@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import jax
 import jax.numpy as jnp
+import numpy as np
+import pytest
 
 jax.config.update("jax_enable_x64", True)
 
@@ -79,6 +81,78 @@ def test_static_land_fraction_shares_topography_chain(tmp_path):
     assert f_land is not None
     assert driver._phis_data is not None       # the same chain set phis too
     assert tuple(f_land.shape) == tuple(driver.grid.grid_shape_2d)
+
+
+@pytest.mark.parametrize("with_mask", [True, False], ids=["fractional", "flat-ocean"])
+@pytest.mark.parametrize("consumer", ["convection", "orographic-gwd"])
+def test_gaussian_driver_land_fraction_reaches_both_consumers(tmp_path, with_mask, consumer):
+    """Production grid/topography setup preserves fractional column order or zeros."""
+    import xarray as xr
+    from legoesm.atmosphere.physics.convection.integration import land_fraction_for_columns
+    from legoesm.atmosphere.physics.gravity_wave_drag import integration as gwd
+
+    mask_path = tmp_path / "lsm.nc"
+    cfg = ExperimentConfig(
+        grid=GridConfig(grid_type="gaussian", resolution=3, nlev=3),
+        dycore=DycoreConfig(dt=600.0, model_type="hydrostatic"),
+        topography="flat",
+        land_mask_path=str(mask_path) if with_mask else "",
+        radiation="gray",
+        days=1,
+    )
+    model = ModelDriver(cfg, output_dir=str(tmp_path / "run"))
+    model._bootstrap_runtime()
+    model._create_grid()
+    n_lat, n_lon = model.grid.n_lat, model.grid.n_lon
+    assert n_lat != n_lon
+    ncol = n_lat * n_lon
+    # Dyadic fractions preserve exact values through NetCDF and dtype casts.
+    mask = ((np.arange(ncol).reshape(n_lat, n_lon) * 7) % 17) / 16.0
+    assert np.any((mask > 0.0) & (mask < 1.0))
+    assert not np.array_equal(mask.reshape(-1), mask.T.reshape(-1))
+    if with_mask:
+        xr.Dataset(
+            {"lsm": (("lat", "lon"), mask)},
+            coords={"lat": np.asarray(model.grid.lat) * 180.0 / np.pi,
+                    "lon": (np.asarray(model.grid.lon) * 180.0 / np.pi) % 360.0},
+        ).to_netcdf(mask_path)
+    model._create_topography()
+
+    extract = (land_fraction_for_columns if consumer == "convection"
+               else gwd._extract_land_frac)
+    actual = extract(model.grid, ncol)
+    assert actual is not None, f"{consumer} received no land fraction from model.grid"
+    assert actual.shape == (ncol,)
+    expected = mask.reshape(-1) if with_mask else np.zeros(ncol)
+    np.testing.assert_array_equal(actual, expected)
+
+
+def test_gaussian_topography_is_ocean_unless_explicit_mask(tmp_path):
+    """The mountain changes geopotential; only the named mask supplies land."""
+    import xarray as xr
+
+    cfg = ExperimentConfig(
+        grid=GridConfig(grid_type="gaussian", resolution=3, nlev=3),
+        dycore=DycoreConfig(dt=600.0, model_type="hydrostatic"),
+        topography="gaussian", radiation="gray", days=1,
+    )
+    ocean = ModelDriver(cfg, output_dir=str(tmp_path / "ocean"))
+    fraction = ocean.static_land_fraction()
+    np.testing.assert_array_equal(fraction, np.zeros(ocean.grid.grid_shape_2d))
+    assert bool(jnp.any(ocean.static_topography_phis() != 0))
+
+    mask = ((np.arange(fraction.size).reshape(fraction.shape) * 7) % 17) / 16.0
+    mask_path = tmp_path / "land_mask.nc"
+    xr.Dataset(
+        {"lsm": (("lat", "lon"), mask)},
+        coords={"lat": np.asarray(ocean.grid.lat) * 180.0 / np.pi,
+                "lon": (np.asarray(ocean.grid.lon) * 180.0 / np.pi) % 360.0},
+    ).to_netcdf(mask_path)
+    masked = ModelDriver(cfg._replace(land_mask_path=str(mask_path)),
+                         output_dir=str(tmp_path / "masked"))
+    np.testing.assert_array_equal(masked.static_land_fraction(), mask)
+    np.testing.assert_array_equal(masked.static_topography_phis(),
+                                  ocean.static_topography_phis())
 
 
 def test_land_mask_to_ocean_only_chain_end_to_end(tmp_path):

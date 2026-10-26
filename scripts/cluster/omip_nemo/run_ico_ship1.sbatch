@@ -24,7 +24,7 @@
 # candidate is the largest MPAS-LEGAL subset of the faithful stack.
 set +e
 WT=/burg-archive/glab/users/pg2328/legoESM_worktrees/nemo-gaps-p4p5; cd $WT
-export PYTHONPATH="$(ls -d $WT/packages/*/ | sed 's:/$::' | tr '\n' ':')$WT:$WT/scripts/validate"
+export PYTHONPATH="$WT/src:$(ls -d $WT/packages/*/ | sed 's:/$::' | tr '\n' ':')$WT:$WT/scripts/validate"
 PY=/burg-archive/glab/users/jn2808/.conda/envs/legoesm/bin/python
 ROOT=/burg-archive/glab/users/pg2328/legoESM
 ROOT2=/burg-archive/glab/users/pg2328/nemo_orca1/nemo_5.0.1
@@ -38,10 +38,10 @@ ICEIC=$ROOT2/cfgs/ORCA1/INPUTS/Ice_initialization.nc
 echo HOST $(hostname); date; git -C $WT log --oneline -1
 # GA/COMMON/LEVERS/IC identical to the ll_ship2 / trp2_ship1 protocol EXCEPT the
 # grid and the unavoidable MPAS gaps (no iwm/bbl/isf/dm2dc/drag-scheme/rgb-chl).
-GA="--grid mpas --mpas-level 7 --mpas-lloyd 20 --dt 150"
+GA="--grid mpas --mpas-level 7 --mpas-lloyd 50 --dt 150"
 COMMON="--nemo-vertical --partial-cell --pgf-scheme smc03 --adaptive-implicit-vertadv --momentum-rk3 --geothermal --runoff --sss-restore --sss-restore-tau-days 45.5 --sss-restore-bound-mmday 4 --sss-ice-gate-nemo --prognostic-sea-ice --prognostic-ice-dynamics free_drift --years 0.25 --snapshot-every-days 30 --diag-every-days 5"
 LEVERS="--tracer-advection superbee --runoff-depth-nemo-ini --river-mouth-restoring-gate"
-IC="--woa-init --woa-t $WTIC --woa-s $WSIC --sss-restore-file $SSSCLIM --ice-init $ICEIC"
+IC="--woa-init --woa-t $WTIC --woa-s $WSIC --ice-init $ICEIC"
 LABEL=ico_ship1
 OUT=$ROOT/results/omip_nemo/nemolev_${LABEL}
 JAX_PLATFORMS=cuda JAX_ENABLE_X64=1 $PY -u scripts/run/run_omip_core2.py $GA $COMMON $LEVERS $IC --kpp-ri-crit 0.15 --output $OUT 2>&1 | tail -50

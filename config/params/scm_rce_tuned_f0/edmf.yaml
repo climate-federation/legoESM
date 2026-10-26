@@ -1,0 +1,13 @@
+# SCM-RCE tuned parameters for convection=edmf
+# corrected nonrotating protocol (coriolis=0), median of 5 seeds.
+# NON-IDENTIFIABLE for multi-parameter schemes: the spread comment on each
+# line is how far the seeds disagreed. A large spread means the median is one
+# point in a flat basin, not a calibrated value. Opt in with --params; this
+# file never mutates a production *Config default.
+
+atm.conv.ConvectiveEDMFConfig.M_b_max: 0.0609538  # default 0.05, seed-spread 84% of range, kg/m^2/s
+atm.conv.ConvectiveEDMFConfig.a_u_init: 0.0185017  # default 0.1, seed-spread 4% of range
+atm.conv.ConvectiveEDMFConfig.cape_activation_scale: 12.558  # default 10, seed-spread 65% of range, J/kg
+atm.conv.ConvectiveEDMFConfig.cape_threshold: 122.121  # default 70, seed-spread 82% of range, J/kg
+atm.conv.ConvectiveEDMFConfig.delta_0: 0.00488876  # default 0.002, seed-spread 34% of range, 1/m
+atm.conv.ConvectiveEDMFConfig.tau_a: 2127.96  # default 1800, seed-spread 77% of range, s

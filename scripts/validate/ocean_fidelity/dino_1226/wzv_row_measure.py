@@ -76,10 +76,17 @@ from legoesm.ocean.fidelity.nemo_state_bridge import bridge_nemo_to_legoesm_topo
 from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel
 from legoesm.ocean.experiments.dino import dino_config_for_recipe, dino_lat_lon_model_config
 
-# Reuse wholesale: the established RUN_DIR/DT (zu_frc_term_walk.py) and the
+# Reuse wholesale: DT (zu_frc_term_walk.py, same value every lane) and the
 # canonical per-element stats convention (cancelling_rows_per_element.py).
-from scripts.validate.ocean_fidelity.dino_1226.zu_frc_term_walk import RUN_DIR, DT
+# RUN_DIR/RESTART route through dump_lane (#1455 shared selector), NOT
+# zu_frc_term_walk's own (still-hardcoded-to-gdb_y5) RUN_DIR -- this probe
+# must be lane-switchable independently of that sibling.
+from scripts.validate.ocean_fidelity.dino_1226 import dump_lane
+from scripts.validate.ocean_fidelity.dino_1226.zu_frc_term_walk import DT
 from scripts.validate.ocean_fidelity.dino_1226.cancelling_rows_per_element import per_element_stats
+
+RUN_DIR = dump_lane.RUN_DIR
+RESTART = dump_lane.RESTART
 
 JPI, JPJ, JPK, HLS = 56, 203, 36, 2  # w-grid: full jpk=36 levels (jk=1..jpk)
 
@@ -94,6 +101,7 @@ def _load_wzv(path: str) -> np.ndarray:
 
 
 def main() -> int:
+    print(dump_lane.banner())
     e3t_mode = require_explicit_e3t_mode(context="wzv_row_measure")
     print(f"LEGOESM_NEMO_E3T={e3t_mode!r} (must be 'both')")
     assert e3t_mode == "both", "run with LEGOESM_NEMO_E3T=both (task rule)"
@@ -106,7 +114,7 @@ def main() -> int:
     assert dcfg.vertical_momentum_scheme == "nemo_advective"
 
     g = read_nemo_mesh_mask(os.path.join(RUN_DIR, "mesh_mask.nc"), nn_hls=0)
-    s = read_nemo_restart(os.path.join(RUN_DIR, "DINO_00057600_restart.nc"), nn_hls=0)
+    s = read_nemo_restart(os.path.join(RUN_DIR, RESTART), nn_hls=0)
     br = bridge_nemo_to_legoesm_topo(g, s, periodic_i=True, full_step=True)
 
     cfg = dataclasses.replace(dcfg, lon_west_deg=1.0, lon_east_deg=49.0, sill_lon_m_deg=1.0)

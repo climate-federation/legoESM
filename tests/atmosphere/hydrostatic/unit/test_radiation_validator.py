@@ -36,7 +36,7 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
-from legoesm.thermo import saturation_mixing_ratio
+from legoesm.thermo import saturation_specific_humidity
 from legoesm.atmosphere.physics.radiation.config import (
     GrayRadiationConfig,
     RRTMGPConfig,
@@ -344,8 +344,8 @@ class TestCloudFraction:
         T_cold = jnp.full((1, nlev), 250.0)  # below T_ice_only=233 would be all-ice
         pf = jnp.full((1, nlev), 5.0e4)
         dp = jnp.full((1, nlev), 1.0e4)
-        qv_warm = 0.9 * saturation_mixing_ratio(T_warm, pf)
-        qv_cold = 0.9 * saturation_mixing_ratio(T_cold, pf)
+        qv_warm = 0.9 * saturation_specific_humidity(T_warm, pf)
+        qv_cold = 0.9 * saturation_specific_humidity(T_cold, pf)
         warm = compute_cloud_properties(T_warm, pf, qv_warm, dp, cfg)
         cold = compute_cloud_properties(T_cold, pf, qv_cold, dp, cfg)
         # Both columns are clouded.
@@ -372,7 +372,7 @@ class TestCloudFraction:
         assert abs(float(g)) > 0.0
 
     def test_cloud_fraction_uses_thermo_saturation(self):
-        """RH is built from legoesm.thermo.saturation_mixing_ratio; verify the
+        """RH is built from legoesm.thermo.saturation_specific_humidity; verify the
         diagnosed RH equals q_v / q_sat(thermo) (no re-derived saturation)."""
         cfg = CloudConfig(scheme="sundqvist")
         T = jnp.full((1, 4), 280.0)
@@ -380,7 +380,7 @@ class TestCloudFraction:
         dp = jnp.full((1, 4), 1.0e4)
         qv = jnp.full((1, 4), 6.0e-3)
         props = compute_cloud_properties(T, pf, qv, dp, cfg)
-        qsat = saturation_mixing_ratio(T, pf)
+        qsat = saturation_specific_humidity(T, pf)
         rh = qv / jnp.maximum(qsat, 1e-10)
         expected = sundqvist_cloud_fraction(rh, cfg)
         np.testing.assert_allclose(

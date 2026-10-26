@@ -44,6 +44,10 @@ NO_SFC_T_OVERRIDE: float = -1.0e4
 SFC_T_OVERRIDE_VALID_MIN: float = 1.0
 
 
+# pbuf RELVAR initial value (micro_mg_cam.F90:1058, cam_cesm2_1_rel_60).
+_RELVAR_INIT = 2.0
+
+
 class PhysicsState(NamedTuple):
     """Prognostic physics state — passed through time loop, checkpointable.
 
@@ -197,13 +201,116 @@ class PhysicsState(NamedTuple):
     # pytree; byte-identical for runs that never read it).  Appended LAST
     # with a default so existing direct constructors are unaffected.
     conv_precip: jnp.ndarray = None
+    # CONVECTIVE heating rate [K/s], shape (ncol, nlev), written by the
+    # convection module each step and read one step LAGGED by the E3SM/CAM
+    # Beres convective gravity-wave source on the standalone (MPAS /
+    # hydrostatic factory) path — CAM's pbuf ``TTEND_DP`` analogue.  Same
+    # lagged-carry convention as ``conv_precip``; zeros for runs that never
+    # read it.  Appended LAST with a default.
+    conv_heating: jnp.ndarray = None
+    # OPTIONAL per-step PRESCRIBED surface KINEMATIC fluxes, shape (ncol,), in
+    # the same units and sign convention as ``SCMForcing.w_th_s`` / ``w_qv_s``:
+    # ``surface_wth_override`` [K m/s] and ``surface_wqv_override``
+    # [(kg/kg) m/s], both POSITIVE UPWARD (out of the surface).  They are the
+    # TIME-VARYING sibling of ``SurfaceLayerConfig.prescribed_shflx_w_m2``: that
+    # config field is one scalar for the whole run, so a case whose surface flux
+    # follows a diurnal cycle (Wangara Day 33) could only hand the closure one
+    # instant of it.  The turbulence integration converts these to W/m^2 with
+    # the SAME ``rho`` it passes to the closure — so a nonlocal scheme that
+    # divides straight back out (``ysu.py``: ``wtheta_sfc = shflx / (rho[:, -1]
+    # * c_pd)``) recovers exactly the value written here, with no second density
+    # convention in the round trip.
+    #
+    # ``None`` (default) leaves the path inert and every existing run
+    # byte-identical.  When set they take PRECEDENCE over the config scalar,
+    # because they are the per-step value and it is the run-constant one.  A
+    # caller that sets these MUST also stop injecting the same flux as a column
+    # tendency (``SCMForcing.flux_to_closure``), or the flux is counted twice.
+    # Appended LAST with a default so existing direct constructors are
+    # unaffected.
+    surface_wth_override: jnp.ndarray = None
+    surface_wqv_override: jnp.ndarray = None
+    # Prescribed (ERA5) surface fluxes as the lower boundary condition,
+    # (ncol,), model sign convention: heat positive UPWARD, stress ON THE
+    # ATMOSPHERE. Window-constant siblings of surface_T_sfc_override: the
+    # training rollout anchors them once on the initial state and they are
+    # CARRIED unchanged for the whole window (update_physics_state carries
+    # them like the T_sfc anchor, NOT reset like the per-step wth/wqv
+    # overrides above).
+    surface_shflx_override_w_m2: jnp.ndarray = None   # [W/m^2] sensible, positive up
+    surface_lhflx_override_w_m2: jnp.ndarray = None   # [W/m^2] latent, positive up
+    surface_evap_override_kg_m2_s: jnp.ndarray = None  # [kg/m^2/s] water, positive up (tile mass flux)
+    surface_tau_x_override_pa: jnp.ndarray = None     # [Pa] eastward stress on the atmosphere
+    surface_tau_y_override_pa: jnp.ndarray = None     # [Pa] northward stress on the atmosphere
+    # Physics-cadence cache (physics_update_steps > 1): the FULL tendency
+    # pytree (HydrostaticTendencies incl. precip / surface / TOA diagnostics
+    # and ledger rows) of the most recent physics step, re-applied unchanged
+    # by the held-physics step variant on the steps in between -- the CAM
+    # physics-every-1800-s pattern, generalising ``rad_heating``.  Seeded by
+    # the driver from ``jax.eval_shape`` of the full variant so the carry
+    # structure is fixed before the first step; never persisted (the first
+    # step of every job is a physics step and repopulates it).
+    held_physics: object = None
+    # CAM6 ``cam6_clubb`` deep-convective cloud-fraction inputs, written by a
+    # convection scheme that exposes ``ConvectionOutput.mass_flux_up`` /
+    # ``icwmr`` and read one step LAGGED by radiation (same convention as
+    # ``conv_precip``).  Interface updraft mass flux (ncol, nlev+1) [kg/m^2/s]
+    # top->bottom, and deep in-cloud condensate (ncol, nlev) [kg/kg]; always
+    # materialised as zeros (uniform pytree; zero => deepcu exactly 0).
+    # Appended LAST so positional constructors keep their field order.
+    conv_mass_flux_up: jnp.ndarray = None
+    conv_icwmr: jnp.ndarray = None
+    # PBL height [m above the surface], shape (ncol,): CAM's pbuf ``pblh``.
+    # Written by the turbulence scheme each call (CAM6: clubb_intr.F90:2616
+    # after the CLUBB sub-steps, the last sub-step's value persists) and read
+    # one physics step LAGGED by Zhang-McFarlane deep convection, which runs
+    # first in the step and bounds its launch-level search at the PBL top
+    # (convect_deep.F90:266 -> zm_conv.F90:738-741).  Zeros before the first
+    # turbulence call = CAM's cold start when the initial file has no PBLH
+    # (physpkg.F90:419-424).  Appended LAST with a default.
+    pblh: jnp.ndarray = None
+    # CAM6 relative cloud-water variance [-] (ncol, nlev) for MG2, written by
+    # prognostic CLUBB (liquid partition) each macmic sub-step and read by the
+    # microphysics of the same sub-step (clubb_intr.F90:2416-2425 -> pbuf
+    # RELVAR).  Seeded at CAM's pbuf initial value; overwritten before any read
+    # on the CLUBB lanes.  Appended LAST.
+    relvar: jnp.ndarray = None
+    # CAM6 droplet activation (microp_aero_run) inputs, (ncol, nlev+1) top-first
+    # interfaces: prognostic CLUBB's final-sub-step w'^2 (pbuf WP2_nadv) and
+    # heat diffusivity Kh_zm (khzm), written by the turbulence sub-step and
+    # read by the microphysics of the same macmic sub-step.  Zeros until then.
+    clubb_wp2_iface: jnp.ndarray = None
+    clubb_kh_iface: jnp.ndarray = None
+    # CAM6 pbuf CLDO: the previous macmic sub-step's ast, set after the
+    # microphysics (micro_mg_cam.F90:1829); 0 at cold start (:1047).
+    cloud_fraction_old: jnp.ndarray = None
 
 
-# Per-step INPUT fields (recomputed by the driver from forcing/dynamics before
-# every convection call) — NOT evolving physics memory, so they are neither
-# persisted in a restart checkpoint nor subject to the carry-completeness gate.
-# A checkpoint legitimately lacks them; the fresh seed's ``None`` is correct.
-PHYSSTATE_INPUT_FIELDS = frozenset({"dyn_tendency_T", "dyn_tendency_qv"})
+# State fields that are run-level INPUTS rather than physics memory.
+# dyn_tendency_* and the wth/wqv overrides are per-step inputs (reset by
+# update_physics_state); the surface_*_override_* flux anchors are prescribed
+# boundary conditions set ONCE per training window by the rollout (the
+# ERA5-surface-flux lane) and then carried unchanged -- so the
+# restart/carry-completeness gate must neither require them nor treat their
+# absence as a hole in the physics memory.
+# The subset of the inputs that ``update_physics_state`` RESETS to None on
+# every call (consumed per physics call).  A sub-cycle inside one physics call
+# must carry them across its intermediate carry updates so every sub-module of
+# the same call sees them; only the call's final update may clear them.
+PHYSSTATE_PER_CALL_INPUTS = (
+    "dyn_tendency_T", "dyn_tendency_qv",
+    "surface_wth_override", "surface_wqv_override",
+)
+PHYSSTATE_INPUT_FIELDS = frozenset({
+    "dyn_tendency_T", "dyn_tendency_qv",
+    # per-job physics-cadence cache: carried across steps, never persisted
+    "held_physics",
+    "surface_wth_override", "surface_wqv_override",
+    "surface_shflx_override_w_m2", "surface_lhflx_override_w_m2",
+    "surface_evap_override_kg_m2_s",
+    "surface_tau_x_override_pa", "surface_tau_y_override_pa",
+})
+
 
 
 def init_physics_state(
@@ -368,9 +475,17 @@ def init_physics_state(
         # docstrings).
         dyn_tendency_T=None,
         dyn_tendency_qv=None,
-        # Lagged convective surface precip for the standalone-path Slingo
+        # Lagged convective surface precip for the standalone-path Slingo-1987-inspired surrogate
         # cumulus cloud fraction; zeros before the first convection step.
         conv_precip=jnp.zeros((ncol,), dtype=dtype),
+        conv_heating=jnp.zeros((ncol, nlev), dtype=dtype),
+        conv_mass_flux_up=jnp.zeros((ncol, nlev + 1), dtype=dtype),
+        conv_icwmr=jnp.zeros((ncol, nlev), dtype=dtype),
+        pblh=jnp.zeros((ncol,), dtype=dtype),
+        relvar=jnp.full((ncol, nlev), _RELVAR_INIT, dtype=dtype),
+        clubb_wp2_iface=jnp.zeros((ncol, nlev + 1), dtype=dtype),
+        clubb_kh_iface=jnp.zeros((ncol, nlev + 1), dtype=dtype),
+        cloud_fraction_old=jnp.zeros((ncol, nlev), dtype=dtype),
     )
 
 
@@ -428,8 +543,42 @@ def update_physics_state(phys_state, updates):
         # r2).  A driver re-populates them before every convection call.
         dyn_tendency_T=updates.get("dyn_tendency_T", None),
         dyn_tendency_qv=updates.get("dyn_tendency_qv", None),
+        # Same contract for the prescribed-surface-flux inputs: the SCM writes
+        # them from ``SCMForcing.w_th_s(t)`` before EVERY tendency evaluation,
+        # so carrying the previous step's value forward would silently freeze a
+        # diurnal cycle at whatever instant the driver last refreshed.
+        surface_wth_override=updates.get("surface_wth_override", None),
+        surface_wqv_override=updates.get("surface_wqv_override", None),
+        held_physics=updates.get("held_physics", phys_state.held_physics),
+        # Prescribed-flux anchors are window-constant inputs: CARRY them
+        # (like surface_T_sfc_override), do NOT reset like wth/wqv above.
+        surface_shflx_override_w_m2=updates.get(
+            "surface_shflx_override_w_m2",
+            phys_state.surface_shflx_override_w_m2),
+        surface_lhflx_override_w_m2=updates.get(
+            "surface_lhflx_override_w_m2",
+            phys_state.surface_lhflx_override_w_m2),
+        surface_evap_override_kg_m2_s=updates.get(
+            "surface_evap_override_kg_m2_s",
+            phys_state.surface_evap_override_kg_m2_s),
+        surface_tau_x_override_pa=updates.get(
+            "surface_tau_x_override_pa",
+            phys_state.surface_tau_x_override_pa),
+        surface_tau_y_override_pa=updates.get(
+            "surface_tau_y_override_pa",
+            phys_state.surface_tau_y_override_pa),
         # Evolving lag carry (convection writes, radiation reads next step):
         # carried forward unchanged when the step's convection published
         # nothing (schemes without a rain split).
         conv_precip=updates.get("conv_precip", phys_state.conv_precip),
+        conv_heating=updates.get("conv_heating", phys_state.conv_heating),
+        conv_mass_flux_up=updates.get(
+            "conv_mass_flux_up", phys_state.conv_mass_flux_up),
+        conv_icwmr=updates.get("conv_icwmr", phys_state.conv_icwmr),
+        pblh=updates.get("pblh", phys_state.pblh),
+        relvar=updates.get("relvar", phys_state.relvar),
+        clubb_wp2_iface=updates.get("clubb_wp2_iface", phys_state.clubb_wp2_iface),
+        clubb_kh_iface=updates.get("clubb_kh_iface", phys_state.clubb_kh_iface),
+        cloud_fraction_old=updates.get(
+            "cloud_fraction_old", phys_state.cloud_fraction_old),
     )

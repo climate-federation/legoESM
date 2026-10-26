@@ -1,0 +1,324 @@
+# WB classical arm matched to the PRODUCTION AMIP configuration, trained with
+# ERA5 surface fluxes prescribed as the lower boundary condition.
+#
+# Owner ask, 2026-09-20: "retrain with a configuration similar to our AMIP run
+# for classical (similar parameterizations and config) with prescribed surface
+# fluxes".  What that means here, and what it cannot mean:
+#
+# MATCHED to config/amip/amip_production.yaml — the scheme set (Bechtold
+# convection, prognostic CLUBB turbulence, Morrison microphysics, McFarlane
+# orographic drag, RRTMGP radiation, Sundqvist cloud cover) and the tuned
+# values that production carries away from library defaults: critical humidity
+# 0.85, diagnostic cloud water 5e-6, cloud-water variability 1.0, convective
+# precipitation efficiency 0.8, convective rain routed to the surface, hard
+# saturation adjustment and homogeneous ice nucleation on, cloud optics with
+# two-region inhomogeneity, maximum-random vertical overlap and 8 sub-columns,
+# no separate convective cloud. Production's realistic orbit and its direct
+# convective-rain routing are selected too, and the background gravity-wave
+# source runs alongside the orographic one at production's launch amplitude.
+#
+# NOT MATCHED, and each for a reason that is not a choice:
+#   * the DYNAMICS.  Production AMIP runs an MPAS Voronoi mesh at 36 levels to
+#     2 hPa with a 112.5 s step; this lane has one training core, the spectral
+#     T63 one, at the 32 levels its ERA5 cache is built for and a 1800 s step.
+#     Owner decision 2026-09-20: keep the training lane's grid.
+#   * radiation CADENCE.  Production calls radiation hourly; this arm keeps the
+#     lane's 3-hourly call (owner decision 2026-09-20).
+#   * land, ocean and sea ice.  There is no land model in this lane at all: the
+#     surface is prescribed from ERA5, which is the point of the flux setting
+#     below.
+#   * three production switches have no consumer on this path. The ice
+#     saturation curve of the hard adjustment and the energy-consistent
+#     moisture clip both live in the coupled driver, not in the spectral
+#     training rollout. Production's troposphere-top taper on the turbulence
+#     is the third: on the prognostic path it scales only the PUBLISHED
+#     sub-grid cloud fraction, which this deck's cloud scheme does not
+#     consume, so setting it here would have been an inert deck key.
+#   * the aerosol-CCN droplet fill, which diagnoses droplet number from an
+#     aerosol optical depth this lane's forcing does not carry. Left off
+#     rather than silently fed a missing field.
+#
+# ERA5's stress is applied as a VECTOR, which this turbulence scheme did not do
+# until 2026-09-21: it took the stress into its implicit wind solve as a
+# magnitude and pulled along the model's own near-surface wind, as CAM does,
+# which is exact for a stress the scheme computed itself and silently rotates a
+# prescribed one. A prescribed stress is now applied whole as an explicit
+# surface source, so the column feels the direction ERA5 gives it.
+#
+# Surface fluxes are PRESCRIBED (era5_surface_fluxes below): ERA5 stress,
+# sensible and latent heat and the upwelling radiation are the lower boundary
+# condition, held fixed across each 6 h window, and the surface exchange
+# parameters freeze by policy because nothing reaches them.
+#
+# One lane limitation worth stating because the loss block below looks like it
+# says otherwise: this trainer rolls ONE lead per sample, the first in
+# multi_step_hours, so the 12 h entry and its weight are not exercised during
+# training. They are honoured by the scorecard, which scores both leads.
+#
+# The flux-on/flux-off A/B (wb_flux_on / wb_flux_off) is a DIFFERENT
+# experiment: it holds the lane's own scheme set fixed. Do not compare a
+# number from this deck against those arms.
+
+# --- grid / dycore (spectral core reads yml["spectral"]) ---
+grid: "gaussian"
+# n_lat/n_lon are the Gaussian transform grid for n_max=63 (quadratic dealias);
+# the spectral build derives them from n_max, these are informational + used by
+# any lat-lon fallback path.
+n_lat: 96
+n_lon: 192
+nlev: 32
+spectral:
+  n_max: 63
+  dt: 1800.0              # outer step; 86400/1800=48 steps/day.  NOT stable on
+                          # its own: only the linear gravity-wave subsystem is
+                          # implicit, and the explicit RK3 advection blows up at
+                          # T63 for dt=1800 (measured 2026-08-23: exponential
+                          # p_s blowup from step ~7, e-fold ~1.5 steps, on L32
+                          # AND L8; advective spectral CFL u*n_max*dt/a exceeds
+                          # the RK3 bound above ~97 m/s).  si_substeps below is
+                          # what makes this dt usable.
+  semi_implicit: true
+  # Full-RK3 sub-stepping at dt/3 = 600 s (matrices rebuilt for the sub-step,
+  # tendencies re-evaluated each sub-step — semi_implicit.py).  Measured: 6 h
+  # dycore-only p_s error 9.8 kPa (blowup) without it, 872 Pa with it — the
+  # same ~0.9 kPa as SI dt600 / explicit dt600.  Keeps 12 outer BPTT steps per
+  # 6 h lead (adjoint memory unchanged; outer step is remat'd).
+  si_substeps: 3
+  time_integrator: "ssp_rk3"
+  hyperdiff_coeff: 2.5e15
+  hyperdiff_order: 2
+  spectral_filter_order: 8
+  spectral_filter_strength: 0.01
+
+# --- ERA5 (WB2 canonical zarr; 2020 = the WB2 held-out test year) ---
+era5_zarr: "gs://weatherbench2/datasets/era5/1959-2023_01_10-wb13-6h-1440x721_with_derived_variables.zarr"
+cache_dir: ".cache/wb_campaign_era5"
+
+# --- cloud condensate in the initial condition ---------------------------
+# The WeatherBench2 store carries NO cloud liquid or ice (only
+# total_cloud_cover), so without this every training sample starts with
+# exactly zero condensate: nothing can activate a microphysics rate
+# coefficient inside a six-hour forecast, and the first radiation call of
+# every sample sees a clear sky.  ARCO-ERA5 has both fields on the same
+# 0.25 degree grid and a superset of these pressure levels, so they are read
+# from it as a second store at the same timestamps.
+# Set on EVERY arm's deck on purpose: the campaign's whole design is that the
+# three arms share one configuration and differ only in the model, so the
+# initial conditions must stay identical across them.
+era5_cloud_condensate: true
+train_years: [2015, 2016, 2017, 2018, 2019]
+
+# --- ERA5 surface fluxes as the lower boundary condition ----------------
+# When true, every sample carries ERA5's surface stress (x, y), sensible and
+# latent heat flux and upwelling SW/LW (ARCO-ERA5 mean rates at the sample
+# start), HELD FIXED over the 6 h window.  The classical arm uses them as its
+# turbulent and radiative surface boundary condition (bulk formula, surface
+# emission and reflection replaced; its surface leaves are then frozen), the
+# learned arms receive the six planes as extra inputs.  Off = the historical
+# interactive surface.
+era5_surface_fluxes: true
+train_windows:  # 60 windows = 12 month-start 1-day windows x 5 train-years (~240 6-hourly pairs);
+                # all-season + low-autocorrelation so the NN arms avoid the #1047 60-sample null
+                # result; day_offset = leap-aware month-start day-of-year, fits the eager loader (#1160).
+  - [2015, 0, 1]
+  - [2015, 31, 1]
+  - [2015, 59, 1]
+  - [2015, 90, 1]
+  - [2015, 120, 1]
+  - [2015, 151, 1]
+  - [2015, 181, 1]
+  - [2015, 212, 1]
+  - [2015, 243, 1]
+  - [2015, 273, 1]
+  - [2015, 304, 1]
+  - [2015, 334, 1]
+  - [2016, 0, 1]
+  - [2016, 31, 1]
+  - [2016, 60, 1]
+  - [2016, 91, 1]
+  - [2016, 121, 1]
+  - [2016, 152, 1]
+  - [2016, 182, 1]
+  - [2016, 213, 1]
+  - [2016, 244, 1]
+  - [2016, 274, 1]
+  - [2016, 305, 1]
+  - [2016, 335, 1]
+  - [2017, 0, 1]
+  - [2017, 31, 1]
+  - [2017, 59, 1]
+  - [2017, 90, 1]
+  - [2017, 120, 1]
+  - [2017, 151, 1]
+  - [2017, 181, 1]
+  - [2017, 212, 1]
+  - [2017, 243, 1]
+  - [2017, 273, 1]
+  - [2017, 304, 1]
+  - [2017, 334, 1]
+  - [2018, 0, 1]
+  - [2018, 31, 1]
+  - [2018, 59, 1]
+  - [2018, 90, 1]
+  - [2018, 120, 1]
+  - [2018, 151, 1]
+  - [2018, 181, 1]
+  - [2018, 212, 1]
+  - [2018, 243, 1]
+  - [2018, 273, 1]
+  - [2018, 304, 1]
+  - [2018, 334, 1]
+  - [2019, 0, 1]
+  - [2019, 31, 1]
+  - [2019, 59, 1]
+  - [2019, 90, 1]
+  - [2019, 120, 1]
+  - [2019, 151, 1]
+  - [2019, 181, 1]
+  - [2019, 212, 1]
+  - [2019, 243, 1]
+  - [2019, 273, 1]
+  - [2019, 304, 1]
+  - [2019, 334, 1]
+eval_years: [2020]
+era5_cadence_hours: 6
+
+# --- training ---
+n_epochs: 12
+optimizer: "adamw"
+# Peak rate sized so a parameter can actually cross its range. Adam moves a
+# leaf by about the learning rate per step, so the total travel available is
+# lr x steps; a sigmoid-bounded parameter needs roughly 5 in the raw
+# pre-constraint space to go from one bound to the other. The previous 3.0e-4
+# over 2880 steps gave 0.9 -- about a fifth of one parameter's span, so the run
+# was rate-limited by its own schedule rather than by the physics. Measured on
+# that run: epoch 2, the first at full rate and the peak of the cosine, bought
+# 0.65%, and every later epoch would have been slower still.
+lr: 1.5e-3
+# 500 steps is more than two full epochs at 240 samples, so the old run spent
+# its first two epochs still ramping and never saw the peak until epoch 2.
+warmup_steps: 200
+weight_decay: 1.0e-5
+grad_clip_norm: 1.0
+grad_accum: 1
+
+# --- multi-step forecast loss (RMSE + grid-CRPS + bias; spectral-CRPS OFF:
+#     backward-pass compile explosion at scale, per the T63 sweep lesson) ---
+loss:
+  w_T: 1.0
+  w_u: 0.5
+  w_v: 0.5
+  w_q: 0.3
+  w_ps: 0.3
+  w_bias_T: 100.0
+  w_bias_u: 1.0
+  w_bias_v: 1.0
+  w_bias_ps: 1.0
+  w_crps_T: 0.5
+  w_crps_u: 0.25
+  w_crps_v: 0.25
+  w_crps_q: 0.5
+  w_crps_ps: 0.15
+  w_spec_crps_T: 0.0
+  w_spec_crps_u: 0.0
+  w_spec_crps_v: 0.0
+  w_spec_crps_q: 0.0
+  multi_step_hours: [6, 12]
+  multi_step_weights: [1.0, 1.0]
+  level_weighting: "pressure"
+  normalize_by_scale: true
+  T_scale: 30.0
+  wind_scale: 20.0
+  q_scale: 5.0e-3
+  ps_scale: 1000.0
+
+# --- per-mode overlays (merged when --mode selects them) ---
+neural_gcm:
+  # NeuralGCM-style spatial embedding: sin/cos lat, land fraction, orography
+  # and a learned 8-channel per-column embedding (Kochkov et al. 2024).
+  # OFF by default (owner, 2026-09-17): the campaign's learned arms train
+  # without it so their numbers stay comparable to the earlier WB arms.  Set
+  # true to select it.
+  spatial_embedding: false
+  surface_drag_confounded: "builder_refuses_classical_scheme"
+  # #1464: NOT enabled here, deliberately. This campaign's classical arm runs
+  # `clubb`, and the learned arm's drag builder refuses prognostic schemes
+  # (clubb/tke/mynn25/clubb_lite/edmf) because it threads no PhysicsState and
+  # would re-seed the carry from the floor every step. Giving the learned arm
+  # `smagorinsky` or `louis` instead would equalise nothing — it would just
+  # change which scheme the two arms differ by. Enable once the builder can
+  # thread the CLUBB carry.
+  nn_hidden: 256
+  nn_layers: 4
+sfno:
+  # ACE2-style static land-fraction input plane (Watt-Meyer et al. 2024;
+  # orography is already a state channel).  OFF by default (owner,
+  # 2026-09-17); set true to select it.
+  spatial_embedding: false
+  sfno_embed_dim: 256
+  sfno_n_blocks: 8
+
+# --- the classical (physics) arm ---------------------------------------
+classical:
+  # The production AMIP scheme set. Cloud cover is Sundqvist here, as it is in
+  # production; the lane's other decks run Xu-Randall.
+  convection: "bechtold"
+  turbulence: "clubb"
+  cloud: "sundqvist"
+  microphysics: "morrison"
+  # Production runs orographic McFarlane PLUS the E3SM/CAM background source;
+  # the two add as body forces on the same column.
+  gwd: "mcfarlane+e3sm_cam"
+  # Prescribed fluxes bypass the bulk formula entirely, so the ocean bulk
+  # scheme is the lane's cheap one rather than production's COARE3: with the
+  # surface exchange prescribed, COARE3 would change nothing and its knobs
+  # freeze either way.
+  surface_bulk: "constant"
+  rad_update_interval_steps: 6
+  # Production's realistic (elliptical) orbit and its direct convective-rain
+  # routing: both live on a family config that the registry-keyed pins below
+  # cannot address, so they are selected here.
+  orbital_insolation: true
+  convective_rain_to_surface: true
+  rrtmgp_gpoint_batch_size: 8
+  # Where training STARTS: the production values, seeded into the trainable
+  # leaves rather than pinned, so each one still trains from there.
+  param_init:
+    atm.clouds.CloudConfig.rh_crit: 0.85
+    atm.clouds.CloudConfig.q_c_diagnostic: 5.0e-6
+    atm.conv.BechtoldConfig.M_b_max: 0.05
+  # Settings that are not trainable parameters: production's values, pinned.
+  param_fixed:
+    atm.clouds.CloudConfig:
+      cloud_optics_inhomogeneity: "two_region"
+      cloud_partial_coverage_optics: "none"
+      cloud_vertical_overlap_optics: "max_random"
+      cloud_n_subcolumns: 8
+      # Production's value sits exactly AT this parameter's upper bound, where
+      # a trainable leaf's gradient is saturated, so it is pinned rather than
+      # seeded.
+      cloud_fsd: 1.0
+      convective_cloud: false
+    atm.conv.BechtoldConfig:
+      precip_efficiency: 0.8
+    # The background gravity-wave source, at production's tuned values. The
+    # launch amplitude, phase-speed width and launch level live on the FRONTAL
+    # sub-config (that is where the background source reads them), which is
+    # why production's four e3sm_cam_* keys land in two places here.
+    atm.gwd.E3SMCAMConfig:
+      source: "background"
+      pgwv: 32
+      effgw: 1.0
+    atm.gwd.E3SMFrontalConfig:
+      taubgnd: 0.7e-3
+      c0: 30.0
+      launch_p: 50000.0
+      latitude_taper: false
+    # Production carries the higher-order moments as state. The spectral
+    # training core refused that until the physics-state thread was shown to
+    # survive its rollout (tests/unit/test_spectral_prognostic_clubb_carry.py).
+    atm.turb.CLUBBConfig:
+      prognostic: true
+    atm.micro.MorrisonConfig:
+      hard_saturation_adjustment: true
+      homogeneous_ice_nucleation: true

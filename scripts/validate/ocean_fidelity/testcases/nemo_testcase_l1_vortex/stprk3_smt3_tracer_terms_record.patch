@@ -1,0 +1,50 @@
+--- stprk3_stg.F90
++++ stprk3_stg.F90
+@@ -31,6 +31,8 @@
+ # endif
+    !
+    USE prtctl         ! print control
++   USE vortex_r18_tracer_terms, ONLY : vortex_r18_tracer_begin, vortex_r18_tracer_rhs,   &
++      &                                vortex_r18_tracer_state, vortex_r18_tracer_finish
+ 
+    IMPLICIT NONE
+    PRIVATE
+@@ -511,6 +513,9 @@
+       DO jn = 1, jpts
+          ts(:,:,:,jn,Krhs) = 0._wp                                                ! set tracer trends to zero (:,:,:) needed otherwise it does not work (?)
+       END DO
++      IF( kstp == nit000 )   &
++         CALL vortex_r18_tracer_begin( kstp, kstg, Kbb, Kmm, Kaa, Krhs, ts,   &
++         &                             zFu, zFv, zFw, .TRUE. )
+       !
+       IF( ln_tile )   CALL dom_tile_start         ! [tiling] TRA tiling loop (1)
+       DO jtile = 1, nijtile
+@@ -525,6 +530,7 @@
+       
+       END DO
+       IF( ln_tile ) CALL dom_tile_stop
++      IF( kstp == nit000 )   CALL vortex_r18_tracer_rhs( 'adv', Krhs, ts )
+       !
+ !!mjb assimilation increments are applied at all RK3 stages because tests applying them only at stage 3
+ !!mjb gave strangely poor results. The additional computational expense is minor.  
+@@ -583,6 +589,8 @@
+             !
+             IF( ln_traqsr  )   CALL tra_qsr( kstp,      Kmm, ts, Krhs )  ! penetrative solar radiation qsr
+                                CALL tra_ldf( kstp, Kbb, Kmm, ts, Krhs )  ! lateral mixing
++            IF( kstp == nit000 .AND. kstg == 3 )   &
++               CALL vortex_r18_tracer_rhs( 'ldf', Krhs, ts )
+             IF( ln_trabbc  )   CALL tra_bbc( kstp,      Kmm, ts, Krhs )  ! bottom heat flux
+             IF( ln_trabbl  )   CALL tra_bbl( kstp, Kbb, Kmm, ts, Krhs )  ! advective (and/or diffusive) bottom boundary layer scheme
+             IF( ln_tradmp  )   CALL tra_dmp( kstp, Kbb, Kmm, ts, Krhs )  ! internal damping trends
+@@ -607,6 +615,10 @@
+             DEALLOCATE( r3fa )                                           ! (r3f = r3f(Kbb) of the next time step)
+          ENDIF
+          !
+       END SELECT
++      IF( kstp == nit000 ) THEN
++         CALL vortex_r18_tracer_state( 'out', Kaa, ts )
++         CALL vortex_r18_tracer_finish( kstg )
++      ENDIF
+ 
+       !>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+       ! Set boundary conditions

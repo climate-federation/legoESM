@@ -294,7 +294,7 @@ agents DISAGREED -> resolved by direct reads) found:
   on lat-lon shapes; gm_redi raises TypeError) — so it's a cryptic-crash footgun, not silent
   double-application.
 - BIGGER (incidental): the lat-lon MODEL applies GM/Redi from the TOP-LEVEL config.gm_redi
-  (ocean_model_latlon_cgrid.py:998, default None), but the recipe set GM/Redi ONLY in
+  (ocean_model_latlon_cgrid.py:999, default None), but the recipe set GM/Redi ONLY in
   physics.lateral_mixing.gm_redi -> the model ignored it -> **the ACC recipe's GM/Redi was
   COMPLETELY INACTIVE** (config.gm_redi=None -> skipped; probe runs physics_fn=None -> physics
   pipeline never invoked). This also CORRECTS the Q2 tracer-iso "near-zero" attribution: it

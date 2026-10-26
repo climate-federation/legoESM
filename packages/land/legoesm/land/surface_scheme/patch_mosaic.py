@@ -396,6 +396,9 @@ def _area_weight(out: SurfaceFluxOutput, fracs: jnp.ndarray) -> SurfaceFluxOutpu
     * ``n_iters`` is a solver iteration COUNT, not a flux — reduced by ``max`` (the
       worst-case patch), keeping it an integer count so a single unit patch is
       identical to the direct canopy call.
+    * ``converged`` is a per-column flag — reduced by ``all``: a column is converged
+      only when every patch's root solve converged (an area-weighted boolean would
+      report a column with a failed patch as e.g. 0.6 "converged").
 
     ``None`` fields pass through.
     """
@@ -409,4 +412,6 @@ def _area_weight(out: SurfaceFluxOutput, fracs: jnp.ndarray) -> SurfaceFluxOutpu
         agg = agg._replace(T_surface=(t4 / eps_grid) ** 0.25)
     if out.n_iters is not None:
         agg = agg._replace(n_iters=jnp.max(out.n_iters, axis=0, keepdims=True))
+    if out.converged is not None:
+        agg = agg._replace(converged=jnp.all(out.converged, axis=0, keepdims=True))
     return agg

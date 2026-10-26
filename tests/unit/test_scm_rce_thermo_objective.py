@@ -33,6 +33,16 @@ from legoesm.training.scm_rce_metrics import (
 )
 
 
+#: Relative tolerance for a value that JAX computed in its default dtype.
+#: These scores are float32 sums over a column and land 0.5-2.5 ulps from the
+#: analytic answer (5.5e-9 to 2.9e-7 measured); asserting tighter measures the
+#: dtype, not the objective.  Set at 2e-6 rather than 1e-6 so the thinnest
+#: site keeps ~7x headroom: a reassociated float32 reduction over ~60 levels
+#: has a worst case near n*eps, which a different backend could reach.  Still
+#: 50x below the smallest error shown to fail these tests (1e-4 relative).
+_F32_REL = 2e-6
+
+
 def _ref(n=20):
     """A synthetic tropical-ish reference: warm moist bottom, cold dry top."""
     p = np.linspace(2_000.0, 100_000.0, n)          # top -> surface
@@ -109,7 +119,7 @@ def test_logq_scores_a_uniform_relative_error_uniformly():
     _T, q_term, _c = score_thermo_jax(
         ref, jnp.asarray(ref.T_ref), jnp.asarray(qv), jnp.asarray(p),
         trop_weights=weights, humidity="logq", logq_scale=math.log(1.10))
-    assert float(q_term) == pytest.approx(1.0, rel=1e-9)
+    assert float(q_term) == pytest.approx(1.0, rel=_F32_REL)
 
 
 def _tropopause_column(n=60, cold_z_km=16.0):
@@ -132,7 +142,7 @@ def test_tropospheric_min_pressure_sits_below_the_reference_cold_point():
     min_p = tropospheric_min_pressure(
         jnp.asarray(T), jnp.asarray(p), jnp.asarray(z_m),
         floor_p_Pa=1.0, buffer_Pa=2_000.0)
-    assert min_p == pytest.approx(float(p[idx]) + 2_000.0, rel=1e-9)
+    assert min_p == pytest.approx(float(p[idx]) + 2_000.0, rel=_F32_REL)
     assert min_p > float(p[idx])
 
 
@@ -185,7 +195,7 @@ def test_one_kelvin_everywhere_scores_one_on_the_T_term():
         ref, jnp.asarray(np.asarray(ref.T_ref) + 1.0),
         jnp.asarray(ref.qv_ref), jnp.asarray(p), trop_weights=weights,
         T_scale_K=1.0)
-    assert float(T_term) == pytest.approx(1.0, rel=1e-10)
+    assert float(T_term) == pytest.approx(1.0, rel=_F32_REL)
 
 
 def test_humidity_term_sees_an_upper_tropospheric_error_analytically():
@@ -214,7 +224,7 @@ def test_humidity_term_sees_an_upper_tropospheric_error_analytically():
         logq_scale=logq_scale)
     mass_fraction = float(np.sum(weights[upper]))
     expected = math.sqrt(mass_fraction) * math.log(1.2) / logq_scale
-    assert float(q_term) == pytest.approx(expected, rel=1e-9)
+    assert float(q_term) == pytest.approx(expected, rel=_F32_REL)
 
 
 def test_logq_is_blind_to_where_in_the_column_the_error_is():
@@ -244,7 +254,7 @@ def test_logq_is_blind_to_where_in_the_column_the_error_is():
     q_dry, abs_dry = _terms(dry)
     q_moist, abs_moist = _terms(moist)
     # Equal weights per level in this fixture, so the logq cost is identical.
-    assert q_dry == pytest.approx(q_moist, rel=1e-9)
+    assert q_dry == pytest.approx(q_moist, rel=_F32_REL)
     # The absolute metric is not: it scales with q_v itself, which here spans
     # three orders of magnitude between the two groups.
     assert abs_moist > 100.0 * abs_dry
@@ -256,7 +266,7 @@ def test_tropospheric_mask_excludes_the_stratosphere():
         tropospheric_mass_weights(jnp.asarray(p), jnp.asarray(w),
                                   min_p_Pa=DEFAULT_THERMO_MIN_P_PA))
     assert np.all(weights[p < DEFAULT_THERMO_MIN_P_PA] == 0.0)
-    assert float(np.sum(weights)) == pytest.approx(1.0, rel=1e-12)
+    assert float(np.sum(weights)) == pytest.approx(1.0, rel=_F32_REL)
 
 
 def test_empty_mask_raises_rather_than_scoring_every_column_alike():

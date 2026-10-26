@@ -240,48 +240,6 @@ def laplacian_compact(data: jax.Array, grid: CubedSphereGrid) -> jax.Array:
 # Higher-order advection operators
 # ==============================================================================
 
-def advect_upwind(
-    q: Field, u: Field, v: Field, grid: CubedSphereGrid
-) -> Field:
-    """First-order upwind advection of scalar q by velocity (u, v).
-
-    -u * dq/dx - v * dq/dy, using upwind differencing for stability.
-    """
-    q_pad = _pad_scalar(q.data, grid)
-    u_data = u.data
-    v_data = v.data
-    q_data = q.data
-
-    # Upwind in x
-    dq_fwd_x = q_pad[:, 2:, 1:-1] - q_data      # q[i+1] - q[i]
-    dq_bwd_x = q_data - q_pad[:, :-2, 1:-1]      # q[i] - q[i-1]
-    dq_dx = jnp.where(u_data > 0, dq_bwd_x, dq_fwd_x) / (grid.dx / 2.0)
-
-    # Upwind in y
-    dq_fwd_y = q_pad[:, 1:-1, 2:] - q_data       # q[j+1] - q[j]
-    dq_bwd_y = q_data - q_pad[:, 1:-1, :-2]      # q[j] - q[j-1]
-    dq_dy = jnp.where(v_data > 0, dq_bwd_y, dq_fwd_y) / (grid.dy / 2.0)
-
-    adv = -(u_data * dq_dx + v_data * dq_dy)
-    return q.replace(data=adv, name=f"advect_{q.name}")
-
-
-def advect_centered(
-    q: Field, u: Field, v: Field, grid: CubedSphereGrid
-) -> Field:
-    """Second-order centered advection of scalar q by velocity (u, v).
-
-    -u * dq/dx - v * dq/dy, using centered differences.
-    Note: centered advection is non-dissipative but can be unstable
-    without explicit diffusion. Pair with SSP-RK3 for stability.
-    """
-    dq_dx = gradient_x(q, grid)
-    dq_dy = gradient_y(q, grid)
-
-    adv = -(u.data * dq_dx.data + v.data * dq_dy.data)
-    return q.replace(data=adv, name=f"advect_{q.name}")
-
-
 def hyperdiffusion(field: Field, grid: CubedSphereGrid, coeff: float) -> Field:
     """Fourth-order hyperdiffusion: -coeff * nabla^4(field).
 

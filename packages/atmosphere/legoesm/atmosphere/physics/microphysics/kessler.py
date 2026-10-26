@@ -1,86 +1,127 @@
-"""Kessler warm-rain microphysics column backend.
+"""Kessler warm-rain microphysics column backend -- faithful port.
 
-A simple one-moment warm-rain scheme tracking cloud water and rain.
-Processes: saturation adjustment, autoconversion, accretion, evaporation,
-rain sedimentation, and latent heating.
+Port of ``kessler_run`` from ESCOMP/atmospheric_physics tag
+``atmos_phys0_31_000`` (SHA 856127273a3f8b6a64315967e0d7d42ce4d02994),
+``schemes/kessler/kessler.F90`` (the 2020 CFL-subcycled reformulation of the
+DCMIP2016 Kessler code by C. Jablonowski and P. Ullrich, after J. Klemp).
+Every formula, coefficient and operation order is the oracle's:
 
-Operations use AD-safe approximations (smooth switches + guarded fractional
-powers) for jax.grad compatibility; the scheme is NOT globally smooth — it
-retains max/min/clip kinks (donor clamps, positivity floors).
+* the physics step ``dt`` is subcycled with ``dt0 <= 0.8 dz_c / V_r`` (CFL on
+  the rain terminal velocity, recomputed after every subcycle) until the
+  elapsed time is within 1e-5 s of ``dt``;
+* per subcycle: upstream mass-weighted rain sedimentation over the distance
+  between level centres (half that distance at the top level), the
+  Klemp-Wilhelmson (1978) autoconversion + semi-implicit collection
+  (eqs. 2.13a,b), the KW78 eq. 2.11 Tetens saturation mixing ratio, the
+  Durran-Klemp (1983) one-step saturation adjustment ``max(prod, -q_c)``
+  (eqs. A1-A4, A13-A14), and the KW78 eq. 2.14 rain evaporation limited by
+  the saturation deficit ``max(-prod - q_c, 0)`` and by ``q_r``;
+* the surface precipitation is the time-weighted mean of
+  ``rho_sfc q_r V_r`` over the subcycles.
 
-Faithfulness to Kessler (1969)
-------------------------------
-FAITHFUL (classic Kessler process forms + coefficients):
-  * **Autoconversion** cloud->rain ``A = k1·max(q_c − a, 0)`` with the canonical
-    Kessler / Klemp-Wilhelmson constants ``k1 = 1e-3 s⁻¹`` (``autoconversion_rate``)
-    and threshold ``a = 1e-3 kg/kg`` (``autoconversion_threshold``).
-  * **Accretion** (collection of cloud by rain) ``C = k2·q_c·q_r^0.875`` with
-    ``k2 = 2.2`` (``accretion_coeff``) and the classic 0.875 exponent.
-  * **Sedimentation density correction** ``(ρ_sfc/max(ρ, 0.1))^0.5`` — the classic
-    ``(ρ_0/ρ)^½`` air-density fall-speed factor (ρ floored at 0.1 kg/m³ aloft for
-    AD safety).
-  * **Latent heating** ``dT/dt = L_v·(cond − evap)/c_pd`` — thermodynamically
-    consistent with the vapour<->liquid exchange.
-DEPARTURES / SURROGATES:
-  * **Rain-evaporation SURROGATE rate**:
-    ``E = evap_coeff·((q_sat − q_v)/q_sat)·q_r^0.525``.  Only the Marshall-Palmer
-    ventilation exponent 0.525 and the sub-saturation driver are Kessler-lineage —
-    and here the exponent is applied to ``q_r`` rather than the classic rain CONTENT
-    ``(ρ q_r)``.  The classic Klemp-Wilhelmson evaporation additionally carries a
-    ``1/ρ`` factor, a ventilation polynomial (``≈ 1.6 + 124.9·(ρ q_r)^0.2046``), and
-    a thermodynamic-resistance denominator; all of that is collapsed into the single
-    tunable ``evaporation_coeff``.
-  * **Constant rain fall speed**: ``V_t = rain_fall_speed·(ρ_sfc/max(ρ, 0.1))^0.5``
-    with a configurable DEFAULT ``rain_fall_speed = 5 m/s``.  The classic Kessler mass-
-    weighted terminal velocity is q_r-DEPENDENT (``∝ (ρ q_r)^0.1364``); dropping
-    that dependence makes the sedimentation flux LINEAR in q_r (not ``q_r^1.1364``).
-  * **Smooth saturation adjustment**: a sigmoid switch (``saturation_sharpness``)
-    replaces Kessler's hard/instantaneous saturation adjustment, for
-    differentiability.
-  * **AD-safe / differentiable positivity limiters**: positivity limiting itself is
-    standard in Kessler implementations, but the SPECIFIC differentiable forms here
-    are departures — ``safe_pow`` fractional-power guards, a condensation donor
-    clamp against q_v, a joint q_c-sink donor clamp, an RH-deficit resolution floor,
-    and a dt-limited sedimentation flux.  None alter the classic rates in the
-    unclamped, resolved regime.
-Non-behavioral pins: ``tests/atmosphere/hydrostatic/unit/test_kessler_faithful.py``.
+Mapping onto legoESM (each one a recorded convention, not oracle physics):
+
+* host constants as ``kessler_init`` receives them: ``lv = L_v``,
+  ``cpair = c_pd``, ``rair = R_d``, ``pref = p_ref``; ``pk = (p/p_ref)^kappa``,
+  ``theta = T/pk``; the returned tendencies are ``(state_after - state)/dt``;
+* the oracle's level heights are the midpoints of the layers ``dz``
+  (``_shared.heights_from_layer_dz``);
+* ``q_v``/``q_c``/``q_r`` and ``rho`` are passed through as the caller holds
+  them (legoESM: specific humidity and moist density; the oracle documents
+  dry mixing ratios and dry density);
+* precipitation is returned in kg m-2 s-1 (the oracle's m s-1 of water times
+  the water density cancels against its ``/rhoqr``).
+
+Differentiability: the oracle's switches are kept exact (``jnp.maximum`` /
+``jnp.minimum``, piecewise differentiable); fractional powers go through
+``safe_pow``.  The existing ``KesslerConfig.saturation_sharpness`` smooths the
+saturation-adjustment switch ``max(prod, -q_c)`` as the sigmoid blend
+``s*prod + (1-s)*(-q_c)``, ``s = sigmoid(sharpness*(prod + q_c))`` (the
+field's existing ``sigmoid(k x) x`` smooth ramp, applied to the oracle's
+switch argument); it equals the oracle exactly as ``sharpness -> inf``.
+KNOWN GAP AT THE DEFAULT (``saturation_sharpness = 100``, unchanged pending a
+user decision): ``k x`` is far from the hard limit for |x| ~ 1e-3, so the
+default adjusts only about half the excess per subcycle and can leave
+NEGATIVE cloud water (-1.3e-4 kg/kg on the oracle fixture columns).  The data-dependent subcycle
+count reuses the Morrison sedimentation sub-step machinery unchanged (user
+decision 2026-10-20): a static-length masked ``fori_loop`` whose length is the
+``MorrisonConfig.sed_cfl_substeps_max`` default, and Morrison's strict error
+path (``equinox.error_if`` plus a NaN poison on every output, so neither a
+jitted nor a differentiated caller can silently use a clamped step) when any
+column needs more subcycles than that -- or when the oracle itself errors
+(``dt <= 0``, initial ``dt0 < 1e-12``).
+
+``KesslerConfig`` fields without an oracle counterpart (``evaporation_coeff``,
+``rain_fall_speed``, ``hard_saturation_adjustment``,
+``hard_sat_adjust_threshold``, ``hard_sat_max_heating_K``) must stay at their
+defaults: a non-default (or traced) value raises.
+
+Oracle-match test: ``tests/atmosphere/microphysics/unit/test_kessler_oracle.py``
+(fixture generated by running the compiled oracle,
+``scripts/validate/oracle/kessler/``).
 
 References
 ----------
-- Kessler (1969): On the Distribution and Continuity of Water
-  Substance in Atmospheric Circulations.
+- Kessler (1969), Meteorol. Monogr. 10(32).
+- Klemp & Wilhelmson (1978), J. Atmos. Sci. 35, 1070-1096.
+- Durran & Klemp (1983), Mon. Wea. Rev. 111, 2341-2361.
 """
 
 from __future__ import annotations
 
+import equinox as eqx
 import jax
 import jax.numpy as jnp
 
 from legoesm import constants
-from legoesm.atmosphere.physics.microphysics._warm_rain import (
-    rain_evaporation,
-    safe_pow,
-    donor_clamp_scale,
-    saturation_adjustment,
+from legoesm.atmosphere.physics._shared import heights_from_layer_dz
+from legoesm.atmosphere.physics.microphysics._warm_rain import safe_pow
+from legoesm.atmosphere.physics.microphysics.config import (
+    KesslerConfig,
+    MorrisonConfig,
 )
-from legoesm.atmosphere.physics.microphysics.config import KesslerConfig
 from legoesm.atmosphere.physics.microphysics.output import (
     HydrometeorState,
     MicrophysicsOutput,
-    sedimentation_tendency,
 )
 
+# --- KW78 / DK83 coefficients as coded in atmos_phys0_31_000 kessler.F90 ---
+_KESSLER_ACCR_EXP = 0.875      # collection exponent on q_r (KW78 2.13b)
+_VT_COEFF = 36.34              # terminal velocity prefactor [m/s] (KW78 2.15)
+_VT_EXP = 0.1364               # terminal velocity exponent on rho*q_r [g/cm3]
+_G_CM3_PER_KG_M3 = 0.001       # kg m-3 -> g cm-3 (the oracle's ``r``)
+_QVS_P_HPA = 3.8               # Tetens prefactor [hPa] (KW78 2.11)
+_QVS_A = 17.27                 # satcurve-ok: KW78 2.11 Tetens exponent (oracle curve)
+_QVS_T0_K = 273.0              # const-ok: KW78 2.11 offset as coded (not T_freeze)
+_QVS_T1_K = 36.0               # KW78 2.11 denominator offset [K]
+_COND_COEFF = 4093.0           # 17.27*(273-36), DK83 A13-A14 condensation slope
+_VENT_A = 1.6                  # KW78 2.14 ventilation constant
+_VENT_B = 124.9                # KW78 2.14 ventilation coefficient
+_VENT_EXP = 0.2046             # KW78 2.14 ventilation exponent
+_EVAP_EXP = 0.525              # KW78 2.14 rain-content exponent
+_EVAP_D1 = 2550000.0           # KW78 2.14 thermodynamic-resistance term
+_EVAP_D2 = 540000.0            # KW78 2.14 diffusion-resistance term
+_CFL_FRACTION = 0.8            # dt0 <= 0.8 dz_c / V_r
+_VEL_EPS = 1.0e-12             # |V_r| above which the CFL limit applies [m/s]
+_DT0_MIN_S = 1.0e-12           # oracle 'bad time splitting' threshold [s]
+_TIME_EPS_S = 1.0e-5           # subcycling stops within this of dt [s]
+_PA_PER_HPA = 100.0
+# Static subcycle cap of the masked loop (reverse-mode AD needs a static
+# length): the Morrison sedimentation sub-step cap, reused unchanged.
+_MAX_SUBCYCLES = MorrisonConfig._field_defaults["sed_cfl_substeps_max"]
 
-# Kessler accretion exponent + density floor (fixed).
-_KESSLER_ACCR_EXP = 0.875
-_RHO_FLOOR = 0.1
+# Config fields with no counterpart in the oracle (must stay at default).
+_NO_ORACLE_FIELDS = (
+    "evaporation_coeff", "rain_fall_speed", "hard_saturation_adjustment",
+    "hard_sat_adjust_threshold", "hard_sat_max_heating_K",
+)
 
 __physics_contract__ = {
     "summary": (
-        "Kessler (1969) single-moment warm-rain microphysics: saturation "
-        "adjustment (cloud condensation/evaporation), cloud->rain "
-        "autoconversion, accretion, rain evaporation and rain sedimentation to "
-        "surface precipitation."
+        "Kessler (1969) warm-rain microphysics as the ESCOMP atmos_phys0_31_000 "
+        "kessler_run: CFL-subcycled rain sedimentation, KW78 autoconversion + "
+        "semi-implicit collection, DK83 saturation adjustment, KW78 rain "
+        "evaporation, surface precipitation."
     ),
     "inputs": {
         "T": "K", "q_v": "kg/kg", "hydrometeors.q_c": "kg/kg",
@@ -92,23 +133,50 @@ __physics_contract__ = {
         "dq_r_dt": "kg/kg/s", "precipitation": "kg/m^2/s",
     },
     "sign_convention": (
-        "z up; surface at [:, -1]. Latent heating dT_dt is consistent with the "
-        "vapour<->liquid phase-change rate via L_v (condensation warms, "
-        "evaporation cools). Water is redistributed vapour<->cloud<->rain; "
-        "SURFACE PRECIPITATION (>= 0) removes water from the column, so column "
-        "moisture is NOT conserved and the falling condensate carries enthalpy "
-        "out -- no contract-level conservation is claimed. Mixing ratios >= 0."
+        "z up; surface at [:, -1]. Latent heating L_v/c_pd*(condensation - "
+        "rain evaporation) (condensation warms). Water moves vapour<->cloud<->"
+        "rain; SURFACE PRECIPITATION (>= 0) removes water from the column. As "
+        "in the oracle, the sedimentation divides by the level-centre spacing "
+        "and the positivity floors are not compensated, so column water is "
+        "not exactly conserved."
     ),
     "conserves": ["none"],
     "differentiable": True,
-    "reference": "Kessler (1969), Meteorol. Monogr. 10(32), Amer. Meteorol. Soc.",
+    "reference": (
+        "ESCOMP/atmospheric_physics atmos_phys0_31_000 schemes/kessler/"
+        "kessler.F90; Klemp & Wilhelmson (1978); Durran & Klemp (1983)"
+    ),
     "idealized_test": (
-        "tests/unit/test_physics_microphysics.py — supersaturated air condenses "
-        "with L_v heating; cloud above the autoconversion threshold makes rain "
-        "+ surface precip; subsaturated rain evaporates; mixing ratios stay "
-        ">= 0; differentiable wrt T, q_v."
+        "tests/atmosphere/microphysics/unit/test_kessler_oracle.py -- compiled "
+        "oracle outputs on 7 columns at dt 1200 and 300 s, max rel err <= 1e-10."
     ),
 }
+
+
+def _require_oracle_defaults(config: KesslerConfig) -> None:
+    default = KesslerConfig()
+    for name in _NO_ORACLE_FIELDS:
+        value = getattr(config, name)
+        if isinstance(value, jax.core.Tracer) or value != getattr(default, name):
+            raise ValueError(
+                f"KesslerConfig.{name}={value!r}: the Kessler scheme is the "
+                "faithful port of the ESCOMP kessler_run, which has no such "
+                f"parameter; leave it at its default {getattr(default, name)!r}.")
+
+
+def _terminal_velocity(q_r, r, rhalf):
+    """KW78 eq. 2.15: ``36.34 sqrt(rho_sfc/rho) (r q_r)^0.1364`` [m/s]."""
+    return _VT_COEFF * rhalf * safe_pow(q_r * r, _VT_EXP)
+
+
+def _cfl_dt(dt_max, vel, dz_c):
+    """``min(dt_max, 0.8 dz_c / V_r)`` over every level but the top, where
+    ``|V_r| > 1e-12`` (the oracle's ``dt0`` update)."""
+    v = vel[:, 1:]
+    live = jnp.abs(v) > _VEL_EPS
+    lim = jnp.where(live, _CFL_FRACTION * dz_c / jnp.where(live, v, 1.0),
+                    jnp.inf)
+    return jnp.minimum(dt_max, jnp.min(lim, axis=1))
 
 
 def kessler_microphysics(
@@ -122,155 +190,43 @@ def kessler_microphysics(
     dt: float,
     config: KesslerConfig = KesslerConfig(),
 ) -> MicrophysicsOutput:
-    """Compute Kessler microphysics tendencies.
+    """Kessler tendencies over one physics step ``dt`` (faithful port).
 
     Parameters
     ----------
-    T : jax.Array
-        Temperature [K], shape (ncol, nlev).
-    q_v : jax.Array
-        Water vapor mixing ratio [kg/kg], shape (ncol, nlev).
-    hydrometeors : HydrometeorState
-        Hydrometeor state (only q_c, q_r used).
-    p_full : jax.Array
-        Pressure at full levels [Pa], shape (ncol, nlev).
-    p_half : jax.Array
-        Pressure at half levels [Pa], shape (ncol, nlev+1).
-    rho : jax.Array
-        Air density [kg/m^3], shape (ncol, nlev).
-    dz : jax.Array
-        Layer thickness [m], shape (ncol, nlev).
-    dt : float
-        Time step [s].
-    config : KesslerConfig
+    T : Temperature [K], (ncol, nlev), level 0 = model top.
+    q_v : Water vapour [kg/kg], (ncol, nlev).
+    hydrometeors : only ``q_c`` and ``q_r`` are used.
+    p_full : Full-level pressure [Pa], (ncol, nlev).
+    p_half : Half-level pressure [Pa], (ncol, nlev+1) (unused; kept for the
+        shared microphysics signature).
+    rho : Air density [kg/m^3], (ncol, nlev).
+    dz : Layer thickness [m], (ncol, nlev); level heights are its midpoints.
+    dt : Physics time step [s].
+    config : KesslerConfig.
 
     Returns
     -------
-    MicrophysicsOutput
+    MicrophysicsOutput with ``(state_after - state)/dt`` tendencies and the
+    step-mean surface precipitation [kg m-2 s-1].
     """
+    del p_half
+    q_c0 = hydrometeors.q_c
+    q_r0 = hydrometeors.q_r
+    T_n, qv, qc, qr, precipitation, cond_rate = kessler_step_states(
+        T, q_v, q_c0, q_r0, p_full, rho, dz, dt, config)
     ncol, nlev = T.shape
-    q_c = hydrometeors.q_c
-    q_r = hydrometeors.q_r
-    sharpness = config.saturation_sharpness
-
-    # 1. Saturation adjustment — the SHARED ``_warm_rain.saturation_adjustment``
-    # helper computes ``q_sat`` and the supersaturation residual (in fp64 when
-    # x64 is available — the issue #618 robustness path the fp32 LES/CRM
-    # production config relies on; an inline fp32 copy here re-exposed the
-    # ~65 % LWP deficit #618 fixed), applies the psychrometric correction, and
-    # donor-clamps the evaporation branch against ``q_c``.  Kessler EXTENDS it
-    # with the previously MISSING positive-branch bound: condensation is
-    # donor-clamped by the available ``q_v``.  Without that clamp the coupled
-    # driver floors ``q_v`` independently while keeping the full ``q_c``
-    # increment, so saturation adjustment created cloud water from vapour that
-    # was floored away → ``q_c`` accumulated to physically impossible
-    # ~1 kg/kg (opaque clouds, planetary-albedo runaway, the coupled cold
-    # drift / OLR collapse).
-    _dt_safe = jnp.maximum(dt, 1e-10)
-    condensation, q_sat = saturation_adjustment(
-        T, q_v, p_full, _dt_safe, sharpness, q_c=q_c,
-        hard_adjust=config.hard_saturation_adjustment,
-        hard_threshold=config.hard_sat_adjust_threshold,
-        hard_max_heating_K=config.hard_sat_max_heating_K,
-    )
-    q_v_avail = jnp.clip(q_v, 0.0, None)
-    condensation = jnp.minimum(condensation, q_v_avail / _dt_safe)
-
-    dq_v_sat = -condensation
-    dq_c_sat = condensation
-
-    # 2. Autoconversion: cloud -> rain (threshold excess).  Uses raw
-    # ``q_c`` so the joint donor clamp below scales it consistently
-    # with the other ``q_c`` sinks (an earlier form used
-    # ``q_c_updated = q_c + cond·dt`` here, which double-counted the
-    # condensation budget when joint sinks were active and made the
-    # joint clamp inconsistent).
-    autoconv = config.autoconversion_rate * jnp.maximum(
-        q_c - config.autoconversion_threshold, 0.0
-    )
-
-    # 3. Accretion: cloud collected by rain.  Fractional powers of q_r
-    # have unbounded derivative at q_r=0 — safe_pow handles the AD guard.
-    accretion = config.accretion_coeff * q_c * safe_pow(q_r, _KESSLER_ACCR_EXP)
-
-    # 4. Evaporation of rain (q_r^0.525) via the shared donor-limited
-    # helper — bounds ``evap·dt ≤ q_r`` so one explicit step can't
-    # evaporate more rain than exists.  Centralises the formula so the
-    # four schemes (kessler/morrison/thompson/seifert_beheng) share
-    # one implementation.
-    evaporation = rain_evaporation(
-        q_v, q_r, q_sat, config.evaporation_coeff, dt=dt,
-    )
-
-    # === Joint donor clamp on q_c sinks ===
-    # Saturation-evaporation, autoconversion, and accretion can each
-    # individually be donor-clamped, but the *combined* sink rate can
-    # still exceed ``q_c / dt`` and drive ``q_c`` negative on an
-    # explicit Euler step.  E.g. with ``q_c = 1e-4``, ``q_r = 5e-3``,
-    # 80 % RH at 290 K, accretion + saturation-evap together over a
-    # 1200-s step demanded ~26× the available q_c (Codex audit cycle
-    # 2 / cycle 3 follow-up).  Mirror the Morrison/Thompson joint
-    # donor clamp so total water is conserved when sinks compete.
-    cond_evap_sink = jnp.maximum(-condensation, 0.0)
-    qc_sink_total = cond_evap_sink + autoconv + accretion
-    qc_avail = jnp.clip(q_c, 0.0)
-    # Shared AD-safe donor clamp helper.  Replaces the previous
-    # boolean ``sink_active`` double-where with an explicit
-    # ``divisor_floor=1e-15`` that bounds the worst-case VJP under
-    # fp32 to ``-q / 1e-30 ≈ -1e30`` (safely within fp32 dynamic
-    # range).
-    qc_scale = donor_clamp_scale(qc_avail, qc_sink_total, dt)
-    autoconv = autoconv * qc_scale
-    accretion = accretion * qc_scale
-    # Scale the evaporation branch only; positive condensation
-    # (saturation adjustment from supersaturation) is unaffected.
-    condensation = jnp.where(
-        condensation < 0.0, condensation * qc_scale, condensation,
-    )
-    dq_v_sat = -condensation
-    dq_c_sat = condensation
-
-    # 5. Rain sedimentation
-    rho_sfc = rho[:, -1:]
-    V_t = config.rain_fall_speed * jnp.sqrt(
-        rho_sfc / jnp.clip(rho, _RHO_FLOOR)
-    )
-    # Joint q_r donor cap: pass evaporation as ``extra_sink`` so the
-    # sedimentation flux limiter accounts for the rain evaporation that
-    # also removes q_r in the same step.  Codex iter-29 #1.
-    sed_tend, precipitation = sedimentation_tendency(
-        q_r, rho, V_t, dz, dt=dt,
-        return_surface_flux=True,
-        extra_sink=evaporation,
-    )
-
-    # 6. Latent heating
-    dT_dt = constants.L_v * (condensation - evaporation) / constants.c_pd
-
-    # Combine tracer tendencies — sources match the scaled sinks so
-    # total water (q_v + q_c + q_r) is conserved per layer (modulo
-    # rain evaporation, which exchanges with q_v, and sedimentation,
-    # which redistributes q_r vertically).
-    dq_v_dt = dq_v_sat + evaporation
-    dq_c_dt = dq_c_sat - autoconv - accretion
-    dq_r_dt = autoconv + accretion - evaporation + sed_tend
-
-    # Precipitation comes from the dt-limited surface flux returned by
-    # ``sedimentation_tendency`` so column water conservation holds
-    # exactly when the CFL limiter fires.  An earlier formulation
-    # diagnosed precipitation as ``q_r_bot · ρ · V_t``, which exceeds
-    # the actual amount removed from the column whenever
-    # ``V_t·dt/dz_bot > 1``.
-
-    # Pin dtype to the input precision so we never silently promote
-    # the unused-tendency placeholders to f64 under x64 mode.
-    _dtype = T.dtype
-    z = jnp.zeros((ncol, nlev), dtype=_dtype)
+    dt = jnp.asarray(dt, T_n.dtype)      # the core's working dtype
+    # Zero outputs carry the core's strict-path NaN poison too (0*NaN = NaN),
+    # so no field of an overflowed step reads as a finite number (as
+    # Morrison poisons every float output).
+    zcol = 0.0 * precipitation
+    z = jnp.broadcast_to(zcol[:, None], (ncol, nlev))
     return MicrophysicsOutput(
-        dT_dt=dT_dt,
-        dq_v_dt=dq_v_dt,
-        dq_c_dt=dq_c_dt,
-        dq_r_dt=dq_r_dt,
+        dT_dt=(T_n - T) / dt,
+        dq_v_dt=(qv - q_v) / dt,
+        dq_c_dt=(qc - q_c0) / dt,
+        dq_r_dt=(qr - q_r0) / dt,
         dq_i_dt=z,
         dq_s_dt=z,
         dq_g_dt=z,
@@ -278,7 +234,122 @@ def kessler_microphysics(
         dN_r_dt=z,
         dN_i_dt=z,
         precipitation=precipitation,
-        # Positive saturation-adjustment condensation (the q_v sink that becomes
-        # cloud water) for the coupled pipeline's joint vapour donor clamp.
-        dq_v_to_qc_dt=jnp.maximum(dq_c_sat, 0.0),
+        precip_frozen=zcol,                            # L_v-only: all liquid
+        # Step-mean positive saturation-adjustment condensation (the q_v sink
+        # that becomes cloud water), for the coupled pipeline's joint vapour
+        # donor clamp.
+        dq_v_to_qc_dt=cond_rate,
     )
+
+
+def kessler_step_states(T, q_v, q_c0, q_r0, p_full, rho, dz, dt,
+                        config: KesslerConfig = KesslerConfig()):
+    """One Kessler step in the oracle's own output form.
+
+    Returns ``(T, q_v, q_c, q_r)`` after the step, the step-mean surface
+    precipitation [kg m-2 s-1] and the step-mean positive saturation-adjustment
+    condensation [kg/kg/s].  Shapes and conventions as
+    :func:`kessler_microphysics`.
+    """
+    _require_oracle_defaults(config)
+    # One working dtype for the loop carry: the inputs' ordinary JAX type
+    # promotion, applied once up front (the arithmetic promotes anyway).
+    dtype = jnp.result_type(T, q_v, q_c0, q_r0, p_full, rho, dz)
+    T, q_v, q_c0, q_r0, p_full, rho, dz = (
+        jnp.asarray(a, dtype) for a in (T, q_v, q_c0, q_r0, p_full, rho, dz))
+    dt = jnp.asarray(dt, dtype)   # a Python float is weakly typed anyway
+    ncol = T.shape[0]
+    sharpness = config.saturation_sharpness
+    k1 = config.autoconversion_rate
+    qc_thr = config.autoconversion_threshold
+    k2 = config.accretion_coeff
+
+    lv = constants.L_v
+    cp = constants.c_pd
+    xk = cp / constants.R_d                        # 1/kappa
+    pref_hpa = constants.p_ref / _PA_PER_HPA
+    f5 = _COND_COEFF * lv / cp
+
+    z_full = heights_from_layer_dz(dz)[0]
+    dz_c = z_full[:, :-1] - z_full[:, 1:]          # centre k-1 above centre k
+    dz_top = 0.5 * (z_full[:, 0] - z_full[:, 1])
+    pk = (p_full / constants.p_ref) ** (constants.R_d / cp)
+    theta0 = T / pk
+    r = _G_CM3_PER_KG_M3 * rho
+    rho_sfc = rho[:, -1:]
+    rhalf = jnp.sqrt(rho_sfc / rho)
+    pc = _QVS_P_HPA / ((pk ** xk) * pref_hpa)
+    lv_cp_pk = lv / (cp * pk)
+
+    q_r_init = jnp.maximum(q_r0, 0.0)
+    vel0 = _terminal_velocity(q_r_init, r, rhalf)
+    dt0_init = _cfl_dt(jnp.full((ncol,), dt, dtype=T.dtype), vel0, dz_c)
+
+    def subcycle(_, carry):
+        theta, qv, qc, qr, vel, dt0, tc, acc, cond = carry
+        active = jnp.abs(dt - tc) > _TIME_EPS_S                    # (ncol,)
+        dt0c = dt0[:, None]
+        acc_n = acc + rho_sfc[:, 0] * qr[:, -1] * vel[:, -1] * dt0
+        # upstream sedimentation (oracle level loop surface -> top-1, top)
+        flux = r * qr * vel
+        sed_below = dt0c * (flux[:, :-1] - flux[:, 1:]) / (r[:, 1:] * dz_c)
+        sed_top = -dt0 * qr[:, 0] * vel[:, 0] / dz_top
+        sed = jnp.concatenate([sed_top[:, None], sed_below], axis=1)
+        # autoconversion + semi-implicit collection (KW78 2.13a,b)
+        qrprod = qc - (qc - dt0c * jnp.maximum(k1 * (qc - qc_thr), 0.0)) / (
+            1.0 + dt0c * k2 * safe_pow(qr, _KESSLER_ACCR_EXP))
+        qc_n = jnp.maximum(qc - qrprod, 0.0)
+        qr_n = jnp.maximum(qr + qrprod + sed, 0.0)
+        # saturation mixing ratio (KW78 2.11) and condensation (DK83 A13-A14)
+        T_c = pk * theta
+        qvs = pc * jnp.exp(_QVS_A * (T_c - _QVS_T0_K) / (T_c - _QVS_T1_K))
+        prod = (qv - qvs) / (1.0 + qvs * f5 / (T_c - _QVS_T1_K) ** 2)
+        # rain evaporation (KW78 2.14a,b)
+        rq = r * qr_n
+        ern = jnp.minimum(jnp.minimum(
+            dt0c * (((_VENT_A + _VENT_B * safe_pow(rq, _VENT_EXP))
+                     * safe_pow(rq, _EVAP_EXP))
+                    / (_EVAP_D1 * pc / (_QVS_P_HPA * qvs) + _EVAP_D2))
+            * (jnp.maximum(qvs - qv, 0.0) / (r * qvs)),
+            jnp.maximum(-prod - qc_n, 0.0)), qr_n)
+        # saturation adjustment max(prod, -qc), smoothed by saturation_sharpness
+        s = jax.nn.sigmoid(sharpness * (prod + qc_n))
+        adj = s * prod - (1.0 - s) * qc_n
+        theta_n = theta + lv_cp_pk * (adj - ern)
+        qv_n = jnp.maximum(qv - adj + ern, 0.0)
+        qc_n = qc_n + adj
+        qr_n = jnp.maximum(qr_n - ern, 0.0)
+        tc_n = tc + dt0
+        vel_n = _terminal_velocity(qr_n, r, rhalf)
+        dt0_n = _cfl_dt(jnp.maximum(dt - tc_n, 0.0), vel_n, dz_c)
+        cond_n = cond + jnp.maximum(adj, 0.0)
+
+        a2 = active[:, None]
+        return (jnp.where(a2, theta_n, theta), jnp.where(a2, qv_n, qv),
+                jnp.where(a2, qc_n, qc), jnp.where(a2, qr_n, qr),
+                jnp.where(a2, vel_n, vel), jnp.where(active, dt0_n, dt0),
+                jnp.where(active, tc_n, tc), jnp.where(active, acc_n, acc),
+                jnp.where(a2, cond_n, cond))
+
+    zcol = jnp.zeros((ncol,), dtype=T.dtype)
+    carry = (theta0, q_v, q_c0, q_r_init, vel0, dt0_init, zcol, zcol,
+             jnp.zeros_like(T))
+    theta, qv, qc, qr, _, _, tc, acc, cond = jax.lax.fori_loop(
+        0, _MAX_SUBCYCLES, subcycle, carry)
+
+    # Oracle error paths (dt <= 0, initial dt0 < 1e-12) and a column the
+    # static loop could not finish: Morrison's strict sub-step error path,
+    # unchanged -- equinox error_if on the outputs plus a NaN poison that
+    # multiplies every output (error_if sits outside AD, so jit(grad(.))
+    # would otherwise keep a finite gradient of a clamped step).
+    overflow = jnp.any((dt <= 0.0) | (dt0_init < _DT0_MIN_S)
+                       | (jnp.abs(dt - tc) > _TIME_EPS_S))
+    outs = (theta * pk, qv, qc, qr, acc / dt, cond / dt)
+    outs = eqx.error_if(
+        outs, overflow,
+        "Kessler: a column needs more CFL subcycles than the static cap "
+        f"{_MAX_SUBCYCLES} (MorrisonConfig.sed_cfl_substeps_max default), or "
+        "the oracle rejects the step (dt <= 0 or initial dt0 < 1e-12); "
+        "shorten the physics step")
+    poison = jnp.where(overflow, jnp.nan, 1.0).astype(T.dtype)
+    return tuple(o * poison for o in outs)

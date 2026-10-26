@@ -27,6 +27,9 @@ no separate operator entry points per backend.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
+from contextvars import ContextVar
+
 import jax.numpy as jnp
 
 # --- Meridionally-periodic (y-re-entrant channel) mode -----------------------
@@ -39,8 +42,11 @@ import jax.numpy as jnp
 # x–z cases (internal_tide #576) whose barotropic Rossby radius spans the basin,
 # so a closed basin geostrophically adjusts instead of oscillating freely.
 # Mirrors the ``_halo_backend`` global-state pattern (accessor, never import the
-# global directly).
-_MERIDIONALLY_PERIODIC = False
+# global directly).  A ContextVar, not a module bool, so a scope set in one
+# thread never leaks into a trace running in another; the latlon ocean model
+# scopes it to ``config.meridionally_periodic`` at every public entry point.
+_MERIDIONALLY_PERIODIC: ContextVar[bool] = ContextVar(
+    "meridionally_periodic", default=False)
 
 
 def set_meridionally_periodic(enabled: bool) -> None:
@@ -50,13 +56,22 @@ def set_meridionally_periodic(enabled: bool) -> None:
     (a periodic-y band exchange is a follow-up).  Default OFF = bit-identical
     closed-basin BC.
     """
-    global _MERIDIONALLY_PERIODIC
-    _MERIDIONALLY_PERIODIC = bool(enabled)
+    _MERIDIONALLY_PERIODIC.set(bool(enabled))
 
 
 def get_meridionally_periodic() -> bool:
     """Return whether the meridionally-periodic boundary mode is active."""
-    return _MERIDIONALLY_PERIODIC
+    return _MERIDIONALLY_PERIODIC.get()
+
+
+@contextmanager
+def meridional_periodicity(enabled: bool):
+    """Scope the y-wrap mode to a block (trace inside it); restores on exit."""
+    token = _MERIDIONALLY_PERIODIC.set(bool(enabled))
+    try:
+        yield
+    finally:
+        _MERIDIONALLY_PERIODIC.reset(token)
 
 
 # --- Meridionally-FLAT (Oceananigans `Flat`-y topology) mode ------------------
@@ -81,6 +96,45 @@ def set_meridionally_flat(enabled: bool) -> None:
 def get_meridionally_flat() -> bool:
     """Return whether the meridionally-flat (`Flat`-y) mode is active."""
     return _MERIDIONALLY_FLAT
+
+
+def _ywrap_pad(value: jnp.ndarray) -> jnp.ndarray:
+    """One wrap row each side; the y-wrap is local-backend only."""
+    from legoesm.grids.halo import get_halo_backend
+    if get_halo_backend() == "mpi" or _spmd_lat_mesh() is not None:
+        raise NotImplementedError(
+            "meridional_periodicity: the j-neighbour helpers have no MPI/SPMD "
+            "band exchange; refuse rather than wall the seam")
+    return pad_with_pole_bc_lat(value, 1)
+
+
+def lat_north(value: jnp.ndarray) -> jnp.ndarray:
+    """``value[j+1]`` along axis 0: the wrapped row under the y-wrap (NEMO
+    ``jpfillperio``, lbclnk.f90:2033), else zero (the closed north wall)."""
+    if _MERIDIONALLY_PERIODIC.get():
+        return _ywrap_pad(value)[2:]
+    return jnp.concatenate([value[1:], jnp.zeros_like(value[:1])], axis=0)
+
+
+def lat_south(value: jnp.ndarray) -> jnp.ndarray:
+    """``value[j-1]`` along axis 0: the wrapped row under the y-wrap (NEMO
+    ``jpfillperio``, lbclnk.f90:2028), else zero (the closed south wall)."""
+    if _MERIDIONALLY_PERIODIC.get():
+        return _ywrap_pad(value)[:-2]
+    return jnp.concatenate([jnp.zeros_like(value[:1]), value[:-1]], axis=0)
+
+
+def lat_faces_from_north(native: jnp.ndarray, south=None) -> jnp.ndarray:
+    """NEMO native north-face rows (n) -> legoESM south-to-north faces (n+1).
+
+    Face 0 is the south seam face: under the y-wrap it is the last native
+    row (lbclnk.f90:2028, a plain copy, no sign), else ``south`` (zeros when
+    None, the closed wall).
+    """
+    if _MERIDIONALLY_PERIODIC.get():
+        return _ywrap_pad(native)[:-1]
+    first = jnp.zeros_like(native[:1]) if south is None else south
+    return jnp.concatenate([first, native], axis=0)
 
 
 def fold_pole_rows(
@@ -131,8 +185,9 @@ def pad_halo_latlon_local(data: jnp.ndarray, halo: int = 1) -> jnp.ndarray:
     # to a single XLA Pad op; the previous ``concatenate([data[:, -halo:],
     # data, data[:, :halo]])`` materialised three buffers + a concat
     # HLO per call.
-    pad_axes = ((0, 0),) * (data.ndim - 1)
-    data_lon = jnp.pad(data, (*pad_axes, (halo, halo)), mode="wrap")
+    # Lon is axis 1 for (lat, lon) and (lat, lon, nlev) alike.
+    lon_pad = ((0, 0), (halo, halo)) + ((0, 0),) * (data.ndim - 2)
+    data_lon = jnp.pad(data, lon_pad, mode="wrap")
 
     # Latitude: pole-folding (scalar — no sign change).  Pole rows are
     # NOT periodic so we still concat the folded rows.
@@ -218,6 +273,42 @@ def _dispatch_latlon_2d_fold(data, topology, halo, *, is_vector_v):
     return pad_halo_latlon_2d(data, topology, halo=halo, pole_bc="wall")
 
 
+def _dispatch_pad(data, halo, *, is_vector_v, local_fn):
+    """Backend dispatch shared by the four lat-lon pad entry points.
+
+    ``"mpi"`` with a lat-lon topology routes through
+    :func:`legoesm.parallel.latlon_mpi.pad_halo_latlon_mpi` (band) or the
+    2-D fold; ``"spmd"`` through :func:`_try_spmd_latlon_pad`; otherwise
+    (or for an MPI topology of a different grid type) ``local_fn``.
+    """
+    # Local import to avoid a module-import cycle: halo.py is
+    # imported by many low-level modules, and the dispatch only
+    # needs ``halo`` when the backend is non-local.
+    from legoesm.grids.halo import get_halo_backend, get_mpi_topology
+    if get_halo_backend() == "mpi":
+        topology = get_mpi_topology()
+        # Lat-lon topology = LatLonBandLayout.  Anything else means
+        # an MPI run was activated for a different grid type (e.g.
+        # cubed-sphere) and a lat-lon op was called by mistake; fall
+        # back to the local serial path rather than crashing in the
+        # MPI dispatch with an opaque error.
+        from legoesm.parallel.latlon_mpi import (
+            LatLon2DLayout, LatLonBandLayout, pad_halo_latlon_mpi,
+        )
+        if isinstance(topology, LatLonBandLayout):
+            return pad_halo_latlon_mpi(
+                data, topology, halo=halo, is_vector_v=is_vector_v,
+            )
+        if isinstance(topology, LatLon2DLayout):
+            return _dispatch_latlon_2d_fold(
+                data, topology, halo, is_vector_v=is_vector_v,
+            )
+    _spmd = _try_spmd_latlon_pad(data, halo, negate=is_vector_v)
+    if _spmd is not None:
+        return _spmd
+    return local_fn(data, halo)
+
+
 def pad_halo_latlon(data: jnp.ndarray, halo: int = 1) -> jnp.ndarray:
     """Pad a scalar field with halo cells using pole-folding.
 
@@ -245,32 +336,9 @@ def pad_halo_latlon(data: jnp.ndarray, halo: int = 1) -> jnp.ndarray:
     -------
     jax.Array : Padded field, shape ``(n_lat_local + 2*halo, n_lon + 2*halo[, nlev])``.
     """
-    # Local import to avoid a module-import cycle: halo.py is
-    # imported by many low-level modules, and the dispatch only
-    # needs ``halo`` when the backend is non-local.
-    from legoesm.grids.halo import get_halo_backend, get_mpi_topology
-    if get_halo_backend() == "mpi":
-        topology = get_mpi_topology()
-        # Lat-lon topology = LatLonBandLayout.  Anything else means
-        # an MPI run was activated for a different grid type (e.g.
-        # cubed-sphere) and a lat-lon op was called by mistake; fall
-        # back to the local serial path rather than crashing in the
-        # MPI dispatch with an opaque error.
-        from legoesm.parallel.latlon_mpi import (
-            LatLon2DLayout, LatLonBandLayout, pad_halo_latlon_mpi,
-        )
-        if isinstance(topology, LatLonBandLayout):
-            return pad_halo_latlon_mpi(
-                data, topology, halo=halo, is_vector_v=False,
-            )
-        if isinstance(topology, LatLon2DLayout):
-            return _dispatch_latlon_2d_fold(
-                data, topology, halo, is_vector_v=False,
-            )
-    _spmd = _try_spmd_latlon_pad(data, halo, negate=False)
-    if _spmd is not None:
-        return _spmd
-    return pad_halo_latlon_local(data, halo)
+    return _dispatch_pad(
+        data, halo, is_vector_v=False, local_fn=pad_halo_latlon_local,
+    )
 
 
 def pad_halo_latlon_vector_local(
@@ -278,8 +346,9 @@ def pad_halo_latlon_vector_local(
 ) -> jnp.ndarray:
     """Local vector halo: lon-wrap + pole-fold with sign reversal."""
     # Longitude: periodic wrap (single Pad HLO via mode="wrap").
-    pad_axes = ((0, 0),) * (data.ndim - 1)
-    data_lon = jnp.pad(data, (*pad_axes, (halo, halo)), mode="wrap")
+    # Lon is axis 1 for (lat, lon) and (lat, lon, nlev) alike.
+    lon_pad = ((0, 0), (halo, halo)) + ((0, 0),) * (data.ndim - 2)
+    data_lon = jnp.pad(data, lon_pad, mode="wrap")
 
     # Latitude: pole-folding (vector — negate)
     south, north = fold_pole_rows(data_lon, halo, negate=True)
@@ -307,24 +376,9 @@ def pad_halo_latlon_vector(data: jnp.ndarray, halo: int = 1) -> jnp.ndarray:
     -------
     jax.Array : Padded field, shape ``(n_lat_local + 2*halo, n_lon + 2*halo[, nlev])``.
     """
-    from legoesm.grids.halo import get_halo_backend, get_mpi_topology
-    if get_halo_backend() == "mpi":
-        topology = get_mpi_topology()
-        from legoesm.parallel.latlon_mpi import (
-            LatLon2DLayout, LatLonBandLayout, pad_halo_latlon_mpi,
-        )
-        if isinstance(topology, LatLonBandLayout):
-            return pad_halo_latlon_mpi(
-                data, topology, halo=halo, is_vector_v=True,
-            )
-        if isinstance(topology, LatLon2DLayout):
-            return _dispatch_latlon_2d_fold(
-                data, topology, halo, is_vector_v=True,
-            )
-    _spmd = _try_spmd_latlon_pad(data, halo, negate=True)
-    if _spmd is not None:
-        return _spmd
-    return pad_halo_latlon_vector_local(data, halo)
+    return _dispatch_pad(
+        data, halo, is_vector_v=True, local_fn=pad_halo_latlon_vector_local,
+    )
 
 
 def pad_halo_vector_latlon(
@@ -353,23 +407,6 @@ def pad_halo_vector_latlon(
 # ==============================================================================
 
 
-def fold_pole_rows_3d(
-    data: jnp.ndarray,
-    halo: int,
-    negate: bool,
-) -> tuple[jnp.ndarray, jnp.ndarray]:
-    """Pole-fold for 3D arrays, shape (n_lat, n_lon_padded, nlev).
-
-    Same logic as fold_pole_rows but keeps the level axis intact.
-    """
-    half = data.shape[1] // 2
-    sign = -1.0 if negate else 1.0
-
-    south = sign * jnp.roll(data[:halo][::-1], half, axis=1)
-    north = sign * jnp.roll(data[-halo:][::-1], half, axis=1)
-    return south, north
-
-
 def pad_halo_latlon_3d_local(
     data: jnp.ndarray, halo: int = 1,
 ) -> jnp.ndarray:
@@ -377,30 +414,15 @@ def pad_halo_latlon_3d_local(
     # Longitude: periodic wrap via single Pad HLO (axis 1).
     data_lon = jnp.pad(data, ((0, 0), (halo, halo), (0, 0)), mode="wrap")
     # Latitude: pole-folding (scalar — no sign change)
-    south, north = fold_pole_rows_3d(data_lon, halo, negate=False)
+    south, north = fold_pole_rows(data_lon, halo, negate=False)
     return jnp.concatenate([south, data_lon, north], axis=0)
 
 
 def pad_halo_latlon_3d(data: jnp.ndarray, halo: int = 1) -> jnp.ndarray:
     """Pad a scalar 3D field with halo cells.  Backend-dispatched."""
-    from legoesm.grids.halo import get_halo_backend, get_mpi_topology
-    if get_halo_backend() == "mpi":
-        topology = get_mpi_topology()
-        from legoesm.parallel.latlon_mpi import (
-            LatLon2DLayout, LatLonBandLayout, pad_halo_latlon_mpi,
-        )
-        if isinstance(topology, LatLonBandLayout):
-            return pad_halo_latlon_mpi(
-                data, topology, halo=halo, is_vector_v=False,
-            )
-        if isinstance(topology, LatLon2DLayout):
-            return _dispatch_latlon_2d_fold(
-                data, topology, halo, is_vector_v=False,
-            )
-    _spmd = _try_spmd_latlon_pad(data, halo, negate=False)
-    if _spmd is not None:
-        return _spmd
-    return pad_halo_latlon_3d_local(data, halo)
+    return _dispatch_pad(
+        data, halo, is_vector_v=False, local_fn=pad_halo_latlon_3d_local,
+    )
 
 
 def pad_halo_latlon_vector_3d_local(
@@ -408,7 +430,7 @@ def pad_halo_latlon_vector_3d_local(
 ) -> jnp.ndarray:
     """Local 3-D vector halo: lon-wrap + pole-fold with sign reversal."""
     data_lon = jnp.pad(data, ((0, 0), (halo, halo), (0, 0)), mode="wrap")
-    south, north = fold_pole_rows_3d(data_lon, halo, negate=True)
+    south, north = fold_pole_rows(data_lon, halo, negate=True)
     return jnp.concatenate([south, data_lon, north], axis=0)
 
 
@@ -416,24 +438,9 @@ def pad_halo_latlon_vector_3d(data: jnp.ndarray, halo: int = 1) -> jnp.ndarray:
     """Pad a 3D vector component with pole-folding + sign reversal.
 
     Backend-dispatched."""
-    from legoesm.grids.halo import get_halo_backend, get_mpi_topology
-    if get_halo_backend() == "mpi":
-        topology = get_mpi_topology()
-        from legoesm.parallel.latlon_mpi import (
-            LatLon2DLayout, LatLonBandLayout, pad_halo_latlon_mpi,
-        )
-        if isinstance(topology, LatLonBandLayout):
-            return pad_halo_latlon_mpi(
-                data, topology, halo=halo, is_vector_v=True,
-            )
-        if isinstance(topology, LatLon2DLayout):
-            return _dispatch_latlon_2d_fold(
-                data, topology, halo, is_vector_v=True,
-            )
-    _spmd = _try_spmd_latlon_pad(data, halo, negate=True)
-    if _spmd is not None:
-        return _spmd
-    return pad_halo_latlon_vector_3d_local(data, halo)
+    return _dispatch_pad(
+        data, halo, is_vector_v=True, local_fn=pad_halo_latlon_vector_3d_local,
+    )
 
 
 def pad_halo_vector_latlon_3d(
@@ -509,7 +516,7 @@ def zero_polar_lat_ends(field: jnp.ndarray) -> jnp.ndarray:
     # Meridionally-periodic (y-re-entrant) mode: the lat-axis WRAPS, so the
     # boundary v-faces are genuine periodic interfaces, not walls — do NOT zero
     # them.  Local backend only (the MPI/SPMD band paths below still wall).
-    if _MERIDIONALLY_PERIODIC:
+    if _MERIDIONALLY_PERIODIC.get():
         from legoesm.grids.halo import get_halo_backend
         if get_halo_backend() != "mpi" and _spmd_lat_mesh() is None:
             return field
@@ -624,7 +631,7 @@ def pad_with_pole_bc_lat(
     # MPI/SPMD band paths below keep the wall constant; periodic-y band exchange
     # is a follow-up).  No vector sign flip: a y-periodic f-plane channel has no
     # pole fold.
-    if _MERIDIONALLY_PERIODIC:
+    if _MERIDIONALLY_PERIODIC.get():
         from legoesm.grids.halo import get_halo_backend
         if get_halo_backend() != "mpi" and _spmd_lat_mesh() is None:
             return jnp.pad(interior, pad_widths, mode="wrap")
@@ -988,8 +995,14 @@ def widen_cgrid_geometry_band(geom, halo: int):
     # when unset (None), keeping non-seam grids byte-identical.
     if getattr(geom, "seam_wall_rows", None) is not None:
         cell_names = cell_names + ("seam_wall_rows",)
+    if getattr(geom, "ff_f", None) is not None:
+        cell_names = cell_names + ("ff_f",)
     vface_names = ("dx_v", "dy_v", "area_q", "f_v", "cos_alpha_v",
                    "sin_alpha_v", "cos_lat_v")
+    # lat_v rides the same v-face axis; omitted when unset (None) so grids
+    # without a face array stay byte-identical.
+    if getattr(geom, "lat_v", None) is not None:
+        vface_names = vface_names + ("lat_v",)
     cell_wide = widen_band_cell_fields(
         tuple(getattr(geom, n) for n in cell_names), halo, clamp_poles=True)
     vface_wide = widen_band_vface_fields(

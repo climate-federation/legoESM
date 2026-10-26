@@ -1,0 +1,65 @@
+{
+    "format": "nemo-testcase-l2-gyre-round29-preregister-v1",
+    "date": "2026-09-05",
+    "starting_tip": "509aed683857",
+    "regime": "CPU production JIT, fp64/x64, oracle V2, transcendentals=libm",
+    "oracle_roots": {
+        "GYRE-zco": [
+            "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round19_oracle_v2_external",
+            "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round21_oracle_v2_stage_ww"
+        ],
+        "LOCK_EXCHANGE-zco": "/data/abyssal/dbalwada/nemo-testcases-l1/phase3/lock_kt1_10",
+        "OVERFLOW-zps": "/data/abyssal/dbalwada/nemo-testcases-l1/phase3/overflow_kt1_10"
+    },
+    "read_before_this_preregistration_no_prediction_carried": {
+        "note": "Rule 0 source readings taken BEFORE this manifest was written. They carry no prediction; they fix WHICH statements GYRE executes inside stage 3, and one of them CORRECTS the premise this round was handed.",
+        "r0_1": "stprk3_stg.F90's stage SELECT CASE opens CASE ( 3 ) at MY_SRC:488 and that block contains TWO stage-3-only momentum calls, not one: dyn_ldf at MY_SRC:493 (compiled ppsrc/nemo/stprk3_stg.f90:485) and dyn_zdf at MY_SRC:523 (ppsrc:498). The round-29 task statement named dyn_zdf as the ONLY stage-3-only momentum operator touching every wet U face; that is CORRECTED here before any measurement.",
+        "r0_2": "dyn_ldf is ACTIVE on GYRE: namelist_cfg:187 ln_dynldf_lap = .true., :188 ln_dynldf_lev = .true., :189 nn_ahm_ijk_t = 0 with :190 rn_Uv = 2.0 and :191 rn_Lv = 100.e+3. The resolved operator is printed at round19_oracle_v2_external/ocean.output:706 and :828 as 'iso-level laplacian operator'.",
+        "r0_3": "Because the resolved operator is np_lap and NOT np_lap_i, dynzdf.F90's rotated-lateral-mixing contribution to the matrix (akzu at :277-291 for U, akzv at :444-458 for V) does NOT execute on GYRE.",
+        "r0_4": "ocean.output:553 prints ln_zad_Aimp = F, so dynzdf.F90's Courant-dependent implicit vertical advection contributions to the matrix (:229-260 U, :406-442 V) do NOT execute on GYRE.",
+        "r0_5": "ocean.output:629 prints ln_drgimp = T, :338 ln_isfcav = F, :630 ln_drgice_imp = F. So on GYRE the implicit BOTTOM friction executes in both places -- the RHS barotropic-stress addition at dynzdf.F90:156-161 and the diagonal term at :293-296 -- and every top-friction block is dead.",
+        "r0_6": "cpp_GYRE_OMIP_L2_P3_SM.fcm sets key_qco key_vco_1d3d key_RK3, so the wind enters the solve through the key_RK3 arm at dynzdf.F90:328-330, rDt * utauU / ( e3u(1,Kaa) * rho0 ) * umask, and NOT the MLF utau/utau_b average.",
+        "r0_7": "namelist_cfg:161 sets ln_dynadv_vec = .true., so dynzdf.F90's explicit update takes the VELOCITY branch at :120-123, puu(Kaa) = ( puu(Kbb) + rDt*puu(Krhs) ) * umask, with no thickness weighting and no r3u.",
+        "r0_8": "EVERY momentum-operand writer in cfgs/GYRE_OMIP_L2_P3_SM/MY_SRC is gated on kstg == 2: NEMO_L2_RKTRM_1 at stprk3_stg.F90:371, NEMO_L2_HPGOP_1 at :387, NEMO_L2_RKPRE_1 at :441, NEMO_L2_RKSTG_1 at :545. The stage-3 writers that do exist are tracer and vertical-velocity ones. There is NO dumped stage-3 momentum frame of any kind, and no dump of dyn_zdf's matrix or of its Krhs input.",
+        "r0_9": "dynzdf.F90 declares zwi/zwd/zws as REAL(wp), DIMENSION(T1Di(0),jpkm1) -- a single i-k slice reused inside the DO_1Dj loop -- so an instrument that wants the whole field must copy each slice into a 3-D buffer inside that loop.",
+        "r0_10": "At kt=1 GYRE starts from rest, so stage 3's uu(:,:,:,Kbb) is the step-entry velocity and is exactly 0.0. The whole stage-3 Kaa is therefore rDt*Krhs, masked, then barotropic-removed, bottom-stress-corrected, wind-forced and solved."
+    },
+    "item1_stage3_owner": {
+        "claim_under_test": "GYRE's kt=1 stage-3 momentum divergence (u 9.4819e-07 on 17400/17400 wet faces, against stage 2's 4.740e-13 and stage 1's 2.711e-19) enters inside dyn_zdf -- its tridiagonal matrix build, its solve, or its surface-stress / bottom-drag boundary conditions -- and not upstream of it.",
+        "predictions": [
+            "P1 The first non-bit operand at kt=1 stage 3 is INSIDE dyn_zdf. CONFIRM: the Krhs entering dyn_zdf is 0 bit-unequal against legoESM's own stage-3 pre-zdf momentum RHS on every wet U and V face, AND at least one of { zwi, zwd, zws, the rCdU_bot diagonal term, the wind term, the solved uu/vv(Kaa) } is bit-unequal. REFUTE: the Krhs entering dyn_zdf is bit-unequal on any wet face -- the owner is then at or before dyn_ldf and P1 is dead.",
+            "P2 dyn_ldf is not the owner. The pre-ldf frame discriminates: CONFIRM if the stage-3 Krhs BEFORE dyn_ldf and the Krhs entering dyn_zdf are both bit-exact against legoESM. REFUTE if the pre-ldf frame is bit-exact and the entering-zdf frame is not -- dyn_ldf then owns it, and P1 is dead in a second, independent way.",
+            "P3 Given r0_3, r0_4 and r0_5, NEMO's dumped zwi/zwd/zws are reproducible BIT FOR BIT from NEMO's own dumped avm, e3u(Kaa), e3uw(Kmm), wumask, rCdU_bot and mbku by the ZDF-plus-bottom-drag statement alone. This is the reader's CALIBRATION, not a physics claim: it proves the dump holds what its header says. CONFIRM: 0 bit-unequal. REFUTE: any bit-unequal -- then either a matrix contribution this round read as dead is live, or the instrument is wrong, and NO number from the record may be quoted until that is settled (Rule 1e).",
+            "P4 The existing records cannot decide P1 or P2. There is no stage-3 momentum frame at all (r0_8), so this round REPORTS the gap rather than a localisation, and the instrument below is what closes it."
+        ],
+        "falsifier_summary": "P1 is REFUTED by a single bit-unequal cell in the Krhs entering dyn_zdf. That is a one-number falsifier and it is the reason the instrument dumps the Krhs INPUT and not only the matrix.",
+        "landing_rule": "Nothing lands this round. The instrument is WRITE-only NEMO-side code plus a reader and a gate; no legoESM numerics change."
+    },
+    "item2_instrument": {
+        "what_is_dumped": [
+            "kt=1 stage 3 only, rank 0 only, at the dyn_zdf call boundary",
+            "entry: uu/vv(:,:,:,Krhs), uu/vv(:,:,:,Kbb), uu_b/vv_b(:,:,Kaa)",
+            "pre-solve column vector: uu/vv(:,:,:,Kaa) after the explicit update, the barotropic removal and the bottom-stress boundary addition, before the matrix is built",
+            "matrix as built, before the LU first recurrence overwrites zwd: zwi/zwd/zws for U and for V, assembled into 3-D buffers",
+            "operands as consumed: avm, e3u(Kaa), e3uw(Kmm), e3v(Kaa), e3vw(Kmm), wumask, wvmask, rCdU_bot, mbku, mbkv, utauU, vtauV, rDt, rho0",
+            "solved: uu/vv(:,:,:,Kaa) at exit",
+            "one companion frame in stprk3_stg.F90 at stage 3 BEFORE dyn_ldf: uu/vv(:,:,:,Krhs). Without it the walk cannot separate dyn_ldf from dyn_zdf, which is exactly P2."
+        ],
+        "admission": "twin identity against round19_oracle_v2_external: every pre-existing record byte-identical except the known unconsumed transport slot, and the final restart byte-identical. WRITE-only: canonical zero-first buffers, NEWUNIT, own locals, no prognostic or work array assigned.",
+        "non_vacuity_today": "the reader and the gate ship with a self-test that builds a SYNTHETIC record with known contents and a planted defect, and the gate must turn red on the plant and green on the baseline. That runs now, before any NEMO execution."
+    },
+    "item3_review_findings_to_fix": {
+        "F1": "tests/ocean/fidelity/test_nemo_testcase_lock_slow_forcing_owner.py:77 calls depth_mean_statement with 6 positionals after round 28 added grid and a required face_mask; it dies on TypeError instead of exercising the dispatch guard. Fix the caller and quote the passing line.",
+        "F2": "the citation gate does not validate the interior of a comma citation, and GYRE's namelist_cfg is not in its file map, so the round-28 premise ln_dynadv_vec = .true. binds to LOCK's namelist where it is .false.",
+        "F3": "the round-28 MIN-versus-MEAN disposition says the difference is 'exactly zero during step 1 ... it enters from kt=3'. That is wrong: r3u(:,:,Kaa) is assigned at STAGE 1 from ssha (stprk3_stg.F90:157-175, the assignment at :169), and legoESM's production stage builder already uses NEMO's area-weighted MEAN rule through nemo_qco_live_face_geometry_cgrid (vertical.py:470, transcribing domqco.F90:166-169 and :219-222). MIN survives on the slow-forcing depth average only. Strike the disposition in place.",
+        "F4": "record the per-stage localisation of the kt=1 momentum divergence in the receipt: stage 1 2.710505431213761e-19 AT-BAR, stage 2 4.740083109008864e-13 DEBT, stage 3 9.481924730527598e-07 DEBT.",
+        "F5": "register the reference-versus-live divide's 488/580 bit-unequal (about 4 ulp) rows as bit debt."
+    },
+    "forbidden_this_round": [
+        "changing the demo card (decision 15C pending)",
+        "landing the dyn_vor unconditional call (decision 16 pending)",
+        "any edit under /home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/src",
+        "makenemo, mpirun, push, merge, deletion, git stash / reset --hard",
+        "any configuration choice"
+    ]
+}

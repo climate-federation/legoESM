@@ -1,0 +1,40 @@
+--- traldf_iso_scheme.h90
++++ traldf_iso_scheme.h90
+@@ -57,0 +58,10 @@
++#if defined iso_lap
++            IF( lr177_write .AND. jn == jp_tem ) THEN
++               DO_2D( INN+1, INN+1, INN+1, INN+1 )
++                  r177_dit(ji,jj,jk) = zdit(ji,jj,ik)
++                  r177_djt(ji,jj,jk) = zdjt(ji,jj,ik)
++                  r177_dkt(ji,jj,jk) = zdkt(ji,jj,ik)
++                  IF( jk == jpkm1 ) r177_dkt(ji,jj,jpk) = zdkt(ji,jj,ikp1)
++               END_2D
++            ENDIF
++#endif
+@@ -89,0 +100,9 @@
++#if defined iso_lap
++               IF( lr177_write .AND. jn == jp_tem ) THEN
++                  r177_A11(ji,jj,jk) = zA11 ; r177_A22(ji,jj,jk) = zA22
++                  r177_A13(ji,jj,jk) = zA13 ; r177_A23(ji,jj,jk) = zA23
++                  r177_hmsku(ji,jj,jk) = zmsku ; r177_hmskv(ji,jj,jk) = zmskv
++                  r177_fu(ji,jj,jk) = zfu(ji,jj) ; r177_fv(ji,jj,jk) = zfv(ji,jj)
++               ENDIF
++#endif
++
+@@ -138,0 +159,9 @@
++#if defined iso_lap
++                  IF( lr177_write .AND. jn == jp_tem ) THEN
++                     r177_vmsku(ji,jj,jk) = zmsku ; r177_vmskv(ji,jj,jk) = zmskv
++                     r177_ahu_w(ji,jj,jk) = zahu_w ; r177_ahv_w(ji,jj,jk) = zahv_w
++                     r177_A31(ji,jj,jk) = zA31 ; r177_A32(ji,jj,jk) = zA32
++                     r177_fw_lower(ji,jj,jk) = zfw(ji,jj) ; r177_fw_upper(ji,jj,jk) = zfw_kp1
++                  ENDIF
++#endif
++
+@@ -157,0 +188,6 @@
++#if defined iso_lap
++                  IF( lr177_write .AND. jn == jp_tem ) THEN
++                     r177_fw_lower(ji,jj,jk) = zfw(ji,jj) ; r177_fw_upper(ji,jj,jk) = 0._wp
++                  ENDIF
++#endif
++

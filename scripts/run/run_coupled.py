@@ -545,6 +545,51 @@ def build_parser():
              "~1e-6 phase-shift vs the fused path). Pass --no-unfused-radiation "
              "for the byte-identical legacy fused path.",
     )
+    # External CMIP6 radiative forcing (ozone + solar), the SAME flags/dests as
+    # run_amip.py so one forcing set serves every lane (tests/unit/
+    # test_run_coupled_forcing_cli.py pins the two parsers against each other).
+    # Without these the coupled lane silently ran the built-in ozone profile
+    # and a constant sun (ExperimentConfig defaults) whatever the AMIP deck did.
+    parser.add_argument("--ozone-source", type=str, default="standard",
+                        choices=["standard", "analytical", "mls", "none"])
+    parser.add_argument("--ozone-forcing", type=str, default="inline",
+                        choices=["inline", "external", "off"])
+    parser.add_argument("--ozone-file", type=str, default="",
+                        help="Ozone NetCDF (CMIP6 input4MIPs vmro3 compatible); "
+                             "see run_amip.py --ozone-file.")
+    parser.add_argument("--solar-source", type=str, default="constant",
+                        choices=["constant", "file", "spectral_file"])
+    parser.add_argument("--solar-file", type=str, default="")
+    parser.add_argument("--solar-tsi-var", type=str, default="tsi")
+    parser.add_argument("--solar-spectral-var", type=str,
+                        default="solar_fraction_by_gpt")
+    parser.add_argument("--solar-spectral-band-order", type=str, default="auto",
+                        choices=["auto", "as_is", "rrtmg_sw"],
+                        help="Band order of a 14-band spectral file "
+                             "(issue #322); see run_amip.py.")
+    # GHG / tropospheric aerosol / volcanic: same flags as run_amip.py
+    # (2026-10-08); without them the coupled lane ran constant GHG and no
+    # external aerosol whatever the AMIP decks prescribed.
+    parser.add_argument("--ghg-forcing", type=str, default="constant",
+                        choices=["constant", "external"])
+    parser.add_argument("--ghg-file", type=str, default="")
+    parser.add_argument("--aerosol-forcing", type=str, default="off",
+                        choices=["off", "external"])
+    parser.add_argument("--aerosol-file", type=str, default="")
+    parser.add_argument("--aerosol-ccn-file", type=str, default="")
+    parser.add_argument("--aerosol-reference-aod", type=float, default=0.03)
+    parser.add_argument("--volcanic-aerosol-file", type=str, default="")
+    parser.add_argument("--volcanic-aerosol-scale", type=float, default=1.0)
+    parser.add_argument("--volcanic-aerosol-lw", action="store_true",
+                        default=False)
+    parser.add_argument(
+        "--forcing-hold-outside-file-years", action="store_true", default=False,
+        help="Hold a multi-year ozone/aerosol/volcanic file's end record for "
+             "run dates outside its years (default: raise).")
+    # Diurnal (instantaneous-zenith) radiation, as run_amip.py; every AMIP deck
+    # sets diurnal_cycle: true (gridaudit 2026-10-09).
+    parser.add_argument("--diurnal-cycle", action=argparse.BooleanOptionalAction,
+                        default=False)
     parser.add_argument(
         "--orbital-insolation", action="store_true", default=False,
         dest="orbital_insolation",
@@ -553,6 +598,30 @@ def build_parser():
              "eccentricity asymmetry (~+/-3.4%%). Default off = circular "
              "orbit. Recommended for CMIP historical/abrupt-4xCO2/1pctCO2.",
     )
+    # Terrain / land-sea mask / subgrid orography (F36): the SAME flags, dests
+    # and defaults as run_amip.py (tests/unit/test_run_coupled_forcing_cli.py
+    # pins them).  Without them the coupled atmosphere was always flat and the
+    # slab deck's land the analytic 50%-poleward-of-25-deg band.  In a coupled
+    # run the land fraction feeds the coupler's land tile (the atmosphere's own
+    # slab land is not activated: the coupler owns land).
+    # Vertical coordinate (F36): the same dests/defaults as run_amip.py.  The
+    # default hybrid table (transition exponent 3) carries NEGATIVE layer mass
+    # below ~658 hPa, i.e. over real Tibet; exponent 2 holds all of ETOPO.
+    parser.add_argument("--vertical-coord", type=str, default="hybrid",
+                        choices=["sigma", "hybrid", "cam_l32"],
+                        help="cam_l32 = CAM6's 32-level hybrid table (nlev must be 32)")
+    parser.add_argument("--transition-exponent", type=int, default=None,
+                        choices=[2, 3],
+                        help="hybrid B(eta)=eta**n exponent; 2 holds all of "
+                             "ETOPO, 3 (default) inverts below ~658 hPa (#1029).")
+    parser.add_argument("--topography", type=str, default="flat")
+    parser.add_argument("--topo-smoothing", type=int, default=4)
+    parser.add_argument("--land-mask-file", type=str, default="",
+                        help="Land-sea-mask NetCDF (CMIP6 sftlf / ERA5 lsm); "
+                             "replaces the terrain product's land fraction.")
+    parser.add_argument("--subgrid-orography-file", type=str, default="",
+                        help="Subgrid orographic stddev NetCDF (SSO_STDH) for "
+                             "an orographic GWD launch; see run_amip.py.")
     # RRTMGP g-point compile/runtime tuning (forward CMIP runs only — these are
     # ANSWER-IDENTITY for a non-AD forward integration).  ``--rrtmgp-gpoint-
     # batch-size N>0`` processes the two-stream g-points in vmap blocks of N
@@ -581,6 +650,10 @@ def build_parser():
                              "higher horizontal resolution. Numerically exact "
                              "(columns are independent); must divide the column "
                              "count.")
+    parser.add_argument("--rrtmgp-overhead-layer", action="store_true",
+                        default=False,
+                        help="CAM RRTMG-style transported layer above the "
+                             "model top (see run_amip.py). Off = byte-identical.")
     # Atmosphere physics suite.  DEFAULT = full realistic CMIP6 atmosphere:
     # convection=sbm, turbulence=holtslag_boville, gravity-wave-drag=hines,
     # clouds=sundqvist, microphysics=kessler (+ rrtmgp radiation above).  This
@@ -592,9 +665,10 @@ def build_parser():
     # run_amip uses.  So this list had drifted, not narrowed on purpose: it was
     # missing zhang_mcfarlane / kain_fritsch / emanuel / tiedtke / bechtold --
     # every one of which resolves through the shared convection factory.
-    # tiedtke is run_amip's default and bechtold is the scheme pinned by
-    # config/amip/amip_production.yaml, so a coupled run could select NEITHER of
-    # the two the atmosphere is actually run with.  Derived from the canonical
+    # tiedtke is run_amip's default and the production deck pins one of these
+    # explicitly -- zhang_mcfarlane since it became the CAM6 suite on
+    # 2026-09-23, bechtold before that -- so a coupled run could select NEITHER
+    # of the two the atmosphere is actually run with.  Derived from the canonical
     # set so it cannot drift again.  (The default stays sbm: the comment above
     # documents the empirically coupled-stable suite, which is a statement about
     # the DEFAULT, not a reason to block the others.)
@@ -634,7 +708,8 @@ def build_parser():
     # "large_yeager") only, so an accepted "most" would SILENTLY fall through to
     # the constant-coefficient branch -- trading a loud crash for wrong physics.
     parser.add_argument("--surface-bulk-scheme", default="constant",
-                        choices=list(VALID_SURFACE_BULK),
+                        # "none" (no surface fluxes) cannot drive an ocean.
+                        choices=[s for s in VALID_SURFACE_BULK if s != "none"],
                         help="AIR-SEA surface bulk-flux algorithm for the "
                              "atmosphere surface layer + the coupler OCEAN tile "
                              "(the 3D-ocean air-sea flux). 'coare3' is the "
@@ -718,7 +793,7 @@ def build_parser():
                         help="Cloud-fraction scheme (default: sundqvist)")
     parser.add_argument("--convective-cloud", dest="convective_cloud",
                         action="store_true", default=False,
-                        help="Add a bounded Slingo(1987) convective cumulus "
+                        help="Add a bounded Slingo-1987-inspired surrogate convective cumulus "
                              "cloud-fraction source driven by the (lagged) "
                              "convective precip — restores the tropical "
                              "cloud-radiative effect the adjustment convection "
@@ -751,7 +826,7 @@ def build_parser():
                              "adiabatic (None=default 1.5e-6; range 5e-7..3e-6).")
     parser.add_argument("--conv-cloud-max", dest="cloud_conv_cloud_max",
                         type=float, default=None,
-                        help="Override convective (Slingo) cloud-cover cap "
+                        help="Override convective (Slingo-1987-inspired surrogate) cloud-cover cap "
                              "(CloudConfig.conv_cloud_max). Range [0.1, 1.0]. "
                              "Default: CloudConfig default.")
     parser.add_argument("--conv-cloud-condensate",
@@ -832,6 +907,14 @@ def build_parser():
                              "woa). Default on; the slab-land skin feedback is "
                              "stiff — turn off (--no-couple-surface-radiation) "
                              "to trade land-radiation realism for stability.")
+    parser.add_argument("--couple-surface-fluxes",
+                        action=argparse.BooleanOptionalAction, default=False,
+                        help="Feed the coupler's tile-blended sensible/latent "
+                             "heat flux to the atmosphere surface tendency "
+                             "(CoupledConfig.couple_surface_fluxes). Default "
+                             "off. Closes the air-sea budget only with the "
+                             "prognostic 3D ocean; the slab/two-layer ocean "
+                             "computes its own fluxes.")
     # SLAB-only (LandConfig.runoff_scheme). topmodel = SIMTOP sub-grid saturated
     # fraction + topographic baseflow (Niu 2005 / CLM4.5); it is implemented and
     # param-spec'd but was unreachable -- land_scheme_overrides built
@@ -986,13 +1069,19 @@ def build_parser():
                              "EQUATORIAL CFL (~60x larger dt at 2deg) instead of "
                              "being clamped to ~5s. Without it a 2deg lat-lon "
                              "run is ~80x more steps and infeasible.")
-    parser.add_argument("--sb81-omega-conversion", action="store_true",
-                        default=False,
+    parser.add_argument("--sb81-omega-conversion",
+                        action=argparse.BooleanOptionalAction, default=True,
                         help="SB81 α-weighted κT·ω/p energy conversion on the "
                              "hybrid lat-lon C-grid lane (#1029; no effect on "
-                             "other grids/coordinates). Default OFF — unmasks "
-                             "the #1029(b) lid-wave instability sooner; opt-in "
-                             "until the lid treatment lands.")
+                             "other grids/coordinates). Default ON; "
+                             "--no-sb81-omega-conversion = legacy form.")
+    parser.add_argument("--energy-fixer",
+                        action=argparse.BooleanOptionalAction, default=True,
+                        help="CAM-style dycore total-energy fixer (DycoreConfig."
+                             "energy_fixer). ON by default; wired on the "
+                             "voronoi, lat-lon and cube atmospheres, refused "
+                             "on gaussian (spectral): pass --no-energy-fixer "
+                             "there to accept the open energy sink explicitly.")
     parser.add_argument("--ocean-nlev", type=int, default=20,
                         help="3D ocean vertical levels (--ocean dynamic)")
     parser.add_argument("--ocean-dt", type=float, default=300.0,
@@ -1175,18 +1264,39 @@ def resolve_coupled_microphysics(grid: str, microphysics: str | None):
     return microphysics, "kept"
 
 
-def main():
+def require_forcing_files(args) -> None:
+    """Refuse an external forcing channel with no file, loudly.
+
+    Mirrors run_amip._postprocess_args: the ozone loader substitutes its
+    reference profile when the path is empty (``use_reference_if_missing``),
+    so an omitted ``--ozone-file`` would run DIFFERENT ozone silently.
+    """
+    if args.ozone_forcing == "external" and not args.ozone_file:
+        raise SystemExit("--ozone-file is required with --ozone-forcing external")
+    if args.solar_source != "constant" and not args.solar_file:
+        raise SystemExit("--solar-file is required with --solar-source "
+                         f"{args.solar_source}")
+    if args.ghg_forcing == "external" and not args.ghg_file:
+        raise SystemExit("--ghg-file is required with --ghg-forcing external")
+    if args.aerosol_forcing == "external" and not args.aerosol_file:
+        raise SystemExit("--aerosol-file is required with --aerosol-forcing external")
+
+
+def main(argv=None, *, build_only=False):
+    """Run a coupled experiment.  ``build_only`` stops after the driver is
+    constructed and returns it (deck tests build every committed deck this way
+    without integrating)."""
     parser = build_parser()
 
     # Two-pass parse so a --config file supplies defaults that explicit CLI
     # flags still override (precedence: CLI > config file > parser default).
-    pre, _ = parser.parse_known_args()
+    pre, _ = parser.parse_known_args(argv)
     if pre.config is not None:
         from legoesm.driver.run_config_yaml import load_yaml_config
         parser.set_defaults(**load_yaml_config(
             pre.config, parser, example_keys=_COUPLED_EXAMPLE_KEYS))
 
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     # --minimal-physics: collapse the full-physics defaults to a cheap
     # idealized atmosphere (gray radiation + SBM convection only).  Applied
@@ -1305,11 +1415,15 @@ def main():
     from legoesm.driver.coupled_config import PRESETS
     from legoesm.ocean.simple_ocean import SimpleOceanConfig
 
+    require_forcing_files(args)
     atm_config = ExperimentConfig(
         grid=GridConfig(
             grid_type=args.grid,
             resolution=args.resolution,
             nlev=args.nlev,
+            vertical_coord=args.vertical_coord,
+            transition_exponent=(args.transition_exponent
+                                 if args.transition_exponent is not None else 3),
         ),
         dycore=DycoreConfig(
             dt=args.dt, model_type="hydrostatic",
@@ -1328,6 +1442,7 @@ def main():
             # #1029 ω-side SB81 conversion (hybrid latlon lane only; the
             # factory threads it, other dycores ignore it). Default OFF.
             sb81_omega_conversion=args.sb81_omega_conversion,
+            energy_fixer=args.energy_fixer,
         ),
         output=OutputConfig(
             diag_days=args.diag_days,
@@ -1345,9 +1460,33 @@ def main():
         rad_update_steps=args.rad_update_steps,
         unfused_radiation=args.unfused_radiation,
         orbital_insolation=args.orbital_insolation,
+        diurnal_cycle=args.diurnal_cycle,
         rrtmgp_gpoint_batch_size=args.rrtmgp_gpoint_batch_size,
         rrtmgp_gpoint_checkpoint=args.rrtmgp_gpoint_checkpoint,
         rrtmgp_column_chunk_size=args.radiation_column_chunk,
+        rrtmgp_overhead_layer=args.rrtmgp_overhead_layer,
+        ozone_source=args.ozone_source,
+        ozone_forcing=args.ozone_forcing,
+        ozone_file=args.ozone_file,
+        solar_source=args.solar_source,
+        solar_file=args.solar_file,
+        solar_tsi_var=args.solar_tsi_var,
+        solar_spectral_var=args.solar_spectral_var,
+        solar_spectral_band_order=args.solar_spectral_band_order,
+        ghg_forcing=args.ghg_forcing,
+        ghg_file=args.ghg_file,
+        aerosol_forcing=args.aerosol_forcing,
+        aerosol_file=args.aerosol_file,
+        aerosol_ccn_file=args.aerosol_ccn_file,
+        aerosol_reference_aod=args.aerosol_reference_aod,
+        volcanic_aerosol_file=args.volcanic_aerosol_file,
+        volcanic_aerosol_scale=args.volcanic_aerosol_scale,
+        volcanic_aerosol_lw=args.volcanic_aerosol_lw,
+        forcing_hold_outside_file_years=args.forcing_hold_outside_file_years,
+        topography=args.topography,
+        topo_smoothing=args.topo_smoothing,
+        land_mask_path=args.land_mask_file,
+        subgrid_orography_path=args.subgrid_orography_file,
         ic=args.ic,
         ic_path=args.ic_path,
         convection=args.convection,
@@ -1391,7 +1530,7 @@ def main():
     # so make_grid_remapper hits the regular-lat-lon overlap branch.  A
     # co-located spectral 3-D ocean stays idealized; cubed_sphere / latlon /
     # voronoi(MPAS) support the dynamic ocean too.
-    overrides = {}
+    overrides = {"couple_surface_fluxes": args.couple_surface_fluxes}
     ocean_grid_obj = None   # None => ocean co-located on the atm grid (no remap)
     # A cubed-sphere OR gaussian(spectral) atmosphere drives a 3-D ocean ONLY on
     # a DISTINCT lat-lon ocean grid (--ocean-grid latlon:<res>), coupled via the
@@ -1648,25 +1787,80 @@ def main():
             args.params, args.land_params, atm_config, coupled_cfg,
             coupler_config, ice_config)
 
+    # Under `legoesm reproduce`: the reference run's atmosphere manifest (at
+    # its output root) must carry a complete resolved-physics record, which
+    # the rerun's atmosphere must resolve to before stepping.
+    from legoesm.driver.restart import (
+        RESOLVED_PHYSICS_KEYS,
+        RUN_MANIFEST_FILENAME,
+        collective_root_gate,
+        collective_version_drift_gate,
+        config_drift_rows,
+        format_drift_rows,
+        read_run_manifest,
+        record_final_state_digest,
+        REPRODUCE_REFERENCE_ENV,
+        RUNNER_REPLAY_SPECS,
+        read_companion_manifest,
+        reproduce_reference_root,
+        restart_version_drift,
+        write_run_manifest_on_root,
+    )
+    ref_atm = None
+    ref = reproduce_reference_root()
+    if ref is not None and ref[0]["reproducibility"].get("runner_tag") == "run_coupled":
+        import os
+        try:
+            ref_atm_path, ref_atm = read_companion_manifest(
+                os.environ[REPRODUCE_REFERENCE_ENV], ref[0],
+                RUNNER_REPLAY_SPECS["run_coupled"], RUN_MANIFEST_FILENAME,
+                "atmosphere")
+        except ValueError as exc:
+            raise RuntimeError(f"reproduce: no atmosphere manifest of the "
+                               f"reference run found ({exc}); refusing") from exc
+        phys = ref_atm["config"].get("resolved_physics")
+        if not (isinstance(phys, dict) and set(phys) == set(RESOLVED_PHYSICS_KEYS)):
+            raise RuntimeError(f"reproduce: the reference atmosphere manifest "
+                               f"{ref_atm_path} has no complete resolved-physics "
+                               f"record; refusing")
+
     driver = CoupledESMDriver(
         atm_config, coupled_cfg, coupler_config=coupler_config,
         ice_config=ice_config, lake_config=lake_config,
         ocean_grid=ocean_grid_obj, output_dir=args.output,
+        expected_resolved_physics=(ref_atm["config"]["resolved_physics"]
+                                   if ref_atm is not None else None),
+        atm_manifest_runner_tag="run_coupled",
     )
+    if build_only:
+        return driver
+
+    # --resume continues from the latest checkpoint in --output.  Its code
+    # check runs before setup() (it needs only the checkpoint and the
+    # manifest beside it), so other code is refused before the model is built.
+    ckpt = None
+    if getattr(args, "resume", False):
+        ckpt, _tok = _find_latest_checkpoint(args.output)
+        if ckpt is not None:
+            _ck = Path(ckpt)
+            collective_version_drift_gate(
+                lambda: restart_version_drift(_ck, [_ck.parent]),
+                f"checkpoint {_ck}")
 
     t0 = time.time()
     driver.setup()
     t_setup = time.time() - t0
     logger.info(f"Setup completed in {t_setup:.1f}s")
 
-    # --resume: continue the integration from the latest checkpoint in --output
-    # (atm + coupled written together, same day token).  setup() has already
-    # rebuilt the IC + ocean geometry + WOA restoring targets deterministically;
-    # the load overwrites the prognostic state with the saved day-N values.
+    # --resume: setup() has already rebuilt the IC + ocean geometry + WOA
+    # restoring targets deterministically; the load overwrites the prognostic
+    # state with the saved day-N values (the coupled file is named from the
+    # loaded atmosphere day).  Before the coupled record is written, so a
+    # refused resume (no coupled checkpoint) leaves the directory's record
+    # as it was.
     start_step, start_day = 0, None
     if getattr(args, "resume", False):
         import os
-        ckpt, _tok = _find_latest_checkpoint(args.output)
         if ckpt is None:
             logger.info("  --resume: no checkpoint in %s; starting fresh",
                         args.output)
@@ -1674,15 +1868,70 @@ def main():
             step, day = driver._atm.load_checkpoint(ckpt)
             elapsed = day - getattr(atm_config, "start_day", 0.0)
             driver.load_coupled_checkpoint(float(elapsed),
-                                           checkpoint_dir=args.output)
+                                           checkpoint_dir=args.output,
+                                           required=True)
             start_step, start_day = step, day
             logger.info("  RESUME from %s: step=%d, day=%.1f (elapsed %.1f) -> "
                         "integrating to day %d", os.path.basename(ckpt),
                         step, day, elapsed, args.days)
 
+    # Coupled run manifest, written after setup so it records the component
+    # configs the driver resolved there (config.resolved_physics), with every
+    # config this driver was built from.  The atmosphere's own manifest,
+    # written by its ModelDriver in setup, sits at the output root.  A failed
+    # write (or a reproduce / continuation refusal) aborts the run.  The
+    # atmosphere entry is the atmosphere's own resolved snapshot (the config
+    # its manifest records), so "auto" settings appear as the values setup
+    # resolved them to.
+    coupled_manifest = write_run_manifest_on_root(
+        driver.output_dir / "coupled",
+        {"runner": "run_coupled", "atmosphere": driver._atm._input_config,
+         "coupled": coupled_cfg, "coupler": coupler_config,
+         "sea_ice": ice_config, "lake": lake_config, "cli_args": vars(args)},
+        config_kind="coupled",
+        runner_tag="run_coupled",
+        rng_seeds={"master": int(atm_config.seed)},
+        resolved_physics=driver.resolved_component_configs(),
+    )
+    if ref_atm is not None:
+        def _same_atmosphere():
+            here = driver.output_dir / RUN_MANIFEST_FILENAME
+            rows = config_drift_rows(
+                ref_atm["config"]["resolved_config"],
+                read_run_manifest(here)["config"]["resolved_config"])
+            if rows:
+                raise RuntimeError(
+                    f"reproduce: the rerun's atmosphere configuration differs "
+                    f"from the reference ({len(rows)} fields); refusing:\n"
+                    + format_drift_rows(rows))
+        collective_root_gate(_same_atmosphere, "reproduce: atmosphere record")
+
     t0 = time.time()
     status = driver.run(start_step=start_step, start_day=start_day)
     t_run = time.time() - t0
+    if coupled_manifest is not None and status == "COMPLETED":
+        # Final digest of every non-atmosphere array a coupled checkpoint
+        # saves; the atmosphere's own manifest records the atmosphere's.
+        # Only for a completed run, as the atmosphere's (a wallclock stop or
+        # a blowup must never become a reproducibility reference).  Best
+        # effort, like the writer: the run has finished.
+        try:
+            arrays = driver.coupled_checkpoint_arrays()
+        except Exception as exc:  # noqa: BLE001 — provenance after the run
+            logger.warning(f"coupled state_digest not recorded: "
+                           f"{type(exc).__name__}: {exc}")
+        else:
+            # Pair it with the atmosphere record's final digest (written by
+            # the atmosphere's own run), so --check compares one run's pair.
+            # The digest the atmosphere recorded in THIS run (a same-config
+            # manifest is preserved across runs, so the file may hold an
+            # older one).  Always written ({} = no pair), so a pair from an
+            # earlier segment never sits beside this run's digest.
+            atm_digest = driver._atm.final_state_digest
+            record_final_state_digest(
+                coupled_manifest, arrays,
+                companion_digests=({RUN_MANIFEST_FILENAME: atm_digest}
+                                   if atm_digest else {}))
 
     # Summary
     logger.info("=" * 60)

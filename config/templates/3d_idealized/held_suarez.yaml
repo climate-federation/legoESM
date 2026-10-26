@@ -22,7 +22,11 @@ atmosphere:
   dynamics: hydrostatic        # canonical key -> ExperimentConfig.dycore.model_type
   time_integrator: ssp_rk3
   dt_seconds: 600
-  hyperdiffusion_coeff: 0.0
+  hyperdiff_scale: 0.0
+  # Keep the cube winds in D staggering between steps (#1028): the per-step
+  # cell-centre round trip is a measured eddy damper.  Runs on 1/2/3/6
+  # devices (face mesh); sub-face tiling and multi-process refuse it at start.
+  persistent_dgrid: true
 physics:
   forcing: held_suarez
   # Held-Suarez is a DRY benchmark, and HS forcing is ADDITIVE to the physics
@@ -46,14 +50,16 @@ surface:
   # that q_v in place as a passive tracer that still perturbs the dynamics
   # through virtual temperature -> density.  Start genuinely dry.
   rh_init: 0.0
+  # Held-Suarez has no surface heat or moisture exchange (its only surface
+  # term is the Rayleigh drag).  Without this the single-device lat-lon/cube
+  # pipeline applies the constant-coefficient bulk fluxes.
+  bulk_scheme: none
 conservation:
   fix_mass: true
-  fix_energy: false
 time:
   duration_hours: 2400          # 100 days (spin-up)
   output_interval_hours: 24
 output:
-  format: zarr
   path: output/held_suarez/
 hardware:
   precision:

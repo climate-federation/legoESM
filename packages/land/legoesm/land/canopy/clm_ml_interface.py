@@ -571,6 +571,31 @@ def resolve_num_ml_steps(canopy_config: CLMMLCanopyConfig, dt: float) -> int:
     return n_sub
 
 
+def refresh_reference_height(mlcanopy, z_ref):
+    """Refresh a warm canopy's forcing geometry without changing layer counts.
+
+    The backend initializes this geometry only once. Model-level height moves
+    with temperature/pressure, so retain its within-canopy grid and rebuild the
+    uniformly spaced above-canopy layers at each coupling step (as initVertical
+    does). All arrays keep their shapes, including the unused 1-based row zero.
+    """
+    levels = jnp.arange(mlcanopy.zw_profile.shape[1])[None, :]
+    ntop = mlcanopy.ntop_canopy[:, None]
+    ncan = mlcanopy.ncan_canopy[:, None]
+    above = (levels > ntop) & (levels <= ncan)
+    above = above & (jnp.arange(z_ref.shape[0])[:, None] > 0)
+    fraction = (levels - ntop) / jnp.maximum(ncan - ntop, 1)
+    top = mlcanopy.ztop_canopy[:, None]
+    zw = jnp.where(above, top + fraction * (z_ref[:, None] - top),
+                   mlcanopy.zw_profile)
+    dz = mlcanopy.dz_profile.at[:, 1:].set(jnp.where(
+        above[:, 1:], zw[:, 1:] - zw[:, :-1], mlcanopy.dz_profile[:, 1:]))
+    zs = mlcanopy.zs_profile.at[:, 1:].set(jnp.where(
+        above[:, 1:], 0.5 * (zw[:, 1:] + zw[:, :-1]), mlcanopy.zs_profile[:, 1:]))
+    return mlcanopy._replace(zref_forcing=z_ref, zw_profile=zw,
+                             dz_profile=dz, zs_profile=zs)
+
+
 def _setup_clm_topology(
     ncol: int,
     lat_deg: np.ndarray,
@@ -1034,6 +1059,8 @@ def _build_stubs(
     forc_po2 = _pad1(o2_pa)
     forc_solad_col = swskyb_col_jax   # (np_, 3)  direct SW
     forc_solai_grc = swskyd_grc_jax   # (np_, 3)  diffuse SW
+    # CLM MLGetAtmForcing computes thref = tref + (g/cp)*zref itself.
+    # Keep physical T here so that paired correction is applied exactly once.
     forc_t = _pad1(forcing.T_lowest)
     forc_pbot = _pad1(forcing.p_surface)
     forc_lwrad = _pad1(forcing.lw_down)
@@ -1225,7 +1252,8 @@ def _build_stubs(
         esai_patch = esai_patch.at[p].set(sai_v)
 
     # ---- frictionvel ----
-    forc_hgt_u_patch = jnp.full(np_, float(land_config.z_ref), dtype=jnp.float64)
+    z_ref = land_config.z_ref if forcing.z_lowest is None else forcing.z_lowest
+    forc_hgt_u_patch = _pad1(jnp.broadcast_to(z_ref, forcing.T_lowest.shape))
 
     # ---- Build stub namespaces ----
     atm2lnd = SimpleNamespace(
@@ -1462,8 +1490,10 @@ def _extract_surface_fluxes(
     u = forcing.u_lowest
     v = forcing.v_lowest
     ws = jnp.sqrt(u ** 2 + v ** 2 + 1.0e-6)
-    tau_x = tau_total * u / ws
-    tau_y = tau_total * v / ws
+    # Sign: stress ON THE AIR (opposes the wind), as the ocean bulk and
+    # SimpleSEB stresses it is tile-blended with (#2031).
+    tau_x = -tau_total * u / ws
+    tau_y = -tau_total * v / ws
 
     # Net radiation: absorbed SW + net LW
     # rnet_canopy is the full-column net radiation (canopy + soil).
@@ -1552,6 +1582,12 @@ def _extract_surface_fluxes(
     # L_v-soil routing (which would drain soil water for ground evaporation that
     # should sublimate from the snowpack).
     LE_soil = jnp.stack([mlcanopy.lhsoi_soil[i + 1] for i in range(ncol)])
+    # The latent heat that ground flux was charged [J/kg] (#1875), so the driver
+    # inverts the ground vapour mass with the solve's own value.
+    from legoesm.land.canopy.clm_ml_backend.multilayer_canopy.MLclm_varcon import mmh2o
+    from legoesm.land.canopy.clm_ml_backend.multilayer_canopy.MLSoilFluxesMod import (
+        soil_latent_heat)
+    L_soil = jnp.stack([soil_latent_heat(mlcanopy, i + 1) for i in range(ncol)]) / mmh2o
     LE_canopy = lhflx - LE_soil
 
     return SurfaceFluxOutput(
@@ -1576,6 +1612,7 @@ def _extract_surface_fluxes(
         stflx_veg=stflx_veg,
         LE_canopy=LE_canopy,
         LE_soil=LE_soil,
+        L_soil=L_soil,
     )
 
 
@@ -1673,6 +1710,8 @@ def compute_clm_ml_canopy_fluxes(
     g1_medlyn_jax: jnp.ndarray | None = None,
     grid_info: Any | None = None,
     pft_per_col: "np.ndarray | None" = None,
+    ground_snow_weight: jnp.ndarray | None = None,
+    ground_sublimation_heat: jnp.ndarray | None = None,
 ) -> tuple[SurfaceFluxOutput, CanopyState]:
     """Compute canopy fluxes via the CLM-ML-JAX multilayer canopy model.
 
@@ -1732,6 +1771,13 @@ def compute_clm_ml_canopy_fluxes(
         (concrete) warm-start state via :func:`extract_clm_ml_grid_info` and pass
         the same object each step.  ``None`` (single warm step whose state is a
         captured constant) reads the ints off the concrete template.
+    ground_snow_weight, ground_sublimation_heat:
+        Per-column snow weight [0-1] of the ground latent flux and the latent
+        heat of sublimation [J/kg] charged to it inside the ground solve -- a
+        documented legoESM deviation from CLM-ML, which charges its ground at
+        LatVap(tref) (#1875; ``MLSoilFluxesMod.soil_latent_heat``).  ``None``
+        weight = 0, the original CLM-ML charge.  The charge actually used is
+        returned as ``SurfaceFluxOutput.L_soil``.
 
     Returns
     -------
@@ -2179,6 +2225,23 @@ def compute_clm_ml_canopy_fluxes(
         mlcanopy = _init_mlcanopy(ncol, stubs, canopy_config)
     else:
         mlcanopy = canopy_state.mlcanopy
+        if forcing.z_lowest is not None:
+            mlcanopy = refresh_reference_height(
+                mlcanopy, stubs["frictionvel"].forc_hgt_u_patch)
+    # Ground latent heat over snow (patch i + 1 = column i), set every step so a
+    # carried state never keeps a stale weight.
+    if (ground_snow_weight is None) != (ground_sublimation_heat is None):
+        raise ValueError(
+            "compute_clm_ml_canopy_fluxes: ground_snow_weight and "
+            "ground_sublimation_heat must be given together")
+    _w_snow = (jnp.zeros(ncol, mlcanopy.snowfrac_soil.dtype) if ground_snow_weight is None
+               else jnp.asarray(ground_snow_weight, mlcanopy.snowfrac_soil.dtype))
+    mlcanopy = mlcanopy._replace(
+        snowfrac_soil=mlcanopy.snowfrac_soil.at[1:ncol + 1].set(_w_snow))
+    if ground_snow_weight is not None:
+        from legoesm.land.canopy.clm_ml_backend.multilayer_canopy.MLclm_varcon import mmh2o
+        mlcanopy = mlcanopy._replace(lsub_soil=mlcanopy.lsub_soil.at[1:ncol + 1].set(
+            jnp.asarray(ground_sublimation_heat, mlcanopy.lsub_soil.dtype) * mmh2o))
 
     # ---- Decomposition bounds ----
     bounds = bounds_type(begg=1, endg=ncol, begl=1, endl=ncol,

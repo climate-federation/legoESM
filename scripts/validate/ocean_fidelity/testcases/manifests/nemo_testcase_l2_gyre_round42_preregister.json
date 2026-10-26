@@ -1,0 +1,79 @@
+{
+  "format": "nemo-testcase-l2-gyre-round42-preregister-v1",
+  "date": "2026-09-11",
+  "parent_commit": "3d4e7c78aba7410c661e14fbd5fe01f968b01c9d",
+  "bar": 1e-15,
+  "regime": "CPU production JIT, fp64/libm, JAX x64, existing NEMO records only",
+  "scope": "Correct and calibrate the round-41 dynadv split, score KEG/ZAD given NEMO operands, land only bit-exact shared statements under Rule 12, and implement user decision 23 for every NEMO-identity card.",
+  "post_review_correction": {
+    "status": "RETRACTED_IN_PART_AFTER_INDEPENDENT_REVIEW",
+    "selector_scope": "Decision 23 applied to GYRE only; applying its five selectors to every GM/Redi NEMO lat-lon recipe was unasked and is reverted outside GYRE.",
+    "association_scope": "The literal native-slope association was widened without asking. It is now limited to the existing DINO oracle and GYRE identity paths; wider scope is an ASKED pending decision.",
+    "verdict_timing": "The pre-fix P2 gate printed CONFIRMED. The fixed final gate prints REFUTED because its conjunction requires KEG to remain DEBT; exact KEG intentionally falsifies that pre-intervention predicate."
+  },
+  "measured_before_preregistration": {
+    "required_header_decode": "The existing stream decodes to (version,kt,kstg,Kbb,Kmm,Krhs,Kaa,nn_dynkeg)=(1,1,3,2,2,3,3,0). This is the mandatory review-blocker diagnosis, not a scientific score.",
+    "compiled_cause": "GYRE_OMIP_L2_P3_SM_R41ADVSP/BLD/ppsrc/nemo/stprk3_stg.f90:468-470 tags stage 3 then calls dyn_adv(kstp,Kmm,Kmm,...); dynadv.f90:184-185 writes its local Kbb,Kmm arguments. The round-41 Kbb=1 expectation is RETRACTED."
+  },
+  "predictions": {
+    "P1_calibration": {
+      "claim": "Independent source-order KEG and ZAD replays reproduce all four NEMO post-statement arrays with 0 unequal cells.",
+      "confirm": "keg_u=keg_v=zad_u=zad_v=0 unequal",
+      "refute": "any unequal cell; no scientific score is admitted"
+    },
+    "P2_dynadv_owner": {
+      "claim": "At least one KEG face is DEBT relative to KEG's own magnitude and both ZAD faces are AT-BAR; the gate prints CONFIRMED only for that conjunction.",
+      "confirm": "KEG has >=1 DEBT row and ZAD has 0 DEBT rows",
+      "refute": "all KEG rows AT-BAR or either ZAD row DEBT; gate prints REFUTED"
+    },
+    "P3_keg_transcription": {
+      "claim": "If P2 confirms KEG, NEMO's separately rounded zu, zv, then 0.25*(zv+zu) association in the one shared vector-form C2 implementation produces 0 unequal cells on both faces given this record.",
+      "confirm": "both post-KEG accumulators exact, 0 unequal",
+      "refute": "any unequal cell; do not land"
+    },
+    "P4_decision23": {
+      "claim": "Selecting the existing n2_integral criterion in the shared NEMO identity recipe makes the GYRE kt2 mixed-layer level exact on NEMO's before state and leaves DINO's already-selected criterion unchanged.",
+      "confirm": "GYRE nmln 0/600 unequal; DINO resolved value remains n2_integral",
+      "refute": "any GYRE level unequal or any DINO resolved-value movement"
+    },
+    "P5_slope_walk": {
+      "claim": "After decision 23, walk ldfslp in compiled source order using the round-40 operands; the first non-bit statement is reported. A statement may land only when its own NEMO-output row becomes 0 unequal given NEMO inputs.",
+      "confirm": "level row exact and every landed statement exact",
+      "refute": "an earlier statement is unequal or any landed statement is non-exact"
+    },
+    "P6_rule12": {
+      "claim": "No changed statement moves any card's first-over-bar step earlier. LOCK_EXCHANGE and OVERFLOW resolve flux-form momentum and no GM/Redi, so the KEG and MLD statements do not execute and their kt=1..10 trajectories remain bit-identical. ORCA2 remains UNMEASURED WITH SPEC rather than discharged.",
+      "confirm": "0 before/after unequal cells on both tanks; GYRE all moved rows registered; no earlier first-over-bar",
+      "refute": "any tank movement or earlier first-over-bar"
+    }
+  },
+  "controls": {
+    "calibration_nonvacuity": "Synthetic NEMO arrays come from an independent second transcription. A flat four-square KEG association and a ZAD reference-thickness divisor each produce a nonzero mismatch.",
+    "halo": "Model input substitutes the last owned x column and supplies a zero y row; this convention is named in gate and receipt.",
+    "trajectory": "Same existing card gates, oracle roots, steps 1..10, CPU/fp64 protocol before and after; every moved row reported.",
+    "plants": "header, calibration, closure, stamp, KEG, ZAD, mixed-layer level, citation and stamp controls exit nonzero."
+  },
+  "rule12": {
+    "GYRE-zco": "Given-input exactness on every executing changed statement plus kt=1..10 before/after and stage-3 RHS kt2 u/v rescore.",
+    "LOCK_EXCHANGE-zco": "Resolve native card; expected NOT EXECUTED for vector KEG and GM/Redi MLD; prove kt=1..10 bit-identical.",
+    "OVERFLOW-zps": "Resolve native card; expected NOT EXECUTED for vector KEG and GM/Redi MLD; prove kt=1..10 bit-identical.",
+    "ORCA2": "UNMEASURED WITH SPEC: resolve vector/flux and GM/Redi arms, acquire native topology operands and outputs for every executing statement, then run native kt=1..10 trajectory."
+  },
+  "asked_unasked": {
+    "ASKED": [
+      "decision 23: use NEMO's n2_integral mixed-layer criterion on the committed GYRE/NEMO-identity card",
+      "transcribe and land only statements proved bit-exact given NEMO inputs"
+    ],
+    "UNASKED": [
+      "round-42 implementation applied the GYRE selector bundle to every GM/Redi NEMO lat-lon recipe; corrected after review",
+      "round-42 implementation widened literal native-slope association to non-NEMO cards; corrected after review and wider scope remains pending"
+    ]
+  },
+  "forbidden": [
+    "running makenemo, mpirun or NEMO",
+    "modifying NEMO sources",
+    "adding a stabiliser or card-specific arithmetic switch",
+    "relaxing the 1e-15 bar",
+    "using DISCHARGED for any non-exact row"
+  ]
+}

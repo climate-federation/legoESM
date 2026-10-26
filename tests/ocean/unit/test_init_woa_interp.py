@@ -221,10 +221,17 @@ def test_two_valid_entries_still_interpolate():
     assert out[0] > out[-1]
 
 
-def test_no_data_column_reaches_the_fill_through_init_ocean_from_woa(tmp_path):
-    """End-to-end: a WET cell whose source column is all-NaN must come out at
-    the FILL value (1.5 degC / 34.7 PSU), never 0/0 -- which would be fresh
-    0 degC water and a ~30 kg/m^3 density step against its neighbour."""
+def test_no_data_column_takes_its_neighbours_water_not_fresh_water(tmp_path):
+    """End-to-end: a WET cell whose source column is all-NaN must come out as
+    the surrounding ocean, never 0/0 -- which would be fresh 0 degC water and a
+    ~30 kg/m^3 density step against its neighbour.
+
+    It used to come out at the deep-ocean FILL (1.5 degC / 34.7 PSU).  That
+    removed the fresh-water step but left a 10-degC one, so the per-level
+    nearest-valid source fill now hands the hole the nearest real observation
+    AT EACH DEPTH instead; the fill is reached only where a level is observed
+    nowhere on the source grid.
+    """
     xr = pytest.importorskip("xarray")
     from legoesm import constants
     from legoesm.grids.latlon import create_latlon_grid
@@ -259,12 +266,12 @@ def test_no_data_column_reaches_the_fill_through_init_ocean_from_woa(tmp_path):
     # NOTHING may be exactly 0 -- that is the defect's signature.
     assert not np.any(S_out == 0.0), "S == 0 PSU leaked into the IC"
     assert not np.any(T_out == 0.0)
-    # The INTERIOR of the hole must carry the documented fill.  Only the
-    # interior is asserted: the hole's edge cells legitimately interpolate
-    # from valid neighbours outside it (the bilinear stencil reweights around
-    # NaN), so asserting the full block would be asserting the wrong thing.
+    # The INTERIOR of the hole carries the water that surrounds it, at every
+    # level, so there is no step at the hole's edge at all.
     hole = (slice(89, 91), slice(1, 3))
-    np.testing.assert_allclose(
-        T_out[hole], float(constants.T_deep_ocean_ref_C))
-    np.testing.assert_allclose(
-        S_out[hole], float(constants.S_deep_ocean_ref_psu))
+    np.testing.assert_allclose(T_out[hole], 12.0)
+    np.testing.assert_allclose(S_out[hole], 35.0)
+    # ... and specifically NOT the deep-ocean fill, which would have been a
+    # 10-degC / 0.3-PSU step against the surrounding ocean.
+    assert not np.any(np.isclose(T_out, float(constants.T_deep_ocean_ref_C)))
+    assert not np.any(np.isclose(S_out, float(constants.S_deep_ocean_ref_psu)))

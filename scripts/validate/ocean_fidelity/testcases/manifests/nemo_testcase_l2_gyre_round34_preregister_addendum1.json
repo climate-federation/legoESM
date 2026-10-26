@@ -1,0 +1,48 @@
+{
+  "format": "nemo-testcase-l2-gyre-round34-preregister-addendum1-v1",
+  "date": "2026-09-06",
+  "amends": "nemo_testcase_l2_gyre_round34_preregister.json at a6a96b933bfb",
+  "written_when": "after the independent CLAIM review, before any Part-B model measurement was read",
+
+  "claim_review_findings_adopted": {
+    "the_instrument_is_sound": "CONFIRMED by the reviewer against the model source: expose_tracer_stage substitutes into the returned state only after the compiled step completes (ocean_model_latlon_cgrid.py:8077-8084), the exposed arrays (:6285, :6331) are the same stage tracers the production chain consumes, and the frames line up -- NEMO's l1_dump_stage writes ts(:,:,:,:,klevel) at stprk3.f90:328 with klevel = Naa at :202, :208 and :216, and the gate pins Kaa = 3/2/3 at nemo_testcase_l2_gyre_phase3_gate.py:37.  No time-level or frame mismatch.",
+    "citation_corrected": "b0_4 cited stprk3.f90:198, :204, :212 for the three l1_dump_stage calls.  The correct lines are :202, :208 and :216.  Corrected here rather than edited in place, because a preregistration is a record.",
+    "b0_2_miscounted": "b0_2 said stage 3 adds FIVE operators and then named three.  Three is right on this card: tra_qsr (stprk3_stg.f90:712), tra_ldf (:727) and tra_zdf (:741).  tra_bbc, tra_bbl, tra_dmp, tra_mfc, tra_osm and tra_npc are all gated false on GYRE.",
+    "the_flags_are_opt_in": "b0_5's 'needs no new instrument' holds only when --measure-stage2-tracers and --measure-stage3-completion are BOTH passed (nemo_testcase_l2_gyre_phase3_gate.py:2668-2669).  This round's invocation passes both."
+  },
+
+  "PB2_MECHANISM_RETRACTED": {
+    "what_was_claimed": "that the only new input stage 2's tracers take is the stage-1 OUTPUT VELOCITY, which is AT-BAR at 2.7e-19, so stage 2 cannot amplify stage 1's one ulp.",
+    "why_it_is_false": "the reviewer defeated it from the oracle's own source.  At stage 2 Kmm is stage 1's Kaa, so the FCT centred flux built from pt(...,jn,Kmm) (traadv_fct.f90:197-198, 236-242, 265, 273) takes the stage-1 OUTPUT TRACER, which carries the whole stage-1 residual; at stage 1 Kmm == Kbb and that input is bit-identical to the base, so stage 1 cannot see the same defect.  The FCT RHS is also divided by (1+r3t(Kmm)) (traadv_fct.f90:327, 342), a different number at stage 2 than at stage 1, and the qco combine's numerator uses r3t(Kmm) where stage 1 has r3t(Kmm) == r3t(Kbb) (stprk3_stg.f90:677-679).  And nonosc (traadv_fct.f90:316) is a min/max ratio limiter, so one ulp can flip a branch and move an antidiffusive flux by O(1) of its own size.  Stage 2 is NOT a smooth amplifier and the prediction's stated reason was wrong.",
+    "the_prediction_itself_is_KEPT_on_a_different_basis": "stage 3 is still predicted first over bar, now on the size argument alone: 3.1956659540810506e-11 / 3.552713678800501e-15 = 8995, i.e. about 95x per stage, and GYRE at kt=1 starts from rest so each stage operator sits within O(dt*U/dx) of the identity.  A condition number of 95 per stage is not credible for a near-identity operator, so the size demands a NEW TERM rather than amplification.  Everything the reviewer found is exactly the channel by which this prediction can be REFUTED, and it is now named."
+  },
+
+  "PB2_THRESHOLD_COLLAPSED": {
+    "defect": "PB2 carried two thresholds that disagree.  The normalized bar of 1e-15 is 2.346094e-14 K absolute on T (scale 23.460943 K), while PB2 also allowed 'absolute T below 3.6e-14 K'.  A stage-2 T of 3.0e-14 K would pass one clause and fail the other.",
+    "resolution": "the NORMALIZED clause is the threshold; the absolute figure is reported next to it and is not a criterion.  PB2 passes only if stage-2 normalized T and S are both below 1e-15."
+  },
+
+  "PB3_CAVEAT_REGISTERED": {
+    "defect": "kt1.stage3.pre_zdf's oracle side is REBUILT in NumPy from NEMO's records as ((1+r3bb)*Kbb + rDt*(1+r3mm)*after_ldf)/(1+r3aa) (nemo_testcase_l2_gyre_phase3_gate.py:1830-1843).  NEMO never computes that expression: at stage 3 the combine happens INSIDE tra_zdf (stprk3_stg.f90:741).",
+    "size": "a few-ulp difference in grouping is about 1.4e-14 K, which is 0.6 of the 2.346094e-14 K bar.",
+    "consequence": "a DEBT verdict on pre_zdf is NOT clean evidence that the owner sits at or before tra_ldf.  PB3 keeps its threshold but its verdict is reported with this reconstruction gap named, and a DEBT there is quoted as SUGGESTIVE, not as an attribution."
+  },
+
+  "PB6_NEW_the_free_discriminator_the_first_registration_missed": {
+    "the_record": "oracle_qsr_stage3_kt00000001.bin (NEMO_L2_QSR___1), written at stprk3_stg.f90:707-724 around the tra_qsr call at :712.  It carries qsr itself and, separately, ts(:,:,:,jp_tem,Krhs) MINUS a copy taken immediately before the call -- i.e. the ISOLATED qsr-only Krhs increment.  It already has a committed reader (nemo_testcase_l2_gyre_phase3_gate.py:369-390).  b0_3 did not list it and PB3 tests only the LUMPED pre-zdf accumulator, which cannot separate qsr from ldf.",
+    "why_it_is_worth_a_prediction": "tra_qsr is the ONLY operator in stage 3's whole tracer program that touches temperature alone (traqsr.f90 writes jp_tem only).  The measured kt2 residual is T-favoured: absolute T/S = 39.11, normalized T/S = 61.38.",
+    "the_sizing_that_makes_it_a_prediction_and_not_a_coincidence": "MEASURED from the oracle's own kt=1 entry record over its 18000 wet cells: GYRE's initial T and S are EXACTLY horizontally uniform -- max horizontal spread within every one of the 31 levels is 0.000000e+00 on both -- so at kt=1 all tracer structure is VERTICAL.  The vertical contrast is 19.460410 K on T and 1.718057 psu on S, a ratio of 11.33.  An owner whose error is proportional to the tracer's own vertical contrast therefore predicts an absolute T/S residual ratio of 11.33; the measured ratio is 39.11, which is 3.45x more T-favoured than that.  A T-only owner predicts an infinite ratio.  Neither pure hypothesis fits, so a MIXTURE is the honest reading and this is labelled PLAUSIBLE.",
+    "PB6": {
+      "claim": "legoESM's isolated qsr-only temperature increment at kt=1 stage 3, scored against NEMO's own qsr-only increment from that record, is NOT bit-exact, and its size is at least 1e-2 of the kt2 T residual of 3.1956659540810506e-11 K -- i.e. at least 3.2e-13 K.",
+      "threshold": "n_unequal > 0 and absolute_max >= 3.2e-13 K",
+      "falsifier": "bit-exact, or below 3.2e-13 K -> PB6 REFUTED and tra_qsr is EXONERATED as the T/S owner, which is a real result because it is the only T-only operator on the card",
+      "note": "PB6 is scored only if a legoESM arm exposing the qsr-only increment exists or can be built WRITE-only.  If no such seam exists, the WRITE-only frame specification is written and the row is reported UNMEASURED with the gap named -- it is not silently dropped."
+    }
+  },
+
+  "PB7_NEW_the_stage_1_residual_is_not_zero_and_that_is_a_row": {
+    "claim": "stage 1's T residual, predicted at one ulp of 23.47 K, is NOT zero, so even the FIRST stage is not bit-exact.  This round reports whether stage 1 is BIT-EXACT separately from whether it is AT-BAR, because AT-BAR at a relative bar hides a one-ulp transcription difference that a later stage can amplify through the FCT limiter branch the claim review named.",
+    "threshold": "report n_unequal and exact for every stage row, not only the status",
+    "falsifier": "n/a -- this is a reporting rule that round 33's item-1 correction already demanded once"
+  }
+}

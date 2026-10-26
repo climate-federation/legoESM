@@ -756,7 +756,7 @@ def _channel_runner(eke_cfg, *, seed_eke=None, seed_velocity=False,
     if seed_eke is not None:
         state0 = state0._replace(eke=seed_eke(grid, z_coord))
 
-    def run(resfn_kwargs):
+    def run(resfn_kwargs, *, eager=False):
         from legoesm.core.precision import (
             PrecisionPolicy, get_policy, set_policy,
         )
@@ -776,7 +776,8 @@ def _channel_runner(eke_cfg, *, seed_eke=None, seed_velocity=False,
         set_policy(PrecisionPolicy.fp64())
         try:
             model = LatLonCGridOceanModel(grid, z_coord, cfg)
-            return model.step(state0, dt=dt)
+            step = model._step_impl if eager else model.step
+            return step(state0, dt=dt)
         finally:
             set_policy(old_policy)
 
@@ -981,7 +982,7 @@ class TestEKEBudgetCoupling:
         # Taper OFF: the legacy SINGLE call (byte-identity of the corner).
         calls.clear()
         with jax.disable_jit():
-            run(None)
+            run(None, eager=True)
         assert len(calls) == 1
         args, kwargs = calls[0]
         assert kwargs.get("want_skew", True) is True
@@ -995,7 +996,7 @@ class TestEKEBudgetCoupling:
         gamma = 1.0e-3
         calls.clear()
         with jax.disable_jit():
-            run(_resfn_on(gamma))
+            run(_resfn_on(gamma), eager=True)
         assert len(calls) == 2, (
             "expected the split skew/iso calls in the uncoupled corner")
         skew_calls = [c for c in calls if c[1].get("want_skew") is True]

@@ -1,0 +1,936 @@
+{
+  "backend": "cpu",
+  "classification": {
+    "materialized_prognostic_exact": false,
+    "outer_scan_all_restart_words_exact": false,
+    "outer_scan_prognostic_exact": true,
+    "signed_zero_policy": "reported_as_DEBT_pending_user_ruling"
+  },
+  "compositions": {
+    "materialized_python_loop": {
+      "rows": [
+        {
+          "bit_identical": false,
+          "bit_unequal": 278318,
+          "candidate_sha256": "c45a165118cc6862a6b9b301fa9c35ae1344fdefa7c51a044ba352e3c10fbb82",
+          "field": "sshn",
+          "first_unequal_cell": [
+            2,
+            3
+          ],
+          "max_abs": 2.168404344971009e-19,
+          "name": "materialized_python_loop.kt10.sshn",
+          "numeric_unequal": 278318,
+          "reference_sha256": "760ef55617918df02fb07ac3086e02e180d37ab6d22dfe5bd67bcaa44be43052",
+          "regions": {
+            "dry_or_storage_halo": {
+              "bit_unequal": 0,
+              "first_unequal_cell": null,
+              "max_abs": 0.0,
+              "numeric_unequal": 0,
+              "population": 5136,
+              "signed_zero_only": 0
+            },
+            "wet_interior": {
+              "bit_unequal": 277135,
+              "first_unequal_cell": [
+                3,
+                5
+              ],
+              "max_abs": 2.168404344971009e-19,
+              "numeric_unequal": 277135,
+              "population": 407044,
+              "signed_zero_only": 0
+            },
+            "wet_wall_adjacent": {
+              "bit_unequal": 1183,
+              "first_unequal_cell": [
+                2,
+                3
+              ],
+              "max_abs": 2.168404344971009e-19,
+              "numeric_unequal": 1183,
+              "population": 2556,
+              "signed_zero_only": 0
+            }
+          },
+          "signed_zero_only": 0,
+          "status": "DEBT"
+        },
+        {
+          "bit_identical": false,
+          "bit_unequal": 3143,
+          "candidate_sha256": "cdc685a0b4b27ec858178d2269680733ad7dbc606380278d6ec1f804082e18c0",
+          "field": "un",
+          "first_unequal_cell": [
+            2,
+            3
+          ],
+          "max_abs": 2.710505431213761e-20,
+          "name": "materialized_python_loop.kt10.un",
+          "numeric_unequal": 3143,
+          "reference_sha256": "65596579ba30123c4f80617851a45be447b1a22a1edb511bde53f9faf4ff5756",
+          "regions": {
+            "dry_or_storage_halo": {
+              "bit_unequal": 0,
+              "first_unequal_cell": null,
+              "max_abs": 0.0,
+              "numeric_unequal": 0,
+              "population": 5776,
+              "signed_zero_only": 0
+            },
+            "wet_interior": {
+              "bit_unequal": 2171,
+              "first_unequal_cell": [
+                3,
+                3
+              ],
+              "max_abs": 2.710505431213761e-20,
+              "numeric_unequal": 2171,
+              "population": 406406,
+              "signed_zero_only": 0
+            },
+            "wet_wall_adjacent": {
+              "bit_unequal": 972,
+              "first_unequal_cell": [
+                2,
+                3
+              ],
+              "max_abs": 2.0328790734103208e-20,
+              "numeric_unequal": 972,
+              "population": 2554,
+              "signed_zero_only": 0
+            }
+          },
+          "signed_zero_only": 0,
+          "status": "DEBT"
+        },
+        {
+          "bit_identical": false,
+          "bit_unequal": 133084,
+          "candidate_sha256": "e0768440c560592b3c8137eaaa6a3e5fc3d6796d8a7b7a2821a5750cd69d5b34",
+          "field": "vn",
+          "first_unequal_cell": [
+            2,
+            2
+          ],
+          "max_abs": 2.541098841762901e-20,
+          "name": "materialized_python_loop.kt10.vn",
+          "numeric_unequal": 133084,
+          "reference_sha256": "5cfeb83102f051263f8f74df29e95b86b1514317c3e1e46c23c91363db167a14",
+          "regions": {
+            "dry_or_storage_halo": {
+              "bit_unequal": 0,
+              "first_unequal_cell": null,
+              "max_abs": 0.0,
+              "numeric_unequal": 0,
+              "population": 5776,
+              "signed_zero_only": 0
+            },
+            "wet_interior": {
+              "bit_unequal": 131345,
+              "first_unequal_cell": [
+                3,
+                3
+              ],
+              "max_abs": 1.9058241313221758e-20,
+              "numeric_unequal": 131345,
+              "population": 406406,
+              "signed_zero_only": 0
+            },
+            "wet_wall_adjacent": {
+              "bit_unequal": 1739,
+              "first_unequal_cell": [
+                2,
+                2
+              ],
+              "max_abs": 2.541098841762901e-20,
+              "numeric_unequal": 1739,
+              "population": 2554,
+              "signed_zero_only": 0
+            }
+          },
+          "signed_zero_only": 0,
+          "status": "DEBT"
+        },
+        {
+          "bit_identical": true,
+          "bit_unequal": 0,
+          "candidate_sha256": "eac5e63a5c2297250f993f0d9c6385e090281acadf5e0538254ea3de43976fb3",
+          "field": "uu_n",
+          "first_unequal_cell": null,
+          "max_abs": 0.0,
+          "name": "materialized_python_loop.kt10.uu_n",
+          "numeric_unequal": 0,
+          "reference_sha256": "eac5e63a5c2297250f993f0d9c6385e090281acadf5e0538254ea3de43976fb3",
+          "regions": {
+            "dry_or_storage_halo": {
+              "bit_unequal": 0,
+              "first_unequal_cell": null,
+              "max_abs": 0.0,
+              "numeric_unequal": 0,
+              "population": 5776,
+              "signed_zero_only": 0
+            },
+            "wet_interior": {
+              "bit_unequal": 0,
+              "first_unequal_cell": null,
+              "max_abs": 0.0,
+              "numeric_unequal": 0,
+              "population": 406406,
+              "signed_zero_only": 0
+            },
+            "wet_wall_adjacent": {
+              "bit_unequal": 0,
+              "first_unequal_cell": null,
+              "max_abs": 0.0,
+              "numeric_unequal": 0,
+              "population": 2554,
+              "signed_zero_only": 0
+            }
+          },
+          "signed_zero_only": 0,
+          "status": "AT-BAR"
+        },
+        {
+          "bit_identical": true,
+          "bit_unequal": 0,
+          "candidate_sha256": "eac5e63a5c2297250f993f0d9c6385e090281acadf5e0538254ea3de43976fb3",
+          "field": "vv_n",
+          "first_unequal_cell": null,
+          "max_abs": 0.0,
+          "name": "materialized_python_loop.kt10.vv_n",
+          "numeric_unequal": 0,
+          "reference_sha256": "eac5e63a5c2297250f993f0d9c6385e090281acadf5e0538254ea3de43976fb3",
+          "regions": {
+            "dry_or_storage_halo": {
+              "bit_unequal": 0,
+              "first_unequal_cell": null,
+              "max_abs": 0.0,
+              "numeric_unequal": 0,
+              "population": 5776,
+              "signed_zero_only": 0
+            },
+            "wet_interior": {
+              "bit_unequal": 0,
+              "first_unequal_cell": null,
+              "max_abs": 0.0,
+              "numeric_unequal": 0,
+              "population": 406406,
+              "signed_zero_only": 0
+            },
+            "wet_wall_adjacent": {
+              "bit_unequal": 0,
+              "first_unequal_cell": null,
+              "max_abs": 0.0,
+              "numeric_unequal": 0,
+              "population": 2554,
+              "signed_zero_only": 0
+            }
+          },
+          "signed_zero_only": 0,
+          "status": "AT-BAR"
+        },
+        {
+          "bit_identical": true,
+          "bit_unequal": 0,
+          "candidate_sha256": "43fc94314e895b8b7e539ba0c7de41dce6cdb2373e8d7ed94c4ac2c9b6942deb",
+          "field": "utau_b",
+          "first_unequal_cell": null,
+          "max_abs": 0.0,
+          "name": "materialized_python_loop.kt10.utau_b",
+          "numeric_unequal": 0,
+          "reference_sha256": "43fc94314e895b8b7e539ba0c7de41dce6cdb2373e8d7ed94c4ac2c9b6942deb",
+          "regions": {
+            "dry_or_storage_halo": {
+              "bit_unequal": 5776,
+              "first_unequal_cell": [
+                0,
+                0
+              ],
+              "max_abs": 0.0999987952167257,
+              "numeric_unequal": 5776,
+              "population": 5776,
+              "signed_zero_only": 0
+            },
+            "wet_interior": {
+              "bit_unequal": 0,
+              "first_unequal_cell": null,
+              "max_abs": 0.0,
+              "numeric_unequal": 0,
+              "population": 406406,
+              "signed_zero_only": 0
+            },
+            "wet_wall_adjacent": {
+              "bit_unequal": 0,
+              "first_unequal_cell": null,
+              "max_abs": 0.0,
+              "numeric_unequal": 0,
+              "population": 2554,
+              "signed_zero_only": 0
+            }
+          },
+          "signed_zero_only": 0,
+          "status": "AT-BAR"
+        },
+        {
+          "bit_identical": false,
+          "bit_unequal": 640,
+          "candidate_sha256": "ff4f608ddcfe8dbb0cbfc15a2e6b6edc033e0a05d9ab4c9c9414e378cc9bdb70",
+          "field": "vtau_b",
+          "first_unequal_cell": [
+            480,
+            2
+          ],
+          "max_abs": 0.0,
+          "name": "materialized_python_loop.kt10.vtau_b",
+          "numeric_unequal": 0,
+          "reference_sha256": "9f037cba5ef2ba95bea1a33379ac2faf2254bad57b1b6d467691f619a9b1036e",
+          "regions": {
+            "dry_or_storage_halo": {
+              "bit_unequal": 4,
+              "first_unequal_cell": [
+                480,
+                0
+              ],
+              "max_abs": 0.0,
+              "numeric_unequal": 0,
+              "population": 5776,
+              "signed_zero_only": 4
+            },
+            "wet_interior": {
+              "bit_unequal": 638,
+              "first_unequal_cell": [
+                480,
+                3
+              ],
+              "max_abs": 0.0,
+              "numeric_unequal": 0,
+              "population": 406406,
+              "signed_zero_only": 638
+            },
+            "wet_wall_adjacent": {
+              "bit_unequal": 2,
+              "first_unequal_cell": [
+                480,
+                2
+              ],
+              "max_abs": 0.0,
+              "numeric_unequal": 0,
+              "population": 2554,
+              "signed_zero_only": 2
+            }
+          },
+          "signed_zero_only": 640,
+          "status": "DEBT"
+        },
+        {
+          "bit_identical": true,
+          "bit_unequal": 0,
+          "candidate_sha256": "3ef04f217d88298e8da77db7e129918f67bbc6964edff6095483c89aca6e017d",
+          "field": "emp_b",
+          "first_unequal_cell": null,
+          "max_abs": 0.0,
+          "name": "materialized_python_loop.kt10.emp_b",
+          "numeric_unequal": 0,
+          "reference_sha256": "3ef04f217d88298e8da77db7e129918f67bbc6964edff6095483c89aca6e017d",
+          "regions": {
+            "dry_or_storage_halo": {
+              "bit_unequal": 0,
+              "first_unequal_cell": null,
+              "max_abs": 0.0,
+              "numeric_unequal": 0,
+              "population": 5136,
+              "signed_zero_only": 0
+            },
+            "wet_interior": {
+              "bit_unequal": 0,
+              "first_unequal_cell": null,
+              "max_abs": 0.0,
+              "numeric_unequal": 0,
+              "population": 407044,
+              "signed_zero_only": 0
+            },
+            "wet_wall_adjacent": {
+              "bit_unequal": 0,
+              "first_unequal_cell": null,
+              "max_abs": 0.0,
+              "numeric_unequal": 0,
+              "population": 2556,
+              "signed_zero_only": 0
+            }
+          },
+          "signed_zero_only": 0,
+          "status": "AT-BAR"
+        },
+        {
+          "bit_identical": true,
+          "bit_unequal": 0,
+          "candidate_sha256": "3ef04f217d88298e8da77db7e129918f67bbc6964edff6095483c89aca6e017d",
+          "field": "qns_b",
+          "first_unequal_cell": null,
+          "max_abs": 0.0,
+          "name": "materialized_python_loop.kt10.qns_b",
+          "numeric_unequal": 0,
+          "reference_sha256": "3ef04f217d88298e8da77db7e129918f67bbc6964edff6095483c89aca6e017d",
+          "regions": {
+            "dry_or_storage_halo": {
+              "bit_unequal": 0,
+              "first_unequal_cell": null,
+              "max_abs": 0.0,
+              "numeric_unequal": 0,
+              "population": 5136,
+              "signed_zero_only": 0
+            },
+            "wet_interior": {
+              "bit_unequal": 0,
+              "first_unequal_cell": null,
+              "max_abs": 0.0,
+              "numeric_unequal": 0,
+              "population": 407044,
+              "signed_zero_only": 0
+            },
+            "wet_wall_adjacent": {
+              "bit_unequal": 0,
+              "first_unequal_cell": null,
+              "max_abs": 0.0,
+              "numeric_unequal": 0,
+              "population": 2556,
+              "signed_zero_only": 0
+            }
+          },
+          "signed_zero_only": 0,
+          "status": "AT-BAR"
+        },
+        {
+          "bit_identical": true,
+          "bit_unequal": 0,
+          "candidate_sha256": "3ef04f217d88298e8da77db7e129918f67bbc6964edff6095483c89aca6e017d",
+          "field": "sfx_b",
+          "first_unequal_cell": null,
+          "max_abs": 0.0,
+          "name": "materialized_python_loop.kt10.sfx_b",
+          "numeric_unequal": 0,
+          "reference_sha256": "3ef04f217d88298e8da77db7e129918f67bbc6964edff6095483c89aca6e017d",
+          "regions": {
+            "dry_or_storage_halo": {
+              "bit_unequal": 0,
+              "first_unequal_cell": null,
+              "max_abs": 0.0,
+              "numeric_unequal": 0,
+              "population": 5136,
+              "signed_zero_only": 0
+            },
+            "wet_interior": {
+              "bit_unequal": 0,
+              "first_unequal_cell": null,
+              "max_abs": 0.0,
+              "numeric_unequal": 0,
+              "population": 407044,
+              "signed_zero_only": 0
+            },
+            "wet_wall_adjacent": {
+              "bit_unequal": 0,
+              "first_unequal_cell": null,
+              "max_abs": 0.0,
+              "numeric_unequal": 0,
+              "population": 2556,
+              "signed_zero_only": 0
+            }
+          },
+          "signed_zero_only": 0,
+          "status": "AT-BAR"
+        }
+      ],
+      "summary": {
+        "all_bit_identical": false,
+        "bit_unequal": 415185,
+        "numeric_unequal": 414545,
+        "prognostic_bit_identical": false,
+        "prognostic_bit_unequal": 414545,
+        "rows": 10,
+        "signed_zero_only": 640
+      }
+    },
+    "outer_jit_lax_scan": {
+      "rows": [
+        {
+          "bit_identical": true,
+          "bit_unequal": 0,
+          "candidate_sha256": "760ef55617918df02fb07ac3086e02e180d37ab6d22dfe5bd67bcaa44be43052",
+          "field": "sshn",
+          "first_unequal_cell": null,
+          "max_abs": 0.0,
+          "name": "outer_jit_lax_scan.kt10.sshn",
+          "numeric_unequal": 0,
+          "reference_sha256": "760ef55617918df02fb07ac3086e02e180d37ab6d22dfe5bd67bcaa44be43052",
+          "regions": {
+            "dry_or_storage_halo": {
+              "bit_unequal": 0,
+              "first_unequal_cell": null,
+              "max_abs": 0.0,
+              "numeric_unequal": 0,
+              "population": 5136,
+              "signed_zero_only": 0
+            },
+            "wet_interior": {
+              "bit_unequal": 0,
+              "first_unequal_cell": null,
+              "max_abs": 0.0,
+              "numeric_unequal": 0,
+              "population": 407044,
+              "signed_zero_only": 0
+            },
+            "wet_wall_adjacent": {
+              "bit_unequal": 0,
+              "first_unequal_cell": null,
+              "max_abs": 0.0,
+              "numeric_unequal": 0,
+              "population": 2556,
+              "signed_zero_only": 0
+            }
+          },
+          "signed_zero_only": 0,
+          "status": "AT-BAR"
+        },
+        {
+          "bit_identical": true,
+          "bit_unequal": 0,
+          "candidate_sha256": "65596579ba30123c4f80617851a45be447b1a22a1edb511bde53f9faf4ff5756",
+          "field": "un",
+          "first_unequal_cell": null,
+          "max_abs": 0.0,
+          "name": "outer_jit_lax_scan.kt10.un",
+          "numeric_unequal": 0,
+          "reference_sha256": "65596579ba30123c4f80617851a45be447b1a22a1edb511bde53f9faf4ff5756",
+          "regions": {
+            "dry_or_storage_halo": {
+              "bit_unequal": 0,
+              "first_unequal_cell": null,
+              "max_abs": 0.0,
+              "numeric_unequal": 0,
+              "population": 5776,
+              "signed_zero_only": 0
+            },
+            "wet_interior": {
+              "bit_unequal": 0,
+              "first_unequal_cell": null,
+              "max_abs": 0.0,
+              "numeric_unequal": 0,
+              "population": 406406,
+              "signed_zero_only": 0
+            },
+            "wet_wall_adjacent": {
+              "bit_unequal": 0,
+              "first_unequal_cell": null,
+              "max_abs": 0.0,
+              "numeric_unequal": 0,
+              "population": 2554,
+              "signed_zero_only": 0
+            }
+          },
+          "signed_zero_only": 0,
+          "status": "AT-BAR"
+        },
+        {
+          "bit_identical": true,
+          "bit_unequal": 0,
+          "candidate_sha256": "5cfeb83102f051263f8f74df29e95b86b1514317c3e1e46c23c91363db167a14",
+          "field": "vn",
+          "first_unequal_cell": null,
+          "max_abs": 0.0,
+          "name": "outer_jit_lax_scan.kt10.vn",
+          "numeric_unequal": 0,
+          "reference_sha256": "5cfeb83102f051263f8f74df29e95b86b1514317c3e1e46c23c91363db167a14",
+          "regions": {
+            "dry_or_storage_halo": {
+              "bit_unequal": 0,
+              "first_unequal_cell": null,
+              "max_abs": 0.0,
+              "numeric_unequal": 0,
+              "population": 5776,
+              "signed_zero_only": 0
+            },
+            "wet_interior": {
+              "bit_unequal": 0,
+              "first_unequal_cell": null,
+              "max_abs": 0.0,
+              "numeric_unequal": 0,
+              "population": 406406,
+              "signed_zero_only": 0
+            },
+            "wet_wall_adjacent": {
+              "bit_unequal": 0,
+              "first_unequal_cell": null,
+              "max_abs": 0.0,
+              "numeric_unequal": 0,
+              "population": 2554,
+              "signed_zero_only": 0
+            }
+          },
+          "signed_zero_only": 0,
+          "status": "AT-BAR"
+        },
+        {
+          "bit_identical": true,
+          "bit_unequal": 0,
+          "candidate_sha256": "eac5e63a5c2297250f993f0d9c6385e090281acadf5e0538254ea3de43976fb3",
+          "field": "uu_n",
+          "first_unequal_cell": null,
+          "max_abs": 0.0,
+          "name": "outer_jit_lax_scan.kt10.uu_n",
+          "numeric_unequal": 0,
+          "reference_sha256": "eac5e63a5c2297250f993f0d9c6385e090281acadf5e0538254ea3de43976fb3",
+          "regions": {
+            "dry_or_storage_halo": {
+              "bit_unequal": 0,
+              "first_unequal_cell": null,
+              "max_abs": 0.0,
+              "numeric_unequal": 0,
+              "population": 5776,
+              "signed_zero_only": 0
+            },
+            "wet_interior": {
+              "bit_unequal": 0,
+              "first_unequal_cell": null,
+              "max_abs": 0.0,
+              "numeric_unequal": 0,
+              "population": 406406,
+              "signed_zero_only": 0
+            },
+            "wet_wall_adjacent": {
+              "bit_unequal": 0,
+              "first_unequal_cell": null,
+              "max_abs": 0.0,
+              "numeric_unequal": 0,
+              "population": 2554,
+              "signed_zero_only": 0
+            }
+          },
+          "signed_zero_only": 0,
+          "status": "AT-BAR"
+        },
+        {
+          "bit_identical": true,
+          "bit_unequal": 0,
+          "candidate_sha256": "eac5e63a5c2297250f993f0d9c6385e090281acadf5e0538254ea3de43976fb3",
+          "field": "vv_n",
+          "first_unequal_cell": null,
+          "max_abs": 0.0,
+          "name": "outer_jit_lax_scan.kt10.vv_n",
+          "numeric_unequal": 0,
+          "reference_sha256": "eac5e63a5c2297250f993f0d9c6385e090281acadf5e0538254ea3de43976fb3",
+          "regions": {
+            "dry_or_storage_halo": {
+              "bit_unequal": 0,
+              "first_unequal_cell": null,
+              "max_abs": 0.0,
+              "numeric_unequal": 0,
+              "population": 5776,
+              "signed_zero_only": 0
+            },
+            "wet_interior": {
+              "bit_unequal": 0,
+              "first_unequal_cell": null,
+              "max_abs": 0.0,
+              "numeric_unequal": 0,
+              "population": 406406,
+              "signed_zero_only": 0
+            },
+            "wet_wall_adjacent": {
+              "bit_unequal": 0,
+              "first_unequal_cell": null,
+              "max_abs": 0.0,
+              "numeric_unequal": 0,
+              "population": 2554,
+              "signed_zero_only": 0
+            }
+          },
+          "signed_zero_only": 0,
+          "status": "AT-BAR"
+        },
+        {
+          "bit_identical": true,
+          "bit_unequal": 0,
+          "candidate_sha256": "43fc94314e895b8b7e539ba0c7de41dce6cdb2373e8d7ed94c4ac2c9b6942deb",
+          "field": "utau_b",
+          "first_unequal_cell": null,
+          "max_abs": 0.0,
+          "name": "outer_jit_lax_scan.kt10.utau_b",
+          "numeric_unequal": 0,
+          "reference_sha256": "43fc94314e895b8b7e539ba0c7de41dce6cdb2373e8d7ed94c4ac2c9b6942deb",
+          "regions": {
+            "dry_or_storage_halo": {
+              "bit_unequal": 5776,
+              "first_unequal_cell": [
+                0,
+                0
+              ],
+              "max_abs": 0.0999987952167257,
+              "numeric_unequal": 5776,
+              "population": 5776,
+              "signed_zero_only": 0
+            },
+            "wet_interior": {
+              "bit_unequal": 0,
+              "first_unequal_cell": null,
+              "max_abs": 0.0,
+              "numeric_unequal": 0,
+              "population": 406406,
+              "signed_zero_only": 0
+            },
+            "wet_wall_adjacent": {
+              "bit_unequal": 0,
+              "first_unequal_cell": null,
+              "max_abs": 0.0,
+              "numeric_unequal": 0,
+              "population": 2554,
+              "signed_zero_only": 0
+            }
+          },
+          "signed_zero_only": 0,
+          "status": "AT-BAR"
+        },
+        {
+          "bit_identical": false,
+          "bit_unequal": 640,
+          "candidate_sha256": "ff4f608ddcfe8dbb0cbfc15a2e6b6edc033e0a05d9ab4c9c9414e378cc9bdb70",
+          "field": "vtau_b",
+          "first_unequal_cell": [
+            480,
+            2
+          ],
+          "max_abs": 0.0,
+          "name": "outer_jit_lax_scan.kt10.vtau_b",
+          "numeric_unequal": 0,
+          "reference_sha256": "9f037cba5ef2ba95bea1a33379ac2faf2254bad57b1b6d467691f619a9b1036e",
+          "regions": {
+            "dry_or_storage_halo": {
+              "bit_unequal": 4,
+              "first_unequal_cell": [
+                480,
+                0
+              ],
+              "max_abs": 0.0,
+              "numeric_unequal": 0,
+              "population": 5776,
+              "signed_zero_only": 4
+            },
+            "wet_interior": {
+              "bit_unequal": 638,
+              "first_unequal_cell": [
+                480,
+                3
+              ],
+              "max_abs": 0.0,
+              "numeric_unequal": 0,
+              "population": 406406,
+              "signed_zero_only": 638
+            },
+            "wet_wall_adjacent": {
+              "bit_unequal": 2,
+              "first_unequal_cell": [
+                480,
+                2
+              ],
+              "max_abs": 0.0,
+              "numeric_unequal": 0,
+              "population": 2554,
+              "signed_zero_only": 2
+            }
+          },
+          "signed_zero_only": 640,
+          "status": "DEBT"
+        },
+        {
+          "bit_identical": true,
+          "bit_unequal": 0,
+          "candidate_sha256": "3ef04f217d88298e8da77db7e129918f67bbc6964edff6095483c89aca6e017d",
+          "field": "emp_b",
+          "first_unequal_cell": null,
+          "max_abs": 0.0,
+          "name": "outer_jit_lax_scan.kt10.emp_b",
+          "numeric_unequal": 0,
+          "reference_sha256": "3ef04f217d88298e8da77db7e129918f67bbc6964edff6095483c89aca6e017d",
+          "regions": {
+            "dry_or_storage_halo": {
+              "bit_unequal": 0,
+              "first_unequal_cell": null,
+              "max_abs": 0.0,
+              "numeric_unequal": 0,
+              "population": 5136,
+              "signed_zero_only": 0
+            },
+            "wet_interior": {
+              "bit_unequal": 0,
+              "first_unequal_cell": null,
+              "max_abs": 0.0,
+              "numeric_unequal": 0,
+              "population": 407044,
+              "signed_zero_only": 0
+            },
+            "wet_wall_adjacent": {
+              "bit_unequal": 0,
+              "first_unequal_cell": null,
+              "max_abs": 0.0,
+              "numeric_unequal": 0,
+              "population": 2556,
+              "signed_zero_only": 0
+            }
+          },
+          "signed_zero_only": 0,
+          "status": "AT-BAR"
+        },
+        {
+          "bit_identical": true,
+          "bit_unequal": 0,
+          "candidate_sha256": "3ef04f217d88298e8da77db7e129918f67bbc6964edff6095483c89aca6e017d",
+          "field": "qns_b",
+          "first_unequal_cell": null,
+          "max_abs": 0.0,
+          "name": "outer_jit_lax_scan.kt10.qns_b",
+          "numeric_unequal": 0,
+          "reference_sha256": "3ef04f217d88298e8da77db7e129918f67bbc6964edff6095483c89aca6e017d",
+          "regions": {
+            "dry_or_storage_halo": {
+              "bit_unequal": 0,
+              "first_unequal_cell": null,
+              "max_abs": 0.0,
+              "numeric_unequal": 0,
+              "population": 5136,
+              "signed_zero_only": 0
+            },
+            "wet_interior": {
+              "bit_unequal": 0,
+              "first_unequal_cell": null,
+              "max_abs": 0.0,
+              "numeric_unequal": 0,
+              "population": 407044,
+              "signed_zero_only": 0
+            },
+            "wet_wall_adjacent": {
+              "bit_unequal": 0,
+              "first_unequal_cell": null,
+              "max_abs": 0.0,
+              "numeric_unequal": 0,
+              "population": 2556,
+              "signed_zero_only": 0
+            }
+          },
+          "signed_zero_only": 0,
+          "status": "AT-BAR"
+        },
+        {
+          "bit_identical": true,
+          "bit_unequal": 0,
+          "candidate_sha256": "3ef04f217d88298e8da77db7e129918f67bbc6964edff6095483c89aca6e017d",
+          "field": "sfx_b",
+          "first_unequal_cell": null,
+          "max_abs": 0.0,
+          "name": "outer_jit_lax_scan.kt10.sfx_b",
+          "numeric_unequal": 0,
+          "reference_sha256": "3ef04f217d88298e8da77db7e129918f67bbc6964edff6095483c89aca6e017d",
+          "regions": {
+            "dry_or_storage_halo": {
+              "bit_unequal": 0,
+              "first_unequal_cell": null,
+              "max_abs": 0.0,
+              "numeric_unequal": 0,
+              "population": 5136,
+              "signed_zero_only": 0
+            },
+            "wet_interior": {
+              "bit_unequal": 0,
+              "first_unequal_cell": null,
+              "max_abs": 0.0,
+              "numeric_unequal": 0,
+              "population": 407044,
+              "signed_zero_only": 0
+            },
+            "wet_wall_adjacent": {
+              "bit_unequal": 0,
+              "first_unequal_cell": null,
+              "max_abs": 0.0,
+              "numeric_unequal": 0,
+              "population": 2556,
+              "signed_zero_only": 0
+            }
+          },
+          "signed_zero_only": 0,
+          "status": "AT-BAR"
+        }
+      ],
+      "summary": {
+        "all_bit_identical": false,
+        "bit_unequal": 640,
+        "numeric_unequal": 0,
+        "prognostic_bit_identical": true,
+        "prognostic_bit_unequal": 0,
+        "rows": 10,
+        "signed_zero_only": 640
+      }
+    }
+  },
+  "control": {
+    "bit_identical": false,
+    "bit_unequal": 1,
+    "candidate_sha256": "defe5a806268fd264df908dab17e154a0b510ace2b26e284f784dc0801e63908",
+    "first_unequal_cell": [
+      2,
+      2
+    ],
+    "input_cell": [
+      2,
+      2
+    ],
+    "max_abs": 3.3881317890172014e-21,
+    "name": "control.one_ulp_outer_scan_un",
+    "numeric_unequal": 1,
+    "reference_sha256": "65596579ba30123c4f80617851a45be447b1a22a1edb511bde53f9faf4ff5756",
+    "regions": {
+      "dry_or_storage_halo": {
+        "bit_unequal": 0,
+        "first_unequal_cell": null,
+        "max_abs": 0.0,
+        "numeric_unequal": 0,
+        "population": 5776,
+        "signed_zero_only": 0
+      },
+      "wet_interior": {
+        "bit_unequal": 0,
+        "first_unequal_cell": null,
+        "max_abs": 0.0,
+        "numeric_unequal": 0,
+        "population": 406406,
+        "signed_zero_only": 0
+      },
+      "wet_wall_adjacent": {
+        "bit_unequal": 1,
+        "first_unequal_cell": [
+          2,
+          2
+        ],
+        "max_abs": 3.3881317890172014e-21,
+        "numeric_unequal": 1,
+        "population": 2554,
+        "signed_zero_only": 0
+      }
+    },
+    "signed_zero_only": 0,
+    "status": "DEBT"
+  },
+  "label": "SWG-DG-TEN-STEP-COMPOSITION-DISCRIMINATOR",
+  "legoesm_git_sha": "d568cd30f8388d953ead2408a2ea45566523e251",
+  "precision_policy": "fp64-libm",
+  "programs": {
+    "materialized_python_loop": "ten separately materialized model.step calls",
+    "outer_jit_lax_scan": "one jax.jit enclosing lax.scan of ten model.step calls"
+  },
+  "restart": {
+    "path": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/swgdg_rounds/round1/oracle_swg_dg_r1/instrumented/SWG_00000010_restart.nc",
+    "sha256": "94b021ed88f02718bcc83e877825a9b7689eec10b23fd24f76fe593f5f363fb8"
+  },
+  "root": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/swgdg_rounds/round1/oracle_swg_dg_r1/instrumented",
+  "schema": "swg-dg-composition-discriminator-v1",
+  "step": 10
+}

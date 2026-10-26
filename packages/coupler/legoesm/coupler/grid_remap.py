@@ -41,9 +41,23 @@ from legoesm.grids.conservative_regrid import (
 
 
 def _is_regular_latlon(grid) -> bool:
-    """True if ``grid`` exposes the regular lat-lon geometry the remap needs."""
+    """True if ``grid`` exposes the regular lat-lon geometry the remap needs.
+
+    "Regular lat-lon" here means the raw 1-D :class:`LatLonGrid`, NOT a C-grid
+    geometry.  ``lat_v`` used to separate the two on its own, and stopped when
+    ``LatLonCGridGeometry`` gained an optional ``lat_v`` of its own: every
+    geometry then answered ``hasattr`` True, including a TRIPOLE built by
+    folding a regular one (``create_synthetic_tripole``), which silently broke
+    the mutual exclusion with :func:`_is_tripole` documented below and sent a
+    tripolar ocean through the separable remap -- measured, 1300 weight pairs
+    against the curvilinear generator's 1216.  ``lat_T`` is the discriminator
+    that does not rot the same way: it is the 2-D centre array EVERY C-grid
+    geometry carries and the raw grid never does, so this restores the exact
+    prior answer for all three cases (raw grid True, regular geometry False,
+    tripole False) instead of merely patching the tripole one."""
     return (
-        hasattr(grid, "lat_v")
+        getattr(grid, "lat_v", None) is not None
+        and not hasattr(grid, "lat_T")
         and hasattr(grid, "lon")
         and hasattr(grid, "n_lat")
         and hasattr(grid, "n_lon")
@@ -77,9 +91,10 @@ def _is_tripole(grid) -> bool:
     """True if ``grid`` is a curvilinear tripole C-grid with an ACTIVE bipolar
     fold (duck-typed: a :class:`LatLonCGridGeometry` whose ``fold.is_active``).
 
-    A tripole grid carries 2-D centres (``lat_T``/``lon_T``) but NOT the 1-D
-    ``lat_v`` of a regular grid, so ``_is_regular_latlon`` is False for it; the
-    two detectors are mutually exclusive.  The active-fold gate means a regular
+    A tripole grid carries 2-D centres (``lat_T``/``lon_T``) but no 1-D
+    ``lat_v`` ARRAY (the optional field stays ``None``), so
+    ``_is_regular_latlon`` is False for it; the two detectors are mutually
+    exclusive.  The active-fold gate means a regular
     lat-lon C-grid geometry (``fold.is_active = False``) is NOT treated as
     tripole — it stays on the separable regular-lat-lon remap path."""
     fold = getattr(grid, "fold", None)
@@ -484,3 +499,49 @@ def rotate_tpoint_currents_to_geographic(u_c, v_c, cos_alpha_u, sin_alpha_u):
     u_east = u_c * cos_T - v_c * sin_T
     v_north = u_c * sin_T + v_c * cos_T
     return u_east, v_north
+
+
+_NN_CHUNK_ELEMS = 2 ** 26   # dot products per chunk (~0.5 GB float64)
+
+
+def nearest_column_map(
+    src_lat, src_lon, dst_lat, dst_lon, *, src_valid=None,
+) -> np.ndarray:
+    """Index of the nearest source column for every target column.
+
+    Generic point-cloud nearest-neighbour on the sphere, for moving PER-COLUMN
+    STATE between any two of the coupler's grids (lat-lon, Voronoi mesh, cube
+    face — anything that yields per-column lat/lon in radians).  Chord distance
+    through unit vectors: exact ordering, no pole or dateline seams.  This is
+    for state carried point-to-point (soil columns, snow, per-column
+    parameters); FLUXES need the conservative remappers above, never this.
+
+    ``src_valid``: optional boolean mask; targets then map onto the nearest
+    VALID source column (e.g. land state selects only land donors, so ocean
+    placeholders can never leak into a land column).
+    """
+    src_lat = np.asarray(src_lat, np.float64).ravel()
+    src_lon = np.asarray(src_lon, np.float64).ravel()
+    dst_lat = np.asarray(dst_lat, np.float64).ravel()
+    dst_lon = np.asarray(dst_lon, np.float64).ravel()
+    if src_valid is not None:
+        idx = np.flatnonzero(np.asarray(src_valid).ravel())
+        if idx.size == 0:
+            raise ValueError("src_valid excludes every source column")
+        return idx[nearest_column_map(src_lat[idx], src_lon[idx],
+                                      dst_lat, dst_lon)]
+
+    def unit(lat, lon):
+        return np.stack([np.cos(lat) * np.cos(lon),
+                         np.cos(lat) * np.sin(lon),
+                         np.sin(lat)], axis=-1)
+
+    # Chunked over targets: the dense (n_dst, n_src) product is ~52 GB for an
+    # ERA5 N320 source onto the res-6 mesh.  Row chunks give the identical argmax.
+    src_t = unit(src_lat, src_lon).T
+    dst = unit(dst_lat, dst_lon)
+    step = max(1, _NN_CHUNK_ELEMS // max(src_t.shape[1], 1))
+    return np.concatenate(
+        [np.argmax(dst[i:i + step] @ src_t, axis=1)
+         for i in range(0, dst.shape[0], step)]
+        or [np.zeros(0, dtype=np.intp)])

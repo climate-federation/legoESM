@@ -389,6 +389,10 @@ def _resolve_template(template: str) -> Path:
     rel = template[:-5] if template.endswith(".yaml") else template
     path = _TEMPLATES_DIR / f"{rel}.yaml"
     if not path.is_file():
+        from legoesm.experiment_registry import retired_template_message
+        retired = retired_template_message(template)
+        if retired is not None:
+            raise ValueError(retired)
         raise ValueError(
             f"template {template!r} not found at {path}; "
             f"available: {', '.join(templates()) or '(none)'}"

@@ -1,0 +1,3775 @@
+{
+ "time_stability": {
+  "median_r": -0.06555557134333641,
+  "median_abs_r": 0.2510969877357959,
+  "max_abs_r": 0.9348666332214329,
+  "block_ci95": [
+   -0.16454133771723223,
+   0.7426288820503459
+  ],
+  "bootstrap_median_r": 0.022724203923992638,
+  "bootstrap_median_abs_r": 0.6116594400286903,
+  "point_percentile_in_bootstrap": 28.499999999999996,
+  "bootstrap_requested_draws": 5000,
+  "bootstrap_retained_draws": 5000,
+  "bootstrap_dropped_draws": 0,
+  "bootstrap_unique_median_draws": 4999,
+  "block_length_rows": 5,
+  "n_correlations": 24,
+  "correlations": [
+   0.16940005379541148,
+   -0.18603587222017381,
+   -0.7755387154688287,
+   0.892059615396009,
+   -0.256977144400019,
+   0.03352103168542414,
+   0.2452168310715728,
+   -0.1321146053385127,
+   -0.8093168456557971,
+   0.8816829725868872,
+   -0.39945153554999135,
+   -0.11827750418821148,
+   0.2578663793556211,
+   -0.087664328956647,
+   -0.8363261003988585,
+   0.8958496501694766,
+   -0.33372006402148124,
+   -0.05600901668795331,
+   0.13838361188634232,
+   -0.0751021259987195,
+   -0.7584920244653865,
+   0.9348666332214329,
+   0.00011625048519433942,
+   0.16688068137057246
+  ],
+  "n_eff": [
+   8.326388785127525,
+   7.138746999578531,
+   9.930541641269944,
+   6.402035999612946,
+   11.433055697068514,
+   8.21654801148828,
+   10.022428903319748,
+   7.519927574720453,
+   9.50483572699168,
+   8.190560610555542,
+   14.229646402383436,
+   8.474338716150513,
+   9.735969995667487,
+   7.963992658946673,
+   9.028502304675406,
+   8.27973064148221,
+   12.642938392243039,
+   8.341492948984085,
+   7.905647969505901,
+   8.187945291909536,
+   8.02653304216116,
+   6.513041174314405,
+   7.641544633957465,
+   7.223046733104116
+  ],
+  "n_eff_median": 8.248139326485244,
+  "n_eff_min": 6.402035999612946,
+  "fisher_ci95": [
+   [
+    -0.5903436957486402,
+    0.7699851609631283
+   ],
+   [
+    -0.818297741214347,
+    0.6499359382678571
+   ],
+   [
+    -0.9445419707361155,
+    -0.28174663472204403
+   ],
+   [
+    0.35337883295050665,
+    0.9864683918832022
+   ],
+   [
+    -0.734207181507318,
+    0.39021703863293516
+   ],
+   [
+    -0.6775674883034534,
+    0.7122177530163062
+   ],
+   [
+    -0.4536571600766688,
+    0.7573324809120112
+   ],
+   [
+    -0.7836609933544412,
+    0.6578452768206033
+   ],
+   [
+    -0.9556793451965977,
+    -0.3421895832200402
+   ],
+   [
+    0.48000812766546397,
+    0.9777444004482465
+   ],
+   [
+    -0.7648811914985693,
+    0.16048211434833848
+   ],
+   [
+    -0.7427213271500339,
+    0.6161990664722433
+   ],
+   [
+    -0.45529063684158055,
+    0.7694577640297314
+   ],
+   [
+    -0.7476414464651346,
+    0.6594308446293304
+   ],
+   [
+    -0.9645244755297404,
+    -0.38895221972203453
+   ],
+   [
+    0.53548711752105,
+    0.9802448204702684
+   ],
+   [
+    -0.7522745450369371,
+    0.27674808072998025
+   ],
+   [
+    -0.7182924995883719,
+    0.6595253596462931
+   ],
+   [
+    -0.6325372566632639,
+    0.77156719493178
+   ],
+   [
+    -0.7332601881083709,
+    0.6557127425935704
+   ],
+   [
+    -0.9533086743649416,
+    -0.1178977778033053
+   ],
+   [
+    0.5716564289009329,
+    0.9917187032613682
+   ],
+   [
+    -0.7209511490396976,
+    0.72106278413668
+   ],
+   [
+    -0.6557354330014087,
+    0.8083354117288957
+   ]
+  ],
+  "status": "UNRESOLVED",
+  "coherent_pair_guard": "CONFIRMED_COHERENT_REORGANIZATION_PRESENT",
+  "decorrelation_guard": "DECORRELATION_WITHHELD_WHILE_ANY_PAIR_ABS_R_GE_0.70",
+  "per_horizon_pair_median_r": {
+   "90_vs_180": 0.20730844243349214,
+   "90_vs_270": -0.10988946714757984,
+   "90_vs_360": -0.7924277805623129,
+   "180_vs_270": 0.8939546327827428,
+   "180_vs_360": -0.29534860421075015,
+   "270_vs_360": -0.011243992501264583
+  }
+ },
+ "member_stability": {
+  "median_r": 0.9967192804713132,
+  "median_abs_r": 0.9967192804713132,
+  "max_abs_r": 0.9999999966000351,
+  "block_ci95": [
+   0.9889940288121114,
+   0.9980287017996373
+  ],
+  "bootstrap_median_r": 0.9944373467643719,
+  "bootstrap_median_abs_r": 0.9944373467643719,
+  "point_percentile_in_bootstrap": 86.7,
+  "bootstrap_requested_draws": 5000,
+  "bootstrap_retained_draws": 5000,
+  "bootstrap_dropped_draws": 0,
+  "bootstrap_unique_median_draws": 4999,
+  "block_length_rows": 5,
+  "n_correlations": 24,
+  "correlations": [
+   0.9999958445224686,
+   0.9999958450409866,
+   0.9999031103752871,
+   0.9999999966000351,
+   0.9999135426035624,
+   0.9999135371698347,
+   0.9961980585660875,
+   0.9950704234982606,
+   0.9982195167989852,
+   0.9976864080374389,
+   0.9909022108077701,
+   0.989871965061431,
+   0.9980659009735929,
+   0.9946298716992553,
+   0.9928588365798697,
+   0.9986527425243853,
+   0.9972405023765389,
+   0.9988918959734828,
+   0.9792649656624013,
+   0.9880158909850134,
+   0.9645171625663554,
+   0.9896582898243415,
+   0.9118484821255497,
+   0.9504095441491225
+  ],
+  "n_eff": [
+   7.2175192511485395,
+   7.217592955790958,
+   7.310681600376705,
+   7.228326422107003,
+   7.321385284713479,
+   7.321457291178692,
+   7.78609233790069,
+   7.616732984264882,
+   6.534906767778501,
+   8.399934724611061,
+   7.610496013884072,
+   7.4339563158883815,
+   4.339883557488566,
+   4.49150058309717,
+   4.5748856772010384,
+   4.582892887873999,
+   4.663628174181622,
+   4.76538733431286,
+   9.393584740131308,
+   9.031193400747693,
+   7.962147283487131,
+   8.734013306026892,
+   7.993626657592161,
+   7.483579743240914
+  ],
+  "n_eff_median": 7.321421287946086,
+  "n_eff_min": 4.339883557488566,
+  "fisher_ci95": [
+   [
+    0.9999719730201626,
+    0.9999993838858819
+   ],
+   [
+    0.9999719769846841,
+    0.9999993839524859
+   ],
+   [
+    0.9993600983675294,
+    0.9999853330014519
+   ],
+   [
+    0.9999999771242719,
+    0.9999999994946713
+   ],
+   [
+    0.9994303147458672,
+    0.9999868816170387
+   ],
+   [
+    0.9994302878983589,
+    0.9999868805864316
+   ],
+   [
+    0.9774024085005127,
+    0.9993653582252513
+   ],
+   [
+    0.969829000869201,
+    0.9992031097480917
+   ],
+   [
+    0.9857671571970185,
+    0.9997784825568807
+   ],
+   [
+    0.9875639449853467,
+    0.9995713584300604
+   ],
+   [
+    0.9448411024253055,
+    0.9985285321395895
+   ],
+   [
+    0.9365821995009315,
+    0.9984190743658842
+   ],
+   [
+    0.9443631596736178,
+    0.9999345109792196
+   ],
+   [
+    0.8749528253153098,
+    0.9997826578567918
+   ],
+   [
+    0.8493824270985422,
+    0.9996847192321495
+   ],
+   [
+    0.9700557952164792,
+    0.9999402126545321
+   ],
+   [
+    0.9439012353241754,
+    0.9998677116846145
+   ],
+   [
+    0.9790338077309902,
+    0.9999419859081125
+   ],
+   [
+    0.905903564340706,
+    0.9955639641703985
+   ],
+   [
+    0.9422315853018698,
+    0.9975594816245175
+   ],
+   [
+    0.8100302346931543,
+    0.9938026141999801
+   ],
+   [
+    0.9479603761206792,
+    0.9979794726881153
+   ],
+   [
+    0.5792296648923685,
+    0.9841681631834335
+   ],
+   [
+    0.7213107176188436,
+    0.9920460482343259
+   ]
+  ],
+  "status": "DEMOTED_CONSTRUCTION_FORCED_AMPLITUDE",
+  "coherent_pair_guard": "CONFIRMED_COHERENT_REORGANIZATION_PRESENT",
+  "decorrelation_guard": "DECORRELATION_WITHHELD_WHILE_ANY_PAIR_ABS_R_GE_0.70",
+  "per_horizon_median_r": {
+   "90": 0.9999546935630155,
+   "180": 0.995634241032174,
+   "270": 0.9976532016750659,
+   "360": 0.9718910641143783
+  },
+  "member_deviation_median_r_descriptive": -0.4578709671267909,
+  "member_deviation_correlations_descriptive": [
+   0.838250594324017,
+   0.838265506924693,
+   -0.9338330270035021,
+   0.9998332575928007,
+   -0.9778122833970443,
+   -0.9778179938824341,
+   -0.41695608363387887,
+   -0.8484772667901198,
+   0.7238900296805798,
+   0.15420900425745096,
+   -0.7330370832900526,
+   -0.7512482189719485,
+   -0.4987858506197028,
+   -0.8231803536804545,
+   -0.8869591357145914,
+   0.17054072152135158,
+   0.15342951648104036,
+   0.6640610771421984,
+   -0.04847550179698269,
+   -0.6936406789187058,
+   -0.0054738222050069,
+   0.46893998589393693,
+   -0.9543954031676067,
+   -0.5813832142367745
+  ],
+  "qualification": "DEMOTED: raw r is an amplitude-to-ensemble-spread diagnostic, not independent evidence of pattern persistence; centered member deviations are descriptive because four deviations sum to zero",
+  "self_comparison_count": 0
+ },
+ "all16_robustness": {
+  "time_median_r_all16": -0.076719912770085,
+  "member_median_r_all16_amplitude_only": 0.99752577720435
+ },
+ "spatial_structure": {
+  "status": "CONFIRMED_PHYSICAL_STRUCTURE",
+  "predictors_by_day": {
+   "90": {
+    "transport_capacity": {
+     "r": -0.45658421675939825,
+     "pearson_denominator": 2.88087671191614,
+     "n_eff": 4.817277128898565,
+     "n_eff_denominator": 7.265515157937881,
+     "bonferroni_ci98_33": [
+      -0.9788305931051656,
+      0.8572496862866339
+     ]
+    },
+    "nemo_row_transport": {
+     "r": -0.40733719743002794,
+     "pearson_denominator": 0.06375140446304783,
+     "n_eff": 4.3057906407862205,
+     "n_eff_denominator": 8.128588433554015,
+     "bonferroni_ci98_33": [
+      -0.9873239008568964,
+      0.9305643899645138
+     ]
+    },
+    "nemo_row_gradient": {
+     "r": -0.18884735548351153,
+     "pearson_denominator": 0.009905715319013485,
+     "n_eff": 8.734232284330888,
+     "n_eff_denominator": 4.007221111211983,
+     "bonferroni_ci98_33": [
+      -0.830849080969441,
+      0.6688109487273197
+     ]
+    }
+   },
+   "180": {
+    "transport_capacity": {
+     "r": 0.5586422552799912,
+     "pearson_denominator": 4.95686035399039,
+     "n_eff": 4.660240474799296,
+     "n_eff_denominator": 7.510342049786038,
+     "bonferroni_ci98_33": [
+      -0.8417351614744303,
+      0.9863134604471181
+     ]
+    },
+    "nemo_row_transport": {
+     "r": 0.20111787876710174,
+     "pearson_denominator": 0.11451590470318082,
+     "n_eff": 4.539604454180342,
+     "n_eff_denominator": 7.709922825494165,
+     "bonferroni_ci98_33": [
+      -0.9385188476217582,
+      0.9723277044747797
+     ]
+    },
+    "nemo_row_gradient": {
+     "r": 0.69288792430966,
+     "pearson_denominator": 0.01911684942490823,
+     "n_eff": 6.345659880742129,
+     "n_eff_denominator": 5.515580831273095,
+     "bonferroni_ci98_33": [
+      -0.4262702143920618,
+      0.9738686880378036
+     ]
+    }
+   },
+   "270": {
+    "transport_capacity": {
+     "r": 0.6780178899333474,
+     "pearson_denominator": 7.1722014162608545,
+     "n_eff": 3.9681804334709896,
+     "n_eff_denominator": 8.820163444378789,
+     "bonferroni_ci98_33": [
+      -0.9227993797986754,
+      0.9970478012832634
+     ]
+    },
+    "nemo_row_transport": {
+     "r": 0.19563060693937995,
+     "pearson_denominator": 0.17461489117801834,
+     "n_eff": 3.9051894942798517,
+     "n_eff_denominator": 8.962433206190493,
+     "bonferroni_ci98_33": [
+      -0.9807952137408579,
+      0.9912619340615042
+     ]
+    },
+    "nemo_row_gradient": {
+     "r": 0.7524977821371684,
+     "pearson_denominator": 0.029035771783077608,
+     "n_eff": 4.588790825216301,
+     "n_eff_denominator": 7.627281637608795,
+     "bonferroni_ci98_33": [
+      -0.7261730498730271,
+      0.9936919786446041
+     ]
+    }
+   },
+   "360": {
+    "transport_capacity": {
+     "r": 0.5287164109619676,
+     "pearson_denominator": 6.298000359737307,
+     "n_eff": 4.892535208294187,
+     "n_eff_denominator": 7.1537553660657185,
+     "bonferroni_ci98_33": [
+      -0.8183612197964458,
+      0.9811910070930092
+     ]
+    },
+    "nemo_row_transport": {
+     "r": 0.49357052151457176,
+     "pearson_denominator": 0.1602834815350258,
+     "n_eff": 4.573881852849409,
+     "n_eff_denominator": 7.65214343658569,
+     "bonferroni_ci98_33": [
+      -0.8781157793869258,
+      0.9851880152692548
+     ]
+    },
+    "nemo_row_gradient": {
+     "r": 0.3943876569821136,
+     "pearson_denominator": 0.02755876982317653,
+     "n_eff": 5.451930404255343,
+     "n_eff_denominator": 6.4197444583448435,
+     "bonferroni_ci98_33": [
+      -0.8047224558173788,
+      0.9599945533644397
+     ]
+    }
+   }
+  },
+  "winner": "transport_capacity",
+  "r_phys": 0.5287164109619676,
+  "winner_effect_lower": 0.0,
+  "winner_sign_stable_horizons": 3,
+  "roughness_Z": 0.18063235553648413,
+  "roughness_denominator": 0.004018983275690021,
+  "q_flip": 0.03333333333333333,
+  "q_flip_numerator": 1,
+  "q_flip_denominator": 30
+ },
+ "row_level": {
+  "status": "UNRESOLVED",
+  "all_members_same_classification": true,
+  "member_statuses": [
+   "UNRESOLVED",
+   "UNRESOLVED",
+   "UNRESOLVED",
+   "UNRESOLVED"
+  ],
+  "within_2floor_fraction": 0.11428571428571428,
+  "within_2floor_numerator": 4,
+  "within_2floor_denominator": 35,
+  "raw_gt5floor_fraction_upper_bound": 0.4857142857142857,
+  "raw_gt5floor_numerator_upper_bound": 17,
+  "raw_gt5floor_denominator": 35,
+  "material_gt5floor_fraction": 0.08571428571428572,
+  "material_gt5floor_numerator": 3,
+  "material_gt5floor_denominator": 35,
+  "voided_by_unsaturated_materiality_n": 14,
+  "reviewer_combined_floor_variant": {
+   "status": "NOT_SCORED_REPO_RULE_USES_PER_SIDE_GROWTH",
+   "voided_n": 9,
+   "surviving_n": 8,
+   "denominator": 35
+  },
+  "member_classifications": [
+   {
+    "member": 0,
+    "within_2floor_n": 4,
+    "raw_gt5floor_upper_bound_n": 17,
+    "material_gt5floor_n": 3,
+    "status": "UNRESOLVED",
+    "per_row_materiality": [
+     {
+      "raw_ratio_upper_bound": 2.449244047884173,
+      "unsaturated_no_can_be_voided": true,
+      "x2yes": 1.2246220239420864,
+      "largest_last_quarter_side_growth": 12.230518170573664,
+      "combined_floor_last_quarter_growth": 5.91824719776559,
+      "combined_floor_variant_can_be_voided": true,
+      "survives_gt5_materiality": false
+     },
+     {
+      "raw_ratio_upper_bound": 3.10196032809623,
+      "unsaturated_no_can_be_voided": true,
+      "x2yes": 1.550980164048115,
+      "largest_last_quarter_side_growth": 1.5612027339862236,
+      "combined_floor_last_quarter_growth": 0.9423565320596577,
+      "combined_floor_variant_can_be_voided": false,
+      "survives_gt5_materiality": false
+     },
+     {
+      "raw_ratio_upper_bound": 9.47884853583025,
+      "unsaturated_no_can_be_voided": false,
+      "x2yes": 4.739424267915125,
+      "largest_last_quarter_side_growth": 1.1741008020700934,
+      "combined_floor_last_quarter_growth": 1.153490228973762,
+      "combined_floor_variant_can_be_voided": false,
+      "survives_gt5_materiality": true
+     },
+     {
+      "raw_ratio_upper_bound": 4.314543414212199,
+      "unsaturated_no_can_be_voided": true,
+      "x2yes": 2.1572717071060996,
+      "largest_last_quarter_side_growth": 1.231789614522705,
+      "combined_floor_last_quarter_growth": 0.8284900669901953,
+      "combined_floor_variant_can_be_voided": false,
+      "survives_gt5_materiality": false
+     },
+     {
+      "raw_ratio_upper_bound": 5.840146918913601,
+      "unsaturated_no_can_be_voided": false,
+      "x2yes": 2.9200734594568005,
+      "largest_last_quarter_side_growth": 1.013672855704895,
+      "combined_floor_last_quarter_growth": 0.9402564538346311,
+      "combined_floor_variant_can_be_voided": false,
+      "survives_gt5_materiality": true
+     },
+     {
+      "raw_ratio_upper_bound": 7.050201660457972,
+      "unsaturated_no_can_be_voided": true,
+      "x2yes": 3.525100830228986,
+      "largest_last_quarter_side_growth": 1.5078190517078385,
+      "combined_floor_last_quarter_growth": 0.9164107135529246,
+      "combined_floor_variant_can_be_voided": false,
+      "survives_gt5_materiality": false
+     },
+     {
+      "raw_ratio_upper_bound": 7.335900144509817,
+      "unsaturated_no_can_be_voided": true,
+      "x2yes": 3.6679500722549085,
+      "largest_last_quarter_side_growth": 1.6207222751606636,
+      "combined_floor_last_quarter_growth": 1.3540071168862777,
+      "combined_floor_variant_can_be_voided": false,
+      "survives_gt5_materiality": false
+     },
+     {
+      "raw_ratio_upper_bound": 7.410389791979752,
+      "unsaturated_no_can_be_voided": false,
+      "x2yes": 3.705194895989876,
+      "largest_last_quarter_side_growth": 1.320541194288515,
+      "combined_floor_last_quarter_growth": 1.267757436789265,
+      "combined_floor_variant_can_be_voided": false,
+      "survives_gt5_materiality": true
+     },
+     {
+      "raw_ratio_upper_bound": 8.502497275090345,
+      "unsaturated_no_can_be_voided": true,
+      "x2yes": 4.251248637545173,
+      "largest_last_quarter_side_growth": 1.4525740847329338,
+      "combined_floor_last_quarter_growth": 1.4407865509230924,
+      "combined_floor_variant_can_be_voided": true,
+      "survives_gt5_materiality": false
+     },
+     {
+      "raw_ratio_upper_bound": 4.592135450098949,
+      "unsaturated_no_can_be_voided": true,
+      "x2yes": 2.2960677250494745,
+      "largest_last_quarter_side_growth": 2.0633297229637715,
+      "combined_floor_last_quarter_growth": 1.987153984561208,
+      "combined_floor_variant_can_be_voided": true,
+      "survives_gt5_materiality": false
+     },
+     {
+      "raw_ratio_upper_bound": 4.363544483557227,
+      "unsaturated_no_can_be_voided": true,
+      "x2yes": 2.1817722417786136,
+      "largest_last_quarter_side_growth": 2.246782639208147,
+      "combined_floor_last_quarter_growth": 2.083833919635385,
+      "combined_floor_variant_can_be_voided": true,
+      "survives_gt5_materiality": false
+     },
+     {
+      "raw_ratio_upper_bound": 4.400514583439705,
+      "unsaturated_no_can_be_voided": true,
+      "x2yes": 2.2002572917198524,
+      "largest_last_quarter_side_growth": 2.854088601236053,
+      "combined_floor_last_quarter_growth": 2.6804504304481704,
+      "combined_floor_variant_can_be_voided": true,
+      "survives_gt5_materiality": false
+     },
+     {
+      "raw_ratio_upper_bound": 3.3437316240062267,
+      "unsaturated_no_can_be_voided": true,
+      "x2yes": 1.6718658120031133,
+      "largest_last_quarter_side_growth": 3.943377512282197,
+      "combined_floor_last_quarter_growth": 2.9366717443284895,
+      "combined_floor_variant_can_be_voided": true,
+      "survives_gt5_materiality": false
+     },
+     {
+      "raw_ratio_upper_bound": 2.005248990220379,
+      "unsaturated_no_can_be_voided": true,
+      "x2yes": 1.0026244951101895,
+      "largest_last_quarter_side_growth": 2.4803811211709497,
+      "combined_floor_last_quarter_growth": 2.0385734009615484,
+      "combined_floor_variant_can_be_voided": true,
+      "survives_gt5_materiality": false
+     },
+     {
+      "raw_ratio_upper_bound": 2.665099883993453,
+      "unsaturated_no_can_be_voided": true,
+      "x2yes": 1.3325499419967266,
+      "largest_last_quarter_side_growth": 2.4459535521766345,
+      "combined_floor_last_quarter_growth": 1.747819368359054,
+      "combined_floor_variant_can_be_voided": true,
+      "survives_gt5_materiality": false
+     },
+     {
+      "raw_ratio_upper_bound": 4.734962334742477,
+      "unsaturated_no_can_be_voided": true,
+      "x2yes": 2.3674811673712384,
+      "largest_last_quarter_side_growth": 9.672840171489248,
+      "combined_floor_last_quarter_growth": 1.4018603649994035,
+      "combined_floor_variant_can_be_voided": true,
+      "survives_gt5_materiality": false
+     },
+     {
+      "raw_ratio_upper_bound": 6.461301761444285,
+      "unsaturated_no_can_be_voided": true,
+      "x2yes": 3.2306508807221426,
+      "largest_last_quarter_side_growth": 4.616119796659796,
+      "combined_floor_last_quarter_growth": 1.5264105405969033,
+      "combined_floor_variant_can_be_voided": true,
+      "survives_gt5_materiality": false
+     },
+     {
+      "raw_ratio_upper_bound": 5.694820218908269,
+      "unsaturated_no_can_be_voided": true,
+      "x2yes": 2.8474101094541346,
+      "largest_last_quarter_side_growth": 5.447559532864868,
+      "combined_floor_last_quarter_growth": 1.832731261294692,
+      "combined_floor_variant_can_be_voided": true,
+      "survives_gt5_materiality": false
+     },
+     {
+      "raw_ratio_upper_bound": 5.496099526275159,
+      "unsaturated_no_can_be_voided": true,
+      "x2yes": 2.7480497631375793,
+      "largest_last_quarter_side_growth": 3.922134830945822,
+      "combined_floor_last_quarter_growth": 2.000720713528571,
+      "combined_floor_variant_can_be_voided": true,
+      "survives_gt5_materiality": false
+     },
+     {
+      "raw_ratio_upper_bound": 0.6156941891307304,
+      "unsaturated_no_can_be_voided": true,
+      "x2yes": 0.3078470945653652,
+      "largest_last_quarter_side_growth": 10.96208527113836,
+      "combined_floor_last_quarter_growth": 1.928236572197041,
+      "combined_floor_variant_can_be_voided": true,
+      "survives_gt5_materiality": false
+     },
+     {
+      "raw_ratio_upper_bound": 1.634475637734891,
+      "unsaturated_no_can_be_voided": true,
+      "x2yes": 0.8172378188674455,
+      "largest_last_quarter_side_growth": 3.1862497851670084,
+      "combined_floor_last_quarter_growth": 1.8877235986893715,
+      "combined_floor_variant_can_be_voided": true,
+      "survives_gt5_materiality": false
+     },
+     {
+      "raw_ratio_upper_bound": 1.5618521336397608,
+      "unsaturated_no_can_be_voided": true,
+      "x2yes": 0.7809260668198804,
+      "largest_last_quarter_side_growth": 3.0924326911249387,
+      "combined_floor_last_quarter_growth": 1.9612672561257913,
+      "combined_floor_variant_can_be_voided": true,
+      "survives_gt5_materiality": false
+     },
+     {
+      "raw_ratio_upper_bound": 3.145538453927205,
+      "unsaturated_no_can_be_voided": true,
+      "x2yes": 1.5727692269636024,
+      "largest_last_quarter_side_growth": 3.312088809890186,
+      "combined_floor_last_quarter_growth": 2.1375500814870803,
+      "combined_floor_variant_can_be_voided": true,
+      "survives_gt5_materiality": false
+     },
+     {
+      "raw_ratio_upper_bound": 3.7700953988808465,
+      "unsaturated_no_can_be_voided": true,
+      "x2yes": 1.8850476994404233,
+      "largest_last_quarter_side_growth": 3.202938689517652,
+      "combined_floor_last_quarter_growth": 2.104703975262464,
+      "combined_floor_variant_can_be_voided": true,
+      "survives_gt5_materiality": false
+     },
+     {
+      "raw_ratio_upper_bound": 1.6745725127381552,
+      "unsaturated_no_can_be_voided": true,
+      "x2yes": 0.8372862563690776,
+      "largest_last_quarter_side_growth": 2.9172058881092986,
+      "combined_floor_last_quarter_growth": 1.911067681114265,
+      "combined_floor_variant_can_be_voided": true,
+      "survives_gt5_materiality": false
+     },
+     {
+      "raw_ratio_upper_bound": 3.0675061194988946,
+      "unsaturated_no_can_be_voided": true,
+      "x2yes": 1.5337530597494473,
+      "largest_last_quarter_side_growth": 2.7604024069586215,
+      "combined_floor_last_quarter_growth": 1.8317424466095575,
+      "combined_floor_variant_can_be_voided": true,
+      "survives_gt5_materiality": false
+     },
+     {
+      "raw_ratio_upper_bound": 4.417351578330517,
+      "unsaturated_no_can_be_voided": true,
+      "x2yes": 2.2086757891652584,
+      "largest_last_quarter_side_growth": 2.7086590992287785,
+      "combined_floor_last_quarter_growth": 1.673741331568172,
+      "combined_floor_variant_can_be_voided": true,
+      "survives_gt5_materiality": false
+     },
+     {
+      "raw_ratio_upper_bound": 7.444929078224269,
+      "unsaturated_no_can_be_voided": true,
+      "x2yes": 3.7224645391121345,
+      "largest_last_quarter_side_growth": 2.5021121654791485,
+      "combined_floor_last_quarter_growth": 1.535040589683585,
+      "combined_floor_variant_can_be_voided": true,
+      "survives_gt5_materiality": false
+     },
+     {
+      "raw_ratio_upper_bound": 9.912994226416933,
+      "unsaturated_no_can_be_voided": true,
+      "x2yes": 4.956497113208466,
+      "largest_last_quarter_side_growth": 2.3479112712576993,
+      "combined_floor_last_quarter_growth": 1.450612409562926,
+      "combined_floor_variant_can_be_voided": false,
+      "survives_gt5_materiality": false
+     },
+     {
+      "raw_ratio_upper_bound": 13.415090017563962,
+      "unsaturated_no_can_be_voided": true,
+      "x2yes": 6.707545008781981,
+      "largest_last_quarter_side_growth": 2.556532149199391,
+      "combined_floor_last_quarter_growth": 1.5762975888844364,
+      "combined_floor_variant_can_be_voided": false,
+      "survives_gt5_materiality": false
+     },
+     {
+      "raw_ratio_upper_bound": 15.078177755386683,
+      "unsaturated_no_can_be_voided": true,
+      "x2yes": 7.539088877693342,
+      "largest_last_quarter_side_growth": 2.405169535830399,
+      "combined_floor_last_quarter_growth": 1.568109237768968,
+      "combined_floor_variant_can_be_voided": false,
+      "survives_gt5_materiality": false
+     },
+     {
+      "raw_ratio_upper_bound": 13.76669120679023,
+      "unsaturated_no_can_be_voided": true,
+      "x2yes": 6.883345603395115,
+      "largest_last_quarter_side_growth": 2.8163298566465875,
+      "combined_floor_last_quarter_growth": 1.7512920480794159,
+      "combined_floor_variant_can_be_voided": true,
+      "survives_gt5_materiality": false
+     },
+     {
+      "raw_ratio_upper_bound": 13.395829730492624,
+      "unsaturated_no_can_be_voided": true,
+      "x2yes": 6.697914865246312,
+      "largest_last_quarter_side_growth": 3.2455512417781924,
+      "combined_floor_last_quarter_growth": 1.8902327915710997,
+      "combined_floor_variant_can_be_voided": true,
+      "survives_gt5_materiality": false
+     },
+     {
+      "raw_ratio_upper_bound": 13.610416216946048,
+      "unsaturated_no_can_be_voided": true,
+      "x2yes": 6.805208108473024,
+      "largest_last_quarter_side_growth": 3.436636205492606,
+      "combined_floor_last_quarter_growth": 1.8829692947708476,
+      "combined_floor_variant_can_be_voided": true,
+      "survives_gt5_materiality": false
+     },
+     {
+      "raw_ratio_upper_bound": 13.413336854538866,
+      "unsaturated_no_can_be_voided": true,
+      "x2yes": 6.706668427269433,
+      "largest_last_quarter_side_growth": 3.840249544263334,
+      "combined_floor_last_quarter_growth": 2.03182439933316,
+      "combined_floor_variant_can_be_voided": true,
+      "survives_gt5_materiality": false
+     }
+    ]
+   },
+   {
+    "member": 1,
+    "within_2floor_n": 5,
+    "raw_gt5floor_upper_bound_n": 22,
+    "material_gt5floor_n": 5,
+    "status": "UNRESOLVED",
+    "per_row_materiality": [
+     {
+      "raw_ratio_upper_bound": 3.2531918357092073,
+      "unsaturated_no_can_be_voided": true,
+      "x2yes": 1.6265959178546037,
+      "largest_last_quarter_side_growth": 12.230518170573664,
+      "combined_floor_last_quarter_growth": 5.91824719776559,
+      "combined_floor_variant_can_be_voided": true,
+      "survives_gt5_materiality": false
+     },
+     {
+      "raw_ratio_upper_bound": 1.8358051767840173,
+      "unsaturated_no_can_be_voided": true,
+      "x2yes": 0.9179025883920087,
+      "largest_last_quarter_side_growth": 1.5612027339862236,
+      "combined_floor_last_quarter_growth": 0.9423565320596577,
+      "combined_floor_variant_can_be_voided": false,
+      "survives_gt5_materiality": false
+     },
+     {
+      "raw_ratio_upper_bound": 7.971042305937672,
+      "unsaturated_no_can_be_voided": false,
+      "x2yes": 3.985521152968836,
+      "largest_last_quarter_side_growth": 1.1741008020700934,
+      "combined_floor_last_quarter_growth": 1.153490228973762,
+      "combined_floor_variant_can_be_voided": false,
+      "survives_gt5_materiality": true
+     },
+     {
+      "raw_ratio_upper_bound": 5.3198449847707465,
+      "unsaturated_no_can_be_voided": false,
+      "x2yes": 2.6599224923853733,
+      "largest_last_quarter_side_growth": 1.231789614522705,
+      "combined_floor_last_quarter_growth": 0.8284900669901953,
+      "combined_floor_variant_can_be_voided": false,
+      "survives_gt5_materiality": true
+     },
+     {
+      "raw_ratio_upper_bound": 5.436860072300248,
+      "unsaturated_no_can_be_voided": false,
+      "x2yes": 2.718430036150124,
+      "largest_last_quarter_side_growth": 1.013672855704895,
+      "combined_floor_last_quarter_growth": 0.9402564538346311,
+      "combined_floor_variant_can_be_voided": false,
+      "survives_gt5_materiality": true
+     },
+     {
+      "raw_ratio_upper_bound": 8.14999010075235,
+      "unsaturated_no_can_be_voided": true,
+      "x2yes": 4.074995050376175,
+      "largest_last_quarter_side_growth": 1.5078190517078385,
+      "combined_floor_last_quarter_growth": 0.9164107135529246,
+      "combined_floor_variant_can_be_voided": false,
+      "survives_gt5_materiality": false
+     },
+     {
+      "raw_ratio_upper_bound": 8.843626575399474,
+      "unsaturated_no_can_be_voided": true,
+      "x2yes": 4.421813287699737,
+      "largest_last_quarter_side_growth": 1.6207222751606636,
+      "combined_floor_last_quarter_growth": 1.3540071168862777,
+      "combined_floor_variant_can_be_voided": false,
+      "survives_gt5_materiality": false
+     },
+     {
+      "raw_ratio_upper_bound": 9.179419256594043,
+      "unsaturated_no_can_be_voided": false,
+      "x2yes": 4.589709628297022,
+      "largest_last_quarter_side_growth": 1.320541194288515,
+      "combined_floor_last_quarter_growth": 1.267757436789265,
+      "combined_floor_variant_can_be_voided": false,
+      "survives_gt5_materiality": true
+     },
+     {
+      "raw_ratio_upper_bound": 9.82827009767282,
+      "unsaturated_no_can_be_voided": false,
+      "x2yes": 4.91413504883641,
+      "largest_last_quarter_side_growth": 1.4525740847329338,
+      "combined_floor_last_quarter_growth": 1.4407865509230924,
+      "combined_floor_variant_can_be_voided": false,
+      "survives_gt5_materiality": true
+     },
+     {
+      "raw_ratio_upper_bound": 6.414201989611232,
+      "unsaturated_no_can_be_voided": true,
+      "x2yes": 3.207100994805616,
+      "largest_last_quarter_side_growth": 2.0633297229637715,
+      "combined_floor_last_quarter_growth": 1.987153984561208,
+      "combined_floor_variant_can_be_voided": true,
+      "survives_gt5_materiality": false
+     },
+     {
+      "raw_ratio_upper_bound": 6.26000564885688,
+      "unsaturated_no_can_be_voided": true,
+      "x2yes": 3.13000282442844,
+      "largest_last_quarter_side_growth": 2.246782639208147,
+      "combined_floor_last_quarter_growth": 2.083833919635385,
+      "combined_floor_variant_can_be_voided": true,
+      "survives_gt5_materiality": false
+     },
+     {
+      "raw_ratio_upper_bound": 6.401330560216557,
+      "unsaturated_no_can_be_voided": true,
+      "x2yes": 3.2006652801082787,
+      "largest_last_quarter_side_growth": 2.854088601236053,
+      "combined_floor_last_quarter_growth": 2.6804504304481704,
+      "combined_floor_variant_can_be_voided": true,
+      "survives_gt5_materiality": false
+     },
+     {
+      "raw_ratio_upper_bound": 4.615829314038913,
+      "unsaturated_no_can_be_voided": true,
+      "x2yes": 2.3079146570194564,
+      "largest_last_quarter_side_growth": 3.943377512282197,
+      "combined_floor_last_quarter_growth": 2.9366717443284895,
+      "combined_floor_variant_can_be_voided": true,
+      "survives_gt5_materiality": false
+     },
+     {
+      "raw_ratio_upper_bound": 3.3628538679849167,
+      "unsaturated_no_can_be_voided": true,
+      "x2yes": 1.6814269339924584,
+      "largest_last_quarter_side_growth": 2.4803811211709497,
+      "combined_floor_last_quarter_growth": 2.0385734009615484,
+      "combined_floor_variant_can_be_voided": true,
+      "survives_gt5_materiality": false
+     },
+     {
+      "raw_ratio_upper_bound": 2.2116981578934753,
+      "unsaturated_no_can_be_voided": true,
+      "x2yes": 1.1058490789467377,
+      "largest_last_quarter_side_growth": 2.4459535521766345,
+      "combined_floor_last_quarter_growth": 1.747819368359054,
+      "combined_floor_variant_can_be_voided": true,
+      "survives_gt5_materiality": false
+     },
+     {
+      "raw_ratio_upper_bound": 5.241152774472161,
+      "unsaturated_no_can_be_voided": true,
+      "x2yes": 2.6205763872360803,
+      "largest_last_quarter_side_growth": 9.672840171489248,
+      "combined_floor_last_quarter_growth": 1.4018603649994035,
+      "combined_floor_variant_can_be_voided": true,
+      "survives_gt5_materiality": false
+     },
+     {
+      "raw_ratio_upper_bound": 7.035858795221915,
+      "unsaturated_no_can_be_voided": true,
+      "x2yes": 3.5179293976109576,
+      "largest_last_quarter_side_growth": 4.616119796659796,
+      "combined_floor_last_quarter_growth": 1.5264105405969033,
+      "combined_floor_variant_can_be_voided": true,
+      "survives_gt5_materiality": false
+     },
+     {
+      "raw_ratio_upper_bound": 6.719139398273892,
+      "unsaturated_no_can_be_voided": true,
+      "x2yes": 3.359569699136946,
+      "largest_last_quarter_side_growth": 5.447559532864868,
+      "combined_floor_last_quarter_growth": 1.832731261294692,
+      "combined_floor_variant_can_be_voided": true,
+      "survives_gt5_materiality": false
+     },
+     {
+      "raw_ratio_upper_bound": 5.937544353553508,
+      "unsaturated_no_can_be_voided": true,
+      "x2yes": 2.968772176776754,
+      "largest_last_quarter_side_growth": 3.922134830945822,
+      "combined_floor_last_quarter_growth": 2.000720713528571,
+      "combined_floor_variant_can_be_voided": true,
+      "survives_gt5_materiality": false
+     },
+     {
+      "raw_ratio_upper_bound": 0.1756707290209613,
+      "unsaturated_no_can_be_voided": true,
+      "x2yes": 0.08783536451048066,
+      "largest_last_quarter_side_growth": 10.96208527113836,
+      "combined_floor_last_quarter_growth": 1.928236572197041,
+      "combined_floor_variant_can_be_voided": true,
+      "survives_gt5_materiality": false
+     },
+     {
+      "raw_ratio_upper_bound": 1.390525448450409,
+      "unsaturated_no_can_be_voided": true,
+      "x2yes": 0.6952627242252045,
+      "largest_last_quarter_side_growth": 3.1862497851670084,
+      "combined_floor_last_quarter_growth": 1.8877235986893715,
+      "combined_floor_variant_can_be_voided": true,
+      "survives_gt5_materiality": false
+     },
+     {
+      "raw_ratio_upper_bound": 1.817617780506849,
+      "unsaturated_no_can_be_voided": true,
+      "x2yes": 0.9088088902534245,
+      "largest_last_quarter_side_growth": 3.0924326911249387,
+      "combined_floor_last_quarter_growth": 1.9612672561257913,
+      "combined_floor_variant_can_be_voided": true,
+      "survives_gt5_materiality": false
+     },
+     {
+      "raw_ratio_upper_bound": 3.1836623907325765,
+      "unsaturated_no_can_be_voided": true,
+      "x2yes": 1.5918311953662883,
+      "largest_last_quarter_side_growth": 3.312088809890186,
+      "combined_floor_last_quarter_growth": 2.1375500814870803,
+      "combined_floor_variant_can_be_voided": true,
+      "survives_gt5_materiality": false
+     },
+     {
+      "raw_ratio_upper_bound": 3.8674069105568685,
+      "unsaturated_no_can_be_voided": true,
+      "x2yes": 1.9337034552784342,
+      "largest_last_quarter_side_growth": 3.202938689517652,
+      "combined_floor_last_quarter_growth": 2.104703975262464,
+      "combined_floor_variant_can_be_voided": true,
+      "survives_gt5_materiality": false
+     },
+     {
+      "raw_ratio_upper_bound": 1.515173578267105,
+      "unsaturated_no_can_be_voided": true,
+      "x2yes": 0.7575867891335525,
+      "largest_last_quarter_side_growth": 2.9172058881092986,
+      "combined_floor_last_quarter_growth": 1.911067681114265,
+      "combined_floor_variant_can_be_voided": true,
+      "survives_gt5_materiality": false
+     },
+     {
+      "raw_ratio_upper_bound": 2.8491213812927745,
+      "unsaturated_no_can_be_voided": true,
+      "x2yes": 1.4245606906463872,
+      "largest_last_quarter_side_growth": 2.7604024069586215,
+      "combined_floor_last_quarter_growth": 1.8317424466095575,
+      "combined_floor_variant_can_be_voided": true,
+      "survives_gt5_materiality": false
+     },
+     {
+      "raw_ratio_upper_bound": 4.208238364472715,
+      "unsaturated_no_can_be_voided": true,
+      "x2yes": 2.1041191822363574,
+      "largest_last_quarter_side_growth": 2.7086590992287785,
+      "combined_floor_last_quarter_growth": 1.673741331568172,
+      "combined_floor_variant_can_be_voided": true,
+      "survives_gt5_materiality": false
+     },
+     {
+      "raw_ratio_upper_bound": 7.059627277291441,
+      "unsaturated_no_can_be_voided": true,
+      "x2yes": 3.5298136386457206,
+      "largest_last_quarter_side_growth": 2.5021121654791485,
+      "combined_floor_last_quarter_growth": 1.535040589683585,
+      "combined_floor_variant_can_be_voided": true,
+      "survives_gt5_materiality": false
+     },
+     {
+      "raw_ratio_upper_bound": 9.575442263984096,
+      "unsaturated_no_can_be_voided": true,
+      "x2yes": 4.787721131992048,
+      "largest_last_quarter_side_growth": 2.3479112712576993,
+      "combined_floor_last_quarter_growth": 1.450612409562926,
+      "combined_floor_variant_can_be_voided": false,
+      "survives_gt5_materiality": false
+     },
+     {
+      "raw_ratio_upper_bound": 12.98310788147906,
+      "unsaturated_no_can_be_voided": true,
+      "x2yes": 6.49155394073953,
+      "largest_last_quarter_side_growth": 2.556532149199391,
+      "combined_floor_last_quarter_growth": 1.5762975888844364,
+      "combined_floor_variant_can_be_voided": false,
+      "survives_gt5_materiality": false
+     },
+     {
+      "raw_ratio_upper_bound": 14.745820475593534,
+      "unsaturated_no_can_be_voided": true,
+      "x2yes": 7.372910237796767,
+      "largest_last_quarter_side_growth": 2.405169535830399,
+      "combined_floor_last_quarter_growth": 1.568109237768968,
+      "combined_floor_variant_can_be_voided": false,
+      "survives_gt5_materiality": false
+     },
+     {
+      "raw_ratio_upper_bound": 13.217181741080097,
+      "unsaturated_no_can_be_voided": true,
+      "x2yes": 6.6085908705400485,
+      "largest_last_quarter_side_growth": 2.8163298566465875,
+      "combined_floor_last_quarter_growth": 1.7512920480794159,
+      "combined_floor_variant_can_be_voided": true,
+      "survives_gt5_materiality": false
+     },
+     {
+      "raw_ratio_upper_bound": 12.643784909584118,
+      "unsaturated_no_can_be_voided": true,
+      "x2yes": 6.321892454792059,
+      "largest_last_quarter_side_growth": 3.2455512417781924,
+      "combined_floor_last_quarter_growth": 1.8902327915710997,
+      "combined_floor_variant_can_be_voided": true,
+      "survives_gt5_materiality": false
+     },
+     {
+      "raw_ratio_upper_bound": 12.756169958865641,
+      "unsaturated_no_can_be_voided": true,
+      "x2yes": 6.3780849794328205,
+      "largest_last_quarter_side_growth": 3.436636205492606,
+      "combined_floor_last_quarter_growth": 1.8829692947708476,
+      "combined_floor_variant_can_be_voided": true,
+      "survives_gt5_materiality": false
+     },
+     {
+      "raw_ratio_upper_bound": 12.533798019437262,
+      "unsaturated_no_can_be_voided": true,
+      "x2yes": 6.266899009718631,
+      "largest_last_quarter_side_growth": 3.840249544263334,
+      "combined_floor_last_quarter_growth": 2.03182439933316,
+      "combined_floor_variant_can_be_voided": true,
+      "survives_gt5_materiality": false
+     }
+    ]
+   },
+   {
+    "member": 2,
+    "within_2floor_n": 2,
+    "raw_gt5floor_upper_bound_n": 24,
+    "material_gt5floor_n": 5,
+    "status": "UNRESOLVED",
+    "per_row_materiality": [
+     {
+      "raw_ratio_upper_bound": 3.0590627901768883,
+      "unsaturated_no_can_be_voided": true,
+      "x2yes": 1.5295313950884442,
+      "largest_last_quarter_side_growth": 12.230518170573664,
+      "combined_floor_last_quarter_growth": 5.91824719776559,
+      "combined_floor_variant_can_be_voided": true,
+      "survives_gt5_materiality": false
+     },
+     {
+      "raw_ratio_upper_bound": 2.797825271144595,
+      "unsaturated_no_can_be_voided": true,
+      "x2yes": 1.3989126355722974,
+      "largest_last_quarter_side_growth": 1.5612027339862236,
+      "combined_floor_last_quarter_growth": 0.9423565320596577,
+      "combined_floor_variant_can_be_voided": false,
+      "survives_gt5_materiality": false
+     },
+     {
+      "raw_ratio_upper_bound": 9.088948578766239,
+      "unsaturated_no_can_be_voided": false,
+      "x2yes": 4.544474289383119,
+      "largest_last_quarter_side_growth": 1.1741008020700934,
+      "combined_floor_last_quarter_growth": 1.153490228973762,
+      "combined_floor_variant_can_be_voided": false,
+      "survives_gt5_materiality": true
+     },
+     {
+      "raw_ratio_upper_bound": 7.258603728764495,
+      "unsaturated_no_can_be_voided": false,
+      "x2yes": 3.6293018643822474,
+      "largest_last_quarter_side_growth": 1.231789614522705,
+      "combined_floor_last_quarter_growth": 0.8284900669901953,
+      "combined_floor_variant_can_be_voided": false,
+      "survives_gt5_materiality": true
+     },
+     {
+      "raw_ratio_upper_bound": 6.14971218513509,
+      "unsaturated_no_can_be_voided": false,
+      "x2yes": 3.074856092567545,
+      "largest_last_quarter_side_growth": 1.013672855704895,
+      "combined_floor_last_quarter_growth": 0.9402564538346311,
+      "combined_floor_variant_can_be_voided": false,
+      "survives_gt5_materiality": true
+     },
+     {
+      "raw_ratio_upper_bound": 9.928554090712547,
+      "unsaturated_no_can_be_voided": true,
+      "x2yes": 4.9642770453562735,
+      "largest_last_quarter_side_growth": 1.5078190517078385,
+      "combined_floor_last_quarter_growth": 0.9164107135529246,
+      "combined_floor_variant_can_be_voided": false,
+      "survives_gt5_materiality": false
+     },
+     {
+      "raw_ratio_upper_bound": 9.566749908187813,
+      "unsaturated_no_can_be_voided": true,
+      "x2yes": 4.783374954093906,
+      "largest_last_quarter_side_growth": 1.6207222751606636,
+      "combined_floor_last_quarter_growth": 1.3540071168862777,
+      "combined_floor_variant_can_be_voided": false,
+      "survives_gt5_materiality": false
+     },
+     {
+      "raw_ratio_upper_bound": 9.233019174903244,
+      "unsaturated_no_can_be_voided": false,
+      "x2yes": 4.616509587451622,
+      "largest_last_quarter_side_growth": 1.320541194288515,
+      "combined_floor_last_quarter_growth": 1.267757436789265,
+      "combined_floor_variant_can_be_voided": false,
+      "survives_gt5_materiality": true
+     },
+     {
+      "raw_ratio_upper_bound": 9.293923361998413,
+      "unsaturated_no_can_be_voided": false,
+      "x2yes": 4.6469616809992065,
+      "largest_last_quarter_side_growth": 1.4525740847329338,
+      "combined_floor_last_quarter_growth": 1.4407865509230924,
+      "combined_floor_variant_can_be_voided": false,
+      "survives_gt5_materiality": true
+     },
+     {
+      "raw_ratio_upper_bound": 4.864528437975368,
+      "unsaturated_no_can_be_voided": true,
+      "x2yes": 2.432264218987684,
+      "largest_last_quarter_side_growth": 2.0633297229637715,
+      "combined_floor_last_quarter_growth": 1.987153984561208,
+      "combined_floor_variant_can_be_voided": true,
+      "survives_gt5_materiality": false
+     },
+     {
+      "raw_ratio_upper_bound": 3.8908195911758603,
+      "unsaturated_no_can_be_voided": true,
+      "x2yes": 1.9454097955879301,
+      "largest_last_quarter_side_growth": 2.246782639208147,
+      "combined_floor_last_quarter_growth": 2.083833919635385,
+      "combined_floor_variant_can_be_voided": true,
+      "survives_gt5_materiality": false
+     },
+     {
+      "raw_ratio_upper_bound": 3.78016175028772,
+      "unsaturated_no_can_be_voided": true,
+      "x2yes": 1.89008087514386,
+      "largest_last_quarter_side_growth": 2.854088601236053,
+      "combined_floor_last_quarter_growth": 2.6804504304481704,
+      "combined_floor_variant_can_be_voided": true,
+      "survives_gt5_materiality": false
+     },
+     {
+      "raw_ratio_upper_bound": 1.733272018522979,
+      "unsaturated_no_can_be_voided": true,
+      "x2yes": 0.8666360092614895,
+      "largest_last_quarter_side_growth": 3.943377512282197,
+      "combined_floor_last_quarter_growth": 2.9366717443284895,
+      "combined_floor_variant_can_be_voided": true,
+      "survives_gt5_materiality": false
+     },
+     {
+      "raw_ratio_upper_bound": 0.13561135975418195,
+      "unsaturated_no_can_be_voided": true,
+      "x2yes": 0.06780567987709098,
+      "largest_last_quarter_side_growth": 2.4803811211709497,
+      "combined_floor_last_quarter_growth": 2.0385734009615484,
+      "combined_floor_variant_can_be_voided": true,
+      "survives_gt5_materiality": false
+     },
+     {
+      "raw_ratio_upper_bound": 5.376103536886444,
+      "unsaturated_no_can_be_voided": true,
+      "x2yes": 2.688051768443222,
+      "largest_last_quarter_side_growth": 2.4459535521766345,
+      "combined_floor_last_quarter_growth": 1.747819368359054,
+      "combined_floor_variant_can_be_voided": true,
+      "survives_gt5_materiality": false
+     },
+     {
+      "raw_ratio_upper_bound": 7.786792725434052,
+      "unsaturated_no_can_be_voided": true,
+      "x2yes": 3.893396362717026,
+      "largest_last_quarter_side_growth": 9.672840171489248,
+      "combined_floor_last_quarter_growth": 1.4018603649994035,
+      "combined_floor_variant_can_be_voided": false,
+      "survives_gt5_materiality": false
+     },
+     {
+      "raw_ratio_upper_bound": 9.53695565559639,
+      "unsaturated_no_can_be_voided": true,
+      "x2yes": 4.768477827798195,
+      "largest_last_quarter_side_growth": 4.616119796659796,
+      "combined_floor_last_quarter_growth": 1.5264105405969033,
+      "combined_floor_variant_can_be_voided": true,
+      "survives_gt5_materiality": false
+     },
+     {
+      "raw_ratio_upper_bound": 8.976765712433563,
+      "unsaturated_no_can_be_voided": true,
+      "x2yes": 4.488382856216782,
+      "largest_last_quarter_side_growth": 5.447559532864868,
+      "combined_floor_last_quarter_growth": 1.832731261294692,
+      "combined_floor_variant_can_be_voided": true,
+      "survives_gt5_materiality": false
+     },
+     {
+      "raw_ratio_upper_bound": 8.65322461213681,
+      "unsaturated_no_can_be_voided": true,
+      "x2yes": 4.326612306068405,
+      "largest_last_quarter_side_growth": 3.922134830945822,
+      "combined_floor_last_quarter_growth": 2.000720713528571,
+      "combined_floor_variant_can_be_voided": true,
+      "survives_gt5_materiality": false
+     },
+     {
+      "raw_ratio_upper_bound": 2.3992758898662143,
+      "unsaturated_no_can_be_voided": true,
+      "x2yes": 1.1996379449331072,
+      "largest_last_quarter_side_growth": 10.96208527113836,
+      "combined_floor_last_quarter_growth": 1.928236572197041,
+      "combined_floor_variant_can_be_voided": true,
+      "survives_gt5_materiality": false
+     },
+     {
+      "raw_ratio_upper_bound": 4.339535140553636,
+      "unsaturated_no_can_be_voided": true,
+      "x2yes": 2.169767570276818,
+      "largest_last_quarter_side_growth": 3.1862497851670084,
+      "combined_floor_last_quarter_growth": 1.8877235986893715,
+      "combined_floor_variant_can_be_voided": true,
+      "survives_gt5_materiality": false
+     },
+     {
+      "raw_ratio_upper_bound": 4.5174160754110355,
+      "unsaturated_no_can_be_voided": true,
+      "x2yes": 2.2587080377055178,
+      "largest_last_quarter_side_growth": 3.0924326911249387,
+      "combined_floor_last_quarter_growth": 1.9612672561257913,
+      "combined_floor_variant_can_be_voided": true,
+      "survives_gt5_materiality": false
+     },
+     {
+      "raw_ratio_upper_bound": 6.013202730278568,
+      "unsaturated_no_can_be_voided": true,
+      "x2yes": 3.006601365139284,
+      "largest_last_quarter_side_growth": 3.312088809890186,
+      "combined_floor_last_quarter_growth": 2.1375500814870803,
+      "combined_floor_variant_can_be_voided": true,
+      "survives_gt5_materiality": false
+     },
+     {
+      "raw_ratio_upper_bound": 6.637020259291973,
+      "unsaturated_no_can_be_voided": true,
+      "x2yes": 3.3185101296459867,
+      "largest_last_quarter_side_growth": 3.202938689517652,
+      "combined_floor_last_quarter_growth": 2.104703975262464,
+      "combined_floor_variant_can_be_voided": true,
+      "survives_gt5_materiality": false
+     },
+     {
+      "raw_ratio_upper_bound": 4.467957274177624,
+      "unsaturated_no_can_be_voided": true,
+      "x2yes": 2.233978637088812,
+      "largest_last_quarter_side_growth": 2.9172058881092986,
+      "combined_floor_last_quarter_growth": 1.911067681114265,
+      "combined_floor_variant_can_be_voided": true,
+      "survives_gt5_materiality": false
+     },
+     {
+      "raw_ratio_upper_bound": 5.834370481651528,
+      "unsaturated_no_can_be_voided": true,
+      "x2yes": 2.917185240825764,
+      "largest_last_quarter_side_growth": 2.7604024069586215,
+      "combined_floor_last_quarter_growth": 1.8317424466095575,
+      "combined_floor_variant_can_be_voided": true,
+      "survives_gt5_materiality": false
+     },
+     {
+      "raw_ratio_upper_bound": 7.189918677623259,
+      "unsaturated_no_can_be_voided": true,
+      "x2yes": 3.5949593388116297,
+      "largest_last_quarter_side_growth": 2.7086590992287785,
+      "combined_floor_last_quarter_growth": 1.673741331568172,
+      "combined_floor_variant_can_be_voided": true,
+      "survives_gt5_materiality": false
+     },
+     {
+      "raw_ratio_upper_bound": 10.032376562262913,
+      "unsaturated_no_can_be_voided": true,
+      "x2yes": 5.016188281131456,
+      "largest_last_quarter_side_growth": 2.5021121654791485,
+      "combined_floor_last_quarter_growth": 1.535040589683585,
+      "combined_floor_variant_can_be_voided": true,
+      "survives_gt5_materiality": false
+     },
+     {
+      "raw_ratio_upper_bound": 12.493983608789794,
+      "unsaturated_no_can_be_voided": true,
+      "x2yes": 6.246991804394897,
+      "largest_last_quarter_side_growth": 2.3479112712576993,
+      "combined_floor_last_quarter_growth": 1.450612409562926,
+      "combined_floor_variant_can_be_voided": false,
+      "survives_gt5_materiality": false
+     },
+     {
+      "raw_ratio_upper_bound": 15.762930661740928,
+      "unsaturated_no_can_be_voided": true,
+      "x2yes": 7.881465330870464,
+      "largest_last_quarter_side_growth": 2.556532149199391,
+      "combined_floor_last_quarter_growth": 1.5762975888844364,
+      "combined_floor_variant_can_be_voided": false,
+      "survives_gt5_materiality": false
+     },
+     {
+      "raw_ratio_upper_bound": 17.49974232029239,
+      "unsaturated_no_can_be_voided": true,
+      "x2yes": 8.749871160146196,
+      "largest_last_quarter_side_growth": 2.405169535830399,
+      "combined_floor_last_quarter_growth": 1.568109237768968,
+      "combined_floor_variant_can_be_voided": false,
+      "survives_gt5_materiality": false
+     },
+     {
+      "raw_ratio_upper_bound": 16.005026946159386,
+      "unsaturated_no_can_be_voided": true,
+      "x2yes": 8.002513473079693,
+      "largest_last_quarter_side_growth": 2.8163298566465875,
+      "combined_floor_last_quarter_growth": 1.7512920480794159,
+      "combined_floor_variant_can_be_voided": true,
+      "survives_gt5_materiality": false
+     },
+     {
+      "raw_ratio_upper_bound": 15.38718079569565,
+      "unsaturated_no_can_be_voided": true,
+      "x2yes": 7.693590397847825,
+      "largest_last_quarter_side_growth": 3.2455512417781924,
+      "combined_floor_last_quarter_growth": 1.8902327915710997,
+      "combined_floor_variant_can_be_voided": true,
+      "survives_gt5_materiality": false
+     },
+     {
+      "raw_ratio_upper_bound": 15.548281333404699,
+      "unsaturated_no_can_be_voided": true,
+      "x2yes": 7.774140666702349,
+      "largest_last_quarter_side_growth": 3.436636205492606,
+      "combined_floor_last_quarter_growth": 1.8829692947708476,
+      "combined_floor_variant_can_be_voided": true,
+      "survives_gt5_materiality": false
+     },
+     {
+      "raw_ratio_upper_bound": 15.42858819833561,
+      "unsaturated_no_can_be_voided": true,
+      "x2yes": 7.714294099167805,
+      "largest_last_quarter_side_growth": 3.840249544263334,
+      "combined_floor_last_quarter_growth": 2.03182439933316,
+      "combined_floor_variant_can_be_voided": true,
+      "survives_gt5_materiality": false
+     }
+    ]
+   },
+   {
+    "member": 3,
+    "within_2floor_n": 2,
+    "raw_gt5floor_upper_bound_n": 23,
+    "material_gt5floor_n": 5,
+    "status": "UNRESOLVED",
+    "per_row_materiality": [
+     {
+      "raw_ratio_upper_bound": 1.3164423372209901,
+      "unsaturated_no_can_be_voided": true,
+      "x2yes": 0.6582211686104951,
+      "largest_last_quarter_side_growth": 12.230518170573664,
+      "combined_floor_last_quarter_growth": 5.91824719776559,
+      "combined_floor_variant_can_be_voided": true,
+      "survives_gt5_materiality": false
+     },
+     {
+      "raw_ratio_upper_bound": 2.210005100233445,
+      "unsaturated_no_can_be_voided": true,
+      "x2yes": 1.1050025501167224,
+      "largest_last_quarter_side_growth": 1.5612027339862236,
+      "combined_floor_last_quarter_growth": 0.9423565320596577,
+      "combined_floor_variant_can_be_voided": false,
+      "survives_gt5_materiality": false
+     },
+     {
+      "raw_ratio_upper_bound": 11.105642787180907,
+      "unsaturated_no_can_be_voided": false,
+      "x2yes": 5.552821393590453,
+      "largest_last_quarter_side_growth": 1.1741008020700934,
+      "combined_floor_last_quarter_growth": 1.153490228973762,
+      "combined_floor_variant_can_be_voided": false,
+      "survives_gt5_materiality": true
+     },
+     {
+      "raw_ratio_upper_bound": 6.75552932826467,
+      "unsaturated_no_can_be_voided": false,
+      "x2yes": 3.377764664132335,
+      "largest_last_quarter_side_growth": 1.231789614522705,
+      "combined_floor_last_quarter_growth": 0.8284900669901953,
+      "combined_floor_variant_can_be_voided": false,
+      "survives_gt5_materiality": true
+     },
+     {
+      "raw_ratio_upper_bound": 7.9907579878137,
+      "unsaturated_no_can_be_voided": false,
+      "x2yes": 3.99537899390685,
+      "largest_last_quarter_side_growth": 1.013672855704895,
+      "combined_floor_last_quarter_growth": 0.9402564538346311,
+      "combined_floor_variant_can_be_voided": false,
+      "survives_gt5_materiality": true
+     },
+     {
+      "raw_ratio_upper_bound": 9.390312112034847,
+      "unsaturated_no_can_be_voided": true,
+      "x2yes": 4.6951560560174235,
+      "largest_last_quarter_side_growth": 1.5078190517078385,
+      "combined_floor_last_quarter_growth": 0.9164107135529246,
+      "combined_floor_variant_can_be_voided": false,
+      "survives_gt5_materiality": false
+     },
+     {
+      "raw_ratio_upper_bound": 8.816076456826556,
+      "unsaturated_no_can_be_voided": true,
+      "x2yes": 4.408038228413278,
+      "largest_last_quarter_side_growth": 1.6207222751606636,
+      "combined_floor_last_quarter_growth": 1.3540071168862777,
+      "combined_floor_variant_can_be_voided": false,
+      "survives_gt5_materiality": false
+     },
+     {
+      "raw_ratio_upper_bound": 8.391636311562348,
+      "unsaturated_no_can_be_voided": false,
+      "x2yes": 4.195818155781174,
+      "largest_last_quarter_side_growth": 1.320541194288515,
+      "combined_floor_last_quarter_growth": 1.267757436789265,
+      "combined_floor_variant_can_be_voided": false,
+      "survives_gt5_materiality": true
+     },
+     {
+      "raw_ratio_upper_bound": 9.280336477978997,
+      "unsaturated_no_can_be_voided": false,
+      "x2yes": 4.6401682389894985,
+      "largest_last_quarter_side_growth": 1.4525740847329338,
+      "combined_floor_last_quarter_growth": 1.4407865509230924,
+      "combined_floor_variant_can_be_voided": false,
+      "survives_gt5_materiality": true
+     },
+     {
+      "raw_ratio_upper_bound": 6.269996870693671,
+      "unsaturated_no_can_be_voided": true,
+      "x2yes": 3.1349984353468354,
+      "largest_last_quarter_side_growth": 2.0633297229637715,
+      "combined_floor_last_quarter_growth": 1.987153984561208,
+      "combined_floor_variant_can_be_voided": true,
+      "survives_gt5_materiality": false
+     },
+     {
+      "raw_ratio_upper_bound": 5.486388454686663,
+      "unsaturated_no_can_be_voided": true,
+      "x2yes": 2.7431942273433316,
+      "largest_last_quarter_side_growth": 2.246782639208147,
+      "combined_floor_last_quarter_growth": 2.083833919635385,
+      "combined_floor_variant_can_be_voided": true,
+      "survives_gt5_materiality": false
+     },
+     {
+      "raw_ratio_upper_bound": 5.176185580383447,
+      "unsaturated_no_can_be_voided": true,
+      "x2yes": 2.5880927901917237,
+      "largest_last_quarter_side_growth": 2.854088601236053,
+      "combined_floor_last_quarter_growth": 2.6804504304481704,
+      "combined_floor_variant_can_be_voided": true,
+      "survives_gt5_materiality": false
+     },
+     {
+      "raw_ratio_upper_bound": 3.3350625100511615,
+      "unsaturated_no_can_be_voided": true,
+      "x2yes": 1.6675312550255807,
+      "largest_last_quarter_side_growth": 3.943377512282197,
+      "combined_floor_last_quarter_growth": 2.9366717443284895,
+      "combined_floor_variant_can_be_voided": true,
+      "survives_gt5_materiality": false
+     },
+     {
+      "raw_ratio_upper_bound": 2.2480895008417536,
+      "unsaturated_no_can_be_voided": true,
+      "x2yes": 1.1240447504208768,
+      "largest_last_quarter_side_growth": 2.4803811211709497,
+      "combined_floor_last_quarter_growth": 2.0385734009615484,
+      "combined_floor_variant_can_be_voided": true,
+      "survives_gt5_materiality": false
+     },
+     {
+      "raw_ratio_upper_bound": 3.7463137706641523,
+      "unsaturated_no_can_be_voided": true,
+      "x2yes": 1.8731568853320761,
+      "largest_last_quarter_side_growth": 2.4459535521766345,
+      "combined_floor_last_quarter_growth": 1.747819368359054,
+      "combined_floor_variant_can_be_voided": true,
+      "survives_gt5_materiality": false
+     },
+     {
+      "raw_ratio_upper_bound": 6.121883033528769,
+      "unsaturated_no_can_be_voided": true,
+      "x2yes": 3.0609415167643843,
+      "largest_last_quarter_side_growth": 9.672840171489248,
+      "combined_floor_last_quarter_growth": 1.4018603649994035,
+      "combined_floor_variant_can_be_voided": true,
+      "survives_gt5_materiality": false
+     },
+     {
+      "raw_ratio_upper_bound": 7.881525747756082,
+      "unsaturated_no_can_be_voided": true,
+      "x2yes": 3.940762873878041,
+      "largest_last_quarter_side_growth": 4.616119796659796,
+      "combined_floor_last_quarter_growth": 1.5264105405969033,
+      "combined_floor_variant_can_be_voided": true,
+      "survives_gt5_materiality": false
+     },
+     {
+      "raw_ratio_upper_bound": 6.9676345309884535,
+      "unsaturated_no_can_be_voided": true,
+      "x2yes": 3.4838172654942268,
+      "largest_last_quarter_side_growth": 5.447559532864868,
+      "combined_floor_last_quarter_growth": 1.832731261294692,
+      "combined_floor_variant_can_be_voided": true,
+      "survives_gt5_materiality": false
+     },
+     {
+      "raw_ratio_upper_bound": 6.401669562493845,
+      "unsaturated_no_can_be_voided": true,
+      "x2yes": 3.2008347812469227,
+      "largest_last_quarter_side_growth": 3.922134830945822,
+      "combined_floor_last_quarter_growth": 2.000720713528571,
+      "combined_floor_variant_can_be_voided": true,
+      "survives_gt5_materiality": false
+     },
+     {
+      "raw_ratio_upper_bound": 1.2646827215731646,
+      "unsaturated_no_can_be_voided": true,
+      "x2yes": 0.6323413607865823,
+      "largest_last_quarter_side_growth": 10.96208527113836,
+      "combined_floor_last_quarter_growth": 1.928236572197041,
+      "combined_floor_variant_can_be_voided": true,
+      "survives_gt5_materiality": false
+     },
+     {
+      "raw_ratio_upper_bound": 2.3383563527023465,
+      "unsaturated_no_can_be_voided": true,
+      "x2yes": 1.1691781763511733,
+      "largest_last_quarter_side_growth": 3.1862497851670084,
+      "combined_floor_last_quarter_growth": 1.8877235986893715,
+      "combined_floor_variant_can_be_voided": true,
+      "survives_gt5_materiality": false
+     },
+     {
+      "raw_ratio_upper_bound": 2.243205442297667,
+      "unsaturated_no_can_be_voided": true,
+      "x2yes": 1.1216027211488335,
+      "largest_last_quarter_side_growth": 3.0924326911249387,
+      "combined_floor_last_quarter_growth": 1.9612672561257913,
+      "combined_floor_variant_can_be_voided": true,
+      "survives_gt5_materiality": false
+     },
+     {
+      "raw_ratio_upper_bound": 3.7690242963918017,
+      "unsaturated_no_can_be_voided": true,
+      "x2yes": 1.8845121481959008,
+      "largest_last_quarter_side_growth": 3.312088809890186,
+      "combined_floor_last_quarter_growth": 2.1375500814870803,
+      "combined_floor_variant_can_be_voided": true,
+      "survives_gt5_materiality": false
+     },
+     {
+      "raw_ratio_upper_bound": 4.536434278711794,
+      "unsaturated_no_can_be_voided": true,
+      "x2yes": 2.268217139355897,
+      "largest_last_quarter_side_growth": 3.202938689517652,
+      "combined_floor_last_quarter_growth": 2.104703975262464,
+      "combined_floor_variant_can_be_voided": true,
+      "survives_gt5_materiality": false
+     },
+     {
+      "raw_ratio_upper_bound": 2.500736864352466,
+      "unsaturated_no_can_be_voided": true,
+      "x2yes": 1.250368432176233,
+      "largest_last_quarter_side_growth": 2.9172058881092986,
+      "combined_floor_last_quarter_growth": 1.911067681114265,
+      "combined_floor_variant_can_be_voided": true,
+      "survives_gt5_materiality": false
+     },
+     {
+      "raw_ratio_upper_bound": 3.9064833716991254,
+      "unsaturated_no_can_be_voided": true,
+      "x2yes": 1.9532416858495627,
+      "largest_last_quarter_side_growth": 2.7604024069586215,
+      "combined_floor_last_quarter_growth": 1.8317424466095575,
+      "combined_floor_variant_can_be_voided": true,
+      "survives_gt5_materiality": false
+     },
+     {
+      "raw_ratio_upper_bound": 5.54893680865416,
+      "unsaturated_no_can_be_voided": true,
+      "x2yes": 2.77446840432708,
+      "largest_last_quarter_side_growth": 2.7086590992287785,
+      "combined_floor_last_quarter_growth": 1.673741331568172,
+      "combined_floor_variant_can_be_voided": true,
+      "survives_gt5_materiality": false
+     },
+     {
+      "raw_ratio_upper_bound": 8.703472109262378,
+      "unsaturated_no_can_be_voided": true,
+      "x2yes": 4.351736054631189,
+      "largest_last_quarter_side_growth": 2.5021121654791485,
+      "combined_floor_last_quarter_growth": 1.535040589683585,
+      "combined_floor_variant_can_be_voided": true,
+      "survives_gt5_materiality": false
+     },
+     {
+      "raw_ratio_upper_bound": 11.398910743181794,
+      "unsaturated_no_can_be_voided": true,
+      "x2yes": 5.699455371590897,
+      "largest_last_quarter_side_growth": 2.3479112712576993,
+      "combined_floor_last_quarter_growth": 1.450612409562926,
+      "combined_floor_variant_can_be_voided": false,
+      "survives_gt5_materiality": false
+     },
+     {
+      "raw_ratio_upper_bound": 15.098137815824462,
+      "unsaturated_no_can_be_voided": true,
+      "x2yes": 7.549068907912231,
+      "largest_last_quarter_side_growth": 2.556532149199391,
+      "combined_floor_last_quarter_growth": 1.5762975888844364,
+      "combined_floor_variant_can_be_voided": false,
+      "survives_gt5_materiality": false
+     },
+     {
+      "raw_ratio_upper_bound": 16.87077572943923,
+      "unsaturated_no_can_be_voided": true,
+      "x2yes": 8.435387864719615,
+      "largest_last_quarter_side_growth": 2.405169535830399,
+      "combined_floor_last_quarter_growth": 1.568109237768968,
+      "combined_floor_variant_can_be_voided": false,
+      "survives_gt5_materiality": false
+     },
+     {
+      "raw_ratio_upper_bound": 15.387823781259456,
+      "unsaturated_no_can_be_voided": true,
+      "x2yes": 7.693911890629728,
+      "largest_last_quarter_side_growth": 2.8163298566465875,
+      "combined_floor_last_quarter_growth": 1.7512920480794159,
+      "combined_floor_variant_can_be_voided": true,
+      "survives_gt5_materiality": false
+     },
+     {
+      "raw_ratio_upper_bound": 14.881659419970296,
+      "unsaturated_no_can_be_voided": true,
+      "x2yes": 7.440829709985148,
+      "largest_last_quarter_side_growth": 3.2455512417781924,
+      "combined_floor_last_quarter_growth": 1.8902327915710997,
+      "combined_floor_variant_can_be_voided": true,
+      "survives_gt5_materiality": false
+     },
+     {
+      "raw_ratio_upper_bound": 14.991401387999222,
+      "unsaturated_no_can_be_voided": true,
+      "x2yes": 7.495700693999611,
+      "largest_last_quarter_side_growth": 3.436636205492606,
+      "combined_floor_last_quarter_growth": 1.8829692947708476,
+      "combined_floor_variant_can_be_voided": true,
+      "survives_gt5_materiality": false
+     },
+     {
+      "raw_ratio_upper_bound": 14.567680110617292,
+      "unsaturated_no_can_be_voided": true,
+      "x2yes": 7.283840055308646,
+      "largest_last_quarter_side_growth": 3.840249544263334,
+      "combined_floor_last_quarter_growth": 2.03182439933316,
+      "combined_floor_variant_can_be_voided": true,
+      "survives_gt5_materiality": false
+     }
+    ]
+   }
+  ],
+  "X_gross_sv_control": 0.12287599720694535,
+  "X_gross_sv_by_member": [
+   0.12287599720694535,
+   0.13097844904722508,
+   0.14889221960098098,
+   0.13603502006592655
+  ],
+  "X_gross_sv_member_mean": 0.13469542148026947,
+  "X_gross_sv_member_sample_std": 0.010906546588659303,
+  "X_mean_over_member_sample_std": 12.34996067594179,
+  "profile_amplitude_label": "PLAUSIBLE_ABOVE_CURRENT_ENSEMBLE_SPREAD; current floors are unsaturated, so this is not promoted to CONFIRMED",
+  "X2_floor_excess_sv": 0.07809794902747139,
+  "X2_over_X": 0.6355834402380504,
+  "X2_bound_status": "UPPER bound on floor-excess magnitude because the day-360 floors are unsaturated",
+  "row_ratios_upper_bound": [
+   2.449244047884173,
+   3.10196032809623,
+   9.47884853583025,
+   4.314543414212199,
+   5.840146918913601,
+   7.050201660457972,
+   7.335900144509817,
+   7.410389791979752,
+   8.502497275090345,
+   4.592135450098949,
+   4.363544483557227,
+   4.400514583439705,
+   3.3437316240062267,
+   2.005248990220379,
+   2.665099883993453,
+   4.734962334742477,
+   6.461301761444285,
+   5.694820218908269,
+   5.496099526275159,
+   0.6156941891307304,
+   1.634475637734891,
+   1.5618521336397608,
+   3.145538453927205,
+   3.7700953988808465,
+   1.6745725127381552,
+   3.0675061194988946,
+   4.417351578330517,
+   7.444929078224269,
+   9.912994226416933,
+   13.415090017563962,
+   15.078177755386683,
+   13.76669120679023,
+   13.395829730492624,
+   13.610416216946048,
+   13.413336854538866
+  ],
+  "row_floor_saturation": [
+   {
+    "saturated": false,
+    "reason": "nemo 180->270 2.37; lego 270->360 12.23; nemo 270->360 1.30",
+    "spreads_by_side_day_sv": {
+     "lego_day90_sv": 0.00011729706316874808,
+     "lego_day180_sv": 0.000673505072716256,
+     "lego_day270_sv": 0.0004804317860538505,
+     "lego_day360_sv": 0.005875929689052778,
+     "nemo_day90_sv": 3.666441031605817e-09,
+     "nemo_day180_sv": 0.00037575329882192943,
+     "nemo_day270_sv": 0.000890678229392378,
+     "nemo_day360_sv": 0.0011593115405978819
+    },
+    "spread_growth_ratios": {
+     "lego_180_to_270": 0.7133306125167876,
+     "nemo_180_to_270": 2.370380332481054,
+     "lego_270_to_360": 12.230518170573664,
+     "nemo_270_to_360": 1.301605341121637
+    }
+   },
+   {
+    "saturated": false,
+    "reason": "lego 180->270 1.70; nemo 180->270 2.45; nemo 270->360 1.56",
+    "spreads_by_side_day_sv": {
+     "lego_day90_sv": 5.316000064250286e-05,
+     "lego_day180_sv": 0.0007624814328555804,
+     "lego_day270_sv": 0.0012978731247924385,
+     "lego_day360_sv": 0.0007729825555851631,
+     "nemo_day90_sv": 4.116707207310749e-09,
+     "nemo_day180_sv": 0.0003112655072803063,
+     "nemo_day270_sv": 0.0007614786936966394,
+     "nemo_day360_sv": 0.0011888226184714515
+    },
+    "spread_growth_ratios": {
+     "lego_180_to_270": 1.7021701366966469,
+     "nemo_180_to_270": 2.446396005616193,
+     "lego_270_to_360": 0.5955763632202353,
+     "nemo_270_to_360": 1.5612027339862236
+    }
+   },
+   {
+    "saturated": false,
+    "reason": "lego 180->270 1.95; nemo 180->270 5.65",
+    "spreads_by_side_day_sv": {
+     "lego_day90_sv": 1.9271325486268142e-05,
+     "lego_day180_sv": 0.0007658755847259578,
+     "lego_day270_sv": 0.0014900856522774221,
+     "lego_day360_sv": 0.0017495107594920596,
+     "nemo_day90_sv": 4.221390268710331e-09,
+     "nemo_day180_sv": 0.0001179088107768165,
+     "nemo_day270_sv": 0.000666184733892312,
+     "nemo_day360_sv": 0.0006956861698450079
+    },
+    "spread_growth_ratios": {
+     "lego_180_to_270": 1.9455975382876292,
+     "nemo_180_to_270": 5.649999601414849,
+     "lego_270_to_360": 1.1741008020700934,
+     "nemo_270_to_360": 1.0442841669161766
+    }
+   },
+   {
+    "saturated": false,
+    "reason": "lego 180->270 1.42; nemo 180->270 2.36",
+    "spreads_by_side_day_sv": {
+     "lego_day90_sv": 1.563408815667121e-05,
+     "lego_day180_sv": 0.0008613783262478184,
+     "lego_day270_sv": 0.001221359515715819,
+     "lego_day360_sv": 0.0008432687145067836,
+     "nemo_day90_sv": 4.02363663768233e-09,
+     "nemo_day180_sv": 0.00026018096242200547,
+     "nemo_day270_sv": 0.0006135665371517401,
+     "nemo_day360_sv": 0.000755784888282173
+    },
+    "spread_growth_ratios": {
+     "lego_180_to_270": 1.4179129872423029,
+     "nemo_180_to_270": 2.358229946726672,
+     "lego_270_to_360": 0.690434473761444,
+     "nemo_270_to_360": 1.231789614522705
+    }
+   },
+   {
+    "saturated": false,
+    "reason": "lego 180->270 1.52; nemo 180->270 2.38",
+    "spreads_by_side_day_sv": {
+     "lego_day90_sv": 2.028360611380713e-05,
+     "lego_day180_sv": 0.000557617802118494,
+     "lego_day270_sv": 0.0008478685497424919,
+     "lego_day360_sv": 0.0008594613340798396,
+     "nemo_day90_sv": 4.0701422580260426e-09,
+     "nemo_day180_sv": 0.0002372827345109809,
+     "nemo_day270_sv": 0.0005642999847999708,
+     "nemo_day360_sv": 0.00042237238088041706
+    },
+    "spread_growth_ratios": {
+     "lego_180_to_270": 1.5205191558111688,
+     "nemo_180_to_270": 2.378175495840201,
+     "lego_270_to_360": 1.013672855704895,
+     "nemo_270_to_360": 0.7484890878211466
+    }
+   },
+   {
+    "saturated": false,
+    "reason": "lego 180->270 1.40; nemo 180->270 7.30; nemo 270->360 1.51",
+    "spreads_by_side_day_sv": {
+     "lego_day90_sv": 4.0754343054717205e-06,
+     "lego_day180_sv": 0.0004957838581717284,
+     "lego_day270_sv": 0.0006951651754696059,
+     "lego_day360_sv": 0.0005203312114425549,
+     "nemo_day90_sv": 3.8797419538005974e-09,
+     "nemo_day180_sv": 4.206791058141553e-05,
+     "nemo_day270_sv": 0.0003069671798888709,
+     "nemo_day360_sv": 0.0004628509620854668
+    },
+    "spread_growth_ratios": {
+     "lego_180_to_270": 1.4021537087413933,
+     "nemo_180_to_270": 7.296943814092843,
+     "lego_270_to_360": 0.7485001116332601,
+     "nemo_270_to_360": 1.5078190517078385
+    }
+   },
+   {
+    "saturated": false,
+    "reason": "lego 180->270 1.84; nemo 180->270 6.80; nemo 270->360 1.62",
+    "spreads_by_side_day_sv": {
+     "lego_day90_sv": 5.385537866626797e-06,
+     "lego_day180_sv": 0.000256837375789251,
+     "lego_day270_sv": 0.00047164014872667605,
+     "lego_day360_sv": 0.0005657093410224713,
+     "nemo_day90_sv": 4.11054904852325e-09,
+     "nemo_day180_sv": 4.892535035543577e-05,
+     "nemo_day270_sv": 0.00033263687659243566,
+     "nemo_day360_sv": 0.0005391119954332292
+    },
+    "spread_growth_ratios": {
+     "lego_180_to_270": 1.8363376719503721,
+     "nemo_180_to_270": 6.7988654997026226,
+     "lego_270_to_360": 1.1994511971675041,
+     "nemo_270_to_360": 1.6207222751606636
+    }
+   },
+   {
+    "saturated": false,
+    "reason": "lego 180->270 2.94; nemo 180->270 3.36; lego 270->360 1.32",
+    "spreads_by_side_day_sv": {
+     "lego_day90_sv": 5.80458922698969e-06,
+     "lego_day180_sv": 0.0001849071559344224,
+     "lego_day270_sv": 0.0005437744826150013,
+     "lego_day360_sv": 0.0007180766046960332,
+     "nemo_day90_sv": 5.688973402707312e-09,
+     "nemo_day180_sv": 7.878158088017483e-05,
+     "nemo_day270_sv": 0.00026462199930100115,
+     "nemo_day360_sv": 0.0002686022853539364
+    },
+    "spread_growth_ratios": {
+     "lego_180_to_270": 2.940797395682467,
+     "nemo_180_to_270": 3.3589323334788848,
+     "lego_270_to_360": 1.320541194288515,
+     "nemo_270_to_360": 1.0150414026930836
+    }
+   },
+   {
+    "saturated": false,
+    "reason": "lego 180->270 4.09; nemo 180->270 10.15; lego 270->360 1.45; nemo 270->360 1.39",
+    "spreads_by_side_day_sv": {
+     "lego_day90_sv": 5.492517188726644e-06,
+     "lego_day180_sv": 0.0001090345309782298,
+     "lego_day270_sv": 0.0004455881989612286,
+     "lego_day360_sv": 0.000647249870273903,
+     "nemo_day90_sv": 5.499490290648497e-09,
+     "nemo_day180_sv": 2.0443921165077343e-05,
+     "nemo_day270_sv": 0.00020751173488979042,
+     "nemo_day360_sv": 0.0002874325756236568
+    },
+    "spread_growth_ratios": {
+     "lego_180_to_270": 4.086670479191553,
+     "nemo_180_to_270": 10.150290309486495,
+     "lego_270_to_360": 1.4525740847329338,
+     "nemo_270_to_360": 1.3851388972113428
+    }
+   },
+   {
+    "saturated": false,
+    "reason": "lego 180->270 6.50; nemo 180->270 4.43; lego 270->360 2.06; nemo 270->360 1.68",
+    "spreads_by_side_day_sv": {
+     "lego_day90_sv": 8.179044457700751e-06,
+     "lego_day180_sv": 5.104458269806734e-05,
+     "lego_day270_sv": 0.000331949631057579,
+     "lego_day360_sv": 0.0006849215402879608,
+     "nemo_day90_sv": 2.0853348678979695e-08,
+     "nemo_day180_sv": 3.891388485962831e-05,
+     "nemo_day270_sv": 0.00017247956053796255,
+     "nemo_day360_sv": 0.0002889185506185307
+    },
+    "spread_growth_ratios": {
+     "lego_180_to_270": 6.503131449248724,
+     "nemo_180_to_270": 4.432339797481993,
+     "lego_270_to_360": 2.0633297229637715,
+     "nemo_270_to_360": 1.675088629153482
+    }
+   },
+   {
+    "saturated": false,
+    "reason": "lego 180->270 1.69; nemo 180->270 7.11; lego 270->360 2.03; nemo 270->360 2.25",
+    "spreads_by_side_day_sv": {
+     "lego_day90_sv": 7.059483100072101e-06,
+     "lego_day180_sv": 0.00013976693249143386,
+     "lego_day270_sv": 0.000236858925314769,
+     "lego_day360_sv": 0.0004807933737291992,
+     "nemo_day90_sv": 4.446457632803137e-08,
+     "nemo_day180_sv": 1.8689873851591128e-05,
+     "nemo_day270_sv": 0.00013284600535255412,
+     "nemo_day360_sv": 0.00029847609851427117
+    },
+    "spread_growth_ratios": {
+     "lego_180_to_270": 1.69467069994747,
+     "nemo_180_to_270": 7.107913429883558,
+     "lego_270_to_360": 2.029872309393696,
+     "nemo_270_to_360": 2.246782639208147
+    }
+   },
+   {
+    "saturated": false,
+    "reason": "nemo 180->270 3.01; lego 270->360 2.85; nemo 270->360 2.36",
+    "spreads_by_side_day_sv": {
+     "lego_day90_sv": 7.87504090457811e-06,
+     "lego_day180_sv": 0.00013217570028686173,
+     "lego_day270_sv": 0.0001313415806272591,
+     "lego_day360_sv": 0.00037486050813658617,
+     "nemo_day90_sv": 5.225257670193037e-08,
+     "nemo_day180_sv": 3.393357267388898e-05,
+     "nemo_day270_sv": 0.00010202806169435817,
+     "nemo_day360_sv": 0.000241275742962408
+    },
+    "spread_growth_ratios": {
+     "lego_180_to_270": 0.9936893115921283,
+     "nemo_180_to_270": 3.0066996680507554,
+     "lego_270_to_360": 2.854088601236053,
+     "nemo_270_to_360": 2.3647978698761247
+    }
+   },
+   {
+    "saturated": false,
+    "reason": "nemo 180->270 11.61; lego 270->360 2.51; nemo 270->360 3.94",
+    "spreads_by_side_day_sv": {
+     "lego_day90_sv": 6.887200841601755e-06,
+     "lego_day180_sv": 0.00018353635035681584,
+     "lego_day270_sv": 0.00010496934620357337,
+     "lego_day360_sv": 0.00026346193964425156,
+     "nemo_day90_sv": 7.51829101343662e-08,
+     "nemo_day180_sv": 5.2381609350980885e-06,
+     "nemo_day270_sv": 6.08103725132117e-05,
+     "nemo_day360_sv": 0.00023979825548210243
+    },
+    "spread_growth_ratios": {
+     "lego_180_to_270": 0.5719267382156225,
+     "nemo_180_to_270": 11.609107331115817,
+     "lego_270_to_360": 2.5098940707252186,
+     "nemo_270_to_360": 3.943377512282197
+    }
+   },
+   {
+    "saturated": false,
+    "reason": "nemo 180->270 7.68; lego 270->360 2.48; nemo 270->360 1.74",
+    "spreads_by_side_day_sv": {
+     "lego_day90_sv": 6.7706622464838e-07,
+     "lego_day180_sv": 0.0001900592173462771,
+     "lego_day270_sv": 7.538355916901631e-05,
+     "lego_day360_sv": 0.0001869799570095013,
+     "nemo_day90_sv": 4.714246314974475e-08,
+     "nemo_day180_sv": 1.3030490254070627e-05,
+     "nemo_day270_sv": 0.00010006195458916741,
+     "nemo_day360_sv": 0.00017396494270588135
+    },
+    "spread_growth_ratios": {
+     "lego_180_to_270": 0.39663195619537756,
+     "nemo_180_to_270": 7.679062923815074,
+     "lego_270_to_360": 2.4803811211709497,
+     "nemo_270_to_360": 1.738572301731897
+    }
+   },
+   {
+    "saturated": false,
+    "reason": "nemo 180->270 7.68; lego 270->360 2.45; nemo 270->360 1.41",
+    "spreads_by_side_day_sv": {
+     "lego_day90_sv": 8.221675194588469e-06,
+     "lego_day180_sv": 0.00020357909510691836,
+     "lego_day270_sv": 6.832020150426931e-05,
+     "lego_day360_sv": 0.00016710803955479096,
+     "nemo_day90_sv": 2.1583853098445328e-08,
+     "nemo_day180_sv": 1.4738804566520553e-05,
+     "nemo_day270_sv": 0.00011321605728542782,
+     "nemo_day360_sv": 0.0001596588709610769
+    },
+    "spread_growth_ratios": {
+     "lego_180_to_270": 0.3355953688092974,
+     "nemo_180_to_270": 7.681495251154903,
+     "lego_270_to_360": 2.4459535521766345,
+     "nemo_270_to_360": 1.410214017244591
+    }
+   },
+   {
+    "saturated": false,
+    "reason": "nemo 180->270 13.04; lego 270->360 9.67",
+    "spreads_by_side_day_sv": {
+     "lego_day90_sv": 4.401139131021986e-06,
+     "lego_day180_sv": 0.00022678095383616835,
+     "lego_day270_sv": 1.6695616547380304e-05,
+     "lego_day360_sv": 0.00016149403042728085,
+     "nemo_day90_sv": 9.710557686692888e-08,
+     "nemo_day180_sv": 1.053537825175033e-05,
+     "nemo_day270_sv": 0.00013741157079708656,
+     "nemo_day360_sv": 0.00010758481462370307
+    },
+    "spread_growth_ratios": {
+     "lego_180_to_270": 0.07362001202024043,
+     "nemo_180_to_270": 13.042870176422685,
+     "lego_270_to_360": 9.672840171489248,
+     "nemo_270_to_360": 0.7829385400343892
+    }
+   },
+   {
+    "saturated": false,
+    "reason": "nemo 180->270 10.92; lego 270->360 4.62",
+    "spreads_by_side_day_sv": {
+     "lego_day90_sv": 4.026240230883292e-06,
+     "lego_day180_sv": 0.00024134751030875553,
+     "lego_day270_sv": 3.633817679914281e-05,
+     "lego_day360_sv": 0.00016774137729704683,
+     "nemo_day90_sv": 1.7155905474561072e-07,
+     "nemo_day180_sv": 1.2244999450890864e-05,
+     "nemo_day270_sv": 0.00013369942617162816,
+     "nemo_day360_sv": 0.0001287949893147696
+    },
+    "spread_growth_ratios": {
+     "lego_180_to_270": 0.15056371102670763,
+     "nemo_180_to_270": 10.918695971186924,
+     "lego_270_to_360": 4.616119796659796,
+     "nemo_270_to_360": 0.9633174427348491
+    }
+   },
+   {
+    "saturated": false,
+    "reason": "nemo 180->270 139.28; lego 270->360 5.45",
+    "spreads_by_side_day_sv": {
+     "lego_day90_sv": 3.3712862538270013e-06,
+     "lego_day180_sv": 0.00022213155870503545,
+     "lego_day270_sv": 3.969012462985832e-05,
+     "lego_day360_sv": 0.0002162143167879794,
+     "nemo_day90_sv": 1.5028680492755635e-07,
+     "nemo_day180_sv": 9.644345163939788e-07,
+     "nemo_day270_sv": 0.0001343295485689636,
+     "nemo_day360_sv": 0.00013839135989436236
+    },
+    "spread_growth_ratios": {
+     "lego_180_to_270": 0.17867845911333172,
+     "nemo_180_to_270": 139.28322378093833,
+     "lego_270_to_360": 5.447559532864868,
+     "nemo_270_to_360": 1.0302376608026302
+    }
+   },
+   {
+    "saturated": false,
+    "reason": "nemo 180->270 15.21; lego 270->360 3.92; nemo 270->360 1.46",
+    "spreads_by_side_day_sv": {
+     "lego_day90_sv": 1.3268308515253272e-06,
+     "lego_day180_sv": 0.0002560264471653772,
+     "lego_day270_sv": 5.181454327092666e-05,
+     "lego_day360_sv": 0.00020322362491245093,
+     "nemo_day90_sv": 3.713332027583679e-08,
+     "nemo_day180_sv": 8.387433024886484e-06,
+     "nemo_day270_sv": 0.00012761269539666076,
+     "nemo_day360_sv": 0.00018610170022576657
+    },
+    "spread_growth_ratios": {
+     "lego_180_to_270": 0.20237965196407107,
+     "nemo_180_to_270": 15.214749854695606,
+     "lego_270_to_360": 3.922134830945822,
+     "nemo_270_to_360": 1.458332179626043
+    }
+   },
+   {
+    "saturated": false,
+    "reason": "nemo 180->270 25.79; lego 270->360 10.96; nemo 270->360 1.42",
+    "spreads_by_side_day_sv": {
+     "lego_day90_sv": 2.858576509743935e-06,
+     "lego_day180_sv": 0.0003666494573610021,
+     "lego_day270_sv": 1.5969591743576678e-05,
+     "lego_day360_sv": 0.00017506002643835465,
+     "nemo_day90_sv": 8.373697220324933e-09,
+     "nemo_day180_sv": 5.138117009818189e-06,
+     "nemo_day270_sv": 0.00013251650658634173,
+     "nemo_day360_sv": 0.00018866451162765
+    },
+    "spread_growth_ratios": {
+     "lego_180_to_270": 0.043555476281130996,
+     "nemo_180_to_270": 25.79086975503323,
+     "lego_270_to_360": 10.96208527113836,
+     "nemo_270_to_360": 1.4237057441951564
+    }
+   },
+   {
+    "saturated": false,
+    "reason": "nemo 180->270 14.14; lego 270->360 3.19; nemo 270->360 1.51",
+    "spreads_by_side_day_sv": {
+     "lego_day90_sv": 1.3174638119376706e-06,
+     "lego_day180_sv": 0.0002693967550930396,
+     "lego_day270_sv": 5.676935964721208e-05,
+     "lego_day360_sv": 0.00018088135997999813,
+     "nemo_day90_sv": 7.790393929677074e-09,
+     "nemo_day180_sv": 9.050504105261103e-06,
+     "nemo_day270_sv": 0.0001279307981341109,
+     "nemo_day360_sv": 0.00019258119938457996
+    },
+    "spread_growth_ratios": {
+     "lego_180_to_270": 0.2107277039309774,
+     "nemo_180_to_270": 14.135212430846154,
+     "lego_270_to_360": 3.1862497851670084,
+     "nemo_270_to_360": 1.5053544743986944
+    }
+   },
+   {
+    "saturated": false,
+    "reason": "nemo 180->270 134.87; lego 270->360 3.09",
+    "spreads_by_side_day_sv": {
+     "lego_day90_sv": 4.228891042702685e-06,
+     "lego_day180_sv": 0.0001984175378731593,
+     "lego_day270_sv": 8.02090685144279e-05,
+     "lego_day360_sv": 0.00024804114559869684,
+     "nemo_day90_sv": 1.708938994843729e-08,
+     "nemo_day180_sv": 9.611005710221625e-07,
+     "nemo_day270_sv": 0.00012962309281521823,
+     "nemo_day360_sv": 0.00016689245560048738
+    },
+    "spread_growth_ratios": {
+     "lego_180_to_270": 0.4042438454492993,
+     "nemo_180_to_270": 134.869436897077,
+     "lego_270_to_360": 3.0924326911249387,
+     "nemo_270_to_360": 1.287521011695021
+    }
+   },
+   {
+    "saturated": false,
+    "reason": "nemo 180->270 17.95; lego 270->360 3.31; nemo 270->360 1.38",
+    "spreads_by_side_day_sv": {
+     "lego_day90_sv": 3.0841445445679526e-06,
+     "lego_day180_sv": 0.0001879024611329065,
+     "lego_day270_sv": 7.996348843396971e-05,
+     "lego_day360_sv": 0.0002648461752419344,
+     "nemo_day90_sv": 2.606209684306281e-08,
+     "nemo_day180_sv": 6.922055950884321e-06,
+     "nemo_day270_sv": 0.00012423009551628165,
+     "nemo_day360_sv": 0.00017201149658817446
+    },
+    "spread_growth_ratios": {
+     "lego_180_to_270": 0.42555849429460224,
+     "nemo_180_to_270": 17.946993840812677,
+     "lego_270_to_360": 3.312088809890186,
+     "nemo_270_to_360": 1.384620174952941
+    }
+   },
+   {
+    "saturated": false,
+    "reason": "nemo 180->270 58.70; lego 270->360 3.20",
+    "spreads_by_side_day_sv": {
+     "lego_day90_sv": 1.4423152723581188e-06,
+     "lego_day180_sv": 0.00016676616390844606,
+     "lego_day270_sv": 8.793203335420609e-05,
+     "lego_day360_sv": 0.0002816409116781433,
+     "nemo_day90_sv": 2.122002270274841e-08,
+     "nemo_day180_sv": 2.129414881572443e-06,
+     "nemo_day270_sv": 0.00012500398806715064,
+     "nemo_day360_sv": 0.00015540059750208192
+    },
+    "spread_growth_ratios": {
+     "lego_180_to_270": 0.5272774242290565,
+     "nemo_180_to_270": 58.7034443822628,
+     "lego_270_to_360": 3.202938689517652,
+     "nemo_270_to_360": 1.2431651174089149
+    }
+   },
+   {
+    "saturated": false,
+    "reason": "nemo 180->270 16.70; lego 270->360 2.92",
+    "spreads_by_side_day_sv": {
+     "lego_day90_sv": 1.489952392055378e-06,
+     "lego_day180_sv": 0.0001550009171600283,
+     "lego_day270_sv": 8.850760616721898e-05,
+     "lego_day360_sv": 0.0002581949098534701,
+     "nemo_day90_sv": 4.950619846845656e-09,
+     "nemo_day180_sv": 7.810523045519504e-06,
+     "nemo_day270_sv": 0.00013042988509003636,
+     "nemo_day360_sv": 0.0001551638040006637
+    },
+    "spread_growth_ratios": {
+     "lego_180_to_270": 0.5710134352033587,
+     "nemo_180_to_270": 16.69925103989768,
+     "lego_270_to_360": 2.9172058881092986,
+     "nemo_270_to_360": 1.1896338319515762
+    }
+   },
+   {
+    "saturated": false,
+    "reason": "nemo 180->270 25.00; lego 270->360 2.76",
+    "spreads_by_side_day_sv": {
+     "lego_day90_sv": 1.6299007393175455e-06,
+     "lego_day180_sv": 0.00015276685442486683,
+     "lego_day270_sv": 9.315235060473331e-05,
+     "lego_day360_sv": 0.0002571379728231592,
+     "nemo_day90_sv": 4.108252407579361e-09,
+     "nemo_day180_sv": 5.476410616828258e-06,
+     "nemo_day270_sv": 0.00013689834457709853,
+     "nemo_day360_sv": 0.00016086291038984154
+    },
+    "spread_growth_ratios": {
+     "lego_180_to_270": 0.6097680740722924,
+     "nemo_180_to_270": 24.997823237802645,
+     "lego_270_to_360": 2.7604024069586215,
+     "nemo_270_to_360": 1.1750537297348151
+    }
+   },
+   {
+    "saturated": false,
+    "reason": "nemo 180->270 34.89; lego 270->360 2.71",
+    "spreads_by_side_day_sv": {
+     "lego_day90_sv": 2.025108636053881e-06,
+     "lego_day180_sv": 0.0001410817780178175,
+     "lego_day270_sv": 8.921866435073645e-05,
+     "lego_day360_sv": 0.00024166294701466053,
+     "nemo_day90_sv": 4.12171626843528e-09,
+     "nemo_day180_sv": 4.279868350733366e-06,
+     "nemo_day270_sv": 0.00014932500622085246,
+     "nemo_day360_sv": 0.00016236958527850894
+    },
+    "spread_growth_ratios": {
+     "lego_180_to_270": 0.6323897076167331,
+     "nemo_180_to_270": 34.89009333552637,
+     "lego_270_to_360": 2.7086590992287785,
+     "nemo_270_to_360": 1.0873569630954074
+    }
+   },
+   {
+    "saturated": false,
+    "reason": "nemo 180->270 23.29; lego 270->360 2.50",
+    "spreads_by_side_day_sv": {
+     "lego_day90_sv": 1.0933376948741854e-06,
+     "lego_day180_sv": 0.00014810317683340408,
+     "lego_day270_sv": 8.830710158917974e-05,
+     "lego_day360_sv": 0.00022095427318448966,
+     "nemo_day90_sv": 3.6201873944258636e-09,
+     "nemo_day180_sv": 6.702464937880496e-06,
+     "nemo_day270_sv": 0.0001560861875739447,
+     "nemo_day360_sv": 0.0001642006952927567
+    },
+    "spread_growth_ratios": {
+     "lego_180_to_270": 0.5962539324089801,
+     "nemo_180_to_270": 23.287878268752788,
+     "lego_270_to_360": 2.5021121654791485,
+     "nemo_270_to_360": 1.0519873529165917
+    }
+   },
+   {
+    "saturated": false,
+    "reason": "nemo 180->270 40.59; lego 270->360 2.35",
+    "spreads_by_side_day_sv": {
+     "lego_day90_sv": 4.3368134820172595e-07,
+     "lego_day180_sv": 0.0001292450736052201,
+     "lego_day270_sv": 9.235329133217301e-05,
+     "lego_day360_sv": 0.000216837333656555,
+     "nemo_day90_sv": 3.5996676385945363e-09,
+     "nemo_day180_sv": 4.06519050389597e-06,
+     "nemo_day270_sv": 0.00016499399353403743,
+     "nemo_day360_sv": 0.0001679701502221239
+    },
+    "spread_growth_ratios": {
+     "lego_180_to_270": 0.7145594702840802,
+     "nemo_180_to_270": 40.58702621092704,
+     "lego_270_to_360": 2.3479112712576993,
+     "nemo_270_to_360": 1.0180379698941737
+    }
+   },
+   {
+    "saturated": false,
+    "reason": "nemo 180->270 28.42; lego 270->360 2.56",
+    "spreads_by_side_day_sv": {
+     "lego_day90_sv": 1.9538966365642287e-06,
+     "lego_day180_sv": 0.00013425925835520403,
+     "lego_day270_sv": 9.225369008467037e-05,
+     "lego_day360_sv": 0.00023584952458373685,
+     "nemo_day90_sv": 2.2097906124716203e-09,
+     "nemo_day180_sv": 5.658675409789845e-06,
+     "nemo_day270_sv": 0.00016083092676862296,
+     "nemo_day360_sv": 0.0001726060218556793
+    },
+    "spread_growth_ratios": {
+     "lego_180_to_270": 0.6871309376713425,
+     "nemo_180_to_270": 28.42200959086218,
+     "lego_270_to_360": 2.556532149199391,
+     "nemo_270_to_360": 1.0732141219580014
+    }
+   },
+   {
+    "saturated": false,
+    "reason": "nemo 180->270 31.70; lego 270->360 2.41",
+    "spreads_by_side_day_sv": {
+     "lego_day90_sv": 1.6235767845296622e-07,
+     "lego_day180_sv": 0.0001443471040242803,
+     "lego_day270_sv": 0.00010255181579394737,
+     "lego_day360_sv": 0.00024665450319169297,
+     "nemo_day90_sv": 2.4292072783873506e-09,
+     "nemo_day180_sv": 5.272128696121055e-06,
+     "nemo_day270_sv": 0.00016712864311638022,
+     "nemo_day360_sv": 0.00018359197598818362
+    },
+    "spread_growth_ratios": {
+     "lego_180_to_270": 0.7104528801402026,
+     "nemo_180_to_270": 31.70041035594301,
+     "lego_270_to_360": 2.405169535830399,
+     "nemo_270_to_360": 1.0985069498849407
+    }
+   },
+   {
+    "saturated": false,
+    "reason": "nemo 180->270 32.12; lego 270->360 2.82",
+    "spreads_by_side_day_sv": {
+     "lego_day90_sv": 1.136495977254514e-06,
+     "lego_day180_sv": 0.00014524454567543715,
+     "lego_day270_sv": 0.00010170942622375594,
+     "lego_day360_sv": 0.00028644729377635725,
+     "nemo_day90_sv": 1.7288740676394372e-09,
+     "nemo_day180_sv": 5.201933020087316e-06,
+     "nemo_day270_sv": 0.00016709237611294567,
+     "nemo_day360_sv": 0.0001879005095819674
+    },
+    "spread_growth_ratios": {
+     "lego_180_to_270": 0.7002633093777951,
+     "nemo_180_to_270": 32.12120868679332,
+     "lego_270_to_360": 2.8163298566465875,
+     "nemo_270_to_360": 1.124530717397642
+    }
+   },
+   {
+    "saturated": false,
+    "reason": "nemo 180->270 32.10; lego 270->360 3.25",
+    "spreads_by_side_day_sv": {
+     "lego_day90_sv": 1.9048697830729117e-06,
+     "lego_day180_sv": 0.00013720692827612016,
+     "lego_day270_sv": 9.263607427108994e-05,
+     "lego_day360_sv": 0.00030065512588399283,
+     "nemo_day90_sv": 1.4381873244023713e-09,
+     "nemo_day180_sv": 5.021893935994157e-06,
+     "nemo_day270_sv": 0.00016118829784120755,
+     "nemo_day360_sv": 0.0001819334903169991
+    },
+    "spread_growth_ratios": {
+     "lego_180_to_270": 0.6751559519258807,
+     "nemo_180_to_270": 32.09711314010418,
+     "lego_270_to_360": 3.2455512417781924,
+     "nemo_270_to_360": 1.1287016039851006
+    }
+   },
+   {
+    "saturated": false,
+    "reason": "nemo 180->270 31.00; lego 270->360 3.44",
+    "spreads_by_side_day_sv": {
+     "lego_day90_sv": 7.087924015402018e-07,
+     "lego_day180_sv": 0.00012915513409444114,
+     "lego_day270_sv": 8.277548295654336e-05,
+     "lego_day360_sv": 0.00028446922165559305,
+     "nemo_day90_sv": 5.373530027882562e-10,
+     "nemo_day180_sv": 4.971947928738949e-06,
+     "nemo_day270_sv": 0.00015414188132419125,
+     "nemo_day360_sv": 0.00016617033896278573
+    },
+    "spread_growth_ratios": {
+     "lego_180_to_270": 0.6408996710577225,
+     "nemo_180_to_270": 31.00231207837423,
+     "lego_270_to_360": 3.436636205492606,
+     "nemo_270_to_360": 1.0780349735922596
+    }
+   },
+   {
+    "saturated": false,
+    "reason": "nemo 180->270 31.98; lego 270->360 3.84",
+    "spreads_by_side_day_sv": {
+     "lego_day90_sv": 2.1433533159136333e-08,
+     "lego_day180_sv": 0.00011292245236562373,
+     "lego_day270_sv": 7.410613447615893e-05,
+     "lego_day360_sv": 0.00028458604914918665,
+     "nemo_day90_sv": 4.1723418028512846e-10,
+     "nemo_day180_sv": 4.607909393234508e-06,
+     "nemo_day270_sv": 0.00014735544137963307,
+     "nemo_day360_sv": 0.00017698273974814865
+    },
+    "spread_growth_ratios": {
+     "lego_180_to_270": 0.6562568641018869,
+     "nemo_180_to_270": 31.978806179649588,
+     "lego_270_to_360": 3.840249544263334,
+     "nemo_270_to_360": 1.2010600904257518
+    }
+   }
+  ],
+  "saturation_summary": {
+   "saturated_rows": 0,
+   "unsaturated_rows": 35,
+   "denominator": 35
+  }
+ },
+ "band_sensitivity": {
+  "status": "UNRESOLVED",
+  "C_median": 0.10230278965655432,
+  "C_values": [
+   0.8620040724100256,
+   0.8614569518514253,
+   0.8614590214652854,
+   0.85691150618189,
+   0.07016013345541794,
+   0.057813270828212936,
+   0.08524591320600336,
+   0.07834301081186058,
+   0.20237689812510748,
+   0.10957007796060032,
+   0.1540562519924869,
+   0.14344021614462948,
+   0.019854869014643974,
+   0.015977267966648584,
+   0.09428192293771818,
+   0.09503550135250831
+  ],
+  "C_denominator": "sum_abs_row_gap",
+  "day360_control_net_sv": 0.002439686829587659,
+  "day360_control_C": 0.019854869014643974,
+  "band_floor_sv": 0.00960450656965795,
+  "J_one_row_over_band_floor": 1.8581226682339187,
+  "day360_net_over_band_floor": 0.2540148014781924,
+  "day360_net_ppm_of_exact_day360_nemo_band": 66.91829010855209,
+  "day360_nemo_band_denominator_sv": 36.45769827098241,
+  "day360_band_status": "UNMEASURABLE_BELOW_OWN_ENSEMBLE_FLOOR",
+  "band_saturation": {
+   "saturated": false,
+   "reason": "lego 180->270 8.93; nemo 180->270 12.10; lego 270->360 1.40",
+   "spreads_by_side_day_sv": {
+    "lego_day90_sv": 6.903798466581317e-05,
+    "lego_day180_sv": 0.0007433413612627969,
+    "lego_day270_sv": 0.00663822213581786,
+    "lego_day360_sv": 0.009272868826336692,
+    "nemo_day90_sv": 2.2682461294826906e-08,
+    "nemo_day180_sv": 0.00025024339144883936,
+    "nemo_day270_sv": 0.003028870178780209,
+    "nemo_day360_sv": 0.0025020891623113474
+   },
+   "spread_growth_ratios": {
+    "lego_180_to_270": 8.930247234649732,
+    "nemo_180_to_270": 12.103696969753711,
+    "lego_270_to_360": 1.396890407795043,
+    "nemo_270_to_360": 0.8260800280713888
+   }
+  },
+  "withdrawn_edge_decider": {
+   "status": "RETRACTED_INVALID_TOPOLOGY",
+   "reason": "rows 13 and 49 are topologically blocked; shifted masks are not circumpolar-channel functionals"
+  },
+  "outside_channel_rows": {
+   "13": {
+    "gap_sv": 0.03223045228917676,
+    "row_floor_sv": 0.003843501337641185,
+    "gap_over_band_floor": 3.355763469515186,
+    "gap_over_band_net": 13.210897357110444,
+    "largest_abs_in_channel_control_sv": 0.01784635137428303,
+    "gap_over_largest_abs_in_channel_control": 1.8059967336304674,
+    "wet_u_columns": 49,
+    "wet_t_columns": 50,
+    "total_u_columns": 52,
+    "topology": "blocked; not a circumpolar channel boundary option"
+   },
+   "49": {
+    "gap_sv": 0.003118879099399674,
+    "row_floor_sv": 0.0003248939003844886,
+    "gap_over_band_floor": 0.324730799732354,
+    "gap_over_band_net": 1.2783932189881961,
+    "largest_abs_in_channel_control_sv": 0.01784635137428303,
+    "gap_over_largest_abs_in_channel_control": 0.17476284277883514,
+    "wet_u_columns": 49,
+    "wet_t_columns": 50,
+    "total_u_columns": 52,
+    "topology": "blocked; not a circumpolar channel boundary option"
+   }
+  }
+ },
+ "verdict_legs": {
+  "A_fixed_pattern_persistence": "UNRESOLVED",
+  "A_coherent_reorganization_guard": "CONFIRMED_COHERENT_REORGANIZATION_PRESENT",
+  "B_member_stability": "DEMOTED_CONSTRUCTION_FORCED_AMPLITUDE",
+  "C_spatial_structure": "CONFIRMED_PHYSICAL_STRUCTURE",
+  "D_row_agreement": "UNRESOLVED",
+  "E_band_sensitivity": "UNRESOLVED",
+  "day360_band_net": "UNMEASURABLE_BELOW_OWN_ENSEMBLE_FLOOR"
+ },
+ "final_verdict": "PLAUSIBLE_TEMPORALLY_REORGANIZING_UNRESOLVED[A_fixed_pattern_persistence,D_row_agreement,E_band_sensitivity,B_member_stability]",
+ "retractions": [
+  {
+   "claim": "genuine row-level agreement REFUTED",
+   "status": "RETRACTED",
+   "replacement": "D UNRESOLVED: raw 17/35 >5-floor rows is an upper bound; regional_audit.u_is_material voids 14, leaving 3/35"
+  },
+  {
+   "claim": "member-stable pattern CONFIRMED as independent evidence",
+   "status": "RETRACTED",
+   "replacement": "raw member r is reported per horizon but demoted as the construction-forced S/(S+N) amplitude diagnostic"
+  },
+  {
+   "claim": "edge sensitivity E=3.680 channel floors",
+   "status": "RETRACTED",
+   "replacement": "edge masks cross topologically blocked rows; row 13 is reported separately"
+  },
+  {
+   "claim": "17 ppm paired with day-360 X",
+   "status": "RETRACTED_WINDOW_MISMATCH",
+   "replacement": "day-360 net is reported in ppm and relative to its own day-360 band floor"
+  }
+ ],
+ "gaps_paired_sv": {
+  "90": [
+   [
+    -0.00540923565308804,
+    0.005273402833308738,
+    0.007997012275936827,
+    0.00793549566309057,
+    0.005694940312534369,
+    0.006148102307472342,
+    0.004721696469999426,
+    0.004134623923143774,
+    0.002924983558215563,
+    0.002347840506115889,
+    0.0020158875099643217,
+    0.001890615810075269,
+    0.0016971679778596538,
+    0.001182067238531509,
+    0.0011266218670957506,
+    0.0009052884200047018,
+    0.0013516701598667025,
+    0.0008623259967666108,
+    0.0013511260888103838,
+    0.0017165507725387386,
+    0.001038528350988166,
+    0.0006664113483672018,
+    0.0006151765039217327,
+    0.00044142245079759057,
+    -8.982332136575621e-05,
+    -7.773653154163895e-05,
+    0.00013123542794435394,
+    0.0007237785602929314,
+    0.0009616809078267785,
+    0.001807168567298234,
+    0.0016211933836072223,
+    0.0016743066032181009,
+    0.0017715191441343148,
+    0.0012579666609120466,
+    0.0012609053470011844
+   ],
+   [
+    -0.005430181943745227,
+    0.005245560231763535,
+    0.00797520224749848,
+    0.00794527948736784,
+    0.005699694241220132,
+    0.006148835971475253,
+    0.004722516287654757,
+    0.00412995493226144,
+    0.0029267654898899736,
+    0.0023471824138366626,
+    0.002014399247555275,
+    0.0018900228506588818,
+    0.001697772426316621,
+    0.0011815590787787322,
+    0.0011265969726026448,
+    0.0009049269271984572,
+    0.0013511915111237283,
+    0.0008625179403662919,
+    0.00135128381226024,
+    0.0017167342832378196,
+    0.0010386260525921953,
+    0.0006666735983580363,
+    0.0006151210761471404,
+    0.0004416370647435386,
+    -8.973061856787368e-05,
+    -7.774895486623024e-05,
+    0.00013127587373595873,
+    0.000723764131320026,
+    0.0009617473373206842,
+    0.001807147484235827,
+    0.0016212450728552152,
+    0.0016742693650169116,
+    0.0017715178616546368,
+    0.0012579334256845875,
+    0.0012609247198840379
+   ],
+   [
+    -0.005430154024678391,
+    0.00524558603987324,
+    0.007975229839659953,
+    0.007945312722739184,
+    0.005699729368657508,
+    0.006148891358516373,
+    0.004722580838764048,
+    0.004129931825280736,
+    0.002926841216765147,
+    0.0023468741466656506,
+    0.002014202160980222,
+    0.0018896936588405494,
+    0.0016977266542091418,
+    0.0011814758580585005,
+    0.001126669351376286,
+    0.0009050275199551372,
+    0.0013513375224097346,
+    0.0008626378370412136,
+    0.0013513010935700676,
+    0.0017166799496516338,
+    0.0010386698483384471,
+    0.000666715243635041,
+    0.0006157299627675972,
+    0.0004407916908377718,
+    -8.968733695269293e-05,
+    -7.771602706552194e-05,
+    0.00013131244129738207,
+    0.0007237950490524003,
+    0.0009617807170316794,
+    0.0018071655751303872,
+    0.001621276450863185,
+    0.0016742889711141018,
+    0.001771541751818262,
+    0.0012579500487603923,
+    0.0012609407705954645
+   ],
+   [
+    -0.005656957511946392,
+    0.005357877048607573,
+    0.008015085330292798,
+    0.007971896493101482,
+    0.005738434058363995,
+    0.006156725036572053,
+    0.00473300357172575,
+    0.004142236765080715,
+    0.002937048509320306,
+    0.0023309743623645685,
+    0.002028888726063653,
+    0.0019058763791875433,
+    0.0017113891321383912,
+    0.0011805346031726893,
+    0.0011430777643202383,
+    0.000913832763416611,
+    0.001359268612092901,
+    0.0008694051330130348,
+    0.0013538403848422087,
+    0.0017223607397401919,
+    0.0010412316479616601,
+    0.0006750383223304013,
+    0.0006215020746345168,
+    0.00044406545995778757,
+    -9.272914853220016e-05,
+    -7.44780717152338e-05,
+    0.00013532051668474487,
+    0.0007259624884112803,
+    0.0009625961077848189,
+    0.0018110661373764714,
+    0.0016215524489748834,
+    0.0016765594993224386,
+    0.0017753345108031393,
+    0.0012593670437244242,
+    0.0012609555884663948
+   ]
+  ],
+  "180": [
+   [
+    -0.020527111238442752,
+    -0.012214862603904697,
+    -0.0034016854614993264,
+    -0.0009979322702786675,
+    0.0006450189366362657,
+    0.0004437963310978399,
+    0.00014673885351582094,
+    -0.0009659251398878577,
+    -0.0008799537700823479,
+    -0.000911190548733759,
+    -0.00015968963842114686,
+    9.298471701352229e-05,
+    0.0006653356185667633,
+    0.00048018454308387803,
+    0.0009751043266583992,
+    0.0008921811335918239,
+    0.0014189728251777778,
+    0.001135289851550425,
+    0.0019512171088105212,
+    0.0022722271298752927,
+    0.0015221987573931228,
+    0.0010532123492688061,
+    0.0013632346062233403,
+    0.0014534148320457518,
+    0.000617184770360879,
+    0.00025163639489411693,
+    0.00033978388917921265,
+    0.0010135072245074372,
+    0.001290398151156058,
+    0.0022381832089071185,
+    0.0025696350522368405,
+    0.002826163623039335,
+    0.002799681826124001,
+    0.0020760540864115384,
+    0.002272527010033887
+   ],
+   [
+    -0.020930037377476562,
+    -0.01197128478322973,
+    -0.002283827200853239,
+    8.987777101870931e-05,
+    0.0016082594500081426,
+    0.0006888997671170294,
+    0.0004106138530014791,
+    -0.0006015035210663322,
+    -0.0006411076924898451,
+    -0.0007793476102343766,
+    -0.00026041441990493075,
+    0.00012186189708781464,
+    0.000645021923362632,
+    0.0003709294111909761,
+    0.0009168334758683783,
+    0.0007508399047695402,
+    0.0011678186418349057,
+    0.0009042921149944316,
+    0.0016551716970576447,
+    0.001809177568034781,
+    0.0011855364729786988,
+    0.0007749826996217291,
+    0.0010811555731033984,
+    0.0011892050963369094,
+    0.0003757744806804908,
+    1.9497462093953644e-05,
+    0.00016536773906628,
+    0.000894252821823649,
+    0.001238507391998045,
+    0.0022212096022842243,
+    0.0025755053008036377,
+    0.002899171775980758,
+    0.002925659739066333,
+    0.002259078240183676,
+    0.00242755305282083
+   ],
+   [
+    -0.019966138321238946,
+    -0.010130828075199605,
+    -0.00235743610450756,
+    -0.000548456595098834,
+    0.0009820850720591023,
+    0.001226136364624958,
+    0.0006076339795240138,
+    -0.0004602258589363195,
+    -0.0008595289194737454,
+    -0.0009469782075584299,
+    -0.0003909513179532059,
+    5.053886832208365e-05,
+    0.000658406680837019,
+    0.0004257707011825207,
+    0.0008166219276407594,
+    0.000659181066906267,
+    0.0010321504813599058,
+    0.0008399325649761646,
+    0.0015950835654814366,
+    0.0016875696004121643,
+    0.0011042281941628929,
+    0.0006784981810661339,
+    0.001000865937109685,
+    0.0011062623073110345,
+    0.0002798983206346861,
+    -9.871874435773975e-05,
+    1.0843945843275193e-05,
+    0.000688225355950367,
+    0.0010087053162031179,
+    0.0019575969491345546,
+    0.0022770684874984237,
+    0.0025769649976261633,
+    0.002616709847565346,
+    0.002008409206175621,
+    0.0022461042428689737
+   ],
+   [
+    -0.020236836946197156,
+    -0.012492711851874172,
+    -0.0038810200743992773,
+    -0.0019427571939809596,
+    0.0005313393674638567,
+    -3.611366596717458e-05,
+    -8.590875480399274e-05,
+    -0.0008702780923576514,
+    -0.0008712019757531886,
+    -0.0008434744657127846,
+    -3.264932945696436e-05,
+    0.000375938297840106,
+    0.0010212482321933225,
+    0.0007828854996943108,
+    0.0012681356298160085,
+    0.001161658282754774,
+    0.0015894516311179552,
+    0.0013226085365219964,
+    0.0021265337856095634,
+    0.0024463017386420205,
+    0.001652373465217405,
+    0.0010704873524565173,
+    0.0013405981970386893,
+    0.001395946223857747,
+    0.0005149970243740754,
+    0.00011605855626495298,
+    0.0002300007478628352,
+    0.0009555277982657984,
+    0.0012326224435348365,
+    0.002158562131758135,
+    0.0024606404401463777,
+    0.0027104852952382075,
+    0.002696608679432,
+    0.0019732101087099885,
+    0.0021587603712824865
+   ]
+  ],
+  "270": [
+   [
+    -0.025774608324201198,
+    -0.018399354148174396,
+    -0.013100880073640853,
+    -0.012377538184808357,
+    -0.0067445359704072505,
+    -0.004741703541099707,
+    -0.0016546002253332026,
+    -0.001003716644675745,
+    0.0004788895537600757,
+    0.0007671425150126421,
+    0.001756418804753905,
+    0.0021194645920419655,
+    0.0024401732005253016,
+    0.0020557350500241545,
+    0.0022369432435673103,
+    0.0018251628422120136,
+    0.001987461256453882,
+    0.0011299364937227274,
+    0.0016472758964846124,
+    0.0021146739437196693,
+    0.0011546481214761428,
+    0.0005168098618403283,
+    0.0007202471362708351,
+    0.0004559573638345249,
+    6.309997080555796e-05,
+    0.00043981495096989676,
+    0.0009317898291900661,
+    0.0018368612866959122,
+    0.0022589338927290203,
+    0.0035115851382467866,
+    0.004218088907181228,
+    0.004552405022776984,
+    0.00487792578325319,
+    0.004568623860686127,
+    0.00492246866289614
+   ],
+   [
+    -0.023547862921755813,
+    -0.016232189345102288,
+    -0.010002490703323041,
+    -0.009853024431463853,
+    -0.005334879590141228,
+    -0.0036399062953771932,
+    -0.0012770721666343632,
+    -0.00024334776350576348,
+    0.0012391431062548919,
+    0.0011111836288572041,
+    0.0020929809128463206,
+    0.0023632966963048896,
+    0.0024718625984352025,
+    0.0019988914679695824,
+    0.0021751604435045896,
+    0.0017761304499158137,
+    0.0019110684926523236,
+    0.0011671092569775499,
+    0.0017168941364579249,
+    0.0021162975538890905,
+    0.001174557979046753,
+    0.0005897417978820707,
+    0.0007853925394698535,
+    0.0004967839749618896,
+    9.352097720771724e-05,
+    0.0004238678724144407,
+    0.000849731524217523,
+    0.0017182683990746295,
+    0.002110922806785487,
+    0.003351001653473906,
+    0.004042780331469542,
+    0.0043947626603055845,
+    0.004733863116252568,
+    0.004469875615374264,
+    0.0049048513734177845
+   ],
+   [
+    -0.02493204647549585,
+    -0.016159328822881958,
+    -0.009821883243060436,
+    -0.009972158792917019,
+    -0.0051008084128045805,
+    -0.003184498613761688,
+    -0.0006484790175184663,
+    -0.0002573305960358041,
+    0.001468690021286606,
+    0.0011103303300634693,
+    0.0020701414657896544,
+    0.0022821857553336627,
+    0.0025384285479212107,
+    0.0019863321443058662,
+    0.002106590761283056,
+    0.0015921651252687463,
+    0.0017529932770654622,
+    0.0008731832391561389,
+    0.0014047596538960816,
+    0.0018771290355845682,
+    0.0008557274477092314,
+    0.00020175815494061222,
+    0.0003917409078575407,
+    8.760345279634763e-05,
+    -0.0003244877422163839,
+    9.213796573925848e-06,
+    0.0004872982671679793,
+    0.0014023836911853937,
+    0.001818726839993845,
+    0.003111880873599704,
+    0.0038396988939126686,
+    0.0042483806537245705,
+    0.004675855545073659,
+    0.004492195724658643,
+    0.004919806809129401
+   ],
+   [
+    -0.024213005485766992,
+    -0.016620353508626118,
+    -0.00943324858723138,
+    -0.010037635082073337,
+    -0.004174288645557245,
+    -0.0025930127844163153,
+    -0.0003445979003620092,
+    0.0003917284145095179,
+    0.00155427734722699,
+    0.0015322906061691621,
+    0.001690046566682632,
+    0.002231004727123058,
+    0.0022968477639849633,
+    0.0019143992804285387,
+    0.0019454296954792144,
+    0.0015732938784814021,
+    0.001621366313625694,
+    0.0008683387394974318,
+    0.0014020222150501471,
+    0.0018658444281943742,
+    0.0008432784003309379,
+    0.00022782996106585074,
+    0.00043540192786784004,
+    0.000168709556244373,
+    -0.00024725200203778996,
+    0.0001256390401920271,
+    0.0005470123752377987,
+    0.0014226440686586628,
+    0.0018082554257905503,
+    0.0030755448036026145,
+    0.003745774390344625,
+    0.004087369433730892,
+    0.004451968093847736,
+    0.00421503986387517,
+    0.004645807011832481
+   ]
+  ],
+  "360": [
+   [
+    0.01466901987776481,
+    0.004398664238315364,
+    -0.01784635137428303,
+    -0.004885756885441683,
+    -0.005592751719157407,
+    -0.004909773712170162,
+    -0.005732661226935443,
+    -0.005681315369519768,
+    -0.006021484418430645,
+    -0.0034136325279927326,
+    -0.0024693585057543876,
+    -0.001961733334627541,
+    -0.0011912106536614564,
+    -0.0005121254607045878,
+    0.000615955564870721,
+    0.0009188122635684082,
+    0.0013664594467321378,
+    0.001461925896587557,
+    0.0015145088847867694,
+    0.00015846240228745145,
+    0.0004318406654159057,
+    0.0004669324110923023,
+    0.0009933700654620736,
+    0.001212722836048341,
+    0.0005044339925224239,
+    0.0009304045575224684,
+    0.0012860856616594418,
+    0.0020494884969655125,
+    0.002718988140577805,
+    0.003920738489813003,
+    0.004636250532028097,
+    0.004716144794977062,
+    0.0047075107029259655,
+    0.004483910663588553,
+    0.004495211432754331
+   ],
+   [
+    0.01948402640619884,
+    0.0026032217454534656,
+    -0.01500752135381378,
+    -0.006024152909948621,
+    -0.005206548557485924,
+    -0.005675668452939209,
+    -0.0069108785800786054,
+    -0.007037575238241389,
+    -0.006960399202554979,
+    -0.004768092925564904,
+    -0.0035425783450415277,
+    -0.0028536897919176907,
+    -0.0016443978382984503,
+    -0.0008588475021422196,
+    0.0005111657526799679,
+    0.0010170377510896333,
+    0.0014879688446025052,
+    0.001724880419666952,
+    0.0016361537185202168,
+    -4.521271472701649e-05,
+    0.00036738720423434845,
+    0.0005433962885580401,
+    0.0010054097140483886,
+    0.0012440249331928666,
+    0.0004564180121409134,
+    0.0008641663340911432,
+    0.0012252035921123117,
+    0.0019434201112797922,
+    0.002626402614779977,
+    0.0037944859648100238,
+    0.004534057041523987,
+    0.00452789576929824,
+    0.004443230018956967,
+    0.004202481804626235,
+    0.004200451592605958
+   ],
+   [
+    0.018321348138091942,
+    0.0039673924433429875,
+    -0.017112265202499644,
+    -0.00821958889779284,
+    -0.0058892034521171865,
+    -0.006914263764658535,
+    -0.007475965482913627,
+    -0.007078668628500651,
+    -0.006581973848355904,
+    -0.0036161199271377287,
+    -0.002201840381834144,
+    -0.0016851823065717197,
+    -0.0006174814029135806,
+    -3.46341179721793e-05,
+    0.0012425203688442715,
+    0.0015110153247677727,
+    0.0020169098472413993,
+    0.0023044390793993674,
+    0.00238448839845129,
+    0.0006175062684858901,
+    0.0011465375802660605,
+    0.0013505298834424195,
+    0.0018989866686753842,
+    0.0021349237035614976,
+    0.0013458894787110598,
+    0.0017696215345415212,
+    0.0020933020964755134,
+    0.00276177786860643,
+    0.003426915469227687,
+    0.004606926146363932,
+    0.005380835201642675,
+    0.005482946002912215,
+    0.0054073035967836525,
+    0.005122334494409131,
+    0.005170582593469142
+   ],
+   [
+    0.007884440437574192,
+    0.0031338474295889984,
+    -0.020909206710933326,
+    -0.007649911186813019,
+    -0.007652260481493034,
+    -0.006539431037175025,
+    -0.006889349457076754,
+    -0.006433606556553673,
+    -0.006572351591768111,
+    -0.004660895894904704,
+    -0.003104783289709645,
+    -0.0023075246330213073,
+    -0.0011881222655782328,
+    -0.0005741450946683685,
+    0.0008658447770200223,
+    0.0011879421228054021,
+    0.0016668135478440371,
+    0.001788671980370693,
+    0.0017640483734902013,
+    0.0003254938340003788,
+    0.0006178112050234663,
+    0.0006706302749073245,
+    0.0011902686827307551,
+    0.0014592303010845242,
+    0.0007533007207138898,
+    0.0011848745499840607,
+    0.0016155399769564038,
+    0.002395948407858839,
+    0.003126553129993992,
+    0.0044126315948309625,
+    0.005187440035543833,
+    0.005271506707161144,
+    0.0052296552289958775,
+    0.004938872072265621,
+    0.004882066475486724
+   ]
+  ]
+ },
+ "row_floors_sv": {
+  "90": [
+   0.00011729706322605041,
+   5.3160000801901635e-05,
+   1.9271325948616607e-05,
+   1.5634088674438902e-05,
+   2.0283606522167897e-05,
+   4.075436152194436e-06,
+   5.3855394353290735e-06,
+   5.804592014819229e-06,
+   5.492519941962077e-06,
+   8.17907104157902e-06,
+   7.0596231300793695e-06,
+   7.875214256167917e-06,
+   6.887611189849221e-06,
+   6.787054474449395e-07,
+   8.221703525913952e-06,
+   4.4022102566405914e-06,
+   4.029893659397026e-06,
+   3.3746343696729917e-06,
+   1.3273503652141482e-06,
+   2.8585887743543937e-06,
+   1.3174868447172129e-06,
+   4.228925572565662e-06,
+   3.0842546595052948e-06,
+   1.4424713634041333e-06,
+   1.4899606166702563e-06,
+   1.6299059168448115e-06,
+   2.025112830526983e-06,
+   1.0933436883201768e-06,
+   4.336962870318064e-07,
+   1.9538978861628254e-06,
+   1.6237585042314064e-07,
+   1.1364972922630458e-06,
+   1.9048703259925653e-06,
+   7.087926052304555e-07,
+   2.1437593802593492e-08
+  ],
+  "180": [
+   0.000771232535977374,
+   0.0008235679398033689,
+   0.0007748986378476419,
+   0.0008998148443631802,
+   0.0006060038855786889,
+   0.0004975654159247108,
+   0.00026145578499951207,
+   0.00020099053162210486,
+   0.00011093458819613678,
+   6.418597866892929e-05,
+   0.00014101101660031183,
+   0.00013646209400685748,
+   0.00018361108417598826,
+   0.00019050537990970444,
+   0.00020411193087274882,
+   0.00022702553869058384,
+   0.00024165794161125177,
+   0.00022213365235070761,
+   0.0002561637965850612,
+   0.000366685457619366,
+   0.00026954874008093327,
+   0.0001984198655627864,
+   0.00018802991718976694,
+   0.00016677975846150084,
+   0.00015519757920371872,
+   0.0001528649825307044,
+   0.00014114668030729006,
+   0.00014825476054545458,
+   0.00012930898973022612,
+   0.00013437845460297117,
+   0.00014444335146065,
+   0.00014533766943091396,
+   0.00013729880037958365,
+   0.0001292507985629457,
+   0.00011301642835111549
+  ],
+  "270": [
+   0.0010119893326337162,
+   0.0015047672408091655,
+   0.0016322246630884492,
+   0.0013668148968100828,
+   0.0010184868926440258,
+   0.0007599233321293764,
+   0.0005771409893259118,
+   0.0006047441528921725,
+   0.000491538363884735,
+   0.0003740852260683807,
+   0.00027156990193944207,
+   0.0001663139686700265,
+   0.00012131143823894438,
+   0.00012527998942047044,
+   0.00013223284599841765,
+   0.00013842212034505139,
+   0.000138549628840024,
+   0.00014007045945478737,
+   0.00013773070435010363,
+   0.0001334752875190927,
+   0.0001399608849142686,
+   0.00015243241408222487,
+   0.0001477405703065819,
+   0.0001528333717566211,
+   0.00015762471657088437,
+   0.00016558537728657432,
+   0.00017394805992418253,
+   0.00017933499976984516,
+   0.0001890823850129758,
+   0.0001854112465291482,
+   0.0001960838042076859,
+   0.00019561357196737589,
+   0.00018591156396874492,
+   0.0001749614247680044,
+   0.00016494042946223048
+  ],
+  "360": [
+   0.00598920303202816,
+   0.001418027238605905,
+   0.0018827552003625168,
+   0.0011323925654213825,
+   0.0009576388739545245,
+   0.0006964018830421979,
+   0.0007814530069940719,
+   0.0007666688971838759,
+   0.0007082018639478672,
+   0.000743364947547263,
+   0.0005659065732134646,
+   0.0004457963489111161,
+   0.0003562518729401586,
+   0.0002553924541053152,
+   0.00023111912936927436,
+   0.0001940484841509051,
+   0.0002114836138572013,
+   0.0002567115098266995,
+   0.00027556067308213197,
+   0.00025737193087882975,
+   0.0002642074653461121,
+   0.0002989607025116756,
+   0.0003158028680977818,
+   0.0003216690050889264,
+   0.00030123150158341326,
+   0.00030330976411367634,
+   0.00029114405744120144,
+   0.0002752865037976087,
+   0.0002742852541295777,
+   0.0002922633008559541,
+   0.0003074808247549539,
+   0.00034257649308287594,
+   0.00035141613454598976,
+   0.00032944699060751193,
+   0.0003351299890178499
+  ]
+ },
+ "mean_gaps_sv": {
+  "90": [
+   -0.005481632283364513,
+   0.005280606538388272,
+   0.007990632423347015,
+   0.007949496091574769,
+   0.005708199495194001,
+   0.006150638668509005,
+   0.004724949292035995,
+   0.004134186861441666,
+   0.0029289096935477474,
+   0.0023432178572456927,
+   0.002018344411140868,
+   0.0018940521746905609,
+   0.001701014047630952,
+   0.0011814091946353578,
+   0.00113074148884873,
+   0.0009072689076437268,
+   0.0013533669513732666,
+   0.0008642217267967878,
+   0.001351887844870725,
+   0.001718081436292096,
+   0.0010392639749701171,
+   0.0006687096281726701,
+   0.0006168824043677468,
+   0.00044197916658417213,
+   -9.049260635463074e-05,
+   -7.691989629715623e-05,
+   0.0001322860649156099,
+   0.0007243250572691595,
+   0.0009619512674909902,
+   0.00180813694101023,
+   0.0016213168390751265,
+   0.0016748561096678882,
+   0.0017724783171025882,
+   0.0012583042947703627,
+   0.0012609316064867704
+  ],
+  "180": [
+   -0.020415030970838854,
+   -0.011702421828552051,
+   -0.0029809922103148506,
+   -0.000849817072084938,
+   0.0009416757065418419,
+   0.0005806796992181631,
+   0.0002697694828093303,
+   -0.0007244831530620402,
+   -0.0008129480894497818,
+   -0.0008702477080598375,
+   -0.00021092617643406197,
+   0.00016033094506588165,
+   0.0007475031137399342,
+   0.0005149425387879214,
+   0.0009941738399958863,
+   0.0008659650970056013,
+   0.0013020983948726361,
+   0.0010505307670107544,
+   0.0018320015392397915,
+   0.0020538190092410646,
+   0.0013660842224380298,
+   0.0008942951456032966,
+   0.0011964635783687783,
+   0.0012862071148878607,
+   0.0004469636490125328,
+   7.211841722382095e-05,
+   0.00018649908048790076,
+   0.0008878783001368129,
+   0.0011925583257230143,
+   0.002143887973021008,
+   0.00247071232017132,
+   0.002753196422971116,
+   0.00275966502304692,
+   0.002079187910370206,
+   0.0022762361692515443
+  ],
+  "270": [
+   -0.024616880801804963,
+   -0.01685280645619619,
+   -0.010589625651813928,
+   -0.010560089122815641,
+   -0.005338628154727576,
+   -0.003539780308663726,
+   -0.0009811873274620103,
+   -0.0002781666474269487,
+   0.001185250007132141,
+   0.0011302367700256194,
+   0.001902396937518128,
+   0.002248987942700894,
+   0.0024368280277166695,
+   0.0019888394856820354,
+   0.0021160310359585426,
+   0.001691688073969494,
+   0.0018182223349493404,
+   0.001009641932338462,
+   0.0015427379754721915,
+   0.0019934862403469256,
+   0.0010070529871407663,
+   0.0003840349439322155,
+   0.0005831956278665174,
+   0.0003022635869592838,
+   -0.00010377969906022466,
+   0.0002496339150375726,
+   0.0007039579989533418,
+   0.0015950393614036495,
+   0.0019992097413247256,
+   0.003262503117230753,
+   0.003961585630727016,
+   0.004320729442634508,
+   0.004684903134606788,
+   0.004436433766148551,
+   0.004848233464318952
+  ],
+  "360": [
+   0.015089708714907446,
+   0.003525781464175204,
+   -0.017718836160382445,
+   -0.006694852469999041,
+   -0.006085191052563388,
+   -0.006009784241735733,
+   -0.006752213686751107,
+   -0.00655779144820387,
+   -0.00653405226527741,
+   -0.004114685318900017,
+   -0.002829640130584926,
+   -0.0022020325165345647,
+   -0.00116030304011293,
+   -0.0004949380438718388,
+   0.0008088716158537457,
+   0.001158701865557804,
+   0.0016345379216050199,
+   0.0018199793440061424,
+   0.0018247998438121193,
+   0.00026406244751167596,
+   0.0006408941637349452,
+   0.0007578722145000216,
+   0.0012720087827291504,
+   0.0015127254434718074,
+   0.0007650105510220717,
+   0.0011872667440347984,
+   0.0015550328318009177,
+   0.0022876587211776434,
+   0.002974714838644865,
+   0.00418369554895448,
+   0.004934645702684648,
+   0.004999623318587165,
+   0.004946924886915616,
+   0.004686899758722385,
+   0.004687078023579039
+  ]
+ },
+ "_stamp": {
+  "producer_sha": "7af72bc33ef560ed0c789c322f28cb572a9d3fc6",
+  "producer_tree_dirty": false,
+  "probe": "channel_rescore.py",
+  "prereg": "PREREG_channel_rescore.md@e2fd09158",
+  "upstream_regional_sha": "102ef501a",
+  "upstream_regional_sha256": "2f2bbc03afed792ea0148002029a6ad6481c93bd2ee37679b4bf615aab392fe7",
+  "lego_dir": "/tmp/dino_verdict360",
+  "nemo_dirs": [
+   "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0",
+   "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M1",
+   "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M2",
+   "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M3"
+  ],
+  "horizons": [
+   90,
+   180,
+   270,
+   360
+  ],
+  "channel_rows": [
+   14,
+   48
+  ],
+  "n_rows": 35,
+  "constants": {
+   "PERSIST_HI": 0.7,
+   "PERSIST_LO": 0.3,
+   "ROUGH_SMOOTH": 0.25,
+   "ROUGH_GRID": 0.6,
+   "ROW_BAR": 2.0,
+   "ESCALATION_BAR": 5.0,
+   "N_BOOT": 5000,
+   "BOOT_SEED": 1226
+  },
+  "input_provenance": {
+   "scored_days": [
+    0,
+    10,
+    30,
+    60,
+    90,
+    120,
+    150,
+    180,
+    210,
+    240,
+    270,
+    280,
+    290,
+    300,
+    310,
+    320,
+    330,
+    340,
+    350,
+    360
+   ],
+   "lego_launch_sha": "a7b940f75c04d824b478de4e1728220e3a71989e",
+   "lego_members": [
+    {
+     "member": 0,
+     "path": "/tmp/dino_verdict360/m0_control.npz",
+     "control_dtype": "float64",
+     "nemo_ladder_mode": "both",
+     "seasonal_t0_seconds": 15552000.0
+    },
+    {
+     "member": 1,
+     "path": "/tmp/dino_verdict360/m1_seed1.npz",
+     "control_dtype": "float64",
+     "nemo_ladder_mode": "both",
+     "seasonal_t0_seconds": 15552000.0
+    },
+    {
+     "member": 2,
+     "path": "/tmp/dino_verdict360/m2_seed2.npz",
+     "control_dtype": "float64",
+     "nemo_ladder_mode": "both",
+     "seasonal_t0_seconds": 15552000.0
+    },
+    {
+     "member": 3,
+     "path": "/tmp/dino_verdict360/m3_seed3.npz",
+     "control_dtype": "float64",
+     "nemo_ladder_mode": "both",
+     "seasonal_t0_seconds": 15552000.0
+    }
+   ],
+   "nemo_member_directories": [
+    "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0",
+    "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M1",
+    "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M2",
+    "/tmp/dino_v360_m3"
+   ]
+  },
+  "clock": {
+   "oracle_restart": "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00005760_restart.nc",
+   "oracle_elapsed_seconds": 15552000.0,
+   "oracle_elapsed_days": 180.0,
+   "control_clock_return_was_null": true,
+   "legacy_clock_env_before_control": null,
+   "legacy_clock_env_after_control": "1",
+   "legacy_clock_bypass_reason": "upstream control supplied and verified the missing reference stamp from the oracle restart before setting the loader bypass"
+  },
+  "clock_helper_compat": "compat alias restart_elapsed_seconds -> _restart_elapsed_seconds",
+  "skip_upstream_self_test": false,
+  "legacy_clock_env_at_write": "1",
+  "floor_saturation_measured": {
+   "saturated_rows": 0,
+   "unsaturated_rows": 35,
+   "denominator": 35
+  },
+  "band_saturation_measured": {
+   "saturated": false,
+   "reason": "lego 180->270 8.93; nemo 180->270 12.10; lego 270->360 1.40",
+   "spreads_by_side_day_sv": {
+    "lego_day90_sv": 6.903798466581317e-05,
+    "lego_day180_sv": 0.0007433413612627969,
+    "lego_day270_sv": 0.00663822213581786,
+    "lego_day360_sv": 0.009272868826336692,
+    "nemo_day90_sv": 2.2682461294826906e-08,
+    "nemo_day180_sv": 0.00025024339144883936,
+    "nemo_day270_sv": 0.003028870178780209,
+    "nemo_day360_sv": 0.0025020891623113474
+   },
+   "spread_growth_ratios": {
+    "lego_180_to_270": 8.930247234649732,
+    "nemo_180_to_270": 12.103696969753711,
+    "lego_270_to_360": 1.396890407795043,
+    "nemo_270_to_360": 0.8260800280713888
+   }
+  },
+  "post_review_deviations": [
+   "lag n-1 omitted from Bartlett sum because it has one pair",
+   "signed-r decorrelation is guarded by max absolute pair r",
+   "registered edge-mask E withdrawn for invalid topology",
+   "raw member r demoted as non-independent amplitude evidence",
+   "unsaturated P5 no-votes filtered by regional_audit.u_is_material"
+  ]
+ }
+}

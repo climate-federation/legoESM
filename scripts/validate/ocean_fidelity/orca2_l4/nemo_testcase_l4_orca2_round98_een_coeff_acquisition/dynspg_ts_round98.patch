@@ -1,0 +1,12 @@
+--- dynspg_ts.F90
++++ dynspg_ts.F90
+@@ -60,0 +61 @@
++   USE l4_r98_een_coeff, ONLY : r98_een_coeff_dump ! round-98 write-only coefficients
+@@ -308,0 +310,3 @@
++      CALL r98_een_coeff_dump(kt, Kmm, nvor_scheme, ffu_nw, ffu_ne, ffu_sw, ffu_se, &
++         & ffv_sw, ffv_se, ffv_nw, ffv_ne)
++
+@@ -389,0 +394,3 @@
++      CALL r98_een_coeff_dump(kt, Kmm, nvor_scheme, ffu_nw, ffu_ne, ffu_sw, ffu_se, &
++         & ffv_sw, ffv_se, ffv_nw, ffv_ne)
++

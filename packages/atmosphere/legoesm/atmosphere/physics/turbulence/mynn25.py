@@ -99,16 +99,27 @@ References
 
 from __future__ import annotations
 
+import math
+
 import jax
 import jax.numpy as jnp
 
 from legoesm import constants
-from legoesm.atmosphere.physics._shared import exner_function, virtual_temperature
+from legoesm.atmosphere.physics._shared import (
+    exner_function,
+    half_to_full,
+    surface_buoyancy_flux,
+    virtual_temperature,
+    half_to_iface_zero_ends,
+)
 from legoesm.atmosphere.physics.turbulence.config import MYNN25Config
 from legoesm.atmosphere.physics.turbulence.output import TurbulenceOutput
 from legoesm.atmosphere.physics.turbulence.pbl_height import diagnose_pbl_height
 from legoesm.atmosphere.physics.turbulence.surface_layer import (
+    latent_enthalpy_correction,
+    surface_moisture_flux,
     compute_surface_fluxes,
+    surface_fluxes_at_lowest_level,
 )
 from legoesm.atmosphere.physics.turbulence.vertical_diffusion import (
     implicit_vertical_diffusion,
@@ -160,6 +171,24 @@ __physics_contract__ = {
 _QKE_FLOOR = 1e-10        # m²/s²; floor on qke to keep sqrt finite
 _L_FLOOR = 1.0            # m; floor on master length scale
 _SMOOTH_EPS = 1e-30       # used in safe sqrt / safe divide
+# |Ri| is bounded BEFORE it is squared in the level-2 discriminant. G_M is
+# exactly zero in a shear-free column, so the 1e-30 divisor floor sends Ri to
+# ~1e28-1e30 and Ri*Ri overflows float32 (max 3.4e38) to inf, whose later
+# inf/inf is NaN. This module runs x64 in the SCM benchmarks and float32 in a
+# global run, so the overflow is a real runtime mode rather than a hypothetical.
+# Set as HIGH as float32 allows rather than at a round number: the bound is
+# only there to keep the square finite, and every entry it touches is one the
+# closure would otherwise have evaluated, so a lower bound perturbs more
+# columns for no extra protection. 1e18^2 = 1e36 against a float32 max of
+# 3.4e38. MEASURED at 1e15 it moved ekman, wangara and astex at round-off (the
+# near-zero shear above the boundary layer); at 1e18 it does not.
+_RI_MAX = 1e18
+# Two-sided floor on |F1| and |F2|, the level-2 combinations of the closure
+# constants that Ri1/Ri2/Ri3 and Rf1/Rf2 divide by. They are ~6.3 and ~5.0 at
+# the NN09 defaults, but they are built from TRAINABLE coefficients and F1 hits
+# exactly zero inside the declared sigmoid bounds, so the tuner can walk onto
+# the singularity.
+_F_FLOOR = 1e-6
 
 
 # MYNN Level-2.5 (Nakanishi-Niino 2009) fixed closure constants.
@@ -170,6 +199,30 @@ _MYNN_LT_COEFF = 0.23
 _MYNN_LB_COEFF = 5.0
 _MYNN_PHI_C9 = 9.0
 _MYNN_PHI_C12 = 12.0
+
+def _away_from_zero(x: jax.Array, floor: float) -> jax.Array:
+    """``x`` pushed out to ``+/-floor`` without changing its sign.
+
+    For denominators that CROSS zero rather than merely approach it. A
+    one-sided ``jnp.maximum(x, eps)`` does not regularize such a quantity: it
+    leaves the root in place, converts it into a ~1/eps amplification, and
+    flips the sign of every negative value. Every entry with
+    ``|x| >= floor`` is returned unchanged, so the guard is inert wherever the
+    expression was already well posed.
+
+    A PYTHON scalar stays a Python scalar. The level-2 constants F1/F2 are
+    plain floats whenever the config is not being traced (i.e. every
+    production run), and routing them through ``jnp.where`` moved their
+    arithmetic from CPython onto XLA, which reassociates. MEASURED: that alone
+    changed ekman and wangara in the last bits of ``v`` -- a field whose true
+    value is zero, so the change was pure round-off, but it was a change to
+    every existing mynn25 result for no benefit. The guard is only reachable
+    when the coefficients are TRACED, which is exactly when they are arrays.
+    """
+    if isinstance(x, (int, float)):
+        return math.copysign(max(abs(x), floor), x) if x else floor
+    return jnp.where(x >= 0.0, jnp.maximum(x, floor), jnp.minimum(x, -floor))
+
 
 def _safe_pow_pos(x: jax.Array, p: float) -> jax.Array:
     """Floored power for AD-safe ``x**p`` with ``p`` fractional and ``p < 1``.
@@ -199,15 +252,6 @@ def _full_to_half(x: jax.Array) -> jax.Array:
     return 0.5 * (x[:, :-1] + x[:, 1:])
 
 
-def _half_to_full(x_half: jax.Array, nlev: int) -> jax.Array:
-    """Interpolate half-level quantity ``(ncol, nlev-1)`` to full levels
-    ``(ncol, nlev)`` with one-sided fallback at top/surface."""
-    interior = 0.5 * (x_half[:, :-1] + x_half[:, 1:])
-    return jnp.concatenate(
-        [x_half[:, :1], interior, x_half[:, -1:]], axis=-1,
-    )
-
-
 def _compute_master_length(
     q_half: jax.Array,       # (ncol, nlev-1)
     z_half_geom: jax.Array,  # (ncol, nlev-1) — geometric height above surface at interior interfaces
@@ -235,11 +279,21 @@ def _compute_master_length(
     zeta = z_half_geom / jnp.where(jnp.abs(L_obu_safe) > eps, L_obu_safe, eps)[:, None]
     zeta = jnp.clip(zeta, -100.0, 100.0)
 
-    kappa = constants.kappa_vk
+    kappa = constants.kappa_von_karman
     L_S_unstable = kappa * z_half_geom * _safe_pow_pos(
         1.0 - 100.0 * zeta, _MYNN_LS_STABLE_FLOOR,
     )
-    L_S_stable_mid = kappa * z_half_geom / (1.0 + _MYNN_LS_STABLE_MID * zeta)
+    # The mid-stability branch is SELECTED only for 0 <= zeta < 1, where the
+    # denominator is >= 1, but jnp.where EVALUATES it everywhere and it
+    # vanishes at zeta = -1/2.7 = -0.370 -- an ordinary unstable surface-layer
+    # value. Forward that is harmless (the entry is discarded), but reverse
+    # mode differentiates the division by zero and returns NaN through an
+    # unselected branch. Substituting a safe denominator outside the branch's
+    # own domain is the same double-where the Obukhov guard above uses, and it
+    # leaves the forward result bit-identical. (codex)
+    denom_mid = 1.0 + _MYNN_LS_STABLE_MID * zeta
+    denom_mid = jnp.where(zeta >= 0.0, denom_mid, 1.0)
+    L_S_stable_mid = kappa * z_half_geom / denom_mid
     L_S_stable_high = kappa * z_half_geom / _MYNN_LS_STABLE_HIGH
     L_S = jnp.where(
         zeta < 0.0,
@@ -308,6 +362,19 @@ def _compute_SM_SH(
     gamma2 = (2.0 * A1 * (3.0 - 2.0 * C2) + B2 * (1.0 - C3)) / B1
     F1 = B1 * (gamma1 - C1) + 2.0 * A1 * (3.0 - 2.0 * C2) + 3.0 * A2 * (1.0 - C2) * (1.0 - C5)
     F2 = B1 * (gamma1 + gamma2) - 3.0 * A1 * (1.0 - C2)
+    # F1 and F2 are divided by four times below and they are built entirely
+    # from TRAINABLE coefficients. F1 = 0 is reachable inside the declared
+    # sigmoid bounds -- e.g. A1=0.7, A2=0.4, B1=15, B2=8, C1=0.15267, C2=1.4,
+    # C3=0.95, C5=0.5, gamma1=0.15 -- so an optimizer exploring those bounds
+    # can produce infinities before D25 is even formed. They are ~6.3 and ~5.0
+    # at the NN09 defaults, so the two-sided floor is inert there. (codex)
+    # NOT wrapped in jnp.asarray: these are built from Python floats when the
+    # config is not being traced, and an explicit array creation would give
+    # them a STRONG dtype (float64 under jax_enable_x64) that then promotes the
+    # whole level-2 block away from the column's float32. jnp.where on weakly
+    # typed inputs keeps the weak type and lets the state decide.
+    F1 = _away_from_zero(F1, _F_FLOOR)
+    F2 = _away_from_zero(F2, _F_FLOOR)
     Rf1 = B1 * (gamma1 - C1) / F1
     Rf2 = B1 * gamma1 / F2
     Rfc = gamma1 / (gamma1 + gamma2)
@@ -315,7 +382,10 @@ def _compute_SM_SH(
     Ri2 = 0.5 * Rf1 / Ri1
     Ri3 = (2.0 * Rf2 - Rf1) / Ri1
 
-    Ri = -G_H / jnp.maximum(G_M, _SMOOTH_EPS)
+    # Bounded BEFORE the square below: G_M is exactly 0 with no resolved shear,
+    # so the 1e-30 divisor floor makes |Ri| ~ 1e30 and Ri*Ri overflows float32
+    # to inf, and inf/inf downstream is NaN. See _RI_MAX. (codex)
+    Ri = jnp.clip(-G_H / jnp.maximum(G_M, _SMOOTH_EPS), -_RI_MAX, _RI_MAX)
     # Level-2 flux Richardson, NN09 eq A11.  Discriminant clipped to
     # zero for AD safety in near-neutral regimes.
     disc = jnp.maximum(Ri * Ri - Ri3 * Ri + Ri2 * Ri2, 0.0)
@@ -341,7 +411,33 @@ def _compute_SM_SH(
     phi_4 = phi_1 - _MYNN_PHI_C12 * alpha_c2 * A1 * A2 * (1.0 - C2) * G_H
     phi_5 = 6.0 * alpha_c2 * A1 * A1 * G_M
 
-    D25 = jnp.maximum(phi_2 * phi_4 + phi_5 * phi_3, _SMOOTH_EPS)
+    # D25 is the level-2.5 denominator. It equals 1.0 at G_M = G_H = 0 and it
+    # PASSES THROUGH ZERO, so a one-sided ``maximum(D25, 1e-30)`` does not
+    # regularize it -- it converts the root into a ~1e30 amplification.
+    #
+    # At exactly zero resolved shear phi_5 = 6*alpha_c^2*A1^2*G_M is 0, so
+    # D25 = phi_2*phi_4 with
+    #     phi_4 = 1 - [3*A2*B2*(1-C3) + 12*A1*A2*(1-C2)] * G_H,
+    # whose root at the NN09 constants is G_H = 0.046. G_H = -L^2 N^2 / qke, so
+    # any unstable layer in a shear-free column sweeps straight through it.
+    # MEASURED at G_M = 0: SH25 = +5.5e29 just past the root, i.e. Kh ~ 1e25
+    # m^2/s -- POSITIVE, so the downstream ``Kh >= 0`` clamp cannot see it, and
+    # it enters the qke budget as -Kh*N^2. On the Nieuwstadt CBL (the one
+    # tuning case with u_geo = v_geo = f_c = 0, hence S^2 identically zero)
+    # that took qke from 5e-6 to 1e24 in a single step and the whole column to
+    # NaN by step 10, while all seven other cases and all eight other closures
+    # were finite through 2000 steps.
+    #
+    # The floor is TWO-SIDED and keeps the sign: SM25/SH25 are bit-identical
+    # wherever |D25| >= the floor, and past the root they stay negative and are
+    # caught by the existing Km/Kh >= 0 clamp exactly as before. Only the
+    # neighbourhood of the root changes, which is the only place that was
+    # producing 1e25 diffusivities.
+    #
+    # This bounds the singularity; it is not the NN09/Helfand-Labraga (1988)
+    # joint (G_M, G_H) realizability limit, which would additionally keep the
+    # closure inside its derived region.
+    D25 = _away_from_zero(phi_2 * phi_4 + phi_5 * phi_3, config.d25_floor)
     SM25 = alpha_c * A1 * (phi_3 - 3.0 * C1 * phi_4) / D25
     SH25 = alpha_c * A2 * (phi_2 + 3.0 * C1 * phi_5) / D25
     return SM25, SH25
@@ -371,6 +467,18 @@ def mynn25_turbulence(
     :class:`PhysicsState.tke` slot.
     """
     ncol, nlev = T.shape
+    # Validated at function entry on the STATIC config value, like every other
+    # scheme guard in this package. d25_floor = 0 restores the division by zero
+    # at the D25 root, and a NEGATIVE value disables the floor entirely --
+    # _away_from_zero then returns the raw denominator on both branches -- so
+    # neither can be allowed to pass silently. It is excluded from
+    # __param_spec__, so it is never a traced leaf. (codex)
+    if not float(config.d25_floor) > 0.0:
+        raise ValueError(
+            f"MYNN25Config.d25_floor must be > 0, got {config.d25_floor!r}. "
+            "Zero reinstates the level-2.5 denominator's pole and a negative "
+            "value silently turns the guard off."
+        )
     qke = jnp.maximum(qke, _QKE_FLOOR)
 
     # Heights above surface for L_S and L_T integrals.
@@ -379,15 +487,14 @@ def mynn25_turbulence(
 
     # Surface fluxes via the bulk-flux helper (which honours the SCM
     # prescribed-flux bypass when configured).
-    tau_x, tau_y, shflx, lhflx, ustar = compute_surface_fluxes(
+    tau_x, tau_y, shflx, lhflx, ustar = surface_fluxes_at_lowest_level(
         u[:, -1], v[:, -1], T[:, -1], q_v[:, -1],
-        T_sfc, q_sfc, rho[:, -1], config.surface,
-    )
+        T_sfc, q_sfc, rho[:, -1], config.surface, z_full[:, -1] - z_half[:, -1])
 
     # Kinematic surface fluxes for closure consistency (jax_scm convention).
     rho_sfc = rho[:, -1]
     w_th_s_kin = shflx / (rho_sfc * constants.c_pd)
-    w_qv_s_kin = lhflx / (rho_sfc * constants.L_v)
+    w_qv_s_kin = surface_moisture_flux(config.surface, lhflx, T_sfc) / rho_sfc
 
     # Potential temperature (full levels) via the canonical inverse-Exner
     # helper (exner_pref = 1/Π = (p_ref/p)^κ; same 1 Pa pressure floor).
@@ -395,13 +502,10 @@ def mynn25_turbulence(
     theta = T * exner_pref
     theta_v = virtual_temperature(theta, q_v)
 
-    # Buoyancy flux (virtual potential temperature) at surface.  Use
-    # ``θ_v`` perturbation form ≈ w'θ' + (1/ε − 1) θ̄ w'q_v'.  The virtual-T
-    # moisture coefficient is the canonical 1/ε − 1 ≈ 0.6078 (constants.epsilon),
-    # not the rounded 0.61 (CLAUDE.md: no hardcoded physical-constant literals).
+    # Buoyancy flux (virtual potential temperature) at surface,
+    # w'θ' + (1/ε − 1) θ̄ w'q_v'.
     th_low = theta[:, -1]
-    _vT_coef = 1.0 / constants.epsilon - 1.0
-    w_thv_sfc = w_th_s_kin + _vT_coef * th_low * w_qv_s_kin
+    w_thv_sfc = surface_buoyancy_flux(w_th_s_kin, w_qv_s_kin, th_low)
 
     # Reference theta for L_B (per-column lowest virtual-θ — surrogate
     # for ``th_ref`` in jax_scm which is a constant per case).  Kept as
@@ -422,7 +526,7 @@ def mynn25_turbulence(
     # tendency (zeta -> L_S -> master length -> qke).  Forward is unchanged: the
     # outer ``where`` still returns the 1e30 neutral sentinel (L -> ∞ ⇒ ζ ≈ 0)
     # whenever |w'θ_v'| ≤ eps.
-    kappa = constants.kappa_vk
+    kappa = constants.kappa_von_karman
     w_thv_safe = jnp.where(
         jnp.abs(w_thv_sfc) > _SMOOTH_EPS, w_thv_sfc, 1.0
     )
@@ -478,13 +582,17 @@ def mynn25_turbulence(
     Kh_half = L * q_half * SH
     Kq_half = L * q_half * (3.0 * SM)        # NN09 eq 67
     # Sign convention: eddy diffusivities are >= 0 (down-gradient mixing).
-    # The EXACT NN09 level-2.5 ``SM``/``SH`` are analytically nonnegative (it
-    # is the level-3 corrections ``S'_M``/``S'_H`` that can turn negative).
-    # This floor is therefore a DEFENSIVE guard on the AD-safe approximations
-    # used here (the floored ``D25`` / discriminant / ``1-Rf`` / ``Rf2-Rf``),
-    # which can yield a slightly negative ``SM25``/``SH25`` -> Km/Kh<0 ->
-    # ANTI-diffusive mixing in the implicit tridiagonal solve in numerical edge
-    # cases.  Clamp at 0 so mixing only ever diffuses (never upgradient).
+    # This clamp is LOAD-BEARING, not defensive. The comment it replaces said
+    # the level-2.5 SM/SH are "analytically nonnegative" and that only a
+    # numerical edge case could make them "slightly negative"; both halves are
+    # false and were measured so. Past the D25 root at G_M = 0 the exact
+    # algebra gives SM25 = -0.67 and SH25 = -0.032 at G_H = 1 -- O(1) negative,
+    # not slight -- because SH25 reduces to A2/phi_4 there and phi_4 changes
+    # sign. So this is a real upgradient branch of the closure being clamped
+    # away, and the clamp must stay.
+    # It is also NOT sufficient on its own: the same root produces LARGE
+    # POSITIVE SM25/SH25 on the other side, which a >= 0 clamp cannot see. That
+    # is bounded at the source by the two-sided D25 floor in _compute_SM_SH.
     Km_half = jnp.maximum(Km_half, 0.0)
     Kh_half = jnp.maximum(Kh_half, 0.0)
     Kq_half = jnp.maximum(Kq_half, 0.0)
@@ -497,8 +605,9 @@ def mynn25_turbulence(
     # ``surface_flux = ρ K dφ/dz`` in mass-weighted form).
     sflx_u = tau_x
     sflx_v = tau_y
-    sflx_T = shflx / constants.c_pd
-    sflx_q = lhflx / constants.L_v
+    sflx_q = surface_moisture_flux(config.surface, lhflx, T_sfc)
+    # Heat BC carries the latent enthalpy correction (water at L(T) vs L_v).
+    sflx_T = (shflx + latent_enthalpy_correction(lhflx, sflx_q)) / constants.c_pd
 
     # Diffuse u, v, theta, q_v using the existing implicit helpers.
     u_new = implicit_vertical_diffusion(
@@ -519,11 +628,11 @@ def mynn25_turbulence(
     # Half-level P_S, P_B → averaged to full levels.
     P_S_half = Km_half * S2
     P_B_half = -Kh_half * N2
-    P_S = _half_to_full(P_S_half, nlev)
-    P_B = _half_to_full(P_B_half, nlev)
+    P_S = half_to_full(P_S_half)
+    P_B = half_to_full(P_B_half)
 
     # Master length on full levels (for the dissipation timescale).
-    L_full = _half_to_full(L, nlev)
+    L_full = half_to_full(L)
     L_full = jnp.maximum(L_full, _L_FLOOR)
     q_full = _safe_pow_pos(qke, 0.5)
     diss_coeff = q_full / (config.B1 * L_full)         # 1/s; ε = qke^(3/2)/(B1·L)
@@ -549,8 +658,8 @@ def mynn25_turbulence(
     qke_new = qke_after_prod.at[:, -1].set(qke_sfc)
 
     # Diagnostics: full-level Km, Kh for downstream tools.
-    Km_full = _half_to_full(Km_half, nlev)
-    Kh_full = _half_to_full(Kh_half, nlev)
+    Km_full = half_to_full(Km_half)
+    Kh_full = half_to_full(Kh_half)
 
     h_pbl = diagnose_pbl_height(T, q_v, u, v, p_full, z_full)
 
@@ -562,8 +671,9 @@ def mynn25_turbulence(
         Km=Km_full,
         Kh=Kh_full,
         shflx=shflx,
-        lhflx=lhflx,
+        lhflx=lhflx, evap_sfc=sflx_q,
         ustar=ustar,
         h_pbl=h_pbl,
+        Kh_iface=half_to_iface_zero_ends(Kh_half),
     )
     return output, qke_new

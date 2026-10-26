@@ -1,0 +1,110 @@
+--- stprk3_stg.F90.r41
++++ stprk3_stg.F90
+@@ -19,6 +19,8 @@
+    !!    stp_RK3_stg  : NEMO 3rd order Runge-Kutta stage with qco or linssh
+    !!----------------------------------------------------------------------
+    USE step_oce       ! time stepping used modules
++   USE l2_r46_stage, ONLY : r46_begin, r46_rhs, r46_ww, r46_state, r46_finish
++                       ! round-46 WRITE-only kt1/kt2 stage recorder
+    USE eosbn2, ONLY : eos_l2_dump_next ! config-local WRITE-only lane-2 instrument
+    USE dynadv, ONLY : dyn_adv_round41_stage ! WRITE-only stage tag for the dyn_adv split
+    USE domqco         ! quasi-eulerian coordinate      (dom_qco_r3c routine)
+@@ -407,12 +409,12 @@
+             !     global arrays, so a tiled call would dump one tile and label
+             !     it the field -- and on a build whose wp is not 64-bit,
+             !     because the reader assumes both.
+-            IF( lwp .AND. kstp == nit000 .AND. kstg == 3 ) THEN
++            IF( lwp .AND. kstp <= nit000 + 1 .AND. kstg == 3 ) THEN
+                IF( l_istiled )                     CALL ctl_stop( 'stp_RK3_stg: L2 stage-3 term instrument does not support domain tiling' )
+                IF( STORAGE_SIZE( 1._wp ) /= 64 )   CALL ctl_stop( 'stp_RK3_stg: L2 stage-3 term instrument requires 64-bit wp' )
+                ALLOCATE( zl3_tmp(jpi,jpj,jpk) )
+                zl3_tmp(:,:,:) = 0._wp
+-               l1_filename = 'oracle_rkstage3_terms_kt00000001.bin'
++               WRITE(l1_filename,'("oracle_rkstage3_terms_kt",I8.8,".bin")') kstp
+                OPEN( NEWUNIT=l3_unit, FILE=TRIM(l1_filename), ACCESS='STREAM', FORM='UNFORMATTED', &
+                   &  STATUS='REPLACE', ACTION='WRITE', IOSTAT=l3_ios )
+                IF( l3_ios /= 0 )   CALL ctl_stop( 'stp_RK3_stg: cannot open L2 stage-3 term dump' )
+@@ -426,6 +428,8 @@
+                WRITE(l3_unit) vv(:,:,:,Krhs)
+             ENDIF
+             CALL    eos    (        ts, Kmm, rhd, rhop )     ! Kmm in situ density anomaly for hpg computation
++            CALL r46_begin( kstp, kstg, Kbb, Kmm, Krhs, Kaa, uu, vv )
++            CALL r46_ww( ww )
+             !                                                ! and potential density for BGC 
+             ! L2 GYRE write-only HPG operand stream.  Capture the exact
+             ! arrays consumed by hpg_sco at the stage-2 call boundary; this
+@@ -444,8 +448,9 @@
+                WRITE(numout,*) 'L2_STAGE2_HPG_OPERAND_DUMP ', kstp, Kmm, TRIM(l1_filename)
+             ENDIF
+             CALL    dyn_hpg( kstp,      Kmm, uu, vv, Krhs )  ! Hydrostratic Pressure Gradient (HPG)
++            CALL r46_rhs( 'after_hpg', uu, vv, Krhs )
+             IF( lwp .AND. kstp == nit000 .AND. kstg == 2 )   WRITE(l1_unit) uu(:,:,:,Krhs), vv(:,:,:,Krhs)
+-            IF( lwp .AND. kstp == nit000 .AND. kstg == 3 ) THEN
++            IF( lwp .AND. kstp <= nit000 + 1 .AND. kstg == 3 ) THEN
+                WRITE(l3_unit) 'after_hpg_u     '   ;   WRITE(l3_unit) 3, jpi, jpj, jpk
+                WRITE(l3_unit) uu(:,:,:,Krhs)
+                WRITE(l3_unit) 'after_hpg_v     '   ;   WRITE(l3_unit) 3, jpi, jpj, jpk
+@@ -454,8 +459,9 @@
+             !
+             !                             !* Coriolis / vorticity       ==> 3D RHS
+             CALL    dyn_vor( kstp,      Kmm, uu, vv, Krhs )
++            CALL r46_rhs( 'after_vor', uu, vv, Krhs )
+             IF( lwp .AND. kstp == nit000 .AND. kstg == 2 )   WRITE(l1_unit) uu(:,:,:,Krhs), vv(:,:,:,Krhs)
+-            IF( lwp .AND. kstp == nit000 .AND. kstg == 3 ) THEN
++            IF( lwp .AND. kstp <= nit000 + 1 .AND. kstg == 3 ) THEN
+                WRITE(l3_unit) 'after_vor_u     '   ;   WRITE(l3_unit) 3, jpi, jpj, jpk
+                WRITE(l3_unit) uu(:,:,:,Krhs)
+                WRITE(l3_unit) 'after_vor_v     '   ;   WRITE(l3_unit) 3, jpi, jpj, jpk
+@@ -470,6 +476,7 @@
+             ELSE                                            ! FF : advective transports used for momentum advection
+                CALL dyn_adv( kstp, Kmm, Kmm, uu, vv, Krhs, zFu, zFv, zFw )
+             ENDIF
++            CALL r46_rhs( 'after_adv', uu, vv, Krhs )
+             IF( lwp .AND. kstp == nit000 .AND. kstg == 2 ) THEN
+                WRITE(l1_unit) uu(:,:,:,Krhs), vv(:,:,:,Krhs)
+                CLOSE(l1_unit)
+@@ -491,7 +498,7 @@
+             !     actually uses on this build: key_qco IS defined, so
+             !     dynvor.F90:490 runs and the nn_e3f_typ SELECT at :493-516 is
+             !     dead code.
+-            IF( lwp .AND. kstp == nit000 .AND. kstg == 3 ) THEN
++            IF( lwp .AND. kstp <= nit000 + 1 .AND. kstg == 3 ) THEN
+                WRITE(l3_unit) 'after_adv_u     '   ;   WRITE(l3_unit) 3, jpi, jpj, jpk
+                WRITE(l3_unit) uu(:,:,:,Krhs)
+                WRITE(l3_unit) 'after_adv_v     '   ;   WRITE(l3_unit) 3, jpi, jpj, jpk
+@@ -710,6 +717,7 @@
+                WRITE(numout,*) 'L2_RK_STAGE3_PRELDF_DUMP ', kstp, Kbb, Kmm, Krhs, Kaa, TRIM(l1_filename)
+             ENDIF
+                                CALL dyn_ldf( kstp, Kbb, Kmm, uu, vv, Krhs )     ! lateral mixing    
++            CALL r46_rhs( 'after_ldf', uu, vv, Krhs )
+             !
+             IF( ln_zdfosm  )   CALL dyn_osm( kstp,      Kmm, uu, vv, Krhs )     ! OSMOSIS non-local velocity fluxes
+             !
+@@ -719,6 +727,7 @@
+             !
+ 
+          END SELECT
++         IF( kstg /= 3 ) CALL r46_state( 'post_update', uu, vv, Kaa )
+ 
+ # if defined key_agrif
+       END DO
+@@ -739,7 +748,10 @@
+ # endif
+          !                     !*  DYN time integration + ZDF  *!   ∆t = rDt
+          !
++         IF( kstg == 3 ) CALL r46_rhs( 'pre_zdf_rhs', uu, vv, Krhs )
+          IF( kstg == 3 )   CALL dyn_zdf( kstp, Kbb, Kmm, Krhs, uu, vv, Kaa  )  ! vertical diffusion and time integration
++         IF( kstg == 3 ) CALL r46_state( 'post_zdf', uu, vv, Kaa )
++         CALL r46_state( 'pre_baro', uu, vv, Kaa )
+ 
+          !
+          !                 !==  All stages: correct the barotropic component ==!   at Kaa = N+1/3, N+1/2 or N+1
+@@ -771,6 +783,8 @@
+             uu(ji,jj,jk,Kaa) = uu(ji,jj,jk,Kaa) + zub(ji,jj)*umask(ji,jj,jk)
+             vv(ji,jj,jk,Kaa) = vv(ji,jj,jk,Kaa) + zvb(ji,jj)*vmask(ji,jj,jk)
+          END_3D
++         CALL r46_state( 'post_baro', uu, vv, Kaa )
++         CALL r46_finish( kstp, kstg )
+          IF( lwp .AND. kstp == nit000 .AND. kstg == 2 ) THEN
+             WRITE(l1_unit) uu(:,:,:,Kaa), vv(:,:,:,Kaa)
+             CLOSE(l1_unit)

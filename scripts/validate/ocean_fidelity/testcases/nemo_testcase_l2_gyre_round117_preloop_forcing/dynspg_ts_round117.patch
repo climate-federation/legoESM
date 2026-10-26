@@ -1,0 +1,54 @@
+--- dynspg_ts.F90
++++ dynspg_ts.F90
+@@ -153,6 +153,7 @@
+       !
+       INTEGER  ::   ji, jj, jk, jn        ! dummy loop indices
+       INTEGER  ::   l2_unit, l2_ios, l2_drag_unit, l2_drag_ios, l2_adv_unit, l2_adv_ios
++      INTEGER  ::   l2_r117_unit, l2_r117_ios
+       INTEGER  ::   l2_ord_unit, l2_ord_ios
+       LOGICAL  ::   ll_fw_start           ! =T : forward integration 
+       LOGICAL  ::   ll_init               ! =T : special startup of 2d equations
+@@ -194,6 +195,8 @@
+       REAL(wp), ALLOCATABLE, DIMENSION(:,:) :: l2_du, l2_dv, l2_zhdiv
+       REAL(wp) :: l2_mid_za1, l2_mid_za2, l2_mid_za3
+       CHARACTER(LEN=96) :: l2_filename
++      CHARACTER(LEN=96) :: l2_r117_filename
++      CHARACTER(LEN=16) :: l2_r117_magic
+       CHARACTER(LEN=96) :: l2_drag_filename
+       CHARACTER(LEN=96) :: l2_adv_filename
+       CHARACTER(LEN=96) :: l2_ord_filename
+@@ -321,13 +324,34 @@
+          CLOSE(l2_unit)
+       ENDIF
+       !
++      ! Round-117 direct pre-loop record.  Open and write the live incoming
++      ! fields before dyn_cor_2D so no inverse reconstruction is needed.
++      IF( lwp .AND. kt == nit000 + 1 ) THEN
++         IF( STORAGE_SIZE( 1._wp ) /= 64 )   CALL ctl_stop( 'round117 preloop forcing requires 64-bit wp' )
++         WRITE(l2_r117_filename,'("oracle_preloop_forcing_kt",I8.8,".bin")') kt
++         OPEN( NEWUNIT=l2_r117_unit, FILE=TRIM(l2_r117_filename), ACCESS='STREAM', &
++            & FORM='UNFORMATTED', STATUS='REPLACE', ACTION='WRITE', IOSTAT=l2_r117_ios )
++         IF( l2_r117_ios /= 0 )   CALL ctl_stop( 'cannot open round117 preloop-forcing dump' )
++         l2_r117_magic = 'NEMO_L2_R117PF1'
++         WRITE(l2_r117_unit) l2_r117_magic, 1, kt, Kmm, jpi, jpj, STORAGE_SIZE(1._wp), 18, SIZE(zu_frc)
++         WRITE(l2_r117_unit) puu_b(:,:,Kmm), pvv_b(:,:,Kmm), zu_frc, zv_frc, &
++            & ssumask, ssvmask, ffu_nw, ffu_ne, ffu_sw, ffu_se, &
++            & ffv_nw, ffv_ne, ffv_sw, ffv_se
++      ENDIF
++      !
+       !
+       CALL dyn_cor_2D( puu_b(:,:,Kmm), pvv_b(:,:,Kmm), zu_trd, zv_trd )
++      IF( lwp .AND. kt == nit000 + 1 )   WRITE(l2_r117_unit) zu_trd, zv_trd
+       !
+       DO_2D( 0, 0, 0, 0 )                          ! Remove coriolis term (and possibly spg) from barotropic trend
+          zu_frc(ji,jj) = zu_frc(ji,jj) - zu_trd(ji,jj) * ssumask(ji,jj)
+          zv_frc(ji,jj) = zv_frc(ji,jj) - zv_trd(ji,jj) * ssvmask(ji,jj)
+       END_2D
++      IF( lwp .AND. kt == nit000 + 1 ) THEN
++         WRITE(l2_r117_unit) zu_frc, zv_frc
++         CLOSE(l2_r117_unit)
++         WRITE(numout,*) 'ROUND117_PRELOOP_FORCING_DUMP ', kt, TRIM(l2_r117_filename)
++      ENDIF
+ 
+ #else
+       !                    !========================================!

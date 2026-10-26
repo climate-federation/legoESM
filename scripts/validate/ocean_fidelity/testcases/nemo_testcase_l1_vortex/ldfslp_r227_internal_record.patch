@@ -1,0 +1,72 @@
+--- ldfslp.F90
++++ ldfslp.F90
+@@ -33,6 +33,9 @@
+    USE lib_mpp        ! distribued memory computing library
+    USE lib_fortran    ! Fortran utilities (allows no signed zero when 'key_nosignedzero' defined)
+    USE timing         ! Timing
++   USE vortex_r23_ldf_terms, ONLY : r227_slope_active, r227_slope_begin, r227_slope_finish, &
++      & r227_slope_e3u, r227_slope_e3v, r227_raw_u, r227_raw_v, r227_bound_u, r227_bound_v, &
++      & r227_hraw_u, r227_hraw_v, r227_wraw_i, r227_wraw_j
+ 
+    IMPLICIT NONE
+    PRIVATE
+@@ -124,6 +127,7 @@
+       !!----------------------------------------------------------------------
+       !
+       IF( ln_timing )   CALL timing_start('ldf_slp')
++      IF( kt == nit000 )   CALL r227_slope_begin
+       !
+       zeps   =  1.e-20_wp           !==   Local constant initialization   ==!
+       z1_16  =  1.0_wp / 16._wp
+@@ -207,10 +211,20 @@
+             zav = zgrv(ji,jj,iik) * r1_e2v(ji,jj)
+             zbu = 0.5_wp * ( zdzr(ji,jj) + zdzr(ji+1,jj  ) )
+             zbv = 0.5_wp * ( zdzr(ji,jj) + zdzr(ji  ,jj+1) )
++            IF( r227_slope_active ) THEN
++               r227_slope_e3u(ji,jj,jk) = e3u(ji,jj,jk,Kmm)
++               r227_slope_e3v(ji,jj,jk) = e3v(ji,jj,jk,Kmm)
++               r227_raw_u(ji,jj,jk) = zau
++               r227_raw_v(ji,jj,jk) = zav
++            ENDIF
+             !                                              ! bound the slopes: abs(zw.)<= 1/100 and zb..<0
+             !                                              ! + kxz max= ah slope max =< e1 e3 /(pi**2 2 dt)
+             zbu = MIN(  zbu, - z1_slpmax * ABS( zau ) , -7.e+3_wp/e3u(ji,jj,jk,Kmm)* ABS( zau )  )
+             zbv = MIN(  zbv, - z1_slpmax * ABS( zav ) , -7.e+3_wp/e3v(ji,jj,jk,Kmm)* ABS( zav )  )
++            IF( r227_slope_active ) THEN
++               r227_bound_u(ji,jj,jk) = zbu
++               r227_bound_v(ji,jj,jk) = zbv
++            ENDIF
+             !
+             !                       !==  slp=dxR(jk)/dzR(jk) under ml   slp=dep(jk)/hml*(dxR/dzR)_ml in ml ==!
+             iku = MAX( nmln(ji+1,jj), nmln(ji,jj) )        ! mix-layer index
+@@ -232,6 +246,10 @@
+             !                                              ! slp at jk level
+             zwz(ji,jj) = ( zfi * zau / ( zbu - zeps ) + ( 1._wp - zfi ) * zdepu * zuslp_hml(ji,jj) ) * umask(ji,jj,jk)
+             zww(ji,jj) = ( zfj * zav / ( zbv - zeps ) + ( 1._wp - zfj ) * zdepv * zvslp_hml(ji,jj) ) * vmask(ji,jj,jk)
++            IF( r227_slope_active ) THEN
++               r227_hraw_u(ji,jj,jk) = zwz(ji,jj)
++               r227_hraw_v(ji,jj,jk) = zww(ji,jj)
++            ENDIF
+             !                                              ! store 1/hml*(dxR/dzR)_ml at nmln level
+             zuslp_hml(ji,jj) = zmli * zwz(ji,jj) * r1_hmlu(ji,jj) + ( 1._wp - zmli ) * zuslp_hml(ji,jj)
+             zvslp_hml(ji,jj) = zmlj * zww(ji,jj) * r1_hmlv(ji,jj) + ( 1._wp - zmlj ) * zvslp_hml(ji,jj)
+@@ -291,6 +309,10 @@
+             !                                        ! wslpi and wslpj with ML flattening (output in zwz and zww, resp.)
+             zwz(ji,jj) = (  zfk * zai / ( zbi - zeps ) + ( 1._wp - zfk ) * zck * zwslpi_hml(ji,jj)  ) * wmask(ji,jj,jk)
+             zww(ji,jj) = (  zfk * zaj / ( zbj - zeps ) + ( 1._wp - zfk ) * zck * zwslpj_hml(ji,jj)  ) * wmask(ji,jj,jk)
++            IF( r227_slope_active ) THEN
++               r227_wraw_i(ji,jj,jk) = zwz(ji,jj)
++               r227_wraw_j(ji,jj,jk) = zww(ji,jj)
++            ENDIF
+             !
+             !                                        ! store 1/hml*(dxR/dzR)_ml at nmln+1 level (1st level above lower T-point in ML)
+             zwslpi_hml(ji,jj) = zmlk * zwz(ji,jj) * r1_hmlw(ji,jj) + ( 1._wp - zmlk ) * zwslpi_hml(ji,jj)
+@@ -317,6 +339,8 @@
+       END DO  ! end jk
+       !                              !==  Lateral boundary conditions  ==!
+       CALL lbc_lnk( 'ldfslp', uslp , 'U', -1.0_wp , vslp , 'V', -1.0_wp , wslpi, 'W', -1.0_wp, wslpj, 'W', -1.0_wp )
++      IF( r227_slope_active )   &
++         CALL r227_slope_finish( kt, Kbb, Kmm, prd, pn2, uslp, vslp, wslpi, wslpj )
+       !
+       IF(sn_cfctl%l_prtctl) THEN
+          CALL prt_ctl(tab3d_1=uslp , clinfo1=' slp  - u : ', tab3d_2=vslp,  clinfo2=' v : ')

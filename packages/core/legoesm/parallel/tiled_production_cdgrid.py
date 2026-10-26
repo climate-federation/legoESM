@@ -1624,7 +1624,8 @@ def _build_hydro_tile_tendency_fns(coord, cdgrid, nl: int, nlev: int,
     def _tile_tendency(u_d_t, v_d_t, T_t, p_s_t, phis_t,
                        cosa_c_t, dxe_t, dye_t, ar_t, gc, fco_t, cosau_t,
                        dx_t, dy_t, ca_t, sa_t, cap_t, sap_t, offs,
-                       q_pack_t=None, column_physics_fn=None):
+                       q_pack_t=None, column_physics_fn=None,
+                       surface_fn=None, T_sfc_t=None):
         # ---- cc winds: dgrid_to_center_vector for B/thermo (within-face, NO
         #      halo); interp_corner_to_center (batched) for vertical advection.
         u_cell, v_cell = dgrid_to_center_vector(u_d_t, v_d_t)  # (1, nl, nl, nlev)
@@ -1760,6 +1761,15 @@ def _build_hydro_tile_tendency_fns(coord, cdgrid, nl: int, nlev: int,
         adiabatic = adiabatic + kappa * T_t * v_dot_grad_lnps
         dT_dt = horiz_adv_T + vert_adv_T + adiabatic
 
+        # Injected surface exchange: lowest-level cc winds from the SAME
+        # corner->centre transform the cell-centre exit state uses.
+        dq_v_sfc = None
+        if surface_fn is not None:
+            dT_sfc, dq_v_sfc = surface_fn(
+                T_t, p_s_t, None if q_pack_t is None else q_pack_t[..., 0],
+                u_cc_va[..., -1], v_cc_va[..., -1], T_sfc_t)
+            dT_dt = dT_dt + dT_sfc
+
         if q_pack_t is None:
             return du_d_dt, dv_d_dt, dT_dt, dp_s_dt
 
@@ -1781,6 +1791,8 @@ def _build_hydro_tile_tendency_fns(coord, cdgrid, nl: int, nlev: int,
         vert_adv_q = jnp.moveaxis(vadv_q_lead, 0, -1)     # (1, nl, nl, nlev, nt)
         dT_k, dq_v, dq_c, dq_r = column_physics_fn(
             T_t, p_s_t, q_pack_t[..., 0], q_pack_t[..., 1], q_pack_t[..., 2])
+        if dq_v_sfc is not None:
+            dq_v = dq_v + dq_v_sfc
         phys_pack = jnp.stack([dq_v, dq_c, dq_r], axis=-1)  # (1, nl, nl, nlev, 3)
         dq_pack = dq_horiz + vert_adv_q + phys_pack
         return du_d_dt, dv_d_dt, dT_dt + dT_k, dp_s_dt, dq_pack
@@ -1946,7 +1958,18 @@ def make_tiled_fv3_hydrostatic_tendencies_stage_2d(mesh, cdgrid, coord, n: int,
 # surfaced as an opaque 83 GB arg-size error at 96 GPUs (issue #1360)
 # after a 24-node allocation — the guard turns that into an instant,
 # named error. Grow ONLY with a new bit-identity receipt.
-_VALIDATED_KT = frozenset({2, 3})
+# kt=4 added 2026-09-17: tests/parallel/test_tiled_fv3_hydrostatic_step.py
+# at N=48 on 96 host devices, sigma + hybrid, both passed.  NOTE the receipt
+# is an FMA-ROBUST RELATIVE match (u_d/v_d corner rel < 1e-9, T/p_s < 1e-7),
+# not literal bit equality — the RK3 accumulation reorders — plus a real
+# multi-controller 96-GPU C768 run (the host-device test alone does not
+# exercise NCCL or device memory, which is where #1360 actually bit).
+# kt=6 (216) and kt=8 (384) added the same day from the same test, host
+# devices only: both counts exceed this machine's 192-GPU ceiling, so their
+# only production use is the CPU rank ladder, whose multi-process run is
+# itself the multi-controller half of the receipt.  A GPU run at those
+# counts would need its own.
+_VALIDATED_KT = frozenset({2, 3, 4, 6, 8})
 
 
 def _validate_tiled_step_factory_args(where, mesh, cdgrid, coord, n, kt,
@@ -2212,6 +2235,12 @@ def make_tiled_fv3_hydrostatic_moist_step_stage_2d(mesh, cdgrid, coord, n: int,
 
         ud3, vd3, T3, ps3, q3 = _ssp_rk3_tile_step(
             (ud0, vd0, T0, ps0, q0), _F, _dt)
+        # ponytail: PLAIN floor, NOT the shared conserving borrow.  This
+        # tiled WB/AIMIP training lane packs q as (6,n,n,nlev,3)=[q_v,q_c,q_r]
+        # (no ice) and takes no positivity config, so it is deliberately left
+        # on the legacy clamp — routing it through apply_water_positivity
+        # (unpack -> borrow with tile-global dp -> repack) is a named #1354/
+        # #1515 follow-up, tracked so the bypass is documented not hidden.
         q3 = jnp.maximum(q3, 0.0)                   # post-step tracer floor
         return ud3, vd3, T3, ps3, q3
 
@@ -2294,7 +2323,7 @@ def make_tiled_fv3_hydrostatic_step_blocked_2d(
         mesh, cdgrid, coord, n: int, kt: int, nlev: int, *,
         p_floor: float, dt: float,
         sponge_sigma: float = 0.0, sponge_tau_sec: float = 0.0,
-        column_physics_fn=None, fix_mass: bool = False):
+        column_physics_fn=None, fix_mass: bool = False, surface_fn=None):
     """Blocked-I/O tiled SSP-RK3 STEP on a ``(6, kt, kt)`` mesh — the
     PRODUCTION (closed-loop) variant of the step stages above.
 
@@ -2312,6 +2341,11 @@ def make_tiled_fv3_hydrostatic_step_blocked_2d(
     ``phis``, ``q_pack``) plain global shapes sharded over the same axes.
     ``fix_mass=True`` appends the serial post-step telescoping dry-mass
     fixer in-stage (one extra psum/step).  ``dt`` [s] static (closed over).
+
+    ``surface_fn`` (optional): ``surface_fn(T_t, p_s_t, q_v_t | None,
+    u_low, v_low, T_sfc_t) -> (dT, dq_v | None)`` added to every RK stage's
+    tendency; the step then takes ``T_sfc`` cc ``(6, n, n)`` (read-only,
+    not returned): ``step(..., T_sfc=...)``.
     """
     from legoesm.parallel.cubesphere_exchange import (
         make_tiled_pad_body, make_tiled_pad_vector_body)
@@ -2325,6 +2359,7 @@ def make_tiled_fv3_hydrostatic_step_blocked_2d(
     _dt = float(dt)
     _phys = column_physics_fn
     _moist = _phys is not None
+    _sfc = surface_fn
     _fix_mass = bool(fix_mass)
     acc = conservation_accumulator()
 
@@ -2356,7 +2391,8 @@ def make_tiled_fv3_hydrostatic_step_blocked_2d(
     co = P("face", "tile_i", "tile_j")             # cc 2D
     cz5 = P("face", "tile_i", "tile_j", None, None)  # q_pack cc 5D
 
-    state_specs = (cz, cz, cz, co, co) + ((cz5,) if _moist else ())
+    state_specs = ((cz, cz, cz, co, co) + ((cz5,) if _moist else ())
+                   + ((co,) if _sfc is not None else ()))
     out_state_specs = (cz, cz, cz, co) + ((cz5,) if _moist else ())
 
     @partial(shard_map, mesh=mesh,
@@ -2375,6 +2411,9 @@ def make_tiled_fv3_hydrostatic_step_blocked_2d(
         else:
             u_d, v_d, T, p_s, phis = args[:5]
             rest = args[5:]
+        T_sfc = None
+        if _sfc is not None:
+            T_sfc, rest = rest[0], rest[1:]
         (cosa_c, dxe, dye, ar, c00, c01, c10, c11, fco, cosau,
          dx_, dy_, ca, sa, capf, sapf, offs) = rest
 
@@ -2397,15 +2436,20 @@ def make_tiled_fv3_hydrostatic_step_blocked_2d(
         if _moist:
             def _F(s):
                 return _tile_tendency(s[0], s[1], s[2], s[3], phis, *mt,
-                                      q_pack_t=s[4], column_physics_fn=_phys)
+                                      q_pack_t=s[4], column_physics_fn=_phys,
+                                      surface_fn=_sfc, T_sfc_t=T_sfc)
 
             ud3, vd3, T3, ps3, q3 = _ssp_rk3_tile_step(
                 (u_d, v_d, T, p_s, q), _F, _dt)
+            # ponytail: PLAIN floor (see the stage_2d note) — the shared
+            # conserving borrow is a named #1354/#1515 follow-up on this packed
+            # tiled lane, deliberately not wired here.
             q3 = jnp.maximum(q3, 0.0)          # post-step tracer floor
             out_rest = (q3,)
         else:
             def _F(s):
-                return _tile_tendency(s[0], s[1], s[2], s[3], phis, *mt)
+                return _tile_tendency(s[0], s[1], s[2], s[3], phis, *mt,
+                                      surface_fn=_sfc, T_sfc_t=T_sfc)
 
             ud3, vd3, T3, ps3 = _ssp_rk3_tile_step(
                 (u_d, v_d, T, p_s), _F, _dt)
@@ -2421,7 +2465,11 @@ def make_tiled_fv3_hydrostatic_step_blocked_2d(
 
     blk = kt * (nl + 1)
 
-    def step(u_d, v_d, T, p_s, phis, q=None):
+    def step(u_d, v_d, T, p_s, phis, q=None, T_sfc=None):
+        if (_sfc is not None) != (T_sfc is not None):
+            raise ValueError(
+                "make_tiled_fv3_hydrostatic_step_blocked_2d: T_sfc must be "
+                "passed iff surface_fn was given.")
         if _moist != (q is not None):
             raise ValueError(
                 "make_tiled_fv3_hydrostatic_step_blocked_2d: q_pack must be "
@@ -2432,7 +2480,10 @@ def make_tiled_fv3_hydrostatic_step_blocked_2d(
                       v_d=(v_d, (blk, blk, nlev)), T=(T, (n, n, nlev)),
                       p_s=(p_s, (n, n)), phis=(phis, (n, n)),
                       **({"q": (q, (n, n, nlev, 3))} if _moist else {}))
-        args = (u_d, v_d, T, p_s, phis) + ((q,) if _moist else ())
+        if _sfc is not None:
+            _check_shapes(n, T_sfc=(T_sfc, (n, n)))
+        args = ((u_d, v_d, T, p_s, phis) + ((q,) if _moist else ())
+                + ((T_sfc,) if _sfc is not None else ()))
         return _step_body(*args,
                           cosa_corner, dx_edge_y, dy_edge_x, area,
                           gc00, gc01, gc10, gc11, f_corner, cosa_u,
@@ -2452,7 +2503,7 @@ def warmup_tiled_cube_comms(mesh, kt: int, *, force: bool = False) -> bool:
     the halo collective-permutes (``jax.lax.ppermute`` over the
     ``(face, tile_i, tile_j)`` mesh axes — the tiled halo cliques) AND the
     mass-fixer GLOBAL reduction (``jax.lax.psum`` over the SAME axes —
-    :func:`_tile_fix_ps_mass_delta` / :func:`_tile_fix_ps_mass_target`).  NCCL
+    :func:`_tile_fix_ps_mass_delta` / :func:`_tile_fix_ps_dry_mass_target`).  NCCL
     communicator init is itself a collective over the clique; under the XLA/GPU
     defaults (latency-hiding scheduler + async collectives +
     ``nccl_comm_splitting``) the two clique KINDS can be scheduled for init in a
@@ -2647,19 +2698,33 @@ def _tile_fix_ps_mass_delta(p_s_new_t, p_s_old_t, ar_t, total_area, acc):
     return p_s_new_t + g_delta / total_area
 
 
-def _tile_fix_ps_mass_target(p_s_new_t, target_mass, ar_t, total_area, acc):
-    """TARGET-anchored per-tile dry-mass fix (the compiled-segment driver's
-    ``fix_ps_mass_target`` semantics — the operator-split lane externalizes
-    the fixer with a fixed t=0 target): uniform additive correction
-    ``(target - psum(sum(p_s*area))) / total_area``.  Shares the psum axes /
-    closed-over ``total_area`` doctrine of :func:`_tile_fix_ps_mass_delta`
-    (see its docstring); a zero target disables the fix (the serial
-    ``target_mass=0`` convention).  Must be called INSIDE a shard_map over
-    the tiled mesh."""
-    local_mass = jnp.sum(p_s_new_t.astype(acc) * ar_t.astype(acc))
+def _tile_fix_ps_dry_mass_target(p_s_new_t, moist_t, target_mass, ar_t,
+                                 total_area, acc, dsigma):
+    """TARGET-anchored per-tile DRY-mass fix (the compiled-segment driver's
+    ``fix_segment_dry_mass`` semantics, review 2026-10-10 F13 -- the
+    operator-split lane externalizes the fixer with a fixed t=0 target):
+    uniform additive correction ``(target - psum(sum(dry_p_s*area))) /
+    total_area`` with ``dry_p_s = p_s - g * column water`` on the lane's
+    ``p_s * dsigma`` layer masses, and every moisture field in ``moist_t``
+    (``{name: array | None}``) re-weighted onto the new layer masses so the
+    correction is dry air (``shift_ps_keep_tracer_mass``).  Shares the psum
+    axes / closed-over ``total_area`` doctrine of
+    :func:`_tile_fix_ps_mass_delta` (see its docstring); a zero target
+    disables the fix (the serial ``target_mass=0`` convention).  Returns
+    ``(p_s_t, moist_t)``.  Must be called INSIDE a shard_map over the tiled
+    mesh."""
+    from legoesm.core.conservation import (
+        SigmaLayers, dry_surface_pressure, shift_ps_keep_tracer_mass,
+    )
+    layers = SigmaLayers(dsigma)
+    tr = {k: v for k, v in moist_t.items() if v is not None}
+    dry = dry_surface_pressure(p_s_new_t, tr, layers)
+    local_mass = jnp.sum(dry.astype(acc) * ar_t.astype(acc))
     g_mass = jax.lax.psum(local_mass, axis_name=("face", "tile_i", "tile_j"))
-    correction = (target_mass.astype(acc) - g_mass) / total_area
-    return jnp.where(target_mass > 0, p_s_new_t + correction, p_s_new_t)
+    correction = jnp.where(
+        target_mass > 0, (target_mass.astype(acc) - g_mass) / total_area, 0.0)
+    p_s_out, tr = shift_ps_keep_tracer_mass(p_s_new_t, tr, layers, correction)
+    return p_s_out, {k: tr.get(k) for k in moist_t}
 
 
 def make_tiled_fix_ps_mass_stage_2d(mesh, grid, n: int, kt: int):
@@ -3178,7 +3243,7 @@ def make_tiled_fv3_sw_momentum_stage_2d(mesh, cdgrid, n: int, kt: int,
 # MASS-PPM: the tiled `cgrid_mass_flux_divergence` height tendency (dh_dt) —
 # the design-doc HARDEST op.  Unlike the momentum assembly (in-stage halos on
 # intermediates), the PPM mass divergence tiles via the U3 DEEP-GLOBAL-PRE-PAD
-# pattern (cf. `tiled_transport.py` ppm_transport_1d(external_halo, rd_prepadded)):
+# pattern (ppm_transport_1d(external_halo, rd_prepadded)):
 # `h` is a STAGE INPUT (cc height), so pre-pad it GLOBALLY (face-replicated)
 # one ring deeper than the production halo=2 and slice the deep window per tile
 # -> the per-tile PPM reconstruction is LOCAL (NO in-stage ppermute).  The cc
@@ -3495,5 +3560,5 @@ def make_tiled_fv3_sw_tendencies_stage_2d(mesh, cdgrid, n: int, kt: int,
 build_hydro_tile_tendency_fns = _build_hydro_tile_tendency_fns
 sponge_rate_from_config = _sponge_rate_from_config
 ssp_rk3_tile_step = _ssp_rk3_tile_step
-tile_fix_ps_mass_target = _tile_fix_ps_mass_target
+tile_fix_ps_dry_mass_target = _tile_fix_ps_dry_mass_target
 validate_tiled_step_factory_args = _validate_tiled_step_factory_args

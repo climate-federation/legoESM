@@ -1,0 +1,28 @@
+{
+  "controls": {
+    "missing_stream": true,
+    "one_bit_file": true
+  },
+  "off_dir": "/tmp/RUN_ZDF30_UV_OFF.75aJsW",
+  "off_sha256": {
+    "DINO_00005760_restart.nc": "0cc00f9945606d1dea52592280e363b45476103de96f5cef471d70b1b881ff3e",
+    "DINO_00005761_restart.nc": "33c0c1a2e998161afdc9d4b71c5606f5cc5d869e54d53058fc0f64eeac7a115c",
+    "mesh_mask.nc": "3285fc4af36854a38b4e6f7985ab0372b95424398750a23b628935da02f72622",
+    "namelist_cfg": "55f17d2344e5aaa58f7c6ef23e7d5dfebd9c351888c6499d5d312131b8515355",
+    "nemo": "4f28b00205658781d7c2a6bbc35362a5a19eb8d57d245bad28a9fbe96ebfafae",
+    "run.attempt1.log": "ef785ca5c63e89d28f0582356c660e7b209d59269f850f1db4623dddb74dc873"
+  },
+  "on_dir": "/tmp/RUN_ZDF30_USLP_ON.h3f2lf",
+  "on_sha256": {
+    "DINO_00005760_restart.nc": "0cc00f9945606d1dea52592280e363b45476103de96f5cef471d70b1b881ff3e",
+    "DINO_00005761_restart.nc": "33c0c1a2e998161afdc9d4b71c5606f5cc5d869e54d53058fc0f64eeac7a115c",
+    "mesh_mask.nc": "3285fc4af36854a38b4e6f7985ab0372b95424398750a23b628935da02f72622",
+    "namelist_cfg": "55f17d2344e5aaa58f7c6ef23e7d5dfebd9c351888c6499d5d312131b8515355",
+    "nemo": "f80875adf31695ab06a069d34478ea1eb4272f21d84e27d00be45908ed01331e",
+    "run.attempt1.log": "ef785ca5c63e89d28f0582356c660e7b209d59269f850f1db4623dddb74dc873"
+  },
+  "schema": "dino-zdf-row30-uslp-bracket-v1",
+  "shared_count": 197,
+  "shared_exact": true,
+  "shared_manifest_sha256": "26a03b595b256e17211fbda58893931ccc20a4cbc73d462d057bab2b67204b2f"
+}

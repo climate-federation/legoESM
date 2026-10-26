@@ -34,9 +34,10 @@ from typing import NamedTuple
 
 import jax.numpy as jnp
 
-from legoesm.land.canopy.clm_ml_backend.clm_src_main.clm_varcon import ispval, spval  # noqa: F401
+from legoesm.land.canopy.clm_ml_backend.clm_src_main.clm_varcon import hsub, ispval, spval  # noqa: F401
 from legoesm.land.canopy.clm_ml_backend.clm_src_main.clm_varpar import nlevgrnd, numrad  # noqa: F401
 from legoesm.land.canopy.clm_ml_backend.multilayer_canopy.MLclm_varctl import nrk  # noqa: F401
+from legoesm.land.canopy.clm_ml_backend.multilayer_canopy.MLclm_varcon import mmh2o  # noqa: F401
 from legoesm.land.canopy.clm_ml_backend.multilayer_canopy.MLclm_varpar import isha, isun, nleaf, nlevmlcan  # noqa: F401
 
 # ---------------------------------------------------------------------------
@@ -405,6 +406,15 @@ class mlcanopy_type(NamedTuple):
     gs_leaf: jnp.ndarray  # Stomatal conductance (mol H2O/m2 leaf/s)
     gspot_leaf: jnp.ndarray  # Stomatal conductance without water stress (mol H2O/m2 leaf/s)
 
+    # ------------------------------------------------------------------
+    # legoESM deviation from CLM-ML (#1875): ground latent heat over snow.
+    # CLM-ML charges its ground at LatVap(tref); legoESM charges the snow-covered
+    # fraction snowfrac_soil at lsub_soil instead, the same rule as its
+    # native land schemes (see MLSoilFluxesMod.soil_latent_heat).
+    # ------------------------------------------------------------------
+    snowfrac_soil: jnp.ndarray  # Snow weight of the ground latent flux (-), 0 = CLM-ML
+    lsub_soil: jnp.ndarray  # Latent heat of sublimation charged over snow (J/mol)
+
 
 # ---------------------------------------------------------------------------
 # Factory function: replaces InitAllocate + Init
@@ -735,6 +745,8 @@ def create_mlcanopy(begp: int, endp: int) -> mlcanopy_type:
         vpd_leaf=_r(np_, nl, nf),
         gs_leaf=_r(np_, nl, nf),
         gspot_leaf=_r(np_, nl, nf),
+        snowfrac_soil=jnp.zeros(np_, dtype=jnp.float64),
+        lsub_soil=jnp.full(np_, hsub * mmh2o, dtype=jnp.float64),
     )
 
 

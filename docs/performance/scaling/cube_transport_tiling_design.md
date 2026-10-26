@@ -115,8 +115,9 @@ bit-identical); do U1→U2→U3 as separate gated+codex commits.
 U1 (rd_prepadded, 65fa25fe) + U2 (synthetic approach-C parity, 6779dcbf) +
 U2b (production cross-face/staggered i-sweep parity, 2150ce17) PROVE the
 per-tile PPM compute. U3 wires it into a `shard_map(face, tile_i, tile_j)`
-stage, mirroring `make_tiled_d2a2c_stage` (packages/core/legoesm/parallel/
-tiled_d2a2c.py) — the established APPROACH-C-under-shard_map pattern:
+stage, mirroring `make_tiled_d2a2c_stage` (HISTORICAL: packages/core/legoesm/
+parallel/tiled_d2a2c.py was deleted as test-only in #1863; see git history) —
+the established APPROACH-C-under-shard_map pattern at the time:
 * inputs FACE-REPLICATED `P("face", None, None)`: the GLOBAL h3=4 pre-padded
   transport field (computed outside shard_map in the GSPMD view, e.g.
   `_pad_halo_dgrid_for_ppm` then `jnp.pad` to h3), the courant, and the

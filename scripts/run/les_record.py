@@ -36,14 +36,15 @@ def select_heights(z, Lz):
     return out, z[out]
 
 
-def _profiles(z, u3, v3, wc3, theta3, z0, case, scalars=None):
+def _profiles(z, u3, v3, wc3, theta3, z0, case, scalars=None, qt3=None):
     """Planar-mean profiles + resolved second moments (matches the layout of
     ``run_les_plane._resolved_profiles``).
 
     Flux sign convention: z is positive UP, so every ``⟨w'x'⟩`` here is positive
     for UPWARD transport of x (same convention as the ``uw``/``vw`` momentum
     fluxes below and as ``run_spectral_cbl.diagnose``). ``wth`` is the RESOLVED
-    kinematic heat flux [K m/s]; the SGS part is not included.
+    kinematic heat flux [K m/s]; the SGS part is not included (for a moist run the
+    caller passes θ_l as ``theta3``, so ``wth`` is then ⟨w'θ_l'⟩).
     """
     um = u3.mean((0, 1)); vm = v3.mean((0, 1)); wm = wc3.mean((0, 1))
     up, vp, wp = u3 - um, v3 - vm, wc3 - wm
@@ -57,6 +58,20 @@ def _profiles(z, u3, v3, wc3, theta3, z0, case, scalars=None):
     out = dict(z=z, theta=theta, u=um, v=vm, spd=spd, wvar=ww,
                uu=uu, vv=vv, ww=ww, tke=tke, uw=uw, vw=vw, wth=wth,
                u_star=u_star, z0=z0, case=case)
+    # The reference-artifact reader asks for the heat flux by its long name.
+    # It is the same array as ``wth``; both are written so neither consumer
+    # has to know the other's spelling.
+    out["wtheta"] = wth
+    # TOTAL water and its resolved flux, when the caller has it. A moist
+    # artifact is scored on total water, not on vapour alone, and summing the
+    # species after the fact cannot recover the flux: the covariance of a sum
+    # is only the sum of covariances because the planar mean is linear, so it
+    # is computed here, from the fields, in the one place the perturbation
+    # maths lives.
+    if qt3 is not None:
+        qt_mean = qt3.mean((0, 1))
+        out["qt"] = qt_mean
+        out["wqt"] = (wp * (qt3 - qt_mean)).mean((0, 1))
     # Optional extra scalars (moist runs): planar mean + resolved kinematic
     # flux ⟨w'x'⟩, same positive-up convention as wth. Kept here so the
     # perturbation maths lives in exactly one place.
@@ -112,6 +127,14 @@ def record_frame(out_dir, frame, t_hours, case, z, u3, v3, wc3, theta3,
         v=np.stack([v3[:, :, k] for k in h_idx]),
         **extra,
     )
-    prof = _profiles(np.asarray(z), u3, v3, wc3, theta3, z0, case, scalars=scalars)
+    # Total water is the sum over the species this run carries: vapour plus
+    # whatever condensate is present. Built here, from the 3-D fields, so its
+    # resolved flux is a real covariance rather than a sum of stored fluxes.
+    qt3 = None
+    for _species in (qv3, qc3, qr3):
+        if _species is not None:
+            qt3 = _species if qt3 is None else qt3 + _species
+    prof = _profiles(np.asarray(z), u3, v3, wc3, theta3, z0, case,
+                     scalars=scalars, qt3=qt3)
     np.savez(prof_dir / f"prof_{frame:03d}.npz", t_hours=t_hours,
              **prof, **prof_extra)

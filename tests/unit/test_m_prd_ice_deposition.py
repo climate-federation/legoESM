@@ -16,7 +16,7 @@ so these tests pin that the JAX code evaluates the gSAM M2005 PRD FORM correctly
 
 Scope of the pin (what it is NOT): it is an ALGEBRAIC-form pin under legoESM's own
 thermodynamics, not a bit-for-bit gSAM numeric reference. The oracle here reuses
-legoESM's ``saturation_mixing_ratio_ice`` (constant-L_s Clausius-Clapeyron), which
+legoESM's ``saturation_specific_humidity_ice`` (constant-L_s Clausius-Clapeyron), which
 differs from gSAM's Flatau ``POLYSVP`` mixing-ratio curve by ~0.3% at 250 K / 40 kPa
 (and legoESM's ``R_v`` differs from gSAM's in the last significant digit). Departures
 beyond that (all interior to this fixture, so the pin stays exact for the CODE): the
@@ -54,8 +54,8 @@ from legoesm.atmosphere.physics.microphysics.morrison import (
 )
 from legoesm.atmosphere.physics.microphysics.output import HydrometeorState
 from legoesm.thermo import (
-    saturation_mixing_ratio,
-    saturation_mixing_ratio_ice,
+    saturation_specific_humidity,
+    saturation_specific_humidity_ice,
 )
 
 jax.config.update("jax_enable_x64", True)
@@ -96,7 +96,7 @@ def _neg_dqv(T, p, q_v, q_i, N_i, eff, dt=20.0):
 
 def _prd_formula(T, p, q_v, q_i, N_i, eff):
     """Independent NumPy PRD (gSAM MICRO_M2005), literal constants."""
-    qsi = float(saturation_mixing_ratio_ice(jnp.asarray(T), jnp.asarray(p)))
+    qsi = float(saturation_specific_humidity_ice(jnp.asarray(T), jnp.asarray(p)))
     rho = p / (constants.R_d * T)
     dv = 8.794e-5 * T ** 1.81 / p
     dqsidt = constants.L_s * qsi / (constants.R_v * T ** 2)
@@ -113,8 +113,8 @@ def _prd_formula(T, p, q_v, q_i, N_i, eff):
 def test_prd_deposition_matches_sam_formula():
     """Ice-supersaturated (liquid-subsaturated) cell: -dq_v_dt == PRD > 0."""
     T, p, q_i, N_i = 250.0, 4.0e4, 1.0e-4, 1.0e5
-    qsi = float(saturation_mixing_ratio_ice(jnp.asarray(T), jnp.asarray(p)))
-    qsl = float(saturation_mixing_ratio(jnp.asarray(T), jnp.asarray(p)))
+    qsi = float(saturation_specific_humidity_ice(jnp.asarray(T), jnp.asarray(p)))
+    qsl = float(saturation_specific_humidity(jnp.asarray(T), jnp.asarray(p)))
     q_v = 1.1 * qsi
     assert qsi < q_v < qsl, "q_v must be ice-supersat but liquid-subsat (no condensation)"
 
@@ -128,7 +128,7 @@ def test_prd_sublimation_matches_sam_formula():
     """Mildly ice-subsaturated cell with ample ice (donor/joint clamps inactive):
     -dq_v_dt == PRD < 0 (sublimation, vapour source)."""
     T, p, q_i, N_i, dt = 250.0, 4.0e4, 1.0e-3, 1.0e5, 20.0
-    qsi = float(saturation_mixing_ratio_ice(jnp.asarray(T), jnp.asarray(p)))
+    qsi = float(saturation_specific_humidity_ice(jnp.asarray(T), jnp.asarray(p)))
     q_v = 0.98 * qsi                                   # 2% ice-subsaturated
     exp = _prd_formula(T, p, q_v, q_i, N_i, eff=1.0)
     # Donor clamp (subl_neg=max(min(dep_raw,0),-q_i/dt)) AND the joint qi_scale
@@ -153,7 +153,7 @@ def test_prd_efficiency_is_a_linear_departure_from_gsam():
     bounds), not the only one. Halving eff exactly halves the deposition rate,
     which pins that it enters as a linear prefactor."""
     T, p, q_i, N_i = 250.0, 4.0e4, 1.0e-4, 1.0e5
-    qsi = float(saturation_mixing_ratio_ice(jnp.asarray(T), jnp.asarray(p)))
+    qsi = float(saturation_specific_humidity_ice(jnp.asarray(T), jnp.asarray(p)))
     q_v = 1.1 * qsi
     full = _neg_dqv(T, p, q_v, q_i, N_i, eff=1.0)
     half = _neg_dqv(T, p, q_v, q_i, N_i, eff=0.5)

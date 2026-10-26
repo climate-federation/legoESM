@@ -1,0 +1,40 @@
+--- stprk3.F90
++++ stprk3.F90
+@@ -23,6 +23,7 @@
+    USE domqco         ! quasi-eulerian coordinate      (dom_qco_r3c routine)
+    USE stprk3_stg     ! RK3 stages
+    USE stp2d          ! external mode solver
++   USE l4_r84_frames, ONLY : r84_dump_frame ! round-84 WRITE-only frames
+    USE lib_mpp, ONLY : l_perpetual_ts
+    USE sbc_ice, ONLY : snwice_mass, snwice_mass_b, snwice_fmass, rCdU_ice
+    USE sbc_oce, ONLY : ln_icebergs
+@@ -102,5 +103,6 @@
+          WRITE(numout,*) 'LANE1_STEP_ENTRY_DUMP ', kstp, Nbb, STORAGE_SIZE(1._wp), TRIM(cl_traj)
+       ENDIF
++      CALL r84_dump_frame( kstp, 0, Nbb )
+       !
+       !>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+       ! update I/O and calendar
+@@ -221,12 +223,14 @@
+       ! Stage 1 :
+       CALL stp_RK3_stg( 1, kstp, Nbb, Nbb, Nrhs, Naa )
+       IF( kstp <= nit000 + 9 )   CALL l1_dump_stage( kstp, 1, Naa )
++      CALL r84_dump_frame( kstp, 1, Naa )
+       !
+       Nrhs = Nnn   ;   Nnn  = Naa   ;   Naa  = Nrhs    ! Swap: Nbb unchanged, Nnn <==> Naa
+       !
+       ! Stage 2 :
+       CALL stp_RK3_stg( 2, kstp, Nbb, Nnn, Nrhs, Naa )
+       IF( kstp <= nit000 + 9 )   CALL l1_dump_stage( kstp, 2, Naa )
++      CALL r84_dump_frame( kstp, 2, Naa )
+       !
+       Nrhs = Nnn   ;   Nnn  = Naa   ;   Naa  = Nrhs    ! Swap: Nbb unchanged, Nnn <==> Naa
+       !
+@@ -235,6 +239,7 @@
+       !
+       CALL stp_RK3_stg( 3, kstp, Nbb, Nnn, Nrhs, Naa )
+       IF( kstp <= nit000 + 9 )   CALL l1_dump_stage( kstp, 3, Naa )
++      CALL r84_dump_frame( kstp, 3, Naa )
+       !
+       IF ( l_ldfeke   )  CALL ldf_eke( kstp, Nbb )                ! GEOMETRIC param. (time evolution of eiv coefficient)
+       !

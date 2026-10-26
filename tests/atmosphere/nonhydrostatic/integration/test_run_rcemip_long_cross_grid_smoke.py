@@ -89,6 +89,7 @@ _EXPECTED_DIAG_COLS = {
     "cubed_sphere",
     "mpas",
 ])
+@pytest.mark.xfail(strict=True, reason="Kessler faithful-port default gap: saturation_sharpness=100 is not the hard limit (negative cloud water, ~half adjustment); passes at the hard limit; known difference: the smooth default is kept because differentiability is never traded for oracle fidelity (user decision 2026-10-20)")
 def test_run_rcemip_long_cross_grid_moist_smoke(tmp_path, grid):
     """iter-275: opt-in ``--moist`` flag for the cubed_sphere + mpas
     paths composes Kessler microphysics + gray radiation into a

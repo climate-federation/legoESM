@@ -299,11 +299,12 @@ def _call_convection(scheme, col, *, T=None, q_v=None, u=None, v=None,
         from legoesm.atmosphere.physics.convection.config import (
             ZhangMcFarlaneConfig,
         )
-        from legoesm.atmosphere.physics.convection.zhang_mcfarlane import (
-            zhang_mcfarlane_convection,
+        from tests._zm_cold_start import (  # ZM at CAM's cold-start pblh = 0
+            zm_cold_start as zhang_mcfarlane_convection,
         )
         out, _prof = zhang_mcfarlane_convection(
-            T, q_v, p_full, p_half, u, v, carry, _DT, ZhangMcFarlaneConfig(),
+            T, q_v, p_full, p_half, u, v, carry, _DT,
+            ZhangMcFarlaneConfig(land_fraction="none"),  # landless test columns
         )
         return out
     raise ValueError(f"unknown convection scheme {scheme!r}")
@@ -411,12 +412,13 @@ class TestConvectionLeafGrad:
             f"convection({scheme}) w.r.t. carry: gradient has NaN/Inf"
         )
         gmax = float(jnp.max(jnp.abs(grad)))
-        if scheme == "kain_fritsch":
+        if scheme in ("kain_fritsch", "zhang_mcfarlane"):
             # NON-DIFFERENTIABLE BY CONSTRUCTION (documented): KF discards the
-            # incoming carry (`del conv_prog_profile`), so d(tend)/d(carry) is
-            # structurally 0.  Asserting the zero pins the property.
+            # incoming carry (`del conv_prog_profile`) and the CAM6 ZM port
+            # diagnoses its cloud-base mass flux every step (no CAPE-relaxation
+            # memory), so d(tend)/d(carry) is structurally 0 for both.
             assert gmax == 0.0, (
-                "Kain-Fritsch is documented as diagnostic (it deletes the "
+                f"{scheme} is documented as diagnostic (it does not read the "
                 f"incoming carry) yet d(tend)/d(carry) = {gmax:.3e} != 0 — "
                 "the carry became live; update this expectation."
             )
@@ -458,6 +460,11 @@ class TestConvectionLeafGrad:
     @pytest.mark.parametrize("scheme", _CONV_SCHEMES)
     def test_trigger_smoothness_sweep(self, scheme, col):
         """The TRIGGER itself, isolated from the tendency magnitude.
+
+        zhang_mcfarlane is the faithful CAM6 port: its trigger is the oracle's
+        hard ``ideep = cape > capelmt`` gate (a step by construction, so
+        ``convective_mask`` is exactly 0/1 and its gradient is 0); the smooth
+        sigmoid trigger this sweep measures does not exist there.
 
         Every scheme here gates on
         ``cape_trigger = sigmoid(sharpness * (CAPE - threshold))``
@@ -504,6 +511,8 @@ class TestConvectionLeafGrad:
             gradient at a live CAPE with an interior mask would be a real
             defect — a detached branch masquerading as a smooth trigger.
         """
+        if scheme == "zhang_mcfarlane":
+            pytest.skip("CAM6 ZM uses the oracle's hard cape > capelmt gate")
         # Stabilization blend toward an isothermal column at T_surface; q_v is
         # recomputed at FIXED RH so the moisture field follows the sounding
         # instead of the column merely becoming supersaturated.
@@ -590,6 +599,12 @@ def _call_microphysics(scheme, col, *, T=None, q_v=None, hyd=None):
         from legoesm.atmosphere.physics.microphysics.sundqvist import (
             sundqvist_microphysics,
         )
+        # Zhao-Carr releases only above rh_crit and evaporates only below it,
+        # so a column of uniform RH can do one or the other: dry the lowest
+        # quarter of the column to 0.6x so rain from above evaporates there.
+        nlev = T.shape[1]
+        dry = jnp.where(jnp.arange(nlev) >= nlev - nlev // 4, 0.6, 1.0)
+        args = (T, q_v * dry, *args[2:])
         return sundqvist_microphysics(*args, SundqvistConfig())
     if scheme == "p3":
         from legoesm.atmosphere.physics.microphysics.config import P3Config
@@ -1149,10 +1164,15 @@ class TestCloudFractionGrad:
         cfg = CloudConfig(scheme="sundqvist", convective_cloud=True)
         ones = jnp.ones((col.ncol, col.nlev))
         conv_precip0 = jnp.full((col.ncol,), 1.0e-4)   # ~8.6 mm/day
+        # Half the fixture's vapour (RH ~30-48 %): the stratiform cover drops
+        # below the convective one (~0.09) in the deck, so the max picks
+        # cf_conv there.  At full RH the stratiform cover wins every deck
+        # cell and the gradient is exactly zero by construction.
+        q_v = 0.5 * col.q_v
 
         def loss(conv_precip):
             props = compute_cloud_properties(
-                col.T, col.p_full, col.q_v, col.dp, cfg,
+                col.T, col.p_full, q_v, col.dp, cfg,
                 q_cloud=1.0e-4 * ones, q_ice=1.0e-5 * ones,
                 conv_precip=conv_precip,
             )

@@ -4,10 +4,10 @@ build-backend = "hatchling.build"
 
 [project]
 name = "legoesm"
-version = "0.1.0"
+version = "1.0.1"
 description = "legoESM: A Differentiable Earth System Model in JAX"
 readme = "README.md"
-license = "LicenseRef-PolyForm-Noncommercial-1.0.0"
+license = "MIT"
 license-files = ["LICENSE"]
 requires-python = ">=3.11"
 authors = [
@@ -30,24 +30,24 @@ dependencies = [
     # shipped independently on top of the same core (see FEDERATION.md).  Pinned
     # to the matching minor (single-sourced version; members bump in lock-step)
     # so a non-workspace ``pip install legoesm`` cannot resolve a mismatched core.
-    "legoesm-core~=0.1.0",
+    "legoesm-core~=1.0.0",
     # The four Earth-system components, each its own installable member on top of
     # legoesm-core (mutually independent — import-linter contract #2).  The meta
     # ``legoesm`` pulls them all; ``pip install legoesm-ocean`` alone is enough to
     # run the ocean standalone.
-    "legoesm-atmosphere~=0.1.0",
-    "legoesm-ocean~=0.1.0",
-    "legoesm-land~=0.1.0",
-    "legoesm-ice~=0.1.0",
+    "legoesm-atmosphere~=1.0.0",
+    "legoesm-ocean~=1.0.0",
+    "legoesm-land~=1.0.0",
+    "legoesm-ice~=1.0.0",
     # The orchestration cluster (coupler/driver, ml/training/da, tools): the meta
-    # package's own modules (cli, config, dycore_factory, taxonomy) import these,
+    # package's own modules (cli, config, dycore_factory) import these,
     # so the meta-member pulls the whole stack.  They are mutually interdependent
     # (a uv-workspace cycle), unlike the four independent components above.
-    "legoesm-coupler~=0.1.0",
-    "legoesm-ml~=0.1.0",
-    "legoesm-tools~=0.1.0",
-    "jax>=0.4.35",              # install minimum; tested with 0.8–0.9
-    "jaxlib>=0.4.35",           # must match jax
+    "legoesm-coupler~=1.0.0",
+    "legoesm-ml~=1.0.0",
+    "legoesm-tools~=1.0.0",
+    "jax>=0.5.3",              # install minimum; tested with 0.8–0.9
+    "jaxlib>=0.5.3",           # must match jax
     "equinox>=0.11",
     "optax>=0.2",
     "xarray>=2024.0",
@@ -122,6 +122,11 @@ all = [
     "legoesm[ml,mesh,viz,data,dev,docs,wizard]",
 ]
 
+[project.urls]
+Homepage = "https://github.com/climate-federation/legoESM"
+Repository = "https://github.com/climate-federation/legoESM"
+Issues = "https://github.com/climate-federation/legoESM/issues"
+
 [project.scripts]
 legoesm = "legoesm.cli:main"
 
@@ -133,6 +138,11 @@ legoesm = "legoesm.cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/legoesm"]
+
+# The sdist ships only the meta-package source; without this hatch packs the whole
+# repository (scripts, tests, docs, data: ~130 MB, over the PyPI upload limit).
+[tool.hatch.build.targets.sdist]
+only-include = ["src/legoesm", "LICENSE", "README.md"]
 
 # === uv workspace (federation carve) ===
 # The repo is a uv workspace; the substrate lives in its own member
@@ -146,7 +156,7 @@ members = ["packages/*"]
 
 # Every inter-member dependency resolves to the in-tree workspace member (never
 # PyPI).  All members must be listed here, or uv would try to fetch e.g.
-# legoesm-atmosphere~=0.1.0 from an index that does not publish it yet.
+# legoesm-atmosphere~=1.0.0 from an index that does not publish it yet.
 [tool.uv.sources]
 legoesm-core = { workspace = true }
 legoesm-atmosphere = { workspace = true }
@@ -191,6 +201,13 @@ select = ["E", "F", "I", "N", "W", "UP"]
 "tests/grids/test_fv3_native_duo_phase4c.py" = ["N806"]
 "tests/grids/test_fv3_native_geopk_pgrad.py" = ["N806"]
 "tests/grids/test_fv3_native_pgrad.py" = ["N803", "N806"]
+# BENCH (NEMO tests/BENCH port, Irrmann 2022): the tracer/heat variables keep
+# the NEMO usrdef_istate.F90 symbol names (T, S, T_ic, S_ic, H_max) so every
+# formula cross-references its NEMO source line 1:1 (same rationale as the
+# FV3-native ports above).
+"packages/ocean/legoesm/ocean/experiments/bench.py" = ["N803", "N806"]
+"tests/ocean/unit/test_bench.py" = ["N806", "N802"]
+"scripts/run/run_bench.py" = ["N806"]
 # Fuller CLUBB port (PORT_CLUBB.md): the closure coefficients, model flags and
 # intermediate variables mirror CLUBB's canonical symbol names 1:1 (c_K1,
 # iiPDF_type, l_use_C7_Richardson, C2rt, Skw, wpthlp, Lscale, ...) as in
@@ -209,6 +226,41 @@ select = ["E", "F", "I", "N", "W", "UP"]
 # snake_case; same rationale as the clubb modules.
 "packages/atmosphere/legoesm/atmosphere/dynamics/column_les_diagnosis.py" = ["N803", "N806", "N815"]
 "packages/atmosphere/legoesm/atmosphere/dynamics/column_les.py" = ["N803", "N806", "N815"]
+# LES-suite case registry (docs/atmosphere/les_suite): case-definition dataclass
+# fields and generator args carry CLAUDE.md-mandated unit suffixes on kinematic
+# fluxes (surface_theta_flux_K_m_s [K m/s], fluxes_K_m_s) whose Kelvin "K" reads as
+# mixedCase to pep8-naming. The unit suffix is load-bearing (units-in-names rule);
+# same rationale as the clubb / column-LES modules. N815 = dataclass field, N803 = arg.
+"packages/atmosphere/legoesm/atmosphere/les_suite/registry.py" = ["N815"]
+"packages/atmosphere/legoesm/atmosphere/les_suite/catalog.py" = ["N803"]
+# CBL intercomparison gate: physical symbol Q0 (surface heat flux) as an arg, and
+# the mK/m unit suffix on the well-mixed metric field read clearer than snake_case
+# (units-in-names rule); same rationale as the clubb / column-LES modules.
+"packages/atmosphere/legoesm/atmosphere/les_suite/intercomparison.py" = ["N803", "N815"]
+"tests/atmosphere/les_suite/test_intercomparison.py" = ["N802", "N803", "N806"]
+# LES-suite emit driver: physical symbols Q0 (surface heat flux) and T (integration
+# length) read clearer than snake_case (units-in-names rule).
+"scripts/run/run_les_suite.py" = ["N803", "N806"]
+# emit.py: T_s kwarg matches the bridge artifact's surface-temperature field name.
+"packages/atmosphere/legoesm/atmosphere/les_suite/emit.py" = ["N803"]
+"tests/atmosphere/les_suite/test_emit.py" = ["N806"]
+# scm_coupling tests: T (temperature) symbol in names/locals reads clearer than
+# snake_case for the θ↔T conversion checks (units-in-names rule).
+"tests/atmosphere/les_suite/test_scm_coupling.py" = ["N802", "N806"]
+# scm_runner: T_profile / T_final (temperature) locals + dtheta_sfc_K (a _K
+# unit-suffixed physical arg) — physical symbol / units-in-names convention.
+"packages/atmosphere/legoesm/atmosphere/les_suite/scm_runner.py" = ["N803", "N806"]
+"tests/atmosphere/les_suite/test_scm_runner.py" = ["N806"]
+# ARM obs scoring: physical symbol T (temperature) locals read clearer than snake_case.
+"packages/atmosphere/legoesm/atmosphere/_future/arm_obs_score.py" = ["N806"]
+"tests/atmosphere/les_suite/test_arm_obs_score.py" = ["N806"]
+# SCM forcing IO + ARM/SCCM loader: physical symbols T (temperature), divT (T
+# advective tendency) as args/locals read clearer than snake_case, matching the
+# sibling dephy_scm loader (units-in-names rule).
+"packages/atmosphere/legoesm/atmosphere/forcing/scm/scm_forcing_io.py" = ["N803", "N806"]
+"packages/atmosphere/legoesm/atmosphere/forcing/scm/sccm_arm.py" = ["N803", "N806"]
+"tests/atmosphere/hydrostatic/unit/test_scm_forcing_io.py" = ["N806"]
+"tests/atmosphere/hydrostatic/unit/test_sccm_arm_loader.py" = ["N806"]
 # Column large-scale extractor: physical symbol names (T, T_v for temperature /
 # virtual temperature) read clearer than snake_case; same rationale. Test files
 # use the same symbols (T) + set jax_enable_x64 before importing (E402).
@@ -270,6 +322,9 @@ select = ["E", "F", "I", "N", "W", "UP"]
 # Same bootstrap idiom: the land sensitivity demos insert the repo root before importing
 # their shared ``scripts.run.land_sensitivity.column_setup``.
 "scripts/run/land_sensitivity/demo_*.py" = ["E402"]
+# Same run-as-a-script sys.path bootstrap (REPO_ROOT insert precedes the ``scripts.run``
+# import), so its module-level imports trip E402.
+"scripts/run/train_scm_rce_params.py" = ["E402"]
 # ERA5->model regridders + their tests: physical symbol names (T, u, v, q) +
 # field-name vars (T_cell, T_model) read clearer than snake_case; E402 covers the
 # x64-before-import idiom / logging setup.
@@ -291,6 +346,10 @@ select = ["E", "F", "I", "N", "W", "UP"]
 # dycore (fp64 replicated-vs-scattered bit-equivalence), so imports follow.
 "tests/parallel/test_cube_face_scatter.py" = ["E402"]
 "tests/distributed/test_cube_face_scatter_mpi.py" = ["E402"]
+# #1226 DINO heat discriminator: matplotlib.use("Agg") must run before
+# `import matplotlib.pyplot` (headless-backend idiom), splitting the import
+# block (E402/I001).
+"scripts/validate/ocean_fidelity/dino_1226/heat_discriminator.py" = ["E402", "I001"]
 # MPAS native-SPMD parity gates use the MPAS canonical symbol names (nCells,
 # nEdges, W) plus the mandated T_sfc / dT unit-suffixed physics names; same
 # rationale as the column-extractor tests above.
@@ -376,8 +435,6 @@ ignore_imports = [
     # avoid the runtime/__init__ <-> core init cycle — not a real layering break.
     "legoesm.core -> legoesm.runtime.backend",
     "legoesm.core.conservation -> legoesm.runtime.backend",
-    "legoesm.core.hardware -> legoesm.runtime.backend",
-    "legoesm.core.hardware -> legoesm.runtime.config",
     "legoesm.core.precision -> legoesm.runtime.backend",
     # core->ocean/atmosphere is only via core->grids.halo_latlon->parallel->
     # component (the root inversion above); baseline the core->grids hop.
@@ -535,8 +592,6 @@ ignore_imports = [
     # baselined in contract #1 (runtime/__init__ <-> core init cycle).
     "legoesm.core -> legoesm.runtime.backend",
     "legoesm.core.conservation -> legoesm.runtime.backend",
-    "legoesm.core.hardware -> legoesm.runtime.backend",
-    "legoesm.core.hardware -> legoesm.runtime.config",
     "legoesm.core.precision -> legoesm.runtime.backend",
     # parallel.voronoi_mpi: FIXED — re-instantiates the dynamics model via
     # type(model)(local_mesh, ...) and calls .tendencies (no atmosphere import).

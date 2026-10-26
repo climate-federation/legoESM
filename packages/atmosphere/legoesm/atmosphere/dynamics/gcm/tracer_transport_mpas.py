@@ -63,7 +63,7 @@ def tracer_horizontal_advection(q, u_edge, mesh):
     standalone ``tracer_advection_tendency`` AND the hybrid coupled PE
     (``primitive_eq_mpas.mpas_hydrostatic_tendencies``), each of which then
     adds its OWN matching vertical advection (``vertical_advection`` for
-    sigma, ``vertical_advection_hybrid`` for the hybrid dycore).  Keeping the
+    sigma, ``vertical_advection_hybrid_van_leer`` for the hybrid dycore).  Keeping the
     horizontal numerics in one place avoids duplicating the gather +
     divergence across the two paths.
 
@@ -111,7 +111,7 @@ def tracer_advection_tendency(q, u_edge, sigma_dot, mesh, sigma_coord):
     """Full sigma-coordinate advective tracer tendency = shared horizontal
     (:func:`tracer_horizontal_advection`) + sigma vertical advection.  Used by
     the standalone prescribed-wind model; the hybrid PE builds its own
-    (horizontal + ``vertical_advection_hybrid``)."""
+    (horizontal + ``vertical_advection_hybrid_van_leer``)."""
     horiz_adv = tracer_horizontal_advection(q, u_edge, mesh)
 
     # Vertical advection — local stencil along axis -1, no halo cost.

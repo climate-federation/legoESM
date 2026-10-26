@@ -24,7 +24,7 @@ def _load():
 def test_build_returns_consistent_cgrid_state():
     mod = _load()
     n_lat, n_lon, nlev = 8, 8, 4
-    model, c0 = mod._build(n_lat, n_lon, nlev)
+    model, c0 = mod._build(n_lat, n_lon, nlev, 60.0)
     # C-grid staggering: u (n_lat, n_lon+1, nlev), v (n_lat+1, n_lon, nlev),
     # T/p_s at centers.
     assert c0.u.shape == (n_lat, n_lon + 1, nlev)
@@ -110,7 +110,7 @@ def test_main_segment_mode_divergence_marks_record_invalid(
         ["bench", "--n-devices", "1", "--n-lat", "8", "--n-lon", "8",
          "--nlev", "4", "--steps", "3", "--warmup", "1",
          "--segment-steps", "2", "--dt", "1e18", "--out", str(out)])
-    assert mod.main() == 0
+    assert mod.main() == 3
     rec = json.loads(out.read_text().strip().splitlines()[-1])
     assert rec["finite_ok"] is False
     assert rec["valid"] is False
@@ -130,21 +130,90 @@ def test_main_segment_mode_divergence_marks_record_invalid(
     assert "INVALID[diverged" in outtxt
 
 
-def test_main_per_step_lane_finite_unchecked_is_null(tmp_path, monkeypatch):
-    """The legacy per-step lane has NO in-graph finite check: its rows must
-    say so (finite_ok=null) while remaining valid — never a fabricated
-    finite_ok=true."""
+@pytest.mark.parametrize("dt,finite", [("60", True), ("1e18", False)])
+def test_main_default_lane_checks_final_state_finite(tmp_path, monkeypatch, dt, finite):
+    """The default fused lane checks the state after its timed blocks: a
+    stable run is stamped finite_ok=true/valid, a diverging one (huge dt)
+    finite_ok=false/valid=false with no throughput -- never an unchecked
+    timing of a blown-up state."""
     import json
     mod = _load()
-    out = tmp_path / "perstep.jsonl"
+    out = tmp_path / "default.jsonl"
     monkeypatch.setattr(
         "sys.argv",
         ["bench", "--n-devices", "1", "--n-lat", "8", "--n-lon", "8",
          "--nlev", "4", "--steps", "2", "--warmup", "1",
-         "--dt", "60", "--out", str(out)])
-    assert mod.main() == 0
+         "--dt", dt, "--out", str(out)])
+    assert mod.main() == (0 if finite else 3)
     rec = json.loads(out.read_text().strip().splitlines()[-1])
     assert rec["segment_mode"] is False
-    assert rec["finite_ok"] is None
-    assert rec["valid"] is True
-    assert rec["completed_blocks"] is None
+    assert rec["finite_ok"] is finite
+    assert rec["valid"] is finite
+    if not finite:
+        assert rec["sypd"] is None and rec["mcells_per_s"] is None
+
+
+def test_thin_band_guard_applies_to_the_gpu_lane_only(monkeypatch, capsys):
+    """The thin-band floor is a GPU-communicator receipt, not a physical bound.
+
+    The same 12-row program runs clean on virtual CPU devices -- the guard's
+    own comment says so -- yet it fired for every multi-process launch, which
+    refused the CPU benchmark it was validated against.  Selecting the CPU
+    platform must reach a later check instead of the communicator one.
+    """
+    mod = _load()
+    argv = ["bench", "--multicontroller", "--n-devices", "8", "--mode",
+            "strong", "--n-lat", "96", "--n-lon", "16", "--nlev", "4",
+            "--steps", "1"]
+
+    monkeypatch.delenv("JAX_PLATFORMS", raising=False)
+    monkeypatch.setattr("sys.argv", list(argv))
+    with pytest.raises(SystemExit) as unset:
+        mod.main()
+    assert "deadlock NCCL" in str(unset.value)
+
+    monkeypatch.setenv("JAX_PLATFORMS", "cpu")
+    monkeypatch.setattr("sys.argv", list(argv))
+    # On the CPU lane the run gets past preflight and only stops later, where
+    # a single-process test cannot stand up a multi-process launch. Whatever
+    # it stops on, it must not be the communicator floor.
+    try:
+        mod.main()
+    except BaseException as exc:            # noqa: BLE001 - any stop will do
+        assert "deadlock NCCL" not in str(exc)
+    assert "[preflight] ok" in capsys.readouterr().out
+
+
+def test_receipt_records_the_warmup_that_actually_applied(tmp_path,
+                                                          monkeypatch):
+    """--warmup is inert on the fused lane, so the receipt must not claim it.
+
+    A job asking for 10 warm-up steps was serialised as ``warmup: 10`` while
+    the fused lane discarded nothing but the compile call and the latency
+    probe, so any startup-sensitive timing was scored against a window the
+    run never had.
+    """
+    import json
+    mod = _load()
+    out = tmp_path / "fused.jsonl"
+    monkeypatch.setattr(
+        "sys.argv",
+        ["bench", "--n-devices", "1", "--n-lat", "8", "--n-lon", "8",
+         "--nlev", "4", "--steps", "2", "--warmup", "10", "--dt", "60",
+         "--out", str(out)])
+    assert mod.main() == 0
+    extra = json.loads(out.read_text().strip().splitlines()[-1])["metadata"]["extra"]
+    assert extra["segment_mode"] is False
+    assert extra["warmup"] is None
+    assert extra["warmup_requested"] == 10
+    assert "none" in extra["warmup_applies"]
+
+
+def test_tiled_lane_is_refused(monkeypatch):
+    mod = _load()
+    monkeypatch.setattr(
+        "sys.argv",
+        ["bench", "--n-devices", "4", "--p-lon", "2", "--n-lat", "8", "--n-lon", "8",
+         "--nlev", "4", "--steps", "2", "--out", "/dev/null"])
+    with pytest.raises(SystemExit, match="tiled lat-lon step has no polar filter"):
+        mod.main()

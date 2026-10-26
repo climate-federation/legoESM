@@ -194,6 +194,53 @@ PW_BC_PA = 34000.0       # pW   -- vertical moisture decay pressure
 PHIW_BC_RAD = 2.0 * np.pi / 9.0   # phiW -- meridional moisture width
 
 
+# --- DCMIP16 terminator toy-chemistry IC (test_cases.F90:4136-4205) ---
+# Filled by the oracle's cold start whenever the field_table lists
+# tracers named cl and cl2 (:6746-6750).  The REACTION lives in fv_phys
+# (:4155 "you will have to change it both here and in fv_phys") and never
+# runs on an adiabatic deck, so on it cl/cl2 are passive, longitude-
+# dependent, nonzero passengers with Cl + 2 Cl2 = qcly exactly.
+TERM_QCLY = 4.0e-6            # :4157
+TERM_LC = 5.0 * np.pi / 3.0   # :4158
+TERM_THC = np.pi / 9.0        # :4159
+TERM_K2 = 1.0                 # :4160
+
+
+def dcmip16_terminator_cl_cl2(agrid_lon, agrid_lat):
+    """``(cl, cl2)`` on cell centres, one level -- the oracle copies
+    level 1 to every level (:4174-4180).  Radians in, mixing ratio out."""
+    lon = np.asarray(agrid_lon, dtype=np.float64)
+    lat = np.asarray(agrid_lat, dtype=np.float64)
+    k1 = np.maximum(0.0, np.sin(lat) * np.sin(TERM_THC)
+                    + np.cos(lat) * np.cos(TERM_THC) * np.cos(lon - TERM_LC))
+    r = k1 / TERM_K2 * 0.25
+    d = np.sqrt(r * r + 2.0 * r * TERM_QCLY)
+    cl = d - r
+    cl2 = 0.5 * (TERM_QCLY - cl)
+    return cl, cl2
+
+
+def dcmip16_terminator_six_face(ctx: dict, km: int) -> list:
+    """Six ``[cl, cl2]`` padded ``(m_a, m_a, km)`` arrays, compute window
+    filled, halos zero (the caller's convention for every tracer)."""
+    from legoesm.core.fv3_native_state_3d import field_shape
+    n, ng = int(ctx["n"]), int(ctx["ng"])
+    cs = slice(ng, ng + n)
+    out = []
+    for t in range(6):
+        gs = ctx["gs6"][t]
+        cl, cl2 = dcmip16_terminator_cl_cl2(
+            np.asarray(gs["agrid_lon"])[cs, cs],
+            np.asarray(gs["agrid_lat"])[cs, cs])
+        pair = []
+        for f in (cl, cl2):
+            q = np.zeros(field_shape("delp", n, ng, km), dtype=np.float64)
+            q[cs, cs, :] = f[:, :, None]
+            pair.append(q)
+        out.append(pair)
+    return out
+
+
 def dcmip16_bc_sphum(ak, bk, agrid_lat, km: int) -> np.ndarray:
     """``sphum`` on the DCMIP16_BC column -- test_cases.F90:6737-6744.
 
@@ -249,3 +296,107 @@ def dcmip16_bc_sphum(ak, bk, agrid_lat, km: int) -> np.ndarray:
         else:
             out[..., k] = QT_BC
     return out
+
+
+def dcmip16_bc_six_face_state(ctx: dict, ak, bk, km: int, *,
+                              hydrostatic: bool = True,
+                              do_pert: bool = True,
+                              constants: DCMIP16Constants | None = None,
+                              with_sphum: bool = True,
+                              zvir: float = 0.0):
+    """The test_case = -13/-12 IC on ALL SIX duo faces, state_3d layout.
+
+    Committed home of the assembly that
+    ``scripts/validate/fv3_native/full_step_oracle_parity.py::build_port_ic``
+    (and ``build_port_tracer_ic``) established against the oracle: window
+    IC only (``is:ie``), halos left at zero exactly as the oracle leaves
+    them to the in-step exchanges; NH adds ``make_nh``'s state
+    (``init_hydro.F90:147-158``): ``w = 0`` and
+    ``delz = -(rdgas/grav) * pt * dpeln`` from the IC's own hydrostatic
+    column (``zvir = 0`` on the adiabatic deck).
+
+    ``zvir != 0`` selects the MOIST IC.  ``test_cases.F90:6760-6768``
+    runs ``pt = pt/(1. + zvir*q(sphum))`` -- labelled "Convert pt to
+    non-virtual temperature" -- whenever the deck is NOT adiabatic, and
+    in the solo driver ``adiabatic = .false.`` is exactly what sets
+    ``zvir = rvgas/rdgas - 1`` (``atmosphere.F90:156-161``), so the one
+    flag decides both.  A moist deck's restart therefore holds DRY
+    temperature: omitting this leaves the IC ~3.8 K warm where
+    ``zvir*q`` peaks at 0.0128, which is the 1.06e-02 relative the
+    parity harness's instrument control refused on 2026-08-20.
+
+    THE ORDER IS THE ORACLE'S, and it matters on the NH arm: ``delz``
+    is built at ``:6721`` from the VIRTUAL ``pt``, ``sphum`` is filled
+    at ``:6737``, and only then is ``pt`` divided at ``:6760``.  The
+    division is therefore LAST in the per-face body, after ``delz``.
+    ``zvir != 0`` requires ``with_sphum`` for the obvious reason.
+
+    ``ctx`` is a ``build_six_face_duo_context`` dict (the NumPy lane's);
+    ``constants=None`` selects ``GFS_CONSTANTS`` — the FMS set the pinned
+    oracle binary links (parity runner asserts it from the run's own
+    log), NOT ``legoesm.constants``; the two differ at ~1e-4 and mixing
+    them was the IC-parity confound of 2026-08-07.
+
+    Returns ``(state, sphum)``: ``state`` is ``build_state_3d``'s list of
+    six per-face dicts and ``sphum`` a list of six padded
+    ``(m_a, m_a, km)`` tracer arrays (zero halos, per :6728-6735), or
+    ``None`` when ``with_sphum=False``.
+    """
+    from legoesm.core.fv3_native_dcmip16_bc import GFS_CONSTANTS
+    from legoesm.core.fv3_native_state_3d import build_state_3d, field_shape
+    from legoesm.grids.fv3_native_gridstruct import FV3_GRAV, FV3_RDGAS
+    from legoesm.grids.fv3_native_metrics import great_circle_dist as _gcd
+
+    if constants is None:
+        constants = GFS_CONSTANTS
+    if zvir != 0.0 and not with_sphum:
+        raise ValueError(
+            "zvir != 0 needs with_sphum=True: the moist IC divides pt by "
+            "(1 + zvir*q(sphum)) (test_cases.F90:6762) and there is no "
+            "sphum to divide by.")
+
+    def gcdr(p1, p2, r):
+        # the oracle's 3-arg form: unit-sphere angle times radius
+        return _gcd(np.asarray(p1, float), np.asarray(p2, float)) * r
+
+    n, ng = int(ctx["n"]), int(ctx["ng"])
+    ak = np.asarray(ak, dtype=np.float64)
+    bk = np.asarray(bk, dtype=np.float64)
+    st = build_state_3d(n, ng, km, remap_follows=True,
+                        hydrostatic=hydrostatic)
+    sphum = [] if with_sphum else None
+    cs, cc = slice(ng, ng + n), slice(ng, ng + n + 1)
+    for t in range(6):
+        gs = ctx["gs6"][t]
+        co = np.stack([np.asarray(gs["grid_lon"])[cc, cc],
+                       np.asarray(gs["grid_lat"])[cc, cc]], -1)
+        ce = np.stack([np.asarray(gs["agrid_lon"])[cs, cs],
+                       np.asarray(gs["agrid_lat"])[cs, cs]], -1)
+        o = dcmip16_bc_face(co, ce, ak, bk, km, do_pert=do_pert,
+                            constants=constants, great_circle_dist=gcdr)
+        st[t]["delp"][cs, cs, :] = o["delp"]
+        st[t]["pt"][cs, cs, :] = o["pt"]
+        st[t]["u"][cs, cc, :] = o["u"]
+        st[t]["v"][cc, cs, :] = o["v"]
+        if not hydrostatic:
+            # make_nh (init_hydro.F90:147-158): w = 0 (build_state_3d's
+            # fill) and delz from the IC's own hydrostatic column
+            pe = np.full((n, n), float(ak[0]))
+            for k in range(km):
+                dp = st[t]["delp"][cs, cs, k]
+                dpeln = np.log(pe + dp) - np.log(pe)
+                st[t]["delz"][:, :, k] = (-(FV3_RDGAS / FV3_GRAV)
+                                          * st[t]["pt"][cs, cs, k] * dpeln)
+                pe = pe + dp
+        if with_sphum:
+            q = np.zeros(field_shape("delp", n, ng, km), dtype=np.float64)
+            q[cs, cs, :] = dcmip16_bc_sphum(
+                ak, bk, np.asarray(gs["agrid_lat"])[cs, cs], km)
+            sphum.append(q)
+            if zvir != 0.0:
+                # :6760-6768, LAST -- after delz above, which the oracle
+                # builds from the still-virtual pt at :6721.
+                st[t]["pt"][cs, cs, :] = (
+                    st[t]["pt"][cs, cs, :]
+                    / (1.0 + zvir * q[cs, cs, :]))
+    return st, sphum

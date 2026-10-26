@@ -1,0 +1,26 @@
+{
+  "backend": "cpu",
+  "bit_mismatches": {
+    "divide_after_sum": 2655,
+    "nemo_literal_left": 0
+  },
+  "controls": {
+    "one_bit_oracle_plant_fires": true,
+    "round11_two_at_bar_candidates_bound": true
+  },
+  "disposition": "DIVERGENCE_LITERAL_EXACT_OWNED_FIX_AUTHORIZED",
+  "git_commit": "f4ebcff093b3154584388c380f214bd332630c5b",
+  "jax_enable_x64": true,
+  "later_rows": {
+    "1.4": "ORDERED_BLOCKED",
+    "2": "ORDERED_BLOCKED",
+    "3": "ORDERED_BLOCKED",
+    "4": "ORDERED_BLOCKED",
+    "5": "ORDERED_BLOCKED",
+    "6": "ORDERED_BLOCKED"
+  },
+  "round11_sha256": "fffe3bfb1daa97ef6d9d85c1bb4eaa7541e6a71eb9f3376b835187a322b07e09",
+  "schema": "dino-split-explicit-momentum-chain-round12-v1",
+  "session_id": "01a04e34-d1fb-73e0-b25a-177641f0a246",
+  "wet_population": 9920
+}

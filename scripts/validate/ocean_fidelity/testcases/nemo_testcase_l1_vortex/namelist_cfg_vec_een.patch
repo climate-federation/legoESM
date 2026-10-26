@@ -1,0 +1,39 @@
+--- /home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/tests/VORTEX/EXPREF/namelist_cfg	2026-07-14 12:56:26.180418856 -0400
++++ namelist_cfg	2026-09-29 15:20:27.431016309 -0400
+@@ -27,11 +27,11 @@
+ &namrun        !   parameters of the run
+ !-----------------------------------------------------------------------
+    nn_no       =       0   !  job number (no more used...)
+-   cn_exp      = "VORTEX"  !  experience name
++   cn_exp      = "VORTEX_VEC_OMIP_L1_ZCO"  !  certified oracle receipt
+    nn_it000    =       1   !  first time step
+-   nn_itend    =    3000   !  last time step 
++   nn_itend    =      10   !  phase-3 contiguous sweep cadence
+    nn_istate   =       0   !  output the initial state (1) or not (0)
+-   nn_stock    =   99999   !  frequency of creation of a restart file (modulo referenced to 1)
++   nn_stock    =      10   !  final-step restart receipt
+    nn_write    =   99999   !  frequency of write in the output file   (modulo referenced to nn_it000)
+ /
+ !-----------------------------------------------------------------------
+@@ -40,7 +40,7 @@
+ !MLF   rn_Dt       =   1440.   !  time step for the dynamics (and tracer if nn_acc=0)
+    rn_Dt       =   2880.   !  time step for the dynamics (and tracer if nn_acc=0)
+ !MLF   rn_atfp     =   0.05    !  asselin time filter parameter
+-   ln_meshmask = .false.   !  =T create a mesh file
++   ln_meshmask = .true.    !  geometry receipt
+ /
+ !-----------------------------------------------------------------------
+ &namcfg        !   parameters of the configuration                      (default: use namusr_def in namelist_cfg)
+@@ -179,10 +179,10 @@
+ !-----------------------------------------------------------------------
+ &namdyn_adv    !   formulation of the momentum advection                (default: NO selection)
+ !-----------------------------------------------------------------------
+-   ln_dynadv_vec = .false. !  vector form (T) or flux form (F)
++   ln_dynadv_vec = .true.  !  decision 73: ORCA2/GYRE vector-invariant momentum
+    nn_dynkeg     = 0       ! scheme for grad(KE): =0   C2  ;  =1   Hollingsworth correction
+    ln_dynadv_cen2 = .false. !  flux form - 2nd order centered scheme
+-   ln_dynadv_up3 = .true.  !  flux form - 3rd order UBS      scheme
++   ln_dynadv_up3 = .false. !  decision 73: exactly one advection form (dynadv.F90:190)
+ /
+ !-----------------------------------------------------------------------
+ &namdyn_vor    !   Vorticity / Coriolis scheme                          (default: OFF)

@@ -14,10 +14,13 @@ helper applies the discrete step
 
 clipped to the land mask so dry cells are untouched.
 
-Currently supports the lat-lon C-grid ocean state
-(``LatLonCGridOceanState``).  Other grids may use the standalone
-``compute_sss_restoring_flux`` directly and assemble the dS
-themselves.
+One variant per state layout: the lat-lon C-grid
+(``apply_sss_restoring_step``), the MPAS Voronoi mesh (``..._mpas``)
+and the FESOM node mesh (``..._fesom``).  They differ only in how the
+surface layer and the per-cell coordinates are addressed, and in how
+the updated layer is written back.  Any other grid may use the
+standalone ``compute_sss_restoring_flux`` directly and assemble the
+dS itself.
 """
 
 from __future__ import annotations
@@ -157,6 +160,107 @@ def apply_sss_restoring_step(
             units=state.S.units,
         ),
     )
+
+
+def apply_sss_restoring_step_fesom(
+    state,
+    *,
+    S_target: np.ndarray | jnp.ndarray,
+    ice_concentration: np.ndarray | jnp.ndarray | None,
+    config: SSSRestoringConfig,
+    grid,
+    dt: float,
+    river_runoff: np.ndarray | jnp.ndarray | None = None,
+) -> object:
+    """Apply one timestep of OMIP-2 SSS restoring on a FESOM node mesh.
+
+    Counterpart of :func:`apply_sss_restoring_step_mpas` for the FESOM
+    facade, where the "cells" are mesh NODES:
+        * ``state.S.data`` has shape ``(nod2D, nlev)``;
+        * ``grid.latCell`` / ``grid.lonCell`` are 1-D ``(nod2D,)``
+          arrays (radians, geographic frame).
+
+    The write-back goes through
+    :func:`legoesm.ocean.dynamics.ocean_model_fesom.with_surface_salinity`
+    rather than ``with_fields``.  The latter is an analytic-IC setter that
+    writes ``S_old = S``, collapsing the two tracer time levels — right for
+    an initial condition, silently wrong applied every step, and it would
+    not raise.
+
+    Parameters
+    ----------
+    state : FesomOceanState
+        ``state.S`` (``(nod2D, nlev)``) and ``state.land_mask``
+        (``(nod2D,)``) are read.
+    S_target : array ``(nod2D,)``
+        Climatological target SSS interpolated to the mesh [PSU].
+    ice_concentration : array ``(nod2D,)`` or None
+        Node ice fraction in [0, 1].  None ⇒ no ice gating.
+    config : SSSRestoringConfig
+    grid : FesomOceanGrid
+        Supplies ``latCell``/``lonCell`` and the native ``mesh``.
+    dt : float
+
+    Returns
+    -------
+    new_state : FesomOceanState
+        With the surface salinity updated and ``S_old`` untouched.
+    """
+    if not config.enabled:
+        return state
+
+    # Deferred: this module is grid-generic, so a module-scope import of the
+    # FESOM dynamics module would put the whole coupler import path behind a
+    # backend that need not be installed.
+    from legoesm.ocean.dynamics.ocean_model_fesom import with_surface_salinity
+
+    # Slice FIRST (device-side), THEN convert — same host-transfer contract
+    # as the other two variants: only the (nod2D,) surface layer crosses.
+    S_top = np.asarray(state.S.data[..., 0], dtype=np.float64)   # (nod2D,)
+
+    lat_deg = np.degrees(np.asarray(grid.latCell))               # (nod2D,)
+    lon_deg = np.degrees(np.asarray(grid.lonCell))               # (nod2D,)
+
+    if ice_concentration is None:
+        ice = np.zeros_like(S_top)
+    else:
+        ice = np.asarray(ice_concentration, dtype=np.float64)
+
+    out = compute_sss_restoring_flux(
+        S_model_top=jnp.asarray(S_top),
+        S_target=jnp.asarray(S_target),
+        lat_deg=jnp.asarray(lat_deg),
+        lon_deg=jnp.asarray(lon_deg),
+        ice_concentration=jnp.asarray(ice),
+        config=config,
+        river_runoff=(None if river_runoff is None
+                      else jnp.asarray(np.asarray(river_runoff,
+                                                  dtype=np.float64))),
+    )
+    dS_dt = np.asarray(out["dS_dt_top"], dtype=np.float64)
+
+    # SURFACE-WET, not any-wet.  ``state.land_mask`` is
+    # ``node_layer_mask.any(axis=1)`` — true for a node with ANY wet layer,
+    # including one whose TOP layer is dry because it sits under an ice-shelf
+    # cavity.  Such a node has no atmosphere contact, and the FESOM flux
+    # translator gates every surface flux on ``node_layer_mask[:, 0]``
+    # accordingly — the water-flux SSS channel and the runoff block included.
+    # Masking the tracer channel on the any-wet mask would restore salinity
+    # under an ice shelf that the water-flux channel leaves alone, so the two
+    # channels would disagree on a cavity mesh.
+    surface_wet = np.asarray(
+        grid.mesh.node_layer_mask[:, 0], dtype=np.float64)
+
+    # Select the RESULT rather than scaling the increment.  The two agree
+    # exactly wherever the increment is finite, but `0.0 * NaN` is NaN, so
+    # multiplying by the mask would turn a dry node into NaN if the target
+    # climatology carries a non-finite fill there -- and this applicator
+    # WRITES salinity rather than adding a flux, so that NaN would become
+    # model state.  (GLM review 2026-09-17; the lat-lon and MPAS siblings
+    # still multiply, which is the same hazard in a less direct form.)
+    S_top_new = np.where(surface_wet > 0.0, S_top + dt * dS_dt, S_top)
+
+    return with_surface_salinity(state, grid.mesh, jnp.asarray(S_top_new))
 
 
 def apply_sss_restoring_step_mpas(

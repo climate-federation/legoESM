@@ -1,7 +1,7 @@
 """Unit tests for the FV3-faithful Lin (1997) hydrostatic PGF.
 
 Validates the cross-product PGF port in
-``legoesm.atmosphere.dynamics.gcm._fv3_lin_pgf`` against:
+``legoesm.atmosphere._future._fv3_lin_pgf`` against:
 
 1. **Exact hydrostatic cancellation** — for any spatially uniform
    hydrostatic state (T const, p_s const, phis const), the C-grid PGF
@@ -33,7 +33,7 @@ import pytest
 jax.config.update("jax_enable_x64", True)
 
 from legoesm import constants
-from legoesm.atmosphere.dynamics.gcm._fv3_lin_pgf import (
+from legoesm.atmosphere._future._fv3_lin_pgf import (
     compute_geopotential_half_fv3,
     compute_pkappa_half,
     fv3_lin1997_pgf_3d_cgrid,
@@ -185,7 +185,7 @@ def test_denom_floor_is_strictly_nonzero_at_zero():
     maps sign(0) -> +1.  We replicate the in-module floor expression and
     assert it is strictly positive at ``d==0`` and has a finite gradient.
     """
-    from legoesm.atmosphere.dynamics.gcm._fv3_lin_pgf import _PGF_DENOM_FLOOR
+    from legoesm.atmosphere._future._fv3_lin_pgf import _PGF_DENOM_FLOOR
 
     def safe_denom(d):
         sgn = jnp.sign(d)
@@ -284,3 +284,8 @@ def test_pgf_production_denominator_exactly_zero_is_finite(small_cube):
     gp, gt = jax.grad(scalar_of_pgf, argnums=(0, 1))(p_s, T)
     assert bool(jnp.all(jnp.isfinite(gp))), "non-finite grad wrt p_s at zero denom"
     assert bool(jnp.all(jnp.isfinite(gt))), "non-finite grad wrt T at zero denom"
+
+
+# Parked module: see its docstring.
+pytestmark = pytest.mark.skip(
+    reason="parked in _future/: not wired into production (ponytail #9)")

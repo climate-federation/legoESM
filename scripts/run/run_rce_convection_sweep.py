@@ -226,13 +226,17 @@ def _build_convection_call(scheme: str, dt: float):
         )
 
     elif scheme == "zhang_mcfarlane":
-        cfg = ZhangMcFarlaneConfig(enable_cmt=False, M_b_max=M_B_MAX_RCE)
+        cfg = ZhangMcFarlaneConfig(enable_cmt=False, land_fraction="none")
 
         def call(T, qv, pf, ph, u, v, carry):
             (prog,) = carry
+            # ZM reads the PBL height and refuses a call without one.  No
+            # PBL scheme runs here, so it stays at CAM's initial value 0
+            # (physpkg.F90:419-424): launch from the lowest level.
             out, prog_new = zhang_mcfarlane_convection(
                 T=T, q_v=qv, p_full=pf, p_half=ph, u=u, v=v,
                 conv_prog_profile=prog, dt=dt, config=cfg,
+                pblh=jnp.zeros(T.shape[0], T.dtype),
             )
             du = out.du_dt_conv if out.du_dt_conv is not None else jnp.zeros_like(u)
             dv = out.dv_dt_conv if out.dv_dt_conv is not None else jnp.zeros_like(v)
@@ -544,7 +548,7 @@ def run_one_scheme(scheme: str, args, *, output_root: Path):
             rho_low * constants.L_v * C_H * wind * (q_sat_sfc - q_v[..., -1]),
             0.0,
         )
-        evap = lhflx / constants.L_v
+        evap = lhflx / constants.L_v   # latent-ok: this script's own bulk pair, charged and inverted with the same constant
         dT_BL = constants.g * shflx / (constants.c_pd * dp_low)
         dq_BL = constants.g * evap / dp_low
 

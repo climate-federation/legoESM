@@ -39,7 +39,7 @@ if not REF_DIR.exists():
 MONTH_TAG = "CHATS7_2007-05"
 
 # ---------------------------------------------------------------------------
-# Variable definitions (from output() function in CLMml_driver.py)
+# Variable definitions (from output() in the Fortran CLM-ML v2 CLMml_driver module)
 # ---------------------------------------------------------------------------
 
 FLUX_VARS = [

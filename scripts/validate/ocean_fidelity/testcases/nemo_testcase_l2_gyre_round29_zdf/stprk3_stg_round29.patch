@@ -1,0 +1,25 @@
+--- stprk3_stg.F90.round28
++++ stprk3_stg.F90
+@@ -490,6 +490,22 @@
+             !
+             !                  !*  complete the momentum RHS *!   except ZDF (implicit)
+             !
++            ! Round-29 L2 WRITE-only stage-3 pre-LDF momentum frame.  dyn_ldf
++            ! (this line) and dyn_zdf are BOTH stage-3-only, and every existing
++            ! momentum-operand record in this MY_SRC is gated on kstg == 2, so
++            ! without this frame nothing can say which of the two owns the
++            ! stage-3 divergence.  No value here is read back into model state.
++            IF( lwp .AND. kstp == nit000 ) THEN
++               l1_filename = 'oracle_rkstage3_preldf_kt00000001.bin'
++               OPEN( NEWUNIT=l1_unit, FILE=TRIM(l1_filename), ACCESS='STREAM', FORM='UNFORMATTED', &
++                  &  STATUS='REPLACE', ACTION='WRITE', IOSTAT=l1_ios )
++               IF( l1_ios /= 0 )   CALL ctl_stop( 'stp_RK3_stg: cannot open L2 stage-3 pre-LDF dump' )
++               l1_magic = 'NEMO_L2_RKPLD_1'
++               WRITE(l1_unit) l1_magic, 1, kstp, kstg, Kbb, Kmm, Krhs, Kaa, jpi, jpj, jpk, STORAGE_SIZE(1._wp)
++               WRITE(l1_unit) uu(:,:,:,Krhs), vv(:,:,:,Krhs)
++               CLOSE(l1_unit)
++               WRITE(numout,*) 'L2_RK_STAGE3_PRELDF_DUMP ', kstp, Kbb, Kmm, Krhs, Kaa, TRIM(l1_filename)
++            ENDIF
+                                CALL dyn_ldf( kstp, Kbb, Kmm, uu, vv, Krhs )     ! lateral mixing    
+             !
+             IF( ln_zdfosm  )   CALL dyn_osm( kstp,      Kmm, uu, vv, Krhs )     ! OSMOSIS non-local velocity fluxes

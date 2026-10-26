@@ -140,3 +140,32 @@ def test_pure_dycore_wb_modes_keep_rayleigh_damping(monkeypatch, mode):
     fric = _record_threaded_fric(monkeypatch, mode)  # yml turbulence -> "louis"
     assert float(fric[-1]) < 1.0
     assert bool(jnp.all(fric > 0.0)) and bool(jnp.all(fric <= 1.0))
+
+
+def test_physics_mode_rollout_uses_the_configured_physics(monkeypatch):
+    """The WB physics-tuning rollout must run the CONFIGURED microphysics,
+    fixers and radiation cadence (as the production compiled segment does),
+    not build_training_segment's defaults (no microphysics -> an extra
+    saturation adjustment, no fixers, radiation every step)."""
+    from legoesm.training import training_driver as td
+    from legoesm.training.scale_build import (
+        build_latlon_config, build_mode_components,
+    )
+
+    recorded = {}
+
+    def _recorder(model, step, grid, sigma, dt, **kwargs):
+        recorded.update(kwargs)
+        return SimpleNamespace(raw=None)
+
+    monkeypatch.setattr(td, "build_training_segment", _recorder)
+    cfg = _mod.build_scale_config_from_args(["--mode", "physics", "--smoke"])
+    yml = dict(_SMOKE_YML, microphysics="kessler", rad_update_steps=3)
+    _, _, _, params, make_run_seg, _, _ = build_mode_components(cfg, yml)
+    make_run_seg(params)
+
+    config = build_latlon_config(cfg, yml)
+    assert recorded["microphysics"] == config.microphysics == "kessler"
+    assert recorded["rad_update_steps"] == int(config.rad_update_steps) == 3
+    assert recorded["fix_moisture"] == config.fix_moisture
+    assert recorded["fix_mass"] == config.dycore.fix_mass

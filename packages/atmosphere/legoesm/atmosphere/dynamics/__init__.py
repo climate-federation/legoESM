@@ -109,6 +109,9 @@ _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
     "CGridLatLonPrimitiveEquationConfig": ("legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid", "CGridLatLonPrimitiveEquationConfig"),
     "CGridLatLonHydrostaticState": ("legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid", "CGridLatLonHydrostaticState"),
     "cgrid_latlon_hydrostatic_tendencies": ("legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid", "cgrid_latlon_hydrostatic_tendencies"),
+    # --- FV3 six-face duo cube (certified fv_dynamics JAX lane) ---
+    "FV3DuoDynamicsModel": ("legoesm.atmosphere.dynamics.gcm.fv3_duo_dynamics", "FV3DuoDynamicsModel"),
+    "FV3DuoConfig": ("legoesm.atmosphere.dynamics.gcm.fv3_duo_dynamics", "FV3DuoConfig"),
     # --- MPAS icosahedral ---
     "MPASPrimitiveEquationModel": ("legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas", "MPASPrimitiveEquationModel"),
     "MPASPrimitiveEquationConfig": ("legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas", "MPASPrimitiveEquationConfig"),
@@ -223,6 +226,7 @@ AVAILABLE_SOLVERS = [
     "latlon_cgrid_primitive_equations",
     "mpas_primitive_equations",
     "mpas_compressible_euler",
+    "fv3_duo_primitive_equations",
     "plane_compressible_euler",
     "tracer_transport",
     "tracer_transport_mpas",
@@ -250,6 +254,7 @@ _ALL_SOLVER_NAMES = AVAILABLE_SOLVERS + list(_DEPRECATED_SOLVER_NAMES)
 DYNAMICS_OPTIONS = ["shallow_water", "hydrostatic", "nonhydrostatic"]
 DISCRETIZATION_OPTIONS = [
     "cdgrid", "spectral", "sfno", "u_cast", "mpas", "latlon_cgrid", "plane",
+    "fv3_duo",
     # Legacy names kept as valid options (default to cdgrid when grid is
     # unknown; the driver resolves more precisely using grid_type).
     "finite_volume", "centered",
@@ -278,6 +283,13 @@ _AXIS_TO_SOLVER = {
     ("nonhydrostatic", "spectral"): "spectral_compressible_euler",
     ("nonhydrostatic", "mpas"): "mpas_compressible_euler",
     ("nonhydrostatic", "plane"): "plane_compressible_euler",
+    # ONE solver serves both fv3_duo arms: the certified fv_dynamics lane
+    # is a single program with a static ``hydrostatic`` switch (unlike
+    # mpas/cdgrid, whose NH is a separate solver class).  NH is listed
+    # FIRST so the reverse map below (last key wins on a value collision)
+    # reports the hydrostatic pair as the canonical axes.
+    ("nonhydrostatic", "fv3_duo"): "fv3_duo_primitive_equations",
+    ("hydrostatic", "fv3_duo"): "fv3_duo_primitive_equations",
     ("shallow_water", "latlon_cgrid"): "latlon_cgrid_shallow_water",
     ("hydrostatic", "latlon_cgrid"): "latlon_cgrid_primitive_equations",
     # "finite_volume" and "centered" default to cdgrid when used without
@@ -321,10 +333,15 @@ def resolve_solver_name(
         A canonical solver name from ``AVAILABLE_SOLVERS``.
     """
     # --- Axis-based keys take priority when explicitly provided ---
-    # The legacy "equations" key is only used as a fallback when neither
-    # dynamics nor discretization is set.  This prevents a stale default
-    # "equations" value from overriding an explicit axis-based selection.
-    if dynamics is None and discretization is None and equations is not None:
+    # The legacy "equations" key is only used when neither dynamics nor
+    # discretization is set.  This prevents a stale default "equations"
+    # value from overriding an explicit axis-based selection.
+    if dynamics is None and discretization is None:
+        if equations is None:
+            raise ValueError(
+                "resolve_solver_name: no solver selected; pass dynamics= and "
+                "discretization=, or a flat equations= solver name."
+            )
         if equations in _DEPRECATED_SOLVER_NAMES:
             canonical = _DEPRECATED_SOLVER_NAMES[equations]
             _warnings.warn(
@@ -336,10 +353,19 @@ def resolve_solver_name(
             return canonical
         if equations in AVAILABLE_SOLVERS:
             return equations
+        raise ValueError(
+            f"Unknown equations={equations!r}. Choose from {AVAILABLE_SOLVERS} "
+            f"or deprecated names {sorted(_DEPRECATED_SOLVER_NAMES)}."
+        )
 
-    # --- Axis-based resolution ---
-    dyn = dynamics or "shallow_water"
-    disc = discretization or "cdgrid"
+    # --- Axis-based resolution: both axes are required ---
+    if dynamics is None or discretization is None:
+        raise ValueError(
+            "resolve_solver_name needs both dynamics= and discretization=; "
+            f"got dynamics={dynamics!r}, discretization={discretization!r}."
+        )
+    dyn = dynamics
+    disc = discretization
 
     if dyn not in DYNAMICS_OPTIONS:
         raise ValueError(
@@ -398,6 +424,7 @@ _SOLVER_TO_CLASS = {
     "tracer_transport_spectral": "SpectralTracerTransportModel",
     "mpas_primitive_equations": "MPASPrimitiveEquationModel",
     "mpas_compressible_euler": "MPASCompressibleEulerModel",
+    "fv3_duo_primitive_equations": "FV3DuoDynamicsModel",
     "plane_compressible_euler": "PlaneCompressibleEulerModel",
     "latlon_cgrid_shallow_water": "CGridLatLonShallowWaterModel",
     "latlon_cgrid_primitive_equations": "CGridLatLonPrimitiveEquationModel",
@@ -457,7 +484,7 @@ def create_model(name: str = None, legoesm_config=None, **kwargs):
         # discretization="cdgrid" is never rerouted.
         # Note: a stale equations= key doesn't affect rerouting because
         # resolve_solver_name ignores it when axis keys are present.
-        _AMBIGUOUS = {"finite_volume", "centered", None}
+        _AMBIGUOUS = {"finite_volume", "centered"}
         _used_axes = (_dyn is not None or _disc is not None)
         _reroute_latlon = _used_axes and _disc in _AMBIGUOUS
 

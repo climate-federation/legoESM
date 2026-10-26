@@ -40,7 +40,7 @@ def _run_amip(fcfg, *, radiation="gray", nlev=5, resolution=8, rad_update_steps=
 
     base = ExperimentConfig(
         grid=GridConfig(grid_type="latlon", resolution=resolution, nlev=nlev),
-        dycore=DycoreConfig(dt=600.0, model_type="hydrostatic",
+        dycore=DycoreConfig(energy_fixer=False, dt=600.0, model_type="hydrostatic",
                             discretization="finite_volume"),
         output=OutputConfig(diag_days=1), radiation=radiation, days=1,
         rad_update_steps=rad_update_steps)

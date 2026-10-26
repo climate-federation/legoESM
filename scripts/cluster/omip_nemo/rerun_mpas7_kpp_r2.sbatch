@@ -21,7 +21,7 @@ set +e
 ROOT=/burg-archive/glab/users/pg2328/legoESM; cd $ROOT
 # packages/* (federation namespace) + ROOT (scripts.* package imports) +
 # scripts/validate (the diag scripts do a bare `from compare_omip_nemo import`).
-export PYTHONPATH="$(ls -d $ROOT/packages/*/ | sed 's:/$::' | tr '\n' ':')$ROOT:$ROOT/scripts/validate"
+export PYTHONPATH="$ROOT/src:$(ls -d $ROOT/packages/*/ | sed 's:/$::' | tr '\n' ':')$ROOT:$ROOT/scripts/validate"
 PY=/burg-archive/glab/users/jn2808/.conda/envs/legoesm/bin/python
 RUN=/burg-archive/glab/users/pg2328/nemo_orca1/nemo_5.0.1/cfgs/ORCA1/EXP00/RUN_REF
 INP=/burg-archive/glab/users/pg2328/nemo_orca1/nemo_5.0.1/cfgs/ORCA1/INPUTS/orca1_inputs/data_repository/input_fields
@@ -34,7 +34,7 @@ COMMON="--nemo-vertical --woa-init --partial-cell --pgf-scheme smc03 \
   --runoff --sss-restore --sss-restore-tau-days 45.5 --sss-restore-bound-mmday 4 \
   --sss-ice-gate-nemo --prognostic-sea-ice --prognostic-ice-dynamics free_drift \
   --years 0.3 --snapshot-every-days 30 --diag-every-days 5"
-GA="--grid mpas --mpas-level 7 --mpas-lloyd 20 --dt 150"
+GA="--grid mpas --mpas-level 7 --mpas-lloyd 50 --dt 150"
 LEVERS="--tracer-advection superbee --runoff-depth-spread-m 150"   # nogate (no --river-mouth-restoring-gate)
 KPP="--kpp-ri-crit 0.5 --kpp-cv 2.5"
 

@@ -30,7 +30,7 @@ NEMO-track work). Verify before rebuilding; EXTEND, don't duplicate.
   `packages/ocean/legoesm/ocean/dynamics/ocean_pe_latlon_cgrid.py:586-721`, calling
   `weno_reconstruct_split(phi,psi,order)` in `packages/core/legoesm/core/weno.py:419-476`.
 - **Divergence-flux D-term** (Eqs. 31–32, Appendix-C asymmetric WENO/centered split):
-  `_bc_dterm`, `ocean_pe_latlon_cgrid.py:1620-1658`, gated by `config.weno_d_term` (default True).
+  `_bc_dterm`, `ocean_pe_latlon_cgrid.py:1654-1692`, gated by `config.weno_d_term` (default True).
 - **WENO9 kernels exist** (`weno.py:389` `weno9_z`) but are NOT wired into momentum →
   the flagship **W9V is a wiring job**, not a from-scratch build.
 - Viscosities present: `A_h`, `B_h`, `C_smag` (biharmonic), `C_smag_lap` (Laplacian), `C_leith`.

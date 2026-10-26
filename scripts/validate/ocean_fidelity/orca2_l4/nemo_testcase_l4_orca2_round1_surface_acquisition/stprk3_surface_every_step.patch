@@ -1,0 +1,61 @@
+--- stprk3.F90
++++ stprk3.F90
+@@ -23,7 +23,7 @@
+    USE domqco         ! quasi-eulerian coordinate      (dom_qco_r3c routine)
+    USE stprk3_stg     ! RK3 stages
+    USE stp2d          ! external mode solver
+-   USE lib_mpp, ONLY : l_perpetual_ts
++   USE lib_mpp, ONLY : l_perpetual_ts, mpprank
+    USE sbc_ice, ONLY : snwice_mass, snwice_mass_b, snwice_fmass, rCdU_ice
+    USE sbc_oce, ONLY : ln_icebergs
+    USE icb_oce, ONLY : berg_grid, nclasses
+@@ -88,11 +88,15 @@
+       !
+       ! Lane-1 certified oracle: exact step-entry Nbb state.  This is a
+       ! write-only instrument; no prognostic array is assigned here.
+-      IF( lwp .AND. kstp >= nit000 .AND. kstp <= nit000 + 59 ) THEN
++      IF( kstp >= nit000 .AND. kstp <= nit000 + 59 ) THEN
+          IF( STORAGE_SIZE( 1._wp ) /= 64 )   CALL ctl_stop( 'lane1 trajectory requires 64-bit wp' )
+-         WRITE(cl_traj,'("oracle_step_entry_kt",I8.8,".bin")') kstp
++         IF( lwp ) THEN
++            WRITE(cl_traj,'("oracle_step_entry_kt",I8.8,".bin")') kstp
++         ELSE
++            WRITE(cl_traj,'("oracle_step_entry_rank",I4.4,"_kt",I8.8,".bin")') mpprank, kstp
++         ENDIF
+          OPEN( NEWUNIT=itraj, FILE=TRIM(cl_traj), ACCESS='STREAM', FORM='UNFORMATTED', &
+-            &  STATUS='REPLACE', ACTION='WRITE', IOSTAT=ios_traj )
++            &  STATUS='NEW', ACTION='WRITE', IOSTAT=ios_traj )
+          IF( ios_traj /= 0 )   CALL ctl_stop( 'cannot open lane1 trajectory file' )
+          cl_magic = 'NEMO_L1_ENTRY_1'
+          WRITE(itraj) cl_magic, 1, kstp, Nbb, jpi, jpj, jpk, jpts, STORAGE_SIZE(1._wp)
+@@ -159,6 +159,6 @@
+       IF( ln_bdy     )   CALL bdy_dta    ( kstp, Nbb )                     ! update dynamic & tracer data at open boundaries
+       IF( ln_isf     )   CALL isf_stp    ( kstp, Nbb )                     ! update iceshelf geometry
+                          CALL sbc        ( kstp, Nbb, Nbb )                ! Sea Boundary Condition (including sea-ice)
+-      IF( kstp == nit000 )   CALL l4_dump_ocean_surface_input( kstp, Nbb )
++                         CALL l4_dump_ocean_surface_input( kstp, Nbb )     ! round-1 WRITE-only per-step acquisition
+ !!$      IF( ln_isf     )   CALL isf_stp    ( kstp, Nbb )                     ! update iceshelf geometry
+                          !clem: problem with isf and cpl: sbcfwb needs isf but isf needs fwf from sbccpl
+@@ -426,14 +426,19 @@
+       !! halo exchange and U/V stress interpolation.  No model array is set.
+       INTEGER, INTENT(in) :: kstp, klevel
+       INTEGER :: iunit, ios
++      CHARACTER(LEN=64) :: cl_surface_file
+       INTEGER, PARAMETER :: in2d_full = 20, in2d_reduced = 12, in2d_halo1 = 1, in3d_reduced = 2
+       INTEGER, PARAMETER :: ihalo = 2
+       CHARACTER(LEN=16) :: magic
+       REAL(wp), DIMENSION(jpi,jpj) :: zicb_zero
+-      IF( .NOT.lwp ) RETURN
+       IF( STORAGE_SIZE( 1._wp ) /= 64 )   CALL ctl_stop( 'lane4 surface input dump requires 64-bit wp' )
+-      OPEN( NEWUNIT=iunit, FILE='oracle_ocean_surface_input_kt00000001.bin', ACCESS='STREAM', &
+-         &  FORM='UNFORMATTED', STATUS='REPLACE', ACTION='WRITE', IOSTAT=ios )
++      IF( lwp ) THEN
++         WRITE(cl_surface_file,'("oracle_ocean_surface_input_kt",I8.8,".bin")') kstp
++      ELSE
++         WRITE(cl_surface_file,'("oracle_ocean_surface_input_rank",I4.4,"_kt",I8.8,".bin")') mpprank, kstp
++      ENDIF
++      OPEN( NEWUNIT=iunit, FILE=TRIM(cl_surface_file), ACCESS='STREAM', &
++         &  FORM='UNFORMATTED', STATUS='NEW', ACTION='WRITE', IOSTAT=ios )
+       IF( ios /= 0 )   CALL ctl_stop( 'cannot open lane4 surface input file' )
+       magic = 'NEMO_L4_SBCIN_1'
+       WRITE(iunit) magic, 1, kstp, klevel, jpi, jpj, jpts, nclasses, ihalo, &

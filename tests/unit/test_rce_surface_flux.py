@@ -358,3 +358,22 @@ def test_compose_rejects_mismatched_tracers_shape():
         compose_rce_surface_scalar_tendencies(
             state_bad, hc, T_sfc, q_sfc, wspd,
         )
+
+
+def test_moisture_tendency_is_the_bulk_water_flux_whatever_the_latent_heat():
+    """The bulk law moves water rho*C_h*|U|*(q_sfc - q_atm), whatever latent
+    heat it charges for it, so dq_v/dt = C_h*|U|*(q_sfc - q_atm)/dz exactly.
+    An inverse with a latent heat other than the one the law charged (the
+    constant L_v against the law's Kirchhoff L_v(T_sfc)) scales it by
+    L_v(T)/L_v -- 2.7 % low at 301 K."""
+    state, _, hc, _ = _plane_state()
+    T_sfc = jnp.full((NY, NX), 301.0, dtype=jnp.float64)
+    q_sfc = jnp.full((NY, NX), 0.02, dtype=jnp.float64)
+    wspd = jnp.full((NY, NX), 5.0, dtype=jnp.float64)
+    C_h = 1.5e-3
+    _, dqv = compose_rce_surface_scalar_tendencies(
+        state, hc, T_sfc, q_sfc, wspd, C_h=C_h, gustiness_floor=0.0)
+    q_atm = state.tracers.data[..., -1, 0]
+    expected = C_h * 5.0 * (q_sfc - q_atm) / hc.dz[-1]
+    assert float(jnp.min(expected)) > 0.0
+    np.testing.assert_allclose(np.asarray(dqv), np.asarray(expected), rtol=1e-12)

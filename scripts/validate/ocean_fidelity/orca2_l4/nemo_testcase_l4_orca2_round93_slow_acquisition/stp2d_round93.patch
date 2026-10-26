@@ -1,0 +1,25 @@
+--- stp2d.F90
++++ stp2d.F90
+@@ -31,0 +32,2 @@
++   USE l4_r93_slow_frames, ONLY : r93_slow_start, r93_slow_put2, &
++      & r93_slow_put_pair, r93_slow_finish ! round-93 write-only slow frames
+@@ -186,0 +189 @@
++         CALL r93_slow_start( kt, Kbb, Kaa, Krhs )
+@@ -217,0 +221 @@
++         CALL r93_slow_put_pair( kt, 'depth', Ue_rhs, Ve_rhs )
+@@ -230,0 +235,2 @@
++         CALL r93_slow_put_pair( kt, 'drag', Ue_rhs, Ve_rhs )
++         CALL r93_slow_put_pair( kt, 'cd', CdU_u, CdU_v )
+@@ -242,0 +250 @@
++         CALL r93_slow_put_pair( kt, 'wind', Ue_rhs, Ve_rhs )
+@@ -283,0 +292 @@
++         CALL r93_slow_put_pair( kt, 'final', Ue_rhs, Ve_rhs )
+@@ -317,0 +327 @@
++      IF( kt == nit000 ) CALL r93_slow_put2( 'ssh_rhs', sshe_rhs )
+@@ -326,0 +337,6 @@
++      IF( kt == nit000 ) THEN
++         CALL r93_slow_put2( 'ssh_after', ssh(:,:,Kaa) )
++         CALL r93_slow_put2( 'ub_after', uu_b(:,:,Kaa) )
++         CALL r93_slow_put2( 'vb_after', vv_b(:,:,Kaa) )
++         CALL r93_slow_finish( kt )
++      ENDIF

@@ -214,3 +214,28 @@ def test_exact_analysis_jittable():
     jitted = jax.jit(lambda u_, v_: vordiv_from_uv_exact_3d(grid, u_, v_))(u, v)
     for a, b in zip(eager, jitted):
         assert np.allclose(np.asarray(a), np.asarray(b), atol=1e-12)
+
+
+def test_exact_analysis_first_call_under_trace_does_not_poison_cache():
+    """JIT-FIRST ordering: the operator cache must never retain a trace's
+    constants. When the first-ever call for a grid happens inside jit/grad,
+    caching the in-trace ``jnp.asarray`` results stores that trace's
+    DynamicJaxprTracers; every later trace or eager call then dies with
+    UnexpectedTracerError at the einsum that consumes them (2026-08-16: this
+    killed the jax_debug_nans re-trace during the WB sample-17 NaN hunt —
+    the sibling jittable test runs eager first and could never see it)."""
+    from legoesm.grids import gaussian as _g
+
+    grid = create_gaussian_grid(21)
+    u, v = _band_limited_winds(grid, nlev=2, seed=13)
+
+    # Force the poisoning ordering: nothing cached, first call inside a trace.
+    _g._VORDIV_PINV_CACHE.clear()
+    jit1 = jax.jit(lambda u_, v_: vordiv_from_uv_exact_3d(grid, u_, v_))(u, v)
+    # Second trace and eager call both must survive and agree.
+    jit2 = jax.jit(lambda u_, v_: vordiv_from_uv_exact_3d(grid, u_, v_))(u, v)
+    eager = vordiv_from_uv_exact_3d(grid, u, v)
+    for a, b in zip(jit1, jit2):
+        assert np.allclose(np.asarray(a), np.asarray(b), atol=1e-12)
+    for a, b in zip(jit1, eager):
+        assert np.allclose(np.asarray(a), np.asarray(b), atol=1e-12)

@@ -390,10 +390,10 @@ def baroclinic_wave_init(
         # Same RH-tapered q_v init as baroclinic_wave_init_mpas / _spectral:
         # q_v = rh · q_sat(T, p) · σ², capped at saturation; q_c=q_r=0.
         # Sigma coordinate ⇒ p_full = p_s · σ_full.
-        from legoesm.thermo import saturation_mixing_ratio
+        from legoesm.thermo import saturation_specific_humidity
 
         p_full = p_s[..., None] * sigma_full[None, None, None, :]  # (6,n,n,nlev)
-        q_sat = saturation_mixing_ratio(T_3d, p_full)
+        q_sat = saturation_specific_humidity(T_3d, p_full)
         q_v_data = jnp.minimum(
             rh_init * q_sat * sigma_full[None, None, None, :] ** 2, q_sat)
         q_zero = jnp.zeros((6, n, n, nlev))
@@ -468,10 +468,10 @@ def baroclinic_wave_init_latlon(
     if moist:
         # Same RH-tapered q_v init as baroclinic_wave_init / _mpas / _spectral:
         # q_v = rh · q_sat(T, p) · σ², capped at saturation; q_c=q_r=0.
-        from legoesm.thermo import saturation_mixing_ratio
+        from legoesm.thermo import saturation_specific_humidity
 
         p_full = p_s[..., None] * sigma_full[None, None, :]  # (n_lat,n_lon,nlev)
-        q_sat = saturation_mixing_ratio(T_3d, p_full)
+        q_sat = saturation_specific_humidity(T_3d, p_full)
         q_v_data = jnp.minimum(
             rh_init * q_sat * sigma_full[None, None, :] ** 2, q_sat)
         q_zero = jnp.zeros((n_lat, n_lon, nlev))
@@ -583,10 +583,10 @@ def baroclinic_wave_init_mpas(
         # all-grid moist initialization): q_v = rh · q_sat(T, p) · σ²,
         # capped at saturation; q_c = q_r = 0.  Sigma coordinate ⇒
         # p_full = p_s · σ_full.
-        from legoesm.thermo import saturation_mixing_ratio
+        from legoesm.thermo import saturation_specific_humidity
 
         p_full = p_s_data[:, None] * sigma_full[None, :]  # (nCells, nlev)
-        q_sat = saturation_mixing_ratio(T_data, p_full)
+        q_sat = saturation_specific_humidity(T_data, p_full)
         q_v_data = jnp.minimum(rh_init * q_sat * sigma_full[None, :] ** 2, q_sat)
         q_zero = jnp.zeros((nCells, nlev))
         tracers = {
@@ -742,10 +742,10 @@ def baroclinic_wave_init_spectral(
     # condensation/precipitation. p is hydrostatic on the uniform p_s=P0 column.
     tracers = None
     if moist:
-        from legoesm.thermo import saturation_mixing_ratio
+        from legoesm.thermo import saturation_specific_humidity
 
         p_full = jnp.asarray(sigma_full, dtype=jnp.float64)[None, None, :] * P0
-        q_sat = saturation_mixing_ratio(T_jax, p_full)
+        q_sat = saturation_specific_humidity(T_jax, p_full)
         sigma2 = jnp.asarray(sigma_full, dtype=jnp.float64)[None, None, :] ** 2
         q_v_data = jnp.minimum(rh_init * q_sat * sigma2, q_sat)
         q_zero = jnp.zeros_like(q_v_data)
@@ -879,7 +879,7 @@ def build_sharded_baroclinic_wave_state_mpas(
 
     tracers = None
     if moist:
-        from legoesm.thermo import saturation_mixing_ratio
+        from legoesm.thermo import saturation_specific_humidity
 
         def _qv_cb(idx):
             # Same expression as the global builder, on the cell slice:
@@ -888,7 +888,7 @@ def build_sharded_baroclinic_wave_state_mpas(
             T_blk = _T_cb(idx)
             ps_blk = _ps_cb(idx)
             p_full = ps_blk[:, None] * sigma_full[None, :]
-            q_sat = saturation_mixing_ratio(T_blk, p_full)
+            q_sat = saturation_specific_humidity(T_blk, p_full)
             return jnp.minimum(
                 rh_init * q_sat * sigma_full[None, :] ** 2, q_sat)
 

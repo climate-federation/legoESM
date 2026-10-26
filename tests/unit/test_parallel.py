@@ -34,7 +34,7 @@ from legoesm.parallel.reductions import (
     _validate_mpi_runtime_versions,
 )
 from legoesm.parallel.metal import get_metal_config, to_cpu
-from legoesm.core.hardware import detect_devices, get_backend
+from legoesm.runtime import get_backend
 from legoesm.core.field import Field
 from legoesm.grids.halo import (
     pad_halo,
@@ -510,39 +510,6 @@ class TestHaloDispatch:
 
 
 # ==============================================================================
-# Hardware detection
-# ==============================================================================
-
-class TestHardwareDetection:
-    """Tests for detect_devices."""
-
-    def test_detect_devices_returns_dict(self):
-        """detect_devices returns expected keys."""
-        info = detect_devices()
-        assert isinstance(info, dict)
-        assert "backend" in info
-        assert "n_devices" in info
-        assert "devices" in info
-        assert "supports_f64" in info
-        assert "distributed" in info
-
-    def test_backend_is_string(self):
-        info = detect_devices()
-        assert isinstance(info["backend"], str)
-        assert info["backend"] == get_backend()
-
-    def test_n_devices_positive(self):
-        info = detect_devices()
-        assert info["n_devices"] >= 1
-
-    def test_supports_f64_on_cpu(self):
-        """CPU always supports float64."""
-        info = detect_devices()
-        if info["backend"] == "CPU":
-            assert info["supports_f64"] is True
-
-
-# ==============================================================================
 # Metal config
 # ==============================================================================
 
@@ -552,7 +519,7 @@ class TestMetalConfig:
     def test_metal_config_on_cpu(self):
         """On non-mps backends, is_metal=False."""
         config = get_metal_config()
-        if get_backend() != "MPS":
+        if get_backend() != "mps":
             assert config.is_metal is False
             assert config.metal_device is None
 

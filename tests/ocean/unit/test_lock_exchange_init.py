@@ -102,3 +102,58 @@ def test_init_lock_exchange_handles_zero_to_two_pi_longitude():
         "cells; bug regression: lon < 0 check on [0, 2pi] grid leaves "
         "every cell at T_warm"
     )
+
+
+def _fake_latlon(n_lat=4, n_lon=8, nlev=3, lon_west=0.0, lon_east=2.0 * np.pi):
+    """The fakes above, as a helper: a lat-lon state on a chosen lon range."""
+    import jax.numpy as jnp
+
+    class FakeField:
+        def __init__(self, data):
+            self.data = jnp.asarray(data)
+
+    class FakeState:
+        def __init__(self, T, mask):
+            self.T = FakeField(T)
+            self.land_mask = FakeField(mask)
+
+        def _replace(self, **kw):
+            return FakeState(np.asarray(kw["T"].data),
+                             np.asarray(self.land_mask.data))
+
+    class FakeGrid:
+        def __init__(self):
+            self.lon = np.linspace(lon_west, lon_east, n_lon, endpoint=False)
+            self.lat = np.linspace(-np.pi / 3, np.pi / 3, n_lat)
+
+    return (FakeState(np.full((n_lat, n_lon, nlev), 15.0),
+                      np.ones((n_lat, n_lon), dtype=np.float32)),
+            FakeGrid())
+
+
+def test_a_domain_holding_one_water_mass_is_refused():
+    """The class-catching check, not only the case that tripped it.
+
+    A case whose initial condition does not contain the phenomenon being
+    measured passes every gate silently: a near-uniform box cannot undershoot
+    a bound and has nothing to mix. The regional Petersen channel ran that way
+    for months -- its domain starts at the prime meridian, where the front
+    sits by default, so one wet column of sixty-six was cold. The initialiser
+    now refuses it instead of reporting a pass.
+    """
+    import pytest
+    import run_ocean_test_matrix as m
+
+    # A channel lying entirely east of the front: no lock to release.
+    state, grid = _fake_latlon(lon_west=0.0, lon_east=np.radians(0.576))
+    with pytest.raises(ValueError, match="only one water mass"):
+        m._init_lock_exchange(state, "latlon", grid, None,
+                              lx_config=LockExchangeConfig(front_longitude=0.0))
+
+    # The same channel with the front at its midpoint is accepted.
+    state, grid = _fake_latlon(lon_west=0.0, lon_east=np.radians(0.576))
+    out = m._init_lock_exchange(
+        state, "latlon", grid, None,
+        lx_config=LockExchangeConfig(front_longitude=0.288))
+    T = np.asarray(out.T.data)
+    assert T.min() == 5.0 and T.max() == 30.0

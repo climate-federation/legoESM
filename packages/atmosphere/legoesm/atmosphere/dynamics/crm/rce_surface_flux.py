@@ -183,8 +183,10 @@ def compose_rce_surface_scalar_tendencies(
     dtheta_dt_sfc = shflx / (
         rho_sfc * constants.c_pd * dz_sfc * exner_sfc
     )
-    # Latent heat → q_v tendency: dq_v/dt = E / (ρ·Δz), with E = LH/L_v.
-    dq_v_dt_sfc = lhflx / (constants.L_v * rho_sfc * dz_sfc)
+    # Latent heat → q_v tendency: dq_v/dt = E / (ρ·Δz), with E = LH / L, L the
+    # latent heat the constant-coefficient law charged (Kirchhoff L_v(T_sfc)).
+    from legoesm.thermo import charged_latent_heat
+    dq_v_dt_sfc = lhflx / (charged_latent_heat("constant", T_sfc) * rho_sfc * dz_sfc)
     return dtheta_dt_sfc, dq_v_dt_sfc
 
 

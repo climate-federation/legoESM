@@ -264,14 +264,17 @@ def test_assess_ic_map_ci_gate_mapped_below_cold(tmp_path):
         sw_mean_w=np.array([235.0, 185.0]),
         soil_class=np.array(["loam", "loam"], dtype=object))
     n_layers, soil_depth, build_dt = 6, 2.0, 7200.0
+    physics = dict(stomatal_model="ball_berry", nsc_gated_respiration=False,
+                   cold_deciduous_dormancy=False, leaf_c_resorption_frac=0.0)
     eq, qc = equilibrate_archetypes(
         table, n_spinup=20, n_verify=6, dt=build_dt,
-        n_layers=n_layers, soil_depth=soil_depth)
+        n_layers=n_layers, soil_depth=soil_depth, **physics)
 
     arch_path = tmp_path / "archetypes.npz"
     drv._write_archetypes_npz(
         arch_path, table, eq, qc, list(CLM5_PFT_NAMES),
-        n_layers=n_layers, soil_depth=soil_depth, dt=build_dt, res_deg=1.0)
+        n_layers=n_layers, soil_depth=soil_depth, dt=build_dt, res_deg=1.0,
+        physics=physics)
 
     # No geometry args -> assess_ic_map reads the stored soil column + dt.
     result = v.assess_ic_map(arch_path, n_years=2)

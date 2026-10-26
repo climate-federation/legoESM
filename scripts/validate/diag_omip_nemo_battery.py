@@ -205,71 +205,116 @@ def _interp_to_depths(sec, z_src, z_tgt):
 
 def _plot_depth_snapshots(out_dir, name, units, tgt_lat, tgt_lon,
                           model_slices, nemo_slices, depths, label):
+    """One row per depth: every model, NEMO, then each model's difference.
+
+    ``model_slices`` may be a LIST OF MODELS (each a list of per-depth
+    ``(field, ocean_flag)`` pairs) with ``label`` the matching list of names;
+    a single model may still be passed directly.  With two models the cell set
+    is the intersection of BOTH models and NEMO, so the two difference panels
+    are drawn on the same cells and can be read against each other -- scoring
+    each model on its own footprint would make the panels differ where only
+    the masks do.  Colour scales are shared across every panel of a row.
+    """
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
+    models = model_slices if isinstance(model_slices[0], list) else [model_slices]
+    labels = list(label) if isinstance(label, (list, tuple)) else [label]
+    nm = len(models)
+    ncol = 2 * nm + 1
     nd = len(depths)
-    fig, ax = plt.subplots(nd, 3, figsize=(15, 3.4 * nd), squeeze=False)
+    fig, ax = plt.subplots(nd, ncol, figsize=(5.0 * ncol, 3.4 * nd), squeeze=False)
     for i, d in enumerate(depths):
-        Lm, ocL = model_slices[i]
-        Nm, ocN = nemo_slices[i]
-        oc = (ocL > 0.5) & (ocN > 0.5)
-        L = np.where(oc, Lm, np.nan); N = np.where(oc, Nm, np.nan)
-        vmin = np.nanpercentile([L, N], 1); vmax = np.nanpercentile([L, N], 99)
-        for a, dat, ttl in [(ax[i, 0], L, f"{label}"), (ax[i, 1], N, "NEMO")]:
-            im = a.pcolormesh(tgt_lon, tgt_lat, dat, vmin=vmin, vmax=vmax,
-                              cmap="RdYlBu_r", shading="auto")
-            a.set_title(f"{ttl} {name} @ {d:.0f} m"); plt.colorbar(im, ax=a, shrink=0.8)
-        dd = L - N
-        dm = np.nanpercentile(np.abs(dd), 98) or 1.0
-        im = ax[i, 2].pcolormesh(tgt_lon, tgt_lat, dd, vmin=-dm, vmax=dm,
-                                 cmap="RdBu_r", shading="auto")
-        ax[i, 2].set_title(f"Δ {name} @ {d:.0f} m ({label}-NEMO)")
-        plt.colorbar(im, ax=ax[i, 2], shrink=0.8)
-    fig.suptitle(f"{label} vs NEMO — {name} [{units}] horizontal snapshots",
-                 fontsize=13)
+        Nm_, ocN = nemo_slices[i]
+        oc = ocN > 0.5
+        for mod in models:
+            oc = oc & (mod[i][1] > 0.5)
+        N = np.where(oc, Nm_, np.nan)
+        Ls = [np.where(oc, mod[i][0], np.nan) for mod in models]
+        flat = np.concatenate([x[np.isfinite(x)].ravel() for x in Ls + [N]])
+        vmin, vmax = ((np.percentile(flat, 1), np.percentile(flat, 99))
+                      if flat.size else (0.0, 1.0))
+        panels = [(Ls[j], labels[j]) for j in range(nm)] + [(N, "NEMO")]
+        for c, (dat, ttl) in enumerate(panels):
+            im = ax[i, c].pcolormesh(tgt_lon, tgt_lat, dat, vmin=vmin, vmax=vmax,
+                                     cmap="RdYlBu_r", shading="auto")
+            ax[i, c].set_title(f"{ttl} {name} @ {d:.0f} m")
+            plt.colorbar(im, ax=ax[i, c], shrink=0.8)
+        diffs = [Ls[j] - N for j in range(nm)]
+        allfin = np.concatenate([np.abs(x[np.isfinite(x)]).ravel() for x in diffs])
+        dm = float(np.percentile(allfin, 98)) if allfin.size else 1.0
+        dm = dm if dm > 0 else 1.0
+        for j in range(nm):
+            c = nm + 1 + j
+            im = ax[i, c].pcolormesh(tgt_lon, tgt_lat, diffs[j], vmin=-dm, vmax=dm,
+                                     cmap="RdBu_r", shading="auto")
+            ax[i, c].set_title(f"Δ {name} @ {d:.0f} m ({labels[j]}-NEMO)")
+            plt.colorbar(im, ax=ax[i, c], shrink=0.8)
+    fig.suptitle(f"{' + '.join(labels)} vs NEMO — {name} [{units}] "
+                 "horizontal snapshots", fontsize=13)
     fig.tight_layout()
     fig.savefig(out_dir / f"{name}_depth_snapshots.png", dpi=85)
     plt.close(fig)
 
 
 def _plot_section(out_dir, name, units, tgt_lat, zL, secL, zN, secN, label):
+    """Zonal-mean section: every model, NEMO, then each model's difference.
+
+    ``zL``/``secL``/``label`` may each be a LIST (one entry per model) or a
+    single model's values.  Every model's section is interpolated onto NEMO's
+    depth axis for its difference panel; the two difference panels share one
+    colour scale so their amplitudes are directly comparable.
+    Returns {label: rmse} on NEMO's depth grid.
+    """
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
-    secL_on_N = _interp_to_depths(secL, zL, zN)
-    diff = secL_on_N - secN
-    fig, ax = plt.subplots(1, 3, figsize=(18, 5))
-    # Shared colour scale over BOTH sections. secL (model nlev) and secN (NEMO
-    # nlev) have DIFFERENT shapes, so stack the FINITE values flat rather than
-    # np.nanpercentile([secL, secN]) (which builds an inhomogeneous array).
-    both = np.concatenate([secL[np.isfinite(secL)].ravel(),
-                           secN[np.isfinite(secN)].ravel()])
+    zs = zL if isinstance(zL, (list, tuple)) else [zL]
+    secs = secL if isinstance(secL, (list, tuple)) else [secL]
+    labels = list(label) if isinstance(label, (list, tuple)) else [label]
+    nm = len(secs)
+    ncol = 2 * nm + 1
+    on_N = [_interp_to_depths(secs[j], zs[j], zN) for j in range(nm)]
+    diffs = [on_N[j] - secN for j in range(nm)]
+    fig, ax = plt.subplots(1, ncol, figsize=(6.0 * ncol, 5), squeeze=False)
+    ax = ax[0]
+    # Shared colour scale over EVERY section.  The model and NEMO sections have
+    # different nlev, so stack the finite values flat rather than percentiling a
+    # list of differently-shaped arrays (which builds an inhomogeneous array).
+    both = np.concatenate([x[np.isfinite(x)].ravel() for x in secs + [secN]])
     vmin, vmax = ((np.percentile(both, 2), np.percentile(both, 98))
                   if both.size else (0.0, 1.0))
-    for a, z, sec, ttl in [(ax[0], zL, secL, label), (ax[1], zN, secN, "NEMO")]:
-        im = a.pcolormesh(tgt_lat, z, sec, vmin=vmin, vmax=vmax,
-                          cmap="RdYlBu_r", shading="auto")
-        a.set_title(f"{ttl} zonal-mean {name}"); a.set_ylabel("depth [m]")
-        a.set_xlabel("lat"); a.invert_yaxis(); plt.colorbar(im, ax=a, shrink=0.85)
-    dm = np.nanpercentile(np.abs(diff), 98) if np.isfinite(diff).any() else 1.0
-    dm = float(dm) if (np.isfinite(dm) and dm > 0) else 1.0
-    im = ax[2].pcolormesh(tgt_lat, zN, diff, vmin=-dm, vmax=dm, cmap="RdBu_r",
-                          shading="auto")
-    ax[2].set_title(f"Δ zonal-mean {name} ({label}-NEMO)")
-    ax[2].set_ylabel("depth [m]"); ax[2].set_xlabel("lat"); ax[2].invert_yaxis()
-    plt.colorbar(im, ax=ax[2], shrink=0.85)
-    fig.suptitle(f"{label} vs NEMO — zonal-mean {name} [{units}] section",
-                 fontsize=13)
+    panels = [(zs[j], secs[j], labels[j]) for j in range(nm)] + [(zN, secN, "NEMO")]
+    for c, (z, sec, ttl) in enumerate(panels):
+        im = ax[c].pcolormesh(tgt_lat, z, sec, vmin=vmin, vmax=vmax,
+                              cmap="RdYlBu_r", shading="auto")
+        ax[c].set_title(f"{ttl} zonal-mean {name}"); ax[c].set_ylabel("depth [m]")
+        ax[c].set_xlabel("lat"); ax[c].invert_yaxis()
+        plt.colorbar(im, ax=ax[c], shrink=0.85)
+    allfin = np.concatenate([np.abs(x[np.isfinite(x)]).ravel() for x in diffs])
+    dm = float(np.percentile(allfin, 98)) if allfin.size else 1.0
+    dm = dm if (np.isfinite(dm) and dm > 0) else 1.0
+    for j in range(nm):
+        c = nm + 1 + j
+        im = ax[c].pcolormesh(tgt_lat, zN, diffs[j], vmin=-dm, vmax=dm,
+                              cmap="RdBu_r", shading="auto")
+        ax[c].set_title(f"Δ zonal-mean {name} ({labels[j]}-NEMO)")
+        ax[c].set_ylabel("depth [m]"); ax[c].set_xlabel("lat"); ax[c].invert_yaxis()
+        plt.colorbar(im, ax=ax[c], shrink=0.85)
+    fig.suptitle(f"{' + '.join(labels)} vs NEMO — zonal-mean {name} [{units}] "
+                 "section", fontsize=13)
     fig.tight_layout()
     fig.savefig(out_dir / f"{name}_zonal_section.png", dpi=90)
     plt.close(fig)
     # RMSE on the common (NEMO) depth grid, area-unweighted but lat-cos weighted.
-    w = np.cos(np.deg2rad(tgt_lat))[None, :] * np.ones_like(diff)
-    fin = np.isfinite(diff)
-    rmse = float(np.sqrt(np.nansum((diff[fin]) ** 2 * w[fin]) / np.nansum(w[fin]))) \
-        if fin.any() else float("nan")
-    return rmse
+    out = {}
+    for j in range(nm):
+        w = np.cos(np.deg2rad(tgt_lat))[None, :] * np.ones_like(diffs[j])
+        fin = np.isfinite(diffs[j])
+        out[labels[j]] = (float(np.sqrt(np.nansum(diffs[j][fin] ** 2 * w[fin])
+                                        / np.nansum(w[fin]))) if fin.any()
+                          else float("nan"))
+    return out
 
 
 def _nemo_transports(args):
@@ -306,6 +351,11 @@ def main() -> int:
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--legoesm-snapshot", type=Path, required=True)
+    p.add_argument("--legoesm-snapshot-2", type=Path, default=None,
+                   help="Second legoESM snapshot (another GRID, same day) drawn "
+                        "in the SAME figures: each row becomes model1 | model2 | "
+                        "NEMO | delta1 | delta2, on the cells all three resolve "
+                        "so the two difference panels are comparable.")
     p.add_argument("--nemo-gridt", type=Path, required=True)
     p.add_argument("--nemo-gridv", type=Path, default=None)
     p.add_argument("--nemo-gridu", type=Path, default=None)
@@ -317,6 +367,7 @@ def main() -> int:
     p.add_argument("--depths-m", type=str, default="0,100,300,1000",
                    help="Comma-separated target depths [m] for horizontal snapshots.")
     p.add_argument("--grid-label", type=str, default="legoESM")
+    p.add_argument("--grid-label-2", type=str, default="model 2")
     p.add_argument("--output-dir", type=Path,
                    default=Path("results/omip_nemo/battery"))
     args = p.parse_args()
@@ -327,29 +378,44 @@ def main() -> int:
     N = _load_nemo_3d(args.nemo_gridt, args.nemo_month, args.nemo_time_idx)
     print(f"[load] legoESM T{L['T'].shape} nlev={L['nlev']} | "
           f"NEMO T{N['T'].shape} nlev={N['z'].size}")
+    MODELS = [L]
+    LABELS = [args.grid_label]
+    if args.legoesm_snapshot_2 is not None:
+        L2 = _load_legoesm_3d(args.legoesm_snapshot_2)
+        MODELS.append(L2)
+        LABELS.append(args.grid_label_2)
+        print(f"[load] second model T{L2['T'].shape} nlev={L2['nlev']} "
+              f"({args.grid_label_2})")
 
     r = args.res_deg
     tgt_lat = np.arange(-89.5, 90.0, r)
     tgt_lon = np.arange(0.5, 360.0, r)
 
     report = {"legoesm_snapshot": str(args.legoesm_snapshot),
+              "legoesm_snapshot_2": (str(args.legoesm_snapshot_2)
+                                     if args.legoesm_snapshot_2 else None),
+              "grid_labels": list(LABELS),
               "nemo_gridt": str(args.nemo_gridt), "depths_m": depths,
               "section_rmse": {}}
 
     # --- horizontal depth snapshots (T, S) ---
     for fld, units in (("T", "degC"), ("S", "psu")):
-        mod_sl, nem_sl = [], []
+        mods_sl = [[] for _ in MODELS]
+        nem_sl = []
         for d in depths:
-            kL = _nearest_level(L["z"], d)
             kN = _nearest_level(N["z"], d)
-            mod_sl.append(_regrid_level(L[fld][..., kL], L["lat"], L["lon"],
-                                        L["wet3d"][..., kL], tgt_lat, tgt_lon))
+            for mi, M in enumerate(MODELS):
+                kM = _nearest_level(M["z"], d)
+                mods_sl[mi].append(_regrid_level(
+                    M[fld][..., kM], M["lat"], M["lon"],
+                    M["wet3d"][..., kM], tgt_lat, tgt_lon))
             nem_sl.append(_regrid_level(N[fld][kN], N["lat"], N["lon"],
                                         np.isfinite(N[fld][kN]).astype(float),
                                         tgt_lat, tgt_lon))
+        mod_sl = mods_sl[0]   # the per-depth band table below scores model 1
         name = "SST/T" if fld == "T" else "SSS/S"
-        _plot_depth_snapshots(out, fld, units, tgt_lat, tgt_lon, mod_sl, nem_sl,
-                              depths, args.grid_label)
+        _plot_depth_snapshots(out, fld, units, tgt_lat, tgt_lon, mods_sl, nem_sl,
+                              depths, LABELS)
         print(f"[snapshots] {fld} at depths {depths} -> {fld}_depth_snapshots.png")
         # Per-band bias at each depth: does the surface cold/salty bias reach into
         # the thermocline (advective / large-scale) or stay confined to the mixed
@@ -372,8 +438,8 @@ def main() -> int:
 
     # --- zonal-mean depth sections (T, S) ---
     for fld, units in (("T", "degC"), ("S", "psu")):
-        secL = _zonal_section(L[fld], L["lat"], L["lon"], L["wet3d"], L["z"],
-                              tgt_lat, tgt_lon)
+        secs = [_zonal_section(M[fld], M["lat"], M["lon"], M["wet3d"], M["z"],
+                               tgt_lat, tgt_lon) for M in MODELS]
         # NEMO levels: regrid each then zonal-mean (build a (lat,lon) per level).
         nlevN = N["z"].size
         secN = np.full((nlevN, tgt_lat.size), np.nan)
@@ -383,11 +449,12 @@ def main() -> int:
                                   tgt_lat, tgt_lon)
             with np.errstate(invalid="ignore"):
                 secN[k] = np.nanmean(np.where(oc > 0.5, g, np.nan), axis=1)
-        rmse = _plot_section(out, fld, units, tgt_lat, L["z"], secL, N["z"],
-                             secN, args.grid_label)
+        rmse = _plot_section(out, fld, units, tgt_lat, [M["z"] for M in MODELS],
+                             secs, N["z"], secN, LABELS)
         report["section_rmse"][fld] = rmse
-        print(f"[section] {fld} zonal-mean section RMSE={rmse:.3f} {units} "
-              f"-> {fld}_zonal_section.png")
+        print(f"[section] {fld} zonal-mean section RMSE "
+              + "  ".join(f"{k}={v:.3f}" for k, v in rmse.items())
+              + f" {units} -> {fld}_zonal_section.png")
 
     # --- NEMO reference transports ---
     tr = _nemo_transports(args)

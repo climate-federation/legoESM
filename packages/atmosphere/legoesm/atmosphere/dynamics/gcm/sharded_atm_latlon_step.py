@@ -34,8 +34,8 @@ from jax.sharding import NamedSharding, PartitionSpec as P
 
 from legoesm.parallel.geometry_consistency import (
     FLAG_ABSENT, assert_flags_agree, assert_schema_agrees, broadcast_checked,
-    checked_shard_put,
-    coerce_bool, coerce_count, config_digest48, name_digest48,
+    checked_replicated_put, checked_shard_put,
+    coerce_bool, coerce_count, config_digest48, mesh_axis_terms, name_digest48,
     tree_schema_digest48)
 
 from legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid import (
@@ -50,29 +50,6 @@ _MESH_ENTRY_FLAGS = (
     "has_mesh", "n_dev", "n_axes", "axis_names", "axis_sizes",
     "has_tree", "tree_schema",
 )
-
-
-def _mesh_axis_terms(mesh):
-    """``(axis_names, axis_sizes)`` term lists for the mesh digests.
-
-    The SIZES are carried per axis (not just the axis count) because a mesh
-    reshaped ``(2, 4)`` on one rank and ``(4, 2)`` on another has the same
-    names, the same count, and the same total device count (codex round-4,
-    blocker 5 tail).  Never raises: an unreadable mesh degrades to a marker
-    term that still participates in the comparison.
-    """
-    if mesh is None:
-        return (), ()
-    try:
-        names = tuple(str(a) for a in mesh.axis_names)
-    except Exception:                       # pragma: no cover - defensive
-        return ("<unreadable>",), ("<unreadable>",)
-    try:
-        shape = dict(mesh.shape)
-        sizes = tuple(f"{n}={shape.get(n, '?')}" for n in names)
-    except Exception:                       # pragma: no cover - defensive
-        sizes = ("<unreadable>",)
-    return names, sizes
 
 
 def _agree_mesh_entry(mesh, tree=None, *, where: str) -> None:
@@ -98,7 +75,7 @@ def _agree_mesh_entry(mesh, tree=None, *, where: str) -> None:
     loop), alongside a full-state gather that is orders of magnitude larger —
     and an exact no-op under a single process.
     """
-    names, sizes = _mesh_axis_terms(mesh)
+    names, sizes = mesh_axis_terms(mesh)
     assert_flags_agree(_MESH_ENTRY_FLAGS, (
         float(mesh is not None),
         float(mesh.devices.size if mesh is not None else 0),
@@ -161,7 +138,13 @@ def build_sharded_held_suarez_state_atm_latlon(
     perturbation_amplitude: float = 1.0,
     seed: int = 42,
 ) -> CGridLatLonHydrostaticState:
-    """Band-local Held-Suarez C-grid state, directly in the sharded layout.
+    """Shard-local Held-Suarez C-grid state, directly in the sharded layout.
+
+    Works for BOTH device meshes: a ``("lat",)`` band mesh and a
+    ``("lat", "lon")`` tile mesh.  The only difference is the partition spec
+    and, for the tile mesh, that ``u`` is created already in its ``u_left``
+    layout (east periodic-seam column dropped, as
+    :func:`shard_state_atm_latlon_2d` does).
 
     The #1100 invariant for multi-process runs: **neither global builds nor
     ``device_put`` replication** — every global-shaped leaf is created with
@@ -215,9 +198,40 @@ def build_sharded_held_suarez_state_atm_latlon(
     def _slice_shape(gshape, idx):
         return tuple(len(range(*sl.indices(n))) for sl, n in zip(idx, gshape))
 
+    # Band mesh -> shard on latitude only; tile mesh -> shard on both. The
+    # callbacks below already take a per-dimension index tuple, so they need
+    # no change: the only band-specific thing in this builder was the
+    # partition spec. Building tile-local matters as much here as band-local
+    # did -- the tiled lane's alternative is a global build plus a device_put
+    # onto a cross-process sharding, which XLA services with an all-gather
+    # and which asked for 105 GiB per device at 2048x4096 on 64 devices.
+    _axes = tuple(mesh.axis_names)
+    if _axes not in (("lat",), ("lat", "lon")):
+        # Anything else -- a swapped ("lon", "lat"), a third axis, a renamed
+        # one -- would silently fall through to the band layout and build a
+        # state whose shards do not match the step's expectations.
+        raise ValueError(
+            f"build_sharded_held_suarez_state_atm_latlon: mesh axes must be "
+            f"('lat',) or ('lat', 'lon'); got {_axes}")
+    _tiled = _axes == ("lat", "lon")
+    _p_lat = int(mesh.shape["lat"])
+    if grid.n_lat % _p_lat:
+        raise ValueError(
+            f"n_lat {grid.n_lat} is not divisible by the mesh's lat split "
+            f"{_p_lat}")
+    if _tiled:
+        _p_lon = int(mesh.shape["lon"])
+        if grid.n_lon % _p_lon:
+            raise ValueError(
+                f"n_lon {grid.n_lon} is not divisible by the mesh's lon "
+                f"split {_p_lon}")
+
     def _make(gshape, cb):
-        sharding = NamedSharding(mesh, P("lat", *((None,) * (len(gshape) - 1))))
-        return jax.make_array_from_callback(gshape, sharding, cb)
+        if _tiled:
+            spec = P("lat", "lon", *((None,) * (len(gshape) - 2)))
+        else:
+            spec = P("lat", *((None,) * (len(gshape) - 1)))
+        return jax.make_array_from_callback(gshape, NamedSharding(mesh, spec), cb)
 
     def _zeros_cb(gshape):
         return lambda idx: jnp.zeros(_slice_shape(gshape, idx), dtype=_dtype)
@@ -237,7 +251,9 @@ def build_sharded_held_suarez_state_atm_latlon(
         return (p_s_init * jnp.exp(
             -phis_block / (constants.R_d * T_init))).astype(_dtype)
 
-    sh_u = (n_lat, n_lon + 1, nlev)
+    # The tiled layout also drops u's east periodic-seam column (u_left),
+    # exactly as shard_state_atm_latlon_2d does; the band layout keeps it.
+    sh_u = (n_lat, n_lon, nlev) if _tiled else (n_lat, n_lon + 1, nlev)
     sh_vlow = (n_lat, n_lon, nlev)   # sharded layout: pole-wall face dropped
     sh_T = (n_lat, n_lon, nlev)
     sh_2d = (n_lat, n_lon)
@@ -312,12 +328,15 @@ def shard_hydrostatic_to_atm_latlon(hs, grid, mesh):
     # entirely (#1362 round 4).
     _agree_mesh_entry(mesh, hs, where="shard_hydrostatic_to_atm_latlon")
     from legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid import (
-        hydrostatic_to_cgrid)
-    c_state = hydrostatic_to_cgrid(hs, grid)
+        facewind_to_cgrid, hydrostatic_to_cgrid)
+    # A LatLonFaceWindState already carries the native faces: no projection.
+    c_state = (facewind_to_cgrid(hs) if hasattr(hs, "u_f")
+               else hydrostatic_to_cgrid(hs, grid))
     return c_state if mesh is None else shard_state_atm_latlon(c_state, mesh)
 
 
-def gather_atm_latlon_to_hydrostatic(c_state, grid, mesh):
+def gather_atm_latlon_to_hydrostatic(c_state, grid, mesh, *,
+                                     as_facewind: bool = False):
     """Inverse of :func:`shard_hydrostatic_to_atm_latlon`: gather the sharded
     C-grid state THEN convert (C-grid faces -> cell winds) to the cell-centered,
     Field-wrapped ``HydrostaticState`` the driver/output/restart contract
@@ -327,9 +346,10 @@ def gather_atm_latlon_to_hydrostatic(c_state, grid, mesh):
     _agree_mesh_entry(mesh, c_state,
                       where="gather_atm_latlon_to_hydrostatic")
     from legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid import (
-        cgrid_to_hydrostatic)
+        cgrid_to_facewind, cgrid_to_hydrostatic)
     full = c_state if mesh is None else gather_state_atm_latlon(c_state, mesh)
-    return cgrid_to_hydrostatic(full, grid)
+    # ``as_facewind``: hand back the native faces (a driver carrying them).
+    return cgrid_to_facewind(full) if as_facewind else cgrid_to_hydrostatic(full, grid)
 
 
 # LatLonGrid scalar fields that stay STATIC per band (uniform bands -> one
@@ -527,11 +547,20 @@ def _build_geometry_stacks(model, mesh, n_dev: int, shard_geometry: bool):
                          arrays=[raw[n] for n in ordered_names])
     # SHARDED mode: checked_shard_put replaces broadcast_checked +
     # device_put (the ocean walls, PR #1457) — owned slabs only, per-slab
-    # gate. REPLICATED mode (codex r22): keep the byte-CANONICAL
-    # process-0 broadcast — every device must hold identical replicated
-    # geometry (an rtol-gated per-process copy would let ULP drift into
-    # the replicated contract and process-dependent evolution); the
-    # walls are soft here (2-D ~MB fields), so canonical wins.
+    # gate. REPLICATED mode: still the byte-CANONICAL process-0 broadcast
+    # — every device must hold identical replicated geometry (an
+    # rtol-gated per-process copy would let ULP drift into the replicated
+    # contract and process-dependent evolution) — but placed with
+    # checked_replicated_put, which skips jax's whole-array device_put
+    # equality assert.
+    #
+    # An earlier version of this comment called the walls "soft here
+    # (2-D ~MB fields)". That was measured false: at 4096x8192 each field
+    # is 134 MB, the assert all-gathers ~P*N*(2s+1) bytes of it, and
+    # per-rank peak grew 12.7/22.2/41.1 GB (f32) and 24.6/41.5/73.4 GB
+    # (f64) at 32/64/128 ranks until the 128-rank f64 arm was OOM-killed.
+    # The assert is also redundant after broadcast_checked, which has
+    # already proven agreement and broadcast one canonical copy.
     spec_of = lat_spec if shard_geometry else (lambda _arr: P())
     if shard_geometry:
         stacks = {
@@ -543,11 +572,9 @@ def _build_geometry_stacks(model, mesh, n_dev: int, shard_geometry: bool):
         }
     else:
         stacks = {
-            name: jax.device_put(
-                jnp.asarray(broadcast_checked(
-                    raw[name], name,
-                    context="make_sharded_atm_latlon_step")),
-                NamedSharding(mesh, P()))
+            name: checked_replicated_put(
+                raw[name], name, NamedSharding(mesh, P()),
+                context="make_sharded_atm_latlon_step")
             for name in ordered_names
         }
     stacks_spec = {name: spec_of(arr) for name, arr in raw.items()}
@@ -733,7 +760,7 @@ def _agree_spmd_entry(model, mesh, *, n_steps=None, segment_steps=None,
     cfg = getattr(model, "config", None)
     fold = getattr(grid, "fold", None)
     shape = dict(mesh.shape) if mesh is not None else {}
-    names, sizes = _mesh_axis_terms(mesh)
+    names, sizes = mesh_axis_terms(mesh)
     # Every user- or object-supplied value goes through a STRICT, NON-THROWING
     # encoder so building this payload cannot raise before the collective
     # (codex round-3 blocker 3, round-4 blockers 1-2). The mesh-derived sizes
@@ -874,7 +901,7 @@ def _agree_spmd_call(mesh, state, phys_state, *, where: str) -> None:
     and rejected: whether a call misses is itself rank-local, so a
     conditional gate can desynchronise exactly like the bug it guards.
     """
-    names, sizes = _mesh_axis_terms(mesh)
+    names, sizes = mesh_axis_terms(mesh)
     assert_flags_agree(_CALL_ENTRY_FLAGS, (
         float(mesh is not None),
         float(mesh.devices.size if mesh is not None else 0),
@@ -1105,11 +1132,9 @@ def make_sharded_atm_latlon_segment(model, mesh, n_steps: int,
     bit-identical numerics, 1/n_dev the geometry bytes
     (:func:`atm_latlon_geometry_bytes`).
 
-    STATELESS physics only (``None`` / Held-Suarez / column-local closures,
-    the production ``run_atm_latlon_spmd`` envelope): a stateful
-    ``PhysicsState`` carry is refused loudly — thread it through the
-    per-step :func:`make_sharded_atm_latlon_step` until the segment lane
-    routes the carry through the scan.
+    A physics carry ``segment(c_state, dt, phys_state=ps) -> (c_state,
+    all_finite, ps_out)`` is threaded through the scan exactly as the
+    per-step factory threads it (``(ncol, ...)`` leaves band-split on dim 0).
 
     ``mesh=None``: the single-device twin — ``jit(lax.scan)`` over the serial
     C-grid step with the model's own geometry, same ``(state, all_finite)``
@@ -1147,31 +1172,32 @@ def make_sharded_atm_latlon_segment(model, mesh, n_steps: int,
     def _refuse_carry(phys_state):
         refuse_unthreaded_stateful_physics(
             physics_fn, phys_state, where="atm lat-lon compiled segment")
-        if phys_state is not None:
-            raise NotImplementedError(
-                "make_sharded_atm_latlon_segment: a stateful PhysicsState "
-                "carry is not yet segment-routed — use the per-step "
-                "make_sharded_atm_latlon_step(phys_state=...) path.")
+
+    def _scan_steps(step_sp, state, ps):
+        """``n_steps`` of ``step_sp((s, ps)) -> (s, ps)``: dtype-fixed-point
+        unroll then ``lax.scan``; ``ps=None`` carries nothing."""
+        out, n_left = unroll_to_dtype_fixed_point(
+            step_sp, (state, ps), n_steps)
+        if n_left > 0:
+            out, _ = jax.lax.scan(lambda c, _x: (step_sp(c), None),
+                                  out, xs=None, length=n_left)
+        return out
 
     if mesh is None:                       # single-device compiled segment
-        def _serial_seg(c_state, dt):
-            def _step1(s):
-                out, _ps = model._step_cgrid_impl(
-                    s, dt, physics_fn=physics_fn, phys_state=None)
-                return out
-            # Unroll to the scan-carry dtype fixed point (helper docstring).
-            out, n_left = unroll_to_dtype_fixed_point(
-                _step1, c_state, n_steps)
-            if n_left > 0:
-                out, _ = jax.lax.scan(lambda s, _x: (_step1(s), None),
-                                      out, xs=None, length=n_left)
-            return out, state_finite_scalar(out)
+        def _serial_seg(c_state, dt, ps):
+            def _step_sp(c):
+                out, ps_out = model._step_cgrid_impl(
+                    c[0], dt, physics_fn=physics_fn, phys_state=c[1])
+                return out, (None if c[1] is None else ps_out)
+            out, ps_out = _scan_steps(_step_sp, c_state, ps)
+            return out, state_finite_scalar(out), ps_out
 
         fn_serial = jax.jit(_serial_seg)
 
         def serial_segment(c_state, dt, phys_state=None):
             _refuse_carry(phys_state)
-            return fn_serial(c_state, jnp.asarray(dt))
+            out, ok, ps_out = fn_serial(c_state, jnp.asarray(dt), phys_state)
+            return (out, ok) if phys_state is None else (out, ok, ps_out)
 
         return serial_segment
 
@@ -1188,16 +1214,27 @@ def make_sharded_atm_latlon_segment(model, mesh, n_steps: int,
         shard_geometry)
 
     def _seg_body(state_local, stacks_local, dt):
-        def _step1(s):
-            out, _ps = band_step(s, stacks_local, dt, None)
-            return out
-        # Unroll to the scan-carry dtype fixed point (helper docstring).
-        out, n_left = unroll_to_dtype_fixed_point(
-            _step1, state_local, n_steps)
-        if n_left > 0:
-            out, _ = jax.lax.scan(lambda s, _x: (_step1(s), None),
-                                  out, xs=None, length=n_left)
+        def _step_sp(c):
+            out, _ps = band_step(c[0], stacks_local, dt, None)
+            return out, None
+        out, _ = _scan_steps(_step_sp, state_local, None)
         return out, state_finite_scalar(out, axis=axis)
+
+    def _seg_body_with_carry(state_local, stacks_local, dt, ps_local):
+        def _step_sp(c):
+            return band_step(c[0], stacks_local, dt, c[1])
+        out, ps_out = _scan_steps(_step_sp, state_local, ps_local)
+        return out, state_finite_scalar(out, axis=axis), ps_out
+
+    _ncol_global = int(model.grid.n_lat) * int(model.grid.n_lon)
+
+    def _ps_spec_leaf(leaf):
+        # Same layout rule as the per-step factory: (ncol, ...) leaves
+        # band-split on dim 0 (lat-major flatten), everything else replicated.
+        if (hasattr(leaf, "ndim") and leaf.ndim >= 1
+                and leaf.shape[0] == _ncol_global):
+            return P("lat")
+        return P()
 
     _cache = {}
 
@@ -1205,19 +1242,30 @@ def make_sharded_atm_latlon_segment(model, mesh, n_steps: int,
         _agree_spmd_call(mesh, c_state, phys_state,
                          where="make_sharded_atm_latlon_segment.segment")
         _refuse_carry(phys_state)
-        # Cache key = state pytree STRUCTURE (in/out specs derive from it) —
-        # same doctrine as the per-step factory.
-        key = jax.tree.structure(c_state)
+        # Cache key = (state, carry) pytree STRUCTURE (in/out specs derive
+        # from both) — same doctrine as the per-step factory.
+        key = (jax.tree.structure(c_state),
+               None if phys_state is None
+               else jax.tree_util.tree_structure(phys_state))
         fn = _cache.get(key)
         if fn is None:
             in_spec = jax.tree.map(lat_spec, c_state)
-            fn = jax.jit(shard_map(
-                _seg_body, mesh=mesh,
-                in_specs=(in_spec, stacks_spec, P()),
-                out_specs=(in_spec, P()), check_vma=False))
+            if phys_state is None:
+                fn = jax.jit(shard_map(
+                    _seg_body, mesh=mesh,
+                    in_specs=(in_spec, stacks_spec, P()),
+                    out_specs=(in_spec, P()), check_vma=False))
+            else:
+                ps_spec = jax.tree.map(_ps_spec_leaf, phys_state)
+                fn = jax.jit(shard_map(
+                    _seg_body_with_carry, mesh=mesh,
+                    in_specs=(in_spec, stacks_spec, P(), ps_spec),
+                    out_specs=(in_spec, P(), ps_spec), check_vma=False))
             _cache[key] = fn
         with _latlon_spmd_armed(mesh):
-            return fn(c_state, stacks, jnp.asarray(dt))
+            if phys_state is None:
+                return fn(c_state, stacks, jnp.asarray(dt))
+            return fn(c_state, stacks, jnp.asarray(dt), phys_state)
 
     segment._geom_stacks = stacks   # test/introspection only
     return segment
@@ -1298,7 +1346,7 @@ def run_atm_latlon_spmd_segment(model, mesh, hs_init, dt, n_steps,
 
 def run_atm_latlon_spmd(model, mesh, hs_init, dt, n_steps, *,
                         segment_steps=None, physics_fn=None, on_segment=None,
-                        compiled_segments=False):
+                        compiled_segments=False, segment_forcing=None):
     """Production lat-band-SPMD run driver: integrate ``n_steps`` of the C-grid
     hydrostatic atm in SEGMENTS, returning ``(hs_final, status)``.
 
@@ -1338,6 +1386,12 @@ def run_atm_latlon_spmd(model, mesh, hs_init, dt, n_steps, *,
     on_segment : callable | None      ``on_segment(hs_global, step_done)`` at each
                                       segment boundary (post-gather, for I/O); the
                                       gathered state is a COPY, not fed back.
+    segment_forcing : callable | None ``segment_forcing(step_done) -> pytree``
+                                      evaluated at each segment START and handed
+                                      to ``physics_fn`` as its 4th argument for
+                                      every step of that segment (``(ncol, ...)``
+                                      leaves band-split); the physics returns it
+                                      unchanged.  ``None``: 3-arg physics.
     compiled_segments : bool          M2b opt-in (default ``False`` =
                                       historical per-step path, byte-identical).
                                       ``True``: each segment runs as ONE
@@ -1373,8 +1427,12 @@ def run_atm_latlon_spmd(model, mesh, hs_init, dt, n_steps, *,
                       compiled_segments=compiled_segments,
                       has_physics_fn=physics_fn is not None,
                       has_on_segment=on_segment is not None,
+                      has_phys_state=segment_forcing is not None,
                       where="run_atm_latlon_spmd")
     import jax.numpy as jnp
+    # A face-wind input (a driver carrying the native C-grid winds) gets face
+    # winds back at every boundary; cell-centre in -> cell-centre out.
+    _fw = hasattr(hs_init, "u_f")
     if n_steps < 1:
         raise ValueError(f"n_steps must be >= 1, got {n_steps}")
     seg = n_steps if segment_steps is None else int(segment_steps)
@@ -1398,18 +1456,23 @@ def run_atm_latlon_spmd(model, mesh, hs_init, dt, n_steps, *,
         done = 0
         while done < n_steps:
             this = min(seg, n_steps - done)
-            c_state, ok = _seg_fn(this)(c_state, dt)
+            if segment_forcing is None:
+                c_state, ok = _seg_fn(this)(c_state, dt)
+            else:
+                c_state, ok, _ = _seg_fn(this)(
+                    c_state, dt, phys_state=segment_forcing(done))
             done += this
             # ONE scalar host read per segment (the M2b finite check); the
             # full state is gathered only on blowup / for the callback.
             if not bool(ok):
                 hs_out = gather_atm_latlon_to_hydrostatic(
-                    c_state, model.grid, mesh)
+                    c_state, model.grid, mesh, as_facewind=_fw)
                 return hs_out, f"BLOWUP at step {done}"
             if on_segment is not None:
                 on_segment(gather_atm_latlon_to_hydrostatic(
-                    c_state, model.grid, mesh), done)
-        return (gather_atm_latlon_to_hydrostatic(c_state, model.grid, mesh),
+                    c_state, model.grid, mesh, as_facewind=_fw), done)
+        return (gather_atm_latlon_to_hydrostatic(c_state, model.grid, mesh,
+                                             as_facewind=_fw),
                 "COMPLETED")
 
     step = make_sharded_atm_latlon_step(model, mesh, physics_fn=physics_fn)
@@ -1419,20 +1482,27 @@ def run_atm_latlon_spmd(model, mesh, hs_init, dt, n_steps, *,
     status = "COMPLETED"
     while done < n_steps:
         this = min(seg, n_steps - done)
-        for _ in range(this):
-            c_state = step(c_state, dt)
+        if segment_forcing is None:
+            for _ in range(this):
+                c_state = step(c_state, dt)
+        else:
+            _sf = segment_forcing(done)
+            for _ in range(this):
+                c_state, _ = step(c_state, dt, phys_state=_sf)
         done += this
         # Gather a cell-centered COPY for output / blowup-check ONLY — the
         # integration continues from c_state (sharded C-grid), so the lossy
         # cell<->face round-trip is NOT fed back into the dynamics.
-        hs_out = gather_atm_latlon_to_hydrostatic(c_state, model.grid, mesh)
+        hs_out = gather_atm_latlon_to_hydrostatic(c_state, model.grid, mesh,
+                                             as_facewind=_fw)
         finite = bool(jnp.isfinite(hs_out.p_s.data).all()
                       & jnp.isfinite(hs_out.T.data).all())
         if not finite:
             return hs_out, f"BLOWUP at step {done}"
         if on_segment is not None:
             on_segment(hs_out, done)
-    return gather_atm_latlon_to_hydrostatic(c_state, model.grid, mesh), status
+    return gather_atm_latlon_to_hydrostatic(c_state, model.grid, mesh,
+                                             as_facewind=_fw), status
 
 
 # ==============================================================================
@@ -1653,12 +1723,14 @@ def _build_geometry_stacks_2d(model, mesh, p_lat: int, p_lon: int,
             for name in ordered_names
         }
     else:
+        # Same reasoning as the 3-D lane above: broadcast_checked already
+        # proves agreement, so jax's whole-array equality assert is redundant
+        # and its all-gather is what made per-rank memory scale with the rank
+        # count.
         stacks = {
-            name: jax.device_put(
-                jnp.asarray(broadcast_checked(
-                    raw[name], name,
-                    context="make_sharded_atm_latlon_step_2d")),
-                NamedSharding(mesh, P()))
+            name: checked_replicated_put(
+                raw[name], name, NamedSharding(mesh, P()),
+                context="make_sharded_atm_latlon_step_2d")
             for name in ordered_names
         }
     stacks_spec = {name: spec_of(raw[name]) for name in ordered_names}

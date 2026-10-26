@@ -252,6 +252,9 @@ class TestConvectionGrad:
         from legoesm.atmosphere.physics.convection.config import ConvectionConfig
 
         config = ConvectionConfig(scheme=scheme)
+        if scheme == "zhang_mcfarlane":  # the test grid has no land fraction
+            config = config._replace(
+                zhang_mcfarlane=config.zhang_mcfarlane._replace(land_fraction="none"))
         conv_fn = make_convection_physics(config, model_type="hydrostatic", dt=300.0)
         state = self.state
 
@@ -277,9 +280,22 @@ class TestConvectionGrad:
                 v=state.v.replace(data=v_data),
             )
 
+        # GFDL moist_conv (dca) adjusts only supersaturated levels, so the
+        # shared 80 % RH state leaves it correctly OFF; scale the humidity to
+        # 1.05x the fixture's saturation mixing ratio so moist_conv acts.
+        if scheme == "dca":
+            q_v = state.tracers["q_v"]
+            state = state._replace(tracers={
+                **state.tracers, "q_v": q_v.replace(data=q_v.data * (1.05 / 0.8))})
+
+        ps = None
+        if scheme == "zhang_mcfarlane":  # ZM needs the carried pblh: CAM cold start
+            from tests._zm_cold_start import cold_phys_state
+            ps = cold_phys_state(state.T.data)
+
         def loss(T_data):
             s = state._replace(T=state.T.replace(data=T_data))
-            tend, _ = conv_fn(s, self.grid, self.sigma)
+            tend, _ = conv_fn(s, self.grid, self.sigma, phys_state=ps)
             return jnp.sum(tend.dT_dt.data ** 2)
 
         grad = jax.grad(loss)(state.T.data)

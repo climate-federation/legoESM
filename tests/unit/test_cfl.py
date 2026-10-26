@@ -180,3 +180,47 @@ class TestCFLCheckAndAdjust:
             grid_type="cubed_sphere", verbose=False,
         )
         assert dt > 0
+
+
+# ============================================================================
+# estimate_min_dx: one spacing for the setup clamp and the run-time CFL
+# ============================================================================
+
+class TestEstimateMinDxByGridType:
+    def test_latlon_is_pole_cell_not_cube_formula(self):
+        from legoesm.core.cfl import estimate_min_dx
+        dx = estimate_min_dx(90, "latlon")
+        assert dx == estimate_min_dx_latlon(90)
+        # The cube formula at n=n_lat is ~16x too large for the 2-deg pole row.
+        assert estimate_min_dx_cubed_sphere(90) > 10.0 * dx
+
+    def test_latlon_polar_filter_uses_equatorial_spacing(self):
+        from legoesm.core.cfl import estimate_min_dx
+        R = constants.R_earth
+        assert estimate_min_dx(90, "latlon", R, use_polar_filter=True) == (
+            pytest.approx(2.0 * np.pi * R / 180))
+
+    def test_cube_and_unknown(self):
+        from legoesm.core.cfl import estimate_min_dx
+        assert estimate_min_dx(48, "cubed_sphere") == estimate_min_dx_cubed_sphere(48)
+        with pytest.raises(ValueError, match="unknown grid_type"):
+            estimate_min_dx(48, "cubedsphere")
+
+
+def test_compiled_lane_cfl_uses_grid_aware_spacing():
+    """The run-time CFL safety net in ModelDriver._run_compiled must judge the
+    same spacing as the setup clamp (estimate_min_dx on the configured grid
+    type), not the cube formula for every grid exposing ``.n`` (a LatLonGrid's
+    ``n`` is n_lat, so lat-lon ignored polar convergence)."""
+    import inspect
+    import io
+    import tokenize
+
+    from legoesm.driver.model_driver import ModelDriver
+
+    src = inspect.getsource(ModelDriver._run_compiled)
+    code = " ".join(
+        t.string for t in tokenize.generate_tokens(io.StringIO(src).readline)
+        if t.type not in (tokenize.COMMENT, tokenize.STRING))
+    assert "estimate_min_dx (" in code
+    assert "estimate_min_dx_cubed_sphere" not in code

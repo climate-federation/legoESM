@@ -12,8 +12,11 @@ SST/SIC         ICON R2B5 unstructured grid (auto-detected)
 Solar           14-band spectral TSI from MPI-M CMIP6 file
 GHG             Historical CO2/CH4/N2O/CFC from greenhouse_historical_plus.nc
 Ozone           CMIP6 UReading interannual ozone (vmro3, multi-level)
-Aerosol         Kinne fine-mode SW aerosol (yearly file)
-Volcanic AOD    CMIP6 stratospheric volcanic aerosol (yearly file)
+Aerosol         MACv2-SP on MACv1 background, 1850-2014: fine+coarse for
+                radiation, fine mode for the droplet-number (CCN) proxy
+Volcanic AOD    ETH CMIP6 stratospheric aerosol v4.0.0, 1850-2014, SW + LW
+                (the products config/amip/amip_production.sh and its Ginsburg
+                twin pass; review 2026-10-10 F33/F37)
 
 Usage::
 
@@ -43,7 +46,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-_REPO = Path(__file__).resolve().parents[1]
+_REPO = Path(__file__).resolve().parents[2]   # scripts/run/<this> -> repo root
 _ROOT = Path("/pool/data/ICON/grids/public/mpim")
 
 # Grid 0019 = R2B5 (default)
@@ -67,14 +70,13 @@ _O3_FILES = {
         "vmro3_input4MIPs_ozone_CMIP_UReading-CCMI-1-0_gn_200001-201412.nc",
 }
 
-# Kinne aerosol: one file per year
-def _kinne_file(year: int) -> Path:
-    return _ROOT / "common" / "aerosol_kinne" / f"aeropt_kinne_sw_b14_fin_{year}_rast.nc"
-
-# Volcanic aerosol: one file per year
-def _volcanic_file(year: int) -> Path:
-    return _ROOT / "common" / "aerosol_volcanic_cmip6" / \
-        f"bc_aeropt_cmip6_volc_lw_b16_sw_b14_{year}.nc"
+# Aerosol / CCN aerosol / volcanic: the SAME products (and Levante paths) as
+# config/amip/amip_production.sh (FORCING_1979_2014); build them there with
+# scripts/data/adapt_cmip6_aerosol.py and adapt_cesm_forcing.py volcanic.
+_FORCING_DIR = Path("/work/bb1596/b309178/diffESM/legoesm_ap/data/forcing/cmip6_1979-2014")
+_AEROSOL_FILE = _FORCING_DIR / "aeropt_macv2sp_sw_b14_tot_1850-2014_MACv1bg.nc"
+_AEROSOL_CCN_FILE = _FORCING_DIR / "aeropt_macv2sp_sw_b14_tot_1850-2014_MACv1bg.nc"
+_VOLCANIC_FILE = _FORCING_DIR / "bc_aeropt_cmip6_volc_lw_b16_sw_b14_1850-2014_IACETH-v4.nc"
 
 
 def _ozone_file(year: int) -> Path:
@@ -120,10 +122,6 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--convection", type=str, default="sbm")
     parser.add_argument("--turbulence", type=str, default="louis")
     parser.add_argument("--clouds", type=str, default="sundqvist")
-    parser.add_argument("--cloud-rh-crit-bl", type=float, default=0.55,
-                        help="Critical RH for BL cloud (Sundqvist). Default 0.55 for AMIP.")
-    parser.add_argument("--cloud-sigma-bl", type=float, default=0.85,
-                        help="Sigma level above which BL rh_crit applies. Default 0.85.")
     parser.add_argument("--microphysics", type=str, default="sundqvist")
     parser.add_argument("--gravity-wave-drag", type=str, default="rayleigh")
     parser.add_argument("--diurnal-cycle", action="store_true", default=True)
@@ -196,15 +194,13 @@ def main(argv: list[str] | None = None) -> int:
     # --- Resolve forcing files ---
     year = args.year
     ozone_f  = _ozone_file(year)
-    kinne_f  = _kinne_file(year)
-    volc_f   = _volcanic_file(year)
 
     # Verify files exist
     required = [_SST_FILE, _SIC_FILE, _SOLAR_FILE, _GHG_FILE, ozone_f]
     if not args.no_aerosol:
-        required.append(kinne_f)
+        required += [_AEROSOL_FILE, _AEROSOL_CCN_FILE]
     if not args.no_volcanic and not args.no_aerosol and args.volcanic_scale > 0:
-        required.append(volc_f)
+        required.append(_VOLCANIC_FILE)
     if args.ic_zarr:
         required.append(Path(args.ic_zarr))
     if args.land_mask_file:
@@ -217,11 +213,6 @@ def main(argv: list[str] | None = None) -> int:
         print("[levante] ERROR — missing files:")
         for p in missing:
             print(f"  {p}")
-        if str(kinne_f) in missing:
-            available = [y for y in range(1845, 2101) if _kinne_file(y).exists()]
-            if available:
-                print(f"\n  Kinne aerosol: available years "
-                      f"{min(available)}–{max(available)}")
         return 2
 
     # --- Build run_amip.py command ---
@@ -273,8 +264,6 @@ def main(argv: list[str] | None = None) -> int:
         "--turbulence", args.turbulence,
         "--gravity-wave-drag", args.gravity_wave_drag,
         "--clouds", args.clouds,
-        "--cloud-rh-crit-bl", str(args.cloud_rh_crit_bl),
-        "--cloud-sigma-bl", str(args.cloud_sigma_bl),
         "--microphysics", args.microphysics,
     ]
 
@@ -293,13 +282,15 @@ def main(argv: list[str] | None = None) -> int:
     if not args.no_aerosol:
         cmd += [
             "--aerosol-forcing", "external",
-            "--aerosol-file", str(kinne_f),
-            "--aerosol-reference-aod", "0.05",
+            "--aerosol-file", str(_AEROSOL_FILE),
+            "--aerosol-ccn-file", str(_AEROSOL_CCN_FILE),
+            "--aerosol-reference-aod", "0.03",   # = production (run_amip.py default)
         ]
     if not args.no_volcanic and not args.no_aerosol and args.volcanic_scale > 0:
         cmd += [
-            "--volcanic-aerosol-file", str(volc_f),
+            "--volcanic-aerosol-file", str(_VOLCANIC_FILE),
             "--volcanic-aerosol-scale", str(args.volcanic_scale),
+            "--volcanic-aerosol-lw",
         ]
 
     # ERA5 IC / restart — mutually exclusive; restart takes precedence
@@ -337,10 +328,11 @@ def main(argv: list[str] | None = None) -> int:
     print(f"  Ozone (CMIP6)     {ozone_f.name}  "
           f"{'ACTIVE' if rad_active else 'inert (gray radiation)'}")
     if not args.no_aerosol:
-        print(f"  Kinne aerosol     {kinne_f.name}  "
+        print(f"  Aerosol           {_AEROSOL_FILE.name}  "
               f"{'ACTIVE' if rad_active else 'inert (gray radiation)'}")
+        print(f"  CCN aerosol       {_AEROSOL_CCN_FILE.name}")
     if not args.no_volcanic and not args.no_aerosol and args.volcanic_scale > 0:
-        print(f"  Volcanic AOD      {volc_f.name}  "
+        print(f"  Volcanic SW+LW    {_VOLCANIC_FILE.name}  "
               f"{'ACTIVE' if rad_active else 'inert (gray radiation)'}")
     if args.restart_from:
         day_info = f"  (start_day→{args.restart_start_day:.0f})" if args.restart_start_day is not None else ""

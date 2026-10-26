@@ -125,6 +125,13 @@ Corollary for the gate: record the precision every measurement was taken at,
 next to the number. A figure measured at a different precision than the current
 default is STALE, exactly like a figure measured at a different commit.
 
+**No-Frankenstein precision rule.** A selectable platform/precision policy is
+allowed only with explicit oracle and toolchain provenance (compiler flags,
+linked math library, and binary identity). It must be one shared implementation,
+never a per-card guard, and it must preserve both JIT execution and autodiff.
+The selector describes the oracle's arithmetic environment; it is not a physics
+arm and cannot be used to conceal a card-specific residual.
+
 ## Rule 1d — Pin the oracle's TIME LEVEL per dump, in a registry that raises
 
 A leapfrog oracle carries three time levels, and a routine is routinely called
@@ -322,6 +329,21 @@ When a finding dies, write down **what it was and what killed it**, next to the
 finding it replaces. Retracted attributions get re-discovered by the next
 session otherwise. A campaign that produced five retractions and one confirmed
 bug is not a failure — but only if the five are written down.
+
+## Rule 12 — A faithful fix may expose a compensating error; keep walking
+
+A change is eligible to land only if the changed operator is shown bit-exact
+given NEMO's own inputs on every card it touches.
+
+**"DISCHARGED" IS RESERVED FOR BIT-EXACT — 0 cells unequal, not "inside the
+tolerance".** A row that is AT-BAR by a `1e-15` comparison while its own
+`exact` field is false is AT-BAR-NOT-EXACT, and saying DISCHARGED of it
+smuggles a tolerance into a bit-exactness claim. Two such rows survived three
+rounds in one campaign's receipt with their own tables contradicting the word
+beside them. If such a change makes a card
+worse against NEMO, that is a second error exposed: the fix stays, the worsened
+row enters that card's register as debt naming the boundary, and the next round
+walks it. Never reverted, never waived silently, never a per-card switch.
 
 ## Working order
 

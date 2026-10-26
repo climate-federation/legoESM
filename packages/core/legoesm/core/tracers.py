@@ -12,9 +12,6 @@ Example
 >>> registry = make_moisture_registry()
 >>> tracers = init_tracers(registry, shape_3d=(6, 48, 48, 40))
 >>> tracers["q_v"] = tracers["q_v"].at[...].set(initial_q_v)
->>> # Transport all tracers at once:
->>> stacked = stack_tracers(tracers, registry)  # (6, 48, 48, 40, n_tracers)
->>> unstacked = unstack_tracers(stacked, registry)
 """
 
 from __future__ import annotations
@@ -71,8 +68,10 @@ def make_moisture_registry() -> TracerRegistry:
     ))
 
 
-def make_full_moisture_registry() -> TracerRegistry:
-    """Full microphysics tracer set (6 species + 3 number concentrations)."""
+def make_full_moisture_registry(snow_number: bool = False) -> TracerRegistry:
+    """Full microphysics tracer set (6 species + 3 number concentrations),
+    plus the snow number ``N_s`` [#/kg] as slot [9] when ``snow_number``
+    (two-moment snow: Morrison's CAM6 MG2 mode)."""
     return TracerRegistry(tracers=(
         TracerInfo("q_v", "kg/kg", True, True, "specific humidity"),
         TracerInfo("q_c", "kg/kg", True, True, "cloud liquid water"),
@@ -80,17 +79,24 @@ def make_full_moisture_registry() -> TracerRegistry:
         TracerInfo("q_i", "kg/kg", True, True, "cloud ice"),
         TracerInfo("q_s", "kg/kg", True, True, "snow"),
         TracerInfo("q_g", "kg/kg", True, True, "graupel"),
-        # UNIT CONVENTION (must match the microphysics formulas + the radiation
-        # r_eff coupling in cloud_fraction.compute_cloud_properties): N_c and N_r
-        # are PER-VOLUME [#/m³] (x_c=q_c·ρ/N_c, dN_r_au∝ρ/x*; see
-        # _warm_rain.effective_Nc + morrison/seifert_beheng), while N_i is
-        # PER-MASS [#/kg] (Cooper nucleation divides by ρ). A wrong label here
-        # would inject a ρ-factor error into restarts/diagnostics that key off
-        # the registry units.
-        TracerInfo("N_c", "1/m^3", True, True, "cloud droplet number"),
-        TracerInfo("N_r", "1/m^3", True, True, "rain droplet number"),
+        # UNIT CONVENTION — all three numbers are STORED AND TRANSPORTED PER
+        # MASS [#/kg], so a dycore's mass-mixing-ratio advection is the right
+        # operator for them and the ratio q/N that sets particle size is
+        # transport-invariant.  The microphysics formulas and the radiation
+        # r_eff coupling still work in PER-VOLUME [#/m³] for N_c and N_r
+        # (x_c=q_c·ρ/N_c, dN_r_au∝ρ/x*; see _warm_rain.effective_Nc +
+        # morrison/seifert_beheng); the conversion happens at the physics
+        # bridge, where ρ is in hand — microphysics/integration.py,
+        # ``number_per_mass_to_per_volume``.  N_i was always per-mass.
+        # Storing N_c/N_r per volume instead, as this did until 2026-08-14,
+        # let them drift against their own mass by the density change along a
+        # trajectory.  A wrong label here injects a ρ-factor error into
+        # restarts and any diagnostic that keys off the registry units.
+        TracerInfo("N_c", "1/kg", True, True, "cloud droplet number"),
+        TracerInfo("N_r", "1/kg", True, True, "rain droplet number"),
         TracerInfo("N_i", "1/kg", True, True, "ice crystal number"),
-    ))
+    ) + ((TracerInfo("N_s", "1/kg", True, True, "snow number"),)
+         if snow_number else ()))
 
 
 def init_tracers(
@@ -114,43 +120,3 @@ def init_tracers(
     return {info.name: jnp.zeros(shape_3d, dtype=_sd) for info in registry.tracers}
 
 
-def stack_tracers(
-    tracers: dict[str, jnp.ndarray],
-    registry: TracerRegistry,
-) -> jnp.ndarray:
-    """Stack tracer dict into a single array with trailing tracer dim.
-
-    Parameters
-    ----------
-    tracers : dict[str, jax.Array]
-        Each value has shape ``(..., nlev)``.
-    registry : TracerRegistry
-        Defines the stacking order.
-
-    Returns
-    -------
-    jax.Array, shape ``(..., nlev, n_tracers)``
-    """
-    arrays = [tracers[name] for name in registry.names]
-    return jnp.stack(arrays, axis=-1)
-
-
-def unstack_tracers(
-    stacked: jnp.ndarray,
-    registry: TracerRegistry,
-) -> dict[str, jnp.ndarray]:
-    """Unstack array with trailing tracer dim into tracer dict.
-
-    Parameters
-    ----------
-    stacked : jax.Array, shape ``(..., nlev, n_tracers)``
-    registry : TracerRegistry
-
-    Returns
-    -------
-    dict[str, jax.Array]
-    """
-    return {
-        name: stacked[..., i]
-        for i, name in enumerate(registry.names)
-    }

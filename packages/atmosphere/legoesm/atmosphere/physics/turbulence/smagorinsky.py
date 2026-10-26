@@ -71,17 +71,23 @@ from legoesm import constants
 from legoesm.atmosphere.physics._shared import (
     buoyancy_coefficient,
     exner_function,
+    deardorff_stable_eddy_viscosity,
     lilly_buoyancy_factor,
     mixing_length,
     virtual_temperature,
+    half_to_iface_zero_ends,
 )
 from legoesm.atmosphere.physics.turbulence.config import SmagorinskyConfig
 from legoesm.atmosphere.physics.turbulence.output import TurbulenceOutput
 from legoesm.atmosphere.physics.turbulence.pbl_height import diagnose_pbl_height
 from legoesm.atmosphere.physics.turbulence.surface_layer import (
+    latent_enthalpy_correction,
+    surface_moisture_flux,
     compute_surface_fluxes,
+    surface_fluxes_at_lowest_level,
 )
 from legoesm.atmosphere.physics.turbulence.vertical_diffusion import (
+    diagnostic_heat_flux_full,
     implicit_vertical_diffusion,
     implicit_vertical_diffusion_theta,
 )
@@ -209,10 +215,25 @@ def smagorinsky_turbulence(
     # AD-safe double-``where`` cutoff (finite cotangent at Ri = Pr_t) lives in the
     # shared helper (with the S²+1e-10 floor above keeping Ri finite). Enhances
     # mixing when unstable (Ri<0), shuts it off at Ri ≥ Pr_t.
-    f_buoy = lilly_buoyancy_factor(Ri, config.Pr_t)
-
-    # K_m = (C_s · l)^2 · |S| · f_buoy ;  K_h = K_m / Pr_t.
-    Km_half = (config.C_s * l_mix) ** 2 * S * f_buoy        # (ncol, nlev-1)
+    # Stable-stratification treatment.  Dispatch on the STATIC config value at
+    # function entry (never a silent ``else``): an unknown value must not run
+    # different physics under a typo.
+    if config.stability_form == "lilly":
+        f_buoy = lilly_buoyancy_factor(Ri, config.Pr_t)
+        # K_m = (C_s · l)^2 · |S| · f_buoy ;  K_h = K_m / Pr_t.
+        Km_half = (config.C_s * l_mix) ** 2 * S * f_buoy    # (ncol, nlev-1)
+    elif config.stability_form == "deardorff":
+        # Deardorff (1980) stable-length limit — stratification shrinks the
+        # mixing length instead of driving a stability factor to zero.  Takes
+        # the RAW S² (the N²/Pr_t subtraction happens inside the helper);
+        # passing the already-corrected strain would apply it twice.
+        Km_half = deardorff_stable_eddy_viscosity(
+            S2, N2, l_mix, config.C_s, config.Pr_t)
+    else:
+        raise ValueError(
+            f"Unknown SmagorinskyConfig.stability_form "
+            f"{config.stability_form!r}; expected 'lilly' or 'deardorff'."
+        )
     Kh_half = Km_half / config.Pr_t
 
     # Interpolate to full levels for diagnostics (single concat; same
@@ -235,10 +256,9 @@ def smagorinsky_turbulence(
     dz = jnp.clip(dz, 1.0, None)
 
     # Surface fluxes
-    tau_x, tau_y, shflx, lhflx, ustar = compute_surface_fluxes(
+    tau_x, tau_y, shflx, lhflx, ustar = surface_fluxes_at_lowest_level(
         u[:, -1], v[:, -1], T[:, -1], q_v[:, -1],
-        T_sfc, q_sfc, rho[:, -1], config.surface,
-    )
+        T_sfc, q_sfc, rho[:, -1], config.surface, z_full[:, -1] - z_half[:, -1])
 
     # Convert surface fluxes to boundary conditions for diffusion
     # Momentum: flux = tau / rho ~ Cd * |V| * u  (already has rho in it)
@@ -249,9 +269,9 @@ def smagorinsky_turbulence(
     sflx_v = tau_y
     # Heat: shflx = rho * c_pd * Ch * |V| * (T_sfc - T) [W/m^2]
     # For T diffusion: surface_flux = shflx / c_pd [kg/(m^2*s) * K]
-    sflx_T = shflx / constants.c_pd
-    # Moisture: lhflx = rho * L_v * Ch * |V| * (q_sfc - q_v) [W/m^2]
-    sflx_q = lhflx / constants.L_v
+    sflx_q = surface_moisture_flux(config.surface, lhflx, T_sfc)
+    # Heat BC carries the latent enthalpy correction (water at L(T) vs L_v).
+    sflx_T = (shflx + latent_enthalpy_correction(lhflx, sflx_q)) / constants.c_pd
 
     # Apply implicit vertical diffusion.  Heat is mixed in θ-space so a
     # dry adiabat stays neutral; momentum and moisture are conserved on
@@ -271,6 +291,10 @@ def smagorinsky_turbulence(
 
     h_pbl = diagnose_pbl_height(T, q_v, u, v, p_full, z_full)
 
+    # Q1 diagnostic (LES-suite): local down-gradient heat flux F = -Kh·∂θ/∂z
+    # (γ=0), θ = T·exner_pref [=T/Π].  Pure diagnostic — does NOT feed tendencies.
+    wtheta_flux = diagnostic_heat_flux_full(T * exner_pref, dz_half, Kh_half)
+
     return TurbulenceOutput(
         du_dt=du_dt,
         dv_dt=dv_dt,
@@ -279,7 +303,9 @@ def smagorinsky_turbulence(
         Km=Km_full,
         Kh=Kh_full,
         shflx=shflx,
-        lhflx=lhflx,
+        lhflx=lhflx, evap_sfc=sflx_q,
         ustar=ustar,
         h_pbl=h_pbl,
+        wtheta_flux=wtheta_flux,
+        Kh_iface=half_to_iface_zero_ends(Kh_half),
     )

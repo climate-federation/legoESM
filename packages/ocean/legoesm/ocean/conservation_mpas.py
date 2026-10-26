@@ -60,6 +60,7 @@ def mpas_ocean_conservation_fixer(
     expected_dHeat: float = 0.0,
     expected_dSalt: float = 0.0,
     owned_mask=None,
+    reduce_fn=None,
 ):
     """Apply all conservation fixers simultaneously (#166, #177).
 
@@ -91,7 +92,11 @@ def mpas_ocean_conservation_fixer(
         fix_salt=config.fix_salt,
         min_water_column_m=config.min_water_column_m,
         weighted_area_acc=weighted_area_acc,
-        reduce_fn=global_sum_if_distributed,
+        # ``reduce_fn`` (list -> list cross-rank SUM) from the distributed
+        # context when the caller carries one (SPMD psum / MPI allreduce);
+        # the historical ``is_multi_process``-gated allreduce otherwise.
+        reduce_fn=(global_sum_if_distributed if reduce_fn is None
+                   else (lambda v: reduce_fn([v])[0])),
         apply_eta_floor=_mpas_eta_floor,
         expected_dHeat=expected_dHeat,
         expected_dSalt=expected_dSalt,

@@ -58,7 +58,7 @@ from legoesm.core.bulk_flux import compute_most_fluxes  # noqa: E402
 from legoesm.ocean.bulk_flux_omip import (  # noqa: E402
     air_sea_fluxes,
     exner_potential_temperature,
-    latent_heat_vaporization_sst,
+    latent_heat_vaporization_sst as latent_heat_vaporization,
     pressure_at_height,
     rho_air_moist,
     seawater_q_sat,
@@ -103,7 +103,7 @@ def oracle():
     theta_s = np.asarray(
         exner_potential_temperature(jnp.asarray(sst), jnp.asarray(slp)))
     L_sst = np.asarray(  # noqa: N806 - latent-heat notation
-        latent_heat_vaporization_sst(jnp.asarray(theta_s)))
+        latent_heat_vaporization(jnp.asarray(theta_s)))
 
     # LY09 Stanton-branch bistability discriminator: sign of the Obukhov
     # numerator evaluated with each branch's Stanton number.  Different

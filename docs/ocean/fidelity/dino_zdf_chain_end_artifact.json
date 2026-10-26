@@ -1,0 +1,1156 @@
+{
+  "bars": {
+    "accumulating": 1e-12,
+    "pointwise": 1e-15
+  },
+  "disposition": "DIVERGED-ROW30",
+  "first_divergence": 30,
+  "focus_columns_ji": [
+    [
+      11,
+      1
+    ],
+    [
+      12,
+      1
+    ],
+    [
+      13,
+      1
+    ],
+    [
+      13,
+      23
+    ]
+  ],
+  "lane": "DUMP LANE: d180  run_dir=/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_SEQDUMP_D180_1R  restart=DINO_00005760_restart.nc  kt(nit000)=5761  t_seconds=15554700s (= day 180.03)",
+  "oracle_source_sha256": {
+    "dynzdf.F90": {
+      "path": "/tmp/nemo-row21-coeff.9gnuvq/cfgs/DINO/MY_SRC/dynzdf.F90",
+      "sha256": "cb5b27ac93148deffc0bdf9c6927053dfd1678e095fedc6127b54c0f2aab08aa"
+    },
+    "ldfslp.F90": {
+      "path": "/tmp/nemo-row21-coeff.9gnuvq/cfgs/DINO/MY_SRC/ldfslp.F90",
+      "sha256": "a4e65b80484423df67247e4b93ace08fd50fa929e325b2f2af113d4bb31ffd30"
+    },
+    "trazdf.F90": {
+      "path": "/tmp/nemo-row21-coeff.9gnuvq/cfgs/DINO/WORK/trazdf.F90",
+      "sha256": "cd7c446164d2813bb278130ba29cfaa103b736815d743b39c5748d4ccc7917ec"
+    }
+  },
+  "probe": {
+    "path": "/tmp/codex-zdf-sweep/scripts/validate/ocean_fidelity/dino_1226/zdf_chain_end.py",
+    "sha256": "df6b6057d53e8e3fc21521569c72b3e1e613aed886701fae6e4e2ea78f596bb0"
+  },
+  "provenance_sha256": {
+    "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/BLD/bin/nemo.exe.seqdump_ea0c113c": "545b383996e644591492e0fc7c82663a2d47272e2c7172ad8bbc58e5cd7d5239",
+    "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_SEQDUMP_D180_1R/DINO_00005760_restart.nc": "0cc00f9945606d1dea52592280e363b45476103de96f5cef471d70b1b881ff3e",
+    "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_SEQDUMP_D180_1R/drg_dump_rCdU_bot.bin": "c50267a90764adec68a2835adcc96416715ff651c64b510c2101be323f6885fc",
+    "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_SEQDUMP_D180_1R/dump_avm.bin": "ad8104d352838ff36c1c09cb3b21231eacabeb00ce7bd2b5477cc40ead4faed0",
+    "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_SEQDUMP_D180_1R/dump_avt.bin": "a6cc3fca6348c10c73ab0bf3bf4081c38be8d20a6f2cbdd00de521e21252eeca",
+    "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_SEQDUMP_D180_1R/eiv_dump_prd_arg.bin": "7dcb079fafa6126943cad48d2c0e844c2a84d1a4e20f053552a4ccf8fc052c25",
+    "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_SEQDUMP_D180_1R/eiv_dump_uslp.bin": "0c51e341b6eeee97d14de18aa8b8f40caa9e2607b0dd799f560b229c49d122ec",
+    "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_SEQDUMP_D180_1R/eiv_dump_vslp.bin": "cbb588a037da590743386c5f4565e651e185a47f80baf905e0d851258a1dfc4f",
+    "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_SEQDUMP_D180_1R/eiv_dump_wslpi.bin": "fb466cc9047d7fb43b373d78c071a902e21b8484ef6a59c131ad162dfcf37ac0",
+    "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_SEQDUMP_D180_1R/eiv_dump_wslpj.bin": "9c5e32fa88395db86f1d4337b928261ff63a6d0efd7902a1bbb9dc0f590e793e",
+    "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_SEQDUMP_D180_1R/eiv_dump_zaj.bin": "e6d6545e3f3d1a500a9ffd791e5b7285492d6580475929e9dcbdde133d050423",
+    "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_SEQDUMP_D180_1R/eiv_dump_zbj.bin": "3ab34f367a3bd9ecac62bea73930348226b2569d3020e12f974549a374f17ee5",
+    "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_SEQDUMP_D180_1R/eiv_dump_zbw.bin": "11b3385bf0dfeebaac6683f197c40b9f7c340182f8d86885c3df441042a94c46",
+    "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_SEQDUMP_D180_1R/eiv_dump_zfk.bin": "58cfb3a16decc44b4065c7ef107d434c6f99902c6b3877fa57c0995943c2be86",
+    "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_SEQDUMP_D180_1R/eiv_dump_zgrv_iik.bin": "562e6f08045a2faeceb91ee4d621c87c9c69fc5183d851740220fd80c8adf6bf",
+    "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_SEQDUMP_D180_1R/eiv_dump_zgrv_iikm1.bin": "dc0e6b2938e7358280e8d4509b09af910c4dff9991dbc86db87ed59923e35809",
+    "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_SEQDUMP_D180_1R/eiv_dump_zww_raw.bin": "6cdf89f7dcfc85ba7e512c322459518d3673bac6f4d37f902f56b11a9705b924",
+    "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_SEQDUMP_D180_1R/ldftra_dump_ahtu.bin": "9acc54547110d20ea24b25d42a2eac85484b4244c2c6f9ac1f036c7d363b1aa4",
+    "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_SEQDUMP_D180_1R/ldftra_dump_ahtv.bin": "819dedfb423dcb9678f25b64deac0c42041d0fb785b113b6e90a46ac64bf5c4c",
+    "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_SEQDUMP_D180_1R/mesh_mask.nc": "3285fc4af36854a38b4e6f7985ab0372b95424398750a23b628935da02f72622",
+    "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_SEQDUMP_D180_1R/namelist_cfg": "0e75f4cb32dad3ed3fc17b721651ec12e0366c2978df8c65a6e95ae80b48d68b",
+    "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_SEQDUMP_D180_1R/namelist_ref": "b04f2ce4d12aa247ae3b707483d25cf2d38d0b3cf8817d71d33e66918fd81cfd",
+    "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_SEQDUMP_D180_1R/nemo": "545b383996e644591492e0fc7c82663a2d47272e2c7172ad8bbc58e5cd7d5239",
+    "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_SEQDUMP_D180_1R/ocean.output": "66162e1d54cc0c8648b0c220fe902b6a75f7b19a0e8c2349f5d11928809c0557",
+    "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_SEQDUMP_D180_1R/seq_dump_r3t_aaa.bin": "96b31bffffa3c1eaa9876b3cc36d08f4e7a790e2acd8f4585b4a325824242e32",
+    "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_SEQDUMP_D180_1R/seq_dump_r3u_aaa.bin": "5b60d354f052af78762d5c8b178d27c3a62507364e675cbbf9aa787d85088b97",
+    "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_SEQDUMP_D180_1R/seq_dump_r3v_aaa.bin": "c6ab4be3184a02539e9de8e53d7b4c496a9307faf496e3ef8a7154da4d471023",
+    "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_SEQDUMP_D180_1R/stp_dump_07_dynspg_u.bin": "2e050572fa3c8474264b89b5ee1e76e6da8a6b6c65fd3aa47fbbf95d624684f4",
+    "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_SEQDUMP_D180_1R/stp_dump_07_dynspg_ub.bin": "14d2085b34d027f13c6a489c1f1c39a09d1fd3cd56d1e3e1edb718fed458f50a",
+    "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_SEQDUMP_D180_1R/stp_dump_07_dynspg_v.bin": "059a62add5b5a9a261f0eea83cee77dd71cb879f435fa46f3ca800040a5ecba9",
+    "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_SEQDUMP_D180_1R/stp_dump_07_dynspg_vb.bin": "d3d2fca6d60cc9015ca120bf4a7e523f8bca18049198a44fb8fe8ac395b41ac3",
+    "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_SEQDUMP_D180_1R/stp_dump_08_dynzdf_u.bin": "dd6aa8b6f3794a5aa3b3bffa2c1f50548792b9adaff1d0ff76e5e29ba42ff8d0",
+    "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_SEQDUMP_D180_1R/stp_dump_08_dynzdf_v.bin": "ac510a24ae30eab9298cbd57972022dc92c4a0c6e8faf4a196ec5f800ff049df",
+    "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_SEQDUMP_D180_1R/stp_dump_21_trazdf_sal.bin": "2c7a83a15400482ec7cfcaade2c48f92fea9f8feead5102b23ff275780c8bbb5",
+    "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_SEQDUMP_D180_1R/stp_dump_21_trazdf_tem.bin": "b090b2d52989b30ee763bc98a0fb79aef8f29b092ffcd9e2791b3c416aa316f4",
+    "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_SEQDUMP_D180_1R/stp_dump_23_after_traldf_sal.bin": "7e751ab80519d2097e9332e120b7c0423d744ec98c3a9260c82c47a4064811fb",
+    "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_SEQDUMP_D180_1R/stp_dump_23_after_traldf_tem.bin": "ff109b54b8f04c9dfcb09643b940b29f603fceff48d1896a510ba9af74a96f2f",
+    "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_SEQDUMP_D180_1R/zdf_dump_u1_poststress.bin": "95bede97a8ccea516af598485a544e42d96a760ef7d64d8d222d6807edfcf22e",
+    "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_SEQDUMP_D180_1R/zdf_dump_u1_prestress.bin": "5ea368afc680f6cad32bb024f09dd1aa4ced5bd5de1c7b0004a0f0924ad273d1",
+    "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_SEQDUMP_D180_1R/zdf_dump_v1_poststress.bin": "8fbdd3b284a504ffbdd3ccc5962edfbaa0f2e990c7b2d474823f46679e881d1b",
+    "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_SEQDUMP_D180_1R/zdf_dump_v1_prestress.bin": "8fbdd3b284a504ffbdd3ccc5962edfbaa0f2e990c7b2d474823f46679e881d1b",
+    "/tmp/RUN_ZDF28_TURB_ON.Uh7AFw/zdf_dump_hmld_turb.bin": "d3a62643bc8e5ea0370a784a6659cc386410baa516b270f86cacedd0603edad9",
+    "/tmp/codex-zdf-sweep/docs/ocean/fidelity/dino_zdf_chain_tail_existing_artifact.json": "074d311d198a1a796364c1237abcddd2eb7f3cc8463cc910f111fb669607daed",
+    "/tmp/codex-zdf-sweep/scripts/validate/ocean_fidelity/dino_1226/row30_seos_oracle.f90": "07f19f0704f7c2b06613b3a17f447729ecde935d280acffaec11a8cdc3566888",
+    "/tmp/dino_mld_audit_codex/mld_maps.npz": "9fb7344d1e6f92232d211f6a52ff8636022f0d9b0b05acea2b0bae6e6afd9bf0",
+    "/tmp/dino_zdf_row28_turbocline_artifact.json": "a64a0261e968f2a3467c8beef1a48c3dfc118df426ccf1c9368231a164bf63ff",
+    "/tmp/row30_seos_oracle.so": "fd831e156b2efed818bc3e96dc8ffaab37b6f46a66fcff9f88b2e40de3a8f68e"
+  },
+  "repo_sha": "e067f777a422105d465a9fe804868bd282d9f455",
+  "rows": {
+    "28": {
+      "disposition": "VERIFIED",
+      "metric": {
+        "absolute_column_bar_m": 1e-15,
+        "exact_unequal_wet_columns": 0,
+        "focus": [
+          {
+            "column_error_m": 0.0,
+            "i": 1,
+            "j": 11,
+            "pass": true,
+            "wet": true
+          },
+          {
+            "column_error_m": 0.0,
+            "i": 1,
+            "j": 12,
+            "pass": true,
+            "wet": true
+          },
+          {
+            "column_error_m": 0.0,
+            "i": 1,
+            "j": 13,
+            "pass": true,
+            "wet": true
+          },
+          {
+            "column_error_m": 0.0,
+            "i": 23,
+            "j": 13,
+            "pass": true,
+            "wet": true
+          }
+        ],
+        "index_exact_pass": true,
+        "max_column_error_m": 0.0,
+        "n_diverged_columns": 0,
+        "n_index_diverged_columns": 0,
+        "n_nonfinite_wet_columns": 0,
+        "n_verified_columns": 9920,
+        "n_wet_columns": 9920,
+        "pass": true
+      },
+      "receipt": "/tmp/dino_zdf_row28_turbocline_artifact.json",
+      "receipt_sha256": "a64a0261e968f2a3467c8beef1a48c3dfc118df426ccf1c9368231a164bf63ff"
+    },
+    "29": {
+      "controls": {
+        "baseline_pass": true,
+        "nonfinite_fired": true,
+        "one_i_roll_fired": true,
+        "perturbation_fired": true,
+        "perturbed_ji_k": [
+          1,
+          1,
+          0
+        ]
+      },
+      "disposition": "VERIFIED",
+      "metric": {
+        "aggregate_bar_pass": true,
+        "bar": 1e-15,
+        "column_bar_pass": true,
+        "correlation": 0.9999999999999998,
+        "focus": [
+          {
+            "column_error": 0.0,
+            "i": 1,
+            "j": 11,
+            "pass": true,
+            "wet": true
+          },
+          {
+            "column_error": 0.0,
+            "i": 1,
+            "j": 12,
+            "pass": true,
+            "wet": true
+          },
+          {
+            "column_error": 0.0,
+            "i": 1,
+            "j": 13,
+            "pass": true,
+            "wet": true
+          },
+          {
+            "column_error": 0.0,
+            "i": 23,
+            "j": 13,
+            "pass": true,
+            "wet": true
+          }
+        ],
+        "max_column_error": 0.0,
+        "n_diverged_columns": 0,
+        "n_nonfinite_wet_elements": 0,
+        "n_verified_columns": 9920,
+        "n_wet_columns": 9920,
+        "n_wet_elements": 332214,
+        "pass": true,
+        "reference_rms": 34.39130758075968,
+        "rms_ratio": 1.0,
+        "worst_column_ji": [
+          1,
+          1
+        ]
+      },
+      "qualification": "registered census excludes halos; NEMO LBC is not claimed to execute in legoESM"
+    },
+    "30": {
+      "controls": {
+        "baseline_exact_unequal_columns": 0,
+        "baseline_pass": true,
+        "nonfinite_fired": true,
+        "one_i_roll_fired": true,
+        "one_ulp_exact_failing_columns": 1,
+        "one_ulp_exact_identity_fired": true,
+        "one_ulp_ji_k": [
+          1,
+          1,
+          0
+        ],
+        "perturbation_fired": true,
+        "perturbed_ji_k": [
+          1,
+          1,
+          0
+        ]
+      },
+      "disposition": "DIVERGED",
+      "first_available_failing_operand": "uslp",
+      "fortran_seos_discriminator": {
+        "exact_unequal": 0,
+        "max_abs_difference": 0.0,
+        "n_wet_elements": 342134,
+        "one_ulp_output_control_fails": true,
+        "pass": true,
+        "shared_object": "/tmp/row30_seos_oracle.so",
+        "shared_object_sha256": "fd831e156b2efed818bc3e96dc8ffaab37b6f46a66fcff9f88b2e40de3a8f68e",
+        "source": "/tmp/codex-zdf-sweep/scripts/validate/ocean_fidelity/dino_1226/row30_seos_oracle.f90",
+        "source_sha256": "07f19f0704f7c2b06613b3a17f447729ecde935d280acffaec11a8cdc3566888"
+      },
+      "localization_interval": "after exact prd and before final uslp; zgru is not dumped. The v sibling is bounded after exact zgrv. Dump zgru, zdzr, zau/zbu/limited_zbu/raw_uslp in source order",
+      "nemo_lines": [
+        "ldfslp.F90:217-285"
+      ],
+      "operands": {
+        "prd": {
+          "aggregate_bar_pass": true,
+          "bar": 1e-15,
+          "column_bar_pass": true,
+          "correlation": 0.9999999999999999,
+          "focus": [
+            {
+              "column_error": 0.0,
+              "i": 1,
+              "j": 11,
+              "pass": true,
+              "wet": true
+            },
+            {
+              "column_error": 0.0,
+              "i": 1,
+              "j": 12,
+              "pass": true,
+              "wet": true
+            },
+            {
+              "column_error": 0.0,
+              "i": 1,
+              "j": 13,
+              "pass": true,
+              "wet": true
+            },
+            {
+              "column_error": 0.0,
+              "i": 23,
+              "j": 13,
+              "pass": true,
+              "wet": true
+            }
+          ],
+          "max_column_error": 0.0,
+          "n_diverged_columns": 0,
+          "n_nonfinite_wet_elements": 0,
+          "n_verified_columns": 9920,
+          "n_wet_columns": 9920,
+          "n_wet_elements": 342134,
+          "pass": true,
+          "reference_rms": 0.0009160646612379989,
+          "rms_ratio": 1.0,
+          "worst_column_ji": [
+            1,
+            1
+          ]
+        },
+        "uslp": {
+          "aggregate_bar_pass": false,
+          "bar": 1e-15,
+          "column_bar_pass": false,
+          "correlation": 0.8642251706591872,
+          "focus": [
+            {
+              "column_error": 3.232928410315342,
+              "i": 1,
+              "j": 11,
+              "pass": false,
+              "wet": true
+            },
+            {
+              "column_error": 2.9518647982651274,
+              "i": 1,
+              "j": 12,
+              "pass": false,
+              "wet": true
+            },
+            {
+              "column_error": 2.3537191188821405,
+              "i": 1,
+              "j": 13,
+              "pass": false,
+              "wet": true
+            },
+            {
+              "column_error": 7.136350201415463,
+              "i": 23,
+              "j": 13,
+              "pass": false,
+              "wet": true
+            }
+          ],
+          "max_column_error": 7.162375865580755,
+          "n_diverged_columns": 9306,
+          "n_nonfinite_wet_elements": 0,
+          "n_verified_columns": 452,
+          "n_wet_columns": 9758,
+          "n_wet_elements": 336338,
+          "pass": false,
+          "reference_rms": 0.0006980116051114225,
+          "rms_ratio": 1.1643185157362532,
+          "worst_column_ji": [
+            90,
+            38
+          ]
+        },
+        "vslp": {
+          "aggregate_bar_pass": false,
+          "bar": 1e-15,
+          "column_bar_pass": false,
+          "correlation": 0.8438524162560449,
+          "focus": [
+            {
+              "column_error": 1.1056606408453928,
+              "i": 1,
+              "j": 11,
+              "pass": false,
+              "wet": true
+            },
+            {
+              "column_error": 1.0859195442727163,
+              "i": 1,
+              "j": 12,
+              "pass": false,
+              "wet": true
+            },
+            {
+              "column_error": 0.7392033777973821,
+              "i": 1,
+              "j": 13,
+              "pass": false,
+              "wet": true
+            },
+            {
+              "column_error": 1.1655573060380948,
+              "i": 23,
+              "j": 13,
+              "pass": false,
+              "wet": true
+            }
+          ],
+          "max_column_error": 4.659745715735317,
+          "n_diverged_columns": 9412,
+          "n_nonfinite_wet_elements": 0,
+          "n_verified_columns": 456,
+          "n_wet_columns": 9868,
+          "n_wet_elements": 340271,
+          "pass": false,
+          "reference_rms": 0.0010729290935060534,
+          "rms_ratio": 1.1912310207353995,
+          "worst_column_ji": [
+            90,
+            37
+          ]
+        },
+        "wslpi": {
+          "aggregate_bar_pass": true,
+          "bar": 1e-15,
+          "column_bar_pass": false,
+          "correlation": 1.0,
+          "focus": [
+            {
+              "column_error": 0.0,
+              "i": 1,
+              "j": 11,
+              "pass": true,
+              "wet": true
+            },
+            {
+              "column_error": 3.68485868864227e-17,
+              "i": 1,
+              "j": 12,
+              "pass": true,
+              "wet": true
+            },
+            {
+              "column_error": 1.473943475456908e-16,
+              "i": 1,
+              "j": 13,
+              "pass": true,
+              "wet": true
+            },
+            {
+              "column_error": 1.842429344321135e-17,
+              "i": 23,
+              "j": 13,
+              "pass": true,
+              "wet": true
+            }
+          ],
+          "max_column_error": 1.1791547803655264e-15,
+          "n_diverged_columns": 1,
+          "n_nonfinite_wet_elements": 0,
+          "n_verified_columns": 9919,
+          "n_wet_columns": 9920,
+          "n_wet_elements": 342134,
+          "pass": false,
+          "reference_rms": 0.0007355792067598877,
+          "rms_ratio": 1.0,
+          "worst_column_ji": [
+            23,
+            12
+          ]
+        },
+        "wslpj": {
+          "aggregate_bar_pass": true,
+          "bar": 1e-15,
+          "column_bar_pass": true,
+          "correlation": 1.0,
+          "focus": [
+            {
+              "column_error": 0.0,
+              "i": 1,
+              "j": 11,
+              "pass": true,
+              "wet": true
+            },
+            {
+              "column_error": 2.4164072371112776e-17,
+              "i": 1,
+              "j": 12,
+              "pass": true,
+              "wet": true
+            },
+            {
+              "column_error": 4.832814474222555e-17,
+              "i": 1,
+              "j": 13,
+              "pass": true,
+              "wet": true
+            },
+            {
+              "column_error": 9.66562894844511e-17,
+              "i": 23,
+              "j": 13,
+              "pass": true,
+              "wet": true
+            }
+          ],
+          "max_column_error": 7.732503158756088e-16,
+          "n_diverged_columns": 0,
+          "n_nonfinite_wet_elements": 0,
+          "n_verified_columns": 9920,
+          "n_wet_columns": 9920,
+          "n_wet_elements": 342134,
+          "pass": true,
+          "reference_rms": 0.0011217088699229632,
+          "rms_ratio": 1.0,
+          "worst_column_ji": [
+            23,
+            1
+          ]
+        },
+        "zaj": {
+          "aggregate_bar_pass": true,
+          "bar": 1e-15,
+          "column_bar_pass": true,
+          "correlation": 1.0,
+          "focus": [
+            {
+              "column_error": 0.0,
+              "i": 1,
+              "j": 11,
+              "pass": true,
+              "wet": true
+            },
+            {
+              "column_error": 0.0,
+              "i": 1,
+              "j": 12,
+              "pass": true,
+              "wet": true
+            },
+            {
+              "column_error": 0.0,
+              "i": 1,
+              "j": 13,
+              "pass": true,
+              "wet": true
+            },
+            {
+              "column_error": 0.0,
+              "i": 23,
+              "j": 13,
+              "pass": true,
+              "wet": true
+            }
+          ],
+          "max_column_error": 0.0,
+          "n_diverged_columns": 0,
+          "n_nonfinite_wet_elements": 0,
+          "n_verified_columns": 9920,
+          "n_wet_columns": 9920,
+          "n_wet_elements": 332214,
+          "pass": true,
+          "reference_rms": 5.766880233014854e-10,
+          "rms_ratio": 1.0,
+          "worst_column_ji": [
+            1,
+            1
+          ]
+        },
+        "zbj": {
+          "aggregate_bar_pass": true,
+          "bar": 1e-15,
+          "column_bar_pass": true,
+          "correlation": 1.0,
+          "focus": [
+            {
+              "column_error": 0.0,
+              "i": 1,
+              "j": 11,
+              "pass": true,
+              "wet": true
+            },
+            {
+              "column_error": 0.0,
+              "i": 1,
+              "j": 12,
+              "pass": true,
+              "wet": true
+            },
+            {
+              "column_error": 0.0,
+              "i": 1,
+              "j": 13,
+              "pass": true,
+              "wet": true
+            },
+            {
+              "column_error": 0.0,
+              "i": 23,
+              "j": 13,
+              "pass": true,
+              "wet": true
+            }
+          ],
+          "max_column_error": 0.0,
+          "n_diverged_columns": 0,
+          "n_nonfinite_wet_elements": 0,
+          "n_verified_columns": 9920,
+          "n_wet_columns": 9920,
+          "n_wet_elements": 332214,
+          "pass": true,
+          "reference_rms": 6.940062593243706e-06,
+          "rms_ratio": 1.0,
+          "worst_column_ji": [
+            1,
+            1
+          ]
+        },
+        "zbw": {
+          "aggregate_bar_pass": true,
+          "bar": 1e-15,
+          "column_bar_pass": true,
+          "correlation": 1.0,
+          "focus": [
+            {
+              "column_error": 0.0,
+              "i": 1,
+              "j": 11,
+              "pass": true,
+              "wet": true
+            },
+            {
+              "column_error": 0.0,
+              "i": 1,
+              "j": 12,
+              "pass": true,
+              "wet": true
+            },
+            {
+              "column_error": 0.0,
+              "i": 1,
+              "j": 13,
+              "pass": true,
+              "wet": true
+            },
+            {
+              "column_error": 0.0,
+              "i": 23,
+              "j": 13,
+              "pass": true,
+              "wet": true
+            }
+          ],
+          "max_column_error": 0.0,
+          "n_diverged_columns": 0,
+          "n_nonfinite_wet_elements": 0,
+          "n_verified_columns": 9920,
+          "n_wet_columns": 9920,
+          "n_wet_elements": 332214,
+          "pass": true,
+          "reference_rms": 6.937983827356828e-06,
+          "rms_ratio": 1.0,
+          "worst_column_ji": [
+            1,
+            1
+          ]
+        },
+        "zfk": {
+          "aggregate_bar_pass": true,
+          "bar": 1e-15,
+          "column_bar_pass": true,
+          "correlation": 1.0,
+          "focus": [
+            {
+              "column_error": 0.0,
+              "i": 1,
+              "j": 11,
+              "pass": true,
+              "wet": true
+            },
+            {
+              "column_error": 0.0,
+              "i": 1,
+              "j": 12,
+              "pass": true,
+              "wet": true
+            },
+            {
+              "column_error": 0.0,
+              "i": 1,
+              "j": 13,
+              "pass": true,
+              "wet": true
+            },
+            {
+              "column_error": 0.0,
+              "i": 23,
+              "j": 13,
+              "pass": true,
+              "wet": true
+            }
+          ],
+          "max_column_error": 0.0,
+          "n_diverged_columns": 0,
+          "n_nonfinite_wet_elements": 0,
+          "n_verified_columns": 9920,
+          "n_wet_columns": 9920,
+          "n_wet_elements": 332214,
+          "pass": true,
+          "reference_rms": 0.8932010072745623,
+          "rms_ratio": 1.0,
+          "worst_column_ji": [
+            1,
+            1
+          ]
+        },
+        "zgrv_iik": {
+          "aggregate_bar_pass": true,
+          "bar": 1e-15,
+          "column_bar_pass": true,
+          "correlation": 0.9999999999999998,
+          "focus": [
+            {
+              "column_error": 0.0,
+              "i": 1,
+              "j": 11,
+              "pass": true,
+              "wet": true
+            },
+            {
+              "column_error": 0.0,
+              "i": 1,
+              "j": 12,
+              "pass": true,
+              "wet": true
+            },
+            {
+              "column_error": 0.0,
+              "i": 1,
+              "j": 13,
+              "pass": true,
+              "wet": true
+            },
+            {
+              "column_error": 0.0,
+              "i": 23,
+              "j": 13,
+              "pass": true,
+              "wet": true
+            }
+          ],
+          "max_column_error": 0.0,
+          "n_diverged_columns": 0,
+          "n_nonfinite_wet_elements": 0,
+          "n_verified_columns": 9868,
+          "n_wet_columns": 9868,
+          "n_wet_elements": 330403,
+          "pass": true,
+          "reference_rms": 3.705027362784663e-05,
+          "rms_ratio": 1.0,
+          "worst_column_ji": [
+            1,
+            1
+          ]
+        },
+        "zgrv_iikm1": {
+          "aggregate_bar_pass": true,
+          "bar": 1e-15,
+          "column_bar_pass": true,
+          "correlation": 1.0,
+          "focus": [
+            {
+              "column_error": 0.0,
+              "i": 1,
+              "j": 11,
+              "pass": true,
+              "wet": true
+            },
+            {
+              "column_error": 0.0,
+              "i": 1,
+              "j": 12,
+              "pass": true,
+              "wet": true
+            },
+            {
+              "column_error": 0.0,
+              "i": 1,
+              "j": 13,
+              "pass": true,
+              "wet": true
+            },
+            {
+              "column_error": 0.0,
+              "i": 23,
+              "j": 13,
+              "pass": true,
+              "wet": true
+            }
+          ],
+          "max_column_error": 0.0,
+          "n_diverged_columns": 0,
+          "n_nonfinite_wet_elements": 0,
+          "n_verified_columns": 9868,
+          "n_wet_columns": 9868,
+          "n_wet_elements": 330403,
+          "pass": true,
+          "reference_rms": 3.869321471514035e-05,
+          "rms_ratio": 1.0,
+          "worst_column_ji": [
+            1,
+            1
+          ]
+        },
+        "zww_raw": {
+          "aggregate_bar_pass": true,
+          "bar": 1e-15,
+          "column_bar_pass": true,
+          "correlation": 1.0,
+          "focus": [
+            {
+              "column_error": 0.0,
+              "i": 1,
+              "j": 11,
+              "pass": true,
+              "wet": true
+            },
+            {
+              "column_error": 0.0,
+              "i": 1,
+              "j": 12,
+              "pass": true,
+              "wet": true
+            },
+            {
+              "column_error": 0.0,
+              "i": 1,
+              "j": 13,
+              "pass": true,
+              "wet": true
+            },
+            {
+              "column_error": 0.0,
+              "i": 23,
+              "j": 13,
+              "pass": true,
+              "wet": true
+            }
+          ],
+          "max_column_error": 6.887303882486813e-16,
+          "n_diverged_columns": 0,
+          "n_nonfinite_wet_elements": 0,
+          "n_verified_columns": 9920,
+          "n_wet_columns": 9920,
+          "n_wet_elements": 332214,
+          "pass": true,
+          "reference_rms": 0.001259363246907037,
+          "rms_ratio": 1.0,
+          "worst_column_ji": [
+            22,
+            10
+          ]
+        }
+      }
+    },
+    "31": {
+      "controls": {
+        "one_cell_roll_fails": true,
+        "wrong_rdt_fails": true
+      },
+      "disposition": "TARGETING-BLOCKED-BY-ROW30",
+      "generic_production_solver": {
+        "u": {
+          "aggregate_bar_pass": true,
+          "bar": 1e-12,
+          "column_bar_pass": false,
+          "correlation": 1.0,
+          "focus": [
+            {
+              "column_error": 1.7737339508496308e-15,
+              "i": 1,
+              "j": 11,
+              "pass": true,
+              "wet": true
+            },
+            {
+              "column_error": 2.700311387860632e-15,
+              "i": 1,
+              "j": 12,
+              "pass": true,
+              "wet": true
+            },
+            {
+              "column_error": 2.6473641057457178e-17,
+              "i": 1,
+              "j": 13,
+              "pass": true,
+              "wet": true
+            },
+            {
+              "column_error": 9.424616216454755e-15,
+              "i": 23,
+              "j": 13,
+              "pass": true,
+              "wet": true
+            }
+          ],
+          "max_column_error": 3.620746940146303e-12,
+          "n_diverged_columns": 89,
+          "n_nonfinite_wet_elements": 0,
+          "n_verified_columns": 9669,
+          "n_wet_columns": 9758,
+          "n_wet_elements": 336338,
+          "pass": false,
+          "reference_rms": 0.032763220446553665,
+          "rms_ratio": 1.0000000000000004,
+          "worst_column_ji": [
+            197,
+            40
+          ]
+        },
+        "v": {
+          "aggregate_bar_pass": true,
+          "bar": 1e-12,
+          "column_bar_pass": false,
+          "correlation": 1.0,
+          "focus": [
+            {
+              "column_error": 1.1743817123116281e-14,
+              "i": 1,
+              "j": 11,
+              "pass": true,
+              "wet": true
+            },
+            {
+              "column_error": 7.564711029755083e-15,
+              "i": 1,
+              "j": 12,
+              "pass": true,
+              "wet": true
+            },
+            {
+              "column_error": 3.0020793771930134e-15,
+              "i": 1,
+              "j": 13,
+              "pass": true,
+              "wet": true
+            },
+            {
+              "column_error": 3.9675057848365816e-16,
+              "i": 23,
+              "j": 13,
+              "pass": true,
+              "wet": true
+            }
+          ],
+          "max_column_error": 1.354919095544832e-11,
+          "n_diverged_columns": 265,
+          "n_nonfinite_wet_elements": 0,
+          "n_verified_columns": 9603,
+          "n_wet_columns": 9868,
+          "n_wet_elements": 340271,
+          "pass": false,
+          "reference_rms": 0.03279245645854034,
+          "rms_ratio": 0.9999999999999977,
+          "worst_column_ji": [
+            115,
+            1
+          ]
+        }
+      },
+      "nemo_lines": [
+        "dynzdf.F90:199-214",
+        "dynzdf.F90:340-380"
+      ],
+      "nemo_literal_discriminator": {
+        "u": {
+          "aggregate_bar_pass": true,
+          "bar": 1e-12,
+          "column_bar_pass": true,
+          "correlation": 1.0,
+          "focus": [
+            {
+              "column_error": 0.0,
+              "i": 1,
+              "j": 11,
+              "pass": true,
+              "wet": true
+            },
+            {
+              "column_error": 0.0,
+              "i": 1,
+              "j": 12,
+              "pass": true,
+              "wet": true
+            },
+            {
+              "column_error": 0.0,
+              "i": 1,
+              "j": 13,
+              "pass": true,
+              "wet": true
+            },
+            {
+              "column_error": 0.0,
+              "i": 23,
+              "j": 13,
+              "pass": true,
+              "wet": true
+            }
+          ],
+          "max_column_error": 4.136506415227684e-19,
+          "n_diverged_columns": 0,
+          "n_nonfinite_wet_elements": 0,
+          "n_verified_columns": 9758,
+          "n_wet_columns": 9758,
+          "n_wet_elements": 336338,
+          "pass": true,
+          "reference_rms": 0.032763220446553665,
+          "rms_ratio": 1.0,
+          "worst_column_ji": [
+            194,
+            26
+          ]
+        },
+        "v": {
+          "aggregate_bar_pass": true,
+          "bar": 1e-12,
+          "column_bar_pass": true,
+          "correlation": 0.9999999999999998,
+          "focus": [
+            {
+              "column_error": 0.0,
+              "i": 1,
+              "j": 11,
+              "pass": true,
+              "wet": true
+            },
+            {
+              "column_error": 0.0,
+              "i": 1,
+              "j": 12,
+              "pass": true,
+              "wet": true
+            },
+            {
+              "column_error": 0.0,
+              "i": 1,
+              "j": 13,
+              "pass": true,
+              "wet": true
+            },
+            {
+              "column_error": 0.0,
+              "i": 23,
+              "j": 13,
+              "pass": true,
+              "wet": true
+            }
+          ],
+          "max_column_error": 1.3225019282788605e-17,
+          "n_diverged_columns": 0,
+          "n_nonfinite_wet_elements": 0,
+          "n_verified_columns": 9868,
+          "n_wet_columns": 9868,
+          "n_wet_elements": 340271,
+          "pass": true,
+          "reference_rms": 0.03279245645854034,
+          "rms_ratio": 1.0,
+          "worst_column_ji": [
+            25,
+            13
+          ]
+        }
+      },
+      "owner": "implicit matrix construction / Thomas evaluation order"
+    },
+    "32": {
+      "controls": {
+        "one_cell_roll_fails": true,
+        "wrong_e3t_slot_fails": true
+      },
+      "disposition": "TARGETING-BLOCKED-BY-EARLIER-ROW",
+      "targeting_volume_form": {
+        "salinity": {
+          "aggregate_bar_pass": true,
+          "bar": 1e-12,
+          "column_bar_pass": false,
+          "correlation": 1.0,
+          "focus": [
+            {
+              "column_error": 3.7420284778449783e-14,
+              "i": 1,
+              "j": 11,
+              "pass": true,
+              "wet": true
+            },
+            {
+              "column_error": 3.2817789859175214e-14,
+              "i": 1,
+              "j": 12,
+              "pass": true,
+              "wet": true
+            },
+            {
+              "column_error": 3.501898308143696e-14,
+              "i": 1,
+              "j": 13,
+              "pass": true,
+              "wet": true
+            },
+            {
+              "column_error": 3.2417572909673076e-14,
+              "i": 23,
+              "j": 13,
+              "pass": true,
+              "wet": true
+            }
+          ],
+          "max_column_error": 1.4711975063698548e-12,
+          "n_diverged_columns": 23,
+          "n_nonfinite_wet_elements": 0,
+          "n_verified_columns": 9897,
+          "n_wet_columns": 9920,
+          "n_wet_elements": 342134,
+          "pass": false,
+          "reference_rms": 35.507878246736105,
+          "rms_ratio": 0.9999999999999996,
+          "worst_column_ji": [
+            88,
+            11
+          ]
+        },
+        "temperature": {
+          "aggregate_bar_pass": true,
+          "bar": 1e-12,
+          "column_bar_pass": false,
+          "correlation": 1.0,
+          "focus": [
+            {
+              "column_error": 1.5264650642134703e-14,
+              "i": 1,
+              "j": 11,
+              "pass": true,
+              "wet": true
+            },
+            {
+              "column_error": 1.4761420401185208e-14,
+              "i": 1,
+              "j": 12,
+              "pass": true,
+              "wet": true
+            },
+            {
+              "column_error": 1.551626576260945e-14,
+              "i": 1,
+              "j": 13,
+              "pass": true,
+              "wet": true
+            },
+            {
+              "column_error": 1.3754959919286215e-14,
+              "i": 23,
+              "j": 13,
+              "pass": true,
+              "wet": true
+            }
+          ],
+          "max_column_error": 3.4427658217491498e-12,
+          "n_diverged_columns": 627,
+          "n_nonfinite_wet_elements": 0,
+          "n_verified_columns": 9293,
+          "n_wet_columns": 9920,
+          "n_wet_elements": 342134,
+          "pass": false,
+          "reference_rms": 10.589726301316574,
+          "rms_ratio": 0.9999999999999983,
+          "worst_column_ji": [
+            88,
+            11
+          ]
+        }
+      }
+    }
+  },
+  "schema": "dino-zdf-chain-end-v1"
+}

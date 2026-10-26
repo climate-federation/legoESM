@@ -34,9 +34,9 @@ from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
     spectral_pe_tendencies,
     isothermal_rest_state_spectral,
     spectral_pe_to_grid,
-    _compute_geopotential_gaussian,
 )
 from legoesm.core.field import Field
+from legoesm.grids.vertical import compute_geopotential
 from legoesm import constants
 
 
@@ -446,7 +446,7 @@ class TestGeopotentialGaussian:
         p_s = jnp.full((n_lat, n_lon), 1e5, dtype=jnp.float64)
         phis = jnp.zeros((n_lat, n_lon), dtype=jnp.float64)
 
-        Phi = _compute_geopotential_gaussian(T, p_s, sigma_coord, phis)
+        Phi = compute_geopotential(T, p_s, sigma_coord, phis)
         assert Phi.shape == (n_lat, n_lon, sigma_coord.n_levels)
 
         # Geopotential should increase upward: Phi[:,:,0] > Phi[:,:,-1]
@@ -462,8 +462,8 @@ class TestGeopotentialGaussian:
         phis_flat = jnp.zeros((n_lat, n_lon), dtype=jnp.float64)
         phis_mountain = jnp.full((n_lat, n_lon), constants.g * 2000.0, dtype=jnp.float64)
 
-        Phi_flat = _compute_geopotential_gaussian(T, p_s, sigma_coord, phis_flat)
-        Phi_mountain = _compute_geopotential_gaussian(T, p_s, sigma_coord, phis_mountain)
+        Phi_flat = compute_geopotential(T, p_s, sigma_coord, phis_flat)
+        Phi_mountain = compute_geopotential(T, p_s, sigma_coord, phis_mountain)
 
         # Mountain case should have higher geopotential at all levels
         assert jnp.all(Phi_mountain > Phi_flat), \
@@ -476,7 +476,7 @@ class TestGeopotentialGaussian:
         p_s = jnp.full((n_lat, n_lon), 1e5, dtype=jnp.float64)
         phis = jnp.zeros((n_lat, n_lon), dtype=jnp.float64)
 
-        Phi = _compute_geopotential_gaussian(T, p_s, sigma_coord, phis)
+        Phi = compute_geopotential(T, p_s, sigma_coord, phis)
         assert jnp.all(jnp.isfinite(Phi)), "Geopotential has non-finite values"
 
 

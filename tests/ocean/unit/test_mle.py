@@ -221,8 +221,17 @@ def _front_setup(n_lat=4, n_lon=5, nlev=6):
 # ---------------------------------------------------------------------------
 def test_tracer_conservation_front() -> None:
     """The bolus tendency integrates to zero heat and salt: it only
-    REDISTRIBUTES tracer (sum(dT·area·dz) ~ 0 to roundoff)."""
+    REDISTRIBUTES tracer (sum(dT·area·dz) ~ 0 to roundoff).
+
+    S gets its own front here: with the closed-cell (vertical-branch) operator
+    a UNIFORM salinity has identically zero tendency, which collapses the
+    |dS|-based normalisation scale to roundoff noise and makes the relative
+    residual meaningless (the 2026-08-11 failure mode of this test).  A
+    salinity front gives dS real signal; S stays a passive tracer (rho is the
+    fixture's thermal-front density either way)."""
     T, S, rho, N2, mask, u_mask, v_mask, z_coord, J, grid, cfg = _front_setup()
+    lon_frac = jnp.linspace(0.0, 1.0, T.shape[1])
+    S = S + 1.5 * lon_frac[jnp.newaxis, :, jnp.newaxis]
     dT, dS = mle_tracer_tendency_latlon_cgrid(
         T, S, rho, N2, mask, u_mask, v_mask, z_coord, J, grid, cfg,
     )
@@ -281,25 +290,102 @@ def test_no_front_no_tendency() -> None:
 # ---------------------------------------------------------------------------
 # (e) Restratifying sign
 # ---------------------------------------------------------------------------
-def test_restratifying_warms_dense_side_at_surface() -> None:
-    """Across a warm(light)/cold(dense) front the bolus advects light water
-    over dense — it should COOL the warm (light) surface side and WARM the cold
-    (dense) surface side, i.e. flatten the SST front (restratify).
+def test_restratification_builds_vertical_stratification() -> None:
+    """The closed FK cell converts a HORIZONTAL buoyancy gradient into
+    VERTICAL stratification: light water spreads over dense, so the surface
+    tendency exceeds the lower-mixed-layer tendency on BOTH sides of the
+    front, and the dense-side surface warms.
 
-    Concretely: with warm water to the west and cold to the east, the surface
-    bolus tendency should be NEGATIVE on the warm (west) cells and POSITIVE on
-    the cold (east) cells of the upper mixed layer, reducing the front.
-    """
+    RETIRED EXPECTATION (encoded the horizontal-only bug): 'the warm surface
+    side cools'.  In the analytic two-column closed cell with a vertically
+    uniform ML and centered face values, BOTH surfaces warm by q(T_A-T_B)/(2V)
+    and both ML bases cool -- the overturning builds stratification without
+    flattening the surface front at leading order.  The pre-fix operator
+    cooled the warm side only through the spurious T·div_h term that also
+    produced the -54 psu river-plume corruption."""
     T, S, rho, N2, mask, u_mask, v_mask, z_coord, J, grid, cfg = _front_setup()
     dT, _ = mle_tracer_tendency_latlon_cgrid(
         T, S, rho, N2, mask, u_mask, v_mask, z_coord, J, grid, cfg,
     )
     dT = np.asarray(dT)
-    # Surface (k=0), a mid-latitude row.  West end is the warm/light extreme,
-    # east end the cold/dense extreme.
     row = dT.shape[0] // 2
-    warm_west = dT[row, 0, 0]
-    cold_east = dT[row, -1, 0]
-    # Restratification flattens the front: cool the warm side, warm the cold side.
-    assert warm_west < 0.0, f"warm (west) surface cell should cool, got {warm_west}"
-    assert cold_east > 0.0, f"cold (east) surface cell should warm, got {cold_east}"
+    # ML = top 3 levels in this fixture; level 2 is the lower mixed layer.
+    warm_west_strat = dT[row, 0, 0] - dT[row, 0, 2]
+    cold_east_strat = dT[row, -1, 0] - dT[row, -1, 2]
+    cold_east_surf = dT[row, -1, 0]
+    assert cold_east_surf > 0.0, (
+        f"dense (east) surface cell should warm, got {cold_east_surf}")
+    assert warm_west_strat > 0.0, (
+        f"warm column should stratify (surf-base > 0), got {warm_west_strat}")
+    assert cold_east_strat > 0.0, (
+        f"dense column should stratify (surf-base > 0), got {cold_east_strat}")
+
+
+# ---------------------------------------------------------------------------
+# (f) CLOSED overturning cell: uniform tracers are invariant
+# ---------------------------------------------------------------------------
+def test_uniform_tracer_zero_tendency_with_active_front() -> None:
+    """REGRESSION (2026-08-11): a spatially UNIFORM tracer must have zero MLE
+    tendency even where the streamfunction is active.
+
+    The horizontal-only flux divergence conserved the GLOBAL sum while pumping
+    tracer at transport-convergence cells (measured as -54 psu / -31 degC
+    extremes at equatorial river-plume fronts after 30 days,
+    results/omip_nemo/mle_psi_diag_d30).  The vertical continuity branch
+    (NEMO zw_mle = -di[psi_uw] - dj[psi_vw]) closes the overturning cell, so a
+    uniform field sees a divergence-free transport and is exactly invariant.
+    """
+    T, S, rho, N2, mask, u_mask, v_mask, z_coord, J, grid, cfg = _front_setup()
+    # Control: the operator is ACTIVE on this front (else the test is vacuous).
+    dT_f, _ = mle_tracer_tendency_latlon_cgrid(
+        T, S, rho, N2, mask, u_mask, v_mask, z_coord, J, grid, cfg,
+    )
+    scale = float(np.max(np.abs(np.asarray(dT_f))))
+    assert scale > 1e-12, "front produced no tendency; test would be vacuous"
+    # Uniform tracers against the SAME active rho front.
+    Tu = jnp.full_like(T, 12.0)
+    Su = jnp.full_like(S, 35.0)
+    dTu, dSu = mle_tracer_tendency_latlon_cgrid(
+        Tu, Su, rho, N2, mask, u_mask, v_mask, z_coord, J, grid, cfg,
+    )
+    assert float(np.max(np.abs(np.asarray(dTu)))) < 1e-9 * scale, (
+        "uniform T gained a tendency: the bolus transport is not "
+        "divergence-free per cell (missing/broken vertical branch)")
+    assert float(np.max(np.abs(np.asarray(dSu)))) < 1e-9 * scale
+
+
+def test_uniform_salinity_untouched_by_thermal_front() -> None:
+    """S is uniform in the front fixture, so dS must vanish identically while
+    dT carries the restratification -- the per-tracer face of the same
+    closed-cell property (this is exactly the field the horizontal-only bug
+    corrupted in production)."""
+    T, S, rho, N2, mask, u_mask, v_mask, z_coord, J, grid, cfg = _front_setup()
+    dT, dS = mle_tracer_tendency_latlon_cgrid(
+        T, S, rho, N2, mask, u_mask, v_mask, z_coord, J, grid, cfg,
+    )
+    scale = float(np.max(np.abs(np.asarray(dT)))) + 1e-30
+    assert float(np.max(np.abs(np.asarray(dS)))) < 1e-9 * scale
+
+
+def test_jit_matches_eager_on_front() -> None:
+    """C-grid jit parity (codex MLE-vertfix: only MPAS had one).  Norm-relative
+    comparison; dS uses a salted front so neither norm is a noise floor."""
+    T, S, rho, N2, mask, u_mask, v_mask, z_coord, J, grid, cfg = _front_setup()
+    lon_frac = jnp.linspace(0.0, 1.0, T.shape[1])
+    S = S + 1.5 * lon_frac[jnp.newaxis, :, jnp.newaxis]
+    # Precompute the geometry EAGERLY and pass it as the grid argument --
+    # the production pattern.  create_latlon_geometry runs float() checks on
+    # its metric arrays, which is untraceable, so building it inside a jit
+    # region is unsupported; ensure_geometry passes a ready geometry through.
+    from legoesm.grids.latlon import ensure_geometry
+    geom = ensure_geometry(grid)
+    args = (T, S, rho, N2, mask, u_mask, v_mask)
+    fn = jax.jit(lambda *a: mle_tracer_tendency_latlon_cgrid(
+        *a, z_coord, J, geom, cfg))
+    dT_j, dS_j = fn(*args)
+    dT_e, dS_e = mle_tracer_tendency_latlon_cgrid(
+        *args, z_coord, J, geom, cfg)
+    for j, e in ((dT_j, dT_e), (dS_j, dS_e)):
+        assert bool(jnp.all(jnp.isfinite(j)))
+        rel = float(jnp.linalg.norm(j - e) / (jnp.linalg.norm(e) + 1e-30))
+        assert rel < 1e-10, rel

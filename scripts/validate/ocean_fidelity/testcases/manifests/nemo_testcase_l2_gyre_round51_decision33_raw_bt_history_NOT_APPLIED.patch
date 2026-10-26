@@ -1,0 +1,66 @@
+diff --git a/packages/ocean/legoesm/ocean/state.py b/packages/ocean/legoesm/ocean/state.py
+--- a/packages/ocean/legoesm/ocean/state.py
++++ b/packages/ocean/legoesm/ocean/state.py
+@@ -648,15 +648,10 @@ class LatLonCGridOceanState(NamedTuple):
+-    # 6-tuple of 2-D arrays in DEVIATION form — (U_f-U_b, U_f-U_bb, V_f-V_b,
+-    # V_f-V_bb, eta_f-eta_b, eta_f-eta_bb), the last two substep values of
+-    # the previous window relative to its final value (NEMO's persistent
+-    # ubb_e/ub_e/vbb_e/vb_e/sshbb_e/sshb_e, written to NEMO's restart).
+-    # Deviation form because NEMO re-imposes the stp2d barotropic mean on the
+-    # 3D velocity after every stage (stprk3_stg.F90:440) so its raw histories
+-    # never see a window-boundary jump; legoESM's post-solve implicit vmix
+-    # shifts the depth mean, and raw carried values would feed that jump into
+-    # the AB3 extrapolation each window (see _run_substep_loop).
++    # 6-tuple of NEMO's RAW persistent end-of-window histories:
++    # (Ub, Ubb, Vb, Vbb, etab, etabb).  This is NEMO's represented state at
++    # dynspg_ts.f90:456-489,749-761; no subtract/reconstruct transform occurs
++    # across windows.
+     # None (default) ⇒ cold start: the barotropic solver applies NEMO's
+diff --git a/packages/ocean/legoesm/ocean/dynamics/barotropic_latlon_cgrid.py b/packages/ocean/legoesm/ocean/dynamics/barotropic_latlon_cgrid.py
+--- a/packages/ocean/legoesm/ocean/dynamics/barotropic_latlon_cgrid.py
++++ b/packages/ocean/legoesm/ocean/dynamics/barotropic_latlon_cgrid.py
+@@ -2062,23 +2062,8 @@ def _run_substep_loop(
+             (Ub0, Ubb0, Vb0, Vbb0, etab0, etabb0) = (
+                 h.astype(dtype) for h in ab3_raw_hist)
+         elif ab3_hist is not None:
+-            # NEMO continuation (dynspg_ts ll_init=F): now-values reset to the
+-            # baroclinic state (ln_bt_fw), b/bb histories carried from the end
+-            # of the PREVIOUS window — one continuous AB3 series across windows.
+-            # DEVIATION form: ab3_hist holds (X_final - X_b, X_final - X_bb)
+-            # of the previous window, reconstructed against THIS window's
+-            # now-values. NEMO re-imposes the stp2d barotropic mean on the 3D
+-            # velocity after every stage (stprk3_stg.F90:440 zub correction),
+-            # so its raw-carried histories never see a window-boundary jump;
+-            # legoESM's implicit vmix/bottom drag shift the depth mean after
+-            # the solve, and a raw carry would feed that jump into the AB3
+-            # extrapolation (x1.78 amplification) every window — pumping a
+-            # spurious deep barotropic mode. Deviation form is identical to
+-            # NEMO's raw carry when the mean is preserved (NEMO's case) and
+-            # jump-transparent when it is not.
+-            (dU_b, dU_bb, dV_b, dV_bb, deta_b, deta_bb) = (
++            (Ub0, Ubb0, Vb0, Vbb0, etab0, etabb0) = (
+                 h.astype(dtype) for h in ab3_hist)
+-            Ub0 = U_bar - dU_b
+-            Ubb0 = U_bar - dU_bb
+-            Vb0 = V_bar - dV_b
+-            Vbb0 = V_bar - dV_bb
+-            etab0 = eta - deta_b
+-            etabb0 = eta - deta_bb
+         else:
+@@ -2894,12 +2879,9 @@ def barotropic_substeps_latlon_cgrid(
+     if _ab3 and not _boxcar_ab3 and hasattr(state, "bt_hist"):
+         # NEMO nn_bt_flt=3 only (nn_bt_flt=2 re-inits the sub-state each step ⇒
+         # no cross-window carry).
+-        # store the end-of-window (b, bb) histories in DEVIATION form
+-        # (X_final - X_b, X_final - X_bb) for the next window (finals
+-        # positions 8-13: Ub, Ubb, Vb, Vbb, etab, etabb after the final
+-        # dynspg_ts:806-808 rotation; finals 0-2: eta_f, U_bar_f, V_bar_f).
+-        # See the reconstruction comment in _run_substep_loop.
++        # Store NEMO's raw post-rotation histories for the next window.
+         state_new = state_new._replace(bt_hist=(
+-            _finals[1] - _finals[8], _finals[1] - _finals[9],
+-            _finals[2] - _finals[10], _finals[2] - _finals[11],
+-            _finals[0] - _finals[12], _finals[0] - _finals[13],
++            _finals[8], _finals[9], _finals[10], _finals[11],
++            _finals[12], _finals[13],
+         ))

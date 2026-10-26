@@ -3,7 +3,7 @@
 from legoesm.land.carbon import CarbonConfig, CarbonState, init_carbon_state
 from legoesm.land.config import LandConfig, MultiLayerLandConfig
 from legoesm.land.state import LandState, MultiLayerLandState
-from legoesm.land.slab_land import step_land
+from legoesm.land.slab_land import step_land, step_land_with_diagnostics
 from legoesm.land.multilayer_land import (
     step_multilayer_land, init_multilayer_land_state, aridity_theta_init,
 )
@@ -29,7 +29,7 @@ from legoesm.land.param_providers import (
 
 __all__ = [
     "CarbonConfig", "CarbonState", "init_carbon_state",
-    "LandConfig", "LandState", "step_land",
+    "LandConfig", "LandState", "step_land", "step_land_with_diagnostics",
     "MultiLayerLandConfig", "MultiLayerLandState",
     "step_multilayer_land", "init_multilayer_land_state", "aridity_theta_init",
     "CanopyConfig", "CanopyLandParams", "CLMMLCanopyConfig", "CanopyState",

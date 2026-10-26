@@ -24,6 +24,19 @@ set -euo pipefail
 
 ROOT=/work/bd1083/b309178/diffESM/legoesm_pg/amip_runs
 REPO=/work/bd1083/b309178/diffESM/legoesm_pg/legoESM
+# BASELINE DECK, pinned 2026-09-23.  config/amip/amip_production.yaml became the
+# CAM6 suite on that date and the GPU chain's CONFIG_YAML default follows it.
+# This script is a one-variable arm comparison whose baseline is the
+# configuration it was measured against, so it names that configuration
+# explicitly instead of inheriting whatever production becomes.
+# CONDITIONAL on purpose (GLM round 3): the rename has not reached every
+# checkout, and in a tree that still predates it the production deck IS the
+# right baseline.  So prefer the renamed deck where it exists and fall back to
+# production where it does not - correct on both sides of the merge, and it
+# never breaks the script the way a hard pin would.
+BASELINE_DECK="${REPO}/config/amip/amip_sundqvist_l36.yaml"
+[[ -f "${BASELINE_DECK}" ]] || BASELINE_DECK="${REPO}/config/amip/amip_production.yaml"
+
 SRC="${ROOT}/century8"
 PIN="${SRC}/checkpoint_day_0080.npz"
 TARGET_DAYS=110          # absolute: 80 (pinned) + 30

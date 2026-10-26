@@ -211,3 +211,179 @@ def test_acc_core_rejects_curvilinear_section():
     with pytest.raises(ValueError, match="not regular"):
         _nt.acc_drake_core(uoe3, e2u, gphiu, glamu, drake_lon=-68.0,
                            max_lon_dev_deg=5.0)
+
+
+# --------------------------------------------------------------------------
+# arctic_gateways_core: the NEMO -> legoESM C-grid face shift.
+# --------------------------------------------------------------------------
+def _synthetic_gateways(nz=2, ny=6, nx=8, v_row=1, v0=0.5, lon=-170.0):
+    """All-wet box whose 66N boundary is ONE v-row.
+
+    Latitudes [60,63,67,70,73,76] put the region at rows 2..5, so the only
+    boundary is the face between row 1 and row 2 = NEMO v index 1.  A uniform
+    northward transport there is analytic: v0 * e1v * nx.
+    """
+    gphit = np.repeat(np.array([60.0, 63.0, 67.0, 70.0, 73.0, 76.0])[:, None],
+                      nx, axis=1)
+    glamt = np.full((ny, nx), lon)
+    tmask = np.ones((ny, nx))
+    uoe3 = np.zeros((nz, ny, nx))
+    voe3 = np.zeros((nz, ny, nx))
+    voe3[:, v_row, :] = v0 / nz          # splits evenly over levels
+    e2u = np.full((ny, nx), 1.0e6)
+    e1v = np.full((ny, nx), 1.0e6)
+    return uoe3, voe3, e2u, e1v, gphit, glamt, tmask
+
+
+def test_arctic_gateways_core_analytic_inflow():
+    """+0.5 m^2/s northward on the boundary row over 8 faces of 1e6 m = 4 Sv."""
+    gw, diag = _nt.arctic_gateways_core(*_synthetic_gateways())
+    assert diag["n_v_faces"] == 8
+    assert gw["bering_pacific"] == pytest_approx(4.0)
+    for name in ("davis_caa", "atlantic_nordic", "siberian_other"):
+        assert gw[name] == pytest_approx(0.0)
+
+
+def test_arctic_gateways_core_sign_is_into_the_arctic():
+    """Southward transport on the same face reports NEGATIVE (out)."""
+    gw, _ = _nt.arctic_gateways_core(*_synthetic_gateways(v0=-0.5))
+    assert gw["bering_pacific"] == pytest_approx(-4.0)
+
+
+def test_arctic_gateways_core_bins_by_longitude():
+    """Half the box in the Atlantic bin lands in atlantic_nordic, not Bering."""
+    uoe3, voe3, e2u, e1v, gphit, glamt, tmask = _synthetic_gateways()
+    glamt = glamt.copy()
+    glamt[:, 4:] = -20.0                       # inside (-45, 70) = atlantic
+    gw, _ = _nt.arctic_gateways_core(uoe3, voe3, e2u, e1v, gphit, glamt, tmask)
+    assert gw["bering_pacific"] == pytest_approx(2.0)
+    assert gw["atlantic_nordic"] == pytest_approx(2.0)
+
+
+def test_arctic_gateways_core_v_face_shift_is_load_bearing():
+    """NON-VACUITY for v: the NEMO->legoESM index shift carries the result.
+
+    Feeding the flow one row AWAY from the boundary must not be collected. If
+    the shift were dropped this row would be read as the boundary face and the
+    test would report 4 Sv instead of 0.
+    """
+    gw, diag = _nt.arctic_gateways_core(*_synthetic_gateways(v_row=2))
+    assert gw["bering_pacific"] == pytest_approx(0.0)
+    # the same numbers WITHOUT the shift do collect it -- that is the proof
+    # the shift is what carries the result, not an accident of the fixture
+    assert diag["unshifted_Sv"]["bering_pacific"] == pytest_approx(4.0)
+
+
+def _synthetic_gateways_with_u(nz=2, ny=6, nx=8, lon=-170.0):
+    """Region bounded in LONGITUDE too, with a NON-UNIFORM zonal transport.
+
+    Every other fixture here has zero zonal transport and no selected u-faces,
+    so none of them pins the u index shift (codex).  A UNIFORM zonal flow will
+    not do either: what enters the western boundary leaves the eastern one, so
+    the net vanishes whether or not the u-faces were selected at all, and the
+    test cannot fail (caught in review).  Making the transport vary with i
+    gives a known NON-ZERO net that only appears if the u-faces really are
+    selected, at the right indices.
+
+    Wet region: columns 2..5 of rows 2..5, so the zonal boundary faces are our
+    u-face 2 (west, inflow) and u-face 6 (east, outflow).
+    """
+    gphit = np.repeat(np.array([60.0, 63.0, 67.0, 70.0, 73.0, 76.0])[:, None],
+                      nx, axis=1)
+    glamt = np.full((ny, nx), lon)
+    tmask = np.zeros((ny, nx))
+    tmask[:, 2:6] = 1.0
+    # NONLINEAR in i.  A LINEAR profile is useless here: shifting both
+    # boundary samples by one column preserves their DIFFERENCE, so the net is
+    # unchanged and the test cannot see the shift (codex caught this).
+    i = np.arange(nx).astype(np.float64)
+    uoe3 = np.zeros((nz, ny, nx))
+    uoe3[:, :, :] = ((0.1 + 0.05 * i * i) / nz)[None, None, :]
+    voe3 = np.zeros((nz, ny, nx))
+    e2u = np.full((ny, nx), 1.0e6)
+    e1v = np.full((ny, nx), 1.0e6)
+    return uoe3, voe3, e2u, e1v, gphit, glamt, tmask
+
+
+def test_arctic_gateways_core_u_faces_carry_a_known_nonzero_net():
+    """NON-VACUITY for u: a non-uniform zonal flow gives a known net.
+
+    Our u-face 2 is the western boundary and carries NEMO's u index 1; our
+    u-face 6 is the eastern boundary and carries NEMO's index 5.  Positive is
+    INTO the region, so inflow at the west counts +, outflow at the east -, over
+    the four wet rows 2..5 of width 1e6 m:
+
+        net = 4 * 1e6 * (u_nemo[1] - u_nemo[5])
+
+    If the u-faces were not selected, or were selected at NEMO's own indices
+    instead of ours, this number changes.  A uniform flow could not detect
+    either.
+    """
+    uoe3, voe3, e2u, e1v, gphit, glamt, tmask = _synthetic_gateways_with_u()
+    gw, diag = _nt.arctic_gateways_core(uoe3, voe3, e2u, e1v, gphit, glamt,
+                                        tmask)
+    u_col = uoe3.sum(axis=0)[0]                    # depth-summed, per column
+    expected = 4.0 * 1.0e6 * (u_col[1] - u_col[5]) / 1.0e6
+    assert diag["n_region_cells"] == 16
+    assert gw["bering_pacific"] == pytest_approx(expected, tol=1e-9)
+    assert abs(expected) > 0.1                     # the test can actually fail
+    # and the unshifted counterfactual differs, so the shift is load-bearing
+    assert diag["unshifted_Sv"]["bering_pacific"] != pytest_approx(
+        expected, tol=1e-9)
+
+
+def test_arctic_gateways_core_land_fill_values_do_not_poison_the_sum():
+    """NaN on LAND must not propagate through the zero-weighted faces.
+
+    section_transport multiplies unselected faces by a zero weight and
+    0 * NaN is NaN, so one decoded land fill value would otherwise turn every
+    gateway into NaN (codex).  The fixture's cell (0, 0) is made DRY so the
+    value is genuinely land -- putting it on a WET cell is a different thing
+    entirely and must be refused, which the next test checks.
+    """
+    uoe3, voe3, e2u, e1v, gphit, glamt, tmask = _synthetic_gateways()
+    uoe3 = uoe3.copy()
+    tmask = tmask.copy()
+    tmask[0, 0] = 0.0                        # genuinely land
+    uoe3[:, 0, 0] = np.nan
+    gw, diag = _nt.arctic_gateways_core(uoe3, voe3, e2u, e1v, gphit, glamt,
+                                        tmask)
+    assert diag["n_nonfinite_u"] == 2        # both levels of that one cell
+    assert np.isfinite(list(gw.values())).all()
+    assert gw["bering_pacific"] == pytest_approx(4.0)
+
+
+def test_arctic_gateways_core_reports_a_masked_face_on_the_section():
+    """A face the section uses but the run masked is counted ZERO and SAID SO.
+
+    Demanding a globally clean field would refuse every real run -- the
+    oracle's mesh and run disagree on ~0.06% of upper-ocean shelf faces, two of
+    which land on this very section.  So the transport is summed with those
+    faces at zero, which is what the run itself did, and the assumption is
+    stated rather than hidden behind a tolerance knob.  What must NOT happen is
+    silent omission, so the count is surfaced in the diagnostics.
+    """
+    uoe3, voe3, e2u, e1v, gphit, glamt, tmask = _synthetic_gateways()
+    voe3 = voe3.copy()
+    voe3[:, 1, 0] = np.nan            # NEMO v index 1 IS the boundary face
+    gw, diag = _nt.arctic_gateways_core(uoe3, voe3, e2u, e1v, gphit, glamt,
+                                        tmask)
+    assert diag["n_masked_section_v"] == 1
+    # seven of the eight boundary faces still carry 0.5 m^2/s over 1e6 m
+    assert gw["bering_pacific"] == pytest_approx(3.5)
+
+
+def test_arctic_gateways_core_tolerates_a_missing_value_off_the_section():
+    """The same defect away from the section is reported, not fatal."""
+    uoe3, voe3, e2u, e1v, gphit, glamt, tmask = _synthetic_gateways()
+    uoe3 = uoe3.copy()
+    uoe3[:, 4, 4] = np.nan            # interior of the region, no face uses it
+    gw, diag = _nt.arctic_gateways_core(uoe3, voe3, e2u, e1v, gphit, glamt,
+                                        tmask)
+    assert diag["n_nonfinite_u"] == 2
+    assert gw["bering_pacific"] == pytest_approx(4.0)
+
+
+def pytest_approx(x, tol=1e-9):
+    import pytest
+    return pytest.approx(x, abs=tol)

@@ -284,35 +284,41 @@ class TestSolverAxes:
         name = resolve_solver_name(dynamics="shallow_water", discretization="spectral")
         assert name == "spectral_shallow_water"
 
-    def test_resolve_defaults_to_shallow_water_centered(self):
-        """No arguments default to cdgrid_shallow_water."""
+    def test_resolve_no_selection_raises(self):
+        """No arguments is not a solver choice: raise, never default."""
         from legoesm.atmosphere.dynamics import resolve_solver_name
-        name = resolve_solver_name()
-        assert name == "cdgrid_shallow_water"
+        with pytest.raises(ValueError, match="no solver selected"):
+            resolve_solver_name()
 
-    def test_resolve_nonhydrostatic_default_discretization(self):
-        """dynamics=nonhydrostatic alone defaults to centered."""
+    def test_resolve_missing_discretization_raises(self):
+        """dynamics alone must not silently pick the cdgrid discretization."""
         from legoesm.atmosphere.dynamics import resolve_solver_name
-        name = resolve_solver_name(dynamics="nonhydrostatic")
-        assert name == "cdgrid_compressible_euler"
+        with pytest.raises(ValueError, match="needs both dynamics"):
+            resolve_solver_name(dynamics="nonhydrostatic")
 
-    def test_resolve_spectral_default_dynamics(self):
-        """discretization=spectral alone defaults to shallow_water dynamics."""
+    def test_resolve_missing_dynamics_raises(self):
+        """discretization alone must not silently pick shallow-water dynamics."""
         from legoesm.atmosphere.dynamics import resolve_solver_name
-        name = resolve_solver_name(discretization="spectral")
-        assert name == "spectral_shallow_water"
+        with pytest.raises(ValueError, match="needs both dynamics"):
+            resolve_solver_name(discretization="spectral")
+
+    def test_resolve_unknown_equations_raises(self):
+        """A mistyped legacy solver name must raise, not become cdgrid SW."""
+        from legoesm.atmosphere.dynamics import resolve_solver_name
+        with pytest.raises(ValueError, match="Unknown equations"):
+            resolve_solver_name(equations="hydrostatik")
 
     def test_resolve_invalid_dynamics_raises(self):
         """Invalid dynamics value raises ValueError."""
         from legoesm.atmosphere.dynamics import resolve_solver_name
         with pytest.raises(ValueError, match="Unknown dynamics"):
-            resolve_solver_name(dynamics="invalid")
+            resolve_solver_name(dynamics="invalid", discretization="cdgrid")
 
     def test_resolve_invalid_discretization_raises(self):
         """Invalid discretization value raises ValueError."""
         from legoesm.atmosphere.dynamics import resolve_solver_name
         with pytest.raises(ValueError, match="Unknown discretization"):
-            resolve_solver_name(discretization="invalid")
+            resolve_solver_name(dynamics="hydrostatic", discretization="invalid")
 
     def test_resolve_hydrostatic_spectral(self):
         """dynamics=hydrostatic + discretization=spectral -> spectral_primitive_equations."""
@@ -338,6 +344,7 @@ class TestSolverAxes:
         from legoesm.atmosphere.dynamics import resolve_solver_name
         name = resolve_solver_name(
             dynamics="nonhydrostatic",
+            discretization="cdgrid",
             equations="shallow_water",  # legacy, should be ignored
         )
         assert name == "cdgrid_compressible_euler"

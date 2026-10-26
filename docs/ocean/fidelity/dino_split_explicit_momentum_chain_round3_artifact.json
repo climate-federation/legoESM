@@ -1,0 +1,564 @@
+{
+  "base_round2_artifact_sha256": "488b05050cfe9dd3418512ad4c053749e71cc2365b80046ad788ec4dc195f373",
+  "base_round2_term_error_closure": {
+    "u_normalized_to_total_residual": 1.0764362196730072e-12,
+    "v_normalized_to_total_residual": 9.973535071390227e-12
+  },
+  "controls": {
+    "correction_classifier": {
+      "perfect_confirms": true,
+      "perfect_score": {
+        "corrected_residual_reduction": 1.0,
+        "prediction_correlation": 1.0,
+        "prediction_normalized_error": 0.0,
+        "verdict": "CONFIRMS_LDF_BEFORE_SOURCE"
+      },
+      "zero_refutes": true,
+      "zero_score": {
+        "corrected_residual_reduction": 0.0,
+        "prediction_correlation": 0.0,
+        "prediction_normalized_error": 1.0,
+        "verdict": "REFUTES_LDF_BEFORE_SOURCE"
+      }
+    },
+    "round2": {
+      "attribution_classifier": {
+        "confirming_score": {
+          "correlation_with_total_residual": 1.0,
+          "residual_removal": 1.0,
+          "rms_gain": 1.0,
+          "verdict": "CONFIRMS_CARRY"
+        },
+        "identity_confirms": true,
+        "orthogonal_refutes": true,
+        "refuting_score": {
+          "correlation_with_total_residual": -5.551115123125784e-17,
+          "residual_removal": -0.4142135623730949,
+          "rms_gain": 0.9999999999999999,
+          "verdict": "REFUTES_CARRY"
+        }
+      },
+      "base_reconstruction": {
+        "bar": 1e-12,
+        "planted_u_fires": true,
+        "planted_u_normalized_error": 1.0000000000050667e-06,
+        "u_pass": true,
+        "v_pass": true
+      },
+      "campaign_classifier_and_alignment": {
+        "actual_binding_campaign_gate": "DEBT",
+        "actual_binding_error": 0.0002740311743349557,
+        "actual_binding_perturbation_changes_score": true,
+        "alignment_best": {
+          "di": 0,
+          "dj": 0,
+          "normalized_rms_error": 0.0002740311743349557
+        },
+        "alignment_scan": [
+          {
+            "di": -1,
+            "dj": -1,
+            "normalized_rms_error": 0.8516081801088069
+          },
+          {
+            "di": 0,
+            "dj": -1,
+            "normalized_rms_error": 0.1519087309177422
+          },
+          {
+            "di": 1,
+            "dj": -1,
+            "normalized_rms_error": 0.6195845689627931
+          },
+          {
+            "di": -1,
+            "dj": 0,
+            "normalized_rms_error": 0.8443944756561844
+          },
+          {
+            "di": 0,
+            "dj": 0,
+            "normalized_rms_error": 0.0002740311743349557
+          },
+          {
+            "di": 1,
+            "dj": 0,
+            "normalized_rms_error": 0.6070870738151861
+          },
+          {
+            "di": -1,
+            "dj": 1,
+            "normalized_rms_error": 0.8458064471463069
+          },
+          {
+            "di": 0,
+            "dj": 1,
+            "normalized_rms_error": 0.12872651182641404
+          },
+          {
+            "di": 1,
+            "dj": 1,
+            "normalized_rms_error": 0.6071317831961214
+          }
+        ],
+        "identical_array_zero": true,
+        "identical_campaign_gate": "AT BAR",
+        "identical_error": 0.0,
+        "planted_actual_binding_campaign_gate": "DEBT",
+        "planted_actual_binding_error": 0.0002740603312831709,
+        "planted_identity_campaign_gate": "DEBT",
+        "planted_identity_error": 1.0000000000008017e-06,
+        "planted_identity_flips_campaign_gate": true,
+        "zero_shift_is_best": true
+      },
+      "donor_equalization": {
+        "changes_verdict_path": true,
+        "east_donor": [
+          49,
+          50
+        ],
+        "equalized_score": {
+          "corrected_residual_reduction": 0.02079651047885067,
+          "prediction_correlation": 0.2026900415810054,
+          "prediction_normalized_error": 0.9792034895211493,
+          "verdict": "UNRESOLVED_BRIDGE_WIND_SOURCE"
+        },
+        "faithful_score": {
+          "corrected_residual_reduction": 0.9928695526681799,
+          "prediction_correlation": 0.999974655141223,
+          "prediction_normalized_error": 0.007130447331820113,
+          "verdict": "CONFIRMS_BRIDGE_WIND_SOURCE"
+        },
+        "receiver": [
+          49,
+          49
+        ]
+      },
+      "entry_identity": {
+        "all_nonstress_exact": true,
+        "fields": [
+          {
+            "exact": true,
+            "field": "u"
+          },
+          {
+            "exact": true,
+            "field": "v"
+          },
+          {
+            "exact": true,
+            "field": "T"
+          },
+          {
+            "exact": true,
+            "field": "S"
+          },
+          {
+            "exact": true,
+            "field": "eta"
+          },
+          {
+            "exact": true,
+            "field": "H_bathy"
+          },
+          {
+            "exact": true,
+            "field": "land_mask"
+          },
+          {
+            "exact": true,
+            "field": "u_mask"
+          },
+          {
+            "exact": true,
+            "field": "v_mask"
+          },
+          {
+            "exact": true,
+            "field": "w"
+          },
+          {
+            "exact": true,
+            "field": "T_som"
+          },
+          {
+            "exact": true,
+            "field": "S_som"
+          },
+          {
+            "exact": true,
+            "field": "T_flux_div_prev"
+          },
+          {
+            "exact": true,
+            "field": "S_flux_div_prev"
+          },
+          {
+            "exact": true,
+            "field": "eke"
+          },
+          {
+            "exact": true,
+            "field": "tke"
+          },
+          {
+            "exact": true,
+            "field": "tke_avm"
+          },
+          {
+            "exact": true,
+            "field": "tke_avt"
+          },
+          {
+            "exact": true,
+            "field": "tke_dissl"
+          },
+          {
+            "exact": true,
+            "field": "tke_avm_surface"
+          },
+          {
+            "exact": true,
+            "field": "dtke"
+          },
+          {
+            "exact": true,
+            "field": "eke_diss"
+          },
+          {
+            "exact": true,
+            "field": "T_incr_prev"
+          },
+          {
+            "exact": true,
+            "field": "S_incr_prev"
+          },
+          {
+            "exact": true,
+            "field": "u_incr_prev"
+          },
+          {
+            "exact": true,
+            "field": "v_incr_prev"
+          },
+          {
+            "exact": true,
+            "field": "u_before"
+          },
+          {
+            "exact": true,
+            "field": "v_before"
+          },
+          {
+            "exact": true,
+            "field": "T_before"
+          },
+          {
+            "exact": true,
+            "field": "S_before"
+          },
+          {
+            "exact": true,
+            "field": "eta_before"
+          },
+          {
+            "exact": true,
+            "field": "F_slow_u_prev"
+          },
+          {
+            "exact": true,
+            "field": "F_slow_v_prev"
+          },
+          {
+            "exact": true,
+            "field": "psi"
+          },
+          {
+            "exact": true,
+            "field": "dpsi"
+          },
+          {
+            "exact": true,
+            "field": "dpsi_prev"
+          },
+          {
+            "exact": true,
+            "field": "dpsin"
+          },
+          {
+            "exact": true,
+            "field": "dpsin_prev"
+          },
+          {
+            "exact": true,
+            "field": "bt_hist"
+          },
+          {
+            "exact": true,
+            "field": "freshwater_eta_prev"
+          },
+          {
+            "exact": true,
+            "field": "mass_flux_u"
+          },
+          {
+            "exact": true,
+            "field": "mass_flux_v"
+          },
+          {
+            "exact": true,
+            "field": "mass_flux_w"
+          },
+          {
+            "exact": true,
+            "field": "salt_flux_u_int"
+          },
+          {
+            "exact": true,
+            "field": "salt_flux_v_int"
+          }
+        ]
+      },
+      "term_error_closure": {
+        "bar": 1e-10,
+        "planted_u_fires": true,
+        "planted_u_normalized_closure": 9.999999947495682e-07,
+        "u_pass": true,
+        "v_pass": true
+      }
+    }
+  },
+  "dump_sha256": {
+    "drg_dump_zu_frc_inc.bin": "0dfaacca230287dd14338be073eceb7dc0d3c147317b946df16a96815624c053",
+    "drg_dump_zv_frc_inc.bin": "d01d083799bdd785477303a8304879771a445920fd682f7760f8ca4b9570ee4c",
+    "hpg_dump_du.bin": "0ccd1859c14bf65ca9a2f3b77f2a5fbf1d84db6567399645616d64d9de841950",
+    "hpg_dump_dv.bin": "60093e5906feda181c1613f8bd0f49cc24cba1970ea216ed673bf06bdcd7bc87",
+    "keg_dump_du.bin": "03d27e444d5c8f53650c7c6bb924084d9ca176f669f4384fc48c59cb208d792a",
+    "keg_dump_dv.bin": "b463386513308d4dd86c7934e5d11ed5a8eb7ae9634ed18da48009292fd9ca72",
+    "ldf_dump_du.bin": "7e5ad7c06e297e9e803df94107a62f2ba8afd7dd3f3d17b7466d7755c3dd2875",
+    "ldf_dump_dv.bin": "b49ea833a151284d167cc09cda34e8b3a9ff2f4d9ec4a6c40235b1467211232a",
+    "spg_dump_zu_frc.bin": "13138faa46149968c009f0d6c20956b8d2457a904667686a1f6cb1a93d7bcca6",
+    "spg_dump_zv_frc.bin": "81d01381ad5164b1a0cc3fb5f22590f471b0e24bb9b68084290e0cb9e2ef4c0e",
+    "stp_dump_06_dynhpg_kt00005761_du.bin": "a77ffe6bf45daa4b66f2b43dbd4fa89098b4e664681873f6420eeda8d38bd273",
+    "stp_dump_06_dynhpg_kt00005761_dv.bin": "b48d1e01babf415f3aeb6b93bab6528d001814a83cf7182be7d8ece42bc8ebfe",
+    "vor_dump_du.bin": "b2c778badfc9690758b70d84aaf47aa74f740f749f0b2f267091238b7edce601",
+    "vor_dump_dv.bin": "10f139210a9b9b369402ad1b3109c17bf71ebd867c18035252df56943ed008c0",
+    "wnd_dump_zu_frc_inc.bin": "d9692e3466b6fc9af72289266edf3b25ba26ec16c327fe505cd10bd6390d15b7",
+    "wnd_dump_zv_frc_inc.bin": "72ecf1fe2e778a7ece1b73d1713587f2d99d641cf47a3a196a8fb5f04acb7d4a",
+    "zad_dump_du.bin": "9899d5cdfcb3bb70f5910f773259a7e97c5b388ffcbe4cf4c05c0981929e26da",
+    "zad_dump_dv.bin": "b053c7d46c36dbd52d4e2da117e700ef5516ad1b519b525b62ee11aa49a7bf4e"
+  },
+  "faithful_leading_pair_scores": {
+    "lateral_friction+cor_removal": {
+      "correlation_with_total_residual": 0.22943987934275234,
+      "residual_removal": -3.8351151874225913,
+      "rms_gain": 4.964252263621091,
+      "verdict": "UNRESOLVED"
+    },
+    "lateral_friction+drag": {
+      "correlation_with_total_residual": 0.942639231887993,
+      "residual_removal": 0.6612398493963094,
+      "rms_gain": 0.9133301769468027,
+      "verdict": "UNRESOLVED"
+    },
+    "lateral_friction+kinetic_energy_gradient": {
+      "correlation_with_total_residual": 0.9426393223555423,
+      "residual_removal": 0.6612415045308233,
+      "rms_gain": 0.9133374285898842,
+      "verdict": "UNRESOLVED"
+    },
+    "lateral_friction+pressure_gradient": {
+      "correlation_with_total_residual": 0.9426393273572348,
+      "residual_removal": 0.6612415186032038,
+      "rms_gain": 0.9133374382143332,
+      "verdict": "UNRESOLVED"
+    },
+    "lateral_friction+vertical_advection": {
+      "correlation_with_total_residual": 0.9430024742652792,
+      "residual_removal": 0.6622361816309115,
+      "rms_gain": 0.9132092731484155,
+      "verdict": "UNRESOLVED"
+    },
+    "lateral_friction+vorticity": {
+      "correlation_with_total_residual": 0.1483978741798338,
+      "residual_removal": -3.8067621779483583,
+      "rms_gain": 4.8534656817026525,
+      "verdict": "REFUTES_CARRY"
+    },
+    "lateral_friction+wind": {
+      "correlation_with_total_residual": 0.9433940178426857,
+      "residual_removal": 0.6640266003243251,
+      "rms_gain": 0.9136089741426487,
+      "verdict": "UNRESOLVED"
+    }
+  },
+  "first_open_term": "lateral_friction",
+  "fixed_wind": {
+    "counterfactual": {
+      "corrected_residual_reduction": 0.9928695526681799,
+      "prediction_correlation": 0.999974655141223,
+      "prediction_normalized_error": 0.007130447331820113,
+      "verdict": "CONFIRMS_BRIDGE_WIND_SOURCE"
+    },
+    "faithful_total": {
+      "campaign_gate": "DEBT",
+      "correlation": 0.9999999999981174,
+      "mean_abs_ratio": 0.9999995140708735,
+      "n": 9758,
+      "normalized_rms_error": 1.9539648558722173e-06,
+      "per_element_max_error_over_nemo_rms": 8.315661699755067e-05,
+      "rms_ratio": 0.9999995840388566
+    },
+    "legacy_total": {
+      "campaign_gate": "DEBT",
+      "correlation": 0.9999999661960921,
+      "mean_abs_ratio": 1.0000909532419107,
+      "n": 9758,
+      "normalized_rms_error": 0.0002740311743349557,
+      "per_element_max_error_over_nemo_rms": 0.005491879143984337,
+      "rms_ratio": 1.0000976381607058
+    },
+    "status": "FIXED-BY-#1695"
+  },
+  "git": {
+    "clean_after": true,
+    "clean_before": true,
+    "commit": "1c5c8414fceacb156983ebf6e3fc0881668d4ece"
+  },
+  "imported_pr1695": {
+    "local_build": "8327ffb10bc",
+    "local_build_is_ancestor": true,
+    "local_default": "7061c59af51",
+    "local_default_is_ancestor": true,
+    "upstream_build": "73ad090d411027ae3815f6ae8ea7b7ff0f85f0dc",
+    "upstream_default": "f862e1554911f0901ab15b7ede80de7a74d2f1ac"
+  },
+  "kt": 5761,
+  "lane": "d180",
+  "lateral_friction_before": {
+    "forcing_counterfactual": {
+      "corrected_residual_reduction": 0.6527883821924848,
+      "prediction_correlation": 0.939316615659043,
+      "prediction_normalized_error": 0.3472116178075152,
+      "verdict": "UNRESOLVED_LDF_BEFORE_SOURCE"
+    },
+    "lego_hook": "tendencies_with_diagnostics(..., ldf_state=BEFORE)",
+    "nemo_source": "stpmlf.F90:319-322; dynldf.F90:69-119, Kbb",
+    "term_metric": {
+      "attribution": {
+        "correlation_with_total_residual": 0.05347417612085318,
+        "residual_removal": 0.0012802038290191664,
+        "rms_gain": 0.05993997835607045,
+        "verdict": "REFUTES_CARRY"
+      },
+      "campaign_gate": "DEBT",
+      "correlation": 0.9999999988872635,
+      "mean_abs_ratio": 1.0000058622821433,
+      "n": 9758,
+      "normalized_rms_error": 5.005763302792829e-05,
+      "per_element_max_error_over_nemo_rms": 0.0010207151284618693,
+      "rms_ratio": 1.0000166897099947,
+      "structural_zero_reference": false
+    }
+  },
+  "merge_order_dependency": "PR #1695 must land before this branch with local patch-equivalent commits dropped, or this branch lands first and #1695 omits/rebases 73ad090d411+f862e155491; never merge a second implementation",
+  "ordered_continuation": {
+    "row_1_1": "OPEN_LATERAL_FRICTION_UNRESOLVED",
+    "row_1_2": "ORDERED_BLOCKED",
+    "row_1_3": "ORDERED_BLOCKED",
+    "rows_2_to_6": "ORDERED_BLOCKED"
+  },
+  "ordered_dispositions": [
+    {
+      "attribution": {
+        "correlation_with_total_residual": -0.06987885937523067,
+        "residual_removal": -2.731148640577885e-14,
+        "rms_gain": 3.8582650119099966e-13,
+        "verdict": "REFUTES_CARRY"
+      },
+      "campaign_gate": "NEAR-CLASS",
+      "ordered_status": "CLEARED_NEAR_CLASS",
+      "term": "kinetic_energy_gradient"
+    },
+    {
+      "attribution": {
+        "correlation_with_total_residual": 0.021117257173451653,
+        "residual_removal": 0.00016906234742519732,
+        "rms_gain": 0.010037093280507435,
+        "verdict": "REFUTES_CARRY"
+      },
+      "campaign_gate": "DEBT",
+      "ordered_status": "CLEARED_REFUTES_CARRY",
+      "term": "vertical_advection"
+    },
+    {
+      "attribution": {
+        "correlation_with_total_residual": -0.02916631433044875,
+        "residual_removal": -3.9651538510810838,
+        "rms_gain": 4.835751370036012,
+        "verdict": "REFUTES_CARRY"
+      },
+      "campaign_gate": "DEBT",
+      "ordered_status": "CLEARED_REFUTES_CARRY",
+      "term": "vorticity"
+    },
+    {
+      "attribution": {
+        "correlation_with_total_residual": 0.9426393223555646,
+        "residual_removal": 0.6612415045308856,
+        "rms_gain": 0.9133374285898909,
+        "verdict": "UNRESOLVED"
+      },
+      "campaign_gate": "DEBT",
+      "ordered_status": "OPEN_UNRESOLVED",
+      "term": "lateral_friction"
+    }
+  ],
+  "provenance_sha256": {
+    "ldf_state_test": "6fd15277845c8723716b89b596396f535328f37261fe64d26ebb622ddfa77b11",
+    "preregistration": "8f1710bb328745a07fd32f7160e2649e63e831626bd52dd879d3787190217285",
+    "probe": "b11041452508114c6c62c2ffebc34251379f432b91767ae03759f03311a85dc9",
+    "round2_preregistration": "d6f12bb4538eb5b500f403387eebbea57013003a32b463a2d8bea6806373d69f",
+    "round2_probe": "dab1dae2107cd61e7b1f2b98f5dd2f87d7586a0d0907d5814b4a61ec3d11320c",
+    "twin_harness": "1e74f8e2b536adf521813d563caa5a76a7c09a69ad4a2c2428c229c3ba0f466e",
+    "zad_flux_fix_test": "cf6a9a5f1323f11131867986ce3edcc614464ad06a5f2d1013af704014cff35f",
+    "zad_mask_fix_test": "9066feeb454cefee3ed02e08bdef401e07ef1914ce1a209613309d8b9b5aef7f"
+  },
+  "run_input_sha256": {
+    "DINO_00005760_restart.nc": "0cc00f9945606d1dea52592280e363b45476103de96f5cef471d70b1b881ff3e",
+    "mesh_mask.nc": "3285fc4af36854a38b4e6f7985ab0372b95424398750a23b628935da02f72622",
+    "namelist_cfg": "0e75f4cb32dad3ed3fc17b721651ec12e0366c2978df8c65a6e95ae80b48d68b",
+    "namelist_ref": "b04f2ce4d12aa247ae3b707483d25cf2d38d0b3cf8817d71d33e66918fd81cfd",
+    "nemo": "545b383996e644591492e0fc7c82663a2d47272e2c7172ad8bbc58e5cd7d5239",
+    "ocean.output": "66162e1d54cc0c8648b0c220fe902b6a75f7b19a0e8c2349f5d11928809c0557",
+    "output.namelist.dyn": "1ebcbcc9bd3f91dede8153a297c1f9df906a262460476760a78a45be14b1176e"
+  },
+  "runtime": {
+    "backend": "cpu",
+    "cpu_device": "cpu:0",
+    "e3t_mode": "both",
+    "jax": "0.10.0",
+    "jax_enable_x64": true,
+    "jaxlib": "0.10.0",
+    "numpy": "2.4.4",
+    "platform": "Linux-5.14.0-611.36.1.el9_7.x86_64-x86_64-with-glibc2.34",
+    "python": "3.13.0 | packaged by conda-forge | (main, Nov 27 2024, 19:18:50) [GCC 13.3.0]"
+  },
+  "schema": "dino-split-explicit-momentum-chain-round3-v1",
+  "selector_receipt": {
+    "build_default": true,
+    "cli_default": true,
+    "legacy_euler_bridge_before": false,
+    "legacy_euler_stress": false,
+    "legacy_opt_in": false,
+    "run_default": true
+  },
+  "session_id": "01a04e34-d1fb-73e0-b25a-177641f0a246",
+  "slot": "NOT_ALLOCATED_EXISTING_DUMPS_AND_PRODUCTION_HOOK_ONLY",
+  "vorticity_plus_cor_removal": {
+    "correlation_with_total_residual": 0.4126863163462953,
+    "residual_removal": 0.08652382878366294,
+    "rms_gain": 0.334979080379257,
+    "verdict": "UNRESOLVED"
+  }
+}

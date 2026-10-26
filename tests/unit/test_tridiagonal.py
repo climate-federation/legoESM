@@ -20,7 +20,7 @@ import numpy as np
 
 jax.config.update("jax_enable_x64", True)
 
-from legoesm.timestepping.tridiagonal import thomas_solve
+from legoesm.timestepping.tridiagonal import thomas_solve, thomas_solve_shared
 
 
 def _dense_solve(a, b, c, d):
@@ -107,3 +107,106 @@ def test_thomas_solve_grad_safe():
         for i in range(n)
     ])
     np.testing.assert_allclose(g, fd, rtol=1e-4, atol=1e-6)
+
+
+def _thomas_loop_np(a, b, c, d):
+    """Reference sequential Thomas sweep in NumPy (same recurrence)."""
+    n = b.shape[-1]
+    cs = np.zeros(np.broadcast_shapes(a.shape, b.shape, c.shape, d.shape))
+    ds = np.zeros_like(cs)
+    cs[..., 0] = c[..., 0] / b[..., 0]
+    ds[..., 0] = d[..., 0] / b[..., 0]
+    for k in range(1, n):
+        den = b[..., k] - a[..., k] * cs[..., k - 1]
+        cs[..., k] = c[..., k] / den
+        ds[..., k] = (d[..., k] - a[..., k] * ds[..., k - 1]) / den
+    x = np.zeros_like(ds)
+    x[..., -1] = ds[..., -1]
+    for k in range(n - 2, -1, -1):
+        x[..., k] = ds[..., k] - cs[..., k] * x[..., k + 1]
+    return x
+
+
+def test_thomas_solve_short_systems_and_broadcast_shapes():
+    """n in {1, 2}, and a/b/c/d of different broadcast-compatible shapes
+    (one operator, many right-hand sides; one RHS, many diagonals): the
+    output is the full broadcast shape and matches the sequential sweep."""
+    rng = np.random.default_rng(3)
+    for n in (1, 2, 5):
+        a, b, c, d = _random_dd_system(n, rng)
+        x = np.asarray(thomas_solve(*map(jnp.asarray, (a, b, c, d))))
+        np.testing.assert_allclose(x, _thomas_loop_np(a, b, c, d), rtol=1e-13, atol=1e-15)
+    a, b, c, _ = _random_dd_system(6, rng)
+    D = rng.uniform(-1, 1, (4, 6))
+    x = np.asarray(thomas_solve(*map(jnp.asarray, (a, b, c, D))))
+    assert x.shape == (4, 6)
+    np.testing.assert_allclose(x, _thomas_loop_np(a, b, c, D), rtol=1e-13, atol=1e-15)
+    B = 3.0 + rng.uniform(0, 1, (3, 6))
+    d = rng.uniform(-1, 1, 6)
+    x = np.asarray(thomas_solve(*map(jnp.asarray, (a, B, c, d))))
+    assert x.shape == (3, 6)
+    np.testing.assert_allclose(x, _thomas_loop_np(a, B, c, d), rtol=1e-13, atol=1e-15)
+
+
+def test_thomas_solve_batched_matches_sequential_sweep_bitwise_close():
+    """A (cells, levels) batch -- the ocean's implicit-mixing shape -- against
+    the sequential NumPy sweep, float64."""
+    rng = np.random.default_rng(4)
+    shp = (257, 40)
+    a = rng.uniform(-1, 0, shp); a[:, 0] = 0
+    c = rng.uniform(-1, 0, shp); c[:, -1] = 0
+    b = 2.5 + rng.uniform(0, 1, shp); d = rng.normal(size=shp)
+    x = np.asarray(thomas_solve(*map(jnp.asarray, (a, b, c, d))))
+    np.testing.assert_allclose(x, _thomas_loop_np(a, b, c, d), rtol=1e-13, atol=1e-15)
+
+
+def test_thomas_sweeps_emit_levels_instead_of_writing_into_a_buffer():
+    """Each sweep scans over the level axis and stacks its outputs; a per-level
+    ``x.at[..., k].set`` inside a loop lowers to a scatter that XLA's CPU
+    backend turns into a whole-buffer rewrite every iteration (~30% of an
+    MPAS dycore step before it was removed)."""
+    import jax
+    import jax.numpy as jnp
+
+    a = b = c = d = jnp.ones((7, 32))
+    jaxpr = str(jax.make_jaxpr(thomas_solve)(a, b + 3.0, c, d))
+    assert "scan" in jaxpr  # the solve body is printed, so the check bites
+    assert "scatter" not in jaxpr and "dynamic_update_slice" not in jaxpr
+    # the one-matrix, several-RHS variant used by ocean vertical mixing
+    jaxpr = str(jax.make_jaxpr(
+        lambda a, b, c, d: thomas_solve_shared(a, b, c, (d, 2.0 * d)))(a, b + 3.0, c, d))
+    assert "scan" in jaxpr
+    assert "scatter" not in jaxpr and "dynamic_update_slice" not in jaxpr
+
+
+def test_thomas_single_level_without_jit():
+    """n == 1 is just d/b; it must also work eagerly (zero-length scans are
+    rejected outside jit)."""
+    import jax
+    import jax.numpy as jnp
+    b = jnp.array([[2.0], [4.0]]); d = jnp.array([[1.0], [3.0]])
+    z = jnp.zeros_like(b)
+    with jax.disable_jit():
+        x = thomas_solve(z, b, z, d)
+    np.testing.assert_allclose(np.asarray(x), np.asarray(d / b), rtol=1e-6)
+    with jax.disable_jit():
+        x1, x2 = thomas_solve_shared(z, b, z, (d, 2.0 * d))
+    np.testing.assert_allclose(np.asarray(x1), np.asarray(d / b), rtol=1e-6)
+    np.testing.assert_allclose(np.asarray(x2), np.asarray(2.0 * d / b), rtol=1e-6)
+
+
+def test_thomas_shared_matches_single_rhs_bitwise():
+    rng = np.random.default_rng(0)
+    for dtype in (np.float32, np.float64):
+        a = jnp.asarray(rng.uniform(-1, 0, (5, 16)), dtype)
+        c = jnp.asarray(rng.uniform(-1, 0, (5, 16)), dtype)
+        b = jnp.asarray(3.0 + rng.uniform(0, 1, (5, 16)), dtype)
+        d1 = jnp.asarray(rng.normal(size=(5, 16)), dtype)
+        d2 = jnp.asarray(rng.normal(size=(5, 16)), dtype)
+        for wrap in (lambda f: f, jax.jit):
+            x1, x2 = wrap(lambda a, b, c, d1, d2: thomas_solve_shared(a, b, c, (d1, d2)))(a, b, c, d1, d2)
+            single = wrap(thomas_solve)
+            np.testing.assert_array_equal(np.asarray(x1), np.asarray(single(a, b, c, d1)))
+            np.testing.assert_array_equal(np.asarray(x2), np.asarray(single(a, b, c, d2)))
+            y1, y2 = wrap(lambda b, d1, d2: thomas_solve_shared(0 * b, b, 0 * b, (d1, d2)))(b[:, :1], d1[:, :1], d2[:, :1])
+            np.testing.assert_array_equal(np.asarray(y1), np.asarray(single(0 * b[:, :1], b[:, :1], 0 * b[:, :1], d1[:, :1])))

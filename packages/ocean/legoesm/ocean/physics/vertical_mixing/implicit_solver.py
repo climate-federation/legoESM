@@ -42,8 +42,10 @@ import os
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 
 from legoesm.timestepping.tridiagonal import (
+    diffusion_thomas_solve,
     thomas_solve,
     thomas_solve_batched,
     thomas_solve_shared,
@@ -113,10 +115,20 @@ def _restore_column_mass(x: jax.Array, field: jax.Array,
     Add the uniform per-column shift that restores ``Σ(x·dz) == Σ(field·dz)``
     exactly in f64 (the diffusion has zero-flux BCs, so the column integral is
     invariant).  Cheap (one f64 column sum) and mass-exact; the shift is
-    ``~1e-6`` of the field so it is physically negligible.  All inputs f64."""
+    ``~1e-6`` of the field so it is physically negligible.  All inputs f64.
+
+    DRY COLUMNS: ``dz`` is zero at every level of a column that is entirely
+    land (and, for the u/v-face control volume, of any face the wet-face mask
+    closes at every level -- a coastal or walled face).  The correction is
+    then ``0/0``: the FORWARD value is masked away downstream, but the
+    REVERSE-mode derivative of ``0/0`` is NaN and poisons every gradient that
+    flows through the column.  Return the uncorrected solve there instead --
+    a column with no water has no mass to restore."""
     w = jnp.broadcast_to(dz, x.shape)
     deficit = jnp.sum((field - x) * w, axis=-1, keepdims=True)
-    return x + deficit / jnp.sum(w, axis=-1, keepdims=True)
+    denom = jnp.sum(w, axis=-1, keepdims=True)
+    wet = denom > 0.0
+    return x + jnp.where(wet, deficit / jnp.where(wet, denom, 1.0), 0.0)
 
 
 def implicit_vertical_diffusion_ocean(
@@ -187,14 +199,27 @@ def implicit_vertical_diffusion_ocean(
         # One-level columns have no vertical gradient ⇒ no-op.
         return field
 
-    a, b, c, d = _build_implicit_tridiag(field, K, dz, dz_half, dt,
-                                          extra_diag=extra_diag)
     if _vmix_f32_solve_enabled(field.dtype):
+        a, b, c, d = _build_implicit_tridiag(field, K, dz, dz_half, dt,
+                                              extra_diag=extra_diag)
         f32 = jnp.float32
         x = thomas_solve(a.astype(f32), b.astype(f32), c.astype(f32),
                          d.astype(f32)).astype(field.dtype)
         return _restore_column_mass(x, field, dz)
-    return thomas_solve(a, b, c, d)
+    # Levels-first solve with the bands built inside the sweep: the same bands
+    # as _build_implicit_tridiag, without materialising and transposing them.
+    flux, inv_dz = _diffusion_interface_coeffs(field, K, dz, dz_half)
+    dtf = dt * flux
+    extra = jnp.asarray(extra_diag)
+    work = jnp.result_type(dtf, inv_dz, extra, field)
+    lead = field.shape[:-1]
+    dtf = jnp.moveaxis(jnp.broadcast_to(dtf, lead + (nlev - 1,)), -1, 0)
+    inv_dz = jnp.moveaxis(jnp.broadcast_to(inv_dz, field.shape), -1, 0)
+    if extra.ndim:
+        extra = jnp.moveaxis(jnp.broadcast_to(extra, field.shape), -1, 0)
+    x = diffusion_thomas_solve(dtf, inv_dz, extra,
+                               jnp.moveaxis(field, -1, 0).astype(work))
+    return jnp.moveaxis(x, 0, -1).astype(field.dtype)
 
 
 def implicit_vertical_diffusion_ocean_pair(
@@ -253,6 +278,432 @@ def implicit_vertical_diffusion_ocean_pair(
     return x1, x2
 
 
+def _round_the_multiply(product: jax.Array) -> jax.Array:
+    """Return ``product`` unchanged, but as a value the backend must round.
+
+    NEMO writes ``zrhs - zwi/zwt*pt`` (``trazdf.F90``, compiled
+    ``trazdf.f90:532``) and ``(pt - zws*pt)/zwt`` (``:546``), and gfortran
+    rounds the multiply and the subtraction SEPARATELY.  XLA on CPU contracts
+    the same expression into a fused multiply-add, which rounds once.
+
+    ``jax.lax.optimization_barrier`` does NOT prevent it.  Measured on 4096
+    random triples of ``c - a*b``: plain, a barrier on the product, a barrier
+    on the ``(product, source)`` tuple, ``lax.reduce_precision(.., 11, 52)``
+    and a bitcast round trip all reproduce the FUSED result on all 812 cells
+    where fused and separate differ; inside a ``lax.scan`` an extra unused
+    output and an unused carry slot are both eliminated and do not help
+    either.  ``XLA_FLAGS=--xla_allow_excess_precision=false`` and
+    ``--xla_cpu_enable_fast_math=false`` change nothing.
+
+    What does work is making the subtraction's operand an ADD rather than a
+    multiply, because a fused multiply-add can only absorb a multiply.
+    ``x + copysign(0.0, x)`` returns ``x`` for every normal input AND for both
+    signed zeros -- which matters here, since NEMO's own ``zwi`` and ``zws``
+    carry negative zeros -- and the compiler cannot fold it away, the way it
+    folds ``x * 1.0`` or ``x - 0.0``.
+
+    IT IS NOT THE IDENTITY ON SUBNORMALS: an independent claim review measured
+    that under ``jit`` this construction FLUSHES a subnormal to a signed zero
+    (5e-324, 1e-308 and 1.5e-310 all become 0.0), where ``x + 0.0`` and
+    ``x * 1.0`` preserve them because they are simplified away.  That is inert
+    in this solve on these cards -- the products it forms are of order 1e-4 to
+    1e4, and XLA's CPU scan already flushes a computed subnormal product with
+    or without this helper -- but it is a real restriction on the docstring's
+    promise, so it is written here rather than discovered by the next caller.
+
+    Cost: one copysign and one add per element.  Measured effect on the
+    tracer sweep, given NEMO's own matrix and right-hand side: 133 (T) and
+    111 (S) differing wet cells to zero.
+    """
+    return product + jnp.copysign(jnp.zeros_like(product), product)
+
+
+def _nemo_ordered_solve(
+    lower: jax.Array,
+    diagonal: jax.Array,
+    upper: jax.Array,
+    rhs: jax.Array,
+    *,
+    return_trace: bool = False,
+) -> jax.Array | tuple[jax.Array, tuple[jax.Array, jax.Array]]:
+    """NEMO's three source-ordered Thomas recurrences.
+
+    Unlike :func:`thomas_solve`, NEMO first eliminates the complete diagonal,
+    then walks the RHS, then seeds the last wet-array row and substitutes in
+    reverse.  Keeping these as separate ordered scans is numerically visible
+    at the matched-day-180 bar (``dynzdf.F90:322-345`` and
+    ``trazdf.F90:256-286``).
+    """
+    if not (lower.shape == diagonal.shape == upper.shape == rhs.shape):
+        raise ValueError("NEMO literal tridiagonal operands must share shape")
+    if rhs.ndim < 1 or rhs.shape[-1] < 1:
+        raise ValueError("NEMO literal tridiagonal solve needs at least one row")
+    nlev = rhs.shape[-1]
+    if nlev == 1:
+        return rhs / diagonal
+
+    diag_inputs = tuple(jnp.moveaxis(x, -1, 0) for x in (
+        lower[..., 1:], diagonal[..., 1:], upper[..., :-1]))
+
+    def diagonal_step(previous, operands):
+        current_lower, current_diagonal, previous_upper = operands
+        product = jax.lax.optimization_barrier(
+            current_lower * previous_upper)
+        quotient = jax.lax.optimization_barrier(product / previous)
+        current = jax.lax.optimization_barrier(
+            current_diagonal - quotient)
+        return current, current
+
+    _, diag_rows = jax.lax.scan(
+        diagonal_step, diagonal[..., 0], diag_inputs)
+    eliminated = jnp.concatenate(
+        [diagonal[..., :1], jnp.moveaxis(diag_rows, 0, -1)], axis=-1)
+
+    rhs_inputs = tuple(jnp.moveaxis(x, -1, 0) for x in (
+        rhs[..., 1:], lower[..., 1:], eliminated[..., :-1]))
+
+    def rhs_step(previous, operands):
+        source, current_lower, previous_diagonal = operands
+        # NEMO writes division before multiplication in both routines.
+        quotient = jax.lax.optimization_barrier(
+            current_lower / previous_diagonal)
+        product = jax.lax.optimization_barrier(
+            _round_the_multiply(quotient * previous))
+        current = jax.lax.optimization_barrier(source - product)
+        return current, current
+
+    _, work_rows = jax.lax.scan(rhs_step, rhs[..., 0], rhs_inputs)
+    work = jnp.concatenate(
+        [rhs[..., :1], jnp.moveaxis(work_rows, 0, -1)], axis=-1)
+
+    terminal = work[..., -1] / eliminated[..., -1]
+    reverse_inputs = tuple(
+        jnp.moveaxis(x[..., :-1][..., ::-1], -1, 0)
+        for x in (work, upper, eliminated))
+
+    def reverse_step(next_value, operands):
+        source, current_upper, current_diagonal = operands
+        product = jax.lax.optimization_barrier(
+            _round_the_multiply(current_upper * next_value))
+        numerator = jax.lax.optimization_barrier(source - product)
+        current = jax.lax.optimization_barrier(
+            numerator / current_diagonal)
+        return current, current
+
+    _, reverse_rows = jax.lax.scan(
+        reverse_step, terminal, reverse_inputs)
+    solution = jnp.concatenate(
+        [jnp.moveaxis(reverse_rows, 0, -1)[..., ::-1],
+         terminal[..., None]], axis=-1)
+    if return_trace:
+        return solution, (eliminated, work)
+    return solution
+
+
+# The three recurrences under a name other modules may import.  It IS
+# ``_nemo_ordered_solve`` -- the same function object the momentum and tracer
+# solves call -- so an oracle gate driving it is driving the trajectory's own
+# sweep and not a copy of it.  ``tests/ocean/unit/test_zdf_implicit_literal.py``
+# pins the identity.
+nemo_ordered_tridiagonal_solve = _nemo_ordered_solve
+
+
+def implicit_vertical_diffusion_nemo_momentum(
+    field: jax.Array,
+    avm_face: jax.Array,
+    dz_after: jax.Array,
+    e3w_now: jax.Array,
+    dt: float,
+    wet: jax.Array,
+    *,
+    extra_diag: jax.Array | float = 0.0,
+    implicit_w: jax.Array | None = None,
+) -> jax.Array:
+    """Literal NEMO ``dynzdf`` momentum matrix and ordered solve.
+
+    ``avm_face`` is the already-interpolated arithmetic face average.  The
+    exact multiply by two reconstructs the rounded two-T-point sum so the
+    coefficient retains NEMO's written ``0.5*dt * (avm_1+avm_2)``
+    association instead of the generic normalised operator's ``dt*K/dz``.
+    """
+    if field.shape != dz_after.shape or field.shape != wet.shape:
+        raise ValueError("field, dz_after, and wet must share shape")
+    if avm_face.shape != field.shape[:-1] + (field.shape[-1] - 1,):
+        raise ValueError("avm_face must contain one value per interior face")
+    if e3w_now.shape != avm_face.shape:
+        raise ValueError("e3w_now must match avm_face")
+    dtype = field.dtype
+    wet_f = jnp.asarray(wet, dtype=dtype)
+    if field.shape[-1] < 2:
+        diagonal = (jnp.asarray(1.0, dtype=dtype)
+                    + jnp.asarray(extra_diag, dtype=dtype))
+        diagonal = jnp.where(wet_f > 0.0, diagonal,
+                             jnp.asarray(1.0, dtype=dtype))
+        return field / diagonal * wet_f
+
+    zero = jnp.zeros_like(field[..., :1])
+    zdt2 = jnp.asarray(0.5, dtype=dtype) * jnp.asarray(dt, dtype=dtype)
+    avm_sum = jnp.asarray(2.0, dtype=dtype) * avm_face
+    interface_wet = wet_f[..., 1:] * wet_f[..., :-1]
+    avm_product = jax.lax.optimization_barrier(-zdt2 * avm_sum)
+    dz_safe = jnp.where(wet_f > 0.0, dz_after,
+                        jnp.asarray(1.0, dtype=dtype))
+    e3w_safe = jnp.where(interface_wet > 0.0, e3w_now,
+                         jnp.asarray(1.0, dtype=dtype))
+    lower_denominator = jax.lax.optimization_barrier(
+        dz_safe[..., 1:] * e3w_safe)
+    upper_denominator = jax.lax.optimization_barrier(
+        dz_safe[..., :-1] * e3w_safe)
+    lower_coeff = jax.lax.optimization_barrier(
+        avm_product / lower_denominator) * interface_wet
+    upper_coeff = jax.lax.optimization_barrier(
+        avm_product / upper_denominator) * interface_wet
+    lower = jnp.concatenate([zero, lower_coeff], axis=-1)
+    upper = jnp.concatenate([upper_coeff, zero], axis=-1)
+    diagonal = jax.lax.optimization_barrier(
+        jnp.asarray(1.0, dtype=dtype) - lower)
+    diagonal = jax.lax.optimization_barrier(diagonal - upper)
+    diagonal = jax.lax.optimization_barrier(
+        diagonal + jnp.asarray(extra_diag, dtype=dtype))
+    if implicit_w is not None:
+        if implicit_w.shape != field.shape[:-1] + (field.shape[-1] + 1,):
+            raise ValueError("implicit_w must contain nlev+1 interfaces")
+        # NEMO dynzdf.F90:252-267, live flux-form branch. ``implicit_w``
+        # already carries the e1e2t-area-weighted momentum-face velocity.
+        w_top = implicit_w[..., :-1]
+        w_bottom = implicit_w[..., 1:]
+        inv_dz = wet_f / jnp.where(wet_f > 0.0, dz_after, 1.0)
+        dt_a = jnp.asarray(dt, dtype=dtype)
+        lower = lower + dt_a * jnp.minimum(w_top, 0.0) * inv_dz
+        upper = upper - dt_a * jnp.maximum(w_bottom, 0.0) * inv_dz
+        diagonal = diagonal + dt_a * (
+            jnp.maximum(w_top, 0.0) - jnp.minimum(w_bottom, 0.0)) * inv_dz
+    diagonal = jnp.where(wet_f > 0.0, diagonal,
+                         jnp.asarray(1.0, dtype=dtype))
+    return _nemo_ordered_solve(lower, diagonal, upper, field) * wet_f
+
+
+def implicit_vertical_diffusion_nemo_tracer_pair(
+    content_rhs_1: jax.Array,
+    content_rhs_2: jax.Array,
+    K: jax.Array,
+    e3t_after: jax.Array,
+    e3w_now: jax.Array,
+    dt: float,
+    wet: jax.Array,
+    implicit_w: jax.Array | None = None,
+    *,
+    return_matrix_trace: bool = False,
+    rounded_thickness: bool = False,
+) -> tuple[jax.Array, jax.Array]:
+    """Literal NEMO ``trazdf`` content matrix and paired ordered solves."""
+    if content_rhs_1.shape != content_rhs_2.shape:
+        raise ValueError("tracer content RHS arrays must share shape")
+    if content_rhs_1.shape != e3t_after.shape or wet.shape != e3t_after.shape:
+        raise ValueError("content RHS, e3t_after, and wet must share shape")
+    if K.shape != content_rhs_1.shape[:-1] + (content_rhs_1.shape[-1] - 1,):
+        raise ValueError("K must contain one value per interior face")
+    if e3w_now.shape != K.shape:
+        raise ValueError("e3w_now must match K")
+    if content_rhs_1.shape[-1] < 2:
+        divisor = jnp.maximum(e3t_after, _EPS)
+        wet_f = jnp.asarray(wet, dtype=content_rhs_1.dtype)
+        out = (content_rhs_1 / divisor * wet_f,
+               content_rhs_2 / divisor * wet_f)
+        if return_matrix_trace:
+            zero = jnp.zeros_like(content_rhs_1)
+            return (*out, (zero, divisor, zero, divisor, content_rhs_1))
+        return out
+
+    wet_f = jnp.asarray(wet, dtype=content_rhs_1.dtype)
+    lower, diagonal, upper = nemo_tracer_tridiagonal(
+        K, e3t_after, e3w_now, dt, wet, implicit_w=implicit_w,
+        dtype=content_rhs_1.dtype, rounded_thickness=rounded_thickness)
+    if return_matrix_trace:
+        out_1_raw, (eliminated_1, forward_1) = _nemo_ordered_solve(
+            lower, diagonal, upper, content_rhs_1, return_trace=True)
+        out_1 = out_1_raw * wet_f
+    else:
+        out_1 = nemo_ordered_tridiagonal_solve(
+            lower, diagonal, upper, content_rhs_1) * wet_f
+    out_2 = nemo_ordered_tridiagonal_solve(
+        lower, diagonal, upper, content_rhs_2) * wet_f
+    if return_matrix_trace:
+        # WRITE-only diagnostic: these are the exact arrays consumed by the
+        # two production recurrences above, not a second reconstruction.
+        return out_1, out_2, (
+            lower, diagonal, upper, eliminated_1, forward_1)
+    return out_1, out_2
+
+
+def nemo_tracer_tridiagonal(
+    K: jax.Array,
+    e3t_after: jax.Array,
+    e3w_now: jax.Array,
+    dt: float,
+    wet: jax.Array,
+    *,
+    implicit_w: jax.Array | None = None,
+    dtype=None,
+    rounded_thickness: bool = False,
+) -> tuple[jax.Array, jax.Array, jax.Array]:
+    """NEMO ``trazdf``'s three tracer diagonals, exactly as the solve uses them.
+
+    Extracted from :func:`implicit_vertical_diffusion_nemo_tracer_pair` --
+    which now calls it -- with no statement reordered, so that an oracle gate
+    can score legoESM's ASSEMBLY against NEMO's dumped ``zwi``/``zwd``/``zws``
+    given NEMO's own operands, separately from the ordered sweep.  Before the
+    extraction the assembly had no name and could only be observed through a
+    solved column, which conflates the two.
+
+    Returns ``(lower, diagonal, upper)``, each shaped like ``e3t_after``.
+    ``lower[..., 0]`` and ``upper[..., -1]`` are exact zeros, matching NEMO's
+    ``zwt(:,1) = 0`` (``trazdf.F90:204``) and its unwritten bottom face.
+
+    TWO DEVIATIONS FROM NEMO ARE DELIBERATE AND VISIBLE HERE, rather than
+    buried: each face coefficient is multiplied by ``interface_wet``, and each
+    dry diagonal is replaced by ``1.0``.  The first is inert given NEMO's own
+    masked ``avt``; the second is NOT inert and is registered at the return,
+    where the measurement that forced it is written down.  The two boundary
+    slots the recurrences never read are NEGATIVE zeros, as NEMO's are.
+    """
+    # ``dtype`` is threaded rather than taken from ``e3t_after`` so the
+    # extraction is byte-exact for the pair solve, whose working dtype is the
+    # RHS's; the two agree in every production call and the parameter exists
+    # only so that "agree" is not an assumption.
+    dtype = e3t_after.dtype if dtype is None else dtype
+    # NEMO's two boundary slots are NEGATIVE zeros, not absent.  It sets
+    # zwt(:,1) = 0 (trazdf.f90:419) and then writes zwi(ji,1) =
+    # -p2dt*zwt(ji,1)/e3w (:443), which is -0.0 for any positive e3w; the
+    # bottom zws(ji,jpkm1) = -p2dt*zwt(ji,jpk)/e3w (:444) is -0.0 whenever the
+    # matrix diffusivity vanishes at jk = jpk, which the round-35 gate reports
+    # as a measured condition rather than assuming.  Neither slot is ever read
+    # by the recurrences -- they use lower[1:] and upper[:-1] -- so this
+    # changes no arithmetic; it stops the assembly from differing from NEMO's
+    # in bits that a gate at the exact bar can see.
+    zero = jnp.full(e3t_after.shape[:-1] + (1,), -0.0, dtype=dtype)
+    wet_f = jnp.asarray(wet, dtype=dtype)
+    interface_wet = wet_f[..., 1:] * wet_f[..., :-1]
+    product = jax.lax.optimization_barrier(
+        -jnp.asarray(dt, dtype=dtype) * K)
+    e3w_safe = jnp.where(interface_wet > 0.0, e3w_now,
+                         jnp.asarray(1.0, dtype=dtype))
+    coeff = (jax.lax.optimization_barrier(product / e3w_safe)
+             * interface_wet)
+    lower = jnp.concatenate([zero, coeff], axis=-1)
+    upper = jnp.concatenate([coeff, zero], axis=-1)
+    coefficient_sum = jax.lax.optimization_barrier(lower + upper)
+    # trazdf.f90:233 rounds the live thickness product before subtracting.
+    # Without this barrier the backend may fuse the caller's product with
+    # the subtraction, changing the last bit of the diagonal.
+    thickness = (
+        _round_the_multiply(e3t_after)
+        if rounded_thickness else e3t_after
+    )
+    diagonal = jax.lax.optimization_barrier(thickness - coefficient_sum)
+    if implicit_w is not None:
+        if implicit_w.shape != e3t_after.shape[:-1] + (
+                e3t_after.shape[-1] + 1,):
+            raise ValueError("implicit_w must contain nlev+1 interfaces")
+        # NEMO trazdf.F90:207-216: the adaptive upwind transport is fused
+        # into the same thickness-form matrix as vertical diffusion.
+        w_top = implicit_w[..., :-1]
+        w_bottom = implicit_w[..., 1:]
+        dt_a = jnp.asarray(dt, dtype=dtype)
+        lower = lower + dt_a * jnp.minimum(w_top, 0.0)
+        upper = upper - dt_a * jnp.maximum(w_bottom, 0.0)
+        diagonal = diagonal + dt_a * (
+            jnp.maximum(w_top, 0.0) - jnp.minimum(w_bottom, 0.0))
+    # NEMO writes trazdf.f90:445 UNCONDITIONALLY, wet or dry, and relies on
+    # avt being masked so that a dry row reduces to its own e3t.  This does
+    # NOT, and the reason is measured rather than asserted: NEMO's e3t_3d is
+    # the positive REFERENCE thickness below the seafloor as well as above it,
+    # while legoESM's h_partial is EXACTLY 0.0 at every dry cell on all three
+    # NEMO cards -- 3120 of GYRE's 21120, 5240 of LOCK_EXCHANGE's 7800, 43600
+    # of OVERFLOW's 60600.  Dropping the substitution therefore divides by a
+    # zero diagonal in production; OVERFLOW's kt=2 tracers went NON-FINITE,
+    # which is how this was found, and the given-inputs discharge could not
+    # see it because NEMO's own e3t_Kaa satisfies the precondition and
+    # legoESM's thickness does not.
+    #
+    # So this substitution is a DEVIATION FROM NEMO that is registered, not a
+    # transcription: it is the only difference left in the assembled tracer
+    # matrix, it accounts for exactly the 3120 dry cells of GYRE's scored box
+    # at up to 299.71, and it cannot reach a wet answer on a card with no dry
+    # cell above a wet one.  Closing it means giving legoESM NEMO's reference
+    # thickness below the seafloor, which is a geometry change and not this
+    # function's to make.
+    diagonal = jnp.where(wet_f > 0.0, diagonal,
+                         jnp.asarray(1.0, dtype=dtype))
+    return lower, diagonal, upper
+
+
+def implicit_vertical_diffusion_ocean_momentum_dispatch(
+    field: jax.Array,
+    avm_face: jax.Array,
+    dz_after: jax.Array,
+    e3w_now: jax.Array,
+    dt: float,
+    wet: jax.Array,
+    *,
+    evaluation: str = "shared_thomas",
+    extra_diag: jax.Array | float = 0.0,
+    implicit_w: jax.Array | None = None,
+) -> jax.Array:
+    """Static production dispatch for the final momentum ZDF application."""
+    if evaluation == "shared_thomas" and implicit_w is not None:
+        raise ValueError("implicit_w requires evaluation='nemo_literal'")
+    if evaluation == "shared_thomas":
+        return implicit_vertical_diffusion_ocean(
+            field, avm_face, dz_after, e3w_now, dt,
+            extra_diag=extra_diag)
+    if evaluation == "nemo_literal":
+        return implicit_vertical_diffusion_nemo_momentum(
+            field, avm_face, dz_after, e3w_now, dt, wet,
+            extra_diag=extra_diag, implicit_w=implicit_w)
+    raise ValueError(
+        "unknown ZDF momentum solver evaluation "
+        f"{evaluation!r}; expected 'shared_thomas' or 'nemo_literal'")
+
+
+def implicit_vertical_diffusion_ocean_tracer_pair_dispatch(
+    field_1: jax.Array,
+    field_2: jax.Array,
+    content_rhs_1: jax.Array,
+    content_rhs_2: jax.Array,
+    K: jax.Array,
+    dz_after: jax.Array,
+    e3w_now: jax.Array,
+    dt: float,
+    wet: jax.Array,
+    *,
+    evaluation: str = "shared_thomas",
+    implicit_w: jax.Array | None = None,
+    return_matrix_trace: bool = False,
+    rounded_thickness: bool = False,
+) -> tuple[jax.Array, jax.Array]:
+    """Static production dispatch for the paired tracer ZDF application."""
+    if evaluation == "shared_thomas" and implicit_w is not None:
+        raise ValueError("implicit_w requires evaluation='nemo_literal'")
+    if evaluation == "shared_thomas" and rounded_thickness:
+        raise ValueError("rounded_thickness requires evaluation='nemo_literal'")
+    if evaluation == "shared_thomas":
+        if return_matrix_trace:
+            raise ValueError(
+                "return_matrix_trace requires evaluation='nemo_literal'")
+        return implicit_vertical_diffusion_ocean_pair(
+            field_1, field_2, K, dz_after, e3w_now, dt)
+    if evaluation == "nemo_literal":
+        return implicit_vertical_diffusion_nemo_tracer_pair(
+            content_rhs_1, content_rhs_2, K, dz_after, e3w_now, dt, wet,
+            implicit_w=implicit_w,
+            return_matrix_trace=return_matrix_trace,
+            rounded_thickness=rounded_thickness)
+    raise ValueError(
+        "unknown ZDF tracer solver evaluation "
+        f"{evaluation!r}; expected 'shared_thomas' or 'nemo_literal'")
+
+
 def _build_implicit_tridiag(
     field: jax.Array,
     K: jax.Array | float,
@@ -280,6 +731,34 @@ def _build_implicit_tridiag(
     Caller guarantees ``field.shape[-1] = nlev >= 2`` (the ``nlev < 2`` no-op
     is handled by the public wrappers before this is invoked).
     """
+    flux_coeff, inv_dz = _diffusion_interface_coeffs(field, K, dz, dz_half)
+
+    # Pad top and bottom with zero (no-flux).  Two Pad HLO ops replace
+    # alloc-zeros + two concatenate-of-two.
+    pad_axes = ((0, 0),) * (flux_coeff.ndim - 1)
+    flux_top = jnp.pad(flux_coeff, (*pad_axes, (1, 0)))  # (..., nlev)
+    flux_bot = jnp.pad(flux_coeff, (*pad_axes, (0, 1)))  # (..., nlev)
+
+    alpha = dt * flux_top * inv_dz                    # (..., nlev)
+    beta = dt * flux_bot * inv_dz                     # (..., nlev)
+
+    # Tridiagonal coefficients:
+    #   a_k = -α_k   (sub-diagonal, a_0 = 0)
+    #   b_k = 1 + α_k + β_k + extra_diag_k
+    #   c_k = -β_k   (super-diagonal, c_{N-1} = 0)
+    #   d_k = φ^n_k
+    # extra_diag defaults to 0.0 -> b unchanged -> bit-identical.
+    a = -alpha
+    b = 1.0 + alpha + beta + extra_diag
+    c = -beta
+    d = field
+    return a, b, c, d
+
+
+def _diffusion_interface_coeffs(field, K, dz, dz_half):
+    """``K/dz_half`` at the interior interfaces (..., nlev-1) and ``1/dz``
+    (..., nlev), with K, dz, dz_half promoted to the field's leading shape.
+    The shared front end of both backward-Euler solve paths."""
     nlev = field.shape[-1]
 
     # --- Promote K, dz, dz_half to match the field's leading shape ---
@@ -305,37 +784,15 @@ def _build_implicit_tridiag(
             f"dz_half last dim {dzh_arr.shape[-1]} must equal nlev-1 = "
             f"{nlev - 1}")
 
-    # --- Build α and β at every cell (last axis = level) ---
-    # α_k uses the (k-1/2) interface, β_k the (k+1/2) interface.
-    # We pad K with an extra zero on each side so indexing is uniform;
-    # the zeros naturally encode the no-flux BCs.
+    # α_k uses the (k-1/2) interface, β_k the (k+1/2) interface; the missing
+    # interfaces above the top and below the bottom are the no-flux BCs.
     K_safe = jnp.maximum(K_arr, 0.0)
     dzh_safe = jnp.maximum(dzh_arr, _EPS)
 
     # K / dz_half at interfaces (nlev-1)
     flux_coeff = K_safe / dzh_safe                   # (..., nlev-1)
-
-    # Pad top and bottom with zero (no-flux).  Two Pad HLO ops replace
-    # alloc-zeros + two concatenate-of-two.
-    pad_axes = ((0, 0),) * (flux_coeff.ndim - 1)
-    flux_top = jnp.pad(flux_coeff, (*pad_axes, (1, 0)))  # (..., nlev)
-    flux_bot = jnp.pad(flux_coeff, (*pad_axes, (0, 1)))  # (..., nlev)
-
     inv_dz = 1.0 / jnp.maximum(dz_arr, _EPS)          # (..., nlev)
-    alpha = dt * flux_top * inv_dz                    # (..., nlev)
-    beta = dt * flux_bot * inv_dz                     # (..., nlev)
-
-    # Tridiagonal coefficients:
-    #   a_k = -α_k   (sub-diagonal, a_0 = 0)
-    #   b_k = 1 + α_k + β_k + extra_diag_k
-    #   c_k = -β_k   (super-diagonal, c_{N-1} = 0)
-    #   d_k = φ^n_k
-    # extra_diag defaults to 0.0 -> b unchanged -> bit-identical.
-    a = -alpha
-    b = 1.0 + alpha + beta + extra_diag
-    c = -beta
-    d = field
-    return a, b, c, d
+    return flux_coeff, inv_dz
 
 
 def implicit_vertical_diffusion_ocean_batched(
@@ -478,3 +935,106 @@ def build_dz_half(dz: jax.Array) -> jax.Array:
     system.
     """
     return 0.5 * (dz[..., :-1] + dz[..., 1:])
+
+
+def nemo_e3w_kmm(z_coord, e3t_now, stretch, *, to_point=None):
+    """NEMO's implicit-solve gradient divisor ``e3w(:,:,jk,Kmm)``.
+
+    NEMO's ``tra_zdf``/``dyn_zdf`` divide the vertical gradient by ``e3w`` at
+    the NOW time level, and by nothing else::
+
+        TRA/trazdf.F90:219-221      zwi = -p2dt*zwt(jk  ) / e3w(ji,jj,jk  ,Kmm)
+                                    zws = -p2dt*zwt(jk+1) / e3w(ji,jj,jk+1,Kmm)
+        DYN/dynzdf.F90:200-203      zzwi = -zDt_2*(avm(ji+1,jj,jk)+avm(ji,jj,jk))
+                                         / (e3u(...,Kaa) * e3uw(ji,jj,jk,Kmm)) * wumask
+
+    with, under ``key_qco key_vco_3d`` (DINO's ``cpp_DINO.fcm``),
+
+        DOM/domzgr_substitute.h90:131   e3w(i,j,k,t)  = E3w_0(i,j,k) *(1+r3t(i,j,t))
+        DOM/domzgr_substitute.h90:108   E3w_0(i,j,k)  = e3w_3d(i,j,k)
+        DOM/domzgr_substitute.h90:49    Time(r3,i,j,t) = *(1._wp + r3(i,j,t))
+
+    and ``e3w_0(k) = gdept_0(k) - gdept_0(k-1)`` — the T-POINT DEPTH
+    DIFFERENCE, which on a stretched ladder is NOT the interface midpoint
+    ``0.5*(e3t_k + e3t_{k-1})``.  The momentum divisor is the same object:
+    ``zgr_lib.F90:111-112`` sets ``pe3uw(:,:,:) = pe3w(:,:,:)`` on the ``zco``
+    branch DINO runs, so this one function serves both solves.
+
+    Returned at the point ``to_point`` maps to: ``None`` = T points (the
+    tracer solve), otherwise the U- or V-face interpolator (the momentum
+    solve, NEMO's ``e3uw``/``e3vw``).
+
+    ``e3w_0`` is resolved in exactly ONE place, with this precedence:
+
+    1. the card's RAW NEMO mesh ``e3w_0`` when it carries one
+       (``z_coord.nemo_e3w_0`` under ``nemo_e3w_mesh_reference``).  The
+       constructor already proves that field equals ``diff(gdept_0)`` on the
+       interior (``vertical.py`` ``create_z_star_from_thicknesses``), so this
+       is NEMO's own array, not a reconstruction of it.
+    2. otherwise ``diff(gdept_0)`` for a coordinate whose T points ARE the
+       cell midpoints, which is the midpoint of the LIVE thickness
+       ``e3t_now`` — including a partial bottom cell, where NEMO's ``zps``
+       re-centres the T point on the thinned cell and its ``e3w_0`` becomes
+       that same midpoint.
+
+    Arm 2 FAILS CLOSED: a coordinate whose own ``t_depth_ref`` is not the
+    midpoint ladder has a stretched T-point ladder that arm 2 cannot
+    reproduce, and it must supply the NEMO mesh field instead of silently
+    getting the wrong ``e3w_0``.
+
+    Parameters
+    ----------
+    z_coord : the vertical coordinate (reference ladders + optional NEMO mesh).
+    e3t_now : array ``(..., nlev)`` — LIVE NOW-level cell thickness at the
+        point being asked for (T points, or already interpolated to the face).
+    stretch : array ``(...)`` — NEMO's ``(1 + r3t)`` at the NOW level, from
+        :func:`legoesm.ocean.eos.nemo_r3t_stretch`.
+    to_point : callable or None — maps a T-point field to the requested point.
+
+    Returns
+    -------
+    array ``(..., nlev-1)`` — ``e3w(Kmm)`` on the interior interfaces, aligned
+    so that entry ``i`` is the interface between cells ``i`` and ``i+1``
+    (NEMO's ``jk = i+1`` in 1-based indexing).
+    """
+    raw = nemo_e3w0_reference(z_coord)
+    if raw is None:
+        h = e3t_now if to_point is None else to_point(e3t_now)
+        return build_dz_half(h)
+    e3w = jnp.asarray(raw)[..., 1:] * jnp.asarray(stretch)[..., jnp.newaxis]
+    return e3w if to_point is None else to_point(e3w)
+
+
+def nemo_e3w0_reference(z_coord):
+    """The card's raw NEMO ``e3w_0`` mesh field, or ``None`` if it has none.
+
+    ``None`` selects :func:`nemo_e3w_kmm`'s midpoint arm, and this function
+    raises if that arm would be wrong — i.e. if the coordinate declares a
+    T-point depth ladder (``t_depth_ref``) that is NOT the interface-midpoint
+    ladder ``|z_full_ref|``.  There is no third behaviour and no silent
+    fallback.
+    """
+    raw = getattr(z_coord, "nemo_e3w_0", None)
+    if raw is not None and getattr(z_coord, "nemo_e3w_mesh_reference", False):
+        if jnp.shape(raw)[-1] != z_coord.n_levels:
+            raise ValueError(
+                f"z_coord.nemo_e3w_0 trailing size {jnp.shape(raw)[-1]} != "
+                f"n_levels={z_coord.n_levels}")
+        return raw
+    t_depth = getattr(z_coord, "t_depth_ref", None)
+    if t_depth is not None:
+        # Static reference ladders: a concrete constructor-captured array, so
+        # this is a Python-level check, never a traced one.
+        gap = float(np.max(np.abs(
+            np.asarray(t_depth) - np.abs(np.asarray(z_coord.z_full_ref)))))
+        if gap > 0.0:
+            raise ValueError(
+                "NEMO e3w(Kmm) divisor: this coordinate's t_depth_ref is not "
+                f"the interface-midpoint ladder (max|t_depth_ref - "
+                f"|z_full_ref||={gap:.6e} m), so e3w_0 = gdept_0(k) - "
+                "gdept_0(k-1) (trazdf.F90:219-221 with "
+                "domzgr_substitute.h90:108) cannot be built from the midpoint "
+                "of the live thickness. Supply the NEMO mesh e3w_0 "
+                "(nemo_e3w_0_m=..., nemo_e3w_source='mesh_reference') on this "
+                "coordinate.")
+    return None

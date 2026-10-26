@@ -1,0 +1,199 @@
+!!>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+!! SI3 configuration namelist: Overwrites SHARED/namelist_ice_ref
+!!              1 - Generic parameters                 (nampar)
+!!              2 - Ice thickness discretization       (namitd)
+!!              3 - Ice dynamics                       (namdyn)
+!!              4 - Ice ridging/rafting                (namdyn_rdgrft)
+!!              5 - Ice rheology                       (namdyn_rhg)
+!!              6 - Ice advection                      (namdyn_adv)
+!!              7 - Ice surface boundary conditions    (namsbc)
+!!              8 - Ice thermodynamics                 (namthd)
+!!              9 - Ice heat diffusion                 (namthd_zdf)
+!!             10 - Ice lateral melting                (namthd_da)
+!!             11 - Ice growth in open water           (namthd_do)
+!!             12 - Ice salinity                       (namthd_sal)
+!!             13 - Ice melt ponds                     (namthd_pnd)
+!!             14 - Ice initialization                 (namini)
+!!             15 - Ice/snow albedos                   (namalb)
+!!             16 - Ice diagnostics                    (namdia)
+!!>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+!
+!------------------------------------------------------------------------------
+&nampar         !   Generic parameters
+!------------------------------------------------------------------------------
+   jpl              =    1           !  number of ice  categories
+   nlay_i           =    3           !  number of ice  layers
+   nlay_s           =    3            !  number of snow layers
+   rn_amax_n        =   0.99999          !  maximum tolerated ice concentration SH
+   rn_amax_s        =   0.99999          !  maximum tolerated ice concentration SH
+   cn_icerst_in     = "restart_ice_r4.2"   !  suffix of ice restart name (input)
+!   cn_icerst_in     = "restart_ice"   !  suffix of ice restart name (input)
+   cn_icerst_out    = "restart_ice"   !  suffix of ice restart name (output)
+   ln_icethd        = .true.          !  ice thermo   (T) or not (F)
+/
+!------------------------------------------------------------------------------
+&namitd         !   Ice discretization
+!------------------------------------------------------------------------------
+   ln_cat_hfn       = .true.          !  ice categories are defined by a function following rn_himean**(-0.05)
+      rn_himean     =   2.0           !  expected domain-average ice thickness (m)
+   rn_himin         =   0.05          !  minimum ice thickness (m) used in remapping
+/
+!------------------------------------------------------------------------------
+&namdyn         !   Ice dynamics
+!------------------------------------------------------------------------------
+   ln_dynALL        = .true.          !  dyn.: full ice dynamics                  (rheology + advection + ridging/rafting + correction)
+   ln_dynRHGADV     = .false.         !  dyn.: no ridge/raft & no corrections     (rheology + advection)
+   ln_landfast_L16  = .true.          !  landfast: parameterization from Lemieux 2016
+/
+!------------------------------------------------------------------------------
+&namdyn_rdgrft  !   Ice ridging/rafting
+!------------------------------------------------------------------------------
+          ! -- ice_rdgrft_strength -- !
+   ln_str_H79       = .true.          !  ice strength param.: Hibler_79   => P = pstar*<h>*exp(-c_rhg*(1-A))
+      rn_pstar      =   2.0e+04       !     ice strength thickness parameter [N/m2]
+      rn_crhg       =  20.0           !     ice strength conc. parameter (-)
+   ln_str_smooth    = .false.          !  spatial smoothing of the ice strength
+                   ! -- ice_rdgrft -- !
+   ln_distf_lin     = .false.          !  redistribution function of ridged ice: linear (Hibler 1980)
+   ln_distf_exp     = .true.         !  redistribution function of ridged ice: exponential
+              ! -- ice_rdgrft_prep -- !
+   ln_partf_exp     = .true.          !  Exponential ridging participation function (Lipscomb, 2007)
+   ln_ridging       = .true.          !  ridging activated (T) or not (F)
+   ln_rafting       = .true.          !  rafting activated (T) or not (F)
+      rn_fpndrdg    =   0.5           !     pond fraction that survives in ridging (small a priori)
+      rn_fpndrft    =   0.5           !     pond fraction that survives in rafting (0.5 a priori)
+      rn_porordg    =   0.            !     porosity of newly ridged ice (Lepparanta et al., 1995)
+/
+!------------------------------------------------------------------------------
+&namdyn_rhg     !   Ice rheology
+!------------------------------------------------------------------------------
+   ln_rhg_EVP       = .true.         !  EVP rheology
+/
+!------------------------------------------------------------------------------
+&namdyn_adv     !   Ice advection
+!------------------------------------------------------------------------------
+   ln_adv_Pra       = .true.         !  Advection scheme (Prather)
+   ln_adv_UMx       = .false.          !  Advection scheme (Ultimate-Macho)
+/
+!------------------------------------------------------------------------------
+&namsbc         !   Ice surface boundary conditions
+!------------------------------------------------------------------------------
+   ln_cndflx        = .false.         !  Use conduction flux as surface boundary conditions (i.e. for Jules coupling)
+      ln_cndemulate = .false.         !     emulate conduction flux (if not provided in the inputs)
+/
+!------------------------------------------------------------------------------
+&namthd         !   Ice thermodynamics
+!------------------------------------------------------------------------------
+   ln_icedA         = .false.          !  activate lateral melting param. (T) or not (F)
+/
+!------------------------------------------------------------------------------
+&namthd_zdf     !   Ice heat diffusion
+!------------------------------------------------------------------------------
+   rn_cnd_s         =   0.5           !  thermal conductivity of the snow (0.31 W/m/K, Maykut and Untersteiner, 1971)
+                                      !     Obs: 0.1-0.5 (Lecomte et al, JAMES 2013)
+   ln_zdf_chkcvg    = .false.         !  check convergence of heat diffusion scheme (output variable: tice_cvg)
+/
+!------------------------------------------------------------------------------
+&namthd_da      !   Ice lateral melting
+!------------------------------------------------------------------------------
+/
+!------------------------------------------------------------------------------
+&namthd_do      !   Ice growth in open water
+!------------------------------------------------------------------------------
+   rn_hinew         =   0.05           !  thickness for new ice formation in open water (m), must be larger than rn_himin
+/
+!------------------------------------------------------------------------------
+&namthd_sal     !   Ice salinity
+!------------------------------------------------------------------------------
+   nn_icesal        =   2             !  ice salinity option
+                                      !     1: constant ice salinity (S=rn_icesal)
+                                      !     2: varying salinity parameterization S(z,t)
+                                      !     3: prescribed salinity profile S(z) (Schwarzacher 1959)
+                                      !     4: Gravity Drainage and Flushing
+   ln_flushing      = .true.          !  activate ice salt flushing
+   ln_drainage      = .true.          !  activate ice salt gravity drainage
+   rn_simin         =   0.1           !  minimum tolerated ice salinity (g/kg)
+   rn_sinew         =   0.75          !  fraction of sss that is entrapped in new ice
+                                      !      (must be set to 0.30 if nn_icesal=2)
+                  ! -- nn_icesal=1 -- !
+   rn_icesal        =   4.            !  ice salinity (g/kg)
+                  ! -- nn_icesal=2 -- !
+   rn_sal_gd        =   5.            !  restoring ice salinity, gravity drainage (g/kg)
+   rn_time_gd       =   1.73e+6       !  restoring time scale,   gravity drainage  (s)
+   rn_sal_fl        =   2.            !  restoring ice salinity, flushing (g/kg)
+   rn_time_fl       =   8.64e+5       !  restoring time scale,   flushing (s)
+                  ! -- nn_icesal=4 -- !
+   rn_sal_himin     =   0.1           !   min ice thickness for gravity drainage and flushing calculation
+   nn_liquidus      =   2             !   formulation of liquidus (also used for outputs)
+                                      !     1 = linear liquidus
+                                      !     2 = Vancopenolle et al (2019) formulation
+                                      !     3 = Weast 71 (used in RJW2014)
+   nn_drainage      =   50            !  maximum number of subcycles for gravity drainage (10 is usually enough)
+   nn_flushing      =   5             !  maximum number of subcycles for flushing         ( 1 is usually enough)
+   rn_flushrate     =   0.3           !  rate of flushing (fraction of melt water used for flushing)
+   rn_vbrc          =   0.05          !  critical brines volume above which flushing can occur
+                                      ! ** drainage convection scheme **
+   nn_sal_scheme    =   1             !    1 = Rees Jones and Worster (2014) => RJW2014
+                                      !    2 = Griewank and Notz (2013)      => GN2013
+                                      !    3 = Cox and Weeks (1988)          => CW1988
+                                      ! ** parameters for each scheme **
+      rn_alpha_RJW  = 0.03            !    1: Intensity of the Brine flow  ==> minmax tested [0.03 ; 0.037]?
+      rn_Rc_RJW     = 9.0             !    1: Critical Rayleigh number     ==>               [2.9  ; 9]?
+      rn_alpha_GN   = 5.4e-4          !    2: Intensity of the Brine flow  ==>               [0.510e-3 ; 0.681e-3] from Griewank and Notz 2015
+      rn_Rc_GN      = 6.4             !    2: Critical Rayleigh number     ==>               [7.10 ; 3.23]         from Griewank and Notz 2015
+      rn_alpha_CW   = 9.e-7           !    3: Intensity of the Brine flow  ==>               [7e-7 ; 15e-7]?
+      !
+   ln_sal_chk       = .FALSE.         !  sanity checks for drainage and flushing
+/
+!------------------------------------------------------------------------------
+&namthd_pnd     !   Melt ponds
+!------------------------------------------------------------------------------
+   ln_pnd            = .false.         !  activate melt ponds or not
+      ln_pnd_LEV        = .false.      !  level ice melt ponds
+!!         rn_pnd_flush=   0.01          !     pond flushing efficiency (tuning parameter) (LEV)
+/
+!------------------------------------------------------------------------------
+&namini         !   Ice initialization
+!------------------------------------------------------------------------------
+   ln_iceini        = .true.         !  activate ice initialization (T) or not (F)
+   nn_iceini_file   =   0             ! ORCA2-grid analytic start; ORCA1 file is not an ORCA2 input
+
+   rn_thres_sst     =   2.0           !  max temp. above Tfreeze with initial ice = (sst - tfreeze)
+   rn_hti_ini_n     =   2.5           !  initial ice thickness       (m), North
+   rn_hti_ini_s     =   1.0           !        "            "             South
+   rn_hts_ini_n     =   0.2           !  initial snow thickness      (m), North
+   rn_hts_ini_s     =   0.1           !        "            "             South
+   rn_ati_ini_n     =   0.997         !  initial ice concentration   (-), North
+   rn_ati_ini_s     =   0.8           !        "            "             South
+   rn_smi_ini_n     =   9.            !  initial ice salinity     (g/kg), North
+   rn_smi_ini_s     =   4.            !        "            "             South
+   rn_tmi_ini_n     = 260.            !  initial ice temperature     (K), North
+   rn_tmi_ini_s     = 272.            !        "            "             South
+   rn_tsu_ini_n     = 250.            !  initial surface temperature (K), North
+   rn_tsu_ini_s     = 270.            !        "            "             South
+   rn_tms_ini_n     = 255.            !  initial snw temperature     (K), North
+   rn_tms_ini_s     = 271.            !        "            "             South
+   rn_apd_ini_n     =   0.0           !  initial pond fraction       (-), North
+   rn_apd_ini_s     =   0.2           !        "            "             South
+   rn_hpd_ini_n     =   0.0           !  initial pond depth          (m), North
+   rn_hpd_ini_s     =   0.05          !        "            "             South
+   rn_hld_ini_n     =   0.0           !  initial pond lid depth      (m), North
+   rn_hld_ini_s     =   0.0           !        "            "             South
+   ! -- for ln_iceini_file = T
+   sn_hti = 'Ice_initialization' , -12 ,'ht_i' ,  .false.  , .true., 'yearly'  , '' , '', ''
+   sn_hts = 'Ice_initialization' , -12 ,'ht_s' ,  .false.  , .true., 'yearly'  , '' , '', ''
+   sn_ati = 'Ice_initialization' , -12 ,'at_i' ,  .false.  , .true., 'yearly'  , '' , '', ''
+   sn_smi = 'Ice_initialization' , -12 ,'sm_i' ,  .false.  , .true., 'yearly'  , '' , '', ''
+   sn_tmi = 'NOT USED'           , -12 ,'tm_i' ,  .false.  , .true., 'yearly'  , '' , '', ''
+   sn_tsu = 'Ice_initialization' , -12 ,'tmsu' ,  .false.  , .true., 'yearly'  , '' , '', ''
+   sn_tms = 'NOT USED'           , -12 ,'tm_s' ,  .false.  , .true., 'yearly'  , '' , '', ''
+/
+!------------------------------------------------------------------------------
+&namalb         !   albedo parameters
+!------------------------------------------------------------------------------
+/
+!------------------------------------------------------------------------------
+&namdia         !   Diagnostics
+!------------------------------------------------------------------------------
+   ln_icediachk     = .false.          !  check online heat, mass & salt budgets
+/

@@ -154,6 +154,11 @@ class TestConvectionADSafety:
     ], ids=["sbm", "dca", "kuo"])
     def test_grad_finite_in_non_convecting_column(self, scheme_fn, config):
         T, q_v, p_full, p_half = _stable_dry_column()
+        if scheme_fn is sbm_convection:
+            # Isca qe_moist_convection stops (FATAL "get_lcl_temp: value to
+            # low") on a q = 1e-12 parcel at 250 K -- the port returns NaN
+            # there; its dry, non-convecting column is q = 0.
+            q_v = jnp.zeros_like(q_v)
 
         def loss(qv):
             return self._scheme_loss(scheme_fn, config, T, qv, p_full, p_half)
@@ -651,7 +656,7 @@ class TestMixingLength:
         # Near surface (κz ≪ l_∞): l → κz.
         z_small = jnp.array([2.0, 5.0])
         l_small = mixing_length(z_small, l_inf)
-        assert jnp.allclose(l_small, constants.kappa_vk * z_small, rtol=0.1)
+        assert jnp.allclose(l_small, constants.kappa_von_karman * z_small, rtol=0.1)
         # Far aloft (κz ≫ l_∞): l → l_∞.
         l_high = mixing_length(jnp.array([1.0e5]), l_inf)
         assert float(l_high[0]) > 0.9 * l_inf
@@ -661,7 +666,7 @@ class TestMixingLength:
         from legoesm.atmosphere.physics._shared import mixing_length
         l_inf = 80.0
         z = jnp.array([10.0, 50.0, 200.0, 1000.0])
-        k = constants.kappa_vk
+        k = constants.kappa_von_karman
         expected = k * z / (1.0 + k * z / l_inf)
         assert jnp.allclose(mixing_length(z, l_inf), expected, rtol=1e-12)
         # Strictly increasing with height.

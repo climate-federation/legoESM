@@ -83,6 +83,27 @@ LITERAL_BUDGET: dict[str, dict[str, int]] = {
     "scripts/run/run_les_plane.py": {
         "return jnp.where(z > 600.0, 273.15 + 0.01 * (z - 600.0), 273.15)": 2,
     },
+    # ``discover_py_files`` used to match its ``scripts/tmp/`` exclusion against
+    # the *absolute* checkout path, so every checkout living under a directory
+    # literally named ``tmp`` (every worktree this week) silently excluded ALL
+    # of scripts/ from every ratchet built on it (fixed 2026-09-03, see
+    # ``tests/_ratchet_audit.py::discover_py_files``). These four sites were
+    # already present in scripts/validate/ — pre-existing debt the fix
+    # surfaced, not introduced by it. Not fixed here (out of scope for the
+    # discovery-bug fix); ratchet-down so paying them off shrinks the budget.
+    "scripts/validate/land_beta_soil_bake_discriminator.py": {
+        "0.716, 0.622, 0.723, 0.457, 0.507, 0.504, 0.488, 0.477)": 1,  # pre-existing, surfaced by discovery fix 2026-09-03
+    },
+    # Zero allowance, kept EXPLICIT rather than absent (GLM review): an
+    # absent file is default-deny too -- proved by planting a 6371229.0 and
+    # watching the gate report "new/extra site (x1, budget 0)" -- but absent
+    # also drops the file out of _RATCHET_DOWN and therefore out of EXACT
+    # mode.  A file in ceiling mode whose allowance is later re-added can go
+    # stale forever without the gate noticing, which is the failure this pair
+    # of entries just cost a session to clean up.  Empty + ratchet-down keeps
+    # them self-cleaning.
+    "scripts/validate/ocean_fidelity/dino_1226/southern_wall_balance.py": {},
+    "scripts/validate/ocean_fidelity/dino_1226/vertex_area_pair_analysis.py": {},
     # --- test fixtures: PERMANENT -----------------------------------------
     "tests/atmosphere/dycore/regression/test_pad_halo_4d_monotone_clip_iter490.py": {
         "field = jnp.full((6, n, n, nlev), 273.15)": 1,
@@ -142,6 +163,9 @@ _RATCHET_DOWN = frozenset(
     {
         "packages/ocean/legoesm/ocean/eos.py",
         "scripts/run/run_les_plane.py",
+        "scripts/validate/land_beta_soil_bake_discriminator.py",
+        "scripts/validate/ocean_fidelity/dino_1226/southern_wall_balance.py",
+        "scripts/validate/ocean_fidelity/dino_1226/vertex_area_pair_analysis.py",
     }
 )
 
@@ -165,6 +189,41 @@ _FILES = ra.discover_py_files()
 
 def test_discovery_sane() -> None:
     ra.assert_discovery_sane(_FILES)
+
+
+def test_discovery_excludes_only_scripts_tmp_regardless_of_checkout_path(
+    tmp_path, monkeypatch
+) -> None:
+    """Regression (2026-09-03): ``discover_py_files`` used to exclude a file by
+    testing ``"tmp" in rp.parts and "scripts" in rp.parts`` against the
+    *absolute* resolved path. Any checkout living under a directory literally
+    named ``tmp`` (every worktree used the week this was found did, e.g.
+    ``/tmp/wt-...``) puts the exact part ``"tmp"`` in every file's parts tuple,
+    so that condition was true for *every* file under ``scripts/`` — not just
+    the intended ``scripts/tmp/`` throwaway probes — silently making the
+    ratchet's verdict on all of ``scripts/`` vacuous in such a checkout. Fixed
+    by matching the path relative to the repo root instead.
+
+    Builds a fake checkout under a directory literally named ``tmp`` and
+    checks both ends: a real ``scripts/validate/`` file is discovered *and* its
+    banned literal is flagged (not just "discovery returns the path"), while a
+    ``scripts/tmp/`` probe stays excluded."""
+    checkout = (tmp_path / "tmp" / "fake_checkout").resolve()
+    assert "tmp" in checkout.parts  # the exact trigger condition for the old bug
+    validate_dir = checkout / "scripts" / "validate"
+    validate_dir.mkdir(parents=True)
+    probe_dir = checkout / "scripts" / "tmp"
+    probe_dir.mkdir(parents=True)
+    leaky = validate_dir / "leaky_probe.py"
+    leaky.write_text("g = 9.80616\n")
+    (probe_dir / "throwaway.py").write_text("g = 9.80616\n")
+
+    monkeypatch.setattr(ra, "repo_root", lambda: checkout)
+    files = {ra.rel(f) for f in ra.discover_py_files()}
+
+    assert "scripts/validate/leaky_probe.py" in files
+    assert "scripts/tmp/throwaway.py" not in files
+    assert [v for _ln, v, _fp in banned_hits(leaky.read_text())] == [9.80616]
 
 
 def test_no_stale_budget_entries() -> None:

@@ -1,0 +1,30 @@
+--- dynspg_ts.F90
++++ dynspg_ts.F90
+@@ -59,6 +59,7 @@
+    USE prtctl          ! Print control
+    USE iom             ! IOM library
+    USE restart         ! only for lrst_oce
++   USE l2_r48_bt_memory, ONLY : r48_bt_memory
+ 
+    USE iom   ! to remove
+ 
+@@ -537,6 +538,9 @@
+       pssh  (:,:,Kaa) = 0._wp       ! Sum for after averaged sea level
+       un_adv(:,:)     = 0._wp       ! Sum for now transport issued from ts loop
+       vn_adv(:,:)     = 0._wp
++      CALL r48_bt_memory( 2, kt, Kbb, Kmm, Kaa, puu_b, pvv_b, pssh, &
++         & un_e, vn_e, sshn_e, un_adv, vn_adv, ubb_e, ub_e, vbb_e, vb_e, &
++         & sshbb_e, sshb_e )
+       !
+       IF( ln_wd_dl ) THEN
+          zuwdmask(:,:) = 0._wp  ! set to zero for definiteness (not sure this is necessary) 
+@@ -1021,6 +1025,9 @@
+          pvv_b(:,:,Kaa) = va_e  (:,:)
+          pssh (:,:,Kaa) = ssha_e(:,:)
+       ENDIF
++      CALL r48_bt_memory( 1, kt, Kbb, Kmm, Kaa, puu_b, pvv_b, pssh, &
++         & un_e, vn_e, sshn_e, un_adv, vn_adv, ubb_e, ub_e, vbb_e, vb_e, &
++         & sshbb_e, sshb_e )
+       !
+ #if defined key_RK3
+       !                                                !*  RK3 case

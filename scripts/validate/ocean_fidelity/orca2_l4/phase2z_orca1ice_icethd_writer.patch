@@ -1,0 +1,268 @@
+--- shipped/src/ICE/icethd.F90
++++ ORCA2_ORCA1ICE_OMIP_L4/MY_SRC/icethd.F90
+@@ -16,6 +16,7 @@
+    USE par_ice        ! SI3 parameters
+    USE phycst         ! physical constants
+    USE par_oce
++   USE dom_oce, ONLY : nn_hls, tmask, umask, vmask, ssmask, ssumask, ssvmask, ssfmask
+    USE ice            ! sea-ice: variables
+    USE sbc_oce , ONLY : sss_m, sst_m, frq_m, sprecip
+    USE sbc_ice , ONLY : qsr_ice, qns_ice, dqns_ice, evap_ice, qprec_ice, qml_ice, qcn_ice, qtr_ice_top
+@@ -52,6 +53,14 @@
+    INTEGER , DIMENSION(3) ::   iloc
+    REAL(wp)               ::   zcfl_drain_max, zcfl_flush_max
+    INTEGER                ::   numcfl                        ! outfile unit
++   INTEGER, SAVE          ::   num_l3thd = -1               ! write-only oracle stream
++   LOGICAL, SAVE          ::   ll_l3thd_opened = .FALSE.    ! NEWUNIT values may be negative
++   INTEGER, SAVE          ::   num_l3zin = -1               ! exact ZDF-entry forcing stream
++   LOGICAL, SAVE          ::   ll_l3zin_opened = .FALSE.
++   INTEGER, SAVE          ::   num_l3rea = -1               ! kt3 arithmetic-replay operands
++   LOGICAL, SAVE          ::   ll_l3rea_opened = .FALSE.
++   INTEGER, SAVE          ::   num_l4pfz = -1               ! post-frazil pre-zdf 1D oracle stream (phase-2z)
++   LOGICAL, SAVE          ::   ll_l4pfz_opened = .FALSE.
+ 
+    !! * Substitutions
+ #  include "do_loop_substitute.h90"
+@@ -107,6 +116,9 @@
+       ENDIF
+       !
+       IF( ln_sal_chk )   CALL ice_thd_salchk( kt, 1 )
++      ! nn_fsbc=2: retain the first three executed SI3 calls (ocean kt 1,3,5).
++      IF( kt <= nit000 + 4 ) CALL l4_orca1ice_thd_dump( kt, 0 )
++      CALL l3thd_dump_global( kt, 0 )                        ! registered ENTRY frame
+       !
+       !-------------------------------------------------------------------------------------------!
+       ! Thermodynamic computation (only on grid points covered by ice) => loop over ice categories
+@@ -139,6 +151,8 @@
+             !
+                               CALL ice_thd_1d2d( jl, 1 )            ! --- Move to 1D arrays --- !
+             !                                                       ! --- & Change units of e_i, e_s from J/m2 to J/m3 --- !
++                              CALL l3zin_dump( kt, jl )
++                              CALL l4_dump_post_frazil_pre_zdf_1d( kt, jl )
+             !
+             dh_s_tot  (1:npti) = 0._wp                              ! --- some init --- !  (important to have them here)
+             dh_i_sum  (1:npti) = 0._wp ; dh_i_bom(1:npti) = 0._wp ; dh_i_itm(1:npti) = 0._wp
+@@ -146,14 +160,20 @@
+             dh_snowice(1:npti) = 0._wp ; dh_s_sum(1:npti) = 0._wp ; dh_s_itm(1:npti) = 0._wp
+             !
+                               CALL ice_thd_zdf                      ! --- Ice-Snow temperature --- !
++                              IF( kt == 3 ) CALL l3rea_dump( kt, jl )
++                              CALL l3thd_dump_1d( kt, 1 )
+             !
+             IF( ln_icedH )    CALL ice_thd_dh                       ! --- Growing/Melting --- !
++                              CALL l3thd_dump_1d( kt, 2 )
+             !
+                               CALL ice_thd_temp                     ! --- Temperature update --- !
++                              CALL l3thd_dump_1d( kt, 3 )
+             !
+                               CALL ice_thd_sal                      ! --- Ice salinity --- !
++                              CALL l3thd_dump_1d( kt, 4 )
+             !
+                               CALL ice_thd_temp                     ! --- Temperature update --- !
++                              CALL l3thd_dump_1d( kt, 5 )
+             !
+             IF( ln_icedH .AND. ln_virtual_itd ) &
+                &              CALL ice_thd_mono                     ! --- Extra lateral melting if virtual_itd --- !
+@@ -179,6 +199,7 @@
+       IF( jpl > 1  )          CALL ice_itd_rem( kt )                ! --- Transport ice between thickness categories --- !
+       !
+       IF( ln_icedO )          CALL ice_thd_do                       ! --- Frazil ice growth in leads --- !
++                              CALL l3thd_dump_global( kt, 6 )
+       !
+                               CALL ice_cor( kt , 2 )                ! --- Corrections --- !
+       !
+@@ -213,11 +234,187 @@
+       IF( ln_icectl )   CALL ice_prt    (kt, iiceprt, jiceprt, 1, ' - ice thermodyn. - ') ! prints
+       IF( sn_cfctl%l_prtctl )   &
+         &               CALL ice_prt3D  ('icethd')                                        ! prints
++      CALL l3thd_dump_global( kt, 7 )                                                      ! registered EXIT frame
++      IF( kt <= nit000 + 4 ) CALL l4_orca1ice_thd_dump( kt, 1 )
+       IF( ln_timing )   CALL timing_stop('icethd')                                        ! timing
+       !
+    END SUBROUTINE ice_thd
+ 
+ 
++   SUBROUTINE l3thd_open
++      INTEGER :: ios
++      IF( .NOT. ll_l3thd_opened ) THEN
++         OPEN( NEWUNIT=num_l3thd, FILE='oracle_si3_thd_frames.bin', STATUS='REPLACE', &
++            &  ACCESS='STREAM', FORM='UNFORMATTED', ACTION='WRITE', IOSTAT=ios )
++         IF( ios /= 0 ) CALL ctl_stop( 'l3thd_open: cannot open oracle_si3_thd_frames.bin' )
++         ll_l3thd_opened = .TRUE.
++      ENDIF
++   END SUBROUTINE l3thd_open
++
++
++   SUBROUTINE l3thd_header( kt, kstage, kpayload )
++      INTEGER, INTENT(in) :: kt, kstage, kpayload
++      CHARACTER(LEN=16), PARAMETER :: cmagic = 'NEMO_L3THD_001'
++      CALL l3thd_open
++      WRITE(num_l3thd) cmagic
++      WRITE(num_l3thd) 1, kt, kstage, kpayload, jpi, jpj, jpl, nlay_i, nlay_s, npti, STORAGE_SIZE(1._wp)
++   END SUBROUTINE l3thd_header
++
++
++   SUBROUTINE l3thd_dump_global( kt, kstage )
++      INTEGER, INTENT(in) :: kt, kstage
++      IF( .NOT.lwp ) RETURN
++      CALL l3thd_header( kt, kstage, 0 )
++      WRITE(num_l3thd) l4_canon_3d(a_i,'T'), l4_canon_3d(v_i,'T'), &
++         & l4_canon_3d(v_s,'T'), l4_canon_3d(sv_i,'T'), l4_canon_3d(oa_i,'T'), &
++         & l4_canon_3d(t_su,'T'), l4_canon_3d(a_ip,'T'), l4_canon_3d(v_ip,'T'), &
++         & l4_canon_3d(v_il,'T'), l4_canon_4d(e_i,'T'), l4_canon_4d(e_s,'T'), &
++         & l4_canon_4d(szv_i,'T')
++      IF( kstage == 7 ) THEN
++         ! NEMO can revisit nitend during terminal handling.  Keep the stream
++         ! open until process teardown so STATUS='REPLACE' cannot truncate it.
++         FLUSH(num_l3thd)
++      ENDIF
++   END SUBROUTINE l3thd_dump_global
++
++
++   SUBROUTINE l3thd_dump_1d( kt, kstage )
++      INTEGER, INTENT(in) :: kt, kstage
++      IF( .NOT.lwp ) RETURN
++      CALL l3thd_header( kt, kstage, 1 )
++      WRITE(num_l3thd) a_i_1d(1:npti), h_i_1d(1:npti), h_s_1d(1:npti), t_su_1d(1:npti), &
++         & e_i_1d(1:npti,1:nlay_i), e_s_1d(1:npti,1:nlay_s), sz_i_1d(1:npti,1:nlay_i)
++   END SUBROUTINE l3thd_dump_1d
++
++
++   SUBROUTINE l4_dump_post_frazil_pre_zdf_1d( kt, kl )
++      !! Phase-2z WRITE-only 1-D oracle frame: the packed-column state
++      !! immediately after CALL ice_thd_1d2d(jl,1) (icethd.F90:150 in this
++      !! instrumented copy; icethd.F90:140 in the shipped/uninstrumented
++      !! source) and before any of ice_thd_zdf/ice_thd_dh/ice_thd_temp/
++      !! ice_thd_sal has run for this category.  Distinct in TIME from the
++      !! existing l3thd_dump_1d stages (which all fire AFTER ice_thd_zdf or
++      !! later): seven of the ten requested fields share a name with an
++      !! l3thd_dump_1d field but not a time level, so this is a genuinely
++      !! new capture point, not a duplicate.  Carries the global packed-cell
++      !! index nptidx so every 1-D slot maps back to a column.  No model
++      !! array is assigned.
++      INTEGER, INTENT(in) :: kt, kl
++      INTEGER :: ios
++      IF( .NOT.lwp ) RETURN
++      IF( STORAGE_SIZE( 1._wp ) /= 64 )   CALL ctl_stop( 'l4 post-frazil dump requires 64-bit wp' )
++      IF( .NOT. ll_l4pfz_opened ) THEN
++         OPEN( NEWUNIT=num_l4pfz, FILE='oracle_l4_post_frazil_pre_zdf_1d.bin', STATUS='REPLACE', &
++            &  ACCESS='STREAM', FORM='UNFORMATTED', ACTION='WRITE', IOSTAT=ios )
++         IF( ios /= 0 )   CALL ctl_stop( 'cannot open oracle_l4_post_frazil_pre_zdf_1d.bin' )
++         ll_l4pfz_opened = .TRUE.
++      ENDIF
++      WRITE(num_l4pfz) 'NEMO_L4_PFZ1D_1 '
++      WRITE(num_l4pfz) 1, kt, kl, jpi, jpj, jpl, nlay_i, nlay_s, npti, STORAGE_SIZE(1._wp)
++      WRITE(num_l4pfz) nptidx(1:npti)
++      WRITE(num_l4pfz) a_i_1d(1:npti), h_i_1d(1:npti), h_s_1d(1:npti), t_su_1d(1:npti), &
++         & s_i_1d(1:npti), oa_i_1d(1:npti)
++      WRITE(num_l4pfz) e_i_1d(1:npti,1:nlay_i), sz_i_1d(1:npti,1:nlay_i)
++      WRITE(num_l4pfz) e_s_1d(1:npti,1:nlay_s), t_s_1d(1:npti,1:nlay_s)
++   END SUBROUTINE l4_dump_post_frazil_pre_zdf_1d
++
++
++   SUBROUTINE l3zin_dump( kt, kl )
++      INTEGER, INTENT(in) :: kt, kl
++      INTEGER :: ios
++      CHARACTER(LEN=16), PARAMETER :: cmagic = 'NEMO_L3ZIN_002'
++      IF( .NOT.lwp ) RETURN
++      IF( .NOT. ll_l3zin_opened ) THEN
++         OPEN( NEWUNIT=num_l3zin, FILE='oracle_si3_zdf_inputs.bin', STATUS='REPLACE', &
++            & ACCESS='STREAM', FORM='UNFORMATTED', ACTION='WRITE', IOSTAT=ios )
++         IF( ios /= 0 ) CALL ctl_stop( 'l3zin_dump: cannot open ZDF-input stream' )
++         ll_l3zin_opened = .TRUE.
++      ENDIF
++      WRITE(num_l3zin) cmagic
++      WRITE(num_l3zin) 2, kt, kl, npti, STORAGE_SIZE(1._wp), ( 13 + nlay_s ) * npti
++      WRITE(num_l3zin) qns_ice_1d(1:npti), qsr_ice_1d(1:npti), dqns_ice_1d(1:npti), &
++         & qtr_ice_top_1d(1:npti), t_bo_1d(1:npti), sss_1d(1:npti), &
++         & evap_ice_1d(1:npti), sprecip_1d(1:npti), qprec_ice_1d(1:npti), &
++         & qcn_ice_1d(1:npti), qsb_ice_bot_1d(1:npti), fhld_1d(1:npti), qml_ice_1d(1:npti), &
++         & t_s_1d(1:npti,1:nlay_s)
++      FLUSH(num_l3zin)
++   END SUBROUTINE l3zin_dump
++
++
++   SUBROUTINE l3rea_dump( kt, kl )
++      INTEGER, INTENT(in) :: kt, kl
++      INTEGER :: ios, nvalue
++      CHARACTER(LEN=16), PARAMETER :: cmagic = 'NEMO_L3REA_001'
++      IF( .NOT.lwp ) RETURN
++      IF( .NOT. ll_l3rea_opened ) THEN
++         OPEN( NEWUNIT=num_l3rea, FILE='oracle_si3_reassoc_operands.bin', STATUS='REPLACE', &
++            & ACCESS='STREAM', FORM='UNFORMATTED', ACTION='WRITE', IOSTAT=ios )
++         IF( ios /= 0 ) CALL ctl_stop( 'l3rea_dump: cannot open arithmetic-replay stream' )
++         ll_l3rea_opened = .TRUE.
++      ENDIF
++      nvalue = ( 3 + 3 * nlay_i + 2 * nlay_s ) * npti
++      WRITE(num_l3rea) cmagic
++      WRITE(num_l3rea) 1, kt, kl, npti, nlay_i, nlay_s, STORAGE_SIZE(1._wp), nvalue
++      WRITE(num_l3rea) t_su_1d(1:npti), t_i_1d(1:npti,1:nlay_i), &
++         & t_s_1d(1:npti,1:nlay_s), sz_i_1d(1:npti,1:nlay_i), &
++         & e_i_1d(1:npti,1:nlay_i), e_s_1d(1:npti,1:nlay_s), &
++         & qns_ice_1d(1:npti), dqns_ice_1d(1:npti)
++      FLUSH(num_l3rea)
++   END SUBROUTINE l3rea_dump
++
++
++   SUBROUTINE l4_orca1ice_thd_dump( kt, kframe )
++      !! WRITE-only, self-describing ORCA1-target thermodynamic frame.
++      !! The source fields are never assigned; canonical helpers zero halos,
++      !! land, and inactive components before serialization.
++      INTEGER, INTENT(in) :: kt, kframe
++      INTEGER :: l4_unit, l4_ios, l4_payload, jf
++      INTEGER, PARAMETER :: l4_nf = 16
++      INTEGER, DIMENSION(4,l4_nf) :: l4_ext
++      CHARACTER(LEN=16), PARAMETER :: l4_magic = 'NEMO_L4_O1ITHD1'
++      CHARACTER(LEN=96) :: l4_name
++      IF( .NOT.lwp ) RETURN
++
++      l4_ext(:, 1) = (/ SHAPE(a_i), 1 /)
++      l4_ext(:, 2) = (/ SHAPE(v_i), 1 /)
++      l4_ext(:, 3) = (/ SHAPE(v_s), 1 /)
++      l4_ext(:, 4) = (/ SHAPE(sv_i), 1 /)
++      l4_ext(:, 5) = (/ SHAPE(t_su), 1 /)
++      l4_ext(:, 6) = SHAPE(e_i)
++      l4_ext(:, 7) = SHAPE(e_s)
++      l4_ext(:, 8) = SHAPE(szv_i)
++      l4_ext(:, 9) = (/ SHAPE(qns_ice), 1 /)
++      l4_ext(:,10) = (/ SHAPE(qsr_ice), 1 /)
++      l4_ext(:,11) = (/ SHAPE(dqns_ice), 1 /)
++      l4_ext(:,12) = (/ SHAPE(evap_ice), 1 /)
++      l4_ext(:,13) = (/ SHAPE(qprec_ice), 1, 1 /)
++      l4_ext(:,14) = (/ SHAPE(qml_ice), 1 /)
++      l4_ext(:,15) = (/ SHAPE(qcn_ice), 1 /)
++      l4_ext(:,16) = (/ SHAPE(qtr_ice_top), 1 /)
++      l4_payload = 0
++      DO jf = 1, l4_nf
++         l4_payload = l4_payload + PRODUCT(l4_ext(:,jf))
++      END DO
++
++      WRITE(l4_name,'("oracle_orca1ice_thd_kt",I8.8,"_f",I1,".bin")') kt, kframe
++      OPEN( NEWUNIT=l4_unit, FILE=TRIM(l4_name), STATUS='REPLACE', ACCESS='STREAM', &
++         & FORM='UNFORMATTED', ACTION='WRITE', IOSTAT=l4_ios )
++      IF( l4_ios /= 0 ) CALL ctl_stop('l4_orca1ice_thd_dump: open failed')
++      WRITE(l4_unit) l4_magic
++      WRITE(l4_unit) 1, kt, kframe, jpi, jpj, jpl, nlay_i, nlay_s, &
++         & STORAGE_SIZE(1._wp), l4_nf, l4_payload
++      WRITE(l4_unit) l4_ext
++      WRITE(l4_unit) l4_canon_3d(a_i,'T'), l4_canon_3d(v_i,'T'), &
++         & l4_canon_3d(v_s,'T'), l4_canon_3d(sv_i,'T'), l4_canon_3d(t_su,'T'), &
++         & l4_canon_4d(e_i,'T'), l4_canon_4d(e_s,'T'), l4_canon_4d(szv_i,'T'), &
++         & l4_canon_3d(qns_ice,'T'), l4_canon_3d(qsr_ice,'T'), &
++         & l4_canon_3d(dqns_ice,'T'), l4_canon_3d(evap_ice,'T'), &
++         & l4_canon_2d(qprec_ice,'T'), l4_canon_3d(qml_ice,'T'), &
++         & l4_canon_3d(qcn_ice,'T'), l4_canon_3d(qtr_ice_top,'T')
++      CLOSE(l4_unit)
++   END SUBROUTINE l4_orca1ice_thd_dump
++
++
+    SUBROUTINE ice_thd_temp
+       !!-----------------------------------------------------------------------
+       !!                   ***  ROUTINE ice_thd_temp ***
+@@ -595,4 +792,6 @@
+ #endif
+ 
+    !!======================================================================
++#include "l4_oracle_canon_subroutines.h90"
++
+ END MODULE icethd

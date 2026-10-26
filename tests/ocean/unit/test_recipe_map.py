@@ -59,11 +59,16 @@ def test_recipe_for_unknown_raises():
         recipe_for("not_an_experiment")
 
 
-def test_only_four_recipes_cover_the_matrix():
-    """The headline finding: ~21 experiments collapse to a handful of recipes."""
+def test_a_handful_of_recipes_cover_the_matrix():
+    """The headline finding: ~21 experiments collapse to a handful of recipes.
+
+    bench deliberately joins the NEMO-like recipe (the benchmark measures
+    the production step cost, Irrmann et al. 2022 Sect. 2.2.1).
+    """
     used = set(EXPERIMENT_RECIPES.values())
     assert used == {"default_wright_v1", "legoesm_linear_v1",
-                    "eady_weno5_v1", "nemo_dino_v1"}
+                    "eady_weno5_v1", "nemo_dino_v1",
+                    "legoesm_nemo_like_v1", "default_wright_implicit_cn_v1"}
 
 
 @pytest.mark.slow
@@ -85,11 +90,20 @@ def test_tags_match_actual_assembled_dycore():
                           "global_overturning"}
 
     def fingerprint(cfg):
+        # Grouped lat-lon configs (#501) nest barotropic_solver in a
+        # sub-config, so plain getattr misses it; read flat names.
+        get = getattr(cfg, "flat_get", None)
+        if get is not None:
+            return {f: get(f) for f in _SCHEME}
         return {f: getattr(cfg, f, None) for f in _SCHEME if hasattr(cfg, f)}
 
     for name, v in AVAILABLE_EXPERIMENTS.items():
         cfg = v["config_class"]()
-        if "create_model_config" in v:
+        if name == "inertia_gravity_wave_channel":
+            # Runner builds its own dycore, not the generic setup (#2114).
+            from run_ocean_test_matrix import igw_channel_model_config
+            mc = igw_channel_model_config()
+        elif "create_model_config" in v:
             mc = v["create_model_config"](cfg)
         elif name == "dino":
             from legoesm.grids.latlon import create_mercator_grid

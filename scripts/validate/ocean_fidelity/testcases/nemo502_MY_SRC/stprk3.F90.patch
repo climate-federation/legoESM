@@ -1,0 +1,239 @@
+--- shipped/src/OCE/stprk3.F90
++++ ORCA2_OMIP_L4/MY_SRC/stprk3.F90
+@@ -24,6 +24,9 @@
+    USE stprk3_stg     ! RK3 stages
+    USE stp2d          ! external mode solver
+    USE lib_mpp, ONLY : l_perpetual_ts
++   USE sbc_ice, ONLY : snwice_mass, snwice_mass_b, snwice_fmass, rCdU_ice
++   USE sbc_oce, ONLY : ln_icebergs
++   USE icb_oce, ONLY : berg_grid, nclasses
+ 
+    IMPLICIT NONE
+    PRIVATE
+@@ -64,6 +67,9 @@
+       !!              -8- Outputs and diagnostics
+       !!----------------------------------------------------------------------
+       INTEGER ::   ji, jj, jk, jtile   ! dummy loop indice
++      INTEGER ::   itraj, ios_traj
++      CHARACTER(LEN=96) ::   cl_traj
++      CHARACTER(LEN=16) ::   cl_magic
+       REAL(wp), ALLOCATABLE, DIMENSION(:,:,:) ::   zgdept
+       !! ---------------------------------------------------------------------
+ #if defined key_agrif
+@@ -82,6 +88,23 @@
+       !
+       IF( ln_timing )   CALL timing_start('stp_RK3')
+       !
++      ! Lane-1 certified oracle: exact step-entry Nbb state.  This is a
++      ! write-only instrument; no prognostic array is assigned here.
++      IF( lwp .AND. kstp >= nit000 .AND. kstp <= nit000 + 59 ) THEN
++         IF( STORAGE_SIZE( 1._wp ) /= 64 )   CALL ctl_stop( 'lane1 trajectory requires 64-bit wp' )
++         WRITE(cl_traj,'("oracle_step_entry_kt",I8.8,".bin")') kstp
++         OPEN( NEWUNIT=itraj, FILE=TRIM(cl_traj), ACCESS='STREAM', FORM='UNFORMATTED', &
++            &  STATUS='REPLACE', ACTION='WRITE', IOSTAT=ios_traj )
++         IF( ios_traj /= 0 )   CALL ctl_stop( 'cannot open lane1 trajectory file' )
++         cl_magic = 'NEMO_L1_ENTRY_1'
++         WRITE(itraj) cl_magic, 1, kstp, Nbb, jpi, jpj, jpk, jpts, STORAGE_SIZE(1._wp)
++         WRITE(itraj) l4_canon_4d(ts(:,:,:,:,Nbb),'T'), &
++            & l4_canon_3d(uu(:,:,:,Nbb),'U'), l4_canon_3d(vv(:,:,:,Nbb),'V'), &
++            & l4_canon_2d(ssh(:,:,Nbb),'T')
++         CLOSE(itraj)
++         WRITE(numout,*) 'LANE1_STEP_ENTRY_DUMP ', kstp, Nbb, STORAGE_SIZE(1._wp), TRIM(cl_traj)
++      ENDIF
++      !
+       !>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+       ! update I/O and calendar
+       !<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+@@ -136,6 +159,7 @@
+       IF( ln_bdy     )   CALL bdy_dta    ( kstp, Nbb )                     ! update dynamic & tracer data at open boundaries
+       IF( ln_isf     )   CALL isf_stp    ( kstp, Nbb )                     ! update iceshelf geometry
+                          CALL sbc        ( kstp, Nbb, Nbb )                ! Sea Boundary Condition (including sea-ice)
++      IF( kstp == nit000 )   CALL l4_dump_ocean_surface_input( kstp, Nbb )
+ !!$      IF( ln_isf     )   CALL isf_stp    ( kstp, Nbb )                     ! update iceshelf geometry
+                          !clem: problem with isf and cpl: sbcfwb needs isf but isf needs fwf from sbccpl
+ 
+@@ -163,6 +187,7 @@
+       !  VERTICAL PHYSICS
+ !!st                         CALL zdf_phy( kstp, Nbb, Nnn, Nrhs )   ! vertical physics update (top/bot drag, avt, avs, avm + MLD)
+                          CALL zdf_phy( kstp, Nbb, Nbb, Nrhs )   ! vertical physics update (top/bot drag, avt, avs, avm + MLD)
++      IF( kstp == nit000 )   CALL l2_dump_zdf( kstp, Nbb )
+ !!gm gdep
+       !  LATERAL  PHYSICS
+       !
+@@ -184,6 +209,8 @@
+       !  RK3 : single first external mode computation
+       !<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+       CALL stp_2D( kstp, Nbb, Nbb, Naa, Nrhs )         ! out: ssh, (uu_b,vv_b) at Naa and (un_adv,vn_adv) between Nbb and Naa
++      CALL l1_dump_bt_frames( kstp, Naa )
++      IF( kstp == nit000 )   CALL l1_dump_rhs( kstp, Nrhs )
+ 
+       !>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+       !  RK3 time integration
+@@ -193,11 +220,13 @@
+       !
+       ! Stage 1 :
+       CALL stp_RK3_stg( 1, kstp, Nbb, Nbb, Nrhs, Naa )
++      IF( kstp <= nit000 + 9 )   CALL l1_dump_stage( kstp, 1, Naa )
+       !
+       Nrhs = Nnn   ;   Nnn  = Naa   ;   Naa  = Nrhs    ! Swap: Nbb unchanged, Nnn <==> Naa
+       !
+       ! Stage 2 :
+       CALL stp_RK3_stg( 2, kstp, Nbb, Nnn, Nrhs, Naa )
++      IF( kstp <= nit000 + 9 )   CALL l1_dump_stage( kstp, 2, Naa )
+       !
+       Nrhs = Nnn   ;   Nnn  = Naa   ;   Naa  = Nrhs    ! Swap: Nbb unchanged, Nnn <==> Naa
+       !
+@@ -205,6 +234,7 @@
+       CALL rk3_dia( 1 )                                ! Diagnostics switched on for stage 3
+       !
+       CALL stp_RK3_stg( 3, kstp, Nbb, Nnn, Nrhs, Naa )
++      IF( kstp <= nit000 + 9 )   CALL l1_dump_stage( kstp, 3, Naa )
+       !
+       IF ( l_ldfeke   )  CALL ldf_eke( kstp, Nbb )                ! GEOMETRIC param. (time evolution of eiv coefficient)
+       !
+@@ -308,6 +338,145 @@
+    END SUBROUTINE stp_RK3
+ 
+ 
++   SUBROUTINE l1_dump_bt_frames( kstp, klevel )
++      !! Phase-3 frame instrument, immediately after stp_2D.  puu_b/pvv_b at
++      !! Kaa are the primary velocity-weighted substep average committed by
++      !! RK3; un_adv/vn_adv are the distinct transport-weighted time means.
++      INTEGER, INTENT(in) :: kstp, klevel
++      INTEGER :: iunit, ios
++      CHARACTER(LEN=96) :: filename
++      CHARACTER(LEN=16) :: magic
++      IF( .NOT.lwp ) RETURN
++      IF( STORAGE_SIZE( 1._wp ) /= 64 )   CALL ctl_stop( 'lane1 frame dump requires 64-bit wp' )
++      WRITE(filename,'("oracle_bt_frames_kt",I8.8,".bin")') kstp
++      OPEN( NEWUNIT=iunit, FILE=TRIM(filename), ACCESS='STREAM', FORM='UNFORMATTED', &
++         &  STATUS='REPLACE', ACTION='WRITE', IOSTAT=ios )
++      IF( ios /= 0 )   CALL ctl_stop( 'cannot open lane1 frame file' )
++      magic = 'NEMO_L1_BTFRM_1'
++      WRITE(iunit) magic, 1, kstp, klevel, jpi, jpj, STORAGE_SIZE(1._wp)
++      WRITE(iunit) l4_canon_2d(uu_b(:,:,klevel),'U'), l4_canon_2d(vv_b(:,:,klevel),'V'), &
++         & l4_canon_2d(un_adv(:,:),'U'), l4_canon_2d(vn_adv(:,:),'V')
++      CLOSE(iunit)
++      WRITE(numout,*) 'LANE1_BT_FRAME_DUMP ', kstp, klevel, TRIM(filename)
++   END SUBROUTINE l1_dump_bt_frames
++
++
++   SUBROUTINE l1_dump_stage( kstp, kstage, klevel )
++      !! Phase-3 read-only stage-state instrument.  The call sites above pin
++      !! Kaa before each Nnn/Naa swap; no prognostic field is assigned here.
++      INTEGER, INTENT(in) :: kstp, kstage, klevel
++      INTEGER :: iunit, ios
++      CHARACTER(LEN=96) :: filename
++      CHARACTER(LEN=16) :: magic
++      IF( .NOT.lwp ) RETURN
++      IF( STORAGE_SIZE( 1._wp ) /= 64 )   CALL ctl_stop( 'lane1 stage dump requires 64-bit wp' )
++      WRITE(filename,'("oracle_stage_kt",I8.8,"_s",I1,".bin")') kstp, kstage
++      OPEN( NEWUNIT=iunit, FILE=TRIM(filename), ACCESS='STREAM', FORM='UNFORMATTED', &
++         &  STATUS='REPLACE', ACTION='WRITE', IOSTAT=ios )
++      IF( ios /= 0 )   CALL ctl_stop( 'cannot open lane1 stage file' )
++      magic = 'NEMO_L1_STAGE_1'
++      WRITE(iunit) magic, 1, kstp, kstage, klevel, jpi, jpj, jpk, jpts, STORAGE_SIZE(1._wp)
++      WRITE(iunit) l4_canon_4d(ts(:,:,:,:,klevel),'T'), &
++         & l4_canon_3d(uu(:,:,:,klevel),'U'), l4_canon_3d(vv(:,:,:,klevel),'V'), &
++         & l4_canon_2d(ssh(:,:,klevel),'T')
++      CLOSE(iunit)
++      WRITE(numout,*) 'LANE1_STAGE_DUMP ', kstp, kstage, klevel, TRIM(filename)
++   END SUBROUTINE l1_dump_stage
++
++
++   SUBROUTINE l1_dump_rhs( kstp, klevel )
++      !! Phase-3 read-only stage-1 RHS instrument, immediately after stp_2D.
++      INTEGER, INTENT(in) :: kstp, klevel
++      INTEGER :: iunit, ios
++      CHARACTER(LEN=16) :: magic
++      IF( .NOT.lwp ) RETURN
++      OPEN( NEWUNIT=iunit, FILE='oracle_rhs_kt00000001.bin', ACCESS='STREAM', &
++         &  FORM='UNFORMATTED', STATUS='REPLACE', ACTION='WRITE', IOSTAT=ios )
++      IF( ios /= 0 )   CALL ctl_stop( 'cannot open lane1 rhs file' )
++      magic = 'NEMO_L1_RHS___1'
++      WRITE(iunit) magic, 1, kstp, klevel, jpi, jpj, jpk, STORAGE_SIZE(1._wp)
++      WRITE(iunit) l4_canon_3d(uu(:,:,:,klevel),'U'), l4_canon_3d(vv(:,:,:,klevel),'V')
++      CLOSE(iunit)
++      WRITE(numout,*) 'LANE1_RHS_DUMP ', kstp, klevel
++   END SUBROUTINE l1_dump_rhs
++
++
++   SUBROUTINE l2_dump_zdf( kstp, klevel )
++      !! Lane-4 read-only stage-entry TKE/viscosity instrument.  The call is
++      !! directly after zdf_phy and before stp_2D; no state array is set.
++      INTEGER, INTENT(in) :: kstp, klevel
++      INTEGER :: iunit, ios
++      CHARACTER(LEN=16) :: magic
++      IF( .NOT.lwp ) RETURN
++      IF( STORAGE_SIZE( 1._wp ) /= 64 )   CALL ctl_stop( 'lane2 zdf dump requires 64-bit wp' )
++      OPEN( NEWUNIT=iunit, FILE='oracle_zdf_entry_kt00000001.bin', ACCESS='STREAM', &
++         &  FORM='UNFORMATTED', STATUS='REPLACE', ACTION='WRITE', IOSTAT=ios )
++      IF( ios /= 0 )   CALL ctl_stop( 'cannot open lane2 zdf file' )
++      magic = 'NEMO_L4_ZDF___2'
++      WRITE(iunit) magic, 2, kstp, klevel, jpi, jpj, jpk, STORAGE_SIZE(1._wp)
++      WRITE(iunit) l4_canon_3d(avm,'T'), l4_canon_3d(avt,'T'), &
++         & l4_canon_3d(avs,'T'), l4_canon_3d(en,'T')
++      CLOSE(iunit)
++      WRITE(numout,*) 'LANE2_ZDF_ENTRY_DUMP ', kstp, klevel
++   END SUBROUTINE l2_dump_zdf
++
++
++   SUBROUTINE l4_dump_ocean_surface_input( kstp, klevel )
++      !! Lane-4 Phase-2b read-only final surface-input instrument.  Its call
++      !! is immediately after sbc returns, after SI3, iceberg, runoff, FWB,
++      !! halo exchange and U/V stress interpolation.  No model array is set.
++      INTEGER, INTENT(in) :: kstp, klevel
++      INTEGER :: iunit, ios
++      INTEGER, PARAMETER :: in2d_full = 20, in2d_reduced = 12, in2d_halo1 = 1, in3d_reduced = 2
++      INTEGER, PARAMETER :: ihalo = 2
++      CHARACTER(LEN=16) :: magic
++      REAL(wp), DIMENSION(jpi,jpj) :: zicb_zero
++      IF( .NOT.lwp ) RETURN
++      IF( STORAGE_SIZE( 1._wp ) /= 64 )   CALL ctl_stop( 'lane4 surface input dump requires 64-bit wp' )
++      OPEN( NEWUNIT=iunit, FILE='oracle_ocean_surface_input_kt00000001.bin', ACCESS='STREAM', &
++         &  FORM='UNFORMATTED', STATUS='REPLACE', ACTION='WRITE', IOSTAT=ios )
++      IF( ios /= 0 )   CALL ctl_stop( 'cannot open lane4 surface input file' )
++      magic = 'NEMO_L4_SBCIN_1'
++      WRITE(iunit) magic, 1, kstp, klevel, jpi, jpj, jpts, nclasses, ihalo, &
++         &                  in2d_full, in2d_reduced, in2d_halo1, in3d_reduced, STORAGE_SIZE(1._wp)
++      IF( ln_icebergs ) THEN
++         WRITE(iunit) l4_canon_2d(utau,'T'), l4_canon_2d(vtau,'T'), &
++            & l4_canon_2d(utauU,'U'), l4_canon_2d(vtauV,'V'), &
++            & l4_canon_2d(utau_b,'T'), l4_canon_2d(vtau_b,'T'), &
++            & l4_canon_2d(utau_icb,'T'), l4_canon_2d(vtau_icb,'T'), &
++            & l4_canon_2d(taum,'T'), l4_canon_2d(wndm,'T')
++      ELSE
++         ! icb_init returns before allocating these component fields when the
++         ! selected deck disables icebergs.  Emit writer-local zero placeholders
++         ! for the frozen schema; no model array is assigned or dereferenced.
++         zicb_zero(:,:) = 0._wp
++         WRITE(iunit) l4_canon_2d(utau,'T'), l4_canon_2d(vtau,'T'), &
++            & l4_canon_2d(utauU,'U'), l4_canon_2d(vtauV,'V'), &
++            & l4_canon_2d(utau_b,'T'), l4_canon_2d(vtau_b,'T'), &
++            & zicb_zero, zicb_zero, l4_canon_2d(taum,'T'), l4_canon_2d(wndm,'T')
++      ENDIF
++      WRITE(iunit) l4_canon_2d(qsr,'T'), l4_canon_2d(qns,'T'), l4_canon_2d(qns_b,'T'), &
++         & l4_canon_2d(qsr_tot,'T'), l4_canon_2d(qns_tot,'T'), l4_canon_2d(emp,'T'), &
++         & l4_canon_2d(emp_b,'T'), l4_canon_2d(sfx,'T'), l4_canon_2d(sfx_b,'T'), &
++         & l4_canon_2d(emp_tot,'T')
++      WRITE(iunit) l4_canon_2d(fwfice,'T'), l4_canon_2d(rnf,'T'), &
++         & l4_canon_2d(rnf_b,'T'), l4_canon_2d(fwficb,'T'), l4_canon_2d(fr_i,'T')
++      WRITE(iunit) l4_canon_2d(snwice_mass,'T'), l4_canon_2d(snwice_mass_b,'T'), &
++         & l4_canon_2d(snwice_fmass,'T'), l4_canon_2d(rCdU_ice,'T')
++      IF( ln_icebergs ) THEN
++         WRITE(iunit) l4_canon_2d(berg_grid%calving,'T'), l4_canon_2d(berg_grid%calving_hflx,'T'), &
++            & l4_canon_2d(berg_grid%floating_melt,'T'), l4_canon_2d(berg_grid%stored_heat,'T')
++      ELSE
++         WRITE(iunit) zicb_zero, zicb_zero, zicb_zero, zicb_zero
++      ENDIF
++      WRITE(iunit) l4_canon_3d(rnf_tsc,'T'), l4_canon_3d(rnf_tsc_b,'T')
++      CLOSE(iunit)
++      WRITE(numout,*) 'LANE4_OCEAN_SURFACE_INPUT_DUMP ', kstp, klevel
++   END SUBROUTINE l4_dump_ocean_surface_input
++
++#include "l4_oracle_canon_subroutines.h90"
++
++
+    SUBROUTINE rk3_dia( kswitch )
+       !!----------------------------------------------------------------------
+       !!----------------------------------------------------------------------

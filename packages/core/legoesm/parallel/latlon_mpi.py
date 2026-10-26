@@ -77,10 +77,7 @@ if TYPE_CHECKING:
     # it would make the low-level parallel layer depend UP on the ocean
     # component, which blocks component independence (see import-linter contracts).
 
-from legoesm.grids.halo_latlon import (
-    fold_pole_rows,
-    fold_pole_rows_3d,
-)
+from legoesm.grids.halo_latlon import fold_pole_rows
 from legoesm.parallel.halo_exchange import get_sendrecv_vjp
 
 
@@ -1349,13 +1346,8 @@ def pad_halo_latlon_mpi(
         # Pole-fold the lon-padded first ``halo`` rows.  Uses
         # ``fold_pole_rows*`` whose lon-shift is ``data.shape[1] // 2``
         # — for lon-padded input that's exactly ``(n_lon + 2*halo) // 2``
-        # which is the serial convention.
-        if data.ndim == 2:
-            south_halo, _ = fold_pole_rows(lon_padded, halo, negate=is_vector_v)
-        else:
-            south_halo, _ = fold_pole_rows_3d(
-                lon_padded, halo, negate=is_vector_v,
-            )
+        # which is the serial convention (2-D and 3-D alike).
+        south_halo, _ = fold_pole_rows(lon_padded, halo, negate=is_vector_v)
     else:
         # MPI sendrecv with south neighbour — exchanges the
         # lon-padded boundary rows.  AD-safe via get_sendrecv_vjp.
@@ -1395,12 +1387,8 @@ def pad_halo_latlon_mpi(
             else:
                 north_halo = jnp.pad(
                     north_unpadded, ((0, 0), (halo, halo), (0, 0)), mode="wrap")
-        elif data.ndim == 2:
-            _, north_halo = fold_pole_rows(lon_padded, halo, negate=is_vector_v)
         else:
-            _, north_halo = fold_pole_rows_3d(
-                lon_padded, halo, negate=is_vector_v,
-            )
+            _, north_halo = fold_pole_rows(lon_padded, halo, negate=is_vector_v)
     else:
         try:
             import mpi4jax
@@ -2311,6 +2299,11 @@ def slice_cgrid_geometry_to_band(geom, layout: LatLonBandLayout):
         cos_lat=t(geom.cos_lat), sin_lat=t(geom.sin_lat),
         # cos_lat_v is a v-FACE (n_lat+1,) field -> vface(), not t().
         cos_lat_v=vface(geom.cos_lat_v),
+        # lat_v is the same v-FACE axis.  Optional (None on builders with no
+        # face array, e.g. tripole), and a band that kept the GLOBAL array
+        # would then be sharded on the n_lat axis by sharded_ocean_step --
+        # caught by test_build_band_grids' per-field stagger audit.
+        lat_v=(vface(geom.lat_v) if geom.lat_v is not None else None),
         lat=t(geom.lat),
         fold=band_fold,
         # Partial-periodic seam wall is a per-lat-row (n_lat,) profile —
@@ -2318,6 +2311,9 @@ def slice_cgrid_geometry_to_band(geom, layout: LatLonBandLayout):
         # aligned with the band-local n_lat (None passes through).
         seam_wall_rows=(t(geom.seam_wall_rows)
                         if geom.seam_wall_rows is not None else None),
+        native_lat_T_deg=(t(geom.native_lat_T_deg)
+                          if geom.native_lat_T_deg is not None else None),
+        ff_f=(t(geom.ff_f) if geom.ff_f is not None else None),
         # lon, dlon, dlat, radius, n_lon pass through unchanged.
     )
 

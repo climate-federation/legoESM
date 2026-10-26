@@ -518,7 +518,23 @@ def cdgrid_div_damp_cube(
 # seams.  The 2026-07-03 #521 sweep optimum (duogrid + ``damp_v=0.010`` +
 # ``1.0x`` biharmonic; ``0.5x`` erupts at the collision transient, ``0x`` blows
 # up ~day 40 even with duogrid) is stable 100 days at C36/C48.
-MODON_DIV_DAMP_FACTOR: float = 8.0
+#
+# DIV-DAMP RETUNE 2026-08-25 (dual-reviewed, receipts below): the sweep's
+# 8.0 factor set the BACKGROUND div-damping FLOOR (production applies
+# max(floor, adaptive Smagorinsky dddmp term), so high-divergence regions
+# can exceed it) to nu = 2.13e8 m^2/s at C36 -- a ~5.5-minute e-fold on a
+# six-cell divergent mode -- and THROTTLED THE DIPOLE SPIN-UP: this case is
+# non-rotating, so the emergent height dipole is built by exactly the
+# divergent component the floor removes.  Measured: day-1 cube height dipole
+# ~50x weaker than latlon/ico/spectral at 8.0 (job 9498762; t=0 IC
+# identical); fully recovered at 0 (ablation, job 9499138).  0.03 gives
+# nu = 8.0e5 m^2/s (~24.5 h six-cell e-fold), keeping a backstop.
+# Re-validated at 0.03: day-1 dipole recovery (job 9499349) and 100-day
+# completion at C36 (9499350) + C48 (9499364), mass drift 0 -- with a
+# BOUNDED vertex-mode transient near the collision (~days 40-80, louder
+# than at 8.0, subsiding by day 100/70).  C96/C192 are NOT re-validated at
+# 0.03 (see docs/validation/cubed_sphere_sw_504_506.md).
+MODON_DIV_DAMP_FACTOR: float = 0.03
 MODON_DAMP_V: float = 0.010
 MODON_HYPERDIFF_FACTOR: float = 1.0
 # Biharmonic backstop resolution law for the modon case (#753/#800).  ``2`` ==
@@ -823,7 +839,7 @@ class CDGridShallowWaterModel(IntegrationMixin):
         same shared edges; the non-owner side (higher face index)
         overwrites its local value with the owner's strip.
 
-        Vertex sync uses ``mpi4jax.allreduce(SUM)`` on a per-rank
+        Vertex sync uses ``global_sum_mpi`` (allreduce SUM) on a per-rank
         ``(8, 2)`` array where each rank fills the owner-face value
         for vertices it owns and zeros elsewhere.  After the
         allreduce every rank has the owner value for all 8 cube
@@ -1025,13 +1041,11 @@ class CDGridShallowWaterModel(IntegrationMixin):
             if _is_owned(owner_face):
                 my_vtx = my_vtx.at[i, 0].set(ue[owner_face, oi, oj])
                 my_vtx = my_vtx.at[i, 1].set(vn[owner_face, oi, oj])
-        # Allreduce SUM: exactly one rank contributes non-zero per row.
-        # mpi4jax.allreduce returns (result, token) or just result; use
-        # ``mpi4jax_array_result`` helper to normalize.
-        from legoesm.parallel.reductions import mpi4jax_array_result
-        all_vtx = mpi4jax_array_result(
-            mpi4jax.allreduce(my_vtx, op=_MPI.SUM, comm=comm)
-        )
+        # Allreduce SUM: exactly one rank contributes non-zero per row; every
+        # rank then writes the shared value into its owned faces, so the sum
+        # needs the allreduce backward pass of global_sum_mpi (#1814).
+        from legoesm.parallel.reductions import global_sum_mpi
+        all_vtx = global_sum_mpi(my_vtx, comm=comm)
         # Apply: for each vertex, set all owned face positions.
         for i, vtx in enumerate(_vtx):
             ue_own = all_vtx[i, 0]

@@ -1,0 +1,53 @@
+--- dynspg_ts.F90
++++ dynspg_ts.F90
+@@ -155,5 +155,6 @@
+       INTEGER  ::   l2_ord_unit, l2_ord_ios, l4_halo_unit, l4_halo_ios
+       INTEGER  ::   l4_uhist_unit, l4_uhist_ios
++      INTEGER  ::   l4_prex_unit, l4_prex_ios
+       LOGICAL  ::   ll_fw_start           ! =T : forward integration 
+       LOGICAL  ::   ll_init               ! =T : special startup of 2d equations
+ LOGICAL, SAVE :: ll_bt_av    ! =T : boxcard time averaging   =F : foreward backward dissipation
+@@ -200,5 +201,6 @@
+       CHARACTER(LEN=96) :: l4_halo_filename
+       CHARACTER(LEN=96) :: l4_uhist_filename
++      CHARACTER(LEN=96) :: l4_prex_filename
+       CHARACTER(LEN=16) :: l2_magic
+       REAL(wp) ::   zttide   ! Time of day for tidal updates
+       !!----------------------------------------------------------------------
+@@ -627,6 +629,16 @@
+          l2_magic = 'NEMO_L4_UHIST_1'
+          WRITE(l4_uhist_unit) l2_magic, 1, kt, 2, narea - 1, jpi, jpj, STORAGE_SIZE(1._wp)
+       ENDIF
++      ! Round-19 WRITE-only per-rank stream immediately before lbc_lnk.
++      ! The existing U-history stream records the same array after exchange.
++      IF( kt == nit000 ) THEN
++         WRITE(l4_prex_filename,'("oracle_bt_u_preexchange_kt",I8.8,"_r",I4.4,".bin")') kt, narea - 1
++         OPEN( NEWUNIT=l4_prex_unit, FILE=TRIM(l4_prex_filename), ACCESS='STREAM', FORM='UNFORMATTED', &
++            & STATUS='REPLACE', ACTION='WRITE', IOSTAT=l4_prex_ios )
++         IF( l4_prex_ios /= 0 )   CALL ctl_stop( 'cannot open lane4 U pre-exchange trace' )
++         l2_magic = 'NEMO_L4_PREX_U1'
++         WRITE(l4_prex_unit) l2_magic, 1, kt, 2, narea - 1, jpi, jpj, STORAGE_SIZE(1._wp)
++      ENDIF
+ 
+       !                                             ! ==================== !
+       DO jn = 1, icycle                             !  sub-time-step loop  !
+@@ -943,6 +956,10 @@
+             END_2D
+          ENDIF
+          !
++         IF( kt == nit000 .AND. jn <= 2 ) THEN
++            WRITE(l4_prex_unit) jn
++            WRITE(l4_prex_unit) ua_e
++         ENDIF
+          IF( .NOT.lk_linssh ) THEN   !* Update ocean depth (variable volume case only)
+             IF( ln_wd_dl ) THEN
+                CALL lbc_lnk( 'dynspg_ts', ua_e , 'U', -1._wp, va_e , 'V', -1._wp  &
+@@ -1063,6 +1080,8 @@
+          WRITE(numout,*) 'LANE4_BT_HALO_DUMP ', kt, 2, narea - 1, TRIM(l4_halo_filename)
+          CLOSE(l4_uhist_unit)
+          WRITE(numout,*) 'LANE4_BT_UHIST_DUMP ', kt, 2, narea - 1, TRIM(l4_uhist_filename)
++         CLOSE(l4_prex_unit)
++         WRITE(numout,*) 'LANE4_BT_PREX_DUMP ', kt, 2, narea - 1, TRIM(l4_prex_filename)
+       ENDIF
+       ! Finalize sums:
+       ! (Divide by weights sums here to prevent from truncation errors)

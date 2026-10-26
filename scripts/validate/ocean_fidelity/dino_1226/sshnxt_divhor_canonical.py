@@ -80,6 +80,11 @@ _read_dims = _cov._read_dims
 _load_haloed = _cov._load_haloed
 RUN_DIR = _cov.RUN_DIR
 RESTART = _cov.RESTART
+# coverage_rows_measure.py is already dump_lane-wired (#1455); reuse its
+# already-executed dump_lane module rather than re-importing it (RUN_DIR/
+# RESTART above already come from it, so this probe is already lane-
+# switchable through that sibling -- verified, not duplicated).
+dump_lane = _cov._dump_lane
 
 from legoesm.core.precision import PrecisionPolicy, set_policy  # noqa: E402
 from legoesm.ocean.dynamics.latlon_cgrid_operators import divergence_cgrid  # noqa: E402
@@ -93,13 +98,13 @@ from legoesm.ocean.vertical import compute_layer_thickness  # noqa: E402
 
 
 def build_state():
-    """Bridge RUN_GDB's kt=57601 (nit000) restart, fp64, explicit e3t + metric."""
+    """Bridge the dump_lane-selected run's nit000 restart, fp64, explicit e3t + metric."""
     e3t_mode = require_explicit_e3t_mode(context="sshnxt_divhor_canonical")
     set_policy(PrecisionPolicy.fp64())
 
     metric = os.environ.get("LEGOESM_METRIC_CONVENTION", "auto")
     jpi, jpj, jpk, hls = _read_dims(RUN_DIR)
-    print(f"RUN_GDB dims: jpi={jpi} jpj={jpj} jpk={jpk} nn_hls={hls}  "
+    print(f"{dump_lane.LANE} dims: jpi={jpi} jpj={jpj} jpk={jpk} nn_hls={hls}  "
           f"LEGOESM_NEMO_E3T={e3t_mode}  LEGOESM_METRIC_CONVENTION={metric}")
 
     grid = read_nemo_mesh_mask(os.path.join(RUN_DIR, "mesh_mask.nc"), nn_hls=0)
@@ -225,6 +230,7 @@ def measure_conditioning(st, part1: dict) -> dict:
 
 
 def main() -> int:
+    print(dump_lane.banner())
     st = build_state()
     part1 = measure_row_tuple(st)
     part2 = measure_conditioning(st, part1)

@@ -29,7 +29,7 @@ from legoesm.atmosphere.physics.microphysics.morrison import (
     morrison_microphysics,
 )
 from legoesm.atmosphere.physics.microphysics.output import HydrometeorState
-from legoesm.thermo import saturation_mixing_ratio
+from legoesm.thermo import saturation_specific_humidity
 
 
 jax.config.update("jax_enable_x64", True)
@@ -37,7 +37,7 @@ _CFG = MorrisonConfig()
 
 
 def _pre(q_r=1.0e-3, N_r=1.0e4, RH=0.8, T=290.0, p=9.0e4, dt=None):
-    qsat = float(saturation_mixing_ratio(jnp.asarray(T), jnp.asarray(p)))
+    qsat = float(saturation_specific_humidity(jnp.asarray(T), jnp.asarray(p)))
     rho = p / (constants.R_d * T)
     return float(rain_evaporation_m2005(
         jnp.asarray(RH * qsat), jnp.asarray(q_r), jnp.asarray(N_r),
@@ -46,7 +46,7 @@ def _pre(q_r=1.0e-3, N_r=1.0e4, RH=0.8, T=290.0, p=9.0e4, dt=None):
 
 
 def _pre_hand(q_r=1.0e-3, N_r=1.0e4, RH=0.8, T=290.0, p=9.0e4):
-    qsat = float(saturation_mixing_ratio(jnp.asarray(T), jnp.asarray(p)))
+    qsat = float(saturation_specific_humidity(jnp.asarray(T), jnp.asarray(p)))
     rho = p / (constants.R_d * T)
     lamr = (math.pi * constants.rho_water * N_r / (rho * q_r)) ** (1.0 / 3.0)
     lamr = min(max(lamr, _CFG.lamr_min), _CFG.lamr_max)
@@ -109,7 +109,7 @@ def test_pre_donor_clamped():
 
 def test_pre_ad_safe():
     """grad finite at q_r=0 and N_r=0 (safe_pow on the clamped slope)."""
-    qsat = float(saturation_mixing_ratio(jnp.asarray(290.0), jnp.asarray(9.0e4)))
+    qsat = float(saturation_specific_humidity(jnp.asarray(290.0), jnp.asarray(9.0e4)))
 
     def loss(args):
         qr, nr = args
@@ -129,7 +129,7 @@ def test_nsubr_removes_rain_number_during_evaporation():
     rain evaporates. Isolated via the subsaturated−saturated DIFFERENCE in
     dN_r: the state (q_r, N_r) is identical, so number sedimentation + self-
     collection cancel and only the evaporation number sink remains."""
-    qsat = float(saturation_mixing_ratio(jnp.asarray(290.0), jnp.asarray(9.0e4)))
+    qsat = float(saturation_specific_humidity(jnp.asarray(290.0), jnp.asarray(9.0e4)))
     q_r, N_r = 1.0e-3, 1.0e4
     z = jnp.zeros((1, 1))
     hm = HydrometeorState(
@@ -161,7 +161,7 @@ def test_bulk_rain_evap_scheme_runs():
     ``evap_coeff·subsat·q_r^0.525``) must still evaluate to a finite,
     evaporative (dq_v >= 0 in subsaturated air) tendency — it is the
     non-default dispatch branch and was previously unexercised."""
-    qsat = float(saturation_mixing_ratio(jnp.asarray(290.0), jnp.asarray(9.0e4)))
+    qsat = float(saturation_specific_humidity(jnp.asarray(290.0), jnp.asarray(9.0e4)))
     z = jnp.zeros((1, 1))
     hm = HydrometeorState(
         q_c=z, q_r=jnp.full((1, 1), 1.0e-3), q_i=z, q_s=z, q_g=z,
@@ -181,7 +181,7 @@ def test_bulk_rain_evap_scheme_runs():
 
 def test_unknown_rain_evap_scheme_raises():
     """The morrison dispatcher rejects an unknown scheme."""
-    qsat = float(saturation_mixing_ratio(jnp.asarray(290.0), jnp.asarray(9.0e4)))
+    qsat = float(saturation_specific_humidity(jnp.asarray(290.0), jnp.asarray(9.0e4)))
     z = jnp.zeros((1, 1))
     hm = HydrometeorState(
         q_c=z, q_r=jnp.full((1, 1), 1.0e-3), q_i=z, q_s=z, q_g=z,

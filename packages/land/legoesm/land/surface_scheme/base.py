@@ -62,6 +62,21 @@ class SurfaceFluxOutput(NamedTuple):
     # the two-leaf canopy, single leaf for SimpleSEB), scaled by the escape
     # probability fesc.  Passive diagnostic — no feedback into the land state.
     sif: jax.Array | None = None
+    # Last CONVERGED canopy Newton solution per column, (ncol, 6) in the solver's
+    # own variable order, NaN where this column has never converged.  Purely a
+    # warm-start cache for the next call (the fixed point does not depend on the
+    # seed, and the solve's adjoint returns a zero cotangent for it); None for
+    # every scheme that does not run the canopy closure.
+    canopy_x: jax.Array | None = None
+    # Canopy solver TERMINAL DIAGNOSTICS (None for every other scheme).  The
+    # solver's own squared residual at exit, that value relative to the seed's
+    # (the ratio the relative convergence gate tests), and 1.0 where the loop
+    # left by the ITERATION CAP rather than the damping ceiling.  These exist
+    # because ``converged`` alone cannot distinguish a stalled column from a
+    # nearly-solved one; non-differentiable, no feedback into the land state.
+    canopy_resid_sq: jax.Array | None = None
+    canopy_resid_rel: jax.Array | None = None
+    canopy_hit_cap: jax.Array | None = None
 
     # ---- Canopy-specific diagnostics (None for SimpleSEB) ----
     Tf_Sun: jax.Array | None = None        # sunlit leaf T [K]
@@ -76,6 +91,12 @@ class SurfaceFluxOutput(NamedTuple):
     gs_Sun: jax.Array | None = None        # sunlit stomatal conductance [m/s]
     gs_Sh: jax.Array | None = None         # shaded stomatal conductance [m/s]
     n_iters: jax.Array | None = None       # canopy Newton iteration count
+    # Per-column flag: did the canopy Newton closure reach a root?  ``False``
+    # means the accompanying fluxes come from a stopped iterate (iteration cap
+    # hit, or a singular Jacobian whose step had to be discarded) and are NOT a
+    # solution of the surface energy balance.  ``None`` for schemes that do not
+    # iterate.  Consumers must not spend a False column's fluxes as they are:
+    # ``multilayer_land`` closes their energy and accepts or reverts the column.
     f_veg: jax.Array | None = None         # vegetation cover fraction [0-1]
     fSun: jax.Array | None = None          # sunlit canopy fraction [0-1]
     # Ts_solve: converged soil skin T from the canopy Picard loop (for
@@ -90,6 +111,14 @@ class SurfaceFluxOutput(NamedTuple):
     # ``None`` when interception is off.
     LE_wet_canopy: jax.Array | None = None
     LE_soil: jax.Array | None = None
+    # SimpleSEB over a layered pack (fractional cover f): the pack's share of
+    # ``lhflx`` [W/m^2 per cell area], f times the snow surface's own latent
+    # flux.  ``None`` on the binary snow path and for the canopy schemes.
+    LE_snow: jax.Array | None = None
+    # SimpleSEB over a layered pack: cell vapour conductance [kg m-2 s-1 per
+    # kg/kg] (> 0), so the caller can export the humidity q_air + E / g that
+    # implies the REALISED vapour flux E.  ``None`` elsewhere.
+    vapour_conductance: jax.Array | None = None
     H_canopy: jax.Array | None = None
     H_soil: jax.Array | None = None
     Rn_canopy: jax.Array | None = None
@@ -137,3 +166,61 @@ class SurfaceFluxOutput(NamedTuple):
     # None for SimpleSEB (negligible for thin canopies without explicit storage).
     stflx_air: jax.Array | None = None
     stflx_veg: jax.Array | None = None
+
+    # ---- Solver / containment status (appended: adding these anywhere earlier
+    #      would shift every following field's POSITION, so a positional
+    #      constructor would silently bind the wrong values) ----
+    # Did the surface scheme's iterative closure reach a root on this column?
+    # ``False`` means the fluxes above come from a stopped iterate (iteration
+    # cap, or a singular Jacobian whose step had to be discarded) and are NOT a
+    # solution of the surface energy balance.  ``None`` for schemes that do not
+    # iterate.
+    converged: jax.Array | None = None
+    # Per-column containment result, filled in by the land step (not by the
+    # surface scheme): ``held`` marks columns whose new state was rejected and
+    # reverted, ``n_held`` counts them.  A non-zero ``n_held`` means the land
+    # model could not solve somewhere — a defect report, not a diagnostic to
+    # ignore.
+    held: jax.Array | None = None
+    n_held: jax.Array | None = None
+    # Unsolved-but-finite columns ACCEPTED with energy-closed fallback fluxes
+    # (``fallback`` mask, ``n_fallback`` count), and unsolved finite columns the
+    # fallback guards rejected and reverted instead (``fallback_rejected`` mask,
+    # ``n_fallback_rejected`` count; already included in ``held``/``n_held``).
+    # Filled in by the land step.
+    fallback: jax.Array | None = None
+    n_fallback: jax.Array | None = None
+    fallback_rejected: jax.Array | None = None
+    n_fallback_rejected: jax.Array | None = None
+
+    # Layered snowpack only (``snow_scheme == "layered"``): excess of the pack-top
+    # temperature over T_freeze after the implicit solve and BEFORE the enthalpy
+    # re-equilibration [K], (ncol,).  The solve carries sensible heat only, so this
+    # measures how far one step overshoots the melting point (an accuracy, not a
+    # conservation, diagnostic).  None for the bulk snowpack.
+    snow_T_top_excess: jax.Array | None = None
+    # Layered snowpack only, for the column energy budget: enthalpy carried into
+    # the pack by mass (snowfall, frost, rain) minus that leaving it (sublimated
+    # ice, drainage incl. any liquid above T_freeze) [J/m^2, relative to ice at
+    # T_freeze]; and the ground heat flux the pack+soil column received, Robin
+    # term included [W/m^2, positive into the ground].  Pack enthalpy + soil
+    # sensible energy change by dt*(snow_ground_heat_applied + geothermal) +
+    # snow_advected_heat.  Melt water enters the soil carrying no heat (same
+    # convention as rain infiltration), so the drainage enthalpy leaves the column.
+    snow_advected_heat: jax.Array | None = None
+    snow_ground_heat_applied: jax.Array | None = None
+    # The scheme's solved surface stress MAGNITUDE rho*u*^2 [Pa] (appended
+    # last, same positional reason).  ``tau_x``/``tau_y`` lay it along a
+    # wind-speed-floored direction, so their length is smaller in light wind;
+    # a consumer handing the land's stress to the atmosphere reads this.
+    # ``None`` for schemes that solve no friction velocity.
+    tau_mag: jax.Array | None = None
+    # Latent heat [J/kg] the canopy scheme charged its GROUND latent flux
+    # ``LE_soil`` at, so ground vapour mass = LE_soil / L_soil exactly (appended
+    # last, same positional reason).  Over snow it carries the sublimation share
+    # (#1875).  ``None`` for SimpleSEB.
+    L_soil: jax.Array | None = None
+    # Columns whose soil-water (Richards) solve kept an unconverged last
+    # iterate this step (any water left over is in RichardsOutput.water_created).
+    # Filled in by the land step (appended last, same positional reason).
+    soil_unconverged: jax.Array | None = None

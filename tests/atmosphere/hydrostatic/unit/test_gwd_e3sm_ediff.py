@@ -37,6 +37,19 @@ from legoesm.atmosphere.physics.gravity_wave_drag.e3sm_cam import (
     newtonian_alpha_profile, e3sm_cam_gwd,
 )
 
+
+_e3sm_cam_gwd_kernel = e3sm_cam_gwd
+
+
+def e3sm_cam_gwd(*args, **kw):
+    """The kernel with ``p_ref_half`` (E3SM pref_edge) = the test column's own
+    interfaces: these columns are built at surface pressure p_ref = 1e5 Pa, so
+    their interfaces ARE the reference interfaces a lane would pass."""
+    if "p_ref_half" not in kw:
+        ph = kw["p_half"] if "p_half" in kw else args[4]
+        kw["p_ref_half"] = jnp.asarray(ph)[0]
+    return _e3sm_cam_gwd_kernel(*args, **kw)
+
 ORACLE_RAIR = 287.04
 ORACLE_CPAIR = 1004.64
 ORACLE_G = 9.80616
@@ -94,7 +107,7 @@ def _spectral_state():
         to(u), to(v), frontgf, NGWV, DC, cfg.frontal.c0, cfg.frontal.taubgnd,
         cfg.frontal.frontgfc, kbot, kfront,
     )
-    tau, utgw, vtgw, gwut = gw_drag_prof(
+    tau, utgw, vtgw, gwut, _tau_sat = gw_drag_prof(
         tau0, c, src, tend, to(T), ti, piln, rhoi, nm, ni,
         ubm, ubi, xv, yv, dpm, rdpm, jnp.zeros(1), 1.0, DT, cfg,
         orographic_only=False, do_taper=False,

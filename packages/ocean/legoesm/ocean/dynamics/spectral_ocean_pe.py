@@ -46,6 +46,7 @@ from legoesm.grids.gaussian import (
     spectral_hyperdiffusion_3d,
 )
 from legoesm.timestepping.dispatch import dispatch_integrator
+from legoesm.timestepping.integration import IntegrationMixin
 from legoesm.parallel.metal import place_spectral_grid
 from legoesm.ocean.eos import compute_hydrostatic_pressure, make_eos_fn, scale_depth
 from legoesm.ocean.vertical import (
@@ -672,7 +673,7 @@ def _vertical_advection_spectral(
 # Model class
 # ==============================================================================
 
-class SpectralOceanModel:
+class SpectralOceanModel(IntegrationMixin):
     """Spectral ocean model on the Gaussian grid.
 
     Uses SSP-RK3 for time integration of the full spectral tendencies.
@@ -867,42 +868,6 @@ class SpectralOceanModel:
             jax.device_put(s, self._default_device) for s in trajectory_cpu
         ]
         return state_out, trajectory_out
-
-    def integrate_scan(
-        self,
-        state: SpectralOceanState,
-        n_steps: int,
-        dt: float,
-    ) -> tuple[SpectralOceanState, SpectralOceanState]:
-        """Integrate using jax.lax.scan (differentiable, JIT-friendly).
-
-        Parameters
-        ----------
-        state : SpectralOceanState
-            Initial state.
-        n_steps : int
-            Number of time steps.
-        dt : float
-            Time step [seconds].
-
-        Returns
-        -------
-        final_state : SpectralOceanState
-        trajectory : SpectralOceanState (stacked, each leaf shape (n_steps, ...))
-
-        Notes
-        -----
-        Does not support the Metal CPU-transfer batching path used by
-        ``integrate()``.  Use ``integrate()`` on Metal for optimal performance.
-        """
-        def scan_fn(state, _):
-            new_state = self.step(state, dt)
-            return new_state, new_state
-
-        final_state, trajectory = jax.lax.scan(
-            scan_fn, state, xs=None, length=n_steps,
-        )
-        return final_state, trajectory
 
 
 # ==============================================================================

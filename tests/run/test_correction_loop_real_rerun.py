@@ -66,7 +66,7 @@ def _build_driver(clubb_cfg):
 
     atm = ExperimentConfig(
         grid=GridConfig(grid_type="latlon", resolution=_NLAT, nlev=_NLEV),
-        dycore=DycoreConfig(dt=600.0, model_type="hydrostatic",
+        dycore=DycoreConfig(energy_fixer=False, dt=600.0, model_type="hydrostatic",
                             discretization="finite_volume"),
         output=OutputConfig(diag_days=0.5), radiation="gray",
         turbulence="clubb_lite", days=0.5,
@@ -185,7 +185,7 @@ def _build_amip_driver(clubb_cfg):
 
     atm = ExperimentConfig(
         grid=GridConfig(grid_type="latlon", resolution=_NLAT, nlev=_NLEV),
-        dycore=DycoreConfig(dt=600.0, model_type="hydrostatic",
+        dycore=DycoreConfig(energy_fixer=False, dt=600.0, model_type="hydrostatic",
                             discretization="finite_volume"),
         output=OutputConfig(diag_days=0.5), radiation="gray",
         turbulence="clubb_lite", days=0.5, dataset="analytical",

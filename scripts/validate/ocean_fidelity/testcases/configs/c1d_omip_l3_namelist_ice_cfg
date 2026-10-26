@@ -1,0 +1,147 @@
+!!>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+!! SI3 configuration namelist: Overwrites SHARED/namelist_ice_ref
+!!              1 - Generic parameters                 (nampar)
+!!              2 - Ice thickness discretization       (namitd)
+!!              3 - Ice dynamics                       (namdyn)
+!!              4 - Ice ridging/rafting                (namdyn_rdgrft)
+!!              5 - Ice rheology                       (namdyn_rhg)
+!!              6 - Ice advection                      (namdyn_adv)
+!!              7 - Ice surface boundary conditions    (namsbc)
+!!              8 - Ice thermodynamics                 (namthd)
+!!              9 - Ice heat diffusion                 (namthd_zdf)
+!!             10 - Ice lateral melting                (namthd_da)
+!!             11 - Ice growth in open water           (namthd_do)
+!!             12 - Ice salinity                       (namthd_sal)
+!!             13 - Ice melt ponds                     (namthd_pnd)
+!!             14 - Ice initialization                 (namini)
+!!             15 - Ice/snow albedos                   (namalb)
+!!             16 - Ice diagnostics                    (namdia)
+!!>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+!
+!------------------------------------------------------------------------------
+&nampar         !   Generic parameters
+!------------------------------------------------------------------------------
+   jpl              = 1          ! shipped C1D value; ORCA1 ice cfg:24
+   nlay_i           = 3          ! ORCA1 ice cfg:25
+   nlay_s           = 3          ! ORCA1 ice cfg:26
+   rn_amax_n        = 0.99999    ! ORCA1 ice cfg:27
+   rn_amax_s        = 0.99999    ! ORCA1 ice cfg:28
+   ln_icethd        = .true.     ! ORCA1 ice cfg:32
+/
+!------------------------------------------------------------------------------
+&namitd         !   Ice discretization
+!------------------------------------------------------------------------------
+   ln_cat_hfn       = .true.     ! ORCA1 ice cfg:37
+   ln_cat_usr       = .false.    ! ice ref:43; exclusive with HFN
+   rn_himean        = 2.0        ! ORCA1 ice cfg:38
+   rn_himin         = 0.05       ! ORCA1 ice cfg:39
+   rn_himax         = 99.0       ! ice ref:46; HFN upper bound
+/
+!------------------------------------------------------------------------------
+&namdyn         !   Ice dynamics
+!------------------------------------------------------------------------------
+   ln_dynALL        = .true.     ! ORCA1 ice cfg:44; inert because ln_c1d skips icestp.F90:167-168
+   ln_dynRHGADV     = .false.    ! ORCA1 ice cfg:45; inert because ln_c1d skips icestp.F90:167-168
+/
+!------------------------------------------------------------------------------
+&namdyn_rdgrft  !   Ice ridging/rafting
+!------------------------------------------------------------------------------
+   ln_str_H79       = .true.     ! ORCA1 ice cfg:52
+   rn_pstar         = 2.0e4      ! ORCA1 ice cfg:53
+   rn_crhg          = 20.0       ! ORCA1 ice cfg:54
+   ln_str_smooth    = .false.    ! ORCA1 ice cfg:55
+   ln_distf_lin     = .false.    ! ORCA1 ice cfg:57
+   ln_distf_exp     = .true.     ! ORCA1 ice cfg:58
+   ln_partf_exp     = .true.     ! ORCA1 ice cfg:60
+   ln_ridging       = .true.     ! ORCA1 ice cfg:61
+   ln_rafting       = .true.     ! ORCA1 ice cfg:62
+   rn_fpndrdg       = 0.5        ! ORCA1 ice cfg:63
+   rn_fpndrft       = 0.5        ! ORCA1 ice cfg:64
+   rn_porordg       = 0.0        ! ORCA1 ice cfg:65
+/
+!------------------------------------------------------------------------------
+&namdyn_rhg     !   Ice rheology
+!------------------------------------------------------------------------------
+   ln_rhg_EVP       = .true.     ! ORCA1 ice cfg:70
+   ln_rhg_EAP       = .false.    ! ice ref:109; exclusive with EVP
+   ln_aEVP          = .true.     ! ice ref:110; resolved ORCA1 EVP selection
+   nn_nevp          = 100        ! ice ref:113; resolved ORCA1 EVP selection
+/
+!------------------------------------------------------------------------------
+&namdyn_adv     !   Ice advection
+!------------------------------------------------------------------------------
+   ln_adv_Pra       = .true.     ! ORCA1 ice cfg:75
+   ln_adv_UMx       = .false.    ! ORCA1 ice cfg:76
+/
+!------------------------------------------------------------------------------
+&namsbc         !   Ice surface boundary conditions
+!------------------------------------------------------------------------------
+   rn_Cd_io         = 5.0e-3    ! ice ref:136; inherited by ORCA1
+   nn_snwfra        = 2          ! ice ref:137; inherited by ORCA1
+   rn_snwblow       = 0.66       ! ice ref:141; inherited by ORCA1
+   nn_flxdist       = -1         ! ice ref:143; inherited by ORCA1
+   ln_cndflx        = .false.    ! ORCA1 ice cfg:81
+   ln_cndemulate    = .false.    ! ORCA1 ice cfg:82
+   nn_qtrice        = 0          ! ice ref:150; inherited by ORCA1
+/
+!------------------------------------------------------------------------------
+&namthd         !   Ice thermodynamics
+!------------------------------------------------------------------------------
+   ln_icedH         = .true.     ! ice ref:157; inherited by ORCA1
+   ln_icedA         = .false.    ! ORCA1 ice cfg:87
+   ln_icedO         = .true.     ! ice ref:159; inherited by ORCA1
+   ln_leadhfx       = .true.     ! ice ref:160; inherited by ORCA1
+/
+!------------------------------------------------------------------------------
+&namthd_zdf     !   Ice heat diffusion
+!------------------------------------------------------------------------------
+   ln_zdf_BL99      = .true.     ! ice ref:165; inherited by ORCA1
+   ln_cndi_P07      = .true.     ! ice ref:167; inherited by ORCA1
+   ln_cndi_U64      = .false.    ! ice ref:166; exclusive with P07
+   rn_cnd_s         = 0.5        ! ORCA1 ice cfg:92
+   rn_kappa_i       = 1.0        ! ice ref:170; inherited by ORCA1
+   rn_kappa_s       = 10.0       ! ice ref:171; inherited by ORCA1
+   ln_zdf_chkcvg    = .false.    ! ORCA1 ice cfg:94
+/
+!------------------------------------------------------------------------------
+&namthd_da      !   Ice lateral melting
+!------------------------------------------------------------------------------
+/
+!------------------------------------------------------------------------------
+&namthd_do      !   Ice growth in open water
+!------------------------------------------------------------------------------
+   rn_hinew         = 0.05       ! ORCA1 ice cfg:103
+   ln_frazil         = .false.    ! ice ref:191; inherited by ORCA1
+/
+!------------------------------------------------------------------------------
+&namthd_sal     !   Ice salinity
+!------------------------------------------------------------------------------
+   nn_icesal        = 2          ! ORCA1 ice cfg:108
+   ln_flushing      = .true.     ! ORCA1 ice cfg:113
+   ln_drainage      = .true.     ! ORCA1 ice cfg:114
+   rn_simin         = 0.1        ! ORCA1 ice cfg:115
+   rn_sinew         = 0.75       ! ORCA1 ice cfg:116; keep despite inconsistency at :117
+   rn_sal_gd        = 5.0        ! ORCA1 ice cfg:121
+   rn_time_gd       = 1.73e6     ! ORCA1 ice cfg:122
+   rn_sal_fl        = 2.0        ! ORCA1 ice cfg:123
+   rn_time_fl       = 8.64e5     ! ORCA1 ice cfg:124
+/
+!------------------------------------------------------------------------------
+&namthd_pnd     !   Melt ponds
+!------------------------------------------------------------------------------
+   ln_pnd           = .false.    ! ORCA1 ice cfg:151
+   ln_pnd_LEV       = .false.    ! ORCA1 ice cfg:152
+/
+!------------------------------------------------------------------------------
+&namini         !   Ice initialization
+!------------------------------------------------------------------------------
+/
+!------------------------------------------------------------------------------
+&namalb         !   albedo parameters
+!------------------------------------------------------------------------------
+/
+!------------------------------------------------------------------------------
+&namdia         !   Diagnostics
+!------------------------------------------------------------------------------
+   ln_icediachk     = .true.     ! phase-1 oracle self-ledger; dossier section 3
+/

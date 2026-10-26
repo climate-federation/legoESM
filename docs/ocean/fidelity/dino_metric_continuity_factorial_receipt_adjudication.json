@@ -1,0 +1,57 @@
+{
+  "artifact_root": "/tmp/dino-metric-continuity-factorial-01a04e34",
+  "basin_arm_sha256": {
+    "legacy_generic": "fe751fc31d508e6e23e02b5371646cb3383286623315780846bb8c69be7fda9f",
+    "legacy_literal": "0df3fbc0f74ad0800c210807e84a917565f7afcd4c4a8603f91250b7e104a688",
+    "nemo_generic": "c8adcbeddbd941798b458ce367dd7205f9e4783fb62c7a1f1c91f76d67e624b2",
+    "nemo_literal": "16cff390f7d1c5e4514ad9b02dd356e6d4e9f47d1da571e822de5a88a1f9b00e"
+  },
+  "basin_score": {
+    "artifact": "/tmp/dino-metric-continuity-factorial-01a04e34/metric_continuity_basin_factorial.json",
+    "artifact_sha256": "d1974563f01cfec03e317dbeba6de1210935b184d8bc8a1dd5fa34984a6d30a6",
+    "basin_gap_sv": {
+      "legacy_generic": -0.951979116371497,
+      "legacy_literal": -0.9525728166480043,
+      "nemo_generic": -0.9769393653427283,
+      "nemo_literal": -0.9388829260453218
+    },
+    "combined_response_fraction": 0.0137568042207605,
+    "combined_sv": 0.013096190326175261,
+    "headline_verdict": "UNRESOLVED/FLOOR",
+    "interaction_sv": 0.03865013957391383,
+    "safety_metrics_all_pass": true,
+    "scorer_commit": "08414088412080679ea12c47e105f96c517e3f03"
+  },
+  "date": "2026-08-29",
+  "disposition": "OWNED_RECEIPT_DRIFT_AND_SCORER_LITERAL_FIXED",
+  "field_delta": {
+    "tau_x": {
+      "different_float64_elements": 3276,
+      "max_abs": 1.3877787807814457e-16,
+      "rms": 2.0276965279154703e-17
+    },
+    "tau_y": {
+      "bit_identical": true,
+      "different_float64_elements": 0,
+      "max_abs": 0.0,
+      "rms": 0.0
+    }
+  },
+  "hash_by_dino_wind_profile_evaluation": {
+    "factored_smoothstep": "b6a08b8395017c8e3f8df0b8b13eefa75fdfe7be3770d788beaaf1ca514127ae",
+    "nemo_literal": "cad9b34958cba58812f1dce2c6c441c8fd6b5f2733c20b91065f4d60507592b7"
+  },
+  "producer_commit": "e013e95ca54957a4454878ed7118e623da0a19ba",
+  "reconstruction_seconds": 15552000.0,
+  "replay": {
+    "control_dtype": "float64",
+    "geometry_shape": [199, 52],
+    "platform": "cpu",
+    "single_changed_config_field": "dino_wind_profile_evaluation"
+  },
+  "session_id": "01a04e34-d1fb-73e0-b25a-177641f0a246",
+  "stop_cause": {
+    "artifact_twin_start_mode": "bridged",
+    "scorer_expected_literal_before_fix": "BRIDGED_BEFORE"
+  }
+}

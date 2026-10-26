@@ -1,0 +1,11 @@
+--- namelist_cfg
++++ namelist_cfg
+@@ -18,7 +18,7 @@
+ !-----------------------------------------------------------------------
+    cn_exp      =  "GYRE_OMIP_L2_P3"   !  phase-3 ten-step oracle
+    nn_it000    =       1   !  first time step
+-   nn_itend    =      1440   !  last  time step
++   nn_itend    =      1081   !  last  time step
+    nn_leapy    =      30   !  Leap year calendar (1) or not (0)
+    nn_stock    =      180   !  frequency of creation of a restart file (modulo referenced to 1)
+    nn_write    =      2160   !  frequency of write in the output file   (modulo referenced to nn_it000)

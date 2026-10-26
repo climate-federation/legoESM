@@ -23,6 +23,16 @@ The density-class CENSUS is EXCLUDED from this gate: its 90-day (and even
 this branch state -- so it remains a multi-year campaign metric only
 (#1492 2.2 comment).
 
+START MODE (#1455, 2026-08-24): the twin runner now CONTINUES NEMO's
+leap-frog by default (``--bridge-before``, formerly opt-in), so ``--run-recipe``
+produces a bridged-start candidate unless ``--no-bridge-before`` is passed.
+This gate PRINTS the candidate's ``twin_start_mode`` stamp and never refuses on
+it -- see ``kamm_twin_90d.certifiable_grid_and_precision`` for why the start
+mode is deliberately NOT a certification dimension the way the ladder and the
+precision are (no recorded artifact carries the new stamp at all, the
+verdict-year baseline included, so a strict criterion would refuse them for
+being unstamped and orphan the campaign's own baseline).
+
 Thresholds: the 2.1 micro-ensemble noise floor (3 members, 1e-14 T
 perturbations -- n=3 caveat inherited: the floor is a small-sample estimate),
 staged 5x / 2x / 1x.  Default gate level 5x; select with --level.
@@ -79,6 +89,7 @@ _DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _DIR)                       # acc_thermal_wind (sibling)
 sys.path.insert(0, os.path.dirname(_DIR))      # rebuild_nemo_restart (parent)
 import acc_thermal_wind as A  # noqa: E402  (recorded harness, imported not copied)
+import kamm_twin_90d as _twin  # noqa: E402  (one shared seasonal-clock guard)
 
 DINO = A.DINO
 RUN_90D_TWIN = os.environ.get("DINO_NEMO_RUN_90D_TWIN", f"{DINO}/RUN_90D_TWIN")
@@ -123,6 +134,62 @@ def metrics(st, wet):
 def load_candidate(path, day=90):
     """{"T","S","u","land_mask"} (fp64) from a kamm_twin_90d --save-3d npz."""
     d = np.load(path)
+    # #1455: the twin harness stamps WHICH vertical ladders the bridge handed
+    # legoESM (nemo_ladder_mode). PRINT it, never refuse on it -- both ladders
+    # are legitimately scoreable and the gate's job is to say which grid a score
+    # was earned on, not to pick one. An artifact written before the stamp
+    # existed does NOT record its grid at all -- it may have been run with
+    # LEGOESM_NEMO_E3T set to anything -- so it is reported as unknown, never
+    # guessed at from whatever the default was on the day.
+    # It prints BEFORE the seasonal-clock refusal below, so a candidate that
+    # is refused still records which grid it ran on.
+    ladder = (str(d["nemo_ladder_mode"]) if "nemo_ladder_mode" in d.files
+              else "UNSTAMPED -- this artifact predates the nemo_ladder_mode "
+                   "stamp and does not record which vertical ladders it ran "
+                   "on; read its run log")
+    print(f"vertical ladder of this candidate: {ladder}", flush=True)
+    # #1640 (GLM): the LABEL above is a taxonomy; this is the IDENTITY. Two
+    # runs with the same label and different numbers get different hashes, so
+    # "same grid" is decidable instead of asserted.
+    lhash = (str(d["vertical_ladder_sha256"])
+             if "vertical_ladder_sha256" in d.files
+             else "UNSTAMPED -- predates the content hash; its ladder ARRAYS "
+                  "cannot be compared to any other run's")
+    print(f"vertical ladder content hash: {lhash}", flush=True)
+    # #1455 (2026-08-24): PRINT the time-integration START this candidate took.
+    # Same policy as the ladder -- report, never refuse -- but for a different
+    # reason, and the reason is worth stating because it is the opposite of the
+    # ladder's. An off-ladder arm is a different experiment from the claim; the
+    # Euler start is the mode the claim's OWN recorded baseline ran in. Refusing
+    # to certify it would withhold a verdict from every artifact this campaign
+    # has, the verdict-year baseline included, and buy no measurement. So it is
+    # printed, not gated, and the bound on what it costs comes from the
+    # registered 90-day bridged-vs-Euler A/B instead. See
+    # kamm_twin_90d.certifiable_grid_and_precision for the full disposition.
+    start = _twin.start_mode_of(d)
+    if start is None:
+        start = ("UNSTAMPED -- predates the twin_start_mode stamp and does "
+                 "not record which start it took; read its run log (the "
+                 "before-level bridge verification line prints if and only if "
+                 "the bridge ran)")
+    elif start != "bridged":
+        start = (f"{start} -- LEGACY FORWARD-EULER START: delayed about half "
+                 "a step at every frequency AND carrying a permanent injected "
+                 "perturbation of half a leap-frog step of tendency "
+                 "(~2.06e-3 Sv of circumpolar transport at t=0), and step 1 "
+                 "skips NEMO's after-level reconciliation")
+    print(f"twin start mode: {start}", flush=True)
+    # #1455 season-bug guard (extend-only): NEMO's analytic surface forcing is
+    # a function of the day of year through the absolute step index
+    # (usrdef_sbc.F90:536), and the day-180 restart carries adatrj=180.0, so a
+    # candidate forced on any other day of the year is a cross-season confound
+    # rather than a fidelity measurement. The guard lives in kamm_twin_90d so
+    # every scorer applies the same one; it refuses an artifact that carries no
+    # clock stamps and one whose clock is not the restart's own.
+    import os as _os
+    if _os.environ.get("DINO_GATE_ALLOW_LEGACY_CLOCK") != "1":
+        _twin.assert_nemo_seasonal_clock(d, path)
+
     key = f"u3d_day{day}"
     if key not in d:
         raise SystemExit(f"{path} has no {key} -- run kamm_twin_90d.py with "
@@ -177,14 +244,29 @@ def classify(cand_m, nemo_m, level):
             for k in KEYS]
 
 
-def print_gate(rows, level, tag=""):
+def print_gate(rows, level, tag="", certified=True):
+    """Print the metric table, and the PASS/FAIL tally ONLY when certified.
+
+    ``certified=False`` (#1640) prints the same numbers but withholds every
+    verdict token -- the per-row ``PASS``/``FAIL`` flags AND the tally line.
+    A row status is a verdict, so suppressing only the tally would still have
+    issued one five times over.  The scores stay visible because an off-claim
+    candidate is still worth scoring; what it cannot buy is a certification.
+    """
     print(f"{'metric':<34}{'candidate':>14}{'NEMO d90':>14}{'|diff|':>12}"
           f"{'thresh':>12}  status")
     for k, c, n, d, t, ok in rows:
-        flag = f"PASS({level}x)" if ok else "FAIL  <--"
+        if certified:
+            flag = f"PASS({level}x)" if ok else "FAIL  <--"
+        else:
+            # NOT a verdict: how the number sits against a threshold that does
+            # not apply to this candidate's grid/precision.
+            flag = f"(within {level}x)" if ok else f"(over {level}x)"
         print(f"{LABELS[k]:<34}{c:>14.6f}{n:>14.6f}{d:>12.3e}{t:>12.3e}  {flag}")
     n_pass = sum(ok for *_, ok in rows)
     n_fail = len(rows) - n_pass
+    if not certified:
+        return n_fail
     # fidelity_bar_gate.py tally-line convention (matched in style, not imported)
     print(f"\n{tag}GATE 90D-TWIN: PASS {n_pass} | FAIL {n_fail} | "
           f"level {level}x | total {len(rows)}")
@@ -223,8 +305,16 @@ def self_test(level):
 def run_candidate_twin(candidate_path, recipe, placement, bridge_before):
     cmd = [sys.executable, f"{_DIR}/kamm_twin_90d.py", recipe, candidate_path,
            "--days", "90", "--save-3d"]
-    if bridge_before:
-        cmd.append("--bridge-before")
+    # BOTH spellings are passed EXPLICITLY, even though --bridge-before is now
+    # the default and so a no-op on the command line. The two reviewers
+    # disagreed here, which is why this comment exists: one wanted the no-op
+    # dropped so a gate log's RUN: line reads honestly; the other pointed out
+    # that dropping it makes a post-flip gate invocation BYTE-IDENTICAL to a
+    # pre-flip Euler-default one -- and the audit that established no recorded
+    # twin was Euler-start worked precisely because the flag was on the command
+    # line as well as in the log. Redundancy in the provenance record wins;
+    # floor90_ensemble.py and verdict360.py already pass it for the same reason.
+    cmd.append("--bridge-before" if bridge_before else "--legacy-euler-start")
     if placement:
         cmd += ["--surface-tendency-placement", placement]
     print("RUN:", " ".join(cmd), flush=True)
@@ -247,7 +337,9 @@ def main(argv=None):
     p.add_argument("--bridge-before", default=True,
                    action=argparse.BooleanOptionalAction,
                    help="forwarded to kamm_twin_90d.py with --run-recipe "
-                        "(default on: nemo_dino_kamm_mlf requires it)")
+                        "(default on since 2026-08-09; --no-bridge-before "
+                        "selects the legacy forward-Euler start, which scores "
+                        "but cannot certify)")
     p.add_argument("--self-test", action="store_true",
                    help="synthetic-violation non-vacuity check (no twin needed)")
     args = p.parse_args(argv)
@@ -267,8 +359,43 @@ def main(argv=None):
     print(f"candidate: {args.candidate}")
     print(f"baseline : {RUN_90D_TWIN}/DINO_{KT_DAY90:08d}_restart_* "
           f"(NEMO day-90 continuation of the day-180 restart, NOW level)\n")
-    n_fail = print_gate(classify(metrics(cand, wet), metrics(nemo, wet),
-                                 args.level), args.level)
+    rows = classify(metrics(cand, wet), metrics(nemo, wet), args.level)
+
+    # #1640: SCORE anything, CERTIFY only the claim's grid and precision.
+    # The gate's job is to say which grid a score was earned on, so an
+    # off-claim candidate is still scored and printed in full -- but the
+    # PASS/FAIL verdict is WITHHELD, because a gate that will score anything
+    # cannot certify a claim that depends on being on the reference's ladders
+    # at double precision.
+    #
+    # THIS IS A BEHAVIOUR CHANGE OFF THE CLAIM'S GRID, not a no-op, and an
+    # earlier comment here wrongly called it one. Any recorded protocol that
+    # sweeps ladder modes and reads a verdict per arm -- notably the
+    # `off/e3t_only/gdept_only/both` sweep in `d180_step_walk.py` and the
+    # exit-status expectations in `PREREG_gate90_ladder_promotion.md` -- now
+    # gets UNCERTIFIED (and exit 3) on its non-`both` arms. That is the
+    # intended consequence of the review finding, not a regression: those arms
+    # were being read as verdicts on a claim they cannot support. The metric
+    # numbers in those tables are unchanged and still printed.
+    #
+    # Exit 3, not 2: argparse's own `p.error` exits 2, so 2 would make
+    # "uncertified" indistinguishable from "bad CLI arguments".
+    with np.load(args.candidate) as _stamps:
+        ok, reasons, _ladder, _dtype = (
+            _twin.certifiable_grid_and_precision(_stamps))
+    if not ok:
+        print_gate(rows, args.level, certified=False)
+        print("\nGATE 90D-TWIN: UNCERTIFIED -- no PASS/FAIL verdict issued "
+              "(exit 3).")
+        for r in reasons:
+            print(f"  - {r}")
+        print("  The metric table above is a real score on the grid the "
+              "candidate actually ran on; it is NOT a verdict on the claim, "
+              "which is about "
+              f"nemo_ladder_mode={_twin.CLAIM_LADDER_MODE!r} at "
+              f"control_dtype={_twin.CLAIM_CONTROL_DTYPE!r}.")
+        return 3
+    n_fail = print_gate(rows, args.level)
     return 1 if n_fail else 0
 
 

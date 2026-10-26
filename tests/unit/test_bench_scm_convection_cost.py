@@ -6,9 +6,7 @@ gated here is that the controls can actually fail:
 
 * the ``_NEWTON_ITERS`` scaling control must really retrace -- a monkeypatch
   that silently reuses a cached executable produces a flat scaling, which
-  reads exactly like a refutation of the hypothesis; and
-* the ON/OFF control must select genuinely different code, i.e.
-  ``use_dilute_cape`` must reach the scheme's config.
+  reads exactly like a refutation of the hypothesis.
 
 These run at a small ``nlev`` so the whole module is seconds, not minutes: the
 gate is on the instrument's wiring, not on the production timings.
@@ -137,13 +135,17 @@ def test_the_TIMED_function_returns_more_than_the_temperature_tendency(mod, col)
 # nlev=74 measurement here would be a claim carried across a configuration
 # change. The bench decides per run from its own activity flag; this suite
 # only pins the reason that is resolution-independent.
-_EXPECTED_INACTIVE = ("kuo",)
+#
+# `dca` is pinned for a reason that is also structural: GFDL moist_conv adjusts
+# only pairs of SUPERSATURATED levels, and build_state's column is RH 0.85 at
+# every level and every nlev.
+_EXPECTED_INACTIVE = ("kuo", "dca")
 
 # Schemes expected to trigger AT THIS MODULE'S nlev. `emanuel` belongs here
 # precisely because it is active at nlev=16.
 @pytest.mark.parametrize(
     "scheme", [s for s in (
-        "sbm", "dca", "mass_flux", "edmf", "zhang_mcfarlane",
+        "sbm", "mass_flux", "edmf", "zhang_mcfarlane",
         "kain_fritsch", "tiedtke", "bechtold", "emanuel") ])
 def test_active_schemes_are_reported_active(mod, col, scheme):
     """codex round 1 findings 14/19: an all-zero tendency is finite and times
@@ -187,40 +189,6 @@ def test_the_expected_inactive_schemes_are_flagged(mod, col, scheme):
         f"every published ratio need revisiting")
 
 
-def test_dilute_override_reaches_the_config_through_physics(mod, monkeypatch):
-    """codex finding 17: asserting on a hand-built _replace cannot fail if
-    `_physics` drops or misroutes sub_overrides. Spy on make_physics and read
-    the config it actually received."""
-    seen = {}
-    real = mod.make_physics
-
-    def spy(cfg, **kw):
-        seen["cfg"] = cfg
-        return real(cfg, **kw)
-
-    monkeypatch.setattr(mod, "make_physics", spy)
-    mod._physics("zhang_mcfarlane", DT, {"use_dilute_cape": False})
-    assert seen["cfg"].convection.scheme == "zhang_mcfarlane"
-    assert seen["cfg"].convection.zhang_mcfarlane.use_dilute_cape is False
-
-    mod._physics("zhang_mcfarlane", DT, {"use_dilute_cape": True})
-    assert seen["cfg"].convection.zhang_mcfarlane.use_dilute_cape is True
-
-
-def test_dilute_on_and_off_give_different_tendencies(mod, col):
-    """The two arms must be different PHYSICS, otherwise the timing control is
-    comparing one code path with itself."""
-    state, sigma = col
-    on = mod._physics("zhang_mcfarlane", DT, {"use_dilute_cape": True})
-    off = mod._physics("zhang_mcfarlane", DT, {"use_dilute_cape": False})
-    dT_on = np.asarray(on(state, None, sigma)[0].dT_dt.data)
-    dT_off = np.asarray(off(state, None, sigma)[0].dT_dt.data)
-    assert np.all(np.isfinite(dT_on)) and np.all(np.isfinite(dT_off))
-    assert not np.allclose(dT_on, dT_off), (
-        "use_dilute_cape did not change the tendency; the ON/OFF timing "
-        "control would be comparing the same code path with itself")
-
-
 def test_newton_iters_patch_actually_retraces(mod, col):
     """THE control that can silently lie.  Patching a module constant only
     changes the executable if the function is retraced; if a cached one is
@@ -237,12 +205,12 @@ def test_newton_iters_patch_actually_retraces(mod, col):
     try:
         _zm_dilute._NEWTON_ITERS = 1
         jax.clear_caches()
-        fn = mod._physics("zhang_mcfarlane", DT, {"use_dilute_cape": True})
+        fn = mod._physics("zhang_mcfarlane", DT, None)
         few = np.asarray(fn(state, None, sigma)[0].dT_dt.data)
 
         _zm_dilute._NEWTON_ITERS = 20
         jax.clear_caches()
-        fn = mod._physics("zhang_mcfarlane", DT, {"use_dilute_cape": True})
+        fn = mod._physics("zhang_mcfarlane", DT, None)
         many = np.asarray(fn(state, None, sigma)[0].dT_dt.data)
     finally:
         _zm_dilute._NEWTON_ITERS = original

@@ -1,0 +1,58 @@
+{
+  "artifact": "OVERFLOW-sco no-BBL attribution control",
+  "date": "2026-08-31",
+  "session": "01a0591f-a335-7060-9257-6c47bf2149ee",
+  "preregistered_commit": "05a99c9eecb57bead443acf3cda77f4aca84a5a2",
+  "run_root": "/data/abyssal/dbalwada/nemo-testcases-l1/overflow_sco_no_bbl_control",
+  "execution": {
+    "command": "OMP_NUM_THREADS=1 CUDA_VISIBLE_DEVICES='' ./nemo.exe",
+    "cpu_only": true,
+    "mpi_launcher": false,
+    "exit_code": 123
+  },
+  "fixed_executable_sha256": "eb4acf9651b887a3da8834281112d472692caa0bbadcb0d69779e91dee92e6cb",
+  "config_hashes": {
+    "committed_namelist_cfg": "5bf45231d14a08354d8cc03693680f60375d4972eeab0f4979cf3b5969727e19",
+    "run_namelist_cfg": "05250200fb357842049870b12e79e3269e848970a75383d545dc06d842106271",
+    "difference": "committed copy strips one final blank line; parsed namelist semantics are identical"
+  },
+  "namelist_semantic_diff_from_failed_sco": {
+    "nambbl.ln_trabbl": [
+      ".true.",
+      ".false."
+    ]
+  },
+  "omip_bbl_source": {
+    "path_lines": "/data/abyssal/dbalwada/ORCA1-omip/EXPREF/namelist_cfg:284-291",
+    "sha256": "7cfe2d47d78a00553cb28fe72c7e2be8655f96f0ea22920f0b8f17f5b2a47a0b"
+  },
+  "outcome": {
+    "completion": "REFUTE",
+    "last_control_step": 4773,
+    "trigger": "stp_ctl |U| > 10 m/s",
+    "velocity_max_m_s": 10.01,
+    "velocity_max_ijk": [
+      200,
+      2,
+      100
+    ],
+    "original_bbl_on_stop_step": 4772,
+    "attribution": "BBL_REFUTED_AS_SOLE_OWNER",
+    "next_registered_suspect": "TEOS-10 sigma-coordinate pressure-gradient truncation",
+    "second_arm_run": false
+  },
+  "source_mechanism": {
+    "nemo_lines": "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/src/OCE/TRA/trabbl.F90:415-434",
+    "interpretation": "nn_bbl_adv=2 computes density-gradient-proportional downslope transport; disabling it delays the safety stop by one step but does not remove it"
+  },
+  "sha256": {
+    "run_namelist_cfg": "05250200fb357842049870b12e79e3269e848970a75383d545dc06d842106271",
+    "output.namelist.dyn": "fd7e485ed7a84d4856dc4a717749b1afd1450a58747625f1cece766bd1c06ffc",
+    "control_stdout.log": "e8d8fd37bf900d6c077bf0dd855930441c319f374327887d94cd53e4871945c7",
+    "ocean.output": "26d1259e69908038e9b906649875d27aafd90efd3b177424fbcbcd2f5fe2cc44",
+    "mesh_mask.nc": "3a5225c64bd0a79c690123e02b6e0e55dd62c9bd37497c2324fa1292d80b2da9",
+    "output.abort.nc": "bc7ab84b8e8c6d4c7d8bddc32e98565e51df6c919538a98d24581b6fc5d3a5c8",
+    "oracle_step_entry_kt00000001.bin": "ab8405f316b292c3b1fb4cc44090f80958e3881abb6561ea5015e839e07292ee",
+    "oracle_step_entry_kt00003060.bin": "a5b63b902d94ac6509c78bf4cbf1b0dfbc77001901ff53e3e741d1da3d0ad0fa"
+  }
+}

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import numpy as np
 import jax.numpy as jnp
+from types import SimpleNamespace
 import pytest
 
 from legoesm.driver.config import (
@@ -38,30 +39,122 @@ def _fake_surface_map(path, lat_deg, lon_deg):
     )
 
 
+def _run_hydraulics_stamp(drv):
+    """The soil-hydraulics stamp a driver built under ``_patch_land_loaders`` checks."""
+    from legoesm.land.restart import (
+        HYDRAULICS_SOURCE_CLM_MAP, soil_hydraulics_stamp)
+    return soil_hydraulics_stamp(
+        drv.physics.land_ml_cfg.hydraulics.retention_curve,
+        HYDRAULICS_SOURCE_CLM_MAP, __file__)
+
+
 def _patch_land_loaders(monkeypatch):
     """Replace the CLM-surfdata + land-mask loaders with synthetic data."""
     import legoesm.land.clm_surface_map as clm
     import legoesm.grids.topography as topo
-    monkeypatch.setattr(clm, "download_clm_surfdata", lambda *a, **k: "synthetic")
+    # Any real file: the driver stamps its soil hydraulics with the parameter
+    # file's md5, so the stand-in path must be readable.
+    monkeypatch.setattr(clm, "download_clm_surfdata", lambda *a, **k: __file__)
     monkeypatch.setattr(clm, "load_clm_surface", _fake_surface_map)
     # Half-land everywhere so every column exercises the land tile blend.
+    # Half-land everywhere so every column exercises the land tile blend.  The
+    # Voronoi mesh names its cell coordinate ``latCell``, the structured grids
+    # ``lat``; take whichever the grid has so both lanes can be driven here.
+    # A CANOPY REFUSES TO RUN WITHOUT ITS PER-PLANT PARAMETERS, and the
+    # calibrated tile now selects one. That guard is the point — it is what
+    # stops a canopy quietly running on generic constants — so it stays, and the
+    # fixture supplies synthetic canopy parameters instead of relaxing it.
+    import legoesm.land.boundary_data as _bd
+    import legoesm.driver.model_driver as _md
+
+    def _fake_land_surface_data(path, grid, land_config, day, **kwargs):
+        """Stand-in for the harmonized surface dataset.
+
+        Built on the SAME bare-ground constructors the gap-filler falls back to,
+        then overridden with vegetated values: the two are combined leaf by leaf,
+        so a hand-rolled parameter set with a different optional-field pattern is
+        a structure mismatch rather than a missing default.
+        """
+        from legoesm.land.boundary_data.gap_fill import (
+            bare_canopy_params, bare_land_surface_params,
+        )
+        _lat = getattr(grid, "lat", None)
+        _lat = grid.latCell if _lat is None else _lat
+        n = int(jnp.asarray(_lat).size)
+        f = lambda v: jnp.full(n, v)
+        from legoesm.land.canopy import CanopyConfig
+        from legoesm.land.canopy.config import CLMMLCanopyConfig
+        # Mirror the REAL surface_data_to_land_params dispatch so each scheme
+        # sees the struct its driver path reads: a two-leaf CanopyConfig gets a
+        # CanopyLandParams (hc/rz0m); the CLM-ML canopy gets a LandSurfaceParams
+        # with prescribed LAI/SAI/htop (it is NOT a CanopyConfig and has no hc);
+        # SimpleSEB gets a LandSurfaceParams.  (Handing CLM-ML a CanopyLandParams
+        # — the old fake — masked the driver's params.hc regression.)
+        _ss = getattr(land_config, "surface_scheme", None)
+        if isinstance(_ss, CanopyConfig):
+            params = bare_canopy_params(
+                n, pft_root_params=kwargs.get("pft_root_params"),
+            )._replace(
+                LAI=f(2.0), hc=f(5.0), FNonVeg=f(0.0), CI=f(0.75),
+                Vcmax25_C3_leaf=f(60.0), rd=f(0.67), rz0m=f(0.055),
+                ALB_VIS=f(0.12), ALB_NIR=f(0.21),
+            )
+        elif isinstance(_ss, CLMMLCanopyConfig):
+            params = bare_land_surface_params(n)._replace(
+                albedo_veg=f(0.15), LAI=f(2.0), SAI=f(0.5), htop=f(5.0))
+        else:
+            params = bare_land_surface_params(n)._replace(albedo_veg=f(0.15))
+        # Every column covered by one plant type, so the gap-filler keeps these
+        # values instead of reverting them to bare soil.
+        gsd = SimpleNamespace(pft_frac=np.ones((n, 1), dtype=np.float32))
+        return land_config, params, gsd
+
+    monkeypatch.setattr(_bd, "init_land_surface_data", _fake_land_surface_data)
     monkeypatch.setattr(
         topo, "load_land_fraction",
-        lambda grid, path, *a, **k: jnp.full(grid.lat.shape, 0.5))
+        lambda grid, path, *a, **k: jnp.full(
+            jnp.asarray(getattr(grid, "lat", None)
+                        if getattr(grid, "lat", None) is not None
+                        else grid.latCell).shape, 0.5))
 
 
 def _small_cfg():
     return ExperimentConfig(
+        # The canopy tile refuses to build without per-plant parameters, and the
+        # fixture above supplies them synthetically; this names the source the
+        # guard checks for.
+        surfdata_path="synthetic",
         grid=GridConfig(resolution=8, nlev=8),
-        dycore=DycoreConfig(dt=600.0),
+        dycore=DycoreConfig(energy_fixer=False, dt=600.0),
         output=OutputConfig(diag_days=1),
         days=1, dataset="analytical",
         radiation="gray",
         land_mask_path="synthetic.nc",     # truthy -> land block runs (loader patched)
         use_multilayer_land=True,
         multilayer_n_layers=6, multilayer_soil_depth=2.5,
+        # NAME the surface scheme instead of inheriting it. These tests
+        # drive the soil column, the transient cover and the restart
+        # path on synthetic grids with no canopy parameter file, and
+        # the canopy scheme refuses to start without one. Relying on
+        # the default meant that flipping it turned twenty of them red
+        # at once for a reason none of them is about.
+        land_surface_scheme="simple_seb",
     )
 
+
+#: The canopy schemes need per-plant-type structure parameters, and the driver
+#: refuses to start them without the harmonized surface-data file rather than
+#: fall back to generic constants. It is a large staged input, not part of the
+#: checkout, so the tests that deliberately select a canopy skip without it --
+#: the same pattern tests/unit/test_land_calibrated_physics.py uses.
+_CANOPY_SURFDATA = "data/legoesm_surfdata_c260716.nc"
+
+
+def _canopy_cfg():
+    import os
+    if not os.path.exists(_CANOPY_SURFDATA):
+        pytest.skip("harmonized surfdata not staged in this checkout")
+    return _small_cfg()._replace(surfdata_path=_CANOPY_SURFDATA)
 
 def test_setup_wires_multilayer_land(monkeypatch, tmp_path):
     """use_multilayer_land -> pipeline land_ml_* attrs + a seeded MultiLayerLandState."""
@@ -86,20 +179,59 @@ def test_setup_wires_multilayer_land(monkeypatch, tmp_path):
                   & (np.asarray(st.theta_soil) <= 1.0))
 
 
+def test_the_default_land_surface_scheme_is_the_canopy():
+    """Coverage of the DEFAULT that does not need the staged data file.
+
+    The test below drives a real setup and therefore skips wherever the canopy
+    parameter file is absent, which is every clean checkout -- so on its own it
+    leaves the default itself untested and the next flip would go unnoticed.
+    This asserts the declared default directly, and needs nothing staged.
+    """
+    default = ExperimentConfig._field_defaults["land_surface_scheme"]
+    assert default == "two_leaf", (
+        f"the default land surface scheme is {default!r}. The simplified "
+        "scheme evaporates at potential with stomata off and its humidity "
+        "gradient self-extinguishes with them on, which is why the canopy is "
+        "the default; changing it back is a decision, not a tidy-up.")
+    # And the value has to be one the driver will accept.
+    ExperimentConfig(
+        grid=GridConfig(resolution=8, nlev=8),
+        dycore=DycoreConfig(energy_fixer=False, dt=600.0),
+        output=OutputConfig(diag_days=1),
+        days=1, dataset="analytical", radiation="gray",
+        land_surface_scheme=default,
+    ).validate_strict()
+
+
 def test_setup_dispatches_land_surface_scheme(monkeypatch, tmp_path):
     """land_surface_scheme dispatches the right surface scheme onto the
-    multilayer land config (issue #730): default -> SimpleSEB, 'two_leaf' ->
-    the DifferBESS two-leaf canopy (Kelvin h_r bare-soil + stomatal transp.)."""
+    multilayer land config: each selection must arrive, and the DEFAULT must be
+    the two-leaf canopy (the simplified scheme is academic-only since
+    2026-08-20 — its evaporation runs at potential with stomata off and its
+    humidity gradient self-extinguishes with them on)."""
     from legoesm.land.surface_scheme import SimpleSEBConfig, TwoLeafCanopyConfig
     _patch_land_loaders(monkeypatch)
 
-    driver_seb = ModelDriver(_small_cfg(), output_dir=tmp_path / "seb")
+    # The DEFAULT, asserted as a default rather than assumed.
+    driver_default = ModelDriver(
+        _canopy_cfg()._replace(land_surface_scheme=type(_small_cfg())
+                               ._field_defaults["land_surface_scheme"]),
+        output_dir=tmp_path / "default")
+    driver_default.setup()
+    assert isinstance(
+        driver_default.physics.land_ml_cfg.surface_scheme, TwoLeafCanopyConfig)
+
+    # And the simplified scheme still arrives when EXPLICITLY selected, so its
+    # coverage is not lost with the default change.
+    driver_seb = ModelDriver(
+        _small_cfg()._replace(land_surface_scheme="simple_seb"),
+        output_dir=tmp_path / "seb")
     driver_seb.setup()
     assert isinstance(
         driver_seb.physics.land_ml_cfg.surface_scheme, SimpleSEBConfig)
 
     driver_two_leaf = ModelDriver(
-        _small_cfg()._replace(land_surface_scheme="two_leaf"),
+        _canopy_cfg()._replace(land_surface_scheme="two_leaf"),
         output_dir=tmp_path / "twoleaf")
     driver_two_leaf.setup()
     assert isinstance(
@@ -124,8 +256,8 @@ def test_setup_clm_ml_warm_starts_and_threads_gridinfo(monkeypatch, tmp_path):
 
     _patch_land_loaders(monkeypatch)
     # A tiny grid keeps the eager warm-start + O(ncol) machinery cheap.
-    cfg = _small_cfg()._replace(land_surface_scheme="clm_ml",
-                                grid=GridConfig(resolution=2, nlev=8))
+    cfg = _canopy_cfg()._replace(land_surface_scheme="clm_ml",
+                                 grid=GridConfig(resolution=2, nlev=8))
     driver_clm = ModelDriver(cfg, output_dir=tmp_path / "clmml")
     driver_clm.setup()
 
@@ -160,8 +292,8 @@ def test_clm_ml_pipeline_step_jits(monkeypatch, tmp_path):
         pytest.skip("clm-ml-jax build lacks MLCanopyFluxes(cos_zenith_device=)")
 
     _patch_land_loaders(monkeypatch)
-    cfg = _small_cfg()._replace(land_surface_scheme="clm_ml",
-                                grid=GridConfig(resolution=2, nlev=8))
+    cfg = _canopy_cfg()._replace(land_surface_scheme="clm_ml",
+                                 grid=GridConfig(resolution=2, nlev=8))
     driver = ModelDriver(cfg, output_dir=tmp_path)
     driver.setup()
     ncol = int(driver._land_ml_state.T_soil.shape[0])
@@ -276,11 +408,23 @@ def test_build_training_segment_land_gradient(monkeypatch, tmp_path):
     from legoesm.land.carbon.carbon_cycle import init_carbon_state
 
     _patch_land_loaders(monkeypatch)
-    driver = ModelDriver(_small_cfg(), output_dir=tmp_path)
+    # simple_seb named in the CONFIG, not patched onto the pipeline afterwards:
+    # the loader keys off it, so a post-setup override leaves the CANOPY
+    # parameters (no z0, no Vc_max25) under a bulk scheme that reads them.
+    driver = ModelDriver(
+        _small_cfg()._replace(land_surface_scheme="simple_seb"), output_dir=tmp_path)
     driver.setup()
     pipe = driver.physics
     # Trainable surface exchange: MOST (z0 active) + Farquhar stomata (Vc_max25/
     # g1/LCMA active via a prescribed carbon state).
+    # simple_seb PINNED, matching train_coupled_land_era5: it is the scheme whose
+    # per-PFT z0 / albedo / emissivity this calibration path optimises.  The
+    # library default (two-leaf canopy) reads CANOPY properties instead, so the
+    # trained roughness would carry ZERO gradient — which this test then catches,
+    # correctly.  Wiring real canopy parameters onto the coupled path is the open
+    # follow-up; until it lands, a canopy default cannot be calibrated this way.
+    from legoesm.land.surface_scheme import SimpleSEBConfig
+    assert isinstance(pipe.land_ml_cfg.surface_scheme, SimpleSEBConfig)
     pipe.land_ml_cfg = pipe.land_ml_cfg._replace(
         bulk_scheme="most", stomata=StomataConfig(enabled=True),
         carbon=CarbonConfig(scheme="differland"))
@@ -305,29 +449,36 @@ def test_build_training_segment_land_gradient(monkeypatch, tmp_path):
     assert g != 0.0, "coupled land gradient is zero (params not reaching the flux)"
 
 
-def test_multilayer_no_mask_still_enables_tiled_surface(monkeypatch, tmp_path):
-    """use_multilayer_land + surface_tiled WITHOUT a land mask (f_land from
-    --topography) must actually ENABLE the tiled turbulent-flux path — i.e. set
-    physics.surface_tiled=True.  Regression guard: physics.surface_tiled was
-    previously threaded only inside the slab/mask activation branch, so a mask-free
-    multilayer config (the SOTA amip_sota.yaml case) validated but silently no-op'd
-    the tiled surface.  gaussian topography gives f_land>0 so _has_land is true."""
+def test_multilayer_elevation_land_enables_tiled_flux_without_slab_or_mask(monkeypatch, tmp_path):
+    """File-derived land activates tiled fluxes outside the slab/mask branch."""
     _patch_land_loaders(monkeypatch)
+    import legoesm.grids.topography as topo
+    monkeypatch.setattr(
+        topo, "load_real_topography",
+        lambda grid, config: (jnp.zeros(grid.grid_shape_2d),
+                              jnp.full(grid.grid_shape_2d, 0.5)))
     cfg = ExperimentConfig(
         grid=GridConfig(resolution=8, nlev=8),
-        dycore=DycoreConfig(dt=600.0),
+        dycore=DycoreConfig(energy_fixer=False, dt=600.0),
         output=OutputConfig(diag_days=1),
         days=1, dataset="analytical", radiation="gray",
-        topography="gaussian",            # elevation-derived f_land, NO mask
+        topography="synthetic_elevation.nc",  # file loader patched above
         surface_tiled=True, turbulence="louis",
         use_multilayer_land=True,
         multilayer_n_layers=6, multilayer_soil_depth=2.5,
+        # NAME the surface scheme instead of inheriting it. These tests
+        # drive the soil column, the transient cover and the restart
+        # path on synthetic grids with no canopy parameter file, and
+        # the canopy scheme refuses to start without one. Relying on
+        # the default meant that flipping it turned twenty of them red
+        # at once for a reason none of them is about.
+        land_surface_scheme="simple_seb",
     )
     cfg.validate_strict()  # the mask-free multilayer+tiled config is valid
     driver = ModelDriver(cfg, output_dir=tmp_path)
     driver.setup()
 
-    assert bool(jnp.any(driver._f_land > 0)), "gaussian topo should give some land"
+    assert bool(jnp.any(driver._f_land > 0)), "elevation file must supply land"
     assert driver.physics.surface_tiled is True, \
         "mask-free multilayer must still enable the tiled surface (not a silent no-op)"
     assert driver.physics.slab_land_active is False, \
@@ -407,9 +558,15 @@ def test_land_ic_path_overrides_cold_start(monkeypatch, tmp_path):
         theta_soil=jnp.asarray(np.asarray(seed.theta_soil) * 0.6),
     )
     ic = tmp_path / "land_ic.npz"
+    # Stamped with the column it was spun up on, as any real producer now is:
+    # this run's column is not the historical default, and an unstamped file
+    # is refused on those rather than warned about.
     save_land_restart(ic, spun, land_mode="multilayer",
                       t_end_s=20 * 365 * 86400.0,
-                      n_steps_completed=1, metadata={})
+                      n_steps_completed=1, metadata={},
+                      soil_grid=src.physics.land_ml_cfg.soil_grid,
+                      soil_hydraulics=_run_hydraulics_stamp(src),
+                      hydraulics=src.physics.land_ml_cfg.hydraulics)
 
     # 2) A fresh driver with land_ic_path set must load THAT column, not the
     #    cold start.
@@ -439,6 +596,44 @@ def test_land_ic_path_overrides_cold_start(monkeypatch, tmp_path):
     np.testing.assert_allclose(T_land, expected_skin, rtol=1e-6, atol=1e-4)
 
 
+def test_land_ic_soil_potential_is_rederived_on_the_runs_hydraulics(
+        monkeypatch, tmp_path):
+    """A regridded land IC keeps its WATER; its matric potential is recomputed
+    on this run's soil.  The regridded flag lives in the file's metadata dict;
+    reading it from the top of the loader's meta skipped the recompute, and the
+    Richards step then dried the deep root zone to residual in a day."""
+    from legoesm.land.restart import save_land_restart
+    from legoesm.land.richards import psi_dry_floor
+    from legoesm.land.soil_hydraulics import psi_from_theta
+
+    _patch_land_loaders(monkeypatch)
+    src = ModelDriver(_small_cfg(), output_dir=tmp_path / "src")
+    src.setup()
+    seed = src._land_ml_state
+    stale = seed._replace(psi_soil=jnp.asarray(np.asarray(seed.psi_soil) * 7.0))
+    common = dict(land_mode="multilayer", t_end_s=0.0, n_steps_completed=1,
+                  soil_grid=src.physics.land_ml_cfg.soil_grid)
+
+    ic = tmp_path / "regridded.npz"
+    save_land_restart(ic, stale, metadata={"regridded_from": "other_grid.npz"},
+                      soil_hydraulics=_run_hydraulics_stamp(src), **common)
+    dst = ModelDriver(_small_cfg()._replace(land_ic_path=str(ic)),
+                      output_dir=tmp_path / "dst")
+    dst.setup()
+    h = dst.physics.land_ml_cfg.hydraulics
+    got = dst._land_ml_state
+    want = jnp.maximum(psi_from_theta(got.theta_soil, h), psi_dry_floor(h))
+    np.testing.assert_allclose(np.asarray(got.psi_soil), np.asarray(want),
+                               rtol=1e-6)
+    assert not np.allclose(np.asarray(got.psi_soil), np.asarray(stale.psi_soil))
+
+    bare = tmp_path / "unstamped.npz"
+    save_land_restart(bare, stale, metadata={}, **common)
+    with pytest.raises(ValueError, match="soil-hydraulics stamp"):
+        ModelDriver(_small_cfg()._replace(land_ic_path=str(bare)),
+                    output_dir=tmp_path / "dst2").setup()
+
+
 def test_land_ic_path_wrong_grid_raises(monkeypatch, tmp_path):
     """A restart whose n_layers/ncol don't match the run's grid must raise on
     load, not silently reshape (load_land_restart validates shapes)."""
@@ -449,7 +644,8 @@ def test_land_ic_path_wrong_grid_raises(monkeypatch, tmp_path):
     src.setup()
     ic = tmp_path / "land_ic_6lay.npz"
     save_land_restart(ic, src._land_ml_state, land_mode="multilayer",
-                      t_end_s=0.0, n_steps_completed=0, metadata={})
+                      t_end_s=0.0, n_steps_completed=0, metadata={},
+                      soil_grid=src.physics.land_ml_cfg.soil_grid)
 
     # Run config asks for 10 layers; the restart has 6 -> mismatch -> raise
     # (separate output dir so this is the SHAPE guard, not the manifest guard).
@@ -470,13 +666,20 @@ def test_setup_multilayer_land_on_latlon_grid(monkeypatch, tmp_path):
     _patch_land_loaders(monkeypatch)
     cfg = ExperimentConfig(
         grid=GridConfig(grid_type="latlon", resolution=8, nlev=8),
-        dycore=DycoreConfig(dt=600.0, discretization="latlon_cgrid"),
+        dycore=DycoreConfig(energy_fixer=False, dt=600.0, discretization="latlon_cgrid"),
         output=OutputConfig(diag_days=1),
         days=1, dataset="analytical",
         radiation="gray",
         land_mask_path="synthetic.nc",
         use_multilayer_land=True,
         multilayer_n_layers=6, multilayer_soil_depth=2.5,
+        # NAME the surface scheme instead of inheriting it. These tests
+        # drive the soil column, the transient cover and the restart
+        # path on synthetic grids with no canopy parameter file, and
+        # the canopy scheme refuses to start without one. Relying on
+        # the default meant that flipping it turned twenty of them red
+        # at once for a reason none of them is about.
+        land_surface_scheme="simple_seb",
     )
     driver = ModelDriver(cfg, output_dir=tmp_path)
     driver.setup()          # raised TypeError (reshape) before the fix
@@ -601,7 +804,11 @@ def test_jitted_radiation_reads_traced_land_ml_params(monkeypatch, tmp_path):
     import jax
     from legoesm import constants
     _patch_land_loaders(monkeypatch)
-    driver = ModelDriver(_small_cfg(), output_dir=tmp_path)
+    # The brightened-cover probe below perturbs the BULK vegetation albedo, so
+    # this names the bulk surface: the canopy carries per-band albedos instead
+    # and does its own radiative transfer.
+    driver = ModelDriver(
+        _small_cfg()._replace(land_surface_scheme="simple_seb"), output_dir=tmp_path)
     driver.setup()
     pipe = driver.physics
     land_ml = driver._land_ml_state
@@ -686,7 +893,7 @@ def test_clm_ml_use_surfdata_pft_derives_mixed_pft_columns(monkeypatch, tmp_path
     _patch_land_loaders(monkeypatch)
     monkeypatch.setattr(_clm, "load_clm_surface", _mixed_pft_surface_map)
 
-    cfg = _small_cfg()._replace(land_surface_scheme="clm_ml",
+    cfg = _canopy_cfg()._replace(land_surface_scheme="clm_ml",
                                 clm_ml_use_surfdata_pft=True,
                                 grid=GridConfig(resolution=2, nlev=8))
     driver = ModelDriver(cfg, output_dir=tmp_path)
@@ -702,3 +909,421 @@ def test_clm_ml_use_surfdata_pft_derives_mixed_pft_columns(monkeypatch, tmp_path
     sigs = {(int(g.ncan), int(g.ntop), int(g.nbot), int(g.pft)) for g in gi}
     assert len(sigs) >= 2, (
         f"mixed PFT must yield >=2 structure groups (group-by-structure engages), got {sigs}")
+
+
+def test_calibrated_physics_deploys_the_model_the_tables_were_fitted_to(
+        monkeypatch, tmp_path):
+    """The coupled tile must run the land model the baked tables were fitted to.
+
+    Three things had to be true at once and none of them was: the stomatal switch
+    on, the carbon scheme set, and a leaf-carbon state present.  With any one
+    missing the flux code takes a different branch — no stomata at all, or the
+    Jarvis model — and the baked canopy conductance (Vc_max25/g1/LCMA) never runs.
+    The soil column has to match too, and it did not (3 m fitted, 6.375 m
+    deployed, same layer count so nothing complained).
+    """
+    from legoesm.land.config import biophysics_lmip_two_leaf_setup
+    from legoesm.driver.config import DycoreConfig, GridConfig
+    _patch_land_loaders(monkeypatch)
+    # The calibration the COUPLED driver deploys, so this exercises the model a
+    # calibrated AMIP run actually builds.
+    cal = biophysics_lmip_two_leaf_setup()
+
+    # The MESH (Voronoi/MPAS) lane: the only one that hands the land tile's
+    # solved fluxes to the atmosphere, and therefore the only one the calibrated
+    # switch is allowed on.
+    cfg = _small_cfg()._replace(
+        grid=GridConfig(grid_type="mpas", resolution=2, nlev=8),
+        dycore=DycoreConfig(dt=600.0, discretization="mpas"),
+        land_beta_soil=True,
+        # The flux handoff rides the turbulence surface flux, so it needs a
+        # turbulence scheme to ride (validation says so).
+        turbulence="louis",
+        land_calibrated_physics=True,
+        # The canopy carries its own stomata, so the separate beta stays off.
+        land_stomatal_beta=False,
+        land_surface_scheme="two_leaf",
+        # The land setup forces the snow-albedo feedback on, so the gate makes
+        # the config state it rather than have it silently reversed.
+        snow_albedo_feedback=True,
+        multilayer_n_layers=cal["soil_grid"].n_layers,
+        multilayer_soil_depth=cal["soil_grid"].total_depth,
+    )
+    cfg.validate_strict()
+    driver = ModelDriver(cfg, output_dir=tmp_path)
+    driver.setup()
+
+    land_cfg = driver.physics.land_ml_cfg
+    # Read the expectation off the setup rather than restating it: the two-leaf
+    # canopy carries its own stomata, so the separate throttle is deliberately
+    # off here, and a hardcoded True would fail for the right reason but the
+    # wrong cause.
+    assert land_cfg.stomata == cal["stomata"]
+    assert type(land_cfg.surface_scheme) is type(cal["surface_scheme"])
+    assert land_cfg.carbon.scheme == "differland"
+    assert land_cfg.bulk_scheme == cal["bulk_scheme"]
+    assert land_cfg.soil_grid == cal["soil_grid"]
+    # The leaf-carbon state is the third condition; without it the SAME config
+    # runs Jarvis instead, which is a different stomatal model with different
+    # parameters, and the failure is completely silent.
+    assert driver.physics.land_ml_carbon is not None
+    ncol = int(jnp.asarray(driver.grid.latCell).size)   # mesh lane: per-cell
+    assert driver.physics.land_ml_carbon.C_fol.shape == (ncol,)
+
+    # And the CANOPY, not the Jarvis path, is the deployed GPP source.  The
+    # two-leaf canopy carries its own Farquhar photosynthesis and publishes GPP
+    # through ``SurfaceFluxOutput.gpp``, which the carbon cycle consumes directly
+    # (multilayer_land.py: ``if surface_out.gpp is not None: gpp_override =
+    # surface_out.gpp``) — it never falls back to the Jarvis
+    # ``compute_effective_beta`` (that reads ``LandSurfaceParams.Vc_max25``,
+    # which a ``CanopyLandParams`` does not carry).  So the meaningful checks
+    # here are that the canopy scheme is deployed and its per-plant carbon
+    # parameters are present and non-generic; the Jarvis-path beta check that
+    # used to live here tested the wrong scheme for a two-leaf run.
+    from legoesm.land.canopy.config import CanopyLandParams
+    lp = driver.physics.land_ml_params
+    assert isinstance(lp, CanopyLandParams), (
+        "the calibrated two-leaf run must deploy CanopyLandParams (the GPP "
+        "producer), not soil params")
+    # The Farquhar carbon capacity the calibration baked must be present and
+    # positive, so the canopy's photosynthesis is not inert.
+    vc = np.asarray(lp.Vcmax25_C3_leaf)
+    assert np.all(np.isfinite(vc)) and float(np.max(vc)) > 0.0, (
+        "the baked per-plant Vcmax25 did not reach the canopy — its Farquhar "
+        "photosynthesis is inert")
+
+
+def test_without_the_flag_the_tile_is_unchanged(monkeypatch, tmp_path):
+    """Default runs must be untouched: no stomata, no carbon state."""
+    _patch_land_loaders(monkeypatch)
+    driver = ModelDriver(_small_cfg(), output_dir=tmp_path)
+    driver.setup()
+    assert driver.physics.land_ml_cfg.stomata.enabled is False
+    assert driver.physics.land_ml_cfg.carbon.scheme == "none"
+    assert driver.physics.land_ml_carbon is None
+
+
+def test_driver_refuses_a_land_ic_from_a_different_soil_column(monkeypatch, tmp_path):
+    """A soil state from another column must be refused by the RUN, not just by
+    the loader in isolation.
+
+    Both columns here have the same number of layers, which is exactly why the
+    existing shape check let a state spun up over 6.375 m into a run using 3 m,
+    where every soil temperature and moisture value would be read at the wrong
+    depth and nothing anywhere would complain.
+    """
+    from legoesm.land.restart import save_land_restart
+    from legoesm.land.soil_grid import SoilGridConfig, make_soil_grid
+
+    _patch_land_loaders(monkeypatch)
+    src = ModelDriver(_small_cfg(), output_dir=tmp_path / "src")
+    src.setup()
+    n_layers = src.physics.land_ml_cfg.soil_grid.n_layers
+
+    # Written as if spun up on a column with the SAME layer count and a
+    # different depth.
+    other = make_soil_grid(SoilGridConfig(n_layers=n_layers, total_depth=6.375,
+                                          growth_factor=2.0)).dz
+    ic = tmp_path / "wrong_column.npz"
+    save_land_restart(ic, src._land_ml_state, land_mode="multilayer",
+                      t_end_s=0.0, n_steps_completed=1, metadata={},
+                      soil_dz=other)
+
+    cfg = _small_cfg()._replace(land_ic_path=str(ic))
+    with pytest.raises(ValueError, match="soil column"):
+        ModelDriver(cfg, output_dir=tmp_path / "dst").setup()
+
+    # The run's OWN column loads fine — so the guard is discriminating, not just
+    # rejecting everything.
+    ok = tmp_path / "right_column.npz"
+    save_land_restart(ok, src._land_ml_state, land_mode="multilayer",
+                      t_end_s=0.0, n_steps_completed=1, metadata={},
+                      soil_dz=make_soil_grid(src.physics.land_ml_cfg.soil_grid).dz,
+                      soil_hydraulics=_run_hydraulics_stamp(src),
+                      hydraulics=src.physics.land_ml_cfg.hydraulics)
+    dst = ModelDriver(_small_cfg()._replace(land_ic_path=str(ok)),
+                      output_dir=tmp_path / "dst_ok")
+    dst.setup()
+    assert dst._land_ml_state.T_soil.shape[1] == n_layers
+
+
+def test_snow_ageing_override_survives_the_calibration_reapply(monkeypatch, tmp_path):
+    """The snow-albedo clock a run asks for must reach the land the run builds.
+
+    This guards WIRING, not arithmetic. The existing coverage builds a
+    ``LandAlbedoConfig`` directly, so deleting the driver's override would leave
+    it green -- review caught that. The ordering is the whole point: the
+    calibration re-apply rewrites every albedo scalar on the object the bake
+    produced, so an override placed before it is silently discarded, and a run
+    asking for a 150-day clock would quietly get the calibrated 3.674 days.
+
+    Adopted into the production deck on 2026-09-13 against a measured 22 W/m2
+    polar clear-sky reflection deficit, which makes the silent-discard failure
+    mode expensive: the arm would score as "the snow clock does nothing".
+    """
+    from legoesm.driver.config import DycoreConfig, GridConfig
+    from legoesm.land.config import biophysics_lmip_two_leaf_setup
+    _patch_land_loaders(monkeypatch)
+    cal = biophysics_lmip_two_leaf_setup()
+
+    base = _small_cfg()._replace(
+        grid=GridConfig(grid_type="mpas", resolution=2, nlev=8),
+        dycore=DycoreConfig(dt=600.0, discretization="mpas"),
+        land_beta_soil=True,
+        turbulence="louis",
+        land_calibrated_physics=True,      # the re-apply that used to win
+        land_stomatal_beta=False,
+        land_surface_scheme="two_leaf",
+        snow_albedo_feedback=True,
+        multilayer_n_layers=cal["soil_grid"].n_layers,
+        multilayer_soil_depth=cal["soil_grid"].total_depth,
+    )
+
+    # CONTROL: no override => the calibration's own clock, whatever it is.
+    # the CONTROL asks for the calibration's own clock (None); the default
+    # is now the 150-day production value, so it must be set explicitly
+    base = base._replace(land_snow_tau_days=None)
+    base.validate_strict()
+    ctl = ModelDriver(base, output_dir=tmp_path / "ctl")
+    ctl.setup()
+    tau_calibrated = float(ctl.physics.land_ml_cfg.land_albedo.tau_snow_decay)
+
+    # ARM: the production value, in DAYS at the config boundary and SECONDS in
+    # the physics -- the unit hop is where this would go wrong silently.
+    cfg = base._replace(land_snow_tau_days=150.0)
+    cfg.validate_strict()
+    arm = ModelDriver(cfg, output_dir=tmp_path / "arm")
+    arm.setup()
+    tau_arm = float(arm.physics.land_ml_cfg.land_albedo.tau_snow_decay)
+
+    assert tau_arm == pytest.approx(150.0 * 86400.0), (
+        f"asked for a 150-day snow clock, the land model got {tau_arm / 86400.0:.3f} days")
+    # NON-VACUITY: the calibration really does set a different value, so the
+    # assertion above cannot pass by both sides happening to agree.
+    assert tau_calibrated != pytest.approx(tau_arm), (
+        "the calibration already used this value, so this test proves nothing")
+
+
+def test_soil_freeze_thaw_reaches_the_land_the_mpas_run_builds(monkeypatch, tmp_path):
+    """``land_soil_freeze_thaw`` must survive the bake, which rebuilds the soil
+    thermal config with the switch at its library default (off). Same MPAS
+    production-lane build as the snow-clock test above."""
+    from legoesm.driver.config import DycoreConfig, GridConfig
+    from legoesm.land.config import biophysics_lmip_two_leaf_setup
+    _patch_land_loaders(monkeypatch)
+    cal = biophysics_lmip_two_leaf_setup()
+    base = _small_cfg()._replace(
+        grid=GridConfig(grid_type="mpas", resolution=2, nlev=8),
+        dycore=DycoreConfig(dt=600.0, discretization="mpas"),
+        land_beta_soil=True,
+        turbulence="louis",
+        land_calibrated_physics=True,
+        land_stomatal_beta=False,
+        land_surface_scheme="two_leaf",
+        snow_albedo_feedback=True,
+        multilayer_n_layers=cal["soil_grid"].n_layers,
+        multilayer_soil_depth=cal["soil_grid"].total_depth,
+    )
+    got = {}
+    for on in (False, True):
+        cfg = base._replace(land_soil_freeze_thaw=on)
+        cfg.validate_strict()
+        drv = ModelDriver(cfg, output_dir=tmp_path / f"ft{int(on)}")
+        drv.setup()
+        th = drv.physics.land_ml_cfg.thermal
+        got[on] = th.enable_freeze_thaw
+        # the per-column baked thermal inertia survives the override
+        assert np.ndim(th.C_soil) == 2
+    assert got == {False: False, True: True}
+
+
+def test_canopy_b0_stress_and_interception_reach_the_mpas_land(monkeypatch, tmp_path):
+    """``land_canopy_stress_b0`` / ``land_canopy_interception`` must survive
+    the calibration bake, which rebuilds the surface scheme at its library
+    default, and interception must allocate the canopy water store."""
+    from legoesm.driver.config import DycoreConfig, GridConfig
+    from legoesm.land.canopy.interception import InterceptionConfig
+    from legoesm.land.config import biophysics_lmip_two_leaf_setup
+    _patch_land_loaders(monkeypatch)
+    cal = biophysics_lmip_two_leaf_setup()
+    base = _small_cfg()._replace(
+        grid=GridConfig(grid_type="mpas", resolution=2, nlev=8),
+        dycore=DycoreConfig(dt=600.0, discretization="mpas"),
+        land_beta_soil=True,
+        turbulence="louis",
+        land_calibrated_physics=True,
+        land_stomatal_beta=False,
+        land_surface_scheme="two_leaf",
+        snow_albedo_feedback=True,
+        multilayer_n_layers=cal["soil_grid"].n_layers,
+        multilayer_soil_depth=cal["soil_grid"].total_depth,
+    )
+    got = {}
+    for arm, (sb0, icp) in {"default": (True, False),
+                            "flipped": (False, True)}.items():
+        cfg = base._replace(land_canopy_stress_b0=sb0,
+                            land_canopy_interception=icp)
+        cfg.validate_strict()
+        drv = ModelDriver(cfg, output_dir=tmp_path / arm)
+        drv.setup()
+        lc = drv.physics.land_ml_cfg
+        got[arm] = (lc.surface_scheme.stress_b0,
+                    isinstance(lc.interception, InterceptionConfig),
+                    drv._land_ml_state.W_canopy is not None)
+    assert got == {"default": (True, False, False),
+                   "flipped": (False, True, True)}
+
+
+def test_two_leaf_land_stress_reaches_clubb_winds(monkeypatch, tmp_path):
+    """land_stress_from_land on the production pairing: the TWO-LEAF
+    canopy's solved stress handed to CLUBB on the mesh lane.  The run must
+    complete finite and its winds must differ from the same run with the bulk
+    stress (the canopy's tau reaches the boundary layer).  Unset (AUTO) on
+    this eligible pairing must be bit-identical to explicit on."""
+    from legoesm.driver.config import DycoreConfig, GridConfig
+    _patch_land_loaders(monkeypatch)
+    base = _small_cfg()._replace(
+        grid=GridConfig(grid_type="mpas", resolution=2, nlev=8),
+        dycore=DycoreConfig(dt=600.0, discretization="mpas"),
+        days=2401.0 / 86400.0,               # 4 steps
+        land_beta_soil=True, turbulence="clubb",
+        land_surface_scheme="two_leaf", snow_albedo_feedback=True,
+        land_params_refresh=False)   # the fixture has no LAI climatology
+    runs = {}
+    for name, on in (("off", False), ("on", True), ("auto", None)):
+        cfg = base._replace(land_stress_from_land=on)
+        cfg.validate_strict()
+        d = ModelDriver(cfg, output_dir=tmp_path / name)
+        d.setup()
+        assert d.run() == "COMPLETED"
+        runs[name] = np.asarray(d.state.u.data)
+    assert np.isfinite(runs["on"]).all()
+    assert np.max(np.abs(runs["on"] - runs["off"])) > 0.0, (
+        "two-leaf land stress did not reach the CLUBB winds")
+    np.testing.assert_array_equal(runs["auto"], runs["on"])
+
+
+def test_canopy_smoothing_widths_survive_the_calibration(monkeypatch, tmp_path):
+    """The calibration replaces surface_scheme with a fresh two-leaf config, so
+    deck widths set before it would be discarded; they must reach the solve."""
+    from legoesm.driver.config import DycoreConfig, GridConfig
+    from legoesm.land.canopy.config import CanopyConfig
+    from legoesm.land.config import biophysics_lmip_two_leaf_setup
+    _patch_land_loaders(monkeypatch)
+    cal = biophysics_lmip_two_leaf_setup()
+    base = _small_cfg()._replace(
+        grid=GridConfig(grid_type="mpas", resolution=2, nlev=8),
+        dycore=DycoreConfig(dt=600.0, discretization="mpas"),
+        land_beta_soil=True,
+        turbulence="louis",
+        land_calibrated_physics=True,
+        land_stomatal_beta=False,
+        land_surface_scheme="two_leaf",
+        snow_albedo_feedback=True,
+        multilayer_n_layers=cal["soil_grid"].n_layers,
+        multilayer_soil_depth=cal["soil_grid"].total_depth,
+        land_canopy_rh_cap_smoothing_width=0.02,
+        land_canopy_zeta_cap_smoothing_width=0.03,
+        land_canopy_most_n_iters=7,
+    )
+    d = CanopyConfig()
+    assert (d.rh_cap_smoothing_width, d.zeta_cap_smoothing_width, d.most_n_iters) != (0.02, 0.03, 7)
+    base.validate_strict()
+    drv = ModelDriver(base, output_dir=tmp_path / "w")
+    drv.setup()
+    ss = drv.physics.land_ml_cfg.surface_scheme
+    assert (ss.rh_cap_smoothing_width, ss.zeta_cap_smoothing_width, ss.most_n_iters) == (0.02, 0.03, 7)
+
+
+def test_pipeline_land_tile_gets_moist_lowest_level_density(monkeypatch, tmp_path):
+    """F28 (review 2026-10-10): the PhysicsPipeline land tile forces the land
+    with the canonical extractor's air -- the coordinate's lowest FULL-level
+    pressure and the moist density there, ``p_lowest / (R_d T_v)`` -- not the
+    surface-pressure dry form ``p_s / (R_d T)`` with ``p_lowest = 0.99 p_s``.
+    The old form is ~1-2 % denser, so the 1e-12 check fails on a revert."""
+    import legoesm.land.multilayer_land as _mll
+    from legoesm import constants
+    _patch_land_loaders(monkeypatch)
+    driver = ModelDriver(_small_cfg(), output_dir=tmp_path)
+    driver.setup()
+    seen = {}
+    real = _mll.step_multilayer_land
+
+    def _capture(land, forcing, *a, **k):
+        seen["f"] = forcing
+        return real(land, forcing, *a, **k)
+
+    monkeypatch.setattr(_mll, "step_multilayer_land", _capture)
+    ncol = int(driver._land_ml_state.T_soil.shape[0])
+    rng = np.random.default_rng(0)
+    T = driver.state.T.data
+    q_v = jnp.asarray(rng.uniform(0.002, 0.018, size=T.shape))
+    driver.physics._step_multilayer_land_tile(
+        driver._land_ml_state, jnp.full(ncol, 400.0), jnp.full(ncol, 350.0),
+        T, driver.state.p_s.data, q_v, driver.state.u.data,
+        driver.state.v.data, None, 600.0)
+    f = seen["f"]
+    ps = np.asarray(f.p_surface)
+    want_p = np.asarray(driver.physics.sigma_coord.pressure_at_full(
+        jnp.asarray(ps)))[..., -1]
+    np.testing.assert_allclose(np.asarray(f.p_lowest), want_p, rtol=1e-12)
+    T_v = np.asarray(f.T_lowest) * (
+        1.0 + (1.0 / constants.epsilon - 1.0) * np.asarray(f.q_lowest))
+    np.testing.assert_allclose(np.asarray(f.rho_lowest),
+                               want_p / (constants.R_d * T_v), rtol=1e-12)
+    # the moisture really is in the forcing (q varies), so T_v != T matters
+    assert float(np.max(np.asarray(f.q_lowest))) > 0.01
+
+
+def _tile_forcing(monkeypatch, tmp_path, precip, frozen):
+    """The forcing the pipeline land tile hands the land model for a given
+    lagged precip / frozen pair (captured from step_multilayer_land)."""
+    import legoesm.land.multilayer_land as _mll
+    _patch_land_loaders(monkeypatch)
+    driver = ModelDriver(_small_cfg(), output_dir=tmp_path)
+    driver.setup()
+    seen = {}
+    real = _mll.step_multilayer_land
+
+    def _capture(land, forcing, *a, **k):
+        seen["f"] = forcing
+        return real(land, forcing, *a, **k)
+
+    monkeypatch.setattr(_mll, "step_multilayer_land", _capture)
+    ncol = int(driver._land_ml_state.T_soil.shape[0])
+    T = driver.state.T.data
+    driver.physics._step_multilayer_land_tile(
+        driver._land_ml_state, jnp.full(ncol, 400.0), jnp.full(ncol, 350.0),
+        T, driver.state.p_s.data, driver.q_v, driver.state.u.data,
+        driver.state.v.data, precip(ncol), 600.0,
+        precip_frozen_col=None if frozen is None else frozen(ncol))
+    return seen["f"]
+
+
+def test_pipeline_land_tile_snow_is_the_atmosphere_frozen_flux(
+        monkeypatch, tmp_path):
+    """F29 (review 2026-10-10): the pipeline land tile takes its snowfall from
+    the atmosphere's own (lagged) frozen surface flux, bounded by the total,
+    not a hard 0 C re-split of the total.  The frozen flux here is a
+    temperature-independent fraction (and one column exceeds the total), so
+    the old where(T_low < 273.15, P, 0) cannot reproduce it."""
+    rng = np.random.default_rng(1)
+    P = rng.uniform(1e-5, 1e-4, size=4096)
+    fr = 0.37 * P
+    fr[0] = 2.0 * P[0]            # bounded by the total
+    f = _tile_forcing(monkeypatch, tmp_path,
+                      lambda n: jnp.asarray(P[:n]), lambda n: jnp.asarray(fr[:n]))
+    n = int(np.asarray(f.precip_total).shape[0])
+    want = np.minimum(fr[:n], P[:n])
+    np.testing.assert_allclose(np.asarray(f.precip_snow), want, rtol=1e-12)
+    np.testing.assert_allclose(np.asarray(f.precip_total), P[:n], rtol=1e-12)
+
+
+def test_pipeline_land_tile_refuses_precip_without_its_frozen_part(
+        monkeypatch, tmp_path):
+    """F29: precipitation without its frozen part (an ML emulator) is refused,
+    never re-split by temperature."""
+    import pytest
+    with pytest.raises(ValueError, match="precip_frozen"):
+        _tile_forcing(monkeypatch, tmp_path,
+                      lambda n: jnp.full(n, 1e-5), None)

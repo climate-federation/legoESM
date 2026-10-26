@@ -12,6 +12,8 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
+from legoesm import constants
+
 jax.config.update("jax_enable_x64", True)
 
 from legoesm.land.multilayer_land import (
@@ -87,15 +89,78 @@ def test_land_tile_beta_soil_throttles_unsaturated_soil():
     ncol = 5
     # Unsaturated but plant-available soil (the run's mean theta ~0.177).
     theta = jnp.full((ncol, n), 0.20)
-    beta = land_tile_beta_soil(theta, cfg, land_params=None)
+    T_warm = jnp.full_like(theta, constants.T_freeze + 15.0)
+    beta = land_tile_beta_soil(theta, T_warm, cfg, land_params=None)
     beta = np.asarray(beta)
     assert beta.shape == (ncol,)
     assert np.all((beta >= cfg.beta_min - 1e-9) & (beta < 1.0))
     # Dry vs wet ordering.
     beta_dry = np.asarray(land_tile_beta_soil(
-        jnp.full((ncol, n), cfg.theta_wp), cfg))
+        jnp.full((ncol, n), cfg.theta_wp), T_warm, cfg))
     beta_wet = np.asarray(land_tile_beta_soil(
-        jnp.full((ncol, n), cfg.theta_fc), cfg))
+        jnp.full((ncol, n), cfg.theta_fc), T_warm, cfg))
     assert np.all(beta_dry <= beta) and np.all(beta <= beta_wet)
     np.testing.assert_allclose(beta_dry, cfg.beta_min, atol=1e-9)
     np.testing.assert_allclose(beta_wet, 1.0, atol=1e-9)
+
+
+# ---------------------------------------------------------------------------
+# The plant wilting point is resolved in ONE place, because the two callers
+# used to disagree: the land step fell straight back to the scalar config
+# value, so a wilting point that varies by plant functional type reached soil
+# evaporation and was inert in transpiration and GPP. Found by codex on the
+# calibrated-LMIP PR, which is the first configuration to ship such an array.
+# ---------------------------------------------------------------------------
+
+class _Params:
+    """Stand-in for the per-column params object (attribute lookup only)."""
+
+    def __init__(self, **kw):
+        for k, v in kw.items():
+            setattr(self, k, v)
+
+
+def test_a_per_column_wilting_point_reaches_the_plant_stress():
+    from legoesm.land.multilayer_land import resolve_plant_wilting_point
+    cfg = MultiLayerLandConfig(theta_wp=0.15)
+    per_col = jnp.array([0.08, 0.11, 0.12, 0.09])
+    got = resolve_plant_wilting_point(_Params(theta_wp=per_col), cfg)
+    np.testing.assert_allclose(np.asarray(got), np.asarray(per_col))
+    assert np.asarray(got).shape == (4,), (
+        "the per-column wilting point collapsed to a scalar, so every column "
+        "runs the same plant stress whatever the calibration says")
+
+
+def test_an_explicit_plant_wilting_point_still_wins():
+    from legoesm.land.multilayer_land import resolve_plant_wilting_point
+    cfg = MultiLayerLandConfig(theta_wp=0.15)
+    plant = jnp.array([0.05, 0.06, 0.07, 0.04])
+    got = resolve_plant_wilting_point(
+        _Params(theta_wp=jnp.full((4,), 0.11), theta_wp_plant=plant), cfg)
+    np.testing.assert_allclose(np.asarray(got), np.asarray(plant))
+
+
+def test_nothing_set_reproduces_the_single_wilting_point():
+    from legoesm.land.multilayer_land import resolve_plant_wilting_point
+    cfg = MultiLayerLandConfig(theta_wp=0.15)
+    assert resolve_plant_wilting_point(None, cfg) == 0.15
+    assert resolve_plant_wilting_point(_Params(), cfg) == 0.15
+    cfg2 = MultiLayerLandConfig(theta_wp=0.15, theta_wp_plant=0.06)
+    assert resolve_plant_wilting_point(_Params(), cfg2) == 0.06
+
+
+def test_both_callers_resolve_it_the_same_way():
+    """The defect was two copies of this chain that had drifted apart."""
+    import ast
+    import inspect
+
+    from legoesm.land import multilayer_land as ml
+
+    for fn in (ml.land_tile_beta_soil, ml._step_multilayer_land_impl):
+        src = inspect.getsource(fn)
+        called = {n.func.id for n in ast.walk(ast.parse(src.lstrip()))
+                  if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}
+        assert "resolve_plant_wilting_point" in called, (
+            f"{fn.__name__} resolves the plant wilting point itself instead "
+            "of through the shared helper, which is how the two paths came "
+            "to disagree in the first place")

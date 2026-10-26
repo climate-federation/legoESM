@@ -86,6 +86,7 @@ class TestScalingReadiness:
             precip_accum=jnp.zeros(s2),
             shflx_accum=jnp.zeros(s2),
             lhflx_accum=jnp.zeros(s2),
+            evap_accum=jnp.zeros(s2),
             sw_up_toa_accum=jnp.zeros(s2),
             lw_up_toa_accum=jnp.zeros(s2),
             sw_up_toa_clr_accum=jnp.zeros(s2),
@@ -135,7 +136,7 @@ class TestScalingReadiness:
         """C16/L10 compile + 1-day run completes and reports timing."""
         cfg = ExperimentConfig(
             grid=GridConfig(resolution=16, nlev=10),
-            dycore=DycoreConfig(dt=600.0),
+            dycore=DycoreConfig(energy_fixer=False, dt=600.0),
             output=OutputConfig(diag_days=1),
             days=1,
             dataset="analytical",
@@ -172,6 +173,7 @@ class TestScalingReadiness:
             precip_accum=jnp.zeros(s2),
             shflx_accum=jnp.zeros(s2),
             lhflx_accum=jnp.zeros(s2),
+            evap_accum=jnp.zeros(s2),
             sw_up_toa_accum=jnp.zeros(s2),
             lw_up_toa_accum=jnp.zeros(s2),
             sw_up_toa_clr_accum=jnp.zeros(s2),

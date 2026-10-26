@@ -51,7 +51,7 @@ def _column(T_val, q_r_val, N_r_val, q_g_val=0.0, q_v_frac=0.5,
     they passed against the pre-fix module).  Pair it with a supersaturated
     q_v_frac so evaporation does not drain q_r instead.
     """
-    from legoesm.thermo import saturation_mixing_ratio
+    from legoesm.thermo import saturation_specific_humidity
 
     sigma_half = jnp.linspace(0.05, 1.0, NLEV + 1)
     sigma_full = 0.5 * (sigma_half[:-1] + sigma_half[1:])
@@ -63,7 +63,7 @@ def _column(T_val, q_r_val, N_r_val, q_g_val=0.0, q_v_frac=0.5,
     rho = p_full / (constants.R_d * T)
     dp = p_half[:, 1:] - p_half[:, :-1]
     dz = constants.R_d * T * dp / (constants.g * p_full)
-    q_v = q_v_frac * saturation_mixing_ratio(T, p_full)
+    q_v = q_v_frac * saturation_specific_humidity(T, p_full)
     zeros = jnp.zeros((NCOL, NLEV))
     q_r_field = (jnp.full((NCOL, NLEV), q_r_val) if uniform_rain
                  else zeros.at[:, -1].set(q_r_val))

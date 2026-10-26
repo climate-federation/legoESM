@@ -13,6 +13,7 @@ from legoesm.ocean.fidelity.nemo_io import (
     read_nemo_restart,
     read_nemo_restart_before,
     read_nemo_restart_en,
+    read_nemo_restart_tke_coefficients,
 )
 
 # Global-with-halo dims: nn_hls=1 -> interior (ny-2, nx-2) = (4, 3).
@@ -28,7 +29,7 @@ def _encode(zyx: np.ndarray) -> np.ndarray:
     return (z * 100 + y * 10 + x).astype(np.float64)
 
 
-def _write_mesh_mask(path, with_e3uv_0=False):
+def _write_mesh_mask(path, with_e3uv_0=False, with_e3w_0=False):
     d2 = (("y", "x"), np.arange(NY * NX).reshape(NY, NX).astype(np.float64))
     d3 = (("z", "y", "x"), _encode(None))
     d1 = (("z",), np.arange(NZ).astype(np.float64) + 0.5)
@@ -44,19 +45,30 @@ def _write_mesh_mask(path, with_e3uv_0=False):
         d3_const = (("z", "y", "x"), np.ones((NZ, NY, NX)))
         data["e3u_0"] = d3_const
         data["e3v_0"] = d3_const
+    if with_e3w_0:
+        data["e3w_0"] = d3
+        data["gdepw_0"] = d3
     ds = xr.Dataset(data)
     ds.to_netcdf(path)
 
 
-def _write_restart(path, with_rhd=True, with_en=False, with_before=False,
-                    with_before_forcing=False):
+def _write_restart(path, with_rhd=True, with_en=False, with_tke_coeffs=False,
+                    with_before=False,
+                    with_before_forcing=False, with_barotropic_velocity=False):
     d2 = (("y", "x"), np.arange(NY * NX).reshape(NY, NX).astype(np.float64))
     d3 = (("z", "y", "x"), _encode(None))
     data = {"tn": d3, "sn": d3, "un": d3, "vn": d3, "sshn": d2}
     if with_rhd:
         data["rhd"] = d3
+    if with_barotropic_velocity:
+        data["uu_n"] = d2
+        data["vv_n"] = (("y", "x"), d2[1] + 1000.0)
     if with_en:
         data["en"] = d3
+    if with_tke_coeffs:
+        data["avm_k"] = (("z", "y", "x"), _encode(None) + 1000.0)
+        data["avt_k"] = (("z", "y", "x"), _encode(None) + 2000.0)
+        data["dissl"] = (("z", "y", "x"), _encode(None) + 3000.0)
     if with_before:
         # Distinct pattern (offset +1) so a reader bug that accidentally
         # reads the now-level fields is caught by value, not just shape.
@@ -80,6 +92,18 @@ def test_mesh_mask_halo_strip_and_axis_order(tmp_path):
     assert g.glamt[0, 0] == 1 * NX + 1
     # 3-D pattern z*100+y*10+x at interior (iy,ix,iz) -> global (iz, iy+1, ix+1)
     assert g.tmask[1, 2, 0] == 0 * 100 + (1 + 1) * 10 + (2 + 1)   # = 23
+
+
+def test_mesh_mask_e3w0_halo_strip_and_axis_order(tmp_path):
+    p = tmp_path / "mesh_mask_e3w0.nc"
+    _write_mesh_mask(p, with_e3w_0=True)
+    g = read_nemo_mesh_mask(str(p), nn_hls=1)
+    assert g.e3w_0 is not None
+    assert g.e3w_0.shape == (IY, IX, NZ)
+    assert g.e3w_0[1, 2, 2] == 2 * 100 + (1 + 1) * 10 + (2 + 1)
+    assert g.gdepw_0 is not None
+    assert g.gdepw_0.shape == (IY, IX, NZ)
+    assert g.gdepw_0[1, 2, 2] == 2 * 100 + (1 + 1) * 10 + (2 + 1)
 
 
 def test_mesh_mask_hu0_hv0_derived_from_e3u0_e3v0(tmp_path):
@@ -129,6 +153,40 @@ def test_restart_without_rhd(tmp_path):
     _write_restart(p, with_rhd=False)
     s = read_nemo_restart(str(p), nn_hls=1)
     assert s.rhd is None
+
+
+def test_restart_reads_prognostic_depth_mean_pair(tmp_path):
+    """restart.F90:175-182 / :304-314 uu_n/vv_n stay separate from un/vn."""
+    p = tmp_path / "restart_baro.nc"
+    _write_restart(p, with_rhd=False, with_barotropic_velocity=True)
+    s = read_nemo_restart(str(p), nn_hls=1)
+    assert s.uu_b.shape == (IY, IX)
+    assert s.vv_b.shape == (IY, IX)
+    assert s.uu_b[1, 2] == (1 + 1) * NX + (2 + 1)
+    assert s.vv_b[1, 2] == 1000.0 + (1 + 1) * NX + (2 + 1)
+
+
+def test_restart_rejects_half_depth_mean_pair(tmp_path):
+    p = tmp_path / "restart_half_baro.nc"
+    _write_restart(p, with_rhd=False, with_barotropic_velocity=True)
+    with xr.open_dataset(p, decode_times=False) as ds:
+        altered = ds.drop_vars("vv_n").load()
+    altered.to_netcdf(p, mode="w")
+    with pytest.raises(ValueError, match="both uu_n and vv_n"):
+        read_nemo_restart(str(p), nn_hls=1)
+
+
+def test_restart_malformed_depth_mean_does_not_use_missing_field_fallback(
+        tmp_path):
+    """restart.F90:311-323 falls back only when uu_n is absent, not unreadable."""
+    p = tmp_path / "restart_bad_baro.nc"
+    _write_restart(p, with_rhd=False, with_barotropic_velocity=True)
+    with xr.open_dataset(p, decode_times=False) as ds:
+        altered = ds.load()
+    altered["uu_n"] = (("y", "x"), np.full((NY, NX), "not-a-real"))
+    altered.to_netcdf(p, mode="w")
+    with pytest.raises((TypeError, ValueError)):
+        read_nemo_restart(str(p), nn_hls=1)
 
 
 def test_restart_before_reads_distinct_tb_sb_ub_vb(tmp_path):
@@ -194,6 +252,20 @@ def test_read_nemo_restart_en_missing_raises(tmp_path):
     _write_restart(p, with_rhd=False, with_en=False)
     with pytest.raises(KeyError):
         read_nemo_restart_en(str(p), nn_hls=1)
+
+
+def test_read_nemo_restart_tke_coefficients_axis_order_and_missing(tmp_path):
+    p = tmp_path / "restart_coeff.nc"
+    _write_restart(p, with_rhd=False, with_tke_coeffs=True)
+    avm, avt, dissl = read_nemo_restart_tke_coefficients(str(p), nn_hls=1)
+    assert avm.shape == avt.shape == dissl.shape == (IY, IX, NZ)
+    assert avm[1, 2, 0] == 1023.0
+    assert avt[1, 2, 0] == 2023.0
+    assert dissl[1, 2, 0] == 3023.0
+    q = tmp_path / "restart_no_coeff.nc"
+    _write_restart(q, with_rhd=False)
+    with pytest.raises(ValueError, match="avm_k"):
+        read_nemo_restart_tke_coefficients(str(q), nn_hls=1)
 
 
 class TestHalolessFiles:

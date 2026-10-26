@@ -39,6 +39,8 @@ import os
 os.environ.setdefault("JAX_ENABLE_X64", "1")
 
 import dataclasses
+import importlib.util
+import sys
 import numpy as np
 
 from legoesm.core.precision import PrecisionPolicy, set_policy
@@ -55,8 +57,25 @@ from legoesm.ocean.experiments.dino import (
     dino_lat_lon_surface_forcing_arrays, dino_step_surface_forcing,
 )
 
-RUN_DIR = "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_GDB"
-RESTART_FILE = "DINO_00057600_restart.nc"
+# Import the sibling lane selector by path (scripts/ package imports do not
+# survive direct script invocation, matching this file's own documented
+# ``Run::`` block -- same pattern coverage_rows_measure.py/atf_filter_walk.py
+# already use for dump_lane.py).
+_HERE = os.path.dirname(__file__)
+
+
+def _load_sibling(name: str, modname: str):
+    spec = importlib.util.spec_from_file_location(modname, os.path.join(_HERE, name))
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[modname] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+_dump_lane = _load_sibling("dump_lane.py", "_dump_lane_dyn_vor_een_bottom_bisect")
+
+RUN_DIR = _dump_lane.RUN_DIR
+RESTART_FILE = _dump_lane.RESTART
 
 
 def _load_full_3d(path, jpi, jpj, jpkm1, hls):
@@ -87,6 +106,7 @@ def main() -> int:
     print("=" * 78)
     print("#1455 dyn_vor EEN bisection -- rerun + mbkt-relative binning")
     print(f"LEGOESM_NEMO_E3T={e3t_mode!r}")
+    print(_dump_lane.banner())
     print("=" * 78)
 
     g = read_nemo_mesh_mask(os.path.join(RUN_DIR, "mesh_mask.nc"), nn_hls=0)

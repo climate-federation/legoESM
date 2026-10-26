@@ -20,6 +20,9 @@ _FVARS = ["2m_temperature", "2m_dewpoint_temperature",
           "total_precipitation", "surface_pressure",
           "10m_u_component_of_wind", "10m_v_component_of_wind",
           "skin_temperature", "forecast_albedo",
+          # latent-heat calibration target [W/m2]; ERA5 sign is positive DOWNWARD,
+          # flipped to positive-up at save time (slhf_wm2) to match model lhflx.
+          "mean_surface_latent_heat_flux",
           # soil-moisture validation targets [m3/m3]: layer 1 (0-7cm) + layer 2
           # (7-28cm) span the offline-evolving root zone (the deep layers are pinned).
           "volumetric_soil_water_layer_1", "volumetric_soil_water_layer_2"]
@@ -53,12 +56,24 @@ def main():
     out["ssrd_wm2"] = out.pop("surface_solar_radiation_downwards") / 3600.0
     out["strd_wm2"] = out.pop("surface_thermal_radiation_downwards") / 3600.0
     out["precip_kgms"] = out.pop("total_precipitation") * 1000.0 / 3600.0
+    # positive-up latent heat (model convention); ERA5 mslhf is positive downward.
+    # mslhf is already a mean RATE in W/m2 (do NOT divide by 3600 — that is the
+    # accumulated `surface_latent_heat_flux` product, a 3600x trap).
+    out["slhf_wm2"] = -out.pop("mean_surface_latent_heat_flux")
     st = sub[["geopotential_at_surface", "land_sea_mask"]].sel(
         time=pd.Timestamp(args.years[-1], 1, 1, 0)).load()
     out["elev_m"] = np.asarray(st["geopotential_at_surface"].values) / 9.80665
     out["lsm"] = np.asarray(st["land_sea_mask"].values)
     out["lat"] = np.asarray(sub.latitude.values); out["lon"] = np.asarray(sub.longitude.values)
     out["hours"] = np.asarray(args.hours, dtype=float)
+    # Sign/units tripwire (GLM): the flipped LAND annual-mean latent heat must be
+    # positive and O(30-70) W/m2.  A negative mean = flipped the wrong way; O(1e5)
+    # = accumulated-J/m2 product mixed in.  Fails LOUDLY before the file ships.
+    _land = out["lsm"] > 0.5
+    _le_land = float(out["slhf_wm2"][:, :, _land].mean())
+    assert 5.0 < _le_land < 120.0, (
+        f"land-mean slhf_wm2 = {_le_land:.1f} W/m2 outside plausible [5, 120]: "
+        "sign or units of mean_surface_latent_heat_flux are wrong")
     np.savez(args.out, **out)
     print(f"# saved {args.out}  ({nh} h, land {(out['lsm']>0.5).sum()})")
 

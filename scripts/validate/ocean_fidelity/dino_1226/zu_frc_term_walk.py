@@ -98,9 +98,22 @@ from legoesm.ocean.experiments.dino import (
     dino_step_surface_forcing,
 )
 
-RUN_DIR = "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_GDB"
-RESTART_FILE = "DINO_00057600_restart.nc"
+# #1455: this module is the dump-run ANCHOR for 23 sibling probes, which all
+# import RUN_DIR/RESTART_FILE from here.  Routing it through the shared lane
+# selector is therefore what makes `DINO_1226_LANE=d180` move the WHOLE sweep
+# rather than the subset that was converted individually -- leaving this one
+# hardcoded would have produced a mixed-state sweep with nothing announcing it.
+import os as _os_lane, sys as _sys_lane
+_HERE_LANE = _os_lane.path.dirname(_os_lane.path.abspath(__file__))
+if _HERE_LANE not in _sys_lane.path:
+    _sys_lane.path.insert(0, _HERE_LANE)
+import dump_lane as _lane
+
+RUN_DIR = _lane.RUN_DIR
+RESTART_FILE = _lane.RESTART
+KT_DUMP = _lane.KT_DUMP
 DT = 2700.0
+print(_lane.banner(), flush=True)
 
 # --- Precondition 1: fp64 everywhere (skill Rule 1c) -----------------------
 set_policy(PrecisionPolicy.fp64())

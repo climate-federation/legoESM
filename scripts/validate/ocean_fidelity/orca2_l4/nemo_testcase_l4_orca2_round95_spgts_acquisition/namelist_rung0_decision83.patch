@@ -1,0 +1,21 @@
+--- namelist_cfg
++++ namelist_cfg
+@@ -157 +157 @@
+-   nn_chldta   =      1       !  RGB : Chl data (=1) or cst value (=0)
++   nn_chldta   =      0       !  RGB : Chl data (=1) or cst value (=0)
+@@ -174 +174 @@
+-      ln_sssr_bnd =  .true.   !  flag to bound erp term (associated with nn_sssr=2)
++      ln_sssr_bnd =  .false.  !  flag to bound erp term (associated with nn_sssr=2)
+@@ -252 +252 @@
+-   ln_spc_dyn    = .false.     !  use 0 as special value for dynamics
++   ln_spc_dyn    = .true.      !  use 0 as special value for dynamics
+@@ -408,0 +409 @@
++   ln_zdfcst   = .true.       !  constant mixing
+@@ -421,7 +421,0 @@
+-   ln_zdfcst      = .true.
+-   ln_zdfric      = .false.
+-   ln_zdfgls      = .false.
+-   ln_zdfosm      = .false.
+-   ln_zdfnpc      = .false.
+-   ln_zdfmfc      = .false.
+-   ln_zdfswm      = .false.

@@ -186,3 +186,38 @@ def test_invalid_metric_raises():
     with pytest.raises(ValueError):
         plot_wb_scorecard.build_scorecard_figure(
             {"p": _synthetic_scorecard(50.0, 0.7)}, None, metric="bogus")
+
+
+def test_a_confounded_family_is_named_on_the_figure():
+    """A status recorded in a file nobody reads is decoration.
+
+    The figure is what gets read, so a family whose learned column ran without
+    the classical arm's surface friction has to be named on it (GLM-5.2)."""
+    import importlib.util
+    import pathlib
+
+    import matplotlib
+    matplotlib.use("Agg")
+
+    root = pathlib.Path(__file__).resolve().parents[2]
+    spec = importlib.util.spec_from_file_location(
+        "plot_wb_scorecard", root / "scripts" / "plot" / "plot_wb_scorecard.py")
+    plot = importlib.util.module_from_spec(spec)
+    import sys
+    sys.modules["plot_wb_scorecard"] = plot
+    spec.loader.exec_module(plot)
+
+    def _card(note):
+        return {"meta": {"surface_drag_confound": note},
+                "model": {"z500": {"rmse": {"24": 50.0, "48": 70.0}}}}
+
+    clean = {"physics": _card("arms carry the same surface stress")}
+    fig = plot.build_scorecard_figure(clean)
+    assert "NOT AN EQUALISED" not in fig._suptitle.get_text()
+
+    dirty = dict(clean)
+    dirty["neural_gcm"] = _card(
+        "learned arm has NO surface stress: the classical arm runs 'clubb'")
+    fig = plot.build_scorecard_figure(dirty)
+    title = fig._suptitle.get_text()
+    assert "NOT AN EQUALISED" in title and "neural_gcm" in title, title

@@ -44,7 +44,7 @@ def _clm_default_params():
 
 
 def _annual(cp, data):
-    T, A, _ = M.forward_ml(cp, data)
+    T, A, _, _ = M.forward_ml(cp, data)
     return np.asarray(T.mean(0)), np.asarray(A.mean(0))   # (ncol,) mean-annual
 
 
@@ -82,7 +82,7 @@ def main():
 
     def _full(cp, bands=False):
         M._ELEV_BANDS_ON = bool(bands)   # forward_ml reads this at call time
-        T, A, _ = M.forward_ml(cp, data)
+        T, A, _, _ = M.forward_ml(cp, data)
         return np.asarray(T), np.asarray(A)                      # (12, ncol) monthly
 
     # The untuned-CLM baseline runs the ORIGINAL albedo physics too — the crude LINEAR

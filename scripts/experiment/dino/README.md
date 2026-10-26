@@ -21,6 +21,7 @@ unknown key is a hard error (typo guard).
 | `prev_mpas_90d.yaml`      | MPAS Voronoi     | 90 d / 10 d | original clean 90-day deliverable |
 | `acc_kpp_latlon_365d.yaml` | lat-lon, KPP     | 365 d / 5 d | barotropic-Psi + ACC-transport spin-up |
 | `paper_tke_latlon.yaml`   | lat-lon, **TKE** | 180 d / 5 d | NEMO TKE closure (sub-annual; floor fixes the day-39 mode, a 2nd ~day-230 mode needs KPP) |
+| `nemo_faithful_kamm_mlf.yaml` | lat-lon, NEMO's exact 52×199 mesh | 1800 d / 30 d | the NEMO-fidelity card (`nemo_dino_kamm_mlf` + `--nemo-faithful-grid`, dt 2700 s), standalone — no NEMO files read; GPU only |
 
 Cross-grid comparison (after running a matched pair):
 

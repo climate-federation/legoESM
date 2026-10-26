@@ -29,7 +29,7 @@ import numpy as np
 import pytest
 
 from legoesm import constants
-from legoesm.thermo import saturation_mixing_ratio, saturation_mixing_ratio_ice
+from legoesm.thermo import saturation_specific_humidity, saturation_specific_humidity_ice
 
 jax.config.update("jax_enable_x64", True)
 
@@ -58,7 +58,7 @@ def _column():
     p_full = jnp.broadcast_to((sf * p_s)[None, :], (_NCOL, _NLEV))
     T = jnp.maximum(300.0 * jnp.clip(sf, 0.01, None) ** 0.19, 200.0)
     T = jnp.broadcast_to(T[None, :], (_NCOL, _NLEV))
-    q_sat = saturation_mixing_ratio(T, p_full)
+    q_sat = saturation_specific_humidity(T, p_full)
     q_v = jnp.where(sf[None, :] > 0.7, 0.95, 0.5) * q_sat
     return T, q_v, p_full, p_half
 
@@ -75,7 +75,7 @@ def _aux():
     w = jnp.full((_NCOL, _NLEV), 0.1)
     lat = jnp.full((_NCOL,), 0.5)
     T_sfc = jnp.full((_NCOL,), 301.0)
-    q_sfc = saturation_mixing_ratio(T_sfc, p_half[:, -1])
+    q_sfc = saturation_specific_humidity(T_sfc, p_half[:, -1])
     prog = jnp.zeros((_NCOL, _NLEV))
     return locals()
 
@@ -164,18 +164,18 @@ class TestConvectionAudit:
             return jnp.sum(out.dT_dt ** 2)
         assert_grad_ok(loss, 1.0e-4, "tiedtke.epsilon_deep")
 
-    def test_zhang_mcfarlane_tau_cape(self):
-        from legoesm.atmosphere.physics.convection.zhang_mcfarlane import zhang_mcfarlane_convection
+    def test_zhang_mcfarlane_tau(self):
+        from tests._zm_cold_start import zm_cold_start as zhang_mcfarlane_convection
         from legoesm.atmosphere.physics.convection.config import ZhangMcFarlaneConfig
         T, q_v, p_full, p_half = _column()
         A = _aux()
 
         def loss(x):
-            cfg = ZhangMcFarlaneConfig()._replace(tau_cape=x)
+            cfg = ZhangMcFarlaneConfig(land_fraction="none")._replace(tau=x)
             out = zhang_mcfarlane_convection(T, q_v, p_full, p_half, A["u"],
                 A["v"], A["prog"], 600.0, config=cfg)[0]
             return jnp.sum(out.dT_dt ** 2)
-        assert_grad_ok(loss, 3600.0, "zhang_mcfarlane.tau_cape")
+        assert_grad_ok(loss, 3600.0, "zhang_mcfarlane.tau")
 
     def test_mass_flux_M_scale(self):
         from legoesm.atmosphere.physics.convection.mass_flux import mass_flux_convection
@@ -309,7 +309,7 @@ def _ice_column():
     p_full = jnp.broadcast_to((sf * p_s)[None, :], (_NCOL, _NLEV))
     p_half = jnp.broadcast_to((sh * p_s)[None, :], (_NCOL, _NLEV + 1))
     T = jnp.broadcast_to(jnp.linspace(258.0, 268.0, _NLEV)[None, :], (_NCOL, _NLEV))
-    q_si = saturation_mixing_ratio_ice(T, p_full)
+    q_si = saturation_specific_humidity_ice(T, p_full)
     q_v = 1.05 * q_si
     rho = p_full / (constants.R_d * T)
     dz = jnp.full((_NCOL, _NLEV), 500.0)
@@ -335,18 +335,6 @@ class TestMicrophysicsAudit:
             return jnp.sum(out.dq_r_dt ** 2)
         assert_grad_ok(loss, 5.25, "thompson.k_ac")
 
-    def test_p3_dep_coeff(self):
-        from legoesm.atmosphere.physics.microphysics.p3 import p3_microphysics
-        from legoesm.atmosphere.physics.microphysics.config import P3Config
-        T, q_v, hydro, p_full, p_half, rho, dz = _ice_column()
-
-        def loss(x):
-            cfg = P3Config()._replace(dep_coeff=x)
-            out = p3_microphysics(T, q_v, hydro, p_full, p_half, rho, dz,
-                60.0, config=cfg)
-            return jnp.sum(out.dT_dt ** 2) + jnp.sum(out.dq_i_dt ** 2)
-        assert_grad_ok(loss, 1e-3, "p3.dep_coeff")
-
     def test_sundqvist_RH_crit(self):
         from legoesm.atmosphere.physics.microphysics.sundqvist import sundqvist_microphysics
         from legoesm.atmosphere.physics.microphysics.config import SundqvistConfig
@@ -355,14 +343,19 @@ class TestMicrophysicsAudit:
         rho = p_full / (constants.R_d * T)
         dz = jnp.full((_NCOL, _NLEV), 500.0)
         z = jnp.zeros((_NCOL, _NLEV))
-        hydro = HydrometeorState(q_c=jnp.full((_NCOL, _NLEV), 3e-3),
+        # q_c 3e-5 (was 3e-3): at 3e-3 the release exponent hits the Zhao-Carr
+        # cap (min(50, .)) and the release no longer depends on the cloud cover.
+        hydro = HydrometeorState(q_c=jnp.full((_NCOL, _NLEV), 3e-5),
             q_r=z, q_i=z, q_s=z, q_g=z, N_c=z, N_r=z, N_i=z)
 
         def loss(x):
             cfg = SundqvistConfig()._replace(rh_crit=x)
             out = sundqvist_microphysics(T, 0.9 * q_v, hydro, p_full, p_half,
                 rho, dz, 60.0, config=cfg)
-            return jnp.sum(out.dT_dt ** 2)
+            # Zhao-Carr: liquid release carries no latent heat and this
+            # column has no sub-rh_crit layer under the cloud, so rh_crit
+            # reaches the output through the cloud cover b -> precipitation.
+            return jnp.sum(out.dT_dt ** 2) + jnp.sum(out.precipitation ** 2)
         assert_grad_ok(loss, 0.8, "sundqvist.RH_crit")
 
 
@@ -431,11 +424,13 @@ class TestTurbulenceAudit:
 # ===========================================================================
 # Gravity-wave drag + radiation + clouds
 # ===========================================================================
-def _gwd_call(fn, cfg, extra=()):
+def _gwd_call(fn, cfg, extra=(), **kw):
     A = _aux()
     T, q_v, p_full, p_half = _column()
+    if kw.pop("p_ref_from_column", False):
+        kw["p_ref_half"] = p_half.reshape(-1, p_half.shape[-1])[0]
     out = fn(A["u"], A["v"], T, p_full, p_half, A["z_full"], A["z_half"],
-             A["rho"], A["lat"], 60.0, cfg, *extra)
+             A["rho"], A["lat"], 60.0, cfg, *extra, **kw)
     # GWDOutput is itself a NamedTuple (==tuple); only unwrap the
     # (output, spectrum) 2-tuple, detected by absence of du_dt.
     out = out if hasattr(out, "du_dt") else out[0]
@@ -459,7 +454,8 @@ class TestGWDRadiationCloudsAudit:
         from legoesm.atmosphere.physics.gravity_wave_drag.mcfarlane import mcfarlane_gwd
         from legoesm.atmosphere.physics.gravity_wave_drag.config import McFarlaneConfig
         assert_grad_ok(lambda x: _gwd_call(mcfarlane_gwd,
-            McFarlaneConfig()._replace(G_0=x)), 0.5, "mcfarlane.G_0")
+            McFarlaneConfig()._replace(G_0=x), p_ref_from_column=True),
+            0.5, "mcfarlane.G_0")
 
     def test_hines_total_rms_wind(self):
         from legoesm.atmosphere.physics.gravity_wave_drag.hines import hines_gwd

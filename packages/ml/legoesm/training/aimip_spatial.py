@@ -296,12 +296,19 @@ class AIMIPSpatialSurfaceParams(eqx.Module):
     """Bundle of learnable spatial surface and surface-radiation fields.
 
     Holds a :class:`SpatialField` for each name in
-    :data:`SPATIAL_FIELD_NAMES`.  ``evaluate`` returns a dict mapping
+    :data:`SPATIAL_FIELD_NAMES` the resolved schemes read (the unread ones,
+    listed in ``frozen``, are not built).  ``evaluate`` returns a dict mapping
     name -> ``(n_lat, n_lon)`` array suitable for substitution into
     :class:`SurfaceLayerConfig` and :class:`GrayRadiationConfig`.
     """
 
     fields: dict[str, SpatialField]
+    # Fields the resolved schemes never read (no-inert rule, review F5). They
+    # are NOT built (decision 5, 2026-10-15: a fixed parameter has no gradient
+    # at all, not a zero one), so ``fields`` lacks them and the physics falls
+    # back to the scalar knob, which those schemes do not read either. Kept
+    # here only as the record of what was dropped.
+    frozen: frozenset = eqx.field(static=True, default=frozenset())
 
     @staticmethod
     def from_defaults(
@@ -310,13 +317,16 @@ class AIMIPSpatialSurfaceParams(eqx.Module):
         dtype: jnp.dtype = jnp.float32,
         init_std: float = 0.0,
         key: jax.Array | None = None,
+        frozen=(),
     ) -> "AIMIPSpatialSurfaceParams":
         """Build the AIMIP spatial-surface bundle.
 
         Each :class:`SpatialField` receives an independently-keyed
         random init when ``init_std > 0``; the key is split per field
         so swapping the field set leaves earlier inits stable across
-        runs that touch different field names.
+        runs that touch different field names.  Names in ``frozen`` (unread
+        by the resolved schemes) are not built at all; the others keep the
+        key of their position in :data:`SPATIAL_FIELD_NAMES`.
         """
         if init_std > 0.0 and key is None:
             key = jax.random.PRNGKey(0)
@@ -337,7 +347,9 @@ class AIMIPSpatialSurfaceParams(eqx.Module):
                     key=keys[i],
                 )
                 for i, (name, spec) in enumerate(_FIELD_SPECS.items())
-            }
+                if name not in frozenset(frozen)
+            },
+            frozen=frozenset(frozen),
         )
 
     def evaluate(
@@ -369,36 +381,32 @@ class AIMIPSpatialSurfaceParams(eqx.Module):
         return sum(f.coeffs.size for f in self.fields.values())
 
 
-def land_mask_from_phis(
-    phis: jax.Array,
-    *,
-    smooth: bool = True,
-    sharpness: float = 1.0e-2,
-) -> jax.Array:
-    """Derive a (soft) land mask from surface geopotential.
+def era5_land_fraction(grid, era5_config=None, *, ds=None) -> jax.Array:
+    """ERA5 land-sea mask on ``grid``, shape (n_lat, n_lon).
 
-    ``phis = g * z_s`` so positive ``phis`` indicates surface above sea
-    level (land).  For differentiability we default to a smooth
-    sigmoid in ``phis`` with a sharpness chosen so the transition zone
-    is roughly one model layer wide (~10 m elevation).
-
-    Parameters
-    ----------
-    phis : jax.Array
-        Surface geopotential, shape ``(n_lat, n_lon)`` [m^2/s^2].
-    smooth : bool
-        If True, use a sigmoid (differentiable).  If False, use a
-        hard step (non-differentiable).
-    sharpness : float
-        Sigmoid sharpness in 1/(m^2/s^2).  At ``sharpness=1e-2`` the
-        transition width in elevation is ~10 m (since
-        d(sigmoid)/d(phis)|_0 = sharpness/4 and phis = g*z_s).
-
-    Returns
-    -------
-    jax.Array
-        Land fraction in [0, 1], shape ``(n_lat, n_lon)``.
+    Read from ``era5_config``'s store (default: the WB2 store) or from an
+    already-open ``ds``, and regridded exactly as the WB classical arm feeds
+    it to ZM.  Not ``phis > 0``: on the smoothed orography that marked 72 %
+    of T21 columns as land.
     """
-    if smooth:
-        return jax.nn.sigmoid(sharpness * phis)
-    return jnp.where(phis > 0.0, 1.0, 0.0)
+    from legoesm.training.era5_to_state import TrainingERA5Config, load_era5_slice
+    from legoesm.training.scale_build import prescribed_surface_planes
+
+    cfg = (era5_config or TrainingERA5Config())._replace(load_land_frac=True)
+    sl = load_era5_slice(cfg, 0, ds=ds)
+    return prescribed_surface_planes(sl, grid)["land_frac"]
+
+
+def grid_with_zm_land_fraction(grid, convection_scheme: str, land=None):
+    """``grid`` carrying the column land fraction Zhang-McFarlane needs.
+
+    ZM picks its autoconversion coefficient per column from the land fraction
+    and refuses to run without one; the AIMIP Gaussian grid carries none.
+    ``land`` is :func:`era5_land_fraction` (loaded here when not given).  Any
+    other convection scheme gets ``grid`` back unchanged, with no store access.
+    """
+    if convection_scheme != "zhang_mcfarlane":
+        return grid
+    if land is None:
+        land = era5_land_fraction(grid)
+    return grid._replace(land_frac=jnp.asarray(land).reshape(-1))

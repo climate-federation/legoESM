@@ -3,8 +3,10 @@
 Welcome. This is the **fastest** path from a clean checkout to a
 running simulation — and a map for "where do I look next?"
 
-If you have never touched legoESM before, read this top-to-bottom; it
-takes about 20 minutes including the first run.
+If you have never touched legoESM before, start with the step-by-step,
+verified [Getting started](../../README.md#getting-started-about-one-hour)
+section of the README (clone → install → first Held–Suarez experiment →
+plots), then come back here for the map of the code.
 
 For technical depth, see [SPECIFICATION.md](../science/specs/SPECIFICATION.md). For
 context on what changed recently, see [CHANGELOG.md](../../CHANGELOG.md).
@@ -56,7 +58,7 @@ python scripts/experiment/install_federation.py --all --extras dev
 ```
 
 > A bare `pip install -e ".[dev]"` **fails** here (`Could not find a version that
-> satisfies the requirement legoesm-core~=0.1.0`): plain pip cannot resolve the
+> satisfies the requirement legoesm-core~=1.0.0`): plain pip cannot resolve the
 > unpublished workspace members. Use `uv` or the helper above. To install just one
 > component standalone: `python scripts/experiment/install_federation.py atmosphere`
 > (or `ocean` / `land` / `ice`).
@@ -67,7 +69,7 @@ Optional MPI extras (only if you want multi-node runs):
 pip install "mpi4py>=4.1,<5" "mpi4jax>=0.9,<0.10"
 ```
 
-Requirements: **Python ≥ 3.11, JAX ≥ 0.4.35**. Apple Silicon users
+Requirements: **Python ≥ 3.11, JAX ≥ 0.5.3** (install minimum in `pyproject.toml`). Apple Silicon users
 who want the spectral solver should set `JAX_PLATFORMS=cpu` (the
 Metal backend has no `float64`).
 
@@ -81,7 +83,7 @@ Quick sanity check:
 
 ## 3. Your first runs
 
-### a. A 30-second shallow-water test
+### a. A quick shallow-water test (≈ 1.5 min on 2 CPU cores, including compilation)
 
 ```bash
 legoesm test williamson --case 2 --resolution 48 --days 5
@@ -108,8 +110,10 @@ JAX_ENABLE_X64=1 .venv/bin/python scripts/run/run_amip.py \
     --grid-type cubed_sphere --resolution 16 --days 365
 ```
 
-Atmosphere-only 365-day AMIP at C16/L40. This is the smallest
-production-grade end-to-end run. Output lands under `output/`.
+Atmosphere-only 365-day AMIP at C16/L40 with the bare-CLI default physics —
+a smoke test, not the production configuration (that is
+`--config config/amip/amip_production.yaml`; see [amip.md](amip.md)).
+Output lands under `results/amip/` unless `--output` is given.
 
 ### d. (Optional) A coupled aquaplanet
 
@@ -124,6 +128,13 @@ Fully coupled atmosphere + slab ocean + bucket land. Other presets:
 ---
 
 ## 4. Repository layout (where things live)
+
+The tree below shows the `legoesm.*` import layout. On disk, each
+component's source lives under `packages/<member>/legoesm/<subpkg>/`, e.g.
+`packages/atmosphere/legoesm/atmosphere/`, and `constants.py`/`thermo.py` are in
+`packages/core/legoesm/`. Only a few meta-package modules (`cli.py`,
+`config.py`, `supported_matrix.py`, …) are in `src/legoesm/`. See
+the README's *Repository Structure*.
 
 ```
 src/legoesm/
@@ -195,7 +206,7 @@ Everything inside the time-step kernel is pure JAX, so you can do:
 
 ```python
 import jax
-from legoesm.training import build_segment_fn
+from legoesm.driver.compiled_segments import build_segment_fn
 
 segment_fn = build_segment_fn(...)
 loss, grads = jax.value_and_grad(loss_fn)(params, segment_fn.raw, ...)
@@ -224,6 +235,11 @@ The single most useful command after editing physics:
 JAX_ENABLE_X64=1 .venv/bin/python -m pytest tests/<area>/ -x
 ```
 
+`JAX_ENABLE_X64=1` is right for scientific and conservation tests. The unit tier
+(`tests/unit/`) is the exception: CI runs it in fp32 on purpose, and unit tests that
+need x64 enable it themselves. To check a change the way CI does, see
+[Running CI's test jobs locally](../validation/TESTING.md#running-cis-test-jobs-locally).
+
 After touching the dycore on cubed-sphere, always run the atmosphere
 test matrix in quick mode and **eyeball the v-wind snapshots**:
 
@@ -234,10 +250,10 @@ JAX_ENABLE_X64=1 .venv/bin/python scripts/matrix/run_atmosphere_test_matrix.py \
 
 Passing pytest is *necessary but not sufficient* on the cubed-sphere
 — edge artifacts only reliably show up in field snapshots. See
-[docs/cubed_sphere_edge_artifacts.md](../dev-notes/cubed_sphere_edge_artifacts.md).
+[docs/dev-notes/cubed_sphere_edge_artifacts.md](../dev-notes/cubed_sphere_edge_artifacts.md).
 
-Ocean: `scripts/matrix/run_ocean_test_matrix.py` (current status: 57/57
-PASS).
+Ocean: `scripts/matrix/run_ocean_test_matrix.py` (per-case PASS/FAIL is
+written to its `summary.json`).
 
 Fast static guardrails (constants/saturation/dispatch/contracts/federation
 tripwires — seconds, no GPU):
@@ -261,7 +277,8 @@ Sea ice: `scripts/matrix/run_sea_ice_test_matrix.py` (15 standard benchmarks).
 ## 8. Common pitfalls
 
 - **Forgetting `JAX_ENABLE_X64=1`.** Most scientific tests need
-  `float64`. Spectral solvers *require* it.
+  `float64`. Spectral solvers *require* it. (But don't set it job-wide for
+  `tests/unit/`, which CI runs in fp32. See above.)
 - **`Buffer has been deleted` errors.** Donated input was reused.
   Use the `.raw` variant (non-donating) inside `jax.grad`.
 - **A new function that already exists.** Search before writing.

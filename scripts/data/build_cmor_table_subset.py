@@ -72,8 +72,8 @@ WANTED: Dict[str, tuple] = {
     # ``rsut`` is NOT a CMIP6 ``day`` variable -- it lives in ``CFday``.
     # ``ua850``/``va850`` do not exist in ANY CMIP6 table; the 850 hPa winds
     # are ``ua``/``va`` on the ``plev8`` coordinate in ``day``.
-    "day": ("pr", "psl", "rlut", "tas", "tasmax", "tasmin", "ua", "va"),
-    "CFday": ("rsut",),
+    "day": ("pr", "psl", "rlut", "tas", "tasmax", "tasmin", "ua", "va", "zg"),
+    "CFday": ("ps", "rsut"),
     "fx": ("areacella", "orog", "sftlf"),
     "Lmon": ("gpp", "lai", "mrso", "mrsos", "tsl"),
     "Omon": (
@@ -83,6 +83,8 @@ WANTED: Dict[str, tuple] = {
     ),
     "Ofx": ("areacello", "deptho", "masscello", "sftof", "thkcello", "volcello"),
     "SImon": ("siconc", "sitemptop", "sithick", "siu", "siv"),
+    "LImon": ("snw",),
+    "Oday": ("tos",),
 }
 
 # Coordinate axes we need the ``requested`` level lists / scalar values for.

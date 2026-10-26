@@ -251,11 +251,16 @@ def test_model_rollout_grads_finite_f32(scheme):
     d = (jax.random.normal(jax.random.PRNGKey(42), zero.shape)
          * wet3).astype(zero.dtype)
     d = d / jnp.linalg.norm(d)
-    _, fwd = jax.jvp(loss, (zero,), (d,))
+    rev = float(jnp.vdot(g, d))
+    try:
+        _, fwd = jax.jvp(loss, (zero,), (d,))
+    except TypeError as exc:
+        pytest.fail(
+            f"{scheme}: reverse directional derivative={rev:.9e}; "
+            f"forward derivative unavailable: {exc}")
     assert bool(jnp.isfinite(fwd)), f"{scheme}: eager forward derivative NaN"
     fwd_j = jax.jit(lambda z: jax.jvp(loss, (z,), (d,))[1])(zero)
     assert bool(jnp.isfinite(fwd_j)), f"{scheme}: jitted forward derivative NaN"
     # reverse and forward agree to float32 noise
-    rev = float(jnp.vdot(g, d))
     assert np.isclose(rev, float(fwd_j), rtol=1e-3), (
         f"{scheme}: rev={rev:.6e} vs fwd={float(fwd_j):.6e}")

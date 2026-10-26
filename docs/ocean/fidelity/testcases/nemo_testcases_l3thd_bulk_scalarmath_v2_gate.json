@@ -1,0 +1,983 @@
+{
+  "bar": 1e-15,
+  "bit_comparisons": 227760,
+  "bit_identical_rows": 211248,
+  "bit_owner_groups": {
+    "binary64_operation_order": {
+      "exact_zero_oracle_non_bit_rows": 0,
+      "largest_relative_row": {
+        "stage": "POST_BLK_ICE_2",
+        "step": 6236,
+        "variable": "emp_ice"
+      },
+      "max_relative_error_nonzero_oracle": 2.008964945929631e-13,
+      "non_bit_identical_rows": 16494,
+      "status": "DISCLOSED_AT_BAR_REASSOCIATION",
+      "variables": [
+        "POST_BLK_ICE_1.utau_ice",
+        "POST_BLK_ICE_1.vtau_ice",
+        "POST_BLK_ICE_2.evap_ice",
+        "POST_BLK_ICE_2.devap_ice",
+        "POST_BLK_ICE_2.emp_ice",
+        "POST_BLK_ICE_2.emp_tot",
+        "POST_ICE_FLX_OTHER.fhld"
+      ]
+    },
+    "jax_exp_ice_alb": {
+      "exact_zero_oracle_non_bit_rows": 0,
+      "largest_relative_row": {
+        "stage": "POST_BLK_ICE_2",
+        "step": 6320,
+        "variable": "qsr_ice"
+      },
+      "max_relative_error_nonzero_oracle": 8.4104602317484995e-16,
+      "non_bit_identical_rows": 18,
+      "status": "AWAITING_LIBM_POLICY",
+      "variables": [
+        "POST_BLK_ICE_2.albedo",
+        "POST_BLK_ICE_2.qsr_ice",
+        "POST_BLK_ICE_2.qsr_tot"
+      ]
+    }
+  },
+  "comparisons": 227760,
+  "coverage": {
+    "alb_ice": {
+      "reason": "ice_alb output at POST_BLK_ICE_2; recomputed after thermodynamics",
+      "status": "VERIFIED"
+    },
+    "devap_ice": {
+      "reason": "POST_BLK_ICE_2 output",
+      "status": "VERIFIED"
+    },
+    "dqla_ice": {
+      "reason": "POST_BLK_ICE_2 output",
+      "status": "VERIFIED"
+    },
+    "dqns_ice": {
+      "reason": "POST_BLK_ICE_2 output",
+      "status": "VERIFIED"
+    },
+    "emp": {
+      "reason": "registered blk_ice_2 ocean evaporation input",
+      "status": "VERIFIED"
+    },
+    "emp_ice": {
+      "reason": "POST_BLK_ICE_2 output",
+      "status": "VERIFIED"
+    },
+    "emp_oce": {
+      "reason": "POST_BLK_ICE_2 output",
+      "status": "VERIFIED"
+    },
+    "evap_ice": {
+      "reason": "POST_BLK_ICE_2 output",
+      "status": "VERIFIED"
+    },
+    "fr_i": {
+      "reason": "registered POST_BLK_ICE_1/2 input",
+      "status": "VERIFIED"
+    },
+    "qcn_ice": {
+      "reason": "ice_thd/ZDF output, not bulk flux",
+      "status": "WAIVED"
+    },
+    "qemp_ice": {
+      "reason": "POST_BLK_ICE_2 output",
+      "status": "VERIFIED"
+    },
+    "qemp_oce": {
+      "reason": "POST_BLK_ICE_2 output and ice_flx_other input",
+      "status": "VERIFIED"
+    },
+    "qevap_ice": {
+      "reason": "POST_BLK_ICE_2 output",
+      "status": "VERIFIED"
+    },
+    "qla_ice": {
+      "reason": "POST_BLK_ICE_2 output",
+      "status": "VERIFIED"
+    },
+    "qml_ice": {
+      "reason": "ice_thd output, not bulk flux",
+      "status": "WAIVED"
+    },
+    "qns": {
+      "reason": "ocean-side NCAR output",
+      "status": "WAIVED"
+    },
+    "qns_ice": {
+      "reason": "POST_BLK_ICE_2 output; end stream later mutated by ZDF",
+      "status": "VERIFIED"
+    },
+    "qns_oce": {
+      "reason": "registered input to ice_flx_other",
+      "status": "VERIFIED"
+    },
+    "qprec_ice": {
+      "reason": "POST_BLK_ICE_2 output",
+      "status": "VERIFIED"
+    },
+    "qsr": {
+      "reason": "registered blk_ice_2 atmospheric input",
+      "status": "VERIFIED"
+    },
+    "qsr_ice": {
+      "reason": "POST_BLK_ICE_2 output",
+      "status": "VERIFIED"
+    },
+    "qsr_oce": {
+      "reason": "registered input to ice_flx_other",
+      "status": "VERIFIED"
+    },
+    "qtr_ice_top": {
+      "reason": "POST_BLK_ICE_2 output",
+      "status": "VERIFIED"
+    },
+    "rCdU_ice": {
+      "reason": "inactive because ln_drgice_imp is false in SAS",
+      "status": "WAIVED"
+    },
+    "sfx": {
+      "reason": "ice thermodynamic salt flux",
+      "status": "WAIVED"
+    },
+    "snwice_fmass": {
+      "reason": "thermodynamic snow/ice exchange output",
+      "status": "WAIVED"
+    },
+    "snwice_mass": {
+      "reason": "thermodynamic snow/ice exchange output",
+      "status": "WAIVED"
+    },
+    "snwice_mass_b": {
+      "reason": "thermodynamic snow/ice exchange history",
+      "status": "WAIVED"
+    },
+    "sstfrz": {
+      "reason": "eos_fzp output upstream of this rung",
+      "status": "WAIVED"
+    },
+    "taum": {
+      "reason": "ocean-side NCAR diagnostic",
+      "status": "WAIVED"
+    },
+    "tn_ice": {
+      "reason": "thermodynamic surface-temperature state",
+      "status": "WAIVED"
+    },
+    "utau": {
+      "reason": "not used by active ln_icedyn branch; ocean NCAR producer and later ice_update_tau uncertified",
+      "status": "WAIVED"
+    },
+    "utau_ice": {
+      "reason": "POST_BLK_ICE_1 output",
+      "status": "VERIFIED"
+    },
+    "vtau": {
+      "reason": "not used by active ln_icedyn branch; ocean NCAR producer and later ice_update_tau uncertified",
+      "status": "WAIVED"
+    },
+    "vtau_ice": {
+      "reason": "POST_BLK_ICE_1 output",
+      "status": "VERIFIED"
+    },
+    "wndm_ice": {
+      "reason": "POST_BLK_ICE_1 output",
+      "status": "VERIFIED"
+    }
+  },
+  "dtypes": {
+    "backend": "cpu",
+    "jax_x64": true,
+    "numpy": "float64"
+  },
+  "frame_registry": [
+    {
+      "source": "icesbc.F90:83-108; sbcblk.F90:1085-1168",
+      "stage": "POST_BLK_ICE_1",
+      "time_level": "current ice step",
+      "values": 17
+    },
+    {
+      "source": "icesbc.F90:149-194; icealb.F90:124-185; sbcblk.F90:1218-1346",
+      "stage": "POST_BLK_ICE_2",
+      "time_level": "current ice step",
+      "values": 50
+    },
+    {
+      "source": "icesbc.F90:194-199,310-437",
+      "stage": "POST_ICE_FLX_OTHER",
+      "time_level": "current ice step",
+      "values": 39
+    }
+  ],
+  "input_legitimacy_rows": [
+    {
+      "bit_identical_count": 8760,
+      "exact_zero_oracle_non_bit_count": 0,
+      "first_non_bit_step": null,
+      "first_over_step": null,
+      "max_absolute": 0.0,
+      "max_normalized": 0.0,
+      "max_relative_error_nonzero_oracle": 0.0,
+      "max_relative_error_step": null,
+      "max_step": 1,
+      "non_bit_identical_count": 0,
+      "over_bar_count": 0,
+      "stage": "EXCHANGE_END_STABLE",
+      "variable": "qsr_ice"
+    },
+    {
+      "bit_identical_count": 8760,
+      "exact_zero_oracle_non_bit_count": 0,
+      "first_non_bit_step": null,
+      "first_over_step": null,
+      "max_absolute": 0.0,
+      "max_normalized": 0.0,
+      "max_relative_error_nonzero_oracle": 0.0,
+      "max_relative_error_step": null,
+      "max_step": 1,
+      "non_bit_identical_count": 0,
+      "over_bar_count": 0,
+      "stage": "EXCHANGE_END_STABLE",
+      "variable": "qla_ice"
+    },
+    {
+      "bit_identical_count": 8760,
+      "exact_zero_oracle_non_bit_count": 0,
+      "first_non_bit_step": null,
+      "first_over_step": null,
+      "max_absolute": 0.0,
+      "max_normalized": 0.0,
+      "max_relative_error_nonzero_oracle": 0.0,
+      "max_relative_error_step": null,
+      "max_step": 1,
+      "non_bit_identical_count": 0,
+      "over_bar_count": 0,
+      "stage": "EXCHANGE_END_STABLE",
+      "variable": "dqla_ice"
+    },
+    {
+      "bit_identical_count": 8760,
+      "exact_zero_oracle_non_bit_count": 0,
+      "first_non_bit_step": null,
+      "first_over_step": null,
+      "max_absolute": 0.0,
+      "max_normalized": 0.0,
+      "max_relative_error_nonzero_oracle": 0.0,
+      "max_relative_error_step": null,
+      "max_step": 1,
+      "non_bit_identical_count": 0,
+      "over_bar_count": 0,
+      "stage": "EXCHANGE_END_STABLE",
+      "variable": "dqns_ice"
+    },
+    {
+      "bit_identical_count": 8760,
+      "exact_zero_oracle_non_bit_count": 0,
+      "first_non_bit_step": null,
+      "first_over_step": null,
+      "max_absolute": 0.0,
+      "max_normalized": 0.0,
+      "max_relative_error_nonzero_oracle": 0.0,
+      "max_relative_error_step": null,
+      "max_step": 1,
+      "non_bit_identical_count": 0,
+      "over_bar_count": 0,
+      "stage": "EXCHANGE_END_STABLE",
+      "variable": "qtr_ice_top"
+    },
+    {
+      "bit_identical_count": 8760,
+      "exact_zero_oracle_non_bit_count": 0,
+      "first_non_bit_step": null,
+      "first_over_step": null,
+      "max_absolute": 0.0,
+      "max_normalized": 0.0,
+      "max_relative_error_nonzero_oracle": 0.0,
+      "max_relative_error_step": null,
+      "max_step": 1,
+      "non_bit_identical_count": 0,
+      "over_bar_count": 0,
+      "stage": "EXCHANGE_END_STABLE",
+      "variable": "utau_ice"
+    },
+    {
+      "bit_identical_count": 8760,
+      "exact_zero_oracle_non_bit_count": 0,
+      "first_non_bit_step": null,
+      "first_over_step": null,
+      "max_absolute": 0.0,
+      "max_normalized": 0.0,
+      "max_relative_error_nonzero_oracle": 0.0,
+      "max_relative_error_step": null,
+      "max_step": 1,
+      "non_bit_identical_count": 0,
+      "over_bar_count": 0,
+      "stage": "EXCHANGE_END_STABLE",
+      "variable": "vtau_ice"
+    },
+    {
+      "bit_identical_count": 8760,
+      "exact_zero_oracle_non_bit_count": 0,
+      "first_non_bit_step": null,
+      "first_over_step": null,
+      "max_absolute": 0.0,
+      "max_normalized": 0.0,
+      "max_relative_error_nonzero_oracle": 0.0,
+      "max_relative_error_step": null,
+      "max_step": 1,
+      "non_bit_identical_count": 0,
+      "over_bar_count": 0,
+      "stage": "EXCHANGE_END_STABLE",
+      "variable": "emp_ice"
+    },
+    {
+      "bit_identical_count": 8760,
+      "exact_zero_oracle_non_bit_count": 0,
+      "first_non_bit_step": null,
+      "first_over_step": null,
+      "max_absolute": 0.0,
+      "max_normalized": 0.0,
+      "max_relative_error_nonzero_oracle": 0.0,
+      "max_relative_error_step": null,
+      "max_step": 1,
+      "non_bit_identical_count": 0,
+      "over_bar_count": 0,
+      "stage": "EXCHANGE_END_STABLE",
+      "variable": "evap_ice"
+    },
+    {
+      "bit_identical_count": 8760,
+      "exact_zero_oracle_non_bit_count": 0,
+      "first_non_bit_step": null,
+      "first_over_step": null,
+      "max_absolute": 0.0,
+      "max_normalized": 0.0,
+      "max_relative_error_nonzero_oracle": 0.0,
+      "max_relative_error_step": null,
+      "max_step": 1,
+      "non_bit_identical_count": 0,
+      "over_bar_count": 0,
+      "stage": "EXCHANGE_END_STABLE",
+      "variable": "devap_ice"
+    },
+    {
+      "bit_identical_count": 8760,
+      "exact_zero_oracle_non_bit_count": 0,
+      "first_non_bit_step": null,
+      "first_over_step": null,
+      "max_absolute": 0.0,
+      "max_normalized": 0.0,
+      "max_relative_error_nonzero_oracle": 0.0,
+      "max_relative_error_step": null,
+      "max_step": 1,
+      "non_bit_identical_count": 0,
+      "over_bar_count": 0,
+      "stage": "EXCHANGE_END_STABLE",
+      "variable": "qns_oce"
+    },
+    {
+      "bit_identical_count": 8760,
+      "exact_zero_oracle_non_bit_count": 0,
+      "first_non_bit_step": null,
+      "first_over_step": null,
+      "max_absolute": 0.0,
+      "max_normalized": 0.0,
+      "max_relative_error_nonzero_oracle": 0.0,
+      "max_relative_error_step": null,
+      "max_step": 1,
+      "non_bit_identical_count": 0,
+      "over_bar_count": 0,
+      "stage": "EXCHANGE_END_STABLE",
+      "variable": "qsr_oce"
+    },
+    {
+      "bit_identical_count": 8760,
+      "exact_zero_oracle_non_bit_count": 0,
+      "first_non_bit_step": null,
+      "first_over_step": null,
+      "max_absolute": 0.0,
+      "max_normalized": 0.0,
+      "max_relative_error_nonzero_oracle": 0.0,
+      "max_relative_error_step": null,
+      "max_step": 1,
+      "non_bit_identical_count": 0,
+      "over_bar_count": 0,
+      "stage": "EXCHANGE_END_STABLE",
+      "variable": "qemp_oce"
+    },
+    {
+      "bit_identical_count": 8760,
+      "exact_zero_oracle_non_bit_count": 0,
+      "first_non_bit_step": null,
+      "first_over_step": null,
+      "max_absolute": 0.0,
+      "max_normalized": 0.0,
+      "max_relative_error_nonzero_oracle": 0.0,
+      "max_relative_error_step": null,
+      "max_step": 1,
+      "non_bit_identical_count": 0,
+      "over_bar_count": 0,
+      "stage": "EXCHANGE_END_STABLE",
+      "variable": "qemp_ice"
+    },
+    {
+      "bit_identical_count": 8760,
+      "exact_zero_oracle_non_bit_count": 0,
+      "first_non_bit_step": null,
+      "first_over_step": null,
+      "max_absolute": 0.0,
+      "max_normalized": 0.0,
+      "max_relative_error_nonzero_oracle": 0.0,
+      "max_relative_error_step": null,
+      "max_step": 1,
+      "non_bit_identical_count": 0,
+      "over_bar_count": 0,
+      "stage": "EXCHANGE_END_STABLE",
+      "variable": "qevap_ice"
+    },
+    {
+      "bit_identical_count": 8760,
+      "exact_zero_oracle_non_bit_count": 0,
+      "first_non_bit_step": null,
+      "first_over_step": null,
+      "max_absolute": 0.0,
+      "max_normalized": 0.0,
+      "max_relative_error_nonzero_oracle": 0.0,
+      "max_relative_error_step": null,
+      "max_step": 1,
+      "non_bit_identical_count": 0,
+      "over_bar_count": 0,
+      "stage": "EXCHANGE_END_STABLE",
+      "variable": "qprec_ice"
+    },
+    {
+      "bit_identical_count": 8760,
+      "exact_zero_oracle_non_bit_count": 0,
+      "first_non_bit_step": null,
+      "first_over_step": null,
+      "max_absolute": 0.0,
+      "max_normalized": 0.0,
+      "max_relative_error_nonzero_oracle": 0.0,
+      "max_relative_error_step": null,
+      "max_step": 1,
+      "non_bit_identical_count": 0,
+      "over_bar_count": 0,
+      "stage": "EXCHANGE_END_STABLE",
+      "variable": "emp_oce"
+    },
+    {
+      "bit_identical_count": 8760,
+      "exact_zero_oracle_non_bit_count": 0,
+      "first_non_bit_step": null,
+      "first_over_step": null,
+      "max_absolute": 0.0,
+      "max_normalized": 0.0,
+      "max_relative_error_nonzero_oracle": 0.0,
+      "max_relative_error_step": null,
+      "max_step": 1,
+      "non_bit_identical_count": 0,
+      "over_bar_count": 0,
+      "stage": "EXCHANGE_END_STABLE",
+      "variable": "wndm_ice"
+    }
+  ],
+  "largest_row": {
+    "bit_identical_count": 5939,
+    "exact_zero_oracle_non_bit_count": 0,
+    "first_non_bit_step": 3,
+    "first_over_step": null,
+    "max_absolute": 2.220446049250313e-16,
+    "max_normalized": 2.220446049250313e-16,
+    "max_relative_error_nonzero_oracle": 4.174974059405097e-16,
+    "max_relative_error_step": 4880,
+    "max_step": 861,
+    "non_bit_identical_count": 2821,
+    "over_bar_count": 0,
+    "stage": "POST_BLK_ICE_1",
+    "variable": "utau_ice"
+  },
+  "non_bit_identical_rows": 16512,
+  "numeric_runtime": {
+    "jax": "0.10.0",
+    "jaxlib": "0.10.0",
+    "numpy": "2.4.4",
+    "python": "3.13.0"
+  },
+  "oracle_version": "V2_SCALAR_MATH",
+  "over_bar_rows": 0,
+  "private_arms": {
+    "numeric_snow_zero_comparison": {
+      "first_affected_step": 5842,
+      "hypothesis": "XLA flushes positive-subnormal h_snow in floating comparison",
+      "over_bar_rows": 35,
+      "status": "REFUTED identity arm"
+    }
+  },
+  "rows": [
+    {
+      "bit_identical_count": 8760,
+      "exact_zero_oracle_non_bit_count": 0,
+      "first_non_bit_step": null,
+      "first_over_step": null,
+      "max_absolute": 0.0,
+      "max_normalized": 0.0,
+      "max_relative_error_nonzero_oracle": 0.0,
+      "max_relative_error_step": null,
+      "max_step": 1,
+      "non_bit_identical_count": 0,
+      "over_bar_count": 0,
+      "stage": "POST_BLK_ICE_1",
+      "variable": "wndm_ice"
+    },
+    {
+      "bit_identical_count": 5939,
+      "exact_zero_oracle_non_bit_count": 0,
+      "first_non_bit_step": 3,
+      "first_over_step": null,
+      "max_absolute": 2.220446049250313e-16,
+      "max_normalized": 2.220446049250313e-16,
+      "max_relative_error_nonzero_oracle": 4.174974059405097e-16,
+      "max_relative_error_step": 4880,
+      "max_step": 861,
+      "non_bit_identical_count": 2821,
+      "over_bar_count": 0,
+      "stage": "POST_BLK_ICE_1",
+      "variable": "utau_ice"
+    },
+    {
+      "bit_identical_count": 5963,
+      "exact_zero_oracle_non_bit_count": 0,
+      "first_non_bit_step": 3,
+      "first_over_step": null,
+      "max_absolute": 5.551115123125783e-17,
+      "max_normalized": 5.551115123125783e-17,
+      "max_relative_error_nonzero_oracle": 4.3087513430746236e-16,
+      "max_relative_error_step": 8720,
+      "max_step": 861,
+      "non_bit_identical_count": 2797,
+      "over_bar_count": 0,
+      "stage": "POST_BLK_ICE_1",
+      "variable": "vtau_ice"
+    },
+    {
+      "bit_identical_count": 8754,
+      "exact_zero_oracle_non_bit_count": 0,
+      "first_non_bit_step": 6196,
+      "first_over_step": null,
+      "max_absolute": 2.220446049250313e-16,
+      "max_normalized": 2.220446049250313e-16,
+      "max_relative_error_nonzero_oracle": 3.405906152206416e-16,
+      "max_relative_error_step": 6320,
+      "max_step": 6320,
+      "non_bit_identical_count": 6,
+      "over_bar_count": 0,
+      "stage": "POST_BLK_ICE_2",
+      "variable": "albedo"
+    },
+    {
+      "bit_identical_count": 8754,
+      "exact_zero_oracle_non_bit_count": 0,
+      "first_non_bit_step": 6196,
+      "first_over_step": null,
+      "max_absolute": 9.466330862652142e-30,
+      "max_normalized": 9.466330862652142e-30,
+      "max_relative_error_nonzero_oracle": 8.4104602317484995e-16,
+      "max_relative_error_step": 6320,
+      "max_step": 6320,
+      "non_bit_identical_count": 6,
+      "over_bar_count": 0,
+      "stage": "POST_BLK_ICE_2",
+      "variable": "qsr_ice"
+    },
+    {
+      "bit_identical_count": 8760,
+      "exact_zero_oracle_non_bit_count": 0,
+      "first_non_bit_step": null,
+      "first_over_step": null,
+      "max_absolute": 0.0,
+      "max_normalized": 0.0,
+      "max_relative_error_nonzero_oracle": 0.0,
+      "max_relative_error_step": null,
+      "max_step": 1,
+      "non_bit_identical_count": 0,
+      "over_bar_count": 0,
+      "stage": "POST_BLK_ICE_2",
+      "variable": "qla_ice"
+    },
+    {
+      "bit_identical_count": 8760,
+      "exact_zero_oracle_non_bit_count": 0,
+      "first_non_bit_step": null,
+      "first_over_step": null,
+      "max_absolute": 0.0,
+      "max_normalized": 0.0,
+      "max_relative_error_nonzero_oracle": 0.0,
+      "max_relative_error_step": null,
+      "max_step": 1,
+      "non_bit_identical_count": 0,
+      "over_bar_count": 0,
+      "stage": "POST_BLK_ICE_2",
+      "variable": "dqla_ice"
+    },
+    {
+      "bit_identical_count": 8760,
+      "exact_zero_oracle_non_bit_count": 0,
+      "first_non_bit_step": null,
+      "first_over_step": null,
+      "max_absolute": 0.0,
+      "max_normalized": 0.0,
+      "max_relative_error_nonzero_oracle": 0.0,
+      "max_relative_error_step": null,
+      "max_step": 1,
+      "non_bit_identical_count": 0,
+      "over_bar_count": 0,
+      "stage": "POST_BLK_ICE_2",
+      "variable": "qns_ice"
+    },
+    {
+      "bit_identical_count": 8760,
+      "exact_zero_oracle_non_bit_count": 0,
+      "first_non_bit_step": null,
+      "first_over_step": null,
+      "max_absolute": 0.0,
+      "max_normalized": 0.0,
+      "max_relative_error_nonzero_oracle": 0.0,
+      "max_relative_error_step": null,
+      "max_step": 1,
+      "non_bit_identical_count": 0,
+      "over_bar_count": 0,
+      "stage": "POST_BLK_ICE_2",
+      "variable": "dqns_ice"
+    },
+    {
+      "bit_identical_count": 4881,
+      "exact_zero_oracle_non_bit_count": 0,
+      "first_non_bit_step": 2,
+      "first_over_step": null,
+      "max_absolute": 1.6940658945086007e-21,
+      "max_normalized": 1.6940658945086007e-21,
+      "max_relative_error_nonzero_oracle": 2.2197992858361858e-16,
+      "max_relative_error_step": 5130,
+      "max_step": 1294,
+      "non_bit_identical_count": 3879,
+      "over_bar_count": 0,
+      "stage": "POST_BLK_ICE_2",
+      "variable": "evap_ice"
+    },
+    {
+      "bit_identical_count": 4908,
+      "exact_zero_oracle_non_bit_count": 0,
+      "first_non_bit_step": 1,
+      "first_over_step": null,
+      "max_absolute": 8.470329472543003e-22,
+      "max_normalized": 8.470329472543003e-22,
+      "max_relative_error_nonzero_oracle": 2.2200335401707282e-16,
+      "max_relative_error_step": 1119,
+      "max_step": 1273,
+      "non_bit_identical_count": 3852,
+      "over_bar_count": 0,
+      "stage": "POST_BLK_ICE_2",
+      "variable": "devap_ice"
+    },
+    {
+      "bit_identical_count": 8760,
+      "exact_zero_oracle_non_bit_count": 0,
+      "first_non_bit_step": null,
+      "first_over_step": null,
+      "max_absolute": 0.0,
+      "max_normalized": 0.0,
+      "max_relative_error_nonzero_oracle": 0.0,
+      "max_relative_error_step": null,
+      "max_step": 1,
+      "non_bit_identical_count": 0,
+      "over_bar_count": 0,
+      "stage": "POST_BLK_ICE_2",
+      "variable": "tprecip"
+    },
+    {
+      "bit_identical_count": 8760,
+      "exact_zero_oracle_non_bit_count": 0,
+      "first_non_bit_step": null,
+      "first_over_step": null,
+      "max_absolute": 0.0,
+      "max_normalized": 0.0,
+      "max_relative_error_nonzero_oracle": 0.0,
+      "max_relative_error_step": null,
+      "max_step": 1,
+      "non_bit_identical_count": 0,
+      "over_bar_count": 0,
+      "stage": "POST_BLK_ICE_2",
+      "variable": "sprecip"
+    },
+    {
+      "bit_identical_count": 8760,
+      "exact_zero_oracle_non_bit_count": 0,
+      "first_non_bit_step": null,
+      "first_over_step": null,
+      "max_absolute": 0.0,
+      "max_normalized": 0.0,
+      "max_relative_error_nonzero_oracle": 0.0,
+      "max_relative_error_step": null,
+      "max_step": 1,
+      "non_bit_identical_count": 0,
+      "over_bar_count": 0,
+      "stage": "POST_BLK_ICE_2",
+      "variable": "emp_oce"
+    },
+    {
+      "bit_identical_count": 6860,
+      "exact_zero_oracle_non_bit_count": 0,
+      "first_non_bit_step": 2,
+      "first_over_step": null,
+      "max_absolute": 1.3552527156068805e-20,
+      "max_normalized": 1.3552527156068805e-20,
+      "max_relative_error_nonzero_oracle": 2.008964945929631e-13,
+      "max_relative_error_step": 6236,
+      "max_step": 6159,
+      "non_bit_identical_count": 1900,
+      "over_bar_count": 0,
+      "stage": "POST_BLK_ICE_2",
+      "variable": "emp_ice"
+    },
+    {
+      "bit_identical_count": 7528,
+      "exact_zero_oracle_non_bit_count": 0,
+      "first_non_bit_step": 2,
+      "first_over_step": null,
+      "max_absolute": 2.710505431213761e-20,
+      "max_normalized": 2.710505431213761e-20,
+      "max_relative_error_nonzero_oracle": 3.176712228670572e-14,
+      "max_relative_error_step": 5510,
+      "max_step": 6159,
+      "non_bit_identical_count": 1232,
+      "over_bar_count": 0,
+      "stage": "POST_BLK_ICE_2",
+      "variable": "emp_tot"
+    },
+    {
+      "bit_identical_count": 8760,
+      "exact_zero_oracle_non_bit_count": 0,
+      "first_non_bit_step": null,
+      "first_over_step": null,
+      "max_absolute": 0.0,
+      "max_normalized": 0.0,
+      "max_relative_error_nonzero_oracle": 0.0,
+      "max_relative_error_step": null,
+      "max_step": 1,
+      "non_bit_identical_count": 0,
+      "over_bar_count": 0,
+      "stage": "POST_BLK_ICE_2",
+      "variable": "qemp_oce"
+    },
+    {
+      "bit_identical_count": 8760,
+      "exact_zero_oracle_non_bit_count": 0,
+      "first_non_bit_step": null,
+      "first_over_step": null,
+      "max_absolute": 0.0,
+      "max_normalized": 0.0,
+      "max_relative_error_nonzero_oracle": 0.0,
+      "max_relative_error_step": null,
+      "max_step": 1,
+      "non_bit_identical_count": 0,
+      "over_bar_count": 0,
+      "stage": "POST_BLK_ICE_2",
+      "variable": "qemp_ice"
+    },
+    {
+      "bit_identical_count": 8760,
+      "exact_zero_oracle_non_bit_count": 0,
+      "first_non_bit_step": null,
+      "first_over_step": null,
+      "max_absolute": 0.0,
+      "max_normalized": 0.0,
+      "max_relative_error_nonzero_oracle": 0.0,
+      "max_relative_error_step": null,
+      "max_step": 1,
+      "non_bit_identical_count": 0,
+      "over_bar_count": 0,
+      "stage": "POST_BLK_ICE_2",
+      "variable": "qns_tot"
+    },
+    {
+      "bit_identical_count": 8754,
+      "exact_zero_oracle_non_bit_count": 0,
+      "first_non_bit_step": 6196,
+      "first_over_step": null,
+      "max_absolute": 9.466330862652142e-30,
+      "max_normalized": 9.466330862652142e-30,
+      "max_relative_error_nonzero_oracle": 7.198613611201066e-16,
+      "max_relative_error_step": 6320,
+      "max_step": 6320,
+      "non_bit_identical_count": 6,
+      "over_bar_count": 0,
+      "stage": "POST_BLK_ICE_2",
+      "variable": "qsr_tot"
+    },
+    {
+      "bit_identical_count": 8760,
+      "exact_zero_oracle_non_bit_count": 0,
+      "first_non_bit_step": null,
+      "first_over_step": null,
+      "max_absolute": 0.0,
+      "max_normalized": 0.0,
+      "max_relative_error_nonzero_oracle": 0.0,
+      "max_relative_error_step": null,
+      "max_step": 1,
+      "non_bit_identical_count": 0,
+      "over_bar_count": 0,
+      "stage": "POST_BLK_ICE_2",
+      "variable": "qprec_ice"
+    },
+    {
+      "bit_identical_count": 8760,
+      "exact_zero_oracle_non_bit_count": 0,
+      "first_non_bit_step": null,
+      "first_over_step": null,
+      "max_absolute": 0.0,
+      "max_normalized": 0.0,
+      "max_relative_error_nonzero_oracle": 0.0,
+      "max_relative_error_step": null,
+      "max_step": 1,
+      "non_bit_identical_count": 0,
+      "over_bar_count": 0,
+      "stage": "POST_BLK_ICE_2",
+      "variable": "qevap_ice"
+    },
+    {
+      "bit_identical_count": 8760,
+      "exact_zero_oracle_non_bit_count": 0,
+      "first_non_bit_step": null,
+      "first_over_step": null,
+      "max_absolute": 0.0,
+      "max_normalized": 0.0,
+      "max_relative_error_nonzero_oracle": 0.0,
+      "max_relative_error_step": null,
+      "max_step": 1,
+      "non_bit_identical_count": 0,
+      "over_bar_count": 0,
+      "stage": "POST_BLK_ICE_2",
+      "variable": "qtr_ice_top"
+    },
+    {
+      "bit_identical_count": 8760,
+      "exact_zero_oracle_non_bit_count": 0,
+      "first_non_bit_step": null,
+      "first_over_step": null,
+      "max_absolute": 0.0,
+      "max_normalized": 0.0,
+      "max_relative_error_nonzero_oracle": 0.0,
+      "max_relative_error_step": null,
+      "max_step": 1,
+      "non_bit_identical_count": 0,
+      "over_bar_count": 0,
+      "stage": "POST_ICE_FLX_OTHER",
+      "variable": "qsb_ice_bot"
+    },
+    {
+      "bit_identical_count": 8747,
+      "exact_zero_oracle_non_bit_count": 0,
+      "first_non_bit_step": 3692,
+      "first_over_step": null,
+      "max_absolute": 7.105427357601002e-15,
+      "max_normalized": 2.1913153259493933e-16,
+      "max_relative_error_nonzero_oracle": 2.1913153259493933e-16,
+      "max_relative_error_step": 5058,
+      "max_step": 5058,
+      "non_bit_identical_count": 13,
+      "over_bar_count": 0,
+      "stage": "POST_ICE_FLX_OTHER",
+      "variable": "fhld"
+    },
+    {
+      "bit_identical_count": 8760,
+      "exact_zero_oracle_non_bit_count": 0,
+      "first_non_bit_step": null,
+      "first_over_step": null,
+      "max_absolute": 0.0,
+      "max_normalized": 0.0,
+      "max_relative_error_nonzero_oracle": 0.0,
+      "max_relative_error_step": null,
+      "max_step": 1,
+      "non_bit_identical_count": 0,
+      "over_bar_count": 0,
+      "stage": "POST_ICE_FLX_OTHER",
+      "variable": "qlead"
+    }
+  ],
+  "scalar_glibc_owner_probe": {
+    "interpretation": "The scalar-libm replay is bit-identical for the three exp-owned outputs; the corresponding JAX differences await the shared library-exact exp precision policy.",
+    "rows": [
+      {
+        "bit_identical_count": 8760,
+        "exact_zero_oracle_non_bit_count": 0,
+        "first_non_bit_step": null,
+        "first_over_step": null,
+        "max_absolute": 0.0,
+        "max_normalized": 0.0,
+        "max_relative_error_nonzero_oracle": 0.0,
+        "max_relative_error_step": null,
+        "max_step": 1,
+        "non_bit_identical_count": 0,
+        "over_bar_count": 0,
+        "stage": "SCALAR_GLIBC_REPLAY",
+        "variable": "albedo"
+      },
+      {
+        "bit_identical_count": 8760,
+        "exact_zero_oracle_non_bit_count": 0,
+        "first_non_bit_step": null,
+        "first_over_step": null,
+        "max_absolute": 0.0,
+        "max_normalized": 0.0,
+        "max_relative_error_nonzero_oracle": 0.0,
+        "max_relative_error_step": null,
+        "max_step": 1,
+        "non_bit_identical_count": 0,
+        "over_bar_count": 0,
+        "stage": "SCALAR_GLIBC_REPLAY",
+        "variable": "qsr_ice"
+      },
+      {
+        "bit_identical_count": 8760,
+        "exact_zero_oracle_non_bit_count": 0,
+        "first_non_bit_step": null,
+        "first_over_step": null,
+        "max_absolute": 0.0,
+        "max_normalized": 0.0,
+        "max_relative_error_nonzero_oracle": 0.0,
+        "max_relative_error_step": null,
+        "max_step": 1,
+        "non_bit_identical_count": 0,
+        "over_bar_count": 0,
+        "stage": "SCALAR_GLIBC_REPLAY",
+        "variable": "qsr_tot"
+      }
+    ],
+    "source": "icealb.F90:124-185; Python math.exp/log call scalar glibc libm"
+  },
+  "scope": {
+    "certified": "ORCA1 constant-coefficient SI3 ice-side bulk arm",
+    "uncertified": [
+      "shipped C1D ECMWF/1.4e-3 arm",
+      "ocean-side NCAR producer"
+    ]
+  },
+  "steps": 8760,
+  "streams": {
+    "bulk": {
+      "bytes": 8374560,
+      "frames": 26280,
+      "path": "/data/abyssal/dbalwada/nemo-testcases-l3/c1d_omip_l3_sasice_scalarmath_v2_a/oracle_si3_bulk_operands.bin",
+      "sha256": "57868f3212646bdf6b0c4add0f48701c0082718331bc76a153050c6d1d44dfe9"
+    },
+    "exchange": {
+      "path": "/data/abyssal/dbalwada/nemo-testcases-l3/c1d_omip_l3_sasice_scalarmath_v2_a/oracle_si3_exchange_frames.bin",
+      "sha256": "091395cf604e83d88fbf458c4ef76ac3df2d5a65dac9cdc502e224cc1d1af2e4"
+    }
+  },
+  "verdict": "AT-BAR"
+}

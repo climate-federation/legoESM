@@ -185,6 +185,10 @@ class IWMConfig(NamedTuple):
     power_sho_wm2: float = 1.0e-10   # uniform fallback [W/m²]
     scale_bot_m: float = 100.0       # uniform fallback [m]
     scale_cri_m: float = 100.0       # uniform fallback [m]
+    # A card that reads real de Lavergne maps sets this, so a host that
+    # forgets to thread them gets a refusal instead of the uniform
+    # constant-power fallback, which is different physics.
+    require_forcing_maps: bool = False
 
 
 class IWMForcing(NamedTuple):

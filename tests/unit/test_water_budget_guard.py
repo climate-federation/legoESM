@@ -28,6 +28,15 @@ class _Sigma:
     sigma_half = jnp.linspace(0.05, 1.0, _NLEV + 1)
     dsigma = jnp.diff(jnp.linspace(0.05, 1.0, _NLEV + 1))
 
+    def pressure_at_full(self, p_s):
+        return p_s[..., None] * self.sigma_full
+
+    def pressure_at_half(self, p_s):
+        return p_s[..., None] * self.sigma_half
+
+    def layer_thickness_dp(self, p_s):
+        return p_s[..., None] * self.dsigma
+
 
 def _build_and_capture(caplog, *, convection, microphysics, cloud_scheme="none"):
     grid = create_cubed_sphere(4)

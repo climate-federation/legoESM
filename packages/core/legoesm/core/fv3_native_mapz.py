@@ -30,7 +30,8 @@ Not ported, each because it is UNREACHABLE rather than merely unused:
     this lane is 9.  :func:`ppm_profile_is_unported` turns that into a
     raise rather than a silent fall-through to the wrong builder.
 ``mapn_tracer``
-    guarded by ``nq > 5`` (``fv_mapz.F90:327``); this deck has nq = 2.
+    (``nq > 5``, ``fv_mapz.F90:327``) ported 2026-09-30 for the nine-slot
+    ice decks -- without its ``fill`` arm, which the lane refuses.
 ``remap_z``/``rst_remap``/``mappm``
     IC / restart / hybrid-z routines, off the timestep path.
 ``compute_total_energy``/``pkez``
@@ -72,6 +73,8 @@ column-local and touches none of the quad-precision geometry helpers of
 ``fv_grid_utils.F90:43-49``.
 """
 from __future__ import annotations
+
+import operator as _operator
 
 import numpy as np
 
@@ -593,8 +596,13 @@ def _build_q4(q1: np.ndarray, pe1: np.ndarray, km: int):
 
 def _rezone(q4: np.ndarray, dp1: np.ndarray, pe1: np.ndarray,
             pe2: np.ndarray, km: int, kn: int,
-            dp2: np.ndarray | None = None) -> np.ndarray:
-    """fv_mapz.F90:1412-1451, and :1715-1754 with ``dp2`` supplied.
+            dp2: np.ndarray | None = None, *,
+            mapn: bool = False) -> np.ndarray:
+    """fv_mapz.F90:1412-1451, and :1715-1754 with ``dp2`` supplied;
+    ``mapn=True`` is :1795-1836 (``mapn_tracer``), the SAME integration
+    with the products associated as that routine writes them --
+    ``fac1 = 0.5*(pr+pl)`` FIRST, then ``(a4+a3-a2)*fac1`` -- which is a
+    rounding-level difference from ``map1_q2``'s ``0.5*(...)*(pr+pl)``.
 
     ``k0`` is a monotone search hint carried ACROSS the target k-loop; it
     is NOT reset per k.  The two cases are written differently on purpose:
@@ -624,25 +632,47 @@ def _rezone(q4: np.ndarray, dp1: np.ndarray, pe1: np.ndarray,
                 if pe2[i, k + 1] <= pe1[i, ell + 1]:
                     # entire target cell inside source cell ell
                     pr = (pe2[i, k + 1] - pe1[i, ell]) / dp1[i, ell]
-                    q2[i, k] = (q4[2, i, ell]
-                                + 0.5 * (q4[4, i, ell] + q4[3, i, ell]
-                                         - q4[2, i, ell]) * (pr + pl)
-                                - q4[4, i, ell] * R3
-                                * (pr * (pr + pl) + pl ** 2))
+                    if mapn:                                 # :1808-1813
+                        fac1 = pr + pl
+                        fac2 = R3 * (pr * fac1 + pl * pl)
+                        fac1 = 0.5 * fac1
+                        q2[i, k] = (q4[2, i, ell]
+                                    + (q4[4, i, ell] + q4[3, i, ell]
+                                       - q4[2, i, ell]) * fac1
+                                    - q4[4, i, ell] * fac2)
+                    else:
+                        q2[i, k] = (q4[2, i, ell]
+                                    + 0.5 * (q4[4, i, ell] + q4[3, i, ell]
+                                             - q4[2, i, ell]) * (pr + pl)
+                                    - q4[4, i, ell] * R3
+                                    * (pr * (pr + pl) + pl ** 2))
                     k0 = ell
                     inside = True
                     break
-                qsum = ((pe1[i, ell + 1] - pe2[i, k])
-                        * (q4[2, i, ell]
-                           + 0.5 * (q4[4, i, ell] + q4[3, i, ell]
-                                    - q4[2, i, ell]) * (1.0 + pl)
-                           - q4[4, i, ell] * (R3 * (1.0 + pl * (1.0 + pl)))))
+                if mapn:                                     # :1818-1824
+                    dp = pe1[i, ell + 1] - pe2[i, k]
+                    fac1 = 1.0 + pl
+                    fac2 = R3 * (1.0 + pl * fac1)
+                    fac1 = 0.5 * fac1
+                    qsum = dp * (q4[2, i, ell]
+                                 + (q4[4, i, ell] + q4[3, i, ell]
+                                    - q4[2, i, ell]) * fac1
+                                 - q4[4, i, ell] * fac2)
+                else:
+                    qsum = ((pe1[i, ell + 1] - pe2[i, k])
+                            * (q4[2, i, ell]
+                               + 0.5 * (q4[4, i, ell] + q4[3, i, ell]
+                                        - q4[2, i, ell]) * (1.0 + pl)
+                               - q4[4, i, ell] * (R3 * (1.0 + pl * (1.0 + pl)))))
                 for m in range(ell + 1, km + 1):
                     if pe2[i, k + 1] > pe1[i, m + 1]:
                         qsum = qsum + dp1[i, m] * q4[1, i, m]
                     else:
                         dp = pe2[i, k + 1] - pe1[i, m]
                         esl = dp / dp1[i, m]
+                        # mapn_tracer :1832-1836 writes fac1 = 0.5*esl,
+                        # fac2 = 1 - r23*esl, dp*(a2 + fac1*(a3-a2+a4*fac2))
+                        # -- the same association as this expression
                         qsum = qsum + dp * (
                             q4[2, i, m] + 0.5 * esl
                             * (q4[3, i, m] - q4[2, i, m]
@@ -707,6 +737,84 @@ def map1_q2(pe1: np.ndarray, q1: np.ndarray, pe2: np.ndarray,
     return _rezone(q4, dp1, pe1, pe2, km, kn, dp2=dp2)
 
 
+def fillz(q: np.ndarray, dp: np.ndarray, km: int) -> np.ndarray:
+    """fv_fill.F90:34-141 (the non-``DEV_GFS_PHYS`` branch the GFDL build
+    compiles), ONE tracer, in place on the 1-based ``(im, km+1)`` layout
+    (``k = 1..km``; column 0 unused): top layer pushes its deficit down,
+    the interior borrows from above then below (sequential in k -- the
+    layer above was just modified), the bottom borrows from above, then
+    any column that was touched gets the non-local rescale of layers
+    2..km (layer 1 EXCLUDED, as the Fortran's ``k=2,km``) when their mass
+    sum is positive.  Called per tracer after ``map1_q2`` (:336) and on
+    every tracer at the end of ``mapn_tracer`` (:1840)."""
+    im = q.shape[0]
+    zfix = np.zeros(im, dtype=bool)
+    # top layer (:68-73)
+    neg = q[:, 1] < 0.0
+    q[neg, 2] = q[neg, 2] + q[neg, 1] * dp[neg, 1] / dp[neg, 2]
+    q[neg, 1] = 0.0
+    # interior (:76-95): the i-loop is independent per i, the k-loop is not
+    for k in range(2, km):
+        neg = q[:, k] < 0.0
+        zfix |= neg
+        up = neg & (q[:, k - 1] > 0.0)
+        dq = np.minimum(q[up, k - 1] * dp[up, k - 1], -q[up, k] * dp[up, k])
+        q[up, k - 1] = q[up, k - 1] - dq / dp[up, k - 1]
+        q[up, k] = q[up, k] + dq / dp[up, k]
+        dn = (q[:, k] < 0.0) & (q[:, k + 1] > 0.0)
+        dq = np.minimum(q[dn, k + 1] * dp[dn, k + 1], -q[dn, k] * dp[dn, k])
+        q[dn, k + 1] = q[dn, k + 1] - dq / dp[dn, k + 1]
+        q[dn, k] = q[dn, k] + dq / dp[dn, k]
+    # bottom layer (:98-110)
+    k = km
+    bt = (q[:, k] < 0.0) & (q[:, k - 1] > 0.0)
+    zfix |= bt
+    qup = q[bt, k - 1] * dp[bt, k - 1]
+    qly = -q[bt, k] * dp[bt, k]
+    dup = np.minimum(qly, qup)
+    q[bt, k - 1] = q[bt, k - 1] - dup / dp[bt, k - 1]
+    q[bt, k] = q[bt, k] + dup / dp[bt, k]
+    # non-local fix (:113-131): layers 2..km of the touched columns
+    for i in np.nonzero(zfix)[0]:
+        dm = q[i, 2:km + 1] * dp[i, 2:km + 1]
+        sum0 = 0.0
+        for v in dm:                       # the Fortran's left-to-right sum
+            sum0 = sum0 + v
+        if sum0 > 0.0:
+            sum1 = 0.0
+            for v in dm:
+                sum1 = sum1 + max(0.0, v)
+            fac = sum0 / sum1
+            q[i, 2:km + 1] = np.maximum(0.0, fac * dm / dp[i, 2:km + 1])
+    return q
+
+
+def mapn_tracer(pe1: np.ndarray, q1: list, pe2: np.ndarray,
+                dp2: np.ndarray, km: int, kords: list,
+                q_min: float, fill: bool = False) -> list:
+    """fv_mapz.F90:1758-1848 -- the nq > 5 tracer remap (:327).
+
+    Per tracer: ``scalar_profile`` (ALWAYS -- unlike ``map1_q2``, which
+    takes ``ppm_profile`` for ``kord <= 7``, :1698-1702) with ``iv=0``
+    and its own ``kord(iq)``, then the integration of ``_rezone`` with
+    ``mapn=True`` (that routine's product association).  The tracers
+    share nothing but ``pe1``/``pe2``/``dp2`` (``k0`` is per column and
+    identical across tracers because the edges are), so this is the
+    per-tracer routine applied in turn.  ``fill``: fillz on every tracer
+    at the end (:1840) -- per tracer here, the same thing.
+    """
+    out = []
+    if len(q1) != len(kords):
+        raise ValueError(f"mapn_tracer: {len(q1)} tracers but {len(kords)} "
+                         "kord entries (zip would silently drop tracers)")
+    for qt, kord in zip(q1, kords):
+        q4, dp1 = _build_q4(qt, pe1, km)
+        scalar_profile(q4, dp1, km, 0, kord, q_min)
+        q2 = _rezone(q4, dp1, pe1, pe2, km, km, dp2=dp2, mapn=True)
+        out.append(fillz(q2, dp2, km) if fill else q2)
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Lagrangian_to_Eulerian -- fv_mapz.F90:62-1080
 # ---------------------------------------------------------------------------
@@ -722,7 +830,8 @@ W_MIN_MAPZ = -60.0
 def _refuse_unported_lane(*, hydrostatic: bool, adiabatic: bool, consv: float,
                           fill: bool, kord_tm: int, do_sat_adj: bool,
                           do_inline_mp: bool, do_adiabatic_init: bool,
-                          nq: int, last_step: bool) -> None:
+                          nq: int, last_step: bool,
+                          defer_close: bool = False) -> None:
     """Reject every configuration whose ``fv_mapz`` branch is not ported.
 
     Each of these is a REAL oracle branch that this port does not carry.
@@ -737,18 +846,24 @@ def _refuse_unported_lane(*, hydrostatic: bool, adiabatic: bool, consv: float,
     # The energy fixer is inside `if (last_step .and. ...)` at :628, so a
     # non-last_step call never reaches it whatever consv says. Refusing it
     # there would be stricter than the oracle, not safer.
-    if last_step and (consv > CONSV_MIN or consv < -CONSV_MIN):
+    if (last_step and (consv > CONSV_MIN or consv < -CONSV_MIN)
+            and not defer_close):
+        # THE FIXER IS PORTED, BUT NOT AS A ONE-CALL OPERATION. Its
+        # dtmp is a global reduction over all six faces and this
+        # function sees one face, so it can only be run through the
+        # two-phase protocol: defer_close=True here, then the caller
+        # reduces and calls close_out_pt. A caller that passes consv
+        # WITHOUT deferring would get the un-fixed answer and no error,
+        # which is the failure this guard now exists to prevent -- it no
+        # longer means "not ported", it means "not like that".
         raise NotImplementedError(
-            f"consv={consv} at last_step: the total-energy fixer "
-            f"(fv_mapz.F90:628-747) is NOT ported. The reference deck pins "
-            f"consv_te=0.0, which leaves dtmp exactly 0. |consv| must be "
-            f"<= {CONSV_MIN}.")
-    # fillz is called at :336, INSIDE the `elseif (nq > 0)` tracer arm
-    # opened at :330 -- with no tracers it is unreachable.
-    if fill and nq > 0:
-        raise NotImplementedError(
-            "fill=True with tracers: fillz (fv_mapz.F90:336) is NOT ported; "
-            "the reference deck pins fill=.F.")
+            f"consv={consv} at last_step without defer_close: the "
+            f"total-energy fixer needs a GLOBAL sum over all six faces "
+            f"(fv_mapz.F90:708, g_sum) and this call sees one. Use "
+            f"defer_close=True, reduce with "
+            f"fv3_native_dynamics.energy_fixer_dtmp, then apply "
+            f"close_out_pt -- which is what fv_dynamics_step does. "
+            f"|consv| <= {CONSV_MIN} keeps the fixer off entirely.")
     if int(kord_tm) >= 0:
         raise NotImplementedError(
             f"kord_tm={kord_tm} >= 0: the positive-kord_tm lane is a "
@@ -762,10 +877,34 @@ def _refuse_unported_lane(*, hydrostatic: bool, adiabatic: bool, consv: float,
             "do_sat_adj / do_inline_mp / do_adiabatic_init: the fast "
             "saturation-adjustment and inline-MP blocks (fv_mapz.F90:"
             "584-625, 748-820, 1010-1078) are NOT ported.")
-    if nq > 5:
-        raise NotImplementedError(
-            f"nq={nq} > 5 selects mapn_tracer (fv_mapz.F90:327), which is "
-            f"NOT ported. The reference deck has nr=2 (ncnst=3, dnats=1).")
+
+
+def close_out_pt(pt, pkz, q, *, sphum_index, r_vir, dtmp, cp,
+                 n: int, ng: int) -> None:
+    """``fv_mapz.F90:975``, in place -- the deferred half of the remap.
+
+    ``pt = (pt + dtmp/cp*pkz) / (1. + r_vir*q(sphum))``, EXACTLY as
+    written, on the HYDROSTATIC arm where :975 is ungated by
+    ``adiabatic``.  Split out of :func:`lagrangian_to_eulerian` because
+    ``dtmp`` is a GLOBAL reduction over all six faces and that function
+    runs one face at a time; see the ``defer_close`` comment there.
+
+    ``dtmp = 0`` and ``r_vir = 0`` make this the identity, and the
+    zero-``dtmp`` branches are kept separate so the certified
+    ``consv_te = 0`` lane keeps its exact expression rather than
+    acquiring an add of a zero.
+    """
+    ia = ng
+    win = (slice(ia, ia + n), slice(ia, ia + n), slice(None))
+    if dtmp == 0.0:
+        if r_vir != 0.0:
+            pt[win] /= (1.0 + r_vir * q[int(sphum_index)][win])
+        return
+    add = pt[win] + dtmp / cp * pkz
+    if r_vir != 0.0:
+        pt[win] = add / (1.0 + r_vir * q[int(sphum_index)][win])
+    else:
+        pt[win] = add
 
 
 def lagrangian_to_eulerian(*, pe, peln, pk, pkz, delp, pt, u, v, ps,
@@ -778,7 +917,7 @@ def lagrangian_to_eulerian(*, pe, peln, pk, pkz, delp, pt, u, v, ps,
                            w=None, delz=None, ws=None, kord_wz=9,
                            w_limiter=False, rdgas=None, grav=None,
                            fill=False, do_sat_adj=False, do_inline_mp=False,
-                           do_adiabatic_init=False):
+                           do_adiabatic_init=False, defer_close=False):
     """``Lagrangian_to_Eulerian`` for ONE face, in place (fv_mapz.F90:62).
 
     Arrays follow ``fv3_native_state_3d``'s layout contract, 0-based
@@ -827,11 +966,22 @@ def lagrangian_to_eulerian(*, pe, peln, pk, pkz, delp, pt, u, v, ps,
             "deck has nr=2 and the oracle makes two passes through "
             "fv_mapz.F90:330-342.")
     nq = len(q)
+    if defer_close and not last_step:
+        # SILENTLY IGNORED BEFORE (GLM MINOR, job 9446300): the
+        # non-last_step arm does `pt /= pkz` (theta_v back-conversion)
+        # regardless, so a caller believing pt was deferred T_v would
+        # then hand theta_v to close_out_pt and get
+        # (theta_v + dtmp/cp*pkz)/... -- garbage, with no error.
+        raise ValueError(
+            "defer_close=True with last_step=False: the fixer lives "
+            "inside `if (last_step)` (fv_mapz.F90:628), so there is "
+            "nothing to defer here, and the non-last_step arm converts "
+            "pt back to theta_v -- which close_out_pt must never see.")
     _refuse_unported_lane(hydrostatic=hydrostatic, adiabatic=adiabatic,
                           consv=consv, fill=fill, kord_tm=kord_tm,
                           do_sat_adj=do_sat_adj, do_inline_mp=do_inline_mp,
                           do_adiabatic_init=do_adiabatic_init, nq=nq,
-                          last_step=last_step)
+                          last_step=last_step, defer_close=defer_close)
     ppm_profile_is_unported(kord_mt)
     ppm_profile_is_unported(abs(int(kord_tm)))
     kords_tr = ([int(kord_tr)] * nq if np.isscalar(kord_tr)
@@ -854,12 +1004,50 @@ def lagrangian_to_eulerian(*, pe, peln, pk, pkz, delp, pt, u, v, ps,
                 "r_vir != 0 needs the tracers for the closing T_v -> T "
                 "conversion (fv_mapz.F90:975). The reference deck is "
                 "adiabatic (driver/solo/atmosphere.F90:156-158, zvir = 0).")
-        if sphum_index is None or not (0 <= int(sphum_index) < len(q)):
+        # int() would COERCE: True -> 1, 1.5 -> 1, "1" -> 1, so the
+        # "never guess the species" guard would admit a bool, a float or
+        # a string and divide by tracer 1 (GLM MINOR, job 9442423).
+        # __index__ accepts int and numpy integers and rejects the rest;
+        # bool has one, so it is excluded by name.
+        # operator.index NORMALISES; the bounds test must then run on
+        # the normalised value, not the original object (codex MINOR,
+        # job 9442482). bool has __index__ too and is excluded by name.
+        _si_in = sphum_index          # keep for the message
+        if isinstance(sphum_index, bool):
+            sphum_index = None
+        else:
+            try:
+                sphum_index = _operator.index(sphum_index)
+            except TypeError:
+                sphum_index = None
+        if sphum_index is None or not 0 <= sphum_index < len(q):
             raise ValueError(
-                f"r_vir != 0 needs sphum_index in [0, {len(q)}) -- "
+                f"r_vir != 0 needs sphum_index an int in [0, {len(q)}) -- "
                 f"fv_mapz.F90:975 uses the explicit sphum argument, and "
                 f"assuming tracer 0 divides by the wrong species. Got "
-                f"{sphum_index!r}.")
+                f"{_si_in!r}.")
+        if not hydrostatic and adiabatic:
+            # fv_mapz.F90:985 -- on the NON-hydrostatic arm the closing
+            # T_v -> T conversion sits inside `if (.not. adiabatic)`, so
+            # with adiabatic=.true. the oracle does NOT convert at all
+            # and pt stays virtual.  This lane always divides, which is
+            # the `.not. adiabatic` branch (:987).  dtmp is initialised
+            # to 0. at :627 and assigned ONLY inside `consv > consv_min`
+            # (:629/:708) and `consv < -consv_min` (:738-741), both of
+            # which this lane refuses, so dtmp is identically 0 and
+            # `(pt + dtmp/cv_air*pkz)/(1+r_vir*q)` reduces EXACTLY to
+            # what is computed here -- cv_air vs cp cannot matter on a
+            # term that is zero.  Refuse the
+            # combination rather than silently running a different branch
+            # of the oracle than the flag names.  (The HYDROSTATIC :975
+            # divide is ungated by adiabatic, which is why this is
+            # NH-only.)
+            raise NotImplementedError(
+                "r_vir != 0 with hydrostatic=False and adiabatic=True: "
+                "the oracle SKIPS the closing T_v -> T conversion there "
+                "(fv_mapz.F90:985) while this lane always divides. Pass "
+                "adiabatic=False -- with consv = 0 the oracle's :987 "
+                "expression is exactly this lane's.")
     if not hydrostatic:
         # fv_mapz.F90:345-419 needs the NH prognostics and the D-stage
         # surface velocity; :460-493 needs rrg = -rdgas/grav (:167).
@@ -987,11 +1175,23 @@ def lagrangian_to_eulerian(*, pe, peln, pk, pkz, delp, pt, u, v, ps,
                 peln1, pad1(pt[ia:ia + n, jd, :]), pn2, km, km,
                 1, abs_kord_tm, T_MIN))
 
-            # :330-343 -- one tracer at a time (nq <= 5 on this lane).
-            for iq in range(nq):
-                q[iq][ia:ia + n, jd, :] = unpad1(map1_q2(
-                    pe1, pad1(q[iq][ia:ia + n, jd, :]), pe2, dp2, km, km,
-                    0, kords_tr[iq], 0.0))   # :335 -- literal 0.
+            # :327-343 -- nq > 5 through mapn_tracer (:328), else one
+            # tracer at a time (:332); both with the literal 0. q_min
+            if nq > 5:
+                qn = mapn_tracer(
+                    pe1, [pad1(q[iq][ia:ia + n, jd, :]) for iq in range(nq)],
+                    pe2, dp2, km, [kords_tr[iq] for iq in range(nq)], 0.0,
+                    fill=fill)
+                for iq in range(nq):
+                    q[iq][ia:ia + n, jd, :] = unpad1(qn[iq])
+            else:
+                for iq in range(nq):
+                    q2 = map1_q2(
+                        pe1, pad1(q[iq][ia:ia + n, jd, :]), pe2, dp2, km,
+                        km, 0, kords_tr[iq], 0.0)    # :335 -- literal 0.
+                    if fill:                          # :336
+                        q2 = fillz(q2, dp2, km)
+                    q[iq][ia:ia + n, jd, :] = unpad1(q2)
 
             # :345-419 -- NH: remap w and delz, then the w_limiter.
             if not hydrostatic:
@@ -1135,7 +1335,15 @@ def lagrangian_to_eulerian(*, pe, peln, pk, pkz, delp, pt, u, v, ps,
     # fv_mapz.F90:627/630) and r_vir is 0 on the adiabatic deck, so the
     # last_step arm is an identity there -- implemented as written so a
     # moist lane is not silently wrong.
-    if last_step:
+    if last_step and defer_close:
+        # THE ENERGY FIXER NEEDS A GLOBAL SUM AND THIS LANE IS PER FACE.
+        # fv_mapz.F90 computes te_2d, reduces it across the domain and
+        # applies dtmp at :975 all inside one call, because there a
+        # "domain" is every tile at once. Here each face is a separate
+        # call, so dtmp cannot be known yet. Leave pt as T_v and let the
+        # caller reduce over the six faces and call close_out_pt.
+        pass
+    elif last_step:
         if r_vir != 0.0:                          # :975, with dtmp == 0
             sphum = q[int(sphum_index)]
             pt[ia:ia + n, ia:ia + n, :] /= (

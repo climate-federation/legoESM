@@ -131,15 +131,60 @@ def main(argv: list[str] | None = None) -> int:
         hard_saturation_adjustment=True)
     hb_base, _st2 = camp.apply_subsidence_solve_override(
         hb_base, "implicit_flux", category="convection")
+    # Each arm is (config, surface_wind_m_s or None for the default 5.0).
+    # The wind arms answer the boundary-condition question directly: SAM's
+    # surface fluxes are driven by resolved gusts (no imposed mean wind), and
+    # our fixed 5 m/s is the surrogate — wind2/wind8 bracket it so the
+    # sensitivity of the equilibrium surface state to that choice is MEASURED.
     arm_cfgs = {
-        "control": base,
-        "entrainment": _with_louis_override(
+        "control": (base, {}),
+        "entrainment": (_with_louis_override(
             base, cloudtop_entrainment_efficiency=args.entrainment_efficiency),
-        "coare3": _with_louis_override(base, bulk_scheme="coare3"),
-        "hb": hb_base,
+            {}),
+        "coare3": (_with_louis_override(base, bulk_scheme="coare3"), {}),
+        "hb": (hb_base, {}),
         # The downdraft pair: emanuel without and with the ported shaft.
-        "emanuel_ctl": dd_base,
-        "downdraft": dd_cfg,
+        "emanuel_ctl": (dd_base, {}),
+        "downdraft": (dd_cfg, {}),
+        "wind2": (base, {"surface_wind_m_s": 2.0}),
+        "wind8": (base, {"surface_wind_m_s": 8.0}),
+        # Review-driven arms (codex adversarial pass on the verdict):
+        # f0: RCEMIP is NONROTATING with a freely evolving wind; the control
+        # pins the column to a 5 m/s geostrophic target through f=2.5e-5.
+        # coriolis_s_inv=0 disables the whole Coriolis+geostrophic block
+        # (scm_forcing.py guards on f_c != 0), giving the protocol-relevant
+        # dynamical BC in one variable.
+        "f0": (base, {"coriolis_s_inv": 0.0}),
+        # nosatadj: hard saturation adjustment is ON in the control and is a
+        # nonlinear regulator of a 93%-RH surface layer that had no arm.
+        "nosatadj": (camp.apply_subsidence_solve_override(
+            camp.make_physics_config(
+                # args.scheme, NOT a hardcoded one: the control runs whatever
+                # --scheme selects, so hardcoding here changes the convection
+                # scheme AND the saturation adjustment, and any difference
+                # would be read as a saturation-adjustment effect.
+                radiation="rrtmgp", convection=args.scheme,
+                turbulence="louis", microphysics="morrison",
+                hard_saturation_adjustment=False),
+            "implicit_flux", category="convection")[0], {}),
+        # subs: large-scale subsidence ships OFF ("none"); the CRM-derived
+        # clear-sky subsidence is the one-variable alternative.
+        "subs": (base, {"large_scale_forcing": "crm_clear_sky_subsidence"}),
+        # f0_coare3: the corrected-protocol CANDIDATE CONFIGURATION -- two
+        # variables at once (nonrotating AND a different flux law), so it is
+        # not a one-variable arm and cannot on its own attribute anything to
+        # the boundary condition. f0 alone did that. f0 alone fixed the
+        # surface state (dqv +6.20 -> +1.37) but the wind spins down and E
+        # collapses to 0.70 vs the CRM's 2.73 - SAM carries its fluxes on
+        # convective gusts. COARE3's w* gustiness supplies exactly that flux
+        # wind independent of the mean wind. PRE-REGISTERED: if E recovers
+        # substantially while the surface stays near the f0 state, the pair
+        # (f=0, coare3 gustiness) is the defensible SCM-RCEMIP configuration
+        # and the campaign should be re-run on it; if E stays collapsed, the
+        # gust source must come from convection itself (cold pools) and no
+        # bulk-scheme fix suffices.
+        "f0_coare3": (_with_louis_override(base, bulk_scheme="coare3"),
+                      {"coriolis_s_inv": 0.0}),
     }
 
     results = {}
@@ -153,9 +198,10 @@ def main(argv: list[str] | None = None) -> int:
     if unknown:
         raise SystemExit(f"unknown arms {unknown}; known={sorted(arm_cfgs)}")
     for arm in _arm_list:
-        cfg = arm_cfgs[arm]
+        cfg, extra_kw = arm_cfgs[arm]
         run = camp.run_cached(
             cache, cfg, ref, label=f"blqv:{arm}", days=args.days, dt=args.dt,
+            **extra_kw,
             analysis_days=args.analysis_days, require_equilibrium=False,
             require_realism=False, equil_T_tol_K=camp.EQUIL_T_TOL_K,
             equil_qv_tol=camp.EQUIL_QV_TOL,
@@ -179,6 +225,9 @@ def main(argv: list[str] | None = None) -> int:
             "evap": run.evap_mm_day,
             "precip": run.precip_mm_day,
             "thermo": run.thermo_score,
+            # Equilibrium evidence (review finding: the probe discarded it).
+            "drift_T_rmse_K": run.drift_T_rmse_K,
+            "drift_qv_rmse": run.drift_qv_rmse,
         }
         results[arm] = rec
         print(f"{arm:12s} dqv sfc {rec['dqv_sfc']:+6.2f}  "
@@ -188,7 +237,8 @@ def main(argv: list[str] | None = None) -> int:
               f"SST-Ta {rec['sfc_dT']:+5.2f}  E {rec['evap']:.2f}  "
               f"P {rec['precip']:.2f}  thermo {rec['thermo']:.3f}")
 
-    print("\nCRM: RH 0.752, SST-Ta 3.06 K, E 2.73 mm/day; biases should -> 0.")
+    print(f"\nCRM: RH 0.752, SST-Ta 3.06 K, E {ref.evap_ref_mm_day:.2f} "
+          f"mm/day ({ref.evap_ref_note}); biases should -> 0.")
     if args.out is not None:
         args.out.parent.mkdir(parents=True, exist_ok=True)
         args.out.write_text(json.dumps(

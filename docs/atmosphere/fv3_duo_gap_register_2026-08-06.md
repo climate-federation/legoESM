@@ -2,16 +2,26 @@
 
 Answers one question: **do we still have gaps for a faithful FV3 duo grid?**
 
-Oracle = the Zenodo 8327578 `symmetryclean` Fortran tree. Two copies are on
-this machine and the SW-relevant files are byte-identical (md5-verified):
+Oracle = the Zenodo 8327578 `symmetryclean` Fortran tree.
 
-| path | contents |
-|---|---|
-| `Code/FV3/duogrid_symmetryclean/.../` | partial: `dyn_core`, `sw_core`, `tp_core`, `a2b_edge`, `fv_grid_utils`, `fv_duogrid` |
-| `fv3_recon/duo_model/atmos_cubed_sphere-symmetryclean/` | **full tree** — also `fv_dynamics`, `fv_mapz`, `nh_core`, `nh_utils`, `fv_arrays`, `test_cases` |
+> **CORRECTION 2026-08-13.** The original text of this section said two copies
+> exist and are byte-identical, and told the reader to cite the
+> `fv3_recon/duo_model/` copy. Both statements are wrong, and they corrupted two
+> line numbers in this document (see the barrier citations below). There are
+> **three** copies, and `dyn_core.F90` differs between them:
+>
+> | path | `dyn_core.F90` | status |
+> |---|---|---|
+> | `fv3_oracle_pinned/atmos_cubed_sphere-symmetryclean/` | md5 `e5a5fab9…`, 3128 lines | **THE oracle** — the tree the verbatim extracts and `full_step_oracle_parity.py` cite |
+> | `Code/FV3/duogrid_symmetryclean/.../` | md5 `e5a5fab9…`, 3128 lines | identical to the pinned tree; partial (no 3-D outer layer) |
+> | `fv3_recon/duo_model/atmos_cubed_sphere-symmetryclean/` | md5 `0a5df09a…`, **3230 lines** | **INSTRUMENTED working copy, +102 lines** — do not cite |
+>
+> `sw_core.F90` IS byte-identical across all three (md5 `9e30c61d…`), so every
+> `sw_core` citation in this document stands. `dyn_core.F90` is not, so
+> `dyn_core` citations had to be re-derived. **Cite the pinned tree.**
 
-Use the **full** tree. The partial one is missing every 3-D outer-layer file, so
-`fv_dynamics.F90:NNN` citations cannot be checked against it.
+The pinned tree is the full tree: it carries `fv_dynamics`, `fv_mapz`,
+`nh_core`, `nh_utils`, `fv_arrays`, `test_cases` as well as the SW core.
 
 The oracle also ships **reference solutions**, in
 `Code/FV3/duogrid_zenodo/extracted/Code and simulations files/` — 43 run

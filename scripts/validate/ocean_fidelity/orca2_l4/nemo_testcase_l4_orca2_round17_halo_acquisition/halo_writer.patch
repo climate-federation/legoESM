@@ -1,0 +1,58 @@
+--- dynspg_ts.F90
++++ dynspg_ts.F90
+@@ -154,6 +154,6 @@
+       INTEGER  ::   ji, jj, jk, jn        ! dummy loop indices
+       INTEGER  ::   l2_unit, l2_ios, l2_drag_unit, l2_drag_ios, l2_adv_unit, l2_adv_ios
+-      INTEGER  ::   l2_ord_unit, l2_ord_ios
++      INTEGER  ::   l2_ord_unit, l2_ord_ios, l4_halo_unit, l4_halo_ios
+       LOGICAL  ::   ll_fw_start           ! =T : forward integration 
+       LOGICAL  ::   ll_init               ! =T : special startup of 2d equations
+ LOGICAL, SAVE :: ll_bt_av    ! =T : boxcard time averaging   =F : foreward backward dissipation
+@@ -197,6 +197,7 @@
+       CHARACTER(LEN=96) :: l2_drag_filename
+       CHARACTER(LEN=96) :: l2_adv_filename
+       CHARACTER(LEN=96) :: l2_ord_filename
++      CHARACTER(LEN=96) :: l4_halo_filename
+       CHARACTER(LEN=16) :: l2_magic
+       REAL(wp) ::   zttide   ! Time of day for tidal updates
+       !!----------------------------------------------------------------------
+@@ -601,7 +602,18 @@
+          IF( l2_ord_ios /= 0 )   CALL ctl_stop( 'cannot open lane2 ordered barotropic trace' )
+          l2_magic = 'NEMO_L2_BTORD_2'
+          WRITE(l2_ord_unit) l2_magic, 2, kt, 2, jpi, jpj, STORAGE_SIZE(1._wp), rDt_e
+       ENDIF
++      ! Round-17 WRITE-only per-rank stream.  Unlike l4_canon_2d, this keeps
++      ! both halo columns so the two live operands of the continuity
++      ! subtraction can be scored.  It never assigns a model operand.
++      IF( kt == nit000 ) THEN
++         WRITE(l4_halo_filename,'("oracle_bt_halo_operands_kt",I8.8,"_r",I4.4,".bin")') kt, narea - 1
++         OPEN( NEWUNIT=l4_halo_unit, FILE=TRIM(l4_halo_filename), ACCESS='STREAM', FORM='UNFORMATTED', &
++            & STATUS='REPLACE', ACTION='WRITE', IOSTAT=l4_halo_ios )
++         IF( l4_halo_ios /= 0 )   CALL ctl_stop( 'cannot open lane4 barotropic halo trace' )
++         l2_magic = 'NEMO_L4_BTHALO1'
++         WRITE(l4_halo_unit) l2_magic, 1, kt, 2, narea - 1, jpi, jpj, STORAGE_SIZE(1._wp)
++      ENDIF
+ 
+       !                                             ! ==================== !
+       DO jn = 1, icycle                             !  sub-time-step loop  !
+@@ -732,6 +743,10 @@
+             ENDIF
+             ssha_e(ji,jj) = (  sshn_e(ji,jj) - rDt_e * ( ssh_frc(ji,jj) + zhdiv )  ) * ssmask(ji,jj)
+          END_2D
++         IF( kt == nit000 .AND. jn <= 2 ) THEN
++            WRITE(l4_halo_unit) jn
++            WRITE(l4_halo_unit) zhU, e2u, ua_e, zhup2_e, ssumask
++         ENDIF
+          !
+          ! Duplicate sea level across open boundaries (this is only cosmetic if linssh=T)
+          IF( ln_bdy )   CALL bdy_ssh( ssha_e )
+@@ -1022,5 +1037,9 @@
+          WRITE(numout,*) 'LANE2_BT_ORDERED_DUMP ', kt, 2, TRIM(l2_ord_filename)
+       ENDIF
++      IF( kt == nit000 ) THEN
++         CLOSE(l4_halo_unit)
++         WRITE(numout,*) 'LANE4_BT_HALO_DUMP ', kt, 2, narea - 1, TRIM(l4_halo_filename)
++      ENDIF
+       ! Finalize sums:
+       ! (Divide by weights sums here to prevent from truncation errors)
+       un_adv(:,:) = un_adv(:,:) / r1_wgt2s 

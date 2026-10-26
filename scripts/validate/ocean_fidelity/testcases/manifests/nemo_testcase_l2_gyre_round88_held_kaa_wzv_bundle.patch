@@ -1,0 +1,554 @@
+diff --git a/packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py b/packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py
+index cd26ce6442c0..36982e8ececb 100644
+--- a/packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py
++++ b/packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py
+@@ -4780,6 +4780,12 @@ class LatLonCGridOceanModel:
+         _cfg_b = self.config if config is None else config  # SPMD band override
+         if self._nemo_ws_test_hooks.omit_barotropic_substep_drag:
+             _cfg_b = _cfg_b._replace(barotropic_drag_substep=False)
++        if (getattr(_cfg_b, "momentum_time_integrator", "euler") == "rk3_ws"
++                and (state.uu_b is not None or state.vv_b is not None)
++                and state.eta_rk3_kaa is None):
++            raise ValueError(
++                "NEMO_RK3_KAA_SSH_REQUIRED: WS-RK3 state/restart lacks "
++                "the pre-solve ssh(Kaa) scratch (NEMO restart variable ssha)")
+         state = cast_pytree(state, None, "compute")
+         # ``_ab2_scope_override`` (private): the leap-frog step (``_leapfrog_step``)
+         # drives this method in "advective" scope to WITHHOLD the dissipative
+@@ -4881,7 +4887,8 @@ class LatLonCGridOceanModel:
+         # rebuilt its own min-of-stretched-T pair.  ``None`` (every other
+         # integrator) keeps that historical min rule.
+         _ws_face_thickness_kbb = None
+-        if getattr(_cfg_b, "momentum_time_integrator", "euler") == "rk3_ws":
++        if (getattr(_cfg_b, "momentum_time_integrator", "euler") == "rk3_ws"
++                and state.eta_rk3_kaa is not None):
+             # NEMO's e3u/e3v(Kbb) = e3u_0*(1+r3u(Kbb)) for the step-entry
+             # dyn_adv (stp2d.F90:172 -> dynadv_up3.F90:160; the same pair
+             # stage 1 consumes through zFu at stprk3_stg.F90:273-274), from
+@@ -6385,19 +6392,9 @@ class LatLonCGridOceanModel:
+                     stage_face_thickness=_face_thickness_kbb, stage_index=1)
+                 _du1_rhs = _du1_rhs + (_p0_with_zub[0] - _p0_no_zub[0])
+                 _dv1_rhs = _dv1_rhs + (_p0_with_zub[1] - _p0_no_zub[1])
+-            # stp2d materializes stage-1 WZV before dyn_zad. The external
+-            # solve makes that stage transport available only at this point,
+-            # so replace the ZAD association without changing earlier terms.
+-            _p0_with_zad = _mom_pert_ws(
+-                u0, v0, False, None,
+-                stage_face_thickness=_face_thickness_kbb,
+-                stage_zad_operands=(_g0[2], _g0[4], _g0[5]),
+-                stage_index=1)
+-            _p0_without_zad = _mom_pert_ws(
+-                u0, v0, False, None,
+-                stage_face_thickness=_face_thickness_kbb, stage_index=1)
+-            _du1_rhs = _du1_rhs + (_p0_with_zad[0] - _p0_without_zad[0])
+-            _dv1_rhs = _dv1_rhs + (_p0_with_zad[1] - _p0_without_zad[1])
++            # stp2d.F90:155-175 consumes the pre-solve WZV in dyn_zad before
++            # dyn_spg_ts runs.  The later _g0 transport feeds tracers; the
++            # executing vector branch has no second stage-one WZV call.
+             # Stage 1: Kmm = Kbb, so the RHS carries (1 + r3u(Kbb)).
+             _u1_rhs = _du1_rhs if _vert0 is None else _du1_rhs + _vert0[0]
+             _v1_rhs = _dv1_rhs if _vert0 is None else _dv1_rhs + _vert0[1]
+@@ -8287,6 +8284,16 @@ class LatLonCGridOceanModel:
+                 eta=state_new.eta.replace(data=_eta_pin),
+             )
+ 
++        if getattr(_cfg_b, "momentum_time_integrator", "euler") == "rk3_ws":
++            # stprk3.F90:222-226, after the stage-3 Naa/Nbb swap: the freed
++            # old-Kbb slot becomes the next whole step's pre-solve Kaa scratch.
++            # Keep both source statements materialized, as in the compiled
++            # assignment ``ssh(Kaa) = 2*ssh(Kbb) - ssh(Kaa)``.
++            eta_kaa_next = nemo_source_round(
++                nemo_source_round(2.0 * state_new.eta.data) - state.eta.data)
++            state_new = state_new._replace(
++                eta_rk3_kaa=state.eta_rk3_kaa.replace(data=eta_kaa_next))
++
+         # Private oracle-fidelity seam: NEMO's stage dumps are written inside
+         # stprk3_stg immediately after each instantaneous Kaa update.  Expose
+         # stages 1/2 only after the ordinary step has completed so the
+diff --git a/packages/ocean/legoesm/ocean/dynamics/ocean_pe_latlon_cgrid.py b/packages/ocean/legoesm/ocean/dynamics/ocean_pe_latlon_cgrid.py
+index 62caa7024ec0..d5894795a444 100644
+--- a/packages/ocean/legoesm/ocean/dynamics/ocean_pe_latlon_cgrid.py
++++ b/packages/ocean/legoesm/ocean/dynamics/ocean_pe_latlon_cgrid.py
+@@ -1653,8 +1653,9 @@ def nemo_qco_wzv_operands(
+         # sensitive to those last bits through the vertical recurrence.
+         safe_e3t = jnp.where(tmask[..., jk] > 0.5, live_t[..., jk], 1.0)
+         hdiv = jax.lax.optimization_barrier(transport_div / safe_e3t)
+-        level = jax.lax.optimization_barrier(
+-            live_t[..., jk] * hdiv) * tmask[..., jk]
++        # divhor.F90 stores pe3divUh as a distinct source statement after the
++        # division; keep that materialization alive through optimized HLO.
++        level = nemo_source_round(live_t[..., jk] * hdiv) * tmask[..., jk]
+         flux_levels.append(level)
+         barotropic_div = jax.lax.optimization_barrier(barotropic_div + level)
+     flux_div = jnp.stack(flux_levels, axis=-1)
+@@ -1669,23 +1670,24 @@ def nemo_qco_wzv_operands(
+     else:
+         eta_after = jax.lax.optimization_barrier(
+             jnp.asarray(eta_after_override, dtype=eta_now.dtype)) * tmask[..., 0]
+-    r3_after = jax.lax.optimization_barrier(eta_after * r1_h0)
+-    r3_before = jax.lax.optimization_barrier(eta_before * r1_h0)
+-    r3_delta = jax.lax.optimization_barrier(r3_after - r3_before)
+-    r1_dt = jax.lax.optimization_barrier(
++    eta_wzv_before = eta_now if eta_after_override is not None else eta_before
++    r3_after = nemo_source_round(eta_after * r1_h0)
++    r3_before = nemo_source_round(eta_wzv_before * r1_h0)
++    r3_delta = nemo_source_round(r3_after - r3_before)
++    r1_dt = nemo_source_round(
+         jnp.asarray(1.0, dtype=eta_now.dtype) / dt)
+-    stretch_rate = jax.lax.optimization_barrier(
+-        (r1_dt * e3t0) * r3_delta[..., None])
++    stretch_rate = nemo_source_round(
++        nemo_source_round(r1_dt * e3t0) * r3_delta[..., None])
+ 
+     # sshwzv.F90 bottom-up left recurrence.  A static Python loop preserves
+     # source ordering under JIT and remains differentiable.
+     carry = jnp.zeros_like(eta_now)
+     levels = [None] * nlev
+     for jk in range(nlev - 1, -1, -1):
+-        bracket = jax.lax.optimization_barrier(
++        bracket = nemo_source_round(
+             flux_div[..., jk] + stretch_rate[..., jk])
+-        carry = jax.lax.optimization_barrier(
+-            carry - bracket * tmask[..., jk])
++        carry = nemo_source_round(
++            carry - nemo_source_round(bracket * tmask[..., jk]))
+         levels[jk] = carry
+     ww = jnp.stack(levels + [jnp.zeros_like(carry)], axis=-1)
+     return ww, live_u, live_v
+@@ -4769,10 +4771,19 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
+             z_coord.is_active.astype(eta.dtype)
+             if isinstance(z_coord, OceanPartialCellCoordinate)
+             else mask_3d)
++        # stp2d.F90 runs before dyn_spg_ts and hands sshwzv the separately
++        # carried Kaa scratch.  Only WS-RK3 states own this slot.
++        eta_kaa_field = getattr(state, "eta_rk3_kaa", None)
++        eta_kaa_override = (
++            eta_kaa_field.data
++            if (getattr(config, "momentum_time_integrator", "euler")
++                == "rk3_ws" and eta_kaa_field is not None)
++            else None)
+         zad_w, zad_h_u, zad_h_v = _nemo_qco_zad_operands(
+             eta, eta_before, u, v, grid, z_coord, u_mask_3d, v_mask_3d,
+             qco_tmask_3d, qco_dt,
+             freshwater_eta_tendency=zad_freshwater_eta_tendency,
++            eta_after_override=eta_kaa_override,
+         )
+         # The W/H pair is a materialized NEMO stage boundary.  Without these
+         # barriers XLA fuses the full tendency graph back through continuity;
+diff --git a/packages/ocean/legoesm/ocean/fidelity/nemo_io.py b/packages/ocean/legoesm/ocean/fidelity/nemo_io.py
+index 0b7538498b83..45b96333d609 100644
+--- a/packages/ocean/legoesm/ocean/fidelity/nemo_io.py
++++ b/packages/ocean/legoesm/ocean/fidelity/nemo_io.py
+@@ -121,6 +121,7 @@ class NemoState(NamedTuple):
+     rhd: np.ndarray | None = None  # in-situ density anomaly, if dumped
+     uu_b: np.ndarray | None = None  # restart uu_n = depth-mean U at Kbb
+     vv_b: np.ndarray | None = None  # restart vv_n = depth-mean V at Kbb
++    ssh_kaa: np.ndarray | None = None  # restart ssha = next pre-solve Kaa
+ 
+ 
+ def _check_hls(nn_hls: int) -> None:
+@@ -254,6 +255,8 @@ def read_nemo_restart(path: str, *, nn_hls: int = 1) -> NemoState:
+               if has_uu_b else None),
+         vv_b=(_strip_halo_2d(np.asarray(r["vv_n"].values).squeeze(), nn_hls)
+               if has_vv_b else None),
++        ssh_kaa=(_strip_halo_2d(np.asarray(r["ssha"].values).squeeze(), nn_hls)
++                 if "ssha" in r else None),
+     )
+ 
+ 
+diff --git a/packages/ocean/legoesm/ocean/fidelity/nemo_state_bridge.py b/packages/ocean/legoesm/ocean/fidelity/nemo_state_bridge.py
+index a46b1cb2a86a..56b6dde06186 100644
+--- a/packages/ocean/legoesm/ocean/fidelity/nemo_state_bridge.py
++++ b/packages/ocean/legoesm/ocean/fidelity/nemo_state_bridge.py
+@@ -869,6 +869,7 @@ def bridge_nemo_to_legoesm_topo(
+         land_mask_override=jnp.asarray(land_mask),
+         H_bathy_override=jnp.asarray(H_bathy.astype(np.float64)),
+         nemo_prognostic_barotropic_velocity=True,
++        nemo_rk3_ssh_scratch=(state.ssh_kaa is not None),
+     )
+ 
+     # Surface face masks from NEMO umask/vmask (periodic-wrap for re-entrant i).
+@@ -904,6 +905,9 @@ def bridge_nemo_to_legoesm_topo(
+         eta=base.eta.replace(data=jnp.asarray(state.ssh)),
+         uu_b=base.uu_b.replace(data=jnp.asarray(uu_b_face)),
+         vv_b=base.vv_b.replace(data=jnp.asarray(vv_b_face)),
++        eta_rk3_kaa=(
++            base.eta_rk3_kaa.replace(data=jnp.asarray(state.ssh_kaa))
++            if base.eta_rk3_kaa is not None else None),
+         u_mask=base.u_mask.replace(data=jnp.asarray(umask_face)),
+         v_mask=base.v_mask.replace(data=jnp.asarray(vmask_face)),
+     )
+diff --git a/packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py b/packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py
+index c3cb668a28e0..56b9a6f488dd 100644
+--- a/packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py
++++ b/packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py
+@@ -613,6 +613,7 @@ def _native_initial_state(
+         land_mask_override=surface_wet,
+         H_bathy_override=bathymetry,
+         nemo_prognostic_barotropic_velocity=True,
++        nemo_rk3_ssh_scratch=True,
+     )
+     active = jnp.asarray(z_coord.is_active) & surface_wet[..., None]
+     temperature = jnp.where(x_km[..., None] <= front_km, cold, warm)
+@@ -835,6 +836,7 @@ def build_gyre_zco_card() -> NEMOTestcaseCard:
+         land_mask_override=wet,
+         H_bathy_override=bathymetry,
+         nemo_prognostic_barotropic_velocity=True,
++        nemo_rk3_ssh_scratch=True,
+     )
+     t_profile, s_profile = _gyre_initial_profiles(_GYRE_GDEPT_1D[:30])
+     active = np.asarray(z_coord.is_active)
+diff --git a/packages/ocean/legoesm/ocean/init_latlon_cgrid.py b/packages/ocean/legoesm/ocean/init_latlon_cgrid.py
+index 8d5b2c5eb5f0..71bb7a34bd3f 100644
+--- a/packages/ocean/legoesm/ocean/init_latlon_cgrid.py
++++ b/packages/ocean/legoesm/ocean/init_latlon_cgrid.py
+@@ -114,6 +114,7 @@ def rest_state_latlon_cgrid_ocean(
+     H_bathy_override: jnp.ndarray | None = None,
+     stratification: str = "exponential",
+     nemo_prognostic_barotropic_velocity: bool = False,
++    nemo_rk3_ssh_scratch: bool = False,
+ ) -> LatLonCGridOceanState:
+     """Create a rest-state initial condition on a C-grid lat-lon grid.
+ 
+@@ -164,6 +165,10 @@ def rest_state_latlon_cgrid_ocean(
+         the depth mean of zero 3-D velocity and copies Kbb to Kmm, hence exact
+         zero.  Non-NEMO recipes leave the pair as ``None`` and gain no array
+         pytree leaves.
++    nemo_rk3_ssh_scratch : bool, default False
++        Allocate NEMO WS-RK3's separately carried pre-solve ``ssh(Kaa)``
++        scratch.  NEMO cold starts copy ``ssh(Kbb)`` into this slot; both are
++        zero in this rest-state constructor.  Non-WS recipes leave it absent.
+ 
+     Returns
+     -------
+@@ -275,6 +280,9 @@ def rest_state_latlon_cgrid_ocean(
+                     name="vv_b", dims=dims_v2d, units="m/s",
+                     staggering="edge")
+               if nemo_prognostic_barotropic_velocity else None),
++        eta_rk3_kaa=(Field(data=zeros_2d, name="eta_rk3_kaa",
++                          dims=dims_2d, units="m")
++                     if nemo_rk3_ssh_scratch else None),
+     )
+ 
+ 
+diff --git a/packages/ocean/legoesm/ocean/restart.py b/packages/ocean/legoesm/ocean/restart.py
+index 8b6c3299f51e..9e521b5d13dd 100644
+--- a/packages/ocean/legoesm/ocean/restart.py
++++ b/packages/ocean/legoesm/ocean/restart.py
+@@ -277,6 +277,8 @@ _SLOT_POLICY: dict[str, str] = {
+     # 175-182 writes Kbb uu_n/vv_n; :304-314 reads it).  This is live input to
+     # the next external-mode window and S-21 transport, never diagnostic.
+     "uu_b": _SLOT_PROGNOSTIC, "vv_b": _SLOT_PROGNOSTIC,
++    # NEMO WS-RK3 pre-solve Kaa SSH scratch (restart ``ssha``).
++    "eta_rk3_kaa": _SLOT_PROGNOSTIC,
+     # SOM (Prather) advection moments — carried by the scheme.
+     "T_som": _SLOT_PROGNOSTIC, "S_som": _SLOT_PROGNOSTIC,
+     # AB2 tracer-advection history.
+@@ -1685,6 +1687,15 @@ def load_run_restart(path: str | Path, template_state, *,
+             meta, in_path, grid_type=grid_type, dt_seconds=dt_seconds,
+             n_forcing_records=n_forcing_records,
+             config_fingerprint=config_fingerprint)
++        if getattr(template_state, "eta_rk3_kaa", None) is not None:
++            inventory = meta.get("inventory") or {}
++            if (inventory.get("eta_rk3_kaa") != _INV_PERSISTED
++                    or "eta_rk3_kaa" not in meta["slots"]
++                    or "eta_rk3_kaa" not in payload_keys):
++                raise ValueError(
++                    "NEMO_RK3_KAA_SSH_REQUIRED: the restart lacks the "
++                    "persisted pre-solve RK3 Kaa SSH scratch; refusing to "
++                    "resume by silently substituting ssh(Kbb) or zero.")
+         _validate_payload_keys(meta, payload_keys, in_path)
+         _validate_run_layout(template_state, meta["slots"],
+                              meta.get("inventory"), meta.get("state_class"),
+diff --git a/packages/ocean/legoesm/ocean/state.py b/packages/ocean/legoesm/ocean/state.py
+index 0c6e5953d77e..f1e6fa7b89b1 100644
+--- a/packages/ocean/legoesm/ocean/state.py
++++ b/packages/ocean/legoesm/ocean/state.py
+@@ -533,6 +533,10 @@ class LatLonCGridOceanState(NamedTuple):
+         the current whole-step ``Kbb`` values and are populated only by cards
+         selecting the NEMO WS-RK3 identity.  ``None`` on every other recipe
+         means the pair contributes no array leaves to its pytree.
++    eta_rk3_kaa : Field or None
++        NEMO WS-RK3's pre-solve ``ssh(Kaa)`` scratch.  This is distinct from
++        the prognostic ``eta``/``ssh(Kbb)`` and is consumed by the next
++        whole-step stage-one WZV before the external-mode solve.
+     T_som : Field or None
+         SOM (Prather 1986) moments for temperature. Shape (n_lat, n_lon, nlev, 9).
+         Order: [sx, sy, sz, sxx, syy, szz, sxy, sxz, syz].
+@@ -559,6 +563,9 @@ class LatLonCGridOceanState(NamedTuple):
+     # default so non-NEMO recipes gain no array pytree leaf.
+     uu_b: object = None
+     vv_b: object = None
++    # restart.F90 writes this slot as ``ssha`` and stp2d.F90 consumes it before
++    # dyn_spg_ts overwrites Kaa.  It is present only on NEMO WS-RK3 states.
++    eta_rk3_kaa: object = None
+     T_som: object = None
+     S_som: object = None
+     T_flux_div_prev: object = None  # Previous advection flux divergence for T (AB2 only)
+diff --git a/scripts/validate/ocean_fidelity/testcases/nemo_testcase_l2_gyre_round88_kaa_scratch.py b/scripts/validate/ocean_fidelity/testcases/nemo_testcase_l2_gyre_round88_kaa_scratch.py
+new file mode 100644
+index 000000000000..4cc858610039
+--- /dev/null
++++ b/scripts/validate/ocean_fidelity/testcases/nemo_testcase_l2_gyre_round88_kaa_scratch.py
+@@ -0,0 +1,164 @@
++#!/usr/bin/env python3
++"""Prove the carried GYRE WS-RK3 Kaa SSH and its stage-one W/ZAD consumer."""
++
++from __future__ import annotations
++
++import argparse
++import json
++import sys
++from pathlib import Path
++from types import SimpleNamespace
++
++import jax
++import jax.numpy as jnp
++import numpy as np
++
++HERE = Path(__file__).resolve().parent
++if str(HERE) not in sys.path:
++    sys.path.insert(0, str(HERE))
++
++import nemo_testcase_l2_gyre_phase3_gate as gate  # noqa: E402
++import nemo_testcase_l2_gyre_round46_kt2_stage_gate as round46  # noqa: E402
++import nemo_testcase_l2_gyre_round72_tracer_stage as round72  # noqa: E402
++import nemo_testcase_l2_gyre_round83_slow_forcing_walk as round83  # noqa: E402
++import nemo_testcase_l2_gyre_round84_rhs_walk as round84  # noqa: E402
++import nemo_testcase_l2_gyre_round86_zad_operands as round86  # noqa: E402
++import nemo_testcase_l2_gyre_round87_wzv_inputs as round87  # noqa: E402
++from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy  # noqa: E402
++from legoesm.ocean.fidelity.provenance import worktree_stamp  # noqa: E402
++
++ROOT = Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3")
++
++
++def require(condition: bool, message: str) -> None:
++    if not condition:
++        raise RuntimeError(message)
++
++
++def _confirmed(rows: dict[str, dict[str, object]]) -> bool:
++    return bool(rows) and all(bool(row["bit_exact"]) for row in rows.values())
++
++
++def measure(args) -> dict[str, object]:
++    set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
++    require(get_policy() == PrecisionPolicy.fp64(transcendentals="libm"),
++            "precision changed")
++    require(bool(jax.config.jax_enable_x64), "JAX x64 is disabled")
++    require(not bool(jax.config.jax_disable_jit), "production JIT is disabled")
++    stamp = worktree_stamp()
++    require(stamp["clean"], "Round-88 measurement worktree is dirty")
++    require(stamp["commit"].lower() == args.expect_commit.lower(),
++            "Round-88 commit stamp mismatch")
++
++    stage, _ = round83._admit_round64(args)
++    arrays = stage["arrays"]
++    base, context = round72._capture_seeded_context(SimpleNamespace(
++        expect_commit=args.expect_commit,
++        expect_krhs_commit=args.expect_krhs_commit,
++        output=args.prerequisite_output,
++    ))
++    require(base["status"] == "MEASURED", "kt=2 seeded context changed")
++    card, seeded, _, _, live_step = context
++    require(seeded.eta_rk3_kaa is not None, "production state lacks Kaa scratch")
++
++    oracle = round87._oracle_trace(arrays)
++    oracle.update(round87._oracle_scalar_boundaries(arrays))
++    masks = gate.expected_masks(card)
++    active = {
++        "u": np.asarray(masks["u"], bool),
++        "v": np.asarray(masks["v"], bool),
++        "t": np.asarray(masks["T"], bool),
++    }
++    active_w = round87._active("ww", active)
++    scratch = np.asarray(seeded.eta_rk3_kaa.data)
++    direct_w = np.asarray(jax.device_get(jax.jit(
++        lambda: round87._direct_production_w(
++            card, seeded, live_step, seeded.eta_rk3_kaa.data))()))
++    captured_w = np.asarray(live_step.operator_operands[0]["operand_zad_w"])
++
++    split = round46._split_view(arrays)
++    zad_u, zad_v = round86._replay_with(
++        split, {"ww": round86._inject_owned(
++            split["ww"], captured_w[..., :30], nlev=30)})
++    candidates = {
++        "carried_kaa_ssh": scratch,
++        "direct_shared_w": direct_w,
++        "captured_stage1_w": captured_w,
++        "zad_u": round83.owned3(zad_u),
++        "zad_v": round83.owned3(zad_v),
++    }
++    references = {
++        "carried_kaa_ssh": np.asarray(oracle["eta_kaa"]),
++        "direct_shared_w": np.asarray(oracle["ww"]),
++        "captured_stage1_w": np.asarray(oracle["ww"]),
++        "zad_u": round83.owned3(np.asarray(arrays["after_zad_u"])),
++        "zad_v": round83.owned3(np.asarray(arrays["after_zad_v"])),
++    }
++    actives = {
++        "carried_kaa_ssh": active["t"][..., 0],
++        "direct_shared_w": active_w,
++        "captured_stage1_w": active_w,
++        "zad_u": active["u"],
++        "zad_v": active["v"],
++    }
++
++    plant_detail = None
++    if args.plant:
++        target = {
++            "scratch-ulp": "carried_kaa_ssh",
++            "w-ulp": "captured_stage1_w",
++            "zad-u-ulp": "zad_u",
++        }[args.plant]
++        changed, at = round84._away_one_ulp(
++            references[target], candidates[target], actives[target])
++        references[target] = changed
++        plant_detail = {"field": target, "location": list(at)}
++
++    rows = {
++        name: round87._row(candidates[name], references[name], actives[name],
++                           name=name)
++        for name in candidates
++    }
++    confirmed = _confirmed(rows)
++    if args.plant:
++        require(not confirmed, f"{args.plant} differential control was invisible")
++        status = "PLANT_FIRED"
++    else:
++        status = "CONFIRMED" if confirmed else "REFUTED"
++    return {
++        "format": "nemo-testcase-l2-gyre-round88-kaa-scratch-v1",
++        "status": status,
++        "worktree": stamp,
++        "round64_admission_status": "PASS",
++        "rows": rows,
++        "first_nonbit_statement": next(
++            (name for name, row in rows.items() if not row["bit_exact"]), None),
++        "prediction_confirmed": confirmed,
++        "plant": args.plant,
++        "plant_detail": plant_detail,
++    }
++
++
++def main(argv=None) -> int:
++    parser = argparse.ArgumentParser(description=__doc__)
++    parser.add_argument("--expect-commit", required=True)
++    parser.add_argument("--expect-krhs-commit", required=True)
++    parser.add_argument("--round64-root", type=Path,
++                        default=ROOT / "round64/oracle_krhs_split")
++    parser.add_argument("--round46-root", type=Path,
++                        default=ROOT / "round46/oracle_kt2_stage")
++    parser.add_argument("--round64-admission", type=Path,
++                        default=ROOT / "round64/oracle_krhs_split/round64_admission.json")
++    parser.add_argument("--prerequisite-output", type=Path, required=True)
++    parser.add_argument("--output", type=Path, required=True)
++    parser.add_argument("--plant", choices=("scratch-ulp", "w-ulp", "zad-u-ulp"))
++    args = parser.parse_args(argv)
++    report = measure(args)
++    args.output.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
++    print(json.dumps(report, indent=2, sort_keys=True))
++    print("ROUND88_KAA_SCRATCH", report["status"])
++    return 1 if args.plant or report["status"] != "CONFIRMED" else 0
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())
+diff --git a/tests/ocean/fidelity/test_nemo_testcase_l2_gyre_round88_kaa_scratch.py b/tests/ocean/fidelity/test_nemo_testcase_l2_gyre_round88_kaa_scratch.py
+new file mode 100644
+index 000000000000..7cbb336e8b5e
+--- /dev/null
++++ b/tests/ocean/fidelity/test_nemo_testcase_l2_gyre_round88_kaa_scratch.py
+@@ -0,0 +1,24 @@
++"""Direct controls for the Round-88 carried-Kaa proof."""
++
++from __future__ import annotations
++
++import importlib.util
++from pathlib import Path
++
++SCRIPT = (Path(__file__).parents[3] / "scripts/validate/ocean_fidelity/testcases"
++          / "nemo_testcase_l2_gyre_round88_kaa_scratch.py")
++SPEC = importlib.util.spec_from_file_location("round88_kaa_scratch", SCRIPT)
++assert SPEC is not None and SPEC.loader is not None
++ROUND88 = importlib.util.module_from_spec(SPEC)
++SPEC.loader.exec_module(ROUND88)
++
++
++def test_confirmation_requires_every_registered_boundary_to_be_bit_exact():
++    rows = {"scratch": {"bit_exact": True}, "w": {"bit_exact": True}}
++    assert ROUND88._confirmed(rows)
++    rows["w"]["bit_exact"] = False
++    assert not ROUND88._confirmed(rows)
++
++
++def test_empty_boundary_set_cannot_confirm_vacuously():
++    assert not ROUND88._confirmed({})
+diff --git a/tests/ocean/unit/test_nemo_testcase_recipe.py b/tests/ocean/unit/test_nemo_testcase_recipe.py
+index 53ae8d887c32..df3a16afef4f 100644
+--- a/tests/ocean/unit/test_nemo_testcase_recipe.py
++++ b/tests/ocean/unit/test_nemo_testcase_recipe.py
+@@ -114,7 +114,12 @@ def test_lane1_cards_carry_oracle_w_grid_thicknesses():
+ 
+ def test_gyre_card_selects_complete_resolved_operator_program():
+     set_policy(PrecisionPolicy.fp64())
+-    cfg = build_gyre_zco_card().recipe.model_config
++    recipe = build_gyre_zco_card().recipe
++    cfg = recipe.model_config
++    assert recipe.initial_state.eta_rk3_kaa is not None
++    np.testing.assert_array_equal(
++        np.asarray(recipe.initial_state.eta_rk3_kaa.data),
++        np.asarray(recipe.initial_state.eta.data))
+     assert cfg.momentum_advection == "vector_invariant"
+     assert cfg.vorticity_scheme == "ene_total"
+     assert cfg.ke_gradient_scheme == "c2"
+@@ -152,6 +157,16 @@ def test_gyre_card_selects_complete_resolved_operator_program():
+     assert cfg.barotropic_drag_substep is True
+ 
+ 
++def test_nemo_rk3_state_without_kaa_ssh_fails_with_named_message():
++    set_policy(PrecisionPolicy.fp64())
++    recipe = build_gyre_zco_card().recipe
++    model = LatLonCGridOceanModel(
++        recipe.grid, recipe.z_coord, recipe.model_config)
++    missing = recipe.initial_state._replace(eta_rk3_kaa=None)
++    with pytest.raises(ValueError, match="NEMO_RK3_KAA_SSH_REQUIRED"):
++        model._step_impl(missing, 1.0)
++
++
+ def test_gyre_rk3_evd_uses_step_entry_for_both_n2_arms():
+     set_policy(PrecisionPolicy.fp64())
+     card = build_gyre_zco_card()
+diff --git a/tests/ocean/unit/test_ocean_run_restart.py b/tests/ocean/unit/test_ocean_run_restart.py
+index f64b1a88875b..8d25f30589eb 100644
+--- a/tests/ocean/unit/test_ocean_run_restart.py
++++ b/tests/ocean/unit/test_ocean_run_restart.py
+@@ -112,6 +112,7 @@ _SLOT_KIND = {
+     "u_before": "field", "v_before": "field", "T_before": "field",
+     "S_before": "field", "eta_before": "field",
+     "uu_b": "field", "vv_b": "field",
++    "eta_rk3_kaa": "field",
+     "F_slow_u_prev": "field", "F_slow_v_prev": "field",
+     # NOT Fields: raw arrays / tuple-of-arrays that save_restart drops silently.
+     # The centred-forcing trio mirrors OceanSurfaceForcing.tau_x/tau_y and the
+@@ -461,6 +462,19 @@ def test_truncated_archive_is_a_hard_error(tmp_path):
+         load_run_restart(path, _base_state()[2], grid_type="latlon")
+ 
+ 
++def test_nemo_rk3_restart_without_kaa_ssh_fails_with_named_message(tmp_path):
++    """A WS-RK3 continuation may not silently cold-seed NEMO's ``ssha``."""
++    grid, z_coord, state = _base_state()
++    path = tmp_path / "pre_kaa_slot.npz"
++    save_run_restart(path, state, step=2, time_days=1.0, grid_type="latlon")
++    ws_template = rest_state_latlon_cgrid_ocean(
++        grid, z_coord, T_water_init_C=12.0, T_deep=2.0, S_uniform=35.0,
++        H_max=H_MAX, nemo_prognostic_barotropic_velocity=True,
++        nemo_rk3_ssh_scratch=True)
++    with pytest.raises(ValueError, match="NEMO_RK3_KAA_SSH_REQUIRED"):
++        load_run_restart(path, ws_template, grid_type="latlon")
++
++
+ def test_static_geometry_mismatch_is_a_hard_error(tmp_path):
+     """A resume whose bathymetry/mask differs from the writing leg is a
+     confound, not a continuation."""

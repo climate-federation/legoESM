@@ -145,7 +145,7 @@ backend / bits    cpu / 64
         --forcing-path /data/COBE-SST2.nc
 ```
 
-Convection and turbulence stay at `run_amip.py`'s defaults (`sbm` / `none`); pass
+Convection and turbulence stay at `run_amip.py`'s defaults (`tiedtke` / `louis`); pass
 extra flags to change them. The Gaussian grid forces 64-bit (spectral transform).
 
 ### AIMIP — ML-emulated physics

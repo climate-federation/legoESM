@@ -320,9 +320,11 @@ class TestSpectralRollout:
         diff = float(jnp.max(jnp.abs(out_a.T_hat.data - out_b.T_hat.data)))
         assert diff > 1e-14, "prescribed SST did not reach the rollout physics"
 
-    def test_forcing_with_rad_gating_raises(self):
-        """forcing_base + rad-gating is the classical AMIP combination and
-        must be rejected here (spectral_amip_rollout owns it)."""
+    def test_forcing_reaches_a_subcycled_radiation_call(self):
+        """Sub-cycled radiation plus a forcing dict is the CLASSICAL TRAINING
+        combination and used to be refused outright — which left every such
+        run with no prescribed surface temperature and a fixed equinox-noon
+        sun.  The prescribed field must now reach the radiation call."""
         from legoesm.training.neural_gcm_spectral import (
             carry_to_spectral_state,
             make_sfno_spectral_physics,
@@ -334,13 +336,53 @@ class TestSpectralRollout:
         state = carry_to_spectral_state(carry, _GRID)
         physics_fn = make_sfno_spectral_physics(_make_small_sfno(), _GRID)
         pe_config = SpectralPEConfig(time_integrator="ssp_rk3")
-        with pytest.raises(ValueError, match="forcing_base"):
-            spectral_rollout(
-                state, physics_fn, _GRID, _SIGMA, pe_config,
-                dt=1800.0, n_steps=1,
-                rad_physics_fn=physics_fn, rad_update_interval=4,
-                forcing_base=self._forcing_base(),
-            )
+        seen = []
+
+        def rad_fn(s, g, sc, *, sim_time_seconds=0.0, forcing=None):
+            seen.append(forcing)
+            return physics_fn(s, g, sc)
+
+        out = spectral_rollout(
+            state, physics_fn, _GRID, _SIGMA, pe_config,
+            dt=1800.0, n_steps=1,
+            rad_physics_fn=rad_fn, rad_update_interval=4,
+            forcing_base=self._forcing_base(),
+        )
+        assert jnp.all(jnp.isfinite(out.T_hat.data))
+        assert seen and seen[0] is not None
+        assert "T_sfc" in seen[0] and "day_of_year" in seen[0]
+
+    def test_a_radiation_callable_without_a_forcing_kwarg_still_runs(self):
+        """Legacy signature (sim_time_seconds but no forcing): it must keep
+        its elapsed-time thread rather than silently fall back to a call that
+        drops it."""
+        from legoesm.training.neural_gcm_spectral import (
+            carry_to_spectral_state,
+            make_sfno_spectral_physics,
+            spectral_rollout,
+        )
+        from legoesm.atmosphere.dynamics.gcm.spectral_pe import SpectralPEConfig
+
+        carry = _make_gaussian_carry()
+        state = carry_to_spectral_state(carry, _GRID)
+        physics_fn = make_sfno_spectral_physics(_make_small_sfno(), _GRID)
+        pe_config = SpectralPEConfig(time_integrator="ssp_rk3")
+        seen = []
+
+        def rad_fn(s, g, sc, *, sim_time_seconds=0.0):
+            seen.append(sim_time_seconds)
+            return physics_fn(s, g, sc)
+
+        spectral_rollout(
+            state, physics_fn, _GRID, _SIGMA, pe_config,
+            dt=1800.0, n_steps=1,
+            rad_physics_fn=rad_fn, rad_update_interval=4,
+            sim_time_offset_seconds=7200.0,
+        )
+        # A non-zero offset: the no-kwargs fallback would report 0.0, so this
+        # fails if the call degrades to the signature-less form (codex).
+        assert seen, "the legacy radiation callable was never called"
+        assert float(seen[0]) == pytest.approx(7200.0)
 
 
 # ---------------------------------------------------------------------------
@@ -634,6 +676,125 @@ class TestPhysicsParamsSpectral:
         # At least some grads should be non-zero
         has_nonzero = any(g != 0 for g in grads.raw_values.values())
         assert has_nonzero, "All physics param gradients are zero"
+
+
+    # --- no-inert gate: judged on the rollout loss the loop trains -------
+    @staticmethod
+    def _params(names):
+        from legoesm.training.trainable_params import (
+            DEFAULT_TRAINABLE, TrainablePhysicsParams,
+        )
+        return TrainablePhysicsParams.from_defaults(
+            [c for c in DEFAULT_TRAINABLE if c.name in names])
+
+    @staticmethod
+    def _ic():
+        from legoesm.training.neural_gcm_spectral import carry_to_spectral_state
+        return carry_to_spectral_state(_make_gaussian_carry(T_val=280.0), _GRID)
+
+    def _gate_run(self, names, heat, tmp_path):
+        """Run ``_train_spectral_loop`` (gate on) with a toy physics whose T
+        tendency on the global-mean mode is ``heat(p, T_hat_mean)``; two
+        dycore steps, scored against a warmer target."""
+        from legoesm.atmosphere.dynamics.gcm.spectral_pe import SpectralPEConfig
+        from legoesm.training.losses import LossConfig
+        from legoesm.training.neural_gcm_spectral import (
+            NeuralGCMSpectralConfig, _train_spectral_loop,
+        )
+        params, ic = self._params(names), self._ic()
+
+        def mk(p, grid_):
+            d = p.as_dict()
+
+            def physics_fn(state, g, s, forcing=None):
+                tend = jax.tree.map(jnp.zeros_like, state)
+                amp = heat(d, state.T_hat.data[0, 0].real)
+                return tend._replace(T_hat=jax.tree.map(
+                    lambda x: x.at[0].add(amp), tend.T_hat))
+            return physics_fn
+
+        cfg = NeuralGCMSpectralConfig(
+            n_max=N_MAX, n_levels=NLEV, dt=1800.0,
+            pe_config=SpectralPEConfig(time_integrator="ssp_rk3"),
+            n_epochs=1, lr=1e-4, warmup_steps=0,
+            loss_config=LossConfig(multi_step_hours=(1,),
+                                   multi_step_weights=(1.0,)),
+            log_every=1, checkpoint_dir=str(tmp_path))
+        _train_spectral_loop(
+            params, mk, _GRID, _SIGMA, [ic],
+            [(_make_gaussian_carry(T_val=282.0),)], cfg,
+            assert_no_inert_params=True)
+        return params, mk, ic
+
+    @staticmethod
+    def _proxy_grads(params, mk, ic):
+        """The retired gate's probe: d/dp of sum |physics output|^2 at the IC."""
+        def probe(p):
+            out = mk(p, _GRID)(ic, _GRID, _SIGMA)
+            return sum(jnp.sum(jnp.abs(x) ** 2) for x in
+                       jax.tree.leaves(eqx.filter(out, eqx.is_inexact_array)))
+        return eqx.filter_grad(probe)(params).raw_values
+
+    def test_no_inert_gate_keeps_a_param_that_acts_later_in_the_rollout(
+            self, tmp_path):
+        """sbm_RH_ref acts only once the heating from sbm_tau_c has warmed the
+        state past a threshold, i.e. after the first stage: zero at the IC,
+        live in the rollout loss.  The gate must keep it."""
+        names = ("sbm_tau_c", "sbm_RH_ref")
+        p0 = {k: float(v) for k, v in self._params(names).as_dict().items()}
+        ic_T = float(self._ic().T_hat.data[0, 0].real)
+        rate = 1.0e-3                 # T_hat[0] units per second
+
+        def heat(d, T_mean):
+            late = jnp.where(T_mean > ic_T + 0.5 * rate * 1800.0,
+                             rate * d["sbm_RH_ref"] / p0["sbm_RH_ref"], 0.0)
+            return rate * d["sbm_tau_c"] / p0["sbm_tau_c"] + late
+
+        params, mk, ic = self._gate_run(names, heat, tmp_path)
+        # the retired probe saw nothing: it would have aborted this run
+        assert float(self._proxy_grads(params, mk, ic)["sbm_RH_ref"]) == 0.0
+
+    def test_no_inert_gate_is_not_fooled_by_a_squared_output_at_zero(
+            self, tmp_path):
+        """Tendency proportional to (p - p0): its square has zero derivative
+        at p0, yet the rollout loss depends on p.  The gate must keep it."""
+        p0 = float(self._params(("albedo_ocean",)).as_dict()["albedo_ocean"])
+
+        def heat(d, T_mean):
+            return 1.0e-2 * (d["albedo_ocean"] - p0)
+
+        params, mk, ic = self._gate_run(("albedo_ocean",), heat, tmp_path)
+        assert float(self._proxy_grads(params, mk, ic)["albedo_ocean"]) == 0.0
+
+    def test_no_inert_gate_rejects_a_param_the_loss_never_reads(self, tmp_path):
+        def heat(d, T_mean):
+            return 1.0e-3 * d["sbm_tau_c"]                  # C_H never read
+
+        with pytest.raises(ValueError, match="C_H"):
+            self._gate_run(("sbm_tau_c", "C_H"), heat, tmp_path)
+
+    def test_trainer_trains_only_consumed_params(self, monkeypatch):
+        """Executed: the trainer hands the loop only the consumed parameters."""
+        from legoesm.training import neural_gcm_spectral as ngs
+        from legoesm.training.neural_gcm_spectral import (
+            NeuralGCMSpectralConfig, carry_to_spectral_state,
+        )
+        state = carry_to_spectral_state(
+            _make_gaussian_carry(T_val=300.0, q_v_val=0.02), _GRID)
+        seen = {}
+        monkeypatch.setattr(
+            ngs, "load_training_data",
+            lambda *a, **k: ([state], [None], [None]))
+        monkeypatch.setattr(
+            ngs, "_train_spectral_loop",
+            lambda params, *a, **k: seen.update(params=params, kw=k))
+        ngs.train_physics_params_spectral(
+            NeuralGCMSpectralConfig(n_max=N_MAX, n_levels=NLEV,
+                                    sigma_top=0.1, dt=1800.0))
+        assert set(seen["params"].raw_values) == set(
+            ngs.SPECTRAL_PHYSICS_TRAINABLE)
+        # ...and turns on the loop's rollout-loss no-inert gate.
+        assert seen["kw"].get("assert_no_inert_params") is True
 
 
 class TestAreaWeightedLoss:

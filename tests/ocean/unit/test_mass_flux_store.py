@@ -1014,7 +1014,7 @@ def test_core2_scan_block_seeds_its_own_carry(monkeypatch):
     block = oa.build_omip2_scan_block_fn(
         model, _DT, np.asarray(state.eta.data).shape)
     dummy = jnp.zeros((1,))
-    out = block(p, dummy, dummy, dummy,
+    out = block(p, dummy, dummy, dummy, None,
                 jnp.arange(2, dtype=jnp.int32), jnp.int32(0))
     for nm in _NEW_SLOTS:
         f = getattr(out, nm)
@@ -1369,7 +1369,36 @@ def test_store_mass_flux_is_the_last_config_field():
     # appended; each addition extends this tuple (a deliberate, visible
     # edit).  store_salt_flux was appended after store_mass_flux (the
     # exact-salt gateway instrument), preserving every earlier position.
-    tail = ("store_mass_flux", "store_salt_flux")
+    # ``zdf_implicit_solver_evaluation`` was appended by ``d80df3ed7``; the
+    # earlier two slots retain their positions immediately before it.
+    # The NEMO ORCA2 lane then appended its 23 card-selected statement
+    # switches, every one defaulting to the previous behaviour.
+    tail = ("store_mass_flux", "store_salt_flux",
+            "zdf_implicit_solver_evaluation",
+            "een_fold_image_v_row",
+            "rk3_stage1_ssh_nemo_literal",
+            "rk3_stage1_rhs_nemo_literal",
+            "rk3_stage_velocity_written_order",
+            "een_vorticity_written_order",
+            "zdf_barotropic_removal_nemo_literal",
+            "zdf_momentum_nemo_face_thickness",
+            "rk3_fold_exchange_top_v_row",
+            "rk3_stage_r3f_nemo_literal",
+            "rk3_stage_r3t_nemo_literal",
+            "nemo_eos_gdept_rounded_product",
+            "rk3_stage_r3uv_nemo_literal",
+            "zdf_tracer_nemo_rounded_thickness",
+            "barotropic_rhs_ascending_level_sum",
+            "zdf_momentum_stage_r3u_nemo_literal",
+            "een_nemo_relative_vorticity",
+            "een_nemo_top_f_u_halo",
+            "barotropic_wind_nemo_stored_depth",
+            "surface_stress_nemo_fold_vector_sign",
+            "zdf_surface_stress_nemo_face_thickness",
+            "rk3_stage_tracer_written_order",
+            "rk3_stage3_heat_nemo_written",
+            "rk3_stage3_tracer_nemo_stored_thickness",
+            )
     assert fields[-len(tail):] == tail, (
         f"config tail is {fields[-len(tail):]}, expected {tail}; a new field "
         "must be APPENDED, never inserted -- positional callers break "

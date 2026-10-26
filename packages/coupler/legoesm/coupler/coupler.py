@@ -16,9 +16,12 @@ import jax.numpy as jnp
 from legoesm import constants
 from legoesm.core.precision import get_policy
 from legoesm.core.bulk_flux import (
-    simple_bulk_fluxes, compute_most_fluxes, apply_gustiness,
+    simple_bulk_fluxes, compute_most_fluxes, compute_sam_oceflx_fluxes,
+    surface_reference_state,
+    apply_gustiness,
     ocean_surface_q_sat,
 )
+from legoesm.land.canopy.config import CLMMLCanopyConfig
 from legoesm.land.multilayer_land import init_multilayer_land_state
 from legoesm.land.surface_params import reshape_params
 from legoesm.surface_albedo import ocean_albedo as compute_ocean_albedo
@@ -41,7 +44,7 @@ from legoesm.core.coupling_fields import (
 # The saturation vapor pressure over saline water is ~2 % lower than over
 # fresh water; q_sat at the air-sea interface is correspondingly reduced.
 # Required by OMIP-2 protocol (Griffies 2016 §2.2 → Large & Yeager 2009 §3).
-_Q_SAT_SALINE_FACTOR = 0.98
+_Q_SAT_SALINE_FACTOR = constants.q_sat_saline_fraction
 from legoesm.coupler.lake import LakeConfig, LakeState, step_lake
 from legoesm.coupler.tile_fractions import (
     blend_tiles,
@@ -307,7 +310,8 @@ def ocean_tile_response(
         )
     rho = forcing.rho_lowest
 
-    valid_schemes = ("constant", "most", "coare3", "large_yeager")
+    valid_schemes = ("constant", "most", "coare3", "large_yeager",
+                     "large_yeager_cesm")
     if config.bulk_scheme not in valid_schemes:
         raise ValueError(
             f"Unknown coupler bulk_scheme {config.bulk_scheme!r}; "
@@ -327,18 +331,32 @@ def ocean_tile_response(
         thermo_convention=_thermo_conv, bulk_scheme=config.bulk_scheme,
         saline_factor=_Q_SAT_SALINE_FACTOR)
 
-    if _is_most:
+    # Model-level forcing: surface-referenced air T paired with its own height
+    # (same convention as land and the atmosphere surface layer, #1818).
+    # Observed forcing (z_lowest None) keeps the configured heights.
+    T_air, z_air = surface_reference_state(
+        forcing.T_lowest, config.z_ref, forcing.z_lowest)
+    model_level = forcing.z_lowest is not None
+    if config.bulk_scheme == "large_yeager_cesm":
+        # CESM/CIME shr_flux_atmOcn: wind relative to the surface current,
+        # lowest-level height as CESM's ``zbot``.
+        tau_x, tau_y, shflx, lhflx, _ = compute_sam_oceflx_fluxes(
+            forcing.u_lowest - ocean_u, forcing.v_lowest - ocean_v,
+            T_air, forcing.q_lowest, ocean_sst, q_sfc, rho,
+            z_bot=z_air, variant="cesm", t_bot=forcing.T_lowest,
+        )
+    elif _is_most:
         # Use wind relative to ocean surface current
         u_rel = forcing.u_lowest - ocean_u
         v_rel = forcing.v_lowest - ocean_v
         tau_x, tau_y, shflx, lhflx, _ = compute_most_fluxes(
             u_rel, v_rel,
-            forcing.T_lowest, forcing.q_lowest,
+            T_air, forcing.q_lowest,
             ocean_sst, q_sfc,
             rho,
-            z_ref=config.z_ref,
-            z_t=config.z_t_atm,
-            z_q=config.z_q_atm,
+            z_ref=z_air,
+            z_t=z_air if model_level else config.z_t_atm,
+            z_q=z_air if model_level else config.z_q_atm,
             z0_init=config.ocean_z0,
             scheme=config.bulk_scheme,
             n_iter=config.bulk_n_iter,
@@ -393,10 +411,15 @@ def ocean_tile_response(
     # — same per-coupler-step micro-optimisation as the loop-18 lake
     # rewrite.
     _ssh_dtype = ocean_sst.dtype
-    # Ocean tile freshwater: P − E, where evap is back-derived from
-    # lhflx using L_v (ocean is liquid, never sublimes).  Positive =
-    # freshwater INTO ocean.
-    evap_rate = lhflx / constants.L_v   # kg/m²/s, positive = up (ocean → atm)
+    # Ocean tile freshwater: P − E, where evap is back-derived from lhflx
+    # with the SAME latent heat the flux used (ocean is liquid, never
+    # sublimes): Kirchhoff L_v(SST) for the MOST and constant laws
+    # (core.bulk_flux), the constant L_v for the CESM shr_flux_atmOcn port,
+    # which charges its oracle's constant (thermo.charged_latent_heat).
+    # Positive = freshwater INTO ocean.
+    from legoesm.thermo import charged_latent_heat
+    # kg/m²/s, positive = up (ocean → atm)
+    evap_rate = lhflx / charged_latent_heat(config.bulk_scheme, ocean_sst)
     freshwater_flux = forcing.precip_total - evap_rate
     return TileResponse(
         T_sfc=ocean_sst,
@@ -422,8 +445,7 @@ def ocean_tile_response(
         # tau_x/tau_y) — back-reaction is the ice tile's job.
         ocean_stress_x=jnp.zeros(shape, dtype=_ssh_dtype),
         ocean_stress_y=jnp.zeros(shape, dtype=_ssh_dtype),
-        # Ocean evaporation: lhflx already used L_v, so evap_rate
-        # is the correct mass flux.
+        # Ocean evaporation: evap_rate is the mass flux of lhflx.
         surface_mass_flux=evap_rate,
         # Ocean tile is the salt-budget sink, not a source of salt
         # back to itself — zero flux on this channel.
@@ -535,6 +557,30 @@ def make_coupler(
     # catalog in any order and assemble the result uniformly — replacing the
     # former hardcoded inline land/ice/lake/ocean stepping with a data-driven set.
 
+    # The land step (the canopy Newton solve: lax.map / while_loop over
+    # columns) ran EAGERLY on every coupling step, and an eager control-flow
+    # primitive built from fresh closures compiles a new executable per call:
+    # a coupled run grew ~2000 memory maps per step until it hit the kernel's
+    # vm.max_map_count and aborted (measured, job 10330808).  One jit per
+    # coupler, built here, compiles once; ``dt`` (the coupling step, concrete
+    # -- step_surface refuses a non-positive one in Python) is static, every
+    # array argument is traced.  The CLM-ML canopy stays eager: its multi-
+    # column forward refuses traced forcing without a per-column GridInfo
+    # (clm_ml_interface), which this coupler does not carry.
+    def _land_kernel(state, forcing, dt, lat_, carbon, doy, land_params, frozen):
+        if _use_multilayer:
+            return step_multilayer_land(
+                state, forcing, land_config, U_min, dt, lat=lat_,
+                carbon_state=carbon, doy=doy, land_params=land_params,
+                soil_frozen_fraction=frozen)
+        return step_land(state, forcing, land_config, U_min, dt, lat=lat_,
+                         carbon_state=carbon, doy=doy, land_params=land_params)
+
+    _land_kernel_jit = (
+        _land_kernel
+        if isinstance(getattr(land_config, "surface_scheme", None), CLMMLCanopyConfig)
+        else jax.jit(_land_kernel, static_argnames=("dt",)))
+
     def _step_land_tile(ctx: _TileContext):
         if _use_multilayer:
             # Multi-layer land operates on columnar (ncol,) arrays.
@@ -555,12 +601,9 @@ def make_coupler(
                 if (_land_soil_frozen_fraction is not None
                     and hasattr(_land_soil_frozen_fraction, 'reshape'))
                 else _land_soil_frozen_fraction)
-            land_new, land_resp_flat, carbon_new = step_multilayer_land(
-                ctx.sfc_state.land, _flat_forcing, land_config, U_min, ctx.dt,
-                lat=_flat_lat, carbon_state=ctx.sfc_state.carbon, doy=ctx.doy,
-                land_params=ctx.land_params,
-                soil_frozen_fraction=_flat_frozen,
-            )
+            land_new, land_resp_flat, carbon_new = _land_kernel_jit(
+                ctx.sfc_state.land, _flat_forcing, ctx.dt, _flat_lat,
+                ctx.sfc_state.carbon, ctx.doy, ctx.land_params, _flat_frozen)
             # Unflatten TileResponse fields back to spatial shape
             land_resp = jax.tree.map(
                 lambda x: (x.reshape(_spatial_shape)
@@ -570,11 +613,9 @@ def make_coupler(
                 land_resp_flat,
             )
         else:
-            land_new, land_resp, carbon_new = step_land(
-                ctx.sfc_state.land, ctx.atm_forcing, land_config, U_min, ctx.dt,
-                lat=_lat, carbon_state=ctx.sfc_state.carbon, doy=ctx.doy,
-                land_params=ctx.land_params,
-            )
+            land_new, land_resp, carbon_new = _land_kernel_jit(
+                ctx.sfc_state.land, ctx.atm_forcing, ctx.dt, _lat,
+                ctx.sfc_state.carbon, ctx.doy, ctx.land_params, None)
         return land_resp, {"land": land_new, "carbon": carbon_new}
 
     def _step_ice_tile(ctx: _TileContext):

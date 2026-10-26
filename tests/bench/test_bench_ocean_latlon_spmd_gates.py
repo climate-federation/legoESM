@@ -51,8 +51,35 @@ def test_gate_symbols_and_flags_exist():
     # Parser accepts the gate flags (argparse would SystemExit on unknowns).
     import argparse  # noqa: F401  (documents the surface under test)
     for flag in ("--parity-gate", "--check-conservation", "--cons-rtol",
-                 "--multicontroller", "--coordinator"):
+                 "--multicontroller", "--coordinator", "--pcg-precond",
+                 "--cheb-degree"):
         assert flag in Path(_BENCH).read_text()
+
+
+def test_pcg_precond_flags_reach_the_barotropic_config():
+    """--pcg-precond / --cheb-degree land on the two config fields the
+    implicit_cn solver dispatches on; jacobi (the default) leaves the
+    scheme default untouched and the degree refuses to ride any other
+    preconditioner."""
+    mod = _load_bench()
+    m, _ = mod.build_model_and_state(8, 16, 3, tripole=False,
+                                     pcg_precond="chebyshev", cheb_degree=3)
+    assert m.config.barotropic.barotropic_implicit_preconditioner == "chebyshev"
+    assert int(m.config.barotropic.barotropic_chebyshev_degree) == 3
+    m, _ = mod.build_model_and_state(8, 16, 3, tripole=False)
+    assert m.config.barotropic.barotropic_implicit_preconditioner == "jacobi"
+    # chebyshev without a degree runs the scheme default, which is 4, not 0
+    m, _ = mod.build_model_and_state(8, 16, 3, tripole=False,
+                                     pcg_precond="chebyshev")
+    assert int(m.config.barotropic.barotropic_chebyshev_degree) == 4
+    m, _ = mod.build_model_and_state(8, 16, 3, tripole=False,
+                                     pcg_precond="zonal_line")
+    assert m.config.barotropic.barotropic_implicit_preconditioner == "zonal_line"
+    with pytest.raises(SystemExit, match="needs --pcg-precond chebyshev"):
+        mod.build_model_and_state(8, 16, 3, tripole=False, cheb_degree=3)
+    with pytest.raises(SystemExit, match=">= 1"):
+        mod.build_model_and_state(8, 16, 3, tripole=False,
+                                  pcg_precond="chebyshev", cheb_degree=-3)
 
 
 # Budget: the smoke compiles the serial reference, the SPMD step, the fused
@@ -146,3 +173,18 @@ def test_parity_gate_refuses_long_windows(tmp_path):
     )
     assert proc.returncode != 0
     assert "smoke gate" in (proc.stdout + proc.stderr)
+
+
+def test_profile_dir_flag_defaults_off_and_reaches_the_block_timer():
+    """A trace on by default would slow every tripole ladder receipt; with
+    the flag the directory must reach timed_scan_blocks' trace_dir (the
+    shared timer already knows how to trace) on ranks 0-3 only."""
+    import inspect
+    mod = _load_bench()
+    p = mod.build_parser() if hasattr(mod, "build_parser") else None
+    src = inspect.getsource(mod)
+    assert 'add_argument("--profile-dir"' in src
+    assert "trace_dir=_trace_dir" in src
+    assert "jax.process_index() < 4" in src
+    if p is not None:
+        assert p.parse_args(["--n-lat", "8", "--n-lon", "16"]).profile_dir is None

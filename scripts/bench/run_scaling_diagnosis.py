@@ -269,8 +269,7 @@ def _setup_cubed_sphere(n: int, nlev: int, dt: float, precision: str,
     physics_fn = None
 
     # Distributed step function.  Iter 23 cleanup: the legacy
-    # ``create_device_config`` factory is gone; use ``detect_devices`` +
-    # ``configure_jax_for_device`` (the canonical entry point in
+    # ``create_device_config`` factory is gone; use ``detect_devices`` (in
     # ``parallel.device_config``).  When more than one device is
     # visible *and* we are not under MPI, route through the sharded
     # step; under MPI use the bare model step (each rank handles its

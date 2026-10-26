@@ -57,13 +57,17 @@ class SDMConfig(NamedTuple):
         implicit Newton family sharing the same adaptive outer loop:
         ``"be"`` (backward Euler), ``"cn"`` (Crank-Nicolson), ``"dirk2"``
         (ERF dirk212, 2-stage DIRK) — unconditionally stable for the stiff
-        Köhler terms. The adaptive integrators are NOT reverse-mode
-        differentiable. Unknown values raise. This completes the ERF
-        ``SDMassChangeTIMethod`` enum (RK3BS's role is covered by the
-        stiffness-adaptive rk4).
+        Köhler terms — and ``"rk3bs"`` (ERF Bogacki-Shampine explicit
+        stages on the same stiffness-based outer loop). The adaptive
+        integrators are NOT reverse-mode differentiable. Unknown values
+        raise. ``rk4_adaptive``/``rk3bs``/``be``/``cn``/``dirk2`` are the
+        ERF ``SDMassChangeTIMethod`` enum (RK4/RK3BS/BE/CN/DIRK2); ``rk4`` and
+        ``euler`` are legoESM fixed-substep integrators with no ERF
+        counterpart. ERF's default is BE.
     adaptive_cfl : float
         Stiffness CFL of the adaptive integrator: ``dt = adaptive_cfl/|τ|``
-        with ``τ`` the growth-ODE Jacobian (ERF ``mass_change_cfl``).
+        with ``τ`` the growth-ODE Jacobian (ERF ``mass_change_cfl``,
+        default 1000).
     adaptive_stol : float
         Steady-state exit tolerance on the relative R² update per step
         (ERF's ``stol = 1e-6``).
@@ -73,11 +77,13 @@ class SDMConfig(NamedTuple):
         too-small exit). Hitting the cap returns the partially integrated
         radius, exactly as ERF does.
     newton_rtol, newton_atol, newton_stol : float
-        Newton-solver tolerances for the implicit ``"be"`` integrator
+        Newton-solver tolerances for the implicit integrators
         (relative/absolute residual, step-size exit — ERF
-        ``m_newton_{rtol,atol,stol}``).
+        ``m_newton_{rtol,atol,stol}``, defaults 1e-6 / 1e-99 / 1e-12; ERF's
+        single-precision build uses atol 0, which is what 1e-99 rounds to in
+        float32).
     newton_maxits : int
-        Newton iteration cap (ERF ``m_newton_maxits``).
+        Newton iteration cap (ERF ``m_newton_maxits``, default 10).
     include_curvature : bool
         Include the Kelvin curvature term (raises equilibrium vapor pressure
         over a curved surface). True is the physically complete Köhler growth.
@@ -90,14 +96,14 @@ class SDMConfig(NamedTuple):
     solute_molar_mass : float
         Molar mass of the dissolved aerosol [kg/mol] (NaCl -> 0.05844).
     collision_kernel : str
-        Collision-coalescence kernel: ``"golovin"`` (analytic test kernel,
-        default), ``"sedimentation"`` (geometric sweep-out), ``"long"``
+        Collision-coalescence kernel: ``"golovin"`` (analytic test kernel),
+        ``"sedimentation"`` (geometric sweep-out, ERF default), ``"long"``
         (Long 1974 polynomial efficiency), or ``"hall"`` (Hall 1980 tabulated
         efficiency, bilinear interpolation). Unknown values raise.
     terminal_velocity : str
-        Droplet terminal-velocity law: ``"rogers_yau"`` (Stokes R²,
-        default), ``"atlas_ulbrich"`` (rain power law), or
-        ``"cloud_rain_shima"`` (SCALE-SDM piecewise). Unknown values raise.
+        Droplet terminal-velocity law: ``"rogers_yau"`` (Stokes R²),
+        ``"atlas_ulbrich"`` (rain power law), or ``"cloud_rain_shima"``
+        (SCALE-SDM piecewise, ERF default for water). Unknown values raise.
     golovin_b : float
         Golovin kernel coefficient ``b`` [1/s] (K = b(X_i+X_j); Shima 2009
         Golovin box test uses b = 1.5e3).
@@ -169,19 +175,19 @@ class SDMConfig(NamedTuple):
 
     n_substeps_condensation: int = 1
     condensation_integrator: str = "rk4"
-    adaptive_cfl: float = 1.0             # [-] dt = cfl/|tau| (ERF mass_change_cfl)
+    adaptive_cfl: float = 1000.0          # [-] dt = cfl/|tau| (ERF mass_change_cfl)
     adaptive_stol: float = 1.0e-6         # [-] steady-state exit (ERF stol)
     adaptive_max_steps: int = 100         # [-] accepted-step cap (ERF max_steps)
-    newton_rtol: float = 1.0e-8           # [-] Newton relative-residual exit
-    newton_atol: float = 1.0e-40          # [m^2/s] Newton absolute-residual exit
-    newton_stol: float = 1.0e-10          # [-] Newton step-size exit
-    newton_maxits: int = 30               # [-] Newton iteration cap
+    newton_rtol: float = 1.0e-6           # [-] Newton relative-residual exit (ERF)
+    newton_atol: float = 1.0e-99          # [m^2/s] Newton absolute-residual exit (ERF, fp64)
+    newton_stol: float = 1.0e-12          # [-] Newton step-size exit (ERF)
+    newton_maxits: int = 10               # [-] Newton iteration cap (ERF)
     include_curvature: bool = True
     include_solute: bool = True
     solute_ionization: float = 2.0        # van't Hoff i for NaCl
     solute_molar_mass: float = 0.05844    # [kg/mol] NaCl
-    collision_kernel: str = "golovin"
-    terminal_velocity: str = "rogers_yau"
+    collision_kernel: str = "sedimentation"
+    terminal_velocity: str = "cloud_rain_shima"
     golovin_b: float = 1.5e3              # [1/s] Golovin kernel coefficient
     include_brownian: bool = False        # add Brownian coagulation to the kernel
     collision_mode: str = "stochastic"    # stochastic | deterministic

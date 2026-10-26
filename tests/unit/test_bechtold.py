@@ -395,7 +395,8 @@ def test_bechtold_orchestrator_one_step_finite():
     )
     ncol = 6 * 4 * 4
     ps = init_physics_state(ncol, 12, cfg)
-    physics_fn = make_physics(cfg, model_type="hydrostatic", dt=300.0)
+    physics_fn = make_physics(cfg, model_type="hydrostatic", dt=300.0,
+                              surface_bulk_coeffs=None)
     tend, ps_out = physics_fn(state, grid, sigma, phys_state=ps)
     assert ps_out.conv_prog_profile.shape == (ncol, 12)
     assert ps_out.conv_stoch_state.shape == (ncol,)
@@ -435,7 +436,8 @@ def test_bechtold_orchestrator_threads_prng_key():
         gravity_wave_drag=GravityWaveDragConfig(scheme="none"),
     )
     ncol = 6 * 4 * 4
-    physics_fn = make_physics(cfg, model_type="hydrostatic", dt=300.0)
+    physics_fn = make_physics(cfg, model_type="hydrostatic", dt=300.0,
+                              surface_bulk_coeffs=None)
 
     ps_seed_0 = init_physics_state(ncol, 12, cfg, prng_seed=0)
     ps_seed_1 = init_physics_state(ncol, 12, cfg, prng_seed=1)
@@ -490,7 +492,8 @@ def test_bechtold_orchestrator_grad_through_phys_state():
     )
     ncol = 6 * 4 * 4
     ps = init_physics_state(ncol, 12, cfg, prng_seed=42)
-    physics_fn = make_physics(cfg, model_type="hydrostatic", dt=300.0)
+    physics_fn = make_physics(cfg, model_type="hydrostatic", dt=300.0,
+                              surface_bulk_coeffs=None)
 
     def loss(scale):
         scaled_T = state.T.replace(data=scale * state.T.data)
@@ -528,7 +531,8 @@ def test_bechtold_orchestrator_does_not_advance_key_when_stochastic_off():
     )
     ncol = 6 * 4 * 4
     ps = init_physics_state(ncol, 12, cfg, prng_seed=11)
-    physics_fn = make_physics(cfg, model_type="hydrostatic", dt=300.0)
+    physics_fn = make_physics(cfg, model_type="hydrostatic", dt=300.0,
+                              surface_bulk_coeffs=None)
 
     _, ps_out = physics_fn(state, grid, sigma, phys_state=ps)
     # No advance — bit-identical key.
@@ -574,7 +578,8 @@ def test_bechtold_orchestrator_with_radiation_merges_dict_correctly():
     )
     ncol = 6 * 4 * 4
     ps = init_physics_state(ncol, 12, cfg, prng_seed=7)
-    physics_fn = make_physics(cfg, model_type="hydrostatic", dt=300.0)
+    physics_fn = make_physics(cfg, model_type="hydrostatic", dt=300.0,
+                              surface_bulk_coeffs=None)
     tend, ps_out = physics_fn(state, grid, sigma, phys_state=ps)
 
     # Each PhysicsState slot must be a JAX array of the right shape —
@@ -2288,14 +2293,14 @@ def test_ifs_ztaures_matches_oracle_piecewise():
     capped at 3 beyond 125 km — pinned at the oracle's own branch points,
     and the turnover tau actually consumes it (integration toggle)."""
     import math
-    from legoesm.atmosphere.physics.convection.bechtold import _ifs_ztaures
-    assert _ifs_ztaures(0.0) == 1.0                          # legacy sentinel
-    assert _ifs_ztaures(-5.0) == 1.0
-    assert _ifs_ztaures(50.0) == _ifs_ztaures(100.0)         # 100 m floor
-    assert abs(_ifs_ztaures(4.0e3) - (1 + math.log(2.0) ** 2)) < 1e-12
-    assert abs(_ifs_ztaures(8.0e3) - (1 + 1.6 * 8e3 / 125e3)) < 1e-12
-    assert abs(_ifs_ztaures(50.0e3) - (1 + 1.6 * 50e3 / 125e3)) < 1e-12
-    assert _ifs_ztaures(200.0e3) == 3.0                      # coarse cap
+    from legoesm.atmosphere.physics.convection.mass_flux import ifs_ztaures
+    assert ifs_ztaures(0.0) == 1.0                          # legacy sentinel
+    assert ifs_ztaures(-5.0) == 1.0
+    assert ifs_ztaures(50.0) == ifs_ztaures(100.0)         # 100 m floor
+    assert abs(ifs_ztaures(4.0e3) - (1 + math.log(2.0) ** 2)) < 1e-12
+    assert abs(ifs_ztaures(8.0e3) - (1 + 1.6 * 8e3 / 125e3)) < 1e-12
+    assert abs(ifs_ztaures(50.0e3) - (1 + 1.6 * 50e3 / 125e3)) < 1e-12
+    assert ifs_ztaures(200.0e3) == 3.0                      # coarse cap
     # integration: dx changes the mass flux on a convecting column.  Probed
     # on the tau-only turnover path — under the full CAPE closure this
     # fixture's mb_scale is pinned by the column-uniform profile limiter

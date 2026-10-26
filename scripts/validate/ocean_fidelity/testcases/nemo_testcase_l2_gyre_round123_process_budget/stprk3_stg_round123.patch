@@ -1,0 +1,73 @@
+--- stprk3_stg.F90
++++ stprk3_stg.F90
+@@ -89,8 +89,12 @@
+       !
+       INTEGER  ::   ji, jj, jk, jn, jtile    ! dummy loop indices
+       INTEGER  ::   l1_unit, l1_ios, l2_tracer_unit, l2_tracer_ios
++      INTEGER  ::   r123_unit, r123_ios
+       CHARACTER(LEN=96) :: l1_filename
++      CHARACTER(LEN=96) :: r123_filename
+       CHARACTER(LEN=16) :: l1_magic
++      CHARACTER(LEN=16) :: r123_magic
++      LOGICAL :: lr123_write
+       !                    !--- round-40 stage-3 per-operator instrument locals ---!
+       !     A SEPARATE unit and magic from the stage-2 term writer above: the
+       !     stage-3 record carries the same four Krhs snapshots PLUS the
+@@ -856,6 +860,20 @@
+       DO jn = 1, jpts
+          ts(:,:,:,jn,Krhs) = 0._wp                                                ! set tracer trends to zero (:,:,:) needed otherwise it does not work (?)
+       END DO
++      lr123_write = lwp .AND. .NOT.ln_tile .AND. kstg == 3 .AND. &
++         &          kstp >= 1081 .AND. kstp <= 1440
++      IF( lr123_write ) THEN
++         WRITE(r123_filename,'("oracle_process_budget_kt",I8.8,".bin")') kstp
++         OPEN( NEWUNIT=r123_unit, FILE=TRIM(r123_filename), ACCESS='STREAM', &
++            &  FORM='UNFORMATTED', STATUS='REPLACE', ACTION='WRITE', IOSTAT=r123_ios )
++         IF( r123_ios /= 0 )   CALL ctl_stop( 'stp_RK3_stg: cannot open round-123 process dump' )
++         r123_magic = 'NEMO_L2_R123PROC'
++         WRITE(r123_unit) r123_magic, 1, kstp, kstg, Kbb, Kmm, Krhs, Kaa, &
++            &             jpi, jpj, jpk, STORAGE_SIZE(1._wp)
++         WRITE(r123_unit) rDt
++         WRITE(r123_unit) ts(:,:,:,jp_tem,Kbb)
++         WRITE(r123_unit) r3t(:,:,Kbb), r3t(:,:,Kmm), r3t(:,:,Kaa)
++      ENDIF
+       IF( lwp .AND. .NOT.ln_tile .AND. kstp == nit000 .AND. kstg == 3 ) THEN
+          l1_filename = 'oracle_rktracer_stage3_kt00000001.bin'
+          OPEN( NEWUNIT=l2_tracer_unit, FILE=TRIM(l1_filename), ACCESS='STREAM', FORM='UNFORMATTED', &
+@@ -886,12 +904,14 @@
+          IF( ln_tile )   CALL dom_tile( ntsi, ntsj, ntei, ntej, ktile = jtile )
+          !
+          CALL tra_adv    ( kstp, Kbb, Kmm, Kaa, ts, Krhs, zFu, zFv, zFw, kstg )   ! horizontal & vertical advection
++         IF( lr123_write )   WRITE(r123_unit) ts(:,:,:,jp_tem,Krhs)
+          IF( lwp .AND. .NOT.ln_tile .AND. kstp == nit000 .AND. kstg == 3 ) &
+             & WRITE(l2_tracer_unit) ts(:,:,:,jp_tem,Krhs), ts(:,:,:,jp_sal,Krhs)
+          IF( lwp .AND. .NOT.ln_tile .AND. kstp == nit000 .AND. kstg <= 2 ) &
+             & WRITE(l1_unit) ts(:,:,:,jp_tem,Krhs), ts(:,:,:,jp_sal,Krhs)
+          !
+          CALL tra_sbc_RK3( kstp, Kbb, Kmm,      ts, Krhs,                kstg )   ! surface boundary condition
++         IF( lr123_write )   WRITE(r123_unit) ts(:,:,:,jp_tem,Krhs)
+          IF( lwp .AND. .NOT.ln_tile .AND. kstp == nit000 .AND. kstg == 3 ) &
+             & WRITE(l2_tracer_unit) ts(:,:,:,jp_tem,Krhs), ts(:,:,:,jp_sal,Krhs)
+          IF( lwp .AND. .NOT.ln_tile .AND. kstp == nit000 .AND. kstg <= 2 ) &
+@@ -985,9 +1005,11 @@
+                   DEALLOCATE( l2_qsr_before )
+                ENDIF
+             ENDIF
++            IF( lr123_write )   WRITE(r123_unit) ts(:,:,:,jp_tem,Krhs)
+             IF( lwp .AND. .NOT.ln_tile .AND. kstp == nit000 .AND. kstg == 3 ) &
+                & WRITE(l2_tracer_unit) ts(:,:,:,jp_tem,Krhs), ts(:,:,:,jp_sal,Krhs)
+                                CALL tra_ldf( kstp, Kbb, Kmm, ts, Krhs )  ! lateral mixing
++            IF( lr123_write )   WRITE(r123_unit) ts(:,:,:,jp_tem,Krhs)
+             IF( lwp .AND. .NOT.ln_tile .AND. kstp == nit000 .AND. kstg == 3 ) &
+                & WRITE(l2_tracer_unit) ts(:,:,:,jp_tem,Krhs), ts(:,:,:,jp_sal,Krhs)
+             IF( ln_trabbc  )   CALL tra_bbc( kstp,      Kmm, ts, Krhs )  ! bottom heat flux
+@@ -1004,4 +1026,9 @@
+                                CALL tra_zdf( kstp, Kbb, Kmm, Krhs, ts    , Kaa  )  ! vertical mixing and after tracer fields
++            IF( lr123_write ) THEN
++               WRITE(r123_unit) ts(:,:,:,jp_tem,Kaa)
++               CLOSE(r123_unit, IOSTAT=r123_ios)
++               IF( r123_ios /= 0 )   CALL ctl_stop( 'stp_RK3_stg: cannot close round-123 process dump' )
++            ENDIF
+             IF( lwp .AND. .NOT.ln_tile .AND. kstp == nit000 .AND. kstg == 3 ) THEN
+                WRITE(l2_tracer_unit) ts(:,:,:,jp_tem,Kbb), ts(:,:,:,jp_sal,Kbb), &
+                   &                   ts(:,:,:,jp_tem,Kmm), ts(:,:,:,jp_sal,Kmm), &

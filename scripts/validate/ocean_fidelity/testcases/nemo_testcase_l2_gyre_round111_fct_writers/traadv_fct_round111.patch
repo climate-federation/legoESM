@@ -1,0 +1,22 @@
+--- traadv_fct.F90.r64
++++ traadv_fct.F90
+@@ -24,0 +25,2 @@
++   USE l2_r111_fct, ONLY : r111_begin, r111_first_flux, r111_midpoint, &
++      & r111_average_flux, r111_upstream
+@@ -157,0 +160,2 @@
++         IF( cdtype == 'TRA' ) CALL r111_begin( kt, Kbb, Kmm, Kaa, Krhs, jn, &
++            & p2dt, pt(:,:,:,jn,Kbb), pU, pV, pW, pt(:,:,:,jn,Krhs) )
+@@ -488,0 +493 @@
++      REAL(wp), DIMENSION(jpi,jpj,jpk) :: zr111
+@@ -525,0 +531 @@
++      CALL r111_first_flux( ptFu, ptFv, ptFw )
+@@ -538,0 +545 @@
++         zr111(ji,jj,jk) = ztra
+@@ -539,0 +547 @@
++      CALL r111_midpoint( zr111, pt_up1 )
+@@ -597,0 +606 @@
++      CALL r111_average_flux( ptFu, ptFv, ptFw )
+@@ -605,0 +615 @@
++         zr111(ji,jj,jk) = ztra
+@@ -610,0 +621 @@
++      CALL r111_upstream( zr111, pt_rhs )

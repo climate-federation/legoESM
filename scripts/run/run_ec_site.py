@@ -40,7 +40,6 @@ from legoesm.land.multilayer_land import (
     init_multilayer_land_state,
     step_multilayer_land_with_diagnostics,
 )
-from legoesm.land.richards import RichardsConfig
 from legoesm.land.soil_grid import SoilGridConfig, make_soil_grid
 from legoesm.land.soil_hydraulics import SoilHydraulicsConfig, psi_from_theta
 from legoesm.land.surface_scheme import TwoLeafCanopyConfig
@@ -215,7 +214,10 @@ def _build_land_config(canopy_config: TwoLeafCanopyConfig, soil: str,
     if depth_m > 0:
         kw["soil_grid"] = SoilGridConfig(total_depth=depth_m)
     if bottom_bc != "free_drainage":
-        kw["richards"] = RichardsConfig(bottom_bc=bottom_bc)
+        # Only the bottom boundary changes; every other Richards setting
+        # (incl. the field-capacity drainage limiter) stays the land default.
+        kw["richards"] = MultiLayerLandConfig().richards._replace(
+            bottom_bc=bottom_bc)
     if texture is not None:
         from legoesm.land import soil_texture as _st
         sand, clay = float(texture[0]), float(texture[1])
@@ -279,9 +281,10 @@ def _diagnostic_fluxes(d: ECSiteDriver, canopy_config: TwoLeafCanopyConfig,
                        mosaic: "PatchMosaicConfig | None" = None):
     """vmap the canopy over time with the soil state PRESCRIBED from the driver.
 
-    Returns (gpp_gC, le_wm2, h_wm2, t_surface) each shape (n_time,).  When
-    ``mosaic`` is given, each timestep runs the N-patch mosaic (tree + grass +
-    ... tiles, area-weighted) instead of the single blended canopy.
+    Returns (gpp_gC, le_wm2, h_wm2, t_surface, converged) each shape (n_time,);
+    ``converged`` is the canopy root-solve flag (for a mosaic: every patch
+    converged).  When ``mosaic`` is given, each timestep runs the N-patch mosaic
+    (tree + grass + ... tiles, area-weighted) instead of the single blended canopy.
     """
     def _step(T_soil_t, forcing_t, params_t, w_frac_t):
         # Mirror production: floor wind as sqrt(u^2 + v^2 + U_min^2) (the canopy
@@ -301,20 +304,21 @@ def _diagnostic_fluxes(d: ECSiteDriver, canopy_config: TwoLeafCanopyConfig,
         )
         out = (compute_two_leaf_canopy_fluxes(**kw) if mosaic is None
                else compute_mosaic_canopy_fluxes(mosaic=mosaic, **kw))
-        return out.gpp, out.lhflx, out.shflx, out.T_surface
+        return out.gpp, out.lhflx, out.shflx, out.T_surface, out.converged
 
     vstep = jax.jit(jax.vmap(_step))
     n = int(d.forcing.T_lowest.shape[0])
-    gpp, le, h, ts = [], [], [], []
+    gpp, le, h, ts, conv = [], [], [], [], []
     for i in range(0, n, chunk):
         sl = slice(i, min(i + chunk, n))
         f = jax.tree_util.tree_map(lambda a: a[sl], d.forcing)
         p = jax.tree_util.tree_map(lambda a: a[sl], d.canopy_params)
-        g, l, hh, t = vstep(d.T_soil_top[sl], f, p, d.w_frac_rz[sl])
+        g, l, hh, t, c = vstep(d.T_soil_top[sl], f, p, d.w_frac_rz[sl])
         gpp.append(np.asarray(g).ravel()); le.append(np.asarray(l).ravel())
         h.append(np.asarray(hh).ravel()); ts.append(np.asarray(t).ravel())
+        conv.append(np.asarray(c).ravel().astype(bool))
     return (np.concatenate(gpp), np.concatenate(le),
-            np.concatenate(h), np.concatenate(ts))
+            np.concatenate(h), np.concatenate(ts), np.concatenate(conv))
 
 
 def _clmml_mosaic_prognostic(d: ECSiteDriver, mosaic: ClmmlMosaicConfig, *,
@@ -333,14 +337,15 @@ def _clmml_mosaic_prognostic(d: ECSiteDriver, mosaic: ClmmlMosaicConfig, *,
     water (independent columns, no inter-patch competition), a documented v1
     simplification of a shared-column mosaic.
 
-    Returns the same 8-tuple as :func:`_prognostic_fluxes`
-    ``(gpp_gC, le, h, T_surface, reverted, ts_soil, swc_soil, ustar)`` so the
-    caller's output/metrics schema is preserved: the soil-state / ustar / skin-T
-    diagnostics are area-weighted across tiles and ``reverted`` is the per-step
-    max (a step is flagged reverted if ANY tile rolled it back).
+    Returns the same 9-tuple as :func:`_prognostic_fluxes`
+    ``(gpp_gC, le, h, T_surface, reverted, ts_soil, swc_soil, ustar, converged)``
+    so the caller's output/metrics schema is preserved: the soil-state / ustar /
+    skin-T diagnostics are area-weighted across tiles and ``reverted`` is the
+    per-step max (a step is flagged reverted if ANY tile rolled it back).
     """
     fracs = [p.frac for p in mosaic.patches]
-    gpps, les, hs, tss, revs, tsoils, swcs, ustars = ([], [], [], [], [], [], [], [])
+    gpps, les, hs, tss, revs, tsoils, swcs, ustars, convs = (
+        [], [], [], [], [], [], [], [], [])
     for p in mosaic.patches:
         cc = CLMMLCanopyConfig(
             pft_clm=int(p.pft_clm), turbulence_scheme=clmml_turbulence,
@@ -351,31 +356,36 @@ def _clmml_mosaic_prognostic(d: ECSiteDriver, mosaic: ClmmlMosaicConfig, *,
             soil_evap_resistance_exp=soil_evap_resistance_exp,
             root_depth=p.root_depth_m, z_ref=z_ref, texture=texture,
             interception=interception, plant_wilting_point=plant_wilting_point)
-        g, l, h, ts, rev, tsoil, swc, ustar = _prognostic_fluxes(
+        g, l, h, ts, rev, tsoil, swc, ustar, conv = _prognostic_fluxes(
             d, cc, lc, u_min, nudge_tau_days=nudge_tau_days, clmml_sai=clmml_sai)
         gpps.append(g); les.append(l); hs.append(h); tss.append(ts)
         revs.append(rev); tsoils.append(tsoil); swcs.append(swc); ustars.append(ustar)
+        convs.append(conv)
     return _aggregate_prognostic_tiles(
-        list(zip(gpps, les, hs, tss, revs, tsoils, swcs, ustars)), fracs)
+        list(zip(gpps, les, hs, tss, revs, tsoils, swcs, ustars, convs)), fracs)
 
 
 def _aggregate_prognostic_tiles(tile_results, fracs):
-    """Area-weight a list of per-tile ``_prognostic_fluxes`` 8-tuples into one grid
-    8-tuple ``(gpp, le, h, T_surface, reverted, ts_soil, swc_soil, ustar)``.
+    """Area-weight a list of per-tile ``_prognostic_fluxes`` 9-tuples into one grid
+    9-tuple ``(gpp, le, h, T_surface, reverted, ts_soil, swc_soil, ustar, converged)``.
 
     Flux / soil-state / ustar / skin-T series are area-weighted; ``reverted`` is the
-    per-step max (a step is reverted if ANY tile rolled it back).  A diagnostic that
-    is ``None`` on any tile aggregates to ``None`` (schema preserved).
+    per-step max (a step is reverted if ANY tile rolled it back) and ``converged``
+    the per-step all (a step is converged only if EVERY tile converged).  A
+    diagnostic that is ``None`` on any tile aggregates to ``None`` (schema preserved).
     """
-    cols = list(zip(*tile_results))     # [gpps, les, hs, tss, revs, tsoils, swcs, ustars]
+    cols = list(zip(*tile_results))     # [gpps, les, hs, tss, revs, tsoils, swcs, ustars, convs]
     def _aw(series):
         return None if any(s is None for s in series) \
             else area_weight_series(series, fracs)
     revs = cols[4]
     reverted = None if any(r is None for r in revs) \
         else np.maximum.reduce([np.asarray(r) for r in revs])
+    convs = cols[8]
+    converged = None if any(c is None for c in convs) \
+        else np.logical_and.reduce([np.asarray(c, dtype=bool) for c in convs])
     return (_aw(cols[0]), _aw(cols[1]), _aw(cols[2]), _aw(cols[3]),
-            reverted, _aw(cols[5]), _aw(cols[6]), _aw(cols[7]))
+            reverted, _aw(cols[5]), _aw(cols[6]), _aw(cols[7]), converged)
 
 
 def _two_leaf_mosaic_prognostic(d: ECSiteDriver, mosaic: "PatchMosaicConfig", *,
@@ -523,7 +533,9 @@ def _prognostic_fluxes(d: ECSiteDriver,
     and surface via ``model_nan`` in the skill report; ``reverted`` counts how
     many steps were rolled back.
 
-    Returns (gpp_gC, le_wm2, h_wm2, t_surface, reverted) each shape (n_time,).
+    Returns (gpp_gC, le_wm2, h_wm2, t_surface, reverted, ts_soil, swc_soil,
+    ustar, converged) each shape (n_time,).  ``converged`` is the canopy
+    root-solve flag (two-leaf), or ``None`` for CLM-ML, which reports none.
     """
     is_clmml = isinstance(canopy_config, CLMMLCanopyConfig)
     # Canopy-param C3/C4 scaling (the GPP / Bowen levers) is applied once in
@@ -621,7 +633,9 @@ def _prognostic_fluxes(d: ECSiteDriver,
         emit = (masked(out.gpp), masked(out.lhflx), masked(out.shflx),
                 masked(out.T_surface), reverted.astype(jnp.float64),
                 safe_state.T_soil[:, _i5], safe_state.theta_soil[:, _i5],
-                masked(u_star))
+                masked(u_star),
+                (jnp.asarray(True) if is_clmml
+                 else jnp.all(out.converged)))
         return safe_state, emit
 
     params = (_clmml_land_params(d.canopy_params, clmml_sai) if is_clmml
@@ -643,14 +657,16 @@ def _prognostic_fluxes(d: ECSiteDriver,
             emits.append(jax.tree_util.tree_map(np.asarray, e))
             if (i + 1) % 200 == 0:
                 print(f"  clmml step {i + 1}/{n_steps}", flush=True)
-        gpp, le, h, ts, reverted, ts_soil, swc_soil, ustar = (
+        gpp, le, h, ts, reverted, ts_soil, swc_soil, ustar, conv = (
             np.stack(v) for v in zip(*emits))
     else:
         run = jax.jit(lambda s0, x: jax.lax.scan(_scan_step, s0, x))
-        _final, (gpp, le, h, ts, reverted, ts_soil, swc_soil, ustar) = run(state0, xs)
+        _final, (gpp, le, h, ts, reverted, ts_soil, swc_soil, ustar, conv) = run(
+            state0, xs)
     rav = lambda a: np.asarray(a).ravel()
     return (rav(gpp), rav(le), rav(h), rav(ts), rav(reverted),
-            rav(ts_soil), rav(swc_soil), rav(ustar))
+            rav(ts_soil), rav(swc_soil), rav(ustar),
+            None if is_clmml else rav(conv).astype(bool))
 
 
 def _skill(model: np.ndarray, obs: np.ndarray, valid: np.ndarray) -> dict:
@@ -672,10 +688,22 @@ def _skill(model: np.ndarray, obs: np.ndarray, valid: np.ndarray) -> dict:
     return dict(n=k, model_nan=model_nan, rmse=rmse, bias=bias, r=r)
 
 
+def _skill_with_converged(model, obs, valid, converged) -> dict:
+    """:func:`_skill` on ``valid`` (primary, every step), plus — when the canopy
+    reports a root-solve flag — a ``converged_only`` sensitivity score on
+    ``valid & converged``, so steps scored from a failed solve stay visible."""
+    out = _skill(model, obs, valid)
+    if converged is not None:
+        out["converged_only"] = _skill(
+            model, obs, np.asarray(valid).ravel() & np.asarray(converged).ravel())
+    return out
+
+
 def _write_output(out_dir: str, d: ECSiteDriver, model: dict,
                   mode: str = "diagnostic",
                   reverted: np.ndarray | None = None,
                   score_valid: np.ndarray | None = None,
+                  converged: np.ndarray | None = None,
                   extra_attrs: dict | None = None) -> str:
     import xarray as xr
     os.makedirs(out_dir, exist_ok=True)
@@ -704,6 +732,9 @@ def _write_output(out_dir: str, d: ECSiteDriver, model: dict,
         data["met_filled"] = ("time", np.asarray(d.met_filled).astype("i1"))
     if d.soil_filled is not None:
         data["soil_filled"] = ("time", np.asarray(d.soil_filled).astype("i1"))
+    if converged is not None:
+        # canopy root-solve flag per step (0 = scored from a failed solve).
+        data["converged"] = ("time", np.asarray(converged).astype("i1"))
     if score_valid is not None:
         # the EXACT mask used for the reported skill metrics, so downstream users
         # can reproduce the metric sample set from the file alone.
@@ -929,12 +960,13 @@ def run_site(driver_nc: str, mode: str, out_dir: str, chunk: int,
     reverted = None
     ts_soil = swc_soil = ustar = None
     if mode == "diagnostic":
-        gpp_gC, le, h, _ = _diagnostic_fluxes(d, canopy_config, land_config, chunk,
+        gpp_gC, le, h, _, converged = _diagnostic_fluxes(d, canopy_config, land_config, chunk,
                                               mosaic=mosaic_cfg)
     elif mosaic_cfg is not None:
         # Two-leaf prognostic OUTER-loop mosaic (per-tile rooting -> per-tile water
         # stress).  Preserves the prognostic 8-tuple output schema.
-        gpp_gC, le, h, _ts, reverted, ts_soil, swc_soil, ustar = _two_leaf_mosaic_prognostic(
+        (gpp_gC, le, h, _ts, reverted, ts_soil, swc_soil, ustar,
+         converged) = _two_leaf_mosaic_prognostic(
             d, mosaic_cfg, soil=soil, bottom_bc=bottom_bc, soil_depth_m=soil_depth_m,
             k_sat_decay_m=k_sat_decay_m,
             soil_evap_resistance_exp=soil_evap_resistance_exp, z_ref=z_ref,
@@ -945,7 +977,8 @@ def run_site(driver_nc: str, mode: str, out_dir: str, chunk: int,
         # CLM-ML outer-loop mosaic: run each tile as its own prognostic column and
         # area-weight (soil-state / ustar diagnostics area-weighted; reverted =
         # per-step any-tile max) so the prognostic output schema is preserved.
-        gpp_gC, le, h, _ts, reverted, ts_soil, swc_soil, ustar = _clmml_mosaic_prognostic(
+        (gpp_gC, le, h, _ts, reverted, ts_soil, swc_soil, ustar,
+         converged) = _clmml_mosaic_prognostic(
             d, clmml_mosaic, soil=soil, bottom_bc=bottom_bc,
             soil_depth_m=soil_depth_m, k_sat_decay_m=k_sat_decay_m,
             soil_evap_resistance_exp=soil_evap_resistance_exp, z_ref=z_ref,
@@ -954,7 +987,8 @@ def run_site(driver_nc: str, mode: str, out_dir: str, chunk: int,
             clmml_turbulence=clmml_turbulence, clmml_stomatal=clmml_stomatal,
             u_min=u_min, nudge_tau_days=nudge_tau_days, clmml_sai=clmml_sai)
     else:
-        gpp_gC, le, h, _ts, reverted, ts_soil, swc_soil, ustar = _prognostic_fluxes(
+        (gpp_gC, le, h, _ts, reverted, ts_soil, swc_soil, ustar,
+         converged) = _prognostic_fluxes(
             d, canopy_config, land_config, u_min, nudge_tau_days=nudge_tau_days,
             clmml_sai=clmml_sai)
     # Trim the spin-up window from BOTH the model arrays and the driver ``d``
@@ -964,7 +998,7 @@ def run_site(driver_nc: str, mode: str, out_dir: str, chunk: int,
     if n_spinup > 0:
         _tr = lambda a: None if a is None else a[n_spinup:]
         gpp_gC, le, h = _tr(gpp_gC), _tr(le), _tr(h)
-        reverted, ts_soil = _tr(reverted), _tr(ts_soil)
+        reverted, ts_soil, converged = _tr(reverted), _tr(ts_soil), _tr(converged)
         swc_soil, ustar = _tr(swc_soil), _tr(ustar)
         d = _slice_driver(d, n_spinup, int(d.forcing.T_lowest.shape[0]) - n_spinup)
 
@@ -989,9 +1023,12 @@ def run_site(driver_nc: str, mode: str, out_dir: str, chunk: int,
     if mode == "diagnostic" and d.soil_filled is not None:
         score_valid = score_valid & (np.asarray(d.soil_filled).ravel() == 0)
     metrics = {
-        "GPP": _skill(model["gpp_umol"], d.obs["gpp_umol"], score_valid),
-        "LE": _skill(model["le_wm2"], d.obs["le_wm2"], score_valid),
-        "H": _skill(model["h_wm2"], d.obs["h_wm2"], score_valid),
+        "GPP": _skill_with_converged(model["gpp_umol"], d.obs["gpp_umol"],
+                                     score_valid, converged),
+        "LE": _skill_with_converged(model["le_wm2"], d.obs["le_wm2"],
+                                    score_valid, converged),
+        "H": _skill_with_converged(model["h_wm2"], d.obs["h_wm2"],
+                                   score_valid, converged),
     }
     # Prognostic soil STATE evaluation: top (~5 cm) model soil T / moisture vs the
     # driver's SHALLOWEST observed TS / SWC, scored only where those obs are genuine
@@ -1000,10 +1037,13 @@ def run_site(driver_nc: str, mode: str, out_dir: str, chunk: int,
         soil_score = score_valid
         if d.soil_filled is not None:
             soil_score = soil_score & (np.asarray(d.soil_filled).ravel() == 0)
-        metrics["TS"] = _skill(model["ts_soil"], np.asarray(d.T_soil_top), soil_score)
-        metrics["SWC"] = _skill(model["swc_soil"], np.asarray(d.theta_soil), soil_score)
+        metrics["TS"] = _skill_with_converged(
+            model["ts_soil"], np.asarray(d.T_soil_top), soil_score, converged)
+        metrics["SWC"] = _skill_with_converged(
+            model["swc_soil"], np.asarray(d.theta_soil), soil_score, converged)
         # friction velocity: modelled u* (from momentum stress) vs observed USTAR.
-        metrics["USTAR"] = _skill(model["ustar"], np.asarray(d.obs["ustar"]), score_valid)
+        metrics["USTAR"] = _skill_with_converged(
+            model["ustar"], np.asarray(d.obs["ustar"]), score_valid, converged)
     # Tag the output with the canopy arm so a two-leaf and a CLM-ML run of the
     # same site/mode do not overwrite each other.
     extra_attrs = {"canopy": canopy}
@@ -1015,7 +1055,7 @@ def run_site(driver_nc: str, mode: str, out_dir: str, chunk: int,
     path = _write_output(out_dir, d, model,
                          mode=mode if canopy == "two_leaf" else f"{mode}_{canopy}",
                          reverted=reverted, score_valid=score_valid,
-                         extra_attrs=extra_attrs)
+                         converged=converged, extra_attrs=extra_attrs)
     forcing_note = ("" if d.met_filled is None else
                     f"; scored on observed forcing only "
                     f"({100 * (d.met_filled == 0).mean():.0f}% of steps)")
@@ -1030,9 +1070,18 @@ def run_site(driver_nc: str, mode: str, out_dir: str, chunk: int,
         if d.soil_filled is not None:
             ic_src = "FILLED" if int(np.asarray(d.soil_filled).ravel()[0]) else "observed"
             print(f"  prognostic soil: initial state from {ic_src} TS/SWC at step 0")
+    if converged is not None:
+        n_unconv = int((np.asarray(score_valid).ravel() & ~converged).sum())
+        print(f"  canopy root solve: {n_unconv} scored step(s) unconverged "
+              f"({100 * n_unconv / max(int(np.asarray(score_valid).sum()), 1):.3f}% "
+              f"of scored steps); 'conv-only' rows exclude them")
     for flux, mtr in metrics.items():
         print(f"  {flux:3s}  n={mtr['n']:>7d}  model_nan={mtr['model_nan']:>5d}  "
               f"RMSE={mtr['rmse']:8.3f}  bias={mtr['bias']:+8.3f}  r={mtr['r']:.3f}")
+        c = mtr.get("converged_only")
+        if c is not None:
+            print(f"       conv-only n={c['n']:>7d}  "
+                  f"RMSE={c['rmse']:8.3f}  bias={c['bias']:+8.3f}  r={c['r']:.3f}")
     print(f"  -> {path}")
     return metrics
 

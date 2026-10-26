@@ -279,3 +279,16 @@ class SurfaceForcingConfig(NamedTuple):
     restoring: RestoringConfig = RestoringConfig()
     bulk_formulas: BulkFormulaConfig = BulkFormulaConfig()
     flux_feedback: FluxFeedbackConfig = FluxFeedbackConfig()
+    # Column shortwave scheme for the EXTERNAL (bulk-flux) surface forcing on the
+    # MPAS / tripole lanes: "auto" = the lanes' existing behaviour (two-band
+    # Jerlov type II with the 0.94 skin split; NEMO RGB when a chl field is
+    # supplied), "jerlov_2band" = the two-band kernel with THIS config's
+    # ``shortwave_water_type`` (routes the run_omip --water-type flag),
+    # "sweeney_2band" = FESOM2's chlorophyll two-band (Sweeney 2005; needs
+    # ``OceanSurfaceForcing.chl``).  ``penetrating_fraction`` sets how much of
+    # the net shortwave enters the column; the rest heats the surface cell.
+    shortwave_scheme: str = "auto"
+    # Jerlov water type used by "jerlov_2band" ("II" = the lanes' historical
+    # kernel default; "I" is the Veros flux_feedback literal, which lives on
+    # FluxFeedbackConfig.shortwave_water_type).
+    shortwave_water_type: str = "II"

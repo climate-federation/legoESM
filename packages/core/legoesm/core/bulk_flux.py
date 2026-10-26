@@ -61,7 +61,7 @@ import jax.numpy as jnp
 from legoesm import constants
 
 # Physical constants
-KAPPA = constants.kappa_vk  # von Kármán constant (0.4)
+KAPPA = constants.kappa_von_karman
 G = constants.g
 NU_AIR = constants.nu_air  # kinematic viscosity of air [m²/s]
 
@@ -70,7 +70,14 @@ NU_AIR = constants.nu_air  # kinematic viscosity of air [m²/s]
 #   "most"         — iterative MOST with fixed roughness (constant-z0 stability)
 #   "coare3"       — COARE 3.0
 #   "large_yeager" — Large & Yeager 2009 (OMIP)
-_VALID_BULK_SCHEMES = ("constant", "most", "coare3", "large_yeager")
+#   "large_yeager_cesm" — CESM/CIME ``shr_flux_atmOcn`` (Large & Pond 1981/82
+#                         + LY04 neutral coefficients, 2 fixed iterations);
+#                         see ``compute_sam_oceflx_fluxes(variant="cesm")``
+#   "nemo_si3_constant" — NEMO SI3 constant-coefficient ice/ocean bulk identity
+_VALID_BULK_SCHEMES = (
+    "constant", "most", "coare3", "large_yeager", "large_yeager_cesm",
+    "nemo_si3_constant",
+)
 
 
 # ============================================================================
@@ -153,6 +160,20 @@ _Z0H_Z0_RATIO_DEFAULT = 0.1
 # (fractional power of a non-positive base) -- the "clamp the base before the
 # power" AD-safety rule.
 _BH91_PSIH_BASE_FLOOR = 1e-6
+
+
+def surface_reference_state(T, z_ref, z_low=None):
+    """Pair model-level height with dry-adiabatic surface-referenced air T.
+
+    Observed forcing (z_low=None) already follows its supplied reference
+    convention. Model-level forcing must move BOTH height and temperature.
+    """
+    if z_low is None:
+        return T, z_ref
+    # Sensible heat is positive UPWARD: H = rho cp Ch U (T_sfc - T_air).
+    # Bringing air down warms it (+g z/cp), reducing upward H; land loses H
+    # through -H in its energy budget. Height simultaneously reduces exchange.
+    return T + (constants.g / constants.c_pd) * z_low, z_low
 
 
 def apply_gustiness(u: jax.Array, v: jax.Array, gustiness: float) -> jax.Array:
@@ -859,6 +880,13 @@ def compute_most_fluxes(
     # wrong air-sea physics. ``coare3``/``large_yeager`` take dedicated
     # branches; ``constant``/``most`` are the (valid) fixed-roughness else path.
     validate_bulk_scheme(scheme)
+    if scheme == "large_yeager_cesm":
+        raise ValueError(
+            "compute_most_fluxes does not implement 'large_yeager_cesm' (the "
+            "CESM shr_flux_atmOcn law has its own fixed-iteration solver): "
+            "call compute_sam_oceflx_fluxes(..., variant='cesm') — the "
+            "surface-layer / coupler dispatchers do."
+        )
     # Dispatch hardening (#762): the thermodynamic-convention selector is a
     # static string — a typo must fail LOUDLY, never silently run the other
     # constants set.
@@ -1215,19 +1243,13 @@ def compute_most_fluxes(
     # -rho u*^2 u/U_eff == -rho Cd U_eff u (AeroBulk/COARE: one factor of the
     # bulk wind incl. gust/floor, one raw wind component for direction and
     # magnitude); reduces to u/|U| exactly when U_eff == wind_speed.
-    # Thermodynamic convention (#762): the constants converting MOST scales
-    # into fluxes are part of the transcribed schemes' definitions.
-    # 'aerobulk' = the NEMO/AeroBulk/COARE set (SST-dependent L_vap, moist
-    # cp_air(q)); 'legoesm' = the historical constant L_v / dry c_pd
-    # (default, byte-identical).  An explicit ``L_latent`` always wins
-    # (the OMIP NEMO-parity path and the oracle tests inject their own).
-    if L_latent is not None:
-        _L = L_latent
-    elif thermo_convention == "aerobulk":
-        from legoesm.thermo import latent_heat_vaporization_sst
-        _L = latent_heat_vaporization_sst(T_sfc)
-    else:
-        _L = constants.L_v
+    # Thermodynamic convention (#762) now selects only the heat capacity:
+    # 'aerobulk' = NEMO/AeroBulk moist cp_air(q); 'legoesm' = dry c_pd.  The
+    # latent heat is the Kirchhoff L_v(T_sfc) in BOTH (user decision
+    # 2026-09-28); an explicit ``L_latent`` always wins (ice passes L_s, the
+    # OMIP NEMO-parity path and the oracle tests inject their own).
+    from legoesm.thermo import latent_heat_vaporization
+    _L = latent_heat_vaporization(T_sfc) if L_latent is None else L_latent
     if thermo_convention == "aerobulk":
         from legoesm.thermo import moist_air_cp
         _cp = moist_air_cp(q_atm)
@@ -1364,6 +1386,24 @@ def ocean_surface_q_sat(
     return saline_factor * _sat(T_sfc, p_sfc)
 
 
+# --- CESM coupler air-sea flux law (cime5.6.47 shr_flux_mod.F90) ---
+# ``seq_flux_atmocn_minwind`` namelist default (CESM2 namelist_defaults_cam.xml).
+_CESM_MINWIND = 0.5
+# ``flux_max_iteration`` as the CESM2.1 driver sets it (cime5.6.47
+# namelist_definition_drv.xml ``flux_max_iteration`` = 5 for cesm, passed to
+# ``shr_flux_adjust_constants`` by seq_flux_mct.F90); the module default of 2
+# in shr_flux_mod.F90 is overridden.  With ``flux_convergence = 0.0`` (f09)
+# every one of the 5 passes runs.  A loop count: never config / trainable.
+_CESM_FLUX_MAX_ITER = 5
+# --- cold-air-outbreak wind enhancement (Mahrt & Sun 1995, MWR) ---
+# shr_flux_mod.F90 module PARAMETERS ``alpha``, ``maxscl``, ``td0``; switched on
+# by ``coldair_outbreak_mod`` = .true. (CESM2.1 default for cesm,
+# namelist_definition_drv.xml).
+_CESM_COA_ALPHA = 1.4      # wind-scaling slope [K^-1/2 m/s]
+_CESM_COA_MAXSCL = 2.0     # maximum wind scaling factor [-]
+_CESM_COA_TD0 = -10.0      # tbot - ts at which the scaling starts [K]
+
+
 def _sam_cdn(u10: jnp.ndarray) -> jnp.ndarray:
     """SAM/CESM neutral 10 m drag coefficient (``oceflx.f90`` ``cdn``).
 
@@ -1372,7 +1412,13 @@ def _sam_cdn(u10: jnp.ndarray) -> jnp.ndarray:
     (and AD-safe).
     """
     u = jnp.maximum(u10, 1.0)
-    return 0.0027 / u + 0.000142 + 0.0000764 * u
+    return _cesm_cdn(u)
+
+
+def _cesm_cdn(u10: jnp.ndarray) -> jnp.ndarray:
+    """CESM ``shr_flux_mod`` ``cdn(Umps)`` — the same Large & Pond fit with NO
+    wind floor (the caller floors ``vmag`` at ``seq_flux_atmocn_minwind``)."""
+    return 0.0027 / u10 + 0.000142 + 0.0000764 * u10
 
 
 def compute_sam_oceflx_fluxes(
@@ -1386,9 +1432,36 @@ def compute_sam_oceflx_fluxes(
     z_bot: jnp.ndarray | float,
     exner_sfc: jnp.ndarray | float = 1.0,
     wd: jnp.ndarray | float = 0.0,
-    n_iter: int = 2,
-) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    n_iter: int | None = None,
+    *,
+    variant: str = "sam",
+    minwind: float = _CESM_MINWIND,
+    return_2m: bool = False,
+    z_diag: float = 2.0,
+    t_bot: jnp.ndarray | None = None,
+) -> tuple[jnp.ndarray, ...]:
     """SAM ocean surface fluxes — faithful port of ``oceflx.f90`` (CESM1).
+
+    ``variant`` selects the oracle (static Python string, dispatch-hardened):
+
+    * ``"sam"`` (default, byte-identical): gSAM ``oceflx.f90`` — ``vmag``
+      floored at 1 m/s, the same floor inside ``cdn``, dry ``c_pd``.
+    * ``"cesm"``: CIME ``shr_flux_mod.F90::shr_flux_atmOcn`` (cime5.6.47, the
+      CAM6/CESM2 coupler law) — ``vmag`` floored at ``minwind``
+      (``seq_flux_atmocn_minwind``, CESM2 default 0.5 m/s), NO floor inside
+      ``cdn``, and the moist ``cp = c_pd (1 + cpvir ssq)`` = ``c_pd + (c_pv -
+      c_pd) q_sfc`` on the sensible heat.  Stability iteration, coefficients
+      and flux algebra are otherwise identical.  The CESM2.1 driver settings
+      are the defaults: ``flux_max_iteration = 5`` with ``flux_convergence =
+      0`` (f09) -> ``n_iter = 5`` passes; ``gust_fac = 0``; and the
+      cold-air-outbreak wind enhancement ON (``coldair_outbreak_mod``: where
+      ``t_bot - T_sfc < -10 K`` the wind is scaled by ``min(1 + 1.4
+      sqrt(|t_bot - T_sfc + 10|)/vmag, 2)``), which needs the ABSOLUTE
+      lowest-level air temperature ``t_bot`` (required).  ``ssq`` is
+      taken from ``q_sfc`` (the caller's saturation curve and salinity
+      factor; CESM's own ``0.98 * 640380/exp(5107.4/T)`` fit is NOT
+      re-derived here).  With ``return_2m=True`` the CESM ``tref`` 2 m
+      temperature diagnostic (potential-to-temperature corrected) is appended.
 
     Iterative Monin–Obukhov bulk scheme with SAM's exact neutral transfer
     coefficients and Businger–Dyer stability functions:
@@ -1439,8 +1512,13 @@ def compute_sam_oceflx_fluxes(
     wd : array or float
         Gust-enhancement wind [m/s] added in quadrature to ``vmag``
         (SAM ``wd``, default 0).
-    n_iter : int
-        Number of MO stability iterations (SAM uses 2).
+    n_iter : int or None
+        Number of MO stability iterations.  None = the oracle's: 2 for
+        ``"sam"``, 5 for ``"cesm"`` (CESM2.1 ``flux_max_iteration``).
+    t_bot : array or None
+        ``"cesm"`` only, REQUIRED there: lowest-level ABSOLUTE air
+        temperature [K] (CESM ``tbot``), read by the cold-air-outbreak
+        wind enhancement.  Ignored by ``"sam"``.
 
     Returns
     -------
@@ -1453,10 +1531,21 @@ def compute_sam_oceflx_fluxes(
     ustar : array
         Friction velocity [m/s].
     """
+    if variant not in ("sam", "cesm"):
+        raise ValueError(
+            f"Unknown oceflx variant {variant!r}; expected 'sam' or 'cesm'.")
     karman = KAPPA
     eps_v = 1.0 / constants.epsilon - 1.0
     z_ref = 10.0
-    umin = 1.0
+    umin = 1.0 if variant == "sam" else minwind
+    _cdn = _sam_cdn if variant == "sam" else _cesm_cdn
+    if n_iter is None:
+        n_iter = 2 if variant == "sam" else _CESM_FLUX_MAX_ITER
+    if variant == "cesm" and t_bot is None:
+        raise ValueError(
+            "compute_sam_oceflx_fluxes(variant='cesm') needs t_bot, the "
+            "absolute lowest-level air temperature: CESM2.1's cold-air-"
+            "outbreak wind enhancement (coldair_outbreak_mod) reads tbot - ts.")
 
     # Safe sqrt (+eps) so the calm-wind (u=v=wd=0) reverse-mode gradient
     # stays finite — bare sqrt(0) gives a 0·inf NaN even though the value
@@ -1465,6 +1554,17 @@ def compute_sam_oceflx_fluxes(
     vmag = jnp.maximum(
         umin, jnp.sqrt(u_atm ** 2 + v_atm ** 2 + wd ** 2 + 1e-12)
     )
+    if variant == "cesm":
+        # shr_flux_atmOcn cold-air-outbreak block (use_coldair_outbreak_mod):
+        # tdiff = tbot - ts; where tdiff < td0 both vmag and vmag_old (the
+        # stress denominator, the same array here since gust_fac = 0) are
+        # scaled by vscl.
+        tdiff = t_bot - T_sfc
+        vscl = jnp.minimum(
+            1.0 + _CESM_COA_ALPHA * (jnp.abs(tdiff - _CESM_COA_TD0) ** 0.5
+                                     / jnp.abs(vmag)),
+            _CESM_COA_MAXSCL)
+        vmag = jnp.where(tdiff < _CESM_COA_TD0, vmag * vscl, vmag)
     theta_sfc = T_sfc / exner_sfc             # surface potential temperature
     delt = theta_atm - theta_sfc             # SAM thbot - ts (pot-T diff)
     delq = q_atm - q_sfc                      # spec-humidity diff
@@ -1485,7 +1585,7 @@ def compute_sam_oceflx_fluxes(
     # neutral; ``where(x>=0,1,0)`` matches that (0.5+0.5*sign would give
     # 0.5 — a non-SAM averaged branch).
     stable = jnp.where(delt >= 0.0, 1.0, 0.0)
-    rdn = jnp.sqrt(_sam_cdn(vmag))
+    rdn = jnp.sqrt(_cdn(vmag))
     rhn = (1.0 - stable) * 0.0327 + stable * 0.018
     ren = jnp.full_like(jnp.asarray(rdn), 0.0346)
     u_star = rdn * vmag
@@ -1493,7 +1593,19 @@ def compute_sam_oceflx_fluxes(
     q_star = ren * delq
 
     # --- MO stability iterations (SAM does 2) ---
+    # CESM: ``do while (abs((ustar-ustar_prev)/ustar) > flux_con_tol .and.
+    # iter < flux_con_max_iter)`` with flux_con_tol = 0 (f09): a column stops
+    # iterating once ustar repeats EXACTLY, keeping that pass's values (which
+    # can differ from a further pass when the stability flag still flips).
+    u_star_prev = 2.0 * u_star
+    going = True
+    hol = psixh = jnp.zeros_like(u_star)
+    rh = rhn
     for _ in range(n_iter):
+        if variant == "cesm":
+            going = going & (u_star != u_star_prev)
+            u_star_prev = u_star
+            old = (rdn, u_star, t_star, q_star, hol, stable, rh, psixh)
         hol = (
             karman * G * z_bot
             * (t_star / theta_atm + q_star / (1.0 / eps_v + q_atm))
@@ -1512,7 +1624,7 @@ def compute_sam_oceflx_fluxes(
         # Shift wind, recompute neutral coeffs at u10n, then shift all.
         rd = rdn / (1.0 + rdn / karman * (alz - psimh))
         u10n = vmag * rd / rdn
-        rdn = jnp.sqrt(_sam_cdn(u10n))
+        rdn = jnp.sqrt(_cdn(u10n))
         rhn = (1.0 - stable) * 0.0327 + stable * 0.018
         ren = jnp.full_like(jnp.asarray(rdn), 0.0346)
         rd = rdn / (1.0 + rdn / karman * (alz - psimh))
@@ -1521,14 +1633,79 @@ def compute_sam_oceflx_fluxes(
         u_star = rd * vmag
         t_star = rh * delt
         q_star = re * delq
+        if variant == "cesm":
+            rdn, u_star, t_star, q_star, hol, stable, rh, psixh = (
+                jnp.where(going, new, prev) for new, prev in zip(
+                    (rdn, u_star, t_star, q_star, hol, stable, rh, psixh), old))
 
     # --- fluxes (legoESM upward-positive W/m²) ---
     tau = rho * u_star ** 2
     tau_x = -tau * u_atm / vmag
     tau_y = -tau * v_atm / vmag
-    shflx = -rho * constants.c_pd * u_star * t_star
+    # CESM: cp = cpdair*(1 + cpvir*ssq), cpvir = cpwv/cpdair - 1.
+    cp = (constants.c_pd + (constants.c_pv - constants.c_pd) * q_sfc
+          if variant == "cesm" else constants.c_pd)
+    shflx = -rho * cp * u_star * t_star
     lhflx = -rho * constants.L_v * u_star * q_star
-    return tau_x, tau_y, shflx, lhflx, u_star
+    if not return_2m:
+        return tau_x, tau_y, shflx, lhflx, u_star
+    # CESM ``tref`` (shr_flux_atmOcn diagnostics block): re-evaluate the
+    # stability function at ztref, integrate the theta profile from zbot down
+    # to ztref, then the 0.01 K/m potential-to-temperature correction.
+    al2 = jnp.log(z_ref / z_diag)
+    hol2 = hol * z_diag / z_bot
+    xsq2 = jnp.maximum(1.0, jnp.sqrt(jnp.abs(1.0 - 16.0 * hol2)))
+    xqq2 = jnp.sqrt(xsq2)
+    psix2 = -5.0 * hol2 * stable + (1.0 - stable) * psixhu(xqq2)
+    fac = (rh / karman) * (alz + al2 - psixh + psix2)
+    tref = theta_atm - delt * fac - 0.01 * z_diag  # coeff-ok: CESM 0.01 K/m theta->T
+    return tau_x, tau_y, shflx, lhflx, u_star, tref
+
+
+def nemo_si3_constant_fluxes(
+    u_air: jnp.ndarray,
+    v_air: jnp.ndarray,
+    theta_air: jnp.ndarray,
+    q_air: jnp.ndarray,
+    T_ice: jnp.ndarray,
+    p_surface: jnp.ndarray,
+    rho_air: jnp.ndarray,
+    Cd: float,
+    Ch: float,
+    Ce: float,
+) -> tuple[jnp.ndarray, ...]:
+    """Executing constant-coefficient SI3 air--ice bulk core.
+
+    Transcribes NEMO 5.0.2 ``sbcblk.F90:1085-1168,1231-1273`` and
+    ``sbc_phy.F90:321-358,665-790``.  ``theta_air`` is already potential
+    temperature, as at NEMO's ``blk_ice_1/2`` boundary.  Returned stress uses
+    NEMO's air-to-ice sign; callers adapting to legoESM's atmospheric reaction
+    convention negate it explicitly.
+
+    Returns ``(tau_x, tau_y, wind, theta_ice, q_sat, dq_sat_dT,
+    sensible, latent, dq_sensible_dT, dq_latent_dT)``.
+    """
+    from legoesm.thermo import nemo_si3_saturation_over_ice
+
+    wind = jnp.sqrt(u_air * u_air + v_air * v_air)
+    theta_ice = T_ice * (
+        constants.p_ref / p_surface
+    ) ** (constants.R_gas_molar / (constants.M_dry_air * constants.c_p_dry_air_nemo))
+    q_sat, dq_sat_dT = nemo_si3_saturation_over_ice(T_ice, p_surface)
+    rho_wind = rho_air * wind
+    stress_scale = rho_wind * Cd
+    tau_x = stress_scale * u_air
+    tau_y = stress_scale * v_air
+    sensible_scale = rho_wind * constants.c_p_air_ice_nemo * Ch
+    latent_scale = rho_wind * constants.L_sub_nemo * Ce
+    sensible = sensible_scale * (theta_ice - theta_air)
+    latent = latent_scale * (q_sat - q_air)
+    dq_sensible_dT = sensible_scale
+    dq_latent_dT = latent_scale * dq_sat_dT
+    return (
+        tau_x, tau_y, wind, theta_ice, q_sat, dq_sat_dT,
+        sensible, latent, dq_sensible_dT, dq_latent_dT,
+    )
 
 
 def simple_bulk_fluxes(
@@ -1576,7 +1753,8 @@ def simple_bulk_fluxes(
     lhflx : array
         Latent heat flux [W/m2] (positive upward = surface moister).
     """
-    _L = constants.L_v if L_latent is None else L_latent
+    from legoesm.thermo import latent_heat_vaporization
+    _L = latent_heat_vaporization(T_sfc) if L_latent is None else L_latent
     tau_x = -rho * Cd * wind_speed * u_lowest
     tau_y = -rho * Cd * wind_speed * v_lowest
     shflx = rho * constants.c_pd * Ch * wind_speed * (T_sfc - T_lowest)

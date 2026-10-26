@@ -95,7 +95,9 @@ def build_model_and_state(n_lat, n_lon, nlev, seed=0, *,
                           wide_halo=False, wide_halo_chunk=0,
                           tripole=False, baro_solver="implicit_cn",
                           force_pcg=False, pcg_variant="standard",
-                          pcg_fixed_iters=0):
+                          pcg_fixed_iters=0, pcg_precond="jacobi",
+                          cheb_degree=0, record_true_residual=False,
+                          A_h_from_mesh=False):
     """Ocean model + gently perturbed rest state (flat 4000 m bottom).
 
     The perturbation (small u/v/eta/T noise on the rest stratification)
@@ -161,6 +163,23 @@ def build_model_and_state(n_lat, n_lon, nlev, seed=0, *,
                 "--pcg-variant only affects the implicit_cn fixed-M PCG; "
                 "drop it for explicit_substep arms.")
         flat["barotropic_implicit_pcg_variant"] = pcg_variant
+    if pcg_precond != "jacobi":
+        if baro_solver != "implicit_cn":
+            raise SystemExit(
+                "--pcg-precond only affects the implicit_cn fixed-M PCG; "
+                "drop it for explicit_substep arms.")
+        flat["barotropic_implicit_preconditioner"] = pcg_precond
+    if cheb_degree:
+        if pcg_precond != "chebyshev":
+            raise SystemExit("--cheb-degree needs --pcg-precond chebyshev.")
+        if int(cheb_degree) < 1:
+            raise SystemExit("--cheb-degree must be >= 1 (0 = scheme default).")
+        flat["barotropic_chebyshev_degree"] = int(cheb_degree)
+    if record_true_residual:
+        if baro_solver != "implicit_cn":
+            raise SystemExit(
+                "--record-true-residual needs the implicit_cn solve.")
+        flat["barotropic_implicit_record_true_residual"] = True
     if wide_halo:
         if baro_solver != "explicit_substep":
             raise SystemExit(
@@ -170,11 +189,26 @@ def build_model_and_state(n_lat, n_lon, nlev, seed=0, *,
         flat.update(barotropic_wide_halo=True,
                     barotropic_wide_halo_chunk=int(wide_halo_chunk),
                     barotropic_local_subcycle_clamp=True)
-    model = LatLonCGridOceanModel(grid, z_coord,
-                                  LatLonCGridOceanConfig.from_flat(**flat))
     state = rest_state_latlon_cgrid_ocean(
         grid, z_coord, T_water_init_C=20.0, T_deep=2.0, S_uniform=35.0,
         H_max=4000.0)
+    cfg = LatLonCGridOceanConfig.from_flat(**flat)
+    if A_h_from_mesh:
+        # Same derivation as run_omip / run_tripole_20yr: anchor viscosity
+        # scaled by (narrowest wet cell / anchor spacing)^2.
+        from legoesm.grids.tripole import DEFAULT_MIN_DX_M
+        from legoesm.ocean.state import (
+            resolution_scaled_lateral_viscosity, wet_min_spacing)
+        lv = cfg.lateral_viscosity._replace(A_h=None)
+        dx_min = wet_min_spacing(grid, np.asarray(state.land_mask.data),
+                                 clamp_floor_m=DEFAULT_MIN_DX_M)
+        cfg = cfg._replace(lateral_viscosity=lv._replace(
+            A_h=resolution_scaled_lateral_viscosity(dx_min, lv),
+            A_h_dx_m=dx_min))
+    print(f"[config] lateral viscosity A_h={cfg.lateral_viscosity.A_h:.6g} "
+          f"m2/s (mesh spacing {cfg.lateral_viscosity.A_h_dx_m:.1f} m; "
+          f"0 = pinned)", flush=True)
+    model = LatLonCGridOceanModel(grid, z_coord, cfg)
     rng = np.random.default_rng(seed)
     # Project the velocity noise through the face masks: v_mask zeroes the pole
     # WALL rows, so the nd=1 and nd>1 runs time the SAME initial state (the
@@ -225,6 +259,11 @@ def main() -> int:
                         "separates compile/probe/blocks explicitly).")
     p.add_argument("--blocks", type=int, default=2,
                    help="Timed fused blocks (per-block times expose drift).")
+    p.add_argument("--profile-dir", type=str, default=None,
+                   help="Trace the timed fused blocks from ranks 0-3 into "
+                        "<dir>/rank<k>/ (timed_scan_blocks' trace_dir); "
+                        "analyze_jax_trace_gaps.py --top-ops / "
+                        "--time-by-family read it. Keep --steps small.")
     p.add_argument("--probe-steps", type=int, default=3,
                    help="Individually-synced steps for the SEPARATE "
                         "dispatch-latency probe (step_latency_ms).")
@@ -257,6 +296,18 @@ def main() -> int:
                         "it trades solver convergence for sync points — "
                         "check zero_forcing_probe_residual in the output "
                         "before believing any speedup.")
+    p.add_argument("--pcg-precond",
+                   choices=["jacobi", "zonal_line", "chebyshev", "multigrid"],
+                   default="jacobi",
+                   help="Preconditioner of the implicit_cn fixed-M PCG "
+                        "(barotropic_implicit_preconditioner; jacobi = "
+                        "scheme default). chebyshev is reduction-free per "
+                        "iteration and composes with --pcg-variant "
+                        "single_reduce.")
+    p.add_argument("--cheb-degree", type=int, default=0,
+                   help="Chebyshev polynomial degree for --pcg-precond "
+                        "chebyshev (0 = scheme default, "
+                        "barotropic_chebyshev_degree).")
     p.add_argument("--pcg-variant", choices=["standard", "single_reduce"],
                    default="standard",
                    help="Fixed-M PCG recurrence for the implicit_cn "
@@ -264,6 +315,13 @@ def main() -> int:
                         "batches/iter; single_reduce = Chronopoulos-Gear, "
                         "ONE batched reduction/iter (halves the per-step "
                         "reduction count the census reports).")
+    p.add_argument("--record-true-residual", action="store_true",
+                   help="ACCURACY runs only: before timing, run --steps "
+                        "untimed steps from the initial state and log the true global relative "
+                        "residual ||rhs - A eta||/||rhs|| of each implicit-CN "
+                        "solve (same unweighted norm for every PCG variant) "
+                        "into the receipt.  Adds work to the step, so the "
+                        "receipt is flagged timing-perturbed.")
     p.add_argument("--dt", type=float, default=600.0)
     p.add_argument("--single-dev-fused-ms", type=float, default=None,
                    help="fused_step_ms of the nd=1 row at the SAME per-device "
@@ -305,6 +363,13 @@ def main() -> int:
                         "(SPMD equivalence gated at 4 devices). Rows are "
                         "tagged grid=tripole. Incompatible with "
                         "--wide-halo (fold refused at construction).")
+    p.add_argument("--A-h-from-mesh", dest="A_h_from_mesh",
+                   action="store_true",
+                   help="Lateral viscosity derived from the narrowest wet "
+                        "cell (anchor 1e5 m2/s at eORCA1 spacing, squared "
+                        "law) instead of the pinned 1e4 m2/s, which is "
+                        "explicitly unstable at dt=600 s on the 3072x4352 "
+                        "tripole (1.6 km polar cells).")
     p.add_argument("--fused-halo", action="store_true",
                    help="Force SPMD halo message aggregation ON "
                         "(LEGOESM_LATLON_SPMD_FUSED_HALO=1): one ppermute "
@@ -392,16 +457,36 @@ def main() -> int:
     # Preflight has passed -> JAX may now be imported (deferred for #1361).
     _import_jax()
 
-    from legoesm.core.precision import PrecisionPolicy, set_policy
+    from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
 
     # Single source of truth = the LIVE jax x64 flag (an in-process caller
     # may have enabled it without the env var; keying on the env would
     # build fp32 states while every gate/metadata site keys on
     # jax.config — the exact mislabel this block exists to kill; codex).
-    if jax.config.jax_enable_x64:
+    _ocean_mixed = os.environ.get("LEGOESM_OCEAN_MIXED", "") == "1"
+    if _ocean_mixed and not jax.config.jax_enable_x64:
+        raise SystemExit(
+            "LEGOESM_OCEAN_MIXED=1 requires JAX x64 enabled (the mixed policy "
+            "accumulates in float64), but jax_enable_x64 is off. Re-run with "
+            "x64 on (JAX_ENABLE_X64=1) or unset LEGOESM_OCEAN_MIXED.")
+    if _ocean_mixed and (args.parity_gate or args.check_conservation):
+        raise SystemExit(
+            "mixed precision has no validated parity/conservation-gate "
+            "tolerances here (SPMD_PARITY_TOLS/CONS_RTOL_DEFAULTS key on "
+            "float32/float64); run f32/f64 for gated correctness checks and "
+            "drop --parity-gate/--check-conservation for a mixed timing arm.")
+    if _ocean_mixed:
+        set_policy(PrecisionPolicy.mixed())
+    elif jax.config.jax_enable_x64:
         set_policy(PrecisionPolicy.fp64())
     else:
         set_policy(PrecisionPolicy.fp32())
+    # Single source of truth for precision-derived reporting, from the arm +
+    # the active policy -- NOT jax_enable_x64, which would mislabel mixed as
+    # float64/8B (mixed stores + ships float32 halos).
+    _prec_label = "mixed" if _ocean_mixed else (
+        "float64" if jax.config.jax_enable_x64 else "float32")
+    _storage_bytes = np.dtype(get_policy().storage).itemsize
 
     if args.multicontroller:
         # MUST run before any other JAX use (backend init). Shared helper:
@@ -482,7 +567,10 @@ def main() -> int:
             wide_halo=args.wide_halo, wide_halo_chunk=args.wide_halo_chunk,
             tripole=args.tripole, baro_solver=args.baro_solver,
             force_pcg=args.force_pcg, pcg_variant=args.pcg_variant,
-            pcg_fixed_iters=args.pcg_fixed_iters)
+            pcg_fixed_iters=args.pcg_fixed_iters,
+            pcg_precond=args.pcg_precond, cheb_degree=args.cheb_degree,
+            record_true_residual=args.record_true_residual,
+            A_h_from_mesh=args.A_h_from_mesh)
         # Prime the build-once vertex-mask cache from the CONCRETE state so
         # the wrapper can build the per-band vertex masks host-side (global
         # 2-D — stays on the host under the nd>1 context).
@@ -549,12 +637,114 @@ def main() -> int:
     # an ARGUMENT (outer-trace constants of non-addressable arrays are
     # unfetchable — see make_sharded_ocean_step's aux note).
     _aux = getattr(step, "aux", None)
+    # Ranks 0-3 only (one node, shared clock), same layout as the MPAS
+    # ocean bench so analyze_jax_trace_gaps.py reads both.
+    _trace_dir = None
+    if args.profile_dir is not None and jax.process_index() < 4:
+        _trace_dir = f"{args.profile_dir}/rank{jax.process_index()}"
+    def _count_nonfinite(tree):
+        n = 0
+        for leaf in jax.tree_util.tree_leaves(tree):
+            if hasattr(leaf, "addressable_shards") and np.issubdtype(leaf.dtype, np.inexact):
+                for sh in leaf.addressable_shards:
+                    n += int(np.size(sh.data) - np.isfinite(np.asarray(sh.data)).sum())
+        from jax.experimental import multihost_utils
+        return int(np.sum(np.asarray(multihost_utils.process_allgather(np.array([n], np.float64)))))
+
+    state_nonfinite_initial = _count_nonfinite(s)
+    print(f"[state] non-finite values in initial state: {state_nonfinite_initial}", flush=True)
+    if state_nonfinite_initial:
+        raise SystemExit("non-finite initial state; refusing.")
+    true_residual = None
+    if args.record_true_residual:
+        # Untimed run of exactly args.steps solves from the INITIAL state
+        # (same start for every arm), before timing; the log length is known.
+        from jax.experimental import multihost_utils
+        from legoesm.ocean.dynamics.barotropic_common import TRUE_RESIDUAL_LOG
+        if jax.local_device_count() != 1 or args.steps < 1:
+            # Several local devices interleave their callbacks with no solve
+            # id, so their agreement cannot be checked.
+            raise SystemExit("--record-true-residual needs one device per "
+                             "process and --steps >= 1.")
+        jax.block_until_ready(s)
+        jax.effects_barrier()
+        TRUE_RESIDUAL_LOG.clear()
+        _sr = s
+        def _max_speed_where(st):
+            # Global max |u|,|v| (non-finite counts as inf) and its global
+            # (row, col, level) — locates where an instability starts.
+            out = []
+            for name in ("u", "v"):
+                best = (-1.0, -1, -1, -1)
+                for sh in getattr(st, name).data.addressable_shards:
+                    a = np.abs(np.asarray(sh.data, dtype=np.float64))
+                    a = np.where(np.isfinite(a), a, np.inf)
+                    k = np.unravel_index(int(np.argmax(a)), a.shape)
+                    off = [sl.start or 0 for sl in sh.index]
+                    if a[k] > best[0]:
+                        best = (float(a[k]), k[0] + off[0], k[1] + off[1], k[2] + off[2])
+                out.append(best)
+            g = np.asarray(multihost_utils.process_allgather(np.array(out, np.float64)))
+            g = g.reshape(-1, 2, 4)
+            return [g[np.argmax(g[:, i, 0]), i].tolist() for i in range(2)]
+
+        for _k in range(args.steps):
+            _sr = step(_sr, args.dt, aux=_aux) if _aux is not None else step(_sr, args.dt)
+            _w = _max_speed_where(_sr)
+            if jax.process_index() == 0:
+                print(f"[where] step {_k + 1}: max|u| {_w[0][0]:.3e} at row,col,lev "
+                      f"{[int(x) for x in _w[0][1:]]}; max|v| {_w[1][0]:.3e} at "
+                      f"{[int(x) for x in _w[1][1:]]}", flush=True)
+        jax.block_until_ready(_sr)
+        del _sr
+        jax.effects_barrier()
+        # Fixed-size gather BEFORE any refusal, so no process exits while
+        # another waits in the collective.  Slot 0 carries the sample count.
+        _vals = np.asarray(TRUE_RESIDUAL_LOG, dtype=np.float64)
+        _buf = np.full(args.steps + 1, np.nan)
+        _buf[0] = _vals.size
+        _buf[1:1 + min(_vals.size, args.steps)] = _vals[:args.steps]
+        _all = np.asarray(multihost_utils.process_allgather(_buf))
+        if _all.shape != (jax.process_count(), args.steps + 1):
+            raise SystemExit(f"--record-true-residual: gather shape {_all.shape}; refusing.")
+        if not np.all(_all[:, 0] == args.steps):
+            raise SystemExit(
+                f"--record-true-residual: per-process sample counts "
+                f"{_all[:, 0].tolist()}, expected {args.steps} each; refusing.")
+        print(f"[residual] per-solve: {_all[0, 1:].tolist()}", flush=True)
+        # Callback order is the scan order within one process (one device),
+        # and the residual is an allreduced global scalar: every process
+        # must log the identical sequence.
+        if not np.array_equal(_all, np.broadcast_to(_all[0], _all.shape), equal_nan=True):
+            raise SystemExit(
+                "--record-true-residual: processes disagree on the global "
+                f"residual (max diff {float(np.max(np.abs(_all - _all[0]))):.3e}).")
+        _r = _all[0, 1:]
+        if not np.all(np.isfinite(_r)):
+            raise SystemExit("--record-true-residual: non-finite residual; refusing.")
+        true_residual = {
+            "norm": "unweighted ||rhs - A eta||/||rhs||, post mass "
+                    "projection and floor clamp, working precision",
+            "n_solves": int(_r.size), "median": float(np.median(_r)),
+            "max": float(np.max(_r)), "min": float(np.min(_r)),
+            "per_solve": [float(x) for x in _r],
+        }
+
     s, timing = timed_scan_blocks(
         (lambda st, aux: step(st, args.dt, aux=aux)) if _aux is not None
         else (lambda st: step(st, args.dt)),
         s,
         block_steps=_blk, n_blocks=_nblk, probe_steps=_probe,
-        sync_label="ocean_latlon_spmd_bench", aux=_aux)
+        sync_label="ocean_latlon_spmd_bench", trace_dir=_trace_dir, aux=_aux)
+
+    # Non-finite values in the timed final state, summed over processes:
+    # a timing of a NaN state is not a timing.
+    state_nonfinite = _count_nonfinite(s)
+    print(f"[state] non-finite values in timed final state: {state_nonfinite}", flush=True)
+    # Same allgathered count on every process, so all of them exit together.
+    if state_nonfinite:
+        raise SystemExit(
+            f"non-finite timed final state ({state_nonfinite} values); refusing to write a timing of it.")
 
     # Post-run ZERO-FORCING residual probe eligibility (audit item 6):
     # needs the gathered global final state on ONE process; multicontroller
@@ -572,7 +762,7 @@ def main() -> int:
 
     # --- Correctness gates (before any timing is reported) -----------------
     if args.parity_gate or args.check_conservation:
-        prec = "float64" if jax.config.jax_enable_x64 else "float32"
+        prec = _prec_label
         rank0 = jax.process_index() == 0
         if args.check_conservation:
             from bench_ocean_mpi_scaling import (
@@ -622,9 +812,9 @@ def main() -> int:
                             or bool(_baro_cfg.barotropic_implicit_force_pcg)))
     if _pcg_fixed_path:
         solver_iters = int(_baro_cfg.barotropic_implicit_pcg_fixed_iters)
+        _pc = str(_baro_cfg.barotropic_implicit_preconditioner)
         solver_iters_mode = (
-            f"fixed_pcg[{_baro_cfg.barotropic_implicit_pcg_variant},"
-            f"{_baro_cfg.barotropic_implicit_preconditioner}]")
+            f"fixed_pcg[{_baro_cfg.barotropic_implicit_pcg_variant},{_pc}]")
     elif args.baro_solver == "implicit_cn":
         solver_iters = None
         solver_iters_mode = (
@@ -704,7 +894,7 @@ def main() -> int:
             model.config, model.config.barotropic.n_barotropic_substeps)
     else:
         _halo_est = None
-    _dtype_bytes = 8 if jax.config.jax_enable_x64 else 4
+    _dtype_bytes = _storage_bytes
     _n_reductions = None
     if nd <= 1:
         _msgs, _n_reductions = 0, 0
@@ -789,7 +979,7 @@ def main() -> int:
         grid_type="tripole" if args.tripole else "latlon",
         resolution=n_lat,
         n_levels=args.nlev,
-        precision="float64" if jax.config.jax_enable_x64 else "float32",
+        precision=_prec_label,
         physics_level="none",
         backend=jax.default_backend(),
         **tidy_throughput_fields(
@@ -801,9 +991,16 @@ def main() -> int:
     rec.update(
         solver_iters=solver_iters,
         solver_iters_mode=solver_iters_mode,
+        # Resolved from the CONFIG (default 4 when --cheb-degree is 0/unset),
+        # so the receipt names the degree the solver actually ran.
+        chebyshev_degree=(int(model.config.barotropic.barotropic_chebyshev_degree)
+                          if str(model.config.barotropic.barotropic_implicit_preconditioner) == "chebyshev"
+                          else None),
         # Canonical residual of the TIMED solve: never captured (the fixed-
         # iteration PCG hot path exposes none) — honest null, never the
         # zero-forcing probe in disguise (codex batch4).
+        lateral_viscosity_A_h=float(model.config.lateral_viscosity.A_h),
+        lateral_viscosity_dx_m=float(model.config.lateral_viscosity.A_h_dx_m),
         solver_residual=None,
         residual_reason=residual_reason,
         zero_forcing_probe_residual=zero_forcing_probe_residual,
@@ -819,7 +1016,7 @@ def main() -> int:
         component="ocean",
         resolution=f"{n_lat}x{args.n_lon}",
         n_levels=args.nlev,
-        precision="float64" if jax.config.jax_enable_x64 else "float32",
+        precision=_prec_label,
         n_gpus=(nd if jax.default_backend() in ("gpu", "cuda", "rocm")
                 else 0),
         decomposition="band" if nd > 1 else "none",
@@ -869,6 +1066,12 @@ def main() -> int:
             "zero_forcing_probe_measured": zero_forcing_probe_measured,
         },
     ))
+    rec["state_nonfinite_values"] = state_nonfinite
+    rec["state_nonfinite_values_initial"] = state_nonfinite_initial
+    if args.record_true_residual:
+        rec["true_residual"] = true_residual
+        rec["timing_perturbed_by_residual_probe"] = True
+        rec["true_residual_probed_from"] = "initial_state"
     # Multi-controller: every process times the same program; process 0 owns
     # the JSONL + stdout (others would duplicate/corrupt the append).
     if jax.process_index() == 0:

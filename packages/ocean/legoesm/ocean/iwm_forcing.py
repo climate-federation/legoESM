@@ -65,6 +65,7 @@ def load_iwm_forcing(
     source_area=None,
     land_mask=None,
     coord_match_tol_deg: float = 1.0e-3,
+    paired_cells: bool = False,
 ) -> IWMForcing:
     """Load + regrid the zdfiwm forcing onto the model tracer grid.
 
@@ -98,14 +99,16 @@ def load_iwm_forcing(
 
     lat_T = np.asarray(lat_T, dtype=np.float64)
     lon_T = np.asarray(lon_T, dtype=np.float64)
-    if lat_T.ndim == 1 and lon_T.ndim == 1:
+    # paired_cells: 1-D lat/lon are PAIRED unstructured cell centres (MPAS
+    # (nCells,)), never grid axes — no outer-product meshgrid.
+    if not paired_cells and lat_T.ndim == 1 and lon_T.ndim == 1:
         lat_T, lon_T = np.meshgrid(lat_T, lon_T, indexing="ij")
     if lat_T.shape != lon_T.shape:
         raise ValueError(
             f"lat_T {lat_T.shape} and lon_T {lon_T.shape} must match")
 
-    if coords_match(src_lat, src_lon, lat_T, lon_T,
-                    tol_deg=coord_match_tol_deg):
+    if not paired_cells and coords_match(src_lat, src_lon, lat_T, lon_T,
+                                         tol_deg=coord_match_tol_deg):
         fields = {v: data[v] for v in _POWER_VARS + _SCALE_VARS}
     else:
         # Wet source cells only (zero-power cells on land would bleed
@@ -115,14 +118,27 @@ def load_iwm_forcing(
             src_wet |= data[v] > 0.0
         if not np.any(src_wet):
             raise ValueError(f"iwm forcing file {path!r} has no wet cells")
-        regrid = NearestWetRegridder(src_lon, src_lat, src_wet, lon_T, lat_T)
+        regrid = NearestWetRegridder(src_lon, src_lat, src_wet, lon_T, lat_T,
+                                     structured=not paired_cells)
         fields = {v: regrid(data[v]) for v in _POWER_VARS + _SCALE_VARS}
         # Preserve each power map's global area integral (the TW totals).
-        if source_area is None:
+        # Weights must share one unit: true areas [m^2] on one side demand
+        # them (or an estimate) on the other — cos-lat vs m^2 mixes units
+        # and rescales the totals by ~1/cell-area.
+        if source_area is None and target_area is not None:
+            from legoesm.ocean.forcing.curvilinear_regrid import (
+                estimate_curvilinear_cell_area,
+            )
+            src_w = estimate_curvilinear_cell_area(src_lat, src_lon)
+        elif source_area is None:
             src_w = np.cos(np.deg2rad(src_lat))
         else:
             src_w = np.asarray(source_area, dtype=np.float64)
         if target_area is None:
+            if source_area is not None:
+                raise ValueError(
+                    "iwm renorm: source_area [m^2] given without "
+                    "target_area — mixed weight units")
             tgt_w = np.cos(np.deg2rad(lat_T))
         else:
             tgt_w = np.asarray(target_area, dtype=np.float64)

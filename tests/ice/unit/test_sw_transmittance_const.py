@@ -151,5 +151,6 @@ def test_runner_retires_ocean_side_sw_surrogate():
     from scripts.run import run_omip_core2 as R
     src = inspect.getsource(R.main)
     assert "sw_transmittance_ice=0.0" in src
-    assert "sw_transmittance_const=float(args.ice_thermo_sw_trans)" in src
+    from tests.ice.unit.test_omip_bulk_snow import _main_config
+    assert _main_config(["--ice-thermo-sw-trans", "0.17"]).sw_transmittance_const == 0.17
     assert "ice_resp.ice_concentration_thermo" in src

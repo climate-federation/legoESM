@@ -472,3 +472,29 @@ class TestDifferentiability:
         data = jax.random.normal(key, (grid.n_lat, grid.n_lon))
         grads = jax.grad(loss)(data)
         assert jnp.all(jnp.isfinite(grads))
+
+
+@pytest.mark.parametrize("halo", [1, 2])
+@pytest.mark.parametrize("vector", [False, True])
+def test_local_pad_3d_pads_lon_not_levels(halo, vector):
+    """A (lat, lon, nlev) field through the single-process 2-D-entry pads must
+    pad lat/lon (lon wrap on axis 1), level by level, exactly like the 2-D pad
+    of each level and like the 3-D-native kernel.  The old kernels wrap-padded
+    the LAST axis, i.e. the levels."""
+    from legoesm.grids.halo_latlon import (
+        pad_halo_latlon_3d_local,
+        pad_halo_latlon_local,
+        pad_halo_latlon_vector_3d_local,
+        pad_halo_latlon_vector_local,
+    )
+    f2d = pad_halo_latlon_vector_local if vector else pad_halo_latlon_local
+    f3d = pad_halo_latlon_vector_3d_local if vector else pad_halo_latlon_3d_local
+    rng = np.random.default_rng(3)
+    n_lat, n_lon, nlev = 6, 8, 3
+    g = jnp.asarray(rng.standard_normal((n_lat, n_lon, nlev)))
+    out = np.asarray(f2d(g, halo))
+    assert out.shape == (n_lat + 2 * halo, n_lon + 2 * halo, nlev)
+    per_level = np.stack(
+        [np.asarray(f2d(g[..., k], halo)) for k in range(nlev)], axis=-1)
+    np.testing.assert_array_equal(out, per_level)
+    np.testing.assert_array_equal(out, np.asarray(f3d(g, halo)))

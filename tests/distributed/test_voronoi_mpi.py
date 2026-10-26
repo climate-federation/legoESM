@@ -209,6 +209,43 @@ class TestHaloExchange:
             err_msg=f"Rank {rank}: second cell exchange cross-matched")
 
 
+    def test_eager_exchange_compiles_once(self, mesh):
+        """An eager exchange (host-side land coupling, CMOR feed) must not
+        recompile on every call: the mpi4jax comm wrapper defeats JAX's eager
+        cache, which cost >= 120 ms per land exchange at 8 nodes."""
+        _skip_if_no_mpi()
+        rank, n_ranks = _get_mpi_info()
+        from jax import monitoring
+        from legoesm.parallel.voronoi_partition import (
+            partition_cells_geometric,
+            scatter_to_local,
+        )
+        layout = make_voronoi_partition_layout(
+            mesh, rank, n_ranks,
+            cell_owner=partition_cells_geometric(mesh, n_ranks))
+        field = scatter_to_local(
+            jnp.arange(mesh.nCells, dtype=jnp.float64), layout.partition, "cell")
+        layout.halo_exchange.exchange_cell_field(field).block_until_ready()
+
+        compiles = []
+
+        def _listen(event, duration, **kw):
+            if event == "/jax/core/compile/backend_compile_duration":
+                compiles.append(duration)
+
+        monitoring.register_event_duration_secs_listener(_listen)
+        try:
+            for _ in range(2):
+                layout.halo_exchange.exchange_cell_field(
+                    field + 1.0).block_until_ready()
+        finally:
+            monitoring.unregister_event_duration_listener(_listen)
+        # Only the eager `field + 1.0` may compile (once); the exchange must not.
+        assert len(compiles) <= 1, (
+            f"rank {rank}: {len(compiles)} backend compiles across two repeated "
+            "eager exchanges")
+
+
 class TestScatterGather:
     """Verify scatter/gather round-trip."""
 

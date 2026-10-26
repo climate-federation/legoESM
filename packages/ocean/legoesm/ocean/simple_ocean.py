@@ -191,10 +191,19 @@ def _ocean_turbulent_fluxes(
     if config.bulk_scheme in ("most", "coare3", "large_yeager"):
         # "most" = generic iterative MOST with fixed roughness (no Charnock);
         # "coare3"/"large_yeager" = ocean-specific stability-dependent MOST.
-        from legoesm.core.bulk_flux import compute_most_fluxes
+        from legoesm.core.bulk_flux import (
+            compute_most_fluxes, surface_reference_state)
+        # Model-level forcing: surface-referenced T at its own height (#1818);
+        # observed forcing keeps the solver's default reference height.
+        T_air, z_kw = forcing.T_lowest, {}
+        if forcing.z_lowest is not None:
+            T_air, z_low = surface_reference_state(
+                forcing.T_lowest, None, forcing.z_lowest)
+            z_kw = {"z_ref": z_low}
         _tx, _ty, shflx, lhflx, _ust = compute_most_fluxes(
             forcing.u_lowest, forcing.v_lowest,
-            forcing.T_lowest, forcing.q_lowest, T_sfc, q_sfc, rho,
+            T_air, forcing.q_lowest, T_sfc, q_sfc, rho,
+            **z_kw,
             scheme=config.bulk_scheme,
             gustiness_w_zi=getattr(config, "gustiness_w_zi", None),
             thermo_convention=getattr(config, "thermo_convention", "legoesm"),
@@ -212,6 +221,7 @@ def _slab_step(
     config: SimpleOceanConfig,
     dt: float,
     q_flux: jnp.ndarray | None = None,
+    open_water_frac: jnp.ndarray | float = 1.0,
 ) -> tuple[SlabOceanState, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Single mixed-layer energy balance step.
 
@@ -249,7 +259,11 @@ def _slab_step(
     # mixed layer (same sign as the scalar config.Q_flux it replaces).
     q_flux_eff = config.Q_flux if q_flux is None else q_flux
     C_mix = config.rho_ocean * config.c_ocean * config.h_mix
-    dT_dt = (sw_net + lw_net - shflx - lhflx + q_flux_eff) / C_mix
+    # The atmospheric surface terms act only on the ice-free fraction
+    # ``open_water_frac`` (1 = full cell); q_flux is ocean heat transport and
+    # applies under ice too.
+    q_sfc_net = open_water_frac * (sw_net + lw_net - shflx - lhflx)
+    dT_dt = (q_sfc_net + q_flux_eff) / C_mix
     T_sfc_trial = T_sfc + dt * dT_dt
 
     # Freezing clamp.  When the trial SST is below T_freeze, the energy
@@ -288,6 +302,7 @@ def _two_layer_step(
     config: SimpleOceanConfig,
     dt: float,
     q_flux: jnp.ndarray | None = None,
+    open_water_frac: jnp.ndarray | float = 1.0,
 ) -> tuple[SlabOceanState, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Two-layer slab ocean: mixed layer + deep layer.
 
@@ -326,7 +341,9 @@ def _two_layer_step(
     # layer (subtracted from the mixed layer).
     q_flux_eff = config.Q_flux if q_flux is None else q_flux
     C_mix = config.rho_ocean * config.c_ocean * config.h_mix
-    dT_sfc_dt = (sw_net + lw_net - shflx - lhflx + q_flux_eff - F_mix) / C_mix
+    # Atmospheric surface terms on the ice-free fraction only (see _slab_step).
+    q_sfc_net = open_water_frac * (sw_net + lw_net - shflx - lhflx)
+    dT_sfc_dt = (q_sfc_net + q_flux_eff - F_mix) / C_mix
     T_sfc_trial = T_sfc + dt * dT_sfc_dt
 
     # Deep layer
@@ -388,7 +405,7 @@ def make_ocean(config: SimpleOceanConfig, sst_map=None):
     # climatology and passes it in each coupling interval (eager path, no
     # recompile); a caller that never sets it is unchanged.
     if mode == "fixed":
-        def step_fixed(state, forcing, dt, q_flux=None):
+        def step_fixed(state, forcing, dt, q_flux=None, open_water_frac=1.0):
             if sst_map is not None:
                 sst = sst_map
             else:
@@ -401,13 +418,15 @@ def make_ocean(config: SimpleOceanConfig, sst_map=None):
         return step_fixed
 
     elif mode == "slab":
-        def step_slab(state, forcing, dt, q_flux=None):
-            return _slab_step(state, forcing, config, dt, q_flux=q_flux)
+        def step_slab(state, forcing, dt, q_flux=None, open_water_frac=1.0):
+            return _slab_step(state, forcing, config, dt, q_flux=q_flux,
+                              open_water_frac=open_water_frac)
         return step_slab
 
     elif mode == "two_layer":
-        def step_two_layer(state, forcing, dt, q_flux=None):
-            return _two_layer_step(state, forcing, config, dt, q_flux=q_flux)
+        def step_two_layer(state, forcing, dt, q_flux=None, open_water_frac=1.0):
+            return _two_layer_step(state, forcing, config, dt, q_flux=q_flux,
+                                   open_water_frac=open_water_frac)
         return step_two_layer
 
     else:

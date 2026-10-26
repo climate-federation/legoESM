@@ -114,6 +114,7 @@ __param_spec__ = {
         "excluded": {
             "C4": "NN09 sets C4=0 (drops its shear pressure-covariance term); not read here",
             "tke_min": "numerics: solver/smoothing/tolerance/iteration parameter",
+            "d25_floor": "numerics: two-sided floor on the level-2.5 denominator D25, which passes through zero at zero resolved shear; a regulariser, not a closure coefficient",
         },
         "params": {
             "A1": {"units": "1", "bounds": (0.6, 2.4), "tunable_tier": 1, "transform": "sigmoid", "category": "return_to_isotropy", "reference": "Nakanishi & Niino (2009) MYNN return-to-isotropy (Rotta) constant A1", "shape": None},
@@ -178,10 +179,9 @@ __param_spec__ = {
             "Pr_t": {"units": "1", "bounds": (0.3, 1.5), "tunable_tier": 2, "transform": "sigmoid", "category": "diffusivity", "reference": "turbulent Prandtl number Kh = Km/Pr_t", "shape": None},
             "a_updraft": {"units": "1", "bounds": (0.01, 0.3), "tunable_tier": 2, "transform": "sigmoid", "category": "mass_flux", "reference": "Siebesma et al. (2007) updraft area fraction", "shape": None},
             "entrainment_rate": {"units": "1/m", "bounds": (1e-04, 1e-02), "tunable_tier": 1, "transform": "sigmoid", "category": "entrainment", "reference": "Siebesma et al. (2007) lateral entrainment rate", "shape": None},
-            # parcel_dT is the LIVE initial plume potential-temperature excess
-            # (theta_u_init = theta + parcel_dT, edmf.py:177) — a buoyancy
-            # calibration knob, not numerics.
-            "parcel_dT": {"units": "K", "bounds": (0.1, 2.0), "tunable_tier": 2, "transform": "sigmoid", "category": "mass_flux", "reference": "Siebesma et al. (2007) EDMF initial updraft thermal excess", "shape": None},
+            # Capped at 2 until the plume carries heat: the MF theta transport
+            # leaks 0.85 % of the surface heat flux at 1, 2.1 % at 2, 5.6 % at 4, 15.4 % at 8.
+            "surface_excess_prefactor": {"units": "1", "bounds": (0.3, 2.0), "tunable_tier": 2, "transform": "sigmoid", "category": "mass_flux", "reference": "Siebesma et al. (2007) Eq. 17 prefactor (LES ~1; Troen & Mahrt 1986 ~8)", "shape": None},
             "l_mix_max": {"units": "m", "bounds": (10.0, 300.0), "tunable_tier": 1, "transform": "sigmoid", "category": "mixing_length", "reference": "Blackadar (1962) asymptotic mixing length", "shape": None},
             # w_updraft_min is LIVE: it floors the initial updraft velocity
             # (edmf.py:173) and sets the velocity scale of the deactivation
@@ -261,6 +261,39 @@ class SurfaceLayerConfig(NamedTuple):
     Ch_neutral: float = 1.5e-3
     bulk_scheme: str = "constant"
     z_ref: float = 10.0
+    # The MOST solver is told the actual per-column height of the lowest full
+    # level (~135 m on L30) instead of labelling its inputs as z_ref (10 m).
+    # Labelling a 135 m level as 10 m inflates ocean latent heat 16-18% and
+    # stress 16-54% (measured offline over the tropical and trade oceans).
+    #
+    # Production default, and it lives HERE (one default): the driver's
+    # ExperimentConfig.surface_z_ref_model_level and the run_amip flag are
+    # None = "leave the scheme's value alone", so an untouched run resolves to
+    # this value and a dry-dynamics deck (fv3_duo) sees no non-default field.
+    # Only the MOST schemes (most/coare3/large_yeager) honour it, and only
+    # when the caller supplies the level height (surface_fluxes_at_lowest_level);
+    # the constant-coefficient path is byte-identical either way.  The
+    # dry-adiabatic adjustment is meaningful only against a REAL surface
+    # temperature: a lane that substitutes the lowest air temperature for a
+    # missing surface and still selects a MOST scheme must set this False,
+    # or the adjustment invents an air-surface contrast and a downward
+    # sensible heat flux out of nothing.
+    z_ref_model_level: bool = True
+    # Ocean q_sfc = 0.98 * q_sat(SST, p_s) (sea water at the surface pressure)
+    # via core.bulk_flux.ocean_surface_q_sat.  The coupler tile ALWAYS applies
+    # this factor, so leaving it off makes the two sides of one air-sea
+    # interface disagree: the ocean evaporates sea water while the atmosphere
+    # evaporates fresh water.  It is also what the reference algorithm does
+    # (COARE 3.0, Fairall et al. 2003).
+    #
+    # It stays False HERE and is turned on by the driver
+    # (ExperimentConfig.surface_ocean_q_sfc_saline, default True since
+    # 2026-09-20) rather than at the scheme, because it needs an ocean to
+    # apply to.  The structured-grid turbulence lanes carry no land fraction
+    # and their T_sfc defaults to the lowest air temperature -- there is no
+    # sea surface there to be saline, so a scheme-level True would be a
+    # sea-water correction applied to a column with no sea.
+    ocean_q_sfc_saline: bool = False
     bulk_n_iter: int = 5
     # COARE 3.0 convective-gustiness BL depth z_i [m] (compute_most_fluxes).
     # None (default) = scheme-native: 600 m for bulk_scheme "coare3" (gustiness
@@ -305,6 +338,44 @@ class SurfaceLayerConfig(NamedTuple):
     # moisture flux.  APPENDED LAST so positional SurfaceLayerConfig(...) and
     # tree_deserialise_leaves field ordering are unchanged.
     z0h_z0_ratio: float = 0.1
+    # PRESCRIBED surface scalar fluxes [W/m^2, positive UP], overriding whatever
+    # the bulk formula computed. ``None`` (default) = off, byte-identical to a
+    # config without them.
+    #
+    # These exist because a case deck that PRESCRIBES its surface heat and
+    # moisture fluxes (SAM's SFC_FLX_FXD, and every dry analytic ABL case) had
+    # no way to hand them to the closure. The single-column driver zeroed
+    # ``Ch_neutral`` to avoid double-counting and then injected the deck flux as
+    # a separate tendency on the lowest cell AFTER turbulence had run -- so the
+    # closure computed its own surface flux as exactly zero. Local closures
+    # still see the resulting gradient, but every flux-driven nonlocal scheme
+    # loses its defining pathway: YSU derives its convective velocity scale,
+    # PBL depth, entrainment and countergradient from ``shflx`` (ysu.py, the
+    # ``wtheta_sfc = shflx / (rho c_pd)`` line), so a prescribed-flux convective
+    # case ran it with no convection at all.
+    #
+    # Set these INSTEAD of injecting the flux as a forcing tendency, never as
+    # well: the closure applies them as the diffusion's lower boundary
+    # condition, so doing both counts the flux twice. MOMENTUM is now
+    # prescribable too (prescribed_tau_*_pa): the ERA5 training lane fixes
+    # the stress as well as the scalar fluxes, so tau no longer always comes
+    # from Cd; ustar is rebuilt from the prescribed stress inside
+    # _apply_prescribed_scalar_fluxes so mixing-length schemes feel it.
+    #
+    # Annotated ``float | None`` => not spec-eligible: a prescribed boundary
+    # condition read off a case deck or an analysis (ERA5) is a measurement,
+    # not a tunable closure.
+    prescribed_shflx_w_m2: float | None = None
+    prescribed_lhflx_w_m2: float | None = None
+    # Prescribed surface WATER flux [kg/m2/s, positive up] from the coupler's
+    # tiles.  When set, the kernel's moisture lower BC is this mass flux (no
+    # heat -> water conversion); when None, the water flux is
+    # prescribed_lhflx_w_m2 / L_v(T_sfc) (surface_layer.surface_moisture_flux).
+    prescribed_evap_kg_m2_s: float | None = None
+    # Stress ON THE ATMOSPHERE (opposite sign to the wind), matching
+    # tau_x/tau_y in compute_surface_fluxes. [Pa]
+    prescribed_tau_x_pa: float | None = None
+    prescribed_tau_y_pa: float | None = None
 
 
 class SmagorinskyConfig(NamedTuple):
@@ -332,12 +403,20 @@ class SmagorinskyConfig(NamedTuple):
         shared with the other turbulence closures).
     Pr_t : float
         Turbulent Prandtl number; Kh = Km / Pr_t (default 1.0).
+    stability_form : str
+        How stable stratification suppresses mixing.  ``"lilly"`` (default,
+        unchanged behaviour) multiplies by ``√(max(0, 1 − Ri/Pr_t))``.
+        ``"deardorff"`` instead SHRINKS the mixing length under stable
+        stratification (Deardorff 1980, as used by SAM/PALM/ARPS/ERF and by
+        this repo's own CRM and TKE-LES lanes), which avoids the hard cutoff
+        whose slope diverges and makes ``"lilly"`` untunable on stable cases.
     surface : SurfaceLayerConfig
         Surface layer parameters.
     """
     C_s: float = 0.2
     l_mix_max: float = 100.0
     Pr_t: float = 1.0
+    stability_form: str = "lilly"
     surface: SurfaceLayerConfig = SurfaceLayerConfig()
 
 
@@ -471,6 +550,17 @@ class MYNN25Config(NamedTuple):
         (NN09 below eq. A4).
     tke_min : float
         Minimum qke (= 2·TKE) [m²/s²] for numerical safety.
+    d25_floor : float
+        Two-sided floor on |D25|, the level-2.5 stability-function denominator
+        (``phi_2*phi_4 + phi_5*phi_3``), which is 1.0 at ``G_M = G_H = 0`` and
+        PASSES THROUGH ZERO. Numerics only, never trainable. At zero resolved
+        shear ``phi_5 = 0`` and ``phi_4`` has a root at ``G_H = 0.046`` for
+        these constants; the previous one-sided ``max(D25, 1e-30)`` turned that
+        root into a ~1e30 amplification (measured ``SH25 = +5.5e29``, i.e.
+        ``Kh ~ 1e25 m²/s``, which the downstream ``Kh >= 0`` clamp cannot see
+        because it is positive). SM/SH are bit-identical wherever
+        ``|D25| >= d25_floor``, so this bounds the pole without touching any
+        column that was already well posed.
     surface : SurfaceLayerConfig
         Surface-layer (bulk-flux) configuration.
     """
@@ -485,6 +575,7 @@ class MYNN25Config(NamedTuple):
     C5: float = 0.2
     gamma1: float = 0.235
     tke_min: float = 1e-10
+    d25_floor: float = 1e-2
     surface: SurfaceLayerConfig = SurfaceLayerConfig()
 
 
@@ -753,12 +844,10 @@ class TurbulentEDMFConfig(NamedTuple):
         Minimum updraft velocity [m/s] (default 0.1).
     entrainment_rate : float
         Lateral entrainment rate [1/m] (default 1e-3).
-    parcel_dT : float
-        Initial updraft potential-temperature perturbation [K]
-        (default 0.5).  Was hardcoded as ``+0.5`` in the scan body
-        prior to the audit-driven config migration; lifting it to a
-        config field lets users tune the initial buoyancy of the
-        plume against scheme calibration data.
+    surface_excess_prefactor : float
+        Prefactor alpha of the updraft surface scalar excess
+        ``alpha * (w'phi')_s / sigma_w`` (SST07 Eq. 17; LES suggests ~1,
+        Troen & Mahrt 1986 used ~8) [-] (default 1.0).
     updraft_deactivation_sharpness : float
         Sigmoid sharpness [s/m] for smoothly deactivating the updraft as
         its vertical velocity falls below ``w_updraft_min`` (default 20.0).
@@ -776,7 +865,7 @@ class TurbulentEDMFConfig(NamedTuple):
     a_updraft: float = 0.1
     w_updraft_min: float = 0.1
     entrainment_rate: float = 1e-3
-    parcel_dT: float = 0.5
+    surface_excess_prefactor: float = 1.0
     updraft_deactivation_sharpness: float = 20.0
     surface: SurfaceLayerConfig = SurfaceLayerConfig()
 
@@ -829,6 +918,12 @@ class TurbulenceConfig(NamedTuple):
     ysu: YSUConfig = YSUConfig()
     edmf: TurbulentEDMFConfig = TurbulentEDMFConfig()
     clubb: CLUBBConfig | None = None
+    # CAM's two-sided cloud-liquid exchange with the CLUBB closure
+    # (clubb_intr.F90).  A dispatch selector, so it lives here beside ``scheme``
+    # and not among CLUBBConfig's tunable leaves: the factory hands the host's
+    # q_c to the kernel and routes its dq_c_dt to the tracer; the kernel keys on
+    # q_c being supplied.  Selected by ExperimentConfig.clubb_liquid_partition.
+    liquid_partition: bool = False
     # NOT YET IMPLEMENTED in the production pipeline (see docstring above):
     # turbulence runs every step; only the SCM reads this (rejection guard).
     update_interval_steps: int = 1

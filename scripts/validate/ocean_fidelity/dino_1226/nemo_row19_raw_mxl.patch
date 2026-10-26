@@ -1,0 +1,50 @@
+--- a/cfgs/DINO/MY_SRC/zdftke.F90
++++ b/cfgs/DINO/MY_SRC/zdftke.F90
+@@ -108,7 +108,7 @@
+    ! nn_mxl clip/constraint sweeps, tke_avn:703-752) field can be dumped as a
+    ! single whole-array write after the loop closes, instead of per-jj-slice.
+-   REAL(wp), ALLOCATABLE, SAVE, DIMENSION(:,:,:) ::   zmxlm_dump, zmxld_dump
++   REAL(wp), ALLOCATABLE, SAVE, DIMENSION(:,:,:) ::   zmxlm_dump, zmxld_dump, zmxlm_raw_dump
+    LOGICAL, SAVE :: l_1226_tke_mxl_dump_done = .FALSE.
+ 
+    !! * Substitutions
+@@ -750,10 +750,11 @@
+       ! "first call" == kt==nit000).
+       IF( .NOT. l_1226_tke_mxl_dump_done ) THEN
+          IF( .NOT. ALLOCATED(zmxlm_dump) ) THEN
+-            ALLOCATE( zmxlm_dump(jpi,jpj,jpk), zmxld_dump(jpi,jpj,jpk) )
++            ALLOCATE( zmxlm_dump(jpi,jpj,jpk), zmxld_dump(jpi,jpj,jpk), zmxlm_raw_dump(jpi,jpj,jpk) )
+          ENDIF
+          zmxlm_dump(:,:,:) = 0._wp
+          zmxld_dump(:,:,:) = 0._wp
++         zmxlm_raw_dump(:,:,:) = 0._wp
+       ENDIF
+ 
+       !                                               ! ================= !
+@@ -831,6 +832,11 @@
+             zrn2 = MAX( rn2(ji,jj,jk), rsmall )
+             zmxlm(ji,jk) = MAX(  rmxl_min,  SQRT( 2._wp * en(ji,jj,jk) / zrn2 )  )
+          END_2D
++         IF( .NOT. l_1226_tke_mxl_dump_done ) THEN
++            DO_2Dik( 0, 0, 1, jpkm1, 1 )
++               zmxlm_raw_dump(ji,jj,jk) = zmxlm(ji,jk)
++            END_2D
++         ENDIF
+          !
+          !                     !* Physical limits for the mixing length
+          !
+@@ -927,11 +933,13 @@
+       IF( .NOT. l_1226_tke_mxl_dump_done ) THEN
+          OPEN( UNIT=8890, FILE='tke_dump_zmxlm.bin', ACCESS='STREAM', FORM='UNFORMATTED', STATUS='REPLACE' )
+          OPEN( UNIT=8891, FILE='tke_dump_zmxld.bin', ACCESS='STREAM', FORM='UNFORMATTED', STATUS='REPLACE' )
++         OPEN( UNIT=8892, FILE='tke_dump_zmxlm_raw.bin', ACCESS='STREAM', FORM='UNFORMATTED', STATUS='REPLACE' )
+          DO jk = 1, jpk
+             WRITE(8890) ( ( zmxlm_dump(ji,jj,jk), ji=Nis0,Nie0 ), jj=Njs0,Nje0 )
+             WRITE(8891) ( ( zmxld_dump(ji,jj,jk), ji=Nis0,Nie0 ), jj=Njs0,Nje0 )
++            WRITE(8892) ( ( zmxlm_raw_dump(ji,jj,jk), ji=Nis0,Nie0 ), jj=Njs0,Nje0 )
+          END DO
+-         CLOSE(8890) ; CLOSE(8891)
++         CLOSE(8890) ; CLOSE(8891) ; CLOSE(8892)
+          WRITE(numout,*) '#1226 tke zmxlm/zmxld dump written, ni/nj/jpk =', Nie0-Nis0+1, Nje0-Njs0+1, jpk
+          l_1226_tke_mxl_dump_done = .TRUE.
+       ENDIF

@@ -1,0 +1,84 @@
+--- stprk3_stg.F90
++++ stprk3_stg.F90
+@@ -31,6 +31,8 @@
+ # endif
+    !
+    USE prtctl         ! print control
++   USE vortex_r16_stage_terms, ONLY : vortex_r16_stage_begin, vortex_r16_stage_rhs,   &
++      &                               vortex_r16_stage_state, vortex_r16_stage_finish
+ 
+    IMPLICIT NONE
+    PRIVATE
+@@ -302,6 +304,9 @@
+             END_3D
+             !
+          ENDIF
++         IF( kstp == nit000 )   &
++            CALL vortex_r16_stage_begin( kstp, kstg, Kbb, Kmm, Kaa, Krhs, uu, vv,   &
++            &                            zFu, zFv, zFw )
+          !           !============================================!
+          !           !==   RHS : part computed at each stages   ==!
+          !           !============================================!
+@@ -313,6 +318,7 @@
+             !
+             !                             !* Flux Form advection only   ==> 3D RHS
+             IF( .NOT.ln_dynadv_vec )   CALL dyn_adv( kstp, Kmm, Kmm, uu, vv, Krhs, zFu, zFv, zFw )
++            IF( kstp == nit000 )   CALL vortex_r16_stage_rhs( 'adv', Krhs, uu, vv )
+             !
+          !                 !-------------------!   Flux Form        : HPG + VOR (COR+MET) + ADV 
+          CASE ( 2 , 3 )    !==  Stage 2 & 3  ==!
+@@ -322,9 +328,11 @@
+             CALL    eos    (        ts, Kmm, rhd, rhop )     ! Kmm in situ density anomaly for hpg computation
+             !                                                ! and potential density for BGC 
+             CALL    dyn_hpg( kstp,      Kmm, uu, vv, Krhs )  ! Hydrostratic Pressure Gradient (HPG)
++            IF( kstp == nit000 )   CALL vortex_r16_stage_rhs( 'hpg', Krhs, uu, vv )
+             !
+             !                             !* Coriolis / vorticity       ==> 3D RHS
+             CALL    dyn_vor( kstp,      Kmm, uu, vv, Krhs )
++            IF( kstp == nit000 )   CALL vortex_r16_stage_rhs( 'vor', Krhs, uu, vv )
+             !
+             !                             !* advection (VIF or FF)      ==> 3D RHS
+             IF( ln_dynadv_vec ) THEN                        ! VIF: only velocities used for momentum advection
+@@ -332,6 +340,7 @@
+             ELSE                                            ! FF : advective transports used for momentum advection
+                CALL dyn_adv( kstp, Kmm, Kmm, uu, vv, Krhs, zFu, zFv, zFw )
+             ENDIF
++            IF( kstp == nit000 )   CALL vortex_r16_stage_rhs( 'adv', Krhs, uu, vv )
+             !
+          END SELECT
+          !
+@@ -386,6 +395,8 @@
+ #endif
+                END_3D
+             ENDIF
++            IF( kstp == nit000 )   &
++               CALL vortex_r16_stage_state( 'update', Kaa, uu, vv )
+             !
+             IF(sn_cfctl%l_prtctl)   CALL prt_ctl( tab3d_1=uu(:,:,:,Kaa), clinfo1='stp stg   - Ua: ', mask1=umask,   &
+                &                                  tab3d_2=vv(:,:,:,Kaa), clinfo2=           ' Va: ', mask2=vmask, clinfo3='dyn' )
+@@ -398,6 +409,7 @@
+             !                  !*  complete the momentum RHS *!   except ZDF (implicit)
+             !
+                                CALL dyn_ldf( kstp, Kbb, Kmm, uu, vv, Krhs )     ! lateral mixing    
++            IF( kstp == nit000 )   CALL vortex_r16_stage_rhs( 'ldf', Krhs, uu, vv )
+             !
+             IF( ln_zdfosm  )   CALL dyn_osm( kstp,      Kmm, uu, vv, Krhs )     ! OSMOSIS non-local velocity fluxes
+             !
+@@ -428,6 +440,8 @@
+          !                     !*  DYN time integration + ZDF  *!   ∆t = rDt
+          !
+          IF( kstg == 3 )   CALL dyn_zdf( kstp, Kbb, Kmm, Krhs, uu, vv, Kaa  )  ! vertical diffusion and time integration
++         IF( kstp == nit000 .AND. kstg == 3 )   &
++            CALL vortex_r16_stage_state( 'zdf', Kaa, uu, vv )
+ 
+          !
+          !                 !==  All stages: correct the barotropic component ==!   at Kaa = N+1/3, N+1/2 or N+1
+@@ -448,6 +462,8 @@
+ #if ! defined key_PSYCLONE_2p5p0
+          DEALLOCATE( zub, zvb )
+ #endif
++         IF( kstp == nit000 )   &
++            CALL vortex_r16_stage_finish( kstg, Kaa, uu, vv )
+ 
+          !>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+          !>>>            Tracers : RHS computation + time-stepping            <<<

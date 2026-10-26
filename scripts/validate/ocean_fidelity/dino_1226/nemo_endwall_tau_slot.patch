@@ -1,0 +1,64 @@
+diff --git a/cfgs/DINO/MY_SRC/trddump.F90 b/cfgs/DINO/MY_SRC/trddump.F90
+index 655206997..3d081d309 100644
+--- a/cfgs/DINO/MY_SRC/trddump.F90
++++ b/cfgs/DINO/MY_SRC/trddump.F90
+@@ -25,6 +25,7 @@ MODULE trddump
+    PRIVATE
+ 
+    PUBLIC   trddump_dyn     ! called by trd_dyn_iom  (MY_SRC/trddyn.F90)
++   PUBLIC   trddump_tau     ! called with the named jpdyn_tau diagnostic
+    PUBLIC   trddump_tra     ! called by trd_tra_iom  (MY_SRC/trdtra.F90)
+    PUBLIC   trddump_state   ! called by trd_dyn_iom at the hpg term (MY_SRC/trddyn.F90)
+    PUBLIC   trddump_write   ! called by rst_write    (MY_SRC/restart.F90)
+@@ -130,6 +131,27 @@ CONTAINS
+    END SUBROUTINE trddump_dyn
+ 
+ 
++   SUBROUTINE trddump_tau( putrd, pvtrd )
++      !!---------------------------------------------------------------------
++      !! Copy NEMO's named jpdyn_tau diagnostic into the dormant restart slot.
++      !! This deliberately does not enter the interval trend accumulators.
++      !!---------------------------------------------------------------------
++      REAL(wp), DIMENSION(T2D(0)), INTENT(in) ::   putrd, pvtrd
++      INTEGER ::   ji, jj
++      !!---------------------------------------------------------------------
++      IF( .NOT. ALLOCATED( utrd_store ) ) THEN
++         ALLOCATE( utrd_store(jpi,jpj,jpk,jptot_dyn), vtrd_store(jpi,jpj,jpk,jptot_dyn) )
++         utrd_store(:,:,:,:) = 0._wp   ;   vtrd_store(:,:,:,:) = 0._wp
++      ENDIF
++      utrd_store(:,:,:,jpdyn_tau) = 0._wp
++      vtrd_store(:,:,:,jpdyn_tau) = 0._wp
++      DO_2D( 0, 0, 0, 0 )
++         utrd_store(ji,jj,1,jpdyn_tau) = putrd(ji,jj)
++         vtrd_store(ji,jj,1,jpdyn_tau) = pvtrd(ji,jj)
++      END_2D
++   END SUBROUTINE trddump_tau
++
++
+    SUBROUTINE trddump_acc_baro( pub_aa, pvb_aa )
+       !!---------------------------------------------------------------------
+       !! #1455 SG-B.  Accumulate uu_b(:,:,Naa)*r1_Dt, sampled by stpmlf
+diff --git a/cfgs/DINO/MY_SRC/trddyn.F90 b/cfgs/DINO/MY_SRC/trddyn.F90
+index f05f7dbbc..895c02c0e 100644
+--- a/cfgs/DINO/MY_SRC/trddyn.F90
++++ b/cfgs/DINO/MY_SRC/trddyn.F90
+@@ -164,6 +164,19 @@ CONTAINS
+                                  z2dx(ji,jj) = ( utau_b(ji,jj) + utauU(ji,jj) ) / ( e3u(ji,jj,1,Kmm) * rho0 )
+                                  z2dy(ji,jj) = ( vtau_b(ji,jj) + vtauV(ji,jj) ) / ( e3v(ji,jj,1,Kmm) * rho0 )
+                               END_2D
++                              CALL trddump_tau( z2dx, z2dy )
++                              ! Independent one-step stream reference for the
++                              ! exact named diagnostic supplied to the slot.
++                              IF( kt == nit000 .AND. ( .NOT. l_istiled .OR. ntile == 1 ) ) THEN
++                                 OPEN( UNIT=9110, FILE='trddyn_dump_utrd_tau.bin', ACCESS='STREAM', &
++                                    &  FORM='UNFORMATTED', STATUS='REPLACE', ACTION='WRITE' )
++                                 OPEN( UNIT=9111, FILE='trddyn_dump_vtrd_tau.bin', ACCESS='STREAM', &
++                                    &  FORM='UNFORMATTED', STATUS='REPLACE', ACTION='WRITE' )
++                                 WRITE(9110) ( ( z2dx(ji,jj), ji=Nis0,Nie0 ), jj=Njs0,Nje0 )
++                                 WRITE(9111) ( ( z2dy(ji,jj), ji=Nis0,Nie0 ), jj=Njs0,Nje0 )
++                                 CLOSE(9110)
++                                 CLOSE(9111)
++                              ENDIF
+                               CALL iom_put( "utrd_tau", z2dx )
+                               CALL iom_put( "vtrd_tau", z2dy )
+                               DEALLOCATE( z2dx , z2dy )

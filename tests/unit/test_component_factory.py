@@ -46,6 +46,7 @@ def _make_config(
             nlev=nlev,
         ),
         dycore=DycoreConfig(
+            energy_fixer=False,  # explicit opt-out: pins pre-fixer numerics (F15b vote V5)
             model_type=model_type,
             discretization=discretization,
             dt=dt,
@@ -117,7 +118,7 @@ class TestCDGridResolution:
         for knob in ("hyperdiff_scale", "a_h_scale", "div_damp_scale"):
             config = ExperimentConfig(
                 grid=GridConfig(grid_type="cubed_sphere", resolution=8, nlev=5),
-                dycore=DycoreConfig(model_type="shallow_water",
+                dycore=DycoreConfig(energy_fixer=False, model_type="shallow_water",
                                     discretization="centered", dt=300.0,
                                     **{knob: 2.0}),
                 days=1)
@@ -225,7 +226,7 @@ class TestDiffusionCoeffs:
         with pytest.raises(ValueError, match="k_h_scale"):
             ExperimentConfig(
                 grid=GridConfig(grid_type="cubed_sphere"),
-                dycore=DycoreConfig(k_h_scale=0.25),
+                dycore=DycoreConfig(energy_fixer=False, k_h_scale=0.25),
             ).validate_strict()
 
     def test_zero_scale_gives_zero(self):
@@ -553,7 +554,8 @@ class TestDefaultBehavior:
     """DycoreConfig defaults produce the same model as before the refactor."""
 
     def test_default_config_creates_hydrostatic_cdgrid(self):
-        """Default ExperimentConfig should create hydrostatic PE on cubed_sphere."""
+        """Default ExperimentConfig creates hydrostatic PE on cubed_sphere with
+        the dycore energy fixer ON (wired on this lane since F15b)."""
         config = ExperimentConfig()
         grid = _make_cubed_sphere_grid(config.grid.resolution)
         sigma = _make_sigma(config.grid.nlev)
@@ -561,6 +563,7 @@ class TestDefaultBehavior:
 
         from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import CDGridPrimitiveEquationModel
         assert isinstance(model, CDGridPrimitiveEquationModel)
+        assert model.config.energy_fixer is True
 
 
 # =========================================================================
@@ -578,6 +581,7 @@ class TestLatLonConservationFixer:
         config = ExperimentConfig(
             grid=GridConfig(grid_type="latlon", resolution=16, nlev=5),
             dycore=DycoreConfig(
+                energy_fixer=False,  # explicit opt-out: pins pre-fixer numerics (F15b vote V5)
                 model_type="hydrostatic",
                 discretization="finite_volume",
                 conservation_fixer=False,
@@ -597,6 +601,7 @@ class TestLatLonConservationFixer:
         config = ExperimentConfig(
             grid=GridConfig(grid_type="latlon", resolution=16, nlev=5),
             dycore=DycoreConfig(
+                energy_fixer=False,  # explicit opt-out: pins pre-fixer numerics (F15b vote V5)
                 model_type="hydrostatic",
                 discretization="finite_volume",
                 fix_mass=True,
@@ -616,6 +621,7 @@ class TestLatLonConservationFixer:
         config = ExperimentConfig(
             grid=GridConfig(grid_type="latlon", resolution=16, nlev=5),
             dycore=DycoreConfig(
+                energy_fixer=False,  # explicit opt-out: pins pre-fixer numerics (F15b vote V5)
                 model_type="hydrostatic",
                 discretization="finite_volume",
                 conservation_fixer=False,
@@ -651,6 +657,7 @@ class TestLatLonUnsupportedKnobs:
         config = ExperimentConfig(
             grid=GridConfig(grid_type="latlon", resolution=16, nlev=5),
             dycore=DycoreConfig(
+                energy_fixer=False,  # explicit opt-out: pins pre-fixer numerics (F15b vote V5)
                 model_type="hydrostatic",
                 discretization="finite_volume",
                 hyperdiff_scale=2.0,
@@ -666,6 +673,7 @@ class TestLatLonUnsupportedKnobs:
         config = ExperimentConfig(
             grid=GridConfig(grid_type="latlon", resolution=16, nlev=5),
             dycore=DycoreConfig(
+                energy_fixer=False,  # explicit opt-out: pins pre-fixer numerics (F15b vote V5)
                 model_type="hydrostatic",
                 discretization="finite_volume",
                 div_damp_scale=2.0,
@@ -682,6 +690,7 @@ class TestLatLonUnsupportedKnobs:
         config = ExperimentConfig(
             grid=GridConfig(grid_type="latlon", resolution=16, nlev=5),
             dycore=DycoreConfig(
+                energy_fixer=False,  # explicit opt-out: pins pre-fixer numerics (F15b vote V5)
                 model_type="hydrostatic",
                 discretization="finite_volume",
             ),
@@ -697,6 +706,7 @@ class TestLatLonUnsupportedKnobs:
         config = ExperimentConfig(
             grid=GridConfig(grid_type="latlon", resolution=16, nlev=5),
             dycore=DycoreConfig(
+                energy_fixer=False,  # explicit opt-out: pins pre-fixer numerics (F15b vote V5)
                 model_type="hydrostatic",
                 discretization="finite_volume",
                 hyperdiff_scale=0.0,
@@ -718,6 +728,7 @@ class TestLatLonPoleCFL:
         config = ExperimentConfig(
             grid=GridConfig(grid_type="latlon", resolution=16, nlev=5),
             dycore=DycoreConfig(
+                energy_fixer=False,  # explicit opt-out: pins pre-fixer numerics (F15b vote V5)
                 model_type="hydrostatic",
                 discretization="finite_volume",
                 dt=600.0,
@@ -738,6 +749,7 @@ class TestLatLonPoleCFL:
         config = ExperimentConfig(
             grid=GridConfig(grid_type="latlon", resolution=16, nlev=5),
             dycore=DycoreConfig(
+                energy_fixer=False,  # explicit opt-out: pins pre-fixer numerics (F15b vote V5)
                 model_type="hydrostatic",
                 discretization="finite_volume",
                 dt=600.0,
@@ -759,6 +771,7 @@ class TestLatLonPoleCFL:
         config = ExperimentConfig(
             grid=GridConfig(grid_type="latlon", resolution=16, nlev=5),
             dycore=DycoreConfig(
+                energy_fixer=False,  # explicit opt-out: pins pre-fixer numerics (F15b vote V5)
                 model_type="hydrostatic",
                 discretization="finite_volume",
                 dt=600.0,
@@ -892,6 +905,7 @@ class TestTimeIntegratorAutoDefault:
         config = ExperimentConfig(
             grid=GridConfig(grid_type="cubed_sphere", resolution=8, nlev=5),
             dycore=DycoreConfig(
+                energy_fixer=False,  # explicit opt-out: pins pre-fixer numerics (F15b vote V5)
                 model_type="hydrostatic",
                 discretization="centered",
                 dt=300.0,
@@ -918,6 +932,7 @@ class TestFixMassForwarding:
         config = ExperimentConfig(
             grid=GridConfig(grid_type="cubed_sphere", resolution=8, nlev=5),
             dycore=DycoreConfig(
+                energy_fixer=False,  # explicit opt-out: pins pre-fixer numerics (F15b vote V5)
                 model_type="nonhydrostatic", discretization="centered",
                 dt=300.0, fix_mass=flag,
             ),
@@ -938,6 +953,7 @@ class TestFixMassForwarding:
         config = ExperimentConfig(
             grid=GridConfig(grid_type="gaussian", resolution=21, nlev=5),
             dycore=DycoreConfig(
+                energy_fixer=False,  # explicit opt-out: pins pre-fixer numerics (F15b vote V5)
                 model_type="hydrostatic", discretization="spectral",
                 dt=300.0, fix_mass=flag,
             ),
@@ -957,6 +973,7 @@ class TestFixMassForwarding:
         config = ExperimentConfig(
             grid=GridConfig(grid_type="gaussian", resolution=21, nlev=2),
             dycore=DycoreConfig(
+                energy_fixer=False,  # explicit opt-out: pins pre-fixer numerics (F15b vote V5)
                 model_type="nonhydrostatic", discretization="spectral",
                 dt=300.0, fix_mass=flag,
             ),
@@ -972,6 +989,7 @@ class TestFixMassForwarding:
         config = ExperimentConfig(
             grid=GridConfig(grid_type="mpas", resolution=1, nlev=2),
             dycore=DycoreConfig(
+                energy_fixer=False,  # explicit opt-out: pins pre-fixer numerics (F15b vote V5)
                 model_type="nonhydrostatic", discretization="mpas",
                 dt=300.0, fix_mass=flag,
             ),
@@ -987,6 +1005,7 @@ class TestFixMassForwarding:
         config = ExperimentConfig(
             grid=GridConfig(grid_type="cubed_sphere", resolution=8, nlev=5),
             dycore=DycoreConfig(
+                energy_fixer=False,  # explicit opt-out: pins pre-fixer numerics (F15b vote V5)
                 model_type="nonhydrostatic", discretization="centered",
                 dt=300.0, fix_mass=True, conservation_fixer=False,
             ),
@@ -1006,6 +1025,7 @@ class TestFixMassForwarding:
         config = ExperimentConfig(
             grid=GridConfig(grid_type="gaussian", resolution=21, nlev=5),
             dycore=DycoreConfig(
+                energy_fixer=False,  # explicit opt-out: pins pre-fixer numerics (F15b vote V5)
                 model_type="hydrostatic", discretization="spectral",
                 dt=300.0, fix_mass=True, conservation_fixer=False,
             ),
@@ -1024,6 +1044,7 @@ class TestFixMassForwarding:
         config = ExperimentConfig(
             grid=GridConfig(grid_type="gaussian", resolution=21, nlev=2),
             dycore=DycoreConfig(
+                energy_fixer=False,  # explicit opt-out: pins pre-fixer numerics (F15b vote V5)
                 model_type="nonhydrostatic", discretization="spectral",
                 dt=300.0, fix_mass=True, conservation_fixer=False,
             ),
@@ -1038,6 +1059,7 @@ class TestFixMassForwarding:
         config = ExperimentConfig(
             grid=GridConfig(grid_type="mpas", resolution=1, nlev=2),
             dycore=DycoreConfig(
+                energy_fixer=False,  # explicit opt-out: pins pre-fixer numerics (F15b vote V5)
                 model_type="nonhydrostatic", discretization="mpas",
                 dt=300.0, fix_mass=True, conservation_fixer=False,
             ),
@@ -1054,6 +1076,7 @@ class TestFixMassForwarding:
         config = ExperimentConfig(
             grid=GridConfig(grid_type="mpas", resolution=1, nlev=2),
             dycore=DycoreConfig(
+                energy_fixer=False,  # explicit opt-out: pins pre-fixer numerics (F15b vote V5)
                 model_type="hydrostatic", discretization="mpas",
                 dt=300.0, fix_mass=True, conservation_fixer=False,
             ),
@@ -1067,6 +1090,7 @@ class TestFixMassForwarding:
         config = ExperimentConfig(
             grid=GridConfig(grid_type="plane", resolution=8, nlev=6),
             dycore=DycoreConfig(
+                energy_fixer=False,  # explicit opt-out: pins pre-fixer numerics (F15b vote V5)
                 model_type="nonhydrostatic", discretization="plane",
                 dt=1.0, fix_mass=True, conservation_fixer=False,
             ),
@@ -1097,6 +1121,7 @@ class TestLatLonSWPolarFilterForwarding:
         config = ExperimentConfig(
             grid=GridConfig(grid_type="latlon", resolution=16, nlev=5),
             dycore=DycoreConfig(
+                energy_fixer=False,  # explicit opt-out: pins pre-fixer numerics (F15b vote V5)
                 model_type="shallow_water", discretization="finite_volume",
                 dt=600.0,
                 use_polar_filter=True,
@@ -1118,6 +1143,7 @@ class TestLatLonSWPolarFilterForwarding:
         config = ExperimentConfig(
             grid=GridConfig(grid_type="latlon", resolution=16, nlev=5),
             dycore=DycoreConfig(
+                energy_fixer=False,  # explicit opt-out: pins pre-fixer numerics (F15b vote V5)
                 model_type="shallow_water", discretization="finite_volume",
                 dt=600.0,
             ),
@@ -1126,3 +1152,47 @@ class TestLatLonSWPolarFilterForwarding:
         assert model.config.use_polar_filter is False
         assert model._polar_mask is None
         assert model._polar_mask_v is None
+
+
+# =========================================================================
+# energy_consistent_moisture_clip wiring (#1354/#1515)
+# =========================================================================
+
+class TestEnergyConsistentMoistureClipWiring:
+    """The ExperimentConfig flag must reach the cube + MPAS core configs.
+
+    Non-vacuity: flip the flag and require the core config field to follow
+    (a stuck-False plumbing bug fails the True case).
+    """
+
+    def test_experiment_flag_defaults_off(self):
+        assert _make_config().energy_consistent_moisture_clip is False
+
+    def test_cube_core_config_carries_the_flag(self):
+        grid = _make_cubed_sphere_grid()
+        sigma = _make_sigma()
+        for want in (False, True):
+            config = _make_config(model_type="hydrostatic")._replace(
+                energy_consistent_moisture_clip=want)
+            model = create_atmosphere_dycore(config, grid, sigma)
+            assert model.config.energy_consistent_moisture_clip is want
+
+    def test_core_configs_accept_and_default_the_field(self):
+        # MPAS mesh build is heavy; assert the config contract directly.
+        from legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas import (
+            MPASPrimitiveEquationConfig)
+        from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
+            CDGridPrimitiveEquationConfig)
+        assert MPASPrimitiveEquationConfig().energy_consistent_moisture_clip is False
+        assert CDGridPrimitiveEquationConfig().energy_consistent_moisture_clip is False
+        assert MPASPrimitiveEquationConfig(
+            energy_consistent_moisture_clip=True).energy_consistent_moisture_clip is True
+
+
+def test_spectral_pe_hyperdiff_is_half_hour_efold():
+    """Shared e-fold helper reproduces the PE factory's former inline formula."""
+    from legoesm.grids.gaussian import create_gaussian_grid, hyperdiff_coeff_for_efold
+    g = create_gaussian_grid(42)
+    eig_max = 42 * 43 / (g.radius * g.radius)
+    expected = 1.0 / (0.5 * 3600.0 * eig_max ** 2)
+    assert hyperdiff_coeff_for_efold(g, 0.5 * 3600.0) == pytest.approx(expected, rel=1e-14)

@@ -2,12 +2,24 @@
 #SBATCH --account=glab
 #SBATCH --partition=burst
 #SBATCH --job-name=amip_gb_prod
-#SBATCH --gres=gpu:2
+#SBATCH --gres=gpu:4
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=64G
 #SBATCH --time=11:59:00
 #SBATCH --requeue
 #SBATCH --output=results/amip/prod_1979/slurm_%j.out
+# FOLLOWS PRODUCTION, DELIBERATELY (2026-09-23): the production deck became
+# the CAM6 suite on that date and this script keeps naming it, because its
+# job is to run whatever the authoritative production configuration IS, not
+# to reproduce one past run.  Runs started before that date continued from a
+# checkpoint must name config/amip/amip_sundqvist_l36.yaml instead.
+# DEVICE COUNT raised 2 -> 4 on 2026-09-23, standing user directive: a
+# production AMIP arm runs on at least four GPUs.  UNVERIFIED ON THIS MACHINE:
+# the four-device evidence run was done on Levante, and this Ginsburg chain
+# does not launch run_amip under srun, so it relies on whatever multi-device
+# path the single process takes there.  Before the next Ginsburg production
+# run, repeat the one-day four-GPU smoke on that machine, and if it needs the
+# rank-per-GPU launch the Levante chain uses, port that too.
 # =============================================================================
 # Self-chaining PRODUCTION AMIP run on Ginsburg (Columbia) — authoritative C48/L40
 # config (config/amip/amip_production.yaml) with the REAL staged inputs (ERA5 IC +
@@ -63,13 +75,46 @@ fi
 RESTART=()
 [ -n "$latest" ] && RESTART=(--restart-from "$latest")
 
-JAX_ENABLE_X64=1 "$PY" -u scripts/run/run_amip.py \
+# ONE RANK PER GPU, matching the Levante chain.  Requesting four GPUs and
+# then launching a SINGLE process would leave three idle and bill for them,
+# which is worse than the one-GPU run this replaces (GLM review).  So the
+# launch is changed with the request, not after it.  UNVERIFIED ON THIS
+# MACHINE: the four-device evidence run was done on Levante.  If this fails
+# here it fails LOUDLY on the first link rather than wasting a chain, and the
+# fix is to repeat the one-day smoke on Ginsburg and adjust the srun flags.
+: "${AMIP_N_GPUS:=4}"
+if (( AMIP_N_GPUS < 4 )); then
+  echo "[chain] REFUSING: AMIP_N_GPUS=${AMIP_N_GPUS} is below the floor of 4" >&2
+  echo "[chain] (production AMIP arms run on at least four GPUs, 2026-09-23)." >&2
+  exit 64
+fi
+# SLURM hands srun two conflicting cpus-per-task values on this cluster
+# (SLURM_CPUS_PER_TASK from the allocation vs SLURM_TRES_PER_TASK from the
+# --cpus-per-task request) and srun refuses to start: "cpus-per-task set by two
+# different environment variables".  Measured, job 27647178 died in 12 s on it.
+# Clear the inherited one and state the value on the srun line instead.
+unset SLURM_CPUS_PER_TASK
+# Ginsburg GPU nodes carry 2 GPUs: AMIP_NODES spreads the ranks (submit with
+# --nodes=$AMIP_NODES --gres=gpu:$((AMIP_N_GPUS/AMIP_NODES))); the conda
+# Open MPI is not CUDA-aware, so mpi4jax stages through the host (CUDA-aware
+# MPI segfaulted on Levante too, see the Levante chain).
+: "${AMIP_NODES:=1}"
+_PER_NODE=$((AMIP_N_GPUS / AMIP_NODES))
+_GPU_MAP=$(seq -s, 0 $((_PER_NODE - 1)))
+export MPI4JAX_USE_CUDA_MPI=0
+# AMIP_EXTRA_FLAGS: word-split extra run_amip flags for a one-variable arm
+# (e.g. "--land-canopy-max-iters 10"); empty on the production chain.
+JAX_ENABLE_X64=1 srun --nodes="${AMIP_NODES}" --ntasks="${AMIP_N_GPUS}" --ntasks-per-node="${_PER_NODE}" \
+  --mpi=pmix --gpu-bind="map_gpu:${_GPU_MAP}" --cpus-per-task=8 --kill-on-bad-exit=1 \
+  "$PY" -u scripts/run/run_amip.py \
   --config config/amip/amip_production.yaml \
+  --distributed \
   "${AMIP_PATH_FLAGS[@]}" \
   --days "$TARGET_DAYS" \
   --checkpoint-days "$CHECKPOINT_DAYS" \
   --max-wallclock-seconds "$MAX_WALL" \
   "${RESTART[@]}" \
+  ${AMIP_EXTRA_FLAGS:-} \
   --output "$OUTDIR"
 rc=$?
 new_day=$(_ckpt_day)
@@ -86,4 +131,5 @@ if [ "${new_day:-0}" -le "${cur_day:-0}" ]; then
 fi
 
 echo "[chain] $new_day/$TARGET_DAYS days done; submitting the next link."
-sbatch --export="ALL,OUTDIR=$OUTDIR,TARGET_DAYS=$TARGET_DAYS,CHECKPOINT_DAYS=$CHECKPOINT_DAYS,MAX_WALL=$MAX_WALL" "$0"
+sbatch --nodes="$AMIP_NODES" --ntasks="$AMIP_N_GPUS" --ntasks-per-node="${_PER_NODE}" --gres="gpu:${_PER_NODE}" --output="$OUTDIR/slurm_%j.out" \
+  --export="ALL,OUTDIR=$OUTDIR,TARGET_DAYS=$TARGET_DAYS,CHECKPOINT_DAYS=$CHECKPOINT_DAYS,MAX_WALL=$MAX_WALL,AMIP_NODES=$AMIP_NODES,AMIP_N_GPUS=$AMIP_N_GPUS" "$0"

@@ -402,6 +402,30 @@ def test_sundqvist_rain_survival_rebuild_matches_physical_scheme():
     )
 
 
+def test_sundqvist_rain_survival_rebuild_gradient_finite_in_rain_free_column():
+    """A cloud-free column has zero base evaporation; the rescale's discarded
+    0/0 branch must not turn the reverse pass into NaN (review F2)."""
+    T = jnp.array([[282.0, 276.0], [290.0, 280.0]])
+    q_v = jnp.array([[8.5e-3, 5.5e-3], [2.0e-3, 1.0e-3]])    # col 2 dry
+    q_c = jnp.array([[2.0e-4, 1.0e-4], [0.0, 0.0]])          # col 2 cloud-free
+    p_full = jnp.array([[8.5e4, 6.5e4], [8.5e4, 6.5e4]])
+    p_half = jnp.array([[9.5e4, 7.5e4, 5.5e4], [9.5e4, 7.5e4, 5.5e4]])
+    rho = jnp.array([[1.05, 0.82], [1.05, 0.82]])
+    dz = jnp.array([[1200.0, 1500.0], [1200.0, 1500.0]])
+    z = jnp.zeros_like(q_c)
+    hm = HydrometeorState(q_c=q_c, q_r=z, q_i=z, q_s=z, q_g=z, N_c=z, N_r=z, N_i=z)
+
+    def loss(T_, frac):
+        out = apply_predicted_sundqvist_rain_survival_fraction(
+            frac, T=T_, q_v=q_v, hydrometeors=hm, p_full=p_full,
+            p_half=p_half, rho=rho, dz=dz, dt=150.0, config=SundqvistConfig())
+        return jnp.sum(out.dT_dt) + jnp.sum(out.dq_v_dt) + jnp.sum(out.precipitation)
+
+    gT, gf = jax.grad(loss, argnums=(0, 1))(T, jnp.array([0.6, 0.6]))
+    assert bool(jnp.all(jnp.isfinite(gT))) and bool(jnp.all(jnp.isfinite(gf)))
+    assert float(jnp.abs(gT[0]).max()) > 0.0       # the rainy column stays live
+
+
 def test_sundqvist_rain_survival_rebuild_drains_incoming_qr():
     """The ML rebuild path must apply the same diagnostic-rain semantics
     as the physical scheme.

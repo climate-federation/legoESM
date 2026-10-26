@@ -39,7 +39,7 @@ import numpy as np
 import jax
 import jax.numpy as jnp
 
-from legoesm.core.precision import cast_pytree
+from legoesm.core.precision import cast_pytree, finalize_to_storage
 from legoesm.core.state import (
     MPAS_SFC_DIAG_EXTRA_KEYS,
     MPAS_SFC_DIAG_MPI_UNPUBLISHED,
@@ -56,6 +56,7 @@ from legoesm.core.state import (
 from legoesm.grids.voronoi import VoronoiMesh
 from legoesm.parallel.voronoi_partition import (
     BatchedHaloSchedule,
+    complete_cell_rings,
     VoronoiPartition,
     build_batched_halo_schedule,
     build_local_mesh,
@@ -73,6 +74,7 @@ from legoesm.parallel.halo_exchange_voronoi import (
 from legoesm.parallel.reductions import (
     require_mpi_stack,
     batch_allreduce_mpi,
+    broadcast_allreduce_sum,
     global_min_mpi,
     global_max_mpi,
     global_sum_mpi,
@@ -135,6 +137,9 @@ class VoronoiPartitionLayout(NamedTuple):
     # layout time; ``None`` only for layouts constructed by hand —
     # ``make_voronoi_mpi_step`` rebuilds it on demand then.
     batched_comm: BatchedHaloSchedule | None = None
+    # Halo rings with complete local stencils, MIN over ranks (set by
+    # initialize_voronoi_mpi; 0 = uncertified).
+    complete_cell_rings: int = 0
 
 
 def voronoi_partition_metrics(
@@ -469,6 +474,23 @@ class MPASOceanHaloRefresh(NamedTuple):
     cells: Callable
     both: Callable
     vertices: Callable
+    # Distributed-reduction context carried WITH the refresh so the step's
+    # reduction sites (barotropic PCG dots / mass projection, eta-floor
+    # redistribution, conservation fixer) need no transport-specific global
+    # accessor: ``owned_mask_*`` weight the local partial sums (halo rows
+    # excluded), ``global_sum(list) -> list`` is the cross-rank SUM
+    # (allreduce on the MPI lane, ``psum`` on the SPMD lane).  ``None`` keeps
+    # the historical layout-accessor / ``is_multi_process`` paths.
+    owned_mask_cells: jnp.ndarray | None = None
+    owned_mask_edges: jnp.ndarray | None = None
+    global_sum: Callable | None = None
+    # Cell rings each refresh fills (SPMD lane); ``None`` = not declared.
+    # The global-polynomial PCG preconditioner needs >= sweeps - 2.
+    halo_depth: int | None = None
+    # Halo rings (around the owned block, on EVERY rank) whose cells carry
+    # their full stencil locally — the redundant-compute budget of one
+    # ``cells`` exchange.  0 = not certified (the deep-halo PCG refuses).
+    complete_cell_rings: int = 0
 
 
 def make_mpas_ocean_halo_refresh(layout) -> MPASOceanHaloRefresh:
@@ -504,8 +526,16 @@ def make_mpas_ocean_halo_refresh(layout) -> MPASOceanHaloRefresh:
             return tuple(fields)
         return tuple(_vx.exchange_vertex_field(f) for f in fields)
 
+    def _global_sum(vals):
+        from legoesm.parallel.reductions import batch_allreduce_mpi
+        return batch_allreduce_mpi(list(vals), op="sum")
+
     return MPASOceanHaloRefresh(edges=_edges, cells=_cells, both=_both,
-                                vertices=_vertices)
+                                vertices=_vertices,
+                                owned_mask_cells=layout.owned_mask_cells,
+                                complete_cell_rings=layout.complete_cell_rings,
+                                owned_mask_edges=layout.owned_mask_edges,
+                                global_sum=_global_sum)
 
 
 def gather_voronoi_field(
@@ -634,8 +664,13 @@ def _fix_mass_mpi(
     state_old: MPASHydrostaticState,
     owned_area: jnp.ndarray,
     total_area: float,
+    sigma_coord=None,
 ) -> MPASHydrostaticState:
-    """Global mass fixer: sum only owned cells, allreduce across ranks.
+    """Global DRY-mass fixer: sum only owned cells, allreduce across ranks.
+
+    Conserves ``∫ (p_s - g*column water) dA`` when ``sigma_coord`` is
+    given (the serial ``_fix_mass_mpas_hydro`` convention, user decision
+    2026-09-28); ``None`` keeps the legacy total-mass sum.
 
     Parameters
     ----------
@@ -657,8 +692,14 @@ def _fix_mass_mpi(
     # JAX_ENABLE_X64 off, ``float64`` falls back to float32 — same as serial.)
     acc = jnp.float64
     area_acc = owned_area.astype(acc)
-    local_mass_old = jnp.sum(state_old.p_s.data.astype(acc) * area_acc)
-    local_mass_new = jnp.sum(state_new.p_s.data.astype(acc) * area_acc)
+    if sigma_coord is not None:
+        from legoesm.core.conservation import dry_surface_pressure
+        ps_old = dry_surface_pressure(state_old.p_s.data, state_old.tracers, sigma_coord)
+        ps_new = dry_surface_pressure(state_new.p_s.data, state_new.tracers, sigma_coord)
+    else:
+        ps_old, ps_new = state_old.p_s.data, state_new.p_s.data
+    local_mass_old = jnp.sum(ps_old.astype(acc) * area_acc)
+    local_mass_new = jnp.sum(ps_new.astype(acc) * area_acc)
     mass_old, mass_new = batch_allreduce_mpi(
         [local_mass_old, local_mass_new], op="sum",
     )
@@ -666,6 +707,12 @@ def _fix_mass_mpi(
     # fp64 correction; the storage-precision cast at the end of ``_step``
     # returns p_s to its carry dtype (mirrors serial cast_pytree(..., "storage")).
     correction = (mass_old - mass_new) / total_area
+    if sigma_coord is not None:
+        from legoesm.core.conservation import shift_ps_keep_tracer_mass
+        ps_new, tr_new = shift_ps_keep_tracer_mass(
+            state_new.p_s.data, state_new.tracers, sigma_coord, correction)
+        return state_new._replace(p_s=state_new.p_s.replace(data=ps_new),
+                                  tracers=tr_new)
     p_s_fixed = state_new.p_s.replace(
         data=state_new.p_s.data + correction)
     return state_new._replace(p_s=p_s_fixed)
@@ -710,6 +757,9 @@ def initialize_voronoi_mpi(
         method=method, halo_depth=halo_depth,
         cell_owner=cell_owner,
     )
+    # One certificate for all ranks: the deep-halo PCG cadence must agree.
+    layout = layout._replace(complete_cell_rings=int(comm.allreduce(
+        complete_cell_rings(global_mesh, [layout.partition]), op=MPI.MIN)))
 
     logger.info(
         "Voronoi MPI init: rank=%d/%d, owned_cells=%d, halo_cells=%d, "
@@ -1100,6 +1150,17 @@ def make_voronoi_mpi_step(
         state_new = dispatch_integrator(
             state, _mpi_tendency_fn, dt, config.time_integrator,
         )
+        if getattr(config, "energy_fixer", False):
+            # Dycore energy fixer, mirroring the serial ``_step_jit`` (F15):
+            # owned cells + one allreduce-SUM (AD-safe).  The cell KE reads
+            # every edge of an owned cell, so both states get a fresh halo.
+            from legoesm.core.conservation import voronoi_energy_fixer_dT
+            _dT_fix = voronoi_energy_fixer_dT(
+                _exchange_mpas_state(state), _exchange_mpas_state(state_new),
+                local_mesh, sigma_coord, _owned_area, sum_fn=global_sum_mpi)
+            state_new = state_new._replace(T=state_new.T.replace(
+                data=state_new.T.data
+                + _dT_fix.astype(state_new.T.data.dtype)))
 
         # Operator-split physics: evaluate ONCE on the post-dynamics state and
         # apply forward over dt (state += dt * tendency).  Mirrors the serial
@@ -1153,27 +1214,26 @@ def make_voronoi_mpi_step(
                     or _pr_sfc is not None
                     or any(_e is not None for _e in _extras)):
                 sfc_diag = (_sw_sfc, _lw_sfc, _pr_sfc) + _extras
+            _ps_phys = state_phys_in.p_s.data + dt * _pt.dp_s_dt.data
+            _tr_phys = state_phys_in.tracers
+            if (state_phys_in.tracers is not None
+                    and _pt.tracer_tendencies is not None):
+                # water tendencies carry their mass (mirrors the serial
+                # _step_jit; shared helper)
+                from legoesm.core.conservation import apply_physics_water_mass
+                _tr_phys, _ps_phys = apply_physics_water_mass(
+                    state_phys_in.tracers, _pt.tracer_tendencies, _ps_phys,
+                    sigma_coord, dt)
             state_new = MPASHydrostaticState(
                 u=state_phys_in.u.replace(
                     data=state_phys_in.u.data + dt * _pt.du_dt.data),
                 T=state_phys_in.T.replace(
                     data=state_phys_in.T.data + dt * _pt.dT_dt.data),
-                p_s=state_phys_in.p_s.replace(
-                    data=state_phys_in.p_s.data + dt * _pt.dp_s_dt.data),
+                p_s=state_phys_in.p_s.replace(data=_ps_phys),
                 phis=state_new.phis,
                 v=state_new.v,
-                tracers=state_phys_in.tracers,
+                tracers=_tr_phys,
             )
-            if (state_new.tracers is not None
-                    and _pt.tracer_tendencies is not None):
-                state_new = state_new._replace(tracers={
-                    k: (state_new.tracers[k].replace(
-                            data=state_new.tracers[k].data
-                            + dt * _pt.tracer_tendencies[k].data)
-                        if k in _pt.tracer_tendencies
-                        else state_new.tracers[k])
-                    for k in state_new.tracers
-                })
 
         # Global mass fixer BEFORE the floors, mirroring the serial ordering
         # (codex 2026-07-26 round 2, finding 5): the fixer touches ONLY p_s
@@ -1184,9 +1244,24 @@ def make_voronoi_mpi_step(
         # (Owned cells + allreduce — correct under the cell partition, unlike
         # the model's internal fixer which would double-count halo cells.)
         if config.fix_mass:
+            _pre_mf = state_new
             state_new = _fix_mass_mpi(
                 state_new, state, _owned_area, _total_area_global,
+                sigma_coord=sigma_coord,
             )
+            if getattr(config, "energy_fixer", False):
+                # The mass fixer sits outside the energy window: return the
+                # energy its p_s shift changed as heat [K, +warming] (serial
+                # ``_step_jit`` mirror, F15 V8).  It leaves u untouched, so one
+                # halo refresh serves both states' cell KE.  (The helper was
+                # imported above under the same static energy_fixer branch.)
+                _pre_x = _exchange_mpas_state(_pre_mf)
+                _dT_mf = voronoi_energy_fixer_dT(
+                    _pre_x, state_new._replace(u=_pre_x.u), local_mesh,
+                    sigma_coord, _owned_area, sum_fn=global_sum_mpi)
+                state_new = state_new._replace(T=state_new.T.replace(
+                    data=state_new.T.data
+                    + _dT_mf.astype(state_new.T.data.dtype)))
 
         # Floors: temperature and tracer non-negativity (advection is not
         # positive-definite; clamp before tracers feed saturation).
@@ -1195,70 +1270,53 @@ def make_voronoi_mpi_step(
             state_new = state_new._replace(
                 T=state_new.T.replace(data=T_clipped))
         if state_new.tracers is not None:
-            # Mirror the serial floors EXACTLY (codex 2026-07-26 review of
-            # fc7e7dce8: this block previously hard-coded the plain clamp, so
-            # ``conservative_tracer_clamp`` was SILENTLY INERT under MPI — the
-            # repo's recurring dropped-flag defect class).  The borrow is
-            # column-local, so it needs no halo/allreduce and is identical on
-            # owned and halo cells.
-            if getattr(config, "conservative_tracer_clamp", False):
-                from legoesm.core.conservation import (
-                    conservative_positive_clip_global,
-                    is_borrow_eligible_tracer,
-                )
-                # PER-MASS tracers borrowed (mixing ratios + N_i/N_s/N_g) —
-                # mirrors the serial floors exactly (see primitive_eq_mpas:
-                # the naive clip INVENTED per-mass number every step, x2.2/day
-                # measured -> N_i overflow NaN; per-volume N_c/N_r keep the
-                # plain clip pending density-aware repair).  GLOBAL residual
-                # redistribution over OWNED cells via allreduce-SUM (the one
-                # AD-safe collective) so the factor is decomposition-
-                # independent; owned-mask weighting keeps halo cells out of
-                # the budget exactly like the mass fixer.
-                # TRUE layer-mass dp weight (post-mass-fix p_s): identical
-                # rescale on pure sigma (per-column p_s cancels), correct on
-                # hybrid where dsigma is not the layer mass (codex
-                # 2026-07-28 round 2).  Non-positive dp zero-weighted.
-                _ph = sigma_coord.pressure_at_half(state_new.p_s.data)
-                _dp = jnp.maximum(_ph[..., 1:] - _ph[..., :-1], 0.0)
-                _owned = layout.owned_mask_cells[:, None]
-                # BROADCAST-allreduce VJP wrapper, NOT global_sum_mpi: the
-                # summed scalar is broadcast back into every rank's rescale
-                # factor, whose correct transpose is allreduce(SUM) of the
-                # cotangent — identity-VJP global_sum_mpi drops the cross-
-                # rank term (the #811 flux-form scale lesson; codex
-                # 2026-07-28 round 2).
-                from legoesm.core.conservation import (
-                    broadcast_allreduce_sum,
-                )
+            # ONE shared positivity stage, mirroring the serial MPAS floors
+            # EXACTLY (#1354/#1515; codex 2026-07-26 review of fc7e7dce8 — this
+            # block previously hard-coded the plain clamp, so the flag was
+            # SILENTLY INERT under MPI).  Borrow (default) is frozen-MSE-neutral
+            # for vapour AND condensate; the hard-floor fallback carries the
+            # per-species latent-heat T correction incl ice.  The borrow's
+            # GLOBAL residual redistribution runs over OWNED cells via an
+            # allreduce-SUM (the one AD-safe collective) so the factor is
+            # decomposition-independent; owned-mask weighting keeps halo cells
+            # out of the budget exactly like the mass fixer.  dp = TRUE layer
+            # mass (post-mass-fix p_s; non-positive dp zero-weighted).
+            from legoesm.core.conservation import apply_water_positivity
+            _ph = sigma_coord.pressure_at_half(state_new.p_s.data)
+            _dp = jnp.maximum(_ph[..., 1:] - _ph[..., :-1], 0.0)
+            _owned = layout.owned_mask_cells[:, None]
 
-                def _mpi_owned_sum(x, _o=_owned):
-                    return broadcast_allreduce_sum(
-                        jnp.sum(jnp.where(_o, x, 0.0)))
+            def _mpi_owned_sum(x, _o=_owned):
+                # The summed scalar feeds every rank's rescale factor, so the
+                # backward pass must allreduce the cotangent (#811, #1814).
+                return broadcast_allreduce_sum(
+                    jnp.sum(jnp.where(_o, x, 0.0)))
 
-                # SORTED iteration: the closure issues collectives per
-                # tracer, so every rank must pair allreduces for the SAME
-                # tracer — dict insertion order is not a cross-rank contract
-                # (codex 2026-07-28: mismatched orders would silently corrupt
-                # every factor).
-                state_new = state_new._replace(tracers={
-                    k: state_new.tracers[k].replace(data=(
-                        conservative_positive_clip_global(
-                            state_new.tracers[k].data, _dp,
-                            sum_fn=_mpi_owned_sum)[0]
-                        if is_borrow_eligible_tracer(k)
-                        else jnp.maximum(state_new.tracers[k].data, 0.0)))
-                    for k in sorted(state_new.tracers)
-                })
-            else:
-                state_new = state_new._replace(tracers={
-                    k: f.replace(data=jnp.maximum(f.data, 0.0))
-                    for k, f in state_new.tracers.items()
-                })
+            # apply_water_positivity iterates SORTED, so every rank issues the
+            # per-tracer allreduces in the SAME order (a cross-rank contract).
+            _tr_out, _T_out = apply_water_positivity(
+                state_new.tracers, state_new.T.data, _dp,
+                conservative=getattr(
+                    config, "conservative_tracer_clamp", False),
+                energy_consistent=getattr(
+                    config, "energy_consistent_moisture_clip", False),
+                area=_owned_area,
+                # GLOBAL mean cell area as the (partition-independent) scale
+                area_ref=_total_area_global / layout.partition.nCells_global,
+                sum_fn=_mpi_owned_sum)
+            state_new = state_new._replace(
+                tracers=_tr_out, T=state_new.T.replace(data=_T_out))
 
         # (mass fixer moved above the floors — codex round-2 finding 5.)
 
-        return cast_pytree(state_new, None, "storage"), phys_state_out, sfc_diag
+        # #1675: ``cast_pytree`` skips DOWNCASTS, so in ``mixed`` it never
+        # rounded the mass fixer's float64 back out of the bulk state.
+        # ``finalize_to_storage`` does, and keeps ``p_s`` at the accumulate
+        # dtype (the exact mass correction is load-bearing). No-op wherever
+        # storage == accumulate, i.e. every mode except mixed.
+        return (finalize_to_storage(
+                    cast_pytree(state_new, None, "storage")),
+                phys_state_out, sfc_diag)
 
     logger.info(
         "Voronoi MPI step ready: rank=%d/%d, %d owned cells, %d local cells",
@@ -1281,7 +1339,7 @@ def make_voronoi_mpi_step(
                 physics_fn, phys_state,
                 where="make_voronoi_mpi_step(return_phys_state=True)")
             _state_out, _phys_out, _sfc = _step(state, dt, forcing, phys_state)
-            # Publish the surface-flux diagnostic on the model so ``_run_mpas``
+            # Publish the surface-flux diagnostic on the model so ``_run_column``
             # stashes it into ``_carry_aux`` for the coupler — the coupled
             # MPI-voronoi path otherwise forced the ocean/land with zero surface
             # flux.  Guard against stashing a Tracer (an outer jit/scan/grad would

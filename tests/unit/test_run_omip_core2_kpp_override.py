@@ -43,6 +43,18 @@ def test_override_sets_both():
     assert vm.kpp == KPPConfig()._replace(Ri_crit=0.45, Cv=2.2)
 
 
+@pytest.mark.parametrize("mode", [0, 1, 2, 3])
+def test_kpp_eice_override_uses_nemo_numbering(mode):
+    vm = _kpp_vmix_override(kpp_eice=mode)
+    assert vm.kpp == KPPConfig()._replace(eice=mode)
+
+
+@pytest.mark.parametrize("mode", [-1, 4, 99])
+def test_kpp_eice_override_rejects_out_of_range(mode):
+    with pytest.raises(ValueError, match="0, 1, 2 or 3"):
+        _kpp_vmix_override(kpp_eice=mode)
+
+
 @pytest.mark.parametrize("bad", [0.0, -0.3, float("nan"), float("inf"),
                                  _KPP_RI_CRIT_RANGE[1] + 0.1,   # above hi
                                  _KPP_RI_CRIT_RANGE[0] - 0.01])  # below lo
@@ -180,12 +192,16 @@ def test_mpas_tke_callsite_runs_full_card_with_seed():
     assert m, "--mpas-vmix tke call-site no longer runs the full ORCA1 card"
     assert "state = model.seed_tke(state)" in src, (
         "the MPAS host loop no longer seeds the prognostic TKE carry")
-    # The card carries the #1326 defaults: prognostic Mode-A + nn_mxl=3 +
-    # Dirichlet surface BC + nn_eice=3.
+    # The card carries prognostic Mode-A + Dirichlet surface BC + nn_eice=3,
+    # and since 2026-08-13 tke_mxl_choice=4 -- ORCA1's namelist_cfg sets
+    # `nn_mxl = 2`, which is legoESM choice 4, not 3. The card had carried 3
+    # while its own comment said 4 was the ORCA1 value; codex 9405307
+    # confirmed 4 against NEMO's SELECT CASE (zdftke.F90:680, one bounded
+    # length used for BOTH viscosity and dissipation).
     vm = core2.build_tripole_vmix_config("tke", iwm=None)
     assert vm.scheme == "tke"
     assert vm.tke.prognostic is True
-    assert vm.tke.tke_mxl_choice == 3
+    assert vm.tke.tke_mxl_choice == 4
     assert vm.tke.surface_bc == "nemo_dirichlet"
     assert vm.tke.eice == 3
 

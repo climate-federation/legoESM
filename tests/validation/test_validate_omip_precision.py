@@ -42,6 +42,15 @@ def test_precision_validation_harness_runs():
     # The fp64 reference must conserve its own budgets on a closed basin.
     assert result["checks"]["fp64_heat_conserved"] is True
     assert result["checks"]["fp64_salt_conserved"] is True
+    # #1675 review finding: this test used to assert only that ``passed`` was a
+    # BOOLEAN, and never looked at the mixed-mode half of the verdict -- so a
+    # run where mixed lost heat, lost salt and disagreed with fp64 on
+    # temperature still went green. Assert the verdict and the mixed budgets.
+    assert result["checks"]["mixed_heat_conserved"] is True, result["metrics"]
+    assert result["checks"]["mixed_salt_conserved"] is True, result["metrics"]
+    assert result["passed"] is True, (
+        f"harness verdict FAILED: "
+        f"{[k for k, v in result['checks'].items() if v is not True]}")
     # Metrics are populated (drift + cross-mode divergence numbers).
     for key in ("fp64_heat_drift_rel", "heat_cross_rel", "T_rms_diff_rel"):
         assert key in result["metrics"]

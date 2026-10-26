@@ -82,6 +82,27 @@ class ConvectionOutput(NamedTuple):
     100% of convective condensate loads the grid-scale cloud and the
     radiation, which microphysics cannot drain fast enough
     (source-buffered)."""
+    # Appended LAST (positional constructors keep their field order).
+    mass_flux_up: jax.Array | None = None
+    """Optional deep-updraft mass flux on INTERFACES [kg/m^2/s], shape
+    (ncol, nlev+1), top->bottom (CAM ``cmfmc``).  Published into
+    ``PhysicsState.conv_mass_flux_up`` for the CAM6 ``cam6_clubb`` deep-
+    convective cloud fraction.  ``None`` (default) = the scheme does not
+    expose one; that cloud term is then exactly zero."""
+    icwmr: jax.Array | None = None
+    """Optional deep in-cloud condensate mixing ratio [kg/kg], shape
+    (ncol, nlev) (CAM ``dp_icwmr``); companion of ``mass_flux_up``."""
+    precip_frozen_sfc: jax.Array | None = None
+    """Optional FROZEN surface precipitation [kg/m^2/s, +into surface],
+    shape (ncol,), of a scheme that books its own surface precip (CAM ZM's
+    ``zm_conv_evap`` snow flux, whose fusion heat the scheme's heating
+    already carries).  The interactive land takes its snow from it (F29).
+    ``None`` = not published."""
+    tracer_transport: dict | None = None
+    """Optional convective transport tendencies of carried tracers, keyed by
+    tracer name (e.g. ``"q_c"``), each (ncol, nlev) [tracer units / s],
+    SIGNED and column-conserving (CAM ZM ``convtran``).  Hosts ADD them to
+    any other tendency of the same tracer.  ``None`` = no transport."""
 
 
 def split_convective_rain(dq_c_conv_dt, precip_efficiency):

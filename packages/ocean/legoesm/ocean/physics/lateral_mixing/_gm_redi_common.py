@@ -383,6 +383,7 @@ def compute_visbeck_kappa_gm(
     f_coriolis: jnp.ndarray,
     cfg: VisbeckConfig,
     rho_ref: float = _RHO_0_DEFAULT,
+    g: float = constants.g,
     *,
     T: jnp.ndarray | None = None,
     S: jnp.ndarray | None = None,
@@ -412,7 +413,7 @@ def compute_visbeck_kappa_gm(
         the configured bounds.
     """
     sigma_bar, L, wet_col, _int_N_dz, _sigma_local, _dzh = _eady_growth_and_length(
-        rho, S_x, S_y, z_coord, jacobian, f_coriolis, cfg, rho_ref,
+        rho, S_x, S_y, z_coord, jacobian, f_coriolis, cfg, rho_ref, g,
         n2_mode=getattr(cfg, "n2_mode", "insitu"),
         n2_over_dzw=getattr(cfg, "n2_over_dzw", False),
         T=T, S=S, p_cell=p_cell, eos_fn=eos_fn,
@@ -525,7 +526,9 @@ def compute_treguier_kappa_gm(
     f_coriolis: jnp.ndarray,
     cfg: TreguierConfig,
     rho_ref: float = _RHO_0_DEFAULT,
+    g: float = constants.g,
     omega: float = constants.Omega,
+    interface_active: jnp.ndarray | None = None,
 ) -> jnp.ndarray:
     r"""Treguier et al. (1997) / Held-Larichev (1996) eddy-induced-velocity
     coefficient — faithful port of NEMO 5.0.1 ``ldftra.F90::ldf_eiv``
@@ -569,7 +572,8 @@ def compute_treguier_kappa_gm(
     # length fields; none of its values reach the Treguier formula.
     sigma_bar, _L, wet_col, int_N_dz, sigma, dz_half = _eady_growth_and_length(
         rho, S_x, S_y, z_coord, jacobian, f_coriolis,
-        _TREGUIER_LENGTH_STUB, rho_ref,
+        _TREGUIER_LENGTH_STUB, rho_ref, g,
+        interface_active=interface_active,
     )
     del sigma_bar, _L
     f_abs = jnp.maximum(jnp.abs(f_coriolis), TREGUIER_F_MIN)
@@ -579,7 +583,12 @@ def compute_treguier_kappa_gm(
     # so sigma^2·dz = N²·(S_x²+S_y²)·dz  (ldf_eiv zah accumulation).
     zah = jnp.sum(sigma ** 2 * dz_half, axis=-1)
     zhw = TREGUIER_ZHW_OFFSET_M + jnp.sum(dz_half, axis=-1)
-    t_inv = jnp.sqrt(zah / zhw)
+    # Dry columns have zah=0 despite the local slope regularisation. Guard
+    # the sqrt argument BEFORE masking: sqrt(0)'s VJP otherwise gives NaNs
+    # under the final dry-column zero cotangent. Forward values are unchanged.
+    growth = zah / zhw
+    positive = growth > 0.0
+    t_inv = jnp.where(positive, jnp.sqrt(jnp.where(positive, growth, 1.0)), 0.0)
     f20 = 2.0 * omega * jnp.sin(
         jnp.deg2rad(TREGUIER_TAPER_LAT_DEG))
     taper = jnp.minimum(1.0, jnp.abs(f_coriolis) / f20)
@@ -611,9 +620,11 @@ def _eady_growth_and_length(
     f_coriolis: jnp.ndarray,
     cfg,
     rho_ref: float = _RHO_0_DEFAULT,
+    g: float = constants.g,
     *,
     n2_mode: str = "insitu",
     n2_over_dzw: bool = False,
+    interface_active: jnp.ndarray | None = None,
     T: jnp.ndarray | None = None,
     S: jnp.ndarray | None = None,
     p_cell: jnp.ndarray | None = None,
@@ -652,11 +663,26 @@ def _eady_growth_and_length(
     eps = EPS
     dz_actual = z_coord.dz_ref * jacobian[..., jnp.newaxis]
     dz_half = 0.5 * (dz_actual[..., :-1] + dz_actual[..., 1:])
+    if interface_active is not None:
+        # PARTIAL / SHALLOW COLUMNS.  The weight above is the FULL reference
+        # column scaled by the free-surface Jacobian; it knows nothing about
+        # where the seafloor is.  Left alone, a shelf column integrates
+        # sub-seafloor water into EVERY reduction below — inflating the
+        # quadrature weight (which dilutes ``sigma_bar`` and the Treguier
+        # growth rate) and adding spurious ``N dz`` to ``int_N_dz`` (which
+        # inflates the Rossby radius).  Zeroing the weight here fixes all of
+        # them at once, because every reduction below shares ``dz_half``.
+        # Omitted => byte-identical to the previous behaviour.
+        dz_half = dz_half * jnp.asarray(interface_active, dtype=dz_half.dtype)
 
     # Local growth rate sigma_Eady ~ N * |S| at each interior interface.
     if n2_mode == "insitu":
         N2 = compute_buoyancy_frequency(
-            rho, z_coord.dz_ref, jacobian, rho_ref=rho_ref, g=constants.g,
+            rho, z_coord.dz_ref,
+            # Dry columns carry zero quadrature weight below. Avoid a zero
+            # denominator BEFORE forming N2: later masking cannot rescue AD
+            # through inf * 0. Wet-column arithmetic is unchanged.
+            jnp.where(jacobian > 0.0, jacobian, 1.0), rho_ref=rho_ref, g=g,
         )
     elif n2_mode == "adiabatic":
         if T is None or S is None or p_cell is None or eos_fn is None:
@@ -679,7 +705,7 @@ def _eady_growth_and_length(
                 if n2_over_dzw else None)
         N2 = compute_buoyancy_frequency_adiabatic(
             T, S, p_cell, z_coord.dz_ref, jacobian,
-            eos_fn=eos_fn, rho_ref=rho_ref, g=constants.g,
+            eos_fn=eos_fn, rho_ref=rho_ref, g=g,
             dz_half=_dzw,
         )
     else:
@@ -745,6 +771,7 @@ def compute_geometric_column_integrals(
     f_coriolis: jnp.ndarray,
     visbeck_cfg,
     rho_ref: float = _RHO_0_DEFAULT,
+    g: float = constants.g,
     *,
     n2_mode: str = "insitu",
     n2_over_dzw: bool = False,
@@ -779,7 +806,7 @@ def compute_geometric_column_integrals(
     Returns ``(int_sigma2_dz, int_sigma_dz, int_N_dz, H_col, wet_col)``.
     """
     _sigma_bar, _L, wet_col, int_N_dz, sigma, _dzh = _eady_growth_and_length(
-        rho, S_x, S_y, z_coord, jacobian, f_coriolis, visbeck_cfg, rho_ref,
+        rho, S_x, S_y, z_coord, jacobian, f_coriolis, visbeck_cfg, rho_ref, g,
         n2_mode=n2_mode, n2_over_dzw=n2_over_dzw,
         T=T, S=S, p_cell=p_cell, eos_fn=eos_fn,
     )
@@ -806,6 +833,7 @@ def compute_eke_kappa_gm(
     visbeck_cfg,
     eke_cfg,
     rho_ref: float = _RHO_0_DEFAULT,
+    g: float = constants.g,
     *,
     beta: jnp.ndarray | None = None,
     depth_resolved: bool = False,
@@ -846,7 +874,7 @@ def compute_eke_kappa_gm(
     # independently. ``visbeck_cfg`` is still used for the LENGTH params
     # (L_min/L_max/f_min/use_rossby_radius/L_fixed).
     sigma_bar, L_rossby, wet_col, int_N_dz, sigma_local, _dzh = _eady_growth_and_length(
-        rho, S_x, S_y, z_coord, jacobian, f_coriolis, visbeck_cfg, rho_ref,
+        rho, S_x, S_y, z_coord, jacobian, f_coriolis, visbeck_cfg, rho_ref, g,
         n2_mode=getattr(eke_cfg, "n2_mode", "insitu"),
         n2_over_dzw=getattr(eke_cfg, "n2_over_dzw", False),
         T=T, S=S, p_cell=p_cell, eos_fn=eos_fn,

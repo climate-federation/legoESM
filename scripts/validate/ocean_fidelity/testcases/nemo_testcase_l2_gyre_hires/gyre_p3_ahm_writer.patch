@@ -1,0 +1,58 @@
+--- a/stprk3.F90
++++ b/stprk3.F90
+@@ -199,0 +200,2 @@
++      IF( l_ldfdyn_time .AND. kstp >= nit000 + 1 .AND. kstp <= nit000 + 2 )   &
++         &   CALL l4_dump_ahm( kstp, Nbb )
+@@ -410,0 +413,19 @@
++
++
++   SUBROUTINE l4_dump_ahm( kstp, klevel )
++      INTEGER, INTENT(in) :: kstp, klevel
++      INTEGER :: iunit, ios
++      CHARACTER(LEN=96) :: filename
++      CHARACTER(LEN=16) :: magic
++      IF( .NOT. lwp )   RETURN
++      IF( STORAGE_SIZE( 1._wp ) /= 64 )   CALL ctl_stop( 'lane4 AHM dump requires 64-bit wp' )
++      WRITE(filename,'("oracle_ahm_kt",I8.8,".bin")') kstp
++      OPEN( NEWUNIT=iunit, FILE=TRIM(filename), ACCESS='STREAM', FORM='UNFORMATTED', &
++         &  STATUS='REPLACE', ACTION='WRITE', IOSTAT=ios )
++      IF( ios /= 0 )   CALL ctl_stop( 'cannot open lane4 AHM file' )
++      magic = 'NEMO_L4_AHMTF__1'
++      WRITE(iunit) magic, 1, kstp, klevel, jpi, jpj, jpk, STORAGE_SIZE(1._wp)
++      WRITE(iunit) ahmt(:,:,:), ahmf(:,:,:)
++      CLOSE(iunit)
++      WRITE(numout,*) 'LANE4_AHM_DUMP ', kstp, klevel, TRIM(filename)
++   END SUBROUTINE l4_dump_ahm
+--- a/stprk3_stg.F90
++++ b/stprk3_stg.F90
+@@ -90,0 +91 @@
++      INTEGER  ::   l4_unit, l4_ios
+@@ -92,0 +94,3 @@
++      CHARACTER(LEN=96) :: l4_filename
++      CHARACTER(LEN=16) :: l4_magic
++      LOGICAL :: l4_dump_ldf
+@@ -99,0 +104 @@
++      REAL(wp), ALLOCATABLE, DIMENSION(:,:,:) ::   l4_uu_before, l4_vv_before
+@@ -106,0 +112,2 @@
++      l4_dump_ldf = lwp .AND. .NOT. ln_tile .AND. kstg == 3   &
++         &          .AND. kstp >= nit000 + 1 .AND. kstp <= nit000 + 2
+@@ -492,0 +500,6 @@
++            IF( l4_dump_ldf ) THEN
++               IF( STORAGE_SIZE( 1._wp ) /= 64 )   CALL ctl_stop( 'lane4 dynldf dump requires 64-bit wp' )
++               ALLOCATE( l4_uu_before(jpi,jpj,jpk), l4_vv_before(jpi,jpj,jpk) )
++               l4_uu_before(:,:,:) = uu(:,:,:,Krhs)
++               l4_vv_before(:,:,:) = vv(:,:,:,Krhs)
++            ENDIF
+@@ -493,0 +507,12 @@
++            IF( l4_dump_ldf ) THEN
++               WRITE(l4_filename,'("oracle_dynldf_kt",I8.8,".bin")') kstp
++               OPEN( NEWUNIT=l4_unit, FILE=TRIM(l4_filename), ACCESS='STREAM', FORM='UNFORMATTED', &
++                  &  STATUS='REPLACE', ACTION='WRITE', IOSTAT=l4_ios )
++               IF( l4_ios /= 0 )   CALL ctl_stop( 'cannot open lane4 dynldf file' )
++               l4_magic = 'NEMO_L4_DYNLDF_1'
++               WRITE(l4_unit) l4_magic, 1, kstp, kstg, Kbb, Kmm, Krhs, jpi, jpj, jpk, STORAGE_SIZE(1._wp)
++               WRITE(l4_unit) l4_uu_before, l4_vv_before, uu(:,:,:,Krhs), vv(:,:,:,Krhs)
++               CLOSE(l4_unit)
++               DEALLOCATE( l4_uu_before, l4_vv_before )
++               WRITE(numout,*) 'LANE4_DYNLDF_DUMP ', kstp, kstg, Kbb, Kmm, Krhs, TRIM(l4_filename)
++            ENDIF

@@ -15,8 +15,15 @@ import numpy as np
 
 from legoesm.core.precision import cast_pytree
 from legoesm.core.state import MPASOceanState, MPASOceanTendencies
+from legoesm.timestepping.integration import IntegrationMixin
 from legoesm.grids.voronoi import VoronoiMesh
-from legoesm.ocean.mpas_config import MPASOceanConfig
+from legoesm.ocean.constants_config import ConstantsConfig
+from legoesm.ocean.state import physics_with_constants
+from legoesm.ocean.mpas_config import (
+    K_ZETA_BIH_MAX_SPACING_RATIO,
+    MPASOceanConfig,
+    resolution_scaled_k_zeta_bih,
+)
 from legoesm.ocean.vertical import (
     OceanPartialCellCoordinate,
     OceanZStarCoordinate,
@@ -136,7 +143,7 @@ def _forward_backward_coriolis_mpas_3d(
     return u_prime_new + u_bar
 
 
-class MPASOceanModel:
+class MPASOceanModel(IntegrationMixin):
     """MPAS ocean model with split-explicit time stepping.
 
     Parameters
@@ -151,11 +158,111 @@ class MPASOceanModel:
         mesh: VoronoiMesh,
         z_coord: OceanZStarCoordinate,
         config: MPASOceanConfig | None = None,
+        *,
+        iwm_forcing=None,
     ):
         self.mesh = mesh
         self.z_coord = z_coord
         self.config = config or MPASOceanConfig()
         self._cfl_checked = False
+        self._vf_checked = False
+        # Internal wave-driven mixing (zdfiwm) static forcing maps
+        # (IWMForcing of de Lavergne power/decay fields on THIS mesh's
+        # (nCells,) cell centres), captured as closure constants by the
+        # jitted step.  Both-or-neither with the config switch — mirrors
+        # the lat-lon C-grid model.
+        self._iwm_forcing = iwm_forcing
+        _vmix_cfg_init = (self.config.physics.vertical_mixing
+                          if getattr(self.config, "physics", None) is not None
+                          else None)
+        _iwm_cfg_init = (getattr(_vmix_cfg_init, "iwm", None)
+                         if _vmix_cfg_init is not None else None)
+        self._iwm_cfg = (_iwm_cfg_init
+                         if (_iwm_cfg_init is not None
+                             and _iwm_cfg_init.enabled) else None)
+        if iwm_forcing is not None and self._iwm_cfg is None:
+            raise ValueError(
+                "iwm_forcing was supplied but "
+                "physics.vertical_mixing.iwm.enabled is not True — the maps "
+                "would be silently ignored.")
+        if (self._iwm_cfg is not None
+                and not getattr(self.config, "implicit_vertical_mixing",
+                                False)):
+            raise ValueError(
+                "vertical_mixing.iwm.enabled=True requires "
+                "implicit_vertical_mixing=True on MPAS (zdfiwm contributes "
+                "to the implicit avt/avm profiles).")
+
+        # ONE MODEL, ONE SET OF CONSTANTS. This configuration carries its own
+        # gravity and reference density, and its physics pipeline carries a
+        # second set. Nothing reconciled them, so a card pinning the model's
+        # gravity left every mixing and convection path on the library's --
+        # the two halves of one model on different planets, and silently.
+        #
+        # The lat-lon model has refused that since it was found there, and
+        # this delegates to the SAME routing helper rather than re-deriving
+        # the rule. That matters for the case a first version of this check
+        # got wrong: a physics pipeline still PROVABLY on the library
+        # defaults is not a pin, it is an absence, and it must INHERIT the
+        # model's values rather than be rejected as a conflict. Rejecting it
+        # broke a real card -- an unstructured configuration pinning its
+        # reference density beside an untouched physics block -- before its
+        # first step.
+        #
+        # Traced constants stay undecidable and are left alone; that is why
+        # the helper asks for a proven difference rather than using ``!=``.
+        _model_cc = ConstantsConfig(g=self.config.g, rho_0=self.config.rho_0)
+        _phys = getattr(self.config, "physics", None)
+        if _phys is not None:
+            _routed = physics_with_constants(_phys, _model_cc)
+            if _routed is not _phys:
+                self.config = self.config._replace(physics=_routed)
+            # The pipeline's own pair is authoritative once routed: it carries
+            # every constant, including the ones the model configuration has
+            # no field for, so rebuilding a pair from gravity and density
+            # alone would drop a pinned specific heat.
+            _cc = getattr(self.config.physics, "constants", None)
+            self._constants_config = _cc if _cc is not None else _model_cc
+        else:
+            self._constants_config = _model_cc
+
+        # Barotropic PCG bundle per JAX backend, written back so the run's
+        # config records the solver it used.
+        from legoesm.ocean.mpas_config import resolve_barotropic_pcg_defaults
+        self.config = resolve_barotropic_pcg_defaults(self.config)
+
+        # Resolution-scaled biharmonic vorticity damping.  Resolved HERE --
+        # the one place every driver, experiment and test hands a mesh and a
+        # configuration to the same constructor -- so no mesh can silently
+        # inherit a coefficient tuned at another resolution.  Ghost edges from
+        # the SPMD padding carry ``dvEdge = 0`` and ``dcEdge = 1`` (the latter
+        # avoids 0/0 in the gradient), so REAL edges are selected by dvEdge --
+        # selecting on dcEdge would keep every ghost at 1 m and both skew the
+        # mean and trip the uniformity guard on every sharded run.
+        if self.config.K_zeta_bih is None:
+            _dc = np.asarray(self.mesh.dcEdge)
+            _dv = np.asarray(self.mesh.dvEdge)
+            _dc = _dc[(_dv > 0.0) & (_dc > 0.0)]
+            if _dc.size == 0:
+                raise ValueError(
+                    "MPASOceanModel: K_zeta_bih=None requires a mesh with "
+                    "positive dcEdge to derive the coefficient from.")
+            _ratio = float(_dc.max()) / float(_dc.min())
+            if _ratio > K_ZETA_BIH_MAX_SPACING_RATIO:
+                raise ValueError(
+                    "MPASOceanModel: K_zeta_bih=None derives ONE coefficient "
+                    "from the mean cell spacing, which describes a "
+                    f"quasi-uniform mesh; this mesh spans {_ratio:.1f}x in "
+                    f"dcEdge (limit {K_ZETA_BIH_MAX_SPACING_RATIO}). Pin the "
+                    "coefficient explicitly (MPASOceanConfig(K_zeta_bih=...) / "
+                    "--mpas-k-zeta-bih) for a variable-resolution mesh.")
+            # Mesh arrays are commonly stored as float32.  Accumulating their
+            # mean in float32 made the configured ico6 anchor differ from the
+            # model's own mean by 7.8 mm, defeating the promised exact anchor.
+            _dx = float(_dc.mean(dtype=np.float64))
+            self.config = self.config._replace(
+                K_zeta_bih=resolution_scaled_k_zeta_bih(_dx, self.config),
+                K_zeta_bih_dx_m=_dx)
 
         _valid_solvers = ("explicit_substep", "implicit_cn")
         if self.config.barotropic_solver not in _valid_solvers:
@@ -281,7 +388,9 @@ class MPASOceanModel:
                     make_kpp_profiles_mpas,
                 )
                 self._kpp_profiles_fn = make_kpp_profiles_mpas(
-                    _vm_cfg, eos_fn=self._eos_fn)
+                    _vm_cfg, eos_fn=self._eos_fn,
+                    constants_config=self._constants_config,
+                    iwm_applied_by_model=True)
 
         # Build TKE profile function for the implicit vertical mixing path.
         # Like KPP, TKE returns raw (A_v, K_v) cell profiles that feed the
@@ -301,12 +410,17 @@ class MPASOceanModel:
                     make_tke_profiles_mpas,
                 )
                 self._tke_profiles_fn = make_tke_profiles_mpas(
-                    _vm_cfg_tke, eos_fn=self._eos_fn)
+                    _vm_cfg_tke, eos_fn=self._eos_fn,
+                    constants_config=self._constants_config,
+                    iwm_applied_by_model=True)
                 self._tke_prognostic = bool(
                     getattr(_vm_cfg_tke.tke, "prognostic", False))
 
         # Cache convection config for implicit vertical mixing path.
         self._conv_config = None
+        # The run's own constants, for the convective-adjustment density below.
+        # Read from the physics config the model was built with rather than
+        # left to the library default, which the comparison cards do not use.
         if self.config.implicit_vertical_mixing and self.config.physics is not None:
             _conv_cfg = getattr(self.config.physics, "convection", None)
             if _conv_cfg is not None and _conv_cfg.scheme == "enhanced_diffusion":
@@ -346,7 +460,10 @@ class MPASOceanModel:
         g = self.config.g
         H_max = self.z_coord.H_max
         n_sub = self.config.n_barotropic_substeps
-        dx_min = float(jnp.min(self.mesh.dcEdge))
+        # Padded ghost edges (SPMD / sharding pads) carry dcEdge=1, dvEdge=0;
+        # real edges always have dvEdge>0 — exclude the pads from the minimum.
+        _real = self.mesh.dvEdge > 0
+        dx_min = float(jnp.min(jnp.where(_real, self.mesh.dcEdge, jnp.inf)))
 
         c_baro = math.sqrt(g * H_max)
         dt_baro = dt / n_sub
@@ -362,7 +479,53 @@ class MPASOceanModel:
                 f"(currently {n_sub}).",
                 stacklevel=2,
             )
+        self.check_vorticity_filter_stability(dt)
         return cfl
+
+    def vorticity_filter_stability_number(self, dt: float) -> float:
+        """``K_zeta_bih * dt * lambda_max**2`` for the EXPLICIT biharmonic
+        vorticity filter (``ocean_pe_mpas`` visc term, forward-Euler in the
+        momentum update).
+
+        ``lambda_max ~ 8 / dv_min**2`` is the vertex-Laplacian spectral limit
+        of a regular degree-3 dual mesh (codex review 2026-09-04 of the
+        level-8 blowup), evaluated at the mesh's MINIMUM dvEdge; the number
+        is 1.4 on the level-7 mesh (min dv 28.9 km, dt 150 s, K 1e14 -- ran
+        180 days) and 11 on level 8 (min dv 14.4 km, dt 75 s, same K -- blew
+        up in 10 steps with a per-step growth of ~5).  The classic explicit
+        limit is 2.
+        """
+        K = float(self.config.K_zeta_bih)
+        if K <= 0.0:
+            return 0.0
+        dv_min = float(jnp.min(jnp.where(self.mesh.dvEdge > 0.0,
+                                         self.mesh.dvEdge, jnp.inf)))
+        lam = 8.0 / (dv_min * dv_min)
+        return K * dt * lam * lam
+
+    def check_vorticity_filter_stability(self, dt: float) -> float:
+        """Refuse an explicit vorticity filter beyond its stability limit.
+
+        The level-8 blowup (2026-09-04) was exactly this: the NEMO-match
+        recipe's fixed ``K_zeta_bih = 1e14`` crossed the explicit limit on
+        the finer dual mesh and nothing checked it.  Raise at >= 2 (the
+        forward-Euler limit), warn at >= 1 (level 7 sits at 1.4).
+        """
+        import warnings
+        n = self.vorticity_filter_stability_number(dt)
+        if n >= 2.0:
+            raise ValueError(
+                f"explicit biharmonic vorticity filter is unstable: "
+                f"K_zeta_bih*dt*lambda_max^2 = {n:.2f} >= 2 (K_zeta_bih="
+                f"{float(self.config.K_zeta_bih):.3g} m^4/s, dt={dt:g} s, "
+                f"min dvEdge={float(jnp.min(jnp.where(self.mesh.dvEdge > 0.0, self.mesh.dvEdge, jnp.inf))):.0f} m). "
+                f"Lower K_zeta_bih (scale ~dv^3 with the mesh) or set it to 0.")
+        if n >= 1.0:
+            warnings.warn(
+                f"explicit biharmonic vorticity filter is marginal: "
+                f"K_zeta_bih*dt*lambda_max^2 = {n:.2f} (limit 2).",
+                stacklevel=2)
+        return n
 
     def tendencies(
         self,
@@ -463,34 +626,13 @@ class MPASOceanModel:
         T_new = state.T.data + dt * tend.dT_dt.data
         S_new = state.S.data + dt * tend.dS_dt.data
 
-        # Fill land cells with ocean-neighbor average (Neumann BC) so that
-        # subsequent operators see smooth values at coastlines instead of
-        # the sharp ocean-to-zero discontinuity that `* mask` would create.
-        c1_m = mesh.cellsOnEdge[0]
-        c2_m = mesh.cellsOnEdge[1]
-        T_new = fill_land_cells_mpas(T_new, mask, c1_m, c2_m)
-        S_new = fill_land_cells_mpas(S_new, mask, c1_m, c2_m)
-        # [stage-halo R1] The updated tracers' halo ring carries the
-        # NEIGHBOR rank's tendencies this rank could not compute
-        # (masked-wrong beyond the outer ring); KPP/TKE column inputs,
-        # GM/Redi (1-2 hops) and the MLE bolus consume it next.
-        if halo_refresh is not None:
-            T_new, S_new = halo_refresh.cells(T_new, S_new)
-
-        # 2a. Implicit vertical tracer diffusion (backward-Euler).
-        # Applied BEFORE GM/Redi and BEFORE advection.  Uses actual
-        # per-cell layer thickness (partial cells) for the vertical
-        # metric so the tridiagonal system respects the seafloor.
-        # Sub-seafloor levels are zeroed BEFORE the solve so the
-        # tridiagonal system doesn't smooth stale sub-seafloor values
-        # into active cells.  Land-fill values are preserved via
-        # ``jnp.where`` so that GM/Redi (which follows) sees smooth
-        # coastline values.
-        #
-        # When KPP and/or convective adjustment are enabled, their K
-        # profiles are added to the background K_v here so that ALL
-        # vertical mixing goes through the unconditionally stable
-        # implicit solver — no explicit CFL constraint on K_conv.
+        # 2a (coefficients). Vertical-mixing coefficients for the implicit
+        # tracer solve (after the halo exchange below) and the momentum
+        # solve (3a).  When KPP and/or convective adjustment are enabled,
+        # their K profiles are added to the background K_v here so that ALL
+        # vertical mixing goes through the unconditionally stable implicit
+        # solver — no explicit CFL constraint on K_conv.  Built from the
+        # start-of-step state only.
         A_v_kpp_cells = None  # KPP/TKE scheme viscosity at cells; shared with momentum solve
         if config.implicit_vertical_mixing:
             h_k_impl = compute_layer_thickness(
@@ -562,7 +704,9 @@ class MPASOceanModel:
                 )
                 _J_conv = jnp.where(mask > 0.5, _J_conv, 1.0)
                 _rho_conv = compute_ocean_rho(
-                    state, z_coord, _J_conv, eos_fn=self._eos_fn)
+                    state, z_coord, _J_conv, eos_fn=self._eos_fn,
+                    g=self._constants_config.g,
+                    rho0=self._constants_config.rho_0)
                 # Density difference at half-levels: drho > 0 ⇒ unstable
                 # (denser water sits above lighter water).
                 _drho = _rho_conv[:, :-1] - _rho_conv[:, 1:]  # (nCells, nlev-1)
@@ -586,51 +730,26 @@ class MPASOceanModel:
                 _K_conv_profile = _K_conv_profile * mask[:, None]
                 K_v_cell = K_v_cell + _K_conv_profile
 
-            # Zero sub-seafloor and land before solve (safe input)
-            T_solve = T_new * active_3d
-            S_solve = S_new * active_3d
-            T_solved = implicit_vertical_diffusion_ocean(
-                T_solve, K_v_cell, dz_cell, dz_half_cell, dt,
-            )
-            S_solved = implicit_vertical_diffusion_ocean(
-                S_solve, K_v_cell, dz_cell, dz_half_cell, dt,
-            )
-            # Restore: use solved values on active cells, keep land-fill
-            # values on inactive cells (needed by GM/Redi).
-            T_new = jnp.where(active_3d > 0.5, T_solved, T_new)
-            S_new = jnp.where(active_3d > 0.5, S_solved, S_new)
-
-        # 2b. GM/Redi isopycnal mixing (forward Euler tendency on top of
-        # the physics-stepped tracer, before advection).  Mirrors the
-        # lat-lon pattern in ocean_model_latlon_cgrid.py.  Only the
-        # centred scheme is implemented on MPAS (Phase 1-4 of the plan
-        # at docs/ocean/experiments/gm_redi_mpas_plan.md); the triad
-        # branch raises NotImplementedError.
-        if config.gm_redi is not None:
-            dT_gm, dS_gm = gm_redi_tracer_tendency_mpas(
-                T_new, S_new, state.eta.data, state.H_bathy.data,
-                mesh, z_coord, config.gm_redi,
-                eos=config.eos, eos_linear=config.eos_linear,
-                mask=mask,
-            )
-            T_new = T_new + dt * dT_gm * active_3d
-            S_new = S_new + dt * dS_gm * active_3d
-
-        # 2c. Fox-Kemper MLE submesoscale restratification (forward-Euler
-        # bolus tracer tendency, same additive pattern as GM/Redi above).
-        # Voronoi port of NEMO nn_mle=1 — see mle_mpas.py / the plan doc.
-        if config.mle is not None:
-            from legoesm.ocean.physics.lateral_mixing.mle_mpas import (
-                mle_tracer_tendency_mpas,
-            )
-            dT_mle, dS_mle = mle_tracer_tendency_mpas(
-                T_new, S_new, state.eta.data, state.H_bathy.data,
-                mesh, z_coord, config.mle,
-                eos=config.eos, eos_linear=config.eos_linear,
-                mask=mask,
-            )
-            T_new = T_new + dt * dT_mle * active_3d
-            S_new = S_new + dt * dS_mle * active_3d
+            # --- NEMO zdfiwm: internal-wave-driven mixing, ADDITIVE on top
+            # of the closure (zdfphy order: closure first, zdf_iwm adds onto
+            # avt/avm) — same contribution and same iwm_K_profile call as
+            # the lat-lon lane; K_iwm is recomputed from THIS grid's own
+            # N²/geometry, only the static power maps were remapped. ---
+            if self._iwm_cfg is not None:
+                from legoesm.ocean.physics.vertical_mixing.k_profiles import (
+                    iwm_K_profile,
+                )
+                _K_iwm = iwm_K_profile(
+                    state, z_coord, self.config.physics, self._iwm_cfg,
+                    eos_fn=self._eos_fn,
+                    iwm_fields=self._iwm_forcing,
+                ).astype(K_v_cell.dtype)
+                if _active_half_c is not None:
+                    _K_iwm = jnp.where(_active_half_c, _K_iwm, 0.0)
+                _K_iwm = _K_iwm * mask[:, None]
+                K_v_cell = K_v_cell + _K_iwm
+                A_v_kpp_cells = (_K_iwm if A_v_kpp_cells is None
+                                 else A_v_kpp_cells + _K_iwm)
 
         # 3. Update 3D velocity with baroclinic perturbation tendency.
         # tend.du_dt uses RELATIVE vorticity in the PV flux only (no
@@ -706,7 +825,7 @@ class MPASOceanModel:
                 active_half_edge = None
 
             # Add KPP viscosity at edges (interpolated from cells).
-            # A_v_kpp_cells was computed during the tracer solve above.
+            # A_v_kpp_cells was computed in the coefficient build (2a) above.
             if A_v_kpp_cells is not None:
                 A_v_kpp_edge = 0.5 * (
                     A_v_kpp_cells[c1_e] + A_v_kpp_cells[c2_e]
@@ -720,11 +839,85 @@ class MPASOceanModel:
                 u_star * edge_mask_3d, A_v_edge, dz_edge, dz_half_edge, dt,
             ) * edge_mask_3d
 
-        # [stage-halo R2] u_star's halo ring was updated with the
-        # neighbor rank's (masked-wrong) tendencies; the forward-backward
-        # Coriolis consumes 2 tangential (edgesOnEdge) hops of it.
+        # [stage-halo R1+R2] ONE message re-arms both rings.  The updated
+        # tracers' halo carries the NEIGHBOR rank's tendencies (masked-wrong
+        # beyond the outer ring) and GM/Redi (1-2 hops) and the MLE bolus
+        # consume it; u_star's ring likewise, consumed by the forward-backward
+        # Coriolis (2 tangential hops).  The vertical-mixing coefficients and
+        # u_star (3/3a) read only the start-of-step state and tendencies, so
+        # they are built before the exchange; the tracer solve stays after it.
         if halo_refresh is not None:
-            (u_star,) = halo_refresh.edges(u_star)
+            (u_star,), (T_new, S_new) = halo_refresh.both(
+                (u_star,), (T_new, S_new))
+
+        # Fill land cells with ocean-neighbor average (Neumann BC) so that
+        # subsequent operators see smooth values at coastlines instead of
+        # the sharp ocean-to-zero discontinuity that `* mask` would create.
+        # After the R1 refresh: a land cell near a rank boundary then fills
+        # from the owners' ocean values, not this rank's stale outer halo.
+        c1_m = mesh.cellsOnEdge[0]
+        c2_m = mesh.cellsOnEdge[1]
+        T_new = fill_land_cells_mpas(T_new, mask, c1_m, c2_m,
+                                     mesh.edgesOnCell, mesh.nEdgesOnCell,
+                                     band_capacity=config.land_fill_band_capacity)
+        S_new = fill_land_cells_mpas(S_new, mask, c1_m, c2_m,
+                                     mesh.edgesOnCell, mesh.nEdgesOnCell,
+                                     band_capacity=config.land_fill_band_capacity)
+
+        # 2a (solve). Implicit vertical tracer diffusion (backward-Euler),
+        # BEFORE GM/Redi and advection, on per-cell layer thickness (partial
+        # cells) so the tridiagonal system respects the seafloor.
+        # Sub-seafloor levels are zeroed BEFORE the solve so it doesn't smooth
+        # stale sub-seafloor values into active cells; land-fill values are
+        # preserved via ``jnp.where`` so GM/Redi (which follows) sees smooth
+        # coastline values.
+        if config.implicit_vertical_mixing:
+            # Zero sub-seafloor and land before solve (safe input)
+            T_solve = T_new * active_3d
+            S_solve = S_new * active_3d
+            T_solved = implicit_vertical_diffusion_ocean(
+                T_solve, K_v_cell, dz_cell, dz_half_cell, dt,
+            )
+            S_solved = implicit_vertical_diffusion_ocean(
+                S_solve, K_v_cell, dz_cell, dz_half_cell, dt,
+            )
+            # Restore: use solved values on active cells, keep land-fill
+            # values on inactive cells (needed by GM/Redi).
+            T_new = jnp.where(active_3d > 0.5, T_solved, T_new)
+            S_new = jnp.where(active_3d > 0.5, S_solved, S_new)
+
+        # 2b. GM/Redi isopycnal mixing (forward Euler tendency on top of
+        # the physics-stepped tracer, before advection).  Mirrors the
+        # lat-lon pattern in ocean_model_latlon_cgrid.py.  Only the
+        # centred scheme is implemented on MPAS (Phase 1-4 of the plan
+        # at docs/ocean/experiments/gm_redi_mpas_plan.md); the triad
+        # branch raises NotImplementedError.
+        if config.gm_redi is not None:
+            dT_gm, dS_gm = gm_redi_tracer_tendency_mpas(
+                T_new, S_new, state.eta.data, state.H_bathy.data,
+                mesh, z_coord, config.gm_redi,
+                eos=config.eos, eos_linear=config.eos_linear,
+                mask=mask,
+            )
+            T_new = T_new + dt * dT_gm * active_3d
+            S_new = S_new + dt * dS_gm * active_3d
+
+        # 2c. Fox-Kemper MLE submesoscale restratification (forward-Euler
+        # bolus tracer tendency, same additive pattern as GM/Redi above).
+        # Voronoi port of NEMO nn_mle=1 — see mle_mpas.py / the plan doc.
+        if config.mle is not None:
+            from legoesm.ocean.physics.lateral_mixing.mle_mpas import (
+                mle_tracer_tendency_mpas,
+            )
+            dT_mle, dS_mle = mle_tracer_tendency_mpas(
+                T_new, S_new, state.eta.data, state.H_bathy.data,
+                mesh, z_coord, config.mle,
+                eos=config.eos, eos_linear=config.eos_linear,
+                mask=mask,
+            )
+            T_new = T_new + dt * dT_mle * active_3d
+            S_new = S_new + dt * dS_mle * active_3d
+
         # 3b. Forward-backward (trapezoidal predictor-corrector) Coriolis
         # on the 3D perturbation velocity. Unconditionally stable for
         # inertial oscillations; mirrors the lat-lon
@@ -773,7 +966,14 @@ class MPASOceanModel:
             # this local sum (single-rank-correct) until owned-mask plumbing
             # (``owned_mask`` + ``global_sum_if_distributed``) lands on both paths.
             if config.normalize_freshwater:
-                if config.freshwater_closure == "real_freshwater":
+                # Distributed context from the refresh object (MPI layout or
+                # SPMD lane): owned-masked partial sums + its cross-rank SUM.
+                # Without it the historical rank-local mean stays, guarded by
+                # the multi-rank refusal.
+                _hr_owned_eta = getattr(halo_refresh, "owned_mask_cells", None)
+                _hr_gsum_eta = getattr(halo_refresh, "global_sum", None)
+                if (config.freshwater_closure == "real_freshwater"
+                        and _hr_owned_eta is None):
                     # codex RED: the multi-rank refusal for freshwater
                     # normalization lives inside the virtual-salt block,
                     # which real_freshwater skips -- but this eta mean is
@@ -783,10 +983,26 @@ class MPASOceanModel:
                     )
                     refuse_multiprocess_eta_normalization("MPASOceanModel")
                 area = mesh.areaCell
-                ocean_area = jnp.sum(area * mask)
-                F_mean = jnp.sum(F_slow_eta * area) / jnp.maximum(
-                    ocean_area, 1e-10)
-                F_slow_eta = (F_slow_eta - F_mean * mask)
+                _w_eta = area * mask
+                if _hr_owned_eta is not None:
+                    _w_eta = _w_eta * _hr_owned_eta.astype(_w_eta.dtype)
+                # RESTORING IS EXCLUDED (codex round 2 RED; same fix as the
+                # lat-lon path).  The flag removes the CORE-II P-E+R imbalance,
+                # a forcing-dataset artifact; SSS restoring is not part of it,
+                # and NEMO never normalizes its `erp`.  Normalizing the full
+                # net would subtract the restoring's own global mean from every
+                # cell -- a spurious uniform water flux AND a globally weakened
+                # restoring, both silent.
+                _fw_rest = getattr(freshwater, "restoring", None)
+                _F_rest = (0.0 if _fw_rest is None
+                           else (jnp.asarray(_fw_rest) / config.rho_0) * mask)
+                _F_phys = F_slow_eta - _F_rest
+                _num_l = jnp.sum(_F_phys * _w_eta)
+                _den_l = jnp.sum(_w_eta)
+                if _hr_gsum_eta is not None:
+                    _num_l, _den_l = _hr_gsum_eta([_num_l, _den_l])
+                F_mean = _num_l / jnp.maximum(_den_l, 1e-10)
+                F_slow_eta = (_F_phys - F_mean * mask) + _F_rest
 
         F_slow_u_data = tend.F_slow_u.data if tend.F_slow_u is not None else None
 
@@ -821,7 +1037,12 @@ class MPASOceanModel:
             from legoesm.parallel.voronoi_mpi import (
                 get_active_voronoi_layout,
             )
-            if (get_active_voronoi_layout() is None
+            # The SPMD lane (voronoi_spmd_ocean) threads its owned mask +
+            # psum reducer through halo_refresh instead of an MPI layout;
+            # its distributed PCG is the same solver, so the layout-less
+            # refusal applies only when neither context exists.
+            _hr_spmd = getattr(halo_refresh, "owned_mask_cells", None) is not None
+            if (get_active_voronoi_layout() is None and not _hr_spmd
                     and (is_multi_process() or mpi_world_size() > 1)):
                 raise NotImplementedError(
                     "barotropic_solver='implicit_cn' under multi-rank MPAS "
@@ -995,6 +1216,28 @@ class MPASOceanModel:
             else:
                 S_corrected = tr_new
 
+        if (freshwater is not None and F_slow_eta is not None
+                and config.freshwater_closure == "real_freshwater"):
+            # Surface dilution of the volume closure (2026-09-05): the eta
+            # channel above spread the surface water uniformly over the
+            # column; add the downward transport of the resident water so the
+            # top cell dilutes by -S_1 F/(rho h_1) and the layers below keep
+            # S and T (NEMO vvl).  Same normalised rate as eta; ice SALT flux
+            # stays on its own channel.  Shared helper with the lat-lon core.
+            from legoesm.ocean.freshwater import (
+                real_freshwater_dilution_tendencies,
+                real_freshwater_entry,
+                resolve_runoff_spread_arg,
+            )
+            _F_entry, _entry_heat = real_freshwater_entry(
+                freshwater, F_slow_eta, h_k_new, mask, config.rho_0,
+                T_corrected, runoff_spread_m=resolve_runoff_spread_arg(config))
+            _dS_dil, _dT_dil = real_freshwater_dilution_tendencies(
+                F_slow_eta, S_corrected, T_corrected, h_k_new, mask,
+                F_entry=_F_entry, entry_heat=_entry_heat)
+            S_corrected = S_corrected + (dt * _dS_dil).astype(S_corrected.dtype)
+            T_corrected = T_corrected + (dt * _dT_dil).astype(T_corrected.dtype)
+
         # Final state construction with explicit land masking
         T_final = T_corrected
         # Clamp salinity >= 0.  The virtual_salt_flux closure uses a
@@ -1004,8 +1247,12 @@ class MPASOceanModel:
         # but virtual_salt_flux is the standard Boussinesq approach.
         S_final = jnp.maximum(S_corrected, 0.0)
 
+        # Padding edges (dvEdge = 0) see wind stress and vertical mixing but
+        # nothing that balances them; zero them so they cannot grow without
+        # bound over a run (real edges: multiply by exactly 1).
+        _real_edge = (self.mesh.dvEdge > 0).astype(u_3d_new.dtype)[:, jnp.newaxis]
         state_new = MPASOceanState(
-            u=state.u.replace(data=u_3d_new),
+            u=state.u.replace(data=u_3d_new * _real_edge),
             T=state.T.replace(data=T_final),
             S=state.S.replace(data=S_final),
             eta=state.eta.replace(data=eta_new * mask),
@@ -1033,6 +1280,10 @@ class MPASOceanModel:
             # when running distributed; defaults to ``None`` (single-
             # rank, all cells owned) otherwise.
             owned_mask = getattr(self, "_owned_mask", None)
+            _hr_owned = getattr(halo_refresh, "owned_mask_cells", None)
+            if owned_mask is None and _hr_owned is not None:
+                # Refresh-carried context (MPI layout or SPMD ppermute lane).
+                owned_mask = _hr_owned
             if owned_mask is None:
                 # Distributed Voronoi runs arm a partition layout
                 # instead of setting ``self._owned_mask`` — pull the
@@ -1069,7 +1320,11 @@ class MPASOceanModel:
             # owned-masked from the same layout, so this dispatch is
             # globally correct on the partition path.
             from legoesm.parallel.reductions import is_multi_process
-            if is_multi_process():
+            _gsum = getattr(halo_refresh, "global_sum", None)
+            if _gsum is not None:
+                expected_dHeat, expected_dSalt = _gsum(
+                    [expected_dHeat_local, expected_dSalt_local])
+            elif is_multi_process():
                 from legoesm.parallel.reductions import global_sum_mpi
                 expected_dHeat = global_sum_mpi(expected_dHeat_local)
                 expected_dSalt = global_sum_mpi(expected_dSalt_local)
@@ -1081,6 +1336,7 @@ class MPASOceanModel:
                 expected_dHeat=expected_dHeat,
                 expected_dSalt=expected_dSalt,
                 owned_mask=owned_mask,
+                reduce_fn=_gsum,
             )
 
         if config.freeze_floor:
@@ -1156,8 +1412,31 @@ class MPASOceanModel:
             tke=Field(data=tke0, name="tke", dims=("nCells", "level"),
                       units="m^2/s^2"))
 
-    @partial(jax.jit, static_argnums=(0,), static_argnames=("halo_refresh",))
     def step(
+        self,
+        state: MPASOceanState,
+        dt: float,
+        freshwater: FreshwaterForcing | None = None,
+        surface_forcing=None,
+        sponge=None,
+        halo_refresh=None,
+    ) -> MPASOceanState:
+        """Host-side entry: the vorticity-filter stability gate runs once
+        (the OMIP runner calls step(), not step_checked(); codex 2026-09-06),
+        then the JIT-compiled :meth:`_step_jit`.  ``dt`` must be a Python
+        float on the first call for the gate; later calls pass through.
+        """
+        if not self._vf_checked and not isinstance(dt, jax.core.Tracer):
+            # (a traced dt -- step() called under an outer jit/grad -- cannot
+            # be gated here; the checked entry and the runner pass floats)
+            self.check_vorticity_filter_stability(float(dt))
+            self._vf_checked = True
+        return self._step_jit(state, dt, freshwater=freshwater,
+                              surface_forcing=surface_forcing, sponge=sponge,
+                              halo_refresh=halo_refresh)
+
+    @partial(jax.jit, static_argnums=(0,), static_argnames=("halo_refresh",))
+    def _step_jit(
         self,
         state: MPASOceanState,
         dt: float,
@@ -1299,28 +1578,3 @@ class MPASOceanModel:
                 trajectory.append(state)
 
         return state, trajectory
-
-    def integrate_scan(
-        self,
-        state: MPASOceanState,
-        n_steps: int,
-        dt: float,
-    ):
-        """Differentiable integration via jax.lax.scan.
-
-        Parameters
-        ----------
-        state : MPASOceanState
-        n_steps : int
-        dt : float
-
-        Returns
-        -------
-        (final_state, trajectory)
-        """
-        def scan_fn(carry, _):
-            s = self.step(carry, dt)
-            return s, s
-
-        final, trajectory = jax.lax.scan(scan_fn, state, None, length=n_steps)
-        return final, trajectory

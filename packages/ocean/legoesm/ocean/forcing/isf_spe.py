@@ -22,6 +22,7 @@ import numpy as np
 from legoesm.ocean.forcing.curvilinear_regrid import (
     NearestWetRegridder,
     coords_match,
+    estimate_curvilinear_cell_area,
 )
 
 _FWF_VAR = "sornfisf"
@@ -45,14 +46,22 @@ def load_isf_spe_forcing(
     lon_T,
     *,
     land_mask=None,
+    paired_cells: bool = False,
+    target_area=None,
 ) -> ISFSpeForcing:
     """Load + regrid the 'spe' ISF melt fields onto the model tracer grid.
 
     Same-mesh targets (the eORCA1 tripole) pass through untouched; other
     grids get nearest-WET-neighbour + per-month global melt-total
-    renormalisation (cos-lat weights).  ``zmin`` is clamped >= 0 (the
-    source stores small negative band tops near the surface) and the
-    band is kept at least ``1 m`` thick.
+    renormalisation (cos-lat weights, or ``target_area`` when given).
+    ``zmin`` is clamped >= 0 (the source stores small negative band tops
+    near the surface) and the band is kept at least ``1 m`` thick.
+
+    ``paired_cells=True`` marks 1-D ``lat_T``/``lon_T`` as PAIRED unstructured
+    cell centres (MPAS Voronoi ``(nCells,)``) rather than regular grid axes —
+    no outer-product meshgrid, ``structured=False`` nearest-wet lookup.  Pass
+    ``target_area`` (cell areas, same shape) for the melt-total weights on
+    quasi-uniform meshes where cos-lat is wrong.
     """
     import netCDF4 as nc
 
@@ -77,14 +86,15 @@ def load_isf_spe_forcing(
 
     lat_T = np.asarray(lat_T, dtype=np.float64)
     lon_T = np.asarray(lon_T, dtype=np.float64)
-    if lat_T.ndim == 1 and lon_T.ndim == 1:
+    if not paired_cells and lat_T.ndim == 1 and lon_T.ndim == 1:
         lat_T, lon_T = np.meshgrid(lat_T, lon_T, indexing="ij")
 
-    if coords_match(src_lat, src_lon, lat_T, lon_T):
+    if not paired_cells and coords_match(src_lat, src_lon, lat_T, lon_T):
         out_fwf, out_zmin, out_zmax = fwf.copy(), zmin.copy(), zmax.copy()
     else:
         src_wet = np.any(fwf > 0.0, axis=0)
-        regrid = NearestWetRegridder(src_lon, src_lat, src_wet, lon_T, lat_T)
+        regrid = NearestWetRegridder(src_lon, src_lat, src_wet, lon_T, lat_T,
+                                     structured=not paired_cells)
         months = range(12)
         out_fwf = np.stack([regrid(fwf[m]) for m in months])
         out_zmin = np.stack([regrid(zmin[m]) for m in months])
@@ -94,8 +104,15 @@ def load_isf_spe_forcing(
         # meaningful on a coarse grid — instead preserve each month's
         # global melt total and let the renormalised field carry the
         # Antarctic-margin pattern the nearest lookup produces.
-        src_w = np.cos(np.deg2rad(src_lat))
-        tgt_w = np.cos(np.deg2rad(lat_T))
+        if target_area is not None:
+            # Weights must share one unit or the renorm ratio is meaningless:
+            # target passes true cell areas [m^2], so estimate the source's
+            # curvilinear cell areas (seam/fold-aware) to match.
+            src_w = estimate_curvilinear_cell_area(src_lat, src_lon)
+            tgt_w = np.asarray(target_area, dtype=np.float64)
+        else:
+            src_w = np.cos(np.deg2rad(src_lat))
+            tgt_w = np.cos(np.deg2rad(lat_T))
         tgt_m = (np.asarray(land_mask, dtype=np.float64)
                  if land_mask is not None else np.ones_like(lat_T))
         # Restrict the painted melt to cells whose nearest source cell is

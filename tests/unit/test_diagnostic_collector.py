@@ -165,7 +165,7 @@ class TestCollectTLowMean:
         coll.set_cmip_grid_info("latlon", grid=_Grid(), start_year=1979)
         return coll
 
-    def _collect(self, coll, t_low_mean=None):
+    def _collect(self, coll, t_low_mean=None, **flux_kw):
         import jax.numpy as jnp
         from legoesm.core.field import Field
         from legoesm.core.state import HydrostaticState
@@ -197,7 +197,59 @@ class TestCollectTLowMean:
             sw_down_toa=jnp.full(s2, 340.0),
             T_ice=271.35,
             t_low_mean=t_low_mean,
+            **flux_kw,
         )
+
+    def test_latent_heat_without_water_is_refused(self):
+        """hfls fed alone must not be turned into evspsbl = hfls / L_v."""
+        import jax.numpy as jnp
+        coll = self._make_collector()
+        s2 = (self._NLAT, self._NLON)
+        with pytest.raises(ValueError, match="lhflx was fed without evspsbl"):
+            self._collect(coll, lhflx=jnp.full(s2, 80.0))
+
+    def test_fed_water_is_the_series_and_the_field(self):
+        """The evspsbl series, monthly field and moisture closure all carry
+        the FED water, not a latent-heat inverse."""
+        import jax.numpy as jnp
+
+        from legoesm import constants
+        coll = self._make_collector()
+        s2 = (self._NLAT, self._NLON)
+        e = 3.0e-5
+        self._collect(coll, lhflx=jnp.full(s2, 80.0), evspsbl=jnp.full(s2, e))
+        assert coll.evspsbl[-1] == pytest.approx(e, rel=1e-6)
+        assert abs(coll.evspsbl[-1] / (80.0 / constants.L_v) - 1.0) > 0.05
+        (bucket,) = coll._spatial_monthly._data_2d.values()
+        arr, count = bucket["evspsbl"]
+        assert count == 1
+        np.testing.assert_allclose(np.asarray(arr), e, rtol=1e-6)
+        assert coll.moisture_tracker.evap_rate[-1] == pytest.approx(
+            e * 86400.0, rel=1e-6)
+
+    def test_lightweight_path_refuses_heat_without_water_before_recording(self):
+        """collect_lightweight raises on lhflx-without-evspsbl BEFORE any
+        series grows: no NaN evspsbl beside a real hfls, ever."""
+        import jax.numpy as jnp
+        from legoesm.core.field import Field
+        from legoesm.core.state import HydrostaticState
+        coll = self._make_collector()
+        s3 = (self._NLAT, self._NLON, self._NLEV)
+        s2 = (self._NLAT, self._NLON)
+        state = HydrostaticState(
+            u=Field(jnp.zeros(s3), name="u", dims=("lat", "lon", "level"), units="m/s"),
+            v=Field(jnp.zeros(s3), name="v", dims=("lat", "lon", "level"), units="m/s"),
+            T=Field(jnp.full(s3, 280.0), name="T", dims=("lat", "lon", "level"), units="K"),
+            p_s=Field(jnp.full(s2, 101325.0), name="p_s", dims=("lat", "lon"), units="Pa"),
+            phis=Field(jnp.zeros(s2), name="phis", dims=("lat", "lon"), units="m2/s2"),
+        )
+        with pytest.raises(ValueError, match="collect_lightweight: lhflx was fed without evspsbl"):
+            coll.collect_lightweight(
+                5.0, state, jnp.full(s3, 0.005), jnp.full(s2, 290.0),
+                jnp.zeros(s2), jnp.zeros(s2), jnp.full(s2, 100.0),
+                jnp.full(s2, 240.0), jnp.full(s2, 160.0), jnp.full(s2, -60.0),
+                lhflx=jnp.full(s2, 80.0))
+        assert coll.times == [] and coll.hfls == [] and coll.evspsbl == []
 
     def _monthly_tas_sum(self, coll):
         (bucket,) = coll._spatial_monthly._data_2d.values()

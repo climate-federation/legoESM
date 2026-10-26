@@ -35,6 +35,7 @@ _P_MAX = 2.0e7          # [Pa]
 # full atmosphere.physics package.  Re-exported here for backward compatibility.
 from legoesm.thermo import saturation_mixing_ratio as saturation_mixing_ratio  # noqa: F401
 from legoesm.thermo import saturation_mixing_ratio_ice as saturation_mixing_ratio_ice  # noqa: F401
+from legoesm.thermo import saturation_specific_humidity
 # Bolton (1980) LCL-temperature formula constants (fixed).
 _LCL_T_OFFSET_K = 55.0
 _LCL_BOLTON_DENOM = 2840.0
@@ -64,6 +65,32 @@ def temperature_from_theta(
     theta_pos = jnp.clip(theta, _THETA_MIN, None)
     p_pos = jnp.clip(p, _P_MIN, _P_MAX)
     return theta_pos * (p_pos / constants.p_ref) ** constants.kappa
+
+
+def potential_temperature_from_temperature(
+    T: jax.Array,
+    p: jax.Array,
+) -> jax.Array:
+    """Potential temperature from temperature and pressure — the exact inverse of
+    :func:`temperature_from_theta`.
+
+    θ = T * (p_0 / p)^kappa
+
+    Parameters
+    ----------
+    T : jax.Array
+        Temperature [K].
+    p : jax.Array
+        Pressure [Pa].
+
+    Returns
+    -------
+    jax.Array
+        Potential temperature [K].
+    """
+    T_pos = jnp.clip(T, _THETA_MIN, None)
+    p_pos = jnp.clip(p, _P_MIN, _P_MAX)
+    return T_pos * (constants.p_ref / p_pos) ** constants.kappa
 
 
 def sanitize_theta_rho(
@@ -219,50 +246,14 @@ def bolton_lcl_temperature(
     p_base : jax.Array
         Parcel launch pressure [Pa].
     q_v_base : jax.Array
-        Parcel water-vapor mixing ratio at the launch level [kg/kg].
+        Parcel specific humidity at the launch level [kg/kg].
     """
-    from legoesm.thermo import saturation_mixing_ratio as _q_sat
+    from legoesm.thermo import saturation_specific_humidity as _q_sat
 
     q_sat_base = _q_sat(T_base, p_base)
     RH = jnp.clip(q_v_base / jnp.maximum(q_sat_base, 1.0e-12), 1.0e-4, 1.0)  # coeff-ok: RH floor
     T_minus_55 = jnp.maximum(T_base - _LCL_T_OFFSET_K, 1.0)
     return 1.0 / (1.0 / T_minus_55 - jnp.log(RH) / _LCL_BOLTON_DENOM) + _LCL_T_OFFSET_K
-
-
-def latent_heat_vaporization(
-    T: jax.Array,
-    c_liquid: float = constants.c_pw,
-) -> jax.Array:
-    """Kirchhoff temperature-dependent latent heat of vaporization [J/kg].
-
-    ``L(T) = L_v − (c_liquid − c_pv) · (T − T_freeze)``
-
-    with ``L_v`` the vaporization latent heat at 0 °C and the slope set by
-    the specific-heat difference between liquid water and water vapor
-    (Kirchhoff's relation).  Default ``c_liquid = constants.c_pw``
-    (4218 J/kg/K) gives a slope of ``−(c_pw − c_pv) ≈ −2372 J/kg/K``.
-    Emanuel's CONVECT passes its own tunable liquid heat capacity
-    ``c_l_emanuel`` in place of ``c_pw`` (same base formula).
-
-    Distinct from :func:`legoesm.thermo.latent_heat_vaporization_sst`,
-    which is the NEMO/AeroBulk *air-sea empirical* convention
-    (slope ``constants.L_v_sst_slope`` ≈ 2370 J/kg/K, applied to SST);
-    this helper is the thermodynamic Kirchhoff form used inside moist
-    parcel/entropy budgets.
-
-    Parameters
-    ----------
-    T : jax.Array
-        Air/parcel temperature [K].
-    c_liquid : float
-        Liquid-water specific heat [J/kg/K] (default ``constants.c_pw``).
-
-    Returns
-    -------
-    jax.Array
-        Latent heat of vaporization at ``T`` [J/kg].
-    """
-    return constants.L_v - (c_liquid - constants.c_pv) * (T - constants.T_freeze)
 
 
 def compute_moist_adiabat(
@@ -384,10 +375,10 @@ def compute_moist_adiabat(
         gamma_2 = moist_adiabat_lapse_rate(T_pred_moist, p_k)
         T_moist = T_moist_start + 0.5 * (gamma_1 + gamma_2) * dp_moist
 
-        # Dry adiabat exact: T = theta_dry * (p / p_ref)^kappa.
-        T_dry = theta_dry * (
-            jnp.clip(p_k, 1.0, None) / constants.p_ref
-        ) ** constants.kappa
+        # Dry adiabat exact: T = theta_dry * Pi(p), Pi from the canonical
+        # Exner helper (physics._shared) rather than an inline power.
+        from legoesm.atmosphere.physics._shared import exner_function
+        T_dry = theta_dry * exner_function(jnp.clip(p_k, 1.0, None))
 
         T_new = below_lcl_k * T_dry + (1.0 - below_lcl_k) * T_moist
         T_new = jnp.clip(T_new, 100.0, 350.0).astype(_dtype)  # coeff-ok: physical T clip [K]
@@ -528,7 +519,7 @@ def parcel_profile_and_cape(
     if q_v is None:
         cape = compute_cape(T, T_moist, p_full, p_half)
     else:
-        q_sat_parcel = saturation_mixing_ratio(T_moist, p_full)
+        q_sat_parcel = saturation_specific_humidity(T_moist, p_full)
         q_v_parcel = jnp.minimum(q_v_base[:, None], q_sat_parcel)
         cape = compute_cape(
             T, T_moist, p_full, p_half,

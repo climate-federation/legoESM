@@ -458,23 +458,6 @@ def _train_aimip_classical(
     )
 
     spatial_surface = bool(cfg.get("aimip_spatial_surface", False))
-    params = AIMIPClassicalParams.from_defaults(
-        spatial_surface=spatial_surface,
-        spatial_init_std=float(cfg.get("aimip_spatial_init_std", 0.0)),
-        spatial_seed=int(cfg.get("aimip_spatial_seed", 0)),
-    )
-    n_scalar = len(params.raw_values)
-    n_spatial = (
-        params.spatial_surface.n_trainable() if params.spatial_surface else 0
-    )
-    logger.info(
-        f"AIMIPClassicalParams: {n_scalar} trainable scheme knobs"
-        + (
-            f" + {n_spatial} spatial coefs across "
-            f"{len(params.spatial_surface.fields)} surface fields"
-            if spatial_surface else ""
-        )
-    )
 
     # Host-resident dataset (#1155): classical loads ALL pairs up front (no
     # chunking) — at T106 all-years the eager device build is ~130 GB, an
@@ -503,36 +486,15 @@ def _train_aimip_classical(
     # backward memory (holds block_size g-points, not all ~256). 0 = scan path.
     rrtmgp_gpoint_batch_size = int(cfg.get("aimip_rrtmgp_gpoint_batch_size", 16))
 
-    # Derive the land mask from surface geopotential (phis > 0 over
-    # land).  Static across samples so we extract it once.  Using a
-    # soft sigmoid keeps the lat-lon surface-parameter gradients
-    # smooth across coastlines (vs. a hard step that would clip them).
+    # The ERA5 land-sea mask, the same field AMIP inference/fine-tune and ZM
+    # read (one helper), so a trained checkpoint replays on the mask it was
+    # trained on.  A closure constant of the jitted physics: stage it so its
+    # placement is deliberate rather than an implicit per-trace transfer.
     land_mask = None
-    if spatial_surface and target_carries:
-        # ``target_carries[0]`` is a single SegmentCarry on the legacy
-        # path and a tuple of K SegmentCarry on the multi-step
-        # autoregressive path.  Surface geopotential is static across
-        # snapshots so any of them works; unwrap when needed.
-        ref_carry = target_carries[0]
-        # A multi-step target is a PLAIN tuple of carries; a single-step
-        # target is ONE SegmentCarry — itself a NamedTuple (tuple subclass),
-        # so isinstance(.., tuple) is True for BOTH and would unwrap a single
-        # carry to its first FIELD (an array) -> `.phis` AttributeError. This
-        # broke the single-step v10 T63 path when multi-step was added.
-        # ``type(..) is tuple`` matches the plain tuple only.
-        if type(ref_carry) is tuple:
-            ref_carry = ref_carry[0]
-        from legoesm.training.aimip_spatial import land_mask_from_phis
+    if spatial_surface:
+        from legoesm.training.aimip_spatial import era5_land_fraction
         from legoesm.training.neural_gcm_spectral import stage_sample
-        # ref_carry lives on host under host_resident loading (#1155,
-        # UNCOMMITTED — see stage_sample's semantics note). The land mask is
-        # a closure constant of the jitted physics; stage it explicitly so
-        # its placement is deliberate rather than an implicit per-trace
-        # transfer, and so this site stays correct if the loader ever
-        # commits its outputs.
-        land_mask = stage_sample(land_mask_from_phis(
-            jnp.asarray(ref_carry.phis), smooth=True,
-        ))
+        land_mask = stage_sample(era5_land_fraction(grid))
 
     # When rad gating is on (``aimip_rad_update_interval > 1``),
     # ``make_aimip_classical_spectral_physics`` returns a
@@ -548,6 +510,8 @@ def _train_aimip_classical(
     # (scripts/run/run_aimip_classical_sweep_stage1.py).
     from legoesm.training.aimip_params import CLASSICAL_DEFAULT_SCHEMES as _DS
     conv_scheme = str(cfg.get("aimip_convection", _DS["convection"]))
+    from legoesm.training.aimip_spatial import grid_with_zm_land_fraction
+    grid = grid_with_zm_land_fraction(grid, conv_scheme, land_mask)
     turb_scheme = str(cfg.get("aimip_turbulence", _DS["turbulence"]))
     gwd_scheme = str(cfg.get("aimip_gwd", _DS["gwd"]))
     # Was "none", which produced classical runs missing a whole family.
@@ -575,6 +539,33 @@ def _train_aimip_classical(
     # activates the Monin-Obukhov stability functions + log-law local z0 so
     # the trained surface_most_* / z0h_z0_ratio leaves become live gradients.
     surface_bulk_scheme = str(cfg.get("aimip_surface_bulk_scheme", "constant"))
+    # NO INERT PARAMETERS (review F5): only the knobs the RESOLVED schemes
+    # read are trainable; the other families' knobs stay in the pytree as
+    # frozen (non-array) values, so the checkpoint leaf layout is unchanged.
+    from legoesm.training.aimip_params import aimip_classical_trainable_names
+    _trainable = aimip_classical_trainable_names(
+        convection=conv_scheme, turbulence=turb_scheme, gwd=gwd_scheme,
+        microphysics=micro_scheme, cloud=cloud_scheme, radiation=radiation,
+        surface_bulk_scheme=surface_bulk_scheme)
+    params = AIMIPClassicalParams.from_defaults(
+        spatial_surface=spatial_surface,
+        spatial_init_std=float(cfg.get("aimip_spatial_init_std", 0.0)),
+        spatial_seed=int(cfg.get("aimip_spatial_seed", 0)),
+        trainable=_trainable,
+    )
+    n_spatial = (
+        params.spatial_surface.n_trainable() if params.spatial_surface else 0
+    )
+    logger.info(
+        f"AIMIPClassicalParams: {len(_trainable)} trainable scheme knobs "
+        f"({len(params.raw_values) - len(_trainable)} frozen: their schemes "
+        "are not selected)"
+        + (
+            f" + {n_spatial} spatial coefs across "
+            f"{len(params.spatial_surface.fields)} surface fields"
+            if spatial_surface else ""
+        )
+    )
     # OPT-IN: train the ACTIVE schemes' spec-declared parameters too.
     #
     # AIMIPClassicalParams maps its leaves through hand-written to_<scheme>_
@@ -592,11 +583,12 @@ def _train_aimip_classical(
     # CANNOT. ``_splice_scheme_overrides`` runs AFTER the ``to_<x>_config``
     # methods, so a class both routes cover would be overwritten by the spec
     # value and the legacy leaf's gradient would silently go to zero — see
-    # ``aimip_legacy_owned_scheme_keys``.
+    # ``aimip_legacy_owned_fields``.
     _scheme_tier = cfg.get("aimip_trainable_schemes")
     if _scheme_tier:
         from legoesm.training.aimip_params import (
             AIMIPTrainableBundle,
+            aimip_inactive_fields,
             aimip_legacy_owned_fields,
             aimip_scheme_keys_for,
         )
@@ -616,7 +608,11 @@ def _train_aimip_classical(
         _scheme_params = build_trainable_params(
             active_scheme_keys=_active,
             tier=(_scheme_tier if isinstance(_scheme_tier, str) else "extended"),
-            exclude=tuple(sorted(_owned)),
+            exclude=tuple(sorted(
+                _owned | aimip_inactive_fields(
+                    cloud_scheme=cloud_scheme, microphysics=micro_scheme,
+                    gwd=gwd_scheme, subgrid_orography=getattr(
+                        grid, "subgrid_topo_stddev", None) is not None))),
         )
         _n_scheme = sum(len(v) for v in _scheme_params.to_overrides().values())
         if _n_scheme == 0:
@@ -712,6 +708,7 @@ def _train_aimip_classical(
         start_epoch=start_epoch,
         host_staged=True,   # dataset loaded host-resident above (#1155)
         resume_from_dir=resume_from_dir,   # EMA resume needs the dir too
+        assert_no_inert_params=True,   # review F5: abort on a dead knob
     )
 
 
@@ -786,6 +783,9 @@ def _evaluate_variant(
     ic_states, target_carries, eval_ic_times = load_training_data(
         eval_cfg, grid, sigma, cache_dir, windows=eval_cfg.windows,
     )
+    from legoesm.training.aimip_spatial import grid_with_zm_land_fraction
+    grid = grid_with_zm_land_fraction(
+        grid, str(cfg.get("aimip_convection", "tiedtke")))
     # NN variants trained WITH prescribed surface forcing must be
     # evaluated with the same inputs (a forced network scored unforced
     # would see out-of-distribution proxies and mis-rank the variants).
@@ -847,14 +847,10 @@ def _evaluate_variant(
     physics_fn = None
     if variant == "classical":
         eval_land_mask = None
-        if bool(cfg.get("aimip_spatial_surface", False)) and target_carries:
-            ref_carry = target_carries[0]
-            if type(ref_carry) is tuple:   # plain tuple=multi-step; carry NamedTuple is not
-                ref_carry = ref_carry[0]
-            from legoesm.training.aimip_spatial import land_mask_from_phis
-            eval_land_mask = land_mask_from_phis(
-                jnp.asarray(ref_carry.phis), smooth=True,
-            )
+        if bool(cfg.get("aimip_spatial_surface", False)):
+            # Same ERA5 mask as training (above) and AMIP inference.
+            from legoesm.training.aimip_spatial import era5_land_fraction
+            eval_land_mask = era5_land_fraction(grid)
         eval_split_rad = eval_rad_interval > 1
         built = make_aimip_classical_spectral_physics(
             trained_model, grid, spec_cfg.dt,

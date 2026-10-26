@@ -15,6 +15,50 @@ from legoesm.ocean.physics.vertical_mixing.double_diffusion import (
 
 
 __param_spec__ = {
+    "EPBLConfig": {
+        "scheme_key": "ocean.vm.epbl",
+        "excluded": {
+            "dt_s": "the model timestep, not a closure parameter",
+            "mld_tol": "solver convergence tolerance, not physics",
+            "ustar_min": "numerical floor that exists to avoid division by zero",
+            "eqd_v0_lower_cap": "Sane et al. (2026) training-range guard, not a trained coefficient",
+            "eqd_v0_upper_cap": "Sane et al. (2026) training-range guard, not a trained coefficient",
+            "eqd_bflux_lower_cap": "Sane et al. (2026) training-range guard, not a trained coefficient",
+            "eqd_bflux_upper_cap": "Sane et al. (2026) training-range guard, not a trained coefficient",
+            "eqd_sigma_max_lower_cap": "Sane et al. (2026) asymptote guard on the shape function",
+            "eqd_sigma_max_upper_cap": "Sane et al. (2026) asymptote guard on the shape function",
+            "eqd_eh_upper_cap": "Sane et al. (2026) asymptote guard on the shape function",
+            "eqd_lh_cap": "Sane et al. (2026) asymptote guard on the shape function",
+            "eqd_f_lower": "Coriolis floor for the v0 scheme; a guard, not a closure knob",
+            "eqd_shape_function_epsilon": "below-boundary-layer floor that keeps the iterative solver well posed",
+            "vonkar": "von Karman constant; a measured universal constant, not tunable",
+            "min_mix_len": "numerical floor on the mixing length (MOM6 default 0 = no floor)",
+        },
+        "params": {
+            "nstar": {"units": "1", "bounds": (0.02, 0.4), "tunable_tier": 1, "transform": "sigmoid", "category": "vertical_mixing", "reference": "Reichl & Hallberg (2018) NSTAR: fraction of released PE available to drive entrainment", "shape": None},
+            "fixed_mstar": {"units": "1", "bounds": (0.3, 3.0), "tunable_tier": 1, "transform": "sigmoid", "category": "vertical_mixing", "reference": "Reichl & Hallberg (2018) MSTAR: TKE input per unit u_star^3 (CONSTANT scheme)", "shape": None},
+            "tke_decay": {"units": "1", "bounds": (0.001, 12.0), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "TKE_DECAY: ratio of the Ekman depth to the TKE decay scale", "shape": None},
+            "wstar_ustar_coef": {"units": "1", "bounds": (0.5, 20.0), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "WSTAR_USTAR_COEF: efficiency of convective relative to mechanical TKE", "shape": None},
+            "ekman_scale_coef": {"units": "1", "bounds": (0.3, 3.0), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "EKMAN_SCALE_COEF: rotational inhibition of the mixing length", "shape": None},
+            "mke_to_tke_effic": {"units": "1", "bounds": (0.0, 0.2), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "MKE_TO_TKE_EFFIC: conversion of resolved shear KE into TKE", "shape": None},
+            "mstar_cap": {"units": "1", "bounds": (-1.0, 20.0), "tunable_tier": 0, "transform": "none", "category": "vertical_mixing", "reference": "MSTAR_CAP: upper bound on mstar (OM4 scheme only, as in MOM6); negative disables", "shape": None},
+            "mstar_coef": {"units": "1", "bounds": (0.1, 1.0), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "MSTAR2_COEF1: rotation/stabilization balance (OM4 scheme)", "shape": None},
+            "c_ek": {"units": "1", "bounds": (0.02, 0.5), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "MSTAR2_COEF2: Ekman-limited mixing coefficient (OM4 scheme)", "shape": None},
+            "mstar_convect_coef": {"units": "1", "bounds": (0.0, 1.0), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "MSTAR_CONV_ADJ: reduction of mstar under convection", "shape": None},
+            "rh18_mstar_cn1": {"units": "1", "bounds": (0.05, 1.0), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "RH18_MSTAR_CN1 (Reichl & Hallberg 2018 value 0.275)", "shape": None},
+            "rh18_mstar_cn2": {"units": "1", "bounds": (1.0, 30.0), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "RH18_MSTAR_CN2 (Reichl & Hallberg 2018 value 8.0)", "shape": None},
+            "rh18_mstar_cn3": {"units": "1", "bounds": (-12.0, -1.0), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "RH18_MSTAR_CN3 (Reichl & Hallberg 2018 value -5.0)", "shape": None},
+            "rh18_mstar_cs1": {"units": "1", "bounds": (0.05, 1.0), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "RH18_MSTAR_CS1 (Reichl & Hallberg 2018 value 0.2)", "shape": None},
+            "rh18_mstar_cs2": {"units": "1", "bounds": (0.1, 1.0), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "RH18_MSTAR_CS2 (Reichl & Hallberg 2018 value 0.4)", "shape": None},
+            "mixlen_exponent": {"units": "1", "bounds": (0.5, 3.0), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "MIX_LEN_EXPONENT: shape of the mixing-length profile (1 = law of the wall, 2 = KPP-like)", "shape": None},
+            "translay_scale": {"units": "1", "bounds": (0.0, 0.5), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "EPBL_TRANSITION_SCALE: mixing length in the transition layer as a fraction of the boundary-layer depth", "shape": None},
+            "vstar_scale_fac": {"units": "1", "bounds": (0.2, 3.0), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "EPBL_VEL_SCALE_FACTOR: overall scaling of the turbulent velocity", "shape": None},
+            "vstar_surf_fac": {"units": "1", "bounds": (0.5, 4.0), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "VSTAR_SURF_FAC: surface mechanical contribution to vstar (REICHL_H18 scheme)", "shape": None},
+            "omega_frac": {"units": "1", "bounds": (0.0, 1.0), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "ML_OMEGA_FRAC: blend of 2*Omega with the local f in the rotational scale", "shape": None},
+            "K_bg": {"units": "m^2/s", "bounds": (1e-6, 1e-4), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "KD: background tracer diffusivity added below the boundary layer", "shape": None},
+            "A_bg": {"units": "m^2/s", "bounds": (1e-5, 1e-3), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "KV: background viscosity added below the boundary layer", "shape": None},
+        },
+    },
     "ConstantVerticalMixingConfig": {
         "scheme_key": "ocean.vm.constant",
         "excluded": {
@@ -58,6 +102,7 @@ __param_spec__ = {
             "tke_surface_min": "numerics: floor/cap",
         },
         "params": {
+            "surface_flux_coeff": {"units": "1", "bounds": (0.5, 10.0), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "FESOM2 namelist tke_cd (3.75) / Veros surface TKE flux (1.0)", "shape": None},
             "Prandtl_tke0": {"units": "1", "bounds": (3.3, 30.0), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "Gaspar TKE vertical mixing", "shape": None},
             "lc_coeff": {"units": "1", "bounds": (0.05, 0.5), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "NEMO zdftke rn_lc / Axell 2002 Langmuir cells", "shape": None},
             "etau_frac": {"units": "1", "bounds": (0.01, 0.2), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "NEMO zdftke rn_efr sub-ML TKE penetration", "shape": None},
@@ -115,7 +160,6 @@ __param_spec__ = {
             "Ri_conv": "default 0 = disabled/off (enable via config, not training)",
             "a_m": "Large 1994 fixed nondim constant",
             "a_s": "Large 1994 fixed nondim constant",
-            "c_b": "Large 1994 fixed nondim constant",
             "c_m": "Large 1994 fixed nondim constant",
             "c_s": "Large 1994 fixed nondim constant",
             "businger_stable_coeff": "Businger-Dyer 1971 fixed MOST stability-function constant",
@@ -248,7 +292,6 @@ class TKEConfig(NamedTuple):
                                      # SINGLE length: l_eps = l_k = min(lup,ldn)).
                                      # NOTE the numbering is Veros-derived and
                                      # does NOT match NEMO's nn_mxl values.
-    mxl0_min_m: float = 0.04         # NEMO rn_mxl0 [m] (kappa*z0 = 0.4*0.1)
     # NEMO dry-w-point TKE.  NEMO closes tke_tke with
     #     en(ji,jj,jk) = MAX( en(ji,jj,jk), rn_emin ) * wmask(ji,jj,jk)
     # (DINO cfgs/DINO/MY_SRC/zdftke.F90:565 = upstream
@@ -266,6 +309,44 @@ class TKEConfig(NamedTuple):
     # Requires positivity="floor" (the Veros positivity branch returns before
     # the `MAX(en,rn_emin)` this mask rides on).
     tke_dry_wmask: bool = False
+    # ----- NEMO rmxl_min provenance (zdftke.F90:841-848) -----------------
+    # NEMO picks the mixing-length floor in TWO arms:
+    #   ln_zdfiwm=.TRUE.  -> rn_emin FORCED to 1e-10 and rmxl_min FORCED to
+    #                        1e-3 (zdftke.F90:842-843); the derivation below
+    #                        is never evaluated.
+    #   ln_zdfiwm=.FALSE. -> rmxl_min = 1e-6/(rn_ediff*SQRT(rn_emin))
+    #                        (zdftke.F90:846), i.e. derived from c_k and
+    #                        tke_background, and the namelist floor is unused.
+    # ``False`` (DEFAULT, main's behaviour): the floor IS ``mxl_min``, whatever
+    #   the card set.  That is also the correct value for an ln_zdfiwm=.TRUE.
+    #   card, which simply sets ``mxl_min=1.0e-3`` (ORCA1, ORCA2).
+    # ``True``: take the ln_zdfiwm=.FALSE. derivation.  Only a NEMO-literal
+    #   card that runs ln_zdfiwm=.FALSE. selects it (GYRE, DINO).  The
+    #   derivation is evaluated in binary64 and RAISES without x64, so the
+    #   requirement lands only on the cards that ask for it.
+    nemo_derived_mxl_min: bool = False
+    # ``ln_mxl0`` surface-anchor masking (zdftke.F90:602 evaluates
+    # ``taum(:,:)*tmask(:,:,1)``).  ``False`` (DEFAULT, main's behaviour):
+    # the anchor is built from ``taum`` alone and a caller that has no
+    # surface T-mask (FESOM) is accepted.  ``True``: the compiled masked
+    # statement, and a missing ``surface_tmask`` is a hard error.  Only the
+    # NEMO-literal cards select it.
+    nemo_mxl0_surface_tmask: bool = False
+    # ----- NEMO rn_mxl0: the ln_mxl0 surface-anchor FLOOR ------------------
+    # ``tke_avn`` floors the wind anchor at ``rn_mxl0``
+    # (``zmxlm(ji,1) = MAX( rn_mxl0, zmxlm(ji,1) )``, GYRE ppsrc
+    # zdftke.f90:610), so on a CALM column the anchor IS this value.
+    # ``zdf_tke_init`` then OVERWRITES the namelist ``rn_mxl0`` with the
+    # active mixing-length floor ``rmxl_min`` whenever ``ln_mxl0`` is true
+    # (shipped zdftke.F90:859-862; GYRE ppsrc zdftke.f90:828-831).
+    # ``False`` (DEFAULT, main's behaviour): NO overwrite -- the floor is the
+    #   card's own ``mxl0_min_m``, i.e. the namelist ``rn_mxl0``.  DECISION 72
+    #   (user, 2026-09-28) keeps the ORCA1 OMIP card on this arm.
+    # ``True``: take NEMO's overwrite, i.e. the mixing-length floor.  Only the
+    #   NEMO-literal cards select it (GYRE and everything built on it, the
+    #   ORCA2-zps testcase card, and the NEMO DINO cards).
+    nemo_mxl0_rmxl_min_overwrite: bool = False
+    mxl0_min_m: float = 0.04             # NEMO rn_mxl0 [m] (kappa*z0 = 0.4*0.1)
     kappaM_min: float = 2.0e-4
     kappaM_max: float = 100.0            # convective ceiling on K_M [m^2/s] (Veros default)
     kappaH_min: float = 2.0e-5
@@ -287,6 +368,10 @@ class TKEConfig(NamedTuple):
     #                             the implicit solve. ~60x larger surface TKE
     #                             than the flux BC under an ~0.07 Pa wind.
     surface_bc: str = "veros_flux"
+    # Multiplies the Veros wind-work surface TKE flux (|tau|/rho0)^1.5.
+    # FESOM2 applies cd = 3.75 (namelist tke_cd); Veros uses 1.0.
+    # Default 1.0 keeps existing runs bit-identical.
+    surface_flux_coeff: float = 1.0
     # Surface TKE BC PLACEMENT (Phase-2 #1317 T3 — the #1 ranked suspect).
     # NEMO holds en(1) at the z=0 W-POINT and SOLVES the tridiagonal from
     # jk=2, the first INTERIOR w-level (zdftke.F90:264,403-410).
@@ -315,6 +400,11 @@ class TKEConfig(NamedTuple):
     #   ``enable_tke`` path does. Requires the caller to pass T/S/pressure
     #   + an EOS to :func:`tke_vertical_mixing`.
     n2_mode: str = "insitu"
+    # Which alpha/beta the n2_mode="nemo_bn2" assembly uses. "seos" (default,
+    # BIT-IDENTICAL legacy) is the 3-term simplified fit; "teos10" is NEMO's
+    # Roquet polynomial with the TEOS-10 coefficient set -- what ORCA1 runs
+    # (ln_teos10=.true., namelist_cfg:308). Ignored by every other n2_mode.
+    n2_eos_form: str = "seos"
     # ----- Diffusivity-stage N² time level (NEMO eosbn2 Nnow sequencing) -----
     # ``False`` (default, BIT-IDENTICAL legacy): the vertical-mixing
     #   diffusivity-stage N² is sampled on the POST-advection mid-step T/S
@@ -344,6 +434,12 @@ class TKEConfig(NamedTuple):
     #   ``T_n2b``/``S_n2b`` to ``tke_vertical_mixing``; Prandtl zri and the
     #   Langmuir PE integral are evaluated on that TRUE Nbb level.
     tke_n2_time_level: str = "step_entry"
+    # Evaluation lifetime of NEMO's rn2/rn2b and live W-grid geometry.
+    # ``implicit_solve_state`` (default, BIT-IDENTICAL legacy) rebuilds them
+    # from the state presented to the implicit solve. ``step_entry`` consumes
+    # a frozen TKEEntryN2Bundle built before the explicit update, matching
+    # stpmlf.F90:204-210 -> zdf_phy. Complete DINO NEMO cards select it.
+    tke_n2_evaluation_stage: str = "implicit_solve_state"
     # ----- Veros vertical-metric slots (the TKE metric-consistency fix) -----
     # legoESM's historical TKE chain mixes vertical-metric conventions: it
     # uses the centre spacing ``dz_half`` (Veros dzw) in slots where Veros
@@ -567,6 +663,50 @@ class TKEConfig(NamedTuple):
     #   geometry; construction raises otherwise) and the same raw C-grid
     #   face state that mode already requires.
     tke_shear_avm_weighting: str = "tpoint"
+    # Which closure coefficients feed the PRE-solve zdftke chain.
+    # ``current_subiteration`` is the historical legoESM formulation.
+    # ``carried_previous_step`` is NEMO's avm_k/avt_k lifetime: the pair
+    # carried from the preceding step feeds zdf_sh2, Prandtl, the TKE matrix
+    # and RHS, and is overwritten only by post-solve tke_avn.
+    tke_preclosure_coeff_source: str = "current_subiteration"
+    # TKE diffusion-matrix evaluation. ``factored`` is the historical shared
+    # solver construction. ``nemo_literal`` evaluates zdftke.F90:499-510 in
+    # source order from carried avm/dissl and raw live e3t/e3w operands.
+    # Complete DINO NEMO cards select the literal form; every generic and
+    # non-oracle card retains the byte-identical factored default.
+    tke_matrix_evaluation: str = "factored"
+    # Solver recurrence. ``shared_thomas`` preserves the generic historical
+    # path; complete DINO NEMO cards select the literal zdftke scan order.
+    tke_solver_evaluation: str = "shared_thomas"
+    # Arithmetic used by the nn_etau penetration profile. ``jax_expression``
+    # is the historical single jnp.exp call. ``nemo_literal`` reproduces the
+    # ordinary-range glibc-2.34 vector EXP linked into the DINO oracle; only
+    # the two complete DINO oracle cards select it.
+    tke_etau_exponential_evaluation: str = "jax_expression"
+    # Latitude-profile arithmetic for nn_htau=1. ``jax_expression`` is the
+    # historical jnp.deg2rad+jnp.sin path. ``nemo_literal`` consumes native
+    # mesh degrees and transcribes glibc-2.34's two-lane vector SIN arithmetic.
+    # Only complete DINO oracle cards select it.
+    tke_htau_evaluation: str = "jax_expression"
+    # Raw nn_mxl buoyancy length. ``factored`` preserves the historical
+    # sqrt(2)*sqrt(e)/sqrt(max(N2,1e-12)) expression. ``nemo_literal`` uses
+    # zdftke.F90 source association and NEMO's runtime rsmall.
+    tke_mxl_raw_evaluation: str = "factored"
+    # Langmuir source evaluation. ``vectorized`` is the historical shared
+    # construction. ``nemo_literal`` preserves zdftke.F90:422-463 operation
+    # order, including the per-column mbkt+1 no-crossing fallback. Only the
+    # complete DINO NEMO cards select it; all other cards remain vectorized.
+    tke_langmuir_evaluation: str = "vectorized"
+    # Evaluation lifetime of NEMO's zdf_sh2 operand.  The historical path
+    # evaluates from the state handed to the implicit solve.  Complete DINO
+    # NEMO cards instead freeze p_sh2 from selected step-entry face levels and
+    # carried avm_k, matching zdfphy.F90:268 before the explicit update reaches
+    # zdftke.F90.  Kept legacy by default so all other cards remain unchanged.
+    tke_shear_evaluation_stage: str = "implicit_solve_state"
+    # Vertical divisor in face-native zdf_sh2.  Historical legoESM uses one
+    # T-point dz_half(J_now) for both factors.  Complete DINO NEMO cards use
+    # the live QCO u/v-face metrics at NOW and BEFORE separately.
+    tke_shear_metric_source: str = "tpoint_jacobian"
     # ----- Tracer/momentum Prandtl chain (abyssal over-diffusion fix) -----
     # ``"unit"`` (default, BIT-IDENTICAL legacy): K_H = max(K_M, kappaH_min)
     #   -- the MOMENTUM floor ``kappaM_min`` leaks into the TRACER floor
@@ -635,20 +775,10 @@ class TKEConfig(NamedTuple):
     #   BC — the prior legoESM behaviour).
     # ``True``: NEMO's bottom friction TKE source (zdftke.F90:279-288):
     #   en(mbkt+1) = max(0.001875·CdU_bot·|u_bot|, rn_emin)·ssmask, held as
-    #   a Dirichlet identity row at the ABSOLUTE-DEEPEST array interface
-    #   (``e_new[..., -1]``), not the per-column bathymetry-relative
-    #   ``bottom_level``-adjacent row. On a FLAT-BOTTOM column (every DINO
-    #   column here reaches the max depth) these coincide exactly; on
-    #   variable topography (a shallower column) the true seafloor
-    #   interface sits SHALLOWER than the array's last row, so the pin
-    #   lands one level below the real bottom (a masked/dry level there —
-    #   downstream wet-interface masking prevents any leak into wet cells,
-    #   so this is NOT a correctness bug, but the BC does not fire at the
-    #   physically correct row on shallow columns). Physics-validator
-    #   review 2026-07-24: acceptable for the Phase-2 kamm-card target
-    #   (deep/not entrainment-relevant per the Phase-1 ranking); a
-    #   bottom_level-relative scatter is the documented follow-up before
-    #   any abyssal-tendency certification.
+    #   a Dirichlet identity row at each column's bathymetry-relative
+    #   ``bottom_level``-adjacent W interface when the caller supplies a
+    #   partial-cell bottom index.  The legacy flat-bottom interface remains
+    #   supported by pinning ``e_new[..., -1]`` when no bottom index exists.
     #   Requires the model-step caller to thread the bottom-cell velocities
     #   + the NEMO bottom-drag rate (reusing
     #   ``nemo_effective_bottom_drag_r`` — single-owner doctrine, no
@@ -731,12 +861,23 @@ class TKEConfig(NamedTuple):
     #   full wave TKE even under compact ice.  Nonzero modes thread
     #   ``surface_forcing.ice_concentration`` as an EFFECTIVE ``ice_frac``
     #   into the kernels' built-in ``(1-ice_frac)`` factor:
-    #     1 -> eff = fi            (factor (1-fi),        NEMO nn_eice=1)
+    #     1 -> eff = tanh(10*fi)   (factor 1-tanh(10*fi), NEMO nn_eice=1)
+    #     2 -> eff = fi            (factor 1-fi, NEMO nn_eice=2)
     #     3 -> eff = min(4*fi, 1)  (factor max(0,1-4*fi), NEMO nn_eice=3 —
     #          the ORCA1 namelist choice; wave TKE killed at fi >= 0.25).
     #   2026-07-18 audit: the kernels ALWAYS supported ``ice_frac`` but no
     #   caller supplied it — under-ice TKE injection over-mixed the Arctic.
-    eice: int = 0                        # 0 off | 1 (1-fi) | 3 max(0,1-4fi)  (NEMO nn_eice)
+    eice: int = 0              # 0 off | 1 tanh(10fi) | 2 fi | 3 min(4fi,1)
+
+
+# --- LMD94 nonlocal-transport constants (Large, McWilliams & Doney 1994, eq. 20 + App. B) ---
+_LMD94_C_STAR = 10.0     # C*, nonlocal flux constant (eq. 20)
+_LMD94_C_S = 98.96       # c_s, scalar convective constant (App. B)
+_LMD94_EPSILON = 0.1     # epsilon, surface-layer fraction (App. A/B)
+# C_s = C* kappa (c_s kappa epsilon)^(1/3) (LMD94 eq. 20; POP/CVMix ``Cg``). At kappa = 0.4
+# this is 6.3275155 -- the published 6.33 and CVMix's 6.32739901 are roundings of it.
+_LMD94_GAMMA_NONLOCAL = (_LMD94_C_STAR * constants.kappa_von_karman
+                         * (_LMD94_C_S * constants.kappa_von_karman * _LMD94_EPSILON) ** (1.0 / 3.0))
 
 
 class KPPConfig(NamedTuple):
@@ -754,19 +895,18 @@ class KPPConfig(NamedTuple):
     """
     Ri_crit: float = 0.3    # Critical bulk Richardson number (Large, McWilliams & Doney 1994; matches NCAR POP2 / MOM6 default)
     Cv: float = 1.6          # Unresolved shear coefficient
-    kappa_vk: float = constants.kappa_vk
+    kappa_vk: float = constants.kappa_von_karman
     K_max: float = 1.0       # Maximum diffusivity [m^2/s]
     K_bg: float = 1e-5       # Background diffusivity [m^2/s]
     A_bg: float = 1e-4       # Background viscosity [m^2/s]
-    gamma_T: float = 6.33    # Non-local transport coefficient for T
-    gamma_S: float = 6.33    # Non-local transport coefficient for S
+    gamma_T: float = _LMD94_GAMMA_NONLOCAL  # Non-local transport coefficient for T
+    gamma_S: float = _LMD94_GAMMA_NONLOCAL  # Non-local transport coefficient for S
     K_conv: float = 1.0      # Convective mixing diffusivity [m^2/s]
     Ri_conv: float = 0.0     # Ri threshold for convective instability
     K_0_shear: float = 5e-3  # LMD94 interior shear instability peak K [m^2/s]
     Ri_0: float = 0.7        # LMD94 critical Ri for interior shear mixing
-    c_s: float = 98.96       # LMD94 scalar stability constant (App. B; V_t^2 + scalar convective scale)
-    c_b: float = 0.599       # LMD94 convective velocity scale parameter (legacy single-scale form)
-    epsilon_lmd: float = 0.1  # LMD94 surface-layer fraction (App. A/B)
+    c_s: float = _LMD94_C_S  # LMD94 scalar stability constant (App. B; V_t^2 + scalar convective scale)
+    epsilon_lmd: float = _LMD94_EPSILON  # LMD94 surface-layer fraction (App. A/B)
     # LMD94 Eq. 23 unresolved-shear variance V_t^2 carries a (-beta_T)^1/2
     # prefactor (beta_T = -0.2 fixed, App. B); applied EXPLICITLY in kpp.py so
     # Cv keeps its standard standalone value 1.6 (it does NOT absorb sqrt(0.2)).
@@ -809,17 +949,18 @@ class KPPConfig(NamedTuple):
     langmuir_coeff: float = 0.08     # C_L in eps_L = sqrt(1 + C_L/La_t^2)
     langmuir_number_default: float = 0.3  # fallback La_t when no Stokes-drift input
     # ``eice``: under-ice attenuation of the KPP turbulent velocity scales
-    #   (NEMO nn_eice analogue; mirrors TKEConfig.eice).  Compact sea ice caps
+    #   (NEMO nn_eice numbering; mirrors TKEConfig.eice).  Compact sea ice caps
     #   the surface, so the surface-forcing-driven w_m/w_s — and hence BOTH the
     #   bulk-Ri boundary-layer depth (via V_t^2) and the mixing coefficients —
     #   are scaled by (1 - eff) under ice.  0 (default, BIT-IDENTICAL) = off;
-    #   1 = linear eff=fi (factor 1-fi; NOT NEMO nn_eice=1 = 1-tanh(10fi));
+    #   1 = eff=tanh(10fi) (factor 1-tanh(10fi));
+    #   2 = linear eff=fi (factor 1-fi);
     #   3 = eff=min(4*fi,1) (max(0,1-4*fi), matches NEMO nn_eice=3, mixing
     #   killed at fi>=0.25).  Consumes surface_forcing.ice_concentration
     #   (2026-07-19: the KPP grids' Arctic halocline erosion — over-deep MLD +
     #   Siberian salty — that TKEConfig.eice fixed on the TKE grid but never
     #   reached the KPP grids).
-    eice: int = 0                    # 0 off | 1 (1-fi) | 3 max(0,1-4fi)
+    eice: int = 0              # 0 off | 1 tanh(10fi) | 2 fi | 3 min(4fi,1)
 
 
 class CATKEConfig(NamedTuple):
@@ -893,6 +1034,100 @@ class CATKEConfig(NamedTuple):
     maximum_tke_diffusivity: float = float("inf")     # K_e cap [m^2/s]
 
 
+class EPBLConfig(NamedTuple):
+    """Energetic Planetary Boundary Layer (Reichl & Hallberg 2018) settings.
+
+    Field-for-field the MOM6 ``MOM_energetic_PBL`` runtime parameters, with
+    MOM6's own defaults except ``vonkar``: legoESM uses 0.4 (the repo's core
+    von Karman value) where MOM6 uses 0.41.  A MOM6 parameter block maps onto
+    this config one name at a time.  The MOM6 name of each field is given in
+    its comment.
+
+    ``dt_s`` has no MOM6 counterpart: MOM6 passes the timestep as an argument,
+    while legoESM's vertical-mixing factory signature carries no timestep, so
+    ePBL — which is an energy-per-timestep closure — reads it from the config.
+    It MUST equal the model timestep; the scheme raises if it is not positive.
+    """
+    # --- timestep (no MOM6 equivalent; see class docstring) ---
+    dt_s: float = 1800.0
+
+    # --- rotation / decay ---
+    omega_frac: float = 0.0        # ML_OMEGA_FRAC
+    tke_decay: float = 2.5         # TKE_DECAY
+    ekman_scale_coef: float = 1.0  # EKMAN_SCALE_COEF
+
+    # --- energy partition ---
+    nstar: float = 0.2                 # NSTAR
+    mke_to_tke_effic: float = 0.0      # MKE_TO_TKE_EFFIC
+    wstar_ustar_coef: float = 1.0      # WSTAR_USTAR_COEF
+
+    # --- mstar (TKE input = mstar * rho0 * ustar^3 * dt) ---
+    mstar_scheme: str = "constant"     # EPBL_MSTAR_SCHEME: constant|om4|reichl_h18
+    fixed_mstar: float = 1.2           # MSTAR
+    mstar_cap: float = -1.0            # MSTAR_CAP, om4 only (<=0 disables)
+    mstar_coef: float = 0.3            # MSTAR2_COEF1 (om4 scheme)
+    c_ek: float = 0.085                # MSTAR2_COEF2 (om4 scheme)
+    mstar_convect_coef: float = 0.0    # MSTAR_CONV_ADJ
+    rh18_mstar_cn1: float = 0.275      # RH18_MSTAR_CN1
+    rh18_mstar_cn2: float = 8.0        # RH18_MSTAR_CN2
+    rh18_mstar_cn3: float = -5.0       # RH18_MSTAR_CN3
+    rh18_mstar_cs1: float = 0.2        # RH18_MSTAR_CS1
+    rh18_mstar_cs2: float = 0.4        # RH18_MSTAR_CS2
+
+    # --- mixing length / boundary-layer depth iteration ---
+    use_mld_iteration: bool = True     # USE_MLD_ITERATION
+    mld_bisection: bool = False        # EPBL_MLD_BISECTION
+    # KNOWN DIFFERENCE vs corrected MOM6 logic: True reproduces MOM6's
+    # documented EPBL_MLD_ITER_BUG (wrong next-iteration bounds when successive
+    # guesses rise by exactly mld_tol), which is MOM6's default via
+    # ENABLE_BUGS_BY_DEFAULT=.true. (MOM_energetic_PBL.F90:3991-3996, 0e9a561).
+    # Set False for the corrected bound ordering.
+    mld_iter_bug: bool = True          # EPBL_MLD_ITER_BUG
+    max_mld_its: int = 20              # EPBL_MLD_MAX_ITS
+    mld_tol: float = 1.0               # EPBL_MLD_TOLERANCE [m]
+    mixlen_exponent: float = 2.0       # MIX_LEN_EXPONENT
+    translay_scale: float = 0.1        # EPBL_TRANSITION_SCALE
+    min_mix_len: float = 0.0           # EPBL_MIN_MIX_LEN [m]
+    vonkar: float = constants.kappa_von_karman  # VON_KARMAN (legoESM 0.4; MOM6 0.41)
+
+    # --- turbulent velocity scale ---
+    wt_scheme: str = "cube_root_tke"   # EPBL_VEL_SCALE_SCHEME: cube_root_tke|reichl_h18
+    vstar_scale_fac: float = 1.0       # EPBL_VEL_SCALE_FACTOR
+    vstar_surf_fac: float = 1.2        # VSTAR_SURF_FAC
+
+    # --- solver numerics ---
+    max_kd_its: int = 20               # ePBL_column's hard-coded max_itt
+    ustar_min: float = 1.45842e-18     # EPBL_USTAR_MIN [m/s]
+
+    # --- machine-learning equation-discovery options (Sane et al. 2026) ---
+    eqdisc_shape: bool = False         # EPBL_EQD_DIFFUSIVITY_SHAPE
+    eqdisc_v0: bool = False            # EPBL_EQD_DIFFUSIVITY_VELOCITY
+    eqdisc_v0h: bool = False           # EPBL_EQD_DIFFUSIVITY_VELOCITY_H
+    eqd_v0_lower_cap: float = 1.0e-4   # EPBL_EQD_DIFFUSIVITY_V0_LOWER_CAP [m/s]
+    eqd_v0_upper_cap: float = 0.1      # EPBL_EQD_DIFFUSIVITY_V0_UPPER_CAP [m/s]
+    eqd_bflux_lower_cap: float = -7.0e-7  # ..._BFLUX_LOWER_CAP [m^2/s^3]
+    eqd_bflux_upper_cap: float = 7.0e-7   # ..._BFLUX_UPPER_CAP [m^2/s^3]
+    eqd_sigma_max_lower_cap: float = 0.1  # ..._SIGMA_MAX_LOWER_CAP
+    eqd_sigma_max_upper_cap: float = 0.7  # ..._SIGMA_MAX_UPPER_CAP
+    eqd_eh_upper_cap: float = 2.0         # ..._EH_UPPER_CAP
+    eqd_lh_cap: float = 8.0               # ..._LH_CAP
+    eqd_f_lower: float = 2.5384e-7        # ..._CORIOLIS_LOWER_CAP [1/s]
+    eqd_shape_function_epsilon: float = 0.01  # ..._SHAPE_FUNCTION_EPSILON
+
+    # --- background floors added to the ePBL diffusivity ---
+    K_bg: float = 1.0e-5               # KD   [m^2/s]
+    A_bg: float = 1.0e-4               # KV   [m^2/s]
+
+    # --- operator-split ordering (no MOM6 parameter; see note) ---
+    # False (legoESM default, same as KPP): K is diagnosed from the
+    # step-entry state, before this step's surface flux is applied.
+    # True: K is diagnosed from the state AFTER the surface flux, as MOM6
+    # does (applyBoundaryFluxes precedes energetic_PBL).  Both converge to
+    # the same answer as dt -> 0.  Honoured by the ocean SCM only; every
+    # other driver raises if it is set.
+    k_after_surface_flux: bool = False
+
+
 #: Canonical set of vertical-mixing closures ``compute_vertical_K_profiles``
 #: dispatches. SINGLE SOURCE OF TRUTH -- the k_profiles.py fail-loud raise reads
 #: this instead of a hand-copied literal list, exactly as ``VALID_EOS_SCHEMES``
@@ -900,7 +1135,7 @@ class CATKEConfig(NamedTuple):
 #: never drift). Every member is reachable through the public YAML key
 #: ``ocean.physics.vertical_mixing.scheme`` (pinned by test_config_footguns).
 VALID_VERTICAL_MIXING_SCHEMES = frozenset(
-    {"none", "constant", "richardson", "tke", "catke", "kpp"}
+    {"none", "constant", "richardson", "tke", "catke", "kpp", "epbl"}
 )
 
 
@@ -910,6 +1145,7 @@ class VerticalMixingConfig(NamedTuple):
     constant: ConstantVerticalMixingConfig = ConstantVerticalMixingConfig()
     richardson: RichardsonVerticalMixingConfig = RichardsonVerticalMixingConfig()
     kpp: KPPConfig = KPPConfig()
+    epbl: EPBLConfig = EPBLConfig()
     tke: TKEConfig = TKEConfig()
     catke: CATKEConfig = CATKEConfig()
     # Tidal mixing is ADDITIVE: when ``tidal.enabled=True`` the
@@ -969,3 +1205,76 @@ class VerticalMixingConfig(NamedTuple):
     # Unknown values raise (dispatch hardening); consulted only by
     # ``compute_vertical_K_profiles`` (k_profiles.py).
     vmix_background_mode: str = "additive"
+
+
+# --- FESOM2-JAX FORCA20 TKE constants (fesom_jax/config.py, fesom_jax/tke.py,
+#     fesom_jax/cvmix_tke.py; CORE2 namelist) ---
+_FESOM2_TKE_CD = 3.75           # namelist tke_cd: surface TKE flux coefficient
+_FESOM2_TKE_C66 = 6.6           # Prandtl law Pr = clamp(6.6 Ri, 1, 10)
+_FESOM2_A_VER = 1.0e-4          # background vertical viscosity [m^2/s]
+_FESOM2_K_VER = 1.0e-5          # background vertical diffusivity [m^2/s]
+_FESOM2_KAPPAM_MAX = 100.0      # KappaM ceiling [m^2/s]
+_FESOM2_TKE_MIN = 1.0e-6        # TKE floor [m^2/s^2]
+
+
+def tke_fesom2_card() -> TKEConfig:
+    """TKE constant set matching the FESOM2-JAX reference closure (TkeConfig).
+
+    Field-by-field mapping to FESOM2 (fesom_tke.c / cvmix_tke, TkeConfig):
+
+    - prognostic=True             FESOM2 carries prognostic TKE (one backward-
+                                   Euler step per model step); legoESM default
+                                   is the diagnostic Mode-B chain.
+    - prandtl_mode="richardson"   FESOM2 Pr = clamp(6.6*Ri, 1, 10); the Veros
+                                   "richardson" branch is clamp(prandtl_ri_coeff*Ri, 1, 10).
+    - prandtl_ri_coeff=6.6        FESOM2 TKE_C66.
+    - enable_kappaH_profile=False FESOM2 background Kv is a constant (no Bryan-Lewis).
+    - kappaM_min=1.0e-4           FESOM2 A_VER (background Av).
+    - kappaH_min=1.0e-5           FESOM2 K_VER (background Kv).
+    - kappaM_max=100.0            FESOM2 kappaM_max (binds only off the "unit" Prandtl path).
+    - tke_background=1.0e-6       FESOM2 tke_min (interior floor).
+    - tke_surface_min=1.0e-6      FESOM2 has ONE floor (tke_min); legoESM's
+                                   separate 1e-4 surface floor would hold 100x
+                                   FESOM's TKE under weak wind.
+    - surface_bc="veros_flux"     FESOM2 Neumann (flux) surface BC.
+    - surface_flux_coeff=3.75     FESOM2 namelist tke_cd multiplying (|tau|/rho0)^1.5.
+    - kappa_convention="veros_sqrte"  FESOM2 KappaM = c_k*mxl*sqrt(tke) (Veros);
+                                   the legacy Gaspar form uses sqrt(2 tke).
+    - n2_mode="nemo_bn2"          SIGNED N^2 from the locally linearised EOS
+                                   (NEMO bn2: alpha dT/dz - beta dS/dz), the same
+                                   construction as FESOM2's pressure_bv; a signed
+                                   mode also selects the Veros/FESOM2 single
+                                   buoyancy length with the wall recursion for
+                                   mxl_choice 2, where the legacy clipped in-situ
+                                   N^2 selects the two-cell Bougeault-Lacarrere
+                                   cap. ("adiabatic" is not wired on MPAS.)
+
+    Already equal by default and left untouched: c_k 0.1, c_eps 0.7,
+    alpha_tke 30, mxl_min 1e-8, tke_mxl_choice 2 (Blanke-Delecluse).
+
+    NOT matched: the surface-flux injection thickness -- FESOM2 divides the
+    flux by hnode/2 (cvmix_tke dzt_surf, Veros' 0.5*dzw_top) while the legacy
+    slots here divide by the interior centre spacing (half the source on
+    equal layers); the Veros slots (veros_dz_slots=True) are not wired on the
+    MPAS ocean, so the card keeps the legacy slots on BOTH lanes rather than
+    differ per lane. FESOM2 adds its Av/Kv backgrounds to the TKE-derived
+    diffusivities, legoESM applies kappaM_min/kappaH_min as floors (max), so
+    the two differ where the closure's K falls below the background; FESOM2's
+    tke_min is a per-step hard floor on the field, legoESM's tke_background is
+    the closure's seed/floor value, not a bit-identical implementation.
+    """
+    return TKEConfig(
+        prognostic=True,
+        prandtl_mode="richardson",
+        prandtl_ri_coeff=_FESOM2_TKE_C66,
+        enable_kappaH_profile=False,
+        kappaM_min=_FESOM2_A_VER,
+        kappaH_min=_FESOM2_K_VER,
+        kappaM_max=_FESOM2_KAPPAM_MAX,
+        tke_background=_FESOM2_TKE_MIN,
+        tke_surface_min=_FESOM2_TKE_MIN,
+        surface_bc="veros_flux",
+        surface_flux_coeff=_FESOM2_TKE_CD,
+        kappa_convention="veros_sqrte",
+        n2_mode="nemo_bn2",
+    )

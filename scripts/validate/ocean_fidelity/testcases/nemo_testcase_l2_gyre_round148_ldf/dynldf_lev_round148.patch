@@ -1,0 +1,65 @@
+--- dynldf_lev.F90
++++ dynldf_lev.F90
+@@ -61,6 +61,11 @@
+       !
+       INTEGER  ::   ji, jj, jk   ! dummy loop indices
+       REAL(wp), DIMENSION(T2D(1)) ::   zwf, zwt
++      INTEGER  ::   r148_ldf_unit, r148_ldf_ios
++      CHARACTER(LEN=16)  :: r148_ldf_magic
++      CHARACTER(LEN=256) :: r148_ldf_filename
++      REAL(wp), ALLOCATABLE, DIMENSION(:,:,:) :: r148_zcur, r148_zdiv
++      LOGICAL :: r148_ldf_dump
+ #if ! defined key_PSYCLONE_2p5p0
+       REAL(wp), ALLOCATABLE, DIMENSION(:,:) ::   zah_cur2, zah_div2   !  temporaries used to calculate GEOMTERIC source term
+ #else
+@@ -96,9 +101,50 @@
+ #        define zcur   zwf
+ #        define zdiv   zwt
+          !
++         r148_ldf_dump = lwp .AND. kt == 1081 .AND. Kbb == Kmm
++         IF( r148_ldf_dump ) THEN
++            IF( STORAGE_SIZE( 1._wp ) /= 64 )   CALL ctl_stop( 'round-148 developed LDF requires 64-bit wp' )
++            ALLOCATE( r148_zcur(jpi,jpj,jpk), r148_zdiv(jpi,jpj,jpk) )
++            r148_zcur(:,:,:) = 0._wp
++            r148_zdiv(:,:,:) = 0._wp
++            WRITE(r148_ldf_filename,'("oracle_developed_ldf_kt",I8.8,".bin")') kt
++            OPEN( NEWUNIT=r148_ldf_unit, FILE=TRIM(r148_ldf_filename), ACCESS='STREAM', FORM='UNFORMATTED', &
++               &  STATUS='REPLACE', ACTION='WRITE', IOSTAT=r148_ldf_ios )
++            IF( r148_ldf_ios /= 0 )   CALL ctl_stop( 'cannot open round-148 developed LDF dump' )
++            r148_ldf_magic = 'NEMO_L2_R148LDF'
++            WRITE(r148_ldf_unit) r148_ldf_magic, 1, kt, Kbb, Kmm, Krhs, jpi, jpj, jpk, STORAGE_SIZE(1._wp)
++            WRITE(r148_ldf_unit) SIZE(pu(:,:,:,Kbb)), SIZE(pv(:,:,:,Kbb)), &
++               & SIZE(tmask), SIZE(umask), SIZE(vmask), SIZE(fmask), SIZE(ahmt), SIZE(ahmf), &
++               & SIZE(e3t_3d), SIZE(e3u_3d), SIZE(e3v_3d), SIZE(e3f_3d), &
++               & SIZE(e3u_3d), SIZE(e3v_3d), &
++               & SIZE(pu(:,:,:,Krhs)), SIZE(pv(:,:,:,Krhs)), &
++               & SIZE(e2u), SIZE(e1v), SIZE(e2v), SIZE(e1u), SIZE(r1_e1e2t), SIZE(r1_e1e2f), &
++               & SIZE(r1_e1u), SIZE(r1_e2v), SIZE(r1_e2u), SIZE(r1_e1v), &
++               & SIZE(r148_zcur), SIZE(r148_zdiv), SIZE(pu(:,:,:,Krhs)), SIZE(pv(:,:,:,Krhs))
++            WRITE(r148_ldf_unit) pu(:,:,:,Kbb), pv(:,:,:,Kbb), tmask, umask, vmask, fmask, ahmt, ahmf, &
++               & e3t_3d * (1._wp + SPREAD(r3t(:,:,Kbb),3,jpk) * tmask), &
++               & e3u_3d * (1._wp + SPREAD(r3u(:,:,Kbb),3,jpk) * umask), &
++               & e3v_3d * (1._wp + SPREAD(r3v(:,:,Kbb),3,jpk) * vmask), &
++               & e3f_3d * (1._wp + SPREAD(r3f(:,:),3,jpk) * fe3mask), &
++               & e3u_3d * (1._wp + SPREAD(r3u(:,:,Kmm),3,jpk) * umask), &
++               & e3v_3d * (1._wp + SPREAD(r3v(:,:,Kmm),3,jpk) * vmask), &
++               & pu(:,:,:,Krhs), pv(:,:,:,Krhs), &
++               & e2u, e1v, e2v, e1u, r1_e1e2t, r1_e1e2f, r1_e1u, r1_e2v, r1_e2u, r1_e1v
++         ENDIF
++         !
+          DO jk = 1, jpkm1                                 ! Horizontal slab
+ #           include "dynldf_lev_rot_scheme.h90"
++            IF( r148_ldf_dump ) THEN
++               r148_zcur(ntsi-(1):ntei+(0),ntsj-(1):ntej+(0),jk) = zcur(ntsi-(1):ntei+(0),ntsj-(1):ntej+(0))
++               r148_zdiv(ntsi-(0):ntei+(1),ntsj-(0):ntej+(1),jk) = zdiv(ntsi-(0):ntei+(1),ntsj-(0):ntej+(1))
++            ENDIF
+          END DO
++         IF( r148_ldf_dump ) THEN
++            WRITE(r148_ldf_unit) r148_zcur, r148_zdiv, pu(:,:,:,Krhs), pv(:,:,:,Krhs)
++            CLOSE(r148_ldf_unit)
++            DEALLOCATE( r148_zcur, r148_zdiv )
++            WRITE(numout,*) 'ROUND148_DEVELOPED_LDF_DUMP ', kt, TRIM(r148_ldf_filename)
++         ENDIF
+          !
+ #        undef  zcur   
+ #        undef  zdiv

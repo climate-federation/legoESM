@@ -84,9 +84,24 @@ def _cell_volume(mesh, z_coord, eta, H_bathy):
 # Tests
 # ============================================================================
 
+
+
+def _with_salt_front(mesh, S):
+    """Add a zonal salinity front so dS carries real signal.
+
+    With the closed-cell (vertical-branch) operator a UNIFORM salinity has
+    identically zero tendency, which collapses the |dS|-based normalisation
+    scale to roundoff noise and makes relative conservation residuals
+    meaningless (the 2026-08-11 failure mode).  S stays passive apart from its
+    (small) EOS contribution to the front."""
+    lon = jnp.asarray(mesh.lonCell)
+    return S + 1.5 * jnp.sin(lon)[:, jnp.newaxis]
+
+
 def test_exact_tracer_conservation(mesh, z_coord, cfg):
     """Sum(dT·vol) and Sum(dS·vol) vanish to roundoff — the must-pass."""
     T, S = _mixed_layer_front(mesh, z_coord)
+    S = _with_salt_front(mesh, S)
     eta = jnp.zeros((mesh.nCells,))
     H = jnp.full((mesh.nCells,), 600.0)
     dT, dS = mle_tracer_tendency_mpas(T, S, eta, H, mesh, z_coord, cfg, eos="wright")
@@ -105,22 +120,30 @@ def test_exact_tracer_conservation(mesh, z_coord, cfg):
     assert abs(netS) / scaleS < 1e-11, (netS, scaleS)
 
 
-def test_restratification_reduces_ml_temperature_variance(mesh, z_coord, cfg):
-    """One forward-Euler MLE step slumps the front: with uniform salinity,
-    buoyancy ∝ temperature, so restratification reduces the horizontal
-    variance of the mixed-layer (top-2-level mean) temperature."""
+def test_restratification_builds_vertical_stratification(mesh, z_coord, cfg):
+    """The closed FK cell converts the horizontal buoyancy gradient into
+    VERTICAL stratification: on average over the front, the surface tendency
+    exceeds the lower-mixed-layer tendency (surfaces warm/lighten, ML bases
+    cool).
+
+    RETIRED EXPECTATION (encoded the horizontal-only bug): 'one Euler step
+    reduces the horizontal ML-mean T variance'.  With centered face values
+    and a vertically uniform ML the closed cell leaves the ML-mean invariant
+    in the two-column limit (the surface and return branches exchange the
+    SAME face value), so the variance metric measured the spurious
+    T·div_h term the vertical branch removed."""
     T, S = _mixed_layer_front(mesh, z_coord)
     eta = jnp.zeros((mesh.nCells,))
     H = jnp.full((mesh.nCells,), 600.0)
-
-    def _ml_T_var(Tf):
-        return float(jnp.var(jnp.mean(Tf[:, :2], axis=1)))   # ML-mean T spread
-
-    v0 = _ml_T_var(T)
     dT, dS = mle_tracer_tendency_mpas(T, S, eta, H, mesh, z_coord, cfg, eos="wright")
-    dt = 3600.0
-    v1 = _ml_T_var(T + dt * dT)
-    assert v1 < v0, (v0, v1)
+    # VOLUME-weighted (codex: an unweighted mean is not meaningful on a
+    # non-uniform Voronoi mesh).  This is a REGRESSION SIGNATURE of this
+    # fixture (thermal front, vertically uniform ML), not a universal FK
+    # invariant -- the invariant proper is the uniform-tracer test.
+    w = jnp.asarray(mesh.areaCell)
+    strat = float(jnp.sum(w * (dT[:, 0] - dT[:, 1])) / jnp.sum(w))
+    assert float(jnp.max(jnp.abs(dT))) > 1e-9      # operator active, not vacuous
+    assert strat > 0.0, f"area-weighted mean(surf - lower-ML) should be > 0, got {strat}"
 
 
 def test_partial_cell_conservation(mesh, z_coord, cfg):
@@ -134,6 +157,7 @@ def test_partial_cell_conservation(mesh, z_coord, cfg):
     H = jnp.asarray(np.clip(H_np, 120.0, 600.0))
     z_pc = create_partial_cell_coordinate(z_coord, H)
     T, S = _mixed_layer_front(mesh, z_coord)
+    S = _with_salt_front(mesh, S)
     eta = jnp.zeros((mesh.nCells,))
     dT, dS = mle_tracer_tendency_mpas(T, S, eta, H, mesh, z_pc, cfg, eos="wright")
     assert bool(jnp.all(jnp.isfinite(dT))) and bool(jnp.all(jnp.isfinite(dS)))
@@ -198,6 +222,7 @@ def test_jit_stable(mesh, z_coord, cfg):
     T, S = _mixed_layer_front(mesh, z_coord)
     eta = jnp.zeros((mesh.nCells,))
     H = jnp.full((mesh.nCells,), 600.0)
+    S = _with_salt_front(mesh, S)
     fn = jax.jit(lambda T, S, eta, H: mle_tracer_tendency_mpas(
         T, S, eta, H, mesh, z_coord, cfg, eos="wright"))
     dT_j, dS_j = fn(T, S, eta, H)
@@ -230,3 +255,47 @@ def test_physics_contract_present():
     assert c["conserves"] == ["tracer"]
     assert c["outputs"] == {"dT_dt": "degC/s", "dS_dt": "PSU/s"}
     assert c["differentiable"] is True
+
+
+def test_uniform_salinity_untouched_by_thermal_front(mesh, z_coord, cfg):
+    """REGRESSION (2026-08-11): S is uniform in the front fixture, so dS must
+    vanish identically while dT carries the restratification.  The
+    horizontal-only flux divergence pumped uniform tracers at
+    transport-convergence cells (globally conservative, locally corrupting:
+    -54 psu river-plume extremes on the structured lane); the vertical
+    continuity branch (NEMO zw_mle, Voronoi form) closes the overturning
+    cell."""
+    T, S = _mixed_layer_front(mesh, z_coord)
+    eta = jnp.zeros((mesh.nCells,))
+    H = jnp.full((mesh.nCells,), 600.0)
+    dT, dS = mle_tracer_tendency_mpas(T, S, eta, H, mesh, z_coord, cfg, eos="wright")
+    scale = float(jnp.max(jnp.abs(dT)))
+    assert scale > 1e-9, "front produced no tendency; test would be vacuous"
+    assert float(jnp.max(jnp.abs(dS))) < 1e-9 * scale, (
+        "uniform S gained a tendency: bolus transport not divergence-free "
+        "per cell (missing/broken vertical branch)")
+
+
+def test_uniform_tracer_invariant_on_partial_cells(mesh, z_coord, cfg):
+    """Codex MLE-vertfix yellow: the closed-cell property must hold on a
+    PARTIAL-CELL ladder with real bottom steps, where the surface-zero of the
+    reconstructed W would delete real transport if any masked column failed to
+    telescope.  Uniform T and S must be invariant for every mld_uv rule.
+    Psi is driven by the density front, which lives in rho (computed from T,S
+    here), so a uniform tracer would make psi vanish too -- instead drive the
+    front through a T front and check S (uniform) on the same call, plus a
+    fully uniform call for the exact-zero property."""
+    lon = np.asarray(mesh.lonCell)
+    lat = np.asarray(mesh.latCell)
+    H_np = 360.0 + 240.0 * np.cos(lat) * np.cos(lon)
+    H = jnp.asarray(np.clip(H_np, 120.0, 600.0))
+    z_pc = create_partial_cell_coordinate(z_coord, H)
+    eta = jnp.zeros((mesh.nCells,))
+    T, S = _mixed_layer_front(mesh, z_coord)   # S uniform 35.0
+    for rule in ("min", "avg", "max"):
+        c = cfg._replace(mld_uv=rule)
+        dT, dS = mle_tracer_tendency_mpas(T, S, eta, H, mesh, z_pc, c, eos="wright")
+        scale = float(jnp.max(jnp.abs(dT)))
+        assert scale > 1e-12, f"mld_uv={rule}: front produced no tendency"
+        assert float(jnp.max(jnp.abs(dS))) < 1e-9 * scale, (
+            f"mld_uv={rule}: uniform S gained tendency on partial cells")

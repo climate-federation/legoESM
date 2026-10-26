@@ -78,6 +78,11 @@ _load_haloed = _slp._load_haloed
 RUN_DIR = _slp.RUN_DIR
 RESTART = _slp.RESTART
 OFFSETS = _slp.OFFSETS
+# ldf_slp_per_element.py is already dump_lane-wired (#1455); reuse its
+# already-executed dump_lane module rather than re-importing it (RUN_DIR/
+# RESTART above already come from it, so this probe is already lane-
+# switchable through that sibling -- verified, not duplicated).
+dump_lane = _slp.dump_lane
 
 from legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid import (
     compute_nemo_native_slopes,
@@ -120,6 +125,7 @@ for _name, _src in _NEW_DUMPS.items():
 
 
 def main() -> int:
+    print(dump_lane.banner())
     e3t_mode = require_explicit_e3t_mode(context="eiv transport u/v walk")
     print(f"restart used  = {os.path.join(RUN_DIR, RESTART)}")
     print(f"dump dir used = {RUN_DIR}")

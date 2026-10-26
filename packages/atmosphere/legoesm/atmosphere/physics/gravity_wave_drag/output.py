@@ -37,11 +37,16 @@ class GWDOutput(NamedTuple):
         is positive by construction since the launch-level
         ``sign(c - U_launch)`` deposition factor landed (#856 closed
         F-GWD-1 -- the earlier deposition could accelerate the mean flow).
+    dq_dt : dict[str, jax.Array] or None
+        Tracer tendencies [tracer units/s], shape (ncol, nlev) each, keyed
+        like the ``tracers`` the scheme was given (``mcfarlane``: CAM6
+        gravity-wave eddy diffusion).  None for schemes that move no tracers.
     """
     du_dt: jax.Array
     dv_dt: jax.Array
     dT_dt: jax.Array
     eps_gwd: jax.Array
+    dq_dt: dict | None = None
 
 
 def make_zero_output(ncol: int, nlev: int, dtype=None) -> GWDOutput:

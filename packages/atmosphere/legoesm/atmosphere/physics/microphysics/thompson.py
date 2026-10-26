@@ -1,5 +1,18 @@
 """Thompson hybrid-moment microphysics.
 
+NOT YET FAITHFUL.  This entry point still runs the legacy surrogate below
+(Morrison-style processes with Seifert-Beheng warm rain); the 2026-10-19
+tier-2 oracle audit measured it O(1) away from Thompson on every tendency.
+The faithful port of the oracle the user chose (WRF v4.8.0
+``phys/module_mp_thompson.F``, commit
+06d4240ae989cc3e50af412bb472df3d9048783c, ``mp_physics=8``) is
+:func:`legoesm.atmosphere.physics.microphysics.thompson_wrf.thompson_wrf_step`,
+matched to the running oracle in ``tests/atmosphere/microphysics/unit/
+test_thompson_wrf_oracle.py``.  Routing this entry point to it waits on user
+decisions about the state mapping (specific humidity vs the oracle's mixing
+ratios, the density used for per-volume rain number, the prescribed droplet
+number vs the carried ``N_c``, the vertical velocity the oracle reads).
+
 Extends Morrison with graupel formation from intense riming and
 gamma distribution shape corrections for autoconversion/accretion.
 
@@ -63,7 +76,7 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
-from legoesm.thermo import saturation_mixing_ratio_ice as _saturation_mixing_ratio_ice
+from legoesm.thermo import saturation_specific_humidity_ice as _saturation_specific_humidity_ice
 from legoesm.thermo import homogeneous_freezing_rh_factor as _homogeneous_freezing_rh_factor
 from legoesm.atmosphere.physics.microphysics._warm_rain import (
     saturation_adjustment,
@@ -254,7 +267,7 @@ def thompson_microphysics(
     dN_i_nuc = jnp.clip(N_i_target - N_i, 0.0) / jnp.clip(dt, 1.0) * f_ice
 
     # === Ice depositional growth / sublimation ===
-    q_sat_i = _saturation_mixing_ratio_ice(T, p_full)
+    q_sat_i = _saturation_specific_humidity_ice(T, p_full)
     # DEPOSITION target only (see morrison.py): pristine air below 235 K may
     # hold ice supersaturation up to the IFS/SAM homogeneous-freezing ramp.
     q_sat_i_dep = q_sat_i * _homogeneous_freezing_rh_factor(
@@ -634,4 +647,5 @@ def thompson_microphysics(
         dN_r_dt=dN_r_dt,
         dN_i_dt=dN_i_dt,
         precipitation=precipitation,
+        precip_frozen=precip_i + precip_s + precip_g,
     )

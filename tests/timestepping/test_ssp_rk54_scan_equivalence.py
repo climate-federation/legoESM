@@ -32,8 +32,7 @@ import jax
 # config (and the documented ``pytest tests/`` runner, which does NOT export
 # JAX_ENABLE_X64=1) the same state is float32 and the drift is ~2e-7, turning
 # these tests red.  Enable x64 at import so the asserted tolerance matches the
-# docstring's float64 framing, regardless of the runner — mirroring the sibling
-# ``tests/timestepping/test_leapfrog_ab2.py``.
+# docstring's float64 framing, regardless of the runner.
 jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp
 import numpy as np

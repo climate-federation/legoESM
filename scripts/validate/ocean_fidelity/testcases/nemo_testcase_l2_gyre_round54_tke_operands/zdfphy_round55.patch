@@ -1,0 +1,18 @@
+--- zdfphy.F90.shipped
++++ zdfphy.F90
+@@ -40,6 +40,7 @@
+    USE lbclnk         ! lateral boundary conditions
+    USE lib_mpp        ! distribued memory computing
+    USE timing         ! Timing
++   USE l2_r54_tke, ONLY : r54_zdfphy_finish
+ 
+    IMPLICIT NONE
+    PRIVATE
+@@ -315,6 +316,7 @@
+             avm(ji,jj,jk) = avm_k(ji,jj,jk)
+          END_3D
+          !
++         CALL r54_zdfphy_finish( avm, avt )
+          IF( ln_rnf_mouth ) THEN                   !* increase diffusivity at rivers mouths
+             DO_3D( 0, 0, 2, nkrnf )
+                avt(ji,jj,jk) = avt(ji,jj,jk) + 2._wp * rn_avt_rnf * rnfmsk(ji,jj) * wmask(ji,jj,jk)

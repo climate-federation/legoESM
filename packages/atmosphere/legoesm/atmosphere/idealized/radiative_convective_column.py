@@ -1,6 +1,7 @@
 """Multi-layer gray radiative–convective-equilibrium (RCE) column — slab rung 2.
 
-The next atmosphere complexity rung above the 0-D slab (``atmosphere.slab``): a
+The next atmosphere complexity rung above a 0-D slab (the deleted, never-wired
+``atmosphere.slab``): a
 single-column, no-dynamics harness that relaxes an ``nlev`` temperature profile to
 radiative–convective equilibrium by composing the existing, separately-validated
 substrate pieces — it introduces NO new radiation or convection numerics:

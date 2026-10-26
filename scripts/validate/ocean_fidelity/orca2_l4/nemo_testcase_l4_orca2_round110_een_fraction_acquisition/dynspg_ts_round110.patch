@@ -1,0 +1,14 @@
+--- dynspg_ts.F90
++++ dynspg_ts.F90
+@@ -63,0 +64,2 @@
++   USE l4_r110_een_fraction, ONLY : r110_een_fraction_init, r110_een_fraction_store, &
++      & r110_een_fraction_dump ! round-110 write-only fraction operands
+@@ -1464,0 +1467 @@
++      CALL r110_een_fraction_init
+@@ -1629,0 +1633,4 @@
++               CALL r110_een_fraction_store(ji, jj, jk, &
++                  & ff_f(ji-1,jj), e3f_0vor(ji-1,jj,jk), r3f(ji-1,jj), fe3mask(ji-1,jj,jk), &
++                  & ff_f(ji,jj), e3f_0vor(ji,jj,jk), r3f(ji,jj), fe3mask(ji,jj,jk), &
++                  & ff_f(ji,jj-1), e3f_0vor(ji,jj-1,jk), r3f(ji,jj-1), fe3mask(ji,jj-1,jk))
+@@ -1656,0 +1666 @@
++         CALL r110_een_fraction_dump(mbku)

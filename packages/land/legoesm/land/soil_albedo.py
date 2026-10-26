@@ -101,6 +101,30 @@ def _gather(color_class: jnp.ndarray) -> jnp.ndarray:
     return table[idx]                                           # (..., 4)
 
 
+def soil_albedo_bounds(
+    color_class: jnp.ndarray,
+) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    """``(dry_vis, dry_nir, sat_vis, sat_nir)`` for each CLM colour class (1..20)."""
+    row = _gather(color_class)
+    return row[..., 0], row[..., 1], row[..., 2], row[..., 3]
+
+
+def wet_soil_albedo(
+    alb_dry: jnp.ndarray,
+    alb_sat: jnp.ndarray,
+    theta_top: jnp.ndarray,
+    config: SoilAlbedoConfig = SoilAlbedoConfig(),
+) -> jnp.ndarray:
+    """One band of the CTSM soil albedo: ``min(alb_sat + inc, alb_dry)``.
+
+    ``inc = max(delta_intercept - delta_slope * theta_top, 0)``.  With
+    ``alb_dry == alb_sat`` (glacier, bare fallback) the result is exactly that
+    value at any wetness.  Differentiable in ``theta_top``.
+    """
+    delta = jnp.maximum(config.delta_intercept - config.delta_slope * theta_top, 0.0)
+    return jnp.minimum(alb_sat + delta, alb_dry)
+
+
 def soil_albedo(
     color_class: jnp.ndarray,
     theta_top: jnp.ndarray,
@@ -112,12 +136,41 @@ def soil_albedo(
     range).  ``theta_top`` is the volumetric water content of the top soil layer.
     Differentiable in ``theta_top``.
     """
-    row = _gather(color_class)
-    dry_vis, dry_nir, sat_vis, sat_nir = row[..., 0], row[..., 1], row[..., 2], row[..., 3]
-    delta = jnp.maximum(config.delta_intercept - config.delta_slope * theta_top, 0.0)
-    alb_vis = jnp.minimum(sat_vis + delta, dry_vis)
-    alb_nir = jnp.minimum(sat_nir + delta, dry_nir)
-    return alb_vis, alb_nir
+    dry_vis, dry_nir, sat_vis, sat_nir = soil_albedo_bounds(color_class)
+    return (wet_soil_albedo(dry_vis, sat_vis, theta_top, config),
+            wet_soil_albedo(dry_nir, sat_nir, theta_top, config))
+
+
+def rewet_soil_bands(land_params, theta_top: jnp.ndarray,
+                     config: SoilAlbedoConfig = SoilAlbedoConfig()):
+    """Recompute canopy soil band albedos ``ALB_VIS``/``ALB_NIR`` at ``theta_top``.
+
+    CTSM evaluates the soil albedo from the CURRENT top-layer water at every
+    albedo call.  Parameter sets built from soil colour carry the per-column
+    dry/saturated bounds (``ALB_VIS_DRY`` ...); for them the bands follow the
+    live soil water.  Parameter sets without bounds carry a PRESCRIBED albedo
+    (e.g. an eddy-covariance site's measured albedo) and are returned unchanged.
+
+    With bounds set, the incoming ``ALB_VIS``/``ALB_NIR`` are overwritten, so a
+    gradient w.r.t. them is zero by construction; train the bounds instead.
+
+    DEPARTURES from CTSM: ``theta_top`` is the land model's top-layer total
+    volumetric water (CTSM converts liquid and ice with their own densities),
+    and the top layer is whatever the configured soil grid makes it (CTSM's
+    20-layer grid starts at 2 cm), so a shallow wetting pulse is damped here.
+    """
+    bounds = [getattr(land_params, f, None) for f in
+              ("ALB_VIS_DRY", "ALB_VIS_SAT", "ALB_NIR_DRY", "ALB_NIR_SAT")]
+    if all(b is None for b in bounds):
+        return land_params
+    if any(b is None for b in bounds):
+        raise ValueError("soil albedo bounds must be all set or all None, got "
+                         f"{[b is not None for b in bounds]}")
+    return land_params._replace(
+        ALB_VIS=wet_soil_albedo(land_params.ALB_VIS_DRY, land_params.ALB_VIS_SAT,
+                                theta_top, config),
+        ALB_NIR=wet_soil_albedo(land_params.ALB_NIR_DRY, land_params.ALB_NIR_SAT,
+                                theta_top, config))
 
 
 def soil_albedo_broadband(

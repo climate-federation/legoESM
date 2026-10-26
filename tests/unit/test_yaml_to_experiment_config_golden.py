@@ -11,8 +11,10 @@ key, or accepting ``radiation`` as a bare string) must regenerate the goldens /
 update the explicit asserts in a dedicated diff so the change is visible in
 review — exactly the bit-repro discipline the master plan mandates.
 
-Scope: the standalone ``config/*.yaml`` files that ``legoesm run`` feeds through
-``to_experiment_config`` (today, the Williamson cases).  The ``config/aimip/``
+Scope: frozen copies of the former standalone ``config/williamson_test*.yaml``
+run configs, kept under ``golden/yaml_to_experiment/fixtures/`` because the
+shipped files now name a matrix case via ``setup:`` (shallow water does not run
+through ``legoesm run``).  The ``config/aimip/``
 configs are consumed by ``scripts/run/run_aimip.py``'s separate AMIP loader, not by
 this function (several even use an incompatible ``radiation:`` string schema);
 they are folded into this golden surface at Stage C1 when the loaders unify.
@@ -37,6 +39,7 @@ from legoesm.driver.config import experiment_config_to_dict
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 GOLDEN_DIR = Path(__file__).parent / "golden" / "yaml_to_experiment"
+FIXTURE_DIR = GOLDEN_DIR / "fixtures"
 _REGEN = os.environ.get("LEGOESM_REGEN_GOLDEN") == "1"
 
 
@@ -55,7 +58,7 @@ def _config_files() -> list[Path]:
     run-config section), excluding dataset catalogs / other non-run YAML.
     """
     out: list[Path] = []
-    for path in sorted((REPO_ROOT / "config").glob("*.yaml")):
+    for path in sorted(FIXTURE_DIR.glob("*.yaml")):
         try:
             doc = yaml.safe_load(path.read_text()) or {}
         except yaml.YAMLError as exc:
@@ -130,12 +133,12 @@ def test_translation_field_mapping_is_pinned() -> None:
                 "dynamics": "hydrostatic",
                 "discretization": "spectral",
                 "dt_seconds": 300,
-                "hyperdiffusion_coeff": 2.0,
+                "hyperdiff_scale": 2.0,
             },
             "conservation": {"fix_mass": False},
             "time": {
                 "duration_hours": 480,          # -> days = 20
-                "output_interval_hours": 48,    # -> diag_days = max(1, 48//24) = 2
+                "output_interval_hours": 36,    # -> diag_days = 36/24 = 1.5
                 "start_day": 3.0,
             },
             "output": {
@@ -164,13 +167,13 @@ def test_translation_field_mapping_is_pinned() -> None:
     assert ec.dycore.model_type == "hydrostatic"  # dynamics -> model_type
     assert ec.dycore.discretization == "spectral"
     assert ec.dycore.dt == 300.0                  # dt_seconds -> dt
-    assert ec.dycore.hyperdiff_scale == 2.0       # hyperdiffusion_coeff -> hyperdiff_scale
+    assert ec.dycore.hyperdiff_scale == 2.0
     assert ec.dycore.fix_mass is False
     assert ec.dycore.conservation_fixer is False  # both driven by conservation.fix_mass
     # Time / integration unit conversions.
     assert ec.days == 20                          # duration_hours // 24
     assert ec.start_day == 3.0
-    assert ec.output.diag_days == 2               # max(1, output_interval_hours // 24)
+    assert ec.output.diag_days == 1.5             # output_interval_hours / 24, exact
     # Output passthrough.
     assert ec.output.output_dir == "out/run/"
     assert ec.output.checkpoint_days == 30
@@ -186,7 +189,60 @@ def test_translation_field_mapping_is_pinned() -> None:
     assert ec.seed == 9                           # master RNG seed (reproducibility)
 
 
-def test_diag_days_floor_is_at_least_one() -> None:
-    """Sub-daily output interval must still yield diag_days >= 1, not 0."""
+def test_hyperdiff_scale_defaults_to_canonical_one() -> None:
+    """A YAML that omits the key gets the ExperimentConfig default scale."""
+    from legoesm.driver.config import DycoreConfig
+    ec = Config.from_dict({}).to_experiment_config()
+    assert ec.dycore.hyperdiff_scale == DycoreConfig._field_defaults["hyperdiff_scale"] == 1.0
+
+
+def test_retired_hyperdiffusion_coeff_key_names_its_replacement() -> None:
+    with pytest.raises(ValueError, match="hyperdiff_scale"):
+        Config.from_dict(
+            {"atmosphere": {"hyperdiffusion_coeff": 0.0}}).to_experiment_config()
+
+
+def test_unread_yaml_keys_are_not_declared() -> None:
+    """conservation.fix_energy and output.format reached no ExperimentConfig
+    field; the schema must not advertise them."""
+    from legoesm.config import DEFAULT_CONFIG
+    assert "fix_energy" not in DEFAULT_CONFIG["conservation"]
+    assert "format" not in DEFAULT_CONFIG["output"]
+
+
+def test_sub_daily_output_interval_is_exact() -> None:
+    """A 6-hour output interval is a quarter-day cadence, not truncated to 1 day."""
     cfg = Config.from_dict({"time": {"output_interval_hours": 6}})
-    assert cfg.to_experiment_config().output.diag_days == 1
+    assert cfg.to_experiment_config().output.diag_days == 0.25
+
+
+@pytest.mark.parametrize("hours", [0, 0.0, -6, float("nan")])
+def test_non_positive_output_interval_raises(hours) -> None:
+    cfg = Config.from_dict({"time": {"output_interval_hours": hours}})
+    with pytest.raises(ValueError, match="output_interval_hours must be > 0"):
+        cfg.to_experiment_config()
+
+
+@pytest.mark.parametrize("blk,key,val", [("conservation", "fix_energy", True),
+                                         ("output", "format", "zarr")])
+def test_removed_yaml_keys_raise(blk, key, val):
+    with pytest.raises(ValueError, match=f"{blk}.{key} was removed and did nothing"):
+        Config.from_dict({blk: {key: val}}).to_experiment_config()
+
+
+def test_omitted_vertical_coord_is_a_valid_coordinate() -> None:
+    """A run config that leaves out grid.vertical_coord must still validate.
+
+    The loader default used to be ``"none"``, which validate_strict rejects, so
+    every YAML omitting the key failed before the run started.
+    """
+    ec = Config.from_dict(
+        {
+            "model": {"type": "atmosphere_only"},
+            "grid": {"type": "cubed_sphere", "resolution": 24, "n_levels": 26},
+            "atmosphere": {"dynamics": "hydrostatic", "dt_seconds": 600},
+            "time": {"duration_hours": 24},
+        }
+    ).to_experiment_config()
+    assert ec.grid.vertical_coord == "hybrid"
+    ec.validate_strict()

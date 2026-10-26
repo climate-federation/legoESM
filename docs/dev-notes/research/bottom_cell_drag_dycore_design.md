@@ -19,7 +19,7 @@ suggests. Three things are happening simultaneously:
    `dv_dt[…, −1] += −r · v[…, −1] / dz_bot_v`. Computed on the **full**
    velocity (not the perturbation), explicit Euler.
 2. **Slow-forcing fold-in.** In
-   `ocean_model_latlon_cgrid.py:373–378` the entire tendency
+   `ocean_model_latlon_cgrid.py:374–378` the entire tendency
    (including the bottom-cell drag) is depth-averaged into
    `F_slow_u/v` and the perturbation `du_dt − F_slow_u` is applied to
    the 3D state. `F_slow_u/v` is then passed to
@@ -86,7 +86,7 @@ need for an `eps` floor on `dz_bot`, since `(1 + dt·r/dz_bot)^{−1}`
 is bounded in [0,1] for any positive `dz_bot`.
 
 The implementation pattern, applied **after** the explicit Euler
-update in `ocean_model_latlon_cgrid.py:380–381` and **before** the
+update in `ocean_model_latlon_cgrid.py:381–381` and **before** the
 forward-backward Coriolis call:
 
 ```

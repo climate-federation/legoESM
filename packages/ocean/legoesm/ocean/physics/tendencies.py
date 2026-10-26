@@ -67,13 +67,13 @@ def wrap_ocean_tendencies(
 def make_none_physics_fn() -> Callable:
     """Factory for a no-op ocean physics function (``scheme="none"``).
 
-    Returns ``physics_fn(state, grid, z_coord, surface_forcing=None)`` yielding
+    Returns ``physics_fn(state, grid, z_coord, surface_forcing=None, dt=None)`` yielding
     zero tendencies — the single shared implementation that the five per-scheme
     integration factories (bottom_drag, vertical_mixing, convection,
     lateral_mixing, surface_forcing) previously each duplicated byte-for-byte.
     """
     def physics_fn(state: OceanState, grid: CubedSphereGrid,
                    z_coord: OceanZStarCoordinate,
-                   surface_forcing=None) -> OceanTendencies:
+                   surface_forcing=None, dt=None) -> OceanTendencies:
         return zero_ocean_tendencies(state)
     return physics_fn

@@ -84,15 +84,22 @@ from legoesm.ocean.experiments.dino import (
     dino_lat_lon_surface_forcing_arrays, dino_step_surface_forcing,
 )
 
-# Reuse wholesale (module-reuse rule) -- same RUN_DIR/DT + err_norm self-check
-# every sibling #1226 probe already shares.
-from scripts.validate.ocean_fidelity.dino_1226.zu_frc_term_walk import RUN_DIR, DT
+# Reuse wholesale (module-reuse rule) -- DT (same value every lane) + err_norm
+# self-check every sibling #1226 probe already shares. RUN_DIR/RESTART route
+# through dump_lane (#1455 shared selector) instead of zu_frc_term_walk's own
+# (still-hardcoded-to-gdb_y5) RUN_DIR -- this probe must be lane-switchable
+# independently of that (untouchable) sibling.
+from scripts.validate.ocean_fidelity.dino_1226 import dump_lane
+from scripts.validate.ocean_fidelity.dino_1226.zu_frc_term_walk import DT
 from scripts.validate.ocean_fidelity.dino_1226.cancelling_rows_per_element import (
     per_element_stats,
 )
 from scripts.validate.ocean_fidelity.dino_1226.bn2_alpha_compare import (
     _read_dims, _load_haloed, _shift_scan,
 )
+
+RUN_DIR = dump_lane.RUN_DIR
+RESTART = dump_lane.RESTART
 
 set_policy(PrecisionPolicy.fp64())
 
@@ -193,6 +200,7 @@ def _capture_iso_lap(model, st, sf, T_before, S_before, wet_mask3):
 
 
 def main() -> int:
+    print(dump_lane.banner())
     e3t_mode = require_explicit_e3t_mode(context="traldf_iso_lap_probe")
     print(f"LEGOESM_NEMO_E3T={e3t_mode!r} (must be 'both')")
 
@@ -203,11 +211,11 @@ def main() -> int:
     assert dcfg.gm_redi_slope_scheme == "nemo_iso_lap"
 
     g = read_nemo_mesh_mask(os.path.join(RUN_DIR, "mesh_mask.nc"), nn_hls=0)
-    now = read_nemo_restart(os.path.join(RUN_DIR, "DINO_00057600_restart.nc"), nn_hls=0)
+    now = read_nemo_restart(os.path.join(RUN_DIR, RESTART), nn_hls=0)
     br = bridge_nemo_to_legoesm_topo(g, now, periodic_i=True, full_step=True,
                                       omega=dcfg.omega)
     before = read_nemo_restart_before(
-        os.path.join(RUN_DIR, "DINO_00057600_restart.nc"), nn_hls=0)
+        os.path.join(RUN_DIR, RESTART), nn_hls=0)
     st_with_before = bridge_before_state_topo(
         br._replace(state=br.state), g, before, periodic_i=True)
     br = br._replace(state=st_with_before)
@@ -236,7 +244,7 @@ def main() -> int:
 
     # ---- Load NEMO's stage-22 (pre) / stage-23 (post) ts(Nrhs), bracket. ---
     jpi, jpj, jpk, hls = _read_dims(RUN_DIR)
-    print(f"RUN_GDB dims: jpi={jpi} jpj={jpj} jpk={jpk} nn_hls={hls}")
+    print(f"{dump_lane.LANE} dims: jpi={jpi} jpj={jpj} jpk={jpk} nn_hls={hls}")
     tem_pre = _load_haloed(os.path.join(RUN_DIR, "stp_dump_22_before_traldf_tem.bin"),
                             jpi, jpj, hls)
     tem_post = _load_haloed(os.path.join(RUN_DIR, "stp_dump_23_after_traldf_tem.bin"),

@@ -80,6 +80,7 @@ def test_mpas_spmd_two_process_selfspawn_bench_parity(tmp_path):
     assert "parity" in outs[0] and "MISMATCH" not in outs[0]
 
 
+@pytest.mark.xfail(strict=True, reason="Kessler faithful-port default gap: saturation_sharpness=100 is not the hard limit (negative cloud water, ~half adjustment); passes at the hard limit; known difference: the smooth default is kept because differentiability is never traded for oracle fidelity (user decision 2026-10-20)")
 @pytest.mark.timeout(900)
 def test_mpas_spmd_two_process_selfspawn_moist_kessler(tmp_path):
     """Two-process FULL-PRODUCTION-state gate for the native step

@@ -1,0 +1,89 @@
+{
+  "format": "nemo-testcase-l2-gyre-round27-preregister-v1",
+  "date": "2026-09-05",
+  "starting_tip": "1af6ba2976dc",
+  "regime": "CPU production JIT, fp64/x64, oracle V2, transcendentals=libm",
+  "oracle_roots": {
+    "GYRE-zco": [
+      "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round19_oracle_v2_external",
+      "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round21_oracle_v2_stage_ww"
+    ],
+    "LOCK_EXCHANGE-zco": "/data/abyssal/dbalwada/nemo-testcases-l1/phase3/lock_kt1_10",
+    "OVERFLOW-zps": "/data/abyssal/dbalwada/nemo-testcases-l1/phase3/overflow_kt1_10",
+    "LOCK_EXCHANGE-zco.external": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round25_lock_external_oracle",
+    "ORCA2": "/data/abyssal/dbalwada/nemo-testcases-l4/runs/variant_icebergs_off_phase2v_tke_a_10step_np2"
+  },
+  "read_before_this_preregistration_no_prediction_carried": {
+    "note": "Rule 0 source readings, done before the manifest was written. They carry no prediction and are reported as readings of the PREPROCESSED source each card compiles.",
+    "item1_ppsrc_facts": [
+      "LOCK and OVERFLOW both compile key_RK3 (cpp_*.fcm)",
+      "0 assignments matching ^\\s*(puu|pvv)\\( in either card's BLD/ppsrc/nemo/dynspg_ts.f90",
+      "shipped dynspg_ts.F90:344-345 (depth-mean removal) is inside the #else at :303; shipped :938-975 (barotropic add-back) is inside the #else at :910 -- both are the MLF arm and neither compiles under key_RK3",
+      "hpg_sco ASSIGNS puu(...,Krhs) = zhpi + zuap (ppsrc dynhpg.f90:393-394,412-413, comment 'RK3 case: dyn_hpg always called first')",
+      "dyn_adv_up3's three puu/pvv(Krhs) writes sit in the ELSE of IF(PRESENT(pUe)) at ppsrc dynadv_up3.f90:211, :317, :355; stp2d.F90:172 passes pUe/pVe",
+      "dyn_drg_init declares puu,pvv INTENT(in) (ppsrc dynspg_ts.f90:1224)",
+      "ln_dynldf_OFF = T (LOCK ocean.output:615, OVERFLOW ocean.output:727)",
+      "stp2d.F90 has 0 direct uu/vv assignments; every write is through a call"
+    ],
+    "item2_citation_corrections": [
+      "stp2d.F90 real lines: :128 dyn_hpg, :131 dyn_ldf, :146 dyn_vor, :281 dyn_spg_ts; round 26 cited :126/:129/:190/:279 and :190 is a comment banner",
+      "stprk3_stg.F90 tracers are :453-601; :168-243 is the r3t/r3u/r3v block"
+    ]
+  },
+  "item1_unretraction": {
+    "claim_under_test": "Round 26's Retraction 1 is itself wrong. At a rest start the kt=1 dumped momentum-RHS frame IS dyn_hpg alone on LOCK and OVERFLOW, so Rule-12 eligibility is discharged with FULL isolation, not as a composite.",
+    "method": "Assert the eight ppsrc/namelist facts above inside the gate, so the isolation claim is mechanical rather than prose. Re-run the eligibility gate unchanged otherwise.",
+    "prediction": "The measured rows are UNCHANGED (0 unequal, 0.0 max on 2540 LOCK and 16900 OVERFLOW U faces) and the frame label returns to dyn_hpg-alone isolation.",
+    "confirm": "rows unchanged AND every asserted ppsrc fact holds",
+    "refute": "any row moves, or any ppsrc fact fails (then the composite label stands)"
+  },
+  "item2_citation_gate": {
+    "claim_under_test": "Every file:line cited in the round-25/26/27 receipt sections points at the symbol the prose names.",
+    "method": "A gate extracts every markdown code-span citation from those sections, requires each to be present in a committed citation->symbol map (fail-closed on an unmapped citation), and greps the cited line range of the real file for that symbol.",
+    "prediction": "After the corrections, the gate passes with 0 mismatches; before them it fails on the four stp2d rows and the decision-15A tracer range.",
+    "non_vacuity": "--plant shifts one cited line number and the gate must exit nonzero"
+  },
+  "item3_bbl": {
+    "claim_under_test": "Round 26's BBL 'open model question' (why is a ku_s == ku_d face marked BBL-active on a zps card) is an artifact of the TEST, which called bbl_static_geometry while the model runs nemo_bbl_static_geometry.",
+    "method": "Point the OVERFLOW liveness test at nemo_bbl_static_geometry with the card's own nemo_gdept_0 / nemo_bbl_e3u_0 / nemo_bbl_e3v_0 operands and drop the ku_s != ku_d filter.",
+    "prediction": "nemo_bbl_static_geometry gives 29 active U faces and 0 of them degenerate (ku_s == ku_d), against bbl_static_geometry's 141 active / 112 degenerate; the test passes with no filter and the open question is RETRACTED.",
+    "source": "trabbl.F90:519-527 signs gdept_0(...,mbkt) differences and leaves mgrhu = 0 when the difference is exactly 0, so equal mbkt is never an active face",
+    "confirm": "0 degenerate active faces AND movement > 1.0e-12 with no filter",
+    "refute": "any degenerate active face under the NEMO geometry, or movement <= 1.0e-12",
+    "non_vacuity": "the test's 'off' arm disables BBL; if BBL were inert the movement is 0.0 and the test fails"
+  },
+  "item4_lock_external_owner": {
+    "claim_under_test": "LOCK's slow_u bit is produced by stp2d.F90:185 (the cumulated depth mean of uu(Krhs)), not by stp2d.F90:172 (dyn_adv_up3's 2-D advective RHS).",
+    "source_argument": "dynspg_ts.F90:282 sets zu_frc = Ue_rhs verbatim under key_RK3. dyn_adv_up3 ZEROES pUe/pVe on entry (ppsrc dynadv_up3.f90:138-141) and every later pUe write subtracts a term built from zFu/zFv/puu(:,:,:,Kbb); NEMO's measured kt=1 entry velocity is exactly 0.0 on this card, so Ue_rhs after :172 is exactly 0.0 and :172 cannot own a nonzero bit. Wind (:199-202) and drag (:196) add exact zeros: usrdef_sbc utau=0 and ln_drg_OFF=T.",
+    "method": "A committed offline probe scores legoESM's depth-mean statement (compute_layer_thickness -> min_cell_to_uface -> sum(du_dt*h_u)/sum(h_u)*u_mask, the model's own path) against NEMO's dumped slow_u frame, in TWO arms differing in ONE variable: (a) the model's own du_dt, (b) NEMO's dumped uu(Krhs) transplanted in. No NEMO run.",
+    "prediction": "Both arms reproduce 1 / 127 unequal at absolute max 2.168404344971009e-19 in cell [1, 64]. That CONFIRMS the depth-mean statement (:185's counterpart) as the producing statement and REFUTES :172.",
+    "confirm": "arm (b) reproduces the walk's 1/127 at 2.168404344971009e-19",
+    "refute": "arm (b) is bit-exact (0/127); the depth mean given NEMO's own RHS is then exact and the owner is elsewhere",
+    "round26_prediction_being_tested": "round 26 left the owner as PLAUSIBLE between :172 and :185 and said no dumped frame separates them; this probe separates them without one",
+    "non_vacuity": "--plant perturbs one transplanted RHS cell by one ULP and the probe must exit nonzero"
+  },
+  "item5_orca2_fourth_card": {
+    "claim_under_test": "Rule-12 eligibility for the round-25 HPG/QCO change on ORCA2, the fourth card that pins pgf_scheme=nemo_sco.",
+    "method": "Detached probe worktree of origin/fidelity/nemo-testcases-l4-orca2-codex at /tmp/codex-orca2-r27-probe with d5a7f8169507 cherry-picked. Route ORCA2's dumped oracle_rkstage2_hpg_operands_kt00000001.bin through the MODEL's nemo_sco arm -- the changed _nemo_hpg_tendency_from_pressure_or_direct consumer, not nemo_hpg_sco_literal_cgrid alone -- and score against oracle_rkstage2_hpg_literal_kt00000001.bin. ORCA2 is NOT at rest, so the LOCK/OVERFLOW frame isolation does not transfer and the operands route is the only valid one. Zero NEMO runs; the ORCA2 branch itself is untouched.",
+    "prediction": "0 unequal on all six literal components (sum_u, sum_v, zhpi_u, zhpi_v, zuap_u, zuap_v) over the stencil-valid owned wet core, with the changed consumer returning the acceleration bit-identically.",
+    "confirm": "0/n on every component",
+    "refute": "any nonzero component; report the first non-bit operand and enter it as ORCA2 Rule-12 debt",
+    "scope_limit_declared_up_front": "gdept_z0 is supplied by NEMO, so this row exercises the changed CONSUMER and the operator, not the _nemo_qco_gdept_z0 builder; that builder is card-independent pure arithmetic pinned by test_nemo_qco_gdept_z0_oracle_bit_pattern and is stated as such, not claimed as an ORCA2 measurement",
+    "non_vacuity": "--plant perturbs one cell by one ULP and the probe must exit nonzero"
+  },
+  "item6_report_defects": {
+    "overflow_ratio": "exit_over_slow_dt_prediction is currently 1.559250241824e+290 because its denominator is 0.0 and the code divides by np.finfo(float).tiny; it must be null when the denominator is 0.",
+    "lock_trajectory_artifact": "DEFAULT_TRAJECTORY is OVERFLOW's overflow_kt1_10_flux_gate.json for every case, so a LOCK run on gate defaults would stamp OVERFLOW's file as LOCK's trajectory_gate. Whether the round-26 LOCK report actually did so is checked before anything is claimed.",
+    "prediction": "the round-26 LOCK report names LOCK's own lock_trajectory_gate_kt10.json (so the brief's premise is REFUTED as written), while the default remains a live latent hole that is closed per card"
+  },
+  "item7_forbidden": "The native demo GYRE card's vertical_momentum_scheme and adaptive_implicit_vertadv are NOT changed (user decision 15C pending). The five test_nemo_recipe failures stay attributed to it.",
+  "forbidden_this_round": [
+    "modifying /home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/src",
+    "makenemo, mpirun, any NEMO executable",
+    "GPU",
+    "git stash / reset --hard / push / merge",
+    "deleting any file or probe worktree",
+    "relaxing BAR",
+    "changing the demo GYRE card's momentum scheme"
+  ]
+}

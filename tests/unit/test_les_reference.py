@@ -307,3 +307,25 @@ def test_frames_on_different_grids_are_refused(tmp_path):
              tke=np.full(NZ_LES, 0.5), case=np.asarray("bomex"))
     with pytest.raises(ValueError, match="different vertical grid"):
         _load(tmp_path, case="bomex", analysis_hours=1.0)
+
+
+# --- DYCOMS-II RF02 is its own case, not an alias of RF01 -------------------
+
+def test_rf02_frames_are_not_accepted_as_rf01(tmp_path):
+    """'dycoms_rf02' used to be a registered alias of 'dycoms', so a genuine
+    RF02 reference -- drizzling, 795 m inversion, 55 cm^-3 droplets -- would
+    have been scored as the non-precipitating RF01 case."""
+    _write_frames(tmp_path, n_frames=6, case_label="DYCOMS_RF02")
+    with pytest.raises(ValueError, match="written by LES case"):
+        _load(tmp_path, case="dycoms")
+
+
+def test_rf02_deck_spelling_is_accepted_for_rf02(tmp_path):
+    _write_frames(tmp_path, n_frames=6, case_label="DYCOMS_RF02")
+    assert _load(tmp_path, case="rf02").n_frames >= 2
+
+
+def test_rf01_frames_are_not_accepted_as_rf02(tmp_path):
+    _write_frames(tmp_path, n_frames=6, case_label="DYCOMS_RF01")
+    with pytest.raises(ValueError, match="written by LES case"):
+        _load(tmp_path, case="rf02")

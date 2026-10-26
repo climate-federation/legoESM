@@ -108,3 +108,32 @@ def test_roundtrip_through_load_real_topography(tmp_path):
     assert float(f_land.min()) >= 0.0 and float(f_land.max()) <= 1.0
     assert 0.0 < float(f_land.mean()) < 1.0                       # real land/ocean mix
     assert np.all(np.isfinite(np.asarray(phis)))
+
+
+def test_global_source_is_periodic_across_the_lon_seam():
+    """#1712: identity at the source resolution must hold in the LAST column
+    too, and a seam target interpolates between the last and first columns."""
+    import numpy as np
+    import xarray as xr
+    res = 0.5                                  # cell centres, like ETOPO
+    lat = -90 + res / 2 + res * np.arange(int(180 / res))
+    lon = -180 + res / 2 + res * np.arange(int(360 / res))
+    z = np.random.default_rng(0).normal(0, 1000, (lat.size, lon.size))
+    ds = xr.Dataset({"z": (("lat", "lon"), z)}, coords={"lat": lat, "lon": lon})
+    out = prep.regrid_elevation_to_latlon(ds, target_res_deg=res)
+    raw = ds["z"].assign_coords(lon=lon % 360).sortby("lon").values
+    np.testing.assert_allclose(out["elevation"].values, raw, atol=1e-6)
+
+    # lon-only field: the first target of a finer grid (lon res/4) lies
+    # between the last source column (359.75 = -0.25) and the first (0.25).
+    zl = np.broadcast_to(np.arange(lon.size, dtype=float), (lat.size, lon.size))
+    ds2 = xr.Dataset({"z": (("lat", "lon"), zl.copy())},
+                     coords={"lat": lat, "lon": lon % 360})
+    out2 = prep.regrid_elevation_to_latlon(ds2, target_res_deg=res / 2)
+    srt = ds2.sortby("lon")["z"].values[0]
+    first, last = srt[0], srt[-1]
+    t = float(out2["lon"].values[0])                       # 0.125
+    w_first = (t + res / 2) / res
+    expect = w_first * first + (1 - w_first) * last
+    np.testing.assert_allclose(out2["elevation"].values[10:-10, 0], expect,
+                               rtol=0, atol=1e-9)

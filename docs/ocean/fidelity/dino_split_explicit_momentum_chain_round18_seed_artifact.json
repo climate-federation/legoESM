@@ -1,0 +1,95 @@
+{
+  "backend": "cpu",
+  "bar": 1e-15,
+  "controls": {
+    "one_ulp_perturbation_detected": true,
+    "reverse_order_distinct": true
+  },
+  "disposition": "OWNED_BY_BEFORE_THICKNESS_TIME_LEVEL_AND_LEFT_ACCUMULATION",
+  "git_commit": "ed4c9f7ba1cb735e7aee91bec502b2dd4964ad5c",
+  "input_sha256": {
+    "DINO_00005760_restart.nc": "0cc00f9945606d1dea52592280e363b45476103de96f5cef471d70b1b881ff3e",
+    "dino_split_explicit_momentum_chain_round16_recurrence.json": "b2dcb7e151436b36ade81f69ad6ed43ec56d25cdcb76f2e289ba26168a167935",
+    "dino_split_explicit_momentum_chain_round17_seed.json": "4702ed903c2d4e35a2ecb63c777838279536abab4390beeaf4bfe7e85026ca03",
+    "mesh_mask.nc": "3285fc4af36854a38b4e6f7985ab0372b95424398750a23b628935da02f72622",
+    "spg_dump_un_e_init.bin": "26a1946c9c0a5b413463b0e027cc6511bfb48c9236423a82d0b0f5bdd7ed210a",
+    "spg_dump_vn_e_init.bin": "df8203ca3654edc64c2803929146343d1e905f00f3fcd7f5dd703a41a4743a42"
+  },
+  "jax_enable_x64": true,
+  "schema": "dino-split-explicit-momentum-chain-round18-v1",
+  "scores": {
+    "literal_live_left": {
+      "u": {
+        "bit_mismatch_count": 0,
+        "max_error_over_nemo_rms": 0.0,
+        "n": 9758,
+        "normalized_rms_error": 0.0
+      },
+      "v": {
+        "bit_mismatch_count": 0,
+        "max_error_over_nemo_rms": 0.0,
+        "n": 9868,
+        "normalized_rms_error": 0.0
+      }
+    },
+    "production_fused": {
+      "u": {
+        "bit_mismatch_count": 7302,
+        "max_error_over_nemo_rms": 5.5743163337299506e-15,
+        "n": 9758,
+        "normalized_rms_error": 2.1633667694662516e-16
+      },
+      "v": {
+        "bit_mismatch_count": 7035,
+        "max_error_over_nemo_rms": 6.396341264411133e-15,
+        "n": 9868,
+        "normalized_rms_error": 2.1699142379161393e-16
+      }
+    },
+    "reverse_live": {
+      "u": {
+        "bit_mismatch_count": 7639,
+        "max_error_over_nemo_rms": 5.5743163337299506e-15,
+        "n": 9758,
+        "normalized_rms_error": 2.5899911392081445e-16
+      },
+      "v": {
+        "bit_mismatch_count": 7694,
+        "max_error_over_nemo_rms": 4.2642275096074225e-15,
+        "n": 9868,
+        "normalized_rms_error": 2.5353100128845856e-16
+      }
+    },
+    "static_left": {
+      "u": {
+        "bit_mismatch_count": 7511,
+        "max_error_over_nemo_rms": 5.5743163337299506e-15,
+        "n": 9758,
+        "normalized_rms_error": 2.319675680502355e-16
+      },
+      "v": {
+        "bit_mismatch_count": 7011,
+        "max_error_over_nemo_rms": 8.528455019214845e-15,
+        "n": 9868,
+        "normalized_rms_error": 2.6386460828339644e-16
+      }
+    },
+    "vector_live": {
+      "u": {
+        "bit_mismatch_count": 0,
+        "max_error_over_nemo_rms": 0.0,
+        "n": 9758,
+        "normalized_rms_error": 0.0
+      },
+      "v": {
+        "bit_mismatch_count": 0,
+        "max_error_over_nemo_rms": 0.0,
+        "n": 9868,
+        "normalized_rms_error": 0.0
+      }
+    }
+  },
+  "script_sha256": "073955bae32dd93e935573ead756f4878009efe18fcc8460ab067acb9c3234cb",
+  "session_id": "01a04e34-d1fb-73e0-b25a-177641f0a246",
+  "ssh_variable": "sshb"
+}

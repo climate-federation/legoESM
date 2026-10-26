@@ -26,6 +26,8 @@ import jax
 import jax.numpy as jnp
 import equinox as eqx
 
+from legoesm import constants
+
 from legoesm.atmosphere.physics.clouds.config import CloudConfig
 from legoesm.atmosphere.physics.convection.config import (
     ConvectionConfig,
@@ -112,10 +114,9 @@ _MCFARLANE_TRAINABLE: list[ParamConstraint] = [
     ParamConstraint("mcfarlane_efficiency", 0.1, 1.0, "sigmoid"),
     ParamConstraint("mcfarlane_min_wind", 0.5, 5.0, "sigmoid"),
     ParamConstraint("mcfarlane_envelope_scale", 0.5, 2.0, "sigmoid"),
-    # Extended: orographic wavenumber + spread + tau cap.
+    # Extended: orographic wavenumber + spread.
     ParamConstraint("mcfarlane_k_wave", 1.0e-5, 5.0e-4, "sigmoid"),
     ParamConstraint("mcfarlane_directional_spread", 0.5, 2.0, "sigmoid"),
-    ParamConstraint("mcfarlane_tau_max", 1.0, 50.0, "sigmoid"),
 ]
 
 # Xu-Randall cloud fraction.  ``T_freeze`` is NOT trainable per
@@ -124,7 +125,7 @@ _XU_RANDALL_TRAINABLE: list[ParamConstraint] = [
     ParamConstraint("cloud_rh_crit", 0.5, 0.95, "sigmoid"),
     ParamConstraint("cloud_alpha_xr", 25.0, 400.0, "sigmoid"),
     ParamConstraint("cloud_p_xr", 0.1, 1.0, "sigmoid"),
-    ParamConstraint("cloud_q_c_diagnostic", 5.0e-5, 5.0e-4, "sigmoid"),
+    ParamConstraint("cloud_q_c_diagnostic", 1.0e-6, 5.0e-4, "sigmoid"),  # lower bound = spec/driver (1e-6)
     # Cloud particle effective radii (drive RRTMGP cloud optics).
     ParamConstraint("cloud_r_eff_liq", 5.0e-6, 30.0e-6, "sigmoid"),
     ParamConstraint("cloud_r_eff_ice", 10.0e-6, 100.0e-6, "sigmoid"),
@@ -229,6 +230,94 @@ AIMIP_CLASSICAL_CONSTRAINTS: list[ParamConstraint] = (
 )
 
 
+# Turbulence schemes whose sub-config carries the trained ``surface`` member
+# (make_aimip_classical_spectral_physics: louis via to_louis_config, the rest
+# via _spatial_surface_override); "none" has no surface to train.
+_SURFACE_CARRYING_TURBULENCE = frozenset({
+    "louis", "tke", "smagorinsky", "mynn25", "clubb_lite", "clubb",
+    "holtslag_boville", "ysu", "edmf"})
+# Surface knobs each bulk scheme reads (core/bulk_flux.py via
+# turbulence/surface_layer.py compute_surface_fluxes), pinned against measured
+# gradients by test_aimip_classical_inert_knobs: the constant law reads only
+# Cd/Ch; "most" reads z0, the Businger-Dyer pair and z0h/z0; coare3 has its own
+# stability functions and scalar roughness (z0 only seeds its iteration);
+# large_yeager keeps the Businger-Dyer pair but not z0h/z0; large_yeager_cesm
+# reads none.
+_SURFACE_KNOBS_BY_BULK = {
+    "constant": ("surface_Cd_neutral", "surface_Ch_neutral"),
+    "most": ("surface_z0", "surface_most_unstable_gamma",
+             "surface_most_stable_beta", "surface_z0h_z0_ratio"),
+    "coare3": ("surface_z0",),
+    "large_yeager": ("surface_z0", "surface_most_unstable_gamma",
+                     "surface_most_stable_beta"),
+    "large_yeager_cesm": (),
+    # No surface exchange: every exchange knob is inert, so none is trainable.
+    "none": (),
+}
+# falls through to the constant-coefficient branch of compute_surface_fluxes
+_SURFACE_KNOBS_BY_BULK["nemo_si3_constant"] = _SURFACE_KNOBS_BY_BULK["constant"]
+
+
+# Spatial surface fields read through the same surface sub-config as these
+# scalar knobs (make_aimip_classical_spectral_physics._spatial_surface_override),
+# so each is live exactly when its scalar is; sfc_emissivity / sfc_albedo are
+# read by both radiation backends (review F5, vote B).
+_SPATIAL_FIELD_READ_WITH = {"Cd_neutral": "surface_Cd_neutral",
+                            "Ch_neutral": "surface_Ch_neutral",
+                            "z0": "surface_z0"}
+
+
+def aimip_spatial_unread_fields(*, turbulence, surface_bulk_scheme) -> frozenset:
+    """Spatial surface fields the resolved surface path never reads.
+
+    The same rule ``AIMIPClassicalParams.from_defaults`` derives from the
+    trainable knob names (a field is read exactly when its scalar knob is),
+    stated on the two scheme choices that decide it, for callers that build a
+    checkpoint template without a trainable set (eval / AMIP replay).
+    """
+    if surface_bulk_scheme not in _SURFACE_KNOBS_BY_BULK:
+        raise ValueError(
+            f"unknown surface bulk scheme {surface_bulk_scheme!r}; expected "
+            f"one of {sorted(_SURFACE_KNOBS_BY_BULK)}")
+    read = (set(_SURFACE_KNOBS_BY_BULK[surface_bulk_scheme])
+            if turbulence in _SURFACE_CARRYING_TURBULENCE else set())
+    return frozenset(f for f, k in _SPATIAL_FIELD_READ_WITH.items()
+                     if k not in read)
+
+
+def aimip_classical_trainable_names(*, convection, turbulence, gwd,
+                                    microphysics, cloud, radiation,
+                                    surface_bulk_scheme) -> frozenset:
+    """Knobs of ``AIMIP_CLASSICAL_CONSTRAINTS`` the RESOLVED schemes read.
+
+    Mirrors the scheme-conditional ``to_*_config`` calls in
+    :func:`make_aimip_classical_spectral_physics`; a knob of an unselected
+    family has no gradient path and must not be trained (review F5).  The
+    run's first-step no-inert gate then checks the remaining set by measurement.
+    """
+    if surface_bulk_scheme not in _SURFACE_KNOBS_BY_BULK:
+        raise ValueError(
+            f"unknown surface bulk scheme {surface_bulk_scheme!r}; expected "
+            f"one of {sorted(_SURFACE_KNOBS_BY_BULK)}")
+    fams = {"tiedtke": _TIEDTKE_TRAINABLE, "sbm": _SBM_TRAINABLE}.get(
+        convection, [])
+    fams = list(fams)
+    if turbulence == "louis":
+        fams += _LOUIS_TRAINABLE
+    if gwd == "mcfarlane":
+        fams += _MCFARLANE_TRAINABLE
+    if microphysics == "sundqvist":
+        fams += _SUNDQVIST_TRAINABLE
+    if cloud == "xu_randall" and radiation == "rrtmgp":   # gray drops clouds
+        fams += _XU_RANDALL_TRAINABLE
+    if radiation == "rrtmgp":
+        fams += _RRTMGP_TRAINABLE
+    names = {c.name for c in fams}
+    if turbulence in _SURFACE_CARRYING_TURBULENCE:
+        names |= set(_SURFACE_KNOBS_BY_BULK[surface_bulk_scheme])
+    return frozenset(names)
+
+
 # ----------------------------------------------------------------------
 # Equinox container for the AIMIP classical variant
 # ----------------------------------------------------------------------
@@ -262,6 +351,8 @@ class AIMIPClassicalParams(eqx.Module):
         spatial_surface: bool = False,
         spatial_init_std: float = 0.0,
         spatial_seed: int = 0,
+        trainable=None,
+        spatial_unread=None,
     ) -> "AIMIPClassicalParams":
         """Initialize all knobs at (or just inside) their canonical defaults.
 
@@ -292,7 +383,25 @@ class AIMIPClassicalParams(eqx.Module):
             PRNG seed for the spatial-coefficient initialization.
             Only used when ``spatial_surface=True`` and
             ``spatial_init_std > 0``.
+        trainable : iterable of str or None
+            Knob names that are TRAINABLE (``aimip_classical_trainable_names``
+            for the run's resolved schemes).  Every other knob is stored as a
+            plain Python float: same value, same checkpoint leaf, but not an
+            array, so ``eqx.filter_value_and_grad`` and the optimizer skip it
+            (frozen out of the trainable set; no-inert-parameters rule).
+            ``None`` keeps every knob an array (checkpoint templates).
+        spatial_unread : iterable of str or None
+            Spatial fields NOT built because the resolved schemes never read
+            them (``aimip_spatial_unread_fields``). ``None`` derives them from
+            ``trainable`` (a field is read exactly when its scalar knob is);
+            ``trainable=None`` and ``spatial_unread=None`` build every field.
         """
+        names = {c.name for c in AIMIP_CLASSICAL_CONSTRAINTS}
+        if trainable is not None:
+            trainable = frozenset(trainable)
+            unknown = sorted(trainable - names)
+            if unknown:
+                raise ValueError(f"unknown AIMIP classical knob(s): {unknown}")
         scheme_defaults = _canonical_scheme_defaults()
         try:
             from legoesm.core.precision import get_policy
@@ -317,16 +426,27 @@ class AIMIPClassicalParams(eqx.Module):
             default_clamped = min(
                 c.max_val - margin, max(c.min_val + margin, default),
             )
-            raw[c.name] = jnp.asarray(
+            raw_c = jnp.asarray(
                 range_to_sigmoid(default_clamped, c.min_val, c.max_val),
-                dtype=param_dtype,
-            )
+                dtype=param_dtype)
+            raw[c.name] = (raw_c if trainable is None or c.name in trainable
+                           else float(raw_c))
         spatial = None
         if spatial_surface:
+            derived = frozenset(f for f, k in _SPATIAL_FIELD_READ_WITH.items()
+                                if trainable is not None and k not in trainable)
+            if spatial_unread is None:
+                spatial_unread = derived
+            elif trainable is not None and frozenset(spatial_unread) != derived:
+                raise ValueError(
+                    f"spatial_unread {sorted(spatial_unread)} disagrees with "
+                    f"the fields the trainable knobs leave unread "
+                    f"{sorted(derived)}")
             spatial = AIMIPSpatialSurfaceParams.from_defaults(
                 dtype=param_dtype,
                 init_std=spatial_init_std,
                 key=jax.random.PRNGKey(int(spatial_seed)),
+                frozen=spatial_unread,
             )
         return AIMIPClassicalParams(
             raw_values=raw,
@@ -334,10 +454,29 @@ class AIMIPClassicalParams(eqx.Module):
             spatial_surface=spatial,
         )
 
+    def for_checkpoint(self) -> "AIMIPClassicalParams":
+        """On-disk view: frozen (Python-float) knobs as arrays of the trainable
+        knobs' dtype, so a checkpoint loads into an all-array template
+        (``from_defaults()``) without an equinox dtype mismatch, and back into
+        a frozen template as the same float (``ml.training.save_checkpoint``)."""
+        # Only Python-float knobs change; optimizer-moment copies of this
+        # module (None / MaskedNode at frozen or masked slots) pass through.
+        if not any(type(v) is float for v in self.raw_values.values()):
+            return self
+        dt = next((v.dtype for v in self.raw_values.values()
+                   if hasattr(v, "dtype")), None)
+        if dt is None:   # every knob frozen: the dtype from_defaults uses
+            from legoesm.core.precision import get_policy
+            dt = get_policy().compute
+        raw = {k: (jnp.asarray(v, dtype=dt) if type(v) is float else v)
+               for k, v in self.raw_values.items()}
+        return eqx.tree_at(lambda m: m.raw_values, self, raw)
+
     def as_dict(self) -> dict[str, jax.Array]:
         """Return constrained physical values for every knob."""
         return {
-            c.name: sigmoid_to_range(self.raw_values[c.name], c.min_val, c.max_val)
+            c.name: sigmoid_to_range(jnp.asarray(self.raw_values[c.name]),
+                                     c.min_val, c.max_val)
             for c in self.constraints
         }
 
@@ -396,7 +535,14 @@ class AIMIPClassicalParams(eqx.Module):
             ``legoesm.core.bulk_flux.validate_bulk_scheme``.
         """
         d = self.as_dict()
-        base = SurfaceLayerConfig()
+        # The AIMIP lanes substitute the lowest air temperature for the
+        # surface wherever no surface is supplied (free-running spectral
+        # physics; NaN over land in the SST-anchored forcing), and the MOST
+        # height adjustment against such a "surface" invents an air-surface
+        # contrast and a downward sensible heat flux out of nothing.  Keep it
+        # off here (the scheme default is True) until this lane carries a
+        # real surface temperature everywhere.
+        base = SurfaceLayerConfig(z_ref_model_level=False)
         return base._replace(
             Cd_neutral=d["surface_Cd_neutral"],
             Ch_neutral=d["surface_Ch_neutral"],
@@ -429,7 +575,6 @@ class AIMIPClassicalParams(eqx.Module):
             envelope_scale=d["mcfarlane_envelope_scale"],
             k_wave=d["mcfarlane_k_wave"],
             directional_spread=d["mcfarlane_directional_spread"],
-            tau_max=d["mcfarlane_tau_max"],
         )
 
     def to_cloud_config(self) -> CloudConfig:
@@ -556,7 +701,6 @@ def _canonical_scheme_defaults() -> dict[str, float]:
         "mcfarlane_envelope_scale": float(mc.envelope_scale),
         "mcfarlane_k_wave": float(mc.k_wave),
         "mcfarlane_directional_spread": float(mc.directional_spread),
-        "mcfarlane_tau_max": float(mc.tau_max),
         # Cloud (Xu-Randall)
         "cloud_rh_crit": float(cl.rh_crit),
         "cloud_alpha_xr": float(cl.alpha_xr),
@@ -704,6 +848,83 @@ CLASSICAL_DEFAULT_SCHEMES = {
 
 _UNFILLED = ("", "none", "off", "false")
 
+# --- Per-rollout TKE seed (training-lane seeding POLICY, not scheme
+# physics; GLM 2026-08-17 review, option c) -------------------------------
+# ``init_physics_state`` seeds the TKE slot at the scheme floor
+# (~1e-6 m^2/s^2). Turbulence production scales with sqrt(TKE), so a floor
+# seed cannot spin up inside a 6-h training window (measured: threading the
+# memory moved the 12-step loss by only 5e-4 relative) — the mixing stays
+# effectively absent. The seed below evaluates the NEUTRAL
+# production-dissipation balance on the initial state,
+#     c_K * L * sqrt(w) * S^2 = w^(3/2) / L   =>   w = c_K * L^2 * S^2,
+# with fixed policy constants: TKE is quasi-equilibrium (tau ~ minutes to
+# tens of minutes), so any physically-scaled seed relaxes to the scheme's
+# own balance within a few steps — the seed's job is escaping the sqrt
+# bottleneck, not being exact. The active scheme's own c_K IS used when
+# available — DETACHED via stop_gradient, so the seed tracks the trained
+# equilibrium without the trained value retro-coupling into its own
+# initial condition (GLM round 2); the constants below are the fallback
+# policy values and the fixed length/clip band, deliberately not tunables.
+_TKE_SEED_CK = 0.5          # representative eddy-diffusivity coefficient
+_TKE_SEED_LENGTH_M = 100.0  # neutral-BL mixing-length scale [m]
+_TKE_SEED_FLOOR = 1.0e-6    # scheme tke_min class floor [m^2/s^2]
+_TKE_SEED_CAP = 10.0        # sanity cap [m^2/s^2] (jet shear layers)
+
+
+def _apply_wp2_seed(ps, state, grid_, sigma_coord, c_k=None):
+    """Replace ``ps.tke`` with the shear-equilibrium wp2 seed (see above).
+
+    ``c_k``: the ACTIVE scheme's eddy coefficient, DETACHED
+    (``lax.stop_gradient``) by the caller — the seed then matches the
+    scheme's own equilibrium as training moves c_K, without the trained
+    value retro-coupling into its own initial condition (GLM: a fixed
+    policy c_K guarantees a per-window adjustment transient the loss
+    would mis-attribute to the sink terms). ``None`` falls back to the
+    fixed policy constant. Bechtold's organization profile and the GWD
+    spectrum keep their cold defaults — no diagnostic exists for them
+    (named open item).
+    """
+    from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
+        spectral_pe_to_grid,
+    )
+
+    if ps.tke is None:
+        return ps
+    ncol = int(grid_.n_lat) * int(grid_.n_lon)
+    nlev = int(jnp.shape(sigma_coord.sigma_full)[0])
+    fields = spectral_pe_to_grid(state, grid_, sigma_coord)
+    u = fields["u"].reshape(ncol, nlev)
+    v = fields["v"].reshape(ncol, nlev)
+    T = fields["T"].reshape(ncol, nlev)
+    # Layer separation dz ~ (R_d T / g) * dln(p): the grid converter exposes
+    # no heights, and a seed needs only order-of-magnitude shear. sigma_full
+    # is static, so dln p is a trace-time constant.
+    sig = jnp.asarray(sigma_coord.sigma_full)
+    dlnp = jnp.abs(jnp.log(sig[1:]) - jnp.log(sig[:-1]))      # (nlev-1,)
+    T_half = 0.5 * (T[:, :-1] + T[:, 1:])
+    dz = jnp.clip((constants.R_d / constants.g) * T_half * dlnp, 1.0, None)
+    s2_half = (((u[:, :-1] - u[:, 1:]) / dz) ** 2
+               + ((v[:, :-1] - v[:, 1:]) / dz) ** 2)
+    # Interior interfaces -> full levels by edge-replicated averaging (the
+    # same half->full stencil the diagnostic scheme itself uses).
+    s2 = jnp.concatenate(
+        [s2_half[:, :1],
+         0.5 * (s2_half[:, :-1] + s2_half[:, 1:]),
+         s2_half[:, -1:]], axis=1)
+    # 1-2-1 vertical smoothing: raw per-layer S^2 from analysis winds is
+    # grid-noisy, and a noisy seed imprints spurious layer-scale K at step 1
+    # (GLM). Replicated-edge convolution: the endpoints blend 3/4-1/4 with
+    # their neighbour (leaving them raw skips the smoothing exactly at the
+    # surface, where the seed matters most — codex round 2).
+    s2 = jnp.concatenate(
+        [0.75 * s2[:, :1] + 0.25 * s2[:, 1:2],
+         0.25 * s2[:, :-2] + 0.5 * s2[:, 1:-1] + 0.25 * s2[:, 2:],
+         0.25 * s2[:, -2:-1] + 0.75 * s2[:, -1:]], axis=1)
+    _ck = _TKE_SEED_CK if c_k is None else jax.lax.stop_gradient(c_k)
+    wp2_seed = jnp.clip(_ck * _TKE_SEED_LENGTH_M ** 2 * s2,
+                        _TKE_SEED_FLOOR, _TKE_SEED_CAP)
+    return ps._replace(tke=wp2_seed.astype(ps.tke.dtype))
+
 
 def validate_classical_scheme_set(
     *, convection: str, turbulence: str, cloud: str, microphysics: str,
@@ -826,43 +1047,10 @@ def aimip_scheme_keys_for(
     return keys
 
 
-def aimip_legacy_owned_scheme_keys() -> set[str]:
-    """Registry ``scheme_key``s the LEGACY hand-written params already train.
-
-    OWNERSHIP RULE (design call, 2026-08-06): a config field has exactly ONE
-    trainer.  ``AIMIPClassicalParams.to_<x>_config`` writes these classes'
-    fields from legacy leaves and ``_splice_scheme_overrides`` runs AFTER it,
-    so letting the spec-driven collector also cover such a class would
-    overwrite the legacy value and silently zero those gradients — trading the
-    46 leaves that train today for new ones, with no error.  The spec route
-    therefore covers only the schemes the legacy route CANNOT reach (Bechtold,
-    CLUBB, Thompson, ...), which is why the opt-in exists.
-
-    Legacy wins the overlap rather than the spec because the alternative —
-    dropping the colliding legacy ``ParamConstraint``s — changes the
-    ``AIMIPClassicalParams`` pytree layout and invalidates every existing
-    classical checkpoint, for no additional trained parameter.
-
-    The owned set is derived by CALLING every ``to_*_config`` method and
-    reading the returned TYPE, so a method added later is owned automatically
-    (a hardcoded class list would rot into a silent gradient loss).
-    """
-    from legoesm.training.param_collector import build_registry
-
-    probe = AIMIPClassicalParams.from_defaults()
-    owned_classes = {
-        type(getattr(probe, name)()).__name__
-        for name in dir(type(probe))
-        if name.startswith("to_") and name.endswith("_config")
-    }
-    return {m.scheme_key for m in build_registry()
-            if m.config_class in owned_classes}
-
-
 def aimip_legacy_owned_fields(*, cloud_scheme: str = "xu_randall") -> set[str]:
     """Qualified ``scheme_key.field`` names the legacy leaves actually WRITE.
 
-    Field-level refinement of :func:`aimip_legacy_owned_scheme_keys`: the
+    Field-level refinement of the former class-level ownership rule: the
     class-level subtraction excluded EVERY spec parameter of a class the
     legacy route touches, which suppressed spec-only fields the legacy never
     writes (Sundqvist ``qc_crit``, McFarlane ``fcrit2``, most of
@@ -936,6 +1124,99 @@ def aimip_legacy_owned_fields(*, cloud_scheme: str = "xu_randall") -> set[str]:
                     if q in known:
                         owned.add(q)
     return owned
+
+
+# Spec parameters of an ACTIVE class that the selected scheme never reads.
+# The cloud-fraction family routes the whole CloudConfig spec, but cam6_clubb
+# takes its liquid fraction from CLUBB and requires explicit condensate, so the
+# RH threshold and the diagnostic in-cloud condensate floor (both Sundqvist /
+# Xu-Randall only) have no gradient path there.
+_INACTIVE_FIELDS_BY_CLOUD_SCHEME = {
+    "cam6_clubb": frozenset({
+        "atm.clouds.CloudConfig.rh_crit",
+        "atm.clouds.CloudConfig.q_c_diagnostic",
+    }),
+}
+
+
+def aimip_inactive_fields(*, cloud_scheme: str, microphysics: str, gwd: str,
+                          subgrid_orography: bool,
+                          param_fixed: dict | None = None) -> frozenset:
+    """Qualified ``scheme_key.field`` names with no gradient path under this
+    scheme selection, frozen OUT of the trainable set by name (no-inert-parameters
+    rule, the ``_inactive_keys`` pattern) rather than left to a measured
+    freeze.  Pass to ``build_trainable_params(exclude=...)`` together with
+    :func:`aimip_legacy_owned_fields` at every bundle build, so a trained
+    checkpoint and its evaluation skeleton share one tree.
+
+    The cloud-scheme set plus :func:`resolved_inactive_fields` of the config
+    the AIMIP factory builds for these names: ``MorrisonConfig`` defaults
+    with the deck's ``param_fixed`` pins for it (a pinned
+    ``warm_rain_scheme`` decides which warm-rain knobs are read), and
+    ``subgrid_orography`` = the lane's grid carries ``subgrid_topo_stddev``.
+    """
+    from legoesm.atmosphere.physics.combined import PhysicsConfig
+    from legoesm.atmosphere.physics.microphysics.config import (
+        MicrophysicsConfig,
+        MorrisonConfig,
+    )
+    from legoesm.core.param_overrides import apply_param_overrides
+
+    pins = (param_fixed or {}).get("atm.micro.MorrisonConfig", {})
+    probe = PhysicsConfig(
+        microphysics=MicrophysicsConfig(
+            scheme=microphysics,
+            morrison=apply_param_overrides(MorrisonConfig(), dict(pins))),
+        gravity_wave_drag=GravityWaveDragConfig(scheme=gwd))
+    return (_INACTIVE_FIELDS_BY_CLOUD_SCHEME.get(cloud_scheme, frozenset())
+            | resolved_inactive_fields(
+                probe, subgrid_orography=subgrid_orography))
+
+
+# Morrison warm-rain laws that read autocon_fact / accre_enhan_fact.
+_KK2000_WARM_RAIN = frozenset({"kk2000", "kk2000_cam6"})
+
+
+def resolved_inactive_fields(physics_config, *,
+                             subgrid_orography: bool) -> frozenset:
+    """Spec parameters of an ACTIVE scheme that a resolved OPTION of it never
+    reads, from the BUILT config (the ``_inactive_keys`` pattern; the
+    ``assert_no_inert`` gate on the first gradient catches the rest).
+
+    * Morrison ``k_au``/``k_ac``/``x_star``: read by no warm-rain law (the
+      former ``"seifert_beheng"`` proxy now runs SB2001 as gSAM does and
+      refuses them, morrison.py), so always inactive under Morrison.
+    * every spec'd ``SeifertBehengConfig`` knob but ``Nc_0``: the stand-alone
+      ``seifert_beheng`` scheme is gSAM M2005 and refuses them
+      (seifert_beheng.py).
+    * Morrison ``autocon_fact``/``accre_enhan_fact``: read only by the two
+      kk2000 laws, ``"kk2000"`` and ``"kk2000_cam6"`` (morrison.py); neither
+      Seifert-Beheng law reads them.
+    * McFarlane ``h_topo``: the scalar fallback height, read only when no
+      per-column subgrid-orography field is wired (mcfarlane.py).
+      ``subgrid_orography`` = the driver wired one (production: SSO file).
+    """
+    out = set()
+    micro = getattr(physics_config, "microphysics", None)
+    if getattr(micro, "scheme", None) == "morrison":
+        out |= {f"atm.micro.MorrisonConfig.{f}"
+                for f in ("k_au", "k_ac", "x_star")}
+    if getattr(micro, "scheme", None) == "seifert_beheng":
+        # The scheme is gSAM M2005 (liquid only, SB2001), which reads only
+        # Nc_0 and refuses every other SeifertBehengConfig field.
+        from legoesm.atmosphere.physics.microphysics import config as _mcfg
+        out |= {f"atm.micro.SeifertBehengConfig.{f}"
+                for f in _mcfg.__param_spec__["SeifertBehengConfig"]["params"]
+                if f != "Nc_0"}
+    if (getattr(micro, "scheme", None) == "morrison"
+            and micro.morrison.warm_rain_scheme not in _KK2000_WARM_RAIN):
+        out |= {f"atm.micro.MorrisonConfig.{f}"
+                for f in ("autocon_fact", "accre_enhan_fact")}
+    gwd = getattr(physics_config, "gravity_wave_drag", None)
+    if subgrid_orography and "mcfarlane" in str(
+            getattr(gwd, "scheme", "")).split("+"):
+        out.add("atm.gwd.McFarlaneConfig.h_topo")
+    return frozenset(out)
 
 
 class AIMIPTrainableBundle(eqx.Module):
@@ -1059,13 +1340,32 @@ def make_aimip_classical_spectral_physics(
     gwd_scheme: str = "mcfarlane",
     microphysics_scheme: str = "sundqvist",
     cloud_scheme: str = "xu_randall",
+    # CAM ``trop_cloud_top_press`` [Pa] for turbulence_scheme="clubb": the
+    # pressure above which CLUBB's mixing tapers to zero. None keeps
+    # CLUBBConfig's default 0.0 = OFF (CAM's own code default; the taper is a
+    # no-op branch); the 32-level WB arm sets 5000 Pa (see CLUBBConfig
+    # docstring).
+    clubb_top_press: float | None = None,
+    # CAM6 clubb_intr liquid hand-off (TurbulenceConfig.liquid_partition):
+    # the closure's diagnosed liquid becomes the host cloud water. CLUBB only;
+    # make_physics requires cld_macmic_num_steps >= 2 with it.
+    clubb_liquid_partition: bool = False,
+    cld_macmic_num_steps: int = 1,
     # Ablations that deliberately drop a family set this True; production
     # training does not (see validate_classical_scheme_set).
     allow_unfilled_families: bool = False,
     land_mask: "jax.Array | None" = None,
+    # Production AMIP settings that live on the FAMILY config rather than on a
+    # scheme's own -- so the registry-keyed override route cannot address them,
+    # and they would otherwise sit silently at their library defaults while a
+    # deck claimed to match production.
+    orbital_insolation: bool = False,
+    convective_rain_to_surface: bool = False,
     split_rad: bool = False,
     rrtmgp_gpoint_checkpoint: bool = True,
     rrtmgp_gpoint_batch_size: int = 16,
+    rrtmgp_column_chunk_size: int = 0,
+    column_mesh=None,
 ):
     """Build a SpectralPE physics function for the AIMIP classical variant.
 
@@ -1114,9 +1414,18 @@ def make_aimip_classical_spectral_physics(
     # without knowing which shape it holds.
     params, _bundle_overrides = unpack_aimip_params(params)
     if _bundle_overrides is not None:
-        param_overrides = {**_bundle_overrides, **(param_overrides or {})}
+        # MERGED PER FIELD, not per scheme_key: both sides address the same
+        # config by key, so a shallow merge silently DROPPED every trained
+        # field of any config the caller also pinned a fixed value on -- the
+        # cloud config being exactly that case (tuned overlap/sub-columns
+        # alongside trained rh_crit). The caller's value wins field by field.
+        merged = {k: dict(v) for k, v in _bundle_overrides.items()}
+        for key, fields in (param_overrides or {}).items():
+            merged.setdefault(key, {}).update(fields)
+        param_overrides = merged
 
     from legoesm.atmosphere.physics.combined import PhysicsConfig, make_physics
+    from legoesm.atmosphere.physics.radiation.solar import earth_orbit
     from legoesm.atmosphere.physics.radiation.config import (
         GrayRadiationConfig, RadiationConfig,
     )
@@ -1127,7 +1436,13 @@ def make_aimip_classical_spectral_physics(
     # cannot silently fall back to constant-Cd bulk aerodynamics — which
     # would leave the trained MOST stability / z0h-ratio leaves dead with no
     # error.  Mirrors compute_surface_fluxes' own validate_bulk_scheme gate.
-    validate_bulk_scheme(surface_bulk_scheme)
+    # "none" = no surface exchange: the turbulence scheme still runs, but its
+    # lower boundary condition is prescribed as zero heat, moisture and stress
+    # (the same prescribed-flux path ERA5 fluxes use).  The bulk law under the
+    # prescription is irrelevant; "constant" only fills the config.
+    _no_surface_flux = surface_bulk_scheme == "none"
+    _bulk_law = "constant" if _no_surface_flux else surface_bulk_scheme
+    validate_bulk_scheme(_bulk_law)
 
     # Radiation backend toggle.  ``rrtmgp`` is the production
     # correlated-k path: it explicitly couples Xu-Randall cloud
@@ -1142,6 +1457,10 @@ def make_aimip_classical_spectral_physics(
     # property, not a radiation-scheme knob.)  Default ``gray`` keeps the
     # AIMIP harness tractable on a single GPU; bump to ``rrtmgp``
     # for production-grade physics realism.
+    # Realistic (elliptical) orbit, as the production AMIP deck runs; None
+    # keeps the circular-orbit default every earlier caller had.
+    _orbit = earth_orbit() if orbital_insolation else None
+
     # ---- Cloud config (trained when xu_randall, defaults otherwise) ----
     if cloud_scheme == "xu_randall":
         cloud_cfg_trained = params.to_cloud_config()
@@ -1226,14 +1545,20 @@ def make_aimip_classical_spectral_physics(
             include_clouds=(cloud_scheme != "none"),
             gpoint_checkpoint=rrtmgp_gpoint_checkpoint,
             gpoint_batch_size=rrtmgp_gpoint_batch_size,
+            column_chunk_size=rrtmgp_column_chunk_size,
         )
         rad_cfg = RadiationConfig(
             scheme="rrtmgp",
             rrtmgp=rrtmgp_cfg,
             cloud_scheme=cloud_scheme,
             cloud_config=cloud_cfg_trained,
+            # cam6_clubb has exactly one legal value here (the radiation
+            # builder refuses the scheme without it), so this is derived,
+            # not a knob.  Every other cloud scheme keeps the RH path.
+            use_clubb_cloud_fraction=(cloud_scheme == "cam6_clubb"),
             update_interval_steps=rad_update_interval_steps,
             diurnal_cycle=True,
+            orbit=_orbit,
         )
     elif radiation == "gray":
         # Gray radiation runs at its published defaults — it is NOT
@@ -1257,6 +1582,7 @@ def make_aimip_classical_spectral_physics(
             scheme="gray",
             gray=gray_cfg,
             diurnal_cycle=True,
+            orbit=_orbit,
         )
     else:
         raise ValueError(
@@ -1275,6 +1601,12 @@ def make_aimip_classical_spectral_physics(
         )
     else:
         conv_cfg = ConvectionConfig(scheme=convection_scheme)
+    if convective_rain_to_surface:
+        # Production routes convective rain straight to the surface instead of
+        # detraining it into the resolved rain field for the microphysics to
+        # re-handle; the two give different surface precipitation and
+        # different re-evaporation.
+        conv_cfg = conv_cfg._replace(rain_to_surface=True)
 
     # ---- Turbulence (with optional spatial surface params) ----
     # When the surface knobs (``Cd_neutral``, ``Ch_neutral``, ``z0``)
@@ -1295,7 +1627,12 @@ def make_aimip_classical_spectral_physics(
     # For ``louis`` this is idempotent with ``to_louis_config`` (which already
     # installed the trained surface).  Schemes without a ``surface`` member
     # ("none") are returned unchanged.
-    trained_surface = params.to_surface_config(bulk_scheme=surface_bulk_scheme)
+    trained_surface = params.to_surface_config(bulk_scheme=_bulk_law)
+    if _no_surface_flux:
+        trained_surface = trained_surface._replace(
+            prescribed_shflx_w_m2=0.0, prescribed_lhflx_w_m2=0.0,
+            prescribed_evap_kg_m2_s=0.0,
+            prescribed_tau_x_pa=0.0, prescribed_tau_y_pa=0.0)
 
     def _spatial_surface_override(inner_cfg):
         if not hasattr(inner_cfg, "surface"):
@@ -1313,9 +1650,13 @@ def make_aimip_classical_spectral_physics(
             )
         return inner_cfg._replace(surface=new_surface)
 
+    if clubb_liquid_partition and turbulence_scheme != "clubb":
+        raise ValueError(
+            "clubb_liquid_partition is CLUBB's liquid hand-off; "
+            f"turbulence_scheme={turbulence_scheme!r} has no closure liquid.")
     if turbulence_scheme == "louis":
         louis_cfg = _spatial_surface_override(
-            params.to_louis_config(bulk_scheme=surface_bulk_scheme)
+            params.to_louis_config(bulk_scheme=_bulk_law)
         )
         turb_cfg = TurbulenceConfig(scheme="louis", louis=louis_cfg)
     elif turbulence_scheme == "tke":
@@ -1365,9 +1706,15 @@ def make_aimip_classical_spectral_physics(
         }
         factory = _surface_scheme_configs.get(turbulence_scheme)
         if factory is not None:
+            _turb_sub = factory()
+            if turbulence_scheme == "clubb" and clubb_top_press is not None:
+                # CAM trop_cloud_top_press override (see the kwarg above).
+                _turb_sub = _turb_sub._replace(
+                    trop_cloud_top_press=float(clubb_top_press))
             turb_cfg = TurbulenceConfig(
                 scheme=turbulence_scheme,
-                **{turbulence_scheme: _spatial_surface_override(factory())},
+                liquid_partition=bool(clubb_liquid_partition),
+                **{turbulence_scheme: _spatial_surface_override(_turb_sub)},
             )
         else:
             # "none" — no surface sub-config to thread the bulk scheme onto.
@@ -1432,16 +1779,55 @@ def make_aimip_classical_spectral_physics(
     # so the caller can dispatch through the simple
     # ``spectral_rollout(state, physics_fn, ...)`` branch.
     if not split_rad:
+        if column_mesh is not None:
+            raise ValueError(
+                "column_mesh is wired only on the split-radiation path "
+                "(split_rad=True)")
         combined_raw = make_physics(
             physics_config, model_type="spectral_pe", dt=dt,
+            surface_bulk_coeffs=None,   # this lane runs its own surface flux
             sfc_albedo_override=_sfc_albedo_override,
             sfc_emissivity_override=_sfc_emissivity_override,
+            cld_macmic_num_steps=cld_macmic_num_steps,
         )
 
         def combined_fn(state, grid_, sigma_coord):
             result = combined_raw(state, grid_, sigma_coord)
             return result[0] if isinstance(result, tuple) else result
 
+        def combined_fn_with_phys_state(state, grid_, sigma_coord, phys_state,
+                                        forcing=None):
+            # Same stateful contract as the split-rad entry below (codex P1:
+            # the non-split path must not stay silently memoryless).
+            result = combined_raw(
+                state, grid_, sigma_coord, phys_state=phys_state,
+                forcing=forcing,
+            )
+            if not (isinstance(result, tuple) and len(result) == 2):
+                raise TypeError(
+                    "stateful classical physics expected (tendencies, "
+                    f"phys_state), got {type(result)!r}")
+            return result
+
+        def _init_phys_state_combined(ncol: int, nlev: int, dtype=None):
+            from legoesm.atmosphere.physics.physics_state import (
+                init_physics_state,
+            )
+            return init_physics_state(ncol, nlev, physics_config, dtype=dtype)
+
+        def _seed_phys_state_combined(state, grid_, sigma_coord):
+            ps = _init_phys_state_combined(
+                int(grid_.n_lat) * int(grid_.n_lon),
+                int(jnp.shape(sigma_coord.sigma_full)[0]))
+            _ck = None
+            if turb_cfg.scheme == "clubb" and turb_cfg.clubb is not None:
+                _ck = turb_cfg.clubb.params.c_K
+            return _apply_wp2_seed(ps, state, grid_, sigma_coord, c_k=_ck)
+
+        combined_fn.with_phys_state = combined_fn_with_phys_state
+        combined_fn.init_phys_state = _init_phys_state_combined
+        combined_fn.seed_phys_state = _seed_phys_state_combined
+        combined_fn.physics_config = physics_config
         return combined_fn
 
     # Rad-split path: separate non-radiative and radiative callables.
@@ -1462,6 +1848,9 @@ def make_aimip_classical_spectral_physics(
     from legoesm.atmosphere.physics.radiation.integration import (
         make_radiation_physics,
     )
+    from legoesm.atmosphere.physics.turbulence.integration import (
+        resolved_clubb_config,
+    )
     non_rad_cfg = PhysicsConfig(
         radiation=RadiationConfig(scheme="none"),
         convection=conv_cfg,
@@ -1469,11 +1858,33 @@ def make_aimip_classical_spectral_physics(
         microphysics=micro_cfg,
         gravity_wave_drag=gwd_cfg,
     )
-    non_rad_raw = make_physics(non_rad_cfg, model_type="spectral_pe", dt=dt)
+    # The split builds radiation and the non-radiative physics SEPARATELY, so
+    # neither sees the other and the combined wrapper's producer gate never
+    # runs: cam6_clubb + a non-CLUBB closure would build with the routing on
+    # and read a cloud fraction nobody writes (zero => clouds cleared).  Same
+    # gate as combined.py, applied to the RESOLVED pair before splitting.
+    if rad_cfg.use_clubb_cloud_fraction and turb_cfg.scheme != "clubb":
+        raise ValueError(
+            "RadiationConfig.use_clubb_cloud_fraction=True requires a "
+            "cloud-fraction-producing turbulence closure "
+            "(turbulence.scheme='clubb', diagnostic or prognostic); got "
+            f"turbulence.scheme={turb_cfg.scheme!r} (cloud_scheme={cloud_scheme!r})."
+        )
+    # CAM macro/micro sub-cycle: turbulence and microphysics run in sequence
+    # inside the non-radiative factory (radiation is split out and is a
+    # "once" module, so the split does not change the sub-cycle's meaning).
+    # This lane runs its own surface flux: no bulk exchange here.
+    non_rad_raw = make_physics(non_rad_cfg, model_type="spectral_pe", dt=dt,
+                               cld_macmic_num_steps=cld_macmic_num_steps,
+                               surface_bulk_coeffs=None)
     rad_only_raw = make_radiation_physics(
         rad_cfg, "spectral_pe",
         sfc_albedo_override=_sfc_albedo_override,
         sfc_emissivity_override=_sfc_emissivity_override,
+        use_clubb_cloud_fraction=rad_cfg.use_clubb_cloud_fraction,
+        column_mesh=column_mesh,
+        # cam6_clubb: CLUBB's top cuts aist (clubb_intr.F90:2535).
+        clubb_config=resolved_clubb_config(turb_cfg),
     )
 
     def non_rad_fn(state, grid_, sigma_coord, phys_state=None, forcing=None):
@@ -1489,7 +1900,66 @@ def make_aimip_classical_spectral_physics(
         )
         return result[0] if isinstance(result, tuple) else result
 
-    def rad_fn(state, grid_, sigma_coord, *, sim_time_seconds=0.0, forcing=None):
+    def non_rad_fn_with_phys_state(state, grid_, sigma_coord, phys_state,
+                                   forcing=None):
+        """``(tendencies, phys_state_out)`` — the STATEFUL entry.
+
+        The combined spectral wrapper has always produced the updated
+        prognostic physics state (CLUBB's wp2/TKE, Bechtold's
+        ``conv_prog_profile`` + stochastic state, the GWD spectrum, the
+        PDF cloud fraction) and ``non_rad_fn`` above DISCARDS it — so the
+        WB/AIMIP spectral training rollout ran every stateful scheme
+        MEMORYLESS: CLUBB's turbulence energy sat at its floor forever,
+        i.e. effectively NO boundary-layer mixing (2026-08-17 scene-17
+        dissection: four in-scheme probes were bit-flat because they
+        patched outputs this lane threw away). ``spectral_rollout``
+        threads this entry's state through its scan carry when the
+        marker below is present.
+        """
+        result = non_rad_raw(
+            state, grid_, sigma_coord, phys_state=phys_state, forcing=forcing,
+        )
+        if not (isinstance(result, tuple) and len(result) == 2):
+            # A silent fallback here would freeze the physics memory and
+            # reintroduce the memoryless pathology this entry exists to fix
+            # (codex P3) — fail loudly instead.
+            raise TypeError(
+                "stateful classical physics expected (tendencies, "
+                f"phys_state) from the combined wrapper, got {type(result)!r}")
+        return result
+
+    def _init_phys_state(ncol: int, nlev: int, dtype=None):
+        from legoesm.atmosphere.physics.physics_state import (
+            init_physics_state,
+        )
+        return init_physics_state(ncol, nlev, non_rad_cfg, dtype=dtype)
+
+    def _seed_phys_state(state, grid_, sigma_coord):
+        ps = _init_phys_state(
+            int(grid_.n_lat) * int(grid_.n_lon),
+            int(jnp.shape(sigma_coord.sigma_full)[0]))
+        # The active scheme's own (possibly trained/traced) c_K, detached
+        # in _apply_wp2_seed; None -> fixed policy constant.
+        _ck = None
+        if turb_cfg.scheme == "clubb" and turb_cfg.clubb is not None:
+            _ck = turb_cfg.clubb.params.c_K
+        return _apply_wp2_seed(ps, state, grid_, sigma_coord, c_k=_ck)
+
+    # Markers consumed by ``spectral_rollout``: their ABSENCE selects the
+    # legacy stateless path (learned arms, older callers) byte-identically.
+    non_rad_fn.with_phys_state = non_rad_fn_with_phys_state
+    non_rad_fn.init_phys_state = _init_phys_state
+    non_rad_fn.seed_phys_state = _seed_phys_state
+    # What each callable ACTUALLY runs, so a caller can assert that the deck's
+    # trained values, pinned settings, orbit and rain routing reached the model
+    # instead of trusting that they did. On this path the two halves carry
+    # DIFFERENT configurations -- the non-radiative families here, radiation on
+    # the rad callable below -- and exposing the pre-split whole would let a
+    # test pass on a config this lane never evaluates.
+    non_rad_fn.physics_config = non_rad_cfg
+
+    def rad_fn(state, grid_, sigma_coord, *, sim_time_seconds=0.0, forcing=None,
+               phys_state=None):
         # ``make_radiation_physics`` returns the per-module physics_fn
         # with signature
         # ``(state, grid, sigma_coord, grid_fields=None, sim_time_seconds=0.0)``
@@ -1509,9 +1979,14 @@ def make_aimip_classical_spectral_physics(
         # pin) keeps the diurnal/seasonal sim_time cycle intact.  The old
         # either/or branch dropped sim_time_seconds whenever any forcing
         # arrived, freezing radiation time at the closure default.
+        # ``phys_state`` is the LAGGED carry the rollout threads (CLUBB's
+        # PDF cloud fraction, ZM's mass flux / in-cloud water); the
+        # spectral radiation builder reads it only when the CLUBB
+        # cloud-fraction routing is on, else it is ignored.
         rad_out = rad_only_raw(
             state, grid_, sigma_coord,
             sim_time_seconds=sim_time_seconds, forcing=forcing,
+            phys_state=phys_state,
         )
         if rad_out.tracers is None and state.tracers is not None:
             zero_tracers = {}
@@ -1523,4 +1998,10 @@ def make_aimip_classical_spectral_physics(
             rad_out = rad_out._replace(tracers=zero_tracers)
         return rad_out
 
+    rad_fn.radiation_config = rad_cfg
+    # The rollout decides whether to fill the carry before the first radiation
+    # call by this marker; it lives on the raw builder output, so re-export it
+    # on the wrapper the rollout actually receives.
+    if getattr(rad_only_raw, "_wants_phys_state_ro", False):
+        rad_fn._wants_phys_state_ro = True
     return non_rad_fn, rad_fn

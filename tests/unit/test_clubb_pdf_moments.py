@@ -18,22 +18,21 @@ import pytest
 
 jax.config.update("jax_enable_x64", True)
 
-from legoesm.atmosphere.physics.turbulence.clubb import (
-    derive_mixt_frac_max_mag,  # noqa: E402
-)
-from legoesm.atmosphere.physics.turbulence.clubb import make_clubb_grid  # noqa: E402
-from legoesm.atmosphere.physics.turbulence.clubb import (  # noqa: E402
+from legoesm.atmosphere.physics.turbulence.clubb import (  # noqa: E402  # noqa: E402
     ADG1_pdf_driver,
-    calc_pdf_liquid_cloud_frac_components,
-)
-from legoesm.atmosphere.physics.turbulence.clubb import (  # noqa: E402
-    _EP1,
-    _EP2,
     calc_pdf_higher_order_moments,
+    calc_pdf_liquid_cloud_frac_components,
     calc_pdf_xprcp_fluxes,
+    calc_trapezoid_zm,
+    calc_trapezoid_zt,
     calc_wp2xp2_pdf,
     calc_wp4_pdf,
     calc_xpthvp_terms,
+    clip_rcm,
+    compute_cloud_cover,
+    derive_mixt_frac_max_mag,  # noqa: E402
+    make_clubb_grid,  # noqa: E402
+    zt2zm,
 )
 
 from legoesm import constants  # noqa: E402
@@ -80,6 +79,26 @@ def _moment_inputs():
                 corr_rt_thl_1=corr_rt_thl_1, corr_rt_thl_2=corr_rt_thl_2, gr=gr)
 
 
+def _no_gr(kw):
+    """Drop the grid: the PDF helpers are grid-agnostic (the caller regrids)."""
+    return {k: v for k, v in kw.items() if k != "gr"}
+
+
+def _hom_to_zm(out, gr):
+    """The zt->zm regrids the closure driver applies to the velocity moments.
+
+    These used to live inside ``calc_pdf_higher_order_moments``; they moved to
+    the caller when the closure became grid-agnostic (CAM runs it once per level
+    set). Reproduced here so the committed golden keeps pinning both grids.
+    """
+    k_ub = gr.zm.shape[1] - 1
+    return {
+        "wp2up2_zm": zt2zm(out["wp2up2"], gr).at[:, k_ub].set(0.0),
+        "wp2vp2_zm": zt2zm(out["wp2vp2"], gr).at[:, k_ub].set(0.0),
+        "wp4_zm": zt2zm(out["wp4"], gr, zm_min=0.0).at[:, 0].set(0.0).at[:, k_ub].set(0.0),
+    }
+
+
 def _xprcp_inputs():
     """ADG1 + cloud-component dict + thermo for the cloud-water flux assembly."""
     kw = _moment_inputs()
@@ -99,6 +118,8 @@ def _xprcp_inputs():
 def _refgr(gr):
     nzm = gr.zm.shape[1]
     return SimpleNamespace(zm=gr.zm, zt=gr.zt, dzm=gr.dzm, invrs_dzm=gr.invrs_dzm,
+                           invrs_dzt=gr.invrs_dzt, dzt=gr.dzt,
+                           grid_dir=1.0, grid_dir_indx=1,
                            k_ub_zt=gr.zt.shape[1] - 1, k_lb_zt=0,
                            k_ub_zm=nzm - 1, k_lb_zm=0)
 
@@ -131,13 +152,15 @@ def test_wp2xp2_nonnegative():
 
 def test_higher_order_moments_matches_golden():
     g = np.load(_FIX / "clubb_hom_golden.npz")
-    out = calc_pdf_higher_order_moments(**_moment_inputs())
+    kw = _moment_inputs()
+    out = calc_pdf_higher_order_moments(**_no_gr(kw))
+    out = dict(out, **_hom_to_zm(out, kw["gr"]))
     for key in g.files:
         np.testing.assert_array_equal(np.asarray(out[key]), g[key], err_msg=key)
 
 
 def test_higher_order_moments_jit_grad():
-    kw = _moment_inputs()
+    kw = _no_gr(_moment_inputs())
 
     def loss(wm):
         out = calc_pdf_higher_order_moments(**dict(kw, wm_zt=wm))
@@ -163,43 +186,49 @@ def _xpthvp_inputs():
     p = jnp.asarray(np.linspace(9.5e4, 6.0e4, nzt)[None, :] * np.ones(shp))
     exner = (p / constants.p_ref) ** constants.kappa
     f = lambda s: jnp.asarray(s * rng.normal(size=shp))  # noqa: E731
-    return dict(exner=exner, thv_ds_zt=jnp.asarray(300.0 + 5 * rng.random(shp)),
-                wprcp_zt=f(1e-5), wp2rcp_zt=f(1e-5), rtprcp_zt=f(1e-6), thlprcp_zt=f(1e-3),
-                wpthlp_zt=f(0.02), wprtp_zt=f(1e-4), wp2thlp_zt=f(0.01), wp2rtp_zt=f(1e-4),
-                rtpthlp_zt=f(1e-5), rtp2_zt=jnp.asarray(1e-6 * rng.random(shp)),
-                thlp2_zt=jnp.asarray(0.1 * rng.random(shp)), gr=gr)
+    return dict(exner=exner, thv_ds=jnp.asarray(300.0 + 5 * rng.random(shp)),
+                wprcp=f(1e-5), wp2rcp=f(1e-5), rtprcp=f(1e-6), thlprcp=f(1e-3),
+                wpthlp=f(0.02), wprtp=f(1e-4), wp2thlp=f(0.01), wp2rtp=f(1e-4),
+                rtpthlp=f(1e-5), rtp2=jnp.asarray(1e-6 * rng.random(shp)),
+                thlp2=jnp.asarray(0.1 * rng.random(shp)), gr=gr)
 
 
 def test_xpthvp_dry_limit_reduces_to_thl_flux():
-    """With no moisture flux (wprtp=wprcp=0), wpthvp == wpthlp on zt."""
-    kw = dict(_xpthvp_inputs(), wprtp_zt=jnp.zeros((2, 8)), wprcp_zt=jnp.zeros((2, 8)))
-    # Recompute the zt buoyancy flux directly: rc_coef*0 + ep1*thv*0 + wpthlp.
-    _, _, _, _, rc_coef_zt, _ = calc_xpthvp_terms(**kw)
-    # wpthvp_zt = wpthlp_zt exactly (the other terms vanish) — check via reconstruction.
-    wpthvp_zt = (kw["wpthlp_zt"] + _EP1 * kw["thv_ds_zt"] * kw["wprtp_zt"]
-                 + rc_coef_zt * kw["wprcp_zt"])
-    np.testing.assert_allclose(np.asarray(wpthvp_zt), np.asarray(kw["wpthlp_zt"]), rtol=1e-12)
+    """With no moisture flux (wprtp=wprcp=0), wpthvp == wpthlp."""
+    kw = dict(_xpthvp_inputs(), wprtp=jnp.zeros((2, 8)), wprcp=jnp.zeros((2, 8)))
+    wpthvp = calc_xpthvp_terms(**_no_gr(kw))[0]
+    np.testing.assert_allclose(np.asarray(wpthvp), np.asarray(kw["wpthlp"]), rtol=1e-12)
 
 
 def test_xpthvp_matches_golden():
+    """Pin both level sets: the on-grid values and the regrids the caller applies."""
     g = np.load(_FIX / "clubb_xpthvp_golden.npz")
-    out = calc_xpthvp_terms(**_xpthvp_inputs())
-    names = ("wpthvp_zm", "wp2thvp_zt", "rtpthvp_zm", "thlpthvp_zm", "rc_coef_zt", "rc_coef_zm")
-    for name, arr in zip(names, out):
+    kw = _xpthvp_inputs()
+    gr = kw["gr"]
+    k_ub = gr.zm.shape[1] - 1
+    wpthvp, wp2thvp, rtpthvp, thlpthvp, rc_coef = calc_xpthvp_terms(**_no_gr(kw))
+
+    def to_zm(field):
+        return zt2zm(field, gr).at[:, k_ub].set(0.0)
+
+    got = {"wpthvp_zm": to_zm(wpthvp), "wp2thvp_zt": wp2thvp,
+           "rtpthvp_zm": to_zm(rtpthvp), "thlpthvp_zm": to_zm(thlpthvp),
+           "rc_coef_zt": rc_coef, "rc_coef_zm": to_zm(rc_coef)}
+    for name, arr in got.items():
         # FP-reassociation tolerance (C1-C8 condense refactor; ~1e-14 rel).
         np.testing.assert_allclose(np.asarray(arr), g[name], rtol=1e-13, atol=1e-16,
                                    err_msg=name)
 
 
 def test_xpthvp_jit_grad():
-    kw = _xpthvp_inputs()
+    kw = _no_gr(_xpthvp_inputs())
 
     def loss(wprtp):
-        out = calc_xpthvp_terms(**dict(kw, wprtp_zt=wprtp))
+        out = calc_xpthvp_terms(**dict(kw, wprtp=wprtp))
         return sum(jnp.sum(v) for v in out)
 
-    assert jnp.isfinite(jax.jit(loss)(kw["wprtp_zt"]))
-    assert jnp.all(jnp.isfinite(jax.grad(loss)(kw["wprtp_zt"])))
+    assert jnp.isfinite(jax.jit(loss)(kw["wprtp"]))
+    assert jnp.all(jnp.isfinite(jax.grad(loss)(kw["wprtp"])))
 
 
 # ---------------------------------------------------------------------------
@@ -207,22 +236,23 @@ def test_xpthvp_jit_grad():
 # ---------------------------------------------------------------------------
 
 def test_xprcp_fluxes_matches_golden():
+    """Pin both level sets: the on-grid fluxes and the regrids the caller applies."""
     g = np.load(_FIX / "clubb_xprcp_golden.npz")
-    out = calc_pdf_xprcp_fluxes(**_xprcp_inputs())
+    kw = _xprcp_inputs()
+    gr = kw["gr"]
+    k_ub = gr.zm.shape[1] - 1
+    out = calc_pdf_xprcp_fluxes(**_no_gr(kw))
+    got = {f"{name}_zt": out[name] for name in out}
+    for name in ("wprcp", "rtprcp", "thlprcp", "uprcp", "vprcp"):
+        got[f"{name}_zm"] = zt2zm(out[name], gr).at[:, k_ub].set(0.0)
     for key in g.files:
         # FP-reassociation tolerance (C1-C8 condense refactor; ~1e-14 rel).
-        np.testing.assert_allclose(np.asarray(out[key]), g[key], rtol=1e-13, atol=1e-16,
+        np.testing.assert_allclose(np.asarray(got[key]), g[key], rtol=1e-13, atol=1e-16,
                                    err_msg=key)
 
 
-def test_xprcp_fluxes_zm_top_zeroed():
-    out = calc_pdf_xprcp_fluxes(**_xprcp_inputs())
-    for key in ("wprcp_zm", "rtprcp_zm", "thlprcp_zm", "uprcp_zm", "vprcp_zm"):
-        np.testing.assert_array_equal(np.asarray(out[key])[:, -1], 0.0)
-
-
 def test_xprcp_fluxes_jit_grad():
-    kw = _xprcp_inputs()
+    kw = _no_gr(_xprcp_inputs())
 
     def loss(rcm):
         out = calc_pdf_xprcp_fluxes(**dict(kw, rcm_zt=rcm))
@@ -236,44 +266,97 @@ def test_xprcp_fluxes_jit_grad():
 # Live bit-exact parity vs CLUBB-JAX reference
 # ---------------------------------------------------------------------------
 
+def test_cloud_cover_gradient_finite_over_clear_levels():
+    """A cloud-free level must not hand reverse-mode AD a 0/0.
+
+    The layer geometry divides by a vertical cloud fraction that is zero on the
+    clear levels the routine leaves alone. Both branches of a ``where`` are
+    evaluated and differentiated, so without a guard on that denominator the
+    gradient is NaN even though the returned values are right.
+    """
+    gr = _moment_inputs()["gr"]
+    ng, nzt = gr.zt.shape
+    deck = np.zeros((ng, nzt))
+    deck[:, 2:5] = 3e-5           # a cloud deck with clear air above and below
+    rcm = jnp.asarray(deck)
+    cloud_frac = jnp.asarray(np.where(deck > 0.0, 0.4, 0.0))
+    # chi is ZERO in the clear air, which is what makes the partial-fraction
+    # denominator (cloud water + |chi|) vanish there as well: this exercises
+    # BOTH guarded divisions, not just the vertical-fraction one.
+    chi = jnp.asarray(np.where(deck > 0.0, 1e-5, 0.0))
+
+    def loss(rcm_in):
+        cover, rc_in = compute_cloud_cover(chi, cloud_frac, rcm_in, gr)
+        return jnp.sum(cover) + jnp.sum(rc_in)
+
+    assert jnp.isfinite(loss(rcm))
+    g = jax.grad(loss)(rcm)
+    assert jnp.all(jnp.isfinite(g)), f"non-finite cloud-cover gradient: {g}"
+
+
 @pytest.mark.skipif(not (_CLUBB_JAX_ROOT / "clubb_jax").exists(),
                     reason="CLUBB-JAX reference tree not present")
-def test_parity_vs_clubb_jax_reference():
+def test_level_set_reconciliation_parity_vs_clubb_jax_reference():
+    """Bit-exact vs upstream for the two-level-set reconciliation routines.
+
+    Upstream folded its per-term PDF helpers into one ``pdf_closure`` routine,
+    so the moment/buoyancy/cloud-flux assemblies are no longer separately
+    callable there and are pinned by the committed goldens above instead. The
+    routines that ARE still standalone upstream — the trapezoidal reconciliation
+    of the thermodynamic and momentum level sets, the cloud-water cap, and the
+    layer cloud-cover geometry — are compared directly here.
+    """
     if str(_CLUBB_JAX_ROOT) not in sys.path:
         sys.path.insert(0, str(_CLUBB_JAX_ROOT))
+    import clubb_jax.src.CLUBB_core.clip_explicit as ref_clip
     import clubb_jax.src.CLUBB_core.pdf_closure_module as refmod
 
-    # Higher-order moments: no physical constants -> bit-exact directly.
+    rng = np.random.default_rng(21)
     kw = _moment_inputs()
-    mine = calc_pdf_higher_order_moments(**kw)
-    ref = refmod.calc_pdf_higher_order_moments_jax(
-        kw["adg1"], kw["wm_zt"], kw["rtm"], kw["thlm"], kw["um"], kw["vm"],
-        kw["corr_rt_thl_1"], kw["corr_rt_thl_2"], _refgr(kw["gr"]))
-    for key in ref:
-        np.testing.assert_array_equal(np.asarray(mine[key]), np.asarray(ref[key]), err_msg=key)
+    gr = kw["gr"]
+    ng, nzt = kw["rtm"].shape
+    nzm = nzt + 1
+    var_zt = jnp.asarray(rng.normal(size=(ng, nzt)))
+    var_zm = jnp.asarray(rng.normal(size=(ng, nzm)))
+    refgr = _refgr(gr)
 
-    # Buoyancy flux: patch reference constants to legoESM, then bit-exact.
-    refmod.Lv, refmod.Cp = constants.L_v, constants.c_pd
-    refmod.ep1, refmod.ep2 = _EP1, _EP2
-    xkw = _xpthvp_inputs()
-    mine_x = calc_xpthvp_terms(**xkw)
-    ref_x = refmod.calc_xpthvp_terms_jax(
-        xkw["exner"], xkw["thv_ds_zt"], xkw["wprcp_zt"], xkw["wp2rcp_zt"], xkw["rtprcp_zt"],
-        xkw["thlprcp_zt"], xkw["wpthlp_zt"], xkw["wprtp_zt"], xkw["wp2thlp_zt"], xkw["wp2rtp_zt"],
-        xkw["rtpthlp_zt"], xkw["rtp2_zt"], xkw["thlp2_zt"], _refgr(xkw["gr"]))
-    for a, b in zip(mine_x, ref_x):
-        np.testing.assert_array_equal(np.asarray(a), np.asarray(b))
+    # The reference's trapezoid routines are jit-compiled, so XLA may contract a
+    # multiply-add that our eager form evaluates separately. That is a last-bit
+    # difference (~1 ULP), not a formula difference, so these two compare at a
+    # few ULP rather than bit-for-bit; everything below is exact.
+    np.testing.assert_allclose(
+        np.asarray(calc_trapezoid_zt(var_zm, var_zt, gr)),
+        np.asarray(refmod.calc_trapezoid_zt(nzm, nzt, ng, refgr, var_zm, var_zt)),
+        rtol=1e-15, atol=0.0)
+    np.testing.assert_allclose(
+        np.asarray(calc_trapezoid_zm(var_zt, var_zm, gr)),
+        np.asarray(refmod.calc_trapezoid_zm(nzm, nzt, ng, refgr, var_zt, var_zm)),
+        rtol=1e-15, atol=0.0)
 
-    # Cloud-water fluxes: no constants given the shared comp dict -> bit-exact.
-    pkw = _xprcp_inputs()
-    mine_p = calc_pdf_xprcp_fluxes(**pkw)
-    ref_p = refmod.calc_pdf_xprcp_fluxes_jax(
-        adg1=pkw["adg1"], comp=pkw["comp"], wm_zt=pkw["wm_zt"], rtm=pkw["rtm"],
-        thlm=pkw["thlm"], um=pkw["um"], vm=pkw["vm"], rcm_zt=pkw["rcm_zt"],
-        gr=_refgr(pkw["gr"]))
-    for key in ("wprcp_zt", "wp2rcp_zt", "rtprcp_zt", "thlprcp_zt", "uprcp_zt", "vprcp_zt",
-                "wprcp_zm", "rtprcp_zm", "thlprcp_zm", "uprcp_zm", "vprcp_zm"):
-        np.testing.assert_array_equal(np.asarray(mine_p[key]), np.asarray(ref_p[key]), err_msg=key)
+    # Cloud-water cap: rtm below rcm on half the points, above on the rest.
+    rcm = jnp.asarray(np.abs(rng.normal(size=(ng, nzt))) * 1e-4)
+    rtm = jnp.asarray(rng.normal(size=(ng, nzt)) * 1e-4)
+    np.testing.assert_array_equal(
+        np.asarray(clip_rcm(rtm, rcm)),
+        np.asarray(ref_clip.clip_rcm(nzt, ng, rtm, "test", rcm)))
+
+    # Layer cloud geometry: a cloud deck with a top, a base and a clear gap.
+    rcm_deck = np.zeros((ng, nzt))
+    rcm_deck[:, 2:5] = 3e-5
+    rcm_deck[:, 6] = 8e-6            # isolated one-level cloud
+    rcm_deck = jnp.asarray(rcm_deck)
+    cloud_frac = jnp.asarray(np.where(np.asarray(rcm_deck) > 0.0, 0.35, 0.0))
+    chi_mean = jnp.asarray(rng.normal(size=(ng, nzt)) * 1e-5)
+    pdf_params = SimpleNamespace(
+        mixt_frac=jnp.full((ng, nzt), 1.0), chi_1=chi_mean,
+        chi_2=jnp.zeros((ng, nzt)))
+    mine_cover, mine_rc = compute_cloud_cover(chi_mean, cloud_frac, rcm_deck, gr)
+    ref_cover, ref_rc = refmod.compute_cloud_cover(
+        refgr, nzt, ng, pdf_params, cloud_frac, rcm_deck)
+    np.testing.assert_allclose(np.asarray(mine_cover), np.asarray(ref_cover),
+                               rtol=1e-13, atol=0.0)
+    np.testing.assert_allclose(np.asarray(mine_rc), np.asarray(ref_rc),
+                               rtol=1e-13, atol=0.0)
 
 
 if __name__ == "__main__":

@@ -1,0 +1,119 @@
+--- stprk3_stg.F90.r49
++++ stprk3_stg.F90
+@@ -19,6 +19,9 @@
+    !!    stp_RK3_stg  : NEMO 3rd order Runge-Kutta stage with qco or linssh
+    !!----------------------------------------------------------------------
+    USE step_oce       ! time stepping used modules
++   USE l1_r50_pair, ONLY : r50_mom_begin, r50_mom_rhd, r50_mom_uv, &
++      & r50_mom_finish, r50_tra_begin, r50_tra_ts, r50_tra_finish
++                       ! round-50 WRITE-only kt3 source-order recorder
+    USE domqco         ! quasi-eulerian coordinate      (dom_qco_r3c routine)
+    USE bdydyn         ! ocean open boundary conditions (define bdy_dyn)
+    USE lbclnk         ! ocean lateral boundary conditions (or mpp link)
+@@ -320,6 +324,7 @@
+             WRITE(numout,*) 'LANE1_TRANSPORT_DUMP ', kstp, kstg, Kmm, TRIM(l1_filename)
+          ENDIF
+          !           !============================================!
++         CALL r50_mom_begin( kstp, kstg, Kbb, Kmm, Krhs, Kaa, ts, ssh, uu, vv )
+          !           !==   RHS : part computed at each stages   ==!
+          !           !============================================!
+          !
+@@ -338,12 +341,15 @@
+             !
+             !                             !*  hydrostatic pressure gradient (HPG))  *!   always called FIRST
+             CALL    eos    (        ts, Kmm, rhd, rhop )     ! Kmm in situ density anomaly for hpg computation
++            CALL r50_mom_rhd( rhd )
+             !                                                ! and potential density for BGC 
+             CALL    dyn_hpg( kstp,      Kmm, uu, vv, Krhs )  ! Hydrostratic Pressure Gradient (HPG)
++            CALL r50_mom_uv( 'after_hpg', uu, vv, Krhs )
+             !
+             !                             !* Coriolis / vorticity       ==> 3D RHS
+             CALL    dyn_vor( kstp,      Kmm, uu, vv, Krhs )
++            CALL r50_mom_uv( 'after_vor', uu, vv, Krhs )
+             !
+             !                             !* advection (VIF or FF)      ==> 3D RHS
+             IF( ln_dynadv_vec ) THEN                        ! VIF: only velocities used for momentum advection
+                CALL dyn_adv( kstp, Kmm, Kmm, uu, vv, Krhs)
+@@ -352,6 +358,7 @@
+             !
+          END SELECT
+          !
++         CALL r50_mom_uv( 'after_adv', uu, vv, Krhs )
+ !!gm ===>>>>>> Probably useless since uu_b(Kaa) will be imposed at the end of stage 1 and 2
+ !                   but may be necessary in stage 3 due to implicite in dynzdf.
+ !                   except if my idea for the matrice construction is OK !
+@@ -406,6 +413,7 @@
+             !                  !*  complete the momentum RHS *!   except ZDF (implicit)
+             !
+                                CALL dyn_ldf( kstp, Kbb, Kmm, uu, vv, Krhs )     ! lateral mixing    
++            CALL r50_mom_uv( 'after_ldf', uu, vv, Krhs )
+             !
+             IF( ln_zdfosm  )   CALL dyn_osm( kstp,      Kmm, uu, vv, Krhs )     ! OSMOSIS non-local velocity fluxes
+             !
+@@ -440,10 +448,12 @@
+       DO jtile = 1, nijtile
+          IF( ln_tile ) CALL dom_tile( ntsi, ntsj, ntei, ntej, ktile = jtile )
+          IF( ln_tile .AND. kstg == 3 .AND. ln_zad_Aimp .AND. .NOT. ln_shuman ) CALL dom_tile_copyin( 'wi', wi )
+ # endif
++         CALL r50_mom_uv( 'pre_zdf', uu, vv, Krhs )
+          !                     !*  DYN time integration + ZDF  *!   ∆t = rDt
+          !
+          IF( kstg == 3 )   CALL dyn_zdf( kstp, Kbb, Kmm, Krhs, uu, vv, Kaa  )  ! vertical diffusion and time integration
++         CALL r50_mom_uv( 'raw_kaa', uu, vv, Kaa )
+ 
+          !
+          !                 !==  All stages: correct the barotropic component ==!   at Kaa = N+1/3, N+1/2 or N+1
+@@ -459,6 +469,7 @@
+             uu(ji,jj,jk,Kaa) = uu(ji,jj,jk,Kaa) + zub(ji,jj)*umask(ji,jj,jk)
+             vv(ji,jj,jk,Kaa) = vv(ji,jj,jk,Kaa) + zvb(ji,jj)*vmask(ji,jj,jk)
+          END_3D
++         CALL r50_mom_finish( uu, vv, Kaa )
+          !
+ #if ! defined key_PSYCLONE_2p5p0
+          DEALLOCATE( zub, zvb )
+@@ -483,14 +494,17 @@
+       DO jn = 1, jpts
+          ts(:,:,:,jn,Krhs) = 0._wp                                                ! set tracer trends to zero (:,:,:) needed otherwise it does not work (?)
+       END DO
++      CALL r50_tra_begin( kstp, kstg, Kbb, Kmm, Krhs, Kaa, ts, ssh )
+       !
+       IF( ln_tile )   CALL dom_tile_start         ! [tiling] TRA tiling loop (1)
+       DO jtile = 1, nijtile
+          IF( ln_tile )   CALL dom_tile( ntsi, ntsj, ntei, ntej, ktile = jtile )
+          !
+          CALL tra_adv    ( kstp, Kbb, Kmm, Kaa, ts, Krhs, zFu, zFv, zFw, kstg )   ! horizontal & vertical advection
++         CALL r50_tra_ts( 'after_adv', ts, Krhs )
+          !
+          CALL tra_sbc_RK3( kstp, Kbb, Kmm,      ts, Krhs,                kstg )   ! surface boundary condition
++         CALL r50_tra_ts( 'after_sbc', ts, Krhs )
+ 
+ !!gm ===>>> Question: I'm surprised not to see kstg in argument of tra_isf : potential BUG.to be checked..
+          IF( ln_isf )   CALL tra_isf( kstp, Kmm, ts, Krhs )                       ! ice shelf heat flux
+@@ -522,6 +536,7 @@
+             END DO   ;   END DO   ;   END DO
+          END DO
+          !
++         CALL r50_tra_finish( ts, ssh, Kaa )
+          IF(sn_cfctl%l_prtctl)   CALL prt_ctl( tab3d_1=ts(:,:,:,jp_tem,Kaa), clinfo1='stp stg   - Ta: ', mask1=tmask,   &
+             &                                  tab3d_2=ts(:,:,:,jp_sal,Kaa), clinfo2=           ' Sa: ', mask2=tmask, clinfo3='tra' )
+          !
+@@ -539,7 +554,9 @@
+             !           !==  complete the tracers RHS  ==!   except ZDF (implicit)
+             !
+             IF( ln_traqsr  )   CALL tra_qsr( kstp,      Kmm, ts, Krhs )  ! penetrative solar radiation qsr
++            CALL r50_tra_ts( 'after_qsr', ts, Krhs )
+                                CALL tra_ldf( kstp, Kbb, Kmm, ts, Krhs )  ! lateral mixing
++            CALL r50_tra_ts( 'after_ldf', ts, Krhs )
+             IF( ln_trabbc  )   CALL tra_bbc( kstp,      Kmm, ts, Krhs )  ! bottom heat flux
+             IF( ln_trabbl  )   CALL tra_bbl( kstp, Kbb, Kmm, ts, Krhs )  ! advective (and/or diffusive) bottom boundary layer scheme
+             IF( ln_tradmp  )   CALL tra_dmp( kstp, Kbb, Kmm, ts, Krhs )  ! internal damping trends
+@@ -552,7 +569,9 @@
+             !           !== TRA time integration + ZDF  ==!   
+             !
++            CALL r50_tra_ts( 'pre_zdf', ts, Krhs )
+                                CALL tra_zdf( kstp, Kbb, Kmm, Krhs, ts    , Kaa  )  ! vertical mixing and after tracer fields
+             IF( ln_zdfnpc  )   CALL tra_npc( kstp,      Kmm, Krhs, ts    , Kaa  )  ! update after fields by non-penetrative convection
++            CALL r50_tra_finish( ts, ssh, Kaa )
+             !
+          END DO
+          IF( ln_tile ) CALL dom_tile_stop

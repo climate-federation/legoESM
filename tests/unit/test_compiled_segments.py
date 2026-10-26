@@ -24,6 +24,7 @@ from legoesm import constants
 from legoesm.core.field import Field
 from legoesm.core.state import HydrostaticState
 from legoesm.driver.compiled_segments import (
+    _segment_water_flux,
     SegmentCarry,
     pack_carry,
     unpack_carry,
@@ -156,7 +157,8 @@ def _mock_step_unified_rad_counting(*args, **kwargs):
 _OPTIONAL_CARRY_FIELDS = (
     "q_i", "q_s", "q_g", "N_c", "N_r", "N_i",
     "tke", "qke", "gwd_spectrum", "cloud_fraction", "land_ml", "w_land", "snow",
-    "budget_ledger_accum",
+    "budget_ledger_accum", "precip_frozen_prev", "precip_frozen_accum",
+    "ice_T_skin",
 )
 
 
@@ -290,6 +292,32 @@ class TestComputeSegmentLength:
 # ===========================================================================
 # 2. SegmentCarry pack/unpack
 # ===========================================================================
+
+class TestSegmentWaterFlux:
+    """The water the segment accumulator sees: the fed evap_sfc, zeros for a
+    fluxless step, and a loud refusal for heat without water."""
+
+    @staticmethod
+    def _out(**kw):
+        base = PhysicsOutput(*([None] * len(PhysicsOutput._fields)))
+        return base._replace(**kw)
+
+    def test_fed_water_is_returned(self):
+        z = jnp.zeros((2, 2))
+        e = jnp.full((2, 2), 3.0e-5)
+        out = _segment_water_flux(self._out(lhflx=jnp.full((2, 2), 80.0),
+                                            evap_sfc=e), z)
+        assert out is e
+
+    def test_fluxless_step_accumulates_zero(self):
+        z = jnp.zeros((2, 2))
+        assert _segment_water_flux(self._out(), z) is z
+
+    def test_heat_without_water_is_refused(self):
+        z = jnp.zeros((2, 2))
+        with pytest.raises(ValueError, match="never derive it as lhflx / L_v"):
+            _segment_water_flux(self._out(lhflx=jnp.full((2, 2), 80.0)), z)
+
 
 class TestSegmentCarryRoundtrip:
     """Pack/unpack preserves all values exactly."""
@@ -571,8 +599,11 @@ class TestBuildSegmentFn:
         # both floor q_v to zero (q_v_raw = -q_v0 < 0)
         np.testing.assert_allclose(np.asarray(r_on.q_v), 0.0, atol=1e-6)
         np.testing.assert_allclose(np.asarray(r_off.q_v), 0.0, atol=1e-6)
-        # flag ON is cooler by (L_v/c_pd) * deficit, deficit = q_v0
-        expected = (constants.L_v / constants.c_pd) * q_v0
+        # flag ON is cooler by (L_v/c_pd) * deficit.  The sink carries its
+        # mass (F13): the column loses 2*q_v0 of its layer mass (sum(dsigma)
+        # = 1), so the raw -q_v0 sits on 1 - 2*q_v0 of the old layer mass
+        # and the deficit is q_v0 / (1 - 2*q_v0).
+        expected = (constants.L_v / constants.c_pd) * q_v0 / (1.0 - 2.0 * q_v0)
         dT_diff = np.asarray(r_off.T) - np.asarray(r_on.T)
         np.testing.assert_allclose(dT_diff, expected, rtol=2e-3)
 
@@ -765,11 +796,19 @@ def _run_per_step_python(model, step_unified, n_steps, carry_init, args,
             **_phys_carry_in,
         )
 
-        # State update
+        # State update.  Physics water carries its MASS (review 2026-10-10
+        # F13, dry-mass convention), restated independently of
+        # apply_physics_water_mass for p_s*dsigma layers (sum dsigma = 1):
+        #   p_s' = p_s * (1 + sum_k dsigma_k D_k),  q' = (q + dt dq) p_s/p_s'
+        dsigma = jnp.asarray(args["dsigma"])
         T_upd = T_new + dt * phys_out.dT_dt
-        q_v_upd = jnp.maximum(carry.q_v + dt * phys_out.dq_v_dt, 0.0)
-        q_c_upd = jnp.maximum(carry.q_c + dt * phys_out.dq_c_dt, 0.0)
-        q_r_upd = jnp.maximum(carry.q_r + dt * phys_out.dq_r_dt, 0.0)
+        _D = dt * (phys_out.dq_v_dt + phys_out.dq_c_dt + phys_out.dq_r_dt)
+        _p_s_phys = p_s_new * (1.0 + jnp.sum(dsigma * _D, axis=-1))
+        _r = (p_s_new / _p_s_phys)[..., None]
+        p_s_new = _p_s_phys
+        q_v_upd = jnp.maximum((carry.q_v + dt * phys_out.dq_v_dt) * _r, 0.0)
+        q_c_upd = jnp.maximum((carry.q_c + dt * phys_out.dq_c_dt) * _r, 0.0)
+        q_r_upd = jnp.maximum((carry.q_r + dt * phys_out.dq_r_dt) * _r, 0.0)
 
         # Time-integrate radiative fluxes + lowest-level T (uses the
         # PRE-sat-adjust T_upd, matching _single_step's accumulation point).
@@ -788,12 +827,22 @@ def _run_per_step_python(model, step_unified, n_steps, carry_init, args,
             carry.lw_up_toa_clr_accum + carry.held_lw_up_toa_clr * dt)
 
         # Saturation adjustment
+        _sat_rain = 0.0
         if do_sat_adjust:
             p_full = p_s_new[..., None] * sigma_full
             q_sat = saturation_mixing_ratio(T_upd, p_full)
             excess = jnp.maximum(q_v_upd - q_sat, 0.0)
-            q_v_upd = q_v_upd - excess
             T_upd = T_upd + constants.L_v * excess / constants.c_pd
+            # the condensate rains out WITH its mass (F13): p_s falls by the
+            # column excess, every moisture field is re-weighted
+            _sat_rain = (p_s_new * jnp.sum(dsigma * excess, axis=-1)
+                         / constants.g)
+            _p_s_sat = p_s_new * (1.0 - jnp.sum(dsigma * excess, axis=-1))
+            _r = (p_s_new / _p_s_sat)[..., None]
+            p_s_new = _p_s_sat
+            q_v_upd = (q_v_upd - excess) * _r
+            q_c_upd = q_c_upd * _r
+            q_r_upd = q_r_upd * _r
 
         # Moisture smoothing
         q_v_upd = jnp.maximum(
@@ -810,7 +859,7 @@ def _run_per_step_python(model, step_unified, n_steps, carry_init, args,
 
         # Accumulate precipitation
         precip_step = phys_out.precip if hasattr(phys_out, 'precip') else jnp.zeros_like(p_s_new)
-        precip_accum = carry.precip_accum + precip_step * dt
+        precip_accum = carry.precip_accum + precip_step * dt + _sat_rain
 
         carry = SegmentCarry(
             u=u_upd, v=v_upd, T=T_upd,
@@ -832,6 +881,7 @@ def _run_per_step_python(model, step_unified, n_steps, carry_init, args,
             precip_accum=precip_accum,
             shflx_accum=carry.shflx_accum,
             lhflx_accum=carry.lhflx_accum,
+            evap_accum=carry.evap_accum,
             sw_up_toa_accum=sw_up_toa_accum,
             lw_up_toa_accum=lw_up_toa_accum,
             sw_up_toa_clr_accum=sw_up_toa_clr_accum,
@@ -1000,6 +1050,29 @@ class TestSegmentMeanAccumulators:
             np.asarray(result.sw_up_toa_accum) / (n_steps * dt),
             self._SW_UP, rtol=1e-6,
         )
+
+    def test_water_accumulator_is_the_fed_flux(self):
+        """evap_accum after n steps == n * dt * evap_sfc: the water the
+        physics publishes, not lhflx / L_v (the mock's lhflx implies a
+        different E on purpose)."""
+        e_fed, lh = 3.0e-5, 100.0
+
+        def _step_with_water(*a, **kw):
+            out, held, t_land = _mock_step_unified(*a, **kw)
+            shape_2d = out.precip.shape
+            return (out._replace(lhflx=jnp.full(shape_2d, lh),
+                                 evap_sfc=jnp.full(shape_2d, e_fed)),
+                    held, t_land)
+
+        args = _make_segment_fn_args()
+        args["step_unified"] = _step_with_water
+        run_segment = build_segment_fn(**args)
+        n_steps, dt = 5, args["dt"]
+        result = run_segment(self._make_carry_with_fluxes(), n_steps, _FORCING)
+        np.testing.assert_allclose(
+            np.asarray(result.evap_accum),
+            np.full((N_FACES, N, N), n_steps * dt * e_fed), rtol=1e-6)
+        assert abs(e_fed / (lh / constants.L_v) - 1.0) > 0.05
 
     def test_t_low_accumulator_is_temperature_like(self):
         """t_low_accum / duration must sit near the actual lowest-level T
@@ -1903,6 +1976,9 @@ class TestDoubleMomentCarry:
         seen = {}
         args = _make_segment_fn_args()
         args["step_unified"] = self._dm_mock(seen)
+        # isolate the carry threading from the warm-rain tail's saturation
+        # adjustment (its rain-out re-weights every field, F13)
+        args["microphysics"] = "kessler"
         run_segment = build_segment_fn(**args)
 
         state = _make_hydrostatic_state()
@@ -1930,14 +2006,21 @@ class TestDoubleMomentCarry:
         # (a) physics received ALL hydrometeor/number columns by keyword.
         for _k in ("q_i", "q_s", "q_g", "N_c", "N_r", "N_i"):
             assert seen[_k] is not None, _k
-        # (b) every field evolved by n_steps * dt * its tendency (clipped >= 0).
-        nd = n_steps * DT
-        np.testing.assert_allclose(np.asarray(result.q_i), qi0 + nd * 1.0e-7, rtol=1e-5)
-        np.testing.assert_allclose(np.asarray(result.q_s), qs0 + nd * 2.0e-7, rtol=1e-5)
-        np.testing.assert_allclose(np.asarray(result.q_g), qg0 + nd * 3.0e-7, rtol=1e-5)
-        np.testing.assert_allclose(np.asarray(result.N_c), nc0 + nd * 2.0, rtol=1e-5)
-        np.testing.assert_allclose(np.asarray(result.N_r), nr0 + nd * 4.0, rtol=1e-5)
-        np.testing.assert_allclose(np.asarray(result.N_i), ni0 + nd * 3.0, rtol=1e-5)
+        # (b) every field evolved by its tendency WITH the column's mass
+        # change (review 2026-10-10 F13): the water tendencies (6e-7/s summed,
+        # uniform, sum(dsigma)=1) grow p_s by the factor (1 + dt*6e-7) each
+        # step and every field is re-weighted onto the new layer masses,
+        # x' = (x + dt*r) / (1 + dt*6e-7).
+        def _carried(x0, r):
+            for _ in range(n_steps):
+                x0 = (x0 + DT * r) / (1.0 + DT * 6.0e-7)
+            return x0
+        np.testing.assert_allclose(np.asarray(result.q_i), _carried(qi0, 1.0e-7), rtol=1e-5)
+        np.testing.assert_allclose(np.asarray(result.q_s), _carried(qs0, 2.0e-7), rtol=1e-5)
+        np.testing.assert_allclose(np.asarray(result.q_g), _carried(qg0, 3.0e-7), rtol=1e-5)
+        np.testing.assert_allclose(np.asarray(result.N_c), _carried(nc0, 2.0), rtol=1e-5)
+        np.testing.assert_allclose(np.asarray(result.N_r), _carried(nr0, 4.0), rtol=1e-5)
+        np.testing.assert_allclose(np.asarray(result.N_i), _carried(ni0, 3.0), rtol=1e-5)
 
     def test_warm_rain_carry_keeps_number_fields_none(self):
         """Without q_i/N_c/N_i in pack_carry, the carry fields stay None
@@ -1979,12 +2062,16 @@ class TestQvSmoothingGate:
                 "(that call is what crashes lat-lon on grid.halo_interp_offsets)")
 
         q = jnp.array([[-1.0, 2.0, 0.0, 0.5]])
+        dsigma = jnp.array([0.1, 0.2, 0.3, 0.4])
         # grid deliberately has NO halo_interp_offsets — mimics a lat-lon grid.
         statics = SimpleNamespace(
-            qv_smooth_coeff=0.0, dt=100.0, grid=object(), hyperdiffusion_3d=_boom)
+            qv_smooth_coeff=0.0, dt=100.0, grid=object(),
+            hyperdiffusion_3d=_boom, dsigma=dsigma)
         out = _apply_qv_smoothing(q, statics)
-        # operator skipped; only the positivity floor applied.
-        assert jnp.array_equal(out, jnp.maximum(q, 0.0))
+        # operator skipped; only the column-conserving positivity floor.
+        assert bool((out >= 0.0).all())
+        assert jnp.sum(out * dsigma) == pytest.approx(
+            float(jnp.sum(q * dsigma)), rel=1e-12)
 
     def test_nonzero_coeff_is_bit_identical_to_former_nested_max(self):
         from types import SimpleNamespace
@@ -1998,14 +2085,20 @@ class TestQvSmoothingGate:
             seen["grid"] = grid
             return jnp.full_like(field, 1.0e-3)  # arbitrary ∇⁴ tendency
 
-        q = jnp.array([[0.01, -0.002, 0.5, 3.0e-4]])
+        q = jnp.array([[0.01, -0.2, 0.5, 3.0e-4]])
+        dsigma = jnp.array([0.1, 0.2, 0.3, 0.4])
         dt, coeff, grid = 90.0, 0.25, object()
         statics = SimpleNamespace(
-            qv_smooth_coeff=coeff, dt=dt, grid=grid, hyperdiffusion_3d=_hd)
+            qv_smooth_coeff=coeff, dt=dt, grid=grid, hyperdiffusion_3d=_hd,
+            dsigma=dsigma)
         out = _apply_qv_smoothing(q, statics)
-        # Former inline form: max(q + dt*hyperdiffusion_3d(q, grid, coeff), 0).
-        expected = jnp.maximum(q + dt * jnp.full_like(q, 1.0e-3), 0.0)
-        assert jnp.array_equal(out, expected)
+        # q + dt*hyperdiffusion_3d(q, grid, coeff), then the column-conserving
+        # floor (a plain max(., 0) would add the clipped water).
+        smoothed = q + dt * jnp.full_like(q, 1.0e-3)
+        assert bool((smoothed < 0.0).any())
+        assert bool((out >= 0.0).all())
+        assert jnp.sum(out * dsigma) == pytest.approx(
+            float(jnp.sum(smoothed * dsigma)), rel=1e-12)
         # The real operator was invoked with the configured coeff + grid.
         assert seen["coeff"] == coeff and seen["grid"] is grid
 

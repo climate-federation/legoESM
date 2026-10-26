@@ -1,0 +1,26 @@
+--- zdftke.F90
++++ zdftke.F90
+@@ -45,6 +45,7 @@
+    USE sbc_oce        ! surface boundary condition: ocean
+    USE zdfdrg         ! vertical physics: top/bottom drag coef.
+    USE zdfmxl         ! vertical physics: mixed layer
++   USE zdfphy_round79b_writer, ONLY : r79_active, r79_tke_mxl, r79_tke_scalars
+ #if defined key_si3
+    USE ice, ONLY: hm_i, h_i
+ #endif
+@@ -723,6 +724,7 @@
+                p_avt(ji,jj,jk)   = MAX( p_pdlr(ji,jj,jk) * p_avt(ji,jj,jk), avtb_2d(ji,jj) * avtb(jk) ) * wmask(ji,jj,jk)
+             END_2D
+          ENDIF
++         IF( r79_active() )   CALL r79_tke_mxl( jj, zmxlm, zmxld, dissl )
+          !                                            ! ================= !
+       END_1D                                          !  i-k slices loop  !
+       !                                               ! ================= !
+@@ -731,6 +733,7 @@
+          CALL prt_ctl( tab3d_1=en   , clinfo1=' tke  - e: ', tab3d_2=p_avt, clinfo2=' t: ' )
+          CALL prt_ctl( tab3d_1=p_avm, clinfo1=' tke  - m: ' )
+       ENDIF
++      IF( r79_active() )   CALL r79_tke_scalars( nn_mxl, rn_ediff, rmxl_min )
+       !
+    END SUBROUTINE tke_avn
+ 

@@ -1,0 +1,30 @@
+--- usrdef_istate.F90	2026-09-11 07:59:45.430746033 -0400
++++ usrdef_istate.F90.new	2026-09-11 07:59:45.479744208 -0400
+@@ -18,6 +18,9 @@
+    !
+    USE in_out_manager ! I/O manager
+    USE lib_mpp        ! MPP library
++   !
++   USE dom_oce   , ONLY : gphit          ! latitude at T-points  (from-rest ensemble seed)
++   USE usrdef_nam, ONLY : nn_pert_seed   ! ensemble seed, 0 = unperturbed  (from-rest ensemble seed)
+    
+    IMPLICIT NONE
+    PRIVATE
+@@ -75,6 +78,17 @@
+               &         + 0.2  * TANH( (pdept(ji,jj,jk) - 1000.) / 5000.) )                  &
+               &         * (-TANH( (pdept(ji,jj,jk) - 500.) / 150.) + 1.) / 2  ) * ptmask(ji,jj,jk)
+       END_3D
++      !
++      ! Tiny IC-temperature perturbation for the from-rest ensemble spread floor.
++      ! Copied statement for statement from cfgs/DINO/MY_SRC/usrdef_istate.F90:177-183
++      ! so the DINO and GYRE cases share ONE instrument.  nn_pert_seed = 0 is a no-op,
++      ! and the control member's byte-identity with the unperturbed run proves it.
++      IF( nn_pert_seed /= 0 ) THEN
++         DO jk = 1, jpk
++            pts(:,:,jk,jp_tem) = pts(:,:,jk,jp_tem) + 1.e-10_wp * SIN( REAL( NINT(pdept(:,:,jk))*73 + NINT(gphit(:,:)*1000._wp)*179 + nn_pert_seed*997, wp ) ) * ptmask(:,:,jk)
++         END DO
++         IF(lwp) WRITE(numout,*) 'TINY PERTURBATION SEED = ', nn_pert_seed
++      ENDIF
+       !   
+    END SUBROUTINE usr_def_istate
+ 

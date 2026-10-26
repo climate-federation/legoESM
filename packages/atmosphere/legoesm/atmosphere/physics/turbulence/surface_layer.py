@@ -18,12 +18,20 @@ from typing import NamedTuple
 import jax
 import jax.numpy as jnp
 
+from legoesm import constants
 from legoesm.atmosphere.physics.turbulence.config import SurfaceLayerConfig
 from legoesm.core.bulk_flux import (
+    surface_reference_state,
     compute_most_fluxes,
+    compute_sam_oceflx_fluxes,
     simple_bulk_fluxes,
     validate_bulk_scheme,
 )
+
+# Bulk schemes that solve a stability-dependent surface layer (and therefore
+# honour the ``z_ref_model_level`` height correction); the constant-coefficient
+# path ignores z_ref.
+_STABILITY_SCHEMES = ("most", "coare3", "large_yeager", "large_yeager_cesm")
 
 
 __physics_contract__ = {
@@ -64,6 +72,56 @@ __physics_contract__ = {
 }
 
 
+def surface_fluxes_at_lowest_level(u, v, T, q_v, T_sfc, q_sfc, rho, config,
+                                   z_low):
+    """``compute_surface_fluxes`` told how high its own input actually is.
+
+    Every turbulence kernel feeds the surface solver the LOWEST FULL LEVEL's
+    wind, temperature and humidity.  Whether it also tells the solver the
+    height of that level is ``SurfaceLayerConfig.z_ref_model_level``; with it
+    off the solver divides by ``config.z_ref`` (10 m) for values that came
+    from over a hundred metres up, which inflates the fluxes.
+
+    Two things have to move together and that is why this is one function
+    rather than a keyword at seven call sites: the height AND the temperature.
+    The bulk formula wants the air-sea temperature difference at the reference
+    height, so the input is brought down dry-adiabatically
+    (``T + g/c_p * z``, ~1.5 K at 150 m, the COARE convention).  Passing the
+    height without that adjustment reads the stability off a dry adiabat and
+    is a different bug from the one being fixed.
+
+    ``z_low`` is the height of the lowest full level ABOVE THE LOCAL SURFACE
+    [m], shape (ncol,).  Callers pass ``z_full[:, -1] - z_half[:, -1]``: on the
+    sigma lanes the surface interface is already zero so the subtraction is an
+    identity, but the nonhydrostatic lane's heights are absolute
+    terrain-following altitudes, and without it a column over a 2 km mountain
+    would be handed a 2 km reference height and warmed ~20 K (codex).
+
+    The caller is responsible for only enabling this where ``T_sfc`` is a REAL
+    surface temperature.  Where it is a stand-in for the lowest air
+    temperature, warming the air input alone manufactures a permanent
+    air-surface contrast of -g/c_p*z (~1.3 K) and with it a spurious downward
+    sensible heat flux that no test would catch (GLM).  That is why the switch
+    is off in this config by default and turned on by the driver, which knows
+    whether the run has a surface.
+    """
+    # BOTH halves, or NEITHER.  ``compute_surface_fluxes`` honours ``z_ref``
+    # on the MOST schemes only -- the constant-coefficient path ignores it --
+    # so on a constant-Cd config the height would be dropped while the
+    # temperature adjustment survived, leaving a one-sided ~1.3 K cooling of
+    # the surface relative to the air and a sensible heat flux made of
+    # nothing (GLM).  That is the same defect this helper's precondition
+    # warns about, arriving through a different door.
+    if (not getattr(config, "z_ref_model_level", False)
+            or z_low is None
+            or config.bulk_scheme not in _STABILITY_SCHEMES):
+        return compute_surface_fluxes(u, v, T, q_v, T_sfc, q_sfc, rho, config,
+                                      t_bot=T)
+    T_ref, z_ref = surface_reference_state(T, config.z_ref, z_low)
+    return compute_surface_fluxes(
+        u, v, T_ref, q_v, T_sfc, q_sfc, rho, config, z_ref=z_ref, t_bot=T)
+
+
 def compute_surface_fluxes(
     u: jax.Array,
     v: jax.Array,
@@ -73,6 +131,8 @@ def compute_surface_fluxes(
     q_sfc: jax.Array,
     rho: jax.Array,
     config: SurfaceLayerConfig,
+    z_ref=None,
+    t_bot=None,
 ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
     """Compute bulk aerodynamic surface fluxes.
 
@@ -98,6 +158,14 @@ def compute_surface_fluxes(
         Lowest-level air density [kg/m^3], shape (ncol,).
     config : SurfaceLayerConfig
         Surface layer parameters.
+    z_ref : array or None
+        Per-column reference height [m] overriding ``config.z_ref`` (MOST
+        schemes only; the constant-coefficient path ignores it).
+    t_bot : array or None
+        Lowest-level ABSOLUTE air temperature [K] (``T`` before any
+        reference-height adjustment).  Required by ``large_yeager_cesm``
+        (CESM's cold-air-outbreak wind enhancement reads it); unused by the
+        other schemes.
 
     Returns
     -------
@@ -119,10 +187,22 @@ def compute_surface_fluxes(
     # uses the local roughness ``config.z0`` via the neutral log law and the
     # selectable ``stability_scheme`` stable branch; without this it would fall
     # through to the constant-Cd path and silently ignore z0 and stability.
+    if config.bulk_scheme == "large_yeager_cesm":
+        # CESM/CIME ``shr_flux_atmOcn`` (CAM6 coupler air-sea law): its own
+        # fixed-iteration solver, not the generic MOST loop.  ``T`` is the
+        # lane's lowest-level temperature (potential-temperature corrected by
+        # the caller when ``z_ref_model_level`` is on), as for the other schemes.
+        tau_x, tau_y, shflx, lhflx, ustar = compute_sam_oceflx_fluxes(
+            u, v, T, q_v, T_sfc, q_sfc, rho,
+            z_bot=(config.z_ref if z_ref is None else z_ref),
+            variant="cesm", t_bot=t_bot,
+        )
+        return _apply_prescribed_scalar_fluxes(
+            config, tau_x, tau_y, shflx, lhflx, ustar, rho)
     if config.bulk_scheme in ("most", "coare3", "large_yeager"):
         tau_x, tau_y, shflx, lhflx, ustar = compute_most_fluxes(
             u, v, T, q_v, T_sfc, q_sfc, rho,
-            z_ref=config.z_ref,
+            z_ref=(config.z_ref if z_ref is None else z_ref),
             z0_init=config.z0,
             scheme=config.bulk_scheme,
             n_iter=config.bulk_n_iter,
@@ -133,7 +213,13 @@ def compute_surface_fluxes(
             stable_beta=config.most_stable_beta,
             z0h_z0_ratio=config.z0h_z0_ratio,
         )
-        return tau_x, tau_y, shflx, lhflx, ustar
+        # The prescribed-flux override applies on THIS branch too. Returning
+        # early without it would let a config that sets both a MOST scheme and
+        # a prescribed flux silently ignore the prescription -- the closure
+        # would run on MOST-derived fluxes while the caller believed it had
+        # pinned them to the deck.
+        return _apply_prescribed_scalar_fluxes(
+            config, tau_x, tau_y, shflx, lhflx, ustar, rho)
 
     # Constant neutral coefficients (default)
     Cd = config.Cd_neutral
@@ -155,6 +241,245 @@ def compute_surface_fluxes(
         u, v, T, q_v, T_sfc, q_sfc, rho, wind_speed, Cd, Ch,
     )
 
+    return _apply_prescribed_scalar_fluxes(
+        config, tau_x, tau_y, shflx, lhflx, ustar, rho)
+
+
+# Floor on the prescribed stress magnitude inside ustar's nested roots; far
+# below any measurable stress, it only bounds the derivative at zero.
+_PRESCRIBED_TAU_FLOOR_PA = 1.0e-12  # coeff-ok: numerical floor for a 0/0 gradient
+
+
+def surface_moisture_flux(config, lhflx, T_sfc):
+    """Surface water flux [kg/m2/s, positive up] for a kernel's moisture BC.
+
+    The coupler's prescribed mass flux (``config.prescribed_evap_kg_m2_s``)
+    when one was folded in -- the tiles' water leaves the surface exactly as
+    it enters the atmosphere, whatever latent heat each tile charged for it.
+    Otherwise the latent heat flux is converted back with the SAME
+    latent heat the bulk law charged (:func:`legoesm.thermo.charged_latent_heat`), so the two
+    are exact inverses (a constant ``L_v`` here against an ``L_v(T)`` there
+    lost ~2 % of warm-ocean evaporation).  Standalone lanes without a coupler
+    have no phase information here: sublimation over their prescribed ice is
+    charged at ``L_v`` on both sides, consistently.
+    """
+    evap = getattr(config, "prescribed_evap_kg_m2_s", None)
+    if evap is not None:
+        return jnp.broadcast_to(jnp.asarray(evap, dtype=jnp.asarray(lhflx).dtype),
+                                jnp.shape(lhflx))
+    from legoesm.thermo import charged_latent_heat
+    return lhflx / charged_latent_heat(config.bulk_scheme, T_sfc)
+
+
+def latent_enthalpy_correction(lhflx, evap):
+    """Heat [W/m2, positive up] the atmosphere must ADD to its sensible flux so
+    that its energy intake equals the physical ``shflx + lhflx``.
+
+    The atmosphere's moist enthalpy credits every kilogram of vapour with the
+    reference ``constants.L_v`` (its constant-L convention, see
+    core.conservation), while the surface charged ``L(T_sfc, phase) * E`` --
+    at 30 degC about 3 % less.  ``lhflx - L_v * E`` is that difference, the
+    enthalpy carried by the water itself (user decision 2026-09-28, 4a):
+    booked into the diffusion's heat lower BC, never into the reported
+    ``shflx``/``lhflx`` (those stay the physical fluxes).  Exactly zero when
+    the surface charged the constant.
+    """
+    return lhflx - constants.L_v * evap   # latent-ok: moist-enthalpy reference L_v of the atmosphere
+
+
+# --- constant-coefficient bulk exchange (ExperimentConfig.C_H / C_E defaults) ---
+# The one home of the default neutral transfer coefficients; the experiment
+# config's C_H / C_E defaults reference these.
+C_H_BULK_DEFAULT = 0.0044
+C_E_BULK_DEFAULT = 0.0044
+
+
+def constant_bulk_surface_fluxes(T_low, q_low, u_low, v_low, p_low, p_s,
+                                 T_sfc, C_H, C_E):
+    """Constant-coefficient bulk ``(shflx, lhflx)`` [W/m2, positive up] at the
+    lowest model level: the ONE law every lane without a turbulence scheme
+    applies.  Latent heat is charged with
+    :func:`legoesm.thermo.charged_latent_heat` (``"constant"``) and the
+    surface humidity is saturation at ``(T_sfc, p_s)``; the wind carries a
+    1 m/s gustiness floor.
+    """
+    from legoesm.thermo import charged_latent_heat, saturation_specific_humidity
+    rho_low = p_low / (constants.R_d * T_low)
+    wind_speed = jnp.sqrt(u_low ** 2 + v_low ** 2 + 1.0)
+    shflx = rho_low * constants.c_pd * C_H * wind_speed * (T_sfc - T_low)
+    q_sat_sfc = saturation_specific_humidity(T_sfc, p_s)
+    lhflx = (rho_low * charged_latent_heat("constant", T_sfc) * C_E
+             * wind_speed * (q_sat_sfc - q_low))
+    return shflx, lhflx
+
+
+def bottom_layer_surface_kick(shflx, lhflx, T_sfc, dp_low, evap=None):
+    """Lowest-layer ``(dT/dt [K/s], dq_v/dt [1/s], evap [kg/m2/s])`` from
+    surface fluxes (positive up = into the column).  ``evap`` defaults to the
+    inverse of the SAME latent heat the bulk law charged; the heat kick
+    carries :func:`latent_enthalpy_correction`.
+    """
+    if evap is None:
+        from legoesm.thermo import charged_latent_heat
+        evap = lhflx / charged_latent_heat("constant", T_sfc)
+    dT = (constants.g * (shflx + latent_enthalpy_correction(lhflx, evap))
+          / (constants.c_pd * dp_low))
+    dq = constants.g * evap / dp_low
+    return dT, dq, evap
+
+
+def prescribed_into_surface_flux(surface_flux, rho_sfc, *, shflx=None,
+                                 lhflx=None, tau_x=None, tau_y=None):
+    """Replace the prescribed components of a ``(tau_x, tau_y, shflx, lhflx,
+    ustar)`` surface-flux tuple, keeping the others.
+
+    The tiled (mosaic) surface path hands a kernel this tuple instead of
+    letting it call :func:`compute_surface_fluxes`; a prescribed coupler /
+    ERA5 flux must therefore land IN the tuple, component by component, so
+    the unprescribed components (the tiled stress when only heat is given,
+    the tiled heat when only the stress is) survive.  ``ustar`` is rebuilt
+    from the stress whenever a stress component is replaced, with the same
+    floor as :func:`_apply_prescribed_scalar_fluxes`.
+    """
+    tx, ty, sh, lh, us = surface_flux
+    if shflx is not None:
+        sh = jnp.broadcast_to(jnp.asarray(shflx), sh.shape)
+    if lhflx is not None:
+        lh = jnp.broadcast_to(jnp.asarray(lhflx), lh.shape)
+    if tau_x is not None or tau_y is not None:
+        if tau_x is not None:
+            tx = jnp.broadcast_to(jnp.asarray(tau_x), tx.shape)
+        if tau_y is not None:
+            ty = jnp.broadcast_to(jnp.asarray(tau_y), ty.shape)
+        us = jnp.sqrt(
+            jnp.sqrt(tx ** 2 + ty ** 2 + _PRESCRIBED_TAU_FLOOR_PA ** 2)
+            / rho_sfc)
+    return tx, ty, sh, lh, us
+
+
+# Wind-speed regulariser for the unit wind vector the land stress is laid
+# along, added INSIDE the square root so the derivative stays finite in calm
+# air: the vector is (0, 0) at u = v = 0 and damped by speed/floor below it.
+_WIND_DIR_FLOOR_MS = 1.0e-6  # coeff-ok: numerical floor for a 0/0 direction
+
+
+# Lower bound on (z - d)/z0m in the neutral land drag: ln >= 2, i.e. neutral
+# Cd <= (kappa/2)^2 = 0.04, applied to the ARGUMENT so a displacement at or
+# above the lowest level never takes the log of a non-positive number
+# (reviewers' clamp, 2026-10-03).
+_NEUTRAL_LOG_ARG_MIN = 7.38905609893065  # coeff-ok: e**2, numerical clamp
+
+
+def neutral_land_stress(z0m, d, z_low, u, v, rho):
+    """Neutral log-law stress magnitude [Pa] over land roughness ``z0m`` with
+    displacement ``d`` for a wind ``(u, v)`` at height ``z_low`` above the local
+    surface: rho (kappa |V| / ln((z_low - d)/z0m))^2, the log bounded below by 2."""
+    arg = jnp.maximum((z_low - d) / z0m, _NEUTRAL_LOG_ARG_MIN)
+    cd = (constants.kappa_von_karman / jnp.log(arg)) ** 2
+    return rho * cd * (u * u + v * v)
+
+
+def blend_land_surface_stress(tau_x, tau_y, tau_land_mag, u, v, f_land):
+    """Surface stress with the LAND fraction's share taken from the land model.
+
+    ``tau_x``/``tau_y`` [Pa] are the atmosphere's bulk stress (opposing the
+    wind, ``tau_x = -rho Cd |V| u``), kept on the non-land fraction only.
+    ``tau_land_mag`` [Pa] (finite, >= 0) is the land's stress magnitude
+    ``rho u*^2``, laid along the CURRENT lowest-level wind, opposing it, in the
+    bulk convention.  ``f_land = 0`` returns the bulk stress unchanged.
+    """
+    inv_speed = 1.0 / jnp.sqrt(u * u + v * v + _WIND_DIR_FLOOR_MS ** 2)
+    tlx = -tau_land_mag * u * inv_speed
+    tly = -tau_land_mag * v * inv_speed
+    return ((1.0 - f_land) * tau_x + f_land * tlx,
+            (1.0 - f_land) * tau_y + f_land * tly)
+
+
+def hold_last_valid_land_stress(prev_mag, prev_valid, new_mag, held):
+    """Per-column land stress magnitude carried between land steps: a column
+    whose new solve is held (``held`` > 0.5) or non-finite keeps its previous
+    value; ``valid`` becomes True once any solve has succeeded.  Returns
+    ``(mag, valid, fresh)``; ``fresh`` marks the columns whose value came from
+    this solve (the rest reuse an older one, or are still on the seed)."""
+    ok = (held < 0.5) & jnp.isfinite(new_mag)
+    return jnp.where(ok, new_mag, prev_mag), prev_valid | ok, ok
+
+
+def land_stress_into_surface_flux(surface_flux, tau_land_mag, land_valid,
+                                  z0m, d, u, v, z_low, f_land, rho_sfc):
+    """``(tau_x, tau_y, shflx, lhflx, ustar)`` with the land stress blended in.
+
+    The land magnitude is the land model's solved ``rho u*^2`` where
+    ``land_valid`` (a land step has succeeded for that column: the driver
+    carries the last valid value over held / failed solves), else the neutral
+    land drag of the column's static roughness ``z0m``, ``d``
+    (:func:`neutral_land_stress`) -- never the ocean bulk law.  A non-finite
+    land value also falls back to the neutral land drag.  ``ustar`` is rebuilt
+    as ``sqrt(|tau|/rho)`` of the blended stress where ``f_land > 0``;
+    ocean-only columns keep the bulk ``ustar`` bit-for-bit.  Land inputs on
+    columns with no land are never read (they may be fill values, even NaN):
+    those columns, and their gradients, stay exactly bulk.
+    """
+    has_land = f_land > 0.0
+    seed = neutral_land_stress(jnp.where(has_land, z0m, 1.0),
+                               jnp.where(has_land, d, 0.0),
+                               z_low, u, v, rho_sfc)
+    use_solved = has_land & land_valid & jnp.isfinite(tau_land_mag)
+    mag = jnp.where(use_solved, tau_land_mag, jnp.where(has_land, seed, 0.0))
+    tx, ty = blend_land_surface_stress(
+        surface_flux[0], surface_flux[1], mag, u, v, f_land)
+    rebuilt = prescribed_into_surface_flux(
+        surface_flux, rho_sfc, tau_x=tx, tau_y=ty)
+    return rebuilt[:4] + (jnp.where(has_land, rebuilt[4], surface_flux[4]),)
+
+
+def _apply_prescribed_scalar_fluxes(config, tau_x, tau_y, shflx, lhflx, ustar, rho):
+    """Override the turbulent surface fluxes with prescribed values.
+
+    Scalars: when ``config.prescribed_shflx_w_m2`` /
+    ``config.prescribed_lhflx_w_m2`` is set, the bulk sensible/latent heat
+    fluxes are replaced by it (``jnp.full_like`` broadcasts a scalar or an
+    (ncol,) array). Momentum: when ``config.prescribed_tau_x_pa`` /
+    ``config.prescribed_tau_y_pa`` is set, the bulk stress components are
+    replaced and ``ustar`` is rebuilt from the (possibly mixed
+    prescribed/interactive) stress magnitude,
+    ``ustar = sqrt(sqrt(tau_x**2 + tau_y**2) / rho)``, so a scheme that
+    builds its mixing from the friction velocity sees the prescribed stress.
+    Components left unset keep their bulk (interactive) values; when none of
+    the four fields is set the behaviour is exactly the previous one.
+
+    Parameters
+    ----------
+    config : SurfaceLayerConfig
+        Closure configuration; only its ``prescribed_*`` fields are read.
+    tau_x, tau_y, shflx, lhflx, ustar : jnp.ndarray
+        Bulk surface stresses, heat fluxes and friction velocity, (ncol,).
+    rho : jnp.ndarray
+        Lowest-level density, (ncol,); used only to rebuild ``ustar`` from a
+        prescribed stress.
+
+    Returns
+    -------
+    tuple of jnp.ndarray
+        ``(tau_x, tau_y, shflx, lhflx, ustar)`` with prescribed components
+        substituted.
+    """
+    if config.prescribed_shflx_w_m2 is not None:
+        shflx = jnp.full_like(shflx, config.prescribed_shflx_w_m2)
+    if config.prescribed_lhflx_w_m2 is not None:
+        lhflx = jnp.full_like(lhflx, config.prescribed_lhflx_w_m2)
+    if (config.prescribed_tau_x_pa is not None
+            or config.prescribed_tau_y_pa is not None):
+        if config.prescribed_tau_x_pa is not None:
+            tau_x = jnp.full_like(tau_x, config.prescribed_tau_x_pa)
+        if config.prescribed_tau_y_pa is not None:
+            tau_y = jnp.full_like(tau_y, config.prescribed_tau_y_pa)
+        # ustar^2 = |tau| / rho  =>  ustar = sqrt(sqrt(tx^2 + ty^2) / rho).
+        # The floor keeps the nested roots differentiable at exactly zero
+        # stress (a calm ERA5 column): without it the cotangent is 0/0.
+        ustar = jnp.sqrt(
+            jnp.sqrt(tau_x ** 2 + tau_y ** 2 + _PRESCRIBED_TAU_FLOOR_PA ** 2)
+            / rho)
     return tau_x, tau_y, shflx, lhflx, ustar
 
 
@@ -166,7 +491,7 @@ def beta_limited_surface_humidity(
 ) -> jax.Array:
     """Soil-moisture-limited effective surface humidity for a BLENDED surface.
 
-    ``beta_land`` may be a scalar (the static ``mpas_land_beta`` knob) or a
+    ``beta_land`` may be a scalar (the static ``land_beta`` knob) or a
     per-column array of shape ``(ncol,)`` (the traced root-zone ``beta_soil``
     from the interactive multilayer land, #1312 phase 2b) — the formula below
     is elementwise either way.
@@ -267,6 +592,8 @@ def _single_tile_flux(
     q_sfc: jax.Array,
     rho: jax.Array,
     config: SurfaceLayerConfig,
+    z_ref=None,
+    t_bot=None,
 ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
     """Single-tile surface flux with correct fixed-roughness MOST routing.
 
@@ -279,10 +606,16 @@ def _single_tile_flux(
     routines (no re-derived flux numerics).
     """
     validate_bulk_scheme(config.bulk_scheme)
+    if config.bulk_scheme == "large_yeager_cesm":
+        return compute_sam_oceflx_fluxes(
+            u, v, T, q_v, T_sfc, q_sfc, rho,
+            z_bot=(config.z_ref if z_ref is None else z_ref),
+            variant="cesm", t_bot=t_bot,
+        )
     if config.bulk_scheme in ("most", "coare3", "large_yeager"):
         return compute_most_fluxes(
             u, v, T, q_v, T_sfc, q_sfc, rho,
-            z_ref=config.z_ref,
+            z_ref=(config.z_ref if z_ref is None else z_ref),
             z0_init=config.z0,
             scheme=config.bulk_scheme,
             n_iter=config.bulk_n_iter,
@@ -314,7 +647,9 @@ def compute_tiled_surface_fluxes(
     config_ocean: SurfaceLayerConfig,
     config_ice: SurfaceLayerConfig,
     config_land: SurfaceLayerConfig,
-) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
+    z_low=None,
+    return_water: bool = False,
+):
     """Area-weighted (mosaic) surface fluxes over ocean / ice / land tiles.
 
     Computes the turbulent surface fluxes SEPARATELY on each tile (each
@@ -352,15 +687,33 @@ def compute_tiled_surface_fluxes(
         heat fluxes [W/m^2] (positive upward), and friction velocity
         [m/s], each shape ``(ncol,)``.
     """
-    f_ocean = _single_tile_flux(
-        u, v, T, q_v, tiles.T_ocean, tiles.q_sfc_ocean, rho, config_ocean,
-    )
-    f_ice = _single_tile_flux(
-        u, v, T, q_v, tiles.T_ice, tiles.q_sfc_ice, rho, config_ice,
-    )
-    f_land = _single_tile_flux(
-        u, v, T, q_v, tiles.T_land, tiles.q_sfc_land, rho, config_land,
-    )
+    # Each tile HAS a real surface temperature, so the reference-height
+    # correction applies here exactly as on the single-surface path: when the
+    # caller supplies the lowest level's height above ground, the air is
+    # brought down to it dry-adiabatically and the solver is told the height.
+    # Without this the mosaic path kept the 10 m mislabel after the
+    # single-surface path was fixed (codex).
+    def _tile(T_sfc_tile, q_sfc_tile, cfg):
+        """One tile, with the height correction decided by ITS OWN config.
+
+        Gating all three tiles on the ocean tile's config was wrong: the land
+        and ice tiles carry their own bulk scheme, and a tile on the
+        constant-coefficient default would have ignored the height while
+        still receiving the warmed air temperature -- a fabricated flux on
+        exactly the tiles the ocean switch was not about (GLM).
+        """
+        if (z_low is None
+                or not getattr(cfg, "z_ref_model_level", False)
+                or cfg.bulk_scheme not in _STABILITY_SCHEMES):
+            return _single_tile_flux(u, v, T, q_v, T_sfc_tile, q_sfc_tile,
+                                     rho, cfg, t_bot=T)
+        return _single_tile_flux(
+            u, v, T + (constants.g / constants.c_pd) * z_low, q_v,
+            T_sfc_tile, q_sfc_tile, rho, cfg, z_ref=z_low, t_bot=T)
+
+    f_ocean = _tile(tiles.T_ocean, tiles.q_sfc_ocean, config_ocean)
+    f_ice = _tile(tiles.T_ice, tiles.q_sfc_ice, config_ice)
+    f_land = _tile(tiles.T_land, tiles.q_sfc_land, config_land)
 
     def _blend(idx: int) -> jax.Array:
         return (
@@ -379,4 +732,20 @@ def compute_tiled_surface_fluxes(
     tau_mag = jnp.sqrt(tau_x ** 2 + tau_y ** 2)
     ustar = jnp.sqrt(tau_mag / jnp.maximum(rho, 1e-6))  # coeff-ok: density floor [kg/m^3]
 
-    return tau_x, tau_y, shflx, lhflx, ustar
+    if not return_water:
+        return tau_x, tau_y, shflx, lhflx, ustar
+    # The blended WATER flux: each tile's latent heat inverted with the L_v of
+    # ITS OWN surface temperature (what its bulk law charged), then area
+    # weighted.  Dividing the blended heat by one L_v(T_blend) is not the same
+    # number on a mixed cell; the kernel takes this as its moisture BC.
+    # Each tile is inverted with the L its law CHARGED.  All three tile laws
+    # run through _single_tile_flux, which never passes ``L_latent``, so the
+    # ice tile (``constant`` scheme, tiled_surface_tile_configs) charged
+    # L_v(T_ice) like the others -- the atmosphere-side mosaic has no phase
+    # information; the coupled lane's sea-ice model charges L_s itself and
+    # hands its water down the coupler's evaporation channel instead.
+    from legoesm.thermo import charged_latent_heat as _L
+    water = (tiles.frac_ocean * f_ocean[3] / _L(config_ocean.bulk_scheme, tiles.T_ocean)
+             + tiles.frac_ice * f_ice[3] / _L(config_ice.bulk_scheme, tiles.T_ice)
+             + tiles.frac_land * f_land[3] / _L(config_land.bulk_scheme, tiles.T_land))
+    return (tau_x, tau_y, shflx, lhflx, ustar), water

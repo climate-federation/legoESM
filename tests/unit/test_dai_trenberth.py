@@ -66,7 +66,9 @@ class TestSyntheticDaiTrenberth:
 class TestLoadFallback:
 
     def test_missing_cache_returns_synthetic(self, tmp_path):
-        d = load_dai_trenberth(cache_dir=tmp_path)
+        with pytest.raises(FileNotFoundError):       # fail-loud by default
+            load_dai_trenberth(cache_dir=tmp_path)
+        d = load_dai_trenberth(cache_dir=tmp_path, allow_synthetic=True)
         ref = synthetic_dai_trenberth()
         assert np.allclose(d.monthly_flux_kg_s, ref.monthly_flux_kg_s)
 

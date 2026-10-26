@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Callable
 
 from legoesm.grids.cubed_sphere import CubedSphereGrid
+from legoesm.ocean.constants_config import ConstantsConfig
 from legoesm.ocean.eos import compute_ocean_rho as _compute_rho
 from legoesm.ocean.state import OceanState, OceanTendencies
 from legoesm.ocean.vertical import OceanZStarCoordinate, compute_ocean_jacobian
@@ -20,6 +21,7 @@ from legoesm.ocean.physics.tendencies import make_none_physics_fn, wrap_ocean_te
 
 def make_lateral_mixing_physics(
     config: LateralMixingConfig,
+    constants_config: ConstantsConfig = ConstantsConfig(),
 ) -> Callable:
     """Create a lateral mixing physics function.
 
@@ -29,7 +31,8 @@ def make_lateral_mixing_physics(
 
     Returns
     -------
-    Callable : physics_fn(state, grid, z_coord) -> OceanTendencies
+    Callable : physics_fn(state, grid, z_coord, surface_forcing=None, dt=None)
+        -> OceanTendencies
     """
     scheme = config.scheme
 
@@ -40,7 +43,7 @@ def make_lateral_mixing_physics(
     elif scheme == "biharmonic":
         return _make_biharmonic(config)
     elif scheme == "gm_redi":
-        return _make_gm_redi(config)
+        return _make_gm_redi(config, constants_config=constants_config)
     else:
         raise ValueError(f"Unknown lateral mixing scheme: {scheme!r}")
 
@@ -50,7 +53,7 @@ def _make_harmonic(config: LateralMixingConfig) -> Callable:
 
     def physics_fn(state: OceanState, grid: CubedSphereGrid,
                    z_coord: OceanZStarCoordinate,
-                   surface_forcing=None) -> OceanTendencies:
+                   surface_forcing=None, dt=None) -> OceanTendencies:
         out = harmonic_lateral_mixing(
             state.u.data, state.v.data, state.T.data, state.S.data,
             state.land_mask.data, grid, cfg,
@@ -64,16 +67,17 @@ def _make_biharmonic(config: LateralMixingConfig) -> Callable:
 
     def physics_fn(state: OceanState, grid: CubedSphereGrid,
                    z_coord: OceanZStarCoordinate,
-                   surface_forcing=None) -> OceanTendencies:
+                   surface_forcing=None, dt=None) -> OceanTendencies:
         out = biharmonic_lateral_mixing(
             state.u.data, state.v.data, state.T.data, state.S.data,
-            state.land_mask.data, grid, cfg,
+            state.land_mask.data, grid, cfg, dt=dt,
         )
         return wrap_ocean_tendencies(out.du_dt, out.dv_dt, out.dT_dt, out.dS_dt, state)
     return physics_fn
 
 
-def _make_gm_redi(config: LateralMixingConfig) -> Callable:
+def _make_gm_redi(config: LateralMixingConfig,
+                  constants_config: ConstantsConfig = ConstantsConfig()) -> Callable:
     """Create GM/Redi physics function (cubed-sphere only).
 
     The lat-lon C-grid ocean model bypasses this factory and calls
@@ -92,7 +96,7 @@ def _make_gm_redi(config: LateralMixingConfig) -> Callable:
 
     def physics_fn(state: OceanState, grid: CubedSphereGrid,
                    z_coord: OceanZStarCoordinate,
-                   surface_forcing=None) -> OceanTendencies:
+                   surface_forcing=None, dt=None) -> OceanTendencies:
         if not isinstance(grid, CubedSphereGrid):
             raise TypeError(
                 "Factory GM/Redi only supports CubedSphereGrid. "
@@ -100,7 +104,8 @@ def _make_gm_redi(config: LateralMixingConfig) -> Callable:
                 "(see ocean_model_latlon_cgrid.py)."
             )
         J = compute_ocean_jacobian(state.eta.data, state.H_bathy.data, z_coord)
-        rho = _compute_rho(state, z_coord, J)
+        rho = _compute_rho(state, z_coord, J, g=constants_config.g,
+                           rho0=constants_config.rho_0)
         out = gm_redi_lateral_mixing(
             state.u.data, state.v.data, state.T.data, state.S.data,
             rho, z_coord, J, grid, cfg,

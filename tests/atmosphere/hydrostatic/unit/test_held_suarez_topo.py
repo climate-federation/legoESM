@@ -112,3 +112,42 @@ def test_topo_init_spectral(sigma):
     # from zero mode)
     phis_amp = float(jnp.max(jnp.abs(state.phis_hat.data)))
     assert phis_amp > 0.0
+
+
+def test_hs_parameter_overrides_reach_every_grid(sigma):
+    """Held-Suarez tunables must reach the lat-lon, MPAS and spectral forcings,
+    not only the cubed-sphere one.  Lat-lon and MPAS: the tendency with a
+    non-default parameter set equals the shared relaxation helper's.  Spectral
+    (output is in spectral space): every override, applied alone, changes it."""
+    import jax
+    from legoesm.atmosphere.forcing.idealized import held_suarez as HS
+
+    kw = dict(k_a=2.0 * HS.K_A, k_s=0.5 * HS.K_S, sigma_b=0.6, delta_T_y=50.0,
+              delta_theta_z=12.0, T_min=190.0)
+
+    ll = create_latlon_grid(24, 48)
+    s = held_suarez_topo_init_latlon(ll, sigma, h_0=2000.0)
+    p_full = sigma.pressure_at_full(s.p_s.data)
+    sig_eff = p_full / jnp.maximum(s.p_s.data[..., None], 1.0)
+    want = HS.held_suarez_temperature_tendency(
+        s.T.data, ll.lat[:, None, None], p_full, sig_eff, **kw)
+    got = HS.held_suarez_forcing_latlon(s, ll, sigma, **kw).dT_dt.data
+    assert bool(jnp.array_equal(got, want))
+    assert not bool(jnp.array_equal(got, HS.held_suarez_forcing_latlon(s, ll, sigma).dT_dt.data))
+
+    mesh = create_voronoi_mesh(4)
+    s = held_suarez_topo_init_mpas(mesh, sigma, h_0=2000.0)
+    p_full = sigma.pressure_at_full(s.p_s.data)
+    sig_eff = p_full / jnp.maximum(s.p_s.data[:, None], 1.0)
+    want = HS.held_suarez_temperature_tendency(
+        s.T.data, mesh.latCell[:, None], p_full, sig_eff, **kw)
+    got = HS.held_suarez_forcing_mpas(s, mesh, sigma, **kw).dT_dt.data
+    assert bool(jnp.array_equal(got, want))
+
+    gg = create_gaussian_grid(n_max=21)
+    s = held_suarez_topo_init_spectral(gg, sigma, h_0=2000.0)
+    base = HS.held_suarez_forcing_spectral(s, gg, sigma)
+    for name, value in kw.items():
+        tuned = HS.held_suarez_forcing_spectral(s, gg, sigma, **{name: value})
+        same = jax.tree_util.tree_map(lambda a, b: bool(jnp.array_equal(a, b)), base, tuned)
+        assert not all(jax.tree_util.tree_leaves(same)), name

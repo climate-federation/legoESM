@@ -29,6 +29,15 @@ def _sigma(nlev=NLEV):
         sigma_full = jnp.linspace(0.1, 0.95, nlev)
         sigma_half = jnp.linspace(0.05, 1.0, nlev + 1)
         dsigma = jnp.diff(jnp.linspace(0.05, 1.0, nlev + 1))
+
+        def pressure_at_full(self, p_s):
+            return p_s[..., None] * self.sigma_full
+
+        def pressure_at_half(self, p_s):
+            return p_s[..., None] * self.sigma_half
+
+        def layer_thickness_dp(self, p_s):
+            return p_s[..., None] * self.dsigma
     return _S()
 
 
@@ -456,11 +465,17 @@ class TestMultilayerLandTile:
         from legoesm.land.soil_grid import SoilGridConfig
         from legoesm.land.multilayer_land import init_multilayer_land_state
         from legoesm.land.surface_params import LandSurfaceParams
+        from legoesm.land.surface_scheme import SimpleSEBConfig
         pipe, _ = _pipeline(land=True)
         ncol = 6 * N_CS * N_CS
+        # The params below are BULK-surface LandSurfaceParams (z0, albedo_veg),
+        # so the scheme is the bulk SimpleSEB: the two-leaf canopy default
+        # reads canopy height / roughness ratio instead and ignores z0 (the
+        # driver refuses that pairing; here it would make d/dz0 exactly 0).
         cfg = MultiLayerLandConfig(
             soil_grid=SoilGridConfig(n_layers=6, total_depth=2.0),
-            bulk_scheme="most")           # MOST -> z0 matters
+            bulk_scheme="most",           # MOST -> z0 matters
+            surface_scheme=SimpleSEBConfig())
         c = lambda v: jnp.full(ncol, v)   # keep traced (z0 is the grad target)
         pipe.land_ml_cfg = cfg
         pipe.land_ml_lat = jnp.zeros(ncol)
@@ -483,6 +498,31 @@ class TestMultilayerLandTile:
         assert T_sfc.shape == (ncol,) and jnp.all(jnp.isfinite(T_sfc))
         assert jnp.all((albedo > 0.0) & (albedo < 1.0))
         assert land_new.T_soil.shape == land_ml.T_soil.shape
+
+    def test_land_co2_is_radiation_co2(self, monkeypatch):
+        """F30 (review 2026-10-10): the canopy sees radiation's CO2 -- the GHG
+        file's when one drives radiation, else the run's co2_ppmv -- never a
+        separate constant (it was 412 ppm while radiation read ~337 in 1979)."""
+        import legoesm.land.multilayer_land as mll
+        seen = []
+
+        class _Stop(Exception):
+            pass
+
+        def spy(state, forcing, *a, **k):   # record the forcing, skip the solve
+            seen.append(float(jnp.mean(forcing.co2_ppmv)))
+            raise _Stop
+
+        monkeypatch.setattr(mll, "step_multilayer_land", spy)
+        pipe, land_ml, atm, sw, lw, _ = self._setup()
+        args = (land_ml, sw, lw, atm["T"], atm["p_s"], atm["q_v"], atm["u"],
+                atm["v"], None, 1800.0)
+        for kw in ({}, {"ghg_vmr_override": {"co2": 337.0e-6}}):
+            with pytest.raises(_Stop):
+                pipe._step_multilayer_land_tile(*args, **kw)
+        assert seen[0] == pytest.approx(pipe.co2_ppmv)
+        assert pipe.co2_ppmv == ExperimentConfig().co2_ppmv
+        assert seen[1] == pytest.approx(337.0, rel=1e-9)
 
     def test_differentiable_wrt_z0(self):
         """jax.grad of the tile's surface T w.r.t. the roughness z0 — the capability

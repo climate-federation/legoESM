@@ -43,10 +43,11 @@ from legoesm.training.trainable_params import (
 # scheme configs are migrated; the drift test keeps this in sync with the gate.
 SPEC_MODULES: tuple[str, ...] = (
     "legoesm.land.snow_bands",
+    "legoesm.land.snow_column",
     "legoesm.land.soil_thermal",
     "legoesm.ocean.physics.shortwave_penetration",
-    "legoesm.ocean.physics.bottom_drag.config",
     "legoesm.ice.config",
+    "legoesm.ice.shortwave",
     "legoesm.coupler.config",
     "legoesm.coupler.coupled_latlon_band",
     "legoesm.coupler.lake.config",
@@ -163,7 +164,12 @@ def build_registry(skipped: list[str] | None = None) -> list[ParamMeta]:
             cls = getattr(mod, cls_name, None)
             if cls is None:
                 raise ValueError(f"{module_path}.{cls_name} not found for its __param_spec__")
-            defaults = getattr(cls, "_field_defaults", {})
+            defaults = dict(getattr(cls, "_field_defaults", {}))
+            # an unset (None) field: the value its resolver gives the class
+            # default (the default flavour); a run config refines it at seed
+            for _f, _res in getattr(mod, "__param_unset_defaults__", {}).get(
+                    cls_name, {}).items():
+                defaults[_f] = getattr(_res(cls()), _f)
             scheme_key = entry["scheme_key"]
             if scheme_key in seen_keys:
                 raise ValueError(
@@ -212,10 +218,75 @@ def _resolve_shape(meta: ParamMeta, dims: dict[str, int] | None) -> tuple[int, .
     return (n,)
 
 
-def _seed_raw(meta: ParamMeta, shape: tuple[int, ...], dtype) -> jax.Array:
-    base = jnp.full(shape, meta.default, dtype=dtype) if shape else jnp.asarray(
-        meta.default, dtype=dtype
+# The clamp ``range_to_sigmoid_array`` applies in normalized coordinates. A
+# seed this close to either bound does not survive the round trip, and its leaf
+# has no usable gradient; kept next to the check that enforces it.
+_SIGMOID_SEED_MARGIN = 0.001
+
+
+def _unset_seed(meta: ParamMeta, cfg) -> float | None:
+    """The run's value of an unset-able field (``__param_unset_defaults__``),
+    through the same resolver the scheme uses: by the run config's selection,
+    or its explicit value.  None for every other field."""
+    mod = importlib.import_module(meta.module)
+    res = getattr(mod, "__param_unset_defaults__", {}).get(
+        meta.config_class, {}).get(meta.field)
+    if res is None:
+        return None
+    cls = getattr(mod, meta.config_class)
+    if not isinstance(cfg, cls):
+        raise TypeError(
+            f"scheme_configs[{meta.scheme_key!r}] is a {type(cfg).__name__}, "
+            f"not the {meta.config_class} that seeds {meta.qualified_name}")
+    val = getattr(res(cfg), meta.field)
+    if val is None:
+        raise ValueError(
+            f"{meta.qualified_name} is unset and its resolver gives no value "
+            f"for this {meta.config_class} (unknown selection?); set it "
+            "explicitly or pass init_values")
+    return float(val)
+
+
+def _seed_raw(meta: ParamMeta, shape: tuple[int, ...], dtype,
+              value: float | None = None) -> jax.Array:
+    """Raw (unconstrained) seed for one parameter.
+
+    ``value`` replaces the spec default, which is how a run starts training
+    from a TUNED configuration rather than from the library default: seeding
+    the raw leaf keeps the parameter trainable, where a static override would
+    freeze it.  It must lie inside the spec bounds -- the sigmoid inverse of
+    an out-of-range value is +-inf and would seed a dead leaf.
+    """
+    seed_value = meta.default if value is None else value
+    if value is not None:
+        lo, hi = meta.bounds
+        if not (lo <= float(value) <= hi):
+            raise ValueError(
+                f"init value {value!r} for {meta.qualified_name} is outside "
+                f"its spec bounds ({lo}, {hi})")
+    base = jnp.full(shape, seed_value, dtype=dtype) if shape else jnp.asarray(
+        seed_value, dtype=dtype
     )
+    if value is not None and meta.transform == "sigmoid":
+        # Tested in NORMALIZED coordinates, because that is where the transform
+        # actually clips: ``range_to_sigmoid_array`` clamps (v-lo)/(hi-lo) to
+        # [_SIGMOID_SEED_MARGIN, 1-_SIGMOID_SEED_MARGIN], so a value at or past
+        # that margin seeds a DIFFERENT number than the deck asked for, on a
+        # leaf whose gradient is saturated there anyway. An absolute tolerance
+        # on the round-trip would pass or fail with the parameter's UNITS
+        # rather than with its position in range (codex: q_c_diagnostic at its
+        # 1e-6 lower bound slipped through at 1e-6 absolute). A parameter
+        # wanted at its bound is a FIXED setting, not a starting point.
+        lo, hi = meta.bounds
+        t = (float(value) - lo) / (hi - lo)
+        if not (_SIGMOID_SEED_MARGIN < t < 1.0 - _SIGMOID_SEED_MARGIN):
+            raise ValueError(
+                f"init value {value!r} for {meta.qualified_name} sits at "
+                f"{t:.4g} of its range ({lo}, {hi}), within the transform's "
+                f"{_SIGMOID_SEED_MARGIN:g} clamp of the edge: it would seed a "
+                f"different value on a leaf whose gradient is saturated "
+                f"there. Pin it as a fixed setting instead of a starting "
+                f"value, or move it inside the range.")
     if meta.transform == "sigmoid":
         lo, hi = meta.bounds
         return range_to_sigmoid_array(base, lo, hi).astype(dtype)
@@ -244,6 +315,8 @@ def build_trainable_params(
     include_tier0: tuple[str, ...] = (),
     dims: dict[str, int] | None = None,
     dtype=None,
+    init_values: dict[str, float] | None = None,
+    scheme_configs: dict | None = None,
 ) -> TrainablePhysicsParams:
     """Build a :class:`TrainablePhysicsParams` from the registered specs.
 
@@ -278,6 +351,11 @@ def build_trainable_params(
     dtype
         Raw-value dtype; defaults to the precision policy's compute dtype
         (guards the float64-into-float32-scan-carry hazard).
+    scheme_configs
+        ``{scheme_key: config}`` of the run: an unset-able field
+        (``__param_unset_defaults__``, e.g. Morrison DCS) is seeded from it
+        through the scheme's own resolver (its flavour, or its explicit value)
+        instead of the class default.  ``init_values`` still wins.
     """
     level = _TIER_LEVELS.get(tier, tier) if isinstance(tier, str) else int(tier)
     if not isinstance(level, int):
@@ -328,6 +406,15 @@ def build_trainable_params(
             )
     include_set, exclude_set = set(include), set(exclude)
     tier0_set = set(include_tier0)
+    # Asking to train a parameter the caller also excludes (inactive, pinned,
+    # owned elsewhere) is ill-posed: refuse it here, at setup, rather than
+    # silently dropping the request (owner 2026-10-15).
+    both = sorted((include_set | tier0_set) & exclude_set)
+    if both:
+        raise ValueError(
+            f"parameter(s) {both} are both requested (include / include_tier0) "
+            "and excluded; "
+            "an excluded parameter has no gradient and cannot be trained.")
 
     raw: dict[str, jax.Array] = {}
     constraints: list[ParamConstraint] = []
@@ -351,7 +438,11 @@ def build_trainable_params(
         elif not selected:
             continue
         shape = _resolve_shape(meta, dims)
-        raw[meta.qualified_name] = _seed_raw(meta, shape, dtype)
+        seed = (None if init_values is None
+                else init_values.get(meta.qualified_name))
+        if seed is None and scheme_configs and meta.scheme_key in scheme_configs:
+            seed = _unset_seed(meta, scheme_configs[meta.scheme_key])
+        raw[meta.qualified_name] = _seed_raw(meta, shape, dtype, seed)
         lo, hi = meta.bounds
         constraints.append(
             ParamConstraint(
@@ -364,4 +455,37 @@ def build_trainable_params(
                 field=meta.field,
             )
         )
+    if scheme_configs:
+        # like init_values: a run config for a scheme this selection does not
+        # carry would silently seed nothing
+        _cls_of = {m.scheme_key: (m.module, m.config_class) for m in registry}
+        for _k, _cfg in scheme_configs.items():
+            if _k not in _cls_of:
+                continue
+            _mod = importlib.import_module(_cls_of[_k][0])
+            # only a scheme with unset-able fields reads its config here
+            # (others may legitimately pass a wrapping sub-config)
+            if _cls_of[_k][1] in getattr(_mod, "__param_unset_defaults__", {}):
+                _cls = getattr(_mod, _cls_of[_k][1])
+                if not isinstance(_cfg, _cls):
+                    raise TypeError(
+                        f"scheme_configs[{_k!r}] is a {type(_cfg).__name__}, "
+                        f"not the {_cls_of[_k][1]} that scheme uses")
+        _scope = (set(active_scheme_keys) if active_scheme_keys is not None
+                  else {m.scheme_key for m in registry})
+        unreached_cfg = sorted(set(scheme_configs) - _scope)
+        if unreached_cfg:
+            raise ValueError(
+                f"scheme_configs for {unreached_cfg} reached no trainable "
+                "parameter: not an active (or registered) scheme")
+    if init_values:
+        # An init value naming a parameter this selection does not carry is a
+        # SILENT no-op otherwise: the deck says "start Bechtold's mass-flux cap
+        # at the tuned value" and the run trains from the library default.
+        unreached = sorted(set(init_values) - set(raw))
+        if unreached:
+            raise ValueError(
+                f"init value(s) for {unreached} reached no trainable "
+                f"parameter: the name is not in the registry, its scheme is "
+                f"not active, or its tier is outside this selection.")
     return TrainablePhysicsParams(raw_values=raw, constraints=constraints)

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "legoesm-atmosphere"
-version = "0.1.0"
+version = "1.0.1"
 description = "legoESM atmosphere component: hydrostatic/nonhydrostatic/shallow-water dynamical cores (FV3 cube, spectral, SFNO, MPAS) + physics (radiation, convection, turbulence, microphysics, gravity-wave drag)."
 readme = "README.md"
 license = { text = "MIT" }
@@ -23,11 +23,12 @@ classifiers = [
 # independent of each other" + "Components must not import the coupler, driver,
 # or training"), which is what lets `pip install legoesm-atmosphere` run standalone.
 dependencies = [
-    "legoesm-core~=0.1.0",
-    "jax>=0.4.35",
-    "jaxlib>=0.4.35",
+    "legoesm-core~=1.0.0",
+    "jax>=0.5.3",
+    "jaxlib>=0.5.3",
     "numpy>=1.26",
     "equinox>=0.11",
+    "pyyaml>=6.0",
 ]
 
 # Optional heavy feature reaching UP into the ML layer.  The BASE atmosphere
@@ -41,7 +42,7 @@ dependencies = [
 # Install with `pip install legoesm-atmosphere[ml]`.  These component->ml edges
 # are baselined in import-linter contract #3.
 [project.optional-dependencies]
-ml = ["legoesm-ml~=0.1.0"]
+ml = ["legoesm-ml~=1.0.0"]
 
 [tool.uv.sources]
 legoesm-core = { workspace = true }
@@ -61,3 +62,9 @@ fv3edge = "legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid:_build_fv3edge_b
 # legoesm/atmosphere into the shared `legoesm` namespace, so it imports as legoesm.atmosphere.
 [tool.hatch.build.targets.wheel]
 packages = ["legoesm"]
+
+# Ship the vendored RRTMGP gas and cloud optics tables. *.nc is git-ignored, so
+# hatch drops them unless listed as artifacts; set for every target because the
+# wheel is built from the sdist.
+[tool.hatch.build]
+artifacts = ["legoesm/atmosphere/physics/radiation/rrtmgp/optics/rrtmgp_data/*.nc"]

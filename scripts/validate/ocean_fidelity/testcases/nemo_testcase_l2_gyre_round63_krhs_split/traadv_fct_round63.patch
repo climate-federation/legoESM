@@ -1,0 +1,18 @@
+--- traadv_fct.F90.shipped
++++ traadv_fct.F90
+@@ -21,6 +21,7 @@
+    USE diaar5         ! AR5 diagnostics
+    USE phycst  , ONLY : rho0_rcp
+    USE zdf_oce , ONLY : ln_zad_Aimp
++   USE l2_r63_krhs, ONLY : r63_fct_first
+    !
+    USE in_out_manager ! I/O manager
+    USE iom            !
+@@ -159,6 +160,7 @@
+ #else
+          CALL fct_up1_1stp( Kbb, Kmm, Kaa, p2dt, pt(:,:,:,jn,Kbb), pU, pV, pW, ztFu, ztFv, ztFw, zta_up1, pt(:,:,:,jn,Krhs) )
+ #endif
++         IF( cdtype == 'TRA' ) CALL r63_fct_first( jn, pt(:,:,:,jn,Krhs) )
+          ! output => ztFu(1,0,1,0), ztFv(1,0,1,0), zta_up1(0,0,0,0), ztFw(0,0,0,0) if Amip2 or ztFw(1,1,1,1) if .not.Aimp2
+          !
+          IF( l_trd .OR. l_hst )  THEN             ! trend diagnostics (contribution of upstream fluxes)

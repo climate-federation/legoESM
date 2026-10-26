@@ -30,7 +30,7 @@ def _make_driver(preset="aquaplanet", days=1, resolution=8, nlev=5, dt=600.0,
 
     atm_config = ExperimentConfig(
         grid=GridConfig(grid_type="cubed_sphere", resolution=resolution, nlev=nlev),
-        dycore=DycoreConfig(dt=dt, model_type="hydrostatic"),
+        dycore=DycoreConfig(energy_fixer=False, dt=dt, model_type="hydrostatic"),
         output=OutputConfig(diag_days=max(days, 1)),
         radiation="gray",
         days=days,
@@ -133,7 +133,7 @@ class TestMixedGridCoupling(unittest.TestCase):
 
         atm_config = ExperimentConfig(
             grid=GridConfig(grid_type="latlon", resolution=atm_nlat, nlev=5),
-            dycore=DycoreConfig(dt=600.0, model_type="hydrostatic",
+            dycore=DycoreConfig(energy_fixer=False, dt=600.0, model_type="hydrostatic",
                                 discretization="finite_volume"),
             output=OutputConfig(diag_days=max(days, 1)),
             radiation="gray", days=days,
@@ -216,7 +216,7 @@ class TestCoupledResumeStatePersistence(unittest.TestCase):
     def setUpClass(cls):
         import tempfile
         cls._tmp = tempfile.TemporaryDirectory()
-        # slab_simple has land, so the lagged runoff channel is genuinely
+        # slab_simple has land, so the lagged surface water flux is genuinely
         # nonzero — the round-trip equality below is not vacuous.
         cls.driver = _make_driver("slab_simple", days=1,
                                   output_dir=cls._tmp.name)
@@ -234,7 +234,11 @@ class TestCoupledResumeStatePersistence(unittest.TestCase):
         ref = self.driver._last_sfc_response
         self.assertIsNotNone(ref)
         self.assertIsNotNone(self.driver._sst_mean_init)
-        self.assertTrue(bool(jnp.any(ref.river_runoff_flux != 0.0)))
+        # Non-vacuity: the buffer carries a live land-sourced channel.  Not
+        # the river runoff: after this 1-day run the slab bucket sits at
+        # ~75 of W_max=150 kg/m2 and runoff is exactly 0 everywhere (job
+        # 10331261) -- the surface water flux is the channel that is live.
+        self.assertTrue(bool(jnp.any(ref.surface_mass_flux != 0.0)))
 
         resumed = _make_driver("slab_simple", days=1)  # fresh: lag buffer None
         self.assertIsNone(resumed._last_sfc_response)
@@ -318,7 +322,7 @@ class TestUnfusedRadiation(unittest.TestCase):
         from legoesm.driver.coupled_esm_driver import CoupledESMDriver
         atm = ExperimentConfig(
             grid=GridConfig(grid_type="cubed_sphere", resolution=8, nlev=5),
-            dycore=DycoreConfig(dt=600.0, model_type="hydrostatic"),
+            dycore=DycoreConfig(energy_fixer=False, dt=600.0, model_type="hydrostatic"),
             output=OutputConfig(diag_days=days),
             radiation="gray", days=days,
             rad_update_steps=rad_update_steps,
@@ -424,6 +428,205 @@ class TestCarbonRadiationCoupling(unittest.TestCase):
         self.assertGreater(ov, 1e-4)
         self.assertLess(ov, 1e-3)
 
+    def _box_flux(self, driver):
+        """A spatially varying CO2 flux [kgCO2/m2/s], +into the atmosphere."""
+        import numpy as np
+        p_s = driver._atm.state.p_s.data
+        rng = np.random.default_rng(0)
+        return jnp.asarray(rng.normal(0.0, 1e-7, p_s.shape), p_s.dtype)
+
+    def _air_mass(self, driver, p_s, own=None):
+        """Independent total air mass [kg] = sum(dp_col * A) / g (numpy)."""
+        import numpy as np
+        from legoesm import constants
+        area = np.asarray(driver._atm.grid.grid_area, np.float64)
+        dp = np.asarray(driver._atm.sigma.layer_thickness_dp(p_s), np.float64)
+        w = area if own is None else area * own
+        return (dp.sum(-1) * w).sum() / constants.g
+
+    def test_co2_box_init_mass(self):
+        """#1817 decision 6: box = co2_ppmv_init as mass with the initial air mass."""
+        import numpy as np
+        from legoesm import constants
+        driver = _make_driver("slab_carbon", days=1)
+        self.assertEqual(np.ndim(driver._co2_mass), 0)  # one global scalar
+        self.assertEqual(driver._co2_mass.dtype, jnp.float64)
+        ppmv = driver.coupled_cfg.co2_ppmv_init
+        p_s = driver._atm.state.p_s.data
+        expected = (ppmv * 1e-6 * (constants.M_CO2 / constants.M_air)
+                    * float(driver._co2_air_mass(p_s)))
+        np.testing.assert_allclose(float(driver._co2_mass), expected, rtol=1e-12)
+        # The driver's air mass vs an independent numpy one (float32 state
+        # summed in a different order; same 1e-6 as the halo check below).
+        np.testing.assert_allclose(float(driver._co2_air_mass(p_s)),
+                                   self._air_mass(driver, p_s), rtol=1e-6)
+        np.testing.assert_allclose(float(driver._co2_box_vmr()) * 1e6, ppmv,
+                                   rtol=1e-12)
+
+    def test_co2_box_no_response_adds_nothing(self):
+        """#1817 decision 6: a step with no surface response leaves the box."""
+        driver = _make_driver("slab_carbon", days=1)
+        driver._last_sfc_response = None
+        m0 = float(driver._co2_mass)
+        driver._step_co2_tracer(3600.0)
+        self.assertEqual(float(driver._co2_mass), m0)
+
+    def test_co2_box_mass_closure(self):
+        """#1817: box CO2 mass change == area-integrated flux * dt, exactly."""
+        import numpy as np
+        from types import SimpleNamespace
+        driver = _make_driver("slab_carbon", days=1)
+        flux = self._box_flux(driver)
+        dt = 3600.0
+        driver._last_sfc_response = SimpleNamespace(co2_flux=flux)
+        m0 = float(driver._co2_mass)
+        driver._step_co2_tracer(dt)
+        m1 = float(driver._co2_mass)
+        area = np.asarray(driver._atm.grid.grid_area, np.float64)
+        expected = float((np.asarray(flux, np.float64) * area).sum() * dt)
+        self.assertNotEqual(expected, 0.0)
+        np.testing.assert_allclose(m1 - m0, expected, rtol=1e-9, atol=0.0)
+
+    def test_co2_box_mass_conserved_when_air_mass_changes(self):
+        """#1817 decision 1: air-mass change moves the mole fraction, not CO2 mass."""
+        import numpy as np
+        driver = _make_driver("slab_carbon", days=1)
+        state0 = driver._atm.state
+        p_s0 = state0.p_s.data
+        m0 = float(driver._co2_mass)
+        v0 = float(driver._co2_box_vmr())
+        driver._atm.state = state0._replace(
+            p_s=state0.p_s.replace(data=p_s0 * 1.01))
+        driver._last_sfc_response = None
+        driver._step_co2_tracer(3600.0)
+        self.assertEqual(float(driver._co2_mass), m0)
+        ratio = (float(driver._co2_air_mass(p_s0))
+                 / float(driver._co2_air_mass(p_s0 * 1.01)))
+        self.assertLess(ratio, 1.0 - 1e-3)  # the air mass really changed
+        np.testing.assert_allclose(float(driver._co2_box_vmr()), v0 * ratio,
+                                   rtol=1e-12)
+        driver._atm.state = state0
+
+    def test_radiation_and_land_see_box_value(self):
+        """#1817: radiation, land forcing and the log all read the box."""
+        from legoesm import constants
+        driver = _make_driver("slab_carbon", days=1)
+        driver.run()  # populates the held radiation the forcing build needs
+        air = driver._co2_air_mass(driver._atm.state.p_s.data)
+        driver._co2_mass = jnp.asarray(
+            5.0e-4 * (constants.M_CO2 / constants.M_air) * air, jnp.float64)
+        driver._update_co2_radiation()
+        self.assertAlmostEqual(driver._atm._co2_vmr_override, 5.0e-4,
+                               delta=1e-12)
+        co2_land = driver._build_atm_forcing(1.0).co2_ppmv
+        self.assertTrue(bool(jnp.all(jnp.abs(co2_land - 500.0) < 1e-3)))
+        driver._log_coupled_diag(0.0)
+        self.assertAlmostEqual(driver._coupled_diag[-1]["co2_ppmv_mean"],
+                               500.0, delta=1e-3)
+
+    def test_co2_box_grad_finite(self):
+        """#1817: d(vmr)/d(mass) and d(vmr)/d(p_s) finite; flux grad = A dt."""
+        import numpy as np
+        from types import SimpleNamespace
+        from legoesm import constants
+        driver = _make_driver("slab_carbon", days=1)
+        p_s = driver._atm.state.p_s.data
+        flux = self._box_flux(driver)
+        dt = 3600.0
+        ratio = constants.M_CO2 / constants.M_air
+        m0 = driver._co2_mass
+        air = float(driver._co2_air_mass(p_s))
+        gm = float(jax.grad(lambda m: driver._co2_vmr_from_mass(m, p_s))(m0))
+        np.testing.assert_allclose(gm, 1.0 / air / ratio, rtol=1e-9)
+        gp = np.asarray(jax.grad(
+            lambda ps: driver._co2_vmr_from_mass(m0, ps))(p_s))
+        self.assertTrue(np.all(np.isfinite(gp)) and np.any(gp != 0.0))
+
+        def mass_after(f):
+            driver._co2_mass = m0
+            driver._last_sfc_response = SimpleNamespace(co2_flux=f)
+            driver._step_co2_tracer(dt)
+            return driver._co2_mass
+
+        g = np.asarray(jax.grad(mass_after)(flux))
+        area = np.asarray(driver._atm.grid.grid_area, np.float64)
+        # float32 cotangent (flux dtype): same 1e-6 as the earlier grad check.
+        np.testing.assert_allclose(g, area * dt, rtol=1e-6)
+        # MPAS-style halo: non-owned cells hold NaN; they must not reach the
+        # value or the gradient.
+        own = np.ones(p_s.shape, bool)
+        own.reshape(-1)[::3] = False
+        driver._atm._voronoi_layout = SimpleNamespace(
+            owned_mask_cells=jnp.asarray(own))
+        nan_flux = jnp.where(jnp.asarray(own), flux, jnp.nan)
+        nan_ps = jnp.where(jnp.asarray(own), p_s, jnp.nan)
+        val = float(driver._co2_vmr_from_mass(m0, nan_ps))
+        np.testing.assert_allclose(
+            val, float(m0) / self._air_mass(driver, p_s, own) / ratio,
+            rtol=1e-6)
+        self.assertTrue(np.all(np.isfinite(np.asarray(
+            jax.grad(mass_after)(nan_flux)))))
+        self.assertTrue(np.all(np.isfinite(np.asarray(jax.grad(
+            lambda ps: driver._co2_vmr_from_mass(m0, ps))(nan_ps)))))
+        driver._atm._voronoi_layout = None
+        driver._co2_mass = m0
+
+    def test_co2_box_requires_x64(self):
+        """#1817 decision 3: the CO2 box refuses to set up without JAX x64."""
+        from unittest import mock
+        driver = _make_driver("slab_carbon", days=1)
+        jax.config.update("jax_enable_x64", False)
+        try:
+            with mock.patch.object(driver._atm, "setup") as atm_setup:
+                with self.assertRaisesRegex(RuntimeError, "x64"):
+                    driver.setup()
+                atm_setup.assert_not_called()  # refused before any component
+        finally:
+            jax.config.update("jax_enable_x64", True)
+
+    def test_co2_restart_radiation_sees_restored_box(self):
+        """#1817 decision 2026-10-26: after a checkpoint load the first resumed
+        segment's radiation CO2 equals the uninterrupted run's (exact
+        continuation), not the configured value."""
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            ref = _make_driver("slab_carbon", days=1, output_dir=d)
+            ref.run()
+            ref.save_checkpoint(step=144, day=1.0)
+            ov_ref = ref._atm._co2_vmr_override  # what segment 2 radiation reads
+            self.assertIsNotNone(ov_ref)
+            # Non-vacuity: the box has moved off the configured CO2.
+            self.assertNotEqual(ov_ref, ref.coupled_cfg.co2_ppmv_init * 1.0e-6)
+            resumed = _make_driver("slab_carbon", days=2)
+            self.assertIsNone(getattr(resumed._atm, "_co2_vmr_override", None))
+            ckpt = sorted(Path(d).glob("checkpoint_day_*.npz"))[-1]
+            resumed._atm.load_checkpoint(ckpt)
+            resumed.load_coupled_checkpoint(1.0, checkpoint_dir=d)
+            self.assertEqual(resumed._atm._co2_vmr_override, ov_ref)
+
+    def test_co2_checkpoint_roundtrip_and_refusals(self):
+        """#1817 decisions 4: restore box mass; refuse co2_field / missing box."""
+        import tempfile
+        import numpy as np
+        driver = _make_driver("slab_carbon", days=1)
+        with tempfile.TemporaryDirectory() as d:
+            arrays = driver.coupled_checkpoint_arrays()
+            self.assertIn("co2_mass", arrays)
+            np.savez(Path(d) / "coupled_day_0001.npz", **arrays)
+            driver._co2_mass = jnp.asarray(0.0, jnp.float64)
+            driver.load_coupled_checkpoint(1.0, checkpoint_dir=d)
+            self.assertEqual(float(driver._co2_mass), float(arrays["co2_mass"]))
+            old = dict(arrays, co2_field=np.ones((2, 3, 4)))
+            np.savez(Path(d) / "coupled_day_0002.npz", **old)
+            with self.assertRaisesRegex(ValueError, "co2_field"):
+                driver.load_coupled_checkpoint(2.0, checkpoint_dir=d)
+            missing = {k: v for k, v in arrays.items() if k != "co2_mass"}
+            np.savez(Path(d) / "coupled_day_0003.npz", **missing)
+            driver._co2_mass = jnp.asarray(1.0, jnp.float64)
+            with self.assertRaisesRegex(ValueError, "co2_mass"):
+                driver.load_coupled_checkpoint(3.0, checkpoint_dir=d)
+            self.assertEqual(float(driver._co2_mass), 1.0)  # nothing restored
+
 
 class TestSlabSimple(unittest.TestCase):
     """Slab ocean + slab bucket land."""
@@ -526,7 +729,7 @@ class TestLandModeDispatch(unittest.TestCase):
 
         atm_config = ExperimentConfig(
             grid=GridConfig(grid_type="cubed_sphere", resolution=8, nlev=5),
-            dycore=DycoreConfig(dt=600.0, model_type="hydrostatic"),
+            dycore=DycoreConfig(energy_fixer=False, dt=600.0, model_type="hydrostatic"),
             output=OutputConfig(diag_days=1),
             radiation="gray",
             days=1,

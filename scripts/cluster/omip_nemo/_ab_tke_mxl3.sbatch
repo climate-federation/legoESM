@@ -18,7 +18,7 @@
 set +e
 SBC=nemo_dirichlet
 ROOT=/burg/glab/users/pg2328/legoESM; cd $ROOT
-export PYTHONPATH="$(ls -d $ROOT/packages/*/ | sed 's:/$::' | tr '\n' ':')$ROOT:$ROOT/scripts/validate"
+export PYTHONPATH="$ROOT/src:$(ls -d $ROOT/packages/*/ | sed 's:/$::' | tr '\n' ':')$ROOT:$ROOT/scripts/validate"
 PY=/burg-archive/glab/users/jn2808/.conda/envs/legoesm/bin/python
 N=/burg-archive/glab/users/pg2328/nemo_orca1/nemo_5.0.1
 RUN=$N/cfgs/ORCA1/EXP00/RUN_REF; INP=$N/cfgs/ORCA1/INPUTS/orca1_inputs/data_repository/input_fields

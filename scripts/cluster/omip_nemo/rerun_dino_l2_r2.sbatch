@@ -42,7 +42,7 @@
 #     sbatch scripts/cluster/omip_nemo/dino_l2_intercomparison.sbatch
 set +e
 ROOT=/burg-archive/glab/users/pg2328/legoESM; cd "$ROOT"
-export PYTHONPATH="$(ls -d $ROOT/packages/*/ | sed 's:/$::' | tr '\n' ':')$ROOT:$ROOT/scripts/validate"
+export PYTHONPATH="$ROOT/src:$(ls -d $ROOT/packages/*/ | sed 's:/$::' | tr '\n' ':')$ROOT:$ROOT/scripts/validate"
 export JAX_ENABLE_X64=1
 PY=/burg-archive/glab/users/jn2808/.conda/envs/legoesm/bin/python
 RD="$PY -u scripts/run/run_dino.py"

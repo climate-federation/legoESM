@@ -49,6 +49,7 @@ from legoesm.land.boundary_data.gap_fill import (
 )
 from legoesm.land.boundary_data.step_updater import (
     make_step_land_params_updater,
+    CanopyUpdaterInputs, precompute_canopy_updater, apply_canopy_updater,
 )
 from legoesm.land.boundary_data.point import (
     PointSurfaceParams,
@@ -66,6 +67,7 @@ __all__ = [
     "surfdata_covered", "fill_land_param_gaps",
     # step updater (lax.scan)
     "make_step_land_params_updater",
+    "CanopyUpdaterInputs", "precompute_canopy_updater", "apply_canopy_updater",
     # single-point
     "PointSurfaceParams", "surface_params_at_point",
 ]

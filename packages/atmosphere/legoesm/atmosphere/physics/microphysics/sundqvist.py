@@ -1,67 +1,76 @@
-"""Sundqvist large-scale diagnostic condensation scheme.
+"""Sundqvist large-scale microphysics: SBK89 precipitation via the Zhao-Carr port.
 
-A diagnostic scheme that activates condensation when relative humidity
-exceeds a critical threshold. Produces large-scale (non-convective)
-precipitation through autoconversion — enhanced per SBK89 by coalescence
-with precipitation falling from above (F1) and the Bergeron-Findeisen
-process in mixed phase (F2) — and sub-cloud evaporation.
+Two stages run in sequence:
 
-All operations are AD-safe (differentiable ALMOST everywhere; the ``max``/``min``/
-``clip`` guards and the donor cap introduce measure-zero kinks, not smoothness).
+1. **Condensation (NOT-YET-FAITHFUL surrogate).** A sigmoid-gated removal of
+   supersaturation, ``sigmoid(k·(RH-RH_crit))·max(q_v-q_sat,0)/dt``, optionally
+   overlaid by the shared hard saturation-adjustment guard
+   (``SundqvistConfig.hard_saturation_adjustment``, default False).  This is NOT
+   SBK89's condensation closure and has NOT been compared with oracle code (the
+   Zhao-Carr condensation routine, ``zhaocarr_gscond``, has not been ported).
 
-Faithfulness to Sundqvist (1978) / SBK89 (oracle = the published equations;
-pinned in ``tests/atmosphere/hydrostatic/unit/test_sundqvist_faithful.py``)
---------------------------------------------------------------------------
-FAITHFUL (forms reproduce the published autoconversion algebra):
-  * The UNCAPPED, no-new-condensate release kernel
-    ``P_auto = c_0·q_c·(1 - exp(-(q_c/q_c,crit)²))`` has the Sundqvist (1978) /
-    SBK89 algebra (``c_0``=``auto_rate``, ``q_c,crit``=``qc_crit``). The
-    IMPLEMENTED rate additionally uses ``qc_avail = max(q_c + condensation·dt, 0)``
-    and a donor cap ``min(rate, qc_avail/dt)``, so the published algebra holds
-    only where no new condensate enters and the cap does not bind.
-  * The SBK89 (Sec. 5) enhancement STRUCTURE: the coalescence F1 and
-    Bergeron-Findeisen F2 factors BOTH multiply the rate (``c_0 → c_0·F1·F2``)
-    AND lower the onset threshold (``q_c,crit → q_c,crit/(F1·F2)``), i.e. the
-    ``enh`` factor appears in the numerator of ``(q_c·enh/q_c,crit)`` and as the
-    rate prefactor. F1 = ``1 + c1·√P_above`` is the SBK89 collection form.
-DEPARTURES / SURROGATES (documented; NOT the SBK89 closed forms):
-  * F2 uses a smooth GAUSSIAN-in-T window ``1 + c2·exp(-((T-T_peak)/T_width)²)``
-    peaking near -15 °C as a proxy for SBK89's Bergeron driver, which is tied to
-    the actual liquid-ice saturation difference ``e_sw - e_si`` (a ``1 + c2·√Δ``
-    form), NOT a Gaussian. Same qualitative mixed-phase peak, different algebra.
-  * Condensation is a SIMPLIFIED sigmoid-gated removal of SUPERSATURATION
-    (``sigmoid(k·(RH-RH_crit))·max(q_v-q_sat,0)/dt``), driving q_v toward q_sat
-    — not SBK89's full condensation-rate closure. The SBK89 partial cloud
-    fraction ``b`` is diagnosed SEPARATELY in
-    ``clouds.cloud_fraction.sundqvist_cloud_fraction`` and is not this
-    microphysics tendency's concern.
-  * OPT-IN ONLY (``SundqvistConfig.hard_saturation_adjustment``, default
-    False): the shared hard (iterated) saturation-adjustment guard
-    (``_warm_rain.hard_saturation_blend``) overlays the condensation rate so it
-    lands on the ENTHALPY-CONSISTENT equilibrium
-    ``q_eq = q_sat(T + L_v/c_pd·(q_v−q_eq))`` with a per-step latent-heating
-    cap, instead of the one-step removal toward ``q_sat(T_old)`` above (which
-    overshoots into a sub-saturated state and can release ~20 K in one step at
-    RH 1.4). This is NOT an SBK89 form; with the default False the code path,
-    and hence the answer, is byte-identical to the smooth formulation above.
-  * Sub-cloud evaporation is a simplified ``evap_coeff·(RH<RH_crit gate)·P``
-    proxy, not SBK89's full evaporation-rate expression.
-  * F1's argument is the RAW precip flux ``√P_above`` (no SBK89 reference-flux
-    normalisation); ``c1``/``c2`` are re-tunable closure coefficients, not the
-    SBK89 paper values.
-  * Precipitation is treated as DIAGNOSTIC: the autoconversion source is
-    accumulated into a one-step downward flux (with the evaporation proxy and a
-    one-step ``q_r`` drain). This transport treatment is an IMPLEMENTATION choice,
-    not one of the supplied SBK89 forms — no paper faithfulness is claimed for it.
+2. **Precipitation (FAITHFUL port).** :func:`zhao_carr_precpd` is a literal JAX
+   port of ``zhaocarr_precpd_run`` from NCAR/ccpp-physics v7.0.1 (commit
+   da75531bf90a799e4c0dcb988cc591d82bd024de,
+   ``physics/MP/Zhao_Carr/zhaocarr_precpd.f``), the Sundqvist et al. (1989)
+   precipitation scheme as implemented by Zhao & Carr (1997).  It reproduces the
+   oracle, run unmodified with legoESM's Tetens curve as ``fpvs`` (the audit's
+   stub), to <= 1e-10 relative in fp64 at the hard-switch limit of
+   ``sigmoid_sharpness`` (``tests/atmosphere/microphysics/unit/
+   test_sundqvist_zhao_carr_oracle.py``).  Contents, oracle line numbers in
+   brackets:
+
+   * cloud cover ``b = 1 - sqrt((1-RH)/(1-RH_crit))`` (0 below RH_crit, 1 at
+     saturation) [409-418]; no release where ``b = 0`` [467];
+   * liquid release (SBK89) ``P = c_0·dt·F1·F2·m·(1-exp(-min(50,(m·F1·F2/
+     (m_r·max(b,0.01)))²)))`` with ``m = max(0, cwm - wmin)``, coalescence
+     ``F1 = 1 + c1·sqrt(P_above/dt)`` and Bergeron ``F2 = 1 + c2·sqrt(min(max(0,
+     268-T),20))`` [495-507];
+   * ice route: ice-water id (T < -15 °C, or -15..0 °C under an ice layer)
+     [380-395]; ice autoconversion ``psaut`` and accretion by snow ``psaci``
+     (Lin et al. 1983) instead of the liquid release [472-482];
+   * rain evaporation ``evpco·sqrt(1/dt)·(RH_crit-RH)·sqrt(P_r)``, snow
+     sublimation, and the saturation-deficit cap [562-599];
+   * snow melting below the freezing level [633-653]; T and q update with
+     L_v / L_v+L_f / L_f [664-665];
+   * the negative-condensate fix (vapour fills negative ``cwm``) [686-699];
+   * the column-eligibility rule (a column with no condensate above
+     ``min(wmin, wmini)`` below the model top is skipped) [297-309];
+   * the frozen fraction of the surface flux, ``sr`` (0 when the total is below
+     1e-13 kg m-2) [729-734].
+
+   Mapping (legoESM -> oracle): ``q_c`` is ``cwm`` (the one condensate variable;
+   ``q_i`` is not read, as before the port); ``rho·dz`` is ``del/g``;
+   ``rh_crit`` = ``u00k``; ``auto_rate`` = ``prautco``; ``qc_crit`` = ``1/cmr``
+   (oracle hard-codes 3e-4); ``coalescence_enh_coeff`` = ``c1`` (300);
+   ``bergeron_enh_coeff`` = ``c2`` (0.5); ``evap_coeff`` = ``evpco``;
+   ``psautco``, ``wminco_liquid``, ``wminco_ice`` = the oracle namelist values
+   (``wk1 = 1``, one value per run).  The saturation humidity is the oracle's
+   ``eps·e/(p + (eps-1)·e)`` with ``e = min(p, e_s)`` on legoESM's Tetens
+   ``e_s``; the real GFS ``fpvs`` table (ice-blended below 0 °C) is NOT used.
+   The only smoothing is the existing ``sigmoid_sharpness``: it multiplies the
+   rain-evaporation and snow-sublimation rates by ``sigmoid(k·(RH_crit-RH))``
+   (the gate the pre-port evaporation carried), which is exactly the oracle at
+   the hard limit (the oracle's ``max(0, RH_crit-RH)`` already vanishes where
+   the sigmoid switches).  Every other oracle switch is ported as a hard
+   ``jnp.where`` (piecewise differentiable).
+
+   ``bergeron_T_peak_K`` / ``bergeron_T_width_K`` parameterised the pre-port
+   Gaussian F2 and have no counterpart in the oracle: setting either to a
+   non-default value raises.
+
+The precipitation is diagnostic (falls to the surface within the step).  Any
+``q_r`` passed in is drained to the surface in one step (pre-port behaviour,
+not part of the oracle).  The frozen surface flux (the oracle's ``sr``) is
+published as ``precip_frozen``.
 
 References
 ----------
-- Sundqvist, H. (1978): A parameterization scheme for non-convective
-  condensation including prediction of cloud water content. Quart. J. Roy.
-  Meteor. Soc., 104, 677-690. (Base autoconversion release form.)
-- Sundqvist, Berge & Kristjansson (1989): Condensation and cloud
-  parameterization studies with a mesoscale numerical weather prediction
-  model. Mon. Wea. Rev., 117, 1641-1657. (F1/F2 enhancements, Sec. 5.)
+- Sundqvist, H., Berge, E. & Kristjansson, J. E. (1989): Mon. Wea. Rev., 117,
+  1641-1657.
+- Zhao, Q. & Carr, F. H. (1997): Mon. Wea. Rev., 125, 1931-1953.
+- Lin, Y.-L., Farley, R. D. & Orville, H. D. (1983): J. Clim. Appl. Meteor.,
+  22, 1065-1092 (ice autoconversion form used by Zhao-Carr).
 """
 
 from __future__ import annotations
@@ -70,9 +79,10 @@ from typing import NamedTuple
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 
 from legoesm import constants
-from legoesm.thermo import saturation_mixing_ratio
+from legoesm.thermo import saturation_specific_humidity, saturation_vapor_pressure
 from legoesm.atmosphere.physics.microphysics._warm_rain import (
     hard_saturation_blend,
     safe_pow,
@@ -83,14 +93,311 @@ from legoesm.atmosphere.physics.microphysics.output import (
     MicrophysicsOutput,
 )
 
+# --- Zhao-Carr precpd fixed coefficients (NCAR/ccpp-physics v7.0.1,
+# zhaocarr_precpd.f; line numbers in brackets) ---
+_ZC_CLIMIT = 1.0e-20            # [kg/kg] condensate presence threshold [223]
+_ZC_EPSQ = 2.0e-12              # [kg/kg] humidity floor [155]
+_ZC_CWS = 0.025                 # [-] melting by collection of cloud water [224]
+_ZC_ZAODT_S = 800.0             # [s] zaodt = 800/dt time scale [226]
+_ZC_CSM1 = 5.0e-8               # snow melting coefficient (x zaodt) [228]
+_ZC_CRS1 = 5.0e-6               # snow sublimation coefficient (x zaodt) [229]
+_ZC_CRS2 = 6.666e-10            # snow sublimation T coefficient (x zaodt) [230]
+_ZC_CR = 5.0e-4                 # collection coefficient (x zaodt) [231]
+_ZC_AA2 = 1.25e-3               # ice accretion by snow (x zaodt) [232]
+_ZC_ICE_EXP_COEFF = 0.025       # [1/K] exp(0.025*(T-T0)) in psaut/psaci [474]
+_ZC_T_ICE_C = -15.0             # [degC] ice-water id threshold [380]
+_ZC_TMT0K_MIN_C = -30.0         # [degC] floor of T in the snow sublimation [566]
+_ZC_QC_MIN = 1.0e-10            # [kg/kg] saturation humidity below which RH = 0 [404]
+_ZC_RQ_MIN = 1.0e-10            # [-] RH above which the deficit cap uses RH [582]
+_ZC_CCR_FLOOR = 0.01            # [-] cloud-cover floor in the release [501]
+_ZC_RELEASE_EXP_CAP = 50.0      # [-] cap of the release exponent [502]
+_ZC_F2_T_K = 268.0              # [K] Bergeron factor onset temperature [498]
+_ZC_F2_DT_CAP_K = 20.0          # [K] cap of 268-T in the Bergeron factor [498]
+_ZC_WMIN_P_SCALE = 1.0e-5       # [1/Pa] wmin = wminco * p * 1e-5 [255,262-263]
+_ZC_SR_MIN = 1.0e-13            # [kg/m^2] total surface precip below which sr = 0 [729-734]
+
 
 class SundqvistProcessRates(NamedTuple):
-    """Intermediate Sundqvist process rates used to assemble tendencies."""
+    """Intermediate Sundqvist process rates used to assemble tendencies.
+
+    ``autoconversion`` is the condensate converted to precipitation (liquid
+    release, or ice autoconversion + accretion by snow) and ``evaporation`` the
+    precipitation returned to vapour (rain evaporation + snow sublimation), both
+    [kg/kg/s]; ``precipitation`` is the surface flux [kg/m^2/s] excluding any
+    ``q_r`` drain.
+    """
 
     condensation: jax.Array
     autoconversion: jax.Array
     evaporation: jax.Array
     precipitation: jax.Array
+
+
+class ZhaoCarrPrecpdResult(NamedTuple):
+    """Updated state and diagnostics of :func:`zhao_carr_precpd`."""
+
+    T: jax.Array               # [K] (ncol, nlev)
+    q_v: jax.Array             # [kg/kg]
+    cwm: jax.Array             # [kg/kg] condensate
+    rain_sfc: jax.Array        # [kg/m^2/s] (ncol,) total minus the frozen part
+    snow_sfc: jax.Array        # [kg/m^2/s] (ncol,) the oracle sr*rn/dt
+    autoconversion: jax.Array  # [kg/kg/s] condensate -> precipitation
+    evaporation: jax.Array     # [kg/kg/s] precipitation -> vapour
+
+
+def _check_no_gaussian_f2_override(config: SundqvistConfig) -> None:
+    """The pre-port Gaussian-F2 fields have no oracle counterpart: refuse a
+    non-default value (concrete values only; a traced leaf cannot be read)."""
+    defaults = SundqvistConfig._field_defaults
+    for name in ("bergeron_T_peak_K", "bergeron_T_width_K"):
+        value = getattr(config, name)
+        if isinstance(value, jax.core.Tracer):
+            continue
+        v = np.asarray(value)
+        if v != np.asarray(defaults[name]).astype(v.dtype):
+            raise ValueError(
+                f"SundqvistConfig.{name}={value!r}: this field parameterised the "
+                "pre-port Gaussian Bergeron factor and has no counterpart in the "
+                "Zhao-Carr/SBK89 port (F2 = 1 + c2*sqrt(min(max(0, 268-T), 20)))."
+            )
+
+
+def _sqrt(x):
+    """sqrt with a finite (zero) gradient at x <= 0; value-identical to sqrt for
+    x >= 0 (x < 0 never reaches it: every caller passes a max(0, .) result)."""
+    return safe_pow(x, 0.5)
+
+
+def zhao_carr_precpd(
+    T: jax.Array,
+    q_v: jax.Array,
+    cwm: jax.Array,
+    p_full: jax.Array,
+    layer_mass: jax.Array,
+    dt: float,
+    config: SundqvistConfig = SundqvistConfig(),
+) -> ZhaoCarrPrecpdResult:
+    """Literal JAX port of ccpp-physics v7.0.1 ``zhaocarr_precpd_run``.
+
+    Columns are (ncol, nlev) with level 0 = model top (the oracle runs bottom ->
+    top; the scan here runs top -> surface, the oracle's ``k = km, 1, -1``).
+    ``layer_mass`` [kg/m^2] plays the oracle's ``del/g``.  Returns the updated
+    state (the oracle's in/out ``t``, ``q``, ``cwm``) and the surface rain and
+    snow fluxes (the oracle's ``rn`` and ``sr``).
+
+    Sign conventions: precipitation fluxes are positive downward; ``evaporation``
+    > 0 moistens and cools; ``autoconversion`` > 0 removes condensate.
+    """
+    elwv = constants.L_v                       # latent-ok: Zhao-Carr oracle constant (hvap)
+    eliv = constants.L_v + constants.L_f       # latent-ok: Zhao-Carr oracle constant (hvap+hfus [210])
+    eliw = eliv - elwv                         # [211]
+    rcp = 1.0 / constants.c_pd
+    eps = constants.R_d / constants.R_v
+    epsm1 = eps - 1.0
+    rdt = 1.0 / dt
+    zaodt = _ZC_ZAODT_S * rdt
+    csm1 = _ZC_CSM1 * zaodt
+    crs1 = _ZC_CRS1 * zaodt
+    crs2 = _ZC_CRS2 * zaodt
+    cr = _ZC_CR * zaodt
+    aa2 = _ZC_AA2 * zaodt
+    ke = config.evap_coeff * jnp.sqrt(rdt)     # [220, 234]
+    dtcp = dt * rcp
+    # Pre-port guard on q_c,crit -> 0 (the linear no-threshold limit), kept.
+    cmr = 1.0 / jnp.maximum(config.qc_crit, 1e-12)
+    c1 = config.coalescence_enh_coeff
+    c2 = config.bergeron_enh_coeff
+    u00k = config.rh_crit
+    prautco = config.auto_rate
+    psautco = config.psautco
+    sharpness = config.sigmoid_sharpness
+
+    dtype = jnp.result_type(T, q_v, cwm)
+    T = T.astype(dtype)
+    q_v = q_v.astype(dtype)
+    cwm = cwm.astype(dtype)
+    p_full = p_full.astype(dtype)
+    layer_mass = layer_mass.astype(dtype)
+
+    # [253-264] wmin / wmini; [297-309] columns where precipitation can form
+    # (levels 1..km-1 of the bottom->top oracle = every level but the top).
+    tem_p = p_full * _ZC_WMIN_P_SCALE
+    wmin = config.wminco_liquid * tem_p
+    wmini = config.wminco_ice * tem_p
+    eligible = jnp.any(
+        (cwm > jnp.minimum(wmin, wmini))[:, 1:], axis=1)
+
+    # Saturation specific humidity, oracle formula on the shared Tetens e_s [357-361].
+    qw = jnp.minimum(p_full, saturation_vapor_pressure(T))
+    qw = eps * qw / (p_full + epsm1 * qw)
+    qw = jnp.maximum(qw, _ZC_EPSQ)
+
+    def level(carry, x):
+        precrl1, precsl1, iwl1 = carry
+        tt, qq, ww, qw_k, wmink, wminik, mass = x
+        precrk = jnp.maximum(0.0, precrl1)
+        precsk = jnp.maximum(0.0, precsl1)
+        wwn = jnp.maximum(ww, _ZC_CLIMIT)
+        comput = eligible & ((wwn > _ZC_CLIMIT) | ((precrk + precsk) > 0.0))  # [329-337]
+        has_c = wwn > _ZC_CLIMIT
+
+        conde = dt * mass                      # (dt/g)*del  [344]
+        condt = conde * rdt
+        # The oracle forms 1/conde only in computed cells [342-346]; the guard
+        # keeps a skipped zero-mass cell's gradient finite (value-identical).
+        rconde = 1.0 / jnp.where(comput, conde, 1.0)
+        qk = jnp.maximum(_ZC_EPSQ, qq)
+        tmt0 = tt - constants.T_zero_zhao_carr
+
+        # Ice-water id [380-395]; qi = qint = qw [373-374].
+        fi = qk - u00k * qw_k
+        iwl = jnp.where(
+            tmt0 < _ZC_T_ICE_C, (fi > 0.0) | has_c,
+            jnp.where(tmt0 >= 0.0, False, iwl1 & has_c))
+        iwl = iwl & comput
+        qc = qw_k                              # (1-fiw)*qint + fiw*qi with qi = qint
+        rq_ok = qc > _ZC_QC_MIN
+        rq = jnp.where(rq_ok, qk / jnp.where(rq_ok, qc, 1.0), 0.0)
+        # Cloud cover b [411-418].
+        rqkll = jnp.minimum(1.0, rq)
+        partial = (rq >= u00k) & (rq < 1.0)
+        # 1-u00k is only formed where the oracle forms it (value-identical; keeps
+        # the gradient finite at rh_crit = 1).
+        ccr = jnp.where(
+            rq < u00k, 0.0,
+            jnp.where(rq >= 1.0, 1.0, 1.0 - _sqrt(
+                (1.0 - rqkll) / jnp.where(partial, 1.0 - u00k, 1.0))))
+
+        # Precipitation production [466-536].
+        do_auto = comput & (ccr > 0.0)
+        wws = ww
+        cwmk = jnp.maximum(0.0, wws)
+        #   ice phase
+        amaxcm_i = jnp.maximum(0.0, cwmk - wminik)
+        expf = dt * jnp.exp(_ZC_ICE_EXP_COEFF * tmt0)
+        psaut = jnp.minimum(cwmk, psautco * expf * amaxcm_i)
+        ww_i = ww - psaut
+        cwmk_i = jnp.maximum(0.0, ww_i)
+        psaci = jnp.minimum(cwmk_i, aa2 * expf * precsl1 * cwmk_i)
+        ww_i = ww_i - psaci
+        #   liquid water (SBK89 release)
+        amaxcm = jnp.maximum(0.0, cwmk - wmink)
+        tem1 = precsl1 + precrl1
+        tem2 = jnp.minimum(jnp.maximum(0.0, _ZC_F2_T_K - tt), _ZC_F2_DT_CAP_K)
+        tem = (1.0 + c1 * _sqrt(tem1 * rdt)) * (1.0 + c2 * _sqrt(tem2))
+        tem2 = amaxcm * cmr * tem / jnp.maximum(ccr, _ZC_CCR_FLOOR)
+        tem2 = jnp.minimum(_ZC_RELEASE_EXP_CAP, tem2 * tem2)
+        praut = (prautco * dt) * tem * amaxcm * (1.0 - jnp.exp(-tem2))
+        praut = jnp.minimum(praut, cwmk)
+        ww_l = ww - praut
+        ice_auto = do_auto & iwl
+        liq_auto = do_auto & ~iwl
+        ww = jnp.where(ice_auto, ww_i, jnp.where(liq_auto, ww_l, ww))
+        precsl = jnp.where(ice_auto, precsl1 + (wws - ww) * condt, precsl1)
+        precrl = jnp.where(liq_auto, precrl1 + (wws - ww) * condt, precrl1)
+        auto = (wws - ww) * rdt
+
+        # Evaporation of precipitation [562-599].
+        tmt0k = jnp.maximum(_ZC_TMT0K_MIN_C, tmt0)
+        precrk = jnp.maximum(0.0, precrl)
+        precsk = jnp.maximum(0.0, precsl)
+        amaxrq = jnp.maximum(0.0, u00k - rq) * conde
+        # Pre-port RH_crit gate (sigmoid_sharpness); 1 or 0 at the hard limit,
+        # where amaxrq is already 0 whenever the gate is 0.
+        gate = jax.nn.sigmoid(sharpness * (u00k - rq))
+        ppr = ke * amaxrq * _sqrt(precrk) * gate
+        pps = jnp.where(
+            tmt0 >= 0.0, 0.0,
+            (crs1 + crs2 * tmt0k) * amaxrq * precsk / u00k * gate)
+        rq_cap = rq >= _ZC_RQ_MIN
+        erk = jnp.where(
+            rq_cap, amaxrq * qk * rdt / jnp.where(rq_cap, rq, 1.0), precrk + precsk)
+        over = (ppr + pps) > jnp.abs(erk)
+        psum = precrk + precsk
+        rprs = erk / jnp.where(over, psum, 1.0)
+        ppr = jnp.where(over, precrk * rprs, ppr)
+        pps = jnp.where(over, precsk * rprs, pps)
+        ppr = jnp.minimum(ppr, precrk)
+        pps = jnp.minimum(pps, precsk)
+        err = jnp.where(comput, ppr * rconde, 0.0)
+        ers = jnp.where(comput, pps * rconde, 0.0)
+        precrl = jnp.where(comput, precrl - ppr, precrl)
+        precsl = jnp.where(comput, precsl - pps, precsl)
+
+        # Melting of snow [633-653].
+        melt = comput & (tmt0 > 0.0)
+        amaxps = jnp.maximum(0.0, precsl)
+        psm1 = csm1 * tmt0 * tmt0 * amaxps
+        psm2 = _ZC_CWS * cr * jnp.maximum(0.0, ww) * amaxps
+        pmelt = (psm1 + psm2) * conde
+        capped = pmelt > amaxps
+        pmelt = jnp.where(capped, amaxps, pmelt)
+        psm1 = jnp.where(capped, amaxps * rconde, psm1)
+        precrl = jnp.where(melt, precrl + pmelt, precrl)
+        precsl = jnp.where(melt, precsl - pmelt, precsl)
+        psm1 = jnp.where(melt, psm1, 0.0)
+
+        # Update t and q [664-665].
+        tt = jnp.where(
+            comput, tt - dtcp * (elwv * err + eliv * ers + eliw * psm1), tt)
+        qq = jnp.where(comput, qq + dt * (err + ers), qq)
+
+        carry = (jnp.maximum(0.0, precrl), jnp.maximum(0.0, precsl), iwl)  # [670-672]
+        return carry, (tt, qq, ww, auto, err + ers)
+
+    ncol = T.shape[0]
+    zeros = jnp.zeros((ncol,), dtype)
+    xs = tuple(jnp.moveaxis(a, 1, 0) for a in (
+        T, q_v, cwm, qw, wmin, wmini, layer_mass))
+    (precrl1, precsl1, _), ys = jax.lax.scan(
+        level, (zeros, zeros, jnp.zeros((ncol,), bool)), xs)
+    t_new, q_new, w_new, auto, evap = (jnp.moveaxis(a, 0, 1) for a in ys)
+
+    # Negative condensate filled from vapour [686-699] (every column).
+    neg = w_new < 0.0
+    tem = q_new + w_new
+    fill = neg & (tem >= 0.0)
+    drain = neg & (tem < 0.0) & (q_new > 0.0)
+    t_fix = jnp.where(fill, t_new - elwv * rcp * w_new,
+                      jnp.where(drain, t_new + elwv * rcp * q_new, t_new))
+    q_fix = jnp.where(fill, tem, jnp.where(drain, 0.0, q_new))
+    w_fix = jnp.where(fill, 0.0, jnp.where(drain, tem, w_new))
+
+    # Frozen fraction sr = 0 for trace precipitation [729-734].
+    snow = jnp.where(precrl1 + precsl1 < _ZC_SR_MIN, 0.0, precsl1)
+    return ZhaoCarrPrecpdResult(
+        T=t_fix, q_v=q_fix, cwm=w_fix,
+        rain_sfc=(precrl1 + precsl1 - snow) * rdt, snow_sfc=snow * rdt,
+        autoconversion=auto, evaporation=evap,
+    )
+
+
+def _sundqvist_step(T, q_v, hydrometeors, p_full, rho, dz, dt, config):
+    """Condensation surrogate followed by the Zhao-Carr precipitation port."""
+    _check_no_gaussian_f2_override(config)
+    sharpness = config.sigmoid_sharpness
+
+    # 1. Condensation (NOT-YET-FAITHFUL surrogate; unchanged by the port).
+    # Removes only the supersaturation ``q_v - q_sat``, with the smooth
+    # RH_crit onset gate.  Sign: POSITIVE = vapour -> cloud water.
+    q_sat = saturation_specific_humidity(T, p_full)
+    RH = q_v / jnp.clip(q_sat, 1e-10)
+    f = jax.nn.sigmoid(sharpness * (RH - config.rh_crit))
+    condensation = f * jnp.maximum(q_v - q_sat, 0.0) / dt  # [kg/kg/s]
+    # OPT-IN hard (iterated) saturation-adjustment guard (shared with the bulk
+    # warm-rain schemes).  STATIC Python ``if`` on a compile-time bool.
+    if config.hard_saturation_adjustment:
+        condensation = hard_saturation_blend(
+            condensation, T, q_v, p_full, dt, q_sat,
+            config.hard_sat_adjust_threshold,
+            config.hard_sat_max_heating_K,
+        )
+
+    # 2. Precipitation: the condensate after condensation, on the pre-step
+    # T and q_v (the pre-port coupling of the two stages).
+    cwm = hydrometeors.q_c + condensation * dt
+    zc = zhao_carr_precpd(T, q_v, cwm, p_full, rho * dz, dt, config)
+    return condensation, zc
 
 
 def diagnose_sundqvist_process_rates(
@@ -104,164 +411,27 @@ def diagnose_sundqvist_process_rates(
     dt: float,
     config: SundqvistConfig = SundqvistConfig(),
 ) -> SundqvistProcessRates:
-    """Diagnose the Sundqvist condensation, rain conversion, and evaporation terms."""
+    """Diagnose the Sundqvist condensation, precipitation-production and
+    precipitation-evaporation rates (see :class:`SundqvistProcessRates`)."""
     del p_half  # Included for signature parity with ``sundqvist_microphysics``.
-    q_c = hydrometeors.q_c
-    sharpness = config.sigmoid_sharpness
-
-    # Saturation
-    q_sat = saturation_mixing_ratio(T, p_full)
-    RH = q_v / jnp.clip(q_sat, 1e-10)
-
-    # 1. Smooth condensation activation — convert increment [kg/kg] to tendency [kg/kg/s]
-    #
-    # Sundqvist (1989) gates condensation on RH > RH_crit (partial
-    # cloud-fraction regime), but the *thermodynamic target* the
-    # condensation drives ``q_v`` toward is ``q_sat``, not
-    # ``RH_crit * q_sat``.  The previous code used
-    # ``max(q_v - RH_crit * q_sat, 0.0)`` which removed any vapor
-    # above ``0.8 * q_sat`` in a single step: at RH=1.0 the column
-    # lost ``0.2 * q_sat`` of vapor per call (verified with a
-    # T=290 K, p=80 kPa probe: dq_v_dt = -1e-5 kg/kg/s, dropping RH
-    # from 1.00 → 0.80 in one 300-s step).  Kessler at the same
-    # conditions removed zero (no supersat).  The fix removes only
-    # the *supersaturation* (``q_v - q_sat``), with ``f`` keeping
-    # the smooth RH_crit *onset* gating intact — Sundqvist's
-    # partial-cloud-fraction subgrid variance is diagnosed
-    # separately by :func:`legoesm.atmosphere.physics.clouds.cloud_fraction.sundqvist_cloud_fraction`
-    # and is not the microphysics tendency's concern.
-    f = jax.nn.sigmoid(sharpness * (RH - config.rh_crit))
-    condensation = (
-        f * jnp.maximum(q_v - q_sat, 0.0) / dt
-    )  # [kg/kg/s]
-
-    # 1b. OPT-IN hard (iterated) saturation-adjustment guard — the SAME guard,
-    # the SAME shared implementation and the SAME defaults the five bulk
-    # warm-rain schemes get, applied to Sundqvist's own smooth rate above.
-    #
-    # Sign convention (this whole block): ``condensation`` is a rate [kg/kg/s]
-    # POSITIVE = vapour -> cloud water.  The blend returns a convex combination
-    # of two NON-NEGATIVE rates (the smooth rate above is >= 0 by the
-    # ``maximum(..., 0)``; the on-curve drain is >= 0 by construction) capped
-    # from above by the on-curve drain and rate-limited only on its positive
-    # branch, so the result stays >= 0: the overlay can never turn condensation
-    # into spurious evaporation.  The caller pairs it with
-    # ``dq_v_dt = -condensation``, ``dq_c_dt = +condensation`` and
-    # ``dT_dt = +L_v*condensation/c_pd``, so c_pd*T + L_v*q_v is conserved and
-    # water is moved, not created (see ``sundqvist_microphysics``).
-    #
-    # STATIC Python ``if`` on a compile-time bool (CLAUDE.md feature-gating
-    # exception — ``jnp.where`` would trace BOTH branches).  Default False =>
-    # this line never executes and the scheme is byte-identical to the
-    # published SBK89 smooth path.
-    if config.hard_saturation_adjustment:
-        condensation = hard_saturation_blend(
-            condensation, T, q_v, p_full, dt, q_sat,
-            config.hard_sat_adjust_threshold,
-            config.hard_sat_max_heating_K,
-        )
-
-    # 2. Autoconversion (computed level-by-level INSIDE the downward scan
-    # below, because the SBK89 coalescence enhancement F1 depends on the
-    # precipitation flux falling in from above).
-    # Cap the autoconversion against the available cloud water + new
-    # condensation so an explicit Euler step (``q_c_new = q_c + dt·dq_c_dt``)
-    # never drives q_c below zero.  Without this, default
-    # ``auto_rate · dt = 1e-3·1800 = 1.8`` over ~30 min for typical
-    # ``q_c ≈ 1e-4 kg/kg`` overshoots the available mass by ~80 %.
-    qc_avail = jnp.maximum(q_c + condensation * dt, 0.0)
-    dt_safe = jnp.maximum(dt, 1.0e-12)
-
-    # SBK89 Bergeron-Findeisen enhancement F2 (per level, T-dependent): a
-    # smooth Gaussian window centred near −15 °C where the liquid-ice
-    # saturation difference e_sw − e_si (the Bergeron growth driver) peaks;
-    # ≈ 1 above freezing by construction (the Gaussian tail).  Smooth in T
-    # (AD-safe everywhere).
-    bergeron_f2 = 1.0 + config.bergeron_enh_coeff * jnp.exp(
-        -((T - config.bergeron_T_peak_K) / config.bergeron_T_width_K) ** 2
-    )
-
-    # 3. Precipitation release + sub-cloud evaporation (single downward scan)
-    #
-    # legoESM column layout convention: level index 0 = TOA, level
-    # index ``nlev-1`` = surface (``sigma_full`` runs 0→1 top→bottom;
-    # ``p_full[..., 0]`` is the lowest pressure).  ``moveaxis(..., 1,
-    # 0)`` puts the vertical axis first so :func:`jax.lax.scan`
-    # iterates TOA → surface — the correct direction for falling
-    # rain: ``P_above`` starts at zero (no rain above TOA),
-    # accumulates the autoconversion source ``P_local`` layer-by-
-    # layer on the way down, and lands at the surface as the final
-    # carry ``P_final``.  Sub-cloud evaporation reduces ``P_total``
-    # in sub-saturated layers (``evap_mask`` peaks where ``RH < RH_crit``).
-    # Sign convention: precipitation flux P is positive DOWNWARD [kg/m²/s].
-    evap_mask = jax.nn.sigmoid(sharpness * (config.rh_crit - RH))
-
-    def scan_fn(carry, x):
-        P_above = carry
-        qc_k, berg_k, evap_m, rho_k, dz_k = x
-        # SBK89 coalescence enhancement F1 = 1 + c1·√P_above from the
-        # precipitation flux entering the layer from above: falling
-        # precipitation collects cloud water, accelerating release.
-        # safe_pow guards the √P AD trap at P_above = 0 (no-precip columns).
-        coal_f1 = 1.0 + config.coalescence_enh_coeff * safe_pow(P_above, 0.5)
-        enh = coal_f1 * berg_k
-        # SBK89 release: c_0 → c_0·F1·F2 AND q_c,crit → q_c,crit/(F1·F2)
-        # (both the rate and the onset threshold are enhanced), applied to
-        # the Sundqvist (1989) base form
-        #   P_auto = c_0·q_c·(1 − exp(−(q_c/q_c,crit)²)).
-        # The threshold factor ∈ [0,1) is smooth + AD-safe (exp of a
-        # non-positive arg; → 0 as q_c → 0, → 1 for q_c ≫ q_c,crit).
-        threshold = 1.0 - jnp.exp(
-            -(qc_k * enh / jnp.maximum(config.qc_crit, 1e-12)) ** 2
-        )
-        # Donor cap: rate · dt ≤ qc_avail → rate ≤ qc_avail / dt.
-        P_auto_k = jnp.minimum(
-            config.auto_rate * enh * qc_k * threshold, qc_k / dt_safe,
-        )
-        P_total = P_above + P_auto_k * rho_k * dz_k
-        evap = config.evap_coeff * evap_m * P_total / jnp.clip(rho_k * dz_k, 1.0)
-        evap = jnp.minimum(evap, P_total / jnp.clip(rho_k * dz_k, 1.0))
-        P_out = jnp.clip(P_total - evap * rho_k * dz_k, 0.0)
-        return P_out, (P_auto_k, evap)
-
-    # Pick a working dtype that ``scan`` can carry without promotion.
-    # Under ``JAX_ENABLE_X64=1`` ``jnp.zeros``/``jnp.ones`` default to
-    # f64, so a state assembled from a mix of (f32) ``T`` and (f64)
-    # tracers ends up with f64 ``q_v``/``q_c``.  ``qc_avail`` inherits
-    # the f64 promotion from ``q_c + condensation * dt``, while a carry
-    # pinned to ``T.dtype`` (f32) would mismatch the f64 scan output.
-    # Promoting to the wider of carry/input dtype keeps ``scan`` happy
-    # without silently downcasting precipitation mass.
-    _scan_dtype = jnp.promote_types(T.dtype, qc_avail.dtype)
-    inputs = (
-        jnp.moveaxis(qc_avail.astype(_scan_dtype), 1, 0),
-        jnp.moveaxis(bergeron_f2.astype(_scan_dtype), 1, 0),
-        jnp.moveaxis(evap_mask.astype(_scan_dtype), 1, 0),
-        jnp.moveaxis(rho.astype(_scan_dtype), 1, 0),
-        jnp.moveaxis(dz.astype(_scan_dtype), 1, 0),
-    )
-    P_init = jnp.zeros(T.shape[0], dtype=_scan_dtype)
-    P_final, (auto_col, evap_col) = jax.lax.scan(scan_fn, P_init, inputs)
-    autoconversion = jnp.moveaxis(auto_col, 0, 1)
-    evaporation = jnp.moveaxis(evap_col, 0, 1)
+    condensation, zc = _sundqvist_step(
+        T, q_v, hydrometeors, p_full, rho, dz, dt, config)
     return SundqvistProcessRates(
         condensation=condensation,
-        autoconversion=autoconversion,
-        evaporation=evaporation,
-        precipitation=P_final,
+        autoconversion=zc.autoconversion,
+        evaporation=zc.evaporation,
+        precipitation=zc.rain_sfc + zc.snow_sfc,
     )
 
 
 __physics_contract__ = {
     "summary": (
-        "Sundqvist (1978)/SBK89 large-scale diagnostic condensation: simplified "
-        "RH-gated vapor condensation and sub-cloud evaporation of diagnostic "
-        "precipitation, plus the Sundqvist (1978) "
-        "autoconversion release P_auto=c_0*q_c*(1-exp(-(q_c/q_c,crit)^2)), enhanced "
-        "per SBK89 by coalescence with precipitation from above (F1=1+c1*sqrt(P)) "
-        "and a Bergeron-Findeisen mixed-phase factor (F2, a smooth Gaussian-in-T "
-        "proxy for SBK89's e_sw-e_si driver). See the module docstring's "
-        "Faithfulness section for the faithful-form vs surrogate split."
+        "Sundqvist large-scale microphysics: a NOT-YET-FAITHFUL RH-gated "
+        "condensation surrogate followed by a literal port of the Zhao-Carr "
+        "precipitation scheme (ccpp-physics v7.0.1 zhaocarr_precpd_run): SBK89 "
+        "liquid release with cloud cover b, coalescence F1 and Bergeron F2; ice "
+        "autoconversion and accretion by snow; rain evaporation, snow "
+        "sublimation and melting; diagnostic (instant) precipitation."
     ),
     "inputs": {
         "T": "K", "q_v": "kg/kg", "hydrometeors.q_c": "kg/kg",
@@ -271,21 +441,28 @@ __physics_contract__ = {
     "outputs": {
         "dT_dt": "K/s", "dq_v_dt": "kg/kg/s", "dq_c_dt": "kg/kg/s",
         "dq_r_dt": "kg/kg/s", "precipitation": "kg/m^2/s",
+        "precip_frozen": "kg/m^2/s",
     },
     "sign_convention": (
-        "z up; surface at [:, -1]. Latent heating dT_dt is tied to the "
-        "diagnosed condensation rate via L_v. Condensate above the threshold is "
-        "converted to precipitation which leaves the column (precipitation "
-        ">= 0), so column moisture is NOT conserved -- no contract-level "
-        "conservation is claimed. Cloud water and q_v stay >= 0."
+        "z up; level 0 = model top, surface at [:, -1]. Precipitation is "
+        "positive downward and leaves the column: int (dq_v + dq_c + dq_r) "
+        "rho dz = -precipitation. Condensation heats with L_v; rain "
+        "evaporation cools with L_v, snow sublimation with L_v+L_f, melting "
+        "with L_f (Zhao-Carr); conversion of condensate to precipitation "
+        "carries no latent heat."
     ),
     "conserves": ["none"],
     "differentiable": True,
-    "reference": "Sundqvist, Berge & Kristjansson (1989), Mon. Wea. Rev. 117, 1641-1657",
+    "reference": (
+        "Sundqvist, Berge & Kristjansson (1989), Mon. Wea. Rev. 117, 1641-1657; "
+        "Zhao & Carr (1997), Mon. Wea. Rev. 125, 1931-1953; oracle "
+        "NCAR/ccpp-physics v7.0.1 zhaocarr_precpd.f"
+    ),
     "idealized_test": (
-        "tests/unit/test_physics_microphysics.py — RH above the critical "
-        "threshold forms cloud with L_v heating; supersaturation is removed; "
-        "condensate above the conversion threshold rains out; q_c, q_v >= 0."
+        "tests/atmosphere/microphysics/unit/test_sundqvist_zhao_carr_oracle.py "
+        "-- the precipitation port against the running Zhao-Carr oracle; "
+        "tests/unit/test_physics_microphysics.py -- supersaturation removed, "
+        "column water budget closes, q_r drained."
     ),
 }
 
@@ -301,7 +478,7 @@ def sundqvist_microphysics(
     dt: float,
     config: SundqvistConfig = SundqvistConfig(),
 ) -> MicrophysicsOutput:
-    """Compute Sundqvist diagnostic condensation tendencies.
+    """Compute Sundqvist tendencies (condensation surrogate + Zhao-Carr precipitation).
 
     Parameters
     ----------
@@ -312,69 +489,27 @@ def sundqvist_microphysics(
     -------
     MicrophysicsOutput
     """
+    del p_half
     ncol, nlev = T.shape
-    rates = diagnose_sundqvist_process_rates(
-        T=T,
-        q_v=q_v,
-        hydrometeors=hydrometeors,
-        p_full=p_full,
-        p_half=p_half,
-        rho=rho,
-        dz=dz,
-        dt=dt,
-        config=config,
-    )
+    condensation, zc = _sundqvist_step(
+        T, q_v, hydrometeors, p_full, rho, dz, dt, config)
 
-    # 4. Latent heating
-    net_cond = rates.condensation - rates.evaporation
-    dT_dt = constants.L_v * net_cond / constants.c_pd
+    # Tendencies = condensation + the Zhao-Carr state update over the step.
+    dT_dt = constants.L_v * condensation / constants.c_pd + (zc.T - T) / dt
+    dq_v_dt = -condensation + (zc.q_v - q_v) / dt
+    dq_c_dt = (zc.cwm - hydrometeors.q_c) / dt
 
-    # Tendencies.  Sundqvist is a *diagnostic* large-scale precipitation
-    # scheme: rain produced by autoconversion is treated as falling
-    # instantly through the column (the bottom-up scan in
-    # ``diagnose_sundqvist_process_rates`` accumulates the layer
-    # autoconversion source into a downward mass flux ``P_total`` and
-    # subtracts sub-cloud evaporation, so ``rates.precipitation`` is the
-    # surface flux).  Adding ``autoconversion - evaporation`` to ``dq_r_dt``
-    # would also accumulate that mass as a ``q_r`` tracer, double-counting
-    # it: the column would lose water to surface precipitation AND grow
-    # ``q_r`` per step.
-    #
-    # Diagnostic-rain semantics (full): the scheme should *own* the q_r
-    # tracer, not just leave it untouched.  Any q_r passed in (from a
-    # prior step under a prognostic scheme like Kessler, or from a
-    # warm-start) is treated as already-falling rain and drained to the
-    # surface in one step.  The drained mass is added to the surface
-    # precipitation flux so the column water budget closes (with the
-    # ``rho*dz`` mass weighting used consistently by the tendencies and the
-    # autoconversion precip — NOT ``dp/g``):
-    #     int (dq_v + dq_c + dq_r) rho dz  =  -precipitation
-    # In a steady state with q_r = 0 input, ``dq_r_dt = 0`` and the
-    # column budget reduces to ``int (dq_v + dq_c) rho dz = -precipitation``.
-    dq_v_dt = -rates.condensation + rates.evaporation
-    dq_c_dt = rates.condensation - rates.autoconversion
+    # Diagnostic-rain semantics (pre-port, not part of the oracle): any q_r
+    # passed in is treated as already-falling rain and drained to the surface
+    # in one step, with the same rho*dz mass weighting as the tendencies so
+    #     int (dq_v + dq_c + dq_r) rho dz  =  -precipitation.
     dt_safe = jnp.maximum(dt, 1e-10)
     q_r_in = jnp.clip(hydrometeors.q_r, 0.0, None)
     dq_r_dt = -q_r_in / dt_safe
-    # Drained mass [kg/m^2/s] is added to the surface precipitation
-    # diagnostic so total column water exits the column at the correct
-    # rate.  ``rates.precipitation`` is the autoconversion-driven surface
-    # flux; ``q_r_drain_flux`` is the column-integrated drain.
-    #
-    # The drain MUST use the SAME ``rho*dz`` mass weighting as the
-    # tracer tendencies (``dq_r_dt`` removes ``q_r_in`` per unit air,
-    # column-integrated as ``int dq_r * rho * dz``) and as the
-    # autoconversion-driven precipitation (``rates.precipitation`` comes
-    # from ``P_flux_layer = P_auto * rho * dz``).  An earlier form used
-    # ``int q_r * dp / (g * dt)`` (the ``dp/g`` hydrostatic mass), which
-    # closes the column water budget only when ``dp/g == rho*dz``
-    # (hydrostatic balance) and leaks on a non-hydrostatically-consistent
-    # profile — a latent mass-weighting inconsistency within one scheme.
     q_r_drain_flux = jnp.sum(q_r_in * rho * dz, axis=1) / dt_safe
-    precipitation = rates.precipitation + q_r_drain_flux
+    precipitation = zc.rain_sfc + zc.snow_sfc + q_r_drain_flux
 
-    # Pin dtype to the input precision so we never silently promote
-    # the unused-tendency placeholders to f64 under x64 mode.
+    # Pin dtype to the input precision for the unused-tendency placeholders.
     z = jnp.zeros((ncol, nlev), dtype=T.dtype)
     return MicrophysicsOutput(
         dT_dt=dT_dt,
@@ -388,4 +523,5 @@ def sundqvist_microphysics(
         dN_r_dt=z,
         dN_i_dt=z,
         precipitation=precipitation,
+        precip_frozen=zc.snow_sfc,   # the oracle's sr * rn
     )

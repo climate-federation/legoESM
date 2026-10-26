@@ -89,6 +89,7 @@ from legoesm.atmosphere.physics._shared import (
     buoyancy_coefficient,
     exner_function,
     louis_stability_functions,
+    half_to_iface_zero_ends,
 )
 from legoesm.atmosphere.physics.turbulence.config import YSUConfig
 from legoesm.atmosphere.physics.turbulence.output import TurbulenceOutput
@@ -96,9 +97,13 @@ from legoesm.atmosphere.physics.turbulence.pbl_height import (
     first_crossing_height,
 )
 from legoesm.atmosphere.physics.turbulence.surface_layer import (
+    latent_enthalpy_correction,
+    surface_moisture_flux,
     compute_surface_fluxes,
+    surface_fluxes_at_lowest_level,
 )
 from legoesm.atmosphere.physics.turbulence.vertical_diffusion import (
+    diagnostic_heat_flux_full,
     implicit_vertical_diffusion,
 )
 from legoesm.atmosphere.physics.turbulence.holtslag_boville import (
@@ -239,10 +244,9 @@ def ysu_turbulence(
     Ri = N2 / S2  # (ncol, nlev-1)
 
     # ----- Surface fluxes -----
-    tau_x, tau_y, shflx, lhflx, ustar = compute_surface_fluxes(
+    tau_x, tau_y, shflx, lhflx, ustar = surface_fluxes_at_lowest_level(
         u[:, -1], v[:, -1], T[:, -1], q_v[:, -1],
-        T_sfc, q_sfc, rho[:, -1], config.surface,
-    )
+        T_sfc, q_sfc, rho[:, -1], config.surface, z_full[:, -1] - z_half[:, -1])
     ustar = jnp.clip(ustar, 1e-4, None)  # coeff-ok: u* floor [m/s]
 
     # ----- PBL height via smooth bulk-Ri (Troen-Mahrt 1986 / Hong et al. 2006)
@@ -307,7 +311,7 @@ def ysu_turbulence(
     )
     w_star_guess = jnp.cbrt(jnp.maximum(buoy_guess, 1e-20))
     w_s_sfc = jnp.cbrt(
-        ustar ** 3 + config.ws_conv_coeff * constants.kappa_vk
+        ustar ** 3 + config.ws_conv_coeff * constants.kappa_von_karman
         * w_star_guess ** 3 * config.sfc_excess_zfrac
     )
     # Thermal excess θ_T = b·(w'θ')_0 / w_s, only for unstable (kbfs>0).
@@ -340,11 +344,11 @@ def ysu_turbulence(
     # convective enhancement and was systematically under-mixed.
     w_s = jnp.cbrt(
         ustar[:, None] ** 3
-        + config.ws_conv_coeff * constants.kappa_vk
+        + config.ws_conv_coeff * constants.kappa_von_karman
         * w_star[:, None] ** 3 * z_norm_clip
     )
     Km_profile = (
-        constants.kappa_vk * w_s * z_half_inner * (1.0 - z_norm_clip) ** 2
+        constants.kappa_von_karman * w_s * z_half_inner * (1.0 - z_norm_clip) ** 2
     )
 
     # Local Ri-based Km above PBL: shared Blackadar mixing-length helper
@@ -400,10 +404,10 @@ def ysu_turbulence(
     # K-profile magnitude κ·w_s(h)·h·(4/27) (see _KPROFILE_PEAK_FRAC), with
     # w_s(h) the mixed-layer velocity scale evaluated at z = h.
     w_s_h = jnp.cbrt(
-        ustar ** 3 + config.ws_conv_coeff * constants.kappa_vk * w_star ** 3
+        ustar ** 3 + config.ws_conv_coeff * constants.kappa_von_karman * w_star ** 3
     )
     K_ent_cap = (
-        _KPROFILE_PEAK_FRAC * constants.kappa_vk * w_s_h * h_pbl
+        _KPROFILE_PEAK_FRAC * constants.kappa_von_karman * w_s_h * h_pbl
     )[:, None]
     K_ent_h = jnp.minimum(K_ent_h, K_ent_cap) * envelope
 
@@ -436,8 +440,9 @@ def ysu_turbulence(
 
     sflx_u = tau_x
     sflx_v = tau_y
-    sflx_T = shflx / constants.c_pd
-    sflx_q = lhflx / constants.L_v
+    sflx_q = surface_moisture_flux(config.surface, lhflx, T_sfc)
+    # Heat BC carries the latent enthalpy correction (water at L(T) vs L_v).
+    sflx_T = (shflx + latent_enthalpy_correction(lhflx, sflx_q)) / constants.c_pd
 
     # ----- Nonlocal countergradient (Troen-Mahrt 1986 / Hong et al. 2006) -----
     # γ_c = b·(w'θ')_0 / (w_s0·h)  [K/m] (Troen & Mahrt 1986; Hong et al.
@@ -473,6 +478,13 @@ def ysu_turbulence(
     )
     q_new = implicit_vertical_diffusion(q_v, Kh_half, rho, dz_layer, dz_half, dt, sflx_q)
 
+    # Q1 diagnostic (LES-suite): NONLOCAL heat flux F = -Kh·(∂θ/∂z − γ) with the
+    # scheme's own countergradient γ (gamma_theta_half), θ = T·exner_pref [=T/Π].
+    # Pure diagnostic — does NOT feed tendencies.
+    wtheta_flux = diagnostic_heat_flux_full(
+        T * exner_pref, dz_half, Kh_half, gamma_theta_half,
+    )
+
     return TurbulenceOutput(
         du_dt=(u_new - u) / dt,
         dv_dt=(v_new - v) / dt,
@@ -481,7 +493,9 @@ def ysu_turbulence(
         Km=Km_full,
         Kh=Kh_full,
         shflx=shflx,
-        lhflx=lhflx,
+        lhflx=lhflx, evap_sfc=sflx_q,
         ustar=ustar,
         h_pbl=h_pbl,
+        wtheta_flux=wtheta_flux,
+        Kh_iface=half_to_iface_zero_ends(Kh_half),
     )

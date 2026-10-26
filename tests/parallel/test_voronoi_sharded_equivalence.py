@@ -272,3 +272,44 @@ class TestVoronoiShardedEquivalence:
                 o, r, atol=atol, rtol=rtol,
                 err_msg=f"{name}: {devices}-device drift exceeds float-pt envelope",
             )
+
+
+def test_sharded_borrow_without_mass_fix_gets_real_cell_area():
+    """The sharded floors pass areaCell to the borrow's global residual; with
+    fix_mass=False that array must still be the real mesh area.  Net-negative
+    columns force the global residual to run; the sharded q must then match
+    the serial step, which borrows with the true areaCell."""
+    _need_multi_device(2)
+    from legoesm.grids.vertical import create_sigma_coordinate
+    from legoesm.grids.voronoi import create_voronoi_mesh
+    from legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas import (
+        MPASPrimitiveEquationModel, MPASPrimitiveEquationConfig,
+    )
+    from legoesm.atmosphere.forcing.idealized.held_suarez import (
+        held_suarez_init_mpas,
+    )
+    from legoesm.parallel.voronoi_partition import reorder_voronoi_for_sharding
+    from legoesm.parallel.mesh import create_voronoi_device_mesh, replicate_pytree
+    from legoesm.parallel.sharded_dynamics import make_voronoi_sharded_step
+
+    mesh = reorder_voronoi_for_sharding(create_voronoi_mesh(subdivision_level=3), 2)
+    sigma = create_sigma_coordinate(6)
+    cfg = MPASPrimitiveEquationConfig(
+        fix_mass=False, conservative_tracer_clamp=True,
+        time_integrator="ssp_rk3")
+    state = held_suarez_init_mpas(mesh, sigma)
+    ncell, nlev = state.T.data.shape
+    q = np.random.default_rng(0).uniform(0.0, 1e-3, (ncell, nlev))
+    q[: ncell // 10] = -1e-4          # whole columns net-negative
+    state = state._replace(tracers={"q_v": state.p_s.replace(data=jnp.asarray(q))})
+
+    ref = MPASPrimitiveEquationModel(mesh, sigma, cfg).step(state, 75.0)
+    dev = create_voronoi_device_mesh(
+        nCells=mesh.nCells, nEdges=mesh.nEdges, nVertices=mesh.nVertices,
+        n_devices=2)
+    model = MPASPrimitiveEquationModel(replicate_pytree(mesh, dev), sigma, cfg)
+    out = make_voronoi_sharded_step(model, dev)(state, 75.0)
+    arr = np.asarray(out.tracers["q_v"].data)
+    assert np.isfinite(arr).all() and arr.min() >= 0.0
+    np.testing.assert_allclose(
+        arr, np.asarray(ref.tracers["q_v"].data), rtol=1e-6, atol=1e-12)

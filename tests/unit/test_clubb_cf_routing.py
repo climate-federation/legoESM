@@ -4,9 +4,10 @@ Covers the routing contract that connects the turbulence WRITE side
 (TurbulenceOutput.cloud_fraction) to the radiation READ side
 (compute_cloud_properties cloud_fraction_override) through PhysicsState:
 
-  * ``_carry_update_with_cloud_fraction`` returns a MULTI-FIELD dict (carry +
-    cloud_fraction) only when the scheme diagnosed a cf, else the bare carry
-    (byte-identical) — this is what combined.py merges into PhysicsState;
+  * ``_carry_update_with_cloud_fraction`` returns a MULTI-FIELD dict: the
+    carry, the diagnosed PBL height ``pblh`` (always; CAM pbuf pblh, read by
+    ZM one step later) and ``cloud_fraction`` when the scheme diagnosed one —
+    this is what combined.py merges into PhysicsState;
   * the static gate raises LOUDLY on misconfiguration (flag set without a
     cf-producing diagnostic-CLUBB closure) — never a silent no-op;
   * the READ side is wired for hydrostatic only (non-hydrostatic raises);
@@ -41,12 +42,14 @@ def _turb_out(cf):
 
 
 class TestCarryPackaging:
-    def test_no_cf_returns_bare_carry(self):
-        """Scheme without a PDF cloud closure (cf None) => bare carry value, the
-        pre-feature (value, not dict) contract."""
+    def test_no_cf_returns_carry_and_pblh(self):
+        """Scheme without a PDF cloud closure (cf None) => the carry and the
+        diagnosed PBL height, no cloud_fraction key."""
         carry = jnp.ones((2, 3))
-        out = _carry_update_with_cloud_fraction("tke", carry, _turb_out(None))
-        assert out is carry  # identity: byte-identical path
+        tout = _turb_out(None)
+        out = _carry_update_with_cloud_fraction("tke", carry, tout)
+        assert isinstance(out, dict) and set(out) == {"tke", "pblh"}
+        assert out["tke"] is carry and out["pblh"] is tout.h_pbl
 
     def test_cf_returns_multifield_dict(self):
         """CLUBB (cf set) => dict co-locating the carry AND cloud_fraction so
@@ -55,16 +58,16 @@ class TestCarryPackaging:
         cf = jnp.full((2, 3), 0.3)
         out = _carry_update_with_cloud_fraction("tke", carry, _turb_out(cf))
         assert isinstance(out, dict)
-        assert set(out) == {"tke", "cloud_fraction"}
+        assert set(out) == {"tke", "cloud_fraction", "pblh"}
         assert bool(jnp.array_equal(out["tke"], carry))
         assert bool(jnp.array_equal(out["cloud_fraction"], cf))
 
     def test_cf_with_none_carry_field_only_cloud_fraction(self):
         """A diagnostic scheme with no prognostic carry still hands back the
-        cloud fraction (single-key dict)."""
+        cloud fraction and the PBL height."""
         cf = jnp.full((2, 3), 0.2)
         out = _carry_update_with_cloud_fraction(None, None, _turb_out(cf))
-        assert isinstance(out, dict) and set(out) == {"cloud_fraction"}
+        assert isinstance(out, dict) and set(out) == {"cloud_fraction", "pblh"}
 
 
 def _cfg(turbulence="clubb", clubb=None, use_clubb_cf=True):
@@ -82,12 +85,26 @@ class TestStaticGate:
         with pytest.raises(ValueError, match="cloud-fraction-producing"):
             make_physics(_cfg(turbulence="louis"), model_type="hydrostatic")
 
-    def test_flag_with_prognostic_clubb_raises(self):
-        """Prognostic CLUBB carries packed moments, not a diagnosed cloud
-        fraction => still refuse."""
+    def test_flag_with_prognostic_clubb_is_accepted(self):
+        """Prognostic CLUBB is now a LEGAL cloud-fraction source.
+
+        This used to refuse, on the grounds that the prognostic path carried
+        "packed moments, not a diagnosed cloud fraction". That was true of its
+        OUTPUT and never of the closure: the moment advance computes the
+        post-advance PDF cloud fraction and simply did not publish it. It does
+        now, and its variance is carried state rather than a mixing-length
+        estimate re-derived each step, which makes it the better source of the
+        two rather than an unsupported one.
+        """
+        make_physics(_cfg(clubb=CLUBBConfig(prognostic=True)),
+                     model_type="hydrostatic")
+
+    def test_flag_without_clubb_still_raises(self):
+        """The guard must still bite for a closure that produces no cloud
+        fraction at all -- otherwise the relaxation above would have removed
+        the check rather than widened it."""
         with pytest.raises(ValueError, match="cloud-fraction-producing"):
-            make_physics(_cfg(clubb=CLUBBConfig(prognostic=True)),
-                         model_type="hydrostatic")
+            make_physics(_cfg(turbulence="louis"), model_type="hydrostatic")
 
     def test_non_hydrostatic_raises(self):
         """READ side is wired for hydrostatic only; a request on another dycore

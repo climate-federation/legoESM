@@ -3,7 +3,7 @@
 calibration (``scripts/run/train_carbon_params.py --with-sif``).
 
 Science-grade data-prep FOLLOW-UP promised by
-:func:`legoesm.land.carbon.sif_observations.load_gridded_sif` and
+:data:`legoesm.land.carbon.sif_observations.SIF_VAR_CANDIDATES` and
 :mod:`legoesm.land.carbon.sif_forward`: fetch a PUBLIC gridded satellite SIF product,
 reduce it to a growing-season climatology, regrid it onto the surfdata cover grid, and
 write it in the MODEL's emitted-photon-flux units so the ``sif`` calibration term compares
@@ -12,14 +12,14 @@ like with like.  Mirrors the ERA5 land-forcing builder
 (:func:`reduce_sif_to_climatology`, unit-tested offline) separated from the networked
 fetch wrapper (:func:`_fetch_caltech_sif740`).
 
-Output contract (what ``load_gridded_sif`` reads via ``--sif-obs``)
+Output contract (what ``load_gridded_obs`` reads via ``--sif-obs``)
 ------------------------------------------------------------------
 A NetCDF with dims ``(lat, lon)`` on the SURFDATA cover grid (read from ``--surf-path``
 via the canonical :func:`legoesm.land.surface_data.sources.clm5_surfdata.read_clm5_cover_veg`
 so ``nlat*nlon`` == the cover ``ncell`` in the SAME row-major orientation), one variable
 ``sif`` [umol m-2 s-1] (the model's emitted top-of-canopy fluorescence PHOTON FLUX, the
 :func:`legoesm.land.canopy.sif.leaf_sif` unit), with NaN preserved over unobserved cells
-(ocean, polar night, persistent cloud) -- ``load_gridded_sif`` excludes NaN from the
+(ocean, polar night, persistent cloud) -- ``load_gridded_obs`` excludes NaN from the
 per-archetype cover-weighted mean, so a gap is NEVER fabricated to 0.
 
 Data source + access (probed reachable from a Ginsburg compute node 2026-07-09)
@@ -50,7 +50,7 @@ make the ``sif`` MSE term SCALE-ROBUST (and comparable to the SOC term), the def
 area-weighted mean equals :data:`_SIF_REFERENCE_MEAN_UMOL` (the model's O(1-10) emitted-SIF
 scale) -- a PATTERN-PRESERVING rescale (one multiplicative constant, spatial structure
 untouched).  ``--no-rescale`` writes the raw absolute physical conversion instead.  Either
-way the file is genuine umol m-2 s-1, honouring the ``load_gridded_sif`` unit contract.
+way the file is genuine umol m-2 s-1, honouring the ``load_gridded_obs`` unit contract.
 
 Aggregation: growing season, not annual mean
 --------------------------------------------
@@ -135,7 +135,7 @@ _GROWING_SEASON_ACTIVE_FRACTION = 0.5
 _SIF_REFERENCE_MEAN_UMOL = 5.0
 
 # --- output contract ---
-_OUT_VAR = "sif"                  # first name load_gridded_sif auto-detects
+_OUT_VAR = "sif"                  # first name in SIF_VAR_CANDIDATES
 _OUT_DIMS = ("lat", "lon")
 
 
@@ -205,7 +205,7 @@ def growing_season_mean(
     non-vegetated ground) there is no productive season, so it FALLS BACK to the plain
     finite-month mean -- a small near-zero / negative value that faithfully reflects "no
     productivity" rather than being silently dropped to NaN.  A cell that is all-NaN (never
-    observed) stays NaN.  Nothing is floored to 0 (no fabrication); ``load_gridded_sif``
+    observed) stays NaN.  Nothing is floored to 0 (no fabrication); ``load_gridded_obs``
     excludes the remaining NaN gaps from the per-archetype mean.
     """
     m = np.asarray(monthly, dtype=np.float64)
@@ -457,7 +457,7 @@ def read_target_grid(surf_path: str):
 
     The SAME reader ``build_global_carbon_ic._load_clm5_cover_soil`` (the trainer's
     ``clm5_surfdata`` cover path) uses -- so the written SIF grid matches the cover
-    ``ncell = nlat*nlon`` in the SAME orientation and ``load_gridded_sif``'s row-major
+    ``ncell = nlat*nlon`` in the SAME orientation and ``load_gridded_obs``'s row-major
     reshape aligns cell-for-cell (no re-derived grid).
     """
     from legoesm.land.surface_data.sources.clm5_surfdata import read_clm5_cover_veg

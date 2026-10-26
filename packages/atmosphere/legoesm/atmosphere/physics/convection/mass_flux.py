@@ -49,7 +49,7 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
-from legoesm.thermo import saturation_mixing_ratio
+from legoesm.thermo import saturation_specific_humidity
 from legoesm.timestepping.tridiagonal import thomas_solve_batched
 from legoesm.atmosphere.physics._shared import (
     compute_layer_dz,
@@ -760,7 +760,7 @@ def mass_flux_convection_from_closure(
     dilution = jnp.exp(-config.epsilon_0 * z)
     T_u = dilution * T_moist + (1.0 - dilution) * T
     q_v_sfc = q_v[:, -1:]
-    q_sat_moist = saturation_mixing_ratio(T_moist, p_full)
+    q_sat_moist = saturation_specific_humidity(T_moist, p_full)
     q_v_u_undiluted = jnp.minimum(q_sat_moist, q_v_sfc)
     q_c_u_undiluted = jnp.clip(q_v_sfc - q_sat_moist, 0.0, None)
     q_v_u = dilution * q_v_u_undiluted + (1.0 - dilution) * q_v
@@ -804,6 +804,7 @@ def mass_flux_convection_from_closure(
         cape=cape,
         convective_mask=convective_mask,
         dq_r_conv_dt=dq_r_conv_dt,
+        precip_frozen_sfc=jnp.zeros_like(cape),  # L_v-only: liquid at sfc (F29)
     )
 
 
@@ -949,7 +950,7 @@ def edmf_convection(
     dilution = jnp.exp(-config.epsilon_0 * z)
     T_u = dilution * T_moist + (1.0 - dilution) * T
     q_v_sfc = q_v[:, -1:]
-    q_sat_moist = saturation_mixing_ratio(T_moist, p_full)
+    q_sat_moist = saturation_specific_humidity(T_moist, p_full)
     q_v_u_undiluted = jnp.minimum(q_sat_moist, q_v_sfc)
     q_c_u_undiluted = jnp.clip(q_v_sfc - q_sat_moist, 0.0, None)
     q_v_u = dilution * q_v_u_undiluted + (1.0 - dilution) * q_v
@@ -1023,5 +1024,67 @@ def edmf_convection(
         cape=cape,
         convective_mask=convective_mask,
         dq_r_conv_dt=dq_r_conv_dt,
+        precip_frozen_sfc=jnp.zeros_like(cape),  # L_v-only: liquid at sfc (F29)
     )
     return conv_out, a_u_new
+
+
+# Fixed source constants (cumastrn.F90:762-768, main 8f6f722) -- do not
+# tune here; verbatim source literals of the ZTAURES resolution function.
+ZTAURES_DX_COEFF = 1.60        # cumastrn.F90:762 ZTAURES=1.0+1.60*ZDX/125.E3
+ZTAURES_REF_DX = 125.0e3       # cumastrn.F90:762 reference grid spacing (m)
+ZTAURES_FINE_DX = 8.0e3        # cumastrn.F90:764 fine-resolution threshold (m)
+ZTAURES_MAX = 3.0              # cumastrn.F90:768 ZTAURES=MIN(3.0,ZTAURES)
+
+
+def ifs_ztaures(dx_m):
+    """Resolution-dependent adjustment timescale, cumastrn.F90:762-768.
+
+    Source (LNEWTAU = .FALSE., deterministic Earth branch)::
+
+        ZTAURES=1.0_JPRB+1.60_JPRB*ZDX(JL)/125.E3_JPRB
+        ! for the 10-1 km resolution range increase ZTAURES
+        IF(ZDX(JL)<8.E3_JPRB) THEN
+          ZTAURES=1.0_JPRB+(LOG(8.E3_JPRB/ZDX(JL)))**2
+        ENDIF
+        ...
+        IF(ZDX(JL)>125.E3_JPRB) ZTAURES=MIN(3.0_JPRB,ZTAURES)
+
+    Shared public helper (used by the bechteld and ifs_closure closures).
+
+    Precision: for a python/numpy scalar the branch test and the
+    logarithm are computed in double-precision python floats (math.log)
+    and a python float is returned -- with x64 disabled, converting to a
+    JAX array first could round a dx just below 8000 m up to 8000 and
+    flip the discontinuous branch.  The jnp path is used only for traced
+    / array inputs.
+
+    LEGACY SENTINEL: dx <= 0 keeps the resolution-agnostic factor 1.0.
+    The production BechtoldConfig default is dx_m = 0.0, so this sentinel
+    preserves the shipped behaviour on both paths.
+    """
+    import math
+
+    import numpy as np
+
+    if isinstance(dx_m, (bool, int, float, np.bool_, np.integer, np.floating)):
+        dx = float(dx_m)
+        if dx <= 0.0:
+            return 1.0                                        # legacy sentinel
+        dx = max(dx, 1.0e2)                                   # :762 floor (m)
+        if dx < ZTAURES_FINE_DX:
+            ztr = 1.0 + math.log(ZTAURES_FINE_DX / dx) ** 2
+        else:
+            ztr = 1.0 + ZTAURES_DX_COEFF * dx / ZTAURES_REF_DX
+        if dx > ZTAURES_REF_DX:
+            ztr = min(ZTAURES_MAX, ztr)
+        return ztr
+
+    # traced / array path
+    dx_in = jnp.asarray(dx_m)
+    dx = jnp.maximum(dx_in, 1.0e2)             # cumastrn.F90:762 floor (m)
+    ztr = 1.0 + ZTAURES_DX_COEFF * dx / ZTAURES_REF_DX
+    ztr_fine = 1.0 + jnp.log(ZTAURES_FINE_DX / dx) ** 2        # dx < 8e3 m
+    ztr = jnp.where(dx < ZTAURES_FINE_DX, ztr_fine, ztr)
+    ztr = jnp.where(dx > ZTAURES_REF_DX, jnp.minimum(ZTAURES_MAX, ztr), ztr)
+    return jnp.where(dx_in > 0.0, ztr, 1.0)    # legacy sentinel: dx <= 0 -> 1.0

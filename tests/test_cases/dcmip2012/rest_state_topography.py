@@ -128,6 +128,95 @@ def rest_state_topography_init_latlon(
 
 
 # ---------------------------------------------------------------------------
+# Stratified (constant-lapse-rate) variant of the same rest state
+# ---------------------------------------------------------------------------
+
+GAMMA = 0.0065        # Constant lapse rate [K/m] (US Standard troposphere)
+
+
+def lapse_rate_state_topography_init_latlon(
+    grid,
+    sigma_coord: SigmaCoordinate | HybridSigmaPressureCoordinate,
+    *,
+    h_0: float = H_0,
+    T_init: float = T_0,
+    gamma: float = GAMMA,
+) -> HydrostaticState:
+    """Rest state over the same mountain, but STRATIFIED (#1029).
+
+    The DCMIP 2-0-0 state above is isothermal, so ``grad T = 0`` identically
+    and the temperature-gradient part of the pressure-gradient force,
+    ``-R_d * integral of grad(T_v) d ln p``, is never exercised: the balance it
+    certifies is only the one between ``-grad(Phi)`` and the surface-pressure
+    correction.  A terrain-following discretisation can pass that and still be
+    inconsistent in the temperature term, which is the part that switches on
+    the moment the atmosphere is stratified -- i.e. in every real run.
+
+    This variant uses the exact constant-lapse-rate atmosphere
+
+        T(z) = T_init - gamma * z ,
+        p(z) = P_0 * (1 - gamma * z / T_init) ** (g / (R_d * gamma)) ,
+
+    whose temperature is a function of PRESSURE alone,
+
+        T(p) = T_init * (p / P_0) ** (R_d * gamma / g) ,
+
+    so it is still an EXACT hydrostatic state at rest, and the correct answer
+    is still "stays at rest indefinitely".  But because the model's levels are
+    terrain-following, ``p`` -- and therefore ``T`` -- varies horizontally
+    along a coordinate surface wherever the terrain slopes, so the temperature
+    integral now carries a real signal that must cancel discretely.
+
+    ``T`` is evaluated on the model's OWN full-level pressures (via
+    ``pressure_from_hybrid`` / ``pressure_from_sigma``) rather than on a
+    re-derived ladder, so the initial state is hydrostatically consistent with
+    the coordinate the dycore actually integrates.
+    """
+    from legoesm.grids.vertical import (
+        pressure_from_hybrid, pressure_from_sigma,
+    )
+
+    if gamma <= 0.0:
+        raise ValueError(
+            "gamma must be > 0 (a zero lapse rate reproduces the isothermal "
+            f"rest state, which is what this variant exists to escape); got {gamma!r}")
+
+    n_lat = grid.n_lat
+    n_lon = grid.n_lon
+    R = float(grid.radius)
+
+    lat_b = jnp.broadcast_to(jnp.asarray(grid.lat)[:, None], (n_lat, n_lon))
+    lon_b = jnp.broadcast_to(jnp.asarray(grid.lon)[None, :], (n_lat, n_lon))
+
+    z_s = dcmip_2_0_0_mountain(lon_b, lat_b, R, h_0=h_0)
+    phis = constants.g * z_s
+
+    # Surface pressure of the constant-lapse-rate atmosphere at terrain height.
+    exponent = constants.g / (constants.R_d * gamma)
+    p_s = P_0 * (1.0 - gamma * z_s / T_init) ** exponent
+
+    if isinstance(sigma_coord, HybridSigmaPressureCoordinate):
+        p_full = pressure_from_hybrid(sigma_coord, p_s, full=True)
+    else:
+        p_full = pressure_from_sigma(sigma_coord.sigma_full, p_s)
+
+    # T(p) for the same atmosphere -- the inverse of p(z) above.
+    T_data = T_init * (p_full / P_0) ** (constants.R_d * gamma / constants.g)
+
+    dims_3d = ("lat", "lon", "level")
+    dims_2d = ("lat", "lon")
+    zeros_3d = jnp.zeros((n_lat, n_lon, sigma_coord.n_levels))
+
+    return HydrostaticState(
+        u=Field(data=zeros_3d, name="u", dims=dims_3d, units="m/s"),
+        v=Field(data=zeros_3d, name="v", dims=dims_3d, units="m/s"),
+        T=Field(data=T_data, name="T", dims=dims_3d, units="K"),
+        p_s=Field(data=p_s, name="p_s", dims=dims_2d, units="Pa"),
+        phis=Field(data=phis, name="phis", dims=dims_2d, units="m^2/s^2"),
+    )
+
+
+# ---------------------------------------------------------------------------
 # MPAS Voronoi
 # ---------------------------------------------------------------------------
 

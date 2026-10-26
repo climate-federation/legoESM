@@ -1,0 +1,266 @@
+--- dynzdf.F90.shipped
++++ dynzdf.F90
+@@ -82,6 +82,16 @@
+       REAL(wp) ::   zWus, zWvs           !   -      -
+       REAL(wp), DIMENSION(T1Di(0),jpkm1)      ::   zwi, zwd, zws  ! 2D workspace
+       REAL(wp), DIMENSION(:,:,:), ALLOCATABLE ::   ztrdu, ztrdv   !  -      -
++      !                    !--- round-29 L2 GYRE WRITE-only dyn_zdf operand instrument ---!
++      !     Own locals, own unit, own buffers.  No value written below is ever
++      !     read back into a prognostic, a work array or a closure coefficient.
++      INTEGER  ::   il2_unit, il2_ios                     ! instrument locals
++      LOGICAL  ::   ll_l2_zdf                             !   -      -
++      CHARACTER(LEN=16) ::   cl_l2_magic                  !   -      -
++      REAL(wp), DIMENSION(:,:,:), ALLOCATABLE ::   zl2_wiu, zl2_wdu, zl2_wsu
++      REAL(wp), DIMENSION(:,:,:), ALLOCATABLE ::   zl2_wiv, zl2_wdv, zl2_wsv
++      REAL(wp), DIMENSION(:,:,:), ALLOCATABLE ::   zl2_ypu, zl2_ypv
++      REAL(wp), DIMENSION(:,:,:), ALLOCATABLE ::   zl2_rhu, zl2_rhv
+       !!---------------------------------------------------------------------
+       !
+       IF( ln_timing )   CALL timing_start('dyn_zdf')
+@@ -97,6 +107,24 @@
+       zDt_2 = rDt * 0.5_wp
+       zDt_4 = rDt * 0.25_wp
+       !
++      !                    !--- round-29 instrument set-up ---!
++      !     Fail closed on domain tiling: the buffers below are global, so a
++      !     tiled call would dump one tile and label it the whole field.
++      ll_l2_zdf = ( lwp .AND. kt == nit000 )
++      IF( ll_l2_zdf ) THEN
++         IF( l_istiled )                     CALL ctl_stop( 'dyn_zdf: L2 instrument does not support domain tiling' )
++         IF( STORAGE_SIZE( 1._wp ) /= 64 )   CALL ctl_stop( 'dyn_zdf: L2 instrument requires 64-bit wp' )
++         ALLOCATE( zl2_wiu(jpi,jpj,jpkm1), zl2_wdu(jpi,jpj,jpkm1), zl2_wsu(jpi,jpj,jpkm1),   &
++            &      zl2_wiv(jpi,jpj,jpkm1), zl2_wdv(jpi,jpj,jpkm1), zl2_wsv(jpi,jpj,jpkm1),   &
++            &      zl2_ypu(jpi,jpj,jpk  ), zl2_ypv(jpi,jpj,jpk  ),                           &
++            &      zl2_rhu(jpi,jpj,jpk  ), zl2_rhv(jpi,jpj,jpk  ) )
++         zl2_wiu(:,:,:) = 0._wp   ;   zl2_wdu(:,:,:) = 0._wp   ;   zl2_wsu(:,:,:) = 0._wp
++         zl2_wiv(:,:,:) = 0._wp   ;   zl2_wdv(:,:,:) = 0._wp   ;   zl2_wsv(:,:,:) = 0._wp
++         zl2_ypu(:,:,:) = 0._wp   ;   zl2_ypv(:,:,:) = 0._wp
++         zl2_rhu(:,:,:) = puu(:,:,:,Krhs)   ! the momentum RHS AS RECEIVED
++         zl2_rhv(:,:,:) = pvv(:,:,:,Krhs)
++      ENDIF
++      !
+       !                             !* explicit top/bottom drag case
+       IF( .NOT.ln_drgimp )   CALL zdf_drg_exp( kt, Kmm, puu(:,:,:,Kbb), pvv(:,:,:,Kbb), puu(:,:,:,Krhs), pvv(:,:,:,Krhs) )  ! add top/bottom friction trend to (puu(Kaa),pvv(Kaa))
+       !
+@@ -170,6 +198,18 @@
+             ENDIF
+          ENDIF
+          !
++         !                    !--- round-29 instrument: pre-solve column vector ---!
++         !     Both faces are already final here: the explicit update, the
++         !     barotropic removal and the bottom-stress addition are all above,
++         !     and the first matrix is built below.  Copied per i-k slice
++         !     because the solve overwrites puu(Kaa) slice by slice.
++         IF( ll_l2_zdf ) THEN
++            DO_2Dik( 0, 0,   1, jpk, 1 )
++               zl2_ypu(ji,jj,jk) = puu(ji,jj,jk,Kaa)
++               zl2_ypv(ji,jj,jk) = pvv(ji,jj,jk,Kaa)
++            END_2D
++         ENDIF
++         !
+          !              !-------------------------------!
+          !              !==  Vertical diffusion on u  ==!
+          !              !-------------------------------!
+@@ -304,6 +344,16 @@
+             ENDIF
+          ENDIF
+          !
++         !                    !--- round-29 instrument: U matrix AS BUILT ---!
++         !     Taken before the LU first recurrence overwrites zwd.
++         IF( ll_l2_zdf ) THEN
++            DO_2Dik( 0, 0,   1, jpkm1, 1 )
++               zl2_wiu(ji,jj,jk) = zwi(ji,jk)
++               zl2_wdu(ji,jj,jk) = zwd(ji,jk)
++               zl2_wsu(ji,jj,jk) = zws(ji,jk)
++            END_2D
++         ENDIF
++         !
+          ! Matrix inversion starting from the first level
+          !-----------------------------------------------------------------------
+          !   solve m.x = y  where m is a tri diagonal matrix ( jpk*jpk )
+@@ -478,6 +528,16 @@
+             ENDIF
+          ENDIF
+          !
++         !                    !--- round-29 instrument: V matrix AS BUILT ---!
++         !     Taken before the LU first recurrence overwrites zwd.
++         IF( ll_l2_zdf ) THEN
++            DO_2Dik( 0, 0,   1, jpkm1, 1 )
++               zl2_wiv(ji,jj,jk) = zwi(ji,jk)
++               zl2_wdv(ji,jj,jk) = zwd(ji,jk)
++               zl2_wsv(ji,jj,jk) = zws(ji,jk)
++            END_2D
++         ENDIF
++         !
+          ! Matrix inversion starting from the first level
+          !-----------------------------------------------------------------------
+          !   solve m.x = y  where m is a tri diagonal matrix ( jpk*jpk )
+@@ -523,6 +583,168 @@
+       END_1D                                          !  i-k slices loop  !
+       !                                               ! ================= !
+       !
++      !                    !--- round-29 instrument: the record ---!
++      !     Self-describing: a 16-character magic, twelve header integers, then
++      !     one (name, rank, n1, n2, n3, payload) group per array until EOF, so a
++      !     reader never has to know this list in advance.  e3u/e3uw/e3v/e3vw are
++      !     PREPROCESSOR MACROS under key_qco (domzgr_substitute.h90:127, :132),
++      !     not arrays, so each is materialised elementwise into zl2_ypu, which
++      !     has already been written out by then.
++      IF( ll_l2_zdf ) THEN
++         OPEN( NEWUNIT=il2_unit, FILE='oracle_zdf_matrix_kt00000001.bin', ACCESS='STREAM',   &
++            &  FORM='UNFORMATTED', STATUS='REPLACE', ACTION='WRITE', IOSTAT=il2_ios )
++         IF( il2_ios /= 0 )   CALL ctl_stop( 'dyn_zdf: cannot open L2 matrix dump' )
++         cl_l2_magic = 'NEMO_L2_ZDFMX_1'
++         WRITE(il2_unit) cl_l2_magic
++         WRITE(il2_unit) 1, kt, 3, Kbb, Kmm, Krhs, Kaa, jpi, jpj, jpk, jpkm1,   &
++            &                ntsi, ntei, ntsj, ntej, STORAGE_SIZE(1._wp)
++         !
++         WRITE(il2_unit) 'uu_Krhs_in      '
++         WRITE(il2_unit) 3, jpi, jpj, jpk  
++         WRITE(il2_unit) zl2_rhu
++         !
++         WRITE(il2_unit) 'vv_Krhs_in      '
++         WRITE(il2_unit) 3, jpi, jpj, jpk  
++         WRITE(il2_unit) zl2_rhv
++         !
++         WRITE(il2_unit) 'uu_Kbb_in       '
++         WRITE(il2_unit) 3, jpi, jpj, jpk  
++         WRITE(il2_unit) puu(:,:,:,Kbb)
++         !
++         WRITE(il2_unit) 'vv_Kbb_in       '
++         WRITE(il2_unit) 3, jpi, jpj, jpk  
++         WRITE(il2_unit) pvv(:,:,:,Kbb)
++         !
++         WRITE(il2_unit) 'uu_b_Kaa        '
++         WRITE(il2_unit) 2, jpi, jpj, 1    
++         WRITE(il2_unit) uu_b(:,:,Kaa)
++         !
++         WRITE(il2_unit) 'vv_b_Kaa        '
++         WRITE(il2_unit) 2, jpi, jpj, 1    
++         WRITE(il2_unit) vv_b(:,:,Kaa)
++         !
++         WRITE(il2_unit) 'uu_Kaa_pre      '
++         WRITE(il2_unit) 3, jpi, jpj, jpk  
++         WRITE(il2_unit) zl2_ypu
++         !
++         WRITE(il2_unit) 'vv_Kaa_pre      '
++         WRITE(il2_unit) 3, jpi, jpj, jpk  
++         WRITE(il2_unit) zl2_ypv
++         !
++         WRITE(il2_unit) 'zwi_u           '
++         WRITE(il2_unit) 3, jpi, jpj, jpkm1
++         WRITE(il2_unit) zl2_wiu
++         !
++         WRITE(il2_unit) 'zwd_u           '
++         WRITE(il2_unit) 3, jpi, jpj, jpkm1
++         WRITE(il2_unit) zl2_wdu
++         !
++         WRITE(il2_unit) 'zws_u           '
++         WRITE(il2_unit) 3, jpi, jpj, jpkm1
++         WRITE(il2_unit) zl2_wsu
++         !
++         WRITE(il2_unit) 'zwi_v           '
++         WRITE(il2_unit) 3, jpi, jpj, jpkm1
++         WRITE(il2_unit) zl2_wiv
++         !
++         WRITE(il2_unit) 'zwd_v           '
++         WRITE(il2_unit) 3, jpi, jpj, jpkm1
++         WRITE(il2_unit) zl2_wdv
++         !
++         WRITE(il2_unit) 'zws_v           '
++         WRITE(il2_unit) 3, jpi, jpj, jpkm1
++         WRITE(il2_unit) zl2_wsv
++         !
++         WRITE(il2_unit) 'avm             '
++         WRITE(il2_unit) 3, jpi, jpj, jpk  
++         WRITE(il2_unit) avm
++         !
++         DO jk = 1, jpk    ;   DO jj = 1, jpj    ;   DO ji = 1, jpi
++            zl2_ypu(ji,jj,jk) = e3u(ji,jj,jk,Kaa)
++         END DO            ;   END DO            ;   END DO
++         WRITE(il2_unit) 'e3u_Kaa         '
++         WRITE(il2_unit) 3, jpi, jpj, jpk  
++         WRITE(il2_unit) zl2_ypu
++         !
++         DO jk = 1, jpk    ;   DO jj = 1, jpj    ;   DO ji = 1, jpi
++            zl2_ypu(ji,jj,jk) = e3uw(ji,jj,jk,Kmm)
++         END DO            ;   END DO            ;   END DO
++         WRITE(il2_unit) 'e3uw_Kmm        '
++         WRITE(il2_unit) 3, jpi, jpj, jpk  
++         WRITE(il2_unit) zl2_ypu
++         !
++         DO jk = 1, jpk    ;   DO jj = 1, jpj    ;   DO ji = 1, jpi
++            zl2_ypu(ji,jj,jk) = e3v(ji,jj,jk,Kaa)
++         END DO            ;   END DO            ;   END DO
++         WRITE(il2_unit) 'e3v_Kaa         '
++         WRITE(il2_unit) 3, jpi, jpj, jpk  
++         WRITE(il2_unit) zl2_ypu
++         !
++         DO jk = 1, jpk    ;   DO jj = 1, jpj    ;   DO ji = 1, jpi
++            zl2_ypu(ji,jj,jk) = e3vw(ji,jj,jk,Kmm)
++         END DO            ;   END DO            ;   END DO
++         WRITE(il2_unit) 'e3vw_Kmm        '
++         WRITE(il2_unit) 3, jpi, jpj, jpk  
++         WRITE(il2_unit) zl2_ypu
++         !
++         WRITE(il2_unit) 'wumask          '
++         WRITE(il2_unit) 3, jpi, jpj, jpk  
++         WRITE(il2_unit) wumask
++         !
++         WRITE(il2_unit) 'wvmask          '
++         WRITE(il2_unit) 3, jpi, jpj, jpk  
++         WRITE(il2_unit) wvmask
++         !
++         WRITE(il2_unit) 'umask           '
++         WRITE(il2_unit) 3, jpi, jpj, jpk  
++         WRITE(il2_unit) umask
++         !
++         WRITE(il2_unit) 'vmask           '
++         WRITE(il2_unit) 3, jpi, jpj, jpk  
++         WRITE(il2_unit) vmask
++         !
++         WRITE(il2_unit) 'rCdU_bot        '
++         WRITE(il2_unit) 2, jpi, jpj, 1    
++         WRITE(il2_unit) rCdU_bot
++         !
++         WRITE(il2_unit) 'mbku            '
++         WRITE(il2_unit) 2, jpi, jpj, 1    
++         WRITE(il2_unit) REAL( mbku, wp )
++         !
++         WRITE(il2_unit) 'mbkv            '
++         WRITE(il2_unit) 2, jpi, jpj, 1    
++         WRITE(il2_unit) REAL( mbkv, wp )
++         !
++         WRITE(il2_unit) 'utauU           '
++         WRITE(il2_unit) 2, jpi, jpj, 1    
++         WRITE(il2_unit) utauU
++         !
++         WRITE(il2_unit) 'vtauV           '
++         WRITE(il2_unit) 2, jpi, jpj, 1    
++         WRITE(il2_unit) vtauV
++         !
++         WRITE(il2_unit) 'uu_Kaa_out      '
++         WRITE(il2_unit) 3, jpi, jpj, jpk  
++         WRITE(il2_unit) puu(:,:,:,Kaa)
++         !
++         WRITE(il2_unit) 'vv_Kaa_out      '
++         WRITE(il2_unit) 3, jpi, jpj, jpk  
++         WRITE(il2_unit) pvv(:,:,:,Kaa)
++         !
++         WRITE(il2_unit) 'rDt             '
++         WRITE(il2_unit) 0, 1, 1, 1        
++         WRITE(il2_unit) rDt
++         !
++         WRITE(il2_unit) 'rho0            '
++         WRITE(il2_unit) 0, 1, 1, 1        
++         WRITE(il2_unit) rho0
++         !
++         CLOSE(il2_unit)
++         DEALLOCATE( zl2_wiu, zl2_wdu, zl2_wsu, zl2_wiv, zl2_wdv, zl2_wsv,   &
++            &        zl2_ypu, zl2_ypv, zl2_rhu, zl2_rhv )
++         WRITE(numout,*) 'L2_ZDF_MATRIX_DUMP ', kt, Kbb, Kmm, Krhs, Kaa
++      ENDIF
++      !
+       IF( l_trddyn )   THEN                      ! save the vertical diffusive trends for further diagnostics
+          ztrdu(:,:,:) = ( puu(T2D(0),:,Kaa) - puu(T2D(0),:,Kbb) )*r1_Dt - ztrdu(:,:,:)
+          ztrdv(:,:,:) = ( pvv(T2D(0),:,Kaa) - pvv(T2D(0),:,Kbb) )*r1_Dt - ztrdv(:,:,:)

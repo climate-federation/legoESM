@@ -80,6 +80,40 @@ def validate_divisibility(extent: int, n_devices: int, *,
             f"{axis}: {near}.")
 
 
+#: Thinnest lat-band height receipted to initialize NCCL cleanly on the
+#: multi-node GPU lane. 12-row bands (LL2304 @ 192) deadlock NCCL channel
+#: setup on the FIRST call and burn the whole walltime -- seven env
+#: candidates refuted, while 15-row (LL2880 @ 192) and 16-row (@144) run
+#: clean, and the same 12-row program executes fine on CPU virtual
+#: devices (jobs 26979367/26996572/27007255/27013729/27014326/27015385/
+#: 27016462 hung; 27036060 clean). Empirical floor, not a derived bound:
+#: 13/14-row bands are untested.
+MIN_GPU_BAND_ROWS = 15
+
+
+def validate_band_rows_gpu(extent: int, n_devices: int, *,
+                           axis: str = "n_lat") -> None:
+    """Refuse lat-band heights below the receipted NCCL-init floor.
+
+    Only meaningful for the multi-node GPU (NCCL) lane -- the caller
+    decides when to apply it. Escape hatch for a deliberate retest:
+    ``LEGOESM_ALLOW_THIN_BANDS=1``.
+    """
+    import os
+    rows = extent // max(1, n_devices)
+    if rows >= MIN_GPU_BAND_ROWS:
+        return
+    if os.environ.get("LEGOESM_ALLOW_THIN_BANDS", "") == "1":
+        return
+    raise ValueError(
+        f"{axis}={extent} over {n_devices} devices gives {rows}-row bands; "
+        f"bands thinner than {MIN_GPU_BAND_ROWS} rows deadlock NCCL "
+        f"communicator setup on the multi-node GPU lane (receipt: 12-row "
+        f"LL2304@192 hung seven independent walltimes; 15-row LL2880@192 "
+        f"ran 6.74 ms/step). Use a larger {axis} or fewer devices, or set "
+        f"LEGOESM_ALLOW_THIN_BANDS=1 for a deliberate retest.")
+
+
 def validate_device_count(path: str, n_devices: int) -> None:
     """``n_devices`` must be shardable by the selected cube parallel ``path``.
 

@@ -72,6 +72,13 @@ _spec.loader.exec_module(_bn2_alpha_compare)
 _read_dims = _bn2_alpha_compare._read_dims
 _load_haloed = _bn2_alpha_compare._load_haloed
 _load_interior = _bn2_alpha_compare._load_interior
+
+_dl_path = os.path.join(os.path.dirname(__file__), "dump_lane.py")
+_dl_spec = importlib.util.spec_from_file_location("_dump_lane", _dl_path)
+dump_lane = importlib.util.module_from_spec(_dl_spec)
+sys.modules["_dump_lane"] = dump_lane
+_dl_spec.loader.exec_module(dump_lane)
+
 from legoesm.ocean.fidelity.nemo_io import (
     read_nemo_mesh_mask,
     read_nemo_restart,
@@ -88,8 +95,8 @@ from legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid import (
     gm_redi_density_and_jacobian,
 )
 
-RUN_DIR = "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_GDB"
-RESTART = "DINO_00057600_restart.nc"
+RUN_DIR = dump_lane.RUN_DIR
+RESTART = dump_lane.RESTART
 
 
 def build_state():
@@ -190,6 +197,7 @@ def shift_scan(m_base, nemo_nmln, wet):
 
 
 def main() -> int:
+    print(dump_lane.banner())
     st = build_state()
     nj, ni = st["ni_ni"]
     print(f"grid interior (nj,ni,nlev) = ({nj},{ni},{st['jpk'] - 1}) "

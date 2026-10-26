@@ -28,6 +28,7 @@ from types import SimpleNamespace
 import jax.numpy as jnp
 import numpy as np
 
+from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import surface_stress_faces
 from legoesm.ocean.physics.surface_forcing.config import PrescribedForcingConfig
 from legoesm.ocean.physics.surface_forcing.external import (
     external_surface_forcing,
@@ -100,3 +101,118 @@ def test_prescribed_and_external_momentum_are_exactly_opposite():
         "prescribed (+tau, on-ocean) and external (-tau, atmosphere) must be "
         "EXACT opposites for the same stress; a sign change in either scheme "
         "(or an accidental unification) breaks coupled forcing")
+
+
+def test_native_ocean_stress_bypasses_lossy_geographic_round_trip():
+    """A source-native pair is the exact operand used for face interpolation."""
+    z, _, _, _, _, jac = _fields()
+    tau_i = jnp.asarray([
+        [0.0, 0.2, 0.4, 0.6, 0.8],
+        [0.1, 0.3, 0.5, 0.7, 0.9],
+        [0.2, 0.4, 0.6, 0.8, 1.0],
+        [0.3, 0.5, 0.7, 0.9, 1.1],
+    ], dtype=jnp.float64)
+    tau_j = -tau_i
+    geographic_poison = jnp.full_like(tau_i, 99.0)
+    forcing = OceanSurfaceForcing(
+        tau_x=geographic_poison,
+        tau_y=geographic_poison,
+        tau_i_native=tau_i,
+        tau_j_native=tau_j,
+    )
+    grid = SimpleNamespace(fold=None)
+    tau_u, tau_v, _, _ = surface_stress_faces(
+        forcing, jnp.float64, z, jac, grid)
+
+    padded = np.pad(np.asarray(tau_i), ((0, 0), (1, 1)), mode="wrap")
+    expected_u = 0.5 * (padded[:, :-1] + padded[:, 1:])
+    np.testing.assert_array_equal(np.asarray(tau_u), expected_u)
+    np.testing.assert_array_equal(
+        np.asarray(tau_v)[1:-1],
+        0.5 * (np.asarray(tau_j)[:-1] + np.asarray(tau_j)[1:]),
+    )
+    assert not np.any(np.asarray(tau_u) == -99.0)
+
+
+def test_native_ocean_stress_pair_is_fail_closed():
+    z, _, _, _, _, jac = _fields()
+    forcing = OceanSurfaceForcing(tau_i_native=jnp.ones((N_LAT, N_LON)))
+    with np.testing.assert_raises_regex(ValueError, "must be supplied together"):
+        surface_stress_faces(
+            forcing, jnp.float64, z, jac, SimpleNamespace(fold=None))
+
+
+def test_native_ocean_stress_applies_nemo_coastal_unmasking_literally():
+    """sbcmod.F90:543-546 doubles a wet/dry coastal face after averaging."""
+    tmask = np.asarray([
+        [0.0, 1.0, 1.0, 0.0],
+        [0.0, 1.0, 1.0, 0.0],
+        [0.0, 0.0, 0.0, 0.0],
+    ])
+    active = jnp.asarray(tmask[..., None] > 0.5)
+    z = SimpleNamespace(is_active=active, dz_ref=jnp.ones((1,)))
+    grid = SimpleNamespace(fold=None, seam_wall_rows=None)
+    forcing = OceanSurfaceForcing(
+        tau_i_native=jnp.ones(tmask.shape),
+        tau_j_native=jnp.ones(tmask.shape),
+    )
+    from legoesm.ocean.dynamics.latlon_cgrid_operators import compute_face_masks_3d
+
+    umask, vmask = compute_face_masks_3d(active, grid)
+    tau_u, tau_v, _, _ = surface_stress_faces(
+        forcing, jnp.float64, z, jnp.ones(tmask.shape), grid,
+        cell_mask=jnp.asarray(tmask), u_mask=umask[..., 0],
+        v_mask=vmask[..., 0],
+    )
+    lon = np.pad(tmask, ((0, 0), (1, 1)), mode="wrap")
+    tmax_u = np.maximum(lon[:, :-1], lon[:, 1:])
+    lat = np.pad(tmask, ((1, 1), (0, 0)), mode="constant")
+    tmax_v = np.maximum(lat[:-1], lat[1:])
+    expected_u = (2.0 - np.asarray(umask[..., 0])) * tmax_u
+    expected_v = (2.0 - np.asarray(vmask[..., 0])) * tmax_v
+    # The shared C-grid interpolation applies the physical meridional wall
+    # before sbcmod's factor; multiplying cannot revive those boundary faces.
+    expected_v[[0, -1], :] = 0.0
+    np.testing.assert_array_equal(np.asarray(tau_u), expected_u)
+    np.testing.assert_array_equal(np.asarray(tau_v), expected_v)
+    assert np.any(expected_u == 2.0), "control has no doubled coastal U face"
+    assert np.any(expected_v == 2.0), "control has no doubled coastal V face"
+
+
+def _fold_case(seed=3):
+    """A T-pivot fold on a small grid, every cell and face wet."""
+    z, _, _, _, _, jac = _fields()
+    rng = np.random.default_rng(seed)
+    tau_i = jnp.asarray(rng.normal(size=(N_LAT, N_LON)))
+    tau_j = jnp.asarray(rng.normal(size=(N_LAT, N_LON)))
+    perm = (N_LON - np.arange(N_LON)) % N_LON
+    fold = SimpleNamespace(is_active=True, fold_j=N_LAT - 1, pivot_row_stored=True,
+                           perm_T=perm, perm_v=perm, perm_u=None, perm_f=None)
+    grid = SimpleNamespace(fold=fold)
+    masks = dict(cell_mask=jnp.ones((N_LAT, N_LON)), u_mask=jnp.ones((N_LAT, N_LON + 1)),
+                 v_mask=jnp.ones((N_LAT + 1, N_LON)))
+    return z, jac, OceanSurfaceForcing(tau_i_native=tau_i, tau_j_native=tau_j), grid, masks, perm
+
+
+def test_pivot_row_v_stress_reads_nemos_vector_halo():
+    """sbcmod.F90:548-551 folds vtau with sign -1, so :559 averages the
+    pivot row with -vtau(pivot-1) mirrored; the scalar rule mirrors the
+    face below.  Only the pivot-row V faces move."""
+    z, jac, forcing, grid, masks, perm = _fold_case()
+    off = surface_stress_faces(forcing, jnp.float64, z, jac, grid, **masks)
+    on = surface_stress_faces(forcing, jnp.float64, z, jac, grid,
+                              nemo_fold_vector_sign=True, **masks)
+    tj = np.asarray(forcing.tau_j_native)
+    np.testing.assert_array_equal(np.asarray(on[1])[-1], 0.5 * (tj[-1] - tj[-2][perm]))
+    assert np.all(np.asarray(on[1])[-1] != np.asarray(off[1])[-1])
+    np.testing.assert_array_equal(np.asarray(on[1])[:-1], np.asarray(off[1])[:-1])
+    np.testing.assert_array_equal(np.asarray(on[0]), np.asarray(off[0]))
+
+
+def test_pivot_row_v_stress_refuses_without_a_fold_or_masks():
+    z, jac, forcing, grid, masks, _ = _fold_case()
+    with np.testing.assert_raises_regex(ValueError, "T-pivot north fold"):
+        surface_stress_faces(forcing, jnp.float64, z, jac, SimpleNamespace(fold=None),
+                             nemo_fold_vector_sign=True, **masks)
+    with np.testing.assert_raises_regex(ValueError, "needs the NEMO masks"):
+        surface_stress_faces(forcing, jnp.float64, z, jac, grid, nemo_fold_vector_sign=True)

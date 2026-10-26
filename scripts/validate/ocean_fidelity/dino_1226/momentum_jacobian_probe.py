@@ -118,6 +118,8 @@ per_element_stats = _cov.per_element_stats
 # reuse that registration rather than re-citing it here (single source of
 # truth for the citation).
 _spg_preload = _load_sibling("spg_substep_chain.py", "_spg_substep_chain_preload")
+# Lane selector (#1455): RUN_DIR/RESTART/KT_DUMP are lane-dependent.
+_dump_lane = _load_sibling("dump_lane.py", "_dump_lane_momentum_jacobian_probe")
 
 from legoesm.core.precision import PrecisionPolicy, set_policy
 from legoesm.ocean.fidelity.precision_gate import require_fp64, require_explicit_e3t_mode
@@ -127,9 +129,9 @@ from legoesm.ocean.fidelity.nemo_state_bridge import bridge_nemo_to_legoesm_topo
 from legoesm.ocean.vertical import compute_ocean_jacobian
 from legoesm.ocean.experiments.dino import dino_config_for_recipe, dino_lat_lon_model_config
 
-RUN_DIR = "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_GDB"
-RESTART = "DINO_00057600_restart.nc"
-KT_DUMP = 57601  # nit000
+RUN_DIR = _dump_lane.RUN_DIR
+RESTART = _dump_lane.RESTART
+KT_DUMP = _dump_lane.KT_DUMP  # nit000; lane-dependent, see dump_lane.py
 
 set_policy(PrecisionPolicy.fp64())
 
@@ -171,6 +173,7 @@ def area_weight_ssh_to_uface_nemo(ssh_2d: np.ndarray, e1e2t: np.ndarray) -> np.n
 def main() -> int:
     e3t_mode = require_explicit_e3t_mode(context="momentum_jacobian_probe")
     print(f"LEGOESM_NEMO_E3T={e3t_mode!r} (task requires 'both')")
+    print(_dump_lane.banner())
     assert e3t_mode == "both"
 
     for _name in ("spg_dump_pssh_final.bin", "sshnxt_dump_ssh_after.bin"):
@@ -178,7 +181,7 @@ def main() -> int:
         print(f"  time_level_for_dump({_name!r}) = {lvl!r}")
 
     jpi, jpj, jpk, hls = _cov._read_dims(RUN_DIR)
-    print(f"RUN_GDB dims: jpi={jpi} jpj={jpj} jpk={jpk} nn_hls={hls}  "
+    print(f"{_dump_lane.LANE} dims: jpi={jpi} jpj={jpj} jpk={jpk} nn_hls={hls}  "
           f"restart={RESTART}  kt(nit000)={KT_DUMP}")
 
     grid = read_nemo_mesh_mask(os.path.join(RUN_DIR, "mesh_mask.nc"), nn_hls=0)

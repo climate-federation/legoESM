@@ -1,0 +1,259 @@
+# ROUND 209 HELD PATCH -- NEMO's stprk3_stg.f90:270 association.
+# Transport target = un_adv * r1_hu_0/(1+r3u(Kmm)) (a MULTIPLY by the
+# stored reciprocal) in place of round 206's algebraically equal divide
+# by SUM_k e3u_0*(1+r3u*umask).  HELD: the per-cell ratchet goes red on
+# the flux card at 30/15/10 km (20.5/17.5/17.5 row-scale ULP vs a 2-ULP
+# bar) while kt=2 u/v do not move at all.  Receipt:
+# docs/ocean/fidelity/testcases/nemo_testcases_l1_vortex_round209_reciprocal_divisor_receipt.md
+#
+diff --git a/packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py b/packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py
+index 7de8b291a..23745b9bc 100644
+--- a/packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py
++++ b/packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py
+@@ -7133,40 +7133,53 @@ class LatLonCGridOceanModel:
+             # already had (``H_u_pre`` and ``Hu_avg`` are both step-entry
+             # quantities); round 206 changed the depth RULE, not the time
+             # level, and the time level is an open item.
+-            # FORM, also stated rather than implied: NEMO MULTIPLIES by a
+-            # stored reciprocal, ``un_adv*(r1_hu_0/(1+r3u))``, while this
+-            # DIVIDES by the summed depth.  Equal algebraically, not
+-            # bitwise.  The literal operand already exists -- the same
+-            # kernel returns ``r1_hu = r1_hu0/(1+r3u)`` under
+-            # ``include_reciprocals=True`` (vertical.py), which
+-            # ``_nemo_stage_corrected_velocity`` consumes through
+-            # ``nemo_source_round``.  Round 206 landed the measured
+-            # candidate the user approved, which is the divide; the
+-            # association is the next walk item, not an oversight.
+-            # Measured on VORTEX-zco: the two depths differ
+-            # by up to 0.129 m in 5000.86 m (2.58e-05 relative, 698 of 3660
+-            # u columns), and the stage-1 flux-form advection trend's
+-            # disagreement with NEMO falls from 6.285649e-11 to
+-            # 2.032879e-20 (u) with that divisor.  The private
+-            # ``"legacy_min_rule_depth"`` arm restores the old divisor as
+-            # the one-variable control.  This is the SHARED RK3 statement,
+-            # not a card option: NEMO's :48 ``n_baro_upd = np_HYB`` default
+-            # is compiled into every card's stprk3_stg, so every card that
+-            # runs the WS-RK3 transport reconcile takes it.
++            # FORM: NEMO MULTIPLIES by the STORED reciprocal
++            # ``un_adv*(r1_hu_0/(1+r3u(Kmm)))``.  ``r1_hu_0`` is built once,
++            # ``r1_hu_0 = ssumask/(hu_0 + 1 - ssumask)`` (domain.f90:213)
++            # over ``hu_0 = SUM_k e3t_1d*umask`` (domain.f90:194-199), and
++            # ``r3u(Kmm)`` is domqco.f90:266-267, inside ``dom_qco_r3c_RK3``
++            # (``:237-291``) -- NOT the ``:214-215`` statement, which is the
++            # MLF ``dom_qco_r3c`` (``:188-234``).  Round 206
++            # landed a DIVIDE by ``SUM_k e3u_0*(1+r3u*umask)``: algebraically
++            # the same depth, not the same association.  Round 209
++            # transcribes NEMO's: the SAME kernel already returns
++            # ``r1_hu = r1_hu0/(1+r3u)`` term for term under
++            # ``include_reciprocals=True`` (vertical.py:241,243,253), which is
++            # also what ``_nemo_stage_corrected_velocity`` multiplies by, so
++            # the two places that compose ``zub`` now read ONE operand.
++            # Measured on the cards: the old divisor and this reciprocal
++            # differ by at most 4.07e-16 relative (VORTEX-zco at step entry;
++            # exactly 0 on LOCK_EXCHANGE-zco and OVERFLOW-zps) -- a pure
++            # association change, which is why the registries move only in
++            # the last bits.  That the SUM equals ``hu_0*(1+r3u)`` at all is
++            # a MEASURED fact, not an algebraic one: ``e3u_0*(1+r3u*umask)``
++            # returns ``e3u_0`` on a dry level, so the two agree only while
++            # ``e3u_0`` itself is zero there -- counted and found zero on
++            # all three cards (round-209 receipt section 3).
++            # The dry-column guard the divide needed is gone with the
++            # divide, and that is NEMO's own behaviour, not a dropped check:
++            # ``r1_hu_0`` is EXACTLY zero on a closed face (``ssumask = 0``),
++            # so NEMO's own ``zub`` there is ``-uu_b(Kmm)``, and legoESM's
++            # ``r1_hu`` is zero wherever ``hu_0 = 0`` (``wet_u = 0``,
++            # vertical.py:241-243).  Those zeros come from the 3-D live face
++            # mask, while the product is masked by the 2-D ``u_mask``: the
++            # two are different objects and a card could in principle make
++            # them disagree, so it is COUNTED, not argued -- zero faces with
++            # ``u_mask = 1`` and ``r1_hu = 0`` on all three cards.
++            # SCOPE is unchanged from round 206: this is the SHARED RK3
++            # statement, not a card option -- NEMO's ``:48``
++            # ``n_baro_upd = np_HYB`` default is compiled into every card's
++            # stprk3_stg, so every card that runs the WS-RK3 transport
++            # reconcile takes it.  The private ``"legacy_min_rule_depth"``
++            # arm still restores the PRE-206 min-rule divisor as the
++            # one-variable control for that statement.
+             _qco_tr_faces = _nemo_ws_qco_stage_faces(
+                 state.eta.data, _ws_h_ref, _ws_u_live_mask,
+-                _ws_v_live_mask, _grid)
+-            _H_u_transport = jnp.sum(_qco_tr_faces[0], axis=-1)
+-            _H_v_transport = jnp.sum(_qco_tr_faces[1], axis=-1)
+-            # Dry columns have a zero qco depth and carry no transport.
+-            _H_u_transport = jnp.where(_H_u_transport > 0.0,
+-                                       _H_u_transport, H_u_pre)
+-            _H_v_transport = jnp.where(_H_v_transport > 0.0,
+-                                       _H_v_transport, H_v_pre)
++                _ws_v_live_mask, _grid, include_reciprocals=True)
+             transport_target_u = (
+-                Hu_avg / _H_u_transport * state.u_mask.data)
++                Hu_avg * _qco_tr_faces[4] * state.u_mask.data)
+             transport_target_v = (
+-                Hv_avg / _H_v_transport * state.v_mask.data)
++                Hv_avg * _qco_tr_faces[5] * state.v_mask.data)
+             def _transport_target_legacy():
+                 """The pre-round-206 target, for the private control arm.
+ 
+diff --git a/tests/ocean/fidelity/test_nemo_testcase_l1_vortex_round209_reciprocal_divisor.py b/tests/ocean/fidelity/test_nemo_testcase_l1_vortex_round209_reciprocal_divisor.py
+new file mode 100644
+index 000000000..49e978040
+--- /dev/null
++++ b/tests/ocean/fidelity/test_nemo_testcase_l1_vortex_round209_reciprocal_divisor.py
+@@ -0,0 +1,157 @@
++"""Round 209 pin: the RK3 transport target multiplies NEMO's STORED reciprocal.
++
++``stprk3_stg.f90:270`` (the ``CASE ( np_LIN, np_HYB )`` arm the module
++default ``n_baro_upd = np_HYB`` at ``:48`` selects) writes
++
++    zub(ji,jj) = un_adv(ji,jj)*(r1_hu_0(ji,jj) /(1._wp+r3u(ji,jj,Kmm))) - uu_b(ji,jj,Kmm)
++
++-- a MULTIPLY by a reciprocal built once in ``domain.f90:213``
++(``r1_hu_0 = ssumask/(hu_0 + 1 - ssumask)`` over
++``hu_0 = SUM_k e3t_1d*umask``, ``domain.f90:194-199``) and divided by
++``1 + r3u(Kmm)`` (``domqco.f90:266-267``, the ``dom_qco_r3c_RK3`` entry).  Round 206 landed the algebraically
++equal DIVIDE by ``SUM_k e3u_0*(1 + r3u*umask)``; round 209 transcribes the
++association.
++
++Two things are asserted, and neither can pass on the reverted code:
++
++* the two forms are NOT the same bits on this card, so the association is
++  observable at all (this is the non-vacuity of the second assertion);
++* the production step is the MULTIPLY one -- proven by substituting the
++  divide form into the one kernel the statement reads and requiring the
++  step to move.  Revert the landing and the substitution becomes a no-op
++  and this test fails.
++"""
++from __future__ import annotations
++
++import inspect
++
++import jax
++import numpy as np
++import pytest
++
++from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
++
++CASE = "VORTEX-zco"
++
++
++@pytest.fixture(scope="module")
++def fp64():
++    old = get_policy()
++    set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
++    yield
++    set_policy(old)
++
++
++def _card_and_model():
++    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
++        LatLonCGridOceanModel,
++    )
++    from legoesm.ocean.fidelity.nemo_testcase_recipe import (
++        build_nemo_testcase_card,
++    )
++
++    card = build_nemo_testcase_card(CASE)
++    return card, LatLonCGridOceanModel(
++        card.recipe.grid, card.recipe.z_coord, card.recipe.model_config)
++
++
++def test_the_two_associations_are_not_the_same_bits(fp64):
++    """Non-vacuity of the pin below: the reciprocal and ``1/SUM(e3u)`` differ.
++
++    If they were bit-identical the substitution control could never move the
++    step and the pin would be a smoke test.
++    """
++    import jax.numpy as jnp
++
++    from legoesm.ocean.dynamics.latlon_cgrid_operators import (
++        compute_face_masks_3d,
++    )
++    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
++        _nemo_ws_qco_stage_faces,
++    )
++    from legoesm.ocean.fidelity.nemo_testcase_recipe import (
++        build_nemo_testcase_card,
++    )
++    from legoesm.ocean.vertical import compute_layer_thickness
++
++    card = build_nemo_testcase_card(CASE)
++    state = card.recipe.initial_state
++    z_coord = card.recipe.z_coord
++    h_ref = compute_layer_thickness(
++        jnp.zeros_like(state.eta.data), state.H_bathy.data, z_coord,
++        min_water_column_m=card.recipe.model_config.min_water_column_m)
++    umask3, vmask3 = compute_face_masks_3d(z_coord.is_active, card.recipe.grid)
++    faces = _nemo_ws_qco_stage_faces(
++        state.eta.data, h_ref, umask3.astype(state.eta.data.dtype),
++        vmask3.astype(state.eta.data.dtype), card.recipe.grid,
++        include_reciprocals=True)
++    r1_hu = np.asarray(faces[4])
++    summed = np.asarray(jnp.sum(faces[0], axis=-1))
++    wet = r1_hu > 0.0
++    assert wet.any()
++    # Same value to rounding -- it IS the same depth ...
++    rel = np.abs(1.0 / summed[wet] - r1_hu[wet]) / r1_hu[wet]
++    assert rel.max() < 1.0e-14
++    # ... and not the same bits, which is what this round is about.
++    assert np.any(1.0 / summed[wet] != r1_hu[wet])
++    # NEMO's reciprocal is EXACTLY zero on a closed face (ssumask = 0), which
++    # is why the divide's dry-column guard is not needed once it is gone.
++    # Asserted against the mask that actually multiplies the target, in BOTH
++    # directions -- ``r1_hu[~wet] == 0`` alone is true by the definition of
++    # ``wet`` and would prove nothing.
++    u_mask = np.asarray(state.u_mask.data) > 0.0
++    assert np.array_equal(wet, u_mask)
++
++
++def test_production_multiplies_the_stored_reciprocal(fp64):
++    """ROUND 209 PIN.
++
++    Substitute the DIVIDE form into the kernel the statement reads.  The
++    production step must move; on the pre-round-209 code it cannot, because
++    production would already be computing that same quotient.
++    """
++    import jax.numpy as jnp
++
++    from legoesm.ocean.dynamics import ocean_model_latlon_cgrid as mod
++
++    card, model = _card_and_model()
++    initial = card.recipe.initial_state
++    plain = model.step(initial, dt=card.dt_s)
++
++    real = mod._nemo_ws_qco_stage_faces
++
++    def divide_form(*args, include_reciprocals=False, **kwargs):
++        out = real(*args, include_reciprocals=include_reciprocals, **kwargs)
++        if not include_reciprocals:
++            return out
++        # ISOLATE THE STATEMENT.  The same kernel also serves
++        # ``_nemo_ws_stage_transport``'s own reciprocal, which this round
++        # does not touch; substituting there too would move the step no
++        # matter what the transport target does and the pin would pass on
++        # the reverted code (it did, when first written).  Leave that
++        # consumer alone and substitute ONLY in the caller that holds
++        # round 209's statement -- ``_step_impl``, the enclosing function
++        # of the ``transport_target_u/v`` lines.
++        if inspect.stack()[1].function != "_step_impl":
++            return out
++        h_u = jnp.sum(out[0], axis=-1)
++        h_v = jnp.sum(out[1], axis=-1)
++        return out[:4] + (
++            jnp.where(h_u > 0.0, 1.0 / jnp.where(h_u > 0.0, h_u, 1.0), 0.0),
++            jnp.where(h_v > 0.0, 1.0 / jnp.where(h_v > 0.0, h_v, 1.0), 0.0),
++        )
++
++    mod._nemo_ws_qco_stage_faces = divide_form
++    try:
++        _, armed_model = _card_and_model()
++        armed = armed_model.step(initial, dt=card.dt_s)
++    finally:
++        mod._nemo_ws_qco_stage_faces = real
++
++    moved = max(
++        float(np.abs(np.asarray(a) - np.asarray(b)).max())
++        for a, b in zip(jax.tree_util.tree_leaves(armed),
++                        jax.tree_util.tree_leaves(plain)))
++    assert moved > 0.0
++    for leaf in jax.tree_util.tree_leaves(armed):
++        assert np.all(np.isfinite(np.asarray(leaf)))

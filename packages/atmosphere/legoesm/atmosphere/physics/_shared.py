@@ -102,8 +102,16 @@ def compute_heights_from_sigma(T, p_half, q_v=None):
     z_half : array (ncol, nlev+1)
         Height at half levels [m] (surface = 0).
     """
-    dz = compute_layer_dz(T, p_half, q_v)
+    return heights_from_layer_dz(compute_layer_dz(T, p_half, q_v))
 
+
+def heights_from_layer_dz(dz):
+    """Full- and half-level heights [m] from layer thicknesses ``dz``.
+
+    ``dz`` is ``(ncol, nlev)``, TOA-first.  Half levels are the running sum of
+    the thicknesses below (surface = 0); full levels are the midpoint of the
+    two bounding half levels.  Returns ``(z_full, z_half)``.
+    """
     # Integrate from surface upward.  Use ``jnp.pad`` to append the
     # surface (z=0) boundary instead of allocating a fresh
     # ``jnp.zeros((ncol, 1))`` and concatenating — single Pad HLO op
@@ -142,6 +150,28 @@ def compute_layer_dz(T, p_half, q_v=None):
     return jnp.abs(
         constants.R_d * T_eff * dp / (constants.g * jnp.clip(p_mid, 1.0, None))
     )
+
+
+def half_to_full(x_half):
+    """Interior-interface field ``(ncol, nlev-1)`` to full levels ``(ncol, nlev)``.
+
+    Interior full levels take the mean of the two adjacent interfaces; the top
+    and bottom full levels copy the nearest interface (one-sided).
+    """
+    mid = 0.5 * (x_half[:, :-1] + x_half[:, 1:])
+    return jnp.concatenate([x_half[:, :1], mid, x_half[:, -1:]], axis=1)
+
+
+def half_to_iface_zero_ends(x_half):
+    """Interior-interface field ``(ncol, nlev-1)`` to ALL interfaces ``(ncol, nlev+1)``.
+
+    Top-first, like the input.  The model-top and surface interfaces are set to
+    zero: CAM6's non-CLUBB ``kvh`` is zero there (``pbl_utils.F90:393`` zeroes
+    the whole column before filling the interior; ``eddy_diff.F90:1018``), and
+    the interior values are passed through unchanged.
+    """
+    zero = jnp.zeros_like(x_half[:, :1])
+    return jnp.concatenate([zero, x_half, zero], axis=1)
 
 
 def brunt_vaisala_n_full(T, p_full, z_full):
@@ -248,6 +278,40 @@ def virtual_temperature(T, q_v):
     return T * (1.0 + coeff * q_v)
 
 
+def ke_dissipation_heating(u, v, du_dt, dv_dt, dt):
+    """Heating [K/s] that returns as heat the kinetic energy a momentum
+    tendency removes (frictional / dissipative heating), per level.
+
+        dT/dt = -(du*(u + dt/2*du) + dv*(v + dt/2*dv)) / c_pd
+
+    Discretely exact for the host update ``u += dt*du, v += dt*dv,
+    T += dt*dT``: ``c_pd*dt*dT = -[(u+dt*du)^2 - u^2 + (v+dt*dv)^2 - v^2]/2``
+    per unit mass, so the momentum tendency leaves the column
+    ``sum((c_pd*T + KE) dp/g)`` unchanged level by level.  Sign: positive
+    (warming) where the tendency removes kinetic energy.  The same closure as
+    the orographic GWD port (``e3sm_cam.py``, ``use_discrete_ke_heating``) and
+    CAM's ``diffusion_solver`` ``dtk``/``clubb_do_energyfix`` intent.
+    """
+    return -(du_dt * (u + 0.5 * dt * du_dt)
+             + dv_dt * (v + 0.5 * dt * dv_dt)) / constants.c_pd
+
+
+def column_energy_fixer_heating(residual, layer_mass, weight):
+    """Heating [K/s] that removes a column energy residual (CAM ``se_dis``).
+
+        dT/dt_k = -residual * w_k / (c_pd * sum_j layer_mass_j * w_j)
+
+    ``residual`` [W/m2, + = energy created], ``layer_mass`` [kg/m2] (dp/g),
+    ``weight`` >= 0 per level (where the fix may act; uniform per unit mass
+    where it is 1).  Exact: ``sum(c_pd * dT/dt * layer_mass) == -residual``.
+    CAM6 ``clubb_intr`` ``clubb_do_energyfix``: the imbalance spread evenly
+    per unit mass over the depth where CLUBB is active.
+    """
+    return -(residual[..., None] * weight
+             / (constants.c_pd * jnp.sum(layer_mass * weight, axis=-1,
+                                         keepdims=True)))
+
+
 def broadcast_column_param(value, like):
     """Broadcast a config coefficient over a column field's vertical dimension.
 
@@ -340,7 +404,17 @@ def exner_to_pressure(exner):
     return constants.p_ref * exner ** inverse_poisson_exponent
 
 
-def buoyancy_coefficient(theta):
+def surface_buoyancy_flux(wtheta_s, wq_s, theta):
+    """Kinematic surface buoyancy (virtual potential temperature) flux [K m/s].
+
+    ``(w'theta_v')_s = (w'theta')_s + (R_v/R_d - 1) theta (w'q')_s`` with
+    ``R_v/R_d - 1 = 1/epsilon - 1`` (E3SM ``zvir``); kinematic fluxes
+    positive upward, ``theta`` the lowest-level potential temperature [K].
+    """
+    return wtheta_s + (1.0 / constants.epsilon - 1.0) * theta * wq_s
+
+
+def buoyancy_coefficient(theta, *, gravity=None):
     """Buoyancy coefficient ``g / θ`` [m s⁻² K⁻¹] for buoyancy / N² terms.
 
     Canonical home for the gravity-over-potential-temperature factor that
@@ -355,13 +429,17 @@ def buoyancy_coefficient(theta):
     ----------
     theta : array
         (Virtual) potential temperature [K].
+    gravity : float, optional
+        Gravity to use [m/s²]; defaults to ``constants.g``. Only for callers
+        that expose gravity as a knob (the LES intercomparison diagnostics do,
+        for reproducing a reference run's value) — physics callers leave it.
 
     Returns
     -------
     array
         ``g / θ``, same shape as ``theta``.
     """
-    return constants.g / theta
+    return (constants.g if gravity is None else gravity) / theta
 
 
 def brunt_vaisala_n_squared_from_gradient(theta, dtheta_dz):
@@ -388,6 +466,100 @@ def brunt_vaisala_n_squared_from_gradient(theta, dtheta_dz):
         ``N²`` [s⁻²], same shape.
     """
     return constants.g * dtheta_dz / theta
+
+
+# --- Deardorff (1980) stable-layer SGS length limit -------------------------
+# SAM ``SGS_TKE/tke_full.f90`` dosmagor calibration. Stable mixing is suppressed
+# by SHRINKING the master length, not by driving a stability factor to zero.
+_DEARDORFF_STABLE_COEF = 0.76   # l = 0.76·√e/N (Deardorff 1980; PALM, ARPS, ERF)
+_DEARDORFF_CK = 0.1             # SAM Ck
+_DEARDORFF_SMIX_FLOOR = 0.1     # SAM floor on smix, as a fraction of the length
+_DEARDORFF_CEE_A = 0.19         # Cee = Ce/0.7·(0.19 + 0.51·smix/l)
+_DEARDORFF_CEE_B = 0.51
+_DEARDORFF_CEE_DIV = 0.7
+# Floor on the buoyancy-shutoff sqrt ARGUMENT [s⁻²]. This is the differentiable
+# model's own requirement, NOT SAM's: d√x/dx = 0.5/√x, so an unfloored argument
+# hands the optimizer 0.5/√1e-36 = 5e17 — finite, and useless. SAM never
+# differentiates its closure, so it can leave the argument bare. The floor caps
+# the slope at 0.5/√_STRAIN_FLOOR ≈ 1.6e5.
+#
+# It sits ONE order BELOW the caller's own strain floor (``S² = |∂V/∂z|² +
+# 1e-10``): at zero shear and neutral N², ``S² − N²/Pr_t = 1e-10`` already
+# exceeds this floor, so the floor does NOT bite and the ``deardorff`` option
+# reduces EXACTLY to ``(c_s·l)²·√(S² − N²/Pr_t)`` there, byte-identical to the
+# default. A floor ABOVE 1e-10 (an earlier 1e-9) silently changed the neutral
+# strain from √1e-10 to √1e-9 — a √10 error the reviewer caught.
+_STRAIN_FLOOR = 1.0e-11
+
+
+def deardorff_stable_eddy_viscosity(strain_sq, n2, length, c_s, Pr_t):
+    """Smagorinsky eddy viscosity with the Deardorff (1980) stable-length limit.
+
+    ``K_m = √(Ck³/Cee)·smix²·√(S² − N²/Pr_t)`` with the master length shrunk
+    under stable stratification to ``smix = clip(√(0.76·tk/(Ck·N)), 0.1·l, l)``
+    (SAM ``dosmagor``).  Where ``N² ≤ 0`` (neutral/unstable) ``smix = l`` and
+    ``√(Ck³/Cee) = c_s²`` EXACTLY, so this reduces identically to the plain
+    ``(c_s·l)²·√(S² − N²/Pr_t)`` Smagorinsky-Lilly form.
+
+    Sign convention: ``N² > 0`` is STABLE; the buoyancy term is SUBTRACTED from
+    the shear so stratification suppresses mixing and ``N² < 0`` enhances it.
+
+    Prandtl convention: this repo divides (``S² − N²/Pr_t``, equivalently
+    Lilly's ``1 − Ri/Pr_t``).  SAM MULTIPLIES (``S² − Pr·N²``).  The two agree
+    only at ``Pr_t = 1`` and invert across this scheme's tunable range
+    ``Pr_t ∈ (0.33, 3)``, so the repo convention is used here and SAM's is NOT
+    transplanted.
+
+    Parameters
+    ----------
+    strain_sq : array
+        RAW deformation ``S²`` [s⁻²] with NO buoyancy correction applied — the
+        ``N²/Pr_t`` subtraction happens here.  Passing an already-corrected
+        strain applies the correction twice and silently guts ``K_m``.
+    n2 : array
+        Brunt-Väisälä ``N²`` [s⁻²]; may be ≤ 0.
+    length : array
+        Master mixing length [m] (Blackadar in a column, grid ``Δ`` in an LES).
+        MUST be strictly positive: ``smix/length`` is an unguarded divide, so a
+        zero length gives 0/0 = NaN on both branches.  The single-column caller
+        satisfies this because :func:`mixing_length` floors ``z`` at 1 m
+        (``length ≥ 0.4 m``); a future LES caller passing a raw grid ``Δ`` must
+        ensure the same.
+    c_s, Pr_t : float
+        Smagorinsky constant and turbulent Prandtl number.
+
+    Returns
+    -------
+    array
+        ``K_m`` [m²/s], same shape.
+    """
+    # Buoyancy-corrected strain, floored so the reverse-mode slope is BOUNDED
+    # rather than merely finite.  Kept as one sqrt (never factored into
+    # S·√(1−Ri/Pr_t)) so there is a single guarded argument.
+    strain = jnp.sqrt(jnp.maximum(strain_sq - n2 / Pr_t, _STRAIN_FLOOR))
+
+    # Deardorff stable length.  smix ∝ N^(-1/2) diverges as N² → 0⁺, but the
+    # clip saturates at ``length`` there: the interior of the clip requires
+    # 0.01 < 0.76·tk/(Ck·N·l²) < 1, which bounds N away from zero, so the
+    # unbounded branch is never the selected one.  ``_STRAIN_FLOOR`` keeps
+    # ``tk`` > 0, so the inner sqrt argument is strictly positive.
+    tk = c_s ** 2 * length ** 2 * strain
+    n_stable = jnp.sqrt(jnp.maximum(n2, _STRAIN_FLOOR))
+    smix_raw = jnp.sqrt(_DEARDORFF_STABLE_COEF * tk
+                        / (_DEARDORFF_CK * n_stable))
+    smix = jnp.where(
+        n2 > 0.0,
+        jnp.clip(smix_raw, _DEARDORFF_SMIX_FLOOR * length, length),
+        length,
+    )
+
+    # Ce = Ck³/c_s⁴ and Cee = Ce/0.7·(0.19 + 0.51·smix/l).  At smix = l this is
+    # Cee = Ce, hence √(Ck³/Cee) = c_s² and the whole expression collapses to
+    # the unmodified Smagorinsky form — the neutral/unstable identity above.
+    ratio = smix / length
+    cee = (_DEARDORFF_CK ** 3 / c_s ** 4) / _DEARDORFF_CEE_DIV * (
+        _DEARDORFF_CEE_A + _DEARDORFF_CEE_B * ratio)
+    return jnp.sqrt(_DEARDORFF_CK ** 3 / cee) * smix ** 2 * strain
 
 
 def lilly_buoyancy_factor(Ri, Pr_t):
@@ -449,7 +621,7 @@ def mixing_length(z, l_mix_max, z_floor=1.0):
     array
         Mixing length [m], same shape as ``z``.
     """
-    kappa = constants.kappa_vk
+    kappa = constants.kappa_von_karman
     z_abs = jnp.clip(jnp.abs(z), z_floor, None)
     return kappa * z_abs / (1.0 + kappa * z_abs / l_mix_max)
 

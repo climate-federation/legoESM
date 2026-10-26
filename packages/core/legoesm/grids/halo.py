@@ -1685,12 +1685,21 @@ def precompute_halo_tables(n: int) -> None:
 #   day 30 zonal_std: 0.520 -> 0.274                               -47%
 #   day 30 eddy_std:  0.364 -> 0.260                               -29%
 #
-# Set via the ``LEGOESM_CORNER_FILL`` environment variable or via the
-# ``set_corner_fill_mode(...)`` helper.  Default ``avg`` preserves the
-# current production behaviour.
+# Runs select it through ``DycoreConfig.corner_fill`` (applied by the model
+# driver at build, before any step is traced, via ``apply_corner_fill_config``).
+# The ``LEGOESM_CORNER_FILL`` environment variable is still read at import for
+# scripts/tests outside the driver; an unknown value raises.
 import os as _os
 
-_corner_fill_mode = _os.environ.get("LEGOESM_CORNER_FILL", "avg")
+CORNER_FILL_MODES = ("avg", "fv3_agrid_xdir", "fv3_bgrid_xdir")
+
+# An EMPTY value is "unset" (shell `VAR= cmd`), not a mode.
+_corner_fill_mode = _os.environ.get("LEGOESM_CORNER_FILL") or "avg"
+if _corner_fill_mode not in CORNER_FILL_MODES:
+    raise ValueError(
+        f"LEGOESM_CORNER_FILL={_corner_fill_mode!r} is not a corner fill mode; "
+        f"choose from {CORNER_FILL_MODES} (runs should set "
+        f"DycoreConfig.corner_fill instead).")
 
 
 def set_corner_fill_mode(mode: str) -> None:
@@ -1716,18 +1725,65 @@ def set_corner_fill_mode(mode: str) -> None:
           See FV3_3D.md iter 10.
     """
     global _corner_fill_mode
-    valid_modes = ("avg", "fv3_agrid_xdir", "fv3_bgrid_xdir")
-    if mode not in valid_modes:
+    if mode not in CORNER_FILL_MODES:
         raise ValueError(
             f"Unknown corner fill mode: {mode!r}.  "
-            f"Choose from {valid_modes}."
+            f"Choose from {CORNER_FILL_MODES}."
         )
+    if _corner_fill_claimed is not None and mode != _corner_fill_claimed:
+        raise ValueError(
+            f"corner fill mode {mode!r} conflicts with corner_fill="
+            f"{_corner_fill_claimed!r} of a model already built in this "
+            f"process; the mode is process-global, so run them in separate "
+            f"processes.")
     _corner_fill_mode = mode
 
 
 def get_corner_fill_mode() -> str:
     """Return the current cube-vertex halo fill mode."""
     return _corner_fill_mode
+
+
+# Mode claimed by the first model built in this process, and every mode a
+# corner fill actually traced with (the fill reads the global at trace time).
+_corner_fill_claimed: str | None = None
+_corner_fill_traced: set[str] = set()
+
+
+def apply_corner_fill_config(mode: str) -> None:
+    """Apply a run's configured corner fill.  A ``LEGOESM_CORNER_FILL`` that
+    disagrees with the config raises, so the env var cannot silently override
+    (or be silently overridden by) the recorded run configuration.  The mode is
+    process-global and read at trace time, so a second model built in the same
+    process with a different mode raises instead of retargeting the first."""
+    global _corner_fill_claimed
+    env = _os.environ.get("LEGOESM_CORNER_FILL") or None     # empty = unset
+    if env is not None and env != mode:
+        raise ValueError(
+            f"LEGOESM_CORNER_FILL={env!r} disagrees with the run config "
+            f"corner_fill={mode!r}; set the config field and unset the env var.")
+    if _corner_fill_claimed is not None and _corner_fill_claimed != mode:
+        raise ValueError(
+            f"corner_fill={mode!r} conflicts with corner_fill="
+            f"{_corner_fill_claimed!r} of a model already built in this "
+            f"process; the mode is process-global, so run them in separate "
+            f"processes.")
+    # A fill that already TRACED with another mode (a compiled function keeps
+    # the mode it traced with) is the same conflict, whether or not the earlier
+    # model went through this door.
+    other = _corner_fill_traced - {mode}
+    if other:
+        raise ValueError(
+            f"corner_fill={mode!r} conflicts with the mode(s) {sorted(other)} a "
+            f"halo fill already traced with in this process; compiled functions "
+            f"keep their traced mode, so run them in separate processes.")
+    set_corner_fill_mode(mode)
+    _corner_fill_claimed = mode
+
+
+def traced_corner_fill_modes() -> list[str]:
+    """Every corner fill mode a halo fill traced with in this process."""
+    return sorted(_corner_fill_traced)
 
 
 def fill_corners_h1(padded: jax.Array) -> jax.Array:
@@ -1770,6 +1826,7 @@ def fill_corners_h1(padded: jax.Array) -> jax.Array:
     ci = jnp.tile(jnp.array([0, n2i, 0, n2i]), 6)
     cj = jnp.tile(jnp.array([0, 0, n2i, n2i]), 6)
 
+    _corner_fill_traced.add(_corner_fill_mode)
     if _corner_fill_mode == "fv3_agrid_xdir":
         # FV3 AGRID-XDir: depth-1 mirror in XDir direction.
         # SW: q[0, 0] = q[0, 1]
@@ -1840,6 +1897,7 @@ def fill_corners_h2(padded: jax.Array) -> jax.Array:
     -------
     jax.Array, shape (6, n+4, n+4)
     """
+    _corner_fill_traced.add(_corner_fill_mode)
     if _corner_fill_mode == "fv3_agrid_xdir":
         # Vectorised FV3 AGRID-XDir for ng=2 (4 cells × 4 corners × 6 faces).
         # SW block (0..1, 0..1).

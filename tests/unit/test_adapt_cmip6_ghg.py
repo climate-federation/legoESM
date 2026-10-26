@@ -233,3 +233,126 @@ def test_roundtrip_real_shape_gmnhsh_units(tmp_path):
 def test_main_requires_input(tmp_path):
     m = _mod()
     assert m.main(["--out", str(tmp_path / "x.nc")]) == 2  # no --in-dir/--co2…
+
+
+def test_optional_halogens_reach_rrtmgp_vmr(tmp_path):
+    """CFC-22 / CCl4 / CF4 merged when supplied, read back by the loader and
+    mapped to RRTMGP's own species (fixed global means otherwise); a file
+    without them still loads (they stay optional)."""
+    m = _mod()
+    years = [1979, 1980]
+    per, _, _ = _synthetic_per_gas(years)
+    halo = {"CFC_22": 60.0, "CCl4": 100.0, "CF4": 70.0}
+    for gas, ppt in halo.items():
+        per[gas] = _gas_ds(m.OPTIONAL_GAS_TO_CFVAR[gas], years,
+                           [ppt, ppt + 1.0], units="1e-12")
+    out = tmp_path / "ghg_halo.nc"
+    m.merge_ghg(per).to_netcdf(out)
+
+    from legoesm.forcing.external import GHGConfig, get_ghg_at_time, ghg_concentrations_to_vmr
+    ghg = get_ghg_at_time(GHGConfig(source="annual_file", path=str(out),
+                                    start_year=1979), day=182.0)
+    vmr = ghg_concentrations_to_vmr(ghg)
+    for gas, rr in (("CFC_22", "cfc22"), ("CCl4", "ccl4"), ("CF4", "cf4")):
+        assert np.isclose(vmr[rr], halo[gas] * 1e-12, rtol=1e-3), (gas, vmr[rr])
+
+    base = tmp_path / "ghg_base.nc"
+    m.merge_ghg(_synthetic_per_gas(years)[0]).to_netcdf(base)
+    vmr0 = ghg_concentrations_to_vmr(get_ghg_at_time(
+        GHGConfig(source="annual_file", path=str(base), start_year=1979), day=182.0))
+    assert not {"cfc22", "ccl4", "cf4"} & set(vmr0)
+
+
+def test_open_handles_year_zero_axis(tmp_path):
+    """UoM-CMIP-1-2-0 files use 'days since 0-1-1' (undecodable by cftime):
+    _open falls back to mid-year fractional years from year 0."""
+    m = _mod()
+    t = np.arange(3) * 365.2425 + 182.0
+    ds = xr.Dataset({"x": ("time", np.ones(3))},
+                    coords={"time": ("time", t, {"units": "days since 0-1-1",
+                                                 "calendar": "gregorian"})})
+    p = tmp_path / "y0.nc"
+    ds.to_netcdf(p)
+    out = m._open(p)
+    np.testing.assert_allclose(out["time"].values, [0.5, 1.5, 2.5])
+
+
+def test_compiled_segments_carry_the_halogens():
+    """Compiled cube/lat-lon lanes pack GHGs through GHG_SPECIES_ORDER; a
+    species missing there is dropped before the solver (codex 2026-10-08)."""
+    from legoesm.driver.compiled_segments import (
+        GHG_SPECIES_ORDER, ghg_array_to_dict, ghg_dict_to_array)
+    vmr = {"co2": 4e-4, "ch4": 1.8e-6, "n2o": 3.2e-7, "cfc11": 2.3e-10,
+           "cfc12": 5e-10, "cfc22": 6e-11, "ccl4": 1e-10, "cf4": 7e-11}
+    keys = tuple(k for k in GHG_SPECIES_ORDER if k in vmr)
+    back = ghg_array_to_dict(ghg_dict_to_array(vmr), keys)
+    assert set(back) == set(vmr)
+    for k, v in vmr.items():
+        assert np.isclose(float(back[k]), v, rtol=1e-12), k
+
+
+def _cesm_ghg_ds():
+    """Synthetic CESM ``GHG_CMIP-*`` layout: one file, short CAM names, a
+    YYYYMMDD ``date`` and a ``days since 0-1-1`` axis that starts at year 0."""
+    years = np.arange(0, 5)
+    date = years * 10000 + 702                       # July 2 = mid-year
+    t = np.arange(years.size) * 365.0 + 183.0
+    mk = lambda v, u: (("time",), np.asarray(v, dtype=np.float64), {"units": u})
+    return xr.Dataset(
+        {"CO2": mk(280.0 + years, "1.e-6"), "CH4": mk(700.0 + years, "1.e-9"),
+         "N2O": mk(270.0 + years, "1.e-9"), "f11": mk(1.0 + years, "1.e-12"),
+         "f12": mk(2.0 + years, "1.e-12"),
+         "date": (("time",), date)},
+        coords={"time": ("time", t, {"units": "days since 0-1-1"})})
+
+
+def test_cesm_single_file_roundtrips_through_real_loader(tmp_path):
+    m = _mod()
+    out = m.adapt_cesm_ghg(_cesm_ghg_ds())
+    assert list(out.data_vars) == ["CO2", "CH4", "N2O", "CFC_11", "CFC_12"]
+    # annual means sit at mid-year, not at their July-2 label
+    np.testing.assert_allclose(out["time"].values, np.arange(5) + 0.5)
+    path = tmp_path / "ghg.nc"
+    out.to_netcdf(path)
+    from legoesm.forcing.external import _load_ghg_annual_file
+    _load_ghg_annual_file.cache_clear() if hasattr(_load_ghg_annual_file, "cache_clear") else None
+    years, data = _load_ghg_annual_file(str(path))
+    np.testing.assert_allclose(years, np.arange(5) + 0.5)
+    assert "EQUIVALENT" in out["CFC_11"].attrs["long_name"]
+    np.testing.assert_allclose(data["CO2"], (280.0 + np.arange(5)) * 1e-6)
+    np.testing.assert_allclose(data["CFC_11"], (1.0 + np.arange(5)) * 1e-12)
+    np.testing.assert_allclose(data["CFC_12"], (2.0 + np.arange(5)) * 1e-12)
+
+
+def test_cesm_single_file_rejects_other_layouts():
+    m = _mod()
+    with pytest.raises(ValueError, match="not a CESM GHG file"):
+        m.adapt_cesm_ghg(_cesm_ghg_ds().drop_vars("f11"))
+    bad = _cesm_ghg_ds()
+    bad["date"] = ("time", bad["date"].values[::-1])
+    with pytest.raises(ValueError, match="strictly increasing"):
+        m.adapt_cesm_ghg(bad)
+    monthly = _cesm_ghg_ds()
+    monthly["date"] = ("time", np.arange(5) * 10000 + 115)
+    with pytest.raises(ValueError, match="annual-mean"):
+        m.adapt_cesm_ghg(monthly)
+    adj = _cesm_ghg_ds()
+    adj["adj"] = ("time", np.full(5, 0.1))
+    with pytest.raises(ValueError, match="adj"):
+        m.adapt_cesm_ghg(adj)
+    zero_adj = _cesm_ghg_ds()
+    zero_adj["adj"] = ("time", np.zeros(5))
+    m.adapt_cesm_ghg(zero_adj)
+    no_units = _cesm_ghg_ds()
+    no_units["CO2"].attrs.pop("units")
+    with pytest.raises(ValueError, match="units"):
+        m.adapt_cesm_ghg(no_units)
+
+
+def test_cesm_file_refuses_other_inputs(tmp_path):
+    m = _mod()
+    src = tmp_path / "cesm.nc"
+    _cesm_ghg_ds().to_netcdf(src)
+    with pytest.raises(SystemExit, match="cannot be combined"):
+        m.main(["--cesm-file", str(src), "--co2", str(src),
+                "--out", str(tmp_path / "o.nc")])

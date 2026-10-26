@@ -26,6 +26,7 @@ from typing import NamedTuple
 import jax.numpy as jnp
 import numpy as np
 from legoesm.forcing.time_utils import NOLEAP_DAYS_PER_MONTH, NOLEAP_MONTH_STARTS
+from legoesm.grids.regridding import fill_missing_nearest_valid
 
 from legoesm import constants
 
@@ -554,8 +555,8 @@ def _load_icon_unstructured(
     # Fill NaN (land-masked ICON cells) with the nearest valid cell BEFORE
     # the KD-tree regrid — a NaN source cell would otherwise propagate to
     # every target point whose nearest neighbour it is (audit F3).
-    sst_data = _fill_nan_nearest_points(sst_data, coords_src)
-    sic_data = _fill_nan_nearest_points(sic_data, coords_src)
+    sst_data = fill_missing_nearest_valid(sst_data, coords_src)
+    sic_data = fill_missing_nearest_valid(sic_data, coords_src)
 
     # --- Build KD-tree from ICON cell centroids ---
     tree = cKDTree(coords_src)
@@ -1037,52 +1038,5 @@ def _fill_nan_nearest(
     coords = np.stack([x.ravel(), y.ravel(), z.ravel()], axis=-1)
 
     ntime = data.shape[0]
-    filled = _fill_nan_nearest_points(data.reshape(ntime, -1), coords)
+    filled = fill_missing_nearest_valid(data.reshape(ntime, -1), coords)
     return filled.reshape(data.shape)
-
-
-def _fill_nan_nearest_points(data: np.ndarray, coords: np.ndarray) -> np.ndarray:
-    """Fill NaN values with the nearest valid neighbour on arbitrary points.
-
-    Shared core of :func:`_fill_nan_nearest` (lat-lon meshes), also used
-    directly on ICON unstructured cell centroids (audit F3: land-masked NaN
-    cells must be filled BEFORE the KD-tree regrid).  An all-NaN frame is
-    left unchanged (no valid donor exists), matching the lat-lon behavior.
-
-    Parameters
-    ----------
-    data : np.ndarray
-        Data array, shape (ntime, npoints). NaN marks missing values.
-    coords : np.ndarray
-        Unit-sphere Cartesian coordinates, shape (npoints, 3).
-
-    Returns
-    -------
-    np.ndarray
-        Data with NaNs filled, shape (ntime, npoints).
-    """
-    if not np.any(np.isnan(data)):
-        return data
-
-    from scipy.interpolate import NearestNDInterpolator
-
-    filled = data.copy()
-    for t in range(data.shape[0]):
-        frame = data[t]
-        mask_valid = ~np.isnan(frame)
-        if not mask_valid.any():
-            # No valid donor for this frame — silently leaving it all-NaN
-            # would leak NaN into the regrid + runtime as a NaN surface
-            # temperature at step N with no message (audit FL2). Fail loud.
-            raise ValueError(
-                f"AMIP forcing frame {t} is entirely NaN/missing; no valid "
-                "point to fill from. Check the source file's time slice "
-                f"(record {t}) for an all-masked field."
-            )
-        if mask_valid.all():
-            continue
-
-        interp = NearestNDInterpolator(coords[mask_valid], frame[mask_valid])
-        filled[t] = interp(coords)
-
-    return filled

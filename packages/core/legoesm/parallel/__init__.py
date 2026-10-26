@@ -52,37 +52,27 @@ Parallelism strategies
    halo communication scheduling.
 
 11. **Device configuration and hardware-aware optimization**:
-    ``detect_devices()`` auto-detects hardware (CPU/GPU/TPU/Metal),
-    ``configure_jax_for_device()`` applies backend-specific XLA flags,
+    ``detect_devices()`` auto-detects hardware (CPU/GPU/TPU/Metal)
     and ``mixed_precision_policy()`` returns optimal dtype policies.
 """
 
 from legoesm.parallel.async_halo import (
     InteriorBoundaryMasks,
     OverlapContext,
-    async_halo_step,
-    async_halo_step_multi,
-    async_halo_step_vector,
     boundary_slices,
     create_interior_boundary_masks,
     create_overlap_context,
     extract_interior_padded,
-    finish_halo_exchange,
     interior_slice,
     merge_interior_boundary,
-    overlapped_compute_with_context,
     overlapped_halo_compute,
-    overlapped_halo_compute_vector,
     split_interior_boundary,
     start_halo_exchange,
 )
 from legoesm.parallel.device_config import (
     HardwareConfig,
     MixedPrecisionPolicy,
-    cast_for_device,
-    configure_jax_for_device,
     get_optimal_dtype,
-    get_optimal_mesh,
     mixed_precision_policy,
 )
 from legoesm.parallel.device_config import (
@@ -147,15 +137,12 @@ from legoesm.parallel.mesh import (
     create_voronoi_device_mesh,
     get_active_config,
     replicate_pytree,
-    shard_latlon,
-    shard_levels,
     shard_pytree,
 )
 from legoesm.parallel.profiling import (
     get_stats as get_mpi_profile_stats,
 )
 from legoesm.parallel.profiling import (
-    is_profiling_enabled,
     mpi_timer,
     print_mpi_profile,
 )
@@ -178,7 +165,6 @@ from legoesm.parallel.sharded_dynamics import (
     create_output_shardings,
     gather_voronoi_state_spmd,
     greedy_edge_coloring,
-    make_face_halo_exchange,
     make_sharded_step,
     make_voronoi_sharded_step,
     multi_ordering_edge_coloring,
@@ -220,8 +206,6 @@ __all__ = [
     "get_active_config",
     "replicate_pytree",
     "shard_pytree",
-    "shard_latlon",
-    "shard_levels",
     # Voronoi mesh decomposition
     "HaloCommSchedule",
     "VoronoiPartition",
@@ -261,14 +245,8 @@ __all__ = [
     "interior_slice",
     "extract_interior_padded",
     "overlapped_halo_compute",
-    "overlapped_halo_compute_vector",
     "create_overlap_context",
-    "overlapped_compute_with_context",
     "start_halo_exchange",
-    "finish_halo_exchange",
-    "async_halo_step",
-    "async_halo_step_multi",
-    "async_halo_step_vector",
     # Sharded dynamics (shard_map-based SPMD)
     "StepCacheKey",
     "CompiledShardedStep",
@@ -278,14 +256,12 @@ __all__ = [
     "gather_voronoi_state_spmd",
     "create_output_shardings",
     "sharded_step_with_halo",
-    "make_face_halo_exchange",
     "sharded_integrate",
     "sharded_integrate_scan",
     "check_sharding",
     # Batch MPI reductions
     "batch_allreduce_mpi",
     # MPI profiling
-    "is_profiling_enabled",
     "mpi_timer",
     "get_mpi_profile_stats",
     "reset_mpi_profile_stats",
@@ -293,10 +269,7 @@ __all__ = [
     # Device configuration and hardware-aware optimization
     "HardwareConfig",
     "detect_hardware",
-    "configure_jax_for_device",
     "get_optimal_dtype",
-    "get_optimal_mesh",
     "MixedPrecisionPolicy",
     "mixed_precision_policy",
-    "cast_for_device",
 ]

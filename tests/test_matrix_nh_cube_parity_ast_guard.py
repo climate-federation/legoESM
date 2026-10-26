@@ -605,7 +605,12 @@ def test_sw_cube_propagating_tests_have_hyperdiff_override():
     # for pre-#753 byte-identical behaviour) + the tuned div_damp/damp_v.
     assert MODON_HYPERDIFF_FACTOR == 1.0
     assert MODON_HYPERDIFF_SCALING == 2
-    assert MODON_DIV_DAMP_FACTOR == 8.0
+    assert MODON_DIV_DAMP_FACTOR == 0.03, (
+        "div_damp retune 2026-08-25 (dual-reviewed): 8.0 throttled the "
+        "non-rotating dipole spin-up (~5.5-min divergent e-fold at C36, "
+        "day-1 dipole 50x weak); 0.03 keeps a ~one-day six-cell backstop, "
+        "re-validated day-1 + 100-day C36/C48."
+    )
     assert MODON_DAMP_V == 0.010, (
         "MODON_* modon config drifted — this is the #800 desync class; the "
         "matrix and run_colliding_modons.py both read these, keep them the "

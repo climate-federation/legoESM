@@ -34,8 +34,8 @@ import pytest
 
 from legoesm.atmosphere.physics.convection._zm_dilute import (
     dilute_parcel_cape,
-    _moist_entropy,
-    _invert_entropy,
+    moist_entropy,
+    invert_entropy,
 )
 from legoesm.atmosphere.physics.thermodynamics import parcel_profile_and_cape
 
@@ -80,9 +80,60 @@ def test_entropy_inversion_round_trips():
     T = jnp.array([300.0, 280.0, 250.0])
     p = jnp.array([1.0e5, 8.0e4, 5.0e4])
     qt = jnp.array([0.018, 0.010, 0.003])
-    s = _moist_entropy(T, p, qt)
-    T_rec = _invert_entropy(s, p, qt, T + 5.0)
+    s = moist_entropy(T, p, qt)
+    T_rec = invert_entropy(s, p, qt, T + 5.0)
     assert jnp.allclose(T_rec, T, atol=0.05), f"{T_rec} vs {T}"
+
+
+def test_entropy_inversion_gradient_is_implicit_and_skips_the_loop():
+    """Gradient = exact implicit-function gradient at the root; reverse mode
+    does not replay the 20 Newton iterations; no path to the first guess."""
+    T = jnp.array([300.0, 280.0, 250.0, 295.0])
+    p = jnp.array([1.0e5, 8.0e4, 5.0e4, 9.5e4])
+    qt = jnp.array([0.018, 0.010, 0.003, 0.030])    # last one supersaturated
+    s = moist_entropy(T, p, qt)
+    guess = T + 5.0
+
+    T_rec = invert_entropy(s, p, qt, guess)
+    resid = moist_entropy(T_rec, p, qt) - s
+    assert jnp.max(jnp.abs(resid)) < 1e-9
+
+    def one(i):
+        return lambda st, pp, qq, tg: invert_entropy(st, pp, qq, tg)[i]
+
+    for i in range(T.shape[0]):
+        gs, gp, gq, gg = jax.grad(one(i), argnums=(0, 1, 2, 3))(s, p, qt, guess)
+        _, dsdT = jax.jvp(lambda t: moist_entropy(t, p, qt), (T_rec,), (jnp.ones_like(T_rec),))
+        assert jnp.allclose(gs[i], 1.0 / dsdT[i], rtol=1e-10)
+        assert jnp.all(gg == 0.0)
+        # Implicit gradient matches a centred difference of the converged solve.
+        for arg, h, g in ((1, 1.0, gp), (2, 1.0e-7, gq)):
+            xs = [s, p, qt]
+            e = jnp.zeros_like(xs[arg]).at[i].set(h)
+            up = invert_entropy(*[x + e if k == arg else x for k, x in enumerate(xs)], guess)[i]
+            dn = invert_entropy(*[x - e if k == arg else x for k, x in enumerate(xs)], guess)[i]
+            assert jnp.allclose(g[i], (up - dn) / (2 * h), rtol=1e-5), (i, arg)
+
+    _, lin = jax.linearize(lambda st: invert_entropy(st, p, qt, guess), s)
+    assert "while" not in str(jax.make_jaxpr(lin)(s))
+
+
+def test_entropy_slope_is_one_sided_at_saturation():
+    """Owner decision 2026-10-03: at qtot == qs exactly the entropy slope the
+    inversion's gradient uses is the saturated branch's, not the average of
+    the two branches that a jnp.minimum derivative would give.  (Whether the
+    inversion's ROOT lands on the tie is decided by its last bit, so the
+    deterministic check is on the slope at an exact tie.)"""
+    from legoesm.thermo import saturation_specific_humidity
+    T = jnp.array([290.0]); p = jnp.array([9.0e4])
+    qt = saturation_specific_humidity(T, p)
+
+    def slope(q):
+        return jax.jvp(lambda t: moist_entropy(t, p, q), (T,), (jnp.ones_like(T),))[1][0]
+
+    sat, unsat = slope(qt * (1 + 1e-12)), slope(qt * (1 - 1e-12))
+    assert abs(sat - unsat) > 0.5 * abs(sat)            # the kink is real
+    assert jnp.allclose(slope(qt), sat, rtol=1e-9)
 
 
 def test_dilute_cape_less_than_undilute():

@@ -92,6 +92,24 @@ def main() -> None:
         for f in _git(cwd, "ls-files", "--others", "--exclude-standard").splitlines():
             if _is_significant_py(f):
                 touched.add(f)
+        # A MERGE is committed the instant it is resolved, so comparing the
+        # working tree against HEAD never sees one -- which is exactly how a
+        # fourteen-conflict merge shipped with no review on 2026-08-20. A
+        # conflict resolution is the HIGHEST-risk review target: somebody chose
+        # between two versions of the same code and the diff does not record
+        # what was discarded. Treat a recent merge that touched numerics as a
+        # change needing review, the same as an uncommitted one.
+        try:
+            recent = _git(cwd, "log", "--merges", "-3",
+                          "--pretty=format:%H").splitlines()
+            for sha in [r for r in recent if r.strip()]:
+                for line in _git(cwd, "diff", "--numstat",
+                                 sha + "^1", sha).splitlines():
+                    parts = line.split("\t")
+                    if len(parts) == 3 and _is_significant_py(parts[2]):
+                        touched.add(parts[2])
+        except Exception:       # fail-open: a hook must never trap a session
+            pass
 
         if not touched or _has_recent_review(cwd):
             sys.exit(0)

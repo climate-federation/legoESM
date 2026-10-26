@@ -10,9 +10,11 @@ split → reshape, for fields with heterogeneous trailing shapes.
 
 from __future__ import annotations
 
+import pytest
+
 import jax.numpy as jnp
 import numpy as np
-from legoesm.atmosphere.dynamics.les import (
+from legoesm.atmosphere._future import (
     pseudo_incompressible_poisson_mpi as pmpi,
 )
 
@@ -46,3 +48,8 @@ def test_packed_single_field_roundtrip(monkeypatch):
     np.testing.assert_array_equal(
         np.asarray(out), np.asarray(_fake_halo_y(f, 1, None)),
     )
+
+
+# Parked module: see its docstring.
+pytestmark = pytest.mark.skip(
+    reason="parked in _future/: not wired into production (ponytail item poisson_mpi)")

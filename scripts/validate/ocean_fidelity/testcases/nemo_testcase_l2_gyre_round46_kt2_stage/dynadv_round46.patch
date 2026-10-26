@@ -1,0 +1,36 @@
+--- dynadv.F90.r41
++++ dynadv.F90
+@@ -19,6 +19,7 @@
+    USE dynadv_up3      ! UP3 flux form advection          (dyn_adv_up3  routine)
+    USE dynkeg          ! kinetic energy gradient          (dyn_keg      routine)
+    USE dynzad          ! vertical advection               (dyn_zad      routine)
++   USE l2_r46_stage, ONLY : r46_rhs ! round-46 WRITE-only stage frames
+    USE zdf_oce,  ONLY : ln_zad_Aimp
+    USE oce,      ONLY : ww
+    USE sbc_oce,  ONLY : ln_vortex_force
+@@ -94,7 +95,7 @@
+          ! Round-41 WRITE-only split.  stprk3_stg arms this routine only around
+          ! the live kt=nit000,kstg=3 call.  Every capture array is zeroed before
+          ! assignment; NEMO never reads any captured value.
+-         l2_write = lwp .AND. kt == nit000 .AND. l2_round41_kstg == 3
++         l2_write = lwp .AND. kt <= nit000 + 1 .AND. l2_round41_kstg == 3
+          IF( l2_write ) THEN
+             IF( l_istiled )                     CALL ctl_stop( 'dyn_adv: round41 split does not support tiling' )
+             IF( STORAGE_SIZE( 1._wp ) /= 64 )   CALL ctl_stop( 'dyn_adv: round41 split requires 64-bit wp' )
+@@ -109,13 +110,15 @@
+          ENDIF
+          !                                                                             !* horizontal gradient of kinetic energy
+          CALL dyn_keg     ( kt, nn_dynkeg     , Kmm, puu, pvv, Krhs )
++         CALL r46_rhs( 'after_keg', puu, pvv, Krhs )
+          IF( l2_write ) THEN
+             l2_after_keg_u(:,:,:) = puu(:,:,:,Krhs)
+             l2_after_keg_v(:,:,:) = pvv(:,:,:,Krhs)
+          ENDIF
+          CALL dyn_zad     ( kt                , Kmm, puu, pvv, Krhs )                  !* vertical advection
++         CALL r46_rhs( 'after_zad', puu, pvv, Krhs )
+          IF( l2_write ) THEN
+-            l2_filename = 'oracle_dynadv_split_kt00000001_s3.bin'
++            WRITE(l2_filename,'("oracle_dynadv_split_kt",I8.8,"_s3.bin")') kt
+             OPEN( NEWUNIT=l2_unit, FILE=TRIM(l2_filename), ACCESS='STREAM', FORM='UNFORMATTED', &
+                &  STATUS='REPLACE', ACTION='WRITE', IOSTAT=l2_ios )
+             IF( l2_ios /= 0 )   CALL ctl_stop( 'dyn_adv: cannot open round41 split dump' )

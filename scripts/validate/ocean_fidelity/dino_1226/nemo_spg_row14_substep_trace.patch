@@ -1,0 +1,61 @@
+--- a/cfgs/DINO/MY_SRC/dynspg_ts.F90
++++ b/cfgs/DINO/MY_SRC/dynspg_ts.F90
+@@ -176,6 +176,7 @@
+       REAL(wp), DIMENSION(jpi,jpj) :: zqco_zhU, zqco_zhV, zqco_zhdiv
+       ! #1226 row 1.3: deterministic write-only snapshots of the active qco continuity operands
+       REAL(wp), DIMENSION(jpi,jpj) :: zks
++      REAL(wp), ALLOCATABLE, DIMENSION(:,:,:) :: ztrace_ssh, ztrace_u, ztrace_v
+       !
+       REAL(wp) ::   zwdramp                     ! local scalar - only used if ln_wd_dl = .True. 
+ 
+@@ -615,6 +616,16 @@
+          zvwdav2 (:,:) = 0._wp   
+       END IF 
+ 
++      ! #1226 row 1.4 recurrence trace.  Full-halo buffers are zero-filled;
++      ! only the active A2D(0) domain is copied after each production swap.
++      IF( ll_spg_dump ) THEN
++         ALLOCATE( ztrace_ssh(jpi,jpj,icycle), ztrace_u(jpi,jpj,icycle), &
++            &      ztrace_v(jpi,jpj,icycle) )
++         ztrace_ssh(:,:,:) = 0._wp
++         ztrace_u  (:,:,:) = 0._wp
++         ztrace_v  (:,:,:) = 0._wp
++      ENDIF
++
+       !                                             ! ==================== !
+       DO jn = 1, icycle                             !  sub-time-step loop  !
+          !                                          ! ==================== !
+@@ -740,6 +751,13 @@
+                zqco_zhV   (ji,jj) = zhV    (ji,jj)
+             END_2D
+          ENDIF
++         IF( ll_spg_dump ) THEN
++            DO_2D( 0, 0, 0, 0 )
++               ztrace_ssh(ji,jj,jn) = sshn_e(ji,jj)
++               ztrace_u  (ji,jj,jn) = un_e  (ji,jj)
++               ztrace_v  (ji,jj,jn) = vn_e  (ji,jj)
++            END_2D
++         ENDIF
+          !     Compute Sea Level at step jit+1
+          !--           m+1        m                               m+1/2          --!
+          !--        ssh    =  ssh   - delta_t' * [ frc + div( flux      ) ]      --!
+@@ -1134,6 +1152,19 @@
+          !                                                 ! ==================== !
+       END DO                                               !        end loop      !
+       !                                                    ! ==================== !
++      IF( ll_spg_dump ) THEN
++         OPEN( UNIT=9440, FILE='row14_dump_ssh_substeps.bin', ACCESS='STREAM', &
++            &  FORM='UNFORMATTED', STATUS='REPLACE' )
++         OPEN( UNIT=9441, FILE='row14_dump_u_substeps.bin', ACCESS='STREAM', &
++            &  FORM='UNFORMATTED', STATUS='REPLACE' )
++         OPEN( UNIT=9442, FILE='row14_dump_v_substeps.bin', ACCESS='STREAM', &
++            &  FORM='UNFORMATTED', STATUS='REPLACE' )
++         WRITE(9440) ( ( ( ztrace_ssh(ji,jj,jn), ji=1,jpi ), jj=1,jpj ), jn=1,icycle )
++         WRITE(9441) ( ( ( ztrace_u  (ji,jj,jn), ji=1,jpi ), jj=1,jpj ), jn=1,icycle )
++         WRITE(9442) ( ( ( ztrace_v  (ji,jj,jn), ji=1,jpi ), jj=1,jpj ), jn=1,icycle )
++         CLOSE(9440) ; CLOSE(9441) ; CLOSE(9442)
++         DEALLOCATE( ztrace_ssh, ztrace_u, ztrace_v )
++      ENDIF
+       ! Finalize sums:
+       ! (Divide by weights sums here to prevent from truncation errors)
+       un_adv(:,:) = un_adv(:,:) / r1_wgt2s 

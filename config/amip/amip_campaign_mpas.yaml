@@ -22,7 +22,11 @@
 # differ from it in exactly ONE key, so a delta is attributable. It is NOT a
 # claim that every choice below beats the tracked default — several are open
 # questions, and `_tools/PRE_REGISTRATION_WAVE4.md` tests them one at a time.
-include: amip_production.yaml
+# Include repointed 2026-09-23: amip_production.yaml is now the CAM6 suite.
+# This deck's overrides and measurements describe the Sundqvist/L36
+# configuration, so it includes that file under its new name rather than
+# silently inheriting a different model.
+include: amip_sundqvist_l36.yaml
 
 # --- Radiation cadence -------------------------------------------------------
 # Base: 12 steps (15 min at dt=75). 48 = hourly, which is the RRTMGP call
@@ -145,6 +149,8 @@ land_stomatal_beta: false
 # transpiration is plant-limited even without a resolved canopy. That is the
 # most this lane can do today; wiring the canopy onto it is separate work.
 land_surface_scheme: simple_seb
+mpas_land_params_refresh: false  # the per-step canopy rebuild is two-leaf
+                                 # only; simple_seb keeps its setup params
 
 # NOT SET, and worth knowing why. The per-PFT land parameters -- albedo,
 # emissivity, root depth, roughness, bulk transfer coefficient, wilting point,

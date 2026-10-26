@@ -104,6 +104,8 @@ class IceColumnModel:
         T_ice_init: float = 260.0,  # noqa: N803 (physical symbol) — coeff-ok: SCM initial condition [K]
         ocean_sst: float = constants.T_freeze_ocean,
         u_min: float = 1.0,
+        h_snow_init: float = 0.0,
+        S_ice_init: float = constants.S_ice_bulk_default,
     ) -> IceColumnModel:
         """Build a thermodynamic ice column for ``ncol`` independent cells.
 
@@ -113,7 +115,13 @@ class IceColumnModel:
         """
         from legoesm.core.field import Field
         from legoesm.ice import SeaIceConfig
-        from legoesm.ice.state import SeaIceState
+        from legoesm.ice.state import SeaIceState, SI3ColumnState
+        from legoesm.ice.config import validate_si3_thermo_config
+        from legoesm.ice.bitz_lipscomb import (
+            ice_enthalpy_from_temperature,
+            option2_salinity_profile,
+            snow_enthalpy_from_temperature,
+        )
 
         if config is None:
             config = SeaIceConfig()
@@ -125,14 +133,34 @@ class IceColumnModel:
             )
 
         dims = ("column",)
-        state = SeaIceState(
-            h_ice=Field(jnp.full((ncol,), h_ice_init), name="h_ice", dims=dims, units="m"),
-            T_ice=Field(jnp.full((ncol,), T_ice_init), name="T_ice", dims=dims, units="K"),
-            concentration=Field(
-                jnp.full((ncol,), concentration_init),
-                name="ice_concentration", dims=dims, units="1",
-            ),
-        )
+        if config.thermo_scheme == "si3_bl99":
+            validate_si3_thermo_config(config)
+            c = config.ice_constants
+            bulk = jnp.full((ncol,), S_ice_init)
+            sss = jnp.full((ncol,), c.S_ocean_ref)
+            sal = option2_salinity_profile(bulk, sss)
+            Ti = jnp.full((ncol, 3), T_ice_init)
+            Ts = jnp.full((ncol, 3), T_ice_init)
+            state = SI3ColumnState(
+                concentration=Field(jnp.full((ncol,), concentration_init), name="ice_concentration", dims=dims, units="1"),
+                h_ice=Field(jnp.full((ncol,), h_ice_init), name="h_ice", dims=dims, units="m"),
+                h_snow=Field(jnp.full((ncol,), h_snow_init), name="h_snow", dims=dims, units="m"),
+                T_surface=Field(jnp.full((ncol,), T_ice_init), name="ice_surface_temperature", dims=dims, units="K"),
+                e_ice=Field(ice_enthalpy_from_temperature(Ti, sal, c), name="ice_layer_enthalpy", dims=dims + ("ice_layer",), units="J/m3"),
+                e_snow=Field(snow_enthalpy_from_temperature(Ts, c), name="snow_layer_enthalpy", dims=dims + ("snow_layer",), units="J/m3"),
+                S_bulk=Field(bulk, name="bulk_ice_salinity", dims=dims, units="PSU"),
+                S_layers=Field(sal, name="ice_layer_salinity", dims=dims + ("ice_layer",), units="PSU"),
+                age_volume=Field(jnp.zeros((ncol,)), name="ice_age_volume", dims=dims, units="s"),
+            )
+        else:
+            state = SeaIceState(
+                h_ice=Field(jnp.full((ncol,), h_ice_init), name="h_ice", dims=dims, units="m"),
+                T_ice=Field(jnp.full((ncol,), T_ice_init), name="T_ice", dims=dims, units="K"),
+                concentration=Field(
+                    jnp.full((ncol,), concentration_init),
+                    name="ice_concentration", dims=dims, units="1",
+                ),
+            )
         zeros = jnp.zeros((ncol,))
         return cls(
             state=state, config=config, forcing=forcing,

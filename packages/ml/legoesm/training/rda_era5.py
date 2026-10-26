@@ -9,7 +9,7 @@ WeatherBench/Zarr loader.
 from __future__ import annotations
 
 import glob
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
@@ -173,23 +173,3 @@ def load_rda_era5_slice(root: str | Path, dt: datetime) -> ERA5Slice:
         lon=lon,
         plev_Pa=np.asarray(levels_hpa * 100.0, dtype=np.float64),
     )
-
-
-def build_rda_time_index(
-    root: str | Path,
-    start: datetime,
-    end: datetime,
-    *,
-    cadence_hours: int = 1,
-) -> list[datetime]:
-    """List hourly/cadenced datetimes for which target RDA files are present."""
-    out: list[datetime] = []
-    t = start
-    step = timedelta(hours=cadence_hours)
-    while t <= end:
-        # Check only a minimal set; ``load_rda_era5_slice`` performs full validation.
-        pressure_level_file(root, "t", t)
-        surface_file(root, "sp", t)
-        out.append(t)
-        t += step
-    return out

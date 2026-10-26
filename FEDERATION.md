@@ -39,7 +39,7 @@ root on `sys.path`.
 | **legoesm-coupler** | `coupler`, `driver` | core + the four components + ml, tools |
 | **legoesm-ml** | `ml`, `training`, `da` + loose module `tuning` | core, atmosphere, ocean, coupler, tools |
 | **legoesm-tools** | `forcing`, `diagnostics`, `experiments`, `visualization` | core, atmosphere, ocean, coupler |
-| **legoesm** (meta) | loose modules `cli`, `config`, `dycore_factory`, `experiment_registry`, `supported_matrix`, `taxonomy`; `legoesm[all]` | every member |
+| **legoesm** (meta) | loose modules `cli`, `config`, `dycore_factory`, `experiment_registry`, `supported_matrix`; `legoesm[all]` | every member |
 
 The orchestration cluster — **legoesm-coupler**, **legoesm-ml**, **legoesm-tools** —
 is *not* a clean DAG: the driver coordinates the components and pulls forcing

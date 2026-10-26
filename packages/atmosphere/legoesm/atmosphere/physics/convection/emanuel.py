@@ -17,10 +17,9 @@ through the buoyancy threshold while still producing the
 qualitatively-correct detrainment-height spread.
 
 Optional unsaturated-downdraft branch (rain evaporation cooling) is
-toggled by ``enable_unsaturated_downdraft``.  Implementation: a
-fraction ``downdraft_efficiency`` of the column-integrated detrained
-condensate is moved as a per-level cooling + moistening tendency in
-the cloud layer below LCL.
+toggled by ``enable_unsaturated_downdraft``.  Implementation: the
+ported CONVECT v4.3c downdraft shaft (convect43c.f lines 713-830),
+driven by the buoyancy-sort mixer's own intermediates.
 
 No convective momentum transport (Emanuel CMT is a separate
 extension, deferred).
@@ -37,13 +36,13 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
-from legoesm.thermo import saturation_mixing_ratio, saturation_mixing_ratio_dT
+from legoesm.thermo import saturation_specific_humidity, saturation_specific_humidity_dT
 from legoesm.atmosphere.physics._shared import virtual_temperature
 from legoesm.atmosphere.physics.thermodynamics import (
     compute_cape,
     compute_moist_adiabat,
-    latent_heat_vaporization,
 )
+from legoesm.thermo import latent_heat_vaporization
 from legoesm.atmosphere.physics.convection.config import EmanuelConfig
 from legoesm.atmosphere.physics.convection.output import ConvectionOutput
 from legoesm.atmosphere.physics.convection.mass_flux import (
@@ -155,8 +154,8 @@ def _mixture_buoyancy(T_e, q_e, T_u, q_u, q_c_u, p, fractions):
     # negative evaporates condensate (entrained dry air) and cools.
     # Bounded to [−q_c, q_v] so we never make negative condensate or
     # negative vapor; ``clip`` keeps finite subgradients (AD-safe).
-    q_sat_m = saturation_mixing_ratio(T_m0, pe)
-    dqs_dT = saturation_mixing_ratio_dT(T_m0, pe)
+    q_sat_m = saturation_specific_humidity(T_m0, pe)
+    dqs_dT = saturation_specific_humidity_dT(T_m0, pe)
     L_over_cp = constants.L_v / constants.c_pd
     delta_q = jnp.clip(
         (q_m0 - q_sat_m) / (1.0 + L_over_cp * dqs_dT), -qc_m0, q_m0,
@@ -371,7 +370,7 @@ def emanuel_convection(
     # surrogate leaves a nonzero ln(2)/sharpness mass-flux floor; in RCE
     # that floor drove persistent heating even after CAPE was exhausted.
     cbmf_new = jnp.maximum(cbmf_new, 0.0)
-    # See ZhangMcFarlaneConfig.M_b_max.
+    # Hard cap on the cloud-base mass flux [kg/m^2/s] (config.M_b_max).
     M_b = jnp.clip(cbmf_new, 0.0, config.M_b_max)
 
     if config.use_genuine_mixing:
@@ -462,9 +461,8 @@ def emanuel_convection(
     # -- Optional unsaturated-downdraft cooling ---------------------------
     # Implemented as a static Python branch (closure-time decision) so
     # it does NOT add a JAX trace overhead when disabled.  When enabled
-    # the column-integrated condensate evaporates a fraction
-    # ``downdraft_efficiency`` below LCL, cooling and moistening the
-    # sub-cloud layer.
+    # precipitation re-evaporates in the ported downdraft shaft, cooling and
+    # moistening the sub-cloud layer.
     if config.enable_unsaturated_downdraft:
         # The PORTED shaft (convect43c.f lines 713-830), not the previous
         # column-integrated stand-in.  It needs the mixer's own intermediates
@@ -727,6 +725,7 @@ def emanuel_convection(
         dq_v_dt=dq_v_dt,
         dq_c_conv_dt=dq_c_conv_dt,
         dq_r_conv_dt=dq_r_conv_dt,
+        precip_frozen_sfc=jnp.zeros_like(cape),  # L_v-only: liquid at sfc (F29)
         cape=cape,
         convective_mask=cape_weight,
         du_dt_conv=None,

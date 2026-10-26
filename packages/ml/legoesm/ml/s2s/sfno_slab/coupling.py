@@ -23,6 +23,10 @@ from legoesm.ml.s2s.sfno_slab.data import (
     normalize_forcing_channels,
     resolve_s2s_sample_dates,
 )
+from legoesm.ml.s2s.neuralgcm_slab.slab_coupling import (
+    SlabCouplingConfig,
+    extract_surface_forcing_from_dataset,
+)
 from legoesm.ml.s2s.sfno_slab.regrid import build_target_grid
 from legoesm.ml.s2s.sfno_slab.training import S2SStochasticConfig, predict_next_atmosphere
 from legoesm.ocean.simple_ocean import SimpleOceanConfig, SlabOceanState, make_ocean
@@ -47,16 +51,6 @@ def _channel_index(labels: list[str], name: str) -> int:
     if name not in labels:
         raise KeyError(f"Required channel {name!r} not found.")
     return labels.index(name)
-
-
-def _optional_channel(labels: list[str], name: str) -> int | None:
-    """Return the channel index when present, otherwise ``None``."""
-    return labels.index(name) if name in labels else None
-
-
-def _level_label(base_var: str, pressure_levels: tuple[int, ...], preferred_level: int) -> str:
-    nearest = min(pressure_levels, key=lambda level: abs(level - preferred_level))
-    return f"{base_var}-{nearest}"
 
 
 def _fill_nan_with_mean(field: np.ndarray, *, default: float) -> np.ndarray:
@@ -117,47 +111,49 @@ def _build_atm_to_surface(
     pressure_levels: tuple[int, ...],
     config: S2SSlabCouplingConfig,
 ) -> AtmToSurface:
-    t_idx = _channel_index(channel_labels, _level_label("t", pressure_levels, config.lowest_level_hpa))
-    q_idx = _optional_channel(channel_labels, _level_label("q", pressure_levels, config.lowest_level_hpa))
-    u_idx = _optional_channel(channel_labels, _level_label("u", pressure_levels, config.lowest_level_hpa))
-    v_idx = _optional_channel(channel_labels, _level_label("v", pressure_levels, config.lowest_level_hpa))
+    """Slab-ocean forcing from one SFNO prediction via the shared S2S builder.
 
-    t_low = _fill_nan_with_mean(prediction_physical[..., t_idx], default=280.0)
-    q_low = (
-        _fill_nan_with_mean(prediction_physical[..., q_idx], default=0.0)
-        if q_idx is not None else np.zeros_like(t_low, dtype=np.float32)
+    Packs the lowest-level T/q/u/v channels and the surface fields into the
+    datasets :func:`extract_surface_forcing_from_dataset` (the NeuralGCM-slab
+    builder) consumes: density from the virtual temperature at the model-level
+    pressure.  A missing channel or surface field, or a non-finite value in
+    one, raises; nothing is filled.  Precipitation is not an SFNO output, so the
+    builder reports none (has_precipitation=0); the slab ocean does not read it.
+    """
+    level = min(pressure_levels, key=lambda lev: abs(lev - config.lowest_level_hpa))
+    for name in ("sp", "sw_down", "lw_down"):
+        if not np.isfinite(aux_surface[name]).all():
+            raise ValueError(f"non-finite surface field {name!r} in SFNO slab forcing")
+    shape = prediction_physical.shape[:-1]
+    coords = {"latitude": np.arange(shape[0]), "longitude": np.arange(shape[1])}
+    names = SlabCouplingConfig().field_names
+    atmosphere = xr.Dataset(
+        {
+            name: (("level", "latitude", "longitude"),
+                   prediction_physical[None, ..., _channel_index(channel_labels, f"{var}-{level}")])
+            for var, name in (
+                ("t", names.temperature),
+                ("q", names.specific_humidity),
+                ("u", names.u_component_of_wind),
+                ("v", names.v_component_of_wind),
+            )
+        },
+        coords={"level": [level], **coords},
     )
-    u_low = (
-        _fill_nan_with_mean(prediction_physical[..., u_idx], default=0.0)
-        if u_idx is not None else np.zeros_like(t_low, dtype=np.float32)
+    if not all(np.isfinite(da.values).all() for da in atmosphere.data_vars.values()):
+        raise ValueError(f"non-finite lowest-level channel (level {level}) in SFNO slab forcing")
+    radiation = xr.Dataset(
+        {
+            names.sw_down: (("latitude", "longitude"), aux_surface["sw_down"]),
+            names.lw_down: (("latitude", "longitude"), aux_surface["lw_down"]),
+        },
+        coords=coords,
     )
-    v_low = (
-        _fill_nan_with_mean(prediction_physical[..., v_idx], default=0.0)
-        if v_idx is not None else np.zeros_like(t_low, dtype=np.float32)
-    )
-
-    p_sfc = _fill_nan_with_mean(aux_surface["sp"], default=100000.0)
-    sw_down = _fill_nan_with_mean(aux_surface["sw_down"], default=0.0)
-    lw_down = _fill_nan_with_mean(aux_surface["lw_down"], default=300.0)
-    rho = p_sfc / np.maximum(constants.R_d * t_low, 1.0)
-    zero = np.zeros_like(t_low, dtype=np.float32)
-
-    return AtmToSurface(
-        sw_down=jnp.asarray(sw_down, dtype=float),
-        lw_down=jnp.asarray(lw_down, dtype=float),
-        precip_total=jnp.asarray(zero, dtype=float),
-        precip_snow=jnp.asarray(zero, dtype=float),
-        T_lowest=jnp.asarray(t_low, dtype=float),
-        q_lowest=jnp.asarray(q_low, dtype=float),
-        u_lowest=jnp.asarray(u_low, dtype=float),
-        v_lowest=jnp.asarray(v_low, dtype=float),
-        p_lowest=jnp.asarray(p_sfc, dtype=float),
-        p_surface=jnp.asarray(p_sfc, dtype=float),
-        rho_lowest=jnp.asarray(rho, dtype=float),
-        cos_zenith=jnp.asarray(zero, dtype=float),
-        co2_ppmv=jnp.asarray(420.0, dtype=float),
-        has_radiation=jnp.asarray(1.0, dtype=float),
-        has_precipitation=jnp.asarray(0.0, dtype=float),
+    return extract_surface_forcing_from_dataset(
+        atmosphere,
+        radiation_dataset=radiation,
+        surface_pressure=aux_surface["sp"],
+        config=SlabCouplingConfig(lowest_level_hpa=config.lowest_level_hpa),
     )
 
 
@@ -316,36 +312,41 @@ def coupled_rollout_to_dataset(
             lw_down = np.asarray(surface_forcing["lw_down"].isel(lead_day=day).values, dtype=np.float32)
             sea_ice_cover = np.asarray(surface_forcing["sea_ice_cover"].isel(lead_day=day).values, dtype=np.float32)
 
-        forcing = _build_atm_to_surface(
-            prediction_physical,
-            {"sp": sp, "sw_down": sw_down, "lw_down": lw_down},
-            channel_labels=channel_labels,
-            pressure_levels=data_config.pressure_levels,
-            config=config,
-        )
-        state_new, sst_new, _, _ = ocean_step(ocean_state, forcing, config.dt_seconds)
-        sst_new = np.asarray(sst_new, dtype=np.float32)
-        sst_prev = np.asarray(ocean_state.T_sfc.data, dtype=np.float32)
-        sst_new = np.where(np.isfinite(sst_new), sst_new, sst_prev)
-        if sea_ice_cover is not None:
-            sst_new = np.where(
-                sea_ice_cover >= config.sea_ice_threshold,
-                np.float32(config.ocean.T_freeze),
-                sst_new,
-            )
-        sst_new = _sst_state_from_masked_array(
-            sst_new,
-            ocean_mask,
-            freeze_temperature=config.ocean.T_freeze,
-        )
-        sst_new_physical = _sst_from_ocean_units(sst_new, uses_celsius=sst_uses_celsius)
-        ocean_state = SlabOceanState(
-            T_sfc=state_new.T_sfc.replace(data=jnp.asarray(sst_new, dtype=float)),
-            T_deep=state_new.T_deep,
-        )
-
         next_forcing_physical = np.asarray(target_forcing_physical[day], dtype=np.float32).copy()
         if coupled:
+            # Only the coupled run uses the slab: its forcing, step and NaN check live
+            # here so an uncoupled (fixed-SST) control never builds or steps it.
+            forcing = _build_atm_to_surface(
+                prediction_physical,
+                {"sp": sp, "sw_down": sw_down, "lw_down": lw_down},
+                channel_labels=channel_labels,
+                pressure_levels=data_config.pressure_levels,
+                config=config,
+            )
+            state_new, sst_new, _, _ = ocean_step(ocean_state, forcing, config.dt_seconds)
+            sst_new = np.asarray(sst_new, dtype=np.float32)
+            n_bad = int(np.size(sst_new) - np.isfinite(sst_new).sum())
+            if n_bad:
+                raise FloatingPointError(
+                    f"slab ocean returned non-finite SST at {n_bad} cells on lead day {day}; "
+                    "refusing to carry the previous SST forward."
+                )
+            if sea_ice_cover is not None:
+                sst_new = np.where(
+                    sea_ice_cover >= config.sea_ice_threshold,
+                    np.float32(config.ocean.T_freeze),
+                    sst_new,
+                )
+            sst_new = _sst_state_from_masked_array(
+                sst_new,
+                ocean_mask,
+                freeze_temperature=config.ocean.T_freeze,
+            )
+            sst_new_physical = _sst_from_ocean_units(sst_new, uses_celsius=sst_uses_celsius)
+            ocean_state = SlabOceanState(
+                T_sfc=state_new.T_sfc.replace(data=jnp.asarray(sst_new, dtype=float)),
+                T_deep=state_new.T_deep,
+            )
             next_forcing_physical[..., sst_index] = np.asarray(sst_new_physical, dtype=np.float32)
             sst_output = _masked_output(sst_new_physical, ocean_mask)
         else:

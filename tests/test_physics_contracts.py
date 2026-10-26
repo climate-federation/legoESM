@@ -48,7 +48,7 @@ import pytest
 from tests import _ratchet_audit as ra
 
 _VALID_CONSERVES = frozenset(
-    {"mass", "energy", "moisture", "momentum", "tracer", "salt", "none"}
+    {"mass", "energy", "moisture", "momentum", "tracer", "salt", "volume", "none"}
 )
 _REQUIRED_KEYS = frozenset(
     {
@@ -81,6 +81,9 @@ EXCLUDED: frozenset[str] = frozenset(
     {
         "packages/atmosphere/legoesm/atmosphere/physics/__init__.py",
         "packages/atmosphere/legoesm/atmosphere/physics/_shared.py",
+        # Not a tendency scheme: loads the LES-calibrated coefficients from the
+        # tracked YAML and splices them into an existing TurbulenceConfig.
+        "packages/atmosphere/legoesm/atmosphere/physics/turbulence/les_tuned.py",
         "packages/atmosphere/legoesm/atmosphere/physics/clouds/__init__.py",
         "packages/atmosphere/legoesm/atmosphere/physics/clouds/config.py",
         "packages/atmosphere/legoesm/atmosphere/physics/combined.py",
@@ -111,6 +114,9 @@ EXCLUDED: frozenset[str] = frozenset(
         # Thompson-2008 snow process functions used by thompson.py. Like _shared.py.
         "packages/atmosphere/legoesm/atmosphere/physics/microphysics/_warm_rain.py",
         "packages/atmosphere/legoesm/atmosphere/physics/microphysics/_thompson_snow.py",
+        # WRF v4.8.0 Thompson init half (module PARAMETERs, gamma constants and
+        # lookup tables); the scheme (thompson_wrf.py) carries the contract.
+        "packages/atmosphere/legoesm/atmosphere/physics/microphysics/thompson_wrf_tables.py",
         "packages/atmosphere/legoesm/atmosphere/physics/microphysics/sdm/__init__.py",
         "packages/atmosphere/legoesm/atmosphere/physics/microphysics/sdm/config.py",
         "packages/atmosphere/legoesm/atmosphere/physics/microphysics/sdm/particles.py",
@@ -124,13 +130,18 @@ EXCLUDED: frozenset[str] = frozenset(
         "packages/atmosphere/legoesm/atmosphere/physics/radiation/rrtmgp/config/__init__.py",
         "packages/atmosphere/legoesm/atmosphere/physics/radiation/rrtmgp/config/radiative_transfer.py",
         "packages/atmosphere/legoesm/atmosphere/physics/radiation/rrtmgp/constants.py",
-        "packages/atmosphere/legoesm/atmosphere/physics/radiation/rrtmgp/interpolation.py",
         "packages/atmosphere/legoesm/atmosphere/physics/radiation/rrtmgp/kernel_ops.py",
         "packages/atmosphere/legoesm/atmosphere/physics/radiation/rrtmgp/optics/__init__.py",
         "packages/atmosphere/legoesm/atmosphere/physics/radiation/rrtmgp/optics/atmospheric_state.py",
         "packages/atmosphere/legoesm/atmosphere/physics/radiation/rrtmgp/optics/cloud_optics.py",
         "packages/atmosphere/legoesm/atmosphere/physics/radiation/rrtmgp/optics/constants.py",
         "packages/atmosphere/legoesm/atmosphere/physics/radiation/rrtmgp/optics/data_loader_base.py",
+        # CAM6 Mitchell ice/snow optics table loader + band optics (engine, like cloud_optics.py).
+        "packages/atmosphere/legoesm/atmosphere/physics/radiation/rrtmgp/optics/mitchell_ice_optics.py",
+        # CAM6 gammadist liquid optics table + band optics, and the shared CAM
+        # lininterp they and the Mitchell optics use (engine, like cloud_optics.py).
+        "packages/atmosphere/legoesm/atmosphere/physics/radiation/rrtmgp/optics/cam6_liquid_optics.py",
+        "packages/atmosphere/legoesm/atmosphere/physics/radiation/rrtmgp/optics/cam_lininterp.py",
         "packages/atmosphere/legoesm/atmosphere/physics/radiation/rrtmgp/optics/gas_optics.py",
         "packages/atmosphere/legoesm/atmosphere/physics/radiation/rrtmgp/optics/lookup_cloud_optics.py",
         "packages/atmosphere/legoesm/atmosphere/physics/radiation/rrtmgp/optics/lookup_gas_optics_base.py",
@@ -164,6 +175,8 @@ EXCLUDED: frozenset[str] = frozenset(
         "packages/atmosphere/legoesm/atmosphere/physics/turbulence/config.py",
         "packages/atmosphere/legoesm/atmosphere/physics/turbulence/integration.py",
         "packages/atmosphere/legoesm/atmosphere/physics/turbulence/output.py",
+        # Config-descend plumbing (nested-CLUBB tunable-leaf helper), not a scheme.
+        "packages/atmosphere/legoesm/atmosphere/physics/turbulence/tunable_subconfig.py",
         # MPI plumbing: slices a deployed per-column override to a rank's tile,
         # not a single-tendency physics scheme.
         "packages/atmosphere/legoesm/atmosphere/physics/turbulence/override_sharding.py",
@@ -187,6 +200,9 @@ EXCLUDED: frozenset[str] = frozenset(
         "packages/ocean/legoesm/ocean/physics/surface_forcing/output.py",
         "packages/ocean/legoesm/ocean/physics/tendencies.py",
         "packages/ocean/legoesm/ocean/physics/vertical_mixing/__init__.py",
+        # Not a scheme: the exact binary64 byte table of glibc 2.34 exp,
+        # carried so the DINO oracle comparison is bit-reproducible.
+        "packages/ocean/legoesm/ocean/physics/vertical_mixing/_glibc234_exp_table.py",
         "packages/ocean/legoesm/ocean/physics/vertical_mixing/_shared.py",
         "packages/ocean/legoesm/ocean/physics/vertical_mixing/config.py",
         "packages/ocean/legoesm/ocean/physics/vertical_mixing/integration.py",

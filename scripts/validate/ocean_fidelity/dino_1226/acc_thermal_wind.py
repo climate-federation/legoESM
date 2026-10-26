@@ -56,7 +56,8 @@ from legoesm.ocean.eos import NemoSEOSConfig, nemo_seos_alpha_beta, nemo_seos_eo
 
 CFG = NemoSEOSConfig()          # defaults ARE the DINO/Kamm set (verified vs namelist_cfg)
 RHO0 = CFG.rho0
-DINO = "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO"
+DINO = os.environ.get(
+    "DINO_DIR", "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO")
 LEGO_DIR = os.environ.get(
     "DINO_TW_LEGO_DIR",
     "/tmp/claude-10257/-home-dbalwada-legoESM/853ee94c-2651-44cc-ba12-f55bf3ed1979/scratchpad",
@@ -64,6 +65,10 @@ LEGO_DIR = os.environ.get(
 DEEP_M = 1400.0                 # the reported upper/deep split depth
 
 # ---------------------------------------------------------------- geometry ---
+# Loaded at import from the DINO oracle build (set DINO_DIR to relocate).  Where
+# the oracle build is absent (any account other than the producer's) this raises
+# FileNotFoundError at import; the dino instrument test fixture treats that as a
+# skip for the data-path tests.
 mm = nc.Dataset(f"{DINO}/RUN_TRAJ/mesh_mask.nc")
 
 
@@ -167,14 +172,14 @@ def per_lev(integ):
     return np.median(integ.sum(axis=0)[2:-2], axis=0) / 1e6
 
 
-def thermal_wind(rho, wet):
-    """Bottom-referenced baroclinic transport [Sv per longitude] + the per-level
-    integrand (for the depth-attribution report).
+def thermal_wind_rows(rho, wet, j_lo, j_hi):
+    """``thermal_wind`` over an arbitrary contiguous T-row range [j_lo, j_hi].
 
-    Note the half-cell x-offset: rho gradients sit on T-columns, u on u-faces.
-    Immaterial to a median over 48 longitudes, and identical for both models.
+    Same integrand, same weights, same sign convention; only the meridional
+    limits differ.  ``thermal_wind`` is this function on the channel band and
+    delegates to it, so the two can never drift apart.
     """
-    a, b = slice(J0, J1), slice(J0 + 1, J1 + 1)     # v-point pairs (j, j+1)
+    a, b = slice(j_lo, j_hi), slice(j_lo + 1, j_hi + 1)   # v-point pairs (j, j+1)
     integ = _shear_integrand(
         rho[b] - rho[a],
         wet[a] & wet[b],
@@ -183,6 +188,16 @@ def thermal_wind(rho, wet):
         f_v[a, :][:, :, None],
     )
     return integ.sum(axis=(0, 2)) / 1e6, integ
+
+
+def thermal_wind(rho, wet):
+    """Bottom-referenced baroclinic transport [Sv per longitude] + the per-level
+    integrand (for the depth-attribution report), over the channel band.
+
+    Note the half-cell x-offset: rho gradients sit on T-columns, u on u-faces.
+    Immaterial to a median over 48 longitudes, and identical for both models.
+    """
+    return thermal_wind_rows(rho, wet, J0, J1)
 
 
 def ts_split(T, S, wet):

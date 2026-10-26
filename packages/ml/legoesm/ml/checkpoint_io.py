@@ -18,8 +18,31 @@ from pathlib import Path
 from typing import Any
 
 
+# Deliberate, owner-approved layout changes; their checkpoints are not
+# migrated, by design.
+_KNOWN_LAYOUT_BREAKS = (
+    "Most likely the checkpoint predates one of these deliberate layout "
+    "changes:\n"
+    "  - 2026-08-12: gray-radiation knobs removed (AIMIPClassicalParams went "
+    "from 59 trainable entries to 50);\n"
+    "  - 2026-10-15: AIMIP spatial surface fields the selected schemes never "
+    "read (e.g. z0 under the constant bulk law) are no longer built, so a "
+    "checkpoint that still holds them has extra leaves.\n"
+    "Those checkpoints are not migrated by design — retrain from scratch "
+    "with the current code.")
+
+
 class CheckpointStructureError(RuntimeError):
     """A checkpoint's pytree does not match the current model skeleton."""
+
+
+def checkpoint_path(path) -> Path:
+    """The file :func:`load_checkpoint_or_fail` opens for ``path``.
+
+    equinox resolves a suffix-less path to ``.eqx`` (_serialisation._with_suffix).
+    """
+    path = Path(path)
+    return path.with_suffix(".eqx") if path.suffix == "" else path
 
 
 def load_checkpoint_or_fail(path, skeleton: Any, *, what: str = "") -> Any:
@@ -59,11 +82,8 @@ def load_checkpoint_or_fail(path, skeleton: Any, *, what: str = "") -> Any:
     import equinox as eqx
     import jax.tree_util as jtu
 
-    path = Path(path)
-    # equinox resolves a suffix-less path to ``.eqx`` (_serialisation._with_suffix);
-    # opening the handle ourselves would otherwise break that (codex).
-    if path.suffix == "":
-        path = path.with_suffix(".eqx")
+    # Opening the handle ourselves would otherwise break equinox's suffix rule (codex).
+    path = checkpoint_path(path)
     try:
         # Deserialise from an OPEN HANDLE, not the path, so the trailing bytes
         # can be checked below. equinox reads leaves POSITIONALLY and stops at
@@ -82,10 +102,7 @@ def load_checkpoint_or_fail(path, skeleton: Any, *, what: str = "") -> Any:
                 f"set{label} consumes: the skeleton took {n_expected} array "
                 f"leaves and the file still has bytes left, so the load would "
                 f"have silently used a prefix of a stale checkpoint.\n"
-                f"Most likely it predates the 2026-08-12 removal of the "
-                f"gray-radiation knobs (AIMIPClassicalParams went from 59 "
-                f"trainable entries to 50). Those checkpoints are not migrated "
-                f"by design — retrain from scratch with the current code."
+                + _KNOWN_LAYOUT_BREAKS
             )
         return loaded
     except CheckpointStructureError:
@@ -97,8 +114,5 @@ def load_checkpoint_or_fail(path, skeleton: Any, *, what: str = "") -> Any:
             f"checkpoint {path} does not match the current parameter set"
             f"{label}: the skeleton has {n_expected} array leaves, and equinox "
             f"rejected the file with: {exc}\n"
-            f"Most likely the checkpoint predates the 2026-08-12 removal of the "
-            f"gray-radiation knobs (AIMIPClassicalParams went from 59 trainable "
-            f"entries to 50). Those checkpoints are not migrated by design — "
-            f"retrain from scratch with the current code."
+            + _KNOWN_LAYOUT_BREAKS
         ) from exc

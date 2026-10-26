@@ -1,0 +1,193 @@
+--- dynadv.F90.nemo
++++ dynadv.F90
+@@ -20,6 +20,8 @@
+    USE dynkeg          ! kinetic energy gradient          (dyn_keg      routine)
+    USE dynzad          ! vertical advection               (dyn_zad      routine)
+    USE zdf_oce,  ONLY : ln_zad_Aimp
++   USE oce,      ONLY : ww
++   USE sbc_oce,  ONLY : ln_vortex_force
+    !
+    USE in_out_manager  ! I/O manager
+    USE lib_mpp         ! MPP library
+@@ -31,6 +33,7 @@
+ 
+    PUBLIC dyn_adv       ! routine called by step module
+    PUBLIC dyn_adv_init  ! routine called by opa  module
++   PUBLIC dyn_adv_round41_stage ! WRITE-only instrument arm from stprk3_stg
+  
+    !                                   !!* namdyn_adv namelist *
+    LOGICAL, PUBLIC ::   ln_dynadv_OFF   !: linear dynamics (no momentum advection)
+@@ -49,6 +52,10 @@
+    REAL(wp), PUBLIC            ::   r_stb_thres_dyn  ! starting Courant number threshold for adaptive implicit vertical advection
+    REAL(wp), PUBLIC            ::   r_stb_cstra_dyn  ! stability constraint for dynamic advection
+ 
++   INTEGER, SAVE ::   l2_round41_kstg = 0
++   INTEGER, SAVE ::   l2_round41_kaa  = 0
++
+    !! * Substitutions
+ #  include "read_nml_substitute.h90"
++#  include "domzgr_substitute.h90"
+    !!----------------------------------------------------------------------
+@@ -71,5 +78,12 @@
+       REAL(wp), DIMENSION(jpi,jpj,jpk),OPTIONAL, TARGET, INTENT(in   ) ::   pau, pav, paw         ! advective velocity
+       REAL(wp), DIMENSION(jpi,jpj,jpk,jpt),      TARGET, INTENT(inout) ::   puu, pvv              ! ocean velocities and RHS of momentum Eq.
++      INTEGER  ::   l2_unit, l2_ios, ji, jj, jk
++      CHARACTER(LEN=46) ::   l2_filename
++      CHARACTER(LEN=16) ::   l2_magic
++      REAL(wp), ALLOCATABLE, DIMENSION(:,:,:) ::   l2_before_u, l2_before_v
++      REAL(wp), ALLOCATABLE, DIMENSION(:,:,:) ::   l2_after_keg_u, l2_after_keg_v
++      REAL(wp), ALLOCATABLE, DIMENSION(:,:,:) ::   l2_tmp
++      LOGICAL ::   l2_write
+       !!----------------------------------------------------------------------
+       !
+       IF( ln_timing )   CALL timing_start( 'dyn_adv' )
+@@ -77,9 +91,133 @@
+       !
+       SELECT CASE( n_dynadv )    !==  compute advection trend and add it to general trend  ==!
+       CASE( np_VEC_c2  )                                                         != vector form =!
++         ! Round-41 WRITE-only split.  stprk3_stg arms this routine only around
++         ! the live kt=nit000,kstg=3 call.  Every capture array is zeroed before
++         ! assignment; NEMO never reads any captured value.
++         l2_write = lwp .AND. kt == nit000 .AND. l2_round41_kstg == 3
++         IF( l2_write ) THEN
++            IF( l_istiled )                     CALL ctl_stop( 'dyn_adv: round41 split does not support tiling' )
++            IF( STORAGE_SIZE( 1._wp ) /= 64 )   CALL ctl_stop( 'dyn_adv: round41 split requires 64-bit wp' )
++            ALLOCATE( l2_before_u(jpi,jpj,jpk), l2_before_v(jpi,jpj,jpk) )
++            ALLOCATE( l2_after_keg_u(jpi,jpj,jpk), l2_after_keg_v(jpi,jpj,jpk) )
++            ALLOCATE( l2_tmp(jpi,jpj,jpk) )
++            l2_before_u(:,:,:) = 0._wp   ;   l2_before_v(:,:,:) = 0._wp
++            l2_after_keg_u(:,:,:) = 0._wp   ;   l2_after_keg_v(:,:,:) = 0._wp
++            l2_tmp(:,:,:) = 0._wp
++            l2_before_u(:,:,:) = puu(:,:,:,Krhs)
++            l2_before_v(:,:,:) = pvv(:,:,:,Krhs)
++         ENDIF
+          !                                                                             !* horizontal gradient of kinetic energy
+          CALL dyn_keg     ( kt, nn_dynkeg     , Kmm, puu, pvv, Krhs )
++         IF( l2_write ) THEN
++            l2_after_keg_u(:,:,:) = puu(:,:,:,Krhs)
++            l2_after_keg_v(:,:,:) = pvv(:,:,:,Krhs)
++         ENDIF
+          CALL dyn_zad     ( kt                , Kmm, puu, pvv, Krhs )                  !* vertical advection
++         IF( l2_write ) THEN
++            l2_filename = 'oracle_dynadv_split_kt00000001_s3.bin'
++            OPEN( NEWUNIT=l2_unit, FILE=TRIM(l2_filename), ACCESS='STREAM', FORM='UNFORMATTED', &
++               &  STATUS='REPLACE', ACTION='WRITE', IOSTAT=l2_ios )
++            IF( l2_ios /= 0 )   CALL ctl_stop( 'dyn_adv: cannot open round41 split dump' )
++            l2_magic = 'NEMO_L2_ADVSP_1'
++            WRITE(l2_unit) l2_magic
++            WRITE(l2_unit) 1, kt, l2_round41_kstg, Kbb, Kmm, Krhs, l2_round41_kaa, nn_dynkeg, &
++               &           jpi, jpj, jpk, jpkm1, ntsi, ntei, ntsj, ntej, STORAGE_SIZE(1._wp)
++            WRITE(l2_unit) 'before_keg_u    '   ;   WRITE(l2_unit) 3, jpi, jpj, jpk
++            WRITE(l2_unit) l2_before_u
++            WRITE(l2_unit) 'before_keg_v    '   ;   WRITE(l2_unit) 3, jpi, jpj, jpk
++            WRITE(l2_unit) l2_before_v
++            WRITE(l2_unit) 'after_keg_u     '   ;   WRITE(l2_unit) 3, jpi, jpj, jpk
++            WRITE(l2_unit) l2_after_keg_u
++            WRITE(l2_unit) 'after_keg_v     '   ;   WRITE(l2_unit) 3, jpi, jpj, jpk
++            WRITE(l2_unit) l2_after_keg_v
++            WRITE(l2_unit) 'after_zad_u     '   ;   WRITE(l2_unit) 3, jpi, jpj, jpk
++            WRITE(l2_unit) puu(:,:,:,Krhs)
++            WRITE(l2_unit) 'after_zad_v     '   ;   WRITE(l2_unit) 3, jpi, jpj, jpk
++            WRITE(l2_unit) pvv(:,:,:,Krhs)
++            WRITE(l2_unit) 'uu_Kmm          '   ;   WRITE(l2_unit) 3, jpi, jpj, jpk
++            WRITE(l2_unit) puu(:,:,:,Kmm)
++            WRITE(l2_unit) 'vv_Kmm          '   ;   WRITE(l2_unit) 3, jpi, jpj, jpk
++            WRITE(l2_unit) pvv(:,:,:,Kmm)
++            WRITE(l2_unit) 'ww              '   ;   WRITE(l2_unit) 3, jpi, jpj, jpk
++            WRITE(l2_unit) ww
++            ! ln_wave=F returns before sbcwave allocates wsd on this deck.
++            ! This is the EFFECTIVE field the executed dyn_zad arm adds: zero.
++            l2_tmp(:,:,:) = 0._wp
++            WRITE(l2_unit) 'wsd_effective   '   ;   WRITE(l2_unit) 3, jpi, jpj, jpk
++            WRITE(l2_unit) l2_tmp
++            WRITE(l2_unit) 'ln_vortex_force '   ;   WRITE(l2_unit) 0, 1, 1, 1
++            IF( ln_vortex_force ) THEN
++               WRITE(l2_unit) 1._wp
++            ELSE
++               WRITE(l2_unit) 0._wp
++            ENDIF
++            DO jk = 1, jpk ; DO jj = 1, jpj ; DO ji = 1, jpi
++               l2_tmp(ji,jj,jk) = e3t(ji,jj,jk,Kmm)
++            END DO ; END DO ; END DO
++            WRITE(l2_unit) 'e3t_Kmm         '   ;   WRITE(l2_unit) 3, jpi, jpj, jpk
++            WRITE(l2_unit) l2_tmp
++            DO jk = 1, jpk ; DO jj = 1, jpj ; DO ji = 1, jpi
++               l2_tmp(ji,jj,jk) = e3u(ji,jj,jk,Kmm)
++            END DO ; END DO ; END DO
++            WRITE(l2_unit) 'e3u_Kmm         '   ;   WRITE(l2_unit) 3, jpi, jpj, jpk
++            WRITE(l2_unit) l2_tmp
++            DO jk = 1, jpk ; DO jj = 1, jpj ; DO ji = 1, jpi
++               l2_tmp(ji,jj,jk) = e3v(ji,jj,jk,Kmm)
++            END DO ; END DO ; END DO
++            WRITE(l2_unit) 'e3v_Kmm         '   ;   WRITE(l2_unit) 3, jpi, jpj, jpk
++            WRITE(l2_unit) l2_tmp
++            DO jk = 1, jpk ; DO jj = 1, jpj ; DO ji = 1, jpi
++               l2_tmp(ji,jj,jk) = e3w(ji,jj,jk,Kmm)
++            END DO ; END DO ; END DO
++            WRITE(l2_unit) 'e3w_Kmm         '   ;   WRITE(l2_unit) 3, jpi, jpj, jpk
++            WRITE(l2_unit) l2_tmp
++            DO jk = 1, jpk ; DO jj = 1, jpj ; DO ji = 1, jpi
++               l2_tmp(ji,jj,jk) = E3t_0(ji,jj,jk)
++            END DO ; END DO ; END DO
++            WRITE(l2_unit) 'e3t_0           '   ;   WRITE(l2_unit) 3, jpi, jpj, jpk
++            WRITE(l2_unit) l2_tmp
++            DO jk = 1, jpk ; DO jj = 1, jpj ; DO ji = 1, jpi
++               l2_tmp(ji,jj,jk) = E3u_0(ji,jj,jk)
++            END DO ; END DO ; END DO
++            WRITE(l2_unit) 'e3u_0           '   ;   WRITE(l2_unit) 3, jpi, jpj, jpk
++            WRITE(l2_unit) l2_tmp
++            DO jk = 1, jpk ; DO jj = 1, jpj ; DO ji = 1, jpi
++               l2_tmp(ji,jj,jk) = E3v_0(ji,jj,jk)
++            END DO ; END DO ; END DO
++            WRITE(l2_unit) 'e3v_0           '   ;   WRITE(l2_unit) 3, jpi, jpj, jpk
++            WRITE(l2_unit) l2_tmp
++            DO jk = 1, jpk ; DO jj = 1, jpj ; DO ji = 1, jpi
++               l2_tmp(ji,jj,jk) = E3w_0(ji,jj,jk)
++            END DO ; END DO ; END DO
++            WRITE(l2_unit) 'e3w_0           '   ;   WRITE(l2_unit) 3, jpi, jpj, jpk
++            WRITE(l2_unit) l2_tmp
++            WRITE(l2_unit) 'e1e2t           '   ;   WRITE(l2_unit) 2, jpi, jpj, 1
++            WRITE(l2_unit) e1e2t
++            WRITE(l2_unit) 'e1e2u           '   ;   WRITE(l2_unit) 2, jpi, jpj, 1
++            WRITE(l2_unit) e1e2u
++            WRITE(l2_unit) 'e1e2v           '   ;   WRITE(l2_unit) 2, jpi, jpj, 1
++            WRITE(l2_unit) e1e2v
++            WRITE(l2_unit) 'r1_e1u          '   ;   WRITE(l2_unit) 2, jpi, jpj, 1
++            WRITE(l2_unit) r1_e1u
++            WRITE(l2_unit) 'r1_e2v          '   ;   WRITE(l2_unit) 2, jpi, jpj, 1
++            WRITE(l2_unit) r1_e2v
++            WRITE(l2_unit) 'r1_e1e2u        '   ;   WRITE(l2_unit) 2, jpi, jpj, 1
++            WRITE(l2_unit) r1_e1e2u
++            WRITE(l2_unit) 'r1_e1e2v        '   ;   WRITE(l2_unit) 2, jpi, jpj, 1
++            WRITE(l2_unit) r1_e1e2v
++            WRITE(l2_unit) 'tmask           '   ;   WRITE(l2_unit) 3, jpi, jpj, jpk
++            WRITE(l2_unit) tmask
++            WRITE(l2_unit) 'umask           '   ;   WRITE(l2_unit) 3, jpi, jpj, jpk
++            WRITE(l2_unit) umask
++            WRITE(l2_unit) 'vmask           '   ;   WRITE(l2_unit) 3, jpi, jpj, jpk
++            WRITE(l2_unit) vmask
++            WRITE(l2_unit) 'wmask           '   ;   WRITE(l2_unit) 3, jpi, jpj, jpk
++            WRITE(l2_unit) wmask
++            CLOSE(l2_unit)
++            DEALLOCATE( l2_before_u, l2_before_v, l2_after_keg_u, l2_after_keg_v, l2_tmp )
++            WRITE(numout,*) 'L2_RK_STAGE3_DYNADV_SPLIT ', kt, l2_round41_kstg, Kbb, Kmm, Krhs, l2_round41_kaa, TRIM(l2_filename)
++         ENDIF
+          !
+       CASE( np_FLX_c2  )                                                         !=  flux form =!
+          CALL dyn_adv_cen2( kt                , Kmm, puu, pvv, Krhs, pau, pav, paw )   !* 2nd order centered scheme
+@@ -93,6 +231,15 @@
+       !
+    END SUBROUTINE dyn_adv
+ 
++   SUBROUTINE dyn_adv_round41_stage( kstg, Kaa )
++      !! WRITE-only diagnostic arm.  It carries no model field and is reset
++      !! immediately after dyn_adv returns.
++      INTEGER, INTENT(in) ::   kstg, Kaa
++      l2_round41_kstg = kstg
++      l2_round41_kaa  = Kaa
++   END SUBROUTINE dyn_adv_round41_stage
++
++
+    
+    SUBROUTINE dyn_adv_init
+       !!---------------------------------------------------------------------

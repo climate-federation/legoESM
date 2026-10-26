@@ -216,6 +216,57 @@ program fv3_extchain_oracle_driver
       real(Atm(this_grid)%gridstruct%rdyc(isd:ied, jsd:jed + 1)))
   call extchain_dump2('M_SINA', &
       real(Atm(this_grid)%gridstruct%sina(isd:ied + 1, jsd:jed + 1)))
+  ! ---- unit vectors the PHYSICS COUPLING needs (slice 2) ----------
+  ! update_dwinds_phys (fv_grid_utils.F90:3363-3547) turns an A-grid wind
+  ! TENDENCY into D-grid increments with exactly four grid quantities:
+  ! vlon/vlat rotate (u_dt, v_dt) into a Cartesian 3-vector at cell
+  ! centres, and es(:, :, :, 1) / ew(:, :, :, 2) project the
+  ! edge-averaged result onto the D-grid u and v directions.  The port's
+  ! gridstruct has never carried any of them, because the dycore works in
+  ! grid-relative components and never forms a lat-lon A-grid wind --
+  ! physics coupling is their first consumer, so they are dumped here
+  ! before anything is built on top of them.
+  !
+  ! COMPONENT-WISE, as 2-D slices, so the existing reader needs no new
+  ! rank.  Bounds are the DECLARED ones (fv_arrays.F90:1396-1397 for
+  ! vlon/vlat, :1411-1412 for ew/es) -- note vlon/vlat are allocated on a
+  ! TWO-ring halo off the COMPUTE bounds, not the data domain, which is
+  ! narrower than every other family dumped above.
+  !
+  ! AND NOTE WHICH ARRAY THIS IS.  The duo lane also carries
+  ! dg%vlon_ext / dg%vlat_ext over the full data domain
+  ! (fv_duogrid.F90:3134-3135), used by the duo A-to-C/D transform
+  ! (:2620, :2709).  update_dwinds_phys reads gridstruct%vlon, NOT the
+  ! extended one; these dumps are the array the physics path actually
+  ! multiplies by.
+  call extchain_mf_note('NOTE VLON_BOUNDS is-2:ie+2,js-2:je+2 '// &
+      '(fv_arrays.F90:1396) -- narrower than the data domain')
+  call extchain_mf_note('NOTE ES/EW are gridstruct%es/ew, NOT '// &
+      'dg%es_ext/ew_ext; update_dwinds_phys reads the former')
+  call extchain_dump2('M_VLON1', &
+      real(Atm(this_grid)%gridstruct%vlon(is - 2:ie + 2, js - 2:je + 2, 1)))
+  call extchain_dump2('M_VLON2', &
+      real(Atm(this_grid)%gridstruct%vlon(is - 2:ie + 2, js - 2:je + 2, 2)))
+  call extchain_dump2('M_VLON3', &
+      real(Atm(this_grid)%gridstruct%vlon(is - 2:ie + 2, js - 2:je + 2, 3)))
+  call extchain_dump2('M_VLAT1', &
+      real(Atm(this_grid)%gridstruct%vlat(is - 2:ie + 2, js - 2:je + 2, 1)))
+  call extchain_dump2('M_VLAT2', &
+      real(Atm(this_grid)%gridstruct%vlat(is - 2:ie + 2, js - 2:je + 2, 2)))
+  call extchain_dump2('M_VLAT3', &
+      real(Atm(this_grid)%gridstruct%vlat(is - 2:ie + 2, js - 2:je + 2, 3)))
+  call extchain_dump2('M_ES1', &
+      real(Atm(this_grid)%gridstruct%es(1, isd:ied, jsd:jed + 1, 1)))
+  call extchain_dump2('M_ES2', &
+      real(Atm(this_grid)%gridstruct%es(2, isd:ied, jsd:jed + 1, 1)))
+  call extchain_dump2('M_ES3', &
+      real(Atm(this_grid)%gridstruct%es(3, isd:ied, jsd:jed + 1, 1)))
+  call extchain_dump2('M_EW1', &
+      real(Atm(this_grid)%gridstruct%ew(1, isd:ied + 1, jsd:jed, 2)))
+  call extchain_dump2('M_EW2', &
+      real(Atm(this_grid)%gridstruct%ew(2, isd:ied + 1, jsd:jed, 2)))
+  call extchain_dump2('M_EW3', &
+      real(Atm(this_grid)%gridstruct%ew(3, isd:ied + 1, jsd:jed, 2)))
   ! f0 is NOT set by grid init -- upstream assigns it in test_cases
   ! init_case's unconditional pre-case block (test_cases.F90:787-800),
   ! which this driver does not reach (first probe run measured the raw

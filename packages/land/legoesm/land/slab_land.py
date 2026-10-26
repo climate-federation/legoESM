@@ -77,7 +77,34 @@ def step_land(
     Dispatches between ``SimpleSEBConfig`` (default — bulk flux on the
     slab T) and ``TwoLeafCanopyConfig`` (two-leaf canopy with explicit
     single-layer thermal Picard callback) via
-    ``isinstance(config.surface_scheme, TwoLeafCanopyConfig)``.
+    ``isinstance(config.surface_scheme, TwoLeafCanopyConfig)``.  Use
+    :func:`step_land_with_diagnostics` to also receive the surface scheme's
+    ``SurfaceFluxOutput``.
+    """
+    new_state, response, carbon_new, _surface_out = step_land_with_diagnostics(
+        state, forcing, config, U_min, dt, lat=lat, carbon_state=carbon_state,
+        doy=doy, land_params=land_params)
+    return new_state, response, carbon_new
+
+
+def step_land_with_diagnostics(
+    state: LandState,
+    forcing: AtmToSurface,
+    config: LandConfig,
+    U_min: float,
+    dt: float,
+    lat: jnp.ndarray | None = None,
+    carbon_state: CarbonState | None = None,
+    doy: float = 0.0,
+    land_params=None,
+):
+    """Like :func:`step_land` but also returns the ``SurfaceFluxOutput``.
+
+    Mirrors ``multilayer_land.step_multilayer_land_with_diagnostics``.  For the
+    two-leaf canopy its ``converged`` field is ``False`` on columns whose canopy
+    root solve failed.  The slab lane does NOT hold those columns (the
+    multilayer lane does): their fluxes are the solver's fallback iterate and
+    are used as-is, so callers that care must count them from ``converged``.
     """
     if isinstance(config.surface_scheme, TwoLeafCanopyConfig):
         return _step_land_canopy(
@@ -153,7 +180,8 @@ def step_land(
     has_snow = has_existing_snow | has_surviving_fresh_snow
 
     # Phase-appropriate latent heat: sublimation (L_s) over snow, vaporisation (L_v) over bare soil
-    L_eff = jnp.where(has_snow, constants.L_s, constants.L_v)
+    from legoesm.thermo import surface_latent_heat
+    L_eff = surface_latent_heat(T_soil, has_snow)
 
     # --- Snow budget (energy-limited melt) ---
     # Q_net drives the melt rate: M = max(0, Q_net * dt / L_f)
@@ -162,13 +190,14 @@ def step_land(
         Q_net=Q_net,
         snow_melt_rate=config.snow_melt_rate,
         T_snow_melt=config.T_snow_melt,
+        snow_age_activation_K=config.land_albedo.snow_age_activation_K,
     )
 
     # --- Energy balance: dT/dt ---
     # The melt consumes latent heat of fusion, reducing the energy
     # available for warming the soil slab.
     heat_cap = C_soil * d_soil
-    melt_energy = snow_melt * constants.L_f / dt  # W/m2 consumed by melt
+    melt_energy = snow_melt * constants.L_f / dt  # W/m2 consumed by melt  # latent-ok: melt at T_freeze, L_f(T_freeze) == L_f
     dT_dt = (Q_net - melt_energy) / heat_cap
     T_soil_new = T_soil + dt * dT_dt
 
@@ -367,7 +396,7 @@ def step_land(
             _pin_to_input_dtype, carbon_state_new, carbon_state,
             is_leaf=lambda x: x is None)
 
-    return new_state, response, carbon_state_new
+    return new_state, response, carbon_state_new, surface_out
 
 
 # ---------------------------------------------------------------------------
@@ -415,14 +444,25 @@ def _step_land_canopy(
     original_shape = T_soil.shape
     is_flat = (T_soil.ndim == 1)
 
+    # --- Flatten state for the canopy vmap ---
+    def _flat(x):
+        return x if is_flat else x.reshape(-1)
+
+    # Every spatial land param (the coupler hands slab land ``reshape_params``
+    # output: each leaf on the state's grid shape) is flattened like the state,
+    # for the post-flux pipeline AND the canopy solve.  Leaves whose leading
+    # dims are not the grid (scalars, per-PFT tables) pass through unchanged.
+    if lp is not None and not is_flat:
+        _nd = len(original_shape)
+        lp = jax.tree.map(
+            lambda x: (x.reshape((-1,) + x.shape[_nd:])
+                       if getattr(x, "shape", ())[:_nd] == original_shape else x),
+            lp)
+
     # --- Spatial parameters (for slab post-flux pipeline) ---
     W_max  = _get(lp, "W_max", config.W_max)
     C_soil = _get(lp, "C_soil", config.C_soil)
     d_soil = _get(lp, "d_soil", config.d_soil)
-
-    # --- Flatten state for the canopy vmap ---
-    def _flat(x):
-        return x if is_flat else x.reshape(-1)
 
     T_soil_flat   = _flat(T_soil)
     W_flat        = _flat(W)
@@ -500,8 +540,9 @@ def _step_land_canopy(
         Q_net=G_surface,
         snow_melt_rate=config.snow_melt_rate,
         T_snow_melt=config.T_snow_melt,
+        snow_age_activation_K=config.land_albedo.snow_age_activation_K,
     )
-    melt_energy = snow_melt * constants.L_f / dt
+    melt_energy = snow_melt * constants.L_f / dt  # latent-ok: melt at T_freeze, L_f(T_freeze) == L_f
 
     # Slab energy balance: net energy into soil = G - melt_energy.
     # NOTE: the canopy already accounts for SW/LW/SH/LE in G; melt is the
@@ -510,7 +551,8 @@ def _step_land_canopy(
     T_soil_new = T_soil_flat + dt * Q_net_slab / heat_cap_total
 
     # --- Latent mass partition ---
-    L_eff = jnp.where(has_snow, constants.L_s, constants.L_v)
+    from legoesm.thermo import surface_latent_heat
+    L_eff = surface_latent_heat(T_soil_flat, has_snow)   # the L the surface solve charged
     evap_rate_demand = surface_out.lhflx / L_eff
 
     snow_after_melt = snow_new
@@ -550,6 +592,8 @@ def _step_land_canopy(
 
     # Excess (unrealised) latent flux warms the slab.
     T_soil_new = T_soil_new + dt * evap_excess_energy / heat_cap_total
+    # End-of-step bucket fraction, on the flat axis W_max lives on (carbon below).
+    w_frac_new = jnp.clip(W_new / W_max, 0.0, 1.0)
 
     # --- Reshape back to original (cubed-sphere or columnar) shape ---
     def _unflat(x):
@@ -608,8 +652,7 @@ def _step_land_canopy(
             gpp_override = None
         # Slab carbon path: pass start-of-step bucket beta as the
         # moisture forcing (consistent with the existing SimpleSEB path).
-        beta_soil_new = config.beta_min + (1.0 - config.beta_min) * jnp.clip(
-            W_new / W_max, 0.0, 1.0)
+        beta_soil_new = config.beta_min + (1.0 - config.beta_min) * _unflat(w_frac_new)
         carbon_state_new, co2_flux = step_carbon(
             carbon_state, forcing.sw_down, T_soil_new, forcing.co2_ppmv,
             beta_soil_new, lat_arr, doy, forcing.precip_total,
@@ -654,4 +697,4 @@ def _step_land_canopy(
         salt_flux=jnp.zeros_like(T_soil_new),
     )
 
-    return new_state, response, carbon_state_new
+    return new_state, response, carbon_state_new, surface_out

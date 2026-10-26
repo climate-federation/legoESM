@@ -141,7 +141,7 @@ sf = dino_step_surface_forcing(forcing)
 # own ttrd_ldf time level; ADVECTION below correctly keeps the now-level
 # state.T/S.data (Kmm), unchanged.
 pr = probe_latlon_cgrid(br.state, br.geometry, br.z_coord, mc,
-                        surface_forcing=sf, dt=DT,
+                        surface_forcing=sf, dt=DT, tke_rn_dt=DT,
                         gm_redi_tracer_state=(state0.T_before.data,
                                                state0.S_before.data))
 

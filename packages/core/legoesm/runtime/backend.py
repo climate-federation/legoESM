@@ -120,6 +120,11 @@ NVIDIA_GPU_XLA_FLAGS = {
     # that still accepts them.
     "xla_gpu_enable_latency_hiding_scheduler": "true",
     "xla_gpu_enable_highest_priority_async_stream": "true",
+    # Multi-shard autotune cache-sync crashes intermittently at >=64 ranks
+    # ("No configuration found in cache after synchronizing results across all
+    # shards"); disabling it is a no-op at <=1 shard.  A launcher that sets
+    # --xla_gpu_shard_autotuning explicitly still wins (set_xla_flags dedups).
+    "xla_gpu_shard_autotuning": "false",
     # CUDA Graphs / command buffers — XLA can capture sequences of
     # kernel launches and replay them as a single command buffer, which
     # eliminates the ~5-10μs per-launch overhead that dominates
@@ -470,7 +475,7 @@ def configure_backend(backend: str | None = None) -> str:
     # is GPU/CPU; MPS/TPU paths often have their own compile
     # caches and we leave them alone.
     if backend in ("gpu", "cpu"):
-        _configure_persistent_jit_cache()
+        _configure_persistent_jit_cache(backend)
 
     logger.info("Configured XLA for %s backend", backend)
     return backend
@@ -565,7 +570,21 @@ def _apply_mps_rev_workaround() -> None:
         ) from exc
 
 
-def _configure_persistent_jit_cache() -> None:
+# Opt-in env override: force-enable the persistent COMPILE cache on the CPU
+# backend for a user who KNOWS every node sharing the cache directory has the
+# SAME CPU microarchitecture.  Default OFF (see _configure_persistent_jit_cache).
+CPU_COMPILE_CACHE_OPT_IN_ENV = "LEGOESM_ALLOW_CPU_COMPILE_CACHE"
+
+
+def cpu_compile_cache_opt_in() -> bool:
+    """Return whether the user opted into the CPU persistent COMPILE cache."""
+    return (
+        os.environ.get(CPU_COMPILE_CACHE_OPT_IN_ENV, "0").strip().lower()
+        in {"1", "true", "yes", "on"}
+    )
+
+
+def _configure_persistent_jit_cache(backend: str | None = None) -> None:
     """Activate JAX's persistent JIT-compile cache.
 
     Respects two environment variables:
@@ -580,6 +599,18 @@ def _configure_persistent_jit_cache() -> None:
 
     Idempotent: a second call in the same process is a no-op.
     Safe to call before or after ``jax.devices()``.
+
+    CPU SAFETY GATE (the policy of ``legoesm.ml.training.
+    configure_jax_compilation_cache``, one policy for every caller): the
+    cache key is NOT CPU-microarchitecture-specific, so on a heterogeneous
+    CPU pool sharing the directory an AOT binary compiled on one node is
+    loaded on another ("Target machine feature ... is not supported on the
+    host machine") -- a coupled test segfaulted with the cache on and passed
+    with it off (jobs 10331662 / 10331745).  The cache stays OFF on the CPU
+    backend unless ``LEGOESM_ALLOW_CPU_COMPILE_CACHE=1``.  ``backend`` is the
+    caller's resolved backend; without it the PJRT-free pre-init detection
+    decides, and no hint at all counts as CPU (fail safe).  GPU/TPU keys
+    carry the device arch and are unchanged.
     """
     import jax
 
@@ -589,6 +620,14 @@ def _configure_persistent_jit_cache() -> None:
     env_dir = os.environ.get("LEGOESM_JIT_CACHE_DIR", None)
     if env_dir == "":
         # Explicit opt-out.
+        _configure_persistent_jit_cache._done = True  # type: ignore[attr-defined]
+        return
+    _be = (backend or _detect_backend_pre_init() or "cpu").lower()
+    if _be == "cpu" and not cpu_compile_cache_opt_in():
+        logger.info(
+            "JAX persistent JIT cache OFF on the CPU backend (key is not "
+            "CPU-microarch-specific); set %s=1 on a homogeneous CPU pool.",
+            CPU_COMPILE_CACHE_OPT_IN_ENV)
         _configure_persistent_jit_cache._done = True  # type: ignore[attr-defined]
         return
     if env_dir is None:

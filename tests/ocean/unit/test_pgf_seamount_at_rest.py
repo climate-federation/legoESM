@@ -90,6 +90,7 @@ def _build(partial: bool, pgf_scheme: str, orient: str = "x"):
     T = (T_REF_C + (N2 * z_phys) / (constants.g * ALPHA_T)) * mask[:, :, None]
     state = state._replace(T=state.T.replace(data=jnp.asarray(T)))
     model = LatLonCGridOceanModel(grid, z, cfg)
+    state = model.seed_scan_carry(state, DT)
     return state, model
 
 

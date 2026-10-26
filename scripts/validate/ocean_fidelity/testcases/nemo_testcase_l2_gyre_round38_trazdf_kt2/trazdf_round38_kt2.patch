@@ -1,0 +1,48 @@
+--- trazdf.F90.orig	2026-09-06 15:09:30.925730111 -0400
++++ trazdf.F90	2026-09-06 15:09:30.953729062 -0400
+@@ -77,6 +77,7 @@
+       !                    !--- round-35 instrument locals ---!
+       INTEGER  ::   il2_unit, il2_ios
+       CHARACTER(LEN=16) ::   cl_l2_magic
++      CHARACTER(LEN=40) ::   cl_l2_file       ! round-38: one file per kt
+       !!---------------------------------------------------------------------
+       !
+       IF( ln_timing )   CALL timing_start('tra_zdf')
+@@ -102,7 +103,17 @@
+       !     call would dump one tile and label it the whole field.  Fail
+       !     closed on a tracer count other than the active pair and on a
+       !     build whose wp is not 64-bit, because the reader assumes both.
+-      ll_l2_tra = ( lwp .AND. kt == nit000 )
++      !     ROUND 38 widens the arm from ONE step to TWO.  At kt = nit000
++      !     GYRE has ln_rstart = F and its analytic initial T and S are
++      !     horizontally UNIFORM on wet cells -- measured, per-level range
++      !     exactly 0.0 on both -- so ldf_slp (stprk3.F90:178, once per step
++      !     on Nbb) returns exactly zero slopes and ah_wslp2 is IDENTICALLY
++      !     0.0 in the record.  A record in which the isoneutral term is
++      !     identically zero cannot discriminate ANY transcription of it.
++      !     kt = nit000+1 is the first step whose Nbb state carries the
++      !     horizontal structure stage 3 of step 1 created, so it is the
++      !     first record in which ah_wslp2 can be non-zero.
++      ll_l2_tra = ( lwp .AND. kt <= nit000 + 1 )
+       IF( ll_l2_tra ) THEN
+          IF( l_istiled )                     CALL ctl_stop( 'tra_zdf: L2 instrument does not support domain tiling' )
+          IF( STORAGE_SIZE( 1._wp ) /= 64 )   CALL ctl_stop( 'tra_zdf: L2 instrument requires 64-bit wp' )
+@@ -140,7 +151,8 @@
+       !     from exactly one place -- the stage-3 arm of stprk3_stg.F90 -- and
+       !     the routine has no kstg argument to read it from.
+       IF( ll_l2_tra ) THEN
+-         OPEN( NEWUNIT=il2_unit, FILE='oracle_trazdf_matrix_kt00000001.bin', ACCESS='STREAM',   &
++         WRITE(cl_l2_file,'(A,I8.8,A)') 'oracle_trazdf_matrix_kt', kt, '.bin'
++         OPEN( NEWUNIT=il2_unit, FILE=TRIM(cl_l2_file), ACCESS='STREAM',   &
+             &  FORM='UNFORMATTED', STATUS='REPLACE', ACTION='WRITE', IOSTAT=il2_ios )
+          IF( il2_ios /= 0 )   CALL ctl_stop( 'tra_zdf: cannot open L2 trazdf dump' )
+          cl_l2_magic = 'NEMO_L2_TRAZD_1'
+@@ -307,7 +319,7 @@
+          CLOSE(il2_unit)
+          DEALLOCATE( zl2_trh, zl2_srh, zl2_wmx, zl2_wlu, zl2_wi, zl2_wd,   &
+             &        zl2_ws, zl2_rhs, zl2_fwd, zl2_sol, zl2_tmp )
+-         ll_l2_tra = .FALSE.
++         ll_l2_tra = .FALSE.   ! re-armed at the top of the next tra_zdf call
+          WRITE(numout,*) 'L2_TRAZDF_MATRIX_DUMP ', kt, Kbb, Kmm, Krhs, Kaa
+       ENDIF
+       !

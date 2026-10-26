@@ -216,6 +216,11 @@ def test_baroclinic_decomposition_bit_identical():
     """The (decomposed) function must reproduce the committed golden to within
     float round-off on every case — the pure-extraction gate.
 
+    RE-BASELINED 2026-09-18 after a first-bad bisection from the prior golden:
+    9caa61f3e, the deliberate NEMO-fidelity/state-and-constants integration,
+    moved these production tendencies.  The old fixture remained green at its
+    parent and red at that commit; this fixture records the landed semantics.
+
     RE-BASELINED 2026-08-01 (#1388), and the earlier version of this note got
     the attribution WRONG — recorded here because the wrong version is the kind
     that gets repeated.

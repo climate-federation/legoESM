@@ -558,3 +558,31 @@ def test_cli_leapfrog_on_applied_now_card_still_raises(monkeypatch):
 
     with pytest.raises(SystemExit, match="#1492"):
         rd.main()
+
+
+def test_nemo_fidelity_run_forces_fp64_policy(monkeypatch):
+    """The NEMO-fidelity config must set the fp64 policy by itself (user
+    decision 2026-09-09); a non-NEMO card must leave the policy untouched."""
+    from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
+    # The policy is process-global, so capture it BEFORE this test perturbs it
+    # and restore it in a finally: capturing after the fp32 set below would
+    # make teardown leave fp32 behind, and a failing assertion used to leak
+    # fp64 into every later test (review comment).
+    _prior = get_policy()
+    try:
+        set_policy(PrecisionPolicy.fp32())
+        y = _REPO / "scripts" / "experiment" / "dino" / "paper_tke_latlon.yaml"
+        monkeypatch.setattr(sys, "argv", ["run_dino", "--config", str(y)])
+        args = rd._parse_args()
+        assert not rd._is_nemo_fidelity_run(args)
+        rd._force_fp64_for_nemo_fidelity(args)
+        assert get_policy().control == PrecisionPolicy.fp32().control
+        y = _REPO / "scripts" / "experiment" / "dino" / "nemo_faithful_kamm_mlf.yaml"
+        monkeypatch.setattr(sys, "argv", ["run_dino", "--config", str(y)])
+        args = rd._parse_args()
+        assert rd._is_nemo_fidelity_run(args)
+        rd._force_fp64_for_nemo_fidelity(args)
+        assert get_policy().control == PrecisionPolicy.fp64().control
+        assert get_policy().storage == PrecisionPolicy.fp64().storage
+    finally:
+        set_policy(_prior)

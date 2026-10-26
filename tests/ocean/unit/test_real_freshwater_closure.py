@@ -172,7 +172,7 @@ class TestSaltMassConservation:
     """
 
     @staticmethod
-    def _setup(closure, fix_eta_drift=True):
+    def _setup(closure, fix_eta_drift=True, **flat):
         import jax.numpy as jnp
         # codex YELLOW, and decisive: the salt-mass baseline is ~1.72e15 kg
         # while the VSF signal is ~6.72e7 kg.  One FP32 ULP near that baseline
@@ -202,6 +202,7 @@ class TestSaltMassConservation:
             fix_salt=False, fix_volume=False, fix_eta_drift=fix_eta_drift,
             enable_runtime_checks=False,
             n_barotropic_substeps=20,
+            **flat,
         )
         return g, z, st, LatLonCGridOceanModel(g, z, cfg), cfg
 
@@ -278,6 +279,19 @@ class TestSaltMassConservation:
         # ...and the same config is still ACCEPTED under the virtual closure,
         # so the guard is scoped to real mode rather than a blanket ban.
         self._setup("virtual_salt_flux", fix_eta_drift=False)
+
+    def test_nemo_literal_continuity_admits_the_unprojected_real_closure(self):
+        """Decision 35: NEMO adds emp locally (sshwzv.f90:137) and never
+        projects eta globally, so a NEMO-identity card must be able to run
+        real_freshwater WITHOUT fix_eta_drift.  The exemption is keyed on the
+        continuity statement that makes the delivery NEMO's own
+        (dynspg_ts.f90:553); the generic lane above still refuses."""
+        _g, _z, _st, model, cfg = self._setup(
+            "real_freshwater", fix_eta_drift=False,
+            barotropic_continuity_evaluation="nemo_literal")
+        assert cfg.fix_eta_drift is False
+        assert cfg.barotropic.barotropic_continuity_evaluation == "nemo_literal"
+        assert model is not None
 
     def test_virtual_salt_flux_does_NOT_conserve(self):
         # The non-vacuity proof: the SAME assertion fails on the old closure.

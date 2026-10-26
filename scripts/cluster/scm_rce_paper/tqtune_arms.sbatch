@@ -13,7 +13,7 @@ set +e
 # the CRM's TEMPERATURE AND HUMIDITY profiles, scored against the EXTERNAL
 # RCEMIP SAM_CRM RCE_small300 reference.
 #
-# TWENTY tasks = 10 schemes x 2 SEEDS.  The second seed is not redundancy: a
+# FIFTY tasks = 10 schemes x 5 SEEDS.  The extra seeds are not redundancy: a
 # uniform search over 20-26 parameters leaves draws ~0.76 of the range apart on
 # every axis, so a single seed's ranking is partly a lottery.  Two seeds make
 # rank REVERSALS visible; they do not make the search converged, and the report
@@ -53,16 +53,41 @@ EVALS_MIN=${EVALS_MIN:-48}
 EVALS_MAX=${EVALS_MAX:-240}
 
 SCHEMES=(sbm dca kuo mass_flux edmf zhang_mcfarlane kain_fritsch emanuel tiedtke bechtold)
-SEEDS=(20260815 20260816)
+# FIVE independent searches per scheme: two give a disagreement, five give a
+# distribution, which is what makes "this scheme improved" separable from
+# "this search got lucky". Array index -> (scheme, seed) as idx%10, idx/10.
+SEEDS=(20260815 20260816 20260817 20260818 20260819)
 SCHEME=${SCHEMES[$(( SLURM_ARRAY_TASK_ID % 10 ))]}
 SEED=${SEEDS[$(( SLURM_ARRAY_TASK_ID / 10 ))]}
-OUT=$REPO/results/scm_rce_tqtune/arm_${OBJECTIVE}_${PARAM_SET}_seed${SEED}
+# Coriolis parameter [1/s].  RCEMIP is NONROTATING with a freely evolving
+# wind; the SCM default 2.5e-5 plus a uniform geostrophic target pins the
+# column wind near its initial value and force-feeds moisture into a surface
+# layer nothing can ventilate.  Measured on mass_flux: the pin accounts for
+# ~78% of the +6.2 g/kg near-surface humidity bias (dqv +6.20 -> +1.37, RH
+# 0.933 -> 0.799, SST-T_air 0.63 -> 2.53 K).  CORIOLIS=0 is the corrected
+# protocol; the results directory carries it so a corrected run can never be
+# compared term-by-term against a pinned one by accident.
+CORIOLIS=${CORIOLIS:-0.0}
+PROTO_TAG=${PROTO_TAG:-f0}
+# Joint multi-SST tuning for generalization. sbatch --export SPLITS a value on
+# commas, so the SSTs are passed DASH-joined (SSTS=295-300-305) and converted to
+# the comma list the driver's --ssts expects HERE, inside the job. Default 300
+# keeps single-SST behaviour. The driver resolves sibling rcemip_ref_sam<SST>
+# dirs; the primary reference-dir must match one of the SSTs.
+SSTS=${SSTS//-/,}
+SSTS=${SSTS:-300}
+OUT=$REPO/results/scm_rce_tqtune/arm_${OBJECTIVE}_${PARAM_SET}_${PROTO_TAG}_seed${SEED}
 
 cd $WT || exit 90
 HEAD_SHA=$(git rev-parse HEAD)
 echo "PINNED sha: $HEAD_SHA"
 echo "host: $(hostname)  date: $(date -Is)"
 [ "$HEAD_SHA" = "$PIN" ] || { echo "PREFLIGHT FAIL: $HEAD_SHA != $PIN"; exit 91; }
+git diff --quiet && git diff --cached --quiet || {
+  echo "PREFLIGHT FAIL: DIRTY TREE at $HEAD_SHA — uncommitted edits would run"
+  git status --porcelain | head -20
+  exit 94
+}
 [ -d "$REF/snapshots3d" ] || { echo "PREFLIGHT FAIL: no reference at $REF"; exit 94; }
 case "$REF" in
   *rcemip1_n128_ocean*|*rcemip1_postfix*)
@@ -121,6 +146,7 @@ fi
 [ "$EVALS" -gt "$EVALS_MAX" ] && EVALS=$EVALS_MAX
 
 echo "SCHEME=$SCHEME  SEED=$SEED  KERNEL_ARM=$ARM  objective=$OBJECTIVE"
+echo "PROTOCOL: coriolis=$CORIOLIS ($PROTO_TAG)  SSTs=$SSTS  outdir=$OUT"
 echo "param_set=$PARAM_SET  n_params=$NPARAM  tune_evals=$EVALS"
 echo "refine_frac=$REFINE_FRAC  bl_anchor_top_m=$BL_ANCHOR"
 echo "REFERENCE=$REF"
@@ -144,8 +170,10 @@ JAX_ENABLE_X64=1 $PY $WT/scripts/run/run_scm_rce_convection_intercomparison.py \
   --scm-convection-substeps 10 \
   --scm-microphysics-substeps 30 \
   --bl-anchor-top-m $BL_ANCHOR \
+  --ssts $SSTS \
   --tune-evals $EVALS \
   --tune-seed $SEED \
+  --coriolis-s-inv $CORIOLIS \
   --no-merge 2>&1 | grep -v "^E[0-9]\|pjrt_executable\|cpu_aot_loader"
 RC=${PIPESTATUS[0]}
 echo "ARM_STATUS=$([ $RC -eq 0 ] && echo OK || echo FAILED) (scheme=$SCHEME seed=$SEED rc=$RC)"

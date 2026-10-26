@@ -23,6 +23,9 @@ from scripts.run.train_weatherbench_scale import (
     ScaleConfig,
     _apply_smoke_overrides,
     _clamped_warmup,
+    _rank_aware_warmup,
+    _resolve_warmup,
+    _uses_reachability_freeze,
     build_scale_config_from_args,
 )
 
@@ -69,6 +72,71 @@ def test_clamped_warmup_degenerate_single_step():
     assert _clamped_warmup(1, 1000) == 0
 
 
+def test_rank_aware_warmup_is_identity_at_single_rank():
+    # Serial runs must be byte-identical to the pre-fix behaviour: the bug only
+    # manifests multi-rank, so nproc==1 may not move the warmup.
+    for desired in (0, 1, 200, 500, 1000):
+        assert _rank_aware_warmup(desired, 1) == desired
+
+
+def test_rank_aware_warmup_holds_the_schedule_fraction_constant():
+    # THE FIX (#1464): warmup_steps is sized against the global schedule
+    # (n_epochs * n_global_samples) but total_steps is per-rank
+    # (n_epochs * n_global_samples / nproc).  Passing warmup_steps through
+    # verbatim made the warmup FRACTION scale with nproc — 17% at 1 rank became
+    # ~69% at 4 and ~100% at 16.  With the rank-aware conversion the fraction is
+    # invariant.  Reverting the fix (using the raw desired) makes this FAIL.
+    n_epochs, n_global = 24, 240        # the T106 config
+    desired = 1000                      # its committed warmup_steps
+    global_total = n_epochs * n_global
+    target_fraction = desired / global_total          # ~0.174
+    for nproc in (1, 2, 4, 8, 16):
+        per_rank_total = n_epochs * (n_global // nproc)
+        warmup = _clamped_warmup(
+            per_rank_total, _rank_aware_warmup(desired, nproc))
+        frac = warmup / per_rank_total
+        assert abs(frac - target_fraction) < 0.02, (
+            f"nproc={nproc}: warmup fraction {frac:.3f} drifted from the "
+            f"configured {target_fraction:.3f}")
+        assert per_rank_total - warmup >= 1        # cosine decay stays positive
+
+
+def test_rank_aware_warmup_non_negative_and_never_inflates():
+    # Guard rails: never negative, and dividing never produces MORE warmup than
+    # the raw count (the clamp handles the upper bound; this handles the helper).
+    for desired in (0, 1, 7, 200, 1000):
+        for nproc in (1, 3, 4, 16):
+            w = _rank_aware_warmup(desired, nproc)
+            assert 0 <= w <= desired
+
+
+def test_resolve_warmup_is_rank_aware_at_the_call_site():
+    # Covers the PRODUCTION resolution the training loop calls (not just the
+    # helper): _resolve_warmup == _clamped_warmup(total, _rank_aware(desired)).
+    # The raw path (no /nproc) is what the bug was; assert the resolved warmup
+    # matches the rank-aware composition and DIFFERS from the raw-clamped value
+    # at >1 rank, so a call-site revert to the YAML value fails here.
+    n_epochs, n_global, desired = 24, 240, 1000
+    for nproc in (1, 4, 16):
+        total = n_epochs * (n_global // nproc)
+        got = _resolve_warmup(desired, total, nproc)
+        assert got == _clamped_warmup(total, _rank_aware_warmup(desired, nproc))
+        raw = _clamped_warmup(total, desired)          # the reverted behaviour
+        if nproc == 1:
+            assert got == raw                          # identity, serial
+        else:
+            assert got != raw                          # rank-aware actually moves it
+
+
+def test_rank_aware_warmup_positive_config_never_vanishes_at_high_rank():
+    # A configured (positive) warmup must not silently round away to 0 at large
+    # rank counts — that is the same "warmup wrong" class in the other
+    # direction. Floors at 1; only warmup_steps: 0 gives no warmup.
+    assert _rank_aware_warmup(1, 16) == 1
+    assert _rank_aware_warmup(200, 1024) == 1
+    assert _rank_aware_warmup(0, 1024) == 0          # 0 stays 0 (as configured)
+
+
 @pytest.mark.parametrize("total_steps,desired", [(100_000, 1000), (4000, 1000)])
 def test_clamped_warmup_preserves_configured_warmup(total_steps, desired):
     # A real run must keep its configured warmup verbatim whenever it is valid
@@ -83,8 +151,12 @@ def test_smoke_overrides_use_gray_radiation():
         multi_step_hours=(6, 12), lr=3e-4, optimizer="adamw", grad_accum=1,
         out_dir="out", resume=False, eval_wb2=False, smoke=True,
     )
-    yml = {"warmup_steps": 1000, "radiation": "rrtmgp"}
+    yml = {"warmup_steps": 1000, "radiation": "rrtmgp",
+           "spectral": {"n_max": 63, "dt": 1800.0}}
     new_cfg = _apply_smoke_overrides(cfg, yml)
+    # The spectral core's own resolution key is dropped (it then falls back to
+    # n_lat, i.e. T21); everything else in the block is kept.
+    assert yml["spectral"] == {"dt": 1800.0}
     # gray radiation crushes the rrtmgp compile wall (item 6) ...
     assert yml["radiation"] == "gray"
     # ... and shrinks the grid + trains a single epoch.
@@ -99,6 +171,91 @@ def test_smoke_radiation_opt_out_into_rrtmgp():
     yml = {"smoke_radiation": "rrtmgp"}
     _apply_smoke_overrides(cfg, yml)
     assert yml["radiation"] == "rrtmgp"
+
+
+def test_cam6_deck_smoke_builds_its_cloud_settings_into_the_cam6_cloud_config(
+        monkeypatch):
+    """The committed CAM6 deck's --smoke builds on RRTMGP, and every cloud
+    setting it pins lands on the cam6_clubb CloudConfig of the built physics."""
+    import yaml
+
+    import legoesm.training.aimip_params as ap
+    from legoesm.training.scale_build import (
+        build_mode_components, validate_wb_campaign_yaml,
+    )
+    from scripts.run.train_weatherbench_scale import _resolve_training_keys
+
+    deck = "config/wb/campaign/spectral_t63_cam6.yaml"
+    yml = yaml.safe_load(open(deck))
+    validate_wb_campaign_yaml(yml)
+    cfg = build_scale_config_from_args(
+        ["--config", deck, "--mode", "physics", "--training-core", "spectral",
+         "--smoke"])
+    cfg, _, _ = _resolve_training_keys(cfg, yml)
+    cfg = _apply_smoke_overrides(cfg, yml)
+    assert yml["radiation"] == "rrtmgp"
+
+    built = []
+    orig = ap._splice_scheme_overrides
+
+    def spy(node, overrides, _ctx=None):
+        out = orig(node, overrides, _ctx)
+        if _ctx is None:
+            built.append(out)
+        return out
+
+    monkeypatch.setattr(ap, "_splice_scheme_overrides", spy)
+    _m, grid, _s, params, make_run_seg, _lc, _dt = build_mode_components(cfg, yml)
+    assert grid.n_max == 21
+    # Frozen out by name: nothing on the cam6_clubb path reads them.
+    trainable = set(params.schemes.raw_values)
+    assert any(".clouds.CloudConfig." in k for k in trainable)
+    assert not trainable & {"atm.clouds.CloudConfig.rh_crit",
+                            "atm.clouds.CloudConfig.q_c_diagnostic"}
+    make_run_seg(params)
+    cc = built[-1].radiation.cloud_config
+    assert cc.scheme == "cam6_clubb"
+    pinned = yml["classical"]["param_fixed"]["atm.clouds.CloudConfig"]
+    assert {f: getattr(cc, f) for f in pinned} == pinned
+    # The CAM6 liquid hand-off (classical.clubb_liquid_partition) reaches the
+    # built turbulence config: with it absent the closure's liquid is never
+    # handed to the microphysics, silently.
+    assert yml["classical"]["clubb_liquid_partition"] is True
+    assert built[-1].turbulence.liquid_partition is True
+
+
+@pytest.mark.parametrize("bad", ["yes", 1])
+def test_clubb_liquid_partition_key_must_be_a_bool(bad):
+    import yaml
+
+    from legoesm.training.scale_build import build_mode_components
+
+    deck = "config/wb/campaign/spectral_t63_cam6.yaml"
+    yml = yaml.safe_load(open(deck))
+    yml["classical"]["clubb_liquid_partition"] = bad
+    cfg = build_scale_config_from_args(
+        ["--config", deck, "--mode", "physics", "--training-core", "spectral",
+         "--smoke"])
+    from scripts.run.train_weatherbench_scale import _resolve_training_keys
+    cfg, _, _ = _resolve_training_keys(cfg, yml)
+    cfg = _apply_smoke_overrides(cfg, yml)
+    with pytest.raises(ValueError, match="clubb_liquid_partition must be true or false"):
+        build_mode_components(cfg, yml)
+
+
+def test_clubb_liquid_partition_refuses_a_non_clubb_closure():
+    from legoesm.grids.gaussian import create_gaussian_grid
+    from legoesm.training.aimip_params import make_aimip_classical_spectral_physics
+    from legoesm.training.model_registry import build_variant
+
+    params = build_variant(
+        "classical", nlev=8, overrides={"spatial_surface": False,
+                                        "spatial_init_std": 0.0,
+                                        "spatial_seed": 0})
+    with pytest.raises(ValueError, match="liquid hand-off"):
+        make_aimip_classical_spectral_physics(
+            params, create_gaussian_grid(8), 1800.0, radiation="gray",
+            turbulence_scheme="louis", clubb_liquid_partition=True)
 
 
 def test_latlon_grid_exposes_2d_lat_for_radiation():
@@ -139,3 +296,39 @@ def test_build_latlon_config_rad_update_steps_is_int():
 
     ec2 = build_latlon_config(cfg, dict(base, rad_update_steps=6))
     assert ec2.rad_update_steps == 6
+
+
+@pytest.mark.parametrize("mode", ["neural_gcm", "sfno"])
+def test_a_neural_model_is_never_frozen_on_a_zero_gradient(mode):
+    """sfno's decoder is zero-initialized by registry policy, so at step 0
+    every upstream weight has an exactly-zero gradient by the chain rule;
+    freezing on that evidence would leave the decoder as the only trainable
+    thing in the network.  neural_gcm is not zeroed but is filtered out for
+    the same reason in kind: a neural weight's zero gradient is a property of
+    the current weights, not of the configuration."""
+    assert _uses_reachability_freeze(mode) is False
+
+
+def test_the_scheme_parameter_mode_is_frozen_on_a_zero_gradient():
+    """There a zero gradient over the whole shard is evidence the selected
+    schemes never read the knob — a configuration property, not a transient
+    state of the weights."""
+    assert _uses_reachability_freeze("physics") is True
+
+
+def test_build_latlon_config_resolves_the_ice_skin_auto():
+    """The WB lat-lon trainer resolves the ice-skin 'auto' once (#2106): on
+    for a radiating lat-lon run, an explicit false wins, junk is refused."""
+    try:
+        from legoesm.training.scale_build import build_latlon_config
+    except ImportError as exc:  # pragma: no cover - env-gated
+        pytest.skip(f"scale_build import needs the full stack ({exc})")
+    cfg = build_scale_config_from_args(["--mode", "physics", "--smoke"])
+    base = {"n_lat": 32, "n_lon": 64, "nlev": 8, "dt": 300.0, "radiation": "gray"}
+    auto = build_latlon_config(cfg, dict(base))
+    assert auto.ice_skin_prognostic is True
+    assert auto.sea_ice_albedo_scheme == "maykut_untersteiner"
+    assert build_latlon_config(
+        cfg, dict(base, ice_skin_prognostic=False)).ice_skin_prognostic is False
+    with pytest.raises(ValueError, match="ice_skin_prognostic"):
+        build_latlon_config(cfg, dict(base, ice_skin_prognostic="yes"))

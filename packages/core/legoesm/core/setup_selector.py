@@ -187,3 +187,18 @@ def setup_signature(spec: MatrixRunnerSpec, setup, *, output_path=None) -> str:
     """Command-effective signature: a no-op override leaves it unchanged."""
     return repr(("setup", build_matrix_command(spec, setup,
                                                 output_path=output_path)))
+
+
+def deep_merge(base: dict, override: dict) -> None:
+    """Recursively merge *override* into *base* (in-place).
+
+    Shared by the component YAML adapters' ``from_yaml``/``from_dict`` (the
+    atmosphere ``Config``, ocean ``OceanExperimentConfig`` and sea-ice
+    ``SeaIceExperimentConfig``): nested dicts merge key by key, anything else
+    replaces.
+    """
+    for key, value in override.items():
+        if key in base and isinstance(base[key], dict) and isinstance(value, dict):
+            deep_merge(base[key], value)
+        else:
+            base[key] = value

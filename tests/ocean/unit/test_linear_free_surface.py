@@ -149,10 +149,7 @@ def test_barotropic_coriolis_split_validation_and_nonvacuity():
 
     SCOPE, stated precisely (codex, #1388): the non-vacuity half is proven for
     the constructed ``ene`` + ``nemo_boxcar_centred`` pairing and through ``u``
-    only. It does NOT cover the GYRE/AB3-AM4 recipe (that combination is
-    rejected outright, which this test now also asserts) nor the more exact
-    DINO ``nemo_boxcar_ab3`` path, which carries different outer-integrator
-    requirements."""
+    only. Separate GYRE gates cover the resolved AB3/AM4 + live-ENE program."""
     import pytest
 
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
@@ -169,44 +166,46 @@ def test_barotropic_coriolis_split_validation_and_nonvacuity():
     # requires the "frozen" split (the live subtraction is the face-f form).
     assert r.model_config.barotropic_coriolis_split == "frozen"
     assert r.model_config.vorticity_scheme == "ene_total"
+    # The legacy experiment recipe carries a historical PGF selector pair
+    # that is unrelated to this validation test. Select the legacy quadrature
+    # matching its z-star coordinate so failures below discriminate only the
+    # Coriolis composition.
+    base = r.model_config._replace(
+        pgf_quadrature="cell_integral", momentum_time_integrator="euler",
+        tracer_time_integrator="euler", outer_integrator="ab2")
 
     with pytest.raises(ValueError, match="barotropic_coriolis_split"):
         LatLonCGridOceanModel(
             r.grid, r.z_coord,
-            r.model_config._replace(barotropic_coriolis_split="typo"))
+            base._replace(barotropic_coriolis_split="typo"))
     with pytest.raises(ValueError, match="explicit_ab2"):
         LatLonCGridOceanModel(
             r.grid, r.z_coord,
-            r.model_config._replace(coriolis_scheme="matsuno_split"))
+            base._replace(coriolis_scheme="matsuno_split"))
     # ene_total + live is stencil-inconsistent -> rejected
     with pytest.raises(ValueError, match="ene_total"):
         LatLonCGridOceanModel(
             r.grid, r.z_coord,
-            r.model_config._replace(barotropic_coriolis_split="live"))
+            base._replace(barotropic_coriolis_split="live"))
     # live remains valid on the face-f split form ("ene" relative-only card).
-    # The recipe now selects the AB3-AM4 filter, which the live split rejects
-    # (the AB3 substep applies live Coriolis to the EXTRAPOLATED U_mid while the
-    # pre-step subtraction uses the plain pre-step U_bar, so substep 0 would not
-    # cancel bit-exactly). Take the guard's own instruction and pair live with
-    # the boxcar filter, NEMO's DINO selection (#1388).
-    _boxcar = r.model_config.barotropic._replace(
+    _boxcar = base.barotropic._replace(
         barotropic_time_filter="nemo_boxcar_centred")
-    _live_ok = r.model_config._replace(
+    _live_ok = base._replace(
         vorticity_scheme="ene", barotropic_coriolis_split="live",
         barotropic=_boxcar)
     LatLonCGridOceanModel(r.grid, r.z_coord, _live_ok)
-    # ... and the pairing guard itself is live: AB3-AM4 + live must still raise.
-    with pytest.raises(ValueError, match="nemo_ab3am4"):
-        LatLonCGridOceanModel(
-            r.grid, r.z_coord,
-            r.model_config._replace(vorticity_scheme="ene",
-                                    barotropic_coriolis_split="live"))
+    # GYRE resolves nn_bt_flt=3 + live ENE. This is intentionally non-
+    # cancelling after substep zero: Kmm is subtracted at stage entry and ENE
+    # acts on the AB3/AM4 mid-step transport inside the loop.
+    LatLonCGridOceanModel(
+        r.grid, r.z_coord,
+        base._replace(vorticity_scheme="ene",
+                      barotropic_coriolis_split="live"))
 
     st = r.initial_state
     n_lat, n_lon = st.T.data.shape[0], st.T.data.shape[1]
     sf = nemo_gyre_wind_forcing(n_lat, n_lon, 0.0)
-    cfg_ene = r.model_config._replace(vorticity_scheme="ene",
-                                      barotropic=_boxcar)
+    cfg_ene = base._replace(vorticity_scheme="ene", barotropic=_boxcar)
     m_live = LatLonCGridOceanModel(
         r.grid, r.z_coord, cfg_ene._replace(barotropic_coriolis_split="live"))
     m_frozen = LatLonCGridOceanModel(r.grid, r.z_coord, cfg_ene)

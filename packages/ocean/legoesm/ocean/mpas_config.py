@@ -82,10 +82,19 @@ class MPASOceanConfig(NamedTuple):
     S_ref : float
         Reference salinity [PSU] for virtual salt flux.
     tracer_advection : str
-        Tracer advection scheme: "upwind" or "tvd".
+        Tracer advection scheme: "upwind", "tvd" or "superbee". An unknown
+        value raises.
         "upwind" uses first-order donor-cell reconstruction.
-        "tvd" uses second-order Van Leer limiter (less diffusive,
-        monotone) for both horizontal and vertical advection.
+        "tvd" uses the second-order Van Leer limiter for both horizontal
+        and vertical advection; "superbee" uses the more compressive Sweby
+        limiter. Both are 1-D TVD limiters applied direction by direction,
+        so neither is multi-dimensionally monotone: MEASURED on the
+        resolved Petersen lock exchange (on the STRUCTURED arm, where the
+        same schemes are available) they undershoot an initial [5, 30] degC
+        range to -0.40 and -2.99 degC. There is NO flux-corrected (FCT)
+        scheme in this port, which is what that case needs -- so a
+        cross-grid lock exchange at resolving resolution cannot share an
+        advection family with the lat-lon arm today.
     """
     g: float = constants.g
     rho_0: float = constants.rho_ocean
@@ -123,6 +132,10 @@ class MPASOceanConfig(NamedTuple):
     bottom_drag_cdmax: float = 0.1      # NEMO rn_Cdmax [-]
     bottom_drag_z0: float = 3.0e-3      # NEMO rn_z0 [m]
     bottom_drag_ke0: float = 2.5e-3     # NEMO rn_ke0 [m²/s²]
+    # NEMO rn_Uc0 [m/s], the reference velocity of the LINEAR law
+    # (zdfdrg np_lin: rCdU_bot = -rn_Cd0*rn_Uc0, constant in time).
+    # Read by 'nemo_linear' only; namelist_ref &namdrg_bot:835.
+    bottom_drag_uc0: float = 0.4
     K_h: float = 0.0
     K_bih: float = 0.0
     A_v: float = 1.0e-3
@@ -151,7 +164,11 @@ class MPASOceanConfig(NamedTuple):
                            # ``pv_scheme == "mixed"``: α·energy + (1−α)·enstrophy.
                            # α=1.0 recovers pure energy; α=0.0 pure enstrophy.
                            # Ignored for pv_scheme in {"energy", "enstrophy"}.
-    K_zeta_bih: float = 0.0  # Biharmonic dissipation on relative vorticity ζ
+    K_zeta_bih: float | None = 0.0
+                             # ``None`` = DERIVE from the mesh (see
+                             # ``resolution_scaled_k_zeta_bih``); ``0.0`` = off;
+                             # any other value pins the coefficient.
+                             # Biharmonic dissipation on relative vorticity ζ
                              # [m⁴/s]. Adds −K_ζ·∇⁴ζ to the vorticity
                              # equation (scale-selective damping of grid-scale
                              # ζ patterns), applied as a tangential-gradient
@@ -290,12 +307,145 @@ class MPASOceanConfig(NamedTuple):
     # area-weighted dots (docs/ocean_experiments/distributed_barotropic_pcg
     # .md).  ``fixed_iters`` targets 1e-10 residual on the diagonally-
     # dominant Voronoi Helmholtz.  ``pcg_variant`` selects the reduction
-    # strategy ("standard" 2-dot PCG, or "single_reduce" Chronopoulos–Gear
-    # with one batched allreduce per iteration — validated at solver entry,
-    # ValueError on unknown).
-    barotropic_implicit_pcg_fixed_iters: int = 60
+    # strategy ("standard" 2-dot PCG, "single_reduce" Chronopoulos–Gear
+    # with one batched allreduce per iteration, or "single_reduce_deep", the
+    # same with the halo exchanged every few iterations — validated at solver
+    # entry, ValueError on unknown).
+    #
+    # History (superseded 2026-10-05 by gpoly@20, see the end of this block):
+    # 20 with the "poly" preconditioner below (owner decision 2026-09-20,
+    # A/B at 32 and 128 GPUs: step -8%/-14.5% f32, -6%/-11% f64 against
+    # Jacobi at 30, same residual).  The Jacobi history that set 30:
+    # measured on the REAL captured systems (scripts/validate/
+    # ocean_fidelity/barotropic_pcg_convergence.py) at subdivision 7, 8 and
+    # 9, in both precisions, after 200 spin-up steps at dt = 300 s.  Over
+    # the configurations tested, the mesh set the iteration count and the
+    # column did not: subdivision 9 at 10, 20 and 40 levels gives the same
+    # table, while subdivision 8 is at its floor ~10 iterations sooner than
+    # 9.  Timestep, bathymetry and state were NOT varied and could move it.
+    #
+    # At subdivision 9 (2.6M cells, the production/scaling mesh), relative
+    # residual and max|b - A eta|/dt.  That second column is the WORST LOCAL
+    # continuity-defect rate a cell carries in one step, not a measured
+    # global mass drift — the cell-to-cell and step-to-step cancellation is
+    # unmeasured, so read it as an upper bound on how wrong one cell's
+    # free-surface tendency can be, not as sea level lost per day:
+    #     M      float32              float64
+    #     20     1.0e-5  / 12 mm/day  3.0e-6  / 11 mm/day
+    #     30     3.2e-6  / 1.4        1.0e-7  / 0.30
+    #     40     3.3e-6  / 1.4        3.2e-9  / 0.011
+    #     60     3.3e-6  / 1.4        3.5e-12 / 5e-6
+    # float32 reaches its own precision floor at 30 and buys nothing after
+    # it.  float64 keeps descending, so 30 trades sea-level budget accuracy
+    # (0.3 mm/day per step, still 4x under the float32 floor the model
+    # already runs at) for ~1.8x on step time.  Owner decision 2026-09-19;
+    # raise to 40 if a long float64 integration shows mass drift.
+    #
+    # NOT covered by that measurement, and the two reasons to revisit this:
+    # no multi-rank convergence check (the probe replays the captured system
+    # on one process, where the halo exchange is the identity); and no
+    # gradient comparison through the unrolled adjoint, which is the use
+    # this most plausibly harms — reverse mode differentiates the TRUNCATED
+    # algorithm exactly, so a loose forward residual bounds nothing about
+    # the derivative, and a training run would degrade without any mass
+    # diagnostic firing.  A verification run that must hit the configured
+    # 1e-10 residual has to set the count back up explicitly.
+    # The lat-lon C-grid default (state.py) is a different operator on a
+    # different mesh and stays at 60 until measured.
+    #
+    # 20 with the GLOBAL polynomial ("gpoly", below) since 2026-10-05 (owner
+    # decision). gpoly@15 was faster (-9/-12/-11% at 8/32/128 GPUs,
+    # single_reduce) and beat poly@20 on L9 at dt=300 s, but FAILED the
+    # finer-mesh check (job 27848794): on L10 @512 emulated devices and on
+    # L9 at dt=600 s it is slightly worse than poly@20 (f64 rel_res 4.3e-4
+    # vs 3.9e-4; 1.3e-3 vs 1.0e-3), while gpoly@20 is 4-6x better than
+    # poly@20 there at about the same step cost (gpoly vs poly at 20:
+    # +0.5..+1.5% at 8/32 GPUs, -1% at 128). NOTE: at L10 or dt=600 s every
+    # option is far from converged at 20 (rel_res ~1e-4..1e-3); the count is
+    # mesh/dt-specific. Single-device runs are unaffected (stock CG).
+    # The opt-in deep-halo Jacobi solver (pcg_variant below) needs 30: Jacobi
+    # reaches the 1e-10 relative residual in 27-30 iterations on real s7
+    # systems (spin-up 30/150/400 steps, 128 emulated ranks; identical at 16).
+    #
+    # None (the default since 2026-10-04, owner decision): the iteration count,
+    # recurrence (pcg_variant) and preconditioner are resolved TOGETHER per
+    # JAX backend by resolve_barotropic_pcg_defaults (table
+    # MPAS_BAROTROPIC_PCG_DEFAULTS below the class) when the model is built,
+    # and written back into model.config, so every run records the solver it
+    # used.  Set all three to pin a solver.
+    barotropic_implicit_pcg_fixed_iters: int | None = None
     barotropic_implicit_pcg_residual_tol: float = 1.0e-10
-    barotropic_implicit_pcg_variant: str = "standard"
+    # Unset (None) = per-backend bundle (MPAS_BAROTROPIC_PCG_DEFAULTS):
+    # "standard" on GPU, "chebyshev_deep" on CPU.
+    # "standard" (two allreduces per iteration) was the default 2026-10-02..
+    # 2026-10-04 (owner decision): it is the recurrence gpoly x 15 was
+    # measured with (GPU weak ladder -6 / -8.5 / -10.4 % at 8 / 32 / 128
+    # GPUs); gpoly x 15 with "single_reduce" has not been measured.
+    # History: "single_reduce" (Chronopoulos-Gear, one batched allreduce per
+    # iteration instead of two) was the default 2026-09-26..2026-10-02. It
+    # had been owner-approved after two checks: convergence on the REAL captured systems is identical (s7 L40,
+    # poly:4, 16-device local preconditioner: rel. residual 4.5e-16 at 20
+    # iterations for both, |eta_single - eta_standard| 7e-18 m); and on
+    # Derecho CPU with the butterfly global sum, s7 16 ranks/node, 313 vs 315
+    # ms/step at 1 node, 167 vs 171 at 2, 110 vs 118 at 4, 86.9 vs 97.2 at 8.
+    # float32 checked too (same systems): both recurrences reach the f32
+    # residual floor 1.56e-7 by 15 iterations, eta differs by 3.7e-9 m.
+    # GPU (NCCL) was not re-measured with it.
+    # "single_reduce_deep" (opt-in): the same recurrence with the cell halo
+    # of (r, s) exchanged once every `complete_cell_rings` iterations instead
+    # of every iteration; the halo is recomputed redundantly.  Owned results
+    # equal the per-iteration exchange bit for bit (x64 test).  Needs precond
+    # "jacobi" and fixed_iters=30.  Cadence = rings the layout certifies: 3 on
+    # the SPMD layout, 1 on the MPI-per-rank layout (its halo has no closure
+    # passes, so there it is the per-iteration exchange of two vectors).
+    # Derecho CPU s7 L40 f64, 3 repeats, ms/step: 8 nodes 82.8 (poly4 x 20)
+    # -> 75.8 with deep Jacobi x 30; 2 nodes 164.2 -> 152.8; Jacobi x 30
+    # with per-iteration exchange 92.7 / 165.3.  The CPU default since
+    # 2026-10-04 (owner decision, per-backend bundle); never measured on GPU.
+    # "chebyshev_deep" (the CPU default since 2026-10-10, owner decision):
+    # Jacobi-scaled Chebyshev iteration on the same
+    # deep-halo schedule, window [1/dmax, 2 - 1/dmax] from the operator's
+    # diagonal (one global max per solve) and no global sums in the loop.
+    # Needs precond "jacobi"; fixed_iters = Chebyshev updates (36 reached the
+    # 1e-10 residual on the s7/L40 test systems where Jacobi CG needed 32).
+    # CPU default runs 40: Derecho s7 L40 f64, 2 repeats, ms/step 8 nodes
+    # 60.0/59.7 (deep Jacobi CG x 30) -> 47.8/48.3; 1 node 268.8/267.6 ->
+    # 269.4/269.5.  True relative residual fresh/spun 2e-10/3.6e-11 -> 8e-12/
+    # 5.6e-12; 1-day trajectory vs a 200-iteration reference 7e-9 -> 1.6e-10.
+    # Measured on the flat 4000 m test ocean.  Realistic seafloor (ETOPO 1 deg,
+    # run_comparison_mpas settings, 118256 wet cells, 11-5500 m): CG x 30
+    # 3.9e-9/8.5e-10, x 40 2.4e-10/6.1e-11 (misses 1e-10 fresh), x 50 1.3e-12/
+    # 3.5e-13; 1-day trajectory 2.7e-7 / 1.3e-8 / 7.6e-11.  So the CPU default
+    # runs 50 since 2026-10-11 (owner decision).  MPI-per-rank lane and GPU
+    # never measured.
+    barotropic_implicit_pcg_variant: str | None = None  # per backend, see fixed_iters
+    # Distributed-only preconditioner for the fixed-iteration PCG
+    # (unset = per-backend bundle: "gpoly" on GPU, "jacobi" on CPU; the MPI Voronoi lane
+    # must select "poly"). "jacobi" or "poly": a communication-free Neumann-series
+    # polynomial in the device-local block of A (K local mat-vecs, no
+    # halo exchange, so it costs nothing in ppermute rounds and buys
+    # iterations back).  Measured on the real subdivision-9 systems,
+    # 128 emulated devices, f64, relative residual:
+    #                iters=10    15        20        30
+    #     jacobi       7.9e-05   1.5e-05   3.1e-06   9.9e-08
+    #     local poly4  2.0e-05   1.4e-06   8.9e-08   4.0e-10
+    #     local poly8  9.1e-06   4.0e-07   1.6e-08   2.6e-11
+    # Each PCG iteration still costs one cell-halo exchange plus two
+    # allreduces; the win is reaching the target residual at a smaller
+    # ``fixed_iters`` (30 -> 20 at poly4).
+    # Default "poly" 2026-09-20..2026-10-02 (owner decision, A/B above);
+    # "jacobi" is the pre-2026-09-20 solver and needs fixed_iters=30 for the
+    # same residual (and is what "single_reduce_deep" requires).
+    # Default "gpoly" 2026-10-02..2026-10-04, now the GPU bundle (owner decision; see fixed_iters for
+    # the A/B): the same polynomial on the GLOBAL operator, evaluated
+    # redundantly on the SPMD halo (layout halo_depth >= sweeps-2, which the
+    # historical 2 satisfies at 4 sweeps); one exchange per iteration as
+    # before, and the answer no longer depends on the device count. Same
+    # systems, 128 emulated devices: f64 rel_res 2.3e-6 / 6.4e-8 / 1.8e-9 at
+    # iters 10 / 15 / 20. SPMD lane only: the MPI Voronoi lane refuses it
+    # (select "poly" there) and a single device keeps the stock CG solve.
+    barotropic_implicit_pcg_precond: str | None = None  # per backend, see fixed_iters
+    barotropic_implicit_pcg_poly_sweeps: int = 4
     freshwater_closure: str = "virtual_salt_flux"
     normalize_freshwater: bool = False  # When True, subtract the global
                                         # area-weighted mean freshwater flux
@@ -431,6 +581,32 @@ class MPASOceanConfig(NamedTuple):
     # Arctic halocline-erosion audit).  Mirrors the lat-lon C-grid field.
     freshwater_salinity: str = "s_ref"   # "s_ref" | "local"
 
+    # --- resolution scaling of the biharmonic vorticity damping -------------
+    # Appended at the END of the schema on purpose: positional construction of
+    # this NamedTuple stays valid for every existing caller.
+    # Anchor for the DERIVED ``K_zeta_bih`` (``K_zeta_bih=None``): the value
+    # and the mesh spacing it was tuned at.  ``1e14`` is the OMIP NEMO-match
+    # MPAS recipe's coefficient, tuned on the ico6 mesh (SST RMSE 0.84 vs
+    # NEMO).  The spacing is that mesh's mean ``dcEdge`` at the DEFAULT 50
+    # Lloyd iterations, to full float precision, so an ico6 run reproduces
+    # ``K_zeta_bih_ref`` EXACTLY rather than to 0.1 % (measured: the ico6 mesh
+    # built by ``create_voronoi_mesh(6)`` derives 1.0e14 bit-identically).
+    # The same mesh at Lloyd 0 measures 120324.32 m, which the cubed law turns
+    # into 0.3 % on the coefficient.
+    K_zeta_bih_ref: float = 1.0e14                 # [m⁴/s] at the reference spacing
+    K_zeta_bih_ref_dx_m: float = 120194.60581296285  # [m] ico6 mean dcEdge, Lloyd 50
+    # Provenance of a DERIVED coefficient, stamped by the model constructor:
+    # the mesh spacing it was derived from (0.0 = pinned, not derived), so a
+    # saved configuration records WHICH mesh its coefficient belongs to and a
+    # replay on another mesh is visible rather than a silent re-pin.
+    K_zeta_bih_dx_m: float = 0.0
+    # Land-fill band capacity (performance only; results identical): None =
+    # the Neumann land fill sweeps every cell; an int K = it sweeps only the
+    # land cells within its reach of ocean, up to K per rank (more -> all
+    # cells).  make_sharded_mpas_ocean_step(land_mask=...) sets it on the
+    # local model from the run's mask; the SPMD bench receipt and the OMIP
+    # log record the value.
+    land_fill_band_capacity: int | None = None
 
 class MPASSimpleOceanConfig(NamedTuple):
     """Configuration for simplified ocean on Voronoi mesh.
@@ -502,3 +678,110 @@ class MPASSimpleOceanConfig(NamedTuple):
     # Appended at the END to preserve positional construction (same convention
     # as LatLonCGridOceanConfig field additions).
     freezing: FreezingPointConfig = FreezingPointConfig()
+
+
+
+#: Distributed barotropic PCG bundle per JAX backend (owner decisions
+#: 2026-10-04/05).  CPU, Derecho s7 L40 f64, 3 repeats, ms/step on main 87144e259
+#: with only these flags changed: 8 nodes gpoly x15 standard 67.7 vs deep-halo
+#: jacobi x30 61.0; 2 nodes 152.3 vs 144.4; 1 node 290.7 vs 280.5.  CPU since
+#: 2026-10-10 (owner decision): deep-halo Jacobi-Chebyshev x40, 8 nodes 48 vs
+#: 60 ms/step, 1 node 269 vs 268; raised to x50 2026-10-11 (owner decision)
+#: after the realistic-seafloor check (see barotropic_implicit_pcg_variant).  GPU:
+#: gpoly standard at 20 iterations (owner decision 2026-10-05; x15 failed the
+#: L10 / dt=600 s check, see barotropic_implicit_pcg_fixed_iters); deep-halo
+#: was never measured on GPU.
+MPAS_BAROTROPIC_PCG_DEFAULTS = {
+    "cpu": dict(barotropic_implicit_pcg_variant="chebyshev_deep",
+                barotropic_implicit_pcg_precond="jacobi",
+                barotropic_implicit_pcg_fixed_iters=50),
+    "gpu": dict(barotropic_implicit_pcg_variant="standard",
+                barotropic_implicit_pcg_precond="gpoly",
+                barotropic_implicit_pcg_fixed_iters=20),
+}
+
+
+def resolve_barotropic_pcg_defaults(config: "MPASOceanConfig",
+                                    backend: str | None = None) -> "MPASOceanConfig":
+    """Fill the unset (None) barotropic PCG fields from the bundle for
+    ``backend`` (default: ``jax.default_backend()``).  Idempotent.
+
+    Mixing bundles is refused: a preconditioner other than the backend's
+    needs its own iteration count and recurrence, so when the caller pins the
+    preconditioner to something else, the other two fields must be pinned too
+    (Jacobi at gpoly's 20 iterations would be silently under-converged).
+    """
+    keys = ("barotropic_implicit_pcg_variant", "barotropic_implicit_pcg_precond",
+            "barotropic_implicit_pcg_fixed_iters")
+    unset = [k for k in keys if getattr(config, k) is None]
+    if not unset:
+        return config
+    if backend is None:
+        import jax
+        backend = jax.default_backend()
+    if backend not in MPAS_BAROTROPIC_PCG_DEFAULTS:
+        raise ValueError(
+            f"no MPAS barotropic PCG default for JAX backend {backend!r}; pin "
+            f"{', '.join(keys)} explicitly")
+    bundle = MPAS_BAROTROPIC_PCG_DEFAULTS[backend]
+    precond = config.barotropic_implicit_pcg_precond
+    if precond is not None and precond != bundle["barotropic_implicit_pcg_precond"]:
+        raise ValueError(
+            f"barotropic_implicit_pcg_precond={precond!r} differs from the "
+            f"{backend} default ({bundle['barotropic_implicit_pcg_precond']!r}); "
+            f"also pin {', '.join(k for k in unset)} (a bundle's count and "
+            "recurrence belong to its preconditioner)")
+    return config._replace(**{k: bundle[k] for k in unset})
+
+
+def resolution_scaled_k_zeta_bih(dx_mean_m: float, config: "MPASOceanConfig") -> float:
+    """Biharmonic vorticity damping coefficient for a mesh of spacing ``dx_mean_m``.
+
+    ``K_ζ`` damps the ζ-checkerboard null mode of the energy-conserving PV
+    flux.  Held fixed across resolutions it is BOTH over-dissipative and
+    explicitly unstable on a finer mesh: the ∇⁴ operator's stability limit
+    scales as ``Δ⁴/K_ζ``, so a coefficient tuned at ~120 km violates it at
+    28 km (measured: an ico8 cold start diverges at step 11 with the fixed
+    1e14 m⁴/s, and survives with the coefficient scaled).
+
+    The scaling is ``K_ζ(Δ) = K_ref · (Δ/Δ_ref)³`` — the NEMO ``ldf_dyn``
+    convention for a biharmonic operator, which holds the damping's velocity
+    scale ``K_ζ/Δ³`` constant and lets the stability limit grow LINEARLY with
+    refinement, rather than the ``Δ⁴`` law that would hold the limit fixed and
+    let the damping vanish.  ``config.K_zeta_bih_ref`` / ``K_zeta_bih_ref_dx_m``
+    carry the anchor, so the choice is in the configuration, not in a default
+    buried at a call site.
+
+    Returns ``config.K_zeta_bih`` unchanged whenever it is not ``None`` — that
+    is the explicit pin (including ``0.0`` = the term off).
+
+    Parameters
+    ----------
+    dx_mean_m : mean cell spacing of the mesh the model runs on [m]
+        (``mesh.dcEdge`` averaged over real, non-padded edges).
+    config : MPASOceanConfig
+
+    Returns
+    -------
+    float
+        The coefficient [m⁴/s] to run with.
+    """
+    if config.K_zeta_bih is not None:
+        return config.K_zeta_bih
+    if not (dx_mean_m > 0.0):
+        raise ValueError(
+            "resolution_scaled_k_zeta_bih: mean cell spacing must be positive, "
+            f"got {dx_mean_m!r} m")
+    if not (config.K_zeta_bih_ref_dx_m > 0.0):
+        raise ValueError(
+            "resolution_scaled_k_zeta_bih: K_zeta_bih_ref_dx_m must be positive, "
+            f"got {config.K_zeta_bih_ref_dx_m!r} m")
+    return config.K_zeta_bih_ref * (dx_mean_m / config.K_zeta_bih_ref_dx_m) ** 3
+
+
+# A single mean spacing describes a QUASI-UNIFORM mesh.  On a mesh whose edge
+# lengths span more than this factor (regional refinement), one scalar
+# coefficient is over-damping the coarse part or unstable in the fine part --
+# the ∇⁴ stability limit follows the SMALLEST edges -- so the derivation
+# refuses rather than returning a plausible number.
+K_ZETA_BIH_MAX_SPACING_RATIO: float = 4.0

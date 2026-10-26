@@ -1,0 +1,1369 @@
+{
+  "bars": {
+    "accumulating": 1e-12,
+    "pointwise": 1e-15
+  },
+  "controls": {
+    "row20_lk": {
+      "baseline_pass": true,
+      "nonfinite_fired": true,
+      "one_i_roll_fired": true,
+      "perturbation_fired": true,
+      "perturbed_ji_k": [
+        1,
+        1,
+        0
+      ]
+    },
+    "row21_actual_card_avm": {
+      "baseline_pass": true,
+      "nonfinite_fired": true,
+      "one_i_roll_fired": true,
+      "perturbation_fired": true,
+      "perturbed_ji_k": [
+        1,
+        1,
+        0
+      ]
+    },
+    "row22_avt": {
+      "baseline_pass": true,
+      "nonfinite_fired": true,
+      "one_i_roll_fired": true,
+      "perturbation_fired": true,
+      "perturbed_ji_k": [
+        1,
+        1,
+        0
+      ]
+    },
+    "row23_avm": {
+      "baseline_pass": true,
+      "nonfinite_fired": true,
+      "one_i_roll_fired": true,
+      "perturbation_fired": true,
+      "perturbed_ji_k": [
+        1,
+        1,
+        0
+      ]
+    },
+    "row24_enabled_runoff_waiver_fired": true,
+    "row25_26_mask_flip_fired": true,
+    "row25_avt": {
+      "baseline_pass": true,
+      "nonfinite_fired": true,
+      "one_i_roll_fired": true,
+      "perturbation_fired": true,
+      "perturbed_ji_k": [
+        1,
+        1,
+        0
+      ]
+    },
+    "row30_prd": {
+      "baseline_pass": true,
+      "nonfinite_fired": true,
+      "one_i_roll_fired": true,
+      "perturbation_fired": true,
+      "perturbed_ji_k": [
+        1,
+        1,
+        1
+      ]
+    }
+  },
+  "first_divergence": null,
+  "focus_columns_ji": [
+    [
+      11,
+      1
+    ],
+    [
+      12,
+      1
+    ],
+    [
+      13,
+      1
+    ],
+    [
+      13,
+      23
+    ]
+  ],
+  "lane": "DUMP LANE: d180  run_dir=/tmp/zdf-tail-lane.Q1ZI7e/RUN_SEQDUMP_D180_1R  restart=DINO_00005760_restart.nc  kt(nit000)=5761  t_seconds=15554700s (= day 180.03)",
+  "oracle_source_sha256": {
+    "ldfslp.F90": {
+      "path": "/tmp/nemo-row19-detwriter.kTFp14/cfgs/DINO/MY_SRC/ldfslp.F90",
+      "sha256": "a4e65b80484423df67247e4b93ace08fd50fa929e325b2f2af113d4bb31ffd30"
+    },
+    "zdfevd.F90": {
+      "path": "/tmp/nemo-row19-detwriter.kTFp14/src/OCE/ZDF/zdfevd.F90",
+      "sha256": "a4939b36876cca686e50880456fe5c27929ee4d0b3e694dcc693df592866f776"
+    },
+    "zdfphy.F90": {
+      "path": "/tmp/nemo-row19-detwriter.kTFp14/src/OCE/ZDF/zdfphy.F90",
+      "sha256": "76eeec2a280d56c55bec9e59b579e5290623c408c03962d04652e406334b45fd"
+    },
+    "zdftke.F90": {
+      "path": "/tmp/nemo-row19-detwriter.kTFp14/cfgs/DINO/MY_SRC/zdftke.F90",
+      "sha256": "6a33079678505c105cae1edb8a52b9d70d02012d0eb3395673f4b62fe657a9fd"
+    }
+  },
+  "probe": {
+    "path": "/tmp/codex-zdf-sweep/scripts/validate/ocean_fidelity/dino_1226/zdf_chain_tail_existing.py",
+    "sha256": "f0cbc99bfa4f60acb7462b8c28787828f0c17c4f194e15d685594acfc56c3eb2"
+  },
+  "provenance_sha256": {
+    "DINO_00005760_restart.nc": "0cc00f9945606d1dea52592280e363b45476103de96f5cef471d70b1b881ff3e",
+    "dump_avm.bin": "abe4c1e928c4c2bb3fd1a7921d68a7fc656a19a91c345379a6edb24170134d7b",
+    "dump_avt.bin": "a0906fc4442eec4c01c36ea63069df6a412ebbe0d38259aa65ca69b1d5db93b3",
+    "eiv_dump_prd_arg.bin": "12e67ec2d5cb951cc5efe02e41d56e4aa6395d3d1def7f653d2b88c91957ab1b",
+    "eiv_dump_uslp.bin": "ecb3ca3c50c97ef67ad45e96f828a5264c18f94b767a0f9d619f010535d9d0f9",
+    "eiv_dump_vslp.bin": "96bfd0eacd958a9c809becf9dbc3852bc0e345aacb2fc511c4880f89f284edfa",
+    "eiv_dump_wslpi.bin": "e3073a8501e8046732e301d58781dcaf35a6a84d9071309353b3de0bad08fb64",
+    "eiv_dump_wslpj.bin": "2d24bcace748f7d550b34ae51dc1736a3e6943967a2ffd068618b0e92a723acc",
+    "mesh_mask.nc": "3285fc4af36854a38b4e6f7985ab0372b95424398750a23b628935da02f72622",
+    "ocean.output": "94f76b939907704fad0e859696da5e73bdfa4a110dedc756c115569358aaa500",
+    "tke_dump_avm_final.bin": "1240ccb86e674edd1309831e2292a244aaabc3bca2f245b530fd3b88b59c275f",
+    "tke_dump_avm_in.bin": "f05299d26b198ffad1449bf29bebfa8f2035de0b339be030bbf1c4eba0bce5bd",
+    "tke_dump_avt_final.bin": "6f34238727e142e4036a629ed20fde47220e290d2f11f20618aef34e72d91c34",
+    "tke_dump_en.bin": "b7a28c78a10dc3ed15b424197f7139d53c42cdfea6fe4191d96796b635722565",
+    "tke_dump_pdlr.bin": "538af8f8f1a229e60bb23513fc87826554670a30ed05a45dbfe9e7cc38acd614",
+    "tke_dump_rn2.bin": "df573f8c07abab1cc0a2fc7fd2093dd8276dccf0319d3375220340d91b5a6004",
+    "tke_dump_rn2b.bin": "fcd7ddee9e94b6158085f2ff5d174b2cb01e1b22a8524faa1b5be31a2b798961",
+    "tke_dump_sh2.bin": "2c18e0926b2b81c07ba3c5c371067d051ffea2d2fad0cc75c444af1654746f53",
+    "tke_dump_zmxld.bin": "df9a09e7fcb9e11b7549fb523cb241a2a22a1e073182bcbcc00d56e0d5cfcde2",
+    "tke_dump_zmxlm.bin": "60ed331574d813885fb29399b2dbf041a6913ea965d45c09e2890eef8b3ef830"
+  },
+  "repo_sha": "2d9aa15577c005f15c7514ca429d43fb87ab0624",
+  "row19_receipt": {
+    "path": "/tmp/dino_zdf_row19_raw_mxl_artifact.json",
+    "repo_sha": "040a3437ea68cf1139f20774793cc3b9dd988695",
+    "sha256": "f5e42f1d15cd9e823e81fa3f5b56a2b9eebd504c8ef823718c50dd9b9f3fc29b"
+  },
+  "row21_receipt": {
+    "path": "/tmp/dino_zdf_row21_coeff_assembly_artifact.json",
+    "repo_sha": "4352c1fd683450e8e2c9844493b2589b11b876e9",
+    "sha256": "84885e45ecc149082606c0b44b411271f40942a99497996b0d4b35e051b6a97a"
+  },
+  "rows": {
+    "19": {
+      "deterministic_bracket": {
+        "on_streams": 198,
+        "shared_streams": 197,
+        "strict_byte_identical_shared_streams": 197,
+        "uninitialized_memory_exclusions": []
+      },
+      "disposition": "VERIFIED",
+      "exact_unequal_wet_elements": 0,
+      "metric": {
+        "absolute_column_bar_m": 1e-15,
+        "focus": [
+          {
+            "column_error_m": 0.0,
+            "i": 1,
+            "j": 11,
+            "pass": true,
+            "wet": true
+          },
+          {
+            "column_error_m": 0.0,
+            "i": 1,
+            "j": 12,
+            "pass": true,
+            "wet": true
+          },
+          {
+            "column_error_m": 0.0,
+            "i": 1,
+            "j": 13,
+            "pass": true,
+            "wet": true
+          },
+          {
+            "column_error_m": 0.0,
+            "i": 23,
+            "j": 13,
+            "pass": true,
+            "wet": true
+          }
+        ],
+        "max_column_error_m": 0.0,
+        "n_diverged_columns": 0,
+        "n_nonfinite_wet_elements": 0,
+        "n_verified_columns": 9920,
+        "n_wet_columns": 9920,
+        "n_wet_elements": 332214,
+        "pass": true,
+        "units": "m",
+        "worst_column_ji": [
+          1,
+          1
+        ]
+      },
+      "operation": "raw buoyancy mixing length before scans",
+      "receipt": "/tmp/dino_zdf_row19_raw_mxl_artifact.json",
+      "receipt_sha256": "f5e42f1d15cd9e823e81fa3f5b56a2b9eebd504c8ef823718c50dd9b9f3fc29b"
+    },
+    "20": {
+      "disposition": "VERIFIED",
+      "operation": "nn_mxl=3 limiting scans (row19+20 composite)",
+      "qualification": "production composite using exact NEMO en/rn2; row19's raw operand and deterministic writer bracket are independently VERIFIED",
+      "zmxld": {
+        "aggregate_bar_pass": true,
+        "bar": 1e-12,
+        "column_bar_pass": true,
+        "correlation": 1.0,
+        "focus": [
+          {
+            "column_error": 0.0,
+            "i": 1,
+            "j": 11,
+            "pass": true,
+            "wet": true
+          },
+          {
+            "column_error": 0.0,
+            "i": 1,
+            "j": 12,
+            "pass": true,
+            "wet": true
+          },
+          {
+            "column_error": 0.0,
+            "i": 1,
+            "j": 13,
+            "pass": true,
+            "wet": true
+          },
+          {
+            "column_error": 0.0,
+            "i": 23,
+            "j": 13,
+            "pass": true,
+            "wet": true
+          }
+        ],
+        "max_column_error": 0.0,
+        "n_diverged_columns": 0,
+        "n_nonfinite_wet_elements": 0,
+        "n_verified_columns": 9920,
+        "n_wet_columns": 9920,
+        "n_wet_elements": 332214,
+        "pass": true,
+        "reference_rms": 233.4074434701507,
+        "rms_ratio": 1.0,
+        "worst_column_ji": [
+          1,
+          1
+        ]
+      },
+      "zmxlm": {
+        "aggregate_bar_pass": true,
+        "bar": 1e-12,
+        "column_bar_pass": true,
+        "correlation": 1.0,
+        "focus": [
+          {
+            "column_error": 0.0,
+            "i": 1,
+            "j": 11,
+            "pass": true,
+            "wet": true
+          },
+          {
+            "column_error": 0.0,
+            "i": 1,
+            "j": 12,
+            "pass": true,
+            "wet": true
+          },
+          {
+            "column_error": 0.0,
+            "i": 1,
+            "j": 13,
+            "pass": true,
+            "wet": true
+          },
+          {
+            "column_error": 0.0,
+            "i": 23,
+            "j": 13,
+            "pass": true,
+            "wet": true
+          }
+        ],
+        "max_column_error": 0.0,
+        "n_diverged_columns": 0,
+        "n_nonfinite_wet_elements": 0,
+        "n_verified_columns": 9920,
+        "n_wet_columns": 9920,
+        "n_wet_elements": 332214,
+        "pass": true,
+        "reference_rms": 144.37290804400527,
+        "rms_ratio": 1.0,
+        "worst_column_ji": [
+          1,
+          1
+        ]
+      }
+    },
+    "21": {
+      "disposition": "VERIFIED",
+      "operands": {
+        "avm_base": {
+          "expression": "max(zav,avmb)*wmask",
+          "metric": {
+            "absolute_column_bar": 1e-15,
+            "exact_unequal_wet_elements": 0,
+            "focus": [
+              {
+                "column_error": 0.0,
+                "i": 1,
+                "j": 11,
+                "pass": true,
+                "wet": true
+              },
+              {
+                "column_error": 0.0,
+                "i": 1,
+                "j": 12,
+                "pass": true,
+                "wet": true
+              },
+              {
+                "column_error": 0.0,
+                "i": 1,
+                "j": 13,
+                "pass": true,
+                "wet": true
+              },
+              {
+                "column_error": 0.0,
+                "i": 23,
+                "j": 13,
+                "pass": true,
+                "wet": true
+              }
+            ],
+            "max_column_error": 0.0,
+            "n_diverged_columns": 0,
+            "n_nonfinite_wet_elements": 0,
+            "n_verified_columns": 9920,
+            "n_wet_columns": 9920,
+            "n_wet_elements": 332214,
+            "pass": true,
+            "units": "m2 s-1",
+            "worst_column_ji": [
+              1,
+              1
+            ]
+          }
+        },
+        "avt_base": {
+          "expression": "max(zav,avtb)*wmask",
+          "metric": {
+            "absolute_column_bar": 1e-15,
+            "exact_unequal_wet_elements": 0,
+            "focus": [
+              {
+                "column_error": 0.0,
+                "i": 1,
+                "j": 11,
+                "pass": true,
+                "wet": true
+              },
+              {
+                "column_error": 0.0,
+                "i": 1,
+                "j": 12,
+                "pass": true,
+                "wet": true
+              },
+              {
+                "column_error": 0.0,
+                "i": 1,
+                "j": 13,
+                "pass": true,
+                "wet": true
+              },
+              {
+                "column_error": 0.0,
+                "i": 23,
+                "j": 13,
+                "pass": true,
+                "wet": true
+              }
+            ],
+            "max_column_error": 0.0,
+            "n_diverged_columns": 0,
+            "n_nonfinite_wet_elements": 0,
+            "n_verified_columns": 9920,
+            "n_wet_columns": 9920,
+            "n_wet_elements": 332214,
+            "pass": true,
+            "units": "m2 s-1",
+            "worst_column_ji": [
+              1,
+              1
+            ]
+          }
+        },
+        "dissl_postavn": {
+          "expression": "sqrt(en)/zmxld",
+          "metric": {
+            "absolute_column_bar": 1e-15,
+            "exact_unequal_wet_elements": 0,
+            "focus": [
+              {
+                "column_error": 0.0,
+                "i": 1,
+                "j": 11,
+                "pass": true,
+                "wet": true
+              },
+              {
+                "column_error": 0.0,
+                "i": 1,
+                "j": 12,
+                "pass": true,
+                "wet": true
+              },
+              {
+                "column_error": 0.0,
+                "i": 1,
+                "j": 13,
+                "pass": true,
+                "wet": true
+              },
+              {
+                "column_error": 0.0,
+                "i": 23,
+                "j": 13,
+                "pass": true,
+                "wet": true
+              }
+            ],
+            "max_column_error": 0.0,
+            "n_diverged_columns": 0,
+            "n_nonfinite_wet_elements": 0,
+            "n_verified_columns": 9920,
+            "n_wet_columns": 9920,
+            "n_wet_elements": 332214,
+            "pass": true,
+            "units": "s-1",
+            "worst_column_ji": [
+              1,
+              1
+            ]
+          }
+        },
+        "zav_base": {
+          "expression": "rn_ediff*zmxlm*sqrt(en)",
+          "metric": {
+            "absolute_column_bar": 1e-15,
+            "exact_unequal_wet_elements": 0,
+            "focus": [
+              {
+                "column_error": 0.0,
+                "i": 1,
+                "j": 11,
+                "pass": true,
+                "wet": true
+              },
+              {
+                "column_error": 0.0,
+                "i": 1,
+                "j": 12,
+                "pass": true,
+                "wet": true
+              },
+              {
+                "column_error": 0.0,
+                "i": 1,
+                "j": 13,
+                "pass": true,
+                "wet": true
+              },
+              {
+                "column_error": 0.0,
+                "i": 23,
+                "j": 13,
+                "pass": true,
+                "wet": true
+              }
+            ],
+            "max_column_error": 0.0,
+            "n_diverged_columns": 0,
+            "n_nonfinite_wet_elements": 0,
+            "n_verified_columns": 9920,
+            "n_wet_columns": 9920,
+            "n_wet_elements": 332214,
+            "pass": true,
+            "units": "m2 s-1",
+            "worst_column_ji": [
+              1,
+              1
+            ]
+          }
+        },
+        "zsqen_base": {
+          "expression": "sqrt(en)",
+          "metric": {
+            "absolute_column_bar": 1e-15,
+            "exact_unequal_wet_elements": 0,
+            "focus": [
+              {
+                "column_error": 0.0,
+                "i": 1,
+                "j": 11,
+                "pass": true,
+                "wet": true
+              },
+              {
+                "column_error": 0.0,
+                "i": 1,
+                "j": 12,
+                "pass": true,
+                "wet": true
+              },
+              {
+                "column_error": 0.0,
+                "i": 1,
+                "j": 13,
+                "pass": true,
+                "wet": true
+              },
+              {
+                "column_error": 0.0,
+                "i": 23,
+                "j": 13,
+                "pass": true,
+                "wet": true
+              }
+            ],
+            "max_column_error": 0.0,
+            "n_diverged_columns": 0,
+            "n_nonfinite_wet_elements": 0,
+            "n_verified_columns": 9920,
+            "n_wet_columns": 9920,
+            "n_wet_elements": 332214,
+            "pass": true,
+            "units": "m s-1",
+            "worst_column_ji": [
+              1,
+              1
+            ]
+          }
+        }
+      },
+      "operation": "base avm/avt/dissl assembly",
+      "production_actual_card_avm": {
+        "aggregate_bar_pass": true,
+        "bar": 1e-15,
+        "column_bar_pass": true,
+        "correlation": 1.0,
+        "focus": [
+          {
+            "column_error": 0.0,
+            "i": 1,
+            "j": 11,
+            "pass": true,
+            "wet": true
+          },
+          {
+            "column_error": 0.0,
+            "i": 1,
+            "j": 12,
+            "pass": true,
+            "wet": true
+          },
+          {
+            "column_error": 0.0,
+            "i": 1,
+            "j": 13,
+            "pass": true,
+            "wet": true
+          },
+          {
+            "column_error": 0.0,
+            "i": 23,
+            "j": 13,
+            "pass": true,
+            "wet": true
+          }
+        ],
+        "max_column_error": 0.0,
+        "n_diverged_columns": 0,
+        "n_nonfinite_wet_elements": 0,
+        "n_verified_columns": 9920,
+        "n_wet_columns": 9920,
+        "n_wet_elements": 332214,
+        "pass": true,
+        "reference_rms": 0.11959969832089476,
+        "rms_ratio": 1.0,
+        "worst_column_ji": [
+          1,
+          1
+        ]
+      },
+      "receipt": "/tmp/dino_zdf_row21_coeff_assembly_artifact.json",
+      "receipt_sha256": "84885e45ecc149082606c0b44b411271f40942a99497996b0d4b35e051b6a97a",
+      "write_only_bracket": {
+        "exclusions": [],
+        "off_streams": 197,
+        "on_streams": 202,
+        "strict_byte_identical_shared_streams": 197
+      }
+    },
+    "22": {
+      "avt": {
+        "aggregate_bar_pass": true,
+        "bar": 1e-15,
+        "column_bar_pass": true,
+        "correlation": 1.0,
+        "focus": [
+          {
+            "column_error": 1.1394012626216691e-19,
+            "i": 1,
+            "j": 11,
+            "pass": true,
+            "wet": true
+          },
+          {
+            "column_error": 1.1394012626216691e-19,
+            "i": 1,
+            "j": 12,
+            "pass": true,
+            "wet": true
+          },
+          {
+            "column_error": 2.848503156554173e-20,
+            "i": 1,
+            "j": 13,
+            "pass": true,
+            "wet": true
+          },
+          {
+            "column_error": 4.557605050486677e-19,
+            "i": 23,
+            "j": 13,
+            "pass": true,
+            "wet": true
+          }
+        ],
+        "max_column_error": 2.3334937858491784e-16,
+        "n_diverged_columns": 0,
+        "n_nonfinite_wet_elements": 0,
+        "n_verified_columns": 9920,
+        "n_wet_columns": 9920,
+        "n_wet_elements": 332214,
+        "pass": true,
+        "reference_rms": 0.118944287676894,
+        "rms_ratio": 1.0,
+        "worst_column_ji": [
+          22,
+          15
+        ]
+      },
+      "disposition": "VERIFIED",
+      "operation": "inverse-Prandtl avt correction"
+    },
+    "23": {
+      "disposition": "VERIFIED",
+      "operation": "closure coefficient copy on EVD-stable points",
+      "production_closure_avm": {
+        "aggregate_bar_pass": true,
+        "bar": 1e-15,
+        "column_bar_pass": true,
+        "correlation": 1.0,
+        "focus": [
+          {
+            "column_error": 0.0,
+            "i": 1,
+            "j": 11,
+            "pass": true,
+            "wet": true
+          },
+          {
+            "column_error": 0.0,
+            "i": 1,
+            "j": 12,
+            "pass": true,
+            "wet": true
+          },
+          {
+            "column_error": 0.0,
+            "i": 1,
+            "j": 13,
+            "pass": true,
+            "wet": true
+          },
+          {
+            "column_error": 0.0,
+            "i": 23,
+            "j": 13,
+            "pass": true,
+            "wet": true
+          }
+        ],
+        "max_column_error": 0.0,
+        "n_diverged_columns": 0,
+        "n_nonfinite_wet_elements": 0,
+        "n_verified_columns": 9920,
+        "n_wet_columns": 9920,
+        "n_wet_elements": 332214,
+        "pass": true,
+        "reference_rms": 0.11959969832089476,
+        "rms_ratio": 1.0,
+        "worst_column_ji": [
+          1,
+          1
+        ]
+      },
+      "production_closure_avt": {
+        "aggregate_bar_pass": true,
+        "bar": 1e-15,
+        "column_bar_pass": true,
+        "correlation": 1.0,
+        "focus": [
+          {
+            "column_error": 1.1394012626216691e-19,
+            "i": 1,
+            "j": 11,
+            "pass": true,
+            "wet": true
+          },
+          {
+            "column_error": 1.1394012626216691e-19,
+            "i": 1,
+            "j": 12,
+            "pass": true,
+            "wet": true
+          },
+          {
+            "column_error": 2.848503156554173e-20,
+            "i": 1,
+            "j": 13,
+            "pass": true,
+            "wet": true
+          },
+          {
+            "column_error": 4.557605050486677e-19,
+            "i": 23,
+            "j": 13,
+            "pass": true,
+            "wet": true
+          }
+        ],
+        "max_column_error": 2.3334937858491784e-16,
+        "n_diverged_columns": 0,
+        "n_nonfinite_wet_elements": 0,
+        "n_verified_columns": 9920,
+        "n_wet_columns": 9920,
+        "n_wet_elements": 332214,
+        "pass": true,
+        "reference_rms": 0.118944287676894,
+        "rms_ratio": 1.0,
+        "worst_column_ji": [
+          22,
+          15
+        ]
+      },
+      "reason": "the production _vmix_K_profiles result is captured before the production EVD composer and compared to NEMO closure dumps"
+    },
+    "24": {
+      "disposition": "WAIVED",
+      "operation": "river-mouth enhancement",
+      "reason": "fail-closed parse confirms resolved ln_rnf=F, namelist_ref ln_rnf_mouth=.false., and live zdfphy.F90:317-321 branch"
+    },
+    "25": {
+      "branch_mask": {
+        "bar": "exact branch-mask equality",
+        "focus": [
+          {
+            "i": 1,
+            "j": 11,
+            "pass": true,
+            "wet": true,
+            "xor_levels": 0
+          },
+          {
+            "i": 1,
+            "j": 12,
+            "pass": true,
+            "wet": true,
+            "xor_levels": 0
+          },
+          {
+            "i": 1,
+            "j": 13,
+            "pass": true,
+            "wet": true,
+            "xor_levels": 0
+          },
+          {
+            "i": 23,
+            "j": 13,
+            "pass": true,
+            "wet": true,
+            "xor_levels": 0
+          }
+        ],
+        "n_diverged_columns": 0,
+        "n_fired_wet_elements": 39293,
+        "n_verified_columns": 9920,
+        "n_wet_columns": 9920,
+        "n_xor_wet_elements": 0,
+        "pass": true
+      },
+      "disposition": "VERIFIED",
+      "fired_wet_elements": 39293,
+      "operation": "EVD tracer overwrite",
+      "production_composed_avt": {
+        "aggregate_bar_pass": true,
+        "bar": 1e-15,
+        "column_bar_pass": true,
+        "correlation": 1.0,
+        "focus": [
+          {
+            "column_error": 3.940684144312852e-22,
+            "i": 1,
+            "j": 11,
+            "pass": true,
+            "wet": true
+          },
+          {
+            "column_error": 3.940684144312852e-22,
+            "i": 1,
+            "j": 12,
+            "pass": true,
+            "wet": true
+          },
+          {
+            "column_error": 9.85171036078213e-23,
+            "i": 1,
+            "j": 13,
+            "pass": true,
+            "wet": true
+          },
+          {
+            "column_error": 1.5762736577251409e-21,
+            "i": 23,
+            "j": 13,
+            "pass": true,
+            "wet": true
+          }
+        ],
+        "max_column_error": 8.070521127552721e-19,
+        "n_diverged_columns": 0,
+        "n_nonfinite_wet_elements": 0,
+        "n_verified_columns": 9920,
+        "n_wet_columns": 9920,
+        "n_wet_elements": 332214,
+        "pass": true,
+        "reference_rms": 34.391305315925024,
+        "rms_ratio": 1.0,
+        "worst_column_ji": [
+          22,
+          15
+        ]
+      }
+    },
+    "26": {
+      "branch_mask": {
+        "bar": "exact branch-mask equality",
+        "focus": [
+          {
+            "i": 1,
+            "j": 11,
+            "pass": true,
+            "wet": true,
+            "xor_levels": 0
+          },
+          {
+            "i": 1,
+            "j": 12,
+            "pass": true,
+            "wet": true,
+            "xor_levels": 0
+          },
+          {
+            "i": 1,
+            "j": 13,
+            "pass": true,
+            "wet": true,
+            "xor_levels": 0
+          },
+          {
+            "i": 23,
+            "j": 13,
+            "pass": true,
+            "wet": true,
+            "xor_levels": 0
+          }
+        ],
+        "n_diverged_columns": 0,
+        "n_fired_wet_elements": 39293,
+        "n_verified_columns": 9920,
+        "n_wet_columns": 9920,
+        "n_xor_wet_elements": 0,
+        "pass": true
+      },
+      "disposition": "VERIFIED",
+      "fired_wet_elements": 39293,
+      "operation": "EVD momentum overwrite",
+      "production_composed_avm": {
+        "aggregate_bar_pass": true,
+        "bar": 1e-15,
+        "column_bar_pass": true,
+        "correlation": 0.9999999999999998,
+        "focus": [
+          {
+            "column_error": 0.0,
+            "i": 1,
+            "j": 11,
+            "pass": true,
+            "wet": true
+          },
+          {
+            "column_error": 0.0,
+            "i": 1,
+            "j": 12,
+            "pass": true,
+            "wet": true
+          },
+          {
+            "column_error": 0.0,
+            "i": 1,
+            "j": 13,
+            "pass": true,
+            "wet": true
+          },
+          {
+            "column_error": 0.0,
+            "i": 23,
+            "j": 13,
+            "pass": true,
+            "wet": true
+          }
+        ],
+        "max_column_error": 0.0,
+        "n_diverged_columns": 0,
+        "n_nonfinite_wet_elements": 0,
+        "n_verified_columns": 9920,
+        "n_wet_columns": 9920,
+        "n_wet_elements": 332214,
+        "pass": true,
+        "reference_rms": 34.39130758075968,
+        "rms_ratio": 1.0,
+        "worst_column_ji": [
+          1,
+          1
+        ]
+      }
+    },
+    "27": {
+      "disposition": "VERIFIED",
+      "operation": "avs copy and optional enhancements",
+      "source_identity": {
+        "bar": "exact source/object identity",
+        "focus": [
+          {
+            "i": 1,
+            "j": 11,
+            "pass": true
+          },
+          {
+            "i": 1,
+            "j": 12,
+            "pass": true
+          },
+          {
+            "i": 1,
+            "j": 13,
+            "pass": true
+          },
+          {
+            "i": 23,
+            "j": 13,
+            "pass": true
+          }
+        ],
+        "legoesm": "ocean_model_latlon_cgrid.py:7308-7336 passes the same K_v_cell object to the T/S pair solve with DDM off",
+        "n_diverged_columns": 0,
+        "n_verified_columns": 9920,
+        "nemo": "zdfphy.F90:326-331 executes avs=avt with DDM off",
+        "production_pair_calls": 1,
+        "resolved_nemo_flags": {
+          "ln_zdfddm": false,
+          "ln_zdfiwm": false,
+          "ln_zdfswm": false
+        },
+        "separated_salinity_K_control": {
+          "K_unequal_elements": 1,
+          "fired": true,
+          "perturbation": "+1 ULP",
+          "perturbed_index": [
+            1,
+            1,
+            0
+          ],
+          "production_pair_calls": 0,
+          "production_scalar_calls": 4
+        },
+        "shared_K_object_asserted": true
+      },
+      "waived_inactive_enhancements": [
+        "DDM coefficient delta",
+        "surface-wave enhancement",
+        "internal-wave enhancement"
+      ]
+    },
+    "28": {
+      "disposition": "UNMEASURED-NEEDS-DUMP",
+      "operation": "composed-avt turbocline scan",
+      "reason": "no same-step imld/hmld (mldkz5) slot exists"
+    },
+    "29": {
+      "controls": {
+        "baseline_pass": true,
+        "nonfinite_fired": true,
+        "one_i_roll_fired": true,
+        "perturbation_fired": true,
+        "perturbed_ji_k": [
+          1,
+          1,
+          0
+        ]
+      },
+      "disposition": "UNMEASURED-BLOCKED-BY-ROW28",
+      "operation": "avm lateral boundary update, interior census",
+      "reason": "the registered census excludes halos, so NEMO's lateral boundary update is an interior no-op; the production-composed avm interior already matches and ordered promotion waits for row 28",
+      "targeting_preview_avm_interior": {
+        "aggregate_bar_pass": true,
+        "bar": 1e-15,
+        "column_bar_pass": true,
+        "correlation": 0.9999999999999998,
+        "focus": [
+          {
+            "column_error": 0.0,
+            "i": 1,
+            "j": 11,
+            "pass": true,
+            "wet": true
+          },
+          {
+            "column_error": 0.0,
+            "i": 1,
+            "j": 12,
+            "pass": true,
+            "wet": true
+          },
+          {
+            "column_error": 0.0,
+            "i": 1,
+            "j": 13,
+            "pass": true,
+            "wet": true
+          },
+          {
+            "column_error": 0.0,
+            "i": 23,
+            "j": 13,
+            "pass": true,
+            "wet": true
+          }
+        ],
+        "max_column_error": 0.0,
+        "n_diverged_columns": 0,
+        "n_nonfinite_wet_elements": 0,
+        "n_verified_columns": 9920,
+        "n_wet_columns": 9920,
+        "n_wet_elements": 332214,
+        "pass": true,
+        "reference_rms": 34.39130758075968,
+        "rms_ratio": 1.0,
+        "worst_column_ji": [
+          1,
+          1
+        ]
+      }
+    },
+    "30": {
+      "disposition": "UNMEASURED-BLOCKED-BY-ROW28",
+      "fields": {
+        "uslp": {
+          "aggregate_bar_pass": false,
+          "bar": 1e-15,
+          "column_bar_pass": false,
+          "correlation": 0.8642251706591872,
+          "focus": [
+            {
+              "column_error": 3.232928410315342,
+              "i": 1,
+              "j": 11,
+              "pass": false,
+              "wet": true
+            },
+            {
+              "column_error": 2.9518647982651274,
+              "i": 1,
+              "j": 12,
+              "pass": false,
+              "wet": true
+            },
+            {
+              "column_error": 2.3537191188821405,
+              "i": 1,
+              "j": 13,
+              "pass": false,
+              "wet": true
+            },
+            {
+              "column_error": 7.136350201415463,
+              "i": 23,
+              "j": 13,
+              "pass": false,
+              "wet": true
+            }
+          ],
+          "max_column_error": 7.162375865580755,
+          "n_diverged_columns": 9306,
+          "n_nonfinite_wet_elements": 0,
+          "n_verified_columns": 452,
+          "n_wet_columns": 9758,
+          "n_wet_elements": 336338,
+          "pass": false,
+          "reference_rms": 0.0006980116051114225,
+          "rms_ratio": 1.1643185157362532,
+          "worst_column_ji": [
+            90,
+            38
+          ]
+        },
+        "vslp": {
+          "aggregate_bar_pass": false,
+          "bar": 1e-15,
+          "column_bar_pass": false,
+          "correlation": 0.8438524162560449,
+          "focus": [
+            {
+              "column_error": 1.1056606408453928,
+              "i": 1,
+              "j": 11,
+              "pass": false,
+              "wet": true
+            },
+            {
+              "column_error": 1.0859195442727163,
+              "i": 1,
+              "j": 12,
+              "pass": false,
+              "wet": true
+            },
+            {
+              "column_error": 0.7392033777973821,
+              "i": 1,
+              "j": 13,
+              "pass": false,
+              "wet": true
+            },
+            {
+              "column_error": 1.1655573060380948,
+              "i": 23,
+              "j": 13,
+              "pass": false,
+              "wet": true
+            }
+          ],
+          "max_column_error": 4.659745715735317,
+          "n_diverged_columns": 9412,
+          "n_nonfinite_wet_elements": 0,
+          "n_verified_columns": 456,
+          "n_wet_columns": 9868,
+          "n_wet_elements": 340271,
+          "pass": false,
+          "reference_rms": 0.0010729290935060534,
+          "rms_ratio": 1.1912310207353995,
+          "worst_column_ji": [
+            90,
+            37
+          ]
+        },
+        "wslpi": {
+          "aggregate_bar_pass": true,
+          "bar": 1e-15,
+          "column_bar_pass": false,
+          "correlation": 1.0,
+          "focus": [
+            {
+              "column_error": 0.0,
+              "i": 1,
+              "j": 11,
+              "pass": true,
+              "wet": true
+            },
+            {
+              "column_error": 3.68485868864227e-17,
+              "i": 1,
+              "j": 12,
+              "pass": true,
+              "wet": true
+            },
+            {
+              "column_error": 1.473943475456908e-16,
+              "i": 1,
+              "j": 13,
+              "pass": true,
+              "wet": true
+            },
+            {
+              "column_error": 1.842429344321135e-17,
+              "i": 23,
+              "j": 13,
+              "pass": true,
+              "wet": true
+            }
+          ],
+          "max_column_error": 1.1791547803655264e-15,
+          "n_diverged_columns": 1,
+          "n_nonfinite_wet_elements": 0,
+          "n_verified_columns": 9919,
+          "n_wet_columns": 9920,
+          "n_wet_elements": 342134,
+          "pass": false,
+          "reference_rms": 0.0007355792067598877,
+          "rms_ratio": 1.0,
+          "worst_column_ji": [
+            23,
+            12
+          ]
+        },
+        "wslpj": {
+          "aggregate_bar_pass": true,
+          "bar": 1e-15,
+          "column_bar_pass": true,
+          "correlation": 1.0,
+          "focus": [
+            {
+              "column_error": 0.0,
+              "i": 1,
+              "j": 11,
+              "pass": true,
+              "wet": true
+            },
+            {
+              "column_error": 2.4164072371112776e-17,
+              "i": 1,
+              "j": 12,
+              "pass": true,
+              "wet": true
+            },
+            {
+              "column_error": 4.832814474222555e-17,
+              "i": 1,
+              "j": 13,
+              "pass": true,
+              "wet": true
+            },
+            {
+              "column_error": 9.66562894844511e-17,
+              "i": 23,
+              "j": 13,
+              "pass": true,
+              "wet": true
+            }
+          ],
+          "max_column_error": 7.732503158756088e-16,
+          "n_diverged_columns": 0,
+          "n_nonfinite_wet_elements": 0,
+          "n_verified_columns": 9920,
+          "n_wet_columns": 9920,
+          "n_wet_elements": 342134,
+          "pass": true,
+          "reference_rms": 0.0011217088699229632,
+          "rms_ratio": 1.0,
+          "worst_column_ji": [
+            23,
+            1
+          ]
+        }
+      },
+      "first_failing_operand": {
+        "design": "separate the EOS-produced prd arithmetic from downstream zgrv with the existing prd slot; literal SEOS association is the next targeted production option only after rows 21--29 close",
+        "metric": {
+          "aggregate_bar_pass": true,
+          "bar": 1e-15,
+          "column_bar_pass": true,
+          "correlation": 1.0,
+          "focus": [
+            {
+              "column_error": 0.0,
+              "i": 1,
+              "j": 11,
+              "pass": true,
+              "wet": true
+            },
+            {
+              "column_error": 0.0,
+              "i": 1,
+              "j": 12,
+              "pass": true,
+              "wet": true
+            },
+            {
+              "column_error": 0.0,
+              "i": 1,
+              "j": 13,
+              "pass": true,
+              "wet": true
+            },
+            {
+              "column_error": 0.0,
+              "i": 23,
+              "j": 13,
+              "pass": true,
+              "wet": true
+            }
+          ],
+          "max_column_error": 0.0,
+          "n_diverged_columns": 0,
+          "n_nonfinite_wet_elements": 0,
+          "n_verified_columns": 9920,
+          "n_wet_columns": 9920,
+          "n_wet_elements": 332214,
+          "pass": true,
+          "reference_rms": 0.00090255402271627,
+          "rms_ratio": 1.0,
+          "worst_column_ji": [
+            1,
+            1
+          ]
+        },
+        "name": "prd argument entering ldf_slp",
+        "nemo_line": "cfgs/DINO/MY_SRC/ldfslp.F90:202-213 (prd input; first consumed operand)"
+      },
+      "operation": "ldf_slp",
+      "targeting_preview_disposition": "DIVERGED"
+    },
+    "31": {
+      "deferred_large_design": "reconstruct Naa_A=(Kbb+rDt*stage6_Krhs)*mask, subtract the stage7 barotropic Naa field, add the dumped level-1 stress deposit, substitute dump_avm into the production momentum matrix/drag call, and compare its u/v result per column with stage8; planted wrong-rDt and one-cell-roll controls must fail",
+      "disposition": "UNMEASURED-BLOCKED-BY-ROW28",
+      "operation": "momentum implicit solve application",
+      "reason": "no new NEMO dump is required: restart Kbb + stage-6 Krhs + stage-7 post-dyn_spg barotropic state + stage-8 output bracket dyn_zdf. The registered volume-form substitution is ready, but ordered promotion cannot cross row 28"
+    },
+    "32": {
+      "deferred_large_design": "reconstruct Naa=(e3t_Kbb*T_Kbb+rDt*e3t_Kmm*stage23_Krhs)/e3t_Kaa for T/S, assemble exact K33 from dump_avt plus the existing NEMO slope/coefficient dumps, substitute both into the production pair solve, and compare per column with stage21; planted wrong-e3t-slot and one-cell-roll controls must fail",
+      "disposition": "UNMEASURED-BLOCKED-BY-ROW28",
+      "operation": "tracer implicit solve application",
+      "reason": "no new NEMO dump is required: restart Kbb + stage-23 post-tra_ldf Krhs and stage-21 post-tra_zdf bracket the application. The registered z-star volume-form substitution is ready, but ordered promotion cannot cross row 28"
+    }
+  },
+  "run_dir": "/tmp/RUN_ZDF21_COEFF_ON.cVaC2Q",
+  "schema": "dino-zdf-chain-tail-existing-v1",
+  "status": "ROWS-19-23,25-27-VERIFIED; ROW-24-WAIVED; ordered frontier is row 28 turbocline diagnostic",
+  "wet_columns": 9920
+}

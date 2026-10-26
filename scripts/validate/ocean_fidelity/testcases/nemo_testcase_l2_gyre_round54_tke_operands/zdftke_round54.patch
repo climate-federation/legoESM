@@ -1,0 +1,43 @@
+--- zdftke.F90.r46
++++ zdftke.F90
+@@ -45,6 +45,8 @@
+    USE sbc_oce        ! surface boundary condition: ocean
+    USE zdfdrg         ! vertical physics: top/bottom drag coef.
+    USE zdfmxl         ! vertical physics: mixed layer
++   USE l2_r54_tke, ONLY : r54_tke_begin, r54_tke_matrix_row, &
++      & r54_tke_avn_row, r54_tke_finish
+ #if defined key_si3
+    USE ice, ONLY: hm_i, h_i
+ #endif
+@@ -179,10 +181,15 @@
+       IF( nn_pdl == 1 ) ALLOCATE( z_pdlr(T2D(0),jpk) )        ! avt multiplied by the inverse Prandtl number
+ #endif
+       !
++      CALL r54_tke_begin( kt, Kbb, Kmm, p_sh2, p_avm, p_avt, dissl, &
++         & rn_ediff, rn_ediss, rn_ebb, rn_emin, rn_emin0, rmxl_min, rn_mxl0, &
++         & rn_bshear, rn_lc, nn_pdl, nn_mxl, ln_mxl0, nn_etau, nn_htau, &
++         & nn_eice, ln_lc )
+       CALL tke_tke( Kbb, Kmm, p_sh2, p_avm, p_avt, z_pdlr )   ! now tke (en)
+       !
+       CALL tke_avn( Kbb, Kmm,        p_avm, p_avt, z_pdlr )   ! now avt, avm, dissl
+       !
++      CALL r54_tke_finish( p_avm, p_avt, dissl )
+ #if ! defined key_PSYCLONE_2p5p0
+       IF( nn_pdl == 1 ) DEALLOCATE( z_pdlr )
+ #endif
+@@ -447,6 +454,7 @@
+ 
+             END SELECT
+          ENDIF
++         CALL r54_tke_matrix_row( jj, zdiag, zd_up, zd_lw, en, p_pdlr )
+          !
+          !                          !* Matrix inversion from level 2 (tke prescribed at level 1)
+          DO_2Dik( 0, 0, 2, jpkm1, 1 )                 ! First recurrence : Dk = Dk - Lk * Uk-1 / Dk-1
+@@ -723,6 +731,7 @@
+                p_avt(ji,jj,jk)   = MAX( p_pdlr(ji,jj,jk) * p_avt(ji,jj,jk), avtb_2d(ji,jj) * avtb(jk) ) * wmask(ji,jj,jk)
+             END_2D
+          ENDIF
++         CALL r54_tke_avn_row( jj, zmxlm, zmxld )
+          !                                            ! ================= !
+       END_1D                                          !  i-k slices loop  !
+       !                                               ! ================= !

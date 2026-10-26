@@ -66,7 +66,7 @@ Every row reached Codex `APPROVE`. Oracle clones (IFS `ifs-source/`, gSAM
 | Kessler warm-rain (`microphysics/kessler.py`) | Kessler (1969) | Audit | #1031 |
 | Morrison ice deposition PRD (`microphysics/morrison.py`) | Morrison et al. (2005) M2005 | Audit | #1050 |
 | Seifert-Beheng warm-rain (`microphysics/seifert_beheng.py`) | Seifert & Beheng (2001) | Behavioral — faithful φ_au/φ_ac added | #1051 |
-| P3 Cooper nucleation (`microphysics/p3.py`) | Morrison-Milbrandt P3 / gSAM P3 | Audit — Cooper pinned, table ice rates documented as surrogate | #1052 |
+| P3 Cooper nucleation (`microphysics/p3.py`) | Morrison-Milbrandt P3 / gSAM P3 | Audit — Cooper pinned, table ice rates documented as surrogate. Superseded 2026-10-21: `p3.py` is now the WRF v4.8.0 P3 port, oracle-matched at zero dynamics forcing (coupled-run deviation: no carried `th_old`/`qv_old`, see its docstring) | #1052, #2077 |
 | Thompson snow fall speed (`microphysics/_thompson_snow.py`) | gSAM/WRF `module_mp_thompson.f90` + Field (2005) | Behavioral — f32 NaN-grad fix + `vts` pin | #1054 |
 | ARG2000 aerosol activation (`microphysics/arg_activation.py`) | Abdul-Razzak & Ghan (2000) / gSAM M2005 | Audit | #1055 |
 

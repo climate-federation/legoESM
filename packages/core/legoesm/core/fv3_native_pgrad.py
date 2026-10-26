@@ -622,7 +622,7 @@ def pk3_halo(pk3, delp, bd, *, npz, ptop, akap) -> None:
 
 
 def pln_halo(pk3, delp, bd, *, npz, ptop) -> None:
-    """``dyn_core.F90:1886-1931`` (``pln_halo``) — the ``use_logp``
+    """``dyn_core.F90:1886-1933`` (``pln_halo``) — the ``use_logp``
     sibling of :func:`pk3_halo` (log(p) rings instead of p**kappa).
     Dead on the pinned deck (USE_LOGP=F) but ten lines away."""
     is_, ie, js, je = bd.is_, bd.ie, bd.js, bd.je
@@ -643,7 +643,7 @@ def pln_halo(pk3, delp, bd, *, npz, ptop) -> None:
 
 
 def pe_halo(pe, delp, bd, *, npz, ptop) -> None:
-    """``dyn_core.F90:1933-1963`` (``pe_halo``), verbatim port.
+    """``dyn_core.F90:1935-1963`` (``pe_halo``), verbatim port.
 
     Fills the ONE-ring edges of ``pe`` — i in {is-1, ie+1} for
     j = js..je, then j in {js-1, je+1} for i = is-1..ie+1 — by local

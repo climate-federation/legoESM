@@ -1,0 +1,77 @@
+{
+  "format": "nemo-testcase-l2-gyre-round45-v1",
+  "date": "2026-09-11",
+  "starting_tip": "718399bf8943",
+  "preregistration": "docs/ocean/fidelity/PREREG_nemo_testcases_l2_gyre_phase3_round45.md",
+  "result": "REFUTED_NO_REGISTERED_PARTNER_NO_LANDING",
+  "source_boundary": {
+    "nemo_stage_velocity_w": "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/GYRE_OMIP_L2_P3_SM_R41ADVSP/BLD/ppsrc/nemo/stprk3_stg.f90:327-333",
+    "nemo_stage_dynadv": "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/GYRE_OMIP_L2_P3_SM_R41ADVSP/BLD/ppsrc/nemo/stprk3_stg.f90:466-472",
+    "nemo_dispatch": "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/GYRE_OMIP_L2_P3_SM_R41ADVSP/BLD/ppsrc/nemo/dynadv.f90:152-176",
+    "nemo_zad": "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/GYRE_OMIP_L2_P3_SM_R41ADVSP/BLD/ppsrc/nemo/dynzad.f90:105-137",
+    "nemo_gyre_arm": "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/GYRE_OMIP_L2_P3_SM_R41ADVSP/EXP00/ocean.output:535 and :780-785",
+    "legoesm_internal_zad": "packages/ocean/legoesm/ocean/dynamics/ocean_pe_latlon_cgrid.py:4749-4770",
+    "legoesm_fold_gate": "packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:5927-5937",
+    "legoesm_implicit_carrier": "packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:6877-6894",
+    "legoesm_poststep_remnant": "packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:6905-6927"
+  },
+  "stage_localization": {
+    "first_candidate_vs_shipped_departure": "GYRE-zco.kt1.stage3.u",
+    "stage1_u_v_candidate_vs_shipped_max": [0.0, 0.0],
+    "stage2_u_v_candidate_vs_shipped_max": [0.0, 0.0],
+    "stage3_u_candidate_vs_shipped_max": 2.747840583544603e-12,
+    "candidate_stage3_u_v_oracle_absolute_max": [7.632783294297951e-17, 9.71445146547012e-17],
+    "shipped_stage3_u_v_oracle_absolute_max": [2.7478404751243857e-12, 3.305560306813421e-12]
+  },
+  "ablation_table": [
+    {"arm": "candidate", "kt2_u": 7.632783294297951e-17, "kt2_v": 9.71445146547012e-17, "rule12_worsening_rows": 55, "verdict": "FAIL"},
+    {"arm": "restore_internal_reconstruction", "kt2_u": 2.7478404751243857e-12, "kt2_v": 3.305560306813421e-12, "rule12_worsening_rows": 0, "verdict": "REFUTED_PARTNER_KT2_NOT_AT_BAR"},
+    {"arm": "remove_stage_folded_term", "kt2_u": 7.632783294297951e-17, "kt2_v": 9.71445146547012e-17, "rule12_worsening_rows": 55, "verdict": "REFUTED_INERT"},
+    {"arm": "remove_implicit_matrix_carrier", "kt2_u": 7.632783294297951e-17, "kt2_v": 9.71445146547012e-17, "rule12_worsening_rows": 55, "verdict": "REFUTED_INERT"},
+    {"arm": "remove_poststep_remnant", "kt2_u": 7.632783294297951e-17, "kt2_v": 9.71445146547012e-17, "rule12_worsening_rows": 55, "verdict": "REFUTED_INERT"}
+  ],
+  "rule12": {
+    "GYRE-zco": "FAIL; 55 rows; maximum 160015661435.125 row-scale ulps at kt8.before.v",
+    "LOCK_EXCHANGE-zco": "STOPPED_NOT_PROMOTED after the registered falsifier; source card is flux-form nemo_up3 with adaptive implicit true",
+    "OVERFLOW-zps": "STOPPED_NOT_PROMOTED after the registered falsifier; source card is flux-form nemo_up3 with adaptive implicit true",
+    "DINO": "RISK_REPORTED_ONLY; its independent leap-frog branch does not execute the rejected WS-RK3 placement",
+    "ORCA2": "UNMEASURED_WITH_SPEC: tripolar native stage WZV/ZAD, adaptive split matrix operands, external-mode frames, and kt1..10 entry records are required"
+  },
+  "given_inputs": {
+    "GYRE_zad": "DISCHARGED: round44/restamp_dynadv_given_inputs.json records 0 unequal U and 0 unequal V",
+    "tanks": "NOT_REEVALUATED because no placement passed GYRE Rule 12"
+  },
+  "new_first_over_bar": {
+    "candidate": "kt=3 T/S/u/v/ssh",
+    "landed": "unchanged shipped kt=2 u/v because the candidate is rejected"
+  },
+  "next_owner": "UNMEASURED_WITH_SPEC at the kt=2 stage program producing kt=3; acquisition contract is round45/run.sh",
+  "evidence": {
+    "classifier": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round45/round45_ablation_report.json",
+    "classifier_commit": "f679cfa8ec32a8b93455afd74ab1b5fbfa508a41",
+    "trajectory_commit": "2167274466daf576e7a243219ca22a322de3230d",
+    "stage_commit": "d2a761b95e33cbd67cb951b58711ab00b268804d",
+    "plant": "round45_ablation_plant.log exits 2",
+    "focused_tests": "24 passed",
+    "stamp_ratchets": "18 passed"
+  },
+  "changes": {
+    "production": "NONE; rejected candidate exists only in the clean scratch measurement commits",
+    "main_checkout": [
+      "docs/ocean/fidelity/PREREG_nemo_testcases_l2_gyre_phase3_round45.md",
+      "scripts/validate/ocean_fidelity/testcases/nemo_testcase_l2_gyre_round45_ablation_gate.py",
+      "tests/ocean/fidelity/test_nemo_testcase_l2_gyre_round45_ablation_gate.py",
+      "scripts/validate/ocean_fidelity/testcases/manifests/nemo_testcase_l2_gyre_round45.json",
+      "scripts/validate/ocean_fidelity/testcases/manifests/nemo_testcase_l2_gyre_round45_postcode_self_review.md"
+    ]
+  },
+  "asked": [
+    "Whether NEMO's literal slope association applies to every card using the slope routine or only NEMO-identity cards; retained identity-only, no decision taken"
+  ],
+  "unasked": [],
+  "open": [
+    "Acquire the registered kt=2 stage/source-order record and identify the first non-bit statement at the new candidate first-over-bar",
+    "Re-run GYRE and only then promote an accepted placement to tank Rule 12",
+    "DINO replay by its operator and native ORCA2 record"
+  ]
+}

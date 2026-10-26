@@ -21,7 +21,8 @@ from legoesm.thermo import (
     saturation_mixing_ratio,
     saturation_mixing_ratio_ice,
 )
-from legoesm.core.bulk_flux import simple_bulk_fluxes, compute_most_fluxes
+from legoesm.core.bulk_flux import (
+    simple_bulk_fluxes, compute_most_fluxes, surface_reference_state)
 from legoesm.core.coupling_fields import AtmToSurface, TileResponse
 from legoesm.core.surface_energy import surface_radiation_fluxes
 from legoesm.coupler.lake.config import LakeConfig
@@ -58,7 +59,8 @@ def step_lake(
     # ``L · evap_rate``, so phase-correct L is the only switch needed.
     # Earlier the lake always used L_v, biasing lhflx by ~13% over
     # frozen lakes (coupler-conservation audit F17).
-    L_eff = jnp.where(is_frozen, constants.L_s, constants.L_v)
+    from legoesm.thermo import surface_latent_heat
+    L_eff = surface_latent_heat(T_epi, is_frozen)
 
     # Frozen lakes are bright: absorb THIS step's shortwave through the
     # ice/snow albedo, keyed on the same start-of-step frozen state as the
@@ -76,11 +78,14 @@ def step_lake(
             f"Unknown bulk_scheme {config.bulk_scheme!r}; expected one of {_valid_bulk}."
         )
     if config.bulk_scheme in ("most", "coare3", "large_yeager"):
+        # Model-level forcing: surface-referenced T at its own height (#1818).
+        T_air, z_air = surface_reference_state(
+            forcing.T_lowest, config.z_ref, forcing.z_lowest)
         tau_x, tau_y, shflx, lhflx, _ = compute_most_fluxes(
             forcing.u_lowest, forcing.v_lowest,
-            forcing.T_lowest, forcing.q_lowest,
+            T_air, forcing.q_lowest,
             T_epi, q_sfc, rho,
-            z_ref=config.z_ref,
+            z_ref=z_air,
             z0_init=config.z0_lake,
             scheme=config.bulk_scheme,
             n_iter=config.bulk_n_iter,

@@ -39,25 +39,16 @@ Usage: run_duo_stepper_w2.py --n 24 --dt 450 --days 5 --out w2_c24.npz
 from __future__ import annotations
 
 import argparse
-import os
-import subprocess
 import sys
 
 import numpy as np
 
 
 def _git_sha() -> str:
-    """Repo SHA, recorded in the npz so a stored score carries its
-    provenance (an artifact without its commit is not comparable to
-    anything)."""
-    try:
-        return subprocess.run(
-            ["git", "-C", os.path.dirname(os.path.abspath(__file__)),
-             "rev-parse", "HEAD"],
-            capture_output=True, text=True, timeout=10,
-        ).stdout.strip() or "unknown"
-    except Exception:
-        return "unknown"
+    """Repo SHA recorded in the npz (artifact without commit is not
+    comparable to anything)."""
+    from legoesm.io.git_provenance import git_provenance
+    return git_provenance(__file__).commit or "unknown"
 
 
 def geographic_va(ctx, states):
@@ -141,6 +132,17 @@ def main():
                          "pre-2026-08-06 runs of this script, which "
                          "inherited the stepper default and so applied a "
                          "filter the oracle does not have.")
+    ap.add_argument("--backend", default="numpy", choices=("numpy", "jax"),
+                    help="which lane runs the HOT loop. 'numpy' = the "
+                         "certified fp64 stepper (default, unchanged); "
+                         "'jax' = the jit-compiled twin "
+                         "(legoesm.core.fv3_duo_stepper), which needs "
+                         "the faithful ext bundle (--ext-bundle) and "
+                         "x64. EVERYTHING ELSE STAYS NUMPY: the context "
+                         "builder, the IC, the c2l_ord2 lens, the "
+                         "nearest-cell map and this npz. The backend is "
+                         "recorded in the npz -- a run whose backend is "
+                         "not recorded is not comparable to anything.")
     ap.add_argument("--k2e-nord", type=int, default=2, choices=(2, 4),
                     help="along-ring k2e order: 2 = authoritative live "
                          "default (2026-07-27 root cause), 4 = "
@@ -174,6 +176,16 @@ def main():
                          "could no longer run; flag kept as a no-op for "
                          "CLI compatibility")
     args = ap.parse_args()
+    if args.backend == "jax" and not args.ext_bundle:
+        # the JAX stepper implements the faithful ext_scalar/ext_vector
+        # lane only.  Not a new restriction: without --ext-bundle the
+        # NumPy arm already refuses at nord>0 (exchange_post_pgrad_sixface
+        # FAILS CLOSED, dyn_core.F90:652), so this only turns a message
+        # about a context flag into one about the CLI flag that sets it.
+        ap.error("--backend jax requires --ext-bundle (the JAX lane "
+                 "implements the faithful ext_scalar/ext_vector duo "
+                 "exchanges only; the interim index-copy path is the "
+                 "NumPy lane's own non-faithful measurement opt-in)")
 
     from legoesm.core.fv3_native_duo_stepper import (
         build_six_face_duo_context,
@@ -198,18 +210,59 @@ def main():
         allv = np.concatenate([v.ravel() for v in v6])
         return allv[nmap]
 
+    # THE SWAP POINT.  Only `full_acoustic_step_sixface` changes lanes;
+    # `advance` hides the container difference (the JAX lane carries
+    # face-STACKED arrays and keeps them on device across the whole run,
+    # converting back only when a frame is sampled), and `snapshot`
+    # hands the samplers the NumPy list-of-dicts they already take.
+    if args.backend == "jax":
+        import jax
+
+        # x64 is a STARTUP precondition, not a per-kernel check: with it
+        # off, jnp.asarray(f64) truncates at ARRAY CREATION and no
+        # downstream check can recover the bits.  states_to_jax's f64
+        # gate is what fires if this is somehow bypassed.
+        jax.config.update("jax_enable_x64", True)
+        from legoesm.core.fv3_duo_stepper import (
+            build_jax_duo_stepper_context,
+            make_full_acoustic_step_sixface_jit,
+            states_to_jax,
+            states_to_numpy,
+        )
+
+        jctx = build_jax_duo_stepper_context(ctx)      # ONCE, not per step
+        jstep = make_full_acoustic_step_sixface_jit()
+        hot = states_to_jax(states)
+
+        def advance(nsteps):
+            nonlocal hot
+            for _ in range(nsteps):
+                hot = jstep(jctx, hot, args.dt, d_ext=args.d_ext)
+
+        def snapshot():
+            return states_to_numpy(hot)
+    else:
+        hot = states
+
+        def advance(nsteps):
+            nonlocal hot
+            for _ in range(nsteps):
+                hot = full_acoustic_step_sixface(ctx, hot, args.dt,
+                                                 d_ext=args.d_ext)
+
+        def snapshot():
+            return hot
+
     steps_per_day = int(round(86400.0 / args.dt))
     times = []
     frames = []
     times.append(1e-6)
-    frames.append(sample_v(states))
+    frames.append(sample_v(snapshot()))
     total_days = int(round(args.days))
     for day in range(1, total_days + 1):
-        for _ in range(steps_per_day):
-            states = full_acoustic_step_sixface(ctx, states, args.dt,
-                                                d_ext=args.d_ext)
+        advance(steps_per_day)
         times.append(float(day))
-        frames.append(sample_v(states))
+        frames.append(sample_v(snapshot()))
         vmax = float(np.nanmax(np.abs(frames[-1])))
         print(f"day {day}: v_ll absmax {vmax:.4f}", flush=True)
         if not np.isfinite(vmax):
@@ -235,8 +288,10 @@ def main():
         d_ext=np.array(float(args.d_ext)),
         dt=np.array(float(args.dt)),
         n=np.array(int(args.n)),
+        backend=np.array(args.backend),
         git_sha=np.array(_git_sha()),
-        protocol=f"duo stepper ({mode}); certified c2l_ord2 D->geographic "
+        protocol=f"duo stepper ({mode}, backend={args.backend}); "
+        "certified c2l_ord2 D->geographic "
         "(upstream operator family; runs' own output used c2l_ord=4, "
         "ord2 residual O(dx^2)); NEAREST-cell 1deg sampling (pattern-"
         "level protocol, envelope-comparable to the fregrid reference); "

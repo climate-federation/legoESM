@@ -1,0 +1,1172 @@
+{
+  "base_round2_artifact_sha256": "39d2962a1efed743377e417191a83324e00bd4dfdd5a31f94f7980e1eabec9d8",
+  "bits_order": [
+    "0000",
+    "0001",
+    "0010",
+    "0011",
+    "0100",
+    "0101",
+    "0110",
+    "0111",
+    "1000",
+    "1001",
+    "1010",
+    "1011",
+    "1100",
+    "1101",
+    "1110",
+    "1111"
+  ],
+  "controls": {
+    "matrix": {
+      "bounded_label_reached": true,
+      "canceller_label_reached": true,
+      "field_interaction_plant_rejected": true,
+      "group_confirm_reached": true,
+      "group_refute_reached": true,
+      "locked_corner_plant_rejected": true,
+      "positive_label_reached": true,
+      "remainder_0p11_rejected": true,
+      "unadmitted_label_distinct": true
+    },
+    "round2": {
+      "attribution_classifier": {
+        "confirming_score": {
+          "correlation_with_total_residual": 1.0,
+          "residual_removal": 1.0,
+          "rms_gain": 1.0,
+          "verdict": "CONFIRMS_CARRY"
+        },
+        "identity_confirms": true,
+        "orthogonal_refutes": true,
+        "refuting_score": {
+          "correlation_with_total_residual": -5.551115123125784e-17,
+          "residual_removal": -0.4142135623730949,
+          "rms_gain": 0.9999999999999999,
+          "verdict": "REFUTES_CARRY"
+        }
+      },
+      "base_reconstruction": {
+        "bar": 1e-12,
+        "planted_u_fires": true,
+        "planted_u_normalized_error": 1.0000000000050667e-06,
+        "u_pass": true,
+        "v_pass": true
+      },
+      "campaign_classifier_and_alignment": {
+        "actual_binding_campaign_gate": "DEBT",
+        "actual_binding_error": 0.0002740311743349557,
+        "actual_binding_perturbation_changes_score": true,
+        "alignment_best": {
+          "di": 0,
+          "dj": 0,
+          "normalized_rms_error": 0.0002740311743349557
+        },
+        "alignment_scan": [
+          {
+            "di": -1,
+            "dj": -1,
+            "normalized_rms_error": 0.8516081801088069
+          },
+          {
+            "di": 0,
+            "dj": -1,
+            "normalized_rms_error": 0.1519087309177422
+          },
+          {
+            "di": 1,
+            "dj": -1,
+            "normalized_rms_error": 0.6195845689627931
+          },
+          {
+            "di": -1,
+            "dj": 0,
+            "normalized_rms_error": 0.8443944756561844
+          },
+          {
+            "di": 0,
+            "dj": 0,
+            "normalized_rms_error": 0.0002740311743349557
+          },
+          {
+            "di": 1,
+            "dj": 0,
+            "normalized_rms_error": 0.6070870738151861
+          },
+          {
+            "di": -1,
+            "dj": 1,
+            "normalized_rms_error": 0.8458064471463069
+          },
+          {
+            "di": 0,
+            "dj": 1,
+            "normalized_rms_error": 0.12872651182641404
+          },
+          {
+            "di": 1,
+            "dj": 1,
+            "normalized_rms_error": 0.6071317831961214
+          }
+        ],
+        "identical_array_zero": true,
+        "identical_campaign_gate": "AT BAR",
+        "identical_error": 0.0,
+        "planted_actual_binding_campaign_gate": "DEBT",
+        "planted_actual_binding_error": 0.0002740603312831709,
+        "planted_identity_campaign_gate": "DEBT",
+        "planted_identity_error": 1.0000000000008017e-06,
+        "planted_identity_flips_campaign_gate": true,
+        "zero_shift_is_best": true
+      },
+      "donor_equalization": {
+        "changes_verdict_path": true,
+        "east_donor": [
+          49,
+          50
+        ],
+        "equalized_score": {
+          "corrected_residual_reduction": 0.02079651047885067,
+          "prediction_correlation": 0.2026900415810054,
+          "prediction_normalized_error": 0.9792034895211493,
+          "verdict": "UNRESOLVED_BRIDGE_WIND_SOURCE"
+        },
+        "faithful_score": {
+          "corrected_residual_reduction": 0.9928695526681799,
+          "prediction_correlation": 0.999974655141223,
+          "prediction_normalized_error": 0.007130447331820113,
+          "verdict": "CONFIRMS_BRIDGE_WIND_SOURCE"
+        },
+        "receiver": [
+          49,
+          49
+        ]
+      },
+      "entry_identity": {
+        "all_nonstress_exact": true,
+        "fields": [
+          {
+            "exact": true,
+            "field": "u"
+          },
+          {
+            "exact": true,
+            "field": "v"
+          },
+          {
+            "exact": true,
+            "field": "T"
+          },
+          {
+            "exact": true,
+            "field": "S"
+          },
+          {
+            "exact": true,
+            "field": "eta"
+          },
+          {
+            "exact": true,
+            "field": "H_bathy"
+          },
+          {
+            "exact": true,
+            "field": "land_mask"
+          },
+          {
+            "exact": true,
+            "field": "u_mask"
+          },
+          {
+            "exact": true,
+            "field": "v_mask"
+          },
+          {
+            "exact": true,
+            "field": "w"
+          },
+          {
+            "exact": true,
+            "field": "T_som"
+          },
+          {
+            "exact": true,
+            "field": "S_som"
+          },
+          {
+            "exact": true,
+            "field": "T_flux_div_prev"
+          },
+          {
+            "exact": true,
+            "field": "S_flux_div_prev"
+          },
+          {
+            "exact": true,
+            "field": "eke"
+          },
+          {
+            "exact": true,
+            "field": "tke"
+          },
+          {
+            "exact": true,
+            "field": "tke_avm"
+          },
+          {
+            "exact": true,
+            "field": "tke_avt"
+          },
+          {
+            "exact": true,
+            "field": "tke_dissl"
+          },
+          {
+            "exact": true,
+            "field": "tke_avm_surface"
+          },
+          {
+            "exact": true,
+            "field": "dtke"
+          },
+          {
+            "exact": true,
+            "field": "eke_diss"
+          },
+          {
+            "exact": true,
+            "field": "T_incr_prev"
+          },
+          {
+            "exact": true,
+            "field": "S_incr_prev"
+          },
+          {
+            "exact": true,
+            "field": "u_incr_prev"
+          },
+          {
+            "exact": true,
+            "field": "v_incr_prev"
+          },
+          {
+            "exact": true,
+            "field": "u_before"
+          },
+          {
+            "exact": true,
+            "field": "v_before"
+          },
+          {
+            "exact": true,
+            "field": "T_before"
+          },
+          {
+            "exact": true,
+            "field": "S_before"
+          },
+          {
+            "exact": true,
+            "field": "eta_before"
+          },
+          {
+            "exact": true,
+            "field": "F_slow_u_prev"
+          },
+          {
+            "exact": true,
+            "field": "F_slow_v_prev"
+          },
+          {
+            "exact": true,
+            "field": "psi"
+          },
+          {
+            "exact": true,
+            "field": "dpsi"
+          },
+          {
+            "exact": true,
+            "field": "dpsi_prev"
+          },
+          {
+            "exact": true,
+            "field": "dpsin"
+          },
+          {
+            "exact": true,
+            "field": "dpsin_prev"
+          },
+          {
+            "exact": true,
+            "field": "bt_hist"
+          },
+          {
+            "exact": true,
+            "field": "freshwater_eta_prev"
+          },
+          {
+            "exact": true,
+            "field": "mass_flux_u"
+          },
+          {
+            "exact": true,
+            "field": "mass_flux_v"
+          },
+          {
+            "exact": true,
+            "field": "mass_flux_w"
+          },
+          {
+            "exact": true,
+            "field": "salt_flux_u_int"
+          },
+          {
+            "exact": true,
+            "field": "salt_flux_v_int"
+          }
+        ]
+      },
+      "term_error_closure": {
+        "bar": 1e-10,
+        "planted_u_fires": true,
+        "planted_u_normalized_closure": 9.999999947495682e-07,
+        "u_pass": true,
+        "v_pass": true
+      }
+    }
+  },
+  "dump_sha256": {
+    "drg_dump_zu_frc_inc.bin": "0dfaacca230287dd14338be073eceb7dc0d3c147317b946df16a96815624c053",
+    "drg_dump_zv_frc_inc.bin": "d01d083799bdd785477303a8304879771a445920fd682f7760f8ca4b9570ee4c",
+    "hpg_dump_du.bin": "0ccd1859c14bf65ca9a2f3b77f2a5fbf1d84db6567399645616d64d9de841950",
+    "hpg_dump_dv.bin": "60093e5906feda181c1613f8bd0f49cc24cba1970ea216ed673bf06bdcd7bc87",
+    "keg_dump_du.bin": "03d27e444d5c8f53650c7c6bb924084d9ca176f669f4384fc48c59cb208d792a",
+    "keg_dump_dv.bin": "b463386513308d4dd86c7934e5d11ed5a8eb7ae9634ed18da48009292fd9ca72",
+    "ldf_dump_du.bin": "7e5ad7c06e297e9e803df94107a62f2ba8afd7dd3f3d17b7466d7755c3dd2875",
+    "ldf_dump_dv.bin": "b49ea833a151284d167cc09cda34e8b3a9ff2f4d9ec4a6c40235b1467211232a",
+    "spg_dump_zu_frc.bin": "13138faa46149968c009f0d6c20956b8d2457a904667686a1f6cb1a93d7bcca6",
+    "spg_dump_zv_frc.bin": "81d01381ad5164b1a0cc3fb5f22590f471b0e24bb9b68084290e0cb9e2ef4c0e",
+    "stp_dump_06_dynhpg_kt00005761_du.bin": "a77ffe6bf45daa4b66f2b43dbd4fa89098b4e664681873f6420eeda8d38bd273",
+    "stp_dump_06_dynhpg_kt00005761_dv.bin": "b48d1e01babf415f3aeb6b93bab6528d001814a83cf7182be7d8ece42bc8ebfe",
+    "vor_dump_du.bin": "b2c778badfc9690758b70d84aaf47aa74f740f749f0b2f267091238b7edce601",
+    "vor_dump_dv.bin": "10f139210a9b9b369402ad1b3109c17bf71ebd867c18035252df56943ed008c0",
+    "wnd_dump_zu_frc_inc.bin": "d9692e3466b6fc9af72289266edf3b25ba26ec16c327fe505cd10bd6390d15b7",
+    "wnd_dump_zv_frc_inc.bin": "72ecf1fe2e778a7ece1b73d1713587f2d99d641cf47a3a196a8fb5f04acb7d4a",
+    "zad_dump_du.bin": "9899d5cdfcb3bb70f5910f773259a7e97c5b388ffcbe4cf4c05c0981929e26da",
+    "zad_dump_dv.bin": "b053c7d46c36dbd52d4e2da117e700ef5516ad1b519b525b62ee11aa49a7bf4e"
+  },
+  "git": {
+    "clean_after": true,
+    "clean_before": true,
+    "commit": "9e108f164e8a339d8a6657b191fc1b7cbdaf7e0b"
+  },
+  "kt": 5761,
+  "lane": "d180",
+  "matrix_axes": [
+    "lateral_friction",
+    "vorticity",
+    "cor_removal",
+    "pressure_gradient"
+  ],
+  "provenance_sha256": {
+    "preregistration": "5197fe953e4377a4a5c77ef1f518c425c8ea5035fa9bdb15d7e87620f4c05f5d",
+    "probe": "8282401e5e4422337341992b47393b20bb8f89311bc40d7704565e77ae86e0f8",
+    "round2_artifact": "8dcd1bedfa1e47d7cc27a5cef722063da76510c2a87d13c2168602d4c2e0cd0a",
+    "round2_probe": "dab1dae2107cd61e7b1f2b98f5dd2f87d7586a0d0907d5814b4a61ec3d11320c",
+    "round4_artifact": "4539d9a7ec4e2f20a41226a5707268ebcd268f97f03f0e2d59901906775fc154"
+  },
+  "round4_u_fully_disposed": true,
+  "row_1_1_fully_disposed": true,
+  "run_input_sha256": {
+    "DINO_00005760_restart.nc": "0cc00f9945606d1dea52592280e363b45476103de96f5cef471d70b1b881ff3e",
+    "mesh_mask.nc": "3285fc4af36854a38b4e6f7985ab0372b95424398750a23b628935da02f72622",
+    "namelist_cfg": "0e75f4cb32dad3ed3fc17b721651ec12e0366c2978df8c65a6e95ae80b48d68b",
+    "namelist_ref": "b04f2ce4d12aa247ae3b707483d25cf2d38d0b3cf8817d71d33e66918fd81cfd",
+    "nemo": "545b383996e644591492e0fc7c82663a2d47272e2c7172ad8bbc58e5cd7d5239",
+    "ocean.output": "66162e1d54cc0c8648b0c220fe902b6a75f7b19a0e8c2349f5d11928809c0557",
+    "output.namelist.dyn": "1ebcbcc9bd3f91dede8153a297c1f9df906a262460476760a78a45be14b1176e"
+  },
+  "runtime": {
+    "backend": "cpu",
+    "cpu_device": "cpu:0",
+    "e3t_mode": "both",
+    "jax": "0.10.0",
+    "jax_enable_x64": true,
+    "jaxlib": "0.10.0",
+    "numpy": "2.4.4",
+    "platform": "Linux-5.14.0-611.36.1.el9_7.x86_64-x86_64-with-glibc2.34",
+    "python": "3.13.0 | packaged by conda-forge | (main, Nov 27 2024, 19:18:50) [GCC 13.3.0]"
+  },
+  "schema": "dino-split-explicit-momentum-chain-round5-v1",
+  "session_id": "01a04e34-d1fb-73e0-b25a-177641f0a246",
+  "slot": "NOT_ALLOCATED_EXISTING_DUMPS_ONLY",
+  "v": {
+    "arms": {
+      "0000": {
+        "attribution": {
+          "correlation_with_total_residual": null,
+          "residual_removal": 0.0,
+          "rms_gain": 0.0,
+          "verdict": "BASELINE"
+        },
+        "campaign_metric": {
+          "campaign_gate": "DEBT",
+          "correlation": 0.9999999997944569,
+          "mean_abs_ratio": 0.9999986895970492,
+          "n": 9868,
+          "normalized_rms_error": 2.939336660178095e-05,
+          "per_element_max_error_over_nemo_rms": 0.0008011401797623365,
+          "rms_ratio": 0.9999785828768776
+        },
+        "normalized_residual_rms": 1.0,
+        "normalized_squared_residual_energy": 1.0,
+        "squared_energy_benefit": 0.0,
+        "substitutions": []
+      },
+      "0001": {
+        "attribution": {
+          "correlation_with_total_residual": 0.9293208299298419,
+          "residual_removal": 0.6323591523535501,
+          "rms_gain": 0.9105717018954679,
+          "verdict": "UNRESOLVED"
+        },
+        "campaign_metric": {
+          "campaign_gate": "DEBT",
+          "correlation": 0.9999999999409038,
+          "mean_abs_ratio": 0.9999998194279668,
+          "n": 9868,
+          "normalized_rms_error": 1.0806202212661601e-05,
+          "per_element_max_error_over_nemo_rms": 0.0007922745818664747,
+          "rms_ratio": 0.9999994170140291
+        },
+        "normalized_residual_rms": 0.3676408476464499,
+        "normalized_squared_residual_energy": 0.13515979285820018,
+        "squared_energy_benefit": 0.8648402071417998,
+        "substitutions": [
+          "pressure_gradient"
+        ]
+      },
+      "0010": {
+        "attribution": {
+          "correlation_with_total_residual": -0.2028852793282902,
+          "residual_removal": -0.0611213040794194,
+          "rms_gain": 0.19827879950509222,
+          "verdict": "UNRESOLVED"
+        },
+        "campaign_metric": {
+          "campaign_gate": "DEBT",
+          "correlation": 0.9999999997978877,
+          "mean_abs_ratio": 0.9999943380760477,
+          "n": 9868,
+          "normalized_rms_error": 3.118992749977166e-05,
+          "per_element_max_error_over_nemo_rms": 0.0008137357498991553,
+          "rms_ratio": 0.9999760681652223
+        },
+        "normalized_residual_rms": 1.0611213040794194,
+        "normalized_squared_residual_energy": 1.1259784219712075,
+        "squared_energy_benefit": -0.12597842197120745,
+        "substitutions": [
+          "cor_removal"
+        ]
+      },
+      "0011": {
+        "attribution": {
+          "correlation_with_total_residual": 0.9065969312903084,
+          "residual_removal": 0.5780875823175036,
+          "rms_gain": 0.8861868764494715,
+          "verdict": "UNRESOLVED"
+        },
+        "campaign_metric": {
+          "campaign_gate": "DEBT",
+          "correlation": 0.999999999927166,
+          "mean_abs_ratio": 0.999995467906965,
+          "n": 9868,
+          "normalized_rms_error": 1.2401426366785225e-05,
+          "per_element_max_error_over_nemo_rms": 0.0008048701520032935,
+          "rms_ratio": 0.9999969023188556
+        },
+        "normalized_residual_rms": 0.42191241768249643,
+        "normalized_squared_residual_energy": 0.17801008819468933,
+        "squared_energy_benefit": 0.8219899118053107,
+        "substitutions": [
+          "cor_removal",
+          "pressure_gradient"
+        ]
+      },
+      "0100": {
+        "attribution": {
+          "correlation_with_total_residual": 0.2944751927142418,
+          "residual_removal": 0.04362368457418231,
+          "rms_gain": 0.20960457488714487,
+          "verdict": "UNRESOLVED"
+        },
+        "campaign_metric": {
+          "campaign_gate": "DEBT",
+          "correlation": 0.9999999997678919,
+          "mean_abs_ratio": 1.000003316967519,
+          "n": 9868,
+          "normalized_rms_error": 2.811111964856678e-05,
+          "per_element_max_error_over_nemo_rms": 0.0007880791593954356,
+          "rms_ratio": 0.9999817556342495
+        },
+        "normalized_residual_rms": 0.9563763154258177,
+        "normalized_squared_residual_energy": 0.9146556567074631,
+        "squared_energy_benefit": 0.08534434329253693,
+        "substitutions": [
+          "vorticity"
+        ]
+      },
+      "0101": {
+        "attribution": {
+          "correlation_with_total_residual": 0.912056081135261,
+          "residual_removal": 0.58254750406453,
+          "rms_gain": 0.9987622534434909,
+          "verdict": "UNRESOLVED"
+        },
+        "campaign_metric": {
+          "campaign_gate": "DEBT",
+          "correlation": 0.9999999999273242,
+          "mean_abs_ratio": 1.0000044467984366,
+          "n": 9868,
+          "normalized_rms_error": 1.2270334251861853e-05,
+          "per_element_max_error_over_nemo_rms": 0.0007792135614995738,
+          "rms_ratio": 1.0000025897590603
+        },
+        "normalized_residual_rms": 0.4174524959354699,
+        "normalized_squared_residual_energy": 0.1742665863627535,
+        "squared_energy_benefit": 0.8257334136372465,
+        "substitutions": [
+          "vorticity",
+          "pressure_gradient"
+        ]
+      },
+      "0110": {
+        "attribution": {
+          "correlation_with_total_residual": 0.7839402999390541,
+          "residual_removal": 0.021164462594718603,
+          "rms_gain": 0.027083034461028218,
+          "verdict": "UNRESOLVED"
+        },
+        "campaign_metric": {
+          "campaign_gate": "DEBT",
+          "correlation": 0.9999999997987151,
+          "mean_abs_ratio": 0.9999989654465173,
+          "n": 9868,
+          "normalized_rms_error": 2.8771271793803616e-05,
+          "per_element_max_error_over_nemo_rms": 0.0008006747295322543,
+          "rms_ratio": 0.9999792408949268
+        },
+        "normalized_residual_rms": 0.9788355374052814,
+        "normalized_squared_residual_energy": 0.9581190092874861,
+        "squared_energy_benefit": 0.041880990712513944,
+        "substitutions": [
+          "vorticity",
+          "cor_removal"
+        ]
+      },
+      "0111": {
+        "attribution": {
+          "correlation_with_total_residual": 0.9294198950891253,
+          "residual_removal": 0.6331188035507153,
+          "rms_gain": 0.9333795183154591,
+          "verdict": "UNRESOLVED"
+        },
+        "campaign_metric": {
+          "campaign_gate": "DEBT",
+          "correlation": 0.9999999999409783,
+          "mean_abs_ratio": 1.0000000952774348,
+          "n": 9868,
+          "normalized_rms_error": 1.0783873506533991e-05,
+          "per_element_max_error_over_nemo_rms": 0.0007918091316363925,
+          "rms_ratio": 1.0000000750362201
+        },
+        "normalized_residual_rms": 0.36688119644928474,
+        "normalized_squared_residual_energy": 0.13460181230805865,
+        "squared_energy_benefit": 0.8653981876919413,
+        "substitutions": [
+          "vorticity",
+          "cor_removal",
+          "pressure_gradient"
+        ]
+      },
+      "1000": {
+        "attribution": {
+          "correlation_with_total_residual": 0.3666841571421037,
+          "residual_removal": 0.06876878683076948,
+          "rms_gain": 0.36689745158929754,
+          "verdict": "UNRESOLVED"
+        },
+        "campaign_metric": {
+          "campaign_gate": "DEBT",
+          "correlation": 0.9999999998530534,
+          "mean_abs_ratio": 0.9999986104387745,
+          "n": 9868,
+          "normalized_rms_error": 2.7372020439704343e-05,
+          "per_element_max_error_over_nemo_rms": 0.0003588141518313428,
+          "rms_ratio": 0.9999785666995679
+        },
+        "normalized_residual_rms": 0.9312312131692305,
+        "normalized_squared_residual_energy": 0.8671915723806368,
+        "squared_energy_benefit": 0.13280842761936318,
+        "substitutions": [
+          "lateral_friction"
+        ]
+      },
+      "1001": {
+        "attribution": {
+          "correlation_with_total_residual": 0.9998655106879224,
+          "residual_removal": 0.9748757788863289,
+          "rms_gain": 0.9808335360922673,
+          "verdict": "CONFIRMS_CARRY"
+        },
+        "campaign_metric": {
+          "campaign_gate": "DEBT",
+          "correlation": 0.9999999999999061,
+          "mean_abs_ratio": 0.9999997402696922,
+          "n": 9868,
+          "normalized_rms_error": 7.384854417795071e-07,
+          "per_element_max_error_over_nemo_rms": 1.5405076938667862e-05,
+          "rms_ratio": 0.9999994008363133
+        },
+        "normalized_residual_rms": 0.025124221113671037,
+        "normalized_squared_residual_energy": 0.0006312264865686334,
+        "squared_energy_benefit": 0.9993687735134313,
+        "substitutions": [
+          "lateral_friction",
+          "pressure_gradient"
+        ]
+      },
+      "1010": {
+        "attribution": {
+          "correlation_with_total_residual": 0.22872803920159646,
+          "residual_removal": 0.0033323835764690335,
+          "rms_gain": 0.4172583918765688,
+          "verdict": "UNRESOLVED"
+        },
+        "campaign_metric": {
+          "campaign_gate": "DEBT",
+          "correlation": 0.9999999998564546,
+          "mean_abs_ratio": 0.9999942589177728,
+          "n": 9868,
+          "normalized_rms_error": 2.9295416629665836e-05,
+          "per_element_max_error_over_nemo_rms": 0.00037512344124670415,
+          "rms_ratio": 0.9999760519879481
+        },
+        "normalized_residual_rms": 0.996667616423531,
+        "normalized_squared_residual_energy": 0.9933463376273626,
+        "squared_energy_benefit": 0.0066536623726374255,
+        "substitutions": [
+          "lateral_friction",
+          "cor_removal"
+        ]
+      },
+      "1011": {
+        "attribution": {
+          "correlation_with_total_residual": 0.9787032551781654,
+          "residual_removal": 0.7910553539844187,
+          "rms_gain": 0.9583303837911238,
+          "verdict": "UNRESOLVED"
+        },
+        "campaign_metric": {
+          "campaign_gate": "DEBT",
+          "correlation": 0.9999999999861401,
+          "mean_abs_ratio": 0.9999953887486904,
+          "n": 9868,
+          "normalized_rms_error": 6.141586579816995e-06,
+          "per_element_max_error_over_nemo_rms": 0.00013999338991549045,
+          "rms_ratio": 0.9999968861411752
+        },
+        "normalized_residual_rms": 0.20894464601558127,
+        "normalized_squared_residual_energy": 0.04365786509857657,
+        "squared_energy_benefit": 0.9563421349014234,
+        "substitutions": [
+          "lateral_friction",
+          "cor_removal",
+          "pressure_gradient"
+        ]
+      },
+      "1100": {
+        "attribution": {
+          "correlation_with_total_residual": 0.4640852297260209,
+          "residual_removal": 0.11591554255917047,
+          "rms_gain": 0.4222628524943766,
+          "verdict": "UNRESOLVED"
+        },
+        "campaign_metric": {
+          "campaign_gate": "DEBT",
+          "correlation": 0.9999999998265345,
+          "mean_abs_ratio": 1.0000032378092443,
+          "n": 9868,
+          "normalized_rms_error": 2.5986218564499925e-05,
+          "per_element_max_error_over_nemo_rms": 0.0003388713312055376,
+          "rms_ratio": 0.9999817394568866
+        },
+        "normalized_residual_rms": 0.8840844574408295,
+        "normalized_squared_residual_energy": 0.7816053278884459,
+        "squared_energy_benefit": 0.21839467211155406,
+        "substitutions": [
+          "lateral_friction",
+          "vorticity"
+        ]
+      },
+      "1101": {
+        "attribution": {
+          "correlation_with_total_residual": 0.9834801669082172,
+          "residual_removal": 0.8012636953360861,
+          "rms_gain": 1.063098179348605,
+          "verdict": "UNRESOLVED"
+        },
+        "campaign_metric": {
+          "campaign_gate": "DEBT",
+          "correlation": 0.9999999999863735,
+          "mean_abs_ratio": 1.000004367640162,
+          "n": 9868,
+          "normalized_rms_error": 5.841529060069741e-06,
+          "per_element_max_error_over_nemo_rms": 0.00013473877100679887,
+          "rms_ratio": 1.0000025735812914
+        },
+        "normalized_residual_rms": 0.19873630466391384,
+        "normalized_squared_residual_energy": 0.039496118791467985,
+        "squared_energy_benefit": 0.960503881208532,
+        "substitutions": [
+          "lateral_friction",
+          "vorticity",
+          "pressure_gradient"
+        ]
+      },
+      "1110": {
+        "attribution": {
+          "correlation_with_total_residual": 0.4228742233144335,
+          "residual_removal": 0.09157002265227521,
+          "rms_gain": 0.3678065698355632,
+          "verdict": "UNRESOLVED"
+        },
+        "campaign_metric": {
+          "campaign_gate": "DEBT",
+          "correlation": 0.9999999998573292,
+          "mean_abs_ratio": 0.9999988862882425,
+          "n": 9868,
+          "normalized_rms_error": 2.670181535623841e-05,
+          "per_element_max_error_over_nemo_rms": 0.00035080980256876936,
+          "rms_ratio": 0.9999792247175996
+        },
+        "normalized_residual_rms": 0.9084299773477248,
+        "normalized_squared_residual_energy": 0.8252450237439877,
+        "squared_energy_benefit": 0.17475497625601233,
+        "substitutions": [
+          "lateral_friction",
+          "vorticity",
+          "cor_removal"
+        ]
+      },
+      "1111": {
+        "attribution": {
+          "correlation_with_total_residual": 0.9999981603463125,
+          "residual_removal": 0.9972272734913317,
+          "rms_gain": 1.0020106628759575,
+          "verdict": "CONFIRMS_CARRY"
+        },
+        "campaign_metric": {
+          "campaign_gate": "DEBT",
+          "correlation": 0.9999999999999982,
+          "mean_abs_ratio": 1.0000000161191602,
+          "n": 9868,
+          "normalized_rms_error": 8.149976674898598e-08,
+          "per_element_max_error_over_nemo_rms": 2.9248501981660745e-06,
+          "rms_ratio": 1.0000000588584868
+        },
+        "normalized_residual_rms": 0.0027727265086683827,
+        "normalized_squared_residual_energy": 7.688012291872359e-06,
+        "squared_energy_benefit": 0.9999923119877081,
+        "substitutions": [
+          "lateral_friction",
+          "vorticity",
+          "cor_removal",
+          "pressure_gradient"
+        ]
+      }
+    },
+    "assembly_remainder": {
+      "bounded": true,
+      "max_abs": 2.4838993024048592e-20,
+      "normalized_rms": 9.971477741582772e-12
+    },
+    "component": "v",
+    "energy_identities": {
+      "mobius_sum_minus_full_benefit": 0.0,
+      "shapley_sum_minus_full_benefit": 0.0
+    },
+    "field_linearity_normalized_rms": {
+      "0011": 0.0,
+      "0101": 0.0,
+      "0110": 1.2589665581348278e-18,
+      "0111": 0.0,
+      "1001": 0.0,
+      "1010": 7.695522592743737e-18,
+      "1011": 9.516401790026104e-18,
+      "1100": 7.146957272875897e-18,
+      "1101": 1.3814402479165301e-17,
+      "1110": 1.1278960674728298e-17,
+      "1111": 1.056144636936949e-17
+    },
+    "fully_disposed": true,
+    "group_confirms": true,
+    "interactions": {
+      "0011": {
+        "label": "MATERIAL",
+        "order": 2,
+        "terms": [
+          "cor_removal",
+          "pressure_gradient"
+        ],
+        "value": 0.08312812663471836
+      },
+      "0101": {
+        "label": "MATERIAL",
+        "order": 2,
+        "terms": [
+          "vorticity",
+          "pressure_gradient"
+        ],
+        "value": -0.12445113679709019
+      },
+      "0110": {
+        "label": "MATERIAL",
+        "order": 2,
+        "terms": [
+          "vorticity",
+          "cor_removal"
+        ],
+        "value": 0.08251506939118447
+      },
+      "0111": {
+        "label": "BOUNDED",
+        "order": 3,
+        "terms": [
+          "vorticity",
+          "cor_removal",
+          "pressure_gradient"
+        ],
+        "value": -5.551115123125783e-16
+      },
+      "1001": {
+        "label": "BOUNDED",
+        "order": 2,
+        "terms": [
+          "lateral_friction",
+          "pressure_gradient"
+        ],
+        "value": 0.0017201387522683964
+      },
+      "1010": {
+        "label": "BOUNDED",
+        "order": 2,
+        "terms": [
+          "lateral_friction",
+          "cor_removal"
+        ],
+        "value": -0.0001763432755182981
+      },
+      "1011": {
+        "label": "BOUNDED",
+        "order": 3,
+        "terms": [
+          "lateral_friction",
+          "cor_removal",
+          "pressure_gradient"
+        ],
+        "value": -5.551115123125783e-16
+      },
+      "1100": {
+        "label": "BOUNDED",
+        "order": 2,
+        "terms": [
+          "lateral_friction",
+          "vorticity"
+        ],
+        "value": 0.00024190119965394885
+      },
+      "1101": {
+        "label": "BOUNDED",
+        "order": 3,
+        "terms": [
+          "lateral_friction",
+          "vorticity",
+          "pressure_gradient"
+        ],
+        "value": 0.0
+      },
+      "1110": {
+        "label": "BOUNDED",
+        "order": 3,
+        "terms": [
+          "lateral_friction",
+          "vorticity",
+          "cor_removal"
+        ],
+        "value": -4.440892098500626e-16
+      },
+      "1111": {
+        "label": "BOUNDED",
+        "order": 4,
+        "terms": [
+          "lateral_friction",
+          "vorticity",
+          "cor_removal",
+          "pressure_gradient"
+        ],
+        "value": 5.551115123125783e-16
+      }
+    },
+    "locked_corners": {
+      "0000": {
+        "actual": 0.0,
+        "delta": 0.0,
+        "prior": 0.0
+      },
+      "0010": {
+        "actual": -0.0611213040794194,
+        "delta": 0.0,
+        "prior": -0.0611213040794194
+      },
+      "0100": {
+        "actual": 0.04362368457418231,
+        "delta": 0.0,
+        "prior": 0.04362368457418231
+      },
+      "0110": {
+        "actual": 0.021164462594718603,
+        "delta": 0.0,
+        "prior": 0.021164462594718603
+      },
+      "1000": {
+        "actual": 0.06876878683076948,
+        "delta": 0.0,
+        "prior": 0.06876878683076948
+      },
+      "1010": {
+        "actual": 0.0033323835764690335,
+        "delta": 0.0,
+        "prior": 0.0033323835764690335
+      },
+      "1100": {
+        "actual": 0.11591554255917047,
+        "delta": 0.0,
+        "prior": 0.11591554255917047
+      },
+      "1110": {
+        "actual": 0.09157002265227521,
+        "delta": 0.0,
+        "prior": 0.09157002265227521
+      },
+      "pressure_singleton": {
+        "actual": 0.6323591523535501,
+        "delta": 0.0,
+        "prior": 0.6323591523535501
+      }
+    },
+    "mobius": {
+      "0001": {
+        "label": "MATERIAL",
+        "order": 1,
+        "terms": [
+          "pressure_gradient"
+        ],
+        "value": 0.8648402071417998
+      },
+      "0010": {
+        "label": "MATERIAL",
+        "order": 1,
+        "terms": [
+          "cor_removal"
+        ],
+        "value": -0.12597842197120745
+      },
+      "0011": {
+        "label": "MATERIAL",
+        "order": 2,
+        "terms": [
+          "cor_removal",
+          "pressure_gradient"
+        ],
+        "value": 0.08312812663471836
+      },
+      "0100": {
+        "label": "MATERIAL",
+        "order": 1,
+        "terms": [
+          "vorticity"
+        ],
+        "value": 0.08534434329253693
+      },
+      "0101": {
+        "label": "MATERIAL",
+        "order": 2,
+        "terms": [
+          "vorticity",
+          "pressure_gradient"
+        ],
+        "value": -0.12445113679709019
+      },
+      "0110": {
+        "label": "MATERIAL",
+        "order": 2,
+        "terms": [
+          "vorticity",
+          "cor_removal"
+        ],
+        "value": 0.08251506939118447
+      },
+      "0111": {
+        "label": "BOUNDED",
+        "order": 3,
+        "terms": [
+          "vorticity",
+          "cor_removal",
+          "pressure_gradient"
+        ],
+        "value": -5.551115123125783e-16
+      },
+      "1000": {
+        "label": "MATERIAL",
+        "order": 1,
+        "terms": [
+          "lateral_friction"
+        ],
+        "value": 0.13280842761936318
+      },
+      "1001": {
+        "label": "BOUNDED",
+        "order": 2,
+        "terms": [
+          "lateral_friction",
+          "pressure_gradient"
+        ],
+        "value": 0.0017201387522683964
+      },
+      "1010": {
+        "label": "BOUNDED",
+        "order": 2,
+        "terms": [
+          "lateral_friction",
+          "cor_removal"
+        ],
+        "value": -0.0001763432755182981
+      },
+      "1011": {
+        "label": "BOUNDED",
+        "order": 3,
+        "terms": [
+          "lateral_friction",
+          "cor_removal",
+          "pressure_gradient"
+        ],
+        "value": -5.551115123125783e-16
+      },
+      "1100": {
+        "label": "BOUNDED",
+        "order": 2,
+        "terms": [
+          "lateral_friction",
+          "vorticity"
+        ],
+        "value": 0.00024190119965394885
+      },
+      "1101": {
+        "label": "BOUNDED",
+        "order": 3,
+        "terms": [
+          "lateral_friction",
+          "vorticity",
+          "pressure_gradient"
+        ],
+        "value": 0.0
+      },
+      "1110": {
+        "label": "BOUNDED",
+        "order": 3,
+        "terms": [
+          "lateral_friction",
+          "vorticity",
+          "cor_removal"
+        ],
+        "value": -4.440892098500626e-16
+      },
+      "1111": {
+        "label": "BOUNDED",
+        "order": 4,
+        "terms": [
+          "lateral_friction",
+          "vorticity",
+          "cor_removal",
+          "pressure_gradient"
+        ],
+        "value": 5.551115123125783e-16
+      }
+    },
+    "noncandidate_bounds": {
+      "assembly_remainder": {
+        "bound": 0.1,
+        "bounded": true,
+        "disposition": "BOUNDED_MAGNITUDE",
+        "rms_gain": 9.971477741582772e-12
+      },
+      "drag": {
+        "bound": 0.1,
+        "bounded": true,
+        "disposition": "BOUNDED_MAGNITUDE",
+        "rms_gain": 1.8764104294133102e-05
+      },
+      "kinetic_energy_gradient": {
+        "bound": 0.1,
+        "bounded": true,
+        "disposition": "BOUNDED_MAGNITUDE",
+        "rms_gain": 0.002339918783242175
+      },
+      "vertical_advection": {
+        "bound": 0.1,
+        "bounded": true,
+        "disposition": "BOUNDED_MAGNITUDE",
+        "rms_gain": 0.0015235955354167049
+      },
+      "wind": {
+        "bound": 0.1,
+        "bounded": true,
+        "disposition": "BOUNDED_MAGNITUDE",
+        "rms_gain": 0.0
+      }
+    },
+    "sample_count": 9868,
+    "shapley": {
+      "cor_removal": {
+        "label": "OWNED_CANCELLER",
+        "value": -0.04324499559601557
+      },
+      "lateral_friction": {
+        "label": "OWNED_POSITIVE_CONTRIBUTOR",
+        "value": 0.133701275957565
+      },
+      "pressure_gradient": {
+        "label": "OWNED_POSITIVE_CONTRIBUTOR",
+        "value": 0.8450387714367478
+      },
+      "vorticity": {
+        "label": "OWNED_POSITIVE_CONTRIBUTOR",
+        "value": 0.06449726018941085
+      }
+    },
+    "term_dispositions": {
+      "assembly_remainder": "BOUNDED_MAGNITUDE",
+      "cor_removal": "OWNED_CANCELLER",
+      "drag": "BOUNDED_MAGNITUDE",
+      "kinetic_energy_gradient": "BOUNDED_MAGNITUDE",
+      "lateral_friction": "OWNED_POSITIVE_CONTRIBUTOR",
+      "pressure_gradient": "OWNED_POSITIVE_CONTRIBUTOR",
+      "vertical_advection": "BOUNDED_MAGNITUDE",
+      "vorticity": "OWNED_POSITIVE_CONTRIBUTOR",
+      "wind": "BOUNDED_MAGNITUDE"
+    }
+  }
+}

@@ -1,0 +1,178 @@
+#!/bin/bash
+#PBS -N amip_mpas
+#PBS -A UOSC0036
+#PBS -q main
+#PBS -l select=1:ncpus=64:mpiprocs=4:ngpus=4:gpu_type=a100:mem=400GB
+#PBS -l walltime=12:00:00
+#PBS -j oe
+#
+# Derecho twin of scripts/cluster/levante/amip_mpas_gpu_chain.sbatch for the
+# MPAS-lane AMIP deck (config/amip/amip_production.yaml): one rank per A100,
+# mpi4jax halo exchange staged through the host (MPI4JAX_USE_CUDA_MPI=0, as on
+# Levante), resume from the newest checkpoint in OUTDIR, resubmit until
+# TARGET_DAYS.
+#
+# Each link runs at most DAYS_PER_LINK simulated days and must FIT the 12 h
+# walltime: the model's wall-clock checkpoint-and-exit is single-rank only
+# (model_driver._maybe_wallclock_exit returns early under MPI), so a 4-rank
+# link that overruns is killed and never resubmits.  Size DAYS_PER_LINK from
+# the measured throughput of the first link.
+#
+# Inputs are the Levante files copied flat into AMIP_INPUTS, so a Derecho arm
+# reads the same forcing products as the Levante arms.
+#
+#   qsub -v NAME=cam6_graupel_on,TARGET_DAYS=30 amip_mpas_gpu_chain.pbs
+#   qsub -v NAME=cam6_graupel_off,TARGET_DAYS=30,EXTRA=--no-morrison-do-graupel \
+#        amip_mpas_gpu_chain.pbs
+set -uo pipefail
+
+: "${NAME:?NAME (run directory under ROOT) is required}"
+: "${REPO:=/glade/u/home/${USER}/legoesm}"
+: "${ROOT:=/glade/derecho/scratch/${USER}/amip_runs}"
+: "${TARGET_DAYS:=30}"
+: "${CONDA_ENV_PREFIX:=/glade/work/${USER}/conda-envs/legoesm-gpu}"
+: "${AMIP_INPUTS:=/glade/work/${USER}/amip_inputs}"
+: "${CONFIG_YAML:=${REPO}/config/amip/amip_production.yaml}"
+: "${AMIP_N_GPUS:=4}"
+: "${DAYS_PER_LINK:=${TARGET_DAYS}}"
+OUTDIR="${ROOT}/${NAME}"
+
+# --- inputs (override the Levante defaults in amip_production.sh) -----------
+# Sources approved by the user 2026-09-24: CESM2 inputdata on glade for SST/SIC,
+# ozone, GHG, solar and volcanic (converted by scripts/data/adapt_cesm_forcing.py,
+# adapt_cmip6_ghg.py --cesm-file, adapt_cmip6_solar.py); ERA5 IC from the public
+# ARCO store; harmonised surfdata from Zenodo.  NOT the Levante products, so a
+# Derecho arm is comparable with another Derecho arm, not with a Levante run.
+# Per-file source + checksum: ${AMIP_INPUTS}/PROVENANCE.md.
+_CESM_IN=/glade/campaign/cesm/cesmdata/inputdata
+export ERA5_IC="${AMIP_INPUTS}/era5_ic_1979-01-01.zarr"
+export ETOPO="${AMIP_INPUTS}/etopo_1deg_nodup.nc"  # duplicated 180E column dropped (PROVENANCE.md)
+export SST="${_CESM_IN}/atm/cam/sst/sst_HadOIBl_bc_0.9x1.25_1850_2017_c180117.nc"
+export SIC="${SST}"
+export AMIP_SST_OFFSET=273.15   # HadOIBl SST_cpl is degC (same offset as PCMDI)
+export SOLAR="${AMIP_INPUTS}/solar_cmip6_14band_from_cesm_c171031.nc"
+export GHG="${AMIP_INPUTS}/ghg_cmip6_from_cesm_GHG_CMIP-1-2-0.nc"
+export OZONE="${AMIP_INPUTS}/ozone_cam6_plev_1978-2014.nc"
+export VOLCANIC="${AMIP_INPUTS}/volcanic_cmip6_from_cesm_1978-2014.nc"
+# Tropospheric aerosol: the SAME merged Kinne fine-mode file the Levante runs
+# read (aeropt_kinne_sw_b14_fin_1979-2014_rast.nc, 432 months, 1 deg), supplied
+# by the user 2026-09-24.
+export AEROSOL="${AEROSOL:-${AMIP_INPUTS}/aeropt_kinne_sw_b14_fin_1979-2014_rast.nc}"
+export CLM_SURFDATA="${AMIP_INPUTS}/surfdata_1.9x2.5_16pfts_CMIP6_simyr2000_c170706.nc"
+export AMIP_SSO="${AMIP_INPUTS}/sso_stdh_2deg_from1deg.nc"
+export AMIP_LAND_MASK="${AMIP_INPUTS}/sftlf_clm_1.9x2.5.nc"
+export AMIP_SURFDATA="${AMIP_INPUTS}/legoesm_surfdata_c260716.nc"
+source "${REPO}/config/amip/amip_production.sh"
+# The deck's SST keys name the PCMDI variables (tosbcs/siconcbcs, percent SIC);
+# HadOIBl carries SST_cpl and ice_cov as a FRACTION.  CLI flags win over the deck.
+AMIP_PATH_FLAGS+=( --sst-var SST_cpl --sic-var ice_cov --sic-scale 1.0 )
+for _f in "${ERA5_IC}" "${ETOPO}" "${SST}" "${SIC}" "${SOLAR}" "${GHG}" \
+          "${OZONE}" "${AEROSOL}" "${VOLCANIC}" "${CLM_SURFDATA}" \
+          "${AMIP_SSO}" "${AMIP_LAND_MASK}" "${AMIP_SURFDATA}"; do
+    [[ -e "${_f}" ]] || { echo "[chain] missing input ${_f}" >&2; exit 3; }
+done
+
+mkdir -p "${OUTDIR}"
+exec > >(tee -a "${OUTDIR}/pbs-${PBS_JOBID:-local}.out") 2>&1
+
+# --- environment --------------------------------------------------------------
+module load conda gcc cray-mpich cuda >/dev/null 2>&1 || { echo "module load failed" >&2; exit 90; }
+conda activate "${CONDA_ENV_PREFIX}" || exit 90
+export LD_LIBRARY_PATH="${CRAY_LD_LIBRARY_PATH:-}:${LD_LIBRARY_PATH:-}"
+PY="$(command -v python)"
+PKG="${REPO}/packages"
+export PYTHONPATH="${REPO}/src:${PKG}/core:${PKG}/atmosphere:${PKG}/coupler:${PKG}/tools:${PKG}/ml:${PKG}/ocean:${PKG}/land:${PKG}/ice"
+export JAX_PLATFORMS=cuda JAX_ENABLE_X64=1
+export XLA_PYTHON_CLIENT_PREALLOCATE=false XLA_PYTHON_CLIENT_MEM_FRACTION=0.85
+export MPI4JAX_USE_CUDA_MPI=0
+export FI_CXI_RX_MATCH_MODE=hybrid
+export LEGOESM_JIT_CACHE_DIR="${LEGOESM_JIT_CACHE_DIR:-/glade/derecho/scratch/${USER}/legoesm_jit_cache}"
+mkdir -p "${LEGOESM_JIT_CACHE_DIR}"
+# NCCL recipe carried from the Levante MPAS lane
+export NCCL_MIN_NCHANNELS=8 NCCL_MAX_NCHANNELS=8 NCCL_P2P_NET_CHUNKSIZE=131072
+
+echo "AMIP MPAS-lane chain  NAME=${NAME}  job=${PBS_JOBID:-local}  commit=$(git -C "${REPO}" rev-parse --short HEAD)  $(date -u)"
+echo "  dirty files: $(git -C "${REPO}" status --porcelain | wc -l)  CONFIG_YAML=${CONFIG_YAML}"
+echo "  TARGET_DAYS=${TARGET_DAYS}  EXTRA='${EXTRA:-}'"
+"${PY}" -c "import jax, mpi4jax; print('  jax', jax.__version__, 'mpi4jax', mpi4jax.__version__)" || exit 91
+
+# --- resume -------------------------------------------------------------------
+LATEST_CKPT=$(ls -1 "${OUTDIR}"/checkpoint_day_*.npz 2>/dev/null | sort -V | tail -1 || true)
+LATEST_DAY=0
+[[ -n "${LATEST_CKPT}" ]] && LATEST_DAY=$(basename "${LATEST_CKPT}" | sed -E 's/checkpoint_day_0*([0-9]+)\.npz/\1/')
+if (( LATEST_DAY >= TARGET_DAYS )); then
+    echo "  Already at/past target (day ${LATEST_DAY}). Nothing to do."; exit 0
+fi
+DAYS_THIS_JOB=$(( TARGET_DAYS - LATEST_DAY ))
+(( DAYS_THIS_JOB > DAYS_PER_LINK )) && DAYS_THIS_JOB=${DAYS_PER_LINK}
+echo "  resume day ${LATEST_DAY}; this link runs ${DAYS_THIS_JOB} day(s)"
+if [[ -n "${LATEST_CKPT}" && -f "${OUTDIR}/run_manifest.json" ]]; then
+    mv -f "${OUTDIR}/run_manifest.json" "${OUTDIR}/run_manifest.day${LATEST_DAY}.json"
+fi
+
+# --- device-count guards (same rules as the Levante chain) ----------------------
+if (( AMIP_N_GPUS < 4 )); then
+    echo "[chain] REFUSING: AMIP_N_GPUS=${AMIP_N_GPUS} is below the floor of 4." >&2
+    exit 64
+fi
+if (( AMIP_N_GPUS != 4 )); then
+    echo "[chain] REFUSING: AMIP_N_GPUS=${AMIP_N_GPUS}; this request allocates exactly 4 GPUs on one node." >&2
+    exit 67
+fi
+_DEVCOUNT_FILE="${OUTDIR}/.device_count"
+if [[ -f "${_DEVCOUNT_FILE}" ]]; then
+    if [[ "$(cat "${_DEVCOUNT_FILE}")" != "${AMIP_N_GPUS}" ]]; then
+        echo "[chain] REFUSING: run started on $(cat "${_DEVCOUNT_FILE}") GPU(s), this link requests ${AMIP_N_GPUS}." >&2
+        exit 65
+    fi
+elif [[ -n "${LATEST_CKPT}" ]]; then
+    echo "[chain] REFUSING: ${OUTDIR} has checkpoints but no .device_count." >&2
+    exit 69
+else
+    printf '%s\n' "${AMIP_N_GPUS}" > "${_DEVCOUNT_FILE}"
+fi
+
+# --- run ------------------------------------------------------------------------
+cd "${REPO}"
+CMD=( "${PY}" -u scripts/run/run_amip.py
+      --config "${CONFIG_YAML}"
+      "${AMIP_PATH_FLAGS[@]}"
+      --days "${DAYS_THIS_JOB}"
+      --checkpoint-days 10
+      --output "${OUTDIR}" )
+[[ -n "${LATEST_CKPT}" ]] && CMD+=( --restart-from "${LATEST_CKPT}" )
+[[ -n "${EXTRA:-}" ]] && CMD+=( ${EXTRA} )
+CMD+=( --distributed )
+LAUNCH=( mpiexec -n "${AMIP_N_GPUS}" --ppn "${AMIP_N_GPUS}"
+         sh -c 'export CUDA_VISIBLE_DEVICES=$PALS_LOCAL_RANKID; exec "$@"' -- )
+echo "[chain] ${LAUNCH[*]} ${CMD[*]}"
+"${LAUNCH[@]}" "${CMD[@]}"
+RC=$?
+echo "[chain] run_amip exit=${RC}  $(date -u)"
+
+if (( RC == 0 )); then
+    NEW_CKPT=$(ls -1 "${OUTDIR}"/checkpoint_day_*.npz 2>/dev/null | sort -V | tail -1 || true)
+    NEW_DAY=0
+    [[ -n "${NEW_CKPT}" ]] && NEW_DAY=$(basename "${NEW_CKPT}" | sed -E 's/checkpoint_day_0*([0-9]+)\.npz/\1/')
+    if (( NEW_DAY > LATEST_DAY && NEW_DAY < TARGET_DAYS )) && [[ -z "${PBS_JOBID:-}" ]]; then
+        echo "[chain] ${NEW_DAY}/${TARGET_DAYS} d done; not under PBS, so no next link queued"
+    elif (( NEW_DAY > LATEST_DAY && NEW_DAY < TARGET_DAYS )); then
+        # -V: the next link inherits this link's WHOLE environment (every
+        # qsub -v override, CONDA_ENV_PREFIX, AMIP_VOLCANIC_LW, input paths),
+        # so a setting cannot silently revert to its default mid-run.
+        if ! NEXT=$(qsub -V -W depend=afterok:"${PBS_JOBID}" \
+                 "${REPO}/scripts/cluster/derecho_amip/amip_mpas_gpu_chain.pbs"); then
+            echo "[chain] RESUBMIT FAILED at ${NEW_DAY}/${TARGET_DAYS} d" >&2
+            exit 71
+        fi
+        echo "[chain] ${NEW_DAY}/${TARGET_DAYS} d done; queued next link ${NEXT}"
+    elif (( NEW_DAY >= TARGET_DAYS )); then
+        echo "[chain] reached ${NEW_DAY}/${TARGET_DAYS} d."
+    else
+        # run_amip exited 0 but no newer checkpoint exists: the chain cannot
+        # advance.  Fail loudly rather than report success below target.
+        echo "[chain] NO PROGRESS: newest checkpoint day ${NEW_DAY} <= resume day ${LATEST_DAY}, target ${TARGET_DAYS}" >&2
+        exit 72
+    fi
+fi
+exit "${RC}"

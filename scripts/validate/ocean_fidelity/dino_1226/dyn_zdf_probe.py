@@ -94,15 +94,21 @@ from legoesm.ocean.experiments.dino import (
     dino_lat_lon_surface_forcing_arrays, dino_step_surface_forcing,
 )
 
-# Reuse wholesale (module-reuse rule) -- same RUN_DIR/DT + err_norm/align-scan
+# Reuse wholesale (module-reuse rule) -- same DT + err_norm/align-scan
 # self-checks every sibling #1226 probe already shares.
 from scripts.validate.ocean_fidelity.dino_1226.zu_frc_term_walk import (
-    RUN_DIR, DT, _load_full_3d,
+    DT, _load_full_3d,
 )
 from scripts.validate.ocean_fidelity.dino_1226.zu_frc_u_structure_probe import (
     _err_norm,
 )
 from scripts.validate.ocean_fidelity.dino_1226.bn2_alpha_compare import _read_dims
+# Lane selector (#1455): RUN_DIR/RESTART are lane-dependent, NOT
+# zu_frc_term_walk's own hardcoded RUN_GDB/year-5 constants.
+from scripts.validate.ocean_fidelity.dino_1226 import dump_lane
+
+RUN_DIR = dump_lane.RUN_DIR
+RESTART = dump_lane.RESTART
 
 set_policy(PrecisionPolicy.fp64())
 
@@ -193,6 +199,7 @@ def _stat(name, lego, nemo, mask):
 def main() -> int:
     e3t_mode = require_explicit_e3t_mode(context="dyn_zdf_probe")
     print(f"LEGOESM_NEMO_E3T={e3t_mode!r} (must be 'both')")
+    print(dump_lane.banner())
 
     dcfg = dino_config_for_recipe("nemo_dino_kamm_mlf")
     print(f"outer_integrator={dcfg.outer_integrator!r}  "
@@ -205,7 +212,7 @@ def main() -> int:
         "the probe is no longer testing the row's stated code path")
 
     g = read_nemo_mesh_mask(os.path.join(RUN_DIR, "mesh_mask.nc"), nn_hls=0)
-    now = read_nemo_restart(os.path.join(RUN_DIR, "DINO_00057600_restart.nc"), nn_hls=0)
+    now = read_nemo_restart(os.path.join(RUN_DIR, RESTART), nn_hls=0)
     br = bridge_nemo_to_legoesm_topo(g, now, periodic_i=True, full_step=True,
                                       omega=dcfg.omega)
     cfg = dataclasses.replace(dcfg, lon_west_deg=1.0, lon_east_deg=49.0,
@@ -232,7 +239,7 @@ def main() -> int:
 
     # ---- Load NEMO's stage-7 (pre) / stage-8 (post) full 3-D u/v(Naa) -----
     jpi, jpj, jpk, hls = _read_dims(RUN_DIR)
-    print(f"RUN_GDB dims: jpi={jpi} jpj={jpj} jpk={jpk} nn_hls={hls}")
+    print(f"{dump_lane.LANE} dims: jpi={jpi} jpj={jpj} jpk={jpk} nn_hls={hls}")
     nemo_pre_u = _load_full_3d(os.path.join(RUN_DIR, "stp_dump_07_dynspg_u.bin"),
                                 jpi, jpj, jpk - 1, hls)
     nemo_pre_v = _load_full_3d(os.path.join(RUN_DIR, "stp_dump_07_dynspg_v.bin"),

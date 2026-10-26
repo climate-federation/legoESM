@@ -38,7 +38,9 @@ from __future__ import annotations
 
 import jax
 import jax.numpy as jnp
+import legoesm.ocean.physics.shortwave_penetration as shortwave_module
 import numpy as np
+import pytest
 from legoesm.ocean.eos import c_sw, rho_0
 from legoesm.ocean.physics.shortwave_penetration import (
     JERLOV_TYPES,
@@ -205,6 +207,62 @@ def test_jerlov_kernel_rejects_non_jerlov_scheme():
     except ValueError:
         return
     raise AssertionError("expected ValueError for scheme='rgb_chl'")
+
+
+def test_nemo_qsr_2bd_selector_requires_extinction_initialization_timestep():
+    generic = _tend(_SW, _DZ, _Z_HALF, 1.0, _cfg(scheme="jerlov_2band"))
+    with pytest.raises(ValueError, match="nemo_time_step_s"):
+        _tend(_SW, _DZ, _Z_HALF, 1.0, _cfg(scheme="nemo_qsr_2bd"))
+    nemo = _tend(
+        _SW,
+        _DZ,
+        _Z_HALF,
+        1.0,
+        ShortwavePenetrationConfig(
+            scheme="nemo_qsr_2bd", water_type="II", nemo_time_step_s=14400.0
+        ),
+    )
+    # NEMO terminates at qsr_ext_lev rather than depositing the remaining
+    # irradiance at the physical bottom like the generic conserving kernel.
+    assert not np.array_equal(np.asarray(nemo), np.asarray(generic))
+
+
+def test_rgb_routes_every_exponential_through_precision_policy(monkeypatch):
+    """Both RGB kernels must honour the certification transcendental policy.
+
+    The Morel--Berthon profile has three exponential call sites and the RGB
+    optical-depth helper is invoked once for each of IR/R/G/B.  Replacing the
+    shared policy function by a planted constant therefore has seven observable
+    calls.  Leaving any one of the four source sites on ``jnp.exp`` makes this
+    control fail by reducing that count or by changing the planted output.
+    """
+    calls = []
+
+    def _planted_exp(value):
+        value = jnp.asarray(value)
+        calls.append(value.shape)
+        return jnp.full_like(value, 0.75)
+
+    monkeypatch.setattr(shortwave_module, "precision_exp", _planted_exp)
+    cfg = ShortwavePenetrationConfig(
+        scheme="nemo_qsr_rgb", rgb_chl_profile="morel_berthon",
+        nemo_time_step_s=10800.0,
+    )
+    result = shortwave_module.shortwave_penetration_rgb_tendency(
+        jnp.asarray([120.0], dtype=jnp.float64),
+        jnp.asarray([0.2], dtype=jnp.float64),
+        jnp.asarray([[5.0, 10.0]], dtype=jnp.float64),
+        jnp.ones((1, 2), dtype=jnp.float64),
+        cfg,
+        gdepw_bottom_live=jnp.asarray([[5.0, 15.0]], dtype=jnp.float64),
+        gdepw_ref=jnp.asarray([0.0, 5.0, 15.0], dtype=jnp.float64),
+        e3t_ref=jnp.asarray([5.0, 10.0], dtype=jnp.float64),
+    )
+
+    assert len(calls) == 7
+    assert calls[:3] == [(1,), (1,), (1, 2)]
+    assert calls[3:] == [(1,)] * 4
+    assert np.all(np.isfinite(np.asarray(result)))
 
 
 def test_water_type_plumbing_changes_profile():

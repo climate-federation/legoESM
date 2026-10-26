@@ -91,7 +91,7 @@ def train(inputs, targets, *, config: EmulatorConfig, epochs: int,
   total_steps = epochs * steps_per_epoch
   opt = create_optimizer(TrainingConfig(
       lr=lr, warmup_steps=max(1, total_steps // 10), total_steps=total_steps,
-      grad_clip_norm=1.0, batch_size=batch_size))
+      grad_clip_norm=1.0))
   opt_state = opt.init(eqx.filter(model, eqx.is_array))
 
   @eqx.filter_jit

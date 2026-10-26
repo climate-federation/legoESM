@@ -1,0 +1,90 @@
+--- stp2d.F90
++++ stp2d.F90
+@@ -126,9 +126,11 @@
+          !                             !*  hydrostatic pressure gradient (HPG))  *!   always called FIRST
+          CALL eos    ( ts, Kbb, rhd )                          ! in situ density anomaly at Kbb
+          CALL dyn_hpg( kt, Kbb     , uu, vv, Krhs )            ! horizontal gradient of Hydrostatic pressure
++         IF( kt == nit000 )   CALL l1_rhs_open_and_dump( kt, Kbb, Kmm, Kaa, Krhs, 'hpg' )
+          !
+          !                             !*  lateral viscosity (LDF)  *!
+          CALL dyn_ldf( kt, Kbb, Kbb, uu, vv, Krhs )
++         IF( kt == nit000 )   CALL l1_rhs_open_and_dump( kt, Kbb, Kmm, Kaa, Krhs, 'ldf' )
+ #if defined key_agrif
+       END DO
+       IF( ln_tile ) CALL dom_tile_stop
+@@ -144,6 +146,7 @@
+          !                             !*  COR + MET  *!   Flux Form        : Coriolis + Metric Term  
+          !                             !*     VOR     *!   Vector Inv. Form : Coriolis + relative Vorticity
+          CALL dyn_vor( kt,      Kbb, uu, vv, Krhs )
++         IF( kt == nit000 )   CALL l1_rhs_open_and_dump( kt, Kbb, Kmm, Kaa, Krhs, 'vor' )
+          !
+          !                             !*  compute advection  *!   (only KEG + ZAD in Vector Inv. Form)
+          IF( .NOT.lk_linssh ) THEN
+@@ -153,6 +156,7 @@
+          ENDIF
+          !
+          CALL wzv    ( kt, Kbb, Kbb, Kaa , uu(:,:,:,Kbb), vv(:,:,:,Kbb), ww, np_velocity )  ! ww guess at Kbb (n)
++         IF( kt == nit000 )   CALL l1_rhs_open_and_dump( kt, Kbb, Kmm, Kaa, Krhs, 'wzv' )
+          !
+          !                             !*  KEG + ZAD  *!   Vector Inv. Form : KE gradient + vertical advection
+          !                             !*     ADV     *!   Flux Form        : flux form advection
+@@ -161,8 +165,10 @@
+          CASE( np_VEC_c2  )               != 2nd order Vector Form =!                       ==>> 3D RHS
+             !
+             CALL dyn_keg( kt, nn_dynkeg, Kbb, uu, vv, Krhs )      !- horizontal Gradient of KE
++            IF( kt == nit000 )   CALL l1_rhs_open_and_dump( kt, Kbb, Kmm, Kaa, Krhs, 'keg' )
+             !
+             CALL dyn_zad( kt, Kbb, uu, vv, Krhs )                 !- vertical advection
++            IF( kt == nit000 )   CALL l1_rhs_open_and_dump( kt, Kbb, Kmm, Kaa, Krhs, 'zad' )
+             !
+          CASE( np_FLX_c2  )               !=  2n order Flux Form =!   (CEN2)                ==>> 2D RHS only
+             !
+@@ -287,6 +293,48 @@
+       !
+    END SUBROUTINE stp_2D
+ 
++   SUBROUTINE l1_rhs_open_and_dump( kstp, Kbb, Kmm, Kaa, Krhs, cdterm )
++      !!----------------------------------------------------------------------
++      !! Round-4 READ-ONLY per-term momentum RHS instrument for the VORTEX
++      !! vector-invariant card.  Under vector-invariant form the FIRST RK3
++      !! stage's whole three-dimensional momentum right-hand side is built
++      !! here, in stp_2D, and stp_RK3_stg does not recompute one
++      !! (stprk3.F90 CASE(1): "Vector Inv. Form : 1st stage 3D RHS already
++      !! entirely computed in stp_2D").  This writes the accumulator after
++      !! each contributing routine, so the per-term increments are the
++      !! DIFFERENCES between consecutive records.  It adds CALLs and one
++      !! module procedure; it changes no shipped statement.
++      !!
++      !! The record is SELF-DESCRIBING (operator note BD): a 16-character
++      !! magic, sixteen header integers, then (name, rank, n1, n2, n3,
++      !! payload) groups to end of file.  No reader may predict its size.
++      !!----------------------------------------------------------------------
++      INTEGER         , INTENT(in) ::   kstp, Kbb, Kmm, Kaa, Krhs
++      CHARACTER(LEN=*), INTENT(in) ::   cdterm
++      INTEGER            :: iunit, ios, igrp
++      CHARACTER(LEN=16)  :: clmagic, clname
++      CHARACTER(LEN=128) :: clfile
++      !
++      IF( STORAGE_SIZE( 1._wp ) /= 64 )   CALL ctl_stop( 'lane1 rhs-term dump requires 64-bit wp' )
++      WRITE(clfile,'("oracle_rhsterm_kt",I8.8,"_",A,".bin")') kstp, TRIM(cdterm)
++      OPEN( NEWUNIT=iunit, FILE=TRIM(clfile), ACCESS='STREAM', FORM='UNFORMATTED', &
++         &  STATUS='REPLACE', ACTION='WRITE', IOSTAT=ios )
++      IF( ios /= 0 )   CALL ctl_stop( 'cannot open lane1 rhs-term file' )
++      clmagic = 'NEMO_L1_RHSTRM1'
++      igrp = 4
++      ! Fifteen header integers, the 64-bit word size LAST so a reader can
++      ! find it the same way in every record family this campaign writes.
++      WRITE(iunit) clmagic, 1, kstp, Kbb, Kmm, Kaa, Krhs, jpi, jpj, jpk,   &
++         &         igrp, 0, 0, 0, 0, STORAGE_SIZE(1._wp)
++      clname = 'uu_rhs'   ;   WRITE(iunit) clname, 3, jpi, jpj, jpk ;  WRITE(iunit) uu(:,:,:,Krhs)
++      clname = 'vv_rhs'   ;   WRITE(iunit) clname, 3, jpi, jpj, jpk ;  WRITE(iunit) vv(:,:,:,Krhs)
++      clname = 'ww'       ;   WRITE(iunit) clname, 3, jpi, jpj, jpk ;  WRITE(iunit) ww(:,:,:)
++      clname = 'r3t_Kaa'  ;   WRITE(iunit) clname, 2, jpi, jpj,   1 ;  WRITE(iunit) r3t(:,:,Kaa)
++      CLOSE(iunit)
++      WRITE(numout,*) 'LANE1_RHSTERM_DUMP ', kstp, TRIM(cdterm), ' ', TRIM(clfile)
++   END SUBROUTINE l1_rhs_open_and_dump
++
++
+ 
+ #else
+    !!----------------------------------------------------------------------

@@ -4,8 +4,11 @@ EVERY grid and for EVERY microphysics scheme, not just the cubed-sphere NH path.
 Background
 ----------
 ``compute_cloud_properties`` derives the M2005 PSD liquid/ice effective radii
-from the cloud-droplet number ``N_c`` (per-VOLUME [#/m³], tracer slot 6) and ice
-number ``N_i`` (per-MASS [#/kg], tracer slot 8).  Originally only
+from the cloud-droplet number ``N_c`` (tracer slot 6) and ice number ``N_i``
+(slot 8).  Both are STORED per MASS [#/kg] since 2026-08-14 so the dycores'
+mass-mixing-ratio advection is the right operator for them, while the PSD wants
+the DROPLET number per VOLUME [#/m³] — so every radiation path multiplies
+``N_c`` by air density on the way in and passes ``N_i`` through.  Originally only
 ``model_type='nonhydrostatic'`` extracted those slots; the plane CRM, MPAS NH,
 hydrostatic (lat-lon / cubed-sphere) and spectral-PE radiation paths silently
 passed ``n_cloud=n_ice=None`` ⇒ RRTMGP fell back to a FIXED r_eff regardless of
@@ -17,8 +20,10 @@ This module pins the coupling for the whole {grid × microphysics} matrix:
 * GRID coverage — every ``model_type`` that ``make_radiation_physics`` dispatches:
   - array-slot states (``plane``, ``nonhydrostatic``, ``mpas_nh``): the radiation
     ``physics_fn`` is run with a spy on ``_call_radiation_backend`` and we assert
-    the captured ``n_cloud`` / ``n_ice`` equal tracer slots 6 / 8 for a 9-slot
-    (double-moment) state and are ``None`` for a 3-slot (single-moment) state;
+    the captured ``n_ice`` equals tracer slot 8 and the captured ``n_cloud`` is
+    slot 6 scaled by the air density (checked by linearity in the carry and by
+    the ratio landing in a physical density band, so the test does not
+    re-derive the model's own density), both ``None`` for a 3-slot state;
   - dict-tracer states (``hydrostatic`` / lat-lon, ``spectral_pe``): the shared
     ``_extract_tracer_columns`` helper is exercised directly (those paths forward
     its 5-tuple verbatim to the backend).
@@ -203,14 +208,30 @@ class TestArraySlotGridCoupling:
     @pytest.mark.parametrize("model_type", list(_ARRAY_SLOT_GRIDS))
     def test_double_moment_9slot_passes_number(self, model_type, backend_spy):
         """9-slot (Morrison / Seifert-Beheng) state ⇒ radiation backend receives
-        n_cloud = slot 6 (N_c) and n_ice = slot 8 (N_i)."""
+        n_ice = slot 8 (N_i) and n_cloud = slot 6 (N_c) converted from the
+        stored per-MASS units to the per-VOLUME number the PSD reads."""
         state, grid, hc, tm = _ARRAY_SLOT_GRIDS[model_type](9)
         physics_fn = make_radiation_physics(_GRAY, model_type=model_type)
         physics_fn(state, grid, hc, tm)
         assert backend_spy["n_cloud"] is not None, model_type
         assert backend_spy["n_ice"] is not None, model_type
-        assert float(jnp.max(backend_spy["n_cloud"])) == pytest.approx(_NC_VAL)
         assert float(jnp.max(backend_spy["n_ice"])) == pytest.approx(_NI_VAL)
+        # N_c is scaled by air density: not the raw slot, but within a
+        # physical density band and exactly linear in the carry.
+        captured = backend_spy["n_cloud"]
+        single = float(jnp.max(captured))
+        assert 0.05 * _NC_VAL < single < 2.0 * _NC_VAL, model_type
+        assert abs(single - _NC_VAL) > 0.01 * _NC_VAL, model_type
+        # The scale must VARY with height: a uniform carry times a real air
+        # density is not uniform, so a constant fudge factor cannot pass here
+        # (codex review).  Air thins by well over 10 % across these columns.
+        assert float(jnp.max(captured)) / float(jnp.min(captured)) > 1.1, model_type
+        state2, grid2, hc2, tm2 = _ARRAY_SLOT_GRIDS[model_type](9)
+        state2 = state2._replace(tracers=state2.tracers.replace(
+            data=state2.tracers.data.at[..., 6].set(2.0 * _NC_VAL)))
+        physics_fn(state2, grid2, hc2, tm2)
+        assert float(jnp.max(backend_spy["n_cloud"])) == pytest.approx(
+            2.0 * single, rel=1e-9), model_type
 
     @pytest.mark.parametrize("model_type", list(_ARRAY_SLOT_GRIDS))
     def test_single_moment_3slot_passes_none(self, model_type, backend_spy):
@@ -250,11 +271,21 @@ class TestDictTracerExtraction:
 
     def test_double_moment_keys_extracted(self):
         state, ncol, nlev = self._tracers(with_number=True)
-        qv, qc, qi, nc, ni = _extract_tracer_columns(state, ncol, nlev)
+        rho = jnp.full((ncol, nlev), 1.2)
+        qv, qc, qi, nc, ni = _extract_tracer_columns(
+            state, ncol, nlev, rho_col=rho)
         assert nc is not None and ni is not None
-        assert float(jnp.max(nc)) == pytest.approx(_NC_VAL)
+        # N_c per MASS -> per VOLUME; N_i stays per mass.
+        assert float(jnp.max(nc)) == pytest.approx(1.2 * _NC_VAL)
         assert float(jnp.max(ni)) == pytest.approx(_NI_VAL)
         assert nc.shape == (ncol, nlev) and ni.shape == (ncol, nlev)
+
+    def test_double_moment_extraction_refuses_missing_density(self):
+        """Without the density there is no way to honour the unit contract, so
+        the extractor must raise rather than silently pass per-mass number."""
+        state, ncol, nlev = self._tracers(with_number=True)
+        with pytest.raises(ValueError, match="density"):
+            _extract_tracer_columns(state, ncol, nlev)
 
     def test_single_moment_keys_absent_is_none(self):
         state, ncol, nlev = self._tracers(with_number=False)

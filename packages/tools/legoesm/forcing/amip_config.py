@@ -41,7 +41,7 @@ class AMIPExperimentConfig(NamedTuple):
     # Integration
     start_day: float = 0.0
     days: int = 200
-    diag_days: int = 5
+    diag_days: float = 5.0
     checkpoint_days: int = 0  # 0 = no checkpointing
 
     # Forcing
@@ -64,6 +64,7 @@ class AMIPExperimentConfig(NamedTuple):
     # Radiation
     radiation: str = "gray"  # "gray" or "rrtmg"
     rad_update_steps: int = 1  # recompute radiation every N steps (1 = every step)
+    physics_update_steps: int = 1  # run the whole physics every N steps, hold its tendencies between (MPAS)
     diurnal_cycle: bool = False  # use instantaneous solar zenith angle
     solar_source: str = "constant"  # "constant", "file", or "spectral_file"
     solar_file: str = ""
@@ -171,14 +172,13 @@ class AMIPExperimentConfig(NamedTuple):
     turbulence: str = "none"
     gravity_wave_drag: str = "none"
     fix_moisture: bool = False
-    # Issue #323: moist-static-energy-conserving q_v floor (remove the
-    # latent heat of the clipped vapour sink).  Opt-in for kessler+sbm.
+    # Issue #323: the q_v floor also books each cell's latent heat (per-cell
+    # moist-static-energy-conserving borrow).  Opt-in for kessler+sbm.
     energy_consistent_moisture_clip: bool = False
 
     # Topography
     topography: str = "flat"  # "flat", "gaussian", or path to NetCDF file
     topo_smoothing: int = 4  # Laplacian smoothing passes
-    topo_edge_blend: float = 0.3  # edge blending strength for cubed-sphere
 
     # Sea ice.  ``T_ice`` is the seawater freezing point used as the
     # SST floor / SIC ramp threshold — NOT the ice surface
@@ -195,7 +195,6 @@ class AMIPExperimentConfig(NamedTuple):
     monthly_means: bool = False  # Accumulate zonal/global monthly means
 
     # Carbon cycle
-    carbon_cycle: str = "none"  # "none", "differland", or "seasonal"
 
     # CMIP experiment
     experiment: str = ""  # "piControl", "historical", "ssp245", "ssp585", "amip", "1pctCO2"
@@ -220,6 +219,17 @@ class AMIPExperimentConfig(NamedTuple):
     physics_parameterization_hidden_dim: int = 128
     physics_parameterization_layers: int = 3
     physics_parameterization_seed: int = 0
+
+    # --- CAM6 macro/micro sub-cycle + MG2 CFL sedimentation (tuple END, so
+    # a positional construction or a pickle written earlier keeps binding the
+    # same fields) ---
+    cld_macmic_num_steps: int = 1  # CAM6 macro/micro sub-cycles per physics step
+    morrison_sed_cfl_substeps: bool = True  # MG2 CFL sub-stepped sedimentation (user 2026-09-22)
+    morrison_sed_cfl_substeps_max: int = 256  # static bound of that loop (cost is linear in it)
+    morrison_sed_cfl_substeps_strict: bool = False  # error when a column exceeds the cap
+    morrison_do_graupel: bool = True  # Morrison graupel category (CAM6 MG2 has none)
+    zm_land_fraction: str = "required"  # ZM land mask policy: "required" | "none" (aquaplanet)
+    zm_transport_cloud_tracers: bool = True  # ZM convtran of carried cloud/precip tracers (CAM6)
 
 
 def config_to_dict(config) -> dict:
@@ -407,16 +417,24 @@ def load_checkpoint(
     # downcast carry), and a storage cast here would also make the
     # restart non-bit-exact for the physics memory.  Everything else
     # (held radiation, conv_prog, T_land, …) keeps the legacy storage
-    # cast.
-    _keep_stored_dtype = ("tke", "qke", "gwd_spectrum")
+    # cast.  The mass/moisture fixer targets are global totals (~5e19 kg)
+    # saved in float64; a float32 cast moves the target by ~1e12 kg, so the
+    # fixer pulls a restarted run off the straight run.
+    _keep_stored_dtype = ("tke", "qke", "gwd_spectrum",
+                          "target_dry_mass", "target_moisture")
     carry_aux = {}
     for key in data.files:
         if key.startswith("carry_"):
             _name = key[6:]
-            if _name == "conv_prog_scheme":
+            if _name == "conv_prog_scheme" or _name.endswith("_sha256"):
                 # Scheme tag for the convection carry (issue #413) —
                 # a plain string, not a float array.
                 carry_aux[_name] = str(data[key])
+            elif f"{key}_sha256" in data.files:
+                # digest-protected: kept as the stored numpy bytes (a jnp
+                # array would drop float64 to float32 with x64 off), verified,
+                # then cast by the consumer
+                carry_aux[_name] = np.asarray(data[key])
             elif _name in _keep_stored_dtype:
                 carry_aux[_name] = jnp.array(data[key])
             else:

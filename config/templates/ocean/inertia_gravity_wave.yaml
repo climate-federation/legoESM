@@ -1,24 +1,28 @@
-# legoESM experiment template — inertia-gravity wave dispersion.
+# legoESM experiment template — inertia-gravity wave, f-plane channel.
 #
-# Names the procedural `inertia_gravity_wave` experiment via the `setup:`
-# selector (#388 Ask#2). Exact match: run_ocean_test_matrix.py --only =inertia_gravity_wave.
+# Names the procedural `inertia_gravity_wave_channel` experiment via the
+# `setup:` selector (#388 Ask#2). Exact match:
+# run_ocean_test_matrix.py --only =inertia_gravity_wave_channel --grid latlon_channel.
+# Retargeted from the global case in #2114: on the sphere a constant-f0 plane
+# wave is not an eigenmode, so only the channel can gate on wave speed. The
+# global case keeps its own template, inertia_gravity_wave_global.yaml.
 experiment:
   tier: tier1
   complexity: primitive_equation
   extent: idealized
-  maturity: structurally_validated
+  maturity: run_tested
   description: >
-    Inertia-gravity (Poincaré) wave propagation: a barotropic-equivalent
-    shallow-water benchmark of the C-grid IGW dispersion relation and the
-    Coriolis / free-surface pressure-gradient coupling. A low-tier dynamical
-    sanity setup.
+    Inertia-gravity (Poincaré) wave in an f-plane channel (Bishnu et al.
+    2024): x-periodic, walled in y, constant f0, where the wave is an exact
+    eigenmode. Gates on L2 error against the exact solution, the measured
+    wave frequency, and mode purity.
   data: []
   conservation_gates: [volume]
 model:
   name: "ocean-inertia-gravity-wave"
   type: ocean_only
 setup:
-  name: inertia_gravity_wave
-  grid: latlon
+  name: inertia_gravity_wave_channel
+  grid: latlon_channel
 output:
   path: output/ocean/inertia_gravity_wave/

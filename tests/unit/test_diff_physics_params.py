@@ -38,12 +38,9 @@ from legoesm.atmosphere.physics.convection.config import (
     SBMConfig, DCAConfig, KuoConfig,
 )
 from legoesm.atmosphere.physics.microphysics.kessler import kessler_microphysics
-from legoesm.atmosphere.physics.microphysics.seifert_beheng import (
-    seifert_beheng_microphysics,
-)
 from legoesm.atmosphere.physics.microphysics.morrison import morrison_microphysics
 from legoesm.atmosphere.physics.microphysics.config import (
-    KesslerConfig, SeifertBehengConfig, MorrisonConfig,
+    KesslerConfig, MorrisonConfig,
 )
 from legoesm.atmosphere.physics.microphysics.output import HydrometeorState
 from legoesm.atmosphere.physics.turbulence.smagorinsky import smagorinsky_turbulence
@@ -279,65 +276,25 @@ class TestMicrophysicsParams:
         assert_param_grad_ok(loss, 2.2, "Kessler accretion_coeff")
 
     def test_kessler_evaporation_coeff(self):
-        # ``rain_evaporation`` applies a donor-cap ``min(rate, q_r/dt)``
-        # that saturates whenever the un-capped rate exceeds the
-        # available rain inventory per timestep.  Probe in the regime
-        # ``rate < q_r/dt`` (tiny rain budget) so the cap is *inactive*
-        # and the evap_coeff gradient is not killed by the ``min``
-        # branch.  Verifies the parameter is reachable when the donor
-        # cap is not saturated — confirming the "BUG" is by-design
-        # donor-positivity, not a vanishing-gradient bug.
-        ncol, nlev = 2, 8
-        # Subsaturated column with very small q_r so the donor cap
-        # ``rate ≤ q_r / dt`` is never active.
-        q_r_tiny = 1e-12  # rate ∝ q_r^0.525 ≈ 1e-6 << q_r/dt is wrong
-                          # — actually rate ∝ q_r^0.525 = 1e-6, q_r/dt
-                          # = 3e-15 → still capped.  Use a tiny
-                          # evap_coeff probe instead.
-        T, q_v, hydro, p_full, p_half, rho, dz = _moist_microphys_column(
-            q_c=5e-3, q_r=q_r_tiny,
-        )
-        q_sat = saturation_mixing_ratio(T, p_full)
-        q_v_dry = 0.5 * q_sat
+        # The faithful ESCOMP kessler_run port has no evaporation coefficient
+        # (KW78 eq. 2.14 is hard-coded), so a traced value must raise rather
+        # than become an inert trainable leaf.
+        T, q_v, hydro, p_full, p_half, rho, dz = _moist_microphys_column()
 
         def loss(c):
             cfg = KesslerConfig()._replace(evaporation_coeff=c)
             out = kessler_microphysics(
-                T, q_v_dry, hydro, p_full, p_half, rho, dz, 300.0, config=cfg,
+                T, q_v, hydro, p_full, p_half, rho, dz, 300.0, config=cfg,
             )
             return jnp.sum(out.dq_v_dt ** 2)
 
-        # Probe at evap_coeff = 1e-12 so ``rate = 1e-12 · 0.5 ·
-        # (1e-12)^0.525 ≈ 1e-19`` << ``q_r / dt = 3.3e-15`` and the
-        # donor cap stays in the *un*-capped branch.
-        assert_param_grad_ok(loss, 1e-12, "Kessler evaporation_coeff")
+        with pytest.raises(ValueError, match="evaporation_coeff"):
+            jax.grad(loss)(1.0)
 
-    def test_seifert_beheng_k_au(self):
-        T, q_v, hydro, p_full, p_half, rho, dz = _moist_microphys_column()
-        # Need positive N_c to drive autoconversion.
-        hydro = hydro._replace(N_c=jnp.full(hydro.q_c.shape, 1e8))
-
-        def loss(k):
-            cfg = SeifertBehengConfig()._replace(k_au=k)
-            out = seifert_beheng_microphysics(
-                T, q_v, hydro, p_full, p_half, rho, dz, 300.0, config=cfg,
-            )
-            return jnp.sum(out.dq_c_dt ** 2)
-
-        assert_param_grad_ok(loss, 6e2, "SeifertBeheng k_au")
-
-    def test_seifert_beheng_k_ac(self):
-        T, q_v, hydro, p_full, p_half, rho, dz = _moist_microphys_column()
-        hydro = hydro._replace(N_c=jnp.full(hydro.q_c.shape, 1e8))
-
-        def loss(k):
-            cfg = SeifertBehengConfig()._replace(k_ac=k)
-            out = seifert_beheng_microphysics(
-                T, q_v, hydro, p_full, p_half, rho, dz, 300.0, config=cfg,
-            )
-            return jnp.sum(out.dq_c_dt ** 2)
-
-        assert_param_grad_ok(loss, 5.25, "SeifertBeheng k_ac")
+    # test_seifert_beheng_k_au / _k_ac removed 2026-10-20: the stand-alone
+    # seifert_beheng scheme is gSAM M2005 (oracle port) and has no k_au/k_ac;
+    # it refuses them (tests/atmosphere/microphysics/unit/
+    # test_gsam_sb_liquid_oracle.py) and AIMIP freezes them out.
 
     def test_morrison_dep_coeff(self):
         # Cold column for ice deposition path.
@@ -1339,7 +1296,7 @@ class TestOceanBottomDragParams:
 
     def _loss(self, scheme, name, p, **fixed):
         kwargs = dict(cd0=1.0e-3, cd_max=0.1, z0=3.0e-3, ke0=2.5e-3,
-                      von_karman=constants.kappa_vk)
+                      von_karman=constants.kappa_von_karman)
         kwargs.update(fixed)
         kwargs[name] = p
         r = self.drag_r(self.u_bot, self.v_bot, self.h_bot,

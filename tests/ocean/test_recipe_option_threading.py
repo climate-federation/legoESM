@@ -393,12 +393,25 @@ def test_sibling_parity_baseline_only_shrinks() -> None:
     )
 
 
-def call_site_completeness_violations() -> list[tuple[str, int, str, str]]:
-    """(rel_path, lineno, function_name, option_name) for call sites the
+def call_site_completeness_violations() -> list[tuple[str, str, str, int]]:
+    """(rel_path, function_name, option_name, ordinal) for call sites the
     static resolver could not prove pass a card-option-name parameter
     explicitly, restricted to functions with a package-unique name (so a
     match is unambiguous -- a name declared by >1 function is skipped rather
-    than guessed at, per-function, not per-name globally)."""
+    than guessed at, per-function, not per-name globally).
+
+    Keyed by (file, function, param, ordinal-among-identical-triples-in-file)
+    rather than by line number: a bare line-number key rots on every
+    unrelated edit that shifts lines above the call site (this gate has
+    shipped red from pure line drift twice -- see
+    ``_recipe_threading_baseline.py``'s CALL_SITE_BASELINE docstring). The
+    ordinal is the 0-based rank, by ascending line number, of a call site
+    among all call sites sharing the same (file, function, param) triple --
+    the same name-and-ordinal join ``test_nemo_shared_state_coverage.py``
+    uses to survive its own oracle's line churn (see the ``seen[call.name]``
+    counter there). A same-triple call site moving up or down a few lines
+    (without reordering relative to its same-triple siblings) leaves the
+    ordinal, and therefore the baseline match, unchanged."""
     files = _ocean_py_files()
     trees = _parse_all(files)
     option_names = _card_option_names()
@@ -419,7 +432,7 @@ def call_site_completeness_violations() -> list[tuple[str, int, str, str]]:
         if params:
             unique_declaring[name] = (params, _fn_positional_params(node))
 
-    out: list[tuple[str, int, str, str]] = []
+    raw: list[tuple[str, int, str, str]] = []
     for path, tree in trees.items():
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call):
@@ -446,8 +459,50 @@ def call_site_completeness_violations() -> list[tuple[str, int, str, str]]:
                 if idx is not None and idx < n_pos:
                     continue
                 rel = str(path.relative_to(repo_root)) if path.is_relative_to(repo_root) else str(path)
-                out.append((rel, node.lineno, fname, optname))
-    return out
+                raw.append((rel, node.lineno, fname, optname))
+
+    return assign_call_site_ordinals(raw)
+
+
+def assign_call_site_ordinals(
+    raw: list[tuple[str, int, str, str]],
+) -> list[tuple[str, str, str, int]]:
+    """(rel_path, function_name, option_name, ordinal) for every
+    ``(rel_path, lineno, function_name, option_name)`` in ``raw``.
+
+    Join key is (file, function, param); the ordinal is the 0-based rank by
+    ascending line number of a call site among all call sites sharing that
+    triple. Grouping already scopes to one file (rel is part of the key), so
+    this is "ordinal among identical triples IN FILE" by construction.
+    Pulled out of ``call_site_completeness_violations`` so the join itself
+    (independent of the AST walk that produces ``raw``) is directly testable
+    -- see ``test_gate_survives_line_drift`` /
+    ``test_gate_catches_new_call_site``.
+
+    Ordinals are assigned by RAW LIST INDEX, not by building a
+    ``(*triple, lineno) -> ordinal`` dict: two call sites can legitimately
+    share both the same triple AND the same line number (two calls to the
+    same helper on one physical line, or either arm of a ternary/`or`
+    chain), and a dict keyed on ``(*triple, lineno)`` collapses both onto the
+    SAME ordinal -- one of the two genuinely distinct call sites then
+    silently vanishes from the result once the caller does ``set(...)`` on
+    it (code-reviewer finding). Sorting is stable, so ties break by each
+    entry's original position in ``raw`` (the AST walk's discovery order),
+    which is deterministic for a given source tree even though it need not
+    match left-to-right position within the line."""
+    by_triple: dict[tuple[str, str, str], list[int]] = collections.defaultdict(list)
+    for idx, (rel, _lineno, fname, optname) in enumerate(raw):
+        by_triple[(rel, fname, optname)].append(idx)
+
+    ordinal_of_index: dict[int, int] = {}
+    for indices in by_triple.values():
+        for ordinal, idx in enumerate(sorted(indices, key=lambda i: raw[i][1])):
+            ordinal_of_index[idx] = ordinal
+
+    return [
+        (rel, fname, optname, ordinal_of_index[idx])
+        for idx, (rel, _lineno, fname, optname) in enumerate(raw)
+    ]
 
 
 def test_call_sites_pass_card_options_explicitly() -> None:
@@ -459,7 +514,7 @@ def test_call_sites_pass_card_options_explicitly() -> None:
         "card-option-name parameter explicitly (could be a genuine unrouted "
         "option, or a resolver false positive -- check the call site "
         "manually before adding to the baseline):\n  "
-        + "\n  ".join(f"{p}:{ln} {fn}({opt}=...)" for p, ln, fn, opt in new)
+        + "\n  ".join(f"{p} {fn}({opt}=...) [occurrence #{ord_}]" for p, fn, opt, ord_ in new)
     )
 
 
@@ -469,7 +524,7 @@ def test_call_site_baseline_only_shrinks() -> None:
     assert not stale, (
         "CALL_SITE_BASELINE has stale entries (now resolved) -- remove them "
         "from tests/ocean/_recipe_threading_baseline.py:\n  "
-        + "\n  ".join(f"{p}:{ln} {fn}({opt}=...)" for p, ln, fn, opt in stale)
+        + "\n  ".join(f"{p} {fn}({opt}=...) [occurrence #{ord_}]" for p, fn, opt, ord_ in stale)
     )
 
 
@@ -477,19 +532,39 @@ def test_call_site_baseline_only_shrinks() -> None:
 # Invariant D -- no consumerless field.
 # ---------------------------------------------------------------------------
 def _ast_read_names(trees: dict[pathlib.Path, ast.Module]) -> dict[str, set[str]]:
-    """name -> set of file stems where it appears as: an attribute access
-    (``x.name``), a bare Name, a call keyword-argument name, a function
-    parameter name, or a string-literal constant (covers
-    ``getattr(cfg, "name", default)`` and ``if cfg.field == "name":``
-    dispatch, both idiomatic in this codebase -- see ``tke_shear_avm_weighting``
-    and ``een_q_boundary`` for real examples of exactly this pattern)."""
+    """name -> set of file stems where it appears as: an attribute READ
+    (``x.name`` in Load/Del context -- NOT ``x.name = ...``, which is an
+    assignment, not a consumer), a bare Name in Load/Del context (NOT a
+    NamedTuple field declaration or a plain assignment target, both Store
+    context), a call keyword-argument name, a function parameter name, or a
+    string-literal constant (covers ``getattr(cfg, "name", default)`` and
+    ``if cfg.field == "name":`` dispatch, both idiomatic in this codebase --
+    see ``tke_shear_avm_weighting`` and ``een_q_boundary`` for real examples
+    of exactly this pattern).
+
+    The Store-context exclusion is the fix for invariant D's original
+    vacuity: EVERY leaf that reaches this check already satisfies invariant
+    B (it lands in the assembled config tree), which means it MUST be
+    declared as a NamedTuple field (an ``AnnAssign`` whose target is an
+    ``ast.Name`` in Store context) in some non-``dino.py`` module to be
+    constructible at all -- that declaration is "the card's own assignment
+    site", and counting it as a "read" made every field that could ever
+    reach this check automatically pass it, before the Store/Del exclusion.
+    Counting it required NO consumer to exist anywhere; the field's own
+    existence was self-certifying. A genuine ``x.name = value`` reassignment
+    is excluded for the same reason: it deposits a value, it does not read
+    one."""
     reads: dict[str, set[str]] = collections.defaultdict(set)
     for path, tree in trees.items():
         stem = path.stem
         for node in ast.walk(tree):
             if isinstance(node, ast.Attribute):
+                if isinstance(node.ctx, ast.Store):
+                    continue
                 reads[node.attr].add(stem)
             elif isinstance(node, ast.Name):
+                if isinstance(node.ctx, ast.Store):
+                    continue
                 reads[node.id].add(stem)
             elif isinstance(node, ast.keyword) and node.arg:
                 reads[node.arg].add(stem)
@@ -556,6 +631,106 @@ def test_consumerless_baseline_only_shrinks() -> None:
         "them from tests/ocean/_recipe_threading_baseline.py:\n  "
         + "\n  ".join(f"{k} -> {t!r}" for k, t in stale)
     )
+
+
+def test_gate_catches_synthetic_violation_d() -> None:
+    """Invariant D's original defect: its read-harvester counted a field's
+    OWN declaration (a NamedTuple ``AnnAssign`` target, which is an
+    ``ast.Name`` in Store context) as evidence the field is READ, and every
+    leaf that reaches this check must be declared somewhere to be
+    constructible at all -- so the check could never bite: existing merely
+    satisfied it. Two things must both hold after the fix:
+
+    (1) A field that is declared (so it would satisfy invariant B) but has
+        NO genuine consumer anywhere -- no Load-context attribute/name
+        access, no keyword-argument pass, no string-literal dispatch, no
+        function parameter of that name -- outside its own declaration and
+        outside dino.py, is flagged with ZERO readers (the motivating class:
+        "option set on the card, read by zero code paths").
+    (2) A field that DOES have a genuine consumer (a real ``cfg.<name>``
+        Load-context read elsewhere) is NOT flagged -- proving the fix does
+        not mass-false-positive by, say, dropping ALL Name/Attribute
+        evidence rather than just the Store-context declaration site.
+    """
+    import tempfile
+
+    files = _ocean_py_files()
+    trees = _parse_all(files)
+
+    fake_name = "zzz_synthetic_consumerless_field_never_read"
+    # Simulates a Config NamedTuple field declaration: an AnnAssign whose
+    # target is an ast.Name in Store context, and nothing else anywhere.
+    declared_only_src = f"class _FakeCfg:\n    {fake_name}: float = 1.0\n"
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        declared_path = pathlib.Path(tmpdir) / "fake_declared_only.py"
+        declared_path.write_text(declared_only_src)
+        trees_no_consumer = dict(trees)
+        trees_no_consumer[declared_path] = ast.parse(declared_only_src)
+
+        reads_no_consumer = _ast_read_names(trees_no_consumer)
+        readers_no_consumer = reads_no_consumer.get(fake_name, set()) - {"dino"}
+        assert not readers_no_consumer, (
+            f"a bare NamedTuple-style declaration of {fake_name!r} (Store "
+            f"context only, no consumer anywhere) was still counted as READ "
+            f"by {sorted(readers_no_consumer)} -- invariant D's harvester is "
+            "still vacuous"
+        )
+        # The full decision logic (mirrors consumerless_card_keys' loop body
+        # -- reimplemented on synthetic inputs rather than calling production
+        # code, same pattern as the A/B self-test's _fake_unrouted_card_keys)
+        # must flag it.
+        flagged = _fake_consumerless_check(
+            all_keys={fake_name}, all_leaf_names={fake_name},
+            dino_to_alias={}, reads=reads_no_consumer,
+        )
+        assert (fake_name, fake_name) in flagged, (
+            "invariant D's decision logic FAILED to flag a synthetically "
+            "consumerless card key -- the D-invariant gate is vacuous"
+        )
+
+        # (2) A genuine consumer elsewhere (Load-context `cfg.<name>`) must
+        # still clear the check -- no mass false positive.
+        consumer_src = f"def consume(cfg):\n    return cfg.{fake_name}\n"
+        consumer_path = pathlib.Path(tmpdir) / "fake_consumer.py"
+        consumer_path.write_text(consumer_src)
+        trees_with_consumer = dict(trees_no_consumer)
+        trees_with_consumer[consumer_path] = ast.parse(consumer_src)
+
+        reads_with_consumer = _ast_read_names(trees_with_consumer)
+        readers_with_consumer = reads_with_consumer.get(fake_name, set()) - {"dino"}
+        assert readers_with_consumer, (
+            f"a genuine consumer (`cfg.{fake_name}`, Load context) was NOT "
+            "detected as a read -- the fix over-corrected and would "
+            "mass-false-positive on every real Attribute-consumed field"
+        )
+        flagged_with_consumer = _fake_consumerless_check(
+            all_keys={fake_name}, all_leaf_names={fake_name},
+            dino_to_alias={}, reads=reads_with_consumer,
+        )
+        assert (fake_name, fake_name) not in flagged_with_consumer, (
+            "invariant D flagged a field WITH a genuine consumer as "
+            "consumerless -- false positive"
+        )
+
+
+def _fake_consumerless_check(
+    *, all_keys: set[str], all_leaf_names: set[str],
+    dino_to_alias: dict[str, str], reads: dict[str, set[str]],
+) -> list[tuple[str, str]]:
+    """Reimplementation of ``consumerless_card_keys``'s decision loop over
+    caller-supplied (synthetic) inputs, so the decision logic is testable
+    without wiring a fake key through the real DINO_RECIPES registry and
+    config assembly (which invariant B, not D, already exercises)."""
+    out: list[tuple[str, str]] = []
+    for key in sorted(all_keys):
+        target = dino_to_alias.get(key, key)
+        if target not in all_leaf_names:
+            continue
+        readers = reads.get(target, set()) - {"dino"}
+        if not readers:
+            out.append((key, target))
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -719,3 +894,136 @@ def test_gate_non_vacuity_on_real_tree() -> None:
     assert isinstance(sibling_parity_violations(), list)
     assert isinstance(call_site_completeness_violations(), list)
     assert isinstance(consumerless_card_keys(), list)
+
+
+# ---------------------------------------------------------------------------
+# CALL_SITE_BASELINE is keyed on (file, function, param, ordinal), not
+# (file, lineno, function, param) -- re-keyed because a bare line number rots
+# on every unrelated edit that shifts lines above a tracked call site (this
+# gate has shipped red from pure line drift twice). These two tests prove the
+# ordinal join actually does its job: (a) it still flags a genuinely new call
+# site, and (b) a tracked call site that merely moves lines (without
+# reordering relative to its same-triple siblings) keeps matching.
+# ---------------------------------------------------------------------------
+def test_gate_catches_new_call_site() -> None:
+    """A call site with a (file, function, param) triple/ordinal combination
+    that has never been seen before must show up as a NEW discovery relative
+    to the current baseline -- i.e. the ordinal join does not silently
+    swallow a real new violation."""
+    # Reconstruct a plausible raw call list: baseline entries at synthetic
+    # ascending line numbers per (file, function, param) group (this only
+    # needs to exercise the ordinal join, not reproduce real file contents).
+    by_triple: dict[tuple[str, str, str], list[int]] = collections.defaultdict(list)
+    for rel, fn, opt, ordinal in CALL_SITE_BASELINE:
+        by_triple[(rel, fn, opt)].append(ordinal)
+    raw = []
+    for (rel, fn, opt), ordinals in by_triple.items():
+        for ordinal in sorted(ordinals):
+            raw.append((rel, 100 + ordinal, fn, opt))
+
+    baseline_reconstructed = set(assign_call_site_ordinals(raw))
+    assert baseline_reconstructed == set(CALL_SITE_BASELINE), (
+        "setup invariant: reconstructing raw call sites at synthetic "
+        "ascending line numbers per (file, function, param) group must "
+        "reproduce the baseline's own ordinals exactly, or this self-test "
+        "proves nothing"
+    )
+
+    # A genuinely new call site: a triple that does not appear in the
+    # baseline at all.
+    new_site = (
+        "packages/ocean/legoesm/ocean/physics/vertical_mixing/kpp.py",
+        500,
+        "compute_buoyancy_frequency",
+        "a_brand_new_option_never_seen_before",
+    )
+    result = set(assign_call_site_ordinals(raw + [new_site]))
+    new_relative_to_baseline = result - set(CALL_SITE_BASELINE)
+    assert new_relative_to_baseline == {
+        ("packages/ocean/legoesm/ocean/physics/vertical_mixing/kpp.py",
+         "compute_buoyancy_frequency", "a_brand_new_option_never_seen_before", 0)
+    }, (
+        "the ordinal join FAILED to flag a genuinely new call site as a "
+        "new discovery -- CALL_SITE_BASELINE's gate would be vacuous"
+    )
+
+    # A second occurrence of an EXISTING triple (not a new triple, but a new
+    # ordinal within a triple that already had entries) must also be flagged.
+    existing_triple = next(iter(by_triple))
+    extra_ordinal_line = 100 + max(by_triple[existing_triple]) + 1
+    extra_occurrence = (*existing_triple, extra_ordinal_line)
+    result2 = set(assign_call_site_ordinals(raw + [extra_occurrence]))
+    new2 = result2 - set(CALL_SITE_BASELINE)
+    assert new2, (
+        "the ordinal join FAILED to flag a new occurrence of an existing "
+        "(file, function, param) triple as a new discovery"
+    )
+
+
+def test_gate_survives_line_drift() -> None:
+    """Shifting every call site's line number by a fixed, order-preserving
+    offset (the effect of an unrelated edit adding/removing lines ABOVE a
+    tracked call site, without touching the call site's relative order among
+    its same-triple siblings) must leave the (file, function, param, ordinal)
+    output UNCHANGED -- this is the entire point of moving off line numbers."""
+    by_triple: dict[tuple[str, str, str], list[int]] = collections.defaultdict(list)
+    for rel, fn, opt, ordinal in CALL_SITE_BASELINE:
+        by_triple[(rel, fn, opt)].append(ordinal)
+    raw = []
+    for (rel, fn, opt), ordinals in by_triple.items():
+        for ordinal in sorted(ordinals):
+            raw.append((rel, 100 + ordinal, fn, opt))
+
+    before = assign_call_site_ordinals(raw)
+
+    # Simulate a fake line shift: every call site in the file moves down by
+    # 37 lines (an edit inserted 37 lines earlier in the file). Order among
+    # same-triple siblings is preserved by construction (a uniform shift
+    # cannot reorder).
+    shifted = [(rel, ln + 37, fn, opt) for rel, ln, fn, opt in raw]
+    after = assign_call_site_ordinals(shifted)
+
+    assert set(before) == set(after), (
+        "a pure line-number shift changed the (file, function, param, "
+        "ordinal) output -- the ordinal join is NOT immune to line drift, "
+        "defeating the reason CALL_SITE_BASELINE was re-keyed"
+    )
+    assert set(before) == set(CALL_SITE_BASELINE), (
+        "setup invariant: the reconstructed baseline must match "
+        "CALL_SITE_BASELINE exactly for this drift test to be meaningful"
+    )
+
+
+def test_gate_ordinal_join_survives_same_line_tie() -> None:
+    """Two call sites can legitimately share BOTH the same (file, function,
+    param) triple AND the same line number -- two calls to the same helper
+    on one physical line, or either arm of a ternary/`or` chain. A join keyed
+    on ``(*triple, lineno)`` collapses both onto the same ordinal, so one of
+    the two genuinely distinct call sites silently vanishes once the caller
+    puts the result through ``set(...)``. This is a real bug the code
+    reviewer caught (fixed by keying ordinals off each entry's position in
+    the raw list instead of off ``(*triple, lineno)``); this test proves it
+    stays fixed.
+
+    SYNTHETIC VIOLATION: revert ``assign_call_site_ordinals`` to build an
+    ``{(*triple, lineno): ordinal}`` dict and this test fails -- the second
+    tied entry collapses onto ordinal 0 alongside the first, so only ONE of
+    the two distinct raw entries survives ``set(...)``."""
+    same_line_raw = [
+        ("fake/file.py", 42, "some_fn", "some_opt"),
+        ("fake/file.py", 42, "some_fn", "some_opt"),
+    ]
+    result = assign_call_site_ordinals(same_line_raw)
+    assert len(result) == 2, (
+        "assign_call_site_ordinals must return one output row per input row "
+        f"(2 in, got {len(result)} out)"
+    )
+    assert len(set(result)) == 2, (
+        "two call sites sharing a (file, function, param) triple AND a "
+        f"line number collapsed onto the same ordinal: {result} -- one "
+        "genuinely distinct call site would silently vanish from "
+        "CALL_SITE_BASELINE's discovered set"
+    )
+    assert {r[3] for r in result} == {0, 1}, (
+        f"expected ordinals {{0, 1}} for the two tied call sites, got {result}"
+    )

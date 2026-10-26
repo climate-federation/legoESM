@@ -11,6 +11,8 @@ An experiment is fully described by a YAML file with this schema::
       surface_scheme: two_leaf_canopy | simple_seb
       bulk_scheme: most | constant
       enable_freeze_thaw: bool         # soil-water latent zero-curtain (default false)
+      soil_ice_impedance_exponent: float  # CLM5 e_ice in [0, 10], active with freeze/thaw
+                                       #   (absent = RichardsConfig default 6)
       albedo: {field: value}           # LandAlbedoConfig field values (absent = default)
       glacier_albedo_vis: float        # ice-sheet base albedo pair (both or neither;
       glacier_albedo_nir: float        #   absent = uncalibrated module default)
@@ -41,6 +43,7 @@ An experiment is fully described by a YAML file with this schema::
 
     restart:
       from: <path to a .npz or "">     # "" -> cold start
+      carbon_ic: <path to a global_carbon_ic.npz or "">   # "" -> cold pools
 
     land_frac_min: float                # surfdata land threshold (default 0.0 = any land)
     land_mask_file: <optional CMIP6 sftlf path>
@@ -183,6 +186,13 @@ def validate_config(data: dict) -> LMIPConfig:
         raise ValueError(
             f"physics.enable_freeze_thaw must be a bool "
             f"(got {physics['enable_freeze_thaw']!r})")
+    # Frozen-soil ice impedance exponent (CLM5 e_ice); absent = library default.
+    _e = physics.get("soil_ice_impedance_exponent")
+    if _e is not None and (isinstance(_e, bool) or not isinstance(_e, (int, float))
+                           or not 0.0 <= float(_e) <= 10.0):
+        raise ValueError(
+            "physics.soil_ice_impedance_exponent must be a number in [0, 10] "
+            f"(got {_e!r})")
     # Snow thermal scheme: "single" (single-node bulk SWE) is the only scheme on
     # this lane; the key exists so configs are explicit and a future scheme name
     # fails here rather than silently running different physics.
@@ -286,6 +296,28 @@ def validate_config(data: dict) -> LMIPConfig:
                 raise ValueError(
                     f"per-PFT theta_wp={_w} / theta_fc={_f} must satisfy "
                     "0 < wp < fc < 1")
+    # --- Prognostic carbon (opt-in) ------------------------------------------
+    # Default false = the pools stay PRESCRIBED: a fixed leaf carbon, re-derived
+    # and discarded every step, which is what the baked conductance was fitted
+    # under.  True makes them evolve, which changes LAI and therefore the
+    # conductance -- so it is a different experiment, never a silent upgrade.
+    physics.setdefault("carbon_prognostic", False)
+    _cp = physics["carbon_prognostic"]
+    if not isinstance(_cp, bool):
+        raise ValueError(
+            f"physics.carbon_prognostic must be a bool (got {_cp!r})")
+    if _cp and data.get("physics", {}).get("land_mode", "multilayer") != "multilayer":
+        raise ValueError(
+            "physics.carbon_prognostic requires land_mode 'multilayer' (the slab "
+            "land has no carbon pools).")
+    # The pools only exist on the interactive-stomata path (the Farquhar branch
+    # needs both the differland scheme and a carbon state).  Catch it HERE, at
+    # config load, instead of letting the driver die after staging forcing.
+    if _cp and not physics.get("stomata_enabled", False):
+        raise ValueError(
+            "physics.carbon_prognostic requires stomata_enabled=true: the carbon "
+            "pools are only stepped on the interactive-stomata path, so with "
+            "stomata off there is nothing to evolve.")
     physics.setdefault("soil_growth_factor", _SOIL_GROWTH_FACTOR_DEFAULT)
     _gf = physics["soil_growth_factor"]
     if not isinstance(_gf, (int, float)) or isinstance(_gf, bool) or not (1.0 <= _gf <= 4.0):  # coeff-ok: schema sanity bound on a layer-thickness RATIO
@@ -358,10 +390,78 @@ def validate_config(data: dict) -> LMIPConfig:
 
     restart = data.get("restart") or {}
     restart.setdefault("from", "")
+    # Seed the carbon pools from a global finidat instead of cold-starting them.
+    # STRICT whole-grid match (the pools are per-area stocks pinned to the
+    # finidat's own cells), so the finidat must be built on the run's grid --
+    # see docs/land/global_carbon_ic_spinup.md.  Only meaningful when the pools
+    # actually evolve, so it requires physics.carbon_prognostic.
+    restart.setdefault("carbon_ic", "")
+    _cic = restart["carbon_ic"]
+    if not isinstance(_cic, str):
+        raise ValueError(f"restart.carbon_ic must be a path string (got {_cic!r})")
+    if _cic and not physics.get("carbon_prognostic", False):
+        raise ValueError(
+            "restart.carbon_ic is set but physics.carbon_prognostic is false: the "
+            "seeded pools would be overwritten by the prescribed leaf carbon every "
+            "step, so the seed would do nothing.  Enable carbon_prognostic or drop "
+            "the seed.")
 
     output = data.get("output") or {}
     if "tapes" not in output or not output["tapes"]:
         raise ValueError("output.tapes: at least one tape must be declared")
+
+    # Run the multilayer land under the PHYSICS the baked per-PFT tables were
+    # calibrated under (legoesm.land.config.calibrated_multilayer_setup): MOST
+    # exchange, big-leaf SEB, Farquhar stomata on a prescribed leaf carbon, and
+    # the calibration soil column.  A land INITIAL CONDITION is only meaningful
+    # for the model it was equilibrated under, so a spin-up feeding a calibrated
+    # coupled run has to be on this too.  Off (default) = unchanged.
+    #
+    # NAMED "_physics" DELIBERATELY, and it is the whole promise: this driver
+    # builds its per-plant-type PARAMETERS from its own surface dataset, NOT
+    # from the tuned tables the coupled run uses, so the schemes and the soil
+    # column match while the parameter values do not.  Closing that gap means
+    # changing which surface dataset this driver reads — a separate decision.
+    physics.setdefault("calibrated_land_physics", False)
+    if not isinstance(physics["calibrated_land_physics"], bool):
+        raise ValueError(
+            f"physics.calibrated_land_physics must be a bool "
+            f"(got {physics['calibrated_land_physics']!r})")
+    if physics["calibrated_land_physics"]:
+        if physics["land_mode"] != "multilayer":
+            raise ValueError(
+                "physics.calibrated_land_physics=true requires physics.land_mode="
+                "'multilayer' — the calibrated tables are a multilayer bake with "
+                "no slab equivalent."
+            )
+        # EVERY field the calibrated setup replaces, plus freeze/thaw, which
+        # this driver applies AFTER the setup and would otherwise survive into
+        # the run.  Checked, never silently overridden, so a config can never
+        # read as one land model while running another.
+        from legoesm.land.config import calibrated_multilayer_setup
+        _cal = calibrated_multilayer_setup()
+        for _key, _exp in (
+                ("surface_scheme", "simple_seb"),
+                ("bulk_scheme", _cal["bulk_scheme"]),
+                ("stomata_enabled", _cal["stomata"].enabled),
+                ("stomatal_model", _cal["stomata"].stomata_model),
+                ("snow_albedo_feedback", _cal["snow_albedo_feedback"]),
+                ("enable_freeze_thaw", False),
+        ):
+            if physics[_key] != _exp:
+                raise ValueError(
+                    f"physics.calibrated_land_physics=true requires "
+                    f"physics.{_key}={_exp!r} (the value the baked tables were "
+                    f"fitted under); got {physics[_key]!r}. Set it or drop "
+                    "calibrated_land_physics — these are not silently overridden."
+                )
+        for _stom_key in ("gs_max", "vc_max25", "g1"):
+            if physics.get(_stom_key) is not None:
+                raise ValueError(
+                    f"physics.calibrated_land_physics=true cannot be combined "
+                    f"with physics.{_stom_key}: the calibrated setup replaces the "
+                    "whole stomatal configuration, so the value would vanish "
+                    "without a word. Drop one of the two.")
 
     return LMIPConfig(
         grid=grid,
@@ -375,7 +475,6 @@ def validate_config(data: dict) -> LMIPConfig:
         land_mask_file=str(data.get("land_mask_file", "")),
         raw=data,
     )
-
 
 def apply_overrides(base: dict, overrides: Iterable[str]) -> dict:
     """Apply ``-o dot.notation=value`` overrides in place on a deep-copied

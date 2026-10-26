@@ -45,6 +45,18 @@ from legoesm.timestepping.dispatch import dispatch_integrator
 from legoesm import constants
 
 
+# --- default del-4 hyperdiffusion: 2.338e15 m^4/s at T21, scaled (21/T)^4 ---
+# Same scaling the spectral Held-Suarez drivers and the atmosphere test matrix
+# already use for their explicit coefficients.
+_HYPERDIFF_REF_COEFF = 2.338e15   # m^4/s at T21
+_HYPERDIFF_REF_TRUNC = 21
+
+
+def default_hyperdiff_coeff(grid: GaussianGrid) -> float:
+    """Truncation-scaled default: 2.338e15 * (21 / n_max)**4 [m^4/s]."""
+    return _HYPERDIFF_REF_COEFF * (_HYPERDIFF_REF_TRUNC / grid.n_max) ** 4
+
+
 # =============================================================================
 # State and config
 # =============================================================================
@@ -68,7 +80,9 @@ class SpectralSWConfig(NamedTuple):
     carried by the initial geopotential field.
     """
     g: float = constants.g
-    hyperdiff_coeff: float = 2.338e15 # Spectral diffusion coefficient
+    # None = default_hyperdiff_coeff(grid): 2.338e15 * (21/n_max)**4.
+    # A float is used as given.
+    hyperdiff_coeff: float | None = None
     hyperdiff_order: int = 2          # Diffusion order (2 = nabla^4)
     spectral_filter_order: int = 0    # Exponential filter order (0 = off)
                                       # Recommended: 8 for runs with topography
@@ -152,7 +166,10 @@ def spectral_sw_tendencies(
     # where U = flux_lon*cosφ, V = flux_mer*cosφ.
     # The 1/cos²φ weighting is baked into Pnm_oc2 and Dnm matrices (pole-safe).
 
-    im_over_a = 1j * grid.ms.astype(jnp.float64) / a
+    # Complex dtype follows the grid's runtime precision (complex64 for the
+    # fp32 spectral runtime, complex128 otherwise).
+    _cdt = jnp.complex64 if grid.Pnm.dtype == jnp.float32 else jnp.complex128
+    im_over_a = (1j * grid.ms / a).astype(_cdt)
     one_over_a = 1.0 / a
 
     # Vorticity fluxes: U = (ζ+f)*u*cosφ, V = (ζ+f)*v*cosφ
@@ -210,6 +227,8 @@ def spectral_sw_tendencies(
     #   - It would violate mass distribution conservation
     #   - It causes spurious energy drift
     #   - Standard practice (Hack & Jakob 1992) diffuses only vor and div
+    if config.hyperdiff_coeff is None:
+        config = config._replace(hyperdiff_coeff=default_hyperdiff_coeff(grid))
     if config.hyperdiff_coeff > 0:
         # Batch the two pointwise hyperdiffusions (vor, div) into one
         # call by stacking along a trailing axis.  ``spectral_hyperdiffusion_3d``
@@ -240,6 +259,15 @@ def spectral_sw_tendencies(
     dvor_hat = dvor_hat * _dealias
     ddiv_hat = ddiv_hat * _dealias
     dphi_hat = dphi_hat * _dealias
+
+    # Mass is a THEOREM, not a measurement: the global-mean (n=0, m=0)
+    # geopotential tendency is analytically zero (Gauss theorem — the integral
+    # of the flux divergence -div(Φv) over the sphere vanishes).  Under exact
+    # Gaussian quadrature it is machine zero in f64, but fp32 transform roundoff
+    # leaves ~1e-9 there and that random-walks total mass.  Zero it explicitly.
+    # Gated to the fp32 runtime so the fp64 path stays byte-identical.
+    if grid.Pnm.dtype == jnp.float32:
+        dphi_hat = jnp.where(grid.ls == 0, jnp.zeros_like(dphi_hat), dphi_hat)
 
     # Return as same pytree structure (for SSP-RK3 tree_map)
     return SpectralSWState(
@@ -294,6 +322,9 @@ class SpectralShallowWaterModel:
         self._use_cpu_for_spectral = placement.use_cpu_for_spectral
         self._cpu_device = placement.cpu_device
         self._default_device = placement.default_device
+        if self.config.hyperdiff_coeff is None:
+            self.config = self.config._replace(
+                hyperdiff_coeff=default_hyperdiff_coeff(self.grid))
 
         # Precompute exponential spectral filter if enabled.
         # The filter damps high-wavenumber spectral coefficients to
@@ -303,9 +334,11 @@ class SpectralShallowWaterModel:
         if self.config.spectral_filter_order > 0:
             alpha = -jnp.log(jnp.float64(self.config.spectral_filter_cutoff))
             ratio = self.grid.ls.astype(jnp.float64) / self.grid.n_max
+            # Built in f64 (one-time), stored at the grid's runtime dtype so
+            # the per-step multiply does not promote a complex64 state.
             self._spectral_filter = jnp.exp(
                 -alpha * ratio ** self.config.spectral_filter_order
-            )
+            ).astype(self.grid.Pnm.dtype)
         else:
             self._spectral_filter = None
 
@@ -320,7 +353,7 @@ class SpectralShallowWaterModel:
         if self.config.dealiasing_fraction > 0.0:
             self._dealias_state = dealiasing_mask(
                 self.grid, self.config.dealiasing_fraction,
-            )
+            ).astype(self.grid.Pnm.dtype)
         else:
             self._dealias_state = None
 
@@ -656,13 +689,33 @@ def spectral_to_grid(
     }
 
 
+def power_spectrum(grid: GaussianGrid, coeffs_hat: jax.Array) -> jax.Array:
+    """Per-total-wavenumber power ``sum_m |coeffs(n,m)|^2``, accumulated in f64.
+
+    Returns an ``(n_max+1,)`` float64 array indexed by total wavenumber ``n``.
+    Unlike the endpoint scalar drift (which is floor-limited), this
+    per-wavenumber reduction is the diagnostic that sees the fp32 spectral
+    noise floor on the ``k^-3`` tail — the regression harness for the fp32
+    spectral runtime.  Use on a ``(state_a − state_b)`` coefficient field to
+    get the difference-field spectrum.
+    """
+    power = jnp.abs(coeffs_hat.astype(jnp.complex128)) ** 2  # f64
+    # One-sided SH storage keeps only m>=0; each m>0 coefficient stands for the
+    # +m and -m conjugate pair, so it carries twice the power (Parseval).
+    weight = jnp.where(grid.ms == 0, 1.0, 2.0)
+    return jax.ops.segment_sum(power * weight, grid.ls, num_segments=grid.n_max + 1)
+
+
 def compute_spectral_diagnostics(
     state: SpectralSWState,
     grid: GaussianGrid,
 ) -> dict[str, float]:
     """Compute conservation diagnostics for the spectral model.
 
-    Returns mass, energy, and enstrophy integrals.
+    Returns mass, energy, and enstrophy integrals, plus f64-accumulated KE and
+    enstrophy per-wavenumber SPECTRA (``ke_spectrum`` / ``enstrophy_spectrum``,
+    each ``(n_max+1,)``) — the tail diagnostics that reveal the fp32 noise
+    floor.
     """
     g = constants.g
     fields = spectral_to_grid(state, grid)
@@ -696,15 +749,29 @@ def compute_spectral_diagnostics(
         ],
         axis=-1,
     ) * dA[..., None]
-    _diag = jnp.sum(_intg, axis=tuple(range(dA.ndim)))
+    # Retained-f64 reduction: mass/energy/enstrophy are near-cancelling
+    # extensive sums, so accumulate in float64 (real when x64 is enabled;
+    # a pure fp32 run without x64 gets fp32 sums and larger drift).
+    _diag = jnp.sum(_intg.astype(jnp.float64), axis=tuple(range(dA.ndim)))
     mass, energy, enstrophy = _diag[0], _diag[1], _diag[2]
 
     # One device→host transfer instead of three separate ``float(...)``
     # casts — this diagnostic is called every save_every steps in
     # validation/test loops.
     _h = jax.device_get(jnp.stack([mass, energy, enstrophy]))
+
+    # f64 per-wavenumber spectra (KE from streamfunction/velocity-potential:
+    # KE_n = 0.5 * a^2/(n(n+1)) * (|vor_n|^2 + |div_n|^2); enstrophy_n = |vor_n|^2).
+    Pvor = power_spectrum(grid, state.vor_hat.data)
+    Pdiv = power_spectrum(grid, state.div_hat.data)
+    ns = jnp.arange(grid.n_max + 1, dtype=jnp.float64)
+    inv_nn = jnp.where(ns > 0, a2 / (ns * (ns + 1.0)), 0.0)
+    ke_spectrum = 0.5 * inv_nn * (Pvor + Pdiv)
+    ke_np, ens_np = jax.device_get((ke_spectrum, Pvor))
     return {
         'mass': float(_h[0]),
         'energy': float(_h[1]),
         'enstrophy': float(_h[2]),
+        'ke_spectrum': ke_np,
+        'enstrophy_spectrum': ens_np,
     }

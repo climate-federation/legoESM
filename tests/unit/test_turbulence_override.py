@@ -33,7 +33,7 @@ from legoesm.grids.vertical import create_sigma_coordinate
 def _config(turbulence="clubb_lite", override=None):
     return ExperimentConfig(
         grid=GridConfig(grid_type="latlon", resolution=8, nlev=5),
-        dycore=DycoreConfig(dt=600.0, model_type="hydrostatic",
+        dycore=DycoreConfig(energy_fixer=False, dt=600.0, model_type="hydrostatic",
                             discretization="finite_volume"),
         radiation="gray", turbulence=turbulence,
         turbulence_override=override,
@@ -251,7 +251,7 @@ def _tiny_coupled_clubb(c_k_override=None, days=0.5, diag_days=0.5):
             scheme="clubb_lite", clubb_lite=CLUBBLiteConfig(C_K=c_k_override))
     atm = ExperimentConfig(
         grid=GridConfig(grid_type="latlon", resolution=8, nlev=5),
-        dycore=DycoreConfig(dt=600.0, model_type="hydrostatic",
+        dycore=DycoreConfig(energy_fixer=False, dt=600.0, model_type="hydrostatic",
                             discretization="finite_volume"),
         output=OutputConfig(diag_days=diag_days),
         radiation="gray", turbulence="clubb_lite", days=days,
@@ -309,7 +309,7 @@ def test_per_column_ck_array_runs_real_forward_step():
 def _hb_lane_config(stability_scheme):
     return ExperimentConfig(
         grid=GridConfig(grid_type="latlon", resolution=8, nlev=4),
-        dycore=DycoreConfig(dt=600.0, model_type="hydrostatic",
+        dycore=DycoreConfig(energy_fixer=False, dt=600.0, model_type="hydrostatic",
                             discretization="finite_volume"),
         radiation="gray", turbulence="holtslag_boville",
         surface_bulk_scheme="coare3", surface_gustiness_zi=300.0,

@@ -75,6 +75,7 @@ physics:
   snow_albedo_feedback: true
   snow_scheme: single             # bulk SWE budget — the stable production scheme
   enable_freeze_thaw: true        # REQUIRED globally: without it boreal columns NaN
+  soil_ice_impedance_exponent: 6.0  # frozen soil impedes water flow, CLM5 e_ice (user 2026-09-28)
   # The 2026-07 calibrated parameter values (see biophysics/lmip_biophys_2deg
   # for the full rationale + how to revert each block).  The as-run config
   # named these via two selector keys (albedo_calibration/root_calibration =

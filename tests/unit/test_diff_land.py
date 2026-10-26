@@ -296,7 +296,7 @@ def test_snow_melt_feedback_grad_wrt_Q_net():
 
     def loss(Q_net):
         snow_new, _, _ = update_snow(
-            snow, snow_age, T_sfc, precip_snow, dt=600.0, Q_net=Q_net,
+            snow, snow_age, T_sfc, precip_snow, dt=600.0, Q_net=Q_net, snow_age_activation_K=0.0
         )
         return jnp.sum(snow_new ** 2)
 

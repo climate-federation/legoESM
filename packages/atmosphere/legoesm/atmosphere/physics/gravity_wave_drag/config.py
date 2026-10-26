@@ -27,10 +27,19 @@ import math
 from typing import NamedTuple
 
 
+# Legal Hines launch pressure [Pa]: above the boundary layer, below the
+# upper troposphere.  The ONE range for ``HinesConfig.launch_p`` and the
+# driver's ``hines_launch_p`` (validated in ``ExperimentConfig``).
+HINES_LAUNCH_P_RANGE_PA = (3.0e4, 9.0e4)
+
+
 __param_spec__ = {
     "E3SMBeresConfig": {
         "scheme_key": "atm.gwd.E3SMBeresConfig",
         "excluded": {
+            "source_wind_p": "selects a level INDEX (the last reference interface with p below the value, E3SM gw_init), so the drag is piecewise-constant in it and its gradient is identically zero (review F4; Hines launch_p precedent)",
+            "z_heat_max": "bounds the integer heating-depth search window (a comparison), so the drag is piecewise-constant in it and its gradient is identically zero (review F4; Hines launch_p precedent)",
+            "hdepth_min_km": "enters only a hard on/off comparison, so the drag is piecewise-constant in it and its gradient is identically zero (review F4; Hines launch_p precedent)",
             "mfcc_uh_slope": "stand-in-table-only surrogate slope (default 0 = uh-independent); the real source spectrum is the offline mfcc table, not a trained scalar",
             "storm_speed_min": "ground-relative storm-speed floor used only to truncate the integer Doppler cell-speed CS; a discretisation threshold, not a continuum closure",
         },
@@ -39,10 +48,6 @@ __param_spec__ = {
             "cf": {"units": "1", "bounds": (5.0, 60.0), "tunable_tier": 1, "transform": "sigmoid", "category": "source_spectrum", "reference": "Beres et al. (2004); E3SM gw_convect_hcf", "shape": None},
             "al": {"units": "m", "bounds": (1.0e4, 1.0e6), "tunable_tier": 1, "transform": "sigmoid", "category": "source_spectrum", "reference": "Beres et al. (2004); E3SM AL", "shape": None},
             "hdepth_scaling_factor": {"units": "1", "bounds": (0.25, 4.0), "tunable_tier": 2, "transform": "sigmoid", "category": "source_spectrum", "reference": "Beres et al. (2004); E3SM hdepth_scaling_factor", "shape": None},
-            # --- convective source triggering / search window ---
-            "hdepth_min_km": {"units": "km", "bounds": (0.5, 10.0), "tunable_tier": 2, "transform": "sigmoid", "category": "source_spectrum", "reference": "Beres et al. (2004); E3SM hdepth_min", "shape": None},
-            "z_heat_max": {"units": "m", "bounds": (5.0e3, 4.0e4), "tunable_tier": 3, "transform": "sigmoid", "category": "source_spectrum", "reference": "Beres et al. (2004) scheme default", "shape": None},
-            "source_wind_p": {"units": "Pa", "bounds": (4.0e4, 9.0e4), "tunable_tier": 3, "transform": "sigmoid", "category": "launch_level", "reference": "E3SM gw_beres_src k700 source-wind level", "shape": None},
             # --- analytic stand-in spectrum surrogate (not Beres-faithful) ---
             "mfcc_peak": {"units": "Pa", "bounds": (1.0e-4, 1.0e-1), "tunable_tier": 2, "transform": "sigmoid", "category": "source_spectrum", "reference": "stand-in mfcc surrogate (E3SM mfcc table replacement)", "shape": None},
             "mfcc_c0": {"units": "m/s", "bounds": (5.0, 90.0), "tunable_tier": 2, "transform": "sigmoid", "category": "source_spectrum", "reference": "stand-in mfcc surrogate phase-speed width", "shape": None},
@@ -52,7 +57,9 @@ __param_spec__ = {
     "E3SMCAMConfig": {
         "scheme_key": "atm.gwd.E3SMCAMConfig",
         "excluded": {
+            "ediff_kbot_p": "selects a level INDEX (the last reference interface with p below the value, E3SM gw_init), so the drag is piecewise-constant in it and its gradient is identically zero (review F4; Hines launch_p precedent)",
             "alpha_newtonian": "uniform Newtonian-cooling coefficient (default 0 = off); when used it is replaced by the E3SM height profile, not a single trained scalar",
+            "kwv": "E3SM module PARAMETER (gw_drag.F90:79-83 kwv = 6.28e-5), not a namelist knob; fixed by the oracle",
             # dc is the phase-speed bin width but the frontal source quadrature
             # turns it into a Python integer sub-interval COUNT
             # (e3sm_cam._front_fav: n_sub = int(math.floor(dc/dca + 0.5)) - 1,
@@ -76,33 +83,30 @@ __param_spec__ = {
             "dback": {"units": "m^2/s", "bounds": (0.0, 1.0), "tunable_tier": 2, "transform": "sigmoid", "category": "saturation", "reference": "E3SM gw_common background diffusivity dback", "shape": None},
             "prndl": {"units": "1", "bounds": (0.05, 1.0), "tunable_tier": 2, "transform": "sigmoid", "category": "saturation", "reference": "E3SM gw_diffusion inverse Prandtl number", "shape": None},
             "egwd_max": {"units": "m^2/s", "bounds": (10.0, 500.0), "tunable_tier": 3, "transform": "sigmoid", "category": "saturation", "reference": "E3SM gw_diffusion eddy-diffusivity cap", "shape": None},
-            "ediff_kbot_p": {"units": "Pa", "bounds": (3.0e4, 9.0e4), "tunable_tier": 3, "transform": "sigmoid", "category": "launch_level", "reference": "E3SM gw_diffusion kbotbg eddy-diffusion bottom level", "shape": None},
         },
     },
     "E3SMFrontalConfig": {
         "scheme_key": "atm.gwd.E3SMFrontalConfig",
         "excluded": {
+            "front_p": "selects a level INDEX (the last reference interface with p below the value, E3SM gw_init), so the drag is piecewise-constant in it and its gradient is identically zero (review F4; Hines launch_p precedent)",
+            "launch_p": "selects a level INDEX (the last reference interface with p below the value, E3SM gw_init), so the drag is piecewise-constant in it and its gradient is identically zero (review F4; Hines launch_p precedent)",
+            "frontgfc": "enters only a hard on/off comparison, so the drag is piecewise-constant in it and its gradient is identically zero (review F4; Hines launch_p precedent)",
             "front_spectrum_dc_resolution": "sub-bin c-grid quadrature spacing dca for the Gaussian integration; a numerical resolution of the spectrum, not a closure",
         },
         "params": {
             # --- frontal source amplitude / triggering ---
             "taubgnd": {"units": "Pa", "bounds": (1.0e-4, 1.0e-2), "tunable_tier": 1, "transform": "sigmoid", "category": "momentum_flux", "reference": "Charron & Manzini (2002); CAM taubgnd", "shape": None},
-            "frontgfc": {"units": "K^2/(m^2 s)", "bounds": (1.0e-16, 1.0e-13), "tunable_tier": 2, "transform": "sigmoid", "category": "source_spectrum", "reference": "E3SM namelist_defaults_eam.xml frontgfc 1.25e-15 (7.5e-16 at 4x5; 2e-14 at ne120np4 on E3SM master); Charron & Manzini (2002)", "shape": None},
             "c0": {"units": "m/s", "bounds": (10.0, 90.0), "tunable_tier": 2, "transform": "sigmoid", "category": "source_spectrum", "reference": "CAM gw_front Gaussian phase-speed width c0", "shape": None},
-            # --- launch / trigger levels ---
-            "launch_p": {"units": "Pa", "bounds": (3.0e4, 9.0e4), "tunable_tier": 3, "transform": "sigmoid", "category": "launch_level", "reference": "E3SM gw_front kbotbg launch interface", "shape": None},
-            "front_p": {"units": "Pa", "bounds": (4.0e4, 9.0e4), "tunable_tier": 3, "transform": "sigmoid", "category": "launch_level", "reference": "E3SM gw_front kfront trigger level", "shape": None},
         },
     },
     "E3SMOrographicConfig": {
         "scheme_key": "atm.gwd.E3SMOrographicConfig",
         "excluded": {
+            "oro_min_wind": "enters only a hard on/off comparison, so the drag is piecewise-constant in it and its gradient is identically zero (review F4; Hines launch_p precedent)",
+            "oro_min_h": "enters only a hard on/off comparison, so the drag is piecewise-constant in it and its gradient is identically zero (review F4; Hines launch_p precedent)",
             "sgh_default": "default subgrid-orography stddev (default 0 = no oro waves); a per-column boundary input supplied by the dataset, not a trained scalar",
         },
         "params": {
-            # --- orographic source activation thresholds ---
-            "oro_min_h": {"units": "m", "bounds": (1.0, 50.0), "tunable_tier": 2, "transform": "sigmoid", "category": "orographic", "reference": "McFarlane (1987); E3SM orohmin", "shape": None},
-            "oro_min_wind": {"units": "m/s", "bounds": (0.5, 6.0), "tunable_tier": 2, "transform": "sigmoid", "category": "orographic", "reference": "McFarlane (1987); E3SM orovmin", "shape": None},
         },
     },
     "GWDMLEmulatorConfig": {
@@ -120,6 +124,7 @@ __param_spec__ = {
         "excluded": {
             "U_mag_floor": "wind-magnitude floor for the direction projection; a divide-by-zero safety floor, not a closure",
             "doppler_sharpness": "sigmoid sharpness of the smooth saturation gate; a differentiability/smoothing width, not a closure",
+            "launch_p": "selects a launch level INDEX by argmin, so the drag is piecewise-constant in it and not usefully differentiable (E3SM selects kbotbg statically at init)",
         },
         "params": {
             # --- launch source spectrum (Hines 1997) ---
@@ -167,9 +172,8 @@ __param_spec__ = {
             "directional_spread": {"units": "1", "bounds": (0.25, 4.0), "tunable_tier": 2, "transform": "sigmoid", "category": "source_spectrum", "reference": "McFarlane (1987) multi-directional spreading factor", "shape": None},
             # --- source activation / clips / tendency limiters ---
             "min_wind": {"units": "m/s", "bounds": (0.5, 6.0), "tunable_tier": 2, "transform": "sigmoid", "category": "orographic", "reference": "McFarlane (1987) minimum source-level wind", "shape": None},
-            "tau_max": {"units": "Pa", "bounds": (1.0, 50.0), "tunable_tier": 3, "transform": "sigmoid", "category": "numerics", "reference": "McFarlane scheme launch-stress clip", "shape": None},
-            "tndmax_per_day": {"units": "m/s/day", "bounds": (100.0, 1000.0), "tunable_tier": 3, "transform": "sigmoid", "category": "damping", "reference": "E3SM gw_common tendency ceiling (orographic)", "shape": None},
-            "umcfac": {"units": "1", "bounds": (0.1, 0.9), "tunable_tier": 3, "transform": "sigmoid", "category": "damping", "reference": "E3SM gw_common umcfac no-reversal limiter", "shape": None},
+            "tndmax_per_day": {"units": "m/s/day", "bounds": (100.0, 1000.0), "tunable_tier": 3, "transform": "sigmoid", "category": "damping", "reference": "CAM6 gw_common tndmax = 400 m/s/day (cam_cesm2_1_rel_60)", "shape": None},
+            "umcfac": {"units": "1", "bounds": (0.1, 0.9), "tunable_tier": 3, "transform": "sigmoid", "category": "damping", "reference": "CAM6 gw_common umcfac no-reversal limiter", "shape": None},
         },
     },
     "PrognosticSpectralConfig": {
@@ -285,10 +289,10 @@ class LindzenConfig(NamedTuple):
 
 
 class McFarlaneConfig(NamedTuple):
-    """Configuration for smoothed McFarlane (1987) orographic GWD.
+    """Configuration for the CAM6 ``gw_oro`` orographic GWD (``mcfarlane``).
 
-    Extends the Lindzen approach with explicit launch flux control
-    and directional spreading.
+    Defaults are the CAM6 (cam_cesm2_1_rel_60) values; see ``mcfarlane.py``
+    for the algorithm and the smoothing fields' hard-switch limits.
 
     Fields
     ------
@@ -316,13 +320,10 @@ class McFarlaneConfig(NamedTuple):
         Sigmoid sharpness for the smooth ``U > min_wind`` activation
         (default 20.0).  Higher values approach a hard step.
     softmin_sharpness : float
-        Sigmoid sharpness of the saturation-cap blend (default 50.0).  Feeds
-        ``jax.nn.sigmoid(sat_sharpness*excess)`` to blend toward ``tau_sat``
-        when ``tau_carry`` exceeds it; higher values give a sharper cap at the
-        cost of larger gradients near the kink.
-    tau_max : float
-        Upper clip on launch stress [Pa] (default 10.0).  Operationally
-        protects against runaway stress in pathological columns.
+        Sigmoid sharpness of the saturation-cap blend (default 50.0): the
+        smooth form of CAM's ``tau = min(taudmp, tausat)``, blending toward
+        ``tausat`` with ``sigmoid(softmin_sharpness*(taudmp/tausat - 1))``;
+        exact ``min`` as the sharpness -> inf.
     fcrit2 : float
         Critical Froude number squared (default 1.0, CAM ``fcrit2``).  Used in
         the McFarlane (1987) / E3SM ``gw_oro_src`` displacement-height cap
@@ -347,9 +348,7 @@ class McFarlaneConfig(NamedTuple):
         the scalar ``config.h_topo`` fallback — because quadrupling a uniform
         500 m pseudo-mountain would silently quadruple drag over OCEAN (no
         landfrac factor in this scheme).  ``True`` on the scalar fallback
-        still raises for the same reason.  Skill retune of
-        ``G_0``/``directional_spread``/``tau_max`` against real SSO remains
-        owed (AMIP A/B 2026-07-17: stable, maxΔu ~0.6 m/s, tau_max-capped).
+        still raises for the same reason.
     use_depth_averaged_source : bool
         When ``True`` the source ``rho``/``N``/``U`` and the wave direction
         come from E3SM's dp-weighted low-level averages over the levels the
@@ -368,29 +367,21 @@ class McFarlaneConfig(NamedTuple):
         deposition).  ``True`` DEFAULT since 2026-07-17 (AMIP A/B: stable,
         small deltas; oracle behavior).
     crit_level_sharpness : float
-        Sigmoid sharpness [s/m] for the smooth critical-level filter
-        (default 10.0).  The orographic wave (phase speed ``c = 0``) has its
-        critical level where the source-projected wind ``U_proj`` reverses sign
-        (at ``U_proj = 0``); the smooth gate ramps in as ``U_proj`` drops toward
-        ``crit_level_floor`` (default +0.5 m/s), i.e. marginally BEFORE the true
-        reversal.  This reproduces the E3SM ``where ubmc*(ubi_above - c) > 0``
-        test (gw_common.F90:492) that the earlier ``|U_proj|`` saturation
-        stress silently dropped, letting waves transmit through and
-        accelerate a reversed jet.  Higher values approach a hard cutoff.  This
-        smooth gate handles the differentiable absorption of the carried stress;
-        the deposited drag additionally carries a HARD ``U_proj > 0`` positivity
-        mask in the scheme body so the VECTOR sink ``u*du_dt + v*dv_dt <= 0`` is
-        enforced STRICTLY (componentwise ``du_dt*u`` can be >0 for oblique winds).
+        Sigmoid sharpness [s/m] of the smooth critical-level test (default
+        10.0).  CAM6 zeroes the saturation stress of a layer whose interface
+        projected winds ``ubi`` differ in sign (gw_common.F90 ``(ubmc > 0)
+        .eqv. (ubi(k+1) > c)``, c = 0), so the residual stress is DEPOSITED
+        in that layer.  Each sign test is relaxed to
+        ``sigmoid(crit_level_sharpness*(ubi - crit_level_floor))`` and the
+        two are combined as a smooth XNOR multiplying ``tausat``; the hard
+        limit (sharpness -> inf, floor -> 0) is CAM's test exactly.
     crit_level_floor : float
-        Signed source-projected wind ``U_proj`` [m/s] (NOT a magnitude) at which
-        the smooth critical-level gate is half-on (default 0.5).  As ``U_proj``
-        drops toward and below this, the gate attenuates the CARRIED stress (not
-        ``tau_sat``), driving the propagated wave stress toward ~0.
+        Offset [m/s] of the two smoothed sign tests (default 0.5); CAM's
+        phase speed ``c = 0`` is the hard limit ``crit_level_floor -> 0``.
     tndmax_per_day : float
-        Absolute ceiling on ``|du/dt|`` [m/s/day] (default 500.0, CAM
-        ``tndmax`` for orographic-only; gw_common.F90:161).  Caps
-        physically-implausible accelerations in thin, low-density upper
-        layers where ``stress / (rho*dz)`` blows up.
+        Absolute ceiling on ``|du/dt|`` [m/s/day] (default 400.0, CAM6
+        ``tndmax = 400/86400`` in cam_cesm2_1_rel_60 gw_common.F90, applied
+        to the summed tendency with ``gw_apply_tndmax = .true.``).
     umcfac : float
         Maximum fraction of ``|c - U_proj|`` the wind may change per step
         (default 0.5, CAM ``umcfac``; gw_common.F90:642).  Prevents the
@@ -405,13 +396,12 @@ class McFarlaneConfig(NamedTuple):
     directional_spread: float = 1.0
     min_wind_sharpness: float = 20.0
     softmin_sharpness: float = 50.0
-    tau_max: float = 10.0
     fcrit2: float = 1.0
     use_e3sm_hdsp: bool | str = "auto"
     use_depth_averaged_source: bool = True
     crit_level_sharpness: float = 10.0
     crit_level_floor: float = 0.5
-    tndmax_per_day: float = 500.0
+    tndmax_per_day: float = 400.0
     umcfac: float = 0.5
 
 
@@ -446,25 +436,15 @@ class HinesConfig(NamedTuple):
     U_mag_floor: float = 0.1  # Wind-magnitude floor for projection [m/s]
     tndmax_per_day: float = 400.0
     umcfac: float = 0.5
-    # Launch pressure [Pa].  ``None`` (default) launches at the SURFACE —
-    # the legacy behaviour, byte-identical.  A non-orographic wave launched
-    # at the surface is born SUPERSATURATED wherever the launch amplitude
-    # exceeds ``sigma_sat = N/m_star``, and N is SMALLEST in the well-mixed
-    # boundary layer: on the 2.5 deg AMIP state the default 2.0 m/s exceeds
-    # the 1.25 m/s sigma_sat at 140 m over 78.5% of the planet's area, so
-    # the wave breaks AT its own launch level and deposits 55% of its
-    # momentum below 1 km (only 35% above 12 km).  Setting a launch level
-    # above the BL makes the scheme behave like a non-orographic source:
-    # no drag is deposited below it and the wave starts propagating there.
-    # Sibling schemes all carry one (E3SMFrontalConfig.launch_p, E3SM
-    # ``gw_front`` kbotbg); Hines was the only one without.
-    #
-    # NOT in ``__param_spec__``: spec eligibility is computed from a plain
-    # ``: float`` annotation, and this is ``float | None``.  That is the
-    # right classification anyway — the value selects a level INDEX by
-    # argmin, so the drag is piecewise-constant in it and it is not usefully
-    # differentiable (mirrors E3SM's static init-time kbotbg selection).
-    launch_p: float | None = None
+    # Launch pressure [Pa], default 700 hPa, legal range
+    # ``HINES_LAUNCH_P_RANGE_PA``.  There is no surface launch: a
+    # non-orographic wave launched at the surface is born SUPERSATURATED
+    # wherever the launch amplitude exceeds ``sigma_sat = N/m_star``, and N is
+    # SMALLEST in the well-mixed boundary layer (2.5 deg AMIP state: 2.0 m/s
+    # exceeds the 1.25 m/s sigma_sat at 140 m over 78.5% of the area), so it
+    # broke at its own launch level and deposited 55% of its momentum below
+    # 1 km.  No drag is deposited at or below the launch level.
+    launch_p: float = 7.0e4
 
 
 class PrognosticSpectralConfig(NamedTuple):
@@ -559,17 +539,25 @@ class E3SMFrontalConfig(NamedTuple):
         Gaussian width in phase speed [m/s] (default 30.0, CAM ``c0``).
     launch_p : float
         Pressure [Pa] of the wave LAUNCH interface ``kbot`` (E3SM ``kbotbg``,
-        the interface nearest 500 hPa; default 5.0e4).
+        the last reference interface above 500 hPa, gw_drag.F90:346;
+        default 5.0e4).
     front_p : float
         Pressure [Pa] of the frontogenesis TRIGGER level ``kfront`` (E3SM
-        ``kfront``, the level near 600 hPa where ``frontgf`` is tested;
-        default 6.0e4).  E3SM tests the trigger at ``kfront`` but launches at
+        ``kfront``, the layer whose top reference interface is the last one
+        above 600 hPa, gw_drag.F90:417-420; default 6.0e4).  E3SM tests the trigger at ``kfront`` but launches at
         ``kbot`` — these are NOT the same level.
     front_spectrum_dc_resolution : float
         Sub-bin c-grid spacing [m/s] for the Gaussian phase-speed
         quadrature in ``gw_front_init`` (``dca``); each phase-speed bin
         of width ``dc`` is integrated over ``nint(dc/dca)`` sub-intervals
         (default 0.1, E3SM ``gw_front.F90`` ``dca``).
+    effgw : float or None
+        Efficiency applied to THIS source's drag (CAM ``effgw_cm``; CAM6 f09
+        namelist 1.0).  ``None`` (default, byte-identical) falls back to
+        ``E3SMCAMConfig.effgw`` for the single-source path; a multi-source
+        ``E3SMCAMConfig.source`` ("orographic+frontal+convective") uses the
+        per-source value where set so each source keeps its own CAM
+        efficiency.
     latitude_taper : bool
         Apply the ``cos(lat)`` polar taper to the frontal tendencies.  E3SM
         sets this BY DYCORE (gw_drag.F90:829-833: ``do_latitude_taper =
@@ -579,10 +567,12 @@ class E3SMFrontalConfig(NamedTuple):
         tree.  legoESM's
         cubed-sphere / icosahedral / MPAS grids correspond to the
         UNSTRUCTURED branch, so the E3SM-equivalent value there is
-        ``False`` — the default ``True`` (legacy, matches E3SM structured)
-        suppresses frontal drag toward the poles (→ 0), a first-order
-        high-latitude difference.  Flip per grid family; behavioral →
-        AMIP-gated.
+        ``False``, which is the default here since 2026-09-17 (user decision).
+        It was ``True`` — E3SM's structured branch — and that suppressed the
+        drag toward the poles, exactly where the polar-night jet needs it;
+        the same class of defect as the surface-launch default this repo
+        already carries a rule about.  Set it ``True`` only for a genuinely
+        structured lat-lon lane.
     """
     taubgnd: float = 1.5e-3
     frontgfc: float = 1.25e-15
@@ -590,7 +580,8 @@ class E3SMFrontalConfig(NamedTuple):
     launch_p: float = 5.0e4
     front_p: float = 6.0e4
     front_spectrum_dc_resolution: float = 0.1
-    latitude_taper: bool = True
+    latitude_taper: bool = False
+    effgw: float | None = None
 
 
 class E3SMBeresConfig(NamedTuple):
@@ -631,7 +622,8 @@ class E3SMBeresConfig(NamedTuple):
         (E3SM ``10``, default 10.0).
     source_wind_p : float
         Pressure [Pa] of the source-wind level ``k700`` (E3SM selects the
-        level nearest 700 hPa; default 7.0e4).  The 700 hPa winds set the
+        layer whose top reference interface is the last one above 700 hPa,
+        gw_drag.F90:453-456; default 7.0e4).  The 700 hPa winds set the
         source direction and the storm speed.
     maxh : int
         Heating-depth table dimension (E3SM ``maxh = 20``); the diagnosed
@@ -658,6 +650,41 @@ class E3SMBeresConfig(NamedTuple):
         heating depth (default 0.05), a documented monotone surrogate for
         the real table's deepening-convection dependence.  Only used when
         ``use_stand_in_table=True``.
+    effgw : float or None
+        Efficiency applied to THIS source's drag (CAM ``effgw_beres_dp``;
+        CAM6 f09 namelist 0.4).  ``None`` (default, byte-identical) falls
+        back to ``E3SMCAMConfig.effgw``; see ``E3SMFrontalConfig.effgw``.
+    mfcc_table_path : str
+        Path of the offline Beres lookup-table netcdf (CAM/E3SM
+        ``gw_drag_file``, e.g. ``newmfspectra40_dc25.nc``: dims ``PS``, ``MW``,
+        ``HD``, variable ``mfcc``).  Empty (default) = no file; the kernel then
+        follows ``use_stand_in_table``.  When set, the GWD factories load it
+        once (``e3sm_cam.load_mfcc_table``) and thread it as ``mfcc_table``,
+        which the kernel uses regardless of ``use_stand_in_table``.
+    spectrum_shift : str
+        How the looked-up spectrum is Doppler-shifted to ground-relative
+        speeds: ``"circular"`` (E3SM ``cshift``, wraps the spectrum ends;
+        default) or ``"end_off"`` (CAM6 ``eoshift``, shifted-in bins are
+        zero).  CAM6 ``gw_convect.F90:239``.
+    storm_speed_truncate : bool
+        ``True`` (E3SM, default): the cell speed ``CS`` is truncated to an
+        integer before it shifts ``uh`` and the spectrum.  ``False`` (CAM6):
+        ``CS`` is kept real (``gw_convect.F90:217``; ``uh - CS`` real,
+        ``shift = -nint(CS/dc)``).
+    hd_index_rule : str
+        How the heating depth picks the table row: ``"nint"`` (E3SM
+        ``NINT(hdepth [km])``, half-km ties round UP; default) or
+        ``"nearest_grid"`` (CAM6 ``index_of_nearest(hdepth, hd)``,
+        gw_convect.F90:308-325: ``idx = 1 + count(hdepth > interfaces)`` with
+        interfaces at the half-km points, so an exact tie takes the LOWER
+        row).  Identical away from exact ties.
+    source_level_rule : str
+        Which midpoint supplies the source wind: ``"interface_below_p"``
+        (default; E3SM gw_drag.F90:453-456 and CAM6 gw_drag.F90:871-874, the
+        same rule): the lowest midpoint whose TOP reference interface
+        (``pref_edge``) is below ``source_wind_p``, i.e. the layer
+        straddling it.  ``"nearest_midpoint"`` (column-mean pressure nearest
+        ``source_wind_p``) matches neither oracle and raises.
     mfcc_uh_slope : float
         Fractional change of the stand-in spectrum amplitude per (m/s) of the
         heating-region mean wind ``uh`` (default 0.0 -> uh-independent).  The
@@ -682,6 +709,12 @@ class E3SMBeresConfig(NamedTuple):
     mfcc_c0: float = 30.0
     mfcc_hdepth_growth: float = 0.05
     mfcc_uh_slope: float = 0.0
+    effgw: float | None = None
+    mfcc_table_path: str = ""
+    spectrum_shift: str = "circular"
+    storm_speed_truncate: bool = True
+    source_level_rule: str = "interface_below_p"
+    hd_index_rule: str = "nint"
 
 
 class E3SMCAMConfig(NamedTuple):
@@ -698,9 +731,14 @@ class E3SMCAMConfig(NamedTuple):
     ------
     source : str
         Wave source: ``"orographic"`` (McFarlane c=0), ``"frontal"``
-        (uniform Gaussian spectrum tied to frontogenesis), or
-        ``"convective"`` (Beres 2004 source from the deep-convective
-        heating profile).  The Beres convective source's full
+        (uniform Gaussian spectrum tied to frontogenesis), ``"background"``
+        or ``"convective"`` (Beres 2004 source from the deep-convective
+        heating profile) — or a ``+``-joined set of them (e.g.
+        ``"orographic+frontal+convective"``, the CAM6 f09 suite): each source
+        runs its own ``gw_drag_prof`` solve with its own efficiency
+        (``frontal.effgw`` / ``beres.effgw``, falling back to ``effgw``) and
+        the tendencies are summed, as CAM's ``gw_tend`` accumulates them
+        into ``ptend``.  The Beres convective source's full
         bit-faithfulness needs an offline ``mfcc`` lookup table that is not
         bundled with the repo; by default ``"convective"`` runs with a
         documented analytic stand-in spectrum (see ``E3SMBeresConfig``).
@@ -711,7 +749,9 @@ class E3SMCAMConfig(NamedTuple):
     dc : float
         Phase-speed bin width [m/s] (default 2.5, CAM ``dc``).
     kwv : float
-        Effective horizontal wavenumber [1/m] (default 2*pi/1e5).
+        Effective horizontal wavenumber [1/m] (default 6.28e-5, the E3SM
+        ``gw_drag.F90:79-83`` parameter; was 2*pi/1e5, 5.07e-4 relative
+        larger).
     fcrit2 : float
         Critical Froude number squared (default 1.0, CAM ``fcrit2``).
     effgw : float
@@ -751,13 +791,13 @@ class E3SMCAMConfig(NamedTuple):
         over-heats by ``0.5*dt*(du^2+dv^2)/c_pd`` per step.  Orographic
         source only.
     use_newtonian_profile : bool
-        When ``True`` use the E3SM height-dependent Newtonian-cooling
-        profile (``alpha0``/``palph`` from gw_drag.F90, interpolated to the
-        column interface pressures) in the spectral saturation/diffusivity
-        instead of the single uniform ``alpha_newtonian``.  ``False``
-        (default) keeps the uniform value so the clean oracle comparison is
-        unchanged.  E3SM uses the profile for spectral sources and a tiny
-        floor (1e-6 1/s) for orographic-only.
+        ``True`` (DEFAULT, E3SM): the height-dependent Newtonian-cooling
+        profile (``alpha0``/``palph`` from gw_drag.F90, interpolated onto
+        the REFERENCE interfaces ``pref_edge``, gw_drag.F90:313-341) in the
+        saturation/diffusivity of every spectral source and of the
+        orographic member of a spectral suite.  ``False`` is a legacy
+        non-E3SM opt-out (uniform ``alpha_newtonian``).  The orographic-only
+        suite always uses the uniform ``alpha_newtonian`` (E3SM: 1e-6 1/s).
     use_e3sm_spectral_heating : bool
         E3SM-faithful spectral thermal term (``True`` DEFAULT since
         2026-07-17 — the oracle applies it unconditionally; ``False`` =
@@ -798,7 +838,8 @@ class E3SMCAMConfig(NamedTuple):
         ``150``, gw_diffusion.F90).
     ediff_kbot_p : float
         Pressure [Pa] of the eddy-diffusion bottom level ``kbotbg`` (E3SM
-        selects the interface nearest 500 hPa; default 5.0e4).
+        selects the last reference interface above 500 hPa,
+        gw_drag.F90:346; default 5.0e4).
     orographic : E3SMOrographicConfig
         Orographic source sub-config.
     frontal : E3SMFrontalConfig
@@ -809,7 +850,7 @@ class E3SMCAMConfig(NamedTuple):
     source: str = "orographic"
     pgwv: int = 0
     dc: float = 2.5
-    kwv: float = 2.0 * math.pi / 1.0e5
+    kwv: float = 6.28e-5        # E3SM v3.0.1 gw_drag.F90:79-83 ``kwv = 6.28e-5_r8``
     fcrit2: float = 1.0
     effgw: float = 0.125
     alpha_newtonian: float = 0.0
@@ -822,7 +863,7 @@ class E3SMCAMConfig(NamedTuple):
     dttke_use_intrinsic: bool = False
     use_discrete_ke_heating: bool = True
     use_e3sm_spectral_heating: bool = True
-    use_newtonian_profile: bool = False
+    use_newtonian_profile: bool = True
     do_eddy_diffusion: bool = False
     do_energy_conservation: bool = True
     prndl: float = 0.25

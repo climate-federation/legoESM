@@ -58,8 +58,10 @@ from legoesm.grids.vertical import (
     HybridSigmaPressureCoordinate,
     pressure_from_hybrid,
     dp_from_hybrid,
+    compute_geopotential,
     compute_geopotential_hybrid,
     compute_mass_flux_from_cumsum,
+    vertical_advection,
     vertical_advection_hybrid,
     compute_omega_hybrid,
 )
@@ -164,6 +166,9 @@ def reconstruct_spectral_state_from_npz(d, *, template: SpectralHydrostaticState
             "(missing the 'spectral_layout' marker)."
         )
 
+    def _early_name(n):
+        return n.decode() if isinstance(n, bytes | np.bytes_) else str(n)
+
     def _load_coeff(arr_in):
         """jnp.asarray with a LOUD x64 guard: complex128 coefficients silently
         downcast to complex64 when JAX x64 is disabled — the spectral transforms
@@ -178,6 +183,26 @@ def reconstruct_spectral_state_from_npz(d, *, template: SpectralHydrostaticState
                 "silently downcast the coefficients to complex64."
             )
         return out
+
+    # Refuse an old-convention droplet number BEFORE loading anything.
+    # Droplet number is stored PER MASS [1/kg] since 2026-08-14; an older
+    # checkpoint holds it per VOLUME with nothing else to tell the two apart,
+    # and reloading it as-is scales every droplet count by the air density.
+    # Mirrors the MPAS restart refusal.
+    _early_names = ([_early_name(n) for n in d["tracer_names"]]
+                    if "tracer_names" in keys else [])
+    if any(n in ("N_c", "N_r") for n in _early_names):
+        _stamp = (str(np.asarray(d["number_convention"]).item())
+                  if "number_convention" in keys else None)
+        if _stamp != "per_mass":
+            raise ValueError(
+                "spectral checkpoint carries cloud/rain droplet number "
+                "written under the old PER-VOLUME convention (no "
+                "'number_convention' stamp); the model now stores them "
+                "PER MASS [1/kg]. Re-run from the initial state, or divide "
+                "the stored N_c/N_r by air density and add "
+                "number_convention='per_mass' to the file."
+            )
 
     fields = {}
     for name in _SPECTRAL_COEFF_NAMES:
@@ -251,6 +276,15 @@ class SpectralPEConfig(NamedTuple):
     g: float = constants.g
     hyperdiff_coeff: float = 0.0
     hyperdiff_order: int = 2
+    # #1354/#1515: column-conserving tracer positivity BORROW (shared MPAS form).
+    # Default TRUE — this lane previously had NO tracer floor, so spectral
+    # transport (Gibbs ringing) left negative water; the borrow moves the
+    # deficit between levels, conserving each species' column integral and
+    # leaving the spectral T untouched (frozen-MSE-neutral for vapour AND
+    # condensate).  False restores the plain max(q,0).  The energy-consistent
+    # hard-floor T correction is not available here (T is spectral); the borrow
+    # is the energy-consistent path on this lane.
+    conservative_tracer_clamp: bool = True
     time_integrator: str = "ssp_rk3"  # "ssp_rk3", "ssp_rk34", or "ssp_rk54"
     semi_implicit: bool = False      # Use Hoskins-Simmons semi-implicit
     si_T_ref: float = 300.0         # Reference temperature for linearization [K]
@@ -317,32 +351,6 @@ class SpectralPEConfig(NamedTuple):
 # Internal vertical helpers (generic shapes, no cubed-sphere assumptions)
 # =============================================================================
 
-def _compute_geopotential_gaussian(T, p_s, sigma_coord, phis):
-    """Simmons-Burridge geopotential on Gaussian grid.
-
-    Same math as vertical.compute_geopotential but with generic
-    broadcasting: T is (..., nlev), p_s is (...), phis is (...).
-    """
-    R_d = constants.R_d
-    ln_ratio = sigma_coord.ln_ratio   # (nlev,)
-    alpha = sigma_coord.alpha         # (nlev,)
-
-    dPhi = R_d * T * ln_ratio         # broadcast: (..., nlev)
-
-    dPhi_reversed = dPhi[..., ::-1]
-    cumsum_reversed = jnp.cumsum(dPhi_reversed, axis=-1)
-    cumsum = cumsum_reversed[..., ::-1]
-
-    Phi_above = phis[..., None] + cumsum
-
-    Phi_below = jnp.concatenate(
-        [Phi_above[..., 1:], phis[..., None]], axis=-1,
-    )
-
-    Phi_full = Phi_below + alpha * R_d * T
-    return Phi_full
-
-
 def _compute_sigma_dot_gaussian(div_3d, sigma_coord):
     """Sigma-dot on arbitrary grid shape. div_3d is (..., nlev).
 
@@ -374,28 +382,6 @@ def _compute_sigma_dot_gaussian(div_3d, sigma_coord):
     pad_axes = ((0, 0),) * (sigma_dot_inner.ndim - 1) + ((1, 1),)
     sigma_dot = jnp.pad(sigma_dot_inner[..., :-1], pad_axes)
     return sigma_dot, D_total
-
-
-def _vertical_advection_sigma_gaussian(field, sigma_dot, sigma_coord):
-    """Vertical advection -sigma_dot * dfield/dsigma (upwind). Generic shapes.
-
-    Top/bottom boundaries pad with a zero gradient; using ``jnp.pad``
-    instead of ``concatenate([jnp.zeros(...), ...])`` lowers to a
-    single XLA ``Pad`` op rather than allocating a fresh zero buffer
-    every RHS evaluation (this helper runs 3-5× per outer step under
-    SSP-RK).
-    """
-    sigma_dot_full = 0.5 * (sigma_dot[..., :-1] + sigma_dot[..., 1:])
-    dsigma_bwd = sigma_coord.dsigma_full
-    df_bwd = jnp.diff(field, axis=-1)
-    diff = df_bwd / dsigma_bwd
-
-    pad_axes = ((0, 0),) * (diff.ndim - 1)
-    grad_bwd = jnp.pad(diff, (*pad_axes, (1, 0)))
-    grad_fwd = jnp.pad(diff, (*pad_axes, (0, 1)))
-
-    grad = jnp.where(sigma_dot_full > 0, grad_bwd, grad_fwd)
-    return -sigma_dot_full * grad
 
 
 _WARNED_NON_CONSERVING: set[tuple[str, bool]] = set()
@@ -460,7 +446,7 @@ def _vertical_advection_sigma_sb(field, sigma_dot, sigma_coord):
     supports a conserved ``sum(ps * dsigma * T)`` under adiabatic flow.
 
     Measured motivation: the legacy first-order UPWIND advective form
-    (:func:`_vertical_advection_sigma_gaussian`) carries a systematic
+    (:func:`legoesm.grids.vertical.vertical_advection`) carries a systematic
     -36 W/m^2 (-0.32 K/day at t=0, -0.47 K/day after adjustment) mass-
     weighted temperature sink at T63L8 — the dominant term of the dycore's
     measured -0.48 K/day zero-physics global cooling (2026-08-10 budget
@@ -484,6 +470,13 @@ def _compute_omega_gaussian(sigma_dot, p_s, dp_s_dt, sigma_coord):
     sigma_dot_full = 0.5 * (sigma_dot[..., :-1] + sigma_dot[..., 1:])
     omega = sigma_full * dp_s_dt[..., None] + p_s[..., None] * sigma_dot_full
     return omega
+
+
+def _tracer_global_mass(q, dp, area_w):
+    """``sum_cells area * sum_k dp_k q_k`` in the budget accumulator: a
+    tracer's global mass (times g) on the grid layer masses ``dp``."""
+    acc = area_w.dtype
+    return jnp.sum(area_w * q.astype(acc) * dp.astype(acc))
 
 
 def _tracer_advection_gaussian(
@@ -564,7 +557,7 @@ def _tracer_advection_gaussian(
         # non-conditional on ``sigma_dot``.
         return horiz_adv
 
-    vert_adv = _vertical_advection_sigma_gaussian(q_grid, sigma_dot, sigma_coord)
+    vert_adv = vertical_advection(q_grid, sigma_dot, sigma_coord)
     return horiz_adv + vert_adv
 
 
@@ -598,7 +591,7 @@ def spectral_pe_tendencies(
     _vadv_scheme = config.vertical_advection_scheme
     if _vadv_scheme == "upwind":
         _warn_non_conserving_numerics(_vadv_scheme, config.frictional_heating)
-        _vadv_sigma = _vertical_advection_sigma_gaussian
+        _vadv_sigma = vertical_advection
         _vadv_hybrid = vertical_advection_hybrid
     elif _vadv_scheme == "sb_centered":
         if not config.frictional_heating:
@@ -692,7 +685,7 @@ def spectral_pe_tendencies(
     if _hybrid:
         Phi = compute_geopotential_hybrid(T, p_s, sigma_coord, phis)
     else:
-        Phi = _compute_geopotential_gaussian(T, p_s, sigma_coord, phis)
+        Phi = compute_geopotential(T, p_s, sigma_coord, phis)
 
     # --- 5. Kinetic energy (pole-safe via oc2 transform) ---
     # KE = (u²+v²)/2 = (u_cos²+v_cos²)/(2·cos²φ).  Computing KE on the
@@ -1051,6 +1044,51 @@ def spectral_pe_tendencies(
         dT_hat = dT_hat + physics_tendency.T_hat.data
         dlnps_hat = dlnps_hat + physics_tendency.lnps_hat.data
 
+    # Physics water carries its MASS (review 2026-10-10 F13 remainder; the
+    # dry-mass convention of ``conservation.apply_physics_water_mass``):
+    # water species are specific (per total mass), so a physics water
+    # tendency D_k = sum_x dq_x,k [1/s] moves the column mass by
+    #   dp_s/dt = sum_k dp_k D_k            [Pa/s, + = water added]
+    # (rain lowers p_s, evaporation raises it).  It enters the lnps
+    # tendency as SH(dp_s/dt / p_s); every tracer is then re-weighted by
+    # its layer-mass change, dq_t += -q_t b_k dps_eff/dp_k (b = dB on
+    # hybrid, dsigma on sigma), with dps_eff the p_s tendency the truncated
+    # lnps actually carries, so each tracer's mass changes by exactly
+    # dp*dq_phys and the column dry mass by the truncation residual only.
+    # Without this the water left at fixed p_s and the anchor kept it as
+    # dry air.
+    _phys_dps_lnps_hat = None
+    if (physics_tendency is not None and state.tracers is not None
+            and physics_tendency.tracers is not None):
+        from legoesm.core.conservation import WATER_MASS_SPECIES
+        _D = None
+        for _nm in WATER_MASS_SPECIES:
+            if _nm in physics_tendency.tracers and _nm in state.tracers:
+                _v = physics_tendency.tracers[_nm]
+                _v = _v.data if hasattr(_v, "data") else _v
+                _D = _v if _D is None else _D + _v
+        if _D is not None:
+            _dp_phys = sigma_coord.layer_thickness_dp(p_s)
+            _x_phys = jnp.sum(_dp_phys * _D, axis=-1) / p_s
+            _phys_dps_lnps_hat = sh_analysis(grid, _x_phys)
+            # The truncated lnps carries p_s * P[x], whose global integral
+            # differs from that of the physics water p_s * x; one l=0 shift
+            # c makes the GLOBAL column-mass change exactly the physics
+            # water, so the physics leaves the global dry mass untouched
+            # (the anchor's factor then stays the dynamics' share, which the
+            # transport fixer removes).
+            from legoesm.core.conservation import conservation_accumulator
+            _accp = conservation_accumulator()
+            _Px = sh_synthesis(grid, _phys_dps_lnps_hat if _dealias is None
+                               else _phys_dps_lnps_hat * _dealias)
+            _wA = grid.grid_area.astype(_accp) * p_s.astype(_accp)
+            _c_phys = (jnp.sum(_wA * (_x_phys - _Px).astype(_accp))
+                       / jnp.sum(_wA))
+            _phys_dps_lnps_hat = _phys_dps_lnps_hat.at[0].add(
+                (_c_phys * jnp.sqrt(jnp.asarray(4.0 * jnp.pi, dtype=_accp))
+                 ).astype(_phys_dps_lnps_hat.dtype))
+            dlnps_hat = dlnps_hat + _phys_dps_lnps_hat
+
     # Apply dealiasing truncation to prevent aliasing instability
     if _dealias_3d is not None:
         dvor_hat = dvor_hat * _dealias_3d
@@ -1074,6 +1112,51 @@ def spectral_pe_tendencies(
         tracers_tend = None
     else:
         is_hybrid = isinstance(sigma_coord, HybridSigmaPressureCoordinate)
+        # Transport mass fixer (review 2026-10-10 F21).  The tracer transport
+        # below is in ADVECTIVE form (pseudo-spectral -v.grad q, upwind
+        # sigma-dot dq/dsigma), which does not telescope: its tendency does
+        # not conserve a tracer's mass sum A sum_k dp_k q_k.  Per tracer and
+        # per stage, subtract lambda*q from the TRANSPORT tendency so that
+        #   sum A sum_k ( dq_k/dt dp_k + q_k d(dp_k)/dt ) = 0,
+        # with d(dp_k)/dt = b_k dp_s/dt the model's EFFECTIVE pressure update
+        # (dynamics lnps tendency, dealiased; b = dB on hybrid, dsigma on
+        # sigma).  With the mass anchor on, the anchor rescales p_s
+        # multiplicatively after the step, so its share
+        # (sum A dp_s/dt / sum A p_s) * p_s is removed here too -- then a
+        # uniform q has lambda = 0 and stays uniform.  The anchor holds the
+        # DRY mass since the F13 remainder (``anchor_lnps_to_dry_mass``,
+        # still without re-weighting the tracers); the share is unchanged:
+        # with it removed, every tracer's (water included) RK mass change is
+        # q b p_s sigma dt and the dry anchor's factor is 1/(1 + sigma dt)
+        # exactly when sigma = sum A dp_s/dt / sum A p_s.  Without the anchor
+        # the raw tendency is the update (codex review 2026-10-10).
+        # Proportional, so positivity is untouched; physics tendencies are
+        # added after and are not corrected.  The residual is the time
+        # integrator's error on this bilinear invariant.
+        from legoesm.core.conservation import conservation_accumulator
+        _acc = conservation_accumulator()
+        _w_tr = grid.grid_area.astype(_acc)[..., None]
+        _dp_tr = sigma_coord.layer_thickness_dp(p_s).astype(_acc)
+        _b_tr = (sigma_coord.dB if is_hybrid else sigma_coord.dsigma)
+        _dlnps_dyn = (_dlnps_hat_pre if _dealias is None
+                      else _dlnps_hat_pre * _dealias)
+        _dps_dt = (p_s.astype(_acc)
+                   * sh_synthesis(grid, _dlnps_dyn).astype(_acc))
+        if config.fix_mass and config.anchor_mass_to_initial:
+            _ps_acc = p_s.astype(_acc)
+            _dps_dt = _dps_dt - _ps_acc * (
+                jnp.sum(_w_tr[..., 0] * _dps_dt)
+                / jnp.sum(_w_tr[..., 0] * _ps_acc))
+        _ddp_dt_tr = jnp.asarray(_b_tr, dtype=_acc) * _dps_dt[..., None]
+        # Physics-water layer-mass change (see the physics block above):
+        # -q b dps_eff / dp re-weights each tracer onto it.
+        _rw_phys = None
+        if _phys_dps_lnps_hat is not None:
+            _pl = (_phys_dps_lnps_hat if _dealias is None
+                   else _phys_dps_lnps_hat * _dealias)
+            _dps_eff = p_s * sh_synthesis(grid, _pl)
+            _rw_phys = (jnp.asarray(_b_tr) * _dps_eff[..., None]
+                        / sigma_coord.layer_thickness_dp(p_s))
         tracers_tend = {}
         for name, value in state.tracers.items():
             q_grid = value.data if hasattr(value, "data") else value
@@ -1093,6 +1176,13 @@ def spectral_pe_tendencies(
                     q_grid, mass_flux, p_s, sigma_coord
                 )
                 dq_dt_grid = dq_dt_grid + vert_adv_q
+            # F21 transport mass fixer (see above).
+            _num = (_tracer_global_mass(dq_dt_grid, _dp_tr, _w_tr)
+                    + _tracer_global_mass(q_grid, _ddp_dt_tr, _w_tr))
+            _mass = _tracer_global_mass(q_grid, _dp_tr, _w_tr)
+            _live = jnp.abs(_mass) > jnp.finfo(_acc).tiny
+            _lam = jnp.where(_live, _num / jnp.where(_live, _mass, 1.0), 0.0)
+            dq_dt_grid = dq_dt_grid - (_lam * q_grid).astype(dq_dt_grid.dtype)
             # Add physics tendency for this tracer when the bridge
             # provided one.
             if (
@@ -1103,6 +1193,9 @@ def spectral_pe_tendencies(
                 phys_v = physics_tendency.tracers[name]
                 phys_grid = phys_v.data if hasattr(phys_v, "data") else phys_v
                 dq_dt_grid = dq_dt_grid + phys_grid
+            if _rw_phys is not None:
+                dq_dt_grid = dq_dt_grid - (q_grid * _rw_phys).astype(
+                    dq_dt_grid.dtype)
             # Wrap back into the original container type so pytree
             # leaves match.
             if hasattr(value, "data") and hasattr(value, "replace"):
@@ -1193,6 +1286,90 @@ def apply_sponge_filter(state, sponge_factor, sponge_factor_T):
         div_hat=state.div_hat.replace(data=div_hat_damped),
         T_hat=state.T_hat.replace(data=T_hat_damped),
     )
+
+
+# --- explicit-advection stability gate (2026-08-23 WB blowup) --------------
+# The semi-implicit step treats ONLY the linear gravity-wave subsystem
+# implicitly; the RK3 advection stays explicit with the spectral bound
+#     u_ref * n_max * dt_step / R_earth <= sqrt(3)
+# (imaginary-axis limit of SSP-RK3 on the fastest resolved advective mode).
+# Measured at T63: dt=1800 with si_substeps=1 sits at u_crit ~ 97 m/s — under
+# real winter jets — and blew up exponentially within 12 steps on every level
+# count, feeding an entire training campaign mid-blowup 6-hour states.
+# u_ref is a design wind envelope ABOVE expected maxima (~2x midlatitude
+# jets), not the measured threshold: gating at the measured 97 m/s would
+# re-legalise the blowup configuration at equality.
+# One bound, one home: the deck gate (tests/unit/test_wb_campaign_dt_stability)
+# and the runtime check both import these.
+ADVECTIVE_CFL_U_REF = 150.0        # [m/s]
+# Hard-error floor (#1663): real winter jets reach ~100 m/s; a spectral config
+# whose u_crit falls below this on ssp_rk3 is the measured 2026-08-23 blowup
+# class, not a design-margin false alarm.  Between this and u_ref it WARNS.
+U_CRIT_HARD_FLOOR = 100.0          # [m/s]
+RK3_ADVECTIVE_BOUND = math.sqrt(3.0)
+
+
+def advective_cfl_courant(n_max: int, dt_step: float,
+                          u_ref: float = ADVECTIVE_CFL_U_REF) -> float:
+    """Courant number of the explicit advective step at wind ``u_ref``."""
+    return u_ref * float(n_max) * float(dt_step) / constants.R_earth
+
+
+def check_advective_cfl(n_max: int, dt: float, config: SpectralPEConfig) -> None:
+    """Refuse a spectral configuration whose explicit advection is unstable.
+
+    ``si_substeps`` subdivides the step ONLY on the semi-implicit path;
+    an explicit configuration advances at the full ``dt``.
+    """
+    import warnings
+    n_sub = int(config.si_substeps) if config.semi_implicit else 1
+    dt_step = float(dt) / max(n_sub, 1)
+    c = advective_cfl_courant(n_max, dt_step)
+    if c <= RK3_ADVECTIVE_BOUND:
+        return
+    # #1663 review (warn-plus-refuse): the old blanket hard error keyed on the
+    # u_ref=150 m/s DESIGN envelope over-blocked legitimate configs — the T42
+    # dt=1800 Held-Suarez benchmark (u_crit~146, real jets ~40 m/s, stable) and
+    # larger-stability integrators (ssp_rk34/rk4/ssp_rk54) for which the SSP-RK3
+    # sqrt(3) bound is conservative.  But downgrading to a bare warning would
+    # be void in a campaign harness (printed once per location, ignored by the
+    # builder), silently re-admitting the 2026-08-23 blowup.  So: hard-error
+    # ONLY the measured blowup class, warn the design-margin band / non-RK3.
+    #   u_crit = the wind at which the SSP-RK3 advective Courant number hits the
+    #   bound.  Real winter jets reach ~100 m/s (the incident sat at u_crit~97),
+    #   so u_crit below that floor on ssp_rk3 is a genuine blowup risk.
+    u_crit = RK3_ADVECTIVE_BOUND * constants.R_earth / (float(n_max) * dt_step)
+    _detail = (f"advective Courant number {c:.2f} > {RK3_ADVECTIVE_BOUND:.2f} "
+               f"(SSP-RK3 bound): u_crit={u_crit:.0f} m/s (n_max={n_max}, "
+               f"dt={dt}, si_substeps={config.si_substeps}, "
+               f"semi_implicit={config.semi_implicit}, "
+               f"time_integrator={config.time_integrator}).")
+    # Normalise the integrator name (GLM re-review: exact-match broke on
+    # "SSP_RK3"/"ssp-rk3").  Gated to ssp_rk3 — the measured-blowup + default
+    # integrator; the larger-stability schemes (ssp_rk34/rk4/ssp_rk54) carry
+    # more headroom than the sqrt(3) u_crit assumes, so they WARN.  FOLLOW-UP
+    # (GLM): a per-integrator advective bound would let the hard gate cover
+    # them precisely, and the 100 m/s floor could rise toward ~120 for NN
+    # training wind transients; both are threshold choices left to the owner.
+    # The SI path ALWAYS executes ssp_rk3 (ssp_rk3_step_si) regardless of the
+    # time_integrator field, so semi_implicit=True is ssp_rk3 for CFL purposes
+    # (codex re-review: else semi_implicit + time_integrator=ssp_rk54 would warn
+    # while actually running SSP-RK3).  Only the EXPLICIT path honours the field.
+    _integrator = str(config.time_integrator).strip().lower().replace("-", "_")
+    _is_rk3 = bool(config.semi_implicit) or _integrator == "ssp_rk3"
+    if u_crit < U_CRIT_HARD_FLOOR and _is_rk3:
+        raise ValueError(
+            f"unstable spectral configuration: {_detail} u_crit is below the "
+            f"{U_CRIT_HARD_FLOOR:.0f} m/s winter-jet floor on ssp_rk3 — the T63 "
+            "dt=1800 blowup class of 2026-08-23 that silently trained a whole "
+            "campaign mid-blowup. Raise si_substeps or lower dt.")
+    warnings.warn(
+        f"{_detail} u_crit is in the {U_CRIT_HARD_FLOOR:.0f}-"
+        f"{ADVECTIVE_CFL_U_REF:.0f} m/s design-margin band (or a "
+        "larger-stability integrator where the SSP-RK3 bound is conservative) "
+        "— likely a false alarm for a low-jet case such as Held-Suarez, but "
+        "verify the run's expected winds stay below u_crit.",
+        RuntimeWarning, stacklevel=2)
 
 
 def apply_spectral_filter_to_state(state, spectral_filter, *,
@@ -1350,6 +1527,45 @@ def anchor_lnps_to_mass(grid, state, target_mass):
     lnps_hat_new = state.lnps_hat.data.at[0].add(
         (log_scale * sqrt_4pi).astype(state.lnps_hat.data.dtype),
     )
+    return state._replace(lnps_hat=state.lnps_hat.replace(data=lnps_hat_new))
+
+
+def spectral_dry_mass(grid, sigma_coord, state) -> jnp.ndarray:
+    """``∫ dry p_s dA`` [Pa m^2] (fp64) of a spectral state: the coordinate's
+    dry surface pressure (``conservation.dry_surface_pressure``) over the
+    state's grid-space water tracers; ``∫ p_s dA`` when it carries none."""
+    from legoesm.core.conservation import dry_surface_pressure
+    acc = jnp.float64
+    p_s = jnp.exp(sh_synthesis(grid, state.lnps_hat.data)).astype(acc)
+    dry = dry_surface_pressure(p_s, state.tracers, sigma_coord)
+    return jnp.sum(dry * grid.grid_area.astype(acc))
+
+
+def anchor_lnps_to_dry_mass(grid, sigma_coord, state, target_dry_mass):
+    """Restore the global DRY mass to ``target_dry_mass`` (review 2026-10-10
+    F13 remainder; the dry-mass convention of the other lanes) with one
+    multiplicative ``p_s`` factor ``s`` (the same ``lnps_hat[0]`` shift as
+    :func:`anchor_lnps_to_mass`, so every ``p_s`` gradient is kept).  The
+    tracers are NOT re-weighted (a uniform q stays uniform); the dry mass
+    is affine in ``s`` for sigma and hybrid layers (``p_top`` and every
+    ``dp_k`` are affine in ``p_s``), so ``s = 1 + (target - D(1)) / (D(2) -
+    D(1))`` is exact.  The tracer mass the factor moves, ``(s-1)`` times the
+    layer masses, is pre-subtracted by the transport fixer in
+    :func:`spectral_pe_tendencies` (dynamics conserves water, so the dry
+    drift it removes is the dynamics' ``sum A dp_s/dt``).  No tracers:
+    ``s = target / ∫ p_s dA``, identical to :func:`anchor_lnps_to_mass`.
+    Differentiable and jit-safe (``target_dry_mass`` traced)."""
+    from legoesm.core.conservation import dry_surface_pressure
+    acc = jnp.float64
+    area = grid.grid_area.astype(acc)
+    p_s = jnp.exp(sh_synthesis(grid, state.lnps_hat.data)).astype(acc)
+    d1 = jnp.sum(dry_surface_pressure(p_s, state.tracers, sigma_coord) * area)
+    d2 = jnp.sum(
+        dry_surface_pressure(2.0 * p_s, state.tracers, sigma_coord) * area)
+    scale = 1.0 + (jnp.asarray(target_dry_mass, dtype=acc) - d1) / (d2 - d1)
+    sqrt_4pi = jnp.sqrt(jnp.asarray(4.0 * jnp.pi, dtype=acc))
+    lnps_hat_new = state.lnps_hat.data.at[0].add(
+        (jnp.log(scale) * sqrt_4pi).astype(state.lnps_hat.data.dtype))
     return state._replace(lnps_hat=state.lnps_hat.replace(data=lnps_hat_new))
 
 
@@ -1634,15 +1850,74 @@ class SpectralPrimitiveEquationModel:
         self._tracer_filter_dt = dt
 
     def _apply_tracer_filter(self, state):
-        """Apply the precomputed tracer filter to ``state.tracers`` (no-op
-        when filter or tracers are absent)."""
-        if self._tracer_filter is None or state.tracers is None:
+        """Apply the spectral tracer filter (if any) then the positivity stage.
+
+        #1354/#1515: this lane previously had NO tracer positivity — spectral
+        transport (Gibbs ringing at sharp moisture edges) leaves negative water
+        that microphysics reads as nonsense.  The conserving BORROW (default)
+        preserves each species' column integral and leaves the SPECTRAL T
+        untouched, so it is fully frozen-MSE-neutral here for vapour AND
+        condensate.  The energy-consistent hard-floor T correction is NOT wired
+        on this lane because T lives in spectral space (``T_hat``); the borrow
+        IS the energy-consistent path here, and the non-default hard floor stays
+        a plain ``max(q,0)``.
+        """
+        if state.tracers is None:
             return state
-        return state._replace(
-            tracers=apply_filter_to_tracers(
-                state.tracers, self._tracer_filter, self.grid,
-            )
-        )
+        dp = self._tracer_layer_mass(state)
+        if self._tracer_filter is not None:
+            filtered = apply_filter_to_tracers(
+                state.tracers, self._tracer_filter, self.grid)
+            # F21: the SH filter keeps each level's AREA mean of q, not the
+            # tracer MASS (p_s varies), so restore each tracer's global mass
+            # to its pre-filter value with one multiplicative factor (a
+            # global factor, not per level: sparse condensate levels make a
+            # per-level ratio ill-conditioned).
+            from legoesm.core.conservation import conservation_accumulator
+            _acc = conservation_accumulator()
+            _w = self.grid.grid_area.astype(_acc)[..., None]
+            out = {}
+            for name, f in filtered.items():
+                q_new = f.data if hasattr(f, "replace") else f
+                o = state.tracers[name]
+                q_old = o.data if hasattr(o, "replace") else o
+                m_new = _tracer_global_mass(q_new, dp, _w)
+                live = m_new > jnp.finfo(_acc).tiny
+                fac = jnp.where(live, jnp.maximum(
+                    _tracer_global_mass(q_old, dp, _w)
+                    / jnp.where(live, m_new, 1.0), 0.0), 1.0)
+                q_new = q_new * fac.astype(q_new.dtype)
+                out[name] = (f.replace(data=q_new) if hasattr(f, "replace")
+                             else q_new)
+            state = state._replace(tracers=out)
+        return self._apply_tracer_positivity(state, dp)
+
+    def _tracer_layer_mass(self, state):
+        """Grid-space layer mass ``dp`` from lnps (one SH synthesis), with the
+        positive-weight contract ``max(dp, 0)`` on hybrid levels.  On pure
+        sigma the per-column p_s cancels in the borrow rescale, but real dp is
+        correct on hybrid too."""
+        coord = self.sigma_coord
+        p_s = jnp.exp(sh_synthesis(self.grid, state.lnps_hat.data))
+        if isinstance(coord, HybridSigmaPressureCoordinate):
+            return jnp.maximum(dp_from_hybrid(coord, p_s), 0.0)
+        return p_s[..., None] * coord.dsigma.astype(p_s.dtype)
+
+    def _apply_tracer_positivity(self, state, dp=None):
+        """Shared tracer positivity for the spectral lane (borrow / plain).
+        With the Gaussian cell area the borrow keeps the global
+        net-negative-column residual mass-weighted."""
+        if state.tracers is None:
+            return state
+        from legoesm.core.conservation import apply_water_positivity
+        if dp is None:
+            dp = self._tracer_layer_mass(state)
+        tracers_out, _ = apply_water_positivity(
+            state.tracers, None, dp,
+            conservative=self.config.conservative_tracer_clamp,
+            energy_consistent=False,  # T is spectral here — borrow is the E-C path
+            area=self.grid.grid_area)
+        return state._replace(tracers=tracers_out)
 
     def _ensure_si_data_leapfrog(self, dt: float):
         """Precompute SI matrices for leapfrog (dt_eff = 2*dt)."""
@@ -1772,7 +2047,11 @@ class SpectralPrimitiveEquationModel:
         """
         if target_mass is None:
             target_mass = self._target_mass
-        return anchor_lnps_to_mass(self.grid, state, target_mass)
+        # DRY mass (F13 remainder): the anchor no longer puts precipitated
+        # water back as dry air.  Tracers are not re-weighted; the transport
+        # fixer pre-subtracts the factor's share of their mass.
+        return anchor_lnps_to_dry_mass(
+            self.grid, self.sigma_coord, state, target_mass)
 
     def _maybe_snapshot_target_mass(self, state) -> None:
         """First-call anchored-mass snapshot, shared by step()/integrate().
@@ -1796,8 +2075,9 @@ class SpectralPrimitiveEquationModel:
         self._target_mass = self._compute_initial_mass(state)
 
     def _compute_initial_mass(self, state):
-        """Compute total dry mass ``∫ p_s dA`` in fp64 from a spectral state."""
-        return global_dry_mass(self.grid, state.lnps_hat.data)
+        """Global DRY mass ``∫ dry p_s dA`` in fp64 (``∫ p_s dA`` for a state
+        without tracers): the anchor's target (F13 remainder)."""
+        return spectral_dry_mass(self.grid, self.sigma_coord, state)
 
     def compute_mass(self, state) -> jax.Array:
         """Public alias of ``_compute_initial_mass`` (iter-22).

@@ -190,7 +190,8 @@ def build_pixel_config(pft: str, texture: str, freeze_thaw: bool,
             n_layers=n_layers, total_depth=soil_depth, growth_factor=1.5),
         hydraulics=SoilHydraulicsConfig(**SOIL_TEXTURE_VG[texture]),
         thermal=SoilThermalConfig(enable_freeze_thaw=freeze_thaw),
-        richards=RichardsConfig(),
+        # Land tables were calibrated with the drainage limiter at 0.5 (#862).
+        richards=RichardsConfig(fc_drain_saturation=0.5),
         carbon=carbon,
         stomata=StomataConfig(
             enabled=True, stomata_model="ball_berry",

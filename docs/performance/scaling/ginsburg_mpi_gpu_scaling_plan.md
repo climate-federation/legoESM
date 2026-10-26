@@ -41,7 +41,7 @@ P1. Lat-lon MPI in benches (design corrected per codex review 2026-06-10):
 P2. Ocean MPI scaling harness must be rank-local from construction (codex):
     `slice_cgrid_geometry_to_band` + `scatter_state_latlon_cgrid_ocean`
     BEFORE model creation — the lat-lon C-grid ocean model caches static
-    structures (rigid-lid islands, ocean_model_latlon_cgrid.py:543) at
+    structures (rigid-lid islands, ocean_model_latlon_cgrid.py:544) at
     build time. Tripole fold: `ParallelRuntime.create(grid_type="latlon")`
     does NOT plumb `global_n_lon`/`fold` — either extend it or call
     `initialize_distributed_latlon(..., fold=...)` directly. Weak + strong,

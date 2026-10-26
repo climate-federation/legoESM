@@ -1,0 +1,79 @@
+diff --git a/cfgs/DINO/MY_SRC/ldfslp.F90 b/cfgs/DINO/MY_SRC/ldfslp.F90
+--- a/cfgs/DINO/MY_SRC/ldfslp.F90
++++ b/cfgs/DINO/MY_SRC/ldfslp.F90
+@@ -88,3 +88,7 @@
+    REAL(wp), ALLOCATABLE, SAVE, DIMENSION(:,:,:) ::   uslp_raw_dump, vslp_raw_dump
+    REAL(wp), ALLOCATABLE, SAVE, DIMENSION(:,:,:) ::   uslp_postshapiro_dump, vslp_postshapiro_dump
++   ! #1226 row 30 continuation: write-only raw-U composite operands.
++   REAL(wp), ALLOCATABLE, SAVE, DIMENSION(:,:,:) ::   iku_dump, zfi_dump, e3u_miku_dump, zdepu_dump
++   REAL(wp), ALLOCATABLE, SAVE, DIMENSION(:,:,:) ::   zuslp_hml_pre_dump, sint_u_dump
++   REAL(wp), ALLOCATABLE, SAVE, DIMENSION(:,:,:) ::   mlterm_u_dump, blend_u_dump
+    LOGICAL, SAVE :: l_1226_raw_dump_done = .FALSE.
+@@ -199,3 +203,7 @@
+             ALLOCATE( uslp_raw_dump(jpi,jpj,jpk), vslp_raw_dump(jpi,jpj,jpk) )
+             ALLOCATE( uslp_postshapiro_dump(jpi,jpj,jpk), vslp_postshapiro_dump(jpi,jpj,jpk) )
++            ALLOCATE( iku_dump(jpi,jpj,jpk), zfi_dump(jpi,jpj,jpk) )
++            ALLOCATE( e3u_miku_dump(jpi,jpj,jpk), zdepu_dump(jpi,jpj,jpk) )
++            ALLOCATE( zuslp_hml_pre_dump(jpi,jpj,jpk), sint_u_dump(jpi,jpj,jpk) )
++            ALLOCATE( mlterm_u_dump(jpi,jpj,jpk), blend_u_dump(jpi,jpj,jpk) )
+          ENDIF
+@@ -221,3 +229,11 @@
+          uslp_postshapiro_dump(:,:,:) = 0._wp
+          vslp_postshapiro_dump(:,:,:) = 0._wp
++         iku_dump(:,:,:) = 0._wp
++         zfi_dump(:,:,:) = 0._wp
++         e3u_miku_dump(:,:,:) = 0._wp
++         zdepu_dump(:,:,:) = 0._wp
++         zuslp_hml_pre_dump(:,:,:) = 0._wp
++         sint_u_dump(:,:,:) = 0._wp
++         mlterm_u_dump(:,:,:) = 0._wp
++         blend_u_dump(:,:,:) = 0._wp
+       ENDIF
+@@ -305,3 +321,19 @@
+                &              - 2 * MAX( risfdep(ji,jj), risfdep(ji+1,jj) )      &
+                &              - e3u(ji,jj,miku(ji,jj),Kmm)   )
++            IF( .NOT. l_1226_raw_dump_done ) THEN
++               iku_dump(ji,jj,jk) = REAL( iku, wp )
++               zfi_dump(ji,jj,jk) = zfi
++               e3u_miku_dump(ji,jj,jk) = e3u(ji,jj,miku(ji,jj),Kmm)
++               zdepu_dump(ji,jj,jk) = zdepu
++               sint_u_dump(ji,jj,jk) = zau / ( zbu - zeps )
++               IF( zfi == 0._wp ) THEN
++                  zuslp_hml_pre_dump(ji,jj,jk) = zuslp_hml(ji,jj)
++                  mlterm_u_dump(ji,jj,jk) = zdepu * zuslp_hml(ji,jj)
++               ELSE
++                  zuslp_hml_pre_dump(ji,jj,jk) = 0._wp
++                  mlterm_u_dump(ji,jj,jk) = 0._wp
++               ENDIF
++               blend_u_dump(ji,jj,jk) = zfi * zau / ( zbu - zeps )   &
++                  &                    + ( 1._wp - zfi ) * zdepu * zuslp_hml(ji,jj)
++            ENDIF
+             zdepv = 0.5_wp * ( ( gdept(ji,jj,jk,Kmm) + gdept(ji,jj+1,jk,Kmm) )   &
+@@ -433,2 +464,10 @@
+          OPEN( UNIT=8910, FILE='eiv_dump_uslp_postshapiro.bin', ACCESS='STREAM', FORM='UNFORMATTED', STATUS='REPLACE' )
+          OPEN( UNIT=8911, FILE='eiv_dump_vslp_postshapiro.bin', ACCESS='STREAM', FORM='UNFORMATTED', STATUS='REPLACE' )
++         OPEN( UNIT=8912, FILE='eiv_dump_iku.bin', ACCESS='STREAM', FORM='UNFORMATTED', STATUS='REPLACE' )
++         OPEN( UNIT=8913, FILE='eiv_dump_zfi.bin', ACCESS='STREAM', FORM='UNFORMATTED', STATUS='REPLACE' )
++         OPEN( UNIT=8914, FILE='eiv_dump_e3u_miku.bin', ACCESS='STREAM', FORM='UNFORMATTED', STATUS='REPLACE' )
++         OPEN( UNIT=8915, FILE='eiv_dump_zdepu.bin', ACCESS='STREAM', FORM='UNFORMATTED', STATUS='REPLACE' )
++         OPEN( UNIT=8916, FILE='eiv_dump_zuslp_hml_pre.bin', ACCESS='STREAM', FORM='UNFORMATTED', STATUS='REPLACE' )
++         OPEN( UNIT=8917, FILE='eiv_dump_sint_u.bin', ACCESS='STREAM', FORM='UNFORMATTED', STATUS='REPLACE' )
++         OPEN( UNIT=8918, FILE='eiv_dump_mlterm_u.bin', ACCESS='STREAM', FORM='UNFORMATTED', STATUS='REPLACE' )
++         OPEN( UNIT=8919, FILE='eiv_dump_blend_u.bin', ACCESS='STREAM', FORM='UNFORMATTED', STATUS='REPLACE' )
+@@ -476,3 +515,11 @@
+             CALL dino_dump_2d( 8910, uslp_postshapiro_dump(Nis0:Nie0,Njs0:Nje0,jk) )
+             CALL dino_dump_2d( 8911, vslp_postshapiro_dump(Nis0:Nie0,Njs0:Nje0,jk) )
++            CALL dino_dump_2d( 8912, iku_dump(Nis0:Nie0,Njs0:Nje0,jk) )
++            CALL dino_dump_2d( 8913, zfi_dump(Nis0:Nie0,Njs0:Nje0,jk) )
++            CALL dino_dump_2d( 8914, e3u_miku_dump(Nis0:Nie0,Njs0:Nje0,jk) )
++            CALL dino_dump_2d( 8915, zdepu_dump(Nis0:Nie0,Njs0:Nje0,jk) )
++            CALL dino_dump_2d( 8916, zuslp_hml_pre_dump(Nis0:Nie0,Njs0:Nje0,jk) )
++            CALL dino_dump_2d( 8917, sint_u_dump(Nis0:Nie0,Njs0:Nje0,jk) )
++            CALL dino_dump_2d( 8918, mlterm_u_dump(Nis0:Nie0,Njs0:Nje0,jk) )
++            CALL dino_dump_2d( 8919, blend_u_dump(Nis0:Nie0,Njs0:Nje0,jk) )
+          END DO
+@@ -485,2 +532,4 @@
+          CLOSE(8906) ; CLOSE(8907) ; CLOSE(8908) ; CLOSE(8909) ; CLOSE(8910) ; CLOSE(8911)
++         CLOSE(8912) ; CLOSE(8913) ; CLOSE(8914) ; CLOSE(8915)
++         CLOSE(8916) ; CLOSE(8917) ; CLOSE(8918) ; CLOSE(8919)
+          l_1226_raw_dump_done = .TRUE.

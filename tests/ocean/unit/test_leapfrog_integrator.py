@@ -54,8 +54,12 @@ def _channel(outer_integrator="forward_euler", n_lat=8, n_lon=16, **cfg_kw):
     )
     grid = create_latlon_grid(n_lat, n_lon)
     z_coord = create_ocean_z_star(n_levels=4, H_max=4000.0)
+    nemo_prognostic_barotropic_velocity = cfg_kw.pop(
+        "_nemo_prognostic_barotropic_velocity", False)
     state = rest_state_latlon_cgrid_ocean(
-        grid, z_coord, H_max=4000.0, land_lat_threshold=80.0)
+        grid, z_coord, H_max=4000.0, land_lat_threshold=80.0,
+        nemo_prognostic_barotropic_velocity=(
+            nemo_prognostic_barotropic_velocity))
     lat = np.degrees(np.asarray(grid.lat))
     T = np.asarray(state.T.data) + 4.0 * np.tanh(lat / 15.0)[:, None, None]
     state = state._replace(T=state.T.replace(data=jnp.asarray(T)))
@@ -193,11 +197,12 @@ def test_boxcar_ab3_live_split_runs_no_nan():
     # NEMO nn_bt_flt=2 (barotropic_time_filter="nemo_boxcar_ab3") = the AB3
     # velocity predictor + ts_bck_interp(alpha=0) ssh temporal dissipation +
     # boxcar averaging, composed WITH the live EEN barotropic Coriolis (the
-    # nemo_dino_kamm_mlf config). The validator must ACCEPT this pairing (only
-    # nemo_ab3am4 is rejected with the live split), and it must step finite.
+    # nemo_dino_kamm_mlf config). The validator must ACCEPT this pairing and it
+    # must step finite.
     state, model = _leapfrog_channel(
         barotropic_coriolis="een", barotropic_coriolis_split="live",
-        barotropic_time_filter="nemo_boxcar_ab3")
+        barotropic_time_filter="nemo_boxcar_ab3",
+        nemo_barotropic_filter_alpha=0.0)   # DINO kamm deck rn_bt_alpha
     assert model.config.barotropic.barotropic_time_filter == "nemo_boxcar_ab3"
     s = state
     for _ in range(6):
@@ -210,24 +215,34 @@ def test_leapfrog_before_seed_wide_halo_not_implemented():
     # The MLF before-level barotropic seed is not wired into the wide-halo path;
     # the leap-frog step must raise NotImplementedError rather than silently drop
     # the Nbb seed (barotropic_wide_halo=True + a non-ab3 filter reaches the
-    # before-state guard). First step is a forward-Euler start (no seed), so
-    # advance one step to populate the before-fields, then the seeded pass fires.
+    # before-state guard).
+    #
+    # #1729: this used to need TWO steps, because the Euler start returned
+    # before the seeded pass. It does not any more -- the start is the same
+    # program with rDt=dt and Nbb:=Nnn, so it seeds the barotropic mode from
+    # the before level like every other step and the guard fires on step ONE.
+    # That is strictly better: the run refuses before doing any work.
     state, model = _leapfrog_channel(
         barotropic_time_filter="nemo_boxcar_centred",
         barotropic_wide_halo=True, barotropic_local_subcycle_clamp=True)
-    s = model.step(state, dt=_DT)   # forward-Euler start (no before-seed yet)
     with pytest.raises(NotImplementedError, match="wide-halo"):
-        model.step(s, dt=_DT)       # leapfrog pass → before-seed → guard
+        model.step(state, dt=_DT)
 
 
-def test_ab3am4_live_split_still_rejected():
-    # nemo_ab3am4 (nn_bt_flt=3, cross-window carry => substep-0 extrapolates)
-    # stays incompatible with the live split; only the ramp-every-step
-    # nemo_boxcar_ab3 (nn_bt_flt=2) is allowed.
-    with pytest.raises(ValueError, match="nemo_ab3am4"):
-        _leapfrog_channel(barotropic_coriolis="een",
-                          barotropic_coriolis_split="live",
-                          barotropic_time_filter="nemo_ab3am4")
+def test_ab3am4_live_split_runs_no_nan():
+    # GYRE's resolved nn_bt_flt=3 path deliberately combines the AB3/AM4
+    # predictor with live ENE Coriolis. The pre-step Kmm subtraction and the
+    # mid-step live operator therefore need not cancel after substep zero.
+    state, model = _leapfrog_channel(
+        barotropic_coriolis="een", barotropic_coriolis_split="live",
+        barotropic_time_filter="nemo_ab3am4",
+        nemo_barotropic_filter_alpha=0.07,   # GYRE deck rn_bt_alpha
+        _nemo_prognostic_barotropic_velocity=True)
+    s = state
+    for _ in range(4):
+        s = model.step(s, dt=_DT)
+    assert np.all(np.isfinite(np.asarray(s.u.data)))
+    assert np.all(np.isfinite(np.asarray(s.v.data)))
 
 
 def test_unknown_vorticity_scheme_raises():
@@ -284,7 +299,7 @@ def test_leapfrog_first_step_is_euler():
     # matched forward-Euler reference with the SAME Coriolis/vorticity placement
     state_fe, model_fe = _channel(
         "forward_euler", coriolis_scheme="explicit_ab2",
-        vorticity_scheme="een_total", momentum_time_integrator="rk3_ws")
+        vorticity_scheme="een_total", momentum_time_integrator="rk3")
     s_lf = model_lf.step(state, dt=_DT)
     # Nbb == pre-step now (unfiltered)
     np.testing.assert_allclose(
@@ -550,7 +565,7 @@ def test_een_total_puts_coriolis_in_rhs():
             A_h=0.0, bottom_drag_r=0.0, n_barotropic_substeps=8,
             enable_runtime_checks=False, implicit_vertical_mixing=True,
             coriolis_scheme=cor, vorticity_scheme=vs,
-            momentum_time_integrator="rk3_ws")
+            momentum_time_integrator="rk3")
         model = LatLonCGridOceanModel(grid, z_coord, cfg)
         tend = model.tendencies(state, None)
         return np.asarray(tend.du_dt.data)
@@ -947,3 +962,216 @@ def test_barotropic_een_seed_sensitivity_nbb_vs_kmm():
     s_kmm = m_kmm.step(s1_pert, dt=_DT)
     assert np.max(np.abs(np.asarray(s_ws.u.data)
                          - np.asarray(s_kmm.u.data))) > 1e-10
+
+
+# ------------------------------------ #1455 barotropic drag-rate time level ---
+
+def test_barotropic_drag_rate_receives_the_now_velocity_not_u_star():
+    """The production step must hand the barotropic solver the STEP-ENTRY
+    (NEMO ``Kmm``) velocity for the bottom-drag rate.
+
+    NEMO builds ``rCdU_bot`` in ``zdf_phy`` from ``uu(:,:,:,Kmm)``
+    (zdfdrg.F90:174-181) at stpmlf.F90:190, i.e. BEFORE ``dyn_adv``/``dyn_vor``/
+    ``dyn_ldf``/``dyn_hpg``/``dyn_spg``, and ``dyn_drg_init``
+    (dynspg_ts.F90:1616) freezes it across the substep window.  legoESM calls
+    the solver with ``state_mid``, whose velocity is the POST-momentum
+    ``u* = u^n + dt·RHS`` (plus the Matsuno rotation), so the now level must
+    travel as ``u_now``/``v_now``.  This asserts BOTH halves: the forwarded
+    array IS the step-entry velocity, and it is NOT ``state_mid``'s.
+
+    #1455: before the fix the rate was built from ``state_mid``'s velocity.
+    On the DINO card that velocity differed from the now-level one by
+    1.115e-01 m/s at the maximum over wet cells -- measured, not asserted
+    here, from the retention lane's committed capture of every drag-helper
+    call in one card step (``results/dino_1455/maps/drag_inputs_d180.npz``,
+    probe commit 888d846f3).
+    """
+    state, model = _leapfrog_partial_cell_channel(
+        bottom_drag_scheme="nemo_quadratic", bottom_drag_cd0=1.0e-3,
+        bottom_drag_cdmax=0.1, bottom_drag_z0=3.0e-3, bottom_drag_ke0=2.5e-3,
+        zdf_drag_in_matrix=True, zdf_baroclinic_only=True,
+        barotropic_drag_substep=True,
+        barotropic_solver="explicit_substep")
+    # A wind stress and a non-rest velocity so the momentum update actually
+    # moves u between the step entry and the barotropic call — otherwise
+    # u* == u^n and the assertion below could not fail (control on the control).
+    rng = np.random.default_rng(11)
+    s0 = state._replace(u=state.u.replace(
+        data=jnp.asarray(0.3 * rng.standard_normal(state.u.data.shape))
+        * state.u_mask.data[..., None]))
+
+    captured = {}
+    from legoesm.ocean.dynamics import ocean_model_latlon_cgrid as _m
+    orig = _m.barotropic_substeps_latlon_cgrid
+
+    def _spy(state_mid, *a, **k):
+        captured["u_now"] = (None if k.get("u_now") is None
+                             else np.asarray(k["u_now"]))
+        captured["u_mid"] = np.asarray(state_mid.u.data)
+        return orig(state_mid, *a, **k)
+
+    _m.barotropic_substeps_latlon_cgrid = _spy
+    try:
+        # ``_step_impl`` (not ``step``) so the spy sees concrete arrays
+        # rather than JIT tracers — same escape the substep-scale spy above
+        # uses.
+        model._step_impl(s0, _DT, surface_forcing=_sf(tau_x=0.05))
+    finally:
+        _m.barotropic_substeps_latlon_cgrid = orig
+
+    assert captured, "the barotropic solver was never called"
+    assert captured["u_now"] is not None, (
+        "the production step called the barotropic solver WITHOUT u_now -- the "
+        "bottom-drag rate would be built from the post-momentum u*, not NEMO's "
+        "Kmm velocity (zdfdrg.F90:174-181 via stpmlf.F90:190)")
+    np.testing.assert_array_equal(captured["u_now"], np.asarray(s0.u.data))
+    # ...and the two time levels really are distinct here, so the equality
+    # above is a time-level assertion and not a tautology.
+    assert np.max(np.abs(captured["u_mid"] - captured["u_now"])) > 1e-6
+
+
+def test_every_bottom_drag_rate_uses_the_step_entry_velocity():
+    """NEMO builds ``rCdU_bot`` ONCE per step, in ``zdf_phy`` from
+    ``uu(:,:,:,Kmm)`` (zdfdrg.F90:174-181 via zdfphy.F90:277 at stpmlf.F90:190),
+    and every consumer reads that one stored array: ``dyn_drg_init`` for the
+    barotropic loop (dynspg_ts.F90:1616), the ``pu_RHSi`` residual (:1642), and
+    ``dyn_zdf``, which only ``USE zdfdrg`` (dynzdf.F90:22) and reads the array
+    at :156-159 and :296 without ever recomputing it.
+
+    So within ONE step there is exactly one drag velocity: the step-entry one.
+    This asserts that invariant over every call that fires IN THIS
+    CONFIGURATION -- the dyn_drg_init residual, the barotropic loop and the
+    implicit vertical-mixing matrix -- so a new consumer on that route cannot
+    quietly pick the wrong level.  ``_bc_bottom_drag`` is a fourth static site
+    on the same helper; it does not fire under ``zdf_drag_in_matrix=True`` and
+    is therefore not covered here.
+
+    SCOPE, stated because the obvious wider claim would be false: it does NOT
+    cover ``_tke_bottom_dirichlet``, which calls ``nemo_effective_bottom_drag_r``
+    directly and so bypasses this spy entirely.  That site is still on the
+    handed state's velocity, and NEMO's zdftke.F90:285 pairs the Kmm rate with
+    a Kbb speed anyway, so it is a separate two-time-level question.
+
+    Scoped to a single ``_step_impl`` so "now" is unambiguous: under the full
+    leap-frog the before-level dissipation pass legitimately treats Kbb as its
+    own now level.
+    """
+    state, model = _leapfrog_partial_cell_channel(
+        bottom_drag_scheme="nemo_quadratic", bottom_drag_cd0=1.0e-3,
+        bottom_drag_cdmax=0.1, bottom_drag_z0=3.0e-3, bottom_drag_ke0=2.5e-3,
+        zdf_drag_in_matrix=True, zdf_baroclinic_only=True,
+        barotropic_drag_substep=True,
+        barotropic_solver="explicit_substep")
+    # A sheared, non-rest velocity plus wind, so the momentum update actually
+    # moves u between the step entry and each drag site -- otherwise every
+    # candidate velocity coincides and the assertion could not fail.
+    rng = np.random.default_rng(7)
+    s0 = state._replace(u=state.u.replace(
+        data=jnp.asarray(0.3 * rng.standard_normal(state.u.data.shape))
+        * state.u_mask.data[..., None]))
+
+    import legoesm.ocean.dynamics.ocean_pe_latlon_cgrid as _pemod
+    seen = []
+    orig = _pemod.nemo_bottom_drag_rate_faces
+
+    def _spy(u, v, h_k, z_coord, config, grid, **kwargs):
+        seen.append((np.asarray(u), np.asarray(v)))
+        return orig(u, v, h_k, z_coord, config, grid, **kwargs)
+
+    _pemod.nemo_bottom_drag_rate_faces = _spy
+    try:
+        out = model._step_impl(s0, _DT, surface_forcing=_sf(tau_x=0.05))
+    finally:
+        _pemod.nemo_bottom_drag_rate_faces = orig
+
+    assert len(seen) >= 2, f"expected the drag helper to fire at several sites, got {len(seen)}"
+    u_now, v_now = np.asarray(s0.u.data), np.asarray(s0.v.data)
+    for i, (u_i, v_i) in enumerate(seen):
+        assert np.array_equal(u_i, u_now), (
+            f"drag call {i} of {len(seen)} was built from a velocity that is "
+            f"not the step-entry (Kmm) one: max|du| = "
+            f"{np.abs(u_i - u_now).max():.4e} m/s")
+        assert np.array_equal(v_i, v_now), (
+            f"drag call {i} of {len(seen)}: max|dv| = "
+            f"{np.abs(v_i - v_now).max():.4e} m/s")
+    # ...and the step really did move the velocity, so the equalities above are
+    # assertions about a time level and not a rest-state tautology.  Uses the
+    # return of the SPIED call above -- ``_step_impl`` returns either the state
+    # or (state, extras), and the state is itself a NamedTuple, so an isinstance
+    # tuple check cannot tell them apart; probe for the field instead.
+    _out = out if hasattr(out, "u") else out[0]
+    assert np.max(np.abs(np.asarray(_out.u.data) - u_now)) > 1e-6
+
+
+def test_implicit_vmix_partial_now_velocity_raises():
+    """One component of the now-level velocity without the other would build
+    the drag rate's ``|U|`` from two different time levels -- a plausible
+    number with no error anywhere.  Rejected, both ways round (same rule the
+    barotropic solver applies)."""
+    state, model = _leapfrog_partial_cell_channel(
+        bottom_drag_scheme="nemo_quadratic", zdf_drag_in_matrix=True,
+        zdf_baroclinic_only=True, barotropic_drag_substep=True,
+        barotropic_solver="explicit_substep")
+    for kw in ({"u_now": state.u.data}, {"v_now": state.v.data}):
+        with pytest.raises(ValueError, match="BOTH u_now and v_now or NEITHER"):
+            model._apply_implicit_vertical_mixing(
+                state, _DT, _sf(), **kw)
+
+
+def test_leapfrog_vmix_drag_rate_uses_the_step_entry_velocity():
+    """N2 from review: scoping the invariant test to ``_step_impl`` leaves the
+    site the shipped kamm_mlf card actually runs -- the implicit vertical-mixing
+    call inside ``_leapfrog_step`` -- untested, so a regression there would pass
+    green.  This covers it directly.
+
+    Unambiguous by construction: both ``_step_impl`` calls inside
+    ``_leapfrog_step`` pass ``_apply_implicit_vmix=False``, so the drag-in-matrix
+    never runs on the before-level pass; the single vertical-mixing call sees the
+    true Nnn state.
+    """
+    import traceback as _tb
+    state, model = _leapfrog_partial_cell_channel(
+        bottom_drag_scheme="nemo_quadratic", bottom_drag_cd0=1.0e-3,
+        bottom_drag_cdmax=0.1, bottom_drag_z0=3.0e-3, bottom_drag_ke0=2.5e-3,
+        zdf_drag_in_matrix=True, zdf_baroclinic_only=True,
+        barotropic_drag_substep=True,
+        barotropic_solver="explicit_substep")
+    sf = _sf(tau_x=0.05)
+    # One Euler-start step to populate the before level, then perturb NOW u so a
+    # wrong time-level pick is visible.
+    s1 = model.step(state, dt=_DT, surface_forcing=sf)
+    rng = np.random.default_rng(23)
+    s1 = s1._replace(u=s1.u.replace(
+        data=jnp.asarray(np.asarray(s1.u.data)
+                         + 0.4 * rng.standard_normal(s1.u.data.shape))
+        * s1.u_mask.data[..., None]))
+
+    import legoesm.ocean.dynamics.ocean_pe_latlon_cgrid as _pemod
+    seen = []
+    orig = _pemod.nemo_bottom_drag_rate_faces
+
+    def _spy(u, v, h_k, z_coord, config, grid, **kwargs):
+        seen.append((_tb.extract_stack()[-2].name, np.asarray(u)))
+        return orig(u, v, h_k, z_coord, config, grid, **kwargs)
+
+    _pemod.nemo_bottom_drag_rate_faces = _spy
+    try:
+        model._leapfrog_step(s1, _DT, surface_forcing=sf)
+    finally:
+        _pemod.nemo_bottom_drag_rate_faces = orig
+
+    vmix = [u for name, u in seen if name == "_apply_implicit_vertical_mixing"]
+    assert len(vmix) == 1, (
+        f"expected exactly one implicit-vmix drag call on the leap-frog path, "
+        f"got {len(vmix)} (sites seen: {[n for n, _ in seen]})")
+    u_now = np.asarray(s1.u.data)
+    assert np.array_equal(vmix[0], u_now), (
+        "the leap-frog path's implicit vertical-mixing drag rate was built from "
+        f"a velocity that is not the step-entry (Kmm) one: max|du| = "
+        f"{np.abs(vmix[0] - u_now).max():.4e} m/s")
+    # Control: some OTHER call in the same step used a different velocity, so
+    # the equality above discriminates a time level rather than being trivial.
+    others = [u for name, u in seen if name != "_apply_implicit_vertical_mixing"]
+    assert any(not np.array_equal(u, u_now) for u in others), (
+        "no drag call in this step differed from the entry velocity -- the "
+        "assertion above cannot discriminate a time level here")

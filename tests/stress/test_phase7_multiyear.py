@@ -105,13 +105,12 @@ class TestSlabCarbon1Year:
 
     def test_co2_finite_and_positive(self, driver):
         """CO2 field stays finite and positive over 1 year."""
-        if not hasattr(driver, '_co2_field') or driver._co2_field is None:
+        if not hasattr(driver, '_co2_mass') or driver._co2_mass is None:
             pytest.skip("No prognostic CO2")
-        assert jnp.all(jnp.isfinite(driver._co2_field)), "CO2 has NaN/inf"
-        assert float(jnp.min(driver._co2_field)) > 0, "CO2 went negative"
+        assert jnp.all(jnp.isfinite(driver._co2_mass)), "CO2 has NaN/inf"
+        assert float(driver._co2_mass) > 0, "CO2 went negative"
         # Convert to ppmv and check wide bounds (uncalibrated model)
-        M_CO2, M_air = constants.M_CO2, constants.M_air
-        co2_ppmv = float(jnp.mean(driver._co2_field)) / (M_CO2 / M_air) * 1e6
+        co2_ppmv = float(driver._co2_box_vmr()) * 1e6
         assert 100.0 < co2_ppmv < 2000.0, f"CO2 = {co2_ppmv:.1f} ppmv"
 
     def test_nee_varies(self, driver):

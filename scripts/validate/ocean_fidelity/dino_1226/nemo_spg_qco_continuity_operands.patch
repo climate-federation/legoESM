@@ -1,0 +1,76 @@
+--- a/cfgs/DINO/MY_SRC/dynspg_ts.F90
++++ b/cfgs/DINO/MY_SRC/dynspg_ts.F90
+@@ -171,6 +171,9 @@
+       REAL(wp), DIMENSION(jpi,jpj) :: zsshv_a, zhvp2_e, zsshp2_e
+       REAL(wp), DIMENSION(jpi,jpj) :: zCdU_u, zCdU_v   ! top/bottom stress at u- & v-points
+       REAL(wp), DIMENSION(jpi,jpj) :: zhU, zhV         ! fluxes
++      REAL(wp), DIMENSION(jpi,jpj) :: zqco_zsshp2, zqco_zhup2, zqco_zhvp2
++      REAL(wp), DIMENSION(jpi,jpj) :: zqco_zhU, zqco_zhV, zqco_zhdiv
++      ! #1226 row 1.3: deterministic write-only snapshots of the active qco continuity operands
+       REAL(wp), DIMENSION(jpi,jpj) :: zks
+       !
+       REAL(wp) ::   zwdramp                     ! local scalar - only used if ln_wd_dl = .True. 
+@@ -715,15 +718,63 @@
+          ENDIF    
+          !
+          !
++         ! #1226 row 1.3: snapshot the actual continuity inputs after any
++         ! active AGRIF/W&D flux commit, without replacing, wrapping, or
++         ! re-evaluating a production expression. Zero-fill cells outside
++         ! the exact production loop bounds for deterministic full streams.
++         IF( ll_spg_dump .AND. jn == 1 ) THEN
++            zqco_zsshp2(:,:) = 0._wp
++            zqco_zhup2 (:,:) = 0._wp
++            zqco_zhvp2 (:,:) = 0._wp
++            zqco_zhU   (:,:) = 0._wp
++            zqco_zhV   (:,:) = 0._wp
++            zqco_zhdiv (:,:) = 0._wp
++            zqco_zsshp2(:,:) = zsshp2_e(:,:)
++            DO_2D( 2, 1, 1, 1 )
++               zqco_zhup2(ji,jj) = zhup2_e(ji,jj)
++               zqco_zhU   (ji,jj) = zhU    (ji,jj)
++            END_2D
++            DO_2D( 1, 1, 2, 1 )
++               zqco_zhvp2(ji,jj) = zhvp2_e(ji,jj)
++               zqco_zhV   (ji,jj) = zhV    (ji,jj)
++            END_2D
++         ENDIF
+          !     Compute Sea Level at step jit+1
+          !--           m+1        m                               m+1/2          --!
+          !--        ssh    =  ssh   - delta_t' * [ frc + div( flux      ) ]      --!
+          !-------------------------------------------------------------------------!
+          DO_2D( 1, 1, 1, 1 )
+             zhdiv = (   ( zhU(ji,jj) - zhU(ji-1,jj) ) + ( zhV(ji,jj) - zhV(ji,jj-1) )  ) * r1_e1e2t(ji,jj)
++            IF( ll_spg_dump .AND. jn == 1 )   zqco_zhdiv(ji,jj) = zhdiv
+             ssha_e(ji,jj) = (  sshn_e(ji,jj) - rDt_e * ( ssh_frc(ji,jj) + zhdiv )  ) * ssmask(ji,jj)
+          END_2D
+          !
++         ! #1226 row 1.3 direct operand writer.  Full jpi*jpj fp64 streams;
++         ! zero-filled non-production cells make the ON/OFF bracket exact.
++         IF( ll_spg_dump .AND. jn == 1 ) THEN
++            OPEN( UNIT=8980, FILE='qco_dump_zsshp2_substep1.bin', ACCESS='STREAM', &
++               &  FORM='UNFORMATTED', STATUS='REPLACE' )
++            OPEN( UNIT=8981, FILE='qco_dump_zhup2_substep1.bin', ACCESS='STREAM', &
++               &  FORM='UNFORMATTED', STATUS='REPLACE' )
++            OPEN( UNIT=8982, FILE='qco_dump_zhvp2_substep1.bin', ACCESS='STREAM', &
++               &  FORM='UNFORMATTED', STATUS='REPLACE' )
++            OPEN( UNIT=8983, FILE='qco_dump_zhU_substep1.bin', ACCESS='STREAM', &
++               &  FORM='UNFORMATTED', STATUS='REPLACE' )
++            OPEN( UNIT=8984, FILE='qco_dump_zhV_substep1.bin', ACCESS='STREAM', &
++               &  FORM='UNFORMATTED', STATUS='REPLACE' )
++            OPEN( UNIT=8985, FILE='qco_dump_zhdiv_substep1.bin', ACCESS='STREAM', &
++               &  FORM='UNFORMATTED', STATUS='REPLACE' )
++            WRITE(8980) ( ( zqco_zsshp2(ji,jj), ji=1,jpi ), jj=1,jpj )
++            WRITE(8981) ( ( zqco_zhup2 (ji,jj), ji=1,jpi ), jj=1,jpj )
++            WRITE(8982) ( ( zqco_zhvp2 (ji,jj), ji=1,jpi ), jj=1,jpj )
++            WRITE(8983) ( ( zqco_zhU    (ji,jj), ji=1,jpi ), jj=1,jpj )
++            WRITE(8984) ( ( zqco_zhV    (ji,jj), ji=1,jpi ), jj=1,jpj )
++            WRITE(8985) ( ( zqco_zhdiv  (ji,jj), ji=1,jpi ), jj=1,jpj )
++            CLOSE(8980) ; CLOSE(8981) ; CLOSE(8982)
++            CLOSE(8983) ; CLOSE(8984) ; CLOSE(8985)
++            WRITE(numout,*) '#1226 qco continuity operands (substep jn=1) written'
++         ENDIF
++         !
+          ! Duplicate sea level across open boundaries (this is only cosmetic if linssh=T)
+          IF( ln_bdy )   CALL bdy_ssh( ssha_e )
+ #if defined key_agrif

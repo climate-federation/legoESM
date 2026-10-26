@@ -32,10 +32,13 @@ Usage
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Optional, Tuple
 
 import numpy as np
+
+logger = logging.getLogger(__name__)
 
 
 WOA_LON_NATIVE: int = 360
@@ -98,7 +101,7 @@ def load_woa_sss(
     *,
     cache_dir: Optional[Path] = None,
     month: Optional[int] = None,
-    allow_synthetic: bool = True,
+    allow_synthetic: bool = False,
     nlat: int = WOA_LAT_NATIVE,
     nlon: int = WOA_LON_NATIVE,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -106,8 +109,9 @@ def load_woa_sss(
 
     Looks for the cached NetCDF at
     ``<cache_dir>/woa_sss_annual.nc`` (or ``woa_sss_m<MM>.nc``).
-    Falls back to a synthetic climatology when the cache is
-    missing and ``allow_synthetic=True``.
+    Raises ``FileNotFoundError`` when the cache is missing, unless
+    ``allow_synthetic=True`` (smoke runs only), which returns a synthetic
+    climatology with a warning.
 
     Returns
     -------
@@ -133,11 +137,38 @@ def load_woa_sss(
         # then s_mn (monthly mean).
         var = "s_an" if "s_an" in ds.variables else "s_mn"
         sss = np.asarray(ds[var].values, dtype=np.float64)
-        # Strip any singleton depth dim — surface only.
-        if sss.ndim > 2:
-            sss = sss[0]
+        # WOA s_an is (time, depth, lat, lon): take the first record at
+        # the surface level (index 0 on every leading axis).
+        sss = sss.reshape((-1,) + sss.shape[-2:])[0]
         lat = np.asarray(ds["lat"].values, dtype=np.float64)
-        lon = np.asarray(ds["lon"].values, dtype=np.float64)
+        lon = np.mod(np.asarray(ds["lon"].values, dtype=np.float64), 360.0)
+        order = np.argsort(lon)
+        lon = lon[order]
+        # interp_woa_sss_to_grid assumes ascending, uniform lat and a global,
+        # uniform lon axis: refuse a file it would silently misread.
+        if not (np.all(np.diff(lat) > 0.0)
+                and np.allclose(np.diff(lat), lat[1] - lat[0])):
+            raise ValueError(
+                f"{nc_path}: WOA SSS latitude must be ascending and uniform")
+        if not np.allclose(np.diff(lon), 360.0 / lon.size):
+            raise ValueError(
+                f"{nc_path}: WOA SSS longitude must be global with uniform "
+                f"spacing 360/{lon.size} deg")
+        sss = sss[:, order]
+        # _FillValue (land / no observation) decodes to NaN, and a bilinear
+        # stencil touching one propagates it into coastal restoring targets
+        # even at zero weight: fill each gap from the nearest observed point.
+        missing = ~np.isfinite(sss)
+        if missing.all():
+            raise ValueError(f"{nc_path}: WOA SSS surface field has no valid values")
+        if missing.any():
+            from legoesm.grids.regridding import fill_missing_nearest_valid
+            from legoesm.ocean.forcing.curvilinear_regrid import unit_sphere_xyz
+            lon2d, lat2d = np.meshgrid(lon, lat)
+            sss = fill_missing_nearest_valid(
+                sss.reshape(1, -1),
+                unit_sphere_xyz(lon2d.ravel(), lat2d.ravel()),
+            ).reshape(sss.shape)
         return sss, lat, lon
 
     if not allow_synthetic:
@@ -146,4 +177,8 @@ def load_woa_sss(
             "allow_synthetic=False"
         )
 
+    logger.warning(
+        "WOA SSS cache missing at %s — falling back to SYNTHETIC analytic "
+        "SSS. Salinity restoring and SSS scores use a made-up target. "
+        "(allow_synthetic=True was requested).", nc_path)
     return synthetic_woa_sss(nlon=nlon, nlat=nlat, month=month)

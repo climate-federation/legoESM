@@ -17,6 +17,7 @@ from legoesm.training.era5_to_state import (
     load_era5_slice,
     resolve_var,
 )
+from legoesm.training.era5_to_state import era5_terrain_product
 
 _LEVELS = (1000.0, 500.0, 100.0)   # hPa, descending (the loader sorts to ascending Pa)
 
@@ -240,15 +241,19 @@ def test_sst_skin_temperature_still_wins_over_fallbacks(monkeypatch):
 # --- with phis=0 is a grossly non-hydrostatic IC; the zero-fill must warn) ---
 
 
-def test_phis_missing_warns_loudly_and_zero_fills(monkeypatch, caplog):
-    """A store with NO surface geopotential keeps the zero-fill (idealized ICs
-    still load) but warns LOUDLY, same mechanism/level as the sst zero-fill."""
+def test_phis_missing_is_refused_unless_allowed(monkeypatch, caplog):
+    """A store with NO surface geopotential is REFUSED (decision C: real
+    surface pressure on flat terrain is grossly non-hydrostatic); with
+    ``allow_flat_phis`` it zero-fills for an idealized store and warns
+    LOUDLY, same mechanism/level as the sst zero-fill."""
     import logging
     monkeypatch.setattr(
         e2s, "open_era5_zarr",
         lambda store: _synthetic_era5("long", drop=("geopotential_at_surface",)))
+    with pytest.raises(ValueError, match="no surface geopotential"):
+        load_era5_slice(_config(), 0)
     with caplog.at_level(logging.WARNING, logger=e2s.logger.name):
-        sl = load_era5_slice(_config(), 0)
+        sl = load_era5_slice(_config()._replace(allow_flat_phis=True), 0)
     np.testing.assert_allclose(sl.phis, 0.0)
     assert any("phis zero-filled" in r.message for r in caplog.records)
     assert any("non-hydrostatic" in r.message for r in caplog.records)
@@ -272,15 +277,18 @@ def test_phis_resolves_2d_short_z(monkeypatch, caplog):
 
 def test_phis_does_not_resolve_3d_z(monkeypatch, caplog):
     """A 3-D 'z' (the pressure-level geopotential, same GRIB short name) must
-    NOT be mistaken for phis: zero-fill + loud warning instead."""
+    NOT be mistaken for phis: refused by default, zero-fill + loud warning
+    when flat phis is allowed."""
     import logging
     ds = _synthetic_era5("long", drop=("geopotential_at_surface",))
     nlat, nlon, nlev = 5, 6, 3
     ds = ds.assign(z=(("time", "level", "lat", "lon"),
                       np.full((1, nlev, nlat, nlon), 9.8e4, dtype=np.float32)))
     monkeypatch.setattr(e2s, "open_era5_zarr", lambda store: ds)
+    with pytest.raises(ValueError, match="no surface geopotential"):
+        load_era5_slice(_config(), 0)
     with caplog.at_level(logging.WARNING, logger=e2s.logger.name):
-        sl = load_era5_slice(_config(), 0)
+        sl = load_era5_slice(_config()._replace(allow_flat_phis=True), 0)
     np.testing.assert_allclose(sl.phis, 0.0)
     assert any("phis zero-filled" in r.message for r in caplog.records)
 
@@ -420,7 +428,7 @@ def test_load_era5_slice_missing_optional_zero_fills(monkeypatch):
 def test_era5_load_regrid_to_reference_column_state_integration(monkeypatch):
     """END-TO-END input chain (the path the empirical run consumes, currently bypassed
     by the compare test's monkeypatch): REAL load_era5_slice → REAL era5_to_latlon_carry
-    (regrid + log-p interp + q→mixing-ratio) → column_state_from_carry → a PHYSICALLY
+    (regrid + log-p interp, q as specific humidity) → column_state_from_carry → a PHYSICALLY
     VALID reference ColumnState on the model grid+sigma (iter 107). This is exactly the
     integration gap that hid iter 106's silent-zeros bug."""
     from legoesm.grids.latlon import create_latlon_grid
@@ -439,7 +447,8 @@ def test_era5_load_regrid_to_reference_column_state_integration(monkeypatch):
     nlat, nlon, nlev = 3, 4, 5
     grid = create_latlon_grid(nlat, nlon)
     sigma = create_sigma_coordinate(nlev)
-    carry = era5_to_latlon_carry(era5, grid, sigma)   # REAL regrid + interp + carry
+    carry = era5_to_latlon_carry(era5, grid, sigma,   # REAL regrid + interp + carry
+                                 target_phis=era5_terrain_product(era5, grid))
     ref = column_state_from_carry(carry)
 
     # shapes land on the MODEL grid + sigma (not the ERA5 grid/levels).
@@ -458,14 +467,9 @@ def test_era5_load_regrid_to_reference_column_state_integration(monkeypatch):
         np.testing.assert_allclose(u[k], 10.0 + 0.5 * (ld / 90.0), atol=2e-3)
     # a non-flat u profile across latitude (proves it is NOT a constant-fill).
     assert float(u[0].mean()) < float(u[1].mean()) < float(u[2].mean())
-    # q is converted SPECIFIC HUMIDITY → MIXING RATIO r = q/(1−q) (NOT left as raw
-    # specific humidity): the synthetic q≡5e-3 ⇒ r = 5e-3/(1−5e-3) via the canonical
-    # thermo helper. (For this physical q the helper and the old inline form agree
-    # to machine precision, so this pins "is the mixing ratio", not "which code path".)
-    from legoesm.thermo import specific_humidity_to_mixing_ratio
-    expected_r = float(specific_humidity_to_mixing_ratio(jnp.asarray(5e-3)))
-    np.testing.assert_allclose(np.asarray(ref.q_v), expected_r, rtol=1e-4)
-    assert expected_r > 5e-3        # mixing ratio strictly exceeds specific humidity
+    # q is loaded AS IS -- SPECIFIC humidity, the tracer convention on every
+    # lane (2026-09-28); the former r = q/(1-q) = 5.025e-3 fails at 1e-4.
+    np.testing.assert_allclose(np.asarray(ref.q_v), 5e-3, rtol=1e-4)
 
 
 def test_era5_to_latlon_carry_hybrid_over_terrain_is_physical(monkeypatch):
@@ -489,7 +493,8 @@ def test_era5_to_latlon_carry_hybrid_over_terrain_is_physical(monkeypatch):
     era5 = era5._replace(p_s=np.full_like(np.asarray(era5.p_s), 7.0e4))   # 700-hPa terrain
     grid = create_latlon_grid(3, 4)
     ref = column_state_from_carry(
-        era5_to_latlon_carry(era5, grid, make_hybrid_levels(5, p_top_Pa=100.0)))
+        era5_to_latlon_carry(era5, grid, make_hybrid_levels(5, p_top_Pa=100.0),
+                             target_phis=era5_terrain_product(era5, grid)))
     validate_reference_physical(ref, name="hybrid-over-terrain ERA5 reference")  # T/q/p_s in range
     assert bool(np.all(np.isfinite(np.asarray(ref.T))))
     assert 150.0 < float(np.min(ref.T)) and float(np.max(ref.T)) < 350.0
@@ -515,7 +520,8 @@ def test_reference_columnstate_invariant_to_config_levels_order(monkeypatch):
 
     def _ref(levels):
         era5 = load_era5_slice(TrainingERA5Config(zarr_store="dummy", levels=levels), 0)
-        return column_state_from_carry(era5_to_latlon_carry(era5, grid, sigma))
+        return column_state_from_carry(era5_to_latlon_carry(
+            era5, grid, sigma, target_phis=era5_terrain_product(era5, grid)))
 
     ref_mono = _ref((1000.0, 500.0, 100.0))         # monotonic descending (store order)
     ref_scrambled = _ref((500.0, 1000.0, 100.0))    # non-monotonic permutation

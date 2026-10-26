@@ -51,15 +51,39 @@ def test_williamson5_cone_zero_outside_radius():
 
 
 def test_dcmip_2_0_0_mountain_peak():
-    """At the centre (3π/2, π/6), the mountain envelope is at maximum."""
+    """At the DCMIP centre (3π/2, 0), the mountain envelope is at maximum."""
     R = constants.R_earth
     z = dcmip_2_0_0_mountain(
         jnp.array([3.0 * jnp.pi / 2.0]),
-        jnp.array([jnp.pi / 6.0]),
+        jnp.array([0.0]),
         R, h_0=2000.0,
     )
     # At d=0: envelope = h_0/2 * (1 + cos(0)) = h_0; ridges = cos(0)^2 = 1
     assert float(z[0]) == pytest.approx(2000.0, abs=1.0)
+
+
+def test_dcmip_2_0_0_mountain_ridge_period_is_pi_over_16():
+    """Ridges repeat every π/16 rad of arc (DCMIP 2012): a trough at ζ/2."""
+    R = constants.R_earth
+    z = dcmip_2_0_0_mountain(
+        jnp.array([3.0 * jnp.pi / 2.0 + jnp.pi / 32.0, 3.0 * jnp.pi / 2.0 + jnp.pi / 16.0]),
+        jnp.array([0.0, 0.0]),
+        R, h_0=2000.0,
+    )
+    assert float(z[0]) == pytest.approx(0.0, abs=1e-6)
+    envelope = 1000.0 * (1.0 + float(jnp.cos(jnp.pi * (jnp.pi / 16.0) / (3.0 * jnp.pi / 4.0))))
+    assert float(z[1]) == pytest.approx(envelope, rel=1e-6)
+
+
+def test_dcmip_2_0_0_mountain_envelope_reaches_3pi_over_4():
+    """The envelope reaches 3π/4 rad: the ridge crest at π/4 (= 4ζ) stands at 1500 m."""
+    R = constants.R_earth
+    z = dcmip_2_0_0_mountain(
+        jnp.array([3.0 * jnp.pi / 2.0 + jnp.pi / 4.0]),
+        jnp.array([0.0]),
+        R, h_0=2000.0,
+    )
+    assert float(z[0]) == pytest.approx(1500.0, rel=1e-6)
 
 
 def test_dcmip_2_0_0_mountain_decays():

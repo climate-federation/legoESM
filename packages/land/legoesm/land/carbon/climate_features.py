@@ -69,7 +69,7 @@ def reduce_climatology_to_features(
         _PT_ALPHA
         * _PT_GAMMA_OVER_S
         * np.maximum(monthly_netrad_w.mean(axis=1), 0.0)
-        / constants.L_v
+        / constants.L_v   # latent-ok: Priestley-Taylor PET proxy, annual net radiation, no surface temperature
         * _SECONDS_PER_YEAR
     )
     aridity = map_yr / np.maximum(pet, _PET_MIN)

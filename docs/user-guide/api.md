@@ -24,18 +24,6 @@ create_grid("gaussian", ...)                             # spectral Gaussian
 
 One grid object feeds every component (atmosphere, ocean, …).
 
-## Capability taxonomy
-
-`legoesm.taxonomy` — introspect what the build can do:
-
-| Function | Returns |
-|----------|---------|
-| `capability_report()` | the full complexity × extent × grid/core map |
-| `grid_capabilities()` | tuple of `GridCapability` for every registered grid |
-| `grid_capability(name)` | one `GridCapability` (e.g. `.variable_resolution`) |
-| `model_dial()` | the complexity-dial mapping per component |
-| `MODEL_COMPLEXITY` | the `ModelComplexity` enumeration |
-
 ## Composable physics
 
 `legoesm.atmosphere.physics.combined` — build a single `physics_fn` from any subset

@@ -10,12 +10,6 @@ from typing import Callable, Mapping, Sequence
 import numpy as np
 import xarray as xr
 
-from legoesm.ml.s2s.neuralgcm_slab.evaluation import (
-    DEFAULT_S2S_WINDOWS,
-    LeadTimeWindow,
-    aggregate_metric_table,
-)
-
 
 @dataclass(frozen=True)
 class FieldSpec:
@@ -111,10 +105,6 @@ DEFAULT_METRIC_SPECS = {
 }
 
 
-def available_metric_names() -> tuple[str, ...]:
-    return tuple(DEFAULT_METRICS)
-
-
 def resolve_metric_specs(metric_names: Sequence[str] | None) -> tuple[MetricSpec, ...]:
     selected = tuple(metric_names) if metric_names is not None else DEFAULT_METRICS
     unknown = sorted(set(selected) - set(DEFAULT_METRIC_SPECS))
@@ -181,33 +171,6 @@ def build_daily_metric_table(
     return table
 
 
-def score_forecast_metrics(
-    forecast: xr.Dataset,
-    truth: xr.Dataset,
-    *,
-    field_specs: Sequence[FieldSpec] = DEFAULT_FIELD_SPECS,
-    metrics: Sequence[MetricSpec] | None = None,
-    windows: Sequence[LeadTimeWindow] = DEFAULT_S2S_WINDOWS,
-    lead_dim: str = "lead_day",
-    latitude_name: str = "latitude",
-) -> tuple[dict[str, np.ndarray], dict[str, dict[str, float]]]:
-    daily = build_daily_metric_table(
-        forecast,
-        truth,
-        field_specs=field_specs,
-        metrics=metrics,
-        lead_dim=lead_dim,
-        latitude_name=latitude_name,
-    )
-    lead_days = (
-        forecast[lead_dim].values
-        if lead_dim in forecast.coords
-        else _lead_values(len(next(iter(daily.values()), ())))
-    )
-    summary = aggregate_metric_table(daily, lead_days=lead_days, windows=windows)
-    return daily, summary
-
-
 def save_metric_table_csv(
     metric_table: Mapping[str, Sequence[float]],
     path: str | Path,
@@ -238,12 +201,10 @@ __all__ = [
     "FieldSpec",
     "MetricSpec",
     "align_truth_to_forecast",
-    "available_metric_names",
     "build_daily_metric_table",
     "latitude_weights",
     "resolve_metric_specs",
     "save_metric_table_csv",
-    "score_forecast_metrics",
     "weighted_mae",
     "weighted_rmse",
 ]

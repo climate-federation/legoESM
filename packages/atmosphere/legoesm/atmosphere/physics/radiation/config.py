@@ -21,6 +21,9 @@ from typing import TYPE_CHECKING, NamedTuple
 
 from legoesm import constants
 from legoesm.atmosphere.physics.radiation.mc3d.config import MC3DRadiationConfig
+from legoesm.atmosphere.physics.radiation.simple_lw import (
+    SimpleLWConfig,
+)
 
 if TYPE_CHECKING:
     from legoesm.atmosphere.physics.clouds.config import CloudConfig
@@ -310,6 +313,12 @@ class RRTMGPConfig(NamedTuple):
     # existing positional RRTMGPConfig(...) argument binding shifts.
     aerosol_ssa_bands: tuple[float, ...] | None = None
     aerosol_g_bands: tuple[float, ...] | None = None
+    # CAM RRTMG-style transported layer from the model top to a 1 Pa lid
+    # (T, q_v of the top layer; no cloud/aerosol; overhead column-mean ozone).
+    # Its heating is discarded and TOA fluxes are reported at the lid, so the
+    # ~2 W/m2 SW absorbed above the model top leaves the column budget.
+    # False (default) = byte-identical.  Appended last (positional binding).
+    overhead_layer: bool = False
 
 
 class OzoneProfileConfig(NamedTuple):
@@ -375,7 +384,7 @@ class RadiationConfig(NamedTuple):
     Fields
     ------
     scheme : str
-        Active radiation scheme: "gray" or "rrtmgp".
+        Active radiation scheme: "gray", "rrtmgp", "mc3d" or "simple_lw".
     gray : GrayRadiationConfig
         Configuration for gray radiation.
     rrtmgp : RRTMGPConfig
@@ -406,6 +415,10 @@ class RadiationConfig(NamedTuple):
     """
     scheme: str = "gray"
     gray: GrayRadiationConfig = GrayRadiationConfig()
+    # Stevens (2005) DYCOMS-II simple longwave -- the cloud-top radiative
+    # cooling the marine-stratocumulus decks (DYCOMS_RF01, ASTEX209) are
+    # driven by. Longwave only; see radiation/simple_lw.py.
+    simple_lw: SimpleLWConfig = SimpleLWConfig()
     rrtmgp: RRTMGPConfig = RRTMGPConfig()
     # "mc3d": 3D Monte-Carlo ray-traced shortwave (plane LES/CRM only) + gray
     # longwave. See docs/specs/mc3d_raytracer.md. mc3d holds MC numerics.

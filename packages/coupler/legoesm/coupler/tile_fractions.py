@@ -118,6 +118,13 @@ def blend_tiles(
     )
     T_rad = (lw_emit_grid / jnp.maximum(eps_grid * _sb, 1.0e-12)) ** 0.25
 
+    _ice_lhflx_cell = ice_resp.lhflx_exchange
+    if _ice_lhflx_cell is None:
+        raise ValueError(
+            "blend_tiles: the sea-ice tile response carries no lhflx_exchange "
+            "(the realized per-cell latent paired with surface_mass_flux); "
+            "every sea_ice response constructor sets it -- a hand-built ice "
+            "tile must too, or the atmosphere gets water without its heat.")
     return SurfaceToAtm(
         T_sfc=_blend(ocean_resp.T_sfc, ice_resp.T_sfc,
                          land_resp.T_sfc, lake_resp.T_sfc),
@@ -151,8 +158,13 @@ def blend_tiles(
         # thermo solve was cooled by slightly more latent than the atmosphere
         # received.  Closing this exactly needs an implicit latent-cap in the
         # T_new solve (a thermo rework); the mass budget IS closed here.
+        # The ice tile publishes its REALIZED per-cell latent heat (sum over
+        # categories of L_s(T_k) * m_k, ``lhflx_exchange``) beside its mass flux,
+        # so the blend takes it on the same exchange basis as the mass.  Its
+        # ``lhflx`` is PER ICE AREA and cannot be used here (off by the
+        # concentration basis).
         lhflx=(fo * ocean_resp.lhflx
-               + f_water * (constants.L_s * ice_resp.surface_mass_flux)
+               + f_water * _ice_lhflx_cell
                + fl * land_resp.lhflx + fk * lake_resp.lhflx),
         tau_x=_blend(ocean_resp.tau_x, ice_resp.tau_x,
                      land_resp.tau_x, lake_resp.tau_x),

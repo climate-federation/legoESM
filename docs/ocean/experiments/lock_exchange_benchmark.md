@@ -86,10 +86,10 @@ inconsistency, FCT h_new certification bug, TVD corner overshoot):
 
 ## The rest of the standard ocean-grid suite
 
-Lock exchange is one case in a family. The other standard cases and the
-grids they cover (`sbatch --array=0-6
-scripts/cluster/ocean_grid_benchmark_suite.sbatch`, results 2026-08-10,
-job 26850849):
+Lock exchange is one case in a family. Run the family with
+`sbatch --array=0-9 scripts/cluster/ocean_grid_benchmark_suite.sbatch`.
+Results 2026-08-13 (jobs 26917739 + 26917853), on the re-centred
+split-explicit barotropic averaging window:
 
 | Case | latlon | mpas | fesom | tripole |
 |---|---|---|---|---|
@@ -97,30 +97,271 @@ job 26850849):
 | rest_state_uniform_with_land | PASS | PASS | PASS | PASS |
 | rest_state_stratified_no_land | PASS | PASS | —¹ | —² |
 | rest_state_uniform_no_land | PASS | PASS | —¹ | —² |
-| geostrophic_adjustment | PASS | PASS | —³ | PASS |
-| phillips_two_layer | PASS | PASS | —³ | —⁴ |
-| inertia_gravity_wave | FAIL⁵ | FAIL⁵ | —³ | —⁴ |
+| geostrophic_adjustment | PASS | PASS | PASS | PASS |
+| phillips_two_layer | PASS | PASS | PASS | PASS |
+| inertia_gravity_wave | PASS³ | PASS³ | PASS³ | PASS³ |
+| barotropic_wave | PASS | PASS | PASS | PASS |
 | lock_exchange | PASS | PASS | PASS | PASS |
+| inertia_gravity_wave_channel | —⁴ | —⁴ | —⁴ | —⁴ |
+| lock_exchange (Petersen channel) | PASS⁵ | — | — | — |
 
 Rest-state drifts are at machine precision on every arm (eta 0 to 1e-31,
-T ≤ 1.5e-14, S ≤ 7.6e-15); geostrophic adjustment settles to
-max|u| = 0.014 (latlon) / 0.027 (mpas) / 0.446 m/s (tripole, the
-continental-boundary arm) against a 1 m/s gate.
+T ≤ 1.5e-14, S ≤ 7.6e-15).
 
 1. The FESOM mesh is built with the same 80° land threshold as the
    with-land arms (190 of 3140 nodes dry), and the setup exposes no 90°
-   variant — so FESOM belongs to the WITH-LAND rows only. (An earlier
-   version of this table registered it as "no land"; that was a
-   mislabel, caught in review.)
+   variant — so FESOM belongs to the WITH-LAND rows only.
 2. The tripole basin is defined by the NEMO tmask, so a no-land tripole
    variant does not exist.
-3. FESOM has IC builders for the rest state and the lock exchange only;
-   the perturbation cases would each need a node-based analytic IC.
-4. The IC writes the analytic u/v EDGE fields from 1-D `grid.lat`/`grid.lon`
-   and a uniform `dlon`/`dlat` — rectilinear-only; on the curvilinear
-   eORCA1 mesh both now raise `NotImplementedError` naming the gap
-   (previously a bare shape mismatch). Needs a curvilinear edge IC.
-5. Pre-existing failure on every grid (analytic L2 0.91 latlon / 1.01 mpas
-   / 0.23 cubed_sphere vs a 0.1 gate) — an unresolved case, not an arm
-   problem. `cubed_sphere` also fails geostrophic_adjustment (2.05 m/s)
-   and phillips (eta_growth 26.4).
+3. PASS here means only: not frozen, not exploding, not extinguished.
+   This case's initial condition is an f-plane plane wave imposed on a
+   sphere where the model integrates `f = 2Ω sin(lat)`, so it is not an
+   eigenmode anywhere and no wave-speed gate is constructible on it. The
+   case that DOES verify wave behaviour is the channel one below.
+4. `inertia_gravity_wave_channel` runs on `latlon_channel` only — a
+   Cartesian f-plane box, which is the one geometry where the Poincaré
+   channel mode is exact. A second grid would need a PLANAR hexagonal
+   mesh with TRiSK metrics and a constant Coriolis parameter; the repo
+   has no such mesh (`create_beta_plane_cgrid_geometry` is lat-lon only,
+   Voronoi meshes carry `f = 2Ω sin(lat)`, and `grids/plane.py` is a quad
+   C-grid for CRM work). Putting the mode on a spherical patch would make
+   it a non-eigenmode and repeat exactly the error in note 3.
+5. Was the ONLY failing case in the suite until 2026-08-13: it finished
+   with water at −3.00 °C from an initial range of exactly [5, 30]. See
+   "The Petersen channel arm's advection scheme" below.
+
+## Is the cross-grid agreement real, or is the instrument blunt?
+
+`scripts/validate/ocean_grid_consistency.py` compares the arms against a
+MEASURED tolerance (each arm against itself at 2× resolution). Every case
+passed — with the tolerance 1.5× to 245× LARGER than the difference it was
+judging, so the test could not fail.
+
+`--refinement` asks the question that can: refine BOTH arms one step and
+see whether the difference shrinks. `--refined-budget` measures each arm's
+own discretisation error at the refined level too, so the difference has a
+tolerance there as well. Without it every row is labelled UNBUDGETED TREND,
+because a direction is not a convergence claim.
+
+Measured 2026-08-13 (jobs 26917825/26917826/26918225/26918425; latlon
+36x72→72x144 with the tolerance from 144x288, MPAS ico4→ico5 with the
+tolerance from ico6).
+
+A D/E ratio alone is not readable, because refining moves TWO things: how
+far apart the arms are (D) and how well each arm knows its own answer (E).
+Only one combination is diagnostic on its own — **E falling while D rises**
+means each arm is converging and they are converging to DIFFERENT limits.
+D/E improving because the tolerance loosened is not evidence of anything.
+
+| Case | D/E coarse | D/E refined | D ratio | E ratio | what that combination means |
+|---|---|---|---|---|---|
+| barotropic_wave | 0.50 | 0.70 | 0.93 | 0.66 | converging together |
+| geostrophic_adjustment | 0.74 | 0.57 | 0.85 | 1.11 | tolerance loosened faster than the difference shrank |
+| inertia_gravity_wave | 0.31 | 0.41 | 0.62 | 0.46 | converging together |
+| lock_exchange (front, km) | 0.56 | 0.24 | 1.50 | 3.58 | case de-settling — **not adjudicable here** |
+| phillips_two_layer | 0.20 | **1.08** | 3.30 | 0.60 | **converging to DIFFERENT limits** |
+
+**`phillips_two_layer` is the one case with the different-limits
+signature**: each arm's own resolution sensitivity FALLS by 0.60× while
+the two arms move 3.30× further apart, ending at 1.08× of their own
+tolerance. Each dycore is settling down; they are settling on different
+answers. That is an algorithmic inconsistency, and it was invisible at the
+coarse resolution alone, where the difference was a fifth of the tolerance.
+
+What the other rows do and do NOT say:
+
+- `inertia_gravity_wave` and `barotropic_wave` converge together — both D
+  and E fall. These two are cross-grid consistent as far as this test goes.
+- `geostrophic_adjustment`'s D/E improves from 0.74 to 0.57, but its
+  tolerance LOOSENED (1.11×) while the difference fell only to 0.85×. The
+  improvement is partly the tolerance moving, so read it as "inside budget
+  at both levels", not as a demonstration of convergence.
+- `lock_exchange` is **unadjudicated, not passing**. Its front-displacement
+  disagreement grows (1.0 → 1.5 km) and its D/E falls to 0.24 only because
+  each arm's own front self-error grew 3.58× (1.88 → 6.73 km). A tolerance
+  outrunning the thing it bounds is not agreement. This row's numbers are a
+  scalar displacement in km and are NOT comparable with the field-norm
+  numbers in the other rows.
+
+  **Why it cannot be made adjudicable today.** The global arms cannot
+  resolve the front (see the Benjamin row above); the resolving geometry is
+  the Petersen channel, which runs on `latlon_regional` only. A second arm
+  is buildable as far as the MESH goes — `create_regional_voronoi_mesh`
+  over the Petersen box at 1 km produces 781 cells with 1.00 km spacing
+  (verified 2026-08-13). It is blocked one level down, on the
+  advection scheme.
+
+  TWO blockers, and the advection one is the softer of them.
+
+  **1. The runner cannot extract the diagnostic.** `_rpe_extract`
+  recognises `"mpas"` and nothing else, so `"mpas_regional"` falls to the
+  `else` branch and reads `grid.area` — which a `VoronoiMesh` does not
+  have (it carries `areaCell`). `run_lock_exchange` calls that diagnostic
+  before its first step, so the arm would raise before integrating.
+  Verified 2026-08-13, not inferred.
+
+  **2. The advection family cannot be matched.** The sweep below was run on
+  the **structured** arm, and `tvd` and `superbee` failed THERE (−0.40 °C
+  and −2.99 °C from an initial [5, 30]). So this is not "MPAS handles the
+  front worse": the case's front breaks the limiters that were tested, on
+  the structured grid, and the flux-CORRECTED schemes hold it. The MPAS
+  tracer port offers `tvd`, `superbee` and `upwind` and no FCT (verified:
+  unknown schemes raise). `upwind` was NOT measured on this geometry, so
+  "only FCT can be bounded here" is not established — two limiters were
+  tested, not three. What IS established is that the two arms could not
+  share an advection family today, which is the confound this comparison
+  exists to remove.
+
+  So: fix the regional RPE extraction first, then either port FCT to the
+  MPAS tracer scheme or soften the lock-exchange front enough that a
+  limiter stays bounded on both grids.
+
+The phillips result is a delta between two resolutions, not a trend, and
+the case's own amplitude doubles between them, so it is reported as
+"BUDGET EXCEEDED (1.08x)" rather than as a convergence or divergence
+result. The competing reading — that an unstable case simply amplifies any
+difference at its own growth rate — was tested with a log-linear fit of the
+difference against time and is NOT settled either way (R² 0.43–0.76, and a
+NEGATIVE slope: the difference appears early and does not grow through the
+run). A poor fit refutes nothing in either direction.
+
+### Where the phillips disagreement lives (measured 2026-08-13)
+
+**READ THE TIME SERIES FIRST — the headline is one sample of an
+oscillation.** The arm-to-arm difference D(t) does NOT grow through the
+run. It spikes in the first output interval and then oscillates with a
+~2-day period while decaying:
+
+| | day 1 | day 2 | day 3 | day 4 | … | day 9 | day 10 |
+|---|---|---|---|---|---|---|---|
+| coarse | **0.127** | 0.050 | 0.085 | 0.033 | | 0.020 | 0.023 |
+| refined | **0.149** | 0.083 | 0.125 | 0.071 | | 0.062 | 0.076 |
+
+The headline number is the day-10 sample, and at the coarse resolution
+that lands in a TROUGH (0.023, against its own day-1 peak of 0.127).
+Comparing the two levels at their PEAKS instead gives **1.17×, not the
+3.30× the final-time comparison reports.** Part of the headline growth is
+therefore where in the oscillation each level's last sample happens to
+fall — the same defect as gating a wave case on a global peak at one
+instant. The refinement block now reports peak-over-time alongside
+final-time for every case.
+
+What survives that correction: at BOTH samplings the refined level's
+difference exceeds the arms' own tolerance (final-time D/E 0.20 → 1.08;
+peak D/E 1.08 → 2.11). The disagreement is real. What does NOT survive is
+"invisible at the coarse resolution" — on peak sampling it was already at
+1.08 there.
+
+**The initial condition is CONSTRAINED, and only weakly.** The t=0
+difference between the arms halves under refinement (2.38e-3 → 1.21e-3).
+An earlier version of this section called that a ruling-out; it is not,
+for three separate reasons:
+
+- It is measured AFTER both arms are sampled onto the COMMON mesh, while
+  each simulation is driven by its initial condition on its own NATIVE
+  mesh. Regridding is not an orthogonal projection, so the two do not
+  decompose additively.
+- It measures the headline field (`eta`) ONLY — not the temperature or
+  velocity initial state, and not the projection of any of them onto the
+  jet's unstable manifold. A smaller total sampling error can carry more
+  power in the directions that grow.
+- The 3.30× it is being contrasted against is the ratio of the EVOLUTION
+  difference, not of the final-state difference ‖A_f − B_f‖. Those two can
+  partially cancel, so "the arms finish further apart" does not follow.
+
+Settling it still needs both arms started from one high-resolution
+analytic field regridded to each native mesh.
+
+**By field**, the same evolution difference split across the saved fields.
+Each is scaled by the LARGER of the two arms' own motion, on exactly the
+cells the difference used:
+
+| Field | difference, coarse → refined | growth |
+|---|---|---|
+| `eta` (free surface) | 2.32e-2 → 7.65e-2 | 3.30× |
+| `SST` (surface tracer) | 2.40e-1 → 2.61e-1 | 1.09× |
+
+Read this table narrowly. What it does NOT establish:
+
+- The `eta` row is the headline restated — `eta` IS this case's headline
+  field — so it is not independent localisation.
+- The two columns are metres and degrees. Their absolute sizes are not
+  comparable; only each row's own change-with-refinement is.
+- A flat surface-tracer discrepancy does NOT exclude tracer advection.
+  `SST` is the SURFACE tracer only, the case relaxes temperature toward a
+  zonal target on a 15-day timescale over a 10-day run, and tracer errors
+  couple into `eta` through the density field. "It is the pressure
+  gradient, not tracer advection" is NOT supported by this table, and an
+  earlier version of this section said it.
+- Surface velocity is now SAVED by both arms (it was missing from the MPAS
+  extractor entirely) but is still **not comparable**, for a different
+  reason: the two arms reduce velocity to cell centres with DIFFERENT
+  operators. Lat-lon takes a 2-point mean of the staggered components;
+  MPAS reconstructs a cell-centred vector from the edge normals by Perot,
+  averaging over ~6 edges, which smooths more. Measured, the row reads the
+  OPPOSITE way from every other field — lat-lon moves 2.1x further in
+  surface speed while MPAS moves 2.9x further in SST — which is exactly
+  what the smoother reduction would produce and is NOT evidence of a
+  weaker MPAS surface flow. The report prints the row marked REPORTED, NOT
+  COMPARABLE. So "free surface" and "barotropic mode" are still not
+  separated: `eta` is tied to column-integrated divergence and the
+  velocity field that would disentangle it cannot yet be compared.
+
+What the fair scale DID surface, once the normaliser stopped being one
+arm picked by alphabetical order: **the two arms do not evolve by the same
+amount.** On exactly the cells the difference uses,
+
+| Field | lat-lon moved | MPAS moved | ratio |
+|---|---|---|---|
+| `SST` coarse | 1.12e-1 | 3.29e-1 | 2.9× |
+| `SST` refined | 1.76e-1 | 3.93e-1 | 2.2× |
+| `eta` coarse | 4.51e-2 | 6.25e-2 | 1.4× |
+| `eta` refined | 1.25e-1 | 1.77e-1 | 1.4× |
+
+MPAS's surface tracer moves roughly three times as far as lat-lon's at
+both resolutions. That is a bigger asymmetry than the disagreement itself
+and it was completely hidden while the scale was lat-lon's own motion —
+which is also why the fractions used to exceed 1 and now do not (0.73 and
+0.66 for `SST`, 0.37 and 0.43 for `eta`).
+
+What is left, stated at its real strength: **the disagreement in `eta`
+grows with refinement while the surface-tracer disagreement does not, and
+the MPAS arm evolves its surface tracer far further than the lat-lon arm
+at both resolutions.** Facts about fields, not a mechanism.
+
+**Next measurement**, given the oscillation: the difference's spatial
+spectrum at its PEAK time (day 1), not at day 10, plus a cell-shaped
+surface speed from the MPAS extractor so the velocity row stops being
+blank. The day-1 spike is where the signal is; day 10 is where it is
+smallest.
+
+## The Petersen channel arm's advection scheme
+
+The 64 km × 4 km, 1 km-resolution channel is the only lock-exchange arm
+that resolves its own front. It ran WENO5, chosen for sharpness, and
+finished with water at −3.00 °C. WENO5 is essentially-non-oscillatory, not
+monotonicity-preserving.
+
+One variable, everything else in the registration fixed. Final T range
+against the initial [5.00, 30.00], and the spurious-mixing number:
+
+| scheme | T range [°C] | RPE_rel | |
+|---|---|---|---|
+| `weno5` | −3.00 … 31.77 | 6.536e-6 | FAIL |
+| `tvd` | −0.40 … 30.00 | 9.832e-6 | FAIL |
+| `superbee` | −2.99 … 30.00 | 8.889e-6 | FAIL |
+| `ppm_fct` | 5.00 … 30.00 | 6.261e-6 | PASS |
+| `fct2` | 5.00 … 30.00 | 6.852e-6 | PASS |
+
+Every flux LIMITER undershoots; only the flux-CORRECTED schemes are
+bounded — the same reason the global lat-lon and tripole arms already run
+`LOCKEX_CGRID_TRACER_ADV`, and the channel arm now runs that same
+constant. `tvd` and `superbee` produce no overshoot above 30.00 while
+still undershooting: the limiter works within each directional sweep and
+the multi-dimensional combination of monotone sweeps does not.
+
+NOT a vertical-CFL artefact. With dz = 1 m and dt = 30 s, CFL_v reaches 1
+at only 0.033 m/s, so an unstable vertical operator was the competing
+explanation. Perturbation test, `weno5`, only dt changed: 30 s → −3.00,
+15 s → −2.92, 7.5 s → −2.88 °C. A 4× smaller dt moves the undershoot by
+4%, where a CFL mechanism predicts it falling roughly with dt.

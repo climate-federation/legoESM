@@ -260,6 +260,81 @@ def cfl_number_from_state(
     return local_max_speed * dt * jnp.sqrt(2.0) / dx_min
 
 
+def estimate_min_dx(
+    n: int,
+    grid_type: str,
+    radius: float = constants.R_earth,
+    *,
+    use_polar_filter: bool = False,
+    dx_min_override: float | None = None,
+) -> float:
+    """Stability-limiting grid spacing [m] for ``grid_type`` at resolution
+    ``n`` (cube N, spectral truncation, n_lat, or icosahedral level).
+
+    The single dispatch used by the setup dt clamp
+    (:func:`cfl_check_and_adjust`) and the run-time CFL diagnostic, so both
+    judge the same spacing.  Lat-lon with the polar filter on uses the
+    equatorial spacing (the filter removes the pole-cell CFL); without it,
+    the pole cell.  Raises on an unknown ``grid_type``.
+    """
+    if grid_type == "latlon":
+        if use_polar_filter:
+            # Stage 3-E: Fourier polar filter truncates the
+            # high-wavenumber modes that would violate CFL near the
+            # poles, so the actual stability limit is the equatorial
+            # CFL ``R * dlon``.  Without this branch the legacy
+            # ``estimate_min_dx_latlon`` returns the pole-cell dx
+            # (a ~60x smaller value at n_lat=180) and the driver
+            # clamps ``dt`` to ~5 s — undoing the polar filter's
+            # whole purpose.  See ``component_factory.py`` for the
+            # mirror logic at the model-builder level.
+            n_lon = 2 * n
+            dx_min = float(2.0 * np.pi * radius / n_lon)
+        else:
+            dx_min = estimate_min_dx_latlon(n, radius)
+    elif grid_type == "gaussian":
+        dx_min = estimate_min_dx_gaussian(n, radius)
+    elif grid_type in ("mpas", "voronoi", "icosahedral", "ico", "mpas_voronoi"):
+        # All the SCVT-Voronoi/MPAS mesh aliases (see driver.config.
+        # normalize_grid_type) dispatch to the icosahedral dx estimator;
+        # ModelDriver passes the raw config grid_type, so accept them here.
+        dx_min = estimate_min_dx_icosahedral(n, radius)
+    elif grid_type == "cubed_sphere":
+        dx_min = estimate_min_dx_cubed_sphere(n, radius)
+    elif grid_type == "fesom":
+        # FESOM's minimum spacing is a property of the MESH FILE, not of any
+        # resolution integer, so it cannot be estimated from (n, radius).  The
+        # caller must pass dx_min_override=float(np.min(mesh.mesh_resolution)).
+        # Substituting a spherical estimate would give a wrong dt clamp -- a
+        # silent stability bug, exactly what the guard below prevents.
+        if dx_min_override is not None and (
+            not math.isfinite(dx_min_override) or dx_min_override <= 0.0
+        ):
+            # A non-finite or non-positive dx_min silently produces a zero,
+            # negative, or unadjusted timestep instead of an error.
+            raise ValueError(
+                f"estimate_min_dx: dx_min_override must be finite and "
+                f"strictly positive [m]; got {dx_min_override!r}."
+            )
+        if dx_min_override is None:
+            raise ValueError(
+                "estimate_min_dx: grid_type='fesom' requires the "
+                "mesh-derived dx_min_override "
+                "(float(np.min(mesh.mesh_resolution)) [m]); a spherical "
+                "estimate from (n, radius) cannot be used for an "
+                "unstructured mesh."
+            )
+        dx_min = float(dx_min_override)
+    else:
+        # Dispatch hardening: a typo'd grid_type must not silently take the
+        # cubed-sphere dx (a wrong dt clamp on a lat-lon/mpas run).
+        raise ValueError(
+            f"estimate_min_dx: unknown grid_type {grid_type!r}; expected "
+            "latlon / gaussian / cubed_sphere / mpas / fesom (or a voronoi alias)."
+        )
+    return dx_min
+
+
 def cfl_check_and_adjust(
     dt: float,
     n: int,
@@ -302,61 +377,9 @@ def cfl_check_and_adjust(
     dt_safe : float
         Adjusted time step (≤ dt) that satisfies CFL.
     """
-    if grid_type == "latlon":
-        if use_polar_filter:
-            # Stage 3-E: Fourier polar filter truncates the
-            # high-wavenumber modes that would violate CFL near the
-            # poles, so the actual stability limit is the equatorial
-            # CFL ``R * dlon``.  Without this branch the legacy
-            # ``estimate_min_dx_latlon`` returns the pole-cell dx
-            # (a ~60x smaller value at n_lat=180) and the driver
-            # clamps ``dt`` to ~5 s — undoing the polar filter's
-            # whole purpose.  See ``component_factory.py`` for the
-            # mirror logic at the model-builder level.
-            n_lon = 2 * n
-            dx_min = float(2.0 * np.pi * radius / n_lon)
-        else:
-            dx_min = estimate_min_dx_latlon(n, radius)
-    elif grid_type == "gaussian":
-        dx_min = estimate_min_dx_gaussian(n, radius)
-    elif grid_type in ("mpas", "voronoi", "icosahedral", "ico", "mpas_voronoi"):
-        # All the SCVT-Voronoi/MPAS mesh aliases (see driver.config.
-        # normalize_grid_type) dispatch to the icosahedral dx estimator;
-        # ModelDriver passes the raw config grid_type, so accept them here.
-        dx_min = estimate_min_dx_icosahedral(n, radius)
-    elif grid_type == "cubed_sphere":
-        dx_min = estimate_min_dx_cubed_sphere(n, radius)
-    elif grid_type == "fesom":
-        # FESOM's minimum spacing is a property of the MESH FILE, not of any
-        # resolution integer, so it cannot be estimated from (n, radius).  The
-        # caller must pass dx_min_override=float(np.min(mesh.mesh_resolution)).
-        # Substituting a spherical estimate would give a wrong dt clamp -- a
-        # silent stability bug, exactly what the guard below prevents.
-        if dx_min_override is not None and (
-            not math.isfinite(dx_min_override) or dx_min_override <= 0.0
-        ):
-            # A non-finite or non-positive dx_min silently produces a zero,
-            # negative, or unadjusted timestep instead of an error.
-            raise ValueError(
-                f"cfl_check_and_adjust: dx_min_override must be finite and "
-                f"strictly positive [m]; got {dx_min_override!r}."
-            )
-        if dx_min_override is None:
-            raise ValueError(
-                "cfl_check_and_adjust: grid_type='fesom' requires the "
-                "mesh-derived dx_min_override "
-                "(float(np.min(mesh.mesh_resolution)) [m]); a spherical "
-                "estimate from (n, radius) cannot be used for an "
-                "unstructured mesh."
-            )
-        dx_min = float(dx_min_override)
-    else:
-        # Dispatch hardening: a typo'd grid_type must not silently take the
-        # cubed-sphere dx (a wrong dt clamp on a lat-lon/mpas run).
-        raise ValueError(
-            f"cfl_check_and_adjust: unknown grid_type {grid_type!r}; expected "
-            "latlon / gaussian / cubed_sphere / mpas / fesom (or a voronoi alias)."
-        )
+    dx_min = estimate_min_dx(
+        n, grid_type, radius, use_polar_filter=use_polar_filter,
+        dx_min_override=dx_min_override)
 
     # Total wave speed = max(wind) + gravity_wave_speed
     c_total = max_wind + gravity_wave_speed

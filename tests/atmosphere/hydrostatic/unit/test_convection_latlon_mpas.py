@@ -115,8 +115,19 @@ def mpas_state(mpas_mesh, sigma_coord):
 def scheme_config(request):
     """Yield a (name, ConvectionConfig) pair for each of the 5 new schemes."""
     name, scheme_field, scheme_cls = request.param
-    kwargs = {scheme_field: scheme_cls()}
+    # The test grids carry no land fraction: ZM gets the explicit aquaplanet choice.
+    kwargs = {scheme_field: (scheme_cls(land_fraction="none")
+                             if name == "zhang_mcfarlane" else scheme_cls())}
     return name, ConvectionConfig(scheme=name, **kwargs)
+
+
+def _zm_ps(scheme_name, state):
+    """ZM needs the carried PBL height: a fresh PhysicsState (pblh = 0, CAM's
+    cold start) for ZM, no carry for the other schemes (as before)."""
+    if scheme_name != "zhang_mcfarlane":
+        return None
+    from tests._zm_cold_start import cold_phys_state
+    return cold_phys_state(state.T.data)
 
 
 # ---------------------------------------------------------------------------
@@ -133,7 +144,8 @@ class TestConvectionLatLon:
             cfg, model_type="hydrostatic", dt=300.0,
         )
         # Returns (tendencies, conv_prog_out).
-        tend, _ = physics_fn(latlon_state, latlon_grid, sigma_coord)
+        tend, _ = physics_fn(latlon_state, latlon_grid, sigma_coord,
+                             phys_state=_zm_ps(scheme_name, latlon_state))
         # Basic structure.
         assert tend.dT_dt.data.shape == latlon_state.T.data.shape, (
             f"{scheme_name}: dT_dt shape mismatch"
@@ -154,7 +166,8 @@ class TestConvectionLatLon:
         physics_fn = make_convection_physics(
             cfg, model_type="hydrostatic", dt=300.0,
         )
-        tend, _ = physics_fn(latlon_state, latlon_grid, sigma_coord)
+        tend, _ = physics_fn(latlon_state, latlon_grid, sigma_coord,
+                             phys_state=_zm_ps(scheme_name, latlon_state))
         assert tend.dT_dt.dims == latlon_state.T.dims, (
             f"{scheme_name}: dT_dt dims {tend.dT_dt.dims} should match "
             f"state.T.dims {latlon_state.T.dims}"
@@ -170,7 +183,8 @@ class TestConvectionLatLon:
         physics_fn = make_convection_physics(
             cfg, model_type="hydrostatic", dt=300.0,
         )
-        tend, _ = physics_fn(latlon_state, latlon_grid, sigma_coord)
+        tend, _ = physics_fn(latlon_state, latlon_grid, sigma_coord,
+                             phys_state=_zm_ps(scheme_name, latlon_state))
         assert bool(jnp.all(jnp.isfinite(tend.dT_dt.data))), (
             f"{scheme_name}: dT_dt has NaN/Inf"
         )
@@ -206,7 +220,8 @@ class TestConvectionMPAS:
         physics_fn = make_convection_physics(
             cfg, model_type="mpas", dt=300.0,
         )
-        tend, _ = physics_fn(mpas_state, mpas_mesh, sigma_coord)
+        tend, _ = physics_fn(mpas_state, mpas_mesh, sigma_coord,
+                             phys_state=_zm_ps(scheme_name, mpas_state))
         assert tend.dT_dt.data.shape == mpas_state.T.data.shape, (
             f"{scheme_name}: dT_dt shape mismatch"
         )
@@ -228,7 +243,8 @@ class TestConvectionMPAS:
         physics_fn = make_convection_physics(
             cfg, model_type="mpas", dt=300.0,
         )
-        tend, _ = physics_fn(mpas_state, mpas_mesh, sigma_coord)
+        tend, _ = physics_fn(mpas_state, mpas_mesh, sigma_coord,
+                             phys_state=_zm_ps(scheme_name, mpas_state))
         assert tend.dT_dt.dims == mpas_state.T.dims, (
             f"{scheme_name}: dT_dt dims {tend.dT_dt.dims} should match "
             f"state.T.dims {mpas_state.T.dims}"
@@ -244,7 +260,8 @@ class TestConvectionMPAS:
         physics_fn = make_convection_physics(
             cfg, model_type="mpas", dt=300.0,
         )
-        tend, _ = physics_fn(mpas_state, mpas_mesh, sigma_coord)
+        tend, _ = physics_fn(mpas_state, mpas_mesh, sigma_coord,
+                             phys_state=_zm_ps(scheme_name, mpas_state))
         assert bool(jnp.all(jnp.isfinite(tend.dT_dt.data))), (
             f"{scheme_name}: dT_dt has NaN/Inf"
         )
@@ -446,7 +463,8 @@ class TestConvectionMPAS:
         physics_fn = make_convection_physics(
             cfg, model_type="mpas", dt=300.0,
         )
-        tend, _ = physics_fn(mpas_state, mpas_mesh, sigma_coord)
+        tend, _ = physics_fn(mpas_state, mpas_mesh, sigma_coord,
+                             phys_state=_zm_ps(scheme_name, mpas_state))
         # CMT was disabled because state.u is on edges (shape mismatch
         # vs ncol=nCells).  du_dt should be exactly zero.
         max_du = float(jnp.max(jnp.abs(tend.du_dt.data)))

@@ -1,11 +1,16 @@
 # MITgcm oracle — program status & scoreboard
 
-**Status (2026-06-18):** MITgcm is the **2nd ocean oracle** (after Veros). Three verification
-cases reproduced — `tutorial_barotropic_gyre` (single-layer, equilibrium-laminar match),
-`front_relax` (baroclinic Cartesian, monitor-tier), and `tutorial_baroclinic_gyre`
-(baroclinic spherical, monitor-tier). The program surfaced a class of latent **C-grid metric
-bugs** that were root-caused and fixed (iterations 7–8), a no-slip zero-length-face bug, and
-a broader code-duplication audit (issues #514–#519).
+**Status (2026-06-18):** MITgcm is the **2nd ocean oracle** (after Veros). **Full
+tutorial-suite survey done** (15 MITgcm tutorials): **10 are out of scope** for the
+hydrostatic-ocean recipe path (3 nonhydrostatic — `deep_convection`, `plume_on_slope`,
+`rotating_tank`; 1 atmospheric — `held_suarez_cs`; 1 pressure-coordinate — `global_oce_in_p`;
+3 BGC/offline — `cfc_offline`, `dic_adjoffline`, `global_oce_biogeo`; 2 adjoint/optim —
+`global_oce_optim`, `tracer_adjsens`). **5 are in-scope ocean-dynamics cases; 4 now have
+recipes** (`barotropic_gyre`, `baroclinic_gyre`, `advection_in_gyre`, `reentrant_channel`),
+the 5th (`global_oce_latlon`) scoped as buildable (~3–5 d glue). Plus `front_relax` (a
+verification case, not a tutorial). The program surfaced a class of latent **C-grid metric
+bugs** root-caused and fixed (iterations 7–8), a no-slip zero-length-face bug, a 2×
+background-`K_v` double-count in two recipes, and a broader code-duplication audit (#514–#519).
 
 Branch: `feat/mitgcm-oracle` (off `main`). Companion deep-dive:
 `docs/ocean/fidelity/mitgcm_gyre_energy_conservation.md`. Strategy/doctrine:
@@ -33,6 +38,8 @@ Fidelity tiers: (0) construction/forcing bit-exactness, (1) 10-step free-surface
 | `tutorial_barotropic_gyre` | single-layer wind-driven gyre | Cartesian β-plane 62×62×1 | on-box MITgcm (built), 75k-step + `%MON` | 10-step eta pattern **0.9997**; per-term tendencies match; **equilibrium LAMINAR** |
 | `front_relax` | baroclinic front geostrophic adjustment | Cartesian f-plane channel 32×1×15 | shipped `results/output.txt` `%MON` (no rebuild) | 20-step `eta_max` **1%**, `uvel_max` **3%** |
 | `tutorial_baroclinic_gyre` | wind+buoyancy double gyre | **spherical** 62×62×15 (lat 15–75N) | on-box rebuild, `%MON` + **field + momentum-tendency dumps** | 10-step `eta_max` **0.9%**, `uvel_max` **3%**, `vvel_max` **10%**→~1% (transient); field max\|u\| **1–5%** row-by-row, eta corr **0.9989**; **tendency tier**: total `du/dt` corr **0.987** / `dv/dt` **0.9996**, wind input corr **0.987** |
+| `tutorial_advection_in_gyre` | passive-tracer advection (DST3) | Cartesian β-plane 60×60×1 | on-box rebuild, field dumps | tracer pattern corr **1.0000**, mass exact, signal-rel L2 **0.68%**; `dst3_multidim`≡MITgcm `advScheme=80` (isolates the advection scheme on prescribed velocity) |
+| `tutorial_reentrant_channel` | ACC channel + GM/Redi + sponge | Cartesian β-plane 20×40×49 (reentrant-x) | on-box rebuild (gmredi+rbcs), `%MON` + field | 10-step T corr **1.0000**, eta corr **0.9999**, u corr **0.9973**; `eta_max` 1.7%, `uvel_max` 2.3%, `theta` 0.1% |
 
 ### Barotropic gyre — two tiers
 
@@ -83,6 +90,43 @@ These fixes are on `feat/mitgcm-oracle` with non-vacuous regression tests; the f
 operator/vorticity suites pass byte-for-byte unchanged.
 
 ---
+
+## Long-timescale verification (the necessary-not-sufficient test)
+
+A 1-year run (26280 steps, 2600× the 10-step match) of `tutorial_baroclinic_gyre`,
+legoESM vs an on-box MITgcm 1-yr run (`scripts/tmp/_bgyre_longrun_{lego,compare}.py`):
+
+- **eta + T HOLD all year** — eta pattern corr **0.999** (amplitude within 2%) and T
+  pattern corr **0.99** (range to 0.07°C) at every month. The gyre circulation + thermocline
+  climate match.
+- **`u` develops a 2Δx CHECKERBOARD null mode** — invisible at step 10 (signed-u matched 3%),
+  dominant by week 4. Raw `u` alternates sign cell-to-cell (zig-zag ratio **1.6–1.8** vs
+  MITgcm's smooth **0.1–0.4**); `|u|max` ~45% high and growing, worst toward the cold northern
+  boundary (~0.3 m/s of pure grid noise). It is AGEOSTROPHIC (eta doesn't see it).
+- **Root-cause investigation (30-day zig-zag sweeps, `_bgyre_*` probes):** it is a C-grid
+  **velocity (u AND v) null mode** — `T` and `eta` stay smooth (zig-zag ~0.1, like MITgcm), only
+  the velocity carries it. Systematically isolated:
+  - **EXCITER = the surface-T restoring.** Wind-only (no restoring) is smooth (zig-zag **0.07**);
+    adding the restoring → **1.39**. The restoring maintains a meridional T-gradient → a
+    *baroclinic* hydrostatic pressure gradient (invisible to eta, hence eta corr stays 0.999)
+    that feeds the velocity null mode. Convection is NOT it (removing it → 1.66, worse).
+  - **DAMPER = raw Laplacian only.** A_h×10 kills it (1.39→**0.09**). Ruled OUT as fixes:
+    viscosity-operator form (`vector_laplacian` 1.37 ≈ `flux_divergence` 1.39), Coriolis scheme
+    (`matsuno_split` 1.27, **energy-conserving** 1.26 — no help), momentum advection (`upwind`
+    1.33), and biharmonic at faithful magnitudes (B_h=1e14 → 0.82 partial, ≫ MITgcm which uses
+    none).
+  - **The puzzle:** MITgcm is smooth with the SAME `viscAh=5000` + `viscAr=1e-2` + same grid +
+    same restoring (its `data` sets *only* those two viscosities). So legoESM's Laplacian is
+    effectively ~10× weaker ON THE 2Δx MODE than MITgcm's `del2` at the same nominal coefficient
+    — a stencil wavenumber-response difference, not a missing term.
+  - **NOTE (corrected):** an earlier "biharmonic-not-wired" suspicion was WRONG — `B_h` is wired
+    correctly (the `Bh_bilap` diagnostic scales linearly with `B_h`); B_h=1e10 was simply ~1000×
+    too small (biharmonic needs `B_h ~ A_h·Δx² ≈ 1e13–1e14` to compete with the Laplacian).
+  - **Next:** measure the legoESM Laplacian's damping rate on a pure 2Δx velocity mode vs the
+    analytic `A_h·(π/Δx)²` and vs MITgcm's `del2` — find why it under-damps the grid mode, then
+    the minimal faithful fix (match MITgcm's effective grid-scale viscous response). LESSON:
+    short-run tendency match (corr 0.987) is necessary but NOT sufficient; the null-mode growth
+    is a long-timescale-only signal — exactly the barotropic-gyre marginal-stability lesson.
 
 ## Open items / next
 

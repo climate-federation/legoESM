@@ -47,9 +47,9 @@ def test_latlon_band_pad_matches_serial(negate, nlev):
     shp = (N_LAT, N_LON) if nlev is None else (N_LAT, N_LON, nlev)
     field = jnp.asarray(rng.standard_normal(shp))
 
-    # Serial reference must be lon=axis-1 aware: the generic 2D helpers pad the
-    # LAST axis as lon (wrong for (lat,lon,nlev)), so use the 3D-aware helpers
-    # when nlev is present (codex HIGH).
+    # Serial reference: the 3D-native helpers when nlev is present (the generic
+    # 2D helpers now also pad lon on axis 1; both are pinned equal in
+    # tests/unit/test_operators_latlon.py).
     if nlev is None:
         serial_fn = pad_halo_latlon_vector_local if negate else pad_halo_latlon_local
     else:

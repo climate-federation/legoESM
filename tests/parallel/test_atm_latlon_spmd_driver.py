@@ -47,6 +47,8 @@ class _DriverStub:
     # run() dispatch that cannot tell the sub-lanes apart).  A no-op here: the
     # stub never sets _requires_surface_flux_export, so it returns immediately.
     _reject_coupled_lane = ModelDriver._reject_coupled_lane
+    _reject_unconsumed_flux_override = ModelDriver._reject_unconsumed_flux_override
+    get_sfc_flux_override = None
 
     def __init__(self, model, state, cfg):
         self.config = cfg

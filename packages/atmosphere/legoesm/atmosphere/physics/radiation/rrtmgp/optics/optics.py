@@ -295,6 +295,8 @@ class RRTMOptics(optics_base.OpticsScheme):
         r_eff_liq,
         r_eff_ice,
         ibnd=ibnd,
+        # LW clouds are absorption-only (RTE-RRTMGP 1scl / CAM6 RRTMG LW).
+        absorption_only=is_lw,
     )
 
   def cloud_properties_fn(
@@ -353,6 +355,36 @@ class RRTMOptics(optics_base.OpticsScheme):
         'ssa': cloud_ssa,
         'asymmetry_factor': cloud_asy,
     }
+
+  def add_cloud_optical_properties(
+      self,
+      igpt: Array,
+      gas_optical_props: Mapping[str, Array],
+      is_lw: bool,
+      cloud_r_eff_liq: Array | None = None,
+      cloud_path_liq: Array | None = None,
+      cloud_r_eff_ice: Array | None = None,
+      cloud_path_ice: Array | None = None,
+      cloud_fraction: Array | None = None,
+  ) -> Mapping[str, Array]:
+    """Add cloud optics to already-computed gas optics for g-point ``igpt``.
+
+    The combination ``compute_lw/sw_optical_properties`` apply; with no cloud
+    path the gas properties are returned unchanged.  Lets a caller that needs
+    both the clear and the cloudy optics compute the gas optics once.
+    """
+    if cloud_path_liq is None and cloud_path_ice is None:
+      return gas_optical_props
+    return self._combine_gas_and_cloud_properties(
+        igpt,
+        gas_optical_props,
+        is_lw=is_lw,
+        radius_eff_liq=cloud_r_eff_liq,
+        cloud_path_liq=cloud_path_liq,
+        radius_eff_ice=cloud_r_eff_ice,
+        cloud_path_ice=cloud_path_ice,
+        cloud_fraction=cloud_fraction,
+    )
 
   def _combine_gas_and_cloud_properties(
       self,
@@ -474,19 +506,9 @@ class RRTMOptics(optics_base.OpticsScheme):
         'ssa': jnp.zeros_like(optical_depth_lw),
         'asymmetry_factor': jnp.zeros_like(optical_depth_lw),
     }
-
-    if cloud_path_liq is not None or cloud_path_ice is not None:
-      return self._combine_gas_and_cloud_properties(
-          igpt,
-          optical_props,
-          is_lw=True,
-          radius_eff_liq=cloud_r_eff_liq,
-          cloud_path_liq=cloud_path_liq,
-          radius_eff_ice=cloud_r_eff_ice,
-          cloud_path_ice=cloud_path_ice,
-          cloud_fraction=cloud_fraction,
-      )
-    return optical_props
+    return self.add_cloud_optical_properties(
+        igpt, optical_props, True, cloud_r_eff_liq, cloud_path_liq,
+        cloud_r_eff_ice, cloud_path_ice, cloud_fraction=cloud_fraction)
 
   @override
   def compute_sw_optical_properties(
@@ -553,18 +575,9 @@ class RRTMOptics(optics_base.OpticsScheme):
         'ssa': ssa,
         'asymmetry_factor': jnp.zeros_like(ssa),
     }
-    if cloud_path_liq is not None or cloud_path_ice is not None:
-      return self._combine_gas_and_cloud_properties(
-          igpt,
-          gas_optical_props,
-          is_lw=False,
-          radius_eff_liq=cloud_r_eff_liq,
-          cloud_path_liq=cloud_path_liq,
-          radius_eff_ice=cloud_r_eff_ice,
-          cloud_path_ice=cloud_path_ice,
-          cloud_fraction=cloud_fraction,
-      )
-    return gas_optical_props
+    return self.add_cloud_optical_properties(
+        igpt, gas_optical_props, False, cloud_r_eff_liq, cloud_path_liq,
+        cloud_r_eff_ice, cloud_path_ice, cloud_fraction=cloud_fraction)
 
   @override
   def compute_planck_sources(
@@ -574,10 +587,12 @@ class RRTMOptics(optics_base.OpticsScheme):
       igpt: Array,
       vmr_fields: dict[int, Array] | None = None,
       sfc_temperature: Array | None = None,
+      level_temperature: Array | None = None,
   ) -> dict[str, Array]:
     """Compute the monochromatic Planck sources given the atmospheric state.
 
-    This requires interpolating the temperature to z faces.
+    The face temperatures are the host's level temperatures (RRTMGP takes
+    tlev from the host; CAM6 builds it in rrtmg_state.F90).
 
     Args:
       pressure: The pressure field [Pa].
@@ -586,6 +601,9 @@ class RRTMOptics(optics_base.OpticsScheme):
       vmr_fields: An optional dictionary containing precomputed volume mixing
         ratio fields, keyed by gas index, that will overwrite the global means.
       sfc_temperature: The optional surface temperature [K], 2D field.
+      level_temperature: ``(nx, ny, nz-1)`` level temperature [K] at the
+        nz-1 faces of the nz-2 interior cells, surface first
+        (``rrtmgp.cam_interface_temperature`` flipped).  Required.
 
     Returns:
       A dictionary containing the Planck source at the cell center
@@ -596,10 +614,18 @@ class RRTMOptics(optics_base.OpticsScheme):
       computational layer, as the local temperature field is used to compute it.
     """
     assert sfc_temperature is not None, 'sfc_temperature is required.'
+    if level_temperature is None:
+      raise ValueError(
+          'compute_planck_sources needs the host level temperatures '
+          '(level_temperature, see rrtmgp.cam_interface_temperature).')
 
-    temperature_bottom, temperature_top = optics_base.reconstruct_face_values(
-        temperature, f_lower_bc=sfc_temperature
-    )
+    # Face index i <-> face x_{i-1/2} below node i (halo width 1): node 1's
+    # bottom face is the surface level, node nz-2's top face the lid.  The
+    # halo nodes' outer faces repeat the boundary levels.
+    temperature_bottom = jnp.concatenate(
+        [level_temperature[:, :, :1], level_temperature], axis=2)
+    temperature_top = jnp.concatenate(
+        [level_temperature, level_temperature[:, :, -1:]], axis=2)
     planck_fraction_fn = self.planck_fraction_fn(igpt)
     planck_fraction = planck_fraction_fn(pressure, temperature, vmr_fields)
 

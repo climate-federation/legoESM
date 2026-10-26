@@ -1,0 +1,21 @@
+--- stprk3_stg.F90.round40
++++ stprk3_stg.F90
+@@ -20,6 +20,7 @@
+    !!--------------------------------------------------------------------------------------------------------------------------------------
+    USE step_oce       ! time stepping used modules
+    USE eosbn2, ONLY : eos_l2_dump_next ! config-local WRITE-only lane-2 instrument
++   USE dynadv, ONLY : dyn_adv_round41_stage ! WRITE-only stage tag for the dyn_adv split
+    USE domqco         ! quasi-eulerian coordinate      (dom_qco_r3c routine)
+    USE bdydyn         ! ocean open boundary conditions (define bdy_dyn)
+    USE lbclnk         ! ocean lateral boundary conditions (or mpp link)
+@@ -463,8 +464,10 @@
+             !
+             !                             !* advection (VIF or FF)      ==> 3D RHS
+             IF( ln_dynadv_vec ) THEN                        ! VIF: only velocities used for momentum advection
++               CALL dyn_adv_round41_stage( kstg, Kaa )
+                CALL dyn_adv( kstp, Kmm, Kmm, uu, vv, Krhs)
++               CALL dyn_adv_round41_stage( 0, 0 )
+             ELSE                                            ! FF : advective transports used for momentum advection
+                CALL dyn_adv( kstp, Kmm, Kmm, uu, vv, Krhs, zFu, zFv, zFw )
+             ENDIF
+             IF( lwp .AND. kstp == nit000 .AND. kstg == 2 ) THEN

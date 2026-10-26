@@ -144,19 +144,31 @@ class TestComputeAMOCFromStateMPAS:
         )
         assert amoc > 0.0, f"AMOC should be positive, got {amoc}"
 
-    def test_southward_upper_collapsed_cell_gives_nonpositive(self):
+    def test_reversed_cell_reports_same_magnitude(self):
+        """SIGN-AGNOSTIC semantics (2026-08-11): the sign of the ψ peak
+        depends on grid orientation / cumsum direction, NOT reliably on the
+        physical circulation direction — the signed convention reported
+        -0.13 Sv on a tripole state whose true AMOC (NEMO amoc_core,
+        cross-validated) is 9.8 Sv.  The diagnostic now reports peak
+        MAGNITUDE, matching amoc_core; a reversed cell therefore reports
+        the SAME positive strength as the forward cell, and direction is
+        not inferable from this scalar."""
         mesh = _FakeMesh()
         nlev = 6
         u = np.zeros((mesh.nEdges, nlev))
-        # Reversed: southward at surface, northward at depth.
-        u[:, :3] = -0.05
-        u[:, 3:] = 0.05
+        u[:, :3] = 0.05
+        u[:, 3:] = -0.05
         h = np.full((mesh.nCells, nlev), 200.0)
-        amoc = compute_amoc_from_state_mpas(
+        fwd = compute_amoc_from_state_mpas(
             u, h, mesh, target_lat_deg=22.5, basin="global",
             lat_band_width_deg=1.0,
         )
-        assert amoc <= 0.0, f"Reversed cell should give AMOC ≤ 0, got {amoc}"
+        rev = compute_amoc_from_state_mpas(
+            -u, h, mesh, target_lat_deg=22.5, basin="global",
+            lat_band_width_deg=1.0,
+        )
+        assert fwd > 0.0
+        assert rev == fwd, f"magnitude must be orientation-invariant: {fwd} vs {rev}"
 
     def test_partial_cell_min_rule_zeros_dry_edge(self):
         """An interior edge against a fully-DRY cell carries no meridional flux

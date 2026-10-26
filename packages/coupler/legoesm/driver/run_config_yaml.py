@@ -22,6 +22,38 @@ from pathlib import Path
 from typing import NamedTuple
 
 
+# Renamed config keys, old -> new (composable physics P2, decision D8).  The
+# old spellings stay working aliases: YAML decks (read_yaml_with_includes),
+# the CLI (second option string), stored configs (experiment_config_from_dict)
+# and run manifests (restart.config_hash_matches).
+RENAMED_CONFIG_KEYS = {
+    "fv3_duo_column_lane": "column_lane",
+    "mpas_land_lapse_K_per_km": "land_lapse_K_per_km",
+    "mpas_land_beta": "land_beta",
+    "mpas_land_beta_soil": "land_beta_soil",
+    "mpas_land_stress_from_land": "land_stress_from_land",
+    "mpas_ocean_flux_on_ocean_surface": "ocean_flux_on_ocean_surface",
+    "mpas_land_params_refresh": "land_params_refresh",
+    "mpas_ice_skin_prognostic": "ice_skin_prognostic",
+    "mpas_ice_thickness_m": "ice_thickness_m",
+}
+
+
+def migrate_renamed_keys(d: dict) -> dict:
+    """*d* with every old key of :data:`RENAMED_CONFIG_KEYS` renamed, at any
+    dict depth.  Old and new name both set to different values raises."""
+    out = {k: (migrate_renamed_keys(v) if isinstance(v, dict) else v)
+           for k, v in d.items() if k not in RENAMED_CONFIG_KEYS}
+    for old, new in RENAMED_CONFIG_KEYS.items():
+        if old in d:
+            if new in out and out[new] != d[old]:
+                raise ValueError(
+                    f"config sets both {old!r} (old name) and {new!r} to "
+                    f"different values ({d[old]!r} vs {out[new]!r})")
+            out[new] = d[old]
+    return out
+
+
 def read_yaml_with_includes(path, _seen=None) -> dict:
     """Read a run YAML config, recursively merging an optional ``include:`` base
     FIRST so the tuned physics can live in one shared file and be reused across
@@ -47,6 +79,11 @@ def read_yaml_with_includes(path, _seen=None) -> dict:
         raise SystemExit(
             f"--config {path}: expected a YAML mapping of argument=value, "
             f"got {type(doc).__name__}.")
+    # renamed keys (RENAMED_CONFIG_KEYS): an old spelling is an alias
+    try:
+        doc = migrate_renamed_keys(doc)
+    except ValueError as exc:
+        raise SystemExit(f"--config {path}: {exc}.")
     base_ref = doc.pop("include", None)
     merged: dict = {}
     if base_ref is not None:
@@ -178,6 +215,9 @@ def load_params_config(path) -> dict:
 # value) — extend this dict only when the pipeline threads a new scalar
 # (issue #691, codex audit).
 _ATM_SCALAR_PARAM_MAP: dict[str, str] = {
+    # prescribed-ice melt albedo -> build_physics_pipeline / MPAS column lane
+    "atm.prescribed_ice.sea_ice_melt_ramp_width_K":
+        "sea_ice_melt_ramp_width_K",
     # clouds -> build_cloud_config (physics_pipeline)
     "atm.clouds.CloudConfig.rh_crit": "cloud_rh_crit",
     "atm.clouds.CloudConfig.q_c_diagnostic": "cloud_q_c_diagnostic",
@@ -197,22 +237,23 @@ _ATM_SCALAR_PARAM_MAP: dict[str, str] = {
     "atm.micro.MorrisonConfig.fall_a_i": "morrison_fall_a_i",
     "atm.micro.MorrisonConfig.ice_snow_d_auto": "morrison_ice_snow_d_auto",
     "atm.micro.MorrisonConfig.hom_ice_nuc_N": "morrison_hom_ice_nuc_N",
+    "atm.micro.MorrisonConfig.autocon_fact": "morrison_autocon_fact",
+    "atm.micro.MorrisonConfig.accre_enhan_fact": "morrison_accre_enhan_fact",
     # convection -> _resolve_convection (physics_pipeline)
     "atm.conv.SBMConfig.tau_c": "sbm_tau_c",
     "atm.conv.SBMConfig.rh_ref": "sbm_RH_ref",
-    # The two cape_threshold entries are tunable_tier 0 (AD-unreachable
-    # trigger, #1417): they stay in this map because the map's contract is
-    # "what the pipeline actually threads", but the tier gate in
-    # apply_params_to_config REFUSES them on the --params route (#1518) —
-    # settable only via the explicit --config/CLI scalars.
+    # The two cape_threshold entries were tunable_tier 0 (AD-unreachable
+    # trigger, #1417) and refused on the --params route by the tier gate in
+    # apply_params_to_config (#1518).  They are tier 2 as of the smooth-trigger
+    # work, so the --params route now accepts them; the gate still refuses any
+    # parameter whose spec says tier 0, whichever those are.
     "atm.conv.SBMConfig.cape_threshold": "sbm_cape_threshold",
     "atm.conv.BechtoldConfig.cape_threshold": "bechtold_cape_threshold",
     "atm.conv.BechtoldConfig.rprcon": "bechtold_rprcon",
+    "atm.conv.BechtoldConfig.M_b_max": "bechtold_M_b_max",
     "atm.conv.BechtoldConfig.epsilon_deep": "bechtold_epsilon_deep",
     "atm.conv.BechtoldConfig.delta_deep": "bechtold_delta_deep",
     "atm.conv.BechtoldConfig.dnoprc": "bechtold_dnoprc",
-    "atm.conv.BechtoldConfig.epsilon_deep": "bechtold_epsilon_deep",
-    "atm.conv.BechtoldConfig.delta_deep": "bechtold_delta_deep",
     "atm.conv.BechtoldConfig.capdcycl_land_tau_scale": "bechtold_capdcycl_land_tau_scale",
     "atm.conv.BechtoldConfig.subcloud_evap_scale": "bechtold_subcloud_evap_scale",
     "atm.conv.BechtoldConfig.rhebc_land": "bechtold_rhebc_land",
@@ -258,16 +299,32 @@ _ATM_SCALAR_PARAM_MAP: dict[str, str] = {
     "atm.conv.BechtoldConfig.downdraft_entrain_rate": "bechtold_downdraft_entrain_rate",
     "atm.conv.TiedtkeConfig.autoconv_pe_max": "autoconv_pe_max",
     "atm.conv.TiedtkeConfig.autoconv_q_c_crit": "autoconv_q_c_crit",
+    # Zhang-McFarlane + CLUBB tunables -> _resolve_convection's ZM branch and
+    # turbulence_config_for (ZM_SCALAR_FIELDS / CLUBB_SCALAR_FIELDS in
+    # driver/config.py), the resolvers every lane (MPAS included) consumes.
+    "atm.conv.ZhangMcFarlaneConfig.c0_lnd": "zm_c0_lnd",
+    "atm.conv.ZhangMcFarlaneConfig.c0_ocn": "zm_c0_ocn",
+    "atm.conv.ZhangMcFarlaneConfig.ke": "zm_ke",
+    "atm.conv.ZhangMcFarlaneConfig.dmpdz": "zm_dmpdz",
+    "atm.conv.ZhangMcFarlaneConfig.tau": "zm_tau",
+    "atm.conv.ZhangMcFarlaneConfig.capelmt": "zm_capelmt",
+    "atm.turb.CLUBBParams.C14": "clubb_c14",
+    "atm.turb.CLUBBParams.C8": "clubb_c8",
+    "atm.turb.CLUBBParams.C11": "clubb_c11",
+    "atm.turb.CLUBBParams.C11b": "clubb_c11b",
+    "atm.turb.CLUBBParams.gamma_coef": "clubb_gamma_coef",
+    "atm.turb.CLUBBParams.gamma_coefb": "clubb_gamma_coefb",
+    "atm.turb.CLUBBParams.beta": "clubb_beta",
+    "atm.turb.CLUBBParams.c_K10": "clubb_c_k10",
     # hard saturation-adjustment trigger + heating cap -> _resolve_microphysics
     # (physics_pipeline, via apply_microphysics_experiment_flags; the MPAS
     # post-step drain reads the same threaded sub-config in model_driver).
-    # One flat scalar serves ALL SEVEN guarded schemes -- the five bulk
-    # warm-rain ones plus the Sundqvist diagnostic scheme and the ML emulator,
+    # One flat scalar serves ALL SIX guarded schemes -- the four bulk
+    # microphysics ones (morrison, p3, seifert_beheng, thompson) plus the
+    # Sundqvist diagnostic scheme and the ML emulator,
     # which gained the same guard when it was made uniform (only the active
     # scheme's sub-config is built, so one scalar is unambiguous). Keep this
     # block in step with microphysics/config.HARD_SAT_GUARD_SCHEMES.
-    "atm.micro.KesslerConfig.hard_sat_adjust_threshold": "hard_sat_adjust_threshold",
-    "atm.micro.KesslerConfig.hard_sat_max_heating_K": "hard_sat_max_heating_K",
     "atm.micro.MorrisonConfig.hard_sat_adjust_threshold": "hard_sat_adjust_threshold",
     "atm.micro.MorrisonConfig.hard_sat_max_heating_K": "hard_sat_max_heating_K",
     "atm.micro.P3Config.hard_sat_adjust_threshold": "hard_sat_adjust_threshold",
@@ -291,13 +348,9 @@ _ATM_SCALAR_PARAM_MAP: dict[str, str] = {
     # gravity wave drag -> gwd_config_for (physics_pipeline), which every lane
     # (FV pipeline / MPAS / spectral) now routes through.  Before it, these
     # scalars existed on ExperimentConfig but NO production path read them.
-    # ``tau_max`` is tier 3 (a numerics clip), so the tier-1/2 reachability
-    # audit does not require it — it is mapped anyway because the same resolver
-    # threads it and the map's contract is "what the pipeline actually threads".
     "atm.gwd.HinesConfig.total_rms_wind": "hines_total_rms_wind",
     "atm.gwd.HinesConfig.Fmax": "hines_Fmax",
     "atm.gwd.McFarlaneConfig.directional_spread": "mcfarlane_directional_spread",
-    "atm.gwd.McFarlaneConfig.tau_max": "mcfarlane_tau_max",
     # NOTE: ``mcfarlane_k_wave`` is threaded too but has NO ``__param_spec__``
     # entry (its computed 2*pi/100e3 default is not a float literal, so the
     # AST-based spec gate never required one) — there is no qualified name to

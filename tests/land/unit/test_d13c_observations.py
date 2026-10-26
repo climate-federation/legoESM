@@ -92,32 +92,34 @@ def test_observed_d13c_delegates_to_shared_mean():
     npt.assert_allclose(got, [-26.25, -30.0], rtol=1e-12)
 
 
-def test_load_gridded_d13c_reshape_and_mismatch(tmp_path):
+def test_load_gridded_obs_d13c_reshape_and_mismatch(tmp_path):
     xr = pytest.importorskip("xarray")
     try:
-        from legoesm.land.carbon.d13c_observations import load_gridded_d13c
+        from legoesm.land.carbon.d13c_observations import D13C_VAR_CANDIDATES
+        from legoesm.land.carbon.soc_observations import load_gridded_obs
         arr = np.array([[-24.0, -26.0, -28.0], [-30.0, -27.0, -25.0]])
         ds = xr.Dataset({"d13c": (("lat", "lon"), arr)})
         path = tmp_path / "d13c.nc"
         ds.to_netcdf(path)
     except Exception as exc:                       # no netcdf backend in this env
         pytest.skip(f"netcdf write unavailable: {exc}")
-    out = load_gridded_d13c(str(path), ncell=6)    # 2x3 row-major flatten
+    out = load_gridded_obs(str(path), D13C_VAR_CANDIDATES, "d13c", ncell=6)  # 2x3 row-major
     npt.assert_allclose(out, arr.reshape(-1), rtol=1e-12)
     with pytest.raises(SystemExit, match="ncell"):  # wrong ncell -> hard error
-        load_gridded_d13c(str(path), ncell=5)
+        load_gridded_obs(str(path), D13C_VAR_CANDIDATES, "d13c", ncell=5)
 
 
-def test_load_gridded_d13c_preserves_nan_gaps(tmp_path):
+def test_load_gridded_obs_d13c_preserves_nan_gaps(tmp_path):
     xr = pytest.importorskip("xarray")
     try:
-        from legoesm.land.carbon.d13c_observations import load_gridded_d13c
+        from legoesm.land.carbon.d13c_observations import D13C_VAR_CANDIDATES
+        from legoesm.land.carbon.soc_observations import load_gridded_obs
         arr = np.array([[-24.0, np.nan], [-30.0, -26.0]])   # a sparse-product gap at (0,1)
         ds = xr.Dataset({"d13c": (("lat", "lon"), arr)})
         path = tmp_path / "d13c_gap.nc"
         ds.to_netcdf(path)
     except Exception as exc:
         pytest.skip(f"netcdf write unavailable: {exc}")
-    out = load_gridded_d13c(str(path), ncell=4)
+    out = load_gridded_obs(str(path), D13C_VAR_CANDIDATES, "d13c", ncell=4)
     assert np.isnan(out[1])                            # gap PRESERVED, not fabricated 0
     npt.assert_allclose(out[[0, 2, 3]], [-24.0, -30.0, -26.0], rtol=1e-12)

@@ -46,21 +46,23 @@ import jax.numpy as jnp
 from jax.sharding import NamedSharding, PartitionSpec as P
 
 from legoesm.parallel.geometry_consistency import (
-    FLAG_ABSENT, assert_flags_agree, assert_schema_agrees, broadcast_checked,
-    coerce_bool, coerce_count, config_digest48, name_digest48,
+    FLAG_ABSENT, assert_flags_agree, assert_schema_agrees, broadcast_checked, checked_replicated_put,
+    coerce_bool, coerce_count, config_digest48, mesh_axis_terms, name_digest48,
     tree_schema_digest48)
 from legoesm.parallel.latlon_spmd import (
-    cell_to_cgrid_winds_spmd, spmd_pole_end_masks, activate_latlon_spmd_halo)
+    cell_to_cgrid_winds_spmd, spmd_pole_end_masks, activate_latlon_spmd_halo,
+    latlon_band_perms, reconstruct_vface_lower, to_vface_lower)
 from legoesm.parallel.shard_map_compat import shard_map
 from legoesm.forcing.time_utils import day_to_calendar
-from legoesm.core.conservation import fix_ps_mass_target
 from legoesm.atmosphere.dynamics.gcm.sharded_atm_latlon_step import (
     build_band_grids_atm, atm_grid_array_field_names, lat_spec)
 from legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid import (
-    CGridLatLonHydrostaticState, cgrid_to_hydrostatic)
+    CGridLatLonHydrostaticState, cgrid_to_hydrostatic, face_to_cell_winds)
 from legoesm.driver.compiled_segments import (
-    SegmentCarry, SegmentForcing, GRID_SHAPED_FORCING_FIELDS,
-    split_physics_single_rank, finalize_split_step, ghg_array_to_dict)
+    SegmentCarry, SegmentForcing, GRID_SHAPED_FORCING_FIELDS, carry_moist,
+    fix_segment_dry_mass, mass_fixer_energy_dT, split_physics_single_rank,
+    finalize_split_step,
+    ghg_array_to_dict)
 
 
 # Carry fields that are per-column state sharded on their leading axis under the
@@ -149,7 +151,7 @@ def _agree_opsplit_mesh_entry(mesh, tree=None, tree2=None, *,
     ``sharded_split_step`` additionally derives its shard_map specs from the
     carry/forcing structure.
     """
-    names, sizes = _opsplit_mesh_axis_terms(mesh)
+    names, sizes = mesh_axis_terms(mesh)
     assert_flags_agree(_OPSPLIT_MESH_ENTRY_FLAGS, (
         float(mesh is not None),
         float(mesh.devices.size if mesh is not None else 0),
@@ -222,22 +224,6 @@ _OPSPLIT_SPMD_ENTRY_FLAGS = (
 )
 
 
-def _opsplit_mesh_axis_terms(mesh):
-    """``(axis_names, axis_sizes)`` term lists; never raises."""
-    if mesh is None:
-        return (), ()
-    try:
-        names = tuple(str(a) for a in mesh.axis_names)
-    except Exception:                       # pragma: no cover - defensive
-        return ("<unreadable>",), ("<unreadable>",)
-    try:
-        shape = dict(mesh.shape)
-        sizes = tuple(f"{n}={shape.get(n, '?')}" for n in names)
-    except Exception:                       # pragma: no cover - defensive
-        sizes = ("<unreadable>",)
-    return names, sizes
-
-
 def _agree_opsplit_spmd_entry(model, mesh, statics, *, fix_mass,
                               rad_update_steps, ghg_keys, where: str) -> None:
     """Agree every rank-local input, as the FIRST statement of this factory.
@@ -264,7 +250,7 @@ def _agree_opsplit_spmd_entry(model, mesh, statics, *, fix_mass,
     # the collective (see the atm twin for the full rule).
     grid = getattr(model, "grid", None)
     fold = getattr(grid, "fold", None)
-    names, sizes = _opsplit_mesh_axis_terms(mesh)
+    names, sizes = mesh_axis_terms(mesh)
     problems = []
 
     def _count(value, label, absent=FLAG_ABSENT):
@@ -329,7 +315,7 @@ def _agree_opsplit_spmd_entry(model, mesh, statics, *, fix_mass,
 
 def make_sharded_operator_split_step(
     model, mesh, statics, *, fix_mass, rad_update_steps, start_day,
-    ghg_keys=None,
+    ghg_keys=None, persistent_cgrid=False,
 ):
     """Build ``sharded_split_step(carry, forcing) -> carry`` — one operator-split
     atmosphere step, lat-band-sharded (or serial when ``mesh is None``).
@@ -370,6 +356,25 @@ def make_sharded_operator_split_step(
                               where="make_sharded_operator_split_step")
     dt = statics.dt
     sigma_coord = model.sigma_coord
+    # ``persistent_cgrid``: the carry holds the native C-grid face winds --
+    # ``u`` (n_lat, n_lon+1, nlev) and ``v`` in the ``v_lower`` layout
+    # (n_lat, n_lon, nlev; the north pole face is the v=0 wall) so both shard
+    # by latitude band -- instead of cell-centre winds re-projected every step.
+    _perm_north = (latlon_band_perms(mesh.devices.size)[0]
+                   if (persistent_cgrid and mesh is not None) else None)
+    if persistent_cgrid and (tuple(model.config.pole_v_bc) != (True, True)
+                             or model.config.pole_v_bc_offset != 0):
+        raise ValueError(
+            "persistent_cgrid carries v in the v_lower layout, which drops the "
+            "north pole face as the v=0 wall; that needs pole_v_bc=(True, True) "
+            f"and pole_v_bc_offset=0, got {model.config.pole_v_bc} / "
+            f"{model.config.pole_v_bc_offset}")
+
+    def _v_faces(v_lower):
+        if mesh is None:                     # serial: append the pole wall
+            return jnp.concatenate([v_lower, jnp.zeros_like(v_lower[:1])], 0)
+        return reconstruct_vface_lower(v_lower, mesh.axis_names[0],
+                                       _perm_north)
 
     def _one_step(carry, band_geom, forcing_band,
                   polar_mask=None, polar_mask_v=None):
@@ -386,7 +391,12 @@ def make_sharded_operator_split_step(
         band slices is required, else a ``use_polar_filter`` model would filter a
         band with the global-length mask)."""
         # --- Dynamics: cell -> C-grid (halo-aware winds) -> band step -> cell ---
-        u_face, v_face = cell_to_cgrid_winds_spmd(carry.u, carry.v)
+        if persistent_cgrid:
+            u_face, v_face = carry.u, _v_faces(carry.v)
+            _u_in, _v_in = face_to_cell_winds(u_face, v_face)
+        else:
+            u_face, v_face = cell_to_cgrid_winds_spmd(carry.u, carry.v)
+            _u_in, _v_in = carry.u, carry.v
         cstate = CGridLatLonHydrostaticState(
             u=u_face, v=v_face, T=carry.T, p_s=carry.p_s, phis=carry.phis,
             tracers={})
@@ -395,15 +405,45 @@ def make_sharded_operator_split_step(
             grid=band_geom, sigma_coord=sigma_coord,
             polar_mask=polar_mask, polar_mask_v=polar_mask_v,
             pole_v_bc_masks=spmd_pole_end_masks(),
+            # energy fixer window starts at the cell-centre view of the
+            # step-input winds (F15b)
+            energy_pre=(carry.T, _u_in, _v_in, carry.p_s, carry.phis),
         )
         hs_out = cgrid_to_hydrostatic(out_cgrid, band_geom)
-        T_new, u_new = hs_out.T.data, hs_out.u.data
-        v_new, p_s_new = hs_out.v.data, hs_out.p_s.data
+        T_new, p_s_new = hs_out.T.data, hs_out.p_s.data
+        u_cc, v_cc = hs_out.u.data, hs_out.v.data
+        if persistent_cgrid:
+            # The finalizer writes these native arrays back into the carry.
+            u_new, v_new = out_cgrid.u, to_vface_lower(out_cgrid.v)
 
-        # --- Dry mass fixer (global_area_sum is lat-band-psum-aware) ---
+            def _lift(du, dv):
+                du_f, dv_f = model.lift_wind_increment(
+                    du, dv, grid=band_geom, polar_mask=polar_mask,
+                    polar_mask_v=polar_mask_v,
+                    # serial path: the model's own (global) masks; band path:
+                    # the band slices passed in (None there = filter off)
+                    own_polar_masks=mesh is None)
+                return du_f, to_vface_lower(
+                    model.wall_v(dv_f, spmd_pole_end_masks()))
+        else:
+            u_new, v_new, _lift = u_cc, v_cc, None
+
+        # --- Dry mass fixer (global_area_sum is lat-band-psum-aware): the
+        # DRY integral, moisture re-weighted so the correction is dry air
+        # (F13; same shared fixer as the compiled segment) ---
         if fix_mass:
-            p_s_new = fix_ps_mass_target(
-                p_s_new, carry.target_mass, band_geom, owned_mask=None)
+            _p_s_pre_mf = p_s_new
+            p_s_new, _fxm = fix_segment_dry_mass(
+                p_s_new, carry_moist(carry),
+                carry.target_mass, band_geom, statics.dsigma)
+            carry = carry._replace(
+                **{_nm: v for _nm, v in _fxm.items() if v is not None})
+            # outside the dycore energy window: return its energy as heat
+            _dT_mf = mass_fixer_energy_dT(
+                model, T_new, u_cc, v_cc, carry.phis, _p_s_pre_mf, p_s_new,
+                band_geom)
+            if _dT_mf is not None:
+                T_new = T_new + _dT_mf.astype(T_new.dtype)
 
         # --- Physics (column-local) + shared finalize tail ---
         need_rad, doy, sod = _need_rad_and_time(
@@ -428,7 +468,7 @@ def make_sharded_operator_split_step(
                     forcing_band.ghg_vmr, ghg_keys))
         lz = split_physics_single_rank(
             carry, T_new, u_new, v_new, p_s_new, need_rad, doy, sod,
-            band_statics)
+            band_statics, u_cc=u_cc, v_cc=v_cc, lift_wind_increment=_lift)
         return finalize_split_step(carry, lz, band_statics)
 
     if mesh is None:                       # serial / single-device
@@ -478,12 +518,15 @@ def make_sharded_operator_split_step(
     assert_schema_agrees(_ordered, n_dev,
                          context="make_sharded_operator_split_step",
                          arrays=[raw[n] for n in _ordered])
+    # checked_replicated_put keeps that guarded broadcast and places the
+    # canonical bytes WITHOUT jax's whole-array device_put equality assert,
+    # whose per-field all-gather (~P*N*(2s+1) bytes) made per-rank memory grow
+    # with the rank count on the lat-lon lane until a 128-rank arm was
+    # OOM-killed.
     stacks = {
-        name: jax.device_put(
-            jnp.asarray(broadcast_checked(
-                raw[name], name,
-                context="make_sharded_operator_split_step")),
-            rep)
+        name: checked_replicated_put(
+            raw[name], name, rep,
+            context="make_sharded_operator_split_step")
         for name in _ordered
     }
     _cache = {}

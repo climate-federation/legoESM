@@ -42,6 +42,151 @@ _argparse_namespace = _day23._argparse_namespace
 # _save_restart
 # ============================================================================
 
+@pytest.mark.parametrize("grid_type,processes,nbytes,expected", [
+    ("tripole", 16, 256 * 1024**2, True),
+    ("tripole", 16, 256 * 1024**2 - 1, False),
+    ("tripole", 1, 8 * 1024**3, False),
+    ("latlon", 16, 8 * 1024**3, False),
+])
+def test_large_tripole_io_scope(monkeypatch, grid_type, processes, nbytes, expected):
+    from types import SimpleNamespace
+    state = SimpleNamespace(T=SimpleNamespace(data=SimpleNamespace(nbytes=nbytes)))
+    monkeypatch.setattr(run_omip.jax, "process_count", lambda: processes)
+    assert run_omip._large_tripole_io(state, grid_type) is expected
+
+
+@pytest.mark.parametrize("fail", [False, True])
+def test_collective_io_waits_for_atomic_write_on_every_rank(tmp_path, monkeypatch, fail):
+    """Delay a real archive write for two status rounds; inject disk failure.
+
+    Two host threads emulate ranks. Neither may advance before root publishes
+    the atomic archive, and both must observe a planted write error.
+    """
+    import threading
+    import zipfile
+    from types import SimpleNamespace
+    from jax.experimental import multihost_utils
+
+    rank = threading.local()
+    rendezvous = threading.Barrier(2, timeout=15)
+    release = threading.Event()
+    shared = {"status": None, "pending": 0}
+    outcomes = {}
+    writes = []
+    state = SimpleNamespace(_fields=("T",), T=SimpleNamespace(
+        data=np.arange(24, dtype=np.float64).reshape(2, 3, 4)))
+    path = tmp_path / "restart_day000000.npz"
+    original_savez = np.savez_compressed
+
+    def slow_savez(fh, **payload):
+        writes.append(threading.current_thread().name)
+        assert release.wait(15), "coordinating ranks never polled"
+        if fail:
+            raise OSError("planted disk full")
+        return original_savez(fh, **payload)
+
+    def broadcast(value, is_source):
+        assert is_source == (rank.index == 0)
+        if is_source:
+            shared["status"] = int(value)
+        rendezvous.wait()
+        status = shared["status"]
+        if is_source and status == 0:
+            shared["pending"] += 1
+            assert not outcomes, "a rank advanced before the writer finished"
+            if not release.is_set():
+                assert not path.exists(), "partial archive published"
+            if shared["pending"] == 2:
+                release.set()
+        rendezvous.wait()
+        return np.asarray(status, dtype=np.int32)
+
+    def operation():
+        result = run_omip._save_restart(state, 0, 20, tmp_path, grid_type="tripole")
+        run_omip._join_restart_writer()
+        return result
+
+    def host(index):
+        rank.index = index
+        try:
+            outcomes[index] = run_omip._collective_root_io(operation)
+        except BaseException as exc:
+            outcomes[index] = exc
+
+    monkeypatch.setattr(run_omip.jax, "process_index", lambda: rank.index)
+    monkeypatch.setattr(multihost_utils, "broadcast_one_to_all", broadcast)
+    monkeypatch.setattr(run_omip.np, "savez_compressed", slow_savez)
+    hosts = [threading.Thread(target=host, args=(i,), daemon=True) for i in range(2)]
+    try:
+        for host_thread in hosts:
+            host_thread.start()
+        for host_thread in hosts:
+            host_thread.join(15)
+        assert all(not h.is_alive() for h in hosts)
+        assert shared["pending"] >= 2
+        assert len(writes) == 1
+        if fail:
+            assert all(isinstance(outcomes[i], RuntimeError) for i in range(2))
+            assert all("rank-0 state write failed" in str(outcomes[i]) for i in range(2))
+            assert not path.exists()
+        else:
+            assert outcomes == {0: path, 1: None}
+            with np.load(path) as archive:
+                np.testing.assert_array_equal(archive["T"], state.T.data)
+                assert int(archive["step"]) == 20
+            with zipfile.ZipFile(path) as archive:
+                assert all(f.compress_type == zipfile.ZIP_DEFLATED
+                           for f in archive.infolist())
+            assert not list(tmp_path.glob("*.tmp"))
+    finally:
+        release.set()
+        run_omip._join_restart_writer()
+
+
+def test_large_tripole_io_driver_routing():
+    """Execute production routing blocks without compiling ocean physics."""
+    import ast
+    import inspect
+    events = []
+
+    def coordinate(operation):
+        events.append("coordinate")
+        return operation()
+
+    def save(state, **kw):
+        assert state == "gathered ocean"
+        assert kw["ice_state"] == "gathered ice"
+        events.append("save")
+        return "checkpoint"
+
+    scope = {
+        "_coordinate_io": True, "_io_rank": True, "_multiproc": True,
+        "spmd_gather": lambda state: "gathered ocean",
+        "spmd_gather_ice": lambda state: "gathered ice",
+        "_collective_root_io": coordinate,
+        "_save_restart": save,
+        "_join_restart_writer": lambda: events.append("join"),
+        "write_final_snapshot": lambda: events.append("snapshot"),
+    }
+    loop = ast.parse(inspect.getsource(run_omip._run_omip_loop))
+    saver = next(n for n in ast.walk(loop)
+                 if isinstance(n, ast.FunctionDef) and n.name == "save_restart")
+    exec(compile(ast.Module(body=[saver], type_ignores=[]), "<save-routing>", "exec"), scope)
+    assert scope["save_restart"]("ocean", ice_state="ice") == "checkpoint"
+    assert events == ["coordinate", "save", "join"]
+
+    events.clear()
+    driver = ast.parse(inspect.getsource(run_omip.run_omip_single))
+    # ast.walk, not the top-level body: the final-snapshot route sits in the
+    # ``elif`` of ``if args.no_final_snapshot`` (a nested If node).
+    final_routes = [n for n in ast.walk(driver.body[0])
+                    if isinstance(n, ast.If) and isinstance(n.test, ast.Name)
+                    and n.test.id == "_coordinate_io"]
+    for route in final_routes:
+        exec(compile(ast.Module(body=[route], type_ignores=[]), "<final-routing>", "exec"), scope)
+    assert events == ["coordinate", "join", "coordinate", "snapshot"]
+
+
 def test_save_restart_writes_expected_npz(tmp_path):
     grid, z_coord, _, _, _ = _make_tiny_latlon_setup(n_lat=4, n_lon=8)
     state = run_omip._init_rest_state("latlon", grid, z_coord, H_max=1000.0)
@@ -107,6 +252,7 @@ def test_save_restart_labels_non_latlon_grid_type(tmp_path):
         out = tmp_path / gt
         fname = run_omip._save_restart(state, day=1.0, step=1, output_dir=out,
                                        grid_type=gt)
+        run_omip._join_restart_writer()
         data = np.load(fname, allow_pickle=False)
         assert str(data["grid_type"]) == gt
 
@@ -296,6 +442,7 @@ def test_gridgate_load_rejects_mismatched_grid_type(tmp_path):
     # Saved as a latlon restart (grid_type='latlon' recorded in the npz).
     fname = run_omip._save_restart(state, day=3.0, step=7, output_dir=tmp_path,
                                    grid_type="latlon")
+    run_omip._join_restart_writer()   # the write is asynchronous
     with pytest.raises(ValueError, match="grid_type"):
         run_omip._load_restart(fname, state, grid_type="mpas")
 
@@ -307,6 +454,7 @@ def test_gridgate_load_accepts_matching_grid_type(tmp_path):
     state = run_omip._init_rest_state("latlon", grid, z_coord, H_max=1000.0)
     fname = run_omip._save_restart(state, day=3.0, step=7, output_dir=tmp_path,
                                    grid_type="latlon")
+    run_omip._join_restart_writer()   # the write is asynchronous
     loaded, restart_day, restart_step = run_omip._load_restart(
         fname, state, grid_type="latlon")
     assert restart_day == 3.0
@@ -324,6 +472,7 @@ def test_gridgate_load_legacy_npz_without_key_no_raise(tmp_path):
     state = run_omip._init_rest_state("latlon", grid, z_coord, H_max=1000.0)
     fname = run_omip._save_restart(state, day=3.0, step=7, output_dir=tmp_path,
                                    grid_type="latlon")
+    run_omip._join_restart_writer()   # the write is asynchronous
     # Rewrite the npz without the grid_type key (legacy format).
     payload = dict(np.load(fname, allow_pickle=False))
     payload.pop("grid_type")
@@ -344,6 +493,7 @@ def test_gridgate_load_default_grid_type_none_skips_check(tmp_path):
     state = run_omip._init_rest_state("latlon", grid, z_coord, H_max=1000.0)
     fname = run_omip._save_restart(state, day=2.0, step=5, output_dir=tmp_path,
                                    grid_type="mpas")
+    run_omip._join_restart_writer()   # the write is asynchronous
     # Even though the npz says 'mpas', a None run grid_type skips the guard.
     loaded, restart_day, restart_step = run_omip._load_restart(fname, state)
     assert restart_day == 2.0

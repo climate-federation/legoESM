@@ -15,7 +15,9 @@ cfg = dataclasses.replace(dino_config_for_recipe("nemo_dino_kamm_mlf"),
     lon_west_deg=1.0, lon_east_deg=49.0, sill_lon_m_deg=1.0)
 mc, _ = dino_lat_lon_model_config(br.geometry, cfg)
 sf = dino_step_surface_forcing(dino_lat_lon_surface_forcing_arrays(br.geometry, cfg))
-pr = probe_latlon_cgrid(br.state, br.geometry, br.z_coord, mc, surface_forcing=sf, dt=2700.0)
+pr = probe_latlon_cgrid(
+    br.state, br.geometry, br.z_coord, mc, surface_forcing=sf,
+    dt=2700.0, tke_rn_dt=2700.0)
 mm = nc.Dataset(f"{RUN}/mesh_mask.nc"); rst = nc.Dataset(f"{RUN}/DINO_00005761_restart.nc")
 def llz(a): return np.moveaxis(np.asarray(a).squeeze(), 0, -1)
 iy = ix = slice(H, -H)

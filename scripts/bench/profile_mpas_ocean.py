@@ -261,7 +261,8 @@ def main() -> int:
     _mask = state0.land_mask.data
 
     def _fill_fn(field):
-        return fill_land_cells_mpas(field, _mask, c1_m, c2_m)
+        return fill_land_cells_mpas(field, _mask, c1_m, c2_m,
+                                    mesh.edgesOnCell, mesh.nEdgesOnCell)
 
     @jax.jit
     def _eos_press(T, S):

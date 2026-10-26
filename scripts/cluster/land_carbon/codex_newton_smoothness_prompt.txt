@@ -1,0 +1,34 @@
+FOLLOW-UP MEASUREMENT on the canopy closure solver (packages/core/legoesm/core/nonlinear.py,
+packages/land/legoesm/land/canopy/solver.py). Reuse your harness
+scripts/tmp/_measure_newton_discriminator.py and _measure_train_multilayer_land_era5.py.
+Measure only; change no physics, no defaults, no tracked files.
+
+Your previous run found: at the 60-iteration cap the failing columns (90% bare soil) still
+have LARGE ||J^T r|| (median 21, p90 1231) -- so descent is available. But an earlier
+measurement found raising the cap 60 -> 200 moves the failure rate only 13.1% -> 11.4%.
+Both cannot be "the solver just needs more iterations". Discriminate between:
+  (A) smooth but slow: the residual decreases along the Gauss-Newton direction, LM steps
+      are accepted, progress is just tiny per iteration;
+  (B) non-smooth residual: a kink or discontinuity in the residual functions makes the
+      Gauss-Newton prediction wrong, so steps are REJECTED and damping pins the iterate;
+  (C) degenerate rows: LAI is exactly 0 in these columns so leaf rows are 0*x = b.
+
+For the FAILING columns that exit at the iteration cap (bare-soil bin), report:
+1. Rejected-step fraction over the 60 iterations (median, p90). You only measured this for
+   the damping-ceiling exits (74.5%).
+2. ||r|| at iterations 20, 40, 60 (median) -- plateau or still falling?
+3. Along the undamped scaled Gauss-Newton direction delta at the terminal iterate:
+   ||r(x + t*x_scale*delta)|| / ||r(x)|| for t in {0.01, 0.1, 0.3, 1.0}. Fraction of columns
+   where the ratio is < 1 at t=0.01 and at t=0.1. (< 1 at small t and > 1 at t=1 => A;
+   >= 1 already at t=0.01 => B.)
+4. Jacobian at x and at x + 0.01*x_scale*delta: max relative change per ROW. A row whose
+   Jacobian jumps by O(1) over a 1% step names the non-smooth equation. Name the row and
+   the sub-function it evaluates (photosynthesis / stability / boundary-layer resistance /
+   longwave / canopy_air_update).
+5. For the same columns: LAI, fSun and the anchor weight
+   0.5*(1-tanh((fSun-0.08)/0.03)) (median, min, max). Is LAI exactly 0.0 or small-positive?
+   If exactly 0.0, what does compute_boundary_layer_resistance return for Rb_Sun/Rb_Sh
+   (inf? guarded?) and which residual rows still depend on x.
+
+Say which of A/B/C the numbers support, in one line, then the tables. Do not implement a
+cure. Heavy work on this compute node directly. Under 500 words.

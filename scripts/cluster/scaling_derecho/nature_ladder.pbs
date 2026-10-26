@@ -1,0 +1,265 @@
+#!/bin/bash -l
+#PBS -N nature_ladder
+#PBS -A P08010000
+#PBS -q main
+#PBS -l job_priority=regular
+#PBS -l walltime=04:00:00
+#PBS -j oe
+#PBS -k eod
+# ===========================================================================
+# The Nature-figure scaling ladders on NCAR Derecho — the SAME strong + weak,
+# f32 + f64 sweep the Levante campaign runs
+# (scripts/cluster/scaling_levante/nature_ladder.sbatch), so the two machines'
+# receipts are directly comparable and feed the SAME plotter
+# (scripts/plot/plot_nature_scaling.py).  Identical arm table, identical
+# benches, identical receipt schema; only the batch system (PBS/PALS instead
+# of SLURM), the launcher (mpiexec instead of srun) and the per-rank GPU pin
+# differ.  Derecho's GPU nodes are 4x A100-40GB (Levante's are 80GB), so the
+# f64 and large-mesh arms may hit the memory preflight and skip — that is the
+# gate doing its job, not a failure of this script.
+#
+#   MATRIX=atm_gpu   qsub -l select=32:ncpus=64:mpiprocs=4:ngpus=4:gpu_type=a100:mem=400GB \
+#                         -v MATRIX=atm_gpu scripts/cluster/scaling_derecho/nature_ladder.pbs
+#   MATRIX=atm_cpu   qsub -l select=16:ncpus=128:mpiprocs=16:mem=200GB \
+#                         -l walltime=08:00:00 -v MATRIX=atm_cpu ... (PPN=16)
+#   MATRIX=ocean_gpu / ocean_cpu likewise.
+#
+# The ladders now run to 1024 devices, which is 256 nodes at four GPUs per
+# node:
+#   select=64:...:ngpus=4   -> up to  256 devices
+#   select=128:...:ngpus=4  -> up to  512 devices
+#   select=256:...:ngpus=4  -> up to 1024 devices
+# Submit the largest allocation the queue will give and let the node guard
+# below skip what does not fit; a resubmission into the same OUTDIR resumes.
+# Derecho's GPU pool is far smaller than its CPU pool, so the top GPU rungs
+# may be unschedulable in practice — check what the queue actually grants
+# rather than assuming the 1024-device arm will ever run.
+#
+# RESOLUTION RUNGS.  An icosahedral mesh quadruples its cell count per
+# subdivision, so the nominal spacing halves:
+#
+#     subdiv  8     655,362 cells   30.0 km   about 1/3.7 degree
+#     subdiv  9   2,621,442 cells   15.0 km   about 1/7.4 degree
+#     subdiv 10  10,485,762 cells    7.5 km   about 1/15  degree
+#     subdiv 11  41,943,042 cells    3.7 km   about 1/30  degree
+#     subdiv 12 167,772,162 cells    1.9 km   about 1/59  degree
+#
+# A 1/48-degree target is 2.3 km, which falls between subdivisions 11 and 12;
+# subdivision 12 is the nearest rung and is the one the tables below carry.
+# THE TWO FINEST RUNGS NEED A MESH THAT DOES NOT EXIST YET. Generating and
+# caching a 42-million-cell mesh, let alone a 168-million-cell one, is its own
+# job, and the 168-million-cell ocean at forty levels needs roughly 164
+# thousand cells per device even at 1024 devices. Expect those arms to skip on
+# the memory preflight until the meshes are built; that is the gate working,
+# not a failure of this script.
+#
+# Arms whose node need exceeds the allocation are skipped, so the same script
+# is submitted at several node counts; a valid receipt is never re-run
+# ("[have]"), which makes a resubmission into the same OUTDIR a resume.
+#
+# Weak arms of the MPAS-atm and cube lanes are strong-bench runs at a larger
+# mesh per device count (those benches have no --mode); the receipt then says
+# mode=strong and the "_weak_" tag in the FILENAME is what marks them — the
+# plotter reads the mode from the filename first.
+# ===========================================================================
+set -uo pipefail
+SUBMIT_DIR="${PBS_O_WORKDIR:-$(pwd)}"
+MATRIX="${MATRIX:?set MATRIX=atm_gpu|atm_cpu|ocean_gpu|ocean_cpu}"
+BACKEND="${MATRIX##*_}"
+export LEGOESM_REPO="${LEGOESM_REPO:-$SUBMIT_DIR}"
+# Derecho's mpiexec exports PALS_*, not the OpenMPI/SLURM rank vars the python
+# auto-pin looks for, so each rank is given exactly ONE GPU here: the
+# multicontroller benches federate N single-GPU processes, and a rank that saw
+# all four would build an N*4-device mesh.
+PIN='export CUDA_VISIBLE_DEVICES=${PALS_LOCAL_RANKID:-${OMPI_COMM_WORLD_LOCAL_RANK:-0}}; exec "$@"'
+if [[ "$BACKEND" == gpu ]]; then
+  export JAX_PLATFORMS=cuda,cpu
+  PPN="${PPN:-4}"; ARM_TIMEOUT="${ARM_TIMEOUT:-1200}"
+  LAUNCH_WRAP=(bash -c "$PIN" _)
+else
+  export JAX_PLATFORMS=cpu
+  # 16 ranks x 8 cores per node (owner-approved 2026-09-25). Measured on
+  # Derecho, one node, ms/step at 4x32 -> 16x8: lat-lon 1024x2048 738 -> 430,
+  # MPAS ocean s6 f64 235 -> 124 (s7 969 -> 420), MPAS atm s7 104 -> 97
+  # (s8 353 -> 332); at two nodes the 16x8 layout stays ahead (-10% atm s8,
+  # -25% ocean s7, -36% lat-lon 2048x4096). Levante's 4x32 optimum was
+  # measured on MPAS atm s7 only. Peak memory at 16x8: 5.3 GB/rank (atm s8).
+  PPN="${PPN:-16}"; ARM_TIMEOUT="${ARM_TIMEOUT:-5400}"
+  # PALS binds each rank to ONE core unless given a depth: measured on a
+  # Derecho CPU node (2026-09-25), 4 ranks of MPAS atmosphere s6 took
+  # 410 ms/step bound that way against 36 ms with --depth 32 (11x). Same
+  # defect the Levante launcher fixed on 2026-09-21. The divisor is the
+  # node's PHYSICAL core count: PBS's NCPUS is per MPI process (it reads 1
+  # under mpiprocs=128), so it cannot be used here.
+  NODE_CORES="$(lscpu -p=SOCKET,CORE | grep -v '^#' | sort -u | wc -l)"
+  (( PPN >= 1 && NODE_CORES >= PPN )) || { echo "cannot size --depth: $NODE_CORES cores, PPN=$PPN" >&2; exit 2; }
+  LAUNCH_WRAP=(--cpu-bind depth --depth "$(( NODE_CORES / PPN ))")
+fi
+# The env's mpi4py links cray-mpich 8.1.27 (libmpi_gnu_91.so.12), whose
+# Slingshot (CXI) init fails across nodes ("OFI fi_getinfo() failed"), so
+# every multi-node arm died at MPI_Init; MPICH 8.1.32 works (2026-09-25).
+# The batch default is the INTEL flavour (no libmpi_gnu_*); loading gcc
+# makes Lmod swap in the GNU one. Loaded BEFORE _env.sh so conda's own
+# libraries stay ahead of the PE runtime on LD_LIBRARY_PATH.
+module load gcc cray-mpich/8.1.32 || { echo "module load gcc cray-mpich/8.1.32 failed" >&2; exit 2; }
+MPI_GNU="$(ls "${MPICH_DIR:-/nonexistent}"/lib/libmpi_gnu_*.so.12 2>/dev/null | head -1)"
+MPIF_GNU="$(ls "${MPICH_DIR:-/nonexistent}"/lib/libmpifort_gnu_*.so.12 2>/dev/null | head -1)"
+[[ -n "$MPI_GNU" && -n "$MPIF_GNU" ]] || { echo "no GNU cray-mpich libs under MPICH_DIR='${MPICH_DIR:-}'" >&2; exit 2; }
+source "${SUBMIT_DIR}/scripts/cluster/scaling_derecho/_env.sh"   # $REPO, $PY, PYTHONPATH, fabric
+cd "$REPO"
+export XLA_FLAGS="${XLA_FLAGS:-} --xla_gpu_shard_autotuning=false"
+JOBID="${PBS_JOBID%%.*}"
+OUTDIR="${OUTDIR:-$SCRATCH/legoesm_scaling/nature_${MATRIX}_j${JOBID}}"
+mkdir -p "$OUTDIR"
+# Route mpi4py's 8.1.27 soname to the loaded 8.1.32 GNU library (same
+# MPICH ABI), on shared storage every node sees, after _env.sh so nothing
+# prepends ahead of it. GPU arms import the same mpi4py: both take it.
+MPISHIM="$OUTDIR/mpishim"; mkdir -p "$MPISHIM"
+ln -sf "$MPI_GNU" "$MPISHIM/libmpi_gnu_91.so.12"
+ln -sf "$MPIF_GNU" "$MPISHIM/libmpifort_gnu_91.so.12"
+export LD_LIBRARY_PATH="$MPISHIM:${LD_LIBRARY_PATH:-}"
+export LEGOESM_JIT_CACHE_DIR="$OUTDIR/jitcache"; mkdir -p "$LEGOESM_JIT_CACHE_DIR"
+# PBS gives the node count only through the node file; no fallback, a wrong
+# count would silently run every arm at one node.
+NODES="$(sort -u "${PBS_NODEFILE:?PBS_NODEFILE unset — run this under qsub}" | wc -l)"
+MAX_ND="${MAX_ND:-$((NODES * PPN))}"
+MIN_ND="${MIN_ND:-1}"
+STEPS="${STEPS:-60}"; WARMUP="${WARMUP:-10}"
+# The mesh cache is a Levante path in the sbatch; on Derecho it lives on GLADE
+# and is built on first use.
+export LEGOESM_MESH_CACHE_DIR_DEFAULT="$SCRATCH/legoesm_mesh_cache"
+mkdir -p "$LEGOESM_MESH_CACHE_DIR_DEFAULT"
+echo "matrix=$MATRIX backend=$BACKEND nodes=$NODES ppn=$PPN nd=[$MIN_ND,$MAX_ND] outdir=$OUTDIR sha=$(git rev-parse --short HEAD)"
+rc=0
+
+# run_arm <lane> <mode> <res> <nd> <x64>
+#   lane: latlon | mpas | cube | tripole | omps    res: latlon rows / mpas level / cube N:kt
+run_arm() {
+  local lane="$1" mode="$2" res="$3" nd="$4" x64="$5"
+  if [[ -n "${LANES:-}" && " $LANES " != *" $lane "* ]]; then return 0; fi
+  if [[ -n "${MODES:-}" && " $MODES " != *" $mode "* ]]; then return 0; fi
+  local nn=$(( (nd + PPN - 1) / PPN ))
+  if (( nn > NODES || nd > MAX_ND || nd < MIN_ND )); then
+    echo "[skip] ${lane}_${mode}_${res} d${nd} (needs ${nn} nodes / outside [$MIN_ND,$MAX_ND])"
+    return 0
+  fi
+  local tag="${lane}_${mode}_${res//:/k}_d${nd}_x${x64}"
+  if grep -q '"valid": true' "$OUTDIR/${tag}.jsonl" 2>/dev/null; then echo "[have] $tag"; return 0; fi
+  rm -f "$OUTDIR/${tag}.jsonl"
+  export JAX_ENABLE_X64="$x64"
+  unset NCCL_P2P_NET_CHUNKSIZE NCCL_MIN_NCHANNELS NCCL_MAX_NCHANNELS \
+        LEGOESM_LATLON_PACKED_EXCHANGE LEGOESM_LATLON_SPMD_FUSED_HALO LEGOESM_MESH_CACHE_DIR \
+        LEGOESM_OCEAN_MIXED LEGOESM_VMIX_F32_SOLVE LEGOESM_BAROCLINIC_F32 LEGOESM_ENABLE_TF32
+  local bench args=(--multicontroller --n-devices "$nd")
+  case "$lane" in
+    latlon)
+      export NCCL_MIN_NCHANNELS=16 NCCL_MAX_NCHANNELS=16
+      export LEGOESM_LATLON_PACKED_EXCHANGE=1 LEGOESM_LATLON_SPMD_FUSED_HALO=1
+      bench=scripts/bench/bench_atm_latlon_spmd_scaling.py
+      if [[ "$mode" == strong ]]; then
+        args+=(--mode strong --n-lat "$res" --n-lon $((2 * res)))
+      else
+        args+=(--mode weak --nlat-per-dev "$res" --n-lon "$NLON_WEAK")
+      fi
+      args+=(--nlev 26 --steps "$STEPS" --warmup "$WARMUP") ;;
+    mpas)
+      export NCCL_MIN_NCHANNELS=32 NCCL_MAX_NCHANNELS=32 NCCL_P2P_NET_CHUNKSIZE=131072
+      export LEGOESM_MESH_CACHE_DIR="$LEGOESM_MESH_CACHE_DIR_DEFAULT"
+      bench=scripts/bench/bench_mpas_spmd_scaling.py
+      args+=(--subdivision "$res" --nlev 26 --lloyd 0 --wide-halo --partition-method sfc
+             --steps "$STEPS" --warmup "$WARMUP") ;;
+    cube)
+      if (( ${res%:*} % ${res#*:} != 0 )); then echo "[skip] $tag: kt does not divide N"; return 0; fi
+      export NCCL_MIN_NCHANNELS=16 NCCL_MAX_NCHANNELS=16
+      bench=scripts/bench/bench_cube_tiled_step_scaling.py
+      args=(--multicontroller --kt "${res#*:}" --resolution "${res%:*}" --nlev 26
+            --steps "$STEPS" --warmup "$WARMUP") ;;
+    tripole)
+      export NCCL_MIN_NCHANNELS=16 NCCL_MAX_NCHANNELS=16
+      bench=scripts/bench/bench_ocean_latlon_spmd_scaling.py
+      args+=(--tripole --nlev 75)
+      if [[ "$mode" == strong ]]; then
+        args+=(--mode strong --n-lat "$res" --n-lon "$NLON_TRIPOLE")
+      else
+        args+=(--mode weak --nlat-per-dev "$res" --n-lon "$NLON_TRIPOLE")
+      fi
+      args+=(--steps "$STEPS" --warmup "$WARMUP") ;;
+    omps)
+      export NCCL_MIN_NCHANNELS=32 NCCL_MAX_NCHANNELS=32 NCCL_P2P_NET_CHUNKSIZE=131072
+      export LEGOESM_MESH_CACHE_DIR="$LEGOESM_MESH_CACHE_DIR_DEFAULT"
+      bench=scripts/bench/bench_ocean_mpas_spmd_scaling.py
+      args+=(--nlev 40 --lloyd 0 --block-steps 20 --blocks 3)
+      if [[ "$mode" == strong ]]; then args+=(--subdivision "$res")
+      else args+=(--mode weak --cells-per-device "$res"); fi ;;
+    *) echo "unknown lane $lane"; return 1 ;;
+  esac
+  args+=(--out "$OUTDIR/${tag}.jsonl")
+  echo "=== arm $tag nd=$nd nn=$nn $(date '+%F %T')"
+  if ! timeout --kill-after=30 "$ARM_TIMEOUT" \
+         mpiexec -n "$nd" --ppn "$PPN" "${LAUNCH_WRAP[@]}" \
+         "$PY" "$bench" "${args[@]}" < /dev/null; then
+    echo "!!! FAILED $tag (continuing)"; rc=1
+    [[ -e "$OUTDIR/${tag}.jsonl" ]] && mv -f "$OUTDIR/${tag}.jsonl" "$OUTDIR/${tag}.failed.jsonl"
+  fi
+  sleep 5
+}
+
+ARMS=()
+add() {  # add <lane> <mode> <res> <nd...>   (both precisions)
+  local lane="$1" mode="$2" res="$3"; shift 3
+  local nd x64
+  for nd in "$@"; do for x64 in 0 1; do ARMS+=("$lane" "$mode" "$res" "$nd" "$x64"); done; done
+}
+P2_GPU="1 2 4 8 16 32 64 128 192 256 512 1024"
+P2_CPU="1 2 4 8 16 32 64 128 256 512 1024"
+case "$MATRIX" in
+  atm_gpu)
+    NLON_WEAK=8192
+    add latlon weak   32   $P2_GPU
+    add latlon strong 2048 $P2_GPU                # Derecho has no reusable lat-lon strong
+    add latlon strong 4096 4 8 16 32 64 128 192 256 512 1024  # receipts, so both are measured here
+    add latlon strong 8192 128 256 512 1024        # the fine lat-lon rung
+    add mpas   strong 9    $P2_GPU
+    add mpas   strong 10   2 4 8 16 32 64 128 192 256 512 1024
+    add mpas   strong 11   64 128 256 512 1024     # ~3.7 km, near 1/30 degree
+    add mpas   weak 7 2;  add mpas weak 8 8;  add mpas weak 9 32;  add mpas weak 10 128
+    add mpas   weak 10 512
+    add cube   strong 768:2 24; add cube strong 768:3 54
+    add cube   strong 768:4 96
+    add cube   weak 192:2 24; add cube weak 288:3 54; add cube weak 384:4 96
+    ;;
+  atm_cpu)
+    NLON_WEAK=8192
+    add latlon strong 4096 32 64 128 256 512
+    add latlon weak   8    $P2_CPU
+    add mpas   strong 9    16 32 64 128 256 512
+    add mpas   weak 5 2; add mpas weak 6 8; add mpas weak 7 32; add mpas weak 8 128; add mpas weak 9 512
+    add cube   strong 768:2 24; add cube strong 768:3 54; add cube strong 768:4 96
+    add cube   strong 768:6 216; add cube strong 768:8 384
+    add cube   weak 192:2 24; add cube weak 288:3 54; add cube weak 384:4 96; add cube weak 768:8 384
+    ;;
+  ocean_gpu)
+    NLON_TRIPOLE=4352
+    add tripole strong 3072 8 16 32 64 128 192 256 512 1024
+    add tripole weak   24   $P2_GPU
+    add omps    strong 9    $P2_GPU
+    add omps    strong 10   8 16 32 64 128 256 512 1024   # ~7.5 km, near 1/15 degree
+    add omps    strong 11   64 128 256 512 1024          # ~3.7 km, near 1/30 degree
+    add omps    strong 12   256 512 1024                 # ~1.9 km, near 1/60 degree
+    add omps    weak 20480 2 8 32 128 512 1024
+    ;;
+  ocean_cpu)
+    NLON_TRIPOLE=4352
+    add tripole strong 3072 32 64 128 256 512
+    add tripole weak   6    $P2_CPU
+    add omps    strong 9    16 32 64 128 256 512
+    add omps    weak 5120   2 8 32 128 512
+    ;;
+  *) echo "unknown MATRIX $MATRIX"; exit 2 ;;
+esac
+
+n=$(( ${#ARMS[@]} / 5 ))
+echo "### $n arms"
+for ((i = 0; i < n; i++)); do s=$((i * 5)); run_arm "${ARMS[@]:s:5}"; done
+echo "=== DONE rc=$rc outdir=$OUTDIR ==="
+exit "$rc"

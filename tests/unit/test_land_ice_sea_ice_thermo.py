@@ -11,6 +11,7 @@ from legoesm.ice.state import SeaIceState
 from legoesm.core.coupling_fields import AtmToSurface, TileResponse
 from legoesm.core.field import Field
 from legoesm import constants
+from legoesm.thermo import latent_heat_sublimation
 
 
 SHAPE = (4,)
@@ -272,7 +273,7 @@ class Test8l_ThinIceStiffStability:
         _, _, sh, lh = simple_bulk_fluxes(
             _jnp.array(5.0), _jnp.array(2.0), _jnp.array(285.0), _jnp.array(6e-3),
             _jnp.array(Ti0), _jnp.array(qsfc), _jnp.array(1.3), _jnp.array(wind),
-            cfg.Cd_ice, cfg.Ch_ice, L_latent=constants.L_s,
+            cfg.Cd_ice, cfg.Ch_ice, L_latent=latent_heat_sublimation(_jnp.array(Ti0)),
         )
         Q_sfc = sw_net + lw_net - float(sh) - float(lh)
         F_cond_new = K_cond * (cfg.T_freeze_ocean - Tin)
@@ -642,7 +643,7 @@ class Test8n_LatentSkinResolve:
         assert vol_out < 0.5 * vol_in, "premise: clamp must fire (heavy ablation)"
         # Energy <-> mass pairing (the coupled invariant this fix guarantees).
         assert jnp.allclose(resp.lhflx * a0,
-                            constants.L_s * resp.surface_mass_flux,
+                            latent_heat_sublimation(272.9) * resp.surface_mass_flux,
                             rtol=1e-9, atol=1e-12)
 
     def test_skin_resolve_noop_for_melting_clamp(self):

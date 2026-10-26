@@ -1,0 +1,95 @@
+{
+ "format": "nemo-testcase-l2-gyre-round35-preregister-v1",
+ "date": "2026-09-06",
+ "starting_tip": "23c46232ea60",
+ "regime": "CPU production JIT, fp64/x64, oracle V2, transcendentals=libm",
+ "what_this_round_delivers": [
+  "the WRITE-only tra_zdf instrument for GYRE (MY_SRC patches + run.sh); the AGENT DOES NOT RUN IT",
+  "the reader and the given-inputs gate, written BEFORE the record exists and proven on a synthetic record written by a Python twin of the Fortran writer",
+  "a diagnosis and a fix, or a registration, for the two pre-existing suite failures round 33 classified"
+ ],
+ "what_this_round_may_not_do": [
+  "run makenemo, mpirun or any NEMO executable",
+  "modify anything under the NEMO src/ tree",
+  "land a model-numerics change without a Rule-12 table covering every executing card",
+  "quote any number from the round-35 record, which does not exist yet"
+ ],
+ "oracle_roots": {
+  "GYRE-zco source run": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round29_oracle_v2_zdf_matrix",
+  "GYRE-zco round-35 target run": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round35_oracle_trazdf_matrix"
+ },
+ "read_before_measuring": {
+  "r0_1": "NEMO's stage-3 tracer program, from the COMPILED arm GYRE runs (cfgs/GYRE_OMIP_L2_P3_SM_R29ZDF/BLD/ppsrc/nemo/stprk3_stg.f90): tra_adv at :640, tra_sbc_RK3 at :646, tra_qsr at :712, tra_ldf at :727, tra_zdf at :741.  tra_zdf performs the time integration itself; there is no separate stage-3 tracer update.",
+  "r0_2": "tra_zdf (src/OCE/TRA/trazdf.F90:51-115) does three things: it calls tra_zdf_imp('TRA', rDt, ...) at :82, then applies the DRAKKAR negative-salinity clamp at :89-91, then optionally saves trends.  The clamp is ACTIVE on GYRE: it is guarded by .NOT.(ln_SEOS .AND. rn_b0==0) and ln_SEOS = F (round29 ocean.output:158).  So NEMO's existing stage-3 tracer record holds the POST-clamp column, and any pre-clamp comparison needs a new dump.",
+  "r0_3": "tra_zdf_imp (trazdf.F90:118-293) builds the tridiagonal ONCE and reuses it: the build is guarded at :159-160 by (jn == jp_tem .OR. (jn == jp_sal .AND. ln_zdfddm)).  ln_zdfddm = F on GYRE (ocean.output:568), so SALINITY IS SOLVED WITH TEMPERATURE'S MATRIX and avs never enters.",
+  "r0_4": "The matrix diffusivity is zwt = avt + ah_wslp2 (trazdf.F90:172-174), not avt alone.  l_ldfslp is TRUE because ldftra.F90:249 sets it for nldf_tra == np_lap_i, and GYRE resolves 'Rotated laplacian operator (standard)' (ocean.output:664) from ln_traldf_lap = T + ln_traldf_iso = T (:650, :655).  ln_traldf_msc = F (:657), so it is the ah_wslp2 arm at :172-174 and not the akz arm at :167-170.",
+  "r0_5": "ln_zad_Aimp = F (ocean.output:553), so the diagonal build takes the ELSE arm at trazdf.F90:217-223 and carries no implicit-vertical-advection term.  ln_zdfmfc = F (:561), so neither the matrix block at :229-235 nor the RHS block at :265-269 runs.",
+  "r0_6": "Under key_qco + key_vco_1d3d the thickness macros resolve DIFFERENTLY for T and W, and this is the single most likely transcription trap in the routine.  domzgr_substitute.h90:126 gives e3t(i,j,k,t) = e3t_3d(i,j,k)*(1+r3t(i,j,t)*tmask(i,j,k)) -- WITH the mask -- while :131 gives e3w(i,j,k,t) = e3w_1d(k)*(1+r3t(i,j,t)) -- NO mask, a ONE-DIMENSIONAL reference ladder, and r3t at the T point rather than any r3w.  Confirmed in the compiled ppsrc at BLD/ppsrc/nemo/trazdf.f90:230-233.",
+  "r0_7": "ah_wslp2 and akz are PUBLIC module arrays of ldfslp (ldfslp.F90:65-66), allocated (jpi,jpj,jpk) at :571, and trazdf USEs ldfslp.  ah_wslp2 is written by traldf_iso_a33 (traldf_iso.F90:135, :296) inside the tra_ldf call that runs immediately before tra_zdf, so it is live at the write point.",
+  "r0_8": "GYRE's initial density is HORIZONTALLY UNIFORM: usrdef_istate.F90:63 and :70 make T and S functions of pdept alone, and the card is zco with a flat bottom.  ldf_slp is called ONCE per step from the BEFORE state (stprk3.F90:193, CALL ldf_slp(kstp, rhd, rn2b, Nbb, Nbb)).  At kt=1 that BEFORE state is the initial state.",
+  "r0_9": "GYRE's avt is a live closure output, not a constant: ln_zdftke = T and ln_zdfevd = T (ocean.output:557, :562), rn_avt0 = 1.2e-5.  It is the only field in the tracer matrix that a closure computes.",
+  "r0_10": "legoESM's literal transcription is implicit_vertical_diffusion_nemo_tracer_pair in ocean/physics/vertical_mixing/implicit_solver.py, reached from the model's step at ocean_model_latlon_cgrid.py:10226 through implicit_vertical_diffusion_ocean_tracer_pair_dispatch(evaluation='nemo_literal').  Its three recurrences are _nemo_ordered_solve, the SAME function object the momentum solve uses.",
+  "r0_11": "A tracer-side pre-implicit override EXISTS and was verified by reading it, not assumed: _NEMOWSRK3TestHooks.pre_implicit_tracer_override and .pre_implicit_tracer_content_override at ocean_model_latlon_cgrid.py:1271 and :1276, consumed at :7870-7881.  It is already used by nemo_testcase_l2_gyre_stage3_completion_gate.py:338.  This round does NOT need it: the gate drives the production solve function directly, which is the stronger form of Rule 10 and avoids the causal-injection arm round 34 recorded as broken.",
+  "r0_12": "Round 34's exoneration of tra_ldf covers its increment to ts(Krhs) only.  ah_wslp2 enters the ZDF MATRIX and never touches Krhs, so 'tra_ldf contributes exactly 0' does not exonerate it.  That is why the instrument dumps it."
+ },
+ "instrument": {
+  "record": "oracle_trazdf_matrix_kt00000001.bin, magic NEMO_L2_TRAZD_1, one file, written once at kt=nit000 from tra_zdf after the clamp so that both the pre-clamp and post-clamp columns are in it",
+  "write_only": "no value written is ever read back into a prognostic, a work array or a closure coefficient; every buffer is zeroed at allocation before any capture",
+  "patches": [
+   "trazdf_round35.patch on the SHIPPED src/OCE/TRA/trazdf.F90, copied into the target cfg's MY_SRC; ADD-only",
+   "no stprk3_stg patch: the R29ZDF MY_SRC copy already writes the stage-3 accumulator record, and the source cfg is inherited whole"
+  ],
+  "source_cfg": "GYRE_OMIP_L2_P3_SM_R29ZDF -- chosen because it is the cfg the round-29/round-34 GYRE oracle records were written by, so the twin identity check compares against a run of the SAME MY_SRC set; the base GYRE cfg would have no records to be a twin of",
+  "target_cfg": "GYRE_OMIP_L2_P3_SM_R35TRAZDF"
+ },
+ "predictions": {
+  "PR1": {
+   "arm": "transcription calibration, record only",
+   "claim": "Rebuilding zwi/zwd/zws, the LU diagonal zwt, the per-level RHS, the forward-sweep intermediate and the solved column from the record's OWN operands, by the statements at trazdf.F90:172-174, :204, :217-223, :256-261, :271-287 with the key_qco/key_vco_1d3d substitutions of domzgr_substitute.h90:126 and :131, reproduces every dumped array with ZERO cells bit-unequal on the writer's own [ntsi,ntei]x[ntsj,ntej] box.",
+   "threshold": "0 cells unequal on every rebuilt array",
+   "falsifier": "any cell unequal -> one of the five resolved-branch readings (l_ldfslp, ln_traldf_msc, ln_zdfddm, ln_zad_Aimp, ln_zdfmfc) or one substitution is wrong, and NO number from this record may be quoted until it is fixed"
+  },
+  "PR2": {
+   "arm": "SWEEP -- legoESM's own ordered solve, given NEMO's exact matrix and NEMO's exact RHS",
+   "claim": "The three recurrences legoESM runs, driven with the dumped zwi/zwd/zws and the dumped per-level RHS, reproduce NEMO's solved column BIT-EXACTLY for both tracers.",
+   "threshold": "0 cells unequal on T and on S",
+   "falsifier": "DEBT on either tracer -> the SWEEP owns the 1.36e-12 and the fix is inside the recurrence, which would also put every momentum discharge that shares the same function under review"
+  },
+  "PR3": {
+   "arm": "ASSEMBLY -- legoESM's assembled lower/diagonal/upper, given NEMO's own operands",
+   "claim": "Given NEMO's own face diffusivity, e3t(Kaa), e3w(Kmm), rDt and tmask read from the record, legoESM's assembly reproduces NEMO's zwi, zwd and zws bit-exactly, scored per diagonal.",
+   "threshold": "0 cells unequal on each of the three diagonals",
+   "falsifier": "DEBT on any diagonal -> the ASSEMBLY FORMULA owns it, and the differing diagonal names the statement"
+  },
+  "PR4": {
+   "arm": "the round's headline attribution",
+   "claim": "PR2 and PR3 both hold, so NEITHER the sweep NOR the assembly formula carries the 1.36e-12; the owner is an OPERAND legoESM computes for itself, or the RHS built from it.  Ranked first suspect: avt, the TKE+evd vertical diffusivity, the only closure output in the tracer matrix (r0_9).  Second: the RHS pair e3t(Kbb)*T(Kbb) + p2dt*e3t(Kmm)*T(Krhs).  Third: the e3t(Kaa) and e3w(Kmm) substitutions of r0_6.",
+   "threshold": "PR2 and PR3 both at 0 cells unequal",
+   "falsifier": "either PR2 or PR3 over the bar REFUTES this: the owner is then inside legoESM's transcription of the routine, not in its inputs"
+  },
+  "PR5": {
+   "arm": "the isoneutral a33 fold",
+   "claim": "ah_wslp2 is EXACTLY ZERO on every owned cell at kt=1 stage 3, because the slopes are built once per step from the BEFORE state (r0_8) and GYRE's initial density is horizontally uniform.  The fold is therefore INERT here and cannot own the residual, even though round 34's tra_ldf exoneration does not cover it (r0_12).",
+   "threshold": "max |ah_wslp2| over owned cells is exactly 0.0",
+   "falsifier": "any nonzero owned cell -> the fold IS live at kt=1, it becomes the ranked first operand suspect ahead of avt, and PR4's ranking is rewritten"
+  },
+  "PR6": {
+   "arm": "the DRAKKAR negative-salinity clamp",
+   "claim": "The clamp at trazdf.F90:89-91 changes NO cell on GYRE at kt=1: the pre-clamp solved S in this record equals the post-clamp S bit for bit.",
+   "threshold": "0 cells differ between the pre-clamp and post-clamp S",
+   "falsifier": "any clamped cell -> the pre-clamp and post-clamp columns are different quantities and every earlier S comparison at this boundary is confounded, which is itself the finding"
+  },
+  "PR7": {
+   "arm": "non-vacuity",
+   "claim": "Every gate arm has a plant that turns it red and exits non-zero, and the reader refuses a wrong record: bad magic, bad version, non-64-bit payload, a short record, a duplicated array, an extent that runs past EOF, trailing bytes, a non-finite payload, and a header whose ln_zdfddm or ln_zad_Aimp or ln_zdfmfc or ln_traldf_msc flag says the record was written by a branch the reader cannot score.",
+   "threshold": "each plant exits non-zero; each malformed record gets a VERDICT rather than a traceback",
+   "falsifier": "any plant passing, or any malformed record parsed as valid"
+  }
+ },
+ "measured_this_round_vs_next": {
+  "this round": "PR7 only, plus the reader/gate proven end to end on a SYNTHETIC record written by a Python twin of the Fortran writer.  PR1-PR6 are written and cannot be measured until the user runs the acquisition.",
+  "next round": "PR1-PR6, on the real record"
+ },
+ "artifact_root": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round35",
+ "reviews_planned": "codex is unavailable on this account, so the mandatory DUAL adversarial review runs as two fresh independent Claude agents: one CLAIM review of these predictions before any code is written, one DIFF review afterwards whose brief is to make the reader accept a wrong record and the gate pass on a wrong solve."
+}

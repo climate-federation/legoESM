@@ -15,7 +15,7 @@ Correctness rests on the same decomposition-friendliness:
   ``step_unified`` column kernels): a tile's ``nl*nl`` columns are computed
   with NO collectives, decomposition-invariant.
 * **Global reductions** live OUTSIDE the physics: the target-mass fixer
-  (:func:`_tile_fix_ps_mass_target` psum) and the moisture fixer
+  (:func:`_tile_fix_ps_dry_mass_target` psum) and the moisture fixer
   (``fix_moisture_hydrostatic`` -> ``global_area_sum``, tile-psum-aware via
   ``conservation._spmd_lat_psum_or_none``'s tiled-mesh branch, armed by
   this module around the step call).
@@ -60,11 +60,11 @@ from legoesm.parallel.cubesphere_exchange import (
     make_tiled_pad_body, make_tiled_pad_vector_body)
 from legoesm.parallel.tiled_production_cdgrid import (
     build_hydro_tile_tendency_fns, sponge_rate_from_config,
-    ssp_rk3_tile_step, tile_fix_ps_mass_target,
+    ssp_rk3_tile_step, tile_fix_ps_dry_mass_target,
     validate_tiled_step_factory_args)
 from legoesm.core.conservation import conservation_accumulator
 from legoesm.driver.compiled_segments import (
-    SegmentCarry, split_physics_single_rank, finalize_split_step)
+    SegmentCarry, carry_moist, split_physics_single_rank, finalize_split_step)
 from legoesm.driver.sharded_operator_split_step import need_rad_and_time
 
 #: Carry fields that stay replicated scalars / opaque pytrees under the tile
@@ -286,7 +286,8 @@ def build_tile_step_unified(grid, sigma, config, kt: int):
             "the column decomposition here; disable "
             "shard_radiation_columns for the tiled lane.")
     nl = int(grid.n) // kt
-    pipeline = build_physics_pipeline(_TilePhysicsGrid(nl), sigma, config)
+    pipeline = build_physics_pipeline(
+        _TilePhysicsGrid(nl), sigma, config, spacing_grid=grid)
     if pipeline.f_land is not None:
         raise NotImplementedError(
             "build_tile_step_unified: land-active pipeline (f_land is a "
@@ -446,10 +447,14 @@ def make_tiled_operator_split_step(
         u_new = interp_corner_to_center(ud3)
         v_new = interp_corner_to_center(vd3)
 
-        # --- Target-anchored dry-mass fixer (psum across all tiles) ---
+        # --- Target-anchored DRY-mass fixer (psum across all tiles; the
+        # moisture re-weighted so the correction is dry air, F13) ---
         if fix_mass:
-            ps_new = tile_fix_ps_mass_target(
-                ps_new, carry_t.target_mass, ar_t, total_area, acc)
+            ps_new, _fxm = tile_fix_ps_dry_mass_target(
+                ps_new, carry_moist(carry_t), carry_t.target_mass, ar_t,
+                total_area, acc, statics.dsigma)
+            carry_t = carry_t._replace(
+                **{k: v for k, v in _fxm.items() if v is not None})
 
         # --- Column-local physics + the shared finalize tail ---
         need_rad, doy, sod = need_rad_and_time(

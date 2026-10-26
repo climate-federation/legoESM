@@ -18,18 +18,24 @@ mod = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(mod)
 
 
-def test_sb81_flag_defaults_off():
-    """Unset flag => False => the legacy arithmetic conversion (bit-identical
-    dycore; the SB81 form stays opt-in until the #1029(b) lid treatment)."""
+def test_sb81_flag_defaults_on():
+    """Unset flag => True => the SB81 energy-consistent conversion."""
     args = mod.build_parser().parse_args([])
-    assert args.sb81_omega_conversion is False
-
-
-def test_sb81_flag_roundtrip():
-    args = mod.build_parser().parse_args(["--sb81-omega-conversion"])
     assert args.sb81_omega_conversion is True
 
 
-def test_dycore_config_default_off():
+def test_sb81_flag_roundtrip():
+    assert mod.build_parser().parse_args(
+        ["--sb81-omega-conversion"]).sb81_omega_conversion is True
+    assert mod.build_parser().parse_args(
+        ["--no-sb81-omega-conversion"]).sb81_omega_conversion is False
+
+
+def test_defaults_on_in_both_configs():
+    """Fails if either the driver or the dycore default reverts to the
+    legacy arithmetic conversion."""
     from legoesm.driver.config import DycoreConfig
-    assert DycoreConfig().sb81_omega_conversion is False
+    from legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid import (
+        CGridLatLonPrimitiveEquationConfig)
+    assert DycoreConfig().sb81_omega_conversion is True
+    assert CGridLatLonPrimitiveEquationConfig().sb81_omega_conversion is True

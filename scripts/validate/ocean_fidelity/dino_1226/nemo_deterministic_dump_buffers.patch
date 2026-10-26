@@ -1,0 +1,548 @@
+diff --git b/cfgs/DINO/MY_SRC/dino_dump_zero.F90 b/cfgs/DINO/MY_SRC/dino_dump_zero.F90
+new file mode 100644
+index 0000000..be24954
+--- /dev/null
++++ b/cfgs/DINO/MY_SRC/dino_dump_zero.F90
+@@ -0,0 +1,44 @@
++MODULE dino_dump_zero
++   !!======================================================================
++   !! Deterministic raw-stream writer for DINO fidelity instrumentation.
++   !! Production arrays are INTENT(in) and are never modified.  Only the
++   !! physical interior is copied into a fully zero-initialized haloed
++   !! buffer, so debug streams cannot expose uninitialized halo storage.
++   !!======================================================================
++   USE par_kind, ONLY : wp
++   USE par_oce , ONLY : jpi, jpj, jpk, jpkm1, Nis0, Nie0, Njs0, Nje0
++
++   IMPLICIT NONE
++   PRIVATE
++
++   PUBLIC :: dino_dump_2d, dino_dump_3d
++
++CONTAINS
++
++   SUBROUTINE dino_dump_2d( kunit, pfield )
++      INTEGER , INTENT(in) :: kunit
++      REAL(wp), DIMENSION(Nie0-Nis0+1,Nje0-Njs0+1), INTENT(in) :: pfield
++
++      INTEGER :: ji, jj
++      REAL(wp), DIMENSION(jpi,jpj) :: zbuffer
++
++      zbuffer(:,:) = 0._wp
++      zbuffer(Nis0:Nie0,Njs0:Nje0) = pfield(:,:)
++      WRITE(kunit) ( ( zbuffer(ji,jj), ji=1,jpi ), jj=1,jpj )
++   END SUBROUTINE dino_dump_2d
++
++
++   SUBROUTINE dino_dump_3d( kunit, pfield )
++      INTEGER , INTENT(in) :: kunit
++      REAL(wp), DIMENSION(Nie0-Nis0+1,Nje0-Njs0+1,jpkm1-1), INTENT(in) :: pfield
++
++      REAL(wp), ALLOCATABLE, DIMENSION(:,:,:) :: zbuffer
++
++      ALLOCATE( zbuffer(jpi,jpj,jpk) )
++      zbuffer(:,:,:) = 0._wp
++      zbuffer(Nis0:Nie0,Njs0:Nje0,2:jpkm1) = pfield(:,:,:)
++      WRITE(kunit) zbuffer
++      DEALLOCATE( zbuffer )
++   END SUBROUTINE dino_dump_3d
++
++END MODULE dino_dump_zero
+diff --git a/cfgs/DINO/MY_SRC/dynadv.F90 b/cfgs/DINO/MY_SRC/dynadv.F90
+index e229c86..46d6045 100644
+--- a/cfgs/DINO/MY_SRC/dynadv.F90
++++ b/cfgs/DINO/MY_SRC/dynadv.F90
+@@ -1,0 +2 @@ MODULE dynadv
++   USE dino_dump_zero, ONLY : dino_dump_2d   ! deterministic #1226 raw streams
+@@ -144,2 +145,2 @@ CONTAINS
+-         WRITE(kuunit) ( ( puu_rhs(ji,jj,jk), ji=1,jpi ), jj=1,jpj )
+-         WRITE(kvunit) ( ( pvv_rhs(ji,jj,jk), ji=1,jpi ), jj=1,jpj )
++         CALL dino_dump_2d( kuunit, puu_rhs(Nis0:Nie0,Njs0:Nje0,jk) )
++         CALL dino_dump_2d( kvunit, pvv_rhs(Nis0:Nie0,Njs0:Nje0,jk) )
+diff --git a/cfgs/DINO/MY_SRC/dynatf_qco.F90 b/cfgs/DINO/MY_SRC/dynatf_qco.F90
+index 6157e22..246514a 100644
+--- a/cfgs/DINO/MY_SRC/dynatf_qco.F90
++++ b/cfgs/DINO/MY_SRC/dynatf_qco.F90
+@@ -1,0 +2 @@ MODULE dynatf_qco
++   USE dino_dump_zero, ONLY : dino_dump_2d   ! deterministic #1226 raw streams
+@@ -180,4 +181,4 @@ CONTAINS
+-                     WRITE(8868) ( ( zu_before(ji,jj,jk),   ji=1,jpi ), jj=1,jpj )
+-                     WRITE(8869) ( ( puu(ji,jj,jk,Kmm),     ji=1,jpi ), jj=1,jpj )
+-                     WRITE(8870) ( ( zv_before(ji,jj,jk),   ji=1,jpi ), jj=1,jpj )
+-                     WRITE(8871) ( ( pvv(ji,jj,jk,Kmm),     ji=1,jpi ), jj=1,jpj )
++                     CALL dino_dump_2d( 8868, zu_before(Nis0:Nie0,Njs0:Nje0,jk) )
++                     CALL dino_dump_2d( 8869, puu(Nis0:Nie0,Njs0:Nje0,jk,Kmm) )
++                     CALL dino_dump_2d( 8870, zv_before(Nis0:Nie0,Njs0:Nje0,jk) )
++                     CALL dino_dump_2d( 8871, pvv(Nis0:Nie0,Njs0:Nje0,jk,Kmm) )
+diff --git a/cfgs/DINO/MY_SRC/dynhpg.F90 b/cfgs/DINO/MY_SRC/dynhpg.F90
+index e593f01..0e09dd0 100644
+--- a/cfgs/DINO/MY_SRC/dynhpg.F90
++++ b/cfgs/DINO/MY_SRC/dynhpg.F90
+@@ -1,0 +2 @@ MODULE dynhpg
++   USE dino_dump_zero, ONLY : dino_dump_2d   ! deterministic #1226 raw streams
+@@ -412,2 +413,2 @@ CONTAINS
+-            WRITE(8835) ( ( puu(ji,jj,jk,Krhs) - zu_before(ji,jj,jk), ji=1,jpi ), jj=1,jpj )
+-            WRITE(8836) ( ( pvv(ji,jj,jk,Krhs) - zv_before(ji,jj,jk), ji=1,jpi ), jj=1,jpj )
++            CALL dino_dump_2d( 8835, puu(Nis0:Nie0,Njs0:Nje0,jk,Krhs) - zu_before(Nis0:Nie0,Njs0:Nje0,jk) )
++            CALL dino_dump_2d( 8836, pvv(Nis0:Nie0,Njs0:Nje0,jk,Krhs) - zv_before(Nis0:Nie0,Njs0:Nje0,jk) )
+diff --git a/cfgs/DINO/MY_SRC/dynldf.F90 b/cfgs/DINO/MY_SRC/dynldf.F90
+index 2333001..2ed9c18 100644
+--- a/cfgs/DINO/MY_SRC/dynldf.F90
++++ b/cfgs/DINO/MY_SRC/dynldf.F90
+@@ -1,0 +2 @@ MODULE dynldf
++   USE dino_dump_zero, ONLY : dino_dump_2d   ! deterministic #1226 raw streams
+@@ -107,4 +108,4 @@ CONTAINS
+-            WRITE(8874) ( ( puu(ji,jj,jk_dbg,Krhs) - zu_ldf_before(ji,jj,jk_dbg), ji=1,jpi ), jj=1,jpj )
+-            WRITE(8875) ( ( pvv(ji,jj,jk_dbg,Krhs) - zv_ldf_before(ji,jj,jk_dbg), ji=1,jpi ), jj=1,jpj )
+-            WRITE(8876) ( ( ahmt(ji,jj,jk_dbg), ji=1,jpi ), jj=1,jpj )
+-            WRITE(8877) ( ( ahmf(ji,jj,jk_dbg), ji=1,jpi ), jj=1,jpj )
++            CALL dino_dump_2d( 8874, puu(Nis0:Nie0,Njs0:Nje0,jk_dbg,Krhs) - zu_ldf_before(Nis0:Nie0,Njs0:Nje0,jk_dbg) )
++            CALL dino_dump_2d( 8875, pvv(Nis0:Nie0,Njs0:Nje0,jk_dbg,Krhs) - zv_ldf_before(Nis0:Nie0,Njs0:Nje0,jk_dbg) )
++            CALL dino_dump_2d( 8876, ahmt(Nis0:Nie0,Njs0:Nje0,jk_dbg) )
++            CALL dino_dump_2d( 8877, ahmf(Nis0:Nie0,Njs0:Nje0,jk_dbg) )
+diff --git a/cfgs/DINO/MY_SRC/dynspg_ts.F90 b/cfgs/DINO/MY_SRC/dynspg_ts.F90
+index 083058a..42ef7ab 100644
+--- a/cfgs/DINO/MY_SRC/dynspg_ts.F90
++++ b/cfgs/DINO/MY_SRC/dynspg_ts.F90
+@@ -61,0 +62 @@ MODULE dynspg_ts
++   USE dino_dump_zero, ONLY : dino_dump_2d   ! deterministic #1226 raw streams
+@@ -397 +398 @@ LOGICAL, SAVE :: ll_bt_av    ! =T : boxcard time averaging   =F : foreward backw
+-         WRITE(8970) ( ( rCdU_bot(ji,jj), ji=1,jpi ), jj=1,jpj )
++         CALL dino_dump_2d( 8970, rCdU_bot(Nis0:Nie0,Njs0:Nje0) )
+@@ -522 +523 @@ LOGICAL, SAVE :: ll_bt_av    ! =T : boxcard time averaging   =F : foreward backw
+-         WRITE(8852) ( ( ssh_frc(ji,jj), ji=1,jpi ), jj=1,jpj )
++         CALL dino_dump_2d( 8852, ssh_frc(Nis0:Nie0,Njs0:Nje0) )
+@@ -593,3 +594,3 @@ LOGICAL, SAVE :: ll_bt_av    ! =T : boxcard time averaging   =F : foreward backw
+-         WRITE(8853) ( ( sshn_e(ji,jj), ji=1,jpi ), jj=1,jpj )
+-         WRITE(8854) ( ( un_e(ji,jj), ji=1,jpi ), jj=1,jpj )
+-         WRITE(8855) ( ( vn_e(ji,jj), ji=1,jpi ), jj=1,jpj )
++         CALL dino_dump_2d( 8853, sshn_e(Nis0:Nie0,Njs0:Nje0) )
++         CALL dino_dump_2d( 8854, un_e(Nis0:Nie0,Njs0:Nje0) )
++         CALL dino_dump_2d( 8855, vn_e(Nis0:Nie0,Njs0:Nje0) )
+@@ -802,4 +803,4 @@ LOGICAL, SAVE :: ll_bt_av    ! =T : boxcard time averaging   =F : foreward backw
+-            WRITE(8973) ( ( zu_trd(ji,jj), ji=1,jpi ), jj=1,jpj )
+-            WRITE(8974) ( ( zv_trd(ji,jj), ji=1,jpi ), jj=1,jpj )
+-            WRITE(8975) ( ( ua_e(ji,jj), ji=1,jpi ), jj=1,jpj )    ! dyn_cor_2D's punb input this substep
+-            WRITE(8976) ( ( va_e(ji,jj), ji=1,jpi ), jj=1,jpj )    ! dyn_cor_2D's pvnb input this substep
++            CALL dino_dump_2d( 8973, zu_trd(Nis0:Nie0,Njs0:Nje0) )
++            CALL dino_dump_2d( 8974, zv_trd(Nis0:Nie0,Njs0:Nje0) )
++            CALL dino_dump_2d( 8975, ua_e(Nis0:Nie0,Njs0:Nje0) )    ! dyn_cor_2D's punb input this substep
++            CALL dino_dump_2d( 8976, va_e(Nis0:Nie0,Njs0:Nje0) )    ! dyn_cor_2D's pvnb input this substep
+@@ -933,7 +934,7 @@ LOGICAL, SAVE :: ll_bt_av    ! =T : boxcard time averaging   =F : foreward backw
+-            WRITE(799) sshn_e(:,:)
+-            WRITE(799) ssha_e(:,:)
+-            WRITE(799) zsshp2_e(:,:)
+-            WRITE(799) un_e(:,:)
+-            WRITE(799) vn_e(:,:)
+-            WRITE(799) ua_e(:,:)
+-            WRITE(799) va_e(:,:)
++            CALL dino_dump_2d( 799, sshn_e(Nis0:Nie0,Njs0:Nje0) )
++            CALL dino_dump_2d( 799, ssha_e(Nis0:Nie0,Njs0:Nje0) )
++            CALL dino_dump_2d( 799, zsshp2_e(Nis0:Nie0,Njs0:Nje0) )
++            CALL dino_dump_2d( 799, un_e(Nis0:Nie0,Njs0:Nje0) )
++            CALL dino_dump_2d( 799, vn_e(Nis0:Nie0,Njs0:Nje0) )
++            CALL dino_dump_2d( 799, ua_e(Nis0:Nie0,Njs0:Nje0) )
++            CALL dino_dump_2d( 799, va_e(Nis0:Nie0,Njs0:Nje0) )
+@@ -967,3 +968,3 @@ LOGICAL, SAVE :: ll_bt_av    ! =T : boxcard time averaging   =F : foreward backw
+-            WRITE(8856) ( ( sshn_e(ji,jj), ji=1,jpi ), jj=1,jpj )
+-            WRITE(8857) ( ( un_e(ji,jj), ji=1,jpi ), jj=1,jpj )
+-            WRITE(8858) ( ( vn_e(ji,jj), ji=1,jpi ), jj=1,jpj )
++            CALL dino_dump_2d( 8856, sshn_e(Nis0:Nie0,Njs0:Nje0) )
++            CALL dino_dump_2d( 8857, un_e(Nis0:Nie0,Njs0:Nje0) )
++            CALL dino_dump_2d( 8858, vn_e(Nis0:Nie0,Njs0:Nje0) )
+@@ -1043,5 +1044,5 @@ LOGICAL, SAVE :: ll_bt_av    ! =T : boxcard time averaging   =F : foreward backw
+-         WRITE(8859) ( ( puu_b(ji,jj,Kaa), ji=1,jpi ), jj=1,jpj )
+-         WRITE(8860) ( ( pvv_b(ji,jj,Kaa), ji=1,jpi ), jj=1,jpj )
+-         WRITE(8861) ( ( pssh(ji,jj,Kaa), ji=1,jpi ), jj=1,jpj )
+-         WRITE(8862) ( ( un_adv(ji,jj), ji=1,jpi ), jj=1,jpj )
+-         WRITE(8863) ( ( vn_adv(ji,jj), ji=1,jpi ), jj=1,jpj )
++         CALL dino_dump_2d( 8859, puu_b(Nis0:Nie0,Njs0:Nje0,Kaa) )
++         CALL dino_dump_2d( 8860, pvv_b(Nis0:Nie0,Njs0:Nje0,Kaa) )
++         CALL dino_dump_2d( 8861, pssh(Nis0:Nie0,Njs0:Nje0,Kaa) )
++         CALL dino_dump_2d( 8862, un_adv(Nis0:Nie0,Njs0:Nje0) )
++         CALL dino_dump_2d( 8863, vn_adv(Nis0:Nie0,Njs0:Nje0) )
+diff --git a/cfgs/DINO/MY_SRC/dynvor.F90 b/cfgs/DINO/MY_SRC/dynvor.F90
+index ff998eb..04a84f5 100644
+--- a/cfgs/DINO/MY_SRC/dynvor.F90
++++ b/cfgs/DINO/MY_SRC/dynvor.F90
+@@ -1,0 +2 @@ MODULE dynvor
++   USE dino_dump_zero, ONLY : dino_dump_2d   ! deterministic #1226 raw streams
+@@ -189,2 +190,2 @@ CONTAINS
+-               WRITE(8837) ( ( zdu_vor(ji,jj,jk), ji=1,jpi ), jj=1,jpj )
+-               WRITE(8838) ( ( zdv_vor(ji,jj,jk), ji=1,jpi ), jj=1,jpj )
++               CALL dino_dump_2d( 8837, zdu_vor(Nis0:Nie0,Njs0:Nje0,jk) )
++               CALL dino_dump_2d( 8838, zdv_vor(Nis0:Nie0,Njs0:Nje0,jk) )
+diff --git a/cfgs/DINO/MY_SRC/eosbn2.F90 b/cfgs/DINO/MY_SRC/eosbn2.F90
+index 671ba30..438390f 100644
+--- a/cfgs/DINO/MY_SRC/eosbn2.F90
++++ b/cfgs/DINO/MY_SRC/eosbn2.F90
+@@ -1,0 +2 @@ MODULE eosbn2
++   USE dino_dump_zero, ONLY : dino_dump_3d   ! deterministic #1226 raw streams
+@@ -1497,5 +1498,5 @@ CONTAINS
+-         WRITE(idbg_zrw   ) zdbg_zrw
+-         WRITE(idbg_zaw   ) zdbg_zaw
+-         WRITE(idbg_zbw   ) zdbg_zbw
+-         WRITE(idbg_num   ) zdbg_num
+-         WRITE(idbg_result) pn2
++         CALL dino_dump_3d( idbg_zrw, zdbg_zrw(Nis0:Nie0,Njs0:Nje0,2:jpkm1) )
++         CALL dino_dump_3d( idbg_zaw, zdbg_zaw(Nis0:Nie0,Njs0:Nje0,2:jpkm1) )
++         CALL dino_dump_3d( idbg_zbw, zdbg_zbw(Nis0:Nie0,Njs0:Nje0,2:jpkm1) )
++         CALL dino_dump_3d( idbg_num, zdbg_num(Nis0:Nie0,Njs0:Nje0,2:jpkm1) )
++         CALL dino_dump_3d( idbg_result, pn2(Nis0:Nie0,Njs0:Nje0,2:jpkm1) )
+diff --git a/cfgs/DINO/MY_SRC/ldfslp.F90 b/cfgs/DINO/MY_SRC/ldfslp.F90
+index 0362d40..317aa95 100644
+--- a/cfgs/DINO/MY_SRC/ldfslp.F90
++++ b/cfgs/DINO/MY_SRC/ldfslp.F90
+@@ -1,0 +2 @@ MODULE ldfslp
++   USE dino_dump_zero, ONLY : dino_dump_2d   ! deterministic #1226 raw streams
+@@ -378,9 +379,27 @@ CONTAINS
+-         WRITE(8840) ( ( ( zwz_raw_dump(ji,jj,jk), ji=1,jpi ), jj=1,jpj ), jk=1,jpk )
+-         WRITE(8841) ( ( ( zww_raw_dump(ji,jj,jk), ji=1,jpi ), jj=1,jpj ), jk=1,jpk )
+-         WRITE(8842) ( ( ( zaj_dump(ji,jj,jk), ji=1,jpi ), jj=1,jpj ), jk=1,jpk )
+-         WRITE(8843) ( ( ( zbj_dump(ji,jj,jk), ji=1,jpi ), jj=1,jpj ), jk=1,jpk )
+-         WRITE(8844) ( ( ( zbw_dump(ji,jj,jk), ji=1,jpi ), jj=1,jpj ), jk=1,jpk )
+-         WRITE(8845) ( ( ( zfk_dump(ji,jj,jk), ji=1,jpi ), jj=1,jpj ), jk=1,jpk )
+-         WRITE(8846) ( ( ( zgrv_iik_dump(ji,jj,jk), ji=1,jpi ), jj=1,jpj ), jk=1,jpk )
+-         WRITE(8847) ( ( ( zgrv_iikm1_dump(ji,jj,jk), ji=1,jpi ), jj=1,jpj ), jk=1,jpk )
+-         WRITE(8848) ( ( ( prd_arg_dump(ji,jj,jk), ji=1,jpi ), jj=1,jpj ), jk=1,jpk )
++         DO jk = 1, jpk
++            CALL dino_dump_2d( 8840, zwz_raw_dump(Nis0:Nie0,Njs0:Nje0,jk) )
++         END DO
++         DO jk = 1, jpk
++            CALL dino_dump_2d( 8841, zww_raw_dump(Nis0:Nie0,Njs0:Nje0,jk) )
++         END DO
++         DO jk = 1, jpk
++            CALL dino_dump_2d( 8842, zaj_dump(Nis0:Nie0,Njs0:Nje0,jk) )
++         END DO
++         DO jk = 1, jpk
++            CALL dino_dump_2d( 8843, zbj_dump(Nis0:Nie0,Njs0:Nje0,jk) )
++         END DO
++         DO jk = 1, jpk
++            CALL dino_dump_2d( 8844, zbw_dump(Nis0:Nie0,Njs0:Nje0,jk) )
++         END DO
++         DO jk = 1, jpk
++            CALL dino_dump_2d( 8845, zfk_dump(Nis0:Nie0,Njs0:Nje0,jk) )
++         END DO
++         DO jk = 1, jpk
++            CALL dino_dump_2d( 8846, zgrv_iik_dump(Nis0:Nie0,Njs0:Nje0,jk) )
++         END DO
++         DO jk = 1, jpk
++            CALL dino_dump_2d( 8847, zgrv_iikm1_dump(Nis0:Nie0,Njs0:Nje0,jk) )
++         END DO
++         DO jk = 1, jpk
++            CALL dino_dump_2d( 8848, prd_arg_dump(Nis0:Nie0,Njs0:Nje0,jk) )
++         END DO
+diff --git a/cfgs/DINO/MY_SRC/ldftra.F90 b/cfgs/DINO/MY_SRC/ldftra.F90
+index 0161f81..a0e9012 100644
+--- a/cfgs/DINO/MY_SRC/ldftra.F90
++++ b/cfgs/DINO/MY_SRC/ldftra.F90
+@@ -36,0 +37 @@ MODULE ldftra
++   USE dino_dump_zero, ONLY : dino_dump_2d   ! deterministic #1226 raw streams
+@@ -391,4 +392,8 @@ CONTAINS
+-         WRITE(8960) ( ( ( ahtu (ji,jj,jk), ji=1,jpi ), jj=1,jpj ), jk=1,jpk )
+-         WRITE(8961) ( ( ( ahtv (ji,jj,jk), ji=1,jpi ), jj=1,jpj ), jk=1,jpk )
+-         WRITE(8962) ( ( gphiu(ji,jj), ji=1,jpi ), jj=1,jpj )
+-         WRITE(8963) ( ( gphiv(ji,jj), ji=1,jpi ), jj=1,jpj )
++         DO jk = 1, jpk
++            CALL dino_dump_2d( 8960, ahtu (Nis0:Nie0,Njs0:Nje0,jk) )
++         END DO
++         DO jk = 1, jpk
++            CALL dino_dump_2d( 8961, ahtv (Nis0:Nie0,Njs0:Nje0,jk) )
++         END DO
++         CALL dino_dump_2d( 8962, gphiu(Nis0:Nie0,Njs0:Nje0) )
++         CALL dino_dump_2d( 8963, gphiv(Nis0:Nie0,Njs0:Nje0) )
+@@ -545,5 +550,15 @@ CONTAINS
+-         WRITE(9301) ( ( ( aeiu (ji,jj,jk), ji=1,jpi ), jj=1,jpj ), jk=1,jpk )
+-         WRITE(9302) ( ( ( aeiv (ji,jj,jk), ji=1,jpi ), jj=1,jpj ), jk=1,jpk )
+-         WRITE(9303) ( ( ( wslpi(ji,jj,jk), ji=1,jpi ), jj=1,jpj ), jk=1,jpk )
+-         WRITE(9304) ( ( ( wslpj(ji,jj,jk), ji=1,jpi ), jj=1,jpj ), jk=1,jpk )
+-         WRITE(9305) ( ( ( rn2b (ji,jj,jk), ji=1,jpi ), jj=1,jpj ), jk=1,jpk )
++         DO jk = 1, jpk
++            CALL dino_dump_2d( 9301, aeiu (Nis0:Nie0,Njs0:Nje0,jk) )
++         END DO
++         DO jk = 1, jpk
++            CALL dino_dump_2d( 9302, aeiv (Nis0:Nie0,Njs0:Nje0,jk) )
++         END DO
++         DO jk = 1, jpk
++            CALL dino_dump_2d( 9303, wslpi(Nis0:Nie0,Njs0:Nje0,jk) )
++         END DO
++         DO jk = 1, jpk
++            CALL dino_dump_2d( 9304, wslpj(Nis0:Nie0,Njs0:Nje0,jk) )
++         END DO
++         DO jk = 1, jpk
++            CALL dino_dump_2d( 9305, rn2b (Nis0:Nie0,Njs0:Nje0,jk) )
++         END DO
+@@ -806,5 +821,5 @@ CONTAINS
+-         WRITE(8821) ( ( zn   (ji,jj), ji=1,jpi ), jj=1,jpj )
+-         WRITE(8822) ( ( zah  (ji,jj), ji=1,jpi ), jj=1,jpj )
+-         WRITE(8823) ( ( zhw  (ji,jj), ji=1,jpi ), jj=1,jpj )
+-         WRITE(8824) ( ( zRo  (ji,jj), ji=1,jpi ), jj=1,jpj )
+-         WRITE(8825) ( ( zaeiw(ji,jj), ji=1,jpi ), jj=1,jpj )
++         CALL dino_dump_2d( 8821, zn(Nis0:Nie0,Njs0:Nje0)    )
++         CALL dino_dump_2d( 8822, zah(Nis0:Nie0,Njs0:Nje0)   )
++         CALL dino_dump_2d( 8823, zhw(Nis0:Nie0,Njs0:Nje0)   )
++         CALL dino_dump_2d( 8824, zRo(Nis0:Nie0,Njs0:Nje0)   )
++         CALL dino_dump_2d( 8825, zaeiw(Nis0:Nie0,Njs0:Nje0) )
+@@ -900,2 +915,2 @@ CONTAINS
+-            WRITE(8830) ( ( zpsi_uw(ji,jj,2), ji=1,jpi ), jj=1,jpj )
+-            WRITE(8831) ( ( zpsi_vw(ji,jj,2), ji=1,jpi ), jj=1,jpj )
++            CALL dino_dump_2d( 8830, zpsi_uw(Nis0:Nie0,Njs0:Nje0,2) )
++            CALL dino_dump_2d( 8831, zpsi_vw(Nis0:Nie0,Njs0:Nje0,2) )
+@@ -917,2 +932,2 @@ CONTAINS
+-            WRITE(8801) ( ( zpsi_uw(ji,jj,1) - zpsi_uw(ji,jj,2), ji=1,jpi ), jj=1,jpj )
+-            WRITE(8802) ( ( zpsi_vw(ji,jj,1) - zpsi_vw(ji,jj,2), ji=1,jpi ), jj=1,jpj )
++            CALL dino_dump_2d( 8801, zpsi_uw(Nis0:Nie0,Njs0:Nje0,1) - zpsi_uw(Nis0:Nie0,Njs0:Nje0,2) )
++            CALL dino_dump_2d( 8802, zpsi_vw(Nis0:Nie0,Njs0:Nje0,1) - zpsi_vw(Nis0:Nie0,Njs0:Nje0,2) )
+@@ -945,12 +960,12 @@ CONTAINS
+-            WRITE(8803) ( ( wslpi(ji,jj,jk), ji=1,jpi ), jj=1,jpj )
+-            WRITE(8818) ( ( wslpj(ji,jj,jk), ji=1,jpi ), jj=1,jpj )
+-            WRITE(8819) ( ( uslp (ji,jj,jk), ji=1,jpi ), jj=1,jpj )
+-            WRITE(8820) ( ( vslp (ji,jj,jk), ji=1,jpi ), jj=1,jpj )
+-            WRITE(8804) ( ( aeiu (ji,jj,jk), ji=1,jpi ), jj=1,jpj )
+-            WRITE(8805) ( ( rn2b (ji,jj,jk), ji=1,jpi ), jj=1,jpj )
+-            WRITE(8806) ( ( e3w  (ji,jj,jk,Kmm), ji=1,jpi ), jj=1,jpj )
+-            WRITE(8807) ( ( gdept(ji,jj,jk,Kmm), ji=1,jpi ), jj=1,jpj )
+-            WRITE(8808) ( ( rab_b(ji,jj,jk,jp_tem), ji=1,jpi ), jj=1,jpj )
+-            WRITE(8809) ( ( rab_b(ji,jj,jk,jp_sal), ji=1,jpi ), jj=1,jpj )
+-            WRITE(8814) ( ( avt  (ji,jj,jk), ji=1,jpi ), jj=1,jpj )
+-            WRITE(8815) ( ( avm  (ji,jj,jk), ji=1,jpi ), jj=1,jpj )
++            CALL dino_dump_2d( 8803, wslpi(Nis0:Nie0,Njs0:Nje0,jk) )
++            CALL dino_dump_2d( 8818, wslpj(Nis0:Nie0,Njs0:Nje0,jk) )
++            CALL dino_dump_2d( 8819, uslp (Nis0:Nie0,Njs0:Nje0,jk) )
++            CALL dino_dump_2d( 8820, vslp (Nis0:Nie0,Njs0:Nje0,jk) )
++            CALL dino_dump_2d( 8804, aeiu (Nis0:Nie0,Njs0:Nje0,jk) )
++            CALL dino_dump_2d( 8805, rn2b (Nis0:Nie0,Njs0:Nje0,jk) )
++            CALL dino_dump_2d( 8806, e3w (Nis0:Nie0,Njs0:Nje0,jk,Kmm) )
++            CALL dino_dump_2d( 8807, gdept(Nis0:Nie0,Njs0:Nje0,jk,Kmm) )
++            CALL dino_dump_2d( 8808, rab_b(Nis0:Nie0,Njs0:Nje0,jk,jp_tem) )
++            CALL dino_dump_2d( 8809, rab_b(Nis0:Nie0,Njs0:Nje0,jk,jp_sal) )
++            CALL dino_dump_2d( 8814, avt (Nis0:Nie0,Njs0:Nje0,jk) )
++            CALL dino_dump_2d( 8815, avm (Nis0:Nie0,Njs0:Nje0,jk) )
+@@ -960,2 +975,2 @@ CONTAINS
+-               WRITE(8816) ( ( hmlp(ji,jj), ji=1,jpi ), jj=1,jpj )
+-               WRITE(8817) ( ( REAL(nmln(ji,jj),wp), ji=1,jpi ), jj=1,jpj )
++               CALL dino_dump_2d( 8816, hmlp(Nis0:Nie0,Njs0:Nje0) )
++               CALL dino_dump_2d( 8817, REAL(nmln(Nis0:Nie0,Njs0:Nje0),wp) )
+@@ -1007,3 +1022,3 @@ CONTAINS
+-            WRITE(9210) ( ( zw_eiv_incr(ji,jj), ji=1,jpi ), jj=1,jpj )
+-            WRITE(9211) ( ( zpsi_uw(ji,jj,1),    ji=1,jpi ), jj=1,jpj )
+-            WRITE(9212) ( ( zpsi_vw(ji,jj,1),    ji=1,jpi ), jj=1,jpj )
++            CALL dino_dump_2d( 9210, zw_eiv_incr(Nis0:Nie0,Njs0:Nje0) )
++            CALL dino_dump_2d( 9211, zpsi_uw(Nis0:Nie0,Njs0:Nje0,1) )
++            CALL dino_dump_2d( 9212, zpsi_vw(Nis0:Nie0,Njs0:Nje0,1) )
+diff --git a/cfgs/DINO/MY_SRC/sshwzv.F90 b/cfgs/DINO/MY_SRC/sshwzv.F90
+index 314243b..d756f59 100644
+--- a/cfgs/DINO/MY_SRC/sshwzv.F90
++++ b/cfgs/DINO/MY_SRC/sshwzv.F90
+@@ -1,0 +2 @@ MODULE sshwzv
++   USE dino_dump_zero, ONLY : dino_dump_2d   ! deterministic #1226 raw streams
+@@ -141 +142 @@ CONTAINS
+-         WRITE(8878) ( ( pssh(ji,jj,Kaa), ji=1,jpi ), jj=1,jpj )
++         CALL dino_dump_2d( 8878, pssh(Nis0:Nie0,Njs0:Nje0,Kaa) )
+@@ -143 +144 @@ CONTAINS
+-            WRITE(8879) ( ( hdiv(ji,jj,jk), ji=1,jpi ), jj=1,jpj )
++            CALL dino_dump_2d( 8879, hdiv(Nis0:Nie0,Njs0:Nje0,jk) )
+@@ -296 +297 @@ CONTAINS
+-            WRITE(9103) ( ( pww(ji,jj,jk), ji=1,jpi ), jj=1,jpj )
++            CALL dino_dump_2d( 9103, pww(Nis0:Nie0,Njs0:Nje0,jk) )
+@@ -340 +341 @@ CONTAINS
+-            WRITE(9110) ( ( pww(ji,jj,jk), ji=1,jpi ), jj=1,jpj )
++            CALL dino_dump_2d( 9110, pww(Nis0:Nie0,Njs0:Nje0,jk) )
+@@ -542,2 +543,2 @@ CONTAINS
+-         WRITE(8872) ( ( zssh_before(ji,jj), ji=1,jpi ), jj=1,jpj )
+-         WRITE(8873) ( ( pssh(ji,jj,Kmm),    ji=1,jpi ), jj=1,jpj )
++         CALL dino_dump_2d( 8872, zssh_before(Nis0:Nie0,Njs0:Nje0) )
++         CALL dino_dump_2d( 8873, pssh(Nis0:Nie0,Njs0:Nje0,Kmm) )
+diff --git a/cfgs/DINO/MY_SRC/stpmlf.F90 b/cfgs/DINO/MY_SRC/stpmlf.F90
+index f5ba0cf..db018c7 100644
+--- a/cfgs/DINO/MY_SRC/stpmlf.F90
++++ b/cfgs/DINO/MY_SRC/stpmlf.F90
+@@ -1,0 +2 @@ MODULE stpmlf
++   USE dino_dump_zero, ONLY : dino_dump_2d   ! deterministic #1226 raw streams
+@@ -228 +229 @@ CONTAINS
+-               WRITE(8930) ( ( rhd(ji,jj,jk), ji=1,jpi ), jj=1,jpj )
++               CALL dino_dump_2d( 8930, rhd(Nis0:Nie0,Njs0:Nje0,jk) )
+@@ -262,3 +263,3 @@ CONTAINS
+-         WRITE(8880) ( ( r3t(ji,jj,Naa), ji=1,jpi ), jj=1,jpj )
+-         WRITE(8881) ( ( r3u(ji,jj,Naa), ji=1,jpi ), jj=1,jpj )
+-         WRITE(8882) ( ( r3v(ji,jj,Naa), ji=1,jpi ), jj=1,jpj )
++         CALL dino_dump_2d( 8880, r3t(Nis0:Nie0,Njs0:Nje0,Naa) )
++         CALL dino_dump_2d( 8881, r3u(Nis0:Nie0,Njs0:Nje0,Naa) )
++         CALL dino_dump_2d( 8882, r3v(Nis0:Nie0,Njs0:Nje0,Naa) )
+@@ -286 +287 @@ CONTAINS
+-               WRITE(8931) ( ( rhd(ji,jj,jk), ji=1,jpi ), jj=1,jpj )
++               CALL dino_dump_2d( 8931, rhd(Nis0:Nie0,Njs0:Nje0,jk) )
+@@ -373 +374 @@ CONTAINS
+-                  WRITE(8932) ( ( zsd_hdiv(ji,jj,jk), ji=1,jpi ), jj=1,jpj )
++                  CALL dino_dump_2d( 8932, zsd_hdiv(Nis0:Nie0,Njs0:Nje0,jk) )
+@@ -388,4 +389,4 @@ CONTAINS
+-               WRITE(8933) ( ( r3t(ji,jj,Naa), ji=1,jpi ), jj=1,jpj )
+-               WRITE(8934) ( ( r3u(ji,jj,Naa), ji=1,jpi ), jj=1,jpj )
+-               WRITE(8935) ( ( r3v(ji,jj,Naa), ji=1,jpi ), jj=1,jpj )
+-               WRITE(8936) ( ( r3f(ji,jj),     ji=1,jpi ), jj=1,jpj )
++               CALL dino_dump_2d( 8933, r3t(Nis0:Nie0,Njs0:Nje0,Naa) )
++               CALL dino_dump_2d( 8934, r3u(Nis0:Nie0,Njs0:Nje0,Naa) )
++               CALL dino_dump_2d( 8935, r3v(Nis0:Nie0,Njs0:Nje0,Naa) )
++               CALL dino_dump_2d( 8936, r3f(Nis0:Nie0,Njs0:Nje0) )
+@@ -468,3 +469,3 @@ CONTAINS
+-         WRITE(8937) ( ( r3t_f(ji,jj), ji=1,jpi ), jj=1,jpj )
+-         WRITE(8938) ( ( r3u_f(ji,jj), ji=1,jpi ), jj=1,jpj )
+-         WRITE(8939) ( ( r3v_f(ji,jj), ji=1,jpi ), jj=1,jpj )
++         CALL dino_dump_2d( 8937, r3t_f(Nis0:Nie0,Njs0:Nje0) )
++         CALL dino_dump_2d( 8938, r3u_f(Nis0:Nie0,Njs0:Nje0) )
++         CALL dino_dump_2d( 8939, r3v_f(Nis0:Nie0,Njs0:Nje0) )
+@@ -604,4 +605,4 @@ CONTAINS
+-            WRITE(8940) ( ( uu(ji,jj,jk,       Naa), ji=1,jpi ), jj=1,jpj )
+-            WRITE(8941) ( ( vv(ji,jj,jk,       Naa), ji=1,jpi ), jj=1,jpj )
+-            WRITE(8942) ( ( ts(ji,jj,jk,jp_tem,Naa), ji=1,jpi ), jj=1,jpj )
+-            WRITE(8943) ( ( ts(ji,jj,jk,jp_sal,Naa), ji=1,jpi ), jj=1,jpj )
++            CALL dino_dump_2d( 8940, uu(Nis0:Nie0,Njs0:Nje0,jk, Naa) )
++            CALL dino_dump_2d( 8941, vv(Nis0:Nie0,Njs0:Nje0,jk, Naa) )
++            CALL dino_dump_2d( 8942, ts(Nis0:Nie0,Njs0:Nje0,jk,jp_tem,Naa) )
++            CALL dino_dump_2d( 8943, ts(Nis0:Nie0,Njs0:Nje0,jk,jp_sal,Naa) )
+@@ -746,2 +747,2 @@ CONTAINS
+-            WRITE(8883) ( ( zu_bc_before(ji,jj,jk), ji=1,jpi ), jj=1,jpj )
+-            WRITE(8884) ( ( zv_bc_before(ji,jj,jk), ji=1,jpi ), jj=1,jpj )
++            CALL dino_dump_2d( 8883, zu_bc_before(Nis0:Nie0,Njs0:Nje0,jk) )
++            CALL dino_dump_2d( 8884, zv_bc_before(Nis0:Nie0,Njs0:Nje0,jk) )
+@@ -775,2 +776,2 @@ CONTAINS
+-            WRITE(8885) ( ( puu(ji,jj,jk,Kaa), ji=1,jpi ), jj=1,jpj )
+-            WRITE(8886) ( ( pvv(ji,jj,jk,Kaa), ji=1,jpi ), jj=1,jpj )
++            CALL dino_dump_2d( 8885, puu(Nis0:Nie0,Njs0:Nje0,jk,Kaa) )
++            CALL dino_dump_2d( 8886, pvv(Nis0:Nie0,Njs0:Nje0,jk,Kaa) )
+@@ -876,2 +877,2 @@ CONTAINS
+-         WRITE(iu_unit) ( ( puu_rhs(ji,jj,jk), ji=1,jpi ), jj=1,jpj )
+-         WRITE(iv_unit) ( ( pvv_rhs(ji,jj,jk), ji=1,jpi ), jj=1,jpj )
++         CALL dino_dump_2d( iu_unit, puu_rhs(Nis0:Nie0,Njs0:Nje0,jk) )
++         CALL dino_dump_2d( iv_unit, pvv_rhs(Nis0:Nie0,Njs0:Nje0,jk) )
+@@ -912,2 +913,2 @@ CONTAINS
+-         WRITE(iu_unit) ( ( puu_st(ji,jj,jk), ji=1,jpi ), jj=1,jpj )
+-         WRITE(iv_unit) ( ( pvv_st(ji,jj,jk), ji=1,jpi ), jj=1,jpj )
++         CALL dino_dump_2d( iu_unit, puu_st(Nis0:Nie0,Njs0:Nje0,jk) )
++         CALL dino_dump_2d( iv_unit, pvv_st(Nis0:Nie0,Njs0:Nje0,jk) )
+@@ -924,2 +925,2 @@ CONTAINS
+-         WRITE(iub_unit) ( ( puu_b(ji,jj), ji=1,jpi ), jj=1,jpj )
+-         WRITE(ivb_unit) ( ( pvv_b(ji,jj), ji=1,jpi ), jj=1,jpj )
++         CALL dino_dump_2d( iub_unit, puu_b(Nis0:Nie0,Njs0:Nje0) )
++         CALL dino_dump_2d( ivb_unit, pvv_b(Nis0:Nie0,Njs0:Nje0) )
+@@ -956,2 +957,2 @@ CONTAINS
+-         WRITE(it_unit) ( ( pts(ji,jj,jk,jp_tem), ji=1,jpi ), jj=1,jpj )
+-         WRITE(is_unit) ( ( pts(ji,jj,jk,jp_sal), ji=1,jpi ), jj=1,jpj )
++         CALL dino_dump_2d( it_unit, pts(Nis0:Nie0,Njs0:Nje0,jk,jp_tem) )
++         CALL dino_dump_2d( is_unit, pts(Nis0:Nie0,Njs0:Nje0,jk,jp_sal) )
+diff --git a/cfgs/DINO/MY_SRC/traadv_fct.F90 b/cfgs/DINO/MY_SRC/traadv_fct.F90
+index afa4000..f0ef568 100644
+--- a/cfgs/DINO/MY_SRC/traadv_fct.F90
++++ b/cfgs/DINO/MY_SRC/traadv_fct.F90
+@@ -29,0 +30 @@ MODULE traadv_fct
++   USE dino_dump_zero, ONLY : dino_dump_2d   ! deterministic #1226 raw streams
+@@ -185,4 +186,4 @@ CONTAINS
+-               WRITE(8826) ( ( ztFu(ji,jj,jk), ji=1,jpi ), jj=1,jpj )
+-               WRITE(8827) ( ( ztFv(ji,jj,jk), ji=1,jpi ), jj=1,jpj )
+-               WRITE(8828) ( ( ztFw(ji,jj,jk), ji=1,jpi ), jj=1,jpj )
+-               WRITE(8833) ( ( pt(ji,jj,jk,jn,Krhs), ji=1,jpi ), jj=1,jpj )
++               CALL dino_dump_2d( 8826, ztFu(Nis0:Nie0,Njs0:Nje0,jk) )
++               CALL dino_dump_2d( 8827, ztFv(Nis0:Nie0,Njs0:Nje0,jk) )
++               CALL dino_dump_2d( 8828, ztFw(Nis0:Nie0,Njs0:Nje0,jk) )
++               CALL dino_dump_2d( 8833, pt(Nis0:Nie0,Njs0:Nje0,jk,jn,Krhs) )
+@@ -206,4 +207,4 @@ CONTAINS
+-               WRITE(8990) ( ( ztFu(ji,jj,jk), ji=1,jpi ), jj=1,jpj )
+-               WRITE(8991) ( ( ztFv(ji,jj,jk), ji=1,jpi ), jj=1,jpj )
+-               WRITE(8992) ( ( ztFw(ji,jj,jk), ji=1,jpi ), jj=1,jpj )
+-               WRITE(8993) ( ( pt(ji,jj,jk,jn,Krhs), ji=1,jpi ), jj=1,jpj )
++               CALL dino_dump_2d( 8990, ztFu(Nis0:Nie0,Njs0:Nje0,jk) )
++               CALL dino_dump_2d( 8991, ztFv(Nis0:Nie0,Njs0:Nje0,jk) )
++               CALL dino_dump_2d( 8992, ztFw(Nis0:Nie0,Njs0:Nje0,jk) )
++               CALL dino_dump_2d( 8993, pt(Nis0:Nie0,Njs0:Nje0,jk,jn,Krhs) )
+@@ -387,3 +388,3 @@ CONTAINS
+-               WRITE(8829) ( ( ztFu(ji,jj,jk), ji=1,jpi ), jj=1,jpj )
+-               WRITE(8830) ( ( ztFv(ji,jj,jk), ji=1,jpi ), jj=1,jpj )
+-               WRITE(8831) ( ( ztFw(ji,jj,jk), ji=1,jpi ), jj=1,jpj )
++               CALL dino_dump_2d( 8829, ztFu(Nis0:Nie0,Njs0:Nje0,jk) )
++               CALL dino_dump_2d( 8830, ztFv(Nis0:Nie0,Njs0:Nje0,jk) )
++               CALL dino_dump_2d( 8831, ztFw(Nis0:Nie0,Njs0:Nje0,jk) )
+@@ -405,3 +406,3 @@ CONTAINS
+-               WRITE(8994) ( ( ztFu(ji,jj,jk), ji=1,jpi ), jj=1,jpj )
+-               WRITE(8995) ( ( ztFv(ji,jj,jk), ji=1,jpi ), jj=1,jpj )
+-               WRITE(8996) ( ( ztFw(ji,jj,jk), ji=1,jpi ), jj=1,jpj )
++               CALL dino_dump_2d( 8994, ztFu(Nis0:Nie0,Njs0:Nje0,jk) )
++               CALL dino_dump_2d( 8995, ztFv(Nis0:Nie0,Njs0:Nje0,jk) )
++               CALL dino_dump_2d( 8996, ztFw(Nis0:Nie0,Njs0:Nje0,jk) )
+@@ -436 +437 @@ CONTAINS
+-               WRITE(8834) ( ( pt(ji,jj,jk,jn,Krhs), ji=1,jpi ), jj=1,jpj )
++               CALL dino_dump_2d( 8834, pt(Nis0:Nie0,Njs0:Nje0,jk,jn,Krhs) )
+@@ -448 +449 @@ CONTAINS
+-               WRITE(8997) ( ( pt(ji,jj,jk,jn,Krhs), ji=1,jpi ), jj=1,jpj )
++               CALL dino_dump_2d( 8997, pt(Nis0:Nie0,Njs0:Nje0,jk,jn,Krhs) )
+@@ -1125,9 +1126,9 @@ CONTAINS
+-            WRITE(8950) ( ( zdump_bup(ji,jj,jk), ji=1,jpi ), jj=1,jpj )
+-            WRITE(8951) ( ( zdump_bdo(ji,jj,jk), ji=1,jpi ), jj=1,jpj )
+-            WRITE(8952) ( ( zdump_up(ji,jj,jk), ji=1,jpi ), jj=1,jpj )
+-            WRITE(8953) ( ( zdump_do(ji,jj,jk), ji=1,jpi ), jj=1,jpj )
+-            WRITE(8954) ( ( zdump_betup(ji,jj,jk), ji=1,jpi ), jj=1,jpj )
+-            WRITE(8955) ( ( zdump_betdo(ji,jj,jk), ji=1,jpi ), jj=1,jpj )
+-            WRITE(8956) ( ( zdump_zau(ji,jj,jk), ji=1,jpi ), jj=1,jpj )
+-            WRITE(8957) ( ( zdump_zbu(ji,jj,jk), ji=1,jpi ), jj=1,jpj )
+-            WRITE(8958) ( ( zdump_zcw(ji,jj,jk), ji=1,jpi ), jj=1,jpj )
++            CALL dino_dump_2d( 8950, zdump_bup(Nis0:Nie0,Njs0:Nje0,jk) )
++            CALL dino_dump_2d( 8951, zdump_bdo(Nis0:Nie0,Njs0:Nje0,jk) )
++            CALL dino_dump_2d( 8952, zdump_up(Nis0:Nie0,Njs0:Nje0,jk) )
++            CALL dino_dump_2d( 8953, zdump_do(Nis0:Nie0,Njs0:Nje0,jk) )
++            CALL dino_dump_2d( 8954, zdump_betup(Nis0:Nie0,Njs0:Nje0,jk) )
++            CALL dino_dump_2d( 8955, zdump_betdo(Nis0:Nie0,Njs0:Nje0,jk) )
++            CALL dino_dump_2d( 8956, zdump_zau(Nis0:Nie0,Njs0:Nje0,jk) )
++            CALL dino_dump_2d( 8957, zdump_zbu(Nis0:Nie0,Njs0:Nje0,jk) )
++            CALL dino_dump_2d( 8958, zdump_zcw(Nis0:Nie0,Njs0:Nje0,jk) )
+diff --git a/cfgs/DINO/MY_SRC/traatf_qco.F90 b/cfgs/DINO/MY_SRC/traatf_qco.F90
+index b28e04a..cf2cce0 100644
+--- a/cfgs/DINO/MY_SRC/traatf_qco.F90
++++ b/cfgs/DINO/MY_SRC/traatf_qco.F90
+@@ -1,0 +2 @@ MODULE traatf_qco
++   USE dino_dump_zero, ONLY : dino_dump_2d   ! deterministic #1226 raw streams
+@@ -383,4 +384,4 @@ CONTAINS
+-            WRITE(8864) ( ( zt_before(ji,jj,jk),          ji=1,jpi ), jj=1,jpj )
+-            WRITE(8865) ( ( pt(ji,jj,jk,jp_tem,Kmm),       ji=1,jpi ), jj=1,jpj )
+-            WRITE(8866) ( ( zs_before(ji,jj,jk),          ji=1,jpi ), jj=1,jpj )
+-            WRITE(8867) ( ( pt(ji,jj,jk,jp_sal,Kmm),       ji=1,jpi ), jj=1,jpj )
++            CALL dino_dump_2d( 8864, zt_before(Nis0:Nie0,Njs0:Nje0,jk) )
++            CALL dino_dump_2d( 8865, pt(Nis0:Nie0,Njs0:Nje0,jk,jp_tem,Kmm) )
++            CALL dino_dump_2d( 8866, zs_before(Nis0:Nie0,Njs0:Nje0,jk) )
++            CALL dino_dump_2d( 8867, pt(Nis0:Nie0,Njs0:Nje0,jk,jp_sal,Kmm) )
+diff --git a/cfgs/DINO/MY_SRC/usrdef_sbc.F90 b/cfgs/DINO/MY_SRC/usrdef_sbc.F90
+index beebadc..836849d 100644
+--- a/cfgs/DINO/MY_SRC/usrdef_sbc.F90
++++ b/cfgs/DINO/MY_SRC/usrdef_sbc.F90
+@@ -32,0 +33 @@ MODULE usrdef_sbc
++   USE dino_dump_zero, ONLY : dino_dump_2d   ! deterministic #1226 raw streams
+@@ -436,4 +437,4 @@ CONTAINS
+-         WRITE(8810) ( ( utau(ji,jj), ji=1,jpi ), jj=1,jpj )
+-         WRITE(8811) ( ( qns (ji,jj), ji=1,jpi ), jj=1,jpj )
+-         WRITE(8812) ( ( qsr (ji,jj), ji=1,jpi ), jj=1,jpj )
+-         WRITE(8813) ( ( sfx (ji,jj), ji=1,jpi ), jj=1,jpj )
++         CALL dino_dump_2d( 8810, utau(Nis0:Nie0,Njs0:Nje0) )
++         CALL dino_dump_2d( 8811, qns(Nis0:Nie0,Njs0:Nje0)  )
++         CALL dino_dump_2d( 8812, qsr(Nis0:Nie0,Njs0:Nje0)  )
++         CALL dino_dump_2d( 8813, sfx(Nis0:Nie0,Njs0:Nje0)  )
+diff --git a/cfgs/DINO/MY_SRC/zdftke.F90 b/cfgs/DINO/MY_SRC/zdftke.F90
+index 20f4f90..1f45db5 100644
+--- a/cfgs/DINO/MY_SRC/zdftke.F90
++++ b/cfgs/DINO/MY_SRC/zdftke.F90
+@@ -398,0 +399,7 @@ CONTAINS
++      en_postsolve_dump(:,:,:) = 0._wp
++      zdiag_forward_dump(:,:,:) = 0._wp
++      zrhs_forward_dump(:,:,:) = 0._wp
++      zdiag_pre_dump(:,:,:) = 0._wp
++      zlw_pre_dump(:,:,:) = 0._wp
++      en_pre_dump(:,:,:) = 0._wp
++      en_postlc_dump(:,:,:) = 0._wp
+@@ -608,2 +615,2 @@ CONTAINS
+-         zdiag_pre_dump(:,jj,:) = zdiag(:,:)
+-         zlw_pre_dump(:,jj,:) = zd_lw(:,:)
++         zdiag_pre_dump(:,jj,1:jpkm1) = zdiag(:,1:jpkm1)
++         zlw_pre_dump(:,jj,1:jpkm1) = zd_lw(:,1:jpkm1)
+@@ -616 +623 @@ CONTAINS
+-         zdiag_forward_dump(:,jj,:) = zdiag(:,:)
++         zdiag_forward_dump(:,jj,1:jpkm1) = zdiag(:,1:jpkm1)
+@@ -624 +631 @@ CONTAINS
+-         zrhs_forward_dump(:,jj,:) = zd_lw(:,:)
++         zrhs_forward_dump(:,jj,1:jpkm1) = zd_lw(:,1:jpkm1)

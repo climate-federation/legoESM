@@ -412,6 +412,105 @@ class TestTreguierKappaNemoNative:
     and the fix raises the ADVECTION-bucket (bolus-inclusive) tracer-tendency
     corr vs the NEMO oracle from 0.9347 to 0.9889 (full3D)."""
 
+    def test_nemo_sqrt_forward_is_exact_red_jittable_and_grad_finite(self):
+        from legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid import (
+            _nemo_sqrt_nonnegative_forward_exact,
+        )
+        value = jnp.asarray([-1.0, 0.0, 4.0], dtype=jnp.float64)
+        got = jax.jit(_nemo_sqrt_nonnegative_forward_exact)(value)
+        np.testing.assert_array_equal(np.asarray(got), [0.0, 0.0, 2.0])
+        guarded = jnp.sqrt(jnp.maximum(value, 1.0e-30))
+        assert float(guarded[0]) == 1.0e-15
+        assert float(guarded[1]) == 1.0e-15
+        assert not np.array_equal(np.asarray(got), np.asarray(guarded))
+        grad = jax.grad(
+            lambda x: jnp.sum(_nemo_sqrt_nonnegative_forward_exact(x)))(value)
+        np.testing.assert_array_equal(np.asarray(grad), [0.0, 0.0, 0.25])
+        assert bool(jnp.isfinite(grad).all())
+
+    def test_literal_column_reduction_is_left_fold_jittable_and_red(self):
+        from legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid import (
+            _nemo_treguier_left_reductions,
+        )
+        # All-positive, physically admissible terms. Each tiny contribution
+        # is lost when added individually to 1, while a tree first combines
+        # the tiny values and crosses multiple ulps: the red plant proves the
+        # association selector is not inert without relying on cancellation.
+        tiny = np.float64(2.0 ** -53)
+        raw = np.full((1, 1, 64), tiny, dtype=np.float64)
+        raw[..., 0] = 1.0
+        term = jnp.asarray(raw)
+        got = jax.jit(_nemo_treguier_left_reductions)(
+            term, 2.0 * term, 3.0 * term, 5.0)
+
+        def left(values, start):
+            acc = np.float64(start)
+            for value in values.ravel():
+                acc = np.float64(acc + value)
+            return acc
+
+        assert float(got[0][0, 0]) == left(raw, 0.0)
+        assert float(got[1][0, 0]) == left(2.0 * raw, 0.0)
+        assert float(got[2][0, 0]) == left(3.0 * raw, 5.0)
+        assert float(jnp.sum(term)) != float(got[0][0, 0])
+
+        grad = jax.grad(lambda x: sum(jnp.sum(v) for v in
+            _nemo_treguier_left_reductions(x, 2.0 * x, 3.0 * x, 5.0)))(term)
+        assert bool(jnp.isfinite(grad).all())
+
+    def test_kmm_bundle_overrides_are_coupled_red_and_validated(self, monkeypatch):
+        import legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid as gm
+
+        shape = (1, 1, 4)
+        rho = jnp.ones(shape, dtype=jnp.float64) * constants.rho_ocean
+        slopes = jnp.ones(shape, dtype=jnp.float64) * 1.0e-3
+        mask = jnp.ones((1, 1), dtype=jnp.float64)
+        act = jnp.ones(shape, dtype=jnp.float64)
+        base_e3w = jnp.asarray([1.0, 2.0, 3.0, 4.0], dtype=jnp.float64)
+        base_pn2 = jnp.asarray([[[0.0, 1.0e-5, 2.0e-5, 3.0e-5]]])
+        monkeypatch.setattr(
+            gm, "_nemo_wpoint_e3w_wmask_n2",
+            lambda *_args, **_kwargs: (base_e3w, act, base_pn2))
+        cfg = TreguierConfig(enabled=True, aei0=1.0e12)
+
+        def run(pn2=None, e3w=None, sqrt_mode="guarded_floor"):
+            return gm.compute_treguier_kappa_gm_nemo_native(
+                rho, rho, rho, slopes, slopes, mask, None, None,
+                jnp.asarray([[1.0e-4]]), cfg, None, active_3d=act,
+                vertical_reduction_evaluation="nemo_left",
+                sqrt_evaluation=sqrt_mode,
+                pn2_override=pn2, e3w_override=e3w,
+                return_diagnostics=True)
+
+        generic = run()
+        explicit_none = run(None, None)
+        np.testing.assert_array_equal(generic[0], explicit_none[0])
+        literal_sqrt = run(sqrt_mode="nemo_forward_exact")
+        assert float(literal_sqrt[1]["zn"][0, 0]) < \
+            float(generic[1]["zn"][0, 0])
+        expected_zn = np.float64(0.0)
+        for n2, thickness in zip(np.asarray(base_pn2).ravel(),
+                                 np.asarray(base_e3w).ravel()):
+            expected_zn = np.float64(
+                expected_zn + np.sqrt(max(n2, 0.0)) * thickness)
+        assert float(literal_sqrt[1]["zn"][0, 0]) == expected_zn
+        pn2_live = base_pn2 * 1.25
+        e3w_live = jnp.asarray([1.0, 2.25, 3.5, 4.75])
+        p_only = run(pn2_live, None)
+        e_only = run(None, e3w_live)
+        coupled = run(pn2_live, e3w_live)
+        assert not np.array_equal(np.asarray(p_only[0]), np.asarray(generic[0]))
+        assert not np.array_equal(np.asarray(e_only[0]), np.asarray(generic[0]))
+        assert not np.array_equal(np.asarray(coupled[0]), np.asarray(p_only[0]))
+        assert not np.array_equal(np.asarray(coupled[0]), np.asarray(e_only[0]))
+        np.testing.assert_array_equal(coupled[1]["zhw"], 5.0 + np.sum(e3w_live))
+        with pytest.raises(ValueError, match="pn2_override"):
+            run(jnp.ones((1, 1, 2)), e3w_live)
+        with pytest.raises(ValueError, match="e3w_override"):
+            run(pn2_live, jnp.ones((2,)))
+        with pytest.raises(ValueError, match="treguier_sqrt_evaluation"):
+            run(sqrt_mode="silent_typo")
+
     def _dino_fixture(self, n_lon=50):
         from legoesm.ocean.experiments.dino import (
             DINOConfig, create_dino_z_star, dino_lat_lon_grid,

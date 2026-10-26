@@ -51,6 +51,30 @@ def test_band_multirank_reassembles():
     np.testing.assert_allclose(np.concatenate(parts), np.asarray(ov.clubb_lite.C_K))
 
 
+def test_slicing_preserves_every_other_override_field():
+    """Localization slices the coefficients and nothing else.
+
+    It used to REBUILD the TurbulenceConfig from scheme + clubb_lite, so a
+    selector carried on the override (liquid_partition, update_interval_steps)
+    came back at its default on every MPI rank -- and the factory's refusal of
+    liquid_partition on a non-CLUBB scheme never saw it (codex, #1782).
+    """
+    ov = _global_override()._replace(liquid_partition=True,
+                                     update_interval_steps=3)
+    local = localize_turbulence_override(ov, _band(1, 2))
+    assert local.clubb_lite.C_K.shape[0] == NCOL // 2   # it really sliced
+    # Every field but the sliced one, so a future selector is covered too.
+    for f in ov._fields:
+        if f != "clubb_lite":
+            assert getattr(local, f) == getattr(ov, f), f
+    # ...so the build still refuses the lever on a non-CLUBB scheme.
+    from legoesm.atmosphere.physics.turbulence.integration import (
+        make_turbulence_physics,
+    )
+    with pytest.raises(ValueError, match="no closure liquid"):
+        make_turbulence_physics(local, model_type="mpas", dt=300.0)
+
+
 def test_2d_pencil_slices():
     ov = _global_override()
     lay = make_latlon_2d_layout(3, 2, 2, N_LAT, N_LON)  # rank 3 = SE block

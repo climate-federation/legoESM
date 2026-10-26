@@ -1,0 +1,108 @@
+--- shipped/src/ICE/icedyn_rhg_evp.F90
++++ ORCA2_ORCA1ICE_OMIP_L4/MY_SRC/icedyn_rhg_evp.F90
+@@ -373,6 +373,11 @@
+          END_2D
+       ENDIF
+ 
++      ! nn_fsbc=2: retain the first three executed SI3 calls (ocean kt 1,3,5).
++      IF( kt <= nit000 + 4 ) CALL l4_orca1ice_dyn_dump( kt, Kmm, pstress1_i, &
++         & pstress2_i, pstress12_i, zaU, zaV, ztaux_ai, ztauy_ai, zdragx_oi, &
++         & zdragy_oi, ztaux_base, ztauy_base, zmU_t, zmV_t )
++
+       !------------------------------------------------------------------------------!
+       ! 3) Solution of the momentum equation, iterative procedure
+       !------------------------------------------------------------------------------!
+@@ -1188,6 +1193,93 @@
+       !
+    END SUBROUTINE rhg_upstream
+ 
++
++   SUBROUTINE l4_orca1ice_dyn_dump( kt, Kmm, ps1, ps2, ps12, pzaU, pzaV, &
++      & ptaux_ai, ptauy_ai, pdragx, pdragy, ptaux_base, ptauy_base, pmU, pmV )
++      !! WRITE-only dynamics-entry/landfast frame after NEMO has evaluated
++      !! ice_strength and the Lemieux-2016 basal-stress operands, but before
++      !! the EVP iteration (icedyn_rhg_evp.F90:254-374).
++      INTEGER, INTENT(in) :: kt, Kmm
++      REAL(wp), DIMENSION(:,:), INTENT(in) :: ps1, ps2, ps12, pzaU, pzaV
++      REAL(wp), DIMENSION(:,:), INTENT(in) :: ptaux_ai, ptauy_ai, pdragx, pdragy
++      REAL(wp), DIMENSION(:,:), INTENT(in) :: ptaux_base, ptauy_base, pmU, pmV
++      INTEGER :: l4_unit, l4_ios, l4_payload, jf
++      INTEGER, PARAMETER :: l4_nf = 34, l4_ns = 5
++      INTEGER, DIMENSION(3,l4_nf) :: l4_ext
++      CHARACTER(LEN=16), PARAMETER :: l4_magic = 'NEMO_L4_O1IDYN1'
++      CHARACTER(LEN=96) :: l4_name
++      IF( .NOT.lwp ) RETURN
++
++      l4_ext(:, 1) = (/ SHAPE(u_ice), 1 /)
++      l4_ext(:, 2) = (/ SHAPE(v_ice), 1 /)
++      l4_ext(:, 3) = (/ SHAPE(utau_ice), 1 /)
++      l4_ext(:, 4) = (/ SHAPE(vtau_ice), 1 /)
++      l4_ext(:, 5) = (/ SHAPE(strength), 1 /)
++      l4_ext(:, 6) = (/ SHAPE(at_i), 1 /)
++      l4_ext(:, 7) = (/ SHAPE(vt_i), 1 /)
++      l4_ext(:, 8) = (/ SHAPE(vt_s), 1 /)
++      l4_ext(:, 9) = (/ SHAPE(tau_icebfr), 1 /)
++      l4_ext(:,10) = (/ SHAPE(icb_tmask), 1 /)
++      l4_ext(:,11) = (/ SHAPE(fast_tmask), 1 /)
++      l4_ext(:,12) = (/ SHAPE(pzaU), 1 /)
++      l4_ext(:,13) = (/ SHAPE(pzaV), 1 /)
++      l4_ext(:,14) = (/ SHAPE(ptaux_ai), 1 /)
++      l4_ext(:,15) = (/ SHAPE(ptauy_ai), 1 /)
++      l4_ext(:,16) = (/ SHAPE(pdragx), 1 /)
++      l4_ext(:,17) = (/ SHAPE(pdragy), 1 /)
++      l4_ext(:,18) = (/ SHAPE(ptaux_base), 1 /)
++      l4_ext(:,19) = (/ SHAPE(ptauy_base), 1 /)
++      l4_ext(:,20) = (/ SHAPE(pmU), 1 /)
++      l4_ext(:,21) = (/ SHAPE(pmV), 1 /)
++      l4_ext(:,22) = (/ SHAPE(ht(:,:,Kmm)), 1 /)
++      l4_ext(:,23) = (/ SHAPE(hu(:,:,Kmm)), 1 /)
++      l4_ext(:,24) = (/ SHAPE(hv(:,:,Kmm)), 1 /)
++      l4_ext(:,25) = (/ SHAPE(ps1), 1 /)
++      l4_ext(:,26) = (/ SHAPE(ps2), 1 /)
++      l4_ext(:,27) = (/ SHAPE(ps12), 1 /)
++      l4_ext(:,28) = SHAPE(a_i)
++      l4_ext(:,29) = (/ SHAPE(icb_umask), 1 /)
++      l4_ext(:,30) = (/ SHAPE(icb_vmask), 1 /)
++      l4_ext(:,31) = (/ SHAPE(fast_umask), 1 /)
++      l4_ext(:,32) = (/ SHAPE(fast_vmask), 1 /)
++      l4_ext(:,33) = SHAPE(v_i)
++      l4_ext(:,34) = SHAPE(v_s)
++      l4_payload = l4_ns
++      DO jf = 1, l4_nf
++         l4_payload = l4_payload + PRODUCT(l4_ext(:,jf))
++      END DO
++
++      WRITE(l4_name,'("oracle_orca1ice_dyn_kt",I8.8,".bin")') kt
++      OPEN( NEWUNIT=l4_unit, FILE=TRIM(l4_name), STATUS='REPLACE', ACCESS='STREAM', &
++         & FORM='UNFORMATTED', ACTION='WRITE', IOSTAT=l4_ios )
++      IF( l4_ios /= 0 ) CALL ctl_stop('l4_orca1ice_dyn_dump: open failed')
++      WRITE(l4_unit) l4_magic
++      WRITE(l4_unit) 1, kt, Kmm, jpi, jpj, jpl, nlay_i, nlay_s, &
++         & STORAGE_SIZE(1._wp), l4_nf, l4_ns, l4_payload
++      WRITE(l4_unit) l4_ext
++      WRITE(l4_unit) rn_lf_depfra, rn_lf_bfr, rn_lf_relax, rn_lf_tensile, rn_crhg
++      WRITE(l4_unit) l4_canon_2d(u_ice,'U'), l4_canon_2d(v_ice,'V'), &
++         & l4_canon_2d(utau_ice,'T'), l4_canon_2d(vtau_ice,'T'), &
++         & l4_canon_2d(strength,'T'), l4_canon_2d(at_i,'T'), &
++         & l4_canon_2d(vt_i,'T'), l4_canon_2d(vt_s,'T'), &
++         & l4_canon_2d(tau_icebfr,'T'), l4_canon_2d(icb_tmask,'T'), &
++         & l4_canon_2d(fast_tmask,'T'), l4_canon_2d(pzaU,'U'), &
++         & l4_canon_2d(pzaV,'V'), l4_canon_2d(ptaux_ai,'U'), &
++         & l4_canon_2d(ptauy_ai,'V'), l4_canon_2d(pdragx,'U'), &
++         & l4_canon_2d(pdragy,'V'), l4_canon_2d(ptaux_base,'U'), &
++         & l4_canon_2d(ptauy_base,'V'), l4_canon_2d(pmU,'U'), &
++         & l4_canon_2d(pmV,'V'), l4_canon_2d(ht(:,:,Kmm),'T'), &
++         & l4_canon_2d(hu(:,:,Kmm),'U'), l4_canon_2d(hv(:,:,Kmm),'V'), &
++         & l4_canon_2d(ps1,'T'), l4_canon_2d(ps2,'T'), &
++         & l4_canon_2d(ps12,'F'), l4_canon_3d(a_i,'T'), &
++         & l4_canon_2d(icb_umask,'U'), l4_canon_2d(icb_vmask,'V'), &
++         & l4_canon_2d(fast_umask,'U'), l4_canon_2d(fast_vmask,'V'), &
++         & l4_canon_3d(v_i,'T'), l4_canon_3d(v_s,'T')
++      CLOSE(l4_unit)
++   END SUBROUTINE l4_orca1ice_dyn_dump
++
++#include "l4_oracle_canon_subroutines.h90"
++
+ #else
+    !!----------------------------------------------------------------------
+    !!   Default option         Empty module           NO SI3 sea-ice model

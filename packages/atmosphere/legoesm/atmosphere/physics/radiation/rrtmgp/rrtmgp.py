@@ -14,6 +14,7 @@
 
 """Implementation of a radiative transfer solver."""
 
+import functools
 from pathlib import Path
 from typing import TypeAlias
 
@@ -25,6 +26,7 @@ from legoesm.atmosphere.physics.radiation.rrtmgp.config.radiative_transfer impor
     RRTMOptics as RRTMOpticsConfig,
 )
 from legoesm.atmosphere.physics.radiation.rrtmgp.optics import atmospheric_state
+from legoesm.atmosphere.physics.radiation.rrtmgp.optics import cloud_optics
 from legoesm.atmosphere.physics.radiation.rrtmgp.optics import constants as optics_constants
 from legoesm.atmosphere.physics.radiation.rrtmgp.optics.lookup_volume_mixing_ratio import (
     LookupVolumeMixingRatio,
@@ -122,6 +124,37 @@ def _add_halos(f_3d):
     bottom_halo = 2 * f_3d[:, :, 0:1] - f_3d[:, :, 1:2]
     top_halo = 2 * f_3d[:, :, -1:] - f_3d[:, :, -2:-1]
     return jnp.concatenate([bottom_halo, f_3d, top_halo], axis=2)
+
+
+def cam_interface_temperature(T, p_full, p_half, sfc_temperature):
+    """Longwave level temperatures, CAM6 host recipe (TOA-first).
+
+    Port of CAM cam_cesm2_1_rel_60 ``rrtmg_state.F90`` (rrtmg_state_create,
+    lines 113-119): the top interface takes the top-layer temperature, the
+    surface interface takes the surface temperature, and each interior
+    interface k (between layers k-1 above and k below) is
+
+        tint(k) = t(k) - dy * (t(k) - t(k-1)),
+        dy = (ln pint(k) - ln pmid(k)) / (ln pmid(k-1) - ln pmid(k)).
+
+    CAM's surface value is (lwup/stebol)**0.25; here it is the
+    ``sfc_temperature`` the radiation is handed (equal for a surface whose
+    upward LW is stebol*T**4).
+
+    Args:
+      T: ``(ncol, nlev)`` layer temperature [K], index 0 = model top.
+      p_full: ``(ncol, nlev)`` layer-midpoint pressure [Pa].
+      p_half: ``(ncol, nlev+1)`` interface pressure [Pa].
+      sfc_temperature: ``(ncol,)`` surface temperature [K].
+
+    Returns:
+      ``(ncol, nlev+1)`` interface temperature [K], index 0 = model top.
+    """
+    lnpm = jnp.log(p_full)
+    dy = (jnp.log(p_half[:, 1:-1]) - lnpm[:, 1:]) / (lnpm[:, :-1] - lnpm[:, 1:])
+    t_int = T[:, 1:] - dy * (T[:, 1:] - T[:, :-1])
+    return jnp.concatenate(
+        [T[:, :1], t_int, jnp.reshape(sfc_temperature, (-1, 1))], axis=1)
 
 
 def _standard_o3_profile(p_full):
@@ -410,6 +443,8 @@ class RRTMGP:
           _hashable(config.sfc_emissivity),
           _hashable(config.sfc_albedo),
           _hashable(config.sfc_albedo_direct),
+          # CAM-style overhead layer changes the solved column (nlev+1).
+          getattr(config, "overhead_layer", False),
       )
 
   @staticmethod
@@ -471,7 +506,7 @@ class RRTMGP:
               # fp64).  GATED OFF in production: the MPAS driver sets
               # ``compute_fp32=False`` because the fp32 RTE path still crashes
               # (the shortwave direct-beam recurrence re-promotes the scan carry
-              # to float64) -- see ``_run_mpas`` + PR #343.  Retained inert so a
+              # to float64) -- see ``_run_column`` + PR #343.  Retained inert so a
               # future kernel-wide precision audit can flip the flag.
               # ``_cast_optics_f64_to_f32`` walks the RRTMOptics object + its
               # frozen-dataclass tables by hand (they are NOT registered JAX
@@ -555,6 +590,11 @@ class RRTMGP:
       ghg_vmr_override: dict | None = None,
       sw_optical_field_only: bool = False,
       lw_optical_field_only: bool = False,
+      *,
+      mcica_cloud_fraction: jnp.ndarray | None = None,
+      clear_sky: bool = False,
+      o3_top_vmr: jnp.ndarray | None = None,
+      cloud_rho_ice: float | None = None,
   ):
       """Compute radiation for legoESM column arrays.
 
@@ -618,6 +658,21 @@ class RRTMGP:
           Per-g-point solar source weights (ngpt_sw,).
       ghg_vmr_override : dict | None
           Runtime GHG VMR overrides (e.g. ``{"co2": 4.15e-4}``).
+      mcica_cloud_fraction : jnp.ndarray | None
+          ``(ncol, nlev)`` layer cloud fraction, index 0 = model top.  Given,
+          ``cloud_path_liq/ice`` are IN-CLOUD paths and each g-point solves
+          its own maximum-random subcolumn (McICA).
+      o3_top_vmr : jnp.ndarray | None
+          Column-mean ozone VMR above the model top (ncol,), over
+          ``0 < p < p_half[:, 0]``.  Used only by the transported overhead
+          layer (``config.overhead_layer``); ``None`` => that layer takes the
+          top model layer's ozone.
+      cloud_rho_ice : float | None
+          Bulk ice density [kg/m^3] of the PSD that produced
+          ``cloud_r_eff_ice`` (``CloudConfig.rho_cloud_ice``).  CAM6 uses one
+          ``rhoi`` for the ice PSD and the optics size ``deffi =
+          effi*rhoi/rhows*2`` (micro_mg2_0.F90:2795).  ``None`` => CAM's
+          ``rhoi`` = 500, the value the cloud optics convert from.
 
       Returns
       -------
@@ -635,6 +690,14 @@ class RRTMGP:
       # all inputs to match so that table lookups, lax.cond branches, and
       # lax.scan carries have consistent dtypes throughout the solver.
       _table_dtype = self.optics_lib.gas_optics_lw.kmajor.dtype
+      # McICA per-column table shift, seeded like CAM's mcica_subcol_gen:
+      # the fractional part of the lowest-layer pressure [Pa], taken before
+      # the cast to the table dtype.  State-derived, so it is independent of
+      # the domain decomposition and needs no PRNG.  Columns with IDENTICAL
+      # bottom pressure (idealized uniform states) share a shift, as they
+      # share a seed in CAM.
+      _mcica_shift = (None if mcica_cloud_fraction is None
+                      else jax.lax.stop_gradient(jnp.mod(p_full[:, -1], 1.0)))
       T = T.astype(_table_dtype)
       p_full = p_full.astype(_table_dtype)
       p_half = p_half.astype(_table_dtype)
@@ -669,8 +732,18 @@ class RRTMGP:
           cloud_r_eff_liq = jnp.asarray(cloud_r_eff_liq).astype(_table_dtype)
       if cloud_r_eff_ice is not None:
           cloud_r_eff_ice = jnp.asarray(cloud_r_eff_ice).astype(_table_dtype)
+          if cloud_rho_ice is not None:
+              # The cloud optics read the table at 2 r 500/917 (CAM rhoi =
+              # 500); r*rho/500 makes that 2 r rho/917 for the configured
+              # bulk density (factor exactly 1.0 at rho = 500).
+              cloud_r_eff_ice = cloud_r_eff_ice * jnp.asarray(
+                  cloud_rho_ice / cloud_optics.RHO_ICE_BULK_CAM_MG2,
+                  dtype=_table_dtype)
       if cloud_fraction is not None:
           cloud_fraction = jnp.asarray(cloud_fraction).astype(_table_dtype)
+      if mcica_cloud_fraction is not None:
+          mcica_cloud_fraction = jnp.asarray(
+              mcica_cloud_fraction).astype(_table_dtype)
       if ghg_vmr_override is not None:
           # Cast every numeric override (array, Python float/int, list)
           # to the working dtype; only floating leaves are retyped so
@@ -686,6 +759,55 @@ class RRTMGP:
       if solar_spectral_fraction is not None:
           solar_spectral_fraction = jnp.asarray(
               solar_spectral_fraction).astype(_table_dtype)
+
+      # --- 0b. CAM-style transported layer ABOVE the model top (opt-in) ---
+      # CAM RRTMG's "extra layer": one layer from p_top up to a 1 Pa lid with
+      # T, q_v of the top model layer, no cloud / aerosol, and the overhead
+      # column-mean ozone, so the beam reaching the model top has already
+      # been depleted by the ozone above it.  Its heating is discarded and
+      # the returned TOA face is the lid (true top).
+      # ponytail: the ~2 W/m2 SW absorbed above the model top LEAVES the
+      # column budget (TOA net - surface net != sum of model-layer heating),
+      # exactly as in CAM.  Not applied to the optics-only (3D MC) paths,
+      # whose per-layer output must stay on the model grid.
+      overhead = (bool(getattr(config, "overhead_layer", False))
+                  and not (sw_optical_field_only or lw_optical_field_only))
+      # LW level temperatures from the model column (CAM6 rrtmg_state).
+      T_lev = cam_interface_temperature(T, p_full, p_half, sfc_temperature)
+      if overhead:
+          # CAM's extra layer (rrtmg_state.F90 L122-136, kk = max(k-1, 1)):
+          # both of its interfaces take tint(1), the top-layer temperature.
+          T_lev = jnp.concatenate([T_lev[:, :1], T_lev], axis=1)
+          p_top = p_half[:, :1]
+          p_lid = jnp.minimum(p_top, 1.0)  # coeff-ok: 1 Pa lid (CAM-like ~0 Pa top)
+
+          def _top(a, k0):
+              return None if a is None else jnp.concatenate([k0, a], axis=1)
+
+          def _zero(a):
+              return None if a is None else _top(a, jnp.zeros_like(a[:, :1]))
+
+          if o3_vmr is None:  # resolve model ozone first: fallback = o3(k0)
+              o3_vmr = _standard_o3_profile(p_full)
+          p_half = _top(p_half, p_lid)
+          p_full = _top(p_full, 0.5 * (p_lid + p_top))
+          T = _top(T, T[:, :1])
+          q_v = _top(q_v, q_v[:, :1])
+          o3_vmr = _top(o3_vmr, o3_vmr[:, :1] if o3_top_vmr is None
+                        else jnp.asarray(o3_top_vmr).astype(
+                            _table_dtype).reshape(ncol, 1))
+          cloud_path_liq, cloud_path_ice = _zero(cloud_path_liq), _zero(cloud_path_ice)
+          cloud_path_liq_lw = _zero(cloud_path_liq_lw)
+          cloud_path_ice_lw = _zero(cloud_path_ice_lw)
+          cloud_fraction = _zero(cloud_fraction)
+          aerosol_optical_depth = _zero(aerosol_optical_depth)
+          aerosol_absorption_optical_depth_lw = _zero(
+              aerosol_absorption_optical_depth_lw)
+          if cloud_r_eff_liq is not None:
+              cloud_r_eff_liq = _top(cloud_r_eff_liq, cloud_r_eff_liq[:, :1])
+          if cloud_r_eff_ice is not None:
+              cloud_r_eff_ice = _top(cloud_r_eff_ice, cloud_r_eff_ice[:, :1])
+          nlev = nlev + 1
 
       # --- 1. Reshape (ncol, nlev) -> (ncol, 1, nlev+2) with halos ---
       T_3d = _add_halos(T[:, None, ::-1])
@@ -742,6 +864,11 @@ class RRTMGP:
           dp_3d[:, :, :1], dp_3d, dp_3d[:, :, -1:],
       ], axis=2)
       dp_3d = jnp.clip(dp_3d, 1.0, None)
+      if overhead:
+          # Exact overhead mass p_top - p_lid, NOT the 1 Pa floor: a top at
+          # or below 1 Pa gets a ~massless (not a phantom 1 Pa) layer.
+          dp_3d = dp_3d.at[:, 0, -2].set(
+              jnp.maximum(dp_exact[:, 0], 1.0e-6))  # coeff-ok: div-by-zero guard [Pa]
 
       mol_m_air = (constants.DRY_AIR_MOL_MASS
                    + constants.WATER_MOL_MASS * h2o_vmr)
@@ -799,6 +926,7 @@ class RRTMGP:
       )
 
       sfc_T_2d = sfc_temperature[:, None]
+      T_lev_3d = T_lev[:, None, ::-1]  # (ncol, 1, nlev+1), surface first
 
       # --- Cloud properties ---
       has_clouds = config.include_clouds and (
@@ -847,6 +975,48 @@ class RRTMGP:
           cpl_3d = cpi_3d = crl_3d = cri_3d = cf_3d = None
           cpl_lw_3d = cpi_lw_3d = None
 
+      # McICA (CAM6 mcica_subcol_gen): each g-point sees its own
+      # maximum-random cloud subcolumn.  The paths passed in are IN-CLOUD;
+      # the g-point's mask zeroes its clear cells, then the paths get the
+      # same halo + floor treatment as above.
+      lw_path_fn = sw_path_fn = None
+      if has_clouds and mcica_cloud_fraction is not None:
+          if (cloud_fraction is not None or cloud_path_liq_lw is not None
+                  or cloud_path_ice_lw is not None):
+              raise ValueError(
+                  "mcica_cloud_fraction takes in-cloud paths and its own "
+                  "sampling; it cannot be combined with cloud_fraction "
+                  "optical-depth scaling or separate longwave paths")
+          if sw_optical_field_only or lw_optical_field_only:
+              raise ValueError(
+                  "mcica_cloud_fraction samples clouds per g-point inside the "
+                  "flux solve; the optical-field-only outputs would return "
+                  "unsampled in-cloud optics")
+          from legoesm.atmosphere.physics.clouds.subcolumns import (
+              generate_subcolumns)
+
+          def _mcica_paths(n_gpt):
+              mask = generate_subcolumns(mcica_cloud_fraction, n_gpt,
+                                         shift=_mcica_shift)
+              if overhead:
+                  # the overhead layer is cloud-free; sample the MODEL layers
+                  # only, so each g-point's model-layer subcolumn is the one
+                  # it draws with the layer off (merge of fu/halo with main's
+                  # McICA: mcica_cloud_fraction stays (ncol, nlev))
+                  mask = jnp.concatenate(
+                      [jnp.zeros_like(mask[:, :, :1]), mask], axis=2)
+
+              def paths(igpt):
+                  m = mask[igpt]
+                  return tuple(
+                      jnp.clip(_add_halos(
+                          jnp.where(m, x, 0.0)[:, None, ::-1]), 0.0, None)
+                      for x in (_cpl, _cpi))
+              return paths
+
+          lw_path_fn = _mcica_paths(optics_lib.n_gpt_lw)
+          sw_path_fn = _mcica_paths(optics_lib.n_gpt_sw)
+
       # Optional aerosol optical depth (shortwave).  Clip AFTER ``_add_halos``
       # (same fix class as q_v / o3 / cf / cloud paths): linear halo
       # extrapolation can drive a boundary aerosol OD negative, which is an
@@ -890,6 +1060,11 @@ class RRTMGP:
       # Reuses the EXACT state above (no duplicated numerics); returns the
       # per-g-point shortwave optical field instead of solving transport. The
       # default path (sw_optical_field_only=False) is byte-identical.
+      if clear_sky and (sw_optical_field_only or lw_optical_field_only):
+          raise ValueError(
+              "clear_sky adds clear-sky TOA fluxes to the RadiationOutput "
+              "path; the optical-field-only outputs have no fluxes.")
+
       if sw_optical_field_only:
           sw_props = two_stream.compute_sw_optical_field(
               p_3d, T_3d, molecules, optics_lib, vmr_fields,
@@ -935,6 +1110,7 @@ class RRTMGP:
       if lw_optical_field_only:
           lw_props = two_stream.compute_lw_optical_field(
               p_3d, T_3d, molecules, optics_lib, sfc_T_2d, vmr_fields,
+              level_temperature=T_lev_3d,
               cloud_r_eff_liq=crl_3d, cloud_path_liq=cpl_lw_3d,
               cloud_r_eff_ice=cri_3d, cloud_path_ice=cpi_lw_3d,
               cloud_fraction=cf_3d,
@@ -966,6 +1142,7 @@ class RRTMGP:
           atmos_state,
           vmr_fields,
           sfc_T_2d,
+          level_temperature=T_lev_3d,
           cloud_r_eff_liq=crl_3d,
           cloud_path_liq=cpl_lw_3d,
           cloud_r_eff_ice=cri_3d,
@@ -976,6 +1153,8 @@ class RRTMGP:
           use_optimal_angle=getattr(config, "use_optimal_angle", False),
           gpoint_batch_size=getattr(config, "gpoint_batch_size", 0),
           gpoint_checkpoint=getattr(config, "gpoint_checkpoint", True),
+          cloud_path_fn=lw_path_fn,
+          clear_sky=clear_sky,
       )
 
       # --- 5. Solve SW ---
@@ -998,6 +1177,8 @@ class RRTMGP:
           use_scan=config.use_scan,
           gpoint_batch_size=getattr(config, "gpoint_batch_size", 0),
           gpoint_checkpoint=getattr(config, "gpoint_checkpoint", True),
+          cloud_path_fn=sw_path_fn,
+          clear_sky=clear_sky,
       )
 
       # --- 6. Compute heating rates using exact layer thickness ---
@@ -1018,6 +1199,16 @@ class RRTMGP:
       lw_hr = lw_hr_3d[:, 0, hw:-hw][:, ::-1]
       sw_hr = sw_hr_3d[:, 0, hw:-hw][:, ::-1]
 
+      if overhead:
+          # Drop the overhead layer's heating and the model-top face: face 0
+          # stays the TRUE top (lid), so TOA diagnostics see the full column.
+          def _faces(a):
+              return jnp.concatenate([a[:, :1], a[:, 2:]], axis=1)
+
+          lw_up, lw_down = _faces(lw_up), _faces(lw_down)
+          sw_up, sw_down = _faces(sw_up), _faces(sw_down)
+          lw_hr, sw_hr = lw_hr[:, 1:], sw_hr[:, 1:]
+
       return RadiationOutput(
           lw_flux_up=lw_up,
           lw_flux_down=lw_down,
@@ -1026,6 +1217,11 @@ class RRTMGP:
           heating_rate=lw_hr + sw_hr,
           lw_heating_rate=lw_hr,
           sw_heating_rate=sw_hr,
+          # internal index -1 is the TOA face (== *_flux_up[:, 0] above)
+          lw_flux_up_toa_clr=(lw_fluxes['flux_up_clr'][:, 0, -1]
+                              if clear_sky else None),
+          sw_flux_up_toa_clr=(sw_fluxes['flux_up_clr'][:, 0, -1]
+                              if clear_sky else None),
       )
 
   def solve_columns_chunked(
@@ -1109,7 +1305,10 @@ class RRTMGP:
           raise ValueError(
               f"column_chunk_size {column_chunk_size} must divide ncol "
               f"{ncol} exactly (radiation columns are independent, but the "
-              "lax.map reshape requires equal-size blocks)."
+              "lax.map reshape requires equal-size blocks). Note that ncol "
+              "here is the SOLVER's column count: with max-random overlap "
+              "it is cloud_n_subcolumns * the grid's column count, so a "
+              "block size chosen against the grid alone need not divide it."
           )
       n_block = ncol // column_chunk_size
 
@@ -1169,6 +1368,22 @@ class RRTMGP:
           else:
               static[k] = v
 
+      # Checkpointed per block: lax.map is a scan, so without this the
+      # backward pass keeps every block's radiation activations at once and
+      # the chunking buys compile time but no memory.  With it the backward
+      # recomputes one block at a time, so reverse-mode scratch is bounded by
+      # ``column_chunk_size`` columns instead of ``ncol`` -- the AMIP WB arm
+      # needs it because max-random overlap hands the solver n_sub*ncol
+      # sub-columns (measured 490 GiB of scratch at 8 sub-columns, T63/L32).
+      # Forward-only callers are unaffected (checkpoint is a no-op there) and
+      # the values are unchanged either way.  prevent_cse=False because this
+      # body already runs inside a scan (same reason as the g-point block
+      # loop in rte/two_stream.py).
+      @functools.partial(
+          jax.checkpoint,
+          policy=jax.checkpoint_policies.nothing_saveable,
+          prevent_cse=False,
+      )
       def _one(chunk):
           return self.solve_columns(**chunk, **static)
 

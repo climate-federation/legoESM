@@ -35,7 +35,11 @@ def _q_sfc(q_sat, q_air, beta):
 def test_surface_humidity_stays_between_air_and_saturation(beta):
     q_air, q_sat = 0.010, 0.020
     q = _q_sfc(q_sat, q_air, beta)
-    assert q_air - 1e-12 <= q <= q_sat + 1e-12, (
+    # Tolerance is float32: the model's default dtype resolves 0.01 kg/kg to
+    # about 2e-10, so a bound asserted tighter than that measures the dtype
+    # rather than the physics.  Exact under x64.
+    tol = 1e-6 * q_sat
+    assert q_air - tol <= q <= q_sat + tol, (
         f"beta={beta} put the surface at {q:.4f}, outside [{q_air}, {q_sat}]")
 
 
@@ -46,7 +50,8 @@ def test_a_bone_dry_surface_evaporates_nothing_rather_than_condensing():
     full potential flux RUNNING BACKWARDS onto a surface that has no water.
     """
     q_air, q_sat = 0.010, 0.020
-    assert _q_sfc(q_sat, q_air, 0.0) - q_air == pytest.approx(0.0, abs=1e-15)
+    # float32 again: beta=0 returns q_air to within ~2e-10 of it.
+    assert _q_sfc(q_sat, q_air, 0.0) - q_air == pytest.approx(0.0, abs=1e-6 * q_sat)
     assert (0.0 * q_sat) - q_air < 0.0, (
         "the product form is supposed to fail this; if it does not, the "
         "example no longer discriminates and this test is vacuous")

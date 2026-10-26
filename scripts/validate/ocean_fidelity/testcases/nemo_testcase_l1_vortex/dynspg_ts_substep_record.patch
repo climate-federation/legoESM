@@ -1,0 +1,149 @@
+--- dynspg_ts.F90
++++ dynspg_ts.F90
+@@ -58,6 +58,7 @@
+    USE lbclnk          ! ocean lateral boundary conditions (or mpp link)
+    USE prtctl          ! Print control
+    USE iom             ! IOM library
++   USE vortex_r12_spgts_terms   ! round-196 read-only barotropic substep record
+    USE restart         ! only for lrst_oce
+ 
+    USE iom   ! to remove
+@@ -517,6 +518,33 @@
+       END IF 
+ 
+       !                                             ! ==================== !
++      !                                   !== round-196 read-only barotropic substep record ==!
++      CALL spgts_r12_open( kt, Kbb, Kmm, Kaa, Krhs, jpi, jpj, jpk,      &
++         &                 icycle, Nis0, Njs0, Nie0, Nje0 )
++      CALL spgts_r12_substep( 0 )
++      CALL spgts_r12_w2( 'ssh_frc', ssh_frc )
++      CALL spgts_r12_w2( 'zu_frc', zu_frc )
++      CALL spgts_r12_w2( 'zv_frc', zv_frc )
++      CALL spgts_r12_w2( 'un_e', un_e )
++      CALL spgts_r12_w2( 'vn_e', vn_e )
++      CALL spgts_r12_w2( 'ub_e', ub_e )
++      CALL spgts_r12_w2( 'vb_e', vb_e )
++      CALL spgts_r12_w2( 'ubb_e', ubb_e )
++      CALL spgts_r12_w2( 'vbb_e', vbb_e )
++      CALL spgts_r12_w2( 'sshn_e', sshn_e )
++      CALL spgts_r12_w2( 'sshb_e', sshb_e )
++      CALL spgts_r12_w2( 'sshbb_e', sshbb_e )
++      CALL spgts_r12_w2( 'hu_e', hu_e )
++      CALL spgts_r12_w2( 'hv_e', hv_e )
++      CALL spgts_r12_w2( 'hur_e', hur_e )
++      CALL spgts_r12_w2( 'hvr_e', hvr_e )
++      CALL spgts_r12_w2( 'zCdU_u', zCdU_u )
++      CALL spgts_r12_w2( 'zCdU_v', zCdU_v )
++      CALL spgts_r12_w1( 'wgtbtp1', wgtbtp1 )
++      CALL spgts_r12_w1( 'wgtbtp2', wgtbtp2 )
++      CALL spgts_r12_w1( 'entry_sc', (/ rDt_e, r1_wgt1s, r1_wgt2s,  &
++         &   REAL(icycle,wp), MERGE(1._wp,0._wp,ll_init),               &
++         &   MERGE(1._wp,0._wp,ll_bt_av) /) )
+       DO jn = 1, icycle                             !  sub-time-step loop  !
+          !                                          ! ==================== !
+          !
+@@ -597,6 +625,14 @@
+          !                    !==  after SSH  ==!   (jn+1)
+          !
+          !                             ! update (ua_e,va_e) to enforce volume conservation at open boundaries
++         CALL spgts_r12_substep( jn )
++         CALL spgts_r12_w2( 'ua_ext', ua_e )
++         CALL spgts_r12_w2( 'va_ext', va_e )
++         CALL spgts_r12_w2( 'sshp2_mid', zsshp2_e )
++         CALL spgts_r12_w2( 'htp2_e', zhtp2_e )
++         CALL spgts_r12_w2( 'hup2_e', zhup2_e )
++         CALL spgts_r12_w2( 'hvp2_e', zhvp2_e )
++         CALL spgts_r12_w1( 'ext_coef', (/ za1, za2, za3 /) )
+          !                             ! values of zhup2_e and zhvp2_e on the halo are not needed in bdy_vol2d
+          IF( ln_bdy .AND. ln_vol ) CALL bdy_vol2d( kt, jn, ua_e, va_e, zhup2_e, zhvp2_e )
+          !      
+@@ -630,6 +666,9 @@
+          END_2D
+          !
+          ! Duplicate sea level across open boundaries (this is only cosmetic if linssh=T)
++         CALL spgts_r12_w2( 'zhU', zhU )
++         CALL spgts_r12_w2( 'zhV', zhV )
++         CALL spgts_r12_w2( 'ssha_e', ssha_e )
+          IF( ln_bdy )   CALL bdy_ssh( ssha_e )
+ #if defined key_agrif
+          CALL agrif_ssh_ts( jn )
+@@ -650,6 +689,8 @@
+          END IF
+          !
+          !  
++         CALL spgts_r12_w2( 'un_adv', un_adv )
++         CALL spgts_r12_w2( 'vn_adv', vn_adv )
+          ! Sea Surface Height at u-,v-points (vvl case only)
+          IF( .NOT.lk_linssh ) THEN
+ #if defined key_qcoTest_FluxForm
+@@ -668,6 +709,8 @@
+ #endif
+          ENDIF
+          !         
++         CALL spgts_r12_w2( 'sshu_a', zsshu_a )
++         CALL spgts_r12_w2( 'sshv_a', zsshv_a )
+          ! Half-step back interpolation of SSH for surface pressure computation at step jit+1/2
+          !--            m+1/2           m+1              m               m-1              m-2     --!
+          !--        ssh'    =  za0 * ssh     +  za1 * ssh   +  za2 * ssh      +  za3 * ssh        --!
+@@ -685,8 +728,14 @@
+             zv_spg(ji,jj) = - zldg * ( zsshp2_e(ji,jj+1) - zsshp2_e(ji,jj) ) * r1_e2v(ji,jj)
+          END_2D
+          !
++         CALL spgts_r12_w2( 'sshp2_bck', zsshp2_e )
++         CALL spgts_r12_w2( 'zu_spg', zu_spg )
++         CALL spgts_r12_w2( 'zv_spg', zv_spg )
++         CALL spgts_r12_w1( 'bck_coef', (/ za0, za1, za2, za3 /) )
+          ! Add Coriolis trend:
+          CALL dyn_cor_2D( ua_e, va_e, zu_trd, zv_trd )
++         CALL spgts_r12_w2( 'cor_u', zu_trd )
++         CALL spgts_r12_w2( 'cor_v', zv_trd )
+          !
+          ! Add tidal astronomical forcing if defined
+          IF ( ln_tide .AND. ln_tide_pot ) THEN
+@@ -705,6 +754,8 @@
+             END_2D
+          ENDIF
+          !
++         CALL spgts_r12_w2( 'trd_u', zu_trd )
++         CALL spgts_r12_w2( 'trd_v', zv_trd )
+          ! Set next velocities:
+          !     Compute barotropic speeds at step jit+1    (h : total height of the water colomn)
+          !--                              VECTOR FORM
+@@ -801,6 +852,12 @@
+ #if defined key_agrif                                                           
+          CALL agrif_dyn_ts( jn )  ! Agrif
+ #endif
++         CALL spgts_r12_w2( 'ua_new', ua_e )
++         CALL spgts_r12_w2( 'va_new', va_e )
++         CALL spgts_r12_w2( 'hu_e', hu_e )
++         CALL spgts_r12_w2( 'hv_e', hv_e )
++         CALL spgts_r12_w2( 'hur_e', hur_e )
++         CALL spgts_r12_w2( 'hvr_e', hvr_e )
+          !                                             !* Swap
+          !                                             !  ----
+          ubb_e  (:,:) = ub_e  (:,:)
+@@ -836,6 +893,10 @@
+          ENDIF
+          !
+          !                                                 ! ==================== !
++         CALL spgts_r12_w2( 'uub_sum', puu_b(:,:,Kaa) )
++         CALL spgts_r12_w2( 'vvb_sum', pvv_b(:,:,Kaa) )
++         CALL spgts_r12_w2( 'ssh_sum', pssh (:,:,Kaa) )
++         CALL spgts_r12_w1( 'sum_coef', (/ wgtbtp1(jn), wgtbtp2(jn) /) )
+       END DO                                               !        end loop      !
+       !                                                    ! ==================== !
+       ! Finalize sums:
+@@ -1026,6 +1087,13 @@
+       ENDIF
+ #endif
+       !                                   !: write time-spliting arrays in the restart
++      CALL spgts_r12_substep( -1 )
++      CALL spgts_r12_w2( 'un_adv', un_adv )
++      CALL spgts_r12_w2( 'vn_adv', vn_adv )
++      CALL spgts_r12_w2( 'uu_b_aa', puu_b(:,:,Kaa) )
++      CALL spgts_r12_w2( 'vv_b_aa', pvv_b(:,:,Kaa) )
++      CALL spgts_r12_w2( 'ssh_aa', pssh (:,:,Kaa) )
++      CALL spgts_r12_close( kt, icycle )
+       IF( lrst_oce )   CALL ts_rst( kt, 'WRITE' )
+       !
+ #if ! defined key_PSYCLONE_2p5p0

@@ -1,0 +1,51 @@
+{
+ "format": "nemo-testcase-l2-gyre-round37-preregister-v1",
+ "date": "2026-09-06",
+ "starting_tip": "e49063768799",
+ "instrument_fix_commit": "06915b026f08",
+ "regime": "CPU production JIT, fp64/x64, oracle V2, transcendentals=libm",
+ "what_this_round_delivers": [
+  "the round-37 instrument fix (avt/avs staged to their true extents) as a patch + run.sh; the AGENT DOES NOT RUN IT",
+  "the upstream owner of the kt=1 stage-3 tracer residual, named from the round-35 record",
+  "NEMO's sweep and dry diagonal transcribed literally into the one shared tracer implicit solve",
+  "the barotropic correction's column sum in NEMO's sequential loop order"
+ ],
+ "what_this_round_may_not_do": [
+  "run makenemo, mpirun or any NEMO executable",
+  "modify anything under the NEMO src/ tree",
+  "land a model-numerics change without a Rule-12 discharge on every card that executes it",
+  "flip tracer_combine unless the WHOLE tra_zdf program is bit-exact given NEMO's inputs"
+ ],
+ "oracle_roots": {
+  "GYRE-zco tra_zdf matrix": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round35_oracle_trazdf_matrix",
+  "GYRE-zco dyn_zdf matrix": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round29_oracle_v2_zdf_matrix",
+  "tanks dyn_zdf matrix": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round33_{lock,overflow}_zdf_matrix",
+  "tanks trajectory": "/data/abyssal/dbalwada/nemo-testcases-l1/phase3/{lock_kt1_10,overflow_kt1_10}"
+ },
+ "read_before_measuring": {
+  "r0_1": "NEMO's tracer sweep, compiled ppsrc cfgs/GYRE_OMIP_L2_P3_SM_R35TRAZDF/BLD/ppsrc/nemo/trazdf.f90. 1st recurrence :493 zwt(ji,1)=zwd(ji,1) and :496 zwt(ji,jk)=zwd(ji,jk)-zwi(ji,jk)*zws(ji,jk-1)/zwt(ji,jk-1) -- multiply THEN divide THEN subtract. 2nd recurrence :515-516 (surface, written straight into pt(Kaa)), :528-529 (zrhs) and :532 pt(jk,Kaa)=zrhs-zwi(ji,jk)/zwt(ji,jk-1)*pt(jk-1,Kaa) -- divide THEN multiply THEN subtract. 3rd recurrence :543 pt(jpkm1)=pt(jpkm1)/zwt(jpkm1)*tmask and :546-547 pt(jk)=(pt(jk)-zws(ji,jk)*pt(jk+1))/zwt(ji,jk)*tmask -- multiply, subtract, divide, mask, at EVERY level.",
+  "r0_2": "The dry diagonal: :445 zwd(ji,jk)=(e3t_3d*(1+r3t(Kaa)*tmask))-(zwi+zws) is written UNCONDITIONALLY, wet or dry. legoESM's nemo_tracer_tridiagonal ends with jnp.where(wet>0, diagonal, 1.0).",
+  "r0_3": "The RHS NEMO builds, :515-516 and :528-529: e3t(Kbb)*T(Kbb) + p2dt*e3t(Kmm)*T(Krhs). THREE time levels of thickness are involved: Kbb on the tracer term, Kmm on the tendency term, Kaa on the diagonal (:445).",
+  "r0_4": "legoESM's NEMO cards resolve tracer_combine='concentration' (round 36, Rule 10, printed by the gate), so _nemo_tracer_content_rhs is None and the literal matrix is fed T_solve_in*dz_cell = e3t(Kaa)*(T(Kbb)+p2dt*T(Krhs)). That is a DIFFERENT EXPRESSION from NEMO's, not a different association: NEMO never multiplies the Kbb tracer by the Kaa thickness.",
+  "r0_5": "The barotropic correction, compiled ppsrc stprk3_stg.f90:522-523: zub = uu_b(Kaa) - SUM( e3u_3d(ji,jj,:)*uu(ji,jj,:,Kaa) ) * r1_hu_0(ji,jj). Fortran's SUM over a rank-1 section has no specified order, but gfortran emits the ascending-k loop; legoESM uses jnp.sum, whose XLA reduction is a tree.",
+  "r0_6": "Round 36 measured, given NEMO's inputs: calibration 0/21120 on all 13 rows; assembly.zwd 3120/21120 = exactly the dry cells; assembly.zwi/zws 704 signed zeros each; sweep.T 133 and sweep.S 111 WET cells at 7.105e-15; rhs_content 0/21120 both tracers."
+ },
+ "already_measured_before_this_preregistration": {
+  "note": "Localisation of the sweep residual was run before this file was written and is recorded here rather than presented as a prediction.",
+  "m1": "A plain NumPy sequential transcription of :493/:496, :515-516/:528-529/:532 and :543/:546-547 reproduces NEMO's dumped zwt_lu, fwd_T/fwd_S and sol_T/sol_S at 0 cells unequal on all 21120 scored cells. So NEMO's statements, separately rounded, ARE legoESM's claimed association.",
+  "m2": "The same transcription with a FUSED multiply-add in the 2nd AND 3rd recurrences (math.fma) reproduces legoESM's JAX solve at 0 cells unequal on all 21120 cells, both tracers; with the fusion in only one of the two it does not (63 and 80 cells left over on T). The 1st recurrence ends in a division and cannot be contracted, which is why the LU row was never over the bar.",
+  "m3": "On 4096 random triples, XLA:CPU evaluates c-a*b as a fused multiply-add in every form tried -- plain, jax.lax.optimization_barrier on the product, on a tuple, lax.reduce_precision, and a bitcast round trip (812 of 4096 cells differ from the separately-rounded result, 0 from the fused one). Giving the product a SECOND USE reproduces the separately-rounded result exactly (0 of 4096). XLA_FLAGS --xla_allow_excess_precision=false and --xla_cpu_enable_fast_math=false do not change the tra_zdf sweep rows."
+ },
+ "predictions": {
+  "PR1": {"claim": "The owner of sweep.T/sweep.S is XLA's fused multiply-add, not a transcription error, and not the dry diagonal or the tmask placement -- every one of the 133/111 differing cells sits in a column with ZERO dry cells.", "falsifier": "any differing cell in a column that has a dry cell, or fma-BOTH not reproducing legoESM exactly", "status_at_preregistration": "CONFIRMED by m1-m3 above"},
+  "PR2": {"claim": "Giving the multiply a second use inside the two contracted recurrences drives GYRE's sweep.T and sweep.S to 0/21120 with max abs 0.0.", "falsifier": "either row still over 0 cells"},
+  "PR3": {"claim": "THE UPSTREAM OWNER OF THE kt=1 STAGE-3 RESIDUAL IS THE RIGHT-HAND SIDE FORM, not any operator upstream of tra_zdf and not the solve. Built from NEMO's OWN dumped operands, legoESM's concentration-form RHS e3t(Kaa)*(T(Kbb)+rDt*T(Krhs)) fed through NEMO's own dumped matrix will reproduce the trajectory's stage-3 residual to within a factor of a few: order 1e-11 K on T and 1e-12 psu on S, against the trajectory's 3.1956659540810506e-11 K and 8.1712414612411521e-13 psu.", "falsifier": "that residual is below 1e-13 K, three orders under the trajectory's, which would exonerate the RHS form and put the owner back upstream of tra_zdf"},
+  "PR4": {"claim": "Dropping the dry-diagonal replacement makes assembly.zwd 0/21120 and moves NO wet cell.", "falsifier": "a wet cell moves, or the row does not reach 0"},
+  "PR5": {"claim": "Accumulating the barotropic correction's column sum in NEMO's ascending-k order discharges OVERFLOW's rule12_correction.u to 0/16900 exact, and leaves GYRE and LOCK bit-identical.", "falsifier": "OVERFLOW does not reach exact, or GYRE/LOCK move"},
+  "PR6": {"claim": "Decision 20 executes ONLY if assembly.zwi, assembly.zwd, assembly.zws and both sweep rows are all 0 cells unequal, signed zeros INCLUDED. Anything short of that leaves tracer_combine at concentration and reports the blocking statement.", "falsifier": "n/a -- this is the round's own gate on itself"}
+ },
+ "rule12_discharge_plan": {
+  "the shared sweep": "_nemo_ordered_solve is called by BOTH the tracer pair solve and the momentum solve, so a change to it touches every card. GYRE: the round-35 tracer record (sweep arm) and the round-29/35 momentum record. LOCK_EXCHANGE and OVERFLOW: their round-33 dyn_zdf records carry zwi_u/zwd_u/zws_u, uu_Kaa_pre and uu_Kaa_out, so the same arm can be driven there without a new acquisition. NO card that executes the change is left UNMEASURED.",
+  "the dry diagonal": "nemo_tracer_tridiagonal is reached only through the tracer pair solve. GYRE is measured by the round-35 record. The tanks have NO tracer-matrix record; the frame spec for one is a trazdf instrument on each tank card writing zwi/zwd/zws/rhs/sol at kt=nit000, exactly as round 35 did for GYRE. Until then their discharge is by TRAJECTORY: kt=1..10 before/after, and the rows that move are registered."
+ }
+}

@@ -67,11 +67,24 @@ os.environ.setdefault("JAX_ENABLE_X64", "1")
 os.environ["LEGOESM_NEMO_E3T"] = "both"
 
 import dataclasses
+import importlib.util
+import sys
 
 import numpy as np
 
-RUN_DIR = ("/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_GDB")
-RESTART = "DINO_00057600_restart.nc"
+# #1455: which NEMO dump run/lane this probe measures against (gdb_y5 default,
+# byte-identical to the prior hardcoded RUN_GDB/kt=57601 pairing; d180 via
+# DINO_1226_LANE=d180) -- ONE shared selector, same importlib-by-path idiom
+# every dino_1226 probe uses (this file has no other sibling import to match,
+# so this is the idiom picked for it too).
+_dl_path = os.path.join(os.path.dirname(__file__), "dump_lane.py")
+_dl_spec = importlib.util.spec_from_file_location("_dump_lane", _dl_path)
+dump_lane = importlib.util.module_from_spec(_dl_spec)
+sys.modules["_dump_lane"] = dump_lane
+_dl_spec.loader.exec_module(dump_lane)
+
+RUN_DIR = dump_lane.RUN_DIR
+RESTART = dump_lane.RESTART
 DT = 2700.0                    # rn_Dt (ocean.output:249 rDt = 2*rn_Dt = 5400)
 
 
@@ -287,6 +300,7 @@ def _report_ab(tag, a, b, ca, cb, wet_if):
 
 # ---------------------------------------------------------------------------
 def main():
+    print(dump_lane.banner())
     g, br, cfg, mc, model, sf = build()
     s1_card(mc, br)
     act, wet_if = s2_structural(br, mc)

@@ -77,11 +77,13 @@ from typing import NamedTuple
 
 import jax
 import jax.numpy as jnp
+import functools
+import hashlib
+
 import numpy as np
 from jax.sharding import NamedSharding
 from jax.sharding import PartitionSpec as P
 from legoesm.core.field import Field
-from legoesm.grids.halo import pad_halo, pad_halo_4d
 from legoesm.parallel.mesh import N_FACES, DeviceConfig
 
 logger = logging.getLogger(__name__)
@@ -888,70 +890,6 @@ def sharded_step_with_halo(
 # Halo exchange utilities for cubed-sphere face boundaries
 # ======================================================================
 
-def make_face_halo_exchange(grid, config: DeviceConfig):
-    """Create a halo exchange function for cubed-sphere face boundaries.
-
-    The returned function operates on a full model state pytree and
-    applies halo exchange to all face-dimensioned arrays.
-
-    For face-only sharding (<=6 devices), this function is typically
-    not needed because the built-in ``pad_halo`` already handles
-    cross-face communication within the JIT'd step function.  It is
-    provided for explicit control when needed (e.g., in custom
-    time-stepping loops).
-
-    For sub-face tiling (>6 devices), this additionally exchanges
-    tile boundary data within each face.
-
-    Parameters
-    ----------
-    grid : CubedSphereGrid
-        The cubed-sphere grid (provides connectivity and metric info).
-    config : DeviceConfig
-        Device configuration.
-
-    Returns
-    -------
-    callable
-        ``exchange(state) -> state`` that applies halo exchange to
-        all face-dimensioned fields in the state pytree.
-    """
-    def _exchange(state):
-        """Apply halo exchange to face-dimensioned arrays.
-
-        This function pads each 2D face field ``(6, n, n)`` with halo
-        data from neighbors, then strips the halos back to ``(6, n, n)``.
-        This ensures boundary values are fresh after a dynamics step.
-
-        For 3D fields ``(6, n, n, nlev)`` the exchange uses the native
-        4D halo path (``pad_halo_4d``) which fetches halos for every
-        level in one MPI message — see CLAUDE.md ``Parallel and HPC
-        Rules``.  The previous ``vmap(pad_halo)`` per level pattern is
-        forbidden because it issues ``nlev`` separate messages.
-        """
-        def _exchange_leaf(leaf):
-            if not isinstance(leaf, (jax.Array, jnp.ndarray)):
-                return leaf
-            if leaf.ndim < 3 or leaf.shape[0] != N_FACES:
-                return leaf
-
-            if leaf.ndim == 3:
-                # 2D field: (6, n, n)
-                padded = pad_halo(leaf)
-                return padded[:, 1:-1, 1:-1]
-
-            elif leaf.ndim == 4:
-                # 3D field: (6, n, n, nlev) — single 4D halo exchange.
-                padded = pad_halo_4d(leaf)
-                return padded[:, 1:-1, 1:-1, :]
-
-            return leaf
-
-        return jax.tree.map(_exchange_leaf, state)
-
-    return _exchange
-
-
 # ======================================================================
 # Multi-step integration with sharding
 # ======================================================================
@@ -1251,7 +1189,8 @@ SPMD_HALO_DEPTH = 3
 def spmd_schedule_cost(mesh, n_dev, *, method="auto", reorder_target=None,
                        already_reordered=False, halo_depth=SPMD_HALO_DEPTH,
                        ppermute_cells_per_device_threshold=2_000,
-                       round_profile_for_device=None):
+                       round_profile_for_device=None,
+                       cell_width=None, edge_width=None):
     """How much halo communication one ownership choice costs, computed offline.
 
     Scores a Voronoi ownership (mesh split) by the number of ``ppermute``
@@ -1392,10 +1331,46 @@ def spmd_schedule_cost(mesh, n_dev, *, method="auto", reorder_target=None,
     ) = _build_voronoi_partition_infra(prepared, n_dev, halo_depth=halo_depth)
     cells_per = n_cells // n_dev
     edges_per = n_edges // n_dev
+    # PRODUCTION WEIGHTS. make_voronoi_sharded_step passes
+    # cell_width=nlev+2, edge_width=nlev; the colouring is SIZE-AWARE and
+    # will admit an extra round when it buys more than ten per cent of
+    # padded weight, so the weights change WHICH schedule is chosen, not
+    # just its reported cost. Left unset this function colours at 1:1 and
+    # its round count is then NOT the one production builds (codex).
+    production_weighted = cell_width is not None and edge_width is not None
     sched = _build_ppermute_schedule(
         partitions, cell_owner, n_dev, cells_per, edges_per, max_lc, max_le,
+        **({"cell_width": int(cell_width), "edge_width": int(edge_width)}
+           if production_weighted else {}),
     )
+    # Partition fingerprint: max_degree alone does not pin the split --
+    # neighbours and payloads can change at equal degree -- so a gate that
+    # wants "the same split the reference measured" compares this (codex).
+    #
+    # It hashes the NEIGHBOUR SET, not cell_owner. Hashing ownership was
+    # measured vacuous: the partition methods reorder the MESH and then cut
+    # it into contiguous blocks, so sfc, metis and geometric all produce
+    # the same owner array while colouring to 13, 15 and 16 rounds. The
+    # directed pair set is what actually differs, and unlike the round
+    # assignment it does not move when the colouring policy changes.
+    _pairs = sorted({(int(s), int(d))
+                     for perm in sched["ppermute_perms"] for s, d in perm})
+    partition_fingerprint = hashlib.sha256(
+        repr((_pairs, int(max_lc), int(max_le), int(cells_per),
+              int(edges_per))).encode()
+    ).hexdigest()[:16]
     return {
+        "production_weighted": production_weighted,
+        "cell_width": cell_width,
+        "edge_width": edge_width,
+        "weights_note": (
+            None if production_weighted else
+            "coloured at 1:1: production passes cell_width=nlev+2, "
+            "edge_width=nlev, and the size-aware colouring can pick a "
+            "DIFFERENT schedule under those weights, so n_rounds here is "
+            "not production's round count"),
+        "partition_fingerprint": partition_fingerprint,
+        "n_neighbour_pairs": len(_pairs),
         "method": method,
         "resolved_method": resolved,
         "n_dev": n_dev,
@@ -1462,6 +1437,28 @@ def _round_profile(sched, device, n_dev):
     return out
 
 
+def _on_host_cpu(fn):
+    """Run ``fn`` with jnp arrays created on the host CPU device.
+
+    The partition infra builds one padded mesh per device and stacks them,
+    so its arrays grow with the device count. Built on the default GPU they
+    exhaust it before the per-shard placement runs (ico10 float64 at 64 and
+    128 GPUs). Values are identical; only the device holding them changes.
+    Without a CPU backend (JAX_PLATFORMS excludes cpu) the default device
+    is used, as before.
+    """
+    @functools.wraps(fn)
+    def wrapped(*args, **kwargs):
+        try:
+            cpu = jax.local_devices(backend="cpu")[0]
+        except RuntimeError:
+            return fn(*args, **kwargs)
+        with jax.default_device(cpu):
+            return fn(*args, **kwargs)
+    return wrapped
+
+
+@_on_host_cpu
 def _build_voronoi_partition_infra(global_mesh, n_dev, halo_depth=2):
     """Pre-compute per-device local meshes and gather/scatter indices.
 
@@ -2634,6 +2631,687 @@ def _build_wide_halo_rings(global_mesh, partitions, max_lc, max_le,
     return cell_ring, edge_ring
 
 
+def _build_rim_rings(global_mesh, partitions, max_lc, max_le,
+                     max_width):
+    """Per-device INWARD ring distances — the rim complement of
+    :func:`_build_wide_halo_rings`.
+
+    Returns ``(cell_rim, edge_rim)`` int32 arrays of shape
+    ``(n_dev, max_lc)`` / ``(n_dev, max_le)``:
+
+    * ``cell_rim[d, i]`` — BFS hops (over ``cellsOnCell``) from device
+      *d*'s i-th local cell to the nearest cell NOT owned by *d*;
+      non-owned (halo) rows are the seed and get 0; owned cells farther
+      than ``max_width`` hops (the interior) and padding rows get
+      ``_WIDE_RING_FAR``. The width-``w`` RIM — the owned cells whose
+      radius-``w`` stencil can see a ghost value, i.e. the rows an
+      interior/rim split must recompute after the halo fill — is
+      ``1 <= cell_rim <= w``.
+    * ``edge_rim[d, j]`` — min of the two adjacent cells' rim
+      distances (an edge is ghost-affected iff EITHER cell is —
+      dual to the outward builder's AND/max), ``_WIDE_RING_FAR`` when
+      padding.
+
+    The BFS seeds from every non-owned LOCAL cell; owned boundary cells
+    adjacent to a cell of another device that is absent from the local
+    halo cannot occur for ``max_width <= halo_depth`` (depth-1 closure
+    contains every neighbour of an owned cell), which the caller must
+    hold — asserted below.
+    """
+    coc = np.asarray(global_mesh.cellsOnCell)     # (maxEdges, nCells)
+    coe = np.asarray(global_mesh.cellsOnEdge)     # (2, nEdges)
+    n_dev = len(partitions)
+    cell_rim = np.full((n_dev, max_lc), _WIDE_RING_FAR, dtype=np.int32)
+    edge_rim = np.full((n_dev, max_le), _WIDE_RING_FAR, dtype=np.int32)
+
+    for d, part in enumerate(partitions):
+        g2l = part.cell_g2l
+        n_owned = part.n_owned_cells
+        n_local = part.n_local_cells
+        assert max_width >= 1, "rim width must be >= 1"
+        rim_l = np.full(max_lc, _WIDE_RING_FAR, dtype=np.int64)
+        # Seed: every local non-owned (halo) cell at distance 0.
+        rim_l[n_owned:n_local] = 0
+        frontier = np.asarray(part.local_cells[n_owned:n_local])
+        # done marks GLOBAL cells already labelled (seed + visited owned).
+        done = np.zeros(coc.shape[1], dtype=bool)
+        done[frontier] = True
+        for r in range(1, max_width + 1):
+            if frontier.size == 0:
+                break
+            nb = coc[:, frontier].ravel()
+            nb = nb[nb >= 0]
+            nb = np.unique(nb)
+            nb = nb[~done[nb]]
+            done[nb] = True
+            lidx = g2l[nb]
+            # keep OWNED rows only — the rim lives in the owned block.
+            nb_owned = lidx[(lidx >= 0) & (lidx < n_owned)]
+            rim_l[nb_owned] = r
+            frontier = nb
+        cell_rim[d] = rim_l.astype(np.int32)
+
+        le = np.asarray(part.local_edges)
+        c12 = coe[:, le]                          # (2, n_local_edges)
+        r12 = np.full_like(c12, _WIDE_RING_FAR, dtype=np.int64)
+        for side in range(2):
+            cs = c12[side]
+            valid = cs >= 0
+            lidx = np.full(cs.shape, -1, dtype=np.int64)
+            lidx[valid] = g2l[cs[valid]]
+            present = lidx >= 0
+            r12[side, present] = rim_l[lidx[present]]
+        edge_rim[d, :le.shape[0]] = np.min(
+            r12, axis=0).astype(np.int32)
+
+    return cell_rim, edge_rim
+
+
+def _build_rim_rings_structural(global_mesh, partitions, max_lc, max_le,
+                                *, n_rounds=3):
+    """Rim membership by STRUCTURAL stencil closure -- provably safe.
+
+    Returns ``(cell_rim, edge_rim)`` with the ``_build_rim_rings`` contract
+    (``1`` = rim, ``_WIDE_RING_FAR`` = interior), consumed by
+    ``_build_rim_plan`` at ``rim_width=1``.
+
+    An owned entity is RIM iff any non-owned (halo) entity lies within
+    ``n_rounds`` hops of it over the mesh incidence graph -- the union of
+    every cell/edge/vertex adjacency the RHS could read. Unlike the cheap
+    ``min(cell_rim)`` measure this cannot be fooled by edge-ownership and
+    cell-ownership being independent blocks (a halo EDGE between two owned
+    cells taints them directly), and unlike a random-fill DEPENDENCY probe it
+    is STATE-INDEPENDENT: the default MPAS RHS has genuine state-dependent
+    switches (donor-cell vertical advection ``where(sigma_dot>0)``, pressure
+    ``maximum``/``clip`` floors, division by ``p_s``) that can zero a halo
+    contribution at one state and admit it at another, so a probe can mark an
+    entity interior that is halo-dependent at other states. The structural
+    closure includes every entity the operator can reach regardless of which
+    branch is live, so it over-includes (safe: a slightly larger rim pass) and
+    never under-includes (which would be a silent wrong answer). The switches
+    do not enlarge the horizontal reach -- they only gate a dependency inside
+    the operator's existing connectivity -- so a closure over that
+    connectivity is conservative. ``_build_rim_rings_by_dependency`` is kept as
+    a VALIDATOR: every entity it flags must lie inside this structural set.
+
+    ``n_rounds`` is the composed-stage count; 3 covers the measured 2-edge-hop
+    momentum stencil with a margin. Setup-time numpy only.
+    """
+    from legoesm.parallel.voronoi_partition import build_local_mesh
+
+    n_dev = len(partitions)
+    cell_rim = np.full((n_dev, max_lc), _WIDE_RING_FAR, dtype=np.int32)
+    edge_rim = np.full((n_dev, max_le), _WIDE_RING_FAR, dtype=np.int32)
+
+    def _spread(taint_tgt, adj):
+        # adj: (deg, N) neighbour indices into taint_tgt; return per-source
+        # OR of the target taint over valid neighbours. Shape (N,).
+        if adj is None:
+            return None
+        a = np.asarray(adj)
+        if a.ndim != 2:
+            return None
+        valid = a >= 0
+        gathered = np.where(valid, taint_tgt[np.where(valid, a, 0)], False)
+        return gathered.any(axis=0)
+
+    for d, part in enumerate(partitions):
+        lm = build_local_mesh(global_mesh, part)
+        n_oc = part.n_owned_cells
+        n_oe = part.n_owned_edges
+        n_lc = part.n_local_cells
+        n_le = part.n_local_edges
+        n_lv = int(getattr(lm, "nVertices", 0))
+
+        def _get(name):
+            return getattr(lm, name, None)
+
+        coc = _get("cellsOnCell")       # (deg, nCells) cell->cell
+        coe = _get("cellsOnEdge")       # (2, nEdges)   edge->cell
+        eoc = _get("edgesOnCell")       # (deg, nCells) cell->edge
+        eoe = _get("edgesOnEdge")       # (deg2, nEdges) edge->edge
+        voe = _get("verticesOnEdge")    # (2, nEdges)   edge->vertex
+        eov = _get("edgesOnVertex")     # (vd, nVertices) vertex->edge
+        cov = _get("cellsOnVertex")     # (vd, nVertices) vertex->cell
+        voc = _get("verticesOnCell")    # (deg, nCells) cell->vertex
+
+        taint_c = np.zeros(n_lc, dtype=bool); taint_c[n_oc:] = True
+        taint_e = np.zeros(n_le, dtype=bool); taint_e[n_oe:] = True
+        taint_v = np.zeros(max(n_lv, 1), dtype=bool)
+
+        for _ in range(n_rounds):
+            nc = taint_c.copy(); ne = taint_e.copy(); nv = taint_v.copy()
+            # cell <- cell
+            r = _spread(taint_c, coc);            nc |= r if r is not None else False
+            # cell <- edge (edgesOnCell) ; edge <- cell (cellsOnEdge)
+            r = _spread(taint_e, eoc);            nc |= r if r is not None else False
+            r = _spread(taint_c, coe);            ne |= r if r is not None else False
+            # edge <- edge
+            r = _spread(taint_e, eoe);            ne |= r if r is not None else False
+            # edge <- vertex (verticesOnEdge) ; vertex <- edge (edgesOnVertex)
+            if n_lv:
+                r = _spread(taint_v, voe);        ne |= r if r is not None else False
+                r = _spread(taint_e, eov);        nv |= r if r is not None else False
+                # cell <- vertex (verticesOnCell) ; vertex <- cell (cellsOnVertex)
+                r = _spread(taint_v, voc);        nc |= r if r is not None else False
+                r = _spread(taint_c, cov);        nv |= r if r is not None else False
+            taint_c, taint_e, taint_v = nc, ne, nv
+
+        cell_rim[d, :n_oc] = np.where(taint_c[:n_oc], 1, _WIDE_RING_FAR)
+        edge_rim[d, :n_oe] = np.where(taint_e[:n_oe], 1, _WIDE_RING_FAR)
+    return cell_rim, edge_rim
+
+
+def _build_rim_rings_by_dependency(
+    tendency_fn, sigma, cfg, dt,
+    global_mesh, partitions, max_lc, max_le,
+    *, n_probe_nlev=4, n_draws=3, seed=0,
+):
+    """Rim membership by DATA DEPENDENCY, not by a graph-hop heuristic.
+
+    Returns ``(cell_rim, edge_rim)`` with the SAME shape/sentinel contract as
+    :func:`_build_rim_rings` (``1`` = rim, ``_WIDE_RING_FAR`` = interior), so
+    ``_build_rim_plan`` consumes it unchanged at ``rim_width=1``.
+
+    WHY this exists: the cheap ``min(cell_rim)`` edge measure is WRONG for the
+    momentum tendency because edge-ownership and cell-ownership are independent
+    blocks — a non-owned (halo) EDGE can sit between two owned, deep-interior
+    cells, and an owned edge that reads it via ``edgesOnEdge`` is then
+    misclassified interior and silently computed from the pad (measured: ~24
+    owned edges wrong by 5e-3, and 2 owned cells wrong, on a metis s6 fixture).
+    Rather than re-derive the exact stencil closure over every connectivity
+    array the RHS touches (cellsOnEdge, verticesOnEdge, edgesOnVertex, …) and
+    risk missing one, ask the OPERATOR itself: run the tendency twice with the
+    owned rows held fixed and the HALO rows filled with two different random
+    draws. Any owned entity whose tendency changes reads the halo, so it is
+    rim. Exact by construction and immune to future operator changes.
+
+    Setup-time only (numpy/CPU-ish; runs the traced RHS on each device's local
+    mesh once per draw). ``n_draws`` random fills are unioned so a single
+    coincidental cancellation cannot mark a genuinely halo-dependent entity as
+    interior.
+    """
+    from legoesm.core.state import MPASHydrostaticState
+    from legoesm.grids.vertical import create_sigma_coordinate
+    from legoesm.parallel.voronoi_partition import build_local_mesh
+
+    n_dev = len(partitions)
+    cell_rim = np.full((n_dev, max_lc), _WIDE_RING_FAR, dtype=np.int32)
+    edge_rim = np.full((n_dev, max_le), _WIDE_RING_FAR, dtype=np.int32)
+    # The rim is a TOPOLOGY property, independent of the vertical resolution,
+    # so probe with a cheap column and its OWN matching sigma rather than the
+    # run's (whose level count is unrelated and would mismatch the buffers).
+    nlev = int(n_probe_nlev)
+    sigma = create_sigma_coordinate(nlev)
+    rng = np.random.default_rng(seed)
+
+    def _state(u, T, ps, phis):
+        return MPASHydrostaticState(
+            u=Field(data=jnp.asarray(u), name="u", dims=("nEdges", "nlev"),
+                    units="m/s", long_name="", staggering="edge"),
+            T=Field(data=jnp.asarray(T), name="T", dims=("nCells", "nlev"),
+                    units="K", long_name="", staggering="cell"),
+            p_s=Field(data=jnp.asarray(ps), name="p_s", dims=("nCells",),
+                      units="Pa", long_name="", staggering="cell"),
+            phis=Field(data=jnp.asarray(phis), name="phis", dims=("nCells",),
+                       units="m^2/s^2", long_name="", staggering="cell"),
+            tracers=None)
+
+    for d, part in enumerate(partitions):
+        lm = build_local_mesh(global_mesh, part)
+        n_lc = part.n_local_cells
+        n_le = part.n_local_edges
+        n_oc = part.n_owned_cells
+        n_oe = part.n_owned_edges
+        n_hc = n_lc - n_oc
+        n_he = n_le - n_oe
+        rim_c = np.zeros(n_oc, dtype=bool)
+        rim_e = np.zeros(n_oe, dtype=bool)
+        # For each OWNED state draw, run TWO different halo fills and flag any
+        # owned entity whose tendency differs between them. The owned state is
+        # VARIED across draws (GLM review): a fixed owned state can mask a
+        # halo dependence that a state-dependent coefficient zeroes at that one
+        # state (a limiter in its inactive plateau, an upwind selector, an
+        # owned factor that happens to be 0), which would mark the entity
+        # interior and silently compute it wrong at other states. Varying the
+        # owned state -- including near-zero and large magnitudes to trip any
+        # threshold/branch -- probes those. Union the rim over all draws.
+        state_scales = [(5.0, 5.0, 1.0e3, 100.0),
+                        (0.05, 0.5, 10.0, 5.0),      # near-flat: gradients ~0
+                        (50.0, 60.0, 2.0e4, 3.0e3)]  # large: trip any cap
+        draws = max(int(n_draws), len(state_scales))
+        for i in range(draws):
+            us, Ts, ps_s, phs = state_scales[i % len(state_scales)]
+            u_own = rng.normal(scale=us, size=(n_oe, nlev))
+            T_own = 250.0 + rng.normal(scale=Ts, size=(n_oc, nlev))
+            ps_own = 1.0e5 + rng.normal(scale=ps_s, size=(n_oc,))
+            phis_own = rng.normal(scale=phs, size=(n_oc,))
+            cur = []
+            for _ in range(2):   # two halo fills at THIS owned state
+                u = np.empty((n_le, nlev)); u[:n_oe] = u_own
+                T = np.empty((n_lc, nlev)); T[:n_oc] = T_own
+                ps = np.empty((n_lc,)); ps[:n_oc] = ps_own
+                phis = np.empty((n_lc,)); phis[:n_oc] = phis_own
+                u[n_oe:] = rng.normal(scale=us, size=(n_he, nlev))
+                T[n_oc:] = 250.0 + rng.normal(scale=4 * Ts, size=(n_hc, nlev))
+                ps[n_oc:] = 1.0e5 + rng.normal(scale=5 * ps_s, size=(n_hc,))
+                phis[n_oc:] = rng.normal(scale=3 * phs, size=(n_hc,))
+                t = tendency_fn(_state(u, T, ps, phis), lm, sigma, cfg, dt=dt)
+                cur.append((np.asarray(t.du_dt.data[:n_oe]),
+                            np.asarray(t.dT_dt.data[:n_oc]),
+                            np.asarray(t.dp_s_dt.data[:n_oc])))
+            rim_e |= np.any(cur[0][0] != cur[1][0], axis=1)
+            rim_c |= np.any(cur[0][1] != cur[1][1], axis=1)
+            rim_c |= (cur[0][2] != cur[1][2])
+        cell_rim[d, :n_oc] = np.where(rim_c, 1, _WIDE_RING_FAR)
+        edge_rim[d, :n_oe] = np.where(rim_e, 1, _WIDE_RING_FAR)
+    return cell_rim, edge_rim
+
+
+def _build_rim_plan(global_mesh, partitions, cell_rim, edge_rim,
+                    rim_width, stencil_depth):
+    """Per-device compact RIM SUBMESH plan for the interior/rim split.
+
+    v2 after codex review of v1 (two blockers fixed):
+
+    * EDGE SCATTER comes from ``edge_rim`` on DEVICE-owned rows (the
+      contiguous shard blocks that production returns), predicate
+      ``0 <= edge_rim <= rim_width`` — cut edges carry 0 under the
+      min-of-cells rule. v1 adopted the synthetic partition's
+      lower-cell edge-ownership, an unrelated set that could miss,
+      mis-scatter into halo rows, or double-patch.
+    * The closure is built with VECTORIZED numpy (frontier BFS over
+      ``cellsOnCell``, mask reductions for edges/vertices) — no
+      per-device call into the Python-loop generic partitioner, whose
+      cost at production scale (s9/64) is billions of interpreter
+      iterations.
+
+    Per device the compact submesh rows are ordered: rim cells first
+    (sorted global), then closure cells; scatter-target edges first,
+    then remaining closure edges. ``build_local_mesh`` consumes only
+    the index/g2l fields of the partition descriptor, so the comm
+    schedules are ``None``.
+
+    Returns a list (one entry per device) of dicts with ``sub_mesh``,
+    ``n_rim_cells``/``n_rim_edges``, ``cell_gather``/``edge_gather``
+    (device-LOCAL rows supplying each submesh entity, submesh order)
+    and ``cell_scatter``/``edge_scatter`` (device-LOCAL owned rows
+    receiving submesh tendency rows ``[0:n_rim_*)``). Raises if any
+    closure entity leaves the device-local region. Setup-time only.
+    """
+    from legoesm.parallel.voronoi_partition import (
+        VoronoiPartition, build_local_mesh,
+    )
+
+    coc = np.asarray(global_mesh.cellsOnCell)     # (maxEdges, nCells)
+    coe = np.asarray(global_mesh.cellsOnEdge)     # (2, nEdges)
+    cov = np.asarray(global_mesh.cellsOnVertex)   # (vDeg, nVertices)
+    nCells = int(global_mesh.nCells)
+    nEdges = int(global_mesh.nEdges)
+    nVertices = int(global_mesh.nVertices)
+
+    plans = []
+    for d, part in enumerate(partitions):
+        n_owned_c = part.n_owned_cells
+        n_owned_e = part.n_owned_edges
+        rim_mask = ((cell_rim[d, :n_owned_c] >= 1)
+                    & (cell_rim[d, :n_owned_c] <= rim_width))
+        rim_global = np.sort(
+            np.asarray(part.local_cells)[np.where(rim_mask)[0]])
+
+        # scatter-target edges FIRST (needed to seed the closure):
+        # DEVICE-owned rows with rim distance in [0, rim_width] — cut
+        # edges are 0 and their far cell lives in the device HALO, so
+        # the closure must be seeded from the edges' cells too, not
+        # from rim cells alone (v2 fix: 77 scatter edges escaped a
+        # rim-only closure on the s3@6 fixture).
+        _own_rim = edge_rim[d, :n_owned_e]
+        # EXACT-PARTITION tripwire: _build_rim_rings initialises owned
+        # rim distance to _WIDE_RING_FAR and its BFS never assigns a
+        # finite value above rim_width, so every owned edge is either
+        # scatter (0..rim_width) or deep-interior (FAR). Anything else
+        # means the ring arrays are inconsistent with this rim_width.
+        own_e_rows = np.where(
+            (_own_rim >= 0) & (_own_rim <= rim_width))[0]
+        interior_e_rows = np.where(_own_rim == _WIDE_RING_FAR)[0]
+        if own_e_rows.size + interior_e_rows.size != n_owned_e:
+            _n_bad = int(n_owned_e
+                         - own_e_rows.size - interior_e_rows.size)
+            raise ValueError(
+                f"rim plan device {d}: {_n_bad} owned edges have a "
+                f"finite rim distance > {rim_width} — inconsistent "
+                f"with _build_rim_rings output for this rim_width")
+        # A FAR owned edge is deep interior by construction: its whole
+        # rim_width stencil lies inside the device-local region, so BOTH
+        # adjacent cells must be device-local. If not, the partition is
+        # genuinely broken (an adjacent cell absent from the device-local
+        # region) and the interior pass would compute from garbage;
+        # refuse to build.
+        if interior_e_rows.size:
+            _int_e = np.asarray(part.local_edges)[interior_e_rows]
+            _int_cells = coe[:, _int_e]
+            _cell_g2l = np.asarray(part.cell_g2l)
+            _bad = (_int_cells < 0) | (_cell_g2l[_int_cells] < 0)
+            if _bad.any():
+                _n_bad = int(_bad.sum())
+                raise ValueError(
+                    f"rim plan device {d}: {_n_bad} cells adjacent to "
+                    f"interior owned edges are not device-local — "
+                    f"partition inconsistent with its local region")
+        scatter_e_global = np.sort(
+            np.asarray(part.local_edges)[own_e_rows])
+        seed_cells = coe[:, scatter_e_global].ravel()
+        seed_cells = np.unique(np.concatenate(
+            [rim_global, seed_cells[seed_cells >= 0]]))
+
+        # --- vectorized cell closure: BFS depth stencil_depth ---
+        in_local = np.zeros(nCells, dtype=bool)
+        in_local[seed_cells] = True
+        frontier = seed_cells
+        for _ in range(stencil_depth):
+            if frontier.size == 0:
+                break
+            nb = coc[:, frontier].ravel()
+            nb = nb[nb >= 0]
+            nb = np.unique(nb)
+            nb = nb[~in_local[nb]]
+            in_local[nb] = True
+            frontier = nb
+        not_rim = in_local.copy()
+        not_rim[rim_global] = False
+        closure_cells = np.where(not_rim)[0]
+        local_cells = np.concatenate([rim_global, closure_cells])
+
+        # --- edges: any adjacent cell local ---
+        e_c1, e_c2 = coe[0], coe[1]
+        c_loc = np.zeros(nCells + 1, dtype=bool)
+        c_loc[:nCells] = in_local
+        e_local_mask = c_loc[np.where(e_c1 >= 0, e_c1, nCells)] | \
+            c_loc[np.where(e_c2 >= 0, e_c2, nCells)]
+        # Restrict to edges the DEVICE partition carries: the production
+        # builder's closed cellsOnEdge construction (AND-filter, mesh
+        # corners) drops a handful of outer-boundary edges the generic
+        # OR-rule would keep. Those sit at maximum distance from every
+        # rim entity; the full-tendency closure gate
+        # (test_rim_plan_closure) is the arbiter that dropping them
+        # never reaches a rim value — scatter edges stay strict below.
+        dev_has_edge = part.edge_g2l >= 0
+        e_local_mask &= dev_has_edge
+        # every scatter edge is in the closure by construction now
+        # (its cells seeded the BFS) — keep the assert as a tripwire.
+        if not e_local_mask[scatter_e_global].all():
+            raise ValueError(
+                f"rim plan device {d}: {int((~e_local_mask[scatter_e_global]).sum())} "
+                f"scatter-target edges outside the closure — seeding bug")
+        e_local_mask_rest = e_local_mask.copy()
+        e_local_mask_rest[scatter_e_global] = False
+        local_edges = np.concatenate(
+            [scatter_e_global, np.where(e_local_mask_rest)[0]])
+
+        # --- vertices: any incident cell local ---
+        v_c = cov
+        v_local_mask = np.zeros(nVertices, dtype=bool)
+        for k in range(v_c.shape[0]):
+            ck = v_c[k]
+            valid = ck >= 0
+            v_local_mask[valid] |= in_local[ck[valid]]
+        # boolean-or over incident cells per vertex needs vertex-major
+        # reduction; the loop above is over vertexDegree (3), not N.
+        local_vertices = np.where(v_local_mask)[0]
+
+        def g2l_of(local_ids, n_global):
+            m = np.full(n_global, -1, dtype=np.int32)
+            m[local_ids] = np.arange(len(local_ids), dtype=np.int32)
+            return m
+
+        rim_part = VoronoiPartition(
+            rank=0, n_ranks=2,
+            nCells_global=nCells, nEdges_global=nEdges,
+            nVertices_global=nVertices,
+            n_owned_cells=len(rim_global),
+            n_owned_edges=len(scatter_e_global),
+            n_owned_vertices=0,
+            n_local_cells=len(local_cells),
+            n_local_edges=len(local_edges),
+            n_local_vertices=len(local_vertices),
+            local_cells=local_cells, local_edges=local_edges,
+            local_vertices=local_vertices,
+            cell_g2l=g2l_of(local_cells, nCells),
+            edge_g2l=g2l_of(local_edges, nEdges),
+            vertex_g2l=g2l_of(local_vertices, nVertices),
+            cell_comm=None, edge_comm=None, vertex_comm=None,
+        )
+        sub_mesh = build_local_mesh(global_mesh, rim_part)
+
+        cell_gather = part.cell_g2l[local_cells]
+        edge_gather = part.edge_g2l[local_edges]
+        if (cell_gather < 0).any() or (edge_gather < 0).any():
+            raise ValueError(
+                f"rim plan device {d}: closure leaves the device-local "
+                f"region ({int((cell_gather < 0).sum())} cells, "
+                f"{int((edge_gather < 0).sum())} edges) — rim_width="
+                f"{rim_width} + stencil_depth={stencil_depth} exceeds "
+                f"the partition halo depth")
+
+        plans.append({
+            "sub_mesh": sub_mesh,
+            "n_rim_cells": int(len(rim_global)),
+            "n_rim_edges": int(len(scatter_e_global)),
+            "cell_gather": cell_gather.astype(np.int64),
+            "edge_gather": edge_gather.astype(np.int64),
+            "cell_scatter": cell_gather[:len(rim_global)].astype(np.int64),
+            "edge_scatter": edge_gather[:len(scatter_e_global)].astype(np.int64),
+        })
+    return plans
+
+
+def _stack_rim_plans(plans):
+    """Stack per-device rim plans into shard_map-able arrays.
+
+    Uses the SAME padding machinery as the device meshes
+    (:func:`_pad_local_mesh_to`): every submesh is padded to the
+    across-device maxima and stacked on a leading device axis;
+    gather/scatter index vectors are padded with a trailing GARBAGE
+    slot index (the padded buffers carry one sacrificial row, mirroring
+    the halo fill's ``max_lc + 1`` convention) so padded lanes read and
+    write only garbage. Returns a dict of stacked arrays plus the
+    per-device true sizes (int32 vectors) the kernel masks with.
+    Setup-time only.
+    """
+    n_dev = len(plans)
+    max_rc = max(p["sub_mesh"].nCells for p in plans)
+    max_re = max(p["sub_mesh"].nEdges for p in plans)
+    max_rv = max(p["sub_mesh"].nVertices for p in plans)
+
+    padded = [_pad_local_mesh_to(p["sub_mesh"], max_rc, max_re, max_rv)
+              for p in plans]
+    stacked_sub = jax.tree.map(
+        lambda *leaves: jnp.stack(leaves, axis=0), *padded)
+
+    def pad_idx(vecs, width, garbage):
+        out = np.full((n_dev, width), garbage, dtype=np.int64)
+        for d, v in enumerate(vecs):
+            out[d, :len(v)] = v
+        return out
+
+    # gather indices point into the device-local (owned+halo+garbage)
+    # buffers; scatter indices point into owned+garbage tendency rows.
+    # The garbage slot index is the buffer's LAST row, appended by the
+    # consumer before the gather/scatter (max_lc / cells_per etc. + 0).
+    cg = pad_idx([p["cell_gather"] for p in plans], max_rc, -1)
+    eg = pad_idx([p["edge_gather"] for p in plans], max_re, -1)
+    max_sc = max(len(p["cell_scatter"]) for p in plans)
+    max_se = max(len(p["edge_scatter"]) for p in plans)
+    cs = pad_idx([p["cell_scatter"] for p in plans], max_sc, -1)
+    es = pad_idx([p["edge_scatter"] for p in plans], max_se, -1)
+
+    return {
+        "sub_mesh": stacked_sub,
+        "cell_gather": cg, "edge_gather": eg,
+        "cell_scatter": cs, "edge_scatter": es,
+        "n_rim_cells": np.array([p["n_rim_cells"] for p in plans],
+                                dtype=np.int32),
+        "n_rim_edges": np.array([p["n_rim_edges"] for p in plans],
+                                dtype=np.int32),
+        "n_sub_cells": np.array([p["sub_mesh"].nCells for p in plans],
+                                dtype=np.int32),
+        "n_sub_edges": np.array([p["sub_mesh"].nEdges for p in plans],
+                                dtype=np.int32),
+    }
+
+
+class InteriorPad(NamedTuple):
+    """Finite fill for the halo rows the interior pass reads before the
+    exchange lands. Any finite value is legal: an interior cell's stencil is
+    all-owned by construction, so its tendency never depends on these rows;
+    they exist only so the operators run without NaN/Inf (a zero surface
+    pressure would divide to Inf and could escape a reduction). Rim cells DO
+    read them and are wrong here, which is exactly why the rim pass recomputes
+    and overwrites them."""
+    u: float = 0.0
+    T: float = 250.0
+    p_s: float = 1.0e5
+    phis: float = 0.0
+
+
+def interior_rim_tendency(
+    tendency_fn, sigma, cfg, dt,
+    u_owned, T_owned, ps_owned, phis_owned,
+    u_full, T_full, ps_full, phis_full,
+    local_mesh, sub_mesh,
+    cell_gather, edge_gather, cell_scatter, edge_scatter,
+    *, pad=InteriorPad(),
+):
+    """Two-pass interior/rim tendency, equal to a single full-mesh pass.
+
+    The INTERIOR pass runs the RHS on a buffer built from the OWNED shard
+    plus a finite pad for the halo rows — it reads nothing the halo exchange
+    produces, so a scheduler can run it while the exchange is in flight. Its
+    result is correct for owned entities whose radius-R stencil is all-owned
+    (rim distance > rim_width) and WRONG for the rim, which read the pad.
+
+    The RIM pass runs the same RHS on the compact ``sub_mesh``, whose fields
+    are gathered from the FILLED buffers (``*_full``, owned+halo after the
+    exchange). Its tendency for submesh rows ``[0:len(*_scatter))`` — the rim
+    entities, in scatter order — is correct, and is scattered back over the
+    interior result's owned rim rows.
+
+    Returns ``(du, dT, dps)`` for OWNED rows only. Equal to a single pass on
+    the fully-filled local mesh up to floating-point re-association ONLY: the
+    rim pass sums each stencil in ``sub_mesh`` order while the full pass sums
+    it in ``local_mesh`` order, so identical inputs reassociate. Dry only
+    (no tracers); the caller asserts tracers are absent.
+
+    All operations are jnp and index with statically-shaped gather/scatter
+    vectors, so the function is jit-able and differentiable. ``*_scatter``
+    indices are unique per device (``_build_rim_plan`` guarantees it), so the
+    reverse-mode transpose of the scatter is a well-defined gather — no row
+    receives two cotangents.
+    """
+    from legoesm.core.state import MPASHydrostaticState
+    n_oe = u_owned.shape[0]
+    n_oc = T_owned.shape[0]
+    max_le = u_full.shape[0]
+    max_lc = T_full.shape[0]
+
+    def _pad(owned, n_full, fill):
+        n_pad = n_full - owned.shape[0]
+        tail_shape = (n_pad,) + owned.shape[1:]
+        return jnp.concatenate(
+            [owned, jnp.full(tail_shape, fill, dtype=owned.dtype)], axis=0)
+
+    # Interior pass: owned rows are real, halo rows are the finite pad, and
+    # NOTHING here reads *_full — so this pass carries no data dependence on
+    # the halo exchange.
+    u_i = _pad(u_owned, max_le, pad.u)
+    T_i = _pad(T_owned, max_lc, pad.T)
+    ps_i = _pad(ps_owned, max_lc, pad.p_s)
+    phis_i = _pad(phis_owned, max_lc, pad.phis)
+    interior_state = MPASHydrostaticState(
+        u=Field(data=u_i, name="u", dims=("nEdges", "nlev"), units="m/s",
+                long_name="normal velocity", staggering="edge"),
+        T=Field(data=T_i, name="T", dims=("nCells", "nlev"), units="K",
+                long_name="temperature", staggering="cell"),
+        p_s=Field(data=ps_i, name="p_s", dims=("nCells",), units="Pa",
+                  long_name="surface pressure", staggering="cell"),
+        phis=Field(data=phis_i, name="phis", dims=("nCells",),
+                   units="m^2/s^2", long_name="surface geopotential",
+                   staggering="cell"),
+        tracers=None,
+    )
+    tend_i = tendency_fn(interior_state, local_mesh, sigma, cfg, dt=dt)
+    du = tend_i.du_dt.data[:n_oe]
+    dT = tend_i.dT_dt.data[:n_oc]
+    dps = tend_i.dp_s_dt.data[:n_oc]
+
+    # Rim pass: gather the compact submesh from the FILLED buffers. Padded
+    # gather/scatter lanes carry -1 (the _stack_rim_plans convention). Append
+    # ONE garbage row to every buffer so a -1 index addresses that garbage row
+    # (jnp: index -1 = last row) instead of aliasing the last REAL row — codex
+    # blocker on the sharded path. For unpadded plans there are no -1 indices,
+    # so the extra row is never touched and this is a no-op.
+    def _pad1_2d(x):
+        return jnp.concatenate([x, jnp.zeros((1,) + x.shape[1:], x.dtype)], 0)
+
+    u_g = _pad1_2d(u_full)
+    T_g = _pad1_2d(T_full)
+    ps_g = _pad1_2d(ps_full)
+    phis_g = _pad1_2d(phis_full)
+    rim_state = MPASHydrostaticState(
+        u=Field(data=u_g[edge_gather], name="u", dims=("nEdges", "nlev"),
+                units="m/s", long_name="normal velocity", staggering="edge"),
+        T=Field(data=T_g[cell_gather], name="T", dims=("nCells", "nlev"),
+                units="K", long_name="temperature", staggering="cell"),
+        p_s=Field(data=ps_g[cell_gather], name="p_s", dims=("nCells",),
+                  units="Pa", long_name="surface pressure", staggering="cell"),
+        phis=Field(data=phis_g[cell_gather], name="phis",
+                   dims=("nCells",), units="m^2/s^2",
+                   long_name="surface geopotential", staggering="cell"),
+        tracers=None,
+    )
+    tend_r = tendency_fn(rim_state, sub_mesh, sigma, cfg, dt=dt)
+    n_re = edge_scatter.shape[0]
+    n_rc = cell_scatter.shape[0]
+    # Scatter into a buffer with ONE appended garbage row so a -1 scatter index
+    # writes garbage, not a real owned row; drop the garbage row afterward.
+    du_p = jnp.concatenate([du, jnp.zeros((1, du.shape[1]), du.dtype)], 0)
+    dT_p = jnp.concatenate([dT, jnp.zeros((1, dT.shape[1]), dT.dtype)], 0)
+    dps_p = jnp.concatenate([dps, jnp.zeros((1,), dps.dtype)], 0)
+    du = du_p.at[edge_scatter].set(tend_r.du_dt.data[:n_re])[:du.shape[0]]
+    dT = dT_p.at[cell_scatter].set(tend_r.dT_dt.data[:n_rc])[:dT.shape[0]]
+    dps = dps_p.at[cell_scatter].set(tend_r.dp_s_dt.data[:n_rc])[:dps.shape[0]]
+    return du, dT, dps
+
+
+def _resolve_halo_overlap(env_value: str) -> bool:
+    """Resolve LEGOESM_MPAS_HALO_OVERLAP: '1' on, '0'/'' off (default).
+
+    On: the ppermute step computes the tendency for owned cells/edges whose
+    stencil is entirely device-owned WHILE the halo exchange is in flight, then
+    recomputes the boundary rim on a compact submesh once the halo lands. Off
+    (default): every existing configuration is byte-identical. Unknown values
+    raise (dispatch-hardening, same contract as LEGOESM_MPAS_WIDE_HALO)."""
+    if env_value in ("0", ""):
+        return False
+    if env_value == "1":
+        return True
+    raise ValueError(
+        f"LEGOESM_MPAS_HALO_OVERLAP={env_value!r}: must be '0' or '1' "
+        f"(empty = off)")
+
+
+def _overlap_rim_n_rounds(cfg) -> int:
+    """Structural-closure hop count for the interior/rim split, sized to the
+    RHS the config selects. 3 covers the bare dry 2-hop stencil; hyperdiffusion
+    (del4 = two composed del2s) or APVM reach ~4 incidence hops, so 5 with a
+    margin. Over-sizing only grows the rim pass; under-sizing is a silent wrong
+    answer, so this rounds UP."""
+    wide = (float(getattr(cfg, "nu_del4", 0.0)) > 0.0
+            or float(getattr(cfg, "nu_del4_ps", 0.0)) > 0.0
+            or float(getattr(cfg, "apvm_scale", 0.0)) > 0.0)
+    return 5 if wide else 3
+
+
 def _resolve_wide_halo(env_value: str) -> bool:
     """Resolve LEGOESM_MPAS_WIDE_HALO: '1' on, '0'/'' off (default).
 
@@ -2648,6 +3326,123 @@ def _resolve_wide_halo(env_value: str) -> bool:
     raise ValueError(
         f"LEGOESM_MPAS_WIDE_HALO={env_value!r}: must be '0' or '1' "
         f"(empty = off)")
+
+
+#: Canonical decimal integer, no sign / whitespace / underscores /
+#: leading zeros — the spellings ``int()`` would silently accept.
+_CANONICAL_INT_RE = re.compile(r"[1-9][0-9]*")
+
+
+def _resolve_wide_halo_stride(env_value: str, evals: int) -> int:
+    """Resolve LEGOESM_MPAS_WIDE_HALO_STRIDE = refresh cadence ``k``.
+
+    ``k`` = number of tendency evaluations between halo refreshes, so
+    the fetched depth is ``k * SPMD_HALO_DEPTH`` and the step does
+    ``ceil(evals / k)`` fills.  ``''``/``'0'`` (default) = ``evals`` =
+    today's full-wide ONE fill per step, byte-identical to the
+    pre-stride code path.  ``k = 1`` is the narrow cadence (one fill
+    per evaluation) run inside ``shard_map``; ``1 < k < evals`` is the
+    intermediate: less redundant compute and payload than full wide,
+    fewer sequential collectives than narrow.
+
+    A SEPARATE env var rather than an integer spelling of
+    LEGOESM_MPAS_WIDE_HALO because ``'1'`` there already means "full
+    wide"; an integer there would have to mean ``k=1`` (narrow) at the
+    same spelling.  Unknown / out-of-range values raise
+    (dispatch-hardening: a typo must not silently pick a cadence), and
+    only CANONICAL decimal spellings are accepted — ``int()`` alone
+    would take ``'0_1'`` (= 1) and ``'+2'``/``' 2 '``/``'02'``, i.e. a
+    typo could silently select a different cadence.
+
+    NOT every ``k`` is sound: see :func:`wide_halo_stride_supported`.
+    """
+    if env_value in ("", "0"):
+        return evals
+    if _CANONICAL_INT_RE.fullmatch(env_value) is None:
+        raise ValueError(
+            f"LEGOESM_MPAS_WIDE_HALO_STRIDE={env_value!r}: must be a "
+            f"canonical decimal integer in 1..{evals} (empty or '0' = "
+            f"full wide = {evals})")
+    k = int(env_value)
+    if not 1 <= k <= evals:
+        raise ValueError(
+            f"LEGOESM_MPAS_WIDE_HALO_STRIDE={k}: out of range for a "
+            f"time_integrator with {evals} tendency evaluations; must "
+            f"be in 1..{evals} (empty or '0' = full wide)")
+    if not wide_halo_stride_supported(evals, k):
+        raise ValueError(
+            f"LEGOESM_MPAS_WIDE_HALO_STRIDE={k} is NOT sound for a "
+            f"time_integrator with {evals} tendency evaluations "
+            f"(refreshes before evaluations "
+            f"{wide_halo_refresh_evals(evals, k)}). The halo refresh "
+            f"is applied to the state the TENDENCY reads; the stage "
+            f"array the integrator then builds still carries the "
+            f"pre-refresh (stale) halo rows, so any evaluation AFTER "
+            f"a mid-step refresh reads stale ghosts through its "
+            f"stencil and corrupts owned rows. Supported: "
+            f"{sorted(k for k in range(1, evals + 1) if wide_halo_stride_supported(evals, k))}"
+            f" (1 = refresh every evaluation, {evals - 1} = one "
+            f"refresh before the LAST evaluation, {evals} = full "
+            f"wide, no refresh).")
+    return k
+
+
+def wide_halo_refresh_evals(evals: int, stride: int) -> list[int]:
+    """1-based evaluation indices at which the wide halo is re-filled."""
+    return [j for j in range(2, evals + 1) if (j - 1) % stride == 0]
+
+
+def wide_halo_stride_supported(evals: int, stride: int) -> bool:
+    """Is refresh-every-``stride`` sound for an ``evals``-stage step?
+
+    The refresh replaces the state the TENDENCY reads, not the stage
+    array the integrator combines (a stage-aware integrator hook would
+    be needed for that, and ``dispatch_integrator`` has none).  So a
+    stage built at or after a mid-step refresh still carries stale halo
+    rows, and any LATER evaluation reads them through its
+    ``SPMD_HALO_DEPTH``-ring stencil — corrupting owned rows.  Sound
+    exactly when:
+
+    * ``stride == evals`` — no refresh at all (full wide), or
+    * ``stride == 1`` — every evaluation is preceded by a refill, so
+      its stencil inputs are fresh (the tendency DOES read halo rows;
+      the bound of 0 only means the kept tendencies are the owned
+      ones), or
+    * the ONLY refresh lands on the LAST evaluation (``stride ==
+      evals - 1``), whose stage output is the step result and is read
+      by nothing.
+
+    ponytail: this rules out e.g. ssp_rk34 k=2 and ssp_rk54 k in
+    {2,3}.  Lifting it needs a post-stage refresh hook in
+    ``dispatch_integrator`` (replace the stage array itself), which is
+    a cross-cutting change to the shared timestepping package — do it
+    only if a receipt shows those cadences are worth it.
+    """
+    if stride == 1:
+        return True
+    refreshes = wide_halo_refresh_evals(evals, stride)
+    return refreshes in ([], [evals])
+
+
+def _wide_mask_ring_bound(eval_index: int, stride: int) -> tuple[int, bool]:
+    """Shrinking-mask ring bound for the ``eval_index``-th (1-based)
+    tendency evaluation at refresh stride ``stride``.
+
+    Returns ``(ring_bound, refresh_first)``: entities with ring
+    ``<= ring_bound`` (plus all owned rows) keep their tendency, and
+    ``refresh_first`` says whether this evaluation opens a new block
+    and must re-fill the halo before reading the state.
+
+    Derivation.  Let ``D = SPMD_HALO_DEPTH`` (one tendency's reach) and
+    ``m = (eval_index - 1) mod stride`` = evaluations since the last
+    refresh.  A refresh restores validity over the full fetched depth
+    ``stride * D``; each evaluation consumes one reach, so the state
+    entering evaluation ``m`` is valid to ``(stride - m) * D`` and its
+    output to ``(stride - m - 1) * D``.  At ``stride = evals`` this is
+    the pre-stride full-wide bound ``(evals - eval_index) * D``.
+    """
+    m = (eval_index - 1) % stride
+    return SPMD_HALO_DEPTH * (stride - 1 - m), (m == 0 and eval_index > 1)
 
 
 def _build_ragged_halo_schedule(partitions, cell_owner, n_dev, cells_per,
@@ -2790,6 +3585,33 @@ def _ragged_halo_fill(cell_pack, u_shard, ragged_sl, max_lc, max_le):
     return cell_local[:max_lc], u_local[:max_le]
 
 
+def _assert_sharded_ps_carry_f64(p_s_dtype):
+    """Loud guard for the deferred sharded p_s carry-seed (decision A).
+
+    In mixed/fp64 the surface pressure ``p_s`` is the intentional always-f64
+    conservation field.  On the SHARDED Voronoi path the per-step mass fixer
+    casts ``p_s`` back to the scan carry dtype to hold the ``lax.scan``
+    carry-dtype contract — so ``p_s`` can only be f64 if the scan's INITIAL
+    carry is already f64, which requires seeding at state construction (IC
+    builder / driver).  That seeding is NOT yet implemented.  Without this
+    guard a mixed+sharded run would silently carry ``p_s`` in float32 for the
+    whole integration.  Fail loudly instead.  Fires only for mixed/fp64
+    (accumulate == float64); an fp32/x64-off sharded run correctly keeps
+    ``p_s`` float32 and is unaffected.
+    """
+    from legoesm.core.precision import resolve_dtype
+    if (resolve_dtype(None, "accumulate") == jnp.float64
+            and jnp.dtype(p_s_dtype) != jnp.float64):
+        raise RuntimeError(
+            f"mixed/fp64 + sharded Voronoi step: p_s carry is "
+            f"{jnp.dtype(p_s_dtype)} but the policy accumulate dtype is "
+            f"float64. p_s must be seeded float64 in the scan INITIAL carry "
+            f"(decision A) — the IC-builder seeding is not implemented, so "
+            f"mixed+sharded MPAS is unsupported until it lands. Use fp32 "
+            f"(x64 off) for sharded runs, or run serial for mixed."
+        )
+
+
 def make_voronoi_sharded_step(
     model,
     dev_config: DeviceConfig,
@@ -2899,8 +3721,16 @@ def make_voronoi_sharded_step(
                 "ModelDriver loop, which threads the carry."
             )
         return model.step
+    if getattr(model.config, "energy_fixer", False):
+        # The global energy fixer (review 2026-10-10 F15) runs in the serial
+        # step and the MPI cell-partition step only; this SPMD step would
+        # drop it silently.
+        raise ValueError(
+            "make_voronoi_sharded_step: config.energy_fixer=True is not wired "
+            "on the multi-device SPMD Voronoi step; use the MPI cell-partition "
+            "step or energy_fixer=False.")
 
-    from legoesm.core.precision import cast_pytree
+    from legoesm.core.precision import cast_pytree, finalize_to_storage
     from legoesm.core.state import MPASHydrostaticState
     from legoesm.parallel.mesh import multiprocess_safe_device_put
     from legoesm.parallel.shard_map_compat import shard_map
@@ -3001,9 +3831,26 @@ def make_voronoi_sharded_step(
                 f"_INTEGRATOR_TENDENCY_EVALS, so the required halo depth "
                 f"is unknown. Add the evals count (and its shrinking-"
                 f"region justification) before enabling wide halo.")
-        _halo_depth_eff = SPMD_HALO_DEPTH * _wide_evals
+        _wide_k = _resolve_wide_halo_stride(
+            _os_wide.environ.get("LEGOESM_MPAS_WIDE_HALO_STRIDE", ""),
+            _wide_evals)
+        _halo_depth_eff = SPMD_HALO_DEPTH * _wide_k
+        _wide_fills = -(-_wide_evals // _wide_k)   # ceil
     else:
+        # The stride is only read inside the wide branch, so a stride
+        # set with wide halo OFF would be silently ignored (codex M1-2):
+        # refuse it instead of running a cadence the user did not get.
+        _stride_env = _os_wide.environ.get("LEGOESM_MPAS_WIDE_HALO_STRIDE",
+                                           "")
+        if _stride_env not in ("", "0"):
+            raise ValueError(
+                f"LEGOESM_MPAS_WIDE_HALO_STRIDE={_stride_env!r} is set "
+                f"but LEGOESM_MPAS_WIDE_HALO is off, so the stride "
+                f"would be ignored. Set LEGOESM_MPAS_WIDE_HALO=1 or "
+                f"unset the stride.")
         _wide_evals = None
+        _wide_k = None
+        _wide_fills = None
         _halo_depth_eff = SPMD_HALO_DEPTH
 
     # ------------------------------------------------------------------
@@ -3013,7 +3860,8 @@ def make_voronoi_sharded_step(
         "Building halo-partitioned infrastructure for %d device(s) "
         "(nCells=%d, nEdges=%d, halo_depth=%d, strategy=%s%s) ...",
         n_dev, nCells, nEdges, _halo_depth_eff, halo_strategy,
-        ", WIDE HALO (1 fill/step)" if use_wide_halo else "",
+        (f", WIDE HALO ({_wide_fills} fill(s)/step, refresh every "
+         f"k={_wide_k} of {_wide_evals} evals)") if use_wide_halo else "",
     )
     t0 = time.time()
     (
@@ -3087,6 +3935,24 @@ def make_voronoi_sharded_step(
     use_ragged = _resolve_ragged_halo(
         _os_ragged.environ.get("LEGOESM_MPAS_RAGGED_HALO", "0"),
         n_dev) and use_ppermute
+
+    # Interior/rim halo-compute overlap (opt-in, default off). Computes the
+    # tendency for owned entities whose stencil is entirely device-owned while
+    # the ppermute fill is in flight, then recomputes the rim on a submesh once
+    # the halo lands. Requires the ppermute strategy; the standalone core is
+    # dry-only, so tracers on this path are refused at the kernel below.
+    import os as _os_overlap
+    use_overlap = _resolve_halo_overlap(
+        _os_overlap.environ.get("LEGOESM_MPAS_HALO_OVERLAP", ""))
+    if use_overlap and not use_ppermute:
+        raise ValueError(
+            "LEGOESM_MPAS_HALO_OVERLAP=1 requires the ppermute halo strategy "
+            "(the overlap hides the ppermute fill); this run selected "
+            f"halo_strategy={halo_strategy!r}")
+    if use_overlap and use_ragged:
+        raise ValueError(
+            "LEGOESM_MPAS_HALO_OVERLAP=1 and LEGOESM_MPAS_RAGGED_HALO=1 are "
+            "mutually exclusive halo strategies")
 
     if use_ragged:
         t1 = time.time()
@@ -3177,10 +4043,52 @@ def make_voronoi_sharded_step(
     mesh_in_specs = jax.tree.map(lambda _: P("device"), stacked_meshes)
     halo_in_specs = jax.tree.map(lambda _: P("device"), halo_args)
 
+    # Interior/rim overlap plan (setup-time, gated). The structural rim is
+    # sized to the RHS the config selects (dry 3 hops, hyperdiffusion 5); the
+    # plan's compact submesh + gather/scatter arrays ride as P("device")
+    # shard_map ARGUMENTS, like the stacked meshes and the halo schedule.
+    rim_arg = ()
+    rim_in_specs = ()
+    if use_overlap:
+        t1 = time.time()
+        _cr, _er = _build_rim_rings_structural(
+            global_mesh, partitions_out, max_lc, max_le,
+            n_rounds=_overlap_rim_n_rounds(cfg))
+        _rim_plans = _build_rim_plan(
+            global_mesh, partitions_out, _cr, _er,
+            rim_width=1, stencil_depth=2)
+        _stacked_rim = _stack_rim_plans(_rim_plans)
+        # Host arrays first (multiprocess_safe_device_put passes a replicated
+        # leaf through unchanged; a host array is always fully addressable, so
+        # the P("device") shard is guaranteed on every controller — same
+        # reasoning as areaCell below).
+        _sub_dev = jax.tree.map(
+            lambda a: multiprocess_safe_device_put(
+                np.asarray(a), dev_sharding),
+            _stacked_rim["sub_mesh"])
+        rim_arg = (
+            _sub_dev,
+            multiprocess_safe_device_put(
+                np.asarray(_stacked_rim["cell_gather"]), dev_sharding),
+            multiprocess_safe_device_put(
+                np.asarray(_stacked_rim["edge_gather"]), dev_sharding),
+            multiprocess_safe_device_put(
+                np.asarray(_stacked_rim["cell_scatter"]), dev_sharding),
+            multiprocess_safe_device_put(
+                np.asarray(_stacked_rim["edge_scatter"]), dev_sharding),
+        )
+        rim_in_specs = jax.tree.map(lambda _: P("device"), rim_arg)
+        logger.info(
+            "  interior/rim overlap plan built in %.3fs (n_rounds=%d, "
+            "submesh gather width cells/edges %d/%d)", time.time() - t1,
+            _overlap_rim_n_rounds(cfg),
+            int(_stacked_rim["cell_gather"].shape[-1]),
+            int(_stacked_rim["edge_gather"].shape[-1]))
+
     def _make_local_tendency(tkeys: tuple):
 
         def _local_tendency(u_shard, T_shard, ps_shard, phis_shard,
-                            q_shard, dt_val, mesh_sl, halo_sl):
+                            q_shard, dt_val, mesh_sl, halo_sl, rim_sl=None):
             """Inside shard_map: full-state halo fill → local tendency.
 
             ``q_shard`` is the tracer block ``(cells_per, nlev * n_q)``
@@ -3221,6 +4129,25 @@ def make_voronoi_sharded_step(
             # device slice of the stacked meshes).
             my_mesh = jax.tree.map(lambda x: x[0], mesh_sl)
 
+            if use_overlap:
+                # Interior pass runs on the OWNED shards (pre-fill, so it is
+                # independent of the collective and the scheduler can run it
+                # while the halo is in flight); the rim pass reads the FILLED
+                # buffers. Dry-only core, so tracers are refused here.
+                if tkeys:
+                    raise ValueError(
+                        "LEGOESM_MPAS_HALO_OVERLAP=1 does not support tracers "
+                        "yet; the interior/rim core is dry-only")
+                _sub_mesh = jax.tree.map(lambda x: x[0], rim_sl[0])
+                du_o, dT_o, dps_o = interior_rim_tendency(
+                    mpas_hydrostatic_tendencies, sigma, cfg, dt_val,
+                    u_shard, T_shard, ps_shard, phis_shard,
+                    u_local, T_local, ps_local, phis_local,
+                    my_mesh, _sub_mesh,
+                    rim_sl[1][0], rim_sl[2][0], rim_sl[3][0], rim_sl[4][0])
+                return (du_o, dT_o, dps_o,
+                        jnp.zeros((cells_per, 0), dtype=T_shard.dtype))
+
             tracers_local = None
             if tkeys:
                 tracers_local = {
@@ -3249,6 +4176,7 @@ def make_voronoi_sharded_step(
             )
             tend = mpas_hydrostatic_tendencies(
                 local_state, my_mesh, sigma, cfg, dt=dt_val,
+                fence_pv_flux=True,
             )
 
             # Owned shards only.  Tracer ADVECTION tendencies ride back
@@ -3277,7 +4205,8 @@ def make_voronoi_sharded_step(
                 mesh=jax_mesh,
                 in_specs=(P("device"), P("device"), P("device"),
                           P("device"), P("device"), P(),
-                          mesh_in_specs, halo_in_specs),
+                          mesh_in_specs, halo_in_specs)
+                         + ((rim_in_specs,) if use_overlap else ()),
                 out_specs=(P("device"), P("device"), P("device"),
                            P("device")),
                 check_vma=False,
@@ -3288,7 +4217,11 @@ def make_voronoi_sharded_step(
     # ------------------------------------------------------------------
     # WIDE-HALO kernel: ONE packed fill at depth evals x SPMD_HALO_DEPTH,
     # then the whole RK body on the local region with no further
-    # exchange.  Validity shrinks by one tendency reach
+    # exchange (stride k = evals, the default).  With k < evals the
+    # fetched depth is k x SPMD_HALO_DEPTH and the halo is re-filled
+    # every k evaluations: ceil(evals/k) fills per step, trading
+    # redundant compute + payload against sequential collectives.
+    # Validity shrinks by one tendency reach
     # (SPMD_HALO_DEPTH rings) per evaluation — the Shu-Osher
     # shrinking-region argument — so after the last of N evaluations the
     # state is valid exactly on the owned cells this kernel returns.
@@ -3308,54 +4241,78 @@ def make_voronoi_sharded_step(
             edge_ring = wide_sl[1][0]     # (max_le,) int32
             _owned_c = jnp.arange(max_lc) < cells_per
             _owned_e = jnp.arange(max_le) < edges_per
-            cell_pack = _pack_cell_state(T_shard, ps_shard, phis_shard,
-                                         q_shard)
-            if use_ragged:
-                cell_local, u_local = _ragged_halo_fill(
-                    cell_pack, u_shard, halo_sl, max_lc, max_le,
-                )
-            elif use_ppermute:
-                cell_local, u_local = _ppermute_halo_fill(
-                    cell_pack, u_shard, halo_sl, ppermute_perms,
-                    max_lc, max_le,
-                )
-            else:
-                cell_full = jax.lax.all_gather(
-                    cell_pack, "device", axis=0, tiled=True)
-                u_full = jax.lax.all_gather(
-                    u_shard, "device", axis=0, tiled=True)
-                gc, ge = halo_sl
-                cell_local = cell_full[gc[0]]
-                u_local = u_full[ge[0]]
-
-            T_local, ps_local, phis_local, q_local = _unpack_cell_state(
-                cell_local, nlev)
             my_mesh = jax.tree.map(lambda x: x[0], mesh_sl)
 
-            tracers_local = None
-            if tkeys:
-                tracers_local = {
-                    k: Field(data=q_local[:, i * nlev:(i + 1) * nlev],
-                             name=k, dims=("nCells", "nlev"),
-                             units="kg/kg", staggering="cell")
-                    for i, k in enumerate(tkeys)
-                }
-            local_state = MPASHydrostaticState(
-                u=Field(data=u_local, name="u",
-                        dims=("nEdges", "nlev"), units="m/s",
-                        long_name="normal velocity", staggering="edge"),
-                T=Field(data=T_local, name="T",
-                        dims=("nCells", "nlev"), units="K",
-                        long_name="temperature", staggering="cell"),
-                p_s=Field(data=ps_local, name="p_s",
-                          dims=("nCells",), units="Pa",
-                          long_name="surface pressure", staggering="cell"),
-                phis=Field(data=phis_local, name="phis",
-                           dims=("nCells",), units="m^2/s^2",
-                           long_name="surface geopotential",
-                           staggering="cell"),
-                tracers=tracers_local,
-            )
+            def _fill_local_state(u_owned, T_owned, ps_owned, phis_owned,
+                                  q_owned):
+                """ONE packed halo fill from OWNED rows -> full local
+                state.  Called at step entry and again at every
+                refresh (stride k < evals); owned rows are correct at
+                every stage, so a refresh restores validity over the
+                whole fetched depth ``k * SPMD_HALO_DEPTH``."""
+                cell_pack = _pack_cell_state(T_owned, ps_owned, phis_owned,
+                                             q_owned)
+                if use_ragged:
+                    cell_local, u_local = _ragged_halo_fill(
+                        cell_pack, u_owned, halo_sl, max_lc, max_le,
+                    )
+                elif use_ppermute:
+                    cell_local, u_local = _ppermute_halo_fill(
+                        cell_pack, u_owned, halo_sl, ppermute_perms,
+                        max_lc, max_le,
+                    )
+                else:
+                    cell_full = jax.lax.all_gather(
+                        cell_pack, "device", axis=0, tiled=True)
+                    u_full = jax.lax.all_gather(
+                        u_owned, "device", axis=0, tiled=True)
+                    gc, ge = halo_sl
+                    cell_local = cell_full[gc[0]]
+                    u_local = u_full[ge[0]]
+
+                T_local, ps_local, phis_local, q_local = _unpack_cell_state(
+                    cell_local, nlev)
+                tracers_local = None
+                if tkeys:
+                    tracers_local = {
+                        k: Field(data=q_local[:, i * nlev:(i + 1) * nlev],
+                                 name=k, dims=("nCells", "nlev"),
+                                 units="kg/kg", staggering="cell")
+                        for i, k in enumerate(tkeys)
+                    }
+                return MPASHydrostaticState(
+                    u=Field(data=u_local, name="u",
+                            dims=("nEdges", "nlev"), units="m/s",
+                            long_name="normal velocity", staggering="edge"),
+                    T=Field(data=T_local, name="T",
+                            dims=("nCells", "nlev"), units="K",
+                            long_name="temperature", staggering="cell"),
+                    p_s=Field(data=ps_local, name="p_s",
+                              dims=("nCells",), units="Pa",
+                              long_name="surface pressure",
+                              staggering="cell"),
+                    phis=Field(data=phis_local, name="phis",
+                               dims=("nCells",), units="m^2/s^2",
+                               long_name="surface geopotential",
+                               staggering="cell"),
+                    tracers=tracers_local,
+                )
+
+            def _refill(s):
+                """Re-fill ``s``'s halo from its own OWNED rows."""
+                if tkeys:
+                    q_owned = jnp.concatenate(
+                        [s.tracers[k].data for k in tkeys],
+                        axis=-1)[:cells_per]
+                else:
+                    q_owned = jnp.zeros((cells_per, 0), dtype=T_shard.dtype)
+                return _fill_local_state(
+                    s.u.data[:edges_per], s.T.data[:cells_per],
+                    s.p_s.data[:cells_per], s.phis.data[:cells_per],
+                    q_owned)._replace(v=s.v)
+
+            local_state = _fill_local_state(u_shard, T_shard, ps_shard,
+                                            phis_shard, q_shard)
 
             # Trace-time evaluation counter: the unrolled integrators
             # call the tendency N times SEQUENTIALLY in Python during
@@ -3370,20 +4327,43 @@ def make_voronoi_sharded_step(
                 rides a zero tendency; tracer ADVECTION under the same
                 keys) — the local-mesh mirror of ``dyn_tendency_fn``,
                 MASKED to the eval's shrinking valid region: entities
-                outside ring ``(evals - k) * SPMD_HALO_DEPTH`` get a
-                ZERO tendency, freezing their stage values at finite
-                fill values.  Their values are never read by a later
-                evaluation whose result reaches an owned cell (the
-                Shu-Osher shrinking-region argument), and the freeze
-                keeps every primal finite — unmasked garbage rings turn
-                zero cotangents into NaN (0 * NaN) which the fill
-                transpose scatter-adds into owned gradients."""
+                outside ring ``(k - 1 - m) * SPMD_HALO_DEPTH`` (``m`` =
+                evaluations since the last halo refresh, ``k`` = the
+                refresh stride) get a ZERO tendency, freezing their
+                stage values at finite fill values.  Their values are
+                never read by a later evaluation whose result reaches
+                an owned cell (the Shu-Osher shrinking-region
+                argument), and the freeze keeps every primal finite —
+                unmasked garbage rings turn zero cotangents into NaN
+                (0 * NaN) which the fill transpose scatter-adds into
+                owned gradients.
+
+                With ``k = evals`` (full wide, the default) ``m = j-1``
+                and the bound collapses to the pre-stride
+                ``(evals - j) * SPMD_HALO_DEPTH``.  With ``k < evals``
+                the halo is re-filled from OWNED rows at the start of
+                every block of ``k`` evaluations, which resets the
+                valid region to the full fetched depth ``k *
+                SPMD_HALO_DEPTH``.
+
+                The refill replaces the state the tendency READS, NOT
+                the stage array the integrator goes on to combine, so
+                that stage keeps its PRE-refresh halo rows — which a
+                later evaluation would read through its stencil.
+                :func:`wide_halo_stride_supported` is the guard: the
+                resolver refuses every ``(evals, k)`` where a refresh
+                is followed by another evaluation that could read a
+                stale stage (e.g. ssp_rk34 k=2)."""
                 _eval_i["k"] += 1
-                thr = SPMD_HALO_DEPTH * (_wide_evals - _eval_i["k"])
+                thr, _do_refresh = _wide_mask_ring_bound(
+                    _eval_i["k"], _wide_k)
+                if _do_refresh:
+                    s = _refill(s)
                 keep_c = (_owned_c | (cell_ring <= thr))[:, None]
                 keep_e = (_owned_e | (edge_ring <= thr))[:, None]
                 tend = mpas_hydrostatic_tendencies(
                     s, my_mesh, sigma, cfg, dt=dt_val,
+                    fence_pv_flux=True,
                 )
                 tr_tend = None
                 if tkeys:
@@ -3453,7 +4433,6 @@ def make_voronoi_sharded_step(
     # ------------------------------------------------------------------
     # Pre-compute mass conservation constants (avoid per-step allreduce)
     # ------------------------------------------------------------------
-    if cfg.fix_mass:
         # areaCell rides as a P("device")-sharded jit ARGUMENT aligned
         # with the p_s cell shards (elementwise product stays local;
         # GSPMD emits one allreduce for the sum) — local-only, and
@@ -3465,15 +4444,15 @@ def make_voronoi_sharded_step(
         # stay replicated under multi-controller.  A host array is
         # always fully addressable, so the P("device") shard is
         # guaranteed on both controllers.  total_area is a host float.
-        _area_for_mass = multiprocess_safe_device_put(
-            np.asarray(global_mesh.areaCell), dev_sharding)
         # fp64 area sum to match the fp64 mass-budget accumulator below
         # (mirrors make_voronoi_mpi_step; identical under x64).
-        _total_area = float(jnp.sum(
-            global_mesh.areaCell.astype(jnp.float64)))
-    else:
-        _area_for_mass = jnp.zeros((0,))  # unused placeholder arg
-        _total_area = 1.0
+    # The global cell areas ride for BOTH the dry-mass fixer and the
+    # positivity stage's area-weighted global residual (area=), so they are built
+    # whether or not the fixer is on.
+    _area_for_mass = multiprocess_safe_device_put(
+        np.asarray(global_mesh.areaCell), dev_sharding)
+    _total_area = (float(jnp.sum(global_mesh.areaCell.astype(jnp.float64)))
+                   if cfg.fix_mass else 1.0)
 
     # ------------------------------------------------------------------
     # JIT-compiled step: dispatch_integrator dynamics (tracer advection
@@ -3497,7 +4476,12 @@ def make_voronoi_sharded_step(
 
         @jax.jit
         def _step(state, dt, forcing, phys_state,
-                  mesh_arg, halo_arg, area_arg, wide_arg):
+                  mesh_arg, halo_arg, area_arg, wide_arg, rim_arg):
+            # Loud guard: the incoming scan-carry p_s must be float64 in
+            # mixed/fp64 (decision A); the sharded carry-seed is deferred, so a
+            # float32 p_s here would be silently carried the whole run.
+            # Trace-time check — the dtype is static.
+            _assert_sharded_ps_carry_f64(state.p_s.data.dtype)
             # Canonical tracer wire order — static at trace time (part
             # of the state's pytree structure).
             tkeys = (tuple(sorted(state.tracers))
@@ -3523,6 +4507,7 @@ def make_voronoi_sharded_step(
                 du, dT, dps, dq = shard_tendency(
                     s.u.data, s.T.data, s.p_s.data, s.phis.data,
                     _pack_tracers(s), dt, mesh_arg, halo_arg,
+                    *((rim_arg,) if use_overlap else ()),
                 )
                 # Static workload-gated fusion barrier (codex rounds
                 # 11-12; see _FUSION_BARRIER_WORKLOADS). Every gate
@@ -3619,27 +4604,28 @@ def make_voronoi_sharded_step(
                     _pt, phys_state_out = _pr[0], _pr[1]
                 else:
                     _pt = _pr
+                _ps_phys = state_new.p_s.data + dt * _pt.dp_s_dt.data
+                _tr_phys = state_new.tracers
+                if (state_new.tracers is not None
+                        and _pt.tracer_tendencies is not None):
+                    # water tendencies carry their mass (mirrors the
+                    # serial _step_jit; shared helper)
+                    from legoesm.core.conservation import (
+                        apply_physics_water_mass,
+                    )
+                    _tr_phys, _ps_phys = apply_physics_water_mass(
+                        state_new.tracers, _pt.tracer_tendencies,
+                        _ps_phys, sigma, dt)
                 state_new = MPASHydrostaticState(
                     u=state_new.u.replace(
                         data=state_new.u.data + dt * _pt.du_dt.data),
                     T=state_new.T.replace(
                         data=state_new.T.data + dt * _pt.dT_dt.data),
-                    p_s=state_new.p_s.replace(
-                        data=state_new.p_s.data + dt * _pt.dp_s_dt.data),
+                    p_s=state_new.p_s.replace(data=_ps_phys),
                     phis=state_new.phis,
                     v=state_new.v,
-                    tracers=state_new.tracers,
+                    tracers=_tr_phys,
                 )
-                if (state_new.tracers is not None
-                        and _pt.tracer_tendencies is not None):
-                    state_new = state_new._replace(tracers={
-                        k: (state_new.tracers[k].replace(
-                                data=state_new.tracers[k].data
-                                + dt * _pt.tracer_tendencies[k].data)
-                            if k in _pt.tracer_tendencies
-                            else state_new.tracers[k])
-                        for k in state_new.tracers
-                    })
 
             # --- 3. Floors (mirrors _step_jit): temperature and tracer
             #        non-negativity (advection is not positive-definite;
@@ -3648,11 +4634,6 @@ def make_voronoi_sharded_step(
                 state_new = state_new._replace(
                     T=state_new.T.replace(
                         data=jnp.maximum(state_new.T.data, cfg.T_min)))
-            if state_new.tracers is not None:
-                state_new = state_new._replace(tracers={
-                    k: f.replace(data=jnp.maximum(f.data, 0.0))
-                    for k, f in state_new.tracers.items()
-                })
 
             # --- 4. Global mass fixer ---
             if cfg.fix_mass:
@@ -3664,9 +4645,12 @@ def make_voronoi_sharded_step(
                 # sequentially-dependent ones.
                 acc = jnp.float64
                 area_acc = area_arg.astype(acc)
+                # DRY mass (p_s - g*column water), the serial fixer's
+                # convention (user decision 2026-09-28)
+                from legoesm.core.conservation import dry_surface_pressure
                 ps_pair = jnp.stack([
-                    state.p_s.data.astype(acc),
-                    state_new.p_s.data.astype(acc),
+                    dry_surface_pressure(state.p_s.data, state.tracers, sigma).astype(acc),
+                    dry_surface_pressure(state_new.p_s.data, state_new.tracers, sigma).astype(acc),
                 ], axis=0) * area_acc[None]
                 masses = jnp.sum(ps_pair, axis=1)  # shape (2,)
                 correction = (masses[0] - masses[1]) / _total_area
@@ -3681,11 +4665,45 @@ def make_voronoi_sharded_step(
                 # the promoted add (iter-11); parity in that corner mode
                 # differs only by the rounding of the correction add.
                 _ps = state_new.p_s.data
+                from legoesm.core.conservation import shift_ps_keep_tracer_mass
+                _ps_new, _tr_new = shift_ps_keep_tracer_mass(
+                    _ps, state_new.tracers, sigma, correction)
                 state_new = state_new._replace(
-                    p_s=state_new.p_s.replace(
-                        data=(_ps + correction).astype(_ps.dtype)))
+                    p_s=state_new.p_s.replace(data=_ps_new.astype(_ps.dtype)),
+                    tracers=_tr_new)
 
-            return cast_pytree(state_new, None, "storage"), phys_state_out
+            # --- 5. Tracer positivity AFTER the mass fixer (#1354/#1515) ---
+            # dp must be the FINAL layer mass, so this runs post-fix (the serial
+            # MPAS lane likewise mass-fixes before its floors).  ONE shared
+            # positivity stage: under GSPMD the borrow's global residual is a
+            # plain jnp.sum over the sharded cells axis — XLA lowers it to a
+            # single allreduce, exactly like the mass fixer above, so
+            # sum_fn=None is decomposition-independent (no halo duplication on
+            # this lane).  Borrow (default) is frozen-MSE-neutral for vapour AND
+            # condensate; the hard-floor fallback carries the per-species
+            # latent-heat T correction incl ice.
+            if state_new.tracers is not None:
+                from legoesm.core.conservation import apply_water_positivity
+                _ph = sigma.pressure_at_half(state_new.p_s.data)
+                _dp = jnp.maximum(_ph[..., 1:] - _ph[..., :-1], 0.0)
+                _tr_out, _T_out = apply_water_positivity(
+                    state_new.tracers, state_new.T.data, _dp,
+                    conservative=getattr(
+                        cfg, "conservative_tracer_clamp", False),
+                    energy_consistent=getattr(
+                        cfg, "energy_consistent_moisture_clip", False),
+                    area=area_arg)
+                state_new = state_new._replace(
+                    tracers=_tr_out, T=state_new.T.replace(data=_T_out))
+
+        # #1675: ``cast_pytree`` skips DOWNCASTS, so in ``mixed`` it never
+        # rounded the mass fixer's float64 back out of the bulk state.
+        # ``finalize_to_storage`` does, and keeps ``p_s`` at the accumulate
+        # dtype (the exact mass correction is load-bearing). No-op wherever
+        # storage == accumulate, i.e. every mode except mixed.
+            return (finalize_to_storage(
+                        cast_pytree(state_new, None, "storage")),
+                    phys_state_out)
 
         return _step
 
@@ -3719,7 +4737,7 @@ def make_voronoi_sharded_step(
             _step_cache[key] = fn
         state_new, phys_state_out = fn(
             state, dt, forcing, phys_state,
-            stacked_meshes, halo_args, _area_for_mass, wide_args,
+            stacked_meshes, halo_args, _area_for_mass, wide_args, rim_arg,
         )
         if return_phys_state:
             return state_new, phys_state_out
@@ -3734,6 +4752,10 @@ def make_voronoi_sharded_step(
         "ppermute_ragged" if use_ragged else halo_strategy)
     _voronoi_step._wide_halo_effective = use_wide_halo
     _voronoi_step._halo_depth_effective = _halo_depth_eff
+    # Refresh cadence actually in force (None when wide halo is off):
+    # k evaluations per halo fill, ceil(evals/k) fills per step.
+    _voronoi_step._wide_halo_stride_effective = _wide_k
+    _voronoi_step._wide_halo_fills_effective = _wide_fills
     return _voronoi_step
 
 
@@ -3831,3 +4853,14 @@ def check_sharding(state, config: DeviceConfig, verbose: bool = False) -> dict:
         )
 
     return result
+
+
+# ---------------------------------------------------------------------------
+# Public names for the Voronoi partition / ppermute machinery shared with the
+# MPAS OCEAN SPMD lane (``legoesm.parallel.voronoi_spmd_ocean``).  Aliases, not
+# copies: the ocean lane must exchange exactly the rows the atmosphere lane
+# does (no private cross-module imports — tests/test_no_private_cross_imports).
+# ---------------------------------------------------------------------------
+build_voronoi_partition_infra = _build_voronoi_partition_infra
+build_ppermute_schedule = _build_ppermute_schedule
+ppermute_halo_fill = _ppermute_halo_fill

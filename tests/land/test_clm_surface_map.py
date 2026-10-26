@@ -302,21 +302,15 @@ def test_clm_loader_no_lai_when_climatology_absent(tmp_path):
 
 
 def test_slab_vs_multilayer_albedo_delta_documented_and_bounded():
-    """#746 item-3 audit: the multilayer land runs ~14 W/m^2 darker than the slab.
+    """Slab-vs-multilayer per-PFT albedo tables stay reconciled (v6 pin).
 
-    Root cause (from the land-albedo audit): the multilayer per-PFT albedo table
-    ``_TUNED_PFT_ALBEDO_MULTILAYER`` is systematically DARKER than the slab table
-    ``_TUNED_PFT_ALBEDO`` — the two were calibrated independently against
-    different ERA5 targets (slab = offline monthly; multilayer = 24-h coupled),
-    so they never had to agree in the mean.  This is a CALIBRATION inconsistency,
-    NOT a code/convention bug: the albedo assembly and the ``(1-alpha)*SW``
-    radiation interface are shared and correct between the two land models.
-
-    This test PINS the finding — direction, magnitude, and a regression BOUND —
-    so the multilayer vegetated albedo cannot silently drift even darker (which
-    would deepen the land cloud-albedo cold trap the issue tracks).  The fix for
-    the -14 W/m^2 is to reconcile the two tables against a common reference; that
-    is a re-tuning (spin-up) task, tracked on #746, not a code change here.
+    History: #746 item-3 found the multilayer table systematically ~0.026 darker
+    (-14 W/m^2 of land SW) because the two tiers were calibrated against
+    DIFFERENT ERA5 targets.  The 2026-08 v6 dual-target re-tune calibrated both
+    tiers against the SAME target — the reconciliation that audit called for —
+    so this test now pins the NEW relationship: per-PFT deltas bounded and the
+    mean modestly slab-brighter (residuals reflect the two models' different
+    bare-soil albedo physics, not a protocol mismatch).
     """
     from legoesm.land.clm_surface_map import (
         _TUNED_PFT_ALBEDO, _TUNED_PFT_ALBEDO_MULTILAYER)
@@ -324,20 +318,21 @@ def test_slab_vs_multilayer_albedo_delta_documented_and_bounded():
     mult = np.asarray(_TUNED_PFT_ALBEDO_MULTILAYER)
     assert slab.shape == mult.shape
     delta = slab - mult                                  # slab brighter -> positive
-    # Multilayer is NOWHERE brighter than the slab (systematically darker/equal) —
-    # the documented direction of the -14 W/m^2 land darkening.
-    assert np.all(delta >= -1e-9), (
-        f"multilayer albedo brighter than slab at PFTs {np.where(delta < -1e-9)[0]}"
-        f" — no longer the systematically-darker calibration (#746)")
-    # Bare soil (PFT 0) carries the largest delta (~0.08 = slab 0.3802 vs ml 0.30).
-    assert delta[0] > 0.05
-    # Mean delta ~0.026 (≈ the -14 W/m^2 at land insolation), and BOUNDED: the
-    # regression guard — the multilayer table must not drift beyond ~0.05 mean
-    # darker than the slab without a deliberate re-tune (#746 item-3).
+    # 2026-08 v6 re-tune: BOTH tables are now calibrated against the SAME ERA5
+    # dual target (the "reconcile against a common reference" fix #746 item-3
+    # called for), so the old "multilayer nowhere brighter" pin is superseded.
+    # The residual per-PFT deltas reflect the two land models' different physics
+    # (multilayer bare soil uses the per-cell CLM soil-colour x scale; the slab
+    # uses one per-PFT value), not a calibration protocol mismatch.  Pin the
+    # NEW relationship: deltas small and bounded, mean modestly slab-brighter.
+    assert np.all(np.abs(delta) < 0.10), (
+        f"slab-vs-multilayer albedo delta exceeds 0.10 at PFTs "
+        f"{np.where(np.abs(delta) >= 0.10)[0]} — re-tune drifted the tables apart")
     mean_delta = float(np.mean(delta))
-    assert 0.015 < mean_delta < 0.05, (
-        f"slab-vs-multilayer mean albedo delta {mean_delta:.4f} outside the "
-        f"documented band — reconcile the two tuned tables (#746 item-3)")
+    assert 0.0 < mean_delta < 0.06, (
+        f"slab-vs-multilayer mean albedo delta {mean_delta:.4f} outside the v6 "
+        f"band [0, 0.06] — reconcile the two tuned tables (see "
+        f"docs/land/land_dual_target_calibration_runbook.md)")
 
 
 def test_nearest_regrid_longitude_wraps_at_seam():
@@ -375,3 +370,37 @@ def test_nearest_regrid_no_op_away_from_seam():
 
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))
+
+
+def test_canopy_cap_survives_calibration_and_bake(tmp_path):
+    """The driver sets the two-leaf solver cap (land_canopy_max_iters), then
+    applies the biophysics calibration and the CLM bake in that order.  Both
+    rebuild config pieces; neither may put the solver's default 60 back (the
+    calibration did, codex 2026-10-04 -- every cap A/B would have run at 60).
+    """
+    from legoesm.land.clm_surface_map import load_clm_surface, clm_multilayer_setup
+    from legoesm.land.config import (
+        MultiLayerLandConfig, apply_biophysics_lmip_two_leaf,
+    )
+    from legoesm.land.soil_grid import SoilGridConfig
+    from legoesm.land.surface_scheme import TwoLeafCanopyConfig
+
+    f = str(tmp_path / "s.nc")
+    _write_synthetic_surfdata(f)
+    lat = np.linspace(70, -70, 4)
+    lon = np.linspace(20, 300, 5)
+    lon2, lat2 = np.meshgrid(lon, lat)
+    m = load_clm_surface(f, lat2.ravel(), lon2.ravel())
+
+    base = MultiLayerLandConfig(
+        soil_grid=SoilGridConfig(n_layers=6, total_depth=2.5),
+        surface_scheme=TwoLeafCanopyConfig(max_iters=10))
+    base = apply_biophysics_lmip_two_leaf(base)
+    _params, cfg = clm_multilayer_setup(m, base_config=base)
+    assert isinstance(cfg.surface_scheme, TwoLeafCanopyConfig)
+    assert cfg.surface_scheme.max_iters == 10
+    # the default path is untouched: no cap given -> the solver's own 60
+    base60 = apply_biophysics_lmip_two_leaf(MultiLayerLandConfig(
+        soil_grid=SoilGridConfig(n_layers=6, total_depth=2.5),
+        surface_scheme=TwoLeafCanopyConfig()))
+    assert clm_multilayer_setup(m, base_config=base60)[1].surface_scheme.max_iters == 60

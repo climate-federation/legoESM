@@ -110,7 +110,15 @@ def _out_like(name: str) -> str:
     """Map a c_sw output name onto the field whose shape it shares."""
     return {"divg_d": "divgd", "uc": "uc", "vc": "vc",
             "delpc": "delp", "ptc": "pt", "ua": "ua", "va": "va",
-            "ut": "ut", "vt": "vt", "wc": "w"}[name]
+            "ut": "ut", "vt": "vt", "wc": "w",
+            # pkc: the C-stage FULL interface pressure (:253), same
+            # (m_a, m_a, km+1) layout field_shape declares for pk/gz.
+            # The shared CSW_OUT_LIKE gained this entry (a111bf998, for
+            # the NH tail's csw_press validation) and the drift gate
+            # test_csw_out_like_matches_the_spec went red because THIS
+            # private twin was not extended with it -- exactly the
+            # divergence that gate exists to catch.
+            "pkc": "pk"}[name]
 
 
 def cgrid_pressure_phase_3d(ctx: dict, csw_outs: list, km: int, *,

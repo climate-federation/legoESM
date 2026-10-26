@@ -1,0 +1,37 @@
+--- zdftke.F90.r46
++++ zdftke.F90
+@@ -45,6 +45,8 @@
+    USE sbc_oce        ! surface boundary condition: ocean
+    USE zdfdrg         ! vertical physics: top/bottom drag coef.
+    USE zdfmxl         ! vertical physics: mixed layer
++   USE l2_r63_krhs, ONLY : r63_tke_begin, r63_tke_before_row, &
++      & r63_tke_after_row, r63_tke_finish
+ #if defined key_si3
+    USE ice, ONLY: hm_i, h_i
+ #endif
+@@ -180,7 +182,9 @@
+       IF( nn_pdl == 1 ) ALLOCATE( z_pdlr(T2D(0),jpk) )        ! avt multiplied by the inverse Prandtl number
+ #endif
+       !
++      CALL r63_tke_begin( kt )
+       CALL tke_tke( Kbb, Kmm, p_sh2, p_avm, p_avt, z_pdlr )   ! now tke (en)
++      CALL r63_tke_finish()
+       !
+       CALL tke_avn( Kbb, Kmm,        p_avm, p_avt, z_pdlr )   ! now avt, avm, dissl
+       !
+@@ -401,6 +405,7 @@
+             END_2D
+          ENDIF
+          !
++         CALL r63_tke_before_row( jj, p_sh2, p_avt, rn2, dissl, en, zfact3 )
+          DO_2Dik( 0, 0, 2, jpkm1, 1 )    !* Matrix and right hand side in en
+             zcof   = zfact1 * tmask(ji,jj,jk)
+             !                                   ! A minimum of 2.e-5 m2/s is imposed on TKE vertical
+@@ -421,6 +426,7 @@
+                &                                   + zfact3 * dissl(ji,jj,jk) * en(ji,jj,jk)  &   ! dissipation
+                &                                  ) * wmask(ji,jj,jk)
+          END_2D
++         CALL r63_tke_after_row( jj, en )
+          !
+          !                     !<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+          !                     !  Surface boundary condition on tke if

@@ -18,11 +18,14 @@ from __future__ import annotations
 import math
 from typing import NamedTuple
 
+from jax import lax
 import jax.numpy as jnp
 import numpy as np
 
 from legoesm.core.precision import get_policy
+from legoesm.core.source_rounding import nemo_source_round
 from legoesm.timestepping.tridiagonal import thomas_solve
+from legoesm.grids.halo_latlon import lat_faces_from_north, lat_north
 
 # Shchepetkin (2015) adaptive-implicit vertical-advection Courant
 # thresholds (NEMO ``ln_zad_Aimp`` PARAMETERs).  Below ``CU_MIN`` the
@@ -36,6 +39,869 @@ _AIMP_CU_MAX = 0.30
 # Layer-thickness floor [m] for advective-tendency / Courant denominators
 # (matches ``flux_form_vertical_momentum_advection``).
 _H_FLOOR = 1.0e-10
+
+
+def nemo_qco_live_t_thickness(
+    eta: jnp.ndarray,
+    H_bathy: jnp.ndarray,
+    z_coord,
+    dtype,
+    *,
+    e3t_0: jnp.ndarray | None = None,
+) -> jnp.ndarray:
+    """NEMO ``e3t(Kmm)`` from the literal QCO T-point statements.
+
+    ``domain.F90:158`` materialises ``r1_ht_0`` as
+    ``ssmask / (ht_0 + 1 - ssmask)``; ``domqco.F90:159-161`` then forms
+    ``r3t = ssh*r1_ht_0``.  Finally ``domzgr_substitute.h90:45-51,126``
+    expands ``e3t`` as ``e3t_0*(1+r3t*tmask)``.  These stored-expression
+    boundaries matter on partial-cell, non-uniform meshes and are shared by
+    every NEMO WS-RK3 card.
+
+    This is deliberately fail-closed: a NEMO-identity caller must supply or
+    carry the oracle's reference ``e3t_0``, and -- on the MOVING-THICKNESS
+    path only -- the active-cell mask.  The linear-free-surface arm returns
+    ``e3t_0`` untouched and reads no mask, so it does not require one
+    (decision 17).  It never reconstructs a midpoint ladder.
+    """
+    if e3t_0 is None:
+        e3t_0 = getattr(z_coord, "nemo_e3t_0", None)
+    active = getattr(z_coord, "is_active", None)
+    if e3t_0 is None:
+        raise ValueError(
+            "literal NEMO QCO e3t requires explicit/reference nemo_e3t_0")
+    sr = nemo_source_round
+    eta = jnp.asarray(eta, dtype=dtype)
+    H = jnp.asarray(H_bathy, dtype=dtype)
+    e3t_0 = jnp.asarray(e3t_0, dtype=dtype)
+    if getattr(z_coord, "linear_free_surface", False):
+        return e3t_0
+    # DECISION 17, asked and answered by the user ("Yes"): the MASK half of
+    # the guard sits BELOW the linear-free-surface early return, because that
+    # path returns e3t_0 untouched and never reads a mask -- refusing a caller
+    # for an operand its own arm never consumes is a defect, not a check.  The
+    # e3t_0 half stays ABOVE, because the early return needs it.  The
+    # moving-thickness path below is unchanged and still refuses a missing
+    # mask, which is the whole point of the guard.
+    if active is None:
+        raise ValueError(
+            "literal NEMO QCO e3t requires is_active on the moving-thickness "
+            "path")
+    tmask = jnp.asarray(active, dtype=dtype)
+    one = jnp.asarray(1.0, dtype=dtype)
+    ssmask = tmask[..., 0]
+    denominator = sr(sr(H + one) - ssmask)
+    r1_ht_0 = sr(ssmask / denominator)
+    r3t = sr(eta * r1_ht_0)
+    factor = sr(one + sr(r3t[..., None] * tmask))
+    return sr(e3t_0 * factor)
+
+
+class NemoAdaptiveImplicitPartition(NamedTuple):
+    """NEMO RK3 ``wAimp`` transport split on T-point interfaces."""
+
+    w_explicit: jnp.ndarray
+    w_implicit: jnp.ndarray
+    fraction: jnp.ndarray
+    courant_horizontal: jnp.ndarray
+    courant_vertical: jnp.ndarray
+
+
+def nemo_wicker_aimp_partition_transport(
+    mass_flux_u: jnp.ndarray,
+    mass_flux_v: jnp.ndarray,
+    w: jnp.ndarray,
+    h_t_kmm: jnp.ndarray,
+    e3w_kmm: jnp.ndarray,
+    area_t: jnp.ndarray,
+    dy_u: jnp.ndarray,
+    dx_v: jnp.ndarray,
+    dt: float,
+) -> NemoAdaptiveImplicitPartition:
+    """Literal NEMO 5.0.2 RK3 transport-form adaptive partition.
+
+    This transcribes ``sshwzv.F90:wAimp_RK3_t``'s live
+    ``np_transport`` arm (lines 773--843).  ``mass_flux_u/v`` are legoESM's
+    thickness transports [m2/s] on redundant west/east and south/north C-grid
+    faces; multiplication by the face width reconstructs NEMO's ``zFu/zFv``
+    volume transports [m3/s].  ``w`` is the T-point vertical velocity [m/s]
+    with surface and bottom interfaces included.
+
+    NEMO stores a bottom-up maximum vertical Courant number for diagnostics,
+    but that value does not enter the split coefficient: every coefficient
+    branch overwrites ``zcff`` from the current interface ``zCu_v``.  This
+    routine therefore has no artificial cross-interface recurrence.
+    """
+    dtype = w.dtype
+    dt_a = jnp.asarray(dt, dtype=dtype)
+    area = jnp.asarray(area_t, dtype=dtype)
+    hu_transport = mass_flux_u * jnp.asarray(dy_u, dtype=dtype)[..., None]
+    hv_transport = mass_flux_v * jnp.asarray(dx_v, dtype=dtype)[..., None]
+    inflow = (
+        jnp.maximum(hu_transport[:, 1:, :], 0.0)
+        - jnp.minimum(hu_transport[:, :-1, :], 0.0)
+        + jnp.maximum(hv_transport[1:, :, :], 0.0)
+        - jnp.minimum(hv_transport[:-1, :, :], 0.0)
+    )
+    cu_h = dt_a * inflow / jnp.maximum(
+        area[..., None] * h_t_kmm, jnp.asarray(_H_FLOOR, dtype=dtype))
+
+    nlev = h_t_kmm.shape[-1]
+    if w.shape[-1] != nlev + 1 or e3w_kmm.shape[-1] != nlev + 1:
+        raise ValueError("w and e3w_kmm must contain nlev+1 interfaces")
+    w_int = w[..., 1:nlev]
+    cu_v_int = dt_a * jnp.abs(w_int) / jnp.maximum(
+        e3w_kmm[..., 1:nlev], jnp.asarray(_H_FLOOR, dtype=dtype))
+    # Positive (upward) w takes the horizontal Courant number from the lower
+    # T cell; non-positive w takes it from the upper cell (sshwzv:816--820).
+    cu_h_int = jnp.where(w_int > 0.0, cu_h[..., 1:], cu_h[..., :-1])
+    one = jnp.asarray(1.0, dtype=dtype)
+    cu_min = jnp.asarray(0.8, dtype=dtype) * (one - cu_h_int / 1.1)
+    cu_max = jnp.asarray(1.1, dtype=dtype) * (one - cu_h_int / 1.1)
+    cu_cut = 2.0 * cu_max - cu_min
+    delta = cu_v_int - cu_min
+    tiny = jnp.asarray(jnp.finfo(dtype).tiny, dtype=dtype)
+    mid = one / (
+        one + 4.0 * cu_max * (cu_max - cu_min)
+        / jnp.maximum(delta * delta, tiny))
+    high = (cu_v_int - cu_max) / jnp.maximum(
+        cu_v_int, tiny)
+    frac_int = jnp.where(
+        cu_v_int <= cu_min,
+        jnp.zeros_like(cu_v_int),
+        jnp.where(cu_v_int < cu_cut, mid, high),
+    )
+    frac_int = jnp.clip(frac_int, 0.0, 1.0)
+    pad = ((0, 0),) * (frac_int.ndim - 1) + ((1, 1),)
+    fraction = jnp.pad(frac_int, pad)
+    cu_v = jnp.pad(cu_v_int, pad)
+    return NemoAdaptiveImplicitPartition(
+        (1.0 - fraction) * w,
+        fraction * w,
+        fraction,
+        cu_h,
+        cu_v,
+    )
+
+
+class NemoQCOLiveFaceGeometry(NamedTuple):
+    """Executed DINO-QCO face thickness and reciprocal operands."""
+
+    e3u: jnp.ndarray
+    e3v: jnp.ndarray
+    r1_hu: jnp.ndarray
+    r1_hv: jnp.ndarray
+    r3u: jnp.ndarray
+    r3v: jnp.ndarray
+
+
+def nemo_qco_live_face_geometry_from_operands(
+    eta,
+    e3u_0,
+    e3v_0,
+    umask3,
+    vmask3,
+    hu_0,
+    hv_0,
+    area_t,
+    area_u,
+    area_v, r3_native=None,  # (r3u, r3v) handed in place of the sea-level ratios (stprk3_stg.f90:172-173, :216-217)
+):
+    """Build live native-face QCO geometry in NEMO source association.
+
+    All horizontal inputs use NEMO's native A2D layout: U/V store the east/
+    north face of each T cell.  The returned thicknesses and reciprocals are
+    the coupled operands materialized by ``dom_qco_r3c.F90:160-181`` and the
+    ``key_qco`` substitutions.  Keeping the reciprocal separate is necessary
+    even though its free-surface factor cancels algebraically against the
+    thickness: round 49 measured that executing both sides changes the final
+    few ULPs in ``mlf_baro_corr``.
+    """
+    dtype = jnp.asarray(e3u_0).dtype
+    # Source statements, not a scheduling hint: XLA strips
+    # ``optimization_barrier`` before optimized HLO.  The IEEE identity in
+    # ``nemo_source_round`` preserves the written domqco association used by
+    # both the live thickness and its coupled reciprocal.
+    b = nemo_source_round
+    one = jnp.asarray(1.0, dtype=dtype)
+    half = jnp.asarray(0.5, dtype=dtype)
+    eta = jnp.asarray(eta, dtype=dtype)
+    e3u_0 = jnp.asarray(e3u_0, dtype=dtype)
+    e3v_0 = jnp.asarray(e3v_0, dtype=dtype)
+    umask3 = jnp.asarray(umask3, dtype=dtype)
+    vmask3 = jnp.asarray(vmask3, dtype=dtype)
+    hu_0 = jnp.asarray(hu_0, dtype=dtype)
+    hv_0 = jnp.asarray(hv_0, dtype=dtype)
+    area_t = jnp.asarray(area_t, dtype=dtype)
+    area_u = jnp.asarray(area_u, dtype=dtype)
+    area_v = jnp.asarray(area_v, dtype=dtype)
+
+    weighted_eta = b(area_t * eta)
+    num_u = b(half * b(weighted_eta + jnp.roll(weighted_eta, -1, axis=1)))
+    num_v = b(half * b(weighted_eta + jnp.roll(weighted_eta, -1, axis=0)))
+    wet_u = (hu_0 > 0.0).astype(dtype)
+    wet_v = (hv_0 > 0.0).astype(dtype)
+    r1_hu0 = b(wet_u / (hu_0 + one - wet_u))
+    r1_hv0 = b(wet_v / (hv_0 + one - wet_v))
+    r1_area_u = b(one / area_u)
+    r1_area_v = b(one / area_v)
+    r3u = b(b(num_u * r1_hu0) * r1_area_u) if r3_native is None else r3_native[0]
+    r3v = b(b(num_v * r1_hv0) * r1_area_v) if r3_native is None else r3_native[1]
+    one_plus_r3u = b(one + r3u)
+    one_plus_r3v = b(one + r3v)
+    e3u = b(e3u_0 * b(one + r3u[..., None] * umask3))
+    e3v = b(e3v_0 * b(one + r3v[..., None] * vmask3))
+    r1_hu = b(r1_hu0 / one_plus_r3u)
+    r1_hv = b(r1_hv0 / one_plus_r3v)
+    return NemoQCOLiveFaceGeometry(e3u, e3v, r1_hu, r1_hv, r3u, r3v)
+
+
+def nemo_t_fold_f_owned(field, grid):
+    """Apply NEMO's owned-row T-pivot/F-point north-fold overwrite."""
+    fold = getattr(grid, "fold", None)
+    if fold is None or not bool(getattr(fold, "is_active", False)):
+        return field
+    from legoesm.grids.operators_latlon_cgrid import (
+        fold_is_local, north_fold_mask,
+    )
+    # lbc_nfd_generic.h90, c_NFtype='T', cd_nat='F': the final owned
+    # row takes the preceding row with ii2=Ni0glo-ji+1, i.e. (-1-i) mod N
+    # after stripping the two NEMO halos.  This is an F-origin permutation;
+    # it is intentionally independent of the T-origin convention detected
+    # for generic scalar halo exchange.
+    perm_f = jnp.arange(field.shape[1] - 1, -1, -1, dtype=jnp.int32)
+    folded = field[-2, perm_f]
+    if fold_is_local(grid):
+        return field.at[-1].set(folded)
+    nmask = north_fold_mask(grid)
+    if nmask is not None:
+        return field.at[-1].set(jnp.where(nmask, folded, field[-1]))
+    return field
+
+
+def nemo_fe3mask_from_tmask(tmask, *, grid=None):
+    """Return NEMO's frozen QCO thickness mask at native F points.
+
+    ``dommsk.F90:146-198`` forms the product of the four surrounding T masks,
+    applies the F-point lateral boundary condition, and copies that result to
+    ``fe3mask``.  Later slip and strait edits change ``fmask`` only.
+    """
+    active = jnp.asarray(tmask)
+    east = jnp.roll(active, -1, axis=1)
+    north = lat_north(active)
+    northeast = jnp.roll(north, -1, axis=1)
+    fe3mask = active * east * north * northeast
+    return nemo_t_fold_f_owned(fe3mask, grid)
+
+
+def nemo_dynvor_e3f_0vor(e3t_0, tmask, *, grid, dtype, nn_e3f_typ=0,
+                         substitute_e3f=None, return_stages=False):
+    """``dyn_vor_init``'s frozen vertex thickness ``e3f_0vor``.
+
+    Three compiled statements, in NEMO's order
+    (``dynvor.f90:914-919``, ``:935``, ``:937``):
+
+    1. the masked four-cell reference average, ``nn_e3f_typ=0`` dividing by a
+       literal four (``:918``) and ``=1`` by the wet-mask sum (``:929``);
+    2. ``CALL lbc_lnk( 'dynvor', e3f_0vor, 'F', 1._wp )`` (``:935``) --
+       the F-point north-fold exchange, a no-op off a folded grid;
+    3. ``WHERE( e3f_0vor == 0 ) e3f_0vor = e3f_3d`` (``:937``), the zero
+       substitution, which takes the MESH reference F thickness.
+
+    ``substitute_e3f`` supplies statement 3's operand.  ``None`` keeps the
+    historical unmasked four-cell ``e3t_0`` average, which is what every
+    certified card was built and measured on; it is NOT ``e3f_3d`` and the
+    difference is reported in round 31's receipt.
+
+    ``return_stages`` additionally returns the array after statement 1 and
+    after statement 2, so a gate can score the three compiled statements
+    separately instead of re-deriving them.
+    """
+    b = lax.optimization_barrier
+    one = jnp.asarray(1.0, dtype=dtype)
+    quarter = jnp.asarray(0.25, dtype=dtype)
+    e3t0 = jnp.asarray(e3t_0, dtype=dtype)
+    tmask = jnp.asarray(tmask, dtype=dtype)
+
+    def east(value):
+        return jnp.roll(value, -1, axis=1)
+
+    def north(value):
+        return lat_north(value)
+
+    masked = b(e3t0 * tmask)
+    masked_n = north(masked)
+    ref_sum = b(b(masked + east(masked)) + b(masked_n + east(masked_n)))
+    tmask_n = north(tmask)
+    wet_sum = b(b(tmask + east(tmask)) + b(tmask_n + east(tmask_n)))
+    divisor = (jnp.asarray(4.0, dtype=dtype) if nn_e3f_typ == 0
+               else jnp.maximum(wet_sum, one))
+    e3f0vor = b(ref_sum / divisor)
+    after_average = e3f0vor
+    if substitute_e3f is None:
+        ref_n = north(e3t0)
+        fill = b(quarter * b(b(e3t0 + east(e3t0))
+                             + b(ref_n + east(ref_n))))
+        e3f0vor = jnp.where(e3f0vor == 0.0, fill, e3f0vor)
+        # ORCA T-pivot north fold, F-point field.  Regular/closed grids
+        # retain the historical path byte-for-byte.  NOTE the order: this
+        # substitutes BEFORE the exchange, where NEMO exchanges first.
+        after_fold = nemo_t_fold_f_owned(e3f0vor, grid)
+        result = after_fold
+    else:
+        after_fold = nemo_t_fold_f_owned(e3f0vor, grid)
+        fill = jnp.asarray(substitute_e3f, dtype=dtype)
+        result = jnp.where(after_fold == 0.0, fill, after_fold)
+    if return_stages:
+        return result, after_average, after_fold
+    return result
+
+
+def nemo_ldf_reference_e3f(z_coord):
+    """dyn_ldf's OWN frozen F thickness operand, ``e3f_3d``.
+
+    ``dynldf_lev.f90:123`` stretches the MESH reference F thickness, not
+    ``dyn_vor_init``'s masked four-cell ``e3f_0vor``; ``e3f_3d`` is ``e3f_0``
+    by ``domzgr_substitute.h90:100`` and is read from the domain file at
+    ``domzgr.F90:173``.  Fail closed rather than fall back to the vorticity
+    array: silently reusing it is exactly the defect this separates.
+    """
+    raw = getattr(z_coord, "nemo_een_barotropic", None)
+    reference = None if raw is None else getattr(raw, "e3f_0", None)
+    if reference is None:
+        raise ValueError(
+            "NEMO's e3-weighted lateral diffusion reads the mesh reference F "
+            "thickness e3f_3d (dynldf_lev.f90:123); the card must carry it "
+            "as z_coord.nemo_een_barotropic.e3f_0")
+    return reference
+
+
+def _nemo_qco_r1_area_f(raw, geom_grid, dtype):
+    b, one = lax.optimization_barrier, jnp.asarray(1.0, dtype=dtype)
+    e1f = None if raw is None else getattr(raw, "e1f", None)
+    e2f = None if raw is None else getattr(raw, "e2f", None)
+    if e1f is None or e2f is None:
+        area_f = b(jnp.asarray(geom_grid.area_q[1:, 1:], dtype=dtype))
+    else:
+        area_f = b(b(jnp.asarray(e1f, dtype=dtype))
+                   * b(jnp.asarray(e2f, dtype=dtype)))
+    return b(one / area_f)
+
+
+def nemo_e3f_0vor_from_tmask(e3t_0, tmask, dry_vertex_fill, *,
+                             nn_e3f_typ=0, grid=None):
+    """Return NEMO's frozen vorticity thickness ``e3f_0vor`` at native F points.
+
+    ``dyn_vor_init`` allocates and freezes this array for EVERY curl-point
+    vorticity scheme -- ENS, ENE, EEN and MIX share one ``SELECT CASE`` arm
+    (``dynvor.f90:890``) -- and ``dyn_cor_2D_init`` divides ``ff_f`` by
+    it in every one of its branches: EEN at ``dynspg_ts.f90:960``, ENE/MIX
+    at ``dynspg_ts.f90:1016``, ENS at ``dynspg_ts.f90:1046``.  It is NOT the
+    F-point reference thickness ``e3f_0``.
+
+    At ``nn_e3f_typ = 0`` (the shipped ``namelist_ref`` value for every card
+    on this lane) it is the four surrounding T cells' MASKED reference
+    thickness divided by FOUR -- by four, not by the number of wet cells,
+    which is the ``nn_e3f_typ = 1`` branch (``dynvor.f90:897`` against
+    ``dynvor.f90:905``).  NEMO's own ``((N + NE) + (C + E))`` association is
+    kept: the compiled source brackets the north pair first "for
+    reproducibility around NP".  The lateral boundary condition runs before
+    the "insure e3f_0vor /= 0" sweep, which restores ``dry_vertex_fill`` at a
+    fully dry vertex.  The unpreprocessed ``dynvor.F90:945-951`` restores
+    ``e3f_0`` in BOTH ``nn_e3f_typ`` arms; ``domzgr_substitute.h90`` then
+    expands that name to ``e3t_1d(jk)`` under key_vco_1d (the VORTEX build's
+    ``dynvor.f90:920``) and to ``e3f_3d`` under key_vco_3d (GYRE's
+    ``dynvor.f90:936``), so the caller passes its own card's array.
+
+    Sibling implementations of the same NEMO statement, both in a DIFFERENT
+    layout and neither interchangeable with this one: the live baroclinic
+    ``nemo_qco_live_vorticity_e3f_cgrid`` below (padded F storage, and it
+    brackets ``((C + E) + (N + NE))`` -- the opposite association, an
+    unmeasured finding), and ``een_e3f_h_vtx``'s ``nemo_avg4`` arm (halo-
+    padded live thicknesses).  This one is the native-A2D frozen operand the
+    split-explicit coefficient builder needs.
+    """
+    if nn_e3f_typ not in (0, 1):
+        raise ValueError("nn_e3f_typ must be 0 or 1")
+    e3t0 = jnp.asarray(e3t_0)
+    dtype = e3t0.dtype
+    active = jnp.asarray(tmask, dtype=dtype)
+    # A bare optimization_barrier is stripped from optimized HLO, so the
+    # bracketing above would not survive JIT on a card whose e3t_0 varies
+    # horizontally.  Hold every written binary64 result the way the literal
+    # coefficient builder does.
+    b = nemo_source_round
+
+    def east(value):
+        return jnp.roll(value, -1, axis=1)
+
+    def north(value):
+        # Closed north wall; an ORCA T fold is applied below instead.
+        return lat_north(value)
+
+    masked = b(e3t0 * active)
+    masked_n = north(masked)
+    ref_sum = b(b(masked_n + east(masked_n)) + b(masked + east(masked)))
+    if nn_e3f_typ == 0:
+        e3f0vor = b(ref_sum * jnp.asarray(0.25, dtype=dtype))
+    else:
+        active_n = north(active)
+        wet = b(b(active_n + east(active_n)) + b(active + east(active)))
+        e3f0vor = jnp.where(
+            wet != 0.0, b(ref_sum / jnp.where(wet == 0.0, 1.0, wet)), 0.0)
+    e3f0vor = nemo_t_fold_f_owned(e3f0vor, grid)
+    fill = jnp.asarray(dry_vertex_fill, dtype=dtype)
+    return jnp.where(e3f0vor == 0.0, fill, e3f0vor)
+
+
+def nemo_qco_live_vorticity_e3f_cgrid(
+    eta, z_coord, dtype, nn_e3f_typ=0, *, grid=None, e3t_0=None, tmask=None, reference_e3f=None,
+    r3f_override=None, return_ratio=False, apply_fe3mask=True, source_associated=False,
+):
+    """Build literal NEMO ``e3f_vor(Kmm)`` from the card's own mesh.
+
+    ``dyn_vor_init`` freezes ``e3f_0vor`` from masked reference T-cell
+    thicknesses (``dynvor.F90:918-950``); ``dom_qco_r3c_RK3`` builds live
+    ``r3f`` (``domqco.F90:233-246``); and
+    ``domzgr_substitute.h90:130`` applies it through ``fe3mask``.
+
+    ``reference_e3f`` selects WHICH frozen F thickness the live ``r3f``
+    stretch multiplies, because NEMO's two consumers do not share one.  The
+    vorticity operator takes ``dyn_vor_init``'s own masked four-cell array
+    ``e3f_0vor`` (``dynvor.f90:734-738`` over ``:914-937``) and is the
+    default here.  The lateral-diffusion operator instead takes the MESH
+    reference thickness ``e3f_3d`` -- ``e3f_0`` by the compiled macro in
+    ``domzgr_substitute.h90:100``, read from the domain file at
+    ``domzgr.F90:173`` -- at ``dynldf_lev.f90:123``::
+
+        zwf = ahmf * (e3f_3d * (1 + r3f * fe3mask)) * r1_e1e2f
+    """
+    if nn_e3f_typ not in (0, 1):
+        raise ValueError("nn_e3f_typ must be 0 or 1")
+    if e3t_0 is None:
+        e3t_0 = getattr(z_coord, "nemo_e3t_0", None)
+    if tmask is None:
+        tmask = getattr(z_coord, "is_active", None)
+    if e3t_0 is None or tmask is None or grid is None:
+        raise ValueError(
+            "literal NEMO e3f_vor requires e3t_0, tmask, and grid operands")
+    from legoesm.grids.latlon import ensure_geometry
+    geom_grid = ensure_geometry(grid)
+    b = lax.optimization_barrier
+    one = jnp.asarray(1.0, dtype=dtype)
+    quarter = jnp.asarray(0.25, dtype=dtype)
+    eta = jnp.asarray(eta, dtype=dtype)
+    e3t0 = jnp.asarray(e3t_0, dtype=dtype)
+    tmask = jnp.asarray(tmask, dtype=dtype)
+
+    def east(value):
+        return jnp.roll(value, -1, axis=1)
+
+    def north(value):
+        # The certified GYRE use is a closed beta-plane box.
+        return lat_north(value)
+
+    raw = getattr(z_coord, "nemo_een_barotropic", None)
+    mesh_e3f = None if raw is None else getattr(raw, "e3f_0", None)
+    e3f0vor = nemo_dynvor_e3f_0vor(
+        e3t0, tmask, grid=grid, dtype=dtype, nn_e3f_typ=nn_e3f_typ,
+        substitute_e3f=mesh_e3f)
+
+    b = nemo_source_round if source_associated else b
+    area_eta = b(jnp.asarray(geom_grid.area_T, dtype=dtype) * eta)
+    area_eta_n = north(area_eta)
+    quad = b(b(area_eta + east(area_eta))
+             + b(area_eta_n + east(area_eta_n)))
+    fe3mask = nemo_fe3mask_from_tmask(tmask, grid=grid)
+    hf0 = _nemo_qco_hf0(raw, e3f0vor, fe3mask, dtype)
+    wet_f = (hf0 > 0.0).astype(dtype)
+    r1_hf0 = b(wet_f / b(hf0 + one - wet_f))
+    # Preserve NEMO's native F-layout operand and stored-reciprocal boundary
+    # on cards that carry its raw mesh.
+    r1_area_f = _nemo_qco_r1_area_f(raw, geom_grid, dtype)
+    r3f = b(b(b(quarter * quad) * r1_hf0) * r1_area_f)
+    if r3f_override is not None:
+        supplied = jnp.asarray(r3f_override, dtype=dtype)
+        if supplied.shape != r3f.shape:
+            raise ValueError(
+                "r3f_override must use NEMO's native A2D F layout with "
+                f"shape {r3f.shape}; got {supplied.shape}")
+        r3f = supplied
+    # dom_qco_zgr applies the F-point lateral boundary condition to r3f
+    # (domqco.F90:124-135) before domzgr_substitute.h90:130 consumes it.
+    # On ORCA's T fold this is the same F-origin permutation as e3f_0vor.
+    r3f = nemo_t_fold_f_owned(r3f, grid) if r3f_override is None else r3f  # handed-in: as given
+    # dommsk.F90:146-198 freezes fe3mask from the four-T-cell free-slip
+    # mask.  The later lateral-slip/strait changes at :207-243 affect fmask
+    # only.  domzgr_substitute.h90:48,130 therefore consumes fe3mask here;
+    # using the vorticity fmask silently stretches partial-cell bottom faces.
+    # dynldf_lev.f90:123 stretches e3f_3d, dynvor.f90:734-738 stretches
+    # e3f_0vor.  Only the reference differs; r3f and fe3mask above are the
+    # single shared pair NEMO builds once.
+    reference = (e3f0vor if reference_e3f is None
+                 else jnp.asarray(reference_e3f, dtype=dtype))
+    if reference.shape != e3f0vor.shape:
+        raise ValueError(
+            "reference_e3f must be the native A2D F-point thickness with "
+            f"shape {e3f0vor.shape}; got {reference.shape}")
+    e3f_native = b(reference * b(one + r3f[..., None] * (fe3mask if apply_fe3mask else jnp.ones_like(fe3mask))))
+
+    # NEMO native F(i,j) maps to legoESM vertex [j+1,i+1].  The added
+    # south/west rows are inert walls for this closed-box identity.
+    with_south = lat_faces_from_north(e3f_native, south=e3f_native[:1])
+    e3f_cgrid = jnp.concatenate([with_south[:, -1:], with_south], axis=1)
+    if return_ratio:
+        return e3f_cgrid, r3f
+    return e3f_cgrid
+
+
+def _nemo_qco_hf0(raw, e3f0vor, fe3mask, dtype):
+    """Select NEMO's carried mesh F column, retaining the generic fallback."""
+    # domain.f90:203-215 builds hf_0 from mesh e3f_3d and two V masks, not
+    # from dyn_vor_init's distinct e3f_0vor reference thickness.
+    carried = None if raw is None else getattr(raw, "hf_0", None)
+    if carried is None:
+        return jnp.sum(e3f0vor * fe3mask, axis=-1)
+    return jnp.asarray(carried, dtype=dtype)
+
+
+def nemo_qco_vorticity_f_cgrid(z_coord, dtype):
+    """Map bridge-carried NEMO ``ff_f(i,j)`` to lego's vertex storage."""
+    raw = getattr(z_coord, "nemo_een_barotropic", None)
+    if raw is None:
+        raise ValueError("literal NEMO F-point Coriolis requires raw ff_f")
+    from legoesm.grids.latlon import nemo_ff_f_to_vertex
+    return nemo_ff_f_to_vertex(jnp.asarray(raw.ff_f, dtype=dtype))
+
+
+def nemo_qco_mesh_operands(z_coord, dtype):
+    """The raw NEMO ``hu_0/hv_0`` and ``e1e2t/e1e2u/e1e2v`` QCO operands.
+
+    ``dom_qco_r3c`` needs exactly these five fields; the cards that carry
+    NEMO's own ``mesh_mask`` expose them on the z-coordinate.  Extracted so
+    the lookup (and its fail-closed error) is written once.
+    """
+    refs = tuple(getattr(z_coord, name, None) for name in (
+        "nemo_hu_0", "nemo_hv_0", "nemo_e1e2t", "nemo_e1e2u",
+        "nemo_e1e2v",
+    ))
+    if any(value is None for value in refs):
+        missing = [name for name, value in zip((
+            "nemo_hu_0", "nemo_hv_0", "nemo_e1e2t", "nemo_e1e2u",
+            "nemo_e1e2v"), refs, strict=True) if value is None]
+        raise ValueError(
+            "NEMO qco face thicknesses need the raw NEMO mesh operands on "
+            f"the z-coordinate; missing: {', '.join(missing)}")
+    return tuple(jnp.asarray(value, dtype=dtype) for value in refs)
+
+
+class NemoQCOMeshOperands(NamedTuple):
+    """The qco mesh operands ``dom_qco_r3c``/``div_hor``/``wzv`` consume.
+
+    Native NEMO A2D horizontal extent throughout (U/V carry the EAST/NORTH
+    face of each T cell).
+    """
+
+    e3t_0: jnp.ndarray
+    e3u_0: jnp.ndarray
+    e3v_0: jnp.ndarray
+    umask3: jnp.ndarray
+    vmask3: jnp.ndarray
+    hu_0: jnp.ndarray
+    hv_0: jnp.ndarray
+    area_t: jnp.ndarray
+    area_u: jnp.ndarray
+    area_v: jnp.ndarray
+    e2u: jnp.ndarray
+    e1v: jnp.ndarray
+
+
+def nemo_qco_card_mesh_operands(h_ref, u_mask_3d, v_mask_3d, grid, dtype):
+    """The same qco operands, built from the card's OWN grid + ladder.
+
+    NEMO computes these in ``domain.F90``/``domzgr.F90`` from the mesh it
+    just built; the cards that read NEMO's own ``mesh_mask.nc`` carry them on
+    ``z_coord.nemo_*`` (see :func:`nemo_qco_mesh_operands`), and every other
+    card -- LOCK_EXCHANGE, OVERFLOW, ORCA1 -- reconstructs the identical
+    quantities here rather than being locked out of the NEMO arm:
+
+    * ``e3u_0``/``e3v_0`` are the shallower neighbour's REFERENCE thickness
+      (``tests/OVERFLOW/MY_SRC/usrdef_zgr.F90:179-186``; on the certified
+      OVERFLOW-zps ``mesh_mask.nc`` this holds exactly on all 16900 wet U
+      faces, and on a full-step ``ln_zco`` mesh it is trivially ``e3t_0``);
+    * ``hu_0 = SUM(e3u_0*umask)`` (``domain.F90:145``), so a closed face adds
+      zero;
+    * ``e1e2t``/``e1e2u``/``e1e2v`` and ``e2u``/``e1v`` are the C-grid
+      horizontal metrics, which on a lat-lon mesh are exactly the grid's own
+      cell/face lengths (``domhgr.F90`` builds them the same way).
+
+    Inputs use legoESM's redundant west/south face layout; the returned
+    operands use NEMO's native east/north extent, matching
+    :func:`nemo_qco_mesh_operands`.
+    """
+    from legoesm.grids.latlon import ensure_geometry
+    from legoesm.ocean.dynamics.latlon_cgrid_operators import (
+        min_cell_to_uface,
+        min_cell_to_vface,
+    )
+
+    geom_grid = ensure_geometry(grid)
+    e3t_0 = jnp.asarray(h_ref, dtype=dtype)
+    e3u_0 = min_cell_to_uface(e3t_0)[:, 1:, :]
+    e3v_0 = min_cell_to_vface(e3t_0, grid)[1:, :, :]
+    umask3 = jnp.asarray(u_mask_3d, dtype=dtype)[:, 1:, :]
+    vmask3 = jnp.asarray(v_mask_3d, dtype=dtype)[1:, :, :]
+    hu_0 = jnp.sum(e3u_0 * umask3, axis=-1)
+    hv_0 = jnp.sum(e3v_0 * vmask3, axis=-1)
+    area_u = jnp.asarray(geom_grid.dx_u * geom_grid.dy_u, dtype=dtype)[:, 1:]
+    area_v = jnp.asarray(geom_grid.dx_v * geom_grid.dy_v, dtype=dtype)[1:, :]
+    return NemoQCOMeshOperands(
+        e3t_0=e3t_0,
+        e3u_0=e3u_0,
+        e3v_0=e3v_0,
+        umask3=umask3,
+        vmask3=vmask3,
+        hu_0=hu_0,
+        hv_0=hv_0,
+        area_t=jnp.asarray(geom_grid.area_T, dtype=dtype),
+        area_u=jnp.where(hu_0 > 0.0, area_u, 1.0),
+        area_v=jnp.where(hv_0 > 0.0, area_v, 1.0),
+        e2u=jnp.asarray(geom_grid.dy_u, dtype=dtype)[:, 1:],
+        e1v=jnp.asarray(geom_grid.dx_v, dtype=dtype)[1:, :],
+    )
+
+
+def nemo_qco_resolved_mesh_operands(
+    z_coord, grid, u_mask_3d, v_mask_3d, dtype, nlev,
+):
+    """One qco operand set, from NEMO's own mesh when the card carries it.
+
+    The NEMO arm of ``wzv``/``div_hor`` needs exactly these fields.  Cards
+    built from NEMO's ``mesh_mask.nc`` (DINO, GYRE, ORCA2, VORTEX) hand over
+    the raw arrays unchanged -- including the reference FACE thicknesses
+    ``e3u_0``/``e3v_0``, which NEMO carries separately from ``e3t_0`` and
+    which this routine must not invent; cards that are not
+    (LOCK_EXCHANGE, OVERFLOW, ORCA1) get the identical quantities rebuilt
+    from their own grid and reference ladder by
+    :func:`nemo_qco_card_mesh_operands`.  This is what makes the NEMO arm a
+    CONFIG choice on every card instead of a mesh-file privilege.
+    """
+    raw_names = (
+        "nemo_e3t_0", "nemo_hu_0", "nemo_hv_0", "nemo_e1e2t", "nemo_e1e2u",
+        "nemo_e1e2v", "nemo_e2u", "nemo_e1v",
+    )
+    raw = tuple(getattr(z_coord, name, None) for name in raw_names)
+    umask3 = jnp.asarray(u_mask_3d, dtype=dtype)[:, 1:, :]
+    vmask3 = jnp.asarray(v_mask_3d, dtype=dtype)[1:, :, :]
+    if all(value is not None for value in raw):
+        e3t0, hu0, hv0, area_t, area_u, area_v, e2u, e1v = (
+            jnp.asarray(value, dtype=dtype) for value in raw)
+        e3t0 = e3t0[..., :nlev]
+        # THE REFERENCE FACE THICKNESS IS THE SHALLOWER NEIGHBOUR'S, NOT THE
+        # T THICKNESS.  NEMO builds it once, in the domain builder, as
+        #     pe3u(ji,jj,jk) = MIN( pe3t(ji,jj,jk), pe3t(ji+1,jj,jk) )
+        #     pe3v(ji,jj,jk) = MIN( pe3t(ji,jj,jk), pe3t(ji,jj+1,jk) )
+        #     CALL lbc_lnk( ..., pe3u,'U', pe3v,'V', kfillmode=jpfillcopy )
+        # (the executing statements on these builds are
+        # tests/VORTEX_SMT_R3{,_VEC_R8}_OMIP_L1_P3/MY_SRC/usrdef_zgr.F90:225
+        # and :228, with their :231 lbc_lnk, transcribed from
+        # tools/DOMAINcfg/src/domzgr.F90::zgr_zps:1166-1167 and its :1177-1178
+        # exchange; `E3u_0 -> e3u_3d` under key_vco_1d3d by
+        # src/OCE/DOM/domzgr_substitute.h90:94-95).  Aliasing
+        # it to e3t_0 is exact ONLY on a full-step mesh; over partial cells it
+        # is wrong on every stepped face: 686 wet U faces of VORTEX_SMT in
+        # the nlev=10 operand this routine actually returns (1 164 cells of
+        # the jpk=11 mesh array it is sliced from), by up to 170.38 m, and
+        # 18 803 U / 18 300 V cells of ORCA2 by up to 917 / 949 m.
+        #
+        # It is NOT re-derived here.  Re-deriving needs NEMO's mask, halo and
+        # north-fold conventions, and a round-213 attempt to do that zeroed a
+        # whole northern row.  The card already carries the arrays NEMO
+        # itself built, verified against its `mesh_mask.nc` at zero ULP, on
+        # the EEN barotropic operand bundle; read them, the way
+        # `nemo_ldf_reference_e3f` above reads `e3f_0` from the same bundle,
+        # and fail closed rather than silently fall back to the alias.
+        raw_een = getattr(z_coord, "nemo_een_barotropic", None)
+        e3u0 = None if raw_een is None else getattr(raw_een, "e3u_0", None)
+        e3v0 = None if raw_een is None else getattr(raw_een, "e3v_0", None)
+        raw_umask = None if raw_een is None else getattr(raw_een, "umask", None)
+        raw_vmask = None if raw_een is None else getattr(raw_een, "vmask", None)
+        if (e3u0 is None or e3v0 is None
+                or raw_umask is None or raw_vmask is None):
+            raise ValueError(
+                "a card carrying NEMO's raw qco mesh operands must also carry "
+                "NEMO's own reference face thicknesses e3u_0/e3v_0 and "
+                "associated umask/vmask on z_coord.nemo_een_barotropic: "
+                "the thicknesses are read by domzgr.f90:184-188 and the "
+                "masks are associated by dommsk.f90:228-232; re-deriving "
+                "either here would lose NEMO's fold conventions")
+        e3u0 = jnp.asarray(e3u0, dtype=dtype)[..., :nlev]
+        e3v0 = jnp.asarray(e3v0, dtype=dtype)[..., :nlev]
+        umask3 = jnp.asarray(raw_umask, dtype=dtype)[..., :nlev]
+        vmask3 = jnp.asarray(raw_vmask, dtype=dtype)[..., :nlev]
+        # The bundle is NEMO-native (U/V hold the EAST/NORTH face of each T
+        # cell), the same extent as e3t0 and the sliced masks.  A card that
+        # attached a redundant west/south layout would BROADCAST silently
+        # here rather than fail, so say the shape out loud.
+        if (e3u0.shape != e3t0.shape or e3v0.shape != e3t0.shape
+                or umask3.shape != e3t0.shape or vmask3.shape != e3t0.shape):
+            raise ValueError(
+                "the raw e3u_0/e3v_0/umask/vmask must be on NEMO's "
+                f"native extent {e3t0.shape} (U/V on the east/north face of "
+                "each T cell); got "
+                f"{e3u0.shape}, {e3v0.shape}, {umask3.shape}, {vmask3.shape}")
+        return NemoQCOMeshOperands(
+            e3t_0=e3t0, e3u_0=e3u0, e3v_0=e3v0, umask3=umask3, vmask3=vmask3,
+            hu_0=hu0, hv_0=hv0, area_t=area_t, area_u=area_u, area_v=area_v,
+            e2u=e2u, e1v=e1v)
+    if any(value is not None for value in raw):
+        # A PARTIAL NEMO mesh is a bridge defect, not a card without one:
+        # falling through to the card-built source here would silently mix
+        # two operand provenances inside one wzv call.
+        missing = [name for name, value in zip(raw_names, raw, strict=True)
+                   if value is None]
+        raise ValueError(
+            "the z-coordinate carries some but not all of NEMO's qco mesh "
+            f"operands; missing: {', '.join(missing)}. Attach the whole set "
+            "or none of it")
+    if not isinstance(z_coord, OceanPartialCellCoordinate):
+        raise ValueError(
+            "the NEMO qco wzv arm needs either the raw NEMO mesh operands "
+            f"({', '.join(raw_names)}) on the z-coordinate or an "
+            "OceanPartialCellCoordinate carrying h_partial to rebuild them")
+    h_ref = jnp.asarray(z_coord.h_partial, dtype=dtype)
+    if h_ref.ndim == 1:
+        h_ref = jnp.broadcast_to(
+            h_ref, (*umask3.shape[:2], h_ref.shape[-1]))
+    return nemo_qco_card_mesh_operands(
+        h_ref[..., :nlev], u_mask_3d, v_mask_3d, grid, dtype)
+
+
+def nemo_qco_live_face_geometry_cgrid(
+    eta,
+    e3u_0,
+    e3v_0,
+    umask3,
+    vmask3,
+    hu_0,
+    hv_0,
+    area_t,
+    area_u,
+    area_v,
+    *,
+    include_reciprocals=False, r3_native=None,
+):
+    """NEMO ``e3u/e3v(Kmm)`` on legoESM's redundant west/south C-grid faces.
+
+    THE single face-thickness rule for BOTH time-stepping lanes.  NEMO's
+    Modified-Leap-Frog entry ``dom_qco_r3c`` (``domqco.F90:166-169``) and its
+    RK3 entry ``dom_qco_r3c_RK3`` (``domqco.F90:219-222``) carry the
+    CHARACTER-IDENTICAL ``pr3u``/``pr3v`` statement --
+
+        pr3u(ji,jj) = 0.5_wp * (  e1e2t(ji  ,jj) * pssh(ji  ,jj)
+           &                    + e1e2t(ji+1,jj) * pssh(ji+1,jj)  )
+           &                  * r1_hu_0(ji,jj) * r1_e1e2u(ji,jj)
+
+    -- differing only in loop extent (``DO_2D(nn_hls, nn_hls-1, ...)`` versus
+    ``DO_2D(0,0,0,0)``) and in the ``key_qcoTest_FluxForm`` alternative
+    (``domqco.F90:227``) that is not compiled in either configuration here.
+    ``domzgr_substitute.h90:127`` then gives
+    ``e3u(i,j,k,t) = e3u_0(i,j,k)*(1 + r3u(i,j,t)*umask(i,j,k))``.  Because
+    NEMO shares the routine, a second legoESM implementation would be an
+    artificial branch point, so both lanes call this one:
+
+    * WS-RK3 stage transport -- ``stprk3_stg.F90:273-274`` consumes
+      ``e3u(Kmm)``/``e3v(Kmm)`` in the single ``zFu``/``zFv`` pair that feeds
+      both ``dyn_adv`` and ``tra_adv`` (``zFw`` is built separately at
+      ``:301`` and carries no ``e3``);
+    * MLF tracer transport -- ``traadv.F90:329-330``, inside the
+      ``#if ! defined key_RK3`` branch opened at ``:313``, builds
+      ``zuu = e2u*e3u(ji,jj,jk,Kmm)*zptu`` from the same ``e3u(Kmm)``.
+
+    Note what this is NOT: the ``min`` of the two STRETCHED T-cell
+    thicknesses, which is first order wrong in the ssh difference across the
+    face, and not the mean of the two ``r3t`` (each of those divides by its
+    own column's ``ht_0``, not by ``hu_0``).
+
+    ``eta``/``e3u_0``/``e3v_0``/the masks and the ``hu_0``..``area_v``
+    operands arrive on NEMO's native A2D extent (U/V store the EAST/NORTH
+    face of each T cell); the returned fields carry legoESM's redundant
+    west/south face layout, so that native->redundant map is written once
+    here instead of at each call site.
+
+    Returns ``(e3u, e3v, one_plus_r3u, one_plus_r3v)`` with the thicknesses
+    3-D on ``(n_lat, n_lon+1, nlev)`` / ``(n_lat+1, n_lon, nlev)`` and the
+    ratios 2-D on the matching face shapes.
+    """
+    geom = nemo_qco_live_face_geometry_from_operands(
+        eta, e3u_0, e3v_0, umask3, vmask3,
+        hu_0, hv_0, area_t, area_u, area_v, r3_native,
+    )
+    one = jnp.asarray(1.0, dtype=geom.e3u.dtype)
+    result = (
+        jnp.concatenate([geom.e3u[:, -1:, :], geom.e3u], axis=1),
+        lat_faces_from_north(geom.e3v),
+        jnp.concatenate([one + geom.r3u[:, -1:], one + geom.r3u], axis=1),
+        lat_faces_from_north(
+            one + geom.r3v, south=jnp.ones_like(geom.r3v[:1])),
+    )
+    if not include_reciprocals:
+        return result
+    # Same native-east/native-north -> redundant-west/redundant-south map as
+    # the coupled thicknesses.  stprk3_stg.F90:265-278 consumes these stored
+    # domqco reciprocals; recomputing 1/SUM(e3) is real-equivalent but not
+    # source-identical on ORCA2's non-uniform, partial-cell mesh.
+    return result + (
+        jnp.concatenate([geom.r1_hu[:, -1:], geom.r1_hu], axis=1),
+        lat_faces_from_north(geom.r1_hv),
+    )
+
+
+def nemo_qco_live_face_thicknesses(
+    eta,
+    z_coord,
+    e3u_0,
+    e3v_0,
+    umask3,
+    vmask3,
+):
+    """Build NEMO QCO live ``e3u/e3v`` on its native east/north faces.
+
+    This is the common ``dom_qco_r3c.F90:160-181`` operand builder used by
+    both ldfslp and dynzad.  Inputs and outputs retain NEMO's native A2D
+    horizontal extent; callers map once to legoESM's redundant west/south
+    face layout when required.  The explicit barriers preserve the executed
+    source association measured by the DINO fidelity instruments.
+    """
+    dtype = jnp.asarray(e3u_0).dtype
+    geom = nemo_qco_live_face_geometry_from_operands(
+        eta, e3u_0, e3v_0, umask3, vmask3,
+        *nemo_qco_mesh_operands(z_coord, dtype),
+    )
+    return geom.e3u, geom.e3v
+
+
+class NemoEENBarotropicOperands(NamedTuple):
+    """Raw native-A2D operands for NEMO's frozen barotropic EEN builder."""
+    ff_f: jnp.ndarray
+    e3u_0: jnp.ndarray
+    e3v_0: jnp.ndarray
+    e3f_0: jnp.ndarray
+    umask: jnp.ndarray
+    vmask: jnp.ndarray
+    fmask: jnp.ndarray
+    fe3mask: jnp.ndarray
+    hu_0: jnp.ndarray
+    hv_0: jnp.ndarray
+    hf_0: jnp.ndarray
+    e1t: jnp.ndarray
+    e2t: jnp.ndarray
+    e1u: jnp.ndarray
+    e2u: jnp.ndarray
+    e1v: jnp.ndarray
+    e2v: jnp.ndarray
+    e1f: jnp.ndarray
+    e2f: jnp.ndarray
 
 
 class OceanZStarCoordinate(NamedTuple):
@@ -92,6 +958,30 @@ class OceanZStarCoordinate(NamedTuple):
     # STATIC Python bool — gates are `if` branches (never jnp.where); the
     # coordinate is constructor-captured, not traced.
     linear_free_surface: bool = False
+    # NEMO fidelity geometry.  These retain the RAW mesh_mask fields, including
+    # their last-bit horizontal variation; averaging them to a 1-D ladder and
+    # differencing changes the operation order in eosbn2.F90.  ``mesh_reference``
+    # is the faithful/default construction.  ``depth_difference`` is the
+    # explicit legacy opt-in for consumers without a NEMO mesh.
+    nemo_gdept_0: jnp.ndarray | None = None
+    nemo_gdepw_0: jnp.ndarray | None = None
+    nemo_e3t_0: jnp.ndarray | None = None
+    nemo_e3w_0: jnp.ndarray | None = None
+    # Exact interior-face reference scale factors consumed by NEMO's BBL
+    # initializer.  They are intentionally distinct from masked live face
+    # thickness: trabbl.F90:529-531 gathers e3u_0/e3v_0 at both adjacent
+    # bottom indices, including an index below the shallower wet column.
+    nemo_bbl_e3u_0: jnp.ndarray | None = None
+    nemo_bbl_e3v_0: jnp.ndarray | None = None
+    nemo_e3w_mesh_reference: bool = False
+    nemo_hu_0: jnp.ndarray | None = None
+    nemo_hv_0: jnp.ndarray | None = None
+    nemo_e1e2t: jnp.ndarray | None = None
+    nemo_e1e2u: jnp.ndarray | None = None
+    nemo_e1e2v: jnp.ndarray | None = None
+    nemo_e2u: jnp.ndarray | None = None
+    nemo_e1v: jnp.ndarray | None = None
+    nemo_een_barotropic: NemoEENBarotropicOperands | None = None
 
 
 def create_ocean_z_star(
@@ -99,6 +989,8 @@ def create_ocean_z_star(
     H_max: float = 5500.0,
     dz_surface: float = 10.0,
     dz_deep: float = 200.0,
+    *,
+    nemo_e3w_source: str = "depth_difference",
 ) -> OceanZStarCoordinate:
     """Create a stretched ocean z-star coordinate.
 
@@ -115,11 +1007,20 @@ def create_ocean_z_star(
         Target layer thickness near surface [m].
     dz_deep : float
         Target layer thickness at depth [m].
+    nemo_e3w_source : {"depth_difference"}
+        Generic coordinates have no raw NEMO mesh field and therefore select
+        the explicit legacy construction.  Use
+        :func:`create_z_star_from_thicknesses` for ``"mesh_reference"``.
 
     Returns
     -------
     OceanZStarCoordinate : The vertical coordinate.
     """
+    if nemo_e3w_source != "depth_difference":
+        raise ValueError(
+            "create_ocean_z_star has no raw NEMO mesh operand; "
+            "nemo_e3w_source must be 'depth_difference' (use "
+            "create_z_star_from_thicknesses for 'mesh_reference')")
     if n_levels < 1:
         raise ValueError(
             f"n_levels must be >= 1, got {n_levels!r}",
@@ -174,11 +1075,19 @@ def create_ocean_z_star(
         z_half_ref=z_half_ref,
         dz_ref=dz_ref,
         dz_half_ref=dz_half_ref,
+        nemo_e3w_mesh_reference=False,
     )
 
 
 def create_z_star_from_thicknesses(
-    dz_ref_m, t_depth_ref_m=None,
+    dz_ref_m, t_depth_ref_m=None, *, nemo_gdept_0_m=None,
+    nemo_gdepw_0_m=None, nemo_e3t_0_m=None, nemo_e3w_0_m=None,
+    nemo_e3w_source="mesh_reference",
+    allow_single_level: bool = False,
+    nemo_hu_0_m=None, nemo_hv_0_m=None, nemo_e1e2t_m=None,
+    nemo_e1e2u_m=None, nemo_e1e2v_m=None,
+    nemo_e2u_m=None, nemo_e1v_m=None,
+    nemo_een_barotropic_m=None,
 ) -> OceanZStarCoordinate:
     """Build a z* coordinate from EXPLICIT reference layer thicknesses.
 
@@ -210,13 +1119,21 @@ def create_z_star_from_thicknesses(
     -------
     OceanZStarCoordinate
     """
+    if nemo_e3w_source not in ("mesh_reference", "depth_difference"):
+        raise ValueError(
+            f"unknown nemo_e3w_source {nemo_e3w_source!r}; expected "
+            "'mesh_reference' or 'depth_difference'")
+
     # Check ndim on the ORIGINAL array BEFORE any ravel -- a 2-D array would
     # otherwise be silently flattened and accepted as 1-D (codex HIGH).
     dz_np = np.asarray(dz_ref_m, dtype=np.float64)
-    if dz_np.ndim != 1 or dz_np.size < 2:
+    # NEMO's TSUNAMI runs ONE wet level (jpk = 2); only a card that states
+    # it may build a one-level column, every other caller keeps the guard.
+    min_levels = 1 if allow_single_level else 2
+    if dz_np.ndim != 1 or dz_np.size < min_levels:
         raise ValueError(
-            f"dz_ref_m must be a 1-D array of >= 2 thicknesses, got shape "
-            f"{dz_np.shape}")
+            f"dz_ref_m must be a 1-D array of >= {min_levels} thicknesses, "
+            f"got shape {dz_np.shape}")
     if not np.all(dz_np > 0.0):
         raise ValueError("dz_ref_m thicknesses must all be > 0")
     n_levels = int(dz_np.size)
@@ -251,6 +1168,88 @@ def create_z_star_from_thicknesses(
             raise ValueError("t_depth_ref_m depths must be strictly increasing")
         t_depth_ref = jnp.asarray(t_np, dtype=get_policy().control)
 
+    def _raw_mesh_field(value, name, *, allow_surface_zero=False):
+        if value is None:
+            return None
+        arr = np.asarray(value, dtype=np.float64)
+        if arr.ndim < 1 or arr.shape[-1] != n_levels:
+            raise ValueError(
+                f"{name} must have trailing dimension n_levels={n_levels}, "
+                f"got shape {arr.shape}")
+        valid = np.all(arr >= 0.0) if allow_surface_zero else np.all(arr > 0.0)
+        if not np.all(np.isfinite(arr)) or not valid:
+            relation = ">= 0" if allow_surface_zero else "> 0"
+            raise ValueError(
+                f"{name} must contain only finite values {relation}")
+        return jnp.asarray(arr, dtype=get_policy().control)
+
+    nemo_gdept_0 = _raw_mesh_field(nemo_gdept_0_m, "nemo_gdept_0_m")
+    nemo_gdepw_0 = _raw_mesh_field(
+        nemo_gdepw_0_m, "nemo_gdepw_0_m", allow_surface_zero=True)
+    nemo_e3t_0 = _raw_mesh_field(nemo_e3t_0_m, "nemo_e3t_0_m")
+    nemo_e3w_0 = _raw_mesh_field(nemo_e3w_0_m, "nemo_e3w_0_m")
+    def _raw_horizontal(value, name):
+        if value is None:
+            return None
+        arr = np.asarray(value, dtype=np.float64)
+        if arr.ndim != 2 or not np.all(np.isfinite(arr)) or not np.all(arr >= 0.0):
+            raise ValueError(f"{name} must be a finite nonnegative 2-D field")
+        return jnp.asarray(arr, dtype=get_policy().control)
+
+    nemo_hu_0 = _raw_horizontal(nemo_hu_0_m, "nemo_hu_0_m")
+    nemo_hv_0 = _raw_horizontal(nemo_hv_0_m, "nemo_hv_0_m")
+    nemo_e1e2t = _raw_horizontal(nemo_e1e2t_m, "nemo_e1e2t_m")
+    nemo_e1e2u = _raw_horizontal(nemo_e1e2u_m, "nemo_e1e2u_m")
+    nemo_e1e2v = _raw_horizontal(nemo_e1e2v_m, "nemo_e1e2v_m")
+    nemo_e2u = _raw_horizontal(nemo_e2u_m, "nemo_e2u_m")
+    nemo_e1v = _raw_horizontal(nemo_e1v_m, "nemo_e1v_m")
+    nemo_een_barotropic = None
+    if nemo_een_barotropic_m is not None:
+        if not isinstance(nemo_een_barotropic_m, NemoEENBarotropicOperands):
+            raise TypeError(
+                "nemo_een_barotropic_m must be NemoEENBarotropicOperands")
+        raw = nemo_een_barotropic_m
+        two_d = (raw.ff_f, raw.hu_0, raw.hv_0, raw.hf_0,
+                 raw.e1t, raw.e2t, raw.e1u, raw.e2u,
+                 raw.e1v, raw.e2v, raw.e1f, raw.e2f)
+        shape2 = np.asarray(raw.ff_f).shape
+        if len(shape2) != 2 or any(np.asarray(x).shape != shape2 for x in two_d):
+            raise ValueError(
+                "NEMO EEN 2-D operands must have one common native A2D shape")
+        three_d = (raw.e3u_0, raw.e3v_0, raw.e3f_0,
+                   raw.umask, raw.vmask, raw.fmask, raw.fe3mask)
+        if any(np.asarray(x).shape != shape2 + (n_levels,) for x in three_d):
+            raise ValueError(
+                "NEMO EEN 3-D operands must have native A2D+n_levels shape")
+        if any(not np.all(np.isfinite(np.asarray(x)))
+               for x in (*two_d, *three_d)):
+            raise ValueError("NEMO EEN operands must be finite")
+        nemo_een_barotropic = NemoEENBarotropicOperands(*(
+            jnp.asarray(x, dtype=get_policy().control) for x in raw))
+    if nemo_gdept_0 is not None and nemo_e3w_0 is not None:
+        # Validate the caller's fp64 oracle operands before policy casting;
+        # a float32 runtime policy must not manufacture a source-recurrence
+        # failure during construction.
+        gdept_np = np.asarray(nemo_gdept_0_m, dtype=np.float64)
+        e3w_np = np.asarray(nemo_e3w_0_m, dtype=np.float64)
+        if gdept_np.shape != e3w_np.shape:
+            raise ValueError(
+                "nemo_gdept_0_m and nemo_e3w_0_m must have identical shapes, "
+                f"got {gdept_np.shape} and {e3w_np.shape}")
+        gdept_spacing = np.diff(gdept_np, axis=-1)
+        e3w_interior = e3w_np[..., 1:]
+        # NEMO's shipped GYRE MI96 literals contain one four-ULP recurrence
+        # miss (level 23) because gdept and e3w are independently evaluated
+        # source arrays.  Preserve both oracle operands; reject discrepancies
+        # larger than that demonstrated fp64 arithmetic envelope.
+        recurrence_tol = 4.0 * np.spacing(
+            np.maximum(np.abs(gdept_spacing), np.abs(e3w_interior))
+        )
+        if np.any(np.abs(gdept_spacing - e3w_interior) > recurrence_tol):
+            raise ValueError(
+                "nemo_gdept_0_m differences must equal interior "
+                "nemo_e3w_0_m within the four-ULP NEMO mesh-reference "
+                "arithmetic envelope")
     return OceanZStarCoordinate(
         n_levels=n_levels,
         H_max=H_max,
@@ -259,6 +1258,16 @@ def create_z_star_from_thicknesses(
         dz_ref=dz_ref,
         dz_half_ref=dz_half_ref,
         t_depth_ref=t_depth_ref,
+        nemo_gdept_0=nemo_gdept_0,
+        nemo_gdepw_0=nemo_gdepw_0,
+        nemo_e3t_0=nemo_e3t_0,
+        nemo_e3w_0=nemo_e3w_0,
+        nemo_e3w_mesh_reference=(nemo_e3w_source == "mesh_reference"),
+        nemo_hu_0=nemo_hu_0, nemo_hv_0=nemo_hv_0,
+        nemo_e1e2t=nemo_e1e2t, nemo_e1e2u=nemo_e1e2u,
+        nemo_e1e2v=nemo_e1e2v,
+        nemo_e2u=nemo_e2u, nemo_e1v=nemo_e1v,
+        nemo_een_barotropic=nemo_een_barotropic,
     )
 
 
@@ -458,11 +1467,43 @@ class OceanPartialCellCoordinate(NamedTuple):
     # midpoint grids → HPG reverts to interface-midpoint depths. Trailing +
     # defaulted so existing constructions stay backward-compatible.
     t_depth_ref: jnp.ndarray | None = None
+    nemo_gdept_0: jnp.ndarray | None = None
+    nemo_gdepw_0: jnp.ndarray | None = None
+    nemo_e3t_0: jnp.ndarray | None = None
+    nemo_e3w_0: jnp.ndarray | None = None
+    nemo_bbl_e3u_0: jnp.ndarray | None = None
+    nemo_bbl_e3v_0: jnp.ndarray | None = None
+    nemo_e3w_mesh_reference: bool = False
+    nemo_hu_0: jnp.ndarray | None = None
+    nemo_hv_0: jnp.ndarray | None = None
+    nemo_e1e2t: jnp.ndarray | None = None
+    nemo_e1e2u: jnp.ndarray | None = None
+    nemo_e1e2v: jnp.ndarray | None = None
+    nemo_e2u: jnp.ndarray | None = None
+    nemo_e1v: jnp.ndarray | None = None
+    nemo_een_barotropic: NemoEENBarotropicOperands | None = None
+    # NEMO ldf_dyn_init's READ coefficient (nn_ahm_ijk_t = -30,
+    # ldfdyn.f90:348-353): the whole 3-D lateral momentum viscosity, already
+    # exchanged and masked as that routine leaves it.  ``nemo_ldf_ahmt`` is on
+    # the T grid, ``nemo_ldf_ahmf`` on legoESM's vertex layout.  Only the
+    # lateral_viscosity_coefficient_source="nemo_ahm_3d_file" arm reads them;
+    # every other card leaves them None and is bit-identical.
+    nemo_ldf_ahmt: jnp.ndarray | None = None
+    nemo_ldf_ahmf: jnp.ndarray | None = None; nemo_r3t_stored_product: bool = False  # card-selected, see _nemo_r3t_product  # noqa: E501,E702
+    # Card-selected: the WS-RK3 stage faces read NEMO's raw face mesh
+    # (e3u_0/e3v_0/umask/vmask on nemo_een_barotropic) instead of rebuilding
+    # it from the card's grid.  Only the ORCA2 cards select it; on VORTEX-SMT
+    # it moved the kt=1-10 NEMO-record distance further, so every other card
+    # keeps the reconstructed source (user decision 2026-10-17).
+    nemo_stage_faces_raw_mesh: bool = False
 
 
 def create_partial_cell_coordinate(
     z_coord: OceanZStarCoordinate,
     H_bathy: jnp.ndarray,
+    *,
+    bottom_index_rule: str = "interface",
+    min_partial_thickness: float | None = None,
 ) -> OceanPartialCellCoordinate:
     """Build an ``OceanPartialCellCoordinate`` from a z* coord + bathymetry.
 
@@ -475,6 +1516,40 @@ def create_partial_cell_coordinate(
         Per-column bathymetry depth [m], positive downward.  Land
         cells should have H_bathy <= 0; they're flagged as
         ``bottom_level = -1`` and ``is_active = False`` everywhere.
+    bottom_index_rule : {"interface", "nemo_tpoint"}
+        ``"interface"`` is the legacy Adcroft rule: the deepest active cell
+        is the one whose top interface is shallower than the supplied depth.
+        ``"nemo_tpoint"`` reproduces NEMO ``zgr_zps`` user domains that set
+        ``k_bot`` from ``pdept_1d(k) < H <= pdept_1d(k+1)`` and then clip the
+        bottom thickness at the reference bottom interface.  The latter also
+        retains near-full last-bit thicknesses instead of applying legoESM's
+        legacy near-full snap.  It requires an explicit ``z_coord.t_depth_ref``;
+        no arithmetic-midpoint fallback is allowed because that changes
+        ``k_bot`` on stretched external grids.
+        ``"nemo_zps_e3min"`` is the OTHER rule NEMO's shipped zps user domains
+        run, and it is NOT equivalent to ``"nemo_tpoint"``:
+        ``tests/OVERFLOW/MY_SRC/usrdef_zgr.F90:204,209-212`` sets
+        ``ze3min = 0.1*rn_dz`` and then
+
+            k_bot = jpkm1
+            DO jk = jpkm1,1,-1 ; WHERE( zht < pdepw_1d(jk)+ze3min ) k_bot = jk-1
+
+        i.e. ``k_bot`` counts the W interfaces that clear the floor, so the
+        thinnest bottom cell is a TENTH of the reference thickness where the
+        T-point rule's is a HALF.  On a uniform ladder the two disagree for
+        every column whose bathymetry lands in
+        ``[pdepw+ze3min, pdepw+0.5*dz)``.  The bottom thickness is then
+        ``MIN(H, pdepw_1d(k+1)) - pdepw_1d(k)``, in NEMO's own association
+        (``OVERFLOW:221-225``).  It is written the source's way because the
+        source writes it that way; no ladder has yet been found on which it
+        differs in the bits from the other rules' clipped
+        ``MIN(H - pdepw(k), dz_ref[k])``, and the unit test says so rather
+        than implying a difference it does not demonstrate.  It requires
+        ``min_partial_thickness``.
+    min_partial_thickness : float, optional
+        ``ze3min`` for ``bottom_index_rule="nemo_zps_e3min"``; refused (and
+        required) for exactly that rule, so neither rule can silently run with
+        the other's floor.
 
     Returns
     -------
@@ -493,12 +1568,45 @@ def create_partial_cell_coordinate(
     nlev = z_coord.n_levels
     abs_z_half = jnp.abs(z_coord.z_half_ref)        # (nlev+1,) positive depths
 
-    # Number of half-interfaces strictly shallower than H_bathy.
-    # E.g. abs_z_half = [0, 10, 300, 1500, 4000], H=2350 → count=4 → bottom_level=3.
+    if bottom_index_rule not in {"interface", "nemo_tpoint", "nemo_zps_e3min"}:
+        raise ValueError(
+            "bottom_index_rule must be 'interface', 'nemo_tpoint' or "
+            f"'nemo_zps_e3min', got {bottom_index_rule!r}"
+        )
+    if (bottom_index_rule == "nemo_zps_e3min") != (min_partial_thickness
+                                                   is not None):
+        raise ValueError(
+            "min_partial_thickness is required by, and only by, "
+            'bottom_index_rule="nemo_zps_e3min" (NEMO\'s ze3min); got rule '
+            f"{bottom_index_rule!r} with {min_partial_thickness!r}"
+        )
+
+    # Number of reference points strictly shallower than H_bathy.  The legacy
+    # rule counts W interfaces.  NEMO's zps user-domain rule counts T points;
+    # on a uniform grid this guarantees a half-cell minimum before k_bot moves
+    # down, exactly as usrdef_zgr.F90:140-143/157-160 executes.
     n_lead = H.ndim
     H_exp = H[..., jnp.newaxis]                     # (..., 1)
+    if bottom_index_rule == "nemo_tpoint":
+        if z_coord.t_depth_ref is None:
+            raise ValueError(
+                'bottom_index_rule="nemo_tpoint" requires an explicit '
+                "t_depth_ref; an arithmetic-midpoint fallback can select "
+                "the wrong NEMO bottom level on a stretched grid"
+            )
+        index_depths = jnp.abs(z_coord.t_depth_ref)
+    elif bottom_index_rule == "nemo_zps_e3min":
+        # OVERFLOW:209-212.  The loop runs jk = jpkm1..1 and the LAST write
+        # wins, so k_bot is the count of jk in 1..jpkm1 whose
+        # pdepw_1d(jk)+ze3min does NOT exceed zht -- the complement of the
+        # loop's strict ``<``, hence ``<=`` here.
+        index_depths = abs_z_half[:nlev] + min_partial_thickness
+    else:
+        index_depths = abs_z_half
+    view = index_depths[(jnp.newaxis,) * n_lead + (slice(None),)]
     interfaces_above = jnp.sum(
-        abs_z_half[(jnp.newaxis,) * n_lead + (slice(None),)] < H_exp,
+        (view <= H_exp) if bottom_index_rule == "nemo_zps_e3min"
+        else (view < H_exp),
         axis=-1,
     )                                                # (...) integer
     bottom_level = interfaces_above.astype(jnp.int32) - 1
@@ -539,10 +1647,19 @@ def create_partial_cell_coordinate(
     safe_bottom = jnp.maximum(bottom_level, 0)
     abs_z_at_bottom = abs_z_half[safe_bottom]       # (...)
     dz_at_bottom = z_coord.dz_ref[safe_bottom]      # (...)
-    raw_partial = H - abs_z_at_bottom
-    capped = jnp.minimum(raw_partial, dz_at_bottom)
-    near_full = jnp.abs(capped - dz_at_bottom) < dz_at_bottom * 1e-5
-    partial_thickness = jnp.where(near_full, dz_at_bottom, capped)
+    if bottom_index_rule == "nemo_zps_e3min":
+        # OVERFLOW:222 -- MIN(zht, pdepw_1d(ik+1)) - pdepw_1d(ik), with the
+        # MIN inside the subtraction as the source writes it.  safe_bottom is
+        # at most nlev-1, so safe_bottom+1 indexes abs_z_half (nlev+1 long)
+        # in range without a clamp.
+        partial_thickness = (jnp.minimum(H, abs_z_half[safe_bottom + 1])
+                             - abs_z_at_bottom)
+    elif bottom_index_rule == "nemo_tpoint":
+        partial_thickness = jnp.minimum(H - abs_z_at_bottom, dz_at_bottom)
+    else:
+        capped = jnp.minimum(H - abs_z_at_bottom, dz_at_bottom)
+        near_full = jnp.abs(capped - dz_at_bottom) < dz_at_bottom * 1e-5
+        partial_thickness = jnp.where(near_full, dz_at_bottom, capped)
 
     is_bottom = (k_view == bottom_view) & (bottom_view >= 0)
     h_partial = jnp.where(is_bottom, partial_thickness[..., jnp.newaxis], h_full)
@@ -566,6 +1683,24 @@ def create_partial_cell_coordinate(
         # gate-N2 pressure geometry, and any future partial-cell PGF
         # fidelity).  ``getattr``: plain midpoint z* coords carry None.
         t_depth_ref=getattr(z_coord, "t_depth_ref", None),
+        nemo_gdept_0=getattr(z_coord, "nemo_gdept_0", None),
+        nemo_gdepw_0=getattr(z_coord, "nemo_gdepw_0", None),
+        nemo_e3t_0=getattr(z_coord, "nemo_e3t_0", None),
+        nemo_e3w_0=getattr(z_coord, "nemo_e3w_0", None),
+        nemo_bbl_e3u_0=getattr(z_coord, "nemo_bbl_e3u_0", None),
+        nemo_bbl_e3v_0=getattr(z_coord, "nemo_bbl_e3v_0", None),
+        nemo_e3w_mesh_reference=getattr(
+            z_coord, "nemo_e3w_mesh_reference", False),
+        nemo_hu_0=getattr(z_coord, "nemo_hu_0", None),
+        nemo_hv_0=getattr(z_coord, "nemo_hv_0", None),
+        nemo_e1e2t=getattr(z_coord, "nemo_e1e2t", None),
+        nemo_e1e2u=getattr(z_coord, "nemo_e1e2u", None),
+        nemo_e1e2v=getattr(z_coord, "nemo_e1e2v", None),
+        nemo_e2u=getattr(z_coord, "nemo_e2u", None),
+        nemo_e1v=getattr(z_coord, "nemo_e1v", None),
+        nemo_een_barotropic=getattr(
+            z_coord, "nemo_een_barotropic", None), nemo_r3t_stored_product=getattr(z_coord, "nemo_r3t_stored_product", False) is True,  # noqa: E501
+        nemo_stage_faces_raw_mesh=getattr(z_coord, "nemo_stage_faces_raw_mesh", False) is True,  # noqa: E501
     )
 
 
@@ -631,6 +1766,24 @@ def create_full_step_coordinate(
         bottom_level=bl,
         is_active=is_active,
         t_depth_ref=getattr(z_coord, "t_depth_ref", None),
+        nemo_gdept_0=getattr(z_coord, "nemo_gdept_0", None),
+        nemo_gdepw_0=getattr(z_coord, "nemo_gdepw_0", None),
+        nemo_e3t_0=getattr(z_coord, "nemo_e3t_0", None),
+        nemo_e3w_0=getattr(z_coord, "nemo_e3w_0", None),
+        nemo_bbl_e3u_0=getattr(z_coord, "nemo_bbl_e3u_0", None),
+        nemo_bbl_e3v_0=getattr(z_coord, "nemo_bbl_e3v_0", None),
+        nemo_e3w_mesh_reference=getattr(
+            z_coord, "nemo_e3w_mesh_reference", False),
+        nemo_hu_0=getattr(z_coord, "nemo_hu_0", None),
+        nemo_hv_0=getattr(z_coord, "nemo_hv_0", None),
+        nemo_e1e2t=getattr(z_coord, "nemo_e1e2t", None),
+        nemo_e1e2u=getattr(z_coord, "nemo_e1e2u", None),
+        nemo_e1e2v=getattr(z_coord, "nemo_e1e2v", None),
+        nemo_e2u=getattr(z_coord, "nemo_e2u", None),
+        nemo_e1v=getattr(z_coord, "nemo_e1v", None),
+        nemo_een_barotropic=getattr(
+            z_coord, "nemo_een_barotropic", None), nemo_r3t_stored_product=getattr(z_coord, "nemo_r3t_stored_product", False) is True,  # noqa: E501
+        nemo_stage_faces_raw_mesh=getattr(z_coord, "nemo_stage_faces_raw_mesh", False) is True,  # noqa: E501
     )
 
 
@@ -759,18 +1912,18 @@ def compute_layer_thickness(
     -------
     array : Layer thickness [m], shape (..., nlev). Positive.
     """
-    if isinstance(z_coord, OceanPartialCellCoordinate):
-        wc = eta + H_bathy
-        if min_water_column_m is not None:
-            wc = jnp.maximum(wc, min_water_column_m)
-        # Avoid division-by-zero in dry columns; h_partial is already
-        # zero there, so the result is zero regardless of the divisor.
-        H_safe = jnp.maximum(H_bathy, 1.0e-10)
-        return z_coord.h_partial * (wc / H_safe)[..., jnp.newaxis]
-    # Pure z\\* path (legacy, unchanged).
     J = compute_ocean_jacobian(
         eta, H_bathy, z_coord, min_water_column_m=min_water_column_m,
     )
+    if isinstance(z_coord, OceanPartialCellCoordinate):
+        # ONE implementation of NEMO's stretch, not two.  This branch used to
+        # form ``(eta + H_bathy)/H_bathy`` inline, so after the round-40 fix
+        # to compute_ocean_jacobian the model carried TWO different roundings
+        # of the SAME NEMO statement -- and this one feeds the momentum RHS
+        # through _bc_geometry_and_density.  Dry columns are unchanged: the
+        # helper returns J = 1 there and h_partial is already 0.
+        return z_coord.h_partial * J[..., jnp.newaxis]
+    # Pure z\\* path (legacy, unchanged).
     return z_coord.dz_ref * J[..., jnp.newaxis]
 
 
@@ -810,7 +1963,8 @@ def compute_ocean_jacobian(
     -------
     array : Jacobian, shape (...).
     """
-    if getattr(z_coord, "linear_free_surface", False):
+    linssh = bool(getattr(z_coord, "linear_free_surface", False))
+    if linssh:
         # NEMO key_linssh: the column NEVER stretches — J is the eta=0
         # reference (H_bathy/H_max; ==1 on a flat bottom where H_bathy==H_max).
         # No min-column clip: the fixed column is positive by construction.
@@ -829,7 +1983,47 @@ def compute_ocean_jacobian(
         # column are masked, so the value is physically inert; wet columns
         # (H_bathy > 0) are bit-identical.
         H_safe = jnp.maximum(H_bathy, 1.0e-10)
-        return jnp.where(H_bathy > 0.0, water_col / H_safe, 1.0)
+        # NEMO forms the RATIO first and adds ONE.  It never forms
+        # (ssh + ht_0)/ht_0:
+        #   r3t(i,j)  = ssh(i,j) * r1_ht_0(i,j)              domqco.F90:209
+        #   r1_ht_0   = ssmask / (ht_0 + 1 - ssmask), i.e. exactly 1/ht_0 on
+        #               a wet column                          domain.F90:158
+        #   e3t(i,j,k,t) = e3t_0(i,j,k) * (1 + r3t(i,j,t))
+        #                                        domzgr_substitute.h90:139
+        # Rounding the SUM first loses the low bits of the small ratio to
+        # cancellation.  Measured on GYRE's kt=1 stage-3 ssh against NEMO's
+        # own dumped arrays: (eta+H)/H differs from NEMO's 1+r3t_Kaa on 221
+        # of 600 wet columns at 2.220446e-16 and its e3t on 5207 of 18000
+        # cells at 1.136868e-13, while 1 + eta*(1/ht_0) reproduces both at
+        # 0 cells unequal.  The clip below is legoESM's own and NEMO has
+        # none; expressing it on J rather than on the column keeps every
+        # clipped cell bit-identical to the pre-round-40 value.
+        # ``r1_ht_0 = ssmask/(ht_0 + 1 - ssmask)`` (domain.F90:158) is built
+        # ONCE and MULTIPLIED at domqco.F90:209; NEMO never divides by ht_0
+        # there, and ``a/b`` and ``a*(1/b)`` are not the same double.
+        #
+        # RULE 1c.  The reciprocal is taken in the PROMOTED dtype of the two
+        # operands, not in the bathymetry's storage dtype.  NEMO is fp64
+        # throughout so the question does not arise there; here a f32 ladder
+        # under a f64 ssh would round 1/ht_0 to single and cost seven digits
+        # of the stretch -- caught by test_jacobian_column_sums_to_water_column
+        # at a relative 3.0e-10, which is 0.7/H times f32 eps and not roundoff.
+        # ``OceanPartialCellCoordinate`` carries no ``linear_free_surface``
+        # field, so ``linssh`` is False on every path that reaches here; the
+        # fixed-column arm belongs to the z* branch below and is not
+        # duplicated as an unreachable one.
+        _dt = jnp.promote_types(jnp.asarray(eta).dtype,
+                                jnp.asarray(H_safe).dtype)
+        r1_h = jnp.where(H_bathy > 0.0,
+                         jnp.asarray(1.0, _dt) / jnp.asarray(H_safe, _dt),
+                         jnp.asarray(0.0, _dt))
+        jac = 1.0 + _nemo_r3t_product(jnp.asarray(eta, _dt) * r1_h, z_coord)
+        if min_water_column_m is not None:
+            # legoESM's own floor; NEMO has none, so there is no faithful form
+            # to match and this keeps every clipped cell at its pre-round-40
+            # value.
+            jac = jnp.maximum(jac, min_col / H_safe)
+        return jnp.where(H_bathy > 0.0, jac, 1.0)
     return water_col / z_coord.H_max
 
 
@@ -1146,6 +2340,60 @@ def flux_form_vertical_momentum_advection_centered(
     return -vert_flux_div / h_u_safe
 
 
+def nemo_up3_vertical_momentum_advection(
+    velocity: jnp.ndarray,
+    w_half_at_face: jnp.ndarray,
+    h_face: jnp.ndarray,
+    face_active: jnp.ndarray | None = None,
+) -> jnp.ndarray:
+    """NEMO ``dynadv_up3`` vertical momentum-flux transcription.
+
+    This is the vertical part of the live flux-form ``ln_dynadv_up3`` arm,
+    not ``dynzad`` (which ``dynadv.F90:79-91`` calls only for vector form).
+    It transcribes NEMO 5.0.2 ``dynadv_up3.F90:239-365`` with
+    ``gamma1=1/3``: second differences come from the before/stage-base
+    velocity, their upwind choice uses the sign of the vertical transport,
+    and the transported value is the centered pair minus the UP3 correction.
+
+    ``w_half_at_face`` is the arithmetic T-to-u/v-face average.  NEMO writes
+    ``0.25*(zFw_left+zFw_right)*(u_below+u_above-gamma1*lap)``; because the
+    supplied average is half that sum, the coefficient below is ``0.5``.
+    Surface and bottom fluxes are exactly zero.  Final tendencies are masked
+    at their own wet velocity cell, matching NEMO's subsequent time update.
+    """
+    nlev = velocity.shape[-1]
+    if nlev < 2:
+        return jnp.zeros_like(velocity)
+    gamma1 = 1.0 / 3.0
+    if face_active is None:
+        active = jnp.ones_like(velocity)
+    else:
+        active = jnp.broadcast_to(face_active, velocity.shape)
+    interface_active = active[..., :-1] * active[..., 1:]
+    first_difference = (
+        (velocity[..., :-1] - velocity[..., 1:]) * interface_active
+    )
+    pad_axes = ((0, 0),) * (velocity.ndim - 1)
+    next_difference = jnp.pad(
+        first_difference[..., 1:], (*pad_axes, (0, 1))
+    )
+    second_difference = first_difference - next_difference
+    previous_second = jnp.pad(
+        second_difference[..., :-1], (*pad_axes, (1, 0))
+    )
+    w_interior = w_half_at_face[..., 1:nlev]
+    up3_correction = jnp.where(
+        w_interior > 0.0, second_difference, previous_second
+    )
+    interior_flux = 0.5 * w_interior * (
+        velocity[..., :-1] + velocity[..., 1:]
+        - gamma1 * up3_correction
+    )
+    flux = jnp.pad(interior_flux, (*pad_axes, (1, 1)))
+    divergence = flux[..., :-1] - flux[..., 1:]
+    return -divergence / jnp.maximum(h_face, _H_FLOOR) * active
+
+
 #: ``bottom_face_mask_mode`` literals for
 #: :func:`nemo_advective_vertical_momentum_advection` (#1226 level-29-onset
 #: finding, ``zad_level29_onset_walk.py``, commit ``b6d0d9877``):
@@ -1460,6 +2708,7 @@ def adaptive_implicit_vertical_momentum_advection(
     cu_min: float = _AIMP_CU_MIN,
     cu_max: float = _AIMP_CU_MAX,
     face_active: jnp.ndarray | None = None,
+    explicit_scheme: str = "upwind",
 ) -> jnp.ndarray:
     """Adaptive-implicit vertical momentum advection (Shchepetkin 2015).
 
@@ -1518,10 +2767,20 @@ def adaptive_implicit_vertical_momentum_advection(
     w_imp = zcff * w_half
     w_exp = (1.0 - zcff) * w_half
 
-    # Explicit (Courant-capped) part through the existing flux-form scheme.
-    tend_exp = flux_form_vertical_momentum_advection(
-        u, w_exp, h, face_active=face_active,
-    )
+    # Explicit (Courant-capped) part.  ``nemo_up3`` selects the live
+    # ln_dynadv_up3 vertical flux; the default is unchanged.
+    if explicit_scheme == "upwind":
+        tend_exp = flux_form_vertical_momentum_advection(
+            u, w_exp, h, face_active=face_active,
+        )
+    elif explicit_scheme == "nemo_up3":
+        tend_exp = nemo_up3_vertical_momentum_advection(
+            u, w_exp, h, face_active=face_active,
+        )
+    else:
+        raise ValueError(
+            "explicit_scheme must be 'upwind' or 'nemo_up3', got "
+            f"{explicit_scheme!r}")
     u_exp = u + dt * tend_exp
 
     # Implicit part: unconditionally-stable backward-Euler upwind solve.
@@ -1832,3 +3091,19 @@ def flux_form_vertical_tracer_advection_tvd(
     vert_flux_div = F[..., :-1] - F[..., 1:]
 
     return vert_flux_div
+
+
+def _nemo_r3t_product(product, z_coord):
+    """NEMO's T-point thickness ratio as the STORED product it is.
+
+    ``domqco.f90:257`` writes ``r3t = ssh * r1_ht_0`` into an array; every
+    thickness then reads ``e3t_0 * (1 + r3t)`` (``trazdf.f90:233``, ``:284``).
+    The product is rounded before the one is added.  Left bare, the compiled
+    ``1 + eta * r1_h`` may be contracted into one fused operation, which
+    rounds differently on rare cells (one T cell at step 19 of the G1
+    record).  ``OceanPartialCellCoordinate.nemo_r3t_stored_product`` selects
+    the rounded product; otherwise ``product`` is returned unchanged.
+    """
+    if getattr(z_coord, "nemo_r3t_stored_product", False) is not True:
+        return product      # identity test: a traced flag reads as off, never raises
+    return nemo_source_round(product)

@@ -3,7 +3,7 @@
 Tests:
 1. fit_gen_be produces valid GenBEParams from synthetic ensemble errors.
 2. sqrt_multiply returns a finite array with increased spatial correlation.
-3. inv_multiply satisfies B * B^{-1} x ≈ x (round-trip).
+3. U^{-1} U v ≈ v on lat-lon; inv_multiply refuses MPAS meshes.
 4. sqrt_multiply is differentiable (jax.grad passes).
 5. inv_multiply is differentiable.
 6. Adjoint test: <B^{1/2} u, v> == <u, (B^{1/2})^T v> (operator symmetry of B).
@@ -29,6 +29,28 @@ def _make_latlon_grid(nlat=8, nlon=16):
     from legoesm.grids.latlon import create_latlon_grid
 
     return create_latlon_grid(n_lat=nlat, n_lon=nlon)
+
+
+class _MPASGeometryGrid:
+    """Lat-lon grid carrying MPAS cell/edge geometry (4-neighbour, periodic in
+    lon, clamped at the poles) so GenBETransform takes its MPAS diffusion path."""
+
+    def __init__(self, base, nlat, nlon):
+        self._base = base
+        ii, jj = np.meshgrid(np.arange(nlat), np.arange(nlon), indexing="ij")
+        c = lambda i, j: (np.clip(i, 0, nlat - 1) * nlon + j % nlon).ravel()
+        ncol = nlat * nlon
+        self.cellsOnCell = np.stack([c(ii, jj + 1), c(ii, jj - 1),
+                                     c(ii + 1, jj), c(ii - 1, jj)])
+        self.edgesOnCell = np.arange(4 * ncol).reshape(4, ncol)
+        self.nEdgesOnCell = np.full(ncol, 4)
+        self.nEdges = 4 * ncol
+        self.areaCell = np.asarray(base.to_columns(base.grid_area))
+        self.dcEdge = np.ones(4 * ncol)
+        self.dvEdge = np.ones(4 * ncol)
+
+    def __getattr__(self, name):
+        return getattr(self._base, name)
 
 
 def _make_hydrostatic_state(nlat=8, nlon=16, nlev=4, rng_key=None):
@@ -373,23 +395,38 @@ class TestGenBETransform:
         grad = jax.grad(loss)(x0)
         assert jnp.all(jnp.isfinite(grad)), "grad through inv_multiply has non-finite values"
 
-    def test_b_inv_b_round_trip(self):
-        """B^{-1} (B^{1/2} v) is finite and non-trivially non-zero.
+    def test_u_inverse_round_trip_latlon(self):
+        """U^{-1} U v recovers v on the lat-lon fallback path.
 
-        B^{-1} B^{1/2} v = U^{-T} U^{-1} U v = U^{-T} v, whose norm depends
-        on the operator conditioning and is not required to match ||v||.
-        We only verify finiteness and non-degeneracy.
+        The generic global-mean relaxation inverse is approximate
+        ((1 - kappa^2)^n on the non-mean part); at kappa ~ 1e-3 the measured
+        relative error is ~5e-6, so 1e-4 bounds it with margin.
         """
         transform, spec, _ = self._setup()
         v = jax.random.normal(jax.random.PRNGKey(5), (spec.total_size,))
-        Bv = transform.sqrt_multiply(v)
-        BinvBv = transform.inv_multiply(Bv)
+        back = transform._inverse(transform.sqrt_multiply(v))
+        rel = float(jnp.linalg.norm(back - v) / jnp.linalg.norm(v))
+        assert rel < 1e-4, rel
 
-        assert jnp.all(jnp.isfinite(BinvBv)), "B^{-1} B^{1/2} v has non-finite values"
+    def test_inv_multiply_refuses_mpas_mesh(self):
+        """On an MPAS mesh the reverse diffusion is not the inverse of the
+        forward diffusion, so inv_multiply must raise, not return a wrong
+        B^{-1}; sqrt_multiply stays available."""
+        from legoesm.da.control_vector import build_control_spec
+        from legoesm.da.gen_be import GenBETransform, fit_gen_be
 
-        # Must be non-trivially non-zero
-        norm_out = float(jnp.linalg.norm(BinvBv))
-        assert norm_out > 1e-10, f"B^{{-1}} B^{{1/2}} v is effectively zero: {norm_out:.2e}"
+        nlat, nlon, nlev = 8, 16, 4
+        base = _make_latlon_grid(nlat, nlon)
+        errors = _make_ensemble(n_members=12, nlat=nlat, nlon=nlon, nlev=nlev)
+        params = fit_gen_be(errors, base, default_len_scale_km=200.0)
+        spec = build_control_spec(_make_hydrostatic_state(nlat, nlon, nlev), base)
+        grid = _MPASGeometryGrid(base, nlat, nlon)
+
+        transform = GenBETransform(params, spec, grid, n_diffusion_iter=5)
+        v = jax.random.normal(jax.random.PRNGKey(5), (spec.total_size,))
+        assert jnp.all(jnp.isfinite(transform.sqrt_multiply(v)))
+        with pytest.raises(NotImplementedError, match="MPAS"):
+            transform.inv_multiply(v)
 
     def test_b_positive_definite(self):
         """<v, B^{-1} B^{1/2} v> > 0 for non-zero v (positive definiteness check)."""

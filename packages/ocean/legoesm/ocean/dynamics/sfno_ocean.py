@@ -52,10 +52,10 @@ from legoesm.ocean.dynamics.channel_packing import (
 )
 from legoesm.ml.conservation import (
     correct_ocean_volume,
-    correct_ocean_heat,
-    correct_ocean_salt,
+    correct_ocean_tracer,
 )
 from legoesm.timestepping.dispatch import dispatch_integrator
+from legoesm.timestepping.integration import IntegrationMixin
 
 
 class SFNOOceanConfig(NamedTuple):
@@ -99,7 +99,7 @@ class SFNOOceanConfig(NamedTuple):
     time_integrator: str = "ssp_rk3"
 
 
-class SFNOOceanModel:
+class SFNOOceanModel(IntegrationMixin):
     """SFNO-based ocean model on the sphere.
 
     Parameters
@@ -267,7 +267,7 @@ class SFNOOceanModel:
             S_new = sh_synthesis_3d(grid, new_state.S_hat.data).real
 
             if self.config.correct_heat:
-                T_new = correct_ocean_heat(
+                T_new = correct_ocean_tracer(
                     T_new, T_old, h_k_new, h_k_old, grid, mask,
                 )
                 T_hat = sh_analysis_3d(grid, T_new.astype(jnp.float64))
@@ -276,7 +276,7 @@ class SFNOOceanModel:
                 )
 
             if self.config.correct_salt:
-                S_new = correct_ocean_salt(
+                S_new = correct_ocean_tracer(
                     S_new, S_old, h_k_new, h_k_old, grid, mask,
                 )
                 S_hat = sh_analysis_3d(grid, S_new.astype(jnp.float64))
@@ -285,66 +285,3 @@ class SFNOOceanModel:
                 )
 
         return new_state
-
-    def integrate(
-        self,
-        state: SpectralOceanState,
-        duration: float,
-        dt: float,
-        save_every: int = 1,
-    ) -> tuple[SpectralOceanState, list]:
-        """Integrate forward for a given duration.
-
-        Parameters
-        ----------
-        state : SpectralOceanState
-            Initial state.
-        duration : float
-            Total integration time [s].
-        dt : float
-            Time step [s].
-        save_every : int
-            Save state every N steps.
-
-        Returns
-        -------
-        (final_state, trajectory)
-        """
-        n_steps = int(duration / dt)
-        trajectory = [state]
-        for i in range(n_steps):
-            state = self.step(state, dt)
-            if (i + 1) % save_every == 0:
-                trajectory.append(state)
-        return state, trajectory
-
-    def integrate_scan(
-        self,
-        state: SpectralOceanState,
-        n_steps: int,
-        dt: float,
-    ) -> tuple[SpectralOceanState, SpectralOceanState]:
-        """Integrate using jax.lax.scan (differentiable, JIT-friendly).
-
-        Parameters
-        ----------
-        state : SpectralOceanState
-            Initial state.
-        n_steps : int
-            Number of time steps.
-        dt : float
-            Time step [seconds].
-
-        Returns
-        -------
-        final_state : SpectralOceanState
-        trajectory : SpectralOceanState (stacked, each leaf shape (n_steps, ...))
-        """
-        def scan_fn(state, _):
-            new_state = self.step(state, dt)
-            return new_state, new_state
-
-        final_state, trajectory = jax.lax.scan(
-            scan_fn, state, xs=None, length=n_steps,
-        )
-        return final_state, trajectory

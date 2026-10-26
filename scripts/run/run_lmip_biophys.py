@@ -8,10 +8,20 @@ from 6-hourly to the model timestep and streamed through ``lax.scan`` as an
 explicit per-step input (SegmentForcing doctrine).  ``run_lmip_smoke.py`` is kept
 untouched as the synthetic-forcing smoke test.
 
-Configuration matches ``run_lmip_smoke`` exactly: ``MultiLayerLandConfig`` with
-prescribed seasonal LAI (CLM5 monthly climatology, one-year cycle) and
-**carbon disabled** (``carbon="none"``) — energy + water + snow + soil
-temperature only.  No NBP; the carbon cycle is a later workstream.
+By default the configuration matches ``run_lmip_smoke`` exactly:
+``MultiLayerLandConfig`` with prescribed seasonal LAI (CLM5 monthly climatology,
+one-year cycle) and **carbon disabled** (``carbon="none"``) — energy + water +
+snow + soil temperature only.  No NBP; the carbon cycle is a later workstream.
+
+``physics.calibrated_land_physics`` REPLACES that default with the land model
+the baked per-plant-type tables were fitted under: MOST exchange, big-leaf
+surface energy balance, Farquhar stomata on a PRESCRIBED (time-constant) leaf
+carbon rather than the seasonal LAI climatology, and the calibration soil column
+(8 layers over 3 m, growth 1.5).  The carbon pools are still not spun up — they
+are re-derived and discarded every step, exactly as the offline calibrator does,
+so the fitted conductance acts on the leaf area it was fitted with.  Use it when
+the resulting soil state will initialise a coupled run on that same land model;
+see ``docs/land/land_dual_target_calibration_runbook.md``.
 
 Default timestep is **1 h** (``--dt 3600``); pass ``--dt 1800`` for 30-min steps.
 Default grid is **latlon ~2°** (``--grid-type latlon --resolution 90`` -> 90x180).
@@ -33,6 +43,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+import warnings
 from pathlib import Path
 
 sys.stdout.reconfigure(line_buffering=True)
@@ -66,7 +77,8 @@ from legoesm.land.output_tapes import (
     init_tape_accumulator, load_output_config,
 )
 from legoesm.land.restart import (
-    load_land_restart, merge_land_restart_into_template, save_land_restart,
+    HYDRAULICS_SOURCE_SURFDATA_COSBY, convert_ic_soil_water, load_land_restart,
+    merge_land_restart_into_template, save_land_restart, soil_hydraulics_stamp,
 )
 
 U_MIN = 1.0
@@ -130,11 +142,15 @@ def _args_from_config(cfg, cli_args) -> argparse.Namespace:
         # canopy).  See lmip_config.validate_config for bounds/validation.
         stomatal_model=cfg.physics.get("stomatal_model", "ball_berry"),
         stomata_enabled=bool(cfg.physics.get("stomata_enabled", False)),
+        calibrated_land_physics=bool(
+            cfg.physics.get("calibrated_land_physics", False)),
+        carbon_prognostic=bool(cfg.physics.get("carbon_prognostic", False)),
         vc_max25=cfg.physics.get("vc_max25", None),
         g1=cfg.physics.get("g1", None),
         gs_max=cfg.physics.get("gs_max", None),
         snow_albedo=bool(cfg.physics.get("snow_albedo_feedback", True)),
         enable_freeze_thaw=bool(cfg.physics.get("enable_freeze_thaw", False)),
+        soil_ice_impedance_exponent=cfg.physics.get("soil_ice_impedance_exponent"),
         albedo=cfg.physics.get("albedo") or {},
         glacier_albedo_vis=cfg.physics.get("glacier_albedo_vis", None),
         glacier_albedo_nir=cfg.physics.get("glacier_albedo_nir", None),
@@ -158,6 +174,7 @@ def _args_from_config(cfg, cli_args) -> argparse.Namespace:
         land_frac_min=cfg.land_frac_min,
         # CLI overrides the config here for chaining ergonomics.
         restart_from=cli_args.restart_from or cfg.restart.get("from", ""),
+        carbon_ic=cfg.restart.get("carbon_ic", ""),
         output_config="",                        # embedded output block is used directly
         _cfg_output_tapes=cfg.output,            # -> load_output_config indirection below
         _cfg_luc=cfg.raw.get("land_use_change") or {},   # E_LUC bookkeeping block
@@ -202,6 +219,18 @@ _VAR_META = {
                        "standard_name": "transpiration_flux"},
     "soil_evap":      {"long_name": "soil / ground evaporation (LE_soil / L_v)", "units": "mm day-1",
                        "standard_name": "water_evaporation_flux_from_soil"},
+    "NBP":            {"long_name": "net biome production (d(total column carbon)/dt; "
+                                    "positive = land gaining carbon). Prognostic "
+                                    "carbon only; 0 when the pools are prescribed",
+                       "units": "gC m-2 day-1",
+                       "standard_name": "surface_net_downward_mass_flux_of_carbon_dioxide_"
+                                        "expressed_as_carbon_due_to_all_land_processes"},
+    "C_total":        {"long_name": "total column carbon (8 pools summed)",
+                       "units": "gC m-2"},
+    "C_soil":         {"long_name": "soil organic carbon (active + slow + passive)",
+                       "units": "gC m-2", "standard_name": "soil_mass_content_of_carbon"},
+    "C_veg":          {"long_name": "live vegetation carbon (labile + foliage + root + wood)",
+                       "units": "gC m-2", "standard_name": "vegetation_mass_content_of_carbon"},
     "reverted":       {"long_name": "NaN-revert guard rate (fraction of steps reverted; "
                                     ">0 = numerically diverging cell)", "units": "1"},
     "land_fraction":  {"long_name": "surfdata land fraction (land + lake + glacier)", "units": "1",
@@ -231,6 +260,15 @@ def _apply_cf_metadata(ds):
             "units": "days"})
     ds.attrs.setdefault("Conventions", "CF-1.8")
     return ds
+
+
+def _column_carbon(carbon):
+    """Total column carbon [gC/m2] = the eight CarbonState pools summed.
+
+    Summed over ``_fields`` rather than a hand-listed set, so a pool added to
+    CarbonState later cannot silently drop out of NBP.
+    """
+    return sum(getattr(carbon, f) for f in carbon._fields)
 
 
 def _nonfinite_per_col(tree, ncol: int):
@@ -405,6 +443,22 @@ def run(args) -> int:
     # values were validated by lmip_config.validate_config.
     _land_albedo = LandAlbedoConfig()._replace(
         **{k: float(v) for k, v in (args.albedo or {}).items()})
+    if args.albedo and isinstance(surf, CanopyConfig):
+        # The two-leaf canopy computes the sunlight it ABSORBS from the CLM
+        # soil-colour albedo pair (a moisture-dependent visible/near-infrared
+        # pair per column), not from this block: nothing here reaches the
+        # canopy radiative transfer, so a brighter snow albedo set here does
+        # not brighten the surface the radiation sees, and does not slow
+        # snowmelt.  It still sets the albedo the run REPORTS below 1 W/m2 of
+        # sunlight and the value handed to a coupled atmosphere.  The ice-sheet
+        # pair (``glacier_albedo_vis``/``_nir``) DOES reach the canopy.  Say so
+        # out loud rather than let a calibration look applied when it is not.
+        warnings.warn(
+            "physics.albedo is set and the surface scheme is the two-leaf "
+            "canopy: these values change the REPORTED albedo only. The canopy "
+            "takes its absorbed sunlight from the soil-colour albedo pair, so "
+            "the snow and dry-soil calibration here does not alter absorbed "
+            "shortwave or snowmelt on this lane.", RuntimeWarning, stacklevel=2)
     _glacier_alb = None
     if args.glacier_albedo_vis is not None:
         _glacier_alb = (float(args.glacier_albedo_vis),
@@ -423,6 +477,10 @@ def run(args) -> int:
         # non-default discretisation can no longer desync from the (ncol, n_layer)
         # Cosby hydraulics.  Defaults reproduce SoilGridConfig(); AMIP parity is
         # 10 layers / 3.0 m.
+        # UNDER ``calibrated_land_physics`` this is REPLACED further down: the
+        # soil grid becomes the calibration column (8 layers, 3 m, growth 1.5 —
+        # same layer COUNT, so the loader still matches) and the carbon scheme
+        # becomes ``differland`` rather than staying off.
         _soil_grid_cfg = SoilGridConfig(
             n_layers=int(args.soil_n_layers),
             growth_factor=float(args.soil_growth_factor),
@@ -436,6 +494,25 @@ def run(args) -> int:
             # heat; on stabilises freezing boreal/Arctic columns.  Preserved
             # through init_land_surface_data (which only _replace()s hydraulics).
             thermal=SoilThermalConfig(enable_freeze_thaw=bool(args.enable_freeze_thaw)))
+        # A land initial condition is only meaningful for the model it was
+        # equilibrated under, so a spin-up feeding a calibrated coupled run has to
+        # use the same one — including its soil column, which this driver
+        # otherwise leaves at the loader default.  ONE shared definition, so the
+        # calibration, the spin-up and the coupled run cannot drift apart.
+        if getattr(args, "calibrated_land_physics", False):
+            from legoesm.land.config import apply_calibrated_multilayer
+            base_cfg = apply_calibrated_multilayer(base_cfg)
+        # Prognostic pools need the carbon scheme ON even when the calibrated
+        # physics bundle (which also sets it) is not selected.  _replace on the
+        # nested CarbonConfig: nothing else about the scheme changes, so with the
+        # flag off this line never runs and every existing run is byte-identical.
+        if getattr(args, "carbon_prognostic", False):
+            base_cfg = base_cfg._replace(
+                carbon=base_cfg.carbon._replace(scheme="differland"))
+        _e_ice = getattr(args, "soil_ice_impedance_exponent", None)
+        if _e_ice is not None:
+            base_cfg = base_cfg._replace(richards=base_cfg.richards._replace(
+                ice_impedance_exponent=float(_e_ice)))
         # Diagnostics variant so the scan can tape GPP (the canopy's surface_out.gpp
         # is dropped from the TileResponse when carbon is off).  Same _impl as
         # step_multilayer_land — the 4th return (SurfaceFluxOutput) is already
@@ -545,6 +622,32 @@ def run(args) -> int:
         k_neighbors=args.k_neighbors, allow_synthetic=allow_syn)
     T0 = _seed_forcing.T_lowest[0]
     del _seed_forcing                                          # free before real staging
+    # Prognostic-carbon state carried out of a restart, bound on EVERY path
+    # (slab mode and cold start included) so the carbon block below cannot hit
+    # an UnboundLocalError.  None = no resumed pools.
+    _restart_carbon = None
+    _restart_phi = None
+    # Hashes the surfdata once; every restart this run reads or writes uses it.
+    _hyd_stamp = (soil_hydraulics_stamp(
+        config.hydraulics.retention_curve, HYDRAULICS_SOURCE_SURFDATA_COSBY,
+        args.surfdata) if args.land_mode == "multilayer" else None)
+    def _cover1d(a):
+        a = np.asarray(a)
+        return a[0] if a.ndim == 2 else a
+    if args.land_mask_file:
+        from legoesm.grids.topography import load_land_fraction
+        land_fraction = np.asarray(load_land_fraction(grid, args.land_mask_file)).ravel()
+    else:
+        land_fraction = (_cover1d(gsd.f_land) + _cover1d(gsd.f_lake)
+                         + _cover1d(gsd.f_glacier))
+    # A cell is "land" if the surfdata assigns it ANY land cover (land_frac_min
+    # default 0.0).  This is the surfdata's own land definition, not an arbitrary
+    # majority-land cutoff; the actual ``land_fraction`` is emitted in every output
+    # so analysis can area-weight or threshold as it sees fit.  (Forcing is now
+    # finite on every land column -- CRU-JRA regrids from land-only source -- so no
+    # threshold is needed to dodge unforced coastal cells.)
+    land = land_fraction > args.land_frac_min
+
     if args.land_mode == "slab":
         from legoesm.core.field import Field
         from legoesm.land.state import LandState
@@ -560,11 +663,23 @@ def run(args) -> int:
         if args.restart_from:
             # Warm start from a prior end-state — bypass the cold-init T_soil
             # broadcast so the loaded profile survives verbatim.
+            # Layer thicknesses, not just the count: 8 layers can span 3 m or
+            # 6.375 m, and only the thicknesses tell a restart's soil profile
+            # apart from one placed at different depths.
+            from legoesm.land.soil_grid import make_soil_grid as _make_soil_grid
             loaded, restart_meta = load_land_restart(
                 args.restart_from,
                 expected_land_mode="multilayer",
                 expected_ncol=ncol,
-                expected_n_layers=config.soil_grid.n_layers)
+                expected_n_layers=config.soil_grid.n_layers,
+                expected_soil_dz=_make_soil_grid(config.soil_grid).dz,
+                # The calibration column is not this driver's historical
+                # default, so an older restart carrying no stamp is almost
+                # certainly on the wrong one: refuse rather than warn,
+                # otherwise the chain re-saves that profile under the new
+                # column's label.
+                require_soil_dz=bool(getattr(
+                    args, "calibrated_land_physics", False)))
             # A restart round-trips only the prognostic fields, leaving the
             # optional structural ones (surface_water, snow/ice bands,
             # canopy_state) as None — but step_multilayer_land returns them as
@@ -573,9 +688,49 @@ def run(args) -> int:
             # cold-start template, as model_driver and run_land_spinup do.
             state = merge_land_restart_into_template(
                 loaded, init_multilayer_land_state(ncol, config, T_init=288.0))
+            # A restart evolved on other soil hydraulics keeps its water, not
+            # its matric potential.
+            state, _conv = convert_ic_soil_water(
+                state, restart_meta, config.hydraulics, _hyd_stamp,
+                _make_soil_grid(config.soil_grid).dz, land_mask=land,
+                file_column_sig=restart_meta.get("soil_hydraulics_column_sig"),
+                path=args.restart_from)
+            if _conv is not None:
+                print(f"restart: soil water converted to this run's hydraulics "
+                      f"({_conv['stamp']['retention_curve']} -> "
+                      f"{_conv['run_stamp']['retention_curve']}); psi re-derived")
             print(f"restart: loaded state from {args.restart_from} "
                   f"(t_end_s={restart_meta['t_end_s']:.1f}, "
                   f"steps_completed={restart_meta['n_steps_completed']})")
+            # Carbon pools + permafrost phi if the writer had them (None for a
+            # biophysics-only restart).  Consumed by the seeding block below,
+            # where a RESUMED state takes precedence over a fresh finidat seed.
+            _restart_carbon = restart_meta.get("carbon_state")
+            _restart_phi = restart_meta.get("soil_frozen_fraction")
+            # A restart that CARRIES pools, resumed with the pools switched off,
+            # would run prescribed physics and then write the next restart with
+            # no carbon at all -- the evolved pools would be destroyed by a
+            # chained run that merely forgot a flag.  Refuse instead.
+            if (_restart_carbon is not None
+                    and not bool(getattr(args, "carbon_prognostic", False))):
+                raise SystemExit(
+                    f"{args.restart_from} carries prognostic carbon pools but "
+                    "physics.carbon_prognostic is false. Resuming would run the "
+                    "prescribed lane and then write a restart WITHOUT them, "
+                    "discarding the evolved carbon. Set physics.carbon_prognostic="
+                    "true to continue the run, or resume from a biophysics-only "
+                    "restart.")
+            # Pools without phi = the high-latitude SOM protection the seed was
+            # equilibrated under is gone, and the Arctic carbon will decay.  It
+            # is legitimate (an unprotected run writes exactly this), so warn
+            # rather than fail -- but never let it pass unremarked.
+            if _restart_carbon is not None and _restart_phi is None:
+                warnings.warn(
+                    f"{args.restart_from} carries carbon pools but no "
+                    "soil_frozen_fraction: resuming UNPROTECTED. If these pools "
+                    "came from a permafrost-protected seed, their high-latitude "
+                    "SOM will now decay toward the unprotected equilibrium.",
+                    RuntimeWarning, stacklevel=2)
         else:
             state = init_multilayer_land_state(ncol, config, T_init=288.0)
             state = state._replace(T_soil=jnp.broadcast_to(T0[:, None], state.T_soil.shape))
@@ -605,20 +760,88 @@ def run(args) -> int:
 
     _ZEROS = jnp.zeros(ncol)                       # slab-mode placeholder for multilayer-only vars
 
-    # ----- scan body: (state, tape_accums, revert_count) -> next. -----
+    # PRESCRIBED carbon state (fixed leaf carbon -> fixed LAI = C_fol/LCMA).  The
+    # Farquhar branch of compute_effective_beta needs BOTH the differland scheme
+    # and a non-None carbon state; with the scheme set and the state missing the
+    # same dispatch silently runs JARVIS instead, a different stomatal model from
+    # the one the baked conductance was fitted under.  The evolved pools are
+    # discarded each step, exactly as the offline calibrator does, so no carbon
+    # spin-up is needed.  None whenever the scheme is not differland, which keeps
+    # every existing run byte-identical.
+    _carbon_state = None
+    if is_multilayer and config.stomata.enabled and config.carbon.scheme == "differland":
+        from legoesm.land.carbon.carbon_cycle import init_carbon_state
+        _carbon_state = init_carbon_state((ncol,), config.carbon)
+
+    # --- PROGNOSTIC pools (opt-in): evolve them instead of discarding ---------
+    # With physics.carbon_prognostic the pools become part of the scan CARRY, so
+    # C_fol -> LAI feeds back on the conductance.  That is a different experiment
+    # from the calibrated lane above, which is why it is opt-in and off by
+    # default; with the flag off nothing below runs.
+    _carbon_prognostic = bool(getattr(args, "carbon_prognostic", False))
+    _carbon_phi = None
+    if _carbon_prognostic:
+        if _carbon_state is None:
+            raise SystemExit(
+                "physics.carbon_prognostic needs the multilayer land with "
+                "stomata enabled and the differland carbon scheme; got "
+                f"land_mode={args.land_mode!r}, stomata_enabled="
+                f"{config.stomata.enabled}, carbon={config.carbon.scheme!r}.")
+        _cic = getattr(args, "carbon_ic", "")
+        if _restart_carbon is not None:
+            # Resuming: the restart's pools ARE the current state.  Re-seeding
+            # from the finidat here would silently rewind the carbon to t=0
+            # while the physics carried on, so the restart wins and says so.
+            _carbon_state = _restart_carbon
+            _carbon_phi = _restart_phi
+            if _cic:
+                print(f"carbon IC: IGNORING restart.carbon_ic={_cic} — the "
+                      "restart already carries evolved pools (a seed here would "
+                      "rewind them)")
+            else:
+                print("carbon: resumed prognostic pools from the restart "
+                      f"(permafrost phi {'threaded' if _carbon_phi is not None else 'absent'})")
+        elif _cic:
+            # STRICT whole-grid match: the pools are per-area stocks pinned to
+            # the finidat's own cells, so the finidat must have been built on
+            # THIS grid.  Passing the run's coordinates makes a same-count but
+            # differently-ordered grid fail loudly instead of scrambling cells.
+            from legoesm.land.carbon.global_init import load_finidat_carbon_ic
+            _seed, _carbon_phi = load_finidat_carbon_ic(
+                _cic, expect_ncol=ncol,
+                target_lat_deg=np.rad2deg(np.asarray(lat_rad, dtype=np.float64)),
+                target_lon_deg=np.rad2deg(np.asarray(lon_rad, dtype=np.float64)))
+            if _seed is None:
+                raise SystemExit(
+                    f"restart.carbon_ic={_cic!r} is not a carbon finidat (one or "
+                    "more of the eight pools is missing).")
+            _carbon_state = _seed
+            print(f"carbon IC: seeded {ncol} columns from {_cic} "
+                  f"(permafrost phi {'threaded' if _carbon_phi is not None else 'absent'})")
+        else:
+            print(f"carbon: PROGNOSTIC from cold pools ({ncol} columns) — "
+                  "soil carbon needs centuries to equilibrate, so seed with "
+                  "restart.carbon_ic for anything but a mechanism test")
+
+    # ----- scan body: (state, tape_accums, revert_count, carbon) -> next. -----
     def _step_body(carry, xs):
-        state, accums, revert_count = carry
+        state, accums, revert_count, carbon = carry
         forcing_t, doy_t, year_t, per_tape_slot = xs
         theta_top_t = (state.theta_soil[:, 0] if is_multilayer else jnp.full(ncol, 0.2))
         land_params_t, lai_diag = update_land_params(theta_top_t, doy_t, year_t)
         # Multilayer uses the diagnostics variant (4-tuple) so surface_out.gpp is
         # reachable; slab keeps the 3-tuple.  ``is_multilayer`` is static.
         if is_multilayer:
-            new_state, resp, _, surf_out = step_fn(
+            # Prognostic: the pools come from the CARRY and the evolved pools are
+            # kept.  Prescribed (default): the closure constant goes in and the
+            # returned pools are discarded, exactly as before.
+            new_state, resp, carbon_new, surf_out = step_fn(
                 state, forcing_t, config, U_MIN, dt,
-                lat=lat_rad, land_params=land_params_t, doy=doy_t)
+                lat=lat_rad, land_params=land_params_t, doy=doy_t,
+                carbon_state=(carbon if _carbon_prognostic else _carbon_state),
+                soil_frozen_fraction=_carbon_phi)
         else:
-            new_state, resp, _ = step_fn(
+            new_state, resp, carbon_new = step_fn(
                 state, forcing_t, config, U_MIN, dt,
                 lat=lat_rad, land_params=land_params_t, doy=doy_t)
             surf_out = None
@@ -631,7 +854,7 @@ def run(args) -> int:
             gpp_day = surf_out.gpp * _SEC_PER_DAY
         else:
             gpp_day = _ZEROS
-        et_mmday = resp.lhflx / constants.L_v * _SEC_PER_DAY
+        et_mmday = resp.surface_mass_flux * _SEC_PER_DAY   # the land's own water flux
         # Transpiration + soil-evaporation split [mm/day]: the canopy's per-component
         # latent (LE_canopy = sunlit+shaded leaf transpiration, LE_soil = ground
         # evaporation), converted to a water flux.  None for simple_seb (single skin,
@@ -640,8 +863,13 @@ def run(args) -> int:
         # SW + net LW = sw_down*(1-albedo) + lw_down - lw_up (scheme-agnostic; the
         # reported albedo/lw_up already reflect the canopy RT).
         if surf_out is not None and surf_out.LE_canopy is not None:
-            transp = surf_out.LE_canopy / constants.L_v * _SEC_PER_DAY
-            soil_evap = surf_out.LE_soil / constants.L_v * _SEC_PER_DAY
+            # Inverse of the L_v(T) the canopy charged: two_leaf_canopy's lam is
+            # L_v(T_soil_top), the PRE-step top-soil temperature (resp.T_sfc is
+            # the canopy-air temperature, a different number).
+            from legoesm.thermo import latent_heat_vaporization as _lv_T
+            _L_charge = _lv_T(state.T_soil[:, 0])
+            transp = surf_out.LE_canopy / _L_charge * _SEC_PER_DAY
+            soil_evap = surf_out.LE_soil / _L_charge * _SEC_PER_DAY
         else:
             transp = _ZEROS
             soil_evap = _ZEROS
@@ -676,22 +904,65 @@ def run(args) -> int:
         # PASS/FAIL.  The reverted step's diagnostics are untrustworthy, so mask
         # them to NaN; ``reverted`` (0/1) is tape-able as a per-cell failure-rate
         # map and ``revert_count`` accumulates a per-cell total for the summary.
+        # TWO masks, because the dependency is one-way.  Carbon consumes the
+        # physics (C_fol -> LAI -> conductance), the physics does not consume a
+        # pool within the step, so a diverging litter pool must NOT freeze that
+        # column's soil temperature and moisture as well.  Carbon reverts when
+        # EITHER it or the physics it ate went bad; physics reverts only on its
+        # own.  Within carbon the revert stays all-or-nothing per column —
+        # reverting one pool and not another would break mass closure.
         reverted = _nonfinite_per_col(new_state, ncol)          # (ncol,) bool
-        def _revert(n, o):
-            if getattr(n, "ndim", 0) < 1 or n.shape[0] != ncol:
-                return n
-            m = reverted.reshape((ncol,) + (1,) * (n.ndim - 1))
-            return jnp.where(m, o, n)
+        reverted_carbon = (reverted | _nonfinite_per_col(carbon_new, ncol)
+                           if _carbon_prognostic else reverted)
+        def _revert_with(mask):
+            def _f(n, o):
+                if getattr(n, "ndim", 0) < 1 or n.shape[0] != ncol:
+                    return n
+                m = mask.reshape((ncol,) + (1,) * (n.ndim - 1))
+                return jnp.where(m, o, n)
+            return _f
+        _revert = _revert_with(reverted)
         new_state = jax.tree_util.tree_map(_revert, new_state, state)
+        carbon_next = (jax.tree_util.tree_map(
+                           _revert_with(reverted_carbon), carbon_new, carbon)
+                       if _carbon_prognostic else carbon)
         revert_count = revert_count + reverted.astype(revert_count.dtype)
         values = {k: jnp.where(reverted, jnp.nan, v) for k, v in values.items()}
         values["reverted"] = reverted.astype(jnp.float64)
+        # Carbon diagnostics come from the POST-revert carry, and are deliberately
+        # NOT NaN-masked like the fluxes above.  Two reasons.  (1) After a revert
+        # the trajectory this run actually reports has dC = 0 for that column, so
+        # NBP = 0 is the CONSISTENT tendency -- it reconciles with the monthly
+        # change in C_total, where NaN would assert "unknown" about a state that
+        # is known.  (2) accumulate_tape_step sums with a plain `.at[].add()`, so
+        # it is NOT NaN-aware: one reverted step would turn that column's whole
+        # averaging window -- and any global mean taken from it -- into NaN.
+        # The `reverted` tape above carries the fraction of the window that was
+        # reverted, which is the honest flag; a zero without that flag would be
+        # the misleading combination, and it is available on every tape.
+        # Differencing is exact for whatever the pools hold (it cannot miss a
+        # sink the way NPP - Rh can), and this driver runs float64, so the
+        # large-stock cancellation that would swamp a float32 difference does
+        # not bite here.
+        if _carbon_prognostic:
+            _c_tot = _column_carbon(carbon_next)
+            values["C_total"] = _c_tot
+            values["C_soil"] = (carbon_next.C_som_active + carbon_next.C_som_slow
+                                + carbon_next.C_som_passive)
+            values["C_veg"] = (carbon_next.C_lab + carbon_next.C_fol
+                               + carbon_next.C_root + carbon_next.C_wood)
+            values["NBP"] = (_c_tot - _column_carbon(carbon)) / dt * _SEC_PER_DAY
+        else:
+            values["C_total"] = _ZEROS
+            values["C_soil"] = _ZEROS
+            values["C_veg"] = _ZEROS
+            values["NBP"] = _ZEROS
         new_accums = {}
         for tape in tape_specs:                    # unrolled at trace time
             new_accums[tape.name] = accumulate_tape_step(
                 accums[tape.name], tape, per_tape_slot[tape.name],
                 {v: values[v] for v in tape.vars})
-        return (new_state, new_accums, revert_count), None
+        return (new_state, new_accums, revert_count, carbon_next), None
 
     # ----- CHUNKED SCAN: stage forcing + lax.scan one year at a time.  --------
     # Tape accumulators are sized for the WHOLE run and threaded across chunks;
@@ -732,22 +1003,6 @@ def run(args) -> int:
         lat_1d = lat_deg.reshape(nlat, nlon)[:, 0]
         lon_1d = lon_deg.reshape(nlat, nlon)[0, :]
 
-    def _cover1d(a):
-        a = np.asarray(a)
-        return a[0] if a.ndim == 2 else a
-    if args.land_mask_file:
-        from legoesm.grids.topography import load_land_fraction
-        land_fraction = np.asarray(load_land_fraction(grid, args.land_mask_file)).ravel()
-    else:
-        land_fraction = (_cover1d(gsd.f_land) + _cover1d(gsd.f_lake)
-                         + _cover1d(gsd.f_glacier))
-    # A cell is "land" if the surfdata assigns it ANY land cover (land_frac_min
-    # default 0.0).  This is the surfdata's own land definition, not an arbitrary
-    # majority-land cutoff; the actual ``land_fraction`` is emitted in every output
-    # so analysis can area-weight or threshold as it sees fit.  (Forcing is now
-    # finite on every land column -- CRU-JRA regrids from land-only source -- so no
-    # threshold is needed to dodge unforced coastal cells.)
-    land = land_fraction > args.land_frac_min
 
     def _flush_tapes(accums, slot_ids_by_tape, label):
         """Write each tape's selected slots to ``lmip_biophys.<tape>[.<label>].nc``.
@@ -798,9 +1053,13 @@ def run(args) -> int:
             print(f"wrote {nc} ({ids.size} {tape.freq} slots, "
                   f"layout={'lat,lon' if is_latlon else 'ncol'})")
 
-    def _save_restart(cur_state, t_end_s, n_completed):
+    def _save_restart(cur_state, t_end_s, n_completed, cur_carbon=None):
         """Save a chained-run seed named by the model time it represents
-        (restart_<YEAR>_d<DDD>h<HH>.npz, noleap).  Multilayer only."""
+        (restart_<YEAR>_d<DDD>h<HH>.npz, noleap).  Multilayer only.
+
+        ``cur_carbon`` (prognostic lane only) is written alongside the physics,
+        with the permafrost phi, so a chained run resumes the pools it evolved
+        instead of silently rewinding them to the seed."""
         if not is_multilayer:
             return
         try:
@@ -817,21 +1076,32 @@ def run(args) -> int:
                 # Sourced from the CONSTRUCTED config (not args) so provenance
                 # reflects the physics actually run.
                 "enable_freeze_thaw": bool(config.thermal.enable_freeze_thaw),
+                "soil_ice_impedance_exponent": float(
+                    config.richards.ice_impedance_exponent),
                 "year": year_start, "year_end": year_end, "dt": dt,
                 "n_steps": args.n_steps, "start_doy": args.start_doy,
                 "forcing": ("synthetic" if synthetic else "CRU-JRA"),
+                "carbon_prognostic": _carbon_prognostic,
+                "carbon": config.carbon.scheme,
                 "year_final": year_final, "doy_final": doy_int, "hour_final": hour_of_day,
             }
+            from legoesm.land.soil_grid import make_soil_grid as _msg
             rp = save_land_restart(
                 out_dir / restart_name, cur_state,
                 land_mode="multilayer", t_end_s=t_end_s,
-                n_steps_completed=n_completed, metadata=restart_meta)
+                n_steps_completed=n_completed, metadata=restart_meta,
+                soil_grid=config.soil_grid,
+                soil_hydraulics=_hyd_stamp,
+                hydraulics=config.hydraulics,
+                carbon_state=cur_carbon,
+                soil_frozen_fraction=(_carbon_phi if cur_carbon is not None else None))
             print(f"wrote {rp}")
         except Exception as e:  # noqa: BLE001
             print(f"(restart write skipped: {e})")
 
     steps_done = 0
     revert_count = jnp.zeros(ncol)                  # per-cell NaN-revert tally
+    _carbon_carry = _carbon_state if _carbon_prognostic else None
     for k, (year, mask) in enumerate(year_masks):
         # Year-local model times: the year's forcing clock resets to 0 at Jan 1.
         tq_year = tq[mask]
@@ -851,8 +1121,14 @@ def run(args) -> int:
         # Slice each tape's GLOBAL slot indices to just this year's steps.
         slot_year_xs = {name: idx[mask] for name, idx in slot_idx_global.items()}
         print(f"  year {year} ({n_step_year} steps) ...")
-        (state, tape_accums, revert_count), _ = jax.lax.scan(
-            _step_body, (state, tape_accums, revert_count),
+        # Only the PROGNOSTIC pools ride in the carry; in the prescribed lane the
+        # carry slot is None (an empty pytree) and the step reads the closure
+        # constant, so that lane's traced graph and its numbers are unchanged.
+        # A separate name is load-bearing: assigning the scan's output back to
+        # _carbon_state would overwrite the prescribed closure constant with the
+        # carry (None) and break the NEXT year chunk.
+        (state, tape_accums, revert_count, _carbon_carry), _ = jax.lax.scan(
+            _step_body, (state, tape_accums, revert_count, _carbon_carry),
             (forcing_year, doy_year, year_xs, slot_year_xs))
         del forcing_year, doy_year, year_xs, slot_year_xs      # free before next year
         steps_done += n_step_year
@@ -865,7 +1141,7 @@ def run(args) -> int:
                     t.name: np.unique(np.asarray(slot_idx_global[t.name])[np.asarray(mask)])
                     for t in tape_specs}
                 _flush_tapes(tape_accums, year_ids, f"{year:04d}")
-                _save_restart(state, float(tq_year[-1] + dt), steps_done)
+                _save_restart(state, float(tq_year[-1] + dt), steps_done, _carbon_carry)
             except Exception as e:  # noqa: BLE001
                 print(f"(year {year} annual flush skipped: {e})")
 
@@ -929,7 +1205,7 @@ def run(args) -> int:
         _flush_tapes(tape_accums, all_ids, "")
     except Exception as e:  # noqa: BLE001
         print(f"(netcdf write skipped: {e})")
-    _save_restart(state, float(model_times_s[-1] + dt), args.n_steps)
+    _save_restart(state, float(model_times_s[-1] + dt), args.n_steps, _carbon_carry)
 
     return 0 if status == "PASS" else 1
 

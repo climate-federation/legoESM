@@ -17,7 +17,10 @@ def _load(path):
     if not path or not os.path.exists(path):
         return []
     with open(path) as f:
-        return [json.loads(l) for l in f if l.strip()]
+        rows = [json.loads(l) for l in f if l.strip()]
+    # invalid rows carry no timing (non-finite state); unchecked rows predate
+    # the finite check and timed a blown-up state
+    return [r for r in rows if r.get("valid") is not False and r.get("finite_ok") is True]
 
 
 def _row_time_ms(r):

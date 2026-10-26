@@ -257,7 +257,7 @@ def test_mcfarlane_drag_scales_linearly_with_k_wave():
             h_topo=200.0, k_wave=2.0 * math.pi / 100e3 * k_factor,
         )
         out = mcfarlane_gwd(u, v, T, p_full, p_half, z_full_b, z_half_b,
-                           rho, lat, 300.0, cfg)
+                           rho, lat, 300.0, cfg, p_ref_half=p_half[0])
         return float(jnp.sum(jnp.abs(out.du_dt))), float(out.eps_gwd[0])
 
     drag_lo, eps_lo = drag_at_k(1.0)
@@ -350,7 +350,7 @@ def test_mcfarlane_saturation_path_fires_in_uniform_wind():
 
     cfg = McFarlaneConfig(h_topo=2000.0)
     out = mcfarlane_gwd(u, v, T, p_full, p_half, z_full_b, z_half_b,
-                       rho, lat, 300.0, cfg)
+                       rho, lat, 300.0, cfg, p_ref_half=p_half[0])
     max_du = float(jnp.max(jnp.abs(out.du_dt)))
     eps = float(out.eps_gwd[0])
 
@@ -519,18 +519,15 @@ def test_gwd_grad_through_T_finite_and_nonzero(scheme):
         )
 
 
-def test_hines_T_gradient_is_limiter_gated_not_missing():
-    """Documents the diagnosis behind the relaxed-limiter hines config above.
-
-    The hines heating IS a differentiable function of T (via the Brunt-Väisälä
-    frequency N(theta) → saturation amplitude → drag → frictional heating). But
-    the E3SM-faithful magnitude limiter ``accel = -min(|accel|, umcfac*U_mag/dt)``
-    is intentionally T-independent *when it binds*: ``jnp.minimum`` routes the
-    gradient to the cap, so the operational (saturated, Fmax=100) regime shows a
-    ~zero dT/dT. That is the limiter doing its job, not a missing/severed T-path.
-
-    Proof that the relaxed config exposes REAL signal (not numerical noise): the
-    cap-off gradient is many orders of magnitude larger than the cap-on one.
+def test_hines_T_gradient_is_not_limiter_gated_at_the_700hpa_launch():
+    """The hines heating is a differentiable function of T (N(theta) ->
+    saturation amplitude -> drag -> frictional heating).  With the old SURFACE
+    launch the wave broke in the boundary layer, the E3SM magnitude limiter
+    ``accel = -min(|accel|, umcfac*U_mag/dt)`` bound there and routed the
+    gradient to the T-independent cap, so dT/dT was ~0 (which is why the
+    relaxed-limiter config above exists).  Launched at 700 hPa the limiter does
+    not bind on this state: the operational gradient is real signal and equal
+    to the limiter-free one.
     """
     from legoesm.atmosphere.physics.gravity_wave_drag.config import HinesConfig
 
@@ -548,17 +545,14 @@ def test_hines_T_gradient_is_limiter_gated_not_missing():
             return jnp.sum(tend.dT_dt.data ** 2)
         return abs(float(jax.grad(loss)(jnp.asarray(0.0))))
 
-    capped = grad_for(HinesConfig(Fmax=100.0))  # E3SM limiter binds → ~0
+    capped = grad_for(HinesConfig(Fmax=100.0))
     freed = grad_for(HinesConfig(Fmax=100.0, tndmax_per_day=1.0e4, umcfac=1.0e3))
     assert jnp.isfinite(capped) and jnp.isfinite(freed)
-    assert freed > 1e-15, (
-        f"uncapped hines T-gradient should be real signal, got {freed}"
-    )
-    assert freed > 1.0e6 * capped, (
-        f"lifting the magnitude limiter must expose a far larger T-gradient "
-        f"(capped={capped:.3e}, freed={freed:.3e}) — confirms it is the cap, "
-        f"not a missing T-path, that zeroes the operational gradient."
-    )
+    assert capped > 1e-15, (
+        f"operational hines T-gradient should be real signal, got {capped}")
+    assert capped == pytest.approx(freed, rel=1e-6), (
+        f"the limiter should not bind at the 700 hPa launch "
+        f"(capped={capped:.3e}, freed={freed:.3e})")
 
 
 @pytest.mark.parametrize("scheme", ["rayleigh", "lindzen", "mcfarlane", "hines"])
@@ -845,7 +839,7 @@ def test_combined_tendency_is_exact_sum():
     h_topo = jnp.full((ncol,), 800.0)
 
     oro = mcfarlane_gwd(u, v, T, p_full, p_half, z_full, z_half, rho, lat, dt,
-                        cfg.mcfarlane, h_topo_col=h_topo)
+                        cfg.mcfarlane, h_topo_col=h_topo, p_ref_half=p_half[0])
     spec_out, spec_new_ref = prognostic_spectral_gwd(
         u, v, T, p_full, p_half, z_full, z_half, rho, lat, dt,
         cfg.prognostic_spectral, spec_in)
@@ -853,7 +847,8 @@ def test_combined_tendency_is_exact_sum():
     _, combined_fn, full_cfg = get_gwd_fn(cfg)
     combined, spec_new = combined_fn(
         u, v, T, p_full, p_half, z_full, z_half, rho, lat, dt, full_cfg,
-        spec_in, h_topo_col=h_topo)
+        spec_in, h_topo_col=h_topo,
+        mcfarlane_kwargs={"p_ref_half": p_half[0]})
 
     assert jnp.allclose(combined.du_dt, oro.du_dt + spec_out.du_dt, atol=1e-12)
     assert jnp.allclose(combined.dv_dt, oro.dv_dt + spec_out.dv_dt, atol=1e-12)
@@ -881,7 +876,8 @@ def test_combined_threads_and_evolves_spectrum():
     spec_in = jnp.full((ncol, sc.n_azimuths, sc.n_wavenumbers), 0.01)
     _, combined_fn, full_cfg = get_gwd_fn(cfg)
     _, spec_new = combined_fn(
-        u, v, T, p_full, p_half, z_full, z_half, rho, lat, 300.0, full_cfg, spec_in)
+        u, v, T, p_full, p_half, z_full, z_half, rho, lat, 300.0, full_cfg, spec_in,
+        mcfarlane_kwargs={"p_ref_half": p_half[0]})
     assert spec_new.shape == spec_in.shape
     assert not bool(jnp.allclose(spec_new, spec_in))
 
@@ -898,12 +894,13 @@ def test_stateless_composite_sums_without_spectrum():
     dt = 300.0
     cfg = GravityWaveDragConfig(scheme="hines+mcfarlane")
     oro = mcfarlane_gwd(u, v, T, p_full, p_half, z_full, z_half, rho, lat, dt,
-                        cfg.mcfarlane)
+                        cfg.mcfarlane, p_ref_half=p_half[0])
     hin = hines_gwd(u, v, T, p_full, p_half, z_full, z_half, rho, lat, dt,
                     cfg.hines)
     _, combined_fn, full_cfg = get_gwd_fn(cfg)
     combined, spec_out = combined_fn(
-        u, v, T, p_full, p_half, z_full, z_half, rho, lat, dt, full_cfg, None)
+        u, v, T, p_full, p_half, z_full, z_half, rho, lat, dt, full_cfg, None,
+        mcfarlane_kwargs={"p_ref_half": p_half[0]})
     assert jnp.allclose(combined.du_dt, oro.du_dt + hin.du_dt, atol=1e-12)
     assert jnp.allclose(combined.dT_dt, oro.dT_dt + hin.dT_dt, atol=1e-12)
     assert spec_out is None  # no stateful part -> spectrum passthrough

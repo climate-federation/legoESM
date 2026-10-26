@@ -1,0 +1,247 @@
+{
+    "format": "nemo-testcase-l2-gyre-round29-v1",
+    "date": "2026-09-05",
+    "starting_tip": "509aed683857",
+    "regime": "CPU production JIT, fp64/x64, oracle V2, transcendentals=libm",
+    "preregistration": "manifests/nemo_testcase_l2_gyre_round29_preregister.json @ 7d7cbfb97319",
+    "oracle_roots": {
+        "GYRE-zco": [
+            "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round19_oracle_v2_external",
+            "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round21_oracle_v2_stage_ww"
+        ],
+        "LOCK_EXCHANGE-zco": "/data/abyssal/dbalwada/nemo-testcases-l1/phase3/lock_kt1_10",
+        "OVERFLOW-zps": "/data/abyssal/dbalwada/nemo-testcases-l1/phase3/overflow_kt1_10"
+    },
+    "item0_corrected_premise": {
+        "handed_premise": "dyn_zdf is the only stage-3-only momentum operator touching every wet U face",
+        "verdict": "WRONG, corrected before any measurement",
+        "reason": "the stage-3 arm calls dyn_ldf first (stprk3_stg.F90:400, ppsrc GYRE_OMIP_L2_P3_SM/BLD/ppsrc/nemo/stprk3_stg.f90:485) and dyn_zdf after (:430, ppsrc :498); neither runs at stage 1 or 2",
+        "dyn_ldf_is_active_on_gyre": "ln_dynldf_lap and ln_dynldf_lev both true (GYRE_OMIP_L2_P3_SM/EXP00/namelist_cfg:187-188), nn_ahm_ijk_t=0 with rn_Uv=2.0 rn_Lv=100e3 (:189-191), printed 'iso-level laplacian operator' at round19_oracle_v2_external/ocean.output:706",
+        "consequence": "the instrument dumps TWO boundaries, not one; one bit-unequal cell in the pre-dyn_zdf RHS moves the owner to dyn_ldf or earlier"
+    },
+    "item0b_resolved_matrix_contributions": {
+        "ln_zad_Aimp": "F (round19_oracle_v2_external/ocean.output:553) -- implicit vertical advection never enters the matrix",
+        "lateral_operator": "iso-level, not iso-neutral (:706) -- rotated lateral mixing never enters the matrix",
+        "ln_isfcav": "F (:338) -- top friction dead",
+        "ln_drgice_imp": "F (:630) -- ice drag dead",
+        "ln_drgimp": "T (:629) -- implicit BOTTOM friction live, in both of its places",
+        "ln_dynadv_vec": "T (GYRE_OMIP_L2_P3_SM/EXP00/namelist_cfg:161) -- dynzdf takes the velocity-form explicit update, dynzdf.F90:121-122",
+        "cpp_keys": "key_qco key_vco_1d3d key_RK3 -- the wind enters through dynzdf.F90:329-330, not the MLF average"
+    },
+    "item1_per_stage_localisation": {
+        "source": "gyre_kt1_10/legoesm_phase3_round8_kt10_gate.json full_stage_program.momentum_rows",
+        "stage1_u": {
+            "absolute_max": 2.710505431213761e-19,
+            "status": "AT-BAR",
+            "n": 17400
+        },
+        "stage2_u": {
+            "absolute_max": 4.740083109008864e-13,
+            "status": "DEBT",
+            "n": 17400
+        },
+        "stage3_u": {
+            "absolute_max": 9.481924730527598e-07,
+            "status": "DEBT",
+            "n": 17400
+        },
+        "stage1_v": {
+            "absolute_max": 2.710505431213761e-19,
+            "status": "AT-BAR",
+            "n": 17100
+        },
+        "stage2_v": {
+            "absolute_max": 4.885601404230715e-13,
+            "status": "DEBT",
+            "n": 17100
+        },
+        "stage3_v": {
+            "absolute_max": 8.988523102725608e-07,
+            "status": "DEBT",
+            "n": 17100
+        }
+    },
+    "item2_existing_record_walk": {
+        "verdict": "NEITHER -- no pre-dyn_zdf momentum frame exists at stage 3, so the existing records cannot decide the owner",
+        "record_census": {
+            "records_read": 51,
+            "distinct_instrument_tags": 21,
+            "momentum_operand_tags_all_gated_on_kstg2": [
+                "NEMO_L2_RKTRM_1",
+                "NEMO_L2_HPGOP_1",
+                "NEMO_L2_HPGLT_1",
+                "NEMO_L2_EOSOP_1",
+                "NEMO_L2_ENEOP_1",
+                "NEMO_L2_RKPRE_1",
+                "NEMO_L2_RKSTG_1"
+            ],
+            "stage3_records_that_exist": "tracer and vertical-velocity only; the three NEMO_L1_STAGE_1 files hold stage OUTPUTS (T, S, u, v, ssh), no RHS and no matrix"
+        },
+        "already_exonerated_inside_stage3": {
+            "ww_at_stage3": "AT-BAR at all three stages (round 21)",
+            "avm_at_zdf_entry": {
+                "absolute_max": 3.469446951953614e-17,
+                "status": "AT-BAR",
+                "n": 17400
+            },
+            "avt_at_zdf_entry": {
+                "absolute_max": 3.469446951953614e-18,
+                "status": "AT-BAR",
+                "n": 17400
+            }
+        },
+        "unmeasured_operators_between_the_two_scored_frames": [
+            "eos + dyn_hpg",
+            "dyn_vor",
+            "dyn_adv",
+            "dyn_ldf",
+            "dyn_zdf",
+            "the barotropic correction"
+        ]
+    },
+    "item3_instrument": {
+        "run_sh": "scripts/validate/ocean_fidelity/testcases/nemo_testcase_l2_gyre_round29_zdf/run.sh",
+        "patches": [
+            "dynzdf_round29.patch (against the SHIPPED src/OCE/DYN/dynzdf.F90, copied into MY_SRC by run.sh)",
+            "stprk3_stg_round29.patch (against the reviewed MY_SRC copy)"
+        ],
+        "target_config": "GYRE_OMIP_L2_P3_SM_R29ZDF",
+        "target_run": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round29_oracle_v2_zdf_matrix",
+        "records": {
+            "oracle_rkstage3_preldf_kt00000001.bin": "NEMO_L2_RKPLD_1 -- uu/vv(Krhs) at stage 3 immediately before dyn_ldf",
+            "oracle_zdf_matrix_kt00000001.bin": "NEMO_L2_ZDFMX_1 -- 32 named arrays: RHS in, Kbb, uu_b/vv_b(Kaa), pre-solve vector, zwi/zwd/zws for both faces, avm, e3u/e3uw/e3v/e3vw, four masks, rCdU_bot, mbku/mbkv, utauU/vtauV, solved Kaa, rDt, rho0"
+        },
+        "format": "16-byte magic, sixteen header integers (including the writer's own ntsi/ntei/ntsj/ntej), then (name[16], rank, n1, n2, n3, payload) groups until EOF",
+        "write_only": "own locals, own NEWUNIT, canonical zero-first buffers, refuses domain tiling rather than dumping one tile as the field",
+        "admission": "reuses nemo_testcase_l2_gyre_round21_admission.py with --allowed-new; every pre-existing record and the final restart must be byte-identical to round19_oracle_v2_external"
+    },
+    "item4_reader_calibration_against_the_fortran_writer": {
+        "method": "the inserted code was preprocessed with the deck's own cpp keys, compiled with gfortran 15.2.0 and run on a 6x5x4 domain, with NEMO's own matrix-build and solve statements lifted verbatim from the preprocessed source so the fixture is what its operands imply",
+        "claim": "the python transcription reproduces gfortran's evaluation of the SAME statements bit for bit; this is NOT a claim about NEMO's real GYRE numbers",
+        "rows": {
+            "zwi_u": {
+                "bit_unequal": 0,
+                "n": 8
+            },
+            "zwd_u": {
+                "bit_unequal": 0,
+                "n": 8
+            },
+            "zws_u": {
+                "bit_unequal": 0,
+                "n": 8
+            },
+            "zdf_solve_u": {
+                "bit_unequal": 0,
+                "n": 8
+            },
+            "zwi_v": {
+                "bit_unequal": 0,
+                "n": 8
+            },
+            "zwd_v": {
+                "bit_unequal": 0,
+                "n": 8
+            },
+            "zws_v": {
+                "bit_unequal": 0,
+                "n": 8
+            },
+            "zdf_solve_v": {
+                "bit_unequal": 0,
+                "n": 8
+            }
+        },
+        "status": "AT-BAR, exit 0",
+        "planted_control": "one ulp on avm turns six of the eight rows bit-unequal, status DEBT, exit 1",
+        "evidence": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round29/ with artifacts.sha256",
+        "record_sha256": "d88b74e2a34c071697b712ce6ae01f0cfa7ef88384b266b65de02158a4b17e59",
+        "reader_defect_found_and_fixed": "a corrupt array name raised UnicodeDecodeError instead of returning a verdict; it now fails closed",
+        "tests": "9 passed"
+    },
+    "item5_decision_15C": {
+        "change": "demo GYRE card vertical_momentum_scheme upwind_perturbation -> nemo_advective, adaptive_implicit_vertadv True -> False",
+        "citations": [
+            "dynadv.F90:144 (np_VEC_c2, 'vector form : keg + zad + vor is used')",
+            "namelist_ref:1177 ln_zad_Aimp = .false.",
+            "round19_oracle_v2_external/ocean.output:553 prints F"
+        ],
+        "before": "5 failed, 19 passed",
+        "after": "4 failed, 20 passed",
+        "surfaced_and_not_fixed": "all four remaining failures are ONE defect: OceanZStarCoordinate on the native demo card has no is_active attribute, so nemo_qco_live_t_thickness (vertical.py:68) refuses the WS-RK3 stage transport. The reference thickness IS supplied by the caller; the active-cell mask is the missing operand. Oracle-bridge cards get one from NEMO's mesh; the native demo card never did.",
+        "test_repair": "test_surface_stress_implicit_wiring asserted a guard whose own exemption clause names this card's split-explicit solver, so it could never have fired; it now runs against the solver the guard covers, with the card's exemption asserted next to it"
+    },
+    "item6_citation_gate": {
+        "defect_1": "only the OUTER two endpoints of a comma citation were pinned, so every interior entry was unvalidated -- the middle line of a three-place citation could be any number between the first and the last",
+        "fix_1": "one anchor per cited ENDPOINT; the three three-place map entries gained the missing anchor; a planted interior shift now reports SYMBOL-NOT-AT-LINE and is in the self-test",
+        "defect_2": "the round-28 GYRE premise named GYRE's deck by an unqualified basename, which resolves to LOCK's namelist where ln_dynadv_vec is .false.",
+        "fix_2": "GYRE's deck, run log and compiled branch are separate keys; the premise itself was right",
+        "defect_3": "a filename in backticks anywhere in the prose rebinds every following bare ':N' citation to it; the round-29 correction did exactly that twelve lines later, and the gate caught it",
+        "map_entries": 113,
+        "tests": "16 passed"
+    },
+    "item7_bit_debt_registered": {
+        "what": "reference-versus-live slow-forcing weighting, round 28's refuted OWNER, still not bitwise equal",
+        "u": {
+            "relative": 8.307570867102084e-16,
+            "bit_unequal": 488,
+            "n": 580,
+            "arm_scale": 2.3896678125115675e-08
+        },
+        "v": {
+            "relative": 5.993770496385322e-16,
+            "bit_unequal": 488,
+            "n": 570,
+            "arm_scale": 3.0361478617076356e-08
+        },
+        "status": "DEBT at the exact bar; ARM-TO-ARM, not an oracle score; owns nothing measured"
+    },
+    "item8_round28_disposition_struck": {
+        "struck": "the MIN-versus-MEAN difference is 'exactly zero during step 1 ... it enters from kt=3'",
+        "why_wrong_1": "r3u(:,:,Kaa) is assigned at STAGE 1 from ssha (stprk3_stg.F90:156, assignment at :163), so a stage-3 thickness already carries a nonzero ratio inside the step that produces kt=2",
+        "why_wrong_2": "the production stage builder uses NEMO's area-weighted MEAN through nemo_qco_live_face_geometry_cgrid (vertical.py:470, transcribing domqco.F90:166-169 and :219-222); MIN survives on the slow-forcing depth average only",
+        "restated_debt": "the 3.058607589676341e-08 at kt=2 sizes the SLOW-FORCING depth average, not the RK3 stages"
+    },
+    "item9_decision_16_preregistration_NOT_LANDED": {
+        "decision": "user decision 16 -- make the pre-stage 2-D vorticity call unconditional, as NEMO's stp2d.F90:146 (dyn_vor after dyn_hpg at :128 and dyn_ldf at :131, on every card)",
+        "why_it_is_inert_where_f_is_zero": "on LOCK and OVERFLOW f = 0, so vor_ens adds +0.0 (compiled ppsrc dynvor.f90:665)",
+        "predictions": [
+            "P1 LOCK's 1260/2540 and OVERFLOW's 16400/16900 signed-zero cells go to 0 bit-unequal with VALUES unchanged. CONFIRM: bit_unequal 0 on both, value residual unmoved. REFUTE: any value moves, or the count does not go to 0.",
+            "P2 GYRE and ORCA2, where the term is nonzero and already executed, must NOT move: every Rule-12 eligibility row unchanged. REFUTE: any row moves -- that would mean those cards were calling the operator at a different point in the RHS order than NEMO, which is a FINDING to report, not to paper over.",
+            "P3 cross-card LOCK/OVERFLOW/GYRE kt=1..10 with first-over-bar per card, before and after."
+        ],
+        "requirements": "one shared implementation, NEMO's source order (hpg ASSIGNS, then vor ACCUMULATES), no card switch",
+        "asked_row": "vorticity call: skipped when f=0 -> unconditional (NEMO stp2d.F90:146), user decision 16",
+        "status": "NOT LANDED this round -- the dyn_zdf walk was first and the cross-card runs did not fit"
+    },
+    "forbidden_and_not_done": [
+        "NEMO execution: no makenemo, no mpirun; run.sh is handed over unrun",
+        "any edit under /home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/src",
+        "push, merge, deletion, git stash / reset --hard",
+        "giving the demo card's z-coordinate an active-cell mask (a geometry choice)",
+        "landing decision 16"
+    ],
+    "item10_full_fidelity_suite": {
+        "command": "pytest tests/ocean/fidelity/ -q --timeout=900 -p no:randomly",
+        "result": "4 failed, 773 passed, 7 skipped, 18 deselected in 2232.11s",
+        "baseline_at_starting_tip_509aed683857": [
+            "test_recipe_case_board::test_every_oracle_comparison_has_a_row",
+            "test_nemo_testcase_phase3_stage_sweep_gate::test_planted_stage_control_exits_nonzero_end_to_end"
+        ],
+        "both_baseline_failures_still_present": true,
+        "failure_1_owned_by_this_round_and_FIXED": {
+            "test": "test_fidelity_card_constructibility::test_legacy_native_gyre_recipe_pgf_pair_no_longer_the_blocker",
+            "cause": "the test asserted that the native GYRE card RAISES, and pinned the reason: rk3_ws is one coupled momentum+tracer stage identity and the card's vertical momentum scheme belonged to neither complete WS-RK3 momentum program. Its own docstring called reconciling that a SCIENTIFIC CHOICE deliberately not made there.",
+            "verdict": "the EXPECTATION was stale, not the code -- user decision 15C made that choice, so the finding the test pinned is closed",
+            "fix": "the test now asserts the card BUILDS and pins the two 15C fields by name; a new sibling test_the_ws_rk3_momentum_program_guard_still_bites reverts one field and requires the refusal, so the pass cannot come from a deleted guard",
+            "result_after": "test_fidelity_card_constructibility 14 passed",
+            "commit": "1829f219987e"
+        },
+        "failure_2_attribution": {
+            "test": "test_nemo_testcase_phase3_stage_sweep_gate::test_prediction_plant_is_fail_closed",
+            "message": "FAIL: planted prediction control needs S1_up3_selector_owns_the_stage3_baroclinic_u (OVERFLOW only)",
+            "touches_nothing_this_round_changed": "it exercises the LOCK_EXCHANGE stage-sweep gate; this round changed nemo_recipe.py (the GYRE card), the citation gate, a new round-29 gate, and two test modules -- none of them that gate",
+            "status": "BEING MEASURED, not inferred -- re-run at the starting tip 509aed683857 in a detached worktree at /tmp/codex-gyre-r29-attrib; the result supersedes this row"
+        }
+    }
+}

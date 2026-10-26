@@ -103,3 +103,127 @@ class TestFoldInactiveOnRegularGeometry:
     def test_perm_T_length(self):
         geom = create_latlon_geometry(8, 16)
         assert geom.fold.perm_T.shape == (16,)
+
+
+# --------------------------------------------------------------------------
+# #1455: the vertex-Coriolis PLACEMENT option.
+#
+# legoESM built f at the v-point as the average of the two adjacent tracer
+# rows; NEMO (and any C-grid model that defines its Coriolis at the F-point)
+# evaluates it AT the v-face latitude.  These tests pin the default as
+# bit-identical, pin the new branch against values computed by hand, and pin
+# the ONE case where the two conventions are indistinguishable -- because that
+# case bounds what the option can ever be measured to do.
+# --------------------------------------------------------------------------
+class TestCoriolisPlacement:
+    def test_default_is_the_cell_average_and_is_bit_identical(self):
+        """The default must reproduce the old construction EXACTLY, or every
+        recorded number on every card moves."""
+        geom = create_latlon_geometry(16, 32)
+        f_T = geom.f_T
+        want_int = 0.5 * (f_T[:-1] + f_T[1:])
+        assert jnp.array_equal(geom.f_v[1:-1], want_int)
+        assert jnp.array_equal(geom.f_v[0], f_T[0])
+        assert jnp.array_equal(geom.f_v[-1], f_T[-1])
+        # and the explicit spelling is the same object-for-object answer
+        same = create_latlon_geometry(16, 32,
+                                      coriolis_placement="cell_average")
+        assert jnp.array_equal(same.f_v, geom.f_v)
+
+    def test_face_latitude_is_hand_computable_at_a_known_latitude(self):
+        """f at 30 degrees is exactly Omega, because sin(30) = 1/2.
+
+        The rotation rate is chosen as 1e-4 so the expected value is a number
+        a reader can check without running anything: f_v at the 30-degree face
+        must be 2 * 1e-4 * 0.5 = 1e-4 exactly.
+        """
+        # Faces placed so that one of them sits EXACTLY on 30 degrees north.
+        lat_face = jnp.deg2rad(jnp.array([-30.0, 0.0, 30.0, 60.0]))
+        lat_c = 0.5 * (lat_face[:-1] + lat_face[1:])
+        geom = create_latlon_geometry(
+            3, 4, omega=1.0e-4, dtype=jnp.float64,
+            lat_1d=lat_c, lat_face_1d=lat_face,
+            coriolis_placement="face_latitude")
+        got = jnp.asarray(geom.f_v)[:, 0]
+        assert float(got[2]) == pytest.approx(1.0e-4, rel=1e-12)   # +30 deg
+        assert float(got[1]) == pytest.approx(0.0, abs=1e-20)      # equator
+        assert float(got[0]) == pytest.approx(-1.0e-4, rel=1e-12)  # -30 deg
+        # 60 degrees: 2*1e-4*sin(60) = 1e-4*sqrt(3)
+        assert float(got[3]) == pytest.approx(1.0e-4 * 3.0 ** 0.5, rel=1e-12)
+
+    def test_the_cell_average_at_the_SAME_faces_is_measurably_different(self):
+        """The control for the test above: the default convention must NOT
+        return the hand-computed values, or that test proves nothing."""
+        lat_face = jnp.deg2rad(jnp.array([-30.0, 0.0, 30.0, 60.0]))
+        lat_c = 0.5 * (lat_face[:-1] + lat_face[1:])
+        kw = dict(omega=1.0e-4, dtype=jnp.float64, lat_1d=lat_c,
+                  lat_face_1d=lat_face)
+        avg = create_latlon_geometry(3, 4, coriolis_placement="cell_average",
+                                     **kw)
+        face = create_latlon_geometry(3, 4,
+                                      coriolis_placement="face_latitude", **kw)
+        # the 30-degree face is INTERIOR here, so the average is a real average
+        assert float(jnp.abs(avg.f_v[2, 0] - face.f_v[2, 0])) > 1e-6 * 1.0e-4
+
+    def test_on_a_UNIFORM_grid_the_two_differ_by_exactly_cos_half_dphi(self):
+        """The boundary of what this option can be measured to do.
+
+        With constant latitude spacing the cell average is cos(dphi/2) times
+        the face value -- a UNIFORM factor, indistinguishable from a change of
+        rotation rate.  Only a stretched grid separates them, and that is the
+        whole reason the DINO measurement could split its Coriolis gap into a
+        constant part and a placement part.
+        """
+        n_lat, n_lon = 12, 4
+        avg = create_latlon_geometry(n_lat, n_lon, dtype=jnp.float64)
+        face = create_latlon_geometry(n_lat, n_lon, dtype=jnp.float64,
+                                      coriolis_placement="face_latitude")
+        dphi = float(avg.dlat)
+        ratio = jnp.asarray(avg.f_v)[1:-1, 0] / jnp.asarray(face.f_v)[1:-1, 0]
+        finite = jnp.abs(jnp.asarray(face.f_v)[1:-1, 0]) > 1e-12
+        got = jnp.asarray(ratio)[finite]
+        assert float(jnp.max(jnp.abs(got - jnp.cos(dphi / 2.0)))) < 1e-12
+
+    def test_face_latitude_puts_the_true_wall_value_on_the_polar_rows(self):
+        """The cell average CARRIES OVER the nearest tracer row at the poles;
+        the face convention uses the wall latitude itself, where sin = +-1."""
+        geom = create_latlon_geometry(12, 4, omega=1.0e-4, dtype=jnp.float64,
+                                      coriolis_placement="face_latitude")
+        assert float(geom.f_v[0, 0]) == pytest.approx(-2.0e-4, rel=1e-9)
+        assert float(geom.f_v[-1, 0]) == pytest.approx(2.0e-4, rel=1e-9)
+        avg = create_latlon_geometry(12, 4, omega=1.0e-4, dtype=jnp.float64)
+        assert float(jnp.abs(avg.f_v[0, 0])) < float(jnp.abs(geom.f_v[0, 0]))
+
+    def test_f_T_and_f_u_are_UNTOUCHED_by_the_option(self):
+        """The option is about the v-point only: on a lat-lon grid the u-point
+        shares the tracer row's latitude, so f_u is already f at its own point
+        and must not move."""
+        a = create_latlon_geometry(16, 32, dtype=jnp.float64)
+        b = create_latlon_geometry(16, 32, dtype=jnp.float64,
+                                   coriolis_placement="face_latitude")
+        assert jnp.array_equal(a.f_T, b.f_T)
+        assert jnp.array_equal(a.f_u, b.f_u)
+
+    def test_unknown_placement_raises_rather_than_defaulting(self):
+        with pytest.raises(ValueError, match="coriolis_placement"):
+            create_latlon_geometry(8, 16, coriolis_placement="f_point")
+
+    def test_ensure_geometry_forwards_the_placement(self):
+        grid = create_latlon_grid(12, 4)
+        geom = ensure_geometry(grid, coriolis_placement="face_latitude")
+        direct = create_latlon_geometry(
+            12, 4, omega=grid.omega, radius=grid.radius,
+            lat_1d=grid.lat, lon_1d=grid.lon,
+            lat_face_1d=getattr(grid, "lat_v", None),
+            coriolis_placement="face_latitude")
+        assert jnp.array_equal(geom.f_v, direct.f_v)
+
+    def test_ensure_geometry_does_NOT_apply_it_to_a_prebuilt_geometry(self):
+        """Documented footgun, pinned: a pre-built geometry passes through
+        UNCHANGED, so the convention has to be chosen where it is built.  The
+        ocean model refuses this case rather than running the default while
+        its config says otherwise."""
+        pre = create_latlon_geometry(12, 4)
+        out = ensure_geometry(pre, coriolis_placement="face_latitude")
+        assert out is pre
+        assert jnp.array_equal(out.f_v, pre.f_v)

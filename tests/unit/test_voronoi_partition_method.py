@@ -307,3 +307,188 @@ def test_sharding_reorder_still_honours_an_explicit_method(monkeypatch):
             monkeypatch.setattr(vp, name, _tap)
         vp.reorder_voronoi_for_sharding(mesh, 4, method=method)
         assert used == [expect], f"method={method!r} used {used}"
+
+
+# ---------------------------------------------------------------------------
+# Edge/vertex order inside an owner block follows the cells' Hilbert curve
+# ---------------------------------------------------------------------------
+
+def _xyz(m, kind):
+    return np.stack([np.array(getattr(m, f"{a}{kind}")) for a in "xyz"], 1)
+
+
+def _runs_are_sorted(owner, key):
+    """True iff ``owner`` is non-decreasing and ``key`` is non-decreasing
+    inside every constant-owner run."""
+    if np.any(np.diff(owner) < 0):
+        return False
+    same = owner[1:] == owner[:-1]
+    return not np.any(np.diff(key)[same] < 0)
+
+
+def test_reorder_sorts_edges_and_vertices_by_hilbert_within_owner(mesh):
+    """A stable sort by owner alone leaves the generator's order inside each
+    block; the reorder must place edges and vertices along the same Hilbert
+    curve as the cells (key = the key of the min ORIGINAL-index cell, the
+    same cell that defines the entity's owner). Fails on the owner-only
+    sort: the level-1 mesh's generator order is not Hilbert order."""
+    from legoesm.parallel import voronoi_partition as vp
+    n_dev = 2
+    r = reorder_voronoi_for_sharding(mesh, n_dev, method="sfc")
+    owner = vp.partition_cells_sfc(mesh, n_dev)
+    key = vp.hilbert_cell_keys(mesh)
+    pc = _row_perm(_xyz(r, "Cell"), _xyz(mesh, "Cell"))
+    assert _runs_are_sorted(owner[pc], key[pc])
+
+    pe = _row_perm(_xyz(r, "Edge"), _xyz(mesh, "Edge"))
+    coe = np.asarray(mesh.cellsOnEdge)
+    ec = np.minimum(coe[0], coe[1])[pe]
+    assert _runs_are_sorted(owner[ec], key[ec]), "edges not Hilbert-ordered within owner"
+
+    pv = _row_perm(_xyz(r, "Vertex"), _xyz(mesh, "Vertex"))
+    cov = np.asarray(mesh.cellsOnVertex)
+    cov = np.where(cov >= 0, cov, mesh.nCells)
+    mc = cov.min(axis=0)
+    # production: an all-sentinel vertex is owned by rank 0 and keyed on the
+    # last cell (voronoi_partition.reorder_voronoi_for_sharding)
+    v_owner = np.where(mc < mesh.nCells, owner[np.minimum(mc, mesh.nCells - 1)], 0)[pv]
+    v_key = key[np.minimum(mc, mesh.nCells - 1)][pv]
+    assert _runs_are_sorted(v_owner, v_key), "vertices not Hilbert-ordered within owner"
+
+
+def test_reorder_owner_edge_order_keeps_generator_order_within_owner(mesh):
+    """edge_order="owner" (the ocean MPAS lanes) must reproduce the
+    pre-relabel layout: edges and vertices in ascending ORIGINAL index inside
+    each owner block, cells still Hilbert-ordered."""
+    from legoesm.parallel import voronoi_partition as vp
+    r = reorder_voronoi_for_sharding(mesh, 2, method="sfc", edge_order="owner")
+    owner = vp.partition_cells_sfc(mesh, 2)
+    key = vp.hilbert_cell_keys(mesh)
+    pc = _row_perm(_xyz(r, "Cell"), _xyz(mesh, "Cell"))
+    assert _runs_are_sorted(owner[pc], key[pc])
+    pe = _row_perm(_xyz(r, "Edge"), _xyz(mesh, "Edge"))
+    coe = np.asarray(mesh.cellsOnEdge)
+    e_owner = owner[np.minimum(coe[0], coe[1])]
+    assert np.array_equal(pe, np.argsort(e_owner, kind="stable"))
+    pv = _row_perm(_xyz(r, "Vertex"), _xyz(mesh, "Vertex"))
+    cov = np.asarray(mesh.cellsOnVertex)
+    mc = np.where(cov >= 0, cov, mesh.nCells).min(axis=0)
+    v_owner = np.where(mc < mesh.nCells, owner[np.minimum(mc, mesh.nCells - 1)], 0)
+    assert np.array_equal(pv, np.argsort(v_owner, kind="stable"))
+    # and it differs from the default, or the switch would be inert here
+    rh = reorder_voronoi_for_sharding(mesh, 2, method="sfc")
+    assert not np.array_equal(np.asarray(rh.xEdge), np.asarray(r.xEdge))
+
+
+def test_reorder_rejects_unknown_edge_order(mesh):
+    for n in (1, 2):
+        with pytest.raises(ValueError, match="edge_order"):
+            reorder_voronoi_for_sharding(mesh, n, method="sfc", edge_order="bogus")
+
+
+def _row_perm(a_new, a_old):
+    """perm with a_new[i] == a_old[perm[i]], recovered from row-unique
+    coordinates (exact, not rounded); asserts a bijection."""
+    a_new, a_old = np.asarray(a_new), np.asarray(a_old)
+    old = {tuple(row): i for i, row in enumerate(a_old)}
+    assert len(old) == len(a_old), "coordinates are not row-unique"
+    perm = np.array([old[tuple(row)] for row in a_new])
+    assert np.array_equal(np.sort(perm), np.arange(len(a_old))), "not a permutation"
+    return perm
+
+
+def _remap(conn, inv):
+    """Connectivity relabel that keeps -1 sentinels."""
+    conn = np.asarray(conn)
+    return np.where(conn >= 0, inv[np.maximum(conn, 0)], -1)
+
+
+def test_reorder_commutes_with_trisk_operators(mesh):
+    """Relabelling cells, edges and vertices must not change any TRiSK
+    operator: div/grad/curl/tangential reconstruction on the reordered mesh
+    are BITWISE equal to the original results mapped through the recovered
+    permutations (a pure relabel runs the same float ops in the same slot
+    order). Also pins every connectivity/weight table as the plain relabel of
+    the original, so a table left unpermuted or a neighbour slot reordered
+    (sign/weight flip) fails."""
+    from legoesm.core.operators_voronoi import (
+        curl_vertex,
+        divergence_cell,
+        gradient_edge,
+        tangential_velocity,
+    )
+    coords = {k: _xyz(mesh, k) for k in ("Cell", "Edge", "Vertex")}
+    tables = {k: np.array(getattr(mesh, k)) for k in (
+        "cellsOnEdge", "verticesOnEdge", "edgesOnCell", "cellsOnCell",
+        "edgesOnVertex", "cellsOnVertex", "verticesOnCell", "edgesOnEdge",
+        "weightsOnEdge")}
+    r = reorder_voronoi_for_sharding(mesh, 2, method="sfc")
+    assert r is not mesh
+    for k, v in coords.items():
+        assert np.array_equal(_xyz(mesh, k), v), "reorder mutated its input"
+    for k, v in tables.items():
+        assert np.array_equal(np.asarray(getattr(mesh, k)), v), f"reorder mutated its input {k}"
+    pc = _row_perm(_xyz(r, "Cell"), coords["Cell"])
+    pe = _row_perm(_xyz(r, "Edge"), coords["Edge"])
+    pv = _row_perm(_xyz(r, "Vertex"), coords["Vertex"])
+    inv = {}
+    for name, p in (("c", pc), ("e", pe), ("v", pv)):
+        inv[name] = np.empty_like(p)
+        inv[name][p] = np.arange(len(p))
+    # Every table is the original's columns permuted by the source entity and
+    # values relabelled by the target entity, slot order untouched.
+    for tab, src, tgt in (("cellsOnEdge", pe, "c"), ("verticesOnEdge", pe, "v"),
+                          ("edgesOnCell", pc, "e"), ("cellsOnCell", pc, "c"),
+                          ("edgesOnVertex", pv, "e"), ("cellsOnVertex", pv, "c"),
+                          ("verticesOnCell", pc, "v"), ("edgesOnEdge", pe, "e")):
+        assert np.array_equal(np.asarray(getattr(r, tab)),
+                              _remap(tables[tab][:, src], inv[tgt])), tab
+    assert np.array_equal(np.asarray(r.weightsOnEdge), tables["weightsOnEdge"][:, pe])
+    rng = np.random.default_rng(0)
+    u = rng.standard_normal(mesh.nEdges)
+    phi = rng.standard_normal(mesh.nCells)
+    for name, f_old, f_new, p in [
+        ("div", divergence_cell(u, mesh), divergence_cell(u[pe], r), pc),
+        ("grad", gradient_edge(phi, mesh), gradient_edge(phi[pc], r), pe),
+        ("curl", curl_vertex(u, mesh), curl_vertex(u[pe], r), pv),
+        ("tangential", tangential_velocity(u, mesh), tangential_velocity(u[pe], r), pe),
+    ]:
+        assert np.array_equal(np.asarray(f_new), np.asarray(f_old)[p]), name
+
+
+@pytest.mark.parametrize("n_dev", [3, 4, 7])
+def test_reorder_block_edge_order_aligns_edge_shards_with_cell_shards(mesh, n_dev):
+    """edge_order="block": every real edge in device d's contiguous edge shard
+    has its smaller cell in d's cell shard, padding edges reference a cell of
+    their own shard, the real edge set is unchanged, and the TRiSK connectivity
+    still round-trips (edge -> cells -> edgesOnCell finds the edge)."""
+    r = reorder_voronoi_for_sharding(mesh, n_dev, method="sfc", edge_order="block")
+    assert r.nCells % n_dev == 0 and r.nEdges % n_dev == 0
+    cp, ep = r.nCells // n_dev, r.nEdges // n_dev
+    coe = np.asarray(r.cellsOnEdge)
+    real = np.asarray(r.dvEdge) > 0
+    shard = np.arange(r.nEdges) // ep
+    assert np.array_equal(coe.min(axis=0) // cp, shard), "edge outside its shard"
+    assert np.all(coe[0, ~real] == coe[1, ~real])
+    assert real.sum() == mesh.nEdges
+    a = np.sort(np.asarray(r.dvEdge)[real]); b = np.sort(np.asarray(mesh.dvEdge))
+    np.testing.assert_array_equal(a, b)
+    eoc, neoc = np.asarray(r.edgesOnCell), np.asarray(r.nEdgesOnCell)
+    for e in np.flatnonzero(real)[:: max(1, real.sum() // 500)]:
+        for c in coe[:, e]:
+            assert e in eoc[: neoc[c], c]
+    eoe = np.asarray(r.edgesOnEdge)
+    assert np.all(real[eoe[eoe >= 0]]), "edgesOnEdge points at a padding edge"
+
+
+def test_reorder_block_edge_order_shrinks_the_halo():
+    """The point of "block": fewer local cells per device than "owner" (on a
+    mesh large enough that the halo does not already cover every rank)."""
+    from legoesm.parallel.sharded_dynamics import build_voronoi_partition_infra
+    big = create_voronoi_mesh(subdivision_level=4, lloyd_iterations=0)
+    n_dev = 16
+    lc = {}
+    for order in ("owner", "block"):
+        r = reorder_voronoi_for_sharding(big, n_dev, method="sfc", edge_order=order)
+        lc[order] = build_voronoi_partition_infra(r, n_dev, halo_depth=2)[5]
+    assert lc["block"] < lc["owner"], lc

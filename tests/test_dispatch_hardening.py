@@ -135,6 +135,12 @@ def discover_hardened_dispatchers() -> tuple[set[tuple[str, str]], list[str]]:
 # justification) only when a dispatcher is intentionally renamed/removed.
 BASELINE_DISPATCHERS: frozenset[tuple[str, str]] = frozenset(
     {
+        # Richards post-solve psi update: retention curve -> shift (PDI/Lu) or
+        # exact reset; an unknown curve must raise, never pick one silently.
+        ("packages/land/legoesm/land/richards.py", "solve_richards"),
+        # Distributed PCG preconditioner selection ("jacobi" | "poly"):
+        # an unknown name must raise, never fall back to Jacobi.
+        ("packages/ocean/legoesm/ocean/dynamics/barotropic_implicit_mpas.py", "barotropic_implicit_mpas"),
         ("packages/atmosphere/legoesm/atmosphere/dynamics/__init__.py", "create_model"),
         # kt whitelist: an unvalidated 6*kt^2 tile count must raise, not
         # silently replicate the global state per device (#1360).
@@ -148,6 +154,9 @@ BASELINE_DISPATCHERS: frozenset[tuple[str, str]] = frozenset(
         # bare ``else`` silently fell back to the energy-conserving PV flux).
         ("packages/atmosphere/legoesm/atmosphere/dynamics/gcm/compressible_euler_mpas.py", "mpas_compressible_euler_slow_tendencies"),
         ("packages/atmosphere/legoesm/atmosphere/dynamics/gcm/primitive_eq_mpas.py", "mpas_hydrostatic_tendencies"),
+        # Vertical-filter form selection: a misspelled tracer name raises even
+        # with the filter off, never sits silently unused.
+        ("packages/atmosphere/legoesm/atmosphere/dynamics/gcm/primitive_eq_mpas.py", "validate_vert4_flux_form_tracers"),
         ("packages/atmosphere/legoesm/atmosphere/dynamics/gcm/shallow_water_mpas.py", "mpas_shallow_water_tendencies"),
         ("packages/atmosphere/legoesm/atmosphere/physics/clouds/cloud_fraction.py", "compute_cloud_properties"),
         ("packages/atmosphere/legoesm/atmosphere/physics/combined.py", "make_physics"),
@@ -160,6 +169,9 @@ BASELINE_DISPATCHERS: frozenset[tuple[str, str]] = frozenset(
         # raise, not silently run the wrong precip physics.
         ("packages/atmosphere/legoesm/atmosphere/physics/convection/bechtold.py", "bechtold_convection"),
         ("packages/atmosphere/legoesm/atmosphere/physics/convection/tiedtke.py", "tiedtke_convection"),
+        # ZM land-fraction policy ("required" | "none"): a typo must raise, not
+        # silently run every column with ocean coefficients.
+        ("packages/atmosphere/legoesm/atmosphere/physics/convection/zhang_mcfarlane.py", "zhang_mcfarlane_convection"),
         # Renamed _get_gwd_fn -> get_gwd_fn (private-import promotion,
         # 2026-06-10); the unknown-scheme raise itself is unchanged.
         ("packages/atmosphere/legoesm/atmosphere/physics/gravity_wave_drag/integration.py", "get_gwd_fn"),
@@ -178,8 +190,14 @@ BASELINE_DISPATCHERS: frozenset[tuple[str, str]] = frozenset(
         ("packages/atmosphere/legoesm/atmosphere/physics/radiation/rrtmgp/optics/optics.py", "optics_factory"),
         ("packages/atmosphere/legoesm/atmosphere/physics/turbulence/integration.py", "get_turbulence_fn"),
         ("packages/atmosphere/legoesm/atmosphere/physics/turbulence/integration.py", "make_turbulence_physics"),
+        # CLUBB cloud_source selector (native ADG1-PDF vs shared grid-scale saturation;
+        # the D9 forced-shared control). A typo must raise, not silently run the PDF cloud.
+        ("packages/atmosphere/legoesm/atmosphere/physics/turbulence/clubb.py", "diagnose_cloud_and_buoyancy"),
         ("packages/atmosphere/legoesm/atmosphere/forcing/scm/scm.py", "__init__"),
         ("packages/core/legoesm/core/bulk_flux.py", "validate_bulk_scheme"),
+        # Latent heat a surface scheme charged (thermo.charged_latent_heat):
+        # an unknown scheme must raise, never fall back to one family.
+        ("packages/core/legoesm/thermo.py", "charged_latent_heat"),
         # Stable-regime MOST stability-function dispatch (stability_scheme):
         # the validator + the shared stable-branch dispatch twins (grow-only
         # lock so a silent-Dyer fallback can't be reintroduced).  2026-08-02:
@@ -203,7 +221,8 @@ BASELINE_DISPATCHERS: frozenset[tuple[str, str]] = frozenset(
         ("packages/core/legoesm/grids/factory.py", "create_grid"),
         ("packages/core/legoesm/grids/factory.py", "create_regional_grid"),
         ("packages/core/legoesm/grids/halo.py", "set_halo_backend"),
-        ("packages/core/legoesm/parallel/device_config.py", "get_optimal_mesh"),
+        # parallel/device_config.py::get_optimal_mesh removed 2026-10 (ponytail
+        # #12): deleted with the function; it had zero non-test callers.
         ("packages/core/legoesm/parallel/halo_exchange_voronoi.py", "exchange_local_simulated"),
         ("packages/core/legoesm/parallel/runtime.py", "halo_exchange"),
         ("packages/core/legoesm/parallel/voronoi_mpi.py", "gather_voronoi_field"),
@@ -222,8 +241,11 @@ BASELINE_DISPATCHERS: frozenset[tuple[str, str]] = frozenset(
         ("packages/coupler/legoesm/driver/kernel_registry.py", "resolve_kernel"),
         ("packages/coupler/legoesm/driver/physics_pipeline.py", "_resolve_physics_parameterization"),
         ("packages/coupler/legoesm/driver/physics_pipeline.py", "build_physics_pipeline"),
+        # MPAS column lane sea_ice_albedo_scheme ("constant" | "maykut_untersteiner").
+        ("packages/coupler/legoesm/driver/model_driver.py", "_run_column"),
         ("packages/ice/legoesm/ice/sea_ice.py", "_bulk_flux_dispatch"),
         ("packages/ice/legoesm/ice/sea_ice.py", "step_sea_ice"),
+        ("packages/ice/legoesm/ice/sea_ice.py", "_closing_rate_from_velocity"),
         ("packages/ice/legoesm/ice/shortwave.py", "compute_ice_sw"),
         ("packages/land/legoesm/land/carbon/carbon_cycle.py", "step_carbon"),
         # The multilayer-land bulk dispatch moved into the pluggable surface
@@ -233,7 +255,14 @@ BASELINE_DISPATCHERS: frozenset[tuple[str, str]] = frozenset(
         # the code.
         ("packages/land/legoesm/land/surface_scheme/simple_seb.py",
          "compute_simple_seb_fluxes"),
-        ("packages/land/legoesm/land/slab_land.py", "step_land"),
+        # 642481601 moved step_land's body (surface_scheme + runoff_scheme
+        # raises) into step_land_with_diagnostics; step_land now only
+        # delegates to it, so the guards live there.
+        ("packages/land/legoesm/land/slab_land.py", "step_land_with_diagnostics"),
+        # The two-leaf canopy branch carries its own runoff_scheme raise.
+        ("packages/land/legoesm/land/slab_land.py", "_step_land_canopy"),
+        # Multilayer-land snowpack dispatch (bulk|layered), 2026-09-26.
+        ("packages/land/legoesm/land/multilayer_land.py", "_step_multilayer_land_impl"),
         # Two-leaf canopy stomatal-model dispatch (ball_berry|medlyn): hardened
         # 2026-07-08 during the stomata consolidation — a bare ``else`` used to
         # silently run Ball-Berry on any typo. Guarded at BOTH ends: a fail-early
@@ -254,6 +283,8 @@ BASELINE_DISPATCHERS: frozenset[tuple[str, str]] = frozenset(
         # above covers both canopy configs) and the applier itself.
         ("packages/land/legoesm/land/canopy/clm_ml_interface.py",
          "_apply_turbulence_scheme"),
+        # GenBE horizontal_scheme ("explicit" | "implicit_matern", #1819).
+        ("packages/ml/legoesm/da/gen_be.py", "__init__"),
         ("packages/ml/legoesm/ml/physics/model.py", "_validate_microphysics_scheme"),
         ("packages/ml/legoesm/ml/training.py", "create_optimizer"),
         ("packages/ml/legoesm/training/aimip_params.py", "make_aimip_classical_spectral_physics"),
@@ -274,6 +305,18 @@ BASELINE_DISPATCHERS: frozenset[tuple[str, str]] = frozenset(
         # "een" NEMO enstrophy-conserving). A typo must raise, not silently
         # run the legacy null-mode 4-pt average.
         ("packages/ocean/legoesm/ocean/dynamics/barotropic_latlon_cgrid.py", "barotropic_substeps_latlon_cgrid"),
+        # Shared by BOTH barotropic entry points: the reconciliation-target
+        # guard moved here so the standard-halo path and its wide-halo twin
+        # cannot diverge on it again.
+        ("packages/ocean/legoesm/ocean/dynamics/barotropic_latlon_cgrid.py", "_reconcile_targets"),
+        # NEMO mlf_baro_corr's AFTER-level reconciliation (barotropic_after_
+        # reconcile). Called at fn entry on the static config value from BOTH
+        # outer-step paths (_leapfrog_step and _nemo_mlf_step), so a typo stops
+        # the step instead of silently selecting "off" -- i.e. silently NOT
+        # running a reconciliation the card asked for.
+        ("packages/ocean/legoesm/ocean/dynamics/barotropic_common.py", "validate_after_reconcile"),
+        # n2_mode + n2_eos_form guards on the EVD convective trigger.
+        ("packages/ocean/legoesm/ocean/physics/convection/enhanced_diffusion.py", "convective_K_A_flag"),
         # In-substep C-grid face-depth scheme (barotropic_face_depth:
         # min_rule | nemo_ssh_avg, #1226 zero-deviation item 2). A typo must
         # raise, not silently run the wrong flux/drag face-thickness rule.
@@ -292,6 +335,18 @@ BASELINE_DISPATCHERS: frozenset[tuple[str, str]] = frozenset(
         ("packages/ocean/legoesm/ocean/dynamics/latlon_cgrid_operators.py", "pv_flux_al81_partial_cell"),
         ("packages/ocean/legoesm/ocean/dynamics/ocean_model.py", "__init__"),
         ("packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py", "_compute_advection_flux_div"),
+        # bbl_adv_option=2 (in-stage Campin-Goosse BBL) x tracer_time_integrator
+        # lane guard (S-42, docs/ocean/fidelity/nemo_branch_isomorphism_map.md):
+        # the in-stage BBL hook is built ONLY on the rk3_ws tracer lane, so a
+        # typo/mismatch on euler/ab2/rk3 used to resolve bbl_adv_option=2 and
+        # silently run NO boundary layer. Lock the guard so it can't be
+        # silently deleted; test_config_footguns.py exercises it directly.
+        # Also guards momentum_flux_scheme="nemo_up3" x momentum_time_integrator
+        # pairing (S-46/S-47, same map doc): NEMO's e3u(Kmm) face thickness for
+        # dyn_adv_up3 is wired only inside the rk3_ws stage program, so nemo_up3
+        # on any other integrator would silently run the legacy (measured
+        # first-order-wrong) face-thickness rule instead -- a pairing NEMO
+        # itself never runs. test_config_footguns.py exercises it directly.
         ("packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py", "_validate_config"),
         # outer_integrator dispatch (nemo_mlf P2, docs/ocean/fidelity/
         # nemo_mlf_step_transcription_spec.md §4/§7): a typo here would
@@ -306,6 +361,13 @@ BASELINE_DISPATCHERS: frozenset[tuple[str, str]] = frozenset(
         # e3-weighting variant, and when paired with any operator other than
         # nemo_div_curl).
         ("packages/ocean/legoesm/ocean/dynamics/ocean_pe_latlon_cgrid.py", "_bc_horizontal_viscosity"),
+        # shortwave_scheme guard of the external (JRA55 bulk) surface forcing
+        ("packages/ocean/legoesm/ocean/dynamics/ocean_pe_latlon_cgrid.py", "_bc_external_surface_forcing"),
+        # VORTEX round 5: after_ssh_form dispatch of the FIRST wzv call.  The
+        # RK3 and modified-leapfrog programs leave different things in NEMO's
+        # after-SSH slot when wzv reads it (stprk3.F90:225 against ssh_nxt),
+        # so an unknown form must raise rather than silently run one of them.
+        ("packages/ocean/legoesm/ocean/dynamics/ocean_pe_latlon_cgrid.py", "nemo_qco_wzv_operands"),
         ("packages/ocean/legoesm/ocean/dynamics/ocean_pe_mpas.py", "mpas_ocean_baroclinic_tendencies"),
         # (nemo_drag_r_from_speed_sq's internal legacy-rejection raise is not
         # scanner-shaped; the canonical unknown-scheme guard is the validator.)

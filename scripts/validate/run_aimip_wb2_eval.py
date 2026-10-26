@@ -404,13 +404,21 @@ def _build_skeleton(variant, cfg, spec_cfg, grid):
       (neural_gcm_spectral.train_sfno_full_spectral, ~L3153).
     """
     if variant == "classical":
-        from legoesm.training.aimip_params import AIMIPClassicalParams
+        from legoesm.training.aimip_params import (
+            AIMIPClassicalParams, aimip_spatial_unread_fields,
+        )
         # Matches _train_aimip_classical: spatial_surface + init_std + seed all
-        # read from the SAME cfg keys with the SAME defaults.
+        # read from the SAME cfg keys with the SAME defaults, and the spatial
+        # fields its schemes never read are not built (as in training).
         skeleton = AIMIPClassicalParams.from_defaults(
             spatial_surface=bool(cfg.get("aimip_spatial_surface", False)),
             spatial_init_std=float(cfg.get("aimip_spatial_init_std", 0.0)),
             spatial_seed=int(cfg.get("aimip_spatial_seed", 0)),
+            spatial_unread=aimip_spatial_unread_fields(
+                turbulence=str(cfg.get("aimip_turbulence",
+                                       _default_schemes()["turbulence"])),
+                surface_bulk_scheme=str(
+                    cfg.get("aimip_surface_bulk_scheme", "constant"))),
         )
         # aimip_trainable_schemes wraps the checkpoint in an
         # AIMIPTrainableBundle (legacy leaves + spec-driven scheme params);
@@ -421,6 +429,7 @@ def _build_skeleton(variant, cfg, spec_cfg, grid):
         if cfg.get("aimip_trainable_schemes"):
             from legoesm.training.aimip_params import (
                 AIMIPTrainableBundle,
+                aimip_inactive_fields,
                 aimip_legacy_owned_fields,
                 aimip_scheme_keys_for,
             )
@@ -428,20 +437,27 @@ def _build_skeleton(variant, cfg, spec_cfg, grid):
                 build_trainable_params,
             )
             _tier = cfg.get("aimip_trainable_schemes")
+            _cloud = str(cfg.get("aimip_cloud", "xu_randall"))
+            _gwd = str(cfg.get("aimip_gwd", "mcfarlane"))
+            _micro = str(cfg.get(
+                "aimip_microphysics", _default_schemes()["microphysics"]))
             _keys = aimip_scheme_keys_for(
                 convection=str(cfg.get("aimip_convection", "tiedtke")),
                 turbulence=str(cfg.get("aimip_turbulence", "louis")),
-                gwd=str(cfg.get("aimip_gwd", "mcfarlane")),
-                microphysics=str(cfg.get(
-                    "aimip_microphysics", _default_schemes()["microphysics"])),
+                gwd=_gwd,
+                microphysics=_micro,
                 radiation=str(cfg.get("aimip_radiation", "rrtmgp")),
                 cloud=str(cfg.get("aimip_cloud", "xu_randall")),
             )
             schemes = build_trainable_params(
                 active_scheme_keys=_keys,
                 tier=(_tier if isinstance(_tier, str) else "extended"),
-                exclude=tuple(sorted(aimip_legacy_owned_fields(
-                    cloud_scheme=str(cfg.get("aimip_cloud", "xu_randall"))))),
+                exclude=tuple(sorted(
+                    aimip_legacy_owned_fields(cloud_scheme=_cloud)
+                    | aimip_inactive_fields(
+                        cloud_scheme=_cloud, microphysics=_micro, gwd=_gwd,
+                        subgrid_orography=getattr(
+                            grid, "subgrid_topo_stddev", None) is not None))),
             )
             skeleton = AIMIPTrainableBundle(
                 classical=skeleton, schemes=schemes)
@@ -487,7 +503,8 @@ def _build_rollout_fn(variant, trained, cfg, spec_cfg, grid, sigma, pe_config,
                       sponge_factor, spectral_filter, checkpoint_path=None,
                       ensemble_ic_noise=0.0, ensemble_noise_scale=1.0,
                       sf_override=None, mc_dropout_members=0,
-                      probabilistic=False, member_paths=()):
+                      probabilistic=False, member_paths=(), era5_cfg=None,
+                      ds=None):
     """Return ``(rollout_fn, dt_for_orchestrator)`` for the variant.
 
     The orchestrator calls ``rollout_fn(state, physics_fn, grid_, sigma_,
@@ -516,13 +533,24 @@ def _build_rollout_fn(variant, trained, cfg, spec_cfg, grid, sigma, pe_config,
     )
 
     if variant == "classical":
+        # The ERA5 land-sea mask run_aimip trains on, read from the same
+        # store/dataset as the verification cases: ZM requires it on the
+        # grid, and the spatial surface fields are gated by it.
+        from legoesm.training.aimip_spatial import (
+            era5_land_fraction, grid_with_zm_land_fraction,
+        )
+        conv = str(cfg.get("aimip_convection", "tiedtke"))
+        spatial = parse_bool_flag(cfg.get("aimip_spatial_surface", False))
+        land = (era5_land_fraction(grid, era5_cfg, ds=ds)
+                if spatial or conv == "zhang_mcfarlane" else None)
+        grid = grid_with_zm_land_fraction(grid, conv, land)
         rad_update_interval = int(cfg.get("aimip_rad_update_interval", 1))
         split_rad = rad_update_interval > 1
         built = make_aimip_classical_spectral_physics(
             trained, grid, spec_cfg.dt,
             radiation=str(cfg.get("aimip_radiation", "rrtmgp")),
             rad_update_interval_steps=rad_update_interval,
-            convection_scheme=str(cfg.get("aimip_convection", "tiedtke")),
+            convection_scheme=conv,
             turbulence_scheme=str(cfg.get("aimip_turbulence", "louis")),
             surface_bulk_scheme=str(
                 cfg.get("aimip_surface_bulk_scheme", "constant")),
@@ -532,7 +560,7 @@ def _build_rollout_fn(variant, trained, cfg, spec_cfg, grid, sigma, pe_config,
             allow_unfilled_families=parse_bool_flag(
     cfg.get("aimip_allow_unfilled_families", False)),
             cloud_scheme=str(cfg.get("aimip_cloud", "xu_randall")),
-            land_mask=None,
+            land_mask=land if spatial else None,
             split_rad=split_rad,
         )
         if isinstance(built, tuple):
@@ -876,6 +904,8 @@ def main(argv=None, ds=None):
             "(ic_noise=%.4g x noise_scale=%.4g)", len(trained),
             cfg_args.ensemble_ic_noise, cfg_args.ensemble_noise_scale)
 
+    era5_cfg = TrainingERA5Config(dt_hours=cadence)._replace(
+        zarr_store=yml["era5_zarr"])
     rollout_fn, dt_orch = _build_rollout_fn(
         cfg_args.variant, trained, yml, spec_cfg, grid, sigma, pe_config,
         sponge_factor, spectral_filter, checkpoint_path=cfg_args.checkpoint,
@@ -885,14 +915,13 @@ def main(argv=None, ds=None):
         mc_dropout_members=cfg_args.mc_dropout_members,
         probabilistic=cfg_args.probabilistic,
         member_paths=cfg_args.members,
+        era5_cfg=era5_cfg, ds=ds,
     )
     # The orchestrator computes n_steps = lead*3600/dt_orch; leads must land on
     # that grid (classical/column_nn: dt=dycore dt; sfno_full: dt=dt_sfno).
     _assert_leads_on_dt_grid(cfg_args.leads_hours, dt_orch)
 
     # --- ERA5 cases (ICs + forcing + WB2-grid verification) ---
-    era5_cfg = TrainingERA5Config(dt_hours=cadence)._replace(
-        zarr_store=yml["era5_zarr"])
     cases = build_forecast_cases(
         era5_cfg, grid, sigma,
         leads_hours=cfg_args.leads_hours, eval_year=eval_year,

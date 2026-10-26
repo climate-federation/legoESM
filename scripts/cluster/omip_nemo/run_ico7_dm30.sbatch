@@ -13,7 +13,7 @@
 # A/B: does the per-cell shallow map cut MPAS Arctic SSS (+3.69 salty) toward NEMO?
 set +e
 WT=/burg-archive/glab/users/pg2328/legoESM_worktrees/nemo-gaps-p4p5; cd $WT
-export PYTHONPATH="$(ls -d $WT/packages/*/ | sed 's:/$::' | tr '\n' ':')$WT:$WT/scripts/validate"
+export PYTHONPATH="$WT/src:$(ls -d $WT/packages/*/ | sed 's:/$::' | tr '\n' ':')$WT:$WT/scripts/validate"
 PY=/burg-archive/glab/users/jn2808/.conda/envs/legoesm/bin/python
 ROOT=/burg-archive/glab/users/pg2328/legoESM
 RUN=/burg-archive/glab/users/pg2328/nemo_orca1/nemo_5.0.1/cfgs/ORCA1/EXP00/RUN_REF
@@ -22,7 +22,7 @@ WTIC=$ROOT/data/woce_gouretski/woce_t_woa57_annual.nc
 WSIC=$ROOT/data/woce_gouretski/woce_s_woa57_annual.nc
 echo "=== HOST ==="; hostname; nvidia-smi -L 2>/dev/null | head -1; date
 git -C $WT log --oneline -1
-GA="--grid mpas --mpas-level 7 --mpas-lloyd 20 --dt 150"
+GA="--grid mpas --mpas-level 7 --mpas-lloyd 50 --dt 150"
 COMMON="--nemo-vertical --partial-cell --pgf-scheme smc03 --adaptive-implicit-vertadv \
   --momentum-rk3 --geothermal --runoff --sss-restore --sss-restore-tau-days 45.5 \
   --sss-restore-bound-mmday 4 --sss-ice-gate-nemo --prognostic-sea-ice \

@@ -130,6 +130,7 @@ def probe_latlon_cgrid(
     sponge=None,
     dt: float = 300.0,
     dt_tracer: float | None = None,
+    tke_rn_dt: float | None = None,
     gm_redi_tracer_state: tuple[jnp.ndarray, jnp.ndarray] | None = None,
 ) -> LatLonProbeResult:
     """Compute per-process tendencies on a frozen ocean state.
@@ -150,6 +151,12 @@ def probe_latlon_cgrid(
     dt : float
         Timestep [s] — needed for the CFL-aware advection-flux build
         even though no time integration is performed.
+    tke_rn_dt : float or None
+        NEMO's base ``rn_Dt`` for the TKE matrix.  Required when the active
+        TKE card selects ``tke_matrix_evaluation="nemo_literal"`` because a
+        leapfrog momentum ``dt`` may be ``2 * rn_Dt``.  This mirrors the
+        production resolution at
+        ``ocean_model_latlon_cgrid.py:_apply_implicit_vertical_mixing``.
     gm_redi_tracer_state : (T, S) or None
         Tracer fields fed to the GM/Redi (iso) tendency + implicit-K33
         solve ONLY — an oracle-fidelity override for models whose iso
@@ -200,10 +207,20 @@ def probe_latlon_cgrid(
         eos_linear=getattr(config, "eos_linear", None),
         eos_veros_nonlin2=getattr(config, "eos_veros_nonlin2", None),
         eos_veros_nonlin3=getattr(config, "eos_veros_nonlin3", None),
+        # NEMO's simplified-EOS coefficients are a per-run &nameos block, not a
+        # library constant: a card whose block differs from the shared defaults
+        # (VORTEX) would otherwise be probed against a different fluid from the
+        # one it integrates.  None keeps every existing probe bit-identical.
+        eos_nemo_seos=getattr(config, "eos_nemo_seos", None),
         **_eos_mk_kw,
     )
+    # The recipe's gravity, read the same way the two GM/Redi calls below it
+    # already do. Without it the probe's density is built on a hydrostatic
+    # pressure the run never used, so its per-process comparison is against a
+    # state the model does not integrate.
     rho = compute_ocean_rho(state, z_coord, J, eos_fn=eos_fn,
-                            eos_depth=_eos_depth, rho0=_eos_rho0)
+                            eos_depth=_eos_depth, rho0=_eos_rho0,
+                            g=config.constants.g)
 
     # GM/Redi isopycnal mixing — the lat-lon model applies this in its tracer
     # step (from the TOP-LEVEL config.gm_redi), not inside baroclinic_tendencies.
@@ -310,10 +327,40 @@ def probe_latlon_cgrid(
             implicit_vertical_diffusion_ocean,
         )
         _dt_tr = dt_tracer if dt_tracer is not None else dt
+        if (getattr(_vm_cfg, "scheme", "none") == "epbl"
+                and float(_vm_cfg.epbl.dt_s) != float(_dt_tr)):
+            # ePBL's energy budget is per timestep and feeds the tracer
+            # implicit solve below, which runs over the tracer dt.
+            raise ValueError(
+                f"EPBLConfig.dt_s is {float(_vm_cfg.epbl.dt_s)} s but the "
+                f"probe's tracer timestep is {float(_dt_tr)} s; ePBL must use "
+                "the tracer dt")
+        _nemo_literal_tke = (
+            getattr(_vm_cfg, "scheme", "none") == "tke"
+            and getattr(
+                getattr(_vm_cfg, "tke", None),
+                "tke_matrix_evaluation",
+                "factored",
+            ) == "nemo_literal"
+        )
+        if _nemo_literal_tke and tke_rn_dt is None:
+            raise ValueError(
+                "probe_latlon_cgrid requires tke_rn_dt for "
+                "tke_matrix_evaluation='nemo_literal'; momentum dt can be "
+                "NEMO's leapfrog rDt and is not a safe rn_Dt substitute"
+            )
+        # Production resolves this identically at
+        # ocean_model_latlon_cgrid.py:10101-10105: literal NEMO TKE consumes
+        # its dedicated base rn_Dt; all other closures consume momentum dt.
+        _dt_tke = tke_rn_dt if _nemo_literal_tke else dt
         # K_v = the closure's TRACER diffusivity at this state (the same call
         # the production implicit solve makes).
+        # Production passes degrees(grid.lat_T) (its grid is always a
+        # LatLonCGridGeometry); a plain LatLonGrid carries lat2d instead.
+        _lat_T = getattr(grid, "lat_T", None)
         _K_v, _A_v = compute_vertical_K_profiles(
-            state, z_coord, surface_forcing, config.physics,
+            state, z_coord, surface_forcing, config.physics, dt_tke=_dt_tke,
+            lat_deg=jnp.degrees(grid.lat2d if _lat_T is None else _lat_T),
         )
         _dz_cell = z_coord.dz_ref * J[:, :, jnp.newaxis]
         _dz_half = build_dz_half(_dz_cell)

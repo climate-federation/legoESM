@@ -1,0 +1,8 @@
+# SCM-RCE tuned parameters for convection=dca
+# corrected nonrotating protocol (coriolis=0), median of 5 seeds.
+# NON-IDENTIFIABLE for multi-parameter schemes: the spread comment on each
+# line is how far the seeds disagreed. A large spread means the median is one
+# point in a flat basin, not a calibrated value. Opt in with --params; this
+# file never mutates a production *Config default.
+
+atm.conv.DCAConfig.cape_threshold: 269.402  # default 100, seed-spread 24% of range, J/kg

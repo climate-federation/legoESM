@@ -97,6 +97,8 @@ def _compute_local_properties_lw(
     cloud_fraction: Array | None = None,
     lw_diffusive_factor: float | Array = monochromatic_two_stream._LW_DIFFUSIVE_FACTOR,
     precomputed_lw_optical_props: dict[str, Array] | None = None,
+    precomputed_planck_srcs: dict[str, Array] | None = None,
+    level_temperature: Array | None = None,
 ) -> dict[str, Array]:
   """Compute local optical properties for longwave radiative transfer.
 
@@ -135,9 +137,13 @@ def _compute_local_properties_lw(
 
   # Compute Planck sources: `planck_src`, `planck_src_bottom`, `planck_src_top`,
   # and `planck_src_sfc`.
-  planck_srcs = optics_lib.compute_planck_sources(
-      pressure, temperature, igpt, vmr_fields, sfc_temperature=sfc_temperature
-  )
+  if precomputed_planck_srcs is not None:
+    planck_srcs = precomputed_planck_srcs
+  else:
+    planck_srcs = optics_lib.compute_planck_sources(
+        pressure, temperature, igpt, vmr_fields, sfc_temperature=sfc_temperature,
+        level_temperature=level_temperature,
+    )
 
   halo_width = 1
   sfc_src = planck_srcs.get(
@@ -167,51 +173,6 @@ def _reindex_vmr_fields(
 ) -> dict[int, Array]:
   """Converts the chemical formulas of the gas species to RRTM indices."""
   return {gas_optics_lib.idx_gases[k]: v for k, v in vmr_fields.items()}
-
-
-def _replace_top_flux(f: Array) -> Array:
-  """Modify problematic value for the fluxes at the top boundary (top halo).
-
-  Use quadratic polynomials to evaluate the flux at the top boundary making use
-  of the points just below the top boundary.
-
-  The quadratic Lagrange stencil ``3*f[-2] - 3*f[-3] + f[-4]`` has
-  coefficient-sum 1, so a flat/linear near-TOA flux profile is reproduced
-  exactly.  But its gain on the near-TOA flux CURVATURE (second difference) is
-  unbounded and unsigned, so a drifted coupled state that develops a sharp
-  near-TOA reflectance/emission gradient (cloud) makes the raw extrapolation
-  OVERSHOOT — producing super-physical TOA shortwave (the ``[:, 0]`` face is
-  read straight into ``rsdt``/``rsut``) or driving the upwelling longwave below
-  zero (negative OLR).  This was BUG B: a 30-day rrtmgp coupled run inflated
-  ``rsdt`` ~2x and turned ``rlut`` negative at day ~15-20 (cells to 1121 W/m2 /
-  -52 W/m2), confirmed by replaying the dumped day-20 state through this
-  function (range-limit -> sw_down max 449, lw_up min +176; raw -> 1121 / -50).
-
-  Fix: RANGE-LIMIT the extrapolated top-halo face to the local range of the
-  three interior faces the stencil reads.  When the quadratic lands inside
-  ``[lo, hi]`` -- the low-curvature, near-flat near-TOA regime that radiative
-  flux profiles physically occupy (the flux asymptotes to a constant toward the
-  model top) -- this is a no-op (bit-identical to the historical behaviour on
-  the cases that were never pathological); only a strongly curved/drifted
-  profile whose quadratic overshoots the interior range is capped, at the
-  nearest interior flux.  Applied by the caller to the non-negative
-  ``flux_up``/``flux_down`` components only (so ``lo >= 0`` automatically); the
-  caller then RECOMPUTES ``flux_net = flux_up - flux_down`` at the top face --
-  this range-limit is nonlinear, so clipping ``flux_net`` independently would
-  break the ``net = up - down`` identity that the raw linear quadratic kept.
-
-  Args:
-    f: The array to fix the top boundary of.
-
-  Returns:
-    The array with the top boundary value fixed.
-  """
-  quad = 3 * f[:, :, -2] - 3 * f[:, :, -3] + f[:, :, -4]
-  lo = jnp.minimum(jnp.minimum(f[:, :, -2], f[:, :, -3]), f[:, :, -4])
-  hi = jnp.maximum(jnp.maximum(f[:, :, -2], f[:, :, -3]), f[:, :, -4])
-  top_bdy_f = jnp.clip(quad, lo, hi)
-  f = f.at[:, :, -1].set(top_bdy_f)
-  return f
 
 
 def _compute_optimal_lw_secant(
@@ -268,6 +229,17 @@ def _compute_optimal_lw_secant(
   c0 = optimal_angle_fit[band_idx, 0]
   c1 = optimal_angle_fit[band_idx, 1]
   return c0 * trans_total + c1
+
+
+def _gpoint_cloud_paths(igpt, cloud_path_liq, cloud_path_ice, cloud_path_fn):
+  """Cloud water paths seen by g-point ``igpt``.
+
+  ``cloud_path_fn(igpt) -> (liq, ice)`` supplies McICA paths (each g-point
+  its own cloud subcolumn); without it every g-point sees the same paths.
+  """
+  if cloud_path_fn is None:
+    return cloud_path_liq, cloud_path_ice
+  return cloud_path_fn(igpt)
 
 
 def _accumulate_over_gpoints(step_fn, n_gpt, init_val, gpoint_batch_size,
@@ -385,6 +357,9 @@ def solve_lw(
     use_optimal_angle: bool = False,
     gpoint_batch_size: int = 0,
     gpoint_checkpoint: bool = True,
+    cloud_path_fn=None,
+    clear_sky: bool = False,
+    level_temperature: Array | None = None,
 ) -> dict[str, Array]:
   """Solves two-stream radiative transfer equation over the longwave spectrum.
 
@@ -425,6 +400,8 @@ def solve_lw(
       (1 − ω) before passing it here.  ``None`` (the default) leaves the
       longwave solution byte-identical.
     use_scan: Whether to use scan or for loops for the recurrent operation.
+    level_temperature: ``(ncol, 1, nlev+1)`` level (interface) temperature
+      [K], surface first: the host's tlev (``rrtmgp.cam_interface_temperature``).
 
   Returns:
     A dictionary with the following entries (in units of W/m²):
@@ -460,19 +437,9 @@ def solve_lw(
       )
     optimal_angle_fit = candidate
 
-  def step_fn(igpt, cumulative_flux):
-    # Compute the LW optics once per g-point; reuse for both the
-    # optimal-angle secant and the source-and-properties solve.
-    # Without this, the optimal-angle path would call
-    # ``compute_lw_optical_properties`` twice per igpt and rely on
-    # XLA's CSE to deduplicate — explicit reuse keeps the graph
-    # smaller and the dependency obvious.
-    precomputed_props = optics_lib.compute_lw_optical_properties(
-        pressure, temperature, molecules, igpt, vmr_fields,
-        cloud_r_eff_liq, cloud_path_liq,
-        cloud_r_eff_ice, cloud_path_ice,
-        cloud_fraction=cloud_fraction,
-    )
+  def _lw_gpoint_fluxes(igpt, precomputed_props, liq_g, ice_g,
+                        planck_srcs=None):
+    """One g-point's LW fluxes from its optics (gas, or gas + cloud)."""
     if aerosol_absorption_optical_depth is not None:
       # Prescribed longwave aerosol as a pure-absorbing layer
       # (single-scattering albedo 0): add its absorption optical depth to
@@ -530,12 +497,14 @@ def solve_lw(
         vmr_fields,
         sfc_temperature,
         cloud_r_eff_liq,
-        cloud_path_liq,
+        liq_g,
         cloud_r_eff_ice,
-        cloud_path_ice,
+        ice_g,
         cloud_fraction=cloud_fraction,
         lw_diffusive_factor=lw_diffusive_factor,
         precomputed_lw_optical_props=precomputed_props,
+        precomputed_planck_srcs=planck_srcs,
+        level_temperature=level_temperature,
     )
 
     # Boundary conditions.
@@ -553,7 +522,40 @@ def solve_lw(
         sfc_emissivity_lw,
         use_scan,
     )
-    # cumulative_flux keys: 'flux_up', 'flux_down', 'flux_net'
+    return fluxes
+
+  def step_fn(igpt, cumulative_flux):
+    liq_g, ice_g = _gpoint_cloud_paths(
+        igpt, cloud_path_liq, cloud_path_ice, cloud_path_fn)
+    if not clear_sky:
+      # Compute the LW optics once per g-point; reuse for both the
+      # optimal-angle secant and the source-and-properties solve.
+      precomputed_props = optics_lib.compute_lw_optical_properties(
+          pressure, temperature, molecules, igpt, vmr_fields,
+          cloud_r_eff_liq, liq_g,
+          cloud_r_eff_ice, ice_g,
+          cloud_fraction=cloud_fraction,
+      )
+      fluxes = _lw_gpoint_fluxes(igpt, precomputed_props, liq_g, ice_g)
+    else:
+      # Clear-sky fluxes alongside the all-sky ones: gas optics and Planck
+      # sources are computed ONCE and shared (their table reads sit behind
+      # optimization barriers, so XLA would not merge two separate calls).
+      gas_props = optics_lib.compute_lw_optical_properties(
+          pressure, temperature, molecules, igpt, vmr_fields)
+      cloudy_props = optics_lib.add_cloud_optical_properties(
+          igpt, gas_props, True, cloud_r_eff_liq, liq_g,
+          cloud_r_eff_ice, ice_g, cloud_fraction=cloud_fraction)
+      sfc_t = sfc_temperature
+      if isinstance(sfc_t, float):
+        sfc_t = sfc_t * jnp.ones(temperature.shape[:2], dtype=temperature.dtype)
+      planck_srcs = optics_lib.compute_planck_sources(
+          pressure, temperature, igpt, vmr_fields, sfc_temperature=sfc_t,
+          level_temperature=level_temperature)
+      fluxes = _lw_gpoint_fluxes(igpt, cloudy_props, liq_g, ice_g, planck_srcs)
+      fluxes_clr = _lw_gpoint_fluxes(igpt, gas_props, None, None, planck_srcs)
+      fluxes = {**fluxes, **{k + '_clr': v for k, v in fluxes_clr.items()}}
+    # cumulative_flux keys: 'flux_up', 'flux_down', 'flux_net' (+ '_clr')
     # Coerce each g-point's flux to the ACCUMULATOR dtype before adding.
     # Under ``compute_fp32`` the scan carry (``cumulative_flux``, init
     # ``zeros_like(temperature)``) is float32, but the per-g-point transport
@@ -568,6 +570,8 @@ def solve_lw(
     )
 
   flux_keys = ['flux_up', 'flux_down', 'flux_net']
+  if clear_sky:
+    flux_keys = flux_keys + [k + '_clr' for k in flux_keys]
   init_val = {key: jnp.zeros_like(temperature) for key in flux_keys}
 
   # Accumulate each g-point's flux contribution.  ``gpoint_batch_size==0``
@@ -578,17 +582,10 @@ def solve_lw(
       step_fn, optics_lib.n_gpt_lw, init_val, gpoint_batch_size,
       checkpoint=gpoint_checkpoint,
   )
-  # There are problematic values for the fluxes at the top boundary (the top
-  # halo), so range-limit the quadratic top-flux extrapolation (BUG B).  The
-  # raw quadratic is LINEAR in the flux so flux_net = flux_up - flux_down held
-  # at the top face automatically; the range-limit is nonlinear, so clip only
-  # the physical up/down components and RECOMPUTE flux_net = up - down at the
-  # top face to keep the TOA energy budget consistent.
-  fluxes['flux_up'] = _replace_top_flux(fluxes['flux_up'])
-  fluxes['flux_down'] = _replace_top_flux(fluxes['flux_down'])
-  fluxes['flux_net'] = fluxes['flux_net'].at[:, :, -1].set(
-      fluxes['flux_up'][:, :, -1] - fluxes['flux_down'][:, :, -1])
-
+  # Index -1 (the top halo position) carries the PHYSICAL boundary fluxes the
+  # recurrence placed there (down = the TOA incident init, up = down*albedo +
+  # emission at the same face); the top model layer is heated by their
+  # divergence against index -2.  They must not be overwritten.
   return fluxes
 
 
@@ -627,6 +624,20 @@ def compute_sw_optical_props_gpt(
       cloud_path_ice,
       cloud_fraction=cloud_fraction,
   )
+  return _mix_sw_aerosol_and_clip(
+      igpt, optics_lib, sw_optical_props, aerosol_optical_depth,
+      aerosol_single_scattering_albedo, aerosol_asymmetry_factor)
+
+
+def _mix_sw_aerosol_and_clip(
+    igpt: Array,
+    optics_lib,
+    sw_optical_props: dict[str, Array],
+    aerosol_optical_depth: Array | None,
+    aerosol_single_scattering_albedo: float | Array,
+    aerosol_asymmetry_factor: float | Array,
+) -> dict[str, Array]:
+  """Mix aerosol into one g-point's SW gas(+cloud) optics, then clip ssa/g."""
   if aerosol_optical_depth is not None:
     # Per-band aerosol optics: ``aerosol_single_scattering_albedo`` /
     # ``aerosol_asymmetry_factor`` may be a SCALAR (grey aerosol, historical
@@ -765,6 +776,7 @@ def compute_lw_optical_field(
     cloud_path_ice: Array | None = None,
     cloud_fraction: Array | None = None,
     aerosol_absorption_optical_depth: Array | None = None,
+    level_temperature: Array | None = None,
 ) -> dict[str, Array]:
   """Stack per-g-point longwave ABSORPTION optical depth + Planck sources for
   the 3D Monte-Carlo emission tracer.
@@ -788,7 +800,7 @@ def compute_lw_optical_field(
         cloud_fraction=cloud_fraction)
     planck = optics_lib.compute_planck_sources(
         pressure, temperature, igpt, vmr_fields,
-        sfc_temperature=sfc_temperature)
+        sfc_temperature=sfc_temperature, level_temperature=level_temperature)
     ssa = jnp.clip(props['ssa'], 0.0, 1.0)
     abs_od = jnp.maximum(props['optical_depth'], 0.0) * (1.0 - ssa)
     if aerosol_absorption_optical_depth is not None:
@@ -825,6 +837,8 @@ def solve_sw(
     use_scan: bool | None = None,
     gpoint_batch_size: int = 0,
     gpoint_checkpoint: bool = True,
+    cloud_path_fn=None,
+    clear_sky: bool = False,
 ) -> dict[str, Array]:
   """Solves the two-stream radiative transfer equation for shortwave.
 
@@ -876,8 +890,13 @@ def solve_sw(
   # ``zenith`` may be a scalar (single-column) or an array with a column
   # dimension, e.g. shape ``(ncol, 1)``.  To avoid division-by-zero in
   # ``exp(-tau / cos(zenith))`` for nighttime columns (cos(zenith) ~ 0),
-  # we clamp the zenith used in the solve to at most ~89.4 degrees
-  # (cos > 0.01).  After the solve, nighttime columns are zeroed out.
+  # we clamp the zenith used in the slant path (exp(-tau/mu) and the
+  # two-stream R/T) to at most ~89.4 degrees (cos > 0.01).  The incident
+  # beam is projected with the TRUE cos(zenith), as RTE does
+  # (sw_solver_2stream: flux_dir(top) = inc_flux_dir * mu0); projecting it
+  # with the floored value gave a sun just above the horizon up to
+  # S_0*(0.01 - cos z) extra insolation.  After the solve, nighttime columns
+  # are zeroed out.
   _ZENITH_MAX = jnp.arccos(jnp.asarray(0.01, dtype=temperature.dtype))  # coeff-ok: min cos(zenith) floor
   safe_zenith = jnp.minimum(zenith, _ZENITH_MAX)
 
@@ -889,14 +908,8 @@ def solve_sw(
   # nighttime domain (preserves the original optimisation).
   any_day = jnp.any(is_day_col)
 
-  def step_fn(igpt, partial_fluxes):
-    # Per-g-point gas+cloud+aerosol optics (shared with the MC ray tracer).
-    sw_optical_props = compute_sw_optical_props_gpt(
-        igpt, optics_lib, pressure, temperature, molecules, vmr_fields,
-        cloud_r_eff_liq, cloud_path_liq, cloud_r_eff_ice, cloud_path_ice,
-        cloud_fraction, aerosol_optical_depth,
-        aerosol_single_scattering_albedo, aerosol_asymmetry_factor,
-    )
+  def _sw_gpoint_fluxes(igpt, sw_optical_props):
+    """One g-point's SW fluxes from its final (aerosol-mixed) optics."""
     optical_props_2stream = monochromatic_two_stream.sw_cell_properties(
         safe_zenith,
         sw_optical_props['optical_depth'],
@@ -931,6 +944,7 @@ def solve_sw(
         sfc_albedo_direct=sfc_albedo_dir,
         zenith=safe_zenith,
         use_scan=use_scan,
+        mu_incident=jnp.cos(zenith),
     )
 
     sw_fluxes = monochromatic_two_stream.sw_transport(
@@ -943,6 +957,36 @@ def solve_sw(
         flux_down_dir=sources_2stream['flux_down_dir'],
         use_scan=use_scan,
     )
+    return sw_fluxes
+
+  def step_fn(igpt, partial_fluxes):
+    liq_g, ice_g = _gpoint_cloud_paths(
+        igpt, cloud_path_liq, cloud_path_ice, cloud_path_fn)
+    if not clear_sky:
+      # Per-g-point gas+cloud+aerosol optics (shared with the MC ray tracer).
+      sw_optical_props = compute_sw_optical_props_gpt(
+          igpt, optics_lib, pressure, temperature, molecules, vmr_fields,
+          cloud_r_eff_liq, liq_g, cloud_r_eff_ice, ice_g,
+          cloud_fraction, aerosol_optical_depth,
+          aerosol_single_scattering_albedo, aerosol_asymmetry_factor,
+      )
+      sw_fluxes = _sw_gpoint_fluxes(igpt, sw_optical_props)
+    else:
+      # Clear-sky alongside all-sky with the gas optics computed ONCE (see
+      # solve_lw); aerosol is mixed into each, as the separate passes did.
+      gas_props = optics_lib.compute_sw_optical_properties(
+          pressure, temperature, molecules, igpt, vmr_fields)
+      cloudy_props = optics_lib.add_cloud_optical_properties(
+          igpt, gas_props, False, cloud_r_eff_liq, liq_g,
+          cloud_r_eff_ice, ice_g, cloud_fraction=cloud_fraction)
+      _aer = (aerosol_optical_depth, aerosol_single_scattering_albedo,
+              aerosol_asymmetry_factor)
+      sw_fluxes = _sw_gpoint_fluxes(
+          igpt, _mix_sw_aerosol_and_clip(igpt, optics_lib, cloudy_props, *_aer))
+      sw_fluxes_clr = _sw_gpoint_fluxes(
+          igpt, _mix_sw_aerosol_and_clip(igpt, optics_lib, gas_props, *_aer))
+      sw_fluxes = {**sw_fluxes,
+                   **{k + '_clr': v for k, v in sw_fluxes_clr.items()}}
     # Cast each g-point contribution to the accumulator dtype (see solve_lw):
     # under ``compute_fp32`` the carry (``partial_fluxes``, init
     # ``zeros_like(temperature)``) is float32 but the transport solve
@@ -954,6 +998,8 @@ def solve_sw(
     return total_sw_fluxes
 
   flux_keys = ['flux_up', 'flux_down', 'flux_net']
+  if clear_sky:
+    flux_keys = flux_keys + [k + '_clr' for k in flux_keys]
   fluxes_0 = {key: jnp.zeros_like(temperature) for key in flux_keys}
 
   def _compute_fluxes(_):
@@ -965,15 +1011,8 @@ def solve_sw(
         step_fn, optics_lib.n_gpt_sw, fluxes_0, gpoint_batch_size,
         checkpoint=gpoint_checkpoint,
     )
-    # There are problematic values for the fluxes at the top boundary (the top
-    # halo), so range-limit the quadratic top-flux extrapolation (BUG B).  Clip
-    # only the physical up/down components and RECOMPUTE flux_net = up - down at
-    # the top face (the nonlinear range-limit would otherwise break the
-    # flux_net = flux_up - flux_down identity the raw linear quadratic kept).
-    fluxes['flux_up'] = _replace_top_flux(fluxes['flux_up'])
-    fluxes['flux_down'] = _replace_top_flux(fluxes['flux_down'])
-    fluxes['flux_net'] = fluxes['flux_net'].at[:, :, -1].set(
-        fluxes['flux_up'][:, :, -1] - fluxes['flux_down'][:, :, -1])
+    # Index -1 holds the physical TOA fluxes from the recurrence (see solve_lw);
+    # an earlier clipped extrapolation here zeroed the top layer's SW heating.
 
     # Zero out nighttime columns.  ``is_day_col`` broadcasts from
     # shape ``()`` or ``(ncol, 1)`` against ``(ncol, 1, nlev+2)``.
