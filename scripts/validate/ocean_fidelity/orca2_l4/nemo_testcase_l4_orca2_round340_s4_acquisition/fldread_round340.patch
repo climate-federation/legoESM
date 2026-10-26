@@ -1,0 +1,54 @@
+--- fldread.F90
++++ fldread.F90
+@@ -56,5 +56,6 @@
+    IMPLICIT NONE
+    PRIVATE   
++   INTEGER, SAVE :: r340_last_kt = -HUGE(0), r340_call = 0
+  
+    PUBLIC   fld_map    ! routine called by tides_init
+    PUBLIC   fld_read, fld_fill   ! called by sbc... modules
+@@ -256,6 +257,7 @@
+             IF( kt == nitend - kn_fsbc + 1 )   CALL iom_close( sd(jf)%num )   ! Close the input files
+ 
+          END DO                                    ! --- end loop over field --- !
++         CALL r340_fld_frame(kt,isecsbc,sd)
+          !
+       ENDIF
+       !
+@@ -1655,5 +1657,36 @@
+       ! 
+    END FUNCTION ksec_week
+ 
++   SUBROUTINE r340_fld_frame(kt,isecsbc,sd)
++      INTEGER, INTENT(in) :: kt,isecsbc
++      TYPE(FLD), INTENT(in), DIMENSION(:) :: sd
++      INTEGER :: jf,iu
++      CHARACTER(LEN=128) :: name
++      CHARACTER(LEN=16) :: magic
++      magic='NEMO_R340_FLDRD1'
++      IF (kt /= r340_last_kt) THEN
++         r340_last_kt=kt
++         r340_call=0
++      ENDIF
++      r340_call=r340_call+1
++      DO jf=1,SIZE(sd)
++         IF (.NOT.ASSOCIATED(sd(jf)%fnow)) CYCLE
++         WRITE(name,'("oracle_r340_fld_k",I8.8,"_c",I3.3,"_f",I3.3,"_r",I4.4,".bin")') kt,r340_call,jf,mpprank
++         OPEN(NEWUNIT=iu,FILE=TRIM(name),ACCESS='STREAM',FORM='UNFORMATTED',STATUS='NEW',ACTION='WRITE')
++         WRITE(iu) magic
++         WRITE(iu) 1,kt,r340_call,jf,mpprank,isecsbc,sd(jf)%nbb,sd(jf)%naa,64
++         WRITE(iu) sd(jf)%clvar,sd(jf)%nrec,sd(jf)%rec_shft
++         WRITE(iu) LBOUND(sd(jf)%fnow),UBOUND(sd(jf)%fnow),SIZE(sd(jf)%fnow)
++         WRITE(iu) sd(jf)%fnow
++         IF (ASSOCIATED(sd(jf)%fdta)) THEN
++            WRITE(iu) 1,LBOUND(sd(jf)%fdta),UBOUND(sd(jf)%fdta),SIZE(sd(jf)%fdta)
++            WRITE(iu) sd(jf)%fdta
++         ELSE
++            WRITE(iu) 0,0,0,0,0,0,0,0,0,0
++         ENDIF
++         CLOSE(iu)
++      END DO
++   END SUBROUTINE r340_fld_frame
++
+    !!======================================================================
+ END MODULE fldread

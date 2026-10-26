@@ -1,0 +1,52 @@
+--- sbcice_if.F90
++++ sbcice_if.F90
+@@ -147,6 +147,7 @@
+       ENDIF
+ 
+       CALL fld_read( kt, nn_fsbc, sf_ice )           ! Read input fields and provides the
++      CALL r340_iif_frame(kt,0,Kbb,Kmm)
+       !                                              ! input fields at the current time-step
+       
+       IF( MOD( kt-1, nn_fsbc) == 0 ) THEN
+@@ -157,6 +158,7 @@
+          
+          CALL eos_fzp( sss_m(:,:), fr_i(:,:) )       ! sea surface freezing temperature [Celsius]
+          fr_i(:,:) = fr_i(:,:) * tmask(:,:,1)
++         CALL r340_iif_frame(kt,1,Kbb,Kmm)
+ 
+          IF( ln_cpl )   a_i(:,:,1) = fr_i(:,:)         
+ 
+@@ -165,6 +167,7 @@
+             zt_fzp  = fr_i(ji,jj)                        ! freezing point temperature
+             ts(ji,jj,1,jp_tem,Kmm) = MAX( ts(ji,jj,1,jp_tem,Kmm), zt_fzp )     ! avoid over-freezing point temperature
+          END DO   ;   END DO
++         CALL r340_iif_frame(kt,2,Kbb,Kmm)
+ 
+          DO jj = ntsj-( 0), ntej+(  0 ) ; DO ji = ntsi-( 0), ntei+(  0)
+             zt_fzp  = fr_i(ji,jj)                        ! freezing point temperature
+@@ -196,8 +199,25 @@
+          END DO   ;   END DO
+          !
+       ENDIF
++      CALL r340_iif_frame(kt,3,Kbb,Kmm)
+       !
+    END SUBROUTINE sbc_ice_if
+ 
++   SUBROUTINE r340_iif_frame(kt,kid,Kbb,Kmm)
++      INTEGER,INTENT(in)::kt,kid,Kbb,Kmm
++      INTEGER::iu
++      CHARACTER(LEN=128)::name
++      CHARACTER(LEN=16)::magic
++      magic='NEMO_R340_IIF_1'
++      WRITE(name,'("oracle_r340_iif_k",I8.8,"_b",I1,"_r",I4.4,".bin")') kt,kid,mpprank
++      OPEN(NEWUNIT=iu,FILE=TRIM(name),ACCESS='STREAM',FORM='UNFORMATTED',STATUS='NEW',ACTION='WRITE')
++      WRITE(iu) magic
++      WRITE(iu) 1,kt,kid,Kbb,Kmm,mpprank,jpi,jpj,64
++      WRITE(iu) LBOUND(qsr),UBOUND(qsr),SIZE(qsr)
++      WRITE(iu) sf_ice(1)%fnow,sss_m,sst_m,ts(:,:,1,jp_tem,Kbb),ts(:,:,1,jp_tem,Kmm),fr_i
++      WRITE(iu) qsr,qns,emp,sfx,utau,vtau,taum,wndm
++      CLOSE(iu)
++   END SUBROUTINE r340_iif_frame
++
+    !!======================================================================
+ END MODULE sbcice_if

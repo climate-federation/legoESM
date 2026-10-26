@@ -1920,6 +1920,31 @@ FILES = {
     "ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/iceupdate.f90": (
         NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo"
         "/iceupdate.f90"),
+    # Round 340: the admitted K0 smoke build's exact preprocessed program.
+    "ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/sbcmod.f90": (
+        Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/"
+             "round339/k0_smoke/orca2_k0_10step_np2/build_sources/ppsrc/"
+             "nemo/sbcmod.f90")),
+    "ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/stprk3.f90": (
+        Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/"
+             "round339/k0_smoke/orca2_k0_10step_np2/build_sources/ppsrc/"
+             "nemo/stprk3.f90")),
+    "ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/stprk3_stg.f90": (
+        Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/"
+             "round339/k0_smoke/orca2_k0_10step_np2/build_sources/ppsrc/"
+             "nemo/stprk3_stg.f90")),
+    "ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/sbcice_if.f90": (
+        Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/"
+             "round339/k0_smoke/orca2_k0_10step_np2/build_sources/ppsrc/"
+             "nemo/sbcice_if.f90")),
+    "ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/sbc_oce.f90": (
+        Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/"
+             "round339/k0_smoke/orca2_k0_10step_np2/build_sources/ppsrc/"
+             "nemo/sbc_oce.f90")),
+    "ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/nemogcm.f90": (
+        Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/"
+             "round339/k0_smoke/orca2_k0_10step_np2/build_sources/ppsrc/"
+             "nemo/nemogcm.f90")),
     # Round 334 (ratchet cleanup): the NEMO statements the named constants cite.
     "trabbc.F90": _OCE / "TRA/trabbc.F90",
     "phycst.F90": _OCE / "DOM/phycst.F90",
@@ -2200,6 +2225,35 @@ CITATION_MAP = {
     'k_profiles.py:329-348': [
         'K_vmix, A_vmix, tke_new = _vmix_K_profiles(',
         'A_v_total = A_v_total + A_vmix', 20],
+    # ORCA2 round 340: source-order S4 boundaries on the admitted K0 build.
+    'ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/sbcmod.f90:428':
+        'CALL sbc_ssm ( kt, Kbb, Kmm )',
+    'ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/sbcmod.f90:440-449': [
+        ('SELECT CASE( nsbc )', 2), ('END SELECT', 4), 10],
+    'ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/sbcmod.f90:499-503': [
+        ('SELECT CASE( nn_ice )', 2), ('END SELECT', 5), 5],
+    'ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/sbcmod.f90:517-521': [
+        'CALL sbc_rnf( kt )', 'CALL sbc_fwb( kt, nn_fwb, nn_fsbc, Kmm )', 5],
+    'ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/sbcmod.f90:565-570': [
+        'DO jj = ntsj-( nn_hls-1)', ('END DO   ;   END DO', 5), 6],
+    'ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/stprk3.f90:128':
+        'CALL sbc        ( kstp, Nbb, Nbb )',
+    'ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/stprk3.f90:185-197': [
+        'CALL stp_RK3_stg( 1, kstp', 'CALL stp_RK3_stg( 3, kstp', 13],
+    'ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/nemogcm.f90:368':
+        'Nbb = 1   ;   Nnn = 2   ;   Naa = 3',
+    'ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/stprk3_stg.f90:582-585': [
+        ('ENDIF', 21), 'DEALLOCATE( zFu, zFv, zFw )', 4],
+    'ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/sbcice_if.f90:149':
+        'CALL fld_read( kt, nn_fsbc, sf_ice )',
+    'ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/sbcice_if.f90:158':
+        'CALL eos_fzp( sss_m(:,:), fr_i(:,:) )',
+    'ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/sbcice_if.f90:166':
+        'ts(ji,jj,1,jp_tem,Kmm) = MAX',
+    'ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/sbcice_if.f90:177':
+        'qsr(ji,jj) = ( 1. - zfr_obs ) * qsr(ji,jj)',
+    'ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/sbc_oce.f90:195-216': [
+        'ALLOCATE( utau(jpi,jpj)', 'wndm(Nis0-(0):Nie0+(0)', 22],
     # ORCA2 round 334: provenance of the constants the ratchet cleanup named.
     'trabbc.F90:179': "* 1.e-3 ! conversion in W/m2",
     'phycst.F90:26': "rad      = 3.141592653589793_wp / 180._wp",

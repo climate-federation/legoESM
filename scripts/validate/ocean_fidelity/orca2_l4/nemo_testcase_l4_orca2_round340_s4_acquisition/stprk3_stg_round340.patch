@@ -1,0 +1,18 @@
+--- stprk3_stg.F90
++++ stprk3_stg.F90
+@@ -29,6 +29,7 @@
+    !!    stp_RK3_stg  : NEMO 3rd order Runge-Kutta stage with qco or linssh
+    !!----------------------------------------------------------------------
+    USE step_oce       ! time stepping used modules
++   USE round340_state_writer, ONLY: r340_state_frame
+    USE domqco         ! quasi-eulerian coordinate      (dom_qco_r3c routine)
+    USE bdydyn         ! ocean open boundary conditions (define bdy_dyn)
+    USE lbclnk         ! ocean lateral boundary conditions (or mpp link)
+@@ -582,6 +583,7 @@
+          ENDIF
+       ENDIF
+       !
++      CALL r340_state_frame( kstp, kstg, Kaa, ts(:,:,:,:,Kaa), uu(:,:,:,Kaa), vv(:,:,:,Kaa), ssh(:,:,Kaa) )
+       DEALLOCATE( zFu, zFv, zFw )
+       !
+       IF( ln_timing )   CALL timing_stop('stp_RK3_stg')

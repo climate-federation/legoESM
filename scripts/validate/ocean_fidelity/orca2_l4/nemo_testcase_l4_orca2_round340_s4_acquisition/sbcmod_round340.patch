@@ -1,0 +1,85 @@
+--- sbcmod.F90
++++ sbcmod.F90
+@@ -10,6 +10,7 @@
+ 
+ 
+ MODULE sbcmod
++   USE round340_surface_writer, ONLY: r340_surface_frame
+    !!======================================================================
+    !!                       ***  MODULE  sbcmod  ***
+    !! Surface module :  provide to the ocean its surface boundary condition
+@@ -78,6 +79,7 @@
+    IMPLICIT NONE
+    PRIVATE
+ 
++   PUBLIC   r340_surface_fixture
+    PUBLIC   sbc        ! routine called by step.F90
+    PUBLIC   sbc_init   ! routine called by opa.F90
+ 
+@@ -425,7 +426,9 @@
+       ll_sas = nn_components == jp_iam_sas               ! component flags
+       ll_opa = nn_components == jp_iam_oce
+       !
++      CALL r340_surface_frame(kt,0)
+       IF( .NOT.ll_sas )   CALL sbc_ssm ( kt, Kbb, Kmm )  ! mean ocean sea surface variables (sst_m, sss_m, ssu_m, ssv_m)
++      CALL r340_surface_frame(kt,1)
+       !
+       !                                            !==  sbc formulation  ==!
+       !
+@@ -437,6 +442,7 @@
+          ENDIF
+       ENDIF
+       !
++      CALL r340_surface_frame(kt,2)
+       SELECT CASE( nsbc )                                ! Compute ocean surface boundary condition
+       !                                                  ! (i.e. utau,vtau, qns, qsr, emp, sfx)
+       CASE( jp_usr     )   ;   CALL usrdef_sbc_oce( kt, Kbb )                        ! user defined formulation
+@@ -447,6 +453,7 @@
+       CASE( jp_none    )
+          IF( ll_opa    )       CALL sbc_cpl_rcv   ( kt, nn_fsbc, nn_ice, Kbb, Kmm )   ! OCE-SAS coupling: OCE receiving fields from SAS
+       END SELECT
++      CALL r340_surface_frame(kt,3)
+       !
+       IF( ln_mixcpl )          CALL sbc_cpl_rcv   ( kt, nn_fsbc, nn_ice, Kbb, Kmm )   ! forced-coupled mixed formulation after forcing
+       !
+@@ -496,11 +503,13 @@
+       !
+       !                                            !==  Misc. Options  ==!
+       !
++      CALL r340_surface_frame(kt,4)
+       SELECT CASE( nn_ice )                                            ! Update heat and freshwater fluxes over sea-ice areas
+       CASE(  1 )   ;         CALL sbc_ice_if   ( kt, Kbb, Kmm )        ! Ice-cover climatology ("Ice-if" model)
+       CASE(  2 )   ;         CALL ice_stp  ( kt, Kbb, Kmm, nsbc )      ! SI3 ice model
+       CASE(  3 )   ;         CALL sbc_ice_cice ( kt, nsbc )            ! CICE ice model
+       END SELECT
++      CALL r340_surface_frame(kt,5)
+       !==> clem: from here on, the following fields are ok on the halos: snwice_mass, snwice_mass_b, snwice_fmass
+       !                        but not utau, vtau, emp (must be done later on)
+       
+@@ -514,6 +523,7 @@
+ !!$      IF( ln_icebergs .AND. .NOT. ln_passive_mode )   CALL lbc_lnk( 'sbcmod', emp, 'T', 1.0_wp )
+       !clem: not needed anymore since lbc is done afterwards
+       
++      CALL r340_surface_frame(kt,6)
+       IF( ln_rnf         )   CALL sbc_rnf( kt )                        ! add runoffs to fresh water fluxes
+ 
+       IF( ln_ssr         )   CALL sbc_ssr( kt )                        ! add SST/SSS damping term
+@@ -568,6 +578,7 @@
+          vtauV  (ji,jj) = 0.5_wp * ( vtau(ji,jj) + vtau(ji,jj+1) ) * &
+             &                      ( 2. - vmask(ji,jj,1) ) * MAX( tmask(ji,jj,1), tmask(ji,jj+1,1) )
+       END DO   ;   END DO
++      CALL r340_surface_frame(kt,7)
+       !
+       IF( kt == nit000 ) THEN                          !   set the forcing field at nit000 - 1    !
+          !                                             ! ---------------------------------------- !
+@@ -670,5 +681,10 @@
+       !
+    END SUBROUTINE sbc_final
+ 
++   SUBROUTINE r340_surface_fixture(kt,kid)
++      INTEGER,INTENT(in)::kt,kid
++      CALL r340_surface_frame(kt,kid)
++   END SUBROUTINE r340_surface_fixture
++
+    !!======================================================================
+ END MODULE sbcmod

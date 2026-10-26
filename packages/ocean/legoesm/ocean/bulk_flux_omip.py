@@ -784,6 +784,56 @@ class NemoStandaloneSurfaceResult(NamedTuple):
     freshwater_forcing: object
 
 
+class NemoStandaloneK0Config(NamedTuple):
+    """Explicit Decision-175 selectors for the standalone ORCA2 card.
+
+    These fields deliberately have no defaults.  The card must carry the K0
+    choices in its resolved configuration rather than inheriting library
+    defaults.
+    """
+
+    nn_ice: int
+    ln_drgice_imp: bool
+    ln_mxl0: bool
+    nn_mxlice: int
+    ln_icebergs: bool
+
+
+def validate_nemo_standalone_k0(config: NemoStandaloneK0Config) -> None:
+    """Refuse every surface-card configuration other than Decision-175 K0."""
+
+    expected = NemoStandaloneK0Config(1, False, True, 0, False)
+    if config != expected:
+        raise ValueError(
+            "standalone ORCA2 requires explicit Decision-175 K0 selectors "
+            f"{expected!r}; got {config!r}"
+        )
+
+
+def nemo_orca2_k0_surface_card(
+    u_wind, v_wind, T_air_K, q_air, slp_Pa,
+    qsr_down, qlw_down, precip, snow, mask, albedo, precip_factor,
+    evap_factor, nb_iter, *, k0_config, ice_if, s0, s2,
+):
+    """Run the production S0 -> S1 -> S3 -> S2 path for standalone K0.
+
+    The routine accepts physical fields, including CORE fields and the
+    Decision-171 ice-cover interpolation operands, but no NEMO exchange
+    record.  It is intentionally a thin binding around
+    :func:`nemo_blk_oce_ncar`; the source-ordered arithmetic remains in that
+    shared production path.
+    """
+
+    validate_nemo_standalone_k0(k0_config)
+    return nemo_blk_oce_ncar(
+        u_wind, v_wind, T_air_K, q_air, slp_Pa,
+        None, None, None,
+        qsr_down, qlw_down, precip, snow, mask, albedo, precip_factor,
+        evap_factor, nb_iter,
+        nn_ice=k0_config.nn_ice, ice_if=ice_if, s0=s0, s2=s2,
+    )
+
+
 def _crop_to_surface_interior(value, interior_shape):
     """Crop symmetric NEMO halos from a full T array to ``A2D(0)``."""
     value = jnp.asarray(value, dtype=jnp.float64)
