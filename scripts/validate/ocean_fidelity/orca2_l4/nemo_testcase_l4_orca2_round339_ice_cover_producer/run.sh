@@ -141,19 +141,20 @@ check_no_removed_lines "$PATCH" || refuse 'observer patch removes a source line'
 check_real_context "$PATCH" || refuse 'observer patch has a zero-context hunk'
 cp "$SOURCE" "$scratch/sbcmod.F90"
 patch --batch -s --fuzz=0 -p0 -d "$scratch" <"$PATCH"
-check_placement "$scratch/sbcmod.F90" || refuse 'observer is not after ice_stp and before icebergs'
-for plant in call use wrapper; do
-  case "$plant" in
-    call) sed '/CALL r339_write(kt,fr_i,nn_fsbc)/d' "$scratch/sbcmod.F90" >"$scratch/plants/$plant.F90" ;;
-    use) sed '/USE round339_ice_cover_writer/d' "$scratch/sbcmod.F90" >"$scratch/plants/$plant.F90" ;;
-    wrapper) sed '/SUBROUTINE r339_fixture_write/,/END SUBROUTINE r339_fixture_write/d' "$scratch/sbcmod.F90" >"$scratch/plants/$plant.F90" ;;
-  esac
-  plant_must_refuse "placement-$plant" check_placement "$scratch/plants/$plant.F90"
-done
 fpp "$SOURCE" "$scratch/sbcmod-base.f90"
 cmp -s "$scratch/sbcmod-base.f90" "$SOURCE_ROOT/BLD/ppsrc/nemo/sbcmod.f90" \
   || refuse 'cpp no longer reproduces round-5 sbcmod ppsrc'
 fpp "$scratch/sbcmod.F90" "$scratch/sbcmod-observed.f90"
+check_placement "$scratch/sbcmod-observed.f90" \
+  || refuse 'preprocessed observer is not after ice_stp and before icebergs'
+for plant in call use wrapper; do
+  case "$plant" in
+    call) sed '/CALL r339_write(kt,fr_i,nn_fsbc)/d' "$scratch/sbcmod-observed.f90" >"$scratch/plants/$plant.f90" ;;
+    use) sed '/USE round339_ice_cover_writer/d' "$scratch/sbcmod-observed.f90" >"$scratch/plants/$plant.f90" ;;
+    wrapper) sed '/SUBROUTINE r339_fixture_write/,/END SUBROUTINE r339_fixture_write/d' "$scratch/sbcmod-observed.f90" >"$scratch/plants/$plant.f90" ;;
+  esac
+  plant_must_refuse "placement-$plant" check_placement "$scratch/plants/$plant.f90"
+done
 fpp "$WRITER" "$scratch/round339_ice_cover_writer.f90"
 compile_like_round5 "$scratch/sbcmod-base.f90" "$scratch/sbcmod-base.o"
 compile_like_round5 "$scratch/round339_ice_cover_writer.f90" "$scratch/round339_ice_cover_writer.o"
