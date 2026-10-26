@@ -89,9 +89,11 @@ from legoesm.ocean.eos import nemo_eos_fzp_eos80
 from legoesm.ocean.forcing.nemo_fld_read import nemo_fld_time_interp
 from legoesm.ocean.forcing.nemo_surface import (
     NemoSurfaceMeans,
+    NemoTStressLbcPlan,
     nemo_orca2_s2,
     nemo_sbc_ssm_step,
     nemo_s2_to_ocean_interfaces,
+    nemo_t_stress_lbc_neighbors,
 )
 from legoesm.thermo import saturation_vapor_pressure_goff
 
@@ -748,8 +750,7 @@ class NemoS0Inputs(NamedTuple):
 
 class NemoS2Inputs(NamedTuple):
     """Post-bulk controls/state for the standalone ORCA2 ``sbcmod`` tail."""
-    post_ice_utau_east: object
-    post_ice_vtau_north: object
+    stress_lbc: NemoTStressLbcPlan
     post_ice_sfx: object
     runoff_now: object
     prior_runoff_mass: object
@@ -781,6 +782,23 @@ class NemoStandaloneSurfaceResult(NamedTuple):
     s2: object
     surface_forcing: object
     freshwater_forcing: object
+
+
+def _crop_to_surface_interior(value, interior_shape):
+    """Crop symmetric NEMO halos from a full T array to ``A2D(0)``."""
+    value = jnp.asarray(value, dtype=jnp.float64)
+    if value.shape == interior_shape:
+        return value
+    if value.ndim != 2 or len(interior_shape) != 2:
+        raise ValueError("standalone surface arrays must be two-dimensional")
+    delta = tuple(full - inner for full, inner in zip(value.shape, interior_shape))
+    if any(amount <= 0 or amount % 2 for amount in delta):
+        raise ValueError("S0 means must be symmetric NEMO halos around A2D(0)")
+    halo = tuple(amount // 2 for amount in delta)
+    return value[
+        halo[0]:value.shape[0] - halo[0],
+        halo[1]:value.shape[1] - halo[1],
+    ]
 
 
 class BlkOce2Result(NamedTuple):
@@ -891,6 +909,8 @@ def nemo_blk_oce_ncar(
         raise ValueError("nemo_blk_oce_ncar: ice_if is required iff nn_ice == 1")
     if (s0 is None) != (s2 is None):
         raise ValueError("nemo_blk_oce_ncar requires S0 and S2 together")
+    if s2 is not None and nn_ice != 1:
+        raise ValueError("standalone S0/S2 path requires composed nn_ice=1 S3")
     if s0 is None:
         if sst_c is None or ssu is None or ssv is None:
             raise ValueError("S1-only path requires explicit sst_c, ssu and ssv")
@@ -917,7 +937,10 @@ def nemo_blk_oce_ncar(
             surface_mask=s0.surface_mask,
             shortwave_fraction_top=s0.shortwave_fraction_top,
         )
-        sst_c, ssu, ssv = means.sst, means.ssu, means.ssv
+        interior_shape = jnp.shape(mask)
+        sst_c = _crop_to_surface_interior(means.sst, interior_shape)
+        ssu = _crop_to_surface_interior(means.ssu, interior_shape)
+        ssv = _crop_to_surface_interior(means.ssv, interior_shape)
     wet = jnp.asarray(mask, dtype=jnp.float64)
     sst_c_arr = jnp.asarray(sst_c, dtype=jnp.float64)
     state = _nemo_ncar_turbulent(
@@ -936,6 +959,8 @@ def nemo_blk_oce_ncar(
     qns = surface.qns
     ts_surface = fr_i = None
     if nn_ice == 1:
+        if means is not None:
+            ice_if = ice_if._replace(sss_m=means.sss, sst_m=means.sst)
         halo = {(a - b) for a, b in zip(jnp.shape(ice_if.ts_surface),
                                          jnp.shape(qns))}
         if len(halo) != 1 or min(halo) < 0 or min(halo) % 2:
@@ -961,13 +986,17 @@ def nemo_blk_oce_ncar(
     )
     if s2 is None:
         return bulk
+    sss_mean = _crop_to_surface_interior(means.sss, jnp.shape(mask))
+    utau, vtau, utau_east, vtau_north = nemo_t_stress_lbc_neighbors(
+        bulk.utau, bulk.vtau, s2.stress_lbc
+    )
     tail = nemo_orca2_s2(
         kt=s0.kt,
         forcing_stride=s0.forcing_stride,
-        post_ice_utau=bulk.utau,
-        post_ice_vtau=bulk.vtau,
-        post_ice_utau_east=s2.post_ice_utau_east,
-        post_ice_vtau_north=s2.post_ice_vtau_north,
+        post_ice_utau=utau,
+        post_ice_vtau=vtau,
+        post_ice_utau_east=utau_east,
+        post_ice_vtau_north=vtau_north,
         post_ice_taum=bulk.taum,
         post_ice_qsr=bulk.qsr,
         post_ice_qns=bulk.qns,
@@ -980,8 +1009,8 @@ def nemo_blk_oce_ncar(
         prior_restoring_volume_flux=s2.prior_restoring_volume_flux,
         prior_restoring_heat_flux=s2.prior_restoring_heat_flux,
         prior_restoring_coefficient=s2.prior_restoring_coefficient,
-        sst_mean=means.sst,
-        sss_mean=means.sss,
+        sst_mean=sst_c,
+        sss_mean=sss_mean,
         sss_target=s2.sss_target,
         runoff_mouth_mask=s2.runoff_mouth_mask,
         surface_mask=s2.surface_mask,
@@ -1189,6 +1218,7 @@ __all__ = [
     "NemoS0Inputs",
     "NemoS2Inputs",
     "NemoStandaloneSurfaceResult",
+    "NemoTStressLbcPlan",
     "ncar_transfer_coefficients",
     "potential_air_temperature_10m",
     "pressure_at_height",

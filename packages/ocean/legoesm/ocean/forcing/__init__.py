@@ -47,9 +47,11 @@ from .sss_restoring import (
 from .nemo_surface import (
     NemoS2Result,
     NemoSurfaceMeans,
+    NemoTStressLbcPlan,
     nemo_orca2_s2,
     nemo_sbc_ssm_step,
     nemo_s2_to_ocean_interfaces,
+    nemo_t_stress_lbc_neighbors,
     nemo_t_stress_to_uv,
 )
 
@@ -77,8 +79,10 @@ __all__ = [
     "nemo_orca2_sss_restoring",
     "NemoS2Result",
     "NemoSurfaceMeans",
+    "NemoTStressLbcPlan",
     "nemo_orca2_s2",
     "nemo_sbc_ssm_step",
     "nemo_s2_to_ocean_interfaces",
+    "nemo_t_stress_lbc_neighbors",
     "nemo_t_stress_to_uv",
 ]

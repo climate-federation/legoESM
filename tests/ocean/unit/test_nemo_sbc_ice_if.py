@@ -388,7 +388,8 @@ def _ice_case():
 
 
 def _blk(blk, **kw):
-    return nemo_blk_oce_ncar(*blk, 0.066, 1.0, 1.0, 5, **kw)
+    return nemo_blk_oce_ncar(
+        *blk, 0.066, 1.0, 1.0, 5, s0=None, s2=None, **kw)
 
 
 def test_nn_ice_1_production_call_site_runs_fld_read_and_sbc_ice_if():

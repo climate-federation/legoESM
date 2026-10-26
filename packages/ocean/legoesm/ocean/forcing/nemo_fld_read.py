@@ -267,18 +267,20 @@ def nemo_fld_record_centres(record_edges, rec_shft):
 
 
 def nemo_fld_select_bracket(model_seconds, record_centres):
-    """Select the closest before and strictly-later after record indices.
+    """Select NEMO's retained-before and current-after record indices.
 
     The caller supplies previous/current/next-file centres after NEMO's file
     policy has assembled them.  It must include a record on each side; file
     cycling/extrapolation remains explicit loader policy, not a numeric default.
+    ``fldread.f90:309`` advances the pair only for ``model_seconds > after``;
+    equality therefore retains the record as the after slot.
     """
     centres = np.asarray(record_centres, dtype=np.int64)
     if centres.ndim != 1 or centres.shape[0] < 2:
         raise ValueError("record_centres must contain at least two records")
     if np.any(np.diff(centres) <= 0):
         raise ValueError("record_centres must be strictly increasing")
-    after = int(np.searchsorted(centres, int(model_seconds), side="right"))
+    after = int(np.searchsorted(centres, int(model_seconds), side="left"))
     if after == 0 or after == centres.size:
         raise ValueError("record_centres do not bracket model_seconds")
     before = after - 1

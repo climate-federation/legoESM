@@ -8,6 +8,10 @@ run was made.**  S0/S2 groups present in the immutable round-5 record are at
 the exact bar; all other groups remain explicitly unmeasured pending the
 already planned S4 acquisition.
 
+Resume 2 rebases the round onto the landed S3 tip `94ec246261`, retains both
+histories, and closes the second Claude HOLD.  It changes no NEMO run,
+configuration, acquisition tool, or comparison bar.
+
 ## Independent-review HOLD closure
 
 The Claude and Argon HOLDs were confirmed and corrected.  SSS restoring now
@@ -32,6 +36,25 @@ entry-point plant for each call.  The complete composed call is bit-identical
 under whole-call eager execution and CPU JIT.  The strengthened mean test was
 also run against parent `0be9d2be51`: its association case failed with parent
 `+0` versus the required `-1/3`, then passed on the corrected tree.
+
+The composed production path now obtains the centre, east, and north stress
+operands from the same-step bulk stress through an explicit NEMO T-vector LBC
+index/sign plan.  Caller-supplied neighbour stresses no longer exist in the
+composed input.  This follows the halo-fill-before-native-face ordering in
+`ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/sbcmod.f90:428-568`.
+A production-call plant replacing those derived neighbours with deliberately
+wrong values changes 5 of 6 U-face words and exits nonzero.
+
+Because S3 landed meanwhile, the path composes it rather than silently naming
+the raw bulk result post-ice: the order is S0 mean, S1 bulk, S3 `sbc_ice_if`,
+then S2.  S3 receives the same-step S0 `sss_m/sst_m`, not stale copies from its
+caller.  Selecting S0/S2 without `nn_ice=1` now refuses explicitly.
+
+The field-reader record loop is literal at equality too.  NEMO advances only
+for the strict `model time > after time` test at
+`ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/fldread.f90:309-366`, so an
+exact centre remains the after record.  The equality test fails when the
+selector is mutated back to `searchsorted(..., side="right")`.
 
 ## Source and executing branch
 
@@ -97,21 +120,24 @@ forcing-boundary division.  A four-step `jax.lax.scan` test pins the stateful
 cadence.
 
 S2 extends, rather than duplicates, the existing shared runoff and
-`sss_restoring.py` code.  Its entry is explicitly post-S3: post-ice
-`utau,vtau,taum,qsr,qns,emp,sfx` are required operands.  It performs the
-forcing-cadence runoff mass/tracer update, SSS restoring, freshwater-budget
-merge, native U/V stress construction, and `qsr` penetrative hand-off.  The
-prior `rnf/rnf_tsc/erp/qrp` states are also required so the non-update step
-preserves NEMO's module diagnostics; the saved restoring coefficient is
-carried too.  The adapter returns the existing
+`sss_restoring.py` code.  Its direct helper entry remains explicitly post-S3,
+but the composed production entry constructs those operands itself.  It runs
+the landed `nn_ice=1` S3 implementation after S1 and before S2, applies the
+explicit T-vector halo/LBC plan to the freshly computed stress, and passes the
+resulting centre/east/north values to native-face construction.  It performs
+the forcing-cadence runoff mass/tracer update, SSS restoring,
+freshwater-budget merge, native U/V stress construction, and `qsr`
+penetrative hand-off.  The prior `rnf/rnf_tsc/erp/qrp` states are also
+required so the non-update step preserves NEMO's module diagnostics; the
+saved restoring coefficient is carried too.  The adapter returns the existing
 `OceanSurfaceForcing` and `FreshwaterForcing` interfaces and selects the
 existing surface-only runoff deposition route; it introduces no second
 depth-distribution formula.
 
 For K0 `nn_ice=1`, there is no additional S2 ice freshwater or salt channel.
-All heat changes made by the ice-interface routine arrive only through the
-explicit post-ice operands.  No `sbcice_if` code, ice-cover plan, vertical
-solve, card, or configuration was touched.
+All heat changes made by the composed S3 ice-interface routine arrive through
+its returned post-ice operands.  Resume 2 changes no `sbcice_if` arithmetic,
+ice-cover plan, vertical solve, card, or configuration.
 
 Every new physical input has no default.  Every NEMO assignment and internal
 association has an M1 source-rounding barrier, including multiplication
@@ -130,12 +156,16 @@ negative zero as positive.  The shared Fortran-sign helper and a negative-zero
 test pin that result.
 
 The executing `sbcrnf.o` `MAXSD(sst,+0)` retains the source positive-zero
-operand on a signed-zero tie.  In `sbcssr.o`, `MAXSD` and `MINSD` retain their
-second Fortran operands on ties: the salinity floor and `ABS(zerp)`,
-respectively.  The shared strict-comparison helpers encode that rule.  Two
-synthetic signed-zero cases make the surviving operand change the output bits,
-and replacing either helper with `jnp.maximum/minimum` makes its test fail.
-The S2 scalar test separately pins runoff temperature content to positive zero
+operand on a signed-zero tie.  `sbcssr.o` is site-specific: the peeled-cell
+`MINSD` at offset `0x4e4a` and the second unrolled site at `0x5034` retain the
+bound, while the first unrolled site at `0x4f55` retains `ABS(zerp)`.  GCC
+peels one cell for an odd local-i extent and then unrolls by two, so the test
+pins `[bound, abs, bound]` for width three and `[abs, bound, abs, bound]` for
+width four.  A checked proof accompanies the site map: both operands are
+nonnegative, and finite numeric equality therefore makes every reachable
+MINSD tie bit-identical; the former unreachable negative-zero-bound test is
+gone.  The reachable `MAXSD` signed-zero test remains bit-changing, and the
+S2 scalar test separately pins runoff temperature content to positive zero
 and Fortran `SIGN` treating negative zero as positive.  These exhaust every
 executing MIN/MAX/SIGN site in S0/S2.
 
@@ -188,10 +218,19 @@ in `omip_scan/q_net` exits nonzero.  This adds focused coverage to round 335's
 unchanged 214-array / 10,231,076-word full-caller control.  No change to a
 non-NEMO caller is requested or observed.
 
+The independent re-review also reports **0 unequal in 117 arrays / 3,316,846
+binary64 words**, including **0 unequal in 46 JRA55-bulk arrays / 745,200
+words**, across three seeds.  Resume 2 reran the focused parent/current
+control above after the rebase and obtained the same 0 / 328 result.
+
 - focused S0/S2 fidelity suite: 7/7 PASS; independent scalar transcription is
   bit-exact under CPU JIT and whole-call eager execution, four-step S0 scan,
-  bit-changing signed-zero ties, coefficient carry, finite-difference gradient,
-  composed production-call-site plants, and no physical defaults;
+  the reachable signed-zero tie plus the per-site MINSD proof, coefficient
+  carry, finite-difference gradient, composed production-call-site plants,
+  strict field-record equality, and no physical defaults;
+- affected round-337/S3/NCAR-bulk suites: 49/49 PASS; the production-path
+  stress-neighbour plant, S3-order plant, S0 plant, and S2 plant all turn the
+  relevant composed test red;
 - NCAR bulk plus the directly affected freshwater and SSS-restoring suites
   pass; the combined regression/ratchet battery reports 6,375 pass and 2 skip,
   with only the two inherited ratchet failures below;
@@ -217,15 +256,16 @@ native domains, manifests, and all ASKED/UNASKED choices.  It deliberately
 contains no writer, patch, build, configuration, or `run.sh`.  The future S4
 owner builds the one composed acquisition after S3 is available.
 
-- ASKED and complete: literal S0-F numeric helpers, stateful S0-M, literal
-  post-S3 S2, shared runoff/restoring extensions, explicit inputs, barriers,
-  object tie audit, tests, offline score, compatibility control, and future
-  acquisition preregistration.
-- UNASKED and unchanged: `sbcice_if`, the ice-cover plan, vertical solve,
+- ASKED and complete: literal S0-F numeric helpers, stateful S0-M, composed
+  S0/S1/S3/S2 production order, same-step LBC stress neighbours, shared
+  runoff/restoring extensions, explicit inputs, barriers, per-site object tie
+  audit, tests, offline score, compatibility control, and future acquisition
+  preregistration.
+- UNASKED and unchanged: S3 arithmetic, the ice-cover plan, vertical solve,
   NEMO acquisition tooling/execution, all configurations/cards, comparison
   bars, and non-NEMO defaults.
 - No new decision is needed.  The missing evidence is already assigned to
   the composed S4 acquisition, not to an unrequested round-337 tool.
 
-codex review: operator.  Claude and Argon HOLD findings are dispositioned
-above; independent re-review remains operator-owned before push.
+codex review: operator.  Argon LAND and Claude HOLD were re-reviewed; all
+confirmed findings are dispositioned above.

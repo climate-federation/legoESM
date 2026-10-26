@@ -19,8 +19,11 @@ from legoesm.ocean.forcing.nemo_fld_read import (
 )
 from legoesm.ocean.forcing.nemo_surface import (
     NemoSurfaceMeans,
+    NemoTStressLbcPlan,
     nemo_orca2_s2,
     nemo_sbc_ssm_step,
+    nemo_t_stress_lbc_neighbors,
+    nemo_t_stress_to_uv,
 )
 
 
@@ -190,6 +193,8 @@ def test_fld_read_temporal_record_arithmetic_and_jit_bits():
     centres = nemo_fld_record_centres(edges, jnp.asarray(0.0))
     np.testing.assert_array_equal(np.asarray(centres), np.asarray([0, 9, 18]))
     before, after = nemo_fld_select_bracket(jnp.asarray(9), centres)
+    assert (int(before), int(after)) == (0, 1)
+    before, after = nemo_fld_select_bracket(jnp.asarray(10), centres)
     assert (int(before), int(after)) == (1, 2)
     model_time = nemo_fld_model_time(
         nsec_year=100,
@@ -364,16 +369,29 @@ def test_sbcssr_object_ties_and_coefficient_state_are_bit_pinned(monkeypatch):
     assert np.all(np.asarray(planted_max.erp) > 0.0)
     monkeypatch.setattr(restoring_module, "_fortran_max", real_max)
 
-    min_tie = _s2_kwargs(jnp.full(shape, 35.0, dtype=jnp.float64))
-    min_tie["sss_target"] = jnp.full(shape, 35.0, dtype=jnp.float64)
-    min_tie["restoring_bound_mm_per_day"] = jnp.asarray(-0.0, dtype=jnp.float64)
-    min_tie["runoff_mouth_mask"] = jnp.zeros(shape, dtype=jnp.float64)
-    min_tie["surface_mask"] = jnp.ones(shape, dtype=jnp.float64)
-    literal_min = nemo_orca2_s2(**min_tie)
-    assert not np.any(np.signbit(np.asarray(literal_min.erp)))
-    monkeypatch.setattr(restoring_module, "_fortran_min", jnp.minimum)
-    planted_min = nemo_orca2_s2(**min_tie)
-    assert np.all(np.signbit(np.asarray(planted_min.erp)))
+    # The three MINSD sites differ in tie operand, but a finite tie cannot
+    # change bits: bound and ABS(zerp) are both nonnegative and equal.  Check
+    # every peeled/unrolled site for even and odd local-i extents at the real
+    # positive bound; this replaces the old unreachable negative-zero bound.
+    for width in (3, 4):
+        bound = np.float64(4.0 / 86400.0)
+        absolute = jnp.full((2, width), bound, dtype=jnp.float64)
+        expected_bound_sites = (
+            np.asarray([True, False, True])
+            if width == 3
+            else np.asarray([False, True, False, True])
+        )
+        np.testing.assert_array_equal(
+            np.asarray(restoring_module._sbcssr_bound_wins_tie(width)),
+            expected_bound_sites,
+        )
+        tied = restoring_module._sbcssr_bound_magnitude(
+            jnp.asarray(bound), absolute
+        )
+        np.testing.assert_array_equal(_bits(tied), _bits(absolute))
+        np.testing.assert_array_equal(
+            _bits(absolute), _bits(jnp.full_like(absolute, bound))
+        )
 
     first_kwargs = _s2_kwargs()
     first = nemo_orca2_s2(**first_kwargs)
@@ -407,19 +425,51 @@ def test_s2_finite_difference_gradient():
 
 
 def _production_surface_case():
-    from legoesm.ocean.bulk_flux_omip import NemoS0Inputs, NemoS2Inputs
+    from legoesm.ocean.bulk_flux_omip import (
+        NemoS0Inputs,
+        NemoS2Inputs,
+        NemoSbcIceIfInputs,
+    )
 
     shape = (2, 3)
-    zero = jnp.zeros(shape, dtype=jnp.float64)
+    full_shape = (4, 5)
+    zero = jnp.zeros(full_shape, dtype=jnp.float64)
     one = jnp.ones(shape, dtype=jnp.float64)
-    value = jnp.asarray([[1.0, 1.5, 2.0], [2.5, 3.0, 3.5]], dtype=jnp.float64)
+    value = jnp.arange(20, dtype=jnp.float64).reshape(full_shape) / 10.0
     s0 = NemoS0Inputs(
         prior=NemoSurfaceMeans(zero, zero, zero, zero, zero, zero, zero),
         kt=1,
         **_ssm_kwargs(value),
     )
     s2_kwargs = _s2_kwargs()
-    s2 = NemoS2Inputs(**{name: s2_kwargs[name] for name in NemoS2Inputs._fields})
+    center = jnp.arange(6, dtype=jnp.int64).reshape(shape)
+    stress_lbc = NemoTStressLbcPlan(
+        center_index=center,
+        east_index=jnp.asarray([[1, 2, 0], [4, 5, 3]], dtype=jnp.int64),
+        north_index=jnp.asarray([[3, 4, 5], [5, 4, 3]], dtype=jnp.int64),
+        center_sign=one,
+        east_sign=one,
+        north_sign=jnp.asarray([[1.0, 1.0, 1.0], [-1.0, -1.0, -1.0]]),
+    )
+    s2_values = {
+        name: (stress_lbc if name == "stress_lbc" else s2_kwargs[name])
+        for name in NemoS2Inputs._fields
+    }
+    s2 = NemoS2Inputs(**s2_values)
+    ice_if = NemoSbcIceIfInputs(
+        fdta_before=jnp.full(shape, 0.25, dtype=jnp.float64),
+        fdta_after=jnp.full(shape, 0.75, dtype=jnp.float64),
+        isecsbc=jnp.asarray(0, dtype=jnp.int64),
+        nrec_sec_before=jnp.asarray(-10, dtype=jnp.int64),
+        nrec_sec_after=jnp.asarray(10, dtype=jnp.int64),
+        # Deliberately stale: the composed path must replace these with S0.
+        sss_m=jnp.full(full_shape, -999.0, dtype=jnp.float64),
+        sst_m=jnp.full(full_shape, 999.0, dtype=jnp.float64),
+        ts_surface=jnp.full(full_shape, -2.0, dtype=jnp.float64),
+        ff_f=jnp.ones(full_shape, dtype=jnp.float64),
+        tmask_surface=jnp.ones(full_shape, dtype=jnp.float64),
+        smask0=one,
+    )
     bulk_args = (
         6.0 * one,
         -2.0 * one,
@@ -439,20 +489,26 @@ def _production_surface_case():
         1.0,
         5,
     )
-    return bulk_args, s0, s2
+    return bulk_args, s0, ice_if, s2
 
 
 def test_production_binding_and_existing_top_cell_runoff_path(monkeypatch):
     from legoesm.ocean.bulk_flux_omip import nemo_blk_oce_ncar
 
-    bulk_args, s0, s2 = _production_surface_case()
+    bulk_args, s0, ice_if, s2 = _production_surface_case()
     with pytest.raises(ValueError, match="S0 and S2 together"):
-        nemo_blk_oce_ncar(*bulk_args, s0=s0, s2=None)
+        nemo_blk_oce_ncar(
+            *bulk_args, nn_ice=1, ice_if=ice_if, s0=s0, s2=None)
+    with pytest.raises(ValueError, match="requires composed nn_ice=1 S3"):
+        nemo_blk_oce_ncar(
+            *bulk_args, nn_ice=0, ice_if=None, s0=s0, s2=s2)
     shadowed = list(bulk_args)
     shadowed[5:8] = [s0.temperature_now, s0.u_before, s0.v_before]
     with pytest.raises(ValueError, match="produces sst_c"):
-        nemo_blk_oce_ncar(*shadowed, s0=s0, s2=s2)
-    run = lambda: nemo_blk_oce_ncar(*bulk_args, s0=s0, s2=s2)
+        nemo_blk_oce_ncar(
+            *shadowed, nn_ice=1, ice_if=ice_if, s0=s0, s2=s2)
+    run = lambda: nemo_blk_oce_ncar(
+        *bulk_args, nn_ice=1, ice_if=ice_if, s0=s0, s2=s2)
     with jax.disable_jit():
         baseline = run()
     compiled = jax.jit(run)()
@@ -462,6 +518,75 @@ def test_production_binding_and_existing_top_cell_runoff_path(monkeypatch):
         strict=True,
     ):
         np.testing.assert_array_equal(_bits(eager_leaf), _bits(compiled_leaf))
+
+    # S3 consumes the same-step S0 means, not the deliberately stale means in
+    # the caller's ice bundle, and sits between the bulk and S2 calls.
+    interior = (slice(1, -1), slice(1, -1))
+    s1_args = list(bulk_args)
+    s1_args[5:8] = [
+        baseline.means.sst[interior],
+        baseline.means.ssu[interior],
+        baseline.means.ssv[interior],
+    ]
+    raw_bulk = nemo_blk_oce_ncar(
+        *s1_args, nn_ice=0, ice_if=None, s0=None, s2=None)
+    cover = bulk_module.nemo_fld_time_interp(*ice_if[:5])
+    expected_s3 = bulk_module.nemo_sbc_ice_if(
+        cover,
+        baseline.means.sss,
+        baseline.means.sst,
+        ice_if.ts_surface,
+        ice_if.ff_f,
+        ice_if.tmask_surface,
+        ice_if.smask0,
+        raw_bulk.qsr,
+        raw_bulk.qns,
+        nn_hls=1,
+    )
+    np.testing.assert_array_equal(_bits(baseline.bulk.qsr), _bits(expected_s3.qsr))
+    np.testing.assert_array_equal(_bits(baseline.bulk.qns), _bits(expected_s3.qns))
+
+    # The native-face stresses must use the just-computed stress after its
+    # NEMO T-vector LBC, never caller-supplied east/north stress values.
+    lbc = nemo_t_stress_lbc_neighbors(
+        baseline.bulk.utau, baseline.bulk.vtau, s2.stress_lbc
+    )
+    expected_u, expected_v = nemo_t_stress_to_uv(
+        *lbc,
+        s2.surface_mask,
+        s2.tmask_east,
+        s2.tmask_north,
+        s2.umask,
+        s2.vmask,
+    )
+    np.testing.assert_array_equal(_bits(baseline.s2.utau_u), _bits(expected_u))
+    np.testing.assert_array_equal(_bits(baseline.s2.vtau_v), _bits(expected_v))
+    caller_u, caller_v = nemo_t_stress_to_uv(
+        lbc[0],
+        lbc[1],
+        jnp.full_like(lbc[2], 1234.0),
+        jnp.full_like(lbc[3], -5678.0),
+        s2.surface_mask,
+        s2.tmask_east,
+        s2.tmask_north,
+        s2.umask,
+        s2.vmask,
+    )
+    assert np.any(_bits(baseline.s2.utau_u) != _bits(caller_u))
+    assert np.any(_bits(baseline.s2.vtau_v) != _bits(caller_v))
+
+    original_s3 = bulk_module.nemo_sbc_ice_if
+
+    def planted_s3(*args, **kwargs):
+        result = original_s3(*args, **kwargs)
+        return result._replace(qns=result.qns.at[0, 0].add(1.0))
+
+    monkeypatch.setattr(bulk_module, "nemo_sbc_ice_if", planted_s3)
+    with jax.disable_jit():
+        changed_s3 = run()
+    assert _bits(changed_s3.bulk.qns)[0, 0] != _bits(baseline.bulk.qns)[0, 0]
+    assert _bits(changed_s3.s2.qns)[0, 0] != _bits(baseline.s2.qns)[0, 0]
+    monkeypatch.setattr(bulk_module, "nemo_sbc_ice_if", original_s3)
 
     original_ssm = bulk_module.nemo_sbc_ssm_step
 

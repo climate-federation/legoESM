@@ -51,6 +51,43 @@ class NemoS2Result(NamedTuple):
     penetrative_qsr: jnp.ndarray
 
 
+class NemoTStressLbcPlan(NamedTuple):
+    """Index/sign form of NEMO's post-flux ``lbc_lnk(...,'T',-1)``.
+
+    Indices address the flattened freshly computed T-point stress.  This keeps
+    topology/halo metadata explicit without accepting stress values from the
+    caller.  The plan can represent periodic rank edges and the ORCA north
+    fold, including sign reversal and pivot-row replacement.
+    """
+    center_index: object
+    east_index: object
+    north_index: object
+    center_sign: object
+    east_sign: object
+    north_sign: object
+
+
+def nemo_t_stress_lbc_neighbors(utau, vtau, plan):
+    """Apply one NEMO T-vector LBC plan to same-step computed stresses."""
+    shape = jnp.shape(utau)
+    if shape != jnp.shape(vtau):
+        raise ValueError("utau and vtau must share a shape")
+
+    def mapped(value, index, sign):
+        source = _sr(jnp.asarray(value, dtype=jnp.float64)).reshape(-1)
+        index = jnp.asarray(index, dtype=jnp.int64)
+        sign = _sr(jnp.asarray(sign, dtype=jnp.float64))
+        if index.shape != shape or sign.shape != shape:
+            raise ValueError("stress LBC indices and signs must match stress shape")
+        return _sr(jnp.take(source, index) * sign)
+
+    utau_lbc = mapped(utau, plan.center_index, plan.center_sign)
+    vtau_lbc = mapped(vtau, plan.center_index, plan.center_sign)
+    utau_east = mapped(utau, plan.east_index, plan.east_sign)
+    vtau_north = mapped(vtau, plan.north_index, plan.north_sign)
+    return utau_lbc, vtau_lbc, utau_east, vtau_north
+
+
 def _surface_temperature(temperature, salinity, use_conservative_temperature):
     temperature = _sr(jnp.asarray(temperature, dtype=jnp.float64))
     salinity = _sr(jnp.asarray(salinity, dtype=jnp.float64))
@@ -371,8 +408,10 @@ def nemo_s2_to_ocean_interfaces(result):
 __all__ = (
     "NemoS2Result",
     "NemoSurfaceMeans",
+    "NemoTStressLbcPlan",
     "nemo_orca2_s2",
     "nemo_sbc_ssm_step",
     "nemo_s2_to_ocean_interfaces",
+    "nemo_t_stress_lbc_neighbors",
     "nemo_t_stress_to_uv",
 )
