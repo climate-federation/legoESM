@@ -7,6 +7,10 @@ My first bit comparison failed on two leaves: XLA folded a zeroed accumulator's 
 below and both now have a gate; neither touches the D5 card's bits. The caller controls then caught a
 D5 test still calling the old `_radiation` signature; fixed (test-only).
 
+Re-check 3: I had filed the ice-sublimation `MAX( -zh_i, -zevap_rema*r1_rhoi )` site as masked from one
+cell. It is not: when every layer melts out under negative-zero evaporation the surviving operand changes
+the water-error flux. It is now a pinned bit-changing site, and the model already matched the object code.
+
 ## Outcome
 
 The C1D BL99/P07 heat diffusion and growth/melt code now runs on any layer count as one NEMO-literal path
@@ -170,10 +174,13 @@ pre-existing one on both trees.
 - CONFIRMED: bit-identity to the independent transcription on every listed branch class, `jit` and eager
   (including a one-cell category, after the re-check fix below); the MIN/MAX operand roles at every executing
   site, read from the record build's instruction stream with each variable operand's defining instruction;
-  a bit-changing signed-zero tie at the 7 sites where one is reachable; the XLA rewrites and their fixes;
+  a bit-changing signed-zero tie at the 8 sites where one is reachable; for every other executing MIN/MAX site
+  a recorded verdict (no tie possible, or the zero's sign masked) whose premises are checked against the
+  object code and the source census (re-check 3); the XLA rewrites and their fixes;
   D5 year byte-identical (18 arms, CPU and AVX) with the core proven on its path.
-- PLAUSIBLE: that the 30 sites of the "unreached" class (27 with a zero operand, 3 variable/variable) can never
-  see a signed-zero tie from a real entry state (search evidence only, re-check item 3).
+- PLAUSIBLE: the hand-written steps of those verdict proofs (their premises are machine-checked, the IEEE
+  reasoning between them is not); and the entry-domain premises they state (finite values, at_i in (0, 1],
+  sss >= 0, |t_bo - rt0| < 1000 K, subnormal cases under the D5 platform floor).
 - PLAUSIBLE: bit-exactness against an ORCA2 NEMO record (none read; P1-P5 of the preregistration).
 
 ## CHOICES
@@ -274,3 +281,26 @@ DECISION_NEEDED.
 
 Review: `codex review: operator`.
 Evidence: `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/round16/`.
+
+## Re-check fixes (codex HOLD 3: every MIN/MAX site needs a test or a proof)
+
+- Every executing `minsd`/`maxsd` of the O9 routines now carries one verdict in the committed audit
+  (`nemo_si3_o9_minmax_audit.json`, key `tie_verdicts`, with lemmas L0-L3): 8 FOUND (a committed cell makes
+  the surviving operand change output bits; model bit-equal; reversed-roles plant), 43 NO_TIE (no
+  differently-signed zero can meet there), 11 MASKED (a zero result's sign never reaches an output), 11
+  NOT_ON_DECK (the arm the deck skips, with the deck value). No site is merely classified. No SIGN executes.
+- Each proof lists its premises as checkable facts: operand kinds and defining instructions from the object
+  code, every read/write line of the variables it relies on and each line's enclosing IF/DO blocks (new source
+  census in the audit tool, regenerated from the record build: `MINMAX_AUDIT MATCH`), deck values from the
+  namelists. A test checks every fact; a plant per fact kind turns it red.
+- MASKED sites are also checked dynamically: negating every zero result at the site in the transcription, over
+  the fixture and 621 search cells, changes no output bit (each site negated at least once); a plant on a
+  bit-changing site does change bits. Run against the parent's "masked" claim for the sublimation site, the
+  same check fails (181 of 631 cells change).
+- The tie search gained a melt-out family (162 cells: no snow, negative-zero evaporation and accumulators,
+  surface at the melting point); it finds the sublimation tie itself. 303,726 cells; found and masked fixture
+  cells for the other sites unchanged.
+- Model code: unchanged. Pending decisions unchanged (1.0e-15 batch-1 gradient change; Picard counts).
+
+Choices in these fixes: the melt-out family's values, the 621-cell stride for the flip check, and the entry
+premises stated in the proofs: UNASKED, offered for revert. Review of these fixes: UNREVIEWED.

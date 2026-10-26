@@ -11,6 +11,7 @@
  ],
  "objects": {
   "icethd": {
+   "census": {},
    "instructions_without_token": [],
    "ppsrc_sha256": "b74357d35d91bb2f2d256ed25581a4e3802050915de80dd44c376f2e70495a16",
    "record_object_sha256": "8d7dab03212342827433a378e887c830932e1c711a430c3738d4abf2dd1fc8e4",
@@ -23,6 +24,11 @@
    "sign_tokens": [],
    "sites": {
     "285": {
+     "enclosing": [
+      "DO jk = 1, nlay_i",
+      "DO ii = 1, npti",
+      "IF( h_i_1d(ii) > 0._wp )"
+     ],
      "instructions": [
       {
        "count": 1,
@@ -47,6 +53,1560 @@
    "token_statements_without_instruction": {}
   },
   "icethd_dh": {
+   "census": {
+    "ice_thd_dh": {
+     "h_i_1d": {
+      "143": [
+       "r",
+       "zs_i_old(jk) = h_i_1d(ji) * r1_nlay_i * zs_i (jk)",
+       [
+        "DO ji = 1, npti",
+        "DO jk = 1, nlay_i"
+       ]
+      ],
+      "144": [
+       "r",
+       "ze_i_old(jk) = h_i_1d(ji) * r1_nlay_i * e_i_1d(ji,jk)",
+       [
+        "DO ji = 1, npti",
+        "DO jk = 1, nlay_i"
+       ]
+      ],
+      "145": [
+       "r",
+       "zh_i_old(jk) = h_i_1d(ji) * r1_nlay_i",
+       [
+        "DO ji = 1, npti",
+        "DO jk = 1, nlay_i"
+       ]
+      ],
+      "146": [
+       "r",
+       "zh_i (jk) = h_i_1d(ji) * r1_nlay_i",
+       [
+        "DO ji = 1, npti",
+        "DO jk = 1, nlay_i"
+       ]
+      ],
+      "290": [
+       "wr",
+       "h_i_1d(ji) = MAX( 0._wp, h_i_1d(ji) + zdum )",
+       [
+        "DO ji = 1, npti",
+        "DO jk = 1, nlay_i"
+       ]
+      ],
+      "311": [
+       "wr",
+       "h_i_1d(ji) = MAX( 0._wp, h_i_1d(ji) + zdum )",
+       [
+        "DO ji = 1, npti",
+        "DO jk = 1, nlay_i"
+       ]
+      ],
+      "367": [
+       "wr",
+       "h_i_1d(ji) = h_i_1d(ji) + dh_i_bog(ji)",
+       [
+        "DO ji = 1, npti",
+        "IF( zf_tt < 0._wp )"
+       ]
+      ],
+      "427": [
+       "wr",
+       "h_i_1d(ji) = MAX( 0._wp, h_i_1d(ji) + zdum )",
+       [
+        "DO ji = 1, npti",
+        "DO jk = nlay_i, 1, -1",
+        "IF( zf_tt > 0._wp .AND. jk > icount(jk) )"
+       ]
+      ],
+      "438": [
+       "r",
+       "IF( h_i_1d(ji) == 0._wp ) THEN",
+       [
+        "DO ji = 1, npti"
+       ]
+      ],
+      "456": [
+       "r",
+       "dh_snowice(ji) = MAX( 0._wp , ( rhos * h_s_1d(ji) + (rhoi-rho0) * h_i_1d(ji) ) * z1_rho )",
+       [
+        "DO ji = 1, npti"
+       ]
+      ],
+      "458": [
+       "wr",
+       "h_i_1d(ji) = h_i_1d(ji) + dh_snowice(ji)",
+       [
+        "DO ji = 1, npti"
+       ]
+      ],
+      "525": [
+       "r",
+       "zds = ( zs_sni - s_i_1d(ji) ) * dh_snowice(ji) / MAX( epsi10, h_i_1d(ji) )",
+       [
+        "DO ji = 1, npti",
+        "IF( nn_icesal == 2 )"
+       ]
+      ],
+      "526": [
+       "r",
+       "zds = zds + ( zs_i_new - s_i_1d(ji) ) * dh_i_bog (ji) / MAX( epsi10, h_i_1d(ji) )",
+       [
+        "DO ji = 1, npti",
+        "IF( nn_icesal == 2 )"
+       ]
+      ],
+      "537": [
+       "r",
+       "WHERE( h_i_1d(1:npti) == 0._wp )",
+       []
+      ]
+     },
+     "h_s_1d": {
+      "153": [
+       "r",
+       "zh_s(jk) = h_s_1d(ji) * r1_nlay_s",
+       [
+        "DO ji = 1, npti",
+        "DO jk = 1, nlay_s"
+       ]
+      ],
+      "170": [
+       "wr",
+       "h_s_1d (ji) = MAX( 0._wp, h_s_1d (ji) - zh_s(jk) )",
+       [
+        "DO ji = 1, npti",
+        "DO jk = 1, nlay_s",
+        "IF( t_s_1d(ji,jk) > rt0 )"
+       ]
+      ],
+      "186": [
+       "wr",
+       "h_s_1d(ji) = h_s_1d(ji) + zh_s(0)",
+       [
+        "DO ji = 1, npti",
+        "IF( sprecip_1d(ji) > 0._wp )"
+       ]
+      ],
+      "194": [
+       "r",
+       "zdeltah = MAX( - evap_ice_1d(ji) * r1_rhos * rDt_ice, - h_s_1d(ji) )",
+       [
+        "DO ji = 1, npti"
+       ]
+      ],
+      "206": [
+       "wr",
+       "h_s_1d(ji) = MAX( 0._wp , h_s_1d(ji) + zdum )",
+       [
+        "DO ji = 1, npti",
+        "DO jk = 0, nlay_s"
+       ]
+      ],
+      "230": [
+       "wr",
+       "h_s_1d (ji) = MAX( 0._wp , h_s_1d (ji) + zdum )",
+       [
+        "DO ji = 1, npti",
+        "DO jk = 0, nlay_s",
+        "IF( zh_s(jk) > 0._wp .AND. zq_top > 0._wp )"
+       ]
+      ],
+      "445": [
+       "w",
+       "h_s_1d(ji) = 0._wp",
+       [
+        "DO ji = 1, npti",
+        "IF( h_i_1d(ji) == 0._wp )",
+        "DO jk = 0, nlay_s"
+       ]
+      ],
+      "456": [
+       "r",
+       "dh_snowice(ji) = MAX( 0._wp , ( rhos * h_s_1d(ji) + (rhoi-rho0) * h_i_1d(ji) ) * z1_rho )",
+       [
+        "DO ji = 1, npti"
+       ]
+      ],
+      "459": [
+       "wr",
+       "h_s_1d(ji) = h_s_1d(ji) - dh_snowice(ji)",
+       [
+        "DO ji = 1, npti"
+       ]
+      ],
+      "509": [
+       "r",
+       "IF( h_s_1d(ji) > 0._wp ) THEN",
+       [
+        "DO ji = 1, npti"
+       ]
+      ],
+      "539": [
+       "w",
+       "h_s_1d (1:npti) = 0._wp",
+       [
+        "WHERE( h_i_1d(1:npti) == 0._wp )"
+       ]
+      ]
+     },
+     "zdeltah": {
+      "194": [
+       "w",
+       "zdeltah = MAX( - evap_ice_1d(ji) * r1_rhos * rDt_ice, - h_s_1d(ji) )",
+       [
+        "DO ji = 1, npti"
+       ]
+      ],
+      "195": [
+       "r",
+       "zevap_rema = evap_ice_1d(ji) * rDt_ice + zdeltah * rhos",
+       [
+        "DO ji = 1, npti"
+       ]
+      ],
+      "196": [
+       "r",
+       "IF( zdeltah > 0._wp .AND. ze_s(0) == 0._wp ) THEN",
+       [
+        "DO ji = 1, npti"
+       ]
+      ],
+      "200": [
+       "r",
+       "zdum = MAX( -zh_s(jk), zdeltah )",
+       [
+        "DO ji = 1, npti",
+        "DO jk = 0, nlay_s"
+       ]
+      ],
+      "211": [
+       "wr",
+       "zdeltah = MIN( zdeltah - zdum, 0._wp )",
+       [
+        "DO ji = 1, npti",
+        "DO jk = 0, nlay_s"
+       ]
+      ],
+      "481": [
+       "w",
+       "zdeltah = dh_snowice(ji)",
+       [
+        "DO ji = 1, npti"
+       ]
+      ],
+      "490": [
+       "r",
+       "zdum = MIN( zdeltah, zh_s(jk) )",
+       [
+        "DO ji = 1, npti",
+        "DO jk = nlay_s, 0, -1"
+       ]
+      ],
+      "494": [
+       "wr",
+       "zdeltah = MAX( 0._wp, zdeltah - zdum )",
+       [
+        "DO ji = 1, npti",
+        "DO jk = nlay_s, 0, -1"
+       ]
+      ]
+     },
+     "zdum": {
+      "200": [
+       "w",
+       "zdum = MAX( -zh_s(jk), zdeltah )",
+       [
+        "DO ji = 1, npti",
+        "DO jk = 0, nlay_s"
+       ]
+      ],
+      "202": [
+       "r",
+       "hfx_sub_1d (ji) = hfx_sub_1d (ji) + ze_s(jk) * zdum * a_i_1d(ji) * r1_Dt_ice",
+       [
+        "DO ji = 1, npti",
+        "DO jk = 0, nlay_s"
+       ]
+      ],
+      "203": [
+       "r",
+       "wfx_snw_sub_1d(ji) = wfx_snw_sub_1d(ji) - rhos * zdum * a_i_1d(ji) * r1_Dt_ice",
+       [
+        "DO ji = 1, npti",
+        "DO jk = 0, nlay_s"
+       ]
+      ],
+      "206": [
+       "r",
+       "h_s_1d(ji) = MAX( 0._wp , h_s_1d(ji) + zdum )",
+       [
+        "DO ji = 1, npti",
+        "DO jk = 0, nlay_s"
+       ]
+      ],
+      "207": [
+       "r",
+       "zh_s (jk) = MAX( 0._wp , zh_s (jk) + zdum )",
+       [
+        "DO ji = 1, npti",
+        "DO jk = 0, nlay_s"
+       ]
+      ],
+      "211": [
+       "r",
+       "zdeltah = MIN( zdeltah - zdum, 0._wp )",
+       [
+        "DO ji = 1, npti",
+        "DO jk = 0, nlay_s"
+       ]
+      ],
+      "221": [
+       "w",
+       "zdum = - zq_top / MAX( ze_s(jk), epsi20 )",
+       [
+        "DO ji = 1, npti",
+        "DO jk = 0, nlay_s",
+        "IF( zh_s(jk) > 0._wp .AND. zq_top > 0._wp )"
+       ]
+      ],
+      "222": [
+       "wr",
+       "zdum = MAX( zdum , - zh_s(jk) )",
+       [
+        "DO ji = 1, npti",
+        "DO jk = 0, nlay_s",
+        "IF( zh_s(jk) > 0._wp .AND. zq_top > 0._wp )"
+       ]
+      ],
+      "224": [
+       "r",
+       "hfx_snw_1d (ji) = hfx_snw_1d (ji) - ze_s(jk) * zdum * a_i_1d(ji) * r1_Dt_ice",
+       [
+        "DO ji = 1, npti",
+        "DO jk = 0, nlay_s",
+        "IF( zh_s(jk) > 0._wp .AND. zq_top > 0._wp )"
+       ]
+      ],
+      "225": [
+       "r",
+       "wfx_snw_sum_1d(ji) = wfx_snw_sum_1d(ji) - rhos * zdum * a_i_1d(ji) * r1_Dt_ice",
+       [
+        "DO ji = 1, npti",
+        "DO jk = 0, nlay_s",
+        "IF( zh_s(jk) > 0._wp .AND. zq_top > 0._wp )"
+       ]
+      ],
+      "228": [
+       "r",
+       "dh_s_sum(ji) = dh_s_sum(ji) + zdum",
+       [
+        "DO ji = 1, npti",
+        "DO jk = 0, nlay_s",
+        "IF( zh_s(jk) > 0._wp .AND. zq_top > 0._wp )"
+       ]
+      ],
+      "229": [
+       "r",
+       "zq_top = MAX( 0._wp , zq_top + zdum * ze_s(jk) )",
+       [
+        "DO ji = 1, npti",
+        "DO jk = 0, nlay_s",
+        "IF( zh_s(jk) > 0._wp .AND. zq_top > 0._wp )"
+       ]
+      ],
+      "230": [
+       "r",
+       "h_s_1d (ji) = MAX( 0._wp , h_s_1d (ji) + zdum )",
+       [
+        "DO ji = 1, npti",
+        "DO jk = 0, nlay_s",
+        "IF( zh_s(jk) > 0._wp .AND. zq_top > 0._wp )"
+       ]
+      ],
+      "231": [
+       "r",
+       "zh_s (jk) = MAX( 0._wp , zh_s (jk) + zdum )",
+       [
+        "DO ji = 1, npti",
+        "DO jk = 0, nlay_s",
+        "IF( zh_s(jk) > 0._wp .AND. zq_top > 0._wp )"
+       ]
+      ],
+      "251": [
+       "w",
+       "zdum = MIN( 0._wp , - zh_i(jk) )",
+       [
+        "DO ji = 1, npti",
+        "DO jk = 1, nlay_i",
+        "IF( t_i_1d(ji,jk) >= (ztmelts+rt0) )"
+       ]
+      ],
+      "253": [
+       "r",
+       "zfmdt = - zdum * rhoi",
+       [
+        "DO ji = 1, npti",
+        "DO jk = 1, nlay_i",
+        "IF( t_i_1d(ji,jk) >= (ztmelts+rt0) )"
+       ]
+      ],
+      "255": [
+       "r",
+       "dh_i_itm(ji) = dh_i_itm(ji) + zdum",
+       [
+        "DO ji = 1, npti",
+        "DO jk = 1, nlay_i",
+        "IF( t_i_1d(ji,jk) >= (ztmelts+rt0) )"
+       ]
+      ],
+      "259": [
+       "r",
+       "wfx_res_1d(ji) = wfx_res_1d(ji) - rhoi * zdum * a_i_1d(ji) * r1_Dt_ice",
+       [
+        "DO ji = 1, npti",
+        "DO jk = 1, nlay_i",
+        "IF( t_i_1d(ji,jk) >= (ztmelts+rt0) )"
+       ]
+      ],
+      "260": [
+       "r",
+       "sfx_res_1d(ji) = sfx_res_1d(ji) - rhoi * zdum * zs_i(jk) * a_i_1d(ji) * r1_Dt_ice",
+       [
+        "DO ji = 1, npti",
+        "DO jk = 1, nlay_i",
+        "IF( t_i_1d(ji,jk) >= (ztmelts+rt0) )"
+       ]
+      ],
+      "270": [
+       "w",
+       "zdum = - zfmdt * r1_rhoi",
+       [
+        "DO ji = 1, npti",
+        "DO jk = 1, nlay_i",
+        "ELSE of IF( t_i_1d(ji,jk) >= (ztmelts+rt0) )"
+       ]
+      ],
+      "272": [
+       "wr",
+       "zdum = MIN( 0._wp , MAX( zdum , - zh_i(jk) ) )",
+       [
+        "DO ji = 1, npti",
+        "DO jk = 1, nlay_i",
+        "ELSE of IF( t_i_1d(ji,jk) >= (ztmelts+rt0) )"
+       ]
+      ],
+      "274": [
+       "r",
+       "zq_top = MAX( 0._wp , zq_top - zdum * rhoi * zdE )",
+       [
+        "DO ji = 1, npti",
+        "DO jk = 1, nlay_i",
+        "ELSE of IF( t_i_1d(ji,jk) >= (ztmelts+rt0) )"
+       ]
+      ],
+      "276": [
+       "r",
+       "dh_i_sum(ji) = dh_i_sum(ji) + zdum",
+       [
+        "DO ji = 1, npti",
+        "DO jk = 1, nlay_i",
+        "ELSE of IF( t_i_1d(ji,jk) >= (ztmelts+rt0) )"
+       ]
+      ],
+      "278": [
+       "r",
+       "zfmdt = - rhoi * zdum",
+       [
+        "DO ji = 1, npti",
+        "DO jk = 1, nlay_i",
+        "ELSE of IF( t_i_1d(ji,jk) >= (ztmelts+rt0) )"
+       ]
+      ],
+      "284": [
+       "r",
+       "wfx_sum_1d(ji) = wfx_sum_1d(ji) - rhoi * zdum * a_i_1d(ji) * r1_Dt_ice",
+       [
+        "DO ji = 1, npti",
+        "DO jk = 1, nlay_i",
+        "ELSE of IF( t_i_1d(ji,jk) >= (ztmelts+rt0) )"
+       ]
+      ],
+      "285": [
+       "r",
+       "sfx_sum_1d(ji) = sfx_sum_1d(ji) - rhoi * zdum * zs_i(jk) * a_i_1d(ji) * r1_Dt_ice",
+       [
+        "DO ji = 1, npti",
+        "DO jk = 1, nlay_i",
+        "ELSE of IF( t_i_1d(ji,jk) >= (ztmelts+rt0) )"
+       ]
+      ],
+      "289": [
+       "r",
+       "zh_i (jk) = MAX( 0._wp, zh_i (jk) + zdum )",
+       [
+        "DO ji = 1, npti",
+        "DO jk = 1, nlay_i"
+       ]
+      ],
+      "290": [
+       "r",
+       "h_i_1d(ji) = MAX( 0._wp, h_i_1d(ji) + zdum )",
+       [
+        "DO ji = 1, npti",
+        "DO jk = 1, nlay_i"
+       ]
+      ],
+      "293": [
+       "r",
+       "zs_i_old(jk) = zs_i_old(jk) + zdum * zs_i(jk)",
+       [
+        "DO ji = 1, npti",
+        "DO jk = 1, nlay_i"
+       ]
+      ],
+      "294": [
+       "r",
+       "ze_i_old(jk) = ze_i_old(jk) + zdum * e_i_1d(ji,jk)",
+       [
+        "DO ji = 1, npti",
+        "DO jk = 1, nlay_i"
+       ]
+      ],
+      "295": [
+       "r",
+       "zh_i_old(jk) = zh_i_old(jk) + zdum",
+       [
+        "DO ji = 1, npti",
+        "DO jk = 1, nlay_i"
+       ]
+      ],
+      "300": [
+       "w",
+       "zdum = MAX( - zh_i(jk) , - zevap_rema * r1_rhoi )",
+       [
+        "DO ji = 1, npti",
+        "DO jk = 1, nlay_i"
+       ]
+      ],
+      "302": [
+       "r",
+       "hfx_sub_1d(ji) = hfx_sub_1d(ji) + e_i_1d(ji,jk) * zdum * a_i_1d(ji) * r1_Dt_ice",
+       [
+        "DO ji = 1, npti",
+        "DO jk = 1, nlay_i"
+       ]
+      ],
+      "303": [
+       "r",
+       "wfx_ice_sub_1d(ji) = wfx_ice_sub_1d(ji) - rhoi * zdum * a_i_1d(ji) * r1_Dt_ice",
+       [
+        "DO ji = 1, npti",
+        "DO jk = 1, nlay_i"
+       ]
+      ],
+      "304": [
+       "r",
+       "sfx_sub_1d(ji) = sfx_sub_1d(ji) - rhoi * zdum * zs_i(jk) * a_i_1d(ji) * r1_Dt_ice",
+       [
+        "DO ji = 1, npti",
+        "DO jk = 1, nlay_i"
+       ]
+      ],
+      "309": [
+       "r",
+       "zevap_rema = zevap_rema + zdum * rhoi",
+       [
+        "DO ji = 1, npti",
+        "DO jk = 1, nlay_i"
+       ]
+      ],
+      "310": [
+       "r",
+       "zh_i (jk) = MAX( 0._wp, zh_i (jk) + zdum )",
+       [
+        "DO ji = 1, npti",
+        "DO jk = 1, nlay_i"
+       ]
+      ],
+      "311": [
+       "r",
+       "h_i_1d(ji) = MAX( 0._wp, h_i_1d(ji) + zdum )",
+       [
+        "DO ji = 1, npti",
+        "DO jk = 1, nlay_i"
+       ]
+      ],
+      "312": [
+       "r",
+       "dh_i_sub(ji) = dh_i_sub(ji) + zdum",
+       [
+        "DO ji = 1, npti",
+        "DO jk = 1, nlay_i"
+       ]
+      ],
+      "315": [
+       "r",
+       "zs_i_old(jk) = zs_i_old(jk) + zdum * zs_i(jk)",
+       [
+        "DO ji = 1, npti",
+        "DO jk = 1, nlay_i"
+       ]
+      ],
+      "316": [
+       "r",
+       "ze_i_old(jk) = ze_i_old(jk) + zdum * e_i_1d(ji,jk)",
+       [
+        "DO ji = 1, npti",
+        "DO jk = 1, nlay_i"
+       ]
+      ],
+      "317": [
+       "r",
+       "zh_i_old(jk) = zh_i_old(jk) + zdum",
+       [
+        "DO ji = 1, npti",
+        "DO jk = 1, nlay_i"
+       ]
+      ],
+      "388": [
+       "w",
+       "zdum = MIN( 0._wp , - zh_i(jk) )",
+       [
+        "DO ji = 1, npti",
+        "DO jk = nlay_i, 1, -1",
+        "IF( zf_tt > 0._wp .AND. jk > icount(jk) )",
+        "IF( t_i_1d(ji,jk) >= (ztmelts+rt0) )"
+       ]
+      ],
+      "390": [
+       "r",
+       "dh_i_itm (ji) = dh_i_itm(ji) + zdum",
+       [
+        "DO ji = 1, npti",
+        "DO jk = nlay_i, 1, -1",
+        "IF( zf_tt > 0._wp .AND. jk > icount(jk) )",
+        "IF( t_i_1d(ji,jk) >= (ztmelts+rt0) )"
+       ]
+      ],
+      "392": [
+       "r",
+       "zfmdt = - zdum * rhoi",
+       [
+        "DO ji = 1, npti",
+        "DO jk = nlay_i, 1, -1",
+        "IF( zf_tt > 0._wp .AND. jk > icount(jk) )",
+        "IF( t_i_1d(ji,jk) >= (ztmelts+rt0) )"
+       ]
+      ],
+      "396": [
+       "r",
+       "wfx_res_1d(ji) = wfx_res_1d(ji) - rhoi * zdum * a_i_1d(ji) * r1_Dt_ice",
+       [
+        "DO ji = 1, npti",
+        "DO jk = nlay_i, 1, -1",
+        "IF( zf_tt > 0._wp .AND. jk > icount(jk) )",
+        "IF( t_i_1d(ji,jk) >= (ztmelts+rt0) )"
+       ]
+      ],
+      "397": [
+       "r",
+       "sfx_res_1d(ji) = sfx_res_1d(ji) - rhoi * zdum * zs_i(jk) * a_i_1d(ji) * r1_Dt_ice",
+       [
+        "DO ji = 1, npti",
+        "DO jk = nlay_i, 1, -1",
+        "IF( zf_tt > 0._wp .AND. jk > icount(jk) )",
+        "IF( t_i_1d(ji,jk) >= (ztmelts+rt0) )"
+       ]
+      ],
+      "407": [
+       "w",
+       "zdum = - zfmdt * r1_rhoi",
+       [
+        "DO ji = 1, npti",
+        "DO jk = nlay_i, 1, -1",
+        "IF( zf_tt > 0._wp .AND. jk > icount(jk) )",
+        "ELSE of IF( t_i_1d(ji,jk) >= (ztmelts+rt0) )"
+       ]
+      ],
+      "409": [
+       "wr",
+       "zdum = MIN( 0._wp , MAX( zdum, - zh_i(jk) ) )",
+       [
+        "DO ji = 1, npti",
+        "DO jk = nlay_i, 1, -1",
+        "IF( zf_tt > 0._wp .AND. jk > icount(jk) )",
+        "ELSE of IF( t_i_1d(ji,jk) >= (ztmelts+rt0) )"
+       ]
+      ],
+      "411": [
+       "r",
+       "zq_bot = MAX( 0._wp , zq_bot - zdum * rhoi * zdE )",
+       [
+        "DO ji = 1, npti",
+        "DO jk = nlay_i, 1, -1",
+        "IF( zf_tt > 0._wp .AND. jk > icount(jk) )",
+        "ELSE of IF( t_i_1d(ji,jk) >= (ztmelts+rt0) )"
+       ]
+      ],
+      "413": [
+       "r",
+       "dh_i_bom(ji) = dh_i_bom(ji) + zdum",
+       [
+        "DO ji = 1, npti",
+        "DO jk = nlay_i, 1, -1",
+        "IF( zf_tt > 0._wp .AND. jk > icount(jk) )",
+        "ELSE of IF( t_i_1d(ji,jk) >= (ztmelts+rt0) )"
+       ]
+      ],
+      "415": [
+       "r",
+       "zfmdt = - zdum * rhoi",
+       [
+        "DO ji = 1, npti",
+        "DO jk = nlay_i, 1, -1",
+        "IF( zf_tt > 0._wp .AND. jk > icount(jk) )",
+        "ELSE of IF( t_i_1d(ji,jk) >= (ztmelts+rt0) )"
+       ]
+      ],
+      "421": [
+       "r",
+       "wfx_bom_1d(ji) = wfx_bom_1d(ji) - rhoi * zdum * a_i_1d(ji) * r1_Dt_ice",
+       [
+        "DO ji = 1, npti",
+        "DO jk = nlay_i, 1, -1",
+        "IF( zf_tt > 0._wp .AND. jk > icount(jk) )",
+        "ELSE of IF( t_i_1d(ji,jk) >= (ztmelts+rt0) )"
+       ]
+      ],
+      "422": [
+       "r",
+       "sfx_bom_1d(ji) = sfx_bom_1d(ji) - rhoi * zdum * zs_i(jk) * a_i_1d(ji) * r1_Dt_ice",
+       [
+        "DO ji = 1, npti",
+        "DO jk = nlay_i, 1, -1",
+        "IF( zf_tt > 0._wp .AND. jk > icount(jk) )",
+        "ELSE of IF( t_i_1d(ji,jk) >= (ztmelts+rt0) )"
+       ]
+      ],
+      "426": [
+       "r",
+       "zh_i (jk) = MAX( 0._wp, zh_i (jk) + zdum )",
+       [
+        "DO ji = 1, npti",
+        "DO jk = nlay_i, 1, -1",
+        "IF( zf_tt > 0._wp .AND. jk > icount(jk) )"
+       ]
+      ],
+      "427": [
+       "r",
+       "h_i_1d(ji) = MAX( 0._wp, h_i_1d(ji) + zdum )",
+       [
+        "DO ji = 1, npti",
+        "DO jk = nlay_i, 1, -1",
+        "IF( zf_tt > 0._wp .AND. jk > icount(jk) )"
+       ]
+      ],
+      "430": [
+       "r",
+       "zs_i_old(jk) = zs_i_old(jk) + zdum * zs_i(jk)",
+       [
+        "DO ji = 1, npti",
+        "DO jk = nlay_i, 1, -1",
+        "IF( zf_tt > 0._wp .AND. jk > icount(jk) )"
+       ]
+      ],
+      "431": [
+       "r",
+       "ze_i_old(jk) = ze_i_old(jk) + zdum * e_i_1d(ji,jk)",
+       [
+        "DO ji = 1, npti",
+        "DO jk = nlay_i, 1, -1",
+        "IF( zf_tt > 0._wp .AND. jk > icount(jk) )"
+       ]
+      ],
+      "432": [
+       "r",
+       "zh_i_old(jk) = zh_i_old(jk) + zdum",
+       [
+        "DO ji = 1, npti",
+        "DO jk = nlay_i, 1, -1",
+        "IF( zf_tt > 0._wp .AND. jk > icount(jk) )"
+       ]
+      ],
+      "490": [
+       "w",
+       "zdum = MIN( zdeltah, zh_s(jk) )",
+       [
+        "DO ji = 1, npti",
+        "DO jk = nlay_s, 0, -1"
+       ]
+      ],
+      "491": [
+       "r",
+       "zh_s(jk) = MAX( 0._wp, zh_s(jk) - zdum )",
+       [
+        "DO ji = 1, npti",
+        "DO jk = nlay_s, 0, -1"
+       ]
+      ],
+      "492": [
+       "r",
+       "ze_i_old(0) = ze_i_old(0) + zdum * ze_s(jk)",
+       [
+        "DO ji = 1, npti",
+        "DO jk = nlay_s, 0, -1"
+       ]
+      ],
+      "494": [
+       "r",
+       "zdeltah = MAX( 0._wp, zdeltah - zdum )",
+       [
+        "DO ji = 1, npti",
+        "DO jk = nlay_s, 0, -1"
+       ]
+      ]
+     },
+     "zevap_rema": {
+      "195": [
+       "w",
+       "zevap_rema = evap_ice_1d(ji) * rDt_ice + zdeltah * rhos",
+       [
+        "DO ji = 1, npti"
+       ]
+      ],
+      "300": [
+       "r",
+       "zdum = MAX( - zh_i(jk) , - zevap_rema * r1_rhoi )",
+       [
+        "DO ji = 1, npti",
+        "DO jk = 1, nlay_i"
+       ]
+      ],
+      "309": [
+       "wr",
+       "zevap_rema = zevap_rema + zdum * rhoi",
+       [
+        "DO ji = 1, npti",
+        "DO jk = 1, nlay_i"
+       ]
+      ],
+      "328": [
+       "r",
+       "wfx_err_sub_1d(ji) = wfx_err_sub_1d(ji) - zevap_rema * a_i_1d(ji) * r1_Dt_ice",
+       [
+        "DO ji = 1, npti"
+       ]
+      ]
+     },
+     "zf_tt": {
+      "129": [
+       "w",
+       "zf_tt = qcn_ice_bot_1d(ji) + qsb_ice_bot_1d(ji) + fhld_1d(ji) + qtr_ice_bot_1d(ji) * frq_m_1d(ji)",
+       [
+        "DO ji = 1, npti"
+       ]
+      ],
+      "130": [
+       "r",
+       "zq_bot = MAX( 0._wp, zf_tt * rDt_ice )",
+       [
+        "DO ji = 1, npti"
+       ]
+      ],
+      "340": [
+       "r",
+       "IF( zf_tt < 0._wp ) THEN",
+       [
+        "DO ji = 1, npti"
+       ]
+      ],
+      "355": [
+       "r",
+       "dh_i_bog(ji) = rDt_ice * MAX( 0._wp , zf_tt / ( zdE * rhoi ) )",
+       [
+        "DO ji = 1, npti",
+        "IF( zf_tt < 0._wp )"
+       ]
+      ],
+      "379": [
+       "r",
+       "IF( zf_tt > 0._wp .AND. jk > icount(jk) ) THEN",
+       [
+        "DO ji = 1, npti",
+        "DO jk = nlay_i, 1, -1"
+       ]
+      ]
+     },
+     "zfmdt": {
+      "253": [
+       "w",
+       "zfmdt = - zdum * rhoi",
+       [
+        "DO ji = 1, npti",
+        "DO jk = 1, nlay_i",
+        "IF( t_i_1d(ji,jk) >= (ztmelts+rt0) )"
+       ]
+      ],
+      "257": [
+       "r",
+       "hfx_res_1d(ji) = hfx_res_1d(ji) + zEi * zfmdt * a_i_1d(ji) * r1_Dt_ice",
+       [
+        "DO ji = 1, npti",
+        "DO jk = 1, nlay_i",
+        "IF( t_i_1d(ji,jk) >= (ztmelts+rt0) )"
+       ]
+      ],
+      "268": [
+       "w",
+       "zfmdt = - zq_top / zdE",
+       [
+        "DO ji = 1, npti",
+        "DO jk = 1, nlay_i",
+        "ELSE of IF( t_i_1d(ji,jk) >= (ztmelts+rt0) )"
+       ]
+      ],
+      "270": [
+       "r",
+       "zdum = - zfmdt * r1_rhoi",
+       [
+        "DO ji = 1, npti",
+        "DO jk = 1, nlay_i",
+        "ELSE of IF( t_i_1d(ji,jk) >= (ztmelts+rt0) )"
+       ]
+      ],
+      "278": [
+       "w",
+       "zfmdt = - rhoi * zdum",
+       [
+        "DO ji = 1, npti",
+        "DO jk = 1, nlay_i",
+        "ELSE of IF( t_i_1d(ji,jk) >= (ztmelts+rt0) )"
+       ]
+      ],
+      "280": [
+       "r",
+       "zQm = zfmdt * zEw",
+       [
+        "DO ji = 1, npti",
+        "DO jk = 1, nlay_i",
+        "ELSE of IF( t_i_1d(ji,jk) >= (ztmelts+rt0) )"
+       ]
+      ],
+      "282": [
+       "r",
+       "hfx_thd_1d(ji) = hfx_thd_1d(ji) + zEw * zfmdt * a_i_1d(ji) * r1_Dt_ice",
+       [
+        "DO ji = 1, npti",
+        "DO jk = 1, nlay_i",
+        "ELSE of IF( t_i_1d(ji,jk) >= (ztmelts+rt0) )"
+       ]
+      ],
+      "283": [
+       "r",
+       "hfx_sum_1d(ji) = hfx_sum_1d(ji) - zdE * zfmdt * a_i_1d(ji) * r1_Dt_ice",
+       [
+        "DO ji = 1, npti",
+        "DO jk = 1, nlay_i",
+        "ELSE of IF( t_i_1d(ji,jk) >= (ztmelts+rt0) )"
+       ]
+      ],
+      "358": [
+       "w",
+       "zfmdt = - rhoi * dh_i_bog(ji)",
+       [
+        "DO ji = 1, npti",
+        "IF( zf_tt < 0._wp )"
+       ]
+      ],
+      "360": [
+       "r",
+       "hfx_thd_1d(ji) = hfx_thd_1d(ji) + zEw * zfmdt * a_i_1d(ji) * r1_Dt_ice",
+       [
+        "DO ji = 1, npti",
+        "IF( zf_tt < 0._wp )"
+       ]
+      ],
+      "361": [
+       "r",
+       "hfx_bog_1d(ji) = hfx_bog_1d(ji) - zdE * zfmdt * a_i_1d(ji) * r1_Dt_ice",
+       [
+        "DO ji = 1, npti",
+        "IF( zf_tt < 0._wp )"
+       ]
+      ],
+      "392": [
+       "w",
+       "zfmdt = - zdum * rhoi",
+       [
+        "DO ji = 1, npti",
+        "DO jk = nlay_i, 1, -1",
+        "IF( zf_tt > 0._wp .AND. jk > icount(jk) )",
+        "IF( t_i_1d(ji,jk) >= (ztmelts+rt0) )"
+       ]
+      ],
+      "394": [
+       "r",
+       "hfx_res_1d(ji) = hfx_res_1d(ji) + zEi * zfmdt * a_i_1d(ji) * r1_Dt_ice",
+       [
+        "DO ji = 1, npti",
+        "DO jk = nlay_i, 1, -1",
+        "IF( zf_tt > 0._wp .AND. jk > icount(jk) )",
+        "IF( t_i_1d(ji,jk) >= (ztmelts+rt0) )"
+       ]
+      ],
+      "405": [
+       "w",
+       "zfmdt = - zq_bot / zdE",
+       [
+        "DO ji = 1, npti",
+        "DO jk = nlay_i, 1, -1",
+        "IF( zf_tt > 0._wp .AND. jk > icount(jk) )",
+        "ELSE of IF( t_i_1d(ji,jk) >= (ztmelts+rt0) )"
+       ]
+      ],
+      "407": [
+       "r",
+       "zdum = - zfmdt * r1_rhoi",
+       [
+        "DO ji = 1, npti",
+        "DO jk = nlay_i, 1, -1",
+        "IF( zf_tt > 0._wp .AND. jk > icount(jk) )",
+        "ELSE of IF( t_i_1d(ji,jk) >= (ztmelts+rt0) )"
+       ]
+      ],
+      "415": [
+       "w",
+       "zfmdt = - zdum * rhoi",
+       [
+        "DO ji = 1, npti",
+        "DO jk = nlay_i, 1, -1",
+        "IF( zf_tt > 0._wp .AND. jk > icount(jk) )",
+        "ELSE of IF( t_i_1d(ji,jk) >= (ztmelts+rt0) )"
+       ]
+      ],
+      "417": [
+       "r",
+       "zQm = zfmdt * zEw",
+       [
+        "DO ji = 1, npti",
+        "DO jk = nlay_i, 1, -1",
+        "IF( zf_tt > 0._wp .AND. jk > icount(jk) )",
+        "ELSE of IF( t_i_1d(ji,jk) >= (ztmelts+rt0) )"
+       ]
+      ],
+      "419": [
+       "r",
+       "hfx_thd_1d(ji) = hfx_thd_1d(ji) + zEw * zfmdt * a_i_1d(ji) * r1_Dt_ice",
+       [
+        "DO ji = 1, npti",
+        "DO jk = nlay_i, 1, -1",
+        "IF( zf_tt > 0._wp .AND. jk > icount(jk) )",
+        "ELSE of IF( t_i_1d(ji,jk) >= (ztmelts+rt0) )"
+       ]
+      ],
+      "420": [
+       "r",
+       "hfx_bom_1d(ji) = hfx_bom_1d(ji) - zdE * zfmdt * a_i_1d(ji) * r1_Dt_ice",
+       [
+        "DO ji = 1, npti",
+        "DO jk = nlay_i, 1, -1",
+        "IF( zf_tt > 0._wp .AND. jk > icount(jk) )",
+        "ELSE of IF( t_i_1d(ji,jk) >= (ztmelts+rt0) )"
+       ]
+      ],
+      "462": [
+       "w",
+       "zfmdt = ( rhos - rhoi ) * dh_snowice(ji)",
+       [
+        "DO ji = 1, npti"
+       ]
+      ],
+      "464": [
+       "r",
+       "zQm = zfmdt * zEw",
+       [
+        "DO ji = 1, npti"
+       ]
+      ],
+      "466": [
+       "r",
+       "hfx_thd_1d(ji) = hfx_thd_1d(ji) + zEw * zfmdt * a_i_1d(ji) * r1_Dt_ice",
+       [
+        "DO ji = 1, npti"
+       ]
+      ],
+      "467": [
+       "r",
+       "sfx_sni_1d(ji) = sfx_sni_1d(ji) + sss_1d(ji) * zfmdt * a_i_1d(ji) * r1_Dt_ice",
+       [
+        "DO ji = 1, npti"
+       ]
+      ],
+      "471": [
+       "r",
+       "sfx_bri_1d(ji) = sfx_bri_1d(ji) - sss_1d(ji) * zfmdt * a_i_1d(ji) * r1_Dt_ice - zs_i(1) * dh_snowice(ji) * rhoi * a_i_1d(ji) * r1_Dt_ice",
+       [
+        "DO ji = 1, npti",
+        "IF( nn_icesal == 1 .OR. nn_icesal == 3 )"
+       ]
+      ],
+      "484": [
+       "r",
+       "zs_i_old(0) = zs_i_old(0) - zfmdt * sss_1d(ji) * r1_rhoi",
+       [
+        "DO ji = 1, npti"
+       ]
+      ],
+      "486": [
+       "r",
+       "ze_i_old(0) = ze_i_old(0) + zfmdt * zEw",
+       [
+        "DO ji = 1, npti"
+       ]
+      ]
+     },
+     "zh_i": {
+      "141": [
+       "w",
+       "zh_i (0:nlay_i+1) = 0._wp",
+       [
+        "DO ji = 1, npti"
+       ]
+      ],
+      "146": [
+       "w",
+       "zh_i (jk) = h_i_1d(ji) * r1_nlay_i",
+       [
+        "DO ji = 1, npti",
+        "DO jk = 1, nlay_i"
+       ]
+      ],
+      "251": [
+       "r",
+       "zdum = MIN( 0._wp , - zh_i(jk) )",
+       [
+        "DO ji = 1, npti",
+        "DO jk = 1, nlay_i",
+        "IF( t_i_1d(ji,jk) >= (ztmelts+rt0) )"
+       ]
+      ],
+      "272": [
+       "r",
+       "zdum = MIN( 0._wp , MAX( zdum , - zh_i(jk) ) )",
+       [
+        "DO ji = 1, npti",
+        "DO jk = 1, nlay_i",
+        "ELSE of IF( t_i_1d(ji,jk) >= (ztmelts+rt0) )"
+       ]
+      ],
+      "289": [
+       "wr",
+       "zh_i (jk) = MAX( 0._wp, zh_i (jk) + zdum )",
+       [
+        "DO ji = 1, npti",
+        "DO jk = 1, nlay_i"
+       ]
+      ],
+      "300": [
+       "r",
+       "zdum = MAX( - zh_i(jk) , - zevap_rema * r1_rhoi )",
+       [
+        "DO ji = 1, npti",
+        "DO jk = 1, nlay_i"
+       ]
+      ],
+      "310": [
+       "wr",
+       "zh_i (jk) = MAX( 0._wp, zh_i (jk) + zdum )",
+       [
+        "DO ji = 1, npti",
+        "DO jk = 1, nlay_i"
+       ]
+      ],
+      "322": [
+       "r",
+       "IF( zh_i(jk) > 0._wp ) THEN ; icount(jk) = 0",
+       [
+        "DO ji = 1, npti",
+        "DO jk = 1, nlay_i"
+       ]
+      ],
+      "366": [
+       "wr",
+       "zh_i(nlay_i+1) = zh_i(nlay_i+1) + dh_i_bog(ji)",
+       [
+        "DO ji = 1, npti",
+        "IF( zf_tt < 0._wp )"
+       ]
+      ],
+      "388": [
+       "r",
+       "zdum = MIN( 0._wp , - zh_i(jk) )",
+       [
+        "DO ji = 1, npti",
+        "DO jk = nlay_i, 1, -1",
+        "IF( zf_tt > 0._wp .AND. jk > icount(jk) )",
+        "IF( t_i_1d(ji,jk) >= (ztmelts+rt0) )"
+       ]
+      ],
+      "409": [
+       "r",
+       "zdum = MIN( 0._wp , MAX( zdum, - zh_i(jk) ) )",
+       [
+        "DO ji = 1, npti",
+        "DO jk = nlay_i, 1, -1",
+        "IF( zf_tt > 0._wp .AND. jk > icount(jk) )",
+        "ELSE of IF( t_i_1d(ji,jk) >= (ztmelts+rt0) )"
+       ]
+      ],
+      "426": [
+       "wr",
+       "zh_i (jk) = MAX( 0._wp, zh_i (jk) + zdum )",
+       [
+        "DO ji = 1, npti",
+        "DO jk = nlay_i, 1, -1",
+        "IF( zf_tt > 0._wp .AND. jk > icount(jk) )"
+       ]
+      ],
+      "480": [
+       "wr",
+       "zh_i(0) = zh_i(0) + dh_snowice(ji)",
+       [
+        "DO ji = 1, npti"
+       ]
+      ]
+     },
+     "zh_s": {
+      "150": [
+       "w",
+       "zh_s(0) = 0._wp",
+       [
+        "DO ji = 1, npti"
+       ]
+      ],
+      "153": [
+       "w",
+       "zh_s(jk) = h_s_1d(ji) * r1_nlay_s",
+       [
+        "DO ji = 1, npti",
+        "DO jk = 1, nlay_s"
+       ]
+      ],
+      "166": [
+       "r",
+       "hfx_res_1d (ji) = hfx_res_1d (ji) - ze_s(jk) * zh_s(jk) * a_i_1d(ji) * r1_Dt_ice",
+       [
+        "DO ji = 1, npti",
+        "DO jk = 1, nlay_s",
+        "IF( t_s_1d(ji,jk) > rt0 )"
+       ]
+      ],
+      "167": [
+       "r",
+       "wfx_snw_sum_1d(ji) = wfx_snw_sum_1d(ji) + rhos * zh_s(jk) * a_i_1d(ji) * r1_Dt_ice",
+       [
+        "DO ji = 1, npti",
+        "DO jk = 1, nlay_s",
+        "IF( t_s_1d(ji,jk) > rt0 )"
+       ]
+      ],
+      "169": [
+       "r",
+       "dh_s_itm(ji) = dh_s_itm(ji) - zh_s(jk)",
+       [
+        "DO ji = 1, npti",
+        "DO jk = 1, nlay_s",
+        "IF( t_s_1d(ji,jk) > rt0 )"
+       ]
+      ],
+      "170": [
+       "r",
+       "h_s_1d (ji) = MAX( 0._wp, h_s_1d (ji) - zh_s(jk) )",
+       [
+        "DO ji = 1, npti",
+        "DO jk = 1, nlay_s",
+        "IF( t_s_1d(ji,jk) > rt0 )"
+       ]
+      ],
+      "171": [
+       "w",
+       "zh_s (jk) = 0._wp",
+       [
+        "DO ji = 1, npti",
+        "DO jk = 1, nlay_s",
+        "IF( t_s_1d(ji,jk) > rt0 )"
+       ]
+      ],
+      "179": [
+       "w",
+       "zh_s(0) = zsnw(ji) * sprecip_1d(ji) * rDt_ice * r1_rhos / at_i_1d(ji)",
+       [
+        "DO ji = 1, npti",
+        "IF( sprecip_1d(ji) > 0._wp )"
+       ]
+      ],
+      "182": [
+       "r",
+       "hfx_spr_1d(ji) = hfx_spr_1d(ji) + ze_s(0) * zh_s(0) * a_i_1d(ji) * r1_Dt_ice",
+       [
+        "DO ji = 1, npti",
+        "IF( sprecip_1d(ji) > 0._wp )"
+       ]
+      ],
+      "183": [
+       "r",
+       "wfx_spr_1d(ji) = wfx_spr_1d(ji) - rhos * zh_s(0) * a_i_1d(ji) * r1_Dt_ice",
+       [
+        "DO ji = 1, npti",
+        "IF( sprecip_1d(ji) > 0._wp )"
+       ]
+      ],
+      "186": [
+       "r",
+       "h_s_1d(ji) = h_s_1d(ji) + zh_s(0)",
+       [
+        "DO ji = 1, npti",
+        "IF( sprecip_1d(ji) > 0._wp )"
+       ]
+      ],
+      "200": [
+       "r",
+       "zdum = MAX( -zh_s(jk), zdeltah )",
+       [
+        "DO ji = 1, npti",
+        "DO jk = 0, nlay_s"
+       ]
+      ],
+      "207": [
+       "wr",
+       "zh_s (jk) = MAX( 0._wp , zh_s (jk) + zdum )",
+       [
+        "DO ji = 1, npti",
+        "DO jk = 0, nlay_s"
+       ]
+      ],
+      "219": [
+       "r",
+       "IF( zh_s(jk) > 0._wp .AND. zq_top > 0._wp ) THEN",
+       [
+        "DO ji = 1, npti",
+        "DO jk = 0, nlay_s"
+       ]
+      ],
+      "222": [
+       "r",
+       "zdum = MAX( zdum , - zh_s(jk) )",
+       [
+        "DO ji = 1, npti",
+        "DO jk = 0, nlay_s",
+        "IF( zh_s(jk) > 0._wp .AND. zq_top > 0._wp )"
+       ]
+      ],
+      "231": [
+       "wr",
+       "zh_s (jk) = MAX( 0._wp , zh_s (jk) + zdum )",
+       [
+        "DO ji = 1, npti",
+        "DO jk = 0, nlay_s",
+        "IF( zh_s(jk) > 0._wp .AND. zq_top > 0._wp )"
+       ]
+      ],
+      "441": [
+       "r",
+       "hfx_res_1d(ji) = hfx_res_1d(ji) - ze_s(jk) * zh_s(jk) * a_i_1d(ji) * r1_Dt_ice",
+       [
+        "DO ji = 1, npti",
+        "IF( h_i_1d(ji) == 0._wp )",
+        "DO jk = 0, nlay_s"
+       ]
+      ],
+      "442": [
+       "r",
+       "wfx_res_1d(ji) = wfx_res_1d(ji) + rhos * zh_s(jk) * a_i_1d(ji) * r1_Dt_ice",
+       [
+        "DO ji = 1, npti",
+        "IF( h_i_1d(ji) == 0._wp )",
+        "DO jk = 0, nlay_s"
+       ]
+      ],
+      "447": [
+       "w",
+       "zh_s (jk) = 0._wp",
+       [
+        "DO ji = 1, npti",
+        "IF( h_i_1d(ji) == 0._wp )",
+        "DO jk = 0, nlay_s"
+       ]
+      ],
+      "490": [
+       "r",
+       "zdum = MIN( zdeltah, zh_s(jk) )",
+       [
+        "DO ji = 1, npti",
+        "DO jk = nlay_s, 0, -1"
+       ]
+      ],
+      "491": [
+       "wr",
+       "zh_s(jk) = MAX( 0._wp, zh_s(jk) - zdum )",
+       [
+        "DO ji = 1, npti",
+        "DO jk = nlay_s, 0, -1"
+       ]
+      ],
+      "506": [
+       "r",
+       "e_s_1d(ji,:) = snw_ent( zh_s, ze_s )",
+       [
+        "DO ji = 1, npti"
+       ]
+      ]
+     },
+     "zq_bot": {
+      "130": [
+       "w",
+       "zq_bot = MAX( 0._wp, zf_tt * rDt_ice )",
+       [
+        "DO ji = 1, npti"
+       ]
+      ],
+      "405": [
+       "r",
+       "zfmdt = - zq_bot / zdE",
+       [
+        "DO ji = 1, npti",
+        "DO jk = nlay_i, 1, -1",
+        "IF( zf_tt > 0._wp .AND. jk > icount(jk) )",
+        "ELSE of IF( t_i_1d(ji,jk) >= (ztmelts+rt0) )"
+       ]
+      ],
+      "411": [
+       "wr",
+       "zq_bot = MAX( 0._wp , zq_bot - zdum * rhoi * zdE )",
+       [
+        "DO ji = 1, npti",
+        "DO jk = nlay_i, 1, -1",
+        "IF( zf_tt > 0._wp .AND. jk > icount(jk) )",
+        "ELSE of IF( t_i_1d(ji,jk) >= (ztmelts+rt0) )"
+       ]
+      ]
+     },
+     "zq_top": {
+      "128": [
+       "w",
+       "zq_top = MAX( 0._wp, qml_ice_1d(ji) * rDt_ice )",
+       [
+        "DO ji = 1, npti"
+       ]
+      ],
+      "219": [
+       "r",
+       "IF( zh_s(jk) > 0._wp .AND. zq_top > 0._wp ) THEN",
+       [
+        "DO ji = 1, npti",
+        "DO jk = 0, nlay_s"
+       ]
+      ],
+      "221": [
+       "r",
+       "zdum = - zq_top / MAX( ze_s(jk), epsi20 )",
+       [
+        "DO ji = 1, npti",
+        "DO jk = 0, nlay_s",
+        "IF( zh_s(jk) > 0._wp .AND. zq_top > 0._wp )"
+       ]
+      ],
+      "229": [
+       "wr",
+       "zq_top = MAX( 0._wp , zq_top + zdum * ze_s(jk) )",
+       [
+        "DO ji = 1, npti",
+        "DO jk = 0, nlay_s",
+        "IF( zh_s(jk) > 0._wp .AND. zq_top > 0._wp )"
+       ]
+      ],
+      "268": [
+       "r",
+       "zfmdt = - zq_top / zdE",
+       [
+        "DO ji = 1, npti",
+        "DO jk = 1, nlay_i",
+        "ELSE of IF( t_i_1d(ji,jk) >= (ztmelts+rt0) )"
+       ]
+      ],
+      "274": [
+       "wr",
+       "zq_top = MAX( 0._wp , zq_top - zdum * rhoi * zdE )",
+       [
+        "DO ji = 1, npti",
+        "DO jk = 1, nlay_i",
+        "ELSE of IF( t_i_1d(ji,jk) >= (ztmelts+rt0) )"
+       ]
+      ]
+     }
+    },
+    "snw_ent": {
+     "zeh_cum0": {
+      "584": [
+       "w",
+       "zeh_cum0(0) = 0._wp",
+       []
+      ],
+      "587": [
+       "wr",
+       "zeh_cum0(jk0) = zeh_cum0(jk0-1) + pe_old(jk0-1) * ph_old(jk0-1)",
+       [
+        "DO jk0 = 1, nlay_s+1"
+       ]
+      ],
+      "608": [
+       "r",
+       "zeh_cum1(jk1) = ( zeh_cum0(jk0-1) * ( zh_cum0(jk0) - zh_cum1(jk1 ) ) + zeh_cum0(jk0 ) * ( zh_cum1(jk1) - zh_cum0(jk0-1) ) ) / ( zh_cum0(jk0) - zh_cum0(jk0-1) )",
+       [
+        "DO jk0 = 1, nlay_s+1",
+        "DO jk1 = 1, nlay_s-1",
+        "IF( zh_cum1(jk1) <= zh_cum0(jk0) .AND. zh_cum1(jk1) > zh_cum0(jk0-1) )"
+       ]
+      ],
+      "615": [
+       "r",
+       "zeh_cum1(nlay_s) = zeh_cum0(nlay_s+1)",
+       []
+      ]
+     },
+     "zeh_cum1": {
+      "603": [
+       "w",
+       "zeh_cum1(0:nlay_s) = 0._wp",
+       []
+      ],
+      "608": [
+       "w",
+       "zeh_cum1(jk1) = ( zeh_cum0(jk0-1) * ( zh_cum0(jk0) - zh_cum1(jk1 ) ) + zeh_cum0(jk0 ) * ( zh_cum1(jk1) - zh_cum0(jk0-1) ) ) / ( zh_cum0(jk0) - zh_cum0(jk0-1) )",
+       [
+        "DO jk0 = 1, nlay_s+1",
+        "DO jk1 = 1, nlay_s-1",
+        "IF( zh_cum1(jk1) <= zh_cum0(jk0) .AND. zh_cum1(jk1) > zh_cum0(jk0-1) )"
+       ]
+      ],
+      "615": [
+       "w",
+       "zeh_cum1(nlay_s) = zeh_cum0(nlay_s+1)",
+       []
+      ],
+      "619": [
+       "r",
+       "snw_ent(jk1) = MAX( 0._wp, zeh_cum1(jk1) - zeh_cum1(jk1-1) ) / MAX( zhnew, epsi20 )",
+       [
+        "DO jk1 = 1, nlay_s"
+       ]
+      ]
+     }
+    }
+   },
    "instructions_without_token": [
     "228",
     "295"
@@ -66,6 +1626,9 @@
    "sign_tokens": [],
    "sites": {
     "128": {
+     "enclosing": [
+      "DO ji = 1, npti"
+     ],
      "instructions": [
       {
        "count": 1,
@@ -80,6 +1643,9 @@
      ]
     },
     "130": {
+     "enclosing": [
+      "DO ji = 1, npti"
+     ],
      "instructions": [
       {
        "count": 1,
@@ -94,6 +1660,11 @@
      ]
     },
     "170": {
+     "enclosing": [
+      "DO ji = 1, npti",
+      "DO jk = 1, nlay_s",
+      "IF( t_s_1d(ji,jk) > rt0 )"
+     ],
      "instructions": [
       {
        "count": 7,
@@ -108,6 +1679,10 @@
      ]
     },
     "180": {
+     "enclosing": [
+      "DO ji = 1, npti",
+      "IF( sprecip_1d(ji) > 0._wp )"
+     ],
      "instructions": [
       {
        "count": 1,
@@ -122,6 +1697,9 @@
      ]
     },
     "194": {
+     "enclosing": [
+      "DO ji = 1, npti"
+     ],
      "instructions": [
       {
        "count": 1,
@@ -146,6 +1724,10 @@
      ]
     },
     "200": {
+     "enclosing": [
+      "DO ji = 1, npti",
+      "DO jk = 0, nlay_s"
+     ],
      "instructions": [
       {
        "count": 1,
@@ -178,6 +1760,10 @@
      ]
     },
     "206": {
+     "enclosing": [
+      "DO ji = 1, npti",
+      "DO jk = 0, nlay_s"
+     ],
      "instructions": [
       {
        "count": 3,
@@ -192,6 +1778,10 @@
      ]
     },
     "207": {
+     "enclosing": [
+      "DO ji = 1, npti",
+      "DO jk = 0, nlay_s"
+     ],
      "instructions": [
       {
        "count": 3,
@@ -206,6 +1796,10 @@
      ]
     },
     "211": {
+     "enclosing": [
+      "DO ji = 1, npti",
+      "DO jk = 0, nlay_s"
+     ],
      "instructions": [
       {
        "count": 3,
@@ -220,6 +1814,11 @@
      ]
     },
     "221": {
+     "enclosing": [
+      "DO ji = 1, npti",
+      "DO jk = 0, nlay_s",
+      "IF( zh_s(jk) > 0._wp .AND. zq_top > 0._wp )"
+     ],
      "instructions": [
       {
        "count": 1,
@@ -234,6 +1833,11 @@
      ]
     },
     "228": {
+     "enclosing": [
+      "DO ji = 1, npti",
+      "DO jk = 0, nlay_s",
+      "IF( zh_s(jk) > 0._wp .AND. zq_top > 0._wp )"
+     ],
      "instructions": [
       {
        "count": 1,
@@ -248,6 +1852,11 @@
      "tokens": []
     },
     "229": {
+     "enclosing": [
+      "DO ji = 1, npti",
+      "DO jk = 0, nlay_s",
+      "IF( zh_s(jk) > 0._wp .AND. zq_top > 0._wp )"
+     ],
      "instructions": [
       {
        "count": 1,
@@ -262,6 +1871,11 @@
      ]
     },
     "230": {
+     "enclosing": [
+      "DO ji = 1, npti",
+      "DO jk = 0, nlay_s",
+      "IF( zh_s(jk) > 0._wp .AND. zq_top > 0._wp )"
+     ],
      "instructions": [
       {
        "count": 1,
@@ -276,6 +1890,11 @@
      ]
     },
     "231": {
+     "enclosing": [
+      "DO ji = 1, npti",
+      "DO jk = 0, nlay_s",
+      "IF( zh_s(jk) > 0._wp .AND. zq_top > 0._wp )"
+     ],
      "instructions": [
       {
        "count": 1,
@@ -290,6 +1909,11 @@
      ]
     },
     "251": {
+     "enclosing": [
+      "DO ji = 1, npti",
+      "DO jk = 1, nlay_i",
+      "IF( t_i_1d(ji,jk) >= (ztmelts+rt0) )"
+     ],
      "instructions": [
       {
        "count": 1,
@@ -304,6 +1928,11 @@
      ]
     },
     "272": {
+     "enclosing": [
+      "DO ji = 1, npti",
+      "DO jk = 1, nlay_i",
+      "ELSE of IF( t_i_1d(ji,jk) >= (ztmelts+rt0) )"
+     ],
      "instructions": [
       {
        "count": 1,
@@ -327,6 +1956,11 @@
      ]
     },
     "274": {
+     "enclosing": [
+      "DO ji = 1, npti",
+      "DO jk = 1, nlay_i",
+      "ELSE of IF( t_i_1d(ji,jk) >= (ztmelts+rt0) )"
+     ],
      "instructions": [
       {
        "count": 1,
@@ -341,6 +1975,10 @@
      ]
     },
     "289": {
+     "enclosing": [
+      "DO ji = 1, npti",
+      "DO jk = 1, nlay_i"
+     ],
      "instructions": [
       {
        "count": 1,
@@ -355,6 +1993,10 @@
      ]
     },
     "290": {
+     "enclosing": [
+      "DO ji = 1, npti",
+      "DO jk = 1, nlay_i"
+     ],
      "instructions": [
       {
        "count": 1,
@@ -369,6 +2011,10 @@
      ]
     },
     "295": {
+     "enclosing": [
+      "DO ji = 1, npti",
+      "DO jk = 1, nlay_i"
+     ],
      "instructions": [
       {
        "count": 1,
@@ -383,6 +2029,10 @@
      "tokens": []
     },
     "310": {
+     "enclosing": [
+      "DO ji = 1, npti",
+      "DO jk = 1, nlay_i"
+     ],
      "instructions": [
       {
        "count": 1,
@@ -397,6 +2047,10 @@
      ]
     },
     "311": {
+     "enclosing": [
+      "DO ji = 1, npti",
+      "DO jk = 1, nlay_i"
+     ],
      "instructions": [
       {
        "count": 1,
@@ -411,6 +2065,10 @@
      ]
     },
     "348": {
+     "enclosing": [
+      "DO ji = 1, npti",
+      "IF( zf_tt < 0._wp )"
+     ],
      "instructions": [
       {
        "count": 1,
@@ -432,6 +2090,10 @@
      ]
     },
     "355": {
+     "enclosing": [
+      "DO ji = 1, npti",
+      "IF( zf_tt < 0._wp )"
+     ],
      "instructions": [
       {
        "count": 1,
@@ -446,6 +2108,12 @@
      ]
     },
     "388": {
+     "enclosing": [
+      "DO ji = 1, npti",
+      "DO jk = nlay_i, 1, -1",
+      "IF( zf_tt > 0._wp .AND. jk > icount(jk) )",
+      "IF( t_i_1d(ji,jk) >= (ztmelts+rt0) )"
+     ],
      "instructions": [
       {
        "count": 4,
@@ -460,6 +2128,12 @@
      ]
     },
     "409": {
+     "enclosing": [
+      "DO ji = 1, npti",
+      "DO jk = nlay_i, 1, -1",
+      "IF( zf_tt > 0._wp .AND. jk > icount(jk) )",
+      "ELSE of IF( t_i_1d(ji,jk) >= (ztmelts+rt0) )"
+     ],
      "instructions": [
       {
        "count": 1,
@@ -491,6 +2165,12 @@
      ]
     },
     "411": {
+     "enclosing": [
+      "DO ji = 1, npti",
+      "DO jk = nlay_i, 1, -1",
+      "IF( zf_tt > 0._wp .AND. jk > icount(jk) )",
+      "ELSE of IF( t_i_1d(ji,jk) >= (ztmelts+rt0) )"
+     ],
      "instructions": [
       {
        "count": 4,
@@ -505,6 +2185,11 @@
      ]
     },
     "426": {
+     "enclosing": [
+      "DO ji = 1, npti",
+      "DO jk = nlay_i, 1, -1",
+      "IF( zf_tt > 0._wp .AND. jk > icount(jk) )"
+     ],
      "instructions": [
       {
        "count": 4,
@@ -519,6 +2204,11 @@
      ]
     },
     "427": {
+     "enclosing": [
+      "DO ji = 1, npti",
+      "DO jk = nlay_i, 1, -1",
+      "IF( zf_tt > 0._wp .AND. jk > icount(jk) )"
+     ],
      "instructions": [
       {
        "count": 4,
@@ -533,6 +2223,9 @@
      ]
     },
     "456": {
+     "enclosing": [
+      "DO ji = 1, npti"
+     ],
      "instructions": [
       {
        "count": 1,
@@ -547,6 +2240,10 @@
      ]
     },
     "490": {
+     "enclosing": [
+      "DO ji = 1, npti",
+      "DO jk = nlay_s, 0, -1"
+     ],
      "instructions": [
       {
        "count": 1,
@@ -571,6 +2268,10 @@
      ]
     },
     "491": {
+     "enclosing": [
+      "DO ji = 1, npti",
+      "DO jk = nlay_s, 0, -1"
+     ],
      "instructions": [
       {
        "count": 4,
@@ -585,6 +2286,10 @@
      ]
     },
     "494": {
+     "enclosing": [
+      "DO ji = 1, npti",
+      "DO jk = nlay_s, 0, -1"
+     ],
      "instructions": [
       {
        "count": 4,
@@ -599,6 +2304,10 @@
      ]
     },
     "525": {
+     "enclosing": [
+      "DO ji = 1, npti",
+      "IF( nn_icesal == 2 )"
+     ],
      "instructions": [
       {
        "count": 1,
@@ -613,6 +2322,9 @@
      ]
     },
     "619": {
+     "enclosing": [
+      "DO jk1 = 1, nlay_s"
+     ],
      "instructions": [
       {
        "count": 2,
@@ -656,6 +2368,7 @@
    }
   },
   "icethd_zdf": {
+   "census": {},
    "instructions_without_token": [],
    "ppsrc_sha256": "b96d344ddbd9b89b201b61398c136693187e149e5fc54727481b4b31bdaf590a",
    "record_object_sha256": "0b9666497859720966556984a8d8d9eb313734fb0612f006aae679b8121c9346",
@@ -670,6 +2383,487 @@
    "token_statements_without_instruction": {}
   },
   "icethd_zdf_bl99": {
+   "census": {
+    "ice_thd_zdf_BL99": {
+     "ice_var_enthalpy": {
+      "813": [
+       "r",
+       "CALL ice_var_enthalpy",
+       [
+        "IF( k_cnd == np_cnd_OFF .OR. k_cnd == np_cnd_ON )"
+       ]
+      ]
+     },
+     "l_T_converged": {
+      "245": [
+       "w",
+       "l_T_converged(:) = .FALSE.",
+       []
+      ],
+      "251": [
+       "r",
+       "DO WHILE ( ( .NOT. ALL (l_T_converged(1:npti)) ) .AND. iconv < iconv_max )",
+       []
+      ],
+      "292": [
+       "r",
+       "IF ( .NOT. l_T_converged(ji) ) ztcond_i(ji,:) = MAX( zkimin, ztcond_i_cp(ji,:) )",
+       [
+        "DO WHILE ( ( .NOT. ALL (l_T_converged(1:npti)) ) .AND. iconv < iconv_max )",
+        "DO ji = 1, npti",
+        "IF( .NOT. l_T_converged(ji) )"
+       ]
+      ],
+      "306": [
+       "r",
+       "IF( .NOT. l_T_converged(ji) ) THEN",
+       [
+        "DO WHILE ( ( .NOT. ALL (l_T_converged(1:npti)) ) .AND. iconv < iconv_max )",
+        "IF( ln_virtual_itd )",
+        "DO ji = 1, npti"
+       ]
+      ],
+      "321": [
+       "r",
+       "IF ( .NOT. l_T_converged(ji) ) THEN",
+       [
+        "DO WHILE ( ( .NOT. ALL (l_T_converged(1:npti)) ) .AND. iconv < iconv_max )",
+        "DO ji = 1, npti"
+       ]
+      ],
+      "352": [
+       "r",
+       "IF ( .NOT. l_T_converged(ji) ) THEN",
+       [
+        "DO WHILE ( ( .NOT. ALL (l_T_converged(1:npti)) ) .AND. iconv < iconv_max )",
+        "DO jk = 1, nlay_i",
+        "DO ji = 1, npti"
+       ]
+      ],
+      "361": [
+       "r",
+       "IF ( .NOT. l_T_converged(ji) ) zeta_s(ji,jk) = rDt_ice * r1_rhos * r1_rcpi * z1_h_s(ji)",
+       [
+        "DO WHILE ( ( .NOT. ALL (l_T_converged(1:npti)) ) .AND. iconv < iconv_max )",
+        "DO jk = 1, nlay_s",
+        "DO ji = 1, npti",
+        "IF( .NOT. l_T_converged(ji) )"
+       ]
+      ],
+      "385": [
+       "r",
+       "IF ( .NOT. l_T_converged(ji) ) THEN",
+       [
+        "DO WHILE ( ( .NOT. ALL (l_T_converged(1:npti)) ) .AND. iconv < iconv_max )",
+        "IF( k_cnd == np_cnd_OFF .OR. k_cnd == np_cnd_EMU )",
+        "DO ji = 1, npti"
+       ]
+      ],
+      "599": [
+       "w",
+       "IF( zdti_max < zdti_bnd ) l_T_converged(ji) = .TRUE.",
+       [
+        "DO WHILE ( ( .NOT. ALL (l_T_converged(1:npti)) ) .AND. iconv < iconv_max )",
+        "IF( k_cnd == np_cnd_OFF .OR. k_cnd == np_cnd_EMU )",
+        "DO ji = 1, npti",
+        "IF( .NOT. l_T_converged(ji) )",
+        "IF( zdti_max < zdti_bnd )"
+       ]
+      ],
+      "616": [
+       "r",
+       "IF ( .NOT. l_T_converged(ji) ) THEN",
+       [
+        "DO WHILE ( ( .NOT. ALL (l_T_converged(1:npti)) ) .AND. iconv < iconv_max )",
+        "ELSEIF( k_cnd == np_cnd_ON )",
+        "DO ji = 1, npti"
+       ]
+      ],
+      "764": [
+       "w",
+       "IF( zdti_max < zdti_bnd ) l_T_converged(ji) = .TRUE.",
+       [
+        "DO WHILE ( ( .NOT. ALL (l_T_converged(1:npti)) ) .AND. iconv < iconv_max )",
+        "ELSEIF( k_cnd == np_cnd_ON )",
+        "DO ji = 1, npti",
+        "IF( .NOT. l_T_converged(ji) )",
+        "IF( zdti_max < zdti_bnd )"
+       ]
+      ]
+     },
+     "t_i_1d": {
+      "209": [
+       "r",
+       "ztiold (1:npti,:) = t_i_1d(1:npti,:)",
+       []
+      ],
+      "261": [
+       "r",
+       "ztcond_i_cp(ji,0) = rcnd_i + zbeta * sz_i_1d(ji,1) / MIN( -epsi10, t_i_1d(ji,1) - rt0 )",
+       [
+        "DO WHILE ( ( .NOT. ALL (l_T_converged(1:npti)) ) .AND. iconv < iconv_max )",
+        "IF( ln_cndi_U64 )",
+        "DO ji = 1, npti"
+       ]
+      ],
+      "266": [
+       "r",
+       "ztcond_i_cp(ji,jk) = rcnd_i + zbeta * 0.5_wp * ( sz_i_1d(ji,jk) + sz_i_1d(ji,jk+1) ) / MIN( -epsi10, 0.5_wp * ( t_i_1d(ji,jk) + t_i_1d(ji,jk+1) ) - rt0 )",
+       [
+        "DO WHILE ( ( .NOT. ALL (l_T_converged(1:npti)) ) .AND. iconv < iconv_max )",
+        "IF( ln_cndi_U64 )",
+        "DO jk = 1, nlay_i-1",
+        "DO ji = 1, npti"
+       ]
+      ],
+      "274": [
+       "r",
+       "ztcond_i_cp(ji,0) = rcnd_i + 0.09_wp * sz_i_1d(ji,1) / MIN( -epsi10, t_i_1d(ji,1) - rt0 ) - 0.011_wp * ( t_i_1d(ji,1) - rt0 )",
+       [
+        "DO WHILE ( ( .NOT. ALL (l_T_converged(1:npti)) ) .AND. iconv < iconv_max )",
+        "ELSEIF( ln_cndi_P07 )",
+        "DO ji = 1, npti"
+       ]
+      ],
+      "281": [
+       "r",
+       "ztcond_i_cp(ji,jk) = rcnd_i + 0.09_wp * 0.5_wp * ( sz_i_1d(ji,jk) + sz_i_1d(ji,jk+1) ) / MIN( -epsi10, 0.5_wp * ( t_i_1d(ji,jk) + t_i_1d(ji,jk+1) ) - rt0 ) - 0.011_wp * ( 0.5_wp * ( t_i_1d(ji,jk) + t_i_1d(ji,jk+1) ) - rt0 )",
+       [
+        "DO WHILE ( ( .NOT. ALL (l_T_converged(1:npti)) ) .AND. iconv < iconv_max )",
+        "ELSEIF( ln_cndi_P07 )",
+        "DO jk = 1, nlay_i-1",
+        "DO ji = 1, npti"
+       ]
+      ],
+      "353": [
+       "r",
+       "zcpi = rcpi + zgamma * sz_i_1d(ji,jk) / MAX( ( t_i_1d(ji,jk) - rt0 ) * ( ztiold(ji,jk) - rt0 ), epsi10 )",
+       [
+        "DO WHILE ( ( .NOT. ALL (l_T_converged(1:npti)) ) .AND. iconv < iconv_max )",
+        "DO jk = 1, nlay_i",
+        "DO ji = 1, npti",
+        "IF( .NOT. l_T_converged(ji) )"
+       ]
+      ],
+      "392": [
+       "r",
+       "ztib(:) = t_i_1d(ji,:)",
+       [
+        "DO WHILE ( ( .NOT. ALL (l_T_converged(1:npti)) ) .AND. iconv < iconv_max )",
+        "IF( k_cnd == np_cnd_OFF .OR. k_cnd == np_cnd_EMU )",
+        "DO ji = 1, npti",
+        "IF( .NOT. l_T_converged(ji) )"
+       ]
+      ],
+      "544": [
+       "w",
+       "t_i_1d(ji,nlay_i) = zindtbis(jm_max) / zdiagbis(jm_max)",
+       [
+        "DO WHILE ( ( .NOT. ALL (l_T_converged(1:npti)) ) .AND. iconv < iconv_max )",
+        "IF( k_cnd == np_cnd_OFF .OR. k_cnd == np_cnd_EMU )",
+        "DO ji = 1, npti",
+        "IF( .NOT. l_T_converged(ji) )"
+       ]
+      ],
+      "548": [
+       "wr",
+       "t_i_1d(ji,jk) = ( zindtbis(jm) - ztrid(jm,3) * t_i_1d(ji,jk+1) ) / zdiagbis(jm)",
+       [
+        "DO WHILE ( ( .NOT. ALL (l_T_converged(1:npti)) ) .AND. iconv < iconv_max )",
+        "IF( k_cnd == np_cnd_OFF .OR. k_cnd == np_cnd_EMU )",
+        "DO ji = 1, npti",
+        "IF( .NOT. l_T_converged(ji) )",
+        "DO jm = nlay_i + nlay_s, nlay_s + 2, -1"
+       ]
+      ],
+      "554": [
+       "r",
+       "IF ( h_s_1d(ji) > 0._wp ) t_s_1d(ji,nlay_s) = ( zindtbis(nlay_s+1) - ztrid(nlay_s+1,3) * t_i_1d(ji,1) ) / zdiagbis(nlay_s+1)",
+       [
+        "DO WHILE ( ( .NOT. ALL (l_T_converged(1:npti)) ) .AND. iconv < iconv_max )",
+        "IF( k_cnd == np_cnd_OFF .OR. k_cnd == np_cnd_EMU )",
+        "DO ji = 1, npti",
+        "IF( .NOT. l_T_converged(ji) )",
+        "IF( h_s_1d(ji) > 0._wp )"
+       ]
+      ],
+      "566": [
+       "r",
+       "t_su_1d(ji) = ( zindtbis(jm_min) - ztrid(jm_min,3) * ( isnow(ji) * t_s_1d(ji,1) + ( 1._wp - isnow(ji) ) * t_i_1d(ji,1) ) ) / zdiagbis(jm_min)",
+       [
+        "DO WHILE ( ( .NOT. ALL (l_T_converged(1:npti)) ) .AND. iconv < iconv_max )",
+        "IF( k_cnd == np_cnd_OFF .OR. k_cnd == np_cnd_EMU )",
+        "DO ji = 1, npti",
+        "IF( .NOT. l_T_converged(ji) )",
+        "IF( t_su_1d(ji) < rt0 )"
+       ]
+      ],
+      "589": [
+       "wr",
+       "t_i_1d(ji,jk) = MAX( MIN( t_i_1d(ji,jk), ztmelts ), rt0 - 100._wp )",
+       [
+        "DO WHILE ( ( .NOT. ALL (l_T_converged(1:npti)) ) .AND. iconv < iconv_max )",
+        "IF( k_cnd == np_cnd_OFF .OR. k_cnd == np_cnd_EMU )",
+        "DO ji = 1, npti",
+        "IF( .NOT. l_T_converged(ji) )",
+        "DO jk = 1, nlay_i"
+       ]
+      ],
+      "590": [
+       "r",
+       "zdti_max = MAX( zdti_max, ABS( t_i_1d(ji,jk) - ztib(jk) ) )",
+       [
+        "DO WHILE ( ( .NOT. ALL (l_T_converged(1:npti)) ) .AND. iconv < iconv_max )",
+        "IF( k_cnd == np_cnd_OFF .OR. k_cnd == np_cnd_EMU )",
+        "DO ji = 1, npti",
+        "IF( .NOT. l_T_converged(ji) )",
+        "DO jk = 1, nlay_i"
+       ]
+      ],
+      "618": [
+       "r",
+       "ztib(:) = t_i_1d(ji,:)",
+       [
+        "DO WHILE ( ( .NOT. ALL (l_T_converged(1:npti)) ) .AND. iconv < iconv_max )",
+        "ELSEIF( k_cnd == np_cnd_ON )",
+        "DO ji = 1, npti",
+        "IF( .NOT. l_T_converged(ji) )"
+       ]
+      ],
+      "719": [
+       "w",
+       "t_i_1d(ji,nlay_i) = zindtbis(jm_max) / zdiagbis(jm_max)",
+       [
+        "DO WHILE ( ( .NOT. ALL (l_T_converged(1:npti)) ) .AND. iconv < iconv_max )",
+        "ELSEIF( k_cnd == np_cnd_ON )",
+        "DO ji = 1, npti",
+        "IF( .NOT. l_T_converged(ji) )"
+       ]
+      ],
+      "723": [
+       "wr",
+       "t_i_1d(ji,jk) = ( zindtbis(jm) - ztrid(jm,3) * t_i_1d(ji,jk+1) ) / zdiagbis(jm)",
+       [
+        "DO WHILE ( ( .NOT. ALL (l_T_converged(1:npti)) ) .AND. iconv < iconv_max )",
+        "ELSEIF( k_cnd == np_cnd_ON )",
+        "DO ji = 1, npti",
+        "IF( .NOT. l_T_converged(ji) )",
+        "DO jm = nlay_i + nlay_s, nlay_s + 2, -1"
+       ]
+      ],
+      "729": [
+       "r",
+       "IF ( h_s_1d(ji) > 0._wp ) t_s_1d(ji,nlay_s) = ( zindtbis(nlay_s+1) - ztrid(nlay_s+1,3) * t_i_1d(ji,1) ) / zdiagbis(nlay_s+1)",
+       [
+        "DO WHILE ( ( .NOT. ALL (l_T_converged(1:npti)) ) .AND. iconv < iconv_max )",
+        "ELSEIF( k_cnd == np_cnd_ON )",
+        "DO ji = 1, npti",
+        "IF( .NOT. l_T_converged(ji) )",
+        "IF( h_s_1d(ji) > 0._wp )"
+       ]
+      ],
+      "754": [
+       "wr",
+       "t_i_1d(ji,jk) = MAX( MIN( t_i_1d(ji,jk), ztmelts ), rt0 - 100._wp )",
+       [
+        "DO WHILE ( ( .NOT. ALL (l_T_converged(1:npti)) ) .AND. iconv < iconv_max )",
+        "ELSEIF( k_cnd == np_cnd_ON )",
+        "DO ji = 1, npti",
+        "IF( .NOT. l_T_converged(ji) )",
+        "DO jk = 1, nlay_i"
+       ]
+      ],
+      "755": [
+       "r",
+       "zdti_max = MAX ( zdti_max, ABS( t_i_1d(ji,jk) - ztib(jk) ) )",
+       [
+        "DO WHILE ( ( .NOT. ALL (l_T_converged(1:npti)) ) .AND. iconv < iconv_max )",
+        "ELSEIF( k_cnd == np_cnd_ON )",
+        "DO ji = 1, npti",
+        "IF( .NOT. l_T_converged(ji) )",
+        "DO jk = 1, nlay_i"
+       ]
+      ],
+      "782": [
+       "r",
+       "qcn_ice_bot_1d(ji) = - zkappa_i(ji,nlay_i) * zg1 * ( t_bo_1d(ji ) - t_i_1d (ji,nlay_i) )",
+       [
+        "IF( k_cnd == np_cnd_OFF .OR. k_cnd == np_cnd_EMU )",
+        "DO ji = 1, npti"
+       ]
+      ],
+      "783": [
+       "r",
+       "qcn_ice_top_1d(ji) = - isnow(ji) * zkappa_s(ji,0) * zg1s * ( t_s_1d(ji,1) - t_su_1d(ji) ) - ( 1._wp - isnow(ji) ) * zkappa_i(ji,0) * zg1 * ( t_i_1d(ji,1) - t_su_1d(ji) )",
+       [
+        "IF( k_cnd == np_cnd_OFF .OR. k_cnd == np_cnd_EMU )",
+        "DO ji = 1, npti"
+       ]
+      ],
+      "793": [
+       "r",
+       "qcn_ice_bot_1d(ji) = - zkappa_i(ji,nlay_i) * zg1 * ( t_bo_1d(ji ) - t_i_1d (ji,nlay_i) )",
+       [
+        "ELSEIF( k_cnd == np_cnd_ON )",
+        "DO ji = 1, npti"
+       ]
+      ],
+      "800": [
+       "r",
+       "t_su_1d(ji) = ( qcn_ice_top_1d(ji) + isnow(ji) * zkappa_s(ji,0) * zg1s * t_s_1d(ji,1) + ( 1._wp - isnow(ji) ) * zkappa_i(ji,0) * zg1 * t_i_1d(ji,1) ) / MAX( epsi10, isnow(ji) * zkappa_s(ji,0) * zg1s + ( 1._wp - isnow(ji) ) * zkappa_i(ji,0) * zg1 )",
+       [
+        "ELSEIF( k_cnd == np_cnd_ON )",
+        "IF( ln_cndemulate )",
+        "DO ji = 1, npti"
+       ]
+      ],
+      "859": [
+       "r",
+       "t1_ice_1d(ji) = isnow(ji) * t_s_1d(ji,1) + ( 1._wp - isnow(ji) ) * t_i_1d(ji,1)",
+       [
+        "DO ji = 1, npti"
+       ]
+      ],
+      "865": [
+       "w",
+       "t_i_1d (1:npti,:) = ztiold (1:npti,:)",
+       [
+        "IF( k_cnd == np_cnd_EMU )"
+       ]
+      ],
+      "872": [
+       "r",
+       "t_si_1d(ji) = ( rcnd_s * h_i_1d(ji) * r1_nlay_i * t_s_1d(ji,nlay_s) + ztcond_i(ji,1) * h_s_1d(ji) * r1_nlay_s * t_i_1d(ji,1) ) / ( rcnd_s * h_i_1d(ji) * r1_nlay_i + ztcond_i(ji,1) * h_s_1d(ji) * r1_nlay_s )",
+       [
+        "DO ji = 1, npti",
+        "IF( h_s_1d(ji) >= zhs_ssl )"
+       ]
+      ]
+     },
+     "zdti_max": {
+      "575": [
+       "w",
+       "zdti_max = 0._wp",
+       [
+        "DO WHILE ( ( .NOT. ALL (l_T_converged(1:npti)) ) .AND. iconv < iconv_max )",
+        "IF( k_cnd == np_cnd_OFF .OR. k_cnd == np_cnd_EMU )",
+        "DO ji = 1, npti",
+        "IF( .NOT. l_T_converged(ji) )"
+       ]
+      ],
+      "578": [
+       "wr",
+       "zdti_max = MAX( zdti_max, ABS( t_su_1d(ji) - ztsub(ji) ) )",
+       [
+        "DO WHILE ( ( .NOT. ALL (l_T_converged(1:npti)) ) .AND. iconv < iconv_max )",
+        "IF( k_cnd == np_cnd_OFF .OR. k_cnd == np_cnd_EMU )",
+        "DO ji = 1, npti",
+        "IF( .NOT. l_T_converged(ji) )"
+       ]
+      ],
+      "583": [
+       "wr",
+       "zdti_max = MAX ( zdti_max , ABS( t_s_1d(ji,jk) - ztsb(jk) ) )",
+       [
+        "DO WHILE ( ( .NOT. ALL (l_T_converged(1:npti)) ) .AND. iconv < iconv_max )",
+        "IF( k_cnd == np_cnd_OFF .OR. k_cnd == np_cnd_EMU )",
+        "DO ji = 1, npti",
+        "IF( .NOT. l_T_converged(ji) )",
+        "IF( h_s_1d(ji) > 0._wp )",
+        "DO jk = 1, nlay_s"
+       ]
+      ],
+      "590": [
+       "wr",
+       "zdti_max = MAX( zdti_max, ABS( t_i_1d(ji,jk) - ztib(jk) ) )",
+       [
+        "DO WHILE ( ( .NOT. ALL (l_T_converged(1:npti)) ) .AND. iconv < iconv_max )",
+        "IF( k_cnd == np_cnd_OFF .OR. k_cnd == np_cnd_EMU )",
+        "DO ji = 1, npti",
+        "IF( .NOT. l_T_converged(ji) )",
+        "DO jk = 1, nlay_i"
+       ]
+      ],
+      "595": [
+       "r",
+       "tice_cvgerr_1d(ji) = zdti_max",
+       [
+        "DO WHILE ( ( .NOT. ALL (l_T_converged(1:npti)) ) .AND. iconv < iconv_max )",
+        "IF( k_cnd == np_cnd_OFF .OR. k_cnd == np_cnd_EMU )",
+        "DO ji = 1, npti",
+        "IF( .NOT. l_T_converged(ji) )",
+        "IF( ln_zdf_chkcvg )"
+       ]
+      ],
+      "599": [
+       "r",
+       "IF( zdti_max < zdti_bnd ) l_T_converged(ji) = .TRUE.",
+       [
+        "DO WHILE ( ( .NOT. ALL (l_T_converged(1:npti)) ) .AND. iconv < iconv_max )",
+        "IF( k_cnd == np_cnd_OFF .OR. k_cnd == np_cnd_EMU )",
+        "DO ji = 1, npti",
+        "IF( .NOT. l_T_converged(ji) )",
+        "IF( zdti_max < zdti_bnd )"
+       ]
+      ],
+      "743": [
+       "w",
+       "zdti_max = 0._wp",
+       [
+        "DO WHILE ( ( .NOT. ALL (l_T_converged(1:npti)) ) .AND. iconv < iconv_max )",
+        "ELSEIF( k_cnd == np_cnd_ON )",
+        "DO ji = 1, npti",
+        "IF( .NOT. l_T_converged(ji) )"
+       ]
+      ],
+      "748": [
+       "wr",
+       "zdti_max = MAX ( zdti_max , ABS( t_s_1d(ji,jk) - ztsb(jk) ) )",
+       [
+        "DO WHILE ( ( .NOT. ALL (l_T_converged(1:npti)) ) .AND. iconv < iconv_max )",
+        "ELSEIF( k_cnd == np_cnd_ON )",
+        "DO ji = 1, npti",
+        "IF( .NOT. l_T_converged(ji) )",
+        "IF( h_s_1d(ji) > 0._wp )",
+        "DO jk = 1, nlay_s"
+       ]
+      ],
+      "755": [
+       "wr",
+       "zdti_max = MAX ( zdti_max, ABS( t_i_1d(ji,jk) - ztib(jk) ) )",
+       [
+        "DO WHILE ( ( .NOT. ALL (l_T_converged(1:npti)) ) .AND. iconv < iconv_max )",
+        "ELSEIF( k_cnd == np_cnd_ON )",
+        "DO ji = 1, npti",
+        "IF( .NOT. l_T_converged(ji) )",
+        "DO jk = 1, nlay_i"
+       ]
+      ],
+      "760": [
+       "r",
+       "tice_cvgerr_1d(ji) = zdti_max",
+       [
+        "DO WHILE ( ( .NOT. ALL (l_T_converged(1:npti)) ) .AND. iconv < iconv_max )",
+        "ELSEIF( k_cnd == np_cnd_ON )",
+        "DO ji = 1, npti",
+        "IF( .NOT. l_T_converged(ji) )",
+        "IF( ln_zdf_chkcvg )"
+       ]
+      ],
+      "764": [
+       "r",
+       "IF( zdti_max < zdti_bnd ) l_T_converged(ji) = .TRUE.",
+       [
+        "DO WHILE ( ( .NOT. ALL (l_T_converged(1:npti)) ) .AND. iconv < iconv_max )",
+        "ELSEIF( k_cnd == np_cnd_ON )",
+        "DO ji = 1, npti",
+        "IF( .NOT. l_T_converged(ji) )",
+        "IF( zdti_max < zdti_bnd )"
+       ]
+      ]
+     }
+    }
+   },
    "instructions_without_token": [],
    "ppsrc_sha256": "67ace0d7db76f40f1f64930551870da8751a1d553b8b69d59d83aa25ca64411a",
    "record_object_sha256": "242addb5df963ffbd125bf02ef97fc913acb0be3dcb611c387a98bffdaf4f7e2",
@@ -682,6 +2876,10 @@
    "sign_tokens": [],
    "sites": {
     "173": {
+     "enclosing": [
+      "DO ji = 1, npti",
+      "IF( h_i_1d(ji) > 0._wp )"
+     ],
      "instructions": [
       {
        "count": 1,
@@ -696,6 +2894,10 @@
      ]
     },
     "181": {
+     "enclosing": [
+      "DO ji = 1, npti",
+      "IF( h_s_1d(ji) > 0._wp )"
+     ],
      "instructions": [
       {
        "count": 1,
@@ -710,6 +2912,9 @@
      ]
     },
     "202": {
+     "enclosing": [
+      "IF( k_cnd == np_cnd_OFF .OR. k_cnd == np_cnd_EMU )"
+     ],
      "instructions": [
       {
        "count": 15,
@@ -726,6 +2931,10 @@
      ]
     },
     "219": {
+     "enclosing": [
+      "DO jk = 1, nlay_s",
+      "DO ji = 1, npti"
+     ],
      "instructions": [
       {
        "count": 7,
@@ -740,6 +2949,10 @@
      ]
     },
     "229": {
+     "enclosing": [
+      "DO jk = 1, nlay_i",
+      "DO ji = 1, npti"
+     ],
      "instructions": [
       {
        "count": 6,
@@ -755,6 +2968,11 @@
      ]
     },
     "261": {
+     "enclosing": [
+      "DO WHILE ( ( .NOT. ALL (l_T_converged(1:npti)) ) .AND. iconv < iconv_max )",
+      "IF( ln_cndi_U64 )",
+      "DO ji = 1, npti"
+     ],
      "instructions": [
       {
        "count": 7,
@@ -769,6 +2987,11 @@
      ]
     },
     "262": {
+     "enclosing": [
+      "DO WHILE ( ( .NOT. ALL (l_T_converged(1:npti)) ) .AND. iconv < iconv_max )",
+      "IF( ln_cndi_U64 )",
+      "DO ji = 1, npti"
+     ],
      "instructions": [
       {
        "count": 7,
@@ -783,6 +3006,12 @@
      ]
     },
     "266": {
+     "enclosing": [
+      "DO WHILE ( ( .NOT. ALL (l_T_converged(1:npti)) ) .AND. iconv < iconv_max )",
+      "IF( ln_cndi_U64 )",
+      "DO jk = 1, nlay_i-1",
+      "DO ji = 1, npti"
+     ],
      "instructions": [
       {
        "count": 7,
@@ -797,6 +3026,11 @@
      ]
     },
     "274": {
+     "enclosing": [
+      "DO WHILE ( ( .NOT. ALL (l_T_converged(1:npti)) ) .AND. iconv < iconv_max )",
+      "ELSEIF( ln_cndi_P07 )",
+      "DO ji = 1, npti"
+     ],
      "instructions": [
       {
        "count": 3,
@@ -811,6 +3045,11 @@
      ]
     },
     "276": {
+     "enclosing": [
+      "DO WHILE ( ( .NOT. ALL (l_T_converged(1:npti)) ) .AND. iconv < iconv_max )",
+      "ELSEIF( ln_cndi_P07 )",
+      "DO ji = 1, npti"
+     ],
      "instructions": [
       {
        "count": 3,
@@ -825,6 +3064,12 @@
      ]
     },
     "281": {
+     "enclosing": [
+      "DO WHILE ( ( .NOT. ALL (l_T_converged(1:npti)) ) .AND. iconv < iconv_max )",
+      "ELSEIF( ln_cndi_P07 )",
+      "DO jk = 1, nlay_i-1",
+      "DO ji = 1, npti"
+     ],
      "instructions": [
       {
        "count": 7,
@@ -839,6 +3084,11 @@
      ]
     },
     "292": {
+     "enclosing": [
+      "DO WHILE ( ( .NOT. ALL (l_T_converged(1:npti)) ) .AND. iconv < iconv_max )",
+      "DO ji = 1, npti",
+      "IF( .NOT. l_T_converged(ji) )"
+     ],
      "instructions": [
       {
        "count": 15,
@@ -853,6 +3103,13 @@
      ]
     },
     "309": {
+     "enclosing": [
+      "DO WHILE ( ( .NOT. ALL (l_T_converged(1:npti)) ) .AND. iconv < iconv_max )",
+      "IF( ln_virtual_itd )",
+      "DO ji = 1, npti",
+      "IF( .NOT. l_T_converged(ji) )",
+      "IF( zhe >= zepsilon * 0.5_wp * EXP(1._wp) )"
+     ],
      "instructions": [
       {
        "count": 1,
@@ -867,6 +3124,12 @@
      ]
     },
     "353": {
+     "enclosing": [
+      "DO WHILE ( ( .NOT. ALL (l_T_converged(1:npti)) ) .AND. iconv < iconv_max )",
+      "DO jk = 1, nlay_i",
+      "DO ji = 1, npti",
+      "IF( .NOT. l_T_converged(ji) )"
+     ],
      "instructions": [
       {
        "count": 7,
@@ -881,6 +3144,12 @@
      ]
     },
     "577": {
+     "enclosing": [
+      "DO WHILE ( ( .NOT. ALL (l_T_converged(1:npti)) ) .AND. iconv < iconv_max )",
+      "IF( k_cnd == np_cnd_OFF .OR. k_cnd == np_cnd_EMU )",
+      "DO ji = 1, npti",
+      "IF( .NOT. l_T_converged(ji) )"
+     ],
      "instructions": [
       {
        "count": 1,
@@ -906,6 +3175,14 @@
      ]
     },
     "582": {
+     "enclosing": [
+      "DO WHILE ( ( .NOT. ALL (l_T_converged(1:npti)) ) .AND. iconv < iconv_max )",
+      "IF( k_cnd == np_cnd_OFF .OR. k_cnd == np_cnd_EMU )",
+      "DO ji = 1, npti",
+      "IF( .NOT. l_T_converged(ji) )",
+      "IF( h_s_1d(ji) > 0._wp )",
+      "DO jk = 1, nlay_s"
+     ],
      "instructions": [
       {
        "count": 15,
@@ -931,6 +3208,14 @@
      ]
     },
     "583": {
+     "enclosing": [
+      "DO WHILE ( ( .NOT. ALL (l_T_converged(1:npti)) ) .AND. iconv < iconv_max )",
+      "IF( k_cnd == np_cnd_OFF .OR. k_cnd == np_cnd_EMU )",
+      "DO ji = 1, npti",
+      "IF( .NOT. l_T_converged(ji) )",
+      "IF( h_s_1d(ji) > 0._wp )",
+      "DO jk = 1, nlay_s"
+     ],
      "instructions": [
       {
        "count": 1,
@@ -963,6 +3248,13 @@
      ]
     },
     "589": {
+     "enclosing": [
+      "DO WHILE ( ( .NOT. ALL (l_T_converged(1:npti)) ) .AND. iconv < iconv_max )",
+      "IF( k_cnd == np_cnd_OFF .OR. k_cnd == np_cnd_EMU )",
+      "DO ji = 1, npti",
+      "IF( .NOT. l_T_converged(ji) )",
+      "DO jk = 1, nlay_i"
+     ],
      "instructions": [
       {
        "count": 7,
@@ -988,6 +3280,13 @@
      ]
     },
     "590": {
+     "enclosing": [
+      "DO WHILE ( ( .NOT. ALL (l_T_converged(1:npti)) ) .AND. iconv < iconv_max )",
+      "IF( k_cnd == np_cnd_OFF .OR. k_cnd == np_cnd_EMU )",
+      "DO ji = 1, npti",
+      "IF( .NOT. l_T_converged(ji) )",
+      "DO jk = 1, nlay_i"
+     ],
      "instructions": [
       {
        "count": 1,
@@ -1028,6 +3327,14 @@
      ]
     },
     "747": {
+     "enclosing": [
+      "DO WHILE ( ( .NOT. ALL (l_T_converged(1:npti)) ) .AND. iconv < iconv_max )",
+      "ELSEIF( k_cnd == np_cnd_ON )",
+      "DO ji = 1, npti",
+      "IF( .NOT. l_T_converged(ji) )",
+      "IF( h_s_1d(ji) > 0._wp )",
+      "DO jk = 1, nlay_s"
+     ],
      "instructions": [
       {
        "count": 15,
@@ -1053,6 +3360,14 @@
      ]
     },
     "748": {
+     "enclosing": [
+      "DO WHILE ( ( .NOT. ALL (l_T_converged(1:npti)) ) .AND. iconv < iconv_max )",
+      "ELSEIF( k_cnd == np_cnd_ON )",
+      "DO ji = 1, npti",
+      "IF( .NOT. l_T_converged(ji) )",
+      "IF( h_s_1d(ji) > 0._wp )",
+      "DO jk = 1, nlay_s"
+     ],
      "instructions": [
       {
        "count": 7,
@@ -1081,6 +3396,13 @@
      ]
     },
     "754": {
+     "enclosing": [
+      "DO WHILE ( ( .NOT. ALL (l_T_converged(1:npti)) ) .AND. iconv < iconv_max )",
+      "ELSEIF( k_cnd == np_cnd_ON )",
+      "DO ji = 1, npti",
+      "IF( .NOT. l_T_converged(ji) )",
+      "DO jk = 1, nlay_i"
+     ],
      "instructions": [
       {
        "count": 8,
@@ -1106,6 +3428,13 @@
      ]
     },
     "755": {
+     "enclosing": [
+      "DO WHILE ( ( .NOT. ALL (l_T_converged(1:npti)) ) .AND. iconv < iconv_max )",
+      "ELSEIF( k_cnd == np_cnd_ON )",
+      "DO ji = 1, npti",
+      "IF( .NOT. l_T_converged(ji) )",
+      "DO jk = 1, nlay_i"
+     ],
      "instructions": [
       {
        "count": 1,
@@ -1136,6 +3465,11 @@
      ]
     },
     "800": {
+     "enclosing": [
+      "ELSEIF( k_cnd == np_cnd_ON )",
+      "IF( ln_cndemulate )",
+      "DO ji = 1, npti"
+     ],
      "instructions": [
       {
        "count": 7,
@@ -1150,6 +3484,11 @@
      ]
     },
     "803": {
+     "enclosing": [
+      "ELSEIF( k_cnd == np_cnd_ON )",
+      "IF( ln_cndemulate )",
+      "DO ji = 1, npti"
+     ],
      "instructions": [
       {
        "count": 7,
@@ -1185,6 +3524,86 @@
    }
   },
   "icevar": {
+   "census": {
+    "ice_var_enthalpy": {
+     "t_i_1d": {
+      "955": [
+       "wr",
+       "t_i_1d(ji,jk) = MIN( t_i_1d(ji,jk), ztmelts + rt0 )",
+       [
+        "DO jk = 1, nlay_i",
+        "DO ji = 1, npti"
+       ]
+      ],
+      "957": [
+       "r",
+       "e_i_1d(ji,jk) = rhoi * ( rcpi * ( ztmelts - ( t_i_1d(ji,jk) - rt0 ) ) + rLfus * MAX( 0._wp, 1._wp - ztmelts / MIN( t_i_1d(ji,jk) - rt0, -epsi10 ) ) - rcp * ztmelts )",
+       [
+        "DO jk = 1, nlay_i",
+        "DO ji = 1, npti"
+       ]
+      ]
+     }
+    },
+    "ice_var_vremap": {
+     "zts_cum0": {
+      "1010": [
+       "w",
+       "zts_cum0(0) = 0._wp",
+       []
+      ],
+      "1013": [
+       "wr",
+       "zts_cum0(jk0) = zts_cum0(jk0-1) + pts_old(jk0-1)",
+       [
+        "DO jk0 = 1, nlay_i+2"
+       ]
+      ],
+      "1034": [
+       "r",
+       "zts_cum1(jk1) = ( zts_cum0(jk0-1) * ( zh_cum0(jk0) - zh_cum1(jk1 ) ) + zts_cum0(jk0 ) * ( zh_cum1(jk1) - zh_cum0(jk0-1) ) ) / ( zh_cum0(jk0) - zh_cum0(jk0-1) )",
+       [
+        "DO jk0 = 1, nlay_i+2",
+        "DO jk1 = 1, nlay_i-1",
+        "IF( zh_cum1(jk1) <= zh_cum0(jk0) .AND. zh_cum1(jk1) > zh_cum0(jk0-1) )"
+       ]
+      ],
+      "1041": [
+       "r",
+       "zts_cum1(nlay_i) = zts_cum0(nlay_i+2)",
+       []
+      ]
+     },
+     "zts_cum1": {
+      "1029": [
+       "w",
+       "zts_cum1(0:nlay_i) = 0._wp",
+       []
+      ],
+      "1034": [
+       "w",
+       "zts_cum1(jk1) = ( zts_cum0(jk0-1) * ( zh_cum0(jk0) - zh_cum1(jk1 ) ) + zts_cum0(jk0 ) * ( zh_cum1(jk1) - zh_cum0(jk0-1) ) ) / ( zh_cum0(jk0) - zh_cum0(jk0-1) )",
+       [
+        "DO jk0 = 1, nlay_i+2",
+        "DO jk1 = 1, nlay_i-1",
+        "IF( zh_cum1(jk1) <= zh_cum0(jk0) .AND. zh_cum1(jk1) > zh_cum0(jk0-1) )"
+       ]
+      ],
+      "1041": [
+       "w",
+       "zts_cum1(nlay_i) = zts_cum0(nlay_i+2)",
+       []
+      ],
+      "1045": [
+       "r",
+       "pts_i(jk1) = MAX( 0._wp, zts_cum1(jk1) - zts_cum1(jk1-1) ) / MAX( zhnew, epsi20 )",
+       [
+        "DO jk1 = 1, nlay_i"
+       ]
+      ]
+     }
+    }
+   },
    "instructions_without_token": [],
    "ppsrc_sha256": "069d3750b10bd98d88884162b8b0038b9b179ff9a8e714e411dda785e883db27",
    "record_object_sha256": "622e41afadb32a2d865309b997655006186d62554a293fd298859b0947b7d613",
@@ -1205,6 +3624,9 @@
    "sign_tokens": [],
    "sites": {
     "1045": {
+     "enclosing": [
+      "DO jk1 = 1, nlay_i"
+     ],
      "instructions": [
       {
        "count": 2,
@@ -1226,6 +3648,10 @@
      ]
     },
     "955": {
+     "enclosing": [
+      "DO jk = 1, nlay_i",
+      "DO ji = 1, npti"
+     ],
      "instructions": [
       {
        "count": 3,
@@ -1242,6 +3668,10 @@
      ]
     },
     "957": {
+     "enclosing": [
+      "DO jk = 1, nlay_i",
+      "DO ji = 1, npti"
+     ],
      "instructions": [
       {
        "count": 3,
@@ -1264,6 +3694,1652 @@
     }
    },
    "token_statements_without_instruction": {}
+  }
+ },
+ "tie_lemmas": {
+  "L0": "Only differently-signed zeros (or a NaN) tie with a visible survivor: equal nonzero doubles are bit-identical.  Deck values are finite (NaN ties out of scope); results that need a subnormal operand or an underflow are under the stated D5 platform floor (XLA CPU flushes subnormals).",
+  "L1": "maxsd/minsd with ZERO as src return +0 on a tie and otherwise the strictly winning VAR or +0: the result of a ZERO-src site is never -0 (and a MAX(0,.) result is >= +0).",
+  "L2": "Round to nearest: a+b = -0 only if a = b = -0; a-b = -0 only if a = -0 and b = +0; a*b and a/b are -0 only with a zero operand of the other sign, or by underflow (subnormal scale, L0).",
+  "L3": "EXP(+0) = EXP(-0) = 1 exactly; a comparison does not see the sign of a zero; MIN(0, x) with ZERO src is +0 for x = +0 and x = -0."
+ },
+ "tie_verdicts": {
+  "dh:128": {
+   "facts": [
+    [
+     "src_zero",
+     "dh:128"
+    ],
+    [
+     "uses",
+     "ice_thd_dh",
+     "zq_top",
+     [
+      128,
+      219,
+      221,
+      229,
+      268,
+      274
+     ]
+    ],
+    [
+     "uses",
+     "ice_thd_dh",
+     "zfmdt",
+     [
+      253,
+      257,
+      268,
+      270,
+      278,
+      280,
+      282,
+      283,
+      358,
+      360,
+      361,
+      392,
+      394,
+      405,
+      407,
+      415,
+      417,
+      419,
+      420,
+      462,
+      464,
+      466,
+      467,
+      471,
+      484,
+      486
+     ]
+    ],
+    [
+     "encl",
+     "dh:274",
+     "ELSE of IF( t_i_1d(ji,jk) >= (ztmelts+rt0) )"
+    ],
+    [
+     "encl",
+     "dh:229",
+     "IF( zh_s(jk) > 0._wp .AND. zq_top > 0._wp )"
+    ],
+    [
+     "src_zero",
+     "dh:272.min"
+    ],
+    [
+     "src_zero",
+     "dh:274"
+    ],
+    [
+     "flip"
+    ]
+   ],
+   "proof": "A zero zq_top keeps its sign only until the next surface layer that does not melt internally: there zdum = -(zq_top/zdE)*r1_rhoi is a zero (or the same 0/0 default NaN), MIN(0, MAX(zdum, -zh_i)) returns +0 for either sign (L3, dh:272.min ZERO src) and MAX(0, zq_top - (+0)*rhoi*zdE) returns +0 (L1).  zfmdt of 268 is read only at 270; the internal-melt arm and the snow loop (only under zq_top > 0, L3) do not see the sign; zq_top is dead after the layer loop.",
+   "verdict": "MASKED"
+  },
+  "dh:130": {
+   "facts": [
+    [
+     "src_zero",
+     "dh:130"
+    ],
+    [
+     "tie_masked"
+    ],
+    [
+     "uses",
+     "ice_thd_dh",
+     "zq_bot",
+     [
+      130,
+      405,
+      411
+     ]
+    ],
+    [
+     "encl",
+     "dh:411",
+     "ELSE of IF( t_i_1d(ji,jk) >= (ztmelts+rt0) )"
+    ],
+    [
+     "src_zero",
+     "dh:409.min"
+    ],
+    [
+     "src_zero",
+     "dh:411"
+    ],
+    [
+     "flip"
+    ]
+   ],
+   "proof": "Same algebra as zq_top at 405/407/409/411 (dh:409.min ZERO src): a zero zq_bot gives +0 from the first basal non-internal-melt layer on, and is dead after the loop.",
+   "verdict": "MASKED"
+  },
+  "dh:170": {
+   "facts": [
+    [
+     "src_zero",
+     "dh:170"
+    ],
+    [
+     "writes",
+     "ice_thd_dh",
+     "h_s_1d",
+     [
+      170,
+      186,
+      206,
+      230,
+      445,
+      459,
+      539
+     ]
+    ],
+    [
+     "writes",
+     "ice_thd_dh",
+     "zh_s",
+     [
+      150,
+      153,
+      171,
+      179,
+      207,
+      231,
+      447,
+      491
+     ]
+    ]
+   ],
+   "proof": "VAR = h_s_1d - zh_s(jk) is -0 only if h_s_1d = -0 and zh_s(jk) = +0 (L2).  170 is h_s_1d's first write, so h_s_1d is the entry value or an earlier 170 result (never -0, L1); zh_s(jk) is still h_s_entry*r1_nlay_s (153; 171 follows), which is -0 when h_s_entry is.",
+   "verdict": "NO_TIE"
+  },
+  "dh:180": {
+   "facts": [
+    [
+     "found"
+    ]
+   ],
+   "proof": "Tie cell committed; survivor test.",
+   "verdict": "FOUND"
+  },
+  "dh:194": {
+   "facts": [
+    [
+     "found"
+    ],
+    [
+     "roles"
+    ]
+   ],
+   "proof": "Tie cell committed; survivor test.",
+   "verdict": "FOUND"
+  },
+  "dh:200": {
+   "facts": [
+    [
+     "found"
+    ],
+    [
+     "roles"
+    ]
+   ],
+   "proof": "Tie cell committed; survivor test.",
+   "verdict": "FOUND"
+  },
+  "dh:206": {
+   "facts": [
+    [
+     "src_zero",
+     "dh:206"
+    ],
+    [
+     "writes",
+     "ice_thd_dh",
+     "h_s_1d",
+     [
+      170,
+      186,
+      206,
+      230,
+      445,
+      459,
+      539
+     ]
+    ],
+    [
+     "writes",
+     "ice_thd_dh",
+     "zh_s",
+     [
+      150,
+      153,
+      171,
+      179,
+      207,
+      231,
+      447,
+      491
+     ]
+    ],
+    [
+     "writes",
+     "ice_thd_dh",
+     "zdeltah",
+     [
+      194,
+      211,
+      481,
+      494
+     ]
+    ],
+    [
+     "roles_of",
+     "dh:194"
+    ],
+    [
+     "roles_of",
+     "dh:200"
+    ],
+    [
+     "encl_only_do",
+     "dh:206"
+    ]
+   ],
+   "proof": "VAR = h_s_1d + zdum is -0 only if both are -0 (L2).  For jk >= 1 h_s_1d is the previous 206 result (never -0, L1).  For jk = 0 h_s_1d = -0 only if it is the -0 entry value with neither 170 nor 186 run (186 adds zh_s(0) != -0). zh_s(0) is +0 (150) or, under sprecip > 0, zsnw*sprecip*rDt*r1_rhos/at_i (179) with zsnw = 1 - (1-at_i)**rn_snwblow and at_i in (0, 1]: >= +0 and never -0 (L2).  Then zh_s(0) = +0, zdeltah = -MIN(A, h_s_1d) with the tie returning src h_s_1d = -0 (dh:194 roles) is >= +0, and zdum = MAX(-0, zdeltah) returns src zdeltah (dh:200 roles) on a tie: never -0.",
+   "verdict": "NO_TIE"
+  },
+  "dh:207": {
+   "facts": [
+    [
+     "src_zero",
+     "dh:207"
+    ],
+    [
+     "src_zero",
+     "dh:211"
+    ],
+    [
+     "writes",
+     "ice_thd_dh",
+     "zh_s",
+     [
+      150,
+      153,
+      171,
+      179,
+      207,
+      231,
+      447,
+      491
+     ]
+    ],
+    [
+     "writes",
+     "ice_thd_dh",
+     "zdeltah",
+     [
+      194,
+      211,
+      481,
+      494
+     ]
+    ],
+    [
+     "encl_only_do",
+     "dh:207"
+    ]
+   ],
+   "proof": "VAR = zh_s(jk) + zdum is -0 only if both are -0 (L2). zh_s(0) is +0 (150) or, under sprecip > 0, zsnw*sprecip*rDt*r1_rhos/at_i (179) with zsnw = 1 - (1-at_i)**rn_snwblow and at_i in (0, 1]: >= +0 and never -0 (L2).  For jk >= 1, if zh_s(jk) = -0 then zdum = MAX(-zh_s(jk), zdeltah) has operands +0 and zdeltah, a 211 result (ZERO src, never -0, L1): zdum is never -0.",
+   "verdict": "NO_TIE"
+  },
+  "dh:211": {
+   "facts": [
+    [
+     "src_zero",
+     "dh:211"
+    ],
+    [
+     "writes",
+     "ice_thd_dh",
+     "zh_s",
+     [
+      150,
+      153,
+      171,
+      179,
+      207,
+      231,
+      447,
+      491
+     ]
+    ],
+    [
+     "writes",
+     "ice_thd_dh",
+     "zdeltah",
+     [
+      194,
+      211,
+      481,
+      494
+     ]
+    ],
+    [
+     "roles_of",
+     "dh:200"
+    ]
+   ],
+   "proof": "VAR = zdeltah - zdum is -0 only if zdeltah = -0 and zdum = +0 (L2).  For jk >= 1 zdeltah is the previous 211 result (never -0, L1).  For jk = 0, zdeltah = -0 gives zdum = MAX(-zh_s(0), -0) with -zh_s(0) in {-0, negative} (zh_s(0) >= +0, never -0), which is -0, not +0.",
+   "verdict": "NO_TIE"
+  },
+  "dh:221": {
+   "facts": [
+    [
+     "const",
+     "dh:221"
+    ]
+   ],
+   "proof": "One operand is the nonzero constant epsi20 (L0).",
+   "verdict": "NO_TIE"
+  },
+  "dh:228": {
+   "facts": [
+    [
+     "roles"
+    ],
+    [
+     "encl",
+     "dh:228",
+     "IF( zh_s(jk) > 0._wp .AND. zq_top > 0._wp )"
+    ],
+    [
+     "writes",
+     "ice_thd_dh",
+     "zh_s",
+     [
+      150,
+      153,
+      171,
+      179,
+      207,
+      231,
+      447,
+      491
+     ]
+    ]
+   ],
+   "proof": "Emitted MIN(zq_top/MAX(ze_s,epsi20), zh_s(jk)) of statement 222: zh_s(jk) (src, loaded at 219) is > 0 under the enclosing IF and unwritten until 231, so equal operands are bit-identical (L0).",
+   "verdict": "NO_TIE"
+  },
+  "dh:229": {
+   "facts": [
+    [
+     "src_zero",
+     "dh:229"
+    ],
+    [
+     "encl",
+     "dh:229",
+     "IF( zh_s(jk) > 0._wp .AND. zq_top > 0._wp )"
+    ],
+    [
+     "writes",
+     "ice_thd_dh",
+     "zq_top",
+     [
+      128,
+      229,
+      274
+     ]
+    ]
+   ],
+   "proof": "Under the enclosing IF zq_top > 0, unwritten between 219 and 229: VAR = zq_top + zdum*ze_s(jk) has a positive addend and is never -0 (L2).",
+   "verdict": "NO_TIE"
+  },
+  "dh:230": {
+   "facts": [
+    [
+     "src_zero",
+     "dh:230"
+    ],
+    [
+     "writes",
+     "ice_thd_dh",
+     "h_s_1d",
+     [
+      170,
+      186,
+      206,
+      230,
+      445,
+      459,
+      539
+     ]
+    ],
+    [
+     "encl_only_do",
+     "dh:206"
+    ]
+   ],
+   "proof": "h_s_1d was last written by 206 (in the unconditional DO jk = 0, nlay_s, after 170/186) or by an earlier 230: never -0 (L1), so VAR = h_s_1d + zdum is never -0 (L2).",
+   "verdict": "NO_TIE"
+  },
+  "dh:231": {
+   "facts": [
+    [
+     "src_zero",
+     "dh:231"
+    ],
+    [
+     "encl",
+     "dh:231",
+     "IF( zh_s(jk) > 0._wp .AND. zq_top > 0._wp )"
+    ],
+    [
+     "writes",
+     "ice_thd_dh",
+     "zh_s",
+     [
+      150,
+      153,
+      171,
+      179,
+      207,
+      231,
+      447,
+      491
+     ]
+    ]
+   ],
+   "proof": "zh_s(jk) > 0 under the enclosing IF and unwritten between 219 and 231: VAR = zh_s(jk) + zdum is never -0 (L2).",
+   "verdict": "NO_TIE"
+  },
+  "dh:251": {
+   "facts": [
+    [
+     "found"
+    ]
+   ],
+   "proof": "Tie cell committed; survivor test.",
+   "verdict": "FOUND"
+  },
+  "dh:272.max": {
+   "facts": [
+    [
+     "roles"
+    ],
+    [
+     "tie_masked"
+    ],
+    [
+     "src_zero",
+     "dh:272.min"
+    ],
+    [
+     "flip"
+    ]
+   ],
+   "proof": "The MAX result is consumed only by the enclosing MIN(0._wp, .) of the same statement, whose ZERO src returns +0 for either zero sign (L3).",
+   "verdict": "MASKED"
+  },
+  "dh:272.min": {
+   "facts": [
+    [
+     "found"
+    ]
+   ],
+   "proof": "Tie cell committed; survivor test.",
+   "verdict": "FOUND"
+  },
+  "dh:274": {
+   "facts": [
+    [
+     "uses",
+     "ice_thd_dh",
+     "zq_top",
+     [
+      128,
+      219,
+      221,
+      229,
+      268,
+      274
+     ]
+    ],
+    [
+     "uses",
+     "ice_thd_dh",
+     "zfmdt",
+     [
+      253,
+      257,
+      268,
+      270,
+      278,
+      280,
+      282,
+      283,
+      358,
+      360,
+      361,
+      392,
+      394,
+      405,
+      407,
+      415,
+      417,
+      419,
+      420,
+      462,
+      464,
+      466,
+      467,
+      471,
+      484,
+      486
+     ]
+    ],
+    [
+     "encl",
+     "dh:274",
+     "ELSE of IF( t_i_1d(ji,jk) >= (ztmelts+rt0) )"
+    ],
+    [
+     "encl",
+     "dh:229",
+     "IF( zh_s(jk) > 0._wp .AND. zq_top > 0._wp )"
+    ],
+    [
+     "src_zero",
+     "dh:272.min"
+    ],
+    [
+     "src_zero",
+     "dh:274"
+    ],
+    [
+     "flip"
+    ]
+   ],
+   "proof": "A zero zq_top keeps its sign only until the next surface layer that does not melt internally: there zdum = -(zq_top/zdE)*r1_rhoi is a zero (or the same 0/0 default NaN), MIN(0, MAX(zdum, -zh_i)) returns +0 for either sign (L3, dh:272.min ZERO src) and MAX(0, zq_top - (+0)*rhoi*zdE) returns +0 (L1).  zfmdt of 268 is read only at 270; the internal-melt arm and the snow loop (only under zq_top > 0, L3) do not see the sign; zq_top is dead after the layer loop.",
+   "verdict": "MASKED"
+  },
+  "dh:289": {
+   "facts": [
+    [
+     "src_zero",
+     "dh:289"
+    ],
+    [
+     "writes",
+     "ice_thd_dh",
+     "zdum",
+     [
+      200,
+      221,
+      222,
+      251,
+      270,
+      272,
+      300,
+      388,
+      407,
+      409,
+      490
+     ]
+    ],
+    [
+     "encl",
+     "dh:251",
+     "IF( t_i_1d(ji,jk) >= (ztmelts+rt0) )"
+    ],
+    [
+     "src_zero",
+     "dh:251"
+    ],
+    [
+     "src_zero",
+     "dh:272.min"
+    ]
+   ],
+   "proof": "zdum was last written by 251 (internal-melt arm) or 272 (other arm), both MIN(0, .) with ZERO src: never -0 (L1), so VAR = zh_i(jk) + zdum is never -0 (L2).",
+   "verdict": "NO_TIE"
+  },
+  "dh:290": {
+   "facts": [
+    [
+     "src_zero",
+     "dh:290"
+    ],
+    [
+     "writes",
+     "ice_thd_dh",
+     "zdum",
+     [
+      200,
+      221,
+      222,
+      251,
+      270,
+      272,
+      300,
+      388,
+      407,
+      409,
+      490
+     ]
+    ],
+    [
+     "encl",
+     "dh:251",
+     "IF( t_i_1d(ji,jk) >= (ztmelts+rt0) )"
+    ],
+    [
+     "src_zero",
+     "dh:251"
+    ],
+    [
+     "src_zero",
+     "dh:272.min"
+    ]
+   ],
+   "proof": "Same zdum as dh:289 (never -0): VAR = h_i_1d + zdum is never -0 (L2).",
+   "verdict": "NO_TIE"
+  },
+  "dh:295": {
+   "facts": [
+    [
+     "found"
+    ],
+    [
+     "roles"
+    ]
+   ],
+   "proof": "Tie cell committed (every layer melts out, -0 evaporation): emitted -MIN(zevap_rema*r1_rhoi, zh_i) of statement 300 changes wfx_err_sub; survivor test.",
+   "verdict": "FOUND"
+  },
+  "dh:310": {
+   "facts": [
+    [
+     "src_zero",
+     "dh:310"
+    ],
+    [
+     "writes",
+     "ice_thd_dh",
+     "zh_i",
+     [
+      141,
+      146,
+      289,
+      310,
+      366,
+      426,
+      480
+     ]
+    ]
+   ],
+   "proof": "zh_i(jk) was last written by 289 (never -0, L1): VAR = zh_i(jk) + zdum is never -0 (L2).",
+   "verdict": "NO_TIE"
+  },
+  "dh:311": {
+   "facts": [
+    [
+     "src_zero",
+     "dh:311"
+    ],
+    [
+     "writes",
+     "ice_thd_dh",
+     "h_i_1d",
+     [
+      290,
+      311,
+      367,
+      427,
+      458
+     ]
+    ]
+   ],
+   "proof": "h_i_1d was last written by 290 (never -0, L1): VAR = h_i_1d + zdum is never -0 (L2).",
+   "verdict": "NO_TIE"
+  },
+  "dh:348.max": {
+   "facts": [
+    [
+     "src_zero",
+     "dh:348.max"
+    ]
+   ],
+   "proof": "VAR = 1.0 - ztmelts/MIN(.): x - y is -0 only if x = -0 (L2); x = 1.0.",
+   "verdict": "NO_TIE"
+  },
+  "dh:348.min": {
+   "facts": [
+    [
+     "const",
+     "dh:348.min"
+    ]
+   ],
+   "proof": "One operand is the nonzero constant -epsi10 (L0).",
+   "verdict": "NO_TIE"
+  },
+  "dh:355": {
+   "facts": [
+    [
+     "src_zero",
+     "dh:355"
+    ],
+    [
+     "encl",
+     "dh:355",
+     "IF( zf_tt < 0._wp )"
+    ],
+    [
+     "writes",
+     "ice_thd_dh",
+     "zf_tt",
+     [
+      129
+     ]
+    ],
+    [
+     "deck",
+     "nn_icesal",
+     4
+    ]
+   ],
+   "proof": "Under IF(zf_tt < 0) VAR = zf_tt/(zdE*rhoi) with zf_tt negative: -0 only by underflow (L2). With sss >= 0 (so ztmelts <= 0 and the latent MAX term is in [0, rLfus]) and |t_bo - rt0| < 1000 K, |zdE*rhoi| < 2e10, so underflow needs |zf_tt| < 2e10 * 2^-1074: a subnormal zf_tt (L0).",
+   "verdict": "NO_TIE"
+  },
+  "dh:388": {
+   "facts": [
+    [
+     "found"
+    ]
+   ],
+   "proof": "Tie cell committed; survivor test.",
+   "verdict": "FOUND"
+  },
+  "dh:409.max": {
+   "facts": [
+    [
+     "roles"
+    ],
+    [
+     "src_zero",
+     "dh:409.min"
+    ],
+    [
+     "flip"
+    ]
+   ],
+   "proof": "The MAX result is consumed only by the enclosing MIN(0._wp, .) of the same statement, whose ZERO src returns +0 for either zero sign (L3).",
+   "verdict": "MASKED"
+  },
+  "dh:409.min": {
+   "facts": [
+    [
+     "found"
+    ]
+   ],
+   "proof": "Tie cell committed; survivor test.",
+   "verdict": "FOUND"
+  },
+  "dh:411": {
+   "facts": [
+    [
+     "uses",
+     "ice_thd_dh",
+     "zq_bot",
+     [
+      130,
+      405,
+      411
+     ]
+    ],
+    [
+     "encl",
+     "dh:411",
+     "ELSE of IF( t_i_1d(ji,jk) >= (ztmelts+rt0) )"
+    ],
+    [
+     "src_zero",
+     "dh:409.min"
+    ],
+    [
+     "src_zero",
+     "dh:411"
+    ],
+    [
+     "flip"
+    ]
+   ],
+   "proof": "Same algebra as zq_top at 405/407/409/411 (dh:409.min ZERO src): a zero zq_bot gives +0 from the first basal non-internal-melt layer on, and is dead after the loop.",
+   "verdict": "MASKED"
+  },
+  "dh:426": {
+   "facts": [
+    [
+     "src_zero",
+     "dh:426"
+    ],
+    [
+     "writes",
+     "ice_thd_dh",
+     "zdum",
+     [
+      200,
+      221,
+      222,
+      251,
+      270,
+      272,
+      300,
+      388,
+      407,
+      409,
+      490
+     ]
+    ],
+    [
+     "encl",
+     "dh:388",
+     "IF( t_i_1d(ji,jk) >= (ztmelts+rt0) )"
+    ],
+    [
+     "src_zero",
+     "dh:388"
+    ],
+    [
+     "src_zero",
+     "dh:409.min"
+    ]
+   ],
+   "proof": "zdum was last written by 388 or 409 (MIN(0, .) with ZERO src, never -0, L1): VAR = zh_i(jk) + zdum is never -0 (L2).",
+   "verdict": "NO_TIE"
+  },
+  "dh:427": {
+   "facts": [
+    [
+     "src_zero",
+     "dh:427"
+    ],
+    [
+     "writes",
+     "ice_thd_dh",
+     "zdum",
+     [
+      200,
+      221,
+      222,
+      251,
+      270,
+      272,
+      300,
+      388,
+      407,
+      409,
+      490
+     ]
+    ],
+    [
+     "encl",
+     "dh:388",
+     "IF( t_i_1d(ji,jk) >= (ztmelts+rt0) )"
+    ],
+    [
+     "src_zero",
+     "dh:388"
+    ],
+    [
+     "src_zero",
+     "dh:409.min"
+    ]
+   ],
+   "proof": "Same zdum as dh:426 (never -0): VAR = h_i_1d + zdum is never -0 (L2).",
+   "verdict": "NO_TIE"
+  },
+  "dh:456": {
+   "facts": [
+    [
+     "src_zero",
+     "dh:456"
+    ],
+    [
+     "writes",
+     "ice_thd_dh",
+     "h_s_1d",
+     [
+      170,
+      186,
+      206,
+      230,
+      445,
+      459,
+      539
+     ]
+    ],
+    [
+     "stmt",
+     "ice_thd_dh",
+     "h_s_1d",
+     445,
+     "h_s_1d(ji) = 0._wp"
+    ],
+    [
+     "encl_only_do",
+     "dh:206"
+    ]
+   ],
+   "proof": "h_s_1d was last written by 206/230 (MAX(0, .), >= +0, never -0, L1) or 445 (+0), so rhos*h_s_1d is not -0 and the sum with (rhoi-rho0)*h_i_1d is not -0 (L2); times z1_rho > 0 it is -0 only by underflow of a subnormal-scale sum (L0).",
+   "verdict": "NO_TIE"
+  },
+  "dh:490": {
+   "facts": [
+    [
+     "roles"
+    ],
+    [
+     "writes",
+     "ice_thd_dh",
+     "zh_s",
+     [
+      150,
+      153,
+      171,
+      179,
+      207,
+      231,
+      447,
+      491
+     ]
+    ],
+    [
+     "writes",
+     "ice_thd_dh",
+     "zdeltah",
+     [
+      194,
+      211,
+      481,
+      494
+     ]
+    ],
+    [
+     "encl_only_do",
+     "dh:207"
+    ],
+    [
+     "stmt",
+     "ice_thd_dh",
+     "zdeltah",
+     481,
+     "zdeltah = dh_snowice(ji)"
+    ],
+    [
+     "src_zero",
+     "dh:456"
+    ],
+    [
+     "src_zero",
+     "dh:494"
+    ],
+    [
+     "src_zero",
+     "dh:491"
+    ]
+   ],
+   "proof": "Neither operand is ever -0: zdeltah is the 456 result (481) or a 494 result (ZERO src, L1); zh_s(jk) was rewritten for every jk by 207 (unconditional loop, L1) and afterwards only by 231, 491 (ZERO src) or 447 (+0).  A zero tie is +0 against +0 (L0).",
+   "verdict": "NO_TIE"
+  },
+  "dh:491": {
+   "facts": [
+    [
+     "src_zero",
+     "dh:491"
+    ],
+    [
+     "writes",
+     "ice_thd_dh",
+     "zh_s",
+     [
+      150,
+      153,
+      171,
+      179,
+      207,
+      231,
+      447,
+      491
+     ]
+    ],
+    [
+     "encl_only_do",
+     "dh:207"
+    ]
+   ],
+   "proof": "VAR = zh_s(jk) - zdum is -0 only if zh_s(jk) = -0 (L2), excluded as in dh:490.",
+   "verdict": "NO_TIE"
+  },
+  "dh:494": {
+   "facts": [
+    [
+     "src_zero",
+     "dh:494"
+    ],
+    [
+     "writes",
+     "ice_thd_dh",
+     "zdeltah",
+     [
+      194,
+      211,
+      481,
+      494
+     ]
+    ],
+    [
+     "src_zero",
+     "dh:456"
+    ]
+   ],
+   "proof": "VAR = zdeltah - zdum is -0 only if zdeltah = -0 (L2); zdeltah is a 456/494 result (never -0, L1).",
+   "verdict": "NO_TIE"
+  },
+  "dh:525": {
+   "facts": [
+    [
+     "encl",
+     "dh:525",
+     "IF( nn_icesal == 2 )"
+    ],
+    [
+     "deck",
+     "nn_icesal",
+     4
+    ]
+   ],
+   "proof": "Arm of nn_icesal == 2; the deck sets nn_icesal = 4.",
+   "verdict": "NOT_ON_DECK"
+  },
+  "dh:619.max1": {
+   "facts": [
+    [
+     "src_zero",
+     "dh:619.max1"
+    ],
+    [
+     "writes",
+     "snw_ent",
+     "zeh_cum0",
+     [
+      584,
+      587
+     ]
+    ],
+    [
+     "writes",
+     "snw_ent",
+     "zeh_cum1",
+     [
+      603,
+      608,
+      615
+     ]
+    ],
+    [
+     "census_encl",
+     "snw_ent",
+     "zeh_cum1",
+     608,
+     "IF( zh_cum1(jk1) <= zh_cum0(jk0) .AND. zh_cum1(jk1) > zh_cum0(jk0-1) )"
+    ]
+   ],
+   "proof": "VAR = c1(j) - c1(j-1) is -0 only if c1(j) = -0 (L2).  c1 is written as +0, as the last running sum c0 (a sum from +0, never -0, L2), or as (A*B + C*D)/E under the guard h1(j) <= h0(k) .AND. h1(j) > h0(k-1), where D = h1(j) - h0(k-1) > 0 and E = h0(k) - h0(k-1) > 0: C*D with C = c0(k) != -0 is not -0 (L2, underflow is L0), so the numerator is not -0 and the quotient by E > 0 is -0 only by underflow (L0).  No tie.  (c = zeh_cum, h = zh_cum; 584-615)",
+   "verdict": "NO_TIE"
+  },
+  "dh:619.max2": {
+   "facts": [
+    [
+     "const",
+     "dh:619.max2"
+    ]
+   ],
+   "proof": "One operand is the nonzero constant epsi20 (L0).",
+   "verdict": "NO_TIE"
+  },
+  "thd:285": {
+   "facts": [
+    [
+     "src_zero",
+     "thd:285"
+    ]
+   ],
+   "proof": "VAR = zbbb*zbbb - 4*rcpi*rLfus*ztmelts; a square is never -0, so VAR is never -0 (L2).",
+   "verdict": "NO_TIE"
+  },
+  "var:1045.max1": {
+   "facts": [
+    [
+     "src_zero",
+     "var:1045.max1"
+    ],
+    [
+     "writes",
+     "ice_var_vremap",
+     "zts_cum0",
+     [
+      1010,
+      1013
+     ]
+    ],
+    [
+     "writes",
+     "ice_var_vremap",
+     "zts_cum1",
+     [
+      1029,
+      1034,
+      1041
+     ]
+    ],
+    [
+     "census_encl",
+     "ice_var_vremap",
+     "zts_cum1",
+     1034,
+     "IF( zh_cum1(jk1) <= zh_cum0(jk0) .AND. zh_cum1(jk1) > zh_cum0(jk0-1) )"
+    ]
+   ],
+   "proof": "VAR = c1(j) - c1(j-1) is -0 only if c1(j) = -0 (L2).  c1 is written as +0, as the last running sum c0 (a sum from +0, never -0, L2), or as (A*B + C*D)/E under the guard h1(j) <= h0(k) .AND. h1(j) > h0(k-1), where D = h1(j) - h0(k-1) > 0 and E = h0(k) - h0(k-1) > 0: C*D with C = c0(k) != -0 is not -0 (L2, underflow is L0), so the numerator is not -0 and the quotient by E > 0 is -0 only by underflow (L0).  No tie.  (c = zts_cum, h = zh_cum; 1010-1041)",
+   "verdict": "NO_TIE"
+  },
+  "var:1045.max2": {
+   "facts": [
+    [
+     "const",
+     "var:1045.max2"
+    ]
+   ],
+   "proof": "One operand is the nonzero constant epsi20 (L0).",
+   "verdict": "NO_TIE"
+  },
+  "var:955": {
+   "facts": [
+    [
+     "uses",
+     "ice_thd_zdf_BL99",
+     "ice_var_enthalpy",
+     [
+      813
+     ]
+    ],
+    [
+     "writes",
+     "ice_thd_zdf_BL99",
+     "t_i_1d",
+     [
+      544,
+      548,
+      589,
+      719,
+      723,
+      754,
+      865
+     ]
+    ],
+    [
+     "writes",
+     "ice_thd_zdf_BL99",
+     "l_T_converged",
+     [
+      245,
+      599,
+      764
+     ]
+    ],
+    [
+     "stmt",
+     "ice_thd_zdf_BL99",
+     "l_T_converged",
+     245,
+     "l_T_converged(:) = .FALSE."
+    ],
+    [
+     "defs",
+     "zdf:589.max",
+     "src",
+     "subsd@577"
+    ]
+   ],
+   "proof": "t_i_1d enters ice_var_enthalpy (called once, 813, after the iteration) as the 589 result of its cell's last iteration (l_T_converged starts .FALSE., so 589 runs at least once and follows 544/548 in the same arm; 719/723/754/865 are np_cnd_ON/EMU): MAX(., 173.15) >= 173.15, nonzero (L0).",
+   "verdict": "NO_TIE"
+  },
+  "var:957.max": {
+   "facts": [
+    [
+     "src_zero",
+     "var:957.max"
+    ]
+   ],
+   "proof": "VAR = 1._wp - ztmelts/MIN(.): x - y is -0 only if x = -0 (L2); x = 1.",
+   "verdict": "NO_TIE"
+  },
+  "var:957.min": {
+   "facts": [
+    [
+     "const",
+     "var:957.min"
+    ]
+   ],
+   "proof": "One operand is the nonzero constant -epsi10 (L0).",
+   "verdict": "NO_TIE"
+  },
+  "zdf:173": {
+   "facts": [
+    [
+     "const",
+     "zdf:173"
+    ]
+   ],
+   "proof": "One operand is a nonzero constant (zh_min, -epsi10, zkimin or epsi10) (L0).",
+   "verdict": "NO_TIE"
+  },
+  "zdf:181": {
+   "facts": [
+    [
+     "const",
+     "zdf:181"
+    ]
+   ],
+   "proof": "One operand is a nonzero constant (zh_min, -epsi10, zkimin or epsi10) (L0).",
+   "verdict": "NO_TIE"
+  },
+  "zdf:202": {
+   "facts": [
+    [
+     "defs",
+     "zdf:202",
+     "src",
+     "subsd@202"
+    ]
+   ],
+   "proof": "The other operand rt0 - ztsu_err (the statement's only subtraction) is 273.14999 K: nonzero (L0).",
+   "verdict": "NO_TIE"
+  },
+  "zdf:219": {
+   "facts": [
+    [
+     "src_zero",
+     "zdf:219"
+    ],
+    [
+     "flip"
+    ],
+    [
+     "text",
+     "zdf:219",
+     "EXP( - zraext_s(ji) * MAX( 0._wp,"
+    ]
+   ],
+   "proof": "The MAX result only multiplies -zraext_s inside EXP: EXP(+0) = EXP(-0) = 1 exactly (L3).",
+   "verdict": "MASKED"
+  },
+  "zdf:229": {
+   "facts": [
+    [
+     "src_zero",
+     "zdf:229"
+    ],
+    [
+     "flip"
+    ],
+    [
+     "text",
+     "zdf:229",
+     "EXP( - rn_kappa_i * MAX( 0._wp,"
+    ]
+   ],
+   "proof": "Both MAX results only multiply -rn_kappa_i inside EXP: EXP(+0) = EXP(-0) = 1 exactly (L3).",
+   "verdict": "MASKED"
+  },
+  "zdf:261": {
+   "facts": [
+    [
+     "encl",
+     "zdf:261",
+     "IF( ln_cndi_U64 )"
+    ],
+    [
+     "deck",
+     "ln_cndi_u64",
+     false
+    ]
+   ],
+   "proof": "Arm of ln_cndi_U64; the deck sets ln_cndi_U64 = .false.",
+   "verdict": "NOT_ON_DECK"
+  },
+  "zdf:262": {
+   "facts": [
+    [
+     "encl",
+     "zdf:262",
+     "IF( ln_cndi_U64 )"
+    ],
+    [
+     "deck",
+     "ln_cndi_u64",
+     false
+    ]
+   ],
+   "proof": "Arm of ln_cndi_U64; the deck sets ln_cndi_U64 = .false.",
+   "verdict": "NOT_ON_DECK"
+  },
+  "zdf:266": {
+   "facts": [
+    [
+     "encl",
+     "zdf:266",
+     "IF( ln_cndi_U64 )"
+    ],
+    [
+     "deck",
+     "ln_cndi_u64",
+     false
+    ]
+   ],
+   "proof": "Arm of ln_cndi_U64; the deck sets ln_cndi_U64 = .false.",
+   "verdict": "NOT_ON_DECK"
+  },
+  "zdf:274": {
+   "facts": [
+    [
+     "const",
+     "zdf:274"
+    ]
+   ],
+   "proof": "One operand is a nonzero constant (zh_min, -epsi10, zkimin or epsi10) (L0).",
+   "verdict": "NO_TIE"
+  },
+  "zdf:276": {
+   "facts": [
+    [
+     "const",
+     "zdf:276"
+    ]
+   ],
+   "proof": "One operand is a nonzero constant (zh_min, -epsi10, zkimin or epsi10) (L0).",
+   "verdict": "NO_TIE"
+  },
+  "zdf:281": {
+   "facts": [
+    [
+     "const",
+     "zdf:281"
+    ]
+   ],
+   "proof": "One operand is a nonzero constant (zh_min, -epsi10, zkimin or epsi10) (L0).",
+   "verdict": "NO_TIE"
+  },
+  "zdf:292": {
+   "facts": [
+    [
+     "const",
+     "zdf:292"
+    ]
+   ],
+   "proof": "One operand is a nonzero constant (zh_min, -epsi10, zkimin or epsi10) (L0).",
+   "verdict": "NO_TIE"
+  },
+  "zdf:309": {
+   "facts": [
+    [
+     "encl",
+     "zdf:309",
+     "IF( ln_virtual_itd )"
+    ],
+    [
+     "deck",
+     "ln_virtual_itd",
+     false
+    ]
+   ],
+   "proof": "Arm of ln_virtual_itd; the deck sets ln_virtual_itd = .false.",
+   "verdict": "NOT_ON_DECK"
+  },
+  "zdf:353": {
+   "facts": [
+    [
+     "const",
+     "zdf:353"
+    ]
+   ],
+   "proof": "One operand is a nonzero constant (zh_min, -epsi10, zkimin or epsi10) (L0).",
+   "verdict": "NO_TIE"
+  },
+  "zdf:577.max": {
+   "facts": [
+    [
+     "defs",
+     "zdf:577.max",
+     "src",
+     "subsd@577"
+    ],
+    [
+     "text",
+     "zdf:577",
+     "rt0 - 100._wp )"
+    ]
+   ],
+   "proof": "The other operand is rt0 - 100._wp = 173.15 (the statement's only subtraction, subsd@577 hoisted): nonzero, so equal operands are bit-identical (L0).",
+   "verdict": "NO_TIE"
+  },
+  "zdf:577.min": {
+   "facts": [
+    [
+     "defs",
+     "zdf:577.max",
+     "src",
+     "subsd@577"
+    ],
+    [
+     "text",
+     "zdf:577",
+     "MAX( MIN("
+    ]
+   ],
+   "proof": "The MIN result is the other operand of MAX(., rt0 - 100._wp): a zero result returns 173.15 for either sign, so no tie at the MIN reaches the output.",
+   "verdict": "MASKED"
+  },
+  "zdf:582.max": {
+   "facts": [
+    [
+     "defs",
+     "zdf:582.max",
+     "src",
+     "subsd@577"
+    ],
+    [
+     "text",
+     "zdf:582",
+     "rt0 - 100._wp )"
+    ]
+   ],
+   "proof": "The other operand is rt0 - 100._wp = 173.15 (the statement's only subtraction, subsd@577 hoisted): nonzero, so equal operands are bit-identical (L0).",
+   "verdict": "NO_TIE"
+  },
+  "zdf:582.min": {
+   "facts": [
+    [
+     "defs",
+     "zdf:582.max",
+     "src",
+     "subsd@577"
+    ],
+    [
+     "text",
+     "zdf:582",
+     "MAX( MIN("
+    ]
+   ],
+   "proof": "The MIN result is the other operand of MAX(., rt0 - 100._wp): a zero result returns 173.15 for either sign, so no tie at the MIN reaches the output.",
+   "verdict": "MASKED"
+  },
+  "zdf:583": {
+   "facts": [
+    [
+     "abs",
+     "zdf:583"
+    ]
+   ],
+   "proof": "Every operand is an ABS(.) result or a MAX of them, so a zero is +0 on both sides (L0).",
+   "verdict": "NO_TIE"
+  },
+  "zdf:589.max": {
+   "facts": [
+    [
+     "defs",
+     "zdf:589.max",
+     "src",
+     "subsd@577"
+    ],
+    [
+     "text",
+     "zdf:589",
+     "rt0 - 100._wp )"
+    ]
+   ],
+   "proof": "The other operand is rt0 - 100._wp = 173.15 (the statement's only subtraction, subsd@577 hoisted): nonzero, so equal operands are bit-identical (L0).",
+   "verdict": "NO_TIE"
+  },
+  "zdf:589.min": {
+   "facts": [
+    [
+     "defs",
+     "zdf:589.max",
+     "src",
+     "subsd@577"
+    ],
+    [
+     "text",
+     "zdf:589",
+     "MAX( MIN("
+    ]
+   ],
+   "proof": "The MIN result is the other operand of MAX(., rt0 - 100._wp): a zero result returns 173.15 for either sign, so no tie at the MIN reaches the output.",
+   "verdict": "MASKED"
+  },
+  "zdf:590": {
+   "facts": [
+    [
+     "abs",
+     "zdf:590"
+    ]
+   ],
+   "proof": "Every operand is an ABS(.) result or a MAX of them, so a zero is +0 on both sides (L0).",
+   "verdict": "NO_TIE"
+  },
+  "zdf:747": {
+   "facts": [
+    [
+     "encl",
+     "zdf:747",
+     "ELSEIF( k_cnd == np_cnd_ON )"
+    ],
+    [
+     "deck",
+     "ln_cndflx",
+     false
+    ]
+   ],
+   "proof": "Arm of k_cnd == np_cnd_ON; with ln_cndflx = .false. ice_thd_zdf calls only ice_thd_zdf_BL99( np_cnd_OFF ) (icethd_zdf.f90:115-116).",
+   "verdict": "NOT_ON_DECK"
+  },
+  "zdf:748": {
+   "facts": [
+    [
+     "encl",
+     "zdf:748",
+     "ELSEIF( k_cnd == np_cnd_ON )"
+    ],
+    [
+     "deck",
+     "ln_cndflx",
+     false
+    ]
+   ],
+   "proof": "Arm of k_cnd == np_cnd_ON; with ln_cndflx = .false. ice_thd_zdf calls only ice_thd_zdf_BL99( np_cnd_OFF ) (icethd_zdf.f90:115-116).",
+   "verdict": "NOT_ON_DECK"
+  },
+  "zdf:754": {
+   "facts": [
+    [
+     "encl",
+     "zdf:754",
+     "ELSEIF( k_cnd == np_cnd_ON )"
+    ],
+    [
+     "deck",
+     "ln_cndflx",
+     false
+    ]
+   ],
+   "proof": "Arm of k_cnd == np_cnd_ON; with ln_cndflx = .false. ice_thd_zdf calls only ice_thd_zdf_BL99( np_cnd_OFF ) (icethd_zdf.f90:115-116).",
+   "verdict": "NOT_ON_DECK"
+  },
+  "zdf:755": {
+   "facts": [
+    [
+     "encl",
+     "zdf:755",
+     "ELSEIF( k_cnd == np_cnd_ON )"
+    ],
+    [
+     "deck",
+     "ln_cndflx",
+     false
+    ]
+   ],
+   "proof": "Arm of k_cnd == np_cnd_ON; with ln_cndflx = .false. ice_thd_zdf calls only ice_thd_zdf_BL99( np_cnd_OFF ) (icethd_zdf.f90:115-116).",
+   "verdict": "NOT_ON_DECK"
+  },
+  "zdf:800": {
+   "facts": [
+    [
+     "encl",
+     "zdf:800",
+     "ELSEIF( k_cnd == np_cnd_ON )"
+    ],
+    [
+     "deck",
+     "ln_cndflx",
+     false
+    ]
+   ],
+   "proof": "Arm of k_cnd == np_cnd_ON; with ln_cndflx = .false. ice_thd_zdf calls only ice_thd_zdf_BL99( np_cnd_OFF ) (icethd_zdf.f90:115-116).",
+   "verdict": "NOT_ON_DECK"
+  },
+  "zdf:803": {
+   "facts": [
+    [
+     "encl",
+     "zdf:803",
+     "ELSEIF( k_cnd == np_cnd_ON )"
+    ],
+    [
+     "deck",
+     "ln_cndflx",
+     false
+    ]
+   ],
+   "proof": "Arm of k_cnd == np_cnd_ON; with ln_cndflx = .false. ice_thd_zdf calls only ice_thd_zdf_BL99( np_cnd_OFF ) (icethd_zdf.f90:115-116).",
+   "verdict": "NOT_ON_DECK"
   }
  }
 }

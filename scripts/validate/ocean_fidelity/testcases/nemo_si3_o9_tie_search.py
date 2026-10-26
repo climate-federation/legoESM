@@ -3,7 +3,8 @@
 The oracle is ``tests/ice/unit/test_si3_o9_zdf_dh_temp.py`` (a CPython transcription
 of the record build whose ``MINSD``/``MAXSD`` carry their ppsrc site tag).  For each
 candidate cell -- the test's nine cell kinds plus zero-heavy mutations (fields and
-layers set to +0/-0, surfaces at the melting point) -- it records which sites see a
+layers set to +0/-0, surfaces at the melting point), then a melt-out family (every
+layer melts away under -0 evaporation with -0 flux accumulators) -- it records which sites see a
 tie whose operands differ in bits, and, per site, whether swapping that one site's
 emitted operand roles changes any output bit.  Writes JSON: the first cell per site
 that ties (``first_tie``), the first whose swap changes the output (``found``) with
@@ -32,7 +33,7 @@ SCALARS = ("h_i", "h_s", "evap_ice", "qprec_ice", "sprecip", "qsr_ice", "qtr_ice
 
 
 def candidates(n_random: int, seed: int = 16):
-    """Deterministic candidate cells: structured zero mutations, then ``n_random`` random ones."""
+    """Deterministic candidate cells: structured zero mutations, ``n_random`` random ones, then melt-outs."""
     for s in range(6):
         r = np.random.default_rng(s)
         for kind in o9.KINDS:
@@ -65,6 +66,14 @@ def candidates(n_random: int, seed: int = 16):
         if rng.random() < 0.2:
             c["t_s"] = [o9.RT0] * len(c["t_s"])
         yield c
+    for s in range(6):  # melt-out: no snow, -0 evaporation, surface at rt0, -0 accumulators
+        for kind in o9.KINDS:
+            for qns in (1.0e3, 1.0e4, 1.0e5):
+                c = o9._cell(np.random.default_rng(s), kind)
+                c.update(h_s=0.0, sprecip=0.0, evap_ice=-0.0, t_su=o9.RT0, qns_ice=qns)
+                for f in o9.FLUXES:
+                    c["flux_" + f] = -0.0
+                yield c
 
 
 def oracle_bits(cell, nml, swap=()):

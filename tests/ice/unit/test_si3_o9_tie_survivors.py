@@ -1,17 +1,20 @@
 """O9 MIN/MAX tie survivors, one verdict per executing site of the record object code.
 
-Every ``minsd``/``maxsd`` statement the production deck executes in the O9 routines
-(``nemo_si3_o9_minmax_audit.json``) falls in exactly one class below.  Sites with a
-reachable signed-zero tie get a cell (``data/si3_o9_tie_cells.json``, from
-``nemo_si3_o9_tie_search.py``) on which the independent oracle sees the tie, swapping
-that one site's emitted operand roles changes output bits, and the model equals the
-unswapped oracle in every bit.  The other classes state why no bit-changing tie exists.
+Every ``minsd``/``maxsd`` of the O9 routines (``nemo_si3_o9_minmax_audit.json``) carries one
+verdict in that report's ``tie_verdicts``: FOUND sites have a cell
+(``data/si3_o9_tie_cells.json``, from ``nemo_si3_o9_tie_search.py``) on which the independent
+oracle sees the tie, swapping that one site's emitted operand roles changes output bits, and
+the model equals the unswapped oracle in every bit; NO_TIE and MASKED sites carry a short
+proof whose premises (operand kinds, census lines, enclosing blocks, deck values) are checked
+here against the report, and every MASKED site with zero results is also checked by negating
+those zeros in the oracle; NOT_ON_DECK sites name the arm and the deck value that skips it.
 """
 
 from __future__ import annotations
 
 import ast
 import importlib.util
+import itertools
 import json
 from pathlib import Path
 
@@ -21,34 +24,20 @@ import numpy as np
 import pytest
 import test_si3_o9_zdf_dh_temp as o9
 
+from legoesm.core.nemo_namelist import overlay, parse_namelist
+
 ROOT = Path(__file__).resolve().parents[3]
 CELLS = json.loads((Path(__file__).parent / "data/si3_o9_tie_cells.json").read_text())
 AUDIT = json.loads((ROOT / "scripts/validate/ocean_fidelity/testcases/nemo_si3_o9_minmax_audit.json").read_text())
+VERDICTS = AUDIT["tie_verdicts"]
 OBJ = {"dh": "icethd_dh", "zdf": "icethd_zdf_bl99", "var": "icevar", "thd": "icethd"}
+SEARCH = ROOT / "scripts/validate/ocean_fidelity/testcases/nemo_si3_o9_tie_search.py"
 
 libm_policy = o9.libm_policy  # same autouse precision policy as the O9 suite
 
-# Signed-zero tie reached, and the surviving operand changes output bits (oracle swap).
-FOUND = ("dh:180", "dh:194", "dh:200", "dh:251", "dh:272.min", "dh:388", "dh:409.min")
-# Signed-zero tie reached, output bits unchanged by the swap: the result only feeds a
-# MAX(0,.)/MIN(.,0) whose zero is the source (:272 max, :409 max), or a branch that the
-# tie value never enters (:130 zq_bot only used when zf_tt > 0; :295 zh_i re-clamped).
-MASKED = ("dh:130", "dh:272.max", "dh:295")
-CLASSES = {
-    "nonzero_constant": {  # equal-value ties have identical bits; only a NaN tells operands apart
-        "zdf:173", "zdf:181", "zdf:274", "zdf:276", "zdf:281", "zdf:292", "zdf:353", "dh:221",
-        "dh:348.min", "var:957.min", "dh:619.max2", "var:1045.max2"},
-    "kelvin": {  # both operands are temperatures >= rt0 - 100 K: never zero
-        "zdf:202", "zdf:577", "zdf:582", "zdf:589", "var:955"},
-    "abs": {"zdf:583", "zdf:590"},  # both operands are ABS(.) or a MAX of them: never -0
-    # No differently-signed tie in the search's entry cells (PLAUSIBLE, search evidence only).
-    "unreached": {
-        "dh:128", "dh:170", "dh:206", "dh:207", "dh:211", "dh:228", "dh:229", "dh:230", "dh:231", "dh:274",
-        "dh:289", "dh:290", "dh:310", "dh:311", "dh:348.max", "dh:355", "dh:409.max", "dh:411", "dh:426",
-        "dh:427", "dh:456", "dh:490", "dh:491", "dh:494", "dh:619.max1", "zdf:219", "zdf:229", "thd:285",
-        "var:957.max", "var:1045.max1"},
-}
-NOT_ON_DECK = {"zdf": {261, 262, 266, 309, 747, 748, 754, 755, 800, 803}, "dh": {525}}
+FOUND = tuple(sorted(t for t, v in VERDICTS.items() if v["verdict"] == "FOUND"))
+MASKED = tuple(sorted(t for t, v in VERDICTS.items() if ["tie_masked"] in v["facts"]))  # tie cell, swap invisible
+FLIPPED = tuple(sorted(t for t, v in VERDICTS.items() if ["flip"] in v["facts"]))
 # Variable/variable deck sites: (src defs, dst defs) of each emitted copy, from the audit's
 # reaching definitions, and the oracle's (dst, src) argument text that follows them.
 VAR_ROLES = {
@@ -64,39 +53,191 @@ VAR_ROLES = {
 }
 
 
-def _executing():
-    out = set()
-    for short, obj in OBJ.items():
-        for line in AUDIT["objects"][obj]["sites"]:
-            if int(line) not in NOT_ON_DECK.get(short, ()):
-                out.add(f"{short}:{line}")
+def _site(tag):
+    short, rest = tag.split(":")
+    line, _, part = rest.partition(".")
+    return short, line, part
+
+
+def _ins(tag, rep=AUDIT):
+    """The instructions a verdict tag covers (``.min``/``.max`` by op; ``.max1``/``.max2`` ZERO/CONST src)."""
+    short, line, part = _site(tag)
+    out = []
+    for i in rep["objects"][OBJ[short]]["sites"][line]["instructions"]:
+        if i["op"] == "sqrtsd":
+            continue
+        if (part in ("", "min", "max") and (not part or i["op"] == part + "sd")) \
+                or (part == "max1" and i["op"] == "maxsd" and i["src"] == "ZERO") \
+                or (part == "max2" and i["op"] == "maxsd" and i["src"].startswith("CONST:")):
+            out.append(i)
     return out
 
 
-def _statement(site):
-    return site.split(".")[0]
+def test_every_site_instruction_has_exactly_one_verdict():
+    covered = {}
+    for tag in VERDICTS:
+        short, line, _ = _site(tag)
+        assert _ins(tag), tag
+        for i in _ins(tag):
+            covered.setdefault(id(i), []).append(tag)
+    n = 0
+    for obj in OBJ.values():
+        for line, site in AUDIT["objects"][obj]["sites"].items():
+            for i in site["instructions"]:
+                if i["op"] != "sqrtsd":
+                    n += 1
+                    assert len(covered.get(id(i), [])) == 1, (obj, line, i, covered.get(id(i)))
+    assert n == len(covered)
+    assert {v["verdict"] for v in VERDICTS.values()} == {"FOUND", "NO_TIE", "MASKED", "NOT_ON_DECK"}
+    assert all(v["proof"] and v["facts"] for v in VERDICTS.values())
 
 
-def test_every_executing_site_has_exactly_one_verdict():
-    tagged = list(FOUND) + list(MASKED) + [s for v in CLASSES.values() for s in v]
-    assert len(tagged) == len(set(tagged))
-    assert {_statement(s) for s in tagged} == _executing()
+def _deck_value(name):
+    v = overlay(parse_namelist(o9.DATA / "namelist_ice_ref", "ice"), parse_namelist(o9.DATA / "namelist_ice_cfg", "ice"))
+    hits = [val[0] for key, val in v.items() if key[2] == name]
+    assert len(hits) == 1, name
+    return hits[0]
 
 
-def test_nonzero_constant_sites_have_a_nonzero_constant_operand():
-    for site in CLASSES["nonzero_constant"]:
-        short, line = _statement(site).split(":")
-        ins = AUDIT["objects"][OBJ[short]]["sites"][line]["instructions"]
-        consts = [k for i in ins for k in (i["src"], i["dst"]) if k.startswith("CONST:")]
-        assert consts and all(float.fromhex(k[6:]) != 0.0 for k in consts), site
+def _census(routine, var, rep):
+    for obj in rep["objects"].values():
+        if routine in obj["census"]:
+            return obj["census"][routine][var]
+    raise KeyError(routine)
 
 
-def test_abs_sites_compare_only_abs_results():
-    for site in CLASSES["abs"]:
-        short, line = site.split(":")
-        for i in AUDIT["objects"][OBJ[short]]["sites"][line]["instructions"]:
-            for defs in (i["src_defs"], i["dst_defs"]):
-                assert all(d.startswith(("andpd@", "maxsd@")) for d in defs.split("|")), (site, defs)
+def _sitedict(tag, rep):
+    short, line, _ = _site(tag)
+    return rep["objects"][OBJ[short]]["sites"][line]
+
+
+def check_fact(tag, fact, rep=AUDIT):
+    """True when report ``rep`` satisfies one premise of ``tag``'s verdict."""
+    kind, *a = fact
+    if kind == "src_zero":
+        return all(i["src"] == "ZERO" for i in _ins(a[0], rep))
+    if kind == "const":
+        return all(any(k.startswith("CONST:") and float.fromhex(k[6:]) != 0.0 for k in (i["src"], i["dst"]))
+                   for i in _ins(a[0], rep))
+    if kind == "abs":
+        return all(all(d.startswith(("andpd@", "maxsd@")) for d in i[f].split("|"))
+                   for i in _ins(a[0], rep) for f in ("src_defs", "dst_defs"))
+    if kind == "defs":
+        return all(i.get(a[1] + "_defs") == a[2] for i in _ins(a[0], rep))
+    if kind in ("roles", "roles_of"):
+        short, line, _ = _site(a[0] if a else tag)
+        return f"{short}:{line}" in VAR_ROLES
+    if kind == "encl":
+        return a[1] in _sitedict(a[0], rep)["enclosing"]
+    if kind == "encl_only_do":
+        return all(h.startswith("DO ") for h in _sitedict(a[0], rep)["enclosing"])
+    if kind == "writes":
+        return sorted(int(k) for k, u in _census(a[0], a[1], rep).items() if "w" in u[0]) == a[2]
+    if kind == "uses":
+        return sorted(int(k) for k in _census(a[0], a[1], rep)) == a[2]
+    if kind == "stmt":
+        return _census(a[0], a[1], rep)[str(a[2])][1] == a[3]
+    if kind == "census_encl":
+        return a[3] in _census(a[0], a[1], rep)[str(a[2])][2]
+    if kind == "text":
+        return a[1] in " ".join(_sitedict(a[0], rep)["statement"].split())
+    if kind == "deck":
+        return _deck_value(a[0]) == a[1]
+    if kind == "found":
+        return tag in CELLS["found"]
+    if kind == "tie_masked":
+        return tag in CELLS["masked"]
+    if kind == "flip":
+        return tag in FLIPPED
+    raise ValueError(f"unknown fact {kind}")
+
+
+@pytest.mark.parametrize("tag", sorted(VERDICTS))
+def test_verdict_premises_hold(tag):
+    v = VERDICTS[tag]
+    bad = [f for f in v["facts"] if not check_fact(tag, f)]
+    assert bad == [], (tag, bad)
+    if v["verdict"] == "FOUND":
+        assert ["found"] in v["facts"]
+    if v["verdict"] == "NOT_ON_DECK":
+        assert {"deck", "encl"} <= {f[0] for f in v["facts"]}
+    assert all(lemma in AUDIT["tie_lemmas"] for lemma in ("L0", "L1", "L2", "L3") if lemma in v["proof"])
+
+
+@pytest.mark.parametrize("plant", ["kind", "uses", "encl", "deck", "text", "census_encl"])
+def test_fact_plants_fail(plant):
+    """Each premise kind can fail: perturb a copy of the report under one verdict per kind."""
+    import copy
+    rep = copy.deepcopy(AUDIT)
+    dh = rep["objects"]["icethd_dh"]
+    if plant == "kind":
+        dh["sites"]["170"]["instructions"][0]["src"] = "VAR"
+        tag, fact = "dh:170", ["src_zero", "dh:170"]
+    elif plant == "uses":
+        dh["census"]["ice_thd_dh"]["zq_top"]["300"] = ["rw", "zq_top = zq_top * 2", []]
+        tag, fact = "dh:128", VERDICTS["dh:128"]["facts"][1]
+    elif plant == "encl":
+        dh["sites"]["229"]["enclosing"] = ["DO ji = 1, npti"]
+        tag, fact = "dh:229", VERDICTS["dh:229"]["facts"][1]
+    elif plant == "deck":
+        assert check_fact("dh:525", ["deck", "nn_icesal", 4]) and not check_fact("dh:525", ["deck", "nn_icesal", 2])
+        return
+    elif plant == "text":
+        rep["objects"]["icethd_zdf_bl99"]["sites"]["219"]["statement"] = "x = MAX( 0._wp, y )"
+        tag, fact = "zdf:219", VERDICTS["zdf:219"]["facts"][2]
+    else:
+        dh["census"]["snw_ent"]["zeh_cum1"]["608"][2] = ["DO jk0 = 1, nlay_s+1"]
+        tag, fact = "dh:619.max1", VERDICTS["dh:619.max1"]["facts"][3]
+    assert check_fact(tag, fact) and not check_fact(tag, fact, rep)
+
+
+def _flip_cells():
+    spec = importlib.util.spec_from_file_location("tie_search_flip", SEARCH)
+    tool = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(tool)
+    fixture = [o9_cell(v["cell"]) for g in ("found", "masked") for v in CELLS[g].values()]
+    return fixture + list(itertools.islice(tool.candidates(0), 0, None, 6))
+
+
+def _flipping(fn, sites, hits):
+    """The oracle's MAXSD/MINSD with a zero result negated at ``sites`` (counted in ``hits``)."""
+    def wrapped(dst, src, site=None):
+        r = fn(dst, src, site)
+        if site in sites and r == 0.0:
+            hits.append(site)
+            return -r
+        return r
+    return wrapped
+
+
+def _flip_report(tags):
+    """tag -> (cells where the site's zero result was negated, cells whose output bits changed)."""
+    nml = o9._deck()
+    out = {t: [0, 0] for t in tags}
+    maxsd, minsd = o9.MAXSD, o9.MINSD
+    for cell in _flip_cells():
+        try:
+            ref = o9._oracle_leaves(o9._oracle_rows([cell], nml))
+        except (ZeroDivisionError, ValueError, OverflowError):
+            continue
+        for t in tags:
+            sites, hits = ({t} if "." in t else {t, t + ".max1", t + ".max2"}), []
+            o9.MAXSD, o9.MINSD = _flipping(maxsd, sites, hits), _flipping(minsd, sites, hits)
+            try:
+                alt = o9._oracle_leaves(o9._oracle_rows([cell], nml))
+            finally:
+                o9.MAXSD, o9.MINSD = maxsd, minsd
+            if hits:
+                out[t][0] += 1
+                out[t][1] += any(not np.array_equal(o9._bits(ref[k]), o9._bits(alt[k])) for k in ref)
+    return out
+
+
+def test_masked_zero_signs_never_reach_the_output():
+    rep = _flip_report(FLIPPED + ("dh:251",))
+    assert rep.pop("dh:251")[1] > 0  # plant: a FOUND site's zero sign does reach the output
+    for t, (negated, changed) in rep.items():
+        assert negated > 0 and changed == 0, (t, negated, changed)
 
 
 def _oracle_calls():
@@ -148,7 +289,7 @@ def _oracle(cell, swap=()):
 def test_fixture_covers_the_found_and_masked_sites():
     assert sorted(CELLS["found"]) == sorted(FOUND)
     assert sorted(CELLS["masked"]) == sorted(MASKED)
-    assert CELLS["candidates"] == 303564 and set(CELLS["tied"]) == set(FOUND) | set(MASKED)
+    assert CELLS["candidates"] == 303726 and set(CELLS["tied"]) == set(FOUND) | set(MASKED)
 
 
 @pytest.mark.parametrize("site", FOUND)
@@ -201,7 +342,7 @@ def test_search_tool_reproduces_a_found_site():
     tool = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(tool)
     rep = tool.search(0)  # structured candidates only
-    assert rep["candidates"] == 3564 and "dh:180" in rep["found"]
+    assert rep["candidates"] == 3726 and {"dh:180", "dh:295"} <= set(rep["found"])  # 3564 structured + 162 melt-outs
     cell = tool.from_hex(rep["found"]["dh:180"]["cell"])
     assert tool.from_hex(tool.to_hex(cell)) == cell
     jax.clear_caches()
