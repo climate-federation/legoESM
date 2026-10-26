@@ -1,0 +1,1421 @@
+{
+ "build": "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/ORCA2_SAS_ICE_O7_REF/BLD",
+ "flags": [
+  "-fdefault-real-8",
+  "-O3",
+  "-funroll-all-loops",
+  "-fcray-pointer",
+  "-ffree-line-length-none",
+  "-fallow-argument-mismatch",
+  "-fno-tree-vectorize"
+ ],
+ "objects": {
+  "icethd_sal": {
+   "census": {
+    "ice_thd_sal": {
+     "sz_i_1d": {
+      "367": [
+       "r",
+       "zv_br(jk) = zmsk(jk) * sz_i_1d(ji,jk) / MAX( zs_br(jk), epsi10 )",
+       [
+        "CASE( 4 )",
+        "IF( ln_drainage )",
+        "DO ji = 1, npti",
+        "IF( h_i_1d(ji) >= rn_sal_himin .AND. zhmelt >= 0._wp .AND. zs_brmax > sss_1d(ji) .AND. t_su_1d(ji) <= t_bo_1d(ji) )",
+        "DO jk = 1, nlay_i"
+       ]
+      ],
+      "457": [
+       "r",
+       "zv_br(jk) = zmsk(jk) * sz_i_1d(ji,jk) / zs_br(jk)",
+       [
+        "CASE( 4 )",
+        "IF( ln_drainage )",
+        "DO ji = 1, npti",
+        "IF( h_i_1d(ji) >= rn_sal_himin .AND. zhmelt >= 0._wp .AND. zs_brmax > sss_1d(ji) .AND. t_su_1d(ji) <= t_bo_1d(ji) )",
+        "DO iter = 1, ndrainage",
+        "IF( iter > 1 )",
+        "DO jk = 1, nlay_i"
+       ]
+      ],
+      "535": [
+       "r",
+       "zs_min = MIN( zs_min , sz_i_1d(ji,jk) + zds(jk) )",
+       [
+        "CASE( 4 )",
+        "IF( ln_drainage )",
+        "DO ji = 1, npti",
+        "IF( h_i_1d(ji) >= rn_sal_himin .AND. zhmelt >= 0._wp .AND. zs_brmax > sss_1d(ji) .AND. t_su_1d(ji) <= t_bo_1d(ji) )",
+        "DO iter = 1, ndrainage",
+        "DO jk = 1, nlay_i"
+       ]
+      ],
+      "538": [
+       "r",
+       "zds(jk) = MAX( zds(jk), -sz_i_1d(ji,jk) + MIN( rn_simin, rn_sinew*sss_1d(ji) ) )",
+       [
+        "CASE( 4 )",
+        "IF( ln_drainage )",
+        "DO ji = 1, npti",
+        "IF( h_i_1d(ji) >= rn_sal_himin .AND. zhmelt >= 0._wp .AND. zs_brmax > sss_1d(ji) .AND. t_su_1d(ji) <= t_bo_1d(ji) )",
+        "DO iter = 1, ndrainage",
+        "DO jk = 1, nlay_i"
+       ]
+      ],
+      "541": [
+       "wr",
+       "sz_i_1d(ji,jk) = sz_i_1d(ji,jk) + zds(jk)",
+       [
+        "CASE( 4 )",
+        "IF( ln_drainage )",
+        "DO ji = 1, npti",
+        "IF( h_i_1d(ji) >= rn_sal_himin .AND. zhmelt >= 0._wp .AND. zs_brmax > sss_1d(ji) .AND. t_su_1d(ji) <= t_bo_1d(ji) )",
+        "DO iter = 1, ndrainage",
+        "DO jk = 1, nlay_i"
+       ]
+      ],
+      "618": [
+       "r",
+       "zv_br(jk) = zmsk(jk) * sz_i_1d(ji,jk) / zs_br(jk)",
+       [
+        "CASE( 4 )",
+        "IF( ln_flushing )",
+        "DO ji = 1, npti",
+        "IF( h_i_1d(ji) >= rn_sal_himin .AND. zhmelt < 0._wp )",
+        "DO iter = 1, nflushing",
+        "DO jk = 1, nlay_i"
+       ]
+      ],
+      "641": [
+       "r",
+       "zs_min = MIN( zs_min , sz_i_1d(ji,jk) + zds(jk) )",
+       [
+        "CASE( 4 )",
+        "IF( ln_flushing )",
+        "DO ji = 1, npti",
+        "IF( h_i_1d(ji) >= rn_sal_himin .AND. zhmelt < 0._wp )",
+        "DO iter = 1, nflushing",
+        "IF( zv_brmin >= rn_vbrc )",
+        "DO jk = 1, nlay_i"
+       ]
+      ],
+      "644": [
+       "r",
+       "zds(jk) = MAX( MIN( 0._wp, zds(jk) ), -sz_i_1d(ji,jk) + MIN( rn_simin, rn_sinew*sss_1d(ji) ) )",
+       [
+        "CASE( 4 )",
+        "IF( ln_flushing )",
+        "DO ji = 1, npti",
+        "IF( h_i_1d(ji) >= rn_sal_himin .AND. zhmelt < 0._wp )",
+        "DO iter = 1, nflushing",
+        "IF( zv_brmin >= rn_vbrc )",
+        "DO jk = 1, nlay_i"
+       ]
+      ],
+      "648": [
+       "wr",
+       "sz_i_1d(ji,jk) = sz_i_1d(ji,jk) + zds(jk)",
+       [
+        "CASE( 4 )",
+        "IF( ln_flushing )",
+        "DO ji = 1, npti",
+        "IF( h_i_1d(ji) >= rn_sal_himin .AND. zhmelt < 0._wp )",
+        "DO iter = 1, nflushing",
+        "IF( zv_brmin >= rn_vbrc )",
+        "DO jk = 1, nlay_i"
+       ]
+      ],
+      "675": [
+       "r",
+       "zsal = sz_i_1d(ji,jk)",
+       [
+        "CASE( 4 )",
+        "IF( ln_drainage .OR. ln_flushing )",
+        "DO ji = 1, npti",
+        "DO jk = 1, nlay_i"
+       ]
+      ],
+      "677": [
+       "wr",
+       "sz_i_1d(ji,jk) = MIN( MAX( rn_simin, sz_i_1d(ji,jk) ), rn_sinew*sss_1d(ji) )",
+       [
+        "CASE( 4 )",
+        "IF( ln_drainage .OR. ln_flushing )",
+        "DO ji = 1, npti",
+        "DO jk = 1, nlay_i"
+       ]
+      ],
+      "679": [
+       "r",
+       "sfx_res_1d(ji) = sfx_res_1d(ji) - rhoi * a_i_1d(ji) * h_i_1d(ji) * r1_nlay_i * ( sz_i_1d(ji,jk) - zsal ) * r1_Dt_ice",
+       [
+        "CASE( 4 )",
+        "IF( ln_drainage .OR. ln_flushing )",
+        "DO ji = 1, npti",
+        "DO jk = 1, nlay_i"
+       ]
+      ]
+     },
+     "zdh": {},
+     "zperm": {
+      "386": [
+       "w",
+       "zperm = 3.e-8_wp * zv_br(jk2)*zv_br(jk2)*zv_br(jk2)",
+       [
+        "CASE( 4 )",
+        "IF( ln_drainage )",
+        "DO ji = 1, npti",
+        "IF( h_i_1d(ji) >= rn_sal_himin .AND. zhmelt >= 0._wp .AND. zs_brmax > sss_1d(ji) .AND. t_su_1d(ji) <= t_bo_1d(ji) )",
+        "ELSEIF( np_perm_eff == 2 )",
+        "DO jk = 1, nlay_i",
+        "DO jk2 = jk, nlay_i"
+       ]
+      ],
+      "387": [
+       "r",
+       "ztmp = ztmp + 1._wp / zperm",
+       [
+        "CASE( 4 )",
+        "IF( ln_drainage )",
+        "DO ji = 1, npti",
+        "IF( h_i_1d(ji) >= rn_sal_himin .AND. zhmelt >= 0._wp .AND. zs_brmax > sss_1d(ji) .AND. t_su_1d(ji) <= t_bo_1d(ji) )",
+        "ELSEIF( np_perm_eff == 2 )",
+        "DO jk = 1, nlay_i",
+        "DO jk2 = jk, nlay_i"
+       ]
+      ],
+      "471": [
+       "w",
+       "zperm = 3.e-8_wp * zv_br(jk2)*zv_br(jk2)*zv_br(jk2)",
+       [
+        "CASE( 4 )",
+        "IF( ln_drainage )",
+        "DO ji = 1, npti",
+        "IF( h_i_1d(ji) >= rn_sal_himin .AND. zhmelt >= 0._wp .AND. zs_brmax > sss_1d(ji) .AND. t_su_1d(ji) <= t_bo_1d(ji) )",
+        "DO iter = 1, ndrainage",
+        "IF( iter > 1 )",
+        "ELSEIF( np_perm_eff == 2 )",
+        "DO jk = 1, nlay_i",
+        "DO jk2 = jk, nlay_i"
+       ]
+      ],
+      "472": [
+       "r",
+       "ztmp = ztmp + 1._wp / zperm",
+       [
+        "CASE( 4 )",
+        "IF( ln_drainage )",
+        "DO ji = 1, npti",
+        "IF( h_i_1d(ji) >= rn_sal_himin .AND. zhmelt >= 0._wp .AND. zs_brmax > sss_1d(ji) .AND. t_su_1d(ji) <= t_bo_1d(ji) )",
+        "DO iter = 1, ndrainage",
+        "IF( iter > 1 )",
+        "ELSEIF( np_perm_eff == 2 )",
+        "DO jk = 1, nlay_i",
+        "DO jk2 = jk, nlay_i"
+       ]
+      ]
+     },
+     "zra": {
+      "397": [
+       "w",
+       "zRa(jk) = zcp_br * grav * zbeta * MAX( 0._wp, zs_br(jk) - sss_1d(ji)) * zperm_eff(jk) * h_i_1d(ji) * ( 1._wp - z_mid(jk) ) * ( z1_cnd_br * z1_visc )",
+       [
+        "CASE( 4 )",
+        "IF( ln_drainage )",
+        "DO ji = 1, npti",
+        "IF( h_i_1d(ji) >= rn_sal_himin .AND. zhmelt >= 0._wp .AND. zs_brmax > sss_1d(ji) .AND. t_su_1d(ji) <= t_bo_1d(ji) )",
+        "DO jk = 1, nlay_i"
+       ]
+      ],
+      "411": [
+       "r",
+       "IF ( zRa(jk) >= rn_Rc_RJW ) THEN",
+       [
+        "CASE( 4 )",
+        "IF( ln_drainage )",
+        "DO ji = 1, npti",
+        "IF( h_i_1d(ji) >= rn_sal_himin .AND. zhmelt >= 0._wp .AND. zs_brmax > sss_1d(ji) .AND. t_su_1d(ji) <= t_bo_1d(ji) )",
+        "IF( nn_sal_scheme == 1 )",
+        "DO jk = nlay_i,1,-1"
+       ]
+      ],
+      "412": [
+       "r",
+       "zRae = MAX( zRae , zRa(jk) - rn_Rc_RJW )",
+       [
+        "CASE( 4 )",
+        "IF( ln_drainage )",
+        "DO ji = 1, npti",
+        "IF( h_i_1d(ji) >= rn_sal_himin .AND. zhmelt >= 0._wp .AND. zs_brmax > sss_1d(ji) .AND. t_su_1d(ji) <= t_bo_1d(ji) )",
+        "IF( nn_sal_scheme == 1 )",
+        "DO jk = nlay_i,1,-1",
+        "IF( zRa(jk) >= rn_Rc_RJW )"
+       ]
+      ],
+      "428": [
+       "r",
+       "zRae = zRae + MAX( zRa(jk) - rn_Rc_GN, 0._wp )",
+       [
+        "CASE( 4 )",
+        "IF( ln_drainage )",
+        "DO ji = 1, npti",
+        "IF( h_i_1d(ji) >= rn_sal_himin .AND. zhmelt >= 0._wp .AND. zs_brmax > sss_1d(ji) .AND. t_su_1d(ji) <= t_bo_1d(ji) )",
+        "ELSEIF ( nn_sal_scheme == 2 )",
+        "DO jk = 1, nlay_i"
+       ]
+      ],
+      "482": [
+       "w",
+       "zRa(jk) = zcp_br * grav * zbeta * MAX( 0._wp, zs_br(jk) - sss_1d(ji)) * zperm_eff(jk) * h_i_1d(ji) * ( 1._wp - z_mid(jk) ) * ( z1_cnd_br * z1_visc )",
+       [
+        "CASE( 4 )",
+        "IF( ln_drainage )",
+        "DO ji = 1, npti",
+        "IF( h_i_1d(ji) >= rn_sal_himin .AND. zhmelt >= 0._wp .AND. zs_brmax > sss_1d(ji) .AND. t_su_1d(ji) <= t_bo_1d(ji) )",
+        "DO iter = 1, ndrainage",
+        "IF( iter > 1 )",
+        "DO jk = 1, nlay_i"
+       ]
+      ],
+      "496": [
+       "r",
+       "IF ( zRa(jk) >= rn_Rc_RJW ) THEN",
+       [
+        "CASE( 4 )",
+        "IF( ln_drainage )",
+        "DO ji = 1, npti",
+        "IF( h_i_1d(ji) >= rn_sal_himin .AND. zhmelt >= 0._wp .AND. zs_brmax > sss_1d(ji) .AND. t_su_1d(ji) <= t_bo_1d(ji) )",
+        "DO iter = 1, ndrainage",
+        "IF( iter > 1 )",
+        "IF( nn_sal_scheme == 1 )",
+        "DO jk = nlay_i,1,-1"
+       ]
+      ],
+      "497": [
+       "r",
+       "zRae = MAX( zRae , zRa(jk) - rn_Rc_RJW )",
+       [
+        "CASE( 4 )",
+        "IF( ln_drainage )",
+        "DO ji = 1, npti",
+        "IF( h_i_1d(ji) >= rn_sal_himin .AND. zhmelt >= 0._wp .AND. zs_brmax > sss_1d(ji) .AND. t_su_1d(ji) <= t_bo_1d(ji) )",
+        "DO iter = 1, ndrainage",
+        "IF( iter > 1 )",
+        "IF( nn_sal_scheme == 1 )",
+        "DO jk = nlay_i,1,-1",
+        "IF( zRa(jk) >= rn_Rc_RJW )"
+       ]
+      ],
+      "513": [
+       "r",
+       "zRae = zRae + MAX( zRa(jk) - rn_Rc_GN, 0._wp )",
+       [
+        "CASE( 4 )",
+        "IF( ln_drainage )",
+        "DO ji = 1, npti",
+        "IF( h_i_1d(ji) >= rn_sal_himin .AND. zhmelt >= 0._wp .AND. zs_brmax > sss_1d(ji) .AND. t_su_1d(ji) <= t_bo_1d(ji) )",
+        "DO iter = 1, ndrainage",
+        "IF( iter > 1 )",
+        "ELSEIF ( nn_sal_scheme == 2 )",
+        "DO jk = 1, nlay_i"
+       ]
+      ]
+     },
+     "zrae": {
+      "409": [
+       "w",
+       "zRae = 0._wp",
+       [
+        "CASE( 4 )",
+        "IF( ln_drainage )",
+        "DO ji = 1, npti",
+        "IF( h_i_1d(ji) >= rn_sal_himin .AND. zhmelt >= 0._wp .AND. zs_brmax > sss_1d(ji) .AND. t_su_1d(ji) <= t_bo_1d(ji) )",
+        "IF( nn_sal_scheme == 1 )"
+       ]
+      ],
+      "412": [
+       "wr",
+       "zRae = MAX( zRae , zRa(jk) - rn_Rc_RJW )",
+       [
+        "CASE( 4 )",
+        "IF( ln_drainage )",
+        "DO ji = 1, npti",
+        "IF( h_i_1d(ji) >= rn_sal_himin .AND. zhmelt >= 0._wp .AND. zs_brmax > sss_1d(ji) .AND. t_su_1d(ji) <= t_bo_1d(ji) )",
+        "IF( nn_sal_scheme == 1 )",
+        "DO jk = nlay_i,1,-1",
+        "IF( zRa(jk) >= rn_Rc_RJW )"
+       ]
+      ],
+      "421": [
+       "r",
+       "zw_br(jk) = - rn_alpha_RJW * zRae * ( zcnd_br * z1_cp_br ) * ( z_mid(jk) - zc ) * z1_h_i * z1_c2",
+       [
+        "CASE( 4 )",
+        "IF( ln_drainage )",
+        "DO ji = 1, npti",
+        "IF( h_i_1d(ji) >= rn_sal_himin .AND. zhmelt >= 0._wp .AND. zs_brmax > sss_1d(ji) .AND. t_su_1d(ji) <= t_bo_1d(ji) )",
+        "IF( nn_sal_scheme == 1 )",
+        "DO jk = jc, nlay_i"
+       ]
+      ],
+      "426": [
+       "w",
+       "zRae = 0._wp",
+       [
+        "CASE( 4 )",
+        "IF( ln_drainage )",
+        "DO ji = 1, npti",
+        "IF( h_i_1d(ji) >= rn_sal_himin .AND. zhmelt >= 0._wp .AND. zs_brmax > sss_1d(ji) .AND. t_su_1d(ji) <= t_bo_1d(ji) )",
+        "ELSEIF ( nn_sal_scheme == 2 )"
+       ]
+      ],
+      "428": [
+       "wr",
+       "zRae = zRae + MAX( zRa(jk) - rn_Rc_GN, 0._wp )",
+       [
+        "CASE( 4 )",
+        "IF( ln_drainage )",
+        "DO ji = 1, npti",
+        "IF( h_i_1d(ji) >= rn_sal_himin .AND. zhmelt >= 0._wp .AND. zs_brmax > sss_1d(ji) .AND. t_su_1d(ji) <= t_bo_1d(ji) )",
+        "ELSEIF ( nn_sal_scheme == 2 )",
+        "DO jk = 1, nlay_i"
+       ]
+      ],
+      "429": [
+       "r",
+       "zw_br(jk) = - rn_alpha_GN / zrhob_GN * zRae * h_i_1d(ji) * r1_nlay_i",
+       [
+        "CASE( 4 )",
+        "IF( ln_drainage )",
+        "DO ji = 1, npti",
+        "IF( h_i_1d(ji) >= rn_sal_himin .AND. zhmelt >= 0._wp .AND. zs_brmax > sss_1d(ji) .AND. t_su_1d(ji) <= t_bo_1d(ji) )",
+        "ELSEIF ( nn_sal_scheme == 2 )",
+        "DO jk = 1, nlay_i"
+       ]
+      ],
+      "494": [
+       "w",
+       "zRae = 0._wp",
+       [
+        "CASE( 4 )",
+        "IF( ln_drainage )",
+        "DO ji = 1, npti",
+        "IF( h_i_1d(ji) >= rn_sal_himin .AND. zhmelt >= 0._wp .AND. zs_brmax > sss_1d(ji) .AND. t_su_1d(ji) <= t_bo_1d(ji) )",
+        "DO iter = 1, ndrainage",
+        "IF( iter > 1 )",
+        "IF( nn_sal_scheme == 1 )"
+       ]
+      ],
+      "497": [
+       "wr",
+       "zRae = MAX( zRae , zRa(jk) - rn_Rc_RJW )",
+       [
+        "CASE( 4 )",
+        "IF( ln_drainage )",
+        "DO ji = 1, npti",
+        "IF( h_i_1d(ji) >= rn_sal_himin .AND. zhmelt >= 0._wp .AND. zs_brmax > sss_1d(ji) .AND. t_su_1d(ji) <= t_bo_1d(ji) )",
+        "DO iter = 1, ndrainage",
+        "IF( iter > 1 )",
+        "IF( nn_sal_scheme == 1 )",
+        "DO jk = nlay_i,1,-1",
+        "IF( zRa(jk) >= rn_Rc_RJW )"
+       ]
+      ],
+      "506": [
+       "r",
+       "zw_br(jk) = - rn_alpha_RJW * zRae * ( zcnd_br * z1_cp_br ) * ( z_mid(jk) - zc ) * z1_h_i * z1_c2",
+       [
+        "CASE( 4 )",
+        "IF( ln_drainage )",
+        "DO ji = 1, npti",
+        "IF( h_i_1d(ji) >= rn_sal_himin .AND. zhmelt >= 0._wp .AND. zs_brmax > sss_1d(ji) .AND. t_su_1d(ji) <= t_bo_1d(ji) )",
+        "DO iter = 1, ndrainage",
+        "IF( iter > 1 )",
+        "IF( nn_sal_scheme == 1 )",
+        "DO jk = jc, nlay_i"
+       ]
+      ],
+      "511": [
+       "w",
+       "zRae = 0._wp",
+       [
+        "CASE( 4 )",
+        "IF( ln_drainage )",
+        "DO ji = 1, npti",
+        "IF( h_i_1d(ji) >= rn_sal_himin .AND. zhmelt >= 0._wp .AND. zs_brmax > sss_1d(ji) .AND. t_su_1d(ji) <= t_bo_1d(ji) )",
+        "DO iter = 1, ndrainage",
+        "IF( iter > 1 )",
+        "ELSEIF ( nn_sal_scheme == 2 )"
+       ]
+      ],
+      "513": [
+       "wr",
+       "zRae = zRae + MAX( zRa(jk) - rn_Rc_GN, 0._wp )",
+       [
+        "CASE( 4 )",
+        "IF( ln_drainage )",
+        "DO ji = 1, npti",
+        "IF( h_i_1d(ji) >= rn_sal_himin .AND. zhmelt >= 0._wp .AND. zs_brmax > sss_1d(ji) .AND. t_su_1d(ji) <= t_bo_1d(ji) )",
+        "DO iter = 1, ndrainage",
+        "IF( iter > 1 )",
+        "ELSEIF ( nn_sal_scheme == 2 )",
+        "DO jk = 1, nlay_i"
+       ]
+      ],
+      "514": [
+       "r",
+       "zw_br(jk) = - rn_alpha_GN / zrhob_GN * zRae * h_i_1d(ji) * r1_nlay_i",
+       [
+        "CASE( 4 )",
+        "IF( ln_drainage )",
+        "DO ji = 1, npti",
+        "IF( h_i_1d(ji) >= rn_sal_himin .AND. zhmelt >= 0._wp .AND. zs_brmax > sss_1d(ji) .AND. t_su_1d(ji) <= t_bo_1d(ji) )",
+        "DO iter = 1, ndrainage",
+        "IF( iter > 1 )",
+        "ELSEIF ( nn_sal_scheme == 2 )",
+        "DO jk = 1, nlay_i"
+       ]
+      ]
+     },
+     "zs_min": {
+      "356": [
+       "w",
+       "zs_min = 0._wp",
+       [
+        "CASE( 4 )",
+        "IF( ln_drainage )",
+        "DO ji = 1, npti"
+       ]
+      ],
+      "535": [
+       "wr",
+       "zs_min = MIN( zs_min , sz_i_1d(ji,jk) + zds(jk) )",
+       [
+        "CASE( 4 )",
+        "IF( ln_drainage )",
+        "DO ji = 1, npti",
+        "IF( h_i_1d(ji) >= rn_sal_himin .AND. zhmelt >= 0._wp .AND. zs_brmax > sss_1d(ji) .AND. t_su_1d(ji) <= t_bo_1d(ji) )",
+        "DO iter = 1, ndrainage",
+        "DO jk = 1, nlay_i"
+       ]
+      ],
+      "554": [
+       "r",
+       "IF( zs_min < 0._wp ) THEN ; sneg_drain_1d(ji) = zs_min",
+       [
+        "CASE( 4 )",
+        "IF( ln_drainage )",
+        "DO ji = 1, npti",
+        "IF( ln_sal_chk)"
+       ]
+      ],
+      "575": [
+       "w",
+       "zs_min = 0._wp",
+       [
+        "CASE( 4 )",
+        "IF( ln_flushing )",
+        "DO ji = 1, npti"
+       ]
+      ],
+      "641": [
+       "wr",
+       "zs_min = MIN( zs_min , sz_i_1d(ji,jk) + zds(jk) )",
+       [
+        "CASE( 4 )",
+        "IF( ln_flushing )",
+        "DO ji = 1, npti",
+        "IF( h_i_1d(ji) >= rn_sal_himin .AND. zhmelt < 0._wp )",
+        "DO iter = 1, nflushing",
+        "IF( zv_brmin >= rn_vbrc )",
+        "DO jk = 1, nlay_i"
+       ]
+      ],
+      "663": [
+       "r",
+       "IF( zs_min < 0._wp ) THEN ; sneg_flush_1d(ji) = zs_min",
+       [
+        "CASE( 4 )",
+        "IF( ln_flushing )",
+        "DO ji = 1, npti",
+        "IF( ln_sal_chk )"
+       ]
+      ]
+     },
+     "zv": {},
+     "zv_b": {},
+     "zvold": {},
+     "zvold2": {}
+    }
+   },
+   "instructions_without_token": [],
+   "ppsrc_sha256": "db71f3961ffd52fdce8092f9930d69a4abd2247b5b9cc744e9a00f5f9135c216",
+   "record_object_sha256": "a99e605bbf4b454393a2d2b499d6779c25dfd2037ddd7e78fc22a757f8a0f72b",
+   "routines": {
+    "ice_thd_sal": [
+     115,
+     687
+    ]
+   },
+   "sign_tokens": [],
+   "sites": {
+    "277": {
+     "enclosing": [
+      "CASE( 2 )",
+      "DO ji = 1, npti",
+      "IF( h_i_1d(ji) > rn_sal_himin )",
+      "IF( t_su_1d(ji) >= rt0 )"
+     ],
+     "instructions": [
+      {
+       "count": 10,
+       "dst": "VAR",
+       "op": "maxsd",
+       "src": "ZERO"
+      }
+     ],
+     "statement": "zds(1) = - MAX( s_i_1d(ji) - rn_sal_fl , 0._wp ) * z1_time_fl",
+     "tokens": [
+      "MAX"
+     ]
+    },
+    "279": {
+     "enclosing": [
+      "CASE( 2 )",
+      "DO ji = 1, npti",
+      "IF( h_i_1d(ji) > rn_sal_himin )",
+      "ELSEIF( t_su_1d(ji) <= t_bo_1d(ji) )"
+     ],
+     "instructions": [
+      {
+       "count": 10,
+       "dst": "VAR",
+       "op": "maxsd",
+       "src": "ZERO"
+      }
+     ],
+     "statement": "zds(1) = - MAX( s_i_1d(ji) - rn_sal_gd , 0._wp ) * z1_time_gd",
+     "tokens": [
+      "MAX"
+     ]
+    },
+    "292": {
+     "enclosing": [
+      "CASE( 2 )",
+      "DO ji = 1, npti",
+      "IF( h_i_1d(ji) > rn_sal_himin )",
+      "IF( ln_drainage .OR. ln_flushing )"
+     ],
+     "instructions": [
+      {
+       "count": 3,
+       "dst": "VAR",
+       "dst_defs": "addsd@284",
+       "op": "maxsd",
+       "src": "VAR",
+       "src_defs": "load@292"
+      },
+      {
+       "count": 3,
+       "dst": "VAR",
+       "dst_defs": "mulsd@292",
+       "op": "minsd",
+       "src": "VAR",
+       "src_defs": "maxsd@292"
+      }
+     ],
+     "statement": "s_i_1d(ji) = MIN( MAX( rn_simin, s_i_1d(ji) ), rn_sinew*sss_1d(ji) )",
+     "tokens": [
+      "MAX",
+      "MIN"
+     ]
+    },
+    "334": {
+     "enclosing": [
+      "CASE( 4 )",
+      "IF( ln_drainage )",
+      "DO ji = 1, npti"
+     ],
+     "instructions": [
+      {
+       "count": 1,
+       "dst": "VAR",
+       "op": "maxsd",
+       "src": "CONST:0x1.b7cdfd9d7bdbbp-34"
+      }
+     ],
+     "statement": "z1_h_i = 1._wp / MAX( epsi10, h_i_1d(ji) * r1_nlay_i )",
+     "tokens": [
+      "MAX"
+     ]
+    },
+    "350": {
+     "enclosing": [
+      "CASE( 4 )",
+      "IF( ln_drainage )",
+      "DO ji = 1, npti",
+      "DO jk = 1, nlay_i"
+     ],
+     "instructions": [
+      {
+       "count": 3,
+       "dst": "MIXED(VAR|ZERO)",
+       "op": "maxsd",
+       "src": "VAR"
+      },
+      {
+       "count": 2,
+       "dst": "VAR",
+       "dst_defs": "subsd@345",
+       "op": "maxsd",
+       "src": "VAR",
+       "src_defs": "maxsd@350"
+      },
+      {
+       "count": 1,
+       "dst": "VAR",
+       "dst_defs": "maxsd@350",
+       "op": "maxsd",
+       "src": "VAR",
+       "src_defs": "subsd@345"
+      },
+      {
+       "count": 1,
+       "dst": "ZERO",
+       "op": "maxsd",
+       "src": "VAR"
+      }
+     ],
+     "statement": "zs_brmax = MAX( zs_brmax, zs_br(jk) )",
+     "tokens": [
+      "MAX"
+     ]
+    },
+    "367": {
+     "enclosing": [
+      "CASE( 4 )",
+      "IF( ln_drainage )",
+      "DO ji = 1, npti",
+      "IF( h_i_1d(ji) >= rn_sal_himin .AND. zhmelt >= 0._wp .AND. zs_brmax > sss_1d(ji) .AND. t_su_1d(ji) <= t_bo_1d(ji) )",
+      "DO jk = 1, nlay_i"
+     ],
+     "instructions": [
+      {
+       "count": 15,
+       "dst": "VAR",
+       "op": "maxsd",
+       "src": "CONST:0x1.b7cdfd9d7bdbbp-34"
+      }
+     ],
+     "statement": "zv_br(jk) = zmsk(jk) * sz_i_1d(ji,jk) / MAX( zs_br(jk), epsi10 )",
+     "tokens": [
+      "MAX"
+     ]
+    },
+    "397": {
+     "enclosing": [
+      "CASE( 4 )",
+      "IF( ln_drainage )",
+      "DO ji = 1, npti",
+      "IF( h_i_1d(ji) >= rn_sal_himin .AND. zhmelt >= 0._wp .AND. zs_brmax > sss_1d(ji) .AND. t_su_1d(ji) <= t_bo_1d(ji) )",
+      "DO jk = 1, nlay_i"
+     ],
+     "instructions": [
+      {
+       "count": 7,
+       "dst": "VAR",
+       "op": "maxsd",
+       "src": "ZERO"
+      }
+     ],
+     "statement": "zRa(jk) = zcp_br * grav * zbeta * MAX( 0._wp, zs_br(jk) - sss_1d(ji)) * zperm_eff(jk) *  h_i_1d(ji) * ( 1._wp - z_mid(jk) ) * ( z1_cnd_br * z1_visc )",
+     "tokens": [
+      "MAX"
+     ]
+    },
+    "412": {
+     "enclosing": [
+      "CASE( 4 )",
+      "IF( ln_drainage )",
+      "DO ji = 1, npti",
+      "IF( h_i_1d(ji) >= rn_sal_himin .AND. zhmelt >= 0._wp .AND. zs_brmax > sss_1d(ji) .AND. t_su_1d(ji) <= t_bo_1d(ji) )",
+      "IF( nn_sal_scheme == 1 )",
+      "DO jk = nlay_i,1,-1",
+      "IF( zRa(jk) >= rn_Rc_RJW )"
+     ],
+     "instructions": [
+      {
+       "count": 14,
+       "dst": "MIXED(VAR|ZERO)",
+       "op": "maxsd",
+       "src": "VAR"
+      },
+      {
+       "count": 1,
+       "dst": "ZERO",
+       "op": "maxsd",
+       "src": "VAR"
+      }
+     ],
+     "statement": "zRae = MAX( zRae , zRa(jk) - rn_Rc_RJW )",
+     "tokens": [
+      "MAX"
+     ]
+    },
+    "428": {
+     "enclosing": [
+      "CASE( 4 )",
+      "IF( ln_drainage )",
+      "DO ji = 1, npti",
+      "IF( h_i_1d(ji) >= rn_sal_himin .AND. zhmelt >= 0._wp .AND. zs_brmax > sss_1d(ji) .AND. t_su_1d(ji) <= t_bo_1d(ji) )",
+      "ELSEIF ( nn_sal_scheme == 2 )",
+      "DO jk = 1, nlay_i"
+     ],
+     "instructions": [
+      {
+       "count": 7,
+       "dst": "VAR",
+       "op": "maxsd",
+       "src": "ZERO"
+      }
+     ],
+     "statement": "zRae = zRae + MAX( zRa(jk) - rn_Rc_GN, 0._wp )",
+     "tokens": [
+      "MAX"
+     ]
+    },
+    "434": {
+     "enclosing": [
+      "CASE( 4 )",
+      "IF( ln_drainage )",
+      "DO ji = 1, npti",
+      "IF( h_i_1d(ji) >= rn_sal_himin .AND. zhmelt >= 0._wp .AND. zs_brmax > sss_1d(ji) .AND. t_su_1d(ji) <= t_bo_1d(ji) )",
+      "ELSEIF ( nn_sal_scheme == 3 )",
+      "DO jk = 1, nlay_i"
+     ],
+     "instructions": [
+      {
+       "count": 15,
+       "dst": "VAR",
+       "op": "maxsd",
+       "src": "ZERO"
+      }
+     ],
+     "statement": "zw_br(jk) = - rn_alpha_CW  * 0.0589_wp * MAX( 0._wp, zv_br(jk)/rn_vbrc - 1._wp )",
+     "tokens": [
+      "MAX"
+     ]
+    },
+    "444": {
+     "enclosing": [
+      "CASE( 4 )",
+      "IF( ln_drainage )",
+      "DO ji = 1, npti",
+      "IF( h_i_1d(ji) >= rn_sal_himin .AND. zhmelt >= 0._wp .AND. zs_brmax > sss_1d(ji) .AND. t_su_1d(ji) <= t_bo_1d(ji) )",
+      "DO jk = 1, nlay_i"
+     ],
+     "instructions": [
+      {
+       "count": 7,
+       "dst": "MIXED(VAR|ZERO)",
+       "op": "maxsd",
+       "src": "VAR"
+      },
+      {
+       "count": 7,
+       "dst": "VAR",
+       "dst_defs": "maxsd@444",
+       "op": "maxsd",
+       "src": "VAR",
+       "src_defs": "andpd@444"
+      },
+      {
+       "count": 1,
+       "dst": "ZERO",
+       "op": "maxsd",
+       "src": "VAR"
+      }
+     ],
+     "statement": "zcfl_test = MAX( zcfl_test, ABS(zcfl) )",
+     "tokens": [
+      "MAX"
+     ]
+    },
+    "482": {
+     "enclosing": [
+      "CASE( 4 )",
+      "IF( ln_drainage )",
+      "DO ji = 1, npti",
+      "IF( h_i_1d(ji) >= rn_sal_himin .AND. zhmelt >= 0._wp .AND. zs_brmax > sss_1d(ji) .AND. t_su_1d(ji) <= t_bo_1d(ji) )",
+      "DO iter = 1, ndrainage",
+      "IF( iter > 1 )",
+      "DO jk = 1, nlay_i"
+     ],
+     "instructions": [
+      {
+       "count": 7,
+       "dst": "VAR",
+       "op": "maxsd",
+       "src": "ZERO"
+      }
+     ],
+     "statement": "zRa(jk) = zcp_br * grav * zbeta * MAX( 0._wp, zs_br(jk) - sss_1d(ji)) * zperm_eff(jk) *  h_i_1d(ji) * ( 1._wp - z_mid(jk) ) * ( z1_cnd_br * z1_visc )",
+     "tokens": [
+      "MAX"
+     ]
+    },
+    "497": {
+     "enclosing": [
+      "CASE( 4 )",
+      "IF( ln_drainage )",
+      "DO ji = 1, npti",
+      "IF( h_i_1d(ji) >= rn_sal_himin .AND. zhmelt >= 0._wp .AND. zs_brmax > sss_1d(ji) .AND. t_su_1d(ji) <= t_bo_1d(ji) )",
+      "DO iter = 1, ndrainage",
+      "IF( iter > 1 )",
+      "IF( nn_sal_scheme == 1 )",
+      "DO jk = nlay_i,1,-1",
+      "IF( zRa(jk) >= rn_Rc_RJW )"
+     ],
+     "instructions": [
+      {
+       "count": 14,
+       "dst": "MIXED(VAR|ZERO)",
+       "op": "maxsd",
+       "src": "VAR"
+      },
+      {
+       "count": 1,
+       "dst": "ZERO",
+       "op": "maxsd",
+       "src": "VAR"
+      }
+     ],
+     "statement": "zRae = MAX( zRae , zRa(jk) - rn_Rc_RJW )",
+     "tokens": [
+      "MAX"
+     ]
+    },
+    "513": {
+     "enclosing": [
+      "CASE( 4 )",
+      "IF( ln_drainage )",
+      "DO ji = 1, npti",
+      "IF( h_i_1d(ji) >= rn_sal_himin .AND. zhmelt >= 0._wp .AND. zs_brmax > sss_1d(ji) .AND. t_su_1d(ji) <= t_bo_1d(ji) )",
+      "DO iter = 1, ndrainage",
+      "IF( iter > 1 )",
+      "ELSEIF ( nn_sal_scheme == 2 )",
+      "DO jk = 1, nlay_i"
+     ],
+     "instructions": [
+      {
+       "count": 7,
+       "dst": "VAR",
+       "op": "maxsd",
+       "src": "ZERO"
+      }
+     ],
+     "statement": "zRae = zRae + MAX( zRa(jk) - rn_Rc_GN, 0._wp )",
+     "tokens": [
+      "MAX"
+     ]
+    },
+    "520": {
+     "enclosing": [
+      "CASE( 4 )",
+      "IF( ln_drainage )",
+      "DO ji = 1, npti",
+      "IF( h_i_1d(ji) >= rn_sal_himin .AND. zhmelt >= 0._wp .AND. zs_brmax > sss_1d(ji) .AND. t_su_1d(ji) <= t_bo_1d(ji) )",
+      "DO iter = 1, ndrainage",
+      "IF( iter > 1 )",
+      "ELSEIF ( nn_sal_scheme == 3 )",
+      "DO jk = 1, nlay_i"
+     ],
+     "instructions": [
+      {
+       "count": 15,
+       "dst": "VAR",
+       "op": "maxsd",
+       "src": "ZERO"
+      }
+     ],
+     "statement": "zw_br(jk) = - rn_alpha_CW  * 0.0589_wp * MAX( 0._wp, zv_br(jk)/rn_vbrc - 1._wp )",
+     "tokens": [
+      "MAX"
+     ]
+    },
+    "534": {
+     "enclosing": [
+      "CASE( 4 )",
+      "IF( ln_drainage )",
+      "DO ji = 1, npti",
+      "IF( h_i_1d(ji) >= rn_sal_himin .AND. zhmelt >= 0._wp .AND. zs_brmax > sss_1d(ji) .AND. t_su_1d(ji) <= t_bo_1d(ji) )",
+      "DO iter = 1, ndrainage",
+      "DO jk = 1, nlay_i"
+     ],
+     "instructions": [
+      {
+       "count": 1,
+       "dst": "VAR",
+       "op": "maxsd",
+       "src": "MIXED(VAR|ZERO)"
+      },
+      {
+       "count": 1,
+       "dst": "MIXED(VAR|ZERO)",
+       "op": "maxsd",
+       "src": "VAR"
+      },
+      {
+       "count": 1,
+       "dst": "VAR",
+       "dst_defs": "andpd@534",
+       "op": "maxsd",
+       "src": "VAR",
+       "src_defs": "maxsd@534"
+      }
+     ],
+     "statement": "zcfl_max = MAX( zcfl_max, ABS(zcfl) )",
+     "tokens": [
+      "MAX"
+     ]
+    },
+    "535": {
+     "enclosing": [
+      "CASE( 4 )",
+      "IF( ln_drainage )",
+      "DO ji = 1, npti",
+      "IF( h_i_1d(ji) >= rn_sal_himin .AND. zhmelt >= 0._wp .AND. zs_brmax > sss_1d(ji) .AND. t_su_1d(ji) <= t_bo_1d(ji) )",
+      "DO iter = 1, ndrainage",
+      "DO jk = 1, nlay_i"
+     ],
+     "instructions": [
+      {
+       "count": 1,
+       "dst": "VAR",
+       "op": "minsd",
+       "src": "MIXED(VAR|ZERO)"
+      },
+      {
+       "count": 1,
+       "dst": "MIXED(VAR|ZERO)",
+       "op": "minsd",
+       "src": "VAR"
+      },
+      {
+       "count": 1,
+       "dst": "VAR",
+       "dst_defs": "subsd@535",
+       "op": "minsd",
+       "src": "VAR",
+       "src_defs": "minsd@535"
+      }
+     ],
+     "statement": "zs_min   = MIN( zs_min , sz_i_1d(ji,jk) + zds(jk) )",
+     "tokens": [
+      "MIN"
+     ]
+    },
+    "538": {
+     "enclosing": [
+      "CASE( 4 )",
+      "IF( ln_drainage )",
+      "DO ji = 1, npti",
+      "IF( h_i_1d(ji) >= rn_sal_himin .AND. zhmelt >= 0._wp .AND. zs_brmax > sss_1d(ji) .AND. t_su_1d(ji) <= t_bo_1d(ji) )",
+      "DO iter = 1, ndrainage",
+      "DO jk = 1, nlay_i"
+     ],
+     "instructions": [
+      {
+       "count": 3,
+       "dst": "VAR",
+       "dst_defs": "xorpd@532",
+       "op": "maxsd",
+       "src": "VAR",
+       "src_defs": "subsd@538"
+      },
+      {
+       "count": 1,
+       "dst": "VAR",
+       "dst_defs": "mulsd@544",
+       "op": "minsd",
+       "src": "VAR",
+       "src_defs": "load@538"
+      }
+     ],
+     "statement": "zds(jk) = MAX( zds(jk), -sz_i_1d(ji,jk) + MIN( rn_simin, rn_sinew*sss_1d(ji) ) )",
+     "tokens": [
+      "MAX",
+      "MIN"
+     ]
+    },
+    "569": {
+     "enclosing": [
+      "CASE( 4 )",
+      "IF( ln_flushing )",
+      "DO ji = 1, npti"
+     ],
+     "instructions": [
+      {
+       "count": 1,
+       "dst": "VAR",
+       "op": "maxsd",
+       "src": "CONST:0x1.b7cdfd9d7bdbbp-34"
+      }
+     ],
+     "statement": "z1_h_i = 1._wp / MAX( h_i_1d(ji) * r1_nlay_i, epsi10 )",
+     "tokens": [
+      "MAX"
+     ]
+    },
+    "605": {
+     "enclosing": [
+      "CASE( 4 )",
+      "IF( ln_flushing )",
+      "DO ji = 1, npti",
+      "IF( h_i_1d(ji) >= rn_sal_himin .AND. zhmelt < 0._wp )",
+      "DO jk = 1, nlay_i"
+     ],
+     "instructions": [
+      {
+       "count": 3,
+       "dst": "MIXED(VAR|ZERO)",
+       "op": "maxsd",
+       "src": "VAR"
+      },
+      {
+       "count": 1,
+       "dst": "VAR",
+       "dst_defs": "maxsd@605",
+       "op": "maxsd",
+       "src": "VAR",
+       "src_defs": "andpd@605"
+      },
+      {
+       "count": 2,
+       "dst": "VAR",
+       "dst_defs": "andpd@605",
+       "op": "maxsd",
+       "src": "VAR",
+       "src_defs": "maxsd@605"
+      },
+      {
+       "count": 1,
+       "dst": "ZERO",
+       "op": "maxsd",
+       "src": "VAR"
+      }
+     ],
+     "statement": "zcfl_test = MAX( zcfl_test, ABS(zcfl) )",
+     "tokens": [
+      "MAX"
+     ]
+    },
+    "619": {
+     "enclosing": [
+      "CASE( 4 )",
+      "IF( ln_flushing )",
+      "DO ji = 1, npti",
+      "IF( h_i_1d(ji) >= rn_sal_himin .AND. zhmelt < 0._wp )",
+      "DO iter = 1, nflushing",
+      "DO jk = 1, nlay_i"
+     ],
+     "instructions": [
+      {
+       "count": 1,
+       "dst": "VAR",
+       "op": "minsd",
+       "src": "CONST:0x1.5af1d78b58c40p+66"
+      },
+      {
+       "count": 7,
+       "dst": "MIXED(CONST:0x1.5af1d78b58c40p+66|VAR)",
+       "op": "minsd",
+       "src": "VAR"
+      },
+      {
+       "count": 7,
+       "dst": "VAR",
+       "dst_defs": "minsd@619",
+       "op": "minsd",
+       "src": "VAR",
+       "src_defs": "divsd@618"
+      }
+     ],
+     "statement": "zv_brmin = MIN( zv_brmin, zv_br(jk) )",
+     "tokens": [
+      "MIN"
+     ]
+    },
+    "637": {
+     "enclosing": [
+      "CASE( 4 )",
+      "IF( ln_flushing )",
+      "DO ji = 1, npti",
+      "IF( h_i_1d(ji) >= rn_sal_himin .AND. zhmelt < 0._wp )",
+      "DO iter = 1, nflushing",
+      "IF( zv_brmin >= rn_vbrc )",
+      "DO jk = 1, nlay_i"
+     ],
+     "instructions": [
+      {
+       "count": 2,
+       "dst": "MIXED(VAR|ZERO)",
+       "op": "maxsd",
+       "src": "VAR"
+      },
+      {
+       "count": 1,
+       "dst": "VAR",
+       "dst_defs": "andpd@637",
+       "op": "maxsd",
+       "src": "VAR",
+       "src_defs": "andpd@637"
+      },
+      {
+       "count": 1,
+       "dst": "VAR",
+       "dst_defs": "maxsd@637",
+       "op": "maxsd",
+       "src": "VAR",
+       "src_defs": "andpd@637"
+      }
+     ],
+     "statement": "zcfl_max = MAX( zcfl_max, ABS(zcfl) )",
+     "tokens": [
+      "MAX"
+     ]
+    },
+    "641": {
+     "enclosing": [
+      "CASE( 4 )",
+      "IF( ln_flushing )",
+      "DO ji = 1, npti",
+      "IF( h_i_1d(ji) >= rn_sal_himin .AND. zhmelt < 0._wp )",
+      "DO iter = 1, nflushing",
+      "IF( zv_brmin >= rn_vbrc )",
+      "DO jk = 1, nlay_i"
+     ],
+     "instructions": [
+      {
+       "count": 2,
+       "dst": "MIXED(VAR|ZERO)",
+       "op": "minsd",
+       "src": "VAR"
+      },
+      {
+       "count": 1,
+       "dst": "VAR",
+       "dst_defs": "minsd@641",
+       "op": "minsd",
+       "src": "VAR",
+       "src_defs": "subsd@641"
+      },
+      {
+       "count": 1,
+       "dst": "VAR",
+       "dst_defs": "subsd@641",
+       "op": "minsd",
+       "src": "VAR",
+       "src_defs": "subsd@641"
+      }
+     ],
+     "statement": "zs_min  = MIN( zs_min , sz_i_1d(ji,jk) + zds(jk) )",
+     "tokens": [
+      "MIN"
+     ]
+    },
+    "644": {
+     "enclosing": [
+      "CASE( 4 )",
+      "IF( ln_flushing )",
+      "DO ji = 1, npti",
+      "IF( h_i_1d(ji) >= rn_sal_himin .AND. zhmelt < 0._wp )",
+      "DO iter = 1, nflushing",
+      "IF( zv_brmin >= rn_vbrc )",
+      "DO jk = 1, nlay_i"
+     ],
+     "instructions": [
+      {
+       "count": 2,
+       "dst": "VAR",
+       "dst_defs": "subsd@644",
+       "op": "maxsd",
+       "src": "VAR",
+       "src_defs": "minsd@644"
+      },
+      {
+       "count": 2,
+       "dst": "VAR",
+       "dst_defs": "minsd@644",
+       "op": "maxsd",
+       "src": "VAR",
+       "src_defs": "subsd@644"
+      },
+      {
+       "count": 1,
+       "dst": "VAR",
+       "dst_defs": "mulsd@644",
+       "op": "minsd",
+       "src": "VAR",
+       "src_defs": "load@644"
+      },
+      {
+       "count": 1,
+       "dst": "ZERO",
+       "op": "minsd",
+       "src": "VAR"
+      },
+      {
+       "count": 3,
+       "dst": "VAR",
+       "op": "minsd",
+       "src": "ZERO"
+      }
+     ],
+     "statement": "zds(jk) = MAX( MIN( 0._wp, zds(jk) ), -sz_i_1d(ji,jk) + MIN( rn_simin, rn_sinew*sss_1d(ji) ) )",
+     "tokens": [
+      "MAX",
+      "MIN",
+      "MIN"
+     ]
+    },
+    "677": {
+     "enclosing": [
+      "CASE( 4 )",
+      "IF( ln_drainage .OR. ln_flushing )",
+      "DO ji = 1, npti",
+      "DO jk = 1, nlay_i"
+     ],
+     "instructions": [
+      {
+       "count": 7,
+       "dst": "VAR",
+       "dst_defs": "load@675",
+       "op": "maxsd",
+       "src": "VAR",
+       "src_defs": "load@677"
+      },
+      {
+       "count": 7,
+       "dst": "VAR",
+       "dst_defs": "maxsd@677",
+       "op": "minsd",
+       "src": "VAR",
+       "src_defs": "mulsd@677"
+      }
+     ],
+     "statement": "sz_i_1d(ji,jk) = MIN( MAX( rn_simin, sz_i_1d(ji,jk) ), rn_sinew*sss_1d(ji) )",
+     "tokens": [
+      "MAX",
+      "MIN"
+     ]
+    }
+   },
+   "token_statements_without_instruction": {
+    "447": {
+     "statement": "ndrainage = MIN( nn_drainage, CEILING(zcfl_test*2._wp) )",
+     "tokens": [
+      "MIN"
+     ]
+    },
+    "448": {
+     "statement": "zdt   = rDt_ice / REAL( MAX( 1, ndrainage ) )",
+     "tokens": [
+      "MAX"
+     ]
+    },
+    "607": {
+     "statement": "nflushing = MIN( nn_flushing, CEILING(zcfl_test*2._wp) )",
+     "tokens": [
+      "MIN"
+     ]
+    },
+    "608": {
+     "statement": "zdt   = rDt_ice / REAL( MAX( 1, nflushing ) )",
+     "tokens": [
+      "MAX"
+     ]
+    }
+   }
+  }
+ },
+ "tie_lemmas": {
+  "L0": "MINSD/MAXSD returns its source operand on an equality or unordered comparison; equal finite nonzero operands have identical bits.",
+  "L1": "The production deck has finite, nonnegative layer thickness, positive salinity limits, and positive ice salinity at the O10 entry.",
+  "L2": "ABS produces +0 for either signed-zero input, and comparisons do not observe a zero sign."
+ },
+ "tie_verdicts": {
+  "sal:334": {
+   "proof": "Other operand is nonzero epsi06 (L0).",
+   "verdict": "NO_TIE"
+  },
+  "sal:350": {
+   "proof": "MAX(0,zv_b) is consumed only by a comparison (L2).",
+   "verdict": "MASKED"
+  },
+  "sal:367": {
+   "proof": "Other operand is nonzero epsi06 (L0).",
+   "verdict": "NO_TIE"
+  },
+  "sal:397": {
+   "proof": "A zero permeability is multiplied then bounded by later MAX sites.",
+   "verdict": "MASKED"
+  },
+  "sal:412": {
+   "proof": "zRa-zRacrit is nonnegative under its enclosing guard (L1).",
+   "verdict": "NO_TIE"
+  },
+  "sal:444": {
+   "proof": "Both candidates are ABS results, hence never -0 (L2).",
+   "verdict": "NO_TIE"
+  },
+  "sal:482": {
+   "proof": "A zero permeability is multiplied then bounded by later MAX sites.",
+   "verdict": "MASKED"
+  },
+  "sal:497": {
+   "proof": "zRa-zRacrit is nonnegative under its enclosing guard (L1).",
+   "verdict": "NO_TIE"
+  },
+  "sal:534": {
+   "proof": "Both candidates are ABS results, hence never -0 (L2).",
+   "verdict": "NO_TIE"
+  },
+  "sal:535": {
+   "proof": "zs_min starts +0 and deck salinities are positive (L1).",
+   "verdict": "NO_TIE"
+  },
+  "sal:538": {
+   "proof": "Both clamps use nonzero rn_simin/rn_simax (L0).",
+   "verdict": "NO_TIE"
+  },
+  "sal:569": {
+   "proof": "Other operand is nonzero epsi06 (L0).",
+   "verdict": "NO_TIE"
+  },
+  "sal:605": {
+   "proof": "Both candidates are ABS results, hence never -0 (L2).",
+   "verdict": "NO_TIE"
+  },
+  "sal:619": {
+   "proof": "Layer brine volumes are nonnegative on the deck (L1).",
+   "verdict": "NO_TIE"
+  },
+  "sal:637": {
+   "proof": "Both candidates are ABS results, hence never -0 (L2).",
+   "verdict": "NO_TIE"
+  },
+  "sal:641": {
+   "proof": "Both salinity candidates are positive on the deck (L1).",
+   "verdict": "NO_TIE"
+  },
+  "sal:644": {
+   "proof": "Both clamps use nonzero rn_simin/rn_simax (L0).",
+   "verdict": "NO_TIE"
+  },
+  "sal:677": {
+   "proof": "Both clamps use nonzero rn_simin/rn_simax (L0).",
+   "verdict": "NO_TIE"
+  }
+ }
+}

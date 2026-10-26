@@ -115,6 +115,19 @@ _OPTION2_LAYER_SHAPE = (1.0 / 3.0, 1.0, 5.0 / 3.0)
 _NEW_ICE_THICKNESS = 0.05  # C1D card rn_hinew, c1d_omip_l3_namelist_ice_cfg:113
 _MAXIMUM_ICE_CONCENTRATION = 0.99999
 
+# --- salinity-4 drainage/flushing (NEMO 5.0.2 icethd_sal.f90:240-249) ---
+_EPS06 = 1.0e-6
+_SAL4_CP_BRINE = 4.0e6
+_SAL4_BETA = 7.5e-4
+_SAL4_CONDUCTIVITY_BRINE = 0.523
+_SAL4_VISCOSITY_BRINE = 1.8e-6
+_SAL4_PERMEABILITY = 3.0e-8
+_SAL4_BRINE_DENSITY_SLOPE = 0.8e-3
+_SAL4_BRINE_VOLUME_SENTINEL = 1.0e20
+_SAL4_VC19_LINEAR = 18.7
+_SAL4_VC19_QUADRATIC = 0.519
+_SAL4_VC19_CUBIC = 0.00535
+
 
 # Compatibility constants for the public functions exposed by the parked
 # prototype.  The selected SI3 path below always receives IceConstantsConfig;
@@ -1555,6 +1568,28 @@ class SI3CategoryStages(NamedTuple):
     t_i: jax.Array
 
 
+class SI3SalinityOutputs(NamedTuple):
+    """Production salinity-4 exit and bounded-subcycle diagnostics."""
+
+    sz_i: jax.Array
+    sfx_bri: jax.Array
+    sfx_res: jax.Array
+    ndrainage: jax.Array
+    nflushing: jax.Array
+    cfl_drain: jax.Array
+    cfl_flush: jax.Array
+    smin_drain: jax.Array
+    smin_flush: jax.Array
+
+
+class SI3O10CategoryStages(NamedTuple):
+    """O9 exits followed by O10 salinity and second-temperature exits."""
+
+    o9: SI3CategoryStages
+    sal: SI3SalinityOutputs
+    t_i: jax.Array
+
+
 def si3_ice_thd_category_stages(*, entry: dict, fluxes: SI3DHFluxes, namelist: dict,
                                 rDt_ice, constants: IceConstantsConfig) -> SI3CategoryStages:
     """``ice_thd`` category body from the 1-D gather to the first ``ice_thd_temp``.
@@ -1594,6 +1629,396 @@ def si3_ice_thd_category_stages(*, entry: dict, fluxes: SI3DHFluxes, namelist: d
     )
     t_i = si3_ice_thd_temp(h_i=dh.h_i, e_i=dh.e_i, sz_i=dh.sz_i, constants=constants)
     return SI3CategoryStages(zdf, dh, t_i)
+
+
+def _sal4_vc19_brine(t_i, T0):
+    """VC19 brine salinity in the source order of ``icethd_sal.f90:342-350``."""
+
+    zt1 = nemo_source_round(t_i - T0)
+    zt2 = nemo_source_round(zt1 * zt1)
+    zt3 = nemo_source_round(zt2 * zt1)
+    linear = nemo_source_round(-_SAL4_VC19_LINEAR * zt1)
+    quadratic = nemo_source_round(_SAL4_VC19_QUADRATIC * zt2)
+    cubic = nemo_source_round(_SAL4_VC19_CUBIC * zt3)
+    return nemo_source_round(nemo_source_round(linear - quadratic) - cubic)
+
+
+def _sal4_effective_permeability(zv_br, *, initial):
+    """Production harmonic mean; only the pre-loop form has the early exit."""
+
+    nlay = zv_br.shape[-1]
+    out = []
+    one = jnp.ones_like(zv_br[..., 0])
+    zero = jnp.zeros_like(one)
+    for jk in range(nlay):
+        ztmp = zero
+        active = jnp.ones_like(one, dtype=bool)
+        for jk2 in range(jk, nlay):
+            low = zv_br[..., jk2] < _EPS06
+            go = active & (~low if initial else jnp.ones_like(low, dtype=bool))
+            safe_v = jnp.where(go, zv_br[..., jk2], one)
+            zperm = nemo_source_round(_SAL4_PERMEABILITY * safe_v)
+            zperm = nemo_source_round(zperm * safe_v)
+            zperm = nemo_source_round(zperm * safe_v)
+            reciprocal = nemo_source_round(one / zperm)
+            candidate = nemo_source_round(ztmp + reciprocal)
+            ztmp = jnp.where(go, candidate, jnp.where(active & low, zero, ztmp))
+            active = go
+        count = jnp.asarray(float(nlay - jk), dtype=zv_br.dtype)
+        safe_sum = jnp.where(ztmp > 0.0, ztmp, one)
+        value = nemo_source_round(count / safe_sum)
+        out.append(jnp.where(ztmp > 0.0, value, zero))
+    return jnp.stack(out, axis=-1)
+
+
+def _sal4_rjw_velocity(sz_i, zs_br, zmsk, sss, h_i, z_mid, z_edge, z1_h_i,
+                      *, gravity, rn_alpha_rjw, rn_rc_rjw, initial):
+    """RJW14 drainage velocity (`icethd_sal.f90:364-422,455-507`)."""
+
+    nlay = sz_i.shape[-1]
+    one = jnp.ones_like(h_i)
+    zero = jnp.zeros_like(h_i)
+    divisor = (
+        _maxsd(zs_br[..., 1:-1], _EPS10)
+        if initial
+        else zs_br[..., 1:-1]
+    )
+    zv_br = nemo_source_round(zmsk * sz_i)
+    zv_br = nemo_source_round(zv_br / divisor)
+    zperm_eff = _sal4_effective_permeability(zv_br, initial=initial)
+
+    z1_cp_br = nemo_source_round(_div_const(one, _SAL4_CP_BRINE))
+    z1_cnd_br = nemo_source_round(_div_const(one, _SAL4_CONDUCTIVITY_BRINE))
+    z1_visc = nemo_source_round(_div_const(one, _SAL4_VISCOSITY_BRINE))
+    transport_scale = nemo_source_round(z1_cnd_br * z1_visc)
+    rayleigh = []
+    for jk in range(nlay):
+        positive = _maxsd(nemo_source_round(zs_br[..., jk + 1] - sss), zero)
+        value = nemo_source_round(_SAL4_CP_BRINE * gravity)
+        value = nemo_source_round(value * _SAL4_BETA)
+        value = nemo_source_round(value * positive)
+        value = nemo_source_round(value * zperm_eff[..., jk])
+        value = nemo_source_round(value * h_i)
+        value = nemo_source_round(value * nemo_source_round(1.0 - z_mid[jk]))
+        value = nemo_source_round(value * transport_scale)
+        rayleigh.append(value)
+    rayleigh = jnp.stack(rayleigh, axis=-1)
+
+    jc = jnp.full(h_i.shape, nlay + 1, dtype=jnp.int32)
+    zc = zero
+    zrae = zero
+    for jk in range(nlay - 1, -1, -1):
+        excess = nemo_source_round(rayleigh[..., jk] - rn_rc_rjw)
+        hit = rayleigh[..., jk] >= rn_rc_rjw
+        zrae = jnp.where(hit, _maxsd(zrae, excess), zrae)
+        zc = jnp.where(hit, z_edge[jk], zc)
+        jc = jnp.where(hit, jk + 1, jc)
+
+    one_minus_zc = nemo_source_round(one - zc)
+    z1_c2 = nemo_source_round(one / nemo_source_round(one_minus_zc * one_minus_zc))
+    conductivity_over_capacity = nemo_source_round(_SAL4_CONDUCTIVITY_BRINE * z1_cp_br)
+    velocity = []
+    for jk in range(nlay):
+        value = nemo_source_round(-rn_alpha_rjw * zrae)
+        value = nemo_source_round(value * conductivity_over_capacity)
+        value = nemo_source_round(value * nemo_source_round(z_mid[jk] - zc))
+        value = nemo_source_round(value * z1_h_i)
+        value = nemo_source_round(value * z1_c2)
+        velocity.append(jnp.where((jk + 1) >= jc, value, zero))
+    return jnp.stack(velocity, axis=-1)
+
+
+def _sal4_flux_increment(rho_i, a_i, h_i, r1_nlay_i, zds, r1_Dt_ice):
+    value = nemo_source_round(rho_i * a_i)
+    value = nemo_source_round(value * h_i)
+    value = nemo_source_round(value * r1_nlay_i)
+    value = nemo_source_round(value * zds)
+    return nemo_source_round(value * r1_Dt_ice)
+
+
+def _si3_ice_thd_sal4_core(*, h_i, t_su, t_i, sz_i, t_bo, sss, a_i,
+                           dh_i_sum, dh_s_sum, sfx_bri, sfx_res, rDt_ice,
+                           r1_Dt_ice, r1_nlay_i, rho_i, rho_s, rho_w, gravity,
+                           rn_simin, rn_sinew, rn_sal_himin, nn_drainage,
+                           nn_flushing, rn_flushrate, rn_vbrc, rn_alpha_rjw,
+                           rn_rc_rjw, constants: IceConstantsConfig):
+    """Executing salinity-4 statements of ``ice_thd_sal.f90:311-683``."""
+
+    nlay = sz_i.shape[-1]
+    dtype = sz_i.dtype
+    one = jnp.ones_like(h_i)
+    zero = jnp.zeros_like(h_i)
+    rDt_ice = jnp.asarray(rDt_ice, dtype=dtype)
+    r1_Dt_ice = jnp.asarray(r1_Dt_ice, dtype=dtype)
+    r1_nlay_i = jnp.asarray(r1_nlay_i, dtype=dtype)
+
+    indices = jnp.arange(1, nlay + 1, dtype=dtype)
+    z_mid = nemo_source_round(nemo_source_round(indices - 0.5) * r1_nlay_i)
+    z_edge = nemo_source_round(jnp.arange(0, nlay + 1, dtype=dtype) * r1_nlay_i)
+    zs_inner = _sal4_vc19_brine(t_i, constants.T0)
+    zs_br = jnp.concatenate(
+        [zero[..., None], zs_inner, sss[..., None]], axis=-1
+    )
+    zmsk = jnp.where(
+        nemo_source_round(t_i - constants.T0) < -_EPS06,
+        jnp.ones_like(t_i),
+        jnp.zeros_like(t_i),
+    )
+    zhmelt = nemo_source_round(dh_s_sum + dh_i_sum)
+
+    # Gravity drainage: positive salt flux is into the ocean.  A negative layer
+    # salinity increment is therefore subtracted from the ice and added to sfx_bri.
+    layer_thickness = nemo_source_round(h_i * r1_nlay_i)
+    z1_h_drain = nemo_source_round(one / _maxsd(layer_thickness, _EPS10))
+    zs_brmax = zero
+    for jk in range(nlay):
+        zs_brmax = _maxsd(zs_brmax, zs_inner[..., jk])
+    drain_cell = (
+        (h_i >= rn_sal_himin)
+        & (zhmelt >= 0.0)
+        & (zs_brmax > sss)
+        & (t_su <= t_bo)
+    )
+    w0 = _sal4_rjw_velocity(
+        sz_i, zs_br, zmsk, sss, h_i, z_mid, z_edge, z1_h_drain,
+        gravity=gravity, rn_alpha_rjw=rn_alpha_rjw, rn_rc_rjw=rn_rc_rjw,
+        initial=True,
+    )
+    cfl_test = zero
+    for jk in range(nlay):
+        cfl = nemo_source_round(nemo_source_round(w0[..., jk] * rDt_ice) * z1_h_drain)
+        cfl_test = _maxsd(cfl_test, jnp.abs(cfl))
+    requested = jnp.ceil(nemo_source_round(cfl_test * 2.0)).astype(jnp.int32)
+    ndrain = jnp.where(
+        drain_cell, jnp.minimum(jnp.asarray(nn_drainage, jnp.int32), requested), 0
+    )
+    zdt_drain = nemo_source_round(
+        rDt_ice / jnp.maximum(jnp.asarray(1, jnp.int32), ndrain).astype(dtype)
+    )
+
+    def drainage_body(iteration, carry):
+        salinity, salt_flux, cfl_max, sal_min = carry
+        velocity = jax.lax.cond(
+            iteration > 0,
+            lambda _: _sal4_rjw_velocity(
+                salinity, zs_br, zmsk, sss, h_i, z_mid, z_edge, z1_h_drain,
+                gravity=gravity, rn_alpha_rjw=rn_alpha_rjw,
+                rn_rc_rjw=rn_rc_rjw, initial=False,
+            ),
+            lambda _: w0,
+            operand=None,
+        )
+        active = drain_cell & (iteration < ndrain)
+        for jk in range(nlay):
+            cfl = nemo_source_round(
+                nemo_source_round(velocity[..., jk] * zdt_drain) * z1_h_drain
+            )
+            brine_gradient = nemo_source_round(zs_br[..., jk + 2] - zs_br[..., jk + 1])
+            zds_raw = nemo_source_round(-cfl * brine_gradient)
+            raw_salinity = nemo_source_round(salinity[..., jk] + zds_raw)
+            cfl_max_next = _maxsd(cfl_max, jnp.abs(cfl))
+            sal_min_next = _minsd(sal_min, raw_salinity)
+            upper_product = nemo_source_round(rn_sinew * sss)
+            lower_bound = _minsd(rn_simin, upper_product)
+            floor_delta = nemo_source_round(-salinity[..., jk] + lower_bound)
+            zds = _maxsd(zds_raw, floor_delta)
+            sal_next = nemo_source_round(salinity[..., jk] + zds)
+            flux_next = nemo_source_round(
+                salt_flux
+                - _sal4_flux_increment(
+                    rho_i, a_i, h_i, r1_nlay_i, zds, r1_Dt_ice
+                )
+            )
+            salinity = salinity.at[..., jk].set(
+                jnp.where(active, sal_next, salinity[..., jk])
+            )
+            salt_flux = jnp.where(active, flux_next, salt_flux)
+            cfl_max = jnp.where(active, cfl_max_next, cfl_max)
+            sal_min = jnp.where(active, sal_min_next, sal_min)
+        return salinity, salt_flux, cfl_max, sal_min
+
+    sz_i, sfx_bri, cfl_drain, smin_drain = jax.lax.fori_loop(
+        0,
+        nn_drainage,
+        jax.checkpoint(drainage_body),
+        (sz_i, sfx_bri, zero, zero),
+    )
+
+    # Flushing uses upward meltwater flow.  The salt-flux convention remains
+    # positive into the ocean, identical to the drainage update above.
+    z1_h_flush = nemo_source_round(one / _maxsd(layer_thickness, _EPS10))
+
+    def flushing_velocity(jk):
+        ice_mass = nemo_source_round(dh_i_sum * rho_i)
+        snow_mass = nemo_source_round(dh_s_sum * rho_s)
+        melt_mass = nemo_source_round(ice_mass + snow_mass)
+        numerator = nemo_source_round(-rn_flushrate * melt_mass)
+        density_term = nemo_source_round(_SAL4_BRINE_DENSITY_SLOPE * zs_inner[..., jk])
+        density = nemo_source_round(rho_w * nemo_source_round(1.0 + density_term))
+        return nemo_source_round(nemo_source_round(numerator / density) * r1_Dt_ice)
+
+    flush_cell = (h_i >= rn_sal_himin) & (zhmelt < 0.0)
+    flush_velocity = jnp.stack([flushing_velocity(jk) for jk in range(nlay)], axis=-1)
+    cfl_test = zero
+    for jk in range(nlay):
+        cfl = nemo_source_round(
+            nemo_source_round(flush_velocity[..., jk] * rDt_ice) * z1_h_flush
+        )
+        cfl_test = _maxsd(cfl_test, jnp.abs(cfl))
+    requested = jnp.ceil(nemo_source_round(cfl_test * 2.0)).astype(jnp.int32)
+    nflush = jnp.where(
+        flush_cell, jnp.minimum(jnp.asarray(nn_flushing, jnp.int32), requested), 0
+    )
+    zdt_flush = nemo_source_round(
+        rDt_ice / jnp.maximum(jnp.asarray(1, jnp.int32), nflush).astype(dtype)
+    )
+
+    def flushing_body(iteration, carry):
+        salinity, salt_flux, cfl_max, sal_min = carry
+        zv_br = nemo_source_round(zmsk * salinity)
+        safe_brine = jnp.where(zs_inner != 0.0, zs_inner, jnp.ones_like(zs_inner))
+        zv_br = nemo_source_round(zv_br / safe_brine)
+        zv_brmin = jnp.full_like(h_i, _SAL4_BRINE_VOLUME_SENTINEL)
+        for jk in range(nlay):
+            zv_brmin = _minsd(zv_brmin, zv_br[..., jk])
+        active = flush_cell & (iteration < nflush) & (zv_brmin >= rn_vbrc)
+        for jk in range(nlay):
+            cfl = nemo_source_round(
+                nemo_source_round(flush_velocity[..., jk] * zdt_flush) * z1_h_flush
+            )
+            cfl_max_next = _maxsd(cfl_max, jnp.abs(cfl))
+            brine_gradient = nemo_source_round(zs_br[..., jk + 1] - zs_br[..., jk])
+            zds_raw = nemo_source_round(-cfl * brine_gradient)
+            raw_salinity = nemo_source_round(salinity[..., jk] + zds_raw)
+            sal_min_next = _minsd(sal_min, raw_salinity)
+            nonpositive = _minsd(zero, zds_raw)
+            upper_product = nemo_source_round(rn_sinew * sss)
+            lower_bound = _minsd(rn_simin, upper_product)
+            floor_delta = nemo_source_round(-salinity[..., jk] + lower_bound)
+            zds = _maxsd(nonpositive, floor_delta)
+            sal_next = nemo_source_round(salinity[..., jk] + zds)
+            flux_next = nemo_source_round(
+                salt_flux
+                - _sal4_flux_increment(
+                    rho_i, a_i, h_i, r1_nlay_i, zds, r1_Dt_ice
+                )
+            )
+            salinity = salinity.at[..., jk].set(
+                jnp.where(active, sal_next, salinity[..., jk])
+            )
+            salt_flux = jnp.where(active, flux_next, salt_flux)
+            cfl_max = jnp.where(active, cfl_max_next, cfl_max)
+            sal_min = jnp.where(active, sal_min_next, sal_min)
+        return salinity, salt_flux, cfl_max, sal_min
+
+    sz_i, sfx_bri, cfl_flush, smin_flush = jax.lax.fori_loop(
+        0,
+        nn_flushing,
+        jax.checkpoint(flushing_body),
+        (sz_i, sfx_bri, zero, zero),
+    )
+
+    for jk in range(nlay):
+        zsal = sz_i[..., jk]
+        lower = _maxsd(rn_simin, zsal)
+        upper = nemo_source_round(rn_sinew * sss)
+        bounded = _minsd(lower, upper)
+        delta = nemo_source_round(bounded - zsal)
+        flux_next = nemo_source_round(
+            sfx_res
+            - _sal4_flux_increment(
+                rho_i, a_i, h_i, r1_nlay_i, delta, r1_Dt_ice
+            )
+        )
+        sz_i = sz_i.at[..., jk].set(bounded)
+        sfx_res = flux_next
+
+    return SI3SalinityOutputs(
+        sz_i, sfx_bri, sfx_res, ndrain, nflush,
+        cfl_drain, cfl_flush, smin_drain, smin_flush,
+    )
+
+
+_SAL4_NAMELIST = (
+    "nn_icesal", "ln_drainage", "ln_flushing", "rn_simin", "rn_sinew",
+    "rn_sal_himin", "nn_liquidus", "nn_drainage", "nn_flushing",
+    "rn_flushrate", "rn_vbrc", "nn_sal_scheme", "rn_alpha_RJW",
+    "rn_Rc_RJW", "ln_sal_chk",
+)
+
+
+def si3_ice_thd_sal(*, h_i, t_su, t_i, sz_i, t_bo, sss, a_i, dh_i_sum,
+                    dh_s_sum, sfx_bri, sfx_res, namelist, rDt_ice,
+                    r1_Dt_ice, r1_nlay_i, rho_i, rho_s, rho_w, gravity,
+                    constants: IceConstantsConfig) -> SI3SalinityOutputs:
+    """Exact-input production salinity-4 stage; every physical input is required."""
+
+    arrays = {
+        "h_i": h_i, "t_su": t_su, "t_i": t_i, "sz_i": sz_i,
+        "t_bo": t_bo, "sss": sss, "a_i": a_i, "dh_i_sum": dh_i_sum,
+        "dh_s_sum": dh_s_sum, "sfx_bri": sfx_bri, "sfx_res": sfx_res,
+    }
+    arrays = {name: _required(name, value) for name, value in arrays.items()}
+    scalars = {
+        "rDt_ice": rDt_ice, "r1_Dt_ice": r1_Dt_ice,
+        "r1_nlay_i": r1_nlay_i, "rho_i": rho_i, "rho_s": rho_s,
+        "rho_w": rho_w, "gravity": gravity,
+    }
+    for name, value in scalars.items():
+        if value is None:
+            raise ValueError(f"SI3 ice_thd_sal requires {name!r}; no default")
+    if constants is None:
+        raise ValueError("SI3 ice_thd_sal requires constants; no default")
+    if namelist is None:
+        raise ValueError("SI3 ice_thd_sal requires the resolved namelist; no default")
+    nml = dict(namelist)
+    missing = [name for name in _SAL4_NAMELIST if nml.get(name) is None]
+    if missing:
+        raise ValueError(f"SI3 ice_thd_sal missing namelist values {missing}")
+    expected = {
+        "nn_icesal": 4, "ln_drainage": True, "ln_flushing": True,
+        "nn_liquidus": 2, "nn_drainage": 50, "nn_flushing": 5,
+        "nn_sal_scheme": 1, "ln_sal_chk": False,
+    }
+    wrong = {name: (nml[name], value) for name, value in expected.items() if nml[name] != value}
+    if wrong:
+        raise ValueError(f"SI3 ice_thd_sal transcribes only the production selectors; got {wrong}")
+    if arrays["sz_i"].shape[-1] != 10:
+        raise ValueError("SI3 O10 requires the production 10 ice layers")
+    return _si3_ice_thd_sal4_core(
+        **arrays, **scalars, rn_simin=nml["rn_simin"],
+        rn_sinew=nml["rn_sinew"], rn_sal_himin=nml["rn_sal_himin"],
+        nn_drainage=nml["nn_drainage"], nn_flushing=nml["nn_flushing"],
+        rn_flushrate=nml["rn_flushrate"], rn_vbrc=nml["rn_vbrc"],
+        rn_alpha_rjw=nml["rn_alpha_RJW"], rn_rc_rjw=nml["rn_Rc_RJW"],
+        constants=constants,
+    )
+
+
+def si3_ice_thd_o10_category_stages(*, entry: dict, fluxes: SI3DHFluxes,
+                                     sfx_bri, namelist: dict, rDt_ice,
+                                     r1_Dt_ice, r1_nlay_i, rho_i, rho_s,
+                                     rho_w, gravity,
+                                     constants: IceConstantsConfig) -> SI3O10CategoryStages:
+    """Selectable O9 + O10 category path through the second temperature call."""
+
+    o9 = si3_ice_thd_category_stages(
+        entry=entry, fluxes=fluxes, namelist=namelist,
+        rDt_ice=rDt_ice, constants=constants,
+    )
+    sal = si3_ice_thd_sal(
+        h_i=o9.dh.h_i, t_su=o9.dh.t_su, t_i=o9.t_i, sz_i=o9.dh.sz_i,
+        t_bo=entry["t_bo"], sss=entry["sss"], a_i=o9.dh.a_i,
+        dh_i_sum=o9.dh.dh.dh_i_sum, dh_s_sum=o9.dh.dh.dh_s_sum,
+        sfx_bri=sfx_bri, sfx_res=o9.dh.fluxes.sfx_res, namelist=namelist,
+        rDt_ice=rDt_ice, r1_Dt_ice=r1_Dt_ice, r1_nlay_i=r1_nlay_i,
+        rho_i=rho_i, rho_s=rho_s, rho_w=rho_w, gravity=gravity,
+        constants=constants,
+    )
+    t_i = si3_ice_thd_temp(
+        h_i=o9.dh.h_i, e_i=o9.dh.e_i, sz_i=sal.sz_i, constants=constants,
+    )
+    return SI3O10CategoryStages(o9, sal, t_i)
 
 
 def _c1d_dh_via_core(state, zdf, forcing, dt, constants):
@@ -2440,6 +2865,10 @@ __all__ = (
     "SI3Frazil",
     "si3_ice_thd_frazil",
     "ieee_lt_zero",
+    "SI3SalinityOutputs",
+    "SI3O10CategoryStages",
+    "si3_ice_thd_sal",
+    "si3_ice_thd_o10_category_stages",
 )
 
 

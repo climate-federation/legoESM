@@ -592,11 +592,11 @@ def _blocks(text: dict, ranges) -> dict[int, list[str]]:
     return out
 
 
-def _census(text: dict, ranges, blocks) -> dict:
+def _census(text: dict, ranges, blocks, census=CENSUS) -> dict:
     """Routine -> variable -> {statement line: [w|r|wr, statement, enclosing]} for the CENSUS variables."""
     out = {}
     for name, (b, e) in ranges.items():
-        for var in CENSUS.get(name, ()):
+        for var in census.get(name, ()):
             word = re.compile(rf"\b{var}\b", re.IGNORECASE)
             uses = {}
             for ln in range(b + 1, e):
@@ -627,13 +627,26 @@ def _ranges(path: Path, names):
     return out
 
 
-def audit(build: Path = BUILD, toolchain: Path = TOOLCHAIN) -> dict:
+def audit(
+    build: Path = BUILD,
+    toolchain: Path = TOOLCHAIN,
+    *,
+    routines=ROUTINES,
+    census=CENSUS,
+    tie_lemmas=TIE_LEMMAS,
+    tie_verdicts=TIE_VERDICTS,
+) -> dict:
+    """Audit selected ppsrc routines against their record-build objects.
+
+    Keyword arguments make the object-code machinery reusable by later SI3
+    rungs while preserving the O9 command-line report byte for byte.
+    """
     flags = _flags(build)
     env = dict(os.environ, PATH=f"{toolchain / 'bin'}:{os.environ['PATH']}")
-    report = {"build": str(build), "flags": flags, "objects": {}, "tie_lemmas": TIE_LEMMAS,
-              "tie_verdicts": TIE_VERDICTS}
+    report = {"build": str(build), "flags": flags, "objects": {}, "tie_lemmas": tie_lemmas,
+              "tie_verdicts": tie_verdicts}
     with tempfile.TemporaryDirectory() as tmp:
-        for obj_name, names in ROUTINES.items():
+        for obj_name, names in routines.items():
             src = build / "ppsrc/nemo" / f"{obj_name}.f90"
             gobj = Path(tmp) / f"{obj_name}.o"
             subprocess.run(["mpif90", "-c", "-cpp", *flags, "-g", f"-I{build / 'inc'}",
@@ -684,7 +697,7 @@ def audit(build: Path = BUILD, toolchain: Path = TOOLCHAIN) -> dict:
                 "record_object_sha256": hashlib.sha256(record.read_bytes()).hexdigest(),
                 "ppsrc_sha256": hashlib.sha256(src.read_bytes()).hexdigest(),
                 "routines": {k: list(v) for k, v in ranges.items()},
-                "census": _census(text, ranges, blocks),
+                "census": _census(text, ranges, blocks, census),
                 "sites": {str(ln): {"statement": text[ln], "enclosing": blocks[ln],
                                     "tokens": tokens.get(ln, []),
                                     "instructions": [dict(op=o, src=s, dst=d, count=n,
