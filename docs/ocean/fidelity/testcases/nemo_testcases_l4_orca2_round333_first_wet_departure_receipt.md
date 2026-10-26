@@ -743,4 +743,11 @@ test and no configuration change. Codex review: operator.
 
 ### Resume-8 final gates
 
-Final gate results are recorded after the landing commit below.
+The Resume-8 citation gate passes all 9 citations with zero failures, zero
+unmapped citations, and zero map-audit failures; all 9 self-test controls fire.
+The exact default ORCA2 landing battery passes all 152 tests in 1,261.12
+seconds. The private-import ratchet passes separately at 6 of 6 tests in 5.67
+seconds, and the revert-sensitive production-call-site suite passes all 3
+tests in 1.43 seconds. The operator-owned DINO month/push gate is not claimed
+here; the requested faithful DINO probe is the passing 66-hash measurement
+reported above.
