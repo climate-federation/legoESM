@@ -1121,6 +1121,19 @@ def test_epbl_scheme_takes_the_model_timestep():
     assert cfg.vertical_mixing.epbl.dt_s == 900.0
 
 
+def test_epbl_dt_mismatch_with_run_dt_raises():
+    """A ePBL dt_s that disagrees with the resolved run dt must raise."""
+    import inspect
+    from scripts.run import run_omip
+    cfg = build_config_from_args(parse_args(
+        ["--grid", "latlon", "--dt", "900", "--vertical-mixing-scheme", "epbl"]))
+    with pytest.raises(ValueError, match="900.0 s but the run timestep is 600.0 s"):
+        run_omip.check_epbl_dt(cfg, 600.0)
+    run_omip.check_epbl_dt(cfg, 900.0)
+    src = inspect.getsource(run_omip.run_omip_single)
+    assert "check_epbl_dt(run_config, dt)" in src
+
+
 def test_epbl_scheme_without_dt_raises():
     args = parse_args(["--grid", "latlon", "--vertical-mixing-scheme", "epbl"])
     with pytest.raises(ValueError, match="explicit --dt"):

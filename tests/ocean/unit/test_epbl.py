@@ -471,8 +471,10 @@ def test_explicit_diffusion_is_rejected():
 
 def test_config_defaults_are_the_mom6_defaults():
     """Canary: these defaults ARE the MOM6 defaults, which is the port's
-    contract. A change here silently changes every run that does not set the
-    field explicitly, so it must be a deliberate edit to this list."""
+    contract (except ``vonkar``: legoESM uses 0.4 where MOM6 uses 0.41, so it
+    is not listed here). A change here silently changes every run that does
+    not set the field explicitly, so it must be a deliberate edit to this
+    list."""
     c = EPBLConfig()
     assert (c.mstar_scheme, c.fixed_mstar, c.nstar) == ("constant", 1.2, 0.2)
     assert (c.tke_decay, c.ekman_scale_coef, c.omega_frac) == (2.5, 1.0, 0.0)
@@ -491,7 +493,7 @@ def test_config_defaults_are_the_mom6_defaults():
 
 # --- operator-split ordering option (k_after_surface_flux) -----------------
 
-def _epbl_scm(q_net, k_after_surface_flux, nsteps=6, dt=1200.0):
+def _epbl_scm(q_net, k_after_surface_flux, nsteps=6, dt=1200.0, set_dt_s=True):
     from legoesm.ocean.physics.combined import OceanPhysicsConfig
     from legoesm.ocean.physics.convection.config import OceanConvectionConfig
     from legoesm.ocean.scm import OceanColumnModel
@@ -501,7 +503,9 @@ def _epbl_scm(q_net, k_after_surface_flux, nsteps=6, dt=1200.0):
     nz = 20
     zc = create_ocean_z_star(n_levels=nz, H_max=20.0, dz_surface=1.0,
                              dz_deep=1.0)
-    cfg = EPBLConfig(dt_s=dt, k_after_surface_flux=k_after_surface_flux)
+    cfg = EPBLConfig(k_after_surface_flux=k_after_surface_flux)
+    if set_dt_s:
+        cfg = cfg._replace(dt_s=dt)
     phys = OceanPhysicsConfig(
         vertical_mixing=VerticalMixingConfig(scheme="epbl", epbl=cfg),
         convection=OceanConvectionConfig(scheme="none"),
@@ -533,6 +537,18 @@ def test_k_after_surface_flux_is_inert_without_flux():
     _, mom6 = _epbl_scm(0.0, True)
     np.testing.assert_allclose(np.asarray(mom6.T.data),
                                np.asarray(base.T.data), atol=1e-12)
+
+
+def test_scm_injects_model_dt_into_epbl():
+    """The SCM must run ePBL on its own dt, not EPBLConfig's 1800 s default:
+    a config that never sets dt_s gives the same column as one set to dt."""
+    assert EPBLConfig().dt_s != 1200.0  # else the comparison is vacuous
+    _, explicit = _epbl_scm(-200.0, False, dt=1200.0)
+    _, injected = _epbl_scm(-200.0, False, dt=1200.0, set_dt_s=False)
+    np.testing.assert_array_equal(np.asarray(injected.T.data),
+                                  np.asarray(explicit.T.data))
+    np.testing.assert_array_equal(np.asarray(injected.u.data),
+                                  np.asarray(explicit.u.data))
 
 
 def test_k_after_surface_flux_off_by_default():

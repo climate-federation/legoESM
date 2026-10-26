@@ -583,10 +583,13 @@ class OceanColumnModel:
         vmix = physics_config.vertical_mixing
         k_after_surface_flux = (vmix.scheme == "epbl"
                                 and vmix.epbl.k_after_surface_flux)
-        if k_after_surface_flux:
+        if vmix.scheme == "epbl":
+            # ePBL's TKE budget is per timestep: inject the SCM's dt so it
+            # never runs on EPBLConfig's placeholder dt_s.
             physics_config = physics_config._replace(
-                vertical_mixing=vmix._replace(
-                    epbl=vmix.epbl._replace(k_after_surface_flux=False)))
+                vertical_mixing=vmix._replace(epbl=vmix.epbl._replace(
+                    dt_s=float(dt),
+                    k_after_surface_flux=False)))
         physics_fn = make_ocean_physics(
             physics_config,
             apply_vertical_diffusion=not implicit_vertical_mixing,

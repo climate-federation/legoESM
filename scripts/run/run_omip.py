@@ -310,6 +310,18 @@ def with_kpp_cfl_dt(run_config: OMIPRunConfig, dt: float) -> OMIPRunConfig:
         kpp=vm.kpp._replace(cfl_cap_dt_s=float(dt))))
 
 
+def check_epbl_dt(run_config: OMIPRunConfig, dt: float) -> None:
+    """Raise if ePBL's per-timestep energy budget would use a dt other than
+    the run's.  ``EPBLConfig.dt_s`` is set from ``--dt`` upstream; this
+    catches any later path that leaves it disagreeing with the resolved dt.
+    """
+    vm = run_config.vertical_mixing
+    if vm.scheme == "epbl" and float(vm.epbl.dt_s) != float(dt):
+        raise ValueError(
+            f"EPBLConfig.dt_s is {float(vm.epbl.dt_s)} s but the run timestep "
+            f"is {float(dt)} s; ePBL must use the run dt")
+
+
 def _apply_drag_iwm_overrides(args, grid_type, grid, z_coord, config, model):
     """Post-``_create_setup`` application of the NEMO zdfdrg drag-law flags
     and the zdfiwm forcing maps (mirrors the run_omip_core2 replace-flat +
@@ -5919,6 +5931,7 @@ def run_omip_single(grid_type: str, args) -> dict:
         resolution = GRID_DEFAULTS[grid_type]["resolution"]
     dt = args.dt or GRID_DEFAULTS[grid_type]["dt"]
     run_config = with_kpp_cfl_dt(run_config, dt)
+    check_epbl_dt(run_config, dt)
     days = 30.0 if args.quick else args.days
     n_steps = int(days * 86400.0 / dt)
     diag_every = args.diag_every or max(1, int(86400.0 / dt))  # ~daily
