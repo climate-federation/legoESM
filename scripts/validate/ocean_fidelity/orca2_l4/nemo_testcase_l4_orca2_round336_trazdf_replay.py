@@ -253,8 +253,20 @@ def measure(label: str, deck_root: Path, record_root: Path,
     require(isinstance(traced, _NEMOWSTracerZDFTrace),
             "production tracer trace has the wrong type")
     passive, changed = outer._tree_bit_identical(ordinary, traced.state_after)
-    require(all(len(captures[name]) == 1 for name in captures),
+    # ``tracer_zdf_trace`` executes the diagnostic graph and then the ordinary
+    # reference graph used for its passive ``state_after`` (the production
+    # hook at ocean_model_latlon_cgrid.py:15496-15513).  Both therefore reach
+    # these shared zdf_phy helpers.  Prove the two observations agree bit for
+    # bit, then use the first: it belongs to the diagnostic graph whose solve
+    # operands are returned below.
+    require(all(len(captures[name]) == 2 for name in captures),
             f"profile capture census moved: { {name: len(v) for name, v in captures.items()} }")
+    for name, observations in captures.items():
+        require(
+            all(np.array_equal(left.view(np.uint64), right.view(np.uint64))
+                for left, right in zip(observations[0], observations[1], strict=True)),
+            f"{name} trace/reference profile observations differ",
+        )
 
     oracle_stage3 = rung10.read_state_frame(
         record_root / "oracle_stage_kt00000002_s3.bin", kt=2, stage=3)
