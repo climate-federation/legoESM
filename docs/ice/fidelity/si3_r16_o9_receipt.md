@@ -47,17 +47,17 @@ Stage sequence, per category (`ORCA2_SAS_ICE_O7_REF/BLD/ppsrc/nemo/icethd.f90:19
 `:201` `CALL ice_thd_temp                     ! --- Temperature update --- !`; the view stops before
 `:203` `CALL ice_thd_sal                      ! --- Ice salinity --- !` (O10).
 
-- ZDF (`icethd_zdf_bl99.f90` 148-879, `np_cnd_OFF`): model `packages/ice/legoesm/ice/bitz_lipscomb.py:532`
-  (`def _si3_zdf_bl99_core(`, Picard loop and n-row system) and `:923` (`def si3_ice_thd_zdf_bl99(`,
+- ZDF (`icethd_zdf_bl99.f90` 148-879, `np_cnd_OFF`): model `packages/ice/legoesm/ice/bitz_lipscomb.py:545`
+  (`def _si3_zdf_bl99_core(`, Picard loop and n-row system) and `:936` (`def si3_ice_thd_zdf_bl99(`,
   exact-input entry with `zq_ini`, interface fluxes, `ice_var_enthalpy`, `hfx_err_dif`, `hfx_dif`,
   `cnd_ice`, `t1_ice`, `t_si`). `rcnd_s` is the deck's `rn_cnd_s = 0.31`, passed explicitly.
-- DH (`icethd_dh.f90` 102-541, `nn_icesal = 4`): `packages/ice/legoesm/ice/bitz_lipscomb.py:1251`
-  (`def _si3_ice_thd_dh_core(`), `:1524` (`def si3_ice_thd_dh(`), remaps `:1216`
+- DH (`icethd_dh.f90` 102-541, `nn_icesal = 4`): `packages/ice/legoesm/ice/bitz_lipscomb.py:1264`
+  (`def _si3_ice_thd_dh_core(`), `:1537` (`def si3_ice_thd_dh(`), remaps `:1229`
   (`def _cumulative_remap(`, `snw_ent` and `ice_var_vremap`, including the salt remap
   `ORCA2_SAS_ICE_O7_REF/BLD/ppsrc/nemo/icethd_dh.f90:522`:
   `IF( nn_icesal == 4 )   CALL ice_var_vremap( zh_i_old, zs_i_old, sz_i_1d(ji,:) )`).
-- TEMP: `packages/ice/legoesm/ice/bitz_lipscomb.py:1508` (`def si3_ice_thd_temp(`); composition
-  `:1558` (`def si3_ice_thd_category_stages(`).
+- TEMP: `packages/ice/legoesm/ice/bitz_lipscomb.py:1521` (`def si3_ice_thd_temp(`); composition
+  `:1593` (`def si3_ice_thd_category_stages(`).
 - Five categories: the category body has no cross-category coupling in these three routines (`at_i` enters
   as data), so the stage function runs per gathered category; the test drives `jpl = 5` with
   `npti = 7, 3, 11, 1, 5`.
@@ -78,7 +78,7 @@ The record objects, a plain recompile and a `-g` recompile of the same ppsrc wit
 identical instruction streams (`icethd_zdf_bl99.o icethd_dh.o icethd.o icevar.o`). GCC 15 emits
 `MAX`/`MIN` as `maxsd`/`minsd` with per-site operand roles; which operand is returned on a signed-zero tie
 or NaN was read from the `-g` disassembly at every executing site and transcribed with two helpers
-(`packages/ice/legoesm/ice/bitz_lipscomb.py:439`, `def _maxsd(dst, src):`; `:444`, `def _minsd(dst, src):`).
+(`packages/ice/legoesm/ice/bitz_lipscomb.py:452`, `def _maxsd(dst, src):`; `:457`, `def _minsd(dst, src):`).
 Examples:
 
 - `ORCA2_SAS_ICE_O7_REF/BLD/ppsrc/nemo/icethd_dh.f90:128`: `zq_top = MAX( 0._wp, qml_ice_1d(ji) * rDt_ice )` —
@@ -90,9 +90,9 @@ Examples:
 - `ORCA2_SAS_ICE_O7_REF/BLD/ppsrc/nemo/icethd_dh.f90:221`: `zdum = - zq_top / MAX( ze_s(jk), epsi20 )   ! thickness change`
   keeps `ze_s`; `:194` (`zdeltah    = MAX( - evap_ice_1d(ji) * r1_rhos * rDt_ice, - h_s_1d(ji) )   ! amount of snw that sublimates (<0) or deposition (>0)`)
   and `:300` (`zdum               = MAX( - zh_i(jk) , - zevap_rema * r1_rhoi )`) are emitted as a negated
-  `MIN` that keeps the thickness (model `packages/ice/legoesm/ice/bitz_lipscomb.py:1334`).
+  `MIN` that keeps the thickness (model `packages/ice/legoesm/ice/bitz_lipscomb.py:1347`).
 - `ORCA2_SAS_ICE_O7_REF/BLD/ppsrc/nemo/icethd_dh.f90:490`: `zdum        = MIN( zdeltah, zh_s(jk) )         ! amount of snw that floods, > 0`
-  keeps `zdeltah` (model `packages/ice/legoesm/ice/bitz_lipscomb.py:1473`).
+  keeps `zdeltah` (model `packages/ice/legoesm/ice/bitz_lipscomb.py:1486`).
 - `ORCA2_SAS_ICE_O7_REF/BLD/ppsrc/nemo/icevar.f90:955`:
   `t_i_1d(ji,jk) = MIN( t_i_1d(ji,jk), ztmelts + rt0 ) ! Force t_i_1d to be lower than melting point => likely conservation issue`
   keeps `t_i`.
@@ -111,9 +111,9 @@ Evidence: superseded scratch `round16/objaudit/`; committed audit `scripts/valid
   materialized divisor gives 0. Executing sites: `ORCA2_SAS_ICE_O7_REF/BLD/ppsrc/nemo/icethd_zdf_bl99.f90:191`
   (`isnow_comb(ji) = h_s_1d(ji) / zh_min`) and `:857`
   (`cnd_ice_1d(ji) = 2._wp * ztcond_i(ji,0) / zhi_ssl ! cnd_ice is capped by: cond_i/zhi_ssl`); model
-  `packages/ice/legoesm/ice/bitz_lipscomb.py:449` (`def _div_const(x, c):`), used at `:590` and `:995`.
+  `packages/ice/legoesm/ice/bitz_lipscomb.py:462` (`def _div_const(x, c):`), used at `:603` and `:1008`.
 - Zero folding: XLA folds `0 + x` to `x`, so a `-0` added to a zeroed `dh_*` stays `-0`; the seed is
-  materialized at `packages/ice/legoesm/ice/bitz_lipscomb.py:1293`. Before the fix `dh_i_sub` differed in
+  materialized at `packages/ice/legoesm/ice/bitz_lipscomb.py:1306`. Before the fix `dh_i_sub` differed in
   5 cells and `cnd_ice` in 1 (`round16/o9_prefix_mismatches.log`).
 - Every multiply-add, including inside each flux accumulation, goes through `nemo_source_round`.
 
@@ -163,7 +163,7 @@ pre-existing one on both trees.
   value is 0.31. O9 passes `rn_cnd_s` explicitly; the shared config was not changed.
 - C1D's flooding water enthalpy uses `t_bo - rt0` where NEMO uses `sst_1d`
   (`ORCA2_SAS_ICE_O7_REF/BLD/ppsrc/nemo/icethd_dh.f90:463`, `zEw            = rcp * sst_1d(ji)`); kept,
-  so the D5 year is unchanged (`packages/ice/legoesm/ice/bitz_lipscomb.py:1612`). PLAUSIBLE that C1D's
+  so the D5 year is unchanged (`packages/ice/legoesm/ice/bitz_lipscomb.py:2037`). PLAUSIBLE that C1D's
   `sst_m` equals `t_bo - rt0`; not measured.
 - `ice_thd_1d2d( jl, 1 )` (gather and J/m2 -> J/m3) sits upstream of O9's entry and no rung owns it.
 - The preregistered Picard frame needed an observer inside NEMO's `ji` loop, against checklist item 1;
