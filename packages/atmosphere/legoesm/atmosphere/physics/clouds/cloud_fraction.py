@@ -535,6 +535,21 @@ def _two_region_inhomogeneity_factor(
 ) -> jnp.ndarray:
     r"""Tau-dependent sub-grid cloud-optics inhomogeneity factor (chi_eff).
 
+    NOT YET FAITHFUL to ecRad Tripleclouds (1.7.2), the oracle this option is
+    named after (tier-2 audit, 2026-10-19).  This is a per-layer grey
+    surrogate: on ecRad's own meridian columns, the change from fsd = 0 to
+    fsd = 1.0 is -8.2 W/m2 of TOA reflected SW against Tripleclouds' -18.2
+    (45%) and +0.17 W/m2 of OLR against +3.04 (5%), with the oracle run at
+    overlap_param = 1 (maximally coherent inhomogeneity; the IFS default
+    overlap and decorrelation would give a smaller oracle effect).
+    Tripleclouds solves vertically overlapped thin/thick regions
+    explicitly, splits them from a lognormal or (ecRad 1.7.2 default) gamma
+    distribution (the 1 +/- fsd split here leaves the thin half empty at
+    fsd = 1), and solves
+    the LW with the regions too, instead of reusing a factor derived from SW
+    reflectance.  A faithful port needs a region-resolved solver;
+    which overlap and decorrelation it uses is a pending user decision.
+
     Two-region (Shonk & Hogan 2008 "Tripleclouds") split of the in-cloud
     optical depth ``tau`` into equal-area optically-THIN ``tau(1-fsd)`` and
     optically-THICK ``tau(1+fsd)`` sub-columns.  Inverting the domain-mean
@@ -576,6 +591,13 @@ def _partial_coverage_factor(
     tau_grid: jnp.ndarray, cf: jnp.ndarray, g,
 ) -> jnp.ndarray:
     r"""Partial-cloud-COVER optics factor (chi_cover) for the radiative path.
+
+    NOT YET FAITHFUL (tier-2 audit, 2026-10-19): ``two_column`` names no
+    oracle; against a maximum-random independent-column reference solved by
+    ecRad it captures 42% of the SW and 35% of the LW partial-coverage effect
+    (TOA reflected SW +16.2 W/m2, OLR -1.8 W/m2, sunlit mean).  No committed
+    configuration selects it; what it should become is a pending user
+    decision.
 
     ``tau_grid`` is the GRID-MEAN optical depth of the layer (``cf tau_ic``),
     summed over phases, and ``cf`` is the TRUE cloud fraction -- not the floored
