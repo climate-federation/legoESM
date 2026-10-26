@@ -474,6 +474,10 @@ def build_latlon_config(cfg, yml):
         # driver's _prepare_run_context reads it bare): radiation every step (1)
         # unless the YAML overrides.
         "--rad-update-steps", str(int(yml.get("rad_update_steps", 1))),
+        # Prognostic sea-ice skin (#2106), on unless the deck turns it off;
+        # the ERA5 sample carries seed it.
+        ("--ice-skin-prognostic" if yml.get("ice_skin_prognostic", True)
+         else "--no-ice-skin-prognostic"),
     ]
     parsed = ra.build_arg_parser().parse_args(argv)
     return ra.build_config_from_args(parsed)
@@ -488,7 +492,8 @@ _WB_CONSUMED_TOP_KEYS = frozenset({
     "classical", "convection", "dt", "era5_cadence_hours",
     "cache_dir", "era5_cloud_condensate", "era5_cloud_zarr", "era5_flux_zarr",
     "era5_surface_fluxes", "era5_zarr", "eval_years",
-    "grad_accum", "grad_clip_norm", "gravity_wave_drag", "loss", "lr",
+    "grad_accum", "grad_clip_norm", "gravity_wave_drag",
+    "ice_skin_prognostic", "loss", "lr",
     "microphysics", "n_epochs", "n_lat", "n_lon", "n_training_days",
     "neural_gcm", "nlev", "optimizer", "rad_update_steps", "radiation",
     "sfno", "smoke_radiation", "spectral", "train_windows", "train_years",

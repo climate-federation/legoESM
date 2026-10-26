@@ -515,7 +515,8 @@ def test_bounds_respect_hard_param_domains() -> None:
                     if hi_dom is not None and b[1] >= hi_dom:
                         errors.append(f"{rel}:{cls_name}.{pname} bounds hi {b[1]} violates domain < {hi_dom}")
                 # 2) generic fraction/efficiency/emissivity/albedo -> [0, 1] inclusive
-                if _FRACTION_NAME_RE.search(pname):
+                # (a temperature in K, e.g. an albedo ramp WIDTH, is not one)
+                if _FRACTION_NAME_RE.search(pname) and p.get("units") != "K":
                     if b[0] < 0.0:
                         errors.append(f"{rel}:{cls_name}.{pname} fraction bound lo {b[0]} < 0")
                     if b[1] > 1.0:

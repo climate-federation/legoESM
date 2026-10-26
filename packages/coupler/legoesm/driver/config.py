@@ -658,6 +658,41 @@ def resolve_sea_ice_albedo_scheme(cfg) -> str:
             else "constant")
 
 
+def resolve_ice_skin_prognostic(cfg, *, latlon_mpi: bool = False,
+                                coupled: bool = False) -> tuple[bool, str]:
+    """``(on, reason)`` for the prognostic ice skin of this run.
+
+    ``ice_skin_prognostic=None`` ("auto") turns the skin on wherever the lane
+    carries it and off, with the reason, where it does not; an explicit
+    ``True``/``False`` is returned unchanged ("explicit").  An explicit
+    ``True`` on a coupled driver raises (the coupled sea-ice model owns the
+    ice surface); the static lanes refuse it in ``validate_strict`` and the
+    checkpoint writers at run start.
+    """
+    value = getattr(cfg, "ice_skin_prognostic", None)
+    if value is not None:
+        if value and coupled:
+            raise ValueError(
+                "ice_skin_prognostic=True on a coupled driver: the coupled "
+                "sea-ice model owns the ice surface temperature (#2106). "
+                "Leave it unset (auto) or false.")
+        return bool(value), "explicit"
+    d, out = cfg.dycore, cfg.output
+    if d.discretization == "spectral":
+        return False, "the spectral lane does not carry the skin yet"
+    if d.discretization == "fv3_duo" and not d.column_lane:
+        return False, "the closed fv3_duo lane has no radiation or surface fluxes"
+    if cfg.radiation == "none":
+        return False, "radiation='none' exports no surface fluxes"
+    if coupled:
+        return False, "coupled drivers: the sea-ice model owns the ice surface"
+    if out.checkpoint_days > 0 and out.checkpoint_format == "zarr":
+        return False, "zarr checkpoints cannot store the skin"
+    if out.checkpoint_days > 0 and latlon_mpi:
+        return False, "lat-lon MPI checkpoints cannot store the skin"
+    return True, "the lane carries the skin"
+
+
 class ExperimentConfig(NamedTuple):
     """Top-level experiment configuration.
 
@@ -1877,11 +1912,10 @@ class ExperimentConfig(NamedTuple):
     # helper).  The prescribed-SST anchor otherwise pins ice-covered cells
     # at the CONSTANT T_ice (271.35 K) year-round — the +8.6 K polar tas
     # warm bias of the first ClimateEval scorecard (real central-Arctic
-    # winter skin ~245-250 K).  Default OFF = byte-identical.  Needs
-    # radiation != "none" (the skin integrates the exported surface
-    # fluxes); refused on non-MPAS lanes (their land/ice tiles own the
-    # surface temperature).
-    ice_skin_prognostic: bool = False
+    # winter skin ~245-250 K).  None = auto: on wherever the lane carries the
+    # skin, off (with the reason logged) elsewhere — see
+    # resolve_ice_skin_prognostic, applied at ModelDriver.setup.
+    ice_skin_prognostic: bool | None = None
     ice_thickness_m: float = 2.0      # climatological ice slab thickness [m]
     # Hines (1997) non-orographic GWD launch amplitude + saturation flux cap.
     # Reached through gwd_config_for on EVERY lane (like the mcfarlane_*
@@ -3569,7 +3603,7 @@ class ExperimentConfig(NamedTuple):
             # compiled / per-step / operator-split (tiled, lat-band SPMD)
             # lanes (#2106).  The spectral lane and the closed fv3_duo lane
             # (its own HS/Kessler loop) do not carry it.
-            if self.ice_skin_prognostic and d.discretization in (
+            if self.ice_skin_prognostic is True and d.discretization in (
                     "spectral", "fv3_duo"):
                 errors.append(
                     "ice_skin_prognostic is not wired on the "
@@ -3689,14 +3723,14 @@ class ExperimentConfig(NamedTuple):
                 "cloud_cap_floor_on requires an active cloud scheme and rrtmgp/rrtmg "
                 f"radiation (cloud_scheme={self.cloud_scheme!r}, radiation={self.radiation!r}); "
                 "otherwise the polar-cap radiative floor would be a silent no-op.")
-        if self.ice_skin_prognostic and self.radiation == "none":
+        if self.ice_skin_prognostic is True and self.radiation == "none":
             errors.append(
                 "ice_skin_prognostic integrates the surface energy "
                 "fluxes exported by the physics; radiation='none' computes "
                 "none — the skin would stay at its seed forever."
             )
         if (self.ice_thickness_m != 2.0
-                and not self.ice_skin_prognostic):
+                and self.ice_skin_prognostic is False):
             errors.append(
                 f"ice_thickness_m={self.ice_thickness_m!r} requires "
                 "ice_skin_prognostic=True (the override would be "
@@ -3708,7 +3742,7 @@ class ExperimentConfig(NamedTuple):
                 f"sea_ice_albedo_scheme={self.sea_ice_albedo_scheme!r} "
                 f"unknown; choose one of {_sia}.")
         if (self.sea_ice_albedo_scheme == "maykut_untersteiner"
-                and not self.ice_skin_prognostic):
+                and self.ice_skin_prognostic is False):
             errors.append(
                 "sea_ice_albedo_scheme='maykut_untersteiner' reads the "
                 "prognostic ice skin; it requires ice_skin_prognostic=True.")
@@ -3720,6 +3754,7 @@ class ExperimentConfig(NamedTuple):
         if (self.sea_ice_albedo_melt_width_K
                 != ExperimentConfig._field_defaults[
                     "sea_ice_albedo_melt_width_K"]
+                and self.ice_skin_prognostic is not None
                 and resolve_sea_ice_albedo_scheme(self)
                 != "maykut_untersteiner"):
             errors.append(

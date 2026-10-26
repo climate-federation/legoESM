@@ -1657,15 +1657,6 @@ class ModelDriver:
             config = config._replace(
                 grid=config.grid._replace(grid_type=canonical_grid_type),
             )
-        # Sea-ice albedo "auto" -> the scheme this run actually uses, BEFORE
-        # the input-config snapshot below, so validation, the log, the
-        # experiment config and the run manifest all record the resolved value.
-        from legoesm.driver.config import resolve_sea_ice_albedo_scheme
-        _sia = resolve_sea_ice_albedo_scheme(config)
-        if _sia != config.sea_ice_albedo_scheme:
-            config = config._replace(sea_ice_albedo_scheme=_sia)
-        logger.info("  Sea-ice albedo scheme: %s (ice skin %s)", _sia,
-                    "ON" if config.ice_skin_prognostic else "OFF")
         self.config = config
         # Cube-vertex halo fill is a module global read at trace time, so it
         # is applied here, before anything is traced.  Only the cubed-sphere
@@ -2457,6 +2448,37 @@ class ModelDriver:
                 "`scripts/matrix/run_atmosphere_test_matrix.py --only sw` "
                 "(both construct the SW model + initial state directly).")
 
+    def _resolve_ice_skin(self) -> None:
+        """Resolve the ice skin and the sea-ice albedo "auto" settings (#2106).
+
+        Runs after the runtime bootstrap (the lat-lon MPI layout and the
+        coupled-driver marker are known) and before physics, the manifest and
+        the saved config, so all of them record the resolved values; the
+        input-config snapshot gets the same values so a replay resolves
+        identically.
+        """
+        from legoesm.driver.config import (
+            resolve_ice_skin_prognostic, resolve_sea_ice_albedo_scheme)
+        latlon_mpi = False
+        if (self._device_config is not None
+                and self._device_config.is_distributed
+                and self.config.grid.grid_type == "latlon"):
+            from legoesm.grids.halo import get_mpi_topology
+            from legoesm.parallel.latlon_mpi import LatLonBandLayout
+            latlon_mpi = isinstance(get_mpi_topology(), LatLonBandLayout)
+        skin, why = resolve_ice_skin_prognostic(
+            self.config, latlon_mpi=latlon_mpi,
+            coupled=bool(getattr(self, "_requires_surface_flux_export", False)))
+        upd = {"ice_skin_prognostic": skin}
+        cfg = self.config._replace(**upd)
+        upd["sea_ice_albedo_scheme"] = resolve_sea_ice_albedo_scheme(cfg)
+        self.config = self.config._replace(**upd)
+        self._input_config = self._input_config._replace(**upd)
+        logger.info("  Sea-ice albedo scheme: %s (ice skin %s: %s)",
+                    upd["sea_ice_albedo_scheme"], "ON" if skin else "OFF", why)
+        # Resolved values must pass the same checks as explicit ones.
+        self.config.validate_strict()
+
     def setup(self) -> None:
         """Initialize grid, dycore, physics, forcing, and state."""
         # SW is not a runnable ModelDriver equation set — reject before any
@@ -2469,6 +2491,7 @@ class ModelDriver:
         # This is the canonical single entry point — handles everything before
         # any JAX array creation.
         self._bootstrap_runtime()
+        self._resolve_ice_skin()
         # Collective, so it runs before the first step where ranks diverge.
         self._check_resume_version_drift()
 

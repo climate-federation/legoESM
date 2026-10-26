@@ -2241,14 +2241,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "TTL ice-supersaturation vapour bias. Requires "
                              "--hard-saturation-adjustment.")
     parser.add_argument("--ice-skin-prognostic", "--mpas-ice-skin-prognostic",
-                        action=_BoolOneSpelling, default=False,
+                        action=_BoolOneSpelling, default=None,
                         dest="ice_skin_prognostic",
-                        help="MPAS lane only: prognostic sea-ice skin "
-                             "temperature (Semtner 1976 zero-layer conduction "
-                             "+ slab thermal inertia) replacing the constant "
-                             "T_ice anchor over ice-covered cells — removes "
-                             "the year-round 271.35 K pin behind the polar "
-                             "tas warm bias. Needs radiation != none.")
+                        help="Prognostic sea-ice skin temperature (Semtner "
+                             "1976 zero-layer conduction + slab thermal "
+                             "inertia) replacing the constant T_ice anchor "
+                             "over ice-covered cells. Unset = auto: on "
+                             "wherever the lane carries it (MPAS, lat-lon, "
+                             "cube), off with the reason logged elsewhere; "
+                             "--no-ice-skin-prognostic forces it off.")
     parser.add_argument("--ice-thickness-m", "--mpas-ice-thickness-m",
                         type=float, default=None, action=_StoreOneSpelling,
                         dest="ice_thickness_m",

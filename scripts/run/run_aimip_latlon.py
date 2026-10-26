@@ -162,6 +162,8 @@ def build_latlon_config(args):
         # Match the training-segment sub-cycling (also resolves the None that
         # skipping _postprocess_args would leave).
         "--rad-update-steps", str(args.rad_update_steps),
+        ("--ice-skin-prognostic" if args.ice_skin_prognostic
+         else "--no-ice-skin-prognostic"),
         # Lat-lon C-grid needs pole-CFL relief; the Fourier polar filter
         # lets the dycore take a much larger stable dt than the ~30 s the
         # raw pole cells force.  The effective (CFL-clamped) dt is read
@@ -654,6 +656,10 @@ def build_parser():
     # default sub-cycles (N=6 -> ~hourly at dt~600s, ~15 min at the T106
     # CFL dt~155s) — never every step.  Moot for the NN-replacement variants.
     p.add_argument("--rad-update-steps", type=int, default=6)
+    p.add_argument("--ice-skin-prognostic",
+                   action=argparse.BooleanOptionalAction, default=True,
+                   help="Prognostic sea-ice skin (#2106); the ERA5 carries "
+                        "seed it at the seawater freezing point.")
     # Radiation-as-forcing: stop_gradient rrtmgp in the rollout so its adjoint
     # never enters the backward graph.  rrtmgp's reverse-mode is the dominant
     # XLA compile cost and it GROWS with grid size (>10 h at true T106) — this
