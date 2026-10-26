@@ -87,9 +87,15 @@ The additions-only operator tool imports the complete reviewed round-333
 driver. Immediately before `tra_zdf_imp`, it preserves `Krhs` because the kt-2
 stage-3 level tuple is `(Kbb,Kmm,Krhs,Kaa)=(3,2,1,1)` and the live solve
 overwrites that slot. One capture call after `tra_zdf_imp`, outside all its
-loops, records final `avt`, `avs`, `akz`, geometry, RK levels and live `Kaa`,
-and replays NEMO's exact statement association into lower/diagonal/upper,
-eliminated, forward and back-substitution fields. Admission requires the
+loops, records final `avt`, `avs`, `akz`, geometry, RK levels and live `Kaa`.
+Five additional calls outside `zdf_phy`'s loops record the kt-2 boundaries
+after the TKE `avt_k` copy, runoff-mouth addition, EVD, DDM and IWM in the
+executing order at
+`ORCA2_ORCA1ICE_OMIP_L4_R333LDFI/BLD/ppsrc/nemo/zdfphy.f90:365-392`.
+This distinguishes a coefficient departure at each executed contributor
+instead of attributing from final `avt`/`avs` alone. The passive writer replays
+NEMO's exact statement association into lower/diagonal/upper, eliminated,
+forward and back-substitution fields. Admission requires the
 outside-loop back-substitution to equal live `Kaa` bit-for-bit on every
 executed cell. The RHS replay uses NEMO's literal
 `p2dt*(e3t_3d*(1+r3t(Kmm)*tmask))*Krhs` association at
@@ -99,24 +105,33 @@ and a required wet-cell discriminator in each admitted rank.
 
 The clean read-only preflight passed every inherited round-333 control,
 including 77 parent tests, both inherited writer suites, 140-file deterministic
-passivity, syntax checks, synthetic in-place and retained admission routes,
+passivity, 11 syntax checks, synthetic in-place and retained admission routes,
 and all inherited plants. The new two-rank fixture compiled and ran the actual
 patched `trazdf` source under bounds checking and compared it bitwise with a
 separately compiled unpatched module using rank-distinct data and signed-zero
-cells. Its passive 25-field replay then matched the live patched-source result.
-All selector,
-placement, header, field-order, truncation, checksum, extent, finite-value,
-signed-zero, wet-coverage, exact-RHS-association, replay and actual-result
-plants fired. The actual
-record-build `trazdf` object had the same normalized 1,294 floating-point
-instructions with and without the observer; a changed matrix statement failed
-that census. The extended same-program proof reports 407 identical ppsrc and
-419 identical normalized objects, exactly seven observer and five writer
-units. Both in-place and retained `--admit-existing` routes were rechecked
+cells. Its passive 36-field replay matched the live patched-source result.
+Every derived field now retains `-0.0` outside exactly the ranges filled at
+`ORCA2_ORCA1ICE_OMIP_L4_R333LDFI/BLD/ppsrc/nemo/trazdf.f90:180-216` and
+`:230-235`; a filled-range plant fires. The record header carries the literal
+RK tuple and tile bounds, and a time-level plant perturbs the tuple and fires.
+
+The production-flag disassembly census is per function and nonzero:
+`tra_zdf` has 60 floating-point instructions and `tra_zdf_imp` has 1,234,
+unchanged by the observer; an arithmetic plant injected into `tra_zdf` fires.
+The observer-free versus instrumented `zdf_phy` census is likewise unchanged
+at 121 instructions, with its own in-function plant. All selector, placement,
+header, field-order, truncation, checksum, extent, finite-value, signed-zero,
+wet-coverage, exact-RHS-association, contribution-boundary, replay and
+actual-result plants fired. All 147 staged `namelist_cfg` assignments belong
+to the same group in NEMO's `namelist_ref`; misspelled and misplaced plants
+both refuse. A synthetic `ocean.output` containing `E R R O R` refuses while
+printing NEMO's matching line. The extended same-program proof reports 407
+identical ppsrc and 419 identical normalized objects, exactly seven observer
+and five writer units. Both in-place and retained `--admit-existing` routes were rechecked
 against each run's manifest: the producer must be a local ancestor and the
 binary must match the manifest SHA-256; producer and binary plants fired on
-both routes. The refreshed preflight passes and its log SHA-256 is
-`61d8076d4b07db37c3751fbf3d958746f751621d997c2917a47e67a7bab3b0a5`.
+both routes. The refreshed preflight passes; its log is stored as
+`round336/resume2_preflight.log`.
 
 Operator command:
 
@@ -127,18 +142,18 @@ Operator command:
 Expected evidence directory:
 `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round336/acquisition/orca1ice_trazdf_internal_kt2_np2`.
 
-No configuration value changed: **ASKED**. Independent review: operator
-(Claude).
+No configuration value changed: **ASKED**. Independent Argon review verdict:
+**HOLD** on fill ranges, function-scoped passivity, checklist items 6/12, and
+coefficient sufficiency; every listed item is addressed above. Codex review:
+operator.
 
 The mandatory receipt-citation test passes 17 tests. The round-336 receipt
-gate finds 13 citations with zero failures, zero unmapped citations and zero
-map-audit failures; all nine self-test controls fire. Its JSON SHA-256 is
-`30fb66d29bc1a4fa0aaa0f0f6c7592fd6c668681fc6fb0db9459da5475b54bc1`.
+gate finds 15 citations with zero failures, zero unmapped citations and zero
+map-audit failures; all nine self-test controls fire. Its report is stored as
+`round336/resume2_citation_gate.json`.
 
-The default ORCA2 landing battery passes 146 tests in 1,354.89 seconds; log
-SHA-256 is
-`bf783ec14ec63ea55834d3f607bb193a3511fbcb881e685197bdd93659c299a0`.
-The all-package private-import ratchet separately passes 6 tests in 5.43
-seconds; log SHA-256 is
-`f6f861734eef844941d042a7f8d5494d49962a8973c919a66a3f9ae9c68c822f`.
+The default ORCA2 landing battery passes 146 tests; its log is stored as
+`round336/resume2_default_gate.log`. The all-package private-import ratchet
+separately passes 6 tests; its log is stored as
+`round336/resume2_ratchet.log`.
 No DINO month gate is required because no model or package file changed.
