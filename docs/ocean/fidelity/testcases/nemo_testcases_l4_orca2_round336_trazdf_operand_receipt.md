@@ -305,3 +305,14 @@ The disposition remains **ACQUISITION_NEEDED** at the operator command above.
 Before retrying, the operator must keep the retained failed build untouched and
 use the already-clear canonical target name, as documented in the acquisition
 README.
+
+The final per-receipt citation gate reports PASS for 17 citations with zero
+failures, zero unmapped citations, zero map-audit failures, and all nine
+self-tests fired. The exact default ORCA2 landing battery passes 152 tests in
+1,062.72 seconds; its log SHA-256 is
+`150d8e977e2605dfd88ab8f12149b1c12b076744d3b13778fce92bb826d36011`.
+The private-import ratchet separately passes 6 tests in 7.48 seconds; its log
+SHA-256 is
+`208fb3acdcdd60c220457676d81bb9c0ea34a5bb5c82d189f82a95f8b90fd133`.
+The reports are `round336/resume5_citation_gate.json`,
+`round336/resume5_default_gate.log`, and `round336/resume5_ratchet.log`.
