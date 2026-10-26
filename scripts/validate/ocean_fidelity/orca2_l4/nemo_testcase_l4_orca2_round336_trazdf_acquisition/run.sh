@@ -143,7 +143,7 @@ check_r336_zdfphy_landing() {
     /CALL zdf_mxl_turb/ {mxl=NR}
     END {
       if(plant=="tke") p1=copy-1
-      if(plant=="runoff") p2=runoff+1
+      if(plant=="runoff") p2=runoff-1
       if(plant=="evd") p3=evd-1
       if(plant=="ddm") p4=ddm-1
       if(plant=="iwm") p5=iwm-1
