@@ -274,3 +274,20 @@ labels its bulk-only replay `nn_ice = 0`; (8) the halo width is taken from
 array shapes, and the call refuses if they disagree; (9) the result type
 gains two fields, `ts_surface` and `fr_i`, which are None unless
 `nn_ice = 1`.  PENDING: ice-cover producer run length (with the user).
+
+### Resume gates (final tree, foreground, CPU binary64)
+
+- Per-receipt citation gate: PASS, 14 citations, 0 failures, 0 unmapped,
+  0 map-audit failures, 9 self-tests.
+- Default `land.sh` ORCA2 inventory: 140 + 10 + 1 = **151 / 152 PASS**; the
+  staircase stage-velocity test was again killed by the 595 s cap (load
+  average 23-38), **UNVERIFIED here**, as before the resume.
+- Shared-caller suites (every test importing the bulk module, the fld_read
+  module or the O1 gate): 159 PASS, 1 FAIL.  The failure, the
+  iceberg-option drift guard in the recipe tests, fails identically on the
+  pre-resume HEAD export; it is inherited.
+- Ratchet set (14 files): 15,306 PASS, 2,565 SKIP, 6 FAIL; none names a
+  changed file.  These are round 338's three inherited failures plus three
+  others outside this diff: a ZM convection formula budget, a coupler
+  sigma-pressure allowlist, and undefined names in two scripts.
+- codex review: operator.
