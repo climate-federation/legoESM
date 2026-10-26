@@ -10021,6 +10021,7 @@ CITATION_MAP = {
     'ORCA2_SAS_ICE_O7_REC/BLD/ppsrc/nemo/icevar.f90:636': ('zsmall = MIN( a_i(ji,jj,jl), v_i(ji,jj,jl),  h_i(ji,jj,jl) )', 1),
     'ORCA2_SAS_ICE_O7_REC/BLD/ppsrc/nemo/iceitd.f90:489-492': ['zworkv = pdvice(ii,jl) / v_i_2d(ii,jl1)', 'zworka = pdaice(ii,jl) / a_i_2d(ii,jl1)', 4],
     'ORCA2_SAS_ICE_O7_REC/BLD/ppsrc/nemo/icectl.f90:81': 'SUBROUTINE ice_cons_hsm(',
+    'ORCA2_SAS_ICE_O7_REC/BLD/ppsrc/nemo/icectl.f90:134': 'ztmp3(ji,jj,9) = SUM( a_i(ji,jj,:) + epsi10 ) * e1e2t(ji,jj)',
     'ORCA2_SAS_ICE_O7_REC/BLD/ppsrc/nemo/icectl.f90:182': 'IF( ABS(zdiag_mass) > rchk_m * rn_icechk_glo * zchk3(9) )',
     'ORCA2_SAS_ICE_O7_REC/BLD/ppsrc/nemo/icectl.f90:198': 'IF( zchk3(10)>MAX(rn_amax_n,rn_amax_s)+epsi10',
     'packages/ice/legoesm/ice/si3_orca2_state.py:3112': 'def si3_ice_cons_hsm_sums(',
