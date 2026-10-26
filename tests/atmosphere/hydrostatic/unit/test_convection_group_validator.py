@@ -122,7 +122,10 @@ def _stable_dry_column(ncol: int = 2, nlev: int = 24):
 # Isca qe_moist_convection: a parcel still buoyant at the model top leaves
 # kLZB = 0 and the oracle writes outside its arrays -- its binary aborts on
 # ``_column()`` -- so the port returns NaN there).
-_LNB_SCHEMES = ("kain_fritsch", "zhang_mcfarlane", "sbm")
+# Emanuel (CONVECT v4.3c) needs the cap for a different reason: on the uncapped
+# column the moist static energy falls to the model top, and CONVECT rejects a
+# column whose HM minimum is not below level NL-1 (its IHMIN gate).
+_LNB_SCHEMES = ("kain_fritsch", "zhang_mcfarlane", "sbm", "emanuel")
 
 
 def _capped_column(
@@ -213,8 +216,12 @@ def _run_zm(T, q, pf, ph, u, v, **kw):
 
 
 def _run_emanuel(T, q, pf, ph, **kw):
+    # Warm start (carried cloud-base mass flux 0.01 kg/m^2/s, the oracle
+    # fixture's warm value): from rest, CONVECT's DTMA closure stays off on
+    # these columns, whose 7.5 K/km sub-cloud layer leaves the lifted parcel
+    # colder than DTMAX at the LCL (oracle cold-start stable exit).
     ncol, nlev = T.shape
-    cpp = jnp.zeros((ncol, nlev))
+    cpp = jnp.zeros((ncol, nlev)).at[:, -1].set(0.01)
     out, _ = emanuel_convection(T, q, pf, ph, cpp, DT, EmanuelConfig(**kw))
     return out
 
@@ -375,11 +382,10 @@ def test_tier2_mass_flux_schemes_net_dry(name):
     "name",
     # Schemes that claim exact column total-water conservation
     # (vapor removed reappears as cloud water in the column).
-    # NB: emanuel is intentionally EXCLUDED here. With use_genuine_mixing=True
-    # (the default) it is a PRECIPITATING scheme — the net vapor removal is the
-    # reference EP*CLW precipitation sink (emanuel.py:464-498, 534-549), NOT
-    # reinserted as in-column cloud water — so it does not close column total
-    # water in-scheme. Its behavioral contract is gated in the tier1/tier2 lists.
+    # NB: emanuel is intentionally EXCLUDED here: it is a PRECIPITATING scheme
+    # (CONVECT's EP*CLW leaves as the rain source dq_r_conv_dt, not as cloud
+    # water), so vapor + cloud alone does not close; vapor + cloud + rain does
+    # (tests/unit/test_emanuel.py, tests/atmosphere/test_emanuel_convect43c_oracle.py).
     ["sbm", "dca_manabe", "dca_ahmed_neelin"],
 )
 def test_tier3_total_water_conserved(name):
@@ -613,7 +619,9 @@ _GRAD_CASES = {
                          _scalar_loss(_run_dca_ahmed(T, q, pf, ph, a_mm_per_hr=x))),  # slope a
     "zhang_mcfarlane": (3600.0, lambda T, q, pf, ph, u, v, w, mc, x:
                         _scalar_loss(_run_zm(T, q, pf, ph, u, v, tau=x))),  # tau [s]
-    "emanuel": (1.0, lambda T, q, pf, ph, u, v, w, mc, x:
+    # CBMF closure slope at CONVECT's ALPHA=0.2: at 1.0 the closure's negative
+    # DTMA on this warm-started column drives CBMF to its zero floor.
+    "emanuel": (0.2, lambda T, q, pf, ph, u, v, w, mc, x:
                 _scalar_loss(_run_emanuel(T, q, pf, ph, alpha_closure=x))),   # CBMF closure slope
     "kain_fritsch": (1800.0, lambda T, q, pf, ph, u, v, w, mc, x:
                      _scalar_loss(_run_kf(T, q, pf, ph, w=w,

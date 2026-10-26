@@ -98,29 +98,22 @@ class TestConvectionAudit:
             return jnp.sum(out.dT_dt ** 2)
         assert_grad_ok(loss, 1.75e-3, "bechtold.epsilon_deep")
 
-    def test_emanuel_cu_coefficient(self):
+    def test_emanuel_alpha_closure(self):
         from legoesm.atmosphere.physics.convection.emanuel import emanuel_convection
         from legoesm.atmosphere.physics.convection.config import EmanuelConfig
-        # ``cu_coefficient`` is the sub-cloud buoyancy-sort multiplier that
-        # scales detrainment (``delta_0 * sort_multiplier``) ONLY in the
-        # mass-flux-kernel branch.  The default ``use_genuine_mixing=True``
-        # path computes detrainment via the buoyancy-sorted mixer and never
-        # reads ``cu_coefficient`` (its gradient is then exactly zero — the
-        # parameter is simply inactive in that mode, not a wiring bug).
-        # Audit AD-reachability in the mode where the knob is live, on a
-        # destabilised column so the buoyancy sort yields a nonzero
-        # negatively-buoyant share for ``cu_coefficient`` to act on.
+        # ``cu_coefficient`` belonged to the retired single-sigmoid surrogate
+        # (it now raises when set).  Audit AD-reachability of the CONVECT
+        # closure slope ALPHA instead.  The shared column convects from rest
+        # with a cloud-base mass flux below the M_b_max transport cap (a
+        # hotter boundary layer saturates the cap and zeroes the gradient).
         T, q_v, p_full, p_half = _column()
-        T = T.at[:, -1].add(20.0)  # hot, convecting boundary layer
 
         def loss(x):
-            cfg = EmanuelConfig()._replace(
-                use_genuine_mixing=False, cu_coefficient=x,
-            )
+            cfg = EmanuelConfig()._replace(alpha_closure=x)
             out = emanuel_convection(T, q_v, p_full, p_half,
                 jnp.zeros((_NCOL, _NLEV)), 600.0, config=cfg)[0]
             return jnp.sum(out.dT_dt ** 2)
-        assert_grad_ok(loss, 0.7, "emanuel.cu_coefficient")
+        assert_grad_ok(loss, 0.2, "emanuel.alpha_closure")
 
     def test_kain_fritsch_cape_consumption_time(self):
         from legoesm.atmosphere.physics.convection.kain_fritsch import kain_fritsch_convection
