@@ -1283,10 +1283,15 @@ class PhysicsPipeline:
             and u.shape == shape_3d and v.shape == shape_3d
         )
         u_conv_col = v_conv_col = None
-        if _ctr.is_cmt_capable:
+        if _ctr.is_cmt_capable or _ctr.is_w_grid_consumer:
             if _winds_on_t_grid:
                 u_conv_col = ad.flatten_3d(u)
                 v_conv_col = ad.flatten_3d(v)
+            elif not _ctr.is_cmt_capable:
+                # Kain-Fritsch needs the real winds (TIMEC, shear): no zero fallback.
+                raise ValueError(
+                    "convection: kain_fritsch needs the winds on the T grid "
+                    f"(got u {None if u is None else u.shape}, expected {shape_3d})")
             else:
                 u_conv_col = jnp.zeros((ad.ncol, nlev), dtype=T_col.dtype)
                 v_conv_col = jnp.zeros((ad.ncol, nlev), dtype=T_col.dtype)
@@ -1556,6 +1561,7 @@ class PhysicsPipeline:
                     T=T_col, q_v=q_v_col,
                     p_full=p_full_col, p_half=p_half_col,
                     w_grid=w_grid_col,
+                    u=u_conv_col, v=v_conv_col,
                     conv_prog_profile=conv_prog,
                     dt=dt, config=_conv_cfg,
                 )

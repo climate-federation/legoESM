@@ -32,7 +32,6 @@ from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
 from legoesm.atmosphere.physics.convection.config import (
     ConvectionConfig,
     ZhangMcFarlaneConfig,
-    KainFritschConfig,
     EmanuelConfig,
     TiedtkeConfig,
     BechtoldConfig,
@@ -452,10 +451,18 @@ class TestSpectralPECMT:
             dims=("lat", "lon", "level"), units="kg/kg",
         )
 
+        # The WRF KF-Eta port emits convective rain (dq_r_conv_dt >= 0), which
+        # the spectral bridge books into a condensate tracer; give it a q_c slot.
+        q_c_field = Field(
+            data=jnp.zeros_like(q_v_grid), name="q_c",
+            dims=("lat", "lon", "level"), units="kg/kg",
+        )
+        tracers = {"q_v": q_v_field, "q_c": q_c_field}
+
         state_no_div = rest_state._replace(
             T_hat=rest_state.T_hat.replace(data=T_hat),
         )
-        state_no_div = _state_with_tracers(state_no_div, {"q_v": q_v_field})
+        state_no_div = _state_with_tracers(state_no_div, tracers)
 
         # Wave-1 divergence: D ∝ -sin(λ) / cos(φ).
         a = grid.radius
@@ -471,7 +478,7 @@ class TestSpectralPECMT:
             T_hat=rest_state.T_hat.replace(data=T_hat),
             div_hat=rest_state.div_hat.replace(data=div_hat_3d),
         )
-        state_w_div = _state_with_tracers(state_w_div, {"q_v": q_v_field})
+        state_w_div = _state_with_tracers(state_w_div, tracers)
 
         physics_fn = make_convection_physics(
             ConvectionConfig(scheme="kain_fritsch"),
@@ -484,6 +491,8 @@ class TestSpectralPECMT:
         # The cloud-base mass flux carry (packed at [:, -1]) should
         # differ between the two states because divergence shifts the
         # KF trigger via w_grid_at_lcl.
+        for t in (tend_a, tend_b):
+            assert bool(jnp.all(jnp.isfinite(t.T_hat.data)))
         a_carry = prog_a[:, -1]
         b_carry = prog_b[:, -1]
         max_diff = float(jnp.max(jnp.abs(a_carry - b_carry)))
@@ -623,12 +632,14 @@ class TestSpectralPECMT:
         # and ZM needs a q_c tracer for its detrained condensate (its signed
         # net rain flux takes the surface route); it is pinned through the
         # bridge in tests/unit/test_spectral_zm_rain_surface_route.py.
-        ("kain_fritsch", "kain_fritsch", KainFritschConfig),
+        # kain_fritsch is absent for the same reason (the WRF KF-Eta port
+        # emits convective rain that needs a condensate tracer); it runs
+        # through the bridge with a q_c slot in test_kf_w_grid_responds_to_divergence.
         ("emanuel", "emanuel", EmanuelConfig),
         ("tiedtke", "tiedtke", TiedtkeConfig),
         ("bechtold", "bechtold", BechtoldConfig),
     ],
-    ids=["kain_fritsch", "emanuel", "tiedtke", "bechtold"],
+    ids=["emanuel", "tiedtke", "bechtold"],
 )
 def profile_scheme_config(request):
     """Yield a (name, ConvectionConfig) pair for each new scheme."""
