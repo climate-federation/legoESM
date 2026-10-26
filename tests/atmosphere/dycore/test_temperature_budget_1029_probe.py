@@ -92,4 +92,36 @@ def test_del4_zero_when_off_and_floor_caught():
     assert float(jnp.max(jnp.abs(terms["D4"]))) == 0.0
     assert float(terms["FL"][8, 5, 12]) > 0.0
     assert info["Tmin_prefloor"] < model.config.T_min
+    # Courant identity holds on every RK stage, including stages that carry
+    # sub-floor T (the tendency advects the floor-clipped field).
+    for x, sc in zip(info["courant_ident"], info["courant_scale"]):
+        assert float(jnp.max(jnp.abs(x))) < 1e-9 * sc
     assert float(out.T[8, 5, 12]) >= model.config.T_min
+
+
+def test_courant_ties_to_captured_vertical_advection(moving):
+    model, st, _, _, info, _ = moving
+    C0 = np.asarray(info["courant_stages"][0])
+    assert C0.shape == st.T.shape and np.max(C0) > 1e-4
+    rel = np.max(np.abs(np.asarray(info["courant_ident"][0]))) / info["courant_scale"][0]
+    assert rel < 1e-9
+    # Known answer: uniform flux F through uniform spacing -> C = F dt / dp.
+    from legoesm.grids.vertical import pressure_from_hybrid
+    ps = st.p_s[:1, :1]
+    mf = jnp.full(ps.shape + (model.sigma_coord.n_levels + 1,), 0.5)
+    C, _ = tb.vertical_courant(st.T[:1, :1], mf, ps, model.sigma_coord, 100.0)
+    dp = np.abs(np.diff(np.asarray(pressure_from_hybrid(
+        model.sigma_coord, ps, full=True)), axis=-1))[0, 0]
+    np.testing.assert_allclose(np.asarray(C)[0, 0, 1:], 50.0 / dp, rtol=1e-12)
+    assert float(C[0, 0, 0]) == 0.0
+
+
+def test_floor_free_run_sets_floor_heat_aside():
+    model, st, target = _model(nu4=0.0)
+    st = st._replace(T=st.T.at[8, 5, 12].set(20.0))
+    _, terms, info = tb.step_budget(model, st, target)
+    rows = tb.floor_free_run(model, st, target, 1, (8, 5))
+    assert terms["FL"][8, 5, 12] > 0.0
+    assert rows[1]["Tmin"] < model.config.T_min        # floor heat removed
+    assert rows[0]["A"] == tb.swing_amplitude(np.asarray(st.T)[8, 5])
+    assert tb.swing_amplitude([0.0, 10.0, 0.0, 10.0, 0.0]) == 10.0

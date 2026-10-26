@@ -43,6 +43,31 @@ last COLD level.  Sums are enthalpy-weighted, c_p dT dp/g [J/m2 per step].
   Verdict per mechanism needs both seeds and both validated intervals;
   otherwise the per-interval numbers are reported with no mechanism claimed.
 
+FOLLOW-UP CHECKS (user-approved 2026-10-26; rules written after the budget
+run above, before these two were run -- so not blind to its numbers).
+  C  vertical Courant number of the T vertical advection, as the scheme sees
+     it (``vertical_courant``: |F| dt / upwind p_full spacing, F = the model's
+     own interface mass flux captured from the T call), at RK stage 1 (the
+     saved state) and max over the 3 stages, over BAND = levels first..last
+     COLD inclusive.
+     INSTRUMENT CONTROLS (C read only if both hold): (i) identity
+     |V| dt == C |upwind dT| at every cell of the domain, to 1e-9 x max |V| dt;
+     (ii) quiet column (same row, 180 deg of longitude away): max C over the
+     column < 0.2 and its T has no level at the floor.
+     CONFIRMED "explicit vertical overshoot (C > 1) in the hot column" if the
+     stage-1 BAND max C >= 1 at both validated intervals of both seeds;
+     REFUTED if the BAND max C over all 3 stages < 0.5 at all validated
+     intervals; otherwise reported, no claim.
+  F  floor-free re-step: from each seed's EARLIEST saved state, 3 steps of the
+     unchanged model with the floor's added heat (the captured FL term)
+     subtracted after every step (``floor_free_run``).  Swing amplitude
+     A = max_k |T_k - (T_{k-1}+T_{k+1})/2| in the hot column.
+     CONFIRMED "the swing grows without the floor" if A(2 steps)/A(0) >= 1.5
+     for both seeds; REFUTED ("the floor is needed for growth") if
+     A(2)/A(0) <= 1.0 for both seeds; otherwise reported, no claim.  Step 3
+     corresponds to the trip step and is reported only.  Reference: the same
+     ratio on the floored run's own saved states.
+
 Usage: python temperature_budget.py <probe_dir> [--out budget.json]
 """
 from __future__ import annotations
@@ -63,7 +88,7 @@ from legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid import (
     CGridLatLonHydrostaticState, cgrid_latlon_hydrostatic_tendencies)
 from legoesm.atmosphere.forcing.idealized.held_suarez import (
     held_suarez_forcing_latlon)
-from legoesm.grids.vertical import dp_from_hybrid
+from legoesm.grids.vertical import dp_from_hybrid, pressure_from_hybrid
 
 TERMS = ("H", "V", "OM", "G", "LAP", "D4", "PF", "HS", "FL")
 RK3_W = (1.0 / 6.0, 1.0 / 6.0, 2.0 / 3.0)   # ssp_rk3_step net stage weights
@@ -105,8 +130,8 @@ def step_budget(model, state, target_mass, physics_fn=held_suarez_forcing_latlon
     def rec_vadv(f):
         def w(q, *a, **k):
             out = f(q, *a, **k)
-            if q.shape == state.T.shape:
-                cap["V"] = out
+            if q.shape == state.T.shape:     # u, v, T in that order: T wins
+                cap["V"], cap["Q"], cap["MF"], cap["PS"] = out, q, a[0], a[1]
             return out
         return w
 
@@ -132,10 +157,15 @@ def step_budget(model, state, target_mass, physics_fn=held_suarez_forcing_latlon
                 dyn = tend(s, cfg._replace(nu_del4=0.0, A_h=0.0))
                 H, V = cap["H"], cap["V"]
                 OM = constants.kappa * jnp.maximum(s.T, cfg.T_min) * cap["X"]
+                # cap["Q"]: the T the call received (floor-clipped inside the
+                # tendency), not the raw stage T, which goes negative.
+                C, dfu = vertical_courant(cap["Q"], cap["MF"], cap["PS"],
+                                          model.sigma_coord, dt)
                 r = tendency_fn(s)
                 stages.append(dict(H=H, V=V, OM=OM, G=dyn - H - V - OM,
                                    LAP=no4 - dyn, D4=full - no4, PF=r.T - full,
-                                   rec=r.T, Tmin=float(jnp.min(s.T))))
+                                   rec=r.T, Tmin=float(jnp.min(s.T)),
+                                   C=C, C_ident=jnp.abs(V) * dt - C * jnp.abs(dfu)))
                 return r
             out = f(s0, tf, dt_, name)
             stages.append(dict(dyn_incr=out.T - s0.T))
@@ -178,8 +208,60 @@ def step_budget(model, state, target_mass, physics_fn=held_suarez_forcing_latlon
     info = dict(rk_vs_integrator=rk_rec - dyn_incr,
                 sum_vs_step=sum(terms.values()) - (out.T - state.T),
                 Tmin_stages=[st["Tmin"] for st in stages],
-                Tmin_prefloor=rails["Tmin_prefloor"])
+                Tmin_prefloor=rails["Tmin_prefloor"],
+                courant_stages=[st["C"] for st in stages],
+                courant_ident=[st["C_ident"] for st in stages],
+                courant_scale=[dt * float(jnp.max(jnp.abs(st["V"]))) for st in stages])
     return out, terms, info
+
+
+def vertical_courant(field, mass_flux, p_s, coord, dt):
+    """Upwind vertical Courant number of ``vertical_advection_hybrid``.
+
+    Mirrors that scheme exactly: full-level flux F = mean of the two interface
+    fluxes, upwind side backward where F > 0, spacing = |p_full difference| on
+    that side; C = |F| dt / spacing (0 where the upwind gradient is the
+    zero pad).  Returns ``(C, dfu)`` with dfu the upwind field difference, so
+    |V| dt == C |dfu| is the identity that ties C to the captured tendency V.
+    """
+    F = 0.5 * (mass_flux[..., :-1] + mass_flux[..., 1:])
+    dp = jnp.clip(jnp.abs(jnp.diff(pressure_from_hybrid(coord, p_s, full=True),
+                                   axis=-1)), 1e-10, None)
+    df = jnp.diff(field, axis=-1)
+    pad = ((0, 0),) * (df.ndim - 1)
+    bwd = F > 0
+    sp = jnp.where(bwd, jnp.pad(dp, (*pad, (1, 0))), jnp.pad(dp, (*pad, (0, 1))))
+    dfu = jnp.where(bwd, jnp.pad(df, (*pad, (1, 0))), jnp.pad(df, (*pad, (0, 1))))
+    C = jnp.where(sp > 0, jnp.abs(F) * dt / jnp.where(sp > 0, sp, 1.0), 0.0)
+    return C, dfu
+
+
+def swing_amplitude(T_col):
+    """Level-alternating (2-level) amplitude: max_k |T_k - (T_{k-1}+T_{k+1})/2|."""
+    T_col = np.asarray(T_col)
+    return float(np.max(np.abs(T_col[1:-1] - 0.5 * (T_col[:-2] + T_col[2:]))))
+
+
+def floor_free_run(model, state, target, n, ij):
+    """``n`` model steps of ``state`` with the floor's added heat set aside.
+
+    Each step is the unchanged model step; afterwards its captured floor term
+    FL is subtracted, i.e. T is carried on as it was just before the 50 K
+    floor (the in-tendency max(T, T_min) of the omega/p term is untouched).
+    Returns per-step dicts for column ``ij``.
+    """
+    i, j = ij
+    rows = [dict(step=0, A=swing_amplitude(np.asarray(state.T)[i, j]),
+                 Tmax=float(np.max(np.asarray(state.T)[i, j])),
+                 Tmin=float(np.min(np.asarray(state.T)[i, j])))]
+    s = state
+    for k in range(1, n + 1):
+        out, terms, _ = step_budget(model, s, target)
+        s = out._replace(T=out.T - terms["FL"])
+        Tc = np.asarray(s.T)[i, j]
+        rows.append(dict(step=k, A=swing_amplitude(Tc), Tmax=float(np.max(Tc)),
+                         Tmin=float(np.min(Tc)), finite=bool(np.all(np.isfinite(Tc)))))
+    return rows
 
 
 def load_state(npz):
@@ -264,6 +346,25 @@ def main(argv=None):
         dp = dp_from_hybrid(sigma, s.p_s)[i, j]
         row.update(column_summary(col(s.T), {k: col(v) for k, v in terms.items()},
                                   info, dp, model.config.T_min))
+        Cs = [np.asarray(c) for c in info["courant_stages"]]
+        band = (list(range(row["cold"][0], row["cold"][-1] + 1))
+                if row["cold"] else [])
+        jq = (j + Cs[0].shape[1] // 2) % Cs[0].shape[1]
+        ident = max(float(np.max(np.abs(np.asarray(x)))) / sc
+                    for x, sc in zip(info["courant_ident"], info["courant_scale"]))
+        row.update(
+            C_band_stage1=float(np.max(Cs[0][i, j, band])) if band else None,
+            C_band_all_stages=(float(max(np.max(c[i, j, band]) for c in Cs))
+                               if band else None),
+            C_col_stage1=np.round(Cs[0][i, j], 3).tolist(),
+            C_quiet_max=float(np.max(Cs[0][i, jq])),
+            quiet_floor_levels=int(np.sum(np.asarray(s.T)[i, jq]
+                                          <= model.config.T_min + 0.01)),
+            C_ident_rel=ident, C_ident_pass=ident <= 1e-9)
+        print(json.dumps({k: row[k] for k in (
+            "step_from", "C_band_stage1", "C_band_all_stages", "C_quiet_max",
+            "quiet_floor_levels", "C_ident_rel", "C_ident_pass")}), flush=True)
+        print("  C(st1) ", row["C_col_stage1"])
         res["intervals"].append(row)
         print(json.dumps({k: row[k] for k in (
             "step_from", "C1_pass", "C1_resid", "C2_pass", "C2_resid", "cold", "hot",
@@ -272,6 +373,11 @@ def main(argv=None):
         print("  T0     ", row["T0"])
         for t in TERMS:
             print(f"  {t:<6} ", row["levels"][t])
+    ff = floor_free_run(model, states[0], target, 3, (i, j))
+    ref = [swing_amplitude(np.asarray(x.T)[i, j]) for x in states]
+    res["floor_free"] = dict(rows=ff, A_ratio_2=ff[2]["A"] / ff[0]["A"],
+                             floored_A=ref, floored_A_ratio_2=ref[2] / ref[0])
+    print("floor-free:", json.dumps(res["floor_free"]), flush=True)
     if a.out:
         a.out.write_text(json.dumps(res))
     return res
