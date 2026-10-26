@@ -9022,7 +9022,7 @@ CITATION_MAP = {
         'fr_i(:,:) = fr_i(:,:) * tmask(:,:,1)', 2],
     'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/sbcice_if.f90:164-167': [
         ('DO jj = ntsj-( nn_hls), ntej+(  nn_hls )', 1),
-        'END DO   ;   END DO', 4],
+        ('END DO   ;   END DO', 1), 4],
     'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/sbcice_if.f90:182-185': [
         'zqri = ztrp * ( ts(ji,jj,1,jp_tem,Kbb) - ( zt_fzp - 1.) )',
         '&                 +      fr_i(ji,jj)   * zqrj ) ) * smask0(ji,jj)', 4],
