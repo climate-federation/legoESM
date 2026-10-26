@@ -1,0 +1,39 @@
+--- sbcmod.F90
++++ sbcmod.F90
+@@ -41,6 +41,7 @@
+    USE sbcabl         ! atmospheric boundary layer
+    USE sbcice_if      ! surface boundary condition: ice-if sea-ice model
++   USE round339_ice_cover_writer, ONLY : r339_write
+ #if defined key_si3
+    USE par_ice        ! SI3 parameters
+    USE icestp         ! surface boundary condition: SI3 sea-ice model
+@@ -71,6 +72,7 @@
+ 
+    PUBLIC   sbc        ! routine called by step.F90
+    PUBLIC   sbc_init   ! routine called by opa.F90
++   PUBLIC :: r339_fixture_write
+ 
+    INTEGER ::   nsbc   ! type of surface boundary condition (deduced from namsbc informations)
+    !! * Substitutions
+@@ -498,7 +500,7 @@
+       !
+       SELECT CASE( nn_ice )                                            ! Update heat and freshwater fluxes over sea-ice areas
+       CASE(  1 )   ;         CALL sbc_ice_if   ( kt, Kbb, Kmm )        ! Ice-cover climatology ("Ice-if" model)
+-      CASE(  2 )   ;         CALL ice_stp  ( kt, Kbb, Kmm, nsbc )      ! SI3 ice model
++      CASE(  2 )   ;         CALL ice_stp  ( kt, Kbb, Kmm, nsbc ) ; CALL r339_write(kt,fr_i,nn_fsbc) ! passive post-SI3 record
+       CASE(  3 )   ;         CALL sbc_ice_cice ( kt, nsbc )            ! CICE ice model
+       END SELECT
+       !==> clem: from here on, the following fields are ok on the halos: snwice_mass, snwice_mass_b, snwice_fmass
+@@ -671,5 +673,13 @@
+    END SUBROUTINE sbc_final
+ 
++   SUBROUTINE r339_fixture_write(kt,pfr_i,kn_fsbc)
++      INTEGER, INTENT(in) :: kt, kn_fsbc
++      REAL(wp), INTENT(in) :: pfr_i(:,:)
++      !! Test entry executes the observer call compiled into this actual unit.
++      CALL r339_write(kt,pfr_i,kn_fsbc)
++   END SUBROUTINE r339_fixture_write
++
+    !!======================================================================
+ END MODULE sbcmod
+
