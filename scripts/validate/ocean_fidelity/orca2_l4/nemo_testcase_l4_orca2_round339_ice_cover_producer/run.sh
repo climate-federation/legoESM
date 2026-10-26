@@ -71,11 +71,12 @@ check_placement() {
   awk '
     /USE round339_ice_cover_writer/ {u++; ul=NR}
     /SUBROUTINE sbc\(/ {s=NR}
-    /CASE\(  2 \).*CALL ice_stp.*CALL r339_write/ {c++; cl=NR}
+    /CASE\(  2 \).*CALL ice_stp/ {ice=NR}
+    /CALL r339_write\(kt,fr_i,nn_fsbc\)/ {c++; cl=NR}
     /IF\( ln_icebergs/ {iceberg=NR}
     /SUBROUTINE r339_fixture_write/ {f++; fl=NR}
     /END MODULE sbcmod/ {e=NR}
-    END {exit !(u==1 && c==1 && f==1 && ul<s && s<cl && cl<iceberg && iceberg<fl && fl<e)}
+    END {exit !(u==1 && c==1 && f==1 && ul<s && s<ice && ice<cl && cl<iceberg && iceberg<fl && fl<e)}
   ' "$1"
 }
 check_year_namelist() {
@@ -132,7 +133,7 @@ patch --batch -s --fuzz=0 -p0 -d "$scratch" <"$PATCH"
 check_placement "$scratch/sbcmod.F90" || refuse 'observer is not after ice_stp and before icebergs'
 for plant in call use wrapper; do
   case "$plant" in
-    call) sed '/CALL ice_stp.*CALL r339_write/s/CALL r339_write/! CALL r339_write/' "$scratch/sbcmod.F90" >"$scratch/plants/$plant.F90" ;;
+    call) sed '/CALL r339_write(kt,fr_i,nn_fsbc)/d' "$scratch/sbcmod.F90" >"$scratch/plants/$plant.F90" ;;
     use) sed '/USE round339_ice_cover_writer/d' "$scratch/sbcmod.F90" >"$scratch/plants/$plant.F90" ;;
     wrapper) sed '/SUBROUTINE r339_fixture_write/,/END SUBROUTINE r339_fixture_write/d' "$scratch/sbcmod.F90" >"$scratch/plants/$plant.F90" ;;
   esac

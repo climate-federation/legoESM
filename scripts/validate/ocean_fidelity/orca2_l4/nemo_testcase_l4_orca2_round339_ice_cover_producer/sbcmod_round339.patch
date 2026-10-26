@@ -1,6 +1,6 @@
 --- sbcmod.F90
 +++ sbcmod.F90
-@@ -41,6 +41,7 @@
+@@ -38,5 +38,6 @@
     USE sbcabl         ! atmospheric boundary layer
     USE sbcice_if      ! surface boundary condition: ice-if sea-ice model
 +   USE round339_ice_cover_writer, ONLY : r339_write
@@ -15,16 +15,10 @@
  
     INTEGER ::   nsbc   ! type of surface boundary condition (deduced from namsbc informations)
     !! * Substitutions
-@@ -498,7 +500,7 @@
-       !
-       SELECT CASE( nn_ice )                                            ! Update heat and freshwater fluxes over sea-ice areas
-       CASE(  1 )   ;         CALL sbc_ice_if   ( kt, Kbb, Kmm )        ! Ice-cover climatology ("Ice-if" model)
--      CASE(  2 )   ;         CALL ice_stp  ( kt, Kbb, Kmm, nsbc )      ! SI3 ice model
-+      CASE(  2 )   ;         CALL ice_stp  ( kt, Kbb, Kmm, nsbc ) ; CALL r339_write(kt,fr_i,nn_fsbc) ! passive post-SI3 record
-       CASE(  3 )   ;         CALL sbc_ice_cice ( kt, nsbc )            ! CICE ice model
-       END SELECT
-       !==> clem: from here on, the following fields are ok on the halos: snwice_mass, snwice_mass_b, snwice_fmass
-@@ -671,5 +673,13 @@
+@@ -478,1 +480,2 @@
++                              CALL r339_write(kt,fr_i,nn_fsbc)          ! passive post-SI3 record
+ #endif
+@@ -658,4 +661,11 @@
     END SUBROUTINE sbc_final
  
 +   SUBROUTINE r339_fixture_write(kt,pfr_i,kn_fsbc)
@@ -36,4 +30,3 @@
 +
     !!======================================================================
  END MODULE sbcmod
-
