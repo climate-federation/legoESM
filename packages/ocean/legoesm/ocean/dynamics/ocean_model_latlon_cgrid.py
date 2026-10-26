@@ -3591,8 +3591,12 @@ class LatLonCGridOceanModel:
             # recompute K/A via the fallback — the same pattern as the
             # surface_forcing_implicit strip above.  Explicit-mixing configs
             # (implicit_vertical_mixing=False) keep the loud ValueError.
+            # ePBL is stripped the same way: its K must come from the
+            # fallback, which hands it the step dt (CATKE's dt_mom); the
+            # pipeline's copy would price mixing with EPBLConfig.dt_s.
             if (self.config.implicit_vertical_mixing
-                    and self._lat_dependent_constant_vmix()):
+                    and (self._lat_dependent_constant_vmix()
+                         or self._epbl_vmix())):
                 physics_for_combined = physics_for_combined._replace(
                     vertical_mixing=physics_for_combined.vertical_mixing
                     ._replace(scheme="none"))
@@ -3622,6 +3626,13 @@ class LatLonCGridOceanModel:
                 and _pc.vertical_mixing.scheme == "constant"
                 and bool(getattr(_pc.vertical_mixing.constant,
                                  "lat_dependent", False)))
+
+    def _epbl_vmix(self) -> bool:
+        """Static predicate: ``vertical_mixing.scheme="epbl"``.  ePBL's K is
+        computed only by the implicit-solve fallback (with the step dt), so
+        the explicit-composition strip and the fallback force share it."""
+        _pc = self.config.physics
+        return _pc is not None and _pc.vertical_mixing.scheme == "epbl"
 
     def _ensure_vertex_mask(self, state) -> None:
         """Fill (or refresh) the vertex-mask cache from CONCRETE state.
@@ -4869,6 +4880,14 @@ class LatLonCGridOceanModel:
             raise ValueError(
                 "dt_mom_ratio must be >= 1.0 (dt_mom <= dt_tracer), "
                 f"got {config.dt_mom_ratio!r}")
+        if (config.dt_mom_ratio != 1.0 and config.physics is not None
+                and config.physics.vertical_mixing.scheme == "epbl"):
+            raise ValueError(
+                "vertical_mixing.scheme='epbl' requires dt_mom_ratio == 1.0: "
+                "ePBL's energy budget is per timestep and runs on the momentum "
+                "step dt, so it must equal the tracer dt of the implicit "
+                f"tracer solve its diffusivity feeds. Got dt_mom_ratio="
+                f"{config.dt_mom_ratio!r}.")
         if config.dt_mom_ratio != 1.0 and config.barotropic.barotropic_solver != "rigid_lid":
             raise ValueError(
                 "dt_mom_ratio != 1.0 (asynchronous dt_mom≠dt_tracer stepping) "
@@ -12647,7 +12666,11 @@ class LatLonCGridOceanModel:
             _constant_nemo_evd = resolve_evd_composition(
                 _conv_here.enhanced_diffusion) == "nemo_replace"
 
-        if self._lat_dependent_constant_vmix() or _constant_nemo_evd:
+        if (self._lat_dependent_constant_vmix() or _constant_nemo_evd
+                or self._epbl_vmix()):
+            # (ePBL: its K comes only from the fallback, which passes it the
+            # step dt; anything surfaced here, e.g. EVD, is re-diagnosed
+            # there, as for tke/catke.)
             # The combined physics pipeline surfaces only the SUM of the
             # constant closure and EVD fields.  NEMO keeps those owners
             # separate: zdfphy.f90:347-351 copies the constant closure, then
@@ -12902,6 +12925,10 @@ class LatLonCGridOceanModel:
                     A_v_background=float(_cfg_b.A_v),
                     K_v_background=float(_cfg_b.K_v),
                     eos_fn=_vmix_eos_fn,
+                    # ePBL's per-timestep energy budget takes the same step
+                    # dt CATKE gets above (dt_mom: leapfrog 2*dt, dt on the
+                    # Euler start); no other scheme on this branch reads it.
+                    dt_tke=(dt_mom if _vmix_cfg.scheme == "epbl" else None),
                     lat_deg=_tke_lat_deg,
                     iwm_fields=_iwm,
                     n2_tracers=n2_tracers,

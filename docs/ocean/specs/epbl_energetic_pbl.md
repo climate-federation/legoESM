@@ -64,9 +64,13 @@ Requirements and guards (`validate_epbl_config`, all raise on violation):
   ePBL without an explicit `--dt`, and raises if it differs from the run
   timestep; the ocean single-column model sets it to its own `dt` when
   `dt_s` is left at the default and raises when a non-default `dt_s`
-  disagrees with that `dt`; the lat-lon tendency probe raises when `dt_s`
-  differs from its tracer timestep. Any other caller of the physics factory
-  must set it itself (nothing checks it there);
+  disagrees with that `dt`. The lat-lon C-grid model does not read `dt_s`:
+  it passes its step dt to ePBL at step time, the same dt CATKE gets on that
+  lane (the momentum dt: `2*dt` on leapfrog steps, `dt` on the Euler start),
+  and refuses ePBL with `dt_mom_ratio != 1`; the lat-lon tendency probe does
+  the same (momentum dt, and refuses a tracer dt that differs from it). Any
+  other caller of the physics factory must set `dt_s` itself (nothing checks
+  it there);
 - unknown `mstar_scheme` / `wt_scheme`, and `eqdisc_v0` together with
   `eqdisc_v0h`, raise.
 

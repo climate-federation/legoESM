@@ -565,16 +565,18 @@ def _find_pe_chg(kddt_h0, dkddt_h, hp_a, hp_b, th_a, sh_a, th_b, sh_b,
 
 
 def _epbl_column(h, u, v, t0, s0, dsv_dt, dsv_ds, tke_forcing,
-                 b_flux, absf, u_star, mech_tke_in, mld_guess_in,
+                 b_flux, absf, u_star, mech_tke_in, mld_guess_in, dt,
                  cfg: EPBLConfig, g: float, rho_0: float):
     """One column of ePBL.  Returns ``(Kd_interfaces, mld, mixvel, mixlen)``.
+
+    ``dt`` [s] is the timestep the energy budget is priced over; it is an
+    argument (not ``cfg.dt_s``) so a traced step dt can reach the kernel.
 
     ``Kd`` has length ``nz+1`` with zeros at the surface and bottom, matching
     MOM6's interface array.  All inputs are single-column 1-D arrays ordered
     surface to bottom.
     """
     nz = h.shape[0]
-    dt = cfg.dt_s
 
     # --- column geometry and the PE sensitivity coefficients -------------
     d_mass = rho_0 * h                       # mass per unit area [kg/m^2]
@@ -1024,7 +1026,7 @@ def _epbl_column(h, u, v, t0, s0, dsv_dt, dsv_ds, tke_forcing,
 
 @partial(jax.jit, static_argnames=("cfg", "g", "rho_0"))
 def _epbl_columns(h, u, v, t0, s0, dsv_dt, dsv_ds, tke_forcing,
-                  b_flux, absf, u_star, mech_tke_in, mld_guess,
+                  b_flux, absf, u_star, mech_tke_in, mld_guess, dt,
                   cfg: EPBLConfig, g: float, rho_0: float):
     """``_epbl_column`` vmapped over a flat stack of columns, compiled once.
 
@@ -1035,9 +1037,9 @@ def _epbl_columns(h, u, v, t0, s0, dsv_dt, dsv_ds, tke_forcing,
     is a NamedTuple of scalars so it is hashable and safe as a static arg.
     """
     return jax.vmap(_epbl_column, in_axes=(0,) * 8 + (0, 0, 0, 0, 0)
-                    + (None, None, None))(
+                    + (None, None, None, None))(
         h, u, v, t0, s0, dsv_dt, dsv_ds, tke_forcing,
-        b_flux, absf, u_star, mech_tke_in, mld_guess, cfg, g, rho_0)
+        b_flux, absf, u_star, mech_tke_in, mld_guess, dt, cfg, g, rho_0)
 
 
 # ---------------------------------------------------------------------------
@@ -1053,6 +1055,7 @@ def epbl_vertical_mixing(
     g: float = constants.g,
     rho_0: float = constants.rho_ocean,
     apply_diffusion: bool = False,
+    dt=None,
 ) -> VerticalMixingOutput:
     """Apply ePBL vertical mixing to an arbitrarily shaped field of columns.
 
@@ -1082,6 +1085,9 @@ def epbl_vertical_mixing(
         First guess at the boundary-layer depth [m]. ``None`` or a
         non-positive value starts from half the column depth, which is
         MOM6's ``MLD_ITERATION_GUESS = False`` behaviour.
+    dt : float, scalar array, or None
+        Timestep [s] the energy budget is priced over; may be traced.
+        ``None`` uses ``cfg.dt_s``.
 
     Returns
     -------
@@ -1129,7 +1135,8 @@ def epbl_vertical_mixing(
     tau_mag = _safe_sqrt(tau_x_b**2 + tau_y_b**2)
     # MOM6 prices mech_TKE from the raw u_star and floors u_star after.
     u_star_raw = _safe_sqrt(tau_mag / rho_0)
-    mech_tke_in = cfg.dt_s * rho_0 * u_star_raw**3
+    dt_run = cfg.dt_s if dt is None else dt
+    mech_tke_in = dt_run * rho_0 * u_star_raw**3
     u_star = jnp.maximum(u_star_raw, cfg.ustar_min)
 
     # Blend the local f with the planetary rotation rate (MOM6 ML_OMEGA_FRAC).
@@ -1149,7 +1156,7 @@ def epbl_vertical_mixing(
         dSV_dT.reshape(r), dSV_dS.reshape(r), tke_f.reshape(r),
         b_flux_b.reshape(flat), absf_eff.reshape(flat),
         u_star.reshape(flat), mech_tke_in.reshape(flat), mld_b.reshape(flat),
-        cfg, g, rho_0,
+        dt_run, cfg, g, rho_0,
     )
 
     # Interior interfaces only, matching VerticalMixingOutput's convention.
@@ -1217,7 +1224,7 @@ def epbl_diagnostics(
         dSV_dT.reshape(r), dSV_dS.reshape(r), tke_f.reshape(r),
         _b(B_flux).reshape(flat), absf_eff.reshape(flat),
         u_star.reshape(flat), mech_tke_in.reshape(flat),
-        _b(mld_guess, -1.0).reshape(flat), cfg, g, rho_0,
+        _b(mld_guess, -1.0).reshape(flat), cfg.dt_s, cfg, g, rho_0,
     )
     return (kd.reshape(horiz + (nlev + 1,)),
             mld.reshape(horiz),

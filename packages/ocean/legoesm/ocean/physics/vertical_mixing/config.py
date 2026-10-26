@@ -1047,6 +1047,8 @@ class EPBLConfig(NamedTuple):
     while legoESM's vertical-mixing factory signature carries no timestep, so
     ePBL — which is an energy-per-timestep closure — reads it from the config.
     It MUST equal the model timestep; the scheme raises if it is not positive.
+    The lat-lon C-grid model does not read it: that model passes its step dt
+    to ePBL at run time, as it does for CATKE.
     """
     # --- timestep (no MOM6 equivalent; see class docstring) ---
     dt_s: float = 1800.0
