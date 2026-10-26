@@ -136,6 +136,8 @@ Tool A `--run`, followed only after its admission by Tool B `--run`.
 - Default ORCA2 landing inventory, including the required
   `test_nemo_testcase_receipt_citation_gate.py`: **152 / 152 PASS** in
   1,469.76 seconds.
+- Required standalone citation-gate pytest on the clean pre-final tree:
+  **17 / 17 PASS**.
 - Focused round-339 tests: **5 / 5 PASS**.
 - Dedicated three-invocation ratchet: **12,314 PASS, 4 SKIP, 3 inherited
   FAIL**. The failures are the unchanged JRA55 test literal, land restart
