@@ -354,8 +354,8 @@ same-program proof remain green. The log is `round336/resume6_preflight.log`,
 SHA-256 `3a01f0800dc2360c75f49a2c567c6dd756c2e91a92ee1de07bfc86df3d2af832`.
 
 The disposition remains **ACQUISITION_NEEDED** at the operator command above.
-No NEMO executable was run, no model or configuration changed, and no unasked
-choice was made. Codex review: operator.
+No real NEMO executable was run, no model or configuration changed, and no
+unasked choice was made. Codex review: operator.
 
 The final per-receipt citation gate reports PASS for 17 citations with zero
 failures, zero unmapped citations, zero map-audit failures, and all nine
