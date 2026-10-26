@@ -195,11 +195,26 @@ def test_no_citation_map_key_is_written_twice():
     import collections
 
     source = Path(gate.__file__).read_text()
+    tree = ast.parse(source)
     assignment = next(
-        node.value for node in ast.parse(source).body
+        node.value for node in tree.body
         if isinstance(node, ast.Assign)
         and getattr(node.targets[0], "id", "") == "CITATION_MAP")
     written = [ast.literal_eval(key) for key in assignment.keys]
+    for node in tree.body:
+        if not isinstance(node, ast.Expr) or not isinstance(node.value, ast.Call):
+            continue
+        call = node.value
+        func = call.func
+        if not (
+            isinstance(func, ast.Attribute)
+            and isinstance(func.value, ast.Name)
+            and func.value.id == "CITATION_MAP"
+            and func.attr == "update"
+        ):
+            continue
+        assert len(call.args) == 1 and isinstance(call.args[0], ast.Dict)
+        written.extend(ast.literal_eval(key) for key in call.args[0].keys)
     repeated = sorted(
         key for key, count in collections.Counter(written).items() if count > 1)
     assert repeated == [], f"shadowed citation-map keys: {repeated}"
