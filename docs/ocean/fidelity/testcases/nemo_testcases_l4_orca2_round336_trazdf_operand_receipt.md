@@ -450,3 +450,16 @@ and `round336/resume7/independent.json` (SHA-256
 `d6329d6f6a13a45ca929833af2ae5512d4e577c8ebe9117bc92dbbd7cab9a17c`).
 The statement replay's seven fail-closed classifier tests pass. Codex review:
 operator.
+
+The final per-receipt citation gate reports PASS for 9 citations with zero
+failures, zero unmapped citations, zero map-audit failures, and all nine
+self-tests fired; its report SHA-256 is
+`e73b9ee91280adc6dd2191242799bd36fb3a1ece2f962a5254f3789ab427c75d`.
+The exact default ORCA2 landing battery, extended by the seven new replay
+controls, passes 159 tests in 1,027.08 seconds; its log SHA-256 is
+`c0e64332517d8584ef01eb859f4b7875a235671f6e5fdc4a9f5479534d6da49e`.
+The private-import ratchet separately passes 6 tests in 4.85 seconds; its log
+SHA-256 is
+`357552e211123f746071b1da46e34b619513dc21077812ffe469614a71dd6b28`.
+The reports are `round336/resume7_citation_gate.json`,
+`round336/resume7_default_gate.log`, and `round336/resume7_ratchet.log`.
