@@ -1,9 +1,6 @@
 --- zdfphy.F90
 +++ zdfphy.F90
-@@ -49,3 +49,5 @@
-    USE tke_round331_writer, ONLY : r331_begin, r331_sh2, r331_drag, r331_mxl, &
-       & r331_finish
-                      ! round-331 WRITE-only TKE localisation recorder
+@@ -51,0 +52,2 @@
 +   USE round336_trazdf_writer, ONLY : r336_zdfphy_capture ! R336_ZDFPHY_OBSERVER
 +
 @@ -369,14 +371,20 @@
