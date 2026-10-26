@@ -4,7 +4,8 @@
 +! O8O16_OBSERVER_BEGIN
 +   USE o8_o16_master_writer, ONLY : o8o16_picard
 +! O8O16_OBSERVER_END
-@@ -772,0 +776,3 @@
+@@ -772,0 +776,4 @@
 +! O8O16_OBSERVER_BEGIN
-+      CALL o8o16_picard(iconv,l_T_converged)
++      CALL o8o16_picard(iconv,l_T_converged,ztrid,zindterm,zdiagbis,zindtbis, &
++         &              zkappa_i,zkappa_s,zradab_i,zradab_s,zradtr_i,zradtr_s)
 +! O8O16_OBSERVER_END

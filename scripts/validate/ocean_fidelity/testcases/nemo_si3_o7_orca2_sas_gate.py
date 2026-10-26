@@ -583,7 +583,12 @@ def _verify_relative_manifest(
     return checked
 
 
-def verify_o7_log(path: str | Path, plant: str | None = None) -> dict[str, Any]:
+def verify_o7_log(
+    path: str | Path,
+    plant: str | None = None,
+    *,
+    expected_nn_itend: int = 2,
+) -> dict[str, Any]:
     """Use O1's whitespace-tolerant real-log parser, then pin production O7."""
     text = Path(path).read_text(errors="replace")
     if plant == "error-token":
@@ -614,7 +619,15 @@ def verify_o7_log(path: str | Path, plant: str | None = None) -> dict[str, Any]:
         if got is not want:
             raise _refuse(f"production selector {name}={got}, expected {want}")
         parsed[name] = got
-    for name, want in (("nn_it000", 1), ("nn_itend", 2), ("nn_fsbc", 1), ("jpni", 1), ("jpnj", 1)):
+    if expected_nn_itend < 1:
+        raise _refuse(f"invalid expected nn_itend={expected_nn_itend}")
+    for name, want in (
+        ("nn_it000", 1),
+        ("nn_itend", expected_nn_itend),
+        ("nn_fsbc", 1),
+        ("jpni", 1),
+        ("jpnj", 1),
+    ):
         matches = re.findall(rf"\b{re.escape(name)}\s*=\s*(-?\d+)", text, re.I)
         if not matches or int(matches[-1]) != want:
             raise _refuse(f"{name} is not {want}")

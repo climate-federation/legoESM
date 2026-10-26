@@ -23,18 +23,18 @@ SPEC.loader.exec_module(gate)
 
 
 def test_schema_has_every_named_boundary_and_registered_projection() -> None:
-    assert set(gate.KINDS) == set(range(1, 18))
+    assert set(gate.KINDS) == set(range(1, 19))
     assert gate.PROJECTIONS == {
         "O8": (1, 2), "O9": (3, 4, 5, 6, 17), "O10": (6, 7, 8),
         "O11": (8, 9), "O12": (10, 11), "O13": (11, 12),
-        "O14": (12, 13), "O15": (13, 14), "O16": (15, 16),
+        "O14": (12, 13), "O15": (13, 14), "O16": (18, 15, 16),
     }
-    assert [gate.KINDS[k].label for k in range(1, 18)] == [
+    assert [gate.KINDS[k].label for k in range(1, 19)] == [
         "frazil_entry", "frazil_exit", "category_entry", "zdf_exit", "dh_exit",
         "temp1_exit_sal_entry", "sal_exit", "temp2_exit_da_entry", "da_exit",
         "pond_entry_category_done", "pond_exit_itd_entry", "itd_exit_do_entry",
         "do_exit_cor_entry", "cor_exit", "update_flx_entry",
-        "update_flx_exit_ocean_boundary", "picard_final",
+        "update_flx_exit_ocean_boundary", "picard_final", "pre_aggregation",
     ]
 
 
@@ -46,6 +46,22 @@ def test_schema_includes_o9_fluxes_o11_inputs_and_o16_boundary() -> None:
     assert {field.name for field in gate.KINDS[16].fields} >= {
         "qsr", "qns", "emp", "sfx", "fr_i", "fwfice", "tn_ice", "alb_ice", "snwice_fmass"
     }
+
+
+def test_every_reviewed_boundary_input_is_recorded() -> None:
+    names = lambda kind: {field.name for field in gate.KINDS[kind].fields}
+    assert {"t_su", "qns_ice", "ztrid", "zindterm", "zdiagbis", "zindtbis",
+            "zkappa_i", "zkappa_s", "zradab_i", "zradab_s", "zradtr_i", "zradtr_s"} <= names(17)
+    assert {"h_i_b", "a_i_b", "hi_max", "rn_amax_2d"} <= names(11) & names(12)
+    assert {"t_bo", "ht_i_new", "fraz_frac", "sss_m", "hi_max", "rn_amax_2d"} <= names(12) & names(13)
+    assert {"sss_m", "hi_max", "hi_mean", "rn_amax_2d"} <= names(13) & names(14)
+    assert {"at_i_b", "a_i_b", "wfx_snw_dyn", "tmask_k1", "cloud_fra"} <= names(15)
+    assert names(18) == {field.name for field in gate.STATE}
+    assert {"rcnd_s", "rn_kappa_i", "rn_kappa_s", "rn_snwblow", "rn_sinew", "nn_icesal"} <= set(gate.SCALAR_NAMES)
+    assert {"rn_icesal", "rn_sal_gd", "rn_time_gd", "rn_sal_fl", "rn_time_fl",
+            "nn_liquidus", "rn_alpha_GN", "rn_Rc_GN", "rn_alpha_CW", "ln_sal_chk",
+            "ln_pnd", "ln_pnd_LEV", "ln_pnd_CST", "ln_pnd_TOPO", "rn_apnd",
+            "rn_hpnd", "ln_pnd_alb", "rn_pnd_hl_min", "rn_pnd_hl_max"} <= set(gate.SCALAR_NAMES)
 
 
 @pytest.mark.parametrize("plant", ["header", "truncation", "swapped-field", "one-bit"])
@@ -64,14 +80,14 @@ def test_each_rung_reader_accepts_only_its_registered_projection(rung: str) -> N
 
 def test_size_and_retention_are_explicit() -> None:
     report = gate.size_report()
-    assert report["master_bytes_worst_case"] == 114_202_493_300
-    assert report["master_gib_worst_case"] == pytest.approx(106.35936008766294)
+    assert report["master_bytes_worst_case"] == 131_392_072_220
+    assert report["master_gib_worst_case"] == pytest.approx(122.36840298399329)
     assert "without copying" in report["retention"]
 
 
 def test_writer_field_counts_and_real_extent_branches_match_schema() -> None:
     text = (ACQ / "o8_o16_master_writer.F90").read_text()
-    for count in (65, 15, 10, 91, 104, 16, 4):
+    for count in (3, 2, 65, 15, 104, 111, 16, 23):
         assert f",{count},u)" in text
     for spec in gate.KINDS.values():
         names = [field.name for field in spec.fields]
@@ -103,11 +119,22 @@ def test_script_is_read_only_by_default_and_retains_refusals() -> None:
     text = (ACQ / "run.sh").read_text()
     assert "mode=${1:---preflight-only}" in text
     assert text.index('if [[ "$mode" == --preflight-only ]]') < text.index("./makenemo")
-    assert 'timeout "$RUN_TIMEOUT_SEC" mpirun -np 1' in text
+    assert 'timeout "$remaining" mpirun -np 1' in text
     assert "--admit-existing" in text and "--move-aside-builds" in text
     assert "REFUSE_RETAINED" in text and "REFUSE_BUILD_RETAINED" in text
     assert "UNMODIFIED_PRODUCTION" in text and "ln_zdf_chkcvg_overlay" in text
     assert "same_program.json" in text
+    assert "--expected-ppsrc-dir" in text and "--plant same-program" in text
+    assert "compile_real_bounds_fixture" in text and "real_bounds_driver.F90" in text
+    assert "stub_driver_fixture" in text and "O8O16_STUB_MODE=1" in text
+
+
+def test_reused_o7_log_gate_accepts_the_preregistered_100_step_window(tmp_path: Path) -> None:
+    subprocess.run([str(ACQ / "stub_nemo.sh")], cwd=tmp_path, check=True, capture_output=True, text=True)
+    report = gate.verify_o7_log(tmp_path / "ocean.output", expected_nn_itend=100)
+    assert report["o7_production"]["ln_icethd"] is True
+    with pytest.raises(ValueError, match="nn_itend is not 2"):
+        gate.verify_o7_log(tmp_path / "ocean.output")
 
 
 def test_preflight_compiles_and_runs_real_patched_source_without_nemo(tmp_path: Path) -> None:
@@ -118,9 +145,11 @@ def test_preflight_compiles_and_runs_real_patched_source_without_nemo(tmp_path: 
     env.update(EVIDENCE=str(tmp_path / "evidence"), REFUSED_DIR=str(tmp_path / "refused"))
     proc = subprocess.run(
         [str(ACQ / "run.sh"), "--preflight-only", str(report)], cwd=REPO, env=env,
-        text=True, capture_output=True, check=True, timeout=120,
+        text=True, capture_output=True, check=True, timeout=300,
     )
-    assert json.loads(report.read_text()) == {"status": "PREFLIGHT_OK", "nemo_run": False, "plants": 36}
+    assert json.loads(report.read_text()) == {"status": "PREFLIGHT_OK", "nemo_run": False, "plants": 39}
     assert "PASS_REAL_PPSRC_PLACEMENT" in proc.stdout
-    assert "PASS_PATCHED_O11_BOUNDS_FIXTURE" in proc.stdout
-    assert "PREFLIGHT_OK: no NEMO build or integration was run" in proc.stdout
+    assert "PASS_REAL_PATCHED_BOUNDS_FIXTURE" in proc.stdout
+    assert "PASS_OBSERVER_FREE_SAME_PROGRAM" in proc.stdout
+    assert "PASS_100_STEP_STUB_DRIVER_RETENTION" in proc.stdout
+    assert "PREFLIGHT_OK: no real NEMO integration was run" in proc.stdout

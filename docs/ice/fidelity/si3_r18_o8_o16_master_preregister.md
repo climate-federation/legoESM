@@ -14,11 +14,11 @@ including every source, deck and executable digest, is written before either run
 
 ## Registered boundaries and projections
 
-The master schema has 17 ordered record kinds: frazil entry/exit; category entry;
+The master schema has 18 ordered record kinds: frazil entry/exit; category entry;
 ZDF, DH, first TEMP, salinity, second TEMP and `ice_thd_da` exits; category/pond,
 pond/remap, remap/open-water, open-water/correction and correction boundaries;
 `ice_update_flx` entry/exit (the latter is the first ocean-format boundary); and
-the final BL99 Picard state. Category frames are recorded at every step and all
+the final BL99 Picard state; and the pre-aggregation category state. Category frames are recorded at every step and all
 five categories. Picard final state is recorded only at steps 1, 2 and 100.
 
 Each admission reader exposes only these record kinds:
@@ -33,11 +33,11 @@ Each admission reader exposes only these record kinds:
 | O13 | pond exit/remap exit | 200 |
 | O14 | remap exit/open-water exit | 200 |
 | O15 | open-water exit/correction exit | 200 |
-| O16 | `ice_update_flx` entry/ocean-format exit | 200 |
+| O16 | pre-aggregation/`ice_update_flx` entry/ocean-format exit | 300 |
 
 ## Frozen acquisition predictions
 
-- P1 CONFIRM: exactly 4,415 rank-0 records exist with valid headers, finite
+- P1 CONFIRM: exactly 4,515 rank-0 records exist with valid headers, finite
   binary64 payloads, exact declared extents and no trailing bytes. REFUTE: any
   missing/extra record, invalid extent, nonfinite value or byte-count mismatch.
 - P2 CONFIRM: reference and observer-run restart filename sets and bytes are
@@ -47,10 +47,10 @@ Each admission reader exposes only these record kinds:
   REFUTE: any missing completion marker or fatal token.
 - P4 CONFIRM: each per-rung reader sees exactly the table projection; no reader
   admits a foreign record kind. REFUTE: missing, foreign or wrong-category entry.
-- P5 CONFIRM: the real-flag census has a nonzero FP count in all five containing
-  functions, observer-free and instrumented counts agree mnemonic by mnemonic,
-  and an injected FP operation changes each count. REFUTE: zero census, any
-  passive-arm difference, or a plant that does not fire.
+- P5 CONFIRM: the real-flag census covers all seven patched units;
+  observer-free and instrumented counts agree mnemonic by mnemonic, and an
+  injected FP operation changes each named routine's nonzero count. REFUTE: a
+  zero census, any passive-arm difference or a plant that does not fire.
 
 These are acquisition predictions, not physics scores. No O8–O16 fidelity verdict
 is authorized until the retained record exists and the respective scorer runs.
@@ -59,10 +59,12 @@ is authorized until the retained record exists and the respective scorer runs.
 
 Worst-case sizing uses ORCA2 local dimensions 182×149, interior 180×147, five
 categories and 10+5 layers, pessimistically treating every interior cell as
-gathered in every category. The master is 114,202,493,300 bytes (106.36 GiB).
-The largest retained projection is O9 at 35,930,845,300 bytes (33.46 GiB); the
+gathered in every category. The master is 131,392,072,220 bytes (122.37 GiB).
+The largest retained projection is O9 at 33.62 GiB; the
 other projections are references into the same immutable files, never copies.
-The run refuses below 150,000,000 KiB free disk or 150 GiB available RAM.
+The run refuses below 150,000,000 KiB free disk or 150 GiB available RAM, and
+rejects final evidence above 150,000,000 KiB or total acquisition time above
+14,400 seconds.
 
 Raw records, logs, production decks, source/binary manifests, per-rung relative
 manifests and builds are retained until every O8–O16 admission completes. A
@@ -73,8 +75,10 @@ rerun is `run.sh --move-aside-builds`, then `run.sh --run`; nothing is deleted.
 
 The default read-only preflight applies all patches to real preprocessed source,
 compiles at production flags, runs the per-function census and its plants, runs
-the patched `ice_thd_da` under `-fcheck=bounds` with distinct values and `-0.0`,
+the real writer and all seven patched units under `-fcheck=bounds` with distinct
+values and `-0.0`, compares to an independently copied observer-free build,
 validates namelist group ownership with misspelling/misplacement plants, checks
 source-derived SAS time level, validates A2D(0) handling, and fires schema,
-checksum, truncation, swapped-field and every projection plant. It never calls
-`makenemo`, `mpirun` or NEMO.
+checksum, truncation, swapped-field and every projection plant. A stub NEMO
+exercises the generated 100-step driver's syntax, run/admission/refusal,
+retention and move-aside paths; it never calls real `makenemo`, `mpirun` or NEMO.

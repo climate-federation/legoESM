@@ -9,11 +9,15 @@
 +                                        CALL o8o16_set_context( kt, Kmm, nit000, narea-1, jpni, jpnj, &
 +                                           &                    rDt_ice, r1_Dt_ice )
 +! O8O16_OBSERVER_END
-@@ -256,0 +265,3 @@
+@@ -253,0 +262,3 @@
++! O8O16_OBSERVER_BEGIN
++                                        CALL o8o16_update(18)
++! O8O16_OBSERVER_END
+@@ -256,0 +268,3 @@
 +! O8O16_OBSERVER_BEGIN
 +                                        CALL o8o16_update(15)
 +! O8O16_OBSERVER_END
-@@ -257,0 +269,3 @@
+@@ -257,0 +272,3 @@
 +! O8O16_OBSERVER_BEGIN
 +                                        CALL o8o16_update(16)
 +! O8O16_OBSERVER_END

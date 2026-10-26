@@ -22,6 +22,8 @@ UNITS = {
     "icethd": ("__icethd_MOD_ice_thd", "a_i(1,1,1) = a_i(1,1,1) + 1._wp"),
     "icethd_do": ("__icethd_do_MOD_ice_thd_frazil", "ht_i_new(1,1) = ht_i_new(1,1) + 1._wp"),
     "icethd_da": ("__icethd_da_MOD_ice_thd_da", "a_i_1d(1) = a_i_1d(1) + 1._wp"),
+    "icethd_sal": ("__icethd_sal_MOD_ice_thd_sal", "sz_i_1d(1,1) = sz_i_1d(1,1) + 1._wp"),
+    "icethd_pnd": ("__icethd_pnd_MOD_ice_thd_pnd", "a_ip(1,1,1) = a_ip(1,1,1) + 1._wp"),
     "icethd_zdf_bl99": ("__icethd_zdf_bl99_MOD_ice_thd_zdf_bl99", "t_i_1d(1,1) = t_i_1d(1,1) + 1._wp"),
 }
 
@@ -46,6 +48,20 @@ def _plant(text: str, statement: str) -> str:
     return text[: end + 1] + "      " + statement + "\n" + text[end + 1 :]
 
 
+def _plant_salinity(text: str, statement: str) -> str:
+    marker = "      SELECT CASE ( nn_icesal )"
+    if marker not in text:
+        raise ValueError("salinity routine executable marker absent")
+    return text.replace(marker, "      " + statement + "\n" + marker, 1)
+
+
+def _plant_pond(text: str, statement: str) -> str:
+    marker = "      IF( ln_timing )   CALL timing_start('icethd_pnd')"
+    if marker not in text:
+        raise ValueError("pond routine executable marker absent")
+    return text.replace(marker, "      " + statement + "\n" + marker, 1)
+
+
 def census(build: Path = BUILD, toolchain: Path = TOOLCHAIN) -> dict:
     flags = _flags(build)
     report = {"flags": flags, "units": {}}
@@ -62,7 +78,13 @@ def census(build: Path = BUILD, toolchain: Path = TOOLCHAIN) -> dict:
             patched = tmp / f"{unit}_instrumented.f90"
             _patched(original, HERE / f"{unit}_o8_o16.patch", patched)
             planted = tmp / f"{unit}_plant.f90"
-            planted.write_text(_plant(patched.read_text(), plant_statement))
+            if unit == "icethd_sal":
+                plant_text = _plant_salinity(patched.read_text(), plant_statement)
+            elif unit == "icethd_pnd":
+                plant_text = _plant_pond(patched.read_text(), plant_statement)
+            else:
+                plant_text = _plant(patched.read_text(), plant_statement)
+            planted.write_text(plant_text)
             baseline = tmp / f"{unit}_baseline.f90"
             baseline.write_bytes(original.read_bytes())
             # Local compilation adds the writer .mod directory for USE resolution.

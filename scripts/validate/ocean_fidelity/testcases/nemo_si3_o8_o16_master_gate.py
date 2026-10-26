@@ -37,7 +37,20 @@ DEFAULT_NEMO_ROOT = Path("/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2")
 MAGIC = b"O816M001"
 VERSION = 1
 N_META = 20
-N_SCALARS = 6
+SCALAR_NAMES = (
+    "rDt_ice", "r1_Dt_ice", "rn_beta", "rn_dmin", "rn_hinew", "picard_iterations",
+    "rcnd_s", "rn_kappa_i", "rn_kappa_s", "rn_snwblow", "rn_sinew", "nn_icesal",
+    "r1_nlay_i", "r1_nlay_s", "rn_simin", "rn_himin",
+    "ln_drainage", "ln_flushing", "nn_drainage", "nn_flushing",
+    "rn_sal_himin", "rn_flushrate", "rn_vbrc", "nn_sal_scheme",
+    "rn_alpha_RJW", "rn_Rc_RJW", "nice_pnd", "rn_apnd_min", "rn_apnd_max",
+    "rn_pnd_flush", "ln_pnd_lids", "ln_pnd_rain",
+    "rn_icesal", "rn_sal_gd", "rn_time_gd", "rn_sal_fl", "rn_time_fl",
+    "nn_liquidus", "rn_alpha_GN", "rn_Rc_GN", "rn_alpha_CW", "ln_sal_chk",
+    "ln_pnd", "ln_pnd_LEV", "ln_pnd_CST", "ln_pnd_TOPO", "rn_apnd",
+    "rn_hpnd", "ln_pnd_alb", "rn_pnd_hl_min", "rn_pnd_hl_max",
+)
+N_SCALARS = len(SCALAR_NAMES)
 HEADER_BYTES = 8 + 4 + 4 * N_META + 8 * N_SCALARS
 STEPS = tuple(range(1, 101))
 PICARD_STEPS = (1, 2, 100)
@@ -88,6 +101,13 @@ TOTALS = _fields(
     "I2",
 )
 POND = _fields("dh_i_sum_2d dh_s_sum_2d", "I3")
+GLOBAL_AUX = (
+    _fields("h_i_b a_i_b", "I3")
+    + _fields("t_bo ht_i_new fraz_frac sss_m rn_amax_2d", "I2")
+    + _fields("hi_max", "C0")
+    + _fields("hi_mean", "C1")
+)
+POND_FORCING = _fields("sprecip tprecip", "I2") + _fields("qsr_ice qns_ice", "I3")
 FLUX = _fields(
     "wfx_snw wfx_snw_sni wfx_snw_sum wfx_pnd wfx_spr wfx_sub wfx_snw_sub "
     "wfx_ice_sub wfx_ice wfx_sni wfx_opw wfx_bog wfx_dyn wfx_bom wfx_sum "
@@ -124,25 +144,22 @@ KINDS: dict[int, Kind] = {
         True,
     ),
     6: Kind("temp1_exit_sal_entry", _fields("nptidx", "G1", "i4") + CAT_BASE + DH_DIAGS + DH_FLUXES, True),
-    7: Kind(
-        "sal_exit",
-        _fields("nptidx", "G1", "i4")
-        + _fields("a_i h_i s_i sss sfx_bri sfx_res", "G1")
-        + _fields("t_i e_i sz_i", "GI"),
-        True,
-    ),
+    7: Kind("sal_exit", _fields("nptidx", "G1", "i4") + CAT_BASE + DH_DIAGS + DH_FLUXES, True),
     8: Kind("temp2_exit_da_entry", _fields("nptidx", "G1", "i4") + CAT_BASE + DH_DIAGS + DH_FLUXES, True),
     9: Kind("da_exit", _fields("nptidx", "G1", "i4") + CAT_BASE + DH_DIAGS + DH_FLUXES, True),
-    10: Kind("pond_entry_category_done", STATE + TOTALS + POND + FLUX),
-    11: Kind("pond_exit_itd_entry", STATE + TOTALS + POND + FLUX),
-    12: Kind("itd_exit_do_entry", STATE + TOTALS + POND + FLUX),
-    13: Kind("do_exit_cor_entry", STATE + TOTALS + POND + FLUX),
-    14: Kind("cor_exit", STATE + TOTALS + POND + FLUX),
+    10: Kind("pond_entry_category_done", STATE + TOTALS + POND + FLUX + GLOBAL_AUX + POND_FORCING),
+    11: Kind("pond_exit_itd_entry", STATE + TOTALS + POND + FLUX + GLOBAL_AUX + POND_FORCING),
+    12: Kind("itd_exit_do_entry", STATE + TOTALS + POND + FLUX + GLOBAL_AUX + POND_FORCING),
+    13: Kind("do_exit_cor_entry", STATE + TOTALS + POND + FLUX + GLOBAL_AUX + POND_FORCING),
+    14: Kind("cor_exit", STATE + TOTALS + POND + FLUX + GLOBAL_AUX + POND_FORCING),
     15: Kind(
         "update_flx_entry",
         STATE + TOTALS + FLUX
         + _fields("qsr_oce qns_oce qemp_oce emp_oce emp_ice qns_tot qsr_tot frq_m", "I2")
         + _fields("a_i_b qsr_ice qns_ice qtr_ice_bot qevap_ice", "I3")
+        + _fields("qcn_ice qml_ice qtr_ice_top", "I3")
+        + _fields("at_i_b wfx_snw_dyn cloud_fra", "I2")
+        + _fields("tmask_k1", "F2")
         + _fields("snwice_mass snwice_mass_b", "F2"),
     ),
     16: Kind(
@@ -158,11 +175,28 @@ KINDS: dict[int, Kind] = {
         "picard_final",
         _fields("nptidx", "G1", "i4")
         + _fields("l_t_converged", "G1", "i4")
+        + _fields("t_su qns_ice", "G1")
         + _fields("t_i", "GI")
         + _fields("t_s", "GS"),
         True,
     ),
+    18: Kind(
+        "pre_aggregation",
+        STATE,
+    ),
 }
+
+# The final Picard record also carries the final scratch state of NEMO's
+# tridiagonal solve.  These arrays are passed directly by icethd_zdf_bl99.
+KINDS[17] = Kind(
+    "picard_final",
+    KINDS[17].fields
+    + _fields("zkappa_i zradab_i zradtr_i", "GI0")
+    + _fields("zkappa_s zradab_s zradtr_s", "GS0")
+    + _fields("ztrid", "TRI3")
+    + _fields("zindterm zdiagbis zindtbis", "TRI1"),
+        True,
+)
 
 PROJECTIONS: dict[str, tuple[int, ...]] = {
     "O8": (1, 2),
@@ -173,7 +207,7 @@ PROJECTIONS: dict[str, tuple[int, ...]] = {
     "O13": (11, 12),
     "O14": (12, 13),
     "O15": (13, 14),
-    "O16": (15, 16),
+    "O16": (18, 15, 16),
 }
 
 
@@ -193,6 +227,12 @@ def _shape(field: Field, meta: dict[str, int]) -> tuple[int, ...]:
         "G1": (meta["npti"],),
         "GI": (meta["npti"], meta["nlay_i"]),
         "GS": (meta["npti"], meta["nlay_s"]),
+        "GI0": (meta["npti"], meta["nlay_i"] + 1),
+        "GS0": (meta["npti"], meta["nlay_s"] + 1),
+        "TRI1": (meta["nlay_i"] + meta["nlay_s"] + 1,),
+        "TRI3": (meta["nlay_i"] + meta["nlay_s"] + 1, 3),
+        "C0": (meta["jpl"] + 1,),
+        "C1": (meta["jpl"],),
     }
     try:
         return dims[field.extent]
@@ -250,6 +290,8 @@ def read_master_record(path: str | Path, plant: str | None = None) -> dict[str, 
     if p.name != expected:
         raise _refuse(f"filename/header disagreement: {p.name} != {expected}")
     scalars = np.frombuffer(raw, dtype="<f8", count=N_SCALARS, offset=8 + 4 + 4 * N_META).copy()
+    if not np.all(np.isfinite(scalars)):
+        raise _refuse(f"nonfinite scalar header in {p}")
     offset = HEADER_BYTES
     fields: dict[str, np.ndarray] = {}
     digests: dict[str, str] = {}
@@ -273,7 +315,7 @@ def read_master_record(path: str | Path, plant: str | None = None) -> dict[str, 
         raise _refuse(f"trailing bytes in {p}: {len(raw) - offset}")
     return {
         "meta": meta,
-        "scalars": scalars,
+        "scalars": dict(zip(SCALAR_NAMES, map(float, scalars), strict=True)),
         "fields": fields,
         "sha256": digests,
         "record_sha256": hashlib.sha256(raw).hexdigest(),
@@ -400,7 +442,9 @@ def _synthetic_record(path: Path, kind: int, kt: int = 1, jl: int | None = None)
         f.write(MAGIC)
         f.write(struct.pack("<i", VERSION))
         f.write(np.asarray([meta[key] for key in ordered], dtype="<i4").tobytes())
-        f.write(np.asarray([10800.0, 1 / 10800.0, 1.0, 8.0, 0.1, 0.0], dtype="<f8").tobytes())
+        scalar_values = np.zeros(N_SCALARS, dtype="<f8")
+        scalar_values[:6] = [10800.0, 1 / 10800.0, 1.0, 8.0, 0.1, 0.0]
+        f.write(scalar_values.tobytes())
         seed = 1
         for field in spec.fields:
             shape = _shape(field, meta)
@@ -445,7 +489,7 @@ def verify_manifest(root: Path, producer: str | None = None) -> dict[str, Any]:
     required = {
         "producer_commit", "binary_sha256", "source_sha256", "nemo_source_sha256", "deck_sha256",
         "forcing_disposition", "dynamics_disposition", "record_schema_sha256",
-        "estimated_master_bytes", "wall_clock_budget_seconds",
+        "estimated_master_bytes", "max_evidence_disk_kib", "wall_clock_budget_seconds",
     }
     missing = sorted(required - set(manifest))
     if missing:
@@ -464,6 +508,10 @@ def verify_manifest(root: Path, producer: str | None = None) -> dict[str, Any]:
         raise _refuse("production ice namelist/overlay disposition mismatch")
     if manifest.get("estimated_master_bytes") != size_report()["master_bytes_worst_case"]:
         raise _refuse("manifest storage estimate differs from schema")
+    if manifest.get("max_evidence_disk_kib") != 150_000_000:
+        raise _refuse("manifest disk-use gate differs from acquisition contract")
+    if manifest.get("wall_clock_budget_seconds") != 14_400:
+        raise _refuse("manifest wall-clock gate differs from acquisition contract")
     for rel, want in manifest["source_sha256"].items():
         path = REPO_ROOT / rel
         if not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != want:
@@ -494,7 +542,7 @@ def admit(root: Path, producer: str | None = None) -> dict[str, Any]:
     _verify_run_completion_and_logs(
         root / "record_100step", "record_100step", expect_icedyn=True, expect_icethd=True
     )
-    verify_o7_log(root / "record_100step/ocean.output")
+    verify_o7_log(root / "record_100step/ocean.output", expected_nn_itend=100)
     for rung in PROJECTIONS:
         result = projection_from_directory(root / "record_100step/o8_o16_master_records", rung)
         retained = root / f"manifest/per_rung/{rung}.json"
@@ -510,12 +558,24 @@ def admit(root: Path, producer: str | None = None) -> dict[str, Any]:
     for ref, rec in zip(ref_restart, rec_restart, strict=True):
         if hashlib.sha256(ref.read_bytes()).digest() != hashlib.sha256(rec.read_bytes()).digest():
             raise _refuse(f"observer changed restart bytes: {ref.name}")
+    usage_path = root / "manifest/resource_usage.json"
+    if not usage_path.is_file():
+        raise _refuse("missing measured resource usage")
+    usage = json.loads(usage_path.read_text())
+    record_bytes = sum(p.stat().st_size for p in (root / "record_100step/o8_o16_master_records").glob("*.bin"))
+    if usage.get("record_bytes") != record_bytes or not (0 < record_bytes <= manifest["estimated_master_bytes"]):
+        raise _refuse("measured record size missing or over schema gate")
+    if not (0 < usage.get("evidence_disk_kib", 0) <= manifest["max_evidence_disk_kib"]):
+        raise _refuse("measured evidence disk use exceeds gate")
+    if not (0 <= usage.get("wall_clock_seconds", -1) <= manifest["wall_clock_budget_seconds"]):
+        raise _refuse("measured wall clock exceeds gate")
     return {"status": "ADMITTED", "manifest": manifest, "projections": list(PROJECTIONS)}
 
 
 def schema_document() -> dict[str, Any]:
     return {
         "magic": MAGIC.decode(), "version": VERSION, "header_bytes": HEADER_BYTES,
+        "scalar_names": list(SCALAR_NAMES),
         "kinds": {str(k): {"label": v.label, "category": v.category,
                            "fields": [field.__dict__ for field in v.fields]}
                   for k, v in KINDS.items()},
@@ -523,18 +583,57 @@ def schema_document() -> dict[str, Any]:
     }
 
 
-def verify_same_program(new_bld: Path, ref_bld: Path, patch_dir: Path, new_cfg: str, ref_cfg: str) -> dict[str, Any]:
-    units = ("icestp", "icethd", "icethd_do", "icethd_da", "icethd_zdf_bl99")
+def write_stub_records(root: Path) -> dict[str, Any]:
+    """Write a complete tiny record index for Checklist 15's stub-NEMO driver."""
+    root.mkdir(parents=True, exist_ok=True)
+    count = 0
+    for kind, spec in KINDS.items():
+        steps = PICARD_STEPS if kind == 17 else STEPS
+        cats = range(1, 6) if spec.category else (0,)
+        for kt in steps:
+            for jl in cats:
+                _synthetic_record(root / record_name(kind, kt, jl), kind, kt, jl)
+                count += 1
+    return {"status": "STUB_RECORDS_WRITTEN", "records": count}
+
+
+def verify_same_program(
+    new_bld: Path,
+    ref_bld: Path,
+    patch_dir: Path,
+    expected_ppsrc_dir: Path,
+    new_cfg: str,
+    ref_cfg: str,
+    plant: str | None = None,
+) -> dict[str, Any]:
+    units = (
+        "icestp", "icethd", "icethd_do", "icethd_da", "icethd_sal",
+        "icethd_pnd", "icethd_zdf_bl99",
+    )
     markers = {unit: ("! O8O16_OBSERVER_BEGIN", "! O8O16_OBSERVER_END") for unit in units}
+    expected = {unit: expected_ppsrc_dir / f"{unit}.F90" for unit in units}
+    if plant == "same-program":
+        with tempfile.TemporaryDirectory() as raw:
+            planted = Path(raw)
+            for unit, source in expected.items():
+                target = planted / source.name
+                target.write_bytes(source.read_bytes())
+            target = planted / "icethd.F90"
+            text = target.read_text()
+            text = text.replace("CALL o8o16_category(3,jl)", "CALL o8o16_category(4,jl)", 1)
+            target.write_text(text)
+            expected = {unit: planted / f"{unit}.F90" for unit in units}
+            return same_program_observers(
+                new_bld, ref_bld,
+                {unit: patch_dir / f"{unit}_o8_o16.patch" for unit in units},
+                ("o8_o16_master_writer",), new_cfg=new_cfg, ref_cfg=ref_cfg,
+                preprocessed_markers=markers, preprocessed_patch_units=expected,
+            )
     return same_program_observers(
-        new_bld,
-        ref_bld,
+        new_bld, ref_bld,
         {unit: patch_dir / f"{unit}_o8_o16.patch" for unit in units},
-        ("o8_o16_master_writer",),
-        new_cfg=new_cfg,
-        ref_cfg=ref_cfg,
-        preprocessed_markers=markers,
-        preprocessed_patch_units={unit: new_bld / f"ppsrc/nemo/{unit}.f90" for unit in units},
+        ("o8_o16_master_writer",), new_cfg=new_cfg, ref_cfg=ref_cfg,
+        preprocessed_markers=markers, preprocessed_patch_units=expected,
     )
 
 
@@ -549,12 +648,14 @@ def main(argv: list[str] | None = None) -> int:
     action.add_argument("--read-projection", choices=sorted(PROJECTIONS))
     action.add_argument("--admit-existing", type=Path)
     action.add_argument("--same-program", type=Path, metavar="NEW_BLD")
+    action.add_argument("--write-stub-records", type=Path)
     parser.add_argument("--records", type=Path)
     parser.add_argument("--plant")
     parser.add_argument("--producer")
     parser.add_argument("--nemo-root", type=Path, default=DEFAULT_NEMO_ROOT)
     parser.add_argument("--reference-bld", type=Path)
     parser.add_argument("--patch-dir", type=Path)
+    parser.add_argument("--expected-ppsrc-dir", type=Path)
     parser.add_argument("--new-cfg")
     parser.add_argument("--reference-cfg")
     args = parser.parse_args(argv)
@@ -577,11 +678,17 @@ def main(argv: list[str] | None = None) -> int:
                 raise _refuse("--read-projection requires --records")
             result = projection_from_directory(args.records, args.read_projection)
         elif args.same_program:
-            if None in (args.reference_bld, args.patch_dir, args.new_cfg, args.reference_cfg):
-                raise _refuse("--same-program needs reference BLD, patch dir and config names")
+            if None in (
+                args.reference_bld, args.patch_dir, args.expected_ppsrc_dir,
+                args.new_cfg, args.reference_cfg,
+            ):
+                raise _refuse("--same-program needs reference BLD, patch/expected ppsrc dirs and config names")
             result = verify_same_program(
-                args.same_program, args.reference_bld, args.patch_dir, args.new_cfg, args.reference_cfg
+                args.same_program, args.reference_bld, args.patch_dir, args.expected_ppsrc_dir,
+                args.new_cfg, args.reference_cfg, args.plant,
             )
+        elif args.write_stub_records:
+            result = write_stub_records(args.write_stub_records)
         else:
             result = admit(args.admit_existing, args.producer)
         result["sas_time_level"] = derive_sas_time_level(args.nemo_root)
