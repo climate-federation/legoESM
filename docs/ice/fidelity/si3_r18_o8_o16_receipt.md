@@ -50,6 +50,19 @@ The default invocation completed all nine phases without invoking NEMO:
 The direct acquisition tests and required repository gates are recorded in the
 commit that carries this receipt. No physics result or fidelity claim is made.
 
+## Gates
+
+- Acquisition schema, readers, patch-marker controls and complete read-only
+  preflight: 20 passed in 61.27 s.
+- Required default receipt-citation gate: 35 passed in 6.84 s.
+- This receipt: PASS, 3 citations, 0 unmapped, 0 failures; shifting the frazil
+  citation by two lines produces `SYMBOL-NOT-AT-LINE` and a FAIL verdict.
+- Seven CI ratchet files with every namespace root present: 12,197 passed,
+  4 skipped, 8 failed. All eight failures are pre-existing and name untouched
+  files (one hardcoded-constant site, one land dispatch guard, and six inline-
+  coefficient files); this round changes only acquisition scripts, tests and
+  documentation.
+
 ## Choices and review
 
 - Shared record, 100 steps, one rank, unmodified production ice namelist: ASKED.
