@@ -69,3 +69,20 @@ def test_coverage_fails_on_an_uncovered_production_call(tmp_path):
     assert probe.coverage([census], pkg)["uncovered"] == ["m.py:4"]
     rc = subprocess.run([sys.executable, str(PROBE), "coverage", "--package", str(pkg), str(census)]).returncode
     assert rc == 1
+
+
+def test_coverage_sees_aliases_attribute_calls_subpackages_and_refuses_zero_calls(tmp_path):
+    sys.path.insert(0, str(PROBE.parent))
+    import nemo_si3_catsum_caller_census as probe
+    import pytest
+
+    pkg = tmp_path / "pkg"
+    (pkg / "sub").mkdir(parents=True)
+    (pkg / "a.py").write_text("from x import fortran_sum_categories as fsc\ny = fsc(1)\n")
+    (pkg / "sub" / "b.py").write_text("import x\nz = x.fortran_sum_categories(2)\n")
+    assert sorted(probe.production_call_sites(pkg)) == [("a.py", 2, 2), ("b.py", 2, 2)]
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    (empty / "c.py").write_text("q = 1\n")
+    with pytest.raises(SystemExit):
+        probe.coverage([tmp_path], empty)

@@ -142,13 +142,25 @@ def compare(parent: Path, current: Path) -> dict:
 
 
 def production_call_sites(package_dir: Path) -> list[tuple[str, int, int]]:
-    """Every ``fortran_sum_categories(...)`` call in the ice package: (file, first line, last line)."""
+    """Every call of the shared sum in the ice package tree: (file, first line, last line).
+
+    Matches the bare name, any ``import ... as`` alias of it, and attribute calls ``x.fortran_sum_categories``.
+    """
     import ast
 
+    target = "fortran_sum_categories"
     sites = []
-    for path in sorted(package_dir.glob("*.py")):
-        for node in ast.walk(ast.parse(path.read_text())):
-            if isinstance(node, ast.Call) and getattr(node.func, "id", None) == "fortran_sum_categories":
+    for path in sorted(package_dir.rglob("*.py")):
+        tree = ast.parse(path.read_text())
+        names = {target} | {
+            a.asname for n in ast.walk(tree) if isinstance(n, ast.ImportFrom)
+            for a in n.names if a.name == target and a.asname
+        }
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            f = node.func
+            if (isinstance(f, ast.Name) and f.id in names) or (isinstance(f, ast.Attribute) and f.attr == target):
                 sites.append((path.name, node.lineno, node.end_lineno))
     return sites
 
@@ -166,6 +178,8 @@ def coverage(census_dirs: list[Path], package_dir: Path) -> dict:
         fname, _, lineno = site.rsplit(":", 2)
         lines[fname].add(int(lineno))
     sites = production_call_sites(package_dir)
+    if not sites:
+        raise SystemExit(f"no category-sum calls found under {package_dir}: coverage would be vacuous")
     missing = [f"{f}:{a}" for f, a, b in sites if not any(a <= ln <= b for ln in lines.get(f, ()))]
     return {
         "production_calls": len(sites),
