@@ -7,31 +7,34 @@
 +      & r336_matrix_lower, r336_after_solve, r336_pre_sweep_mxl, & ! R336_TKE_OBSERVER
 +      & r336_final_mxl, r336_final_mxld, r336_pre_pdlr_zav, & ! R336_TKE_OBSERVER
 +      & r336_pre_pdlr_avt ! R336_TKE_OBSERVER
-+   USE zdf_oce, ONLY : en ! R336_TKE_OBSERVER
-@@ -182,0 +190,2 @@
++   USE zdf_oce, ONLY : en, avtb, avmb, avtb_2d ! R336_TKE_OBSERVER
+@@ -182,0 +190,5 @@
 +      CALL r336_tke_begin(kt,Kbb,Kmm,en,p_avt,p_avm,p_sh2,dissl,rn2,rn2b, & ! R336_TKE_OBSERVER
-+         & wmask,rCdU_bot,rCdU_top,nmln,hmlp,fr_i,hm_i,taum) ! R336_TKE_OBSERVER
-@@ -183,0 +194,1 @@
++         & wmask,tmask,umask,vmask,ssmask,mbkt,mikt,rCdU_bot,rCdU_top,nmln, & ! R336_TKE_OBSERVER
++         & hmlp,fr_i,hm_i,taum,htau,uu(:,:,:,Kbb),vv(:,:,:,Kbb), & ! R336_TKE_OBSERVER
++         & avtb_2d,avtb,avmb,gdepw_1d,e3w_1d,e3t_3d, & ! R336_TKE_OBSERVER
++         & r3t(:,:,Kmm)) ! R336_TKE_OBSERVER
+@@ -183,0 +196,1 @@
 +      CALL r336_tke_after_tke(en,z_pdlr) ! R336_TKE_OBSERVER
-@@ -186,0 +198,1 @@
+@@ -186,0 +200,1 @@
 +      CALL r336_tke_finish(p_avm,p_avt) ! R336_TKE_OBSERVER
-@@ -304,0 +317,1 @@
+@@ -304,0 +319,1 @@
 +         r336_after_bc(:,jj,:)=en(ntsi:ntei,jj,:) ! R336_TKE_COPYOUT
-@@ -374,0 +388,1 @@
+@@ -374,0 +383,1 @@
 +         r336_after_langmuir(:,jj,:)=en(ntsi:ntei,jj,:) ! R336_TKE_COPYOUT
-@@ -423,0 +438,4 @@
+@@ -423,0 +433,4 @@
 +         r336_after_rhs(:,jj,:)=en(ntsi:ntei,jj,:) ! R336_TKE_COPYOUT
 +         r336_matrix_diag(:,jj,1:jpkm1)=zdiag(ntsi:ntei,1:jpkm1) ! R336_TKE_COPYOUT
 +         r336_matrix_upper(:,jj,1:jpkm1)=zd_up(ntsi:ntei,1:jpkm1) ! R336_TKE_COPYOUT
 +         r336_matrix_lower(:,jj,1:jpkm1)=zd_lw(ntsi:ntei,1:jpkm1) ! R336_TKE_COPYOUT
-@@ -472,0 +491,1 @@
+@@ -472,0 +486,1 @@
 +         r336_after_solve(:,jj,1:jpkm1)=en(ntsi:ntei,jj,1:jpkm1) ! R336_TKE_COPYOUT
-@@ -658,0 +678,1 @@
+@@ -658,0 +673,1 @@
 +         r336_pre_sweep_mxl(:,jj,:)=zmxlm(ntsi:ntei,:) ! R336_TKE_COPYOUT
-@@ -709,0 +730,2 @@
+@@ -709,0 +725,2 @@
 +         r336_final_mxl(:,jj,:)=zmxlm(ntsi:ntei,:) ! R336_TKE_COPYOUT
 +         r336_final_mxld(:,jj,:)=zmxld(ntsi:ntei,:) ! R336_TKE_COPYOUT
-@@ -716,0 +740,1 @@
+@@ -716,0 +735,1 @@
 +            r336_pre_pdlr_zav(ji,jj,jk)=zav ! R336_TKE_COPYOUT
-@@ -720,0 +745,1 @@
+@@ -720,0 +740,1 @@
 +         r336_pre_pdlr_avt(:,jj,1:jpkm1)=p_avt(ntsi:ntei,jj,1:jpkm1) ! R336_TKE_COPYOUT

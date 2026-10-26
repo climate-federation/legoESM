@@ -13,6 +13,7 @@ readonly here
 readonly REPO=$(CDPATH= cd -- "$here/../../../../.." && pwd -P)
 readonly PARENT=$here/../nemo_testcase_l4_orca2_round328_dynzdf_acquisition/run.sh
 readonly GATE=$here/../nemo_testcase_l4_orca2_round336_tke_gate.py
+readonly STUB_RECORD_BUILDER=$here/make_stub_records.py
 readonly TEST=$REPO/tests/ocean/fidelity/test_orca2_round336_tke_gate.py
 readonly EVIDENCE=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round336/acquisition
 readonly TARGET_RUN=$EVIDENCE/orca1ice_tke_internal_kt2_np2
@@ -27,11 +28,11 @@ plant_must_refuse() {
   printf 'PREFLIGHT_PLANT_FIRED %s\n' "$label"
 }
 
-for path in "$PARENT" "$GATE" "$TEST" "$SOURCE_OUTPUT"; do
+for path in "$PARENT" "$GATE" "$STUB_RECORD_BUILDER" "$TEST" "$SOURCE_OUTPUT"; do
   [[ -f $path ]] || refuse "missing round-336 TKE acquisition input $path"
 done
 
-scratch=$(mktemp -d /tmp/orca2-r336-tke-driver.XXXXXX)
+scratch=$(mktemp -d /data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round336/.r336-tke-driver.XXXXXX)
 retention_armed=0
 cleanup() {
   local rc=$? refused
@@ -64,11 +65,22 @@ check_driver_body() {
 }
 
 exercise_stub_flow() {
-  local base=$scratch/flow stub=$scratch/stub-nemo stub_bin=$scratch/bin retained canonical
+  local base=$scratch/flow stub=$scratch/stub-nemo stub_bin=$scratch/bin \
+    records=$scratch/stub-records retained canonical
+  "$PY" "$STUB_RECORD_BUILDER" --output "$records" \
+    --phase-reference-dir \
+      /data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round336/acquisition/orca1ice_trazdf_internal_kt2_np2 \
+    --ice-reference-dir \
+      /data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round326/acquisition/orca1ice_tke_hmi_10step_np2
   mkdir -p "$base/success" "$base/refusal" "$base/retention" "$stub_bin"
   cat >"$stub" <<'STUB'
 #!/usr/bin/env bash
 set -eu
+while IFS= read -r -d '' source; do
+  cp -- "$source" "$(basename "$source")"
+done < <(find "$R336_TKE_STUB_DETERMINISTIC_SOURCE" -maxdepth 1 -type f \
+  \( -name 'oracle_*.bin' -o -name 'ORCA2_00000010_restart*.nc' \) -print0)
+cp -- "$R336_TKE_STUB_RECORD_ROOT"/oracle_r336_tke_kt00000002_r*.bin .
 case "${R336_TKE_STUB_SCENARIO:-success}" in
   success)
     cp -- "$R336_TKE_STUB_SOURCE_OUTPUT" ocean.output
@@ -103,6 +115,8 @@ STUB
 
   if ! R336_TKE_STUB_FLOW_ROOT=$base/success R336_TKE_STUB_NEMO=$stub \
       R336_TKE_STUB_BIN=$stub_bin R336_TKE_STUB_SOURCE_OUTPUT=$SOURCE_OUTPUT \
+      R336_TKE_STUB_RECORD_ROOT=$records \
+      R336_TKE_STUB_DETERMINISTIC_SOURCE=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round326/acquisition/orca1ice_tke_hmi_10step_np2 \
       R336_TKE_STUB_SCENARIO=success R328_ACQ_TARGET=tke336 \
       "$PARENT" --run >"$base/success.log" 2>&1; then
     tail -80 "$base/success.log" >&2
@@ -112,13 +126,18 @@ STUB
     || refuse 'stub success missed real admission branch'
   if ! R336_TKE_STUB_FLOW_ROOT=$base/success R336_TKE_STUB_NEMO=$stub \
       R336_TKE_STUB_BIN=$stub_bin R336_TKE_STUB_SOURCE_OUTPUT=$SOURCE_OUTPUT \
+      R336_TKE_STUB_RECORD_ROOT=$records \
+      R336_TKE_STUB_DETERMINISTIC_SOURCE=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round326/acquisition/orca1ice_tke_hmi_10step_np2 \
       R336_TKE_STUB_SCENARIO=success R328_ACQ_TARGET=tke336 \
       "$PARENT" --admit-existing >"$base/in-place.log" 2>&1; then
+    tail -120 "$base/in-place.log" >&2
     refuse 'stub in-place admission refused'
   fi
 
   if R336_TKE_STUB_FLOW_ROOT=$base/refusal R336_TKE_STUB_NEMO=$stub \
       R336_TKE_STUB_BIN=$stub_bin R336_TKE_STUB_SOURCE_OUTPUT=$SOURCE_OUTPUT \
+      R336_TKE_STUB_RECORD_ROOT=$records \
+      R336_TKE_STUB_DETERMINISTIC_SOURCE=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round326/acquisition/orca1ice_tke_hmi_10step_np2 \
       R336_TKE_STUB_SCENARIO=refusal R328_ACQ_TARGET=tke336 \
       "$PARENT" --run >"$base/refusal.log" 2>&1; then
     refuse 'stub NEMO error flow stayed green'
@@ -131,6 +150,8 @@ STUB
 
   if R336_TKE_STUB_FLOW_ROOT=$base/retention R336_TKE_STUB_NEMO=$stub \
       R336_TKE_STUB_BIN=$stub_bin R336_TKE_STUB_SOURCE_OUTPUT=$SOURCE_OUTPUT \
+      R336_TKE_STUB_RECORD_ROOT=$records \
+      R336_TKE_STUB_DETERMINISTIC_SOURCE=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round326/acquisition/orca1ice_tke_hmi_10step_np2 \
       R336_TKE_STUB_SCENARIO=retention R328_ACQ_TARGET=tke336 \
       "$PARENT" --run >"$base/retention.log" 2>&1; then
     refuse 'crashing stub NEMO stayed green'
@@ -140,6 +161,8 @@ STUB
   [[ -n $retained ]] || refuse 'crashed stub outputs were not retained'
   if ! R336_TKE_STUB_FLOW_ROOT=$base/retention R336_TKE_STUB_NEMO=$stub \
       R336_TKE_STUB_BIN=$stub_bin R336_TKE_STUB_SOURCE_OUTPUT=$SOURCE_OUTPUT \
+      R336_TKE_STUB_RECORD_ROOT=$records \
+      R336_TKE_STUB_DETERMINISTIC_SOURCE=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round326/acquisition/orca1ice_tke_hmi_10step_np2 \
       R336_TKE_STUB_SCENARIO=success R328_ACQ_TARGET=tke336 \
       R328_EXISTING_RUN=$retained "$PARENT" --admit-existing \
       >"$base/retained-admit.log" 2>&1; then

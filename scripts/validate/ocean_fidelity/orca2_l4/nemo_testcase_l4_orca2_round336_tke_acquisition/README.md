@@ -5,12 +5,18 @@ new production-arithmetic observer.  Unlike the round-331/332 recorders, all
 procedure calls are outside NEMO's arithmetic loops; the in-loop additions are
 direct copy-outs after the statement blocks.  The preflight proves the pristine
 and observed per-function FP instruction censuses identical at NEMO's real
-flags, compiles and runs the actual patched routines over real `A2D(0)` versus
-full-halo extents, and reports the non-passive historical 331/332 censuses.
+flags, compiles and runs the actual patched routines over each array's real
+NEMO allocation extent, and reports the non-passive historical 331/332 censuses.
+The 46-field record includes `htau`, bottom velocity at `Kbb`, evaluated
+`gdepw/e3t/e3w` at `Kmm`, masks, bottom/top levels, and background viscosity
+inputs so the recorded active TKE blocks have a complete replay read set.
 
 The preflight also syntax-plants the executable driver, runs a stub NEMO through
 success, quoted `E R R O R`, crash retention, in-place admission, and retained
-admission, and exercises the binary gate's layout and semantic plants. Its
+admission through the real gate and all 16 admission plants, including source
+value checks for ice cover and linear bottom drag. The stub also supplies the
+inherited oracle/restart files so the byte-for-byte deterministic passivity
+check runs. Its
 default mode is read-only; it never runs NEMO unless the operator supplies
 `--run`.
 

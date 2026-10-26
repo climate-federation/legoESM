@@ -26,7 +26,8 @@ esac
 export PATH=/home/dbalwada/miniconda3/envs/nemo-build/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 if [[ -n ${R336_TKE_STUB_FLOW_ROOT:-} ]]; then
   [[ -d $R336_TKE_STUB_FLOW_ROOT && $R336_TKE_STUB_FLOW_ROOT == /* &&
-     -d ${R336_TKE_STUB_BIN:-} && -x ${R336_TKE_STUB_NEMO:-} ]] \
+     -d ${R336_TKE_STUB_BIN:-} && -x ${R336_TKE_STUB_NEMO:-} &&
+     -d ${R336_TKE_STUB_RECORD_ROOT:-} && -d ${R336_TKE_STUB_DETERMINISTIC_SOURCE:-} ]] \
     || { printf 'REFUSE: invalid round-336 TKE stub-flow inputs\n' >&2; exit 64; }
   PATH=$R336_TKE_STUB_BIN:$PATH
   export PATH
@@ -239,8 +240,8 @@ r336_tke_stub_finish_target() {
   cp -- "$R336_TKE_STUB_NEMO" "$target/BLD/bin/nemo.exe"
   chmod 700 "$target/BLD/bin/nemo.exe"
 }
-r336_tke_stub_admit() {
-  local producer binary_sha scenario
+r336_tke_stub_assert() {
+  local producer binary_sha scenario plant_count
   [[ $TARGET_RUN == "$R336_TKE_STUB_FLOW_ROOT"/* && -x $TARGET_RUN/nemo ]] \
     || refuse 'stub admission escaped its flow root or lacks NEMO'
   producer=$(cat "$TARGET_RUN/producer_commit.txt")
@@ -255,6 +256,11 @@ r336_tke_stub_admit() {
     || refuse 'stub binary identity changed'
   scenario=$(cat "$TARGET_RUN/.r336-tke-stub-scenario")
   case "$scenario" in success|retention) ;; *) refuse 'stub scenario is not admissible' ;; esac
+  [[ -s $TARGET_RUN/round336_tke_kt2_admission.json ]] \
+    || refuse 'stub did not execute the real round-336 admission'
+  plant_count=$(find "$TARGET_RUN" -maxdepth 1 -type f \
+    -name 'round336_tke_*_plant.log' -printf x | wc -c)
+  [[ $plant_count -eq 16 ]] || refuse "stub real admission ran $plant_count/16 plants"
   printf 'R336_TKE_STUB_ADMISSION_PASS scenario=%s path=%s\n' "$scenario" "$TARGET_RUN"
 }
 plant_must_refuse() {
@@ -792,6 +798,13 @@ if [[ "$ACQ_TARGET" == tke336 ]]; then
     || refuse 'round-336 outside-loop TKE call census changed'
   [[ $(grep -Fc 'R336_TKE_COPYOUT' "$dry/zdftke.F90") -eq 12 ]] \
     || refuse 'round-336 TKE copy-out census changed'
+  "$PY" "$R336_TKE_GATE" --read-set-source "$dry/zdftke.F90" \
+    --writer-source "$dry/tke_round336_writer.F90"
+  sed 's/entry_htau/entry_htau_missing/g' "$dry/tke_round336_writer.F90" \
+    >"$plants/tke_round336_writer.read-set-missing.F90"
+  plant_must_refuse r336-tke-read-set \
+    "$PY" "$R336_TKE_GATE" --read-set-source "$dry/zdftke.F90" \
+      --writer-source "$plants/tke_round336_writer.read-set-missing.F90"
 fi
 [[ $(grep -Fc 'CALL r328_' "$dry/dynzdf.F90") -eq 17 ]] || refuse 'dynzdf writer call census changed'
 [[ $(grep -Fc 'CALL r328_finish' "$dry/stprk3_stg.F90") -eq 1 ]] || refuse 'stage writer call census changed'
@@ -1063,7 +1076,7 @@ for plant in ("header", "field-order", "truncation", "checksum", "extent", "time
         print(f"PREFLIGHT_PLANT_FIRED r336-tke-{plant}")
     else:
         raise AssertionError(f"{plant} parser plant stayed green")
-for plant in ("entry", "rn2", "langmuir", "pre-sweep", "zav", "pdlr", "final", "signed-zero"):
+for plant in ("entry", "rn2", "langmuir", "pre-sweep", "zav", "pdlr", "final", "signed-zero", "source-values"):
     record = gate.read_record(root / gate.record_name(0), expected_layout=layout)
     try:
         gate.verify_record(copy.deepcopy(record), plant=plant)
@@ -1071,7 +1084,7 @@ for plant in ("entry", "rn2", "langmuir", "pre-sweep", "zav", "pdlr", "final", "
         print(f"PREFLIGHT_PLANT_FIRED r336-tke-{plant}")
     else:
         raise AssertionError(f"{plant} semantic plant stayed green")
-print("R336_PATCHED_TKE_BOUNDS_AND_SOURCE_EXECUTION_PASS ranks=2 fields=31")
+print("R336_PATCHED_TKE_BOUNDS_AND_SOURCE_EXECUTION_PASS ranks=2 fields=46")
 PY
 fi
 
@@ -1136,18 +1149,15 @@ fi
 
 admit() {
   local plant
-  if [[ -n ${R336_TKE_STUB_FLOW_ROOT:-} ]]; then
-    r336_tke_stub_admit
-    return 0
-  fi
   [[ $(cat "$TARGET_RUN/producer_commit.txt") == "$EXPECTED_PRODUCER" ]] || refuse 'producer commit changed'
   compare_deterministic "$SOURCE_RUN" "$TARGET_RUN" \
     || refuse 'write-only observer changed an inherited deterministic output'
   if [[ "$ACQ_TARGET" == tke336 ]]; then
     for plant in header field-order truncation checksum stamp extent entry rn2 \
-      langmuir pre-sweep zav pdlr final signed-zero time-level; do
+      langmuir pre-sweep zav pdlr final signed-zero source-values time-level; do
       if "$PY" "$R336_TKE_GATE" --record-dir "$TARGET_RUN" \
-        --phase-reference-dir "$R336_PHASE_REFERENCE" --expect-commit "$EXPECTED_PRODUCER" \
+        --phase-reference-dir "$R336_PHASE_REFERENCE" --ice-reference-dir "$SOURCE_RUN" \
+        --expect-commit "$EXPECTED_PRODUCER" \
         --plant "$plant" >"$TARGET_RUN/round336_tke_${plant}_plant.log" 2>&1; then
         refuse "$plant round-336 TKE plant stayed green"
       fi
@@ -1155,11 +1165,13 @@ admit() {
         || refuse "$plant round-336 TKE plant missed its refusal"
     done
     "$PY" "$R336_TKE_GATE" --record-dir "$TARGET_RUN" \
-      --phase-reference-dir "$R336_PHASE_REFERENCE" --expect-commit "$EXPECTED_PRODUCER" \
+      --phase-reference-dir "$R336_PHASE_REFERENCE" --ice-reference-dir "$SOURCE_RUN" \
+      --expect-commit "$EXPECTED_PRODUCER" \
       --output "$TARGET_RUN/round336_tke_kt2_admission.json"
     ( cd "$TARGET_RUN" && sha256sum oracle_r336_tke_kt00000002_r*.bin \
         round336_tke_kt2_admission.json round336_tke_*_plant.log \
         >round336_tke_kt2_outputs.sha256 )
+    [[ -z ${R336_TKE_STUB_FLOW_ROOT:-} ]] || r336_tke_stub_assert
   elif [[ "$ACQ_TARGET" == tke332 ]]; then
     for name in oracle_rhs_kt00000001.bin oracle_stage_kt00000001_s1.bin; do
       cmp -s "$SOURCE_RUN/$name" "$TARGET_RUN/$name" \

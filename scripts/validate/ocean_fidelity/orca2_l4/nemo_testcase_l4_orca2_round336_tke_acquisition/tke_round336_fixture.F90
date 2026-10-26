@@ -25,10 +25,9 @@ PROGRAM tke_round336_fixture
    ALLOCATE(mbkt(jpi,jpj),mikt(jpi,jpj),e3t_3d(jpi,jpj,jpk),e3w_1d(jpk), &
       & gdepw_1d(jpk),r3t(jpi,jpj,3),gphit(jpi,jpj),ssmask(jpi,jpj), &
       & tmask(jpi,jpj,jpk),umask(jpi,jpj,jpk),vmask(jpi,jpj,jpk),wmask(jpi,jpj,jpk))
-   ALLOCATE(fr_i(Nis0:Nie0,Njs0:Nje0),taum(Nis0:Nie0,Njs0:Nje0), &
-      & utau(Nis0:Nie0,Njs0:Nje0),vtau(Nis0:Nie0,Njs0:Nje0))
-   ALLOCATE(rCdU_bot(Nis0:Nie0,Njs0:Nje0),rCdU_top(Nis0:Nie0,Njs0:Nje0))
-   ALLOCATE(nmln(Nis0:Nie0,Njs0:Nje0),hmlp(Nis0:Nie0,Njs0:Nje0))
+   ALLOCATE(fr_i(jpi,jpj),taum(Nis0:Nie0,Njs0:Nje0),utau(jpi,jpj),vtau(jpi,jpj))
+   ALLOCATE(rCdU_bot(jpi,jpj),rCdU_top(jpi,jpj))
+   ALLOCATE(nmln(jpi,jpj),hmlp(jpi,jpj))
    ALLOCATE(hm_i(Nis0:Nie0,Njs0:Nje0),h_i(jpi,jpj,1))
    ALLOCATE(hsw(Nis0:Nie0,Njs0:Nje0),phioc(Nis0:Nie0,Njs0:Nje0), &
       & ut0sd(Nis0:Nie0,Njs0:Nje0),vt0sd(Nis0:Nie0,Njs0:Nje0))
@@ -53,9 +52,19 @@ PROGRAM tke_round336_fixture
       gdepw_1d(k)=REAL(k-1,wp)*10._wp
    END DO
    r3t=0._wp
-   fr_i=0.2_wp+0.01_wp*REAL(rank,wp); hm_i=1.5_wp+0.1_wp*REAL(rank,wp)
-   taum=0.05_wp+0.001_wp*REAL(rank,wp); utau=0.01_wp; vtau=0.02_wp
-   rCdU_bot=-0.002_wp; rCdU_top=-0.001_wp; nmln=2; hmlp=25._wp
+   DO j=1,jpj; DO i=1,jpi
+      fr_i(i,j)=0.2_wp+0.01_wp*REAL(rank,wp)+0.001_wp*REAL(i,wp)+0.0001_wp*REAL(j,wp)
+      rCdU_bot(i,j)=-0.0004_wp*ssmask(i,j)
+      rCdU_top(i,j)=-0.001_wp-1.e-6_wp*REAL(i+10*j+rank,wp)
+      nmln(i,j)=2+MOD(i+j+rank,2)
+      hmlp(i,j)=25._wp+REAL(i+10*j+rank,wp)
+      utau(i,j)=0.01_wp+1.e-5_wp*REAL(i+j+rank,wp)
+      vtau(i,j)=0.02_wp+1.e-5_wp*REAL(i+2*j+rank,wp)
+   END DO; END DO
+   DO j=Njs0,Nje0; DO i=Nis0,Nie0
+      hm_i(i,j)=1.5_wp+0.1_wp*REAL(rank,wp)+0.01_wp*REAL(i+j,wp)
+      taum(i,j)=0.05_wp+0.001_wp*REAL(rank,wp)+1.e-4_wp*REAL(i+2*j,wp)
+   END DO; END DO
    h_i=hm_i(ntsi,ntsj); hsw=0._wp; phioc=0._wp; ut0sd=0._wp; vt0sd=0._wp
    avtb=1.e-5_wp; avmb=2.e-5_wp; avtb_2d=1._wp
    DO k=1,jpk; DO j=Njs0,Nje0; DO i=Nis0,Nie0

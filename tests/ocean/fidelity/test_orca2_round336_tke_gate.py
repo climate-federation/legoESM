@@ -38,6 +38,12 @@ def _write_record(path: Path, rank: int) -> None:
                 array[-1, -1, -1] = -0.0
             if name == "entry_nmln":
                 array.fill(2.0)
+            if name in {"entry_mbkt", "entry_mikt"}:
+                array.fill(3.0 if name == "entry_mbkt" else 1.0)
+            if name == "entry_ssmask":
+                array.fill(1.0)
+            if name == "entry_drag_bottom":
+                array.fill(-0.0004)
             if name == "tke_pdlr":
                 array.fill(0.5)
             if name in {"final_mxl", "final_mxld"}:
@@ -46,7 +52,9 @@ def _write_record(path: Path, rank: int) -> None:
                 array[..., -1] = -0.0
             origin = gate._origin(name, header)
             stream.write(name.ljust(24).encode("ascii"))
-            stream.write(struct.pack("=7i", 2 if name in gate.INTERIOR_2D else 3,
+            field_rank = (1 if name in gate.ONE_D else
+                          2 if name in gate.INTERIOR_2D | gate.FULL_2D else 3)
+            stream.write(struct.pack("=7i", field_rank,
                                      *shape, *origin))
             stream.write(struct.pack("=Q", _checksum(array)))
             stream.write(array.tobytes(order="F"))
@@ -63,13 +71,16 @@ def test_real_declared_extents_and_semantics(record: dict) -> None:
     header = record["header"]
     assert record["fields"]["entry_en"].shape == (3, 2, 5)
     assert record["fields"]["entry_avm"].shape == (7, 6, 5)
+    assert record["fields"]["entry_fr_i"].shape == (7, 6)
+    assert record["fields"]["entry_nmln"].shape == (7, 6)
+    assert record["fields"]["entry_htau"].shape == (3, 2)
     assert gate.verify_record(record)["wet_process_interfaces"] > 0
     assert gate._layout(header) == LAYOUT
 
 
 @pytest.mark.parametrize("plant", [
     "entry", "rn2", "langmuir", "pre-sweep", "zav", "pdlr", "final",
-    "signed-zero",
+    "signed-zero", "source-values",
 ])
 def test_semantic_plants_hit_recorded_wet_boundaries(record: dict, plant: str) -> None:
     with pytest.raises(gate.GateError):
@@ -93,8 +104,23 @@ def test_patch_keeps_calls_outside_tke_loops_and_captures_missing_boundaries() -
     for name in ("r336_after_langmuir", "r336_pre_sweep_mxl", "r336_pre_pdlr_zav"):
         assert name in patch
     writer = (TOOL / "tke_round336_writer.F90").read_text()
-    for name in ("entry_en", "entry_avt", "entry_rn2", "entry_rn2b"):
+    for name in ("entry_en", "entry_avt", "entry_rn2", "entry_rn2b",
+                 "entry_htau", "entry_uu_kbb", "entry_vv_kbb",
+                 "entry_gdepw_kmm"):
         assert f"'{name}'" in writer
+
+
+def test_mechanical_read_set_covers_writer_and_has_a_plant(tmp_path: Path) -> None:
+    source = Path(
+        "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/"
+        "ORCA2_ORCA1ICE_OMIP_L4_R326HMI/MY_SRC/zdftke.F90"
+    )
+    writer = TOOL / "tke_round336_writer.F90"
+    assert gate.audit_read_set(source, writer)["status"] == "PASS_R336_TKE_READ_SET"
+    planted = tmp_path / "writer.F90"
+    planted.write_text(writer.read_text().replace("entry_htau", "entry_htau_missing"))
+    with pytest.raises(gate.GateError):
+        gate.audit_read_set(source, planted)
 
 
 def test_wrapper_pins_distinct_build_record_and_exit_retention() -> None:
