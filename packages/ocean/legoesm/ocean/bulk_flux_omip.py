@@ -79,12 +79,20 @@ import jax.numpy as jnp
 from legoesm import constants
 from legoesm.core import transcendentals as tx
 from legoesm.core.source_rounding import (
+    nemo_fortran_max,
+    nemo_fortran_min,
     nemo_fortran_sign as _sign,
     nemo_source_barrier as B,
     nemo_source_round as R,
 )
 from legoesm.ocean.eos import nemo_eos_fzp_eos80
 from legoesm.ocean.forcing.nemo_fld_read import nemo_fld_time_interp
+from legoesm.ocean.forcing.nemo_surface import (
+    NemoSurfaceMeans,
+    nemo_orca2_s2,
+    nemo_sbc_ssm_step,
+    nemo_s2_to_ocean_interfaces,
+)
 from legoesm.thermo import saturation_vapor_pressure_goff
 
 
@@ -120,12 +128,12 @@ _IIF_ZQI_OFFSET_W_M2: float = -3.0  # zqi = -3 + SIGN(1, ff_f): -2 N, -4 S
 
 def _fmax(first, second):
     """Record-object MAXSD ordering: the second source operand wins a tie."""
-    return jnp.where(first > second, first, second)
+    return nemo_fortran_max(first, second)
 
 
 def _fmin(first, second):
     """Record-object MINSD ordering: the second source operand wins a tie."""
-    return jnp.where(first < second, first, second)
+    return nemo_fortran_min(first, second)
 
 
 def _q_sat_nemo(T_K, p_Pa):
@@ -717,6 +725,64 @@ class NemoSbcIceIfInputs(NamedTuple):
     smask0: object
 
 
+class NemoS0Inputs(NamedTuple):
+    """State and instantaneous operands for the ``sbc_ssm`` production arm."""
+    prior: NemoSurfaceMeans
+    kt: object
+    nit000: object
+    forcing_stride: object
+    restart_means_present: object
+    use_conservative_temperature: object
+    remove_inverse_barometer: object
+    u_before: object
+    v_before: object
+    temperature_now: object
+    salinity_now: object
+    ssh_now: object
+    ssh_inverse_barometer: object
+    e3t_reference: object
+    r3t_now: object
+    surface_mask: object
+    shortwave_fraction_top: object
+
+
+class NemoS2Inputs(NamedTuple):
+    """Post-bulk controls/state for the standalone ORCA2 ``sbcmod`` tail."""
+    post_ice_utau_east: object
+    post_ice_vtau_north: object
+    post_ice_sfx: object
+    runoff_now: object
+    prior_runoff_mass: object
+    prior_runoff_temperature_content: object
+    prior_runoff_salinity_content: object
+    prior_restoring_volume_flux: object
+    prior_restoring_heat_flux: object
+    prior_restoring_coefficient: object
+    sss_target: object
+    runoff_mouth_mask: object
+    surface_mask: object
+    tmask_east: object
+    tmask_north: object
+    umask: object
+    vmask: object
+    freshwater_budget_correction: object
+    runoff_factor: object
+    reference_density: object
+    restoring_mm_per_day: object
+    restoring_bound_mm_per_day: object
+    seconds_per_day: object
+    salinity_floor: object
+    heat_capacity: object
+
+
+class NemoStandaloneSurfaceResult(NamedTuple):
+    means: NemoSurfaceMeans
+    bulk: NemoBlkOceResult
+    s2: object
+    surface_forcing: object
+    freshwater_forcing: object
+
+
 class BlkOce2Result(NamedTuple):
     qlwn: object
     qns: object
@@ -801,9 +867,9 @@ def blk_oce_2(
 def nemo_blk_oce_ncar(
     u_wind, v_wind, T_air_K, q_air, slp_Pa, sst_c, ssu, ssv,
     qsr_down, qlw_down, precip, snow, mask, albedo, precip_factor,
-    evap_factor, nb_iter, *, nn_ice, ice_if,
+    evap_factor, nb_iter, *, nn_ice, ice_if, s0, s2,
 ):
-    """Literal round-5 NCAR ``blk_oce_1`` + ``blk_oce_2``, then ``nn_ice``.
+    """Literal S0 -> NCAR S1 -> optional S3 -> optional S2 surface path.
 
     Every physical input and resolved deck scalar is required: this boundary
     has no standard-atmosphere, mask, precipitation, or coefficient defaults.
@@ -813,12 +879,45 @@ def nemo_blk_oce_ncar(
     call: ``0`` returns the bulk fields (``ice_if`` must be None); ``1`` runs
     ``fld_read``'s time blend of ``sn_ice`` and ``sbc_ice_if`` on ``qsr``/``qns``
     (``ice_if`` a :class:`NemoSbcIceIfInputs`; the bulk arrays are ``A2D(0)``)
-    and fills ``ts_surface``/``fr_i``.  Any other value raises.
+    and fills ``ts_surface``/``fr_i``.  Any other value raises. ``s0=None,
+    s2=None`` selects the established S1/S3 path.  Supplying both selects the
+    standalone S0 -> S1 -> S3 -> S2 arm; in that arm the explicit mean
+    arguments ``sst_c``, ``ssu`` and ``ssv`` must be ``None`` because S0
+    produces them.  Half-selected or shadowed inputs refuse.
     """
     if nn_ice not in (0, 1):
         raise ValueError(f"nemo_blk_oce_ncar: unsupported nn_ice={nn_ice!r}")
     if (nn_ice == 1) != (ice_if is not None):
         raise ValueError("nemo_blk_oce_ncar: ice_if is required iff nn_ice == 1")
+    if (s0 is None) != (s2 is None):
+        raise ValueError("nemo_blk_oce_ncar requires S0 and S2 together")
+    if s0 is None:
+        if sst_c is None or ssu is None or ssv is None:
+            raise ValueError("S1-only path requires explicit sst_c, ssu and ssv")
+        means = None
+    else:
+        if sst_c is not None or ssu is not None or ssv is not None:
+            raise ValueError("standalone S0 arm produces sst_c, ssu and ssv")
+        means = nemo_sbc_ssm_step(
+            s0.prior,
+            kt=s0.kt,
+            nit000=s0.nit000,
+            forcing_stride=s0.forcing_stride,
+            restart_means_present=s0.restart_means_present,
+            use_conservative_temperature=s0.use_conservative_temperature,
+            remove_inverse_barometer=s0.remove_inverse_barometer,
+            u_before=s0.u_before,
+            v_before=s0.v_before,
+            temperature_now=s0.temperature_now,
+            salinity_now=s0.salinity_now,
+            ssh_now=s0.ssh_now,
+            ssh_inverse_barometer=s0.ssh_inverse_barometer,
+            e3t_reference=s0.e3t_reference,
+            r3t_now=s0.r3t_now,
+            surface_mask=s0.surface_mask,
+            shortwave_fraction_top=s0.shortwave_fraction_top,
+        )
+        sst_c, ssu, ssv = means.sst, means.ssu, means.ssv
     wet = jnp.asarray(mask, dtype=jnp.float64)
     sst_c_arr = jnp.asarray(sst_c, dtype=jnp.float64)
     state = _nemo_ncar_turbulent(
@@ -851,7 +950,7 @@ def nemo_blk_oce_ncar(
             nn_hls=min(halo) // 2,
         )
         qsr, qns, ts_surface, fr_i = iif.qsr, iif.qns, iif.ts_surface, iif.fr_i
-    return NemoBlkOceResult(
+    bulk = NemoBlkOceResult(
         state.theta_air, jnp.asarray(q_air, dtype=jnp.float64), rain,
         sst_c_arr, jnp.asarray(ssu, dtype=jnp.float64),
         jnp.asarray(ssv, dtype=jnp.float64), state.tsk_c, state.ssq,
@@ -860,6 +959,47 @@ def nemo_blk_oce_ncar(
         surface.qlwn, qns, surface.emp,
         state.utau, state.vtau, state.taum, state.wndm, ts_surface, fr_i,
     )
+    if s2 is None:
+        return bulk
+    tail = nemo_orca2_s2(
+        kt=s0.kt,
+        forcing_stride=s0.forcing_stride,
+        post_ice_utau=bulk.utau,
+        post_ice_vtau=bulk.vtau,
+        post_ice_utau_east=s2.post_ice_utau_east,
+        post_ice_vtau_north=s2.post_ice_vtau_north,
+        post_ice_taum=bulk.taum,
+        post_ice_qsr=bulk.qsr,
+        post_ice_qns=bulk.qns,
+        post_ice_emp=bulk.emp,
+        post_ice_sfx=s2.post_ice_sfx,
+        runoff_now=s2.runoff_now,
+        prior_runoff_mass=s2.prior_runoff_mass,
+        prior_runoff_temperature_content=s2.prior_runoff_temperature_content,
+        prior_runoff_salinity_content=s2.prior_runoff_salinity_content,
+        prior_restoring_volume_flux=s2.prior_restoring_volume_flux,
+        prior_restoring_heat_flux=s2.prior_restoring_heat_flux,
+        prior_restoring_coefficient=s2.prior_restoring_coefficient,
+        sst_mean=means.sst,
+        sss_mean=means.sss,
+        sss_target=s2.sss_target,
+        runoff_mouth_mask=s2.runoff_mouth_mask,
+        surface_mask=s2.surface_mask,
+        tmask_east=s2.tmask_east,
+        tmask_north=s2.tmask_north,
+        umask=s2.umask,
+        vmask=s2.vmask,
+        freshwater_budget_correction=s2.freshwater_budget_correction,
+        runoff_factor=s2.runoff_factor,
+        reference_density=s2.reference_density,
+        restoring_mm_per_day=s2.restoring_mm_per_day,
+        restoring_bound_mm_per_day=s2.restoring_bound_mm_per_day,
+        seconds_per_day=s2.seconds_per_day,
+        salinity_floor=s2.salinity_floor,
+        heat_capacity=s2.heat_capacity,
+    )
+    forcing, freshwater = nemo_s2_to_ocean_interfaces(tail)
+    return NemoStandaloneSurfaceResult(means, bulk, tail, forcing, freshwater)
 
 
 class NemoSbcIceIfResult(NamedTuple):
@@ -1046,6 +1186,9 @@ __all__ = [
     "nemo_sbc_ice_if",
     "NemoSbcIceIfResult",
     "NemoSbcIceIfInputs",
+    "NemoS0Inputs",
+    "NemoS2Inputs",
+    "NemoStandaloneSurfaceResult",
     "ncar_transfer_coefficients",
     "potential_air_temperature_10m",
     "pressure_at_height",

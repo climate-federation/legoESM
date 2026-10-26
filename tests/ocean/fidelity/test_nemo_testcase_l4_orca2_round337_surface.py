@@ -5,10 +5,12 @@ import inspect
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
 
 from legoesm import constants
 from legoesm.ocean import freshwater as freshwater_module
-from legoesm.ocean.forcing import nemo_surface as surface_module
+from legoesm.ocean import bulk_flux_omip as bulk_module
+from legoesm.ocean.forcing import sss_restoring as restoring_module
 from legoesm.ocean.forcing.nemo_fld_read import (
     nemo_fld_model_time,
     nemo_fld_record_centres,
@@ -19,7 +21,6 @@ from legoesm.ocean.forcing.nemo_surface import (
     NemoSurfaceMeans,
     nemo_orca2_s2,
     nemo_sbc_ssm_step,
-    nemo_s2_to_ocean_interfaces,
 )
 
 
@@ -74,6 +75,7 @@ def _s2_kwargs(sss_mean=None):
         prior_runoff_salinity_content=jnp.zeros(shape, dtype=jnp.float64),
         prior_restoring_volume_flux=jnp.zeros(shape, dtype=jnp.float64),
         prior_restoring_heat_flux=jnp.zeros(shape, dtype=jnp.float64),
+        prior_restoring_coefficient=jnp.ones(shape, dtype=jnp.float64),
         sst_mean=jnp.asarray([[-0.0, -2.0, 3.0], [4.0, 5.0, 6.0]]),
         sss_mean=(
             jnp.asarray([[34.5, 35.2, 33.0], [36.1, 32.0, 35.0]])
@@ -99,56 +101,67 @@ def _s2_kwargs(sss_mean=None):
 
 
 def _scalar_s2(kwargs):
+    """Independent scalar execution of sbcrnf/sbcssr/sbcfwb/sbcmod statements."""
     arrays = {key: np.asarray(value, dtype=np.float64) for key, value in kwargs.items()}
     shape = arrays["post_ice_qns"].shape
     out = {name: np.empty(shape, dtype=np.float64) for name in (
-        "rnf", "rnf_t", "rnf_s", "erp", "qrp", "qns", "emp", "utau_u", "vtau_v"
+        "rnf", "rnf_t", "rnf_s", "coefice", "erp", "qrp", "qns", "emp",
+        "utau_u", "vtau_v"
     )}
+    update = (int(arrays["kt"]) - 1) % int(arrays["forcing_stride"]) == 0
     for index in np.ndindex(shape):
         mask = np.float64(arrays["surface_mask"][index])
-        rnf = np.float64(arrays["runoff_factor"] * arrays["runoff_now"][index])
-        rnf = np.float64(rnf * mask)
-        rnf_t = np.maximum(arrays["sst_mean"][index], np.float64(0.0))
-        rnf_t = np.float64(rnf_t * rnf)
-        inverse_density = np.float64(np.float64(1.0) / arrays["reference_density"])
-        rnf_t = np.float64(rnf_t * inverse_density)
-        rnf_s = np.float64(np.float64(0.0) * rnf)
-        rnf_s = np.float64(rnf_s * inverse_density)
-        zsrp = np.float64(
-            arrays["restoring_mm_per_day"] / arrays["seconds_per_day"]
-        )
-        bound = np.float64(
-            arrays["restoring_bound_mm_per_day"] / arrays["seconds_per_day"]
-        )
-        coefice = np.float64(
-            np.float64(1.0)
-            - np.float64(np.float64(2.0) * arrays["runoff_mouth_mask"][index])
-        )
-        delta = np.float64(arrays["sss_mean"][index] - arrays["sss_target"][index])
-        numerator = np.float64(np.float64(zsrp * coefice) * delta)
-        denominator = np.maximum(
-            arrays["sss_mean"][index], arrays["salinity_floor"]
-        )
-        erp0 = np.float64(np.float64(numerator / denominator) * mask)
-        magnitude = np.minimum(bound, np.abs(erp0))
-        erp = np.float64(magnitude if erp0 >= np.float64(0.0) else -magnitude)
-        heat = np.float64(arrays["heat_capacity"] * arrays["sst_mean"][index])
-        qrp = np.float64(np.float64(-erp) * heat)
-        emp = np.float64(arrays["post_ice_emp"][index] + erp)
-        correction = np.float64(arrays["freshwater_budget_correction"] * mask)
-        emp = np.float64(emp + correction)
-        correction_heat = np.float64(
-            np.float64(
+        if update:
+            # sbcrnf.f90: the runoff fields are assigned only on an sbc step.
+            rnf = np.float64(arrays["runoff_factor"] * arrays["runoff_now"][index])
+            rnf = np.float64(rnf * mask)
+            sst_value = np.float64(arrays["sst_mean"][index])
+            rnf_t = sst_value if sst_value > np.float64(0.0) else np.float64(0.0)
+            rnf_t = np.float64(rnf_t * rnf)
+            inverse_density = np.float64(np.float64(1.0) / arrays["reference_density"])
+            rnf_t = np.float64(rnf_t * inverse_density)
+            rnf_s = np.float64(np.float64(0.0) * rnf)
+            rnf_s = np.float64(rnf_s * inverse_density)
+
+            # sbcssr.f90:130-139, in written statement order.
+            two_rnf = np.float64(np.float64(2.0) * arrays["runoff_mouth_mask"][index])
+            damping = np.float64(np.float64(1.0) - two_rnf)
+            coefice = np.float64(arrays["prior_restoring_coefficient"][index] * damping)
+            zsrp = np.float64(arrays["restoring_mm_per_day"] / arrays["seconds_per_day"])
+            bound = np.float64(arrays["restoring_bound_mm_per_day"] / arrays["seconds_per_day"])
+            delta = np.float64(arrays["sss_mean"][index] - arrays["sss_target"][index])
+            numerator = np.float64(np.float64(zsrp * coefice) * delta)
+            first = np.float64(arrays["sss_mean"][index])
+            second = np.float64(arrays["salinity_floor"])
+            denominator = first if first > second else second
+            erp0 = np.float64(np.float64(numerator / denominator) * mask)
+            absolute = np.float64(abs(erp0))
+            magnitude = bound if bound < absolute else absolute
+            erp = np.float64(magnitude if erp0 >= np.float64(0.0) else -magnitude)
+            heat = np.float64(np.float64(erp * arrays["heat_capacity"]) * arrays["sst_mean"][index])
+            emp = np.float64(arrays["post_ice_emp"][index] + erp)
+            qns = np.float64(arrays["post_ice_qns"][index] - heat)
+            qrp = np.float64(np.float64(0.0) - heat)
+
+            # sbcfwb.f90: forcing-cadence correction, after restoring.
+            correction = np.float64(arrays["freshwater_budget_correction"] * mask)
+            emp = np.float64(emp + correction)
+            correction_heat = np.float64(
                 np.float64(
-                    arrays["freshwater_budget_correction"]
-                    * arrays["heat_capacity"]
-                )
-                * arrays["sst_mean"][index]
+                    np.float64(arrays["freshwater_budget_correction"] * arrays["heat_capacity"])
+                    * arrays["sst_mean"][index]
+                ) * mask
             )
-            * mask
-        )
-        qns = np.float64(arrays["post_ice_qns"][index] + qrp)
-        qns = np.float64(qns - correction_heat)
+            qns = np.float64(qns - correction_heat)
+        else:
+            rnf = np.float64(arrays["prior_runoff_mass"][index])
+            rnf_t = np.float64(arrays["prior_runoff_temperature_content"][index])
+            rnf_s = np.float64(arrays["prior_runoff_salinity_content"][index])
+            coefice = np.float64(arrays["prior_restoring_coefficient"][index])
+            erp = np.float64(arrays["prior_restoring_volume_flux"][index])
+            qrp = np.float64(arrays["prior_restoring_heat_flux"][index])
+            emp = np.float64(arrays["post_ice_emp"][index])
+            qns = np.float64(arrays["post_ice_qns"][index])
         u_sum = np.float64(
             arrays["post_ice_utau"][index] + arrays["post_ice_utau_east"][index]
         )
@@ -164,7 +177,7 @@ def _scalar_s2(kwargs):
         v_wet = np.maximum(mask, arrays["tmask_north"][index])
         vtau_v = np.float64(np.float64(v_mean * v_unmask) * v_wet)
         for name, value in (
-            ("rnf", rnf), ("rnf_t", rnf_t), ("rnf_s", rnf_s),
+            ("rnf", rnf), ("rnf_t", rnf_t), ("rnf_s", rnf_s), ("coefice", coefice),
             ("erp", erp), ("qrp", qrp), ("qns", qns), ("emp", emp),
             ("utau_u", utau_u), ("vtau_v", vtau_v),
         ):
@@ -203,9 +216,13 @@ def test_sbc_ssm_nn_fsbc2_cadence_and_restart_arm():
     prior = NemoSurfaceMeans(z, z, z, z, z, z, z)
     values = [jnp.full_like(z, float(step)) for step in range(1, 5)]
     states = []
-    for kt, value in enumerate(values, start=1):
-        prior = nemo_sbc_ssm_step(prior, kt=kt, **_ssm_kwargs(value))
-        states.append(prior)
+    with jax.disable_jit():
+        for kt, value in enumerate(values, start=1):
+            kwargs = _ssm_kwargs(value)
+            kwargs["remove_inverse_barometer"] = True
+            kwargs["ssh_inverse_barometer"] = jnp.full_like(value, 0.25)
+            prior = nemo_sbc_ssm_step(prior, kt=kt, **kwargs)
+            states.append(prior)
     np.testing.assert_array_equal(np.asarray(states[0].ssu), np.asarray(values[0]))
     np.testing.assert_array_equal(np.asarray(states[1].ssu), np.asarray(values[1]))
     np.testing.assert_array_equal(
@@ -215,14 +232,23 @@ def test_sbc_ssm_nn_fsbc2_cadence_and_restart_arm():
 
     def scan_step(carry, item):
         kt, value = item
-        return nemo_sbc_ssm_step(carry, kt=kt, **_ssm_kwargs(value)), None
+        kwargs = _ssm_kwargs(value)
+        kwargs["remove_inverse_barometer"] = True
+        kwargs["ssh_inverse_barometer"] = jnp.full_like(value, 0.25)
+        return nemo_sbc_ssm_step(carry, kt=kt, **kwargs), None
 
+    with jax.disable_jit():
+        eager_state, _ = jax.lax.scan(
+            scan_step,
+            NemoSurfaceMeans(z, z, z, z, z, z, z),
+            (jnp.arange(1, 5), jnp.stack(values)),
+        )
     compiled_state, _ = jax.jit(
         lambda state, samples: jax.lax.scan(
             scan_step, state, (jnp.arange(1, 5), samples)
         )
     )(NemoSurfaceMeans(z, z, z, z, z, z, z), jnp.stack(values))
-    for eager_value, compiled_value in zip(states[-1], compiled_state, strict=True):
+    for eager_value, compiled_value in zip(eager_state, compiled_state, strict=True):
         np.testing.assert_array_equal(_bits(eager_value), _bits(compiled_value))
 
     restart_prior = NemoSurfaceMeans(*[jnp.full_like(z, 8.0) for _ in range(7)])
@@ -230,6 +256,22 @@ def test_sbc_ssm_nn_fsbc2_cadence_and_restart_arm():
     kwargs["restart_means_present"] = True
     restarted = nemo_sbc_ssm_step(restart_prior, kt=1, **kwargs)
     np.testing.assert_array_equal(np.asarray(restarted.ssu), np.asarray(5.0 * jnp.ones_like(z)))
+
+    # sbcssm.f90:152 is (ssh_m + ssh) - ssh_ib, not ssh_m + (ssh - ssh_ib).
+    association = _ssm_kwargs(jnp.zeros_like(z))
+    association.update(
+        forcing_stride=3,
+        restart_means_present=True,
+        remove_inverse_barometer=True,
+        ssh_now=jnp.full_like(z, -1.0e16),
+        ssh_inverse_barometer=jnp.ones_like(z),
+    )
+    association_prior = restart_prior._replace(ssh=jnp.full_like(z, 1.0e16))
+    with jax.disable_jit():
+        grouped = nemo_sbc_ssm_step(association_prior, kt=1, **association)
+    np.testing.assert_array_equal(
+        _bits(grouped.ssh), _bits(jnp.full_like(z, -1.0 / 3.0))
+    )
 
 
 def test_s2_scalar_transcription_is_bit_exact_under_jit_and_truly_eager():
@@ -244,6 +286,7 @@ def test_s2_scalar_transcription_is_bit_exact_under_jit_and_truly_eager():
         "rnf": compiled.runoff.mass_flux,
         "rnf_t": compiled.runoff.temperature_content,
         "rnf_s": compiled.runoff.salinity_content,
+        "coefice": compiled.restoring_coefficient,
         "erp": compiled.erp,
         "qrp": compiled.qrp,
         "qns": compiled.qns,
@@ -255,6 +298,7 @@ def test_s2_scalar_transcription_is_bit_exact_under_jit_and_truly_eager():
         "rnf": eager.runoff.mass_flux,
         "rnf_t": eager.runoff.temperature_content,
         "rnf_s": eager.runoff.salinity_content,
+        "coefice": eager.restoring_coefficient,
         "erp": eager.erp,
         "qrp": eager.qrp,
         "qns": eager.qns,
@@ -283,6 +327,11 @@ def test_s2_scalar_transcription_is_bit_exact_under_jit_and_truly_eager():
     off_kwargs["prior_restoring_heat_flux"] = jnp.full(
         (2, 3), 1.25, dtype=jnp.float64
     )
+    off_kwargs["prior_restoring_coefficient"] = jnp.full(
+        (2, 3), 0.625, dtype=jnp.float64
+    )
+    off_kwargs["post_ice_qns"] = jnp.full((2, 3), -0.0, dtype=jnp.float64)
+    off_kwargs["post_ice_emp"] = jnp.full((2, 3), -0.0, dtype=jnp.float64)
     off = jax.jit(lambda: nemo_orca2_s2(**off_kwargs))()
     np.testing.assert_array_equal(np.asarray(off.runoff.mass_flux), np.full((2, 3), 0.125))
     np.testing.assert_array_equal(
@@ -293,8 +342,52 @@ def test_s2_scalar_transcription_is_bit_exact_under_jit_and_truly_eager():
     )
     np.testing.assert_array_equal(np.asarray(off.erp), np.full((2, 3), 0.75))
     np.testing.assert_array_equal(np.asarray(off.qrp), np.full((2, 3), 1.25))
+    np.testing.assert_array_equal(
+        np.asarray(off.restoring_coefficient), np.full((2, 3), 0.625)
+    )
     np.testing.assert_array_equal(_bits(off.qns), _bits(off_kwargs["post_ice_qns"]))
     np.testing.assert_array_equal(_bits(off.emp), _bits(off_kwargs["post_ice_emp"]))
+
+
+def test_sbcssr_object_ties_and_coefficient_state_are_bit_pinned(monkeypatch):
+    shape = (2, 3)
+    max_tie = _s2_kwargs(jnp.zeros(shape, dtype=jnp.float64))
+    max_tie["sss_target"] = jnp.ones(shape, dtype=jnp.float64)
+    max_tie["salinity_floor"] = jnp.asarray(-0.0, dtype=jnp.float64)
+    max_tie["runoff_mouth_mask"] = jnp.zeros(shape, dtype=jnp.float64)
+    max_tie["surface_mask"] = jnp.ones(shape, dtype=jnp.float64)
+    literal_max = nemo_orca2_s2(**max_tie)
+    assert np.all(np.asarray(literal_max.erp) < 0.0)
+    real_max = restoring_module._fortran_max
+    monkeypatch.setattr(restoring_module, "_fortran_max", jnp.maximum)
+    planted_max = nemo_orca2_s2(**max_tie)
+    assert np.all(np.asarray(planted_max.erp) > 0.0)
+    monkeypatch.setattr(restoring_module, "_fortran_max", real_max)
+
+    min_tie = _s2_kwargs(jnp.full(shape, 35.0, dtype=jnp.float64))
+    min_tie["sss_target"] = jnp.full(shape, 35.0, dtype=jnp.float64)
+    min_tie["restoring_bound_mm_per_day"] = jnp.asarray(-0.0, dtype=jnp.float64)
+    min_tie["runoff_mouth_mask"] = jnp.zeros(shape, dtype=jnp.float64)
+    min_tie["surface_mask"] = jnp.ones(shape, dtype=jnp.float64)
+    literal_min = nemo_orca2_s2(**min_tie)
+    assert not np.any(np.signbit(np.asarray(literal_min.erp)))
+    monkeypatch.setattr(restoring_module, "_fortran_min", jnp.minimum)
+    planted_min = nemo_orca2_s2(**min_tie)
+    assert np.all(np.signbit(np.asarray(planted_min.erp)))
+
+    first_kwargs = _s2_kwargs()
+    first = nemo_orca2_s2(**first_kwargs)
+    second_kwargs = _s2_kwargs()
+    second_kwargs.update(
+        kt=3,
+        prior_restoring_coefficient=first.restoring_coefficient,
+        prior_restoring_volume_flux=first.erp,
+        prior_restoring_heat_flux=first.qrp,
+    )
+    second = nemo_orca2_s2(**second_kwargs)
+    damping = 1.0 - 2.0 * np.asarray(first_kwargs["runoff_mouth_mask"])
+    expected = np.asarray(first.restoring_coefficient) * damping
+    np.testing.assert_array_equal(_bits(second.restoring_coefficient), _bits(expected))
 
 
 def test_s2_finite_difference_gradient():
@@ -313,30 +406,101 @@ def test_s2_finite_difference_gradient():
     np.testing.assert_allclose(tangent, finite_difference, rtol=2.0e-7, atol=2.0e-8)
 
 
-def test_production_binding_and_existing_top_cell_runoff_path(monkeypatch):
-    baseline = nemo_orca2_s2(**_s2_kwargs())
-    original = surface_module.nemo_orca2_surface_runoff
+def _production_surface_case():
+    from legoesm.ocean.bulk_flux_omip import NemoS0Inputs, NemoS2Inputs
 
-    def planted(*args, **kwargs):
-        result = original(*args, **kwargs)
-        return freshwater_module.NemoRunoffSurface(
-            result.mass_flux.at[0, 0].set(jnp.nextafter(result.mass_flux[0, 0], jnp.inf)),
-            result.temperature_content,
-            result.salinity_content,
+    shape = (2, 3)
+    zero = jnp.zeros(shape, dtype=jnp.float64)
+    one = jnp.ones(shape, dtype=jnp.float64)
+    value = jnp.asarray([[1.0, 1.5, 2.0], [2.5, 3.0, 3.5]], dtype=jnp.float64)
+    s0 = NemoS0Inputs(
+        prior=NemoSurfaceMeans(zero, zero, zero, zero, zero, zero, zero),
+        kt=1,
+        **_ssm_kwargs(value),
+    )
+    s2_kwargs = _s2_kwargs()
+    s2 = NemoS2Inputs(**{name: s2_kwargs[name] for name in NemoS2Inputs._fields})
+    bulk_args = (
+        6.0 * one,
+        -2.0 * one,
+        286.0 * one,
+        0.006 * one,
+        100800.0 * one,
+        None,
+        None,
+        None,
+        125.0 * one,
+        310.0 * one,
+        2.3e-5 * one,
+        3.0e-6 * one,
+        s2.surface_mask,
+        0.066,
+        1.0,
+        1.0,
+        5,
+    )
+    return bulk_args, s0, s2
+
+
+def test_production_binding_and_existing_top_cell_runoff_path(monkeypatch):
+    from legoesm.ocean.bulk_flux_omip import nemo_blk_oce_ncar
+
+    bulk_args, s0, s2 = _production_surface_case()
+    with pytest.raises(ValueError, match="S0 and S2 together"):
+        nemo_blk_oce_ncar(*bulk_args, s0=s0, s2=None)
+    shadowed = list(bulk_args)
+    shadowed[5:8] = [s0.temperature_now, s0.u_before, s0.v_before]
+    with pytest.raises(ValueError, match="produces sst_c"):
+        nemo_blk_oce_ncar(*shadowed, s0=s0, s2=s2)
+    run = lambda: nemo_blk_oce_ncar(*bulk_args, s0=s0, s2=s2)
+    with jax.disable_jit():
+        baseline = run()
+    compiled = jax.jit(run)()
+    for eager_leaf, compiled_leaf in zip(
+        jax.tree_util.tree_leaves(baseline),
+        jax.tree_util.tree_leaves(compiled),
+        strict=True,
+    ):
+        np.testing.assert_array_equal(_bits(eager_leaf), _bits(compiled_leaf))
+
+    original_ssm = bulk_module.nemo_sbc_ssm_step
+
+    def planted_ssm(*args, **kwargs):
+        result = original_ssm(*args, **kwargs)
+        return result._replace(
+            sst=result.sst.at[0, 0].set(jnp.nextafter(result.sst[0, 0], jnp.inf))
         )
 
-    monkeypatch.setattr(surface_module, "nemo_orca2_surface_runoff", planted)
-    changed = nemo_orca2_s2(**_s2_kwargs())
-    assert _bits(changed.runoff.mass_flux)[0, 0] != _bits(baseline.runoff.mass_flux)[0, 0]
+    monkeypatch.setattr(bulk_module, "nemo_sbc_ssm_step", planted_ssm)
+    with jax.disable_jit():
+        changed_s0 = run()
+    assert _bits(changed_s0.means.sst)[0, 0] != _bits(baseline.means.sst)[0, 0]
+    monkeypatch.setattr(bulk_module, "nemo_sbc_ssm_step", original_ssm)
 
-    forcing, freshwater = nemo_s2_to_ocean_interfaces(changed)
-    np.testing.assert_array_equal(_bits(forcing.q_solar), _bits(changed.qsr))
-    np.testing.assert_array_equal(_bits(forcing.sw_down), _bits(changed.qsr))
-    h = jnp.ones(changed.emp.shape + (3,), dtype=jnp.float64)
-    temperature = jnp.broadcast_to(changed.qns[..., None] * 0.0 + 2.0, h.shape)
+    original_s2 = bulk_module.nemo_orca2_s2
+
+    def planted_s2(*args, **kwargs):
+        result = original_s2(*args, **kwargs)
+        return result._replace(
+            qns=result.qns.at[0, 0].add(jnp.asarray(1.0, dtype=jnp.float64))
+        )
+
+    monkeypatch.setattr(bulk_module, "nemo_orca2_s2", planted_s2)
+    with jax.disable_jit():
+        changed_s2 = run()
+    assert _bits(changed_s2.s2.qns)[0, 0] != _bits(baseline.s2.qns)[0, 0]
+    assert _bits(changed_s2.surface_forcing.q_net)[0, 0] != _bits(
+        baseline.surface_forcing.q_net
+    )[0, 0]
+
+    forcing, freshwater = baseline.surface_forcing, baseline.freshwater_forcing
+    np.testing.assert_array_equal(_bits(forcing.q_solar), _bits(baseline.s2.qsr))
+    np.testing.assert_array_equal(_bits(forcing.sw_down), _bits(baseline.s2.qsr))
+    h = jnp.ones(baseline.s2.emp.shape + (3,), dtype=jnp.float64)
+    temperature = jnp.broadcast_to(baseline.s2.qns[..., None] * 0.0 + 2.0, h.shape)
     f_rate = freshwater_module.net_freshwater_flux(freshwater) / constants.rho_ocean_nemo
     entry, _ = freshwater_module.real_freshwater_entry(
-        freshwater, f_rate, h, jnp.ones_like(changed.emp), constants.rho_ocean_nemo,
+        freshwater, f_rate, h, jnp.ones_like(baseline.s2.emp), constants.rho_ocean_nemo,
         temperature, runoff_spread_m=None,
     )
     assert np.all(np.asarray(entry[..., 1:]) == 0.0)

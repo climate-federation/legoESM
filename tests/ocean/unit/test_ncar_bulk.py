@@ -450,10 +450,12 @@ def test_literal_blk_oce_inexact_binary64_pins_and_eager_jit():
     prior = get_policy()
     try:
         set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
-        eager = nemo_blk_oce_ncar(*_literal_scalar_inputs(), **_NO_ICE)
+        eager = nemo_blk_oce_ncar(
+            *_literal_scalar_inputs(), **_NO_ICE, s0=None, s2=None)
         inputs = _literal_scalar_inputs()
         compiled = jax.jit(
-            lambda *values: nemo_blk_oce_ncar(*values, 5, **_NO_ICE)
+            lambda *values: nemo_blk_oce_ncar(
+                *values, 5, **_NO_ICE, s0=None, s2=None)
         )(*inputs[:-1])
         assert all(np.array_equal(np.asarray(a).view(np.uint64),
                                   np.asarray(b).view(np.uint64))
@@ -476,16 +478,17 @@ def test_literal_blk_oce_path_plants_and_physical_inputs_have_no_defaults():
     assert all(parameter.default is inspect.Parameter.empty
                for parameter in signature.parameters.values())
     base_args = list(_literal_scalar_inputs())
-    base = nemo_blk_oce_ncar(*base_args, **_NO_ICE)
+    base = nemo_blk_oce_ncar(*base_args, **_NO_ICE, s0=None, s2=None)
     longwave_args = list(base_args)
     longwave_args[9] = longwave_args[9] + 1.0
-    longwave = nemo_blk_oce_ncar(*longwave_args, **_NO_ICE)
+    longwave = nemo_blk_oce_ncar(
+        *longwave_args, **_NO_ICE, s0=None, s2=None)
     assert float(longwave.qlwn - base.qlwn) == pytest.approx(
         constants.emissivity_seawater_lw, rel=0.0, abs=1e-14)
     assert np.asarray(longwave.qns).view(np.uint64) != np.asarray(base.qns).view(np.uint64)
     snow_args = list(base_args)
     snow_args[11] = snow_args[11] + 1.0e-6
-    snow = nemo_blk_oce_ncar(*snow_args, **_NO_ICE)
+    snow = nemo_blk_oce_ncar(*snow_args, **_NO_ICE, s0=None, s2=None)
     assert np.asarray(snow.qns).view(np.uint64) != np.asarray(base.qns).view(np.uint64)
     assert np.asarray(snow.emp).view(np.uint64) == np.asarray(base.emp).view(np.uint64)
 
@@ -493,7 +496,7 @@ def test_literal_blk_oce_path_plants_and_physical_inputs_have_no_defaults():
 def test_literal_blk_oce_finite_difference_gradient():
     args = _literal_scalar_inputs()
     objective = lambda sst: nemo_blk_oce_ncar(
-        *args[:5], sst, *args[6:], **_NO_ICE
+        *args[:5], sst, *args[6:], **_NO_ICE, s0=None, s2=None
     ).qns
     value = args[5]
     tangent = float(jax.grad(objective)(value))
@@ -514,7 +517,8 @@ def test_literal_blk_oce_zero_wind_and_masked_fill_gradients_are_finite():
     def wind_objective(u_wind):
         values = list(args)
         values[0] = u_wind
-        result = nemo_blk_oce_ncar(*values, **_NO_ICE)
+        result = nemo_blk_oce_ncar(
+            *values, **_NO_ICE, s0=None, s2=None)
         return result.qns + result.utau + result.vtau + result.taum
 
     assert np.isfinite(float(jax.grad(wind_objective)(jnp.asarray(0.0))))
@@ -523,7 +527,8 @@ def test_literal_blk_oce_zero_wind_and_masked_fill_gradients_are_finite():
         values = list(args)
         values[2] = temperature
         values[12] = jnp.asarray(0.0)
-        result = nemo_blk_oce_ncar(*values, **_NO_ICE)
+        result = nemo_blk_oce_ncar(
+            *values, **_NO_ICE, s0=None, s2=None)
         return result.theta_air + result.qns
 
     value = masked_temperature_objective(jnp.asarray(0.0))

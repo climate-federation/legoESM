@@ -45,6 +45,8 @@ import jax.numpy as jnp
 
 from legoesm import constants
 from legoesm.core.source_rounding import (
+    nemo_fortran_max as _fortran_max,
+    nemo_fortran_min as _fortran_min,
     nemo_fortran_sign as _fortran_sign,
     nemo_source_round as _sr,
 )
@@ -441,6 +443,7 @@ def nemo_orca2_sss_restoring(
     sst_mean,
     runoff_mouth_mask,
     surface_mask,
+    prior_coefficient,
     *,
     restoring_mm_per_day,
     bound_mm_per_day,
@@ -453,8 +456,9 @@ def nemo_orca2_sss_restoring(
     This extends the shared restoring module without changing its generic
     OMIP defaults.  ``nn_sssr_ice=1`` makes the initial ice coefficient one;
     active runoff-mouth damping then multiplies it by ``1-2*rnfmsk``.  The
-    returned ``erp`` uses NEMO's positive-upward convention and ``qns_delta``
-    is the heat term added to the post-ice non-solar flux.
+    returned ``erp`` uses NEMO's positive-upward convention.  ``heat_term``
+    is NEMO's materialized ``(erp * rcp) * sst_m``; callers subtract it from
+    both ``qns`` and the zero-initialized ``qrp`` diagnostic.
 
     All resolved namelist/constants are required inputs.  This path therefore
     cannot silently substitute ORCA1 or generic restoring settings.
@@ -464,20 +468,21 @@ def nemo_orca2_sss_restoring(
     sst = _sr(jnp.asarray(sst_mean, dtype=jnp.float64))
     rnfmsk = _sr(jnp.asarray(runoff_mouth_mask, dtype=jnp.float64))
     smask = _sr(jnp.asarray(surface_mask, dtype=jnp.float64))
+    coefice = _sr(jnp.asarray(prior_coefficient, dtype=jnp.float64))
     zsrp = _sr(_sr(restoring_mm_per_day) / _sr(seconds_per_day))
     zerp_bound = _sr(_sr(bound_mm_per_day) / _sr(seconds_per_day))
     two_rnf = _sr(_sr(2.0) * rnfmsk)
-    coefice = _sr(_sr(1.0) - two_rnf)
+    runoff_damping = _sr(_sr(1.0) - two_rnf)
+    coefice = _sr(coefice * runoff_damping)
     salinity_delta = _sr(sss - target)
     numerator = _sr(_sr(zsrp * coefice) * salinity_delta)
-    denominator = _sr(jnp.maximum(sss, _sr(salinity_floor)))
+    denominator = _sr(_fortran_max(sss, _sr(salinity_floor)))
     quotient = _sr(numerator / denominator)
     unbounded = _sr(quotient * smask)
-    magnitude = _sr(jnp.minimum(zerp_bound, _sr(jnp.abs(unbounded))))
+    magnitude = _sr(_fortran_min(zerp_bound, _sr(jnp.abs(unbounded))))
     erp = _sr(_fortran_sign(_sr(1.0), unbounded) * magnitude)
-    heat_content = _sr(_sr(heat_capacity) * sst)
-    qns_delta = _sr(_sr(-erp) * heat_content)
-    return erp, qns_delta
+    heat_term = _sr(_sr(erp * _sr(heat_capacity)) * sst)
+    return coefice, erp, heat_term
 
 
 def interp_woa_sss_to_grid(

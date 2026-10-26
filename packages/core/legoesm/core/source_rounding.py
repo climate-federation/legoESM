@@ -43,7 +43,19 @@ def nemo_fortran_sign(magnitude: jax.Array, sign_source: jax.Array) -> jax.Array
     return jnp.where(sign_source >= 0.0, magnitude, -magnitude)
 
 
+def nemo_fortran_max(first: jax.Array, second: jax.Array) -> jax.Array:
+    """Record-object ``MAXSD`` ordering: the second operand wins a tie."""
+    return jnp.where(first > second, first, second)
+
+
+def nemo_fortran_min(first: jax.Array, second: jax.Array) -> jax.Array:
+    """Record-object ``MINSD`` ordering: the second operand wins a tie."""
+    return jnp.where(first < second, first, second)
+
+
 __all__ = (
+    "nemo_fortran_max",
+    "nemo_fortran_min",
     "nemo_fortran_sign",
     "nemo_source_barrier",
     "nemo_source_round",

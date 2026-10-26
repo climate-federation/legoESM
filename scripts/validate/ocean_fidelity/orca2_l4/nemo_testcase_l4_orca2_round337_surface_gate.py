@@ -102,11 +102,6 @@ def validate(record_root: Path, *, plant_group: str | None) -> dict[str, object]
     rnf = np.asarray(fields["rnf"], dtype=np.float64)
     oracle_rnf_tsc = np.asarray(fields["rnf_tsc"], dtype=np.float64)
     wet = tmask > 0.5
-    # Parent generic density (1025) versus the record deck's rho0 (1026).
-    parent_temperature = np.maximum(sst, np.float64(0.0)) * rnf / np.float64(
-        constants.rho_ocean
-    )
-    parent_salinity = np.zeros_like(parent_temperature)
     runoff_fn = jax.jit(
         lambda runoff, temperature, mask: nemo_orca2_surface_runoff(
             runoff,
@@ -153,12 +148,6 @@ def validate(record_root: Path, *, plant_group: str | None) -> dict[str, object]
         "utauU": current_u,
         "vtauV": current_v,
     }
-    parent = {
-        "runoff_temperature_content": parent_temperature,
-        "runoff_salinity_content": parent_salinity,
-        "utauU": utau[:, :-1],
-        "vtauV": vtau[:-1, :],
-    }
     oracle = {
         "runoff_temperature_content": oracle_rnf_tsc[..., 0],
         "runoff_salinity_content": oracle_rnf_tsc[..., 1],
@@ -178,15 +167,12 @@ def validate(record_root: Path, *, plant_group: str | None) -> dict[str, object]
         current[plant_group] = planted
 
     rows = {
-        group: {
-            "before": score(parent[group], oracle[group], masks[group]),
-            "after": score(current[group], oracle[group], masks[group]),
-        }
+        group: score(current[group], oracle[group], masks[group])
         for group in GROUPS
     }
-    after_unequal = sum(int(row["after"]["unequal"]) for row in rows.values())
+    after_unequal = sum(int(row["unequal"]) for row in rows.values())
     if plant_group is not None:
-        require(rows[plant_group]["after"]["unequal"] == 1,
+        require(rows[plant_group]["unequal"] == 1,
                 f"{plant_group} one-ULP plant did not fire once")
         raise GateError(f"planted {plant_group} word rejected through real scorer")
     require(

@@ -7,6 +7,31 @@ run was made.**  S0/S2 groups present in the immutable round-5 record are at
 the exact bar; all other groups remain explicitly unmeasured pending the
 already planned S4 acquisition.
 
+## Independent-review HOLD closure
+
+The Claude and Argon HOLDs were confirmed and corrected.  SSS restoring now
+evaluates the compiled `erp * rcp * sst_m` association once and subtracts that
+materialized term independently from `qns` and zero-initialized `qrp`, matching
+`ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/sbcssr.f90:147-205`.
+The seven-field mean now evaluates inverse-barometer accumulation as
+``(ssh_m + ssh) - ssh_ib`` in the order shown by
+`ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/sbcssm.f90:109-174`.
+
+The saved restoring coefficient is now an explicit input/output state and is
+multiplied by the runoff-mouth factor at every forcing update, rather than
+being rebuilt.  Between forcing updates, runoff/restoring diagnostics and
+`emp/qns` are returned without executing an add-zero expression.  The scalar
+replica was rewritten directly from the Fortran assignments and independently
+handles update and non-update arms.
+
+S0 and S2 are now selectable around the existing NCAR S1 entry point.  The
+composed path rejects half-selection and shadow mean inputs, returns the S0
+and S2 carried states plus the existing forcing interfaces, and has a real
+entry-point plant for each call.  The complete composed call is bit-identical
+under whole-call eager execution and CPU JIT.  The strengthened mean test was
+also run against parent `0be9d2be51`: its association case failed with parent
+`+0` versus the required `-1/3`, then passed on the corrected tree.
+
 ## Source and executing branch
 
 All source transcription was taken from the compiled round-5 record branch,
@@ -76,7 +101,8 @@ S2 extends, rather than duplicates, the existing shared runoff and
 forcing-cadence runoff mass/tracer update, SSS restoring, freshwater-budget
 merge, native U/V stress construction, and `qsr` penetrative hand-off.  The
 prior `rnf/rnf_tsc/erp/qrp` states are also required so the non-update step
-preserves NEMO's module diagnostics.  The adapter returns the existing
+preserves NEMO's module diagnostics; the saved restoring coefficient is
+carried too.  The adapter returns the existing
 `OceanSurfaceForcing` and `FreshwaterForcing` interfaces and selects the
 existing surface-only runoff deposition route; it introduces no second
 depth-distribution formula.
@@ -103,11 +129,14 @@ negative zero as positive.  The shared Fortran-sign helper and a negative-zero
 test pin that result.
 
 The executing `sbcrnf.o` `MAXSD(sst,+0)` retains the source positive-zero
-operand on a signed-zero tie.  The S2 scalar test pins runoff temperature
-content to positive zero.  Equal positive operands make the `MINSD` bound and
-salinity-floor `MAXSD` result bit-identical whichever operand survives;
-stress masks are only zero or one.  These exhaust every executing
-MIN/MAX/SIGN site in S0/S2.
+operand on a signed-zero tie.  In `sbcssr.o`, `MAXSD` and `MINSD` retain their
+second Fortran operands on ties: the salinity floor and `ABS(zerp)`,
+respectively.  The shared strict-comparison helpers encode that rule.  Two
+synthetic signed-zero cases make the surviving operand change the output bits,
+and replacing either helper with `jnp.maximum/minimum` makes its test fail.
+The S2 scalar test separately pins runoff temperature content to positive zero
+and Fortran `SIGN` treating negative zero as positive.  These exhaust every
+executing MIN/MAX/SIGN site in S0/S2.
 
 There is no exponential, logarithmic, trigonometric, or power operation in
 the S0/S2 numeric path.  The required scalar-glibc arm is therefore present
@@ -125,15 +154,18 @@ The immutable round-5 record was verified by digest before scoring:
 - mesh:
   `0f373c6609d287bc818b1f6ef96bafdcc0b620c730219018de9728369d01ec5f`.
 
-The registered before/current counts on CPU binary64 JIT were:
+The registered current counts on CPU binary64 JIT are:
 
-| Independently scorable group | Parent over-bar / words | Current over-bar / words |
-|---|---:|---:|
-| runoff temperature content | 1,340 / 8,794 | **0 / 8,794** |
-| runoff salinity content | 0 / 8,794 | **0 / 8,794** |
-| native U stress | 8,489 / 8,489 | **0 / 8,489** |
-| native V stress | 8,554 / 8,554 | **0 / 8,554** |
-| total | 18,383 / 34,631 | **0 / 34,631** |
+| Independently scorable group | Current over-bar / words |
+|---|---:|
+| runoff temperature content | **0 / 8,794** |
+| runoff salinity content | **0 / 8,794** |
+| native U stress | **0 / 8,489** |
+| native V stress | **0 / 8,554** |
+| total | **0 / 34,631** |
+
+The earlier “Parent” column was removed: it was a hand-built counterfactual,
+not execution of parent code, and therefore was not a valid parent control.
 
 One-ULP plants in each of the four output groups exit nonzero.  S0-F record
 selection/blending, S0-M means, SSS/FWB merge, and the complete
@@ -155,10 +187,10 @@ in `omip_scan/q_net` exits nonzero.  This adds focused coverage to round 335's
 unchanged 214-array / 10,231,076-word full-caller control.  No change to a
 non-NEMO caller is requested or observed.
 
-- focused S0/S2 fidelity suite: 6/6 PASS; independent scalar transcription is
+- focused S0/S2 fidelity suite: 7/7 PASS; independent scalar transcription is
   bit-exact under CPU JIT and whole-call eager execution, four-step S0 scan,
-  signed-zero ties, finite-difference gradient, production-call-site
-  monkeypatch plant, and no physical defaults;
+  bit-changing signed-zero ties, coefficient carry, finite-difference gradient,
+  composed production-call-site plants, and no physical defaults;
 - shared field-reader, freshwater/runoff, SSS-restoring, and coupler
   regression suites: 159/159 PASS;
 - offline measured-group gate: 0 / 34,631 after, with all four one-ULP plants
