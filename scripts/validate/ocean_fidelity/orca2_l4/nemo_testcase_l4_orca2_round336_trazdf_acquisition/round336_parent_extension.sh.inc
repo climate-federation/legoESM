@@ -101,6 +101,8 @@ printf 'R336_GENERATED_DRIVER_SYNTAX_PASS role=inner path=%s\n' "$ADAPTED"
 if [[ -n ${R336_GENERATED_INNER_COPY:-} ]]; then
   cp -- "$ADAPTED" "$R336_GENERATED_INNER_COPY"
   cp -- "$COMBINED_WRITER" "$R336_GENERATED_INNER_COPY.round332_writer.F90"
+  declare -f check_r333_ldf_landing >"$R336_GENERATED_INNER_COPY.r333-functions"
+  sed -i "2r $R336_GENERATED_INNER_COPY.r333-functions" "$R336_GENERATED_INNER_COPY"
   sed -i "s|^readonly R332_WRITER=.*|readonly R332_WRITER=$R336_GENERATED_INNER_COPY.round332_writer.F90|" \
     "$R336_GENERATED_INNER_COPY"
   chmod 700 "$R336_GENERATED_INNER_COPY"
