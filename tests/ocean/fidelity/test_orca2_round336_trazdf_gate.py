@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -101,3 +102,11 @@ def test_a2d_fields_use_declared_interior_extents():
     for name in gate.INTERIOR_THREE_D_FIELDS:
         assert record["fields"][name].shape == (3, 2, 5)
     assert record["fields"]["akz"].shape == (7, 6, 5)
+
+
+def test_wrapper_arms_retention_before_inherited_admission() -> None:
+    source = (Path(__file__).parents[3] / "scripts/validate/ocean_fidelity/orca2_l4"
+              / "nemo_testcase_l4_orca2_round336_trazdf_acquisition/run.sh").read_text()
+    arm = source.index('if [[ "$MODE" != --preflight-only ]]; then retention_armed=1; fi')
+    inherited = source.index('"$ADAPTED_PARENT" "$MODE"')
+    assert arm < inherited

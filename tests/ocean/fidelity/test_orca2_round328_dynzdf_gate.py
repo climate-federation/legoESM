@@ -185,6 +185,14 @@ def test_cleanup_keeps_crashed_and_admission_refused_runs(
     assert f"R328_FAILED_OUTPUTS_KEPT kind={failure_kind}" in result.stderr
 
 
+def test_nemo_error_refusal_precedes_mpirun_status_refusal() -> None:
+    source = RUN_SH.read_text()
+    start = source.index('timeout --kill-after=60 "$RUN_TIMEOUT_S" mpirun')
+    error_check = source.index('refuse_nemo_errors "$TARGET_RUN/ocean.output"', start)
+    status_check = source.index('[[ $rc -eq 0 ]] || refuse "mpirun exited $rc"', start)
+    assert start < error_check < status_check
+
+
 PLANT_REASONS = {
     "header": "wrong version/kt/stage",
     "field-order": "field order",

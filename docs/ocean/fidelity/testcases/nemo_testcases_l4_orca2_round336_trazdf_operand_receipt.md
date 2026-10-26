@@ -157,3 +157,58 @@ The default ORCA2 landing battery passes 146 tests; its log is stored as
 separately passes 6 tests; its log is stored as
 `round336/resume2_ratchet.log`.
 No DINO month gate is required because no model or package file changed.
+
+## Resume 3: declared extents and refusal-path repair
+
+Claude Opus 4.6 returned RUN. Argon's re-review held the acquisition on five
+remaining tool defects; all five are repaired without running NEMO or changing
+a model statement, configuration value, observer placement, or score.
+
+The decisive extent is now read from NEMO rather than inferred from the tracer
+grid. NEMO allocates `avs`, `avt`, `avt_k`, and `en` with `A2D(0),jpk` at
+`zdf_oce.F90:70-72`. Therefore final `avt`/`avs`, saved `avt_k`, and all eleven
+recorded `zdf_phy` phase fields are written and parsed at
+`(ntsi:ntei,ntsj:ntej,jpk)`, which is `(90,148,31)` in this build; full-grid
+geometry, `akz`, masks, tracer state, and replay arrays retain their own
+declared extents. The bounds fixture allocates the actual A2D fields at those
+lower bounds and runs the patched NEMO `trazdf` source on two rank-distinct
+inputs. A source-allocation plant and record-metadata extent plant both fire.
+
+Every value plant now selects a cell from the live wet/owned mask instead of
+the former fixed `(2,2,1)` slot. Each saved phase has its own named wet-cell
+checksum plant; the gate also enforces the TKE copy, the unchanged salinity
+across runoff and EVD, and the final IWM-to-`tra_zdf` handoff. Thus none of
+`avt_after_runoff`, `avs_after_runoff`, `avt_after_evd`, `avs_after_evd`,
+`avt_after_ddm`, `avs_after_ddm`, `avt_after_iwm`, or `avs_after_iwm` is merely
+parsed and ignored.
+
+The inherited parent now scans `ocean.output` and prints matching
+`E R R O R` lines before refusing a nonzero `mpirun` status. Its preflight
+executes that refusal plant at the reachable parent check, and a structural
+test pins the check before the status refusal. Failed target builds are kept
+in place rather than deleted. The acquisition README gives the exact
+move-aside-before-rerun procedure; refused run evidence remains under
+`refused/`.
+
+Both admission recovery routes remain live. The synthetic in-place call now
+explicitly removes any operator-provided `R328_EXISTING_RUN` before entering
+the inherited route; the retained call supplies its own path. The round-333
+and round-336 retention traps arm before invoking inherited
+`--admit-existing`, so any later refusal retains a run already moved to its
+canonical name. The preflight executes both complete synthetic routes plus
+producer-commit and binary-digest plants for each.
+
+Finally, the same-program setup preprocesses the pristine `TRAZDF_SOURCE`
+with the build's own `cpp`, requires its nonblank output to equal the real
+record-build ppsrc, and only then applies the observer patch. A nonblank
+same-program plant fires in both the direct and inherited checks. The refreshed
+preflight again reaches `ORCA2_ROUND336_TRAZDF_PREFLIGHT_READY`, with 140-file
+deterministic passivity, 11 syntax proofs, the nonzero 60/1,234/121 function
+censuses, 407 identical ppsrc units, 419 identical objects, both admission
+routes, the real-extent bounds fixture, and every new plant green/fired as
+appropriate. Its final log is stored as `round336/resume3_preflight.log`.
+
+The acquisition disposition is unchanged: **ACQUISITION_NEEDED** at the same
+operator command and evidence directory above. No unasked choice was made;
+configuration choices remain empty. Codex review: operator. Argon findings
+are dispositioned here; operator re-review remains required before acquisition.

@@ -1850,6 +1850,7 @@ FILES = {
     "trabbc.F90": _OCE / "TRA/trabbc.F90",
     "phycst.F90": _OCE / "DOM/phycst.F90",
     "tramle.F90": _OCE / "TRA/tramle.F90",
+    "zdf_oce.F90": _OCE / "ZDF/zdf_oce.F90",
 }
 
 # citation -> the anchors that IDENTIFY its first and last line, plus the
@@ -1867,6 +1868,9 @@ FILES = {
 # recurring symbol is refused now, and every multi-line citation states its
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
+    'zdf_oce.F90:70-72': [
+        'ALLOCATE( avm (jpi,jpj,jpk), avm_k(jpi,jpj,jpk), avs(A2D(0),jpk)',
+        '&      avmb(jpk)        , avtb(jpk)         , avtb_2d(A2D(0))', 3],
     # ORCA2 round 336: record-build tra_zdf input and recurrence audit.
     'ORCA2_ORCA1ICE_OMIP_L4_R333LDFI/BLD/ppsrc/nemo/stprk3.f90:183':
         'CALL zdf_phy( kstp, Nbb, Nbb, Nrhs )',
