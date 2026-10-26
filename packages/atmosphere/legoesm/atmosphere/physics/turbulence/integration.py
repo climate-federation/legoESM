@@ -57,6 +57,9 @@ from legoesm.atmosphere.physics.turbulence.holtslag_boville import (
 )
 from legoesm.atmosphere.physics.turbulence.ysu import ysu_turbulence
 from legoesm.atmosphere.physics.turbulence.edmf import edmf_turbulence
+from legoesm.atmosphere.physics.convection.zhang_mcfarlane import (
+    cam6_detrain_condensate,
+)
 from legoesm.thermo import saturation_specific_humidity
 from legoesm.atmosphere.physics.thermodynamics import (
     pressure_from_eos,
@@ -1199,6 +1202,17 @@ def _make_mpas_turbulence(
                 f"turbulence scheme {scheme_name!r} accepted the liquid "
                 "partition but returned no dq_c_dt, so the liquid removed from "
                 "vapour would vanish. This is a scheme bug, not a config one.")
+        # ZM's detrained condensate handed over by the combined macmic loop
+        # (CAM6 clubb_intr.F90:2345-2376): booked on state1 AFTER the CLUBB
+        # update (:2251), so everything below -- the PBL height included
+        # (:2594-2617 runs after the detrainment update at :2397) -- sees it.
+        _dlf = None if forcing is None else forcing.get("conv_dlf")
+        _det = None
+        if _dlf is not None:
+            _det = cam6_detrain_condensate(
+                T_col + dt * turb_out.dT_dt,
+                jnp.asarray(_dlf).reshape(nCells, nlev))
+            turb_out = turb_out._replace(dT_dt=turb_out.dT_dt + _det[0])
         if scheme_name == "clubb" and _surface_flux is not None:
             # CAM6 PBL height (oracle row 48): clubb_intr.F90:2594-2617 runs
             # hb_diff::pblintd on state1 AFTER the CLUBB update
@@ -1258,6 +1272,17 @@ def _make_mpas_turbulence(
                 )
             else:
                 tracer_tends["q_c"] = turb_out.dq_c_dt.reshape(_qc_raw.shape)
+        if _det is not None:
+            for _nm, _d in zip(("q_c", "q_i", "N_c", "N_i"), _det[1:]):
+                _d = _d.reshape(state.T.data.shape)
+                _prev = tracer_tends.get(_nm)
+                if _prev is None:
+                    tracer_tends[_nm] = state.T.replace(
+                        data=_d, name=f"d{_nm}_dt_detrain", units="1/s")
+                elif hasattr(_prev, "replace"):
+                    tracer_tends[_nm] = _prev.replace(data=_prev.data + _d)
+                else:
+                    tracer_tends[_nm] = _prev + _d
 
         zero_ps = jnp.zeros_like(p_s)
         # Surface turbulent fluxes for the CMOR hfss/hfls feed [W/m^2,

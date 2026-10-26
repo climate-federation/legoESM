@@ -683,11 +683,14 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
     run N times sequentially at ``dt/N`` on that state, each sub-step's
     increment applied before the next (``cld_macmic_ztodt``); their
     tendencies, precipitation and ledger rows are averaged over the window
-    (CAM's ``1/N`` scaling).  Departures from CAM: radiation and gravity-wave
+    (CAM's ``1/N`` scaling).  On the MPAS/column lane with ZM and CLUBB, ZM's
+    detrained condensate is booked by the CLUBB bridge in every sub-step on
+    its post-CLUBB state (clubb_intr.F90:2345-2376: liquid/ice ramp, fusion
+    heating, number source).  Departures from CAM: radiation and gravity-wave
     drag see the PRE-physics state (CAM: post-macmic / post-coupler) exactly
-    as the N=1 parallel split already does, and the whole convective
-    increment (including detrained condensate) is applied before sub-step 1
-    rather than spread over the sub-steps (CAM hands ``dlf`` per sub-step).
+    as the N=1 parallel split already does; on the other lanes the detrained
+    condensate is booked as liquid with the convective increment before
+    sub-step 1.
 
     ``physics_cadence``: ``"off"`` (default, byte-identical to before);
     ``"write"`` additionally stores the full tendency pytree of every call in
@@ -787,8 +790,19 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
             False,
             None,
         ))
+    # CAM6 books ZM's detrained condensate in the CLUBB host on the post-CLUBB
+    # state of every macmic sub-step (clubb_intr.F90:2345-2376): liquid/ice
+    # ramp, fusion heating and number source.  Ported on the MPAS/column lane,
+    # whose CLUBB bridge applies it; ZM then publishes dlf instead of booking
+    # it into q_c.
+    _defer_dlf = (model_type == "mpas" and _n_macmic >= 2
+                  and config.convection.scheme == "zhang_mcfarlane"
+                  and config.turbulence.scheme == "clubb")
     if config.convection.scheme != "none":
-        tagged_fns.append((make_convection_physics(config.convection, model_type, dt), True, "conv_prog_profile"))
+        tagged_fns.append((make_convection_physics(
+            config.convection, model_type, dt,
+            defer_detrainment=_defer_dlf), True, "conv_prog_profile"))
+    _turb_entry = None
     if config.turbulence.scheme != "none":
         # MYNN-2.5 writes its prognostic ``qke = 2·TKE`` into a
         # dedicated PhysicsState field so a restart-time scheme switch
@@ -805,6 +819,7 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
             True,
             _turb_field,
         ))
+        _turb_entry = tagged_fns[-1]
     _sfc_bulk = surface_bulk_coeffs is not None
     if _sfc_bulk:
         if config.turbulence.scheme != "none":
@@ -1227,9 +1242,9 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
         sel = {g: [(f, r) for f, gg, r in zip(fns, groups, rows) if gg == g]
                for g in ("once", "pre", "sub")}
 
-        def _run(fns_rows, st, ps):
+        def _run(fns_rows, st, ps, frc=forcing):
             return _accumulate([f for f, _ in fns_rows], st, grid, sigma_coord,
-                               ps, forcing,
+                               ps, frc,
                                ledger_rows=([r for _, r in fns_rows]
                                             if ledger_rows is not None else None))
         # Evaluation order: the group holding ``fns[0]`` first, so ``first``
@@ -1242,8 +1257,16 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
         ps_m = phys_state
         if groups[0] == "once" and sel["once"]:
             acc = _add_scaled(acc, _run(sel["once"], state, phys_state), 1.0)
+        dlf = None
         if sel["pre"]:
             r_pre = _run(sel["pre"], state, phys_state)
+            if _defer_dlf:
+                # ZM's dlf is a hand-off to the CLUBB host, not carried state.
+                _upd = dict(r_pre[6])
+                dlf = _upd.pop("conv_dlf", None)   # None: no q_i, booked as liquid
+                if dlf is not None:
+                    dlf = dlf.reshape(state.T.data.shape)
+                r_pre = r_pre[:6] + (_upd,) + r_pre[7:]
             acc = _add_scaled(acc, r_pre, 1.0)
             state_m = _advance_state(state_m, r_pre[0], r_pre[1], r_pre[2],
                                      r_pre[3], r_pre[5], dt)
@@ -1256,7 +1279,12 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
         # microp_driver_tend on the updated state (physpkg.F90:2097-2101).
         for _i in range(_n_macmic):
             for _fr in sel["sub"]:
-                r_sub = _run([_fr], state_m, ps_m)
+                if dlf is not None and _fr[0] is _turb_entry:
+                    # clubb_tend_cam books dlf on its post-CLUBB state1.
+                    r_sub = _run([_fr], state_m, ps_m,
+                                 {**(forcing or {}), "conv_dlf": dlf})
+                else:
+                    r_sub = _run([_fr], state_m, ps_m)
                 state_m = _advance_state(state_m, r_sub[0], r_sub[1], r_sub[2],
                                          r_sub[3], r_sub[5], _dt_sub)
                 ps_m = _carry_within_call(ps_m, r_sub[6])

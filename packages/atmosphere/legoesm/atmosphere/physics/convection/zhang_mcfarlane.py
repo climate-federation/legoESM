@@ -61,13 +61,31 @@ from legoesm.atmosphere.physics.convection.mass_flux import compute_column_geome
 from legoesm.atmosphere.physics.convection.output import ConvectionOutput
 
 
-__all__ = ("CONVTRAN1_TRACERS", "zhang_mcfarlane_convection")
+__all__ = ("CONVTRAN1_TRACERS", "cam6_detrain_condensate",
+           "zhang_mcfarlane_convection")
 
 # CAM6 constituents with ``is_convtran1`` (micro_mg_cam.F90:416-435, MG2) that
 # zm_conv_intr.F90:829-846 transports with ``convtran``, mapped to legoESM
 # tracer names: CLDLIQ, CLDICE, NUMLIQ, NUMICE, RAINQM, SNOWQM, NUMRAI.  CAM's
 # NUMSNO has no legoESM tracer.
 CONVTRAN1_TRACERS = ("q_c", "q_i", "N_c", "N_i", "q_r", "q_s", "N_r")
+
+
+# --- CAM6 detrainment of ZM condensate (clubb_intr.F90:2345-2376) ---
+# The CLUBB host books ZM's detrained condensate ``dlf`` on the post-CLUBB
+# state of every macmic sub-step.  Literals exactly as the oracle writes them
+# (cam_cesm2_1_rel_60, a03b84b7c4e34f965b115686f22a043b85739e56): the
+# all-liquid / all-ice temperatures and ramp width (:2347-2352), and the
+# deep-convection droplet / crystal radii and densities of the number source
+# (:2365-2372, CAM's ``3.14``, not pi).
+_DETRAIN_T_LIQ_K = 268.15
+_DETRAIN_T_ICE_K = 238.15
+_DETRAIN_RAMP_K = 30.0
+_DETRAIN_PI = 3.14
+_DETRAIN_R_LIQ_M = 8.0e-6
+_DETRAIN_R_ICE_M = 25.0e-6
+_DETRAIN_RHO_LIQ = 997.0
+_DETRAIN_RHO_ICE = 500.0
 
 
 __physics_contract__ = {
@@ -265,3 +283,35 @@ def zhang_mcfarlane_convection(
     mb_kg = conv.mb * 100.0 / constants.g
     conv_prog_profile_new = jnp.zeros_like(conv_prog_profile).at[:, -1].set(mb_kg)
     return out, conv_prog_profile_new
+
+
+def cam6_detrain_condensate(T: jax.Array, dlf: jax.Array):
+    """CAM6 detrainment of ZM condensate, clubb_intr.F90:2345-2376.
+
+    ``T`` is the state the CLUBB host holds after its own update in the
+    macmic sub-step (``state1``, clubb_intr.F90:2251); ``dlf`` [kg/kg/s] is
+    ZM's detrained condensate (pbuf DLF).  The ``zmconv_microp = .false.``
+    branch (namelist default) with CAM6's shallow detrainment ``dlf2 = 0``
+    (clubb_intr.F90:2327), whose terms therefore vanish:
+
+    ``dum1 = 0`` above 268.15 K, ``1`` below 238.15 K, ``(268.15 - T)/30``
+    between; ``dq_c = dlf (1 - dum1)``, ``dq_i = dlf dum1``,
+    ``dN_c = 3 max(0, dlf) (1 - dum1) / (4 3.14 (8e-6)^3 997)``,
+    ``dN_i = 3 max(0, dlf) dum1 / (4 3.14 (25e-6)^3 500)``,
+    ``s = dlf dum1 latice`` (fusion heating, applied as ``s/cpair``).
+
+    Returns ``(dT_dt [K/s], dq_c_dt, dq_i_dt [kg/kg/s], dN_c_dt, dN_i_dt
+    [1/kg/s])``; signed as sources (+ = gain), same shape as ``T``.
+    """
+    dum1 = jnp.where(T > _DETRAIN_T_LIQ_K, 0.0,
+                     jnp.where(T < _DETRAIN_T_ICE_K, 1.0,
+                               (_DETRAIN_T_LIQ_K - T) / _DETRAIN_RAMP_K))
+    dlf_pos = jnp.maximum(0.0, dlf)
+    dq_c = dlf * (1.0 - dum1)
+    dq_i = dlf * dum1
+    dN_c = 3.0 * (dlf_pos * (1.0 - dum1)) / (
+        4.0 * _DETRAIN_PI * _DETRAIN_R_LIQ_M**3 * _DETRAIN_RHO_LIQ)
+    dN_i = 3.0 * (dlf_pos * dum1) / (
+        4.0 * _DETRAIN_PI * _DETRAIN_R_ICE_M**3 * _DETRAIN_RHO_ICE)
+    dT = dlf * dum1 * constants.L_f / constants.c_pd
+    return dT, dq_c, dq_i, dN_c, dN_i
