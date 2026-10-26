@@ -493,7 +493,8 @@ def test_config_defaults_are_the_mom6_defaults():
 
 # --- operator-split ordering option (k_after_surface_flux) -----------------
 
-def _epbl_scm(q_net, k_after_surface_flux, nsteps=6, dt=1200.0, set_dt_s=True):
+def _epbl_scm(q_net, k_after_surface_flux, nsteps=6, dt=1200.0, set_dt_s=True,
+              dt_s=None):
     from legoesm.ocean.physics.combined import OceanPhysicsConfig
     from legoesm.ocean.physics.convection.config import OceanConvectionConfig
     from legoesm.ocean.scm import OceanColumnModel
@@ -505,7 +506,7 @@ def _epbl_scm(q_net, k_after_surface_flux, nsteps=6, dt=1200.0, set_dt_s=True):
                              dz_deep=1.0)
     cfg = EPBLConfig(k_after_surface_flux=k_after_surface_flux)
     if set_dt_s:
-        cfg = cfg._replace(dt_s=dt)
+        cfg = cfg._replace(dt_s=dt if dt_s is None else dt_s)
     phys = OceanPhysicsConfig(
         vertical_mixing=VerticalMixingConfig(scheme="epbl", epbl=cfg),
         convection=OceanConvectionConfig(scheme="none"),
@@ -549,6 +550,15 @@ def test_scm_injects_model_dt_into_epbl():
                                   np.asarray(explicit.T.data))
     np.testing.assert_array_equal(np.asarray(injected.u.data),
                                   np.asarray(explicit.u.data))
+
+
+def test_scm_rejects_user_dt_s_that_disagrees_with_model_dt():
+    """A dt_s moved off the default that disagrees with the SCM dt raises
+    instead of being silently overwritten."""
+    assert EPBLConfig().dt_s not in (900.0, 1200.0)
+    with pytest.raises(ValueError, match="900.0 s but the SCM timestep is "
+                                         "1200.0 s"):
+        _epbl_scm(-200.0, False, nsteps=1, dt=1200.0, dt_s=900.0)
 
 
 def test_k_after_surface_flux_off_by_default():

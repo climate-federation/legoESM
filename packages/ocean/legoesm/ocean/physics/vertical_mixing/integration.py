@@ -263,6 +263,12 @@ def _make_epbl(config: VerticalMixingConfig,
     ePBL is implicit-only: it returns the interface diffusivity/viscosity for
     the backward-Euler solver and no explicit tendency, so the host model
     must run with ``implicit_vertical_mixing=True``.
+
+    ``cfg.dt_s`` is used as given: this factory does not know the caller's
+    timestep and does not check it.  The OMIP driver, the ocean SCM and the
+    lat-lon tendency probe check (or set) it against their dt; any other
+    caller of this factory must set ``EPBLConfig.dt_s`` to the dt its
+    implicit solve uses.
     """
     import jax.numpy as jnp
 

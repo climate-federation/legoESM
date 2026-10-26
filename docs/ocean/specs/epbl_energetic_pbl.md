@@ -62,7 +62,11 @@ Requirements and guards (`validate_epbl_config`, all raise on violation):
   (ePBL is an energy-per-timestep closure), which the drivers enforce, not
   `validate_epbl_config`: the OMIP driver sets it from `--dt`, refuses to run
   ePBL without an explicit `--dt`, and raises if it differs from the run
-  timestep; the ocean single-column model overwrites it with its own `dt`;
+  timestep; the ocean single-column model sets it to its own `dt` when
+  `dt_s` is left at the default and raises when a non-default `dt_s`
+  disagrees with that `dt`; the lat-lon tendency probe raises when `dt_s`
+  differs from its tracer timestep. Any other caller of the physics factory
+  must set it itself (nothing checks it there);
 - unknown `mstar_scheme` / `wt_scheme`, and `eqdisc_v0` together with
   `eqdisc_v0h`, raise.
 

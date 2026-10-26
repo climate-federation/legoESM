@@ -94,6 +94,7 @@ from legoesm.ocean.physics.vertical_mixing import (
     build_dz_half,
     implicit_vertical_diffusion_ocean,
 )
+from legoesm.ocean.physics.vertical_mixing.config import EPBLConfig
 from legoesm.ocean.scm_forcing import (
     OceanSCMForcing,
     build_ocean_surface_forcing_struct,
@@ -585,7 +586,15 @@ class OceanColumnModel:
                                 and vmix.epbl.k_after_surface_flux)
         if vmix.scheme == "epbl":
             # ePBL's TKE budget is per timestep: inject the SCM's dt so it
-            # never runs on EPBLConfig's placeholder dt_s.
+            # never runs on EPBLConfig's placeholder dt_s.  A dt_s already
+            # moved off the default that disagrees with dt raises instead of
+            # being silently overwritten (same rule as run_omip's KPP CFL cap).
+            _dt_s = float(vmix.epbl.dt_s)
+            if (_dt_s != float(EPBLConfig._field_defaults["dt_s"])
+                    and _dt_s != float(dt)):
+                raise ValueError(
+                    f"EPBLConfig.dt_s was set to {_dt_s} s but the SCM "
+                    f"timestep is {float(dt)} s; ePBL must use the SCM dt")
             physics_config = physics_config._replace(
                 vertical_mixing=vmix._replace(epbl=vmix.epbl._replace(
                     dt_s=float(dt),

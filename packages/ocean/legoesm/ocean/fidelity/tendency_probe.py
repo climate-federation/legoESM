@@ -327,6 +327,14 @@ def probe_latlon_cgrid(
             implicit_vertical_diffusion_ocean,
         )
         _dt_tr = dt_tracer if dt_tracer is not None else dt
+        if (getattr(_vm_cfg, "scheme", "none") == "epbl"
+                and float(_vm_cfg.epbl.dt_s) != float(_dt_tr)):
+            # ePBL's energy budget is per timestep and feeds the tracer
+            # implicit solve below, which runs over the tracer dt.
+            raise ValueError(
+                f"EPBLConfig.dt_s is {float(_vm_cfg.epbl.dt_s)} s but the "
+                f"probe's tracer timestep is {float(_dt_tr)} s; ePBL must use "
+                "the tracer dt")
         _nemo_literal_tke = (
             getattr(_vm_cfg, "scheme", "none") == "tke"
             and getattr(
