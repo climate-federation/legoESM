@@ -1127,10 +1127,15 @@ class TestSoilHydraulicsConsistency:
         from legoesm.land.soil_hydraulics import (
             SoilHydraulicsConfig, theta_from_psi
         )
+        from legoesm.land.soil_hydraulics import air_entry_psi
         for curve in ["van_genuchten", "clapp_hornberger", "pdi", "lu"]:
             cfg = SoilHydraulicsConfig(retention_curve=curve)
             psi = jnp.linspace(-0.01, -100.0, 100)
             theta = theta_from_psi(psi, cfg)
             assert float(jnp.min(theta)) >= 0.0, f"{curve}: theta < 0"
-            assert float(jnp.max(theta)) <= cfg.theta_sat + 1e-6, \
+            # Above air entry (psi_sat for Clapp-Hornberger) the column holds
+            # the elastic specific storage S_s*theta_sat*(psi - psi_air_entry),
+            # at most S_s*theta_sat*|psi_air_entry| (~2e-5 for loam).
+            elastic = cfg.S_s * cfg.theta_sat * abs(float(air_entry_psi(cfg)))
+            assert float(jnp.max(theta)) <= cfg.theta_sat + elastic + 1e-6, \
                 f"{curve}: theta > theta_sat"

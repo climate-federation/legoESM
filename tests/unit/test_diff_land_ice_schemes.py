@@ -187,32 +187,36 @@ class TestSoilRetentionCurves:
 class TestSoilRetentionNearSaturation:
     """The near-saturation band ``psi in (psi_air_entry, 0)``.
 
-    NOT a bug, but a differentiability CLIFF worth pinning: the
-    sharp-air-entry families (Clapp-Hornberger / Campbell / Brooks-Corey)
-    are flat at ``theta_sat`` above their air-entry pressure, so
-    ``dtheta/dpsi`` is EXACTLY zero there and the soil-moisture adjoint
-    through ``theta`` is dead in that band; the elastic specific-storage
-    term only switches on at ``psi >= 0``.  The smooth families (van
-    Genuchten / PDI / Lu) stay differentiable throughout.  A parameter-
-    estimation run that lands a wet column in that band gets no gradient
-    from those three schemes — pin the behaviour so the split is explicit
-    rather than discovered as a silent training stall.
+    The sharp-air-entry families (Clapp-Hornberger / Campbell / Brooks-Corey)
+    are flat at ``theta_sat`` above their air-entry pressure, so the raw
+    retention curve has ``dtheta/dpsi`` EXACTLY zero there.  ``theta_from_psi``
+    starts the elastic specific-storage branch AT air entry
+    (``soil_hydraulics.air_entry_psi``), so the band carries the small but
+    non-zero elastic capacity ``S_s*theta_sat`` and the soil-moisture adjoint
+    through ``theta`` is not dead there (it used to be: the elastic term only
+    switched on at ``psi >= 0``, and the Richards solver's capacity on the band
+    disagreed with ``theta``, which let a saturated layer store water in the
+    linear system that the state could not hold).  The smooth families (van
+    Genuchten / PDI / Lu) stay differentiable throughout.  Pinned so a change
+    to either branch is explicit rather than discovered as a silent training
+    stall or a water-budget leak.
     """
 
     _NEAR_SAT = np.array([-0.40, -0.20, -0.05])   # above the -0.478 m air entry
 
     @pytest.mark.parametrize("curve", ["clapp_hornberger", "campbell",
                                        "brooks_corey"])
-    def test_sharp_air_entry_capacity_is_zero_near_saturation(self, curve):
+    def test_sharp_air_entry_capacity_is_elastic_near_saturation(self, curve):
         from legoesm.land.soil_hydraulics import theta_from_psi
         cfg = _hydro_cfg(curve)
         psi = jnp.asarray(self._NEAR_SAT)
         g = jax.grad(lambda p: jnp.sum(theta_from_psi(p, cfg)))(psi)
         assert jnp.all(jnp.isfinite(g)), f"{curve}: NaN/Inf near saturation"
-        assert float(jnp.max(jnp.abs(g))) == 0.0, (
-            f"{curve}: dtheta/dpsi = {g} above air entry — this test pins "
-            "the documented FLAT branch; a non-zero value means the curve "
-            "changed and the dead-band note is stale")
+        np.testing.assert_allclose(
+            np.asarray(g), cfg.S_s * cfg.theta_sat, rtol=1e-12,
+            err_msg=f"{curve}: dtheta/dpsi above air entry must be the elastic "
+                    "specific storage S_s*theta_sat (consistent with the Richards "
+                    "capacity on the band)")
 
     @pytest.mark.parametrize("curve", ["van_genuchten", "pdi", "lu"])
     def test_smooth_curves_stay_differentiable_near_saturation(self, curve):

@@ -11,10 +11,15 @@
 #   # full period, 5-year blocks
 #   scripts/run/submit_lmip_ginsburg.sh --arm least_cost --year-start 2000 --year-end 2014
 #   # another partition / skip full nodes (repeatable, passed to sbatch)
-#   ... --sbatch-arg=--partition=short --sbatch-arg=--exclude=g097,g098
+#   ... --partition short --sbatch-arg=--exclude=g097,g098
 #   # extend an existing run
 #   scripts/run/submit_lmip_ginsburg.sh --arm least_cost --year-start 2001 --year-end 2014 \
 #       --restart-from <root>/least_cost/2000-2000/restart_2001_d000h00.npz
+#   # warm start from the published 1985 soil state (no P-model acclimation state
+#   # in it: the first block resets that explicitly), start only after job 123 ends well
+#   ... --restart-from data/lmip_soil_ic/restart_1985_d000h00.npz --pmodel-cold-restart --after 123
+#   # any config override, repeatable (same syntax as init_experiment.py -o)
+#   ... --override forcing.co2_file=
 #
 # Arms (tests/land/integration/test_run_lmip_biophys.py):
 #   baseline    prescribed capacities + table g1
@@ -32,8 +37,13 @@ TEMPLATE=biophysics/lmip_pmodel_crujra
 ROOT="/burg/glab/users/$USER/lmip_runs/pmodel_crujra"
 PYTHON="${LEGOESM_PYTHON:-/burg/glab/users/$USER/.conda/envs/legoesm-gpu/bin/python}"
 ACCOUNT=glab
+PARTITION=glab1
+MAIL_USER="${LEGOESM_MAIL_USER:-}"   # set to get END/FAIL emails
 SBATCH_EXTRA=()          # e.g. --sbatch-arg=--partition=short --sbatch-arg=--exclude=g098
 MIN_FREE_GB=40           # host RAM one forcing year needs; nodes here are often oversubscribed
+OVERRIDES=()             # extra -o key=value for init_experiment.py
+PMODEL_COLD_RESTART=0    # first block only: --pmodel-cold-restart when restarting from a file
+AFTER=""                 # first block waits for this job (afterok)
 DRY_RUN=0
 
 while [[ $# -gt 0 ]]; do
@@ -47,10 +57,15 @@ while [[ $# -gt 0 ]]; do
         --template)       TEMPLATE="$2"; shift ;;
         --root)           ROOT="$2"; shift ;;
         --account)        ACCOUNT="$2"; shift ;;
+        --partition)      PARTITION="$2"; shift ;;
+        --mail-user)      MAIL_USER="$2"; shift ;;
         --sbatch-arg=*)   SBATCH_EXTRA+=("${1#--sbatch-arg=}") ;;
         --min-free-gb)    MIN_FREE_GB="$2"; shift ;;
+        --override)       OVERRIDES+=(-o "$2"); shift ;;
+        --pmodel-cold-restart) PMODEL_COLD_RESTART=1 ;;
+        --after)          AFTER="$2"; shift ;;
         --dry-run)        DRY_RUN=1 ;;
-        -h|--help)        sed -n '2,23p' "$0"; exit 0 ;;
+        -h|--help)        sed -n '2,28p' "$0"; exit 0 ;;
         *) echo "unknown arg: $1" >&2; exit 2 ;;
     esac
     shift
@@ -87,9 +102,17 @@ while (( y0 <= YEAR_END )); do
     ovr=(-o forcing.year_start="$y0" -o forcing.year_end="$y1"
          -o time.n_steps=$(( nyears * 8760 )))
     for o in "${ARM_OVR[@]}"; do ovr+=(-o "physics.$o"); done
+    ovr+=("${OVERRIDES[@]}")
+    # The explicit acclimation reset applies only to the block that reads the
+    # external file; later blocks restart from this chain's own files.
+    cold=""
+    if (( PMODEL_COLD_RESTART )) && [[ -n "$restart" && "$restart" == "$RESTART_FROM" ]]; then
+        cold=" --pmodel-cold-restart"
+    fi
+    dep="${prev_job:-$AFTER}"
 
     if (( DRY_RUN )); then
-        echo "[dry-run] $name -> $exp | walltime $walltime | restart: ${restart:-cold start}"
+        echo "[dry-run] $name -> $exp | walltime $walltime | restart: ${restart:-cold start}${cold} | after: ${dep:-none}"
         JAX_PLATFORMS=cpu "$PYTHON" scripts/run/init_experiment.py "$TEMPLATE" --name "$name" \
             --output-dir "$exp" "${ovr[@]}" --dry-run > /dev/null
     else
@@ -98,7 +121,10 @@ while (( y0 <= YEAR_END )); do
         cat > "$exp/job.sbatch" <<EOF
 #!/bin/bash
 #SBATCH --account=$ACCOUNT
-#SBATCH --job-name=lmip_$name
+#SBATCH --partition=$PARTITION
+${MAIL_USER:+#SBATCH --mail-type=END,FAIL
+#SBATCH --mail-user=$MAIL_USER
+}#SBATCH --job-name=lmip_$name
 #SBATCH -N 1
 #SBATCH -c 4
 #SBATCH --gres=gpu:1
@@ -118,10 +144,10 @@ if (( free_gb < $MIN_FREE_GB )); then
     exit 3
 fi
 "$PYTHON" scripts/run/run_lmip_biophys.py --config "$exp/config.yaml" \\
-    --output-dir "$exp"${restart:+ --restart-from "$restart"}
+    --output-dir "$exp"${restart:+ --restart-from "$restart"}$cold
 EOF
-        job=$(sbatch --parsable -A "$ACCOUNT" "${SBATCH_EXTRA[@]}" ${prev_job:+--dependency=afterok:$prev_job} "$exp/job.sbatch")
-        echo "$name -> job $job | $exp | walltime $walltime | restart: ${restart:-cold start}"
+        job=$(sbatch --parsable -A "$ACCOUNT" "${SBATCH_EXTRA[@]}" ${dep:+--dependency=afterok:$dep} "$exp/job.sbatch")
+        echo "$name -> job $job | $exp | walltime $walltime | restart: ${restart:-cold start}${cold} | after: ${dep:-none}"
         prev_job=$job
     fi
     restart="$exp/restart_$(printf '%04d' $(( y1 + 1 )))_d000h00.npz"
