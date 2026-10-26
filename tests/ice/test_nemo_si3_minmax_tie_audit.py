@@ -84,8 +84,9 @@ def test_expectation_rules_bind():
 
 
 def _sites():
-    sites = json.loads(TABLE.read_text())["sites"]
-    units: dict[str, list[int]] = {}
+    table = json.loads(TABLE.read_text())
+    sites = table["sites"]
+    units: dict[str, list[int]] = {u: [] for u in table["complete"]}
     for key in sites:
         unit, line = key.split(":")
         units.setdefault(unit, []).append(int(line))
@@ -104,6 +105,13 @@ def test_record_object_code_matches_committed_table_and_plants_fire(tmp_path):
     assert sum(len(u["rows"]) for u in report["units"].values()) == sum(
         s["copies"] for s in sites.values()
     )
+    table = json.loads(TABLE.read_text())
+    assert audit.uncovered(report, table["complete"], table["non_executing"]) == []
+    hidden = copy.deepcopy(report)  # a table missing one executing line must be caught
+    hidden["units"]["icevar"]["lines"] = [n for n in hidden["units"]["icevar"]["lines"] if n != 642]
+    assert audit.uncovered(hidden, table["complete"], table["non_executing"]) == [
+        "icevar:642 has 7 min/max instruction(s) not in the table"
+    ]
     planted = copy.deepcopy(sites)
     planted["icedyn_rdgrft:857"]["rules"][0]["keeps"] = "phrmax"  # the other operand
     assert audit.check_expectations(report, planted)
@@ -154,3 +162,28 @@ def test_input_match_needs_both_operands_and_a_unique_pair():
     # a result-named destination still wins over an input reading
     res = _one("\tmaxsd\t%xmm1, %xmm2\t# a_1, r_3", ["r_3 = MAX_EXPR <a_1, b_2>"])
     assert (res["status"], res["matched_by"]) == ("MATCHED", "result")
+
+
+@pytest.mark.skipif(not HAVE_BUILD, reason="record build not on this host")
+def test_every_source_min_max_sign_of_the_rung_is_in_the_table():
+    """Source-level completeness, including MIN/MAX the compiler folded away (:751, :875)."""
+    import re
+
+    table = json.loads(TABLE.read_text())
+    known = set(table["sites"]) | set(table["non_executing"])
+    found = set()
+    for unit, routines in table["complete"].items():
+        lines = (BUILD / "ppsrc" / "nemo" / f"{unit}.f90").read_text().splitlines()
+        inside = False
+        for n, text in enumerate(lines, 1):
+            if m := re.match(r"\s*SUBROUTINE\s+(\w+)", text, re.I):
+                inside = m.group(1).lower() in routines
+            elif re.match(r"\s*END\s+SUBROUTINE", text, re.I):
+                inside = False
+            elif (
+                inside
+                and not text.lstrip().startswith("!")
+                and re.search(r"\b(MIN|MAX|SIGN)\s*\(", text)
+            ):
+                found.add(f"{unit}:{n}")
+    assert found and found <= known, sorted(found - known)

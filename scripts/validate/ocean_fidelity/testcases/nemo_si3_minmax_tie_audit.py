@@ -124,6 +124,41 @@ def asm_minmax(asm: Path, lines: set[int]) -> list[dict]:
     return out
 
 
+def minmax_lines(asm: Path, prefixes) -> dict[int, int]:
+    """Source line -> min/max instruction count inside functions named by ``prefixes``."""
+    out: dict[int, int] = {}
+    line, func = None, ""
+    for raw in asm.read_text().splitlines():
+        if m := ASM_LINE.match(raw):
+            line = int(m.group(2))
+        elif raw.startswith("__") and raw.rstrip().endswith(":"):
+            func = raw.rstrip()[:-1].split("_MOD_")[-1]
+        elif ASM_MINMAX.match(raw) and any(func.startswith(p) for p in prefixes):
+            out[line] = out.get(line, 0) + 1
+    return out
+
+
+def uncovered(report: dict, complete: dict, non_executing: dict) -> list[str]:
+    """Min/max instructions in the rung's functions on a line neither audited nor declared idle."""
+    errors = []
+    for unit, prefixes in complete.items():
+        u = report["units"].get(unit)
+        if u is None:
+            errors.append(f"{unit}: completeness unit not compiled")
+            continue
+        known = set(u["lines"]) | {
+            int(k.split(":")[1]) for k in non_executing if k.startswith(unit + ":")
+        }
+        found = minmax_lines(Path(u["asm"]), prefixes)
+        u["minmax_lines_in_rung_functions"] = found
+        errors += [
+            f"{unit}:{n} has {c} min/max instruction(s) not in the table"
+            for n, c in sorted(found.items())
+            if n not in known
+        ]
+    return errors
+
+
 def gimple_functions(dump: Path) -> dict[str, list[str]]:
     funcs: dict[str, list[str]] = {}
     cur = None
@@ -290,6 +325,7 @@ def audit(build: Path, gfortran: str, sites: dict[str, list[int]], work: Path) -
             "record_object": str(art["record"]),
             "record_object_sha256": hashlib.sha256(art["record"].read_bytes()).hexdigest(),
             "recompiled_instructions_equal_record": True,
+            "asm": str(art["asm"]),
             "lines": lines,
             "rows": [classify(i, opt, cun) for i in asm_minmax(art["asm"], set(lines))],
         }
@@ -365,7 +401,7 @@ def main() -> int:
     )
     p.add_argument("--artifact", type=Path)
     a = p.parse_args()
-    sites = {u: [int(x) for x in ls.split(",")] for u, ls in (s.split(":") for s in a.site)}
+    sites = {u: [int(x) for x in ls.split(",") if x] for u, ls in (s.split(":") for s in a.site)}
     report = audit(a.build, a.gfortran, sites, a.work)
     for unit, u in report["units"].items():
         for r in u["rows"]:
@@ -381,7 +417,9 @@ def main() -> int:
         if r["status"] != "MATCHED"
     ]
     if a.expect:
-        errors += check_expectations(report, json.loads(a.expect.read_text())["sites"])
+        table = json.loads(a.expect.read_text())
+        errors += check_expectations(report, table["sites"])
+        errors += uncovered(report, table.get("complete", {}), table.get("non_executing", {}))
     report["errors"] = errors
     if a.artifact:
         a.artifact.write_text(json.dumps(report, indent=2) + "\n")
