@@ -9050,6 +9050,8 @@ CITATION_MAP = {
         'fr_i(ji,jj) = at_i(ji,jj)',
     'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/sbcmod.f90:500':
         'CALL sbc_ice_if   ( kt, Kbb, Kmm )',
+    'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/sbcice_if.f90:149':
+        'CALL fld_read( kt, nn_fsbc, sf_ice )',
 }
 
 

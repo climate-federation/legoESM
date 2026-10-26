@@ -210,3 +210,67 @@ file: 185 passed.
   average near 25.  It is **UNVERIFIED here**; the operator's push gate runs
   it.  Both package changes are pure additions (0 removed lines), so no
   existing function body it could call changed.
+
+## Resume: codex HOLD items (2026-10-26)
+
+Argon review: LAND.  Codex: HOLD on four items; each is fixed below.
+Evidence: `orca2_rounds/round338/resume_m4/`.
+
+- **M4, production call site (CONFIRMED, plants).**  The routine is now the
+  `nn_ice = 1` branch of the shared NEMO surface function S1 uses (the
+  literal bulk arm in `bulk_flux_omip.py`), in the order of the record
+  build's `SELECT CASE( nn_ice )` after the bulk call,
+  `ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/sbcmod.f90:500`:
+
+      CALL sbc_ice_if   ( kt, Kbb, Kmm )        ! Ice-cover climatology ("Ice-if" model)
+
+  `nn_ice` and the ice inputs are required keyword arguments (no default);
+  `0` returns the bulk fields, `1` runs the time blend then the ice routine,
+  anything else raises.  The S1 gate and S1 tests now pass `nn_ice = 0`
+  explicitly.  The production-call test fails when the ice call is removed
+  and when the time blend is replaced by the raw record (two scratch-copy
+  removals, both `1 failed`).
+- **fld_read time blend (CONFIRMED, unit test; transcribed, not
+  NEMO-certified).**  `ln_tint` is transcribed literally in the round-337
+  module (extended, not duplicated), the read being
+  `ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/sbcice_if.f90:149`:
+
+      CALL fld_read( kt, nn_fsbc, sf_ice )           ! Read input fields and provides the
+
+  and the blend `ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/fldread.f90:244-246`.
+  Object code of `fld_read`: `cvtsi2sd`, `divsd`, `subsd`, then
+  `mulsd, mulsd, addsd`, no FMA.  With the same field in both slots, the
+  JIT blend equals a scalar transcription bitwise on 200,003 values and
+  differs from `F` on some words at two non-dyadic weights; at `w = 0.5`
+  it equals `F`.  The record times (`nrec(2,*)`, `isecsbc`) are inputs; their
+  selection stays with S0-F.
+- **M3, MIN tie (CONFIRMED, checked proof).**  It cannot be made
+  bit-changing.  The two orders differ only for an operand of `-0` or NaN.
+  `-0` needs the clamped temperature at `-0` with a `+0` freezing point,
+  which MAXSD never returns.  A NaN operand needs a NaN freezing point, which
+  makes `zqri` NaN as well, and the output word is the same either way.  The
+  committed test runs every pair from a special-value set (signed zeros,
+  subnormals, infinities, NaN, the freezing point and its neighbours).  It
+  records the real MIN operand: no `-0`, `+0` ties present, NaN present.
+  Both orders then give 0 unequal words.
+- **M2, eager==jit guard (CONFIRMED, plant).**  The parent tree has no such
+  routine, so the plant is an unbarriered copy: in it eager differs from JIT
+  in 70 words on the test grid, and the committed plant arm asserts that.
+- **Side finding (CONFIRMED in JAX, PLAUSIBLE for NEMO).**  XLA's CPU backend
+  flushes subnormal temperatures to zero (6 special-grid cells).  The record
+  build has no fast-math flag, so NEMO likely keeps them.  This is
+  unreachable for physical temperatures and is not fixed here.
+
+Controls on the final tree: non-NEMO census **0 / 10,231,076** unequal
+across 214 arrays, inventory equal, plant exits 1, census file
+byte-identical to the pre-resume one.  S1's O1 replay on the admitted
+record is 0 unequal, and its JSON is identical to round 335's.  New and S1
+tests: 46 passed.
+
+CHOICES added in this resume: ASKED: wiring into the S1 surface function
+and the literal time blend (round prompt).  UNASKED, offered for revert:
+(7) `nn_ice` accepts only 0 and 1 and raises on 2/3, while the S1 gate
+labels its bulk-only replay `nn_ice = 0`; (8) the halo width is taken from
+array shapes, and the call refuses if they disagree; (9) the result type
+gains two fields, `ts_surface` and `fr_i`, which are None unless
+`nn_ice = 1`.  PENDING: ice-cover producer run length (with the user).
