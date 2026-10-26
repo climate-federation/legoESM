@@ -214,7 +214,7 @@ Conflicts: **none**.  The only file both sides changed is the receipt
 citation gate.  The two sides' hunks are disjoint: the lane re-anchored
 existing `CITATION_MAP` entries and added round-333 `FILES` entries; round 335
 added its `FILES` and `CITATION_MAP` entries and moved the
-`zdfdrg.f90:380` entry.  Both sides are kept.  Neither `bulk_flux_omip.py`
+drag-initialisation entry already cited above.  Both sides are kept.  Neither `bulk_flux_omip.py`
 nor `omip2_applicator.py` was touched by rounds 333 or 334.  No `CITATION_MAP`
 key is duplicated after the merge; the three duplicated `FILES` keys
 (`dynspg_ts.f90`, `domqco.F90`, `iceistate.f90`) are identical on the base,
