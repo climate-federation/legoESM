@@ -10238,7 +10238,14 @@ for _old in [key for key in CITATION_MAP
 # The inserted O10 expressions also change occurrence numbers for otherwise
 # anonymous closing-parenthesis anchors.  Pin those moved endpoints anew; none
 # is derived at gate runtime.
-CITATION_MAP.update({
+def _replace_citation_anchors(entries: dict) -> None:
+    missing = sorted(set(entries) - set(CITATION_MAP))
+    if missing:
+        raise RuntimeError(f"cannot replace absent citation anchors: {missing}")
+    CITATION_MAP.update(entries)
+
+
+_replace_citation_anchors({
     'packages/ice/legoesm/ice/bitz_lipscomb.py:2091-2108,2143-2159,2218-2222': [('if _nemo_dh_snow_update:', 1), (')', 948), ('if _nemo_dh_snow_update:', 2), 'remaining_mass = evaporation * dt + snow_delta * constants.rho_snow', 'melted_snow.append(', (')', 1000), 40],
     'packages/ice/legoesm/ice/bitz_lipscomb.py:2091-2108,2143-2159,2218-2222,2695,2727': [('if _nemo_dh_snow_update:', 1), (')', 948), ('if _nemo_dh_snow_update:', 2), 'remaining_mass = evaporation * dt + snow_delta * constants.rho_snow', 'melted_snow.append(', (')', 1000), ('_nemo_dh_snow_update: bool = True,', 2), '_nemo_dh_snow_update=_nemo_dh_snow_update,', 42],
     'packages/ice/legoesm/ice/bitz_lipscomb.py:2096-2100': ['h_precip_raw = (', (')', 945), 5],
