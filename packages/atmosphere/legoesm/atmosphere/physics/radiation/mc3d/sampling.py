@@ -53,8 +53,12 @@ def henyey_greenstein_mu(key: Array, g: Array) -> Array:
   # the isotropic branch is selected. Use 0.5 (NOT +-1: g=+-1 gives s=0/0 at
   # u=0); any g with 0<|g|<1 keeps s and 1/(2g) finite for all u in [0,1).
   safe_g = jnp.where(jnp.abs(g) < _G_ISOTROPIC_EPS, 0.5, g)
-  s = (1.0 - safe_g * safe_g) / (1.0 - safe_g + 2.0 * safe_g * u)
-  mu_hg = (1.0 + safe_g * safe_g - s * s) / (2.0 * safe_g)
+  # microhh raytracer_functions.h henyey(), same operations: a/b and c are
+  # the oracle's (algebraically (1 + g^2 - s^2)/(2g)).
+  a = (1.0 - safe_g * safe_g) ** 2
+  b = 2.0 * safe_g * (2.0 * u * safe_g + 1.0 - safe_g) ** 2
+  c = -safe_g / 2.0 - 1.0 / (2.0 * safe_g)
+  mu_hg = -1.0 * (a / b) - c
   mu_iso = 1.0 - 2.0 * u
   return jnp.where(jnp.abs(g) < _G_ISOTROPIC_EPS, mu_iso, mu_hg)
 
@@ -63,13 +67,12 @@ def rayleigh_mu(key: Array, dtype) -> Array:
   """Sample the scattering-angle cosine from the Rayleigh phase function
   ``p(mu) = (3/8)(1 + mu^2)`` (molecular/gas scattering).
 
-  Closed-form inverse CDF: the depressed cubic ``mu^3 + 3 mu + (4 - 8u) = 0``
-  has the single real root ``t - 1/t`` with ``t = cbrt(term + sqrt(term^2+1))``,
-  ``term = 4u - 2``.
+  Closed-form inverse CDF, microhh raytracer_functions.h rayleigh():
+  ``q = 4u - 2``, ``t = (-q + sqrt(1 + q^2))^(1/3)``, ``mu = t - 1/t``.
   """
   u = jax.random.uniform(key, dtype=dtype)
-  term = 4.0 * u - 2.0
-  t = jnp.cbrt(term + jnp.sqrt(term * term + 1.0))
+  q = 4.0 * u - 2.0
+  t = jnp.cbrt(-q + jnp.sqrt(1.0 + q * q))
   return t - 1.0 / t
 
 
@@ -160,7 +163,14 @@ def isotropic_direction(key: Array, dtype) -> Array:
 
 
 def free_path(key: Array, majorant: Array) -> Array:
-  """Sample a free-flight distance ``-ln(u)/majorant`` for Woodcock tracking."""
+  """Sample a free-flight distance for Woodcock tracking.
+
+  microhh: ``tau = sample_tau(u) = -log(1 - u + Float_epsilon)`` (the machine
+  epsilon of the working precision keeps the log finite) and the step
+  ``dn = max(Float_epsilon, tau / k_ext_null)`` (raytracer_kernels.cu:212),
+  so a step is never negative or zero.
+  """
   u = jax.random.uniform(key, dtype=majorant.dtype)
-  # ``1-u`` keeps the argument in (0,1] so the log is finite.
-  return -jnp.log(1.0 - u) / majorant
+  eps = jnp.finfo(majorant.dtype).eps
+  tau = -1.0 * jnp.log(-u + 1.0 + eps)
+  return jnp.maximum(eps, tau / majorant)

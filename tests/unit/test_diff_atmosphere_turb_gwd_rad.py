@@ -1960,42 +1960,22 @@ class TestSolarGeometryGrad:
 class TestOzoneGrad:
     """MLS climatological ozone + the ML (ridge-regression) ozone predictor."""
 
-    def test_mls_ozone_grad_wrt_p_full_in_table_range(self):
-        """``mls_ozone_vmr`` is a log-log ``jnp.interp``: differentiable in p
-        wherever p lies INSIDE the tabulated 0.0097-1054 hPa range."""
-        from legoesm.atmosphere.physics.radiation.ozone_mls import mls_ozone_vmr
+    def test_mls_ozone_grad_wrt_p_half_in_table_range(self):
+        """``mls_ozone_layer_vmr`` (gSAM layer means) is differentiable in the
+        interface pressures inside the tabulated 0.0097-1054 hPa range."""
+        from legoesm.atmosphere.physics.radiation.ozone_mls import (
+            mls_ozone_layer_vmr,
+        )
 
         # 50 hPa .. 900 hPa, comfortably inside the table.
-        p_full = jnp.linspace(5.0e3, 9.0e4, 30)
+        p_half = jnp.linspace(5.0e3, 9.0e4, 31)[None, :]
 
         def loss(p):
-            return jnp.sum(mls_ozone_vmr(p) ** 2)
+            return jnp.sum(mls_ozone_layer_vmr(p)[0] ** 2)
 
-        grad = jax.grad(loss)(p_full)
-        assert_gradient_ok(grad, "mls_ozone_vmr w.r.t. p_full (in range)",
+        grad = jax.grad(loss)(p_half)
+        assert_gradient_ok(grad, "mls_ozone_layer_vmr w.r.t. p_half (in range)",
                            min_nonzero_frac=0.9)
-
-    def test_mls_ozone_grad_is_exactly_zero_outside_table(self):
-        """MEASURED ZERO — ``jnp.interp`` clamps to the table endpoints.
-
-        Above 1054 hPa (and below 0.0097 hPa) the interpolant returns a
-        CONSTANT endpoint value, so d(O3)/dp is identically 0 there.  This is
-        the documented clamp behaviour, not a bug, but it means a column whose
-        surface pressure exceeds the table top has no ozone sensitivity at its
-        bottom level — worth having asserted rather than assumed.
-        """
-        from legoesm.atmosphere.physics.radiation.ozone_mls import mls_ozone_vmr
-
-        p_out = jnp.linspace(1.2e5, 1.5e5, 8)   # 1200-1500 hPa, above the table
-
-        def loss(p):
-            return jnp.sum(mls_ozone_vmr(p) ** 2)
-
-        grad = jax.grad(loss)(p_out)
-        assert_exactly_zero(
-            grad, "mls_ozone_vmr w.r.t. p_full (above table top)",
-            reason="jnp.interp clamps to the 1053.63 hPa endpoint -> constant",
-        )
 
     def _synthetic_ml_coefficients(self, n_lev=6, n_lat=4, n_lon=8, seed=0):
         """Build ``MLOzoneCoefficients`` directly (no NetCDF dependency)."""

@@ -5104,8 +5104,9 @@ class ModelDriver:
         # Ozone is evaluated on the model levels PLUS 16 midpoints of equal
         # pressure sub-layers above the model top (0 < p < p_top); their mean
         # is the overhead column-mean VMR for the RRTMGP overhead layer
-        # (RRTMGPConfig.overhead_layer; unused when that is off).  All ozone sources are pointwise in
-        # p, so the model-level values are unchanged.
+        # (RRTMGPConfig.overhead_layer; unused when that is off).  The inline sources other than
+        # "mls" are pointwise in p, so the model-level values are unchanged;
+        # "mls" (gSAM layer means) is handled from the interfaces below.
         _p_o3 = jnp.concatenate([
             p_full_col,
             p_half_col[:, :1] * ((jnp.arange(16) + 0.5) / 16.0),
@@ -5154,10 +5155,23 @@ class ModelDriver:
             from legoesm.atmosphere.physics.radiation.config import (
                 OzoneProfileConfig,
             )
-            _o3_inline = _compute_ozone_vmr(
-                _p_o3, lat_col,
-                OzoneProfileConfig(source=self.config.ozone_source),
-            )
+            if self.config.ozone_source == "mls":
+                # gSAM layer means are not pointwise in p: evaluate them on the
+                # model interfaces; the overhead layer takes the top model
+                # layer's value, as the backend's RRTMGP overhead layer does
+                # when no above-top ozone is supplied.
+                _lay = _compute_ozone_vmr(
+                    p_full_col, lat_col, OzoneProfileConfig(source="mls"),
+                    p_half=p_half_col,
+                )
+                _o3_inline = jnp.concatenate(
+                    [_lay, jnp.broadcast_to(_lay[:, :1], (ncol, _p_o3.shape[1] - nlev))],
+                    axis=1)
+            else:
+                _o3_inline = _compute_ozone_vmr(
+                    _p_o3, lat_col,
+                    OzoneProfileConfig(source=self.config.ozone_source),
+                )
             if _o3_inline is None:
                 # source="standard": the backend contract is o3_vmr=None →
                 # its built-in US Std Atm 1976 fit; materialize the same

@@ -651,14 +651,15 @@ class RRTMGP:
       # all inputs to match so that table lookups, lax.cond branches, and
       # lax.scan carries have consistent dtypes throughout the solver.
       _table_dtype = self.optics_lib.gas_optics_lw.kmajor.dtype
-      # McICA per-column table shift, seeded like CAM's mcica_subcol_gen:
-      # the fractional part of the lowest-layer pressure [Pa], taken before
-      # the cast to the table dtype.  State-derived, so it is independent of
-      # the domain decomposition and needs no PRNG.  Columns with IDENTICAL
-      # bottom pressure (idealized uniform states) share a shift, as they
-      # share a seed in CAM.
-      _mcica_shift = (None if mcica_cloud_fraction is None
-                      else jax.lax.stop_gradient(jnp.mod(p_full[:, -1], 1.0)))
+      # McICA per-column table shift, seeded like CAM's mcica_subcol_gen
+      # (clouds.subcolumns.cam_seed_shift), taken before the cast to the
+      # table dtype.
+      if mcica_cloud_fraction is None:
+          _mcica_shift = None
+      else:
+          from legoesm.atmosphere.physics.clouds.subcolumns import (
+              cam_seed_shift)
+          _mcica_shift = cam_seed_shift(p_full)
       T = T.astype(_table_dtype)
       p_full = p_full.astype(_table_dtype)
       p_half = p_half.astype(_table_dtype)
