@@ -174,7 +174,9 @@ def coverage(census_dirs: list[Path], package_dir: Path) -> dict:
         for site, c in json.loads((d / "census.json").read_text()).items():
             seen[site] = [a + b for a, b in zip(seen[site], c)]
     lines = defaultdict(set)
-    for site in seen:
+    for site, (calls, cells, _) in seen.items():
+        if calls < 1 or cells < 1:
+            continue  # a record with no executed call proves nothing
         fname, _, lineno = site.rsplit(":", 2)
         lines[fname].add(int(lineno))
     sites = production_call_sites(package_dir)

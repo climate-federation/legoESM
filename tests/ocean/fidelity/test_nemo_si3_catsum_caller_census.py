@@ -67,6 +67,8 @@ def test_coverage_fails_on_an_uncovered_production_call(tmp_path):
     assert probe.coverage([census], pkg)["uncovered"] == []  # line 3 lies inside the multi-line call
     (census / "census.json").write_text(json.dumps({"m.py:f:3": [1, 4, 0]}))
     assert probe.coverage([census], pkg)["uncovered"] == ["m.py:4"]
+    (census / "census.json").write_text(json.dumps({"m.py:f:3": [1, 4, 0], "m.py:f:4": [0, 0, 0]}))
+    assert probe.coverage([census], pkg)["uncovered"] == ["m.py:4"]  # a zero-count record is not coverage
     rc = subprocess.run([sys.executable, str(PROBE), "coverage", "--package", str(pkg), str(census)]).returncode
     assert rc == 1
 
