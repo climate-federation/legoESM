@@ -20,15 +20,30 @@ cftime, numpy float64):
   * N = (AOT / 0.0027)**(1 / 0.640), clipped to legoESM's CCNFromAODConfig
     limits 10..1e4 cm^-3 (the paper gives no limits; Fig. 1 spans 10..1e4).
 
-The fixture also stores, per date, the two bracketing band-0.55 um records on
-a 5x5 cell block around each column (NaN elsewhere when rebuilt), so the test
-can write a small file in the production layout and run the real loader.
+The fixture also stores, per date, the two bracketing records (ALL SW bands)
+on a 5x5 cell block around each column, so the test can write a small file in
+the production layout and run the real loader.
+
+Radiation (row 73 of the tier-1 asks): CAM's prescribed aerosol reaches
+radiation through tracer_data.F90 (cam_cesm2_1_rel_60, a03b84b7), which
+interpolates each record to the physics columns with interpolate_data.F90
+``lininterp`` (bilinear; longitude cyclic on [0, 2pi), latitude held at the
+boundary value beyond the outermost row; tracer_data.F90:1372-1375 and
+1539-1543).  With ``--cam-src <CAM clone>`` the generator COMPILES that
+unmodified interpolate_data.F90 (gfortran -O0, stubs in cam_lininterp/) and
+RUNS it on every SW band of the four records at the 11 columns plus three
+off-node columns, then interpolates linearly in time as above
+(``aod_band_cam``, per date x band x column).  The file's longitudes are
+handed to CAM mapped to [0, 360) and sorted, as a CAM input file is laid out.
+A polar probe column poleward of the outermost row is also run, and compared
+with legoESM's regridder (linear extrapolation) in ``meta['polar_probe']``.
 
 Usage (CPU node, ~2 min)::
 
     python scripts/validate/oracle/ccn_aod_lon/make_fixture.py \\
         --src /burg-archive/glab/users/pg2328/legoESM/data/cmip6_forcing/aeropt_macv2sp_sw_b14_tot_1850-2014_MACv1bg.nc \\
-        --out tests/atmosphere/microphysics/oracle_fixtures/ccn_aod_lon.npz
+        --out tests/atmosphere/microphysics/oracle_fixtures/ccn_aod_lon.npz \\
+        --cam-src /burg/glab/users/pg2328/oracles/CAM
 """
 from __future__ import annotations
 
@@ -62,6 +77,37 @@ COLUMNS = (
     ("corner_greenwich_wrap", -55.0, 0.0),
 )
 HALF = 2                  # 5x5 block
+# Off-node columns for the CAM lininterp check (inside the blocks above).
+OFFNODE = (
+    ("offnode_EChina", 31.27, 116.83),
+    ("offnode_dateline", 0.21, 179.64),
+    ("offnode_greenwich_wrap", -55.33, 359.81),
+)
+POLAR_PROBE = (89.8, 10.3)  # poleward of the file's outermost row (89.5 N)
+CAM_DIR = Path(__file__).resolve().parent / "cam_lininterp"
+
+
+def run_cam_lininterp(cam_src, lat, lon, fields, col_lat, col_lon, workdir):
+    """CAM's tracer_data horizontal interpolation, compiled and run.
+
+    ``fields`` (nfld, nlat, nlon) on the file axes ``lat``/``lon`` [deg];
+    returns (nfld, ncol).  Longitudes go to CAM in [0, 360) increasing."""
+    workdir = Path(workdir)
+    exe = workdir / "cam_lininterp"
+    subprocess.run(["gfortran", "-O0", "-J", str(workdir), str(CAM_DIR / "stubs.F90"),
+                    str(Path(cam_src) / "src/utils/interpolate_data.F90"),
+                    str(CAM_DIR / "driver.F90"), "-o", str(exe)], check=True)
+    order = np.argsort(lon % 360.0)
+    lon_c = np.radians((lon % 360.0)[order])
+    fld = np.ascontiguousarray(np.asarray(fields, np.float64)[:, :, order])
+    fin, fout = workdir / "in.bin", workdir / "out.bin"
+    with open(fin, "wb") as f:
+        np.array([lon_c.size, lat.size, fld.shape[0], len(col_lat)], np.int32).tofile(f)
+        for arr in (lon_c, np.radians(lat), np.radians(np.asarray(col_lon) % 360.0),
+                    np.radians(np.asarray(col_lat)), fld):
+            np.asarray(arr, np.float64).tofile(f)
+    subprocess.run([str(exe), str(fin), str(fout)], check=True)
+    return np.fromfile(fout, np.float64).reshape(fld.shape[0], len(col_lat))
 
 
 def andreae_ccn_m3(aot):
@@ -94,6 +140,8 @@ def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("--src", required=True)
     ap.add_argument("--out", required=True)
+    ap.add_argument("--cam-src", required=True,
+                    help="CAM clone (cam_cesm2_1_rel_60) holding src/utils/interpolate_data.F90")
     a = ap.parse_args(argv)
     md5 = hashlib.md5()
     with open(a.src, "rb") as f:
@@ -120,8 +168,9 @@ def main(argv=None):
     # >12 records keeps the loader on its multi-year (non-cyclic) path, as
     # with the production 1980-record file.
     sub = np.arange(lo_rec, max(hi_rec, lo_rec + 12) + 1)
-    fields = {r: np.asarray(ds["aod"][r, ib, :, :], dtype=np.float32) for r in recs}
-    assert all(np.isfinite(f).all() for f in fields.values())
+    fields_all = {r: np.asarray(ds["aod"][r, :, :, :], dtype=np.float32) for r in recs}
+    assert all(np.isfinite(f).all() for f in fields_all.values())
+    fields = {r: fields_all[r][ib] for r in recs}
     ds.close()
 
     # 5x5 block mask around every column's cell(s).
@@ -139,7 +188,35 @@ def main(argv=None):
         jj = np.arange(j.min() - HALF, j.max() + HALF + 1) % nlon
         mask[np.ix_(ii, jj)] = True
     blk_i, blk_j = np.nonzero(mask)
-    rec_vals = np.stack([fields[r][blk_i, blk_j] for r in recs])
+    rec_vals = np.stack([fields_all[r][:, blk_i, blk_j] for r in recs])  # (rec, band, blk)
+
+    # CAM tracer_data lininterp on every band of every record, then time.
+    import tempfile
+    nb = wl1.size
+    rad_cols = list(COLUMNS) + list(OFFNODE)
+    c_lat = [c[1] for c in rad_cols] + [POLAR_PROBE[0]]
+    c_lon = [c[2] for c in rad_cols] + [POLAR_PROBE[1]]
+    stack = np.concatenate([fields_all[r] for r in recs]).astype(np.float64)
+    with tempfile.TemporaryDirectory() as wd:
+        cam = run_cam_lininterp(a.cam_src, lat, lon, stack, c_lat, c_lon, wd)
+    cam = cam.reshape(len(recs), nb, len(c_lat))
+    aod_band_cam = np.stack([(1.0 - w) * cam[2 * q] + w * cam[2 * q + 1]
+                             for q, w in enumerate(weights)])      # (date, band, col)
+    polar_cam = aod_band_cam[:, :, -1]
+    aod_band_cam = aod_band_cam[:, :, :-1]
+    # legoESM's regridder at the polar probe (linear extrapolation), same
+    # records + time weights, for the reported pole gap only.
+    from types import SimpleNamespace
+    from legoesm.forcing.amip import regrid_monthly_latlon_to_grid
+    order = np.argsort(lon % 360.0)
+    probe = SimpleNamespace(grid_lat=np.radians([POLAR_PROBE[0]]),
+                            grid_lon=np.radians([POLAR_PROBE[1]]))
+    lego = regrid_monthly_latlon_to_grid(
+        stack[:, :, order], lat, (lon % 360.0)[order], probe)[:, 0].reshape(len(recs), nb)
+    polar_lego = np.stack([(1.0 - w) * lego[2 * q] + w * lego[2 * q + 1]
+                           for q, w in enumerate(weights)])
+    cam_sha = subprocess.run(["git", "-C", str(a.cam_src), "rev-parse", "HEAD"],
+                             capture_output=True, text=True).stdout.strip()
 
     sha = subprocess.run(["git", "-C", str(Path(__file__).resolve().parent), "rev-parse",
                           "HEAD"], capture_output=True, text=True).stdout.strip()
@@ -151,9 +228,14 @@ def main(argv=None):
         band_um=[float(lo_[ib]), float(hi_[ib])], records=[int(r) for r in recs],
         dates=["%04d-%02d-%02d" % d for d in DATES], time_weights=[float(w) for w in weights],
         limits_cm3=[N_MIN_CM3, N_MAX_CM3], start_year=START_YEAR,
-        legoesm_sha=sha,
+        legoesm_sha=sha, cam_sha=cam_sha,
+        cam_oracle="CAM cam_cesm2_1_rel_60 src/chemistry/utils/tracer_data.F90:1372-1375, "
+                   "1539-1543 -> src/utils/interpolate_data.F90 lininterp_init/lininterp2d1d, "
+                   "compiled unmodified (gfortran -O0) and run",
+        polar_probe=dict(lat=POLAR_PROBE[0], lon=POLAR_PROBE[1],
+                         cam=polar_cam.tolist(), legoesm=polar_lego.tolist()),
         command="python scripts/validate/oracle/ccn_aod_lon/make_fixture.py "
-                f"--src {a.src} --out {a.out}")
+                f"--src {a.src} --out {a.out} --cam-src {a.cam_src}")
     np.savez_compressed(
         a.out, meta=json.dumps(meta),
         lat=lat, lon=lon, wl1=wl1, wl2=wl2, time_units=tunits, calendar=tcal,
@@ -162,12 +244,19 @@ def main(argv=None):
         col_names=np.array([c[0] for c in COLUMNS]),
         col_lat=np.array([c[1] for c in COLUMNS]), col_lon=np.array([c[2] for c in COLUMNS]),
         sim_day=np.array([sim_day(*d) for d in DATES]),
-        aod_oracle=aod, n_oracle_m3=andreae_ccn_m3(aod))
+        aod_oracle=aod, n_oracle_m3=andreae_ccn_m3(aod),
+        rad_col_names=np.array([c[0] for c in rad_cols]),
+        rad_col_lat=np.array([c[1] for c in rad_cols]),
+        rad_col_lon=np.array([c[2] for c in rad_cols]),
+        aod_band_cam=aod_band_cam)
     print(json.dumps(meta, indent=1))
     for k, c in enumerate(COLUMNS):
         print(f"{c[0]:34s} AOD " + " ".join(f"{aod[q, k]:.5f}" for q in range(len(DATES)))
               + "  N[cm-3] " + " ".join(f"{andreae_ccn_m3(aod[q, k]) / 1e6:9.2f}"
                                         for q in range(len(DATES))))
+    vis_gap = np.abs(aod_band_cam[:, ib, :len(COLUMNS)] - aod).max()
+    print("max |CAM lininterp - centre/corner oracle| in the 0.55 um band:", vis_gap)
+    print("polar probe band-mean CAM vs legoESM:", polar_cam.mean(axis=1), polar_lego.mean(axis=1))
     print("fixture bytes", Path(a.out).stat().st_size)
 
 

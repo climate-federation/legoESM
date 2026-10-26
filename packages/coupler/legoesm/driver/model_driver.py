@@ -5173,8 +5173,15 @@ class ModelDriver:
             # column-only volcanic file (profile None) stays in the column.
             volc_sw = get_aerosol_sw_volcanic_at_time(_acfg, day, lat_grid=lat_col)
             _trop_cfg = _acfg._replace(volcanic_enabled=False)
+            # Both reads below are at each column's own longitude, as CAM's
+            # prescribed aerosol reaches radiation (tracer_data.F90 bilinear
+            # lon/lat lininterp); radiation and the droplet proxy see the
+            # same local aerosol.
+            lon_col = jnp.asarray(
+                self._owned_lon() if lon is None else lon).reshape(ncol)
             aerosol_col = get_aerosol_at_time(
                 _acfg if volc_sw is None else _trop_cfg, day, lat_grid=lat_col,
+                lon_grid=lon_col,
             )
             aerosol_od = distribute_column_aod_to_layers(
                 jnp.asarray(aerosol_col), p_half_col,
@@ -5189,8 +5196,6 @@ class ModelDriver:
             # column's own longitude (the Andreae 2009 fit is local total
             # AOT; a zonal mean gave polluted E China and the clean N Pacific
             # one droplet number).
-            lon_col = jnp.asarray(
-                self._owned_lon() if lon is None else lon).reshape(ncol)
             self._aerosol_ccn_aod = jnp.asarray(get_aerosol_at_time(
                 _trop_cfg._replace(path=_acfg.ccn_path or _acfg.path),
                 day, lat_grid=lat_col, band="vis", lon_grid=lon_col,
