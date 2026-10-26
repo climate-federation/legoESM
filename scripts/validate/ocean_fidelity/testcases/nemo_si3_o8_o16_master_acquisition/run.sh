@@ -3,7 +3,7 @@
 # Default is read-only preflight. Only explicit --run invokes makenemo/NEMO.
 set -Eeuo pipefail
 
-export PATH=/home/dbalwada/legoESM/.venv/bin:/home/dbalwada/miniconda3/envs/nemo-build/bin:${PATH}
+export PATH=${O8O16_PATH_PREFIX:+$O8O16_PATH_PREFIX:}/home/dbalwada/legoESM/.venv/bin:/home/dbalwada/miniconda3/envs/nemo-build/bin:${PATH}
 export OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1
 export JAX_PLATFORMS=cpu JAX_ENABLE_X64=1
 
@@ -282,7 +282,7 @@ stub_driver_fixture() {
   tar -czf "$bundles/sas.tar.gz" -C "$bundles/sas" .
   local orca_sha sas_sha; orca_sha=$(sha256sum "$bundles/orca.tar.gz"); orca_sha=${orca_sha%% *}
   sas_sha=$(sha256sum "$bundles/sas.tar.gz"); sas_sha=${sas_sha%% *}
-  local envs=(env PATH="$scratch/stub_bin:$PATH" O8O16_DRIVER_FIXTURE_ACTIVE=1 \
+  local envs=(env O8O16_PATH_PREFIX="$scratch/stub_bin" O8O16_DRIVER_FIXTURE_ACTIVE=1 \
     NEMO_EXE_OVERRIDE="$STUB_NEMO" NEMO_ROOT="$root" \
     NEMO_SOURCE_ROOT="$NEMO_SOURCE_ROOT" BASE_BLD="$BASE_BLD" \
     REF_CFG=STUB_O8O16_REF REC_CFG=STUB_O8O16_REC REFUSED_DIR="$refused" MIN_FREE_RAM_GB=1 \

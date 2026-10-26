@@ -140,7 +140,7 @@ def test_script_is_read_only_by_default_and_retains_refusals() -> None:
     assert "--expected-ppsrc-dir" in text and "--plant same-program" in text
     assert "compile_real_bounds_fixture" in text and "real_bounds_driver.F90" in text
     assert "stub_driver_fixture" in text and 'NEMO_EXE_OVERRIDE="$STUB_NEMO"' in text
-    assert 'PATH="$scratch/stub_bin:$PATH"' in text and 'STUB_MPIRUN' in text
+    assert 'O8O16_PATH_PREFIX="$scratch/stub_bin"' in text and 'STUB_MPIRUN' in text
     assert "O8O16_STUB_MODE" not in text and "O8O16_SKIP_DRIVER_TEST" not in text
     assert 'cp "$NEMO_SOURCE_ROOT/src/ICE/$unit.F90"' in text
     assert 'timeout "$remaining" mpirun -np 1' in text
