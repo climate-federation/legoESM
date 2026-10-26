@@ -25,6 +25,7 @@ assert READSET_SPEC and READSET_SPEC.loader
 readset = importlib.util.module_from_spec(READSET_SPEC)
 sys.modules[READSET_SPEC.name] = readset
 READSET_SPEC.loader.exec_module(readset)
+from scripts.validate.ocean_fidelity.orca2_l4 import nemo_acquisition_extents as extents
 
 
 def test_schema_has_every_named_boundary_and_registered_projection() -> None:
@@ -86,8 +87,14 @@ def test_every_reviewed_boundary_input_is_recorded() -> None:
     assert extents(16)["fr_i"] == "F2"
     assert extents(19)["utau"] == extents(19)["vtau"] == "F2"
     assert extents(20)["utau"] == extents(20)["vtau"] == "F2"
-    assert extents(20)["rCdU_ice"] == "F2"
+    assert extents(20)["rCdU_ice"] == "H1"
     assert "vm_ibr" not in {field.name for field in gate.TOTALS}
+    assert {field.name for field in gate.AGG2_DIAGNOSTICS}.isdisjoint(
+        {field.name for kind in range(10, 15) for field in gate.KINDS[kind].fields}
+    )
+    assert {field.name for field in gate.AGG2_DIAGNOSTICS} <= {
+        field.name for field in gate.KINDS[15].fields
+    }
 
 
 @pytest.mark.parametrize("plant", ["header", "truncation", "swapped-field", "one-bit", "category-dh"])
@@ -106,14 +113,14 @@ def test_each_rung_reader_accepts_only_its_registered_projection(rung: str) -> N
 
 def test_size_and_retention_are_explicit() -> None:
     report = gate.size_report()
-    assert report["master_bytes_worst_case"] == 140_714_793_940
-    assert report["master_gib_worst_case"] == pytest.approx(131.05086417868733)
+    assert report["master_bytes_worst_case"] == 141_156_786_740
+    assert report["master_gib_worst_case"] == pytest.approx(131.46250205114484)
     assert "without copying" in report["retention"]
 
 
 def test_writer_field_counts_and_real_extent_branches_match_schema() -> None:
     text = (ACQ / "o8_o16_master_writer.F90").read_text()
-    for count in (2, 4, 10, 12, 13, 16, 23, 67, 107, 113):
+    for count in (2, 4, 10, 12, 13, 16, 23, 67, 70, 98, 114):
         assert f",{count},u)" in text
     for spec in gate.KINDS.values():
         names = [field.name for field in spec.fields]
@@ -121,6 +128,7 @@ def test_writer_field_counts_and_real_extent_branches_match_schema() -> None:
     assert "SIZE(a,1)==ni" in text
     assert "SIZE(a,1)==jpi" in text
     assert "ERROR STOP 'O8-O16 I2 extent mismatch'" in text
+    assert "ERROR STOP 'O8-O16 H1 extent mismatch'" in text
     assert "ACCESS='stream'" in text
 
 
@@ -139,9 +147,27 @@ def test_source_derived_readsets_cover_every_rung_and_plants_fire() -> None:
     assert "rn_hinew" in report["rungs"]["O8"]["scalar_reads"]
     assert all(row["scalar_coverage"] for row in report["rungs"].values())
     assert "rCdU_ice" in {field.name for field in gate.KINDS[20].fields}
-    for plant in ("drop-sst_m", "drop-qlead", "drop-rn_hinew"):
+    for plant in ("drop-sst_m", "drop-qlead", "drop-rn_hinew", "drop-snwice_mass"):
         with pytest.raises(ValueError, match="STATUS PLANT-FIRED"):
             readset.derive_and_gate(readset.DEFAULT_PPSRC, plant)
+    assert report["rungs"]["O16"]["entry_kinds"] == [15, 19]
+    assert "snwice_mass" in report["rungs"]["O16"]["coverage"]
+
+
+def test_shared_source_allocation_gate_and_fixture_plants(tmp_path: Path) -> None:
+    deck = extents.DeckDimensions(184, 152, 31, 2)
+    writer = ACQ / "o8_o16_master_writer.F90"
+    report = extents.validate_writer(readset.DEFAULT_PPSRC, writer, deck)
+    assert report["rCdU_ice_shape"] == [182, 150]
+    assert report["arrays_checked"] > 250
+    include = extents.fixture_include(readset.DEFAULT_PPSRC, writer, deck)
+    assert "nn_hls=2" in include
+    assert "ALLOCATE(rCdU_ice(Nis0-(1):Nie0+(1),Njs0-(1):Nje0+(1)))" in include
+    for plant in ("missing-allocation", "writer-mode", "dummy-actual"):
+        with pytest.raises(extents.ExtentError, match="STATUS PLANT-FIRED|missing allocation"):
+            extents.validate_writer(readset.DEFAULT_PPSRC, writer, deck, plant)
+    with pytest.raises(extents.ExtentError, match="STATUS PLANT-FIRED"):
+        extents.fixture_include(readset.DEFAULT_PPSRC, writer, deck, "fixture-allocation")
 
 
 def test_category_entry_observer_follows_every_diagnostic_zero() -> None:
@@ -199,6 +225,9 @@ def test_reused_o7_log_gate_accepts_the_preregistered_100_step_window(tmp_path: 
     assert report["o7_production"]["ln_icethd"] is True
     with pytest.raises(ValueError, match="nn_itend is not 2"):
         gate.verify_o7_log(tmp_path / "ocean.output")
+    assert gate.verify_resolved_drag_namelist(tmp_path / "output.namelist.dyn")["ln_drgice_imp"] is True
+    with pytest.raises(ValueError, match="STATUS PLANT-FIRED"):
+        gate.verify_resolved_drag_namelist(tmp_path / "output.namelist.dyn", "drag-disabled")
 
 
 def test_preflight_compiles_and_runs_real_patched_source_without_nemo(tmp_path: Path) -> None:
@@ -211,7 +240,7 @@ def test_preflight_compiles_and_runs_real_patched_source_without_nemo(tmp_path: 
         [str(ACQ / "run.sh"), "--preflight-only", str(report)], cwd=REPO, env=env,
         text=True, capture_output=True, check=True, timeout=1200,
     )
-    assert json.loads(report.read_text()) == {"status": "PREFLIGHT_OK", "nemo_run": False, "plants": 45}
+    assert json.loads(report.read_text()) == {"status": "PREFLIGHT_OK", "nemo_run": False, "plants": 51}
     assert "PASS_SOURCE_DERIVED_READ_SETS" in proc.stdout
     assert "PASS_REAL_PPSRC_PLACEMENT" in proc.stdout
     assert "PASS_REAL_PATCHED_BOUNDS_FIXTURE" in proc.stdout

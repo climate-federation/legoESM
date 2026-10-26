@@ -32,6 +32,8 @@ export PYTHONPATH="$REPO:$REPO/packages/core:$REPO/packages/ocean:$REPO/packages
 readonly GATE=$here/../nemo_si3_o8_o16_master_gate.py
 readonly PASSIVITY=$here/../nemo_si3_o8_o16_master_passivity.py
 readonly READSET=$here/../nemo_si3_o8_o16_readset.py
+readonly EXTENTS=$here/../../orca2_l4/nemo_acquisition_extents.py
+readonly DECK_LOG=$here/../nemo_si3_o7_orca2_sas_acquisition/ocean.output.excerpt
 readonly WRITER=$here/o8_o16_master_writer.F90
 readonly STUB_NEMO=$here/stub_nemo.sh
 readonly STUB_MPIRUN=$here/stub_mpirun.sh
@@ -41,6 +43,7 @@ readonly REF_ROOT=$NEMO_ROOT/cfgs/$REF_CFG
 readonly REC_ROOT=$NEMO_ROOT/cfgs/$REC_CFG
 readonly UNITS=(icestp icethd icethd_do icethd_da icethd_sal icethd_pnd icethd_zdf_bl99 icealb)
 readonly MASTER_BYTES=$($PY "$GATE" --size | $PY -c 'import json,sys; print(json.load(sys.stdin)["master_bytes_worst_case"])')
+readonly MASTER_GIB=$($PY "$GATE" --size | $PY -c 'import json,sys; print("%.2f" % json.load(sys.stdin)["master_gib_worst_case"])')
 export O8O16_GATE=$GATE O8O16_PY=$PY
 
 mode=${1:---preflight-only}; arg=${2:-}
@@ -239,13 +242,15 @@ compile_real_bounds_fixture() {
   local flags_text; flags_text=$(production_flags)
   read -r -a flags <<< "$flags_text"
   mkdir -p "$scratch/bounds_mod" "$scratch/bounds_obj" "$run/o8_o16_master_records"
+  "$PY" "$EXTENTS" --ppsrc "$BASE_BLD/ppsrc/nemo" --writer "$WRITER" --deck-log "$DECK_LOG" \
+    --fixture-include "$scratch/generated_bounds_allocations.inc" > "$scratch/extents.json"
   mpif90 -c -cpp "${flags[@]}" -fcheck=bounds -I"$BASE_BLD/inc" -J"$scratch/bounds_mod" \
     "$WRITER" -o "$scratch/bounds_obj/o8_o16_master_writer.o"
   for unit in "${UNITS[@]}"; do
     mpif90 -c "${flags[@]}" -fcheck=bounds -I"$scratch/bounds_mod" -I"$BASE_BLD/inc" \
       -J"$scratch/bounds_mod" "$scratch/patched_ppsrc/$unit.f90" -o "$scratch/bounds_obj/$unit.o"
   done
-  mpif90 -c -cpp "${flags[@]}" -fcheck=bounds -I"$scratch/bounds_mod" -I"$BASE_BLD/inc" \
+  mpif90 -c -cpp "${flags[@]}" -fcheck=bounds -I"$scratch" -I"$scratch/bounds_mod" -I"$BASE_BLD/inc" \
     -J"$scratch/bounds_mod" "$here/real_bounds_driver.F90" -o "$scratch/bounds_obj/real_bounds_driver.o"
   local base_objects=()
   for obj in "$BASE_BLD"/obj/*.o; do
@@ -358,6 +363,8 @@ stub_driver_fixture() {
   awk '{print} /O8O16_DRIVER_TRUNCATION_POINT/ {exit}' "$0" > "$scratch/run_truncated.sh"
   expect_refusal bash -n "$scratch/run_truncated.sh"
   "${envs[@]}" EVIDENCE="$evidence" "$0" --run
+  expect_refusal "$PY" "$GATE" --verify-drag-namelist \
+    "$evidence/record_100step/output.namelist.dyn" --plant drag-disabled
   "${envs[@]}" EVIDENCE="$evidence" "$0" --admit-existing
   expect_refusal "${envs[@]}" EVIDENCE="$evidence" "$0" --run
   "${envs[@]}" "$0" --move-aside-builds
@@ -390,6 +397,7 @@ run_preflight() {
   expect_refusal "$PY" "$READSET" --ppsrc "$BASE_BLD/ppsrc/nemo" --plant drop-sst_m
   expect_refusal "$PY" "$READSET" --ppsrc "$BASE_BLD/ppsrc/nemo" --plant drop-qlead
   expect_refusal "$PY" "$READSET" --ppsrc "$BASE_BLD/ppsrc/nemo" --plant drop-rn_hinew
+  expect_refusal "$PY" "$READSET" --ppsrc "$BASE_BLD/ppsrc/nemo" --plant drop-snwice_mass
   printf 'PASS_SOURCE_DERIVED_READ_SETS\n'
   for rung in O8 O9 O10 O11 O12 O13 O14 O15 O16; do
     "$PY" "$GATE" --projection-self-test "$rung" >/dev/null
@@ -408,14 +416,20 @@ run_preflight() {
   expect_refusal placement_gate "$scratch/patched_ppsrc" misplace
   printf 'PREFLIGHT 5/10 production-flag writer/patched-source compile and FP census plant\n'
   "$PY" "$PASSIVITY" > "$scratch/passivity.json"
+  "$PY" "$EXTENTS" --ppsrc "$BASE_BLD/ppsrc/nemo" --writer "$WRITER" --deck-log "$DECK_LOG" > "$scratch/extents.json"
+  for plant in missing-allocation writer-mode dummy-actual; do
+    expect_refusal "$PY" "$EXTENTS" --ppsrc "$BASE_BLD/ppsrc/nemo" --writer "$WRITER" --deck-log "$DECK_LOG" --plant "$plant"
+  done
+  expect_refusal "$PY" "$EXTENTS" --ppsrc "$BASE_BLD/ppsrc/nemo" --writer "$WRITER" --deck-log "$DECK_LOG" \
+    --fixture-include "$scratch/planted_allocations.inc" --plant fixture-allocation
   printf 'PREFLIGHT 6/10 real writer and all patched units under production flags plus -fcheck=bounds\n'
   compile_real_bounds_fixture "$scratch"
   printf 'PREFLIGHT 7/10 observer-free same-program comparison and plant\n'
   same_program_fixture "$scratch"
-  printf 'PREFLIGHT 8/10 source-derived SAS time level and A2D(0) extent evidence\n'
+  printf 'PREFLIGHT 8/10 source-derived SAS time level and allocation extent evidence\n'
   grep -q '"sas_time_level": 2' "$scratch/self.json"
-  grep -q 'ALLOCATE( ht_i_new (Nis0-(0):Nie0+(0),Njs0-(0):Nje0+(0))' "$BASE_BLD/ppsrc/nemo/ice.f90"
-  grep -q "SIZE(a,1)==ni" "$WRITER"
+  grep -q '"rCdU_ice_shape": \[' "$scratch/extents.json"
+  grep -q "O8-O16 H1 extent mismatch" "$WRITER"
   printf 'PREFLIGHT 9/10 memory/disk and global wall-clock gate logic\n'
   ram_gate 1; disk_gate "$EVIDENCE" 1024
   grep -q 'remaining_timeout' "$0"
@@ -427,8 +441,8 @@ run_preflight() {
   else
     printf 'PASS_EXISTING_CFG_DIGESTS_UNCHANGED: delegated to outer preflight\n'
   fi
-  if [[ -n "${PREFLIGHT_JSON:-}" ]]; then printf '{"status":"PREFLIGHT_OK","nemo_run":false,"plants":45}\n' > "$PREFLIGHT_JSON"; fi
-  printf 'PREFLIGHT_OK: no real NEMO integration was run; worst-case master %s bytes (131.06 GiB)\n' "$MASTER_BYTES"
+  if [[ -n "${PREFLIGHT_JSON:-}" ]]; then printf '{"status":"PREFLIGHT_OK","nemo_run":false,"plants":51}\n' > "$PREFLIGHT_JSON"; fi
+  printf 'PREFLIGHT_OK: no real NEMO integration was run; worst-case master %s bytes (%s GiB)\n' "$MASTER_BYTES" "$MASTER_GIB"
   rm -rf -- "$scratch"; ACTIVE_SCRATCH=""
 }
 
@@ -526,7 +540,7 @@ import hashlib,json,sys
 from pathlib import Path
 ev,repo,here,commit=Path(sys.argv[1]),Path(sys.argv[2]),Path(sys.argv[3]),sys.argv[4]
 sha=lambda p: hashlib.sha256(p.read_bytes()).hexdigest()
-sources=[here/'run.sh',here/'stub_nemo.sh',here/'stub_mpirun.sh',here.parent/'nemo_si3_o8_o16_master_gate.py',here.parent/'nemo_si3_o8_o16_master_passivity.py',here.parent/'nemo_si3_o8_o16_readset.py']+sorted(here.glob('*.F90'))+sorted(here.glob('*.patch'))
+sources=[here/'run.sh',here/'stub_nemo.sh',here/'stub_mpirun.sh',here.parent/'nemo_si3_o8_o16_master_gate.py',here.parent/'nemo_si3_o8_o16_master_passivity.py',here.parent/'nemo_si3_o8_o16_readset.py',here.parents[1]/'orca2_l4/nemo_acquisition_extents.py']+sorted(here.glob('*.F90'))+sorted(here.glob('*.patch'))
 deck=ev/'manifest/production_deck'
 nemo=Path('/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/ORCA2_SAS_ICE_O7_REF/BLD/ppsrc/nemo')
 manifest={
@@ -560,6 +574,7 @@ stage_run() {
   local remaining; remaining=$(remaining_timeout)
   (cd "$dir" && printf 'RUN_STARTED\n' > run.user.time.log && timeout "$remaining" mpirun -np 1 --oversubscribe ./nemo > run.user.stdout.log 2>&1 && printf 'MPIRUN_RC=0\nRUN DONE\n' >> run.user.time.log)
   ! grep -Eiq 'E[[:space:]]+R[[:space:]]+R[[:space:]]+O[[:space:]]+R|ABORT' "$dir/ocean.output" "$dir/run.user.stdout.log" || refuse "fatal token in $dir"
+  "$PY" "$GATE" --verify-drag-namelist "$dir/output.namelist.dyn" >/dev/null
   touch "$dir/RUN_COMPLETE"
 }
 

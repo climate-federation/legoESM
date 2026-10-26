@@ -14,38 +14,20 @@ PROGRAM real_bounds_driver
    USE o8_o16_master_writer
    IMPLICIT NONE
    INTEGER :: ji, jj, ierr, kind
-   LOGICAL :: converged(16)
-   REAL(wp) :: pu(6,6), pv(6,6)
-   REAL(wp) :: zkappa_i(16,0:10), zradab_i(16,0:10), zradtr_i(16,0:10)
-   REAL(wp) :: zkappa_s(16,0:5), zradab_s(16,0:5), zradtr_s(16,0:5)
+   LOGICAL, ALLOCATABLE :: converged(:)
+   REAL(wp), ALLOCATABLE :: pu(:,:), pv(:,:)
+   REAL(wp), ALLOCATABLE :: zkappa_i(:,:), zradab_i(:,:), zradtr_i(:,:)
+   REAL(wp), ALLOCATABLE :: zkappa_s(:,:), zradab_s(:,:), zradtr_s(:,:)
 
-   jpi=6 ; jpj=6 ; jpk=2 ; jpkm1=1 ; nn_hls=1
-   Nis0=2 ; Nie0=5 ; Njs0=2 ; Nje0=5
-   ntsi=Nis0 ; ntei=Nie0 ; ntsj=Njs0 ; ntej=Nje0
-   jpij=16 ; jpni=1 ; jpnj=1 ; jpl=5 ; nlay_i=10 ; nlay_s=5 ; npti=jpij
+   INCLUDE 'generated_bounds_allocations.inc'
    rDt_ice=10800._wp ; r1_Dt_ice=1._wp/rDt_ice
    r1_nlay_i=1._wp/REAL(nlay_i,wp) ; r1_nlay_s=1._wp/REAL(nlay_s,wp)
    rn_kappa_i=1._wp ; rn_kappa_s=10._wp ; rn_snwblow=0.66_wp
    rn_sinew=0.75_wp ; nn_icesal=4 ; rn_simin=0.1_wp ; rn_himin=0.1_wp
    ln_zdf_chkcvg=.FALSE. ; ln_sal_chk=.FALSE. ; rcnd_s=0.31_wp
 
-   ALLOCATE(tmask(jpi,jpj,jpk),umask(jpi,jpj,jpk),vmask(jpi,jpj,jpk),smask0(Nis0:Nie0,Njs0:Nje0))
    ierr=ice_alloc() ; ierr=ierr+ice1D_alloc()
    IF(ierr/=0) ERROR STOP 'real bounds allocation'
-   ALLOCATE(qsr(Nis0:Nie0,Njs0:Nje0),qns(Nis0:Nie0,Njs0:Nje0),emp(jpi,jpj), &
-      & sfx(Nis0:Nie0,Njs0:Nje0),fr_i(jpi,jpj),fwfice(Nis0:Nie0,Njs0:Nje0), &
-      & qns_tot(Nis0:Nie0,Njs0:Nje0),qsr_tot(Nis0:Nie0,Njs0:Nje0),frq_m(jpi,jpj),sss_m(jpi,jpj),sst_m(jpi,jpj), &
-      & cloud_fra(Nis0:Nie0,Njs0:Nje0),sprecip(Nis0:Nie0,Njs0:Nje0),tprecip(Nis0:Nie0,Njs0:Nje0), &
-      & utau(jpi,jpj),vtau(jpi,jpj),taum(Nis0:Nie0,Njs0:Nje0))
-   ALLOCATE(qsr_oce(Nis0:Nie0,Njs0:Nje0),qns_oce(Nis0:Nie0,Njs0:Nje0), &
-      & qemp_oce(Nis0:Nie0,Njs0:Nje0),qemp_ice(Nis0:Nie0,Njs0:Nje0), &
-      & emp_oce(Nis0:Nie0,Njs0:Nje0),emp_ice(Nis0:Nie0,Njs0:Nje0), &
-      & qsr_ice(Nis0:Nie0,Njs0:Nje0,jpl),qns_ice(Nis0:Nie0,Njs0:Nje0,jpl), &
-      & qevap_ice(Nis0:Nie0,Njs0:Nje0,jpl),qcn_ice(Nis0:Nie0,Njs0:Nje0,jpl), &
-      & qml_ice(Nis0:Nie0,Njs0:Nje0,jpl),qtr_ice_top(Nis0:Nie0,Njs0:Nje0,jpl), &
-      & tn_ice(Nis0:Nie0,Njs0:Nje0,jpl),alb_ice(Nis0:Nie0,Njs0:Nje0,jpl), &
-      & snwice_mass(jpi,jpj),snwice_mass_b(jpi,jpj),snwice_fmass(jpi,jpj), &
-      & utau_ice(jpi,jpj),vtau_ice(jpi,jpj),rCdU_ice(jpi,jpj))
 
    tmask=701._wp ; umask=702._wp ; vmask=703._wp ; smask0=704._wp
    qsr=705._wp ; qns=706._wp ; emp=707._wp ; sfx=708._wp ; fr_i=709._wp ; fwfice=710._wp

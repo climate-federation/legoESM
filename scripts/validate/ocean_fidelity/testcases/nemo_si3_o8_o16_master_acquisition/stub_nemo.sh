@@ -31,6 +31,11 @@ cat > ocean.output <<'EOF'
  jpni = 1
  jpnj = 1
 EOF
+cat > output.namelist.dyn <<'EOF'
+&namdrg
+   ln_drgice_imp = .true.
+/
+EOF
 printf 'stub restart, observer independent\n' > ORCA2_00000100_restart.nc
 if [[ -d o8_o16_master_records ]]; then
   : "${O8O16_GATE:?O8O16_GATE is required by stub NEMO}"

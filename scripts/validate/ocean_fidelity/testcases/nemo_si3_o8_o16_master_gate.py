@@ -102,6 +102,8 @@ TOTALS = _fields(
     "om_i at_ip at_ip_eff hm_ip vt_ip hm_il vt_il tm_si",
     "I2",
 )
+AGG2_DIAGNOSTICS = _fields("tm_i tm_s sm_i hm_i hm_s om_i hm_ip hm_il tm_si", "I2")
+PRE_AGG_TOTALS = tuple(field for field in TOTALS if field not in AGG2_DIAGNOSTICS)
 POND = _fields("dh_i_sum_2d dh_s_sum_2d", "I3")
 GLOBAL_AUX = (
     _fields("h_i_b a_i_b", "I3")
@@ -138,7 +140,10 @@ KINDS: dict[int, Kind] = {
         + _fields("hi_max", "C0"),
     ),
     2: Kind("frazil_exit", _fields("ht_i_new fraz_frac", "I2")),
-    3: Kind("category_entry", _fields("nptidx", "G1", "i4") + CAT_BASE + DH_DIAGS + DH_FLUXES, True),
+    3: Kind(
+        "category_entry", _fields("nptidx", "G1", "i4") + CAT_BASE + DH_DIAGS + DH_FLUXES
+        + _fields("qcn_ice_top qcn_ice_bot qtr_ice_bot", "G1"), True,
+    ),
     4: Kind(
         "zdf_exit",
         _fields("nptidx", "G1", "i4")
@@ -157,17 +162,17 @@ KINDS: dict[int, Kind] = {
     7: Kind("sal_exit", _fields("nptidx", "G1", "i4") + CAT_BASE + DH_DIAGS + DH_FLUXES, True),
     8: Kind("temp2_exit_da_entry", _fields("nptidx", "G1", "i4") + CAT_BASE + DH_DIAGS + DH_FLUXES, True),
     9: Kind("da_exit", _fields("nptidx", "G1", "i4") + CAT_BASE + DH_DIAGS + DH_FLUXES, True),
-    10: Kind("pond_entry_category_done", STATE + TOTALS + POND + FLUX + GLOBAL_AUX + POND_FORCING),
-    11: Kind("pond_exit_itd_entry", STATE + TOTALS + POND + FLUX + GLOBAL_AUX + POND_FORCING),
-    12: Kind("itd_exit_do_entry", STATE + TOTALS + POND + FLUX + GLOBAL_AUX + POND_FORCING),
-    13: Kind("do_exit_cor_entry", STATE + TOTALS + POND + FLUX + GLOBAL_AUX + POND_FORCING),
-    14: Kind("cor_exit", STATE + TOTALS + POND + FLUX + GLOBAL_AUX + POND_FORCING),
+    10: Kind("pond_entry_category_done", STATE + PRE_AGG_TOTALS + POND + FLUX + GLOBAL_AUX + POND_FORCING),
+    11: Kind("pond_exit_itd_entry", STATE + PRE_AGG_TOTALS + POND + FLUX + GLOBAL_AUX + POND_FORCING),
+    12: Kind("itd_exit_do_entry", STATE + PRE_AGG_TOTALS + POND + FLUX + GLOBAL_AUX + POND_FORCING),
+    13: Kind("do_exit_cor_entry", STATE + PRE_AGG_TOTALS + POND + FLUX + GLOBAL_AUX + POND_FORCING),
+    14: Kind("cor_exit", STATE + PRE_AGG_TOTALS + POND + FLUX + GLOBAL_AUX + POND_FORCING),
     15: Kind(
         "update_flx_entry",
         STATE + TOTALS + FLUX
         + _fields("qsr_oce qns_oce qemp_oce qemp_ice emp_oce emp_ice qns_tot qsr_tot frq_m", "I2")
         + _fields("a_i_b qsr_ice qns_ice qtr_ice_bot qevap_ice", "I3")
-        + _fields("qcn_ice qml_ice qtr_ice_top", "I3")
+        + _fields("qcn_ice qml_ice qtr_ice_top alb_ice", "I3")
         + _fields("at_i_b wfx_snw_dyn cloud_fra", "I2")
         + _fields("tmask_k1", "F2")
         + _fields("smask0", "I2")
@@ -217,7 +222,7 @@ KINDS[19] = Kind(
     _fields("uu_kbb vv_kbb umask_k1 vmask_k1 u_ice v_ice u_oce v_oce drag_io at_i utau vtau", "F2")
     + _fields("taum", "I2"),
 )
-KINDS[20] = Kind("tau_exit", _fields("utau vtau", "F2") + _fields("taum", "I2") + _fields("rCdU_ice", "F2"))
+KINDS[20] = Kind("tau_exit", _fields("utau vtau", "F2") + _fields("taum", "I2") + _fields("rCdU_ice", "H1"))
 KINDS[21] = Kind("pre_category_state", STATE)
 
 PROJECTIONS: dict[str, tuple[int, ...]] = {
@@ -237,11 +242,28 @@ def _refuse(message: str) -> ValueError:
     return ValueError(f"STATUS PLANT-FIRED: {message}")
 
 
+def verify_resolved_drag_namelist(path: Path, plant: str | None = None) -> dict[str, Any]:
+    """Require the resolved NEMO dynamics namelist to enable ice drag filling."""
+    if not path.is_file():
+        raise _refuse(f"missing resolved dynamics namelist: {path}")
+    text = "\n".join(line.split("!", 1)[0] for line in path.read_text().splitlines())
+    values = re.findall(r"\bln_drgice_imp\s*=\s*([^,\s/]+)", text, flags=re.I)
+    if plant == "drag-disabled":
+        values = [".false."]
+    if not values:
+        raise _refuse(f"ln_drgice_imp is absent from {path}")
+    resolved = values[-1].strip().lower()
+    if resolved not in {".true.", "true", "t"}:
+        raise _refuse(f"resolved ln_drgice_imp is not true in {path}: {resolved}")
+    return {"status": "PASS_RESOLVED_LN_DRGICE_IMP", "path": str(path), "ln_drgice_imp": True}
+
+
 def _shape(field: Field, meta: dict[str, int]) -> tuple[int, ...]:
     ni = meta["ntei"] - meta["ntsi"] + 1
     nj = meta["ntej"] - meta["ntsj"] + 1
     dims = {
         "I2": (ni, nj),
+        "H1": (ni + 2, nj + 2),
         "F2": (meta["jpi"], meta["jpj"]),
         "I3": (ni, nj, meta["jpl"]),
         "II4": (ni, nj, meta["nlay_i"], meta["jpl"]),
@@ -407,7 +429,7 @@ def field_bytes(field: Field, *, jpi: int, jpj: int, ni: int, nj: int, npti: int
     return int(np.prod(_shape(field, meta))) * (4 if field.dtype == "i4" else 8)
 
 
-def size_report(jpi: int = 182, jpj: int = 149, ni: int = 180, nj: int = 147) -> dict[str, Any]:
+def size_report(jpi: int = 184, jpj: int = 152, ni: int = 180, nj: int = 148) -> dict[str, Any]:
     """Worst-case sizing: every category gathers every declared interior cell."""
     npti = ni * nj
     kinds: dict[str, Any] = {}
@@ -577,6 +599,8 @@ def admit(root: Path, producer: str | None = None) -> dict[str, Any]:
         root / "record_100step", "record_100step", expect_icedyn=True, expect_icethd=True
     )
     verify_o7_log(root / "record_100step/ocean.output", expected_nn_itend=100)
+    verify_resolved_drag_namelist(root / "reference_100step/output.namelist.dyn")
+    verify_resolved_drag_namelist(root / "record_100step/output.namelist.dyn")
     for rung in PROJECTIONS:
         result = projection_from_directory(root / "record_100step/o8_o16_master_records", rung)
         retained = root / f"manifest/per_rung/{rung}.json"
@@ -683,6 +707,7 @@ def main(argv: list[str] | None = None) -> int:
     action.add_argument("--admit-existing", type=Path)
     action.add_argument("--same-program", type=Path, metavar="NEW_BLD")
     action.add_argument("--write-stub-records", type=Path)
+    action.add_argument("--verify-drag-namelist", type=Path)
     parser.add_argument("--records", type=Path)
     parser.add_argument("--plant")
     parser.add_argument("--producer")
@@ -723,6 +748,8 @@ def main(argv: list[str] | None = None) -> int:
             )
         elif args.write_stub_records:
             result = write_stub_records(args.write_stub_records)
+        elif args.verify_drag_namelist:
+            result = verify_resolved_drag_namelist(args.verify_drag_namelist, args.plant)
         else:
             result = admit(args.admit_existing, args.producer)
         result["sas_time_level"] = derive_sas_time_level(args.nemo_root)

@@ -312,13 +312,15 @@ def derive_and_gate(ppsrc: Path = DEFAULT_PPSRC, plant: str | None = None) -> di
         }
         covered = {
             _normalise(field.name)
-            for kind in gate.PROJECTIONS[rung]
+            for kind in ENTRY_KINDS[rung]
             for field in gate.KINDS[kind].fields
         }
         if plant == "drop-sst_m":
             covered.discard("sst_m")
         elif plant == "drop-qlead":
             covered.discard("qlead")
+        elif plant == "drop-snwice_mass" and rung == "O16":
+            covered.discard("snwice_mass")
         missing = sorted(reads - covered)
         if missing:
             raise ValueError(f"STATUS PLANT-FIRED: {rung} source read-set is not recorded: {missing}")
@@ -354,7 +356,9 @@ def derive_and_gate(ppsrc: Path = DEFAULT_PPSRC, plant: str | None = None) -> di
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--ppsrc", type=Path, default=DEFAULT_PPSRC)
-    parser.add_argument("--plant", choices=("drop-sst_m", "drop-qlead", "drop-rn_hinew"))
+    parser.add_argument(
+        "--plant", choices=("drop-sst_m", "drop-qlead", "drop-rn_hinew", "drop-snwice_mass")
+    )
     args = parser.parse_args(argv)
     try:
         print(json.dumps(derive_and_gate(args.ppsrc, args.plant), indent=2, sort_keys=True))
