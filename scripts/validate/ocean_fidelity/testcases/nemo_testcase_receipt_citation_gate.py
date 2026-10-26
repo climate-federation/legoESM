@@ -9091,9 +9091,6 @@ CITATION_MAP = {
         "sn_ice      ='ice_cover_clim.nc'",
     'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/fldread.f90:885':
         "IF    ( NINT(sdjf%freqh) == -12 ) THEN            ;   ireclast = 1",
-    'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/fldread.f90:244-246': [
-        'ztinta =  REAL( isecsbc - sd(jf)%nrec(2,ibb), wp )',
-        'sd(jf)%fnow(:,:,:) = ztintb * sd(jf)%fdta(:,:,:,ibb)', 3],
     'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/sbcmod.f90:501':
         'CALL ice_stp  ( kt, Kbb, Kmm, nsbc )',
     'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/iceupdate.f90:212':
