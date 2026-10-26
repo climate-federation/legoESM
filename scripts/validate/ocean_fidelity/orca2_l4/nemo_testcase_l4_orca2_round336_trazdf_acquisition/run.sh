@@ -313,17 +313,23 @@ STUB
   plant_must_refuse "r336-$role-driver-body-truncation" \
     r336_check_driver_body "$truncated" "$role"
 
-  R336_STUB_FLOW_ROOT=$base/success R336_STUB_NEMO=$stub R336_STUB_BIN=$stub_bin \
-    R336_STUB_SOURCE_OUTPUT=$SOURCE_OUTPUT \
-    R336_STUB_NEMO_SCENARIO=success R336_STUB_DRIVER_ROLE=$role \
-    R328_ACQ_TARGET=tke332 "$driver" --run >"$base/success.log" 2>&1
+  if ! R336_STUB_FLOW_ROOT=$base/success R336_STUB_NEMO=$stub R336_STUB_BIN=$stub_bin \
+      R336_STUB_SOURCE_OUTPUT=$SOURCE_OUTPUT \
+      R336_STUB_NEMO_SCENARIO=success R336_STUB_DRIVER_ROLE=$role \
+      R328_ACQ_TARGET=tke332 "$driver" --run >"$base/success.log" 2>&1; then
+    tail -80 "$base/success.log" >&2
+    refuse "generated $role driver refused stub success"
+  fi
   grep -F 'R336_STUB_NEMO_ADMISSION_PASS scenario=success' "$base/success.log" >/dev/null \
     || refuse "generated $role driver missed real-flow stub success"
-  R336_STUB_FLOW_ROOT=$base/success R336_STUB_NEMO=$stub R336_STUB_BIN=$stub_bin \
-    R336_STUB_SOURCE_OUTPUT=$SOURCE_OUTPUT \
-    R336_STUB_NEMO_SCENARIO=success R336_STUB_DRIVER_ROLE=$role \
-    R328_ACQ_TARGET=tke332 "$driver" --admit-existing \
-    >"$base/admit-in-place.log" 2>&1
+  if ! R336_STUB_FLOW_ROOT=$base/success R336_STUB_NEMO=$stub R336_STUB_BIN=$stub_bin \
+      R336_STUB_SOURCE_OUTPUT=$SOURCE_OUTPUT \
+      R336_STUB_NEMO_SCENARIO=success R336_STUB_DRIVER_ROLE=$role \
+      R328_ACQ_TARGET=tke332 "$driver" --admit-existing \
+      >"$base/admit-in-place.log" 2>&1; then
+    tail -80 "$base/admit-in-place.log" >&2
+    refuse "generated $role driver refused in-place admission"
+  fi
   grep -F 'R336_STUB_NEMO_ADMISSION_PASS scenario=success' \
     "$base/admit-in-place.log" >/dev/null \
     || refuse "generated $role driver missed in-place admission"
@@ -349,11 +355,14 @@ STUB
   retained=$(find "$base/retention/evidence/refused" -mindepth 1 -maxdepth 1 \
     -type d -name 'orca1ice_trazdf_internal_kt2_np2_*' -print -quit)
   [[ -n $retained ]] || refuse "generated $role driver did not retain a crashed run"
-  R336_STUB_FLOW_ROOT=$base/retention R336_STUB_NEMO=$stub R336_STUB_BIN=$stub_bin \
-    R336_STUB_SOURCE_OUTPUT=$SOURCE_OUTPUT \
-    R336_STUB_NEMO_SCENARIO=success R336_STUB_DRIVER_ROLE=$role \
-    R328_ACQ_TARGET=tke332 R328_EXISTING_RUN=$retained \
-    "$driver" --admit-existing >"$base/admit-existing.log" 2>&1
+  if ! R336_STUB_FLOW_ROOT=$base/retention R336_STUB_NEMO=$stub R336_STUB_BIN=$stub_bin \
+      R336_STUB_SOURCE_OUTPUT=$SOURCE_OUTPUT \
+      R336_STUB_NEMO_SCENARIO=success R336_STUB_DRIVER_ROLE=$role \
+      R328_ACQ_TARGET=tke332 R328_EXISTING_RUN=$retained \
+      "$driver" --admit-existing >"$base/admit-existing.log" 2>&1; then
+    tail -80 "$base/admit-existing.log" >&2
+    refuse "generated $role driver refused retained admission"
+  fi
   grep -F 'R336_STUB_NEMO_ADMISSION_PASS scenario=retention' "$base/admit-existing.log" >/dev/null \
     || refuse "generated $role driver missed retained admission"
   canonical=$base/retention/evidence/orca1ice_trazdf_internal_kt2_np2
