@@ -1556,6 +1556,20 @@ FILES = {
     "ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/sbcrnf.f90": (
         NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo"
         "/sbcrnf.f90"),
+    "ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/fldread.f90": (
+        NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo"
+        "/fldread.f90"),
+    "ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/sbcssm.f90": (
+        NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo"
+        "/sbcssm.f90"),
+    "ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/sbcssr.f90": (
+        NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo"
+        "/sbcssr.f90"),
+    "ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/sbcfwb.f90": (
+        NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo"
+        "/sbcfwb.f90"),
+    "ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/EXP00/namelist_cfg": (
+        NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/EXP00/namelist_cfg"),
     "ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/stp2d.f90": (
         NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo"
         "/stp2d.f90"),
@@ -8928,6 +8942,42 @@ CITATION_MAP = {
         'anchors': ('pCd0(:,:) = rn_Cd0 * zmsk_boost(:,:)', 1),
         'routine': 'drg_init',
     },
+    # ORCA2 round 337: standalone-S0/S2 literal surface transcription.
+    'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/fldread.f90:205': (
+        'isecsbc = nsec_year + nsec1jan000 + NINT( ( 0.5*REAL(kn_fsbc-1,wp) + zt_offset ) * rn_Dt )'),
+    'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/fldread.f90:217': (
+        'IF( MOD( kt-1, kn_fsbc ) == 0 ) THEN'),
+    'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/fldread.f90:244-246': [
+        'ztinta =  REAL( isecsbc - sd(jf)%nrec(2,ibb), wp ) / REAL( sd(jf)%nrec(2,iaa) - sd(jf)%nrec(2,ibb), wp )',
+        'sd(jf)%fnow(:,:,:) = ztintb * sd(jf)%fdta(:,:,:,ibb) + ztinta * sd(jf)%fdta(:,:,:,iaa)', 3],
+    'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/fldread.f90:309-366': [
+        'IF( ksecsbc > sdjf%nrec(2,iaa) ) THEN',
+        'END SUBROUTINE fld_update', 58],
+    'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/fldread.f90:932-936': [
+        'IF( sdjf%ln_tint ) THEN   ! record time defined in the middle of the record, computed using an implementation',
+        '& MAX( MOD( sdjf%nrecsec(0:sdjf%nreclast-1), 2 ), MOD( sdjf%nrecsec(1:sdjf%nreclast), 2 ) ) + irecshft', 5],
+    'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/sbcssm.f90:109-174': [
+        'IF( kt == nit000 .AND. .NOT. l_ssm_mean ) THEN',
+        'frq_m(:,:) = frq_m(:,:) * zcoef', 66],
+    'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/sbcrnf.f90:185-227': [
+        'IF( .NOT. l_rnfcpl )  THEN',
+        'rnf_tsc(:,:,jp_sal) = zrnf_sal * rnf(Nis0-(0):Nie0+(0),Njs0-(0):Nje0+(0)) * r1_rho0', 43],
+    'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/sbcssr.f90:147-205': [
+        'IF( nn_sstr + nn_sssr /= 0 ) THEN',
+        "IF( nn_sssr == 2 )   CALL iom_put( 'vflx_ssr_cea', -erp(:,:) )", 59],
+    'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/sbcfwb.f90:277-332': [
+        'CASE ( 2 )                             !==  set volume annual trend  ==!',
+        ("IF( iom_use('vflx_fwb_cea') )  CALL iom_put( 'vflx_fwb_cea', -emp_corr                       * smask0(:,:) )", 2), 56],
+    'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/EXP00/namelist_cfg:92': (
+        'nn_fwb      = 2         !  FreshWater Budget:'),
+    'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/EXP00/namelist_cfg:153-156': [
+        'nn_sssr     =     2     !  add a damping term to the surface freshwater flux',
+        'rn_sssr_bnd =   4.e0    !  ABS(Max/Min) value of the damping erp term [mm/day]', 4],
+    'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/EXP00/namelist_cfg:164': (
+        'rn_rfact    =   1.e0    !  multiplicative factor for runoff'),
+    'cfgs/SHARED/namelist_ref:474-476': [
+        'ln_rnf_depth = .false.   !  read in depth information for runoff',
+        'ln_rnf_sal   = .false.   !  read in salinity information for runoff', 3],
     # ORCA2 round 335: standalone-S1 literal surface-bulk transcription.
     'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/sbcmod.f90:428-568': [
         'IF( .NOT.ll_sas )   CALL sbc_ssm',
