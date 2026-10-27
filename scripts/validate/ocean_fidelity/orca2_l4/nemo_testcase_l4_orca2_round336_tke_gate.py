@@ -360,7 +360,12 @@ def verify_record(record: dict, source: dict | None = None,
         _bits_equal(fields["entry_e3w_kmm"], expected_e3w[i0:i1, j0:j1],
                     "TKE live e3w(Kmm) differs from admitted round-333 replay")
     if ice is not None:
-        _bits_equal(fields["entry_fr_i"], ice["fields"]["fr_i"],
+        # The round-326 writer deliberately zero-filled its halo and copied
+        # only ntsi:ntei,ntsj:ntej, exactly the range tke_avn reads.  The
+        # round-336 record carries the live full-grid fr_i, so compare the
+        # common executed range rather than unrecorded round-326 halo cells.
+        _bits_equal(fields["entry_fr_i"][i0:i1, j0:j1],
+                    ice["fields"]["fr_i"][i0:i1, j0:j1],
                     "fr_i differs from admitted ice-cover source")
         _bits_equal(fields["entry_hm_i"], ice["fields"]["hm_i"][i0:i1, j0:j1],
                     "hm_i differs from admitted ice source")

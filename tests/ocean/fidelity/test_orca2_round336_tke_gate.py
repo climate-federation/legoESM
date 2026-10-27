@@ -175,6 +175,12 @@ def test_tke_geometry_replay_uses_the_slot_named_by_the_live_call() -> None:
     assert 'tracer["fields"]["r3t_Kbb"]' in stub
 
 
+def test_ice_cover_cross_check_excludes_round326_unwritten_halo() -> None:
+    source = (TOOL.parent / "nemo_testcase_l4_orca2_round336_tke_gate.py").read_text()
+    assert 'fields["entry_fr_i"][i0:i1, j0:j1]' in source
+    assert 'ice["fields"]["fr_i"][i0:i1, j0:j1]' in source
+
+
 def test_stub_outputs_come_from_build_contract() -> None:
     wrapper = (TOOL / "run.sh").read_text()
     stub = wrapper[wrapper.index("<<'STUB'", wrapper.index("cat >\"$stub\"")):
