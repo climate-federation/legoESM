@@ -12,6 +12,7 @@ cfg_overrides:
   aimip_n_epochs: 12
   eval_years: [2020]
   aimip_convection: "sbm"
+  aimip_sbm_cape_threshold: 0.0   # Isca oracle: convect when CAPE > 0 (tier-2 R3)
   aimip_turbulence: "ysu"
   aimip_gwd: "hines"
   aimip_microphysics: "morrison"

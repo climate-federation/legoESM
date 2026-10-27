@@ -1,4 +1,5 @@
 aimip_convection: sbm
+aimip_sbm_cape_threshold: 0.0   # Isca oracle: convect when CAPE > 0 (tier-2 R3)
 aimip_turbulence: louis
 aimip_gwd: mcfarlane
 aimip_microphysics: sundqvist

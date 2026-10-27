@@ -1335,6 +1335,9 @@ def make_aimip_classical_spectral_physics(
     radiation: str = "rrtmgp",
     rad_update_interval_steps: int = 6,
     convection_scheme: str = "tiedtke",
+    # SBM CAPE trigger threshold [J/kg] from the deck key
+    # aimip_sbm_cape_threshold; None keeps SBMConfig's default.
+    sbm_cape_threshold: float | None = None,
     turbulence_scheme: str = "louis",
     surface_bulk_scheme: str = "constant",
     gwd_scheme: str = "mcfarlane",
@@ -1596,9 +1599,10 @@ def make_aimip_classical_spectral_physics(
             scheme="tiedtke", tiedtke=params.to_tiedtke_config(),
         )
     elif convection_scheme == "sbm":
-        conv_cfg = ConvectionConfig(
-            scheme="sbm", sbm=params.to_sbm_config(),
-        )
+        _sbm = params.to_sbm_config()
+        if sbm_cape_threshold is not None:
+            _sbm = _sbm._replace(cape_threshold=float(sbm_cape_threshold))
+        conv_cfg = ConvectionConfig(scheme="sbm", sbm=_sbm)
     else:
         conv_cfg = ConvectionConfig(scheme=convection_scheme)
     if convective_rain_to_surface:

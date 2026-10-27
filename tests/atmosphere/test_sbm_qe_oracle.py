@@ -199,3 +199,45 @@ def test_amip_sbm_decks_name_the_cape_threshold(deck):
     loaded = load_yaml_config(str(repo / deck), m.build_arg_parser())
     assert loaded["convection"] == "sbm"
     assert loaded["sbm_cape_threshold"] == 0.0
+
+
+@pytest.mark.parametrize("deck", [
+    "config/aimip/sweep/stage1/combo_conv_sbm/variant_classical.yaml",
+    "config/aimip/wbcompare/classical_sweep/sbm_ysu/suite.yaml",
+    "config/aimip/wbcompare/classical_sweep/sbm_ysu/variant_classical.yaml"])
+def test_aimip_sbm_decks_name_the_cape_threshold(deck):
+    """User 2026-10-27 (Q13 item 5): the AIMIP decks that run SBM state the
+    threshold through aimip_sbm_cape_threshold."""
+    from pathlib import Path
+    import yaml
+    d = yaml.safe_load((Path(__file__).resolve().parents[2] / deck).read_text())
+    d = {**d, **(d.get("cfg_overrides") or {})}
+    assert d["aimip_convection"] == "sbm"
+    assert d["aimip_sbm_cape_threshold"] == 0.0
+
+
+def test_aimip_builder_hands_the_deck_threshold_to_sbm(monkeypatch):
+    """The AIMIP physics builder passes aimip_sbm_cape_threshold to SBMConfig
+    (None keeps the scheme default)."""
+    from legoesm.atmosphere.physics import combined
+    from legoesm.grids.gaussian import create_gaussian_grid
+    from legoesm.training.aimip_params import (
+        AIMIPClassicalParams, make_aimip_classical_spectral_physics)
+    seen = []
+
+    class _Stop(Exception):
+        pass
+
+    def spy(cfg, *a, **k):
+        seen.append(cfg.convection.sbm.cape_threshold)
+        raise _Stop
+
+    monkeypatch.setattr(combined, "make_physics", spy)
+    grid = create_gaussian_grid(21, dealiasing="quadratic")
+    for thr in (50.0, None):
+        with pytest.raises(_Stop):
+            make_aimip_classical_spectral_physics(
+                AIMIPClassicalParams.from_defaults(), grid, dt=1800.0,
+                radiation="gray", convection_scheme="sbm",
+                sbm_cape_threshold=thr)
+    assert seen == [50.0, SBMConfig().cape_threshold]

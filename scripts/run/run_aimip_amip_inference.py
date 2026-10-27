@@ -292,6 +292,7 @@ def main():
             radiation=str(cfg.get("aimip_radiation", "rrtmgp")),
             rad_update_interval_steps=args.rad_update_interval,
             convection_scheme=str(cfg["aimip_convection"]),
+            sbm_cape_threshold=cfg.get("aimip_sbm_cape_threshold"),
             turbulence_scheme=str(cfg["aimip_turbulence"]),
             surface_bulk_scheme=str(
                 cfg.get("aimip_surface_bulk_scheme", "constant")),

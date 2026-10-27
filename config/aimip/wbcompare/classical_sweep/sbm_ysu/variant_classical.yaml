@@ -3,6 +3,7 @@
 # run_aimip / the WB2 eval bridge from the suite's parent dir. See ../README.md.
 aimip_variant: "classical"
 aimip_convection: "sbm"
+aimip_sbm_cape_threshold: 0.0   # Isca oracle: convect when CAPE > 0 (tier-2 R3)
 aimip_turbulence: "ysu"
 aimip_gwd: "hines"
 aimip_microphysics: "morrison"
