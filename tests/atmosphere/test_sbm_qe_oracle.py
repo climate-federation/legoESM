@@ -241,3 +241,27 @@ def test_aimip_builder_hands_the_deck_threshold_to_sbm(monkeypatch):
                 radiation="gray", convection_scheme="sbm",
                 sbm_cape_threshold=thr)
     assert seen == [50.0, SBMConfig().cape_threshold]
+
+
+def test_every_deck_driven_aimip_caller_forwards_the_threshold():
+    """Every entry point that reads the deck's aimip_convection also hands
+    the builder aimip_sbm_cape_threshold."""
+    import ast
+    root = Path(__file__).resolve().parents[2]
+    hits = []
+    for path in sorted((root / "scripts").rglob("*.py")):
+        src = path.read_text()
+        if "make_aimip_classical_spectral_physics(" not in src:
+            continue
+        for node in ast.walk(ast.parse(src)):
+            if not (isinstance(node, ast.Call)
+                    and getattr(node.func, "id", None)
+                    == "make_aimip_classical_spectral_physics"):
+                continue
+            kw = {k.arg: ast.unparse(k.value) for k in node.keywords if k.arg}
+            if "convection_scheme" not in kw:
+                continue
+            hits.append(path.name)
+            assert "aimip_sbm_cape_threshold" in kw.get("sbm_cape_threshold", ""), (
+                f"{path}:{node.lineno} drops aimip_sbm_cape_threshold")
+    assert len(hits) == 7, hits
