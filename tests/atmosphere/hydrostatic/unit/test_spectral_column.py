@@ -525,6 +525,39 @@ def test_projection_residuals_meet_the_acceptance(grid, sigma):
     assert int(col._step_diag["T_floor_hits"]) > 0
 
 
+def test_water_projection_is_differentiable_at_a_zero_tendency(grid, sigma):
+    """d(lnps_hat, passenger tracer)/d(water tendency) at an EXACTLY-zero
+    tendency is the finite-difference slope: a value-masked zero branch
+    would return a zero derivative there (codex 2026-10-27 r2 P1)."""
+    from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
+        apply_grid_physics_increments, grid_view_state)
+    nat = _native_ic(grid, sigma)
+    hs = grid_view_state(nat, grid, sigma)
+    z3 = jnp.zeros_like(hs.T.data)
+    pat = jnp.asarray(1e-8 * np.random.default_rng(7).normal(size=z3.shape))
+
+    def f(eps):
+        tend = _tend(hs, z3, z3, z3,
+                     tracers={"q_v": hs.T.replace(data=eps * pat, name="dq_v")})
+        out, _ = apply_grid_physics_increments(nat, tend, DT, grid, sigma)
+        return out.lnps_hat.data, out.tracers["q_r"].data
+    _, (d_lnps, d_qr) = jax.jvp(f, (jnp.asarray(0.0),), (jnp.asarray(1.0),))
+    h = 1e-2
+    (lp, rp), (lm, rm) = f(jnp.asarray(h)), f(jnp.asarray(-h))
+    for jv, fd in ((d_lnps, (lp - lm) / (2 * h)), (d_qr, (rp - rm) / (2 * h))):
+        fd = np.asarray(fd)
+        assert np.abs(fd).max() > 0.0
+        np.testing.assert_allclose(np.asarray(jv), fd, rtol=1e-4,
+                                   atol=1e-6 * np.abs(fd).max())
+    # the tangent-keeping select itself, forward and reverse, to order 2,
+    # on its contract (both branches the same function, computed two ways)
+    from jax.test_util import check_grads
+    from legoesm.atmosphere.dynamics.gcm.spectral_pe import _select_keep_tangent
+    mask = jnp.asarray([True, False, True])
+    check_grads(lambda x: _select_keep_tangent(mask, x * x * x, x ** 3),
+                (jnp.asarray([0.3, -1.2, 2.0]),), order=2, modes=("fwd", "rev"))
+
+
 def test_anchored_fixer_keeps_the_dry_integral_under_a_water_sink(grid, sigma):
     """A physics water sink through the split step: the dycore's anchored
     DRY-mass fixer (F13, inherited by the lane) keeps the global dry mass and
@@ -729,6 +762,10 @@ def test_energy_fixer_returns_the_dynamics_loss_as_uniform_heating(grid, sigma):
         out[on] = col.step(col.from_bundle(nat), DT, physics_fn=_zero_physics).native
     assert abs(energy(out[True]) - e0) / abs(e0) < 1e-11
     assert abs(energy(out[False]) - e0) / abs(e0) > 1e-9
+    # a dynamics-only step (no physics) runs the configured fixer too
+    _, col_on = _model(grid, sigma, energy_fixer=True)
+    no_phys = col_on.step(col_on.from_bundle(nat), DT).native
+    _assert_native_equal(no_phys, out[True])
     # the fix is a uniform T shift: every coefficient but n = 0 agrees
     dT_hat = np.asarray(out[True].T_hat.data - out[False].T_hat.data)
     np.testing.assert_array_equal(dT_hat[1:], 0.0)

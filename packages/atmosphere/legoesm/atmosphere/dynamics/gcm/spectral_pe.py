@@ -2218,8 +2218,8 @@ class SpectralPrimitiveEquationModel:
         dynamics-only step, the sponge / filter / truncation /
         hyperdiffusion chain, the energy fixer, ONE evaluation of
         ``physics_fn(grid HydrostaticState, grid, sigma_coord, phys_state,
-        forcing) -> (HydrostaticTendencies, phys_state_out)`` on the
-        post-dynamics grid view, the tendencies applied as grid increments
+        forcing) -> (HydrostaticTendencies, phys_state_out)`` (``None``:
+        dynamics only) on the post-dynamics grid view, the tendencies applied as grid increments
         (:func:`apply_grid_physics_increments`), then the tracer filter /
         positivity and the anchored dry-mass fixer -- the lat-lon C-grid
         step's order.  Returns ``(state, phys_state_out, tend, diag)``."""
@@ -2230,12 +2230,21 @@ class SpectralPrimitiveEquationModel:
         res = self._post_step_dynamics(res)
         if self.config.energy_fixer:
             res = self._apply_energy_fixer(state, res)
-        hs = grid_view_state(res, self.grid, self.sigma_coord)
-        pr = physics_fn(hs, self.grid, self.sigma_coord, phys_state, forcing_data)
-        tend, pout = (pr[0], pr[1]) if type(pr) is tuple else (pr, phys_state)
-        res, diag = apply_grid_physics_increments(
-            res, tend, dt, self.grid, self.sigma_coord,
-            dealias_mask=self._dealias_state)
+        if physics_fn is None:
+            # dynamics only: no physics call, no increments (the configured
+            # energy fixer above still runs)
+            tend, pout = None, phys_state
+            zero = jnp.zeros((), dtype=jnp.float64)
+            diag = {"dry_mass_trunc_rel_max": zero,
+                    "dry_mass_trunc_rel_mean": zero}
+        else:
+            hs = grid_view_state(res, self.grid, self.sigma_coord)
+            pr = physics_fn(hs, self.grid, self.sigma_coord, phys_state,
+                            forcing_data)
+            tend, pout = (pr[0], pr[1]) if type(pr) is tuple else (pr, phys_state)
+            res, diag = apply_grid_physics_increments(
+                res, tend, dt, self.grid, self.sigma_coord,
+                dealias_mask=self._dealias_state)
         # the lat-lon lane's safety rails after its physics increment:
         # tracer filter + positivity, then the anchored dry-mass fixer
         res = self._post_step_tracers_and_mass(res, target_mass)
@@ -2927,6 +2936,21 @@ def grid_view_state(state: SpectralHydrostaticState, grid: GaussianGrid,
         phis=fld(f["phis"], "phis", "m^2/s^2"), tracers=tracers)
 
 
+@jax.custom_jvp
+def _select_keep_tangent(mask, a, b):
+    """``where(mask, a, b)`` whose tangent is ``a``'s everywhere: the mask
+    only pins bitwise-exact values where ``a`` equals ``b`` mathematically
+    (an exactly-zero water tendency); the derivative stays ``a``'s."""
+    return jnp.where(mask, a, b)
+
+
+@_select_keep_tangent.defjvp
+def _select_keep_tangent_jvp(primals, tangents):
+    mask, a, b = primals
+    _, a_dot, _ = tangents
+    return _select_keep_tangent(mask, a, b), a_dot
+
+
 def apply_grid_physics_increments(state: SpectralHydrostaticState, tend, dt,
                                   grid: GaussianGrid, sigma_coord, *,
                                   dealias_mask=None):
@@ -2982,9 +3006,11 @@ def apply_grid_physics_increments(state: SpectralHydrostaticState, tend, dt,
         # columns whose water the physics moved: inside one jit, XLA may
         # evaluate p_s_old in two fusions with different rounding, so a
         # zero water tendency is masked out explicitly (bitwise identity)
-        # rather than relied on as log(p_s / p_s) == 0 (measured 4e-17)
+        # rather than relied on as log(p_s / p_s) == 0 (measured 4e-17);
+        # the derivative is the unmasked one (codex 2026-10-27 r2)
         moved = p_s_new != p_s_old
-        inc = sh_analysis(grid, jnp.where(moved, jnp.log(p_s_new / p_s_old), 0.0))
+        lr = jnp.log(p_s_new / p_s_old)
+        inc = sh_analysis(grid, _select_keep_tangent(moved, lr, jnp.zeros_like(lr)))
         if dealias_mask is not None:
             inc = inc * dealias_mask
         lnps_hat = lnps_hat + inc
@@ -2999,7 +3025,7 @@ def apply_grid_physics_increments(state: SpectralHydrostaticState, tend, dt,
                 "dry_mass_trunc_rel_mean": jnp.sum(rel * w) / jnp.sum(w)}
         _, shifted = shift_ps_keep_tracer_mass(
             p_s_new, tracers, sigma_coord, p_s_eff - p_s_new)
-        tracers = {nm: tr.replace(data=jnp.where(
+        tracers = {nm: tr.replace(data=_select_keep_tangent(
                        reweight[..., None], shifted[nm].data, tr.data))
                    for nm, tr in tracers.items()}
     out = state._replace(

@@ -172,8 +172,6 @@ class SpectralColumnModel:
         refuse_unthreaded_stateful_physics(
             physics_fn, phys_state, where="SpectralColumnModel.step()")
         native = self._native_of(state)
-        if physics_fn is None:
-            return self.from_bundle(self.dyn.step(native, dt))
         self.dyn.prepare_column_split(native, dt)
         key = (physics_fn, float(dt))
         fn = self._fns.get(key)
@@ -192,7 +190,9 @@ class SpectralColumnModel:
                     box["tend"] = tend
                     return self._tend_to_grid(tend), out
                 new, ps_out, _, diag = self.dyn.column_split_impl(
-                    nat, dt_, bridge, fo, ps, tm)
+                    nat, dt_, None if physics_fn is None else bridge, fo, ps, tm)
+                if physics_fn is None:
+                    return self._view(new), ps_out, None, diag
                 tend = box["tend"]
                 sfc = (getattr(tend, "sw_net_sfc", None),
                        getattr(tend, "lw_net_sfc", None),
@@ -205,7 +205,8 @@ class SpectralColumnModel:
             self._fns[key] = fn
         state_new, phys_out, sfc_diag, diag = fn(
             native, self.dyn._target_mass, forcing, phys_state)
-        self._phys_state = phys_out
+        if physics_fn is not None:
+            self._phys_state = phys_out
         self._step_diag = diag
         if sfc_diag is not None:
             prev = self._sfc_diag or (None,) * len(sfc_diag)
