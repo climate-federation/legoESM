@@ -31,6 +31,8 @@ import numpy as np
 BAND = (30.0, 70.0)
 SLP_BAND = (20.0, 90.0)
 N_DAYS = 30
+T_UNITS = "days since 1979-01-01"
+GRIB_CODE = {"u": 131, "msl": 151}  # ECMWF table 128: u [m s-1], msl [Pa]
 
 
 def _one(pattern):
@@ -51,6 +53,10 @@ def window_mean_daily(path, var):
     """Mean over the 30 CMOR daily means of days 1-30; returns (lat, lon, field)."""
     import netCDF4
     with netCDF4.Dataset(path) as d:
+        if d["time"].units != T_UNITS:
+            raise SystemExit(f"FATAL: {path} time units {d['time'].units!r} != {T_UNITS!r}")
+        if var == "psl" and d[var].units != "Pa":
+            raise SystemExit(f"FATAL: {path} psl units {d[var].units!r}")
         tb = np.asarray(d["time_bnds"][:], np.float64)
         expect = np.stack([np.arange(N_DAYS), np.arange(1, N_DAYS + 1)], axis=1)
         if tb.shape != expect.shape or not np.array_equal(tb, expect):
@@ -69,6 +75,11 @@ def read_ref(path, var, lat, lon):
     """ERA5 field already remapped onto the CMOR grid; grid must match exactly."""
     import netCDF4
     with netCDF4.Dataset(path) as d:
+        if int(d[var].code) != GRIB_CODE[var]:
+            raise SystemExit(f"FATAL: {path} {var} GRIB code {d[var].code}")
+        t0 = netCDF4.num2date(d["time"][0], d["time"].units)
+        if (t0.year, t0.month) != (1979, 1) or d["time"].size != 1:
+            raise SystemExit(f"FATAL: {path} is not the single Jan-1979 record ({t0})")
         rlat, rlon = np.asarray(d["lat"][:]), np.asarray(d["lon"][:])
         if not (np.allclose(rlat, lat) and np.allclose(rlon, lon)):
             raise SystemExit(f"FATAL: {path} grid differs from the CMOR grid")
@@ -94,22 +105,30 @@ def global_mean(x, lat):
     return float(np.sum(w * x) / np.sum(w))
 
 
-def toa_net(run):
+def toa_net(run, lat, lon):
+    """Global cos-lat mean of rsdt - rsut - rlut, single Jan-1979 Amon record."""
     import netCDF4
     f = {}
     for v in ("rsdt", "rsut", "rlut"):
         with netCDF4.Dataset(_one(f"{run}/cmor/Amon/{v}_Amon_*.nc")) as d:
-            f[v] = _finite(d[v][:], v)[0]
-            lat = np.asarray(d["lat"][:], np.float64)
+            x = _finite(d[v][:], v)
+            if (x.shape[0] != 1 or d["time"].units != T_UNITS
+                    or not np.array_equal(d["lat"][:], lat)
+                    or not np.array_equal(d["lon"][:], lon)):
+                raise SystemExit(f"FATAL: {run} {v} Amon record/grid unexpected")
+            f[v] = x[0]
     return global_mean(f["rsdt"] - f["rsut"] - f["rlut"], lat)
 
 
 def verdict(err_base, err_arm):
-    """Pre-registered rule on the fractional reduction (base - arm) / base."""
+    """Pre-registered rule: CONFIRM if arm >= 20 % smaller, REFUTE if < 5 % smaller.
+
+    Compared as arm <= 0.8 base / arm > 0.95 base, the literal form of the rule, so
+    the boundaries are not lost to rounding in (base - arm) / base."""
     red = (err_base - err_arm) / err_base
-    if red >= 0.20:
+    if err_arm <= 0.80 * err_base:
         return red, "CONFIRM"
-    if red < 0.05:
+    if err_arm > 0.95 * err_base:
         return red, "REFUTE"
     return red, "INCONCLUSIVE"
 
@@ -127,17 +146,19 @@ def main(argv=None):
     res, ref_zm = {}, None
     for name, run in runs.items():
         lat, lon, u = window_mean_daily(_one(f"{run}/cmor/day/ua_day_*.nc"), "ua")
-        _, _, slp = window_mean_daily(_one(f"{run}/cmor/day/psl_day_*.nc"), "psl")
+        plat, plon, slp = window_mean_daily(_one(f"{run}/cmor/day/psl_day_*.nc"), "psl")
+        if not (np.array_equal(plat, lat) and np.array_equal(plon, lon)):
+            raise SystemExit(f"FATAL: {run} psl and ua grids differ")
         if ref_zm is None:
             ref_zm = read_ref(a.era5_u, "u", lat, lon).mean(axis=1)
             ref_slp = read_ref(a.era5_msl, "msl", lat, lon)
-            lat0 = lat
-        elif not np.array_equal(lat, lat0):
+            lat0, lon0 = lat, lon
+        elif not (np.array_equal(lat, lat0) and np.array_equal(lon, lon0)):
             raise SystemExit("FATAL: runs on different CMOR grids")
         zm = u.mean(axis=1)
         res[name] = dict(zm=zm, err=band_rmse(zm - ref_zm, lat, BAND),
                          slp=band_rmse((slp - ref_slp) / 100.0, lat, SLP_BAND),
-                         toa=toa_net(run))
+                         toa=toa_net(run, lat, lon))
     m = (lat0 >= BAND[0]) & (lat0 <= BAND[1])
     print("lat      " + " ".join(f"{x:7.1f}" for x in lat0[m]))
     print("ERA5     " + " ".join(f"{x:7.3f}" for x in ref_zm[m]))

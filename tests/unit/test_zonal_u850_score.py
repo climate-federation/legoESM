@@ -42,9 +42,17 @@ def test_band_rmse_2d_equals_1d_for_zonally_uniform_field():
         m.band_rmse(d, LAT, (20.0, 90.0)), rel=1e-12)
 
 
+def test_band_rmse_2d_is_spatial_not_zonal_mean():
+    m = _mod()
+    d = np.zeros((LAT.size, 4))
+    d[:, 0], d[:, 1] = 2.0, -2.0  # zonal mean 0, spatial RMS 2/sqrt(2)
+    assert m.band_rmse(d, LAT, (20.0, 90.0)) == pytest.approx(np.sqrt(2.0), rel=1e-12)
+
+
 def test_verdict_thresholds():
     m = _mod()
-    # exact 20 % / 5 % are not representable boundaries in float; test either side
+    assert m.verdict(1.0, 0.80)[1] == "CONFIRM"  # exactly 20 % smaller
+    assert m.verdict(1.0, 0.95)[1] == "INCONCLUSIVE"  # exactly 5 % smaller
     assert m.verdict(1.0, 0.799)[1] == "CONFIRM"
     assert m.verdict(1.0, 0.801)[1] == "INCONCLUSIVE"
     assert m.verdict(1.0, 0.949)[1] == "INCONCLUSIVE"
@@ -69,6 +77,9 @@ def test_window_requires_days_1_to_30(tmp_path):
         d.createDimension("plev", 1)
         d.createDimension("lat", 2)
         d.createDimension("lon", 3)
+        tv = d.createVariable("time", "f8", ("time",))
+        tv.units = "days since 1979-01-01"
+        tv[:] = np.arange(29) + 0.5
         d.createVariable("time_bnds", "f8", ("time", "bnds"))[:] = np.stack(
             [np.arange(29), np.arange(1, 30)], 1)
         d.createVariable("plev", "f8", ("plev",))[:] = [85000.0]
