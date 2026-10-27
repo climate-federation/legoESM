@@ -547,8 +547,8 @@ Argon item 3 is resolved for the new acquisition. When the target is
 `tke336`, the shared driver neither stages nor applies the round-328
 `dynzdf`/stage patches, and its actual target-build branch has the same
 exclusion
-(`scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round328_dynzdf_acquisition/run.sh:795-802`,
-`scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round328_dynzdf_acquisition/run.sh:1589-1598`).
+(`scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round328_dynzdf_acquisition/run.sh:881-888`,
+`scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round328_dynzdf_acquisition/run.sh:1691-1705`).
 The same-program result consequently contains only observer unit `zdftke` and
 writer unit `tke_round336_writer`: 425 inherited objects and 413 inherited
 preprocessed sources are identical. The round-328 writer is compiled only in
@@ -584,7 +584,7 @@ The preflight compiles observer-free sources at the real record flags and
 compares each named function's normalized FP-opcode multiset with the
 SHA-pinned executable that actually produced the admitted record. It also
 pins zero-FP/inlined topology instead of silently omitting such functions
-(`scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round328_dynzdf_acquisition/run.sh:1149-1224`).
+(`scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round328_dynzdf_acquisition/run.sh:1235-1310`).
 
 | admitted tool | patched/touched function | production FP | producer FP | verdict |
 |---|---|---:|---:|---|
@@ -710,7 +710,7 @@ The normalized opcode multisets of both FP-bearing functions in the new build
 equal production exactly; the arithmetic plant changes the `zdf_tke` census.
 The historical build independently pins every nonzero count above and refuses
 if round 332 unexpectedly regains FP arithmetic in `zdf_tke`
-(`scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round328_dynzdf_acquisition/run.sh:1071-1147`).
+(`scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round328_dynzdf_acquisition/run.sh:1157-1233`).
 Thus the 1,007-to-1,054 `tke_tke` change is plain evidence that the admitted
 round-331/332 TKE arithmetic differs from production, not merely a symbol-name
 or record-layout difference.
@@ -759,7 +759,7 @@ preprocessed sources. The wrapper has its own `EXIT` retention trap
 (`scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round336_tke_acquisition/run.sh:35-53`)
 and its stub NEMO exercises success, quoted refusal, crash retention, in-place
 admission, and retained admission through the actual driver branches
-(`scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round336_tke_acquisition/run.sh:118-179`).
+(`scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round336_tke_acquisition/run.sh:131-205`).
 
 The preflight log is `round336/resume9_tke_preflight.log`, SHA-256
 `d4eeb86f56d810e166fd399f997fb5a8ced37990fb49e231ea067b64bbb35b3d`.
@@ -787,20 +787,20 @@ The record now contains `htau`, bottom `uu/vv` at `Kbb`, evaluated `gdepw`,
 background coefficient inputs used by `tke_avn`. Its executable source-read
 census classifies 30 external array reads into 31 recorded fields, 34 pinned
 scalar or selector reads, and seven reads belonging only to inactive branches
-(`scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round336_tke_gate.py:79-106`).
+(`scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round336_tke_gate.py:92-119`).
 Removing `entry_htau` makes the read-set plant refuse. Admission additionally
 requires full-domain `fr_i` to equal the admitted kt-2 ice-cover source,
-`hm_i/taum` to equal their admitted sources, evaluated metrics to equal the
-admitted kt-2 phase record, and bottom drag to equal the linear-drag namelist
-constant `-0.0004*ssmask`; the source-value plant perturbs the latter and
-refuses
-(`scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round336_tke_gate.py:324-375`).
+`hm_i/taum` to equal their admitted sources, evaluated metrics to replay from
+the admitted round-333 tracer/LDF records, and bottom drag to equal the
+linear-drag namelist constant `-0.0004*ssmask`; the source-value plant
+perturbs the latter and refuses
+(`scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round336_tke_gate.py:301-363`).
 
 The stub no longer bypasses `admit()`. Its success and retained-success paths
-run all 16 parser/semantic plants followed by the real two-rank admission;
+run all 19 parser/semantic plants followed by the real two-rank admission;
 success, in-place re-admission, quoted NEMO refusal, crash retention, and
 retained re-admission all pass end to end
-(`scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round328_dynzdf_acquisition/run.sh:1417-1442`).
+(`scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round328_dynzdf_acquisition/run.sh:1503-1535`).
 The refreshed read-only preflight passes 19 focused tests and the 45-test
 inherited battery, real-source bounds execution on both ranks, five syntax
 proofs, all 15 placement plants, the read-set plant, the source-value plant,
@@ -811,7 +811,7 @@ inlined in both builds.
 The opcode proof is deliberately described as a multiset: it cannot detect a
 MIN/MAX operand swap. The admission backstop is the independent byte compare
 over every inherited `oracle_*.bin` and every step-10 restart file
-(`scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round328_dynzdf_acquisition/run.sh:527-541`).
+(`scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round328_dynzdf_acquisition/run.sh:576-590`).
 The real stub admission reports `DETERMINISTIC_PASSIVITY_PASS files=160`, a
 set that includes all four ocean/ice rank restart files, before the TKE gate
 can pass. Thus no passivity claim relies on the opcode multiset alone.
@@ -937,18 +937,18 @@ The writer now allocates `T2D(1)` and copies precisely that filled slice
 (`scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round336_tke_acquisition/tke_round336_writer.F90:116-135`).
 The parser requires both the 92-by-150 extent and origin `(ntsi-1,ntsj-1)`,
 with a `drag-range` plant that perturbs the origin and refuses
-(`scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round336_tke_gate.py:190-216`).
+(`scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round336_tke_gate.py:203-229`).
 The bottom-drag source-value check is restricted to the identical one-halo
 mask slice, so no unwritten outer-ring value is demanded
-(`scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round336_tke_gate.py:342-347`).
+(`scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round336_tke_gate.py:319-324`).
 
-The stub builder now reads admitted real phase, ice, and round-328 drag
+The stub builder now reads admitted real tracer/LDF, ice, and round-328 drag
 records. Its drag arrays copy the real NEMO overlap directly; the newly
 exposed left/bottom halo is derived from the admitted real mask and the
 source-literal linear coefficient for bottom drag, while top drag extends the
 nearest real halo value. It then emits the same exact metadata path consumed
 by admission
-(`scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round336_tke_acquisition/make_stub_records.py:82-117`).
+(`scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round336_tke_acquisition/make_stub_records.py:96-132`).
 Consequently the stub no longer fabricates a full-domain drag record that can
 conceal this extent class, and the real parser/admission plus `drag-range`
 plant exercises the repaired contract.
@@ -956,19 +956,19 @@ plant exercises the repaired contract.
 The acquisition build no longer copies any inherited round-326 `MY_SRC` unit.
 It installs pristine NEMO `zdftke.F90`, the round-336 writer, and only the
 round-336 patch
-(`scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round328_dynzdf_acquisition/run.sh:1587-1630`).
+(`scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round328_dynzdf_acquisition/run.sh:1689-1737`).
 Preflight reconstructs a pristine baseline by replacing all 15 inherited NEMO
 units and removing the inherited writer, producing 425 NEMO objects
-(`scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round328_dynzdf_acquisition/run.sh:932-974`).
+(`scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round328_dynzdf_acquisition/run.sh:1019-1060`).
 It compares the FP opcode multiset for every function in every one of those
 objects, excluding only the new write-only private writer. The passing census
 is 815 FP-bearing functions and 205,193 FP instructions; `stp_rk3_stg` is the
 pristine 1,175-FP body
-(`scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round328_dynzdf_acquisition/run.sh:1363-1386`).
+(`scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round328_dynzdf_acquisition/run.sh:1460-1472`).
 The negative plant recompiles the actual inherited stage source, pins its
 1,367-FP census, substitutes it for the clean stage, and makes the whole-build
 census refuse
-(`scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round328_dynzdf_acquisition/run.sh:1387-1406`).
+(`scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round328_dynzdf_acquisition/run.sh:1473-1492`).
 
 The clean committed preflight exits zero. It passes 23 focused tests and the
 49-test inherited battery, the two-rank 51-field bounds/source fixture, all 20
@@ -1007,7 +1007,7 @@ the two rank-local TKE records for the observed run, while the twin must have
 only the five standard outputs; every restart and `ocean.output` is then
 byte-compared between the two runs
 (`scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round336_tke_gate.py:430-473`;
-`scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round328_dynzdf_acquisition/run.sh:593-609`).
+`scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round328_dynzdf_acquisition/run.sh:593-608`).
 Thus round 336 no longer requires this pristine-plus-TKE build to regenerate
 the 156 inherited `oracle_*.bin` files from round 326.
 
