@@ -2,9 +2,9 @@
 
 ## Outcome
 
-The operator-only acquisition tool is ready and its read-only preflight passes.
-No real NEMO integration was run. It produces one shared, one-rank, 100-step
-record under the unmodified production ice namelist. The O7 log verifier now
+The operator-only acquisition completed and the retained evidence is admitted.
+It produced one shared, one-rank, 100-step record under the unmodified
+production ice namelist. The O7 log verifier now
 accepts an explicit expected step count, preserving its two-step default while
 admitting this preregistered 100-step window. The stage order is taken from
 NEMO's own thermodynamics call chain
@@ -145,9 +145,39 @@ The generated driver passed all ten phases:
   a namelist group. Default-value, call-tree, and fabricated-output drag plants
   are all refused.
 
-The explicit operator run remains required. Refused evidence and builds are
-retained, and only `--move-aside-builds` enables a rebuild after failure. No
-physics result or fidelity claim is made here.
+The explicit operator run completed successfully. Refused evidence and builds
+remain retained by the tool, and only `--move-aside-builds` enables a rebuild
+after failure. No physics result or fidelity claim is made here.
+
+## Acquisition admission
+
+`STATUS: ADMITTED`
+
+The admitted master contains 4,815 rank-0 binary records totaling
+**81,440,242,576 bytes (75.85 GiB)**. The run manifest records **2,342.5088832378387
+seconds (39 minutes 2.509 seconds)** wall clock. The measured evidence footprint
+is 85,771,108 KiB. The producer is
+`cd34f1be648a05abbb23e4cb6bb2a9ed66e60fc5`; the run-manifest SHA-256 is
+`bfb0b71d1500b7bc91c68a9e39c8af7a654b139258c0635ad5b1f25284b31fd0`,
+the resource-usage SHA-256 is
+`b30a5febe9248e5008999cb419953dad40c78658542a3c7221d301825270967c`, and
+the complete record-inventory SHA-256 is
+`fbd3cb4d3450f428d8444dcb145bec3c1a832554e3e7e05d7f5b6a159daadd85`.
+
+Each SHA-256 below covers the retained relative-path projection manifest,
+which contains one digest for every admitted record in that projection.
+
+| Rung | Kinds | Records | Projection-manifest SHA-256 |
+|---|---|---:|---|
+| O8 | 1, 2 | 200 | `303a29d76034c3856e4cf6fa60ed551b7146e5decd3618038b058501c818ed82` |
+| O9 | 21, 3, 4, 5, 6, 17 | 2,115 | `3d97b7bb71c91530a89f60498c8a84316829200e89d8c45470f5a8d1814ee0a3` |
+| O10 | 21, 6, 7, 8 | 1,600 | `ded24ddbc825a9a331d763665e51559022c97288cb7c7f516b3a587693deb554` |
+| O11 | 21, 8, 9 | 1,100 | `0c5197c52331975ff77d813f0154e0df6ea0aa1e0593e9ca062990d664465666` |
+| O12 | 10, 11 | 200 | `fe395cab681d59a8c28a722cd7fc8222ec3ac0ee8c4e569d4043643fd4a47e50` |
+| O13 | 11, 12 | 200 | `a94d126ddaee3194a053ef437d762707dff93045287392d4e0586aaee995a4aa` |
+| O14 | 12, 13 | 200 | `8130e5ac516cf8c1549badbab2caf90cf5cce03f3167c317a10532b836572cd6` |
+| O15 | 13, 14 | 200 | `e1cd64c354294a071aca8496b014b59eb0b8f7be93d0304219e5c94b192ea292` |
+| O16 | 18, 15, 16, 19, 20 | 500 | `6a3f9ed6f9330af1c65b603726c2ba407a28683f2de1b2a9dcaf9fd7dd3dc5e0` |
 
 ## Gates
 
@@ -160,4 +190,4 @@ physics result or fidelity claim is made here.
   name pre-existing, untouched files; none is in this acquisition,
   citation-map, test or receipt change.
 
-independent review: Sonnet HOLD findings repaired in resume 7; Argon re-review remains in progress
+independent review: Sonnet RUN; Argon RUN (operator review of resume 7)
