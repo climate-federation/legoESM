@@ -53,6 +53,8 @@ MODE="preflight"
 ADMIT_ROOT=""
 STUB_ROOT=""
 PLANT_STUB_UNPRODUCED=0
+PLANT_STUB_MISSING_STOP=0
+PLANT_STUB_SHORT_TIMESTEP=""
 PLANT_STUB_SLEEP=0
 
 while [[ $# -gt 0 ]]; do
@@ -86,6 +88,14 @@ while [[ $# -gt 0 ]]; do
     --plant-stub-unproduced-file)
       PLANT_STUB_UNPRODUCED=1
       shift
+      ;;
+    --plant-stub-missing-stop)
+      PLANT_STUB_MISSING_STOP=1
+      shift
+      ;;
+    --plant-stub-short-timestep)
+      PLANT_STUB_SHORT_TIMESTEP="$2"
+      shift 2
       ;;
     --plant-stub-sleep)
       PLANT_STUB_SLEEP="$2"
@@ -162,8 +172,20 @@ build_observer_free_k0_nemo() {
   check_clean_worktree
   check_memory_and_disk "${RUN_ROOT}"
   check_no_active_nemo
+  if [[ -x "${BUILD_CFG}/BLD/bin/nemo.exe" ]]; then
+    if [[ -d "${BUILD_CFG}/MY_SRC" ]]; then
+      local extra_src
+      extra_src="$(find "${BUILD_CFG}/MY_SRC" -maxdepth 1 -type f | wc -l)"
+      if [[ "${extra_src}" -ne 0 ]]; then
+        echo "REFUSE: ${BUILD_CFG}/MY_SRC is non-empty (${extra_src} files)" >&2
+        exit 1
+      fi
+    fi
+    echo "Reusing verified observer-free K0 build ${BUILD_CFG}/BLD/bin/nemo.exe ..."
+    return 0
+  fi
   if [[ -e "${BUILD_CFG}" ]]; then
-    echo "REFUSE: build config ${BUILD_CFG} already exists; move aside before re-building (never delete)" >&2
+    echo "REFUSE: build config ${BUILD_CFG} already exists without BLD/bin/nemo.exe; move aside before re-building (never delete)" >&2
     exit 1
   fi
   local source_cfg="ORCA2_STANDALONE_IIF_OMIP_L4_R339K0"
@@ -210,6 +232,12 @@ stage_single_arm() {
     if [[ "${PLANT_STUB_UNPRODUCED}" -eq 1 ]]; then
       extra_flags+=("--plant-stub-unproduced-file")
     fi
+    if [[ "${PLANT_STUB_MISSING_STOP}" -eq 1 ]]; then
+      extra_flags+=("--plant-stub-missing-stop")
+    fi
+    if [[ -n "${PLANT_STUB_SHORT_TIMESTEP}" ]]; then
+      extra_flags+=("--plant-stub-short-timestep" "${PLANT_STUB_SHORT_TIMESTEP}")
+    fi
     if [[ "${PLANT_STUB_SLEEP}" -gt 0 ]]; then
       extra_flags+=("--plant-stub-sleep" "${PLANT_STUB_SLEEP}")
     fi
@@ -239,15 +267,25 @@ run_single_arm() {
     cat "${arm_dir}/mpirun.stdout.log" "${arm_dir}/mpirun.stderr.log" >&2 || true
     return "${rc}"
   fi
-  if ! grep -F 'STOP 0' "${arm_dir}/mpirun.stdout.log" >/dev/null 2>&1; then
-    echo "REFUSE: missing clean STOP 0 in ${arm_dir}/mpirun.stdout.log" >&2
+  if [[ ! -f "${arm_dir}/mpirun.stderr.log" ]] || ! LC_ALL=C grep -Eq '(^|[[:space:]])STOP 0([[:space:]]|$)' "${arm_dir}/mpirun.stderr.log"; then
+    echo "REFUSE: missing clean STOP 0 in ${arm_dir}/mpirun.stderr.log" >&2
+    return 1
+  fi
+  if [[ ! -f "${arm_dir}/time.step" ]]; then
+    echo "REFUSE: missing ${arm_dir}/time.step" >&2
+    return 1
+  fi
+  local actual_step
+  actual_step="$(tr -d '[:space:]' < "${arm_dir}/time.step")"
+  if [[ "${actual_step}" != "${EXPECTED_STEPS}" ]]; then
+    echo "REFUSE: short or mismatched time.step in ${arm_dir}/time.step: got '${actual_step}', expected '${EXPECTED_STEPS}'" >&2
     return 1
   fi
   if [[ ! -f "${arm_dir}/ocean.output" ]]; then
     echo "REFUSE: missing ${arm_dir}/ocean.output" >&2
     return 1
   fi
-  if LC_ALL=C grep -Eq 'E R R O R|STOP [1-9][0-9]*([^0-9]|$)' "${arm_dir}/mpirun.stdout.log" "${arm_dir}/ocean.output"; then
+  if LC_ALL=C grep -Eq 'E R R O R|STOP [1-9][0-9]*([^0-9]|$)' "${arm_dir}/mpirun.stdout.log" "${arm_dir}/mpirun.stderr.log" "${arm_dir}/ocean.output"; then
     echo "REFUSE: runtime error marker found in ${arm_dir}" >&2
     return 1
   fi
@@ -261,6 +299,30 @@ run_twin_pipeline() {
   local arm_a="${target_root}/${TWIN_A_NAME}"
   local arm_b="${target_root}/${TWIN_B_NAME}"
   mkdir -p "${target_root}"
+  if [[ -d "${arm_a}" && ! -e "${arm_b}" && ! -L "${arm_b}" ]]; then
+    if ! "${PYTHON_BIN}" "${GATE_PY}" \
+         --admit-existing "${target_root}" \
+         --build-cfg "${BUILD_CFG}" \
+         --expected-steps "${EXPECTED_STEPS}" >/dev/null; then
+      echo "REFUSE: existing Arm A at ${arm_a} failed verification" >&2
+      return 1
+    fi
+    if [[ "${nemo_bin}" != "__STUB__" ]] && ! cmp -s "${arm_a}/nemo" "${nemo_bin}"; then
+      echo "REFUSE: admitted Arm A binary (${arm_a}/nemo) does not match ${nemo_bin}" >&2
+      return 1
+    fi
+    echo "R342_RESUMING_ARM_B_ONLY arm_a=${arm_a} arm_b=${arm_b}"
+    if ! stage_single_arm "${arm_b}" "${nemo_bin}" \
+       || ! run_single_arm "${arm_b}" "${timeout_s}" \
+       || ! "${PYTHON_BIN}" "${GATE_PY}" \
+            --admit-existing "${target_root}" \
+            --build-cfg "${BUILD_CFG}" \
+            --expected-steps "${EXPECTED_STEPS}"; then
+      quarantine_arms "${target_root}" "${arm_b}"
+      return 1
+    fi
+    return 0
+  fi
   local existing_arm
   for existing_arm in "${arm_a}" "${arm_b}"; do
     if [[ -e "${existing_arm}" || -L "${existing_arm}" ]]; then

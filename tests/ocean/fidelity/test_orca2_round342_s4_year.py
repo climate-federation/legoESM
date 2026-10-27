@@ -230,6 +230,51 @@ def test_gate_checklist_controls_and_planted_failures(tmp_path: Path) -> None:
     assert planted_fix["passed"] is True
 
 
+def test_real_arm_a_completion_signal_and_plants(tmp_path: Path) -> None:
+    real_logs = r342_gate.REAL_ARM_A_LOGS_DIR
+    assert real_logs.is_dir()
+    assert (real_logs / "mpirun.stderr.log").is_file()
+    assert (real_logs / "mpirun.stdout.log").is_file()
+    assert (real_logs / "mpirun.stdout.log").stat().st_size == 0
+    assert (real_logs / "time.step").is_file()
+    assert (real_logs / "ocean.output").is_file()
+    assert (real_logs / "namelist_cfg").is_file()
+
+    signal = r342_gate.verify_nemo_completion_signal(real_logs, expected_steps=2920)
+    assert signal["nn_itend"] == 2920
+    assert signal["nn_stock"] == 8
+    assert signal["time_step"] == 2920
+    assert signal["stderr_stop_0"] is True
+    assert signal["stderr_last_line"] == "STOP 0"
+    assert signal["stdout_bytes"] == 0
+    assert signal["ocean_output_error_free"] is True
+
+    planted = r342_gate.plant_completion_signal_failures(real_logs)
+    assert planted["passed"] is True
+    assert "STOP 0" in planted["missing_stop_error"]
+    assert "STOP 0" in planted["stdout_only_stop_error"]
+    assert "nonzero STOP" in planted["stop123_error"]
+    assert "time.step (2912) != nn_itend (2920)" in planted["short_timestep_error"]
+    assert "missing time.step" in planted["missing_timestep_error"]
+    assert "E R R O R" in planted["ocean_output_error"]
+
+    # Also verify direct mutations on a temporary copy of the real Arm-A logs
+    work = tmp_path / "real_arm_a_copy"
+    r342_gate.shutil.copytree(real_logs, work)
+    assert r342_gate.verify_nemo_completion_signal(work, expected_steps=2920)["time_step"] == 2920
+
+    # Plant short time.step = 2919
+    (work / "time.step").write_text("     2919\n", encoding="utf-8")
+    with pytest.raises(r342_gate.GateError, match=r"time\.step \(2919\) != nn_itend \(2920\)"):
+        r342_gate.verify_nemo_completion_signal(work, expected_steps=2920)
+    (work / "time.step").write_text("     2920\n", encoding="utf-8")
+
+    # Plant missing STOP 0 on stderr
+    (work / "mpirun.stderr.log").write_text("", encoding="utf-8")
+    with pytest.raises(r342_gate.GateError, match=r"mpirun\.stderr\.log lacks clean STOP 0"):
+        r342_gate.verify_nemo_completion_signal(work, expected_steps=2920)
+
+
 @pytest.mark.skipif(
     not (
         r342_driver.DEFAULT_OUTPUT_DIR / "candidate_step00000008.npz"
@@ -237,12 +282,23 @@ def test_gate_checklist_controls_and_planted_failures(tmp_path: Path) -> None:
     or not r342_gate.R340_RUN_A.is_dir(),
     reason="20-step legoESM smoke snapshot or R340_RUN_A not present",
 )
-def test_evaluate_month_by_month_on_day1_smoke(tmp_path: Path) -> None:
+def test_evaluate_month_by_month_on_day1_smoke(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
     stub_nemo = tmp_path / "stub_nemo"
     r342_gate.stage_s4_year_run_dir(
         stub_nemo, r342_gate.DEFAULT_ICE_COVER_PATH, nn_itend=8, nn_stock=8
     )
+    capsys.readouterr()
     r342_gate.write_stub_s4_year_outputs(stub_nemo)
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err.strip() == "STOP 0"
+    assert (stub_nemo / "time.step").read_text(encoding="utf-8").strip() == "8"
+    (stub_nemo / "mpirun.stdout.log").write_text(captured.out, encoding="utf-8")
+    (stub_nemo / "mpirun.stderr.log").write_text(captured.err, encoding="utf-8")
+    stub_sig = r342_gate.verify_nemo_completion_signal(stub_nemo, expected_steps=8)
+    assert stub_sig["time_step"] == 8 and stub_sig["stderr_stop_0"] is True
     day1_check = r342_gate.verify_day1_against_admitted_s4_kt9(stub_nemo)
     assert all(v["max_ulp"] == 0 for v in day1_check.values())
 
