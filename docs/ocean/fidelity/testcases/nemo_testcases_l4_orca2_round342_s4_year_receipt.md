@@ -97,14 +97,40 @@ and `tests/ocean/fidelity/test_orca2x_round1_pilot_metrics.py`) from the ORCA2X
 branch verbatim (`100%` byte-identical) and extended `chlorophyll_at_step` in
 `scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round1_ladder_gate.py`
 to `1 <= kt <= 2920` (bit-identical for `kt = 1..10`).
-`nemo_testcase_l4_orca2_round342_s4_year_metrics.py` imports and calls
-`pilot_metrics.static_geometry`, `pilot_metrics.read_nemo_day`,
-`pilot_metrics.read_candidate_day`, `pilot_metrics.day_metrics`,
-`pilot_metrics.monthly`, and `pilot_metrics.planted_controls` across each of
-the 12 no-leap calendar months (`[31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30,
-31]` days, summing to `365` days) for both:
+`nemo_testcase_l4_orca2_round342_s4_year_metrics.py` reuses the Decision-160
+metric card verbatim for both:
 1. The NEMO reproducibility twin comparison (`Twin B vs Twin A`), and
 2. The legoESM standalone K0 candidate vs NEMO Arm A comparison.
+
+**Sampling schedule and nonlinear metric semantics (Decision 160 card, reused
+exactly):**
+- **Saved steps (both arms):** The Decision-160 card
+  (`docs/ocean/fidelity/testcases/orca2x_longrun_design.md` and
+  `scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2x_round1_pilot_metrics.py`)
+  defines its metrics on the instantaneous completed end-of-day states saved
+  every `nn_stock = 8` steps (`kt = 8, 16, 24, ..., 2920` for Days `d = 1..365`
+  at `rn_Dt = 10800 s`), without per-timestep online means:
+  - NEMO arm (`orca2_k0_year1_{a,b}_np2`): two-rank daily restarts
+    `ORCA2_{8*d:08d}_restart_{0000,0001}.nc` containing `tn, sn, un, vn, sshn`
+    (`Kbb` after the Stage-3 time-level swap), read via
+    `pilot_metrics.read_nemo_day`.
+  - legoESM arm: daily snapshots `candidate_step{8*d:08d}.npz` containing
+    `T, S, u, v, ssh` (`save_stride = 8`), read via
+    `pilot_metrics.read_candidate_day`.
+- **Per-saved-state metric evaluation then monthly averaging:** Daily restart or
+  snapshot state fields (`T, S, u, v, ssh`) are **never** averaged before
+  computing nonlinear metrics (`KE`, `PSI`, `MLD`;
+  `state_averaging_before_nonlinear_metrics = False`). Instead, on each saved
+  daily state `d` (`kt = 8d`), `pilot_metrics.day_metrics(cand, nemo, geo, mld,
+  cover)` computes every linear and nonlinear metric (`SST`, `SSS`, `SSH`,
+  depth-band `T`/`S`, surface `KE`, barotropic streamfunction `PSI`, Drake
+  Passage transport `DRAKE`, mixed-layer depth `MLD`, and under-ice
+  `ICE_SST`/`ICE_SSS`) and its daily difference map, and
+  `pilot_metrics.monthly(m_rows, m_maps, geo)` then averages those per-day
+  metric values across the saved daily states in each of the 12 no-leap calendar
+  months (`[31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]` days, summing to
+  `365` days), identically for both `Twin B vs Twin A` and `candidate vs NEMO
+  Arm A`.
 
 Every monthly metric is reported next to its Decision-185 reference bar:
 - Monthly RMS `SST` and depth-band `T` (`0-100m`, `100-1000m`, `>1000m`): `0.01 K`
@@ -118,8 +144,12 @@ Every monthly metric is reported next to its Decision-185 reference bar:
 All bars are strictly reference-only (`bar_mode = "DECISION_185_REFERENCE_ONLY"`,
 `verdict = None`, `pass_fail_assigned = False`). On the Day-1 (`kt = 8`) smoke
 verification in
-`/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/orca2_r342/smoke_metrics_comparison/`,
-both `Twin B vs Twin A` and `candidate vs NEMO` report `0.0000e+00` RMS (`PSI`
+`/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/orca2_r342/smoke_metrics_comparison/`
+(`round342_s4_nemo_twin_b_vs_a_metrics.json` SHA-256
+`973a6f1f610eea9f7071fa7753d58671cffb1ef5d90c79f5c7e2769a78e4a23e`,
+`round342_s4_candidate_vs_nemo_metrics.json` SHA-256
+`2c5246b21fd14204ec1d6f7fb9c5bcbd5ba482ae78f39be177ebc1b8e8ad231b`), both
+`Twin B vs Twin A` and `candidate vs NEMO` report `0.0000e+00` RMS (`PSI`
 pattern correlation `1.000000`) on `M01_Jan` (`1d` partial month) and
 `PENDING_ACQUISITION` on `M02_Feb..M12_Dec`.
 
@@ -150,13 +180,14 @@ pattern correlation `1.000000`) on `M01_Jan` (`1d` partial month) and
 4. **Checklist 6 (Real-flag FP instruction census + drift plant):**
    `verify_real_flag_fp_census` parses the real `BLD/Makefile` flags
    (`-fdefault-real-8 -O3 -funroll-all-loops -fcray-pointer -ffree-line-length-none`)
-   and audits all `425` compiled `.o` objects (`2,530` functions, `445,274`
+   and audits all `425` compiled `.o` objects (`1,700` functions, `205,193`
    floating-point instructions) plus a real-flag `mpif90` recompile of
    `restart.f90`. `plant_fp_drift` injects `+ 1.0e-30_wp` into `restart.f90`,
    compiles at real `-O3` flags, and proves `compare_fp_census` refuses.
 5. **Checklist 7 (Whole-build observer-free equivalence + contamination plant):**
-   `verify_same_program_no_observer` checks empty `MY_SRC`, scans all `424`
-   preprocessed `.f90` files for observer symbols, and runs
+   `verify_same_program_no_observer` checks empty `MY_SRC`, scans all `411`
+   preprocessed `ppsrc/nemo/*.f90` files (`413` total `ppsrc` files, `425`
+   identical `.o` objects) for observer symbols, and runs
    `common.same_program_no_observer`. `plant_observer_contamination` plants both
    a non-empty `MY_SRC` file and a `CALL r340_s4_surface_write(kstp)` line in
    `stprk3.f90` and proves both refuse.
@@ -178,11 +209,29 @@ pattern correlation `1.000000`) on `M01_Jan` (`1d` partial month) and
    admitted R340 `kt = 9` entry mismatch, unproduced `.bin` observer file, and
    manifest SHA-256 mismatch) and proves all six refuse while restoring the runs
    cleanly.
-9. **Checklist 11 (Rerun-after-refusal quarantine + `--admit-existing`):**
-   `admit_existing_with_quarantine` admits a valid twin pair in place and, on
-   failure, moves `orca2_k0_year1_{a,b}_np2` into `refused/<UTC-timestamp>_*`
-   without deleting any file. Verified in preflight for both pass and fail
-   paths.
+9. **Checklist 11 & 13 (Retention without deletion, rerun-after-refusal
+   quarantine, and `refused/ -> --admit-existing`):**
+   All `rm -rf` of retained arms are removed from `run.sh`
+   (`verify_run_sh_syntax_and_plant` asserts `rm -rf` is absent, and
+   `stage_single_arm` refuses if an arm directory already exists). If `mpirun`
+   or post-run admission fails, `quarantine_arms` moves
+   `orca2_k0_year1_{a,b}_np2` into
+   `<target_root>/refused/<UTC-timestamp>_orca2_k0_year1_{a,b}_np2.failed.<pid>`
+   (never deleting any file) before any re-run can stage fresh arms.
+   `admit_existing_with_quarantine` (`--admit-existing <run_root>`) supports
+   both in-place admission and the `refused/ -> --admit-existing` route: when
+   canonical arm directories are absent and quarantined pairs exist in
+   `<run_root>/refused/`, it verifies `producer_manifest.json` inside the
+   `refused/` retention trap (`producer_commit` ancestry, `binary_sha256` against
+   `./nemo`, and relative file SHA-256 digests) plus full twin admission
+   (`admit_twin_runs`), promotes the verified arms from `refused/` back to
+   canonical `<run_root>/orca2_k0_year1_{a,b}_np2` on pass, keeps them in
+   `refused/` on failure, and appends an audit record to
+   `<run_root>/admit_existing.log`. Preflight verifies all five routes
+   (`in_place_pass_verified`, `existing_arm_overwrite_refused`,
+   `refused_quarantine_and_rerun_verified`,
+   `refused_to_admit_existing_checksum_plant_verified`, and
+   `refused_to_admit_existing_promotion_verified`).
 10. **Checklist 12 (Stub replaces only `./nemo` and writes only K0 files):**
     In `--preflight-only`, `run.sh` installs a 3-line wrapper at `$run_dir/nemo`
     that calls `nemo_testcase_l4_orca2_round342_s4_year_gate.py --stub-nemo
@@ -192,12 +241,33 @@ pattern correlation `1.000000`) on `M01_Jan` (`1d` partial month) and
     `ORCA2_{kt:08d}_restart_{0000,0001}.nc` (with Day 1 `kt = 8` populated from
     admitted R340 S4 `kt = 9` entry state). `verify_no_unexpected_files` refuses
     any `.bin` or `oracle_*` file.
-11. **Checklist 13–16 (No symlinked outputs, disk-space & RAM preflight, timeout,
-    clean tree):** All outputs are regular files (`not p.is_symlink()`); disk
-    guard checks free space (`361,329.85 GiB` available vs `25.0 GiB` required)
-    with a `10^9 GiB` plant that refuses; RAM guard checks `>= 150 GiB` with a
-    `999,999 GiB` plant that refuses; per-arm `timeout --foreground 5400s` wraps
-    `mpirun -np 2 ./nemo`; dirty-tree guard refuses untracked or modified files.
+11. **Checklist 14–16 (No symlinked outputs, disk-space & RAM preflight + plants,
+    `timeout --foreground` + plant, clean worktree + plants, and `run.sh` syntax
+    plant):**
+    - All outputs are regular files (`not p.is_symlink()`).
+    - `verify_disk_space` checks free space (`351,076.36 GiB` available on
+      `/data/abyssal` vs `50.0 GiB` required for the `38.69 GiB` two-twin 365-day
+      restart footprint), and `plant_disk_space_exhaustion` plants a `10^9 GiB`
+      requirement in both Python and `run.sh` (`--required-disk-gib 1000000000`)
+      and proves both refuse.
+    - `verify_available_ram` checks `MemAvailable >= 150.0 GiB` and `free -g`
+      column 7 `>= 150 GiB` (`924.54 GiB` / `924 GiB` available), and
+      `plant_ram_exhaustion` plants a `999,999 GiB` requirement in both Python
+      and `run.sh` (`--required-ram-gib 999999`) and proves both refuse.
+    - `run.sh` wraps each arm's `mpirun -np 2 ./nemo` in
+      `timeout --foreground --signal=TERM --kill-after=30s 5400s`, and
+      `plant_timeout_foreground` runs `run.sh --stub-run-dir ... --timeout-seconds 1`
+      with `R342_STUB_SLEEP_SECONDS=5`, proving `timeout --foreground` terminates
+      the arm (`rc = 1`) and quarantines both arms into `refused/`.
+    - `verify_clean_worktree` enforces `allow_dirty=False` (`git_sha(allow_dirty=False)`,
+      `worktree_stamp(allow_dirty=False)`, and
+      `git status --porcelain --untracked-files=all`), and `plant_dirty_worktree`
+      plants both an untracked file and a modified tracked file in a temporary
+      git repository and proves both Python (`verify_clean_worktree`) and
+      `run.sh` (`check_clean_worktree`) refuse.
+    - `verify_run_sh_syntax_and_plant` checks `bash -n` on `run.sh` and plants a
+      syntax error (`if then`) in a temporary copy, proving `bash -n` refuses
+      (`rc = 2`).
 
 ## Preflight result
 
@@ -205,10 +275,12 @@ Executed
 `bash scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round342_s4_year_acquisition/run.sh --preflight-only`:
 - Status: **`ORCA2_ROUND342_S4_YEAR_PREFLIGHT_READY`**
 - Evidence JSON:
-  `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/orca2_r342/round342_s4_year_preflight.json`
-  (SHA-256 `4ee05995817ff0795ef63c04f1cf1220f023cf26b3650caee2c5677f70b88bb9`).
-- All Checklist 1–16 controls and all 13 planted failure modes fired and refused
-  as expected.
+  `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/orca2_r342/round342_s4_year_preflight.json`.
+- All Checklist 1–16 controls and all 18 planted failure modes (including
+  disk-space `10^9 GiB`, RAM `999,999 GiB`, `timeout --foreground`, dirty-tree
+  untracked + modified-tracked, `run.sh` syntax, failed-arm quarantine + re-run,
+  and `refused/ -> --admit-existing` binary-checksum plant + clean promotion)
+  fired and refused as expected.
 
 ## Choices and review
 
