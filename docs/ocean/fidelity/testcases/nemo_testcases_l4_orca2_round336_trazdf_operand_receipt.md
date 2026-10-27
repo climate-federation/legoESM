@@ -1461,8 +1461,8 @@ recipe at `packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:2063`).
 
 ### 2. Decision 122 census across all seven pairs and both labels
 
-Measured with `scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round336_d122_gate.py:217-457`
-(unit-tested in `tests/ocean/fidelity/test_orca2_round336_d122_gate.py:20-50`;
+Measured with `scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round336_d122_gate.py:311-626`
+(unit-tested in `tests/ocean/fidelity/test_orca2_round336_d122_gate.py:22-54`;
 self-test artifact `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/orca2_r336_resume18/d122_self_test.json`,
 SHA-256 `a93149a47b89842a1dbc99157ccd56f18705d19795eeb36860935777793bc4fa`;
 both `exact-loss` and `away-row` plants fire `STATUS PLANT-FIRED`). Both the
@@ -1502,7 +1502,7 @@ to the parent.
      (ORCA2 `kt=1` rest-state entry check where `u = v = 0`; `0` unequal words
      vs parent, SHA-256 `23e5a7ad14db9c9df3463d102a5d064780b4939bad3b5b8643012909e1d1585b`).
 - **Non-NEMO and non-ORCA2 card audit**
-  (`scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round336_d122_gate.py:461-608`;
+  (`scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round336_d122_gate.py:952-1411`;
   artifact `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/orca2_r336_resume18/caller_audit.json`,
   SHA-256 `66310b27c31186a6c704d7e545f068be8bf59061911a2153652856420850c438`,
   `STATUS PASS_R336_CALLER_AUDIT`):
@@ -1633,3 +1633,97 @@ From the wet-value audit embedded in
   `47e19e089c96c2f2f1b88f0591fc13f532b16b0bfb8bec5947838286da148c1e`).
 - **Review**: `independent review: operator`.
 - **Disposition**: **LANDED**.
+
+## Resume 20: rebase onto the ORCA2 lane tip
+
+Round 336 (97 commits based on `ba9f395125951c865f34b0db7b9f1d9de819dd0e`,
+pre-rebase tip preserved on branch `backup/r336_pre_rebase` at
+`47be2059440c1a255dee4fea0a2efc8bac269083`) was rebased onto the ORCA2 lane tip
+`d5d97cfc31218e12a59950e84f09bc9382255f37` (59 commits ahead across rounds 335,
+337, 338, and 339: standalone S0--S3 surface path and acquisition tools),
+producing rebased tip `e58c7cb69599331b7c810e5530398bf0f2d382f9` (`8ad851012b8b`
+before the three-entry `d122_gate` citation re-anchor). No model code,
+configuration value, or measurement artifact changed.
+
+### Conflict resolution and re-anchored citations
+
+The only file modified by both the lane and Round 336 is the receipt citation
+gate (`scripts/validate/ocean_fidelity/testcases/nemo_testcase_receipt_citation_gate.py`):
+
+- **Conflict (1 hunk)**: first and only conflict at commit `02678adcc2`
+  ("Audit shell and patch receipt citations", rebased as `e1af807c8d`) on the
+  `_NAME` file-extension pattern. The lane added `xml` and Round 336 added
+  `sh|patch`; resolved by keeping both sides' extensions:
+  `_NAME = (r"[A-Za-z0-9_./]+\.(?:F90|f90|h90|py|fcm|xml|sh|patch)"`.
+- **Re-anchored citations (3 entries)**: commit `47be2059440c` (rebased as
+  `e58c7cb69599`) expanded the Decision-122 and cross-tree caller comparator gate
+  and its unit test, shifting three Round-336 citations in
+  `nemo_testcase_receipt_citation_gate.py` and Section 2--3 of Resume 18 above:
+
+```text
+scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round336_d122_gate.py:217-457 (extent 241)
+  -> scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round336_d122_gate.py:311-626 (extent 316, ['def measure(', '"d122_c_and_d": True,', 316])
+tests/ocean/fidelity/test_orca2_round336_d122_gate.py:20-50 (extent 31)
+  -> tests/ocean/fidelity/test_orca2_round336_d122_gate.py:22-54 (extent 33, ['def test_d122_self_test_passes_and_plants_fire(tmp_path: Path) -> None:', 'assert d1["_max_index"] == (0, 0, 1)', 33])
+scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round336_d122_gate.py:461-608 (extent 148)
+  -> scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round336_d122_gate.py:952-1411 (extent 460, ['def caller_audit_dump(', '"callers": callers_report,', 460])
+```
+
+### 1. Mechanical non-gate delta verification
+
+At the rebased tip `e58c7cb69599` (prior to appending this receipt section),
+excluding only the shared citation gate file:
+
+- `git diff ba9f39512595..backup/r336_pre_rebase -- ':!scripts/validate/ocean_fidelity/testcases/nemo_testcase_receipt_citation_gate.py'`
+  vs
+  `git diff d5d97cfc3121..e58c7cb69599 -- ':!scripts/validate/ocean_fidelity/testcases/nemo_testcase_receipt_citation_gate.py'`:
+  **byte-identical** (`0` differing bytes across `12,154` lines, `602,041`
+  bytes, and `49` changed files; SHA-256
+  `4caf7b76abd73f7a34b15d744524de3cac48c30ece284acc5177a4875b4e3f2b`).
+- Symmetrically, `git diff backup/r336_pre_rebase..e58c7cb69599 -- ':!scripts/validate/ocean_fidelity/testcases/nemo_testcase_receipt_citation_gate.py'`
+  vs
+  `git diff ba9f39512595..d5d97cfc3121 -- ':!scripts/validate/ocean_fidelity/testcases/nemo_testcase_receipt_citation_gate.py'`:
+  **byte-identical** (`44` changed files; SHA-256
+  `20599eb48a72f90ddb23e2f33b687b2c720f29616dad9084ffcd669df8b3719c`).
+- Including this receipt commit (`HEAD`), the diff outside the citation gate and
+  this receipt file remains byte-identical (`48` files, `10,512` lines,
+  `505,054` bytes).
+
+### 2. Citation-gate line and key accounting
+
+Across `base = ba9f39512595`, `lane = d5d97cfc3121`, `backup = 47be2059440c`,
+and `HEAD`:
+
+- `FILES` entries: `718` (base) + `22` (added by lane) + `34` (added by
+  Round 336) = `774` in `HEAD` (`0` lane entries missing, `0` Round-336 entries
+  missing).
+- `CITATION_MAP` keys: `2,315` (base) + `56` (added by lane) + `85` (added by
+  Round 336) = `2,456` in `HEAD` (`0` duplicate keys; all `56` lane additions
+  present verbatim; `82 / 85` Round-336 additions present verbatim and `3 / 85`
+  re-anchored as listed above, plus the `25` Round-336 re-anchors of base
+  `ocean_model_latlon_cgrid.py`, `nemo_testcase_l4_orca2_round331_tke_gate.py`,
+  and `tke_round331_writer.F90` keys).
+- Added diff lines (`git diff -U0`): `208 / 209` lane-added lines and
+  `370 / 378` Round-336-added lines appear verbatim in `HEAD`; the `1` remaining
+  lane line and `1` Round-336 line are the combined `_NAME` regex
+  (`(?:F90|f90|h90|py|fcm|xml|sh|patch)`), and the `7` remaining Round-336 lines
+  are the `3` re-anchored `d122_gate` entries listed above.
+
+### 3. Full `land.sh` landing battery on the rebased tree
+
+Executed in `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/orca2_r336_resume20/`:
+
+- **ORCA2 `land.sh` T4 pytest battery** (`gate.log`, SHA-256
+  `adddd72fca73842d6656c75c24ce2e3d262f2514ebe85f9144bf526cbe18b040`):
+  `======================= 152 passed in 1090.87s (0:18:10) =======================`
+- **30-day GPU DINO from-rest month gate** (`dino_month_gate.log`, SHA-256
+  `882e6b307f21e4d2efe56e4cc2c0cf281cc7dc7145206b787e7533d8b5d4254c`;
+  snapshot SHA-256
+  `40a63d3a43a80600c740067fd3446bf428cd20e362a60987908c1a079a6e6bb5`; score
+  JSON SHA-256
+  `cb20c83a2362b906d9db56d23f143b49dbd639a425cd867ba6890bbc27c01856`):
+  `DINO month gate: day-30 wet 3-D T rms vs NEMO kt=960: 2.056821683e-03 K against bar 2.244317642e-03 K (certified 2.040288765e-03 K) -- PASS`
+  (raw log pass line:
+  `DINO from-rest month day-30 wet 3-D T rms vs NEMO kt=960: 2.056821683e-03 K against bar 2.244317642e-03 K (certified 2.040288765e-03 K) -- PASS`).
+- **Review**: `independent review: operator`.
+- **Disposition**: **REBASED, GATES GREEN, READY TO LAND**.
