@@ -436,8 +436,9 @@ def test_momentum_scored_only_with_geostrophic_wind_and_floor_is_5pct_ustar2():
         ev.momentum_flux_floor(dataclasses.replace(forced, tau_x_s=None))
 
 
+@pytest.mark.parametrize("kind", ["momentum", "both"])
 @pytest.mark.parametrize("plant", [False, True])
-def test_rollout_other_accel_is_what_the_step_applied(tmp_path, monkeypatch, plant):
+def test_rollout_other_accel_is_what_the_step_applied(tmp_path, monkeypatch, plant, kind):
     """The dissipation heating's midpoint uses the step's real non-candidate wind
     tendency: u(s+1) = u(s) + dt (candidate du + recorded other du), to round-off."""
     from cosci_eval import Arm
@@ -449,9 +450,11 @@ def test_rollout_other_accel_is_what_the_step_applied(tmp_path, monkeypatch, pla
             ft = real(st, sc, f, t)
             return ft._replace(du_dt=ft.du_dt.replace(data=0.0 * ft.du_dt.data))
         monkeypatch.setattr(ev, "compute_forcing_tendencies", planted)
-    cand = _write(tmp_path, f"mom_roll_{plant}", _GOOD_MOMENTUM)
-    rec, _ = Arm(_base_turbulence("louis", **_RGH)[0], cand, None, True).run(
+    body, hf = (_GOOD_MOMENTUM, None) if kind == "momentum" else (_GOOD_BOTH, "theta")
+    cand = _write(tmp_path, f"{kind}_roll_{plant}", body)
+    rec, _ = Arm(_base_turbulence("louis", **_RGH)[0], cand, hf, True).run(
         _forced_artifact(), 5, params=cand.default_params(), nlev=16, dt=10.0)
+    assert rec.other_accel is not None
     worst = 0.0
     for s in range(5):
         a, b = rec.at(s), rec.at(s + 1)
@@ -797,3 +800,192 @@ def test_e1_and_e2_ignore_the_layer_above_the_case_sponge_base():
     e1b = cosci_eval.stage_e1({"louis": arm}, [("a.npz", flux_spoiled)], 16, 10.0)
     assert e1["a.npz"]["louis"]["wtheta"] == pytest.approx(
         e1b["a.npz"]["louis"]["wtheta"], rel=1e-12)
+
+
+# --- "both" candidates: scalars and momentum, own surface stress -----------------
+
+_GOOD_BOTH = """
+    import jax.numpy as jnp
+    KIND = "both"
+    PARAMS = {"K": (10.0, 1.0, 100.0, "m2/s"), "C_d": (2e-3, 1e-4, 1e-2, "1")}
+    def init_aux(inputs):
+        return ()
+    def fluxes(params, inputs, aux):
+        def f(phi, s):
+            g = (phi[1:] - phi[:-1]) / (inputs.z_full[1:] - inputs.z_full[:-1])
+            return jnp.concatenate([jnp.reshape(s, (1,)), -params["K"] * g, jnp.zeros(1)])
+        speed = jnp.sqrt(inputs.u[0] ** 2 + inputs.v[0] ** 2 + 1e-12)
+        tau = -params["C_d"] * speed
+        return ((f(inputs.theta_l, inputs.w_theta_s), f(inputs.q_t, inputs.w_qt_s)),
+                (f(inputs.u, tau * inputs.u[0]), f(inputs.v, tau * inputs.v[0])), aux)
+"""
+
+
+def test_both_tendencies_are_the_scalar_and_momentum_kinds_summed(tmp_path):
+    both = _write(tmp_path, "both_sum", _GOOD_BOTH)
+    inp = _column()
+    sa, mo = both.fluxes(both.default_params(), inp, ())[:2]
+    ct = cmod.candidate_tendencies("both", sa, mo, inp, heat_form="enthalpy",
+                                   ke_heating=True)
+    cs = cmod.candidate_tendencies("scalar", *sa, inp, heat_form="enthalpy",
+                                   ke_heating=None)
+    cm = cmod.candidate_tendencies("momentum", *mo, inp, heat_form=None, ke_heating=True)
+    np.testing.assert_array_equal(np.asarray(ct.dtheta), np.asarray(cs.dtheta + cm.dtheta))
+    np.testing.assert_array_equal(np.asarray(ct.du), np.asarray(cm.du))
+    np.testing.assert_array_equal(np.asarray(ct.dqt), np.asarray(cs.dqt))
+    with pytest.raises(ValueError, match="both"):
+        cmod.owned_fluxes("both", sa[0], mo[0])
+
+
+@pytest.mark.parametrize("heating, expect_closed", [(True, True), (False, False)])
+def test_both_e0_passes_and_total_energy_needs_dissipation_heating(tmp_path, heating,
+                                                                   expect_closed):
+    both = _write(tmp_path, "both_e0", _GOOD_BOTH)
+    r = ev.e0_column_checks(both, both.default_params(), _column(),
+                            heat_form="enthalpy", ke_heating=heating)
+    assert r["finite"] and r["surface_exact"] and r["top_zero"]
+    assert set(r["closure_rel"]) == {"heat", "qt", "u", "v"}
+    assert max(r["closure_rel"].values()) < 1e-13 and r["jit_parity"] < 1e-12
+    assert r["surface_stress_power"] < 0.0          # drag removes kinetic energy
+    assert (r["energy_rel"] < 1e-12) is expect_closed, r["energy_rel"]
+
+
+def test_both_e0_checks_scalar_surface_and_closure_are_not_vacuous(tmp_path, monkeypatch):
+    bad = _GOOD_BOTH.replace("f(inputs.theta_l, inputs.w_theta_s)",
+                             "f(inputs.theta_l, 1.01 * inputs.w_theta_s)")
+    cand = _write(tmp_path, "both_badsfc", bad)
+    r = ev.e0_column_checks(cand, cand.default_params(), _column(), heat_form="theta",
+                            ke_heating=True)
+    assert r["surface_exact"] is False
+    both = _write(tmp_path, "both_leak", _GOOD_BOTH)
+    real = ev.candidate_tendencies
+
+    def leaky(*a, **k):
+        t = real(*a, **k)
+        return t._replace(dtheta=t.dtheta * 1.001)
+    monkeypatch.setattr(ev, "candidate_tendencies", leaky)
+    r = ev.e0_column_checks(both, both.default_params(), _column(), heat_form="theta",
+                            ke_heating=True)
+    assert r["closure_rel"]["heat"] > 1e-5
+
+
+def test_both_e0_heat_closure_sees_a_composition_defect(tmp_path, monkeypatch):
+    """A defect only in how "both" adds dissipation heating to the scalar heating
+    (here: heating applied twice) must show in the heat closure, which is checked on
+    the tendencies the candidate actually applies."""
+    both = _write(tmp_path, "both_twice", _GOOD_BOTH)
+    real = cmod.ke_dissipation_heating
+    monkeypatch.setattr(cmod, "ke_dissipation_heating", lambda *a: 2.0 * real(*a))
+    r = ev.e0_column_checks(both, both.default_params(), _column(), heat_form="enthalpy",
+                            ke_heating=True)
+    assert r["closure_rel"]["heat"] > 1e-8, r["closure_rel"]["heat"]
+
+
+def test_both_e0_hides_the_baseline_surface_stress(tmp_path):
+    peek = _GOOD_BOTH.replace("tau * inputs.u[0]", "inputs.uw_s")
+    cand = _write(tmp_path, "both_peek", peek)
+    r = ev.e0_column_checks(cand, cand.default_params(), _column(), heat_form="theta",
+                            ke_heating=True)
+    assert r["finite"] is False   # a candidate reading the absent stress gets NaN
+
+
+def _rollout_final(cand, base_name, heat_form, ke_heating, nsteps=20):
+    from cosci_eval import Arm
+    from tune_scm_to_les import _base_turbulence
+    arm = Arm(_base_turbulence(base_name, **_RGH)[0], cand, heat_form, ke_heating)
+    rec, _ = arm.run(_forced_artifact(), nsteps, params=cand.default_params(), nlev=16,
+                     dt=10.0)
+    return rec
+
+
+def test_both_rollout_does_not_depend_on_the_baseline(tmp_path):
+    both = _write(tmp_path, "both_roll", _GOOD_BOTH)
+    a = _rollout_final(both, "louis", "theta", True)
+    b = _rollout_final(both, "holtslag_boville", "theta", True)
+    for f in ("theta_l", "u", "v"):
+        d = float(jnp.max(jnp.abs(getattr(a.final_inputs, f) - getattr(b.final_inputs, f))))
+        assert d < 1e-12, (f, d)
+    # the column evolved, and its surface stress is the candidate's own drag
+    assert float(jnp.max(jnp.abs(a.final_inputs.u - a.at(0).u))) > 1e-3
+    assert bool(jnp.all(jnp.isnan(a.inputs.uw_s)))
+    col, fl = a.at(3), a.fluxes_of_step(3)
+    speed = jnp.sqrt(col.u[0] ** 2 + col.v[0] ** 2 + 1e-12)
+    np.testing.assert_allclose(float(fl.uw[0]), float(-2e-3 * speed * col.u[0]),
+                               rtol=1e-13)
+    # control: a momentum-only candidate keeps each baseline's scalar transport, so
+    # the same comparison separates the two baselines
+    mom = _write(tmp_path, "mom_ctrl", _GOOD_MOMENTUM)
+    ma = _rollout_final(mom, "louis", None, True)
+    mb = _rollout_final(mom, "holtslag_boville", None, True)
+    assert float(jnp.max(jnp.abs(ma.final_inputs.theta_l - mb.final_inputs.theta_l))) > 1e-6
+
+
+def test_both_rollout_on_a_cloudy_column_does_not_depend_on_the_baseline(tmp_path):
+    """Moist path: condensation acts, so tend_full - tend_turb keeps a nonzero q_v
+    remainder that the candidate's moisture transport must replace exactly."""
+    from cosci_eval import Arm
+    from tune_scm_to_les import _base_turbulence
+    both = _write(tmp_path, "both_moist", _GOOD_BOTH)
+    art = _moist_artifact()
+    n = ev.e2_nsteps(art, 10.0)
+    recs = [Arm(_base_turbulence(b, **_RGH)[0], both, "enthalpy", True).run(
+        art, n, params=both.default_params(), nlev=16, dt=10.0)[0]
+        for b in ("louis", "holtslag_boville")]
+    for k in ("theta_l", "q_t", "u"):
+        d = float(jnp.max(jnp.abs(getattr(recs[0].final_inputs, k)
+                                  - getattr(recs[1].final_inputs, k))))
+        assert d < 1e-12, (k, d)
+    assert float(jnp.max(recs[0].at(0).q_c)) > 1e-5               # cloud present
+    np.testing.assert_array_equal(np.asarray(recs[0].fluxes.wqt[:, 0]),
+                                  np.asarray(recs[0].inputs.w_qt_s))
+    assert float(jnp.max(jnp.abs(recs[0].final_inputs.q_t - recs[0].at(0).q_t))) > 1e-6
+
+
+@pytest.mark.parametrize("plant", [False, True])
+def test_both_owned_tendencies_keep_the_non_turbulent_remainder(monkeypatch, plant):
+    """On a cloudy column the baseline total minus its turbulence leaves a nonzero
+    microphysics remainder in T and q_v; a "both" candidate's tendency is added to
+    exactly that remainder (planted: the q_v remainder dropped)."""
+    from cosci_eval import Arm
+    from legoesm.atmosphere.physics import MicrophysicsConfig
+    from legoesm.atmosphere.physics.combined import make_physics
+    from tune_scm_to_les import _base_turbulence
+    scm, phys, *_ = Arm(_base_turbulence("holtslag_boville", **_RGH)[0]).prepare(
+        _moist_artifact(), nlev=16, dt=10.0)
+    args = (scm.state, scm.grid, scm.sigma_coord)
+    full, _ = scm.physics_fn(*args, phys_state=scm.phys_state)
+    turb_fn = make_physics(phys._replace(microphysics=MicrophysicsConfig(scheme="none")),
+                           model_type="hydrostatic", dt=scm.dt)
+    turb, _ = turb_fn(*args, phys_state=scm.phys_state)
+    inp = ev.scm_column_inputs(scm.state, scm.sigma_coord, scm.phys_state, f_c=0.0,
+                               u_geo=None, v_geo=None, dt=10.0, uw_s=0.0, vw_s=0.0)
+    n = inp.mass.shape[0]
+    r = jnp.linspace(-1.0, 1.0, n)
+    cand = cmod.CandidateTendencies(dtheta=1e-4 * r, dqt=1e-7 * r, du=1e-3 * r,
+                                    dv=-1e-3 * r)
+    if plant:
+        real = ev._swap
+        monkeypatch.setattr(ev, "_swap", lambda f, new: real(
+            f, cand.dqt if f is full.tracer_tendencies["q_v"] else new))
+    out = ev._owned_tendencies(full, turb, cand, inp, "both")
+    col = ev._col
+    q_rem = col(full.tracer_tendencies["q_v"].data) - col(turb.tracer_tendencies["q_v"].data)
+    t_rem = col(full.dT_dt.data) - col(turb.dT_dt.data)
+    assert float(jnp.max(jnp.abs(q_rem))) > 0.0 and float(jnp.max(jnp.abs(t_rem))) > 0.0
+    got_q = col(out.tracer_tendencies["q_v"].data)
+    ok_q = float(jnp.max(jnp.abs(got_q - (q_rem + cand.dqt)))) <= 1e-15
+    assert ok_q is (not plant)
+    np.testing.assert_allclose(np.asarray(col(out.dT_dt.data)),
+                               np.asarray(t_rem + cand.dtheta * inp.exner), rtol=0, atol=1e-15)
+    for f, c in (("du_dt", cand.du), ("dv_dt", cand.dv)):
+        rem = col(getattr(full, f).data) - col(getattr(turb, f).data)
+        np.testing.assert_allclose(np.asarray(col(getattr(out, f).data)),
+                                   np.asarray(rem + c), rtol=0, atol=1e-15)
+
+
+def test_cli_both_needs_both_choices():
+    import cosci_eval
+    cosci_eval.check_kind_choices("both", "theta", "on")
+    for hf, ke in ((None, "on"), ("theta", None), (None, None)):
+        with pytest.raises(SystemExit):
+            cosci_eval.check_kind_choices("both", hf, ke)

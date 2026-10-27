@@ -8,14 +8,19 @@ Candidate contract (a module with these names)::
 
     KIND = "scalar"        # owns θ_l and q_t transport; momentum stays with the baseline
     # or KIND = "momentum" # owns u, v transport; scalars stay with the baseline
+    # or KIND = "both"     # owns θ_l, q_t, u and v transport, incl. the surface stress
     PARAMS = {"name": (default, lo, hi, "units"), ...}   # every free parameter
     def init_aux(inputs: ColumnInputs): -> pytree       # candidate prognostic state, or ()
     def fluxes(params: dict, inputs: ColumnInputs, aux) -> (flux_a, flux_b, aux_new)
 
 ``fluxes`` returns KINEMATIC interface fluxes, shape ``(n+1,)``, surface-first,
 positive upward: ``(w'θ_l', w'q_t')`` for ``KIND="scalar"``, ``(u'w', v'w')`` for
-``KIND="momentum"``. Index 0 is the surface interface and must equal the prescribed
-surface flux in ``inputs`` exactly; index ``n`` is the model top and must be zero
+``KIND="momentum"``; for ``KIND="both"`` ``flux_a`` is the pair ``(w'θ_l', w'q_t')``
+and ``flux_b`` the pair ``(u'w', v'w')``. Index 0 is the surface interface and must
+equal the prescribed surface flux in ``inputs`` exactly, except the surface stress of
+a ``"both"`` candidate, which the candidate computes itself (the baseline's
+turbulence is computed and subtracted whole, so no surface stress is handed over and
+``inputs.uw_s``/``vw_s`` are NaN for that kind); index ``n`` is the model top and must be zero
 (use :func:`absorb_top` to deposit a top-reaching wave flux into the mean flow
 inside the column). ``params`` values are traced scalars, so ``jax.grad`` reaches
 them. The operator may be implicit in time internally (``inputs.dt`` is given):
@@ -40,7 +45,30 @@ from legoesm import constants
 
 Array = jnp.ndarray
 
-KINDS = ("scalar", "momentum")
+KINDS = ("scalar", "momentum", "both")
+
+
+def owns_scalars(kind: str) -> bool:
+    return kind in ("scalar", "both")
+
+
+def owns_momentum(kind: str) -> bool:
+    return kind in ("momentum", "both")
+
+
+def owned_fluxes(kind: str, flux_a, flux_b) -> dict:
+    """The candidate's fluxes by field name (``wtheta``, ``wqt``, ``uw``, ``vw``),
+    owned fields only."""
+    if kind == "scalar":
+        return {"wtheta": flux_a, "wqt": flux_b}
+    if kind == "momentum":
+        return {"uw": flux_a, "vw": flux_b}
+    if kind == "both":
+        if not (isinstance(flux_a, tuple | list) and isinstance(flux_b, tuple | list)
+                and len(flux_a) == 2 and len(flux_b) == 2):
+            raise ValueError('a "both" candidate returns ((wtheta, wqt), (uw, vw), aux)')
+        return {"wtheta": flux_a[0], "wqt": flux_a[1], "uw": flux_b[0], "vw": flux_b[1]}
+    raise ValueError(f"kind must be one of {KINDS}, got {kind!r}")
 #: Heat-flux conversions the harness offers. ``theta``: the flux moves mass-weighted
 #: θ_l (what every roster closure and the LES conserve; column enthalpy is NOT
 #: conserved). ``enthalpy``: the flux is converted with the interface Exner function
@@ -243,27 +271,26 @@ def candidate_tendencies(kind: str, flux_a: Array, flux_b: Array, inputs: Column
     forward-Euler step (``None`` = the candidate stepped alone). Dissipation heating
     is evaluated at the full step's midpoint winds so the stepped energy budget
     closes exactly."""
-    if kind == "scalar":
-        return CandidateTendencies(
-            dtheta=heat_flux_to_theta_tendency(flux_a, inputs, heat_form),
-            dqt=flux_to_tendency(flux_b, inputs.rho_half, inputs.mass),
-            du=None, dv=None)
-    if kind == "momentum":
-        du = flux_to_tendency(flux_a, inputs.rho_half, inputs.mass)
-        dv = flux_to_tendency(flux_b, inputs.rho_half, inputs.mass)
-        dtheta = None
+    fl = owned_fluxes(kind, flux_a, flux_b)
+    dtheta = dqt = du = dv = None
+    if owns_scalars(kind):
+        dtheta = heat_flux_to_theta_tendency(fl["wtheta"], inputs, heat_form)
+        dqt = flux_to_tendency(fl["wqt"], inputs.rho_half, inputs.mass)
+    if owns_momentum(kind):
+        du = flux_to_tendency(fl["uw"], inputs.rho_half, inputs.mass)
+        dv = flux_to_tendency(fl["vw"], inputs.rho_half, inputs.mass)
         if ke_heating:
             u_mid, v_mid = step_midpoint_winds(*_total_accel(du, dv, other_accel), inputs)
-            heat = ke_dissipation_heating(flux_a, flux_b, u_mid, v_mid,
+            heat = ke_dissipation_heating(fl["uw"], fl["vw"], u_mid, v_mid,
                                           inputs.rho_half, inputs.mass)
-            dtheta = heat / (constants.c_pd * inputs.exner)
-        return CandidateTendencies(dtheta=dtheta, dqt=None, du=du, dv=dv)
-    raise ValueError(f"kind must be one of {KINDS}, got {kind!r}")
+            d_heat = heat / (constants.c_pd * inputs.exner)
+            dtheta = d_heat if dtheta is None else dtheta + d_heat
+    return CandidateTendencies(dtheta=dtheta, dqt=dqt, du=du, dv=dv)
 
 
 class EnergyBudget(NamedTuple):
     """Column total-energy rate budget [W m⁻²]: ``d/dt Σ m (c_p T + L_v q_t + ½|u|²)``
-    (the candidate's own tendencies; latent term only for a scalar candidate)
+    (the candidate's own tendencies; latent term only for a candidate that owns scalars)
     vs the boundary inputs (surface enthalpy flux + surface-stress work − top
     fluxes); ``residual`` = rate − inputs."""
 
@@ -279,21 +306,22 @@ def column_energy_budget(tend: CandidateTendencies, flux_a: Array, flux_b: Array
     (momentum: its KE work and surface/top work at the full step's midpoint winds;
     ``other_accel`` as in :func:`candidate_tendencies`)."""
     m = inputs.mass
+    fl = owned_fluxes(kind, flux_a, flux_b)
     d_temp = (jnp.zeros_like(m) if tend.dtheta is None else tend.dtheta * inputs.exner)
     rate = jnp.sum(m * constants.c_pd * d_temp)
     boundary = jnp.asarray(0.0, m.dtype)
-    if kind == "scalar":
-        mh = inputs.rho_half * flux_a * inputs.exner_half * constants.c_pd
+    if owns_scalars(kind):
+        mh = inputs.rho_half * fl["wtheta"] * inputs.exner_half * constants.c_pd
         # latent-ok: column moist-enthalpy diagnostic at the constant L_v
-        mq = inputs.rho_half * flux_b * constants.L_v  # latent-ok: see above
+        mq = inputs.rho_half * fl["wqt"] * constants.L_v  # latent-ok: see above
         rate = rate + jnp.sum(m * constants.L_v * tend.dqt)  # latent-ok: see above
         boundary = boundary + mh[0] - mh[-1] + mq[0] - mq[-1]
-    if kind == "momentum":
+    if owns_momentum(kind):
         u_mid, v_mid = step_midpoint_winds(*_total_accel(tend.du, tend.dv, other_accel),
                                            inputs)
         rate = rate + jnp.sum(m * (u_mid * tend.du + v_mid * tend.dv))
-        mu = inputs.rho_half * flux_a
-        mv = inputs.rho_half * flux_b
+        mu = inputs.rho_half * fl["uw"]
+        mv = inputs.rho_half * fl["vw"]
         boundary = boundary + u_mid[0] * mu[0] + v_mid[0] * mv[0] \
             - u_mid[-1] * mu[-1] - v_mid[-1] * mv[-1]
     return EnergyBudget(rate=rate, boundary_input=boundary, residual=rate - boundary)

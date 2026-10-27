@@ -16,8 +16,10 @@ Stages (``--stage``):
   equally; parameters AD-tuned on the training cases only (Adam, the LES-suite AD
   tuner's budget), scored on training and held-out cases.
 
-A candidate owns either scalars or momentum; ``--baseline`` names the roster closure
-that supplies the other part (and the surface stress). ``--baseline-only`` scores a
+A candidate owns scalars, momentum, or both; ``--baseline`` names the roster closure
+that supplies the other part (and the surface stress). For a "both" candidate the
+baseline only sets up the column: its turbulence tendency is removed whole and the
+candidate computes its own surface stress. ``--baseline-only`` scores a
 roster closure instead (default, LES-tuned, and AD-tuned arms) for comparison.
 
 Usage::
@@ -662,9 +664,9 @@ def parse_args(argv=None):
     p.add_argument("--baseline", default=None,
                    help="roster closure supplying the non-owned part (required with --candidate)")
     p.add_argument("--heat-form", choices=("theta", "enthalpy"), default=None,
-                   help="scalar candidates only (required): how the heat flux is applied")
+                   help="scalar and both candidates (required): how the heat flux is applied")
     p.add_argument("--ke-heating", choices=("on", "off"), default=None,
-                   help="momentum candidates only (required): KE dissipation as heat")
+                   help="momentum and both candidates (required): KE dissipation as heat")
     p.add_argument("--baseline-only", nargs="*", default=[],
                    help="roster closures to score (default/LES-tuned/AD-tuned arms)")
     p.add_argument("--artifacts", nargs="*", type=Path, default=[])
@@ -686,11 +688,14 @@ def parse_args(argv=None):
 
 def check_kind_choices(kind: str, heat_form, ke_heating) -> None:
     """Each candidate kind states exactly the choice that acts on it: a scalar
-    candidate its heat form, a momentum candidate its dissipation heating."""
+    candidate its heat form, a momentum candidate its dissipation heating, a
+    "both" candidate the two."""
     if kind == "scalar" and (heat_form is None or ke_heating is not None):
         raise SystemExit("a scalar candidate needs --heat-form and takes no --ke-heating")
     if kind == "momentum" and (ke_heating is None or heat_form is not None):
         raise SystemExit("a momentum candidate needs --ke-heating and takes no --heat-form")
+    if kind == "both" and (heat_form is None or ke_heating is None):
+        raise SystemExit('a "both" candidate needs --heat-form and --ke-heating')
 
 
 def main(argv=None) -> int:

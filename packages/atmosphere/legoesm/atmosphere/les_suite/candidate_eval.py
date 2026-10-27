@@ -3,15 +3,19 @@
 E0 static checks, L idealized limits, E1 a-priori fluxes, E2 a-posteriori SCM runs
 with AD tuning. Every stage drives the SAME single-column model the roster is scored
 in (:mod:`~legoesm.atmosphere.les_suite.scm_runner`); a candidate replaces only the
-part it owns (scalars OR momentum), and the other part is a named baseline closure.
+part it owns (scalars, momentum, or both), and any other part is a named baseline
+closure. A ``"both"`` candidate replaces the whole baseline turbulence tendency and
+computes its own surface stress; the baseline then only sets up the column.
 
 How a candidate enters the column (:func:`rollout`): the SCM step calls a substitute
 physics function that returns ``baseline_total − baseline_turbulence[owned] +
 candidate[owned]``. Combined physics is a parallel split (every process sees the same
 input state, tendencies summed), so that subtraction removes the baseline closure's
 owned part exactly. The candidate gets the surface heat/moisture flux the forcing
-injected for this stage and the surface stress the baseline surface layer applied,
-so both arms of a comparison see the same surface boundary condition.
+injected for this stage; a scalar or momentum candidate also gets the surface stress
+the baseline surface layer applied, so both arms of such a comparison see the same
+surface boundary condition. A ``"both"`` candidate gets NaN for the stress and
+applies its own, so its surface stress can differ from any baseline's.
 """
 from __future__ import annotations
 
@@ -42,6 +46,11 @@ from .candidate import (
     column_energy_budget,
     column_inputs,
     half_level_average,
+    ke_dissipation_heating,
+    owned_fluxes,
+    owns_momentum,
+    owns_scalars,
+    step_midpoint_winds,
     tendency_to_flux,
 )
 from .scm_coupling import interp_profile, liquid_water_theta
@@ -141,7 +150,7 @@ def _swap(field, full_new: Array):
 def _owned_tendencies(tend_full, tend_turb, cand, inputs: ColumnInputs, kind: str):
     """Replace the baseline closure's owned part by the candidate's tendencies."""
     out = tend_full
-    if kind == "scalar":
+    if owns_scalars(kind):
         d_temp = (_col(tend_full.dT_dt.data) - _col(tend_turb.dT_dt.data)
                   + cand.dtheta * inputs.exner)
         tr = dict(tend_full.tracer_tendencies or {})
@@ -149,13 +158,15 @@ def _owned_tendencies(tend_full, tend_turb, cand, inputs: ColumnInputs, kind: st
             q_full = _col(tr["q_v"].data)
             q_turb = _col(tend_turb.tracer_tendencies["q_v"].data)
             tr["q_v"] = _swap(tr["q_v"], q_full - q_turb + cand.dqt)
-        return out._replace(dT_dt=_swap(tend_full.dT_dt, d_temp), tracer_tendencies=tr)
-    du = _col(tend_full.du_dt.data) - _col(tend_turb.du_dt.data) + cand.du
-    dv = _col(tend_full.dv_dt.data) - _col(tend_turb.dv_dt.data) + cand.dv
-    out = out._replace(du_dt=_swap(tend_full.du_dt, du), dv_dt=_swap(tend_full.dv_dt, dv))
-    if cand.dtheta is not None:  # KE-dissipation heating of a momentum candidate
+        out = out._replace(dT_dt=_swap(tend_full.dT_dt, d_temp), tracer_tendencies=tr)
+    elif cand.dtheta is not None:  # KE-dissipation heating of a momentum candidate
         d_temp = _col(tend_full.dT_dt.data) + cand.dtheta * inputs.exner
         out = out._replace(dT_dt=_swap(tend_full.dT_dt, d_temp))
+    if owns_momentum(kind):
+        du = _col(tend_full.du_dt.data) - _col(tend_turb.du_dt.data) + cand.du
+        dv = _col(tend_full.dv_dt.data) - _col(tend_turb.dv_dt.data) + cand.dv
+        out = out._replace(du_dt=_swap(tend_full.du_dt, du),
+                           dv_dt=_swap(tend_full.dv_dt, dv))
     return out
 
 
@@ -201,10 +212,11 @@ def rollout(scm, physics_config, nsteps: int, *, candidate: Candidate | None = N
     if candidate is not None:
         if params is None:
             raise ValueError("a candidate rollout needs params")
-        if candidate.kind == "scalar" and heat_form is None:
-            raise ValueError("a scalar candidate rollout needs an explicit heat_form")
-        if candidate.kind == "momentum" and ke_heating is None:
-            raise ValueError("a momentum candidate rollout needs an explicit ke_heating")
+        if owns_scalars(candidate.kind) and heat_form is None:
+            raise ValueError("a scalar-owning candidate rollout needs an explicit heat_form")
+        if owns_momentum(candidate.kind) and ke_heating is None:
+            raise ValueError("a momentum-owning candidate rollout needs an explicit "
+                             "ke_heating")
         if physics_config.turbulence.scheme in PROGNOSTIC_TURBULENCE:
             raise ValueError(
                 f"baseline {physics_config.turbulence.scheme!r} carries prognostic "
@@ -241,6 +253,9 @@ def rollout(scm, physics_config, nsteps: int, *, candidate: Candidate | None = N
                                  v_geo=vg, dt=dt, uw_s=zero, vw_s=zero, z0_m=z0_m,
                                  z0h_m=z0h_m)
         imp = implied_fluxes(tend_turb, base)
+        if kind == "both":  # the candidate computes its own surface stress
+            nan = jnp.full((), jnp.nan, zero.dtype)
+            return base._replace(uw_s=nan, vw_s=nan), imp
         return base._replace(uw_s=imp.uw[0], vw_s=imp.vw[0]), imp
 
     def _other_accel(tend_full, tend_turb, st, sc, t):
@@ -291,12 +306,11 @@ def rollout(scm, physics_config, nsteps: int, *, candidate: Candidate | None = N
                 return tend_full, phys_out
             fa, fb, aux_new = candidate.fluxes(params, inputs, aux)
             other = (_other_accel(tend_full, tend_turb, st, sc, t)
-                     if kind == "momentum" and ke_heating else None)
+                     if owns_momentum(kind) and ke_heating else None)
             ct = candidate_tendencies(kind, fa, fb, inputs, heat_form=heat_form,
                                       ke_heating=ke_heating, other_accel=other)
             stash["other"] = other
-            stash["fluxes"] = (imp._replace(wtheta=fa, wqt=fb) if kind == "scalar"
-                               else imp._replace(uw=fa, vw=fb))
+            stash["fluxes"] = imp._replace(**owned_fluxes(kind, fa, fb))
             stash["aux"] = aux_new
             return _owned_tendencies(tend_full, tend_turb, ct, inputs, kind), phys_out
 
@@ -515,43 +529,67 @@ def e0_column_checks(candidate: Candidate, params: dict, inputs: ColumnInputs, *
     * ``energy_rel``: relative residual of the total-energy rate budget
       (:func:`candidate.column_energy_budget`), dissipation heating included when on;
     * ``jit_parity``: max |eager − jit| flux difference.
+
+    A ``"both"`` candidate computes its own surface stress, so ``surface_exact``
+    covers its scalar fluxes only; ``surface_stress_power`` [W m⁻²] records
+    ``ρ_0 (u_0 u'w'_0 + v_0 v'w'_0)`` at the lowest level's winds (negative = the
+    stress removes kinetic energy from the column, as surface drag does).
     """
+    kind = candidate.kind
+    if kind == "both":  # as in the rollout: no other closure supplies a surface stress
+        nan = jnp.full((), jnp.nan, inputs.u.dtype)
+        inputs = inputs._replace(uw_s=nan, vw_s=nan)
     aux = candidate.init_aux(inputs)
     fa, fb, _ = candidate.fluxes(params, inputs, aux)
+    fl = owned_fluxes(kind, fa, fb)
     n = inputs.mass.shape[0]
     out: dict = {}
-    out["finite"] = bool(fa.shape == (n + 1,) and fb.shape == (n + 1,)
-                         and jnp.all(jnp.isfinite(fa)) and jnp.all(jnp.isfinite(fb)))
-    if candidate.kind == "scalar":
-        sa, sb = inputs.w_theta_s, inputs.w_qt_s
-    else:
-        sa, sb = inputs.uw_s, inputs.vw_s
-    out["surface_exact"] = bool(fa[0] == sa) and bool(fb[0] == sb)
-    out["surface_mismatch"] = [float(fa[0] - sa), float(fb[0] - sb)]
-    out["top_zero"] = bool(fa[-1] == 0.0) and bool(fb[-1] == 0.0)
-    out["top_flux"] = [float(fa[-1]), float(fb[-1])]
-    ct = candidate_tendencies(candidate.kind, fa, fb, inputs, heat_form=heat_form,
+    out["finite"] = all(f.shape == (n + 1,) and bool(jnp.all(jnp.isfinite(f)))
+                        for f in fl.values())
+    prescribed = {"wtheta": inputs.w_theta_s, "wqt": inputs.w_qt_s}
+    if kind == "momentum":
+        prescribed = {"uw": inputs.uw_s, "vw": inputs.vw_s}
+    owned_prescribed = {k: v for k, v in prescribed.items() if k in fl}
+    out["surface_exact"] = all(bool(fl[k][0] == s) for k, s in owned_prescribed.items())
+    out["surface_mismatch"] = [float(fl[k][0] - s) for k, s in owned_prescribed.items()]
+    if kind == "both":
+        out["surface_stress_power"] = float(
+            inputs.rho_half[0] * (inputs.u[0] * fl["uw"][0] + inputs.v[0] * fl["vw"][0]))
+    out["top_zero"] = all(bool(f[-1] == 0.0) for f in fl.values())
+    out["top_flux"] = [float(f[-1]) for f in fl.values()]
+    ct = candidate_tendencies(kind, fa, fb, inputs, heat_form=heat_form,
                               ke_heating=ke_heating)
     m, rh = inputs.mass, inputs.rho_half
-    if candidate.kind == "scalar":
+    pairs = []
+    if owns_scalars(kind):
+        # the heat the candidate applied, less the dissipation heating a "both"
+        # candidate adds (an internal source, closed by the energy budget), must
+        # close on its scalar transport
+        dtheta = ct.dtheta
+        if kind == "both" and ke_heating:
+            heat = ke_dissipation_heating(fl["uw"], fl["vw"], *step_midpoint_winds(
+                ct.du, ct.dv, inputs), rh, inputs.mass)
+            dtheta = dtheta - heat / (constants.c_pd * inputs.exner)
         if heat_form == "theta":
-            heat_tend, heat_flux = ct.dtheta, rh * fa
+            heat_tend, heat_flux = dtheta, rh * fl["wtheta"]
         else:
-            heat_tend, heat_flux = ct.dtheta * inputs.exner, rh * fa * inputs.exner_half
-        pairs = (("heat", heat_tend, heat_flux), ("qt", ct.dqt, rh * fb))
-    else:
-        pairs = (("u", ct.du, rh * fa), ("v", ct.dv, rh * fb))
+            heat_tend = dtheta * inputs.exner
+            heat_flux = rh * fl["wtheta"] * inputs.exner_half
+        pairs += [("heat", heat_tend, heat_flux), ("qt", ct.dqt, rh * fl["wqt"])]
+    if owns_momentum(kind):
+        pairs += [("u", ct.du, rh * fl["uw"]), ("v", ct.dv, rh * fl["vw"])]
     closures = {}
     for name, tend, mflux in pairs:
         resid = jnp.sum(m * tend) - (mflux[0] - mflux[-1])
         scale = jnp.sum(jnp.abs(m * tend)) + jnp.abs(mflux[0]) + jnp.abs(mflux[-1])
         closures[name] = _rel(resid, scale)
     out["closure_rel"] = closures
-    eb = column_energy_budget(ct, fa, fb, inputs, candidate.kind)
+    eb = column_energy_budget(ct, fa, fb, inputs, kind)
     out["energy_rel"] = _rel(eb.residual, jnp.abs(eb.rate) + jnp.abs(eb.boundary_input))
     jfa, jfb, _ = jax.jit(candidate.fluxes)(params, inputs, aux)
-    out["jit_parity"] = float(jnp.maximum(jnp.max(jnp.abs(jfa - fa)),
-                                          jnp.max(jnp.abs(jfb - fb))))
+    jfl = owned_fluxes(kind, jfa, jfb)
+    out["jit_parity"] = float(jnp.max(jnp.stack([jnp.max(jnp.abs(jfl[k] - fl[k]))
+                                                 for k in fl])))
     return out
 
 
