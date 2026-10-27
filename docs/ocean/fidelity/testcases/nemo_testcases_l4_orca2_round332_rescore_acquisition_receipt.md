@@ -471,7 +471,7 @@ in its generic tendency boundary.  That upstream multiply was therefore the
 first owning statement.
 
 The fix changes only the `rk3_vector_raw_vmask` arm at
-`ocean_pe_latlon_cgrid.py:6236-6256`: it no longer writes a prematurely masked
+`ocean_pe_latlon_cgrid.py:6258-6278`: it no longer writes a prematurely masked
 `dv_dt`, leaving NEMO's later stage-update product to determine the dry sign.
 The production-call-site AST test fails on the exact one-line revert, and the
 real stage-update-plus-fold test checks both signed-zero directions and a

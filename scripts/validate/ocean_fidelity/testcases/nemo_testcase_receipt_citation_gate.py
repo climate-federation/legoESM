@@ -2009,6 +2009,8 @@ FILES = {
         REPO / "packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py"),
     "packages/ocean/legoesm/ocean/bulk_flux_omip.py": (
         REPO / "packages/ocean/legoesm/ocean/bulk_flux_omip.py"),
+    "packages/ocean/legoesm/ocean/state.py": (
+        REPO / "packages/ocean/legoesm/ocean/state.py"),
     # Round 334 (ratchet cleanup): the NEMO statements the named constants cite.
     "trabbc.F90": _OCE / "TRA/trabbc.F90",
     "phycst.F90": _OCE / "DOM/phycst.F90",
@@ -2429,12 +2431,18 @@ CITATION_MAP = {
     'packages/ocean/legoesm/ocean/forcing/nemo_surface.py:348-358': [
         'utau_u, vtau_v = nemo_t_stress_to_uv(',
         (')', 126), 11],
-    'packages/ocean/legoesm/ocean/forcing/nemo_surface.py:406-412': [
+    'packages/ocean/legoesm/ocean/forcing/nemo_surface.py:406-414': [
         'q_solar=None,',
-        'result.runoff.salinity_content,', 7],
-    'packages/ocean/legoesm/ocean/dynamics/ocean_pe_latlon_cgrid.py:4631-4663': [
+        'result.runoff.salinity_content,', 9],
+    'packages/ocean/legoesm/ocean/state.py:378-379': [
+        'utau_u_native: object = None',
+        'vtau_v_native: object = None', 2],
+    'packages/ocean/legoesm/ocean/dynamics/ocean_pe_latlon_cgrid.py:4626-4651': [
+        '_native_u = getattr(surface_forcing, "utau_u_native", None)',
+        ('return tau_i_u, tau_j_v, dz_0_u, dz_0_v', 1), 26],
+    'packages/ocean/legoesm/ocean/dynamics/ocean_pe_latlon_cgrid.py:4653-4685': [
         'tau_i_T = jnp.asarray(_native_i, dtype=u_dtype)',
-        ('return tau_i_u, tau_j_v, dz_0_u, dz_0_v', 1), 33],
+        ('return tau_i_u, tau_j_v, dz_0_u, dz_0_v', 2), 33],
     'packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:7132-7149': [
         '_sfx = (surface_stress_faces(',
         '_tau_i_u, _tau_j_v, _, _ = _sfx', 18],
@@ -4417,7 +4425,7 @@ CITATION_MAP = {
     'ORCA2_OMIP_L4_R92RHS/BLD/ppsrc/nemo/stp2d.f90:203-215': [
         '!*  vertical averaging  *!',
         ('END SELECT', 2), 13],
-    'ocean_pe_latlon_cgrid.py:6236-6256': [
+    'ocean_pe_latlon_cgrid.py:6258-6278': [
         ('du_dt = du_dt * u_mask_3d', 1),
         'dv_dt = jnp.where(_restore_hpg, hpg_tendency_v, dv_dt * v_mask_3d)',
         21],
@@ -4955,8 +4963,8 @@ CITATION_MAP = {
     'overflow_kt1_10/namelist_cfg:92': 'ln_dynvor_ens = .true.',
     'nemo_testcase_recipe.py:3550':
         'if (cfg.momentum_advection != "vector_invariant"',
-    'ocean_pe_latlon_cgrid.py:5598': ('if _mom_adv == "flux_form":', 2),
-    'ocean_pe_latlon_cgrid.py:5616': (
+    'ocean_pe_latlon_cgrid.py:5620': ('if _mom_adv == "flux_form":', 2),
+    'ocean_pe_latlon_cgrid.py:5638': (
         '_bc_horizontal_momentum_advection_flux_form(', 2),
     'nemo_testcase_recipe.py:3553':
         'requires ln_dynadv_vec=.true. with nn_dynkeg=0',
@@ -7277,7 +7285,7 @@ CITATION_MAP = {
     'ocean_model_latlon_cgrid.py:15322-15337': [
         '# ``step`` is the production-compiled entry point even when a caller',
         ('_nemo_stage1_zad_eta_after_override))', 1), 16],
-    'state.py:621-625': [
+    'state.py:629-633': [
         '# NEMO TKE-closure coefficient memory (avm_k/avt_k). These are the',
         'tke_avt: object = None', 5],
     'tests/ocean/fidelity/test_nemo_testcase_l2_gyre_card_reconciliation.py:193-216': [
@@ -7560,7 +7568,7 @@ CITATION_MAP = {
     'ocean_pe_latlon_cgrid.py:3360-3391': [
         'area_w = jax.lax.optimization_barrier(',
         'diag_vertadv_v = jax.lax.optimization_barrier(diag_vertadv_v)', 32],
-    'ocean_pe_latlon_cgrid.py:5427-5466': [
+    'ocean_pe_latlon_cgrid.py:5449-5488': [
         'zad_w, zad_h_u, zad_h_v = w, h_u, h_v',
         ('zad_h_v = jax.lax.optimization_barrier(zad_h_v)', 1), 40],
     'ocean_model_latlon_cgrid.py:8628-8638': [
@@ -8344,8 +8352,8 @@ CITATION_MAP = {
     'ocean.output:875': 'Barotropic time filter => nn_bt_flt',
     'lock_kt1_10/ocean.output:615': 'no explicit diffusion                ln_dynldf_OFF',
     'overflow_kt1_10/ocean.output:727': 'no explicit diffusion                ln_dynldf_OFF',
-    'ocean_pe_latlon_cgrid.py:5910': 'rho_prime=rho_prime, h_k=h_k,',
-    'ocean_pe_latlon_cgrid.py:5887-5888': [
+    'ocean_pe_latlon_cgrid.py:5932': 'rho_prime=rho_prime, h_k=h_k,',
+    'ocean_pe_latlon_cgrid.py:5909-5910': [
         '_u_ldf_local = u if ldf_state is None else ldf_state[2]',
         '_v_ldf_local = v if ldf_state is None else ldf_state[3]',
         2],
