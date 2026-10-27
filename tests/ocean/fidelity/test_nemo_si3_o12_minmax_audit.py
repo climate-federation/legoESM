@@ -75,10 +75,40 @@ def test_committed_object_audit_pins_every_site_and_tie_verdict():
     assert check_report(_report()) == []
 
 
-def test_record_build_regenerates_committed_object_audit():
+def test_record_build_regenerates_committed_object_audit(tmp_path, monkeypatch):
     if not audit_mod.BUILD.exists():
         pytest.skip("record build is not mounted")
+    monkeypatch.chdir(tmp_path)
+    real_run = audit_mod.common.subprocess.run
+    mpif90_cwds: list[Path | None] = []
+
+    def _recording_run(cmd, *args, **kwargs):
+        if cmd and cmd[0] == "mpif90":
+            mpif90_cwds.append(kwargs.get("cwd"))
+            cmd = [
+                "-Iinc" if arg == f"-I{audit_mod.BUILD.resolve() / 'inc'}" else arg
+                for arg in cmd
+            ]
+        return real_run(cmd, *args, **kwargs)
+
+    monkeypatch.setattr(audit_mod.common.subprocess, "run", _recording_run)
     assert audit_mod.audit() == _report()
+    assert mpif90_cwds == [audit_mod.BUILD.resolve()]
+
+    # Planted mutant: stripping cwd=build when mpif90 resolves relative -Iinc fails in tmp_path.
+    def _no_cwd_plant(cmd, *args, **kwargs):
+        if cmd and cmd[0] == "mpif90":
+            kwargs = dict(kwargs)
+            kwargs.pop("cwd", None)
+            cmd = [
+                "-Iinc" if arg == f"-I{audit_mod.BUILD.resolve() / 'inc'}" else arg
+                for arg in cmd
+            ]
+        return real_run(cmd, *args, **kwargs)
+
+    monkeypatch.setattr(audit_mod.common.subprocess, "run", _no_cwd_plant)
+    with pytest.raises(audit_mod.common.subprocess.CalledProcessError):
+        audit_mod.audit()
 
 
 @pytest.mark.parametrize(

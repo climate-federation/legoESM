@@ -642,16 +642,16 @@ def audit(
     rungs while preserving the O9 command-line report byte for byte.
     """
     flags = _flags(build)
-    env = dict(os.environ, PATH=f"{toolchain / 'bin'}:{os.environ['PATH']}")
+    env = dict(os.environ, PATH=f"{toolchain.resolve() / 'bin'}:{os.environ['PATH']}")
     report = {"build": str(build), "flags": flags, "objects": {}, "tie_lemmas": tie_lemmas,
               "tie_verdicts": tie_verdicts}
     with tempfile.TemporaryDirectory() as tmp:
         for obj_name, names in routines.items():
-            src = build / "ppsrc/nemo" / f"{obj_name}.f90"
+            src = build.resolve() / "ppsrc/nemo" / f"{obj_name}.f90"
             gobj = Path(tmp) / f"{obj_name}.o"
-            subprocess.run(["mpif90", "-c", "-cpp", *flags, "-g", f"-I{build / 'inc'}",
-                            f"-J{tmp}", f"-I{toolchain / 'include'}", str(src), "-o", str(gobj)],
-                           check=True, env=env, capture_output=True)
+            subprocess.run(["mpif90", "-c", "-cpp", *flags, "-g", f"-I{build.resolve() / 'inc'}",
+                            f"-J{tmp}", f"-I{toolchain.resolve() / 'include'}", str(src), "-o", str(gobj)],
+                           check=True, cwd=build.resolve(), env=env, capture_output=True)
             record = build / "obj" / f"{obj_name}.o"
             same = _stream(gobj) == _stream(record)
             if not same:
