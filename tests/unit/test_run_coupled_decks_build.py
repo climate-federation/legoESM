@@ -100,6 +100,8 @@ def test_sbm_cape_threshold_reaches_the_coupled_atmosphere(tmp_path):
     from legoesm.driver.run_config_yaml import read_yaml_with_includes
     assert read_yaml_with_includes(
         CMIP_DIR / "cmip_tuned_physics.yaml")["sbm_cape_threshold"] == 0.0
+    for d in DECKS:   # every run deck inherits the pin through its include
+        assert read_yaml_with_includes(d)["sbm_cape_threshold"] == 0.0, d.name
     deck = DECKS[0]
     base = ["--config", str(deck), *PATH_FLAGS, "--output", str(tmp_path)]
     assert mod.main(base, build_only=True).atm_config.sbm_cape_threshold == 0.0
