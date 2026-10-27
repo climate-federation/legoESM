@@ -196,3 +196,8 @@ object-audit regressions passed `20 passed in 15.10s`, and the regenerated
 object audit reports `O10_MINMAX_AUDIT MATCH`. The full-namespace
 private-import ratchet passed `6 passed in 5.19s`. The non-stamping full-map and
 all-SI3-receipt citation checks passed `21 passed, 14 deselected in 3.49s`.
+On clean implementation commit `3037ea4433`, the complete citation/default
+suite passed `35 passed in 7.19s`; the explicit O10 gate passed with 49
+citations, no unmapped citations, no failures, and no full-map audit failures.
+Shifting the VC19 citation by two lines produced `SYMBOL-NOT-AT-LINE`, gate
+status `FAIL`, and exit status 1.
