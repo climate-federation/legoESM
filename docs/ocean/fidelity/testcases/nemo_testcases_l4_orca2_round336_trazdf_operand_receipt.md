@@ -1045,6 +1045,18 @@ all six stub-flow scenarios pass, and the final marker is
 No model source, configuration value, or score changed.  Codex review:
 operator.
 
+At evidence commit `cc6e6b36f613e0cecc345e3c75886219bcef6994`, the
+per-receipt citation gate passes all 63 citations with zero failures, zero
+unmapped citations, zero map-audit failures, and all nine self-tests fired;
+its log SHA-256 is
+`95276d63d9c763de2e8dbcd34ea1d41cf80f309a51e729d99b5db753c6ee4cb6`.
+The exact default ORCA2 battery passes all 156 tests in 1,076.03 seconds; its
+log SHA-256 is
+`d178cd62618f9277ba2a45d789fc8b76e5813ef29eaaa072bf4e2417668122bd`.
+The explicit private-import ratchet passes all 6 tests in 5.44 seconds; its
+log SHA-256 is
+`1835a92948bcc36dbddb1ce8d40daf33d8d9bf09a84abe0117f775cf3f3ae3b8`.
+
 The required operator handoff remains:
 
 ```text
