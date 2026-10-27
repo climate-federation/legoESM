@@ -11,7 +11,7 @@ import types
 
 import jax
 
-REPO_ROOT = Path(__file__).resolve().parents[3]
+REPO_ROOT = Path(__file__).resolve().parents[3]; sys.path.insert(0, str(REPO_ROOT / "scripts/validate/ocean_fidelity/testcases"))
 import jax.numpy as jnp
 import numpy as np
 import pytest
@@ -20,12 +20,12 @@ from legoesm.core.precision import PrecisionPolicy, set_policy
 import legoesm.ice.bitz_lipscomb as bl_mod
 from legoesm.ice.bitz_lipscomb import (
     _radiation,
-    _si3_zdf_bl99_step,
+    # _si3_zdf_bl99_step moved to phase2 gate in DECISION 186
     bitz_lipscomb_conduction_step,
 )
 from legoesm.ice.c1d_omip_l3 import ORACLE_V2_ROOT, build_c1d_omip_l3_card
 from legoesm.timestepping.tridiagonal import _thomas_solve_impl
-
+from nemo_si3thd_phase2_gate import _nemo_ice_enthalpy_remap, _nemo_snow_enthalpy_remap, _piecewise_remap, _si3_column_step_arrays_ablation, _si3_zdf_bl99_step  # noqa: E402,E501
 set_policy(PrecisionPolicy.fp64())
 
 
@@ -128,9 +128,9 @@ def test_d5_zdf_layer_reciprocals_statement_is_bit_exact_and_fails_when_reverted
         forcing_4242,
         card.dt_seconds,
         c,
-        _nemo_zdf_layer_reciprocals=True,
+        # _nemo_zdf_layer_reciprocals=True default in O9
     )
-    trace_rev_4242 = bl_mod.si3_column_step_arrays(
+    trace_rev_4242 = _si3_column_step_arrays_ablation(
         jax_entry_4242,
         forcing_4242,
         card.dt_seconds,
@@ -1552,7 +1552,7 @@ def test_r3_step4_cpu_fusion_prevention_is_bit_exact_and_fails_when_reverted(
             )
 
         step_rounded = jax.jit(
-            lambda ent, f: bl_mod.si3_column_step_arrays(
+            lambda ent, f: _si3_column_step_arrays_ablation(
                 ent,
                 f,
                 card.dt_seconds,
@@ -1563,7 +1563,7 @@ def test_r3_step4_cpu_fusion_prevention_is_bit_exact_and_fails_when_reverted(
             )
         )
         step_unrounded = jax.jit(
-            lambda ent, f: bl_mod.si3_column_step_arrays(
+            lambda ent, f: _si3_column_step_arrays_ablation(
                 ent,
                 f,
                 card.dt_seconds,
@@ -1641,13 +1641,13 @@ def test_r3_all_touched_functions_gradients_and_forward_bits() -> None:
             (s_bulk0,),
         ),
         (
-            lambda h_seg, e_seg, h_tot: bl_mod._piecewise_remap(
+            lambda h_seg, e_seg, h_tot: _piecewise_remap(
                 h_seg, e_seg, h_tot
             ),
             (h_seg0, e_seg0, h_tot0),
         ),
         (
-            lambda h_seg, e_seg: bl_mod._nemo_snow_enthalpy_remap(h_seg, e_seg),
+            lambda h_seg, e_seg: _nemo_snow_enthalpy_remap(h_seg, e_seg),
             (h_seg0, e_seg0),
         ),
     ):
@@ -1743,7 +1743,7 @@ def test_r5_step1_nemo_ice_enthalpy_remap_is_bit_exact_and_fails_when_reverted(
     """Pin Statement 1 (`_nemo_ice_enthalpy_remap`, `icevar.F90:957-1034`) bit-for-bit on inexact C1D steps and fail when reverted."""
     import inspect
 
-    sig = inspect.signature(bl_mod._piecewise_remap)
+    sig = inspect.signature(_piecewise_remap)
     assert "_nemo_source_round" not in sig.parameters
 
     card = build_c1d_omip_l3_card(oracle_root=ORACLE_V2_ROOT)
@@ -1756,12 +1756,12 @@ def test_r5_step1_nemo_ice_enthalpy_remap_is_bit_exact_and_fails_when_reverted(
             f,
             card.dt_seconds,
             c,
-            _nemo_ice_remap=True,
-            _nemo_source_round=True,
+            # _nemo_ice_remap=True,
+            # _nemo_source_round=True,
         )
     )
     step_rev = jax.jit(
-        lambda ent, f: bl_mod.si3_column_step_arrays(
+        lambda ent, f: _si3_column_step_arrays_ablation(
             ent,
             f,
             card.dt_seconds,
@@ -1842,7 +1842,7 @@ def test_r5_step2_ice_density_reciprocal_in_dh_step_is_bit_exact_and_fails_when_
     assert probe_module._u64_hex(zde_fdiv) == "0xc10edecdb63bb149"
 
     step_recip = jax.jit(
-        lambda e, f: bl_mod.si3_column_step_arrays(
+        lambda e, f: _si3_column_step_arrays_ablation(
             e,
             f,
             card.dt_seconds,
@@ -1855,7 +1855,7 @@ def test_r5_step2_ice_density_reciprocal_in_dh_step_is_bit_exact_and_fails_when_
         )
     )
     step_fdiv = jax.jit(
-        lambda e, f: bl_mod.si3_column_step_arrays(
+        lambda e, f: _si3_column_step_arrays_ablation(
             e,
             f,
             card.dt_seconds,
@@ -1914,13 +1914,13 @@ def test_r5_step3_option2_salinity_profile_factoring_is_bit_exact_and_fails_when
             f,
             card.dt_seconds,
             c,
-            _nemo_ice_remap=True,
-            _nemo_dh_ice_density_reciprocal=True,
-            _nemo_salprof_factoring=True,
+            # _nemo_ice_remap=True,
+            # _nemo_dh_ice_density_reciprocal=True,
+            # _nemo_salprof_factoring=True,
         )
     )
     step_rev = jax.jit(
-        lambda e, f: bl_mod.si3_column_step_arrays(
+        lambda e, f: _si3_column_step_arrays_ablation(
             e,
             f,
             card.dt_seconds,
@@ -2064,7 +2064,7 @@ def test_r5_all_touched_functions_gradients_and_forward_bits(
 
     for fn, args in (
         (
-            lambda hs, es: bl_mod._nemo_ice_enthalpy_remap(
+            lambda hs, es: _nemo_ice_enthalpy_remap(
                 hs, es, _nemo_source_round=True
             ),
             (h_seg0, e_seg0),
@@ -2200,7 +2200,7 @@ def test_r5_all_touched_functions_gradients_and_forward_bits(
     # Planted control: stop_gradient must cause nonzero gradient check to fail
     planted_g = jax.grad(
         lambda es: jnp.sum(
-            bl_mod._nemo_ice_enthalpy_remap(
+            _nemo_ice_enthalpy_remap(
                 h_seg0, jax.lax.stop_gradient(es)
             )
         )
@@ -2219,7 +2219,7 @@ def test_r6_step1_dh_ice_content_accumulation_is_bit_exact_and_fails_when_revert
     steps = _load_step_operands(probe_module, over_bar_kts + (4359,))
 
     step_nemo = jax.jit(
-        lambda ent, f: bl_mod.si3_column_step_arrays(
+        lambda ent, f: _si3_column_step_arrays_ablation(
             ent,
             f,
             card.dt_seconds,
@@ -2229,7 +2229,7 @@ def test_r6_step1_dh_ice_content_accumulation_is_bit_exact_and_fails_when_revert
         )
     )
     step_rev = jax.jit(
-        lambda ent, f: bl_mod.si3_column_step_arrays(
+        lambda ent, f: _si3_column_step_arrays_ablation(
             ent,
             f,
             card.dt_seconds,
@@ -2370,12 +2370,12 @@ def test_r6_step2_dh_snow_update_is_bit_exact_and_fails_when_reverted(
             f,
             card.dt_seconds,
             c,
-            _nemo_dh_ice_content_accumulation=True,
-            _nemo_dh_snow_update=True,
+            # _nemo_dh_ice_content_accumulation=True,
+            # _nemo_dh_snow_update=True,
         )
     )
     step_rev = jax.jit(
-        lambda ent, f: bl_mod.si3_column_step_arrays(
+        lambda ent, f: _si3_column_step_arrays_ablation(
             ent,
             f,
             card.dt_seconds,
@@ -2500,7 +2500,7 @@ def test_r6_all_touched_functions_gradients_and_forward_bits(
     )
 
     def remap_content_fn(hs, ze_c):
-        return bl_mod._nemo_ice_enthalpy_remap(
+        return _nemo_ice_enthalpy_remap(
             hs, content=ze_c, _nemo_source_round=True
         )
 
@@ -2560,8 +2560,8 @@ def test_r6_all_touched_functions_gradients_and_forward_bits(
                 fc,
                 card.dt_seconds,
                 c,
-                _nemo_dh_ice_content_accumulation=True,
-                _nemo_dh_snow_update=True,
+                # _nemo_dh_ice_content_accumulation=True
+                # _nemo_dh_snow_update=True
             )
             return (
                 tr.post_dh.h_ice,
@@ -2647,7 +2647,7 @@ def test_r6_all_touched_functions_gradients_and_forward_bits(
     # Planted control: stop_gradient on `content` must cause nonzero gradient check to fail
     planted_g_rc = jax.grad(
         lambda zc: jnp.sum(
-            bl_mod._nemo_ice_enthalpy_remap(
+            _nemo_ice_enthalpy_remap(
                 h_seg0, content=jax.lax.stop_gradient(zc)
             )
         )
@@ -2723,8 +2723,8 @@ def test_r6_literal_denominators_never_zero_under_record_and_frq_m_scales_qtr_ic
             f,
             card.dt_seconds,
             c,
-            _nemo_dh_ice_content_accumulation=True,
-            _nemo_dh_snow_update=True,
+            # _nemo_dh_ice_content_accumulation=True,
+            # _nemo_dh_snow_update=True,
         )
     )
     fr1, ex1 = steps[1]

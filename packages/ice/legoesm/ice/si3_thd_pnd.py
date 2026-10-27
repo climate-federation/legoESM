@@ -596,6 +596,8 @@ def si3_ice_thd_pnd(
     gravity,
     nn_hls: int,
     constants: IceConstantsConfig,
+    _allow_general_shape: bool = False,
+    _at_i_override=None,
 ) -> SI3PondOutputs:
     """``ice_thd_pnd`` production melt-pond stage (``icethd_pnd.f90:162-264``).
 
@@ -653,6 +655,10 @@ def si3_ice_thd_pnd(
         "ln_pnd_alb": True,
         "ln_icediachk": False,
     }
+    if _allow_general_shape:
+        if not isinstance(nml["ln_pnd_lids"], bool):
+            raise ValueError(f"ln_pnd_lids must be bool; got {nml['ln_pnd_lids']!r}")
+        expected = {k: v for k, v in expected.items() if k != "ln_pnd_lids"}
     wrong = {name: (nml[name], val) for name, val in expected.items() if nml[name] is not val}
     if wrong:
         raise ValueError(f"SI3 ice_thd_pnd transcribes only the production selectors; got {wrong}")
@@ -660,14 +666,26 @@ def si3_ice_thd_pnd(
     if arr["a_i"].ndim != 3:
         raise ValueError(f"SI3 ice_thd_pnd requires 3D (jpi, jpj, jpl) a_i; got {arr['a_i'].shape}")
     jpi, jpj, jpl = arr["a_i"].shape
-    if jpl != 5:
+    if not _allow_general_shape and jpl != 5:
         raise ValueError(f"SI3 O12 requires the production 5 ice categories (jpl=5); got {jpl}")
     if 2 * nn_hls >= jpi or 2 * nn_hls >= jpj:
         raise ValueError(f"nn_hls={nn_hls} leaves no interior in grid {(jpi, jpj)}")
     for k in ("v_i", "h_i", "t_su", "a_ip", "v_ip", "h_ip", "v_il", "h_il", "a_ip_frac", "dh_i_sum_2d", "dh_s_sum_2d"):
         if arr[k].shape != (jpi, jpj, jpl):
             raise ValueError(f"SI3 ice_thd_pnd requires {k} shape {(jpi, jpj, jpl)}; got {arr[k].shape}")
-    if arr["t_i"].shape != (jpi, jpj, 10, jpl) or arr["sz_i"].shape != (jpi, jpj, 10, jpl):
+    if _allow_general_shape:
+        if (
+            arr["t_i"].ndim != 4
+            or arr["sz_i"].ndim != 4
+            or arr["t_i"].shape != arr["sz_i"].shape
+            or arr["t_i"].shape[:2] != (jpi, jpj)
+            or arr["t_i"].shape[3] != jpl
+            or arr["t_i"].shape[2] < 1
+        ):
+            raise ValueError(
+                f"SI3 ice_thd_pnd requires t_i and sz_i shape (jpi, jpj, nlay_i, jpl); got {arr['t_i'].shape}, {arr['sz_i'].shape}"
+            )
+    elif arr["t_i"].shape != (jpi, jpj, 10, jpl) or arr["sz_i"].shape != (jpi, jpj, 10, jpl):
         raise ValueError(
             f"SI3 O12 requires t_i and sz_i shape {(jpi, jpj, 10, jpl)} (nlay_i=10); got {arr['t_i'].shape}, {arr['sz_i'].shape}"
         )
@@ -680,7 +698,7 @@ def si3_ice_thd_pnd(
     r1_dt = _required("r1_Dt_ice", r1_Dt_ice)
 
     # :203 at_i(:,:) = SUM( a_i, dim=3 ) over the full (jpi, jpj) domain
-    at_i = fortran_sum0(arr["a_i"])
+    at_i = fortran_sum0(arr["a_i"]) if _at_i_override is None else _required("at_i", _at_i_override)
 
     interior = (slice(nn_hls, jpi - nn_hls), slice(nn_hls, jpj - nn_hls))
     at_int = at_i[interior]

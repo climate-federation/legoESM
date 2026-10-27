@@ -50,7 +50,7 @@ import numpy as np
 from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
 from legoesm.ice.bitz_lipscomb import (
     SI3SurfaceForcing,
-    _si3_zdf_bl99_step,
+    # _si3_zdf_bl99_step moved to phase2 gate in DECISION 186
     ice_temperature_from_enthalpy,
     si3_column_step_arrays,
     snow_temperature_from_enthalpy,
@@ -62,8 +62,8 @@ TESTCASES_DIR = Path(__file__).resolve().parent
 if str(TESTCASES_DIR) not in sys.path:
     sys.path.insert(0, str(TESTCASES_DIR))
 
-import nemo_si3thd_phase2_gate as phase2  # noqa: E402
-import nemo_si3thd_phase2b_year_gate as year_gate  # noqa: E402
+import nemo_si3thd_phase2_gate as phase2, nemo_si3thd_phase2b_year_gate as year_gate  # noqa: E402, F401
+_si3_zdf_bl99_step = phase2._si3_zdf_bl99_step
 
 DEFAULT_ORACLE_DIR = year_gate.REPLAY_ROOT
 SMALLEST_SUBNORMAL_BITS = np.uint64(1)
@@ -306,7 +306,7 @@ def _evaluate_subnormal_window_arm(
         )
     )
     step_fn = jax.jit(
-        lambda b_ent, b_forc: si3_column_step_arrays(
+        lambda b_ent, b_forc: phase2._si3_column_step_arrays_ablation(
             b_ent,
             b_forc,
             card.dt_seconds,
@@ -1084,7 +1084,7 @@ def run_year_rescore(
 
         def _make_runner(k_dict):
             def _runner(b_entry, b_forcing):
-                return si3_column_step_arrays(
+                return phase2._si3_column_step_arrays_ablation(
                     b_entry,
                     b_forcing,
                     card.dt_seconds,

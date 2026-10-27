@@ -148,7 +148,7 @@ def test_round4_zdf_operand_stream_registers_tiny_snow_temperature(gate) -> None
 
 
 def test_round6_dh_operand_streams_replay_and_fail_closed(gate, tmp_path) -> None:
-    from legoesm.ice.bitz_lipscomb import _nemo_snow_enthalpy_remap
+    _nemo_snow_enthalpy_remap = gate.phase2._nemo_snow_enthalpy_remap
 
     operands = gate._read_dh_operands(
         gate.REPLAY_ROOT / "oracle_si3_dh_operands.bin"
@@ -198,8 +198,8 @@ def test_round6_dh_operand_streams_replay_and_fail_closed(gate, tmp_path) -> Non
         gate._read_dh_remap_operands(truncated)
 
 
-def test_round6_snow_remap_jit_and_gradients_are_finite() -> None:
-    from legoesm.ice.bitz_lipscomb import _nemo_snow_enthalpy_remap
+def test_round6_snow_remap_jit_and_gradients_are_finite(gate) -> None:
+    _nemo_snow_enthalpy_remap = gate.phase2._nemo_snow_enthalpy_remap
 
     enthalpy = jnp.asarray([1.0, 2.0, 3.0, 4.0], dtype=jnp.float64)
     remap = jax.jit(_nemo_snow_enthalpy_remap)

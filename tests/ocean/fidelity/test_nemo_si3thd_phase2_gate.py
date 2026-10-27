@@ -12,7 +12,7 @@ import pytest
 from legoesm.core.precision import PrecisionPolicy, set_policy
 from legoesm.ice.bitz_lipscomb import (
     SI3SurfaceForcing,
-    _si3_zdf_bl99_step,
+    # _si3_zdf_bl99_step moved to phase2 gate (DECISION 186)
     ice_enthalpy_from_temperature,
     ice_temperature_from_enthalpy,
     option2_salinity_profile,
@@ -28,7 +28,7 @@ from legoesm.ice.constants_config import (
 from legoesm.ice.scm import IceColumnModel
 from legoesm.ice.snow import snow_ice_flooding
 from legoesm.timestepping.tridiagonal import thomas_solve
-
+import sys; sys.path.insert(0, "scripts/validate/ocean_fidelity/testcases"); from nemo_si3thd_phase2_gate import _si3_zdf_bl99_step  # noqa: E402,E501,E702
 set_policy(PrecisionPolicy.fp64())
 
 

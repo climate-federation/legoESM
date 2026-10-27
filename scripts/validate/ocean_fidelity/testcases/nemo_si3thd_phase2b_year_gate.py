@@ -243,10 +243,10 @@ def _dh_owner_evidence(root: Path, card, *, plant=False,
                        plant_bridge=False) -> dict[str, object]:
     """Own the preregistered kt5734 DH interaction and retain its controls."""
 
-    from legoesm.ice.bitz_lipscomb import (
+    (
         _piecewise_remap,
         si3_column_step_arrays,
-    )
+    ) = (phase2._piecewise_remap, phase2._si3_column_step_arrays_ablation)
 
     operand_path = root / "oracle_si3_dh_operands.bin"
     remap_path = root / "oracle_si3_dh_remap_operands.bin"
@@ -570,7 +570,7 @@ def _ice_enthalpy_nemo_order(temperature, salinity, constants) -> np.ndarray:
 
 
 def _arithmetic_replay(root: Path, constants, *, plant=False) -> dict[str, object]:
-    from legoesm.ice.bitz_lipscomb import _si3_zdf_bl99_step
+    _si3_zdf_bl99_step = phase2._si3_zdf_bl99_step
 
     zdf_path = root / "oracle_si3_zdf_operands.bin"
     reassoc_path = root / "oracle_si3_reassoc_operands.bin"
@@ -1086,7 +1086,7 @@ def _scope_ablation_sweep(thd_path: Path, zin_path: Path, card) -> dict[str, obj
                 card.config.ice_constants,
             )))
             disabled_maps = {
-                arm_name: _stage_maps(jax.device_get(si3_column_step_arrays(
+                arm_name: _stage_maps(jax.device_get(phase2._si3_column_step_arrays_ablation(
                     batch_entry, batch_forcing, card.dt_seconds,
                     card.config.ice_constants, **kwargs,
                 )))
@@ -1451,7 +1451,7 @@ def _owner_arms(root: Path, card, *, plant_deposition=False,
                 plant_surface=False, plant_snow_temperature=False) -> dict[str, object]:
     """Evaluate preregistered one-variable DH arms on exact NEMO entries."""
 
-    from legoesm.ice.bitz_lipscomb import si3_column_step_arrays
+    si3_column_step_arrays = phase2._si3_column_step_arrays_ablation
 
     selected = _read_exact_steps(root, (73, 74, 3836, 4238, 4239, 5285))
 
@@ -1620,11 +1620,11 @@ def _melt_scaling(root: Path, card) -> dict[str, object]:
             full = si3_column_step_arrays(
                 state, forcing, card.dt_seconds, card.config.ice_constants
             )
-            no_surface = si3_column_step_arrays(
+            no_surface = phase2._si3_column_step_arrays_ablation(
                 state, forcing, card.dt_seconds, card.config.ice_constants,
                 _surface_melt=False,
             )
-            no_basal = si3_column_step_arrays(
+            no_basal = phase2._si3_column_step_arrays_ablation(
                 state, forcing, card.dt_seconds, card.config.ice_constants,
                 _basal_melt=False,
             )

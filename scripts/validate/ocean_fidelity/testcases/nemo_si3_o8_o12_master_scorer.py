@@ -28,8 +28,11 @@ from legoesm import constants as canonical_constants
 from legoesm.core.precision import PrecisionPolicy, set_policy
 from legoesm.ice import bitz_lipscomb as bl
 from legoesm.ice.bitz_lipscomb import (
+    SI3ColumnArrays,
     SI3DHFluxes,
     SI3DHIncrements,
+    SI3SurfaceForcing,
+    si3_column_step_arrays,
     si3_ice_thd_category_stages,
     si3_ice_thd_dh,
     si3_ice_thd_frazil,
@@ -38,7 +41,9 @@ from legoesm.ice.bitz_lipscomb import (
     si3_ice_thd_temp,
     si3_ice_thd_zdf_bl99,
 )
+from legoesm.ice.config import SI3LateralMeltConfig, SI3PondConfig, SI3ThermoConfig
 from legoesm.ice.constants_config import NEMO_SI3_CONSTANTS_CONFIG
+from legoesm.ice.ponds import step_ponds
 from legoesm.ice.si3_thd_da import si3_ice_thd_da
 from legoesm.ice.si3_thd_pnd import si3_ice_thd_pnd
 from scripts.validate.ocean_fidelity.testcases.nemo_si3_o5_orca2_sas_gate import (
@@ -794,6 +799,119 @@ def _build_compiled_kernels(
             constants=constants,
         )
 
+    si3_orca2_cfg = SI3ThermoConfig(
+        n_ice_layers=10,
+        n_snow_layers=5,
+        salinity_scheme=int(namelist["nn_icesal"]),
+        lateral_melt=bool(namelist["ln_icedA"]),
+        namthd_da=SI3LateralMeltConfig(
+            rn_beta=float(namelist["rn_beta"]),
+            rn_dmin=float(namelist["rn_dmin"]),
+        ),
+    )
+    pnd_orca2_cfg = SI3PondConfig(
+        rn_himin=float(namelist["rn_himin"]),
+        rn_apnd_min=float(namelist["rn_apnd_min"]),
+        rn_apnd_max=float(namelist["rn_apnd_max"]),
+        rn_pnd_flush=float(namelist["rn_pnd_flush"]),
+        ln_pnd_lids=bool(namelist["ln_pnd_lids"]),
+    )
+
+    @jax.jit
+    def jit_prod_column_step(
+        entry: dict[str, jax.Array],
+        fluxes: SI3DHFluxes,
+        sfx_bri: jax.Array,
+        sfx_lam: jax.Array,
+        wfx_lam: jax.Array,
+    ):
+        zero = jnp.zeros_like(entry["h_i"])
+        state = SI3ColumnArrays(
+            concentration=entry["a_i"],
+            h_ice=entry["h_i"],
+            h_snow=entry["h_s"],
+            T_surface=entry["t_su"],
+            e_ice=entry["e_i"],
+            e_snow=entry["e_s"],
+            S_bulk=entry["s_i"],
+            S_layers=entry["sz_i"],
+            age_volume=zero,
+        )
+        forcing = SI3SurfaceForcing(
+            qns_ice=entry["qns_ice"],
+            qsr_ice=entry["qsr_ice"],
+            dqns_ice=entry["dqns_ice"],
+            qtr_ice_top=entry["qtr_ice_top"],
+            t_bottom=entry["t_bo"],
+            sss=entry["sss"],
+            evaporation=entry["evap_ice"],
+            snow_precipitation=entry["sprecip"],
+            qprec_ice=entry["qprec_ice"],
+            qcn_ice_bottom=zero,
+            qsb_ice_bottom=entry["qsb_ice_bot"],
+            fhld=entry["fhld"],
+            qlead=zero,
+            frq_m=entry["frq_m"],
+            sst_m=entry["sst"],
+        )
+        return si3_column_step_arrays(
+            state,
+            forcing,
+            rDt_ice,
+            constants,
+            si3=si3_orca2_cfg,
+            namelist=namelist,
+            at_i=entry["at_i"],
+            t_i_entry=entry["t_i"],
+            t_s_entry=entry["t_s"],
+            hfx_err_dif=entry["hfx_err_dif"],
+            hfx_dif=entry["hfx_dif"],
+            fluxes=fluxes,
+            sfx_bri=sfx_bri,
+            sfx_lam=sfx_lam,
+            wfx_lam=wfx_lam,
+            _return_stage_outputs=True,
+        )
+
+    @jax.jit
+    def jit_prod_step_ponds(inputs: dict[str, jax.Array]):
+        zero_3d = jnp.zeros_like(inputs["a_i"])
+        return step_ponds(
+            inputs["a_ip_frac"],
+            inputs["h_ip"],
+            melt_water_m=zero_3d,
+            rain_water_m=zero_3d,
+            ice_mask=inputs["a_i"] > 0.0,
+            h_snow=zero_3d,
+            T_air=inputs["t_su"],
+            dt=rDt_ice,
+            drainage_timescale=86400.0,
+            refreeze_threshold=constants.T0,
+            pond_to_ice_max_area=0.6,
+            depth_to_area_ratio=0.8,
+            scheme="si3_lev",
+            at_i=inputs["a_i"],
+            a_i=inputs["a_i"],
+            h_i=inputs["h_i"],
+            t_su=inputs["t_su"],
+            h_il=inputs["h_il"],
+            dh_i_sum=inputs["dh_i_sum_2d"],
+            dh_s_sum=inputs["dh_s_sum_2d"],
+            sz_i=inputs["sz_i"],
+            t_i=inputs["t_i"],
+            namthd_pnd=pnd_orca2_cfg,
+            rho_w=rho_w,
+            gravity=gravity,
+            ice_constants=constants,
+            v_i=inputs["v_i"],
+            a_ip=inputs["a_ip"],
+            v_ip=inputs["v_ip"],
+            v_il=inputs["v_il"],
+            wfx_pnd=inputs["wfx_pnd"],
+            nn_hls=0,
+            _return_si3_outputs=True,
+        )
+
     return {
         "jit_o8_frazil": jit_o8_frazil,
         "jit_o9_zdf": jit_o9_zdf,
@@ -805,6 +923,8 @@ def _build_compiled_kernels(
         "jit_o10_category_stages": jit_o10_category_stages,
         "jit_o11_da": jit_o11_da,
         "jit_o12_pnd": jit_o12_pnd,
+        "jit_prod_column_step": jit_prod_column_step,
+        "jit_prod_step_ponds": jit_prod_step_ponds,
     }
 
 
@@ -855,6 +975,8 @@ def score_o8_to_o12(
     jit_o10_category_stages = kernels["jit_o10_category_stages"]
     jit_o11_da = kernels["jit_o11_da"]
     jit_o12_pnd = kernels["jit_o12_pnd"]
+    jit_prod_column_step = kernels["jit_prod_column_step"]
+    jit_prod_step_ponds = kernels["jit_prod_step_ponds"]
 
     # 1. Rung O8: Kind 1 -> Kind 2 (si3_ice_thd_frazil)
     o8_acc = FieldScoreAccumulator()
@@ -889,6 +1011,8 @@ def score_o8_to_o12(
 
     o11_da_acc = FieldScoreAccumulator()
     o12_pnd_acc = FieldScoreAccumulator()
+    prod_column_acc = FieldScoreAccumulator()
+    prod_step_ponds_acc = FieldScoreAccumulator()
 
     zdf_input_keys = (
         "h_i",
@@ -1100,9 +1224,19 @@ def score_o8_to_o12(
                         spec.name, r5["fields"][spec.name], f6[spec.name], kt=kt, category=jl
                     )
 
-            # O9 composed category path: Kind 3 -> Kind 4, 5, 6 (si3_ice_thd_category_stages)
+            # O9 composed category path & production si3_column_step_arrays (Kind 3 -> Kind 4..9)
             entry_pad = _pad_dict(f3, CAT_ENTRY_KEYS)
-            cat_out = jit_o9_category_stages(entry_pad, flux_in)
+            sfx_bri_pad = _pad_1d(f3["sfx_bri"])
+            sfx_lam_pad = _pad_1d(r8["fields"]["sfx_lam"])
+            wfx_lam_pad = _pad_1d(r8["fields"]["wfx_lam"])
+            prod_trace, prod_o10, prod_da, _ = jit_prod_column_step(
+                entry_pad,
+                flux_in,
+                sfx_bri_pad,
+                sfx_lam_pad,
+                wfx_lam_pad,
+            )
+            cat_out = prod_o10.o9
             for fname in ZDF_UPDATED_FIELDS:
                 o9_composed_acc.update(
                     f"zdf.{fname}",
@@ -1288,7 +1422,85 @@ def score_o8_to_o12(
                         spec.name, r8["fields"][spec.name], f9[spec.name], kt=kt, category=jl
                     )
 
-        # 5. Rung O12: Kind 10 -> Kind 11 (si3_ice_thd_pnd)
+            # Production entry point: si3_column_step_arrays (Kind 3 -> Kind 4, 5, 6, 7, 8, 9)
+            for fname in ZDF_UPDATED_FIELDS:
+                prod_column_acc.update(
+                    f"zdf.{fname}",
+                    getattr(prod_o10.o9.zdf, fname)[:npti],
+                    f4[fname],
+                    kt=kt,
+                    category=jl,
+                )
+            for fname in DH_UPDATED_CAT_FIELDS:
+                prod_column_acc.update(
+                    f"dh.{fname}",
+                    getattr(prod_o10.o9.dh, fname)[:npti],
+                    f5[fname],
+                    kt=kt,
+                    category=jl,
+                )
+            for fname in DH_DIAG_FIELDS:
+                got_diag = (
+                    np.zeros_like(f5[fname])
+                    if fname == "dh_s_tot"
+                    else getattr(prod_o10.o9.dh.dh, fname)[:npti]
+                )
+                prod_column_acc.update(
+                    f"dh.{fname}", got_diag, f5[fname], kt=kt, category=jl
+                )
+            for fname in DH_FLUX_FIELDS:
+                prod_column_acc.update(
+                    f"dh.{fname}",
+                    getattr(prod_o10.o9.dh.fluxes, fname)[:npti],
+                    f5[fname],
+                    kt=kt,
+                    category=jl,
+                )
+            prod_column_acc.update(
+                "temp1.t_i", prod_o10.o9.t_i[:npti], f6["t_i"], kt=kt, category=jl
+            )
+            for fname in SAL_UPDATED_FIELDS:
+                prod_column_acc.update(
+                    f"sal.{fname}",
+                    getattr(prod_o10.sal, fname)[:npti],
+                    f7[fname],
+                    kt=kt,
+                    category=jl,
+                )
+            prod_column_acc.update(
+                "temp2.t_i", prod_o10.t_i[:npti], f8["t_i"], kt=kt, category=jl
+            )
+            for fname in DA_UPDATED_FIELDS:
+                prod_column_acc.update(
+                    f"da.{fname}",
+                    getattr(prod_da, fname)[:npti],
+                    f9[fname],
+                    kt=kt,
+                    category=jl,
+                )
+            prod_column_acc.update(
+                "trace.post_zdf.t_su",
+                prod_trace.post_zdf.T_surface[:npti],
+                f4["t_su"],
+                kt=kt,
+                category=jl,
+            )
+            prod_column_acc.update(
+                "trace.post_dh.h_i",
+                prod_trace.post_dh.h_ice[:npti],
+                f5["h_i"],
+                kt=kt,
+                category=jl,
+            )
+            prod_column_acc.update(
+                "trace.post_sal.sz_i",
+                prod_trace.post_sal.S_layers[:npti],
+                f7["sz_i"],
+                kt=kt,
+                category=jl,
+            )
+
+        # 5. Rung O12: Kind 10 -> Kind 11 (si3_ice_thd_pnd and step_ponds(scheme='si3_lev'))
         n10 = record_name(10, kt, 0)
         n11 = record_name(11, kt, 0)
         r10 = read_record_verified(records_dir / n10, digests_by_rung["O12"].get(n10))
@@ -1311,6 +1523,16 @@ def score_o8_to_o12(
                 o12_pnd_acc.update(
                     spec.name, f10[spec.name], f11[spec.name], kt=kt, category=0
                 )
+        prod_pnd_out = jit_prod_step_ponds(pnd_in)
+        for fname in PND_UPDATED_FIELDS:
+            prod_step_ponds_acc.update(
+                fname, getattr(prod_pnd_out, fname), f11[fname], kt=kt, category=0
+            )
+        for spec in KINDS[11].fields:
+            if spec.name not in PND_UPDATED_FIELDS:
+                prod_step_ponds_acc.update(
+                    spec.name, f10[spec.name], f11[spec.name], kt=kt, category=0
+                )
 
     rungs_report = {
         "O8": {
@@ -1321,6 +1543,7 @@ def score_o8_to_o12(
         },
         "O9": {
             "production_functions": [
+                "legoesm.ice.bitz_lipscomb.si3_column_step_arrays",
                 "legoesm.ice.bitz_lipscomb.si3_ice_thd_zdf_bl99",
                 "legoesm.ice.bitz_lipscomb.si3_ice_thd_dh",
                 "legoesm.ice.bitz_lipscomb.si3_ice_thd_temp",
@@ -1340,6 +1563,7 @@ def score_o8_to_o12(
         },
         "O10": {
             "production_functions": [
+                "legoesm.ice.bitz_lipscomb.si3_column_step_arrays",
                 "legoesm.ice.bitz_lipscomb.si3_ice_thd_sal",
                 "legoesm.ice.bitz_lipscomb.si3_ice_thd_temp",
                 "legoesm.ice.bitz_lipscomb.si3_ice_thd_o10_category_stages",
@@ -1355,25 +1579,27 @@ def score_o8_to_o12(
         },
         "O11": {
             "production_function": "legoesm.ice.si3_thd_da.si3_ice_thd_da",
+            "production_entry_point": "legoesm.ice.bitz_lipscomb.si3_column_step_arrays",
             "entry_kind": 8,
             "exit_kind": 9,
             "score": o11_da_acc.summary(),
+            "production_column_step_arrays_o9_o11": prod_column_acc.summary(),
         },
         "O12": {
             "production_function": "legoesm.ice.si3_thd_pnd.si3_ice_thd_pnd",
+            "production_entry_point": "legoesm.ice.ponds.step_ponds(scheme='si3_lev')",
             "entry_kind": 10,
             "exit_kind": 11,
             "score": o12_pnd_acc.summary(),
+            "production_step_ponds_si3_lev": prod_step_ponds_acc.summary(),
         },
     }
 
     # Check if any rung had a non-0-ULP difference (e.g. under a plant)
     failures: list[str] = []
     for rung_name, rdata in rungs_report.items():
-        sub_scores = (
-            [rdata["score"]]
-            if "score" in rdata
-            else [
+        if rung_name == "O9":
+            sub_scores = [
                 rdata["zdf_exit"],
                 rdata["dh_exit"],
                 rdata["temp1_exit"],
@@ -1381,13 +1607,24 @@ def score_o8_to_o12(
                 rdata["picard_final_kind17"],
                 rdata["pre_category_gather_kind21"],
             ]
-            if rung_name == "O9"
-            else [
+        elif rung_name == "O10":
+            sub_scores = [
                 rdata["sal_exit"],
                 rdata["temp2_exit"],
                 rdata["unpadded_o10_composed_spot_check"],
             ]
-        )
+        elif rung_name == "O11":
+            sub_scores = [
+                rdata["score"],
+                rdata["production_column_step_arrays_o9_o11"],
+            ]
+        elif rung_name == "O12":
+            sub_scores = [
+                rdata["score"],
+                rdata["production_step_ponds_si3_lev"],
+            ]
+        else:
+            sub_scores = [rdata["score"]]
         for sub in sub_scores:
             if sub["total_unequal"] > 0:
                 fnb = sub["first_non_bit"]
