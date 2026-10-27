@@ -434,7 +434,9 @@ def _compose_nh_moist_physics(model_type: str, dt: float,
                 )
             summed = [a + b for a, b in zip(summed, leaves_s)]
         if conv_fn is not None:
-            t_conv = conv_fn(*args, **kwargs, phys_state=_zm_start_state(args[0]))
+            if convection_scheme == "zhang_mcfarlane":
+                kwargs = {**kwargs, "phys_state": _zm_start_state(args[0])}
+            t_conv = conv_fn(*args, **kwargs)
             leaves_c = jax.tree_util.tree_leaves(t_conv)
             if len(leaves_c) != len(summed):
                 raise ValueError(

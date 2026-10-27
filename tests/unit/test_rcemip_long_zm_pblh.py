@@ -35,3 +35,24 @@ def test_zm_gets_zero_pblh_per_column(monkeypatch):
     ps = seen["phys_state"]
     np.testing.assert_array_equal(np.asarray(ps.pblh), np.zeros(6 * 3 * 3))
     assert ps.cloud_fraction is None
+
+
+def test_other_schemes_still_get_no_physics_state(monkeypatch):
+    mod = importlib.import_module("run_rcemip_long")
+    import legoesm.atmosphere.physics.convection.integration as conv_int
+    import legoesm.atmosphere.physics.microphysics.integration as micro_int
+    import legoesm.atmosphere.physics.radiation.integration as rad_int
+
+    seen = {}
+    zero = lambda *a, **k: [jnp.zeros(())]  # noqa: E731
+
+    def conv_spy(*a, **k):
+        seen.update(k)
+        return [jnp.zeros(())]
+
+    monkeypatch.setattr(micro_int, "make_microphysics_physics", lambda *a, **k: zero)
+    monkeypatch.setattr(rad_int, "make_radiation_physics", lambda *a, **k: zero)
+    monkeypatch.setattr(conv_int, "make_convection_physics", lambda *a, **k: conv_spy)
+    fn = mod._compose_nh_moist_physics("nonhydrostatic", 60.0, convection_scheme="bechtold")
+    fn(SimpleNamespace(theta_prime=SimpleNamespace(data=jnp.ones((6, 3, 3, 5)))))
+    assert "phys_state" not in seen
