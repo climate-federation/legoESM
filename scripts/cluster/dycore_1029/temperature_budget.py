@@ -295,15 +295,12 @@ def column_summary(T0, terms, info, dp, T_min):
         T0=np.round(T0, 2).tolist())
 
 
-def main(argv=None):
+def load_probe(probe_dir):
+    """Rebuild the probe's model and list its saved states (checked vs meta)."""
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     from burst_anatomy_probe import build, runner
 
-    ap = argparse.ArgumentParser()
-    ap.add_argument("probe_dir", type=Path)
-    ap.add_argument("--out", type=Path, default=None)
-    a = ap.parse_args(argv)
-    meta = json.loads((a.probe_dir / "meta.json").read_text())
+    meta = json.loads((probe_dir / "meta.json").read_text())
     nu4 = runner._biharmonic_visc_latlon(72)
     if abs(nu4 - meta["nu_del4"]) > 1e-9 * nu4:
         raise SystemExit(f"nu_del4 {nu4} != probe's {meta['nu_del4']}")
@@ -311,7 +308,16 @@ def main(argv=None):
     if abs(dt - meta["dt"]) > 0 or abs(ah - meta["A_h"]) > 1e-9 * ah:
         raise SystemExit("dt / A_h differ from the probe run")
     target = model.compute_mass(st0)                 # anchor_mass_to_initial
-    clean = sorted(a.probe_dir.glob("clean_*.npz"), key=lambda p: int(p.stem[6:]))
+    clean = sorted(probe_dir.glob("clean_*.npz"), key=lambda p: int(p.stem[6:]))
+    return meta, grid, sigma, model, st0, target, clean
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser()
+    ap.add_argument("probe_dir", type=Path)
+    ap.add_argument("--out", type=Path, default=None)
+    a = ap.parse_args(argv)
+    meta, grid, sigma, model, st0, target, clean = load_probe(a.probe_dir)
     states = [load_state(c) for c in clean]
     # The CPU rebuild of the mountain differs from the run's float32 phis by
     # rounding only (seed 42: 0.07 of 19278 m2/s2); the saved field is used,

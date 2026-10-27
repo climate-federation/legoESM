@@ -125,3 +125,79 @@ def test_floor_free_run_sets_floor_heat_aside():
     assert rows[1]["Tmin"] < model.config.T_min        # floor heat removed
     assert rows[0]["A"] == tb.swing_amplitude(np.asarray(st.T)[8, 5])
     assert tb.swing_amplitude([0.0, 10.0, 0.0, 10.0, 0.0]) == 10.0
+
+
+_PS = _P.parent / "courant_series.py"
+_spec_s = importlib.util.spec_from_file_location("courant_series_1029", _PS)
+cs = importlib.util.module_from_spec(_spec_s)
+_spec_s.loader.exec_module(cs)
+
+
+def test_sustained_onset_is_last_upward_crossing():
+    st = [10, 11, 12, 13, 14, 15]
+    assert cs.sustained_onset(st, [1, 1, 0, 1, 1, 1]) == 13   # not first-ever
+    assert cs.first_true(st, [0, 1, 0, 1, 1, 1]) == 11
+    assert cs.sustained_onset(st, [1, 1, 1, 1, 1, 0]) is None
+    assert cs.sustained_onset(st, [1] * 6) == 10                # window start
+
+
+def test_row_envelope_skips_hot_and_neighbours_periodically():
+    row = np.zeros((10, 5))
+    zig = np.array([0.0, 8.0, 0.0, 8.0, 0.0])                  # A = 8
+    row[0] = zig                                               # hot column
+    row[9] = row[1] = row[8] = row[2] = 2.0 * zig              # +-2, wrapped
+    row[5] = 0.5 * zig                                         # quiet: A = 4
+    assert cs.row_envelope(row, 0) == 4.0
+    assert cs.row_envelope(row, 0, exclude=1) == 16.0
+
+
+def test_series_row_ties_to_step_budget(moving):
+    model, st, _, _, _, _ = moving
+    ij, tgt = (8, 5), model.compute_mass(st)
+    _, _, info = tb.step_budget(model, st, tgt)
+    r = cs.series_row(model, st, tgt, ij)
+    C = [np.asarray(c)[ij] for c in info["courant_stages"]]
+    assert r["C"] == float(np.max(C[0])) > 0.0
+    assert r["C3"] == float(max(np.max(c) for c in C))
+    assert r["C3"] > r["C"]                                    # stages differ
+    assert r["ident"] < 1e-9 and not r["floor"]
+    assert r["A"] == tb.swing_amplitude(np.asarray(st.T)[ij])
+    assert C[0][r["k_C"]] == r["C"]
+    Tc = np.asarray(st.T)[ij]
+    assert abs(Tc[r["k_A"]] - 0.5 * (Tc[r["k_A"] - 1] + Tc[r["k_A"] + 1])) == r["A"]
+    o = cs.onsets([dict(step=1, **r), dict(step=2, **dict(r, C=2.0, C3=2.0))])
+    assert o["t_C"] == o["t_C3"] == 2 and o["window"] == [1, 2]
+
+
+def test_controls_fail_on_planted_violations_and_window_checked():
+    ok = dict(A=1.0, E=2.0, C=0.5, C3=0.5, floor=False, ident=1e-12, Cq=0.01)
+    o = cs.onsets([dict(step=1, **ok), dict(step=2, **ok)])
+    assert o["K3_pass"] and o["K4_pass"]
+    o = cs.onsets([dict(step=1, **ok), dict(step=2, **dict(ok, ident=2e-9))])
+    assert not o["K3_pass"] and o["K4_pass"]
+    o = cs.onsets([dict(step=1, **dict(ok, Cq=0.2)), dict(step=2, **ok)])
+    assert o["K3_pass"] and not o["K4_pass"]
+    assert cs.readable(dict(K3_pass=True, K4_pass=True))["C_readable"]
+    assert not cs.readable(dict(K3_pass=True, K4_pass=False))["C_readable"]
+    assert not cs.readable(dict(K3_pass=False, K4_pass=True))["C_readable"]
+    cs.check_window([7, 8, 9], 10, 3, 10)
+    for steps, trip, n, exp in (([7, 9], 10, 2, 10), ([7, 8], 10, 2, 10),
+                                ([8, 9], None, 2, 10), ([8, 9], 10, 3, 10),
+                                ([7, 8, 9], 10, 3, 11)):
+        with pytest.raises(SystemExit):
+            cs.check_window(steps, trip, n, exp)
+
+
+def test_compare_states_reports_and_refuses_missing(tmp_path):
+    ref, new = tmp_path / "ref", tmp_path / "new"
+    ref.mkdir(), new.mkdir()
+    with pytest.raises(SystemExit):
+        cs.compare_states(ref, new)                         # empty reference
+    z = {f: np.zeros(3) for f in ("u", "v", "T", "p_s", "phis")}
+    np.savez(ref / "clean_9.npz", **z)
+    np.savez(new / "clean_9.npz", **dict(z, T=np.array([0.0, -2.0, 1.0])))
+    np.savez(new / "clean_8.npz", **z)                      # extra new: fine
+    assert cs.compare_states(ref, new) == {"clean_9": dict(u=0.0, v=0.0, T=2.0, p_s=0.0)}
+    np.savez(ref / "clean_7.npz", **z)                      # not in new
+    with pytest.raises(FileNotFoundError):
+        cs.compare_states(ref, new)
