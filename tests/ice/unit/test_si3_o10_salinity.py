@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
 import math
+import textwrap
 from types import SimpleNamespace
 
 import jax
@@ -216,7 +218,7 @@ def _oracle_column(*, h_i, t_su, t_i, sz_i, t_bo, sss, a_i, dh_i_sum,
                 cfl = (flush_velocity[k] * zdt) * z1_h
                 cfl_flush = _fmax(cfl_flush, abs(cfl))
                 zds = -cfl * (brine[k] - (0.0 if k == 0 else brine[k - 1]))
-                smin_flush = _fmin(salinity[k] + zds, smin_flush)
+                smin_flush = _fmin(smin_flush, salinity[k] + zds)
                 nonpositive = _fmin(0.0, zds) if k == 8 else _fmin(zds, 0.0)
                 floor = -salinity[k] + _fmin(0.75 * sss, 0.1)
                 if events is not None:
@@ -242,21 +244,22 @@ def _oracle_column(*, h_i, t_su, t_i, sz_i, t_bo, sss, a_i, dh_i_sum,
 
 def _fixture():
     T0 = NEMO_SI3_CONSTANTS_CONFIG.T0
-    n = 13
+    n = 14
     h_i = np.array([1.5, 2.2, 0.05, 1.0, 1.8, 0.7, 0.11, 1.2,
-                    0.1, 0.11, 0.1, 0.1, 0.17693980726715666])
+                    0.1, 0.11, 0.1, 0.1, 0.17693980726715666, 0.0])
     t_su = np.array([T0 - 12.0, T0 - 0.2, T0 - 8.0, T0 - 5.0,
                      T0 - 0.1, T0 - 2.0, T0 - 18.0, T0 - 0.5,
-                     T0 - 3.0, T0 - 3.0, T0 - 1.0, T0 - 1.0, T0 - 5.0])
+                     T0 - 3.0, T0 - 3.0, T0 - 1.0, T0 - 1.0, T0 - 5.0,
+                     T0])
     t_bo = np.array([T0 - 1.8] * n)
     sss = np.array([32.0, 34.0, 30.0, 0.2, 35.0, 28.0, 33.0, 36.0,
-                    32.0, 32.0, 32.0, 32.0, 20.140314206854406])
+                    32.0, 32.0, 32.0, 32.0, 20.140314206854406, 32.0])
     a_i = np.array([0.7, 0.9, 0.4, 0.8, 0.95, 0.6, 0.5, 0.85,
-                    0.8, 0.8, 0.8, 0.8, 0.8])
+                    0.8, 0.8, 0.8, 0.8, 0.8, 0.8])
     dh_i_sum = np.array([0.0, -0.08, 0.0, 0.0, -0.4, -0.01, 0.0, -0.03,
-                         0.0, 0.0, -0.5, -0.5, 0.0])
+                         0.0, 0.0, -0.5, -0.5, 0.0, 0.0])
     dh_s_sum = np.array([0.0, -0.02, 0.0, 0.0, -0.1, 0.0, 0.0, -0.01,
-                         0.0, 0.0, 0.0, 0.0, 0.0])
+                         0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
     levels = np.linspace(0.0, 1.0, 10)
     t_i = np.stack([
         T0 - (2.0 + 15.0 * levels),
@@ -277,6 +280,7 @@ def _fixture():
             -1.3798759479405038, -1.1318599582791267, -1.0657063643631135,
             -0.7658493514394027,
         ]),
+        np.full(10, T0),
     ])
     sz_i = np.stack([
         np.linspace(3.0, 11.0, 10),
@@ -297,14 +301,15 @@ def _fixture():
             3.2605020539867735, 7.739808978871614, 1.0234779941351597,
             11.72299965885506,
         ]),
+        np.full(10, 5.0),
     ])
     return dict(
         h_i=h_i, t_su=t_su, t_i=t_i, sz_i=sz_i, t_bo=t_bo, sss=sss,
         a_i=a_i, dh_i_sum=dh_i_sum, dh_s_sum=dh_s_sum,
         sfx_bri=np.array([0.0, -0.0, 1.0, -2.0, 3.0, 0.5, -1.0, 2.0,
-                          -0.0, 0.0, -0.0, 0.0, -0.0]),
+                          -0.0, 0.0, -0.0, 0.0, -0.0, -0.0]),
         sfx_res=np.array([-0.0, 0.0, -1.0, 2.0, -3.0, -0.5, 1.0, -2.0,
-                          0.0, -0.0, 0.0, -0.0, 0.0]),
+                          0.0, -0.0, 0.0, -0.0, 0.0, 0.0]),
     )
 
 
@@ -337,61 +342,84 @@ def _array_args():
     return tuple(jnp.asarray(fixture[name]) for name in _ARRAY_NAMES)
 
 
-def _barrier_site(site, *args, round_source):
-    sr = bl.nemo_source_round if round_source else (lambda value: value)
-    if site == "vc19":
-        (temperature,) = args
-        zt1 = sr(temperature - NEMO_SI3_CONSTANTS_CONFIG.T0)
-        zt2 = sr(zt1 * zt1)
-        zt3 = sr(zt2 * zt1)
-        linear = sr(-18.7 * zt1)
-        quadratic = sr(0.519 * zt2)
-        cubic = sr(0.00535 * zt3)
-        return sr(sr(linear - quadratic) - cubic)
-    if site == "flux_increment":
-        salt_flux, a_i, h_i, zds = args
-        value = sr(RHO_I * a_i)
-        value = sr(value * h_i)
-        value = sr(value * R1_NLAY)
-        value = sr(value * zds)
-        return sr(salt_flux - sr(value * R1_RDT))
-    if site == "rayleigh_chain":
-        positive, permeability, h_i, depth = args
-        value = sr(4.0e6 * GRAVITY)
-        value = sr(value * 7.5e-4)
-        value = sr(value * positive)
-        value = sr(value * permeability)
-        value = sr(value * h_i)
-        value = sr(value * sr(1.0 - depth))
-        value = sr(value * sr((1.0 / 0.523) * (1.0 / 1.8e-6)))
-        return sr(value - 8.0)
-    velocity, zdt, z1_h, brine_hi, brine_lo, salinity = args
-    cfl = sr(sr(velocity * zdt) * z1_h)
-    gradient = sr(brine_hi - brine_lo)
-    zds = sr(-cfl * gradient)
-    return sr(salinity + zds)
+def _source_mutant(function, old, new):
+    """Compile a one-site mutant from the real production function source."""
+
+    source = textwrap.dedent(inspect.getsource(function))
+    assert source.count(old) == 1
+    namespace = dict(vars(bl))
+    namespace["_barrier_identity"] = lambda value: value
+    exec(
+        compile(source.replace(old, new), inspect.getsourcefile(function), "exec"),
+        namespace,
+    )
+    return namespace[function.__name__]
 
 
-def _barrier_stress(site):
+def _without_source_rounding(function):
+    source = textwrap.dedent(inspect.getsource(function))
+    assert "nemo_source_round(" in source
+    namespace = dict(vars(bl))
+    namespace["_barrier_identity"] = lambda value: value
+    exec(
+        compile(
+            source.replace("nemo_source_round(", "_barrier_identity("),
+            inspect.getsourcefile(function),
+            "exec",
+        ),
+        namespace,
+    )
+    return namespace[function.__name__]
+
+
+def _rjw_barrier_stress():
     rng = np.random.default_rng(19010)
     n = 2000
-    if site == "vc19":
-        return (jnp.asarray(NEMO_SI3_CONSTANTS_CONFIG.T0 - rng.uniform(0.01, 40.0, n)),)
-    if site == "flux_increment":
-        return tuple(jnp.asarray(value) for value in (
-            rng.uniform(-3.0, 3.0, n), rng.uniform(0.01, 1.0, n),
-            rng.uniform(0.1, 6.0, n), rng.uniform(-30.0, 30.0, n),
-        ))
-    if site == "rayleigh_chain":
-        return tuple(jnp.asarray(value) for value in (
-            rng.uniform(0.0, 80.0, n), rng.uniform(1.0e-12, 1.0e-7, n),
-            rng.uniform(0.1, 6.0, n), rng.uniform(0.05, 0.95, n),
-        ))
-    return tuple(jnp.asarray(value) for value in (
-        rng.uniform(-0.02, 0.02, n), rng.uniform(1.0, RDT, n),
-        rng.uniform(1.0, 100.0, n), rng.uniform(0.0, 120.0, n),
-        rng.uniform(0.0, 120.0, n), rng.uniform(0.1, 26.0, n),
-    ))
+    salinity = jnp.asarray(rng.uniform(0.1, 25.0, (n, 10)))
+    inner_brine = jnp.asarray(rng.uniform(0.2, 80.0, (n, 10)))
+    sss = jnp.asarray(rng.uniform(20.0, 36.0, n))
+    brine = jnp.concatenate(
+        [jnp.zeros((n, 1)), inner_brine, sss[:, None]], axis=-1
+    )
+    h_i = jnp.asarray(rng.uniform(0.1, 6.0, n))
+    return (
+        salinity,
+        brine,
+        jnp.ones_like(salinity),
+        sss,
+        h_i,
+        jnp.asarray((np.arange(10) + 0.5) / 10.0),
+        jnp.asarray(np.arange(11) / 10.0),
+        10.0 / h_i,
+    )
+
+
+def _unguarded_effective_permeability(zv_br, *, initial):
+    """Pre-fix arithmetic retained only for forward-bit regression proof."""
+
+    nlay = zv_br.shape[-1]
+    one = jnp.ones_like(zv_br[..., 0])
+    zero = jnp.zeros_like(one)
+    out = []
+    for jk in range(nlay):
+        total = zero
+        active = jnp.ones_like(one, dtype=bool)
+        for jk2 in range(jk, nlay):
+            low = zv_br[..., jk2] < 1.0e-6
+            go = active & (~low if initial else jnp.ones_like(low, dtype=bool))
+            safe_v = jnp.where(go, zv_br[..., jk2], one)
+            permeability = bl.nemo_source_round(3.0e-8 * safe_v)
+            permeability = bl.nemo_source_round(permeability * safe_v)
+            permeability = bl.nemo_source_round(permeability * safe_v)
+            reciprocal = bl.nemo_source_round(one / permeability)
+            candidate = bl.nemo_source_round(total + reciprocal)
+            total = jnp.where(go, candidate, jnp.where(active & low, zero, total))
+            active = go
+        count = jnp.asarray(float(nlay - jk), dtype=zv_br.dtype)
+        safe_sum = jnp.where(total > 0.0, total, one)
+        value = bl.nemo_source_round(count / safe_sum)
+        out.append(jnp.where(total > 0.0, value, zero))
+    return jnp.stack(out, axis=-1)
 
 
 def _bits(value):
@@ -427,24 +455,97 @@ def test_salinity4_is_bit_exact_to_independent_scalar_under_jit_and_eager():
 @pytest.mark.parametrize(
     "site", ["vc19", "flux_increment", "rayleigh_chain", "loop_body"]
 )
-def test_each_source_round_site_has_a_bit_changing_unbarriered_plant(site):
-    args = _barrier_stress(site)
+def test_real_model_barrier_groups_have_bit_changing_stripped_plants(site, monkeypatch):
+    """Every plant strips barriers from the executing model function itself."""
+
+    if site == "vc19":
+        rng = np.random.default_rng(19010)
+        args = (
+            jnp.asarray(
+                NEMO_SI3_CONSTANTS_CONFIG.T0 - rng.uniform(0.01, 40.0, 2000)
+            ),
+            NEMO_SI3_CONSTANTS_CONFIG.T0,
+        )
+        function = bl._sal4_vc19_brine
+        with jax.disable_jit():
+            eager = function(*args)
+        protected = jax.jit(function)(*args)
+        stripped = jax.jit(_without_source_rounding(function))(*args)
+        np.testing.assert_array_equal(_bits(protected), _bits(eager))
+        assert np.count_nonzero(_bits(stripped) != _bits(eager)) > 0
+        return
+
+    if site == "rayleigh_chain":
+        args = _rjw_barrier_stress()
+        kwargs = {
+            "gravity": GRAVITY,
+            "rn_alpha_rjw": NML["rn_alpha_RJW"],
+            "rn_rc_rjw": NML["rn_Rc_RJW"],
+            "initial": True,
+        }
+        function = bl._sal4_rjw_velocity
+        with jax.disable_jit():
+            eager = function(*args, **kwargs)
+        protected = jax.jit(function, static_argnames=("initial",))(*args, **kwargs)
+        stripped = jax.jit(
+            _without_source_rounding(function), static_argnames=("initial",)
+        )(*args, **kwargs)
+        np.testing.assert_array_equal(_bits(protected), _bits(eager))
+        assert np.count_nonzero(_bits(stripped) != _bits(eager)) > 0
+        return
+
+    args = _array_args()
     with jax.disable_jit():
-        eager = _barrier_site(site, *args, round_source=False)
-    stripped = jax.jit(
-        lambda *values: _barrier_site(site, *values, round_source=False)
-    )(*args)
-    protected = jax.jit(
-        lambda *values: _barrier_site(site, *values, round_source=True)
-    )(*args)
-    changed = np.count_nonzero(_bits(stripped) != _bits(eager))
-    assert changed == {
-        "vc19": 1022,
-        "flux_increment": 181,
-        "rayleigh_chain": 3,
-        "loop_body": 506,
-    }[site]
-    np.testing.assert_array_equal(_bits(protected), _bits(eager))
+        eager = _model_from_array_args(*args)
+    protected = jax.jit(lambda *values: _model_from_array_args(*values))(*args)
+    target = (
+        bl._sal4_flux_increment
+        if site == "flux_increment"
+        else bl._si3_ice_thd_sal4_core
+    )
+    monkeypatch.setattr(bl, target.__name__, _without_source_rounding(target))
+    stripped = jax.jit(lambda *values: _model_from_array_args(*values))(*args)
+    for got, want in zip(protected, eager):
+        np.testing.assert_array_equal(_bits(got), _bits(want))
+    assert sum(
+        np.count_nonzero(_bits(got) != _bits(want))
+        for got, want in zip(stripped, eager)
+    ) > 0
+
+
+def test_zero_permeability_guard_changes_no_forward_bits_on_fixture_and_fuzz():
+    fixture = _fixture()
+    temperature = jnp.asarray(fixture["t_i"])
+    salinity = jnp.asarray(fixture["sz_i"])
+    brine = bl._sal4_vc19_brine(temperature, NEMO_SI3_CONSTANTS_CONFIG.T0)
+    mask = jnp.where(
+        bl.nemo_source_round(temperature - NEMO_SI3_CONSTANTS_CONFIG.T0) < -1.0e-6,
+        1.0,
+        0.0,
+    )
+    numerator = bl.nemo_source_round(mask * salinity)
+    full_fixture = bl.nemo_source_round(
+        numerator / jnp.where(numerator == 0.0, 1.0, brine)
+    )
+
+    rng = np.random.default_rng(1901646)
+    fuzz = rng.uniform(1.0e-4, 1.0, (12000, 10))
+    fuzz[::7, rng.integers(0, 10, len(fuzz[::7]))] = 0.0
+    fuzz[::11, rng.integers(0, 10, len(fuzz[::11]))] = -0.0
+    fuzz = jnp.asarray(fuzz)
+
+    for initial, values in (
+        (False, full_fixture),
+        (True, fuzz),
+        (False, fuzz),
+    ):
+        old = jax.jit(_unguarded_effective_permeability, static_argnames=("initial",))(
+            values, initial=initial
+        )
+        new = jax.jit(bl._sal4_effective_permeability, static_argnames=("initial",))(
+            values, initial=initial
+        )
+        np.testing.assert_array_equal(_bits(new), _bits(old))
 
 
 def test_salinity4_inexact_inputs_and_output_digest_are_pinned():
@@ -455,7 +556,7 @@ def test_salinity4_inexact_inputs_and_output_digest_are_pinned():
     digest = hashlib.sha256()
     for leaf in jax.tree.leaves(out):
         digest.update(np.asarray(leaf).tobytes())
-    assert digest.hexdigest() == "34479cbb140c1c1c7518e99d4e9270b58fcb0cf24a40b11de038798f2d9e8d47"
+    assert digest.hexdigest() == "1d77233ee682c9e47b266ed263db0b4be98a13d4dcf329d6a6fe80a9dd27a674"
 
 
 def test_salinity4_branch_and_subcycle_coverage_is_real():
@@ -491,7 +592,7 @@ def test_salinity4_branch_and_subcycle_coverage_is_real():
         "flush_floor_clamp": 11,
         "flush_min_zero_block": 9,
         "harmonic_early_exit": 9,
-        "zmsk_zero_layers": 1,
+        "zmsk_zero_layers": 11,
         "drain_cap_50": 1,
         "flush_cap_5": 2,
         "drain_iterations_after_first": 62,
@@ -499,31 +600,81 @@ def test_salinity4_branch_and_subcycle_coverage_is_real():
     }
 
 
-def test_signed_zero_tie_survivors_change_flux_bits_and_layer_plants_fire():
-    zero = jnp.asarray(0.0, dtype=jnp.float64)
-    negative_zero = jnp.asarray(-0.0, dtype=jnp.float64)
-    below = jnp.asarray(-1.0, dtype=jnp.float64)
+def _role_fixture(kind):
+    T0 = NEMO_SI3_CONSTANTS_CONFIG.T0
+    if kind == "drain":
+        temperature = T0 - np.linspace(2.0, 12.0, 10)
+        temperature[0] = np.nan
+        arrays = {
+            "h_i": [1.0], "t_su": [T0 - 5.0], "t_i": [temperature],
+            "sz_i": [np.full(10, 10.0)], "t_bo": [T0 - 1.8], "sss": [0.2],
+            "a_i": [0.8], "dh_i_sum": [0.0], "dh_s_sum": [0.0],
+            "sfx_bri": [-0.0], "sfx_res": [0.0],
+        }
+        return tuple(jnp.asarray(arrays[name]) for name in _ARRAY_NAMES), NML
 
-    drain = bl._maxsd(negative_zero, zero)
-    drain_plant = bl._maxsd(zero, negative_zero)
-    flush_inner = bl._sal4_flush_delta(negative_zero, below, 0, zero)
-    flush_inner_plant = bl._maxsd(bl._minsd(zero, negative_zero), below)
-    flush_outer = bl._sal4_flush_delta(zero, negative_zero, 8, zero)
-    flush_outer_plant = bl._maxsd(zero, negative_zero)
+    arrays = {
+        "h_i": [0.1], "t_su": [T0 - 1.0], "t_i": [np.full(10, T0)],
+        "sz_i": [np.full(10, -0.0)], "t_bo": [T0 - 1.8], "sss": [32.0],
+        "a_i": [0.8], "dh_i_sum": [-0.001], "dh_s_sum": [0.0],
+        "sfx_bri": [-0.0], "sfx_res": [0.0],
+    }
+    simin = -1.0 if kind == "flush_inner_other" else 0.0
+    namelist = {**NML, "rn_simin": simin, "rn_vbrc": 0.0}
+    return tuple(jnp.asarray(arrays[name]) for name in _ARRAY_NAMES), namelist
 
-    for kept, planted in (
-        (drain, drain_plant),
-        (flush_inner, flush_inner_plant),
-        (flush_outer, flush_outer_plant),
-    ):
-        assert _bits(kept) != _bits(planted)
-        kept_flux = negative_zero - bl._sal4_flux_increment(
-            RHO_I, 0.8, 0.1, R1_NLAY, kept, R1_RDT
-        )
-        planted_flux = negative_zero - bl._sal4_flux_increment(
-            RHO_I, 0.8, 0.1, R1_NLAY, planted, R1_RDT
-        )
-        assert _bits(kept_flux) != _bits(planted_flux)
+
+def _role_model(namelist, *values):
+    arrays = dict(zip(_ARRAY_NAMES, values, strict=True))
+    return bl.si3_ice_thd_sal(
+        **arrays, namelist=namelist, rDt_ice=RDT, r1_Dt_ice=R1_RDT,
+        r1_nlay_i=R1_NLAY, rho_i=RHO_I, rho_s=RHO_S, rho_w=RHO_W,
+        gravity=GRAVITY, constants=NEMO_SI3_CONSTANTS_CONFIG,
+    )
+
+
+@pytest.mark.parametrize(
+    ("site", "old", "new"),
+    [
+        ("drain", "_maxsd(zds_raw, floor_delta)", "_maxsd(floor_delta, zds_raw)"),
+        ("flush_smin", "_minsd(sal_min, raw_salinity)", "_minsd(raw_salinity, sal_min)"),
+        (
+            "flush_inner9",
+            "_minsd(zero, zds_raw) if jk == 8 else _minsd(zds_raw, zero)",
+            "_minsd(zds_raw, zero) if jk == 8 else _minsd(zds_raw, zero)",
+        ),
+        (
+            "flush_inner_other",
+            "_minsd(zero, zds_raw) if jk == 8 else _minsd(zds_raw, zero)",
+            "_minsd(zero, zds_raw) if jk == 8 else _minsd(zero, zds_raw)",
+        ),
+        (
+            "flush_outer",
+            "_maxsd(floor_delta, nonpositive) if jk in (8, 9) else _maxsd(nonpositive, floor_delta)",
+            "_maxsd(nonpositive, floor_delta) if jk in (8, 9) else _maxsd(floor_delta, nonpositive)",
+        ),
+    ],
+)
+def test_real_salinity_callsite_role_plants_change_bits(site, old, new, monkeypatch):
+    kind = "drain" if site == "drain" else site
+    args, namelist = _role_fixture(kind)
+    assert _bits(args[_ARRAY_NAMES.index("sfx_bri")])[0] == np.uint64(1 << 63)
+    protected = jax.jit(lambda *values: _role_model(namelist, *values))(*args)
+    mutant = _source_mutant(bl._si3_ice_thd_sal4_core, old, new)
+    monkeypatch.setattr(bl, "_si3_ice_thd_sal4_core", mutant)
+    planted = jax.jit(lambda *values: _role_model(namelist, *values))(*args)
+    changed = [
+        np.count_nonzero(_bits(got) != _bits(want))
+        for got, want in zip(planted, protected)
+    ]
+    assert sum(changed) > 0
+    if site == "flush_smin":
+        assert _bits(protected.smin_flush)[0] == np.uint64(1 << 63)
+        assert changed[-1] == 1
+    if site in ("flush_inner9", "flush_outer"):
+        assert changed[1] == 1
+    if site == "flush_inner_other":
+        assert changed[0] == 8
 
 
 def test_masked_signed_zero_sites_have_checked_downstream_arguments():
@@ -550,6 +701,11 @@ def test_five_category_o9_sal_temp2_composition_matches_scalar_oracle():
     categories = o9_fixture._categories(seed=19)
     assert len(categories) == 5
     checked_columns = 0
+    salinity_active = 0
+    below_floor = 0
+    melted_temperature = 0
+    flush_eligible = 0
+    flush_with_melted_temperature = 0
     for jl, cells in enumerate(categories):
         entry, fluxes = o9_fixture._entry(cells)
         sfx_bri = jnp.asarray(np.linspace(-0.0, jl + 1.0, len(cells)))
@@ -582,9 +738,20 @@ def test_five_category_o9_sal_temp2_composition_matches_scalar_oracle():
                 np.asarray(o9.dh.e_i[i]).tolist(), row[0], float(o9.dh.h_i[i])
             ))
 
-            if float(o9.dh.h_i[i]) >= NML["rn_sal_himin"]:
-                salt = np.asarray(o9.dh.sz_i[i])
-                temperature = np.asarray(o9.t_i[i])
+            h_i = float(o9.dh.h_i[i])
+            salt = np.asarray(o9.dh.sz_i[i])
+            temperature = np.asarray(o9.t_i[i])
+            has_melted_temperature = np.all(
+                temperature == NEMO_SI3_CONSTANTS_CONFIG.T0
+            )
+            below_floor += int(np.any(salt < NML["rn_simin"]))
+            melted_temperature += int(has_melted_temperature)
+            melting = float(o9.dh.dh.dh_i_sum[i] + o9.dh.dh.dh_s_sum[i]) < 0.0
+            flush = h_i >= NML["rn_sal_himin"] and melting
+            flush_eligible += int(flush)
+            flush_with_melted_temperature += int(flush and has_melted_temperature)
+            if h_i >= NML["rn_sal_himin"]:
+                salinity_active += 1
                 assert np.all(salt >= NML["rn_simin"])
                 upper = (
                     NEMO_SI3_CONSTANTS_CONFIG.T0
@@ -601,6 +768,8 @@ def test_five_category_o9_sal_temp2_composition_matches_scalar_oracle():
                 np.testing.assert_array_equal(_bits(got), _bits(want))
         np.testing.assert_array_equal(_bits(stages.t_i), _bits(temp_rows))
     assert checked_columns == sum(len(cells) for cells in categories)
+    assert (salinity_active, below_floor, melted_temperature) == (19, 3, 3)
+    assert (flush_eligible, flush_with_melted_temperature) == (3, 0)
 
 
 def test_salinity4_gradient_is_finite_nonzero_and_matches_central_difference():
@@ -622,6 +791,25 @@ def test_salinity4_gradient_is_finite_nonzero_and_matches_central_difference():
     assert np.isfinite(analytic)
     assert analytic != 0.0
     np.testing.assert_allclose(analytic, finite, rtol=1.0e-5, atol=1.0e-7)
+
+
+def test_melted_h_i_zero_column_has_finite_temperature_and_salinity_gradients():
+    kwargs = _model_kwargs()
+    temperature = kwargs.pop("t_i")
+    salinity = kwargs.pop("sz_i")
+    assert kwargs["h_i"][-1] == 0.0
+    assert np.all(np.asarray(temperature[-1]) == NEMO_SI3_CONSTANTS_CONFIG.T0)
+
+    def objective(t_i, sz_i):
+        return jnp.sum(bl.si3_ice_thd_sal(t_i=t_i, sz_i=sz_i, **kwargs).sz_i)
+
+    grad_t, grad_s = jax.jit(jax.grad(objective, argnums=(0, 1)))(
+        temperature, salinity
+    )
+    assert np.all(np.isfinite(np.asarray(grad_t[-1])))
+    assert np.all(np.isfinite(np.asarray(grad_s[-1])))
+    np.testing.assert_array_equal(grad_t[-1], jnp.zeros(10, dtype=jnp.float64))
+    np.testing.assert_array_equal(grad_s[-1], jnp.ones(10, dtype=jnp.float64))
 
 
 @pytest.mark.parametrize(

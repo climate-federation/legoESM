@@ -1655,14 +1655,15 @@ def _sal4_effective_permeability(zv_br, *, initial):
         active = jnp.ones_like(one, dtype=bool)
         for jk2 in range(jk, nlay):
             low = zv_br[..., jk2] < _EPS06
-            go = active & (~low if initial else jnp.ones_like(low, dtype=bool))
+            stop = low if initial else zv_br[..., jk2] == 0.0  # absorb +0 without 1/0
+            go = active & ~stop
             safe_v = jnp.where(go, zv_br[..., jk2], one)
             zperm = nemo_source_round(_SAL4_PERMEABILITY * safe_v)
             zperm = nemo_source_round(zperm * safe_v)
             zperm = nemo_source_round(zperm * safe_v)
             reciprocal = nemo_source_round(one / zperm)
             candidate = nemo_source_round(ztmp + reciprocal)
-            ztmp = jnp.where(go, candidate, jnp.where(active & low, zero, ztmp))
+            ztmp = jnp.where(go, candidate, jnp.where(active & stop, zero, ztmp))
             active = go
         count = jnp.asarray(float(nlay - jk), dtype=zv_br.dtype)
         safe_sum = jnp.where(ztmp > 0.0, ztmp, one)
@@ -1683,8 +1684,8 @@ def _sal4_rjw_velocity(sz_i, zs_br, zmsk, sss, h_i, z_mid, z_edge, z1_h_i,
         if initial
         else zs_br[..., 1:-1]
     )
-    zv_br = nemo_source_round(zmsk * sz_i)
-    zv_br = nemo_source_round(zv_br / divisor)
+    volume_numerator = nemo_source_round(zmsk * sz_i)
+    zv_br = nemo_source_round(volume_numerator / jnp.where(volume_numerator == 0.0, 1.0, divisor))
     zperm_eff = _sal4_effective_permeability(zv_br, initial=initial)
 
     z1_cp_br = nemo_source_round(_div_const(one, _SAL4_CP_BRINE))
@@ -1766,8 +1767,6 @@ def _si3_ice_thd_sal4_core(*, h_i, t_su, t_i, sz_i, t_bo, sss, a_i,
     )
     zhmelt = nemo_source_round(dh_s_sum + dh_i_sum)
 
-    # Gravity drainage: positive salt flux is into the ocean.  A negative layer
-    # salinity increment is therefore subtracted from the ice and added to sfx_bri.
     layer_thickness = nemo_source_round(h_i * r1_nlay_i)
     z1_h_drain = nemo_source_round(one / _maxsd(layer_thickness, _EPS10))
     zs_brmax = zero
@@ -1844,8 +1843,7 @@ def _si3_ice_thd_sal4_core(*, h_i, t_su, t_i, sz_i, t_bo, sss, a_i,
         (sz_i, sfx_bri, zero, zero),
     )
 
-    # Flushing uses upward meltwater flow.  The salt-flux convention remains
-    # positive into the ocean, identical to the drainage update above.
+    # Flushing uses upward meltwater flow and the same positive-ocean salt flux.
     z1_h_flush = nemo_source_round(one / _maxsd(layer_thickness, _EPS10))
 
     def flushing_velocity(jk):
@@ -1890,11 +1888,13 @@ def _si3_ice_thd_sal4_core(*, h_i, t_su, t_i, sz_i, t_bo, sss, a_i,
             brine_gradient = nemo_source_round(zs_br[..., jk + 1] - zs_br[..., jk])
             zds_raw = nemo_source_round(-cfl * brine_gradient)
             raw_salinity = nemo_source_round(salinity[..., jk] + zds_raw)
-            sal_min_next = _minsd(raw_salinity, sal_min)
+            sal_min_next = _minsd(sal_min, raw_salinity)
             upper_product = nemo_source_round(rn_sinew * sss)
             lower_bound = _minsd(upper_product, rn_simin)
             floor_delta = nemo_source_round(-salinity[..., jk] + lower_bound)
-            zds = _sal4_flush_delta(zds_raw, floor_delta, jk, zero)
+            # -O3 line-644 roles: inner dst=0 only at layer 9; outer dst=floor at 9/10.
+            nonpositive = _minsd(zero, zds_raw) if jk == 8 else _minsd(zds_raw, zero)
+            zds = _maxsd(floor_delta, nonpositive) if jk in (8, 9) else _maxsd(nonpositive, floor_delta)
             sal_next = nemo_source_round(salinity[..., jk] + zds)
             flux_next = nemo_source_round(
                 salt_flux
@@ -2909,20 +2909,4 @@ def _si3_column_thd_da(entry, post_temp2, forcing, si3, dt, constants):
         concentration=jnp.where(gathered, da.a_i, post_temp2.concentration),
         h_ice=jnp.where(gathered, da.h_i, post_temp2.h_ice),
         h_snow=jnp.where(gathered, da.h_s, post_temp2.h_snow),
-    )
-
-
-def _sal4_flush_delta(zds_raw, floor_delta, jk, zero):
-    """Line-644 clamps with the record object's layer-specific operand roles."""
-
-    # The -O3 unrolled object emits MIN(0,zds) with zds as the destination in
-    # every layer except Fortran layer 9.  Its outer MAX reverses roles only in
-    # Fortran layers 9 and 10.  These distinctions are visible on +/-0 ties.
-    nonpositive = (
-        _minsd(zero, zds_raw) if jk == 8 else _minsd(zds_raw, zero)
-    )
-    return (
-        _maxsd(floor_delta, nonpositive)
-        if jk in (8, 9)
-        else _maxsd(nonpositive, floor_delta)
     )

@@ -9,8 +9,9 @@ master-record array was read and no acquisition tool was built. The next legal
 step is the O10 projection from DECISION 173's one shared 100-step production
 record; the KILL RULE still applies to any differing normal binary64 bit.
 
-Independent review: Argon HOLD and Sonnet HOLD. Every confirmed HOLD item is
-resolved below; neither review claimed master-record confirmation.
+The supplied Argon and Sonnet re-reviews both held. This resume resolves their
+confirmed model-preparation items below; neither review claimed master-record
+confirmation.
 
 ## Production identity and transcription
 
@@ -37,11 +38,11 @@ The selectable model is split into source-order helpers and one core:
 
 - VC19 rounding barriers are at
   `packages/ice/legoesm/ice/bitz_lipscomb.py:1634-1643`;
-- the initial/repeated harmonic forms are at `:1646-1671`, and the RJW chain is
-  at `:1674-1728`, including true constant divides at `:1690-1692`;
-- the line-644 layer-specific object roles are isolated at `:2915-2927`;
-- drainage, flushing, and final bounds are `:1739-1844`, `:1847-1917`, and
-  `:1921-1937`;
+- the initial/repeated harmonic forms are at `:1646-1672`, and the RJW chain is
+  at `:1675-1729`, including the zero-volume divisor guard at `:1687-1689`;
+- drainage, flushing, and final bounds are `:1740-1843`, `:1846-1917`, and
+  `:1921-1937`; line 641's role is at `:1891`, and line 644's per-layer roles
+  remain at the executing call site at `:1895-1897`;
 - the fail-closed public entry is `:1949-1986`, and the real O9 -> SAL -> TEMP2
   category composition is `:1997-2020`.
 
@@ -54,7 +55,7 @@ model preserves those per-layer splits. Salinity-2/D5 code is untouched.
 
 The audit contains only real ppsrc variables, covers every executing floating
 site, and records one explicit verdict at
-`scripts/validate/ocean_fidelity/testcases/nemo_si3_o10_minmax_audit.py:12-76`.
+`scripts/validate/ocean_fidelity/testcases/nemo_si3_o10_minmax_audit.py:12-98`.
 It pins ppsrc SHA-256
 `db71f3961ffd52fdce8092f9930d69a4abd2247b5b9cc744e9a00f5f9135c216`
 and record-object SHA-256
@@ -69,7 +70,8 @@ The tie conclusions are now deliberately narrow:
 - lines 350, 397, and 482 are `MASKED` only because checked downstream
   comparisons cannot observe the surviving zero sign;
 - lines 535 and 641 are `MASKED` only because `zs_min` is read solely by the
-  deck-disabled `ln_sal_chk` diagnostics;
+  deck-disabled `ln_sal_chk` diagnostics; their distinct object roles are still
+  pinned at the real model call sites;
 - lines 538 and 644 are `FOUND`: signed-zero operand swaps change the flux bit,
   and the per-layer line-644 object roles are pinned;
 - line 619 is `NO_TIE` only under the production TEMP1 bound proved below.
@@ -77,56 +79,70 @@ The tie conclusions are now deliberately narrow:
 ## Independent controls and review mutants
 
 The scalar oracle is a literal transcription and shares no numerical model
-helper. Its 13-column fixture hits the drain floor, flush floor,
+helper. Its 14-column fixture hits the drain floor, flush floor,
 `MIN(0,zds)`, initial harmonic early exit, a zero `zmsk` layer, both 50/5 caps,
-and repeated loop bodies. The exact census is pinned at
-`tests/ice/unit/test_si3_o10_salinity.py:461-498`.
+repeated loop bodies, and an explicit `h_i = 0`, `t_i = T0` column. The exact
+census is pinned at `tests/ice/unit/test_si3_o10_salinity.py:562-599`.
 
 Both eager and compiled calls take arrays as arguments; no constant-input JIT
-closure remains. Scalar == eager == JIT is checked bit-for-bit at `:414-424`.
-Four independently planted missing-barrier controls prove that unbarriered
-eager and JIT differ, while the protected version agrees, at `:427-447`.
-Their pinned changed-column counts are 1022 (VC19), 181 (flux increment), 3
-(Rayleigh chain), and 506 (loop body). The full-output digest is pinned at
-`:450-458`.
+closure remains. Scalar == eager == JIT is checked bit-for-bit at `:442-452`.
+Four missing-barrier controls now strip `nemo_source_round` from the real VC19,
+flux, RJW, and salinity-core functions, and each changes output bits while the
+protected function agrees with eager, at `:455-512`. The full-output digest is
+pinned at `:551-559`.
 
-Signed-zero survivor plants for the drainage clamp and both line-644 clamps
-change output flux bits at `:502-526`. The three `MASKED` downstream arguments
-are separately checked at `:529-545`.
+Source-compiled plants flip the real drainage, line-641, and per-layer line-644
+call sites in `_si3_ice_thd_sal4_core`; the dedicated fixture reaches the
+line-641/644 signed-zero ties with `sfx_bri = -0`, and every flip changes output
+bits at `:603-677`. The three `MASKED` downstream arguments are separately
+checked at `:680-696`.
 
 Real `jpl=5` O9 -> SAL -> TEMP2 composition runs all five categories against
-the scalar oracle at `:548-603`. The separate wiring plant gives every array a
-distinct identity token and checks each keyword, SAL ordering, and TEMP2 use at
-`:658-724`. Required-input and selector refusal checks are `:627-655`. The
-production gradient/finite-difference check is `:606-624`.
+the scalar oracle and pins the reachability census at `:699-772`. The separate
+wiring plant gives every array a distinct identity token and checks each
+keyword, SAL ordering, and TEMP2 use at `:846-912`. Required-input and selector
+refusal checks are `:815-843`. The smooth production gradient/finite-difference
+check is `:775-793`, and the melted `h_i = 0` gradient check is `:796-812`.
 
 ## Edge deviations and reachability
 
-Two forward implementations intentionally avoid invalid intermediate values:
+The seed-19 five-category production composition resolves the reviewer
+disagreement rather than averaging it. It produces 27 gathered columns:
+
+- 19/27 are salinity-active (`h_i >= rn_sal_himin`), and 0/19 has any
+  pre-salinity layer below `rn_simin = 0.1`;
+- 3/27 are melted-out numerical-residue columns with `sz_i = 0` and every
+  `t_i = T0`; thus the global lower-bound claim is false even though its
+  salinity-active form is true;
+- 3/27 are flush-eligible, but 0/3 of those has a `T0` layer.
+
+These counts are computed and pinned in the real composition test at
+`tests/ice/unit/test_si3_o10_salinity.py:699-772`.
+
+Two forward implementations avoid invalid intermediate values:
 
 1. At NEMO source line 618, `zmsk*salinity/zs_br` can form `0/0 = NaN`; the
    compiled `MINSD` can then drop that NaN and allow flushing. The model's
    `safe_brine` instead yields zero and blocks flushing when a layer temperature
    is exactly `T0`. The relevant NEMO loop is
    `ORCA2_SAS_ICE_O7_REF/BLD/ppsrc/nemo/icethd_sal.f90:593-644`, and the model
-   code is `packages/ice/legoesm/ice/bitz_lipscomb.py:1876-1884`.
+   code is `packages/ice/legoesm/ice/bitz_lipscomb.py:1874-1882`. This deviation
+   remains unreachable in the measured composition because the overlap count
+   between flush eligibility and `T0` layers is exactly 0.
 2. After the first drainage iteration, NEMO's repeated harmonic mean has no
-   early exit; a zero-mask layer can therefore produce NaN gradients. The NEMO
-   repeated form is `ORCA2_SAS_ICE_O7_REF/BLD/ppsrc/nemo/icethd_sal.f90:455-474`
-   and the model's guarded arithmetic is
-   `packages/ice/legoesm/ice/bitz_lipscomb.py:1646-1671`.
+   early exit; a zero volume therefore has a forward `1/0 -> infinity -> +0`
+   path whose transpose produced NaN. This path is reachable in the 3 melted
+   columns above. The model now forms exact zero volume without `0/0` and stops
+   the repeated harmonic mean at the same absorbing +0 without evaluating
+   `1/0`, at `packages/ice/legoesm/ice/bitz_lipscomb.py:1653-1672` and
+   `:1682-1689`.
 
-Both deviations are unreachable for the checked production composition. For
-every active state across all five resolved-deck categories, the composition
-test proves `sz_i >= rn_simin = 0.1`; TEMP1 therefore proves
-`t_i <= T0 - rTmlt*rn_simin = T0 - 0.0054 K`, strictly below the `epsi06`
-zero-mask threshold. The check is part of
-`tests/ice/unit/test_si3_o10_salinity.py:548-603`. The exact final-bound kink
-and synthetic zero-mask columns exist only to exercise forward branches and
-are explicitly excluded from the smooth production gradient claim at
-`tests/ice/unit/test_si3_o10_salinity.py:606-624`. If a future admitted
-record violates this bound, these deviations become reachable and model prep
-must stop for an operator decision.
+The guard changes zero forward bits against the pre-fix arithmetic on the full
+14-column fixture and deterministic 12,000-column fuzz for both harmonic forms,
+as proved at `tests/ice/unit/test_si3_o10_salinity.py:516-548`. The full fixture
+digest is also pinned. The explicit `h_i = 0`, all-layer `t_i = T0` column has
+finite gradients, with temperature gradient exactly zero and salinity gradient
+exactly one, at `:796-812`.
 
 ## Citation-gate repair
 
@@ -145,11 +161,10 @@ The frozen F1/F2/F3 master projection remains
 tool was added. P1-P3 remain untested; P4, independent scalar/model equality,
 is confirmed.
 
-All changes in this resume were ASKED review fixes: true JIT arguments,
-barrier mutants, complete branch census, distinct wiring tokens, real five-
-category composition, object-role correction, bit-changing signed-zero plants,
-real-variable audit census, checked `MASKED` arguments, both edge-deviation
-reachability proofs, and the citation-gate bypass repair. No configuration
+All changes in this resume were ASKED review fixes: corrected audit labels,
+real-model barrier plants, real-call-site operand-role plants, the measured
+five-category reachability census, a forward-neutral permeability gradient
+guard, and the explicit melted-column gradient fixture. No configuration
 choice was made.
 
 ## CONFIRMED vs PLAUSIBLE
@@ -159,13 +174,14 @@ CONFIRMED:
 - Sonnet independently transcribed source lines 311-683 and found model
   arithmetic bit-exact on 6,500 random/stress columns; eager == JIT and the
   object contains no FMA, square root, or reciprocal instruction;
-- every requested planted mutant now turns its local test red, including true
-  JIT barrier removal, uncovered event sites, input swaps, MIN/MAX role swaps,
-  signed-zero survivors, real composition, and the citation bypass;
+- every requested barrier and operand-role mutant now turns its local test red
+  in the real salinity functions/call sites, including the line-641/644 ties;
 - the record-object census and hashes regenerate, and line 644's four unrolled
   copies have the pinned operand-role split;
-- the two edge deviations are unreachable under the checked five-category
-  production bound; D5 remains untouched;
+- the flush `safe_brine` deviation is unreachable in the measured production
+  composition (0/3 flush-eligible columns have a `T0` layer); the repeated
+  permeability gradient defect is reachable in 3/27 melted columns and is now
+  guarded with zero forward-bit changes on the full fixture plus fuzz;
 - no physical-input default, acquisition tool, or configuration change exists.
 
 PLAUSIBLE:
@@ -175,12 +191,8 @@ PLAUSIBLE:
 
 ## Gates
 
-The complete CPU/x64 O10 suite passed `40 passed in 429.89s`. O9 and O10
-object-audit regressions plus every non-stamping citation/default check passed
-`58 passed, 2 deselected in 18.44s`; the regenerated object audit reports
-`O10_MINMAX_AUDIT MATCH`. The full-namespace private-import ratchet passed
-`6 passed in 5.07s`. On clean commit `a7d5dded14`, the complete citation/default
-suite passed `35 passed in 6.91s`; the explicit O10 gate passed with 45
-citations, no unmapped citations, no failures, and no full-map audit failures.
-Shifting the VC19 citation by two lines produced `SYMBOL-NOT-AT-LINE`, gate
-status `FAIL`, and exit status 1.
+The complete CPU/x64 O10 suite passed `46 passed in 673.71s`. The O9/O10
+object-audit regressions passed `20 passed in 15.10s`, and the regenerated
+object audit reports `O10_MINMAX_AUDIT MATCH`. The full-namespace
+private-import ratchet passed `6 passed in 5.19s`. The non-stamping full-map and
+all-SI3-receipt citation checks passed `21 passed, 14 deselected in 3.49s`.

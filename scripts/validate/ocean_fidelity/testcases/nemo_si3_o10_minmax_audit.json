@@ -2061,7 +2061,7 @@
  },
  "tie_lemmas": {
   "L0": "MINSD/MAXSD returns its source operand on an equality or unordered comparison; equal finite nonzero operands have identical bits.",
-  "L1": "The production deck has finite, nonnegative layer thickness and the O10 entry has sz_i >= rn_simin = 0.1; TEMP1 therefore has t_i-rt0 <= -rTmlt*rn_simin = -0.0054 K.",
+  "L1": "For salinity-active production columns (h_i >= rn_sal_himin), the measured O10 entry has sz_i >= rn_simin = 0.1; TEMP1 therefore has t_i-rt0 <= -rTmlt*rn_simin = -0.0054 K. Melted-out columns are measured separately and do reach t_i = rt0.",
   "L2": "ABS produces +0 for either signed-zero input, and comparisons do not observe a zero sign.",
   "L3": "The unrolled line-644 object emits MIN(0,zds) as (dst,src)=(zds,0) except in layer 9, and emits the outer MAX as (MIN,floor) except in layers 9 and 10; the committed bit-changing plants pin both splits."
  },
@@ -2075,15 +2075,15 @@
    "verdict": "MASKED"
   },
   "sal:367": {
-   "proof": "Other operand is nonzero epsi06 (L0).",
+   "proof": "Other operand is nonzero epsi10 (L0).",
    "verdict": "NO_TIE"
   },
   "sal:397": {
-   "proof": "A signed-zero permeability reaches only the subcritical Rayleigh comparison; the downstream result is checked (L2).",
+   "proof": "The MAX survivor can change only the zero sign of zRa; either zero is subcritical and the downstream result is checked (L2).",
    "verdict": "MASKED"
   },
   "sal:412": {
-   "proof": "zRa-zRacrit is nonnegative under its enclosing guard (L1).",
+   "proof": "zRa-rn_Rc_RJW is nonnegative under its enclosing guard (L0).",
    "verdict": "NO_TIE"
   },
   "sal:444": {
@@ -2091,11 +2091,11 @@
    "verdict": "NO_TIE"
   },
   "sal:482": {
-   "proof": "A signed-zero permeability reaches only the subcritical Rayleigh comparison; the downstream result is checked (L2).",
+   "proof": "The MAX survivor can change only the zero sign of zRa; either zero is subcritical and the downstream result is checked (L2).",
    "verdict": "MASKED"
   },
   "sal:497": {
-   "proof": "zRa-zRacrit is nonnegative under its enclosing guard (L1).",
+   "proof": "zRa-rn_Rc_RJW is nonnegative under its enclosing guard (L0).",
    "verdict": "NO_TIE"
   },
   "sal:534": {
@@ -2111,7 +2111,7 @@
    "verdict": "FOUND"
   },
   "sal:569": {
-   "proof": "Other operand is nonzero epsi06 (L0).",
+   "proof": "Other operand is nonzero epsi10 (L0).",
    "verdict": "NO_TIE"
   },
   "sal:605": {
@@ -2119,7 +2119,7 @@
    "verdict": "NO_TIE"
   },
   "sal:619": {
-   "proof": "L1 makes every zmsk=1 and every divisor nonzero on the deck.",
+   "proof": "All three measured flush-eligible production columns satisfy L1, so their zmsk and divisors are nonzero.",
    "verdict": "NO_TIE"
   },
   "sal:637": {
@@ -2135,7 +2135,7 @@
    "verdict": "FOUND"
   },
   "sal:677": {
-   "proof": "Both clamps use nonzero rn_simin/rn_simax (L0).",
+   "proof": "The inner clamp uses nonzero rn_simin and the outer clamp uses positive rn_sinew*sss on the production deck (L0).",
    "verdict": "NO_TIE"
   }
  }

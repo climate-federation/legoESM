@@ -25,9 +25,10 @@ TIE_LEMMAS = {
         "comparison; equal finite nonzero operands have identical bits."
     ),
     "L1": (
-        "The production deck has finite, nonnegative layer thickness and the "
-        "O10 entry has sz_i >= rn_simin = 0.1; TEMP1 therefore has "
-        "t_i-rt0 <= -rTmlt*rn_simin = -0.0054 K."
+        "For salinity-active production columns (h_i >= rn_sal_himin), the "
+        "measured O10 entry has sz_i >= rn_simin = 0.1; TEMP1 therefore has "
+        "t_i-rt0 <= -rTmlt*rn_simin = -0.0054 K. Melted-out columns are "
+        "measured separately and do reach t_i = rt0."
     ),
     "L2": (
         "ABS produces +0 for either signed-zero input, and comparisons do not "
@@ -46,22 +47,22 @@ TIE_LEMMAS = {
 TIE_VERDICTS = {
     "sal:334": {"verdict": "NO_TIE", "proof": "Other operand is nonzero epsi10 (L0)."},
     "sal:350": {"verdict": "MASKED", "proof": "The sign of zero zs_brmax is consumed only by > sss; the downstream comparison is checked (L2)."},
-    "sal:367": {"verdict": "NO_TIE", "proof": "Other operand is nonzero epsi06 (L0)."},
-    "sal:397": {"verdict": "MASKED", "proof": "A signed-zero permeability reaches only the subcritical Rayleigh comparison; the downstream result is checked (L2)."},
-    "sal:412": {"verdict": "NO_TIE", "proof": "zRa-zRacrit is nonnegative under its enclosing guard (L1)."},
+    "sal:367": {"verdict": "NO_TIE", "proof": "Other operand is nonzero epsi10 (L0)."},
+    "sal:397": {"verdict": "MASKED", "proof": "The MAX survivor can change only the zero sign of zRa; either zero is subcritical and the downstream result is checked (L2)."},
+    "sal:412": {"verdict": "NO_TIE", "proof": "zRa-rn_Rc_RJW is nonnegative under its enclosing guard (L0)."},
     "sal:444": {"verdict": "NO_TIE", "proof": "Both candidates are ABS results, hence never -0 (L2)."},
-    "sal:482": {"verdict": "MASKED", "proof": "A signed-zero permeability reaches only the subcritical Rayleigh comparison; the downstream result is checked (L2)."},
-    "sal:497": {"verdict": "NO_TIE", "proof": "zRa-zRacrit is nonnegative under its enclosing guard (L1)."},
+    "sal:482": {"verdict": "MASKED", "proof": "The MAX survivor can change only the zero sign of zRa; either zero is subcritical and the downstream result is checked (L2)."},
+    "sal:497": {"verdict": "NO_TIE", "proof": "zRa-rn_Rc_RJW is nonnegative under its enclosing guard (L0)."},
     "sal:534": {"verdict": "NO_TIE", "proof": "Both candidates are ABS results, hence never -0 (L2)."},
     "sal:535": {"verdict": "MASKED", "proof": "zs_min is read only under deck-disabled ln_sal_chk (census)."},
     "sal:538": {"verdict": "FOUND", "proof": "zds and the floor can tie as -0/+0; the flux-bit plant fires."},
-    "sal:569": {"verdict": "NO_TIE", "proof": "Other operand is nonzero epsi06 (L0)."},
+    "sal:569": {"verdict": "NO_TIE", "proof": "Other operand is nonzero epsi10 (L0)."},
     "sal:605": {"verdict": "NO_TIE", "proof": "Both candidates are ABS results, hence never -0 (L2)."},
-    "sal:619": {"verdict": "NO_TIE", "proof": "L1 makes every zmsk=1 and every divisor nonzero on the deck."},
+    "sal:619": {"verdict": "NO_TIE", "proof": "All three measured flush-eligible production columns satisfy L1, so their zmsk and divisors are nonzero."},
     "sal:637": {"verdict": "NO_TIE", "proof": "Both candidates are ABS results, hence never -0 (L2)."},
     "sal:641": {"verdict": "MASKED", "proof": "zs_min is read only under deck-disabled ln_sal_chk (census)."},
     "sal:644": {"verdict": "FOUND", "proof": "Both zero-valued clamps have layer-specific survivors pinned by L3."},
-    "sal:677": {"verdict": "NO_TIE", "proof": "Both clamps use nonzero rn_simin/rn_simax (L0)."},
+    "sal:677": {"verdict": "NO_TIE", "proof": "The inner clamp uses nonzero rn_simin and the outer clamp uses positive rn_sinew*sss on the production deck (L0)."},
 }
 
 
