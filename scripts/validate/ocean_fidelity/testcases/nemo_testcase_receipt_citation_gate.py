@@ -160,6 +160,10 @@ FILES = {
         NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R336TZDF/BLD/ppsrc/nemo/trazdf.f90"),
     "ORCA2_ORCA1ICE_OMIP_L4_R336TZDF/BLD/ppsrc/nemo/zdftke.f90": (
         NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R336TZDF/BLD/ppsrc/nemo/zdftke.f90"),
+    "ORCA2_ORCA1ICE_OMIP_L4_R336TKE/BLD/ppsrc/nemo/stprk3.f90": (
+        NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R336TKE/BLD/ppsrc/nemo/stprk3.f90"),
+    "ORCA2_ORCA1ICE_OMIP_L4_R336TKE/BLD/ppsrc/nemo/zdftke.f90": (
+        NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R336TKE/BLD/ppsrc/nemo/zdftke.f90"),
     "ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/stp2d.f90": (
         NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/stp2d.f90"),
     "ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/traadv.f90": (
@@ -1965,7 +1969,7 @@ CITATION_MAP = {
     'scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round336_tke_gate.py:319-324': [
         'drag_i0, drag_i1 = header["ntsi"] - 2, header["ntei"] + 1',
         '"bottom drag differs from -rn_Cd0*rn_Uc0*ssmask")', 6],
-    'scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round336_tke_acquisition/make_stub_records.py:96-132': [
+    'scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round336_tke_acquisition/make_stub_records.py:99-135': [
         'def write_record(path: Path, rank: int, tracer: dict, ldf: dict,',
         'stream.write(values.tobytes(order="F"))', 37],
     'scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round328_dynzdf_acquisition/run.sh:1019-1060': [
@@ -1992,10 +1996,22 @@ CITATION_MAP = {
     'scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round336_tke_gate.py:92-119': [
         'READ_SET_FIELDS = {',
         '"h_i", "hsw", "phioc", "ut0sd", "vt0sd", "utau", "vtau",', 28],
-    'scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round336_tke_gate.py:301-363': [
+    'scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round336_tke_gate.py:301-373': [
         'if plant == "source-values":',
-        '"taum differs from admitted surface source")', 63],
-    'scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round336_tke_gate.py:430-473': [
+        '"taum differs from admitted surface source")', 73],
+    'ORCA2_ORCA1ICE_OMIP_L4_R336TKE/BLD/ppsrc/nemo/stprk3.f90:153-155': [
+        '!  VERTICAL PHYSICS',
+        'CALL zdf_phy( kstp, Nbb, Nbb, Nrhs )', 3],
+    'ORCA2_ORCA1ICE_OMIP_L4_R336TKE/BLD/ppsrc/nemo/zdftke.f90:199-204': [
+        'CALL r336_tke_begin(kt,Kbb,Kmm,en,p_avt,p_avm,p_sh2,dissl,rn2,rn2b,',
+        'CALL tke_tke( Kbb, Kmm, p_sh2, p_avm, p_avt, z_pdlr )', 6],
+    'scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round336_tke_gate.py:344-361': [
+        'if source is not None:',
+        '"TKE live e3w(Kmm) differs from admitted round-333 replay")', 18],
+    'scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round336_tke_gate.py:362-373': [
+        'if ice is not None:',
+        '"taum differs from admitted surface source")', 12],
+    'scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round336_tke_gate.py:440-483': [
         'def output_contract(same_program_path: Path, writer_source: Path) -> dict[str, object]:',
         '"files": sorted(actual)}', 44],
     'scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round328_dynzdf_acquisition/run.sh:593-608': [
@@ -2010,9 +2026,9 @@ CITATION_MAP = {
     'scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round328_dynzdf_acquisition/run.sh:197-204': [
         'readonly R336_TRACER_REFERENCE=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round333/acquisition/orca1ice_tracer_stage3_kt2_np2',
         'readonly R336_ICE_R1_SHA=4c69a6733b13a8f60d419e6cd1e42a1e0f15c902f9d7804c9431ef1d6d717243', 8],
-    'scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round336_tke_gate.py:337-420': [
+    'scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round336_tke_gate.py:337-430': [
         'expected_final = np.maximum(',
-        'ice=reference_digests[f"ice_r{rank:04d}"])', 84],
+        'ice=reference_digests[f"ice_r{rank:04d}"])', 94],
     'scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round336_tke_acquisition/run.sh:84-97': [
         'for name in ORCA2_00000010_restart_0000.nc ORCA2_00000010_restart_0001.nc \\',
         "printf 'fabricated\\n' >\"$R336_TKE_STUB_FABRICATED_OUTPUT\"", 14],

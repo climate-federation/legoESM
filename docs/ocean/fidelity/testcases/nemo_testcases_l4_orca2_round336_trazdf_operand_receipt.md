@@ -794,7 +794,7 @@ requires full-domain `fr_i` to equal the admitted kt-2 ice-cover source,
 the admitted round-333 tracer/LDF records, and bottom drag to equal the
 linear-drag namelist constant `-0.0004*ssmask`; the source-value plant
 perturbs the latter and refuses
-(`scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round336_tke_gate.py:301-363`).
+(`scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round336_tke_gate.py:301-373`).
 
 The stub no longer bypasses `admit()`. Its success and retained-success paths
 run all 19 parser/semantic plants followed by the real two-rank admission;
@@ -826,6 +826,62 @@ The required operator handoff remains:
 
 ```text
 ACQUISITION_NEEDED: scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round336_tke_acquisition/run.sh
+```
+
+## Resume 15: retained TKE admission and comparison repair
+
+The kept refusal is case **(a), a comparison defect**, not a production-value
+departure.  The executing step driver deliberately calls `zdf_phy` with
+`(Kbb,Kmm)=(Nbb,Nbb)` at
+`ORCA2_ORCA1ICE_OMIP_L4_R336TKE/BLD/ppsrc/nemo/stprk3.f90:153-155`.
+The TKE observer then records the exact `r3t(:,:,Kmm)` operand passed to the
+live TKE arithmetic at
+`ORCA2_ORCA1ICE_OMIP_L4_R336TKE/BLD/ppsrc/nemo/zdftke.f90:199-204`.
+At kt 2 that live header is `(Kbb,Kmm)=(3,3)`, whereas the admitted
+round-333 stage-3 header is `(Kbb,Kmm,Krhs,Kaa)=(3,2,1,1)`.  Therefore the
+live TKE `Kmm` slot is round 333's `Kbb` slot; the refused check had replayed
+round 333's different `Kmm` slot.
+
+Across the two 90-by-148-by-31 rank-local arrays (825,840 words), replay with
+round-333 `r3t_Kbb` gives **0 unequal, max absolute 0** for both live
+`e3t(Kmm)` and live `e3w(Kmm)`.  The refused `r3t_Kmm` replay gives 430,552
+unequal `e3t` words (rank 0: 233,341, max 0.2327149741621497 m; rank 1:
+197,211, max 0.23877390803374965 m) and 509,423 unequal `e3w` words (rank 0:
+272,614, max 4.735874793313712 m; rank 1: 236,809, max
+11.872214721130604 m).  `r3t_Kaa` has the same unequal counts and exactly
+twice those maxima.  Thus staggering, extent and formula are exonerated:
+the correct T-grid expression and the independently checked W-grid expression
+both match bit-for-bit over identical extents.  The gate now asserts the
+header-slot relation and replays `r3t_Kbb` without changing its exact bar
+(`scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round336_tke_gate.py:344-361`).
+
+The repaired replay exposed one further comparison-only extent defect.  The
+round-326 ice recorder zero-filled its halo and copied only the range TKE
+executes at `zdftke_round326_writer.F90:34-69`, while round 336 records the
+live full-grid `fr_i`.  Full-grid comparison found 101/14,288 unequal words
+on rank 0 and 99/14,288 on rank 1 (maxima 0.9971085262668478 and
+0.9970634354455692); all 200 are in the unrecorded halo.  The common executed
+range is 0/13,320 unequal per rank, max 0.  The check now compares only that
+range, again at the exact bit bar
+(`scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round336_tke_gate.py:362-373`).
+
+The focused suite passes 28 tests.  The committed, clean-tree retained route
+then passed 54 inherited/focused tests, 140-file deterministic passivity, the
+two-rank 51-field patched-source fixture, all semantic plants, the 425-object
+same-program census (815 FP-bearing functions, 205,193 FP instructions), the
+five observer-free twin outputs, and both rank-local TKE records.  Admission
+reports `PASS_R336_TKE_KT2_ADMISSION`, with 233,341/197,211 wet interfaces
+and 224,547/189,572 wet process interfaces.  The admission JSON SHA-256 is
+`c86e812a18dcc30d7fc531b747b107cfb99ba51a5c595cba9ca20597157031c5`; the
+complete retained-admission log SHA-256 is
+`690fe5a9a62f63e355e76c6ff5d1e42fdea8c7955cb134c9dd36bf661d938a00`.
+No NEMO executable was run in this resume, and no model source,
+configuration, score or fidelity bar changed.
+
+The requested admission line is:
+
+```text
+R328_RETAINED_OUTPUTS_ADMITTED /data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round336/acquisition/orca1ice_tke_internal_kt2_np2
 ```
 
 ## Resume 12: producer-value discrimination
@@ -948,7 +1004,7 @@ exposed left/bottom halo is derived from the admitted real mask and the
 source-literal linear coefficient for bottom drag, while top drag extends the
 nearest real halo value. It then emits the same exact metadata path consumed
 by admission
-(`scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round336_tke_acquisition/make_stub_records.py:96-132`).
+(`scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round336_tke_acquisition/make_stub_records.py:99-135`).
 Consequently the stub no longer fabricates a full-domain drag record that can
 conceal this extent class, and the real parser/admission plus `drag-range`
 plant exercises the repaired contract.
@@ -1006,7 +1062,7 @@ format.  It requires exactly the four terminal restarts, `ocean.output`, and
 the two rank-local TKE records for the observed run, while the twin must have
 only the five standard outputs; every restart and `ocean.output` is then
 byte-compared between the two runs
-(`scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round336_tke_gate.py:430-473`;
+(`scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round336_tke_gate.py:440-483`;
 `scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round328_dynzdf_acquisition/run.sh:593-608`).
 Thus round 336 no longer requires this pristine-plus-TKE build to regenerate
 the 156 inherited `oracle_*.bin` files from round 326.
@@ -1027,7 +1083,7 @@ Admission verifies those digests, reconstructs `e3t(Kmm)` and `e3w(Kmm)` from
 the round-333 records, checks the round-326 ice fields, and checks final `avt`
 against the recorded NEMO `pdlr` statement rather than consuming a
 round-336 `tra_zdf` record
-(`scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round336_tke_gate.py:337-420`).
+(`scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round336_tke_gate.py:337-430`).
 
 The stub copies the four explicit restarts, derives its observer records from
 the build-generated contract, and never copies an inherited round's
