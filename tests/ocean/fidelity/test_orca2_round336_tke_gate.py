@@ -166,6 +166,15 @@ def test_tke_target_excludes_round328_dynzdf_observer() -> None:
     assert 'observer_free_nemo.sha256' in parent
 
 
+def test_tke_geometry_replay_uses_the_slot_named_by_the_live_call() -> None:
+    source = (TOOL.parent / "nemo_testcase_l4_orca2_round336_tke_gate.py").read_text()
+    stub = (TOOL / "make_stub_records.py").read_text()
+    assert 'header["kmm"] == tracer_header["Kbb"]' in source
+    assert 'tracer_fields["r3t_Kbb"]' in source
+    assert 'tracer_fields["r3t_Kmm"]' not in source
+    assert 'tracer["fields"]["r3t_Kbb"]' in stub
+
+
 def test_stub_outputs_come_from_build_contract() -> None:
     wrapper = (TOOL / "run.sh").read_text()
     stub = wrapper[wrapper.index("<<'STUB'", wrapper.index("cat >\"$stub\"")):

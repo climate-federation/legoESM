@@ -344,12 +344,17 @@ def verify_record(record: dict, source: dict | None = None,
     if source is not None:
         tracer_fields = source["tracer"]["fields"]
         ldf_fields = source["ldf"]["fields"]
+        tracer_header = source["tracer"]["header"]
+        require(header["kt"] == tracer_header["kt"],
+                "TKE and round-333 tracer records have different steps")
+        require(header["kmm"] == tracer_header["Kbb"],
+                "TKE Kmm does not name the round-333 Kbb slot")
         _bits_equal(fields["entry_tmask"], ldf_fields["tmask"],
                     "TKE tmask differs from admitted round-333 LDF source")
         expected_e3t = ldf_fields["e3t_3d"] * (
-            np.float64(1.0) + tracer_fields["r3t_Kmm"][..., None] * ldf_fields["tmask"])
+            np.float64(1.0) + tracer_fields["r3t_Kbb"][..., None] * ldf_fields["tmask"])
         expected_e3w = ldf_fields["e3w_1d"][None, None, :] * (
-            np.float64(1.0) + tracer_fields["r3t_Kmm"][..., None])
+            np.float64(1.0) + tracer_fields["r3t_Kbb"][..., None])
         _bits_equal(fields["entry_e3t_kmm"], expected_e3t[i0:i1, j0:j1],
                     "TKE live e3t(Kmm) differs from admitted round-333 replay")
         _bits_equal(fields["entry_e3w_kmm"], expected_e3w[i0:i1, j0:j1],

@@ -66,7 +66,10 @@ def make_fields(header: dict[str, int], tracer: dict, ldf: dict,
     depth = np.arange(1, header["jpk"] + 1, dtype="=f8")[None, None, :]
     fields["entry_gdepw_kmm"] = np.broadcast_to(
         depth, fields["entry_gdepw_kmm"].shape).copy(order="F")
-    r3t_kmm = tracer["fields"]["r3t_Kmm"]
+        # zdf_phy is deliberately called as (Nbb, Nbb) by stprk3, so the
+        # TKE call's Kmm=3 names the tracer record's Kbb slot, not its stage-3
+        # Kmm=2 slot.
+        r3t_kmm = tracer["fields"]["r3t_Kbb"]
     e3t_kmm = ldf["fields"]["e3t_3d"] * (
         np.float64(1.0) + r3t_kmm[..., None] * tmask)
     e3w_kmm = ldf["fields"]["e3w_1d"][None, None, :] * (
