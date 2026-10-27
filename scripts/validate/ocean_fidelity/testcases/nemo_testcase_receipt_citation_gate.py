@@ -224,6 +224,12 @@ FILES = {
         "nemo_testcase_l4_orca2_round336_tke_acquisition/"
         "tke_round336_writer.F90"),
     "scripts/validate/ocean_fidelity/orca2_l4/"
+    "nemo_testcase_l4_orca2_round336_tke_acquisition/"
+    "make_stub_records.py": (
+        REPO / "scripts/validate/ocean_fidelity/orca2_l4/"
+        "nemo_testcase_l4_orca2_round336_tke_acquisition/"
+        "make_stub_records.py"),
+    "scripts/validate/ocean_fidelity/orca2_l4/"
     "nemo_testcase_l4_orca2_round336_tke_acquisition/run.sh": (
         REPO / "scripts/validate/ocean_fidelity/orca2_l4/"
         "nemo_testcase_l4_orca2_round336_tke_acquisition/run.sh"),
@@ -309,6 +315,7 @@ FILES = {
     # ORCA2 round 324: the ice-ocean top-drag coefficient and its consumer.
     "ICE/iceupdate.F90": NEMO / "src/ICE/iceupdate.F90",
     "ZDF/zdfdrg.F90": _OCE / "ZDF/zdfdrg.F90",
+    "do_loop_substitute.h90": _OCE / "do_loop_substitute.h90",
     "domqco.F90": _OCE / "DOM/domqco.F90",
     # ORCA2 round 1 binds its first non-bit entry field to the compiled branch
     # that executes the category-summed initial snow/ice load adjustment.
@@ -1937,6 +1944,42 @@ CITATION_MAP = {
     'scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round336_tke_acquisition/tke_round336_writer.F90:232-284': [
         'WRITE(unit) magic,2,nkt,nkbb,nkmm,narea-1,jpi,jpj,jpk,ntsi,ntei,ntsj,ntej, &',
         "CALL put3(unit,'tke_wmask',entry_wmask,1,1,1)", 53],
+    'ZDF/zdfdrg.F90:117-127': [
+        'IF( ln_drgice_imp ) THEN',
+        'END_2D', 11],
+    'ZDF/zdfdrg.F90:171-190': [
+        'IF( l_log_not_linssh ) THEN',
+        'END_2D', 20],
+    'ZDF/zdfdrg.F90:213-221': [
+        'SELECT CASE( ndrg )',
+        'END_2D', 9],
+    'do_loop_substitute.h90:117-125': [
+        '#define DO_1Di(L, R) DO ji = ntsi-(L), ntei+(R)',
+        '#define END_2D   END DO   ;   END DO', 9],
+    'scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round336_tke_acquisition/tke_round336_writer.F90:116-135': [
+        'ALLOCATE(entry_en(A2D(0),jpk),entry_avt(A2D(0),jpk), &',
+        'entry_drag_top=ptop(ntsi-1:ntei+1,ntsj-1:ntej+1)', 20],
+    'scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round336_tke_gate.py:190-216': [
+        'require(magic == MAGIC, f"magic {magic!r} != {MAGIC!r}")',
+        'f"{name}: wrong origin {(i0, j0, k0)}")', 27],
+    'scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round336_tke_gate.py:342-347': [
+        'drag_i0, drag_i1 = header["ntsi"] - 2, header["ntei"] + 1',
+        '"bottom drag differs from -rn_Cd0*rn_Uc0*ssmask")', 6],
+    'scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round336_tke_acquisition/make_stub_records.py:82-117': [
+        'def write_record(path: Path, rank: int, phase: dict, ice: dict, drag: dict) -> None:',
+        'stream.write(values.tobytes(order="F"))', 36],
+    'scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round328_dynzdf_acquisition/run.sh:932-974': [
+        'if [[ "$ACQ_TARGET" == tke336 ]]; then',
+        '"$(find -L "$R336_PRISTINE_BLD/obj" -maxdepth 1 -type f -name \'*.o\' | wc -l)"', 43],
+    'scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round328_dynzdf_acquisition/run.sh:1363-1386': [
+        'if [[ "$ACQ_TARGET" == tke336 ]]; then',
+        '"$r336_function_count" "$r336_instruction_count" "$r336_stage_count"', 24],
+    'scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round328_dynzdf_acquisition/run.sh:1387-1406': [
+        '# Recompile the inherited round-326 stage observer for the plant.  The',
+        'cp "$scratch/stage.clean.o" "$dry_bld/obj/stprk3_stg.o"', 20],
+    'scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round328_dynzdf_acquisition/run.sh:1587-1630': [
+        'while IFS= read -r -d \'\' source; do cp -a "$source" "$TARGET_ROOT/EXP00/$(basename "$source")"; done \\',
+        'patch -s --fuzz=0 -p0 -d "$TARGET_ROOT/MY_SRC" <"$R336_TKE_PATCH"', 44],
     'scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round328_dynzdf_acquisition/run.sh:996-1072': [
         "command -v objdump >/dev/null || refuse 'no objdump for TKE arithmetic passivity proof'",
         "printf 'R336_HISTORICAL_TKE_RESULT admitted_rounds=331,332 arithmetic_differs_from_production=yes\\n'", 77],

@@ -920,3 +920,68 @@ The prescribed offline default battery, including the four new producer-value
 tests and the private-import ratchet, passes 156 tests in 1,141.51 seconds;
 its complete log SHA-256 is
 `fbbb1198e1af7684593eb56bb032c1368db4169a1006682f058fac5da8d23914`.
+
+## Resume 13: exact drag fill and pristine executable census
+
+Sonnet's two HOLD findings are resolved without running NEMO and without
+changing a model statement, configuration value, or score. In NEMO,
+`rCdU_top` is updated inside `DO_2D(1,1,1,1)` at
+`ZDF/zdfdrg.F90:117-127`; both nonlinear bottom-drag arms use that same loop
+at `ZDF/zdfdrg.F90:171-190`, and the linear bottom-drag assignment does so at
+`ZDF/zdfdrg.F90:213-221`. The macro expands to
+`ntsi-1:ntei+1,ntsj-1:ntej+1`, exactly one halo ring, at
+`do_loop_substitute.h90:117-125`. Thus the real two-rank layout fills
+`2:93,2:151` (92 by 150), not the outermost `jpi`/`jpj` ring.
+
+The writer now allocates `T2D(1)` and copies precisely that filled slice
+(`scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round336_tke_acquisition/tke_round336_writer.F90:116-135`).
+The parser requires both the 92-by-150 extent and origin `(ntsi-1,ntsj-1)`,
+with a `drag-range` plant that perturbs the origin and refuses
+(`scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round336_tke_gate.py:190-216`).
+The bottom-drag source-value check is restricted to the identical one-halo
+mask slice, so no unwritten outer-ring value is demanded
+(`scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round336_tke_gate.py:342-347`).
+
+The stub builder now reads admitted real phase, ice, and round-328 drag
+records. Its drag arrays copy the real NEMO overlap directly; the newly
+exposed left/bottom halo is derived from the admitted real mask and the
+source-literal linear coefficient for bottom drag, while top drag extends the
+nearest real halo value. It then emits the same exact metadata path consumed
+by admission
+(`scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round336_tke_acquisition/make_stub_records.py:82-117`).
+Consequently the stub no longer fabricates a full-domain drag record that can
+conceal this extent class, and the real parser/admission plus `drag-range`
+plant exercises the repaired contract.
+
+The acquisition build no longer copies any inherited round-326 `MY_SRC` unit.
+It installs pristine NEMO `zdftke.F90`, the round-336 writer, and only the
+round-336 patch
+(`scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round328_dynzdf_acquisition/run.sh:1587-1630`).
+Preflight reconstructs a pristine baseline by replacing all 15 inherited NEMO
+units and removing the inherited writer, producing 425 NEMO objects
+(`scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round328_dynzdf_acquisition/run.sh:932-974`).
+It compares the FP opcode multiset for every function in every one of those
+objects, excluding only the new write-only private writer. The passing census
+is 815 FP-bearing functions and 205,193 FP instructions; `stp_rk3_stg` is the
+pristine 1,175-FP body
+(`scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round328_dynzdf_acquisition/run.sh:1363-1386`).
+The negative plant recompiles the actual inherited stage source, pins its
+1,367-FP census, substitutes it for the clean stage, and makes the whole-build
+census refuse
+(`scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round328_dynzdf_acquisition/run.sh:1387-1406`).
+
+The clean committed preflight exits zero. It passes 23 focused tests and the
+49-test inherited battery, the two-rank 51-field bounds/source fixture, all 20
+placement plants, the exact drag-range and source-value plants, pristine
+same-program identity, the 425-object whole-executable census, and the
+inherited-stage census plant. The stub runs the real `admit()` path for
+success, in-place admission, quoted NEMO refusal, crash retention, and retained
+admission; all five cases pass. It ends with
+`ORCA2_ROUND336_TKE_KT2_PREFLIGHT_READY`. Argon's RUN remains satisfied and
+Sonnet's HOLDs are resolved. Codex review: operator.
+
+The required operator handoff remains:
+
+```text
+ACQUISITION_NEEDED: scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round336_tke_acquisition/run.sh
+```
