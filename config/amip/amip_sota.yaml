@@ -49,6 +49,7 @@ clouds: sundqvist
 microphysics: morrison      # two-moment SOTA microphysics (predicts hydrometeors;
                             # also the aerosol_ccn prereq when that is re-enabled)
 convection: sbm             # the structural-bias fix (albedo+precip)
+sbm_cape_threshold: 0.0      # Isca qe_moist_convection oracle: convect when CAPE > 0 (tier-2 R3)
 turbulence: louis
 gravity_wave_drag: hines
 diurnal_cycle: true

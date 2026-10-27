@@ -91,3 +91,17 @@ def test_three_d_deck_is_a_dynamic_ocean_deck():
     from legoesm.driver.run_config_yaml import read_yaml_with_includes
     assert any(read_yaml_with_includes(d).get("ocean") == "dynamic"
                for d in DECKS)
+
+
+def test_sbm_cape_threshold_reaches_the_coupled_atmosphere(tmp_path):
+    """The CMIP base deck pins SBM's CAPE threshold at the oracle's 0 (tier-2
+    R3) and the flag reaches the atmosphere ExperimentConfig: a CLI value
+    overrides the deck, so the wiring is not the default by coincidence."""
+    from legoesm.driver.run_config_yaml import read_yaml_with_includes
+    assert read_yaml_with_includes(
+        CMIP_DIR / "cmip_tuned_physics.yaml")["sbm_cape_threshold"] == 0.0
+    deck = DECKS[0]
+    base = ["--config", str(deck), *PATH_FLAGS, "--output", str(tmp_path)]
+    assert mod.main(base, build_only=True).atm_config.sbm_cape_threshold == 0.0
+    over = mod.main(base + ["--sbm-cape-threshold", "50"], build_only=True)
+    assert over.atm_config.sbm_cape_threshold == 50.0

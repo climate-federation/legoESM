@@ -33,6 +33,7 @@ rrtmgp_gpoint_checkpoint: false # plain scan over g-points (smaller compiled cod
 
 # --- physics scheme selection (the realistic coupled stack) ---
 convection: sbm                 # Betts-Miller adjustment (detrains-to-precip)
+sbm_cape_threshold: 0.0      # Isca qe_moist_convection oracle: convect when CAPE > 0 (tier-2 R3)
 microphysics: morrison          # 2-moment (ice) — needed with rrtmgp + sbm
 clouds: sundqvist
 convective_cloud: true          # convective (thin-cirrus) cloud-fraction source;

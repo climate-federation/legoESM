@@ -89,6 +89,7 @@ dt: 600.0
 # top-of-model sponge, vertical advection at the polar singularity, and the
 # Fourier polar filter aloft.  (GWD was already excluded at 7.5 deg above.)
 convection: sbm
+sbm_cape_threshold: 0.0      # Isca qe_moist_convection oracle: convect when CAPE > 0 (tier-2 R3)
 # The base pins convective_precip_efficiency: 0.5 for bechtold; sbm has its own
 # rain-split (sbm_precip_efficiency) and rejects the bechtold/tiedtke knob, so
 # clear it here.  null = UNSET -> each scheme uses its own default (the #929

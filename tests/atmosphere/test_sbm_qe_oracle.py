@@ -181,3 +181,21 @@ def test_cape_threshold_default_is_the_oracle_and_inside_its_range():
     assert ExperimentConfig().sbm_cape_threshold == 0.0
     tp = TUNING_PARAMETERS["sbm_cape_threshold"]
     assert (tp.default, tp.min_val, tp.max_val) == (0.0, 0.0, 210.0)
+
+
+@pytest.mark.parametrize("deck", [
+    "config/amip/amip_sota.yaml", "config/amip/amip_realism_c12.yaml",
+    "config/amip/amip_sundqvist_latlon24.yaml"])
+def test_amip_sbm_decks_name_the_cape_threshold(deck):
+    """RULE 3: every AMIP deck that runs SBM states the threshold, not the default."""
+    import importlib.util
+    from pathlib import Path
+    from legoesm.driver.run_config_yaml import load_yaml_config
+    repo = Path(__file__).resolve().parents[2]
+    spec = importlib.util.spec_from_file_location(
+        "_run_amip_sbm", repo / "scripts" / "run" / "run_amip.py")
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    loaded = load_yaml_config(str(repo / deck), m.build_arg_parser())
+    assert loaded["convection"] == "sbm"
+    assert loaded["sbm_cape_threshold"] == 0.0

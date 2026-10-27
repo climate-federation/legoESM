@@ -34,6 +34,7 @@ rad_update_steps: 6
 # tiedtke gives the non-precipitating overcast trap (albedo ~0.8); SBM is the
 # scheme validated realistic in amip_production.yaml (albedo 0.292, precip 3.2).
 convection: sbm
+sbm_cape_threshold: 0.0      # Isca qe_moist_convection oracle: convect when CAPE > 0 (tier-2 R3)
 microphysics: morrison
 clouds: sundqvist
 turbulence: louis           # Louis required by the tiled/coare3 surface

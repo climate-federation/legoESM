@@ -673,7 +673,8 @@ def build_parser():
     # documents the empirically coupled-stable suite, which is a statement about
     # the DEFAULT, not a reason to block the others.)
     # CAVEAT: run_coupled does not expose the per-scheme convection tunables
-    # run_amip has (--bechtold-*, --sbm-*, convective_precip_efficiency, ...),
+    # run_amip has (--bechtold-*, the other --sbm-*, convective_precip_efficiency,
+    # ...; --sbm-cape-threshold is exposed),
     # so a coupled bechtold/tiedtke run uses each scheme's OWN config defaults
     # rather than AMIP's tuned values (e.g. amip_production pins bechtold
     # precip-efficiency 0.0; coupled leaves it at the scheme default). The
@@ -684,6 +685,10 @@ def build_parser():
     parser.add_argument("--convection", default="sbm",
                         choices=list(VALID_CONVECTION_SCHEMES),
                         help="Convection scheme (default: sbm)")
+    parser.add_argument("--sbm-cape-threshold", type=float, default=0.0,
+                        help="SBM CAPE trigger threshold [J/kg] (default 0: "
+                             "the Isca oracle convects whenever CAPE > 0); "
+                             "same flag as run_amip")
     # clubb_lite and ysu were missing here while run_amip offers both, and both
     # resolve through the shared turbulence factory -- drift, not a deliberate
     # exclusion (contrast --surface-bulk-scheme below, which documents its own).
@@ -1490,6 +1495,7 @@ def main(argv=None, *, build_only=False):
         ic=args.ic,
         ic_path=args.ic_path,
         convection=args.convection,
+        sbm_cape_threshold=args.sbm_cape_threshold,
         turbulence=args.turbulence,
         surface_bulk_scheme=args.surface_bulk_scheme,
         surface_gustiness_zi=args.surface_gustiness_zi,
