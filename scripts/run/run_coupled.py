@@ -1787,42 +1787,80 @@ def main(argv=None, *, build_only=False):
             args.params, args.land_params, atm_config, coupled_cfg,
             coupler_config, ice_config)
 
+    # Under `legoesm reproduce`: the reference run's atmosphere manifest (at
+    # its output root) must carry a complete resolved-physics record, which
+    # the rerun's atmosphere must resolve to before stepping.
+    from legoesm.driver.restart import (
+        RESOLVED_PHYSICS_KEYS,
+        RUN_MANIFEST_FILENAME,
+        collective_root_gate,
+        collective_version_drift_gate,
+        config_drift_rows,
+        format_drift_rows,
+        read_run_manifest,
+        record_final_state_digest,
+        REPRODUCE_REFERENCE_ENV,
+        RUNNER_REPLAY_SPECS,
+        read_companion_manifest,
+        reproduce_reference_root,
+        restart_version_drift,
+        write_run_manifest_on_root,
+    )
+    ref_atm = None
+    ref = reproduce_reference_root()
+    if ref is not None and ref[0]["reproducibility"].get("runner_tag") == "run_coupled":
+        import os
+        try:
+            ref_atm_path, ref_atm = read_companion_manifest(
+                os.environ[REPRODUCE_REFERENCE_ENV], ref[0],
+                RUNNER_REPLAY_SPECS["run_coupled"], RUN_MANIFEST_FILENAME,
+                "atmosphere")
+        except ValueError as exc:
+            raise RuntimeError(f"reproduce: no atmosphere manifest of the "
+                               f"reference run found ({exc}); refusing") from exc
+        phys = ref_atm["config"].get("resolved_physics")
+        if not (isinstance(phys, dict) and set(phys) == set(RESOLVED_PHYSICS_KEYS)):
+            raise RuntimeError(f"reproduce: the reference atmosphere manifest "
+                               f"{ref_atm_path} has no complete resolved-physics "
+                               f"record; refusing")
+
     driver = CoupledESMDriver(
         atm_config, coupled_cfg, coupler_config=coupler_config,
         ice_config=ice_config, lake_config=lake_config,
         ocean_grid=ocean_grid_obj, output_dir=args.output,
+        expected_resolved_physics=(ref_atm["config"]["resolved_physics"]
+                                   if ref_atm is not None else None),
+        atm_manifest_runner_tag="run_coupled",
     )
     if build_only:
         return driver
 
-    # Coupled run manifest: every component config this driver was built from
-    # (the atmosphere's own manifest, written by its ModelDriver at setup, sits
-    # at the output root and covers the atmosphere only).  A failed write
-    # aborts the run.
-    from legoesm.driver.restart import write_run_manifest_on_root
-    write_run_manifest_on_root(
-        driver.output_dir / "coupled",
-        {"runner": "run_coupled", "atmosphere": atm_config,
-         "coupled": coupled_cfg, "coupler": coupler_config,
-         "sea_ice": ice_config, "lake": lake_config, "cli_args": vars(args)},
-        config_kind="coupled",
-        runner_tag="run_coupled",
-        rng_seeds={"master": int(atm_config.seed)},
-    )
+    # --resume continues from the latest checkpoint in --output.  Its code
+    # check runs before setup() (it needs only the checkpoint and the
+    # manifest beside it), so other code is refused before the model is built.
+    ckpt = None
+    if getattr(args, "resume", False):
+        ckpt, _tok = _find_latest_checkpoint(args.output)
+        if ckpt is not None:
+            _ck = Path(ckpt)
+            collective_version_drift_gate(
+                lambda: restart_version_drift(_ck, [_ck.parent]),
+                f"checkpoint {_ck}")
 
     t0 = time.time()
     driver.setup()
     t_setup = time.time() - t0
     logger.info(f"Setup completed in {t_setup:.1f}s")
 
-    # --resume: continue the integration from the latest checkpoint in --output
-    # (atm + coupled written together, same day token).  setup() has already
-    # rebuilt the IC + ocean geometry + WOA restoring targets deterministically;
-    # the load overwrites the prognostic state with the saved day-N values.
+    # --resume: setup() has already rebuilt the IC + ocean geometry + WOA
+    # restoring targets deterministically; the load overwrites the prognostic
+    # state with the saved day-N values (the coupled file is named from the
+    # loaded atmosphere day).  Before the coupled record is written, so a
+    # refused resume (no coupled checkpoint) leaves the directory's record
+    # as it was.
     start_step, start_day = 0, None
     if getattr(args, "resume", False):
         import os
-        ckpt, _tok = _find_latest_checkpoint(args.output)
         if ckpt is None:
             logger.info("  --resume: no checkpoint in %s; starting fresh",
                         args.output)
@@ -1830,15 +1868,70 @@ def main(argv=None, *, build_only=False):
             step, day = driver._atm.load_checkpoint(ckpt)
             elapsed = day - getattr(atm_config, "start_day", 0.0)
             driver.load_coupled_checkpoint(float(elapsed),
-                                           checkpoint_dir=args.output)
+                                           checkpoint_dir=args.output,
+                                           required=True)
             start_step, start_day = step, day
             logger.info("  RESUME from %s: step=%d, day=%.1f (elapsed %.1f) -> "
                         "integrating to day %d", os.path.basename(ckpt),
                         step, day, elapsed, args.days)
 
+    # Coupled run manifest, written after setup so it records the component
+    # configs the driver resolved there (config.resolved_physics), with every
+    # config this driver was built from.  The atmosphere's own manifest,
+    # written by its ModelDriver in setup, sits at the output root.  A failed
+    # write (or a reproduce / continuation refusal) aborts the run.  The
+    # atmosphere entry is the atmosphere's own resolved snapshot (the config
+    # its manifest records), so "auto" settings appear as the values setup
+    # resolved them to.
+    coupled_manifest = write_run_manifest_on_root(
+        driver.output_dir / "coupled",
+        {"runner": "run_coupled", "atmosphere": driver._atm._input_config,
+         "coupled": coupled_cfg, "coupler": coupler_config,
+         "sea_ice": ice_config, "lake": lake_config, "cli_args": vars(args)},
+        config_kind="coupled",
+        runner_tag="run_coupled",
+        rng_seeds={"master": int(atm_config.seed)},
+        resolved_physics=driver.resolved_component_configs(),
+    )
+    if ref_atm is not None:
+        def _same_atmosphere():
+            here = driver.output_dir / RUN_MANIFEST_FILENAME
+            rows = config_drift_rows(
+                ref_atm["config"]["resolved_config"],
+                read_run_manifest(here)["config"]["resolved_config"])
+            if rows:
+                raise RuntimeError(
+                    f"reproduce: the rerun's atmosphere configuration differs "
+                    f"from the reference ({len(rows)} fields); refusing:\n"
+                    + format_drift_rows(rows))
+        collective_root_gate(_same_atmosphere, "reproduce: atmosphere record")
+
     t0 = time.time()
     status = driver.run(start_step=start_step, start_day=start_day)
     t_run = time.time() - t0
+    if coupled_manifest is not None and status == "COMPLETED":
+        # Final digest of every non-atmosphere array a coupled checkpoint
+        # saves; the atmosphere's own manifest records the atmosphere's.
+        # Only for a completed run, as the atmosphere's (a wallclock stop or
+        # a blowup must never become a reproducibility reference).  Best
+        # effort, like the writer: the run has finished.
+        try:
+            arrays = driver.coupled_checkpoint_arrays()
+        except Exception as exc:  # noqa: BLE001 — provenance after the run
+            logger.warning(f"coupled state_digest not recorded: "
+                           f"{type(exc).__name__}: {exc}")
+        else:
+            # Pair it with the atmosphere record's final digest (written by
+            # the atmosphere's own run), so --check compares one run's pair.
+            # The digest the atmosphere recorded in THIS run (a same-config
+            # manifest is preserved across runs, so the file may hold an
+            # older one).  Always written ({} = no pair), so a pair from an
+            # earlier segment never sits beside this run's digest.
+            atm_digest = driver._atm.final_state_digest
+            record_final_state_digest(
+                coupled_manifest, arrays,
+                companion_digests=({RUN_MANIFEST_FILENAME: atm_digest}
+                                   if atm_digest else {}))
 
     # Summary
     logger.info("=" * 60)

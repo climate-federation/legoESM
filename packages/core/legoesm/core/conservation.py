@@ -1843,7 +1843,8 @@ def energy_fixer_dT(e_before, e_after, mass) -> jax.Array:
     return (e_before - e_after) / (constants.c_pd * mass)
 
 
-def gridded_energy_fixer_dT(pre, post, grid, sigma_coord) -> jax.Array:
+def gridded_energy_fixer_dT(pre, post, grid, sigma_coord,
+                            owned_mask=None) -> jax.Array:
     """:func:`energy_fixer_dT` for the structured lanes (lat-lon C-grid, cube
     C-D grid), serial and distributed.
 
@@ -1853,7 +1854,8 @@ def gridded_energy_fixer_dT(pre, post, grid, sigma_coord) -> jax.Array:
     F15b-V1).  The three global integrals go through ONE
     :func:`batch_global_area_sums` call -- the reduction the lanes' own mass
     fixers use (serial, MPI allreduce-SUM, lat-band / tile SPMD psum, cube
-    face GSPMD), all AD-safe.
+    face GSPMD), all AD-safe.  ``owned_mask`` as for that call (the
+    owned-face MPI segment lane).
     """
     acc = conservation_accumulator()
 
@@ -1865,7 +1867,8 @@ def gridded_energy_fixer_dT(pre, post, grid, sigma_coord) -> jax.Array:
 
     e0, _ = _col(*pre)
     e1, m1 = _col(*post)
-    s0, s1, sm = batch_global_area_sums([e0, e1, m1], grid)
+    s0, s1, sm = batch_global_area_sums([e0, e1, m1], grid,
+                                        owned_mask=owned_mask)
     return energy_fixer_dT(s0, s1, sm)
 
 

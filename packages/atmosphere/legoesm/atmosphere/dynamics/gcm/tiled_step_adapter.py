@@ -248,7 +248,7 @@ _TILED_TRACERS = ("q_v", "q_c", "q_r")
 
 
 def make_tiled_cc_loop(model, mesh, kt: int, dt: float,
-                       column_physics_fn=None):
+                       column_physics_fn=None, surface_fn=None):
     """Closed-loop tiled stepping: state stays TILE-SHARDED across steps.
 
     The single-shot ``make_tiled_cc_step`` re-replicates per call (its exit
@@ -280,6 +280,11 @@ def make_tiled_cc_loop(model, mesh, kt: int, dt: float,
     physics + the post-step ``max(q, 0)`` floor), and ``exit_`` unpacks
     them back into the tracer Fields.  Dry mode refuses tracer-carrying
     states (silently freezing them would be divergence-by-omission).
+
+    SURFACE (``surface_fn`` given — the blocked step's surface hook): the
+    blocked carry holds a read-only ``"T_sfc"`` cc ``(6, n, n)`` leaf, set by
+    ``enter(state, T_sfc=...)`` and replaceable between segments; ``step``
+    passes it through unchanged.
 
     Unlike the single-shot adapter, the default production config's
     ``use_conservation_fixer+fix_mass`` is INSIDE this envelope: the
@@ -327,6 +332,7 @@ def make_tiled_cc_loop(model, mesh, kt: int, dt: float,
         sponge_tau_sec=float(getattr(cfg, "sponge_tau_sec", 0.0)),
         column_physics_fn=column_physics_fn,
         fix_mass=_fix_mass,
+        surface_fn=surface_fn,
     )
 
     import jax
@@ -337,8 +343,14 @@ def make_tiled_cc_loop(model, mesh, kt: int, dt: float,
     co = NamedSharding(mesh, P("face", "tile_i", "tile_j"))
     cz5 = NamedSharding(mesh, P("face", "tile_i", "tile_j", None, None))
 
-    def enter(state):
+    _sfc = surface_fn is not None
+
+    def enter(state, T_sfc=None):
         """cc HydrostaticState -> blocked pytree (dict) on the tiled mesh."""
+        if _sfc != (T_sfc is not None):
+            raise ValueError(
+                "make_tiled_cc_loop: enter needs T_sfc iff surface_fn was "
+                "given.")
         tracers = getattr(state, "tracers", None)
         if _moist:
             # The moist blocked step advances EXACTLY [q_v, q_c, q_r];
@@ -377,20 +389,24 @@ def make_tiled_cc_loop(model, mesh, kt: int, dt: float,
                 [state.tracers[nm].data for nm in _TILED_TRACERS], axis=-1)
             (q_pack,) = cast_pytree((q_pack,), None, "compute")
             blocked["q_pack"] = jax.device_put(q_pack, cz5)
+        if _sfc:
+            blocked["T_sfc"] = jax.device_put(jnp.asarray(T_sfc), co)
         return blocked
 
     def step(blocked):
+        _kw = {"T_sfc": blocked["T_sfc"]} if _sfc else {}
+        _keep = {"T_sfc": blocked["T_sfc"]} if _sfc else {}
         if _moist:
             u2, v2, T2, ps2, q2 = tiled(
                 blocked["u_d"], blocked["v_d"], blocked["T"],
-                blocked["p_s"], blocked["phis"], blocked["q_pack"])
+                blocked["p_s"], blocked["phis"], blocked["q_pack"], **_kw)
             return {"u_d": u2, "v_d": v2, "T": T2, "p_s": ps2,
-                    "phis": blocked["phis"], "q_pack": q2}
+                    "phis": blocked["phis"], "q_pack": q2, **_keep}
         u2, v2, T2, ps2 = tiled(blocked["u_d"], blocked["v_d"],
                                 blocked["T"], blocked["p_s"],
-                                blocked["phis"])
+                                blocked["phis"], **_kw)
         return {"u_d": u2, "v_d": v2, "T": T2, "p_s": ps2,
-                "phis": blocked["phis"]}
+                "phis": blocked["phis"], **_keep}
 
     def exit_(blocked, template_state):
         """Blocked -> cc HydrostaticState (GLOBAL GATHER — I/O only).

@@ -98,7 +98,10 @@ def test_the_real_classical_skeleton_has_fifty_knobs():
     again, this fails and the message gets updated with it."""
     from legoesm.training.aimip_params import AIMIPClassicalParams
 
-    assert len(AIMIPClassicalParams.from_defaults().raw_values) == 50
+    # 49 since 2026-10-19: the CAM6 gw_oro port removed McFarlane's launch
+    # clip, so the ``mcfarlane_tau_max`` knob is gone (checkpoints written
+    # before that date fail with the legible message above).
+    assert len(AIMIPClassicalParams.from_defaults().raw_values) == 49
 
 
 def test_a_truncated_file_is_also_actionable(tmp_path):
@@ -118,3 +121,10 @@ def test_a_suffixless_path_still_resolves(tmp_path):
     eqx.tree_serialise_leaves(tmp_path / "m.eqx", _params(2))
     loaded = load_checkpoint_or_fail(tmp_path / "m", _params(2))
     assert len(loaded.raw_values) == 2
+
+
+def test_checkpoint_path_adds_eqx_only_when_suffixless(tmp_path):
+    from legoesm.ml.checkpoint_io import checkpoint_path
+    assert checkpoint_path(tmp_path / "epoch_0019") == tmp_path / "epoch_0019.eqx"
+    assert checkpoint_path(str(tmp_path / "exp1") + "/") == tmp_path / "exp1.eqx"
+    assert checkpoint_path(tmp_path / "params.eqx") == tmp_path / "params.eqx"

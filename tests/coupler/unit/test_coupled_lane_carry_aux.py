@@ -222,7 +222,7 @@ def test_both_coupled_consumers_are_strict(driver_file):
 
 @pytest.mark.parametrize("driver_file,ctor", [
     ("coupled_esm_driver.py",
-     "self._atm = ModelDriver(atm_config, output_dir=output_dir)"),
+     "self._atm = ModelDriver(atm_config, output_dir=output_dir,"),
     ("earth_system_driver.py",
      "self._atm = ModelDriver(config, output_dir=output_dir)"),
 ])

@@ -768,7 +768,8 @@ def _sample_omip2_forcing(forcing, idx_t, grid, grid_type,
     )
 
 
-def sample_omip2_forcing(forcing, idx_t, grid, grid_type):
+def sample_omip2_forcing(forcing, idx_t, grid, grid_type,
+                         forcing_remap="bilinear"):
     """Public wrapper for :func:`_sample_omip2_forcing`.
 
     Returns the CORE-II / JRA forcing channels (``u10``, ``v10``, ``T_air`` [K],
@@ -779,8 +780,13 @@ def sample_omip2_forcing(forcing, idx_t, grid, grid_type):
     coupler driver (e.g. the prognostic sea-ice glue in
     ``scripts/run/run_omip_core2.py``) can populate an ``AtmToSurface`` from the
     identical sampled fields rather than re-deriving the regrid (cross-module
-    callers must not import the private ``_sample_omip2_forcing``)."""
-    return _sample_omip2_forcing(forcing, idx_t, grid, grid_type)
+    callers must not import the private ``_sample_omip2_forcing``).
+
+    ``forcing_remap`` MUST be the value the ocean forcing uses, so the ice and
+    the ocean see the same sampled fields (review 2026-10-10 F19 residual: the
+    prognostic ice saw bilinear while the ocean saw ``nemo_scrip``)."""
+    return _sample_omip2_forcing(forcing, idx_t, grid, grid_type,
+                                 forcing_remap=forcing_remap)
 
 
 def compute_omip2_freshwater_forcing(state, *, forcing, idx_t: int,

@@ -22,6 +22,18 @@ def test_run_smoke_validates_the_turnkey_chain(tmp_path):
     assert (tmp_path / "synthetic_era5.zarr").exists()
 
 
+def test_run_smoke_writes_nothing_into_the_caller_cwd(tmp_path, monkeypatch):
+    from scripts.experiment.smoke_compare_reanalysis import run_smoke
+
+    cwd = tmp_path / "cwd"
+    cwd.mkdir()
+    monkeypatch.chdir(cwd)
+    rc = run_smoke(str(tmp_path / "work"), resolution=8, nlev=5,
+                   era5_nlat=8, era5_nlon=16)
+    assert rc == 0
+    assert list(cwd.iterdir()) == []
+
+
 def test_run_smoke_validates_realistic_ocean_only_surface_flux_flags(tmp_path):
     """REGRESSION (iter 484): forwarding the realistic --ocean-only/--surface-flux flags to the
     dry-run must validate end-to-end on a STRUCTURED (lat-lon) grid. --ocean-only built a FLAT

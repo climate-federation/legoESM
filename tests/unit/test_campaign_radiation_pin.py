@@ -196,7 +196,7 @@ def test_wb_and_aimip_classical_are_the_same_model():
 
     params = build_variant("classical", nlev=8)
     assert isinstance(params, AIMIPClassicalParams)
-    assert len(params.raw_values) == 50
+    assert len(params.raw_values) == 49   # 50 until mcfarlane_tau_max left (CAM6 gw_oro)
 
 
 def test_the_wb_campaign_config_names_every_family():
@@ -257,9 +257,15 @@ def test_swapping_a_scheme_swaps_what_is_trained():
         cfg = SimpleNamespace(mode="physics", training_core="spectral",
                               smoke=True, multi_step_hours=(6,), n_days=1)
         *_, params, _mk, _loss, _dt = build_mode_components(cfg, yml)
-        counts[scheme] = len(
-            [x for x in jax.tree.leaves(params) if hasattr(x, "size")])
+        # The SET of trainable (array) leaves, not their count: since the
+        # unselected families' knobs left the tree (2026-10-15) the two arms
+        # happen to train the same NUMBER of leaves.
+        counts[scheme] = {
+            jax.tree_util.keystr(pth)
+            for pth, x in jax.tree.leaves_with_path(params)
+            if hasattr(x, "size")}
 
-    assert counts["tiedtke"] > 0
+    assert counts["tiedtke"]
     assert counts["bechtold"] != counts["tiedtke"], (
         f"swapping convection did not change what is trainable: {counts}")
+    assert any("tiedtke" in n for n in counts["tiedtke"] - counts["bechtold"])

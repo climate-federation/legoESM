@@ -99,19 +99,61 @@ CARDS["smt3"] = (
          "oracle_vortex_smt3/day100"),
 )
 CERTIFIED_LADDER["smt3"] = Path(
-    "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round226/"
-    "smt3_ladder.json")
+    "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round237/"
+    "landing_smt3.json")
 
+CARDS["smt4"] = (
+    "VORTEX_SMT4_VEC-zps",
+    Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round237/"
+         "oracle_vortex_smt4/day100"),
+)
+CERTIFIED_LADDER["smt4"] = Path(
+    "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round238/"
+    "smt4_ladder.json")
+
+# Round 241 / mini-ladder SMT-1 deferred 100-day comparison.  The NEMO
+# trajectory is acquired into this round's evidence root by the existing
+# hash-checked ``smt1vec100d`` driver arm.  The short-run reference is the
+# latest production-tree census (round 237); rounds 238-240 changed no model
+# code, so this is also the current certified SMT-1 registry.
+CARDS["smt1"] = (
+    "VORTEX_SMT1_VEC-zps",
+    Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round241/"
+         "oracle_vortex_smt1/day100"),
+)
+CERTIFIED_LADDER["smt1"] = Path(
+    "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round237/inert/"
+    "VORTEX_SMT1_VEC-zps.json")
+
+# Round 243 / mini-ladder SMT-2 deferred 100-day comparison.  The NEMO
+# trajectory is acquired into this round's evidence root by the existing
+# hash-checked ``smt2vec100d`` driver arm.  Round 237's inert-card census is
+# the latest SMT-2 registry; rounds 238-242 changed no production model code.
+CARDS["smt2"] = (
+    "VORTEX_SMT2_VEC-zps",
+    Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round243/"
+         "oracle_vortex_smt2/day100"),
+)
+CERTIFIED_LADDER["smt2"] = Path(
+    "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round237/inert/"
+    "VORTEX_SMT2_VEC-zps.json")
 
 class ComparisonError(RuntimeError):
     pass
 
 
-def sanity_check_kt1_10(tag: str, case: str, nemo_dir: Path) -> dict:
+def sanity_check_kt1_10(
+    tag: str,
+    case: str,
+    nemo_dir: Path,
+    *,
+    ladder_reference: Path | None = None,
+) -> dict:
     """This round's own first 10 steps must equal the certified ladder."""
     report = trajectory_run(case, nemo_dir, max_step=10,
                              continue_after_first=True)
-    certified = json.loads(CERTIFIED_LADDER[tag].read_text())
+    reference = CERTIFIED_LADDER[tag] if ladder_reference is None else ladder_reference
+    certified = json.loads(reference.read_text())
     mismatches = []
     for new_step, old_step in zip(report["steps"], certified["steps"]):
         require(new_step["kt"] == old_step["kt"], "kt sequence misaligned")
@@ -125,31 +167,31 @@ def sanity_check_kt1_10(tag: str, case: str, nemo_dir: Path) -> dict:
         "status": "REPRODUCED" if not mismatches else "MISMATCH",
         "kt10_is_day_0_33": TABLE_DAYS[0] * STEPS_PER_DAY // STEPS_PER_DAY,
         "mismatches": mismatches,
+        "ladder_reference": str(reference),
         "certified_first_over_bar": certified["first_over_bar"],
         "this_round_first_over_bar": report["first_over_bar"],
     }
 
 
-def run_lego(case: str, lego_dir: Path) -> dict:
-    """Step the certified card 3000 times; snapshot every 30th (daily)."""
+def run_lego_card(card, lego_dir: Path, *, model_hooks=None,
+                  snapshot_days=range(1, N_DAYS + 1)) -> dict:
+    """Step one resolved card for 100 days through the production closure."""
     import jax
     from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
         LatLonCGridOceanModel,
-    )
-    from legoesm.ocean.fidelity.nemo_testcase_recipe import (
-        build_nemo_testcase_card,
     )
 
     set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
     require(get_policy() == PrecisionPolicy.fp64(transcendentals="libm"),
             "precision policy is not fp64")
     require(bool(jax.config.jax_enable_x64), "JAX x64 is disabled")
-    card = build_nemo_testcase_card(case)
     model = LatLonCGridOceanModel(
-        card.recipe.grid, card.recipe.z_coord, card.recipe.model_config)
+        card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
+        **({} if model_hooks is None else {"_nemo_ws_test_hooks": model_hooks}))
     state = card.recipe.initial_state
     lego_dir.mkdir(parents=True, exist_ok=True)
+    snapshot_days = frozenset(int(day) for day in snapshot_days)
     day9_T = None
     for step in range(1, N_DAYS * STEPS_PER_DAY + 1):
         state = model.step(state, dt=card.dt_s)
@@ -157,13 +199,22 @@ def run_lego(case: str, lego_dir: Path) -> dict:
             # The kt=10 "before" entry in the ladder is the state after 9
             # completed steps; keep it for the sanity cross-check.
             day9_T = np.asarray(state.T.data, dtype=np.float64).copy()
-        if step % STEPS_PER_DAY == 0:
+        if step % STEPS_PER_DAY == 0 and step // STEPS_PER_DAY in snapshot_days:
             day = step // STEPS_PER_DAY
             fields = lego_fields(state)
             np.savez(lego_dir / f"day{day:03d}.npz",
                      **{k: np.asarray(v, dtype=np.float64)
                         for k, v in fields.items()})
     return {"card": card, "day9_T": day9_T}
+
+
+def run_lego(case: str, lego_dir: Path) -> dict:
+    """Step the certified named card 3000 times; snapshot every day."""
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import (
+        build_nemo_testcase_card,
+    )
+
+    return run_lego_card(build_nemo_testcase_card(case), lego_dir)
 
 
 def load_nemo(nemo_dir: Path, day: int, nlev: int) -> dict:
@@ -228,9 +279,15 @@ def main() -> int:
     ap.add_argument("--out", type=Path, default=Path(
         "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round210"))
     ap.add_argument("--cards", default="flux,vec",
-                     help="comma-separated tags: flux, vec, smtflux, smtvec, smt3")
+                     help=("comma-separated tags: flux, vec, smtflux, smtvec, "
+                           "smt1, smt2, smt3, smt4"))
     ap.add_argument("--skip-run", action="store_true",
                      help="scoring only; legoESM snapshots already written")
+    ap.add_argument(
+        "--ladder-reference", type=Path,
+        help=("one-card measurement arm: bind the ten-step sanity check and "
+              "kt=10 cross-check to this just-produced candidate ladder "
+              "instead of the immutable certified ladder"))
     args = ap.parse_args()
 
     report = {"format": "nemo-testcase-l1-vortex-round210-100day-v1",
@@ -242,10 +299,13 @@ def main() -> int:
     if unknown:
         raise ComparisonError(f"unknown card tag(s) {unknown}; "
                               f"expected from {sorted(CARDS)}")
+    if args.ladder_reference is not None and len(selected) != 1:
+        raise ComparisonError("--ladder-reference requires exactly one card")
     for tag in selected:
         case, nemo_dir = CARDS[tag]
         print(f"\n################ {tag} ({case})")
-        sanity = sanity_check_kt1_10(tag, case, nemo_dir)
+        sanity = sanity_check_kt1_10(
+            tag, case, nemo_dir, ladder_reference=args.ladder_reference)
         print(f"  kt1-10 sanity vs certified ladder: {sanity['status']}")
         require(sanity["status"] == "REPRODUCED",
                 f"{tag}: this round's first 10 steps diverge from the "
@@ -270,7 +330,9 @@ def main() -> int:
         # certified ladder's kt=10 row scored (same precision, same build).
         kt10_check = None
         if day9_T is not None:
-            certified = json.loads(CERTIFIED_LADDER[tag].read_text())
+            reference = (CERTIFIED_LADDER[tag] if args.ladder_reference is None
+                         else args.ladder_reference)
+            certified = json.loads(reference.read_text())
             kt10_row = next(r for r in certified["steps"][9]["rows"]
                              if r["name"].endswith(".T"))
             require(certified["steps"][9]["kt"] == 10,

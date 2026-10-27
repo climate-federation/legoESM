@@ -63,6 +63,7 @@ from legoesm.atmosphere.physics.convection.integration import (
 from legoesm.atmosphere.physics.turbulence.integration import (
     get_turbulence_fn,
     make_turbulence_physics,
+    resolved_clubb_config,
     turbulence_carry_field,
 )
 from legoesm.atmosphere.physics.microphysics.integration import (
@@ -169,6 +170,8 @@ def make_physics(
     physics_cadence: str = "off",
     physics_cadence_steps: int = 1,
     cld_macmic_num_steps: int = 1,
+    surface_bulk_coeffs="default",
+    cam6_activation=None,
 ) -> Callable:
     """Create a combined physics function for a dynamical core.
 
@@ -294,10 +297,32 @@ def make_physics(
             f"{cld_macmic_num_steps} they are evaluated in parallel on the same "
             "state and summed, leaving the microphysical sinks evaluated on the "
             "pre-exchange liquid.")
+    # Surface exchange with no turbulence scheme (``surface_bulk_coeffs``
+    # ``(C_H, C_E, latent)``): "default" = the default-coefficient bulk law
+    # whenever turbulence is "none" on a model type that carries it; ``None``
+    # = no surface exchange (surface_bulk_scheme="none").  The nonhydrostatic
+    # lane has no bulk module.
+    _bulk_models = ("hydrostatic", "mpas", "spectral_pe")
+    if isinstance(surface_bulk_coeffs, str):
+        if surface_bulk_coeffs != "default":
+            raise ValueError(
+                f"surface_bulk_coeffs={surface_bulk_coeffs!r}: pass "
+                "'default', None, or (C_H, C_E, latent).")
+        from legoesm.atmosphere.physics.turbulence.surface_layer import (
+            C_E_BULK_DEFAULT, C_H_BULK_DEFAULT)
+        surface_bulk_coeffs = (
+            (C_H_BULK_DEFAULT, C_E_BULK_DEFAULT, True)
+            if (config.turbulence.scheme == "none"
+                and model_type in _bulk_models) else None)
+    if surface_bulk_coeffs is not None and model_type not in _bulk_models:
+        raise ValueError(
+            f"surface_bulk_coeffs is wired for model_type {_bulk_models}; "
+            f"{model_type!r} would silently drop the surface exchange.")
     if model_type == "hydrostatic":
         fn = _make_hydrostatic_combined(
             config, dt, column_mesh=column_mesh, need_rad=need_rad,
-            cld_macmic_num_steps=cld_macmic_num_steps)
+            cld_macmic_num_steps=cld_macmic_num_steps,
+            surface_bulk_coeffs=surface_bulk_coeffs)
     elif model_type == "nonhydrostatic":
         fn = _make_nonhydrostatic_combined(config, dt)
     elif model_type == "spectral_pe":
@@ -305,6 +330,7 @@ def make_physics(
             config, dt,
             sfc_albedo_override=sfc_albedo_override,
             sfc_emissivity_override=sfc_emissivity_override,
+            surface_bulk_coeffs=surface_bulk_coeffs,
             cld_macmic_num_steps=cld_macmic_num_steps,
         )
     elif model_type == "mpas":
@@ -316,7 +342,9 @@ def make_physics(
             physics_cadence_steps=physics_cadence_steps,
             cld_macmic_num_steps=cld_macmic_num_steps,
             budget_ledger=budget_ledger,
-            budget_ledger_level_weight=budget_ledger_level_weight)
+            budget_ledger_level_weight=budget_ledger_level_weight,
+            surface_bulk_coeffs=surface_bulk_coeffs,
+            cam6_activation=cam6_activation)
     else:
         raise ValueError(
             f"Unknown model_type: {model_type!r}. "
@@ -640,8 +668,14 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
                                budget_ledger_level_weight=None,
                                physics_cadence: str = "off",
                                physics_cadence_steps: int = 1,
-                               cld_macmic_num_steps: int = 1) -> Callable:
+                               cld_macmic_num_steps: int = 1,
+                               surface_bulk_coeffs=None,
+                               cam6_activation=None) -> Callable:
     """Combined physics for any hydrostatic model (cubed-sphere, lat-lon, MPAS).
+
+    ``surface_bulk_coeffs`` ``(C_H, C_E, latent)``: the constant-coefficient surface
+    exchange (:func:`~legoesm.atmosphere.physics.turbulence.integration.make_surface_bulk_physics`)
+    for a lane with NO turbulence scheme; ``None`` adds no surface exchange.
 
     ``cld_macmic_num_steps`` (CAM6 namelist ``cld_macmic_num_steps``, 3 for
     CLUBB+MG2 at dtime=1800): 1 (default) is the byte-identical parallel
@@ -740,6 +774,10 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
             "fraction CLUBB diagnosed in the same sub-step); got "
             f"turbulence.scheme={config.turbulence.scheme!r}, "
             f"cld_macmic_num_steps={_n_macmic}.")
+    # The run's resolved CLUBBConfig (None unless CLUBB runs): the cam6_clubb
+    # ice-stratus fraction is cut at CLUBB's top (clubb_intr.F90:2535) in
+    # radiation and MG2 alike.
+    _clubb_cfg = resolved_clubb_config(config.turbulence)
     if config.radiation.scheme != "none":
         tagged_fns.append((
             make_radiation_physics(
@@ -747,6 +785,7 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
                 nc_from_aerosol=_nc_from_aerosol,
                 activation_config=_activation_cfg,
                 use_clubb_cloud_fraction=_use_clubb_cf,
+                clubb_config=_clubb_cfg,
             ),
             False,
             None,
@@ -769,14 +808,36 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
             True,
             _turb_field,
         ))
+    _sfc_bulk = surface_bulk_coeffs is not None
+    if _sfc_bulk:
+        if config.turbulence.scheme != "none":
+            raise ValueError(
+                "surface_bulk_coeffs adds the bulk surface exchange for a lane "
+                "with no turbulence scheme; turbulence="
+                f"{config.turbulence.scheme!r} already owns the surface flux, "
+                "so both would apply it.")
+        from legoesm.atmosphere.physics.turbulence.integration import (
+            make_surface_bulk_physics)
+        _C_H, _C_E, _latent = surface_bulk_coeffs
+        tagged_fns.append((make_surface_bulk_physics(_C_H, _C_E, _latent),
+                           False, None))
     if config.microphysics.scheme != "none":
         # The run's BUILT cloud config (MPAS lane: _standalone_cloud_config),
         # never a default one: the aist rh ramps are run parameters.
-        tagged_fns.append((
-            make_microphysics_physics(
-                config.microphysics, model_type, _dt_sub,
-                cloud_config=config.radiation.cloud_config),
-            False, None))
+        _micro_fn = make_microphysics_physics(
+            config.microphysics, model_type, _dt_sub,
+            cloud_config=config.radiation.cloud_config,
+            clubb_config=_clubb_cfg,
+            relvar_from_clubb=(
+                _clubb_liquid_partition_on(config.turbulence)
+                and getattr(getattr(config.microphysics,
+                                    config.microphysics.scheme, None),
+                            "warm_rain_scheme", None) == "kk2000_cam6"),
+            cam6_activation=cam6_activation)
+        # CAM6 droplet activation writes the CLDO carry (cloud_fraction_old).
+        _micro_carry = getattr(_micro_fn, "_writes_phys_state", False)
+        tagged_fns.append((_micro_fn, _micro_carry,
+                           "cloud_fraction_old" if _micro_carry else None))
     if config.gravity_wave_drag.scheme != "none":
         tagged_fns.append((make_gwd_physics(config.gravity_wave_drag, model_type, dt), True, "gwd_spectrum"))
     # Macmic group of each module, PARALLEL to ``tagged_fns`` (same append
@@ -790,6 +851,8 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
         _macmic_group.append("pre")
     if config.turbulence.scheme != "none":
         _macmic_group.append("sub")
+    if _sfc_bulk:
+        _macmic_group.append("once")
     if config.microphysics.scheme != "none":
         _macmic_group.append("sub")
     if config.gravity_wave_drag.scheme != "none":
@@ -829,6 +892,9 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
             _ledger_row_of.append(ROW_CONVECTION)
         if config.turbulence.scheme != "none":
             _ledger_row_of.append(ROW_TURBULENCE)
+        if _sfc_bulk:
+            # The FV pipeline books its bulk kick in the other_physics residual.
+            _ledger_row_of.append(ROW_OTHER)
         if config.microphysics.scheme != "none":
             _ledger_row_of.append(ROW_MICROPHYSICS)
         if config.gravity_wave_drag.scheme != "none":
@@ -1439,6 +1505,7 @@ def _make_nonhydrostatic_combined(config: PhysicsConfig, dt: float) -> Callable:
 def _make_spectral_pe_combined(
     config: PhysicsConfig, dt: float,
     sfc_albedo_override=None, sfc_emissivity_override=None,
+    surface_bulk_coeffs=None,
     cld_macmic_num_steps: int = 1,
 ) -> Callable:
     # CAM macrophysics/microphysics sub-cycle (physpkg.F90 tphysbc): turbulence
@@ -1478,6 +1545,7 @@ def _make_spectral_pe_combined(
             sfc_albedo_override=sfc_albedo_override,
             sfc_emissivity_override=sfc_emissivity_override,
             use_clubb_cloud_fraction=config.radiation.use_clubb_cloud_fraction,
+            clubb_config=resolved_clubb_config(config.turbulence),
         ), False, None))
     if config.convection.scheme != "none":
         tagged_fns.append((make_convection_physics(config.convection, "spectral_pe", dt), True, "conv_prog_profile"))
@@ -1493,6 +1561,17 @@ def _make_spectral_pe_combined(
             True,
             _turb_field,
         ))
+    if surface_bulk_coeffs is not None:
+        if config.turbulence.scheme != "none":
+            raise ValueError(
+                "surface_bulk_coeffs adds the bulk surface exchange for a lane "
+                "with no turbulence scheme; turbulence="
+                f"{config.turbulence.scheme!r} already owns the surface flux, "
+                "so both would apply it.")
+        from legoesm.atmosphere.physics.turbulence.integration import (
+            make_spectral_surface_bulk_physics)
+        tagged_fns.append((make_spectral_surface_bulk_physics(
+            *surface_bulk_coeffs), False, None))
     if config.microphysics.scheme != "none":
         tagged_fns.append((make_microphysics_physics(config.microphysics, "spectral_pe", _dt_sub), False, None))
     if config.gravity_wave_drag.scheme != "none":
@@ -1509,6 +1588,8 @@ def _make_spectral_pe_combined(
         _macmic_group.append("pre")
     if config.turbulence.scheme != "none":
         _macmic_group.append("sub")
+    if surface_bulk_coeffs is not None:
+        _macmic_group.append("once")
     if config.microphysics.scheme != "none":
         _macmic_group.append("sub")
     if config.gravity_wave_drag.scheme != "none":

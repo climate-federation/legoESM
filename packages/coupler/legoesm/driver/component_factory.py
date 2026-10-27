@@ -452,13 +452,44 @@ def _ledger_level_weight(config, sigma):
     return sigma_band_weight(sigma.sigma_half, float(band[0]), float(band[1]))
 
 
+def _auto_ice_skin(cfg):
+    from legoesm.driver.config import resolve_ice_skin_prognostic
+    return resolve_ice_skin_prognostic(
+        cfg._replace(ice_skin_prognostic=None))[0]
+
+
+def _auto_sea_ice_albedo(cfg):
+    from legoesm.driver.config import resolve_sea_ice_albedo_scheme
+    return resolve_sea_ice_albedo_scheme(
+        cfg._replace(sea_ice_albedo_scheme="auto"))
+
+
+def _auto_ocean_flux_surface(cfg):
+    from legoesm.driver.config import resolve_ocean_flux_on_ocean_surface
+    return resolve_ocean_flux_on_ocean_surface(
+        cfg._replace(ocean_flux_on_ocean_surface=None))
+
+
+# AUTO-default fields (user decision 2026-10-26): ModelDriver.setup
+# replaces the AUTO default by its resolved value before this wall runs,
+# so each is accepted at its default OR at exactly what AUTO resolves to
+# in this config (the closed lane: skin off, constant albedo).  Any other
+# value is still refused.  Path -> fn(config) -> resolved AUTO value.
+_FV3_DUO_AUTO_RESOLVED = {
+    "ice_skin_prognostic": _auto_ice_skin,
+    "sea_ice_albedo_scheme": _auto_sea_ice_albedo,
+    "ocean_flux_on_ocean_surface": _auto_ocean_flux_surface,
+}
+
+
 def _refuse_fv3_duo_non_default(config: ExperimentConfig) -> None:
     """Refuse EVERY non-default, non-allow-listed field, all at once.
 
     Diffs the incoming config field-by-field against a freshly
     constructed default instance and raises ONE error naming every
     offending path and value, so a mis-built launch script is fixed in
-    one round-trip instead of field-by-field.
+    one round-trip instead of field-by-field.  An AUTO-default field
+    (``_FV3_DUO_AUTO_RESOLVED``) also passes at its resolved value.
     """
     defaults = dict(_flatten_config_fields(type(config)()))
     offending = [
@@ -466,6 +497,8 @@ def _refuse_fv3_duo_non_default(config: ExperimentConfig) -> None:
         for path, val in _flatten_config_fields(config)
         if path not in _FV3_DUO_ALLOWED_NONDEFAULT
         and not (val == defaults[path])
+        and not (path in _FV3_DUO_AUTO_RESOLVED
+                 and val == _FV3_DUO_AUTO_RESOLVED[path](config))
     ]
     if offending:
         listing = ", ".join(f"{p}={v!r}" for p, v in offending)
@@ -571,11 +604,14 @@ def _create_fv3_duo_column_model(config: ExperimentConfig, gc, model_type,
     moist = any(getattr(config, k) != "none"
                 for k in ("microphysics", "convection", "turbulence"))
     from legoesm.driver.physics_pipeline import (
-        moisture_registry_for, validate_microphysics_tracer_slots)
-    registry = moisture_registry_for(config.microphysics)
+        moisture_registry_for, registry_scheme_config,
+        validate_microphysics_tracer_slots)
+    _scheme_cfg = registry_scheme_config(config)
+    registry = moisture_registry_for(config.microphysics, _scheme_cfg)
     validate_microphysics_tracer_slots(
         config.microphysics, registry.n_tracers,
-        context="fv3_duo column lane tracer slots")
+        context="fv3_duo column lane tracer slots",
+        scheme_config=_scheme_cfg)
     if bundle.ctx_np.get("ectx") is None:
         raise ValueError("fv3_duo column lane needs the duo ext bundle "
                          "(ctx['ectx'] with amat6) for the c2l column winds")
@@ -703,6 +739,16 @@ def fv3_duo_dynamics_for_layout(config: ExperimentConfig, bundle, cfg):
     else:
         logger.info("  fv3_duo layout: single-device (%s)", devs[0])
     return FV3DuoDynamicsModel(bundle, cfg)
+
+
+def driver_solver_name(config: ExperimentConfig) -> str | None:
+    """The solver ``create_atmosphere_dycore`` builds for ``config`` (None
+    when the combination is unsupported).  Gate on this, not on one
+    discretization spelling: several spellings build the same solver."""
+    from legoesm.driver.config import normalize_grid_type
+    return _DRIVER_SUPPORTED.get((
+        config.dycore.model_type, config.dycore.discretization,
+        normalize_grid_type(config.grid.grid_type)))
 
 
 def energy_fixer_wired(config: ExperimentConfig, solver_name: str) -> bool:
@@ -833,13 +879,9 @@ def create_atmosphere_dycore(
     # here too — the cost is one dict lookup.
     from legoesm.driver.config import normalize_grid_type
     grid_type = normalize_grid_type(gc.grid_type)
-
-    key = (model_type, discretization, grid_type)
-
-    if key not in _DRIVER_SUPPORTED:
+    solver_name = driver_solver_name(config)
+    if solver_name is None:
         _fail_unsupported(model_type, discretization, grid_type)
-
-    solver_name = _DRIVER_SUPPORTED[key]
     refuse_unwired_energy_fixer(config, solver_name)
     warn_if_vapour_floor_creates_water(config, solver_name)
     if coeff_grid is None:
@@ -1106,6 +1148,7 @@ def create_atmosphere_dycore(
             # #930 cure: vertical biharmonic damping of the 2Δσ T checkerboard.
             nu_vert4_T=dc.mpas_nu_vert4_T,
             vert4_flux_form_tracers=tuple(dc.mpas_vert4_flux_form_tracers),
+            vert4_log_form_tracers=tuple(dc.mpas_vert4_log_form_tracers),
             # Mass-conserving tracer positivity clamp (see DycoreConfig).
             conservative_tracer_clamp=dc.mpas_conservative_tracer_clamp,
             energy_consistent_moisture_clip=config.energy_consistent_moisture_clip,  # #1354/#1515 (no-op under the borrow)
@@ -1524,6 +1567,10 @@ def create_atmosphere_dycore(
                              else dc.time_integrator),
             # CAM-style dycore total-energy fixer (F15; DycoreConfig).
             energy_fixer=dc.energy_fixer,
+            # CAM-FV ldiv4 on this grid: the SCALE only; the dycore builds its
+            # own per-row 0.01*area_row^2/dt (NOT diff.div_damp4, whose
+            # smallest-cell / dx_min^2 value is wrong on a lat-lon grid).
+            nu_div4_scale=dc.mpas_div_damp4_scale,
         )
         model = CGridLatLonPrimitiveEquationModel(
             grid, sigma, cfg, dt=_effective_dt)

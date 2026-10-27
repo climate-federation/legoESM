@@ -42,14 +42,18 @@ def _masses(d):
     return dry, tot
 
 
-@pytest.mark.parametrize("grid_type,vcoord", [
-    ("cubed_sphere", "hybrid"), ("latlon", "hybrid"), ("cubed_sphere", "sigma")])
+@pytest.mark.parametrize("grid_type,vcoord,fixer", [
+    ("cubed_sphere", "hybrid", False), ("latlon", "hybrid", False),
+    ("cubed_sphere", "sigma", False),
+    # the dycore energy fixer + the mass fixer's energy closure (F15 V8) on
+    # this lane: it runs, and the heating it adds moves no mass
+    ("cubed_sphere", "hybrid", True), ("latlon", "hybrid", True)])
 def test_per_step_lane_keeps_dry_mass_and_rain_leaves_p_s(tmp_path, grid_type,
-                                                          vcoord):
+                                                          vcoord, fixer):
     if grid_type == "cubed_sphere":
-        res, dyc = 4, DycoreConfig(energy_fixer=False, dt=1800.0, fix_mass=True)
+        res, dyc = 4, DycoreConfig(energy_fixer=fixer, dt=1800.0, fix_mass=True)
     else:
-        res, dyc = 8, DycoreConfig(energy_fixer=False, dt=600.0, fix_mass=True,
+        res, dyc = 8, DycoreConfig(energy_fixer=fixer, dt=600.0, fix_mass=True,
                                    discretization="latlon_cgrid")
     cfg = ExperimentConfig(
         grid=GridConfig(grid_type=grid_type, resolution=res, nlev=5,
@@ -72,3 +76,43 @@ def test_per_step_lane_keeps_dry_mass_and_rain_leaves_p_s(tmp_path, grid_type,
     assert abs(dry1 - dry0) / (tot0 - tot1) < 1e-8, (dry1 - dry0)
     np.testing.assert_allclose(
         float(d._carry_aux["target_dry_mass"]), dry0, rtol=1e-14)
+
+
+@pytest.mark.parametrize("grid_type", ["cubed_sphere", "latlon"])
+def test_per_step_dry_mass_fixer_returns_its_energy_as_heat(tmp_path,
+                                                           grid_type):
+    """The per-step lane's dry-mass fixer runs after the dycore step, outside
+    its energy window (review 2026-10-14 F15 V8): with the energy fixer on,
+    the dry energy of the driver's state is unchanged across the fixer even
+    though it moves real air (anchor offset 1e-5)."""
+    from legoesm.core.conservation import dycore_column_energy
+    disc = {} if grid_type == "cubed_sphere" else {
+        "discretization": "latlon_cgrid"}
+    cfg = ExperimentConfig(
+        grid=GridConfig(grid_type=grid_type,
+                        resolution=4 if grid_type == "cubed_sphere" else 8,
+                        nlev=5, vertical_coord="hybrid"),
+        dycore=DycoreConfig(energy_fixer=True, dt=600.0, fix_mass=True, **disc),
+        output=OutputConfig(output_dir="", diag_days=1, checkpoint_days=0),
+        days=1, dataset="analytical", radiation="gray", rh_init=0.5,
+        microphysics="none", convection="none", turbulence="none",
+        precision="fp64",
+    )
+    d = ModelDriver(cfg, output_dir=str(tmp_path))
+    d.setup()
+    sig = d.model.sigma_coord
+
+    def E():
+        c = d.cell_centre_state()
+        ph = sig.pressure_at_half(c.p_s.data)
+        e = dycore_column_energy(
+            c.T.data, 0.5 * (c.u.data ** 2 + c.v.data ** 2),
+            ph[..., 1:] - ph[..., :-1], c.phis.data, c.p_s.data)
+        return float(global_area_sum(e, d.grid))
+
+    _dry, _ = _masses(d)
+    ps0, e0 = np.asarray(d.state.p_s.data), E()
+    d._per_step_fix_dry_mass(_dry * (1.0 + 1.0e-5), None)
+    assert abs(E() - e0) / e0 < 1e-12, (E() - e0) / e0
+    # NON-VACUITY: the fixer added ~1 Pa of air (its energy ~1e-5 of E)
+    assert float(np.mean(np.asarray(d.state.p_s.data) - ps0)) > 0.5

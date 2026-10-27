@@ -1,7 +1,8 @@
 """``resolved_inactive_fields``: the production trainable set freezes out, by
 name, exactly the core knobs the resolved options never read (measured in the
 production MPAS physics: AD = FD = 0 for Morrison k_au/k_ac under kk2000 and
-McFarlane h_topo with the SSO height wired).  Each frozen name's reason is
+McFarlane h_topo with the SSO height wired; Morrison autocon_fact /
+accre_enhan_fact are read only by the two kk2000 laws).  Each frozen name's reason is
 pinned against the real kernel, with a control that the same fixture moves
 when the option that reads it is selected."""
 from __future__ import annotations
@@ -28,6 +29,8 @@ from legoesm.training.aimip_params import (  # noqa: E402
 )
 
 _MICRO = {"atm.micro.MorrisonConfig." + f for f in ("k_au", "k_ac", "x_star")}
+_KK = {"atm.micro.MorrisonConfig." + f
+       for f in ("autocon_fact", "accre_enhan_fact")}
 _HTOPO = "atm.gwd.McFarlaneConfig.h_topo"
 
 
@@ -44,7 +47,13 @@ def test_sets_follow_the_resolved_options():
         _MICRO | {_HTOPO})
     assert resolved_inactive_fields(_cfg(), subgrid_orography=False) == _MICRO
     assert resolved_inactive_fields(
-        _cfg("seifert_beheng"), subgrid_orography=False) == frozenset()
+        _cfg("kk2000_cam6"), subgrid_orography=False) == _MICRO
+    # "seifert_beheng" runs SB2001 as gSAM does since the 2026-10-20 oracle
+    # port: k_au/k_ac/x_star are read by no law.
+    assert resolved_inactive_fields(
+        _cfg("seifert_beheng"), subgrid_orography=False) == _MICRO | _KK
+    assert resolved_inactive_fields(
+        _cfg("seifert_beheng_sb2001"), subgrid_orography=False) == _MICRO | _KK
     assert _HTOPO not in resolved_inactive_fields(
         _cfg(gwd="lindzen"), subgrid_orography=True)
     assert _HTOPO in resolved_inactive_fields(
@@ -64,6 +73,16 @@ def test_frozen_names_leave_the_core_trainable_set():
     assert core_frozen <= set(full.raw_values)        # non-vacuous: they WERE in
     assert not (frozen & set(cut.raw_values))
     assert set(full.raw_values) - set(cut.raw_values) == core_frozen
+    # tier 1 (user decision 2026-10-14): the kk2000 knobs are core and stay
+    # trainable under kk2000; under seifert_beheng they leave, and k_au/k_ac
+    # (read by no law since the 2026-10-20 oracle port) leave too
+    assert _KK <= set(cut.raw_values)
+    sb = _cfg("seifert_beheng")
+    cut_sb = build_trainable_params(
+        active_scheme_keys=keys, tier="core", exclude=tuple(sorted(
+            resolved_inactive_fields(sb, subgrid_orography=True))))
+    assert set(full.raw_values) - set(cut_sb.raw_values) == (
+        _KK | core_frozen)
 
 
 def _morrison_out(cfg):
@@ -89,10 +108,34 @@ def _morrison_out(cfg):
 
 
 def test_morrison_sb_knobs_unread_under_kk2000():
-    """One knob at a time: bitwise inert under kk2000, each one moves the
-    output under seifert_beheng (the control that the fixture can see it)."""
+    """One knob at a time: bitwise inert under kk2000 and seifert_beheng_sb2001,
+    REFUSED under seifert_beheng (which runs SB2001 as gSAM does since the
+    2026-10-20 oracle port; the knobs have no gSAM counterpart).  Control that
+    the fixture can see a warm-rain change: kk2000 vs SB2001 differ."""
+    import pytest
+    assert not np.array_equal(
+        _morrison_out(MorrisonConfig(warm_rain_scheme="kk2000")),
+        _morrison_out(MorrisonConfig(warm_rain_scheme="seifert_beheng_sb2001")))
     for knob in ("k_au", "k_ac", "x_star"):
-        for law, moves in (("kk2000", False), ("seifert_beheng", True)):
+        for law in ("kk2000", "seifert_beheng_sb2001"):
+            base = MorrisonConfig(warm_rain_scheme=law)
+            a = _morrison_out(base)
+            b = _morrison_out(base._replace(
+                **{knob: 2.0 * getattr(base, knob)}))
+            assert np.array_equal(a, b), (knob, law)
+        base = MorrisonConfig(warm_rain_scheme="seifert_beheng")
+        with pytest.raises(ValueError, match="no counterpart"):
+            _morrison_out(base._replace(**{knob: 2.0 * getattr(base, knob)}))
+
+
+def test_morrison_kk2000_knobs_unread_under_seifert_beheng():
+    """One knob at a time: bitwise inert under both Seifert-Beheng laws, each
+    one moves the output under both kk2000 laws (the control that the fixture
+    can see it)."""
+    for knob in ("autocon_fact", "accre_enhan_fact"):
+        for law, moves in (("seifert_beheng", False),
+                           ("seifert_beheng_sb2001", False),
+                           ("kk2000", True), ("kk2000_cam6", True)):
             base = MorrisonConfig(warm_rain_scheme=law)
             a = _morrison_out(base)
             b = _morrison_out(base._replace(
@@ -114,7 +157,8 @@ def _mcfarlane_drag(h_topo, h_topo_col):
         u=jnp.full((ncol, nlev), 25.0), v=jnp.zeros((ncol, nlev)), T=T,
         p_full=p_full, p_half=p_half, z_full=z_full, z_half=z_half,
         rho=p_full / (constants.R_d * T), lat=jnp.zeros((ncol,)), dt=600.0,
-        config=McFarlaneConfig(h_topo=h_topo), h_topo_col=h_topo_col)
+        config=McFarlaneConfig(h_topo=h_topo), h_topo_col=h_topo_col,
+        p_ref_half=p_half[0])
     return jnp.sum(out.du_dt ** 2)
 
 

@@ -34,7 +34,7 @@ COMMON="--nemo-vertical --woa-init --partial-cell --pgf-scheme smc03 \
   --runoff --sss-restore --sss-restore-tau-days 45.5 --sss-restore-bound-mmday 4 \
   --sss-ice-gate-nemo --prognostic-sea-ice --prognostic-ice-dynamics free_drift \
   --years 0.3 --snapshot-every-days 30 --diag-every-days 5"
-GA="--grid mpas --mpas-level 7 --mpas-lloyd 20 --dt 150"
+GA="--grid mpas --mpas-level 7 --mpas-lloyd 50 --dt 150"
 LEVERS="--tracer-advection superbee --runoff-depth-spread-m 150"   # nogate (no --river-mouth-restoring-gate)
 KPP="--kpp-ri-crit 0.5 --kpp-cv 2.5"
 

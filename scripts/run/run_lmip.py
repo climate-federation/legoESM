@@ -903,10 +903,20 @@ def main() -> None:
     # Run manifest (failed write aborts the run).  Forcing is synthetic, so the
     # resolved land config + every CLI control define the experiment.
     from legoesm.driver.restart import (
+        collective_version_drift_gate,
         dataset_provenance_entry,
         record_final_state_digest,
+        restart_version_drift,
         write_run_manifest_on_root,
     )
+    # Continuing from a restart needs the code that wrote it (its manifest
+    # sits beside it).  Checked BEFORE this run writes its own manifest, which
+    # would otherwise sit beside a restart copied into a fresh directory.
+    if args.restart_from is not None:
+        _restart = Path(args.restart_from)
+        collective_version_drift_gate(
+            lambda: restart_version_drift(_restart, [_restart.parent]),
+            f"restart {_restart}")
     manifest_path = write_run_manifest_on_root(
         out_dir,
         {"runner": "run_lmip", "run_config": run_config._asdict(),

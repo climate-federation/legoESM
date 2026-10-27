@@ -1,14 +1,10 @@
-"""Faithfulness / invariant tests for the McFarlane (1987)-INSPIRED orographic GWD.
+"""Invariant tests for the CAM6 ``gw_oro`` orographic GWD (``mcfarlane``).
 
-``mcfarlane.py`` is McFarlane-INSPIRED, NOT a faithful E3SM ``gw_oro`` port (use
-``e3sm_cam`` for that — see the scheme docstring's "Faithfulness" section).  The
-one piece genuinely shared with the oracle is the **Froude-capped launch-stress
-FORM** ``tau_0 = G0·ρ·N·k·min(h², fcrit2·(U/N)²)·U`` (E3SM ``gw_oro_src``); these
-tests lock that FORM directly on the exposed ``_mcfarlane_launch_stress`` helper
-(the total deposited drag is downstream of the Lindzen ``tau_sat`` saturation and
-cannot isolate the cap).  The remaining tests pin scheme INVARIANTS (strict
-momentum sink, critical-level absorption, heating/KE diagnostic tie-back) — not
-E3SM-faithfulness — and the documented 4× ``hdsp`` source-amplitude departure.
+The oracle match itself (CAM Fortran, 1e-10) lives in
+``test_gw_oro_cam6_oracle.py``.  These tests lock the Froude-capped launch
+FORM on the ``_mcfarlane_launch_stress`` helper, the displacement-convention
+flags, and scheme INVARIANTS (vector momentum sink, critical-level behaviour,
+pressure-mass energy closure).
 """
 
 from __future__ import annotations
@@ -133,7 +129,8 @@ def test_mcfarlane_strict_momentum_sink():
         nlev=24, u_sfc=30.0, u_top=5.0,
     )
     cfg = McFarlaneConfig(h_topo=1000.0)
-    out = mcfarlane_gwd(u, v, T, p_full, p_half, z_full, z_half, rho, lat, 300.0, cfg)
+    out = mcfarlane_gwd(u, v, T, p_full, p_half, z_full, z_half, rho, lat, 300.0, cfg,
+                        p_ref_half=p_half[0])
     ke_rate = u * out.du_dt + v * out.dv_dt
     assert jnp.all(ke_rate <= 1e-12), (
         f"drag added KE: max(u*du+v*dv)={float(jnp.max(ke_rate)):.3e}"
@@ -141,51 +138,53 @@ def test_mcfarlane_strict_momentum_sink():
 
 
 def test_mcfarlane_critical_level_no_reversed_acceleration():
-    """Invariant: critical-level absorption never accelerates the reversed flow.
+    """Invariant: critical-level deposition never accelerates the local flow.
 
-    Across a source-projected-wind reversal the hard ``U_proj > 0`` mask makes
-    the deposited drag EXACTLY zero where ``U_proj < 0``, so the single-wave drag
-    never accelerates the flow it passed through (``u·du/dt + v·dv/dt ≤ 0``).
-    NOTE: this is the scheme's RADIATING single-wave treatment, NOT E3SM's
-    crossing-layer deposition — an invariant, not an oracle match.
+    CAM6 zeroes ``tausat`` in the layer whose interface winds change sign and
+    DEPOSITS the residual stress there, with the tendency signed against the
+    LOCAL projected wind (``sign(ubt) = sign(c - ubm)``, c = 0), so
+    ``u·du/dt + v·dv/dt = ubm·ubt ≤ 0`` at every level, reversed layers
+    included, and no stress survives above the critical layer.
     """
     # Surface wind +25 m/s (source), reversing to -15 m/s aloft; v=0 ⇒ U_proj=u.
     u, v, T, p_full, p_half, z_full, z_half, rho, lat = _column(
         nlev=24, u_sfc=25.0, u_top=-15.0,
     )
     cfg = McFarlaneConfig(h_topo=1000.0)
-    out = mcfarlane_gwd(u, v, T, p_full, p_half, z_full, z_half, rho, lat, 300.0, cfg)
+    out = mcfarlane_gwd(u, v, T, p_full, p_half, z_full, z_half, rho, lat, 300.0,
+                        cfg, p_ref_half=p_half[0])
     ke_rate = u * out.du_dt + v * out.dv_dt
     assert jnp.all(ke_rate <= 1e-12), (
-        f"drag accelerated reversed flow: max(u*du+v*dv)={float(jnp.max(ke_rate)):.3e}"
+        f"drag accelerated the local flow: max(u*du+v*dv)={float(jnp.max(ke_rate)):.3e}"
     )
-    # Where U_proj < 0 the hard mask zeroes BOTH tendency components exactly.
-    u_proj = u[0]  # v = 0 in this column
-    reversed_lyr = u_proj < 0.0
-    assert jnp.all(jnp.abs(out.du_dt[0])[reversed_lyr] == 0.0)
-    assert jnp.all(jnp.abs(out.dv_dt[0])[reversed_lyr] == 0.0)
+    # Nothing deposits above the first layer whose top interface is reversed.
+    ubi_top = jnp.concatenate([u[0, :1], 0.5 * (u[0, :-1] + u[0, 1:])])
+    crossing = int(jnp.max(jnp.where(ubi_top < 0.0, jnp.arange(u.shape[1]), -1)))
+    assert crossing >= 1, "fixture must contain a reversal"
+    assert float(jnp.max(jnp.abs(out.du_dt[0, :crossing]))) == 0.0
+    assert float(jnp.abs(out.du_dt[0, crossing])) > 0.0, (
+        "CAM deposits the residual stress in the crossing layer")
 
 
 def test_mcfarlane_ke_heat_diagnostic_consistency():
-    """KE→heat tie-back = the pointwise energy closure (``conserves=["energy"]``).
+    """Pressure-mass energy closure (``conserves=["energy"]``).
 
-    ``dT_dt`` is computed as ``-(u·du+v·dv)/c_pd`` from the FINAL applied tendency
-    and ``eps_gwd`` as the same column KE loss with the same ``ρ·dz``, so
-    ``c_pd·∫ρ (dT/dt) dz == eps_gwd`` holds BY CONSTRUCTION.  For a c=0 wave (zero
-    wave-energy flux) that by-construction identity IS the exact resolved-energy
-    conservation the contract declares — this test locks it against accidental
-    desync (a future edit changing one term but not the other).  It is a
-    consistency/regression pin of the conservation closure, not an independent
-    re-derivation of it (and NOT an E3SM-faithfulness claim).
+    CAM6 returns the removed KE locally (``dttke = -ubm·ubt``) and adds a
+    zero-flux eddy diffusion of dse, so ``sum(dp/g·(c_pd·dT + u·du + v·dv))``
+    vanishes per column, and the dissipation diagnostic ``eps_gwd`` (``ρ·dz``
+    KE loss) stays >= 0.
     """
     u, v, T, p_full, p_half, z_full, z_half, rho, lat = _column(
         nlev=24, u_sfc=25.0, u_top=8.0,
     )
     cfg = McFarlaneConfig(h_topo=800.0)
-    out = mcfarlane_gwd(u, v, T, p_full, p_half, z_full, z_half, rho, lat, 300.0, cfg)
-    dz = jnp.clip(jnp.abs(z_half[:, :-1] - z_half[:, 1:]), 1.0, None)
-    heat_col = constants.c_pd * jnp.sum(rho * out.dT_dt * dz, axis=1)
-    assert jnp.allclose(heat_col, out.eps_gwd, rtol=1e-6, atol=1e-10)
+    out = mcfarlane_gwd(u, v, T, p_full, p_half, z_full, z_half, rho, lat, 300.0,
+                        cfg, p_ref_half=p_half[0])
+    dpg = (p_half[:, 1:] - p_half[:, :-1]) / constants.g
+    heat_col = constants.c_pd * jnp.sum(dpg * out.dT_dt, axis=1)
+    ke_col = -jnp.sum(dpg * (u * out.du_dt + v * out.dv_dt), axis=1)
+    assert float(ke_col[0]) > 0.0, "fixture must dissipate"
+    assert jnp.allclose(heat_col, ke_col, rtol=1e-6, atol=1e-10)
     assert float(out.eps_gwd[0]) >= 0.0, "eps_gwd (column KE loss) must be >= 0"
 
 
@@ -241,7 +240,8 @@ def test_mcfarlane_vector_ke_sink_not_componentwise_for_veering_wind():
     v = jnp.broadcast_to(jnp.linspace(25.0, 15.0, nlev)[None, :], (ncol, nlev))
     lat = jnp.full((ncol,), 0.5)
     cfg = McFarlaneConfig(h_topo=1500.0)
-    out = mcfarlane_gwd(u, v, T, p_full, p_half, z_full, z_half, rho, lat, 300.0, cfg)
+    out = mcfarlane_gwd(u, v, T, p_full, p_half, z_full, z_half, rho, lat, 300.0, cfg,
+                        p_ref_half=p_half[0])
 
     # (a) VECTOR invariant holds at every level.
     ke_rate = u * out.du_dt + v * out.dv_dt
@@ -348,21 +348,22 @@ def test_e3sm_hdsp_auto_resolution_full_scheme():
     u, v, T, p_full, p_half, z_full, z_half, rho, lat = _column()
     col = jnp.full((u.shape[0],), 300.0)           # below the Froude cap
     args = (u, v, T, p_full, p_half, z_full, z_half, rho, lat, 1800.0)
+    pr = {"p_ref_half": p_half[0]}
 
-    auto_scalar = mcfarlane_gwd(*args, McFarlaneConfig(), h_topo_col=None)
+    auto_scalar = mcfarlane_gwd(*args, McFarlaneConfig(), h_topo_col=None, **pr)
     false_scalar = mcfarlane_gwd(
-        *args, McFarlaneConfig(use_e3sm_hdsp=False), h_topo_col=None)
+        *args, McFarlaneConfig(use_e3sm_hdsp=False), h_topo_col=None, **pr)
     for a, b in zip(auto_scalar[:3], false_scalar[:3]):
         assert jnp.array_equal(a, b)
 
-    auto_col = mcfarlane_gwd(*args, McFarlaneConfig(), h_topo_col=col)
+    auto_col = mcfarlane_gwd(*args, McFarlaneConfig(), h_topo_col=col, **pr)
     true_col = mcfarlane_gwd(
-        *args, McFarlaneConfig(use_e3sm_hdsp=True), h_topo_col=col)
+        *args, McFarlaneConfig(use_e3sm_hdsp=True), h_topo_col=col, **pr)
     for a, b in zip(auto_col[:3], true_col[:3]):
         assert jnp.array_equal(a, b)
 
     false_col = mcfarlane_gwd(
-        *args, McFarlaneConfig(use_e3sm_hdsp=False), h_topo_col=col)
+        *args, McFarlaneConfig(use_e3sm_hdsp=False), h_topo_col=col, **pr)
     assert float(jnp.max(jnp.abs(auto_col.du_dt - false_col.du_dt))) > 0.0, (
         "auto + wired h_topo_col produced the legacy drag -> the E3SM "
         "doubling did not activate (resolution defect)"
@@ -393,7 +394,12 @@ def test_e3sm_hdsp_requires_per_column_topo():
                           h_topo_col=None)
     # And with the per-column field it runs.
     out = mcfarlane_gwd(u, v, T, p_full, p_half, z_full, z_half, rho, lat,
-                        1800.0, cfg, h_topo_col=jnp.full((u.shape[0],), 300.0))
+                        1800.0, cfg, h_topo_col=jnp.full((u.shape[0],), 300.0),
+                        p_ref_half=p_half[0])
+    # The reference interfaces are required (CAM pref_edge damping profile).
+    with pytest.raises(ValueError, match="p_ref_half"):
+        mcfarlane_gwd(u, v, T, p_full, p_half, z_full, z_half, rho, lat,
+                      1800.0, cfg, h_topo_col=jnp.full((u.shape[0],), 300.0))
     assert bool(jnp.all(jnp.isfinite(out.du_dt)))
 
 
@@ -412,50 +418,12 @@ def test_depth_avg_source_default_off_bit_identical():
         u_sfc=15.0, u_top=25.0)
     cfg = McFarlaneConfig(use_depth_averaged_source=False)  # legacy explicit
     out = mcfarlane_gwd(u, v, T, p_full, p_half, z_full, z_half, rho, lat,
-                        300.0, cfg)
+                        300.0, cfg, p_ref_half=p_half[0])
     # Independent recomputation of the legacy launch from surface values:
     expected_dir = float(u[0, -1] / jnp.sqrt(u[0, -1] ** 2 + 1e-10))
     assert abs(expected_dir - 1.0) < 1e-6  # sanity: along +x
     assert bool(jnp.all(jnp.isfinite(out.du_dt)))
     assert float(jnp.max(jnp.abs(out.du_dt))) > 0.0
-
-
-def test_depth_avg_no_deposition_in_source_region():
-    """Flag ON with a penetrating mountain: dp/N/U/rho come from the shared
-    helper and NO drag deposits at or below src_level (E3SM tau hold)."""
-    u, v, T, p_full, p_half, z_full, z_half, rho, lat = _column(
-        ncol=1, u_sfc=15.0, u_top=2.0)
-    # h large enough that (a) the mountain penetrates several levels and
-    # (b) tau_0 rides the Froude cap/tau_max, exceeding tau_sat at the FIRST
-    # above-source midpoint — so the s-1 boundary pin below is meaningful.
-    h_col = jnp.full((1,), 1500.0)
-    # Arm pinned EXPLICITLY (default-flip lesson): this test hand-mirrors the
-    # depth-average machinery with the LEGACY h displacement (the helper below
-    # is called with the unscaled h_col); the hdsp composition has its own
-    # tests (compose + auto-resolution).
-    cfg = McFarlaneConfig(use_depth_averaged_source=True, use_e3sm_hdsp=False)
-    out = mcfarlane_gwd(u, v, T, p_full, p_half, z_full, z_half, rho, lat,
-                        300.0, cfg, h_topo_col=h_col)
-
-    from legoesm.atmosphere.physics._shared import brunt_vaisala_n_full
-    from legoesm.atmosphere.physics.gravity_wave_drag.oro_source import (
-        depth_averaged_oro_source,
-    )
-    N_full = brunt_vaisala_n_full(T, p_full, z_full)
-    dpm = jnp.abs(p_half[:, 1:] - p_half[:, :-1])
-    *_, src = depth_averaged_oro_source(
-        u, v, rho, h_col, p_half, dpm, z_full, N_full)
-    s = int(src[0])
-    assert s < u.shape[1], "fixture must include at least the surface"
-    # Zero tendency at and below the source interface, activity above it.
-    assert float(jnp.max(jnp.abs(out.du_dt[0, s:]))) == 0.0
-    assert float(jnp.max(jnp.abs(out.du_dt[0, :s]))) > 0.0
-    # Boundary pin (codex wave-5 LOW): the FIRST midpoint above the source
-    # interface (index s-1) must itself be allowed to deposit — a mask
-    # over-restricted to ``k < s-1`` passes the two asserts above but fails
-    # here (E3SM's first nonconstant stress interface is s-1, so Fortran
-    # midpoint s == Python index s-1 deposits).
-    assert float(jnp.abs(out.du_dt[0, s - 1])) > 0.0
 
 
 def test_depth_avg_nocturnal_decoupling_discriminant():
@@ -474,11 +442,11 @@ def test_depth_avg_nocturnal_decoupling_discriminant():
     off = mcfarlane_gwd(u, v, T, p_full, p_half, z_full, z_half, rho, lat,
                         300.0,
                         McFarlaneConfig(use_depth_averaged_source=False),
-                        h_topo_col=h_col)
+                        h_topo_col=h_col, p_ref_half=p_half[0])
     on = mcfarlane_gwd(u, v, T, p_full, p_half, z_full, z_half, rho, lat,
                        300.0,
                        McFarlaneConfig(use_depth_averaged_source=True),
-                       h_topo_col=h_col)
+                       h_topo_col=h_col, p_ref_half=p_half[0])
     tot_off = float(jnp.sum(jnp.abs(off.du_dt)))
     tot_on = float(jnp.sum(jnp.abs(on.du_dt)))
     assert tot_on > 10.0 * max(tot_off, 1e-30), (
@@ -507,62 +475,8 @@ def test_depth_avg_composes_with_e3sm_hdsp():
     out = mcfarlane_gwd(
         u, v, T, p_full, p_half, z_full, z_half, rho, lat, 300.0,
         McFarlaneConfig(use_depth_averaged_source=True, use_e3sm_hdsp=True),
-        h_topo_col=h_col)
+        h_topo_col=h_col, p_ref_half=p_half[0])
     assert bool(jnp.all(jnp.isfinite(out.du_dt)))
     assert float(jnp.max(jnp.abs(out.du_dt))) > 0.0
 
 
-def test_depth_avg_launch_uses_averaged_values():
-    """Value-level pin (codex wave-5 LOW): the launch entering the scan must
-    be built from the DEPTH-AVERAGED rho/N/U — verified by full absorption:
-    on a column whose winds collapse aloft (everything breaks by the top),
-    the column-integrated deposited momentum equals the launched stress, and
-    that total must match the hand-computed depth-averaged tau_0, NOT the
-    surface-value tau_0 (which differs through rho_src, N_src, U_avg)."""
-    u, v, T, p_full, p_half, z_full, z_half, rho, lat = _column(
-        ncol=1, u_sfc=14.0, u_top=0.5)
-    # h must PENETRATE past the bottom midpoint (gm ~ 316 m here) so the
-    # depth averages genuinely differ from the surface values, while staying
-    # below the Froude cap and tau_max so the hand formula is exact.  A
-    # sharp near-surface shear (6 m/s at the bottom midpoint vs 14 m/s in
-    # the layer above) makes the surface-vs-averaged discriminant strong.
-    u = u.at[:, -1].set(6.0)
-    h_col = jnp.full((1,), 600.0)
-    # Arm pinned EXPLICITLY (default-flip lesson): the hand tau_0 below uses
-    # the LEGACY h_col^2 displacement; hdsp composition is tested separately.
-    cfg = McFarlaneConfig(use_depth_averaged_source=True, use_e3sm_hdsp=False)
-    out = mcfarlane_gwd(u, v, T, p_full, p_half, z_full, z_half, rho, lat,
-                        300.0, cfg, h_topo_col=h_col)
-    dz = jnp.abs(z_half[:, :-1] - z_half[:, 1:])
-    deposited = float(jnp.sum(rho * jnp.abs(out.du_dt) * dz))
-
-    from legoesm.atmosphere.physics._shared import brunt_vaisala_n_full
-    from legoesm.atmosphere.physics.gravity_wave_drag.oro_source import (
-        depth_averaged_oro_source,
-    )
-    N_full = brunt_vaisala_n_full(T, p_full, z_full)
-    dpm = jnp.abs(p_half[:, 1:] - p_half[:, :-1])
-    rsrc, usrc, vsrc, nsrc, _ = depth_averaged_oro_source(
-        u, v, rho, h_col, p_half, dpm, z_full, N_full)
-
-    def tau0_from(rho_s, n_s, u_mag):
-        u_act = float(
-            jax.nn.sigmoid(cfg.min_wind_sharpness * (u_mag - cfg.min_wind))
-            * u_mag)
-        h_eff = min(float(h_col[0]) ** 2,
-                    cfg.fcrit2 * (u_act / n_s) ** 2)
-        return (cfg.G_0 * rho_s * n_s * cfg.k_wave * h_eff * u_act
-                * cfg.directional_spread)
-
-    tau_avg = tau0_from(float(rsrc[0]), max(float(nsrc[0]), 1e-6),
-                        float(jnp.sqrt(usrc[0] ** 2 + vsrc[0] ** 2 + 1e-10)))
-    tau_sfc = tau0_from(float(rho[0, -1]), float(N_full[0, -1]),
-                        float(jnp.sqrt(u[0, -1] ** 2 + 1e-10)))
-    assert abs(tau_avg - tau_sfc) > 0.05 * tau_avg, (
-        "fixture degenerate: surface and averaged launches must differ")
-    # Full absorption: deposited total tracks the AVERAGED launch.
-    assert abs(deposited - tau_avg) < 0.15 * tau_avg, (
-        f"deposited {deposited:.4e} vs averaged tau_0 {tau_avg:.4e}")
-    assert abs(deposited - tau_avg) < abs(deposited - tau_sfc), (
-        "deposited total sits closer to the SURFACE launch — averaged "
-        "values not reaching tau_0")

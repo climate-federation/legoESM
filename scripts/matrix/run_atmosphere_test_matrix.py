@@ -1570,7 +1570,8 @@ def _make_rrtmgp_physics(model_type: str, dt: float, hs_fn=None,
         microphysics=MicrophysicsConfig(scheme="none"),
         gravity_wave_drag=GravityWaveDragConfig(scheme="none"),
     )
-    rrtmgp_fn = make_physics(phys_cfg, model_type=model_type, dt=dt)
+    rrtmgp_fn = make_physics(phys_cfg, model_type=model_type, dt=dt,
+                             surface_bulk_coeffs=None)   # radiation only
 
     if hs_fn is None:
         return rrtmgp_fn

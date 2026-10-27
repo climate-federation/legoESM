@@ -26,6 +26,7 @@ from legoesm.atmosphere.physics.clouds.cloud_fraction import (
     compute_cloud_properties,
 )
 from legoesm.atmosphere.physics.clouds.config import CloudConfig
+from legoesm.atmosphere.physics.turbulence.clubb import CLUBBConfig
 from legoesm.thermo import (
     mixing_ratio_to_specific_humidity,
     saturation_mixing_ratio_goff,
@@ -38,6 +39,11 @@ jax.config.update("jax_enable_x64", True)
 RTOL = 1e-10
 NCOL, NLEV = 6, 8
 STRADDLE_K = 3   # column 0's layer spanning 24000-30000 Pa (tP = 24548 Pa)
+# aist_vector alone (no CLUBB top cut: CLUBB's static 0 = off gate).
+NO_TOP = dict(trop_cloud_top_press=0.0, trop_cloud_taper_lnp_width=0.15)
+CLUBB = CLUBBConfig()
+CLUBB_TOP = dict(trop_cloud_top_press=CLUBB.trop_cloud_top_press,
+                 trop_cloud_taper_lnp_width=CLUBB.trop_cloud_taper_lnp_width)
 
 
 # ---------------------------------------------------------------------------
@@ -130,7 +136,7 @@ def test_aist_matches_fortran_transcription():
     cfg = CloudConfig(scheme="cam6_clubb")
     got = np.asarray(cam6_ice_stratus_fraction(
         jnp.asarray(q_v), jnp.asarray(T), jnp.asarray(p), jnp.asarray(q_i),
-        jnp.asarray(lat), cfg, jnp.asarray(p_half[:, :-1])))
+        jnp.asarray(lat), cfg, jnp.asarray(p_half[:, :-1]), **NO_TOP))
     p_trop = 25000.0 - 15000.0 * np.cos(lat) ** 2
     n_strat = 0
     n_straddle = 0
@@ -180,7 +186,7 @@ def test_aist_step_when_ramp_is_degenerate():
     cfg = CloudConfig(scheme="cam6_clubb", cam6_rhmini=0.9, cam6_rhmaxi=0.9)
     lat = jnp.zeros((1,))
     got = np.asarray(cam6_ice_stratus_fraction(
-        q_v, T, p, q_i, lat, cfg, jnp.full((1, 2), 2.5e4)))
+        q_v, T, p, q_i, lat, cfg, jnp.full((1, 2), 2.5e4), **NO_TOP))
     np.testing.assert_allclose(got, [[1.0e-4, 0.999]], rtol=RTOL)
 
 
@@ -227,8 +233,9 @@ def test_assembly_is_max_alst_aist_plus_deepcu_capped():
     out = compute_cloud_properties(
         T, p, q_v, dp, cfg, q_cloud=q_c, q_ice=q_i,
         cloud_fraction_override=alst, lat=lat, p_half=p_half,
-        conv_mass_flux_up=mf, conv_icwmr=icwmr)
-    aist = cam6_ice_stratus_fraction(q_v, T, p, q_i, lat, cfg, p_half[:, :-1])
+        conv_mass_flux_up=mf, conv_icwmr=icwmr, clubb_config=CLUBB)
+    aist = cam6_ice_stratus_fraction(q_v, T, p, q_i, lat, cfg, p_half[:, :-1],
+                                     **CLUBB_TOP)
     deepcu = cam6_deep_convective_fraction(mf, icwmr, cfg)
     want = jnp.minimum(jnp.maximum(alst, aist) + deepcu, 1.0)
     np.testing.assert_allclose(np.asarray(out.cloud_fraction), np.asarray(want),
@@ -238,7 +245,8 @@ def test_assembly_is_max_alst_aist_plus_deepcu_capped():
     # No deep-convection carries => deepcu exactly 0
     out0 = compute_cloud_properties(
         T, p, q_v, dp, cfg, q_cloud=q_c, q_ice=q_i,
-        cloud_fraction_override=alst, lat=lat, p_half=p_half)
+        cloud_fraction_override=alst, lat=lat, p_half=p_half,
+        clubb_config=CLUBB)
     np.testing.assert_allclose(np.asarray(out0.cloud_fraction),
                                np.asarray(jnp.maximum(alst, aist)), rtol=RTOL)
     # CAM6 has no diagnostic condensate floor: radiative condensate is the
@@ -257,7 +265,7 @@ def test_rh_blend_floor_gate_knobs_are_bypassed_for_cam6():
                           clubb_cf_override_p_min_pa=7.0e4,
                           clubb_cf_override_ramp_pa=1.0e4)
     kw = dict(q_cloud=q_c, q_ice=q_i, cloud_fraction_override=alst, lat=lat,
-              p_half=p_half)
+              p_half=p_half, clubb_config=CLUBB)
     a = compute_cloud_properties(T, p, q_v, dp, base, **kw).cloud_fraction
     b = compute_cloud_properties(T, p, q_v, dp, knobs, **kw).cloud_fraction
     np.testing.assert_array_equal(np.asarray(a), np.asarray(b))
@@ -275,12 +283,13 @@ def test_rh_blend_floor_gate_knobs_are_bypassed_for_cam6():
     ("lat", "needs lat"),
     ("p_half", "needs lat"),
     ("q_cloud", "requires explicit q_cloud/q_ice"),
+    ("clubb_config", "needs the run's CLUBBConfig"),
 ])
 def test_missing_inputs_raise(drop, match):
     T, p, q_v, dp, q_i, lat, p_half = _column_inputs()
     kw = dict(q_cloud=jnp.full(T.shape, 1.0e-5),
               cloud_fraction_override=jnp.full(T.shape, 0.3), lat=lat,
-              p_half=p_half)
+              p_half=p_half, clubb_config=CLUBB)
     kw[drop] = None
     with pytest.raises(ValueError, match=match):
         compute_cloud_properties(T, p, q_v, dp, CloudConfig(scheme="cam6_clubb"),
@@ -291,7 +300,7 @@ def test_convective_cloud_overlay_refused_and_half_carries_refused():
     T, p, q_v, dp, q_i, lat, p_half = _column_inputs()
     kw = dict(q_cloud=jnp.full(T.shape, 1.0e-5),
               cloud_fraction_override=jnp.full(T.shape, 0.3), lat=lat,
-              p_half=p_half)
+              p_half=p_half, clubb_config=CLUBB)
     with pytest.raises(ValueError, match="convective_cloud"):
         compute_cloud_properties(
             T, p, q_v, dp, CloudConfig(scheme="cam6_clubb", convective_cloud=True),
@@ -309,7 +318,8 @@ def test_cam6_cloud_fraction_is_differentiable():
     def f(qv, alst):
         return jnp.sum(compute_cloud_properties(
             T, p, qv, dp, cfg, q_cloud=jnp.full(T.shape, 1.0e-5), q_ice=q_i,
-            cloud_fraction_override=alst, lat=lat, p_half=p_half).cloud_fraction)
+            cloud_fraction_override=alst, lat=lat, p_half=p_half,
+            clubb_config=CLUBB).cloud_fraction)
     g_qv, g_alst = jax.grad(f, argnums=(0, 1))(q_v, jnp.full(T.shape, 0.3))
     assert np.all(np.isfinite(np.asarray(g_qv)))
     assert np.all(np.isfinite(np.asarray(g_alst)))
@@ -466,6 +476,8 @@ def test_radiation_cloud_call_receives_the_clubb_and_deepcu_carries(monkeypatch)
         combined_fn(state, grid, sigma, phys_state=ps)
     assert np.allclose(np.asarray(seen["cloud_fraction_override"]), 0.37)
     assert np.allclose(np.asarray(seen["conv_mass_flux_up"]), 0.02)
+    # ... and the run's CLUBB config, whose top cuts aist (clubb_intr:2535).
+    assert seen["clubb_config"] == CLUBBConfig(prognostic=True)
 
     seen.clear()
     fn_off = radint.make_radiation_physics(
@@ -527,6 +539,7 @@ def test_cmor_cloud_diagnostics_use_the_carry_or_refuse():
     dc = DiagnosticCollector.__new__(DiagnosticCollector)
     from legoesm.grids.vertical import create_sigma_coordinate
     dc._cloud_config = CloudConfig(scheme="cam6_clubb")
+    dc._clubb_config = CLUBB
     dc.vcoord = create_sigma_coordinate(3)
     p_s = np.full(2, 1.0e5)
     with pytest.raises(ValueError, match="cam6_clubb"):
@@ -534,7 +547,8 @@ def test_cmor_cloud_diagnostics_use_the_carry_or_refuse():
     kw = dc._cam6_cloud_kwargs(np.zeros((2, 3)), np.zeros((2, 4)),
                                np.zeros((2, 3)), np.zeros(2), p_s, 2, 3)
     assert set(kw) == {"cloud_fraction_override", "lat", "conv_mass_flux_up",
-                       "conv_icwmr", "p_half"}
+                       "conv_icwmr", "p_half", "clubb_config"}
+    assert kw["clubb_config"] is CLUBB
     assert kw["p_half"].shape == (2, 4)
     dc._cloud_config = CloudConfig(scheme="sundqvist")
     assert dc._cam6_cloud_kwargs(None, None, None, None, p_s, 2, 3) == {}

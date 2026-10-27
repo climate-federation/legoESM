@@ -183,8 +183,10 @@ def test_new_fields_are_appended_last():
     """Positional ABI: the new fields sit at the end of both NamedTuples."""
     from legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas import MPASPrimitiveEquationConfig
     from legoesm.driver.config import DycoreConfig
-    assert MPASPrimitiveEquationConfig._fields[-1] == "vert4_flux_form_tracers"
-    assert DycoreConfig._fields[-1] == "mpas_vert4_flux_form_tracers"
+    assert MPASPrimitiveEquationConfig._fields[-2:] == (
+        "vert4_flux_form_tracers", "vert4_log_form_tracers")
+    assert DycoreConfig._fields[-2:] == (
+        "mpas_vert4_flux_form_tracers", "mpas_vert4_log_form_tracers")
 
 
 def test_every_builder_forwarding_the_filter_forwards_the_form():
@@ -197,7 +199,8 @@ def test_every_builder_forwarding_the_filter_forwards_the_form():
             if "nu_vert4_T=dycore.mpas_nu_vert4_T" in p.read_text()
             or "nu_vert4_T=dc.mpas_nu_vert4_T" in p.read_text()]
     assert len(hits) >= 3, hits
-    missing = [str(p) for p in hits if "vert4_flux_form_tracers=" not in p.read_text()]
+    missing = [str(p) for p in hits if "vert4_flux_form_tracers=" not in p.read_text()
+               or "vert4_log_form_tracers=" not in p.read_text()]
     assert not missing, missing
 
 @pytest.mark.parametrize("dp", [

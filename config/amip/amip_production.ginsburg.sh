@@ -83,7 +83,9 @@ CMIP6_FORCING_FLAGS=(
 # droplets at ~768 cm-3 through aerosol_ccn.  Staging +
 # provenance: fv3_duo_gaps/forcing_stage/ (deck_ledgers.md 2026-10-08).
 #   GHG: input4MIPs UoM-CMIP-1-2-0 global means incl. CFC-22/CCl4/CF4.
-#   AEROSOL: fine+coarse (radiation); AEROSOL_CCN: fine mode (CCN).  MACv2-SP
+#   AEROSOL: fine+coarse (radiation); AEROSOL_CCN: fine+coarse too, the TOTAL
+#     AOT the Andreae (2009) droplet fit was built on (oracle audit 2026-10-18,
+#     user decision 2026-10-19; was fine mode, ~3x fewer droplets).  MACv2-SP
 #     anthropogenic plumes (input4MIPs MPI-M-MACv2-SP-1-0 v20170201, Stevens et
 #     al. 2017) on the Kinne MACv1 pre-industrial fine (+ coarse) background,
 #     1850-2014, one product for every lane (review 2026-10-10 F37, vote): built
@@ -96,7 +98,7 @@ CMIP6_FORCING_FLAGS=(
 #     *_1979-2014_IACETH-v4.nc slice.
 : "${GHG:=${CMIP6_FORCING_DIR}/ghg_cmip6_UoM-CMIP-1-2-0_halogens_0000-2014.nc}"
 : "${AEROSOL:=${CMIP6_FORCING_DIR}/aeropt_macv2sp_sw_b14_tot_1850-2014_MACv1bg.nc}"
-: "${AEROSOL_CCN:=${CMIP6_FORCING_DIR}/aeropt_macv2sp_sw_b14_fin_1850-2014_MACv1bg.nc}"
+: "${AEROSOL_CCN:=${CMIP6_FORCING_DIR}/aeropt_macv2sp_sw_b14_tot_1850-2014_MACv1bg.nc}"
 : "${VOLCANIC:=${CMIP6_FORCING_DIR}/bc_aeropt_cmip6_volc_lw_b16_sw_b14_1850-2014_IACETH-v4.nc}"
 CMIP6_FORCING_FLAGS+=(
   --ghg-forcing external --ghg-file "${GHG}"

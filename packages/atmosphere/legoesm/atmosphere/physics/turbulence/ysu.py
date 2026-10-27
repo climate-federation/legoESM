@@ -89,6 +89,7 @@ from legoesm.atmosphere.physics._shared import (
     buoyancy_coefficient,
     exner_function,
     louis_stability_functions,
+    half_to_iface_zero_ends,
 )
 from legoesm.atmosphere.physics.turbulence.config import YSUConfig
 from legoesm.atmosphere.physics.turbulence.output import TurbulenceOutput
@@ -310,7 +311,7 @@ def ysu_turbulence(
     )
     w_star_guess = jnp.cbrt(jnp.maximum(buoy_guess, 1e-20))
     w_s_sfc = jnp.cbrt(
-        ustar ** 3 + config.ws_conv_coeff * constants.kappa_vk
+        ustar ** 3 + config.ws_conv_coeff * constants.kappa_von_karman
         * w_star_guess ** 3 * config.sfc_excess_zfrac
     )
     # Thermal excess θ_T = b·(w'θ')_0 / w_s, only for unstable (kbfs>0).
@@ -343,11 +344,11 @@ def ysu_turbulence(
     # convective enhancement and was systematically under-mixed.
     w_s = jnp.cbrt(
         ustar[:, None] ** 3
-        + config.ws_conv_coeff * constants.kappa_vk
+        + config.ws_conv_coeff * constants.kappa_von_karman
         * w_star[:, None] ** 3 * z_norm_clip
     )
     Km_profile = (
-        constants.kappa_vk * w_s * z_half_inner * (1.0 - z_norm_clip) ** 2
+        constants.kappa_von_karman * w_s * z_half_inner * (1.0 - z_norm_clip) ** 2
     )
 
     # Local Ri-based Km above PBL: shared Blackadar mixing-length helper
@@ -403,10 +404,10 @@ def ysu_turbulence(
     # K-profile magnitude κ·w_s(h)·h·(4/27) (see _KPROFILE_PEAK_FRAC), with
     # w_s(h) the mixed-layer velocity scale evaluated at z = h.
     w_s_h = jnp.cbrt(
-        ustar ** 3 + config.ws_conv_coeff * constants.kappa_vk * w_star ** 3
+        ustar ** 3 + config.ws_conv_coeff * constants.kappa_von_karman * w_star ** 3
     )
     K_ent_cap = (
-        _KPROFILE_PEAK_FRAC * constants.kappa_vk * w_s_h * h_pbl
+        _KPROFILE_PEAK_FRAC * constants.kappa_von_karman * w_s_h * h_pbl
     )[:, None]
     K_ent_h = jnp.minimum(K_ent_h, K_ent_cap) * envelope
 
@@ -496,4 +497,5 @@ def ysu_turbulence(
         ustar=ustar,
         h_pbl=h_pbl,
         wtheta_flux=wtheta_flux,
+        Kh_iface=half_to_iface_zero_ends(Kh_half),
     )

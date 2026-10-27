@@ -3,15 +3,17 @@
 air-sea flux law).
 
 ``_shr_flux_atmocn_ref`` below is a line-by-line NumPy transcription of the
-Fortran (column loop, ``do while`` iteration with ``flux_con_tol = 0`` /
-``flux_con_max_iter = 2``, ``gust_fac = 0``, cold-air-outbreak off) with
+Fortran (column loop, ``do while`` iteration with the CESM2.1 driver's
+``flux_con_tol = 0`` / ``flux_con_max_iter = 5``, ``gust_fac = 0``,
+cold-air-outbreak modification on) with
 ``ssq`` supplied by the caller (the model's own saturation curve + salinity
 factor; CESM's private ``qsat`` fit is deliberately not re-derived).  CESM's
 fluxes are positive DOWNWARD and its stress is the wind-direction stress on
 the ocean; legoESM's are positive UPWARD with the stress opposing the wind,
 so the pin compares ``-sen``, ``-lat``, ``-taux``, ``-tauy``.
 
-Run with ``JAX_ENABLE_X64=1`` (the pin is at rel 1e-10).
+Run with ``JAX_ENABLE_X64=1`` (the pin is at rel 1e-10).  The compiled
+Fortran itself is pinned by ``tests/core/test_shr_flux_atmocn_oracle.py``.
 """
 
 from __future__ import annotations
@@ -32,7 +34,7 @@ from legoesm import constants
 
 jax.config.update("jax_enable_x64", True)
 
-_KARMAN = constants.kappa_vk
+_KARMAN = constants.kappa_von_karman
 _G = constants.g
 _ZVIR = constants.R_v / constants.R_d - 1.0
 _CPVIR = constants.c_pv / constants.c_pd - 1.0
@@ -58,13 +60,18 @@ def _fsign(a, b):
 _CLAMPED: list = []
 
 
-def _shr_flux_atmocn_ref(zbot, ubot, vbot, thbot, qbot, rbot, ts, us, vs, ssq,
+def _shr_flux_atmocn_ref(zbot, ubot, vbot, thbot, qbot, rbot, ts, us, vs, ssq, tbot,
                          minwind=_CESM_MINWIND, zref=10.0, ztref=2.0):
     """Transcription of shr_flux_atmOcn (lines 309-444) for ONE column."""
     flux_con_tol = 0.0
-    flux_con_max_iter = 2
+    flux_con_max_iter = 5
     vmag_old = max(minwind, math.sqrt((ubot - us) ** 2 + (vbot - vs) ** 2))
     vmag = vmag_old                                   # gust_fac = 0
+    tdiff = tbot - ts                                 # coldair_outbreak_mod
+    if tdiff < -10.0:
+        vscl = min(1.0 + 1.4 * (abs(tdiff + 10.0) ** 0.5 / abs(vmag)), 2.0)
+        vmag = vmag * vscl
+        vmag_old = vmag_old * vscl
     delt = thbot - ts
     delq = qbot - ssq
     alz = math.log(zbot / zref)
@@ -140,7 +147,7 @@ def _states(n=20, seed=7):
     thbot[1] = ts[1]
     ubot[2], vbot[2], zbot[2], thbot[2] = 0.6, 0.0, 120.0, ts[2] - 9.0
     return dict(zbot=zbot, ubot=ubot, vbot=vbot, thbot=thbot, qbot=qbot,
-                rbot=rbot, ts=ts, us=us, vs=vs, ssq=ssq)
+                rbot=rbot, ts=ts, us=us, vs=vs, ssq=ssq, tbot=thbot.copy())
 
 
 def _model(st, **kw):
@@ -148,7 +155,7 @@ def _model(st, **kw):
     return compute_sam_oceflx_fluxes(
         j["ubot"] - j["us"], j["vbot"] - j["vs"], j["thbot"], j["qbot"],
         j["ts"], j["ssq"], j["rbot"], z_bot=j["zbot"], variant="cesm",
-        return_2m=True, **kw,
+        return_2m=True, t_bot=j["tbot"], **kw,
     )
 
 
@@ -215,6 +222,17 @@ def test_unknown_variant_raises():
             j["rbot"], z_bot=j["zbot"], variant="bogus")
 
 
+def test_cesm_variant_refuses_missing_tbot():
+    """The cold-air-outbreak block needs the absolute air temperature; a
+    caller without it is refused, never silently run without the block."""
+    st = _states(n=3)
+    j = {k: jnp.asarray(v) for k, v in st.items()}
+    with pytest.raises(ValueError, match="t_bot"):
+        compute_sam_oceflx_fluxes(
+            j["ubot"], j["vbot"], j["thbot"], j["qbot"], j["ts"], j["ssq"],
+            j["rbot"], z_bot=j["zbot"], variant="cesm")
+
+
 def test_cesm_variant_is_differentiable():
     st = _states(n=3)
     j = {k: jnp.asarray(v) for k, v in st.items()}
@@ -222,7 +240,7 @@ def test_cesm_variant_is_differentiable():
     def loss(u):
         out = compute_sam_oceflx_fluxes(
             u, j["vbot"], j["thbot"], j["qbot"], j["ts"], j["ssq"], j["rbot"],
-            z_bot=j["zbot"], variant="cesm")
+            z_bot=j["zbot"], variant="cesm", t_bot=j["tbot"])
         return jnp.sum(out[2] + out[3] + out[0])
 
     g = jax.grad(loss)(j["ubot"])
@@ -242,10 +260,10 @@ def test_scheme_name_is_valid_and_reaches_surface_layer():
     cfg = SurfaceLayerConfig(bulk_scheme="large_yeager_cesm")
     got = compute_surface_fluxes(
         j["ubot"], j["vbot"], j["thbot"], j["qbot"], j["ts"], j["ssq"],
-        j["rbot"], cfg, z_ref=j["zbot"])
+        j["rbot"], cfg, z_ref=j["zbot"], t_bot=j["tbot"])
     want = compute_sam_oceflx_fluxes(
         j["ubot"], j["vbot"], j["thbot"], j["qbot"], j["ts"], j["ssq"],
-        j["rbot"], z_bot=j["zbot"], variant="cesm")
+        j["rbot"], z_bot=j["zbot"], variant="cesm", t_bot=j["tbot"])
     for a, b in zip(got, want):
         np.testing.assert_allclose(np.asarray(a), np.asarray(b), rtol=1e-12)
     # and it is NOT the constant-coefficient fall-through
@@ -277,7 +295,8 @@ def test_scheme_reaches_coupled_ocean_tile():
         CouplerConfig(bulk_scheme="large_yeager_cesm"))
     want = compute_sam_oceflx_fluxes(
         forcing.u_lowest, forcing.v_lowest, forcing.T_lowest, forcing.q_lowest,
-        sst, resp.q_surface, forcing.rho_lowest, z_bot=10.0, variant="cesm")
+        sst, resp.q_surface, forcing.rho_lowest, z_bot=10.0, variant="cesm",
+        t_bot=forcing.T_lowest)
     np.testing.assert_allclose(np.asarray(resp.shflx), np.asarray(want[2]), rtol=1e-12)
     np.testing.assert_allclose(np.asarray(resp.lhflx), np.asarray(want[3]), rtol=1e-12)
     np.testing.assert_allclose(np.asarray(resp.tau_x), np.asarray(want[0]), rtol=1e-12)

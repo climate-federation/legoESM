@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from typing import NamedTuple
 
+import equinox as eqx
 import jax
 import jax.numpy as jnp
 
@@ -367,3 +368,58 @@ def _sedimentation_substepped(q_pos, rho, V_t, dz, dt, return_surface_flux,
     if return_substeps:
         out = out + (nstep_req[:, 0],)
     return out if len(out) > 1 else out[0]
+
+
+def sedimentation_overflow_guard(required, n_max, arrays, message):
+    """Strict CFL sub-step gate: ``(arrays, poison)``.
+
+    Raises (``equinox.error_if``, jit- and gradient-safe: the check sits in a
+    custom_jvp) when any column's REQUIRED sub-step count exceeds the static
+    cap ``n_max``.  The check is attached to ``arrays`` (the sedimentation
+    tendencies and surface fluxes), not only to the diagnostic count, so a
+    caller that discards the count cannot let XLA eliminate it as dead code
+    (codex 2026-09-22 reproduced exactly that, under jit AND under grad).
+
+    ``error_if`` alone is not enough: its check sits OUTSIDE AD, so
+    ``jit(grad(f))`` keeps the gradient and drops the abort, and a caller
+    reading an output that does not descend from sedimentation never touches
+    it at all (codex 2026-09-22 reproduced both).  ``poison`` is exactly 1.0
+    unless the cap is exceeded (then NaN); the caller multiplies EVERY returned
+    field by it via :func:`apply_sedimentation_poison`, so the guard is a real
+    data dependency of every consumer and of its derivative.
+    """
+    overflow = jnp.any(required > n_max)
+    arrays = eqx.error_if(arrays, overflow, message)
+    return arrays, jnp.where(overflow, jnp.nan, 1.0)
+
+
+def apply_sedimentation_poison(out, poison):
+    """Multiply-and-add the strict-gate ``poison`` into every FLOAT field of a
+    :class:`MicrophysicsOutput` (the count stays a usable integer).
+
+    BOTH a multiply and an add: the multiply propagates the poison into
+    derivatives, the add reaches a field that is structurally ZERO (e.g.
+    ``dN_c_dt`` with a specified droplet number), where a multiply alone still
+    leaves 0 * NaN unevaluated in some simplifications.  Residual, documented
+    limit: a loss reading ONLY a field that does not depend on the
+    differentiated input at all has no AD path, so jit(grad) of it returns
+    zeros with no abort -- the forward value is NaN and the reported count
+    still shows the overflow (codex 2026-09-22).  A ``where`` would be
+    bit-neutral on the clean path (the ADD turns -0.0 into +0.0; the multiply
+    by 1.0 does not) but its DERIVATIVE on overflow is 0, not NaN, which is the
+    silent failure this guard exists to prevent; strict and non-strict arms
+    are not claimed bit-identical (GLM 2026-09-22).
+    """
+    bias = jnp.where(jnp.isnan(poison), jnp.nan, 0.0)
+
+    # ``qc_budget`` is a dict of arrays, not an array: ``jnp.asarray`` on a
+    # dict raises, so filter on type BEFORE probing the dtype.  The budget is a
+    # diagnostic and carries no gradient the guard needs to poison.
+    def _is_float_array(v):
+        if v is None or isinstance(v, dict):
+            return False
+        return jnp.issubdtype(jnp.asarray(v).dtype, jnp.floating)
+
+    return out._replace(**{
+        k: getattr(out, k) * poison + bias
+        for k in out._fields if _is_float_array(getattr(out, k))})

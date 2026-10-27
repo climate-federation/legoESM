@@ -6,6 +6,13 @@ the question can be decided on evidence rather than re-litigated from memory.
 **Nothing here changes the default** — that is a physics decision affecting
 every existing run and every tuned parameter set.
 
+> **Status 2026-10-20.** The measurements below predate three oracle ports:
+> kessler (ESCOMP `kessler_run`) and seifert_beheng (gSAM M2005 SB2001) now
+> refuse the opt-in guard (`HARD_SAT_GUARD_EXEMPT`), and p3 is the WRF P3
+> port. The guarded schemes today are `HARD_SAT_GUARD_SCHEMES` in
+> `microphysics/config.py`; the kessler, seifert_beheng and p3 rows describe
+> the pre-port schemes.
+
 ## Protocol
 
 Single column, 4 levels, dt = 300 s, T0 = 300 K, p = 90000 Pa,
@@ -19,6 +26,9 @@ Source: `scripts/tmp/_probe_supersat_guard.py`, SLURM job 9331634.
 | kessler / seifert_beheng / morrison / thompson / p3 | 1.0589 | 1.0250 | 1.0026 | 1.0000 | 1.0000 |
 | sundqvist | 0.2255 | 0.2256 | 0.2256 | 0.2257 | 1.0000 |
 | ml_emulator (untrained) | 1.2459 | 1.1108 | 0.7949 | 0.1604 | 1.0000 |
+
+kessler and seifert_beheng: pre-port measurements. Both are now faithful oracle
+ports that refuse the opt-in guard (`HARD_SAT_GUARD_EXEMPT`).
 
 ## What the numbers actually say
 

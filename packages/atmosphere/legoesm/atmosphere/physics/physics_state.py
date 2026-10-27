@@ -44,6 +44,10 @@ NO_SFC_T_OVERRIDE: float = -1.0e4
 SFC_T_OVERRIDE_VALID_MIN: float = 1.0
 
 
+# pbuf RELVAR initial value (micro_mg_cam.F90:1058, cam_cesm2_1_rel_60).
+_RELVAR_INIT = 2.0
+
+
 class PhysicsState(NamedTuple):
     """Prognostic physics state — passed through time loop, checkpointable.
 
@@ -256,6 +260,30 @@ class PhysicsState(NamedTuple):
     # Appended LAST so positional constructors keep their field order.
     conv_mass_flux_up: jnp.ndarray = None
     conv_icwmr: jnp.ndarray = None
+    # PBL height [m above the surface], shape (ncol,): CAM's pbuf ``pblh``.
+    # Written by the turbulence scheme each call (CAM6: clubb_intr.F90:2616
+    # after the CLUBB sub-steps, the last sub-step's value persists) and read
+    # one physics step LAGGED by Zhang-McFarlane deep convection, which runs
+    # first in the step and bounds its launch-level search at the PBL top
+    # (convect_deep.F90:266 -> zm_conv.F90:738-741).  Zeros before the first
+    # turbulence call = CAM's cold start when the initial file has no PBLH
+    # (physpkg.F90:419-424).  Appended LAST with a default.
+    pblh: jnp.ndarray = None
+    # CAM6 relative cloud-water variance [-] (ncol, nlev) for MG2, written by
+    # prognostic CLUBB (liquid partition) each macmic sub-step and read by the
+    # microphysics of the same sub-step (clubb_intr.F90:2416-2425 -> pbuf
+    # RELVAR).  Seeded at CAM's pbuf initial value; overwritten before any read
+    # on the CLUBB lanes.  Appended LAST.
+    relvar: jnp.ndarray = None
+    # CAM6 droplet activation (microp_aero_run) inputs, (ncol, nlev+1) top-first
+    # interfaces: prognostic CLUBB's final-sub-step w'^2 (pbuf WP2_nadv) and
+    # heat diffusivity Kh_zm (khzm), written by the turbulence sub-step and
+    # read by the microphysics of the same macmic sub-step.  Zeros until then.
+    clubb_wp2_iface: jnp.ndarray = None
+    clubb_kh_iface: jnp.ndarray = None
+    # CAM6 pbuf CLDO: the previous macmic sub-step's ast, set after the
+    # microphysics (micro_mg_cam.F90:1829); 0 at cold start (:1047).
+    cloud_fraction_old: jnp.ndarray = None
 
 
 # State fields that are run-level INPUTS rather than physics memory.
@@ -453,6 +481,11 @@ def init_physics_state(
         conv_heating=jnp.zeros((ncol, nlev), dtype=dtype),
         conv_mass_flux_up=jnp.zeros((ncol, nlev + 1), dtype=dtype),
         conv_icwmr=jnp.zeros((ncol, nlev), dtype=dtype),
+        pblh=jnp.zeros((ncol,), dtype=dtype),
+        relvar=jnp.full((ncol, nlev), _RELVAR_INIT, dtype=dtype),
+        clubb_wp2_iface=jnp.zeros((ncol, nlev + 1), dtype=dtype),
+        clubb_kh_iface=jnp.zeros((ncol, nlev + 1), dtype=dtype),
+        cloud_fraction_old=jnp.zeros((ncol, nlev), dtype=dtype),
     )
 
 
@@ -542,4 +575,10 @@ def update_physics_state(phys_state, updates):
         conv_mass_flux_up=updates.get(
             "conv_mass_flux_up", phys_state.conv_mass_flux_up),
         conv_icwmr=updates.get("conv_icwmr", phys_state.conv_icwmr),
+        pblh=updates.get("pblh", phys_state.pblh),
+        relvar=updates.get("relvar", phys_state.relvar),
+        clubb_wp2_iface=updates.get("clubb_wp2_iface", phys_state.clubb_wp2_iface),
+        clubb_kh_iface=updates.get("clubb_kh_iface", phys_state.clubb_kh_iface),
+        cloud_fraction_old=updates.get(
+            "cloud_fraction_old", phys_state.cloud_fraction_old),
     )

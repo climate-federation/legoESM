@@ -1244,10 +1244,24 @@ def make_voronoi_mpi_step(
         # (Owned cells + allreduce — correct under the cell partition, unlike
         # the model's internal fixer which would double-count halo cells.)
         if config.fix_mass:
+            _pre_mf = state_new
             state_new = _fix_mass_mpi(
                 state_new, state, _owned_area, _total_area_global,
                 sigma_coord=sigma_coord,
             )
+            if getattr(config, "energy_fixer", False):
+                # The mass fixer sits outside the energy window: return the
+                # energy its p_s shift changed as heat [K, +warming] (serial
+                # ``_step_jit`` mirror, F15 V8).  It leaves u untouched, so one
+                # halo refresh serves both states' cell KE.  (The helper was
+                # imported above under the same static energy_fixer branch.)
+                _pre_x = _exchange_mpas_state(_pre_mf)
+                _dT_mf = voronoi_energy_fixer_dT(
+                    _pre_x, state_new._replace(u=_pre_x.u), local_mesh,
+                    sigma_coord, _owned_area, sum_fn=global_sum_mpi)
+                state_new = state_new._replace(T=state_new.T.replace(
+                    data=state_new.T.data
+                    + _dT_mf.astype(state_new.T.data.dtype)))
 
         # Floors: temperature and tracer non-negativity (advection is not
         # positive-definite; clamp before tracers feed saturation).

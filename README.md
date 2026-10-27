@@ -10,6 +10,17 @@ data assimilation, parameter estimation, sensitivity analysis and hybrid
 AI–physics modelling. Dynamical cores, physics schemes, grids, vertical
 coordinates and time integrators are swappable bricks, hence the "lego".
 
+**Install** (Python ≥ 3.11):
+
+```bash
+pip install legoesm
+```
+
+This installs the model as a Python library (`import legoesm`). The `legoesm`
+command-line test cases, experiment templates and the walkthrough below still
+need a clone of this repository; [Getting started](#getting-started-about-one-hour)
+sets one up with `uv`.
+
 **New here? Follow [Getting started](#getting-started-about-one-hour) below.**
 It takes you from `git clone` to your own 3-D atmosphere experiment, with the
 results plotted, in well under an hour. The feature inventory and reference
@@ -250,7 +261,7 @@ More things to try:
 |---|---|
 | `ModuleNotFoundError: No module named 'numpy'` (or `yaml`, `legoesm`) | The system `python` was used, not the environment's. Run `source .venv/bin/activate` in the repository root, or call `.venv/bin/python` directly. |
 | `legoesm: command not found` from `bash run.sh` | `run.sh` calls `legoesm` from `PATH` (the default machine profile does not activate a venv). Activate `.venv` first. |
-| `Could not find a version that satisfies the requirement legoesm-core~=1.0.0` | Plain `pip install` cannot resolve the unpublished workspace members. Use `uv sync`, or the pip-only helper in [Installing](#installing). |
+| `Could not find a version that satisfies the requirement legoesm-core~=1.0.0` | Plain `pip install` from a checkout cannot resolve workspace members not yet on PyPI. Use `pip install legoesm` for a release, `uv sync`, or the pip-only helper in [Installing](#installing). |
 | Run killed: `Out Of Memory` / exit 137 | Not enough RAM. Run one experiment at a time, reduce `grid.resolution`, or ask for more memory in your allocation. |
 | `ERROR: --output-dir runs/... exists and is not empty` | `init_experiment` never overwrites. Pick a new `--output-dir` or remove the old one. |
 | `ERROR: resolved config is invalid: ... grid.vertical_coord must be one of ('sigma', 'hybrid', 'cam_l32'); got 'none'` | `none` is not a vertical coordinate. Shallow water does not run through `legoesm run`: launch a `2d/` template with `init_experiment.py` and `bash run.sh`, which call the matrix runner; see [Known issues](#known-issues-in-the-getting-started-path). |
@@ -507,10 +518,12 @@ independently-installable members (`legoesm-core`, `legoesm-atmosphere`,
 others as ordinary distributions (`legoesm-core~=1.0.0`, …) that resolve to the
 in-tree source **only via** `[tool.uv.sources]` (`workspace = true`).
 
-**This is why a bare `pip install legoesm` (or `pip install ./packages/atmosphere`)
-fails** with `Could not find a version that satisfies the requirement
+From PyPI, `pip install legoesm` (or one member, e.g. `pip install
+legoesm-ocean`) installs released wheels. **From a checkout, a bare `pip install .`
+(or `pip install ./packages/atmosphere`) fails** for any member version not yet
+on PyPI, with `Could not find a version that satisfies the requirement
 legoesm-core~=1.0.0 … (from versions: none)`: plain pip ignores `[tool.uv.sources]`
-and looks for the members on PyPI, where they are not published. You need either
+and looks for the members on PyPI. For a checkout you need either
 `uv` (which understands the workspace) or the bundled helper (which resolves the
 inter-member dependency DAG against the in-tree source instead of PyPI):
 

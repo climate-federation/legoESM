@@ -244,3 +244,17 @@ def test_second_order_at_a_clamped_pivot_is_the_price_of_1736():
         "float64 second order must stay finite at a clamped pivot; if this "
         "goes NaN the #1736 trade is worse than measured and the clamp floor "
         "needs raising")
+
+
+def test_e3sm_vd_lu_order_solves_the_same_system_and_differentiates():
+    """``operation_order="e3sm_vd_lu"`` (E3SM vd_lu_decomp/vd_lu_solve,
+    bottom-up elimination) solves the same system as the default order, and
+    its custom_vjp gradient passes jax.test_util.check_grads (reverse, 2nd
+    order)."""
+    from jax.test_util import check_grads
+    a, b, c, d = _random_dd_system((3, 7))
+    x = thomas_solve(a, b, c, d, "e3sm_vd_lu")
+    np.testing.assert_allclose(np.asarray(x), np.asarray(thomas_solve(a, b, c, d)),
+                               rtol=1e-12, atol=0.0)
+    check_grads(lambda bb, dd: thomas_solve(a, bb, c, dd, "e3sm_vd_lu"), (b, d),
+                order=2, modes=["rev"])

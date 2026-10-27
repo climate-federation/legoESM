@@ -166,7 +166,7 @@ _NEMO_TKE_CDRAG = 1.5e-3       # zcdrag [-] surface drag coeff      (zdftke.F90:
 # ½·0.016² / (ρ_air·C_d): surface stress → ½W_lc² (Axell 2002 Eq. 44, via
 # |τ| = ρ_air·C_d·U₁₀² and the Stokes drift u_s = 0.016·U₁₀) (zdftke.F90:243)
 _NEMO_TKE_LC_CSD = 0.5 * 0.016 * 0.016 / (_NEMO_TKE_RHO_AIR * _NEMO_TKE_CDRAG)
-_NEMO_MXL0_VKARMN = 0.4        # vkarmn (phycst) — the ln_mxl0 anchor prefactor
+_NEMO_MXL0_VKARMN = constants.kappa_von_karman  # vkarmn (phycst) — the ln_mxl0 anchor prefactor
 _NEMO_MXL0_LENGTH_SCALE = 2.0e5  # zraug numerator; shipped zdftke.F90:575
 _NEMO_MOLECULAR_VISCOSITY = 1.0e-6
 
@@ -3513,7 +3513,14 @@ def tke_vertical_mixing(
     if _matrix_eval == "nemo_literal":
         # Post-solve tke_avn overwrite, MY_SRC/zdftke.F90:832-837.  Keep the
         # source association: zsqen=SQRT(en), then dissl=zsqen/zmxld.
-        dissl_new = jnp.sqrt(tke_curr) / l_eps_final
+        _dissl_positive = tke_curr > 0.0
+        _dissl_sqrt_input = jnp.where(_dissl_positive, tke_curr, 1.0)
+        _dissl_divisor = jnp.where(_dissl_positive, l_eps_final, 1.0)
+        dissl_new = jnp.where(
+            _dissl_positive,
+            jnp.sqrt(_dissl_sqrt_input) / _dissl_divisor,
+            0.0,
+        )
     _statement_trace = None
     if return_statement_trace:
         if any(value is None for value in (

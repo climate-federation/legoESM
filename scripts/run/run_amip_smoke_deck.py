@@ -520,7 +520,7 @@ def main(argv: list[str] | None = None) -> int:
         cmd += [
             "--aerosol-forcing", "external",
             "--aerosol-file", str(files["aerosol"]),
-            "--aerosol-reference-aod", "0.05",
+            "--aerosol-reference-aod", "0.03",
         ]
     # Aerosol-CCN + dynamic albedo run through the coupled physics
     # pipeline, which only the cubed-sphere / lat-lon paths use — the

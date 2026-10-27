@@ -2863,6 +2863,36 @@ def build_fesom_ocean(mesh_dir: str, dt: float, ic_dir: str | None = None, *,
     return grid, z_coord, model, state, H_bathy
 
 
+def _write_fesom_manifest(out, args, model, lane, n_steps, dt, total_days):
+    """Write the FESOM lane's run_manifest.json through the canonical writer.
+
+    Called at RUN START, as the tripole lane does; returns the manifest path
+    (process 0) for the run-end state digest."""
+    from legoesm.driver.restart import write_run_manifest_on_root
+    from legoesm.ocean.config import FesomRunRecord
+    forcing = dict(
+        emp_freshwater=bool(args.emp_freshwater), dm2dc=bool(args.dm2dc),
+        sw_rgb_chl=bool(args.sw_rgb_chl),
+        prognostic_sea_ice=bool(args.prognostic_sea_ice),
+        sss_restore=bool(args.sss_restore),
+        sss_restore_channel=args.sss_restore_channel,
+        runoff=bool(args.runoff))
+    if lane == "fesom_b1_unforced":
+        # B1 applies none of these forcings (user decision 2026-10-26), so
+        # it records that instead of the parser defaults it never used.
+        forcing = dict.fromkeys(forcing, "not_applicable")
+    record = FesomRunRecord(
+        runtime_config=model.config, lane=lane, n_steps=int(n_steps),
+        dt_seconds=float(dt), total_days=float(total_days), **forcing,
+        nemo_monthly_init=(list(args.nemo_monthly_init)
+                           if args.nemo_monthly_init is not None else None),
+        woa_init=bool(args.woa_init),
+        vmix_config=model.vmix_config,
+        k_ver=float(model._params.k_ver), a_ver=float(model._params.a_ver))
+    return write_run_manifest_on_root(out, record, config_kind="ocean",
+                                      runner_tag="run_omip_core2")
+
+
 def run_fesom_b1_smoke(args, grid, z_coord, model, state) -> None:
     """Stage-B1 execution path: UNFORCED steps + comparator-convention
     snapshots.  The full OMIP host loop cannot run this lane until B2/B3
@@ -2871,8 +2901,6 @@ def run_fesom_b1_smoke(args, grid, z_coord, model, state) -> None:
     from pathlib import Path
 
     from scripts.run.run_fesom_core2 import write_snapshot
-
-    import json
 
     out = Path(args.output); out.mkdir(parents=True, exist_ok=True)
     dt = float(args.dt)
@@ -2893,6 +2921,9 @@ def run_fesom_b1_smoke(args, grid, z_coord, model, state) -> None:
     print(f"[fesom-b1] UNFORCED smoke: {n_steps} steps of dt={dt}s "
           f"(zero wind stress, no heat/freshwater — plumbing stage only; "
           f"NOT a scored OMIP run)")
+    manifest_path = _write_fesom_manifest(out, args, model,
+                                          "fesom_b1_unforced",
+                                          n_steps, dt, total_days)
     for step in range(1, n_steps + 1):
         state = model.step(state, dt)
         if snap_every and step % snap_every == 0:
@@ -2903,11 +2934,7 @@ def run_fesom_b1_smoke(args, grid, z_coord, model, state) -> None:
         raise SystemExit("fesom B1: non-finite temperature after "
                          f"{n_steps} steps — refusing to report success.")
     write_snapshot(out, "final", state.inner, model.mesh)
-    (out / "run_manifest.json").write_text(json.dumps({
-        "lane": "fesom_b1_unforced", "git_sha": _source_revision(),
-        "n_steps": n_steps, "dt_s": dt, "total_days": total_days,
-        "argv": sys.argv,
-    }, indent=1))
+    _record_final_state_digest(manifest_path, state)
     print(f"[fesom-b1] done: {n_steps} steps; snapshots in {out}")
 
 
@@ -2942,8 +2969,6 @@ def run_fesom_forced_loop(args, grid, z_coord, model, state) -> None:
     mid-step diurnal-SW window, and the calendar-month chlorophyll/runoff/
     SSS-target slices."""
     from pathlib import Path
-
-    import json
 
     from scripts.run.run_fesom_core2 import write_snapshot
     from legoesm import constants as _const
@@ -2990,10 +3015,8 @@ def run_fesom_forced_loop(args, grid, z_coord, model, state) -> None:
     if args.prognostic_sea_ice:
         from legoesm.ice import (
             SeaIceConfig, init_dynamic_ice_state, step_sea_ice,
-            uses_new_physics,
         )
         from legoesm.ice.config import BrineConfig
-        from legoesm.coupler.ocean_forcing import blend_ice_ocean_forcing
         # FesomOceanGrid has NO strain-rate / flux-divergence ice operators
         # (grid_supports_ice_dynamics/transport are both False), so the
         # rheology degrades to free_drift and transport stays 'none' —
@@ -3131,6 +3154,9 @@ def run_fesom_forced_loop(args, grid, z_coord, model, state) -> None:
           f"ice={'PROGNOSTIC' if ice_config is not None else 'off'}, "
           f"sss_restore={'on' if sss_restore_cfg is not None else 'off'}, "
           f"runoff={'on' if runoff_monthly is not None else 'off'}")
+    manifest_path = _write_fesom_manifest(out, args, model,
+                                          "fesom_b4_core2_forced",
+                                          n_steps, dt, total_days)
     for step in range(1, n_steps + 1):
         it = _idx_t(step, dt, n_rec)
         _dm2dc_win = None
@@ -3178,7 +3204,8 @@ def run_fesom_forced_loop(args, grid, z_coord, model, state) -> None:
                 forc_ice["sw_down"] = (
                     np.asarray(forc_ice["sw_down"], dtype=np.float64)
                     * dm2dc_sw_factor(grid, _dm2dc_win))
-            atm_ice = _build_atm_to_surface_core2(forc_ice)
+            atm_ice = _build_atm_to_surface_core2(
+                forc_ice, ramp=ramp, with_precip=args.emp_freshwater)
             # Ocean T is potential temperature [degC]; ice wants SST [K].
             sst_K = jnp.asarray(state.T.data)[..., 0] + _ice_T_freeze
             # Surface current, ROTATED frame -> GEOGRAPHIC east/north (the
@@ -3213,18 +3240,10 @@ def run_fesom_forced_loop(args, grid, z_coord, model, state) -> None:
             # melt/freeze freshwater and ice stress added exactly once.
             # sf was built UNMASKED (ice_albedo=None -> raw SW), so the SW
             # albedo/partition happens here and only here (raw_core2).
-            fw, sf = blend_ice_ocean_forcing(
-                open_sf=sf, open_fw=fw, ice_resp=ice_resp,
-                ice_concentration=_ice_conc_pre,
-                ocean_mask=state.land_mask.data,
-                sw_partition="raw_core2",
-                alpha_ocean=float(_const.alpha_ocean_broadband),
-                sw_transmittance_ice=0.0,
-                ice_owns_snow_reservoir=uses_new_physics(ice_config),
-            )
-            # Same partition-time-level concentration to the closure (the
-            # TKE eice under-ice attenuation reads it), as the host loop does.
-            sf = sf._replace(ice_concentration=_ice_conc_pre)
+            fw, sf = _blend_prognostic_ice_forcing(
+                sf, fw, ice_resp, ice_state, _ice_conc_pre,
+                state.land_mask.data, ice_config,
+                _const.alpha_ocean_broadband, atm_ice)
         # --- SSS restoring (B4).  Inputs are assembled here, PRE-step, for
         # both channels: the water-flux channel consumes them below (NEMO
         # sbcssr — the flux is computed from the NOW-level SSS and enters the
@@ -3312,25 +3331,13 @@ def run_fesom_forced_loop(args, grid, z_coord, model, state) -> None:
             ice_state, grid, state.land_mask.data)
         print(f"[fesom-forced] final ice: area={_af / 1.0e12:.3f}e6 km2 "
               f"mean_conc={_cf:.3f} max_h={_hf:.3f} m")
-    (out / "run_manifest.json").write_text(json.dumps({
-        "lane": "fesom_b4_core2_forced", "git_sha": _source_revision(),
-        "n_steps": n_steps, "dt_s": dt, "total_days": total_days,
-        "emp_freshwater": bool(args.emp_freshwater),
-        "dm2dc": bool(args.dm2dc), "sw_rgb_chl": bool(args.sw_rgb_chl),
-        "prognostic_sea_ice": bool(args.prognostic_sea_ice),
-        "sss_restore": bool(args.sss_restore),
-        "sss_restore_channel": args.sss_restore_channel,
-        "runoff": bool(args.runoff),
-        "nemo_monthly_init": bool(args.nemo_monthly_init),
-        "woa_init": bool(args.woa_init),
-        "argv": sys.argv,
-    }, indent=1))
+    _record_final_state_digest(manifest_path, state)
     print(f"[fesom-forced] done: {n_steps} steps; snapshots in {out}")
 
 
 def build_mpas_ocean(nlev: int, H_max: float, mesh_path: str, level: int = 6,
                      nemo_domain_cfg: str | None = None,
-                     lloyd_iterations: int = 20, woa_init: bool = False,
+                     lloyd_iterations: int = 50, woa_init: bool = False,
                      woa_t=None, woa_s=None, flat_bottom: bool = False,
                      A_h=None, B_h=None, K_bih=None, C_smag_lap=None,
                      pgf_scheme=None, tracer_advection=None, bottom_drag_r=None,
@@ -3371,6 +3378,9 @@ def build_mpas_ocean(nlev: int, H_max: float, mesh_path: str, level: int = 6,
     mesh, z_coord, config, _model0, _ = run_omip._create_setup(
         "mpas", f"ico{level}", nlev, H_max,
         physics_preset="full", water_type="II",
+        # --mpas-lloyd reaches the mesh builder (it was dropped here, so every
+        # run built _create_setup's default 50 whatever the flag said).
+        mpas_lloyd=lloyd_iterations,
         dz_ref_override=dz_ref_override,
         # KPP boundary-layer-depth sensitivity override (Ri_crit / Cv).  None
         # -> _create_setup builds the default KPPConfig (byte-identical to the
@@ -4658,8 +4668,9 @@ def _source_revision_drift_note(parent_sha, this_sha) -> str | None:
     SHA describes only part of the running code, so equality of two such
     strings is not equality of the code.
 
-    Pure function of the two strings so it is directly testable; ``main`` only
-    prints the result.
+    Pure function of the two strings so it is directly testable; ``main``
+    hands the result to ``_refuse_restart_source_drift``, which refuses the
+    resume on it (a warning with ``LEGOESM_ALLOW_VERSION_DRIFT=1``).
     """
     unknown = {None, "", _SOURCE_REV_UNAVAILABLE}
     if parent_sha in unknown or this_sha in unknown:
@@ -4671,14 +4682,26 @@ def _source_revision_drift_note(parent_sha, this_sha) -> str | None:
         return (f"[warn] --restart-from was written at source revision "
                 f"{parent_sha[:20]} but this leg is running {this_sha[:20]}: "
                 "the model code changed between legs.  The state and "
-                "configuration still validated, so the resume proceeds — but "
-                "attribute results to BOTH revisions.")
+                "configuration validated, but the resume is refused unless "
+                "LEGOESM_ALLOW_VERSION_DRIFT=1; if allowed, attribute results "
+                "to BOTH revisions.")
     why = _revision_ambiguity(this_sha)
     if why:
         return (f"[warn] both legs report {this_sha}, but that string does not "
                 f"pin the code: {why}  Matching markers do not prove matching "
                 "source.")
     return None
+
+
+def _refuse_restart_source_drift(parent_sha, this_sha, path) -> None:
+    """Version-drift rule for ``--restart-from`` (reproducibility decision 3):
+    a restart written by other or unidentifiable code (unknown, mismatched,
+    dirty or mixed-tree revision) is refused on every process unless
+    ``LEGOESM_ALLOW_VERSION_DRIFT`` is set, which downgrades it to a warning."""
+    from legoesm.driver.restart import collective_version_drift_gate
+    note = _source_revision_drift_note(parent_sha, this_sha)
+    collective_version_drift_gate(lambda: [note] if note else [],
+                                  f"restart {path}")
 
 
 def _revision_ambiguity(rev) -> str | None:
@@ -4809,6 +4832,48 @@ def _grid_lat2d_deg(grid, grid_type):
 # salt_flux, KPP freshwater) and FreshwaterForcing (evap x f_open, ice_fw)
 # channels.  No new sea-ice physics; no new ocean salt/FW applicator.
 # ===========================================================================
+
+def _blend_prognostic_ice_forcing(sf, fw, ice_resp, ice_state, ice_conc_thermo,
+                                  land_mask, ice_config, alpha_ocean, atm_ice):
+    """Prognostic-ice open-water/ice partition shared by both host loops.
+
+    Heat, SW, stress and evaporation split at the thermodynamics-time cover
+    ``ice_conc_thermo``.  The direct precip channel carries what the ice tile
+    does not take: the ice forwards rain (and snow, when it tracks none) at the
+    post-thermo cover it reports (``ice_concentration_precip``, before ridging;
+    the post-step state cover when it reports none), and stores tracked snow on
+    the thermodynamics-time ice area, so ocean + pack receive exactly ``P``
+    through freezing, melt-out and ridging.
+    Snowfall is the ice tile's own input (``atm_ice``).
+    """
+    from legoesm.coupler.ocean_forcing import blend_ice_ocean_forcing
+    from legoesm.ice import uses_new_physics
+    conc_post = ice_resp.ice_concentration_precip
+    if conc_post is None:
+        conc_post = ice_state.concentration.data
+        if conc_post.ndim > np.asarray(land_mask).ndim:
+            conc_post = jnp.sum(conc_post, axis=-1)  # multi-category total
+    ice_precip = None
+    if fw is not None:
+        snow = atm_ice.precip_snow * atm_ice.has_precipitation
+        a_snow = ice_conc_thermo if ice_config.snow.enabled else conc_post
+        # Rain floored at zero like the ice tile's own rain (snow can exceed the
+        # corrected total precip), so ocean + ice still sum to ``fw.precip``.
+        ice_precip = conc_post * jnp.maximum(fw.precip - snow, 0.0) + a_snow * snow
+    fw, sf = blend_ice_ocean_forcing(
+        open_sf=sf, open_fw=fw, ice_resp=ice_resp,
+        ice_concentration=ice_conc_thermo,
+        ice_precip=ice_precip,
+        ocean_mask=land_mask,
+        sw_partition="raw_core2",
+        alpha_ocean=float(alpha_ocean),
+        sw_transmittance_ice=0.0,
+        ice_owns_snow_reservoir=uses_new_physics(ice_config),
+    )
+    # Same partition-time-level cover to the vertical-mixing closure (TKE eice
+    # under-ice attenuation reads sf.ice_concentration).
+    return fw, sf._replace(ice_concentration=ice_conc_thermo)
+
 
 def _ice_state_spatial_shape(grid, app_grid_type):
     """Spatial shape of a per-cell ice field on the ocean grid.
@@ -5175,7 +5240,7 @@ def _q_open_top(sf, dz_top_m: float):
     return q_non_sw + sf.sw_down * (1.0 - float(_c.alpha_ocean_broadband)) * frac
 
 
-def _build_atm_to_surface_core2(forc, ramp=1.0):
+def _build_atm_to_surface_core2(forc, ramp=1.0, with_precip=True):
     """Build an :class:`AtmToSurface` from the CORE-II fields ALREADY sampled
     onto the ocean grid by :func:`sample_omip2_forcing`.
 
@@ -5193,7 +5258,11 @@ def _build_atm_to_surface_core2(forc, ramp=1.0):
     ``coupler.surface_exchange.extract_atm_to_surface`` uses.  ``cos_zenith`` /
     ``co2_ppmv`` are inert for the ice model (it has its own SW/albedo path), so
     they are populated as zeros / a default and never read.  ``has_radiation`` /
-    ``has_precipitation`` = 1 (CORE-II provides both)."""
+    ``has_precipitation`` = 1 (CORE-II provides both).
+
+    ``with_precip=False`` (the host loops pass ``args.emp_freshwater``, i.e.
+    ``--no-emp``) zeroes rain and snow, so the ice receives no precipitation
+    when the ocean receives none."""
     from legoesm.core.coupling_fields import AtmToSurface
     from legoesm import constants
 
@@ -5208,6 +5277,9 @@ def _build_atm_to_surface_core2(forc, ramp=1.0):
     snow_np = forc.get("snow")
     precip_snow = (jnp.asarray(np.asarray(snow_np, dtype=np.float64)) * float(ramp)
                    if snow_np is not None else jnp.zeros_like(precip))
+    if not with_precip:
+        precip = jnp.zeros_like(precip)
+        precip_snow = jnp.zeros_like(precip)
     slp_np = forc.get("slp")
     p_sfc = (jnp.asarray(np.asarray(slp_np, dtype=np.float64))
              if slp_np is not None
@@ -6335,8 +6407,10 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--mpas-level", type=int, default=6,
                    help="MPAS Voronoi subdivision level (nCells=10*4^level+2): "
                         "5~230km, 6~115km (~ORCA1), 7~58km. For --grid mpas.")
-    p.add_argument("--mpas-lloyd", type=int, default=20,
-                   help="MPAS Lloyd-relaxation iterations at mesh build. For --grid mpas.")
+    p.add_argument("--mpas-lloyd", type=int, default=50,
+                   help="MPAS Lloyd-relaxation iterations at mesh build. For "
+                        "--grid mpas. Default 50 = the mesh every run built "
+                        "before this flag was forwarded (user 2026-10-12).")
     p.add_argument("--cube-Ah", type=float, default=None,
                    help="cube horizontal viscosity A_h override [m^2/s].")
     p.add_argument("--cube-hyperdiff", type=float, default=None,
@@ -7566,6 +7640,17 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                         "Lets --C-smag-lap "
                         "be cranked high to damp WBC jets WITHOUT self-CFL at the "
                         "sharp jet. ~0.125 is a safe 2-D Laplacian cap.")
+    p.add_argument("--synthetic-forcing", action="store_true",
+                   help="Use synthetic forcing (no real CORE-II data needed). "
+                        "Explicit opt-in for testing and development only — "
+                        "never the default (a silent fallback would corrupt "
+                        "the NEMO comparison invisibly).")
+    p.add_argument("--forcing-scale", type=float, default=1.0,
+                   help="Scale surface forcing by this factor (default 1.0). "
+                        "Useful for sensitivity tests or reducing cold-start shock.")
+    p.add_argument("--days", type=float, default=None,
+                   help="Run for this many days (overrides --years and --smoke). "
+                        "Useful for short tests that are not the standard 10-day smoke.")
     p.add_argument("--nudge-woa-tau-days", type=float, default=0.0,
                    help="Nudge T,S toward WOA with this timescale [days] from a "
                         "rest start -- gradual cold-start spinup that avoids the "
@@ -7676,6 +7761,15 @@ def main() -> int:
         raise SystemExit(
             "--relative-winds/--wind-vfac is not wired for --grid cubed_sphere "
             "(parked); supported grids: tripole / latlon_bathy / mpas.")
+    # NEMO's SCRIP weights target the eORCA1 tripole; on latlon_bathy /
+    # cubed_sphere / mpas the shared sampler raises only at the first forcing
+    # step, after the model build (user 2026-10-15, decisions 8 + 6) -- refuse
+    # every non-tripole grid here instead.
+    if args.grid != "tripole" and args.forcing_remap != "bilinear":
+        raise SystemExit(
+            f"--forcing-remap {args.forcing_remap} is wired for --grid tripole "
+            f"only (NEMO's weight files target eORCA1), not --grid "
+            f"{args.grid}.  Use --forcing-remap bilinear.")
 
     # --spmd-persistent-state combo validation (scaling-M2): fail BEFORE the
     # jax.distributed bootstrap / any expensive setup.
@@ -9010,13 +9104,13 @@ def main() -> int:
         chl_clim = load_nemo_chl_monthly(
             grid, app_grid_type, lat2d, lon2d, chl_file=args.chl_file,
                                          chl_remap=args.chl_remap)
-    # allow_synthetic=False: this NEMO-faithful pipeline MUST use the real
-    # 6-hourly CORE-II nyf.zarr; a silent fallback to 365 daily synthetic forcing
-    # would corrupt the comparison invisibly. --forcing-path (set via --config
-    # forcing.path) threads the staged data dir into the loader's cache_dir so a
-    # fetch-then-run workflow finds it (#376).
+    # allow_synthetic=False by default: this NEMO-faithful pipeline MUST use the
+    # real 6-hourly CORE-II nyf.zarr; a silent fallback to 365 daily synthetic
+    # forcing would corrupt the comparison invisibly. --forcing-path (set via
+    # --config forcing.path) threads the staged data dir into the loader's
+    # cache_dir so a fetch-then-run workflow finds it (#376).
     forcing = load_core2_nyf(
-        allow_synthetic=False,
+        allow_synthetic=args.synthetic_forcing,
         cache_dir=(Path(args.forcing_path) if args.forcing_path else None),
     )
     n_rec = int(forcing.u10.shape[0])
@@ -9150,7 +9244,10 @@ def main() -> int:
 
     dt = float(args.dt)
     ramp_s = float(args.forcing_ramp_days) * _SEC_PER_DAY
-    total_days = 10.0 if args.smoke else args.years * 365.0
+    if args.days is not None:
+        total_days = float(args.days)
+    else:
+        total_days = 10.0 if args.smoke else args.years * 365.0
     n_steps = int(total_days * _SEC_PER_DAY / dt)
     diag_every = max(1, int(args.diag_every_days * _SEC_PER_DAY / dt))
     steps_per_year = int(365.0 * _SEC_PER_DAY / dt)
@@ -9285,13 +9382,13 @@ def main() -> int:
     # resumes silently.  Recorded always, via _source_revision() — which scopes
     # the query to THIS script's checkout, marks a dirty tree, and returns
     # _SOURCE_REV_UNAVAILABLE instead of silently omitting the field.
-    # DELIBERATELY A WARNING, NOT AN ABORT: chaining a multi-day production run
-    # across a bug fix is a legitimate and expected workflow, and a hard error
-    # would make the feature unusable exactly when it matters.  The state
-    # itself is still validated by the config fingerprint; this line makes the
-    # code drift visible in the log and in the archive so a scorecard is never
-    # attributed to the wrong revision.  It is provenance, NOT a proof of
-    # identical code — see ocean.restart's SCOPE OF THE GUARANTEE.
+    # A resume across a source change is REFUSED (reproducibility decision 3,
+    # approved 2026-10-12; it was a warning before): chaining a production run
+    # across a bug fix stays possible, but explicitly, with
+    # LEGOESM_ALLOW_VERSION_DRIFT=1 (then a warning).  The state itself is
+    # still validated by the config fingerprint.  The revision is provenance,
+    # NOT a proof of identical code — see ocean.restart's SCOPE OF THE
+    # GUARANTEE.
     _restart_src_sha = None
     if args.restart_save or args.restart_from:
         _restart_src_sha = _source_revision()
@@ -9356,10 +9453,8 @@ def main() -> int:
         # Source-revision drift: three DISTINCT outcomes (unknown / mismatch /
         # equal-but-dirty), decided by the pure helper so the logic is unit
         # tested rather than only exercised by a full driver run.
-        _drift_note = _source_revision_drift_note(_rs_meta.get("sha"),
-                                                  _restart_src_sha)
-        if _drift_note:
-            print(_drift_note, flush=True)
+        _refuse_restart_source_drift(_rs_meta.get("sha"), _restart_src_sha,
+                                     _rs_path)
         start_step = int(_rs_meta["step"])
         if start_step >= n_steps:
             # Never exit silently "already at target" (CLAUDE.md run-target
@@ -9939,6 +10034,15 @@ def main() -> int:
                 "an integrator slot mid-block that the restart neither records "
                 "nor continues.  Run the restartable leg on the host Python "
                 "loop (omit --scan-block).")
+        if args.forcing_remap != "bilinear":
+            # The on-device forcing stack is bilinear by construction and this
+            # branch returns before the host loop reads --forcing-remap, so
+            # nemo_scrip here would SILENTLY run bilinear (user 2026-10-14, 4a).
+            raise SystemExit(
+                f"[scan] --forcing-remap {args.forcing_remap} is not applied on "
+                "the --scan-block fast path (the on-device forcing stack is "
+                "bilinear only); use the host Python loop (omit --scan-block) "
+                "or --forcing-remap bilinear.")
         from legoesm.ocean.coupler.omip2_applicator import (
             build_core2_forcing_device_stack, build_omip2_scan_block_fn,
         )
@@ -10297,6 +10401,11 @@ def main() -> int:
         if ramp < 1.0:
             sf = sf._replace(tau_x=sf.tau_x * ramp, tau_y=sf.tau_y * ramp,
                              q_net=sf.q_net * ramp, sw_down=sf.sw_down * ramp)
+        if args.forcing_scale != 1.0:
+            sf = sf._replace(tau_x=sf.tau_x * args.forcing_scale,
+                             tau_y=sf.tau_y * args.forcing_scale,
+                             q_net=sf.q_net * args.forcing_scale,
+                             sw_down=sf.sw_down * args.forcing_scale)
         # Surface chlorophyll for THIS step (calendar-month slice); attaching it
         # switches the PE step to NEMO's RGB penetration.  NOT ramped — Chl is a
         # fixed optical climatology, independent of the dynamical spin-up ramp.
@@ -10340,7 +10449,10 @@ def main() -> int:
         ice_resp = None
         if ice_config is not None:
             from legoesm.ocean.coupler import sample_omip2_forcing
-            forc_ice = sample_omip2_forcing(forcing, it, grid, app_grid_type)
+            # SAME remap as the ocean forcing above (F19 residual): under
+            # --forcing-remap nemo_scrip the ice must not see bilinear fields.
+            forc_ice = sample_omip2_forcing(forcing, it, grid, app_grid_type,
+                                            forcing_remap=args.forcing_remap)
             if _dm2dc_win is not None:
                 # SAME diurnal SW modulation the ocean forcing gets (codex r1
                 # #2): the ice tile must not integrate the raw daily-mean SW
@@ -10352,7 +10464,8 @@ def main() -> int:
                 forc_ice["sw_down"] = (
                     np.asarray(forc_ice["sw_down"], dtype=np.float64)
                     * dm2dc_sw_factor(grid, _dm2dc_win))
-            atm_ice = _build_atm_to_surface_core2(forc_ice, ramp=ramp)
+            atm_ice = _build_atm_to_surface_core2(
+                forc_ice, ramp=ramp, with_precip=args.emp_freshwater)
             sst_K = jnp.asarray(state.T.data)[..., 0] + _ice_T_freeze
             ocn_u, ocn_v = _surface_currents(state, grid, app_grid_type)
             # Partition time level (codex r4 #1 + r5 #1): the ice model
@@ -10443,24 +10556,15 @@ def main() -> int:
                 # routes tau*SW to the ocean via resp.ocean_heat_extraction),
                 # so adding the old ocean-side A*tau*swd surrogate here would
                 # now DOUBLE-COUNT it (codex L1 — budget closed).
-                from legoesm.coupler.ocean_forcing import blend_ice_ocean_forcing
-                from legoesm.ice import uses_new_physics
-                fw, sf = blend_ice_ocean_forcing(
-                    open_sf=sf, open_fw=fw, ice_resp=ice_resp,
-                    ice_concentration=_ice_conc_pre,
-                    ocean_mask=state.land_mask.data,
-                    sw_partition="raw_core2",
-                    alpha_ocean=float(_ice_const.alpha_ocean_broadband),
-                    sw_transmittance_ice=0.0,
-                    ice_owns_snow_reservoir=uses_new_physics(ice_config),
-                )
-                # Thread the SAME partition-time-level ice concentration to
-                # the vertical-mixing closure: the TKE lc/etau under-ice
-                # attenuation (TKEConfig.eice, NEMO nn_eice) reads
-                # surface_forcing.ice_concentration.  Attach ALWAYS (inert
-                # unless eice != 0 — consumption is config-gated in
-                # k_profiles, so eice=0 stays bit-identical).
-                sf = sf._replace(ice_concentration=_ice_conc_pre)
+                # The helper also threads the SAME partition-time-level ice
+                # concentration to the vertical-mixing closure: the TKE
+                # lc/etau under-ice attenuation (TKEConfig.eice, NEMO nn_eice)
+                # reads surface_forcing.ice_concentration (inert unless
+                # eice != 0).
+                fw, sf = _blend_prognostic_ice_forcing(
+                    sf, fw, ice_resp, ice_state, _ice_conc_pre,
+                    state.land_mask.data, ice_config,
+                    _ice_const.alpha_ocean_broadband, atm_ice)
             elif fw is not None:
                 # KPP freshwater-buoyancy contract (codex): sf.freshwater is
                 # consumed ONLY by the vertical-mixing surface-buoyancy

@@ -122,7 +122,7 @@ def test_clubb_returns_its_ke_loss_as_heat(prognostic, monkeypatch):
     both to isolate the local heating."""
     kw = _column()
     dt = 150.0
-    cfg_on = CLUBBConfig(prognostic=prognostic, clubb_dt=300.0)
+    cfg_on = CLUBBConfig(trop_cloud_top_press=0.0, prognostic=prognostic, clubb_dt=300.0)
     monkeypatch.setattr(clubb_mod, "column_energy_fixer_heating",
                         lambda r, m, w: jnp.zeros_like(w * r[..., None]))
     jax.clear_caches()
@@ -144,7 +144,7 @@ def test_ke_heating_is_differentiable(prognostic, monkeypatch):
     gradient (d/du of the column heating differs from the heating-off path)."""
     kw = _column(ncol=2, nlev=16)
     dt = 150.0
-    cfg = CLUBBConfig(prognostic=prognostic, clubb_dt=300.0)
+    cfg = CLUBBConfig(trop_cloud_top_press=0.0, prognostic=prognostic, clubb_dt=300.0)
 
     def loss(u, heating):
         out = _run(dict(kw, u=u), cfg, dt, heating, monkeypatch)

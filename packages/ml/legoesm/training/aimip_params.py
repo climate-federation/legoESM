@@ -114,10 +114,9 @@ _MCFARLANE_TRAINABLE: list[ParamConstraint] = [
     ParamConstraint("mcfarlane_efficiency", 0.1, 1.0, "sigmoid"),
     ParamConstraint("mcfarlane_min_wind", 0.5, 5.0, "sigmoid"),
     ParamConstraint("mcfarlane_envelope_scale", 0.5, 2.0, "sigmoid"),
-    # Extended: orographic wavenumber + spread + tau cap.
+    # Extended: orographic wavenumber + spread.
     ParamConstraint("mcfarlane_k_wave", 1.0e-5, 5.0e-4, "sigmoid"),
     ParamConstraint("mcfarlane_directional_spread", 0.5, 2.0, "sigmoid"),
-    ParamConstraint("mcfarlane_tau_max", 1.0, 50.0, "sigmoid"),
 ]
 
 # Xu-Randall cloud fraction.  ``T_freeze`` is NOT trainable per
@@ -268,6 +267,24 @@ _SPATIAL_FIELD_READ_WITH = {"Cd_neutral": "surface_Cd_neutral",
                             "z0": "surface_z0"}
 
 
+def aimip_spatial_unread_fields(*, turbulence, surface_bulk_scheme) -> frozenset:
+    """Spatial surface fields the resolved surface path never reads.
+
+    The same rule ``AIMIPClassicalParams.from_defaults`` derives from the
+    trainable knob names (a field is read exactly when its scalar knob is),
+    stated on the two scheme choices that decide it, for callers that build a
+    checkpoint template without a trainable set (eval / AMIP replay).
+    """
+    if surface_bulk_scheme not in _SURFACE_KNOBS_BY_BULK:
+        raise ValueError(
+            f"unknown surface bulk scheme {surface_bulk_scheme!r}; expected "
+            f"one of {sorted(_SURFACE_KNOBS_BY_BULK)}")
+    read = (set(_SURFACE_KNOBS_BY_BULK[surface_bulk_scheme])
+            if turbulence in _SURFACE_CARRYING_TURBULENCE else set())
+    return frozenset(f for f, k in _SPATIAL_FIELD_READ_WITH.items()
+                     if k not in read)
+
+
 def aimip_classical_trainable_names(*, convection, turbulence, gwd,
                                     microphysics, cloud, radiation,
                                     surface_bulk_scheme) -> frozenset:
@@ -335,6 +352,7 @@ class AIMIPClassicalParams(eqx.Module):
         spatial_init_std: float = 0.0,
         spatial_seed: int = 0,
         trainable=None,
+        spatial_unread=None,
     ) -> "AIMIPClassicalParams":
         """Initialize all knobs at (or just inside) their canonical defaults.
 
@@ -372,6 +390,11 @@ class AIMIPClassicalParams(eqx.Module):
             array, so ``eqx.filter_value_and_grad`` and the optimizer skip it
             (frozen out of the trainable set; no-inert-parameters rule).
             ``None`` keeps every knob an array (checkpoint templates).
+        spatial_unread : iterable of str or None
+            Spatial fields NOT built because the resolved schemes never read
+            them (``aimip_spatial_unread_fields``). ``None`` derives them from
+            ``trainable`` (a field is read exactly when its scalar knob is);
+            ``trainable=None`` and ``spatial_unread=None`` build every field.
         """
         names = {c.name for c in AIMIP_CLASSICAL_CONSTRAINTS}
         if trainable is not None:
@@ -410,13 +433,20 @@ class AIMIPClassicalParams(eqx.Module):
                            else float(raw_c))
         spatial = None
         if spatial_surface:
+            derived = frozenset(f for f, k in _SPATIAL_FIELD_READ_WITH.items()
+                                if trainable is not None and k not in trainable)
+            if spatial_unread is None:
+                spatial_unread = derived
+            elif trainable is not None and frozenset(spatial_unread) != derived:
+                raise ValueError(
+                    f"spatial_unread {sorted(spatial_unread)} disagrees with "
+                    f"the fields the trainable knobs leave unread "
+                    f"{sorted(derived)}")
             spatial = AIMIPSpatialSurfaceParams.from_defaults(
                 dtype=param_dtype,
                 init_std=spatial_init_std,
                 key=jax.random.PRNGKey(int(spatial_seed)),
-                frozen=({f for f, k in _SPATIAL_FIELD_READ_WITH.items()
-                         if k not in trainable}
-                        if trainable is not None else ()),
+                frozen=spatial_unread,
             )
         return AIMIPClassicalParams(
             raw_values=raw,
@@ -545,7 +575,6 @@ class AIMIPClassicalParams(eqx.Module):
             envelope_scale=d["mcfarlane_envelope_scale"],
             k_wave=d["mcfarlane_k_wave"],
             directional_spread=d["mcfarlane_directional_spread"],
-            tau_max=d["mcfarlane_tau_max"],
         )
 
     def to_cloud_config(self) -> CloudConfig:
@@ -672,7 +701,6 @@ def _canonical_scheme_defaults() -> dict[str, float]:
         "mcfarlane_envelope_scale": float(mc.envelope_scale),
         "mcfarlane_k_wave": float(mc.k_wave),
         "mcfarlane_directional_spread": float(mc.directional_spread),
-        "mcfarlane_tau_max": float(mc.tau_max),
         # Cloud (Xu-Randall)
         "cloud_rh_crit": float(cl.rh_crit),
         "cloud_alpha_xr": float(cl.alpha_xr),
@@ -1111,14 +1139,42 @@ _INACTIVE_FIELDS_BY_CLOUD_SCHEME = {
 }
 
 
-def aimip_inactive_fields(*, cloud_scheme: str) -> frozenset:
+def aimip_inactive_fields(*, cloud_scheme: str, microphysics: str, gwd: str,
+                          subgrid_orography: bool,
+                          param_fixed: dict | None = None) -> frozenset:
     """Qualified ``scheme_key.field`` names with no gradient path under this
-    cloud scheme, frozen OUT of the trainable set by name (no-inert-parameters
+    scheme selection, frozen OUT of the trainable set by name (no-inert-parameters
     rule, the ``_inactive_keys`` pattern) rather than left to a measured
     freeze.  Pass to ``build_trainable_params(exclude=...)`` together with
     :func:`aimip_legacy_owned_fields` at every bundle build, so a trained
-    checkpoint and its evaluation skeleton share one tree."""
-    return _INACTIVE_FIELDS_BY_CLOUD_SCHEME.get(cloud_scheme, frozenset())
+    checkpoint and its evaluation skeleton share one tree.
+
+    The cloud-scheme set plus :func:`resolved_inactive_fields` of the config
+    the AIMIP factory builds for these names: ``MorrisonConfig`` defaults
+    with the deck's ``param_fixed`` pins for it (a pinned
+    ``warm_rain_scheme`` decides which warm-rain knobs are read), and
+    ``subgrid_orography`` = the lane's grid carries ``subgrid_topo_stddev``.
+    """
+    from legoesm.atmosphere.physics.combined import PhysicsConfig
+    from legoesm.atmosphere.physics.microphysics.config import (
+        MicrophysicsConfig,
+        MorrisonConfig,
+    )
+    from legoesm.core.param_overrides import apply_param_overrides
+
+    pins = (param_fixed or {}).get("atm.micro.MorrisonConfig", {})
+    probe = PhysicsConfig(
+        microphysics=MicrophysicsConfig(
+            scheme=microphysics,
+            morrison=apply_param_overrides(MorrisonConfig(), dict(pins))),
+        gravity_wave_drag=GravityWaveDragConfig(scheme=gwd))
+    return (_INACTIVE_FIELDS_BY_CLOUD_SCHEME.get(cloud_scheme, frozenset())
+            | resolved_inactive_fields(
+                probe, subgrid_orography=subgrid_orography))
+
+
+# Morrison warm-rain laws that read autocon_fact / accre_enhan_fact.
+_KK2000_WARM_RAIN = frozenset({"kk2000", "kk2000_cam6"})
 
 
 def resolved_inactive_fields(physics_config, *,
@@ -1127,19 +1183,35 @@ def resolved_inactive_fields(physics_config, *,
     reads, from the BUILT config (the ``_inactive_keys`` pattern; the
     ``assert_no_inert`` gate on the first gradient catches the rest).
 
-    * Morrison ``k_au``/``k_ac``/``x_star``: read only by the
-      ``warm_rain_scheme == "seifert_beheng"`` branch (morrison.py); the
-      kk2000 laws carry their own knobs (``autocon_fact``, ``accre_enhan_fact``).
+    * Morrison ``k_au``/``k_ac``/``x_star``: read by no warm-rain law (the
+      former ``"seifert_beheng"`` proxy now runs SB2001 as gSAM does and
+      refuses them, morrison.py), so always inactive under Morrison.
+    * every spec'd ``SeifertBehengConfig`` knob but ``Nc_0``: the stand-alone
+      ``seifert_beheng`` scheme is gSAM M2005 and refuses them
+      (seifert_beheng.py).
+    * Morrison ``autocon_fact``/``accre_enhan_fact``: read only by the two
+      kk2000 laws, ``"kk2000"`` and ``"kk2000_cam6"`` (morrison.py); neither
+      Seifert-Beheng law reads them.
     * McFarlane ``h_topo``: the scalar fallback height, read only when no
       per-column subgrid-orography field is wired (mcfarlane.py).
       ``subgrid_orography`` = the driver wired one (production: SSO file).
     """
     out = set()
     micro = getattr(physics_config, "microphysics", None)
-    if (getattr(micro, "scheme", None) == "morrison"
-            and micro.morrison.warm_rain_scheme != "seifert_beheng"):
+    if getattr(micro, "scheme", None) == "morrison":
         out |= {f"atm.micro.MorrisonConfig.{f}"
                 for f in ("k_au", "k_ac", "x_star")}
+    if getattr(micro, "scheme", None) == "seifert_beheng":
+        # The scheme is gSAM M2005 (liquid only, SB2001), which reads only
+        # Nc_0 and refuses every other SeifertBehengConfig field.
+        from legoesm.atmosphere.physics.microphysics import config as _mcfg
+        out |= {f"atm.micro.SeifertBehengConfig.{f}"
+                for f in _mcfg.__param_spec__["SeifertBehengConfig"]["params"]
+                if f != "Nc_0"}
+    if (getattr(micro, "scheme", None) == "morrison"
+            and micro.morrison.warm_rain_scheme not in _KK2000_WARM_RAIN):
+        out |= {f"atm.micro.MorrisonConfig.{f}"
+                for f in ("autocon_fact", "accre_enhan_fact")}
     gwd = getattr(physics_config, "gravity_wave_drag", None)
     if subgrid_orography and "mcfarlane" in str(
             getattr(gwd, "scheme", "")).split("+"):
@@ -1713,6 +1785,7 @@ def make_aimip_classical_spectral_physics(
                 "(split_rad=True)")
         combined_raw = make_physics(
             physics_config, model_type="spectral_pe", dt=dt,
+            surface_bulk_coeffs=None,   # this lane runs its own surface flux
             sfc_albedo_override=_sfc_albedo_override,
             sfc_emissivity_override=_sfc_emissivity_override,
             cld_macmic_num_steps=cld_macmic_num_steps,
@@ -1775,6 +1848,9 @@ def make_aimip_classical_spectral_physics(
     from legoesm.atmosphere.physics.radiation.integration import (
         make_radiation_physics,
     )
+    from legoesm.atmosphere.physics.turbulence.integration import (
+        resolved_clubb_config,
+    )
     non_rad_cfg = PhysicsConfig(
         radiation=RadiationConfig(scheme="none"),
         convection=conv_cfg,
@@ -1797,14 +1873,18 @@ def make_aimip_classical_spectral_physics(
     # CAM macro/micro sub-cycle: turbulence and microphysics run in sequence
     # inside the non-radiative factory (radiation is split out and is a
     # "once" module, so the split does not change the sub-cycle's meaning).
+    # This lane runs its own surface flux: no bulk exchange here.
     non_rad_raw = make_physics(non_rad_cfg, model_type="spectral_pe", dt=dt,
-                               cld_macmic_num_steps=cld_macmic_num_steps)
+                               cld_macmic_num_steps=cld_macmic_num_steps,
+                               surface_bulk_coeffs=None)
     rad_only_raw = make_radiation_physics(
         rad_cfg, "spectral_pe",
         sfc_albedo_override=_sfc_albedo_override,
         sfc_emissivity_override=_sfc_emissivity_override,
         use_clubb_cloud_fraction=rad_cfg.use_clubb_cloud_fraction,
         column_mesh=column_mesh,
+        # cam6_clubb: CLUBB's top cuts aist (clubb_intr.F90:2535).
+        clubb_config=resolved_clubb_config(turb_cfg),
     )
 
     def non_rad_fn(state, grid_, sigma_coord, phys_state=None, forcing=None):

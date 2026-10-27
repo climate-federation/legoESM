@@ -89,7 +89,7 @@ def _mock_step_unified_stateful(
     return phys_out, held_new, kwargs.get("T_land")
 
 
-def _build_harness(use_polar_filter=False):
+def _build_harness(use_polar_filter=False, energy_fixer=False):
     """Real lat-lon C-grid model (dynamics-only: config fix_mass=False, the
     operator-split mass fixer is separate) + a column-local mock physics carry.
     ``use_polar_filter`` exercises the band-sliced polar-mask path (else the
@@ -99,7 +99,7 @@ def _build_harness(use_polar_filter=False):
     sigma = create_sigma_coordinate(n_levels=NLEV)
     cfg = CGridLatLonPrimitiveEquationConfig(
         fix_mass=False, use_polar_filter=use_polar_filter, use_ppm_transport=True,
-        time_integrator="ssp_rk3")
+        time_integrator="ssp_rk3", energy_fixer=energy_fixer)
     model = CGridLatLonPrimitiveEquationModel(grid, sigma, cfg)
 
     rng = np.random.default_rng(2027)
@@ -165,10 +165,15 @@ def _build_harness(use_polar_filter=False):
     return model, statics, carry, forcing
 
 
-@pytest.mark.parametrize("use_polar_filter", [False, True])
-def test_operator_split_spmd_matches_serial(use_polar_filter):
+@pytest.mark.parametrize("use_polar_filter,energy_fixer", [
+    (False, False), (True, False),
+    # the dycore energy fixer and the segment mass fixer's energy closure
+    # (F15 V8) reduce over the bands like the mass fixer (lat psum)
+    (False, True)])
+def test_operator_split_spmd_matches_serial(use_polar_filter, energy_fixer):
     mesh = _mesh()
-    model, statics, carry, forcing = _build_harness(use_polar_filter)
+    model, statics, carry, forcing = _build_harness(use_polar_filter,
+                                                    energy_fixer)
     n_steps = 3
 
     step_none = make_sharded_operator_split_step(

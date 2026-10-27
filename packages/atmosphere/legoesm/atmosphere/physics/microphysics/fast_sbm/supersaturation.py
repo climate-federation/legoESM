@@ -21,13 +21,12 @@ differentiable without a discontinuity.
 
 Relaxation rate (oracle ONECOND1: ``RW = (OPER2(QPS) + B5L·AL1)·DOPL·SFNL``):
 
-    R = [ ∂ln e/∂q_v + (L_v/(R_v T²))·(L_v/c_pd) ] · (1+S) · SFN
-        with  ∂ln e/∂q_v = ε / ((ε + (1−ε) q_v) q_v)   (OPER2)
+    R = [ OPER2(q_v) + (BB1/T²)·AL1 ] · (1+S) · SFN
+        with  OPER2(q) = 0.622 / (0.622 + 0.378 q) / q
 
-The oracle hardcodes ``BB1_MY = 5.42e3 K ≈ L_v/R_v`` and
-``AL1 = 2500 K ≈ L_v/c_pd`` (CGS-era roundings, ≤0.5% off); the port
-derives both from ``legoesm.constants`` — faithful to the physics rather
-than to the roundings (documented deviation).
+with the oracle's literals ``BB1_MY = 5.42e3 K`` (≈ L_v/R_v) and
+``AL1 = 2500 K`` (≈ L_v/c_pd), from ``legoesm.constants`` ``*_fast_sbm``
+(faithful port, user decision 2026-10-19).
 """
 
 from __future__ import annotations
@@ -73,8 +72,8 @@ __physics_contract__ = {
         "Matches the oracle's closed-form DEL1N/DEL1INT expressions "
         "verbatim for |R dt| > 1e-6 and its Taylor branch for small R dt; "
         "equilibrium S(t->inf) = F/R; R reproduces the oracle's "
-        "(OPER2 + B5L*AL1)*(1+S)*SFN with derived L_v/R_v and L_v/c_pd "
-        "within the documented 0.5% rounding difference."
+        "(OPER2 + B5L*AL1)*(1+S)*SFN with its literals BB1_MY=5420 K, "
+        "AL1=2500 K, 0.622/0.378."
     ),
 }
 
@@ -93,7 +92,7 @@ def supersat_relaxation_rate(
     sfn: jax.Array,
 ) -> jax.Array:
     """Relaxation rate ``R`` [s⁻¹] of the warm supersaturation ODE
-    (oracle ``RW = (OPER2(QPS) + B5L·AL1)·DOPL·SFNL``).
+    (oracle ``RW = (OPER2(QPS) + B5L·AL1)·DOPL·SFNL``, literals as above).
 
     ``q_v`` is floored at a tiny positive value in the OPER2 term: at a
     bone-dry level (``q_v=0``) the ``ε/((…)q)`` vapor-pressure derivative is
@@ -102,12 +101,11 @@ def supersat_relaxation_rate(
     The floor keeps the psychrometric factor finite so the empty-spectrum
     cell correctly yields ``R = finite·0 = 0`` (surfaced by the end-to-end
     hydrostatic grad test over a dry upper atmosphere)."""
-    eps = constants.epsilon
+    eps = constants.epsilon_fast_sbm
     q_safe = jnp.maximum(q_v, 1.0e-12)
-    dlne_dq = eps / ((eps + (1.0 - eps) * q_safe) * q_safe)
-    dlnes_dT = constants.L_v / (constants.R_v * T * T)
-    psychro = dlne_dq + dlnes_dT * (constants.L_v / constants.c_pd)
-    return psychro * (1.0 + S) * sfn
+    oper2 = eps / (eps + constants.one_minus_epsilon_fast_sbm * q_safe) / q_safe
+    b5l = constants.bb1_fast_sbm / T / T
+    return (oper2 + b5l * constants.lv_over_cp_fast_sbm) * (1.0 + S) * sfn
 
 
 def integrate_supersaturation(

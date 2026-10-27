@@ -550,6 +550,38 @@ def test_ocean_surface_key_reaches_turbulence_from_the_first_step(
         "the non-land surface fluxes")
 
 
+def _find_key(obj, key):
+    """Every value stored under ``key`` anywhere in a nested JSON object."""
+    if isinstance(obj, dict):
+        hits = [obj[key]] if key in obj else []
+        return hits + [h for v in obj.values() for h in _find_key(v, key)]
+    if isinstance(obj, list):
+        return [h for v in obj for h in _find_key(v, key)]
+    return []
+
+
+@pytest.mark.parametrize("kw,want", [
+    (dict(), True), (dict(land_stress_from_land=False), False)])
+def test_ocean_surface_auto_resolves_and_is_recorded(monkeypatch, tmp_path,
+                                                     kw, want):
+    """Unset (AUTO) on an eligible run: on -- T_sfc_ocean reaches the
+    turbulence on every trace -- and the run manifest + saved config record
+    the boolean, never null; ineligible (bulk stress over land): off, and
+    recorded false."""
+    import json
+    _patch_land_loaders(monkeypatch)
+    seen, _ = _record_turbulence_forcing_keys(monkeypatch)
+    out = tmp_path / "auto"
+    d = _build_driver(str(out), TWO_STEPS_DAYS, **_LS_KW, **kw)
+    assert d.config.ocean_flux_on_ocean_surface is want
+    assert d.run() == "COMPLETED"
+    assert seen and all(("T_sfc_ocean" in s) is want for s in seen)
+    for name in ("run_manifest.json", "experiment_config.json"):
+        rec = _find_key(json.loads((out / name).read_text()),
+                        "ocean_flux_on_ocean_surface")
+        assert rec and all(v is want for v in rec), (name, rec)
+
+
 # --- review 2026-10-10 F28 / F31 -------------------------------------------
 
 def test_mpas_land_forcing_uses_moist_lowest_level_density(monkeypatch,
@@ -689,3 +721,38 @@ def test_land_window_payload_roundtrip():
         bad = {k: v for k, v in empty.items() if k != drop}
         with pytest.raises(ValueError, match="partial held land-output set"):
             land_window_from_checkpoint(bad, 3, n_cells)
+
+
+def test_the_mpas_run_freezes_once_after_its_first_hourly_step(
+        monkeypatch, tmp_path):
+    """By the first hourly output step every compiled path exists and lives
+    for the run.  Freezing it (after a collection, so no dead cycle is
+    frozen) keeps the full collections from scanning it and pausing one rank
+    for most of a second while every other rank waits.  Once per process."""
+    import gc
+    import legoesm.driver.model_driver as md
+    monkeypatch.setattr(md, "_GC_FROZEN", [False], raising=False)
+    monkeypatch.setenv("LEGOESM_DIGEST_EVERY_STEPS", "1")
+    _patch_land_loaders(monkeypatch)
+    ev = []
+    monkeypatch.setattr(gc, "collect", lambda *a: ev.append("collect"))
+    monkeypatch.setattr(gc, "freeze", lambda: ev.append("freeze"))
+    real = md.ModelDriver._write_step_digest
+    monkeypatch.setattr(md.ModelDriver, "_write_step_digest",
+                        lambda self, step, *a, **k: (ev.append(step),
+                                                     real(self, step, *a, **k)))
+    hour = int(round(3600.0 / DT))
+    days = (hour + 2) * DT / 86400.0 + 1e-6
+    d = _build_driver(str(tmp_path / "a"), days, use_multilayer=False)
+    assert d.run() == "COMPLETED"
+    i = ev.index("freeze")
+    assert ev[i - 1] == "collect", ev
+    steps = [e for e in ev if isinstance(e, int)]       # other gc.collect calls ignored
+    assert [e for e in ev[:i] if isinstance(e, int)] == list(range(1, hour)), ev
+    assert steps[len(range(1, hour))] == hour, ev        # frozen inside the hour's step
+    assert ev.count("freeze") == 1, ev
+    ev.clear()
+    d2 = _build_driver(str(tmp_path / "b"), days, use_multilayer=False)
+    assert d2.run() == "COMPLETED"
+    assert "freeze" not in ev, ev                       # once per process
+    assert [e for e in ev if isinstance(e, int)][-1] == hour + 2, ev

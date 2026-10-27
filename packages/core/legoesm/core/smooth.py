@@ -6,10 +6,19 @@ clamping) with smooth approximations parameterized by a sharpness factor.
 
 Higher sharpness -> closer to the true discontinuous function but with
 steeper gradients. Lower sharpness -> smoother gradients but less accurate.
+A static ``sharpness = math.inf`` returns the discontinuous function exactly
+(``x >= 0``, ``jnp.maximum``, ...): the hard limit of a RULE 5 smooth switch.
 """
+
+import math
+import numbers
 
 import jax
 import jax.numpy as jnp
+
+
+def _hard(sharpness) -> bool:
+    return isinstance(sharpness, numbers.Real) and sharpness == math.inf
 
 
 def sigmoid_switch(x: jax.Array, sharpness: float = 100.0) -> jax.Array:
@@ -26,9 +35,31 @@ def sigmoid_switch(x: jax.Array, sharpness: float = 100.0) -> jax.Array:
 
     Returns
     -------
-    array : Values in (0, 1).
+    array : Values in (0, 1); exactly ``x >= 0`` at ``sharpness = inf``.
     """
+    if _hard(sharpness):
+        x = jnp.asarray(x)
+        return (x >= 0).astype(x.dtype)
     return jax.nn.sigmoid(sharpness * x)
+
+
+def smoothstep_cubic(t: jax.Array) -> jax.Array:
+    """C1 step: 0 for t <= 0, 1 for t >= 1, t^2 (3 - 2t) between.
+
+    Zero first derivative at both ends, so a ramp built on it has no kink.
+    """
+    t = jnp.clip(t, 0.0, 1.0)
+    return t * t * (3.0 - 2.0 * t)
+
+
+def smoothstep_quintic(t: jax.Array) -> jax.Array:
+    """C2 step: 0 for t <= 0, 1 for t >= 1, 6t^5 - 15t^4 + 10t^3 between.
+
+    Unlike :func:`sigmoid_switch` it is EXACTLY 0 below the threshold, with
+    zero first and second derivatives there.
+    """
+    t = jnp.clip(t, 0.0, 1.0)
+    return 6.0 * t**5 - 15.0 * t**4 + 10.0 * t**3
 
 
 def smooth_max(a: jax.Array, b: jax.Array, sharpness: float = 100.0) -> jax.Array:
@@ -47,6 +78,8 @@ def smooth_max(a: jax.Array, b: jax.Array, sharpness: float = 100.0) -> jax.Arra
     -------
     array : Smooth approximation to element-wise max(a, b).
     """
+    if _hard(sharpness):
+        return jnp.maximum(a, b)
     a = jnp.asarray(a)
     b = jnp.asarray(b)
     # Broadcast to same shape before stacking
@@ -60,6 +93,8 @@ def smooth_min(a: jax.Array, b: jax.Array, sharpness: float = 100.0) -> jax.Arra
 
     min(a, b) = -max(-a, -b)
     """
+    if _hard(sharpness):
+        return jnp.minimum(a, b)
     return -smooth_max(-a, -b, sharpness)
 
 
@@ -89,6 +124,8 @@ def smooth_relu(x: jax.Array, sharpness: float = 100.0) -> jax.Array:
 
     Uses softplus: log(1 + exp(s*x)) / s
     """
+    if _hard(sharpness):
+        return jnp.maximum(x, 0.0)
     return jax.nn.softplus(x * sharpness) / sharpness
 
 

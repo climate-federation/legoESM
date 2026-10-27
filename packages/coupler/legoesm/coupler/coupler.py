@@ -343,7 +343,7 @@ def ocean_tile_response(
         tau_x, tau_y, shflx, lhflx, _ = compute_sam_oceflx_fluxes(
             forcing.u_lowest - ocean_u, forcing.v_lowest - ocean_v,
             T_air, forcing.q_lowest, ocean_sst, q_sfc, rho,
-            z_bot=z_air, variant="cesm",
+            z_bot=z_air, variant="cesm", t_bot=forcing.T_lowest,
         )
     elif _is_most:
         # Use wind relative to ocean surface current

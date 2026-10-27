@@ -257,7 +257,7 @@ def test_mcfarlane_drag_scales_linearly_with_k_wave():
             h_topo=200.0, k_wave=2.0 * math.pi / 100e3 * k_factor,
         )
         out = mcfarlane_gwd(u, v, T, p_full, p_half, z_full_b, z_half_b,
-                           rho, lat, 300.0, cfg)
+                           rho, lat, 300.0, cfg, p_ref_half=p_half[0])
         return float(jnp.sum(jnp.abs(out.du_dt))), float(out.eps_gwd[0])
 
     drag_lo, eps_lo = drag_at_k(1.0)
@@ -350,7 +350,7 @@ def test_mcfarlane_saturation_path_fires_in_uniform_wind():
 
     cfg = McFarlaneConfig(h_topo=2000.0)
     out = mcfarlane_gwd(u, v, T, p_full, p_half, z_full_b, z_half_b,
-                       rho, lat, 300.0, cfg)
+                       rho, lat, 300.0, cfg, p_ref_half=p_half[0])
     max_du = float(jnp.max(jnp.abs(out.du_dt)))
     eps = float(out.eps_gwd[0])
 
@@ -839,7 +839,7 @@ def test_combined_tendency_is_exact_sum():
     h_topo = jnp.full((ncol,), 800.0)
 
     oro = mcfarlane_gwd(u, v, T, p_full, p_half, z_full, z_half, rho, lat, dt,
-                        cfg.mcfarlane, h_topo_col=h_topo)
+                        cfg.mcfarlane, h_topo_col=h_topo, p_ref_half=p_half[0])
     spec_out, spec_new_ref = prognostic_spectral_gwd(
         u, v, T, p_full, p_half, z_full, z_half, rho, lat, dt,
         cfg.prognostic_spectral, spec_in)
@@ -847,7 +847,8 @@ def test_combined_tendency_is_exact_sum():
     _, combined_fn, full_cfg = get_gwd_fn(cfg)
     combined, spec_new = combined_fn(
         u, v, T, p_full, p_half, z_full, z_half, rho, lat, dt, full_cfg,
-        spec_in, h_topo_col=h_topo)
+        spec_in, h_topo_col=h_topo,
+        mcfarlane_kwargs={"p_ref_half": p_half[0]})
 
     assert jnp.allclose(combined.du_dt, oro.du_dt + spec_out.du_dt, atol=1e-12)
     assert jnp.allclose(combined.dv_dt, oro.dv_dt + spec_out.dv_dt, atol=1e-12)
@@ -875,7 +876,8 @@ def test_combined_threads_and_evolves_spectrum():
     spec_in = jnp.full((ncol, sc.n_azimuths, sc.n_wavenumbers), 0.01)
     _, combined_fn, full_cfg = get_gwd_fn(cfg)
     _, spec_new = combined_fn(
-        u, v, T, p_full, p_half, z_full, z_half, rho, lat, 300.0, full_cfg, spec_in)
+        u, v, T, p_full, p_half, z_full, z_half, rho, lat, 300.0, full_cfg, spec_in,
+        mcfarlane_kwargs={"p_ref_half": p_half[0]})
     assert spec_new.shape == spec_in.shape
     assert not bool(jnp.allclose(spec_new, spec_in))
 
@@ -892,12 +894,13 @@ def test_stateless_composite_sums_without_spectrum():
     dt = 300.0
     cfg = GravityWaveDragConfig(scheme="hines+mcfarlane")
     oro = mcfarlane_gwd(u, v, T, p_full, p_half, z_full, z_half, rho, lat, dt,
-                        cfg.mcfarlane)
+                        cfg.mcfarlane, p_ref_half=p_half[0])
     hin = hines_gwd(u, v, T, p_full, p_half, z_full, z_half, rho, lat, dt,
                     cfg.hines)
     _, combined_fn, full_cfg = get_gwd_fn(cfg)
     combined, spec_out = combined_fn(
-        u, v, T, p_full, p_half, z_full, z_half, rho, lat, dt, full_cfg, None)
+        u, v, T, p_full, p_half, z_full, z_half, rho, lat, dt, full_cfg, None,
+        mcfarlane_kwargs={"p_ref_half": p_half[0]})
     assert jnp.allclose(combined.du_dt, oro.du_dt + hin.du_dt, atol=1e-12)
     assert jnp.allclose(combined.dT_dt, oro.dT_dt + hin.dT_dt, atol=1e-12)
     assert spec_out is None  # no stateful part -> spectrum passthrough

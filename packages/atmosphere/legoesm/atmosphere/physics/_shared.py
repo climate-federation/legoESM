@@ -102,8 +102,16 @@ def compute_heights_from_sigma(T, p_half, q_v=None):
     z_half : array (ncol, nlev+1)
         Height at half levels [m] (surface = 0).
     """
-    dz = compute_layer_dz(T, p_half, q_v)
+    return heights_from_layer_dz(compute_layer_dz(T, p_half, q_v))
 
+
+def heights_from_layer_dz(dz):
+    """Full- and half-level heights [m] from layer thicknesses ``dz``.
+
+    ``dz`` is ``(ncol, nlev)``, TOA-first.  Half levels are the running sum of
+    the thicknesses below (surface = 0); full levels are the midpoint of the
+    two bounding half levels.  Returns ``(z_full, z_half)``.
+    """
     # Integrate from surface upward.  Use ``jnp.pad`` to append the
     # surface (z=0) boundary instead of allocating a fresh
     # ``jnp.zeros((ncol, 1))`` and concatenating — single Pad HLO op
@@ -152,6 +160,18 @@ def half_to_full(x_half):
     """
     mid = 0.5 * (x_half[:, :-1] + x_half[:, 1:])
     return jnp.concatenate([x_half[:, :1], mid, x_half[:, -1:]], axis=1)
+
+
+def half_to_iface_zero_ends(x_half):
+    """Interior-interface field ``(ncol, nlev-1)`` to ALL interfaces ``(ncol, nlev+1)``.
+
+    Top-first, like the input.  The model-top and surface interfaces are set to
+    zero: CAM6's non-CLUBB ``kvh`` is zero there (``pbl_utils.F90:393`` zeroes
+    the whole column before filling the interior; ``eddy_diff.F90:1018``), and
+    the interior values are passed through unchanged.
+    """
+    zero = jnp.zeros_like(x_half[:, :1])
+    return jnp.concatenate([zero, x_half, zero], axis=1)
 
 
 def brunt_vaisala_n_full(T, p_full, z_full):
@@ -384,6 +404,16 @@ def exner_to_pressure(exner):
     return constants.p_ref * exner ** inverse_poisson_exponent
 
 
+def surface_buoyancy_flux(wtheta_s, wq_s, theta):
+    """Kinematic surface buoyancy (virtual potential temperature) flux [K m/s].
+
+    ``(w'theta_v')_s = (w'theta')_s + (R_v/R_d - 1) theta (w'q')_s`` with
+    ``R_v/R_d - 1 = 1/epsilon - 1`` (E3SM ``zvir``); kinematic fluxes
+    positive upward, ``theta`` the lowest-level potential temperature [K].
+    """
+    return wtheta_s + (1.0 / constants.epsilon - 1.0) * theta * wq_s
+
+
 def buoyancy_coefficient(theta, *, gravity=None):
     """Buoyancy coefficient ``g / θ`` [m s⁻² K⁻¹] for buoyancy / N² terms.
 
@@ -591,7 +621,7 @@ def mixing_length(z, l_mix_max, z_floor=1.0):
     array
         Mixing length [m], same shape as ``z``.
     """
-    kappa = constants.kappa_vk
+    kappa = constants.kappa_von_karman
     z_abs = jnp.clip(jnp.abs(z), z_floor, None)
     return kappa * z_abs / (1.0 + kappa * z_abs / l_mix_max)
 

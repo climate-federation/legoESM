@@ -70,7 +70,8 @@ class TestGWDDissipationSign:
         from legoesm.atmosphere.physics.gravity_wave_drag.mcfarlane import mcfarlane_gwd
         from legoesm.atmosphere.physics.gravity_wave_drag.config import McFarlaneConfig
         args = self._make_gwd_inputs()
-        out = mcfarlane_gwd(*args, dt=300.0, config=McFarlaneConfig())
+        out = mcfarlane_gwd(*args, dt=300.0, config=McFarlaneConfig(),
+                            p_ref_half=args[4][0])
         assert float(jnp.min(out.eps_gwd)) >= -1e-10, "eps_gwd should be >= 0"
 
     def test_hines_eps_positive(self):

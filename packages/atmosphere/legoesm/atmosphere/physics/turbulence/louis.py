@@ -41,6 +41,7 @@ from legoesm.atmosphere.physics._shared import (
     louis_stability_functions,
     mixing_length,
     virtual_temperature,
+    half_to_iface_zero_ends,
 )
 from legoesm.atmosphere.physics.turbulence.config import LouisConfig
 from legoesm.atmosphere.physics.turbulence.output import TurbulenceOutput
@@ -383,4 +384,5 @@ def louis_turbulence(
         ustar=ustar,
         h_pbl=h_pbl,
         wtheta_flux=wtheta_flux,
+        Kh_iface=half_to_iface_zero_ends(Kh_half),
     )

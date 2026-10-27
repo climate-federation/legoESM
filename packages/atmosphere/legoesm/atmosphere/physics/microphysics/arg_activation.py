@@ -111,7 +111,7 @@ import jax.numpy as jnp
 
 from legoesm import constants
 from legoesm.atmosphere.physics.microphysics._warm_rain import kelvin_coefficient
-from legoesm.thermo import saturation_vapor_pressure
+from legoesm.thermo import saturation_specific_humidity, saturation_vapor_pressure
 
 __physics_contract__ = {
     "summary": (
@@ -189,6 +189,29 @@ _KAPPA_FLOOR = 1.0e-4          # hygroscopicity floor (S_m ~ 1/sqrt(kappa))
 _SIGMA_G_FLOOR = 1.0 + 1.0e-3  # geometric-std floor (> 1; ln sigma > 0)
 _INV_S2_FLOOR = 1.0e-30        # floor on sum 1/S_max^2 so S_max finite
 _S_RATIO_FLOOR = 1.0e-30       # floor on S_m/S_max so ln(.) finite
+
+
+# --- CAM6 ndrop.F90 activate_modal / maxsat (fixed published fits + guards) ---
+# Vapour diffusivity / thermal conductivity fits evaluated at T_ref_cam6_activation
+# (ndrop.F90:1426-1427): diff0 = 0.211e-4 (p0/p) (T/t0)^1.94 [m^2/s];
+# conduct0 = (5.69 + 0.017 (T - t0)) * 4.186e2 * 1e-5 [J/m/s/K].
+_CAM6_P0_PA = 1013.25e2                 # ndrop.F90 activate_modal p0 [Pa]
+_CAM6_DIFF0_COEFF = 0.211e-4            # [m^2/s]
+_CAM6_DIFF0_T_EXP = 1.94
+_CAM6_COND0_A = 5.69                    # [1e-5 cal/cm/s/K]
+_CAM6_COND0_B = 0.017                   # [1e-5 cal/cm/s/K^2]
+_CAM6_CAL_TO_J_PER_100 = 4.186e2         # cal/cm -> J/m (x 1e2 cm/m)
+_CAM6_COND0_SCALE = 1.0e-5              # the fit is in 1e-5 cal/cm/s/K
+_CAM6_ETAFACTOR2MAX_NUM = 1.0e10        # etafactor2max = 1e10/(alpha*wmaxf)^1.5
+_CAM6_TINY_CONC = 1.0e-39               # volume / number "present" thresholds
+_CAM6_HYGRO_MIN = 1.0e-10               # below: smc = _CAM6_SMC_NOHYGRO
+_CAM6_SMC_NOHYGRO = 100.0               # critical supersaturation, no hygroscopicity
+_CAM6_SMC_EMPTY = 1.0                   # critical supersaturation, empty mode
+_CAM6_NA_MIN_SINGLE_MODE = 1.0e-20      # nmode==1 early return
+_CAM6_MAXSAT_RATIO = 1.0e5              # maxsat: zeta or smc^2 > 1e5*eta -> smax = 1e-20
+_CAM6_SMAX_TINY = 1.0e-20
+_CAM6_ETA_MIN = 1.0e-20                 # maxsat: eta <= this -> sum = 1e20
+_CAM6_SUM_HUGE = 1.0e20
 
 
 class ActivationConfig(NamedTuple):
@@ -589,3 +612,154 @@ def activated_nc_field(
     raise ValueError(
         f"unknown activation scheme {scheme!r}; expected 'proxy' or 'arg'."
     )
+
+
+# ===========================================================================
+# CAM6 ndrop.F90 activation (Abdul-Razzak & Ghan 2000 as coded in CAM6)
+# ===========================================================================
+# Port of ``maxsat`` and of ``activate_modal``'s SINGLE-UPDRAFT branch
+# (``sigw <= 1e-5``; ndrop.F90:1294-1750).  dropmixnuc calls activate_modal with
+# ``sigw = wmix = 0`` and ``wdiab = 0`` (ndrop.F90:689-693, 754-757), so the
+# updraft-spectrum integration and its endrun sites are unreachable from the
+# only caller and are not ported, nor are the optional smax_prescribed /
+# in_cloud arguments (never passed by dropmixnuc).  Constants: legoesm.constants
+# and the legoesm.thermo saturation curve (user decision B7); CAM's activation
+# surface tension and reference temperature are the named
+# ``constants.surften_cam6_activation`` / ``constants.T_ref_cam6_activation``.
+
+
+def cam6_mode_sigma_factors(sigmag):
+    """``alogsig, exp45logsig, f1, f2`` per mode (ndrop.F90:153-156)."""
+    alogsig = jnp.log(jnp.asarray(sigmag))
+    exp45logsig = jnp.exp(4.5 * alogsig * alogsig)  # coeff-ok: exact lognormal 3rd moment, exp(9/2 ln^2 sigma)
+    f1 = _ARG_F_PREFACTOR * jnp.exp(_ARG_F_LOGSQ_COEFF * alogsig * alogsig)
+    f2 = 1.0 + _ARG_G_LOG_COEFF * alogsig
+    return alogsig, exp45logsig, f1, f2
+
+
+def cam6_aten():
+    """Kelvin coefficient at CAM's fixed reference temperature [m] (ndrop.F90:122)."""
+    return (2.0 * constants.M_water * constants.surften_cam6_activation
+            / (constants.R_universal * constants.T_ref_cam6_activation
+               * constants.rho_water))
+
+
+def _sqrt_times_self(g):
+    """CAM's ``gsqrt = sqrt(g); g = gsqrt*g`` (same rounding), with a zero-safe
+    gradient: at ``g = 0`` the value is 0 and d/dg = 0, where autodiff of
+    ``sqrt(g)*g`` would give ``inf*0 = NaN``."""
+    pos = g > 0.0
+    g_s = jnp.where(pos, g, 1.0)
+    return jnp.where(pos, jnp.sqrt(g_s) * g_s, 0.0)
+
+
+def cam6_maxsat(zeta, eta, smc, f1, f2):
+    """CAM6 ``maxsat`` (ndrop.F90:1704-1750), statement for statement.
+
+    ``eta``/``smc`` have a leading mode axis; ``zeta`` is the (mode-independent)
+    field; ``f1``/``f2`` are per-mode 1-D.  ``smax = 1e-20`` only when EVERY mode
+    has ``zeta > 1e5*eta`` or ``smc**2 > 1e5*eta``; a mode with ``eta <= 1e-20``
+    SETS the running sum to 1e20 and later modes still add to it.
+    """
+    nmode = eta.shape[0]
+    tiny_all = jnp.ones(zeta.shape, dtype=bool)
+    total = jnp.zeros_like(zeta)
+    for m in range(nmode):
+        tiny_all = tiny_all & ((zeta > _CAM6_MAXSAT_RATIO * eta[m])
+                               | (smc[m] * smc[m] > _CAM6_MAXSAT_RATIO * eta[m]))
+        ok = eta[m] > _CAM6_ETA_MIN
+        eta_s = jnp.where(ok, eta[m], 1.0)
+        g1 = _sqrt_times_self(zeta / eta_s)
+        g2 = _sqrt_times_self(smc[m] / jnp.sqrt(eta_s + 3.0 * zeta))
+        term = (f1[m] * g1 + f2[m] * g2) / (smc[m] * smc[m])
+        total = jnp.where(ok, total + term, _CAM6_SUM_HUGE)
+    safe_total = jnp.where(tiny_all, 1.0, total)
+    return jnp.where(tiny_all, _CAM6_SMAX_TINY, 1.0 / jnp.sqrt(safe_total))
+
+
+def cam6_activate_single_updraft(wbar, tair, rhoair, na, volume, hygro, sigmag,
+                                 wmaxf):
+    """CAM6 ``activate_modal`` single-updraft branch (``sigw = 0``, ``wdiab = 0``).
+
+    Parameters
+    ----------
+    wbar : updraft [m/s], field shape ``F``.
+    tair : air temperature [K], shape ``F``.
+    rhoair : air density [kg/m^3], shape ``F`` (CAM passes p/(R_d T)).
+    na : per-mode aerosol number [1/m^3], shape ``(nmode,) + F``.
+    volume : per-mode dry aerosol volume [m^3/m^3], shape ``(nmode,) + F``.
+    hygro : per-mode volume-mean hygroscopicity [-], shape ``(nmode,) + F``.
+    sigmag : per-mode geometric standard deviation, shape ``(nmode,)``.
+    wmaxf : maximum updraft [m/s] (enters only ``etafactor2max``).
+
+    Returns ``fn, fm, fluxn, fluxm`` (``(nmode,) + F``; number / mass fraction
+    activated and their fluxes [m/s]) and ``flux_fullact`` (``F``) — all zero
+    where CAM returns early (``wbar <= 0``; single mode with ``na < 1e-20``).
+    """
+    wbar = jnp.asarray(wbar)
+    tair = jnp.asarray(tair)
+    rhoair = jnp.asarray(rhoair)
+    nmode = na.shape[0]
+    alogsig, exp45logsig, f1, f2 = cam6_mode_sigma_factors(sigmag)
+    bshape = (nmode,) + (1,) * tair.ndim
+    alogsig_b = alogsig.reshape(bshape)
+    exp45_b = exp45logsig.reshape(bshape)
+    t0 = constants.T_ref_cam6_activation
+    aten = cam6_aten()
+    rhoh2o = constants.rho_water
+    latvap, rh2o = constants.L_v, constants.R_v
+
+    pres = constants.R_d * rhoair * tair
+    diff0 = (_CAM6_DIFF0_COEFF * (_CAM6_P0_PA / pres)
+             * (tair / t0) ** _CAM6_DIFF0_T_EXP)
+    # same multiplication order as CAM (x 4.186e2, then x 1e-5) for bitwise parity
+    conduct0 = ((_CAM6_COND0_A + _CAM6_COND0_B * (tair - t0)) * _CAM6_CAL_TO_J_PER_100
+                * _CAM6_COND0_SCALE)
+    qs = saturation_specific_humidity(tair, pres)
+    dqsdt = latvap / (rh2o * tair * tair) * qs
+    alpha = constants.g * (latvap / (constants.c_pd * rh2o * tair * tair)
+                           - 1.0 / (constants.R_d * tair))
+    gamma = (1.0 + latvap / constants.c_pd * dqsdt) / (rhoair * qs)
+    etafactor2max = _CAM6_ETAFACTOR2MAX_NUM / (alpha * wmaxf) ** 1.5
+    grow = 1.0 / (rhoh2o / (diff0 * rhoair * qs)
+                  + latvap * rhoh2o / (conduct0 * tair)
+                  * (latvap / (rh2o * tair) - 1.0))
+    sqrtg = jnp.sqrt(grow)
+    beta = 2.0 * jnp.pi * rhoh2o * grow * gamma
+
+    present = (volume > _CAM6_TINY_CONC) & (na > _CAM6_TINY_CONC)
+    na_s = jnp.where(present, na, 1.0)
+    vol_s = jnp.where(present, volume, 1.0)
+    amcube = 3.0 * vol_s / (4.0 * jnp.pi * exp45_b * na_s)
+    hyg_ok = hygro > _CAM6_HYGRO_MIN
+    hyg_s = jnp.where(hyg_ok, hygro, 1.0)
+    smc_present = jnp.where(
+        hyg_ok, 2.0 * aten * jnp.sqrt(aten / (27.0 * hyg_s * amcube)),  # coeff-ok: exact Koehler critical-S algebra (27 = 3^3)
+        _CAM6_SMC_NOHYGRO)
+    smc = jnp.where(present, smc_present, _CAM6_SMC_EMPTY)
+    etafactor2 = jnp.where(present, 1.0 / (na_s * beta * sqrtg), etafactor2max)
+    lnsm = jnp.log(smc)
+
+    active = wbar > 0.0
+    if nmode == 1:
+        active = active & ~(na[0] < _CAM6_NA_MIN_SINGLE_MODE)
+    w = jnp.where(active, wbar, 1.0)
+    alw = alpha * w
+    sqrtalw = jnp.sqrt(alw)
+    etafactor1 = alw * sqrtalw
+    eta = etafactor1 * etafactor2
+    zeta = (2.0 / 3.0) * sqrtalw * aten / sqrtg
+    smax = cam6_maxsat(zeta, eta, smc, f1, f2)
+    lnsmax = jnp.log(smax)
+    sq2 = jnp.sqrt(2.0)
+    x = (2.0 / 3.0) * (lnsm - lnsmax) / (sq2 * alogsig_b)
+    fn = 0.5 * (1.0 - jax.scipy.special.erf(x))
+    arg = x - 1.5 * sq2 * alogsig_b  # coeff-ok: exact mass-vs-number lognormal shift (3/2)
+    fm = 0.5 * (1.0 - jax.scipy.special.erf(arg))
+    zero = jnp.zeros_like(fn)
+    fn = jnp.where(active, fn, zero)
+    fm = jnp.where(active, fm, zero)
+    fluxn = fn * jnp.where(active, w, 0.0)
+    fluxm = fm * jnp.where(active, w, 0.0)
+    flux_fullact = jnp.where(active, w, 0.0)
+    return fn, fm, fluxn, fluxm, flux_fullact

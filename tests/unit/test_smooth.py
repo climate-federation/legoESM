@@ -6,7 +6,7 @@ import pytest
 
 from legoesm.core.smooth import (
     sigmoid_switch, smooth_max, smooth_min, smooth_clamp,
-    smooth_relu, smooth_abs,
+    smooth_relu, smooth_abs, smoothstep_cubic, smoothstep_quintic,
 )
 
 
@@ -60,6 +60,25 @@ class TestSmoothApproximations:
         expected = jnp.abs(x)
         assert jnp.allclose(result, expected, atol=1e-3)
 
+    def test_smoothstep_cubic(self):
+        """Exactly 0 / 1 outside [0, 1], C1 at both ends, 1/2 at the middle."""
+        t = jnp.array([-1.0, 0.0, 0.5, 1.0, 2.0])
+        assert jnp.array_equal(smoothstep_cubic(t), jnp.array([0.0, 0.0, 0.5, 1.0, 1.0]))
+        d1 = jax.grad(smoothstep_cubic)
+        for x in (0.0, 1.0):
+            assert abs(float(d1(jnp.array(x)))) < 1e-12
+        assert float(d1(jnp.array(0.5))) == pytest.approx(1.5)
+
+    def test_smoothstep_quintic(self):
+        """Exactly 0 / 1 outside [0, 1], C2 at both ends, 1/2 at the middle."""
+        t = jnp.array([-1.0, 0.0, 0.5, 1.0, 2.0])
+        assert jnp.array_equal(smoothstep_quintic(t), jnp.array([0.0, 0.0, 0.5, 1.0, 1.0]))
+        d1 = jax.grad(smoothstep_quintic)
+        d2 = jax.grad(d1)
+        for x in (0.0, 1.0):
+            assert abs(float(d1(jnp.array(x)))) < 1e-12 and abs(float(d2(jnp.array(x)))) < 1e-12
+        assert float(d1(jnp.array(0.5))) == pytest.approx(1.875)
+
     def test_all_differentiable(self):
         """All smooth functions should have finite gradients."""
         x = jnp.array(0.0)
@@ -74,3 +93,19 @@ class TestSmoothApproximations:
         ]:
             grad = jax.grad(fn)(x)
             assert jnp.isfinite(grad), f"{fn_name} has non-finite gradient at x=0"
+
+
+def test_infinite_sharpness_is_the_exact_hard_limit():
+    import math
+    x = jnp.array([-2.0, -1e-30, 0.0, 1e-30, 3.0])
+    y = jnp.array([1.0, 0.0, 0.0, -1.0, 5.0])
+    inf = math.inf
+    assert jnp.array_equal(sigmoid_switch(x, inf), (x >= 0).astype(x.dtype))
+    assert jnp.array_equal(smooth_max(x, y, inf), jnp.maximum(x, y))
+    assert jnp.array_equal(smooth_min(x, y, inf), jnp.minimum(x, y))
+    assert jnp.array_equal(smooth_relu(x, inf), jnp.maximum(x, 0.0))
+    assert jnp.array_equal(smooth_clamp(x, -1.0, 1.0, inf), jnp.clip(x, -1.0, 1.0))
+    import numpy as np
+    assert jnp.array_equal(sigmoid_switch(x, np.float64(inf)), (x >= 0).astype(x.dtype))
+    # a traced sharpness still takes the smooth path
+    assert float(jax.jit(lambda s: sigmoid_switch(jnp.array(0.0), s))(10.0)) == 0.5

@@ -74,6 +74,20 @@ def test_latest_checkpoint_ema_files_never_win_epoch_ordering(tmp_path):
     )
 
 
+def test_latest_checkpoint_skips_optimizer_state_files(tmp_path):
+    # train_weatherbench_scale writes epoch_NNNN.opt.eqx next to each
+    # checkpoint; its stem "epoch_NNNN.opt" must not reach the int() sort.
+    for name in (
+        "epoch_0003.eqx", "epoch_0003.opt.eqx", "epoch_0003_ema.eqx",
+        "epoch_0004.eqx", "epoch_0004.opt.eqx", "epoch_0004_ema.eqx",
+    ):
+        _touch(tmp_path / name)
+    assert latest_checkpoint(tmp_path).endswith("epoch_0004.eqx")
+    assert latest_checkpoint(tmp_path, prefer_ema=True).endswith(
+        "epoch_0004_ema.eqx"
+    )
+
+
 def test_latest_checkpoint_none_cases(tmp_path):
     assert latest_checkpoint(tmp_path / "missing_dir") is None
     assert latest_checkpoint(tmp_path) is None

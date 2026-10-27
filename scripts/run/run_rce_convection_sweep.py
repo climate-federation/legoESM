@@ -230,9 +230,13 @@ def _build_convection_call(scheme: str, dt: float):
 
         def call(T, qv, pf, ph, u, v, carry):
             (prog,) = carry
+            # ZM reads the PBL height and refuses a call without one.  No
+            # PBL scheme runs here, so it stays at CAM's initial value 0
+            # (physpkg.F90:419-424): launch from the lowest level.
             out, prog_new = zhang_mcfarlane_convection(
                 T=T, q_v=qv, p_full=pf, p_half=ph, u=u, v=v,
                 conv_prog_profile=prog, dt=dt, config=cfg,
+                pblh=jnp.zeros(T.shape[0], T.dtype),
             )
             du = out.du_dt_conv if out.du_dt_conv is not None else jnp.zeros_like(u)
             dv = out.dv_dt_conv if out.dv_dt_conv is not None else jnp.zeros_like(v)

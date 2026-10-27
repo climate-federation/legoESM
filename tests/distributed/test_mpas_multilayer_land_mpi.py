@@ -118,7 +118,7 @@ def _shared_tmp_root():
     raise RuntimeError("no writable shared temp directory found")
 
 
-def _land_mask_path():
+def _land_mask_path(polar_cap=False):
     """A deterministic, spatially varying land mask, written once by rank 0.
 
     Every rank must read the SAME file, so rank 0 writes it into a shared
@@ -135,7 +135,8 @@ def _land_mask_path():
         lat = np.arange(-89.0, 90.0, 2.0)
         lon = np.arange(0.0, 360.0, 2.0)
         lon2d, lat2d = np.meshgrid(lon, lat)
-        lsm = np.clip(0.5 * (1.0 + np.sin(np.deg2rad(3.0 * lon2d))
+        lsm = (lat2d > 60.0).astype(float) if polar_cap else np.clip(
+            0.5 * (1.0 + np.sin(np.deg2rad(3.0 * lon2d))
                              * np.cos(np.deg2rad(2.0 * lat2d))), 0.0, 1.0)
         xr.Dataset({"lsm": (("lat", "lon"), lsm)},
                    coords={"lat": lat, "lon": lon}).to_netcdf(path)
@@ -174,7 +175,8 @@ def _surfdata_or_none():
 
 
 def _build(distributed, mask_path, output_dir=None, fix_mass=True,
-           land_surface_scheme="simple_seb", land_ic=""):
+           land_surface_scheme="simple_seb", land_ic="",
+           turbulence="none", **extra):
     cfg = ExperimentConfig(
         grid=GridConfig(grid_type="mpas", resolution=RES, nlev=NLEV,
                         vertical_coord="sigma"),
@@ -182,7 +184,7 @@ def _build(distributed, mask_path, output_dir=None, fix_mass=True,
                             fix_mass=fix_mass),
         output=OutputConfig(output_dir="", diag_days=0),
         days=DAYS, dataset="analytical", radiation="gray",
-        convection="none", turbulence="none", precision="fp64",
+        convection="none", turbulence=turbulence, precision="fp64",
         land_mask_path=mask_path, use_multilayer_land=True,
         surfdata_path=SURFDATA,
         multilayer_n_layers=N_SOIL, multilayer_soil_depth=2.5,
@@ -203,6 +205,7 @@ def _build(distributed, mask_path, output_dir=None, fix_mass=True,
         land_params_refresh=(land_surface_scheme == "two_leaf"),
         land_ic_path=land_ic,
         distributed=distributed,
+        **extra,
     )
     d = ModelDriver(cfg, output_dir=output_dir or tempfile.mkdtemp())
     d.setup()
@@ -646,6 +649,143 @@ def test_spun_up_land_ic_scatters_to_the_same_columns_the_serial_run_gets():
     if MPI.COMM_WORLD.Get_rank() == 0:
         print(f"\n[land IC] {len(ref_cols)} per-column leaves scattered "
               f"exactly, {len(varying)} of them spatially varying")
+
+
+def test_rank_with_no_land_runs_and_checkpoints_with_its_neighbours():
+    """A rank whose cells are all ocean must take the same land path as its
+    land-holding neighbours: their land halo exchange and checkpoint gathers
+    are point-to-point/collective, so a rank that skips them leaves the others
+    blocked (8-node AMIP, 2026-10-18: 4 of 128 ranks had no land).  Land only
+    north of 60N, so at np>=4 some rank owns none; the land-flux handoff and
+    land stress are on, so the exchange carries every land field."""
+    comm = MPI.COMM_WORLD
+    if comm.Get_size() < 4:
+        pytest.skip("needs mpirun -n >= 4 for a rank without land")
+    mask = _land_mask_path(polar_cap=True)
+    out = _shared_tmpdir("noland_")
+    kw = dict(turbulence="louis", land_beta_soil=True,
+              land_stress_from_land=True)
+    d = _build(True, mask, output_dir=out, **kw)
+    has = comm.allgather(bool(np.any(np.asarray(d._f_land) > 0.0)))
+    assert not all(has), (
+        f"every rank holds land ({has}): the case under test never happens")
+    assert any(has), f"no rank holds land ({has})"
+    assert d.run() == "COMPLETED"
+    assert np.isfinite(np.asarray(d.state.u.data)).all()
+    d.save_checkpoint(step=int(DAYS * 86400 / DT), day=float(DAYS))
+    comm.Barrier()
+    ckpt = os.path.join(out, f"checkpoint_day_{int(round(float(DAYS))):04d}.npz")
+    d2 = _build(True, mask, output_dir=out, **kw)
+    d2.load_checkpoint(ckpt)
+    n_owned = d._voronoi_layout.partition.n_owned_cells
+    assert _bitwise_equal(np.asarray(d2._land_ml_state.T_soil)[:n_owned],
+                          np.asarray(d._land_ml_state.T_soil)[:n_owned])
+
+
+def test_land_solves_owned_columns_only_and_the_halo_gets_the_owners(
+        monkeypatch):
+    """Each rank solves only its OWNED land columns, and the land halo
+    exchange then gives every halo row of the consumed land outputs the
+    owner's value.  Solving the halo copies too was discarded work (the
+    exchange overwrote them), about a third of the land solve at 8 nodes.
+    The halo check guards the exchange; it holds with or without the
+    owned-only solve, the column count is what tells the two apart."""
+    import legoesm.land.multilayer_land as ml
+    from legoesm.parallel.voronoi_mpi import gather_voronoi_field
+    comm = MPI.COMM_WORLD
+    if comm.Get_size() < 2:
+        pytest.skip("needs mpirun -n >= 2: one rank has no halo")
+    solved = set()
+    real = ml.step_multilayer_land_with_diagnostics
+
+    def spy(state, *a, **k):
+        # Recorded when the solve EXECUTES: an all-ocean rank only traces
+        # the step for its output shapes (jax.eval_shape) and never runs it.
+        n = int(state.T_soil.shape[0])
+        jax.debug.callback(lambda _: solved.add(n), state.T_soil[0, 0])
+        return real(state, *a, **k)
+
+    monkeypatch.setattr(ml, "step_multilayer_land_with_diagnostics", spy)
+    # Every land field the atmosphere consumes leaves the land block through
+    # this exchange (the 11-field land call: skin T, albedo, humidity, SH, LH,
+    # evaporation, soil beta, stress): at EVERY land call none may carry a
+    # NaN, and every halo row must hold its owner's value.
+    import legoesm.driver.model_driver as md
+    real_ex, n_ex = md._exchange_halo_cell_fields, []
+
+    def checked_ex(halo_ex, fields):
+        out = real_ex(halo_ex, fields)
+        if isinstance(fields, tuple) and len(fields) == 11:
+            n_ex.append(1)
+            p = d._voronoi_layout.partition
+            no, halo = int(p.n_owned_cells), np.asarray(
+                p.local_cells[p.n_owned_cells:p.n_local_cells])
+            for i, v in enumerate(out):
+                if v is None:
+                    continue
+                v = jnp.asarray(v, jnp.float64).reshape(-1)
+                assert bool(jnp.all(jnp.isfinite(v))), f"land field {i} has NaN"
+                g = np.asarray(gather_voronoi_field(v, p, "cell"))
+                np.testing.assert_array_equal(
+                    np.asarray(v)[no:], g[halo], err_msg=f"land field {i}")
+        return out
+
+    monkeypatch.setattr(md, "_exchange_halo_cell_fields", checked_ex)
+    d = _build(True, _land_mask_path(), turbulence="louis",
+               land_beta_soil=True, land_stress_from_land=True)
+    part = d._voronoi_layout.partition
+    n_owned = int(part.n_owned_cells)
+    n_local = int(part.n_local_cells)
+
+    # The halo rows of the land STATE are never solved.  Here (test only, so
+    # the production state stays NaN-free, #911) every land call hands them
+    # back as NaN, so any reader of a stale halo row poisons a consumed field
+    # and fails the checks below.
+    # (A rank whose owned cells hold no land returns its state unchanged
+    # without this scatter; no such rank exists on this mesh at 4 ranks.)
+    real_scatter, poisoned = ml.scatter_land_columns, []
+
+    def poisoning_scatter(full, packed, idx, ncol):
+        poisoned.append(1)
+        return jax.tree_util.tree_map(
+            lambda x: (x.at[n_owned:].set(jnp.nan)
+                       if (getattr(x, "ndim", 0) >= 1 and x.shape[0] == n_local
+                           and jnp.issubdtype(x.dtype, jnp.floating)) else x),
+            real_scatter(full, packed, idx, ncol))
+
+    monkeypatch.setattr(ml, "scatter_land_columns", poisoning_scatter)
+    land = np.asarray(d._f_land).reshape(-1) > 0.0
+    n_land_owned, n_land_local = int(land[:n_owned].sum()), int(land.sum())
+    assert any(comm.allgather(n_land_local > n_land_owned)), (
+        "no rank has a halo land column: the case under test never happens")
+    assert d.run() == "COMPLETED"
+    jax.effects_barrier()
+    assert n_ex, "the land exchange never ran"
+    assert np.isfinite(np.asarray(d.state.T.data)).all()
+    assert solved == ({n_land_owned} if n_land_owned else set()), (
+        f"rank {comm.Get_rank()} solved {sorted(solved)} land columns, "
+        f"owns {n_land_owned} (local, with halo: {n_land_local})")
+    # The hook ran: halo rows of the land state are NaN, owned rows are not.
+    assert all(comm.allgather(bool(poisoned) or n_land_owned == 0)), (
+        "a land-owning rank never took the poisoned scatter")
+    T_soil = np.asarray(d._land_ml_state.T_soil)
+    assert np.isfinite(T_soil[:n_owned]).all()
+    if poisoned:
+        assert np.isnan(T_soil[n_owned:]).all()
+    # Every held land output (the checkpointed set: skin T, albedo, solved
+    # humidity, SH, LH, evaporation, soil beta) and the land stress fields.
+    outs = {k: v for k, v in d._land_window.items()
+            if k.startswith("land_held_") and v is not None}
+    assert {"land_held_T_skin", "land_held_albedo",
+            "land_held_shflx"} <= set(outs), sorted(outs)
+    for name in ("_land_taumag", "_land_taumag_valid", "_land_taumag_fresh"):
+        outs[name] = getattr(d, name)
+        assert outs[name] is not None, f"{name} was never published"
+    for name, v in outs.items():
+        v = np.asarray(v).reshape(-1).astype(np.float64)
+        g = np.asarray(gather_voronoi_field(jnp.asarray(v), part, "cell"))
+        halo = np.asarray(part.local_cells[n_owned:part.n_local_cells])
+        np.testing.assert_array_equal(v[n_owned:], g[halo], err_msg=name)
 
 
 if __name__ == "__main__":

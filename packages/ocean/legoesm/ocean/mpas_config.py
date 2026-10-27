@@ -600,6 +600,13 @@ class MPASOceanConfig(NamedTuple):
     # saved configuration records WHICH mesh its coefficient belongs to and a
     # replay on another mesh is visible rather than a silent re-pin.
     K_zeta_bih_dx_m: float = 0.0
+    # Land-fill band capacity (performance only; results identical): None =
+    # the Neumann land fill sweeps every cell; an int K = it sweeps only the
+    # land cells within its reach of ocean, up to K per rank (more -> all
+    # cells).  make_sharded_mpas_ocean_step(land_mask=...) sets it on the
+    # local model from the run's mask; the SPMD bench receipt and the OMIP
+    # log record the value.
+    land_fill_band_capacity: int | None = None
 
 class MPASSimpleOceanConfig(NamedTuple):
     """Configuration for simplified ocean on Voronoi mesh.

@@ -189,7 +189,9 @@ def _gwd_column(ncol=8, nlev=20, seed=0):
 
     return dict(u=u, v=v, T=T, q_v=q_v, p_full=p_full, p_half=p_half,
                 z_full=z_full, z_half=z_half, rho=rho, lat=lat,
-                sigma_full=sigma_full, p_s=p_s)
+                sigma_full=sigma_full, p_s=p_s,
+                # E3SM pref_edge: the sigma interfaces at p_ref (as the lanes pass it)
+                p_ref_half=sigma_half * 1.0e5)
 
 
 def _gwd_args(col, **override):
@@ -218,7 +220,17 @@ def _gwd_leaf(scheme):
     from legoesm.atmosphere.physics.gravity_wave_drag.integration import get_gwd_fn
 
     _name, fn, cfg = get_gwd_fn(GravityWaveDragConfig(scheme=scheme))
+    if scheme == "mcfarlane":
+        # CAM6 gw_oro needs the reference interfaces (CAM pref_edge).
+        import functools
+        fn = functools.partial(fn, p_ref_half=_gwd_p_ref_half())
     return fn, cfg
+
+
+def _gwd_p_ref_half():
+    """The fixture's sigma interfaces at 1e5 Pa (CAM pref_edge)."""
+    col = _gwd_column()
+    return col["p_half"][0] / col["p_s"][0] * 1.0e5
 
 
 class TestGWDLeafGrad:
@@ -519,7 +531,7 @@ class TestGWDE3SMCAMGrad:
         )
 
         def loss(u):
-            out = e3sm_cam_gwd(*_gwd_args(col, u=u), 1800.0, cfg)
+            out = e3sm_cam_gwd(*_gwd_args(col, u=u), 1800.0, cfg, p_ref_half=col["p_ref_half"])
             return jnp.sum(out.du_dt ** 2)
 
         grad = jax.grad(loss)(col["u"])
@@ -543,7 +555,7 @@ class TestGWDE3SMCAMGrad:
         sgh = jnp.linspace(150.0, 600.0, ncol)
 
         def loss(h):
-            out = e3sm_cam_gwd(*_gwd_args(col), 1800.0, cfg, h_topo_col=h)
+            out = e3sm_cam_gwd(*_gwd_args(col), 1800.0, cfg, p_ref_half=col["p_ref_half"], h_topo_col=h)
             return jnp.sum(out.du_dt ** 2)
 
         grad = jax.grad(loss)(sgh)
@@ -569,7 +581,7 @@ class TestGWDE3SMCAMGrad:
         land_frac = jnp.linspace(0.2, 1.0, ncol)
 
         def loss(lf):
-            out = e3sm_cam_gwd(*_gwd_args(col), 1800.0, cfg,
+            out = e3sm_cam_gwd(*_gwd_args(col), 1800.0, cfg, p_ref_half=col["p_ref_half"],
                                land_frac_col=lf)
             return jnp.sum(out.du_dt ** 2)
 
@@ -615,7 +627,7 @@ class TestGWDE3SMCAMGrad:
         )
 
         def loss(f):
-            out = e3sm_cam_gwd(*_gwd_args(col), 1800.0, cfg, frontgf_col=f)
+            out = e3sm_cam_gwd(*_gwd_args(col), 1800.0, cfg, p_ref_half=col["p_ref_half"], frontgf_col=f)
             return jnp.sum(out.du_dt ** 2)
 
         grad = jax.grad(loss)(frontgf)
@@ -626,7 +638,7 @@ class TestGWDE3SMCAMGrad:
         )
         # Guard against a vacuous zero: the forward drag must be non-trivial,
         # otherwise "gradient is zero" would just mean "nothing happened".
-        out = e3sm_cam_gwd(*_gwd_args(col), 1800.0, cfg, frontgf_col=frontgf)
+        out = e3sm_cam_gwd(*_gwd_args(col), 1800.0, cfg, p_ref_half=col["p_ref_half"], frontgf_col=frontgf)
         assert float(jnp.max(jnp.abs(out.du_dt))) > 0.0, (
             "frontal source produced NO drag at all — the exactly-zero "
             "gradient above is vacuous, not a step-function finding."
@@ -648,7 +660,7 @@ class TestGWDE3SMCAMGrad:
         frontgf = jnp.full((ncol, nlev), 1e-9)
 
         def loss(u):
-            out = e3sm_cam_gwd(*_gwd_args(col, u=u), 1800.0, cfg,
+            out = e3sm_cam_gwd(*_gwd_args(col, u=u), 1800.0, cfg, p_ref_half=col["p_ref_half"],
                                frontgf_col=frontgf)
             return jnp.sum(out.du_dt ** 2)
 
@@ -679,7 +691,7 @@ class TestGWDE3SMCAMGrad:
         )
 
         def loss(q):
-            out = e3sm_cam_gwd(*_gwd_args(col), 1800.0, cfg, netdt_col=q)
+            out = e3sm_cam_gwd(*_gwd_args(col), 1800.0, cfg, p_ref_half=col["p_ref_half"], netdt_col=q)
             return jnp.sum(out.du_dt ** 2)
 
         grad = jax.grad(loss)(netdt)
@@ -688,7 +700,7 @@ class TestGWDE3SMCAMGrad:
 
 
 class TestGWDE3SMExcludedKnobsGrad:
-    """Review F4: nine E3SM knobs reach the drag only through an argmin level
+    """Review F4: nine E3SM knobs reach the drag only through a level-index
     choice or a hard on/off comparison.  MEASURED identically-zero gradient
     (with a non-trivial forward, so the zero is not vacuous), and the spec
     must therefore list each as ``excluded``, never as a tunable tier."""
@@ -735,14 +747,14 @@ class TestGWDE3SMExcludedKnobsGrad:
             return base._replace(**{sub: getattr(base, sub)._replace(**{field: p})})
 
         def loss(p):
-            out = e3sm_cam_gwd(*_gwd_args(col), 1800.0, cfg_at(p), **kw)
+            out = e3sm_cam_gwd(*_gwd_args(col), 1800.0, cfg_at(p), p_ref_half=col["p_ref_half"], **kw)
             return jnp.sum(out.du_dt ** 2) + jnp.sum(out.dT_dt ** 2)
 
         p0 = jnp.asarray(value, dtype=col["u"].dtype)
-        out = e3sm_cam_gwd(*_gwd_args(col), 1800.0, cfg_at(p0), **kw)
+        out = e3sm_cam_gwd(*_gwd_args(col), 1800.0, cfg_at(p0), p_ref_half=col["p_ref_half"], **kw)
         assert float(jnp.max(jnp.abs(out.du_dt))) > 0.0, "vacuous: no drag"
         assert_exactly_zero(jax.grad(loss)(p0), f"e3sm {field}",
-                            reason="argmin level index / hard threshold")
+                            reason="level index (reference-interface threshold) / hard threshold")
         spec = gcfg.__param_spec__[self._SPEC_CLASS[sub]]
         assert field in spec["excluded"] and field not in spec["params"]
 
@@ -823,7 +835,8 @@ class TestGWDCompositeGrad:
 
         def loss(u):
             out, _spec = fn(*_gwd_args(col, u=u), 300.0, cfg, None,
-                            h_topo_col=jnp.full((ncol,), 400.0))
+                            h_topo_col=jnp.full((ncol,), 400.0),
+                            mcfarlane_kwargs={"p_ref_half": _gwd_p_ref_half()})
             return jnp.sum(out.du_dt ** 2)
 
         grad = jax.grad(loss)(col["u"])
@@ -848,7 +861,8 @@ class TestGWDCompositeGrad:
 
         def loss(spectrum_in):
             out, spec_new = fn(*_gwd_args(col), 300.0, cfg, spectrum_in,
-                               h_topo_col=jnp.full((ncol,), 400.0))
+                               h_topo_col=jnp.full((ncol,), 400.0),
+                               mcfarlane_kwargs={"p_ref_half": _gwd_p_ref_half()})
             return jnp.sum(spec_new ** 2) + jnp.sum(out.du_dt ** 2)
 
         grad = jax.grad(loss)(spec)

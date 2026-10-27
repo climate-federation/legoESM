@@ -333,7 +333,7 @@ class TestXLAFlags:
                         f"`os.cpu_count()`."
                     )
 
-    def test_configure_tpu_multihost_does_not_crash_on_jax_0_9(self):
+    def test_configure_tpu_multihost_does_not_crash_on_jax_0_9(self, monkeypatch):
         """Iter-149/150 regression: the canonical TPU bootstrap must NOT
         call `jax.config.update("jax_spmd_mode", "allow_all")`.
 
@@ -358,10 +358,18 @@ class TestXLAFlags:
         # point.  It queries `jax.process_count()` internally to decide
         # whether to apply the multi-host branch; mock to force the
         # >1 branch.
-        with patch.object(jax, "process_count", return_value=2):
-            # Must NOT raise AttributeError("jax_spmd_mode") on JAX 0.9+
-            resolved = configure_backend("tpu")
-            assert resolved == "tpu"
+        # configure_backend('tpu') mutates process-global state (TPU-only
+        # XLA_FLAGS, bf16 default matmul precision); restore both so later
+        # tests on this worker don't inherit them.
+        monkeypatch.setenv("XLA_FLAGS", os.environ.get("XLA_FLAGS", ""))
+        old_precision = jax.config.jax_default_matmul_precision
+        try:
+            with patch.object(jax, "process_count", return_value=2):
+                # Must NOT raise AttributeError("jax_spmd_mode") on JAX 0.9+
+                resolved = configure_backend("tpu")
+                assert resolved == "tpu"
+        finally:
+            jax.config.update("jax_default_matmul_precision", old_precision)
 
         # Additional invariant: NEITHER source file may reference
         # `jax_spmd_mode` in an EXECUTABLE `jax.config.update(...)`

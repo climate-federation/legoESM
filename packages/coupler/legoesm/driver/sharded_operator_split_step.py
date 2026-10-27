@@ -60,7 +60,8 @@ from legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid import (
     CGridLatLonHydrostaticState, cgrid_to_hydrostatic, face_to_cell_winds)
 from legoesm.driver.compiled_segments import (
     SegmentCarry, SegmentForcing, GRID_SHAPED_FORCING_FIELDS, carry_moist,
-    fix_segment_dry_mass, split_physics_single_rank, finalize_split_step,
+    fix_segment_dry_mass, mass_fixer_energy_dT, split_physics_single_rank,
+    finalize_split_step,
     ghg_array_to_dict)
 
 
@@ -431,11 +432,18 @@ def make_sharded_operator_split_step(
         # DRY integral, moisture re-weighted so the correction is dry air
         # (F13; same shared fixer as the compiled segment) ---
         if fix_mass:
+            _p_s_pre_mf = p_s_new
             p_s_new, _fxm = fix_segment_dry_mass(
                 p_s_new, carry_moist(carry),
                 carry.target_mass, band_geom, statics.dsigma)
             carry = carry._replace(
                 **{_nm: v for _nm, v in _fxm.items() if v is not None})
+            # outside the dycore energy window: return its energy as heat
+            _dT_mf = mass_fixer_energy_dT(
+                model, T_new, u_cc, v_cc, carry.phis, _p_s_pre_mf, p_s_new,
+                band_geom)
+            if _dT_mf is not None:
+                T_new = T_new + _dT_mf.astype(T_new.dtype)
 
         # --- Physics (column-local) + shared finalize tail ---
         need_rad, doy, sod = _need_rad_and_time(

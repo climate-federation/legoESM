@@ -79,9 +79,13 @@ mpas_vert_advection_scheme: sb       # conservative Simmons-Burridge flux form
                                      # 6.7e-16 conservative.  USER-APPROVED
                                      # 2026-09-23; the CODE default stays
                                      # 'upwind' and this deck selects it.
-mpas_vert4_flux_form_tracers: [q_v]  # vertical del4 filter on vapour in mass-conserving flux form
-                                     # (the projected form dried the stratosphere to ~1 ppmv;
-                                     # 60-day A/B 2026-10-08: 0.64 -> 4.05 ppmv, UTLS T -2.3 K)
+mpas_vert4_flux_form_tracers: []     # vapour takes the log form below instead
+mpas_vert4_log_form_tracers: [q_v]   # vertical del4 filter on ln(q_v + 1e-7), water-weighted
+                                     # mass-conserving flux.  The flux form [q_v] removed 8-10 %/day
+                                     # of UTLS water offline; one 60-day pair vs it (2026-10-14,
+                                     # PLAUSIBLE): Feb ClimateEval median RMSE ratio 0.97, 200 hPa
+                                     # T RMSE -26..-32 %.  USER-APPROVED 2026-10-15; the CODE
+                                     # default moved to this too (same day).
 mpas_div_damp4_scale: 1.0            # CAM6: fv_div24del2flag=4 selects ldiv4,
                                      # 4th-order DIVERGENCE damping at every
                                      # level (cd_core.F90 tau4 = 0.01/dt times
@@ -107,7 +111,10 @@ energy_fixer: true                   # CAM6 check_energy_fix analogue (review
                                      # 2026-10-10 F15, by vote): the energy each
                                      # dynamics step loses (sponge/del4/div4 KE,
                                      # numerics) returns as a uniform heating
-                                     # before physics.  Named, not inherited
+                                     # before physics, and the energy the dry-
+                                     # mass fixer moves (outside that window)
+                                     # returns too (2026-10-14 F15 V8: 0.065
+                                     # W/m2 at res6).  Named, not inherited
                                      # (the code default is also true).
 
 # ---- physics cadence ---------------------------------------------------------
@@ -137,6 +144,13 @@ cloud_cam6_rhmaxi: 1.0      # cldfrc2m_rhmini/rhmaxi/rhminis/rhmaxis under
 cloud_cam6_rhminis: 1.0     # clubb_sgs (namelist_defaults_cam.xml:1521-1533);
 cloud_cam6_rhmaxis: 1.0     # = the code defaults, now recorded (user 2026-09-30)
 microphysics: morrison      # mg flavour (MG2 port = run 2)
+morrison_flavor: mg         # NAMED, equals the code default.  Resolves the
+                            # MG rows (resolve_morrison_flavor), incl. since
+                            # 2026-10-19 (oracle audit, user decision) CAM6
+                            # MG2 rain: slope bounds 1/[500, 20] um (was
+                            # 1/[2800, 20] um) and Beheng self-collection
+                            # -8*nric*qric*rho on in-precip rain (was SAM
+                            # SB2001 with breakup).
 morrison_do_graupel: true   # NAMED, equals the code default: this deck's
                             # measured behaviour.  CAM6's MG2 has NO graupel
                             # (eight constituents, micro_mg_cam.F90:139); our
@@ -145,11 +159,14 @@ morrison_do_graupel: true   # NAMED, equals the code default: this deck's
                             # The graupel-off arm is this deck plus
                             # --no-morrison-do-graupel; this value stays
                             # until the user decides (2026-09-24).
-morrison_warm_rain_scheme: kk2000  # NAMED, equals the code default (was an
-                                   # unrecorded default).  NOTE: CAM6 MG2's
-                                   # kk2000 is 0.01*1350*qc^2.47*Nc^-1.1
-                                   # (micro_mg_utils.F90); this port is
-                                   # 1350*qc^2.47*Nc^-1.79 (SAM/E3SM form).
+morrison_warm_rain_scheme: kk2000_cam6  # CAM6 MG2 law (user decision
+                                   # 2026-10-19, oracle audit; was kk2000, the
+                                   # SAM/E3SM 1350*qc^2.47*Nc^-1.79 form, 0.003-
+                                   # 13x MG2): 13.5*var_coef(relvar,2.47)*
+                                   # qc^2.47*Nc^-1.1 (micro_mg_utils.F90), with
+                                   # per-cell relvar = rcm^2/min(1, rcp2) from
+                                   # CLUBB (clubb_intr.F90:2416-2425).  Code
+                                   # default stays kk2000.
 morrison_autocon_fact: 1.0         # kk2000 autoconversion multiplier (1 = unscaled)
 morrison_accre_enhan_fact: 1.0     # kk2000 accretion multiplier (MG2 accre_enhan)
 morrison_warm_rain_incloud: true   # CAM6 MG2 in-cloud warm rain (user decision
@@ -160,11 +177,28 @@ morrison_warm_rain_incloud: true   # CAM6 MG2 in-cloud warm rain (user decision
                                    # 1810), times lcldm (micro_mg2_0.F90:878,
                                    # :1224-1322).  Grid-mean arm:
                                    # --no-morrison-warm-rain-incloud.
+                                   # Since 2026-10-19 (oracle audit, user
+                                   # decision) it is the whole CAM6 MG2 rain
+                                   # mode: in_cloud precip_frac, rain
+                                   # evaporation only in the precipitating
+                                   # clear air, rain sedimenting the post-
+                                   # source state, two-sided number re-adjust.
+                                   # Since 2026-10-19 also CAM6 MG2 TWO-MOMENT
+                                   # SNOW (user decision): the run carries the
+                                   # snow number N_s (tracer slot [9]); MG2
+                                   # riming, Bergeron onto snow, sublimation,
+                                   # self-aggregation, melt above +2 C, fall
+                                   # speeds, snow sedimenting the post-source
+                                   # state.
+morrison_ice_snow_d_auto: 500.0e-6 # CAM6 MG2 micro_mg_dcs = 500 um ice->snow
+                                   # size (namelist_defaults_cam.xml:1244;
+                                   # user decision 2026-10-19, was 250 um).
 morrison_sed_cfl_substeps: true  # MG2 micro_mg2_0.F90 sedimentation loop:
                                  # nstep = 1 + int(max V dt/dz) per column,
                                  # so precipitation crosses >1 layer per 600 s.
-                                 # DEPARTURE: Morrison sediments the PRE-source
-                                 # pools (MG2 sediments post-source, :2204).
+                                 # Rain and snow sediment the POST-source state
+                                 # as MG2 (:2204, via warm_rain_incloud); ice/
+                                 # graupel still sediment PRE-source pools.
 morrison_sed_cfl_substeps_strict: false # the abort path is an equinox error_if,
                                         # i.e. a host callback, and the GPU lane
                                         # runs JAX_PLATFORMS=cuda with no CPU
@@ -220,7 +254,13 @@ hard_sat_ice_curve: false          # the ice-curve blend of that same
                                    # is off, set explicitly so no row rests
                                    # on a default.  User table row 3.
 homogeneous_ice_nucleation: true
-aerosol_ccn: true
+aerosol_ccn: false                 # off with the prognostic droplet number (user
+                                   # decision 2026-10-24): CAM6 MG2 cannot run both.
+morrison_prognostic_droplet_number: true  # CAM6 MG2 prognostic droplet number,
+                                   # activation = CAM6 microp_aero_run on the
+                                   # prescribed PPE-000 MAM4 climatology (user
+                                   # decision 2026-10-24).
+cam6_aerosol_dir: /work/bb1596/b309178/diffESM/legoesm_ap/data/cam6_optics
 energy_consistent_moisture_clip: true
 
 # ---- convection ---------------------------------------------------------------
@@ -234,7 +274,6 @@ convection: zhang_mcfarlane # CAM6: faithful zm_conv port (f09 mg2+clubb namelis
                             # and reaches the MPAS winds (mpas_cmt resolves True;
                             # the Sundqvist/L36 deck's Bechtold runs CMT
                             # off, lane default)
-convective_precip_efficiency: 0.8
 convective_rain_to_surface: true
 convective_cloud: false     # refused by cam6_clubb (deepcu is CAM6's version)
 # ZM tunables written explicitly (values = the scheme defaults = the CAM6 f09
@@ -245,6 +284,7 @@ zm_ke: 5.0e-6               # rain evaporation efficiency
 zm_dmpdz: -1.0e-3           # dilute-plume entrainment [1/m]
 zm_tau: 3600.0              # CAPE consumption timescale [s]
 zm_capelmt: 70.0            # deep-convection CAPE threshold [J/kg]
+zm_transport_cloud_tracers: true  # ZM convtran of carried cloud/precip water + numbers (CAM6)
 
 # ---- turbulence ---------------------------------------------------------------
 turbulence: clubb
@@ -252,7 +292,9 @@ clubb_prognostic: true
 clubb_liquid_partition: true       # CAM6 clubb_intr: the closure's diagnosed
                                    # cloud liquid is handed to the host as a
                                    # tendency, and the Morrison saturation
-                                   # adjustment stops condensing (MG2
+                                   # adjustment is switched off, both
+                                   # condensation and (since 2026-10-19, user
+                                   # decision) cloud-water evaporation (MG2
                                    # allow_sed_supersat = .false. under CLUBB,
                                    # micro_mg_cam.F90:668-672).  One flag,
                                    # both halves.  User table row 1.
@@ -262,9 +304,16 @@ clubb_liquid_partition: true       # CAM6 clubb_intr: the closure's diagnosed
 # are pinned to 0 here.  Not in the user's three-row table: REQUIRED BY ROW 1.
 cloud_q_c_diagnostic: 0.0
 conv_cloud_condensate: 0.0
-clubb_trop_cloud_top_press: 15000.0
+# CLUBB upper domain limit = CAM6's trop_cloud_top_press 1.D2 (100 Pa;
+# cam_cesm2_1_rel_60 namelist_defaults_cam.xml:1295).  User decision
+# 2026-10-20 ("use cam6 rule"), was 15000 Pa.  Offline 1/3-day A/B on a
+# day-105 production checkpoint: stable, sparse stratospheric CLUBB cloud
+# (scripts/validate/oracle/clubb_glue/top_press_scm_ab.py).
+clubb_trop_cloud_top_press: 100.0
 # CLUBB tunables written explicitly (values = the port's CLUBBParams defaults,
-# the CAM6 clubb namelist).  clubb_c_K10h has no consumer in this port.
+# the CAM6 clubb namelist).  clubb_c_K10h (0.3) is read by the eddy-scalar
+# rtm/thlm diffusion (CAM l_do_expldiff_rtm_thlm) but has no deck key, so the
+# CLUBBParams default applies.
 clubb_c14: 2.2
 clubb_c8: 4.2
 clubb_c11: 0.7
@@ -281,10 +330,21 @@ clubb_c_k10: 0.5
 # So no non-orographic member here (the Sundqvist/L36 deck carries the
 # e3sm_cam
 # background source; that row is dropped on purpose).
-gravity_wave_drag: mcfarlane            # orographic member: McFarlane (decision
-                                        # pending: CAM6 gw_oro port via e3sm_cam
-                                        # 'orographic', effgw_oro 0.125,
-                                        # gw_polar_taper true on fv, lndscl_sgh)
+gravity_wave_drag: mcfarlane            # orographic member = CAM6 gw_oro port
+                                        # (cam_cesm2_1_rel_60, oracle-matched;
+                                        # user decision 2026-10-19): effgw_oro
+                                        # 0.125 x landfrac, sgh/sqrt(landfrac),
+                                        # interface N with n2min 5e-5, no launch
+                                        # clip, tndmax 400 m/s/day, limiter
+                                        # remainder carried down, gw eddy
+                                        # diffusion of dse + tracers.  These are
+                                        # the McFarlaneConfig code defaults (no
+                                        # deck rows exist for them, except
+                                        # effgw_oro below); the fv3duo deck
+                                        # inherits this row.
+mcfarlane_effgw_oro: 0.125              # CAM6 effgw_oro (namelist_defaults_cam
+                                        # non-WACCM L32); explicit so the run
+                                        # records it (#1712).
 hines_launch_p: 70000.0                 # inert (hines not selected); kept equal
                                         # to the Sundqvist/L36 deck.  The e3sm_cam_*
                                         # rows
@@ -295,13 +355,20 @@ hines_launch_p: 70000.0                 # inert (hines not selected); kept equal
 
 # ---- surface ------------------------------------------------------------------
 surface_bulk_scheme: large_yeager_cesm  # CAM6/CESM shr_flux_atmOcn (LY04)
-surface_gustiness_zi: 300.0
+# (surface_gustiness_zi: 300 removed, user 2026-10-19: inert on this scheme --
+# CESM2.1 runs gust_fac = 0, and the large_yeager_cesm law never reads it.)
 surface_tiled: false
 surface_z0_land: 0.1
 mpas_land_lapse_K_per_km: 6.5
 mpas_land_beta: 0.6
 mpas_ice_skin_prognostic: true
 albedo_ice: 0.80
+# Melt-dependent sea-ice albedo on the prognostic skin (#2106, user decision
+# 2026-10-24 after the July 1979 A/B: Arctic clear-sky reflected SW -19.2
+# W/m2).  Named explicitly although "auto" resolves to it here.
+sea_ice_albedo_scheme: maykut_untersteiner
+sea_ice_melt_ramp_width_K: 1.0
+ice_skin_melt_cap_width_K: 0.01
 dynamic_albedo: true
 snow_albedo_feedback: true
 land_snow_tau_days: 150.0
@@ -330,6 +397,9 @@ land_soil_ice_impedance_exponent: 6.0
 land_soil_vg_air_entry_m: -0.02
 land_soil_richards_se_switch: 0.01
 land_soil_richards_c_switch_per_m: 1.0e-5
+# One-layer snow thermal node OFF (record only; A/B switch added 2026-10-03,
+# user decision: off until the Sep-Dec arm verdict).
+land_snow_insulation: false
 land_soil_moisture_init_frac: 0.25
 land_stomatal_beta: false
 land_calibrated_physics: true
@@ -351,6 +421,10 @@ mpas_land_beta_soil: true
 # the ocean bulk law (user 2026-10-03: "a major default"; Dec 2001 45-70N land:
 # the boundary layer received 0.04 Pa vs land model 0.23 vs ERA5 0.26).
 mpas_land_stress_from_land: true
+# Coastal cells: the non-land fraction's bulk fluxes on the ocean/ice surface,
+# not on the land-blended T_sfc/q_sfc (#1320; CESM computes atm-ocn fluxes on
+# ocean points only).  User 2026-10-19.
+ocean_flux_on_ocean_surface: true
 mpas_land_params_refresh: true  # seasonal LAI / canopy height / wet-soil
                                 # albedo rebuilt every land step, as the
                                 # offline calibration runs the tables (user
@@ -384,6 +458,11 @@ solar_spectral_band_order: rrtmg_sw   # explicit: SSI_frac is in RRTMG-SW band o
 ozone_forcing: external
 ghg_forcing: external
 aerosol_forcing: external
+aerosol_reference_aod: 0.03  # 550 nm background AOD of the built-in reference
+                             # aerosol field, read only when no aerosol file is
+                             # given (the production launchers give one). Written
+                             # out so it rests on no default (user decision
+                             # 2026-10-15); equals the run_amip default.
 # A date outside a multi-year forcing file's years raises (explicit: the
 # end-record hold is an opt-in for deliberate experiments only; F37).
 forcing_hold_outside_file_years: false

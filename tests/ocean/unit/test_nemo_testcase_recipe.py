@@ -1,5 +1,6 @@
 from types import SimpleNamespace
 
+import math
 import jax.numpy as jnp
 import legoesm.ocean.fidelity.nemo_testcase_recipe as testcase_recipe
 import numpy as np
@@ -12,19 +13,24 @@ from legoesm.ocean.fidelity.nemo_recipe import (
     nemo_gyre_seasonal_cosines,
 )
 from legoesm.ocean.fidelity.nemo_testcase_recipe import (
+    GYRE_R4_NAMELIST,
+    GYRE_R4_SMAG_NAMELIST,
+    GYRE_SHIPPED_NAMELIST,
     _orca2_depth_ladder,
     _orca2_masks,
     build_gyre_zco_card,
     build_lock_exchange_zco_card,
     build_nemo_testcase_card,
     build_overflow_zps_card,
+    gyre_surface_forcings,
     gyre_horizontal_coordinates,
     gyre_surface_boundary_condition,
     gyre_vertical_ladder,
+    validate_gyre_namelist,
     validate_nemo_testcase_card,
     validate_nemo_testcase_card_for_execution,
 )
-from legoesm.ocean.vertical import nemo_fe3mask_from_tmask
+from legoesm.ocean.vertical import compute_ocean_jacobian, nemo_fe3mask_from_tmask
 
 
 @pytest.fixture(autouse=True)
@@ -78,6 +84,7 @@ def test_orca2_structural_guard_rejects_iceberg_option_drift():
                 barotropic=good.recipe.model_config.barotropic._replace(
                     barotropic_coriolis="een_metric",
                     n_barotropic_substeps=65,
+                    nemo_barotropic_filter_alpha=0.09,
                 ),
                 physics=good.recipe.model_config.physics._replace(
                     vertical_mixing=(good.recipe.model_config.physics
@@ -322,11 +329,23 @@ def test_testcase_cards_select_their_resolved_barotropic_filters():
     assert lock_baro.barotropic_time_filter == "nemo_ab3am4"
     assert overflow_baro.barotropic_time_filter == "nemo_boxcar1_ab3"
     assert gyre_baro.barotropic_time_filter == "nemo_ab3am4"
+    assert lock_baro.nemo_barotropic_filter_alpha == 0.07
+    assert overflow_baro.nemo_barotropic_filter_alpha == 0.0
+    assert gyre_baro.nemo_barotropic_filter_alpha == 0.07
     # Resolved ln_bt_auto counts, independently printed by the pinned NEMO
     # runs: LOCK ocean.output:763 and OVERFLOW ocean.output:879.
     assert lock_baro.n_barotropic_substeps == 1
     assert overflow_baro.n_barotropic_substeps == 3
     assert gyre_baro.n_barotropic_substeps == 50
+
+    missing = build_gyre_zco_card()
+    missing = missing._replace(
+        recipe=missing.recipe._replace(
+            model_config=missing.recipe.model_config._replace(
+                barotropic=missing.recipe.model_config.barotropic._replace(
+                    nemo_barotropic_filter_alpha=None))))
+    with pytest.raises(ValueError, match="must state its deck's rn_bt_alpha"):
+        validate_nemo_testcase_card(missing)
 
 
 def test_gyre_card_pins_rotated_grid_mi96_ic_and_seasonal_sbc():
@@ -423,6 +442,236 @@ def test_gyre_card_pins_rotated_grid_mi96_ic_and_seasonal_sbc():
     assert float(np.sum(final_emp[wet])) == pytest.approx(0.0, abs=1.0e-17)
     assert card.recipe.model_config.barotropic_coriolis_split == "live"
     assert card.recipe.model_config.barotropic.barotropic_coriolis == "ene_metric"
+
+
+def test_gyre_r4_card_resolves_grid_clock_and_mixing_from_namelist():
+    set_policy(PrecisionPolicy.fp64())
+    card = build_nemo_testcase_card("GYRE-zco", namelist=GYRE_R4_NAMELIST)
+    cfg = card.recipe.model_config
+
+    assert card.resolved_namelist == GYRE_R4_NAMELIST
+    assert (card.recipe.grid.n_lat, card.recipe.grid.n_lon) == (82, 122)
+    assert card.dt_s == 3600.0
+    assert card.n_steps == 26280
+    assert cfg.barotropic.n_barotropic_substeps == 50
+    assert cfg.lateral_viscosity.A_h == 25000.0
+    assert cfg.gm_redi.kappa_Redi == 250.0
+    assert cfg.physics.shortwave_penetration.nemo_time_step_s == 3600.0
+    np.testing.assert_array_equal(
+        np.asarray(card.recipe.grid.dx_T), np.full((82, 122), 26500.0))
+    sbc = gyre_surface_boundary_condition(card, card.dt_s)
+    assert sbc.qsr_w_m2.shape == (82, 122)
+
+
+def test_gyre_nemo_qsr_pipeline_uses_live_kbb_stretch():
+    """The shared Kbb deposit must be the field stage 3 later subtracts."""
+    from legoesm.ocean.physics.shortwave_penetration import (
+        shortwave_penetration_tendency,
+    )
+
+    set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
+    card = build_nemo_testcase_card("GYRE-zco")
+    state = card.recipe.initial_state
+    wet = jnp.asarray(card.recipe.land_mask) > 0.5
+    state = state._replace(
+        eta=state.eta.replace(
+            data=jnp.where(wet, jnp.asarray(0.25, dtype=jnp.float64), 0.0)))
+    _, surface = gyre_surface_forcings(card, state, 2)
+    model = LatLonCGridOceanModel(
+        card.recipe.grid, card.recipe.z_coord, card.recipe.model_config)
+    cc_state = state._replace(
+        u=state.u.replace(
+            data=0.5 * (state.u.data[:, :-1] + state.u.data[:, 1:])),
+        v=state.v.replace(
+            data=0.5 * (state.v.data[:-1] + state.v.data[1:])),
+    )
+    actual = model._physics_fn(
+        cc_state, card.recipe.grid, card.recipe.z_coord, surface).dT_dt.data
+    zero = model._physics_fn(
+        cc_state, card.recipe.grid, card.recipe.z_coord,
+        surface._replace(sw_down=jnp.zeros_like(surface.sw_down)),
+    ).dT_dt.data
+    actual_qsr = actual - zero
+    stretch = compute_ocean_jacobian(
+        state.eta.data, state.H_bathy.data, card.recipe.z_coord)
+    expected = shortwave_penetration_tendency(
+        surface.sw_down,
+        card.recipe.z_coord.dz_ref,
+        card.recipe.z_coord.z_half_ref,
+        stretch,
+        card.recipe.model_config.physics.shortwave_penetration,
+        rho_0=card.recipe.model_config.rho_0,
+        c_sw=card.recipe.model_config.physics.constants.c_sw,
+        z_half_stretch=stretch,
+    )
+    static = shortwave_penetration_tendency(
+        surface.sw_down,
+        card.recipe.z_coord.dz_ref,
+        card.recipe.z_coord.z_half_ref,
+        stretch,
+        card.recipe.model_config.physics.shortwave_penetration,
+        rho_0=card.recipe.model_config.rho_0,
+        c_sw=card.recipe.model_config.physics.constants.c_sw,
+    )
+    active = np.asarray(card.recipe.z_coord.is_active, dtype=bool)
+    np.testing.assert_array_equal(
+        np.asarray(actual_qsr)[active], np.asarray(expected)[active])
+    assert not np.array_equal(
+        np.asarray(expected)[active], np.asarray(static)[active])
+
+
+def test_nemo_qsr_2bd_refuses_integrators_without_stage3_kmm_call():
+    from legoesm.ocean.fidelity.nemo_recipe import build_nemo_gyre_recipe
+    from legoesm.ocean.physics.shortwave_penetration import (
+        ShortwavePenetrationConfig,
+    )
+
+    recipe = build_nemo_gyre_recipe()
+    qsr = ShortwavePenetrationConfig(
+        scheme="nemo_qsr_2bd", water_type="I", nemo_time_step_s=14400.0)
+
+    def with_qsr(cfg):
+        return cfg._replace(
+            physics=cfg.physics._replace(shortwave_penetration=qsr))
+
+    rk3 = recipe.model_config._replace(
+        momentum_time_integrator="rk3", tracer_time_integrator="rk3")
+    # Each half of the refused pair remains legal on its own.
+    LatLonCGridOceanModel(recipe.grid, recipe.z_coord, rk3)
+    LatLonCGridOceanModel(
+        recipe.grid, recipe.z_coord, with_qsr(recipe.model_config))
+    with pytest.raises(ValueError, match="nemo_qsr_2bd"):
+        LatLonCGridOceanModel(recipe.grid, recipe.z_coord, with_qsr(rk3))
+
+
+def test_stage3_two_band_solar_uses_source_literal_kmm_stretch():
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        _NEMOWSRK3TestHooks,
+    )
+    from legoesm.ocean.physics.shortwave_penetration import (
+        shortwave_penetration_tendency,
+    )
+    from legoesm.ocean.eos import nemo_r3t_rk3_stage2_stretch
+
+    set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
+    card = build_nemo_testcase_card("GYRE-zco")
+    wet = jnp.asarray(card.recipe.land_mask) > 0.5
+    state = card.recipe.initial_state._replace(
+        eta=card.recipe.initial_state.eta.replace(
+            data=jnp.where(wet, jnp.asarray(0.25, dtype=jnp.float64), 0.0)))
+    freshwater, surface = gyre_surface_forcings(card, state, 2)
+    trace = LatLonCGridOceanModel(
+        card.recipe.grid,
+        card.recipe.z_coord,
+        card.recipe.model_config,
+        _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(tracer_process_trace=()),
+    ).step(state, card.dt_s, freshwater=freshwater, surface_forcing=surface)
+    stretch = jnp.where(
+        wet,
+        nemo_r3t_rk3_stage2_stretch(
+            card.recipe.z_coord,
+            state.eta.data,
+            trace.state_after.eta.data,
+            state.H_bathy.data,
+        ),
+        0.0,
+    )
+    cfg = card.recipe.model_config
+    expected = shortwave_penetration_tendency(
+        surface.sw_down,
+        card.recipe.z_coord.dz_ref,
+        card.recipe.z_coord.z_half_ref,
+        stretch,
+        cfg.physics.shortwave_penetration,
+        rho_0=cfg.rho_0,
+        c_sw=cfg.physics.constants.c_sw,
+        z_half_stretch=stretch,
+    )
+    active = np.asarray(card.recipe.z_coord.is_active, dtype=bool)
+    np.testing.assert_array_equal(
+        np.asarray(trace.qsr_association.qsr_kmm)[active],
+        np.asarray(expected)[active],
+    )
+    old_stretch = (
+        np.asarray(trace.qsr_association.thickness_kmm)[..., 0]
+        / np.asarray(card.recipe.z_coord.dz_ref)[..., 0]
+    )
+    assert not np.array_equal(
+        np.asarray(stretch)[np.asarray(wet)],
+        old_stretch[np.asarray(wet)],
+    )
+
+
+def test_gyre_five_year_clock_matches_nemo_completed_year_arithmetic():
+    """Compiled usrdef_sbc.f90:92,105-106 over the operator's full run."""
+    set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
+    steps = np.arange(1, 43_801, dtype=np.float64)
+    clocks = steps * np.float64(3600.0)
+    got1, got2 = nemo_gyre_seasonal_cosines(jnp.asarray(clocks))
+
+    expected1 = np.empty(steps.size, dtype=np.float64)
+    expected2 = np.empty(steps.size, dtype=np.float64)
+    unbounded1 = np.empty(steps.size, dtype=np.float64)
+    rpi = np.float64(np.pi)
+    ztimemax1 = np.float64((5.0 * 30.0 + 21.0) * 24.0)
+    ztimemin1 = np.float64(ztimemax1 + 24.0 * 360.0 / 2.0)
+    ztimemax2 = np.float64((6.0 * 30.0 + 21.0) * 24.0)
+    ztimemin2 = np.float64(ztimemax2 - 24.0 * 360.0 / 2.0)
+    for index, kt_float in enumerate(steps):
+        kt = int(kt_float)
+        nyear = 1 + (kt - 1) // (24 * 360)
+        unbounded = np.float64(kt_float * 3600.0) / np.float64(60.0 * 60.0)
+        ztime = unbounded - np.float64(nyear - 1) * np.float64(24.0) * np.float64(360.0)
+        arg1 = np.float64(
+            np.float64((ztime - ztimemax1) / (ztimemin1 - ztimemax1)) * rpi)
+        arg2 = np.float64(
+            np.float64((ztime - ztimemax2) / (ztimemax2 - ztimemin2)) * rpi)
+        old_arg1 = np.float64(
+            np.float64((unbounded - ztimemax1) / (ztimemin1 - ztimemax1)) * rpi)
+        expected1[index] = math.cos(float(arg1))
+        expected2[index] = math.cos(float(arg2))
+        unbounded1[index] = math.cos(float(old_arg1))
+
+    np.testing.assert_array_equal(np.asarray(got1), expected1)
+    np.testing.assert_array_equal(np.asarray(got2), expected2)
+    # Non-vacuity: the superseded unbounded clock differs after year one.
+    assert np.count_nonzero(unbounded1.view(np.uint64) != expected1.view(np.uint64)) > 30_000
+
+
+def test_gyre_r4_smag_card_resolves_exact_mode32_operator_block():
+    set_policy(PrecisionPolicy.fp64())
+    card = build_nemo_testcase_card(
+        "GYRE-zco", namelist=GYRE_R4_SMAG_NAMELIST)
+    cfg = card.recipe.model_config
+    lv = cfg.lateral_viscosity
+    assert card.resolved_namelist == GYRE_R4_SMAG_NAMELIST
+    assert cfg.lateral_viscosity_operator == "nemo_div_curl"
+    assert cfg.lateral_viscosity_e3_weighting == "nemo_e3"
+    assert cfg.lateral_viscosity_coefficient_source == "nemo_smag_blp"
+    assert (lv.A_h, lv.B_h, lv.C_smag, lv.C_smag_lap, lv.C_leith) == (
+        0.0, 0.0, 3.5, 0.0, 0.0)
+    assert GYRE_R4_SMAG_NAMELIST.rn_Uv_m_s is None
+    assert GYRE_R4_SMAG_NAMELIST.rn_Lv_m is None
+
+
+def test_gyre_r4_smag_dispatch_rejects_unimplemented_hybrids():
+    with pytest.raises(ValueError, match="implemented decks"):
+        validate_gyre_namelist(
+            GYRE_R4_SMAG_NAMELIST._replace(ln_dynldf_lap=True))
+    with pytest.raises(ValueError, match="requires rn_Uv/rn_Lv absent"):
+        validate_gyre_namelist(
+            GYRE_R4_SMAG_NAMELIST._replace(rn_Lv_m=25_000.0))
+    with pytest.raises(ValueError, match="implements exactly"):
+        validate_gyre_namelist(
+            GYRE_R4_SMAG_NAMELIST._replace(rn_csmc=3.4))
+
+
+def test_gyre_parameterised_dispatch_fails_closed_on_unsupported_values():
+    with pytest.raises(ValueError, match="unsupported GYRE namelist value"):
+        validate_gyre_namelist(GYRE_SHIPPED_NAMELIST._replace(nn_fct_h=4))
+    with pytest.raises(ValueError, match="does not accept a GYRE namelist"):
+        build_nemo_testcase_card(
+            "LOCK_EXCHANGE-zco", namelist=GYRE_SHIPPED_NAMELIST)
 
 
 @pytest.mark.parametrize(
@@ -643,3 +892,22 @@ def test_nemo_tpoint_requires_explicit_t_depth_on_stretched_grid():
         pinned, depth, bottom_index_rule="nemo_tpoint"
     )
     assert int(nemo.bottom_level[0, 0]) == 0
+
+
+def test_orca2_evd_mixes_tracers_only_while_gyre_mixes_momentum_too():
+    """ORCA2 nn_evdm = 0 vs GYRE nn_evdm = 1 (zdfevd.f90:121-135)."""
+    kwargs = dict(
+        barotropic_time_filter="nemo_ab3am4", nemo_barotropic_filter_alpha=0.09,
+        n_barotropic_substeps=65, bbl_adv_option=0, bbl_gamma_s=0.0,
+        bbl_diffusive_option=1, bbl_aht_m2_s=1000.0,
+        tke_langmuir_evaluation="vectorized",
+    )
+    orca2 = testcase_recipe._model_config(
+        whole_step_identity="orca2_vector_een_c2", **kwargs)
+    gyre = testcase_recipe._model_config(
+        whole_step_identity="gyre_vector_ene_c2", **kwargs)
+    orca2_evd = orca2.physics.convection.enhanced_diffusion
+    gyre_evd = gyre.physics.convection.enhanced_diffusion
+    assert (orca2_evd.K_conv, orca2_evd.nu_conv) == (100.0, 0.0)
+    assert (gyre_evd.K_conv, gyre_evd.nu_conv) == (100.0, 100.0)
+    assert orca2_evd._replace(nu_conv=100.0, n2_eos_form="teos10") == gyre_evd

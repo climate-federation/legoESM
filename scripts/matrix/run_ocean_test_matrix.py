@@ -6041,6 +6041,17 @@ def _init_inertia_gravity_wave(state, grid_type, grid, z_coord):
         f"edge IC rather than a silent fall-through to the cube branch.")
 
 
+def igw_channel_model_config():
+    """The IGW channel dycore: model defaults + implicit_cn barotropic solver
+    (see the comment in run_inertia_gravity_wave_channel). Tagged
+    ``default_wright_implicit_cn_v1``; fingerprinted in test_recipe_map."""
+    from legoesm.ocean.state import LatLonCGridOceanConfig
+    config = LatLonCGridOceanConfig()
+    return config._replace(
+        barotropic=config.barotropic._replace(
+            barotropic_solver="implicit_cn"))
+
+
 def run_inertia_gravity_wave_channel(tc: TestCase, output_dir: Path,
                                      days: float) -> tuple[str, float, str]:
     """Bishnu et al. (2024) inertia-gravity wave, as actually specified.
@@ -6056,7 +6067,6 @@ def run_inertia_gravity_wave_channel(tc: TestCase, output_dir: Path,
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
         LatLonCGridOceanModel)
     from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean
-    from legoesm.ocean.state import LatLonCGridOceanConfig
     from legoesm.ocean.vertical import create_ocean_z_star
 
     t_wall = _time.time()
@@ -6080,10 +6090,7 @@ def run_inertia_gravity_wave_channel(tc: TestCase, output_dir: Path,
     # lat-lon grid, at 20 and 40 points per wavelength, with no damping.
     # A case that verifies wave SPEED cannot run on a solver that gets it
     # wrong by 2x; the defect is tracked separately.
-    config = LatLonCGridOceanConfig()
-    config = config._replace(
-        barotropic=config.barotropic._replace(
-            barotropic_solver="implicit_cn"))
+    config = igw_channel_model_config()
     model = LatLonCGridOceanModel(grid, z_coord, config)
 
     state = rest_state_latlon_cgrid_ocean(

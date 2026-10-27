@@ -61,10 +61,12 @@ def _driver_bounds() -> dict[str, tuple[float, float]]:
     return out
 
 
-def _spec_bounds() -> dict[str, tuple[float, float]]:
-    """``"name": {... "bounds": (lo, hi) ...}`` from every ``__param_spec__``."""
-    out = {}
-    for path in _PACKAGES.rglob("*.py"):
+def _spec_bounds() -> dict[str, list[tuple[tuple[float, float], str]]]:
+    """``name -> [((lo, hi), file), ...]`` from EVERY ``__param_spec__``, in
+    sorted file order.  All declarations are kept: a name two specs bound
+    differently is a disagreement whichever file is read last."""
+    out: dict[str, list] = {}
+    for path in sorted(_PACKAGES.rglob("*.py")):
         text = path.read_text(errors="replace")
         if "__param_spec__" not in text:
             continue
@@ -72,26 +74,40 @@ def _spec_bounds() -> dict[str, tuple[float, float]]:
                 r'"([a-z_0-9]+)"\s*:\s*\{[^}]*"bounds"\s*:\s*'
                 r'\(\s*([0-9eE.+-]+)\s*,\s*([0-9eE.+-]+)\s*\)', text):
             try:
-                out[m.group(1)] = (float(m.group(2)), float(m.group(3)))
+                b = (float(m.group(2)), float(m.group(3)))
             except ValueError:
                 continue
+            out.setdefault(m.group(1), []).append(
+                (b, str(path.relative_to(_ROOT))))
     return out
 
 
-def _disagreements() -> dict[str, str]:
-    driver, spec = _driver_bounds(), _spec_bounds()
+def _disagreements(driver=None, spec=None) -> dict[str, str]:
+    driver = _driver_bounds() if driver is None else driver
+    spec = _spec_bounds() if spec is None else spec
     bad = {}
     for name, (lo, hi) in driver.items():
-        for sname, (slo, shi) in spec.items():
+        for sname, decls in spec.items():
             # the driver prefixes the scheme onto the spec's field name
             if not (name == sname or name.endswith("_" + sname)
                     or name == "cloud_" + sname):
                 continue
-            if (abs(lo - slo) > _TOL * max(1.0, abs(slo))
-                    or abs(hi - shi) > _TOL * max(1.0, abs(shi))):
-                bad[name] = (f"driver ({lo:g}, {hi:g}) vs spec "
-                             f"({slo:g}, {shi:g})")
+            for (slo, shi), where in decls:
+                if (abs(lo - slo) > _TOL * max(1.0, abs(slo))
+                        or abs(hi - shi) > _TOL * max(1.0, abs(shi))):
+                    bad[name] = (f"driver ({lo:g}, {hi:g}) vs spec "
+                                 f"({slo:g}, {shi:g}) in {where}")
     return bad
+
+
+def test_a_second_spec_declaring_another_range_is_caught():
+    """Non-vacuity: one agreeing and one diverging declaration of the same
+    name is a disagreement, in either order."""
+    driver = {"bechtold_dnoprc": (7.5e-5, 1.2e-3)}
+    good, bad = ((7.5e-5, 1.2e-3), "a.py"), ((1.0e-4, 1.0e-3), "b.py")
+    for decls in ([good, bad], [bad, good]):
+        assert "bechtold_dnoprc" in _disagreements(driver, {"dnoprc": decls})
+    assert not _disagreements(driver, {"dnoprc": [good, good]})
 
 
 def test_the_comparison_finds_both_declarations():
@@ -122,3 +138,13 @@ def test_each_known_disagreement_is_still_real(name):
     """An entry that stops describing the code is a lie in a list."""
     assert name in _disagreements(), (
         f"{name} is listed as disagreeing but does not; remove it")
+
+
+def test_ifs_ascent_port_shares_the_bechtold_ranges():
+    """IFSAscentConfig ports the same rprcon / dnoprc as BechtoldConfig: one
+    parameter, one range."""
+    from legoesm.atmosphere.physics.convection import _ifs_ascent, config
+    ifs = _ifs_ascent.__param_spec__["IFSAscentConfig"]["params"]
+    bec = config.__param_spec__["BechtoldConfig"]["params"]
+    for name in ("rprcon", "dnoprc"):
+        assert ifs[name]["bounds"] == bec[name]["bounds"], name

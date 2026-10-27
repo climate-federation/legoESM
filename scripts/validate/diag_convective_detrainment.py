@@ -55,6 +55,24 @@ def column_integral(rate, dp, area_w, g):
     return float(np.sum(area_w * np.sum(rate * dp, axis=1) / g))
 
 
+def phys_state_from_checkpoint(carry_aux, ncol, nlev, physics_config):
+    """The restored run's PBL height and cloud fraction (the checkpoint's
+    staged ``physstate_*`` carry) on a fresh physics state: what ZM reads,
+    as in the run (CAM pbuf pblh).  A checkpoint without ``pblh`` is
+    refused: ZM requires it and there is no run value to substitute."""
+    import jax.numpy as jnp
+    from legoesm.atmosphere.physics.physics_state import (
+        init_physics_state, update_physics_state,
+    )
+    if "physstate_pblh" not in carry_aux:
+        raise SystemExit("checkpoint carries no PBL height (physstate_pblh); "
+                         "Zhang-McFarlane needs the run's own pblh")
+    upd = {name: jnp.asarray(carry_aux[f"physstate_{name}"])
+           for name in ("pblh", "cloud_fraction")
+           if f"physstate_{name}" in carry_aux}
+    return update_physics_state(init_physics_state(ncol, nlev, physics_config), upd)
+
+
 def main():
     a = build_arg_parser().parse_args()
     import jax.numpy as jnp
@@ -97,7 +115,14 @@ def main():
     print(f"[{a.label}] convection scheme = {conv_cfg.scheme}   dt = {dt_phys:.1f} s")
 
     fn = make_convection_physics(conv_cfg, model_type="mpas", dt=dt_phys)
-    out = fn(state, mesh, sc, None, None)
+    # ZM reads the run's PBL height; load_checkpoint only stages that carry
+    # (the run loop adopts it).  Other schemes take no physics state here.
+    ps = None
+    if conv_cfg.scheme == "zhang_mcfarlane":
+        from legoesm.atmosphere.physics.combined import PhysicsConfig
+        ps = phys_state_from_checkpoint(driver._carry_aux, ncol, nlev,
+                                        PhysicsConfig(convection=conv_cfg))
+    out = fn(state, mesh, sc, ps, None)
     tends = out[0] if isinstance(out, tuple) else out
     tr = getattr(tends, "tracer_tendencies", None)
     if tr is None:

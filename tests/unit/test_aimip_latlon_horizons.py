@@ -180,3 +180,21 @@ def test_trainers_are_given_the_training_horizon(tree):
         assert kwargs.get("rollout_hours") == "_ROLLOUT_HOURS", (
             f"{name}() is called with rollout_hours="
             f"{kwargs.get('rollout_hours')!r}; it must be _ROLLOUT_HOURS")
+
+
+def test_every_loader_seeds_the_ice_skin_from_the_run_config(tree):
+    """The ERA5 carries must carry the prognostic ice skin whenever the run
+    has it on (#2106); a loader call or the lat-lon converter call that drops
+    the flag starts training from a skin-less carry, which step_unified
+    refuses."""
+    calls = _loader_calls(tree)
+    assert calls, "no load_window_pairs(...) call found"
+    for kw in calls:
+        assert kw.get("ice_skin_prognostic") == "config.ice_skin_prognostic"
+    conv = [node for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and getattr(node.func, "id", None) == "era5_to_latlon_carry"]
+    assert conv, "no era5_to_latlon_carry(...) call found"
+    for node in conv:
+        kws = {k.arg: ast.unparse(k.value) for k in node.keywords if k.arg}
+        assert kws.get("ice_skin_prognostic") == "ice_skin_prognostic"

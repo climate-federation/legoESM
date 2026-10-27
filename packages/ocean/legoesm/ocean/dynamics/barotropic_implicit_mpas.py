@@ -552,7 +552,8 @@ def barotropic_implicit_mpas(
     # the I0-refreshed fields, so it rides in the same message; the predictor
     # keeps the unrefreshed copy.
     eta_filled_old = fill_land_cells_mpas(eta_old, mask, c1, c2,
-                                          mesh.edgesOnCell, mesh.nEdgesOnCell)
+                                          mesh.edgesOnCell, mesh.nEdgesOnCell,
+                                          band_capacity=config.land_fill_band_capacity)
     grad_eta_old = gradient_edge(eta_filled_old, mesh).astype(eta_dtype)
     grad_eta_for_div = grad_eta_old
     if halo_refresh is not None:
@@ -855,7 +856,8 @@ def barotropic_implicit_mpas(
 
     # ----- Step 5: corrector for u_bar using new η gradient delta ------
     eta_filled_new = fill_land_cells_mpas(eta_new, mask, c1, c2,
-                                          mesh.edgesOnCell, mesh.nEdgesOnCell)
+                                          mesh.edgesOnCell, mesh.nEdgesOnCell,
+                                          band_capacity=config.land_fill_band_capacity)
     grad_eta_new = gradient_edge(eta_filled_new, mesh).astype(eta_dtype)
     delta_grad = grad_eta_new - grad_eta_old
 

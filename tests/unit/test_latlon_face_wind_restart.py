@@ -11,6 +11,7 @@ import glob
 import logging
 from pathlib import Path
 
+import jax
 import numpy as np
 import pytest
 
@@ -135,8 +136,10 @@ def test_faces_from_another_state_are_refused(leg1, corrupt):
     tmp, b1, ckpt = leg1
     with np.load(ckpt, allow_pickle=True) as z:
         data = {k: z[k] for k in z.keys()}
-    key = next(k for k in data if "latlon_u_face" in k)
+    key = next(k for k in data if k.endswith("latlon_u_face"))
     data[key] = corrupt(data[key])
+    for k in [k for k in data if k.endswith("_sha256")]:
+        data.pop(k)                 # a pre-digest file: the average check
     bad = _beside(ckpt, "bad_checkpoint_day_0001.npz")
     np.savez(bad, **data)
     d = ModelDriver(_cfg(tmp / "leg2_bad", 2))
@@ -169,3 +172,44 @@ def test_checkpoint_with_one_face_wind_is_refused(leg1):
     np.savez(half, **data)
     with pytest.raises(ValueError, match="only one of the face winds"):
         _resume(tmp, str(half), "leg2_half")
+
+
+_needs_x64 = pytest.mark.skipif(
+    not jax.config.read("jax_enable_x64"),
+    reason="Spectral/Gaussian grids require JAX_ENABLE_X64=True",
+)
+
+
+@_needs_x64
+def test_sfno_run_drops_saved_face_winds(tmp_path):
+    """A run that does not carry face winds (here SFNO) drops saved ones on
+    entering the run, so its checkpoints never re-save them next to a newer
+    state.  The winds are handed over directly: SFNO restarts refuse lat-lon
+    checkpoints, so no normal load brings saved face winds into this guard."""
+    c = _cfg(tmp_path / "sfno", 1)
+    d = ModelDriver(c._replace(
+        grid=GridConfig(grid_type="gaussian", resolution=5, nlev=4),
+        dycore=c.dycore._replace(discretization="sfno", energy_fixer=False)))
+    d.setup()
+    face = np.zeros((4, 10, 20))
+    d._carry_aux = {"other": np.ones(1)}
+    for k in ModelDriver._FACE_WIND_KEYS:
+        d._carry_aux[k] = face
+        d._carry_aux[k + "_sha256"] = np.asarray("0" * 64)
+    d._enter_persistent_cgrid()
+    assert not any("latlon_" in k for k in d._carry_aux)
+    assert "other" in d._carry_aux
+
+
+def test_load_then_save_keeps_the_saved_winds(leg1):
+    """Load, enter the staggered lane, load again and save without running:
+    the second load must not leave the lane flagged on a cell-centre state."""
+    tmp, _b1, ckpt = leg1
+    d = _resume(tmp, ckpt, "leg2_resave")
+    assert d._persistent_cgrid_active()
+    step, day = d.load_checkpoint(ckpt)
+    d.save_checkpoint(step, day)
+    new = sorted(glob.glob(str(tmp / "leg2_resave" / "checkpoint_day_*.npz")))[-1]
+    with np.load(ckpt, allow_pickle=True) as a, np.load(new, allow_pickle=True) as b:
+        for k in ModelDriver._FACE_WIND_KEYS:
+            np.testing.assert_array_equal(a[f"carry_{k}"], b[f"carry_{k}"])

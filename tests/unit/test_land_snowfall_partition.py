@@ -107,7 +107,7 @@ def test_ice_schemes_publish_their_frozen_fall(name):
     np.testing.assert_array_equal(np.asarray(warm.precip_frozen), 0.0)
 
 
-@pytest.mark.parametrize("name", ["kessler", "sundqvist", "seifert_beheng"])
+@pytest.mark.parametrize("name", ["kessler", "seifert_beheng"])
 def test_lv_only_schemes_publish_zero_frozen(name):
     """L_v-only heating: every kg they precipitate is liquid energetically."""
     out = _run(name, _column(262.0, rain=1e-3))
@@ -131,7 +131,8 @@ def test_zm_publishes_its_convective_snow_flux():
     u = jnp.full((ncol, nlev), 5.0)
     out, _ = zhang_mcfarlane_convection(
         T, q, p_full, p_half, u, jnp.zeros_like(u), jnp.zeros((ncol, nlev)),
-        dt=300.0, config=ZhangMcFarlaneConfig(land_fraction="none"))
+        dt=300.0, config=ZhangMcFarlaneConfig(land_fraction="none"),
+        pblh=jnp.zeros(ncol))  # CAM's cold-start PBL height (ZM needs one)
     snow = np.asarray(out.precip_frozen_sfc)
     prec = np.asarray(jnp.sum(out.dq_r_conv_dt * (p_half[:, 1:] - p_half[:, :-1]),
                               axis=-1) / constants.g)

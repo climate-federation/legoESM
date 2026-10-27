@@ -60,6 +60,9 @@ T_min_atmosphere = 200.0        # Lower-bound floor for atmospheric temperature 
                                 # to avoid division by near-zero T in clear-sky columns.
                                 # Matches Held-Suarez T_MIN and DCMIP lower bounds.
 T_freeze_ocean = 271.35         # Freezing point of seawater [K] (~-1.8 C)
+T_zero_zhao_carr = 273.16       # [K] Zhao-Carr precpd temperature origin: NCAR/ccpp-physics
+                                # v7.0.1 (da75531b) zhaocarr_precpd.f:348 ``tmt0 = t - 273.16``
+                                # (oracle-literal; NOT T_freeze)
 # Saturation specific humidity over sea water, as a fraction of the value over
 # fresh water at the same temperature: the water activity of salt water at the
 # ocean's typical salinity (S ~ 35 psu) lowers the saturation vapour pressure
@@ -101,6 +104,11 @@ M_H2O = 18.01528        # [g/mol] water
 # ==============================================================================
 epsilon = R_d / R_v              # Molecular weight ratio (~0.622)
 
+# CAM6 Goff-Gratch saturation reference temperatures (ESCOMP/CAM
+# cam_cesm2_1_rel_60, used by thermo.saturation_*_goff_gratch).
+T_triple_cam = 273.16           # [K] h2otrip = shr_const_mod.F90:37 SHR_CONST_TKTRIP
+T_boil_cam = 373.16             # [K] tboil, wv_saturation.F90:71
+
 # ==============================================================================
 # Cloud-microphysics material properties
 # (diffusional droplet growth: Super-Droplet Method, bin/bulk condensation)
@@ -112,11 +120,23 @@ k_air = 2.40e-2                 # Thermal conductivity of air [W/(m*K)]
 sigma_water = 0.0728            # Surface tension of the water-air interface [N/m]
                                 # at ~293 K (Pruppacher & Klett 1997) — Kelvin
                                 # curvature term in Köhler droplet growth
+# CAM6 droplet-activation (ndrop.F90 ndrop_init) scheme constants: CAM evaluates
+# the Kelvin term ONCE at a fixed reference temperature with its own surface
+# tension, aten = 2*M_w*surften/(R*t0*rho_w) (ndrop.F90:120-122).  Distinct from
+# sigma_water above on purpose (user decision 2026-10-16: keep CAM's value).
+surften_cam6_activation = 0.076     # [N/m] CAM6 ndrop surften (ndrop.F90:121)
+T_ref_cam6_activation = 273.0       # [K]  CAM6 ndrop t0 (ndrop.F90:120); NOT T_freeze
 
 # ==============================================================================
 # Turbulence
 # ==============================================================================
-kappa_von_karman = 0.4          # Von Kármán constant for the log-law (Pope 2000)
+# Von Kármán constant for the log-law.
+# REVISIT: literature best estimates 0.38-0.41 (Andreas et al. 2006 0.387±0.003;
+# Högström 1996 0.40±0.01; Bailey et al. 2014 0.40±0.02; Lee & Moser 2015 ~0.384;
+# 2024 reviews argue non-universal). Kept 0.4 (user 2026-10-25) because reference
+# ports (CESM, CAM, COARE, KPP, NEMO, CLM5) use 0.4; a change needs fixtures
+# regenerated or per-port config.
+kappa_von_karman = 0.4
 nu_ocean_molecular = 1.4e-6     # Molecular kinematic viscosity of seawater
                                 # [m^2/s] (~10 degC; NEMO phycst/zdfiwm ``rnu``)
 kappa_T_ocean_molecular = 1.4e-7  # Molecular thermal diffusivity of seawater
@@ -212,6 +232,47 @@ ice_supercool_volume_stop_nemo = 20.0  # [m] icesbc.F90:376-381
 ice_landfast_speed_stop_nemo = 5.0e-3  # [m/s] icesbc.F90:421
 ice_full_cover_margin_nemo = 1.0e-3
 ice_growth_thickness_stop_nemo = 3.0  # [m]
+
+# WRF v4.8.0 Thompson microphysics (phys/module_mp_thompson.F, commit
+# 06d4240ae989cc3e50af412bb472df3d9048783c) carries its OWN thermodynamic
+# constants; the faithful port (microphysics/thompson_wrf.py) uses these so
+# it reproduces the running scheme.  Line numbers are in that file.
+R_v_wrf_thompson = 461.5         # [J/(kg*K)] :202 Rv
+R_d_wrf_thompson = 287.04        # [J/(kg*K)] :204 R
+c_p_wrf_thompson = 1004.0        # [J/(kg*K)] :205 Cp (times 1+0.887 q_v in use)
+L_s_wrf_thompson = 2.834e6       # [J/kg] :216 lsub
+L_v0_wrf_thompson = 2.5e6        # [J/kg] :217 lvap0 (lvap = lvap0 + (c_pi - c_pw) T_C)
+epsilon_wrf_thompson = 0.622     # [-] literal in rho (:1234, :1802), RSLF/RSIF, t_dew
+T_flatau_wrf_thompson = 273.16   # [K] Flatau et al. (1992) fit origin in RSLF/RSIF (:5398, :5433)
+
+# ERF super-droplet physics (erf-model/ERF tag 26.09,
+# 6d09aeb120eb4eac388106004bfaaa7f795a2e26) carries its OWN constants; the
+# faithful SDM port (microphysics/sdm/) uses these so it reproduces the running
+# scheme.  Source/ERF_Constants.H unless noted.
+L_v_erf = 2.5e6                  # [J/kg] l.59 L_v (water m_lat_vap, MaterialProperties.cpp:175)
+R_v_erf = 461.505                # [J/(kg*K)] l.48 R_v (water m_Rv)
+g_erf = 9.81                     # [m/s^2] l.64 CONST_GRAV (TerminalVelocity.H CloudRainShima)
+k_B_erf = 1.38065e-23            # [J/K] l.105 boltz (Brownian kernel)
+N_A_erf_kmol = 6.02214e26        # [1/kmol] l.106 avogadro (per KILOmole)
+M_air_erf = 28.966               # [kg/kmol] l.107 mwdair
+sigma_water_erf = 0.076148325    # [N/m] MaterialProperties.H surfaceTension(), water
+b_solute_water_erf = 4.3e-6      # [m^3/mol] MaterialProperties.H coeffVPSolute(), water
+T_flatau_erf = 273.16            # [K] Flatau et al. (1992) fit origin in erf_esatw (Utils/ERF_MicrophysicsUtils.H)
+
+# WRF v4.8.0 fast spectral-bin microphysics (phys/module_mp_fast_sbm.F, commit
+# 06d4240ae989cc3e50af412bb472df3d9048783c) carries its OWN thermodynamic
+# literals; the faithful FSBM building blocks (microphysics/fast_sbm/) use these
+# so they reproduce the running scheme.  CGS values converted to SI exactly.
+epsilon_fast_sbm = 0.622            # [-] :4596 EW1N=QQ*PP/(0.622+0.378*QQ), :2871 OPER2
+one_minus_epsilon_fast_sbm = 0.378  # [-] same statements (literal, not 1-0.622)
+aa1_fast_sbm = 2.53e11              # [Pa] :1724 POLYSVP AA1_MY = 2.53E12 dyn/cm^2
+bb1_fast_sbm = 5.42e3               # [K] :1724 POLYSVP BB1_MY (also B5L=BB1_MY/T^2 in ONECOND1)
+lv_over_cp_fast_sbm = 2500.0        # [K] :6830 ONECOND1 DATA AL1 /2500./ (T update, RW)
+lf_over_cp_fast_sbm = 333.0         # [K] :6627 FREEZ / :6741 J_W_MELT ARG_1=333.*SUM_ICE/RO
+R_v_fast_sbm = 461.5                # [J/(kg*K)] :1768 JERRATE_KS RV_MY=461.5D4 erg/(g*K)
+L_v_fast_sbm = 2.5e6                # [J/kg] :1816 JERRATE_KS AL1_MY(1)=2.5D10 erg/g
+k_air_fast_sbm = 2.4e-2             # [W/(m*K)] :1768 JERRATE_KS CF_MY=2.4D3 erg/(cm*s*K)
+p_zero_fast_sbm = 101300.0          # [Pa] :1782 JERRATE_KS PZERO=1.013D6 dyn/cm^2
 
 # Active no-pond ice_alb identity, icealb.F90:124-185 and accepted namalb.
 albedo_snow_dry_orca1 = 0.85
@@ -320,7 +381,6 @@ RAD_TO_DEG = 180.0 / jnp.pi
 # ==============================================================================
 # Turbulence
 # ==============================================================================
-kappa_vk = 0.4                  # von Kármán constant
 nu_air = 1.5e-5                 # Kinematic viscosity of air at 15°C [m^2/s]
 prandtl_air = 0.71              # Molecular Prandtl number of air ν/α [-] (DNS
                                 # heat diffusion κ = ν / Pr). Schmidt number of

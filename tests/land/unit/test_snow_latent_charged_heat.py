@@ -23,10 +23,11 @@ from legoesm import constants
 from legoesm.core.coupling_fields import AtmToSurface
 from legoesm.land.boundary_data.gap_fill import bare_canopy_params
 from legoesm.land.multilayer_land import (
-    MultiLayerLandConfig, init_multilayer_land_state, land_snow_cover, seed_snow_layers,
+    MultiLayerLandConfig, init_multilayer_land_state, seed_snow_layers,
     step_multilayer_land_with_diagnostics)
 from legoesm.land.snow_column import SnowColumnState, column_enthalpy, total_water
 from legoesm.land.soil_grid import make_soil_grid
+from legoesm.surface_albedo import snow_cover_fraction
 from legoesm.land.soil_thermal import compute_heat_capacity
 from legoesm.land.surface_scheme import TwoLeafCanopyConfig
 from legoesm.land.surface_scheme.two_leaf_canopy import compute_two_leaf_canopy_fluxes
@@ -166,7 +167,7 @@ def test_layered_pack_plus_soil_energy_closes_without_ground_correction(swe):
     # The solve's ground charge is the cover-weighted blend at the skin (260 K on
     # the seeded first step, pack and soil both at 260 K).
     s0 = out[0][0]
-    f = float(land_snow_cover(total_water(_pack(s0)), cfg.land_albedo)[0])
+    f = float(snow_cover_fraction(total_water(_pack(s0)), cfg.land_albedo)[0])
     if swe < 10.0:
         assert 0.01 < f < 0.99, f                          # partial cover
     np.testing.assert_allclose(float(out[0][3].L_soil[0]),
@@ -305,7 +306,7 @@ def test_layered_soil_share_routes_at_its_liquid_charge(monkeypatch):
     lp = bare_canopy_params(1)._replace(LAI=jnp.asarray([0.3]))
     _, _, _, sfc = step_multilayer_land_with_diagnostics(
         st, _forcing(1), cfg, 1.0, 1800.0, lat=jnp.full(1, 0.9), land_params=lp)
-    f = float(land_snow_cover(total_water(_pack(st)), cfg.land_albedo)[0])
+    f = float(snow_cover_fraction(total_water(_pack(st)), cfg.land_albedo)[0])
     assert 0.01 < f < 0.99, f
     L_v = float(latent_heat_vaporization(st.T_soil[0, 0]))
     le_soil = float(sfc.LE_soil[0])

@@ -177,15 +177,17 @@ __param_spec__ = {
                 "category": "convection",
                 "reference": "cuascn.F90:686", "shape": None,
             },
+            # rprcon / dnoprc: the SAME parameters as BechtoldConfig's; one
+            # range for both (test_param_bounds_agree holds them equal).
             "rprcon": {
-                "units": "1/m", "bounds": (5.0e-4, 5.0e-3),
+                "units": "1/m", "bounds": (3.5e-4, 1.4e-2),
                 "tunable_tier": 2, "transform": "none",
                 "category": "convection",
                 "reference": "sucumf.F90:175 (ZPRCDGW = RPRCON*RPLRG)",
                 "shape": None,
             },
             "dnoprc": {
-                "units": "kg/kg", "bounds": (1.0e-4, 1.0e-3),
+                "units": "kg/kg", "bounds": (7.5e-5, 1.2e-3),
                 "tunable_tier": 2, "transform": "none",
                 "category": "convection",
                 "reference": "cuascn.F90:284 (ZDNOPRC)", "shape": None,

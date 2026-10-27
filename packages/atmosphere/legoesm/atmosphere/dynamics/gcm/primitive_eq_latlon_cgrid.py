@@ -244,6 +244,27 @@ class CGridLatLonPrimitiveEquationConfig(NamedTuple):
     # sets it from ``DycoreConfig.energy_fixer`` (default True).  Appended at
     # the tuple END: preserves positional construction.
     energy_fixer: bool = False
+    # Divergence-SELECTIVE biharmonic damping (CAM-FV ``ldiv4``), as a
+    # multiple of CAM's nondimensional rate: per latitude row
+    # nu_row = nu_div4_scale * 0.01 * area_row**2 / dt [m^4/s], applied
+    # inside the final gradient as CAM does (sw_core.F90 ~1098).  The
+    # driver fills it from ``DycoreConfig.mpas_div_damp4_scale`` (one
+    # meaning, one value on every grid).  Per row, not one global value:
+    # built from the equatorial cell a global value is RK3-unstable near
+    # the poles, built from the pole cell it is ~1000x too weak.  0.0
+    # (default) is OFF and byte-identical; needs ``dt`` in the tendency.
+    nu_div4_scale: float = 0.0
+
+
+# CAM-FV ldiv4 nondimensional rate tau4*dt (cd_core.F90:620-684); the same
+# 0.01 as the MPAS lane's ``nu_div4_cam`` in driver.component_factory.
+CAM_DIV4_RATE = 0.01
+# Highest polar-filter start latitude [deg] at which the div-4 damping's
+# stability was measured (Fourier-block eigen check, 96x48, dt 450 s:
+# worst eig*dt -0.67 at 35.9041 deg, -0.83 at 60 deg, RK3 limit ~-2.51).
+# Above it the filter covers fewer rows and nothing was measured, so the
+# model refuses it (user decision 2026-10-13).
+DIV4_MAX_POLAR_FILTER_CUTOFF_DEG = 60.0
 
 
 def _zero_v_at_pole(v, *, south: bool, north: bool, offset: int = 0):
@@ -445,7 +466,8 @@ def cgrid_latlon_hydrostatic_tendencies(
         byte-identical.
     dt : float, optional
         Step length [s]; required only when ``config.nu_del4 > 0`` (sizes the
-        per-row pole stability cap of the hyperdiffusion).
+        per-row pole stability cap of the hyperdiffusion) or
+        ``config.nu_div4_scale > 0`` (the div-4 rate 0.01*area^2/dt).
 
     Returns
     -------
@@ -928,6 +950,26 @@ def cgrid_latlon_hydrostatic_tendencies(
         flux_T = dp_T * nu_u[..., None] * laplacian_cgrid(T, grid)
         dT_dt = dT_dt - laplacian_cgrid(flux_T, grid) / dp_T
 
+    # --- 13a'. Divergence-selective del-4 damping (CAM-FV ldiv4) ---
+    # SIGN: (du, dv) -= grad(nu * lap(D)), D = div(u, v).  The divergence of
+    # that increment is -lap(nu lap D); for constant nu a Fourier mode of D
+    # (lap -> -k^2) decays at nu k^4.  Non-divergent flow (D = 0) gets
+    # exactly zero.  nu is per latitude ROW (cell area squared), inside the
+    # final gradient as in CAM.  It runs at every RK stage, so the polar
+    # filter of du/dv covers it (without the filter the pole rows are
+    # unstable).  Off (0.0) adds nothing: byte-identical.
+    if config.nu_div4_scale > 0.0:
+        if dt is None:
+            raise ValueError(
+                "cgrid_latlon_hydrostatic_tendencies: nu_div4_scale > 0 "
+                "requires the dt argument (the coefficient is 0.01*area^2/dt).")
+        D = divergence_cgrid(u, v, grid, lat_pad=_lat_pad)
+        nu_row = (config.nu_div4_scale * CAM_DIV4_RATE
+                  * grid.area[:, 0] ** 2 / dt).astype(D.dtype)   # (n_lat,)
+        psi = nu_row[:, None, None] * laplacian_cgrid(D, grid)
+        du_dt = du_dt - gradient_x_cgrid(psi, grid)
+        dv_dt = dv_dt - gradient_y_cgrid(psi, grid)
+
     # --- 13b. Top sponge (Rayleigh damping increasing toward the lid, #836) ---
     # Absorb upward-propagating gravity-wave / convective energy that would else
     # reflect off the rigid model lid and contaminate the upper levels.  Gated on
@@ -1017,6 +1059,26 @@ class CGridLatLonPrimitiveEquationModel(IntegrationMixin):
         self.grid = grid
         self.sigma_coord = sigma_coord
         self.config = config or CGridLatLonPrimitiveEquationConfig()
+        if self.config.nu_div4_scale > 0.0 and not self.config.use_polar_filter:
+            # Measured (Fourier-block eigen check of the damping on the 96x48
+            # grid): worst eigenvalue x dt -149.6 with no filter, against the
+            # SSP-RK3 real-axis limit ~-2.51; -0.67 / -0.83 with the filter
+            # starting at 35.9 / 60 deg.  A smaller dt does not help: the
+            # coefficient scales as 1/dt, so the per-step damping is fixed.
+            raise ValueError(
+                "nu_div4_scale > 0 needs use_polar_filter=True: the per-row "
+                "div-4 coefficient 0.01*area^2/dt is unstable on the pole rows "
+                "without the polar filter (measured at scale 1; a smaller dt "
+                "does not help).")
+        if (self.config.nu_div4_scale > 0.0
+                and self.config.polar_filter_cutoff_deg
+                > DIV4_MAX_POLAR_FILTER_CUTOFF_DEG):
+            raise ValueError(
+                "nu_div4_scale > 0 needs polar_filter_cutoff_deg <= "
+                f"{DIV4_MAX_POLAR_FILTER_CUTOFF_DEG} (got "
+                f"{self.config.polar_filter_cutoff_deg}): the div-4 damping's "
+                "stability under the polar filter was measured only for a "
+                "filter starting at 35.9041 and 60 deg.")
 
         # Stash the constructor ``dt`` so callers downstream (notably
         # ``make_latlon_mpi_step`` rebuilding an MPI-aware model) can
@@ -1514,6 +1576,7 @@ class CGridLatLonPrimitiveEquationModel(IntegrationMixin):
         # Conservation fixer for mass — fp64 budget accumulator
         # (iter-12 mirrors compute_mass; see docstring there).
         if self.config.fix_mass:
+            _pre_mf = state
             acc = conservation_accumulator()
             # ``grid_total_area`` is a precomputed scalar on the grid;
             # avoids recomputing ``jnp.sum(area)`` every step (one
@@ -1585,6 +1648,18 @@ class CGridLatLonPrimitiveEquationModel(IntegrationMixin):
                 state = state._replace(tracers=new_tracers)
 
             state = state._replace(p_s=p_s_post)
+            if self.config.energy_fixer:
+                # The mass fixer sits outside the energy window (after
+                # physics): return the energy its p_s shift changed as a
+                # uniform heating [K, +warming] (F15 V8, vote B).  Same
+                # cell-centre energy and global reduction as the fixer.
+                def _cc(s):
+                    return (s.T, _face_to_cell_u(s.u), _face_to_cell_v(s.v),
+                            s.p_s, s.phis)
+                _dT_mf = gridded_energy_fixer_dT(
+                    _cc(_pre_mf), _cc(state), grid, sigma_coord)
+                state = state._replace(
+                    T=state.T + _dT_mf.astype(state.T.dtype))
 
         # #1354/#1515: shared tracer positivity stage — this lane previously had
         # NO tracer floor, so negatives from non-monotone transport persisted.

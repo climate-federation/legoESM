@@ -858,9 +858,11 @@ class MPASOceanModel(IntegrationMixin):
         c1_m = mesh.cellsOnEdge[0]
         c2_m = mesh.cellsOnEdge[1]
         T_new = fill_land_cells_mpas(T_new, mask, c1_m, c2_m,
-                                     mesh.edgesOnCell, mesh.nEdgesOnCell)
+                                     mesh.edgesOnCell, mesh.nEdgesOnCell,
+                                     band_capacity=config.land_fill_band_capacity)
         S_new = fill_land_cells_mpas(S_new, mask, c1_m, c2_m,
-                                     mesh.edgesOnCell, mesh.nEdgesOnCell)
+                                     mesh.edgesOnCell, mesh.nEdgesOnCell,
+                                     band_capacity=config.land_fill_band_capacity)
 
         # 2a (solve). Implicit vertical tracer diffusion (backward-Euler),
         # BEFORE GM/Redi and advection, on per-cell layer thickness (partial

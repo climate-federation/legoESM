@@ -69,11 +69,11 @@ def test_factor_never_reduces_the_saturation_target():
     assert float(jnp.min(homogeneous_freezing_rh_factor(T))) >= 1.0
 
 
-@pytest.mark.parametrize("scheme", ["morrison", "thompson", "p3"])
+# p3 is not listed: the WRF P3 port has no rh_homo allowance (no such field).
+@pytest.mark.parametrize("scheme", ["morrison", "thompson"])
 def test_schemes_default_to_the_allowance_on(scheme):
     from legoesm.atmosphere.physics.microphysics import config as cfg
-    sub = {"morrison": cfg.MorrisonConfig, "thompson": cfg.ThompsonConfig,
-           "p3": cfg.P3Config}[scheme]()
+    sub = {"morrison": cfg.MorrisonConfig, "thompson": cfg.ThompsonConfig}[scheme]()
     assert sub.homogeneous_ice_supersaturation is True
     assert sub._replace(
         homogeneous_ice_supersaturation=False,

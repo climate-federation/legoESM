@@ -108,7 +108,9 @@ from legoesm import constants
 from legoesm.atmosphere.physics._shared import (
     exner_function,
     half_to_full,
+    surface_buoyancy_flux,
     virtual_temperature,
+    half_to_iface_zero_ends,
 )
 from legoesm.atmosphere.physics.turbulence.config import MYNN25Config
 from legoesm.atmosphere.physics.turbulence.output import TurbulenceOutput
@@ -277,7 +279,7 @@ def _compute_master_length(
     zeta = z_half_geom / jnp.where(jnp.abs(L_obu_safe) > eps, L_obu_safe, eps)[:, None]
     zeta = jnp.clip(zeta, -100.0, 100.0)
 
-    kappa = constants.kappa_vk
+    kappa = constants.kappa_von_karman
     L_S_unstable = kappa * z_half_geom * _safe_pow_pos(
         1.0 - 100.0 * zeta, _MYNN_LS_STABLE_FLOOR,
     )
@@ -500,13 +502,10 @@ def mynn25_turbulence(
     theta = T * exner_pref
     theta_v = virtual_temperature(theta, q_v)
 
-    # Buoyancy flux (virtual potential temperature) at surface.  Use
-    # ``θ_v`` perturbation form ≈ w'θ' + (1/ε − 1) θ̄ w'q_v'.  The virtual-T
-    # moisture coefficient is the canonical 1/ε − 1 ≈ 0.6078 (constants.epsilon),
-    # not the rounded 0.61 (CLAUDE.md: no hardcoded physical-constant literals).
+    # Buoyancy flux (virtual potential temperature) at surface,
+    # w'θ' + (1/ε − 1) θ̄ w'q_v'.
     th_low = theta[:, -1]
-    _vT_coef = 1.0 / constants.epsilon - 1.0
-    w_thv_sfc = w_th_s_kin + _vT_coef * th_low * w_qv_s_kin
+    w_thv_sfc = surface_buoyancy_flux(w_th_s_kin, w_qv_s_kin, th_low)
 
     # Reference theta for L_B (per-column lowest virtual-θ — surrogate
     # for ``th_ref`` in jax_scm which is a constant per case).  Kept as
@@ -527,7 +526,7 @@ def mynn25_turbulence(
     # tendency (zeta -> L_S -> master length -> qke).  Forward is unchanged: the
     # outer ``where`` still returns the 1e30 neutral sentinel (L -> ∞ ⇒ ζ ≈ 0)
     # whenever |w'θ_v'| ≤ eps.
-    kappa = constants.kappa_vk
+    kappa = constants.kappa_von_karman
     w_thv_safe = jnp.where(
         jnp.abs(w_thv_sfc) > _SMOOTH_EPS, w_thv_sfc, 1.0
     )
@@ -675,5 +674,6 @@ def mynn25_turbulence(
         lhflx=lhflx, evap_sfc=sflx_q,
         ustar=ustar,
         h_pbl=h_pbl,
+        Kh_iface=half_to_iface_zero_ends(Kh_half),
     )
     return output, qke_new

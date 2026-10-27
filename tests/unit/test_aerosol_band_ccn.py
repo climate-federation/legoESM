@@ -112,6 +112,8 @@ def _driver_forcing(cfg, ncol=_LAT.size, temp_fn=None, **kw):
     fake._owned_temp = lambda: ModelDriver._owned_temp(fake)
     fake.radiation_ghg_vmr = lambda day: ModelDriver.radiation_ghg_vmr(fake, day)
     lat = jnp.radians(jnp.asarray(_LAT))
+    fake._grid_lon = jnp.zeros_like(lat)  # zonal test files: no lon to resolve
+    fake._owned_lon = lambda: ModelDriver._owned_lon(fake)
     _, aer, _ = ModelDriver._precompute_external_forcing(fake, 15.5, p_s, lat, **kw)
     p_full = np.asarray(fake.sigma.pressure_at_full(p_s)).reshape(ncol, -1)
     return fake, np.asarray(aer), p_full

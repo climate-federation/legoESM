@@ -24,6 +24,7 @@ tolerance.
 from __future__ import annotations
 
 import functools
+from collections import namedtuple
 
 import jax
 import jax.numpy as jnp
@@ -31,7 +32,9 @@ import numpy as np
 import pytest
 
 from legoesm import constants
-from legoesm.core.conservation import compute_global_moisture
+from legoesm.core.conservation import (
+    SigmaLayers, compute_global_moisture, dycore_column_energy,
+)
 from legoesm.core.field import Field
 from legoesm.core.state import HydrostaticState
 from legoesm.driver.compiled_segments import (
@@ -99,7 +102,7 @@ def _sink_physics(need_rad, T, p_s, q_v, q_c, q_r, conv_prog, u, v,
 
 
 def _run(n_steps, *, fix_mass, drift, seed=0, T=300.0, k_sink=K_SINK,
-         target_moisture=None, **seg_kw):
+         target_moisture=None, model_cls=None, **seg_kw):
     state, q_v = _state(seed, T)
     z3, z2 = jnp.zeros_like(q_v), jnp.zeros_like(state.p_s.data)
     moist = {"q_v": q_v, "q_c": z3, "q_r": z3}
@@ -111,7 +114,7 @@ def _run(n_steps, *, fix_mass, drift, seed=0, T=300.0, k_sink=K_SINK,
         target_mass=target if fix_mass else None,
         target_moisture=target_moisture)
     run = build_segment_fn(
-        model=_DriftModel(drift),
+        model=(model_cls or _DriftModel)(drift),
         step_unified=functools.partial(_sink_physics, k_sink=k_sink),
         grid=_GRID,
         sigma_full=SIGMA_FULL, dsigma=DSIGMA, dt=DT, rad_update_steps=1,
@@ -276,3 +279,35 @@ def test_dry_mass_target_is_differentiable():
     g = jax.grad(loss)(q_v)
     assert bool(jnp.all(jnp.isfinite(g)))
     assert float(jnp.max(jnp.abs(g))) > 0.0
+
+
+class _EnergyFixerDriftModel(_DriftModel):
+    """The drift dycore with the energy fixer on (its own window closed; the
+    mass drift stands for what it leaves): ``config`` / ``sigma_coord`` are
+    what the segment's mass-fixer energy closure reads."""
+    config = namedtuple("Cfg", "energy_fixer")(True)
+    sigma_coord = SigmaLayers(DSIGMA)
+
+
+def test_segment_mass_fixer_returns_its_energy_as_heat():
+    """The segment's dry-mass fixer runs after the dycore step, OUTSIDE its
+    energy window (review 2026-10-14 F15 V8): with the dycore fixer on, the
+    step's energy equals the post-dynamics (drifted) state's -- the mass the
+    fixer removes takes no energy with it."""
+    drift = 2.0e-4
+    state, _q, _t, out = _run(1, fix_mass=True, drift=drift, k_sink=0.0,
+                              model_cls=_EnergyFixerDriftModel)
+    sig, area = _EnergyFixerDriftModel.sigma_coord, _GRID.area.astype(
+        jnp.float64)
+
+    def E(T, p_s):
+        ph = sig.pressure_at_half(p_s)
+        e = dycore_column_energy(T, jnp.zeros_like(T),
+                                 ph[..., 1:] - ph[..., :-1],
+                                 jnp.zeros_like(p_s), p_s)
+        return float(jnp.sum(e * area))
+
+    e_dyn = E(state.T.data, state.p_s.data * (1.0 + drift))
+    assert abs(E(out.T, out.p_s) - e_dyn) / e_dyn < 1e-12
+    # NON-VACUITY: the fixer really removed the drift (~20 Pa of air)
+    assert float(jnp.mean(state.p_s.data * (1.0 + drift) - out.p_s)) > 10.0

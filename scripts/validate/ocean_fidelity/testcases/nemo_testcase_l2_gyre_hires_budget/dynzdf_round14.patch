@@ -1,0 +1,63 @@
+--- dynzdf.F90
++++ dynzdf.F90
+@@ -21,6 +21,7 @@
+    USE zdf_oce        ! ocean vertical physics variables
+    USE zdfdrg         ! vertical physics: top/bottom drag coef.
+    USE dynadv    ,ONLY: ln_dynadv_vec    ! dynamics: advection form
++   USE gyre_r14_budget, ONLY : r14_is_active, r14_zdf_pre_row, r14_zdf_row
+    USE dynldf_iso,ONLY: akzu, akzv       ! dynamics: vertical component of rotated lateral mixing
+    USE ldfdyn         ! lateral diffusion: eddy viscosity coef. and type of operator
+    USE trd_oce        ! trends: ocean variables
+@@ -81,6 +82,11 @@
+       REAL(wp) ::   zWui, zWvi           !   -      -
+       REAL(wp) ::   zWus, zWvs           !   -      -
+       REAL(wp), DIMENSION(T1Di(0),jpkm1)      ::   zwi, zwd, zws  ! 2D workspace
++      ! The companion crosses a module boundary as a whole array.  Keep the
++      ! full native i extent so its element indices remain aligned with pvv;
++      ! T1Di(0) has only the 122 inner columns on this single-rank deck while
++      ! r14_zdf_row stores into a jpi=126 full-domain field.
++      REAL(wp), DIMENSION(jpi,jpkm1)           ::   zr14_vnostress
+       REAL(wp), DIMENSION(:,:,:), ALLOCATABLE ::   ztrdu, ztrdv   !  -      -
+       !!---------------------------------------------------------------------
+       !
+@@ -140,6 +142,7 @@
+ #endif
+             END_2D
+          ENDIF
++         IF( r14_is_active() ) CALL r14_zdf_pre_row( jj, pvv(:,jj,:,Kaa) )
+          !                    ! add top/bottom friction
+          !     With split-explicit free surface, barotropic stress is treated explicitly Update velocities at the bottom.
+          !     J. Chanut: The bottom stress is computed considering after barotropic velocities, which does
+@@ -493,6 +496,11 @@
+          !   The solution (after velocity) is in 2d array va
+          !-----------------------------------------------------------------------
+          !
++         IF( r14_is_active() ) THEN
++            DO_2Dik( 0, 0, 1, jpkm1, 1 )
++               zr14_vnostress(ji,jk) = pvv(ji,jj,jk,Kaa)
++            END_2D
++         ENDIF
+          DO_2Dik( 0, 0,    2, jpkm1, 1 )   !==  First recurrence : Dk = Dk - Lk * Uk-1 / Dk-1   (increasing k)  ==
+             zwd(ji,jk) = zwd(ji,jk) - zwi(ji,jk) * zws(ji,jk-1) / zwd(ji,jk-1)
+          END_2D
+@@ -518,6 +526,20 @@
+          DO_2Dik( 0, 0,   jpk-2, 1, -1 )
+             pvv(ji,jj,jk,Kaa) = ( pvv(ji,jj,jk,Kaa) - zws(ji,jk) * pvv(ji,jj,jk+1,Kaa) ) / zwd(ji,jk)
+          END_2D
++         IF( r14_is_active() ) THEN
++            DO_2Dik( 0, 0, 2, jpkm1, 1 )
++               zr14_vnostress(ji,jk) = zr14_vnostress(ji,jk) - &
++                  & zwi(ji,jk) / zwd(ji,jk-1) * zr14_vnostress(ji,jk-1)
++            END_2D
++            DO_1Di( 0, 0 )
++               zr14_vnostress(ji,jpkm1) = zr14_vnostress(ji,jpkm1) / zwd(ji,jpkm1)
++            END_1D
++            DO_2Dik( 0, 0, jpk-2, 1, -1 )
++               zr14_vnostress(ji,jk) = ( zr14_vnostress(ji,jk) - &
++                  & zws(ji,jk) * zr14_vnostress(ji,jk+1) ) / zwd(ji,jk)
++            END_2D
++            CALL r14_zdf_row( jj, zr14_vnostress, pvv(:,jj,:,Kaa) )
++         ENDIF
+          !
+          !                                            ! ================= !
+       END_1D                                          !  i-k slices loop  !

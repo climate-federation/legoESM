@@ -43,6 +43,9 @@ Usage
 
 from __future__ import annotations
 
+import functools
+
+import jax
 import jax.numpy as jnp
 
 from legoesm.parallel.voronoi_partition import (
@@ -98,6 +101,12 @@ class VoronoiHaloExchange:
     def __init__(self, partition: VoronoiPartition, backend: str = "local"):
         self.partition = partition
         self.backend = backend
+        # One jit per entity type.  Called eagerly (host-side land coupling,
+        # CMOR feed), every mpi4jax sendrecv was re-lowered and recompiled on
+        # each call -- its comm wrapper has no __eq__, so the eager dispatch
+        # cache never hits (>= 120 ms per land exchange at 8 nodes).  Inside
+        # an outer jit the call simply inlines.
+        self._jit = {}
 
     def exchange_cell_field(self, field: jnp.ndarray) -> jnp.ndarray:
         """Exchange halo values for a cell-centered field.
@@ -128,9 +137,13 @@ class VoronoiHaloExchange:
         entity_type: int,
     ) -> jnp.ndarray:
         if self.backend == "mpi":
-            return _exchange_mpi(
-                field, comm, self.partition.rank, entity_type,
-            )
+            fn = self._jit.get(entity_type)
+            if fn is None:
+                fn = jax.jit(functools.partial(
+                    _exchange_mpi, comm=comm, rank=self.partition.rank,
+                    entity_type=entity_type))
+                self._jit[entity_type] = fn
+            return fn(field)
         # local backend: no-op (halos are already filled or irrelevant)
         return field
 

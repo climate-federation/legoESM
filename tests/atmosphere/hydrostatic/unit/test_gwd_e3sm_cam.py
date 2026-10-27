@@ -38,6 +38,19 @@ from legoesm.atmosphere.physics.gravity_wave_drag.e3sm_cam import (
     e3sm_cam_gwd,
 )
 
+
+_e3sm_cam_gwd_kernel = e3sm_cam_gwd
+
+
+def e3sm_cam_gwd(*args, **kw):
+    """The kernel with ``p_ref_half`` (E3SM pref_edge) = the test column's own
+    interfaces: these columns are built at surface pressure p_ref = 1e5 Pa, so
+    their interfaces ARE the reference interfaces a lane would pass."""
+    if "p_ref_half" not in kw:
+        ph = kw["p_half"] if "p_half" in kw else args[4]
+        kw["p_ref_half"] = jnp.asarray(ph)[0]
+    return _e3sm_cam_gwd_kernel(*args, **kw)
+
 # E3SM oracle constants (gw_common uses rair=287.04, cpair=1004.64).
 ORACLE_RAIR = 287.04
 ORACLE_CPAIR = 1004.64

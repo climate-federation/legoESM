@@ -128,7 +128,7 @@ def _run_serial(model, state, forcing, dt, n):
 
 
 def _run_spmd(model, mesh, n_real, state, forcing, dt, n, tracer_advection,
-              n_dev=N_DEV, halo_depth=None, relabel_depth=None):
+              n_dev=N_DEV, halo_depth=None, relabel_depth=None, **step_kw):
     from legoesm.parallel.voronoi_spmd_ocean import (
         build_mpas_ocean_spmd_layout,
         gather_state_mpas_ocean_spmd,
@@ -142,7 +142,7 @@ def _run_spmd(model, mesh, n_real, state, forcing, dt, n, tracer_advection,
         nlev=state.T.data.shape[1], **kw)
     if relabel_depth is not None:   # mutation: claim rings the layout lacks
         layout = layout._replace(halo_depth=relabel_depth)
-    step = make_sharded_mpas_ocean_step(model, layout)
+    step = make_sharded_mpas_ocean_step(model, layout, **step_kw)
     st = shard_state_mpas_ocean_spmd(state, layout)
     fw_s = jax.tree.map(lambda x: jax.device_put(x, layout.cell_sharding), fw)
     sf_s = jax.tree.map(lambda x: jax.device_put(x, layout.cell_sharding), sf)
@@ -808,3 +808,34 @@ def test_deep_halo_pcg_refuses_poly_preconditioner():
     finally:
         set_halo_backend("local")
         set_spmd_mesh(None)
+
+
+def test_land_fill_band_capacity_is_bit_identical():
+    """The sharded step with the run's land mask (land fill swept over the
+    coastal band only, capacity from the mask) equals the all-cells fill bit
+    for bit, and the capacity is a real restriction (0 < K < local cells)."""
+    _need_devices(N_DEV)
+    from legoesm.grids.halo import set_halo_backend, set_spmd_mesh
+    from legoesm.parallel.voronoi_spmd_ocean import (
+        build_mpas_ocean_spmd_layout, make_sharded_mpas_ocean_step)
+    mesh, n_real, model, state, forcing = _build({})
+    # Widen the land (the default polar caps are too small to hold cells
+    # three edges inland, so a band missing its last pass would go unseen).
+    lat = np.abs(np.degrees(np.asarray(mesh.latCell)))
+    mask = jnp.asarray(np.asarray(state.land_mask.data) * (lat < 45.0))
+    state = state._replace(land_mask=state.land_mask.replace(data=mask))
+    try:
+        full, layout = _run_spmd(model, mesh, n_real, state, forcing, 300.0, 3, "upwind")
+        band, _ = _run_spmd(model, mesh, n_real, state, forcing, 300.0, 3, "upwind",
+                            land_mask=mask)
+        cap = make_sharded_mpas_ocean_step(
+            model, build_mpas_ocean_spmd_layout(mesh, N_DEV, n_cells_real=n_real,
+                                                tracer_advection="upwind", nlev=4),
+            land_mask=mask).land_fill_band_capacity
+    finally:
+        set_halo_backend("local")
+        set_spmd_mesh(None)
+    assert 0 < cap < layout.max_lc, (cap, layout.max_lc)
+    for f in ("u", "T", "S", "eta", "w"):
+        a, b = np.asarray(getattr(full, f).data), np.asarray(getattr(band, f).data)
+        assert np.array_equal(a.view(np.uint64), b.view(np.uint64)), f

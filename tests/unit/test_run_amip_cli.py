@@ -961,6 +961,57 @@ def test_land_canopy_flags_without_two_leaf_are_refused(flag):
         cfg.validate_strict()
 
 
+def test_land_snow_insulation_round_trip_and_production_deck():
+    """The snow-thermal-node flag reaches ExperimentConfig both ways, and the
+    production deck records it explicitly OFF (user 2026-10-03)."""
+    from legoesm.driver.run_config_yaml import load_yaml_config
+    parser = build_arg_parser()
+    base = ["--dataset", "analytical", "--use-multilayer-land"]
+    cfg0 = build_config_from_args(_postprocess_args(parser.parse_args(base), parser))
+    assert cfg0.land_snow_insulation is False
+    cfg1 = build_config_from_args(_postprocess_args(parser.parse_args(
+        base + ["--land-snow-insulation"]), parser))
+    assert cfg1.land_snow_insulation is True
+    cfg2 = build_config_from_args(_postprocess_args(parser.parse_args(
+        base + ["--no-land-snow-insulation"]), parser))
+    assert cfg2.land_snow_insulation is False
+    p = build_arg_parser()
+    rows = load_yaml_config(
+        str(_repo_root() / "config" / "amip" / "amip_production.yaml"), p)
+    assert rows.get("land_snow_insulation") is False
+    p.set_defaults(**rows)
+    cfg = build_config_from_args(_postprocess_args(
+        p.parse_args(_AMIP_DUMMY_PATHS), p))
+    assert cfg.land_snow_insulation is False
+
+
+def test_land_snow_insulation_with_clm_ml_canopy_is_refused():
+    parser = build_arg_parser()
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args(
+        ["--dataset", "analytical", "--use-multilayer-land",
+         "--land-snow-insulation"]), parser))._replace(land_surface_scheme="clm_ml")
+    with pytest.raises(ValueError, match="land_snow_insulation is not supported"):
+        cfg.validate_strict()
+
+
+def test_land_snow_insulation_with_layered_snowpack_is_refused():
+    parser = build_arg_parser()
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args(
+        ["--dataset", "analytical", "--use-multilayer-land",
+         "--land-surface-scheme", "two_leaf", "--land-snow-scheme", "layered",
+         "--land-snow-insulation"]), parser))
+    with pytest.raises(ValueError, match="carries its own snow heat"):
+        cfg.validate_strict()
+
+
+def test_land_snow_insulation_without_multilayer_land_is_refused():
+    parser = build_arg_parser()
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args(
+        ["--dataset", "analytical", "--land-snow-insulation"]), parser))
+    with pytest.raises(ValueError, match="land_snow_insulation"):
+        cfg.validate_strict()
+
+
 @pytest.mark.parametrize("bad", ["0.1", "500"])
 def test_land_snow_tau_days_out_of_range_is_refused(bad):
     """0.5 d is melting spring snow and 400 d spans the cold plateau; outside
@@ -1055,11 +1106,11 @@ def test_mpas_land_stress_from_land_flag_flows_to_config():
 
 
 def test_mpas_ocean_flux_on_ocean_surface_flag_flows_to_config():
-    """--mpas-ocean-flux-on-ocean-surface round-trip; default off."""
+    """--mpas-ocean-flux-on-ocean-surface round-trip; unset = auto (None)."""
     parser = build_arg_parser()
     cfg_default = build_config_from_args(_postprocess_args(
         parser.parse_args(["--dataset", "analytical"]), parser))
-    assert cfg_default.ocean_flux_on_ocean_surface is False
+    assert cfg_default.ocean_flux_on_ocean_surface is None
     for flag, want in (("--mpas-ocean-flux-on-ocean-surface", True),
                        ("--no-mpas-ocean-flux-on-ocean-surface", False)):
         cfg = build_config_from_args(_postprocess_args(parser.parse_args([
@@ -1926,7 +1977,7 @@ def test_aimip_classical_overrides_spectral_refused(tmp_path):
     args = parser.parse_args(["--dataset", "analytical",
                               "--discretization", "spectral",
                               "--aimip-classical-checkpoint", ckpt])
-    with pytest.raises(SystemExit, match="spectral"):
+    with pytest.raises(SystemExit, match="AIMIP-classical forces tiedtke"):
         _apply_aimip_classical_overrides(args)
 
 
@@ -2429,8 +2480,13 @@ def test_config_yaml_round_trips_authoritative_values():
     # observed ocean rain all ran with it off.  cam6_clubb refuses it anyway
     # (deepcu is CAM6's own deep-convective cloud term), so it stays pinned.
     assert cfg.convective_cloud is False
-    assert cfg.surface_gustiness_zi == 300.0
-    assert cfg.convective_precip_efficiency == pytest.approx(0.8)
+    # surface_gustiness_zi removed 2026-10-19 (user): inert on large_yeager_cesm
+    # (CESM gust_fac = 0); the coastal ocean-surface flux is on (#1320).
+    assert cfg.surface_gustiness_zi is None
+    assert cfg.ocean_flux_on_ocean_surface is True
+    # No convective_precip_efficiency row: ZM has no precip-efficiency field,
+    # so the 0.8 the deck carried was read by nothing (oracle audit 2026-10-18).
+    assert cfg.convective_precip_efficiency is None
     # User table 2026-09-24, "production now, matches CAM6", three rows set
     # EXPLICITLY so nothing rests on a code default (the defaults are the
     # opposite of all three): the closure's liquid handed to cloud water; the
@@ -2479,6 +2535,10 @@ def _assert_optics_thinning(cfg, *, thinned: bool):
     # The MPAS lane's own builder (model_driver._run_column), so the pin reads
     # the config the run would radiate with, not the YAML.
     from legoesm.driver.model_driver import _standalone_cloud_config
+    from legoesm.driver.physics_pipeline import turbulence_config_for
+    from legoesm.atmosphere.physics.turbulence.integration import (
+        resolved_clubb_config,
+    )
     cloud_cfg = _standalone_cloud_config(
         cfg, cfg.cloud_scheme, allow_convective_cloud=True)
     assert cloud_cfg.cloud_partial_coverage_optics == "none"
@@ -2493,7 +2553,9 @@ def _assert_optics_thinning(cfg, *, thinned: bool):
         q_ice=jnp.zeros_like(q_c),
         cloud_fraction_override=jnp.full((1, 4), 0.5),
         # cam6_clubb's tropopause switch needs these; harmless to the others.
-        lat=jnp.zeros((1,)), p_half=p_half)
+        lat=jnp.zeros((1,)), p_half=p_half,
+        # cam6_clubb's aist top cut reads the run's resolved CLUBB config.
+        clubb_config=resolved_clubb_config(turbulence_config_for(cfg)))
     raw = q_c * dp / constants.g
     ratio = float(jnp.sum(props.lwp) / jnp.sum(raw))
     if thinned:
@@ -4048,7 +4110,8 @@ def test_hard_saturation_adjustment_requires_a_guarded_scheme():
         HARD_SAT_GUARD_EXEMPT,
     )
     parser = build_arg_parser()
-    assert set(HARD_SAT_GUARD_EXEMPT) == {"sdm", "fast_sbm", "none"}
+    assert set(HARD_SAT_GUARD_EXEMPT) == {"sdm", "fast_sbm", "none", "kessler",
+                                          "seifert_beheng"}
     for micro in sorted(HARD_SAT_GUARD_EXEMPT):
         cfg = build_config_from_args(_postprocess_args(parser.parse_args([
             "--dataset", "analytical", "--microphysics", micro,
@@ -4067,9 +4130,8 @@ def test_hard_saturation_adjustment_accepted_by_every_guarded_scheme():
     )
     parser = build_arg_parser()
     exposed = [s for s in HARD_SAT_GUARD_SCHEMES
-               if s in {"kessler", "sundqvist", "seifert_beheng", "morrison",
-                        "thompson", "p3"}]
-    assert len(exposed) == 6, exposed
+               if s in {"sundqvist", "morrison", "thompson", "p3"}]
+    assert len(exposed) == 4, exposed
     for micro in exposed:
         cfg = build_config_from_args(_postprocess_args(parser.parse_args([
             "--dataset", "analytical", "--microphysics", micro,
@@ -4089,6 +4151,20 @@ def test_morrison_flavor_round_trips():
     d = build_config_from_args(_postprocess_args(
         parser.parse_args(["--dataset", "analytical"]), parser))
     assert d.morrison_flavor == "mg"
+
+
+def test_morrison_ice_snow_d_auto_round_trips():
+    """--morrison-ice-snow-d-auto (and the deck key) reach ExperimentConfig;
+    default unset (None = the flavor's DCS)."""
+    parser = build_arg_parser()
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--microphysics", "morrison",
+        "--morrison-ice-snow-d-auto", "3.0e-4",
+    ]), parser))
+    assert cfg.morrison_ice_snow_d_auto == 3.0e-4
+    d = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert d.morrison_ice_snow_d_auto is None
 
 
 def test_morrison_flavor_yaml_route():
@@ -4718,14 +4794,18 @@ def test_persistent_dgrid_flag_flows_to_config_1028():
 def test_clubb_trop_cloud_top_press_reaches_the_turbulence_kernel():
     """The CLUBB upper domain limit (CAM trop_cloud_top_press) was a scheme
     field no run could set; the flag threads it through the same single source
-    the prognostic flag uses, and None keeps the scheme's own 0 (off)."""
+    the prognostic flag uses, and None keeps the scheme's own default, CAM6's
+    namelist 100 Pa (namelist_defaults_cam.xml:1295)."""
+    from legoesm.atmosphere.physics.turbulence.integration import (
+        resolved_clubb_config,
+    )
     from legoesm.driver.physics_pipeline import turbulence_config_for
     parser = build_arg_parser()
     cfg_off = build_config_from_args(_postprocess_args(parser.parse_args(
         ["--dataset", "analytical", "--turbulence", "clubb"]), parser))
     assert cfg_off.clubb_trop_cloud_top_press is None
     tc_off = turbulence_config_for(cfg_off)
-    assert tc_off.clubb is None or tc_off.clubb.trop_cloud_top_press == 0.0
+    assert resolved_clubb_config(tc_off).trop_cloud_top_press == 100.0
     cfg_on = build_config_from_args(_postprocess_args(parser.parse_args(
         ["--dataset", "analytical", "--turbulence", "clubb",
          "--clubb-trop-cloud-top-press", "15000"]), parser))
@@ -5251,6 +5331,47 @@ def test_production_deck_pins_the_zm_land_fraction_policy():
     assert keys["zm_land_fraction"] == "required"
 
 
+def test_zm_transport_cloud_tracers_flows_to_config_and_kernel():
+    """--[no-]zm-transport-cloud-tracers threads CLI -> ExperimentConfig ->
+    ZhangMcFarlaneConfig and survives the AMIP export; default on (CAM6)."""
+    from legoesm.driver.config import ExperimentConfig
+    from legoesm.driver.physics_pipeline import _resolve_convection
+    parser = build_arg_parser()
+    base = ["--dataset", "analytical", "--convection", "zhang_mcfarlane"]
+    cfg_on = build_config_from_args(_postprocess_args(parser.parse_args(base), parser))
+    cfg_off = build_config_from_args(_postprocess_args(parser.parse_args(
+        base + ["--no-zm-transport-cloud-tracers"]), parser))
+    assert cfg_on.zm_transport_cloud_tracers is True
+    assert cfg_off.zm_transport_cloud_tracers is False
+    assert _resolve_convection(cfg_on)[1].transport_cloud_tracers is True
+    assert _resolve_convection(cfg_off)[1].transport_cloud_tracers is False
+    for c in (cfg_on, cfg_off):
+        assert ExperimentConfig.from_amip_config(
+            c.to_amip_config()).zm_transport_cloud_tracers == c.zm_transport_cloud_tracers
+    # a quoted YAML "false" reaches the config as a str (truthy); refuse it
+    with pytest.raises(ValueError, match="zm_transport_cloud_tracers"):
+        cfg_on._replace(zm_transport_cloud_tracers="false").validate_strict()
+
+
+def test_production_deck_pins_zm_tracer_transport_on():
+    from legoesm.driver.run_config_yaml import load_yaml_config
+    for deck in ("amip_production.yaml", "amip_production_fv3duo_c24.yaml"):
+        keys = load_yaml_config(
+            str(_repo_root() / "config" / "amip" / deck), build_arg_parser())
+        assert keys["zm_transport_cloud_tracers"] is True, deck
+
+
+def test_production_deck_pins_the_reference_aod():
+    """User decision 2026-10-15: production's reference AOD (0.03) is a deck
+    row, not the run_amip default; the duo deck inherits it via include."""
+    from legoesm.driver.run_config_yaml import load_yaml_config
+    amip = _repo_root() / "config" / "amip"
+    for deck in ("amip_production.yaml", "amip_production_fv3duo_c24.yaml"):
+        keys = load_yaml_config(str(amip / deck), build_arg_parser())
+        assert keys["aerosol_reference_aod"] == 0.03, deck
+        assert _resolved_deck_fields(amip / deck)["aerosol_reference_aod"] == 0.03, deck
+
+
 def test_mpas_land_params_refresh_flag_flows_to_config():
     """--mpas-land-params-refresh round-trip: default ON (user 2026-09-29),
     --no- form reaches the config, and a YAML false pin is honoured."""
@@ -5371,21 +5492,209 @@ def test_forcing_hold_outside_file_years_round_trips_and_defaults_off():
 
 def test_mpas_vert4_flux_form_tracers_flag_flows_to_dycore_config():
     """--mpas-vert4-flux-form-tracers reaches DycoreConfig as a tuple; absent
-    means the default (q_v, owner decision 2026-10); the bare flag means none."""
+    means the default (none since 2026-10-15: q_v takes the log form); the bare
+    flag means none."""
     parser = build_arg_parser()
     cfg_default = build_config_from_args(_postprocess_args(
         parser.parse_args(["--dataset", "analytical"]), parser))
-    assert cfg_default.dycore.mpas_vert4_flux_form_tracers == ("q_v",)
+    assert cfg_default.dycore.mpas_vert4_flux_form_tracers == ()
     cfg_none = build_config_from_args(_postprocess_args(parser.parse_args([
         "--dataset", "analytical", "--mpas-vert4-flux-form-tracers"]), parser))
     assert cfg_none.dycore.mpas_vert4_flux_form_tracers == ()
+    # The pre-2026-10-15 spelling (flux flag alone) now overlaps the log default:
+    # a hard error that names the flag to add (user decision by vote 2026-10-15).
+    old = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--mpas-vert4-flux-form-tracers", "q_v"]), parser))
+    with pytest.raises(ValueError, match=r"--mpas-vert4-log-form-tracers with no names"):
+        old.validate_strict()
     cfg_set = build_config_from_args(_postprocess_args(parser.parse_args([
         "--dataset", "analytical", "--mpas-vert4-flux-form-tracers", "q_v",
-    ]), parser))
+        "--mpas-vert4-log-form-tracers"]), parser))
     assert cfg_set.dycore.mpas_vert4_flux_form_tracers == ("q_v",)
+    cfg_set.validate_strict()
     # a typo'd tracer name is refused at validation (the dycore would skip it)
     for typo in (("qv",), ("trc_q_v",), "q_v", ""):
         bad = cfg_set._replace(dycore=cfg_set.dycore._replace(
             mpas_vert4_flux_form_tracers=typo))
         with pytest.raises(ValueError, match="mpas_vert4_flux_form_tracers"):
             bad.validate_strict()
+
+
+def test_mpas_vert4_log_form_tracers_flag_flows_to_dycore_config():
+    """--mpas-vert4-log-form-tracers reaches DycoreConfig as a tuple; absent
+    means q_v (code default since 2026-10-15, user decision); typos and an
+    overlap with the flux-form list are refused at validation."""
+    parser = build_arg_parser()
+    cfg_default = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg_default.dycore.mpas_vert4_log_form_tracers == ("q_v",)
+    assert cfg_default.dycore.mpas_vert4_flux_form_tracers == ()
+    cfg_default.validate_strict()
+    from legoesm.driver.config import DycoreConfig
+    assert DycoreConfig().mpas_vert4_log_form_tracers == ("q_v",)
+    assert DycoreConfig().mpas_vert4_flux_form_tracers == ()
+    cfg_set = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--mpas-vert4-flux-form-tracers",
+        "--mpas-vert4-log-form-tracers", "q_v"]), parser))
+    assert cfg_set.dycore.mpas_vert4_log_form_tracers == ("q_v",)
+    assert cfg_set.dycore.mpas_vert4_flux_form_tracers == ()
+    cfg_set.validate_strict()
+    for typo in (("qv",), "q_v", ""):
+        bad = cfg_set._replace(dycore=cfg_set.dycore._replace(
+            mpas_vert4_log_form_tracers=typo))
+        with pytest.raises(ValueError, match="mpas_vert4_log_form_tracers"):
+            bad.validate_strict()
+    both = cfg_set._replace(dycore=cfg_set.dycore._replace(
+        mpas_vert4_flux_form_tracers=("q_v",)))
+    with pytest.raises(ValueError, match="each tracer takes one filter form"):
+        both.validate_strict()
+
+
+def test_production_deck_selects_log_form_vapour_filter():
+    """Production deck -> loader -> DycoreConfig: vapour takes the log form of
+    the MPAS vertical del4 filter and no tracer takes the flux form (user
+    approved 2026-10-15).  Red if the deck row is dropped or reverted."""
+    from legoesm.driver.run_config_yaml import load_yaml_config
+    parser = build_arg_parser()
+    keys = load_yaml_config(
+        str(_repo_root() / "config" / "amip" / "amip_production.yaml"), parser)
+    parser.set_defaults(**keys)
+    # No _postprocess_args: it needs forcing paths the deck lacks and does not
+    # touch the vert4 keys (same as the div-damp4 deck test).
+    cfg = build_config_from_args(parser.parse_args([]))
+    assert cfg.dycore.mpas_vert4_log_form_tracers == ("q_v",)
+    assert cfg.dycore.mpas_vert4_flux_form_tracers == ()
+
+
+_DRY_BASE = ["--grid-type", "latlon", "--dataset", "analytical", "--dry-run"]
+
+
+def test_dry_run_reports_missing_input_and_returns_1(tmp_path, capsys):
+    from scripts.run.run_amip import main
+    gone = str(tmp_path / "no_such_restart.npz")
+    assert main(_DRY_BASE + ["--restart-from", gone]) == 1
+    out = capsys.readouterr().out
+    assert "MISSING" in out and gone in out
+    assert "Setup..." not in out
+
+
+def test_dry_run_all_present_returns_0(tmp_path, capsys):
+    from scripts.run.run_amip import main
+    here = tmp_path / "restart.npz"
+    here.write_bytes(b"")
+    assert main(_DRY_BASE + ["--restart-from", str(here)]) == 0
+    out = capsys.readouterr().out
+    assert "all input files present" in out and "MISSING" not in out
+
+
+def test_dry_run_builtin_topography_is_not_a_file(capsys):
+    from scripts.run.run_amip import main
+    assert main(_DRY_BASE + ["--topography", "gaussian"]) == 0
+    assert "not used  topography" in capsys.readouterr().out
+
+
+def test_dry_run_reports_missing_ml_stats(tmp_path, capsys):
+    from scripts.run.run_amip import main
+    gone = str(tmp_path / "no_such_stats.npz")
+    assert main(_DRY_BASE + ["--physics-parameterization-stats", gone]) == 1
+    out = capsys.readouterr().out
+    assert "MISSING" in out and gone in out
+
+
+def test_dry_run_reports_missing_aimip_checkpoint_before_loading(tmp_path, capsys):
+    from scripts.run.run_amip import main
+    gone = str(tmp_path / "no_such_aimip.eqx")
+    assert main(_DRY_BASE + ["--aimip-classical-checkpoint", gone]) == 1
+    out = capsys.readouterr().out
+    assert "MISSING" in out and gone in out
+
+
+def test_dry_run_finds_suffixless_aimip_checkpoint(tmp_path, capsys):
+    from scripts.run.run_amip import main
+    (tmp_path / "epoch_0019.eqx").write_bytes(b"")
+    assert main(_DRY_BASE + ["--aimip-classical-checkpoint",
+                             str(tmp_path / "epoch_0019")]) == 0
+    assert "MISSING" not in capsys.readouterr().out
+
+
+def test_dry_run_suffixless_aimip_checkpoint_checks_the_eqx_file(tmp_path, capsys):
+    from scripts.run.run_amip import main
+    (tmp_path / "exp1").mkdir()  # the literal path exists; the loader opens exp1.eqx
+    assert main(_DRY_BASE + ["--aimip-classical-checkpoint",
+                             str(tmp_path / "exp1")]) == 1
+    assert "MISSING" in capsys.readouterr().out
+    (tmp_path / "exp1.eqx").mkdir()  # a directory is not a checkpoint file
+    assert main(_DRY_BASE + ["--aimip-classical-checkpoint",
+                             str(tmp_path / "exp1")]) == 1
+
+
+def test_dry_run_keeps_aimip_spectral_refusal(tmp_path):
+    from scripts.run.run_amip import main
+    gone = str(tmp_path / "no_such_aimip.eqx")
+    with pytest.raises(SystemExit, match="AIMIP-classical forces tiedtke"):
+        main(["--grid-type", "gaussian", "--discretization", "spectral",
+              "--dataset", "analytical", "--dry-run",
+              "--aimip-classical-checkpoint", gone])
+
+
+def test_dry_run_exit_code_reaches_the_shell(tmp_path):
+    import subprocess
+    gone = str(tmp_path / "no_such_restart.npz")
+    proc = subprocess.run(
+        [sys.executable, "scripts/run/run_amip.py", *_DRY_BASE,
+         "--restart-from", gone],
+        capture_output=True, text=True, env={**__import__("os").environ,
+                                             "JAX_PLATFORMS": "cpu"})
+    assert proc.returncode == 1, proc.stderr[-2000:]
+
+
+def test_latlon48_deck_resolves_div4_and_cam_polar_cutoff_into_the_dycore():
+    """The lat-lon production deck (NEW lat-lon baseline 2026-10-13) resolves
+    to the MPAS deck's div-4 scale and CAM's polar-filter start, and both
+    reach the dycore the run steps (resolved config + factory, not deck text)."""
+    import math
+    from legoesm.driver.component_factory import create_atmosphere_dycore
+    from legoesm.driver.run_config_yaml import load_yaml_config
+    from legoesm.grids.latlon import create_latlon_grid
+    from legoesm.grids.vertical import make_cam6_l32_levels
+    amip = _repo_root() / "config" / "amip"
+    ll = _resolved_deck_fields(amip / "amip_production_latlon48.yaml")
+    mpas = _resolved_deck_fields(amip / "amip_production.yaml")
+    assert ll["dycore.mpas_div_damp4_scale"] == mpas["dycore.mpas_div_damp4_scale"] == 1.0
+    assert ll["dycore.use_polar_filter"] is True
+    # CAM: acos(min(0.81, 96/94)), a LATITUDE (CAM compares cos(lat) with it)
+    assert ll["dycore.polar_filter_cutoff_deg"] == 35.9041
+    assert abs(ll["dycore.polar_filter_cutoff_deg"] - math.degrees(math.acos(0.81))) < 1e-4
+    parser = build_arg_parser()
+    keys = load_yaml_config(str(amip / "amip_production_latlon48.yaml"), parser)
+    parser.set_defaults(**keys, _config_keys=frozenset(keys))
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args(
+        _AMIP_DUMMY_PATHS + ["--clm-surfdata-path", "/dummy/surfdata.nc"]), parser))
+    grid = create_latlon_grid(n_lat=cfg.grid.resolution, radius=constants.R_earth,
+                              omega=constants.Omega)
+    dyn = create_atmosphere_dycore(cfg, grid, make_cam6_l32_levels(),
+                                   latlon_native_grid=grid).dyn
+    assert dyn.config.nu_div4_scale == 1.0
+    assert dyn.config.use_polar_filter is True
+    assert dyn.config.polar_filter_cutoff_deg == 35.9041
+    assert dyn.dt == cfg.dycore.dt == 450.0
+def test_mcfarlane_effgw_oro_flag_flows_to_config():
+    """--mcfarlane-effgw-oro round-trips into ExperimentConfig (#1712); the
+    default is CAM6's 0.125 and the production deck pins that value."""
+    parser = build_arg_parser()
+    cfg_default = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg_default.mcfarlane_effgw_oro == 0.125
+
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--mcfarlane-effgw-oro", "0.3",
+    ]), parser))
+    assert cfg.mcfarlane_effgw_oro == 0.3
+
+    from pathlib import Path
+    deck = str(Path(__file__).resolve().parents[2]
+               / "config/amip/amip_production.yaml")
+    from legoesm.driver.run_config_yaml import load_yaml_config
+    parser = build_arg_parser()
+    # The deck sets the dest as a parser default, exactly as main() applies it.
+    assert load_yaml_config(deck, parser)["mcfarlane_effgw_oro"] == 0.125

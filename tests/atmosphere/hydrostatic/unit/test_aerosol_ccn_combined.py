@@ -245,3 +245,40 @@ def test_fill_matches_specified_nc_field():
     assert n_c.shape == (ncol, nlev)
     assert jnp.all(n_c > 0.0)
     assert jnp.allclose(n_c, n_c[0, 0])
+
+
+# ---------------------------------------------------------------------------
+# radiation factory: the aerosol number reaches the cloud optics as IN-CLOUD
+# ---------------------------------------------------------------------------
+
+class _BackendReached(Exception):
+    pass
+
+
+@pytest.mark.parametrize("nc_from_aerosol", [True, False])
+def test_radiation_flags_aerosol_number_in_cloud(monkeypatch, nc_from_aerosol):
+    """The hydrostatic/MPAS radiation physics_fn (_make_hydrostatic_radiation,
+    the MPAS ``_run_column`` lane) must hand the activated CCN number to the
+    cloud optics with ``n_cloud_in_cloud=True`` (CAM6 MG2 nccons footing), and
+    the prognostic-tracer path with False (#1521)."""
+    from legoesm.atmosphere.physics.radiation import integration as rad_int
+    from legoesm.atmosphere.physics.radiation.config import RRTMGPConfig
+
+    seen = {}
+
+    def _spy(**kw):
+        seen.update(kw)
+        raise _BackendReached
+
+    monkeypatch.setattr(rad_int, "_call_radiation_backend", _spy)
+    grid, sigma = _setup()
+    state = _moist_state(grid, sigma)
+    fn = rad_int.make_radiation_physics(
+        RadiationConfig(scheme="rrtmgp", rrtmgp=RRTMGPConfig(include_clouds=True)),
+        model_type="hydrostatic", nc_from_aerosol=nc_from_aerosol)
+    with pytest.raises(_BackendReached):
+        fn(state, grid, sigma, forcing={**_aerosol_forcing(grid, sigma, 0.1),
+                                        "day_of_year": jnp.asarray(80.0)})
+    assert seen["n_cloud_in_cloud"] is nc_from_aerosol
+    if nc_from_aerosol:
+        assert float(jnp.min(seen["n_cloud"])) > 1.0  # the CCN number, not the dead carry

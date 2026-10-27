@@ -407,6 +407,15 @@ def make_train_step(optimizer: optax.GradientTransformation, grid: GaussianGrid)
     return train_step
 
 
+def checkpoint_view(model):
+    """``model`` with each module's on-disk view (AIMIP frozen knobs: see
+    AIMIPClassicalParams.for_checkpoint), so a checkpoint loads into an
+    all-array template as well as into a frozen one."""
+    return jax.tree_util.tree_map(
+        lambda x: x.for_checkpoint() if hasattr(x, "for_checkpoint") else x,
+        model, is_leaf=lambda x: hasattr(x, "for_checkpoint"))
+
+
 def save_checkpoint(
     model,
     path: str | Path,
@@ -433,11 +442,7 @@ def save_checkpoint(
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f"{path.name}.tmp-{os.getpid()}")
-    # A module may supply its on-disk view (AIMIP frozen knobs: see
-    # AIMIPClassicalParams.for_checkpoint).
-    model = jax.tree_util.tree_map(
-        lambda x: x.for_checkpoint() if hasattr(x, "for_checkpoint") else x,
-        model, is_leaf=lambda x: hasattr(x, "for_checkpoint"))
+    model = checkpoint_view(model)
     try:
         eqx.tree_serialise_leaves(str(tmp), model)
         os.replace(tmp, path)

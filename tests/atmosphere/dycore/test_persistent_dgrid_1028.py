@@ -311,7 +311,8 @@ def test_driver_refuses_the_lanes_it_did_not_wire(cube):
 
     def _stub(grid_type="cubed_sphere", model_type="hydrostatic",
               discretization="cdgrid", coupled=False, ensemble=1):
-        st = type("S", (), {})()
+        st = ModelDriver.__new__(ModelDriver)     # methods, no setup
+        st._carry_aux = {}
         st.config = _Cfg()
         st.config.grid = _Cfg(); st.config.grid.grid_type = grid_type
         st.config.dycore = _Cfg()

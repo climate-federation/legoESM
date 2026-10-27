@@ -1132,11 +1132,9 @@ def make_sharded_atm_latlon_segment(model, mesh, n_steps: int,
     bit-identical numerics, 1/n_dev the geometry bytes
     (:func:`atm_latlon_geometry_bytes`).
 
-    STATELESS physics only (``None`` / Held-Suarez / column-local closures,
-    the production ``run_atm_latlon_spmd`` envelope): a stateful
-    ``PhysicsState`` carry is refused loudly — thread it through the
-    per-step :func:`make_sharded_atm_latlon_step` until the segment lane
-    routes the carry through the scan.
+    A physics carry ``segment(c_state, dt, phys_state=ps) -> (c_state,
+    all_finite, ps_out)`` is threaded through the scan exactly as the
+    per-step factory threads it (``(ncol, ...)`` leaves band-split on dim 0).
 
     ``mesh=None``: the single-device twin — ``jit(lax.scan)`` over the serial
     C-grid step with the model's own geometry, same ``(state, all_finite)``
@@ -1174,31 +1172,32 @@ def make_sharded_atm_latlon_segment(model, mesh, n_steps: int,
     def _refuse_carry(phys_state):
         refuse_unthreaded_stateful_physics(
             physics_fn, phys_state, where="atm lat-lon compiled segment")
-        if phys_state is not None:
-            raise NotImplementedError(
-                "make_sharded_atm_latlon_segment: a stateful PhysicsState "
-                "carry is not yet segment-routed — use the per-step "
-                "make_sharded_atm_latlon_step(phys_state=...) path.")
+
+    def _scan_steps(step_sp, state, ps):
+        """``n_steps`` of ``step_sp((s, ps)) -> (s, ps)``: dtype-fixed-point
+        unroll then ``lax.scan``; ``ps=None`` carries nothing."""
+        out, n_left = unroll_to_dtype_fixed_point(
+            step_sp, (state, ps), n_steps)
+        if n_left > 0:
+            out, _ = jax.lax.scan(lambda c, _x: (step_sp(c), None),
+                                  out, xs=None, length=n_left)
+        return out
 
     if mesh is None:                       # single-device compiled segment
-        def _serial_seg(c_state, dt):
-            def _step1(s):
-                out, _ps = model._step_cgrid_impl(
-                    s, dt, physics_fn=physics_fn, phys_state=None)
-                return out
-            # Unroll to the scan-carry dtype fixed point (helper docstring).
-            out, n_left = unroll_to_dtype_fixed_point(
-                _step1, c_state, n_steps)
-            if n_left > 0:
-                out, _ = jax.lax.scan(lambda s, _x: (_step1(s), None),
-                                      out, xs=None, length=n_left)
-            return out, state_finite_scalar(out)
+        def _serial_seg(c_state, dt, ps):
+            def _step_sp(c):
+                out, ps_out = model._step_cgrid_impl(
+                    c[0], dt, physics_fn=physics_fn, phys_state=c[1])
+                return out, (None if c[1] is None else ps_out)
+            out, ps_out = _scan_steps(_step_sp, c_state, ps)
+            return out, state_finite_scalar(out), ps_out
 
         fn_serial = jax.jit(_serial_seg)
 
         def serial_segment(c_state, dt, phys_state=None):
             _refuse_carry(phys_state)
-            return fn_serial(c_state, jnp.asarray(dt))
+            out, ok, ps_out = fn_serial(c_state, jnp.asarray(dt), phys_state)
+            return (out, ok) if phys_state is None else (out, ok, ps_out)
 
         return serial_segment
 
@@ -1215,16 +1214,27 @@ def make_sharded_atm_latlon_segment(model, mesh, n_steps: int,
         shard_geometry)
 
     def _seg_body(state_local, stacks_local, dt):
-        def _step1(s):
-            out, _ps = band_step(s, stacks_local, dt, None)
-            return out
-        # Unroll to the scan-carry dtype fixed point (helper docstring).
-        out, n_left = unroll_to_dtype_fixed_point(
-            _step1, state_local, n_steps)
-        if n_left > 0:
-            out, _ = jax.lax.scan(lambda s, _x: (_step1(s), None),
-                                  out, xs=None, length=n_left)
+        def _step_sp(c):
+            out, _ps = band_step(c[0], stacks_local, dt, None)
+            return out, None
+        out, _ = _scan_steps(_step_sp, state_local, None)
         return out, state_finite_scalar(out, axis=axis)
+
+    def _seg_body_with_carry(state_local, stacks_local, dt, ps_local):
+        def _step_sp(c):
+            return band_step(c[0], stacks_local, dt, c[1])
+        out, ps_out = _scan_steps(_step_sp, state_local, ps_local)
+        return out, state_finite_scalar(out, axis=axis), ps_out
+
+    _ncol_global = int(model.grid.n_lat) * int(model.grid.n_lon)
+
+    def _ps_spec_leaf(leaf):
+        # Same layout rule as the per-step factory: (ncol, ...) leaves
+        # band-split on dim 0 (lat-major flatten), everything else replicated.
+        if (hasattr(leaf, "ndim") and leaf.ndim >= 1
+                and leaf.shape[0] == _ncol_global):
+            return P("lat")
+        return P()
 
     _cache = {}
 
@@ -1232,19 +1242,30 @@ def make_sharded_atm_latlon_segment(model, mesh, n_steps: int,
         _agree_spmd_call(mesh, c_state, phys_state,
                          where="make_sharded_atm_latlon_segment.segment")
         _refuse_carry(phys_state)
-        # Cache key = state pytree STRUCTURE (in/out specs derive from it) —
-        # same doctrine as the per-step factory.
-        key = jax.tree.structure(c_state)
+        # Cache key = (state, carry) pytree STRUCTURE (in/out specs derive
+        # from both) — same doctrine as the per-step factory.
+        key = (jax.tree.structure(c_state),
+               None if phys_state is None
+               else jax.tree_util.tree_structure(phys_state))
         fn = _cache.get(key)
         if fn is None:
             in_spec = jax.tree.map(lat_spec, c_state)
-            fn = jax.jit(shard_map(
-                _seg_body, mesh=mesh,
-                in_specs=(in_spec, stacks_spec, P()),
-                out_specs=(in_spec, P()), check_vma=False))
+            if phys_state is None:
+                fn = jax.jit(shard_map(
+                    _seg_body, mesh=mesh,
+                    in_specs=(in_spec, stacks_spec, P()),
+                    out_specs=(in_spec, P()), check_vma=False))
+            else:
+                ps_spec = jax.tree.map(_ps_spec_leaf, phys_state)
+                fn = jax.jit(shard_map(
+                    _seg_body_with_carry, mesh=mesh,
+                    in_specs=(in_spec, stacks_spec, P(), ps_spec),
+                    out_specs=(in_spec, P(), ps_spec), check_vma=False))
             _cache[key] = fn
         with _latlon_spmd_armed(mesh):
-            return fn(c_state, stacks, jnp.asarray(dt))
+            if phys_state is None:
+                return fn(c_state, stacks, jnp.asarray(dt))
+            return fn(c_state, stacks, jnp.asarray(dt), phys_state)
 
     segment._geom_stacks = stacks   # test/introspection only
     return segment
@@ -1325,7 +1346,7 @@ def run_atm_latlon_spmd_segment(model, mesh, hs_init, dt, n_steps,
 
 def run_atm_latlon_spmd(model, mesh, hs_init, dt, n_steps, *,
                         segment_steps=None, physics_fn=None, on_segment=None,
-                        compiled_segments=False):
+                        compiled_segments=False, segment_forcing=None):
     """Production lat-band-SPMD run driver: integrate ``n_steps`` of the C-grid
     hydrostatic atm in SEGMENTS, returning ``(hs_final, status)``.
 
@@ -1365,6 +1386,12 @@ def run_atm_latlon_spmd(model, mesh, hs_init, dt, n_steps, *,
     on_segment : callable | None      ``on_segment(hs_global, step_done)`` at each
                                       segment boundary (post-gather, for I/O); the
                                       gathered state is a COPY, not fed back.
+    segment_forcing : callable | None ``segment_forcing(step_done) -> pytree``
+                                      evaluated at each segment START and handed
+                                      to ``physics_fn`` as its 4th argument for
+                                      every step of that segment (``(ncol, ...)``
+                                      leaves band-split); the physics returns it
+                                      unchanged.  ``None``: 3-arg physics.
     compiled_segments : bool          M2b opt-in (default ``False`` =
                                       historical per-step path, byte-identical).
                                       ``True``: each segment runs as ONE
@@ -1400,6 +1427,7 @@ def run_atm_latlon_spmd(model, mesh, hs_init, dt, n_steps, *,
                       compiled_segments=compiled_segments,
                       has_physics_fn=physics_fn is not None,
                       has_on_segment=on_segment is not None,
+                      has_phys_state=segment_forcing is not None,
                       where="run_atm_latlon_spmd")
     import jax.numpy as jnp
     # A face-wind input (a driver carrying the native C-grid winds) gets face
@@ -1428,7 +1456,11 @@ def run_atm_latlon_spmd(model, mesh, hs_init, dt, n_steps, *,
         done = 0
         while done < n_steps:
             this = min(seg, n_steps - done)
-            c_state, ok = _seg_fn(this)(c_state, dt)
+            if segment_forcing is None:
+                c_state, ok = _seg_fn(this)(c_state, dt)
+            else:
+                c_state, ok, _ = _seg_fn(this)(
+                    c_state, dt, phys_state=segment_forcing(done))
             done += this
             # ONE scalar host read per segment (the M2b finite check); the
             # full state is gathered only on blowup / for the callback.
@@ -1450,8 +1482,13 @@ def run_atm_latlon_spmd(model, mesh, hs_init, dt, n_steps, *,
     status = "COMPLETED"
     while done < n_steps:
         this = min(seg, n_steps - done)
-        for _ in range(this):
-            c_state = step(c_state, dt)
+        if segment_forcing is None:
+            for _ in range(this):
+                c_state = step(c_state, dt)
+        else:
+            _sf = segment_forcing(done)
+            for _ in range(this):
+                c_state, _ = step(c_state, dt, phys_state=_sf)
         done += this
         # Gather a cell-centered COPY for output / blowup-check ONLY — the
         # integration continues from c_state (sharded C-grid), so the lossy

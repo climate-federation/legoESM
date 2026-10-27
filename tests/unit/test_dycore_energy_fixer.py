@@ -87,7 +87,7 @@ def mpas():
     set_policy(prev)
 
 
-def _mpas_model(mesh, sigma, fixer):
+def _mpas_model(mesh, sigma, fixer, fix_mass=False):
     from legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas import (
         MPASPrimitiveEquationConfig, MPASPrimitiveEquationModel)
     # damping ON (the sink the fixer closes); no mass fixer, so the step's
@@ -95,7 +95,7 @@ def _mpas_model(mesh, sigma, fixer):
     cfg = MPASPrimitiveEquationConfig(
         nu_del2=2.0e5, nu_del4=1.0e19, nu_div4=1.0e19,
         sponge_del2_top_layers=2, sponge_del2_top_factor=8.0,
-        fix_mass=False, energy_fixer=fixer)
+        fix_mass=fix_mass, energy_fixer=fixer)
     return MPASPrimitiveEquationModel(mesh, sigma, cfg)
 
 
@@ -124,6 +124,24 @@ def test_mpas_step_conserves_total_energy_with_the_fixer(mpas):
     dT = np.asarray(on.T.data - off.T.data)
     assert np.all(dT > 0.0) and np.ptp(dT) < 1e-12   # K: T round-off only
     np.testing.assert_array_equal(np.asarray(on.u.data), np.asarray(off.u.data))
+
+
+def test_mpas_mass_fixer_is_energy_neutral_with_the_fixer(mpas):
+    """The dry-mass fixer runs after physics, OUTSIDE the energy window (F15
+    V8): with the fixer on, the energy its p_s shift changes comes back as
+    heat, so a step whose fixer moves real mass still closes E."""
+    mesh, sigma, s0 = mpas
+    model = _mpas_model(mesh, sigma, True, fix_mass=True)
+    target = model.compute_mass(s0) * (1.0 + 1.0e-5)   # the fixer adds mass
+    on = model.step_pure(s0, DT, target_mass=target)[0]
+    e0 = _mpas_energy(s0, mesh, sigma)
+    rel_on = (_mpas_energy(on, mesh, sigma) - e0) / e0
+    assert abs(rel_on) < 1e-13, rel_on
+    # NON-VACUITY: the fixer moved ~1 Pa of air, whose energy at fixed T is
+    # ~1e-5 of E (a dynamics-window-only fixer leaves exactly that open)
+    dps = float(jnp.mean(on.p_s.data - _mpas_model(mesh, sigma, True)
+                         .step(s0, DT).p_s.data))
+    assert dps > 0.5, dps
 
 
 def test_mpas_fixer_is_differentiable(mpas):
@@ -304,15 +322,16 @@ def _latlon_energy(s, grid, sigma):
                            h.phis.data, sigma, grid.area)
 
 
-def _latlon_step(grid, sigma, state, fixer, physics_fn=None):
+def _latlon_step(grid, sigma, state, fixer, physics_fn=None, fix_mass=False,
+                 target_mass=None):
     from legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid import (
         CGridLatLonPrimitiveEquationConfig, CGridLatLonPrimitiveEquationModel)
     # viscosity ON (the sink the fixer closes); no mass fixer, so the step's
     # only energy change is the dynamics window's (plus the physics)
-    cfg = CGridLatLonPrimitiveEquationConfig(A_h=1.0e5, fix_mass=False,
+    cfg = CGridLatLonPrimitiveEquationConfig(A_h=1.0e5, fix_mass=fix_mass,
                                              energy_fixer=fixer)
     model = CGridLatLonPrimitiveEquationModel(grid, sigma, cfg, dt=DT)
-    return model._step_cgrid(state, DT, None, physics_fn, None)[0]
+    return model._step_cgrid(state, DT, target_mass, physics_fn, None)[0]
 
 
 def test_latlon_step_conserves_total_energy_with_the_fixer(fp64_policy):
@@ -328,6 +347,91 @@ def test_latlon_step_conserves_total_energy_with_the_fixer(fp64_policy):
     dT = np.asarray(on.T - off.T)               # a uniform heating, nothing else
     assert np.ptp(dT) < 1e-12 and dT.flat[0] != 0.0
     np.testing.assert_array_equal(np.asarray(on.u), np.asarray(off.u))
+
+
+def test_latlon_mass_fixer_is_energy_neutral_with_the_fixer(fp64_policy):
+    """The lat-lon dry-mass fixer (safety rails, after physics) sits outside
+    the energy window (F15 V8): with the fixer on, its energy returns as heat."""
+    grid, sigma, s0 = _latlon_setup()
+    target = float(jnp.sum(s0.p_s * grid.area)) * (1.0 + 1.0e-5)
+    e0 = _latlon_energy(s0, grid, sigma)
+    on = _latlon_step(grid, sigma, s0, True, fix_mass=True, target_mass=target)
+    rel_on = (_latlon_energy(on, grid, sigma) - e0) / e0
+    assert abs(rel_on) < 1e-13, rel_on
+    # NON-VACUITY: the fixer moved ~1 Pa of air (energy ~1e-5 of E)
+    dps = float(jnp.mean(on.p_s - _latlon_step(grid, sigma, s0, True).p_s))
+    assert dps > 0.5, dps
+
+
+def test_segment_mass_fixer_energy_dT_restores_the_energy():
+    """The segment lanes' helper: E(T + dT, p_s_post) == E(T, p_s_pre) on the
+    model's own layer masses; ``None`` when the model runs no fixer."""
+    from collections import namedtuple
+
+    from legoesm.core.conservation import SigmaLayers
+    from legoesm.driver.compiled_segments import mass_fixer_energy_dT
+    from legoesm.grids.cubed_sphere import create_cubed_sphere
+    grid = create_cubed_sphere(4)
+    sig = SigmaLayers(jnp.asarray([0.2, 0.3, 0.5]))
+    rng = np.random.default_rng(5)
+    c, s2 = (6, 4, 4, 3), (6, 4, 4)
+    T = jnp.asarray(260.0 + 10.0 * rng.random(c))
+    u, v = (jnp.asarray(10.0 * rng.standard_normal(c)) for _ in range(2))
+    phis = jnp.asarray(2.0e3 * rng.random(s2))
+    ps0 = jnp.asarray(1.0e5 + 300.0 * rng.standard_normal(s2))
+    ps1 = ps0 + 3.0                              # the fixer's uniform shift
+    cfg = namedtuple("Cfg", "energy_fixer")
+    model = namedtuple("Model", "config sigma_coord")
+    dT = mass_fixer_energy_dT(model(cfg(True), sig), T, u, v, phis, ps0, ps1,
+                              grid)
+    area = grid.area.astype(jnp.float64)
+    e0 = _gridded_energy(T, u, v, ps0, phis, sig, area)
+    np.testing.assert_allclose(
+        _gridded_energy(T + dT, u, v, ps1, phis, sig, area), e0, rtol=1e-14)
+    # NON-VACUITY: the shift alone changes E by ~3e-5 of it
+    assert abs(_gridded_energy(T, u, v, ps1, phis, sig, area) - e0) / e0 > 1e-5
+    assert mass_fixer_energy_dT(model(cfg(False), sig), T, u, v, phis, ps0,
+                                ps1, grid) is None
+
+
+def test_operator_split_lane_mass_fixer_is_energy_neutral(fp64_policy):
+    """The lat-lon operator-split segment step (serial layout of the lat-band
+    SPMD lane): its dry-mass fixer runs after the dycore's energy window; with
+    the fixer on and no physics, the step closes E although the fixer moves
+    real mass (anchor offset by 1e-5)."""
+    import dataclasses
+
+    from legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid import (
+        CGridLatLonPrimitiveEquationModel)
+    from legoesm.driver.sharded_operator_split_step import (
+        make_sharded_operator_split_step)
+    from tests.parallel.test_atm_latlon_operator_split_spmd import (
+        _build_harness, _mock_step_unified_stateful)
+    m0, statics, carry, forcing = _build_harness()
+    model = CGridLatLonPrimitiveEquationModel(
+        m0.grid, m0.sigma_coord, m0.config._replace(energy_fixer=True))
+
+    def no_physics(*a, **k):
+        out, held, tl = _mock_step_unified_stateful(*a, **k)
+        z = jnp.zeros_like
+        return out._replace(dT_dt=z(out.dT_dt), dq_v_dt=z(out.dq_v_dt),
+                            precip=z(out.precip)), held, tl
+
+    statics = dataclasses.replace(statics, step_unified=no_physics,
+                                  do_sat_adjust=False, qv_smooth_coeff=0.0)
+    carry = carry._replace(target_mass=carry.target_mass * (1.0 + 1.0e-5))
+    step = make_sharded_operator_split_step(
+        model, None, statics, fix_mass=True, rad_update_steps=1, start_day=0.0)
+    out = step(carry, forcing)
+    sig, area = model.sigma_coord, model.grid.area
+
+    def E(c):
+        return _gridded_energy(c.T, c.u, c.v, c.p_s, c.phis, sig, area)
+
+    e0 = E(carry)
+    assert abs(E(out) - e0) / e0 < 1e-13, (E(out) - e0) / e0
+    # NON-VACUITY: the fixer added ~1 Pa of air (energy ~1e-5 of E)
+    assert float(jnp.mean(out.p_s - carry.p_s)) > 0.5
 
 
 def test_latlon_cell_centre_step_closes_the_driver_view(fp64_policy):

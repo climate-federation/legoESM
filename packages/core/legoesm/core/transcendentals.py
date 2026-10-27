@@ -26,14 +26,32 @@ import numpy as np
 from legoesm.core.precision import get_policy
 
 _LIBM_SONAME = "libm.so.6"
-_LIBM = ctypes.CDLL(_LIBM_SONAME)
+_LIBM: ctypes.CDLL | None = None
+
+
+def glibc_libm() -> ctypes.CDLL:
+    """Return glibc's ``libm.so.6``, loaded on first use.
+
+    Loading at import time made every ``legoesm`` import fail on non-glibc
+    hosts (macOS), although only the ``libm`` certification arm needs it.
+    """
+    global _LIBM
+    if _LIBM is None:
+        try:
+            _LIBM = ctypes.CDLL(_LIBM_SONAME)
+        except OSError as exc:
+            raise RuntimeError(
+                f"the glibc scalar-libm oracle needs {_LIBM_SONAME!r}, which "
+                "is not available on this platform"
+            ) from exc
+    return _LIBM
 
 
 def _scalar_libm(name: str, values: np.ndarray) -> np.ndarray:
     source = np.asarray(values)
     if source.dtype not in (np.dtype(np.float32), np.dtype(np.float64)):
         raise TypeError(f"libm {name} requires float32/float64, got {source.dtype}")
-    function = getattr(_LIBM, name)
+    function = getattr(glibc_libm(), name)
     function.argtypes = (ctypes.c_double,)
     function.restype = ctypes.c_double
     result = np.empty_like(source)

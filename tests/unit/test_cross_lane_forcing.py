@@ -67,8 +67,13 @@ def _patch_readers(monkeypatch):
         "tsi": 1360.5 + 1e-3 * float(day), "solar_fraction_by_gpt": SPECTRUM})
     monkeypatch.setattr(ext, "get_ozone_at_time", lambda c, day, lat_grid=None, p_grid=None: (
         _o3(np.asarray(lat_grid), day)[:, None] * np.ones(np.shape(p_grid))))
-    monkeypatch.setattr(ext, "get_aerosol_at_time", lambda c, day, lat_grid=None, band="gray": (
-        _aod(np.asarray(lat_grid), day, "ccn" in (c.path or ""))))
+    def _aer(c, day, lat_grid=None, band="gray", lon_grid=None):
+        ccn = "ccn" in (c.path or "")
+        # The CCN read is longitude-resolved on every lane, in lat's layout.
+        assert (lon_grid is not None) == ccn
+        assert lon_grid is None or np.shape(lon_grid) == np.shape(lat_grid)
+        return _aod(np.asarray(lat_grid), day, ccn)
+    monkeypatch.setattr(ext, "get_aerosol_at_time", _aer)
     monkeypatch.setattr(ext, "get_aerosol_sw_volcanic_at_time", lambda c, day, lat_grid=None: None)
     monkeypatch.setattr(ext, "get_aerosol_lw_at_time", lambda c, day, lat_grid=None: (
         np.full((np.size(lat_grid), 2), 0.01), np.array([2000.0, 3000.0, 4000.0])))

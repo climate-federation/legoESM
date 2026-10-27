@@ -1,0 +1,67 @@
+# =============================================================================
+# legoESM AMIP -- the CAM6 production deck on the LAT-LON COLUMN lane, 48x96 L32
+# =============================================================================
+# composable physics P3 (fv3_duo_gaps/fu/composable_physics_design.md): the
+# lat-lon C-grid dycore behind the shared column loop, so EVERY physics / land
+# / cadence / forcing row is the MPAS production deck's by inclusion.  Only the
+# grid / dycore rows below differ; `diff` against amip_production.yaml IS the
+# cross-grid configuration table (user rule 2026-10-01/10-09: same
+# configuration on every grid, no improvised deck values).
+#
+# NEW LAT-LON BASELINE (2026-10-13): CAM-FV ldiv4 divergence damping ON and the
+# polar filter starting at CAM's latitude.  Runs of this deck from before that
+# change are NOT comparable to runs after it (two dycore rows differ).
+#
+# Ported onto main's lat-lon column lane 2026-10-26 (user decision 6): the
+# included base is main's CURRENT production deck, which differs from the base
+# the 2026-10-13 P3 runs used (CAM6 warm rain kk2000_cam6, CLUBB cloud-top
+# limit 100 Pa, ...), so P3-era runs of this deck are NOT comparable either.
+include: amip_production.yaml
+
+# ---- grid / dycore -------------------------------------------------------------
+grid_type: latlon
+resolution: 48              # n_lat 48 (n_lon 96): 3.75 deg, ~417 km at the equator (C24 class, design row P3)
+discretization: latlon_cgrid
+column_lane: true           # the lat-lon dycore is the dynamics operator of the CAM6 column loop
+use_polar_filter: true      # Fourier polar filter: the dt below is set by the EQUATORIAL CFL (as
+                            # amip_sundqvist_latlon24.yaml); filter off, the pole-cell clamp is 36 s.
+                            # ASK: not inherited (the MPAS deck has no such row); the only setting
+                            # under which a C24-class dt exists on this grid
+polar_filter_cutoff_deg: 35.9041   # LATITUDE where the filter starts, CAM's rule
+                            # acos(min(0.81, 96/94)) = acos(0.81) (CAM compares cos(lat) with this
+                            # cosine).  Both hemispheres: cell rows 46.9/50.6/54.4/58.1 keep k <= 47/44/
+                            # 40/36 and v-faces 48.75/52.5/56.25/60 keep k <= 45/42/38/34 (all 48 at
+                            # the 60 deg code default); removes the 48 -> 32 jump between 58 and 62 deg
+dt: 450.0                   # decision A rule (MPAS / duo decks): 0.82 x the DRIVER's printed CFL clamp
+                            # (cfl_check_and_adjust, polar filter on: 0.8 * 417003 m / (390 m/s * sqrt 2)
+                            # = 604.9 s -> 496 s), rounded DOWN to a divisor of 1800 s -> 450 s.  The
+                            # factory's equatorial clamp alone (1112 s) is NOT the binding one: the
+                            # driver clamp would silently cut 900 s to 600 s and halve every cadence
+                            # (codex r1 #1).  ASK: value reported, not chosen
+physics_update_steps: 4     # CAM6: physics every 1800 s (4 x 450 s)
+rad_update_steps: 8         # CAM6 f09: radiation hourly (8 x 450 s); checkpoint_days 30 = 5760
+                            # steps, a multiple of 8 (D-REX-1: checkpoints on radiation boundaries)
+# ---- MPAS-dycore rows of the included deck ---------------------------------------
+# Divergence damping (CAM-FV ldiv4) is ON with the MPAS deck's value: the same
+# scale means CAM's nondimensional rate 0.01*area^2/dt on every grid; this
+# dycore applies it per latitude ROW (its own cell area, inside the final
+# gradient as CAM does, every RK stage, under the polar filter).
+mpas_div_damp4_scale: 1.0
+# The other rows are MPAS numerics, inert on this dycore and pinned OFF at the
+# code defaults so no row rests on a default.  This dycore has NO lid sponge in
+# this deck (its #836 Rayleigh sponge is OFF: sponge_coeff 0, the inherited code
+# default) and its Laplacian A_h via a_h_scale is inherited.  ASK: a lat-lon
+# counterpart of the MPAS top sponge (B1 on the duo) was NOT matched here.
+mpas_sponge_del2_top_layers: 0
+mpas_sponge_del2_top_factor: 1.0
+mpas_vert_advection_scheme: upwind
+mpas_qv_smooth_del2_m2s: 0.0
+mpas_qv_smooth_del4_m4s: 0.0        # refused non-zero on the column lane (edge operator)
+latlon_qv_smooth_del4_m4s: 0.0      # this lane's own q_v del-4 smoother: OFF, as in P3 (user 2026-10-26)
+# ---- land IC -------------------------------------------------------------------
+land_ic: data/lmip_soil_ic/soil_ic_latlon48_era5T_19790101.npz
+                            # the spun-up soil IC regridded to this grid (same recipe / source /
+                            # batch as the MPAS res-6 and duo C24 files, regrid_land_ic.py at
+                            # 294495454, from restart_1985_d000h00.npz + ERA5 1979-01-01 soil T).
+                            # ADOPTED by the user 2026-10-14: md5 6ecd8c389e2522cf2951ad020a570134
+                            # (data/ is not tracked; copy the file beside the deck's data dir).

@@ -545,7 +545,7 @@ def test_land_stress_before_any_valid_solve_is_neutral_land_drag_not_ocean():
     neutral log-law drag of the column's static land roughness, opposing the
     wind; never the bulk (ocean) stress."""
     rho, z, d, z0, U2 = 1.25, 50.0, 10.0, 1.0, 25.0
-    expect = rho * (_const.kappa_vk / np.log((z - d) / z0)) ** 2 * U2
+    expect = rho * (_const.kappa_von_karman / np.log((z - d) / z0)) ** 2 * U2
     for kw in (dict(land_valid=jnp.zeros(1, bool)),
                dict(tau_land_mag=jnp.array([jnp.nan])),
                dict(tau_land_mag=jnp.array([jnp.inf]))):
@@ -555,7 +555,7 @@ def test_land_stress_before_any_valid_solve_is_neutral_land_drag_not_ocean():
     # displacement at/above the lowest level: log argument clamped (Cd <= 0.04)
     o = _call(**_lsf(1, land_valid=jnp.zeros(1, bool), d=jnp.array([60.0])))
     np.testing.assert_allclose(np.hypot(float(o[0][0]), float(o[1][0])),
-                               rho * (_const.kappa_vk / 2.0) ** 2 * U2,
+                               rho * (_const.kappa_von_karman / 2.0) ** 2 * U2,
                                rtol=1e-9)
 
 
@@ -983,6 +983,55 @@ def test_ocean_surface_flag_refused_without_sst_or_land_stress():
     with pytest.raises(ValueError, match="land model's stress"):
         cfg._replace(land_surface_scheme="clm_ml").validate_strict()
     cfg._replace(land_stress_from_land=True).validate_strict()
+
+
+@pytest.mark.parametrize("kw,want", [
+    (dict(), True),
+    (dict(land_beta_soil=False), False),          # no land-flux handoff
+    (dict(radiation="none"), False),              # no SST anchor
+    (dict(land_stress_from_land=False), False),   # bulk stress over land
+], ids=["eligible", "no_handoff", "radiation_none", "land_stress_off"])
+def test_ocean_surface_auto_on_exactly_where_true_is_accepted(kw, want):
+    """AUTO (None, the default) resolves True exactly where an explicit True
+    passes validate_strict and False for each of the three ineligible
+    conditions; AUTO itself always validates; explicit True/False win."""
+    from legoesm.driver.config import (
+        ExperimentConfig, resolve_ocean_flux_on_ocean_surface as res)
+    assert ExperimentConfig().ocean_flux_on_ocean_surface is None
+    cfg = _eligible_cfg(**kw)
+    assert cfg.ocean_flux_on_ocean_surface is None
+    cfg.validate_strict()
+    assert res(cfg) is want
+    cfg._replace(ocean_flux_on_ocean_surface=res(cfg)).validate_strict()
+    explicit_true = cfg._replace(ocean_flux_on_ocean_surface=True)
+    if want:
+        explicit_true.validate_strict()
+    else:
+        with pytest.raises(ValueError, match="ocean_flux_on_ocean_surface"):
+            explicit_true.validate_strict()
+    assert res(explicit_true) is True
+    assert res(cfg._replace(ocean_flux_on_ocean_surface=False)) is False
+
+
+@pytest.mark.parametrize("kw,want", [
+    (dict(), True), (dict(land_stress_from_land=False), False),
+    (dict(ocean_flux_on_ocean_surface=False), False),
+])
+def test_ocean_surface_auto_resolved_into_driver_config(kw, want):
+    """ModelDriver setup writes the RESOLVED boolean into its config and the
+    input-config snapshot (what the manifest and a replay record)."""
+    from legoesm.driver.model_driver import ModelDriver
+    d = ModelDriver(_eligible_cfg(**kw))
+    d._resolve_ocean_flux_surface()
+    assert d.config.ocean_flux_on_ocean_surface is want
+    assert d._input_config.ocean_flux_on_ocean_surface is want
+
+
+def test_ocean_surface_truthy_non_bool_is_still_validated():
+    """A truthy non-boolean (a YAML-quoted "true") is checked like True."""
+    with pytest.raises(ValueError, match="radiation='none'"):
+        _eligible_cfg(radiation="none",
+                      ocean_flux_on_ocean_surface="true").validate_strict()
 
 
 def test_ocean_surface_flag_refused_off_the_mpas_lane():

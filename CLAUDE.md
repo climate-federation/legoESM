@@ -129,6 +129,44 @@ module (`coupler/grid_remap.py`) and core had another (`grids/regridding.py`):
   2026-08-23): laziest working solution, reuse over rebuild, delete before
   add, shortest diff that is actually correct. Not a mode to be asked for.
 
+## RULE 5 — DIFFERENTIABILITY IS NEVER TRADED FOR ORACLE FIDELITY.
+User directive 2026-10-20, STRICT, on the Kessler port (the smooth saturation
+ramp misses the reference by up to 100 % and lets cloud water go slightly
+negative; the reference's exact step would match it): *"keep the current
+smoothing - differentiability cannot be traded off!"*
+
+- **The default is always the differentiable form.** A switch in the
+  reference whose branch depends on TRACED model state (a saturation step,
+  a threshold `max`/`where` on a prognostic, a clip, a cutoff on the
+  column's traced pressure) is ported as a smooth
+  function whose sharpness/width is a config field; the hard limit is
+  reachable only by setting that field, never as the default.
+- **Out of scope (state-independent):** selections that do not depend on
+  traced state and keep JAX gradients intact — fixed land/sea masks, domain boundaries, index
+  picks, static scheme dispatch. Smoothing those changes the domain or
+  breaks conservation; port them exactly.
+- **Never propose moving a default to the hard limit to close an oracle gap.**
+  Not as an ASK, not as a "pick". The gap is recorded instead.
+- **Record the gap as a KNOWN DIFFERENCE** where the code lives (docstring)
+  and in the PR body: what the reference does, what the port does, the
+  measured size at the production setting, which field recovers the
+  reference, and any invariant the smoothing breaks (e.g. how negative
+  cloud water goes). Never loosen the tolerance.
+- **Every such switch gets three tests:** one AT the hard limit,
+  matching the reference to the oracle tolerance; one AT the smooth default
+  asserting the recorded gap PER CASE (each fixture column's measured
+  mismatch, stored with the test, to 1e-6 relative with a 1e-12 absolute
+  floor); and a gradient test at the default (finite, non-zero derivative
+  through the switch, `jax.test_util.check_grads`). Never a blanket xfail,
+  never one worst-case bound. A change to the smooth form OR its default
+  width re-measures and updates the stored gaps in the same PR, with the
+  reason.
+- RULE 3 is waived only when all four hold: the smooth default is kept for
+  differentiability, the hard limit is reachable via its field and matches
+  the reference, the gap is recorded as above, and all three tests exist and pass.
+  Missing any one, RULE 3 applies.
+- Applies to every oracle translation (CAM, IFS, WRF, ESCOMP, NEMO, FV3, ...).
+
 ## RULE 3 — A FIX WHOSE DEFAULT KEEPS THE BUG IS NOT A FIX. IT IS A BUG WITH A KNOB.
 User directive 2026-08-22, on finding non-orographic gravity waves still being
 launched at the SURFACE months after that exact defect was "fixed": *"Why does
@@ -248,6 +286,34 @@ leave choice pending.
 
 NOT COVERED, proceed normally: what user asked in that message; pure additions
 changing no existing behaviour; tests; comments; docs; error text.
+
+**2026-10-16 EXTENSION — NO SIDE IMPLEMENTATION DECISIONS (STRICT).** User:
+*"No side implementation decisions as strict Claude.md rule."* Approving a
+change does NOT approve the decisions made while implementing it.
+
+A SIDE DECISION = any value, behaviour, or method that changes what the code
+computes, accepts, rejects, or reads, and is NOT dictated by the user's answer,
+the oracle being ported, or existing repo code reused unchanged. Each one gets
+ASKED (one line, current -> proposed, batched) before the code embodying it;
+one found mid-implementation → stop and ask then. Classes, not exhaustive:
+- tolerances and acceptance thresholds (incl. checks on input files, and the
+  tolerance an oracle-match test certifies)
+- guards, floors, caps, clamp vs extrapolate, and their fp32-vs-fp64 behaviour
+- edge cases: zero/empty/missing input, absent file, old checkpoint
+- mappings between representations (bands, grids, levels, units)
+- algorithm and order: interpolation, aggregation, update/operation order
+- where data or files live; names and defaults of user-facing switches
+- which lanes/grids get it; error vs warning vs fallback there
+
+PRECEDENCE: this OVERRIDES the "NOT COVERED" line above for pure additions and
+tests whenever they carry a side decision. Still exempt: error MESSAGE wording,
+comments, docs. Ponytail/minimal-diff governs how much code, never licenses
+picking a value. "Formatting only", "minor", "internal", "implementation
+detail", "numerically negligible" are NOT exemptions. Subagent briefs must
+state this rule. Any item on an end-of-task UNASKED list is a violation of this
+rule (target: empty), not a disclosure that discharges it. FAILURE 2026-10-16:
+radiation stage 1 shipped a band-list check tolerance and an fp32 tiny-path
+guard behaviour, both labelled "formatting only", neither asked.
 
 MECHANICAL CHECK, end of every task: print list of choices made, each one line,
 marked ASKED or UNASKED. Empty UNASKED list = target. Anything on UNASKED list
@@ -872,7 +938,7 @@ See `docs/architecture/ai_guardrails/domain_architect_vs_syntax_engine.md`. Doct
 - **Debug / throwaway / one-off → `scripts/tmp/` ONLY** (eventually deleted): `_*`-prefixed probes, `diag_*`/`diagnose_*`, per-iteration scratch. Never at `scripts/` root. `_probe_*.py` gitignored.
 - **No new files dumped at repo root.** Root keeps ONLY: `README.md`, `CLAUDE.md`, `CONTRIBUTING.md`, `CHANGELOG.md`, `FEDERATION.md`, `project_status.md` (generated), `pyproject.toml`/lockfile/dotfiles. Everything else has a home.
 - **No `.md` notes accumulating at repo root → `docs/`.** Dev-notes, change logs, faithfulness/audit trackers (`*_faithful.md`, `*_checks.md`, review logs) live under `docs/`. Reference by BASENAME so code comments survive the move.
-- **No runtime outputs in git.** `diagnostics/`, `logs/`, `**/logs/`, `results/`, `checkpoints/`, `output/`, `*.zarr`/`*.nc`, root `*.png`/`*.pdf`/`*.svg` gitignored. Visual-regression baselines stay in LOCAL working copies, regenerated on demand — not tracked. Never `git add -f` a runtime artifact.
+- **No runtime outputs in git.** `diagnostics/`, `logs/`, `**/logs/`, `results/`, `checkpoints/`, `output/`, `*.zarr`/`*.nc`, root `*.png`/`*.pdf`/`*.svg` gitignored. Visual-regression baselines stay in LOCAL working copies, regenerated on demand — not tracked. Never `git add -f` a runtime artifact. EXCEPTION: `.physics-validator/` is tracked on purpose — review logs, probes and banked oracle results cited as evidence by docs, tests and validation scripts (user 2026-10-24); only its error captures are ignored.
 - **Source stays under `packages/<pkg>/legoesm/`** (federation namespace). New subpackage → update `tests/test_federation_plan.py` same PR.
 - **Do NOT "flatten" `packages/<pkg>/legoesm/<subpkg>/` → `packages/<pkg>/` — double name is LOAD-BEARING, not redundant.** Editable installs (dev/test workflow) require on-disk path == import path, and hatchling REFUSES prefix-*adding* `sources` remap in dev mode (`ValueError: Dev mode installations are unsupported when any path rewrite in the sources option changes a prefix rather than removes it`; editables#20). So `packages/atmosphere/legoesm/atmosphere/` is only layout where `import legoesm.atmosphere` resolve under `pip install -e`. Flattening to keep `legoesm.*` build wheel but break editable dev; flattening to bare `import atmosphere` mean rewriting ~23k import sites + dropping namespace. Verified 2026-07-13 — don't re-attempt. `src/legoesm/` is SANCTIONED root meta-package (the `legoesm.*` TOP-LEVEL modules: `constants`, `config`, `cli`, `registry`, `dycore_factory`, …), same load-bearing reason — NOT stray `src/` to remove. "Never add source at `src/`" mean don't create NEW `src/` trees for component code; existing `src/legoesm/` stays.
 - **Tests mirror package tree under `tests/`** (`tests/<component>/<tier>/...`). Curated dycore regressions in `tests/atmosphere/dycore/regression/`. No new `test_*.py` at repo root.

@@ -27,7 +27,7 @@ from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (  # noqa: E402
     _NEMOWSRK3TestHooks,
 )
 from legoesm.ocean.dynamics.barotropic_common import (  # noqa: E402
-    _ascending_level_sum,
+    ascending_level_sum,
     rk3_stage_barotropic_correction,
 )
 from legoesm.ocean.fidelity.provenance import worktree_stamp  # noqa: E402
@@ -71,7 +71,7 @@ def _stats(candidate, reference, active) -> dict[str, object]:
 @jax.jit
 def _correction_terms(raw, thickness, reciprocal, target, mask):
     products = raw * thickness
-    own_mean = _ascending_level_sum(products) * reciprocal
+    own_mean = ascending_level_sum(products) * reciprocal
     correction = target - own_mean
     final = (raw + correction[..., None]) * mask
     return products, own_mean, correction, final

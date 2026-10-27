@@ -1,5 +1,10 @@
 """Stateless column adapter for the Super-Droplet Method.
 
+NOT YET FAITHFUL to the ERF 26.09 oracle: ERF's SDM needs persistent
+particles, which this keyless, stateless interface does not carry, so the
+adapter below is a legoESM closure built from the (faithful) SDM particle
+physics, not ERF SDM.  See the package docstring for the status of each part.
+
 Exposes SDM as a switchable ``scheme="sdm"`` microphysics backend that matches
 the legoESM column-physics interface
 ``micro_fn(T, q_v, hydrometeors, p_full, p_half, rho, dz, dt, cfg)

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "legoesm"
-version = "1.0.0"
+version = "1.0.1"
 description = "legoESM: A Differentiable Earth System Model in JAX"
 readme = "README.md"
 license = "MIT"
@@ -122,6 +122,11 @@ all = [
     "legoesm[ml,mesh,viz,data,dev,docs,wizard]",
 ]
 
+[project.urls]
+Homepage = "https://github.com/climate-federation/legoESM"
+Repository = "https://github.com/climate-federation/legoESM"
+Issues = "https://github.com/climate-federation/legoESM/issues"
+
 [project.scripts]
 legoesm = "legoesm.cli:main"
 
@@ -133,6 +138,11 @@ legoesm = "legoesm.cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/legoesm"]
+
+# The sdist ships only the meta-package source; without this hatch packs the whole
+# repository (scripts, tests, docs, data: ~130 MB, over the PyPI upload limit).
+[tool.hatch.build.targets.sdist]
+only-include = ["src/legoesm", "LICENSE", "README.md"]
 
 # === uv workspace (federation carve) ===
 # The repo is a uv workspace; the substrate lives in its own member

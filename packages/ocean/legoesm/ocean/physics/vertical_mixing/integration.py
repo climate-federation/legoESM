@@ -19,6 +19,10 @@ from legoesm.ocean.physics.vertical_mixing.config import (
 from legoesm.ocean.physics.vertical_mixing.constant import constant_vertical_mixing
 from legoesm.ocean.physics.vertical_mixing.richardson import richardson_vertical_mixing
 from legoesm.ocean.physics.vertical_mixing.kpp import kpp_vertical_mixing
+from legoesm.ocean.physics.vertical_mixing.epbl import (
+    epbl_vertical_mixing,
+    surface_tke_forcing,
+)
 from legoesm.ocean.physics.vertical_mixing._shared import surface_buoyancy_flux
 from legoesm.ocean.physics.tendencies import make_none_physics_fn, wrap_ocean_tendencies
 
@@ -101,6 +105,9 @@ def make_vertical_mixing_physics(
     elif scheme == "kpp":
         return _make_kpp(config, apply_diffusion=apply_diffusion,
                          constants_config=constants_config)
+    elif scheme == "epbl":
+        return _make_epbl(config, apply_diffusion=apply_diffusion,
+                          constants_config=constants_config)
     elif scheme == "tke":
         return _make_tke(config, apply_diffusion=apply_diffusion)
     elif scheme == "catke":
@@ -246,6 +253,123 @@ def _make_kpp(config: VerticalMixingConfig,
                                 A_v=out.A_v if not apply_diffusion else None)
     return physics_fn
 
+
+
+def _make_epbl(config: VerticalMixingConfig,
+               apply_diffusion: bool = True,
+               constants_config: ConstantsConfig = ConstantsConfig()) -> Callable:
+    """Factory for the energetic PBL closure (Reichl & Hallberg 2018).
+
+    ePBL is implicit-only: it returns the interface diffusivity/viscosity for
+    the backward-Euler solver and no explicit tendency, so the host model
+    must run with ``implicit_vertical_mixing=True``.
+
+    ``cfg.dt_s`` is used as given: this factory does not know the caller's
+    timestep and does not check it.  The OMIP driver, the ocean SCM and the
+    lat-lon tendency probe check (or set) it against their dt; any other
+    caller of this factory must set ``EPBLConfig.dt_s`` to the dt its
+    implicit solve uses.
+    """
+    import jax.numpy as jnp
+
+    from legoesm.ocean.eos import eos_density_derivatives, make_eos_fn
+    from legoesm.ocean.physics.vertical_mixing.epbl import validate_epbl_config
+
+    cfg = config.epbl
+    validate_epbl_config(cfg)
+    if apply_diffusion:
+        raise ValueError(
+            "vertical_mixing=\"epbl\" requires implicit_vertical_mixing=True. "
+            "ePBL prices mixing against the surface energy budget and hands "
+            "back K_v/A_v for the unconditionally-stable implicit solve; it "
+            "has no explicit-diffusion form."
+        )
+
+    if cfg.k_after_surface_flux:
+        # The MOM6 step order is a driver-level operator split, not part of
+        # the closure.  Only the ocean SCM implements it, and it clears this
+        # flag before building physics; reaching here with it set means a
+        # driver that would silently ignore it.
+        raise NotImplementedError(
+            "EPBLConfig.k_after_surface_flux=True (MOM6 step order) is "
+            "implemented only in the ocean single-column model; this driver "
+            "diagnoses K before the surface flux. Set it to False."
+        )
+
+    eos_fn = make_eos_fn()
+
+    def physics_fn(state: OceanState, grid, z_coord: OceanZStarCoordinate,
+                   surface_forcing=None) -> OceanTendencies:
+        J = compute_ocean_jacobian(state.eta.data, state.H_bathy.data, z_coord)
+        h = z_coord.dz_ref * J[..., jnp.newaxis]          # layer thickness [m]
+        T = state.T.data
+        S = state.S.data
+        g = constants_config.g
+        rho_0 = constants_config.rho_0
+
+        # Specific-volume derivatives at MID-LAYER pressure, as MOM6's
+        # applyBoundaryFluxesInOut computes them (MOM_diabatic_aux.F90:909).
+        d_pres = (g * rho_0) * h
+        p_lay = jnp.cumsum(d_pres, axis=-1) - 0.5 * d_pres
+        rho = eos_fn(T, S, p_lay)
+        drho_dT, drho_dS = eos_density_derivatives(eos_fn, T, S, p_lay)
+        inv_rho2 = 1.0 / (rho * rho)
+        dSV_dT = -drho_dT * inv_rho2
+        dSV_dS = -drho_dS * inv_rho2
+
+        tau_x = getattr(surface_forcing, "tau_x", None) if surface_forcing else None
+        tau_y = getattr(surface_forcing, "tau_y", None) if surface_forcing else None
+        q_net = getattr(surface_forcing, "q_net", None) if surface_forcing else None
+        fw = getattr(surface_forcing, "freshwater", None) if surface_forcing else None
+
+        # Surface buoyancy flux, MOM6 sign convention: POSITIVE = stabilizing.
+        # calculateBuoyancyFlux1d uses surface-pressure density derivatives.
+        drho_dT_s, drho_dS_s = eos_density_derivatives(
+            eos_fn, T[..., 0], S[..., 0], jnp.zeros_like(T[..., 0]))
+        c_sw = constants_config.c_sw
+        net_heat = (jnp.zeros_like(T[..., 0]) if q_net is None
+                    else q_net / (rho_0 * c_sw))
+        # A freshwater gain dilutes the surface: the equivalent salt flux is
+        # -S * (water flux) / rho_0, matching netSalt's dilution adjustment.
+        net_salt = (jnp.zeros_like(S[..., 0]) if fw is None
+                    else -S[..., 0] * fw / rho_0)
+        B_flux = -(g / rho_0) * (drho_dT_s * net_heat + drho_dS_s * net_salt)
+
+        # Energy released (or required) by mixing the surface fluxes through
+        # the top layer.  Only the top layer is forced: no penetrating
+        # shortwave profile is supplied on this path.
+        tke_top = surface_tke_forcing(
+            jnp.zeros_like(T[..., 0]) if q_net is None else q_net,
+            None if fw is None else -S[..., 0] * fw,
+            h[..., 0], dSV_dT[..., 0], dSV_dS[..., 0],
+            g=g, rho_0=rho_0, c_sw=c_sw, dt=cfg.dt_s)
+        tke_forcing = jnp.zeros_like(T).at[..., 0].set(tke_top)
+
+        # Coriolis from the grid latitude (ePBL's rotational length scale).
+        lat = getattr(grid, "grid_lat", None)
+        if lat is None:
+            raise ValueError(
+                "ePBL needs the column latitude (grid.grid_lat, radians) for "
+                "its Coriolis length scale; the grid supplied none.")
+        absf = jnp.abs(2.0 * constants_config.Omega * jnp.sin(
+            jnp.broadcast_to(lat, T.shape[:-1])))
+
+        # ePBL needs cell-centre velocities; average C-grid faces if needed.
+        u_data, v_data = state.u.data, state.v.data
+        if u_data.shape[1] != T.shape[1]:
+            u_data = 0.5 * (u_data[:, :-1, :] + u_data[:, 1:, :])
+            v_data = 0.5 * (v_data[:-1, :, :] + v_data[1:, :, :])
+
+        out = epbl_vertical_mixing(
+            u_data, v_data, T, S, dSV_dT, dSV_dS, h, cfg,
+            tau_x=tau_x, tau_y=tau_y, B_flux=B_flux,
+            tke_forcing=tke_forcing, absf=absf,
+            g=g, rho_0=rho_0, apply_diffusion=False,
+        )
+        return _wrap_tendencies(None, None, out.dT_dt, out.dS_dt, state,
+                                K_v=out.K_v, A_v=out.A_v)
+
+    return physics_fn
 
 
 def _make_tke(config: VerticalMixingConfig,

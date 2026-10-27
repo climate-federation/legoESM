@@ -18,6 +18,7 @@ import pytest
 from legoesm.atmosphere.physics.gravity_wave_drag.config import (
     E3SMCAMConfig, E3SMFrontalConfig, GravityWaveDragConfig)
 from legoesm.atmosphere.physics.gravity_wave_drag.e3sm_cam import e3sm_cam_gwd
+
 from legoesm.atmosphere.physics.gravity_wave_drag.integration import (
     get_gwd_fn, make_gwd_physics)
 from legoesm.driver.config import ExperimentConfig
@@ -27,6 +28,19 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 _HYDRO = os.path.normpath(os.path.join(_HERE, os.pardir, "atmosphere", "hydrostatic", "unit"))
 sys.path.insert(0, os.path.normpath(os.path.join(_HERE, os.pardir, os.pardir, "scripts", "run")))
 from run_amip import build_arg_parser, build_config_from_args  # noqa: E402
+
+
+_e3sm_cam_gwd_kernel = e3sm_cam_gwd
+
+
+def e3sm_cam_gwd(*args, **kw):
+    """The kernel with ``p_ref_half`` (E3SM pref_edge) = the test column's own
+    interfaces: these columns are built at surface pressure p_ref = 1e5 Pa, so
+    their interfaces ARE the reference interfaces a lane would pass."""
+    if "p_ref_half" not in kw:
+        ph = kw["p_half"] if "p_half" in kw else args[4]
+        kw["p_ref_half"] = jnp.asarray(ph)[0]
+    return _e3sm_cam_gwd_kernel(*args, **kw)
 
 
 def _load(name, filename):
@@ -159,13 +173,14 @@ def test_legacy_composite_tendencies_are_unchanged():
     du = np.asarray(tend.du_dt.data, dtype=np.float64)
     dv = np.asarray(tend.dv_dt.data, dtype=np.float64)
     dT = np.asarray(tend.dT_dt.data, dtype=np.float64)
-    # Recorded 2026-09-17 on the fixture below, x64, before/after the E3SM
-    # kernel fixes (they do not touch this path).  A deliberate change to
-    # McFarlane or Hines re-records these; an accidental one goes red.
+    # Re-recorded 2026-10-19 on the fixture below, x64, after the deliberate
+    # McFarlane -> CAM6 gw_oro port (effgw_oro = 0.125, CAM damping and gw
+    # eddy diffusion; Hines untouched).  A deliberate change to McFarlane or
+    # Hines re-records these; an accidental one goes red.
     for name, arr, total, peak in (
-            ("du", du, -1.99970478896111720e-01, 1.80290549600362429e-03),
-            ("dv", dv, -2.99955718344167635e-02, 2.70435824400543675e-04),
-            ("dT", dT, +4.07050913105737842e-03, 3.66991334142320838e-05)):
+            ("du", du, -4.411696559834051e-02, 3.0274223551890315e-04),
+            ("dv", dv, -6.617544839751076e-03, 4.541133532783547e-05),
+            ("dT", dT, +8.980250787177799e-04, 4.626124283842524e-06)):
         np.testing.assert_allclose(arr.sum(), total, rtol=1e-12, err_msg=name)
         np.testing.assert_allclose(np.abs(arr).max(), peak, rtol=1e-12, err_msg=name)
 
@@ -173,7 +188,7 @@ def test_legacy_composite_tendencies_are_unchanged():
 def test_calm_column_gradient_is_finite():
     """A zero-wind column must give finite reverse-mode gradients.
 
-    Reverting `_source_direction` to `sqrt(usrc**2 + vsrc**2)` makes this NaN:
+    Reverting `source_direction` to `sqrt(usrc**2 + vsrc**2)` makes this NaN:
     the forward value is a finite 0.0, so only the derivative shows the defect.
     """
     u, v, T, pf, ph, zf, zh, rho, lat = _e3sm._driver_column(ncol=3)
@@ -227,7 +242,7 @@ def test_momentum_fixer_uses_the_pre_limiter_stress():
         mod.gw_drag_prof, mod.momentum_energy_conservation = spy_prof, spy_fix
         try:
             mod.e3sm_cam_gwd(u, v, T, pf, ph, zf, zh, rho, lat, DT, cfg,
-                             frontgf_col=zeros)
+                             frontgf_col=zeros, p_ref_half=ph[0])
         finally:
             mod.gw_drag_prof, mod.momentum_energy_conservation = orig_prof, orig_fix
         assert "tau_net" in seen, "the momentum fixer never ran"

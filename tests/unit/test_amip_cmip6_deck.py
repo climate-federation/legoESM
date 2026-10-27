@@ -1451,6 +1451,12 @@ class TestSpectralMpasForcingActive:
                       if "Solar TSI" in ln), None)
         assert solar is not None and "ACTIVE" in solar, (
             f"cubed_sphere solar should be ACTIVE: {solar!r}")
+        # The deck hands run_amip the production reference AOD (user
+        # decision 2026-10-15: 0.05 -> 0.03, the run_amip default).
+        block = out.split("[deck] Command:", 1)[1].split(
+            "[deck] Forcing-channel activity", 1)[0]
+        toks = [t.strip() for t in block.split("\\\n")]
+        assert toks[toks.index("--aerosol-reference-aod") + 1] == "0.03"
 
     def test_voronoi_mpas_rrtmg_forcing_active(self, tmp_path):
         out = self._run(tmp_path, "voronoi", "mpas", 4)

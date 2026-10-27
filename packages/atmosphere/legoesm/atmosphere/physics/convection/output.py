@@ -98,6 +98,11 @@ class ConvectionOutput(NamedTuple):
     ``zm_conv_evap`` snow flux, whose fusion heat the scheme's heating
     already carries).  The interactive land takes its snow from it (F29).
     ``None`` = not published."""
+    tracer_transport: dict | None = None
+    """Optional convective transport tendencies of carried tracers, keyed by
+    tracer name (e.g. ``"q_c"``), each (ncol, nlev) [tracer units / s],
+    SIGNED and column-conserving (CAM ZM ``convtran``).  Hosts ADD them to
+    any other tendency of the same tracer.  ``None`` = no transport."""
 
 
 def split_convective_rain(dq_c_conv_dt, precip_efficiency):

@@ -506,11 +506,13 @@ energy_consistent_moisture_clip: true
 # why that one is off above.
 cloud_vertical_overlap_optics: max_random
 cloud_n_subcolumns: 8
-# Microphysics: saturation over ice below freezing, a homogeneous freezing
-# source for ice number, and droplet number from the aerosol field.
+# Microphysics: saturation over ice below freezing and a homogeneous freezing
+# source for ice number; droplet number is prescribed (see below).
 hard_sat_ice_curve: true
 homogeneous_ice_nucleation: true
-aerosol_ccn: true
+# Off (oracle follow-up row 67): this deck's cloud scheme has no reference
+# for the in-cloud CCN droplet radius, so radiation refuses that pairing.
+aerosol_ccn: false
 # Grid-scale moisture smoothing, the positivity fixer that borrows within a
 # column rather than creating water, and the prognostic sea-ice skin.
 # The moisture filter is a SCALE-SELECTIVE biharmonic, not a Laplacian, since

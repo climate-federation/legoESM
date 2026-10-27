@@ -31,10 +31,15 @@ from legoesm import constants
 
 # Earth orbital / calendar constants (fixed).
 _EARTH_OBLIQUITY_DEG = 23.45
-# Day of the vernal equinox in a 365-day no-leap calendar (≈ March 21).
-# The simplified declination crosses zero here; the orbital longitude is
-# measured from this point.
+# Day of the vernal equinox in a 365-day no-leap calendar (≈ March 21) for the
+# CIRCULAR-orbit (Cooper) declination, which crosses zero here.
 _SOLSTICE_OFFSET_DAYS = 80.0
+# Calendar day of the vernal equinox for the Berger (1978) ORBITAL longitude,
+# as in CESM2.1 cime5.6.47 share/util/shr_orb_mod.F90 shr_orb_decl
+# (``ve = 80.5_SHR_KIND_R8``, "Calday of vernal equinox, assumes Jan 1 = calday
+# 1"; March 21 at noon).  Calday 1.0 is Jan 1 00Z, the same origin as the
+# ``day_of_year`` this module receives (forcing.time_utils.day_to_calendar).
+_VERNAL_EQUINOX_CALDAY_SHR_ORB = 80.5
 _DAYS_PER_YEAR = 365.0
 
 # Machine-checked scheme contract (see tests/test_physics_contracts.py).
@@ -102,16 +107,16 @@ def _orbital_solar_longitude(
     """True solar ecliptic longitude lambda [rad], measured from the
     vernal equinox.
 
-    Berger (1978) eccentricity series: the series COEFFICIENTS match CESM
-    ``shr_orb_mod`` / climlab ``solar_longitude``, while the vernal-equinox
-    calendar day (``_SOLSTICE_OFFSET_DAYS = 80``) follows climlab's convention
-    (CESM/CLM5 document ``d_ve = 80.5`` — a ~½-day calendar offset).  Captures
-    the non-uniform apparent motion of the Sun caused by the elliptical orbit,
-    which the simple ``obliquity·sin`` declination ignores.
+    Berger (1978) eccentricity series and vernal-equinox calendar day
+    (``_VERNAL_EQUINOX_CALDAY_SHR_ORB = 80.5``) as in CESM2.1 ``shr_orb_decl``
+    (cime5.6.47); matched to round-off against the compiled Fortran
+    (tests/atmosphere/test_rad_boundary_oracle.py).  Captures the non-uniform
+    apparent motion of the Sun caused by the elliptical orbit, which the simple
+    ``obliquity·sin`` declination ignores.
     """
     e = orbit.eccentricity
     w = orbit.long_perihelion_deg * constants.DEG_TO_RAD
-    delta_lambda = (day_of_year - _SOLSTICE_OFFSET_DAYS) * (
+    delta_lambda = (day_of_year - _VERNAL_EQUINOX_CALDAY_SHR_ORB) * (
         2.0 * jnp.pi / _DAYS_PER_YEAR
     )
     beta = jnp.sqrt(1.0 - e * e)

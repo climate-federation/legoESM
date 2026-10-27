@@ -203,7 +203,7 @@ def test_validate_strict_refuses_inert_or_foreign_use():
     assert d["morrison_warm_rain_scheme"] == m.warm_rain_scheme == "kk2000"
 
 
-def test_cli_round_trip_and_production_deck_changes_nothing():
+def test_cli_round_trip_and_production_deck_selects_the_mg2_law():
     from scripts.run.run_amip import (
         _postprocess_args,
         build_arg_parser,
@@ -218,11 +218,12 @@ def test_cli_round_trip_and_production_deck_changes_nothing():
     assert (cfg.morrison_autocon_fact, cfg.morrison_accre_enhan_fact,
             cfg.morrison_warm_rain_scheme) == (0.3, 1.5, "kk2000")
     keys = load_yaml_config(_AMIP / "amip_production.yaml", build_arg_parser())
-    assert keys["morrison_warm_rain_scheme"] == "kk2000"
+    # CAM6 MG2 law, user decision 2026-10-19 (oracle audit)
+    assert keys["morrison_warm_rain_scheme"] == "kk2000_cam6"
     assert keys["morrison_autocon_fact"] == 1.0
     assert keys["morrison_accre_enhan_fact"] == 1.0
-    # Naming the defaults changes nothing: the deck's values thread to the
-    # SAME MorrisonConfig object the untouched config yields.
+    # The factors are the defaults; only the law differs from the untouched
+    # config.
     from legoesm.atmosphere.physics.microphysics.config import MorrisonConfig
     from legoesm.driver.config import ExperimentConfig
     from legoesm.driver.physics_pipeline import thread_morrison_scalars
@@ -232,7 +233,7 @@ def test_cli_round_trip_and_production_deck_changes_nothing():
                                   "morrison_accre_enhan_fact")}
     assert thread_morrison_scalars(
         ExperimentConfig(microphysics="morrison", **named), "morrison",
-        base) is base
+        base) == base._replace(warm_rain_scheme="kk2000_cam6")
 
 
 # --- warm_rain_scheme="kk2000_cam6": CAM6 MG2 kk2000_liq_autoconversion ------

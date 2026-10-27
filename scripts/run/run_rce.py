@@ -671,7 +671,8 @@ def main():
                 rad = rrtmgp_radiation(
                     T=T_col, p_full=p_full_col, p_half=p_half_col,
                     sfc_temperature=T_sfc_col, q_v=q_v_col, cos_zenith=mu0,
-                    config=rrtmgp_config, **cloud_props.to_rrtmg_kwargs())
+                    config=rrtmgp_config, cloud_rho_ice=cloud_config.rho_cloud_ice,
+                    **cloud_props.to_rrtmg_kwargs())
             else:
                 rad = rrtmgp_radiation(
                     T=T_col, p_full=p_full_col, p_half=p_half_col,

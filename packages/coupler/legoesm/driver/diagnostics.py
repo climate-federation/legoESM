@@ -287,6 +287,7 @@ class DiagnosticCollector:
         vcoord=None,
         surface_stability_scheme: str = "dyer1974",
         surface_bulk_scheme: str = "constant",
+        clubb_config=None,
     ):
         self.nlev = nlev
         self.sigma_full = sigma_full
@@ -327,6 +328,9 @@ class DiagnosticCollector:
         # fractional cloud fraction (issue #689).  ``None`` (cloud scheme
         # 'none') => ``clt`` is not published.
         self._cloud_config = cloud_config
+        # The run's resolved CLUBBConfig (cam6_clubb only): its top cuts the
+        # ice-stratus fraction exactly as radiation and MG2 do.
+        self._clubb_config = clubb_config
         # Set by ``feed_cmip_accumulators_native`` (MPAS lane) when it derives
         # clwvi/clivi from the RADIATION cloud diagnosis (floor included).
         # The cube lane's :meth:`collect` integrates the PROGNOSTIC condensate
@@ -821,6 +825,7 @@ class DiagnosticCollector:
                 *_, T_2m = compute_sam_oceflx_fluxes(
                     u_low, v_low, T_low, q_low, T_sfc, q_sfc, rho_low,
                     z_bot=10.0, variant="cesm", return_2m=True,
+                    t_bot=T_low,
                 )
                 return T_2m
             *_, T_2m = compute_most_fluxes(
@@ -895,6 +900,7 @@ class DiagnosticCollector:
             conv_mass_flux_up=jnp.reshape(
                 jnp.asarray(conv_mass_flux_up), (ncol, nlev + 1)),
             conv_icwmr=jnp.reshape(jnp.asarray(conv_icwmr), (ncol, nlev)),
+            clubb_config=self._clubb_config,
         )
 
     def _clt_percent(self, T, p_s, q_v, q_c, q_i=None, *, cloud_fraction=None,
@@ -1674,6 +1680,15 @@ class DiagnosticCollector:
         evspsbl=None,
         rsutcs=None,
         rlutcs=None,
+        rsds=None,
+        rsus=None,
+        rlds=None,
+        rlus=None,
+        siconc=None,
+        snw=None,
+        land_fraction=None,
+        zg=None,
+        tos=None,
         wap=None,
         flux_interval_days=None,
         include_state=True,
@@ -1758,6 +1773,25 @@ class DiagnosticCollector:
             CMOR sign as rsut/rlut] from the clouds-off second radiation pass
             (``--clear-sky-diag``, #843).  Interval means like the other flux
             fields; absent (None) keeps the output byte-identical.
+        rsds, rsus, rlds, rlus : array, shape ``(nCells,)``, optional
+            Surface downwelling / upwelling SW and LW flux [W/m2, CMOR
+            ``positive`` down for rsds/rlds, up for rsus/rlus], from the
+            radiation call's own surface fluxes (the caller derives the
+            upwelling pair as down minus the ``+into surface`` net).
+        siconc : array, shape ``(nCells,)``, optional
+            Sea-ice area fraction [%] (CMOR SImon), a state sample like ts.
+        snw, land_fraction : array, shape ``(nCells,)``, optional
+            Surface snow amount [kg/m2] (CMOR LImon ``snw``, ``area: mean
+            where land``) and the native land fraction [0-1] it is averaged
+            with: the published value is regrid(snw*f)/regrid(f), missing
+            where the target cell has no land.  Both or neither.
+        zg : array, shape ``(nCells, nlev)``, optional
+            Geopotential height [m] on model levels (the dycore's own
+            geopotential over g); published on plev19 (Amon) and sliced at
+            850 hPa for the daily table like ua/va.
+        tos : array, shape ``(nCells,)``, optional
+            Sea-surface temperature [K] (Omon monthly, Oday daily), the
+            prescribed AMIP SST on this lane, unmasked like siconc.
         q_c, q_i : array, shape ``(nCells, nlev)``, optional
             CLOUD liquid / CLOUD ice mixing ratio [kg/kg] (the tracers the
             radiation's cloud diagnosis consumes — NOT the precipitating
@@ -1835,8 +1869,8 @@ class DiagnosticCollector:
         # Flux-field name sets (Amon spatial / daily / zonal) used to split
         # the PHASE-2 commits between the two calendar bins.
         _FLUX_2D = ("pr", "rlut", "rsut", "rsdt", "hfss", "hfls", "evspsbl",
-                    "rsutcs", "rlutcs")
-        _FLUX_DAILY = ("pr",)
+                    "rsutcs", "rlutcs", "rsds", "rsus", "rlds", "rlus")
+        _FLUX_DAILY = ("pr", "rlut")
         _FLUX_ZONAL = ("precip",)
 
         # Coerce to a numeric float array (``dtype=float64``): a non-numeric
@@ -1880,6 +1914,20 @@ class DiagnosticCollector:
         evspsbl_np = None if evspsbl is None else np.asarray(evspsbl, dtype=_f64)
         rsutcs_np = None if rsutcs is None else np.asarray(rsutcs, dtype=_f64)
         rlutcs_np = None if rlutcs is None else np.asarray(rlutcs, dtype=_f64)
+        rsds_np = None if rsds is None else np.asarray(rsds, dtype=_f64)
+        rsus_np = None if rsus is None else np.asarray(rsus, dtype=_f64)
+        rlds_np = None if rlds is None else np.asarray(rlds, dtype=_f64)
+        rlus_np = None if rlus is None else np.asarray(rlus, dtype=_f64)
+        siconc_np = None if siconc is None else np.asarray(siconc, dtype=_f64)
+        snw_np = None if snw is None else np.asarray(snw, dtype=_f64)
+        f_land_np = (None if land_fraction is None
+                     else np.asarray(land_fraction, dtype=_f64))
+        zg_np = None if zg is None else np.asarray(zg, dtype=_f64)
+        tos_np = None if tos is None else np.asarray(tos, dtype=_f64)
+        if (snw_np is None) != (f_land_np is None):
+            raise ValueError(
+                "feed_cmip_accumulators_native: snw and land_fraction must be "
+                "supplied together (snw is a mean where land)")
 
         # Shape contract — validated UP FRONT so BOTH the spatial regrid AND the
         # zonal binning are transactional.  A malformed optional input raises
@@ -1903,6 +1951,15 @@ class DiagnosticCollector:
             ("evspsbl", evspsbl_np, (_ncol,)),
             ("rsutcs", rsutcs_np, (_ncol,)),
             ("rlutcs", rlutcs_np, (_ncol,)),
+            ("rsds", rsds_np, (_ncol,)),
+            ("rsus", rsus_np, (_ncol,)),
+            ("rlds", rlds_np, (_ncol,)),
+            ("rlus", rlus_np, (_ncol,)),
+            ("siconc", siconc_np, (_ncol,)),
+            ("snw", snw_np, (_ncol,)),
+            ("land_fraction", f_land_np, (_ncol,)),
+            ("tos", tos_np, (_ncol,)),
+            ("zg", zg_np, (_ncol, _nlev)),
             ("q_v", q_v_np, (_ncol, _nlev)),
             ("q_c", q_c_np, (_ncol, _nlev)),
             ("q_i", q_i_np, (_ncol, _nlev)),
@@ -1944,6 +2001,8 @@ class DiagnosticCollector:
             for _name, _src in (
                 ('tas', tas_field),
                 ('ts', ts_field),
+                ('siconc', siconc_np),
+                ('tos', tos_np),
                 ('ps', p_s_np),
                 ('pr', precip_np),   # CMOR kg/m2/s — native, no conversion
                 ('psl', psl),
@@ -1955,12 +2014,25 @@ class DiagnosticCollector:
                 ('evspsbl', evspsbl_np),
                 ('rsutcs', rsutcs_np),
                 ('rlutcs', rlutcs_np),
+                ('rsds', rsds_np),
+                ('rsus', rsus_np),
+                ('rlds', rlds_np),
+                ('rlus', rlus_np),
             ):
                 if _src is None or (not include_state and _name not in _FLUX_2D):
                     continue
                 r = self._regrid_to_latlon_2d(_src)
                 if r is not None:
                     fields_2d[_name] = r
+            if include_state and snw_np is not None:
+                # ``area: mean where land``: land-weighted regrid, missing
+                # (NaN -> the writer's 1e20) where the target cell has no land.
+                _snw_w = self._regrid_to_latlon_2d(snw_np * f_land_np)
+                _f_w = self._regrid_to_latlon_2d(f_land_np)
+                if _snw_w is not None and _f_w is not None:
+                    with np.errstate(divide='ignore', invalid='ignore'):
+                        fields_2d['snw'] = np.where(
+                            _f_w > 0.0, _snw_w / _f_w, np.nan)
             if include_state and q_v_np is not None:
                 cwv_field = np.asarray(
                     column_water_vapor(q_v_np, p_s_np, self.dsigma,
@@ -2063,6 +2135,7 @@ class DiagnosticCollector:
                 # rest, so subsidence becomes a published field instead of a
                 # continuity guess made downstream from monthly-mean winds.
                 ('wap', None if wap is None else np.asarray(wap)),
+                ('zg', zg_np),
             ):
                 if _src is None or not include_state:
                     continue
@@ -2076,12 +2149,13 @@ class DiagnosticCollector:
             # Daily: reuse the regridded 2-D fields + 850 hPa winds sliced from
             # the 3-D arrays (same index convention as collect()).
             if self._spatial_daily is not None:
-                for _name in ("tas", "pr", "psl"):
+                for _name in ("tas", "pr", "psl", "ps", "rlut", "tos"):
                     if _name in fields_2d:
                         daily_2d[_name] = fields_2d[_name]
                 _plev_sorted = np.sort(CMIP6_PLEV19)
                 _idx850 = int(np.argmin(np.abs(_plev_sorted - 85000.0)))
-                for _src_name, _dst in (("ua", "ua850"), ("va", "va850")):
+                for _src_name, _dst in (("ua", "ua850"), ("va", "va850"),
+                                        ("zg", "zg850")):
                     if (_src_name in fields_3d
                             and fields_3d[_src_name].shape[2] > _idx850):
                         daily_2d[_dst] = fields_3d[_src_name][:, :, _idx850]

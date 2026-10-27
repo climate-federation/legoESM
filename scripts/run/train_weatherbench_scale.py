@@ -1266,7 +1266,10 @@ def _main(argv=None):
                  "difference %.3g)", _rel)
 
     # --- NO INERT PARAMETERS: freeze what this configuration cannot reach ---
-    # The trainable bundle carries a knob for every scheme family and for the
+    # Unselected families' knobs, the option-unread spec fields and (ERA5
+    # fluxes) the surface knobs are already OUT of the differentiated tree,
+    # by name, at build time (scale_build); this probe judges the rest.
+    # Before that (2026-10-15) the bundle carried a knob for every family and for the
     # switched-off modes of the families that ARE selected, so a large part of
     # it has no gradient path in any one run: measured on the classical arm,
     # 110 of 157 leaves had an exactly-zero gradient on all 48 probe scenes.
@@ -1518,8 +1521,11 @@ def _main(argv=None):
             ppath, opath, fpath = _checkpoint_paths(cfg.out_dir, epoch)
             # Parameters, optimizer state and the trainable set together --
             # any one of them missing makes the other two unresumable.
+            # On-disk view: frozen (float) knobs as arrays, so the file
+            # also loads into an all-array template (checkpoint_view).
+            from legoesm.ml.training import checkpoint_view
             _atomic_write(ppath, lambda t: eqx.tree_serialise_leaves(
-                t, eqx.combine(cur_arr, _static_h)))    # CURRENT params
+                t, checkpoint_view(eqx.combine(cur_arr, _static_h))))
             _atomic_write(opath, lambda t: eqx.tree_serialise_leaves(
                 t, cur_opt_state))
             # Written LAST: it is the marker that says this epoch is

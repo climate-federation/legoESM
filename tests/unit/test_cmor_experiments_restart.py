@@ -403,6 +403,7 @@ class TestDiagnosticCollector(unittest.TestCase):
 
         fake = types.SimpleNamespace(
             _mpi_world_size=1,
+            _is_spmd_multiprocess=lambda: False,
             _run_wallclock_start=0.0,       # epoch → budget long exhausted
             _last_checkpoint_step=0,
             diagnostics=_Diag(),

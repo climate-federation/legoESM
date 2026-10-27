@@ -289,6 +289,125 @@ def cloud_levers(fns, state, mesh, sig, forcing, phys_state, rad_int, real_backe
           f"(radius moved {rows['Nc x2']['reff'] * 1e6:.2f} -> {rows['Nc x0.5']['reff'] * 1e6:.2f} um)")
     return 0
 
+def rlutcs_replay(fns, state, mesh, sig, forcing, phys_state, rad_int, real_backend,
+                  ref_run, era5_dir, target):
+    """#2109: clear-sky OLR of the PRODUCTION clear-sky radiation call on the
+    captured state, re-solved with temperature and/or humidity corrected to
+    ERA5 by the global-mean profile ``rlutcs_kernel.bias_profiles`` measures
+    (its reduction and identity-outside-range fill, unchanged).  On this deck
+    the clear-sky TOA flux is the clear stream of the ONE all-sky RRTMGP solve
+    (``clear_sky_toa`` -> ``lw_flux_up_toa_clr``), so that call's layer ``T``
+    and ``q_v`` are replaced and its clear-sky output read; surface
+    temperature, pressure and every other input are the production call's.  Pressure is the call's own ``p_full`` (hybrid
+    levels included).  Instantaneous, one state, no feedback."""
+    import inspect
+    import jax
+    import jax.numpy as jnp
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "rk", str(Path(__file__).with_name("rlutcs_kernel.py")))
+    rk = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(rk)
+    if era5_dir:
+        orig = rk._load
+
+        def _load(path, name):
+            m = orig(path, name)
+            if name == "prs":
+                m.ERA5 = era5_dir
+            return m
+        rk._load = _load
+    plev, dT, ratio = rk.bias_profiles(ref_run)
+    print(f"perturbation profile from {ref_run} (global mean, below-ground masked; "
+          f"ERA5 {era5_dir or 'climatology'}):")
+    for p, t, r in zip(plev, dT, ratio):
+        print(f"   {p / 100:7.0f} hPa   dT(ERA5-model) {t:+6.2f} K   q_ERA5/q_model {r:5.2f}")
+    fn = fns["radiation"]
+    area = np.asarray(mesh.areaCell, dtype=np.float64)
+    w = area / area.sum()
+    sig_bound = inspect.signature(real_backend)
+    rec = {}
+
+    def run(mode):
+        rec.clear()
+
+        def backend(*a, **kw):
+            b = sig_bound.bind(*a, **kw).arguments
+            if isinstance(b.get("T"), jax.core.Tracer):
+                raise SystemExit("rlutcs_replay reached a traced radiation call")
+            b = dict(b)
+            pf = np.asarray(b["p_full"], dtype=np.float64)
+            T = np.asarray(b["T"], dtype=np.float64)
+            if mode in ("dT", "both"):
+                T = T + rk._on_columns(plev, dT, pf, 0.0)
+            b["T"] = jnp.asarray(T, dtype=jnp.asarray(b["T"]).dtype)
+            if mode in ("dq", "both"):
+                q = np.asarray(b["q_v"], dtype=np.float64) * rk._on_columns(plev, ratio, pf, 1.0)
+                b["q_v"] = jnp.asarray(q, dtype=jnp.asarray(b["q_v"]).dtype)
+            out = real_backend(**b)
+            if out.lw_flux_up_toa_clr is None:
+                raise SystemExit("radiation call returned no clear-sky TOA flux")
+            rec.setdefault("cs", []).append(np.asarray(out.lw_flux_up_toa_clr, dtype=np.float64))
+            return out
+        rad_int._call_radiation_backend = backend
+        try:
+            kw = {"forcing": forcing} if getattr(fn, "_wants_forcing", False) else {}
+            if getattr(fn, "_wants_phys_state_ro", False):
+                kw["phys_state"] = phys_state
+            fn(state, mesh, sig, **kw)
+        finally:
+            rad_int._call_radiation_backend = real_backend
+        if len(rec.get("cs", [])) != 1:
+            raise SystemExit(f"expected one radiation solve with a clear-sky stream, got {len(rec.get('cs', []))}")
+        return rec["cs"][0]
+
+    # I1: the unperturbed replay must equal the production clear-sky call.
+    prod = {}
+
+    def spy(*a, **kw):
+        out = real_backend(*a, **kw)
+        b = sig_bound.bind(*a, **kw).arguments
+        if out.lw_flux_up_toa_clr is not None:
+            prod.setdefault("cs", []).append(np.asarray(out.lw_flux_up_toa_clr, dtype=np.float64))
+        return out
+    rad_int._call_radiation_backend = spy
+    kw = {"forcing": forcing} if getattr(fn, "_wants_forcing", False) else {}
+    if getattr(fn, "_wants_phys_state_ro", False):
+        kw["phys_state"] = phys_state
+    fn(state, mesh, sig, **kw)
+    rad_int._call_radiation_backend = real_backend
+    if len(prod.get("cs", [])) != 1:
+        raise SystemExit(f"production call made {len(prod.get('cs', []))} clear-sky solves, expected 1")
+    o = {m: run(m) for m in ("base", "dT", "dq", "both")}
+    d0 = float(np.abs(o["base"] - prod["cs"][0]).max())
+    gate(d0 < 1e-6, f"I1 replay = production clear-sky call (max|d rlutcs| {d0:.1e} W/m2)")
+    # The perturbed calls must not leave the captured state changed: re-solve
+    # the unperturbed call LAST and require it to equal the first one.
+    d1 = float(np.abs(run("base") - o["base"]).max())
+    gate(d1 < 1e-6, f"I2 base re-solved after the arms is unchanged (max|d rlutcs| {d1:.1e} W/m2)")
+    g = {m: float((v * w).sum()) for m, v in o.items()}
+    print(f"\nall {area.size} columns, captured instant, clear-sky stream of the production solve")
+    print(f"  base rlutcs                        {g['base']:8.2f} W/m2")
+    import regional_bias as rb
+    mc = rb._load_model(ref_run, "rlutcs")
+    if mc is not None:
+        mlat = np.asarray(mc.lat, dtype=np.float64)
+        mlon = np.asarray(mc.lon, dtype=np.float64) % 360.0
+        cmor = rb.region_mean(np.asarray(mc["rlutcs"], dtype=np.float64).mean(0), mlat, mlon,
+                              rb.REGIONS["GLOBAL"])
+        print(f"  (instrument check: {ref_run} CMOR monthly-mean rlutcs {cmor:8.2f} W/m2; "
+              f"instant vs monthly mean, so not expected to match exactly)")
+    for m, lab in (("dT", "+ temperature correction to ERA5"), ("dq", "+ humidity correction to ERA5"),
+                   ("both", "+ both")):
+        print(f"  {lab:<34s} {g[m]:8.2f}  (d = {g[m] - g['base']:+6.2f})")
+    if target is not None:
+        print(f"\nrlutcs error to explain: {target:+.2f} W/m2 (model - obs)")
+        for m in ("dT", "dq", "both"):
+            print(f"  {m:>4s} covers {100 * (g[m] - g['base']) / -target:6.1f} %")
+    print("SENSITIVITY OF THE RADIATION OPERATOR on one frozen state, not a coupled prediction.")
+    return 0
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("--run", default="dd_ctl")
@@ -315,6 +434,16 @@ def main(argv=None):
                     help="#1521: re-solve the captured production radiation call with "
                          "liquid water, ice water or droplet number scaled (LEVER_ARMS), "
                          "diurnally averaged; prints rsut/rlut per arm")
+    ap.add_argument("--rlutcs-replay", action="store_true",
+                    help="#2109: clear-sky OLR of the production clear-sky call with T and/or "
+                         "q_v corrected to ERA5 by rlutcs_kernel.bias_profiles of --ref-run")
+    ap.add_argument("--ref-run", default=None, help="run the bias profile is measured from "
+                    "(default: --run)")
+    ap.add_argument("--profile-era5", default=None,
+                    help="ERA5 monthly folder for the profile (e.g. a same-year 1979 copy); "
+                         "default: profile_rh_split's climatology")
+    ap.add_argument("--target", type=float, default=None,
+                    help="rlutcs model-minus-obs error to be explained [W/m2]")
     ap.add_argument("--n-times", type=int, default=8)
     args = ap.parse_args(argv)
     t0 = time.time()
@@ -398,6 +527,9 @@ def main(argv=None):
 
     pf_full = real_make_physics(phys_cfg, *pargs, **pkw)
     T0 = np.asarray(state.T.data, dtype=np.float64)
+    if args.rlutcs_replay:
+        return rlutcs_replay(fns, state, mesh, sig, forcing, phys_state, rad_int, real_backend,
+                             args.ref_run or args.run, args.profile_era5, args.target)
     if args.cloud_levers:
         return cloud_levers(fns, state, mesh, sig, forcing, phys_state, rad_int,
                             real_backend, n_times=args.n_times)

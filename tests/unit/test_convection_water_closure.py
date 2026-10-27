@@ -113,6 +113,8 @@ def _leaf_kwargs(conv_fn, scheme_cfg, p_full, p_half, T, q_v):
         "M_c": jnp.zeros((ncol,)),
         "a_u": jnp.zeros((ncol,)),
         "w_grid": zeros_2d,
+        # ZM's PBL height: CAM's cold-start value (ZM refuses a call without)
+        "pblh": jnp.zeros((ncol,)),
     }
     sig = inspect.signature(conv_fn)
     kwargs, missing = {}, []

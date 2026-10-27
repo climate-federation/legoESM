@@ -164,7 +164,8 @@ def test_cesm_ocean_law_water_inverts_with_the_constant_it_charges():
     u, v = jnp.full((n,), 6.0), jnp.full((n,), 1.0)
     T_air, q_v, q_sfc, rho = T_sfc - 1.5, jnp.full((n,), 0.008), jnp.full((n,), 0.02), jnp.full((n,), 1.15)
     cfg = SurfaceLayerConfig(bulk_scheme="large_yeager_cesm", z_ref=10.0)
-    _, _, _, lhflx, _ = compute_surface_fluxes(u, v, T_air, q_v, T_sfc, q_sfc, rho, cfg)
+    _, _, _, lhflx, _ = compute_surface_fluxes(u, v, T_air, q_v, T_sfc, q_sfc, rho, cfg,
+                                               t_bot=T_air)
     assert float(jnp.min(jnp.abs(lhflx))) > 1.0
     E_ref = lhflx / constants.L_v
     np.testing.assert_allclose(np.asarray(surface_moisture_flux(cfg, lhflx, T_sfc)),

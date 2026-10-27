@@ -422,20 +422,6 @@ TUNING_PARAMETERS: dict[str, TuningParameter] = {
         sensitivity="low",
         notes="Spreads the launched wave stress over multiple directions.",
     ),
-    "mcfarlane_tau_max": TuningParameter(
-        name="mcfarlane_tau_max",
-        default=10.0,
-        min_val=1.0,
-        max_val=30.0,
-        units="Pa",
-        description="McFarlane GWD upper clip on launch stress",
-        category="gwd",
-        sensitivity="low",
-        notes=(
-            "Upper bound on orographic launch stress; protects against "
-            "runaway drag in pathological columns."
-        ),
-    ),
 
 
     # -- Diffusion / turbulence -----------------------------------------

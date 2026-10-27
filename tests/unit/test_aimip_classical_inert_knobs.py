@@ -79,7 +79,7 @@ def test_surface_knob_map_matches_measured_gradients(bulk):
     def f(raw):
         cfg = eqx.tree_at(lambda m: m.raw_values, p, raw).to_surface_config(
             bulk_scheme=bulk)
-        out = compute_surface_fluxes(u, v, T, q, T_sfc, q_sfc, rho, cfg)
+        out = compute_surface_fluxes(u, v, T, q, T_sfc, q_sfc, rho, cfg, t_bot=T)
         return sum(jnp.sum(wi * o) for wi, o in zip(w, out))
 
     g = jax.grad(f)(p.raw_values)
@@ -140,10 +140,10 @@ def test_checkpoint_loads_into_array_and_frozen_templates(tmp_path):
 
 @pytest.mark.parametrize("bulk,frozen", [("constant", {"z0"}),
                                          ("most", {"Cd_neutral", "Ch_neutral"})])
-def test_unread_spatial_fields_are_frozen(bulk, frozen):
-    """Vote B: a spatial surface field is frozen exactly when its scalar knob
-    is (same surface sub-config reads both); its gradient is cut, the live
-    fields keep theirs."""
+def test_unread_spatial_fields_are_not_built(bulk, frozen):
+    """Vote B: a spatial surface field is unread exactly when its scalar knob
+    is (same surface sub-config reads both). Decision 5 (2026-10-15): an
+    unread field is not in the tree at all; the live fields keep a gradient."""
     from legoesm.grids.gaussian import create_gaussian_grid
     names = aimip_classical_trainable_names(
         **{**DEFAULT_ARM, "surface_bulk_scheme": bulk})
@@ -151,6 +151,7 @@ def test_unread_spatial_fields_are_frozen(bulk, frozen):
                                            spatial_init_std=0.01,
                                            trainable=names)
     assert p.spatial_surface.frozen == frozen
+    assert not (set(p.spatial_surface.fields) & frozen)
     assert AIMIPClassicalParams.from_defaults(
         spatial_surface=True).spatial_surface.frozen == frozenset()
     grid = create_gaussian_grid(10, dealiasing="quadratic")
@@ -160,28 +161,7 @@ def test_unread_spatial_fields_are_frozen(bulk, frozen):
         return sum(jnp.sum(v) for v in s.evaluate(grid).values())
     g = eqx.filter_grad(f)(sp)
     for n, fld in g.fields.items():
-        assert (float(jnp.abs(fld.coeffs).max()) == 0.0) == (n in frozen), n
-
-
-def test_frozen_spatial_fields_keep_their_values_under_adamw():
-    """The gradient cut alone would let AdamW's decoupled weight decay move a
-    frozen field; the trainer's optimizer zeroes its updates (reviews r3)."""
-    import optax
-
-    from legoesm.training.neural_gcm_spectral import freeze_spatial_updates
-    names = aimip_classical_trainable_names(**DEFAULT_ARM)   # constant: z0 frozen
-    p = AIMIPClassicalParams.from_defaults(spatial_surface=True,
-                                           spatial_init_std=0.01, trainable=names)
-    opt = freeze_spatial_updates(optax.adamw(1e-2, weight_decay=0.5), p)
-    params = eqx.filter(p, eqx.is_array)
-    grads = jax.tree_util.tree_map(jnp.ones_like, params)
-    upd, _ = opt.update(grads, opt.init(params), params)
-    f = upd.spatial_surface.fields
-    assert float(jnp.abs(f["z0"].coeffs).max()) == 0.0
-    assert float(jnp.abs(f["Cd_neutral"].coeffs).max()) > 0.0
-    base = optax.adamw(1e-2)
-    assert freeze_spatial_updates(
-        base, AIMIPClassicalParams.from_defaults(spatial_surface=True)) is base
+        assert float(jnp.abs(fld.coeffs).max()) > 0.0, n
 
 
 def test_gate_reads_bare_params_and_bundles():

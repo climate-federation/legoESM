@@ -338,3 +338,94 @@ def test_clm_tuned_albedo_branch_reaches_physics(tmp_path, monkeypatch):
     assert found, ("no driver branch assigns self.physics.albedo_land from "
                    "clm_surface_provider(variant='multilayer') under a "
                    "clm_surfdata_path condition")
+
+
+def test_open_ocean_frac_reaches_the_rrtmgp_backend(monkeypatch, mesh, sigma):
+    """dynamic_albedo on the MPAS lane: the driver's daily ``open_ocean_frac``
+    must arrive at the radiation call, next to the diffuse ``sfc_albedo``, so
+    the solver's direct beam gets the CESM ocean curve at that call's cosine
+    (tests/atmosphere/test_rad_boundary_oracle.py pins the curve)."""
+    state = _state(mesh, sigma)
+    n = int(mesh.nCells)
+    alb = _mixed_surface_albedo(n)
+    frac = jnp.linspace(0.0, 1.0, n)
+    seen = {}
+
+    class _Stop(Exception):
+        pass
+
+    def _spy(*args, **kwargs):
+        seen.update(kwargs)
+        raise _Stop
+
+    monkeypatch.setattr(rad_int, "_call_radiation_backend", _spy)
+    cfg = RadiationConfig(scheme="rrtmgp", cloud_scheme="none", diurnal_cycle=True)
+    with pytest.raises(_Stop):
+        make_radiation_physics(cfg, "mpas")(
+            state, mesh, sigma,
+            forcing={"day_of_year": jnp.asarray(80.0),
+                     "seconds_of_day": jnp.asarray(43200.0),
+                     "sfc_albedo": alb, "open_ocean_frac": frac})
+    np.testing.assert_array_equal(np.asarray(seen["open_ocean_frac"]), np.asarray(frac))
+    np.testing.assert_array_equal(np.asarray(seen["sfc_albedo_override"]), np.asarray(alb))
+    assert seen["cos_sza"] is not None       # diurnal: the call's own cosine
+
+
+_DRIVER_SCRIPT = '''
+import json, sys, jax
+from legoesm.atmosphere.physics.radiation import integration as I
+from legoesm.driver.config import (ExperimentConfig, GridConfig, DycoreConfig,
+                                   OutputConfig)
+from legoesm.driver.model_driver import ModelDriver
+out, radiation = sys.argv[1], sys.argv[2]
+real, rec = I._call_radiation_backend, []
+def spy(*a, **k):
+    fr = k.get("open_ocean_frac")
+    if fr is None:
+        jax.debug.callback(lambda: rec.append(None))
+    else:
+        jax.debug.callback(lambda f, s: rec.append(
+            [float(f.min()), float(f.max()), float(s.min()), float(s.max())]),
+            fr, k["sfc_albedo_override"])
+    return real(*a, **k)
+I._call_radiation_backend = spy
+cfg = ExperimentConfig(
+    grid=GridConfig(grid_type="mpas", resolution=3, nlev=8, vertical_coord="hybrid"),
+    dycore=DycoreConfig(model_type="hydrostatic", discretization="mpas", dt=600.0),
+    output=OutputConfig(output_dir=out, diag_days=0, checkpoint_days=0),
+    days=2 * 600.0 / 86400.0, dataset="analytical", fix_moisture=True,
+    distributed=False, n_devices=1, turbulence="none", radiation=radiation,
+    convection="none", microphysics="none", gravity_wave_drag="none",
+    cloud_scheme="none", diurnal_cycle=True, orbital_insolation=True,
+    dynamic_albedo=True)
+d = ModelDriver(cfg, output_dir=out)
+d.setup()
+assert d.run(compiled=True) == "COMPLETED"
+print("RESULT " + json.dumps(rec))
+'''
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("radiation", ["rrtmg", "gray"])
+def test_run_column_hands_open_ocean_frac_to_rrtmgp_only(tmp_path, radiation):
+    """End to end on ``ModelDriver._run_column``: with dynamic_albedo the
+    rrtmgp lane receives the diffuse blend (open ocean 0.06 on this all-ocean
+    analytical run) plus ``open_ocean_frac``; the gray lane keeps its single
+    daily-mean albedo and receives no fraction."""
+    import json, os, subprocess, sys
+    env = {k: v for k, v in os.environ.items()
+           if not k.startswith(("SLURM_", "PMI", "PMIX", "OMPI_"))}
+    env.update(JAX_ENABLE_X64="1", JAX_PLATFORMS="cpu")
+    proc = subprocess.run([sys.executable, "-c", _DRIVER_SCRIPT, str(tmp_path),
+                           radiation], env=env, capture_output=True, text=True,
+                          timeout=3600)
+    lines = [ln for ln in proc.stdout.splitlines() if ln.startswith("RESULT ")]
+    assert proc.returncode == 0 and lines, proc.stderr[-3000:]
+    rec = json.loads(lines[-1][len("RESULT "):])
+    assert rec, "radiation never ran"
+    if radiation == "gray":
+        assert all(r is None for r in rec)
+        return
+    for fmin, fmax, amin, amax in rec:
+        assert 0.0 <= fmin and fmax == 1.0          # analytical: no land, no ice
+        assert amin == pytest.approx(0.06) and amax == pytest.approx(0.06)

@@ -997,6 +997,12 @@ class SingleColumnModel:
                     dims=_DIMS_3D, units=units[name],
                 )
             state = state._replace(tracers=new_tracers)
+        # The bulk surface exchange needs a surface temperature: the SCM's
+        # prescribed skin (prescribe="T_s").  Prescribed fluxes are the
+        # surface exchange already, and a case with no surface forcing has
+        # none.
+        _sfc_bulk = ("default" if (forcing is not None
+                                   and forcing.prescribe == "T_s") else None)
         microphysics_fn = None
         if (
             microphysics_substeps > 1
@@ -1007,6 +1013,7 @@ class SingleColumnModel:
             )
             physics_fn = make_physics(
                 nonmicro_config, model_type="hydrostatic", dt=dt,
+                surface_bulk_coeffs=_sfc_bulk,
             )
             microphysics_fn = make_microphysics_physics(
                 physics_config.microphysics,
@@ -1016,6 +1023,7 @@ class SingleColumnModel:
         else:
             physics_fn = make_physics(
                 physics_config, model_type="hydrostatic", dt=dt,
+                surface_bulk_coeffs=_sfc_bulk,
             )
         phys_state = init_physics_state(
             ncol=1, nlev=nlev, physics_config=physics_config,
