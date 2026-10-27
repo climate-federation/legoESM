@@ -703,3 +703,138 @@ def test_budget_check_catches_overspending():
     """Control: tripling ePBL's Kd must break the bound, or the check above
     could not fail (measured: 17 of the 18 columns go red at x3)."""
     assert _budget_residual(_ref_cfg(), 0.0, 0.05, kd_scale=3.0) > 1e-6
+
+
+# --- lat-lon C-grid model: ePBL takes the step dt, like CATKE --------------
+
+def _latlon_epbl_setup(dt_s=1800.0, convection="none", **flat):
+    from legoesm.grids.latlon import create_latlon_grid
+    from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean
+    from legoesm.ocean.physics.combined import OceanPhysicsConfig
+    from legoesm.ocean.physics.bottom_drag.config import BottomDragConfig
+    from legoesm.ocean.physics.convection.config import OceanConvectionConfig
+    from legoesm.ocean.physics.lateral_mixing.config import LateralMixingConfig
+    from legoesm.ocean.physics.surface_forcing.config import (
+        SurfaceForcingConfig,
+    )
+    from legoesm.ocean.state import LatLonCGridOceanConfig
+    from legoesm.ocean.vertical import create_ocean_z_star
+
+    grid = create_latlon_grid(n_lat=8, n_lon=16)
+    z_coord = create_ocean_z_star(n_levels=8, H_max=4000.0)
+    phys = OceanPhysicsConfig(
+        vertical_mixing=VerticalMixingConfig(
+            scheme="epbl", epbl=EPBLConfig(dt_s=dt_s)),
+        lateral_mixing=LateralMixingConfig(scheme="none"),
+        surface_forcing=SurfaceForcingConfig(scheme="none"),
+        bottom_drag=BottomDragConfig(scheme="none"),
+        convection=OceanConvectionConfig(scheme=convection),
+        shortwave_penetration=None,
+    )
+    cfg = LatLonCGridOceanConfig.from_flat(
+        A_h=1.0e4, implicit_vertical_mixing=True, physics=phys, **flat)
+    state = rest_state_latlon_cgrid_ocean(
+        grid, z_coord, T_water_init_C=20.0, T_deep=2.0, S_uniform=35.0,
+        H_max=4000.0)
+    return grid, z_coord, cfg, phys, state
+
+
+def _windy_forcing(state):
+    from types import SimpleNamespace
+    shape = state.T.data.shape[:-1]
+    return SimpleNamespace(tau_x=jnp.full(shape, 0.1), tau_y=jnp.zeros(shape),
+                           q_net=jnp.full(shape, -100.0), freshwater=None)
+
+
+def test_k_profiles_epbl_uses_dt_tke_not_dt_s():
+    """On the K-profile path ePBL prices mixing with the dt it is passed:
+    dt_s does not matter there, dt_tke does, and a missing dt_tke raises."""
+    from legoesm.ocean.physics.vertical_mixing.k_profiles import (
+        compute_vertical_K_profiles,
+    )
+    grid, z_coord, _, phys_a, state = _latlon_epbl_setup(dt_s=1800.0)
+    _, _, _, phys_b, _ = _latlon_epbl_setup(dt_s=600.0)
+    forcing = _windy_forcing(state)
+    lat_deg = jnp.degrees(grid.lat2d)   # as the tendency probe passes it
+
+    def _kv(phys, dt_tke):
+        K_v, _ = compute_vertical_K_profiles(
+            state, z_coord, forcing, phys, dt_tke=dt_tke, lat_deg=lat_deg)
+        return np.asarray(K_v)
+
+    k_a = _kv(phys_a, 1200.0)
+    assert np.max(k_a) > 0.0          # forced: the comparison is not of zeros
+    np.testing.assert_array_equal(k_a, _kv(phys_b, 1200.0))
+    # Surface diffusivity (shallowest interior interface; k=0 at the surface)
+    # must differ exactly, in every column, between the two dts.
+    assert np.all(k_a[..., 0] != _kv(phys_a, 300.0)[..., 0])
+    with pytest.raises(ValueError, match="requires dt_tke"):
+        compute_vertical_K_profiles(state, z_coord, forcing, phys_a,
+                                    lat_deg=lat_deg)
+
+
+def _record_epbl_dt(monkeypatch):
+    import legoesm.ocean.physics.vertical_mixing as vertical_mixing
+    real = vertical_mixing.compute_vertical_K_profiles
+    seen = []
+
+    def _spy(*args, **kwargs):
+        # The model step is jitted, so dt_tke is a tracer here: read its
+        # runtime value through a host callback.
+        dt_tke = kwargs.get("dt_tke")
+        if dt_tke is None:
+            seen.append(None)
+        else:
+            jax.debug.callback(lambda x: seen.append(float(x)), dt_tke)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(vertical_mixing, "compute_vertical_K_profiles", _spy)
+    return seen
+
+
+@pytest.mark.parametrize("convection", ["none", "enhanced_diffusion"])
+def test_latlon_model_passes_step_dt_to_epbl(monkeypatch, convection):
+    """The lat-lon C-grid model hands ePBL its step dt (CATKE's dt_mom), not
+    EPBLConfig.dt_s -- also when another scheme (enhanced diffusion)
+    surfaces K from the physics pipeline, which would otherwise skip the
+    K-profile path."""
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel,
+    )
+    grid, z_coord, cfg, _, state = _latlon_epbl_setup(
+        dt_s=1800.0, convection=convection)
+    model = LatLonCGridOceanModel(grid, z_coord, cfg)
+    seen = _record_epbl_dt(monkeypatch)
+    new = model.step(state, 900.0)
+    jax.block_until_ready(new)
+    assert seen and all(d == 900.0 for d in seen)
+    assert np.all(np.isfinite(np.asarray(new.T.data)))
+
+
+def test_latlon_leapfrog_passes_euler_start_then_two_dt_to_epbl(monkeypatch):
+    """Leapfrog: the Euler start hands ePBL dt, later steps 2*dt, the same
+    dt_mom CATKE receives."""
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel,
+    )
+    grid, z_coord, cfg, _, state = _latlon_epbl_setup(
+        dt_s=1800.0, outer_integrator="leapfrog", enable_runtime_checks=False,
+        coriolis_scheme="explicit_ab2", vorticity_scheme="een_total")
+    model = LatLonCGridOceanModel(grid, z_coord, cfg)
+    seen = _record_epbl_dt(monkeypatch)
+    s1 = jax.block_until_ready(model.step(state, 900.0))
+    first = list(seen)
+    seen.clear()
+    jax.block_until_ready(model.step(s1, 900.0))
+    assert first and all(d == 900.0 for d in first)
+    assert seen and all(d == 1800.0 for d in seen)
+
+
+def test_latlon_model_rejects_epbl_with_dt_mom_ratio():
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel,
+    )
+    grid, z_coord, cfg, _, _ = _latlon_epbl_setup(
+        dt_mom_ratio=2.0, barotropic_solver="rigid_lid")
+    with pytest.raises(ValueError, match="epbl.*dt_mom_ratio == 1.0"):
+        LatLonCGridOceanModel(grid, z_coord, cfg)

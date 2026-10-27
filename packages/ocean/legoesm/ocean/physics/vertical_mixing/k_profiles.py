@@ -1228,10 +1228,18 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
         from legoesm.ocean.physics.vertical_mixing.integration import (
             make_vertical_mixing_physics,
         )
+        # ePBL's energy budget is per timestep: it takes the step dt the
+        # caller passes in ``dt_tke``, exactly as CATKE does below, and never
+        # reads EPBLConfig.dt_s on this path.
+        if dt_tke is None:
+            raise ValueError(
+                "ePBL (vertical_mixing.scheme='epbl') prices mixing per "
+                "timestep and requires dt_tke (the step dt) to be passed to "
+                "compute_vertical_K_profiles.")
         grid = _EPBLGridShim(lat_deg)
         fn = make_vertical_mixing_physics(
             vmix_cfg, apply_diffusion=False, constants_config=constants_config)
-        tend = fn(state, grid, z_coord, surface_forcing)
+        tend = fn(state, grid, z_coord, surface_forcing, dt=dt_tke)
         return tend.K_v, tend.A_v, None
 
     if scheme == "none":
