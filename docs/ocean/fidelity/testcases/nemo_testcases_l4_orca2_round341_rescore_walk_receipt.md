@@ -318,3 +318,20 @@ Across all `kt = 1..10`, every column where `e3t_kmm_stored != e3t_kmm_rebuilt` 
 | **Total (`kt = 1..10`)** | **2,286,410** | **15** | **148** | **1** | **0** | **0** | **0** |
 
 With the single-statement fix proposal (`e3t_kmm_stored` = `_h_s2_kmm`), both `T` and `S` at Stage 2 have **`0` unequal interior 3-D wet words across all `kt = 1..10`**, eliminating the sole 3-D-wet departure on Rung 10 (`kt = 10, stage2, T`) and making all **`200 / 200` Rung-10 rows `100%` `BIT_EXACT` on 3-D wet cells** (`152 / 200` raw `BIT_EXACT`, `48 / 200` `AT_BAR_NOT_EXACT` dry signed-zero `u`/`v` rows, `0 / 200` `OVER_BAR`).
+
+## 4. Final gates and disposition
+
+- **Per-receipt and suite citation gates**:
+  - `scripts/validate/ocean_fidelity/testcases/nemo_testcase_receipt_citation_gate.py --receipt docs/ocean/fidelity/testcases/nemo_testcases_l4_orca2_round341_rescore_walk_receipt.md --from-heading "# ORCA2 round 341 —"` passes all 24 citations with `0` failures, `0` unmapped citations, `0` map-audit failures, and `9 / 9` self-test controls fired (`/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/orca2_r341/rescore/citation_gate.json`, SHA-256 `40a1bebb5bd9b4b512e421d59dc26aa392a428ceae96869fc7a74d913f6fb15f`).
+  - `JAX_ENABLE_X64=1 pytest tests/ocean/fidelity/test_nemo_testcase_receipt_citation_gate.py`: `18 passed in 9.01s` (`/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/orca2_r341/rescore/test_citation_gate.log`, SHA-256 `5156712751b05a0e1b99e9bb00e47d6fb97339193d4868b942ccc23a4e3c341f`).
+- **Default ORCA2 gate battery and private-import ratchet**:
+  - All 153 tests in the default ORCA2 landing battery plus the 3 new Round-341 unit controls (`tests/ocean/fidelity/test_orca2_round341_rescore_walk_gate.py:22-114`) pass on CPU under `JAX_ENABLE_X64=1`:
+    - `141 passed in 344.39s` (`default_gate_part1.log`, SHA-256 `3ce741813e70ab8b6a0c46977b7b9a1250fbc162ab58f89c7252941e5dd6ba9c`),
+    - `10 passed in 72.58s` (`default_gate_part2.log`, SHA-256 `9692ea18db0ae2d0c0a08871730bd946ccda8e80125bd00671490c494f6fb518`),
+    - `2 passed in 580.81s` (`default_gate_part3.log`, SHA-256 `40ad668e52559b6988449fc40e4a23f3aeffa8d6305fa95eab782ae3b7a2af9f`),
+    - `3 passed in 6.91s` (`default_gate_r341.log`, SHA-256 `6ecf78b85eea9ab71175adcbf06777d938288e4c88c9759a8cf9d032cb68888f`).
+  - Explicit private-import ratchet (`tests/test_no_private_cross_imports.py`): `6 passed in 5.11s` (`/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/orca2_r341/rescore/ratchet.log`, SHA-256 `531050d7267caa32f4485abc610c52e4083e66d13f42905a7fe2fc98c74ee52e`).
+  - No DINO month gate is required because `0` files under `packages/` or `src/` changed.
+- **Review**: `independent review: operator`.
+- **Disposition**: **HELD** — single cited statement (`ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/stprk3_stg.f90:177` + `ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/traadv_cen.f90:143-160` and `:202-227` vs `ocean_model_latlon_cgrid.py:2293-2295` / `:9570-9572` / `:2665-2666` / `:2705-2706`) `CONFIRMED` on admitted production-arithmetic records; stopping with the fix `PROPOSAL` and verification on the recorded inputs per prompt instruction 3.
+
