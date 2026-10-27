@@ -266,11 +266,6 @@ def build_tile_step_unified(grid, sigma, config, kt: int):
         convection_scheme_traits,
     )
 
-    if getattr(config, "microphysics", None) == "sundqvist":
-        raise NotImplementedError(
-            "build_tile_step_unified: sundqvist blends its ice autoconversion "
-            "by each column's grid-cell area, a per-column bake that differs "
-            "per tile (same reason as land)")
     if getattr(config, "convection", "none") != "none":
         traits = convection_scheme_traits(config.convection)
         if (getattr(traits, "is_w_grid_consumer", False)
@@ -466,7 +461,7 @@ def make_tiled_operator_split_step(
             carry_t.step_index, start_day, dt, rad_update_steps)
         tile_statics = dataclasses.replace(
             statics, grid=TileGridView(ar_t),
-            lat=lat_t, lon=lon_t, forcing=forcing_t)
+            lat=lat_t, lon=lon_t, cell_area=ar_t, forcing=forcing_t)
         if ghg_keys is not None:
             # Transient GHG: rebuild the override from THIS segment's
             # forcing (the lat-band factory's contract — a baked statics

@@ -18374,11 +18374,6 @@ class ModelDriver:
         # --- BAND step_unified: build the physics pipeline on ONE band grid so
         # its ColumnAdapter bakes the band ncol (bands are uniform, so one build
         # serves every band — the make_sharded_operator_split_step CONTRACT). ---
-        if getattr(cfg, "microphysics", None) == "sundqvist":
-            raise NotImplementedError(
-                "lat-band SPMD: sundqvist blends its ice autoconversion by each "
-                "column's grid-cell area, and the one band-0 pipeline build "
-                "would apply band 0's areas to every band; run serial or MPI")
         band_grid = build_band_grids_atm(self.grid, n_dev)[0]
         band_physics = build_physics_pipeline(
             band_grid, self.sigma, cfg, spacing_grid=self.grid)

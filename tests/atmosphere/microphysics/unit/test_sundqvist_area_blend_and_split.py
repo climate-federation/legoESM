@@ -131,11 +131,3 @@ def test_lane_kwargs_carry_the_grid_area_per_column():
     assert kw["carries_q_i"] is True
     assert sundqvist_lane_kwargs("kessler", G(), 6, True) == {}
     assert sundqvist_lane_kwargs("sundqvist", object(), 6, False)["cell_area"] is None
-
-
-def test_tiled_cube_lane_refuses_sundqvist():
-    from types import SimpleNamespace
-
-    from legoesm.driver.tiled_operator_split_step import build_tile_step_unified
-    with pytest.raises(NotImplementedError, match="sundqvist"):
-        build_tile_step_unified(None, None, SimpleNamespace(microphysics="sundqvist"), 1)
