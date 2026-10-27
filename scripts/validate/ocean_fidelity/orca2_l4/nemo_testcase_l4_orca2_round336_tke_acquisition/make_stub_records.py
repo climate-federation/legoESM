@@ -108,7 +108,7 @@ def write_record(path: Path, rank: int, phase: dict, ice: dict, drag: dict) -> N
         ))
         for name in gate.FIELDS:
             values = np.asarray(fields[name], dtype="=f8", order="F")
-        rank = field_rank(name)
+            rank = field_rank(name)
             n1, n2, n3 = gate._extent(name, header)
             stream.write(name.ljust(24).encode("ascii"))
             stream.write(struct.pack(
