@@ -547,8 +547,8 @@ Argon item 3 is resolved for the new acquisition. When the target is
 `tke336`, the shared driver neither stages nor applies the round-328
 `dynzdf`/stage patches, and its actual target-build branch has the same
 exclusion
-(`scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round328_dynzdf_acquisition/run.sh:764-771`,
-`scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round328_dynzdf_acquisition/run.sh:1475-1479`).
+(`scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round328_dynzdf_acquisition/run.sh:795-802`,
+`scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round328_dynzdf_acquisition/run.sh:1589-1598`).
 The same-program result consequently contains only observer unit `zdftke` and
 writer unit `tke_round336_writer`: 425 inherited objects and 413 inherited
 preprocessed sources are identical. The round-328 writer is compiled only in
@@ -564,7 +564,7 @@ construction, each of the five Thomas phases, the pre-sweep state, `lup`,
 The 51-field record writes those boundaries separately, including
 `post_langmuir_en`, `solve_diag`, `solve_rhs`, `solve_bottom`, `solve_back`,
 `after_lup_mxld`, and `after_ldown_mxl`
-(`scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round336_tke_acquisition/tke_round336_writer.F90:232-284`).
+(`scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round336_tke_acquisition/tke_round336_writer.F90:236-288`).
 `entry_avm_k` retains its full `jpi,jpj,jpk` allocation and the semantic plant
 explicitly probes the north halo at `jj=ntej`; therefore the 17 observed
 `avt_k` differences at `jj=150` have the required `avm_k(:,151,:)` input.
@@ -584,7 +584,7 @@ The preflight compiles observer-free sources at the real record flags and
 compares each named function's normalized FP-opcode multiset with the
 SHA-pinned executable that actually produced the admitted record. It also
 pins zero-FP/inlined topology instead of silently omitting such functions
-(`scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round328_dynzdf_acquisition/run.sh:1074-1149`).
+(`scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round328_dynzdf_acquisition/run.sh:1149-1224`).
 
 | admitted tool | patched/touched function | production FP | producer FP | verdict |
 |---|---|---:|---:|---|
@@ -710,7 +710,7 @@ The normalized opcode multisets of both FP-bearing functions in the new build
 equal production exactly; the arithmetic plant changes the `zdf_tke` census.
 The historical build independently pins every nonzero count above and refuses
 if round 332 unexpectedly regains FP arithmetic in `zdf_tke`
-(`scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round328_dynzdf_acquisition/run.sh:996-1072`).
+(`scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round328_dynzdf_acquisition/run.sh:1071-1147`).
 Thus the 1,007-to-1,054 `tke_tke` change is plain evidence that the admitted
 round-331/332 TKE arithmetic differs from production, not merely a symbol-name
 or record-layout difference.
@@ -747,7 +747,7 @@ The writer allocates full-halo `p_avm/rn2/rn2b/wmask` and interior-only
 Its 46 ordered fields now include entry `en/p_avt`, `rn2/rn2b`, post-Langmuir
 `en`, pre-sweep `zmxlm`, and pre-Prandtl `zav`, as well as the previous
 boundary, matrix, solve, final-mixing, and final-coefficient values
-(`scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round336_tke_acquisition/tke_round336_writer.F90:232-284`).
+(`scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round336_tke_acquisition/tke_round336_writer.F90:236-288`).
 
 The read-only preflight passes 17 focused tests and the inherited 43-test
 battery; syntax-compiles all five relevant Fortran units; fires all 15 real
@@ -759,7 +759,7 @@ preprocessed sources. The wrapper has its own `EXIT` retention trap
 (`scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round336_tke_acquisition/run.sh:35-53`)
 and its stub NEMO exercises success, quoted refusal, crash retention, in-place
 admission, and retained admission through the actual driver branches
-(`scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round336_tke_acquisition/run.sh:116-177`).
+(`scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round336_tke_acquisition/run.sh:118-179`).
 
 The preflight log is `round336/resume9_tke_preflight.log`, SHA-256
 `d4eeb86f56d810e166fd399f997fb5a8ced37990fb49e231ea067b64bbb35b3d`.
@@ -787,20 +787,20 @@ The record now contains `htau`, bottom `uu/vv` at `Kbb`, evaluated `gdepw`,
 background coefficient inputs used by `tke_avn`. Its executable source-read
 census classifies 30 external array reads into 31 recorded fields, 34 pinned
 scalar or selector reads, and seven reads belonging only to inactive branches
-(`scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round336_tke_gate.py:73-100`).
+(`scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round336_tke_gate.py:79-106`).
 Removing `entry_htau` makes the read-set plant refuse. Admission additionally
 requires full-domain `fr_i` to equal the admitted kt-2 ice-cover source,
 `hm_i/taum` to equal their admitted sources, evaluated metrics to equal the
 admitted kt-2 phase record, and bottom drag to equal the linear-drag namelist
 constant `-0.0004*ssmask`; the source-value plant perturbs the latter and
 refuses
-(`scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round336_tke_gate.py:310-358`).
+(`scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round336_tke_gate.py:324-375`).
 
 The stub no longer bypasses `admit()`. Its success and retained-success paths
 run all 16 parser/semantic plants followed by the real two-rank admission;
 success, in-place re-admission, quoted NEMO refusal, crash retention, and
 retained re-admission all pass end to end
-(`scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round328_dynzdf_acquisition/run.sh:1301-1326`).
+(`scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round328_dynzdf_acquisition/run.sh:1417-1442`).
 The refreshed read-only preflight passes 19 focused tests and the 45-test
 inherited battery, real-source bounds execution on both ranks, five syntax
 proofs, all 15 placement plants, the read-set plant, the source-value plant,
@@ -811,7 +811,7 @@ inlined in both builds.
 The opcode proof is deliberately described as a multiset: it cannot detect a
 MIN/MAX operand swap. The admission backstop is the independent byte compare
 over every inherited `oracle_*.bin` and every step-10 restart file
-(`scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round328_dynzdf_acquisition/run.sh:497-511`).
+(`scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round328_dynzdf_acquisition/run.sh:527-541`).
 The real stub admission reports `DETERMINISTIC_PASSIVITY_PASS files=160`, a
 set that includes all four ocean/ice rank restart files, before the TKE gate
 can pass. Thus no passivity claim relies on the opcode multiset alone.

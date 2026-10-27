@@ -1936,23 +1936,23 @@ CITATION_MAP = {
         '@@ -185,3 +187,5 @@',
         '+            & zmxld(ntsi:ntei,1:jpkm1),p_pdlr(ntsi:ntei,jj,2:jpkm1))', 12],
     'scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round336_tke_acquisition/zdftke_round336.patch:13-52': [
-        '@@ -182,0 +194,5 @@',
+        '@@ -181,0 +191,5 @@',
         '+         r336_pre_pdlr_avt(:,jj,1:jpkm1)=p_avt(ntsi:ntei,jj,1:jpkm1) ! R336_TKE_COPYOUT', 40],
     'scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round336_tke_acquisition/tke_round336_writer.F90:80-128': [
         'SUBROUTINE r336_tke_begin(kt,Kbb,Kmm,pen,pavt,pavm,psh2,pdissl,prn2,prn2b, &',
         '& after_tke_en(A2D(0),jpk),after_tke_pdlr(A2D(0),jpk))', 49],
-    'scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round336_tke_acquisition/tke_round336_writer.F90:232-284': [
+    'scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round336_tke_acquisition/tke_round336_writer.F90:236-288': [
         'WRITE(unit) magic,2,nkt,nkbb,nkmm,narea-1,jpi,jpj,jpk,ntsi,ntei,ntsj,ntej, &',
         "CALL put3(unit,'tke_wmask',entry_wmask,1,1,1)", 53],
     'ZDF/zdfdrg.F90:117-127': [
         'IF( ln_drgice_imp ) THEN',
-        'END_2D', 11],
+        ('END_2D', 2), 11],
     'ZDF/zdfdrg.F90:171-190': [
         'IF( l_log_not_linssh ) THEN',
-        'END_2D', 20],
+        ('END_2D', 4), 20],
     'ZDF/zdfdrg.F90:213-221': [
-        'SELECT CASE( ndrg )',
-        'END_2D', 9],
+        ('SELECT CASE( ndrg )', 1),
+        ('END_2D', 6), 9],
     'do_loop_substitute.h90:117-125': [
         '#define DO_1Di(L, R) DO ji = ntsi-(L), ntei+(R)',
         '#define END_2D   END DO   ;   END DO', 9],
@@ -1969,10 +1969,10 @@ CITATION_MAP = {
         'def write_record(path: Path, rank: int, phase: dict, ice: dict, drag: dict) -> None:',
         'stream.write(values.tobytes(order="F"))', 36],
     'scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round328_dynzdf_acquisition/run.sh:932-974': [
-        'if [[ "$ACQ_TARGET" == tke336 ]]; then',
+        ('if [[ "$ACQ_TARGET" == tke336 ]]; then', 7),
         '"$(find -L "$R336_PRISTINE_BLD/obj" -maxdepth 1 -type f -name \'*.o\' | wc -l)"', 43],
     'scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round328_dynzdf_acquisition/run.sh:1363-1386': [
-        'if [[ "$ACQ_TARGET" == tke336 ]]; then',
+        ('if [[ "$ACQ_TARGET" == tke336 ]]; then', 11),
         '"$r336_function_count" "$r336_instruction_count" "$r336_stage_count"', 24],
     'scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round328_dynzdf_acquisition/run.sh:1387-1406': [
         '# Recompile the inherited round-326 stage observer for the plant.  The',
@@ -1980,34 +1980,34 @@ CITATION_MAP = {
     'scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round328_dynzdf_acquisition/run.sh:1587-1630': [
         'while IFS= read -r -d \'\' source; do cp -a "$source" "$TARGET_ROOT/EXP00/$(basename "$source")"; done \\',
         'patch -s --fuzz=0 -p0 -d "$TARGET_ROOT/MY_SRC" <"$R336_TKE_PATCH"', 44],
-    'scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round328_dynzdf_acquisition/run.sh:996-1072': [
+    'scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round328_dynzdf_acquisition/run.sh:1071-1147': [
         "command -v objdump >/dev/null || refuse 'no objdump for TKE arithmetic passivity proof'",
         "printf 'R336_HISTORICAL_TKE_RESULT admitted_rounds=331,332 arithmetic_differs_from_production=yes\\n'", 77],
     'scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round336_tke_acquisition/run.sh:35-53': [
         'scratch=$(mktemp -d /data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round336/.r336-tke-driver.XXXXXX)',
         'trap cleanup EXIT', 19],
-    'scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round336_tke_acquisition/run.sh:116-177': [
+    'scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round336_tke_acquisition/run.sh:118-179': [
         ('if ! R336_TKE_STUB_FLOW_ROOT=$base/success R336_TKE_STUB_NEMO=$stub \\', 1),
         "printf 'R336_TKE_STUB_FLOW_PASS cases=success,in-place,refusal,retention,retained-admission\\n'", 62],
-    'scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round336_tke_gate.py:73-100': [
+    'scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round336_tke_gate.py:79-106': [
         'READ_SET_FIELDS = {',
         '"h_i", "hsw", "phioc", "ut0sd", "vt0sd", "utau", "vtau",', 28],
-    'scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round336_tke_gate.py:310-358': [
+    'scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round336_tke_gate.py:324-375': [
         'if plant == "source-values":',
-        '"taum differs from admitted surface source")', 49],
-    'scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round328_dynzdf_acquisition/run.sh:497-511': [
+        '"taum differs from admitted surface source")', 52],
+    'scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round328_dynzdf_acquisition/run.sh:527-541': [
         'compare_deterministic() {',
         "printf 'DETERMINISTIC_PASSIVITY_PASS %s files=%s\\n' \"$candidate\" \"$count\"", 15],
-    'scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round328_dynzdf_acquisition/run.sh:1301-1326': [
+    'scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round328_dynzdf_acquisition/run.sh:1417-1442': [
         'admit() {',
         '[[ -z ${R336_TKE_STUB_FLOW_ROOT:-} ]] || r336_tke_stub_assert', 26],
-    'scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round328_dynzdf_acquisition/run.sh:764-771': [
+    'scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round328_dynzdf_acquisition/run.sh:795-802': [
         "# Syntax proof uses the record program's stprk3_stg, not pristine NEMO.",
         'patch -s --fuzz=0 -p0 -d "$dry" <"$STAGE_PATCH"', 8],
-    'scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round328_dynzdf_acquisition/run.sh:1475-1479': [
+    'scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round328_dynzdf_acquisition/run.sh:1589-1598': [
         ('if [[ "$ACQ_TARGET" != tke336 ]]; then', 5),
-        'patch -s --fuzz=0 -p0 -d "$TARGET_ROOT/MY_SRC" <"$STAGE_PATCH"', 5],
-    'scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round328_dynzdf_acquisition/run.sh:1074-1149': [
+        'patch -s --fuzz=0 -p0 -d "$TARGET_ROOT/MY_SRC" <"$STAGE_PATCH"', 10],
+    'scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round328_dynzdf_acquisition/run.sh:1149-1224': [
         '# Audit every admitted ORCA2 recorder in the requested round set against an',
         "printf 'R336_HISTORICAL_OBSERVER_RESULT equal=r5,r326,r328-zdf,r333-ldf-arithmetic different=r328-dyn,r331,r332,r333-stage\\n'", 76],
     'zdf_oce.F90:70-72': [
