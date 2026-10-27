@@ -827,3 +827,87 @@ The required operator handoff remains:
 ```text
 ACQUISITION_NEEDED: scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round336_tke_acquisition/run.sh
 ```
+
+## Resume 12: producer-value discrimination
+
+Resume 11's unequal FP counts are provenance flags, not value-difference
+measurements. This section supersedes only that section's value implication;
+the counts and producer identities remain valid. The offline audit recompiles
+the observer-free functions with the record flags, compares register-free
+ordered FP mnemonics with each admitted producer binary, scans every affected
+function for FMA instructions, and byte-compares the already-written twin
+witnesses. It does not run NEMO and does not modify either acquisition tool.
+
+All available producer build Makefiles carry the identical flags
+`-fdefault-real-8 -O3 -funroll-all-loops -fcray-pointer
+-ffree-line-length-none -fallow-argument-mismatch -fno-tree-vectorize`.
+None carries `-ffast-math`, `-Ofast`, `-mfma`, `-ffp-contract=fast`, or the
+other unsafe-math flags checked by the audit. The affected-function FMA census
+is zero in every producer.
+
+The observer-free twin is
+`/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round326/acquisition/orca1ice_tke_hmi_10step_np2`.
+For it and every producer below, the ordered four-restart manifest has SHA-256
+`9e09b85d488f60846b94a46687dfe9d757b1e09433cbcab0d60293c7d7161f7a`;
+the 30 complete stage files have manifest SHA-256
+`9bebfc965ea298c5521e278ac07b41417edf2ba5f9cac8b0f704d59065f7ef15`;
+and the post-`zdf_phy` return file has SHA-256
+`209369523aafa70ddbaa17695908b6da30929dae6bce7ee225c9ee353c993ad8`.
+Here a manifest digest is SHA-256 over filename-ordered `SHA-256  basename`
+lines. Thus every row has 4/4 restart files, 30/30 completed-stage files, and
+the post-ZDF file byte-identical to the same-input twin.
+
+| admitted record (path below `orca2_rounds`) | census differs? | restart bytes equal to twin? | per-function value test | VERDICT |
+|---|---|---|---|---|
+| round 328 dyn walk — `round328/acquisition/orca1ice_dynzdf_kt1_np2` | yes: `dyn_zdf` 2,446/2,365; `stp_rk3_stg` 1,175/1,367 | yes, 4/4; common restart digest above | ordered sequences differ for both; all 30 returned stages are byte-identical; no internal-boundary twin | **values production-identical PLAUSIBLE** |
+| round 328 ZDF terms — `round328/acquisition/orca1ice_zdfphy_kt1_np2` | direct ZDF functions no; inherited `dyn_zdf`/stage yes | yes, 4/4; common restart digest above | direct censuses remain equal; inherited ordered sequences differ; post-ZDF and stage outputs are byte-identical | **values production-identical PLAUSIBLE** |
+| round 331 TKE — `round331/acquisition/orca1ice_tke331_kt1_np2` | yes: `zdf_tke` 1,007/783; `tke_tke` inlined/1,054 | yes, 4/4; common restart digest above | inlining prevents an ordered one-function comparison; the admitted-input post-ZDF return and all stages are byte-identical | **values production-identical PLAUSIBLE** |
+| round 332 source order — `round332/acquisition/orca1ice_source_order_kt1_np2` | yes: `zdf_tke` 1,007/0; `tke_tke` inlined/1,054; stage 1,175/1,367 | yes, 4/4; common restart digest above | inlining prevents a TKE sequence match and stage sequence differs; post-ZDF return and all stages are byte-identical | **values production-identical PLAUSIBLE** |
+| round 332 raw V — `round332/acquisition/orca1ice_raw_postfold_v_kt1_np2` | yes: stage 1,175/1,367 | yes, 4/4; common restart digest above | stage ordered sequence differs; every completed-stage value is byte-identical | **values production-identical PLAUSIBLE** |
+| round 333 tracer stage — `round333/acquisition/orca1ice_tracer_stage3_kt2_np2` | yes: stage 1,175/1,367 | yes, 4/4; common restart digest above | stage ordered sequence differs; every completed-stage value is byte-identical | **values production-identical PLAUSIBLE** |
+| round 333 internal LDF — `round333/acquisition/orca1ice_traldf_iso_internal_kt2_np2` | direct LDF counts no; inherited stage yes | yes, 4/4; common restart digest above | stage sequence differs; the 526/526 and 538/538 LDF sequences reorder; all returned stages are byte-identical | **values production-identical PLAUSIBLE** |
+| round 336 `tra_zdf` — `round336/acquisition/orca1ice_trazdf_internal_kt2_np2` | direct `tra_zdf` 60/60 and `tra_zdf_imp` 1,234/1,234 no; inherited `zdf_phy`/stage yes | yes, 4/4; common restart digest above | `tra_zdf` and `tra_zdf_imp` ordered sequences are exactly equal (sequence digests `3c2bac50...` and `da401374...`); inherited `zdf_phy` reorders and stage differs; all return witnesses are byte-identical | **values production-identical PLAUSIBLE** |
+
+`PLAUSIBLE` is deliberate. The runtime twins confirm every persistent restart,
+every completed stage, and the available direct post-ZDF return. They do not
+contain an observer-free copy of each internal boundary later used for
+statement localization, and the differing functions' ordered opcode sequences
+do not close that gap. No row shows `values differ`. Within the round-336 row,
+the two directly instrumented tracer-solve functions are individually
+production-identical **CONFIRMED** by exact ordered opcode sequences; the whole
+record remains `PLAUSIBLE` because its inherited `zdf_phy` and stage inputs do
+not have function-local internal twins at kt 2.
+
+### Superseding earlier-receipt impact list
+
+- Round 328's dyn-walk localization, its exact recorded recurrence statements,
+  and the later ZDF-term conclusions are no longer classified as results of
+  demonstrated different values. They remain **PLAUSIBLE** pending an
+  observer-free internal-boundary twin or a function harness on the admitted
+  inputs.
+- Round 331's first-TKE-mismatch family, recurrence/returned-energy claims,
+  seven residual coefficient cells, and stored-bottom ownership remain
+  **PLAUSIBLE**, not refuted. Round 332's mixing walk, surface anchor,
+  viscosity-order exclusion, Prandtl conclusion, and raw-V/fold localization
+  likewise remain **PLAUSIBLE**. Their independent Decision-122, DINO, and
+  gradient results are unchanged.
+- Round 333's stage counts, `tra_ldf` call-boundary attribution, internal-LDF
+  divisor walk, and later post-LDF/`tra_zdf` conclusions remain **PLAUSIBLE**.
+  The reverse-safe model landing still has its independent evidence and is not
+  changed by this audit.
+- Round 336's admitted `tra_zdf` and `tra_zdf_imp` arithmetic is individually
+  **CONFIRMED** production-identical. Conclusions that also depend on inherited
+  kt-2 `zdf_phy` or internal stage values remain **PLAUSIBLE**. The new
+  production-arithmetic TKE acquisition remains needed because this audit does
+  not supply its missing internal kt-2 boundaries.
+
+The committed audit is
+`scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round336_producer_value_audit.py`.
+Its report is
+`/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round336/resume12_producer_value_audit.json`,
+SHA-256 `5f6679afb2934a41e35c9a5d31352486b06bf7ff7fa12df0cef23f402dc1ae42`.
+It reports `PASS_R336_PRODUCER_VALUE_AUDIT`, eight records, zero FMA
+instructions in affected functions, zero `values differ`, and eight
+`PLAUSIBLE` record verdicts. Its restart- and opcode-mutation plants both
+refuse, its self-test passes, and the four focused tests pass. Codex review:
+operator.
