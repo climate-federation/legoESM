@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import json
 import struct
 from pathlib import Path
 
@@ -46,6 +47,14 @@ def _write_record(path: Path, rank: int) -> None:
                 array.fill(-0.0004)
             if name == "tke_pdlr":
                 array.fill(0.5)
+            if name == "entry_avtb_2d":
+                array.fill(1.0e-5)
+            if name == "entry_avtb":
+                array.fill(1.0)
+            if name == "pre_pdlr_avt":
+                array.fill(1.0e-4)
+            if name == "final_avt":
+                array.fill(5.0e-5)
             if name in {"final_mxl", "final_mxld"}:
                 array.fill(2.0 if name == "final_mxl" else 3.0)
             if name in gate.NEGATIVE_ZERO_EDGE:
@@ -151,3 +160,52 @@ def test_tke_target_excludes_round328_dynzdf_observer() -> None:
     stop = parent.index('elif [[ "$ACQ_TARGET" == tke332 ]]', start)
     assert 'dynzdf=$PATCH' not in parent[start:stop]
     assert 'if [[ "$ACQ_TARGET" != tke336 ]]; then\n  while IFS= read -r -d' in parent
+    admit = parent[parent.index("admit() {"):]
+    assert 'compare_r336_twin "$TARGET_RUN"' in admit
+    assert 'if [[ "$ACQ_TARGET" == tke336 ]]; then' in admit
+    assert 'observer_free_nemo.sha256' in parent
+
+
+def test_stub_outputs_come_from_build_contract() -> None:
+    wrapper = (TOOL / "run.sh").read_text()
+    stub = wrapper[wrapper.index("<<'STUB'", wrapper.index("cat >\"$stub\"")):
+                   wrapper.index("STUB\n", wrapper.index("<<'STUB'")) + 5]
+    assert "round336_output_contract.json" in stub
+    assert "find \"$R336_TKE_STUB_DETERMINISTIC_SOURCE\"" not in stub
+    assert "oracle_impossible.bin" in wrapper
+
+
+def test_output_contract_is_build_derived_and_rejects_impossible_file(
+        tmp_path: Path) -> None:
+    program = tmp_path / "same_program.json"
+    program.write_text(json.dumps({
+        "observer_units": ["zdftke"],
+        "writer_units": ["tke_round336_writer"],
+    }))
+    contract = gate.output_contract(program, TOOL / "tke_round336_writer.F90")
+    contract_path = tmp_path / "contract.json"
+    contract_path.write_text(json.dumps(contract))
+    observed = tmp_path / "observed"
+    twin = tmp_path / "twin"
+    observed.mkdir()
+    twin.mkdir()
+    for name in contract["standard_outputs"]:
+        (observed / name).write_bytes(b"same")
+        (twin / name).write_bytes(b"same")
+    for name in contract["observer_outputs"]:
+        (observed / name).write_bytes(b"record")
+    assert gate.verify_output_set(observed, contract_path, "observed")["files"]
+    assert gate.verify_output_set(twin, contract_path, "twin")["files"]
+    (observed / "oracle_impossible.bin").write_bytes(b"fabricated")
+    with pytest.raises(gate.GateError, match="oracle_impossible"):
+        gate.verify_output_set(observed, contract_path, "observed")
+
+
+def test_output_contract_rejects_unbuilt_writer(tmp_path: Path) -> None:
+    program = tmp_path / "same_program.json"
+    program.write_text(json.dumps({
+        "observer_units": ["zdftke"],
+        "writer_units": ["tke_round336_writer", "fabricated_writer"],
+    }))
+    with pytest.raises(gate.GateError, match="writer list"):
+        gate.output_contract(program, TOOL / "tke_round336_writer.F90")

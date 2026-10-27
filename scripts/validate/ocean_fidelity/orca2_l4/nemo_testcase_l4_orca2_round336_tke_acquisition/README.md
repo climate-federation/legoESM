@@ -38,9 +38,13 @@ admission through the real gate and all 19 admission plants, including the
 one-halo drag-range check and source-value checks for ice cover and linear
 bottom drag. Its drag overlap comes from the admitted round-328 NEMO files and
 is checked against the admitted NEMO mask before the records are written; the
-stub cannot manufacture a full-domain drag field. The stub also supplies the
-inherited oracle/restart files so the byte-for-byte deterministic passivity
-check runs. Its
+stub cannot manufacture a full-domain drag field. The admissible stub files are
+derived from the built executable's same-program observer/writer list: four
+restarts, `ocean.output`, and the two rank-local TKE records. An extra
+`oracle_*.bin` file refuses. The run compares the restart and log bytes against
+a same-deck observer-free executable built immediately before the observer is
+added. Replay reads only digest-pinned round-326 ice and round-333 tracer/LDF
+records; it does not require this build to reproduce inherited observers. The
 default mode is read-only; it never runs NEMO unless the operator supplies
 `--run`.
 

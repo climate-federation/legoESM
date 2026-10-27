@@ -16,7 +16,8 @@ import numpy as np
 from scripts.validate.ocean_fidelity.orca2_l4 import (
     nemo_testcase_l4_orca2_round326_hmi_gate as hmi,
     nemo_testcase_l4_orca2_round331_tke_gate as r331,
-    nemo_testcase_l4_orca2_round336_trazdf_gate as trazdf,
+    nemo_testcase_l4_orca2_round333_tracer_gate as tracer,
+    nemo_testcase_l4_orca2_round333_traldf_gate as ldf,
 )
 from scripts.validate.ocean_fidelity.orca2_l4.nemo_testcase_l4_orca2_round328_dynzdf_gate import (
     BUILD_CONFIG_FILES,
@@ -70,6 +71,18 @@ PLANTS = (
 )
 OBSERVER_UNITS = ("zdftke",)
 WRITER_UNITS = ("tke_round336_writer",)
+STANDARD_OUTPUTS = (
+    "ORCA2_00000010_restart_0000.nc",
+    "ORCA2_00000010_restart_0001.nc",
+    "ORCA2_00000010_restart_ice_0000.nc",
+    "ORCA2_00000010_restart_ice_0001.nc",
+    "ocean.output",
+)
+REFERENCE_KEYS = tuple(
+    f"{kind}_r{rank:04d}"
+    for kind in ("tracer", "ldf", "ice")
+    for rank in (0, 1)
+)
 
 # External array reads in the active ORCA2 tke_tke/tke_avn blocks.  Scalars
 # and selectors are pinned by the run's namelist/ocean.output identity; local
@@ -239,60 +252,13 @@ def _bits_equal(left: np.ndarray, right: np.ndarray, message: str) -> None:
     require(np.array_equal(left.view(np.uint64), right.view(np.uint64)), message)
 
 
-def read_phase_reference(path: Path, sha256: str) -> dict:
-    """Read only the four admitted phase arrays consumed by this gate."""
-    wanted = {"avt_after_tke", "tmask", "e3t_Kmm", "e3w_Kmm"}
-    fields: dict[str, np.ndarray] = {}
-    with path.open("rb") as stream:
-        magic = stream.read(16).decode("ascii").rstrip()
-        raw_header = stream.read(4 * len(trazdf.HEADER_NAMES))
-        require(len(raw_header) == 4 * len(trazdf.HEADER_NAMES),
-                "truncated phase-reference header")
-        header = dict(zip(trazdf.HEADER_NAMES, struct.unpack(
-            f"={len(trazdf.HEADER_NAMES)}i", raw_header), strict=True))
-        require(magic == trazdf.MAGIC, "wrong phase-reference magic")
-        require(header["n_fields"] == len(trazdf.FIELDS),
-                "phase-reference field census moved")
-        order: list[str] = []
-        for index in range(header["n_fields"]):
-            name = stream.read(24).decode("ascii").rstrip()
-            metadata_raw = stream.read(36)
-            require(len(metadata_raw) == 36,
-                    f"truncated phase-reference metadata {index}")
-            rank, *dims, i0, j0, k0, n0 = struct.unpack("=9i", metadata_raw)
-            shape = trazdf._shape(name, header)
-            padded = (*shape, *(1 for _ in range(4 - len(shape))))
-            require((rank, *dims, i0, j0, k0, n0) ==
-                    (len(shape), *padded, 1, 1, 1, 1),
-                    f"{name}: phase-reference metadata moved")
-            checksum_raw = stream.read(8)
-            require(len(checksum_raw) == 8, f"truncated phase-reference checksum {name}")
-            checksum, = struct.unpack("=Q", checksum_raw)
-            size = int(np.prod(shape)) * 8
-            if name in wanted:
-                payload = stream.read(size)
-                require(len(payload) == size, f"truncated phase-reference payload {name}")
-                values = np.frombuffer(payload, dtype="=f8").copy().reshape(shape, order="F")
-                words = np.ascontiguousarray(values).view(np.uint64).reshape(-1)
-                observed = int(np.bitwise_xor.reduce(words, initial=np.uint64(0)))
-                require(observed == checksum, f"{name}: phase-reference checksum differs")
-                fields[name] = values
-            else:
-                stream.seek(size, io.SEEK_CUR)
-            order.append(name)
-        require(stream.read(1) == b"", "phase reference has trailing bytes")
-    require(tuple(order) == trazdf.FIELDS, "phase-reference field order moved")
-    require(set(fields) == wanted, "phase-reference selected field set incomplete")
-    return {"header": header, "fields": fields, "sha256": sha256}
-
-
 def _wet_index(wet: np.ndarray) -> tuple[int, ...]:
     indices = np.argwhere(wet)
     require(bool(indices.size), "record has no wet interface")
     return tuple(int(v) for v in indices[0])
 
 
-def verify_record(record: dict, phase: dict | None = None,
+def verify_record(record: dict, source: dict | None = None,
                   ice: dict | None = None, plant: str | None = None) -> dict[str, int]:
     require(plant is None or plant in {
         "entry", "rn2", "langmuir", "solve-steps",
@@ -314,11 +280,22 @@ def verify_record(record: dict, phase: dict | None = None,
     if plant in field_for_plant:
         name = field_for_plant[plant]
         target = fields[name]
+        plant_index = index
+        if plant == "final":
+            process_index = _wet_index(wet[..., 1:-1])
+            plant_index = (process_index[0], process_index[1], process_index[2] + 1)
         if name in FULL_3D:
-            global_index = (index[0] + i0, index[1] + j0, index[2])
-            target[global_index] = np.nan
+            global_index = (plant_index[0] + i0, plant_index[1] + j0,
+                            plant_index[2])
+            if plant == "final":
+                target[global_index] = np.nextafter(target[global_index], np.inf)
+            else:
+                target[global_index] = np.nan
         else:
-            target[index] = np.nan
+            if plant == "final":
+                target[plant_index] = np.nextafter(target[plant_index], np.inf)
+            else:
+                target[plant_index] = np.nan
     if plant == "north-halo-avm-k":
         fields["entry_avm_k"][i0, header["ntej"], index[2]] = np.nan
     if plant == "source-values":
@@ -357,15 +334,26 @@ def verify_record(record: dict, phase: dict | None = None,
     pdlr = fields["tke_pdlr"][..., 1:-1][interior]
     require(bool(np.all((pdlr >= 0.1) & (pdlr <= 1.0))),
             "wet inverse Prandtl ratio is outside [0.1,1]")
-    if phase is not None:
-        _bits_equal(fields["final_avt"], phase["fields"]["avt_after_tke"],
-                    "kt=2 final avt differs from admitted zdf_phy handoff")
-        _bits_equal(fields["entry_tmask"], phase["fields"]["tmask"],
-                    "TKE tmask differs from admitted kt=2 phase source")
-        _bits_equal(fields["entry_e3t_kmm"], phase["fields"]["e3t_Kmm"][i0:i1, j0:j1],
-                    "TKE live e3t(Kmm) differs from admitted kt=2 phase source")
-        _bits_equal(fields["entry_e3w_kmm"], phase["fields"]["e3w_Kmm"][i0:i1, j0:j1],
-                    "TKE live e3w(Kmm) differs from admitted kt=2 phase source")
+    expected_final = np.maximum(
+        fields["tke_pdlr"] * fields["pre_pdlr_avt"],
+        fields["entry_avtb_2d"][..., None] * fields["entry_avtb"][None, None, :],
+    ) * fields["tke_wmask"][i0:i1, j0:j1]
+    _bits_equal(fields["final_avt"][..., 1:-1][interior],
+                expected_final[..., 1:-1][interior],
+                "final avt differs from the recorded NEMO pdlr statement")
+    if source is not None:
+        tracer_fields = source["tracer"]["fields"]
+        ldf_fields = source["ldf"]["fields"]
+        _bits_equal(fields["entry_tmask"], ldf_fields["tmask"],
+                    "TKE tmask differs from admitted round-333 LDF source")
+        expected_e3t = ldf_fields["e3t_3d"] * (
+            np.float64(1.0) + tracer_fields["r3t_Kmm"][..., None] * ldf_fields["tmask"])
+        expected_e3w = ldf_fields["e3w_1d"][None, None, :] * (
+            np.float64(1.0) + tracer_fields["r3t_Kmm"][..., None])
+        _bits_equal(fields["entry_e3t_kmm"], expected_e3t[i0:i1, j0:j1],
+                    "TKE live e3t(Kmm) differs from admitted round-333 replay")
+        _bits_equal(fields["entry_e3w_kmm"], expected_e3w[i0:i1, j0:j1],
+                    "TKE live e3w(Kmm) differs from admitted round-333 replay")
     if ice is not None:
         _bits_equal(fields["entry_fr_i"], ice["fields"]["fr_i"],
                     "fr_i differs from admitted ice-cover source")
@@ -377,7 +365,8 @@ def verify_record(record: dict, phase: dict | None = None,
             "wet_process_interfaces": int(np.count_nonzero(interior))}
 
 
-def run_gate(root: Path, phase_root: Path, ice_root: Path, expect_commit: str,
+def run_gate(root: Path, tracer_root: Path, ldf_root: Path, ice_root: Path,
+             reference_digests: dict[str, str], expect_commit: str,
              plant: str | None = None) -> dict[str, object]:
     require(plant is None or plant in PLANTS, f"unknown plant {plant}")
     stamp = root / "producer_commit.txt"
@@ -387,56 +376,100 @@ def run_gate(root: Path, phase_root: Path, ice_root: Path, expect_commit: str,
         produced = "0" * 40
     require(produced == expect_commit,
             f"producer commit {produced} != {expect_commit}")
-    phase_producer = "plant-does-not-consume-reference"
-    phase_admission: dict[str, object] | None = None
-    if plant is None:
-        phase_stamp = phase_root / "producer_commit.txt"
-        require(phase_stamp.is_file(), "phase reference lacks producer_commit.txt")
-        phase_producer = phase_stamp.read_text().strip()
-        phase_admission = trazdf.run_gate(phase_root, expect_commit=phase_producer)
-        require(phase_admission["status"] == "PASS_R336_TRAZDF_ACQUISITION",
-                "round-336 phase reference is not admitted")
+    require(set(reference_digests) == set(REFERENCE_KEYS),
+            "reference digest keys are incomplete")
     counts: dict[str, object] = {}
     hashes: dict[str, object] = {}
     for rank in (0, 1):
         path = root / record_name(rank)
-        phase_path = phase_root / trazdf.record_name(rank)
+        tracer_path = tracer_root / tracer.record_name(rank)
+        ldf_path = ldf_root / ldf.record_name(rank)
         ice_path = ice_root / hmi.record_name(2, rank)
         require(path.is_file(), f"missing {path.name}")
         if plant is None:
-            require(phase_path.is_file(), f"missing phase reference {phase_path.name}")
-            require(ice_path.is_file(), f"missing ice reference {ice_path.name}")
+            for kind, reference in (("tracer", tracer_path), ("ldf", ldf_path),
+                                    ("ice", ice_path)):
+                require(reference.is_file(), f"missing {kind} reference {reference.name}")
+                require(hashlib.sha256(reference.read_bytes()).hexdigest() ==
+                        reference_digests[f"{kind}_r{rank:04d}"],
+                        f"{kind} reference digest changed: {reference.name}")
         parser_plant = plant if rank == 0 and plant in {
             "header", "field-order", "truncation", "checksum", "extent", "time-level",
             "drag-range",
         } else None
         record = read_record(path, plant=parser_plant)
         require(record["header"]["rank"] == rank, f"{path.name}: wrong rank")
-        phase = None
+        source = None
         ice = None
         if plant is None:
-            assert phase_admission is not None
-            phase = read_phase_reference(
-                phase_path, phase_admission["records"][phase_path.name])
+            source = {
+                "tracer": tracer.read_stage3(tracer_path),
+                "ldf": ldf.read_record(ldf_path),
+            }
             ice = hmi.read_record(ice_path)
         semantic_plant = plant if rank == 0 and plant in {
             "entry", "rn2", "langmuir", "solve-steps",
             "pre-sweep", "sweep-steps", "north-halo-avm-k", "pdlr", "final",
             "signed-zero", "source-values"} else None
-        counts[str(rank)] = verify_record(record, phase, ice, semantic_plant)
+        counts[str(rank)] = verify_record(record, source, ice, semantic_plant)
         hashes[str(rank)] = {"tke": record["sha256"]}
         if plant is None:
-            assert phase is not None
             hashes[str(rank)].update(
-                phase=phase["sha256"], ice=hmi.sha256(ice_path))
+                tracer=reference_digests[f"tracer_r{rank:04d}"],
+                ldf=reference_digests[f"ldf_r{rank:04d}"],
+                ice=reference_digests[f"ice_r{rank:04d}"])
     return {
         "format": "nemo-testcase-l4-orca2-round336-tke-v2",
         "status": "PASS_R336_TKE_KT2_ADMISSION",
         "producer_commit": produced,
-        "phase_reference_producer": phase_producer,
         "counts": counts,
         "sha256": hashes,
     }
+
+
+def output_contract(same_program_path: Path, writer_source: Path) -> dict[str, object]:
+    """Derive admissible run outputs from the compiled observer/writer census."""
+    program = json.loads(same_program_path.read_text())
+    require(program.get("observer_units") == list(OBSERVER_UNITS),
+            "same-program observer list moved")
+    require(program.get("writer_units") == list(WRITER_UNITS),
+            "same-program writer list moved")
+    source = writer_source.read_text()
+    require(len(re.findall(r"\bOPEN\s*\(", source, flags=re.IGNORECASE)) == 1,
+            "compiled writer OPEN census moved")
+    require('\"oracle_r336_tke_kt\",I8.8,\"_r\",I4.4,\".bin\"' in source,
+            "compiled writer output format moved")
+    return {
+        "format": "nemo-testcase-l4-orca2-round336-output-contract-v1",
+        "observer_units": program["observer_units"],
+        "writer_units": program["writer_units"],
+        "observer_outputs": [record_name(rank) for rank in (0, 1)],
+        "standard_outputs": list(STANDARD_OUTPUTS),
+    }
+
+
+def verify_output_set(root: Path, contract_path: Path, role: str) -> dict[str, object]:
+    require(role in ("observed", "twin"), f"unknown output role {role}")
+    contract = json.loads(contract_path.read_text())
+    require(contract.get("format") ==
+            "nemo-testcase-l4-orca2-round336-output-contract-v1",
+            "output contract format moved")
+    expected = set(contract["standard_outputs"])
+    if role == "observed":
+        expected.update(contract["observer_outputs"])
+    actual = {
+        path.name for path in root.iterdir()
+        if path.is_file() and (
+            path.name.startswith("oracle_") or
+            (path.name.startswith("ORCA2_00000010_restart") and
+             path.suffix == ".nc") or
+            path.name == "ocean.output")
+    }
+    require(actual == expected,
+            f"{role} output set differs: missing={sorted(expected - actual)} "
+            f"unexpected={sorted(actual - expected)}")
+    return {"status": "PASS_R336_OUTPUT_SET", "role": role,
+            "files": sorted(actual)}
 
 
 def same_program(new_bld: Path, ref_bld: Path, patches: dict[str, Path], *,
@@ -479,8 +512,10 @@ def same_program(new_bld: Path, ref_bld: Path, patches: dict[str, Path], *,
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--record-dir", type=Path)
-    parser.add_argument("--phase-reference-dir", type=Path)
+    parser.add_argument("--tracer-reference-dir", type=Path)
+    parser.add_argument("--ldf-reference-dir", type=Path)
     parser.add_argument("--ice-reference-dir", type=Path)
+    parser.add_argument("--reference-sha256", action="append", default=[])
     parser.add_argument("--expect-commit")
     parser.add_argument("--same-program", type=Path, metavar="NEW_BLD")
     parser.add_argument("--reference-bld", type=Path)
@@ -491,12 +526,27 @@ def main() -> int:
     parser.add_argument("--output", type=Path)
     parser.add_argument("--read-set-source", type=Path)
     parser.add_argument("--writer-source", type=Path)
+    parser.add_argument("--build-output-contract", type=Path,
+                        metavar="SAME_PROGRAM_JSON")
+    parser.add_argument("--compiled-writer", type=Path)
+    parser.add_argument("--check-output-set", type=Path, metavar="RUN_DIR")
+    parser.add_argument("--output-contract", type=Path)
+    parser.add_argument("--output-role", choices=("observed", "twin"))
     args = parser.parse_args()
     try:
         if args.read_set_source is not None:
             require(args.writer_source is not None,
                     "--read-set-source needs --writer-source")
             result = audit_read_set(args.read_set_source, args.writer_source)
+        elif args.build_output_contract is not None:
+            require(args.compiled_writer is not None,
+                    "--build-output-contract needs --compiled-writer")
+            result = output_contract(args.build_output_contract, args.compiled_writer)
+        elif args.check_output_set is not None:
+            require(args.output_contract is not None and args.output_role is not None,
+                    "--check-output-set needs --output-contract and --output-role")
+            result = verify_output_set(
+                args.check_output_set, args.output_contract, args.output_role)
         elif args.same_program is not None:
             require(None not in (args.reference_bld, args.new_cfg, args.reference_cfg),
                     "--same-program needs reference BLD and config names")
@@ -508,12 +558,20 @@ def main() -> int:
                 {unit: Path(path) for unit, path in entries},
                 new_cfg=args.new_cfg, ref_cfg=args.reference_cfg)
         else:
-            require(None not in (args.record_dir, args.phase_reference_dir,
-                                 args.ice_reference_dir,
+            require(None not in (args.record_dir, args.tracer_reference_dir,
+                                 args.ldf_reference_dir, args.ice_reference_dir,
                                  args.expect_commit),
                     "admission needs record/reference dirs and expected commit")
-            result = run_gate(args.record_dir, args.phase_reference_dir,
-                              args.ice_reference_dir,
+            entries = [item.split("=", 1) for item in args.reference_sha256]
+            require(all(len(item) == 2 for item in entries),
+                    "reference digests must be NAME=SHA256")
+            digests = {name: digest for name, digest in entries}
+            require(all(re.fullmatch(r"[0-9a-f]{64}", value)
+                        for value in digests.values()),
+                    "reference digests must be lowercase SHA-256")
+            result = run_gate(args.record_dir, args.tracer_reference_dir,
+                              args.ldf_reference_dir, args.ice_reference_dir,
+                              digests,
                               args.expect_commit, args.plant)
             require(args.plant is None, f"{args.plant} plant stayed green")
     except (GateError, OSError, UnicodeError, ValueError, KeyError, struct.error) as error:

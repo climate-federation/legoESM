@@ -194,7 +194,14 @@ readonly R336_TKE_FIXTURE_STUBS=$R336_TKE_DIR/tke_round336_fixture_stubs.F90
 readonly R336_TKE_FIXTURE=$R336_TKE_DIR/tke_round336_fixture.F90
 readonly R336_TKE_GATE=$here/../nemo_testcase_l4_orca2_round336_tke_gate.py
 readonly R336_TKE_TEST=$REPO/tests/ocean/fidelity/test_orca2_round336_tke_gate.py
-readonly R336_PHASE_REFERENCE=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round336/acquisition/orca1ice_trazdf_internal_kt2_np2
+readonly R336_TRACER_REFERENCE=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round333/acquisition/orca1ice_tracer_stage3_kt2_np2
+readonly R336_LDF_REFERENCE=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round333/acquisition/orca1ice_traldf_iso_internal_kt2_np2
+readonly R336_TRACER_R0_SHA=b7a6af26e7e5e4e30e4cf482a0bcf32dc7e2c21741306b88c48e175d9935116b
+readonly R336_TRACER_R1_SHA=a2d60b8a2afb80802ac28bfb3e94e633af56fcc9cb28015c23f760165300d5b1
+readonly R336_LDF_R0_SHA=8ff5d8e0d5fc13c39dbe3d82cea168f1a98edaa94f05f10b64a3c6a0ca9fb16d
+readonly R336_LDF_R1_SHA=f965b671fb4d1f4c6561b6742b6f18dd43ca7999fa8599e7fbade3d4cfb1a9e6
+readonly R336_ICE_R0_SHA=4367aeaeacf7f6449fa6f800a3041206b424cb0a988683e61fae2b420bd2c1ee
+readonly R336_ICE_R1_SHA=4c69a6733b13a8f60d419e6cd1e42a1e0f15c902f9d7804c9431ef1d6d717243
 readonly HIST_R5_RUN=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round5/acquisition/orca1ice_surface_entry_every_step_a_np2
 readonly HIST_R326_RUN=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round326/acquisition/orca1ice_tke_hmi_10step_np2
 readonly HIST_R328_DYN_RUN=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round328/acquisition/orca1ice_dynzdf_kt1_np2
@@ -246,7 +253,7 @@ r336_tke_stub_prepare_target() {
   mkdir -p "$1/EXP00" "$1/MY_SRC"
 }
 r336_tke_stub_finish_target() {
-  local target=$1 template=$2
+  local target=$1 template=$2 twin_binary=$3
   [[ -d $template/ppsrc && -d $template/obj ]] \
     || refuse 'stub build template is absent'
   mkdir -p "$target/BLD/bin"
@@ -254,7 +261,9 @@ r336_tke_stub_finish_target() {
   cp -- "$SOURCE_ROOT/BLD/ppsrc/nemo/icevar.f90" \
     "$target/BLD/ppsrc/nemo/icevar.f90"
   cp -- "$R336_TKE_STUB_NEMO" "$target/BLD/bin/nemo.exe"
+  cp -- "$R336_TKE_STUB_NEMO" "$twin_binary"
   chmod 700 "$target/BLD/bin/nemo.exe"
+  chmod 700 "$twin_binary"
 }
 r336_tke_stub_assert() {
   local producer binary_sha scenario plant_count
@@ -279,6 +288,19 @@ r336_tke_stub_assert() {
   [[ $plant_count -eq 19 ]] || refuse "stub real admission ran $plant_count/19 plants"
   printf 'R336_TKE_STUB_ADMISSION_PASS scenario=%s path=%s\n' "$scenario" "$TARGET_RUN"
 }
+
+r336_reference_args() {
+  printf '%s\0' \
+    --tracer-reference-dir "$R336_TRACER_REFERENCE" \
+    --ldf-reference-dir "$R336_LDF_REFERENCE" \
+    --ice-reference-dir "$SOURCE_RUN" \
+    --reference-sha256 "tracer_r0000=$R336_TRACER_R0_SHA" \
+    --reference-sha256 "tracer_r0001=$R336_TRACER_R1_SHA" \
+    --reference-sha256 "ldf_r0000=$R336_LDF_R0_SHA" \
+    --reference-sha256 "ldf_r0001=$R336_LDF_R1_SHA" \
+    --reference-sha256 "ice_r0000=$R336_ICE_R0_SHA" \
+    --reference-sha256 "ice_r0001=$R336_ICE_R1_SHA"
+}
 plant_must_refuse() {
   local label=$1; shift
   if "$@"; then refuse "preflight plant stayed green: $label"; fi
@@ -293,6 +315,27 @@ refuse_nemo_errors() {
       "$output" "$lines" >&2
     return 1
   }
+}
+run_nemo_case() {
+  local run_dir=$1 label=$2 rc started
+  (
+    cd "$run_dir"
+    mem_ok "$MEM_MIN_GB" || refuse "under $MEM_MIN_GB GB before $label run"
+    free -g >run.user.memory.log
+    printf 'RUN_STARTED_UTC=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >run.user.time.log
+    started=$SECONDS
+    set +e
+    timeout --kill-after=60 "$RUN_TIMEOUT_S" mpirun -np 2 --oversubscribe ./nemo \
+      >run.user.stdout.log 2>&1
+    rc=$?
+    set -e
+    refuse_nemo_errors "$run_dir/ocean.output" \
+      || refuse "NEMO $label ocean.output contains the quoted E R R O R lines above"
+    [[ $rc -eq 0 ]] || refuse "$label mpirun exited $rc"
+    grep 'STOP 0' run.user.stdout.log >/dev/null || refuse "$label NEMO did not report STOP 0"
+    printf 'wall_seconds %s\nRUN_FINISHED_UTC=%s\nRUN_DONE\n' "$((SECONDS-started))" \
+      "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >>run.user.time.log
+  )
 }
 pin() {
   local digest=$1 path=$2 label=$3
@@ -541,6 +584,23 @@ compare_deterministic() {
   printf 'DETERMINISTIC_PASSIVITY_PASS %s files=%s\n' "$candidate" "$count"
 }
 
+compare_r336_twin() {
+  local observed=$1 twin=$observed/observer_free_twin name count=0
+  "$PY" "$R336_TKE_GATE" --check-output-set "$observed" \
+    --output-contract "$observed/round336_output_contract.json" \
+    --output-role observed || return 1
+  "$PY" "$R336_TKE_GATE" --check-output-set "$twin" \
+    --output-contract "$observed/round336_output_contract.json" \
+    --output-role twin || return 1
+  for name in ORCA2_00000010_restart_0000.nc ORCA2_00000010_restart_0001.nc \
+    ORCA2_00000010_restart_ice_0000.nc ORCA2_00000010_restart_ice_0001.nc \
+    ocean.output; do
+    cmp -s "$observed/$name" "$twin/$name" || return 1
+    count=$((count+1))
+  done
+  printf 'R336_OBSERVER_FREE_TWIN_PASS compared=%s observer_records=2\n' "$count"
+}
+
 compare_transport_defined() {
   local reference=$1 candidate=$2 size payload defined
   [[ -f "$reference" && -f "$candidate" ]] || return 1
@@ -590,6 +650,13 @@ if [[ "$MODE" == --admit-existing ]]; then
   git merge-base --is-ancestor "$EXPECTED_PRODUCER" "$COMMIT" \
     || refuse 'existing producer is not an ancestor of the admission repair'
   pin "$retained_binary_sha" "$TARGET_RUN/nemo" 'existing acquisition binary'
+  if [[ "$ACQ_TARGET" == tke336 ]]; then
+    [[ -f "$TARGET_RUN/observer_free_nemo.sha256" &&
+       $(wc -l <"$TARGET_RUN/observer_free_nemo.sha256") -eq 1 ]] \
+      || refuse 'existing run lacks its observer-free binary digest manifest'
+    ( cd "$TARGET_RUN" && sha256sum -c observer_free_nemo.sha256 >/dev/null ) \
+      || refuse 'existing observer-free binary digest manifest changed'
+  fi
   if [[ "$ACQ_TARGET" == tke332 ]]; then
     [[ -f "$TARGET_RUN/nemo.sha256" ]] \
       || refuse 'existing run lacks its binary digest manifest'
@@ -653,7 +720,13 @@ if [[ "$ACQ_TARGET" == tke336 ]]; then
   for path in "$R336_TKE_PATCH" "$R336_TKE_WRITER" "$R336_TKE_FIXTURE_STUBS" \
     "$R336_TKE_FIXTURE" "$R336_TKE_GATE" "$R336_TKE_TEST" "$SOURCE_ZDFTKE" \
     "$SOURCE_ROOT/BLD/ppsrc/nemo/zdftke.f90" \
-    "$R336_PHASE_REFERENCE/producer_commit.txt" "$SOURCE_STPRK3_PRISTINE" \
+    "$R336_TRACER_REFERENCE/oracle_rktracer_stage3_kt00000002_r0000.bin" \
+    "$R336_TRACER_REFERENCE/oracle_rktracer_stage3_kt00000002_r0001.bin" \
+    "$R336_LDF_REFERENCE/oracle_r333_traldf_kt00000002_r0000.bin" \
+    "$R336_LDF_REFERENCE/oracle_r333_traldf_kt00000002_r0001.bin" \
+    "$SOURCE_RUN/oracle_tke_hmi_kt00000002_r0000.bin" \
+    "$SOURCE_RUN/oracle_tke_hmi_kt00000002_r0001.bin" \
+    "$SOURCE_STPRK3_PRISTINE" \
     "$SOURCE_STAGE_PRISTINE" "$SOURCE_DYNVOR_PRISTINE" "$SOURCE_ZDFTKE_PRISTINE" \
     "$SOURCE_TRALDF_PRISTINE" "$SOURCE_ZDFPHY" "$SOURCE_ZDFDDM" "$SOURCE_ZDFIWM" \
     "$HIST_R5_RUN/nemo" "$HIST_R326_RUN/nemo" \
@@ -683,6 +756,12 @@ fi
 if [[ "$ACQ_TARGET" == tke336 ]]; then
   pin "$SOURCE_ZDFTKE_SHA" "$SOURCE_ZDFTKE" 'source zdftke'
   pin "$SOURCE_ZDFTKE_PRISTINE_SHA" "$SOURCE_ZDFTKE_PRISTINE" 'pristine source zdftke'
+  pin "$R336_TRACER_R0_SHA" "$R336_TRACER_REFERENCE/oracle_rktracer_stage3_kt00000002_r0000.bin" 'round-333 tracer replay rank 0'
+  pin "$R336_TRACER_R1_SHA" "$R336_TRACER_REFERENCE/oracle_rktracer_stage3_kt00000002_r0001.bin" 'round-333 tracer replay rank 1'
+  pin "$R336_LDF_R0_SHA" "$R336_LDF_REFERENCE/oracle_r333_traldf_kt00000002_r0000.bin" 'round-333 LDF replay rank 0'
+  pin "$R336_LDF_R1_SHA" "$R336_LDF_REFERENCE/oracle_r333_traldf_kt00000002_r0001.bin" 'round-333 LDF replay rank 1'
+  pin "$R336_ICE_R0_SHA" "$SOURCE_RUN/oracle_tke_hmi_kt00000002_r0000.bin" 'round-326 ice replay rank 0'
+  pin "$R336_ICE_R1_SHA" "$SOURCE_RUN/oracle_tke_hmi_kt00000002_r0001.bin" 'round-326 ice replay rank 1'
   pin 0d4360984a193ff9bce2cfbaa13a45dbd26fcd18b215e0159c95254075830630 "$HIST_R5_RUN/nemo" 'round-5 producer binary'
   pin 20376f40a78cb1a5491838ff112bfbe738178e4da8da1e43d5bd5c3884c72934 "$HIST_R326_RUN/nemo" 'round-326 producer binary'
   pin eead2832bfe824810d40fb32014d86c9b6b7ece52eba86673c48d5a0a5878bb5 "$HIST_R328_DYN_RUN/nemo" 'round-328 dyn producer binary'
@@ -1416,15 +1495,22 @@ fi
 
 admit() {
   local plant
+  local -a reference_args=()
   [[ $(cat "$TARGET_RUN/producer_commit.txt") == "$EXPECTED_PRODUCER" ]] || refuse 'producer commit changed'
-  compare_deterministic "$SOURCE_RUN" "$TARGET_RUN" \
-    || refuse 'write-only observer changed an inherited deterministic output'
   if [[ "$ACQ_TARGET" == tke336 ]]; then
+    compare_r336_twin "$TARGET_RUN" \
+      || refuse 'round-336 output set or observer-free twin differs'
+  else
+    compare_deterministic "$SOURCE_RUN" "$TARGET_RUN" \
+      || refuse 'write-only observer changed an inherited deterministic output'
+  fi
+  if [[ "$ACQ_TARGET" == tke336 ]]; then
+    mapfile -d '' -t reference_args < <(r336_reference_args)
     for plant in header field-order truncation checksum stamp extent entry rn2 \
       langmuir solve-steps pre-sweep sweep-steps north-halo-avm-k \
       pdlr final signed-zero source-values time-level drag-range; do
       if "$PY" "$R336_TKE_GATE" --record-dir "$TARGET_RUN" \
-        --phase-reference-dir "$R336_PHASE_REFERENCE" --ice-reference-dir "$SOURCE_RUN" \
+        "${reference_args[@]}" \
         --expect-commit "$EXPECTED_PRODUCER" \
         --plant "$plant" >"$TARGET_RUN/round336_tke_${plant}_plant.log" 2>&1; then
         refuse "$plant round-336 TKE plant stayed green"
@@ -1433,7 +1519,7 @@ admit() {
         || refuse "$plant round-336 TKE plant missed its refusal"
     done
     "$PY" "$R336_TKE_GATE" --record-dir "$TARGET_RUN" \
-      --phase-reference-dir "$R336_PHASE_REFERENCE" --ice-reference-dir "$SOURCE_RUN" \
+      "${reference_args[@]}" \
       --expect-commit "$EXPECTED_PRODUCER" \
       --output "$TARGET_RUN/round336_tke_kt2_admission.json"
     ( cd "$TARGET_RUN" && sha256sum oracle_r336_tke_kt00000002_r*.bin \
@@ -1546,6 +1632,7 @@ if [[ "$MODE" == --admit-existing ]]; then
 fi
 
 manifest=$scratch/manifest; mkdir "$manifest"
+r336_twin_binary=$scratch/nemo.observer-free
 printf '%s\n' "$COMMIT" >"$manifest/producer_commit.txt"
 sha256sum "$PATCH" "$STAGE_PATCH" "$WRITER" "$FIXTURE_STUBS" "$FIXTURE" \
   "$EXCERPT" "$GATE" "$TEST" "$PREREG" "$SOURCE_DYNZDF" "$SOURCE_STAGE" \
@@ -1573,6 +1660,14 @@ if [[ "$ACQ_TARGET" == tke336 ]]; then
     "$R336_TKE_FIXTURE" "$R336_TKE_GATE" "$R336_TKE_TEST" "$SOURCE_ZDFTKE" \
     "$SOURCE_ZDFTKE_PRISTINE" \
     >>"$manifest/toolchain.sha256"
+  {
+    printf '%s  %s\n' "$R336_TRACER_R0_SHA" round333/tracer/oracle_rktracer_stage3_kt00000002_r0000.bin
+    printf '%s  %s\n' "$R336_TRACER_R1_SHA" round333/tracer/oracle_rktracer_stage3_kt00000002_r0001.bin
+    printf '%s  %s\n' "$R336_LDF_R0_SHA" round333/ldf/oracle_r333_traldf_kt00000002_r0000.bin
+    printf '%s  %s\n' "$R336_LDF_R1_SHA" round333/ldf/oracle_r333_traldf_kt00000002_r0001.bin
+    printf '%s  %s\n' "$R336_ICE_R0_SHA" round326/ice/oracle_tke_hmi_kt00000002_r0000.bin
+    printf '%s  %s\n' "$R336_ICE_R1_SHA" round326/ice/oracle_tke_hmi_kt00000002_r0001.bin
+  } >"$manifest/replay_inputs.sha256"
 fi
 
 # makenemo rewrites shared work_cfgs.txt; only the target's line may change.
@@ -1591,6 +1686,11 @@ if [[ "$ACQ_TARGET" != tke336 ]]; then
     < <(find "$SOURCE_ROOT/MY_SRC" -maxdepth 1 \( -type f -o -type l \) -print0 | sort -z)
 fi
 cp "$SOURCE_ROOT/cpp_$SOURCE_CFG.fcm" "$TARGET_ROOT/cpp_$TARGET_CFG.fcm"
+if [[ "$ACQ_TARGET" == tke336 && -z ${R336_TKE_STUB_FLOW_ROOT:-} ]]; then
+  ./makenemo -n "$TARGET_CFG" -m conda-scalarmath del_key 'key_xios'
+  [[ -x $BINARY ]] || refuse 'pristine twin build produced no executable'
+  cp "$BINARY" "$r336_twin_binary"
+fi
 if [[ "$ACQ_TARGET" != tke336 ]]; then
   cp "$SOURCE_DYNZDF" "$TARGET_ROOT/MY_SRC/dynzdf.F90"
   cp "$WRITER" "$TARGET_ROOT/MY_SRC/dynzdf_round328_writer.F90"
@@ -1631,7 +1731,7 @@ if [[ "$ACQ_TARGET" == tke336 ]]; then
 fi
 touch "$TARGET_ROOT/MY_SRC/"*.F90
 if [[ -n ${R336_TKE_STUB_FLOW_ROOT:-} ]]; then
-  r336_tke_stub_finish_target "$TARGET_ROOT" "$dry_bld"
+  r336_tke_stub_finish_target "$TARGET_ROOT" "$dry_bld" "$r336_twin_binary"
 else
   ./makenemo -n "$TARGET_CFG" -m conda-scalarmath del_key 'key_xios'
 fi
@@ -1663,6 +1763,10 @@ diff <(grep -v "^$TARGET_CFG " "$scratch/work_cfgs.before") \
   || refuse 'work_cfgs.txt changed beyond the target line'
 same_program "$TARGET_ROOT/BLD" "$manifest/same_program.json"
 if [[ "$ACQ_TARGET" == tke336 ]]; then
+  "$PY" "$R336_TKE_GATE" \
+    --build-output-contract "$manifest/same_program.json" \
+    --compiled-writer "$TARGET_ROOT/BLD/ppsrc/nemo/tke_round336_writer.f90" \
+    --output "$manifest/round336_output_contract.json" >/dev/null
   compare_whole_executable_fp "$R336_PRISTINE_BLD" "$TARGET_ROOT/BLD" r336-built-whole \
     || refuse 'built round-336 whole executable FP census differs from pristine'
   printf 'R336_BUILT_WHOLE_EXECUTABLE_FP_PASS reference=%s target=%s\n' \
@@ -1681,24 +1785,23 @@ cp "$BINARY" "$TARGET_RUN/nemo"
 cp "$manifest"/* "$TARGET_RUN/"
 ( cd "$TARGET_RUN" && sha256sum nemo >nemo.sha256 )
 ( cd "$TARGET_RUN" && sha256sum -c deck_files.sha256 >/dev/null && sha256sum -c input_files.sha256 >/dev/null )
-
-(
-  cd "$TARGET_RUN"
-  mem_ok "$MEM_MIN_GB" || refuse "under $MEM_MIN_GB GB before run"
-  free -g >run.user.memory.log
-  printf 'RUN_STARTED_UTC=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >run.user.time.log
-  started=$SECONDS
-  set +e
-  timeout --kill-after=60 "$RUN_TIMEOUT_S" mpirun -np 2 --oversubscribe ./nemo >run.user.stdout.log 2>&1
-  rc=$?
-  set -e
-  refuse_nemo_errors "$TARGET_RUN/ocean.output" \
-    || refuse 'NEMO ocean.output contains the quoted E R R O R lines above'
-  [[ $rc -eq 0 ]] || refuse "mpirun exited $rc"
-  printf 'wall_seconds %s\nRUN_FINISHED_UTC=%s\nRUN_DONE\n' "$((SECONDS-started))" \
-    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >>run.user.time.log
-)
-grep 'STOP 0' "$TARGET_RUN/run.user.stdout.log" >/dev/null || refuse 'NEMO did not report STOP 0'
+if [[ "$ACQ_TARGET" == tke336 ]]; then
+  twin_run=$TARGET_RUN/observer_free_twin
+  mkdir "$twin_run"
+  while read -r digest name; do cp -a "$SOURCE_RUN/$name" "$twin_run/$name"; done \
+    <"$SOURCE_RUN/deck_files.sha256"
+  while read -r digest name; do cp -a "$SOURCE_RUN/$name" "$twin_run/$name"; done \
+    <"$SOURCE_RUN/input_files.sha256"
+  cp "$SOURCE_RUN/deck_files.sha256" "$SOURCE_RUN/input_files.sha256" "$twin_run/"
+  cp "$r336_twin_binary" "$twin_run/nemo"
+  ( cd "$twin_run" && sha256sum nemo >nemo.sha256 && \
+      sha256sum -c deck_files.sha256 >/dev/null && sha256sum -c input_files.sha256 >/dev/null )
+  ( cd "$TARGET_RUN" && sha256sum observer_free_twin/nemo >observer_free_nemo.sha256 )
+  run_nemo_case "$twin_run" observer-free-twin
+fi
+run_nemo_case "$TARGET_RUN" observed
 run_completed=1
 check_echo "$TARGET_RUN/ocean.output" || refuse 'run selectors changed'
+[[ "$ACQ_TARGET" != tke336 ]] || check_echo "$TARGET_RUN/observer_free_twin/ocean.output" \
+  || refuse 'observer-free twin selectors changed'
 admit

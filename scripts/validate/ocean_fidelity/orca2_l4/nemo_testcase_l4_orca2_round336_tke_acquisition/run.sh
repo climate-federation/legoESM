@@ -68,21 +68,34 @@ exercise_stub_flow() {
   local base=$scratch/flow stub=$scratch/stub-nemo stub_bin=$scratch/bin \
     records=$scratch/stub-records retained canonical
   "$PY" "$STUB_RECORD_BUILDER" --output "$records" \
-    --phase-reference-dir \
-      /data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round336/acquisition/orca1ice_trazdf_internal_kt2_np2 \
+    --tracer-reference-dir \
+      /data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round333/acquisition/orca1ice_tracer_stage3_kt2_np2 \
+    --ldf-reference-dir \
+      /data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round333/acquisition/orca1ice_traldf_iso_internal_kt2_np2 \
     --ice-reference-dir \
       /data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round326/acquisition/orca1ice_tke_hmi_10step_np2 \
     --drag-reference-dir \
       /data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round328/acquisition/orca1ice_dynzdf_kt1_np2
-  mkdir -p "$base/success" "$base/refusal" "$base/retention" "$stub_bin"
+  mkdir -p "$base/success" "$base/refusal" "$base/fabricated" \
+    "$base/retention" "$stub_bin"
   cat >"$stub" <<'STUB'
 #!/usr/bin/env bash
 set -eu
-while IFS= read -r -d '' source; do
-  cp -- "$source" "$(basename "$source")"
-done < <(find "$R336_TKE_STUB_DETERMINISTIC_SOURCE" -maxdepth 1 -type f \
-  \( -name 'oracle_*.bin' -o -name 'ORCA2_00000010_restart*.nc' \) -print0)
-cp -- "$R336_TKE_STUB_RECORD_ROOT"/oracle_r336_tke_kt00000002_r*.bin .
+for name in ORCA2_00000010_restart_0000.nc ORCA2_00000010_restart_0001.nc \
+  ORCA2_00000010_restart_ice_0000.nc ORCA2_00000010_restart_ice_0001.nc; do
+  cp -- "$R336_TKE_STUB_DETERMINISTIC_SOURCE/$name" .
+done
+if [[ $(basename "$PWD") == observer_free_twin ]]; then
+  cp -- "$R336_TKE_STUB_SOURCE_OUTPUT" ocean.output
+  printf 'STOP 0\n'
+  exit 0
+fi
+while IFS= read -r name; do
+  cp -- "$R336_TKE_STUB_RECORD_ROOT/$name" .
+done < <(sed -n 's/.*"\(oracle_[^"]*\.bin\)".*/\1/p' round336_output_contract.json)
+if [[ -n ${R336_TKE_STUB_FABRICATED_OUTPUT:-} ]]; then
+  printf 'fabricated\n' >"$R336_TKE_STUB_FABRICATED_OUTPUT"
+fi
 case "${R336_TKE_STUB_SCENARIO:-success}" in
   success)
     cp -- "$R336_TKE_STUB_SOURCE_OUTPUT" ocean.output
@@ -150,6 +163,19 @@ STUB
     -name 'orca1ice_tke_internal_kt2_np2_*' -print -quit | grep . >/dev/null \
     || refuse 'stub refusal outputs were not retained'
 
+  if R336_TKE_STUB_FLOW_ROOT=$base/fabricated R336_TKE_STUB_NEMO=$stub \
+      R336_TKE_STUB_BIN=$stub_bin R336_TKE_STUB_SOURCE_OUTPUT=$SOURCE_OUTPUT \
+      R336_TKE_STUB_RECORD_ROOT=$records \
+      R336_TKE_STUB_DETERMINISTIC_SOURCE=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round326/acquisition/orca1ice_tke_hmi_10step_np2 \
+      R336_TKE_STUB_FABRICATED_OUTPUT=oracle_impossible.bin \
+      R336_TKE_STUB_SCENARIO=success R328_ACQ_TARGET=tke336 \
+      "$PARENT" --run >"$base/fabricated.log" 2>&1; then
+    refuse 'stub impossible-output plant stayed green'
+  fi
+  grep -F "unexpected=['oracle_impossible.bin']" "$base/fabricated.log" >/dev/null \
+    || refuse 'stub impossible-output plant missed the output-set refusal'
+  printf 'PREFLIGHT_PLANT_FIRED r336-tke-impossible-stub-output\n'
+
   if R336_TKE_STUB_FLOW_ROOT=$base/retention R336_TKE_STUB_NEMO=$stub \
       R336_TKE_STUB_BIN=$stub_bin R336_TKE_STUB_SOURCE_OUTPUT=$SOURCE_OUTPUT \
       R336_TKE_STUB_RECORD_ROOT=$records \
@@ -176,7 +202,7 @@ STUB
   canonical=$base/retention/evidence/orca1ice_tke_internal_kt2_np2
   [[ -d $canonical && ! -e $retained ]] \
     || refuse 'retained stub output was not moved into canonical place'
-  printf 'R336_TKE_STUB_FLOW_PASS cases=success,in-place,refusal,retention,retained-admission\n'
+  printf 'R336_TKE_STUB_FLOW_PASS cases=success,in-place,refusal,impossible-output,retention,retained-admission\n'
 }
 
 export R328_ACQ_TARGET=tke336

@@ -12,8 +12,9 @@ import numpy as np
 from scripts.validate.ocean_fidelity.orca2_l4 import (
     nemo_testcase_l4_orca2_round326_hmi_gate as hmi,
     nemo_testcase_l4_orca2_round328_dynzdf_gate as dynzdf,
+    nemo_testcase_l4_orca2_round333_tracer_gate as tracer_gate,
+    nemo_testcase_l4_orca2_round333_traldf_gate as ldf_gate,
     nemo_testcase_l4_orca2_round336_tke_gate as gate,
-    nemo_testcase_l4_orca2_round336_trazdf_gate as trazdf,
 )
 
 
@@ -30,7 +31,8 @@ def field_rank(name: str) -> int:
     return 3
 
 
-def make_fields(header: dict[str, int], phase: dict, ice: dict) -> dict[str, np.ndarray]:
+def make_fields(header: dict[str, int], tracer: dict, ldf: dict,
+                ice: dict) -> dict[str, np.ndarray]:
     i0, i1 = header["ntsi"] - 1, header["ntei"]
     j0, j1 = header["ntsj"] - 1, header["ntej"]
     fields: dict[str, np.ndarray] = {}
@@ -40,7 +42,7 @@ def make_fields(header: dict[str, int], phase: dict, ice: dict) -> dict[str, np.
         shape = (n1,) if rank == 1 else (n1, n2) if rank == 2 else (n1, n2, n3)
         fields[name] = np.full(shape, 0.01 * number, dtype="=f8", order="F")
 
-    tmask = np.asarray(phase["fields"]["tmask"], dtype="=f8", order="F")
+    tmask = np.asarray(ldf["fields"]["tmask"], dtype="=f8", order="F")
     ssmask = np.any(tmask != 0.0, axis=2).astype("=f8")
     fields["entry_tmask"] = tmask.copy(order="F")
     fields["entry_umask"] = tmask.copy(order="F")
@@ -64,8 +66,13 @@ def make_fields(header: dict[str, int], phase: dict, ice: dict) -> dict[str, np.
     depth = np.arange(1, header["jpk"] + 1, dtype="=f8")[None, None, :]
     fields["entry_gdepw_kmm"] = np.broadcast_to(
         depth, fields["entry_gdepw_kmm"].shape).copy(order="F")
-    fields["entry_e3t_kmm"] = phase["fields"]["e3t_Kmm"][i0:i1, j0:j1].copy(order="F")
-    fields["entry_e3w_kmm"] = phase["fields"]["e3w_Kmm"][i0:i1, j0:j1].copy(order="F")
+    r3t_kmm = tracer["fields"]["r3t_Kmm"]
+    e3t_kmm = ldf["fields"]["e3t_3d"] * (
+        np.float64(1.0) + r3t_kmm[..., None] * tmask)
+    e3w_kmm = ldf["fields"]["e3w_1d"][None, None, :] * (
+        np.float64(1.0) + r3t_kmm[..., None])
+    fields["entry_e3t_kmm"] = e3t_kmm[i0:i1, j0:j1].copy(order="F")
+    fields["entry_e3w_kmm"] = e3w_kmm[i0:i1, j0:j1].copy(order="F")
     fields["entry_avtb_2d"].fill(1.0e-5)
     fields["entry_avtb"].fill(1.0)
     fields["entry_avmb"].fill(1.0e-5)
@@ -73,19 +80,27 @@ def make_fields(header: dict[str, int], phase: dict, ice: dict) -> dict[str, np.
     fields["pre_sweep_mxl"].fill(1.0)
     fields["final_mxl"].fill(2.0)
     fields["final_mxld"].fill(3.0)
-    fields["final_avt"] = phase["fields"]["avt_after_tke"].copy(order="F")
+    fields["pre_pdlr_avt"].fill(1.0e-4)
+    fields["final_avt"] = fields["pre_pdlr_avt"].copy(order="F")
+    fields["final_avt"][..., 1:-1] = (
+        np.maximum(
+            fields["tke_pdlr"][..., 1:-1] * fields["pre_pdlr_avt"][..., 1:-1],
+            fields["entry_avtb_2d"][..., None] * fields["entry_avtb"][None, None, 1:-1],
+        ) * fields["tke_wmask"][i0:i1, j0:j1, 1:-1]
+    )
     for name in gate.NEGATIVE_ZERO_EDGE:
         fields[name][..., -1] = -0.0
     return fields
 
 
-def write_record(path: Path, rank: int, phase: dict, ice: dict, drag: dict) -> None:
+def write_record(path: Path, rank: int, tracer: dict, ldf: dict,
+                 ice: dict, drag: dict) -> None:
     header = dict(zip(
         gate.HEADER_NAMES,
         (2, 2, 3, 3, rank, *gate.REAL_LAYOUT, 64, len(gate.FIELDS)),
         strict=True,
     ))
-    fields = make_fields(header, phase, ice)
+    fields = make_fields(header, tracer, ldf, ice)
     # Seed the exact overlap from a REAL admitted NEMO drag record.  That
     # record covers ntsi:ntei+1,ntsj:ntej+1; the new record deliberately also
     # carries NEMO's filled left/bottom halo.  Bottom values for those two
@@ -120,16 +135,20 @@ def write_record(path: Path, rank: int, phase: dict, ice: dict, drag: dict) -> N
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--phase-reference-dir", type=Path, required=True)
+    parser.add_argument("--tracer-reference-dir", type=Path, required=True)
+    parser.add_argument("--ldf-reference-dir", type=Path, required=True)
     parser.add_argument("--ice-reference-dir", type=Path, required=True)
     parser.add_argument("--drag-reference-dir", type=Path, required=True)
     args = parser.parse_args()
     args.output.mkdir(parents=True, exist_ok=False)
     for rank in (0, 1):
-        phase = trazdf.read_record(args.phase_reference_dir / trazdf.record_name(rank))
+        tracer = tracer_gate.read_stage3(
+            args.tracer_reference_dir / tracer_gate.record_name(rank))
+        ldf = ldf_gate.read_record(
+            args.ldf_reference_dir / ldf_gate.record_name(rank))
         ice = hmi.read_record(args.ice_reference_dir / hmi.record_name(2, rank))
         drag = dynzdf.read_record(args.drag_reference_dir / dynzdf.record_name(rank))
-        write_record(args.output / gate.record_name(rank), rank, phase, ice, drag)
+        write_record(args.output / gate.record_name(rank), rank, tracer, ldf, ice, drag)
         gate.read_record(args.output / gate.record_name(rank))
     print(f"R336_TKE_STUB_RECORDS_PASS path={args.output} fields={len(gate.FIELDS)}")
     return 0
