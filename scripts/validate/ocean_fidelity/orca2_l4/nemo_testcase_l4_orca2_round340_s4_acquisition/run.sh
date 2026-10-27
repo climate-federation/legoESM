@@ -135,6 +135,11 @@ admit_existing_route(){
  if [[ -d $existing_b ]]; then
   finalize_interrupted_manifest "$existing_b"
   admit_pair "$existing_a" "$existing_b" "$parent"
+  if [[ $existing_b != "$RUN_B" ]]; then
+   [[ ! -e $RUN_B ]] || refuse "canonical arm B already exists: $RUN_B"
+   mv "$existing_b" "$RUN_B"
+   printf 'ORCA2_ROUND340_S4_ARM_B_ADMITTED %s\n' "$RUN_B"
+  fi
   return
  fi
  admit_one "$existing_a" "$parent"
@@ -263,6 +268,23 @@ from scripts.validate.ocean_fidelity.orca2_l4 import nemo_testcase_l4_orca2_roun
 g.same_program_observers(Path(sys.argv[1]),Path(sys.argv[2]),dict(zip(('sbcmod','stprk3','stprk3_stg','fldread','sbcice_if','sbcblk','sbcfwb'),map(Path,sys.argv[3:10]),strict=True)),('round340_surface_writer','round340_state_writer'),new_cfg=sys.argv[10],ref_cfg=sys.argv[11])
 print('R340_SAME_PROGRAM_DRY_BUILD_PASS')
 PY
+cp "$scratch/dry-bld/ppsrc/nemo/sbcmod.f90" "$scratch/sbcmod.before-padding"
+{ printf '\n\n\n'; cat "$scratch/sbcmod.before-padding"; } >"$scratch/dry-bld/ppsrc/nemo/sbcmod.f90"
+"$PY" - "$scratch/dry-bld" "$K0_BUILD/BLD" "$SURFACE_PATCH" "$STATE_PATCH" "$STAGE_PATCH" "$FLD_PATCH" "$IIF_PATCH" "$BLK_PATCH" "$FWB_PATCH" "$TARGET_CFG" "$K0_CFG" <<'PY'
+import sys
+from pathlib import Path
+from scripts.validate.ocean_fidelity.orca2_l4 import nemo_testcase_l4_orca2_round328_dynzdf_gate as g
+g.same_program_observers(Path(sys.argv[1]),Path(sys.argv[2]),dict(zip(('sbcmod','stprk3','stprk3_stg','fldread','sbcice_if','sbcblk','sbcfwb'),map(Path,sys.argv[3:10]),strict=True)),('round340_surface_writer','round340_state_writer'),new_cfg=sys.argv[10],ref_cfg=sys.argv[11])
+PY
+printf '! nonblank prefix plant\n' >"$scratch/dry-bld/ppsrc/nemo/sbcmod.f90"
+cat "$scratch/sbcmod.before-padding" >>"$scratch/dry-bld/ppsrc/nemo/sbcmod.f90"
+plant_must_refuse same-program-prefix "$PY" - "$scratch/dry-bld" "$K0_BUILD/BLD" "$SURFACE_PATCH" "$STATE_PATCH" "$STAGE_PATCH" "$FLD_PATCH" "$IIF_PATCH" "$BLK_PATCH" "$FWB_PATCH" "$TARGET_CFG" "$K0_CFG" <<'PY'
+import sys
+from pathlib import Path
+from scripts.validate.ocean_fidelity.orca2_l4 import nemo_testcase_l4_orca2_round328_dynzdf_gate as g
+g.same_program_observers(Path(sys.argv[1]),Path(sys.argv[2]),dict(zip(('sbcmod','stprk3','stprk3_stg','fldread','sbcice_if','sbcblk','sbcfwb'),map(Path,sys.argv[3:10]),strict=True)),('round340_surface_writer','round340_state_writer'),new_cfg=sys.argv[10],ref_cfg=sys.argv[11])
+PY
+cp "$scratch/sbcmod.before-padding" "$scratch/dry-bld/ppsrc/nemo/sbcmod.f90"
 unlink "$scratch/dry-bld/ppsrc/nemo/iceupdate.f90"
 cp "$K0_BUILD/BLD/ppsrc/nemo/iceupdate.f90" "$scratch/dry-bld/ppsrc/nemo/iceupdate.f90"
 printf '! unregistered plant\n' >>"$scratch/dry-bld/ppsrc/nemo/iceupdate.f90"
@@ -448,7 +470,7 @@ grep -F 'STOP 0' "$run/run.user.stdout.log" >/dev/null
 step='ocean.output existence check'
 [[ -f "$run/ocean.output" ]]
 step='runtime error scan'
-if grep -Eq 'E R R O R|STOP [1-9]' "$run/run.user.stdout.log" "$run/ocean.output"; then
+if LC_ALL=C grep -Eq 'E R R O R|STOP [1-9][0-9]*([^0-9]|$)' "$run/run.user.stdout.log" "$run/ocean.output"; then
   quote_ocean_errors "$run/run.user.stdout.log"
   quote_ocean_errors "$run/ocean.output"
   refuse 'error marker found'

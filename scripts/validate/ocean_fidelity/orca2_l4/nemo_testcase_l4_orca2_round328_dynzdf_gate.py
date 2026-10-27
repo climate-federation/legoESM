@@ -251,13 +251,33 @@ def _regular_files(root: Path) -> set[str]:
     return {p.relative_to(root).as_posix() for p in root.rglob("*") if p.is_file()}
 
 
-def _observer_only(ref: list[str], new: list[str], inserted: list[str], unit: str) -> None:
+def _observer_only(
+        ref: list[str], new: list[str], patch: Path | list[str], unit: str) -> None:
+    """Apply an insertion-only unified patch by its exact source coordinates.
+
+    SequenceMatcher is ambiguous around repeated blank/comment lines and can
+    attribute an unchanged line to an insertion.  Patch coordinates are the
+    authoritative proof and retain exact source equality.
+    """
+    # The NEMO build preprocessor emits one blank output line per command-line
+    # macro before the first source token.  Configurations can therefore have
+    # different leading blank padding even when their Fortran is identical.
+    def leading_blanks(lines: list[str]) -> int:
+        return next((i for i, line in enumerate(lines) if line), len(lines))
+
+    ref = ref[leading_blanks(ref):]
+    new = new[leading_blanks(new):]
+    inserted = (patch if isinstance(patch, list) else
+                [line[1:] for line in patch.read_text().splitlines()
+                 if line.startswith("+") and not line.startswith("+++")])
     added: list[str] = []
-    for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(None, ref, new, autojunk=False).get_opcodes():
+    for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(
+            None, ref, new, autojunk=False).get_opcodes():
         require(tag in ("equal", "insert"),
                 f"{unit}.f90 {tag}s record-build lines {i1 + 1}-{i2}")
         added += new[j1:j2] if tag == "insert" else []
-    require(added == inserted, f"{unit}.f90 insertions differ from its committed patch")
+    require(added == inserted,
+            f"{unit}.f90 insertions differ from its exact committed patch")
 
 
 def same_program_observers(
@@ -267,11 +287,6 @@ def same_program_observers(
     for name in BUILD_CONFIG_FILES:
         want = (ref_bld / name).read_text().replace(ref_cfg, new_cfg)
         require((new_bld / name).read_text() == want, f"build config differs: {name}")
-    inserted = {
-        unit: [line[1:] for line in patch.read_text().splitlines()
-               if line.startswith("+") and not line.startswith("+++")]
-        for unit, patch in observer_patches.items()
-    }
     ref_root, new_root = f"{ref_bld.parent}/".encode(), f"{new_bld.parent}/".encode()
     counts: dict[str, int] = {}
     for sub, writers in (
@@ -296,7 +311,7 @@ def same_program_observers(
                 rel = f"nemo/{unit}.f90"
                 _observer_only((ref_bld / sub / rel).read_text().splitlines(),
                                (new_bld / sub / rel).read_text().splitlines(),
-                               inserted[unit], unit)
+                               observer_patches[unit], unit)
         counts[sub] = len(ref_files) - len(observers)
     return {"status": "PASS_SAME_PROGRAM_R326_PLUS_OBSERVERS",
             "identical_ppsrc": counts["ppsrc"], "identical_obj": counts["obj"],
