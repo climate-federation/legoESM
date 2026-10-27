@@ -138,6 +138,7 @@ readonly SOURCE_ZDFSH2_SHA=c31f062e282b8710a0b565be7aecbc35b8e741b05a96a393402fc
 readonly SOURCE_ZDFDRG_SHA=f70dcfc7fa072bad6eeb77b24e8689ea1dfce75808fbf10eddb4c339acf255c2
 readonly SOURCE_ZDFMXL_SHA=3a9caebc8599e6e432bbd33d23bf5ef63f7a291cf093ad077e884162c7a5f732
 readonly SOURCE_ZDFTKE_SHA=2a7f4ce379d5ad48f915a93f35f06ac16da6685df7d502e01b5297ec6738fd31
+readonly SOURCE_ZDFTKE_PRISTINE_SHA=2e78c1a215e4a7ee51dab4b3b19ef446cceb1ef8e5ad9380dd7c482d37e10397
 readonly SOURCE_BINARY_SHA=20376f40a78cb1a5491838ff112bfbe738178e4da8da1e43d5bd5c3884c72934
 readonly DECK_MANIFEST_SHA=51da69b494a10fa3c3b119018329a94d963f1fe3e59b6834ea936055ab0df2b9
 readonly INPUT_MANIFEST_SHA=3dfe251754fa76c8b5053cda90a51ee10589d0fffc01a4e799c49cc36bbd17e5
@@ -681,6 +682,7 @@ if [[ "$ACQ_TARGET" == tke332 ]]; then
 fi
 if [[ "$ACQ_TARGET" == tke336 ]]; then
   pin "$SOURCE_ZDFTKE_SHA" "$SOURCE_ZDFTKE" 'source zdftke'
+  pin "$SOURCE_ZDFTKE_PRISTINE_SHA" "$SOURCE_ZDFTKE_PRISTINE" 'pristine source zdftke'
   pin 0d4360984a193ff9bce2cfbaa13a45dbd26fcd18b215e0159c95254075830630 "$HIST_R5_RUN/nemo" 'round-5 producer binary'
   pin 20376f40a78cb1a5491838ff112bfbe738178e4da8da1e43d5bd5c3884c72934 "$HIST_R326_RUN/nemo" 'round-326 producer binary'
   pin eead2832bfe824810d40fb32014d86c9b6b7ece52eba86673c48d5a0a5878bb5 "$HIST_R328_DYN_RUN/nemo" 'round-328 dyn producer binary'
@@ -857,7 +859,7 @@ if [[ "$ACQ_TARGET" == tke332 ]]; then
     check_r332_raw_landing "$plants/stprk3_stg.raw-misplaced.F90"
 fi
 if [[ "$ACQ_TARGET" == tke336 ]]; then
-  cp "$SOURCE_ZDFTKE" "$dry/zdftke.F90"
+  cp "$SOURCE_ZDFTKE_PRISTINE" "$dry/zdftke.F90"
   cp "$R336_TKE_WRITER" "$dry/tke_round336_writer.F90"
   patch -s --fuzz=0 -p0 -d "$dry" <"$R336_TKE_PATCH"
 fi
@@ -1067,7 +1069,7 @@ fi
 
 if [[ "$ACQ_TARGET" == tke336 ]]; then
   command -v objdump >/dev/null || refuse 'no objdump for TKE arithmetic passivity proof'
-  fpp "$SOURCE_ZDFTKE" "$scratch/zdftke_arithmetic_base.f90"
+  fpp "$SOURCE_ZDFTKE_PRISTINE" "$scratch/zdftke_arithmetic_base.f90"
   compile_record_object "$scratch/zdftke_arithmetic_base.f90" \
     "$scratch/zdftke_arithmetic_base.o"
   compile_record_object "$scratch/zdftke.f90" "$scratch/zdftke_arithmetic_observed.o"
@@ -1089,7 +1091,7 @@ if [[ "$ACQ_TARGET" == tke336 ]]; then
   fi
   printf 'R336_TKE_INLINE_PASS source_function=tke_tke object_function=__zdftke_MOD_zdf_tke\n'
   sed '0,/zfact2  = 1.5_wp \* rn_Dt \* rn_ediss/s//zfact2  = (1.5_wp + rn_ediff) * rn_Dt * rn_ediss/' \
-    "$SOURCE_ZDFTKE" >"$plants/zdftke.arithmetic.F90"
+    "$SOURCE_ZDFTKE_PRISTINE" >"$plants/zdftke.arithmetic.F90"
   fpp "$plants/zdftke.arithmetic.F90" "$scratch/zdftke_arithmetic_plant.f90"
   compile_record_object "$scratch/zdftke_arithmetic_plant.f90" \
     "$scratch/zdftke_arithmetic_plant.o"
@@ -1554,6 +1556,7 @@ fi
 if [[ "$ACQ_TARGET" == tke336 ]]; then
   sha256sum "$R336_TKE_PATCH" "$R336_TKE_WRITER" "$R336_TKE_FIXTURE_STUBS" \
     "$R336_TKE_FIXTURE" "$R336_TKE_GATE" "$R336_TKE_TEST" "$SOURCE_ZDFTKE" \
+    "$SOURCE_ZDFTKE_PRISTINE" \
     >>"$manifest/toolchain.sha256"
 fi
 
@@ -1607,7 +1610,7 @@ if [[ "$ACQ_TARGET" == tke332 ]]; then
     || refuse 'built round-332 raw V observer did not land at the intended statement'
 fi
 if [[ "$ACQ_TARGET" == tke336 ]]; then
-  cp "$SOURCE_ZDFTKE" "$TARGET_ROOT/MY_SRC/zdftke.F90"
+  cp "$SOURCE_ZDFTKE_PRISTINE" "$TARGET_ROOT/MY_SRC/zdftke.F90"
   cp "$R336_TKE_WRITER" "$TARGET_ROOT/MY_SRC/tke_round336_writer.F90"
   patch -s --fuzz=0 -p0 -d "$TARGET_ROOT/MY_SRC" <"$R336_TKE_PATCH"
 fi
