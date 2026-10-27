@@ -325,18 +325,213 @@ At `kt = 1`, every active wet-cell surface flux and stress field (`utau`,
    are masked until `card.ocean.recipe.initial_state` uses the standalone K0
    `eta = 0.0` initial condition.
 
+## Resume 7 — four confirmed S4 root-cause fixes and ten-step re-score
+
+Resume 7 resolves all four **CONFIRMED** `kt = 1` surface and entry root causes
+at their literal source locations and re-scores the 10-step standalone K0
+composed card against admitted arm A (with the arm-B reproducibility control
+repeated):
+
+1. **K0 initial state (`ssh = 0.0`, no `ice_istate` sea-surface depression)**:
+   In standalone K0 (`nn_ice = 1`), `sbc_init` only invokes `ice_init` (and its
+   `ice_istate` levitating-ice sea-surface depression) under `IF( nn_ice == 2 )`
+   at `ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/sbcmod.f90:376-384`,
+   so `ssh` remains at its `0._wp` cold-start allocation from
+   `ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/restart.f90:398,405,408`.
+   `NemoStandaloneK0Config` now requires the explicit no-default field
+   `initial_state="nemo_k0_istate"` (`validate_nemo_standalone_k0` refuses any
+   other value, and `_validate_k0_ocean_card` refuses non-zero or `-0.0` initial
+   `eta`), and `build_nemo_orca2_k0_ocean_card` passes
+   `initial_state=k0.initial_state` to `build_orca2_zps_card` via
+   `build_orca2_istate_for_mode(..., initial_state="nemo_k0_istate")`. The SI3
+   card (`build_orca2_zps_card(deck_root)` with `initial_state="si3_iceistate"`)
+   is 100% bit-identical (`ORCA2-zps` fingerprint unchanged at
+   `d699476d15b0cf24`).
+2. **Dry-cell signed zero (`-0.0` vs `+0.0`) on initial `T` and `tra_dmp` target**:
+   In NEMO `istate_init`
+   (`ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/istate.f90:118`) and
+   `dta_tsd`
+   (`ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/dtatsd.f90:308-309`),
+   initial and damping tracers are masked by `REAL(wp)` multiplication
+   `ptsd(:,:,:,jp_tem) = sf_tsd(jp_tem)%fnow(:,:,:) * tmask(:,:,:)` and
+   `ptsd(:,:,:,jp_sal) = sf_tsd(jp_sal)%fnow(:,:,:) * tmask(:,:,:)`, which
+   preserves IEEE-754 `-0.0` on the `151,917 / 799,200` 3-D dry cells (`4,668 /
+   26,640` surface dry cells) where the raw NetCDF temperature is negative.
+   `build_orca2_ts_at_step`, `build_orca2_initial_ts`, and
+   `build_orca2_damping_for_step` now support
+   `mask_evaluation="nemo_tmask_multiply"`, selected by
+   `initial_state="nemo_k0_istate"` and the K0 composed-card damping builder,
+   while `mask_evaluation="where_zero"` keeps the SI3 card and all other cards
+   bit-identical.
+3. **Unmasked `S1_TURB` intermediate diagnostics over `A2D(0)` in `_nemo_ncar_turbulent`**:
+   In `blk_oce_1`, NEMO initializes `tsk` on `A2D(0)` as
+   `tsk(ji,jj) = ( sst_m(ji,jj) + rt0 ) * tmask(ji,jj,1)` at
+   `ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/sbcblk.f90:656-657`,
+   executes `turb_ncar` and the intermediate turbulent diagnostics (`theta_air`,
+   `ssq`, `Cd`, `Ch`, `Ce`, `rhoa`, `zsen`, `zlat`, `evap`) unmasked over
+   `A2D(0)` at
+   `ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/sbcblk.f90:740-876`, and
+   masks only the exit fluxes (`sen`, `lat`, `evap`, `utau`, `vtau`, `taum`,
+   `wndm`) by `tmask(ji,jj,1)` (with `tsk` converted back to Celsius via
+   `( tsk(ji,jj) - rt0 ) * tmask(ji,jj,1)` at
+   `ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/sbcblk.f90:925`).
+   Removing the non-NEMO `jnp.where(active, ...)` dry-cell operand substitution
+   from `_nemo_ncar_turbulent` makes all `19` fields of `kt01/S1_TURB`
+   bit-identical (`0 / 506,160` unequal words across both wet and dry cells),
+   while leaving all non-NEMO bulk callers (`air_sea_fluxes`,
+   `ncar_transfer_coefficients`, `blk_oce_2(nemo_source_exact=False)`)
+   bit-identical.
+4. **`S0_F` `tradmp` (`damping_call`) `sf_tsd` year-seam slot order**:
+   Because `istate_init`
+   (`ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/istate.f90:118`) already
+   called `dta_tsd( nit000, ts(:,:,:,:,Kbb) )` at `kt = 1`, swapping `sf_tsd` to
+   `(nbb = 2, naa = 1)`, the subsequent `tra_dmp` call `dta_tsd( kt, zts_dta )`
+   at `kt = 1`
+   (`ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/tradmp.f90:181`) enters
+   `fld_read` with `ll_firstcall = ( kt == nit000 )` true a second time
+   (`ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/fldread.f90:192,209-215`)
+   and runs `fld_init` + `fld_update` again on `sf_tsd`, swapping its year-seam
+   slots back to `nbb = 1, naa = 2, nrec = (12, -1339200, 1, 1339200)`, and
+   `fdta = (before, after)` for `kt = 1..10`. Updating `damping_call` in
+   `build_real_composed_inputs` to emit `sf_tsd`'s unswapped slots makes all
+   `99` `S0_F` frames across `kt = 1..10` 100% bit-exact (`0 / 57,890,304`
+   unequal words, `max |diff| = 0.0`).
+
+### M6 verification: non-NEMO callers and SI3 card bit-identical
+
+- `scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_card_fingerprint.py`:
+  `PASS` — `ORCA2-zps` (the SI3 card) fingerprint is unchanged at
+  `d699476d15b0cf24`, and `GYRE-zco`, `LOCK_EXCHANGE-zco`, `OVERFLOW-zps`,
+  `VORTEX-zco`, and `VORTEX_VEC-zco` are all unchanged (`0` leaf changes).
+- Non-NEMO bulk callers (`air_sea_fluxes(algo="ncar")`,
+  `air_sea_fluxes(algo="ly09_2coeff")`, `ncar_transfer_coefficients`, and
+  `blk_oce_2(nemo_source_exact=False)`): `0` unequal words across mixed wet/dry
+  inputs (`test_non_nemo_callers_bit_identical_for_item3`).
+
+### Repeated reproducibility control (admitted arm B vs admitted arm A)
+
+Re-running `score_reproducibility_control` in
+`scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round340_score_composed_card.py`:
+
+- Status: `PASS_REPRODUCIBILITY_EXACT`
+- Surface boundaries (`259` time-qualified boundaries, `1,899` field rows):
+  `0 / 123,824,304` unequal words (`max |diff| = 0.0`)
+- Rung-10 state ladder (`40` checkpoints, `200` field rows):
+  `0 / 128,937,600` unequal words (`200 / 200 BIT_EXACT`, `max |diff| = 0.0`)
+
+### Re-scored real legoESM composed card (`kt = 1..10` vs arm A)
+
+Running the production ORCA2 K0 composed card (`NemoStandaloneK0Config(nn_ice=1,
+ln_drgice_imp=False, ln_mxl0=True, nn_mxlice=0, ln_icebergs=False,
+initial_state="nemo_k0_istate")` explicit) on CPU (`JAX_PLATFORMS=cpu
+JAX_ENABLE_X64=1`, `PrecisionPolicy.fp64(transcendentals="libm")`) for
+`kt = 1..10` and scoring against arm A via `score_composed_card`:
+
+- Overall status: `FAIL_S4_SURFACE` (`surface exact bar failed: 24496893 / 123824304`,
+  reduced from `58,062,489 / 123,824,304`; `max |diff| = 37.58738257120578`,
+  reduced from `2,678,400.0` / `127.37701245735659`)
+- **`kt = 1` surface boundaries (`18` outer/S1/S3/S2 boundaries + `18` `S0_F` frames)**:
+  **`0 / 18,035,664` unequal words (`max |diff| = 0.0`, 100% bit-exact across all
+  wet and dry cells)**
+- **All `99` `S0_F` boundaries across `kt = 1..10`**:
+  **`0 / 57,890,304` unequal words (`max |diff| = 0.0`, 100% bit-exact)**
+- **`kt = 1` `entry` state rows (`kt01/entry/T`, `kt01/entry/S`, `kt01/entry/u`, `kt01/entry/v`, `kt01/entry/ssh`)**:
+  **`5 / 5 BIT_EXACT` (`0 / 3,223,440` unequal words, `max |diff| = 0.0`)**
+- First non-bit surface row (and first non-zero-`max |diff|` surface row):
+  `kt02/S0_EXIT/sst_m` (`16,433 / 26,640` unequal wet-cell words,
+  `max |diff| = 0.0006906256512557718`)
+- First non-bit rung-10 row (and first `OVER_BAR` rung-10 row):
+  `kt01/stage1/T` (`587,799 / 799,200` unequal words,
+  `max |diff| = 0.0004687813029160548`,
+  `normalized_max_abs = 1.558028817559533e-05 > 1e-15`)
+
+#### Re-scored surface boundaries by step (`kt = 1..10`)
+
+| Step | Unequal / Total | Max `\|diff\|` | First non-bit row |
+| --- | --- | --- | --- |
+| `kt01` | `0 / 18,035,664` | `0.0` | `None` |
+| `kt02` | `1,497,312 / 10,842,528` | `0.18087092394585402` | `kt02/S0_EXIT/sst_m` |
+| `kt03` | `3,176,738 / 12,894,000` | `5.904199766100569` | `kt03/S0_EXIT/sst_m` |
+| `kt04` | `2,572,755 / 10,842,528` | `4.500545930355912` | `kt04/S0_EXIT/sst_m` |
+| `kt05` | `3,175,632 / 12,894,000` | `37.55767153423536` | `kt05/S0_EXIT/sst_m` |
+| `kt06` | `2,571,923 / 10,842,528` | `37.55767153423536` | `kt06/S0_EXIT/sst_m` |
+| `kt07` | `3,177,037 / 12,894,000` | `37.58738257120578` | `kt07/S0_EXIT/sst_m` |
+| `kt08` | `2,572,966 / 10,842,528` | `37.58732115683465` | `kt08/S0_EXIT/sst_m` |
+| `kt09` | `3,178,492 / 12,894,000` | `37.55243048136965` | `kt09/S0_EXIT/sst_m` |
+| `kt10` | `2,574,038 / 10,842,528` | `37.552424399404195` | `kt10/S0_EXIT/sst_m` |
+| **Total** | **`24,496,893 / 123,824,304`** | **`37.58738257120578`** | **`kt02/S0_EXIT/sst_m`** |
+
+#### Re-scored surface boundaries by boundary family (`kt = 1..10` aggregate plus `kt01` and `kt02`)
+
+| Boundary family | `kt01` unequal / total (`max \|diff\|`) | `kt02` unequal / total (`max \|diff\|`) | `kt = 1..10` unequal / total | `kt = 1..10` max `\|diff\|` | First non-bit row |
+| --- | --- | --- | --- | --- | --- |
+| `S0_ENTRY` | `0 / 0` (`0.0`) | `0 / 0` (`0.0`) | `0 / 0` | `0.0` | `None` |
+| `S0_EXIT` | `0 / 186,480` (`0.0`) | `124,168 / 186,480` (`0.18087092394585402`) | `1,117,512 / 1,864,800` | `0.18087092394585402` | `kt02/S0_EXIT/sst_m` |
+| `S0_F` | `0 / 10,656,384` (`0.0`) | `0 / 5,035,008` (`0.0`) | `0 / 57,890,304` | `0.0` | `None` |
+| `S1_ENTRY` | `0 / 186,480` (`0.0`) | `124,168 / 186,480` (`0.18087092394585402`) | `1,117,512 / 1,864,800` | `0.18087092394585402` | `kt02/S1_ENTRY/sst_m` |
+| `S1_TURB` | `0 / 506,160` (`0.0`) | absent on even `kt` | `910,171 / 2,530,800` | `8.992867801479244` | `kt03/S1_TURB/sst` |
+| `S1_FLUX` | `0 / 159,840` (`0.0`) | absent on even `kt` | `197,196 / 799,200` | `8.749036513328946` | `kt03/S1_FLUX/qlwn` |
+| `S1_EXIT` | `0 / 399,600` (`0.0`) | `124,168 / 399,600` (`0.18087092394585402`) | `1,769,042 / 3,996,000` | `37.58732115683465` | `kt02/S1_EXIT/sst_m` |
+| `S3_ENTRY` | `0 / 399,600` (`0.0`) | `124,168 / 399,600` (`0.18087092394585402`) | `1,769,042 / 3,996,000` | `37.58732115683465` | `kt02/S3_ENTRY/sst_m` |
+| `S3_COVER_IIF` | `0 / 426,240` (`0.0`) | `65,732 / 426,240` (`0.001455833838534204`) | `1,243,118 / 4,262,400` | `37.58732115683465` | `kt02/S3_COVER_IIF/sss_m` |
+| `S3_FREEZE_IIF` | `0 / 452,880` (`0.0`) | absent on even `kt` | `654,425 / 2,264,400` | `8.749036513328946` | `kt03/S3_FREEZE_IIF/sss_m` |
+| `S3_CLAMP_IIF` | `0 / 452,880` (`0.0`) | absent on even `kt` | `654,425 / 2,264,400` | `8.749036513328946` | `kt03/S3_CLAMP_IIF/sss_m` |
+| `S3_EXIT_IIF` | `0 / 452,880` (`0.0`) | `65,732 / 452,880` (`0.001455833838534204`) | `1,243,136 / 4,528,800` | `37.58738257120578` | `kt02/S3_EXIT_IIF/sss_m` |
+| `S3_EXIT` | `0 / 426,240` (`0.0`) | `124,168 / 426,240` (`0.18087092394585402`) | `1,769,060 / 4,262,400` | `37.58738257120578` | `kt02/S3_EXIT/sst_m` |
+| `S2_ENTRY` | `0 / 426,240` (`0.0`) | `124,168 / 426,240` (`0.18087092394585402`) | `1,769,060 / 4,262,400` | `37.58738257120578` | `kt02/S2_ENTRY/sst_m` |
+| `S2_RNF` | `0 / 506,160` (`0.0`) | `124,168 / 506,160` (`0.18087092394585402`) | `1,796,120 / 5,061,600` | `37.58738257120578` | `kt02/S2_RNF/sst_m` |
+| `S2_SSR` | `0 / 586,080` (`0.0`) | `124,168 / 586,080` (`0.18087092394585402`) | `2,054,396 / 5,860,800` | `37.58732115683465` | `kt02/S2_SSR/sst_m` |
+| `S2_FWB` | `0 / 586,080` (`0.0`) | `124,168 / 586,080` (`0.18087092394585402`) | `2,054,396 / 5,860,800` | `37.58732115683465` | `kt02/S2_FWB/sst_m` |
+| `S2_LBC` | `0 / 586,080` (`0.0`) | `124,168 / 586,080` (`0.18087092394585402`) | `2,054,396 / 5,860,800` | `37.58732115683465` | `kt02/S2_LBC/sst_m` |
+| `S2_EXIT` | `0 / 639,360` (`0.0`) | `124,168 / 639,360` (`0.18087092394585402`) | `2,323,886 / 6,393,600` | `37.58732115683465` | `kt02/S2_EXIT/sst_m` |
+
+#### Re-scored rung-10 200-row state ladder by step (`kt = 1..10`)
+
+| Step | `BIT_EXACT` | `AT_BAR_NOT_EXACT` | `OVER_BAR` | Unequal / Total | Max `\|diff\|` | Max normalized `\|diff\|` | First non-bit row | First `OVER_BAR` row |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `kt01` | `5` | `0` | `15` | `5,506,511 / 12,893,760` | `0.08960306993076475` | `0.08960306993076475` | `kt01/stage1/T` | `kt01/stage1/T` |
+| `kt02` | `0` | `0` | `20` | `6,912,223 / 12,893,760` | `0.12147086390205597` | `0.0953385078356453` | `kt02/entry/T` | `kt02/entry/T` |
+| `kt03` | `0` | `0` | `20` | `6,927,385 / 12,893,760` | `0.12437813393687264` | `0.08705966238910777` | `kt03/entry/T` | `kt03/entry/T` |
+| `kt04` | `0` | `0` | `20` | `6,904,848 / 12,893,760` | `0.13166476376835412` | `0.0598007900115033` | `kt04/entry/T` | `kt04/entry/T` |
+| `kt05` | `0` | `0` | `20` | `6,926,791 / 12,893,760` | `0.41715841853835123` | `0.05424006434964804` | `kt05/entry/T` | `kt05/entry/T` |
+| `kt06` | `0` | `0` | `20` | `6,906,448 / 12,893,760` | `0.41772315226799306` | `0.06127472183902331` | `kt06/entry/T` | `kt06/entry/T` |
+| `kt07` | `0` | `0` | `20` | `6,923,911 / 12,893,760` | `0.13581575230804432` | `0.06127472183902331` | `kt07/entry/T` | `kt07/entry/T` |
+| `kt08` | `0` | `0` | `20` | `6,905,061 / 12,893,760` | `0.13648423773422635` | `0.10226624263910054` | `kt08/entry/T` | `kt08/entry/T` |
+| `kt09` | `0` | `0` | `20` | `6,930,006 / 12,893,760` | `0.13176780483340167` | `0.10226624263910054` | `kt09/entry/T` | `kt09/entry/T` |
+| `kt10` | `0` | `0` | `20` | `6,906,109 / 12,893,760` | `0.14902761351543603` | `0.11725492112954827` | `kt10/entry/T` | `kt10/entry/T` |
+| **Total** | **`5`** | **`0`** | **`195`** | **`67,749,293 / 128,937,600`** | **`0.41772315226799306`** | **`0.11725492112954827`** | **`kt01/stage1/T`** | **`kt01/stage1/T`** |
+
+- With all four `kt = 1` surface and entry root causes resolved, the first
+  departure in the composed 10-step run occurs inside the `kt = 1` ocean step at
+  `kt01/stage1` (`kt01/stage1/T`: `587,799 / 799,200` unequal words, `max |diff|
+  = 0.0004687813029160548`; `kt01/stage1/S`: `430,552 / 799,200`, `max |diff| =
+  0.00034781990987120537`; `kt01/stage1/u`: `438,720 / 799,200`, `max |diff| =
+  0.02714041350475488`; `kt01/stage1/v`: `421,889 / 799,200`, `max |diff| =
+  0.01631687050598546`; `kt01/stage1/ssh`: `16,433 / 26,640`, `max |diff| =
+  0.009738004150344978`), which then feeds `kt01/stage3` and becomes the first
+  non-bit surface row at `kt02/S0_EXIT/sst_m` (`16,433 / 26,640` unequal wet-cell
+  words, `max |diff| = 0.0006906256512557718`).
+- independent review: operator
+
 ## Verification
 
-- Round-340 focused fast tests (`test_orca2_round340_standalone.py`, including
-  items 1–3 and scoring-driver tests): 12/12 non-operator tests pass (`2`
-  operator-only CPU smoke/gradient tests skipped by default; both previously
-  verified in `766.84 s` and `952.12 s`).
+- Round-340 focused fast tests (`test_orca2_round340_standalone.py`,
+  `test_nemo_card_opt_in_defaults.py`, `test_ncar_bulk.py`, and
+  `test_dispatch_hardening.py`): all pass (`37 passed, 2 skipped` in
+  `test_orca2_round340_standalone.py` + `test_nemo_card_opt_in_defaults.py`;
+  `72 passed` in `test_ncar_bulk.py`; `24 passed` in
+  `test_dispatch_hardening.py`).
+- M6 card-fingerprint gate (`nemo_testcase_l4_orca2_card_fingerprint.py`):
+  `PASS` (`ORCA2-zps` SI3 card `d699476d15b0cf24` and all five phase-2 cards
+  100% bit-identical).
 - Admitted arm-B vs arm-A reproducibility control: `PASS_REPRODUCIBILITY_EXACT`
   (`0 / 123,824,304` surface words and `0 / 128,937,600` rung-10 words unequal).
-- Real 10-step CPU composed-card score (`nemo_testcase_l4_orca2_round340_score_composed_card.py`):
-  executed detached on CPU (`JAX_PLATFORMS=cpu JAX_ENABLE_X64=1`); full table
-  committed above.
-- Per-receipt citation gate: PASS, 18 citations, zero failures, zero unmapped
+- Real 10-step CPU composed-card re-score (`nemo_testcase_l4_orca2_round340_score_composed_card.py`):
+  executed on CPU (`JAX_PLATFORMS=cpu JAX_ENABLE_X64=1`); full re-scored tables
+  committed above (`0 / 18,035,664` unequal surface words at `kt = 1`,
+  `0 / 57,890,304` unequal `S0_F` words across `kt = 1..10`, `5 / 5 BIT_EXACT`
+  on `kt01/entry/*`).
+- Per-receipt citation gate: PASS, 27 citations, zero failures, zero unmapped
   citations, zero map-audit failures, and all nine self-tests fired.
 - Required receipt-citation pytest (`tests/ocean/fidelity/test_nemo_testcase_receipt_citation_gate.py`
   with `JAX_ENABLE_X64=1`): 17/17 PASS on the clean committed tree.
