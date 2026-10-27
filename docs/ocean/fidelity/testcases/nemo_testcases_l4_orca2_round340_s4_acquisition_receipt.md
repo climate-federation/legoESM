@@ -1,7 +1,7 @@
 # ORCA2 round 340 — exact standalone S4 acquisition tool and composed card
 
-Date: 2026-10-27. Base `d5d97cfc3121`. Disposition:
-**TWINS_ADMITTED (`ORCA2_ROUND340_S4_TWINS_ADMITTED`) / COMPOSED_CARD_SCORED (`FAIL_S4_SURFACE`)**.
+Date: 2026-10-27. Base `a91d673b6fcf` (rebased from `d5d97cfc3121`). Disposition:
+**TWINS_ADMITTED (`ORCA2_ROUND340_S4_TWINS_ADMITTED`) / COMPOSED_CARD_SCORED (`PASS_S4_EXACT`)**.
 Both operator-run NEMO arms A and B are admitted (`0` unequal words across all
 surface and rung-10 state records); no agent ran NEMO.
 
@@ -972,31 +972,254 @@ Executed `scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round3
 
 - independent review: operator
 
+## Resume 12 — Rebase onto ORCA2 lane tip (`a91d673b6fcf`), `nemo_sh2_fold_top_v` verification, 10-step re-score (`PASS_S4_EXACT`), and landing battery
+
+### (1) Rebase onto ORCA2 lane tip (`a91d673b6fcf`) and mechanical delta / gate accounting
+
+Round 340 (`23` commits based on `d5d97cfc31218e12a59950e84f09bc9382255f37`,
+pre-rebase tip preserved on backup branch `backup/r340_pre_rebase` at
+`c81be0d554508b0dcffa927c300cff8766ec9498`) was rebased onto the ORCA2 lane tip
+`a91d673b6fcff38b097f7c0fc8ddb009c05d7a32` (`98` commits ahead from Round 336,
+landing the north-fold V-face mask row in `_tke_bottom_dirichlet` at
+`packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:12466-12495`),
+producing rebased tip `424890bbbc18d3e718d214d89f689e39b620a144` and re-anchored
+commit `8a74ac5dd1697d36ecfaa264e081a751d77adcfd`. No model code, configuration
+value, or test file was changed during or after the rebase.
+
+1. **Conflict resolution and citation re-anchor (`1` conflict hunk, `1` shifted citation key)**:
+   - **Conflict (`1` hunk)**: At commit `eb4909b171` (rebased as `b9dc379088`,
+     step `1/23`), `scripts/validate/ocean_fidelity/testcases/nemo_testcase_receipt_citation_gate.py`
+     conflicted at the opening of `CITATION_MAP = {`, where Round 336 and
+     Round 340 both inserted their round entries. Resolved by keeping both
+     sides' blocks verbatim in full.
+   - **Re-anchored citation (`1` entry)**: Because Round 340 inserted
+     `build_orca2_istate_for_mode` (`+77` lines) earlier in
+     `packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py`, Round 336's
+     citation of `nemo_sh2_fold_top_v=True,` shifted from line `2063` to
+     `packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:2140`:
+
+```text
+packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:2063
+  -> packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:2140 ('nemo_sh2_fold_top_v=True,')
+```
+2. **Mechanical non-gate delta proof**:
+   - At the rebased tip `424890bbbc18` (immediately after `git rebase FETCH_HEAD`),
+     comparing `git diff d5d97cfc3121..backup/r340_pre_rebase` against
+     `git diff a91d673b6fcf..424890bbbc18`:
+     - Across all `33` non-gate, non-shared-receipt files (`packages/`, `scripts/`,
+       `tests/`, `PREREG_nemo_testcases_l4_orca2_round340_s4.md`, and Round 340's
+       receipts), the raw `git diff` output (including `index` headers) is
+       **100% byte-identical** (`0` differing bytes across `7,451` lines and
+       `414,599` bytes; SHA-256
+       `d4be84a1ba18a514095f527402057040180de83c7f05a7df2e28be6608ab86ea`).
+     - Across all `35` non-gate files (including the two historical receipts
+       `nemo_testcases_l2_gyre_phase3_round8_receipt.md` and
+       `nemo_testcases_l4_orca2_round332_rescore_acquisition_receipt.md` where
+       the lane and Round 340 re-anchored disjoint citations), the patch content
+       (excluding only the two git blob `index` header lines on those two shared
+       receipts) is **100% byte-identical** (`0` differing bytes across `7,460`
+       lines and `416,833` bytes; SHA-256
+       `928cd9f8365e23554e15438b38f9974a238a1447952ec3b8d870d3aaa29a0e93`).
+     - Symmetrically, `git diff backup/r340_pre_rebase..424890bbbc18` vs
+       `git diff d5d97cfc3121..a91d673b6fcf` outside the citation gate is
+       **100% byte-identical** (`12,198` lines, `606,425` bytes, SHA-256
+       `1cea014b48839ea17a590a202c287789b41f45e65a2df5b492a862f77188cac0`;
+       raw `48`-file diff SHA-256
+       `3f795b35dbc9523ba818d5d900e223916cb4dd66f2d68a4eea933a709b69228c`).
+3. **Citation-gate line and key accounting**:
+   - Across `base = d5d97cfc3121`, `lane = a91d673b6fcf`,
+     `backup = c81be0d55450`, `rebased = 424890bbbc18`, and `HEAD = 8a74ac5dd169`:
+     - `FILES` entries: `736` unique (`740` raw in `base`) + `34` added by lane +
+       `31` added by Round 340 (`1` shared key) = `800` unique (`805` raw) in
+       `HEAD` (`0` lane entries missing, `0` Round-340 entries missing).
+     - `CITATION_MAP` keys: `2,371` (`base`) + `85` net new added by lane + `79`
+       net new added by Round 340 = `2,535` keys in `HEAD` (`0` duplicate keys;
+       `84 / 85` lane additions present verbatim and `1 / 85` re-anchored from
+       line `2063` to line `2140` as shown above; `79 / 79` Round-340 additions present
+       verbatim; all `25` lane re-anchors of base `ocean_model_latlon_cgrid.py` /
+       `round331` keys and all `21` Round-340 re-anchors of base
+       `nemo_testcase_recipe.py` / `ocean_pe_latlon_cgrid.py` /
+       `shortwave_penetration.py` / `state.py` keys preserved).
+     - Added diff lines (`git diff -U0`): at `424890bbbc18`, `378 / 378`
+       lane-added lines and `358 / 358` Round-340-added lines in
+       `nemo_testcase_receipt_citation_gate.py` are present verbatim (`377 / 378`
+       and `358 / 358` at `8a74ac5dd169` after the single line `2063 -> 2140`
+       re-anchor line).
+
+### (2) Confirmation of `nemo_sh2_fold_top_v=True` on the standalone K0 card
+
+Instantiating both `build_orca2_zps_card(deck_root)` and
+`build_nemo_orca2_k0_ocean_card(deck_root)` on
+`/data/abyssal/dbalwada/nemo-testcases-l4/inputs/ORCA2_ICE_v5.0.0` (Rule 10):
+
+- `build_nemo_orca2_k0_ocean_card` in `packages/ocean/legoesm/ocean/bulk_flux_omip.py`
+  constructs `ocean=build_orca2_zps_card(deck_root, initial_state=k0.initial_state)`,
+  which sets `nemo_sh2_fold_top_v=True` at
+  `packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:2140`.
+- Verified on the instantiated `k0` card:
+  - `k0.ocean.recipe.model_config.physics.vertical_mixing.tke.nemo_sh2_fold_top_v == True`
+  - `k0.ocean.recipe.model_config.physics.vertical_mixing.tke.bottom_tke_bc == True`
+  - `k0.ocean.recipe.grid.fold.is_active == True`
+  - `k0.ocean.recipe.z_coord.nemo_een_barotropic is not None == True`
+  - `r10.recipe.model_config.physics.vertical_mixing.tke == k0.ocean.recipe.model_config.physics.vertical_mixing.tke == True`
+- Thus the standalone K0 card already enables `nemo_sh2_fold_top_v=True` and
+  executes Round 336's north-fold V-face mask restoration in
+  `_tke_bottom_dirichlet`
+  (`packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:12466-12495`,
+  matching `src/OCE/DOM/dommsk.F90:146-172`,
+  `ORCA2_ORCA1ICE_OMIP_L4_R336TKE/BLD/ppsrc/nemo/zdftke.f90:303-309`, and
+  `packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:12881-12898`)
+  with zero configuration changes.
+
+### (3) Re-scored 10-step real ORCA2 K0 composed card (+ arm-B control) on `8a74ac5dd169`
+
+Executed `scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round340_score_composed_card.py`
+on CPU (`JAX_PLATFORMS=cpu JAX_ENABLE_X64=1`, `PrecisionPolicy.fp64(transcendentals="libm")`;
+artifact `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/orca2_r340_resume12/score_composed_card.json`,
+SHA-256 `fd278bc2ffd096ea0920c7f4bbde0f071629edb1a38a5521dfc3d0521d77376d`;
+log `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/orca2_r340_resume12/score_composed_card.log`,
+SHA-256 `4d5582565b477158d171659776cc778239d7ed125a4ce7f8a23b6c8f06f1e6b6`):
+
+- **Arm-B vs arm-A reproducibility control**: `PASS_REPRODUCIBILITY_EXACT`
+  (`0 / 123,824,304` surface words unequal, `0 / 128,937,600` rung-10 state
+  words unequal across `200 / 200` rows).
+- **Overall composed-card status**: **`PASS_S4_EXACT`** (`failure_message = None`).
+- **Overall surface score (`kt = 1..10`)**: **`PASS_S4_EXACT`**,
+  **`0 / 123,824,304` unequal words (`0.0%`, down from `914,406 / 123,824,304` in
+  Resume 11), `max |diff| = 0.0` (down from `3.1096305974642746e-08` in Resume 11)**.
+  - **Every single step `kt = 1..10` and every single boundary family (`S0_ENTRY`,
+    `S0_EXIT`, `S0_F`, `S1_ENTRY`, `S1_TURB`, `S1_FLUX`, `S1_EXIT`, `S3_ENTRY`,
+    `S3_COVER_IIF`, `S3_FREEZE_IIF`, `S3_CLAMP_IIF`, `S3_EXIT_IIF`, `S3_EXIT`,
+    `S2_ENTRY`, `S2_RNF`, `S2_SSR`, `S2_FWB`, `S2_LBC`, `S2_EXIT`) is 100%
+    bit-exact (`0` unequal words across all wet and dry cells)**.
+  - **First non-bit surface row**: `None`.
+  - **First non-zero `max |diff|` surface row**: `None`.
+- **Overall rung-10 200-row state ladder (`kt = 1..10`)**:
+  **`88 BIT_EXACT`, `112 AT_BAR_NOT_EXACT`, `0 OVER_BAR`** (down from `163 OVER_BAR`
+  in Resume 11), `1,221,696 / 128,937,600` unequal words (down from
+  `4,916,620 / 128,937,600`), **`max |diff| = 1.1102230246251565e-16`** (down from
+  `2.3088674083737715e-08`), **`max_normalized_max_abs = 3.677867469028952e-18 <= 1e-15`**
+  (down from `2.0148460472540064e-09`).
+  - **Old first `OVER_BAR` row (`kt02/stage3/T`)**: resolved from `OVER_BAR`
+    (`216 / 799,200` words, `37` wet words, `max |diff| = 4.622280336263884e-11`)
+    to **`AT_BAR_NOT_EXACT` with `0` unequal wet words (`140 / 799,200` dry
+    `-0.0` vs `+0.0` words, `max |diff| = 0.0`, `normalized_max_abs = 0.0`)**;
+    `kt02/stage3/S` is now **`BIT_EXACT` (`0 / 799,200`, `max |diff| = 0.0`)**,
+    and `kt02/stage3/{u, v}` have `0` unequal wet words (`max |diff| = 0.0`).
+  - **First non-bit rung-10 row**: `kt01/stage1/T` (`AT_BAR_NOT_EXACT`,
+    `157,456 / 799,200` dry `-0.0` vs `+0.0` words from
+    `packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:2881-2885`,
+    `0` wet words unequal, `max |diff| = 0.0`, `normalized_max_abs = 0.0`).
+  - **First non-zero `max |diff|` rung-10 row**: `kt07/stage2/T`
+    (`AT_BAR_NOT_EXACT`, `10,213 / 799,200` unequal words, `max |diff| =
+    5.551115123125783e-17`, `normalized_max_abs = 1.8412868400289552e-18 <= 1e-15`),
+    followed only by `kt09/stage2/T` (`AT_BAR_NOT_EXACT`, `10,210 / 799,200`
+    unequal words, `max |diff| = 1.1102230246251565e-16`, `normalized_max_abs =
+    3.677867469028952e-18 <= 1e-15`); all other `198 / 200` rows have
+    `max |diff| = 0.0`.
+  - **First `OVER_BAR` rung-10 row**: **`None` (`0 / 200 OVER_BAR`)**.
+
+#### Re-scored surface boundaries by step (`kt = 1..10`)
+
+| Step | Unequal words | Total words | Max `\|diff\|` | First non-bit row |
+| --- | --- | --- | --- | --- |
+| `kt01` | `0` | `18,035,664` | `0.0` | `None` |
+| `kt02` | `0` | `10,842,528` | `0.0` | `None` |
+| `kt03` | `0` | `12,894,000` | `0.0` | `None` |
+| `kt04` | `0` | `10,842,528` | `0.0` | `None` |
+| `kt05` | `0` | `12,894,000` | `0.0` | `None` |
+| `kt06` | `0` | `10,842,528` | `0.0` | `None` |
+| `kt07` | `0` | `12,894,000` | `0.0` | `None` |
+| `kt08` | `0` | `10,842,528` | `0.0` | `None` |
+| `kt09` | `0` | `12,894,000` | `0.0` | `None` |
+| `kt10` | `0` | `10,842,528` | `0.0` | `None` |
+| **Total** | **`0`** | **`123,824,304`** | **`0.0`** | **`None`** |
+
+#### Re-scored surface boundaries by boundary family (`kt = 1..10`)
+
+| Boundary family | `kt01` (`unequal / count`, `max \|diff\|`) | `kt02` (`unequal / count`, `max \|diff\|`) | `kt = 1..10` (`unequal / count`) | `kt = 1..10` Max `\|diff\|` | First non-bit row |
+| --- | --- | --- | --- | --- | --- |
+| `S0_ENTRY` | `0 / 0` (`0.0`) | `0 / 0` (`0.0`) | `0 / 0` | `0.0` | `None` |
+| `S0_EXIT` | `0 / 186,480` (`0.0`) | `0 / 186,480` (`0.0`) | `0 / 1,864,800` | `0.0` | `None` |
+| `S0_F` | `0 / 10,656,384` (`0.0`) | `0 / 5,035,008` (`0.0`) | `0 / 57,890,304` | `0.0` | `None` |
+| `S1_ENTRY` | `0 / 186,480` (`0.0`) | `0 / 186,480` (`0.0`) | `0 / 1,864,800` | `0.0` | `None` |
+| `S1_TURB` | `0 / 506,160` (`0.0`) | absent on even `kt` | `0 / 2,530,800` | `0.0` | `None` |
+| `S1_FLUX` | `0 / 159,840` (`0.0`) | absent on even `kt` | `0 / 799,200` | `0.0` | `None` |
+| `S1_EXIT` | `0 / 399,600` (`0.0`) | `0 / 399,600` (`0.0`) | `0 / 3,996,000` | `0.0` | `None` |
+| `S3_ENTRY` | `0 / 399,600` (`0.0`) | `0 / 399,600` (`0.0`) | `0 / 3,996,000` | `0.0` | `None` |
+| `S3_COVER_IIF` | `0 / 426,240` (`0.0`) | `0 / 426,240` (`0.0`) | `0 / 4,262,400` | `0.0` | `None` |
+| `S3_FREEZE_IIF` | `0 / 452,880` (`0.0`) | absent on even `kt` | `0 / 2,264,400` | `0.0` | `None` |
+| `S3_CLAMP_IIF` | `0 / 452,880` (`0.0`) | absent on even `kt` | `0 / 2,264,400` | `0.0` | `None` |
+| `S3_EXIT_IIF` | `0 / 452,880` (`0.0`) | `0 / 452,880` (`0.0`) | `0 / 4,528,800` | `0.0` | `None` |
+| `S3_EXIT` | `0 / 426,240` (`0.0`) | `0 / 426,240` (`0.0`) | `0 / 4,262,400` | `0.0` | `None` |
+| `S2_ENTRY` | `0 / 426,240` (`0.0`) | `0 / 426,240` (`0.0`) | `0 / 4,262,400` | `0.0` | `None` |
+| `S2_RNF` | `0 / 506,160` (`0.0`) | `0 / 506,160` (`0.0`) | `0 / 5,061,600` | `0.0` | `None` |
+| `S2_SSR` | `0 / 586,080` (`0.0`) | `0 / 586,080` (`0.0`) | `0 / 5,860,800` | `0.0` | `None` |
+| `S2_FWB` | `0 / 586,080` (`0.0`) | `0 / 586,080` (`0.0`) | `0 / 5,860,800` | `0.0` | `None` |
+| `S2_LBC` | `0 / 586,080` (`0.0`) | `0 / 586,080` (`0.0`) | `0 / 5,860,800` | `0.0` | `None` |
+| `S2_EXIT` | `0 / 639,360` (`0.0`) | `0 / 639,360` (`0.0`) | `0 / 6,393,600` | `0.0` | `None` |
+
+#### Re-scored rung-10 200-row state ladder by step (`kt = 1..10`)
+
+| Step | `BIT_EXACT` | `AT_BAR_NOT_EXACT` | `OVER_BAR` | Unequal / Total | Max `\|diff\|` | Max normalized `\|diff\|` | First non-bit row | First `OVER_BAR` row |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `kt01` | `11` | `9` | `0` | `389,384 / 12,893,760` | `0.0` | `0.0` | `kt01/stage1/T` | `None` |
+| `kt02` | `8` | `12` | `0` | `89,009 / 12,893,760` | `0.0` | `0.0` | `kt02/entry/T` | `None` |
+| `kt03` | `8` | `12` | `0` | `103,775 / 12,893,760` | `0.0` | `0.0` | `kt03/entry/T` | `None` |
+| `kt04` | `8` | `12` | `0` | `81,297 / 12,893,760` | `0.0` | `0.0` | `kt04/entry/T` | `None` |
+| `kt05` | `8` | `12` | `0` | `103,113 / 12,893,760` | `0.0` | `0.0` | `kt05/entry/T` | `None` |
+| `kt06` | `8` | `12` | `0` | `83,299 / 12,893,760` | `0.0` | `0.0` | `kt06/entry/T` | `None` |
+| `kt07` | `8` | `12` | `0` | `100,705 / 12,893,760` | `5.551115123125783e-17` | `1.8412868400289552e-18` | `kt07/entry/T` | `None` |
+| `kt08` | `8` | `12` | `0` | `81,670 / 12,893,760` | `0.0` | `0.0` | `kt08/entry/T` | `None` |
+| `kt09` | `9` | `11` | `0` | `106,701 / 12,893,760` | `1.1102230246251565e-16` | `3.677867469028952e-18` | `kt09/entry/T` | `None` |
+| `kt10` | `12` | `8` | `0` | `82,743 / 12,893,760` | `0.0` | `0.0` | `kt10/entry/u` | `None` |
+| **Total** | **`88`** | **`112`** | **`0`** | **`1,221,696 / 128,937,600`** | **`1.1102230246251565e-16`** | **`3.677867469028952e-18`** | **`kt01/stage1/T`** | **`None`** |
+
+### (4) Full `land.sh` landing battery (`T4` pytest set + 30-day GPU DINO month gate)
+
+Executed in `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/orca2_r340_resume12/`:
+
+- **ORCA2 `land.sh` `T4` pytest battery** (`gate.log`, SHA-256
+  `0a51a806b45072237a805b6cece18eb91b479b9a25fe8a2101c9a4ebf0d82c10`):
+  `======================= 152 passed in 1079.48s (0:17:59) =======================`
+- **30-day GPU DINO from-rest month gate** (`dino_month_gate.log`, SHA-256
+  `6e121e0aa74be8e28f806cd0949fb6246de91e6f88bc9f6f2695fb0796c9a51f`;
+  snapshot SHA-256
+  `40a63d3a43a80600c740067fd3446bf428cd20e362a60987908c1a079a6e6bb5`;
+  score JSON SHA-256
+  `0e8c9a347c74db77971e8146474d11ba486acda33cd0b0985c6da0dda01113d5`):
+  `DINO month gate: day-30 wet 3-D T rms vs NEMO kt=960: 2.056821683e-03 K against bar 2.244317642e-03 K (certified 2.040288765e-03 K) -- PASS`
+  (raw log pass line:
+  `DINO from-rest month day-30 wet 3-D T rms vs NEMO kt=960: 2.056821683e-03 K against bar 2.244317642e-03 K (certified 2.040288765e-03 K) -- PASS`).
+- independent review: operator
+
 ## Verification
 
 - Round-340 focused fast tests (`test_orca2_round340_standalone.py`,
   `test_surface_forcing_sign_convention.py`,
   `test_nemo_testcase_l4_orca2_round337_surface.py`,
   `test_nemo_card_opt_in_defaults.py`, and
-  `test_lead_freeze_nemo_qlead.py`): all pass (`21 passed, 1 skipped` in
-  `test_orca2_round340_standalone.py` with `ORCA2_R340_REAL_GRADIENT=1`;
-  `7 passed` in `test_nemo_testcase_l4_orca2_round337_surface.py`; `22 passed`
-  in `test_nemo_card_opt_in_defaults.py`; `7 passed` in
+  `test_lead_freeze_nemo_qlead.py`): all pass (`20 passed, 2 skipped` in
+  `test_orca2_round340_standalone.py` on the rebased tree; `21 passed, 1 skipped`
+  with `ORCA2_R340_REAL_GRADIENT=1`; `7 passed` in
+  `test_nemo_testcase_l4_orca2_round337_surface.py`; `22 passed` in
+  `test_nemo_card_opt_in_defaults.py`; `7 passed` in
   `test_lead_freeze_nemo_qlead.py`).
 - M6 card-fingerprint gate (`nemo_testcase_l4_orca2_card_fingerprint.py`):
-  `PASS` (`ORCA2-zps` SI3 card `d699476d15b0cf24` and all five phase-2 cards
-  100% bit-identical).
+  `PASS` (`ORCA2-zps` SI3 card and all five phase-2 cards 100% bit-identical).
 - Admitted arm-B vs arm-A reproducibility control: `PASS_REPRODUCIBILITY_EXACT`
   (`0 / 123,824,304` surface words and `0 / 128,937,600` rung-10 words unequal).
 - Real 10-step CPU composed-card re-score (`nemo_testcase_l4_orca2_round340_score_composed_card.py`):
-  executed on CPU (`JAX_PLATFORMS=cpu JAX_ENABLE_X64=1`); full re-scored tables
-  committed above (`0 / 18,035,664` unequal surface words at `kt = 1`,
-  `0 / 10,842,528` unequal surface words at `kt = 2`, `0 / 57,890,304` unequal
-  `S0_F` words across `kt = 1..10`, `0 / 20 OVER_BAR` rows at `kt = 1` with
-  `max |diff| = 0.0`, `0 / 15 OVER_BAR` rows on `kt02/{entry,stage1,stage2}`
-  with `max |diff| = 0.0`, first non-bit surface row `kt03/S0_EXIT/sst_m`,
-  first `OVER_BAR` state row `kt02/stage3/T`).
-- Per-receipt citation gate: PASS, 79 citations, zero failures, zero unmapped
+  `PASS_S4_EXACT` (`0 / 123,824,304` unequal surface words across all `10` steps
+  and all `259` time-qualified boundaries, `max |diff| = 0.0`, first non-bit
+  surface row `None`; `88 BIT_EXACT`, `112 AT_BAR_NOT_EXACT`, `0 OVER_BAR` across
+  all `200` rung-10 state rows, `max |diff| = 1.1102230246251565e-16`,
+  `max_normalized_max_abs = 3.677867469028952e-18 <= 1e-15`, first non-bit state
+  row `kt01/stage1/T`, first `OVER_BAR` state row `None`).
+- Full `land.sh` landing battery: `152 passed in 1079.48s (0:17:59)` on the
+  ORCA2 `T4` pytest set and `PASS` on the 30-day GPU DINO from-rest month gate
+  (`2.056821683e-03 K against bar 2.244317642e-03 K`).
+- Per-receipt citation gate: PASS, 84 citations, zero failures, zero unmapped
   citations, zero map-audit failures, and all nine self-tests fired.
 - Required receipt-citation pytest (`tests/ocean/fidelity/test_nemo_testcase_receipt_citation_gate.py`
   with `JAX_ENABLE_X64=1`): 17/17 PASS on the clean committed tree.
