@@ -1381,6 +1381,11 @@ FILES = {
     "k_profiles.py":
         REPO / "packages/ocean/legoesm/ocean/physics/vertical_mixing/k_profiles.py",
     "tke.py": REPO / "packages/ocean/legoesm/ocean/physics/vertical_mixing/tke.py",
+    "packages/ocean/legoesm/ocean/physics/vertical_mixing/tke.py":
+        REPO / "packages/ocean/legoesm/ocean/physics/vertical_mixing/tke.py",
+    "scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round336_tke_walk.py":
+        REPO / "scripts/validate/ocean_fidelity/orca2_l4"
+             / "nemo_testcase_l4_orca2_round336_tke_walk.py",
     "shortwave_penetration.py":
         REPO / "packages/ocean/legoesm/ocean/physics/shortwave_penetration.py",
     "barotropic_latlon_cgrid.py":
@@ -2005,6 +2010,15 @@ CITATION_MAP = {
     'ORCA2_ORCA1ICE_OMIP_L4_R336TKE/BLD/ppsrc/nemo/zdftke.f90:199-204': [
         'CALL r336_tke_begin(kt,Kbb,Kmm,en,p_avt,p_avm,p_sh2,dissl,rn2,rn2b,',
         'CALL tke_tke( Kbb, Kmm, p_sh2, p_avm, p_avt, z_pdlr )', 6],
+    'ORCA2_ORCA1ICE_OMIP_L4_R336TKE/BLD/ppsrc/nemo/zdftke.f90:480-503': [
+        'DO jk =  2,  jpkm1,  1  ; DO ji = ntsi-( 0), ntei+(  0)                 ! First recurrence : Dk = Dk - Lk * Uk-1 / Dk-1',
+        'r336_after_solve(:,jj,1:jpkm1)=en(ntsi:ntei,jj,1:jpkm1) ! R336_TKE_COPYOUT', 24],
+    'packages/ocean/legoesm/ocean/physics/vertical_mixing/tke.py:1193-1224': [
+        'terminal = work[..., jpkm1] / diagonal[..., jpkm1]',
+        '* jnp.asarray(w_active, dtype=solved_prefix.dtype))', 32],
+    'scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round336_tke_walk.py:136-238': [
+        'def measure(record_root: Path, deck_root: Path,',
+        '"after_solve": "actual production-card JIT output",', 103],
     'scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round336_tke_gate.py:344-361': [
         'if source is not None:',
         '"TKE live e3w(Kmm) differs from admitted round-333 replay")', 18],

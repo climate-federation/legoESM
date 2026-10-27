@@ -541,6 +541,72 @@ The required operator handoff is:
 ACQUISITION_NEEDED: scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round336_tke_acquisition/run.sh
 ```
 
+## Resume 16: production kt-2 TKE boundary walk
+
+The retained production-arithmetic record is admitted.  Rank 0 contains
+233,341 wet words (224,547 process-interface words), rank 1 contains 197,211
+(189,572), for 430,552 full and 414,119 process-interface wet words.  The
+walk uses the shared production implementation by advancing the actual ORCA2
+comparison card through kt=1 and kt=2, then compares its kt=2 statement trace
+and state in NEMO source order.  Only the four Thomas intermediates are
+source-order replays from the exact recorded live matrix/RHS; they are not
+presented as live JIT observers
+(`scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round336_tke_walk.py:136-238`).
+
+The complete wet-word result is:
+
+| boundary | unequal / wet | maximum absolute difference |
+| --- | ---: | ---: |
+| after BCs | 0 / 430,552 | 0 |
+| after Langmuir | 0 / 430,552 | 0 |
+| matrix RHS | 0 / 430,552 | 0 |
+| matrix diagonal | 0 / 414,119 | 0 |
+| matrix upper | 0 / 414,119 | 0 |
+| matrix lower | 0 / 414,119 | 0 |
+| Thomas diagonal recurrence | 0 / 430,552 | 0 |
+| Thomas RHS recurrence | 0 / 430,552 | 0 |
+| Thomas terminal division | 0 / 430,552 | 0 |
+| Thomas reverse sweep | 0 / 430,552 | 0 |
+| after solve | 17 / 430,552 | 6.589800151726445e-13 |
+| after TKE copyout | 17 / 414,119 | 6.589800151726445e-13 |
+| pre-sweep mixing length | 17 / 430,552 | 1.4305320720289783e-06 |
+| after `lup` | 17 / 430,552 | 1.4305320720289783e-06 |
+| after `ldown` | 17 / 430,552 | 1.4305320720289783e-06 |
+| final `mxl` | 17 / 430,552 | 1.4305320720289783e-06 |
+| final `mxld` | 17 / 430,552 | 1.4305320720289783e-06 |
+| `zav` | 17 / 414,119 | 6.3610196697257665e-12 |
+| pre-`pdlr` `avt` | 17 / 414,119 | 6.3610196697257665e-12 |
+| final `avm` | 0 / 414,119 | 0 |
+| final `avt_k` | 17 / 414,119 | 6.361019669726387e-13 m2/s |
+
+Thus the first differing recorded boundary is **CONFIRMED** as the live
+post-solve boundary: 17 of 430,552 wet words, maximum
+6.589800151726445e-13.  The requested endpoint is independently recovered as
+17 of 414,119 wet words with maximum 6.361019669726387e-13 m2/s.  The JSON
+receipt is
+`round336/walk/tke_production_walk.json`, SHA-256
+`b2fd42fcefd2c78a721dded4877f6ce7d311680bc8cfeba7a186be86e2666eb1`.
+
+The record-build source performs the diagonal recurrence, RHS recurrence,
+terminal division, reverse sweep, and only then the `MAX`/mask statement at
+`ORCA2_ORCA1ICE_OMIP_L4_R336TKE/BLD/ppsrc/nemo/zdftke.f90:480-503`.
+legoESM's shared solver expresses the terminal division and reverse scan and
+returns the floor/mask expression at
+`packages/ocean/legoesm/ocean/physics/vertical_mixing/tke.py:1193-1224`.
+Because replay of all four recorded Thomas nests is exact but the compiled
+production result first differs after the solve, exact ownership by one
+source statement is only **PLAUSIBLE**, not confirmed: compilation can change
+materialization across that region.
+
+Three controlled literal probes were therefore tried and reverted: a
+rounding barrier around the terminal division, one around the reverse-sweep
+quotient, and separated rounding barriers around `maximum` then mask
+multiplication.  Each left the same 17-word after-solve and `avt_k`
+departures.  No single cited statement owns a literal fix, so the Decision
+122 seven-pair/two-label eligibility condition is unopened; there is no fix
+proposal and no model code is landed in this round.  The focused walk controls
+pass 2 tests.  Codex review: operator.
+
 ## Resume 11: passive boundary repair and admitted-recorder census
 
 Argon item 3 is resolved for the new acquisition. When the target is
