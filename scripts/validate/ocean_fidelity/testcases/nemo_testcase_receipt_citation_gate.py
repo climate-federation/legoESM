@@ -2129,7 +2129,6 @@ CITATION_MAP = {
     'ORCA2_ORCA1ICE_OMIP_L4_ORCA2X_R1_LONGRUN/BLD/ppsrc/nemo/stprk3.f90:314': 'IF( kstp > nit000 + 9 ) RETURN   ! ORCA2X: cap inherited write-only observer',
     'ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/restart.f90:176-180': ["CALL iom_rstput( kt, nitrst, numrow, 'sshn', ssh(:,:        ,Kbb) )     ! before fields", "CALL iom_rstput( kt, nitrst, numrow, 'sn'  , ts(:,:,:,jp_sal,Kbb) )", 5],
     'ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/zdfphy.f90:330': 'CALL zdf_mxl( kt, Kmm )                        !* mixed layer depth, and level',
-    'ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/stprk3.f90:183': 'CALL zdf_phy( kstp, Nbb, Nbb, Nrhs )   ! vertical physics update (top/bot drag, avt, avs, avm + MLD)',
     'ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/stprk3.f90:175': 'CALL bn2    ( ts(:,:,:,:,Nbb), rab_b, rn2b, Nbb ) ! before Brunt-Vaisala frequency',
     'ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/zdfmxl.f90:45': 'REAL(wp), PUBLIC ::   rho_c = 0.01_wp    !: density criterion for mixed layer depth',
     'ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/zdfmxl.f90:114-118': ['zN2_c = grav * rho_c * r1_rho0      ! convert density criteria into N^2 criteria', 'IF( hmlp(ji,jj) < zN2_c )   nmln(ji,jj) = MIN( jk , ikt ) + 1   ! Mixed layer level', 5],
@@ -10048,6 +10047,17 @@ CITATION_MAP = {
     'packages/ocean/legoesm/ocean/physics/vertical_mixing/tke.py:2708-2811': [
         'def _nemo_etau_htau(',
         'profile = _nemo_glibc234_vector_exp(-depth_w / htau)', 104],
+    # ORCA2 round 342: observer-free one-year S4 acquisition.
+    'ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/restart.f90:107-115': [
+        'IF( .NOT. ln_rst_list ) THEN', ('ENDIF', 4), 9],
+    'ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/restart.f90:176-180': [
+        "CALL iom_rstput( kt, nitrst, numrow, 'sshn', ssh(:,:        ,Kbb) )",
+        "CALL iom_rstput( kt, nitrst, numrow, 'sn'  , ts(:,:,:,jp_sal,Kbb) )",
+        5],
+    'ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/stprk3.f90:203':
+        'Nrhs = Nbb   ;   Nbb  = Naa   ;   Naa  = Nrhs    ! Swap: Nnn unchanged, Nbb <==> Naa',
+    'ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/stprk3.f90:241':
+        'IF( lrst_oce   )   CALL rst_write    ( kstp, Nbb, Nnn, Naa )   ! write output ocean restart file',
 }
 
 
