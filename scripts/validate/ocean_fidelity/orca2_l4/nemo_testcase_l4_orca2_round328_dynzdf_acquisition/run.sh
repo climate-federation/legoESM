@@ -591,7 +591,8 @@ compare_deterministic() {
 }
 
 compare_r336_twin() {
-  local observed=$1 twin=$observed/observer_free_twin name count=0
+  local observed=$1 twin name count=0
+  twin=$observed/observer_free_twin
   "$PY" "$R336_TKE_GATE" --check-output-set "$observed" \
     --output-contract "$observed/round336_output_contract.json" \
     --output-role observed || return 1
