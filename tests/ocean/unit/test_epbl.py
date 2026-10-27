@@ -752,13 +752,14 @@ def test_k_profiles_epbl_uses_dt_tke_not_dt_s():
     from legoesm.ocean.physics.vertical_mixing.k_profiles import (
         compute_vertical_K_profiles,
     )
-    _, z_coord, _, phys_a, state = _latlon_epbl_setup(dt_s=1800.0)
+    grid, z_coord, _, phys_a, state = _latlon_epbl_setup(dt_s=1800.0)
     _, _, _, phys_b, _ = _latlon_epbl_setup(dt_s=600.0)
     forcing = _windy_forcing(state)
+    lat_deg = jnp.degrees(grid.lat2d)   # as the tendency probe passes it
 
     def _kv(phys, dt_tke):
         K_v, _ = compute_vertical_K_profiles(
-            state, z_coord, forcing, phys, dt_tke=dt_tke)
+            state, z_coord, forcing, phys, dt_tke=dt_tke, lat_deg=lat_deg)
         return np.asarray(K_v)
 
     k_a = _kv(phys_a, 1200.0)
@@ -766,7 +767,8 @@ def test_k_profiles_epbl_uses_dt_tke_not_dt_s():
     np.testing.assert_array_equal(k_a, _kv(phys_b, 1200.0))
     assert not np.allclose(k_a, _kv(phys_a, 300.0))
     with pytest.raises(ValueError, match="requires dt_tke"):
-        compute_vertical_K_profiles(state, z_coord, forcing, phys_a)
+        compute_vertical_K_profiles(state, z_coord, forcing, phys_a,
+                                    lat_deg=lat_deg)
 
 
 def _record_epbl_dt(monkeypatch):
