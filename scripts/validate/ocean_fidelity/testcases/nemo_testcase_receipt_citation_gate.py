@@ -251,6 +251,8 @@ FILES = {
         "nemo_testcase_l4_orca2_round341_rescore_walk_gate.py"),
     "tests/ocean/fidelity/test_orca2_round341_rescore_walk_gate.py": (
         REPO / "tests/ocean/fidelity/test_orca2_round341_rescore_walk_gate.py"),
+    "tests/ocean/unit/test_orca2_round341_stage2_thickness.py": (
+        REPO / "tests/ocean/unit/test_orca2_round341_stage2_thickness.py"),
     "ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/MY_SRC/stprk3.F90": (
         NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/MY_SRC/stprk3.F90"),
     # ORCA2 round 311: G1b's build (P5) and G8's build (R31FULLENTRY_FIX1).
@@ -9800,13 +9802,21 @@ CITATION_MAP = {
     'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/stprk3.f90:479-525': [
         'FUNCTION l4_canon_3d( pfield, cdgrid ) RESULT( zfield )',
         'END FUNCTION l4_canon_3d', 47],
+    'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/stprk3.f90:488-520': [
+        'zfield(:,:,:) = 0._wp',
+        'IF( llwet ) zfield(ji,jj,jk) = pfield(ji,jj,jk)', 33],
     'ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/stprk3_stg.f90:846-892': [
         'FUNCTION l4_canon_3d( pfield, cdgrid ) RESULT( zfield )',
         'END FUNCTION l4_canon_3d', 47],
     'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/stprk3_stg.f90:177':
         'r3t(:,:,Kaa) = r2_3 * r3t(:,:,Kbb) + r1_3 * r3ta(:,:)',
+    'ocean_model_latlon_cgrid.py:2267':
+        'nemo_stage_pair=None, stored_h_stage=False,',
+    'ocean_model_latlon_cgrid.py:2291-2295': [
+        'if stored_h_stage and stage_index != 1: raise ValueError("stored_h_stage is Stage-2 (stage_index == 1) only")',
+        'e3t_0=h_ref)', 5],
     'ocean_model_latlon_cgrid.py:2293-2295': [
-        'h_stage = nemo_qco_live_t_thickness(',
+        'h_stage = jnp.asarray(h_stage) if stored_h_stage else nemo_qco_live_t_thickness(',
         'e3t_0=h_ref)', 3],
     'ocean_model_latlon_cgrid.py:2665-2666': [
         ('(mf_u, mf_v, w_stage, h_stage, hu_stage, hv_stage,', 4),
@@ -9820,21 +9830,39 @@ CITATION_MAP = {
     'ocean_model_latlon_cgrid.py:9163-9170': [
         '_stage_tracer_source_terms(h_k_old),',
         '_stage_tracer_sources(_h_s2_kmm),', 8],
+    'ocean_model_latlon_cgrid.py:9341-9354': [
+        '_g0 = _nemo_ws_stage_transport(',
+        ('**_stage_transport_kw)', 1), 14],
     'ocean_model_latlon_cgrid.py:9570-9572': [
         '_g1 = _nemo_ws_stage_transport(',
         'eta_stage=_eta_live_one_third,', 3],
-    'scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round341_rescore_walk_gate.py:407-502': [
+    'ocean_model_latlon_cgrid.py:9641-9658': [
+        '_g2 = _nemo_ws_stage_transport(',
+        ('**_stage_transport_kw)', 3), 18],
+    'ocean_model_latlon_cgrid.py:10144-10162': [
+        '_nemo_ws_stage_transport_geometry = tuple(',
+        'strict=True)))', 19],
+    'scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round341_rescore_walk_gate.py:480-602': [
         'def measure(',
-        ('return result', 1), 96],
-    'scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round341_rescore_walk_gate.py:505-655': [
+        ('return result', 1), 123],
+    'scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round341_rescore_walk_gate.py:605-755': [
         'def aggregate(',
         'str(rung10_table_out) if rung10_table_out is not None else None', 151],
-    'scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round341_rescore_walk_gate.py:660-1301': [
+    'scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round341_rescore_walk_gate.py:760-1411': [
         'def walk_source_order(',
-        '"per_kt_stage2_summary": per_kt_stage2_summary,', 642],
-    'tests/ocean/fidelity/test_orca2_round341_rescore_walk_gate.py:22-114': [
+        '"per_kt_stage2_summary": per_kt_stage2_summary,', 652],
+    'scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round341_rescore_walk_gate.py:1423-1669': [
+        'def classify(',
+        '"d122_c_and_d": True,', 247],
+    'scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round341_rescore_walk_gate.py:1995-2479': [
+        'def caller_audit_dump(',
+        '"callers": callers_report,', 485],
+    'tests/ocean/fidelity/test_orca2_round341_rescore_walk_gate.py:22-124': [
         'def test_round341_self_test_passes_and_plants_fire() -> None:',
-        'gate.walk_source_order(r5_root, r326_root, plant=plant_name)', 93],
+        'gate.walk_source_order(r5_root, r326_root, plant=plant_name)', 103],
+    'tests/ocean/unit/test_orca2_round341_stage2_thickness.py:168-586': [
+        'def test_stage2_transport_uses_stored_h_s2_kmm_and_fails_on_revert() -> None:',
+        'np.asarray(h_rev, dtype=np.float64).view(np.uint64),', 419],
 }
 
 
