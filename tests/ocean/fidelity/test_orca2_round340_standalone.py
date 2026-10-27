@@ -594,3 +594,140 @@ def test_item3_shared_allocate_extent_gate_and_admit_order(tmp_path):
     assert "check_same_program_build" in admit_existing_body
     assert admit_existing_body.index("check_same_program_build") < admit_existing_body.index("admit_one")
 
+
+def test_scoring_driver_reproducibility_control_and_composed_card_flow(
+    tmp_path, monkeypatch
+):
+    """Direct test for nemo_testcase_l4_orca2_round340_score_composed_card."""
+    import json
+    from scripts.validate.ocean_fidelity.orca2_l4 import (
+        nemo_testcase_l4_orca2_round340_score_composed_card as score_driver,
+    )
+
+    k0 = score_driver.explicit_k0_config()
+    assert k0 == bulk.NemoStandaloneK0Config(1, False, True, 0, False)
+
+    if score_driver.DEFAULT_ARM_A.exists() and score_driver.DEFAULT_ARM_B.exists():
+        repro = score_driver.score_reproducibility_control(
+            score_driver.DEFAULT_ARM_A, score_driver.DEFAULT_ARM_B
+        )
+        assert repro["status"] == "PASS_REPRODUCIBILITY_EXACT"
+        assert repro["surface_unequal"] == 0
+        assert repro["surface_count"] == 123824304
+        assert repro["rung10_unequal"] == 0
+        assert repro["rung10_rows"] == 200
+
+    expected_surface = _boundaries()
+    rung_expected = OrderedDict(
+        (
+            f"kt{kt:02d}/{checkpoint}",
+            OrderedDict(
+                T=np.zeros(2),
+                S=np.ones(2),
+                u=np.zeros(2),
+                v=np.zeros(2),
+                ssh=np.zeros(2),
+            ),
+        )
+        for kt in range(1, 11)
+        for checkpoint in ("entry", "stage1", "stage2", "stage3")
+    )
+
+    def clone_surface():
+        return OrderedDict(
+            (b, OrderedDict((k, v.copy()) for k, v in fields.items()))
+            for b, fields in expected_surface.items()
+        )
+
+    def clone_rung():
+        return OrderedDict(
+            (c, OrderedDict((k, v.copy()) for k, v in fields.items()))
+            for c, fields in rung_expected.items()
+        )
+
+    state = {"surface": clone_surface(), "rung10": clone_rung()}
+    DummyRecipe = namedtuple("DummyRecipe", "initial_state")
+    DummyOcean = namedtuple("DummyOcean", "recipe")
+    DummyCard = namedtuple("DummyCard", "ocean k0")
+    dummy_card = DummyCard(DummyOcean(DummyRecipe("init")), k0)
+
+    monkeypatch.setattr(
+        score_driver,
+        "score_reproducibility_control",
+        lambda arm_a, arm_b: {
+            "status": "PASS_REPRODUCIBILITY_EXACT",
+            "arm_a": str(arm_a),
+            "arm_b": str(arm_b),
+            "surface_unequal": 0,
+            "surface_count": 34,
+            "rung10_unequal": 0,
+            "rung10_count": 400,
+            "rung10_rows": 200,
+        },
+    )
+    monkeypatch.setattr(
+        bulk, "build_nemo_orca2_k0_ocean_card", lambda _deck: dummy_card
+    )
+    monkeypatch.setattr(bulk, "_validate_k0_ocean_card", lambda _card: None)
+    monkeypatch.setattr(
+        gate,
+        "build_real_composed_inputs",
+        lambda _card, _deck, _manifest, _ice: ("ctrl",) * 10,
+    )
+    monkeypatch.setattr(
+        gate,
+        "run_composed_card",
+        lambda _card, _init, _ctrls, model=None: {
+            "surface_actual": state["surface"],
+            "rung10": state["rung10"],
+        },
+    )
+    monkeypatch.setattr(
+        gate, "load_oracle_boundaries", lambda _root: expected_surface
+    )
+    monkeypatch.setattr(
+        gate, "load_oracle_state_ladder", lambda _root: rung_expected
+    )
+
+    out_pass = tmp_path / "pass.json"
+    rc = score_driver.main(["--output-json", str(out_pass)])
+    assert rc == 0
+    payload = json.loads(out_pass.read_text(encoding="utf-8"))
+    assert payload["status"] == "PASS_S4_EXACT"
+    assert payload["composed_card"]["surface"]["unequal"] == 0
+    assert payload["composed_card"]["rung10"]["classifications"]["BIT_EXACT"] == 200
+
+    # Plant a surface discrepancy and verify strict mode fails while --report-only
+    # still writes the full surface + 200-row rung-10 table.
+    state["surface"] = clone_surface()
+    state["surface"]["kt01/S0_EXIT"]["a"][0] = 0.25
+    state["rung10"] = clone_rung()
+    state["rung10"]["kt01/entry"]["ssh"][0] = 0.25
+    with pytest.raises(gate.GateError, match="surface exact bar failed") as exc_info:
+        score_driver.run_and_score_real_composed_card(strict=True)
+    assert exc_info.value.report is not None
+    assert exc_info.value.report["status"] == "FAIL_S4_SURFACE"
+    assert (
+        exc_info.value.report["composed_card"]["surface"]["first_non_bit_row"]
+        == "kt01/S0_EXIT/a"
+    )
+    assert (
+        exc_info.value.report["composed_card"]["rung10"]["first_over_bar_row"]
+        == "kt01/entry/ssh"
+    )
+    out_fail = tmp_path / "fail.json"
+    assert score_driver.main(["--output-json", str(out_fail)]) == 1
+    assert (
+        score_driver.main(["--output-json", str(out_fail), "--report-only"])
+        == 0
+    )
+    fail_payload = json.loads(out_fail.read_text(encoding="utf-8"))
+    assert fail_payload["status"] == "FAIL_S4_SURFACE"
+    assert (
+        fail_payload["composed_card"]["surface"]["by_boundary"]["kt01/S0_EXIT"][
+            "unequal"
+        ]
+        == 1
+    )
+
+
