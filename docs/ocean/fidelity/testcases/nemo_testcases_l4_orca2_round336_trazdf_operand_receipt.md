@@ -1369,3 +1369,51 @@ The required operator handoff remains:
 ```text
 ACQUISITION_NEEDED: scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round336_tke_acquisition/run.sh
 ```
+
+## Resume 18: landing north-fold V-face mask in `_tke_bottom_dirichlet`
+
+### Preregistration (frozen before model edit and measurement)
+
+Both independent reviews (Codex and Gemini Flash) re-ran the Resume 17 probe
+and confirmed the single-statement owner of the kt-2 `zdftke`/`tra_zdf`
+departure: in NEMO, `dommsk` applies `lbc_lnk` to `vmask`
+(`src/OCE/DOM/dommsk.F90:146-172`) and `tke_tke` uses that `vmask` directly in
+`zmskv = 2. - vmask(ji,jj-1,mbkt) * vmask(ji,jj,mbkt)` when forming `zebot` at
+`jk = mbkt + 1`
+(`ORCA2_ORCA1ICE_OMIP_L4_R336TKE/BLD/ppsrc/nemo/zdftke.f90:303-309`), whereas
+legoESM's `_tke_bottom_dirichlet` leaves the northernmost V-face mask row at
+`compute_face_masks_3d`'s zero wall instead of restoring the card's raw NEMO
+`vmask[-1]` under `nemo_sh2_fold_top_v=True` (already set on the ORCA2 NEMO
+recipe at `packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:2063`).
+
+- **R336-R18-P1 (production-call-site test and `eager == jit`)**: Restoring
+  `vm3[-1]` from `_zc.nemo_een_barotropic.vmask[-1]` under the existing
+  `nemo_sh2_fold_top_v` branch in `_tke_bottom_dirichlet` (no new knob) makes
+  the production vertical-mixing call (`LatLonCGridOceanModel._apply_implicit_vertical_mixing`
+  and `_tke_bottom_dirichlet`) match NEMO's `zebot` formula on the north-fold
+  row, satisfy `eager == jit` (with `jax.disable_jit()` around the eager arm
+  and inputs passed as JIT arguments), and fail when the one-line fix is
+  reverted.
+- **R336-R18-P2 (Decision 122 on all seven pairs, both labels)**: Across
+  `rung0/independent`, `omt1/independent`, `omt2/independent`,
+  `omt3/independent`, `omt4/independent`, `rung10/given_nemo_entry`, and
+  `rung10/independent`, zero exact rows are lost (`exact_row_losses == []`) and
+  every row is bit-identical or strictly better vs parent `254fec16a822`.
+  *Falsifier*: any exact-row loss or any row moving away (`away > 0`) stops the
+  landing immediately.
+- **R336-R18-P3 (other callers and DINO month gate)**: Every other caller of
+  `_tke_bottom_dirichlet` (where `nemo_sh2_fold_top_v=False` or
+  `bottom_tke_bc=False`, including faithful DINO, `V1`, `GYRE`, `VORTEX`,
+  `ORCA2G1..G8`, and non-NEMO configurations) is bit-identical parent vs
+  current (normalized JAXPR and 3-step faithful DINO leaf-step SHA-256 hashes),
+  and the 30-day GPU DINO from-rest month gate passes within bar
+  (`<= 2.244317642e-03 K`).
+- **R336-R18-P4 (rung-10 N=1 gradients)**: Rung-10 N=1 forward parity has 0
+  non-bit leaves, reverse cotangents (`T@1`, `ssh@1`) are finite across all
+  799,200 cells with 0 nonzero dry cells, and reverse equals forward (JVP) for
+  `T_dir0` and `rn_ud` within `1e-10`.
+- **R336-R18-P5 (rung-10 kt 1--10 rescore)**: Round 333's 18-word `kt=2 stage3 T`
+  departure (and 13-word `kt=2 stage3 S` departure) becomes `0` unequal wet
+  words (`BIT_EXACT`) under both `given_nemo_entry` and `independent`, and the
+  first non-bit / first wet-value / first over-bar row across `kt=1..10` is
+  reported.
