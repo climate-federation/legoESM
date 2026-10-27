@@ -775,7 +775,7 @@ def test_five_category_o9_sal_temp2_composition_matches_scalar_oracle():
 def test_salinity4_gradient_is_finite_nonzero_and_matches_central_difference():
     kwargs = _model_kwargs()
     # The first eight columns are smooth production states.  The ninth pins an
-    # exact final-bound kink and the tenth pins the unreachable zero-mask branch;
+    # exact final-bound kink and the tenth pins a synthetic zero-mask branch;
     # neither belongs in a two-sided finite-difference claim.
     for name in _ARRAY_NAMES:
         kwargs[name] = kwargs[name][:8]
