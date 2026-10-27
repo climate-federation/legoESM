@@ -329,9 +329,15 @@ run_nemo_case() {
       >run.user.stdout.log 2>&1
     rc=$?
     set -e
-    refuse_nemo_errors "$run_dir/ocean.output" \
-      || refuse "NEMO $label ocean.output contains the quoted E R R O R lines above"
-    [[ $rc -eq 0 ]] || refuse "$label mpirun exited $rc"
+    if [[ $label == observed ]]; then
+      refuse_nemo_errors "$TARGET_RUN/ocean.output" \
+        || refuse 'NEMO ocean.output contains the quoted E R R O R lines above'
+      [[ $rc -eq 0 ]] || refuse "mpirun exited $rc"
+    else
+      refuse_nemo_errors "$run_dir/ocean.output" \
+        || refuse "NEMO $label ocean.output contains the quoted E R R O R lines above"
+      [[ $rc -eq 0 ]] || refuse "$label mpirun exited $rc"
+    fi
     grep 'STOP 0' run.user.stdout.log >/dev/null || refuse "$label NEMO did not report STOP 0"
     printf 'wall_seconds %s\nRUN_FINISHED_UTC=%s\nRUN_DONE\n' "$((SECONDS-started))" \
       "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >>run.user.time.log
