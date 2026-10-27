@@ -661,17 +661,7 @@ def build_real_composed_inputs(
         value = np.asarray(fnow, dtype=np.float64)
         if value.ndim == 2:
             value = value[..., None]
-        result = {
-            "fnow": value,
-            # The oracle joins two MPI slabs.  Scalar metadata is therefore
-            # present once per rank even though the gridded arrays join into
-            # one global ORCA2 field.
-            "isecsbc": np.asarray([clock, clock], dtype=np.float64),
-            "nrec": np.tile(np.asarray(nrec, dtype=np.float64), 2),
-            "rec_shft": np.asarray([0.0, 0.0], dtype=np.float64),
-            "nbb": np.asarray([nbb, nbb], dtype=np.float64),
-            "naa": np.asarray([naa, naa], dtype=np.float64),
-        }
+        result = {"fnow": value}
         if fdta is not None:
             before, after = (np.asarray(item, dtype=np.float64) for item in fdta)
             if before.ndim == 2:
@@ -679,6 +669,16 @@ def build_real_composed_inputs(
             # fld_update swaps the logical before record into slot 2 and
             # writes the logical after record into slot 1 at the year seam.
             result["fdta"] = np.stack((after, before), axis=-1)
+        result.update(
+            # The oracle joins two MPI slabs.  Scalar metadata is therefore
+            # present once per rank even though the gridded arrays join into
+            # one global ORCA2 field.
+            isecsbc=np.asarray([clock, clock], dtype=np.float64),
+            nrec=np.tile(np.asarray(nrec, dtype=np.float64), 2),
+            rec_shft=np.asarray([0.0, 0.0], dtype=np.float64),
+            nbb=np.asarray([nbb, nbb], dtype=np.float64),
+            naa=np.asarray([naa, naa], dtype=np.float64),
+        )
         return result
 
     controls = []

@@ -1945,6 +1945,14 @@ FILES = {
         Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/"
              "round339/k0_smoke/orca2_k0_10step_np2/build_sources/ppsrc/"
              "nemo/nemogcm.f90")),
+    "ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/lbcnfd.f90": (
+        Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/"
+             "round339/k0_smoke/orca2_k0_10step_np2/build_sources/ppsrc/"
+             "nemo/lbcnfd.f90")),
+    "ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/dommsk.f90": (
+        Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/"
+             "round339/k0_smoke/orca2_k0_10step_np2/build_sources/ppsrc/"
+             "nemo/dommsk.f90")),
     # Round 334 (ratchet cleanup): the NEMO statements the named constants cite.
     "trabbc.F90": _OCE / "TRA/trabbc.F90",
     "phycst.F90": _OCE / "DOM/phycst.F90",
@@ -2254,6 +2262,15 @@ CITATION_MAP = {
         'qsr(ji,jj) = ( 1. - zfr_obs ) * qsr(ji,jj)',
     'ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/sbc_oce.f90:195-216': [
         'ALLOCATE( utau(jpi,jpj)', 'wndm(Nis0-(0):Nie0+(0)', 22],
+    'ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/lbcnfd.f90:588-606': [
+        ('DO jj = 1, ihls', 9), ('END DO', 85), 19],
+    'ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/lbcnfd.f90:619-628': [
+        ('! line number ipj-ihls : right half', 5), ('END DO', 89), 10],
+    'ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/dommsk.f90:232':
+        "CALL lbc_lnk( 'dommsk', umask, 'U', 1.0_wp, vmask, 'V', 1.0_wp, fmask, 'F', 1.0_wp )",
+    'ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/sbcmod.f90:444-521': [
+        'CASE( jp_blk     )   ;   CALL sbc_blk       ( kt )',
+        'CALL sbc_fwb( kt, nn_fwb, nn_fsbc, Kmm )', 78],
     # ORCA2 round 334: provenance of the constants the ratchet cleanup named.
     'trabbc.F90:179': "* 1.e-3 ! conversion in W/m2",
     'phycst.F90:26': "rad      = 3.141592653589793_wp / 180._wp",
