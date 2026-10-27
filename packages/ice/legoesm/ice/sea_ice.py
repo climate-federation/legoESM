@@ -2434,7 +2434,27 @@ def _thermo_v2(
             depth_to_area_ratio=config.ponds.depth_to_area_ratio,
             snow_block_threshold=config.ponds.snow_block_threshold,
             refreeze_width_K=config.ponds.refreeze_width_K,
+            scheme=config.ponds.scheme,
+            at_i=(
+                jnp.broadcast_to(jnp.sum(conc_new, axis=-1, keepdims=True), conc_new.shape)
+                if config.n_categories > 1
+                else conc_new
+            ),
+            a_i=conc_new,
+            h_i=h_new,
+            t_su=T_new,
+            h_il=jnp.zeros_like(pond_depth_dil),
+            dh_i_sum=-ice_melt_m,
+            dh_s_sum=-snow_melt_m,
+            sz_i=S_ice,
+            t_i=T_ice,
+            namthd_pnd=config.ponds.namthd_pnd,
+            rho_w=constants.rho_water,
+            gravity=constants.g_nemo,
+            ice_constants=config.ice_constants,
         )
+        if config.ponds.scheme == "si3_lev":
+            pond_captured_melt_m_liquid = jnp.zeros_like(h_new)
         # Convert refrozen pond water [m of liquid] to equivalent ice
         # thickness [m of ice] using density.  Ice gain is
         # mass-neutral with the ocean: the water came from earlier

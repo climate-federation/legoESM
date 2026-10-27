@@ -287,6 +287,7 @@ __all__.extend(
     )
 )
 
+from legoesm.ice.config import SI3PondConfig  # noqa: E402
 from legoesm.ice.si3_thd_pnd import (  # noqa: E402
     SI3O12CategoryOutput,
     SI3O12Stages,
@@ -300,6 +301,7 @@ from legoesm.ice.si3_thd_pnd import (  # noqa: E402
 
 __all__.extend(
     (
+        "SI3PondConfig",
         "SI3PndLevOutputs",
         "SI3PondOutputs",
         "SI3O12CategoryOutput",

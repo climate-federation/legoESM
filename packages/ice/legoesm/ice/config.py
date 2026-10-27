@@ -265,27 +265,27 @@ class RidgingConfig(NamedTuple):
 
 
 class MeltPondConfig(NamedTuple):
-    """CESM-style melt-pond configuration.
+    """Melt-pond configuration (CESM default or SI3 ``pnd_LEV`` branch).
 
     Tracks pond area fraction (relative to ice area) and mean depth
-    per category.  Pond water is sourced from surface melt and
-    rainfall on bare ice; drains via simple linear Darcy parameter to
-    the ocean.  Pond freezing returns water to bulk ice volume.
+    per category.  When ``scheme == 'cesm'``, pond water is sourced from
+    surface melt and rainfall on bare ice and drains via linear Darcy;
+    when ``scheme == 'si3_lev'``, ``step_ponds`` dispatches to SI3
+    ``pnd_LEV`` (``icethd_pnd.f90:369-550``) with explicit ``namthd_pnd``.
     """
     enabled: bool = False
     refreeze_threshold: float = constants.T_freeze  # Air T below which ponds refreeze [K]
-    # Smoothing half-width [K] for the refreeze ramp around the
-    # threshold (keeps the refreeze response differentiable — see
-    # step_ponds).  Smaller → sharper, CICE-like cutoff.
+    # Smoothing half-width [K] for the refreeze ramp around the threshold
+    # (keeps the refreeze response differentiable — see step_ponds).
     refreeze_width_K: float = 0.5
     drainage_timescale_s: float = 86400.0  # Drainage e-folding time [s] (1 day)
     pond_to_ice_max_area: float = 0.6    # Cap pond fraction per category
     depth_to_area_ratio: float = 0.8     # Volume → area conversion (CICE)
-    # Minimum snow depth that blocks pond formation [m].  Snow
-    # thinner than this is treated as transparent to surface melt
-    # water so deposition / patchy snow does not lock out pond
-    # capture.  CICE uses ~5 mm.
+    # Minimum snow depth that blocks pond formation [m] (~5 mm in CICE).
+    # Thinner snow is treated as transparent to surface melt water.
     snow_block_threshold: float = 5.0e-3
+    scheme: str = "cesm"                 # "cesm" or "si3_lev"
+    namthd_pnd: SI3PondConfig | None = None
 
 
 class SI3ThermoConfig(NamedTuple):
@@ -647,3 +647,13 @@ def build_si3_orca2_o4_config(
     )
     _validate_si3_orca2_o4_config(cfg)
     return cfg
+
+
+class SI3PondConfig(NamedTuple):
+    """``&namthd_pnd`` values read by ``ice_thd_pnd`` (``namelist_ice_ref:223-227``); no defaults."""
+
+    rn_himin: float
+    rn_apnd_min: float
+    rn_apnd_max: float
+    rn_pnd_flush: float
+    ln_pnd_lids: bool

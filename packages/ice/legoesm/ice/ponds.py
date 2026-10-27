@@ -22,7 +22,10 @@ from __future__ import annotations
 
 import jax.numpy as jnp
 
-from legoesm.ice.config import MeltPondConfig
+from legoesm.core.source_rounding import nemo_source_round
+from legoesm.ice.config import MeltPondConfig, SI3PondConfig
+from legoesm.ice.constants_config import IceConstantsConfig
+from legoesm.ice.si3_thd_pnd import si3_pnd_lev
 
 # Canonical melt-pond defaults (single source of truth callers pass in).
 _POND_DEFAULTS = MeltPondConfig()
@@ -44,6 +47,20 @@ def step_ponds(
     depth_to_area_ratio: float,
     snow_block_threshold: float = _POND_DEFAULTS.snow_block_threshold,
     refreeze_width_K: float = _POND_DEFAULTS.refreeze_width_K,
+    scheme: str = _POND_DEFAULTS.scheme,
+    at_i: jnp.ndarray | None = None,
+    a_i: jnp.ndarray | None = None,
+    h_i: jnp.ndarray | None = None,
+    t_su: jnp.ndarray | None = None,
+    h_il: jnp.ndarray | None = None,
+    dh_i_sum: jnp.ndarray | None = None,
+    dh_s_sum: jnp.ndarray | None = None,
+    sz_i: jnp.ndarray | None = None,
+    t_i: jnp.ndarray | None = None,
+    namthd_pnd: SI3PondConfig | None = None,
+    rho_w: float | None = None,
+    gravity: float | None = None,
+    ice_constants: IceConstantsConfig | None = None,
 ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Advance pond area + depth one time step.
 
@@ -98,6 +115,105 @@ def step_ponds(
         gain on the per-ice-area column ``h`` (white-ice gain; no FW
         exchange with the ocean).
     """
+    if scheme not in ("cesm", "si3_lev"):
+        raise ValueError(
+            f"Unknown MeltPondConfig.scheme={scheme!r}; expected 'cesm' or 'si3_lev'"
+        )
+    if scheme == "si3_lev":
+        if not isinstance(namthd_pnd, SI3PondConfig):
+            raise ValueError(
+                "step_ponds(scheme='si3_lev') requires MeltPondConfig.namthd_pnd "
+                "to be an explicit SI3PondConfig; no defaults"
+            )
+        if any(
+            x is None
+            for x in (
+                a_i,
+                h_i,
+                t_su,
+                dh_i_sum,
+                dh_s_sum,
+                sz_i,
+                t_i,
+                rho_w,
+                gravity,
+                ice_constants,
+            )
+        ):
+            raise ValueError(
+                "step_ponds(scheme='si3_lev') requires SI3 category state, "
+                "melt totals, rho_w, gravity, and ice_constants"
+            )
+        a_i_f64 = jnp.asarray(a_i, dtype=jnp.float64)
+        pond_area_f64 = jnp.asarray(pond_area, dtype=jnp.float64)
+        h_ip_in = jnp.asarray(pond_depth, dtype=jnp.float64)
+        h_il_in = (
+            jnp.zeros_like(h_ip_in)
+            if h_il is None
+            else jnp.asarray(h_il, dtype=jnp.float64)
+        )
+        at_i_in = a_i_f64 if at_i is None else jnp.asarray(at_i, dtype=jnp.float64)
+        a_ip_in = nemo_source_round(pond_area_f64 * a_i_f64)
+        sz_i_f64 = jnp.asarray(sz_i, dtype=jnp.float64)
+        t_i_f64 = jnp.asarray(t_i, dtype=jnp.float64)
+        if sz_i_f64.ndim == h_ip_in.ndim:
+            sz_i_f64 = sz_i_f64[..., None]
+        if t_i_f64.ndim == h_ip_in.ndim:
+            t_i_f64 = t_i_f64[..., None]
+        dt_f64 = jnp.asarray(dt, dtype=jnp.float64)
+        r1_dt = nemo_source_round(jnp.float64(1.0) / dt_f64)
+        lev = si3_pnd_lev(
+            at_i=at_i_in,
+            a_i=a_i_f64,
+            h_i=jnp.asarray(h_i, dtype=jnp.float64),
+            t_su=jnp.asarray(t_su, dtype=jnp.float64),
+            a_ip=a_ip_in,
+            h_ip=h_ip_in,
+            h_il=h_il_in,
+            dh_i_sum=jnp.asarray(dh_i_sum, dtype=jnp.float64),
+            dh_s_sum=jnp.asarray(dh_s_sum, dtype=jnp.float64),
+            sz_i=sz_i_f64,
+            t_i=t_i_f64,
+            wfx_pnd=jnp.zeros_like(h_ip_in),
+            r1_Dt_ice=r1_dt,
+            rn_himin=namthd_pnd.rn_himin,
+            rn_apnd_min=namthd_pnd.rn_apnd_min,
+            rn_apnd_max=namthd_pnd.rn_apnd_max,
+            rn_pnd_flush=namthd_pnd.rn_pnd_flush,
+            ln_pnd_lids=namthd_pnd.ln_pnd_lids,
+            rho_w=rho_w,
+            gravity=gravity,
+            ice_constants=ice_constants,
+        )
+        has_ice = a_i_f64 > 0.0
+        safe_ai = jnp.where(has_ice, a_i_f64, jnp.ones_like(a_i_f64))
+        pond_area_new = jnp.where(
+            has_ice,
+            nemo_source_round(lev.a_ip / safe_ai),
+            jnp.zeros_like(lev.a_ip),
+        )
+        pond_depth_new = lev.h_ip
+        rho_w_f64 = jnp.asarray(rho_w, dtype=jnp.float64)
+        drain_cell_m = nemo_source_round(
+            nemo_source_round(lev.wfx_pnd * dt_f64) / rho_w_f64
+        )
+        drain_to_ocean_m = jnp.where(
+            has_ice,
+            nemo_source_round(drain_cell_m / safe_ai),
+            jnp.zeros_like(lev.wfx_pnd),
+        )
+        refreeze_m = jnp.zeros_like(pond_depth_new)
+        return (
+            pond_area_new.astype(pond_area.dtype),
+            pond_depth_new.astype(pond_depth.dtype),
+            drain_to_ocean_m.astype(pond_depth.dtype),
+            refreeze_m.astype(pond_depth.dtype),
+        )
+    if namthd_pnd is not None:
+        raise ValueError(
+            "step_ponds(scheme='cesm') does not accept namthd_pnd; "
+            "set MeltPondConfig.scheme='si3_lev'"
+        )
     # Input water this step.  Snow thicker than the configured
     # threshold blocks pond formation; thinner snow / deposition
     # patches do not.
