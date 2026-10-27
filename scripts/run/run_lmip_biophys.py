@@ -243,6 +243,13 @@ _VAR_META = {
                        "standard_name": "transpiration_flux"},
     "soil_evap":      {"long_name": "soil / ground evaporation (LE_soil / L_v)", "units": "mm day-1",
                        "standard_name": "water_evaporation_flux_from_soil"},
+    "soil_water":     {"long_name": "column water store: soil + surface pond + snow "
+                                    "water equivalent + canopy interception store",
+                       "units": "kg m-2"},
+    "water_budget":   {"long_name": "land water budget residual, d(column water store)/dt "
+                                    "- (precip - surface evaporation mass flux - runoff); "
+                                    "0 when the step conserved water, > 0 = water created",
+                       "units": "mm day-1"},
     "reverted":       {"long_name": "NaN-revert guard rate (fraction of steps reverted; "
                                     ">0 = numerically diverging cell)", "units": "1"},
     "land_fraction":  {"long_name": "surfdata land fraction (land + lake + glacier)", "units": "1",
@@ -835,8 +842,29 @@ def run(args) -> int:
             values["T_soil_top"] = new_state.T_soil[:, 0]
             values["theta_soil_top"] = new_state.theta_soil[:, 0]
             values["snow_depth"] = new_state.snow_depth
+            # Closed water budget of the land step from the stores the state
+            # carries and the fluxes the tape reports: the residual is zero when
+            # every sink was feasible, positive when water was created (the dry
+            # floor's clip) and negative when water vanished.
+            from legoesm.land.soil_grid import make_soil_grid as _msg_budget
+            _dz_rho = jnp.asarray(_msg_budget(config.soil_grid).dz) * constants.rho_water
+            def _store(st):
+                w = jnp.sum(st.theta_soil * _dz_rho[None, :], axis=1) + st.snow_depth
+                if st.surface_water is not None:
+                    w = w + st.surface_water * constants.rho_water
+                if st.W_canopy is not None:
+                    w = w + st.W_canopy
+                return w
+            _w_new = _store(new_state)
+            values["soil_water"] = _w_new
+            values["water_budget"] = (
+                (_w_new - _store(state)) / dt
+                - (forcing_t.precip_total - resp.surface_mass_flux - resp.freshwater_flux)
+            ) * _SEC_PER_DAY
         else:
             values["T_soil_top"] = _ZEROS
+            values["soil_water"] = _ZEROS
+            values["water_budget"] = _ZEROS
             values["theta_soil_top"] = _ZEROS
             values["snow_depth"] = _ZEROS
         if is_multilayer and isinstance(config.surface_scheme, CanopyConfig):
