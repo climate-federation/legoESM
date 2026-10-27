@@ -1,4 +1,13 @@
 --- sbcfwb.F90
 +++ sbcfwb.F90
 @@ -48,0 +49 @@
-+   PUBLIC   a_fwb, a_fwb_b
++   PUBLIC   a_fwb, a_fwb_b, r340_fwb_probe
+@@ -477,2 +478,8 @@
++   SUBROUTINE r340_fwb_probe(pvalue)
++      REAL(wp),INTENT(out)::pvalue
++      a_fwb=-0._wp ; a_fwb_b=-0._wp
++      pvalue=a_fwb+a_fwb_b
++   END SUBROUTINE r340_fwb_probe
++
+    !!======================================================================
+ END MODULE sbcfwb

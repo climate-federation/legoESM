@@ -8,11 +8,18 @@
  
     IMPLICIT NONE
     PRIVATE
-@@ -125,6 +126,7 @@
-       IF( ln_apr_dyn )   CALL sbc_apr    ( kstp )                          ! atmospheric pressure (NB: call before bdy_dta which needs ssh_ib)
-       IF( ln_bdy     )   CALL bdy_dta    ( kstp, Nbb )                     ! update dynamic & tracer data at open boundaries
-       IF( ln_isf     )   CALL isf_stp    ( kstp, Nbb )                     ! update iceshelf geometry
+@@ -53,4 +54,5 @@
++   PUBLIC   r340_entry_probe
+    !!----------------------------------------------------------------------
+    !! NEMO/OCE 5.0, NEMO Consortium (2024)
+    !! Software governed by the CeCILL license (see ./LICENSE)
+    !!----------------------------------------------------------------------
+@@ -127,0 +130 @@
 +                         CALL r340_state_frame( kstp, 0, Nbb, ts(:,:,:,:,Nbb), uu(:,:,:,Nbb), vv(:,:,:,Nbb), ssh(:,:,Nbb) )
-                          CALL sbc        ( kstp, Nbb, Nbb )                ! Sea Boundary Condition (including sea-ice)
- !!$      IF( ln_isf     )   CALL isf_stp    ( kstp, Nbb )                     ! update iceshelf geometry
-                          !clem: problem with isf and cpl: sbcfwb needs isf but isf needs fwf from sbccpl
+@@ -315,0 +319,6 @@
++   SUBROUTINE r340_entry_probe(kt,klev,pts,pu,pv,pssh)
++      INTEGER,INTENT(in)::kt,klev
++      REAL(wp),INTENT(in)::pts(:,:,:,:),pu(:,:,:),pv(:,:,:),pssh(:,:)
++      CALL r340_state_frame(kt,0,klev,pts,pu,pv,pssh)
++   END SUBROUTINE r340_entry_probe
++

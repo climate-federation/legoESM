@@ -362,7 +362,14 @@ def read_core_field(path: Path, variable: str) -> np.ndarray:
 
 
 def load_core_normal_year(root: Path, manifest: Path) -> dict[str, np.ndarray]:
-    """Load and map the digest-pinned round-5 CORE forcing and weights."""
+    """Map every CORE record reachable during the ten-step K0 replay.
+
+    The files have independent 6-hourly, daily, and monthly cadences.  NEMO
+    uses the containing record when ``ln_tint=.false.``; consequently the
+    first ten steps need records 1--5, 1--2, and 1 respectively.  Keeping the
+    leading record axis here prevents the caller from silently freezing
+    record 0 across the replay.
+    """
 
     declared = {}
     for line in manifest.read_text().splitlines():
@@ -384,17 +391,27 @@ def load_core_normal_year(root: Path, manifest: Path) -> dict[str, np.ndarray]:
                for bicubic in (False, True)}
     for field, filename, variable, bicubic in o1.FIELD_SPECS:
         with netCDF4.Dataset(root / filename) as dataset:
-            source = np.asarray(dataset[variable][0].data, dtype=np.float64)
+            source_variable = dataset[variable]
+            count = {1460: 5, 365: 2, 12: 1}.get(source_variable.shape[0])
+            require(count is not None,
+                    f"CORE cadence moved for {variable}: {source_variable.shape}")
+            sources = [np.asarray(source_variable[index].data, dtype=np.float64)
+                       for index in range(count)]
         indices, coefficients = weights[bicubic]
-        mapped[field] = np.asarray(o1.nemo_fld_interp(
-            source, indices, coefficients, bicubic=bicubic))
+        mapped[field] = np.stack([
+            np.asarray(o1.nemo_fld_interp(
+                source, indices, coefficients, bicubic=bicubic))
+            for source in sources
+        ])
     with netCDF4.Dataset(root / "ORCA_R2_zps_domcfg.nc") as dataset:
         cosine, sine = o1.nemo_t_rotation_from_domain(*(
             np.asarray(dataset[name][:].data, dtype=np.float64)
             for name in ("glamt", "gphit", "glamv", "gphiv")
         ))
+    wind_shape = mapped["wndi"].shape
     mapped["wndi"], mapped["wndj"] = map(np.asarray, o1.rotate_en_to_ij(
-        mapped["wndi"], mapped["wndj"], cosine, sine))
+        mapped["wndi"], mapped["wndj"],
+        np.broadcast_to(cosine, wind_shape), np.broadcast_to(sine, wind_shape)))
     require(all(np.isfinite(value).all() for value in mapped.values()),
             "mapped CORE normal-year input contains non-finite values")
     return mapped
@@ -444,6 +461,32 @@ def build_real_composed_inputs(
     runoff_before, runoff_after = _monthly_slots(
         root / "runoff_core_monthly.nc", "sorunoff")
     sss_before, sss_after = _monthly_slots(root / "sss_data.nc", "sss")
+    with netCDF4.Dataset(root / "chlorophyll.nc") as dataset:
+        chlorophyll_records = np.asarray(
+            dataset.variables["CHLA"][[11, 0]], dtype=np.float64)
+    damping_records = {}
+    for filename, variable in (
+        ("data_1m_potential_temperature_nomask.nc", "votemper"),
+        ("data_1m_salinity_nomask.nc", "vosaline"),
+    ):
+        with netCDF4.Dataset(root / filename) as dataset:
+            source = dataset.variables[variable]
+            source.set_auto_maskandscale(False)
+            raw = np.asarray(source[[11, 0]], dtype=np.float64)
+        damping_records[variable] = np.moveaxis(raw, 1, -1)
+    static_fields = {}
+    with netCDF4.Dataset(root / "zdfiwm_forcing_orca2.nc") as dataset:
+        dataset.set_auto_maskandscale(False)
+        for variable in (
+            "power_bot", "power_cri", "power_nsq", "power_sho",
+            "scale_bot", "scale_cri",
+        ):
+            static_fields[variable] = np.asarray(
+                dataset.variables[variable][0], dtype=np.float64)
+    with netCDF4.Dataset(root / "geothermal_heating.nc") as dataset:
+        source = dataset.variables["heatflow"]
+        source.set_auto_maskandscale(False)
+        geothermal_raw = np.asarray(source[0], dtype=np.float64)
     geothermal = ladder.read_geothermal_heatflow(root, (148, 180))
     with netCDF4.Dataset(root / "ORCA_R2_zps_domcfg.nc") as dataset:
         ff_f = np.asarray(dataset.variables["ff_f"][:], dtype=np.float64)
@@ -482,7 +525,8 @@ def build_real_composed_inputs(
         remove_inverse_barometer=False, u_before=zero, v_before=zero,
         temperature_now=zero, salinity_now=zero, ssh_now=zero,
         ssh_inverse_barometer=zero, e3t_reference=one, r3t_now=zero,
-        surface_mask=jnp.asarray(mask), shortwave_fraction_top=zero,
+        # traqsr.F90 initializes fraqsr_1lev=1 before the first stage-3 call.
+        surface_mask=jnp.asarray(mask), shortwave_fraction_top=one,
     )
     s2 = bulk.NemoS2Inputs(
         stress_lbc=stress_lbc, post_ice_sfx=zero,
@@ -508,27 +552,156 @@ def build_real_composed_inputs(
             card.ocean.recipe.model_config.physics.constants.c_sw,
             dtype=jnp.float64),
     )
-    atmosphere = bulk.NemoStandaloneAtmosphereFields(
-        *(jnp.asarray(mapped[name], dtype=jnp.float64) for name in (
-            "wndi", "wndj", "tair", "humi", "slp", "qsr_down",
-            "qlw_down", "precip_raw", "snow_raw")))
     geothermal = jnp.asarray(geothermal, dtype=jnp.float64)
+
+    def fld_fields(fnow, *, clock, nrec, nbb, naa, fdta=None):
+        value = np.asarray(fnow, dtype=np.float64)
+        if value.ndim == 2:
+            value = value[..., None]
+        result = {
+            "fnow": value,
+            # The oracle joins two MPI slabs.  Scalar metadata is therefore
+            # present once per rank even though the gridded arrays join into
+            # one global ORCA2 field.
+            "isecsbc": np.asarray([clock, clock], dtype=np.float64),
+            "nrec": np.tile(np.asarray(nrec, dtype=np.float64), 2),
+            "rec_shft": np.asarray([0.0, 0.0], dtype=np.float64),
+            "nbb": np.asarray([nbb, nbb], dtype=np.float64),
+            "naa": np.asarray([naa, naa], dtype=np.float64),
+        }
+        if fdta is not None:
+            before, after = (np.asarray(item, dtype=np.float64) for item in fdta)
+            if before.ndim == 2:
+                before, after = before[..., None], after[..., None]
+            # fld_update swaps the logical before record into slot 2 and
+            # writes the logical after record into slot 1 at the year seam.
+            result["fdta"] = np.stack((after, before), axis=-1)
+        return result
+
     controls = []
     for kt in range(1, 11):
-        midpoint = (2 * kt - 1) * int(card.ocean.dt_s) // 2
+        dt_s = int(card.ocean.dt_s)
+        # fldread.F90:195-206 adds half of nn_fsbc-1 to NEMO's step-entry
+        # clock: (2*kt-1)*dt/2 + dt/2 == kt*dt for nn_fsbc=2.
+        isecsbc = kt * dt_s
+        retained_kt = kt if kt % 2 else kt - 1
+        retained_clock = retained_kt * dt_s
+
+        def selected(name: str, cadence_seconds: int):
+            index = retained_clock // cadence_seconds
+            records = mapped[name]
+            require(0 <= index < records.shape[0],
+                    f"CORE record selection escaped loaded window: {name} {index}")
+            return jnp.asarray(records[index], dtype=jnp.float64)
+
+        atmosphere = bulk.NemoStandaloneAtmosphereFields(
+            *(selected(name, cadence) for name, cadence in (
+                ("wndi", 21600), ("wndj", 21600), ("tair", 21600),
+                ("humi", 21600), ("slp", 21600),
+                ("qsr_down", 86400), ("qlw_down", 86400),
+                ("precip_raw", 2678400), ("snow_raw", 2678400))))
         pair_runoff = bulk.NemoStandaloneFieldPair(
-            jnp.asarray(runoff_before), jnp.asarray(runoff_after), midpoint,
+            jnp.asarray(runoff_before), jnp.asarray(runoff_after), isecsbc,
             -1339200, 1339200)
         pair_sss = bulk.NemoStandaloneFieldPair(
-            jnp.asarray(sss_before), jnp.asarray(sss_after), midpoint,
+            jnp.asarray(sss_before), jnp.asarray(sss_after), isecsbc,
             -1339200, 1339200)
         s0f = bulk.NemoStandaloneS0FInputs(
-            atmosphere, atmosphere, midpoint, midpoint - 1, midpoint + 1,
+            atmosphere, atmosphere, isecsbc, isecsbc - 1, isecsbc + 1,
             pair_runoff, pair_sss)
         ice_if = bulk.NemoSbcIceIfInputs(
-            jnp.asarray(cover), jnp.asarray(cover), midpoint,
+            jnp.asarray(cover), jnp.asarray(cover), isecsbc,
             -15768000, 15768000, zero, zero, zero, jnp.asarray(ff_f),
             jnp.asarray(mask), jnp.asarray(mask))
+        fld_actual = {}
+        midpoint = (2 * kt - 1) * dt_s // 2
+        surface_call = 4 if kt == 1 else 1
+        if kt % 2:
+            if kt == 1:
+                monthly_nrec = (1, 1339200, 12, -1339200)
+                for field_index, variable in enumerate(
+                        ("votemper", "vosaline"), start=1):
+                    before, after = damping_records[variable]
+                    now = bulk.nemo_fld_time_interp(
+                        jnp.asarray(before), jnp.asarray(after), midpoint,
+                        -1339200, 1339200)
+                    fld_actual[
+                        f"kt01/S0_F/c001/f{field_index:03d}/{variable}"
+                    ] = fld_fields(
+                        now, clock=midpoint, nrec=monthly_nrec,
+                        nbb=2, naa=1, fdta=(before, after))
+                annual_nrec = (0, 0, 1, 31536000)
+                for field_index, variable in enumerate(static_fields, start=1):
+                    fld_actual[
+                        f"kt01/S0_F/c002/f{field_index:03d}/{variable}"
+                    ] = fld_fields(
+                        static_fields[variable], clock=midpoint,
+                        nrec=annual_nrec, nbb=1, naa=2)
+                fld_actual["kt01/S0_F/c003/f001/heatflow"] = fld_fields(
+                    geothermal_raw, clock=midpoint, nrec=annual_nrec,
+                    nbb=1, naa=2)
+            for field_index, (field, _filename, clvar, _bicubic) in enumerate(
+                    o1.FIELD_SPECS, start=1):
+                cadence = (21600 if mapped[field].shape[0] == 5 else
+                           86400 if mapped[field].shape[0] == 2 else 2678400)
+                record = retained_clock // cadence
+                key = (f"kt{kt:02d}/S0_F/c{surface_call:03d}/"
+                       f"f{field_index:03d}/{clvar}")
+                fld_actual[key] = fld_fields(
+                    selected(field, cadence), clock=isecsbc,
+                    nrec=(record, record * cadence,
+                          record + 1, (record + 1) * cadence),
+                    nbb=1, naa=2)
+
+            monthly_nrec = (1, 1339200, 12, -1339200)
+            ice_now = bulk.nemo_fld_time_interp(
+                jnp.asarray(cover), jnp.asarray(cover), isecsbc,
+                -15768000, 15768000)
+            fld_actual[
+                f"kt{kt:02d}/S0_F/c{surface_call + 1:03d}/f001/ice_cover"
+            ] = fld_fields(
+                ice_now, clock=isecsbc,
+                nrec=(1, 15768000, 1, -15768000), nbb=2, naa=1,
+                fdta=(cover, cover))
+            runoff_now = bulk.nemo_fld_time_interp(
+                jnp.asarray(runoff_before), jnp.asarray(runoff_after),
+                isecsbc, -1339200, 1339200)
+            fld_actual[
+                f"kt{kt:02d}/S0_F/c{surface_call + 2:03d}/f001/sorunoff"
+            ] = fld_fields(
+                runoff_now, clock=isecsbc, nrec=monthly_nrec, nbb=2, naa=1,
+                fdta=(runoff_before, runoff_after))
+            sss_now = bulk.nemo_fld_time_interp(
+                jnp.asarray(sss_before), jnp.asarray(sss_after),
+                isecsbc, -1339200, 1339200)
+            fld_actual[
+                f"kt{kt:02d}/S0_F/c{surface_call + 3:03d}/f001/sss"
+            ] = fld_fields(
+                sss_now, clock=isecsbc, nrec=monthly_nrec, nbb=2, naa=1,
+                fdta=(sss_before, sss_after))
+
+        ocean_call = surface_call + 4 if kt % 2 else 1
+        chl_now = bulk.nemo_fld_time_interp(
+            jnp.asarray(chlorophyll_records[0]),
+            jnp.asarray(chlorophyll_records[1]), midpoint,
+            -1339200, 1339200)
+        fld_actual[
+            f"kt{kt:02d}/S0_F/c{ocean_call:03d}/f001/CHLA"
+        ] = fld_fields(
+            chl_now, clock=midpoint, nrec=(1, 1339200, 12, -1339200),
+            nbb=2, naa=1,
+            fdta=(chlorophyll_records[0], chlorophyll_records[1]))
+        damping_call = ocean_call + 1
+        for field_index, variable in enumerate(("votemper", "vosaline"), start=1):
+            before, after = damping_records[variable]
+            now = bulk.nemo_fld_time_interp(
+                jnp.asarray(before), jnp.asarray(after), midpoint,
+                -1339200, 1339200)
+            fld_actual[
+                f"kt{kt:02d}/S0_F/c{damping_call:03d}/f{field_index:03d}/{variable}"
+            ] = fld_fields(
+                now, clock=midpoint, nrec=(1, 1339200, 12, -1339200),
+                nbb=2, naa=1, fdta=(before, after))
         controls.append({
             "s0f": s0f, "ice_if": ice_if, "s0": s0, "s2": s2,
             "chl": jnp.asarray(ladder.chlorophyll_at_step(
@@ -537,6 +710,7 @@ def build_real_composed_inputs(
             "sponge": build_orca2_damping_for_step(
                 root, np.asarray(card.ocean.recipe.z_coord.is_active) > 0.5,
                 kt=kt, dt_s=card.ocean.dt_s),
+            "_s0f_actual": fld_actual,
         })
     return tuple(controls)
 
@@ -627,6 +801,134 @@ def load_oracle_state_ladder(root: Path) -> dict[str, dict[str, np.ndarray]]:
     return result
 
 
+def _ordered_fields(names, values):
+    """Materialize one registered boundary in writer declaration order."""
+
+    return {name: np.asarray(values[name]) for name in names}
+
+
+def _surface_boundaries_for_step(kt, state_before, controls, surface):
+    """Rebuild the WRITE-only S0/S1/S3/S2 frames from production results."""
+
+    from legoesm.ocean import bulk_flux_omip as bulk
+    from legoesm.ocean.freshwater import NemoRunoffSurface
+
+    means = surface.means
+    mean_fields = {
+        "sst_m": means.sst, "sss_m": means.sss, "ssu_m": means.ssu,
+        "ssv_m": means.ssv, "ssh_m": means.ssh, "e3t_m": means.e3t,
+        "frq_m": means.frq,
+    }
+    pre = surface.bulk_before_ice
+    post = surface.bulk
+    tail = surface.s2
+    prior_s2 = controls["s2"]
+    zero = np.zeros_like(np.asarray(post.qsr))
+
+    def outer(flux, *, fr_i=None, runoff=None, erp=None, qrp=None,
+              coefficient=None, use_lbc=False, include_uv=False):
+        values = dict(mean_fields)
+        values.update(
+            utau=tail.utau if use_lbc else flux.utau,
+            vtau=tail.vtau if use_lbc else flux.vtau,
+            emp=flux.emp, qsr=flux.qsr, qns=flux.qns,
+            sfx=tail.sfx, taum=flux.taum, wndm=flux.wndm,
+            fr_i=(surface.ice_if.fr_i if fr_i is None else fr_i),
+            rnf=(tail.runoff.mass_flux if runoff is None else runoff.mass_flux),
+            rnf_tsc_T=(tail.runoff.temperature_content if runoff is None
+                       else runoff.temperature_content),
+            rnf_tsc_S=(tail.runoff.salinity_content if runoff is None
+                       else runoff.salinity_content),
+            erp=tail.erp if erp is None else erp,
+            qrp=tail.qrp if qrp is None else qrp,
+            coefice=(tail.restoring_coefficient if coefficient is None
+                     else coefficient),
+            utauU=tail.utau_u if include_uv else zero,
+            vtauV=tail.vtau_v if include_uv else zero,
+        )
+        return values
+
+    prior_runoff = NemoRunoffSurface(
+        prior_s2.prior_runoff_mass,
+        prior_s2.prior_runoff_temperature_content,
+        prior_s2.prior_runoff_salinity_content,
+    )
+    pre_values = outer(pre, fr_i=zero, runoff=prior_runoff,
+                       erp=prior_s2.prior_restoring_volume_flux,
+                       qrp=prior_s2.prior_restoring_heat_flux,
+                       coefficient=prior_s2.prior_restoring_coefficient)
+    post_values = outer(post, runoff=prior_runoff,
+                        erp=prior_s2.prior_restoring_volume_flux,
+                        qrp=prior_s2.prior_restoring_heat_flux,
+                        coefficient=prior_s2.prior_restoring_coefficient)
+    rnf_values = outer(post, erp=prior_s2.prior_restoring_volume_flux,
+                       qrp=prior_s2.prior_restoring_heat_flux,
+                       coefficient=prior_s2.prior_restoring_coefficient)
+    ssr_flux = post._replace(qns=tail.qns_after_ssr, emp=tail.emp_after_ssr)
+    ssr_values = outer(ssr_flux)
+    final_flux = post._replace(qns=tail.qns, emp=tail.emp)
+    fwb_values = outer(final_flux)
+    lbc_values = outer(final_flux, use_lbc=True)
+    exit_values = outer(final_flux, use_lbc=True, include_uv=True)
+
+    result = {}
+    outer_values = {
+        0: {}, 1: mean_fields, 2: mean_fields, 3: pre_values, 4: pre_values,
+        5: post_values, 6: post_values, 7: rnf_values, 8: ssr_values,
+        9: fwb_values, 10: lbc_values, 11: exit_values,
+    }
+    for kid, boundary in OUTER_BOUNDARIES.items():
+        result[f"kt{kt:02d}/{boundary}"] = _ordered_fields(
+            OUTER_FIELDS_BY_KID[kid], outer_values[kid])
+
+    atmosphere, _, _ = bulk.nemo_orca2_k0_s0f(controls["s0f"])
+    turb_values = {
+        "theta_air": pre.theta_air, "q_air": pre.q_air,
+        "sst": means.sst, "ssu": means.ssu, "ssv": means.ssv,
+        "tsk": pre.tsk, "ssq": pre.ssq, "Cd": pre.Cd, "Ch": pre.Ch,
+        "Ce": pre.Ce, "rhoa": pre.rhoa, "sensible": pre.sensible,
+        "latent": pre.latent, "evap": pre.evap, "qsr": pre.qsr,
+        "utau": pre.utau, "vtau": pre.vtau, "taum": pre.taum,
+        "wndm": pre.wndm,
+    }
+    flux_values = {
+        "precip": atmosphere.precip, "snow": atmosphere.snow,
+        "qlw_down": atmosphere.qlw_down, "qlwn": pre.qlwn,
+        "qns": pre.qns, "emp": pre.emp,
+    }
+    if kt % 2:
+        result[f"kt{kt:02d}/S1_TURB"] = _ordered_fields(
+            S1_TURB_FIELDS, turb_values)
+        result[f"kt{kt:02d}/S1_FLUX"] = _ordered_fields(
+            S1_FLUX_FIELDS, flux_values)
+
+    iif = surface.ice_if
+    ice_inputs = controls["ice_if"]
+    ts_before = np.asarray(state_before.T.data)[..., 0]
+    ts_after = np.asarray(iif.ts_surface) if kt % 2 else ts_before
+    common = {
+        "sss_m": means.sss, "sst_m": means.sst,
+        "ff_f": ice_inputs.ff_f, "tmask": ice_inputs.tmask_surface,
+        "emp": post.emp, "utau": post.utau, "vtau": post.vtau,
+        "ice_cover": iif.ice_cover, "sfx": tail.sfx,
+        "taum": post.taum, "wndm": post.wndm, "smask0": ice_inputs.smask0,
+    }
+    kids = (0, 1, 2, 3) if kt % 2 else (0, 3)
+    for kid in kids:
+        values = dict(common)
+        values.update(
+            ts_kbb=ts_before if kid < 2 else ts_after,
+            ts_kmm=ts_before if kid < 2 else ts_after,
+            fr_i=(iif.freezing_temperature if kid in (1, 2) else iif.fr_i),
+            qsr=pre.qsr if kid < 3 else post.qsr,
+            qns=pre.qns if kid < 3 else post.qns,
+        )
+        boundary = f"{IIF_BOUNDARIES[kid]}_IIF"
+        result[f"kt{kt:02d}/{boundary}"] = _ordered_fields(
+            IIF_FIELDS_BY_KID[kid], values)
+    return result
+
+
 def run_composed_card(card, initial_state, step_inputs, *, model=None):
     """Drive the production surface/ocean binding for exactly ten steps.
 
@@ -660,13 +962,18 @@ def run_composed_card(card, initial_state, step_inputs, *, model=None):
     state = initial_state
     ladder: dict[str, dict[str, np.ndarray]] = {}
     surfaces = []
+    surface_actual: dict[str, dict[str, np.ndarray]] = {}
+    s0f_actual_all: dict[str, dict[str, np.ndarray]] = {}
     carry_s0 = carry_s2 = prior_surface = None
     for kt, controls in enumerate(inputs, start=1):
         controls = dict(controls)
         require("model" not in controls and "nemo_kt" not in controls,
                 "step inputs may not replace the production driver/model")
         if carry_s0 is not None:
-            controls["s0"] = controls["s0"]._replace(prior=carry_s0.prior)
+            controls["s0"] = controls["s0"]._replace(
+                prior=carry_s0.prior,
+                shortwave_fraction_top=carry_s0.shortwave_fraction_top,
+            )
             controls["s2"] = controls["s2"]._replace(
                 prior_runoff_mass=carry_s2.prior_runoff_mass,
                 prior_runoff_temperature_content=(
@@ -678,10 +985,14 @@ def run_composed_card(card, initial_state, step_inputs, *, model=None):
                 prior_restoring_heat_flux=carry_s2.prior_restoring_heat_flux,
                 prior_restoring_coefficient=carry_s2.prior_restoring_coefficient,
             )
+        s0f_actual = controls.pop("_s0f_actual", {})
         controls["prior_surface"] = prior_surface
         ladder[f"kt{kt:02d}/entry"] = rung10._candidate_fields(state)
         result = bulk.nemo_orca2_k0_ocean_step(
             card, state, model=model, nemo_kt=kt, **controls)
+        surface_actual.update(
+            _surface_boundaries_for_step(kt, state, controls, result.surface))
+        s0f_actual_all.update(s0f_actual)
         trace = result.ocean
         require(hasattr(trace, "state_after") and hasattr(trace, "stage_outputs"),
                 "rung-10 driver lacks the registered live-stage observer")
@@ -696,8 +1007,12 @@ def run_composed_card(card, initial_state, step_inputs, *, model=None):
         state = trace.state_after
     require(sum(len(fields) for fields in ladder.values()) == 200,
             "composed card did not produce the registered 200 ladder rows")
+    # load_oracle_boundaries registers all source-ordered surface frames first,
+    # followed by the sorted generic fld_read inventory.
+    surface_actual.update({key: s0f_actual_all[key]
+                           for key in sorted(s0f_actual_all)})
     return {"state_after": state, "surface_steps": tuple(surfaces),
-            "rung10": ladder}
+            "surface_actual": surface_actual, "rung10": ladder}
 
 
 def exact_score(actual: np.ndarray, expected: np.ndarray) -> dict[str, object]:

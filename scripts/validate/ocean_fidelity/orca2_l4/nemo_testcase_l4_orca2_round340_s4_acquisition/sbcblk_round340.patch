@@ -4,6 +4,12 @@
 +   USE round340_surface_writer, ONLY: r340_s1_turb_frame, r340_s1_flux_frame
 @@ -79,0 +81 @@
 +   INTEGER, SAVE :: r340_s1_kt = -HUGE(0)
+@@ -244,4 +246,5 @@
++   PUBLIC   r340_s1_probe
+    !!----------------------------------------------------------------------
+    !! NEMO/OCE 5.0, NEMO Consortium (2024)
+    !! Software governed by the CeCILL license (see ./LICENSE)
+    !!----------------------------------------------------------------------
 @@ -665,0 +668 @@
 +         r340_s1_kt = kt
 @@ -931,0 +935,6 @@
@@ -15,3 +21,13 @@
 +         & vtau(Nis0-(0):Nie0+(0),Njs0-(0):Nje0+(0)),taum,wndm)
 @@ -1028,0 +1038 @@
 +      CALL r340_s1_flux_frame(r340_s1_kt,pprec,psnow,pdqlw,zqlw,qns,emp(Nis0-(0):Nie0+(0),Njs0-(0):Nje0+(0)))
+@@ -1496,2 +1507,9 @@
++   SUBROUTINE r340_s1_probe(kt,p)
++      INTEGER,INTENT(in)::kt
++      REAL(wp),INTENT(in)::p(:,:)
++      CALL r340_s1_turb_frame(kt,p,p,p,p,p,p,p,p,p,p,p,p,p,p,p,p,p,p,p)
++      CALL r340_s1_flux_frame(kt,p,p,p,p,p,p)
++   END SUBROUTINE r340_s1_probe
++
+    !!======================================================================
+ END MODULE sbcblk

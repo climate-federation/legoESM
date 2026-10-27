@@ -12,6 +12,13 @@ move the retained target build and any admitted in-place run to unique names
 under that same `refused/` directory; then invoke `--run` again. Never delete
 retained evidence.
 
+Preflight derives the reduced writer extent from the admitted `sbc_oce`
+`A2D(0)` allocation and the deck's `nn_hls=2`, links all seven patched bounds
+objects, executes every one through a patched-module probe, and runs surface
+kids 0--11 plus ice-interface kids 0--3. It also
+runs the ten-step real CPU card and the one-step real reverse/JVP check in
+separate Python processes so their XLA compilations do not accumulate.
+
 To re-admit retained twins, set `R340_EXISTING_RUN_A` and
 `R340_EXISTING_RUN_B` to either refused or in-place run directories and invoke
 `run.sh --admit-existing`. Admission verifies the manifest's producing commit
@@ -19,3 +26,5 @@ and staged binary, relative-path digests, both clean `STOP 0` logs, the complete
 decoded record inventory, unchanged parent restart bytes, and byte-identical
 twin record digests. The run remains under the failure trap until sources,
 manifest, restart comparison, and single-run admission have all completed.
+An admission failure leaves an already-retained directory in place, and any
+`E R R O R` line is quoted with its source log before refusal.

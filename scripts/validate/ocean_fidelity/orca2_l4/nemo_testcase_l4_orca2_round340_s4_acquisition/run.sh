@@ -6,6 +6,11 @@ readonly MODE=${1:---preflight-only}
 case "$MODE" in --preflight-only|--run|--admit-existing) ;; *) exit 64;; esac
 refuse(){ printf 'REFUSE: %s\n' "$*" >&2; exit 65; }
 plant_must_refuse(){ local n=$1; shift; if "$@"; then refuse "plant stayed green: $n"; fi; printf 'PREFLIGHT_PLANT_FIRED %s\n' "$n"; }
+quote_ocean_errors(){
+ local log=$1 lines
+ lines=$(grep -nF 'E R R O R' "$log" 2>/dev/null || true)
+ [[ -z $lines ]] || printf 'R340_OCEAN_ERROR %s %s\n' "$log" "$lines" >&2
+}
 here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P); readonly here
 readonly REPO=$(CDPATH= cd -- "$here/../../../../.." && pwd -P)
 readonly NEMO_ROOT=/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2
@@ -54,6 +59,10 @@ r,parent=map(Path,sys.argv[1:3])
 c.verify_manifest(r/'producer_manifest.json',expected_commit=sys.argv[3])
 for log_name in ('run.user.stdout.log','ocean.output'):
     text=(r/log_name).read_text(errors='replace')
+    if 'E R R O R' in text:
+        for line_number,line in enumerate(text.splitlines(),start=1):
+            if 'E R R O R' in line:
+                print(f'R340_OCEAN_ERROR {r/log_name}:{line_number}:{line}',file=sys.stderr)
     g.require('STOP 0' in text and 'E R R O R' not in text,
               f'admission log is not a clean STOP 0: {log_name}')
 inventory=g.inspect_acquisition_records(r)
@@ -77,9 +86,7 @@ admit_pair(){
 admit_existing_route(){
  local existing_a=${R340_EXISTING_RUN_A:-$RUN_A}
  local existing_b=${R340_EXISTING_RUN_B:-$RUN_B}
- active_runs=("$existing_a" "$existing_b")
  admit_pair "$existing_a" "$existing_b" "${R340_EXISTING_PARENT:-$K0_RUN}"
- active_runs=()
 }
 
 check_placement(){
@@ -89,13 +96,13 @@ check_placement(){
 }
 check_other_placements(){
  local d=$1
- [[ $(grep -Fc 'CALL r340_state_frame' "$d/stprk3.F90") -eq 1 ]] || return 1
- [[ $(grep -Fc 'CALL r340_state_frame' "$d/stprk3_stg.F90") -eq 1 ]] || return 1
- [[ $(grep -Fc 'CALL r340_fld_frame' "$d/fldread.F90") -eq 1 ]] || return 1
+ [[ $(grep -Fc 'CALL r340_state_frame' "$d/stprk3.F90") -eq 2 ]] || return 1
+ [[ $(grep -Fc 'CALL r340_state_frame' "$d/stprk3_stg.F90") -eq 2 ]] || return 1
+ [[ $(grep -Fc 'CALL r340_fld_frame' "$d/fldread.F90") -eq 2 ]] || return 1
  [[ $(grep -Fc 'CALL r340_iif_frame' "$d/sbcice_if.F90") -eq 4 ]] || return 1
- [[ $(grep -Ec 'CALL r340_s1_(turb|flux)_frame' "$d/sbcblk.F90") -eq 2 ]] || return 1
- awk '/^[[:space:]]*IF.*CALL isf_stp/{a=NR}/CALL r340_state_frame/{b=NR}/CALL sbc        /{c=NR} END{exit !(a<b&&b<c)}' "$d/stprk3.F90" || return 1
- awk '/CALL r340_state_frame/{a=NR}/DEALLOCATE\( zFu/{b=NR} END{exit !(a<b)}' "$d/stprk3_stg.F90" || return 1
+ [[ $(grep -Ec 'CALL r340_s1_(turb|flux)_frame' "$d/sbcblk.F90") -eq 4 ]] || return 1
+ awk '/^[[:space:]]*IF.*CALL isf_stp/{a=NR}/CALL r340_state_frame/{if(!b)b=NR}/CALL sbc        /{c=NR} END{exit !(a<b&&b<c)}' "$d/stprk3.F90" || return 1
+ awk '/CALL r340_state_frame/{if(!a)a=NR}/DEALLOCATE\( zFu/{b=NR} END{exit !(a<b)}' "$d/stprk3_stg.F90" || return 1
  awk '/end loop over field/{a=NR}/CALL r340_fld_frame/{b=NR} END{exit !(a<b)}' "$d/fldread.F90" || return 1
  awk '/CALL fld_read/{f=NR}/r340_iif_frame\(kt,0/{a=NR}/CALL eos_fzp/{e=NR}/r340_iif_frame\(kt,1/{b=NR}/r340_iif_frame\(kt,2/{c=NR}/r340_iif_frame\(kt,3/{d=NR} END{exit !(f<a&&a<e&&e<b&&b<c&&c<d)}' "$d/sbcice_if.F90"
 }
@@ -225,14 +232,35 @@ except c.GateError: print('PREFLIGHT_PLANT_FIRED arithmetic-census')
 else: raise AssertionError('arithmetic census plant stayed green')
 PY
 # Execute an actual wrapper compiled from the patched K0 sbcmod with bounds
-# checking.  Linker section GC drops sbcmod's unrelated production callees;
-# the stubs supply storage only, while both scientific units compile against
-# the admitted K0 module interfaces.
+# checking.  Linker section GC drops unrelated production callees; explicit
+# probes keep and execute one section from each of the seven patched objects.
+# The stubs supply storage only; scientific units use admitted K0 interfaces.
+"$PY" - "$K0_RUN/build_sources/ppsrc/nemo/sbc_oce.f90" "$K0_RUN/ocean.output" "$scratch/fixture_extents.F90" <<'PY'
+import re,sys
+from pathlib import Path
+source,output,target=map(Path,sys.argv[1:])
+allocation=re.search(
+    r'ALLOCATE\(\s*qns\s*\(Nis0-\(0\):Nie0\+\(0\),Njs0-\(0\):Nje0\+\(0\)\)',
+    source.read_text())
+if allocation is None:
+    raise AssertionError('sbc_oce A2D(0) allocation moved')
+matches=re.findall(r'halo width .* nn_hls\s*=\s*(\d+)',output.read_text())
+if matches != ['2']:
+    raise AssertionError(f'deck nn_hls moved: {matches}')
+h=int(matches[0])
+target.write_text(f'''MODULE dom_oce
+ USE par_oce,ONLY:nn_hls,Nis0,Nie0,Njs0,Nje0
+END MODULE
+''')
+print('R340_SOURCE_DERIVED_EXTENTS_PASS allocation=A2D(0) nn_hls=2 bounds=3:jpi-2,3:jpj-2')
+PY
 cat >"$scratch/fixture_stubs.F90" <<'EOF'
 MODULE par_oce
  USE,INTRINSIC::iso_fortran_env,ONLY:real64
  INTEGER,PARAMETER::wp=real64
  INTEGER,PARAMETER::jpi=6,jpj=5,jpk=3,jpts=2
+ INTEGER,PARAMETER::nn_hls=2
+ INTEGER::Nis0=1+nn_hls,Nie0=jpi-nn_hls,Njs0=1+nn_hls,Nje0=jpj-nn_hls
 END MODULE
 MODULE lib_mpp; INTEGER::mpprank=0; END MODULE
 MODULE sbc_oce
@@ -242,10 +270,10 @@ MODULE sbc_oce
 END MODULE
 MODULE sbcrnf; USE par_oce,ONLY:wp; REAL(wp),ALLOCATABLE::rnf_tsc(:,:,:); END MODULE
 MODULE sbcssr; USE par_oce,ONLY:wp; REAL(wp),ALLOCATABLE::erp(:,:),qrp(:,:),coefice(:,:); END MODULE
-MODULE sbcfwb; USE par_oce,ONLY:wp; REAL(wp)::a_fwb,a_fwb_b; END MODULE
 EOF
 mkdir "$scratch/stub-mod" "$scratch/check-mod"
 "$FC" -c -J "$scratch/stub-mod" "$scratch/fixture_stubs.F90" -o "$scratch/fixture-stubs.o"
+"$FC" -c -I "$scratch/stub-mod" -J "$scratch/stub-mod" "$scratch/fixture_extents.F90" -o "$scratch/fixture-extents.o"
 "$FC" -fdefault-real-8 -O3 -funroll-all-loops -fno-tree-vectorize -fcheck=bounds -ffunction-sections \
   -I "$scratch/stub-mod" -J "$scratch/check-mod" -c "$SURFACE_WRITER" -o "$scratch/surface-check.o"
 "$FC" -fdefault-real-8 -O3 -funroll-all-loops -fno-tree-vectorize -fcheck=bounds -ffunction-sections \
@@ -260,8 +288,11 @@ for unit in fldread sbcblk sbcice_if sbcmod stprk3 stprk3_stg; do
 done
 "$FC" -fdefault-real-8 -fcheck=bounds -I "$scratch/bounds-mod" -I "$scratch/check-mod" -I "$scratch/stub-mod" \
   -J "$scratch/check-mod" -c "$SURFACE_FIXTURE" -o "$scratch/fixture-check.o"
-"$MPIFC" -Wl,--gc-sections "$scratch/fixture-stubs.o" "$scratch/surface-check.o" \
-  "$scratch/state-check.o" "$scratch/sbcmod-bounds.o" "$scratch/fixture-check.o" -o "$scratch/surface-fixture"
+"$MPIFC" -Wl,--gc-sections "$scratch/fixture-stubs.o" "$scratch/fixture-extents.o" "$scratch/surface-check.o" \
+  "$scratch/state-check.o" "$scratch/fldread-bounds.o" "$scratch/sbcblk-bounds.o" \
+  "$scratch/sbcice_if-bounds.o" "$scratch/sbcmod-bounds.o" \
+  "$scratch/stprk3-bounds.o" "$scratch/stprk3_stg-bounds.o" \
+  "$scratch/sbcfwb-bounds.o" "$scratch/fixture-check.o" -o "$scratch/surface-fixture"
 for rank in 0 1; do
   (cd "$scratch" && ./surface-fixture "$rank") >"$scratch/fixture-$rank.log"
   grep -E "R340_SURFACE_FIXTURE_PASS[[:space:]]+$rank$" "$scratch/fixture-$rank.log" >/dev/null \
@@ -275,7 +306,14 @@ root=Path(sys.argv[1])
 for path in sorted(root.glob('oracle_r340_surface_*.bin')): g.inspect_exact_record(path)
 for path in sorted(root.glob('oracle_r340_state_*.bin')): g.inspect_exact_record(path)
 for path in sorted(root.glob('oracle_r340_s1[tf]_*.bin')): g.inspect_exact_record(path)
-print('R340_PATCHED_SOURCE_BOUNDS_FIXTURE_PASS units=7 linked=1 writers=4 ranks=2 signed_zero=true')
+fld=sorted(root.glob('oracle_r340_fld_*.bin'))
+iif=sorted(root.glob('oracle_r340_iif_*.bin'))
+for path in fld+iif: g.inspect_exact_record(path)
+g.require(len(list(root.glob('oracle_r340_surface_*.bin')))==24,'surface probe inventory moved')
+g.require(len(list(root.glob('oracle_r340_state_*.bin')))==4,'state probe inventory moved')
+g.require(len(list(root.glob('oracle_r340_s1[tf]_*.bin')))==4,'S1 probe inventory moved')
+g.require(len(fld)==2 and len(iif)==8,'patched fld/iif probe inventory moved')
+print('R340_PATCHED_SOURCE_BOUNDS_FIXTURE_PASS units=7 linked=7 executed=7 writers=6 surface_kids=12 iif_kids=4 ranks=2 signed_zero=true')
 PY
 "$PY" - "$ICE_RUN" "$K0_RUN" <<'PY'
 import sys
@@ -300,6 +338,10 @@ c.require(staged.is_file(),'K0 staged namelist is absent')
 print('R340_K0_NAMELIST_SCHEMA_PASS')
 PY
 "$PY" -m pytest -q -p no:cacheprovider "$TEST"
+ORCA2_R340_REAL_SMOKE=1 "$PY" -m pytest -q -p no:cacheprovider "$TEST" \
+ -k real_rung10_composed_card_ten_steps_cpu
+ORCA2_R340_REAL_GRADIENT=1 "$PY" -m pytest -q -p no:cacheprovider "$TEST" \
+ -k real_composed_card_n1_reverse_equals_forward
 
 # Produce every driver used by --run, syntax-check it, then exercise its real
 # refusal/retention/success flow while replacing only the NEMO executable.
@@ -307,6 +349,11 @@ cat >"$scratch/execute.sh" <<'DRIVER'
 #!/usr/bin/env bash
 set -Eeuo pipefail
 run=$1; nemo=$2; source_run=$3; k0_run=$4; target_build=$5; commit=$6; py=$7
+quote_ocean_errors(){
+ local log=$1 lines
+ lines=$(grep -nF 'E R R O R' "$log" 2>/dev/null || true)
+ [[ -z $lines ]] || printf 'R340_OCEAN_ERROR %s %s\n' "$log" "$lines" >&2
+}
 mkdir "$run"
 armed=1
 trap 'rc=$?; if [[ $rc -ne 0 && $armed -eq 1 ]]; then mkdir -p "$(dirname "$run")/refused"; mv "$run" "$(dirname "$run")/refused/$(basename "$run").failed.$$"; fi; exit $rc' EXIT
@@ -335,6 +382,8 @@ grep 'STOP 0' "$run/run.user.stdout.log" >/dev/null
 [[ -f "$run/ocean.output" ]]
 grep 'STOP 0' "$run/ocean.output" >/dev/null
 if grep -Eq 'E R R O R|STOP [1-9]' "$run/run.user.stdout.log" "$run/ocean.output"; then
+  quote_ocean_errors "$run/run.user.stdout.log"
+  quote_ocean_errors "$run/ocean.output"
   exit 70
 fi
 "$py" - "$run" "$commit" <<'PY'

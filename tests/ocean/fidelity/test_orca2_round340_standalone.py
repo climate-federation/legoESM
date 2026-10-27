@@ -69,7 +69,7 @@ def test_k0_is_explicit_and_calls_production_composition(monkeypatch):
     assert result.s2 is not None
     np.testing.assert_array_equal(
         np.asarray(result.surface_forcing.ice_concentration),
-        np.asarray(result.ice_if.ice_cover),
+        np.asarray(result.ice_if.fr_i)[1:-1, 1:-1],
     )
     np.testing.assert_array_equal(
         np.asarray(result.surface_forcing.chl), np.ones(s2.surface_mask.shape))
@@ -286,6 +286,9 @@ def test_composed_card_steps_a_three_dimensional_ocean_state():
     assert model.calls == 10
     assert len(replay["rung10"]) == 40
     assert sum(len(row) for row in replay["rung10"].values()) == 200
+    assert "kt01/S0_ENTRY" in replay["surface_actual"]
+    assert "kt01/S1_TURB" in replay["surface_actual"]
+    assert "kt10/S3_EXIT_IIF" in replay["surface_actual"]
     assert replay["state_after"].T.data.ndim == 3
 
 
@@ -306,9 +309,73 @@ def test_real_rung10_composed_card_ten_steps_cpu():
     card = bulk.build_nemo_orca2_k0_ocean_card(deck)
     controls = gate.build_real_composed_inputs(
         card, deck, source / "input_files.sha256", k0 / "ice_cover_clim.nc")
+    assert [int(item["s0f"].isecsbc) for item in controls] == [
+        10800 * kt for kt in range(1, 11)]
+    np.testing.assert_array_equal(
+        np.asarray(controls[0]["s0f"].before.u_wind),
+        np.asarray(controls[1]["s0f"].before.u_wind))
+    assert not np.array_equal(
+        np.asarray(controls[0]["s0f"].before.u_wind),
+        np.asarray(controls[2]["s0f"].before.u_wind))
+    assert not np.array_equal(
+        np.asarray(controls[0]["s0f"].before.qsr_down),
+        np.asarray(controls[8]["s0f"].before.qsr_down))
     replay = gate.run_composed_card(card, card.ocean.recipe.initial_state, controls)
     assert len(replay["surface_steps"]) == 10
+    assert replay["surface_actual"]
+    assert "kt01/S0_F/c001/f001/votemper" in replay["surface_actual"]
+    assert "kt01/S0_F/c002/f006/scale_cri" in replay["surface_actual"]
+    assert "kt01/S0_F/c004/f001/U_10_MOD" in replay["surface_actual"]
+    assert "kt01/S0_F/c009/f002/vosaline" in replay["surface_actual"]
+    assert "kt10/S0_F/c002/f002/vosaline" in replay["surface_actual"]
+    assert replay["surface_actual"][
+        "kt01/S0_F/c001/f001/votemper"]["fnow"].shape == (148, 180, 31)
+    assert replay["surface_actual"][
+        "kt01/S0_F/c004/f001/U_10_MOD"]["isecsbc"].tolist() == [10800, 10800]
     assert len(replay["rung10"]) == 40
     for leaf in jax.tree_util.tree_leaves(replay["state_after"]):
         if leaf is not None:
             assert np.isfinite(np.asarray(leaf)).all()
+
+
+@pytest.mark.skipif(
+    os.environ.get("ORCA2_R340_REAL_GRADIENT") != "1",
+    reason="operator-only real composed-card CPU gradient",
+)
+def test_real_composed_card_n1_reverse_equals_forward():
+    """M4: one real surface+ocean step, reverse AD against a forward JVP."""
+
+    deck = Path("/data/abyssal/dbalwada/nemo-testcases-l4/inputs/ORCA2_ICE_v5.0.0")
+    source = Path(
+        "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/"
+        "round5/acquisition/orca1ice_surface_entry_every_step_a_np2")
+    k0 = Path(
+        "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/"
+        "round339/k0_smoke/orca2_k0_10step_np2")
+    card = bulk.build_nemo_orca2_k0_ocean_card(deck)
+    controls = gate.build_real_composed_inputs(
+        card, deck, source / "input_files.sha256", k0 / "ice_cover_clim.nc")
+    control = controls[0]
+    state = card.ocean.recipe.initial_state
+    direction = jnp.asarray(1.0, dtype=jnp.float64)
+
+    def objective(delta):
+        atmosphere = control["s0f"].before
+        moved = atmosphere._replace(u_wind=atmosphere.u_wind + delta)
+        s0f = control["s0f"]._replace(before=moved, after=moved)
+        result = bulk.nemo_orca2_k0_ocean_step(
+            card, state, s0f=s0f, ice_if=control["ice_if"],
+            s0=control["s0"], s2=control["s2"], chl=control["chl"],
+            geothermal_heat_flux_mwm2=control["geothermal_heat_flux_mwm2"],
+            sponge=control["sponge"], nemo_kt=1,
+        )
+        return jnp.sum(result.ocean.T.data)
+
+    zero = jnp.asarray(0.0, dtype=jnp.float64)
+    primal, forward = jax.jvp(objective, (zero,), (direction,))
+    reverse = jax.grad(objective)(zero) * direction
+    assert np.isfinite(np.asarray(primal))
+    assert np.isfinite(np.asarray(forward))
+    assert np.isfinite(np.asarray(reverse))
+    assert float(np.abs(np.asarray(forward))) > 0.0
+    np.testing.assert_allclose(reverse, forward, rtol=2.0e-12, atol=2.0e-12)

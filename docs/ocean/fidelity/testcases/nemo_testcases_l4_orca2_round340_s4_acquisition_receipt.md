@@ -77,16 +77,17 @@ production call, proves the ocean driver is invoked for a three-dimensional
 state, produces all ten ladder steps, and confirms finite N=1 forward and
 reverse gradients, with reverse equal to forward.
 
-Resume 2 closes Argon's four HOLD groups. The composed driver now carries
+Resume 2 addressed Argon's original HOLD groups. The composed driver carries
 S0/S2 state and the preceding surface result across all ten calls, enforces
 the K0 `nn_fsbc=2` cadence, updates the live SST slot after the ice-interface
 clamp, and derives S0 means from the live ocean time levels, thickness stretch,
 and step number. Chlorophyll, geothermal heat flux, and ice concentration are
-mandatory: the first two come from the same digest-pinned deck files as K0,
-and ice concentration is the same interpolated `sf_ice(1)%fnow` cover consumed
-by the ice-interface heat-flux arm. A post-fix operator smoke ran the real
+mandatory: the first two come from the same digest-pinned deck files as K0.
+Resume 3 corrects the TKE input to the interior binary `fr_i` written by the
+ice-interface arm; observed `sf_ice(1)%fnow` remains confined to that arm's
+heat-flux calculation. A post-fix operator smoke ran the real
 rung-10 `LatLonCGridOceanModel` through all ten `run_composed_card` steps on
-CPU/fp64 in 785.47 seconds and found every final state leaf finite.
+CPU/fp64 in 766.84 seconds and found every final state leaf finite.
 
 Surface and ice-interface records now use boundary-specific inventories: the
 pre-initialization frame is header-only, later frames add only fields already
@@ -96,13 +97,30 @@ owned `fnow` and associated `fdta` slabs, while its decoder retains v1/v2
 compatibility. Scoring uses the exact time-qualified keys
 emitted by the loader, including S0-F and ice-interface labels.
 
-The bounds executable now links and calls a probe compiled into patched
-`sbcmod` and executes both S1 sub-frame writers. The generated run driver
+The bounds executable links all seven patched bounds objects, executes every
+one through its patched-module probe, and runs every surface kid 0--11 and
+ice-interface kid 0--3. Its A2D(0) extents are generated
+from the admitted `sbc_oce` allocation after the deck's `nn_hls=2` value is
+verified, giving `3:jpi-2,3:jpj-2`; a `NOT USED` FLD entry retains untouched
+pointers and emits no frame. The generated run driver
 captures patched sources, parent manifest, and a producer manifest before
 launch. Its refusal trap remains armed through admission and restart/twin
 comparison. Preflight routes retained evidence through the actual
 `--admit-existing` entry point and proves that either log containing
-`E R R O R` is quarantined.
+`E R R O R` is quoted and quarantined. A failed retained-run admission does
+not move or rename already-quarantined evidence.
+
+Resume 3 also replaces the frozen CORE record with the records NEMO selects at
+its own `nn_fsbc=2` clock. Atmospheric `isecsbc` is `kt*10800`: six-hourly
+wind, air temperature, humidity, and pressure advance through records 1--5 at
+steps 1,3,5,7,9; daily radiation advances to record 2 at step 9; monthly
+precipitation remains on record 1. Runoff and SSS use the same surface clock.
+The cold-start shortwave fraction is 1.0 and each next S0-M call consumes the
+fraction recomputed from the preceding real stage-3 Kmm thickness. The
+ten-step composed driver returns the materialized S0/S1/S3/S2 boundary
+dictionary used by the surface-first scorer. Its 99-field S0-F inventory also
+materializes all three `kt=1` initialization calls, all odd-step surface calls,
+and every per-step chlorophyll and 31-level T/S call with two-rank metadata.
 
 ## Checklist and choices
 
@@ -122,16 +140,19 @@ actual NEMO arms and run admission remain unmeasured until the operator invokes
   ten-step state ladder, explicit K0 model card, exact surface-first scoring,
   finite N=1 gradients, and no author-run NEMO.
 - UNASKED: none.
-- independent review: Argon HOLD; items 1--4 repaired and re-preflighted in
-  Resume 2; item 5 is parent-identical and intentionally out of scope
+- independent review: Argon HOLD and Sonnet HOLD; every listed model-code,
+  acquisition-tool, real-smoke, and real-gradient item is addressed in Resume 3
 
 ## Verification
 
-- Round-340 focused tests: 8/8 pass; round-337 production-surface regression:
-  7/7 pass (15/15 combined).
-- Real rung-10 CPU smoke after the final ice-cover source correction: 1/1 pass
-  in 785.47 seconds; ten actual model steps, 40 ladder checkpoints, finite
-  final tree.
+- Round-340 focused fast tests: 8/8 pass.
+- Real rung-10 CPU smoke after the Resume-3 corrections: 1/1 pass in 766.84
+  seconds; ten actual model steps, 40 ladder checkpoints, a populated surface
+  boundary dictionary, and a finite final tree.
+- Real composed-card N=1 CPU gradient: 1/1 pass in the final isolated preflight
+  process in 952.12 seconds;
+  a nonzero reverse derivative agrees with its forward JVP at the configured
+  binary64 tolerance.
 - Acquisition preflight: READY; same-program, placement, FP-census, bounds,
   namelist, checksum, generated-flow, `ocean.output` error quarantine,
   actual-route retained admission, and generated-syntax controls pass or fire

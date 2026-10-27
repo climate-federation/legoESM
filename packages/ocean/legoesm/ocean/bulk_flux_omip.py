@@ -998,12 +998,6 @@ def nemo_orca2_k0_ocean_step(
     )
     e3t_reference = jnp.asarray(
         card.ocean.recipe.z_coord.nemo_e3t_0[..., 0], dtype=jnp.float64)
-    from legoesm.ocean.physics.shortwave_penetration import (
-        top_layer_absorbed_fraction,
-    )
-    shortwave_fraction_top = top_layer_absorbed_fraction(
-        e3t_reference * stretch, chl_surface=chl,
-    )
     s0 = s0._replace(
         kt=int(nemo_kt),
         u_before=u_before,
@@ -1014,7 +1008,6 @@ def nemo_orca2_k0_ocean_step(
         e3t_reference=e3t_reference,
         r3t_now=stretch - jnp.asarray(1.0, dtype=jnp.float64),
         surface_mask=jnp.asarray(state.land_mask.data, dtype=jnp.float64),
-        shortwave_fraction_top=shortwave_fraction_top,
     )
     ice_if = ice_if._replace(ts_surface=temperature[..., 0])
     fields, runoff_now, sss_target = nemo_orca2_k0_s0f(s0f)
@@ -1052,7 +1045,29 @@ def nemo_orca2_k0_ocean_step(
         kwargs["sponge"] = sponge
     kwargs["nemo_kt"] = int(nemo_kt)
     stepped = model.step(state, card.ocean.dt_s, **kwargs)
-    next_s0 = s0._replace(prior=surface.means)
+    # traqsr.F90:400-401 replaces fraqsr_1lev during stage 3.  sbc_ssm on
+    # the next step consumes that carried value; at cold start the deck
+    # initializes it to one (traqsr.F90:1288-1293).  Re-evaluate the shared
+    # RGB kernel on the actual stage-3 Kmm thickness, never on step entry.
+    state_after = stepped.state_after if hasattr(stepped, "state_after") else stepped
+    if hasattr(stepped, "stage_outputs"):
+        stage3_eta = stepped.stage_outputs[-1][4]
+    else:
+        stage3_eta = state_after.eta.data
+    stage3_stretch = nemo_r3t_stretch(
+        card.ocean.recipe.z_coord, stage3_eta, state.H_bathy.data,
+        evaluation="nemo_reciprocal",
+    )
+    from legoesm.ocean.physics.shortwave_penetration import (
+        top_layer_absorbed_fraction,
+    )
+    next_shortwave_fraction = top_layer_absorbed_fraction(
+        e3t_reference * stage3_stretch, chl_surface=chl,
+    )
+    next_s0 = s0._replace(
+        prior=surface.means,
+        shortwave_fraction_top=next_shortwave_fraction,
+    )
     next_s2 = s2._replace(
         prior_runoff_mass=surface.s2.runoff.mass_flux,
         prior_runoff_temperature_content=surface.s2.runoff.temperature_content,
@@ -1325,10 +1340,12 @@ def nemo_blk_oce_ncar(
         salinity_floor=s2.salinity_floor,
         heat_capacity=s2.heat_capacity,
     )
-    # The dynamics ice mask consumes the same ``sf_ice(1)%fnow`` field used
-    # by K0's ice-if heat-flux update, never ``fr_i`` (which is a freezing
-    # temperature / binary freeze flag at different points in that routine).
-    ice_concentration = jnp.asarray(iif.ice_cover, dtype=jnp.float64)
+    # zdftke.F90:261 consumes the post-sbcice_if ``fr_i`` field.  At this
+    # point sbcice_if.F90:169-175 has overwritten its interior with the
+    # binary freezing flag; the observed ``sf_ice(1)%fnow`` cover is a
+    # different field used only by the ice-if heat-flux calculation.
+    ice_concentration = _crop_to_surface_interior(
+        iif.fr_i, jnp.shape(s2.surface_mask))
     forcing, freshwater = nemo_s2_to_ocean_interfaces(
         tail, chl=chl, ice_concentration=ice_concentration,
         geothermal_heat_flux_mwm2=geothermal_heat_flux_mwm2)

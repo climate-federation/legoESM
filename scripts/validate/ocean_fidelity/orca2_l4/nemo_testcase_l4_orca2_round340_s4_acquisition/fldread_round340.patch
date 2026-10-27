@@ -7,7 +7,13 @@
   
     PUBLIC   fld_map    ! routine called by tides_init
     PUBLIC   fld_read, fld_fill   ! called by sbc... modules
-@@ -256,6 +257,7 @@
+@@ -156,4 +157,5 @@
++   PUBLIC   r340_fld_probe
+    !!----------------------------------------------------------------------
+    !! NEMO/OCE 5.0, NEMO Consortium (2024)
+    !! Software governed by the CeCILL license (see ./LICENSE)
+    !!----------------------------------------------------------------------
+@@ -256,6 +258,7 @@
              IF( kt == nitend - kn_fsbc + 1 )   CALL iom_close( sd(jf)%num )   ! Close the input files
  
           END DO                                    ! --- end loop over field --- !
@@ -15,7 +21,7 @@
           !
        ENDIF
        !
-@@ -1655,5 +1657,38 @@
+@@ -1655,5 +1658,54 @@
        ! 
     END FUNCTION ksec_week
  
@@ -32,7 +38,7 @@
 +      ENDIF
 +      r340_call=r340_call+1
 +      DO jf=1,SIZE(sd)
-+         IF (.NOT.ASSOCIATED(sd(jf)%fnow)) CYCLE
++         IF (TRIM(sd(jf)%clrootname) == 'NOT USED') CYCLE
 +         WRITE(name,'("oracle_r340_fld_k",I8.8,"_c",I3.3,"_f",I3.3,"_r",I4.4,".bin")') kt,r340_call,jf,mpprank
 +         OPEN(NEWUNIT=iu,FILE=TRIM(name),ACCESS='STREAM',FORM='UNFORMATTED',STATUS='NEW',ACTION='WRITE')
 +         WRITE(iu) magic
@@ -41,7 +47,7 @@
 +         WRITE(iu) LBOUND(sd(jf)%fnow),UBOUND(sd(jf)%fnow),Nis0,Nie0,Njs0,Nje0, &
 +            & (Nie0-Nis0+1)*(Nje0-Njs0+1)*SIZE(sd(jf)%fnow,3)
 +         WRITE(iu) sd(jf)%fnow(Nis0:Nie0,Njs0:Nje0,:)
-+         IF (ASSOCIATED(sd(jf)%fdta)) THEN
++         IF (sd(jf)%ln_tint) THEN
 +            WRITE(iu) 1,LBOUND(sd(jf)%fdta),UBOUND(sd(jf)%fdta),Nis0,Nie0,Njs0,Nje0, &
 +               & (Nie0-Nis0+1)*(Nje0-Njs0+1)*SIZE(sd(jf)%fdta,3)*SIZE(sd(jf)%fdta,4)
 +            WRITE(iu) sd(jf)%fdta(Nis0:Nie0,Njs0:Nje0,:,:)
@@ -51,6 +57,22 @@
 +         CLOSE(iu)
 +      END DO
 +   END SUBROUTINE r340_fld_frame
++
++   SUBROUTINE r340_fld_probe(kt,isecsbc)
++      INTEGER,INTENT(in)::kt,isecsbc
++      TYPE(FLD)::sd(2)
++      sd(1)%clrootname='round340-fixture'
++      sd(1)%clvar='fixture'
++      sd(1)%ln_tint=.FALSE.
++      sd(1)%rec_shft=0._wp
++      sd(1)%nbb=1 ; sd(1)%naa=2
++      sd(1)%nrec(:,1)=(/0,0/) ; sd(1)%nrec(:,2)=(/1,1/)
++      ALLOCATE(sd(1)%fnow(Nis0:Nie0,Njs0:Nje0,1))
++      sd(1)%fnow=-0._wp
++      sd(2)%clrootname='NOT USED'
++      CALL r340_fld_frame(kt,isecsbc,sd)
++      DEALLOCATE(sd(1)%fnow)
++   END SUBROUTINE r340_fld_probe
 +
     !!======================================================================
  END MODULE fldread

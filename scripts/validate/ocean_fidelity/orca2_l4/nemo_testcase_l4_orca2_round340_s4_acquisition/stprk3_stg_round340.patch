@@ -8,11 +8,18 @@
     USE domqco         ! quasi-eulerian coordinate      (dom_qco_r3c routine)
     USE bdydyn         ! ocean open boundary conditions (define bdy_dyn)
     USE lbclnk         ! ocean lateral boundary conditions (or mpp link)
-@@ -582,6 +583,7 @@
-          ENDIF
-       ENDIF
-       !
+@@ -71,4 +72,5 @@
++   PUBLIC   r340_stage_probe
+    !!----------------------------------------------------------------------
+    !! NEMO/OCE 5.0, NEMO Consortium (2024)
+    !! Software governed by the CeCILL license (see ./LICENSE)
+    !!----------------------------------------------------------------------
+@@ -584,0 +587 @@
 +      CALL r340_state_frame( kstp, kstg, Kaa, ts(:,:,:,:,Kaa), uu(:,:,:,Kaa), vv(:,:,:,Kaa), ssh(:,:,Kaa) )
-       DEALLOCATE( zFu, zFv, zFw )
-       !
-       IF( ln_timing )   CALL timing_stop('stp_RK3_stg')
+@@ -591,0 +595,6 @@
++   SUBROUTINE r340_stage_probe(kt,klev,pts,pu,pv,pssh)
++      INTEGER,INTENT(in)::kt,klev
++      REAL(wp),INTENT(in)::pts(:,:,:,:),pu(:,:,:),pv(:,:,:),pssh(:,:)
++      CALL r340_state_frame(kt,1,klev,pts,pu,pv,pssh)
++   END SUBROUTINE r340_stage_probe
++
