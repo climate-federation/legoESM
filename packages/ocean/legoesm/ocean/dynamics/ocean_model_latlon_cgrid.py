@@ -12466,6 +12466,15 @@ class LatLonCGridOceanModel:
         um3, vm3 = compute_face_masks_3d(_zc.is_active, _grid)
         um3 = um3.astype(h_k.dtype)
         vm3 = vm3.astype(h_k.dtype)
+        if bool(getattr(vmix.tke, "nemo_sh2_fold_top_v", False)):
+            _fold = getattr(_grid, "fold", None)
+            _raw = getattr(_zc, "nemo_een_barotropic", None)
+            if _fold is None or not bool(_fold.is_active) or _raw is None:
+                raise ValueError(
+                    "nemo_sh2_fold_top_v=True needs an active north fold and "
+                    "the card's raw NEMO vmask (z_coord.nemo_een_barotropic)")
+            vm3 = vm3.at[-1].set(
+                jnp.asarray(_raw.vmask[-1], dtype=vm3.dtype))
 
         def _at_bottom(a):
             return jnp.take_along_axis(a, _bl_idx, axis=-1)[..., 0]

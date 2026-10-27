@@ -7,9 +7,10 @@ REPO = Path(__file__).resolve().parents[3]
 for _pkg in (REPO, REPO / "packages/core", REPO / "packages/ocean"):
     if str(_pkg) not in sys.path:
         sys.path.insert(0, str(_pkg))
-for _mod in list(sys.modules):
-    if _mod == "legoesm" or _mod.startswith("legoesm."):
-        sys.modules.pop(_mod, None)
+if not str(getattr(sys.modules.get("legoesm"), "__file__", "")).startswith(str(REPO)):
+    for _mod in list(sys.modules):
+        if _mod == "legoesm" or _mod.startswith("legoesm."):
+            sys.modules.pop(_mod, None)
 
 import jax.numpy as jnp
 import numpy as np
