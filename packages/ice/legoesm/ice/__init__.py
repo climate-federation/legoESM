@@ -287,3 +287,27 @@ __all__.extend(
     )
 )
 
+from legoesm.ice.si3_thd_pnd import (  # noqa: E402
+    SI3O12CategoryOutput,
+    SI3O12Stages,
+    SI3PndLevOutputs,
+    SI3PondOutputs,
+    si3_ice_perm_eff,
+    si3_ice_thd_o12_stages,
+    si3_ice_thd_pnd,
+    si3_pnd_lev,
+)
+
+__all__.extend(
+    (
+        "SI3PndLevOutputs",
+        "SI3PondOutputs",
+        "SI3O12CategoryOutput",
+        "SI3O12Stages",
+        "si3_ice_perm_eff",
+        "si3_pnd_lev",
+        "si3_ice_thd_pnd",
+        "si3_ice_thd_o12_stages",
+    )
+)
+
