@@ -521,7 +521,7 @@ def caller_audit(deck_root: Path, expect_commit: str) -> dict[str, object]:
         "LOCK_EXCHANGE-zco": build_lock_exchange_zco_card(),
         "OVERFLOW-zps": build_overflow_zps_card(),
         "VORTEX-zco": build_vortex_zco_card(),
-        "ORCA2-rung0": rung0.rung0_card(deck_root),
+        "ORCA2-rung0": rung0.build_rung0_card(deck_root),
     }
     card_rows = {}
     for name, card in non_orca2_cards.items():
