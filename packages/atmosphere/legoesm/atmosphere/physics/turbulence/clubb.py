@@ -120,6 +120,7 @@ import math
 import sys
 from typing import NamedTuple
 
+import equinox as eqx
 import jax
 import jax.numpy as jnp
 from jax import lax
@@ -6339,6 +6340,15 @@ def clubb_turbulence(
     w_fix = ((p_full >= config.trop_cloud_top_press).astype(dp_g.dtype)
              if _trop_on else jnp.ones_like(dp_g))
     dT_dt = dT_dt + column_energy_fixer_heating(resid, dp_g, w_fix)
+    if _trop_on:
+        # A cut pressure above every layer pressure leaves the fixer no mass
+        # (0/0 -> NaN in dT_dt, which also reaches any gradient): fail loudly
+        # (user decision 2026-10-27).
+        dT_dt = eqx.error_if(
+            dT_dt, jnp.any(jnp.sum(w_fix, axis=1) == 0.0),
+            "clubb_turbulence: trop_cloud_top_press is higher than every "
+            "layer pressure in a column, so no layer is at or below the cut "
+            "for the column energy fixer; lower the cut pressure.")
     output = TurbulenceOutput(
         du_dt=du_dt,
         dv_dt=dv_dt,

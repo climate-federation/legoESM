@@ -330,3 +330,17 @@ def test_diagnostic_clubb_cutoff_on_closes_energy_below_the_cut():
     np.testing.assert_allclose(h[~above].reshape(h.shape[0], -1),
                                h[:, -1:] * np.ones((1, (~above[0]).sum())),
                                rtol=1e-12)
+
+
+def test_diagnostic_clubb_cut_below_every_layer_raises():
+    """A cut pressure higher than every layer pressure leaves the energy
+    fixer no layer to heat: a clear error, not a NaN tendency."""
+    kw = _column(p_top=2.0e4)
+    cut = 1.1 * float(np.max(np.asarray(kw["p_full"])))
+    cfg = CLUBBConfig(trop_cloud_top_press=cut)
+    with pytest.raises(Exception, match="no layer is at or below the cut"):
+        jax.block_until_ready(_run_diagnostic(kw, cfg).dT_dt)
+    # traced pressures (under jit) raise too
+    with pytest.raises(Exception, match="no layer is at or below the cut"):
+        jax.block_until_ready(
+            jax.jit(lambda k: _run_diagnostic(k, cfg).dT_dt)(kw))
