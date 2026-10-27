@@ -167,6 +167,27 @@ def test_series_row_ties_to_step_budget(moving):
     assert abs(Tc[r["k_A"]] - 0.5 * (Tc[r["k_A"] - 1] + Tc[r["k_A"] + 1])) == r["A"]
     o = cs.onsets([dict(step=1, **r), dict(step=2, **dict(r, C=2.0, C3=2.0))])
     assert o["t_C"] == o["t_C3"] == 2 and o["window"] == [1, 2]
+    jq = (ij[1] + st.T.shape[1] // 2) % st.T.shape[1]
+    np.testing.assert_array_equal(r["C_lev"], C[0])
+    np.testing.assert_array_equal(r["C3_lev"], np.max(C, 0))
+    assert np.any(np.asarray(r["C3_lev"]) > np.asarray(r["C_lev"]))
+    np.testing.assert_array_equal(r["Cq_lev"], np.asarray(info["courant_stages"][0])[ij[0], jq])
+
+
+def test_at_swing_level_reads_fixed_level_at_departure():
+    # level 2 = k_A at t_D=12 only; levels 0/1 would give other onsets.
+    lev = {10: [3.0, 0.5, 0.5], 11: [3.0, 0.5, 1.2], 12: [3.0, 0.9, 1.5],
+           13: [3.0, 2.0, 0.8]}
+    l3 = {10: [3.0, 0.5, 1.1], 11: [3.0, 0.5, 1.2], 12: [3.0, 0.9, 1.5],
+          13: [3.0, 2.0, 1.0]}
+    rows = [dict(step=s, k_A=(2 if s == 12 else 1), C_lev=lev[s], C3_lev=l3[s],
+                 Cq_lev=[0.5, 0.0, 0.01 * s]) for s in lev]
+    a = cs.at_swing_level(rows, 12)
+    assert a["k"] == 2 and a["C"] == [0.5, 1.2, 1.5, 0.8]
+    assert a["t_C"] is None and a["first_C"] == 11       # drops below 1 at 13
+    assert a["t_C3"] == a["first_C3"] == 10
+    assert a["C_at_t_D"] == 1.5 and a["max_Cq_k"] == 0.13
+    assert cs.at_swing_level(rows, None) is None             # no departure
 
 
 def test_controls_fail_on_planted_violations_and_window_checked():

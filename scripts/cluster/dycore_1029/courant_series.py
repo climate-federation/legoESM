@@ -13,6 +13,9 @@ Input: a ``burst_anatomy_probe.py --keep 500`` directory (the rerun of job
   floor  hot column has a level at T <= T_min + 0.01 K
   k_C, k_A  levels (0 = top) of the stage-1 max C and of the max swing term
 
+Also per level: C_lev (stage 1), C3_lev (max over stages), Cq_lev (quiet);
+``at_swing_level`` repeats the C/C3 onsets at the fixed level k_A(t_D).
+
 and the onsets t_D (A > E sustained to the last saved step), t_D2 (A > 2E),
 t_C (C >= 1 sustained), t_C3, plus first-ever C >= 1 and first floor step.
 The reading rule is pre-registered on #1029 (comment 6435566464); this
@@ -77,7 +80,9 @@ def series_row(model, state, target, ij):
         k_C=int(np.argmax(Cs[0][i, j])),
         k_A=1 + int(np.argmax(np.abs(T[i, j, 1:-1] - 0.5 * (T[i, j, :-2] + T[i, j, 2:])))),
         floor=bool(np.any(T[i, j] <= model.config.T_min + 0.01)),
-        Tmax=float(np.max(T[i, j])))
+        Tmax=float(np.max(T[i, j])),
+        C_lev=Cs[0][i, j].tolist(), C3_lev=np.max([c[i, j] for c in Cs], 0).tolist(),
+        Cq_lev=Cs[0][i, jq].tolist())
 
 
 def onsets(rows):
@@ -95,6 +100,26 @@ def onsets(rows):
         K3_pass=all(r["ident"] <= 1e-9 for r in rows),
         K4_max_Cq=max(r["Cq"] for r in rows),
         K4_pass=all(r["Cq"] < 0.2 for r in rows))
+
+
+def at_swing_level(rows, t_D):
+    """Same Courant series at one fixed level: k_A at the departure step t_D
+    (the level of largest swing there) instead of the column maximum.  Onsets
+    use the unchanged definitions; max_Cq_k is the quiet column at that level.
+    No departure (t_D None) -> no level, returns None (the rule makes no claim)."""
+    if t_D is None:
+        return None
+    k = next(r["k_A"] for r in rows if r["step"] == t_D)
+    st = [r["step"] for r in rows]
+    C = [r["C_lev"][k] for r in rows]
+    C3 = [r["C3_lev"][k] for r in rows]
+    return dict(k=k, t_D=t_D,
+                t_C=sustained_onset(st, [c >= 1.0 for c in C]),
+                t_C3=sustained_onset(st, [c >= 1.0 for c in C3]),
+                first_C=first_true(st, [c >= 1.0 for c in C]),
+                first_C3=first_true(st, [c >= 1.0 for c in C3]),
+                C_at_t_D=C[st.index(t_D)], C3_at_t_D=C3[st.index(t_D)],
+                max_Cq_k=max(r["Cq_lev"][k] for r in rows), C=C, C3=C3)
 
 
 def readable(o):
@@ -154,7 +179,11 @@ def main(argv=None):
         print(json.dumps(r), flush=True)
     res = dict(meta=meta, column=[int(i), int(j), lat, lon], rows=rows,
                onsets=readable(onsets(rows)), K2=k2)
+    res["at_swing_level"] = at_swing_level(rows, res["onsets"]["t_D"])
     print("ONSETS", json.dumps(res["onsets"]), flush=True)
+    lv = res["at_swing_level"]
+    print("AT_SWING_LEVEL", json.dumps(lv and {x: v for x, v in lv.items()
+                                               if x not in ("C", "C3")}), flush=True)
     a.out.write_text(json.dumps(res))
     return res
 
