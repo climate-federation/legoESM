@@ -10425,7 +10425,6 @@ CITATION_MAP.update({
     'ORCA2_SAS_ICE_O7_REF/BLD/ppsrc/nemo/icethd.f90:222-223': ['IF ( ln_pnd .AND. ln_icedH ) &', '&                    CALL ice_thd_pnd( kt )                ! --- Melt ponds --- !', 2],
     'ORCA2_SAS_ICE_O7_REF/BLD/ppsrc/nemo/icethd_pnd.f90:1441': '&                          ln_pnd_lids, ln_pnd_rain, ln_pnd_alb,  &',
     'ORCA2_SAS_ICE_O7_REF/BLD/ppsrc/nemo/icethd_pnd.f90:702': 'IF( ln_pnd_rain )    zv_mlt = zv_mlt + ( tprecip(ji,jj) - sprecip(ji,jj) ) * z1_rhow * a_i(ji,jj,jl) * rDt_ice',
-    'ORCA2_SAS_ICE_O7_REF/BLD/ppsrc/nemo/icethd_pnd.f90:162-264': ['SUBROUTINE ice_thd_pnd( kt )', ('END SUBROUTINE ice_thd_pnd', 1), 103],
     'packages/ice/legoesm/ice/si3_thd_pnd.py:575-763': ['def si3_ice_thd_pnd(', (')', 315), 189],
     'ORCA2_SAS_ICE_O7_REF/BLD/ppsrc/nemo/icethd_pnd.f90:203': 'at_i(:,:) = SUM( a_i, dim=3 )',
     'packages/ice/legoesm/ice/si3_thd_pnd.py:683': 'at_i = fortran_sum0(arr["a_i"])',
