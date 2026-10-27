@@ -41,7 +41,7 @@ def test_card_is_fp64_and_default_ice_state_layout_is_unchanged():
     card = _build_card()
     assert card.initial_state.contents.dtype == jnp.float64
     assert all(moment.dtype == jnp.float64 for moment in card.initial_state.moments)
-    assert len(DynamicSeaIceState._fields) == 12
+    assert len(DynamicSeaIceState._fields) == 13
 
 
 def test_prather_rung_rejects_a_nonzero_y_velocity():

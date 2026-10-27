@@ -128,9 +128,11 @@ def step_ponds(
         if any(
             x is None
             for x in (
+                at_i,
                 a_i,
                 h_i,
                 t_su,
+                h_il,
                 dh_i_sum,
                 dh_s_sum,
                 sz_i,
@@ -141,18 +143,14 @@ def step_ponds(
             )
         ):
             raise ValueError(
-                "step_ponds(scheme='si3_lev') requires SI3 category state, "
-                "melt totals, rho_w, gravity, and ice_constants"
+                "step_ponds(scheme='si3_lev') requires at_i, a_i, h_i, t_su, "
+                "h_il, melt totals, sz_i, t_i, rho_w, gravity, and ice_constants"
             )
         a_i_f64 = jnp.asarray(a_i, dtype=jnp.float64)
         pond_area_f64 = jnp.asarray(pond_area, dtype=jnp.float64)
         h_ip_in = jnp.asarray(pond_depth, dtype=jnp.float64)
-        h_il_in = (
-            jnp.zeros_like(h_ip_in)
-            if h_il is None
-            else jnp.asarray(h_il, dtype=jnp.float64)
-        )
-        at_i_in = a_i_f64 if at_i is None else jnp.asarray(at_i, dtype=jnp.float64)
+        h_il_in = jnp.asarray(h_il, dtype=jnp.float64)
+        at_i_in = jnp.asarray(at_i, dtype=jnp.float64)
         a_ip_in = nemo_source_round(pond_area_f64 * a_i_f64)
         sz_i_f64 = jnp.asarray(sz_i, dtype=jnp.float64)
         t_i_f64 = jnp.asarray(t_i, dtype=jnp.float64)
@@ -194,6 +192,7 @@ def step_ponds(
             jnp.zeros_like(lev.a_ip),
         )
         pond_depth_new = lev.h_ip
+        h_il_new = lev.h_il
         rho_w_f64 = jnp.asarray(rho_w, dtype=jnp.float64)
         drain_cell_m = nemo_source_round(
             nemo_source_round(lev.wfx_pnd * dt_f64) / rho_w_f64
@@ -209,6 +208,7 @@ def step_ponds(
             pond_depth_new.astype(pond_depth.dtype),
             drain_to_ocean_m.astype(pond_depth.dtype),
             refreeze_m.astype(pond_depth.dtype),
+            h_il_new.astype(jnp.asarray(h_il).dtype),
         )
     if namthd_pnd is not None:
         raise ValueError(

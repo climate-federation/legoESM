@@ -1956,6 +1956,7 @@ def test_production_step_sea_ice_and_step_ponds_wire_si3_lev_and_preserve_cesm(m
         emissivity_ice=0.0,
         Cd_ice=0.0,
         Ch_ice=0.0,
+        Ce_ice=0.0,
         ocean_heat_transfer_coeff=0.0,
         snow=SnowConfig(enabled=True, flooding=False),
         ponds=MeltPondConfig(enabled=True, scheme="si3_lev", namthd_pnd=namthd_pnd),
@@ -1995,16 +1996,19 @@ def test_production_step_sea_ice_and_step_ponds_wire_si3_lev_and_preserve_cesm(m
         ln_pnd_lids=namthd_pnd.ln_pnd_lids,
     )
     want_step_pa = oracle_step[0] / conc_out
+    assert oracle_step[2] > 0.0
     np.testing.assert_array_equal(_bits(state_eager.pond_area.data), _bits(np.full(shape, want_step_pa)))
     np.testing.assert_array_equal(_bits(state_jit.pond_area.data), _bits(np.full(shape, want_step_pa)))
     np.testing.assert_array_equal(_bits(state_eager.pond_depth.data), _bits(np.full(shape, oracle_step[1])))
     np.testing.assert_array_equal(_bits(state_jit.pond_depth.data), _bits(np.full(shape, oracle_step[1])))
+    np.testing.assert_array_equal(_bits(state_eager.h_il.data), _bits(np.full(shape, oracle_step[2])))
+    np.testing.assert_array_equal(_bits(state_jit.h_il.data), _bits(np.full(shape, oracle_step[2])))
     np.testing.assert_array_equal(_bits(resp_eager.freshwater_flux), _bits(resp_jit.freshwater_flux))
 
     # Direct step_ponds(scheme="si3_lev") vs independent scalar oracle _oracle_pnd_lev_category
     with precision_scope(PrecisionPolicy.fp64(transcendentals="libm")):
-        pa_new, pd_new, drain_m, refreeze_m = jax.jit(
-            lambda pa, pd, ai, hi, tsu, dhi, dhs, szi, ti: ponds_mod.step_ponds(
+        pa_new, pd_new, drain_m, refreeze_m, hil_new = jax.jit(
+            lambda pa, pd, hil, ai, hi, tsu, dhi, dhs, szi, ti: ponds_mod.step_ponds(
                 pa,
                 pd,
                 melt_water_m=zeros,
@@ -2022,6 +2026,7 @@ def test_production_step_sea_ice_and_step_ponds_wire_si3_lev_and_preserve_cesm(m
                 a_i=ai,
                 h_i=hi,
                 t_su=tsu,
+                h_il=hil,
                 dh_i_sum=dhi,
                 dh_s_sum=dhs,
                 sz_i=szi,
@@ -2034,6 +2039,7 @@ def test_production_step_sea_ice_and_step_ponds_wire_si3_lev_and_preserve_cesm(m
         )(
             state.pond_area.data,
             state.pond_depth.data,
+            jnp.full(shape, 0.008, dtype=jnp.float64),
             state.concentration.data,
             state.h_ice.data,
             jnp.full(shape, _ORACLE_RT0, dtype=jnp.float64),
@@ -2049,7 +2055,7 @@ def test_production_step_sea_ice_and_step_ponds_wire_si3_lev_and_preserve_cesm(m
         t_su=_ORACLE_RT0,
         a_ip=0.15 * 0.80,
         h_ip=0.12,
-        h_il=0.0,
+        h_il=0.008,
         dh_i_sum=-0.012,
         dh_s_sum=-0.004,
         sz_i=[2.5],
@@ -2065,9 +2071,11 @@ def test_production_step_sea_ice_and_step_ponds_wire_si3_lev_and_preserve_cesm(m
     )
     want_pa = oracle_cat[0] / 0.80
     want_pd = oracle_cat[1]
+    want_hil = oracle_cat[2]
     want_drain_m = (oracle_cat[5] * RDT / _ORACLE_RHOW) / 0.80
     np.testing.assert_array_equal(_bits(pa_new), _bits(np.full(shape, want_pa)))
     np.testing.assert_array_equal(_bits(pd_new), _bits(np.full(shape, want_pd)))
+    np.testing.assert_array_equal(_bits(hil_new), _bits(np.full(shape, want_hil)))
     np.testing.assert_array_equal(_bits(drain_m), _bits(np.full(shape, want_drain_m)))
     np.testing.assert_array_equal(_bits(refreeze_m), _bits(np.zeros(shape)))
 
@@ -2075,7 +2083,7 @@ def test_production_step_sea_ice_and_step_ponds_wire_si3_lev_and_preserve_cesm(m
     monkeypatch.setattr(
         sea_ice_mod,
         "step_ponds",
-        lambda pa, pd, **kw: (pa, pd, jnp.zeros_like(pd), jnp.zeros_like(pd)),
+        lambda pa, pd, **kw: (pa, pd, jnp.zeros_like(pd), jnp.zeros_like(pd), kw["h_il"]),
     )
     with precision_scope(PrecisionPolicy.fp64(transcendentals="libm")):
         state_no_call, resp_no_call = jax.jit(
@@ -2083,6 +2091,7 @@ def test_production_step_sea_ice_and_step_ponds_wire_si3_lev_and_preserve_cesm(m
         )(state, forcing, ocean_sst, zeros, zeros)
     assert np.count_nonzero(_bits(state_no_call.pond_area.data) != _bits(state_jit.pond_area.data)) > 0
     assert np.count_nonzero(_bits(state_no_call.pond_depth.data) != _bits(state_jit.pond_depth.data)) > 0
+    assert np.count_nonzero(_bits(state_no_call.h_il.data) != _bits(state_jit.h_il.data)) > 0
     assert np.count_nonzero(_bits(resp_no_call.freshwater_flux) != _bits(resp_jit.freshwater_flux)) > 0
     monkeypatch.undo()
 
@@ -2091,7 +2100,7 @@ def test_production_step_sea_ice_and_step_ponds_wire_si3_lev_and_preserve_cesm(m
     monkeypatch.setattr(
         sea_ice_mod,
         "step_ponds",
-        lambda *a, **kw: orig_step_ponds(*a, **{**kw, "scheme": "cesm", "namthd_pnd": None}),
+        lambda *a, **kw: (*orig_step_ponds(*a, **{**kw, "scheme": "cesm", "namthd_pnd": None}), kw["h_il"]),
     )
     with precision_scope(PrecisionPolicy.fp64(transcendentals="libm")):
         state_cesm_mut, resp_cesm_mut = jax.jit(
@@ -2099,6 +2108,7 @@ def test_production_step_sea_ice_and_step_ponds_wire_si3_lev_and_preserve_cesm(m
         )(state, forcing, ocean_sst, zeros, zeros)
     assert np.count_nonzero(_bits(state_cesm_mut.pond_area.data) != _bits(state_jit.pond_area.data)) > 0
     assert np.count_nonzero(_bits(state_cesm_mut.pond_depth.data) != _bits(state_jit.pond_depth.data)) > 0
+    assert np.count_nonzero(_bits(state_cesm_mut.h_il.data) != _bits(state_jit.h_il.data)) > 0
     assert np.count_nonzero(_bits(resp_cesm_mut.freshwater_flux) != _bits(resp_jit.freshwater_flux)) > 0
     monkeypatch.undo()
 
@@ -2122,7 +2132,7 @@ def test_production_step_sea_ice_and_step_ponds_wire_si3_lev_and_preserve_cesm(m
     for got, want in zip(jax.tree.leaves(rsp_def), jax.tree.leaves(rsp_exp), strict=True):
         np.testing.assert_array_equal(_bits(got), _bits(want))
 
-    # Validation guards on step_ponds
+    # Validation guards on step_ponds and DynamicSeaIceState.h_il
     with pytest.raises(ValueError, match="requires MeltPondConfig.namthd_pnd"):
         sea_ice_mod.step_sea_ice(
             state,
@@ -2145,3 +2155,681 @@ def test_production_step_sea_ice_and_step_ponds_wire_si3_lev_and_preserve_cesm(m
             U_min=1.0,
             dt=RDT,
         )
+    with pytest.raises(ValueError, match="DynamicSeaIceState.h_il must be a Field"):
+        sea_ice_mod.step_sea_ice(
+            state._replace(h_il=None),
+            forcing,
+            ocean_sst,
+            zeros,
+            zeros,
+            cfg_si3,
+            U_min=1.0,
+            dt=RDT,
+        )
+
+
+def test_lid_thickness_h_il_persists_across_steps_and_restart_round_trip(tmp_path, monkeypatch):
+    """Verify prognostic h_il is carried in DynamicSeaIceState across steps and run restart."""
+    from legoesm.grids.latlon import create_latlon_grid
+    from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean
+    from legoesm.ocean.restart import load_run_restart, save_run_restart
+    from legoesm.ocean.vertical import create_ocean_z_star
+
+    namthd_pnd = SI3PondConfig(
+        rn_himin=float(DECK_PND_NML["rn_himin"]),
+        rn_apnd_min=float(DECK_PND_NML["rn_apnd_min"]),
+        rn_apnd_max=float(DECK_PND_NML["rn_apnd_max"]),
+        rn_pnd_flush=float(DECK_PND_NML["rn_pnd_flush"]),
+        ln_pnd_lids=bool(DECK_PND_NML["ln_pnd_lids"]),
+    )
+    shape = (2, 2)
+    t_cold = SeaIceConfig().T_freeze_ocean  # 271.35 K (< T0, grows lid via Flocco 2010)
+    base_state = init_dynamic_ice_state(shape, S_ice_init=2.5, T_ice_init=t_cold)
+    # Four distinct cells:
+    # (0, 0): starts at h_il=0.0, grows lid on step 1, evolves from that lid on step 2
+    # (0, 1): starts with existing lid h_il=0.015 m, insulates pond on step 1 and step 2
+    # (1, 0): starts with thicker lid h_il=0.025 m and pond depth h_ip=0.16 m
+    # (1, 1): starts with moderate lid h_il=0.006 m and deeper pond h_ip=0.18 m
+    pa_0 = np.array([[0.15, 0.22], [0.20, 0.25]], dtype=np.float64)
+    pd_0 = np.array([[0.12, 0.14], [0.16, 0.18]], dtype=np.float64)
+    hil_0 = np.array([[0.00, 0.015], [0.025, 0.006]], dtype=np.float64)
+    ai_0 = np.array([[0.50, 0.75], [0.85, 0.90]], dtype=np.float64)
+    hi_0 = np.array([[1.60, 1.60], [1.80, 2.10]], dtype=np.float64)
+    state_0 = base_state._replace(
+        h_ice=base_state.h_ice.replace(data=jnp.asarray(hi_0)),
+        T_ice=base_state.T_ice.replace(data=jnp.full(shape, t_cold, dtype=jnp.float64)),
+        concentration=base_state.concentration.replace(data=jnp.asarray(ai_0)),
+        h_snow=base_state.h_snow.replace(data=jnp.full(shape, 0.02, dtype=jnp.float64)),
+        S_ice=base_state.S_ice.replace(data=jnp.full(shape, 2.5, dtype=jnp.float64)),
+        pond_area=base_state.pond_area.replace(data=jnp.asarray(pa_0)),
+        pond_depth=base_state.pond_depth.replace(data=jnp.asarray(pd_0)),
+        h_il=base_state.h_il.replace(data=jnp.asarray(hil_0)),
+    )
+    zeros = jnp.zeros(shape, dtype=jnp.float64)
+    forcing = AtmToSurface(
+        sw_down=zeros,
+        lw_down=zeros,
+        precip_total=zeros,
+        precip_snow=zeros,
+        T_lowest=jnp.full(shape, t_cold, dtype=jnp.float64),
+        q_lowest=zeros,
+        u_lowest=zeros,
+        v_lowest=zeros,
+        p_lowest=jnp.full(shape, 100000.0, dtype=jnp.float64),
+        p_surface=jnp.full(shape, 101325.0, dtype=jnp.float64),
+        rho_lowest=jnp.full(shape, 1.25, dtype=jnp.float64),
+        cos_zenith=zeros,
+        co2_ppmv=jnp.full(shape, 400.0, dtype=jnp.float64),
+        has_radiation=zeros,
+        has_precipitation=zeros,
+        z_lowest=jnp.full(shape, 10.0, dtype=jnp.float64),
+    )
+    ocean_sst = jnp.full(shape, t_cold, dtype=jnp.float64)
+    cfg_si3 = SeaIceConfig(
+        emissivity_ice=0.0,
+        Cd_ice=0.0,
+        Ch_ice=0.0,
+        Ce_ice=0.0,
+        ocean_heat_transfer_coeff=0.0,
+        snow=SnowConfig(enabled=True, flooding=False),
+        ponds=MeltPondConfig(enabled=True, scheme="si3_lev", namthd_pnd=namthd_pnd),
+        ice_constants=NEMO_SI3_CONSTANTS_CONFIG,
+    )
+
+    @jax.jit
+    def _run_step(st, frc, sst, u_ocn, v_ocn):
+        return sea_ice_mod.step_sea_ice(
+            st, frc, sst, u_ocn, v_ocn, cfg_si3, U_min=1.0, dt=RDT
+        )
+
+    with precision_scope(PrecisionPolicy.fp64(transcendentals="libm")):
+        with jax.disable_jit():
+            st1_eager, rsp1_eager = sea_ice_mod.step_sea_ice(
+                state_0, forcing, ocean_sst, zeros, zeros, cfg_si3, U_min=1.0, dt=RDT
+            )
+            st2_eager, rsp2_eager = sea_ice_mod.step_sea_ice(
+                st1_eager, forcing, ocean_sst, zeros, zeros, cfg_si3, U_min=1.0, dt=RDT
+            )
+        st1_jit, rsp1_jit = _run_step(state_0, forcing, ocean_sst, zeros, zeros)
+        st2_jit, rsp2_jit = _run_step(st1_jit, forcing, ocean_sst, zeros, zeros)
+
+    # Verify step 1 and step 2 against sequential scalar oracle _oracle_pnd_lev_category
+    want_pa1 = np.zeros(shape, dtype=np.float64)
+    want_pd1 = np.zeros(shape, dtype=np.float64)
+    want_hil1 = np.zeros(shape, dtype=np.float64)
+    want_fw1 = np.zeros(shape, dtype=np.float64)
+    want_pa2 = np.zeros(shape, dtype=np.float64)
+    want_pd2 = np.zeros(shape, dtype=np.float64)
+    want_hil2 = np.zeros(shape, dtype=np.float64)
+    want_fw2 = np.zeros(shape, dtype=np.float64)
+    for j in range(shape[0]):
+        for i in range(shape[1]):
+            c1 = float(st1_jit.concentration.data[j, i])
+            h1 = float(st1_jit.h_ice.data[j, i])
+            t1 = float(st1_jit.T_ice.data[j, i])
+            dil1 = float(ai_0[j, i]) / c1
+            o1 = _oracle_pnd_lev_category(
+                at_i=c1,
+                a_i=c1,
+                h_i=h1,
+                t_su=t1,
+                a_ip=float(pa_0[j, i]) * c1,
+                h_ip=float(pd_0[j, i]) * dil1,
+                h_il=float(hil_0[j, i]) * dil1,
+                dh_i_sum=0.0,
+                dh_s_sum=0.0,
+                sz_i=[2.5],
+                t_i=[float(t_cold)],
+                wfx_pnd=0.0,
+                rDt_ice=RDT,
+                r1_Dt_ice=R1_RDT,
+                rn_himin=namthd_pnd.rn_himin,
+                rn_apnd_min=namthd_pnd.rn_apnd_min,
+                rn_apnd_max=namthd_pnd.rn_apnd_max,
+                rn_pnd_flush=namthd_pnd.rn_pnd_flush,
+                ln_pnd_lids=namthd_pnd.ln_pnd_lids,
+            )
+            want_pa1[j, i] = o1[0] / c1
+            want_pd1[j, i] = o1[1]
+            want_hil1[j, i] = o1[2]
+            want_fw1[j, i] = (((o1[5] * RDT / _ORACLE_RHOW) / c1) * _ORACLE_RHOW / RDT) * c1
+
+            c2 = float(st2_jit.concentration.data[j, i])
+            h2 = float(st2_jit.h_ice.data[j, i])
+            t2 = float(st2_jit.T_ice.data[j, i])
+            dil2 = c1 / c2
+            o2 = _oracle_pnd_lev_category(
+                at_i=c2,
+                a_i=c2,
+                h_i=h2,
+                t_su=t2,
+                a_ip=want_pa1[j, i] * c2,
+                h_ip=want_pd1[j, i] * dil2,
+                h_il=want_hil1[j, i] * dil2,
+                dh_i_sum=0.0,
+                dh_s_sum=0.0,
+                sz_i=[2.5],
+                t_i=[t1],
+                wfx_pnd=0.0,
+                rDt_ice=RDT,
+                r1_Dt_ice=R1_RDT,
+                rn_himin=namthd_pnd.rn_himin,
+                rn_apnd_min=namthd_pnd.rn_apnd_min,
+                rn_apnd_max=namthd_pnd.rn_apnd_max,
+                rn_pnd_flush=namthd_pnd.rn_pnd_flush,
+                ln_pnd_lids=namthd_pnd.ln_pnd_lids,
+            )
+            want_pa2[j, i] = o2[0] / c2
+            want_pd2[j, i] = o2[1]
+            want_hil2[j, i] = o2[2]
+            want_fw2[j, i] = (((o2[5] * RDT / _ORACLE_RHOW) / c2) * _ORACLE_RHOW / RDT) * c2
+
+    for st1, st2 in ((st1_eager, st2_eager), (st1_jit, st2_jit)):
+        np.testing.assert_array_equal(_bits(st1.pond_area.data), _bits(want_pa1))
+        np.testing.assert_array_equal(_bits(st1.pond_depth.data), _bits(want_pd1))
+        np.testing.assert_array_equal(_bits(st1.h_il.data), _bits(want_hil1))
+        np.testing.assert_array_equal(_bits(st2.pond_area.data), _bits(want_pa2))
+        np.testing.assert_array_equal(_bits(st2.pond_depth.data), _bits(want_pd2))
+        np.testing.assert_array_equal(_bits(st2.h_il.data), _bits(want_hil2))
+    np.testing.assert_array_equal(_bits(rsp1_eager.freshwater_flux), _bits(want_fw1))
+    np.testing.assert_array_equal(_bits(rsp2_eager.freshwater_flux), _bits(want_fw2))
+
+    # Restart round-trip between step 1 and step 2 (save_run_restart / load_run_restart)
+    grid = create_latlon_grid(n_lat=shape[0], n_lon=shape[1])
+    z_coord = create_ocean_z_star(n_levels=2, H_max=100.0)
+    ocn_state = rest_state_latlon_cgrid_ocean(
+        grid, z_coord, T_water_init_C=12.0, T_deep=2.0, S_uniform=35.0, H_max=100.0
+    )
+    rst_path = tmp_path / "lid_restart.npz"
+    save_run_restart(
+        rst_path,
+        ocn_state,
+        step=1,
+        time_days=RDT / 86400.0,
+        grid_type="latlon",
+        ice_state=st1_jit,
+    )
+    _, got_ice, _ = load_run_restart(
+        rst_path,
+        ocn_state,
+        ice_template=init_dynamic_ice_state(shape),
+        grid_type="latlon",
+    )
+    np.testing.assert_array_equal(_bits(got_ice.h_il.data), _bits(st1_jit.h_il.data))
+    with precision_scope(PrecisionPolicy.fp64(transcendentals="libm")):
+        st2_from_rst, rsp2_from_rst = _run_step(got_ice, forcing, ocean_sst, zeros, zeros)
+    for got, want in zip(jax.tree.leaves(st2_from_rst), jax.tree.leaves(st2_jit), strict=True):
+        np.testing.assert_array_equal(_bits(got), _bits(want))
+    for got, want in zip(jax.tree.leaves(rsp2_from_rst), jax.tree.leaves(rsp2_jit), strict=True):
+        np.testing.assert_array_equal(_bits(got), _bits(want))
+
+    # Planted mutant (reproducing the pre-fix defect where h_il was reset to zero every step):
+    orig_step_ponds = ponds_mod.step_ponds
+    monkeypatch.setattr(
+        sea_ice_mod,
+        "step_ponds",
+        lambda pa, pd, **kw: (
+            *orig_step_ponds(pa, pd, **{**kw, "h_il": jnp.zeros_like(pd)})[:4],
+            jnp.zeros_like(pd),
+        ),
+    )
+    with precision_scope(PrecisionPolicy.fp64(transcendentals="libm")):
+        st1_reset, _ = jax.jit(
+            lambda st, frc, sst, u_ocn, v_ocn: sea_ice_mod.step_sea_ice(
+                st, frc, sst, u_ocn, v_ocn, cfg_si3, U_min=1.0, dt=RDT
+            )
+        )(state_0, forcing, ocean_sst, zeros, zeros)
+        st2_reset, rsp2_reset = jax.jit(
+            lambda st, frc, sst, u_ocn, v_ocn: sea_ice_mod.step_sea_ice(
+                st, frc, sst, u_ocn, v_ocn, cfg_si3, U_min=1.0, dt=RDT
+            )
+        )(st1_reset, forcing, ocean_sst, zeros, zeros)
+    assert np.count_nonzero(_bits(st2_reset.h_il.data) != _bits(st2_jit.h_il.data)) == shape[0] * shape[1]
+    assert np.count_nonzero(_bits(st2_reset.pond_depth.data) != _bits(st2_jit.pond_depth.data)) == shape[0] * shape[1]
+    assert np.count_nonzero(_bits(st2_reset.pond_area.data) != _bits(st2_jit.pond_area.data)) > 0
+    assert np.count_nonzero(_bits(rsp2_reset.freshwater_flux) != _bits(rsp2_jit.freshwater_flux)) == shape[0] * shape[1]
+
+
+def test_multicategory_jpl5_step_sea_ice_sums_at_i_over_categories(monkeypatch):
+    """Verify multi-category (jpl=5) step_sea_ice computes at_i over categories (ice_var_agg), not spatial axis."""
+    from legoesm.grids.latlon import create_latlon_grid
+
+    namthd_pnd = SI3PondConfig(
+        rn_himin=float(DECK_PND_NML["rn_himin"]),
+        rn_apnd_min=float(DECK_PND_NML["rn_apnd_min"]),
+        rn_apnd_max=float(DECK_PND_NML["rn_apnd_max"]),
+        rn_pnd_flush=float(DECK_PND_NML["rn_pnd_flush"]),
+        ln_pnd_lids=bool(DECK_PND_NML["ln_pnd_lids"]),
+    )
+    spatial = (2, 3)
+    n_cat = 5
+    shape_mc = (*spatial, n_cat)
+    t_melt = SeaIceConfig().T_melt_surface  # 273.15 K
+    t_init = SeaIceConfig().T_freeze_ocean  # 271.35 K (< T0 so zperm > 0 without flushing ponds dry)
+    base_state = init_dynamic_ice_state(shape_mc, n_categories=n_cat, S_ice_init=2.5, T_ice_init=t_init)
+
+    # Distinct per-category AND spatially varying concentrations conc[j, i, k]
+    # with sum_k conc[j, i, k] <= 1.0 in every cell, while spatial sum along axis=1 differs in every cell.
+    conc_mc = np.array(
+        [
+            [
+                [0.0625, 0.125, 0.1875, 0.25, 0.125],
+                [0.125, 0.0625, 0.125, 0.1875, 0.1875],
+                [0.1875, 0.1875, 0.25, 0.125, 0.125],
+            ],
+            [
+                [0.125, 0.125, 0.0625, 0.1875, 0.125],
+                [0.1875, 0.125, 0.25, 0.1875, 0.1875],
+                [0.0625, 0.1875, 0.1875, 0.125, 0.25],
+            ],
+        ],
+        dtype=np.float64,
+    )
+    # Distinct per-category thicknesses inside the 5 category bins [0, 0.6, 1.4, 2.4, 3.6, inf)
+    h_bins = np.array([0.451, 0.6588, 1.45, 2.4775, 3.65], dtype=np.float64)
+    h_mc = np.broadcast_to(h_bins, shape_mc).copy()
+    pa_mc = np.stack(
+        [np.full(spatial, 0.08 + 0.02 * k, dtype=np.float64) for k in range(n_cat)],
+        axis=-1,
+    )
+    pd_mc = np.stack(
+        [np.full(spatial, 0.04 + 0.01 * k, dtype=np.float64) for k in range(n_cat)],
+        axis=-1,
+    )
+    hil_mc = np.stack(
+        [np.full(spatial, 0.25 + 0.02 * k, dtype=np.float64) for k in range(n_cat)],
+        axis=-1,
+    )
+    sal_mc = np.stack(
+        [np.full(spatial, 1.8 + 0.4 * k, dtype=np.float64) for k in range(n_cat)],
+        axis=-1,
+    )
+    state_mc = base_state._replace(
+        h_ice=base_state.h_ice.replace(data=jnp.asarray(h_mc)),
+        T_ice=base_state.T_ice.replace(data=jnp.full(shape_mc, t_init, dtype=jnp.float64)),
+        concentration=base_state.concentration.replace(data=jnp.asarray(conc_mc)),
+        h_snow=base_state.h_snow.replace(data=jnp.full(shape_mc, 0.08, dtype=jnp.float64)),
+        S_ice=base_state.S_ice.replace(data=jnp.asarray(sal_mc)),
+        pond_area=base_state.pond_area.replace(data=jnp.asarray(pa_mc)),
+        pond_depth=base_state.pond_depth.replace(data=jnp.asarray(pd_mc)),
+        h_il=base_state.h_il.replace(data=jnp.asarray(hil_mc)),
+    )
+    zeros_2d = jnp.zeros(spatial, dtype=jnp.float64)
+    forcing = AtmToSurface(
+        sw_down=jnp.full(spatial, 1800.0, dtype=jnp.float64),
+        lw_down=zeros_2d,
+        precip_total=zeros_2d,
+        precip_snow=zeros_2d,
+        T_lowest=jnp.full(spatial, t_melt, dtype=jnp.float64),
+        q_lowest=zeros_2d,
+        u_lowest=zeros_2d,
+        v_lowest=zeros_2d,
+        p_lowest=jnp.full(spatial, 100000.0, dtype=jnp.float64),
+        p_surface=jnp.full(spatial, 101325.0, dtype=jnp.float64),
+        rho_lowest=jnp.full(spatial, 1.25, dtype=jnp.float64),
+        cos_zenith=zeros_2d,
+        co2_ppmv=jnp.full(spatial, 400.0, dtype=jnp.float64),
+        has_radiation=jnp.ones(spatial, dtype=jnp.float64),
+        has_precipitation=zeros_2d,
+        z_lowest=jnp.full(spatial, 10.0, dtype=jnp.float64),
+    )
+    ocean_sst = jnp.full(spatial, t_melt, dtype=jnp.float64)
+    cfg_mc = SeaIceConfig(
+        n_categories=n_cat,
+        itd_remap="lipscomb2001",
+        T_freeze_ocean=t_melt,
+        emissivity_ice=0.0,
+        Cd_ice=0.0,
+        Ch_ice=0.0,
+        Ce_ice=0.0,
+        ocean_heat_transfer_coeff=0.0,
+        snow=SnowConfig(enabled=True, flooding=False),
+        ponds=MeltPondConfig(enabled=True, scheme="si3_lev", namthd_pnd=namthd_pnd),
+        ice_constants=NEMO_SI3_CONSTANTS_CONFIG,
+    )
+
+    grid_mc = create_latlon_grid(n_lat=spatial[0], n_lon=spatial[1])
+
+    @jax.jit
+    def _run_mc(st, frc, sst, u_ocn, v_ocn):
+        return sea_ice_mod.step_sea_ice(
+            st, frc, sst, u_ocn, v_ocn, cfg_mc, U_min=1.0, dt=RDT, grid=grid_mc
+        )
+
+    with precision_scope(PrecisionPolicy.fp64(transcendentals="libm")):
+        with jax.disable_jit():
+            st_eager, rsp_eager = sea_ice_mod.step_sea_ice(
+                state_mc, forcing, ocean_sst, zeros_2d, zeros_2d, cfg_mc, U_min=1.0, dt=RDT, grid=grid_mc
+            )
+        st_jit, rsp_jit = _run_mc(state_mc, forcing, ocean_sst, zeros_2d, zeros_2d)
+
+    # Independent scalar oracle at jpl=5 with Fortran left-to-right category sum at_i
+    q_sfc = 1800.0 * (1.0 - cfg_mc.albedo_ice)
+    want_pa = np.zeros(shape_mc, dtype=np.float64)
+    want_pd = np.zeros(shape_mc, dtype=np.float64)
+    want_hil = np.zeros(shape_mc, dtype=np.float64)
+    want_fw_cat = np.zeros(shape_mc, dtype=np.float64)
+    for j in range(spatial[0]):
+        for i in range(spatial[1]):
+            at_i_cell = 0.0
+            for k in range(n_cat):
+                at_i_cell = float(np.float64(at_i_cell) + np.float64(conc_mc[j, i, k]))
+            for k in range(n_cat):
+                ak = float(conc_mc[j, i, k])
+                hk = float(h_mc[j, i, k])
+                r_tot = (0.08 / cfg_mc.snow.k_snow) + (hk / cfg_mc.k_ice)
+                k_cond = 1.0 / r_tot
+                skin_cap = (cfg_mc.rho_ice * cfg_mc.c_ice * hk * 0.5) + (
+                    cfg_mc.snow.rho_snow * cfg_mc.snow.c_snow * 0.08
+                )
+                cap_dt = skin_cap / RDT
+                t_trial = ((cap_dt * t_init) + q_sfc + (k_cond * t_melt)) / (cap_dt + k_cond)
+                e_pos = ((t_trial - t_melt) * (cap_dt + k_cond)) * RDT
+                snow_melt_k = (e_pos / cfg_mc.L_f) / cfg_mc.snow.rho_snow
+                o_cat = _oracle_pnd_lev_category(
+                    at_i=at_i_cell,
+                    a_i=ak,
+                    h_i=hk,
+                    t_su=float(t_melt),
+                    a_ip=float(pa_mc[j, i, k]) * ak,
+                    h_ip=float(pd_mc[j, i, k]),
+                    h_il=float(hil_mc[j, i, k]),
+                    dh_i_sum=0.0,
+                    dh_s_sum=-snow_melt_k,
+                    sz_i=[float(sal_mc[j, i, k])],
+                    t_i=[float(t_init)],
+                    wfx_pnd=0.0,
+                    rDt_ice=RDT,
+                    r1_Dt_ice=R1_RDT,
+                    rn_himin=namthd_pnd.rn_himin,
+                    rn_apnd_min=namthd_pnd.rn_apnd_min,
+                    rn_apnd_max=namthd_pnd.rn_apnd_max,
+                    rn_pnd_flush=namthd_pnd.rn_pnd_flush,
+                    ln_pnd_lids=namthd_pnd.ln_pnd_lids,
+                )
+                want_pa[j, i, k] = o_cat[0] / ak
+                want_pd[j, i, k] = o_cat[1]
+                want_hil[j, i, k] = o_cat[2]
+                melt_fw_k = ((snow_melt_k * cfg_mc.snow.rho_snow) * ak) / RDT
+                drain_fw_k = (((o_cat[5] * RDT / _ORACLE_RHOW) / ak) * _ORACLE_RHOW / RDT) * ak
+                want_fw_cat[j, i, k] = melt_fw_k + drain_fw_k
+    want_fw_mc = jnp.sum(jnp.asarray(want_fw_cat), axis=-1)
+
+    for st_out in (st_eager, st_jit):
+        np.testing.assert_array_equal(_bits(st_out.pond_area.data), _bits(want_pa))
+        np.testing.assert_array_equal(_bits(st_out.pond_depth.data), _bits(want_pd))
+        np.testing.assert_array_equal(_bits(st_out.h_il.data), _bits(want_hil))
+    np.testing.assert_array_equal(_bits(rsp_eager.freshwater_flux), _bits(want_fw_mc))
+
+    # Planted mutant: reproducing the pre-fix bug where _thermo_v2 summed conc_new along the last spatial axis!
+    orig_step_ponds = ponds_mod.step_ponds
+    monkeypatch.setattr(
+        sea_ice_mod,
+        "step_ponds",
+        lambda pa, pd, **kw: orig_step_ponds(
+            pa,
+            pd,
+            **{
+                **kw,
+                "at_i": jnp.broadcast_to(
+                    jnp.sum(kw["a_i"], axis=-1, keepdims=True), kw["a_i"].shape
+                ),
+            },
+        ),
+    )
+    with precision_scope(PrecisionPolicy.fp64(transcendentals="libm")):
+        st_spatial_bug, rsp_spatial_bug = jax.jit(
+            lambda st, frc, sst, u_ocn, v_ocn: sea_ice_mod.step_sea_ice(
+                st, frc, sst, u_ocn, v_ocn, cfg_mc, U_min=1.0, dt=RDT, grid=grid_mc
+            )
+        )(state_mc, forcing, ocean_sst, zeros_2d, zeros_2d)
+    assert np.count_nonzero(_bits(st_spatial_bug.pond_area.data) != _bits(st_jit.pond_area.data)) == math.prod(shape_mc)
+    assert np.count_nonzero(_bits(st_spatial_bug.pond_depth.data) != _bits(st_jit.pond_depth.data)) == math.prod(shape_mc)
+    assert np.count_nonzero(_bits(st_spatial_bug.h_il.data) != _bits(st_jit.h_il.data)) == np.count_nonzero(
+        _bits(st_jit.h_il.data) != 0
+    )
+    assert np.count_nonzero(_bits(rsp_spatial_bug.freshwater_flux) != _bits(rsp_jit.freshwater_flux)) == math.prod(spatial)
+
+
+def test_m6_parent_commit_vs_current_across_all_other_callers(monkeypatch):
+    """M6 control: compare PARENT (e31236c2f6) vs current HEAD across every output of every other caller."""
+    import subprocess
+    import types
+    from legoesm.grids.latlon import create_latlon_grid
+    from legoesm.ice.config import BrineConfig, RidgingConfig
+    from legoesm.ice.state import (
+        SeaIceState,
+        distribute_dynamic_state_to_categories,
+        slab_to_dynamic,
+    )
+
+    parent_rev = "e31236c2f6"
+    repo_root = pathlib.Path(__file__).resolve().parents[3]
+
+    def _load_parent_module(name: str, relpath: str):
+        src = subprocess.check_output(
+            ["git", "show", f"{parent_rev}:{relpath}"],
+            cwd=repo_root,
+            text=True,
+        )
+        mod = types.ModuleType(name)
+        mod.__file__ = f"{parent_rev}:{relpath}"
+        exec(compile(src, mod.__file__, "exec"), mod.__dict__)
+        return mod
+
+    parent_state_mod = _load_parent_module("_parent_ice_state", "packages/ice/legoesm/ice/state.py")
+    parent_ponds_mod = _load_parent_module("_parent_ice_ponds", "packages/ice/legoesm/ice/ponds.py")
+    parent_sea_ice_mod = _load_parent_module("_parent_ice_sea_ice", "packages/ice/legoesm/ice/sea_ice.py")
+    # Wire parent sea_ice to parent state and parent ponds so the parent call graph is 100% parent code
+    parent_sea_ice_mod.step_ponds = parent_ponds_mod.step_ponds
+    parent_sea_ice_mod.DynamicSeaIceState = parent_state_mod.DynamicSeaIceState
+    parent_sea_ice_mod.SeaIceState = parent_state_mod.SeaIceState
+    parent_sea_ice_mod.init_dynamic_ice_state = parent_state_mod.init_dynamic_ice_state
+    parent_sea_ice_mod.dynamic_to_slab = parent_state_mod.dynamic_to_slab
+    parent_sea_ice_mod.slab_to_dynamic = parent_state_mod.slab_to_dynamic
+
+    shape_2d = (3, 4)
+    rng = np.random.default_rng(20261027)
+    pa_in = jnp.asarray(0.05 + 0.25 * rng.random(shape_2d), dtype=jnp.float64)
+    pd_in = jnp.asarray(0.02 + 0.15 * rng.random(shape_2d), dtype=jnp.float64)
+    melt_in = jnp.asarray(0.005 * rng.random(shape_2d), dtype=jnp.float64)
+    rain_in = jnp.asarray(0.002 * rng.random(shape_2d), dtype=jnp.float64)
+    mask_in = jnp.asarray([[True, True, False, True], [True, False, True, True], [True, True, True, False]])
+    hsnow_in = jnp.asarray(0.04 * rng.random(shape_2d), dtype=jnp.float64)
+    tair_in = jnp.asarray(268.0 + 6.0 * rng.random(shape_2d), dtype=jnp.float64)
+
+    total_arrays = 0
+    total_elements = 0
+    unequal_elements = 0
+
+    def _compare_pair(got_arr, want_arr):
+        nonlocal total_arrays, total_elements, unequal_elements
+        g = _bits(got_arr)
+        w = _bits(want_arr)
+        assert g.shape == w.shape
+        total_arrays += 1
+        total_elements += int(g.size)
+        unequal_elements += int(np.count_nonzero(g != w))
+
+    # Caller 1: direct step_ponds (default CESM scheme)
+    p_def = MeltPondConfig()
+    got_ponds = ponds_mod.step_ponds(
+        pa_in,
+        pd_in,
+        melt_water_m=melt_in,
+        rain_water_m=rain_in,
+        ice_mask=mask_in,
+        h_snow=hsnow_in,
+        T_air=tair_in,
+        dt=RDT,
+        drainage_timescale=p_def.drainage_timescale_s,
+        refreeze_threshold=p_def.refreeze_threshold,
+        pond_to_ice_max_area=p_def.pond_to_ice_max_area,
+        depth_to_area_ratio=p_def.depth_to_area_ratio,
+    )
+    want_ponds = parent_ponds_mod.step_ponds(
+        pa_in,
+        pd_in,
+        melt_water_m=melt_in,
+        rain_water_m=rain_in,
+        ice_mask=mask_in,
+        h_snow=hsnow_in,
+        T_air=tair_in,
+        dt=RDT,
+        drainage_timescale=p_def.drainage_timescale_s,
+        refreeze_threshold=p_def.refreeze_threshold,
+        pond_to_ice_max_area=p_def.pond_to_ice_max_area,
+        depth_to_area_ratio=p_def.depth_to_area_ratio,
+    )
+    assert len(got_ponds) == 4 and len(want_ponds) == 4
+    for g, w in zip(got_ponds, want_ponds, strict=True):
+        _compare_pair(g, w)
+
+    # Shared forcing and ocean inputs for step_sea_ice callers
+    forcing = AtmToSurface(
+        sw_down=jnp.asarray(120.0 + 40.0 * rng.random(shape_2d), dtype=jnp.float64),
+        lw_down=jnp.asarray(240.0 + 30.0 * rng.random(shape_2d), dtype=jnp.float64),
+        precip_total=jnp.asarray(2.0e-5 * rng.random(shape_2d), dtype=jnp.float64),
+        precip_snow=jnp.asarray(1.0e-5 * rng.random(shape_2d), dtype=jnp.float64),
+        T_lowest=tair_in,
+        q_lowest=jnp.asarray(0.002 + 0.001 * rng.random(shape_2d), dtype=jnp.float64),
+        u_lowest=jnp.asarray(-3.0 + 6.0 * rng.random(shape_2d), dtype=jnp.float64),
+        v_lowest=jnp.asarray(-2.0 + 4.0 * rng.random(shape_2d), dtype=jnp.float64),
+        p_lowest=jnp.full(shape_2d, 100000.0, dtype=jnp.float64),
+        p_surface=jnp.full(shape_2d, 101325.0, dtype=jnp.float64),
+        rho_lowest=jnp.full(shape_2d, 1.25, dtype=jnp.float64),
+        cos_zenith=jnp.full(shape_2d, 0.5, dtype=jnp.float64),
+        co2_ppmv=jnp.full(shape_2d, 400.0, dtype=jnp.float64),
+        has_radiation=jnp.ones(shape_2d, dtype=jnp.float64),
+        has_precipitation=jnp.ones(shape_2d, dtype=jnp.float64),
+        z_lowest=jnp.full(shape_2d, 10.0, dtype=jnp.float64),
+    )
+    ocean_sst = jnp.asarray(271.2 + 0.4 * rng.random(shape_2d), dtype=jnp.float64)
+    ocean_u = jnp.asarray(-0.05 + 0.10 * rng.random(shape_2d), dtype=jnp.float64)
+    ocean_v = jnp.asarray(-0.05 + 0.10 * rng.random(shape_2d), dtype=jnp.float64)
+
+    # Caller 2: State builders (init_dynamic_ice_state, slab_to_dynamic, distribute_dynamic_state_to_categories)
+    cur_init = init_dynamic_ice_state(shape_2d)
+    par_init = parent_state_mod.init_dynamic_ice_state(shape_2d)
+    for name in parent_state_mod.DynamicSeaIceState._fields:
+        _compare_pair(getattr(cur_init, name).data, getattr(par_init, name).data)
+
+    slab_cur = SeaIceState(
+        h_ice=cur_init.h_ice.replace(data=jnp.asarray(0.8 + 1.2 * rng.random(shape_2d), dtype=jnp.float64)),
+        T_ice=cur_init.T_ice.replace(data=jnp.asarray(265.0 + 5.0 * rng.random(shape_2d), dtype=jnp.float64)),
+        concentration=cur_init.concentration.replace(data=jnp.asarray(0.4 + 0.5 * rng.random(shape_2d), dtype=jnp.float64)),
+    )
+    slab_par = parent_state_mod.SeaIceState(
+        h_ice=slab_cur.h_ice,
+        T_ice=slab_cur.T_ice,
+        concentration=slab_cur.concentration,
+    )
+    cur_lifted = slab_to_dynamic(slab_cur)
+    par_lifted = parent_state_mod.slab_to_dynamic(slab_par)
+    for name in parent_state_mod.DynamicSeaIceState._fields:
+        _compare_pair(getattr(cur_lifted, name).data, getattr(par_lifted, name).data)
+
+    cur_seeded = cur_lifted._replace(
+        h_snow=cur_lifted.h_snow.replace(data=hsnow_in),
+        S_ice=cur_lifted.S_ice.replace(data=jnp.full(shape_2d, 4.0, dtype=jnp.float64)),
+        pond_area=cur_lifted.pond_area.replace(data=pa_in),
+        pond_depth=cur_lifted.pond_depth.replace(data=pd_in),
+    )
+    par_seeded = par_lifted._replace(
+        h_snow=par_lifted.h_snow.replace(data=hsnow_in),
+        S_ice=par_lifted.S_ice.replace(data=jnp.full(shape_2d, 4.0, dtype=jnp.float64)),
+        pond_area=par_lifted.pond_area.replace(data=pa_in),
+        pond_depth=par_lifted.pond_depth.replace(data=pd_in),
+    )
+    cur_mc = distribute_dynamic_state_to_categories(cur_seeded, 5)
+    par_mc = parent_state_mod.distribute_dynamic_state_to_categories(par_seeded, 5)
+    for name in parent_state_mod.DynamicSeaIceState._fields:
+        _compare_pair(getattr(cur_mc, name).data, getattr(par_mc, name).data)
+
+    # Caller 3: step_sea_ice slab mode (SeaIceState, default SeaIceConfig)
+    cfg_slab = SeaIceConfig()
+    got_slab_st, got_slab_rsp = sea_ice_mod.step_sea_ice(
+        slab_cur, forcing, ocean_sst, ocean_u, ocean_v, cfg_slab, U_min=1.0, dt=RDT
+    )
+    want_slab_st, want_slab_rsp = parent_sea_ice_mod.step_sea_ice(
+        slab_par, forcing, ocean_sst, ocean_u, ocean_v, cfg_slab, U_min=1.0, dt=RDT
+    )
+    for g, w in zip(jax.tree.leaves(got_slab_st), jax.tree.leaves(want_slab_st), strict=True):
+        _compare_pair(g, w)
+    for g, w in zip(jax.tree.leaves(got_slab_rsp), jax.tree.leaves(want_slab_rsp), strict=True):
+        _compare_pair(g, w)
+
+    # Caller 4: step_sea_ice legacy dynamic mode (dynamics="free_drift", uses_new_physics=False)
+    cfg_leg_dyn = SeaIceConfig(dynamics="free_drift")
+    got_leg_st, got_leg_rsp = sea_ice_mod.step_sea_ice(
+        cur_seeded, forcing, ocean_sst, ocean_u, ocean_v, cfg_leg_dyn, U_min=1.0, dt=RDT
+    )
+    want_leg_st, want_leg_rsp = parent_sea_ice_mod.step_sea_ice(
+        par_seeded, forcing, ocean_sst, ocean_u, ocean_v, cfg_leg_dyn, U_min=1.0, dt=RDT
+    )
+    for name in parent_state_mod.DynamicSeaIceState._fields:
+        _compare_pair(getattr(got_leg_st, name).data, getattr(want_leg_st, name).data)
+    for g, w in zip(jax.tree.leaves(got_leg_rsp), jax.tree.leaves(want_leg_rsp), strict=True):
+        _compare_pair(g, w)
+
+    # Caller 5: step_sea_ice single-category new-physics mode (default CESM ponds + snow + brine + delta-Eddington)
+    cfg_v2_1cat = SeaIceConfig(
+        shortwave_scheme="delta_eddington",
+        snow=SnowConfig(enabled=True, flooding=True),
+        brine=BrineConfig(enabled=True),
+        ponds=MeltPondConfig(enabled=True),
+    )
+    got_v2_1_st, got_v2_1_rsp = sea_ice_mod.step_sea_ice(
+        cur_seeded, forcing, ocean_sst, ocean_u, ocean_v, cfg_v2_1cat, U_min=1.0, dt=RDT
+    )
+    want_v2_1_st, want_v2_1_rsp = parent_sea_ice_mod.step_sea_ice(
+        par_seeded, forcing, ocean_sst, ocean_u, ocean_v, cfg_v2_1cat, U_min=1.0, dt=RDT
+    )
+    for name in parent_state_mod.DynamicSeaIceState._fields:
+        _compare_pair(getattr(got_v2_1_st, name).data, getattr(want_v2_1_st, name).data)
+    for g, w in zip(jax.tree.leaves(got_v2_1_rsp), jax.tree.leaves(want_v2_1_rsp), strict=True):
+        _compare_pair(g, w)
+
+    # Caller 6: step_sea_ice 5-category new-physics mode (EVP + advect + Lipscomb2001 + ridging + CESM ponds + snow + brine)
+    grid = create_latlon_grid(n_lat=shape_2d[0], n_lon=shape_2d[1])
+    cfg_v2_5cat = SeaIceConfig(
+        n_categories=5,
+        dynamics="evp",
+        N_evp=4,
+        transport="advect",
+        itd_remap="lipscomb2001",
+        shortwave_scheme="delta_eddington",
+        snow=SnowConfig(enabled=True, flooding=True),
+        brine=BrineConfig(enabled=True),
+        ridging=RidgingConfig(enabled=True),
+        ponds=MeltPondConfig(enabled=True),
+    )
+    got_v2_5_st, got_v2_5_rsp = sea_ice_mod.step_sea_ice(
+        cur_mc, forcing, ocean_sst, ocean_u, ocean_v, cfg_v2_5cat, U_min=1.0, dt=RDT, grid=grid
+    )
+    want_v2_5_st, want_v2_5_rsp = parent_sea_ice_mod.step_sea_ice(
+        par_mc, forcing, ocean_sst, ocean_u, ocean_v, cfg_v2_5cat, U_min=1.0, dt=RDT, grid=grid
+    )
+    for name in parent_state_mod.DynamicSeaIceState._fields:
+        _compare_pair(getattr(got_v2_5_st, name).data, getattr(want_v2_5_st, name).data)
+    for g, w in zip(jax.tree.leaves(got_v2_5_rsp), jax.tree.leaves(want_v2_5_rsp), strict=True):
+        _compare_pair(g, w)
+
+    assert total_arrays == 161
+    assert total_elements == 2604
+    assert unequal_elements == 0
+
+    # Planted control: a 1-ULP perturbation on current step_ponds must be caught by the parent comparison
+    orig_step_ponds = ponds_mod.step_ponds
+    monkeypatch.setattr(
+        sea_ice_mod,
+        "step_ponds",
+        lambda *a, **kw: (
+            jnp.asarray(np.nextafter(np.asarray(orig_step_ponds(*a, **kw)[0]), np.inf)),
+            *orig_step_ponds(*a, **kw)[1:],
+        ),
+    )
+    perturbed_st, _ = sea_ice_mod.step_sea_ice(
+        cur_seeded, forcing, ocean_sst, ocean_u, ocean_v, cfg_v2_1cat, U_min=1.0, dt=RDT
+    )
+    assert np.count_nonzero(_bits(perturbed_st.pond_area.data) != _bits(want_v2_1_st.pond_area.data)) > 0

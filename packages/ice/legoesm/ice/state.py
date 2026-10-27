@@ -73,6 +73,7 @@ class DynamicSeaIceState(NamedTuple):
     S_ice: Field               # Bulk ice salinity [g/kg] (zero when brine disabled)
     pond_area: Field           # Melt pond area fraction of ice area [0-1]
     pond_depth: Field          # Mean melt pond depth [m]
+    h_il: Field | None = None  # Mean melt pond lid thickness [m]
 
 
 # Per-grid spatial Field dim names, keyed by spatial rank (no category axis) —
@@ -158,6 +159,7 @@ def init_dynamic_ice_state(
         S_ice=Field(data=jnp.full(shape, S_ice_init), name="S_ice", dims=dims, units="g/kg"),
         pond_area=Field(data=jnp.zeros(shape), name="pond_area", dims=dims, units="1"),
         pond_depth=Field(data=jnp.zeros(shape), name="pond_depth", dims=dims, units="m"),
+        h_il=Field(data=jnp.zeros(shape), name="h_il", dims=dims, units="m"),
     )
 
 
@@ -221,6 +223,7 @@ def slab_to_dynamic(
         S_ice=Field(data=jnp.full(s, S_ice_init), name="S_ice", dims=dims, units="g/kg"),
         pond_area=Field(data=jnp.zeros(s), name="pond_area", dims=dims, units="1"),
         pond_depth=Field(data=jnp.zeros(s), name="pond_depth", dims=dims, units="m"),
+        h_il=Field(data=jnp.zeros(s), name="h_il", dims=dims, units="m"),
     )
 
 
@@ -293,6 +296,11 @@ def distribute_dynamic_state_to_categories(
             state.pond_area, state.pond_area.data[..., jnp.newaxis] * occ),
         pond_depth=_lift(
             state.pond_depth, state.pond_depth.data[..., jnp.newaxis] * occ),
+        h_il=(
+            _lift(state.h_il, state.h_il.data[..., jnp.newaxis] * occ)
+            if state.h_il is not None
+            else None
+        ),
     )
 
 

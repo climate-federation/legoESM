@@ -1257,6 +1257,7 @@ def _step_dynamic(
         S_ice=state.S_ice,
         pond_area=state.pond_area,
         pond_depth=state.pond_depth,
+        h_il=state.h_il,
     )
 
     return new_state, response
@@ -2013,6 +2014,8 @@ def _thermo_v2(
     enable_lead_freeze: bool = True,
     q_open_top=None,
     ocean_dz_top_m=None,
+    h_il: jnp.ndarray | None = None,
+    at_i: jnp.ndarray | None = None,
 ) -> dict:
     """Extended thermodynamics: snow + brine + SW scheme + ponds aware.
 
@@ -2359,12 +2362,23 @@ def _thermo_v2(
     dilute = jnp.where(conc_new > 1e-12, retained_area / jnp.maximum(conc_new, 1e-12), 0.0)
     # Per-grid-cell snow + pond mass shed to the ocean from the retired area,
     # taken from the PRE-conversion tracers (post-sublimation snow; old pond).
+    h_il_in = jnp.zeros_like(pond_depth) if h_il is None else h_il
     shed_snow_kg = shed_area * jnp.maximum(h_snow_after_sub, 0.0) * config.snow.rho_snow
-    shed_pond_kg = shed_area * pond_area * pond_depth * constants.rho_water
+    shed_pond_kg = (
+        shed_area
+        * pond_area
+        * (
+            (pond_depth + h_il_in)
+            if (config.ponds.enabled and config.ponds.scheme == "si3_lev")
+            else pond_depth
+        )
+        * constants.rho_water
+    )
     # Surviving tracers diluted onto the new ice area (depth-diluted; the pond
     # area FRACTION is preserved, the water VOLUME per ice-area is diluted).
     h_snow_dil = jnp.maximum(h_snow_after_sub, 0.0) * dilute
     pond_depth_dil = pond_depth * dilute
+    h_il_dil = h_il_in * dilute
 
     # 10. Snow-ice flooding (white-ice formation) — on the diluted, new-area snow.
     if config.snow.enabled and config.snow.flooding:
@@ -2420,41 +2434,73 @@ def _thermo_v2(
             pond_captured_m_liquid * melt_fraction_of_capture
         )
 
-        pond_area_new, pond_depth_new, drain_to_ocean_m, refreeze_m = step_ponds(
-            pond_area, pond_depth_dil,
-            melt_water_m=melt_water_m_liquid,
-            rain_water_m=rain_m_liquid,
-            ice_mask=ice_mask,
-            h_snow=h_snow_new,
-            T_air=forcing.T_lowest,
-            dt=dt,
-            drainage_timescale=config.ponds.drainage_timescale_s,
-            refreeze_threshold=config.ponds.refreeze_threshold,
-            pond_to_ice_max_area=config.ponds.pond_to_ice_max_area,
-            depth_to_area_ratio=config.ponds.depth_to_area_ratio,
-            snow_block_threshold=config.ponds.snow_block_threshold,
-            refreeze_width_K=config.ponds.refreeze_width_K,
-            scheme=config.ponds.scheme,
-            at_i=(
-                jnp.broadcast_to(jnp.sum(conc_new, axis=-1, keepdims=True), conc_new.shape)
-                if config.n_categories > 1
-                else conc_new
-            ),
-            a_i=conc_new,
-            h_i=h_new,
-            t_su=T_new,
-            h_il=jnp.zeros_like(pond_depth_dil),
-            dh_i_sum=-ice_melt_m,
-            dh_s_sum=-snow_melt_m,
-            sz_i=S_ice,
-            t_i=T_ice,
-            namthd_pnd=config.ponds.namthd_pnd,
-            rho_w=constants.rho_water,
-            gravity=constants.g_nemo,
-            ice_constants=config.ice_constants,
-        )
         if config.ponds.scheme == "si3_lev":
+            if h_il is None:
+                raise ValueError(
+                    "_thermo_v2(scheme='si3_lev') requires prognostic h_il (lid thickness)"
+                )
+            if config.n_categories > 1 and at_i is None:
+                raise ValueError(
+                    "_thermo_v2(scheme='si3_lev', n_categories > 1) requires "
+                    "category-summed at_i from ice_var_agg"
+                )
+            from legoesm.ice.si3_orca2_state import fortran_sum_categories
+            at_i_in = (
+                at_i
+                if at_i is not None
+                else fortran_sum_categories(
+                    jnp.asarray(conc_new, dtype=jnp.float64)[..., None], axis=-1
+                )
+            )
+            pond_area_new, pond_depth_new, drain_to_ocean_m, refreeze_m, h_il_new = step_ponds(
+                pond_area, pond_depth_dil,
+                melt_water_m=melt_water_m_liquid,
+                rain_water_m=rain_m_liquid,
+                ice_mask=ice_mask,
+                h_snow=h_snow_new,
+                T_air=forcing.T_lowest,
+                dt=dt,
+                drainage_timescale=config.ponds.drainage_timescale_s,
+                refreeze_threshold=config.ponds.refreeze_threshold,
+                pond_to_ice_max_area=config.ponds.pond_to_ice_max_area,
+                depth_to_area_ratio=config.ponds.depth_to_area_ratio,
+                snow_block_threshold=config.ponds.snow_block_threshold,
+                refreeze_width_K=config.ponds.refreeze_width_K,
+                scheme=config.ponds.scheme,
+                at_i=at_i_in,
+                a_i=conc_new,
+                h_i=h_new,
+                t_su=T_new,
+                h_il=h_il_dil,
+                dh_i_sum=-ice_melt_m,
+                dh_s_sum=-snow_melt_m,
+                sz_i=S_ice,
+                t_i=T_ice,
+                namthd_pnd=config.ponds.namthd_pnd,
+                rho_w=constants.rho_water,
+                gravity=constants.g_nemo,
+                ice_constants=config.ice_constants,
+            )
             pond_captured_melt_m_liquid = jnp.zeros_like(h_new)
+        else:
+            pond_area_new, pond_depth_new, drain_to_ocean_m, refreeze_m = step_ponds(
+                pond_area, pond_depth_dil,
+                melt_water_m=melt_water_m_liquid,
+                rain_water_m=rain_m_liquid,
+                ice_mask=ice_mask,
+                h_snow=h_snow_new,
+                T_air=forcing.T_lowest,
+                dt=dt,
+                drainage_timescale=config.ponds.drainage_timescale_s,
+                refreeze_threshold=config.ponds.refreeze_threshold,
+                pond_to_ice_max_area=config.ponds.pond_to_ice_max_area,
+                depth_to_area_ratio=config.ponds.depth_to_area_ratio,
+                snow_block_threshold=config.ponds.snow_block_threshold,
+                refreeze_width_K=config.ponds.refreeze_width_K,
+                scheme=config.ponds.scheme,
+                namthd_pnd=config.ponds.namthd_pnd,
+            )
+            h_il_new = h_il_dil
         # Convert refrozen pond water [m of liquid] to equivalent ice
         # thickness [m of ice] using density.  Ice gain is
         # mass-neutral with the ocean: the water came from earlier
@@ -2465,6 +2511,7 @@ def _thermo_v2(
     else:
         pond_area_new = pond_area
         pond_depth_new = pond_depth_dil
+        h_il_new = h_il_dil
         pond_drain_to_ocean_kg_s = jnp.zeros_like(h_new)
         pond_captured_melt_m_liquid = jnp.zeros_like(h_new)
         refreeze_ice_m = jnp.zeros_like(h_new)
@@ -2483,6 +2530,7 @@ def _thermo_v2(
     h_snow_new = jnp.where(ablated, 0.0, h_snow_new)
     pond_area_new = jnp.where(ablated, 0.0, pond_area_new)
     pond_depth_new = jnp.where(ablated, 0.0, pond_depth_new)
+    h_il_new = jnp.where(ablated, 0.0, h_il_new)
 
     # 12. Brine + salt budget update — uses the *final* per-cat
     #     volume (including white-ice and refrozen-pond contributions)
@@ -2670,6 +2718,7 @@ def _thermo_v2(
         "S_ice": S_ice_new,
         "pond_area": pond_area_new,
         "pond_depth": pond_depth_new,
+        "h_il": h_il_new,
         "alpha": alpha,
         "lw_up": lw_up,
         "shflx": shflx,
@@ -2736,6 +2785,11 @@ def _step_dynamic_v2(
     S_ice = state.S_ice.data
     pond_area = state.pond_area.data
     pond_depth = state.pond_depth.data
+    if config.ponds.enabled and config.ponds.scheme == "si3_lev" and state.h_il is None:
+        raise ValueError(
+            "DynamicSeaIceState.h_il must be a Field when config.ponds.scheme == 'si3_lev'"
+        )
+    h_il = state.h_il.data if state.h_il is not None else jnp.zeros_like(pond_depth)
 
     # Cap an already-overfilled multicat state (e.g. a restart) to
     # sum_k a_k <= 1 BEFORE the dynamics aggregate and the conc_pre snapshot,
@@ -2893,6 +2947,13 @@ def _step_dynamic_v2(
     if is_multicat:
         n_cat = h.shape[-1]
         open_water_agg = jnp.clip(1.0 - jnp.sum(conc, axis=-1), 0.0, 1.0)
+        if config.ponds.enabled and config.ponds.scheme == "si3_lev":
+            from legoesm.ice.si3_orca2_state import fortran_sum_categories
+            at_i_agg = fortran_sum_categories(
+                jnp.asarray(conc, dtype=jnp.float64), axis=-1
+            )
+        else:
+            at_i_agg = None
 
         h_list = []
         T_list = []
@@ -2901,6 +2962,7 @@ def _step_dynamic_v2(
         S_list = []
         pa_list = []
         pd_list = []
+        hil_list = []
         salt_flux_list = []
         fw_flux_list = []
         ocean_heat_list = []
@@ -2922,6 +2984,8 @@ def _step_dynamic_v2(
                 enable_lead_freeze=(k == 0),
                 q_open_top=q_open_top,
                 ocean_dz_top_m=ocean_dz_top_m,
+                h_il=h_il[..., k],
+                at_i=at_i_agg,
             )
             h_list.append(result["h"])
             T_list.append(result["T"])
@@ -2930,6 +2994,7 @@ def _step_dynamic_v2(
             S_list.append(result["S_ice"])
             pa_list.append(result["pond_area"])
             pd_list.append(result["pond_depth"])
+            hil_list.append(result["h_il"])
             salt_flux_list.append(result["salt_flux_to_ocean"])
             fw_flux_list.append(result["freshwater_to_ocean"])
             ocean_heat_list.append(result["ocean_heat_extraction"])
@@ -2949,6 +3014,7 @@ def _step_dynamic_v2(
         S_ice = jnp.stack(S_list, axis=-1)
         pond_area = jnp.stack(pa_list, axis=-1)
         pond_depth = jnp.stack(pd_list, axis=-1)
+        h_il = jnp.stack(hil_list, axis=-1)
 
         # Ice->ocean EXCHANGE fluxes (freshwater / heat / salt / SW
         # penetration): ``_thermo_v2`` already multiplied the per-cat-area
@@ -3027,6 +3093,7 @@ def _step_dynamic_v2(
             forcing, ocean_sst, config, U_min, dt,
             q_open_top=q_open_top,
             ocean_dz_top_m=ocean_dz_top_m,
+            h_il=h_il,
         )
         h = result["h"]
         T_ice = result["T"]
@@ -3035,6 +3102,7 @@ def _step_dynamic_v2(
         S_ice = result["S_ice"]
         pond_area = result["pond_area"]
         pond_depth = result["pond_depth"]
+        h_il = result["h_il"]
         # Ice->ocean EXCHANGE fluxes (freshwater / heat / salt) returned by
         # ``_thermo_v2`` are PER-GRID-CELL (per-cat-area terms already
         # multiplied by ``conc`` inside the kernel).  Returned per-grid-cell:
@@ -3109,10 +3177,11 @@ def _step_dynamic_v2(
             # Recover h_snow from V_snow and conc.
             conc_safe = jnp.maximum(conc, 1e-12)
             h_snow = jnp.where(conc > 1e-12, remap["V_snow"] / conc_safe, 0.0)
-            # Recover per-ice-area pond (area, depth) from the conserved
-            # per-cell pond volume (V-conserving even at the area cap).
-            pond_area, pond_depth = _pond_area_depth_from_volume(
-                remap["V_pond"], conc, config)
+            if config.ponds.scheme != "si3_lev":
+                # Recover per-ice-area pond (area, depth) from the conserved
+                # per-cell pond volume (V-conserving even at the area cap).
+                pond_area, pond_depth = _pond_area_depth_from_volume(
+                    remap["V_pond"], conc, config)
         elif config.itd_remap == "simple":
             # Legacy linear remap for h, a, T only (valid only when there are
             # no snow/brine/pond tracers — enforced by the multicat guard in
@@ -3311,5 +3380,10 @@ def _step_dynamic_v2(
         S_ice=state.S_ice.replace(data=S_ice),
         pond_area=state.pond_area.replace(data=pond_area),
         pond_depth=state.pond_depth.replace(data=pond_depth),
+        h_il=(
+            state.h_il.replace(data=h_il)
+            if state.h_il is not None
+            else None
+        ),
     )
     return new_state, response

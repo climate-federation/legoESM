@@ -69,7 +69,7 @@ The compiled production record build is `/home/dbalwada/oracle-builds/nemo5/nemo
 
 4. Category-to-pond composer `si3_ice_thd_o12_stages` and production pond wiring:
    - `packages/ice/legoesm/ice/si3_thd_pnd.py:766-954`, exported in `packages/ice/legoesm/ice/__init__.py:290-314`.
-   - Selectable production pond branch (`scheme = "si3_lev"`, `namthd_pnd = SI3PondConfig(...)`) in `packages/ice/legoesm/ice/config.py:267-288,652-659`, dispatched through `packages/ice/legoesm/ice/ponds.py:34-212` (`step_ponds`) and called from `packages/ice/legoesm/ice/sea_ice.py:2423-2457` (`_thermo_v2`), while keeping the default `scheme = "cesm"` bit-for-bit identical across all existing callers.
+   - Selectable production pond branch (`scheme = "si3_lev"`, `namthd_pnd = SI3PondConfig(...)`) in `packages/ice/legoesm/ice/config.py:267-288,652-659`, carrying prognostic lid thickness `h_il` in `DynamicSeaIceState` (`packages/ice/legoesm/ice/state.py:52-76,149-163,213-227,284-304`) and through run restarts (`packages/ocean/legoesm/ocean/restart.py:322-329`), dispatched through `packages/ice/legoesm/ice/ponds.py:34-212` (`step_ponds`), and called from `packages/ice/legoesm/ice/sea_ice.py:2437-2503,2950-3017,3180-3184,3370-3388` (`_thermo_v2` and `_step_dynamic_v2`, computing `at_i` over the category axis via `fortran_sum_categories` as in NEMO's `ice_var_agg`), while keeping the default `scheme = "cesm"` bit-for-bit identical to parent `e31236c2f6ad` across all existing callers.
 
 ---
 
@@ -97,10 +97,10 @@ The committed audit tool `scripts/validate/ocean_fidelity/testcases/nemo_si3_o12
 
 ## 4. Independent scalar oracle, barriers, plants, gradients, and caller controls
 
-### Unit and object-audit suites (`82 passed in 215.04s`)
+### Unit and object-audit suites (`85 passed in 241.29s`)
 
-Foreground run of `tests/ice/unit/test_si3_o12_pnd.py` and `tests/ocean/fidelity/test_nemo_si3_o12_minmax_audit.py` on the default GPU host (with explicit CPU scoping at `tests/ice/unit/test_si3_o12_pnd.py:35-54` for `transcendentals="libm"`, saved in `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/round20/pytest_o12_pnd.log`):
-`======================== 82 passed in 215.04s (0:03:35) ========================`
+Foreground run of `tests/ice/unit/test_si3_o12_pnd.py` and `tests/ocean/fidelity/test_nemo_si3_o12_minmax_audit.py` on CPU (`JAX_PLATFORMS=cpu JAX_ENABLE_X64=1`, with explicit CPU scoping at `tests/ice/unit/test_si3_o12_pnd.py:35-54` for `transcendentals="libm"`, saved in `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/round20/pytest_o12_pnd.log`):
+`======================== 85 passed in 241.29s (0:04:01) ========================`
 
 - **Independent scalar transcription with independent constants and namelist parser (`0` ULP under `jit` and `jax.disable_jit`)**:
   - Physical constants and `&namthd`/`&namthd_pnd` parameters are transcribed directly from `phycst.f90`, `eosbn2.f90`, `par_ice.f90`, and `namelist_ice_ref`/`namelist_ice_cfg` at `tests/ice/unit/test_si3_o12_pnd.py:62-123` without importing `legoesm.constants` or `NEMO_SI3_CONSTANTS_CONFIG` into any `_oracle_*` function; six planted constant defects in the model's `IceConstantsConfig` all fail against the independent oracle (`tests/ice/unit/test_si3_o12_pnd.py:1870-1911`).
@@ -112,28 +112,32 @@ Foreground run of `tests/ice/unit/test_si3_o12_pnd.py` and `tests/ocean/fidelity
   - Stripping `nemo_source_round` from 15 individual arithmetic sites/groups across `si3_ice_perm_eff`, `_pnd_lev_single_category`, and `si3_ice_thd_pnd` changes compiled `jit` output bits when arrays are passed as runtime JIT arguments while the protected functions match `jax.disable_jit` bit-for-bit (`tests/ice/unit/test_si3_o12_pnd.py:1006-1239`).
   - Eight source-compiled mutants on `si3_ice_perm_eff`, `_pnd_lev_single_category`, and `si3_ice_thd_pnd` fire through `si3_ice_thd_pnd` (`tests/ice/unit/test_si3_o12_pnd.py:1242-1301`), plus the `epsi06` early-exit boundary plant (`tests/ice/unit/test_si3_o12_pnd.py:1304-1323`).
   - Active `_maxsd`/`_minsd` signed-zero tie-survivor test with role-swap plants (`+0.0` vs `-0.0` changing bit 63) plus pre-mask sign-bit flip and checked downstream masking verification at `ORCA2_SAS_ICE_O7_REF/BLD/ppsrc/nemo/icethd_pnd.f90:456` and `:478` (`tests/ice/unit/test_si3_o12_pnd.py:1326-1421`).
-- **Five-category composition, call-sequence spy, and production `step_sea_ice`/`step_ponds` wiring**:
+- **Five-category composition, call-sequence spy, and production `step_sea_ice`/`step_ponds`/restart wiring**:
   - `O9 -> O10 -> O11 -> ice_thd_1d2d(jl, 2) -> O12` via `si3_ice_thd_o12_stages` matches the scalar oracle bit-for-bit across all 5 categories (`tests/ice/unit/test_si3_o12_pnd.py:1424-1550`).
   - Call-sequence spy verifies `o10` -> `da` (5 categories) -> `ice_thd_1d2d(jl, 2)` volume recovery -> `pnd` (`tests/ice/unit/test_si3_o12_pnd.py:1553-1648`).
-  - Production `step_sea_ice` (`packages/ice/legoesm/ice/sea_ice.py:2423-2457`) and `step_ponds` (`packages/ice/legoesm/ice/ponds.py:34-212`) with `MeltPondConfig(enabled=True, scheme="si3_lev", namthd_pnd=...)` match `_oracle_pnd_lev_category` to `0` ULP under both eager and `jax.jit`, fail on planted mutants that remove the `step_ponds` call or force `scheme="cesm"`, and preserve `scheme="cesm"` bit-for-bit (`tests/ice/unit/test_si3_o12_pnd.py:1914-2147`).
+  - Production `step_sea_ice` (`packages/ice/legoesm/ice/sea_ice.py:2437-2503,2950-3017,3180-3184,3370-3388`) and `step_ponds` (`packages/ice/legoesm/ice/ponds.py:34-212`) with `MeltPondConfig(enabled=True, scheme="si3_lev", namthd_pnd=...)` match `_oracle_pnd_lev_category` to `0` ULP under both eager and `jax.jit`, fail on planted mutants that remove the `step_ponds` call or force `scheme="cesm"`, and preserve `scheme="cesm"` bit-for-bit (`tests/ice/unit/test_si3_o12_pnd.py:1914-2168`).
+  - Prognostic lid thickness `h_il` (`packages/ice/legoesm/ice/state.py:52-76,149-163,213-227,284-304` and `packages/ocean/legoesm/ocean/restart.py:322-329`) persists across multi-step integration and `save_run_restart`/`load_run_restart`, matches the sequential scalar oracle to `0` ULP, and fails on the planted `h_il = 0` reset mutant (`tests/ice/unit/test_si3_o12_pnd.py:2171-2390`).
+  - Multi-category (`jpl = 5`) `step_sea_ice` aggregates `at_i` over the category axis via `fortran_sum_categories` (`packages/ice/legoesm/ice/sea_ice.py:2950-2989`) exactly as NEMO's `ice_var_agg` does, matches the 5-category scalar oracle to `0` ULP across all 5 categories with distinct per-category and spatially varying concentrations, and fails on the planted spatial-axis `at_i` sum mutant (`tests/ice/unit/test_si3_o12_pnd.py:2393-2591`).
 - **Differentiability (`jax.grad`, `jax.jvp`, central finite difference, and boundary safety)**:
   - All 10 continuous physical array inputs have finite, nonzero reverse-mode gradients matching `jax.jvp` (`rtol=1e-12`) and central finite differences (`rtol=1e-5, atol=1e-7`), and a `stop_gradient` plant breaks the `sz_i`/`t_i` gradients (`tests/ice/unit/test_si3_o12_pnd.py:1651-1785`).
   - Custom JVP on `_nemo_sqrt` (`packages/ice/legoesm/ice/si3_thd_pnd.py:90-104`) and safe divisors ensure zero-pond (`rad = 0, disc = 0`), thin-ice, vanished-ice, and impermeable-ice states have finite `jax.grad` with zero forward-bit change (`tests/ice/unit/test_si3_o12_pnd.py:1788-1807`).
 - **No defaults and non-production selector refusals**:
   - Every physical array, scalar, `constants`, `namelist`, and `nn_hls` is required without defaults (`tests/ice/unit/test_si3_o12_pnd.py:1810-1837`), and every non-production pond selector is refused (`tests/ice/unit/test_si3_o12_pnd.py:1840-1867`).
 
-### Parent-vs-current controls on shared code callers
+### Parent-vs-current controls on shared code callers (M6)
 
-Shared files touched are `packages/ice/legoesm/ice/config.py:267-288,652-659` (keeping line numbers `291..649` unchanged so zero historical receipt citations shifted), `packages/ice/legoesm/ice/ponds.py:34-212`, `packages/ice/legoesm/ice/sea_ice.py:2423-2457`, and `packages/ice/legoesm/ice/__init__.py:290-314`.
+Shared files touched are `packages/ice/legoesm/ice/config.py:267-288,652-659` (keeping line numbers `291..649` unchanged so zero historical receipt citations shifted), `packages/ice/legoesm/ice/state.py:52-76,149-163,213-227,284-304`, `packages/ocean/legoesm/ocean/restart.py:322-329`, `packages/ice/legoesm/ice/ponds.py:34-212`, `packages/ice/legoesm/ice/sea_ice.py:2437-2503,2950-3017,3180-3184,3370-3388`, and `packages/ice/legoesm/ice/__init__.py:290-314`.
 
-1. **D5 C1D full-year platform probe (`nemo_si3thd_d5_platform_probe.py`)**:
+1. **Direct parent (`e31236c2f6`) vs current (`HEAD`) comparison across every output of every other caller (`tests/ice/unit/test_si3_o12_pnd.py:2594-2835`)**:
+   - Loads `packages/ice/legoesm/ice/state.py`, `packages/ice/legoesm/ice/ponds.py`, and `packages/ice/legoesm/ice/sea_ice.py` directly from parent commit `e31236c2f6` via `git show` and compares every output array bit-for-bit against current `HEAD` across all 6 non-`si3_lev` caller paths (direct `step_ponds` default CESM scheme; state builders `init_dynamic_ice_state`, `slab_to_dynamic`, and `distribute_dynamic_state_to_categories`; `step_sea_ice` slab mode; `step_sea_ice` legacy dynamic `free_drift` mode; `step_sea_ice` single-category v2 mode with CESM ponds + snow + brine + delta-Eddington; and `step_sea_ice` 5-category v2 mode with EVP + advect + Lipscomb2001 + ridging + CESM ponds + snow + brine): **`161` output arrays, `2604` scalar elements compared, `0` unequal** (`0` ULP difference), with a planted 1-ULP perturbation control that fires.
+2. **D5 C1D full-year platform probe (`nemo_si3thd_d5_platform_probe.py`)**:
    - Default CPU (`XLA_FLAGS=""`, `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/round20/d5_platform_probe_current.json`): all 18 arms are leaf-for-leaf identical to parent (`round17/resume1/d5_wired_cpu.json` except `worktree`); shipped arm `r6_step1_plus_step2_snow_update` `full_year_output_sha256` = `b7a7329bed74c17918fa3cbc11c7613acb2074851e2357a08869fcd4661e12d2`.
    - AVX (`XLA_FLAGS="--xla_cpu_max_isa=AVX"`, `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/round20/d5_platform_probe_current_avx.json`): all 18 arms are leaf-for-leaf identical to parent (`round17/resume1/d5_wired_avx.json` except `worktree`); shipped arm `full_year_output_sha256` = `b7a7329bed74c17918fa3cbc11c7613acb2074851e2357a08869fcd4661e12d2`.
-2. **Existing SI3 thermodynamic, pond, and audit suites**:
+3. **Existing SI3 thermodynamic, pond, restart, and audit suites**:
    - `tests/ice/unit/test_si3_o10_salinity.py` (`/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/round20/pytest_o10_salinity_control.log`): `======================== 44 passed in 682.84s (0:11:22) ========================`.
    - `tests/ice/unit/test_si3_thd_da.py`, `tests/ice/unit/test_si3_o9_zdf_dh_temp.py`, `tests/ocean/fidelity/test_nemo_si3_o9_minmax_audit.py`, `tests/ocean/fidelity/test_nemo_si3_o10_minmax_audit.py` (`/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/round20/pytest_si3_callers_control.log`): `67 passed` (all pass, identical to parent `e31236c2f6ad`).
-   - `tests/ice/test_ice_ponds_faithful.py` and `tests/ice/test_sea_ice_new_physics.py`: `92 passed`.
-3. **Private-import and parameter/constant ratchets (`tests/test_no_private_cross_imports.py`, `tests/test_param_specs.py`, `tests/test_no_inline_physics_coeffs.py`, `tests/test_no_hardcoded_constants.py`)**: all pass.
+   - `tests/ocean/unit/test_ocean_run_restart.py`: `74 passed`.
+4. **Private-import and parameter/constant ratchets (`tests/test_no_private_cross_imports.py`, `tests/test_param_specs.py`, `tests/test_no_inline_physics_coeffs.py`, `tests/test_no_hardcoded_constants.py`)**: all pass.
 
 ---
 
@@ -145,7 +149,7 @@ Shared files touched are `packages/ice/legoesm/ice/config.py:267-288,652-659` (k
 
 ## 6. CHOICES (`ASKED` / `UNASKED`)
 
-- **New module `packages/ice/legoesm/ice/si3_thd_pnd.py` with exports appended at the end of `packages/ice/legoesm/ice/__init__.py:290-314` and selectable `"si3_lev"` branch wired into `packages/ice/legoesm/ice/ponds.py:34-212` and `packages/ice/legoesm/ice/sea_ice.py:2423-2457`** (`ASKED`): wires the SI3 level-pond scheme into the production sea-ice step while keeping `bitz_lipscomb.py`, `si3_surface.py`, and `si3_thd_da.py` byte-identical to parent `e31236c2f6ad` and keeping default `scheme = "cesm"` bit-identical.
+- **New module `packages/ice/legoesm/ice/si3_thd_pnd.py` with exports appended at the end of `packages/ice/legoesm/ice/__init__.py:290-314`, prognostic `h_il` on `DynamicSeaIceState` (`packages/ice/legoesm/ice/state.py:52-76,149-163,213-227,284-304` and `packages/ocean/legoesm/ocean/restart.py:322-329`), and selectable `"si3_lev"` branch wired into `packages/ice/legoesm/ice/ponds.py:34-212` and `packages/ice/legoesm/ice/sea_ice.py:2437-2503,2950-3017,3180-3184,3370-3388`** (`ASKED`): wires the SI3 level-pond scheme (including prognostic lid thickness `h_il` and category-summed `at_i`) into the production sea-ice step and restart while keeping `bitz_lipscomb.py`, `si3_surface.py`, and `si3_thd_da.py` byte-identical to parent `e31236c2f6ad` and keeping default `scheme = "cesm"` bit-identical (`161` arrays, `2604` elements, `0` unequal).
 - **`_nemo_sqrt` custom JVP with zero-radicand tangent `0.0` (`packages/ice/legoesm/ice/si3_thd_pnd.py:90-104`) and safe divisors on untaken branches** (`UNASKED`; offered for revert): preserves 100% of forward binary64 bits (including `+0.0` and `-0.0`) while preventing `0.0 * inf = NaN` in `jax.grad` on zero-pond (`rad = 0, disc = 0`), thin-ice, and vanished-ice cells.
 - **Both `ln_pnd_lids = True` and `ln_pnd_lids = False` (glibc `EXP`) arms transcribed inside `si3_pnd_lev`, while `si3_ice_thd_pnd` enforces the production deck's `ln_pnd_lids = True`** (`UNASKED`; offered for revert): allows direct unit testing of the glibc `exp` arm in `si3_pnd_lev` while keeping `si3_ice_thd_pnd` fail-closed on the production deck selectors.
 - **No namelist or acquisition tool changes** (`ASKED`).

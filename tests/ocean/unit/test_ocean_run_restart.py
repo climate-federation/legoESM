@@ -390,8 +390,8 @@ def test_all_slots_round_trip_bit_exact(tmp_path):
         if _SLOT_POLICY[name] == _SLOT_DIAGNOSTIC:
             continue      # excluded by policy — covered by its own test below
         _assert_slot_equal(name, getattr(got, name), getattr(state, name))
-    # All 12 sea-ice slots, unmangled (no land-masking, no category aggregation).
-    assert len(DynamicSeaIceState._fields) == 12
+    # All 13 sea-ice slots, unmangled (no land-masking, no category aggregation).
+    assert len(DynamicSeaIceState._fields) == 13
     for name in DynamicSeaIceState._fields:
         _assert_slot_equal(f"ice_{name}", getattr(got_ice, name),
                            getattr(ice, name))
