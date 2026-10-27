@@ -1,4 +1,6 @@
-"""Unit controls for the round-336 resume-18 Decision-122 and wet-value gate."""
+"""Unit controls for the round-336 resume-19 Decision-122, parent-provenance,
+wet-value, and cross-tree caller output comparator gate.
+"""
 from __future__ import annotations
 
 from pathlib import Path
@@ -20,15 +22,17 @@ from scripts.validate.ocean_fidelity.orca2_l4 import (  # noqa: E402
 def test_d122_self_test_passes_and_plants_fire(tmp_path: Path) -> None:
     res = gate.self_test(plant="none", tmp_dir=tmp_path)
     assert res["status"] == "PASS_R336_D122_SELF_TEST"
+    assert res["census"]["control_commit"] == gate.PARENT_COMMIT
     assert res["census"]["registered_census"] == {"toward": 1, "away": 0, "equal": 2}
     assert res["census"]["first_over_bar"]["old_target"] == [2, "stage3", "T"]
     assert res["census"]["first_over_bar"]["new_first_over_bar"] == [3, "stage3", "T"]
+    assert res["caller_audit"]["status"] == "PASS_R336_CALLER_AUDIT"
+    assert res["caller_audit"]["parent_commit"] == gate.PARENT_COMMIT
+    assert res["caller_audit"]["orca2_unequal_words"] == 3
 
-    with pytest.raises(gate.GateError):
-        gate.self_test(plant="exact-loss", tmp_dir=tmp_path)
-
-    with pytest.raises(gate.GateError):
-        gate.self_test(plant="away-row", tmp_dir=tmp_path)
+    for plant_name in ("exact-loss", "away-row", "parent-commit", "caller-unequal"):
+        with pytest.raises(gate.GateError):
+            gate.self_test(plant=plant_name, tmp_dir=tmp_path)
 
 
 def test_wet_row_detail_separates_dry_signed_zero_from_wet_value_diff() -> None:

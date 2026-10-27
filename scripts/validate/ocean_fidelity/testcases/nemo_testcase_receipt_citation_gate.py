@@ -2081,20 +2081,20 @@ CITATION_MAP = {
     'tests/ocean/fidelity/test_orca2_round336_tke_walk.py:126-207': [
         'def test_admitted_record_compiled_solver_and_bottom_dirichlet_fix() -> None:',
         'assert fixed_score["max_abs"] == 0.0', 82],
-    'scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round336_d122_gate.py:217-457': [
+    'scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round336_d122_gate.py:311-626': [
         'def measure(',
-        '"d122_c_and_d": True,', 241],
-    'tests/ocean/fidelity/test_orca2_round336_d122_gate.py:20-50': [
+        '"d122_c_and_d": True,', 316],
+    'tests/ocean/fidelity/test_orca2_round336_d122_gate.py:22-54': [
         'def test_d122_self_test_passes_and_plants_fire(tmp_path: Path) -> None:',
-        'assert d1["_max_index"] == (0, 0, 1)', 31],
+        'assert d1["_max_index"] == (0, 0, 1)', 33],
     'packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:13927-13929': [
         'tke_bottom_dirichlet=self._tke_bottom_dirichlet(',
         'u_now=u_now, v_now=v_now),', 3],
     'scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_phase2t_tke_entry_gate.py:93':
         'card_bottom = np.asarray(jax.jit(model._tke_bottom_dirichlet)(state))[:, :90]',
-    'scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round336_d122_gate.py:461-608': [
-        'def caller_audit(deck_root: Path, expect_commit: str) -> dict[str, object]:',
-        '"sha256": hashlib.sha256(kt1_cand.tobytes()).hexdigest(),', 148],
+    'scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round336_d122_gate.py:952-1411': [
+        'def caller_audit_dump(',
+        '"callers": callers_report,', 460],
     'scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round336_tke_gate.py:344-361': [
         'if source is not None:',
         '"TKE live e3w(Kmm) differs from admitted round-333 replay")', 18],

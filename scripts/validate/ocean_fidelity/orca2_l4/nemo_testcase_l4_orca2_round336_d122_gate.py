@@ -1,21 +1,68 @@
 #!/usr/bin/env python3
-"""Round 336 Resume 18: Decision-122 and rung-10 wet-value rescore gate for
-the north-fold V-face mask restoration in ``_tke_bottom_dirichlet``.
+"""Round 336 Resume 19: Decision-122, rung-10 wet-value rescore, parent-SHA
+provenance enforcement, and cross-tree caller output comparator for the
+north-fold V-face mask restoration in ``_tke_bottom_dirichlet``.
 """
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import os
+import subprocess
 import sys
+import types
 from collections import Counter
 from pathlib import Path
+from types import MethodType, SimpleNamespace
 
 import numpy as np
 
-REPO_ROOT = Path(__file__).resolve().parents[4]
-for package in (REPO_ROOT, REPO_ROOT / "packages/core", REPO_ROOT / "packages/ocean"):
-    if str(package) not in sys.path:
-        sys.path.insert(0, str(package))
+PARENT_COMMIT = "254fec16a822b9548fdd47e196611027ce9ac37d"
+PLANTED_WRONG_PARENT_COMMIT = "fb1a92720a71892d8549a61efa887ea926186bfa"
+DEFAULT_REPO_ROOT = Path(__file__).resolve().parents[4]
+
+
+def _resolve_active_repo() -> Path:
+    if "--repo" in sys.argv:
+        idx = sys.argv.index("--repo")
+        if idx + 1 < len(sys.argv):
+            return Path(sys.argv[idx + 1]).resolve()
+    return DEFAULT_REPO_ROOT
+
+
+ACTIVE_REPO_ROOT = _resolve_active_repo()
+_script_dir = str(Path(__file__).resolve().parent)
+sys.path = [p for p in sys.path if p != _script_dir]
+if ACTIVE_REPO_ROOT != DEFAULT_REPO_ROOT:
+    _default_prefix = str(DEFAULT_REPO_ROOT)
+    sys.path = [p for p in sys.path if not p.startswith(_default_prefix)]
+    os.chdir(ACTIVE_REPO_ROOT)
+
+for _package in (
+    ACTIVE_REPO_ROOT,
+    ACTIVE_REPO_ROOT / "packages/core",
+    ACTIVE_REPO_ROOT / "packages/ocean",
+    ACTIVE_REPO_ROOT / "packages/atmosphere",
+    ACTIVE_REPO_ROOT / "packages/coupler",
+    ACTIVE_REPO_ROOT / "packages/ice",
+    ACTIVE_REPO_ROOT / "packages/land",
+    ACTIVE_REPO_ROOT / "packages/ml",
+    ACTIVE_REPO_ROOT / "packages/tools",
+    ACTIVE_REPO_ROOT / "src",
+):
+    if _package.exists():
+        _pkg_str = str(_package)
+        if _pkg_str in sys.path:
+            sys.path.remove(_pkg_str)
+        sys.path.insert(0, _pkg_str)
+
+for _mod_name in [
+    m for m in list(sys.modules) if m == "legoesm" or m.startswith("legoesm.")
+]:
+    mod_file = getattr(sys.modules[_mod_name], "__file__", None)
+    if mod_file is None or not Path(mod_file).resolve().is_relative_to(ACTIVE_REPO_ROOT):
+        del sys.modules[_mod_name]
 
 from scripts.validate.ocean_fidelity.orca2_l4 import (  # noqa: E402
     nemo_testcase_l4_orca2_round1_ladder_gate as rung10,
@@ -35,9 +82,43 @@ PAIRS = (
     ("rung10", "independent"),
 )
 
+CALLER_ORDER = (
+    "non_nemo_folded",
+    "non_nemo_unfolded",
+    "faithful_dino",
+    "ORCA2V1-tke",
+    "GYRE-zco",
+    "VORTEX-zco",
+    "LOCK_EXCHANGE-zco",
+    "OVERFLOW-zps",
+    "ORCA2-rung0",
+    "ORCA2G1-flat",
+    "ORCA2G1b-vec",
+    "ORCA2G2-zps",
+    "ORCA2G3-ts",
+    "ORCA2G4-sbc",
+    "ORCA2G5-ice",
+    "ORCA2G6-vec",
+    "ORCA2G7-drg",
+    "ORCA2G8-ldf",
+    "ORCA2-zps_kt1_rest",
+    "ORCA2-zps",
+)
+
+GRIDLADDER_LANE = Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/lanes/gridladder")
+GRIDLADDER_RECIPE_COMMIT = "242eaacc47"
+GRIDLADDER_VMIX_LANE = Path(
+    "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/lanes/gridladder_vmix"
+)
+GRIDLADDER_VMIX_RECIPE_COMMIT = "0b9443cef2"
+GRIDLADDER_ROUNDS = Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/gridladder_rounds")
+GRIDLADDER_VMIX_ROUNDS = Path(
+    "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/gridladder_vmix_rounds"
+)
+
 
 class GateError(RuntimeError):
-    """The same-tree arm, wet-value audit, or Decision-122 comparison failed."""
+    """The same-tree arm, wet-value audit, caller audit, or D122 check failed."""
 
 
 def require(condition: bool, message: str) -> None:
@@ -46,8 +127,6 @@ def require(condition: bool, message: str) -> None:
 
 
 def _strip_fold_top_v_in_bottom_dirichlet(cfg):
-    from types import SimpleNamespace
-
     vmix = getattr(getattr(cfg, "physics", None), "vertical_mixing", None)
     if vmix is None or vmix.scheme != "tke":
         return cfg, False
@@ -64,15 +143,30 @@ def _strip_fold_top_v_in_bottom_dirichlet(cfg):
 
 
 def _wrap_bottom_dirichlet(original, counter: list[int], *, strip_flag: bool):
-    def wrapped(self, state, z_coord=None, config=None, grid=None, *,
-                u_now=None, v_now=None):
+    def wrapped(
+        self,
+        state,
+        z_coord=None,
+        config=None,
+        grid=None,
+        *,
+        u_now=None,
+        v_now=None,
+    ):
         cfg_b = self.config if config is None else config
         cfg_eff, active = _strip_fold_top_v_in_bottom_dirichlet(cfg_b)
         if active:
             counter[0] += 1
         use_cfg = cfg_eff if (strip_flag and active) else config
-        return original(self, state, z_coord=z_coord, config=use_cfg,
-                        grid=grid, u_now=u_now, v_now=v_now)
+        return original(
+            self,
+            state,
+            z_coord=z_coord,
+            config=use_cfg,
+            grid=grid,
+            u_now=u_now,
+            v_now=v_now,
+        )
 
     return wrapped
 
@@ -226,6 +320,14 @@ def measure(
     require(arm in ("control", "candidate"), f"unknown arm {arm}")
     from legoesm.ocean.dynamics import ocean_model_latlon_cgrid as model_module
 
+    model_path = Path(model_module.__file__).resolve()
+    r332_path = Path(r332.__file__).resolve()
+    require(
+        model_path.is_relative_to(ACTIVE_REPO_ROOT)
+        and r332_path.is_relative_to(ACTIVE_REPO_ROOT),
+        f"imported modules {model_path} / {r332_path} are outside {ACTIVE_REPO_ROOT}",
+    )
+
     calls = [0]
     cls = model_module.LatLonCGridOceanModel
     original_bd = cls._tke_bottom_dirichlet
@@ -273,6 +375,11 @@ def measure(
         (calls[0] > 0) == (rung == "rung10"),
         f"bottom_dirichlet call execution count moved for {rung}: {calls[0]}",
     )
+    require(
+        bool(result.get("worktree", {}).get("clean"))
+        and str(result["worktree"]["commit"]).lower() == expect_commit.lower(),
+        f"measured worktree {result.get('worktree')} != clean {expect_commit}",
+    )
     if rung == "rung10":
         result["wet_audit"] = _finalize_wet_audit(
             result["ladder"]["rows"], card_ref, ice_by_kt
@@ -301,18 +408,49 @@ def classify(
     candidate_path: Path,
     *,
     allow_cross_tree_parent: bool = False,
+    expect_parent_commit: str = PARENT_COMMIT,
+    expect_commit: str | None = None,
     plant: str = "none",
 ) -> dict[str, object]:
     control = json.loads(control_path.read_text(encoding="utf-8"))
     candidate = json.loads(candidate_path.read_text(encoding="utf-8"))
+    if plant == "parent-commit":
+        control = dict(control)
+        control["worktree"] = {
+            **dict(control.get("worktree", {})),
+            "commit": PLANTED_WRONG_PARENT_COMMIT,
+        }
     require(
         candidate.get("status") == "PASS_R336_D122_ARM",
         f"candidate arm is not admitted: {candidate.get('status')}",
     )
+    require(
+        bool(control.get("worktree", {}).get("clean")) is True,
+        "control worktree is not clean",
+    )
+    require(
+        bool(candidate.get("worktree", {}).get("clean")) is True,
+        "candidate worktree is not clean",
+    )
+    if expect_commit is not None:
+        require(
+            str(candidate["worktree"]["commit"]).lower() == expect_commit.lower(),
+            f"candidate commit {candidate['worktree']['commit']} != {expect_commit}",
+        )
     if allow_cross_tree_parent:
         require(
-            control.get("status") in ("PASS_R336_D122_ARM", "PASS_R333_D122_ARM"),
+            control.get("status") == "PASS_R336_D122_ARM",
             f"parent arm is not admitted: {control.get('status')}",
+        )
+        require(
+            str(control["worktree"]["commit"]).lower()
+            == expect_parent_commit.lower(),
+            f"parent commit {control['worktree']['commit']} != expected parent {expect_parent_commit}",
+        )
+        require(
+            str(candidate["worktree"]["commit"]).lower()
+            != str(control["worktree"]["commit"]).lower(),
+            "cross-tree parent and candidate commits are identical",
         )
     else:
         require(
@@ -432,7 +570,13 @@ def classify(
     }
 
 
-def decide(paths: list[Path]) -> dict[str, object]:
+def decide(
+    paths: list[Path],
+    *,
+    allow_cross_tree_parent: bool = False,
+    expect_parent_commit: str = PARENT_COMMIT,
+    expect_commit: str | None = None,
+) -> dict[str, object]:
     docs = [json.loads(path.read_text(encoding="utf-8")) for path in paths]
     require(
         sorted((doc["rung"], doc["label"]) for doc in docs) == sorted(PAIRS),
@@ -443,6 +587,30 @@ def decide(paths: list[Path]) -> dict[str, object]:
         "censuses mix candidate commits",
     )
     require(
+        len({doc["control_commit"] for doc in docs}) == 1,
+        "censuses mix control commits",
+    )
+    if expect_commit is not None:
+        require(
+            str(docs[0]["worktree_commit"]).lower() == expect_commit.lower(),
+            f"decision worktree_commit {docs[0]['worktree_commit']} != {expect_commit}",
+        )
+    if allow_cross_tree_parent:
+        require(
+            str(docs[0]["control_commit"]).lower() == expect_parent_commit.lower(),
+            f"decision control_commit {docs[0]['control_commit']} != expected parent {expect_parent_commit}",
+        )
+        require(
+            str(docs[0]["worktree_commit"]).lower()
+            != str(docs[0]["control_commit"]).lower(),
+            "cross-tree decision has control_commit == worktree_commit",
+        )
+    else:
+        require(
+            docs[0]["control_commit"] == docs[0]["worktree_commit"],
+            "same-tree decision control_commit != worktree_commit",
+        )
+    require(
         all(
             doc["status"] == "PASS_R336_D122_CENSUS" and doc["d122_c_and_d"]
             for doc in docs
@@ -452,18 +620,352 @@ def decide(paths: list[Path]) -> dict[str, object]:
     return {
         "format": "nemo-testcase-l4-orca2-round336-d122-decision-v1",
         "status": "PASS_R336_D122_DECISION",
+        "control_commit": docs[0]["control_commit"],
         "worktree_commit": docs[0]["worktree_commit"],
         "cards": docs,
         "d122_c_and_d": True,
     }
 
 
-def caller_audit(deck_root: Path, expect_commit: str) -> dict[str, object]:
-    import hashlib
+def _load_git_module(repo: Path, commit: str, rel_path: str, mod_name: str):
+    src = subprocess.check_output(
+        ["git", "-C", str(repo), "show", f"{commit}:{rel_path}"],
+        text=True,
+    )
+    mod = types.ModuleType(mod_name)
+    mod.__file__ = f"{repo}@{commit}:{rel_path}"
+    exec(compile(src, mod.__file__, "exec"), mod.__dict__)
+    return mod
+
+
+def _load_file_module(path: Path, mod_name: str):
+    saved_path = list(sys.path)
+    src = path.read_text(encoding="utf-8")
+    mod = types.ModuleType(mod_name)
+    mod.__file__ = str(path.resolve())
+    exec(compile(src, mod.__file__, "exec"), mod.__dict__)
+    extra = [p for p in sys.path if p not in saved_path and not p.startswith(str(GRIDLADDER_VMIX_LANE / "packages"))]
+    sys.path = [p for p in saved_path if p != str(GRIDLADDER_VMIX_LANE)] + [
+        p for p in extra if p != str(GRIDLADDER_VMIX_LANE)
+    ]
+    return mod
+
+
+def _non_nemo_staircase_caller(*, fold: bool) -> tuple[dict[str, np.ndarray], dict[str, object]]:
+    import jax.numpy as jnp
+    from legoesm.core.field import Field
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel
+    from legoesm.ocean.physics.combined import OceanPhysicsConfig
+    from legoesm.ocean.physics.convection.config import OceanConvectionConfig
+    from legoesm.ocean.physics.vertical_mixing.config import (
+        TKEConfig,
+        VerticalMixingConfig,
+    )
+    from legoesm.ocean.vertical import (
+        create_partial_cell_coordinate,
+        create_z_star_from_thicknesses,
+    )
+
+    ny, nx, nz_bot = 4, 6, 4
+    perm = np.array([(nx - i) % nx for i in range(nx)], dtype=np.int32)
+    rng = np.random.default_rng(19)
+
+    def _sym(arr: np.ndarray) -> np.ndarray:
+        out = arr.copy()
+        out[-1] = 0.5 * (out[-1] + out[-1, perm])
+        out[-1, 0] = out[-1, nx // 2] = 0.0
+        return out
+
+    one = np.ones((ny, nx))
+    raw = create_z_star_from_thicknesses(
+        [1.0, 2.0, 3.0, 4.0],
+        nemo_gdept_0_m=np.broadcast_to([0.5, 2.0, 4.5, 8.0], (ny, nx, nz_bot)).copy(),
+        nemo_gdepw_0_m=np.broadcast_to([0.0, 1.0, 3.0, 6.0], (ny, nx, nz_bot)).copy(),
+        nemo_e3t_0_m=np.broadcast_to([1.0, 2.0, 3.0, 4.0], (ny, nx, nz_bot)).copy(),
+        nemo_e3w_0_m=np.broadcast_to([1.0, 1.5, 2.5, 3.5], (ny, nx, nz_bot)).copy(),
+        nemo_hu_0_m=6.0 * one,
+        nemo_hv_0_m=6.0 * one,
+        nemo_e1e2t_m=one,
+        nemo_e1e2u_m=one,
+        nemo_e1e2v_m=one,
+    )
+    base_z = create_partial_cell_coordinate(raw, jnp.full((ny, nx), 6.0))
+    raw_vmask = np.zeros((ny, nx, nz_bot), dtype=np.float64)
+    raw_vmask[..., :3] = 1.0
+    z = base_z._replace(
+        nemo_een_barotropic=SimpleNamespace(vmask=jnp.asarray(raw_vmask))
+    )
+
+    eta = jnp.asarray(_sym(rng.uniform(-0.05, 0.05, (ny, nx))), dtype=jnp.float64)
+    avm = jnp.asarray(
+        _sym(rng.uniform(0.05, 0.2, (ny, nx, nz_bot - 1))), dtype=jnp.float64
+    )
+    tke0 = jnp.asarray(
+        _sym(rng.uniform(1.0e-4, 5.0e-4, (ny, nx, nz_bot - 1))), dtype=jnp.float64
+    )
+    u = np.zeros((ny, nx + 1, nz_bot), dtype=np.float64)
+    v = np.zeros((ny + 1, nx, nz_bot), dtype=np.float64)
+    v_row = np.array([0.8, -0.3, 0.5, -0.1, 0.4, -0.6], dtype=np.float64)
+    v[-2, :, :] = v_row[:, None]
+    v[-1, :, :] = -v_row[perm, None]
+    u_in = jnp.asarray(u, dtype=jnp.float64)
+    v_in = jnp.asarray(v, dtype=jnp.float64)
+
+    d3, d2 = ("lat", "lon", "level"), ("lat", "lon")
+    tke_cfg = TKEConfig(
+        prognostic=True,
+        bottom_tke_bc=True,
+        tke_background=1.0e-14,
+        mxl_min=1.0e-3,
+        kappaM_min=1.0e-12,
+        kappaH_min=1.0e-12,
+        tke_preclosure_coeff_source="carried_previous_step",
+        tke_shear_evaluation_stage="step_entry",
+        tke_shear_production="nemo_face_native_nbb2",
+        tke_shear_avm_weighting="nemo_face",
+        tke_shear_metric_source="nemo_qco_live_face",
+        nemo_sh2_fold_top_v=False,
+    )
+    physics = OceanPhysicsConfig(
+        vertical_mixing=VerticalMixingConfig(scheme="tke", tke=tke_cfg),
+        convection=OceanConvectionConfig(scheme="none"),
+    )
+    bottom_drag = SimpleNamespace(
+        bottom_drag_scheme="nemo_linear",
+        bottom_drag_cd0=1.0e-3,
+        bottom_drag_cdmax=0.1,
+        bottom_drag_z0=3.0e-3,
+        bottom_drag_ke0=2.5e-3,
+        bottom_drag_uc0=0.4,
+    )
+    cfg = SimpleNamespace(
+        physics=physics,
+        bottom_drag=bottom_drag,
+        eos="linear",
+        eos_linear=None,
+        eos_nemo_seos=None,
+        implicit_ice_ocean_top_drag=False,
+        zdf_implicit_solver_evaluation="factored",
+        zdf_baroclinic_only=False,
+        zdf_drag_in_matrix=False,
+        A_v=1.0e-4,
+        K_v=1.0e-5,
+    )
+    grid = SimpleNamespace(
+        lat_T=jnp.zeros((ny, nx), dtype=jnp.float64),
+        dx_T=jnp.ones((ny, nx), dtype=jnp.float64),
+        dy_T=jnp.ones((ny, nx), dtype=jnp.float64),
+        area_T=jnp.ones((ny, nx), dtype=jnp.float64),
+        dx_U=jnp.ones((ny, nx + 1), dtype=jnp.float64),
+        dy_U=jnp.ones((ny, nx + 1), dtype=jnp.float64),
+        area_U=jnp.ones((ny, nx + 1), dtype=jnp.float64),
+        dx_V=jnp.ones((ny + 1, nx), dtype=jnp.float64),
+        dy_V=jnp.ones((ny + 1, nx), dtype=jnp.float64),
+        area_V=jnp.ones((ny + 1, nx), dtype=jnp.float64),
+        fold=SimpleNamespace(is_active=True, perm_T=jnp.asarray(perm))
+        if fold
+        else None,
+    )
+    model = SimpleNamespace(
+        config=cfg,
+        z_coord=z,
+        grid=grid,
+        _iwm_forcing=None,
+        _nemo_ws_test_hooks=SimpleNamespace(
+            zdf_momentum_observer=None,
+            tke_rhs_materialization="",
+            tke_rhs_intermediate="",
+        ),
+        _tke_post_mixing_active=lambda: False,
+        _tke_realized_kdiss_active=lambda: False,
+        _lat_dependent_constant_vmix=lambda: False,
+    )
+    for name in (
+        "_tke_bottom_dirichlet",
+        "_tke_bottom_level",
+        "_tke_step_entry_p_sh2",
+    ):
+        setattr(model, name, MethodType(getattr(LatLonCGridOceanModel, name), model))
+
+    class _StateNS(SimpleNamespace):
+        def _replace(self, **kwargs):
+            return _StateNS(**{**self.__dict__, **kwargs})
+
+    T_arr = jnp.broadcast_to(
+        jnp.asarray([15.0, 10.0, 6.0, 2.0], dtype=jnp.float64), (ny, nx, nz_bot)
+    )
+    S_arr = jnp.full((ny, nx, nz_bot), 35.0, dtype=jnp.float64)
+    state = _StateNS(
+        T=Field(T_arr, "T", d3, "degC"),
+        S=Field(S_arr, "S", d3, "psu"),
+        H_bathy=Field(jnp.full((ny, nx), 6.0, dtype=jnp.float64), "H_bathy", d2, "m"),
+        land_mask=Field(jnp.ones((ny, nx), dtype=jnp.float64), "land_mask", d2, "1"),
+        eta=Field(eta, "eta", d2, "m"),
+        u=Field(u_in, "u", d3, "m/s"),
+        v=Field(v_in, "v", d3, "m/s"),
+        tke=Field(tke0, "tke", d3, "m2/s2"),
+        tke_avm=Field(avm, "tke_avm", d3, "m2/s"),
+        tke_avt=Field(avm, "tke_avt", d3, "m2/s"),
+        tke_avm_surface=None,
+        tke_dissl=None,
+    )
+    bot = np.asarray(model._tke_bottom_dirichlet(state, u_now=u_in, v_now=v_in))
+    kv, av = LatLonCGridOceanModel._apply_implicit_vertical_mixing(
+        model,
+        state,
+        10800.0,
+        None,
+        tke_old=tke0,
+        u_now=u_in,
+        v_now=v_in,
+        eta_now=eta,
+        eta_step_entry=eta,
+        return_K_profiles=True,
+    )
+    arrays = {
+        "bot_dirichlet": np.asarray(bot, dtype=np.float64),
+        "K_v": np.asarray(kv, dtype=np.float64),
+        "A_v": np.asarray(av, dtype=np.float64),
+    }
+    meta = {
+        "vmix_scheme": "tke",
+        "bottom_tke_bc": True,
+        "nemo_sh2_fold_top_v": False,
+        "fold": fold,
+        "bottom_dirichlet_is_none": False,
+    }
+    return arrays, meta
+
+
+def _eval_model_caller(
+    name: str,
+    model,
+    state,
+    dt: float,
+    forcing,
+    *,
+    u_val: float,
+    v_val: float,
+    avm_override: float | None = None,
+) -> tuple[dict[str, np.ndarray], dict[str, object]]:
+    import jax.numpy as jnp
+    from legoesm.core.field import Field
+
+    vmix = getattr(
+        getattr(model.config, "physics", None), "vertical_mixing", None
+    )
+    scheme = getattr(vmix, "scheme", "none") if vmix is not None else "none"
+    tke_cfg = getattr(vmix, "tke", None) if vmix is not None else None
+    bot_flag = bool(getattr(tke_cfg, "bottom_tke_bc", False)) and scheme == "tke"
+    fold_flag = bool(getattr(tke_cfg, "nemo_sh2_fold_top_v", False)) and scheme == "tke"
+
+    st = model._seed_tke_preclosure_carry(state) if scheme == "tke" else state
+    u_nz = jnp.full_like(st.u.data, u_val, dtype=jnp.float64)
+    v_nz = jnp.full_like(st.v.data, v_val, dtype=jnp.float64)
+    u_f = Field(u_nz, st.u.name, st.u.dims, st.u.units)
+    v_f = Field(v_nz, st.v.name, st.v.dims, st.v.units)
+    repl = {"u": u_f, "v": v_f}
+    if hasattr(st, "u_before") and st.u_before is not None:
+        repl["u_before"] = u_f
+    if hasattr(st, "v_before") and st.v_before is not None:
+        repl["v_before"] = v_f
+    if avm_override is not None and getattr(st, "tke_avm", None) is not None:
+        avm_arr = jnp.full_like(st.tke_avm.data, avm_override, dtype=jnp.float64)
+        repl["tke_avm"] = Field(
+            avm_arr, st.tke_avm.name, st.tke_avm.dims, st.tke_avm.units
+        )
+    st = st._replace(**repl)
+
+    bot = model._tke_bottom_dirichlet(st, u_now=u_nz, v_now=v_nz)
+    require(
+        (bot is None) == (not bot_flag),
+        f"{name}: _tke_bottom_dirichlet None={bot is None} vs bottom_tke_bc={bot_flag}",
+    )
+
+    n2_tr = model._n2_before_advection_tracers(st)
+    n2_tr_b = model._n2_nemo_before_tracers(st)
+    n2_bundle = model._tke_step_entry_n2_bundle(st) if scheme == "tke" else None
+    tke_old = (
+        st.tke.data
+        if (scheme == "tke" and getattr(st, "tke", None) is not None)
+        else None
+    )
+
+    kv, av = model._apply_implicit_vertical_mixing(
+        st,
+        dt,
+        forcing,
+        tke_old=tke_old,
+        u_now=u_nz,
+        v_now=v_nz,
+        eta_now=st.eta.data,
+        eta_step_entry=st.eta.data,
+        n2_tracers=n2_tr,
+        n2_tracers_before=n2_tr_b,
+        tke_n2_bundle=n2_bundle,
+        return_K_profiles=True,
+    )
+    vmix_out = model._apply_implicit_vertical_mixing(
+        st,
+        dt,
+        forcing,
+        tke_old=tke_old,
+        u_now=u_nz,
+        v_now=v_nz,
+        eta_now=st.eta.data,
+        eta_step_entry=st.eta.data,
+        n2_tracers=n2_tr,
+        n2_tracers_before=n2_tr_b,
+        tke_n2_bundle=n2_bundle,
+        return_tke=(scheme == "tke"),
+    )
+    if scheme == "tke":
+        state_out, tke_new = vmix_out
+    else:
+        state_out, tke_new = vmix_out, None
+
+    arrays: dict[str, np.ndarray] = {}
+    if bot is not None:
+        arrays["bot_dirichlet"] = np.asarray(bot, dtype=np.float64)
+    arrays["K_v"] = np.asarray(kv, dtype=np.float64)
+    arrays["A_v"] = np.asarray(av, dtype=np.float64)
+    arrays["u"] = np.asarray(state_out.u.data, dtype=np.float64)
+    arrays["v"] = np.asarray(state_out.v.data, dtype=np.float64)
+    arrays["T"] = np.asarray(state_out.T.data, dtype=np.float64)
+    arrays["S"] = np.asarray(state_out.S.data, dtype=np.float64)
+    if tke_new is not None:
+        arrays["tke"] = np.asarray(tke_new, dtype=np.float64)
+    for attr in ("tke_avm", "tke_avt", "tke_avm_surface", "tke_dissl"):
+        val = getattr(state_out, attr, None)
+        if val is not None and getattr(val, "data", None) is not None:
+            arrays[attr] = np.asarray(val.data, dtype=np.float64)
+
+    meta = {
+        "vmix_scheme": scheme,
+        "bottom_tke_bc": bot_flag,
+        "nemo_sh2_fold_top_v": fold_flag,
+        "bottom_dirichlet_is_none": bot is None,
+    }
+    return arrays, meta
+
+
+def caller_audit_dump(
+    out_dir: Path, deck_root: Path, expect_commit: str
+) -> dict[str, object]:
+    os.environ.setdefault("JAX_PLATFORMS", "cpu")
     import jax
     import jax.numpy as jnp
+    from legoesm.core.field import Field
     from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
     from legoesm.ocean.dynamics import ocean_model_latlon_cgrid as model_module
+    from legoesm.ocean.experiments.dino import (
+        dino_config_for_recipe,
+        dino_lat_lon_grid,
+        dino_lat_lon_model_config,
+        dino_lat_lon_state,
+        dino_lat_lon_vertical,
+        nemo_faithful_dino_config,
+    )
     from legoesm.ocean.fidelity.nemo_testcase_recipe import (
         build_gyre_zco_card,
         build_lock_exchange_zco_card,
@@ -475,12 +977,16 @@ def caller_audit(deck_root: Path, expect_commit: str) -> dict[str, object]:
     from scripts.validate.ocean_fidelity.orca2_l4 import (
         nemo_testcase_l4_orca2_round92_rung0_card_gate as rung0,
     )
-    from tests.ocean.unit.test_nemo_sh2_fold_top_v import _bottom_bc_production_case
 
-    stamp = worktree_stamp()
+    model_file = Path(model_module.__file__).resolve()
     require(
-        stamp["clean"] and stamp["commit"].lower() == expect_commit.lower(),
-        "caller_audit requires clean committed tree",
+        model_file.is_relative_to(ACTIVE_REPO_ROOT),
+        f"model_module {model_file} is outside active repo {ACTIVE_REPO_ROOT}",
+    )
+    stamp = worktree_stamp(repo=ACTIVE_REPO_ROOT)
+    require(
+        bool(stamp["clean"]) and str(stamp["commit"]).lower() == expect_commit.lower(),
+        f"caller_audit_dump requires clean committed tree at {expect_commit}: got {stamp}",
     )
     set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
     require(
@@ -490,123 +996,419 @@ def caller_audit(deck_root: Path, expect_commit: str) -> dict[str, object]:
     )
 
     cls = model_module.LatLonCGridOceanModel
-    original_bd = cls._tke_bottom_dirichlet
+    g_recipe = _load_git_module(
+        GRIDLADDER_LANE,
+        GRIDLADDER_RECIPE_COMMIT,
+        "packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py",
+        "g_recipe",
+    )
+    v_recipe = _load_git_module(
+        GRIDLADDER_VMIX_LANE,
+        GRIDLADDER_VMIX_RECIPE_COMMIT,
+        "packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py",
+        "v_recipe",
+    )
+    g4_forcing_mod = _load_file_module(
+        GRIDLADDER_VMIX_LANE
+        / "scripts/validate/ocean_fidelity/testcases/nemo_testcase_g4_orca2sbc/g4_forcing_steps.py",
+        "g4_forcing_steps",
+    )
+    g5_records_mod = _load_file_module(
+        GRIDLADDER_VMIX_LANE
+        / "scripts/validate/ocean_fidelity/testcases/nemo_testcase_g5_orca2ice/g5_records.py",
+        "g5_records",
+    )
+    if "rCdU_ice" not in g5_records_mod.ROUTE_FIELDS:
+        g5_records_mod.ROUTE_FIELDS = (*g5_records_mod.ROUTE_FIELDS, "rCdU_ice")
 
-    def _run_non_nemo_arm(strip_flag: bool):
-        calls = [0]
-        cls._tke_bottom_dirichlet = _wrap_bottom_dirichlet(
-            original_bd, calls, strip_flag=strip_flag
-        )
-        try:
-            bot_f, kv_f, _ = _bottom_bc_production_case(False, fold=True)
-            bot_nf, kv_nf, _ = _bottom_bc_production_case(False, fold=False)
-        finally:
-            cls._tke_bottom_dirichlet = original_bd
-        return calls[0], bot_f, kv_f, bot_nf, kv_nf
+    all_arrays: dict[str, np.ndarray] = {}
+    caller_meta: dict[str, dict[str, object]] = {}
 
-    c_ctrl, bf_ctrl, kvf_ctrl, bnf_ctrl, kvnf_ctrl = _run_non_nemo_arm(True)
-    c_cand, bf_cand, kvf_cand, bnf_cand, kvnf_cand = _run_non_nemo_arm(False)
-    require(c_ctrl == c_cand and c_cand > 0, "non-NEMO bottom_dirichlet call count moved")
-    for a, b, label in (
-        (bf_ctrl, bf_cand, "folded_bot"),
-        (kvf_ctrl, kvf_cand, "folded_kv"),
-        (bnf_ctrl, bnf_cand, "unfolded_bot"),
-        (kvnf_ctrl, kvnf_cand, "unfolded_kv"),
-    ):
-        unequal = int(np.count_nonzero(a.view(np.uint64) != b.view(np.uint64)))
-        require(unequal == 0, f"non-NEMO {label} moved: {unequal} unequal words")
+    def _record_caller(
+        caller_name: str,
+        arrays: dict[str, np.ndarray],
+        meta: dict[str, object],
+    ) -> None:
+        array_meta: dict[str, dict[str, object]] = {}
+        for arr_name, arr in arrays.items():
+            contig = np.ascontiguousarray(np.asarray(arr, dtype=np.float64))
+            all_arrays[f"{caller_name}__{arr_name}"] = contig
+            array_meta[arr_name] = {
+                "shape": list(contig.shape),
+                "elements": int(contig.size),
+                "sha256": hashlib.sha256(contig.tobytes()).hexdigest(),
+            }
+        caller_meta[caller_name] = {
+            **meta,
+            "array_names": list(arrays.keys()),
+            "arrays": array_meta,
+        }
 
-    non_orca2_cards = {
-        "GYRE-zco": build_gyre_zco_card(),
-        "LOCK_EXCHANGE-zco": build_lock_exchange_zco_card(),
-        "OVERFLOW-zps": build_overflow_zps_card(),
-        "VORTEX-zco": build_vortex_zco_card(),
-        "ORCA2-rung0": rung0.build_rung0_card(deck_root),
-    }
-    card_rows = {}
-    for name, card in non_orca2_cards.items():
-        vmix = getattr(
-            getattr(card.recipe.model_config, "physics", None),
-            "vertical_mixing",
-            None,
-        )
-        scheme = getattr(vmix, "scheme", "none") if vmix is not None else "none"
-        tke_cfg = getattr(vmix, "tke", None) if vmix is not None else None
-        fold_flag = bool(getattr(tke_cfg, "nemo_sh2_fold_top_v", False))
-        bot_flag = bool(getattr(tke_cfg, "bottom_tke_bc", False)) and scheme == "tke"
-        require(not fold_flag, f"{name} unexpectedly enables nemo_sh2_fold_top_v")
-        require(not bot_flag, f"{name} unexpectedly enables bottom_tke_bc")
-        model = cls(
+    # 1-2. Non-NEMO prognostic TKE callers (folded and unfolded)
+    arr_f, meta_f = _non_nemo_staircase_caller(fold=True)
+    _record_caller("non_nemo_folded", arr_f, meta_f)
+    arr_nf, meta_nf = _non_nemo_staircase_caller(fold=False)
+    _record_caller("non_nemo_unfolded", arr_nf, meta_nf)
+
+    # 3. Faithful DINO (bottom_tke_bc=True, nemo_sh2_fold_top_v=False)
+    dino_cfg = nemo_faithful_dino_config(dino_config_for_recipe("nemo_dino_kamm_mlf"))
+    dino_grid = dino_lat_lon_grid(dino_cfg, n_lon=50)
+    dino_z = dino_lat_lon_vertical(dino_grid, dino_cfg)
+    dino_state0 = dino_lat_lon_state(dino_grid, dino_z, dino_cfg)
+    dino_mcfg, _ = dino_lat_lon_model_config(dino_grid, dino_cfg)
+    dino_model = cls(dino_grid, dino_z, dino_mcfg)
+    ny_d, nx_d, nlev_d = dino_state0.T.data.shape
+    tke_init_d = jnp.full((ny_d, nx_d, nlev_d - 1), 1.0e-4, dtype=jnp.float64)
+    dino_state = dino_state0._replace(
+        tke=Field(tke_init_d, "tke", ("lat", "lon", "level"), "m2/s2"),
+        T_before=dino_state0.T,
+        S_before=dino_state0.S,
+        u_before=dino_state0.u,
+        v_before=dino_state0.v,
+        eta_before=dino_state0.eta,
+    )
+    arr_dino, meta_dino = _eval_model_caller(
+        "faithful_dino",
+        dino_model,
+        dino_state,
+        2700.0,
+        None,
+        u_val=0.08,
+        v_val=-0.06,
+    )
+    require(
+        meta_dino["bottom_tke_bc"] and not meta_dino["nemo_sh2_fold_top_v"],
+        f"faithful_dino flags unexpected: {meta_dino}",
+    )
+    _record_caller("faithful_dino", arr_dino, meta_dino)
+
+    # 4. ORCA2V1-tke (scheme="tke", bottom_tke_bc=False, nemo_sh2_fold_top_v=True)
+    v1_deck = GRIDLADDER_VMIX_ROUNDS / "round1/oracle_v1_r1/twin_a"
+    v1_card = v_recipe.build_nemo_testcase_card("ORCA2V1-tke", deck_root=v1_deck)
+    _, v1_forcing = g5_records_mod.nemo_supplied_forcing(v1_card, v1_deck, 1)
+    v1_forcing = v1_forcing._replace(
+        ice_mean_thickness_hm_i=g5_records_mod.read_v1_hm_i(v1_deck, 1)
+    )
+    v1_model = cls(
+        v1_card.recipe.grid,
+        v1_card.recipe.z_coord,
+        v1_card.recipe.model_config,
+        iwm_forcing=v1_card.recipe.iwm_forcing,
+    )
+    arr_v1, meta_v1 = _eval_model_caller(
+        "ORCA2V1-tke",
+        v1_model,
+        v1_card.recipe.initial_state,
+        float(v1_card.dt_s),
+        v1_forcing,
+        u_val=0.08,
+        v_val=-0.06,
+    )
+    require(
+        meta_v1["vmix_scheme"] == "tke"
+        and not meta_v1["bottom_tke_bc"]
+        and meta_v1["nemo_sh2_fold_top_v"],
+        f"ORCA2V1-tke flags unexpected: {meta_v1}",
+    )
+    _record_caller("ORCA2V1-tke", arr_v1, meta_v1)
+
+    # 5-9. Standard non-ORCA2 cards
+    std_cards = (
+        ("GYRE-zco", build_gyre_zco_card()),
+        ("VORTEX-zco", build_vortex_zco_card()),
+        ("LOCK_EXCHANGE-zco", build_lock_exchange_zco_card()),
+        ("OVERFLOW-zps", build_overflow_zps_card()),
+        ("ORCA2-rung0", rung0.build_rung0_card(deck_root)),
+    )
+    for cname, card in std_cards:
+        cmodel = cls(
             card.recipe.grid,
             card.recipe.z_coord,
             card.recipe.model_config,
             iwm_forcing=card.recipe.iwm_forcing,
         )
-        out = model._tke_bottom_dirichlet(card.recipe.initial_state)
-        require(out is None, f"{name} _tke_bottom_dirichlet did not return None")
-        card_rows[name] = {
-            "vmix_scheme": scheme,
-            "bottom_tke_bc": bot_flag,
-            "nemo_sh2_fold_top_v": fold_flag,
-            "bottom_dirichlet_return": None,
-            "bit_identical_to_parent": True,
+        c_arr, c_meta = _eval_model_caller(
+            cname,
+            cmodel,
+            card.recipe.initial_state,
+            float(card.dt_s),
+            None,
+            u_val=0.08,
+            v_val=-0.06,
+        )
+        require(
+            not c_meta["bottom_tke_bc"] and not c_meta["nemo_sh2_fold_top_v"],
+            f"{cname} flags unexpected: {c_meta}",
+        )
+        _record_caller(cname, c_arr, c_meta)
+
+    # 10-18. ORCA2G1..G8 gridladder cards
+    g_decks = (
+        ("ORCA2G1-flat", GRIDLADDER_ROUNDS / "round4/oracle_g1_r4/p3_a_100step"),
+        ("ORCA2G1b-vec", GRIDLADDER_ROUNDS / "round22/oracle_g1b_r22/ref_100step"),
+        ("ORCA2G2-zps", GRIDLADDER_ROUNDS / "round10/oracle_g2_r10/p3_a_100step"),
+        ("ORCA2G3-ts", GRIDLADDER_ROUNDS / "round21/oracle_g3_r21/p3_a"),
+        ("ORCA2G4-sbc", GRIDLADDER_ROUNDS / "round21/oracle_g4_r21/p6_a"),
+        ("ORCA2G5-ice", GRIDLADDER_ROUNDS / "round31/oracle_g5_r31/twin_a"),
+        ("ORCA2G6-vec", GRIDLADDER_ROUNDS / "round36/oracle_g6_r36/twin_a"),
+        ("ORCA2G7-drg", GRIDLADDER_ROUNDS / "round41/oracle_g7_r41/twin_a"),
+        ("ORCA2G8-ldf", GRIDLADDER_ROUNDS / "round45/oracle_g8_r45/twin_a"),
+    )
+    for gname, gdeck in g_decks:
+        gcard = g_recipe.build_nemo_testcase_card(gname, deck_root=gdeck)
+        if gname == "ORCA2G4-sbc":
+            _, gforcing = g4_forcing_mod.nemo_supplied_forcing(gcard, gdeck, 1)
+        elif gname in ("ORCA2G5-ice", "ORCA2G6-vec", "ORCA2G7-drg", "ORCA2G8-ldf"):
+            _, gforcing = g5_records_mod.nemo_supplied_forcing(gcard, gdeck, 1)
+        else:
+            gforcing = None
+        gmodel = cls(
+            gcard.recipe.grid,
+            gcard.recipe.z_coord,
+            gcard.recipe.model_config,
+            iwm_forcing=gcard.recipe.iwm_forcing,
+        )
+        g_arr, g_meta = _eval_model_caller(
+            gname,
+            gmodel,
+            gcard.recipe.initial_state,
+            float(gcard.dt_s),
+            gforcing,
+            u_val=0.08,
+            v_val=-0.06,
+        )
+        require(
+            not g_meta["bottom_tke_bc"] and not g_meta["nemo_sh2_fold_top_v"],
+            f"{gname} flags unexpected: {g_meta}",
+        )
+        _record_caller(gname, g_arr, g_meta)
+
+    # 19. ORCA2-zps_kt1_rest (kt=1 rest entry u=v=0, covering phase2t_tke_entry_gate.py:93)
+    orca2_card = build_orca2_zps_card(deck_root)
+    orca2_model = cls(
+        orca2_card.recipe.grid,
+        orca2_card.recipe.z_coord,
+        orca2_card.recipe.model_config,
+        iwm_forcing=orca2_card.recipe.iwm_forcing,
+    )
+    arr_kt1, meta_kt1 = _eval_model_caller(
+        "ORCA2-zps_kt1_rest",
+        orca2_model,
+        orca2_card.recipe.initial_state,
+        float(orca2_card.dt_s),
+        None,
+        u_val=0.0,
+        v_val=0.0,
+    )
+    require(
+        meta_kt1["bottom_tke_bc"] and meta_kt1["nemo_sh2_fold_top_v"],
+        f"ORCA2-zps_kt1_rest flags unexpected: {meta_kt1}",
+    )
+    _record_caller("ORCA2-zps_kt1_rest", arr_kt1, meta_kt1)
+
+    # 20. ORCA2-zps (active north-fold velocity and viscosity)
+    arr_orca2, meta_orca2 = _eval_model_caller(
+        "ORCA2-zps",
+        orca2_model,
+        orca2_card.recipe.initial_state,
+        float(orca2_card.dt_s),
+        None,
+        u_val=0.4,
+        v_val=-0.5,
+        avm_override=0.02,
+    )
+    require(
+        meta_orca2["bottom_tke_bc"] and meta_orca2["nemo_sh2_fold_top_v"],
+        f"ORCA2-zps flags unexpected: {meta_orca2}",
+    )
+    _record_caller("ORCA2-zps", arr_orca2, meta_orca2)
+
+    require(
+        tuple(caller_meta.keys()) == CALLER_ORDER,
+        f"caller order {tuple(caller_meta.keys())} != {CALLER_ORDER}",
+    )
+    out_dir.mkdir(parents=True, exist_ok=True)
+    np.savez(out_dir / "arrays.npz", **all_arrays)
+    manifest = {
+        "format": "nemo-testcase-l4-orca2-round336-caller-dump-v1",
+        "status": "PASS_R336_CALLER_DUMP",
+        "worktree": stamp,
+        "model_file": str(model_file),
+        "caller_order": list(CALLER_ORDER),
+        "callers": caller_meta,
+    }
+    (out_dir / "manifest.json").write_text(
+        json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    return manifest
+
+
+def caller_audit_compare(
+    parent_dump: Path,
+    candidate_dump: Path,
+    *,
+    expect_parent_commit: str = PARENT_COMMIT,
+    expect_commit: str | None = None,
+    plant: str = "none",
+) -> dict[str, object]:
+    parent_manifest = json.loads(
+        (parent_dump / "manifest.json").read_text(encoding="utf-8")
+    )
+    candidate_manifest = json.loads(
+        (candidate_dump / "manifest.json").read_text(encoding="utf-8")
+    )
+    if plant == "parent-commit":
+        parent_manifest = dict(parent_manifest)
+        parent_manifest["worktree"] = {
+            **dict(parent_manifest.get("worktree", {})),
+            "commit": PLANTED_WRONG_PARENT_COMMIT,
+        }
+    require(
+        parent_manifest.get("status") == "PASS_R336_CALLER_DUMP",
+        f"parent dump not admitted: {parent_manifest.get('status')}",
+    )
+    require(
+        candidate_manifest.get("status") == "PASS_R336_CALLER_DUMP",
+        f"candidate dump not admitted: {candidate_manifest.get('status')}",
+    )
+    require(
+        bool(parent_manifest.get("worktree", {}).get("clean")) is True,
+        "parent dump worktree is not clean",
+    )
+    require(
+        bool(candidate_manifest.get("worktree", {}).get("clean")) is True,
+        "candidate dump worktree is not clean",
+    )
+    parent_commit = str(parent_manifest["worktree"]["commit"])
+    candidate_commit = str(candidate_manifest["worktree"]["commit"])
+    require(
+        parent_commit.lower() == expect_parent_commit.lower(),
+        f"parent dump commit {parent_commit} != expected parent {expect_parent_commit}",
+    )
+    require(
+        candidate_commit.lower() != parent_commit.lower(),
+        "parent and candidate dumps have identical commit",
+    )
+    if expect_commit is not None:
+        require(
+            candidate_commit.lower() == expect_commit.lower(),
+            f"candidate dump commit {candidate_commit} != expected {expect_commit}",
+        )
+    require(
+        tuple(parent_manifest["caller_order"]) == CALLER_ORDER
+        and tuple(candidate_manifest["caller_order"]) == CALLER_ORDER,
+        "caller_order moved between parent and candidate dumps",
+    )
+
+    parent_npz = np.load(parent_dump / "arrays.npz")
+    candidate_npz = np.load(candidate_dump / "arrays.npz")
+
+    callers_report: dict[str, dict[str, object]] = {}
+    non_orca2_unequal_callers: list[str] = []
+
+    for caller_name in CALLER_ORDER:
+        p_info = parent_manifest["callers"][caller_name]
+        c_info = candidate_manifest["callers"][caller_name]
+        arr_names = list(p_info["array_names"])
+        require(
+            arr_names == list(c_info["array_names"]),
+            f"{caller_name}: array_names moved {arr_names} vs {c_info['array_names']}",
+        )
+        arrays_report: dict[str, dict[str, object]] = {}
+        total_elements = 0
+        total_unequal_words = 0
+        total_unequal_values = 0
+
+        for arr_name in arr_names:
+            key = f"{caller_name}__{arr_name}"
+            a = np.ascontiguousarray(np.asarray(parent_npz[key], dtype=np.float64))
+            b = np.ascontiguousarray(np.asarray(candidate_npz[key], dtype=np.float64))
+            if (
+                plant == "caller-unequal"
+                and caller_name == "ORCA2V1-tke"
+                and arr_name == "K_v"
+            ):
+                b = b.copy()
+                b.flat[0] = b.flat[0] + np.spacing(max(abs(float(b.flat[0])), 1.0))
+            require(
+                a.shape == b.shape,
+                f"{caller_name}.{arr_name}: shape {a.shape} != {b.shape}",
+            )
+            p_sha = hashlib.sha256(a.tobytes()).hexdigest()
+            c_sha = hashlib.sha256(b.tobytes()).hexdigest()
+            require(
+                p_sha == p_info["arrays"][arr_name]["sha256"],
+                f"{caller_name}.{arr_name}: parent npz sha256 mismatch",
+            )
+            if not (
+                plant == "caller-unequal"
+                and caller_name == "ORCA2V1-tke"
+                and arr_name == "K_v"
+            ):
+                require(
+                    c_sha == c_info["arrays"][arr_name]["sha256"],
+                    f"{caller_name}.{arr_name}: candidate npz sha256 mismatch",
+                )
+            bit_diff = a.view(np.uint64) != b.view(np.uint64)
+            val_diff = a != b
+            unequal_words = int(np.count_nonzero(bit_diff))
+            unequal_values = int(np.count_nonzero(val_diff))
+            res = a - b
+            max_abs = float(np.max(np.abs(res))) if unequal_values > 0 else 0.0
+            rms = float(np.sqrt(np.mean(res * res))) if unequal_values > 0 else 0.0
+
+            total_elements += int(a.size)
+            total_unequal_words += unequal_words
+            total_unequal_values += unequal_values
+            arrays_report[arr_name] = {
+                "shape": list(a.shape),
+                "elements": int(a.size),
+                "unequal_words": unequal_words,
+                "unequal_values": unequal_values,
+                "max_abs": max_abs,
+                "rms": rms,
+                "parent_sha256": p_sha,
+                "candidate_sha256": c_sha,
+            }
+
+        if caller_name != "ORCA2-zps" and total_unequal_words > 0:
+            non_orca2_unequal_callers.append(caller_name)
+
+        callers_report[caller_name] = {
+            "vmix_scheme": c_info["vmix_scheme"],
+            "bottom_tke_bc": c_info["bottom_tke_bc"],
+            "nemo_sh2_fold_top_v": c_info["nemo_sh2_fold_top_v"],
+            "bottom_dirichlet_is_none": c_info["bottom_dirichlet_is_none"],
+            "array_count": len(arr_names),
+            "total_elements": total_elements,
+            "total_unequal_words": total_unequal_words,
+            "total_unequal_values": total_unequal_values,
+            "arrays": arrays_report,
         }
 
-    orca2 = build_orca2_zps_card(deck_root)
-    orca2_tke = orca2.recipe.model_config.physics.vertical_mixing.tke
     require(
-        bool(orca2_tke.bottom_tke_bc) and bool(orca2_tke.nemo_sh2_fold_top_v),
-        "ORCA2 card does not enable both bottom_tke_bc and nemo_sh2_fold_top_v",
+        not non_orca2_unequal_callers,
+        f"non-ORCA2 callers have unequal words vs parent: {non_orca2_unequal_callers}",
     )
-    orca2_model = cls(
-        orca2.recipe.grid,
-        orca2.recipe.z_coord,
-        orca2.recipe.model_config,
-        iwm_forcing=orca2.recipe.iwm_forcing,
+    orca2_rep = callers_report["ORCA2-zps"]
+    require(
+        int(orca2_rep["total_unequal_words"]) > 0
+        and int(orca2_rep["arrays"]["bot_dirichlet"]["unequal_words"]) > 0
+        and int(orca2_rep["arrays"]["K_v"]["unequal_words"]) > 0
+        and int(orca2_rep["arrays"]["T"]["unequal_words"]) > 0,
+        f"ORCA2-zps card did not move vs parent: {orca2_rep}",
     )
-    state0 = orca2_model._seed_tke_preclosure_carry(orca2.recipe.initial_state)
-    calls_kt1_ctrl, calls_kt1_cand = [0], [0]
-    cls._tke_bottom_dirichlet = _wrap_bottom_dirichlet(
-        original_bd, calls_kt1_ctrl, strip_flag=True
-    )
-    try:
-        kt1_ctrl = np.asarray(jax.jit(orca2_model._tke_bottom_dirichlet)(state0))
-    finally:
-        cls._tke_bottom_dirichlet = original_bd
-    cls._tke_bottom_dirichlet = _wrap_bottom_dirichlet(
-        original_bd, calls_kt1_cand, strip_flag=False
-    )
-    try:
-        kt1_cand = np.asarray(jax.jit(orca2_model._tke_bottom_dirichlet)(state0))
-    finally:
-        cls._tke_bottom_dirichlet = original_bd
-    kt1_unequal = int(
-        np.count_nonzero(kt1_ctrl.view(np.uint64) != kt1_cand.view(np.uint64))
-    )
-    require(kt1_unequal == 0, f"kt=1 rest-state bottom_dirichlet moved: {kt1_unequal}")
 
     return {
-        "format": "nemo-testcase-l4-orca2-round336-caller-audit-v1",
+        "format": "nemo-testcase-l4-orca2-round336-caller-audit-v2",
         "status": "PASS_R336_CALLER_AUDIT",
-        "worktree": stamp,
-        "non_nemo_prognostic_tke": {
-            "nemo_sh2_fold_top_v": False,
-            "bottom_tke_bc": True,
-            "folded_bot_sha256": hashlib.sha256(bf_cand.tobytes()).hexdigest(),
-            "folded_kv_sha256": hashlib.sha256(kvf_cand.tobytes()).hexdigest(),
-            "unfolded_bot_sha256": hashlib.sha256(bnf_cand.tobytes()).hexdigest(),
-            "unfolded_kv_sha256": hashlib.sha256(kvnf_cand.tobytes()).hexdigest(),
-            "unequal_words_vs_parent": 0,
-            "bit_identical_to_parent": True,
-        },
-        "non_orca2_cards": card_rows,
-        "orca2_kt1_rest_entry": {
-            "bottom_tke_bc": True,
-            "nemo_sh2_fold_top_v": True,
-            "unequal_words_vs_parent": kt1_unequal,
-            "bit_identical_at_rest": True,
-            "sha256": hashlib.sha256(kt1_cand.tobytes()).hexdigest(),
-        },
+        "parent_commit": parent_commit,
+        "worktree_commit": candidate_commit,
+        "parent_worktree": parent_manifest["worktree"],
+        "worktree": candidate_manifest["worktree"],
+        "caller_order": list(CALLER_ORDER),
+        "non_orca2_unequal_callers": non_orca2_unequal_callers,
+        "callers": callers_report,
     }
 
 
@@ -653,13 +1455,23 @@ def self_test(*, plant: str = "none", tmp_dir: Path | None = None) -> dict[str, 
         "rms": 1.0e-12,
         "classification": "OVER_BAR",
     }
-    ctrl_doc = {
+    cand_sha = "c2451f6309fc0000000000000000000000000000"
+    ctrl_same_doc = {
         "status": "PASS_R336_D122_ARM",
         "arm": "control",
         "rung": "rung10",
         "label": "given_nemo_entry",
         "bottom_dirichlet_calls": 30,
-        "worktree": {"commit": "deadbeef"},
+        "worktree": {"commit": cand_sha, "clean": True},
+        "ladder": {"rows": [base_row_exact, base_row_over_before, base_row_kt3]},
+    }
+    ctrl_parent_doc = {
+        "status": "PASS_R336_D122_ARM",
+        "arm": "candidate",
+        "rung": "rung10",
+        "label": "given_nemo_entry",
+        "bottom_dirichlet_calls": 30,
+        "worktree": {"commit": PARENT_COMMIT, "clean": True},
         "ladder": {"rows": [base_row_exact, base_row_over_before, base_row_kt3]},
     }
     cand_doc = {
@@ -668,24 +1480,137 @@ def self_test(*, plant: str = "none", tmp_dir: Path | None = None) -> dict[str, 
         "rung": "rung10",
         "label": "given_nemo_entry",
         "bottom_dirichlet_calls": 30,
-        "worktree": {"commit": "deadbeef"},
+        "worktree": {"commit": cand_sha, "clean": True},
         "ladder": {"rows": [base_row_exact, base_row_over_after, base_row_kt3]},
     }
     with tempfile.TemporaryDirectory(dir=tmp_dir) as td:
-        p_ctrl = Path(td) / "ctrl.json"
-        p_cand = Path(td) / "cand.json"
-        p_ctrl.write_text(json.dumps(ctrl_doc), encoding="utf-8")
+        td_path = Path(td)
+        p_ctrl = td_path / "ctrl_same.json"
+        p_parent = td_path / "ctrl_parent.json"
+        p_cand = td_path / "cand.json"
+        p_ctrl.write_text(json.dumps(ctrl_same_doc), encoding="utf-8")
+        p_parent.write_text(json.dumps(ctrl_parent_doc), encoding="utf-8")
         p_cand.write_text(json.dumps(cand_doc), encoding="utf-8")
-        res = classify(p_ctrl, p_cand, plant=plant)
-        require(
-            res["status"] == "PASS_R336_D122_CENSUS" and res["d122_c_and_d"],
-            f"classify failed or plant {plant} fired: {res}",
+
+        classify_plant = (
+            plant if plant in ("exact-loss", "away-row", "parent-commit") else "none"
         )
-    return {"status": "PASS_R336_D122_SELF_TEST", "census": res}
+        res_same = classify(p_ctrl, p_cand, expect_commit=cand_sha)
+        res_cross = classify(
+            p_parent,
+            p_cand,
+            allow_cross_tree_parent=True,
+            expect_parent_commit=PARENT_COMMIT,
+            expect_commit=cand_sha,
+            plant=classify_plant,
+        )
+        require(
+            res_same["status"] == "PASS_R336_D122_CENSUS"
+            and res_same["d122_c_and_d"]
+            and res_cross["status"] == "PASS_R336_D122_CENSUS"
+            and res_cross["d122_c_and_d"]
+            and res_cross["control_commit"] == PARENT_COMMIT,
+            f"classify failed or plant {plant} fired: {res_cross}",
+        )
+
+        # Synthetic caller dump pair for caller_audit_compare self-test
+        p_dump = td_path / "parent_dump"
+        c_dump = td_path / "cand_dump"
+        p_dump.mkdir()
+        c_dump.mkdir()
+        p_arrays: dict[str, np.ndarray] = {}
+        c_arrays: dict[str, np.ndarray] = {}
+        p_callers: dict[str, object] = {}
+        c_callers: dict[str, object] = {}
+        for cname in CALLER_ORDER:
+            names = (
+                ["bot_dirichlet", "K_v", "T"]
+                if cname in ("non_nemo_folded", "non_nemo_unfolded", "faithful_dino", "ORCA2-zps_kt1_rest", "ORCA2-zps")
+                else ["K_v", "T"]
+            )
+            p_meta_arrs = {}
+            c_meta_arrs = {}
+            for aname in names:
+                arr_p = np.array([[1.0, 2.0]], dtype=np.float64)
+                arr_c = arr_p.copy()
+                if cname == "ORCA2-zps":
+                    arr_c[0, 1] = 2.5
+                p_arrays[f"{cname}__{aname}"] = arr_p
+                c_arrays[f"{cname}__{aname}"] = arr_c
+                p_meta_arrs[aname] = {
+                    "shape": [1, 2],
+                    "elements": 2,
+                    "sha256": hashlib.sha256(arr_p.tobytes()).hexdigest(),
+                }
+                c_meta_arrs[aname] = {
+                    "shape": [1, 2],
+                    "elements": 2,
+                    "sha256": hashlib.sha256(arr_c.tobytes()).hexdigest(),
+                }
+            common_meta = {
+                "vmix_scheme": "tke" if "bot_dirichlet" in names or cname in ("ORCA2V1-tke", "GYRE-zco") else "constant",
+                "bottom_tke_bc": "bot_dirichlet" in names,
+                "nemo_sh2_fold_top_v": cname in ("ORCA2V1-tke", "ORCA2-zps_kt1_rest", "ORCA2-zps"),
+                "bottom_dirichlet_is_none": "bot_dirichlet" not in names,
+                "array_names": names,
+            }
+            p_callers[cname] = {**common_meta, "arrays": p_meta_arrs}
+            c_callers[cname] = {**common_meta, "arrays": c_meta_arrs}
+
+        np.savez(p_dump / "arrays.npz", **p_arrays)
+        np.savez(c_dump / "arrays.npz", **c_arrays)
+        (p_dump / "manifest.json").write_text(
+            json.dumps(
+                {
+                    "format": "nemo-testcase-l4-orca2-round336-caller-dump-v1",
+                    "status": "PASS_R336_CALLER_DUMP",
+                    "worktree": {"commit": PARENT_COMMIT, "clean": True},
+                    "caller_order": list(CALLER_ORDER),
+                    "callers": p_callers,
+                }
+            ),
+            encoding="utf-8",
+        )
+        (c_dump / "manifest.json").write_text(
+            json.dumps(
+                {
+                    "format": "nemo-testcase-l4-orca2-round336-caller-dump-v1",
+                    "status": "PASS_R336_CALLER_DUMP",
+                    "worktree": {"commit": cand_sha, "clean": True},
+                    "caller_order": list(CALLER_ORDER),
+                    "callers": c_callers,
+                }
+            ),
+            encoding="utf-8",
+        )
+        caller_plant = (
+            plant if plant in ("caller-unequal", "parent-commit") else "none"
+        )
+        caller_res = caller_audit_compare(
+            p_dump,
+            c_dump,
+            expect_parent_commit=PARENT_COMMIT,
+            expect_commit=cand_sha,
+            plant=caller_plant,
+        )
+
+    return {
+        "status": "PASS_R336_D122_SELF_TEST",
+        "census": res_cross,
+        "caller_audit": {
+            "status": caller_res["status"],
+            "parent_commit": caller_res["parent_commit"],
+            "worktree_commit": caller_res["worktree_commit"],
+            "orca2_unequal_words": caller_res["callers"]["ORCA2-zps"][
+                "total_unequal_words"
+            ],
+        },
+    }
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--repo", type=Path, default=DEFAULT_REPO_ROOT)
     parser.add_argument("--measure", action="store_true")
     parser.add_argument("--rung")
     parser.add_argument("--label")
@@ -693,14 +1618,18 @@ def main() -> int:
     parser.add_argument("--deck-root", type=Path)
     parser.add_argument("--twin-a", type=Path)
     parser.add_argument("--expect-commit")
+    parser.add_argument("--expect-parent-commit", default=PARENT_COMMIT)
     parser.add_argument("--classify", nargs=2, type=Path)
     parser.add_argument("--allow-cross-tree-parent", action="store_true")
     parser.add_argument("--decide", nargs="+", type=Path)
+    parser.add_argument("--caller-audit-dump", type=Path)
     parser.add_argument("--caller-audit", action="store_true")
+    parser.add_argument("--parent-dump", type=Path)
+    parser.add_argument("--candidate-dump", type=Path)
     parser.add_argument("--self-test", action="store_true")
     parser.add_argument(
         "--plant",
-        choices=("none", "exact-loss", "away-row"),
+        choices=("none", "exact-loss", "away-row", "parent-commit", "caller-unequal"),
         default="none",
     )
     parser.add_argument("--output", type=Path)
@@ -719,6 +1648,8 @@ def main() -> int:
             result = classify(
                 *args.classify,
                 allow_cross_tree_parent=args.allow_cross_tree_parent,
+                expect_parent_commit=args.expect_parent_commit,
+                expect_commit=args.expect_commit,
                 plant=args.plant,
             )
             require(
@@ -726,13 +1657,32 @@ def main() -> int:
                 f"census failed: {result}",
             )
         elif args.decide:
-            result = decide(args.decide)
-        elif args.caller_audit:
+            result = decide(
+                args.decide,
+                allow_cross_tree_parent=args.allow_cross_tree_parent,
+                expect_parent_commit=args.expect_parent_commit,
+                expect_commit=args.expect_commit,
+            )
+        elif args.caller_audit_dump:
             require(
                 bool(args.deck_root and args.expect_commit),
-                "--caller-audit requires --deck-root and --expect-commit",
+                "--caller-audit-dump requires --deck-root and --expect-commit",
             )
-            result = caller_audit(args.deck_root, args.expect_commit)
+            result = caller_audit_dump(
+                args.caller_audit_dump, args.deck_root, args.expect_commit
+            )
+        elif args.caller_audit:
+            require(
+                bool(args.parent_dump and args.candidate_dump),
+                "--caller-audit requires --parent-dump and --candidate-dump",
+            )
+            result = caller_audit_compare(
+                args.parent_dump,
+                args.candidate_dump,
+                expect_parent_commit=args.expect_parent_commit,
+                expect_commit=args.expect_commit,
+                plant=args.plant,
+            )
         elif args.self_test:
             result = self_test(plant=args.plant)
         else:
