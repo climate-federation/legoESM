@@ -1801,7 +1801,64 @@ def run_preflight(
         require('"route": "in_place"' in admit_log and '"status": "PASS"' in admit_log,
                 f"admit_existing.log missing in_place PASS record: {admit_log}")
 
-        # 4. Failed-arm quarantine + clean re-run without deleting quarantined runs
+        # 4a. Arm-A staging failure quarantine + clean re-run (failure after mkdir arm_a routes to refused/)
+        stub_stage_bad = Path(tmp) / "stub_s4_year_stage_bad"
+        missing_ice = Path(tmp) / "missing_ice_cover_clim.nc"
+        stage_bad_res = subprocess.run(
+            [
+                "bash",
+                str(run_sh),
+                "--stub-run-dir",
+                str(stub_stage_bad),
+                "--stub-steps",
+                "16",
+                "--ice-cover",
+                str(missing_ice),
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        require(
+            stage_bad_res.returncode != 0
+            and "R342_REFUSED_ARM_QUARANTINED" in stage_bad_res.stderr,
+            f"arm-A staging failure plant did not fail and quarantine partial arm:\n{stage_bad_res.stderr}",
+        )
+        stage_refused_items = (
+            sorted((stub_stage_bad / "refused").glob("*"))
+            if (stub_stage_bad / "refused").is_dir()
+            else []
+        )
+        require(
+            len(stage_refused_items) == 1
+            and TWIN_A_NAME in stage_refused_items[0].name
+            and stage_refused_items[0].is_dir()
+            and any(stage_refused_items[0].iterdir()),
+            f"expected 1 non-empty quarantined partial arm-A dir in {stub_stage_bad / 'refused'}, found {stage_refused_items}",
+        )
+        require(
+            not (stub_stage_bad / TWIN_A_NAME).exists()
+            and not (stub_stage_bad / TWIN_B_NAME).exists(),
+            "partial arm-A dir still present at canonical path after staging failure",
+        )
+        stage_rerun_res = subprocess.run(
+            ["bash", str(run_sh), "--stub-run-dir", str(stub_stage_bad), "--stub-steps", "16"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        require(
+            stage_rerun_res.returncode == 0,
+            f"re-run after arm-A staging failure quarantine failed:\n{stage_rerun_res.stdout}\n{stage_rerun_res.stderr}",
+        )
+        require(
+            stage_refused_items[0].is_dir()
+            and (stub_stage_bad / TWIN_A_NAME).is_dir()
+            and (stub_stage_bad / TWIN_B_NAME).is_dir(),
+            "re-run after arm-A staging quarantine did not preserve refused/ partial arm alongside new admitted twins",
+        )
+
+        # 4b. Failed-arm quarantine + clean re-run without deleting quarantined runs
         stub_bad = Path(tmp) / "stub_s4_year_bad"
         bad_res = subprocess.run(
             [
@@ -1945,6 +2002,12 @@ def run_preflight(
             "rc": timeout_res.returncode,
             "quarantined_count": len(timeout_refused),
         },
+        "stage_failure_plant": {
+            "passed": True,
+            "rc": stage_bad_res.returncode,
+            "quarantined_count": len(stage_refused_items),
+            "rerun_rc": stage_rerun_res.returncode,
+        },
         "prerequisites": prereq,
         "allocate_extents": alloc_check,
         "allocate_plant": alloc_plant,
@@ -1960,6 +2023,7 @@ def run_preflight(
         "admit_existing_routes": {
             "in_place_pass_verified": True,
             "existing_arm_overwrite_refused": True,
+            "stage_failure_quarantine_and_rerun_verified": True,
             "refused_quarantine_and_rerun_verified": True,
             "refused_to_admit_existing_checksum_plant_verified": True,
             "refused_to_admit_existing_promotion_verified": True,

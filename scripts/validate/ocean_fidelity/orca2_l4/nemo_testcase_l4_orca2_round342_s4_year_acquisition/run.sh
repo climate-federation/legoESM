@@ -200,11 +200,11 @@ stage_single_arm() {
     echo "REFUSE: retained arm directory already exists: ${arm_dir} (quarantine to refused/ or move aside before re-running; never delete)" >&2
     return 1
   fi
-  mkdir "${arm_dir}"
+  mkdir "${arm_dir}" || return 1
   "${PYTHON_BIN}" "${GATE_PY}" \
     --stage-run-dir "${arm_dir}" \
     --ice-cover "${ICE_COVER_PATH}" \
-    --expected-steps "${EXPECTED_STEPS}" >/dev/null
+    --expected-steps "${EXPECTED_STEPS}" >/dev/null || return 1
   if [[ "${nemo_bin}" == "__STUB__" ]]; then
     local extra_flags=()
     if [[ "${PLANT_STUB_UNPRODUCED}" -eq 1 ]]; then
@@ -213,15 +213,15 @@ stage_single_arm() {
     if [[ "${PLANT_STUB_SLEEP}" -gt 0 ]]; then
       extra_flags+=("--plant-stub-sleep" "${PLANT_STUB_SLEEP}")
     fi
-    cat > "${arm_dir}/nemo" <<EOF
+    cat > "${arm_dir}/nemo" <<EOF || return 1
 #!/usr/bin/env bash
 exec "${PYTHON_BIN}" "${GATE_PY}" --act-as-nemo-binary ${extra_flags[*]:-}
 EOF
-    chmod +x "${arm_dir}/nemo"
+    chmod +x "${arm_dir}/nemo" || return 1
   else
-    cp -a "${nemo_bin}" "${arm_dir}/nemo"
+    cp -a "${nemo_bin}" "${arm_dir}/nemo" || return 1
   fi
-  "${PYTHON_BIN}" "${GATE_PY}" --write-run-manifest "${arm_dir}" >/dev/null
+  "${PYTHON_BIN}" "${GATE_PY}" --write-run-manifest "${arm_dir}" >/dev/null || return 1
 }
 
 run_single_arm() {
@@ -251,7 +251,7 @@ run_single_arm() {
     echo "REFUSE: runtime error marker found in ${arm_dir}" >&2
     return 1
   fi
-  "${PYTHON_BIN}" "${GATE_PY}" --write-run-manifest "${arm_dir}" >/dev/null
+  "${PYTHON_BIN}" "${GATE_PY}" --write-run-manifest "${arm_dir}" >/dev/null || return 1
 }
 
 run_twin_pipeline() {
@@ -261,23 +261,24 @@ run_twin_pipeline() {
   local arm_a="${target_root}/${TWIN_A_NAME}"
   local arm_b="${target_root}/${TWIN_B_NAME}"
   mkdir -p "${target_root}"
-  stage_single_arm "${arm_a}" "${nemo_bin}"
-  if ! stage_single_arm "${arm_b}" "${nemo_bin}"; then
-    quarantine_arms "${target_root}" "${arm_a}"
-    return 1
-  fi
-  if ! run_single_arm "${arm_a}" "${timeout_s}"; then
+  local existing_arm
+  for existing_arm in "${arm_a}" "${arm_b}"; do
+    if [[ -e "${existing_arm}" || -L "${existing_arm}" ]]; then
+      echo "REFUSE: retained arm directory already exists: ${existing_arm} (quarantine to refused/ or move aside before re-running; never delete)" >&2
+      return 1
+    fi
+  done
+  if ! stage_single_arm "${arm_a}" "${nemo_bin}" \
+     || ! stage_single_arm "${arm_b}" "${nemo_bin}" \
+     || ! run_single_arm "${arm_a}" "${timeout_s}" \
+     || ! run_single_arm "${arm_b}" "${timeout_s}" \
+     || ! "${PYTHON_BIN}" "${GATE_PY}" \
+          --admit-existing "${target_root}" \
+          --build-cfg "${BUILD_CFG}" \
+          --expected-steps "${EXPECTED_STEPS}"; then
     quarantine_arms "${target_root}" "${arm_a}" "${arm_b}"
     return 1
   fi
-  if ! run_single_arm "${arm_b}" "${timeout_s}"; then
-    quarantine_arms "${target_root}" "${arm_a}" "${arm_b}"
-    return 1
-  fi
-  "${PYTHON_BIN}" "${GATE_PY}" \
-    --admit-existing "${target_root}" \
-    --build-cfg "${BUILD_CFG}" \
-    --expected-steps "${EXPECTED_STEPS}"
 }
 
 case "${MODE}" in

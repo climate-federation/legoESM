@@ -183,6 +183,31 @@ def test_gate_checklist_controls_and_planted_failures(tmp_path: Path) -> None:
     planted_dirty = r342_gate.plant_dirty_worktree(run_sh)
     assert planted_dirty["passed"] is True
 
+    with r342_gate.tempfile.TemporaryDirectory(dir=r342_gate._scratch_root()) as scratch_tmp:
+        stage_bad_root = Path(scratch_tmp) / "stub_stage_bad"
+        missing_ice = Path(scratch_tmp) / "missing_ice_cover.nc"
+        stage_bad = r342_gate.subprocess.run(
+            [
+                "bash",
+                str(run_sh),
+                "--stub-run-dir",
+                str(stage_bad_root),
+                "--stub-steps",
+                "16",
+                "--ice-cover",
+                str(missing_ice),
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert stage_bad.returncode != 0
+        assert "R342_REFUSED_ARM_QUARANTINED" in stage_bad.stderr
+        refused_stage = list((stage_bad_root / "refused").glob("*"))
+        assert len(refused_stage) == 1 and r342_gate.TWIN_A_NAME in refused_stage[0].name
+        assert any(refused_stage[0].iterdir())
+        assert not (stage_bad_root / r342_gate.TWIN_A_NAME).exists()
+
     nml_check = r342_gate.verify_namelist_groups_against_ppsrc(
         staged_namelist, r342_gate.NAMELIST_REF, ppsrc_dir
     )

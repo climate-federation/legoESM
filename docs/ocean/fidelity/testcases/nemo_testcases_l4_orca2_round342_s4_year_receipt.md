@@ -212,35 +212,46 @@ pattern correlation `1.000000`) on `M01_Jan` (`1d` partial month) and
 9. **Checklist 11 & 13 (Retention without deletion, rerun-after-refusal
    quarantine, and `refused/ -> --admit-existing`):**
    All `rm -rf` of retained arms are removed from `run.sh`
-   (`verify_run_sh_syntax_and_plant` asserts `rm -rf` is absent, and
-   `stage_single_arm` refuses if an arm directory already exists). If `mpirun`
-   or post-run admission fails, `quarantine_arms` moves
-   `orca2_k0_year1_{a,b}_np2` into
+   (`verify_run_sh_syntax_and_plant` asserts `rm -rf` is absent, and both
+   `run_twin_pipeline` and `stage_single_arm` refuse before creating an arm
+   directory if `orca2_k0_year1_{a,b}_np2` already exists). Once an arm
+   directory is created (`mkdir "${arm_dir}"`), every failure path — including
+   an arm-A or arm-B staging failure (`stage_single_arm`), an `mpirun` /
+   runtime / timeout failure (`run_single_arm`), or post-run admission failure
+   (`--admit-existing`) — routes through `quarantine_arms`, moving any created
+   arm directory into
    `<target_root>/refused/<UTC-timestamp>_orca2_k0_year1_{a,b}_np2.failed.<pid>`
-   (never deleting any file) before any re-run can stage fresh arms.
-   `admit_existing_with_quarantine` (`--admit-existing <run_root>`) supports
-   both in-place admission and the `refused/ -> --admit-existing` route: when
-   canonical arm directories are absent and quarantined pairs exist in
-   `<run_root>/refused/`, it verifies `producer_manifest.json` inside the
+   (never deleting any file) so a partial retained arm never blocks a subsequent
+   re-run. `admit_existing_with_quarantine` (`--admit-existing <run_root>`)
+   supports both in-place admission and the `refused/ -> --admit-existing`
+   route: when canonical arm directories are absent and quarantined pairs exist
+   in `<run_root>/refused/`, it verifies `producer_manifest.json` inside the
    `refused/` retention trap (`producer_commit` ancestry, `binary_sha256` against
    `./nemo`, and relative file SHA-256 digests) plus full twin admission
-   (`admit_twin_runs`), promotes the verified arms from `refused/` back to
-   canonical `<run_root>/orca2_k0_year1_{a,b}_np2` on pass, keeps them in
+   (`admit_s4_year_twin_runs`), promotes the verified arms from `refused/` back
+   to canonical `<run_root>/orca2_k0_year1_{a,b}_np2` on pass, keeps them in
    `refused/` on failure, and appends an audit record to
-   `<run_root>/admit_existing.log`. Preflight verifies all five routes
+   `<run_root>/admit_existing.log`. Preflight verifies all six routes
    (`in_place_pass_verified`, `existing_arm_overwrite_refused`,
+   `stage_failure_quarantine_and_rerun_verified`,
    `refused_quarantine_and_rerun_verified`,
    `refused_to_admit_existing_checksum_plant_verified`, and
-   `refused_to_admit_existing_promotion_verified`).
+   `refused_to_admit_existing_promotion_verified`), including a planted arm-A
+   staging failure (`run.sh --stub-run-dir ... --stub-steps 16 --ice-cover
+   <missing_ice_cover>`) that proves the partially populated arm-A directory is
+   quarantined to `refused/` and a subsequent re-run on the same `<target_root>`
+   admits both twins cleanly while preserving the quarantined directory.
 10. **Checklist 12 (Stub replaces only `./nemo` and writes only K0 files):**
-    In `--preflight-only`, `run.sh` installs a 3-line wrapper at `$run_dir/nemo`
-    that calls `nemo_testcase_l4_orca2_round342_s4_year_gate.py --stub-nemo
-    "$run_dir"`, reading `nn_itend` and `nn_stock` directly from
-    `$run_dir/namelist_cfg` and writing only `ocean.output`,
-    `output.namelist.dyn`, `mesh_mask_{0000,0001}.nc`, and
-    `ORCA2_{kt:08d}_restart_{0000,0001}.nc` (with Day 1 `kt = 8` populated from
-    admitted R340 S4 `kt = 9` entry state). `verify_no_unexpected_files` refuses
-    any `.bin` or `oracle_*` file.
+    Under `--stub-run-dir <stub_root>` (invoked by `--preflight-only`),
+    `stage_single_arm` in `run.sh` installs a 2-line wrapper at `${arm_dir}/nemo`
+    that `exec`s `nemo_testcase_l4_orca2_round342_s4_year_gate.py
+    --act-as-nemo-binary` (with optional `--plant-stub-unproduced-file` or
+    `--plant-stub-sleep <seconds>`), calling `write_stub_s4_year_outputs(Path.cwd(), ...)`
+    to read `nn_itend` and `nn_stock` directly from `namelist_cfg` in the staged
+    arm directory and write only `ocean.output`, `output.namelist.dyn`,
+    `mesh_mask_{0000,0001}.nc`, and `ORCA2_{kt:08d}_restart_{0000,0001}.nc` (with
+    Day 1 `kt = 8` populated from admitted R340 S4 `kt = 9` entry state).
+    `verify_no_unexpected_files` refuses any `.bin` or `oracle_*` file.
 11. **Checklist 14–16 (No symlinked outputs, disk-space & RAM preflight + plants,
     `timeout --foreground` + plant, clean worktree + plants, and `run.sh` syntax
     plant):**
@@ -248,23 +259,25 @@ pattern correlation `1.000000`) on `M01_Jan` (`1d` partial month) and
     - `verify_disk_space` checks free space (`351,076.36 GiB` available on
       `/data/abyssal` vs `50.0 GiB` required for the `38.69 GiB` two-twin 365-day
       restart footprint), and `plant_disk_space_exhaustion` plants a `10^9 GiB`
-      requirement in both Python and `run.sh` (`--required-disk-gib 1000000000`)
-      and proves both refuse.
+      requirement in both Python (`verify_disk_space(..., required_gib=1.0e9)`)
+      and `run.sh` (`R342_REQUIRED_DISK_GIB=1000000000`) and proves both refuse.
     - `verify_available_ram` checks `MemAvailable >= 150.0 GiB` and `free -g`
-      column 7 `>= 150 GiB` (`924.54 GiB` / `924 GiB` available), and
+      column 7 `>= 150 GiB` (`~922 GiB` available, recorded in `ram_check`), and
       `plant_ram_exhaustion` plants a `999,999 GiB` requirement in both Python
-      and `run.sh` (`--required-ram-gib 999999`) and proves both refuse.
-    - `run.sh` wraps each arm's `mpirun -np 2 ./nemo` in
-      `timeout --foreground --signal=TERM --kill-after=30s 5400s`, and
-      `plant_timeout_foreground` runs `run.sh --stub-run-dir ... --timeout-seconds 1`
-      with `R342_STUB_SLEEP_SECONDS=5`, proving `timeout --foreground` terminates
-      the arm (`rc = 1`) and quarantines both arms into `refused/`.
+      (`verify_available_ram(required_gib=999_999.0)`) and `run.sh`
+      (`R342_REQUIRED_RAM_GIB=999999`) and proves both refuse.
+    - `run.sh` wraps each arm's `mpirun -np 2 --oversubscribe ./nemo` in
+      `timeout --foreground --signal=TERM --kill-after=30s 5400s`, and the
+      `timeout_foreground_plant` check in `run_preflight` runs
+      `run.sh --stub-run-dir ... --stub-steps 16 --stub-timeout 1
+      --plant-stub-sleep 5`, proving `timeout --foreground` terminates the arm
+      (`rc = 1` from `run.sh`) and quarantines both staged arms into `refused/`.
     - `verify_clean_worktree` enforces `allow_dirty=False` (`git_sha(allow_dirty=False)`,
       `worktree_stamp(allow_dirty=False)`, and
       `git status --porcelain --untracked-files=all`), and `plant_dirty_worktree`
       plants both an untracked file and a modified tracked file in a temporary
       git repository and proves both Python (`verify_clean_worktree`) and
-      `run.sh` (`check_clean_worktree`) refuse.
+      `run.sh` (`check_clean_worktree` with `R342_CHECK_REPO_ROOT`) refuse.
     - `verify_run_sh_syntax_and_plant` checks `bash -n` on `run.sh` and plants a
       syntax error (`if then`) in a temporary copy, proving `bash -n` refuses
       (`rc = 2`).
@@ -276,11 +289,12 @@ Executed
 - Status: **`ORCA2_ROUND342_S4_YEAR_PREFLIGHT_READY`**
 - Evidence JSON:
   `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/orca2_r342/round342_s4_year_preflight.json`.
-- All Checklist 1–16 controls and all 18 planted failure modes (including
+- All Checklist 1–16 controls and all 19 planted failure modes (including
   disk-space `10^9 GiB`, RAM `999,999 GiB`, `timeout --foreground`, dirty-tree
-  untracked + modified-tracked, `run.sh` syntax, failed-arm quarantine + re-run,
-  and `refused/ -> --admit-existing` binary-checksum plant + clean promotion)
-  fired and refused as expected.
+  untracked + modified-tracked, `run.sh` syntax, arm-A staging-failure
+  quarantine + re-run, failed-arm quarantine + re-run, and
+  `refused/ -> --admit-existing` binary-checksum plant + clean promotion) fired
+  and refused as expected.
 
 ## Choices and review
 
