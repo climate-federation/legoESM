@@ -94,6 +94,9 @@ class SCMGrid(NamedTuple):
     grid_lat: jax.Array  # (1, 1, 1) [rad]
     grid_lon: jax.Array  # (1, 1, 1) [rad]
     radius: float
+    #: the GCM cell area [m^2] the column stands for, declared by its case;
+    #: None = undeclared (area-aware schemes such as Sundqvist then refuse)
+    grid_area: jax.Array | None = None
 
     @property
     def grid_n_columns(self) -> int:
@@ -104,11 +107,17 @@ class SCMGrid(NamedTuple):
         return (1, 1, 1)
 
 
-def make_scm_grid(latitude_deg: float, longitude_deg: float = 0.0) -> SCMGrid:
-    """Build a single-column grid at the given latitude/longitude."""
+def make_scm_grid(latitude_deg: float, longitude_deg: float = 0.0,
+                  cell_area_m2: float | None = None) -> SCMGrid:
+    """Build a single-column grid at the given latitude/longitude.
+
+    ``cell_area_m2`` is the GCM cell the column stands for, declared by the
+    case; ``None`` leaves it undeclared."""
     lat = jnp.asarray([[[jnp.deg2rad(latitude_deg)]]])
     lon = jnp.asarray([[[jnp.deg2rad(longitude_deg)]]])
-    return SCMGrid(grid_lat=lat, grid_lon=lon, radius=constants.R_earth)
+    area = None if cell_area_m2 is None else jnp.full((1, 1, 1), cell_area_m2)
+    return SCMGrid(grid_lat=lat, grid_lon=lon, radius=constants.R_earth,
+                   grid_area=area)
 
 
 def make_column_state(
@@ -826,6 +835,7 @@ class SingleColumnModel:
         phis: float = 0.0,
         latitude_deg: float = 0.0,
         longitude_deg: float = 0.0,
+        cell_area_m2: float | None = None,
         sigma_top: float = 0.01,
         prng_seed: int = 0,
         dtype=None,
@@ -908,7 +918,7 @@ class SingleColumnModel:
         cls._validate_prescribed_fluxes_no_double_count(
             physics_config, forcing,
         )
-        grid = make_scm_grid(latitude_deg, longitude_deg)
+        grid = make_scm_grid(latitude_deg, longitude_deg, cell_area_m2)
         sigma_coord = create_sigma_coordinate(nlev, sigma_top=sigma_top, dtype=dtype)
 
         needs_moist = (

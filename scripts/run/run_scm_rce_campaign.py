@@ -41,6 +41,7 @@ from jax import lax
 
 from legoesm import constants
 from legoesm.atmosphere.idealized.rcemip_initial_conditions import (
+    RCE_CELL_AREA_M2,
     WING_P_SFC,
     WING_Q_SFC_BY_SST,
     wing2018_T_v0,
@@ -1536,6 +1537,7 @@ def run_scm_rce(
         v=0.0,
         p_s=WING_P_SFC,
         latitude_deg=0.0,
+        cell_area_m2=RCE_CELL_AREA_M2,
         time_integrator="forward_euler",
         forcing=forcing,
         dtype=jnp.float64,
