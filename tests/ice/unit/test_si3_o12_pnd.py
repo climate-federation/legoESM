@@ -8,6 +8,8 @@ import ctypes.util
 import hashlib
 import inspect
 import math
+import pathlib
+import re
 import textwrap
 from types import SimpleNamespace
 
@@ -16,24 +18,40 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from legoesm import constants as canonical_constants
+from legoesm.core.coupling_fields import AtmToSurface
 from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
 from legoesm.ice import bitz_lipscomb as bl
+from legoesm.ice import ponds as ponds_mod
+from legoesm.ice import sea_ice as sea_ice_mod
 from legoesm.ice import si3_thd_da as da_mod
 from legoesm.ice import si3_thd_pnd as pnd_mod
-from legoesm.ice.constants_config import NEMO_SI3_CONSTANTS_CONFIG
+from legoesm.ice.config import MeltPondConfig, SeaIceConfig, SI3PondConfig, SnowConfig
+from legoesm.ice.constants_config import IceConstantsConfig, NEMO_SI3_CONSTANTS_CONFIG
+from legoesm.ice.state import init_dynamic_ice_state
 from tests.ice.unit import test_si3_o9_zdf_dh_temp as o9_fixture
 from tests.ice.unit import test_si3_o10_salinity as o10_fixture
+
+
+@pytest.fixture(autouse=True)
+def _cpu_device_scope(monkeypatch):
+    """Place all array creation and JIT execution on CPU so CPU-only libm tests pass on GPU hosts."""
+    monkeypatch.setattr(jax, "default_backend", lambda: "cpu")
+    with jax.default_device(jax.devices("cpu")[0]):
+        yield
 
 
 @contextlib.contextmanager
 def precision_scope(policy: PrecisionPolicy):
     prev = get_policy()
-    set_policy(policy)
-    try:
-        yield
-    finally:
-        set_policy(prev)
+    orig_backend = jax.default_backend
+    jax.default_backend = lambda: "cpu"
+    with jax.default_device(jax.devices("cpu")[0]):
+        set_policy(policy)
+        try:
+            yield
+        finally:
+            set_policy(prev)
+            jax.default_backend = orig_backend
 
 
 _LIBM = ctypes.CDLL(ctypes.util.find_library("m") or "libm.so.6")
@@ -41,35 +59,68 @@ _LIBM_EXP = _LIBM.exp
 _LIBM_EXP.argtypes = (ctypes.c_double,)
 _LIBM_EXP.restype = ctypes.c_double
 
+# Independent oracle physical constants transcribed directly from the NEMO 5.0.2
+# record build (ORCA2_SAS_ICE_O7_REF/BLD/ppsrc/nemo/phycst.f90:49-50,68-75,
+# eosbn2.f90:1945, par_ice.f90:134-135) — NEVER imported from legoesm.constants
+# or NEMO_SI3_CONSTANTS_CONFIG.
+_ORACLE_RT0 = 273.15  # const-ok: independent oracle transcribes the record build's phycst.f90:50 literal, never the model's constants
+_ORACLE_GRAV = 9.80665  # phycst.f90:49 grav
+_ORACLE_RHOW = 1000.0  # phycst.f90:68 rhow
+_ORACLE_RHO0 = 1026.0  # eosbn2.f90:1945 rn_rho0
+_ORACLE_RHOI = 917.0  # phycst.f90:70 rhoi
+_ORACLE_RHOS = 330.0  # phycst.f90:71 rhos
+_ORACLE_RLFUS = 0.3333601e6  # const-ok: independent oracle transcribes the record build's phycst.f90:75 literal, never the model's constants
+_ORACLE_RCND_I = 2.034396  # par_ice.f90:135 rcnd_i
+
 RDT = 10800.0
 R1_RDT = 1.0 / RDT
 R1_NLAY_I = 1.0 / 10.0
 R1_NLAY_S = 1.0 / 5.0
-RHO_I = 917.0
-RHO_S = 330.0
-RHO_W = 1000.0
-RHO_0 = 1026.0
-GRAVITY = canonical_constants.g_nemo
+RHO_I = _ORACLE_RHOI
+RHO_S = _ORACLE_RHOS
+RHO_W = _ORACLE_RHOW
+RHO_0 = _ORACLE_RHO0
+GRAVITY = _ORACLE_GRAV
 
-DECK_PND_NML = {
-    "ln_icedH": True,
-    "rn_himin": 0.1,
-    "ln_pnd": True,
-    "ln_pnd_LEV": True,
-    "rn_apnd_min": 0.15,
-    "rn_apnd_max": 0.80,
-    "rn_pnd_flush": 0.1,
-    "ln_pnd_lids": True,
-    "ln_pnd_rain": True,
-    "ln_pnd_CST": False,
-    "rn_apnd": 0.2,
-    "rn_hpnd": 0.05,
-    "ln_pnd_TOPO": False,
-    "ln_pnd_alb": True,
-    "rn_pnd_hl_min": 0.005,
-    "rn_pnd_hl_max": 0.015,
-    "ln_icediachk": False,
-}
+
+def _parse_independent_pnd_namelist() -> dict[str, float | bool]:
+    """Parse &namthd and &namthd_pnd directly from the committed NEMO namelist files."""
+    data_dir = pathlib.Path(__file__).resolve().parent / "data" / "orca2_sas_ice_expref"
+    values: dict[str, float | bool] = {}
+    keys = {
+        "ln_icedH",
+        "rn_himin",
+        "ln_pnd",
+        "ln_pnd_LEV",
+        "rn_apnd_min",
+        "rn_apnd_max",
+        "rn_pnd_flush",
+        "ln_pnd_lids",
+        "ln_pnd_rain",
+        "ln_pnd_CST",
+        "rn_apnd",
+        "rn_hpnd",
+        "ln_pnd_TOPO",
+        "ln_pnd_alb",
+        "rn_pnd_hl_min",
+        "rn_pnd_hl_max",
+        "ln_icediachk",
+    }
+    for fname in ("namelist_ice_ref", "namelist_ice_cfg"):
+        for raw_line in (data_dir / fname).read_text().splitlines():
+            code = raw_line.split("!", 1)[0].strip()
+            m = re.match(r"^([A-Za-z0-9_]+)\s*=\s*(\S+)", code)
+            if not m or m.group(1) not in keys:
+                continue
+            key, tok = m.group(1), m.group(2).rstrip(",")
+            if tok.lower() in (".true.", ".false."):
+                values[key] = tok.lower() == ".true."
+            else:
+                values[key] = float(tok.replace("d", "e").replace("D", "E"))
+    return values
+
+
+DECK_PND_NML = _parse_independent_pnd_namelist()
 
 
 def _fmax(dst: float, src: float) -> float:
@@ -90,7 +141,6 @@ def _oracle_ice_perm_eff(
     t_i: list[float],
     sz_i: list[float],
     *,
-    T0: float,
     events: dict[str, int] | None = None,
 ) -> float:
     """Independent scalar translation of ``ice_perm_eff`` (``icethd_pnd.f90:1372-1422``)."""
@@ -98,7 +148,7 @@ def _oracle_ice_perm_eff(
     assert len(sz_i) == nlay_i
     zv_br = []
     for jk in range(nlay_i):
-        zt1 = t_i[jk] - T0
+        zt1 = t_i[jk] - _ORACLE_RT0
         zt2 = zt1 * zt1
         zt3 = zt2 * zt1
         zs_br = ((-18.7 * zt1) - (0.519 * zt2)) - (0.00535 * zt3)
@@ -150,23 +200,20 @@ def _oracle_pnd_lev_category(
     rn_apnd_max: float,
     rn_pnd_flush: float,
     ln_pnd_lids: bool,
-    rho_w: float,
-    gravity: float,
-    constants,
     events: dict[str, int] | None = None,
 ) -> tuple[float, float, float, float, float, float]:
     """Independent scalar translation of one category in ``pnd_LEV`` (``icethd_pnd.f90:384-559``)."""
     zaspect = 0.8
     zTp = -0.15
     zvisc = 1.79e-3
-    rt0 = float(constants.T0)
-    rho0 = float(constants.rho_ocean)
-    rhoi = float(constants.rho_ice)
-    rhos = float(constants.rho_snow)
-    rhow = float(rho_w)
-    grav = float(gravity)
-    rLfus = float(constants.latent_fusion)
-    rcnd_i = float(constants.k_ice)
+    rt0 = _ORACLE_RT0
+    rho0 = _ORACLE_RHO0
+    rhoi = _ORACLE_RHOI
+    rhos = _ORACLE_RHOS
+    rhow = _ORACLE_RHOW
+    grav = _ORACLE_GRAV
+    rLfus = _ORACLE_RLFUS
+    rcnd_i = _ORACLE_RCND_I
     r1_rho0 = 1.0 / rho0
 
     z1_Tp = 1.0 / zTp
@@ -253,7 +300,7 @@ def _oracle_pnd_lev_category(
         t3_hp = h_ip_1 * (rho0 - t1_hp)
         zhp = (t2_hp + t3_hp) * r1_rho0
 
-        zperm = _oracle_ice_perm_eff(t_i, sz_i, T0=rt0, events=events)
+        zperm = _oracle_ice_perm_eff(t_i, sz_i, events=events)
 
         q1 = zperm * rho0
         q2 = q1 * grav
@@ -330,9 +377,6 @@ def _oracle_pnd_lev(
     rn_apnd_max: float,
     rn_pnd_flush: float,
     ln_pnd_lids: bool,
-    rho_w: float,
-    gravity: float,
-    constants,
     events: dict[str, int] | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Independent scalar translation of multi-category ``pnd_LEV`` (``icethd_pnd.f90:329-582``)."""
@@ -366,9 +410,6 @@ def _oracle_pnd_lev(
                 rn_apnd_max=rn_apnd_max,
                 rn_pnd_flush=rn_pnd_flush,
                 ln_pnd_lids=ln_pnd_lids,
-                rho_w=rho_w,
-                gravity=gravity,
-                constants=constants,
                 events=events,
             )
             a_ip_out[idx, jl] = res[0]
@@ -400,9 +441,6 @@ def _oracle_ice_thd_pnd(
     namelist: dict,
     rDt_ice: float,
     r1_Dt_ice: float,
-    rho_w: float,
-    gravity: float,
-    constants,
     nn_hls: int = 2,
     events: dict[str, int] | None = None,
 ) -> tuple[np.ndarray, ...]:
@@ -433,7 +471,7 @@ def _oracle_ice_thd_pnd(
                     if events is not None and (v_ip_w[jj, ji, jl] > 0.0 or v_il_w[jj, ji, jl] > 0.0):
                         events["pnd_vanished_ice_conserved"] += 1
                     dv = float(v_ip_w[jj, ji, jl]) + float(v_il_w[jj, ji, jl])
-                    flux_inc = (dv * float(rho_w)) * float(r1_Dt_ice)
+                    flux_inc = (dv * _ORACLE_RHOW) * float(r1_Dt_ice)
                     wfx_w[jj, ji] = float(wfx_w[jj, ji]) + flux_inc
                     a_ip_w[jj, ji, jl] = 0.0
                     v_ip_w[jj, ji, jl] = 0.0
@@ -467,9 +505,6 @@ def _oracle_ice_thd_pnd(
                         rn_apnd_max=float(namelist["rn_apnd_max"]),
                         rn_pnd_flush=float(namelist["rn_pnd_flush"]),
                         ln_pnd_lids=bool(namelist["ln_pnd_lids"]),
-                        rho_w=rho_w,
-                        gravity=gravity,
-                        constants=constants,
                         events=events,
                     )
                     a_ip_w[jj, ji, jl] = res[0]
@@ -487,7 +522,7 @@ def _oracle_ice_thd_pnd(
 
 def _pnd_2d_fixture() -> dict[str, np.ndarray]:
     """2D/3D (jpj=6, jpi=7, jpl=5, nlay_i=10, nn_hls=2) fixture covering every O12 branch."""
-    T0 = float(NEMO_SI3_CONSTANTS_CONFIG.T0)
+    T0 = _ORACLE_RT0
     jpj, jpi, jpl, nlay_i = 6, 7, 5, 10
     rng = np.random.default_rng(20261012)
 
@@ -710,7 +745,7 @@ def _without_source_rounding(function):
 
 
 def test_ice_perm_eff_is_bit_exact_to_independent_scalar_under_jit_and_eager():
-    T0 = float(NEMO_SI3_CONSTANTS_CONFIG.T0)
+    T0 = _ORACLE_RT0
     rng = np.random.default_rng(12001)
     # 8 columns x 10 layers covering permeable, impermeable interior layer, warm layer (zt1 >= -1e-6), and zs_br floor
     t_i = T0 - rng.uniform(0.1, 3.0, (8, 10))
@@ -734,7 +769,6 @@ def test_ice_perm_eff_is_bit_exact_to_independent_scalar_under_jit_and_eager():
             _oracle_ice_perm_eff(
                 t_i[row].tolist(),
                 sz_i[row].tolist(),
-                T0=T0,
                 events=events,
             )
             for row in range(t_i.shape[0])
@@ -822,9 +856,6 @@ def test_pnd_lev_is_bit_exact_to_independent_scalar_under_jit_and_eager(ln_pnd_l
         rn_apnd_max=DECK_PND_NML["rn_apnd_max"],
         rn_pnd_flush=DECK_PND_NML["rn_pnd_flush"],
         ln_pnd_lids=ln_pnd_lids,
-        rho_w=RHO_W,
-        gravity=GRAVITY,
-        constants=NEMO_SI3_CONSTANTS_CONFIG,
         events=events,
     )
 
@@ -862,6 +893,7 @@ def test_pnd_lev_is_bit_exact_to_independent_scalar_under_jit_and_eager(ln_pnd_l
         with jax.disable_jit():
             eager = run_model(*args)
         compiled = jax.jit(run_model)(*args)
+    assert compiled.a_ip.devices().pop().platform == "cpu"
     for actual in (eager, compiled):
         for got, want in zip(actual, oracle, strict=True):
             np.testing.assert_array_equal(_bits(got), _bits(want))
@@ -919,9 +951,6 @@ def test_ice_thd_pnd_is_bit_exact_to_independent_scalar_and_preserves_halo():
         namelist=DECK_PND_NML,
         rDt_ice=RDT,
         r1_Dt_ice=R1_RDT,
-        rho_w=RHO_W,
-        gravity=GRAVITY,
-        constants=NEMO_SI3_CONSTANTS_CONFIG,
         nn_hls=2,
         events=events,
     )
@@ -974,19 +1003,86 @@ def test_o12_inexact_constants_and_output_digest_are_pinned():
     )
 
 
-@pytest.mark.parametrize("site", ["ice_perm_eff", "pnd_lev_core", "ice_thd_pnd"])
-def test_real_model_barrier_groups_have_bit_changing_stripped_plants(site, monkeypatch):
-    """Stripping nemo_source_round from the real model function changes bits under jit."""
-    rng = np.random.default_rng(202612)
-    T0 = float(NEMO_SI3_CONSTANTS_CONFIG.T0)
+_CORE_SINGLE_LINE_SITES: dict[str, tuple[str, str]] = {
+    "lev_zdv_pnd_old": (
+        "zdv_pnd_old = sr(sr(h_ip + h_il) * a_ip)",
+        "zdv_pnd_old = ((h_ip + h_il) * a_ip)",
+    ),
+    "lev_v_il_init": (
+        "v_il = sr(h_il * a_ip)",
+        "v_il = (h_il * a_ip)",
+    ),
+    "lev_melt_mass": (
+        "melt_mass = sr(sr(dh_i_sum * rhoi) + sr(dh_s_sum * rhos))",
+        "melt_mass = ((dh_i_sum * rhoi) + (dh_s_sum * rhos))",
+    ),
+    "lev_zfr_mlt": (
+        "zfr_mlt = sr(rn_apnd_min + sr(sr(rn_apnd_max - rn_apnd_min) * at_i))",
+        "zfr_mlt = (rn_apnd_min + ((rn_apnd_max - rn_apnd_min) * at_i))",
+    ),
+    "lev_zv_ip_max_area": (
+        "zv_ip_max_area = sr(sr(sr(zfr_mlt * zfr_mlt) * a_i) * zaspect)",
+        "zv_ip_max_area = (((zfr_mlt * zfr_mlt) * a_i) * zaspect)",
+    ),
+    "lev_zv_ip_max_depth": (
+        "zv_ip_max_depth = sr(sr(sr(sr(z1_aspect * a_i) * depth_cap_factor) * h_i) * h_i)",
+        "zv_ip_max_depth = ((((z1_aspect * a_i) * depth_cap_factor) * h_i) * h_i)",
+    ),
+    "lev_lid_freeze_quad": (
+        "v_il_sq = sr(v_il * v_il)",
+        "v_il_sq = (v_il * v_il)",
+    ),
+    "lev_head_and_darcy": (
+        "t3_hp = sr(h_ip_1 * sr(rho0 - t1_hp))",
+        "t3_hp = (h_ip_1 * (rho0 - t1_hp))",
+    ),
+    "lev_zdv_pnd_out": (
+        "zdv_pnd = sr(sr(sr(h_ip_out + h_il_out) * a_ip_out) - zdv_pnd_old)",
+        "zdv_pnd = (((h_ip_out + h_il_out) * a_ip_out) - zdv_pnd_old)",
+    ),
+    "lev_wfx_pnd_out": (
+        "wfx_pnd_out = sr(wfx_pnd - sr(sr(zdv_pnd * rhow) * r1_Dt_ice))",
+        "wfx_pnd_out = (wfx_pnd - ((zdv_pnd * rhow) * r1_Dt_ice))",
+    ),
+}
 
-    if site == "ice_perm_eff":
-        t_i = jnp.asarray(T0 - rng.uniform(0.15, 1.5, (1500, 10)), dtype=jnp.float64)
-        sz_i = jnp.asarray(rng.uniform(3.0, 15.0, (1500, 10)), dtype=jnp.float64)
+
+@pytest.mark.parametrize(
+    "site",
+    [
+        "ice_perm_eff",
+        "perm_brine_poly",
+        "pnd_lev_core",
+        *_CORE_SINGLE_LINE_SITES.keys(),
+        "ice_thd_pnd",
+        "thd_pnd_vanished_flux",
+    ],
+)
+def test_real_model_barrier_groups_have_bit_changing_stripped_plants(site, monkeypatch):
+    """Stripping nemo_source_round from each arithmetic site/group changes bits under jit with runtime args."""
+    rng = np.random.default_rng(20261026)
+    T0 = _ORACLE_RT0
+
+    if site in ("ice_perm_eff", "perm_brine_poly"):
+        t_i = jnp.asarray(T0 - rng.uniform(0.15, 1.5, (128, 10)), dtype=jnp.float64)
+        sz_i = jnp.asarray(rng.uniform(3.0, 15.0, (128, 10)), dtype=jnp.float64)
         fn = lambda t, s: pnd_mod.si3_ice_perm_eff(
             t, s, constants=NEMO_SI3_CONSTANTS_CONFIG
         )
-        stripped_perm = _without_source_rounding(pnd_mod.si3_ice_perm_eff)
+        if site == "ice_perm_eff":
+            stripped_perm = _without_source_rounding(pnd_mod.si3_ice_perm_eff)
+        else:
+            stripped_perm = _source_mutant(
+                pnd_mod.si3_ice_perm_eff,
+                "term1 = -sr(c1 * zt1)\n"
+                "    term2 = sr(c2 * zt2)\n"
+                "    term3 = sr(c3 * zt3)\n"
+                "    zs_br = sr(sr(term1 - term2) - term3)",
+                "term1 = -(c1 * zt1)\n"
+                "    term2 = c2 * (zt1 * zt1)\n"
+                "    term3 = c3 * ((zt1 * zt1) * zt1)\n"
+                "    zs_br = (term1 - term2) - term3",
+            )
         stripped_fn = lambda t, s: stripped_perm(
             t, s, constants=NEMO_SI3_CONSTANTS_CONFIG
         )
@@ -998,41 +1094,106 @@ def test_real_model_barrier_groups_have_bit_changing_stripped_plants(site, monke
         assert np.count_nonzero(_bits(stripped) != _bits(eager)) > 0
         return
 
-    if site == "pnd_lev_core":
-        n = 800
-        kwargs = dict(
-            at_i=jnp.asarray(rng.uniform(0.3, 0.95, n), dtype=jnp.float64),
-            wfx_pnd=jnp.asarray(rng.uniform(-1.0e-5, 1.0e-5, n), dtype=jnp.float64),
-            a_i=jnp.asarray(rng.uniform(0.15, 0.85, n), dtype=jnp.float64),
-            h_i=jnp.asarray(rng.uniform(0.3, 2.5, n), dtype=jnp.float64),
-            t_su=jnp.asarray(T0 - rng.uniform(0.2, 6.0, n), dtype=jnp.float64),
-            a_ip=jnp.asarray(rng.uniform(0.03, 0.25, n), dtype=jnp.float64),
-            h_ip=jnp.asarray(rng.uniform(0.03, 0.20, n), dtype=jnp.float64),
-            h_il=jnp.asarray(rng.uniform(0.005, 0.04, n), dtype=jnp.float64),
-            dh_i_sum=jnp.asarray(-rng.uniform(0.001, 0.05, n), dtype=jnp.float64),
-            dh_s_sum=jnp.asarray(-rng.uniform(0.001, 0.03, n), dtype=jnp.float64),
-            sz_i=jnp.asarray(rng.uniform(1.5, 4.0, (n, 10)), dtype=jnp.float64),
-            t_i=jnp.asarray(T0 - rng.uniform(1.5, 3.5, (n, 10)), dtype=jnp.float64),
-            rDt_ice=jnp.asarray(RDT, dtype=jnp.float64),
-            r1_Dt_ice=jnp.asarray(R1_RDT, dtype=jnp.float64),
-            rn_himin=jnp.asarray(0.1, dtype=jnp.float64),
-            rn_apnd_min=jnp.asarray(0.15, dtype=jnp.float64),
-            rn_apnd_max=jnp.asarray(0.80, dtype=jnp.float64),
-            rn_pnd_flush=jnp.asarray(0.1, dtype=jnp.float64),
-            ln_pnd_lids=True,
-            rhow=jnp.asarray(RHO_W, dtype=jnp.float64),
-            grav=jnp.asarray(GRAVITY, dtype=jnp.float64),
-            constants=NEMO_SI3_CONSTANTS_CONFIG,
-            z1_rhow=jnp.asarray(1.0 / RHO_W, dtype=jnp.float64),
-            z1_aspect=jnp.asarray(1.0 / 0.8, dtype=jnp.float64),
-            z1_Tp=jnp.asarray(1.0 / -0.15, dtype=jnp.float64),
+    if site == "pnd_lev_core" or site in _CORE_SINGLE_LINE_SITES:
+        n = 128
+        core_arrays = (
+            jnp.asarray(rng.uniform(0.3, 0.95, n), dtype=jnp.float64),  # at_i
+            jnp.asarray(rng.uniform(-1.0e-5, 1.0e-5, n), dtype=jnp.float64),  # wfx_pnd
+            jnp.asarray(rng.uniform(0.15, 0.85, n), dtype=jnp.float64),  # a_i
+            jnp.asarray(rng.uniform(0.3, 2.5, n), dtype=jnp.float64),  # h_i
+            jnp.asarray(T0 - rng.uniform(0.2, 6.0, n), dtype=jnp.float64),  # t_su
+            jnp.asarray(rng.uniform(0.03, 0.25, n), dtype=jnp.float64),  # a_ip
+            jnp.asarray(rng.uniform(0.03, 0.20, n), dtype=jnp.float64),  # h_ip
+            jnp.asarray(rng.uniform(0.005, 0.04, n), dtype=jnp.float64),  # h_il
+            jnp.asarray(-rng.uniform(0.001, 0.05, n), dtype=jnp.float64),  # dh_i_sum
+            jnp.asarray(-rng.uniform(0.001, 0.03, n), dtype=jnp.float64),  # dh_s_sum
+            jnp.asarray(rng.uniform(1.5, 4.0, (n, 10)), dtype=jnp.float64),  # sz_i
+            jnp.asarray(T0 - rng.uniform(1.5, 3.5, (n, 10)), dtype=jnp.float64),  # t_i
+            jnp.asarray(RDT, dtype=jnp.float64),  # rDt_ice
+            jnp.asarray(R1_RDT, dtype=jnp.float64),  # r1_Dt_ice
+            jnp.asarray(0.1, dtype=jnp.float64),  # rn_himin
+            jnp.asarray(0.15, dtype=jnp.float64),  # rn_apnd_min
+            jnp.asarray(0.80, dtype=jnp.float64),  # rn_apnd_max
+            jnp.asarray(0.1, dtype=jnp.float64),  # rn_pnd_flush
+            jnp.asarray(RHO_W, dtype=jnp.float64),  # rhow
+            jnp.asarray(GRAVITY, dtype=jnp.float64),  # grav
+            jnp.asarray(1.0 / RHO_W, dtype=jnp.float64),  # z1_rhow
+            jnp.asarray(1.0 / 0.8, dtype=jnp.float64),  # z1_aspect
+            jnp.asarray(1.0 / -0.15, dtype=jnp.float64),  # z1_Tp
         )
-        fn = lambda: pnd_mod._pnd_lev_single_category(**kwargs)
+
+        def _wrap_core(core_fn):
+            def _runner(
+                at_i_a,
+                wfx_a,
+                ai_a,
+                hi_a,
+                tsu_a,
+                aip_a,
+                hip_a,
+                hil_a,
+                dhi_a,
+                dhs_a,
+                szi_a,
+                ti_a,
+                rdt_a,
+                r1dt_a,
+                himin_a,
+                apmin_a,
+                apmax_a,
+                flush_a,
+                rhow_a,
+                grav_a,
+                z1rhow_a,
+                z1asp_a,
+                z1tp_a,
+            ):
+                return core_fn(
+                    at_i=at_i_a,
+                    wfx_pnd=wfx_a,
+                    a_i=ai_a,
+                    h_i=hi_a,
+                    t_su=tsu_a,
+                    a_ip=aip_a,
+                    h_ip=hip_a,
+                    h_il=hil_a,
+                    dh_i_sum=dhi_a,
+                    dh_s_sum=dhs_a,
+                    sz_i=szi_a,
+                    t_i=ti_a,
+                    rDt_ice=rdt_a,
+                    r1_Dt_ice=r1dt_a,
+                    rn_himin=himin_a,
+                    rn_apnd_min=apmin_a,
+                    rn_apnd_max=apmax_a,
+                    rn_pnd_flush=flush_a,
+                    ln_pnd_lids=True,
+                    rhow=rhow_a,
+                    grav=grav_a,
+                    constants=NEMO_SI3_CONSTANTS_CONFIG,
+                    z1_rhow=z1rhow_a,
+                    z1_aspect=z1asp_a,
+                    z1_Tp=z1tp_a,
+                )
+
+            return _runner
+
+        if site == "pnd_lev_core":
+            stripped_core = _without_source_rounding(pnd_mod._pnd_lev_single_category)
+        else:
+            old_line, new_line = _CORE_SINGLE_LINE_SITES[site]
+            stripped_core = _source_mutant(
+                pnd_mod._pnd_lev_single_category,
+                old_line,
+                new_line,
+            )
+
+        run_protected = _wrap_core(pnd_mod._pnd_lev_single_category)
+        run_stripped = _wrap_core(stripped_core)
         with jax.disable_jit():
-            eager = fn()
-        protected = jax.jit(fn)()
-        stripped_core = _without_source_rounding(pnd_mod._pnd_lev_single_category)
-        stripped = jax.jit(lambda: stripped_core(**kwargs))()
+            eager = run_protected(*core_arrays)
+        protected = jax.jit(run_protected)(*core_arrays)
+        stripped = jax.jit(run_stripped)(*core_arrays)
         for got, want in zip(protected, eager, strict=True):
             np.testing.assert_array_equal(_bits(got), _bits(want))
         assert sum(
@@ -1046,16 +1207,29 @@ def test_real_model_barrier_groups_have_bit_changing_stripped_plants(site, monke
         with jax.disable_jit():
             eager = _call_si3_ice_thd_pnd(*args)
         protected = jax.jit(lambda *v: _call_si3_ice_thd_pnd(*v))(*args)
-        monkeypatch.setattr(
-            pnd_mod,
-            "_pnd_lev_single_category",
-            _without_source_rounding(pnd_mod._pnd_lev_single_category),
-        )
-        monkeypatch.setattr(
-            pnd_mod,
-            "si3_ice_thd_pnd",
-            _without_source_rounding(pnd_mod.si3_ice_thd_pnd),
-        )
+        if site == "thd_pnd_vanished_flux":
+            monkeypatch.setattr(
+                pnd_mod,
+                "si3_ice_thd_pnd",
+                _source_mutant(
+                    pnd_mod.si3_ice_thd_pnd,
+                    "flux_inc = sr(sr(sr(v_ip_int[..., jl] + v_il_int[..., jl]) * rhow) * r1_dt)\n"
+                    "        wfx_int = jnp.where(vanished, sr(wfx_int + flux_inc), wfx_int)",
+                    "flux_inc = ((v_ip_int[..., jl] + v_il_int[..., jl]) * rhow) * r1_dt\n"
+                    "        wfx_int = jnp.where(vanished, wfx_int + flux_inc, wfx_int)",
+                ),
+            )
+        else:
+            monkeypatch.setattr(
+                pnd_mod,
+                "_pnd_lev_single_category",
+                _without_source_rounding(pnd_mod._pnd_lev_single_category),
+            )
+            monkeypatch.setattr(
+                pnd_mod,
+                "si3_ice_thd_pnd",
+                _without_source_rounding(pnd_mod.si3_ice_thd_pnd),
+            )
         stripped = jax.jit(lambda *v: _call_si3_ice_thd_pnd(*v))(*args)
     for got, want in zip(protected, eager, strict=True):
         np.testing.assert_array_equal(_bits(got), _bits(want))
@@ -1129,7 +1303,7 @@ def test_production_code_path_plants_fire_through_si3_ice_thd_pnd(
 
 def test_ice_perm_eff_epsi06_early_exit_boundary_plant():
     """Column with epsi10 < zv_br < epsi06 returns 0.0; mutating epsi06 -> epsi10 returns > 0."""
-    T0 = float(NEMO_SI3_CONSTANTS_CONFIG.T0)
+    T0 = _ORACLE_RT0
     t_i = jnp.full((1, 10), T0 - 20.0, dtype=jnp.float64)
     sz_i = jnp.full((1, 10), 1.0e-4, dtype=jnp.float64)  # zv_br ~ 3.7e-7 in (epsi10, epsi06)
     base = jax.jit(
@@ -1150,36 +1324,86 @@ def test_ice_perm_eff_epsi06_early_exit_boundary_plant():
 
 
 def test_masked_and_signed_zero_paths_are_verified_through_pnd_lev(monkeypatch):
-    """Verify the 456 and 478 MASKED zero-tie sites and zero-pond outputs."""
-    T0 = float(NEMO_SI3_CONSTANTS_CONFIG.T0)
-    # Column 0: dh_i_sum = +0.0, dh_s_sum = +0.0 -> zdv_avail = -0.0, 456 ties with +0.0
-    # Column 1: dh_i_sum = -0.0, dh_s_sum = -0.0 -> zdv_avail = +0.0, 456 has +0.0 vs +0.0
-    # Both have v_ip = 0.0, v_il = 0.0, t_su = T0 -> 478 has +0.0 - +0.0 = +0.0
-    kwargs = dict(
-        at_i=jnp.asarray([0.8, 0.8], dtype=jnp.float64),
-        wfx_pnd=jnp.asarray([0.0, 0.0], dtype=jnp.float64),
-        a_i=jnp.asarray([0.8, 0.8], dtype=jnp.float64),
-        h_i=jnp.asarray([1.0, 1.0], dtype=jnp.float64),
-        t_su=jnp.asarray([T0, T0], dtype=jnp.float64),
-        a_ip=jnp.asarray([0.0, 0.0], dtype=jnp.float64),
-        h_ip=jnp.asarray([0.0, 0.0], dtype=jnp.float64),
-        h_il=jnp.asarray([0.0, 0.0], dtype=jnp.float64),
-        dh_i_sum=jnp.asarray([0.0, -0.0], dtype=jnp.float64),
-        dh_s_sum=jnp.asarray([0.0, -0.0], dtype=jnp.float64),
-        sz_i=jnp.full((2, 10), 5.0, dtype=jnp.float64),
-        t_i=jnp.full((2, 10), T0 - 2.0, dtype=jnp.float64),
-        rDt_ice=RDT,
-        r1_Dt_ice=R1_RDT,
-        rn_himin=0.1,
-        rn_apnd_min=0.15,
-        rn_apnd_max=0.80,
-        rn_pnd_flush=0.1,
-        ln_pnd_lids=True,
-        rho_w=RHO_W,
-        gravity=GRAVITY,
-        constants=NEMO_SI3_CONSTANTS_CONFIG,
+    """Verify active _maxsd/_minsd ±0 tie-survivor bits AND the 456/478 checked masking argument."""
+    T0 = _ORACLE_RT0
+    pos_zero = jnp.asarray([0.0, -0.0], dtype=jnp.float64)
+    neg_zero = jnp.asarray([-0.0, 0.0], dtype=jnp.float64)
+    sign_bit = np.uint64(1 << 63)
+
+    # 1. Active signed-zero tie-survivor test on _maxsd and _minsd under jax.jit with runtime args:
+    # x86 maxsd/minsd return src (second argument) on a (+0.0, -0.0) or (-0.0, +0.0) tie.
+    jit_maxsd = jax.jit(pnd_mod._maxsd)
+    jit_minsd = jax.jit(pnd_mod._minsd)
+    got_max = _bits(jit_maxsd(pos_zero, neg_zero))
+    got_min = _bits(jit_minsd(pos_zero, neg_zero))
+    np.testing.assert_array_equal(got_max, np.array([sign_bit, np.uint64(0)], dtype=np.uint64))
+    np.testing.assert_array_equal(got_min, np.array([sign_bit, np.uint64(0)], dtype=np.uint64))
+    # Planted mutant: swapping dst/src on _maxsd or _minsd flips the output sign bits on ±0 ties!
+    swapped_max = _bits(jax.jit(lambda d, s: pnd_mod._maxsd(s, d))(pos_zero, neg_zero))
+    swapped_min = _bits(jax.jit(lambda d, s: pnd_mod._minsd(s, d))(pos_zero, neg_zero))
+    assert np.all(swapped_max != got_max)
+    assert np.all(swapped_min != got_min)
+
+    # 2. Pre-mask intermediate sign-bit verification at icethd_pnd.f90:456 and :478:
+    # At :456, when dh_i_sum = +0.0, dh_s_sum = +0.0, zdv_avail = -0.0 so zfr_mlt * zdv_avail = -0.0.
+    # Unswapped _maxsd(dst=-0.0, src=+0.0) produces +0.0 (0x0); swapped _maxsd(dst=+0.0, src=-0.0)
+    # produces -0.0 (0x8000000000000000) before :465/:472 mask it.
+    pre_mask_456 = jax.jit(lambda zfr, avail, z: pnd_mod._maxsd(pnd_mod.nemo_source_round(zfr * avail), z))(
+        jnp.asarray([0.5], dtype=jnp.float64),
+        jnp.asarray([-0.0], dtype=jnp.float64),
+        jnp.asarray([0.0], dtype=jnp.float64),
     )
-    out = jax.jit(lambda: pnd_mod.si3_pnd_lev(**kwargs))()
+    pre_mask_456_swapped = jax.jit(lambda zfr, avail, z: pnd_mod._maxsd(z, pnd_mod.nemo_source_round(zfr * avail)))(
+        jnp.asarray([0.5], dtype=jnp.float64),
+        jnp.asarray([-0.0], dtype=jnp.float64),
+        jnp.asarray([0.0], dtype=jnp.float64),
+    )
+    assert int(_bits(pre_mask_456)[0]) == 0
+    assert int(_bits(pre_mask_456_swapped)[0]) == int(sign_bit)
+
+    # 3. Full pnd_LEV checked masking verification with runtime array arguments to jax.jit:
+    lev_args = (
+        jnp.asarray([0.8, 0.8], dtype=jnp.float64),  # at_i
+        jnp.asarray([0.0, 0.0], dtype=jnp.float64),  # wfx_pnd
+        jnp.asarray([0.8, 0.8], dtype=jnp.float64),  # a_i
+        jnp.asarray([1.0, 1.0], dtype=jnp.float64),  # h_i
+        jnp.asarray([T0, T0], dtype=jnp.float64),  # t_su
+        jnp.asarray([0.0, 0.0], dtype=jnp.float64),  # a_ip
+        jnp.asarray([0.0, 0.0], dtype=jnp.float64),  # h_ip
+        jnp.asarray([0.0, 0.0], dtype=jnp.float64),  # h_il
+        jnp.asarray([0.0, -0.0], dtype=jnp.float64),  # dh_i_sum
+        jnp.asarray([0.0, -0.0], dtype=jnp.float64),  # dh_s_sum
+        jnp.full((2, 10), 5.0, dtype=jnp.float64),  # sz_i
+        jnp.full((2, 10), T0 - 2.0, dtype=jnp.float64),  # t_i
+    )
+
+    def _run_lev(at_i_a, wfx_a, ai_a, hi_a, tsu_a, aip_a, hip_a, hil_a, dhi_a, dhs_a, szi_a, ti_a):
+        return pnd_mod.si3_pnd_lev(
+            at_i=at_i_a,
+            wfx_pnd=wfx_a,
+            a_i=ai_a,
+            h_i=hi_a,
+            t_su=tsu_a,
+            a_ip=aip_a,
+            h_ip=hip_a,
+            h_il=hil_a,
+            dh_i_sum=dhi_a,
+            dh_s_sum=dhs_a,
+            sz_i=szi_a,
+            t_i=ti_a,
+            rDt_ice=RDT,
+            r1_Dt_ice=R1_RDT,
+            rn_himin=0.1,
+            rn_apnd_min=0.15,
+            rn_apnd_max=0.80,
+            rn_pnd_flush=0.1,
+            ln_pnd_lids=True,
+            rho_w=RHO_W,
+            gravity=GRAVITY,
+            constants=NEMO_SI3_CONSTANTS_CONFIG,
+        )
+
+    out = jax.jit(_run_lev)(*lev_args)
     for leaf in out:
         bits = _bits(leaf)
         np.testing.assert_array_equal(bits, np.zeros_like(bits))
@@ -1192,7 +1416,7 @@ def test_masked_and_signed_zero_paths_are_verified_through_pnd_lev(monkeypatch):
         "zdv_mlt = _maxsd(zero, sr(zfr_mlt * zdv_avail))",
     )
     monkeypatch.setattr(pnd_mod, "_pnd_lev_single_category", flipped_456)
-    out_flipped = jax.jit(lambda: pnd_mod.si3_pnd_lev(**kwargs))()
+    out_flipped = jax.jit(_run_lev)(*lev_args)
     for got, want in zip(out_flipped, out, strict=True):
         np.testing.assert_array_equal(_bits(got), _bits(want))
 
@@ -1250,30 +1474,29 @@ def test_five_category_o9_o10_o11_1d2d_o12_composition_matches_scalar_oracle(mon
     )
     wfx_pnd = jnp.zeros((jpj, jpi), dtype=jnp.float64)
 
-    # Compile single-category O10 once and reuse across all 5 categories
-    jit_o10 = jax.jit(
-        lambda e, f, b: bl.si3_ice_thd_o10_category_stages(
-            entry=e,
-            fluxes=f,
-            sfx_bri=b,
-            namelist=namelist,
-            rDt_ice=RDT,
-            r1_Dt_ice=R1_RDT,
-            r1_nlay_i=R1_NLAY_I,
-            rho_i=RHO_I,
-            rho_s=RHO_S,
-            rho_w=RHO_W,
-            gravity=GRAVITY,
-            constants=NEMO_SI3_CONSTANTS_CONFIG,
-        )
-    )
-    monkeypatch.setattr(
-        pnd_mod,
-        "si3_ice_thd_o10_category_stages",
-        lambda **kw: jit_o10(kw["entry"], kw["fluxes"], kw["sfx_bri"]),
-    )
-
     with precision_scope(PrecisionPolicy.fp64(transcendentals="libm")):
+        # Compile single-category O10 once on CPU and reuse across all 5 categories
+        jit_o10 = jax.jit(
+            lambda e, f, b: bl.si3_ice_thd_o10_category_stages(
+                entry=e,
+                fluxes=f,
+                sfx_bri=b,
+                namelist=namelist,
+                rDt_ice=RDT,
+                r1_Dt_ice=R1_RDT,
+                r1_nlay_i=R1_NLAY_I,
+                rho_i=RHO_I,
+                rho_s=RHO_S,
+                rho_w=RHO_W,
+                gravity=GRAVITY,
+                constants=NEMO_SI3_CONSTANTS_CONFIG,
+            )
+        )
+        monkeypatch.setattr(
+            pnd_mod,
+            "si3_ice_thd_o10_category_stages",
+            lambda **kw: jit_o10(kw["entry"], kw["fluxes"], kw["sfx_bri"]),
+        )
         out = pnd_mod.si3_ice_thd_o12_stages(
             category_entries=tuple(entries),
             category_fluxes=tuple(fluxes_list),
@@ -1321,9 +1544,6 @@ def test_five_category_o9_o10_o11_1d2d_o12_composition_matches_scalar_oracle(mon
         namelist=namelist,
         rDt_ice=RDT,
         r1_Dt_ice=R1_RDT,
-        rho_w=RHO_W,
-        gravity=GRAVITY,
-        constants=NEMO_SI3_CONSTANTS_CONFIG,
         nn_hls=2,
     )
     for got, want in zip(out.pnd, oracle_pnd, strict=True):
@@ -1645,3 +1865,283 @@ def test_ice_thd_pnd_refuses_nonproduction_selectors(key, bad_value):
     }
     with pytest.raises(ValueError, match="production selectors"):
         pnd_mod.si3_ice_thd_pnd(**kwargs)
+
+
+@pytest.mark.parametrize(
+    ("const_field", "bad_factor"),
+    [
+        ("T0", 1.0001),
+        ("rho_ocean", 1.001),
+        ("rho_ice", 1.001),
+        ("rho_snow", 1.001),
+        ("latent_fusion", 1.001),
+        ("k_ice", 1.001),
+    ],
+)
+def test_independent_oracle_catches_model_constant_defect(const_field, bad_factor):
+    """Independent oracle shares no model constants, so a model constant defect fails."""
+    fx = _pnd_2d_fixture()
+    oracle = _oracle_ice_thd_pnd(
+        **fx,
+        namelist=DECK_PND_NML,
+        rDt_ice=RDT,
+        r1_Dt_ice=R1_RDT,
+        nn_hls=2,
+    )
+    bad_constants = NEMO_SI3_CONSTANTS_CONFIG._replace(
+        **{const_field: getattr(NEMO_SI3_CONSTANTS_CONFIG, const_field) * bad_factor}
+    )
+    args = _pnd_array_args()
+    arrays = dict(zip(_PND_ARRAY_NAMES, args, strict=True))
+    with precision_scope(PrecisionPolicy.fp64(transcendentals="libm")):
+        mutated = pnd_mod.si3_ice_thd_pnd(
+            **arrays,
+            namelist=DECK_PND_NML,
+            rDt_ice=RDT,
+            r1_Dt_ice=R1_RDT,
+            rho_w=RHO_W,
+            gravity=GRAVITY,
+            constants=bad_constants,
+            nn_hls=2,
+        )
+    mismatches = sum(
+        np.count_nonzero(_bits(got) != _bits(want))
+        for got, want in zip(mutated, oracle, strict=True)
+    )
+    assert mismatches > 0, f"constant defect in {const_field} was not caught by independent oracle"
+
+
+def test_production_step_sea_ice_and_step_ponds_wire_si3_lev_and_preserve_cesm(monkeypatch):
+    """Verify production step_sea_ice (sea_ice.py:2423) and step_ponds (ponds.py:31) wire si3_lev."""
+    namthd_pnd = SI3PondConfig(
+        rn_himin=float(DECK_PND_NML["rn_himin"]),
+        rn_apnd_min=float(DECK_PND_NML["rn_apnd_min"]),
+        rn_apnd_max=float(DECK_PND_NML["rn_apnd_max"]),
+        rn_pnd_flush=float(DECK_PND_NML["rn_pnd_flush"]),
+        ln_pnd_lids=bool(DECK_PND_NML["ln_pnd_lids"]),
+    )
+    shape = (2, 2)
+    t_init = SeaIceConfig().T_freeze_ocean
+    base_state = init_dynamic_ice_state(shape, S_ice_init=2.5, T_ice_init=t_init)
+    state = base_state._replace(
+        h_ice=base_state.h_ice.replace(data=jnp.full(shape, 1.4, dtype=jnp.float64)),
+        T_ice=base_state.T_ice.replace(data=jnp.full(shape, t_init, dtype=jnp.float64)),
+        concentration=base_state.concentration.replace(data=jnp.full(shape, 0.80, dtype=jnp.float64)),
+        h_snow=base_state.h_snow.replace(data=jnp.full(shape, 0.05, dtype=jnp.float64)),
+        S_ice=base_state.S_ice.replace(data=jnp.full(shape, 2.5, dtype=jnp.float64)),
+        pond_area=base_state.pond_area.replace(data=jnp.full(shape, 0.15, dtype=jnp.float64)),
+        pond_depth=base_state.pond_depth.replace(data=jnp.full(shape, 0.12, dtype=jnp.float64)),
+    )
+    zeros = jnp.zeros(shape, dtype=jnp.float64)
+    forcing = AtmToSurface(
+        sw_down=zeros,
+        lw_down=zeros,
+        precip_total=zeros,
+        precip_snow=zeros,
+        T_lowest=jnp.full(shape, t_init, dtype=jnp.float64),
+        q_lowest=zeros,
+        u_lowest=zeros,
+        v_lowest=zeros,
+        p_lowest=jnp.full(shape, 100000.0, dtype=jnp.float64),
+        p_surface=jnp.full(shape, 101325.0, dtype=jnp.float64),
+        rho_lowest=jnp.full(shape, 1.25, dtype=jnp.float64),
+        cos_zenith=zeros,
+        co2_ppmv=jnp.full(shape, 400.0, dtype=jnp.float64),
+        has_radiation=zeros,
+        has_precipitation=zeros,
+        z_lowest=jnp.full(shape, 10.0, dtype=jnp.float64),
+    )
+    ocean_sst = jnp.full(shape, t_init, dtype=jnp.float64)
+    cfg_si3 = SeaIceConfig(
+        emissivity_ice=0.0,
+        Cd_ice=0.0,
+        Ch_ice=0.0,
+        ocean_heat_transfer_coeff=0.0,
+        snow=SnowConfig(enabled=True, flooding=False),
+        ponds=MeltPondConfig(enabled=True, scheme="si3_lev", namthd_pnd=namthd_pnd),
+        ice_constants=NEMO_SI3_CONSTANTS_CONFIG,
+    )
+
+    def _run_step(st, frc, sst, u_ocn, v_ocn):
+        return sea_ice_mod.step_sea_ice(
+            st, frc, sst, u_ocn, v_ocn, cfg_si3, U_min=1.0, dt=RDT
+        )
+
+    with precision_scope(PrecisionPolicy.fp64(transcendentals="libm")):
+        with jax.disable_jit():
+            state_eager, resp_eager = _run_step(state, forcing, ocean_sst, zeros, zeros)
+        state_jit, resp_jit = jax.jit(_run_step)(state, forcing, ocean_sst, zeros, zeros)
+
+    conc_out = float(state_jit.concentration.data[0, 0])
+    oracle_step = _oracle_pnd_lev_category(
+        at_i=conc_out,
+        a_i=conc_out,
+        h_i=float(state_jit.h_ice.data[0, 0]),
+        t_su=float(state_jit.T_ice.data[0, 0]),
+        a_ip=0.15 * conc_out,
+        h_ip=0.12 * (0.80 / conc_out),
+        h_il=0.0,
+        dh_i_sum=0.0,
+        dh_s_sum=0.0,
+        sz_i=[2.5],
+        t_i=[float(t_init)],
+        wfx_pnd=0.0,
+        rDt_ice=RDT,
+        r1_Dt_ice=R1_RDT,
+        rn_himin=namthd_pnd.rn_himin,
+        rn_apnd_min=namthd_pnd.rn_apnd_min,
+        rn_apnd_max=namthd_pnd.rn_apnd_max,
+        rn_pnd_flush=namthd_pnd.rn_pnd_flush,
+        ln_pnd_lids=namthd_pnd.ln_pnd_lids,
+    )
+    want_step_pa = oracle_step[0] / conc_out
+    np.testing.assert_array_equal(_bits(state_eager.pond_area.data), _bits(np.full(shape, want_step_pa)))
+    np.testing.assert_array_equal(_bits(state_jit.pond_area.data), _bits(np.full(shape, want_step_pa)))
+    np.testing.assert_array_equal(_bits(state_eager.pond_depth.data), _bits(np.full(shape, oracle_step[1])))
+    np.testing.assert_array_equal(_bits(state_jit.pond_depth.data), _bits(np.full(shape, oracle_step[1])))
+    np.testing.assert_array_equal(_bits(resp_eager.freshwater_flux), _bits(resp_jit.freshwater_flux))
+
+    # Direct step_ponds(scheme="si3_lev") vs independent scalar oracle _oracle_pnd_lev_category
+    with precision_scope(PrecisionPolicy.fp64(transcendentals="libm")):
+        pa_new, pd_new, drain_m, refreeze_m = jax.jit(
+            lambda pa, pd, ai, hi, tsu, dhi, dhs, szi, ti: ponds_mod.step_ponds(
+                pa,
+                pd,
+                melt_water_m=zeros,
+                rain_water_m=zeros,
+                ice_mask=ai > 0.0,
+                h_snow=zeros,
+                T_air=tsu,
+                dt=RDT,
+                drainage_timescale=86400.0,
+                refreeze_threshold=_ORACLE_RT0,
+                pond_to_ice_max_area=0.6,
+                depth_to_area_ratio=0.8,
+                scheme="si3_lev",
+                at_i=ai,
+                a_i=ai,
+                h_i=hi,
+                t_su=tsu,
+                dh_i_sum=dhi,
+                dh_s_sum=dhs,
+                sz_i=szi,
+                t_i=ti,
+                namthd_pnd=namthd_pnd,
+                rho_w=RHO_W,
+                gravity=GRAVITY,
+                ice_constants=NEMO_SI3_CONSTANTS_CONFIG,
+            )
+        )(
+            state.pond_area.data,
+            state.pond_depth.data,
+            state.concentration.data,
+            state.h_ice.data,
+            jnp.full(shape, _ORACLE_RT0, dtype=jnp.float64),
+            jnp.full(shape, -0.012, dtype=jnp.float64),
+            jnp.full(shape, -0.004, dtype=jnp.float64),
+            state.S_ice.data,
+            state.T_ice.data,
+        )
+    oracle_cat = _oracle_pnd_lev_category(
+        at_i=0.80,
+        a_i=0.80,
+        h_i=1.4,
+        t_su=_ORACLE_RT0,
+        a_ip=0.15 * 0.80,
+        h_ip=0.12,
+        h_il=0.0,
+        dh_i_sum=-0.012,
+        dh_s_sum=-0.004,
+        sz_i=[2.5],
+        t_i=[float(t_init)],
+        wfx_pnd=0.0,
+        rDt_ice=RDT,
+        r1_Dt_ice=R1_RDT,
+        rn_himin=namthd_pnd.rn_himin,
+        rn_apnd_min=namthd_pnd.rn_apnd_min,
+        rn_apnd_max=namthd_pnd.rn_apnd_max,
+        rn_pnd_flush=namthd_pnd.rn_pnd_flush,
+        ln_pnd_lids=namthd_pnd.ln_pnd_lids,
+    )
+    want_pa = oracle_cat[0] / 0.80
+    want_pd = oracle_cat[1]
+    want_drain_m = (oracle_cat[5] * RDT / _ORACLE_RHOW) / 0.80
+    np.testing.assert_array_equal(_bits(pa_new), _bits(np.full(shape, want_pa)))
+    np.testing.assert_array_equal(_bits(pd_new), _bits(np.full(shape, want_pd)))
+    np.testing.assert_array_equal(_bits(drain_m), _bits(np.full(shape, want_drain_m)))
+    np.testing.assert_array_equal(_bits(refreeze_m), _bits(np.zeros(shape)))
+
+    # Planted mutant 1: removing step_ponds call in sea_ice.py:2423 must fail on step_sea_ice!
+    monkeypatch.setattr(
+        sea_ice_mod,
+        "step_ponds",
+        lambda pa, pd, **kw: (pa, pd, jnp.zeros_like(pd), jnp.zeros_like(pd)),
+    )
+    with precision_scope(PrecisionPolicy.fp64(transcendentals="libm")):
+        state_no_call, resp_no_call = jax.jit(
+            lambda st, frc, sst, u_ocn, v_ocn: _run_step(st, frc, sst, u_ocn, v_ocn)
+        )(state, forcing, ocean_sst, zeros, zeros)
+    assert np.count_nonzero(_bits(state_no_call.pond_area.data) != _bits(state_jit.pond_area.data)) > 0
+    assert np.count_nonzero(_bits(state_no_call.pond_depth.data) != _bits(state_jit.pond_depth.data)) > 0
+    assert np.count_nonzero(_bits(resp_no_call.freshwater_flux) != _bits(resp_jit.freshwater_flux)) > 0
+    monkeypatch.undo()
+
+    # Planted mutant 2: ignoring scheme="si3_lev" and running the CESM pond branch must fail!
+    orig_step_ponds = ponds_mod.step_ponds
+    monkeypatch.setattr(
+        sea_ice_mod,
+        "step_ponds",
+        lambda *a, **kw: orig_step_ponds(*a, **{**kw, "scheme": "cesm", "namthd_pnd": None}),
+    )
+    with precision_scope(PrecisionPolicy.fp64(transcendentals="libm")):
+        state_cesm_mut, resp_cesm_mut = jax.jit(
+            lambda st, frc, sst, u_ocn, v_ocn: _run_step(st, frc, sst, u_ocn, v_ocn)
+        )(state, forcing, ocean_sst, zeros, zeros)
+    assert np.count_nonzero(_bits(state_cesm_mut.pond_area.data) != _bits(state_jit.pond_area.data)) > 0
+    assert np.count_nonzero(_bits(state_cesm_mut.pond_depth.data) != _bits(state_jit.pond_depth.data)) > 0
+    assert np.count_nonzero(_bits(resp_cesm_mut.freshwater_flux) != _bits(resp_jit.freshwater_flux)) > 0
+    monkeypatch.undo()
+
+    # Check that default scheme="cesm" is bit-identical to explicit scheme="cesm"
+    cfg_cesm_default = SeaIceConfig(
+        snow=SnowConfig(enabled=True, flooding=False),
+        ponds=MeltPondConfig(enabled=True),
+    )
+    cfg_cesm_explicit = SeaIceConfig(
+        snow=SnowConfig(enabled=True, flooding=False),
+        ponds=MeltPondConfig(enabled=True, scheme="cesm"),
+    )
+    st_def, rsp_def = sea_ice_mod.step_sea_ice(
+        state, forcing, ocean_sst, zeros, zeros, cfg_cesm_default, U_min=1.0, dt=RDT
+    )
+    st_exp, rsp_exp = sea_ice_mod.step_sea_ice(
+        state, forcing, ocean_sst, zeros, zeros, cfg_cesm_explicit, U_min=1.0, dt=RDT
+    )
+    for got, want in zip(jax.tree.leaves(st_def), jax.tree.leaves(st_exp), strict=True):
+        np.testing.assert_array_equal(_bits(got), _bits(want))
+    for got, want in zip(jax.tree.leaves(rsp_def), jax.tree.leaves(rsp_exp), strict=True):
+        np.testing.assert_array_equal(_bits(got), _bits(want))
+
+    # Validation guards on step_ponds
+    with pytest.raises(ValueError, match="requires MeltPondConfig.namthd_pnd"):
+        sea_ice_mod.step_sea_ice(
+            state,
+            forcing,
+            ocean_sst,
+            zeros,
+            zeros,
+            SeaIceConfig(ponds=MeltPondConfig(enabled=True, scheme="si3_lev")),
+            U_min=1.0,
+            dt=RDT,
+        )
+    with pytest.raises(ValueError, match="does not accept namthd_pnd"):
+        sea_ice_mod.step_sea_ice(
+            state,
+            forcing,
+            ocean_sst,
+            zeros,
+            zeros,
+            SeaIceConfig(ponds=MeltPondConfig(enabled=True, scheme="cesm", namthd_pnd=namthd_pnd)),
+            U_min=1.0,
+            dt=RDT,
+        )

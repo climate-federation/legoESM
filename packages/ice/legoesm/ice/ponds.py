@@ -175,6 +175,7 @@ def step_ponds(
             sz_i=sz_i_f64,
             t_i=t_i_f64,
             wfx_pnd=jnp.zeros_like(h_ip_in),
+            rDt_ice=dt_f64,
             r1_Dt_ice=r1_dt,
             rn_himin=namthd_pnd.rn_himin,
             rn_apnd_min=namthd_pnd.rn_apnd_min,
@@ -183,7 +184,7 @@ def step_ponds(
             ln_pnd_lids=namthd_pnd.ln_pnd_lids,
             rho_w=rho_w,
             gravity=gravity,
-            ice_constants=ice_constants,
+            constants=ice_constants,
         )
         has_ice = a_i_f64 > 0.0
         safe_ai = jnp.where(has_ice, a_i_f64, jnp.ones_like(a_i_f64))
