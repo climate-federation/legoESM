@@ -236,7 +236,7 @@ is the `l_zdfsh2` arm at
 `ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/stprk3_stg.f90:791-793`,
 not lines 795--796.  For equal signed-zero sources, NEMO's `psgn*src` at
 `ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/lbcnfd.f90:684-717` and
-legoesm's `-1*src*mask` at `ocean_model_latlon_cgrid.py:18316-18337` produce
+legoesm's `-1*src*mask` at `ocean_model_latlon_cgrid.py:18325-18346` produce
 the same sign.  The observed difference must therefore arise either from the
 stage dump's dry-cell zero fill or from an upstream mask multiplication on
 the source row.  The existing record cannot distinguish them and does not
@@ -455,7 +455,7 @@ already bit-identical case (a), and the 57 NEMO +0 words were case (b).  The
 fold sources, at row 146 and permuted columns 122, 121, 120, 119 and 116, are
 all -0.  Thus NEMO's fold multiply at
 `ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/lbcnfd.f90:684-717` and
-legoESM's fold at `ocean_model_latlon_cgrid.py:18316-18337` agree: -1 times
+legoESM's fold at `ocean_model_latlon_cgrid.py:18325-18346` agree: -1 times
 the source -0 makes the target +0.
 
 The pre-fold source-order record closes the owner.  At those 57 mapped source

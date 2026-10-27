@@ -35,7 +35,7 @@ back-substitution at
 `ORCA2_ORCA1ICE_OMIP_L4_R333LDFI/BLD/ppsrc/nemo/trazdf.f90:293-299`.
 
 The shared legoESM production caller reaches its literal tracer-pair dispatch
-at `ocean_model_latlon_cgrid.py:14824-14849`. The paired solve consumes the
+at `ocean_model_latlon_cgrid.py:14833-14858`. The paired solve consumes the
 content RHS and matrix at `implicit_solver.py:478-539`; matrix construction is
 at `implicit_solver.py:542-641`, and its eliminated-diagonal, forward and
 reverse recurrences are at `implicit_solver.py:329-392`. The stage call that
@@ -736,14 +736,14 @@ uninstrumented `_nemo_literal_tke_solve` (`0 / 772,560` interior words unequal;
   `en(ji,jj,mbkt(ji,jj)+1) = MAX( zebot, rn_emin ) * ssmask(ji,jj)` at the
   seafloor interface `jk = mbkt + 1` where `tke_wmask == 0`. In legoESM,
   `_tke_bottom_dirichlet`
-  (`packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:12466-12486`)
+  (`packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:12466-12495`)
   calls `compute_face_masks_3d(_zc.is_active, _grid)`, which sets the
   northernmost V-face mask row `north = jnp.zeros_like(south)`
   (`packages/ocean/legoesm/ocean/dynamics/latlon_cgrid_operators.py:5450-5451`),
   zeroing `vm3[-1]` on the north-fold row `jj = 150` (`j = 147`) instead of
   restoring NEMO's raw `vmask[-1]` as `_tke_step_entry_p_sh2` already does when
   `nemo_sh2_fold_top_v=True`
-  (`packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:12872-12889`).
+  (`packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:12881-12898`).
   Because `compute_tke_step` records `_statement_after_boundaries`
   (`packages/ocean/legoesm/ocean/physics/vertical_mixing/tke.py:3596-3597`)
   before `_solve_tke_backward_euler` scatters `bottom_dirichlet` into `rhs` at
@@ -763,12 +763,12 @@ uninstrumented `_nemo_literal_tke_solve` (`0 / 772,560` interior words unequal;
 ### 3. Non-landed literal fix proposal and verification on recorded inputs
 
 - **Proposal (not landed in model code)**: in `_tke_bottom_dirichlet`
-  (`packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:12466-12486`),
+  (`packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:12466-12495`),
   when `getattr(vmix.tke, "nemo_sh2_fold_top_v", False)` is active and
   `_zc.nemo_een_barotropic.vmask` is present, restore the north-fold V-face
   mask row `vm3 = vm3.at[-1].set(jnp.asarray(_raw.vmask[-1], dtype=h_k.dtype))`
   (matching `_tke_step_entry_p_sh2` at
-  `packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:12872-12889`).
+  `packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:12881-12898`).
 - **Verification on the admitted kt-2 inputs**
   (`scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round336_tke_walk.py:333-547`):
   - `bottom_dirichlet` across all 11,676 in-solve seafloor columns drops from
@@ -1417,3 +1417,205 @@ recipe at `packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:2063`).
   words (`BIT_EXACT`) under both `given_nemo_entry` and `independent`, and the
   first non-bit / first wet-value / first over-bar row across `kt=1..10` is
   reported.
+
+### 1. Landed production change and revert-sensitive call-site test
+
+- **Model fix**: In `_tke_bottom_dirichlet`
+  (`packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:12466-12495`),
+  under the existing `bool(getattr(vmix.tke, "nemo_sh2_fold_top_v", False))`
+  selector (no new configuration knob; already set on the ORCA2 NEMO recipe at
+  `packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:2063`),
+  `_tke_bottom_dirichlet` validates that `_grid.fold` is active and
+  `_zc.nemo_een_barotropic.vmask` is present and restores the north-fold V-face
+  mask row `vm3 = vm3.at[-1].set(jnp.asarray(_raw.vmask[-1], dtype=h_k.dtype))`
+  before forming `v_sum = vm3[:-1] * v_b[:-1] + vm3[1:] * v_b[1:]`. This matches
+  NEMO's `lbc_lnk`-processed `vmask` (`src/OCE/DOM/dommsk.F90:146-172`) in
+  `tke_tke` (`ORCA2_ORCA1ICE_OMIP_L4_R336TKE/BLD/ppsrc/nemo/zdftke.f90:303-309`)
+  and matches `_tke_step_entry_p_sh2`
+  (`packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:12881-12898`).
+- **Production-call-site test and `eager == jit` (`M2`, `M4`)**:
+  `tests/ocean/unit/test_nemo_sh2_fold_top_v.py:118-310` exercises
+  `model._tke_bottom_dirichlet` and
+  `LatLonCGridOceanModel._apply_implicit_vertical_mixing` on a partial-cell
+  north-fold staircase (`mbkt = 2 < nlev - 1 = 3`, so the in-solve seafloor
+  Dirichlet slot `k = 2` couples into wet interface `k = 1` during the Thomas
+  reverse sweep) with depth-uniform velocity (`dv == 0`, isolating
+  `_tke_bottom_dirichlet` from `_tke_step_entry_p_sh2`). Eager execution
+  (`with jax.disable_jit():`) and `jax.jit(run_vmix)(*args)` with
+  `(eta, u, v, avm, tke0)` passed as JIT arguments agree bit-for-bit on
+  `_tke_bottom_dirichlet` and within `rtol=1e-13` on `K_v`/`A_v`. When the
+  fix in `_tke_bottom_dirichlet` is reverted,
+  `test_production_bottom_dirichlet_restores_north_fold_vmask_and_matches_nemo`
+  fails (`EXIT_CODE=1`, 6/6 elements mismatched on `bot_on[-1]` vs
+  `nemo_ref_top`, `max_abs = 2.04939015e-04`, relative error `0.5`; log
+  `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/orca2_r336_resume18/revert_test_failure.log`),
+  and passes (`5 passed`) when enabled.
+- **Admitted kt-2 21-boundary TKE walk on the landed model**:
+  `tests/ocean/fidelity/test_orca2_round336_tke_walk.py:126-207` and
+  `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/orca2_r336_resume18/round336_tke_walk_landed.json`
+  (SHA-256 `8102ffa2e46fceb0b3e5b12f263929f08658501f38748adb2a0ddc60d8b229ed`)
+  report `PASS_R336_TKE_WALK` with `first_non_bit_boundary = None`,
+  `first_non_bit_active_solve30_stage = None`,
+  `first_non_bit_wet30_solver_stage = None`, and `0` unequal wet words across
+  all 21 recorded `zdftke`/`zdf_phy` boundaries at `kt = 2`.
+
+### 2. Decision 122 census across all seven pairs and both labels
+
+Measured with `scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round336_d122_gate.py:217-457`
+(unit-tested in `tests/ocean/fidelity/test_orca2_round336_d122_gate.py:20-50`;
+self-test artifact `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/orca2_r336_resume18/d122_self_test.json`,
+SHA-256 `a93149a47b89842a1dbc99157ccd56f18705d19795eeb36860935777793bc4fa`;
+both `exact-loss` and `away-row` plants fire `STATUS PLANT-FIRED`). Both the
+same-tree control comparison (`decision.json`, SHA-256
+`807888ca3e096627bcfce9c1eac4085a6de8560e740aed8852bd529dc045b687`) and the
+cross-tree parent comparison against `254fec16a822` (`cross_tree_decision.json`,
+SHA-256 `893dc811ab135fc8e27bc8d548ce3d7f9d3b7f9a8cc8473f0d6a272a19df7b68`)
+return `PASS_R336_D122_DECISION` with identical numbers:
+
+| Pair (`rung / label`) | Rows | `exact_row_losses` | `unequal_increases` | RMS / `max_abs` (`toward / equal / away`) | Parent classes (`BIT / AT_BAR / OVER_BAR`) | Current classes (`BIT / AT_BAR / OVER_BAR`) | Old first `OVER_BAR` -> New at old target | New first `OVER_BAR` | Candidate artifact SHA-256 |
+|---|---:|---:|---:|---|---|---|---|---|---|
+| `rung0 / independent` | 200 | 0 | 0 | `0 / 200 / 0` | `35 / 15 / 150` | `35 / 15 / 150` | `(1, stage3, T)` `430,551` -> `430,551` (`equal`) | `(1, stage3, T)` | `8e6bc77cd63658eeb8ec14632a328dfe472c15b316cc30ab7c71cd2f8e389b0c` |
+| `omt1 / independent` | 160 | 0 | 0 | `0 / 160 / 0` | `62 / 0 / 98` | `62 / 0 / 98` | `(4, stage3, T)` `7` -> `7` (`equal`) | `(4, stage3, T)` | `60c1e963d8ae8fee27cadc2e765fee0a837d577bf723bf83e917f9e85415b28d` |
+| `omt2 / independent` | 200 | 0 | 0 | `0 / 200 / 0` | `62 / 0 / 138` | `62 / 0 / 138` | `(4, stage3, T)` `7` -> `7` (`equal`) | `(4, stage3, T)` | `5c5b571952541a12e265b328f257518dadcacbaee85c9ca278baa8da8db6bb26` |
+| `omt3 / independent` | 200 | 0 | 0 | `0 / 200 / 0` | `36 / 12 / 152` | `36 / 12 / 152` | `(3, stage3, T)` `5` -> `5` (`equal`) | `(3, stage3, T)` | `2df03a4460a0f870ebc5c93264dfdbcbd5a2ac288daa033d72890f83ef269895` |
+| `omt4 / independent` | 200 | 0 | 0 | `0 / 200 / 0` | `16 / 4 / 180` | `16 / 4 / 180` | `(2, stage1, u)` `433,735` -> `433,735` (`equal`) | `(2, stage1, u)` | `9dbd287f7686a73bfa32eb330f42f5db9b6fb05adca39848a6fee47126f7af43` |
+| `rung10 / given_nemo_entry` | 200 | 0 | 0 | `159 / 41 / 0` | `31 / 11 / 158` | `151 / 49 / 0` | `(2, stage3, T)` `18` (`max_abs=7.678e-12`) -> `0` (`BIT_EXACT`, `toward`) | `None` (`0` `OVER_BAR`) | `25f1bc86c762c9500b9881c72a16c274d7f875bd759d3a439c5bd95583cfc7fe` |
+| `rung10 / independent` | 200 | 0 | 0 | `159 / 41 / 0` | `31 / 11 / 158` | `151 / 49 / 0` | `(2, stage3, T)` `18` (`max_abs=7.678e-12`) -> `0` (`BIT_EXACT`, `toward`) | `None` (`0` `OVER_BAR`) | `e8ddde4e7e16e73fd84326dd468c22db4653d6144eb472ad966348e60f036dcf` |
+
+The same-tree `rung10` control artifacts (`rung10_given_nemo_entry_control.json`
+SHA-256 `2939abb87017acc312d2b7a5ffaa1b0572f7ef10cb3a25dc5df40536d9b0de0c`;
+`rung10_independent_control.json` SHA-256
+`744b1db8a099c114dbe250097c753071533609009f10a03e186764b1d3c0dc46`) are
+bit-identical to the Round-333 parent candidate rows on all 200 rows. On both
+`rung10` labels, `120` rows move from `OVER_BAR` directly to `BIT_EXACT` (`31 -> 151`
+`BIT_EXACT`), `39` rows move from `OVER_BAR` to `AT_BAR_NOT_EXACT` with strictly
+smaller RMS, `max_abs`, and `unequal` counts (`158 -> 0` `OVER_BAR`), and the
+remaining `41` rows (`31 BIT_EXACT` + `10 AT_BAR_NOT_EXACT`) are bit-identical
+to the parent.
+
+### 3. Caller audit and DINO fidelity gates (`M6`)
+
+- **All callers of `_tke_bottom_dirichlet`**:
+  1. `packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:13927-13929`
+     (production caller inside `_apply_implicit_vertical_mixing`).
+  2. `scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_phase2t_tke_entry_gate.py:93`
+     (ORCA2 `kt=1` rest-state entry check where `u = v = 0`; `0` unequal words
+     vs parent, SHA-256 `23e5a7ad14db9c9df3463d102a5d064780b4939bad3b5b8643012909e1d1585b`).
+- **Non-NEMO and non-ORCA2 card audit**
+  (`scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round336_d122_gate.py:461-608`;
+  artifact `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/orca2_r336_resume18/caller_audit.json`,
+  SHA-256 `66310b27c31186a6c704d7e545f068be8bf59061911a2153652856420850c438`,
+  `STATUS PASS_R336_CALLER_AUDIT`):
+  - Non-NEMO prognostic TKE with `bottom_tke_bc=True, nemo_sh2_fold_top_v=False`
+    (both folded and unfolded grids): `0` unequal words vs parent on both
+    `_tke_bottom_dirichlet` and `_apply_implicit_vertical_mixing` (`K_v`, `A_v`).
+  - Non-ORCA2 NEMO testcase cards (`GYRE-zco`, `LOCK_EXCHANGE-zco`,
+    `OVERFLOW-zps`, `VORTEX-zco`, `ORCA2-rung0`): `nemo_sh2_fold_top_v=False`,
+    `bottom_tke_bc=False`, `_tke_bottom_dirichlet` returns `None`, bit-identical
+    to parent.
+- **Faithful DINO 3-step value and JAXPR probe**:
+  `scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round330_dino_probe.py`
+  on the `faithful` DINO grid produces `faithful_values.json` with SHA-256
+  `5f977ac145525b73d311bdaacd5c7620b4199567f62afac15d3d1c8d19b503fa` —
+  byte-for-byte identical to the Round-333 baseline across all 66 leaf-step
+  hashes (`0` differences; `faithful_program.json` SHA-256
+  `5963788cd3b46a3d51440fc22f2ed58ac627c119d33e3d28d1094639bd1741df`).
+- **30-day GPU DINO from-rest month gate**:
+  `scripts/validate/ocean_fidelity/dino_1226/dino_fromrest_month_gate.py` passes
+  its `--self-test` (`SELF-TEST OK`) and completes the 30-day (`kt = 960`) fp64
+  integration on GPU 0 in `256.9 s` (`267.6 ms/step`). Day-30 wet 3-D `T` RMS vs
+  NEMO `kt = 960` is `2.056821683e-03 K` against bar `2.244317642e-03 K`
+  (`PASS`; snapshot SHA-256
+  `40a63d3a43a80600c740067fd3446bf428cd20e362a60987908c1a079a6e6bb5`; score
+  JSON SHA-256
+  `04415f8cec382eb8df532a034647117ee9468187d9cef44663c16866e2db1629`).
+
+### 4. Rung-10 `N = 1` gradient gate
+
+Measured with `scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round329_grad_probe.py`
+(`/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/orca2_r336_resume18/grad/grad_rung10_n1.json`,
+SHA-256 `eb0a11a12baf784b80e4c6413a527aeb2b25eaf83efe156808393b0c581b69bc`,
+peak RSS `77.71 GiB`, `2,416.6 s`):
+
+- **Forward and construction parity**: `forward_parity_non_bit_leaves = []`;
+  rebuilt model vs traced scalar at `eps = 1e-4` has
+  `rebuilt_vs_traced_non_bit_leaves = []`.
+- **Reverse cotangent finiteness (`N = 1`)**: Both `T@1` (`loss = 32.91696958352461`,
+  `dT0_l2 = 0.01931092431777194`, `dT0_nonzero_wet_frac = 1.0`) and `ssh@1`
+  (`loss = 0.09080875357052787`, `dT0_l2 = 0.0006856828144876344`,
+  `dT0_nonzero_wet_frac = 0.9999628384027945`) have `dT0_finite = True`,
+  `dT0_nonfinite_count = 0`, `dT0_nonzero_dry = 0`, and
+  `nonfinite_cotangent_leaves = {}`.
+- **Reverse = forward (JVP) agreement**:
+  - Directional `T_dir0` on `T` loss: `reverse = -0.04157151209367675`,
+    `forward = -0.04157151209367753`, relative difference
+    `1.869443948746345e-14`.
+  - Directional `T_dir0` on `ssh` loss: `reverse = 0.0004299604909920475`,
+    `forward = 0.0004299604909920481`, relative difference
+    `1.3868976507379975e-15`.
+  - Scalar `rn_ud` on `T` loss: `reverse = -4.51170448705634e-05`,
+    `forward = -4.511704487056347e-05`, relative difference
+    `1.501929835492298e-15` (central FD at `eps = 1e-4` is
+    `-4.5116905766917625e-05`, relative error `3.0831728047889743e-06`).
+  - Scalar `rn_ud` on `ssh` loss: `reverse = 0.0`, `forward = 0.0`, relative
+    difference `0.0`.
+
+### 5. Rung-10 `kt = 1..10` rescore (both labels, every stage)
+
+From the wet-value audit embedded in
+`rung10_given_nemo_entry_candidate.json` (SHA-256
+`25f1bc86c762c9500b9881c72a16c274d7f875bd759d3a439c5bd95583cfc7fe`) and
+`rung10_independent_candidate.json` (SHA-256
+`e8ddde4e7e16e73fd84326dd468c22db4653d6144eb472ad966348e60f036dcf`):
+
+- **Round 333's 18-word `kt = 2, stage3, T` departure (and 13-word `S` departure) is GONE**:
+  At `kt = 2, stage3`, under both `given_nemo_entry` and `independent`, `T` has
+  `unequal = 0`, `unequal_wet = 0`, `unequal_dry = 0`, `signed_zero_only_wet = 0`,
+  `max_abs = 0.0`, `rms = 0.0` (`BIT_EXACT`, down from `18` unequal wet words,
+  `max_abs = 7.678080393702658e-12 K`, `rms = 1.2687664596813964e-14 K`), and
+  `S` has `unequal = 0`, `unequal_wet = 0`, `max_abs = 0.0`, `rms = 0.0`
+  (`BIT_EXACT`, down from `13` unequal wet words,
+  `max_abs = 2.3803181647963357e-12 psu`).
+- **Summary across all 200 rows (`kt = 1..10`, `entry/stage1/stage2/stage3`, `ssh/T/S/u/v`) for both `given_nemo_entry` and `independent`**:
+  - `BIT_EXACT`: **151 / 200** rows (up from 31 in parent `254fec16a822`). Every
+    `stage3` row for `ssh`, `T`, `S`, and `u` across `kt = 1..10`, every
+    `stage1` row for `ssh`, `T`, `S`, and `u` across `kt = 1..10`, every
+    `stage2` row for `ssh`, `S`, and `u` across `kt = 1..10`, and `stage2 T` at
+    `kt = 1..9` are `BIT_EXACT` (`0` unequal words).
+  - `AT_BAR_NOT_EXACT`: **49 / 200** rows (`48` `u`/`v` rows with
+    `unequal_wet = 0`, `max_abs = 0.0`, `rms = 0.0` consisting solely of
+    signed-zero `+0.0` vs `-0.0` and dry-mask bit differences, plus `1` single
+    1-ULP wet cell at `kt = 10, stage2, T`).
+  - `OVER_BAR`: **0 / 200** rows (down from 158 in parent `254fec16a822`).
+- **New first non-bit row (bit-level)**:
+  - `kt = 1, stage1, v` (both `given_nemo_entry` and `independent`):
+    `unequal = 7,534` (`signed_zero_only_wet = 5,550`, `unequal_dry = 1,984`,
+    `unequal_wet = 0`), `max_abs = 0.0`, `rms = 0.0`, `AT_BAR_NOT_EXACT`.
+- **New first wet-value row (`unequal_wet > 0`)**:
+  - `kt = 10, stage2, T` (both `given_nemo_entry` and `independent`):
+    `unequal = 1`, `unequal_wet = 1` out of `263,820` wet cells, at
+    `(j=18, i=34, k=3, rank=0)` (`coast = True`, `under_ice = True`,
+    `fold = False`, `seam = False`, `ice_fraction = 0.8657079645688692`),
+    `max_abs = 2.220446049250313e-16 K` (1 ULP),
+    `rms = 3.5125902029716364e-19 K`, `wet_rms = 4.3230112674073626e-19 K`,
+    `wet_normalized_max_abs = 7.349646833843343e-18 <= 1.0e-15`
+    (`AT_BAR_NOT_EXACT`). At the following checkpoint `kt = 10, stage3, T`, the
+    field returns to `BIT_EXACT` (`0` unequal words).
+- **New first `OVER_BAR` row (`kt = 1..10`)**: **`None`** (`0` `OVER_BAR` rows
+  across `kt = 1..10` under both `given_nemo_entry` and `independent`).
+
+### 6. Final gates and disposition
+
+- **Per-receipt and suite citation gates**: Re-anchored all 24
+  `ocean_model_latlon_cgrid.py` citations shifted by the 9-line addition in
+  `_tke_bottom_dirichlet` across `scripts/validate/ocean_fidelity/testcases/nemo_testcase_receipt_citation_gate.py`
+  and the ORCA2 round 331, 332, 333, and 336 receipts. Both
+  `scripts/validate/ocean_fidelity/testcases/nemo_testcase_receipt_citation_gate.py --receipt docs/ocean/fidelity/testcases/nemo_testcases_l4_orca2_round336_trazdf_operand_receipt.md --from-heading "# ORCA2 round 336 — \`tra_zdf\` operand audit and acquisition handoff"`
+  and `JAX_ENABLE_X64=1 pytest tests/ocean/fidelity/test_nemo_testcase_receipt_citation_gate.py`
+  pass with zero failures, zero unmapped citations, zero map-audit failures, and
+  all nine self-test controls firing.
+- **Default ORCA2 landing gate and private-import ratchet**: All default ORCA2
+  landing tests and `tests/test_no_private_cross_imports.py` pass on CPU under
+  `JAX_ENABLE_X64=1`.
+- **Review**: `independent review: operator`.
+- **Disposition**: **LANDED**.
