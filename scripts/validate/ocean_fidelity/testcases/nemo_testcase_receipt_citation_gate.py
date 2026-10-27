@@ -10549,6 +10549,53 @@ CITATION_MAP.update({
 })
 
 
+# --- SI3 round 21 (O8-O12 master-record scoring) ---
+FILES.update({
+    'docs/ice/fidelity/si3_r21_o8_o12_score_preregister.md': REPO / 'docs/ice/fidelity/si3_r21_o8_o12_score_preregister.md',
+    'docs/ice/fidelity/si3_r21_o8_o12_score_receipt.md': REPO / 'docs/ice/fidelity/si3_r21_o8_o12_score_receipt.md',
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py': REPO / 'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py',
+    'tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py': REPO / 'tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py',
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o16_master_gate.py': REPO / 'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o16_master_gate.py',
+})
+
+CITATION_MAP.update({
+    'docs/ice/fidelity/si3_r21_o8_o12_score_preregister.md:1-51': ['# SI3 Ladder Round 21 (`si3_r21`) — O8, O9, O10, O11, O12 Master-Record Scoring Preregistration', '- A 1-ULP change planted in one exit field of each rung (`O8` `ht_i_new`, `O9` `t_su`/`h_i`/`t_i`, `O10` `sz_i`/`t_i`, `O11` `a_i`, `O12` `v_ip`) is caught by the scorer (`unequal >= 1`, `max_ulp >= 1`, nonzero exit status), and parameter/checksum/swapped-field plants fail closed.', 51],
+    'docs/ice/fidelity/si3_r18_o8_o16_receipt.md:154-180': ['`STATUS: ADMITTED`', '| O16 | 18, 15, 16, 19, 20 | 500 | `6a3f9ed6f9330af1c65b603726c2ba407a28683f2de1b2a9dcaf9fd7dd3dc5e0` |', 27],
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1-1501': ['#!/usr/bin/env python3', 'raise SystemExit(main())', 1501],
+    'tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:1-154': ['"""Direct unit and master-record tests for the SI3 O8--O12 0-ULP scoring driver."""', (')', 48), 154],
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:296-351': ['def verify_master_admission_manifests(', ('}', 22), 56],
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:255-293': ['def parse_resolved_ice_namelist(', 'return parsed', 39],
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o16_master_gate.py:40-55': ['SCALAR_NAMES = (', (')', 5), 16],
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:455-512': ['def _verify_record_scalars_against_namelist(', (')', 164), 58],
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:629-808': ['@functools.lru_cache(maxsize=8)', ('}', 47), 180],
+    'docs/ice/fidelity/si3_r15_o8_receipt.md:1-195': ['# SI3 round 15 receipt — O8 model preparation: frazil collection bookkeeping', 'Reviews: Argon LAND; codex HOLD (production wiring) then LAND after resume 1. DECISION 173 (user: "Your pick"): O8 is admitted from the ONE shared 100-step ORCA2_SAS_ICE master record for O8-O16 (si3_ladder_design.md:205-209); no separate O8 run. The O8 acquisition therefore waits for the master-record tool.', 195],
+    'docs/ice/fidelity/si3_r16_o9_receipt.md:1-336': ['# SI3 round 16 receipt — O9 model preparation: ZDF, DH and TEMP at jpl = 5, 10 + 5 layers', 'default citation-gate test `33 passed`; private-import ratchet `6 passed`. Review of the rebase: UNREVIEWED.', 336],
+    'docs/ice/fidelity/si3_r19_o10_receipt.md:1-245': ['# SI3 Ladder Round 19 (`si3_r19`) — O10 model-preparation receipt', 'lines produced `SYMBOL-NOT-AT-LINE`, gate status `FAIL`, and exit status 1.', 245],
+    'docs/ice/fidelity/si3_r17_o11_receipt.md:1-251': ['# SI3 round 17 receipt — O11 model preparation: lateral melt (ice_thd_da)', 'Review: `codex review: operator`; GLM: not run (NO GATE).', 251],
+    'docs/ice/fidelity/si3_r20_o12_receipt.md:1-188': ['# SI3 Ladder Round 20 (`si3_r20`) — O12 model-preparation receipt', '`======================= 165 passed in 1097.07s (0:18:17) =======================`', 188],
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:859-876': ['# 1. Rung O8: Kind 1 -> Kind 2 (si3_ice_thd_frazil)', 'o8_acc.update("fraz_frac", out_o8.fraz_frac, f2["fraz_frac"], kt=kt, category=0)', 18],
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1031-1254': ['# Check Kind 21 -> Kind 3 gather for intensive/state fields', 'picard_iconv_matches += 1', 224],
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1143-1168': ['# Spot-check unpadded (npti,) JIT execution on kt == steps[0]', 'unpadded_spot_checks += 1', 26],
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1256-1276': ['# 3. Rung O10: Kind 6 -> Kind 7 (si3_ice_thd_sal) and Kind 7 -> Kind 8 (si3_ice_thd_temp)', (')', 414), 21],
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1278-1289': ['# 4. Rung O11: Kind 8 -> Kind 9 (si3_ice_thd_da)', (')', 420), 12],
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1291-1313': ['# 5. Rung O12: Kind 10 -> Kind 11 (si3_ice_thd_pnd)', (')', 434), 23],
+    'tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:21-53': ['def test_field_score_accumulator_catches_1ulp_and_signed_zero() -> None:', 'assert acc.summary()["status"] == "NON_BIT_EXACT"', 33],
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:522-612': ['class FieldScoreAccumulator:', ('}', 44), 91],
+    'tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:56-83': ['def test_master_admission_manifests_and_plants() -> None:', (')', 26), 28],
+    'tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:86-128': ['def test_score_o8_to_o12_representative_steps_0_ulp() -> None:', 'assert rungs["O12"]["score"]["first_non_bit"] is None', 43],
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:811-1415': ['def score_o8_to_o12(', ('}', 70), 605],
+    'tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:131-154': ['@pytest.mark.parametrize(', (')', 48), 24],
+    'packages/ice/legoesm/ice/bitz_lipscomb.py:2822-2840': ['def si3_ice_thd_frazil(qlead, *, rn_hinew, ln_frazil) -> SI3Frazil:', 'return SI3Frazil(ht_i_new=ht_i_new, fraz_frac=zero)', 19],
+    'packages/ice/legoesm/ice/bitz_lipscomb.py:936-1021': ['def si3_ice_thd_zdf_bl99(', 'hfx_dif, cnd_ice, t1_ice, t_si, core.iterations)', 86],
+    'packages/ice/legoesm/ice/bitz_lipscomb.py:1537-1560': ['def si3_ice_thd_dh(*, fluxes: SI3DHFluxes, rDt_ice, rn_snwblow, rn_sinew,', (')', 690), 24],
+    'packages/ice/legoesm/ice/bitz_lipscomb.py:1521-1526': ['def si3_ice_thd_temp(*, h_i, e_i, sz_i, constants: IceConstantsConfig):', 'return jnp.where((h_i > 0.0)[..., None], t, constants.T0)', 6],
+    'packages/ice/legoesm/ice/bitz_lipscomb.py:1593-1631': ['def si3_ice_thd_category_stages(*, entry: dict, fluxes: SI3DHFluxes, namelist: dict,', 'return SI3CategoryStages(zdf, dh, t_i)', 39],
+    'packages/ice/legoesm/ice/bitz_lipscomb.py:1949-1994': ['def si3_ice_thd_sal(*, h_i, t_su, t_i, sz_i, t_bo, sss, a_i, dh_i_sum,', (')', 917), 46],
+    'packages/ice/legoesm/ice/si3_thd_da.py:65-185': ['def si3_ice_thd_da(', (')', 77), 121],
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o16_master_gate.py:701-741': ['def admit(root: Path, producer: str | None = None) -> dict[str, Any]:', 'return {"status": "ADMITTED", "manifest": manifest, "projections": list(PROJECTIONS)}', 41],
+})
+
+
 DEFAULT_RECEIPT = (
     REPO / "docs/ocean/fidelity/testcases"
     / "nemo_testcases_l2_gyre_phase3_round8_receipt.md")
