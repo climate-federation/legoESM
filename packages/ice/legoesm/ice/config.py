@@ -660,7 +660,7 @@ class SI3PondConfig(NamedTuple):
 
 
 def _validate_si3_lev_pond_config(config: "SeaIceConfig") -> None:
-    """Reject combining ``ponds.scheme='si3_lev'`` with stages that do not yet carry ``h_il``/``v_il`` as NEMO does."""
+    """Reject combining ``ponds.scheme='si3_lev'`` with stages that do not yet carry ``a_ip, v_ip[, v_il]`` (``pond_area, pond_depth[, h_il]``) as NEMO does."""
     if not config.ponds.enabled:
         if config.ponds.scheme != "cesm":
             raise ValueError(
@@ -688,35 +688,37 @@ def _validate_si3_lev_pond_config(config: "SeaIceConfig") -> None:
             f"Unknown config.itd_remap={config.itd_remap!r}; expected "
             "'simple', 'lipscomb2001', or 'none'."
         )
+    pnd_qty = (
+        "a_ip, v_ip, v_il (pond_area, pond_depth, h_il)"
+        if config.ponds.namthd_pnd.ln_pnd_lids
+        else "a_ip, v_ip (pond_area, pond_depth)"
+    )
     missing_stages: list[str] = []
     if config.dynamics != "none" or config.transport != "none":
         missing_stages.append(
             f"advection (dynamics={config.dynamics!r}, transport={config.transport!r}; "
-            "NEMO rung O4 Prather advection ice_dyn_adv_pra must carry v_il)"
+            f"does not carry {pnd_qty} as NEMO rung O4 Prather advection ice_dyn_adv_pra does)"
         )
     if config.n_categories > 1 and config.itd_remap != "none":
         missing_stages.append(
-            "concentration cap (_cap_multicat_concentration; NEMO rung O6/O15 ice_cor must carry v_il)"
+            f"concentration cap (_cap_multicat_concentration; does not carry {pnd_qty} as NEMO rung O6/O15 ice_cor does)"
         )
         missing_stages.append(
-            f"ITD remap (itd_remap={config.itd_remap!r}; NEMO rung O13 ice_itd_rem must carry v_il)"
+            f"ITD remap (itd_remap={config.itd_remap!r}; does not carry {pnd_qty} as NEMO rung O13 ice_itd_rem does)"
         )
     elif config.n_categories == 1 and config.itd_remap == "lipscomb2001":
         missing_stages.append(
-            f"ITD remap (itd_remap={config.itd_remap!r}; NEMO rung O13 ice_itd_rem must carry v_il)"
+            f"ITD remap (itd_remap={config.itd_remap!r}; does not carry {pnd_qty} as NEMO rung O13 ice_itd_rem does)"
         )
     if config.ridging.enabled:
         missing_stages.append(
-            "ridging (ridging.enabled=True; NEMO rung O6 ice_dyn_rdgrft must carry v_il)"
+            f"ridging (ridging.enabled=True; does not carry {pnd_qty} as NEMO rung O6 ice_dyn_rdgrft does)"
         )
     if missing_stages:
         raise ValueError(
-            "MeltPondConfig(scheme='si3_lev', "
-            f"ln_pnd_lids={config.ponds.namthd_pnd.ln_pnd_lids}) cannot be combined "
-            "with stages that do not yet carry prognostic lid thickness/volume "
-            "(h_il/v_il) as NEMO does; missing stage(s): "
-            + "; ".join(missing_stages)
-            + ". Run thermodynamics-only O12 composition (dynamics='none', "
-            "transport='none', ridging.enabled=False, and itd_remap='none' when "
-            "n_categories > 1) until rungs O4/O6/O13 carry v_il."
+            f"MeltPondConfig(scheme='si3_lev', ln_pnd_lids={config.ponds.namthd_pnd.ln_pnd_lids}) "
+            f"cannot be combined with stages that do not yet carry {pnd_qty} as NEMO does; "
+            "missing stage(s): " + "; ".join(missing_stages) + ". Run thermodynamics-only O12 "
+            "composition (dynamics='none', transport='none', ridging.enabled=False, and "
+            f"itd_remap='none' when n_categories > 1) until rungs O4/O6/O13 carry {pnd_qty}."
         )

@@ -3411,12 +3411,14 @@ def test_si3_lev_lids_refuses_advection_concentration_cap_itd_remap_and_ridging_
         with pytest.raises(ValueError) as exc_info:
             fn()
         msg = str(exc_info.value)
+        assert "ln_pnd_lids=True" in msg
+        assert "a_ip, v_ip, v_il (pond_area, pond_depth, h_il)" in msg
         assert "advection" in msg and "O4" in msg
         assert "concentration cap" in msg
         assert "ITD remap" in msg and "O13" in msg
         assert "ridging" in msg and "O6" in msg
 
-    # 2. Each individual stage that does not carry h_il/v_il is refused at configuration time naming that stage:
+    # 2. Each individual stage that does not carry a_ip, v_ip, v_il is refused at configuration time naming that stage:
     # (a) Advection / dynamics (free_drift, evp, mevp, transport='advect') -> names advection and O4
     for cfg_adv in (
         SeaIceConfig(dynamics="free_drift", ponds=ponds_lids, ice_constants=NEMO_SI3_CONSTANTS_CONFIG),
@@ -3424,9 +3426,15 @@ def test_si3_lev_lids_refuses_advection_concentration_cap_itd_remap_and_ridging_
         SeaIceConfig(dynamics="mevp", N_mevp=4, ponds=ponds_lids, ice_constants=NEMO_SI3_CONSTANTS_CONFIG),
         SeaIceConfig(transport="advect", ponds=ponds_lids, ice_constants=NEMO_SI3_CONSTANTS_CONFIG),
     ):
-        with pytest.raises(ValueError, match=r"advection.*O4"):
+        with pytest.raises(
+            ValueError,
+            match=r"advection.*does not carry a_ip, v_ip, v_il \(pond_area, pond_depth, h_il\).*O4",
+        ):
             validate_si3_thermo_config(cfg_adv)
-        with pytest.raises(ValueError, match=r"advection.*O4"):
+        with pytest.raises(
+            ValueError,
+            match=r"advection.*does not carry a_ip, v_ip, v_il \(pond_area, pond_depth, h_il\).*O4",
+        ):
             sea_ice_mod.step_sea_ice(
                 st_1cat, forcing, ocean_sst, zeros_2d, zeros_2d, cfg_adv, U_min=1.0, dt=RDT, grid=grid
             )
@@ -3446,9 +3454,15 @@ def test_si3_lev_lids_refuses_advection_concentration_cap_itd_remap_and_ridging_
             ice_constants=NEMO_SI3_CONSTANTS_CONFIG,
         ),
     ):
-        with pytest.raises(ValueError, match=r"concentration cap.*ITD remap.*O13"):
+        with pytest.raises(
+            ValueError,
+            match=r"concentration cap.*does not carry a_ip, v_ip, v_il \(pond_area, pond_depth, h_il\).*ITD remap.*does not carry a_ip, v_ip, v_il \(pond_area, pond_depth, h_il\).*O13",
+        ):
             validate_si3_thermo_config(cfg_rem)
-        with pytest.raises(ValueError, match=r"concentration cap.*ITD remap.*O13"):
+        with pytest.raises(
+            ValueError,
+            match=r"concentration cap.*does not carry a_ip, v_ip, v_il \(pond_area, pond_depth, h_il\).*ITD remap.*does not carry a_ip, v_ip, v_il \(pond_area, pond_depth, h_il\).*O13",
+        ):
             sea_ice_mod.step_sea_ice(
                 st_5cat, forcing, ocean_sst, zeros_2d, zeros_2d, cfg_rem, U_min=1.0, dt=RDT, grid=grid
             )
@@ -3459,9 +3473,15 @@ def test_si3_lev_lids_refuses_advection_concentration_cap_itd_remap_and_ridging_
         ponds=ponds_lids,
         ice_constants=NEMO_SI3_CONSTANTS_CONFIG,
     )
-    with pytest.raises(ValueError, match=r"ITD remap.*O13"):
+    with pytest.raises(
+        ValueError,
+        match=r"ITD remap.*does not carry a_ip, v_ip, v_il \(pond_area, pond_depth, h_il\).*O13",
+    ):
         validate_si3_thermo_config(cfg_rem_1cat)
-    with pytest.raises(ValueError, match=r"ITD remap.*O13"):
+    with pytest.raises(
+        ValueError,
+        match=r"ITD remap.*does not carry a_ip, v_ip, v_il \(pond_area, pond_depth, h_il\).*O13",
+    ):
         sea_ice_mod.step_sea_ice(
             st_1cat, forcing, ocean_sst, zeros_2d, zeros_2d, cfg_rem_1cat, U_min=1.0, dt=RDT, grid=grid
         )
@@ -3474,15 +3494,24 @@ def test_si3_lev_lids_refuses_advection_concentration_cap_itd_remap_and_ridging_
         ponds=ponds_lids,
         ice_constants=NEMO_SI3_CONSTANTS_CONFIG,
     )
-    with pytest.raises(ValueError, match=r"ridging.*O6"):
+    with pytest.raises(
+        ValueError,
+        match=r"ridging.*does not carry a_ip, v_ip, v_il \(pond_area, pond_depth, h_il\).*O6",
+    ):
         validate_si3_thermo_config(cfg_rdg)
-    with pytest.raises(ValueError, match=r"ridging.*O6"):
+    with pytest.raises(
+        ValueError,
+        match=r"ridging.*does not carry a_ip, v_ip, v_il \(pond_area, pond_depth, h_il\).*O6",
+    ):
         sea_ice_mod.step_sea_ice(
             st_5cat, forcing, ocean_sst, zeros_2d, zeros_2d, cfg_rdg, U_min=1.0, dt=RDT, grid=grid
         )
 
     # 3. Defense-in-depth guards inside _cap_multicat_concentration and _pond_area_depth_from_volume:
-    with pytest.raises(ValueError, match="concentration cap"):
+    with pytest.raises(
+        ValueError,
+        match=r"concentration cap.*does not carry a_ip, v_ip, v_il \(pond_area, pond_depth, h_il\)",
+    ):
         sea_ice_mod._cap_multicat_concentration(
             st_5cat.concentration.data,
             st_5cat.h_ice.data,
@@ -3490,7 +3519,10 @@ def test_si3_lev_lids_refuses_advection_concentration_cap_itd_remap_and_ridging_
             st_5cat.pond_depth.data,
             h_il=st_5cat.h_il.data,
         )
-    with pytest.raises(ValueError, match="_pond_area_depth_from_volume"):
+    with pytest.raises(
+        ValueError,
+        match=r"_pond_area_depth_from_volume.*does not carry a_ip, v_ip, v_il \(pond_area, pond_depth, h_il\)",
+    ):
         sea_ice_mod._pond_area_depth_from_volume(
             st_1cat.pond_area.data * st_1cat.pond_depth.data * st_1cat.concentration.data,
             st_1cat.concentration.data,
@@ -3540,5 +3572,223 @@ def test_si3_lev_lids_refuses_advection_concentration_cap_itd_remap_and_ridging_
         )
     assert st_out_1.h_il is not None and float(jnp.max(st_out_1.h_il.data)) > 0.015
     assert st_out_5.h_il is not None and float(jnp.max(st_out_5.h_il.data)) > 0.015
+    assert jnp.all(jnp.isfinite(rsp_out_1.freshwater_flux))
+    assert jnp.all(jnp.isfinite(rsp_out_5.freshwater_flux))
+
+
+def test_si3_lev_lids_off_refuses_advection_concentration_cap_itd_remap_and_ridging_while_thermo_only_runs():
+    """Verify si3_lev with ln_pnd_lids=False refuses advection (O4), concentration cap + ITD remap (O13), and ridging (O6) naming a_ip, v_ip (pond_area, pond_depth), while thermo-only runs."""
+    from legoesm.grids.latlon import create_latlon_grid
+    from legoesm.ice.config import BrineConfig, RidgingConfig, validate_si3_thermo_config
+    from legoesm.ice.state import distribute_dynamic_state_to_categories
+
+    namthd_pnd_nolid = SI3PondConfig(
+        rn_himin=float(DECK_PND_NML["rn_himin"]),
+        rn_apnd_min=float(DECK_PND_NML["rn_apnd_min"]),
+        rn_apnd_max=float(DECK_PND_NML["rn_apnd_max"]),
+        rn_pnd_flush=float(DECK_PND_NML["rn_pnd_flush"]),
+        ln_pnd_lids=False,
+    )
+    assert namthd_pnd_nolid.ln_pnd_lids is False
+    ponds_nolid = MeltPondConfig(enabled=True, scheme="si3_lev", namthd_pnd=namthd_pnd_nolid)
+
+    spatial = (2, 3)
+    n_cat = 5
+    grid = create_latlon_grid(n_lat=spatial[0], n_lon=spatial[1])
+    t_cold = SeaIceConfig().T_freeze_ocean
+    st_1cat = init_dynamic_ice_state(spatial, S_ice_init=2.5, T_ice_init=t_cold, pond_scheme="si3_lev")
+    st_1cat = st_1cat._replace(
+        h_ice=st_1cat.h_ice.replace(data=jnp.full(spatial, 1.5, dtype=jnp.float64)),
+        concentration=st_1cat.concentration.replace(data=jnp.full(spatial, 0.75, dtype=jnp.float64)),
+        pond_area=st_1cat.pond_area.replace(data=jnp.full(spatial, 0.20, dtype=jnp.float64)),
+        pond_depth=st_1cat.pond_depth.replace(data=jnp.full(spatial, 0.14, dtype=jnp.float64)),
+    )
+    st_5cat = distribute_dynamic_state_to_categories(st_1cat, n_cat)
+    zeros_2d = jnp.zeros(spatial, dtype=jnp.float64)
+    forcing = AtmToSurface(
+        sw_down=zeros_2d,
+        lw_down=zeros_2d,
+        precip_total=zeros_2d,
+        precip_snow=zeros_2d,
+        T_lowest=jnp.full(spatial, t_cold, dtype=jnp.float64),
+        q_lowest=zeros_2d,
+        u_lowest=jnp.full(spatial, 2.0, dtype=jnp.float64),
+        v_lowest=jnp.full(spatial, -1.0, dtype=jnp.float64),
+        p_lowest=jnp.full(spatial, 100000.0, dtype=jnp.float64),
+        p_surface=jnp.full(spatial, 101325.0, dtype=jnp.float64),
+        rho_lowest=jnp.full(spatial, 1.25, dtype=jnp.float64),
+        cos_zenith=zeros_2d,
+        co2_ppmv=jnp.full(spatial, 400.0, dtype=jnp.float64),
+        has_radiation=zeros_2d,
+        has_precipitation=zeros_2d,
+        z_lowest=jnp.full(spatial, 10.0, dtype=jnp.float64),
+    )
+    ocean_sst = jnp.full(spatial, t_cold, dtype=jnp.float64)
+
+    # 1. Composed configuration with ln_pnd_lids=False + dynamics + advection + concentration cap + ITD remap + ridging
+    # MUST refuse at configuration time naming a_ip, v_ip (pond_area, pond_depth) and all four stages (O4, O6, O13).
+    cfg_composed_nolid = SeaIceConfig(
+        n_categories=n_cat,
+        dynamics="evp",
+        N_evp=4,
+        transport="advect",
+        itd_remap="lipscomb2001",
+        snow=SnowConfig(enabled=True),
+        brine=BrineConfig(enabled=True),
+        ridging=RidgingConfig(enabled=True),
+        ponds=ponds_nolid,
+        ice_constants=NEMO_SI3_CONSTANTS_CONFIG,
+    )
+    for fn in (
+        lambda: validate_si3_thermo_config(cfg_composed_nolid),
+        lambda: sea_ice_mod.step_sea_ice(
+            st_5cat, forcing, ocean_sst, zeros_2d, zeros_2d, cfg_composed_nolid, U_min=1.0, dt=RDT, grid=grid
+        ),
+        lambda: sea_ice_mod._step_dynamic_v2(
+            st_5cat, forcing, ocean_sst, zeros_2d, zeros_2d, cfg_composed_nolid, U_min=1.0, dt=RDT, grid=grid
+        ),
+    ):
+        with pytest.raises(ValueError) as exc_info:
+            fn()
+        msg = str(exc_info.value)
+        assert "ln_pnd_lids=False" in msg
+        assert "a_ip, v_ip (pond_area, pond_depth)" in msg
+        assert "v_il" not in msg and "h_il" not in msg
+        assert "advection" in msg and "O4" in msg
+        assert "concentration cap" in msg
+        assert "ITD remap" in msg and "O13" in msg
+        assert "ridging" in msg and "O6" in msg
+
+    # 2. Each individual stage with ln_pnd_lids=False refuses naming a_ip, v_ip (pond_area, pond_depth):
+    for cfg_adv in (
+        SeaIceConfig(dynamics="free_drift", ponds=ponds_nolid, ice_constants=NEMO_SI3_CONSTANTS_CONFIG),
+        SeaIceConfig(dynamics="evp", N_evp=4, ponds=ponds_nolid, ice_constants=NEMO_SI3_CONSTANTS_CONFIG),
+        SeaIceConfig(dynamics="mevp", N_mevp=4, ponds=ponds_nolid, ice_constants=NEMO_SI3_CONSTANTS_CONFIG),
+        SeaIceConfig(transport="advect", ponds=ponds_nolid, ice_constants=NEMO_SI3_CONSTANTS_CONFIG),
+    ):
+        with pytest.raises(
+            ValueError,
+            match=r"advection.*does not carry a_ip, v_ip \(pond_area, pond_depth\).*O4",
+        ):
+            validate_si3_thermo_config(cfg_adv)
+        with pytest.raises(
+            ValueError,
+            match=r"advection.*does not carry a_ip, v_ip \(pond_area, pond_depth\).*O4",
+        ):
+            sea_ice_mod.step_sea_ice(
+                st_1cat, forcing, ocean_sst, zeros_2d, zeros_2d, cfg_adv, U_min=1.0, dt=RDT, grid=grid
+            )
+
+    for cfg_rem in (
+        SeaIceConfig(
+            n_categories=n_cat,
+            itd_remap="lipscomb2001",
+            ponds=ponds_nolid,
+            ice_constants=NEMO_SI3_CONSTANTS_CONFIG,
+        ),
+        SeaIceConfig(
+            n_categories=n_cat,
+            itd_remap="simple",
+            ponds=ponds_nolid,
+            ice_constants=NEMO_SI3_CONSTANTS_CONFIG,
+        ),
+    ):
+        with pytest.raises(
+            ValueError,
+            match=r"concentration cap.*does not carry a_ip, v_ip \(pond_area, pond_depth\).*ITD remap.*does not carry a_ip, v_ip \(pond_area, pond_depth\).*O13",
+        ):
+            validate_si3_thermo_config(cfg_rem)
+        with pytest.raises(
+            ValueError,
+            match=r"concentration cap.*does not carry a_ip, v_ip \(pond_area, pond_depth\).*ITD remap.*does not carry a_ip, v_ip \(pond_area, pond_depth\).*O13",
+        ):
+            sea_ice_mod.step_sea_ice(
+                st_5cat, forcing, ocean_sst, zeros_2d, zeros_2d, cfg_rem, U_min=1.0, dt=RDT, grid=grid
+            )
+
+    cfg_rem_1cat = SeaIceConfig(
+        n_categories=1,
+        itd_remap="lipscomb2001",
+        ponds=ponds_nolid,
+        ice_constants=NEMO_SI3_CONSTANTS_CONFIG,
+    )
+    with pytest.raises(
+        ValueError,
+        match=r"ITD remap.*does not carry a_ip, v_ip \(pond_area, pond_depth\).*O13",
+    ):
+        validate_si3_thermo_config(cfg_rem_1cat)
+    with pytest.raises(
+        ValueError,
+        match=r"ITD remap.*does not carry a_ip, v_ip \(pond_area, pond_depth\).*O13",
+    ):
+        sea_ice_mod.step_sea_ice(
+            st_1cat, forcing, ocean_sst, zeros_2d, zeros_2d, cfg_rem_1cat, U_min=1.0, dt=RDT, grid=grid
+        )
+
+    cfg_rdg = SeaIceConfig(
+        n_categories=n_cat,
+        itd_remap="none",
+        ridging=RidgingConfig(enabled=True),
+        ponds=ponds_nolid,
+        ice_constants=NEMO_SI3_CONSTANTS_CONFIG,
+    )
+    with pytest.raises(
+        ValueError,
+        match=r"ridging.*does not carry a_ip, v_ip \(pond_area, pond_depth\).*O6",
+    ):
+        validate_si3_thermo_config(cfg_rdg)
+    with pytest.raises(
+        ValueError,
+        match=r"ridging.*does not carry a_ip, v_ip \(pond_area, pond_depth\).*O6",
+    ):
+        sea_ice_mod.step_sea_ice(
+            st_5cat, forcing, ocean_sst, zeros_2d, zeros_2d, cfg_rdg, U_min=1.0, dt=RDT, grid=grid
+        )
+
+    # 3. Thermodynamics-only O12 compositions with ln_pnd_lids=False (1-cat and 5-cat) RUN:
+    cfg_thermo_1cat_nolid = SeaIceConfig(
+        n_categories=1,
+        dynamics="none",
+        transport="none",
+        ridging=RidgingConfig(enabled=False),
+        emissivity_ice=0.0,
+        Cd_ice=0.0,
+        Ch_ice=0.0,
+        Ce_ice=0.0,
+        ocean_heat_transfer_coeff=0.0,
+        snow=SnowConfig(enabled=True, flooding=False),
+        ponds=ponds_nolid,
+        ice_constants=NEMO_SI3_CONSTANTS_CONFIG,
+    )
+    validate_si3_thermo_config(cfg_thermo_1cat_nolid)
+
+    cfg_thermo_5cat_nolid = SeaIceConfig(
+        n_categories=n_cat,
+        dynamics="none",
+        transport="none",
+        itd_remap="none",
+        ridging=RidgingConfig(enabled=False),
+        emissivity_ice=0.0,
+        Cd_ice=0.0,
+        Ch_ice=0.0,
+        Ce_ice=0.0,
+        ocean_heat_transfer_coeff=0.0,
+        snow=SnowConfig(enabled=True, flooding=False),
+        ponds=ponds_nolid,
+        ice_constants=NEMO_SI3_CONSTANTS_CONFIG,
+    )
+    validate_si3_thermo_config(cfg_thermo_5cat_nolid)
+
+    with precision_scope(PrecisionPolicy.fp64(transcendentals="libm")):
+        st_out_1, rsp_out_1 = sea_ice_mod.step_sea_ice(
+            st_1cat, forcing, ocean_sst, zeros_2d, zeros_2d, cfg_thermo_1cat_nolid, U_min=1.0, dt=RDT, grid=grid
+        )
+        st_out_5, rsp_out_5 = sea_ice_mod.step_sea_ice(
+            st_5cat, forcing, ocean_sst, zeros_2d, zeros_2d, cfg_thermo_5cat_nolid, U_min=1.0, dt=RDT, grid=grid
+        )
+    assert st_out_1.h_il is not None and float(jnp.max(jnp.abs(st_out_1.h_il.data))) == 0.0
+    assert st_out_5.h_il is not None and float(jnp.max(jnp.abs(st_out_5.h_il.data))) == 0.0
+    assert float(jnp.max(st_out_1.pond_depth.data)) < 0.14
+    assert float(jnp.max(st_out_5.pond_depth.data)) < 0.14
     assert jnp.all(jnp.isfinite(rsp_out_1.freshwater_flux))
     assert jnp.all(jnp.isfinite(rsp_out_5.freshwater_flux))

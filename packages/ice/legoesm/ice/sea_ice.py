@@ -1737,8 +1737,8 @@ def _cap_multicat_concentration(conc, h, h_snow=None, pond_depth=None, *, h_il=N
     if h_il is not None:
         raise ValueError(
             "concentration cap (_cap_multicat_concentration) cannot run with "
-            "prognostic lid thickness h_il (MeltPondConfig.scheme='si3_lev'); "
-            "NEMO rung O6/O15 ice_cor must carry v_il"
+            "MeltPondConfig.scheme='si3_lev'; does not carry a_ip, v_ip, v_il "
+            "(pond_area, pond_depth, h_il) as NEMO rung O6/O15 ice_cor does"
         )
     sum_conc = jnp.sum(conc, axis=-1, keepdims=True)
     overfill = jnp.maximum(sum_conc, 1.0)
@@ -1768,7 +1768,7 @@ def _pond_area_depth_from_volume(V_pond_per_cell, conc, config):
         raise ValueError(
             "_pond_area_depth_from_volume (CESM pond reconstruction after "
             "advection/ITD remap/ridging) cannot run with MeltPondConfig.scheme='si3_lev'; "
-            "NEMO rungs O4/O6/O13 must carry v_il"
+            "does not carry a_ip, v_ip, v_il (pond_area, pond_depth, h_il) as NEMO rungs O4/O6/O13 do"
         )
     conc_safe = jnp.maximum(conc, 1e-12)
     vol_per_ice_area = jnp.where(conc > 1e-12, V_pond_per_cell / conc_safe, 0.0)
