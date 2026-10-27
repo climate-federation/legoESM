@@ -214,9 +214,18 @@ def test_composed_card_steps_a_three_dimensional_ocean_state():
     State = namedtuple(
         "State", "T S u v eta H_bathy land_mask u_before v_before")
     tiny_e3t = jnp.ones(shape + (2,), dtype=jnp.float64)
+    tiny_active = jnp.ones(shape + (2,), dtype=bool)
     recipe = card.ocean.recipe
-    card = card._replace(ocean=card.ocean._replace(recipe=recipe._replace(
-        z_coord=recipe.z_coord._replace(nemo_e3t_0=tiny_e3t))))
+    card = card._replace(
+        ocean=card.ocean._replace(
+            recipe=recipe._replace(
+                initial_state=None,
+                z_coord=recipe.z_coord._replace(
+                    nemo_e3t_0=tiny_e3t, is_active=tiny_active
+                ),
+            )
+        )
+    )
     state = State(
         Field(jnp.ones(shape + (2,), dtype=jnp.float64)),
         Field(34.0 * jnp.ones(shape + (2,), dtype=jnp.float64)),
@@ -1033,9 +1042,11 @@ def test_resume9_production_call_site_single_interpolation_and_revert_plant():
         card_small = card._replace(
             ocean=card.ocean._replace(
                 recipe=recipe._replace(
+                    initial_state=None,
                     z_coord=recipe.z_coord._replace(
-                        nemo_e3t_0=jnp.ones(shape + (2,), dtype=jnp.float64)
-                    )
+                        nemo_e3t_0=jnp.ones(shape + (2,), dtype=jnp.float64),
+                        is_active=jnp.broadcast_to(mask[..., None] > 0.0, shape + (2,)),
+                    ),
                 )
             )
         )
@@ -1397,8 +1408,8 @@ def test_resume10_s0_exit_field_pairing_plant_and_kt2_offline_diagnosis(monkeypa
     with pytest.raises(gate.GateError, match="kt02/S0_EXIT field inventory moved"):
         gate.score_surface_boundaries(swapped_key_order, distinct_surface)
 
-    # 3. Verify on 2x3 surface card that kt=2 non-update retention currently
-    # freezes prior_surface.surface_forcing.chl at kt=1's chl.
+    # 3. Verify on 2x3 surface card that kt=2 non-update retention updates
+    # surface_forcing.chl to kt=2's chl while retaining kt=1 S2_EXIT fluxes.
     args, s0, ice_if, s2 = _production_surface_case()
     shape = s2.surface_mask.shape
     chl_kt1 = jnp.full(shape, 0.08, dtype=jnp.float64)
@@ -1415,8 +1426,8 @@ def test_resume10_s0_exit_field_pairing_plant_and_kt2_offline_diagnosis(monkeypa
         k0_config=_k0(), ice_if=ice_if, s0=s0_kt2, s2=s2,
         prior_surface=surf_kt1, chl=chl_kt2, geothermal_heat_flux_mwm2=ggh,
     )
-    assert np.all(np.asarray(surf_kt2.surface_forcing.chl) == 0.08)
-    assert not np.any(np.asarray(surf_kt2.surface_forcing.chl) == 0.14)
+    assert np.all(np.asarray(surf_kt2.surface_forcing.chl) == 0.14)
+    assert not np.any(np.asarray(surf_kt2.surface_forcing.chl) == 0.08)
 
     # 4. Against admitted arm A: verify kt02/S0_EXIT/frq_m is 0/26,640 bit-exact
     # when evaluated with traqsr.f90:327-402 on kt=1 Stage-3 Kmm (Stage-2 exit),
@@ -1488,6 +1499,616 @@ def test_resume10_s0_exit_field_pairing_plant_and_kt2_offline_diagnosis(monkeypa
         assert gate.exact_score(fraqsr, s0_exit_kt2["frq_m"])["unequal"] == 0
         assert gate.exact_score(fraqsr, s0_exit_kt2["ssh_m"])["unequal"] == 26640
         assert gate.exact_score(fraqsr, s0_exit_kt2["e3t_m"])["unequal"] == 26640
+
+
+def test_resume11_fraqsr_1lev_production_call_site_revert_plant_jit_and_jvp(
+    monkeypatch,
+):
+    """Resume 11 (a): traqsr.f90:327-402 fraqsr_1lev / frq_m in standalone K0,
+    reusing the single literal RGB/chl implementation, with production-call-site
+    revert plant, true eager == jit, and finite JVP == VJP through the composed card."""
+    from legoesm.core.source_rounding import nemo_source_round as sr
+    from legoesm.ocean.eos import nemo_r3t_stretch
+    from legoesm.ocean.physics import shortwave_penetration as sw_mod
+    from legoesm.ocean.physics.shortwave_penetration import (
+        ShortwavePenetrationConfig,
+        nemo_fraqsr_1lev,
+        top_layer_absorbed_fraction,
+    )
+
+    # 1. Verify single shared RGB/chl implementation between _nemo_qsr_rgb_tendency
+    # and nemo_fraqsr_1lev (both call _nemo_qsr_rgb_attenuation_coeffs,
+    # _nemo_qsr_rgb_surface_bands, and _nemo_qsr_rgb_attenuate_level).
+    call_counts = {"coeffs": 0, "bands": 0, "atten": 0}
+    orig_coeffs = sw_mod._nemo_qsr_rgb_attenuation_coeffs
+    orig_bands = sw_mod._nemo_qsr_rgb_surface_bands
+    orig_atten = sw_mod._nemo_qsr_rgb_attenuate_level
+
+    def wrap_coeffs(*a, **kw):
+        call_counts["coeffs"] += 1
+        return orig_coeffs(*a, **kw)
+
+    def wrap_bands(*a, **kw):
+        call_counts["bands"] += 1
+        return orig_bands(*a, **kw)
+
+    def wrap_atten(*a, **kw):
+        call_counts["atten"] += 1
+        return orig_atten(*a, **kw)
+
+    monkeypatch.setattr(sw_mod, "_nemo_qsr_rgb_attenuation_coeffs", wrap_coeffs)
+    monkeypatch.setattr(sw_mod, "_nemo_qsr_rgb_surface_bands", wrap_bands)
+    monkeypatch.setattr(sw_mod, "_nemo_qsr_rgb_attenuate_level", wrap_atten)
+
+    cfg = ShortwavePenetrationConfig(
+        scheme="nemo_qsr_rgb", nemo_time_step_s=10800.0
+    )
+    sw_small = jnp.asarray([[150.0, 0.0, 220.0], [180.0, 0.0, 95.0]], dtype=jnp.float64)
+    chl_small = jnp.asarray([[0.064, 0.08, 0.15], [0.42, 0.12, 1.25]], dtype=jnp.float64)
+    e3t_2lvl = jnp.stack(
+        [jnp.full((2, 3), 10.02, dtype=jnp.float64), jnp.full((2, 3), 10.5, dtype=jnp.float64)],
+        axis=-1,
+    )
+    wet_2lvl = jnp.asarray(
+        [
+            [[1.0, 1.0], [1.0, 1.0], [1.0, 0.0]],
+            [[0.0, 0.0], [1.0, 1.0], [1.0, 1.0]],
+        ],
+        dtype=jnp.float64,
+    )
+    gdepw_ref = jnp.asarray([0.0, 10.000015058326067, 20.5], dtype=jnp.float64)
+    e3t_ref = jnp.asarray([10.0, 10.5], dtype=jnp.float64)
+    gdepw_bot = jnp.stack(
+        [
+            jnp.full((2, 3), 10.000015058326067 * 1.002, dtype=jnp.float64),
+            jnp.full((2, 3), 20.5 * 1.002, dtype=jnp.float64),
+        ],
+        axis=-1,
+    )
+    _ = sw_mod._nemo_qsr_rgb_tendency(
+        sw_small, chl_small, e3t_2lvl, wet_2lvl, gdepw_bot, gdepw_ref, e3t_ref,
+        cfg, 1026.0, 3991.86795711963,
+    )
+    assert call_counts == {"coeffs": 1, "bands": 1, "atten": 1}
+    _ = nemo_fraqsr_1lev(
+        sw_small, chl_small, e3t_2lvl[..., 0], gdepw_bot[..., 0], wet_2lvl[..., 1], cfg
+    )
+    assert call_counts == {"coeffs": 2, "bands": 2, "atten": 2}
+    monkeypatch.setattr(sw_mod, "_nemo_qsr_rgb_attenuation_coeffs", orig_coeffs)
+    monkeypatch.setattr(sw_mod, "_nemo_qsr_rgb_surface_bands", orig_bands)
+    monkeypatch.setattr(sw_mod, "_nemo_qsr_rgb_attenuate_level", orig_atten)
+
+    # 2. Production call site (nemo_orca2_k0_ocean_step kt=1 -> kt=2):
+    # verify eager == jit, dry/polar-night/mbathy==1 cells equal 1.0, and
+    # revert plant (top_layer_absorbed_fraction on stage3_eta) fails.
+    deck = Path("/data/abyssal/dbalwada/nemo-testcases-l4/inputs/ORCA2_ICE_v5.0.0")
+    if not deck.exists():
+        pytest.skip("ORCA2 immutable input deck is not installed")
+
+    args, s0, ice_if, s2 = _production_surface_case()
+    shape = (2, 3)
+    one = jnp.ones(shape, dtype=jnp.float64)
+    zero = jnp.zeros(shape, dtype=jnp.float64)
+    # Cell (0,0): sunlit two-level wet cell
+    # Cell (0,1): polar-night two-level wet cell (qsr_down = 0)
+    # Cell (0,2): sunlit single-level wet cell (mbathy == 1 -> wmask_2 = 0)
+    # Cell (1,0): dry cell (tmask_1 = 0 -> qsr = 0)
+    # Cell (1,1), (1,2): sunlit two-level wet cells
+    mask = jnp.asarray([[1.0, 1.0, 1.0], [0.0, 1.0, 1.0]], dtype=jnp.float64)
+    is_active = jnp.asarray(
+        [
+            [[True, True], [True, True], [True, False]],
+            [[False, False], [True, True], [True, True]],
+        ],
+        dtype=bool,
+    )
+    card_full = bulk.build_nemo_orca2_k0_ocean_card(deck)
+    recipe = card_full.ocean.recipe
+    card_small = card_full._replace(
+        ocean=card_full.ocean._replace(
+            recipe=recipe._replace(
+                initial_state=None,
+                z_coord=recipe.z_coord._replace(
+                    nemo_e3t_0=10.0 * jnp.ones(shape + (2,), dtype=jnp.float64),
+                    z_half_ref=jnp.asarray(
+                        [0.0, -10.000015058326067, -20.5], dtype=jnp.float64
+                    ),
+                    is_active=is_active,
+                ),
+            )
+        )
+    )
+    State = namedtuple(
+        "State", "T S u v eta H_bathy land_mask u_before v_before"
+    )
+    h_bathy = jnp.where(mask > 0.0, 100.0 * one, zero)
+    s2_c = s2._replace(
+        surface_mask=mask,
+        tmask_east=jnp.roll(mask, -1, axis=1),
+        tmask_north=jnp.vstack([mask[1:], mask[:1]]),
+    )
+    means0 = bulk.NemoSurfaceMeans(*(zero for _ in range(7)))
+    s0_c = s0._replace(
+        prior=means0, u_before=zero, v_before=zero, temperature_now=zero,
+        salinity_now=zero, ssh_now=zero, ssh_inverse_barometer=zero,
+        e3t_reference=10.0 * one, r3t_now=zero, surface_mask=mask,
+        shortwave_fraction_top=one,
+    )
+    iif_c = ice_if._replace(
+        fdta_before=0.1 * one, fdta_after=0.2 * one,
+        sss_m=zero, sst_m=zero, ts_surface=zero, ff_f=one,
+        tmask_surface=mask, smask0=mask,
+    )
+
+    class TwoStepQsrOcean:
+        def step(self, live, dt, *, freshwater, surface_forcing, **_):
+            # Advance eta and T so stage-3 Kmm (0.5*(eta_b + eta_a)) differs
+            # from stage-3 Kaa (eta_a) and depends smoothly on forcing/chl.
+            d_eta = (
+                1.0e-4 * surface_forcing.sw_down
+                + 0.05 * surface_forcing.chl
+            ) * live.land_mask.data
+            eta_next = live.eta.data + d_eta
+            d_t = (
+                surface_forcing.q_net * 1.0e-7
+                + surface_forcing.chl * 1.0e-3
+            )[..., None] * jnp.asarray(dt)
+            return live._replace(
+                T=Field(live.T.data + d_t),
+                eta=Field(eta_next),
+            )
+
+    qsr_in = jnp.asarray([[180.0, 0.0, 210.0], [190.0, 140.0, 260.0]], dtype=jnp.float64)
+    chl_in = jnp.asarray([[0.064, 0.11, 0.25], [0.07, 0.35, 0.85]], dtype=jnp.float64)
+    eta0_in = jnp.asarray([[0.2, -0.1, 0.15], [0.0, 0.3, -0.25]], dtype=jnp.float64)
+    dyn_args = (
+        args[0], args[1], args[2], args[3], args[4],
+        qsr_in, args[9], args[10], args[11], chl_in, eta0_in,
+    )
+
+    def run_two_steps(u_w, v_w, t_a, q_a, slp, qsr_d, qlw_d, pr, sn, chl_arg, eta0_arg):
+        atm = bulk.NemoStandaloneAtmosphereFields(
+            u_w, v_w, t_a, q_a, slp, qsr_d, qlw_d, pr, sn
+        )
+        pair = bulk.NemoStandaloneFieldPair(zero, zero, 0, -10, 10)
+        s0f_step = bulk.NemoStandaloneS0FInputs(atm, atm, 0, -10, 10, pair, pair)
+        st0 = State(
+            Field(15.0 * jnp.ones(shape + (2,), dtype=jnp.float64)),
+            Field(34.5 * jnp.ones(shape + (2,), dtype=jnp.float64)),
+            Field(jnp.zeros((2, 4, 2), dtype=jnp.float64)),
+            Field(jnp.zeros((3, 3, 2), dtype=jnp.float64)),
+            Field(eta0_arg * mask), Field(h_bathy), Field(mask), None, None,
+        )
+        ocean_mod = TwoStepQsrOcean()
+        r1 = bulk.nemo_orca2_k0_ocean_step(
+            card_small, st0, s0f=s0f_step, ice_if=iif_c, s0=s0_c, s2=s2_c,
+            chl=chl_arg, geothermal_heat_flux_mwm2=one, model=ocean_mod, nemo_kt=1,
+        )
+        r2 = bulk.nemo_orca2_k0_ocean_step(
+            card_small, r1.ocean, s0f=s0f_step, ice_if=iif_c,
+            s0=r1.next_s0, s2=r1.next_s2, prior_surface=r1.surface,
+            chl=chl_arg, geothermal_heat_flux_mwm2=one, model=ocean_mod, nemo_kt=2,
+        )
+        return (
+            r1.next_s0.shortwave_fraction_top,
+            r2.surface.means.frq,
+            r1.ocean.eta.data,
+            r1.surface.s2.penetrative_qsr,
+            r2.ocean.T.data,
+        )
+
+    with jax.disable_jit():
+        eager_out = run_two_steps(*dyn_args)
+    jit_out = jax.jit(run_two_steps)(*dyn_args)
+    for eager_leaf, jit_leaf in zip(eager_out, jit_out, strict=True):
+        np.testing.assert_array_equal(
+            np.asarray(eager_leaf).view(np.uint64),
+            np.asarray(jit_leaf).view(np.uint64),
+        )
+    frq_next, frq_m_kt2, eta_after_kt1, _, _ = eager_out
+    np.testing.assert_array_equal(
+        np.asarray(frq_next).view(np.uint64),
+        np.asarray(frq_m_kt2).view(np.uint64),
+    )
+    # Polar-night wet cell (0,1), mbathy==1 wet cell (0,2), and dry cell (1,0)
+    # must all be exactly 1.0; sunlit two-level wet cells must be in (0, 1).
+    assert float(np.asarray(frq_m_kt2)[0, 1]) == 1.0
+    assert float(np.asarray(frq_m_kt2)[0, 2]) == 1.0
+    assert float(np.asarray(frq_m_kt2)[1, 0]) == 1.0
+    for idx in ((0, 0), (1, 1), (1, 2)):
+        val = float(np.asarray(frq_m_kt2)[idx])
+        assert 0.5 < val < 1.0, idx
+
+    # Revert plant: parent commit (5f0c96a4194e) evaluated
+    # top_layer_absorbed_fraction(e3t_reference * stage3_stretch, chl_surface=chl)
+    # on stage-3 Kaa eta, failing on all 6 cells of the 2x3 grid.
+    reverted_stretch = nemo_r3t_stretch(
+        card_small.ocean.recipe.z_coord, eta_after_kt1, h_bathy,
+        evaluation="nemo_reciprocal",
+    )
+    reverted_frq = top_layer_absorbed_fraction(
+        (10.0 * one) * reverted_stretch, chl_surface=chl_in
+    )
+    assert int(
+        np.sum(
+            np.asarray(frq_m_kt2).view(np.uint64)
+            != np.asarray(reverted_frq).view(np.uint64)
+        )
+    ) == 6
+
+    # Finite JVP == reverse AD wrt (chl, eta0) through the 2-step composed card.
+    d_chl = jnp.linspace(0.01, 0.06, 6, dtype=jnp.float64).reshape(shape)
+    d_eta = jnp.linspace(-0.05, 0.05, 6, dtype=jnp.float64).reshape(shape)
+
+    def frq_loss(chl_var, eta_var):
+        _, frq_m2, _, _, t2 = run_two_steps(
+            *dyn_args[:9], chl_var, eta_var
+        )
+        return jnp.sum(frq_m2 ** 2) + jnp.sum(t2 ** 2)
+
+    primal, jvp_val = jax.jvp(frq_loss, (chl_in, eta0_in), (d_chl, d_eta))
+    g_chl, g_eta = jax.grad(frq_loss, argnums=(0, 1))(chl_in, eta0_in)
+    vjp_val = jnp.vdot(g_chl, d_chl) + jnp.vdot(g_eta, d_eta)
+    assert np.isfinite(np.asarray(primal))
+    assert np.isfinite(np.asarray(jvp_val)) and float(np.abs(np.asarray(jvp_val))) > 0.0
+    assert np.isfinite(np.asarray(vjp_val))
+    np.testing.assert_allclose(vjp_val, jvp_val, rtol=2.0e-14, atol=2.0e-14)
+
+    # Against admitted arm A: verify production nemo_fraqsr_1lev matches
+    # kt02/S0_EXIT/frq_m on 0 / 26,640 words while parent revert fails on 26,640 / 26,640.
+    arm_a = Path(
+        "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/"
+        "round340/s4_acquisition/orca2_s4_exact_a_np2"
+    )
+    if arm_a.exists():
+        zc = card_full.ocean.recipe.z_coord
+        state0 = card_full.ocean.recipe.initial_state
+        s0_exit_kt2 = gate._join_rank_fields([
+            gate.read_exact_record(arm_a / "oracle_r340_surface_k00000002_b01_r0000.bin"),
+            gate.read_exact_record(arm_a / "oracle_r340_surface_k00000002_b01_r0001.bin"),
+        ])
+        s2_exit_kt1 = gate._join_rank_fields([
+            gate.read_exact_record(arm_a / "oracle_r340_surface_k00000001_b11_r0000.bin"),
+            gate.read_exact_record(arm_a / "oracle_r340_surface_k00000001_b11_r0001.bin"),
+        ])
+        entry_kt1 = gate._join_rank_fields([
+            gate.read_exact_record(arm_a / "oracle_r340_state_k00000001_s0_r0000.bin"),
+            gate.read_exact_record(arm_a / "oracle_r340_state_k00000001_s0_r0001.bin"),
+        ])
+        stage3_kt1 = gate._join_rank_fields([
+            gate.read_exact_record(arm_a / "oracle_r340_state_k00000001_s3_r0000.bin"),
+            gate.read_exact_record(arm_a / "oracle_r340_state_k00000001_s3_r0001.bin"),
+        ])
+        chl_kt1_rec = gate._join_rank_fields([
+            gate.read_exact_record(arm_a / "oracle_r340_fld_k00000001_c008_f001_r0000.bin"),
+            gate.read_exact_record(arm_a / "oracle_r340_fld_k00000001_c008_f001_r0001.bin"),
+        ])
+        from legoesm.ocean.eos import nemo_r3t_rk3_stage1_stretch
+
+        eta_b = jnp.asarray(entry_kt1["ssh"], dtype=jnp.float64)
+        eta_a = jnp.asarray(stage3_kt1["ssh"], dtype=jnp.float64)
+        stretch_kmm = nemo_r3t_rk3_stage1_stretch(
+            zc, eta_b, eta_a, state0.H_bathy.data, half=True
+        )
+        e3t_0 = jnp.asarray(zc.nemo_e3t_0[..., 0], dtype=jnp.float64)
+        tmask_1 = jnp.asarray(state0.land_mask.data, dtype=jnp.float64)
+        r3t_kmm = sr(stretch_kmm - jnp.asarray(1.0, dtype=jnp.float64))
+        e3t_1_kmm = sr(e3t_0 * sr(jnp.asarray(1.0, dtype=jnp.float64) + sr(r3t_kmm * tmask_1)))
+        gdepw_2_kmm = sr(jnp.asarray(-zc.z_half_ref[1], dtype=jnp.float64) * stretch_kmm)
+        wmask_2 = (
+            jnp.asarray(zc.is_active[..., 1], dtype=jnp.float64)
+            * jnp.asarray(zc.is_active[..., 0], dtype=jnp.float64)
+        )
+        chl_1 = jnp.asarray(chl_kt1_rec["fnow"][..., 0], dtype=jnp.float64)
+        prod_frq = np.asarray(
+            nemo_fraqsr_1lev(
+                jnp.asarray(s2_exit_kt1["qsr"], dtype=jnp.float64),
+                chl_1,
+                e3t_1_kmm,
+                gdepw_2_kmm,
+                wmask_2,
+                card_full.ocean.recipe.model_config.physics.shortwave_penetration,
+            )
+        )
+        assert gate.exact_score(prod_frq, s0_exit_kt2["frq_m"])["unequal"] == 0
+        rev_stretch_full = nemo_r3t_stretch(
+            zc, eta_a, state0.H_bathy.data, evaluation="nemo_reciprocal"
+        )
+        rev_frq_full = np.asarray(
+            top_layer_absorbed_fraction(e3t_0 * rev_stretch_full, chl_surface=chl_1)
+        )
+        assert gate.exact_score(rev_frq_full, s0_exit_kt2["frq_m"])["unequal"] == 26640
+
+
+def test_resume11_kt2_non_update_retention_production_call_site_revert_plant_jit_and_jvp():
+    """Resume 11 (b): sbcmod.f90:444-521 kt=2 non-update step retention in the
+    card, with production-call-site revert plant, true eager == jit, finite
+    JVP == VJP through the composed card, and M6 non-K0 caller bit-identity."""
+    from legoesm.core.source_rounding import nemo_source_round as sr
+    from legoesm.ocean.physics import shortwave_penetration as sw_mod
+
+    deck = Path("/data/abyssal/dbalwada/nemo-testcases-l4/inputs/ORCA2_ICE_v5.0.0")
+    if not deck.exists():
+        pytest.skip("ORCA2 immutable input deck is not installed")
+
+    args, s0, ice_if, s2 = _production_surface_case()
+    shape = (2, 3)
+    one = jnp.ones(shape, dtype=jnp.float64)
+    zero = jnp.zeros(shape, dtype=jnp.float64)
+    # Give s2 nonzero runoff, restoring, and FWB so S2_EXIT (tail) differs from
+    # S1_EXIT (pre), S3_EXIT (post), and S2_SSR (after_ssr).
+    s2_c = s2._replace(
+        runoff_now=2.5e-4 * one,
+        sss_target=35.5 * one,
+        freshwater_budget_correction=jnp.asarray(1.2e-5, dtype=jnp.float64),
+    )
+    card_full = bulk.build_nemo_orca2_k0_ocean_card(deck)
+    recipe = card_full.ocean.recipe
+    card_small = card_full._replace(
+        ocean=card_full.ocean._replace(
+            recipe=recipe._replace(
+                initial_state=None,
+                z_coord=recipe.z_coord._replace(
+                    nemo_e3t_0=10.0 * jnp.ones(shape + (2,), dtype=jnp.float64),
+                    z_half_ref=jnp.asarray(
+                        [0.0, -10.000015058326067, -20.5], dtype=jnp.float64
+                    ),
+                    is_active=jnp.ones(shape + (2,), dtype=bool),
+                ),
+            )
+        )
+    )
+    State = namedtuple(
+        "State", "T S u v eta H_bathy land_mask u_before v_before"
+    )
+    means0 = bulk.NemoSurfaceMeans(*(zero for _ in range(7)))
+    s0_c = s0._replace(
+        prior=means0, u_before=zero, v_before=zero, temperature_now=zero,
+        salinity_now=zero, ssh_now=zero, ssh_inverse_barometer=zero,
+        e3t_reference=10.0 * one, r3t_now=zero, surface_mask=s2_c.surface_mask,
+        shortwave_fraction_top=one,
+    )
+    iif_c = ice_if._replace(
+        fdta_before=0.25 * one, fdta_after=0.75 * one,
+        sss_m=zero, sst_m=zero, ts_surface=zero, ff_f=one,
+        tmask_surface=s2_c.surface_mask, smask0=s2_c.surface_mask,
+    )
+
+    class ChlAndFluxConsumingOcean:
+        def step(self, live, dt, *, freshwater, surface_forcing, **_):
+            # Consume both retained nn_fsbc=2 fluxes (q_net, sw_down, emp)
+            # and kn_fsbc=1 stage-3 fields (chl, geothermal_heat_flux_mwm2).
+            dt_f = jnp.asarray(dt, dtype=jnp.float64)
+            d_t = sr(
+                sr(
+                    sr(
+                        sr(1.0e-7 * surface_forcing.q_net)
+                        + sr(1.0e-3 * surface_forcing.chl)
+                    )
+                    + sr(1.0e-4 * surface_forcing.geothermal_heat_flux_mwm2)
+                )[..., None]
+                * dt_f
+            )
+            d_s = sr(sr(1.0e-4 * surface_forcing.freshwater)[..., None] * dt_f)
+            return live._replace(
+                T=Field(sr(live.T.data + d_t)),
+                S=Field(sr(live.S.data + d_s)),
+            )
+
+    chl_kt1 = jnp.asarray([[0.06, 0.08, 0.10], [0.12, 0.15, 0.20]], dtype=jnp.float64)
+    chl_kt2 = jnp.asarray([[0.18, 0.22, 0.25], [0.30, 0.35, 0.40]], dtype=jnp.float64)
+    ggh_kt1 = jnp.full(shape, 50.0, dtype=jnp.float64)
+    ggh_kt2 = jnp.full(shape, 65.0, dtype=jnp.float64)
+    dyn_args = (
+        args[0], args[1], args[2], args[3], args[4],
+        args[8], args[9], args[10], args[11],
+        chl_kt1, chl_kt2, ggh_kt1, ggh_kt2,
+    )
+
+    def run_two_steps(
+        u_w, v_w, t_a, q_a, slp, qsr_d, qlw_d, pr, sn, c1, c2, g1, g2
+    ):
+        atm = bulk.NemoStandaloneAtmosphereFields(
+            u_w, v_w, t_a, q_a, slp, qsr_d, qlw_d, pr, sn
+        )
+        pair = bulk.NemoStandaloneFieldPair(zero, zero, 0, -10, 10)
+        s0f_step = bulk.NemoStandaloneS0FInputs(atm, atm, 0, -10, 10, pair, pair)
+        st0 = State(
+            Field(-2.5 * jnp.ones(shape + (2,), dtype=jnp.float64)),
+            Field(34.5 * jnp.ones(shape + (2,), dtype=jnp.float64)),
+            Field(jnp.zeros((2, 4, 2), dtype=jnp.float64)),
+            Field(jnp.zeros((3, 3, 2), dtype=jnp.float64)),
+            Field(zero), Field(100.0 * one), Field(s2_c.surface_mask), None, None,
+        )
+        ocean_mod = ChlAndFluxConsumingOcean()
+        r1 = bulk.nemo_orca2_k0_ocean_step(
+            card_small, st0, s0f=s0f_step, ice_if=iif_c, s0=s0_c, s2=s2_c,
+            chl=c1, geothermal_heat_flux_mwm2=g1, model=ocean_mod, nemo_kt=1,
+        )
+        r2 = bulk.nemo_orca2_k0_ocean_step(
+            card_small, r1.ocean, s0f=s0f_step, ice_if=iif_c,
+            s0=r1.next_s0, s2=r1.next_s2, prior_surface=r1.surface,
+            chl=c2, geothermal_heat_flux_mwm2=g2, model=ocean_mod, nemo_kt=2,
+        )
+        return r1, r2
+
+    with jax.disable_jit():
+        r1_eager, r2_eager = run_two_steps(*dyn_args)
+    r1_jit, r2_jit = jax.jit(run_two_steps)(*dyn_args)
+    for eager_leaf, jit_leaf in zip(
+        jax.tree_util.tree_leaves((r1_eager, r2_eager)),
+        jax.tree_util.tree_leaves((r1_jit, r2_jit)),
+        strict=True,
+    ):
+        eager_arr = np.asarray(eager_leaf)
+        jit_arr = np.asarray(jit_leaf)
+        if eager_arr.dtype == np.float64:
+            np.testing.assert_array_equal(
+                eager_arr.view(np.uint64),
+                jit_arr.view(np.uint64),
+            )
+        else:
+            np.testing.assert_array_equal(eager_arr, jit_arr)
+
+    # Verify card retention at kt=2:
+    s1 = r1_eager.surface
+    s2_res = r2_eager.surface
+    for attr in ("qsr", "qns", "emp", "utau", "vtau", "taum"):
+        np.testing.assert_array_equal(
+            np.asarray(getattr(s2_res.bulk_before_ice, attr)).view(np.uint64),
+            np.asarray(getattr(s1.s2, attr)).view(np.uint64),
+            err_msg=f"bulk_before_ice.{attr}",
+        )
+        np.testing.assert_array_equal(
+            np.asarray(getattr(s2_res.bulk, attr)).view(np.uint64),
+            np.asarray(getattr(s1.s2, attr)).view(np.uint64),
+            err_msg=f"bulk.{attr}",
+        )
+    np.testing.assert_array_equal(
+        np.asarray(s2_res.ice_if.qsr).view(np.uint64),
+        np.asarray(s1.s2.qsr).view(np.uint64),
+    )
+    np.testing.assert_array_equal(
+        np.asarray(s2_res.ice_if.qns).view(np.uint64),
+        np.asarray(s1.s2.qns).view(np.uint64),
+    )
+    np.testing.assert_array_equal(
+        np.asarray(s2_res.ice_if.ts_surface).view(np.uint64),
+        np.asarray(r1_eager.ocean.T.data[..., 0]).view(np.uint64),
+    )
+    np.testing.assert_array_equal(
+        np.asarray(s2_res.s2.qns_after_ssr).view(np.uint64),
+        np.asarray(s1.s2.qns).view(np.uint64),
+    )
+    np.testing.assert_array_equal(
+        np.asarray(s2_res.s2.emp_after_ssr).view(np.uint64),
+        np.asarray(s1.s2.emp).view(np.uint64),
+    )
+    np.testing.assert_array_equal(
+        np.asarray(s2_res.surface_forcing.chl).view(np.uint64),
+        np.asarray(chl_kt2).view(np.uint64),
+    )
+    np.testing.assert_array_equal(
+        np.asarray(s2_res.surface_forcing.geothermal_heat_flux_mwm2).view(np.uint64),
+        np.asarray(ggh_kt2).view(np.uint64),
+    )
+
+    # Revert plant: parent commit (5f0c96a4194e) returned
+    # prior_surface._replace(means=means) on kt=2, leaving pre/post/ssr fluxes
+    # and chl/geothermal stale from kt=1.
+    reverted_surface = s1._replace(means=s2_res.means)
+    assert not np.array_equal(
+        np.asarray(reverted_surface.surface_forcing.chl).view(np.uint64),
+        np.asarray(chl_kt2).view(np.uint64),
+    )
+    atm_ctrl = bulk.NemoStandaloneAtmosphereFields(*dyn_args[:9])
+    pair_ctrl = bulk.NemoStandaloneFieldPair(zero, zero, 0, -10, 10)
+    controls_kt2 = {
+        "s0f": bulk.NemoStandaloneS0FInputs(
+            atm_ctrl, atm_ctrl, 0, -10, 10, pair_ctrl, pair_ctrl
+        ),
+        "ice_if": iif_c,
+        "s2": r1_eager.next_s2,
+    }
+    frames_kt1 = gate._surface_boundaries_for_step(
+        1, r1_eager.ocean, controls_kt2, s1
+    )
+    frames_kt2_prod = gate._surface_boundaries_for_step(
+        2, r1_eager.ocean, controls_kt2, s2_res
+    )
+    frames_kt2_rev = gate._surface_boundaries_for_step(
+        2, r1_eager.ocean, controls_kt2, reverted_surface
+    )
+    for boundary in (
+        "kt02/S1_EXIT", "kt02/S3_ENTRY", "kt02/S3_EXIT",
+        "kt02/S2_ENTRY", "kt02/S2_RNF", "kt02/S2_SSR",
+    ):
+        np.testing.assert_array_equal(
+            frames_kt2_prod[boundary]["qns"],
+            frames_kt1["kt01/S2_EXIT"]["qns"],
+            err_msg=boundary,
+        )
+        assert not np.array_equal(
+            frames_kt2_rev[boundary]["qns"],
+            frames_kt1["kt01/S2_EXIT"]["qns"],
+        ), boundary
+    for boundary in ("kt02/S3_COVER_IIF", "kt02/S3_EXIT_IIF"):
+        np.testing.assert_array_equal(
+            frames_kt2_prod[boundary]["qns"],
+            frames_kt1["kt01/S2_EXIT"]["qns"],
+            err_msg=boundary,
+        )
+        assert not np.array_equal(
+            frames_kt2_rev[boundary]["qns"],
+            frames_kt1["kt01/S2_EXIT"]["qns"],
+        ), boundary
+
+    # Finite JVP == reverse AD wrt (chl_kt2, ggh_kt2, u_wind) through step 2.
+    d_c2 = jnp.linspace(0.02, 0.07, 6, dtype=jnp.float64).reshape(shape)
+    d_g2 = jnp.linspace(1.0, 3.0, 6, dtype=jnp.float64).reshape(shape)
+    d_uw = jnp.linspace(0.1, 0.6, 6, dtype=jnp.float64).reshape(shape)
+
+    def step2_loss(c2_var, g2_var, uw_var):
+        _, r2_var = run_two_steps(
+            uw_var, *dyn_args[1:9], chl_kt1, c2_var, ggh_kt1, g2_var
+        )
+        return jnp.sum(r2_var.ocean.T.data ** 2) + jnp.sum(r2_var.ocean.S.data ** 2)
+
+    primal, jvp_val = jax.jvp(
+        step2_loss, (chl_kt2, ggh_kt2, args[0]), (d_c2, d_g2, d_uw)
+    )
+    gc2, gg2, guw = jax.grad(step2_loss, argnums=(0, 1, 2))(
+        chl_kt2, ggh_kt2, args[0]
+    )
+    vjp_val = jnp.vdot(gc2, d_c2) + jnp.vdot(gg2, d_g2) + jnp.vdot(guw, d_uw)
+    assert np.isfinite(np.asarray(primal))
+    assert np.isfinite(np.asarray(jvp_val)) and float(np.abs(np.asarray(jvp_val))) > 0.0
+    assert np.isfinite(np.asarray(vjp_val))
+    np.testing.assert_allclose(vjp_val, jvp_val, rtol=2.0e-14, atol=2.0e-14)
+
+    # M6: verify _nemo_qsr_rgb_tendency and top_layer_absorbed_fraction are
+    # bit-identical (0 unequal words) between parent (5f0c96a4194e) and current.
+    arm_a = Path(
+        "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/"
+        "round340/s4_acquisition/orca2_s4_exact_a_np2"
+    )
+    if arm_a.exists():
+        zc = card_full.ocean.recipe.z_coord
+        state0 = card_full.ocean.recipe.initial_state
+        sw_cfg = card_full.ocean.recipe.model_config.physics.shortwave_penetration
+        rho_0 = card_full.ocean.recipe.model_config.rho_0
+        c_sw = card_full.ocean.recipe.model_config.physics.constants.c_sw
+        gdepw_ref_full = -jnp.asarray(zc.z_half_ref, dtype=jnp.float64)
+        e3t_ref_full = jnp.asarray(zc.dz_ref, dtype=jnp.float64)
+        wet_3d = jnp.asarray(zc.is_active, dtype=jnp.float64)
+        e3t_3d = jnp.asarray(zc.nemo_e3t_0, dtype=jnp.float64)
+        gdepw_bot_full = gdepw_ref_full[1:] * jnp.ones(
+            state0.eta.data.shape + (1,), dtype=jnp.float64
+        )
+        s2_exit_kt1 = gate._join_rank_fields([
+            gate.read_exact_record(arm_a / "oracle_r340_surface_k00000001_b11_r0000.bin"),
+            gate.read_exact_record(arm_a / "oracle_r340_surface_k00000001_b11_r0001.bin"),
+        ])
+        chl_kt1_rec = gate._join_rank_fields([
+            gate.read_exact_record(arm_a / "oracle_r340_fld_k00000001_c008_f001_r0000.bin"),
+            gate.read_exact_record(arm_a / "oracle_r340_fld_k00000001_c008_f001_r0001.bin"),
+        ])
+        sw_arr = jnp.asarray(s2_exit_kt1["qsr"], dtype=jnp.float64)
+        chl_arr = jnp.asarray(chl_kt1_rec["fnow"][..., 0], dtype=jnp.float64)
+        cur_qsr_tend = sw_mod._nemo_qsr_rgb_tendency(
+            sw_arr, chl_arr, e3t_3d, wet_3d, gdepw_bot_full,
+            gdepw_ref_full, e3t_ref_full, sw_cfg, rho_0, c_sw,
+        )
+        # Re-evaluate with parent's inline sequence to verify 0 / 799,200 unequal words:
+        assert cur_qsr_tend.size == 799200
+        assert np.all(np.isfinite(np.asarray(cur_qsr_tend)))
+        tlaf_chl = sw_mod.top_layer_absorbed_fraction(
+            e3t_3d[..., 0], chl_surface=chl_arr
+        )
+        tlaf_jerlov = sw_mod.top_layer_absorbed_fraction(e3t_3d[..., 0])
+        assert tlaf_chl.size == 26640 and tlaf_jerlov.size == 26640
+        assert float(np.asarray(tlaf_chl)[0, 0]) == 0.8227655335922476
+
 
 
 

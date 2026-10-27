@@ -1064,24 +1064,43 @@ def nemo_orca2_k0_ocean_step(
         kwargs["sponge"] = sponge
     kwargs["nemo_kt"] = int(nemo_kt)
     stepped = model.step(state, card.ocean.dt_s, **kwargs)
-    # traqsr.F90:400-401 replaces fraqsr_1lev during stage 3.  sbc_ssm on
-    # the next step consumes that carried value; at cold start the deck
-    # initializes it to one (traqsr.F90:1288-1293).  Re-evaluate the shared
-    # RGB kernel on the actual stage-3 Kmm thickness, never on step entry.
+    # traqsr.f90:327-402 replaces fraqsr_1lev during stage 3 with Kmm = Nnn
+    # (stage-2 exit r1_2 * (r3t(Kbb) + r3ta), stprk3_stg.f90:215,525),
+    # gdepw_1d(2) * (1 + r3t(Kmm)), e3t_3d(1) * (1 + r3t(Kmm) * tmask(1)),
+    # wmask(2), and WHERE(qsr /= 0) 1 - zeT/qsr ELSEWHERE 1.  sbc_ssm on the
+    # next step consumes that carried value; at cold start the deck
+    # initializes it to one (traqsr.f90:1289-1293).
+    from legoesm.ocean.eos import nemo_r3t_rk3_stage1_stretch
+    from legoesm.ocean.physics.shortwave_penetration import nemo_fraqsr_1lev
+
     state_after = stepped.state_after if hasattr(stepped, "state_after") else stepped
-    if hasattr(stepped, "stage_outputs"):
-        stage3_eta = stepped.stage_outputs[-1][4]
-    else:
-        stage3_eta = state_after.eta.data
-    stage3_stretch = nemo_r3t_stretch(
-        card.ocean.recipe.z_coord, stage3_eta, state.H_bathy.data,
-        evaluation="nemo_reciprocal",
+    z_coord = card.ocean.recipe.z_coord
+    stage3_kmm_stretch = nemo_r3t_rk3_stage1_stretch(
+        z_coord,
+        state.eta.data,
+        state_after.eta.data,
+        state.H_bathy.data,
+        half=True,
     )
-    from legoesm.ocean.physics.shortwave_penetration import (
-        top_layer_absorbed_fraction,
+    tmask_1 = jnp.asarray(state.land_mask.data, dtype=jnp.float64)
+    r3t_kmm = R(stage3_kmm_stretch - jnp.asarray(1.0, dtype=jnp.float64))
+    e3t_1_kmm = R(
+        e3t_reference
+        * R(jnp.asarray(1.0, dtype=jnp.float64) + R(r3t_kmm * tmask_1))
     )
-    next_shortwave_fraction = top_layer_absorbed_fraction(
-        e3t_reference * stage3_stretch, chl_surface=chl,
+    gdepw_1d_2 = jnp.asarray(-z_coord.z_half_ref[1], dtype=jnp.float64)
+    gdepw_2_kmm = R(gdepw_1d_2 * stage3_kmm_stretch)
+    wmask_2 = (
+        jnp.asarray(z_coord.is_active[..., 1], dtype=jnp.float64)
+        * jnp.asarray(z_coord.is_active[..., 0], dtype=jnp.float64)
+    )
+    next_shortwave_fraction = nemo_fraqsr_1lev(
+        surface.s2.penetrative_qsr,
+        _crop_to_surface_interior(chl, e3t_reference.shape),
+        e3t_1_kmm,
+        gdepw_2_kmm,
+        wmask_2,
+        card.ocean.recipe.model_config.physics.shortwave_penetration,
     )
     next_s0 = s0._replace(
         prior=surface.means,
@@ -1262,7 +1281,75 @@ def nemo_blk_oce_ncar(
             if prior_surface is None:
                 raise ValueError(
                     "nn_fsbc=2 preservation step requires prior_surface carry")
-            return prior_surface._replace(means=means)
+            tail_prior = prior_surface.s2
+            bulk_prior = prior_surface.bulk
+            pre_prior = prior_surface.bulk_before_ice
+            iif_prior = prior_surface.ice_if
+            ts_now = (
+                None
+                if ice_if is None
+                else jnp.asarray(ice_if.ts_surface, dtype=jnp.float64)
+            )
+            sst_c_now = jnp.asarray(sst_c, dtype=jnp.float64)
+            ssu_now = jnp.asarray(ssu, dtype=jnp.float64)
+            ssv_now = jnp.asarray(ssv, dtype=jnp.float64)
+            retained_pre = pre_prior._replace(
+                sst=sst_c_now,
+                ssu=ssu_now,
+                ssv=ssv_now,
+                qsr=tail_prior.qsr,
+                qns=tail_prior.qns,
+                emp=tail_prior.emp,
+                utau=tail_prior.utau,
+                vtau=tail_prior.vtau,
+                taum=tail_prior.taum,
+                wndm=bulk_prior.wndm,
+            )
+            retained_iif = (
+                None
+                if iif_prior is None
+                else iif_prior._replace(
+                    ts_surface=ts_now,
+                    qsr=tail_prior.qsr,
+                    qns=tail_prior.qns,
+                )
+            )
+            retained_bulk = bulk_prior._replace(
+                sst=sst_c_now,
+                ssu=ssu_now,
+                ssv=ssv_now,
+                qsr=tail_prior.qsr,
+                qns=tail_prior.qns,
+                emp=tail_prior.emp,
+                utau=tail_prior.utau,
+                vtau=tail_prior.vtau,
+                taum=tail_prior.taum,
+                ts_surface=ts_now,
+                fr_i=(None if retained_iif is None else retained_iif.fr_i),
+            )
+            retained_s2 = tail_prior._replace(
+                qns_after_ssr=tail_prior.qns,
+                emp_after_ssr=tail_prior.emp,
+            )
+            retained_forcing = prior_surface.surface_forcing
+            if retained_forcing is not None:
+                retained_forcing = retained_forcing._replace(
+                    chl=R(_crop_to_surface_interior(chl, interior_shape)),
+                    geothermal_heat_flux_mwm2=R(
+                        _crop_to_surface_interior(
+                            geothermal_heat_flux_mwm2, interior_shape
+                        )
+                    ),
+                )
+            return NemoStandaloneSurfaceResult(
+                means=means,
+                bulk=retained_bulk,
+                s2=retained_s2,
+                surface_forcing=retained_forcing,
+                freshwater_forcing=prior_surface.freshwater_forcing,
+                bulk_before_ice=retained_pre,
+                ice_if=retained_iif,
+            )
     wet = jnp.asarray(mask, dtype=jnp.float64)
     sst_c_arr = jnp.asarray(sst_c, dtype=jnp.float64)
     state = _nemo_ncar_turbulent(

@@ -634,11 +634,14 @@ def test_production_binding_and_existing_top_cell_runoff_path(monkeypatch):
 
 
 def test_literal_physical_inputs_have_no_defaults():
+    from legoesm.ocean.physics.shortwave_penetration import nemo_fraqsr_1lev
+
     functions = (
         nemo_fld_model_time,
         nemo_fld_time_interpolate,
         nemo_sbc_ssm_step,
         nemo_orca2_s2,
+        nemo_fraqsr_1lev,
     )
     for function in functions:
         for parameter in inspect.signature(function).parameters.values():

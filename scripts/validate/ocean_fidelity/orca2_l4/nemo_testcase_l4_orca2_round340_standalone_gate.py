@@ -967,22 +967,32 @@ def _surface_boundaries_for_step(kt, state_before, controls, surface):
         )
         return values
 
-    prior_runoff = NemoRunoffSurface(
-        prior_s2.prior_runoff_mass,
-        prior_s2.prior_runoff_temperature_content,
-        prior_s2.prior_runoff_salinity_content,
+    prior_runoff = (
+        NemoRunoffSurface(
+            prior_s2.prior_runoff_mass,
+            prior_s2.prior_runoff_temperature_content,
+            prior_s2.prior_runoff_salinity_content,
+        )
+        if kt % 2
+        else tail.runoff
+    )
+    prior_erp = (
+        prior_s2.prior_restoring_volume_flux if kt % 2 else tail.erp
+    )
+    prior_qrp = (
+        prior_s2.prior_restoring_heat_flux if kt % 2 else tail.qrp
+    )
+    prior_coef = (
+        prior_s2.prior_restoring_coefficient
+        if kt % 2
+        else tail.restoring_coefficient
     )
     pre_values = outer(pre, fr_i=zero, runoff=prior_runoff,
-                       erp=prior_s2.prior_restoring_volume_flux,
-                       qrp=prior_s2.prior_restoring_heat_flux,
-                       coefficient=prior_s2.prior_restoring_coefficient)
+                       erp=prior_erp, qrp=prior_qrp, coefficient=prior_coef)
     post_values = outer(post, runoff=prior_runoff,
-                        erp=prior_s2.prior_restoring_volume_flux,
-                        qrp=prior_s2.prior_restoring_heat_flux,
-                        coefficient=prior_s2.prior_restoring_coefficient)
-    rnf_values = outer(post, erp=prior_s2.prior_restoring_volume_flux,
-                       qrp=prior_s2.prior_restoring_heat_flux,
-                       coefficient=prior_s2.prior_restoring_coefficient)
+                        erp=prior_erp, qrp=prior_qrp, coefficient=prior_coef)
+    rnf_values = outer(post, erp=prior_erp, qrp=prior_qrp,
+                       coefficient=prior_coef)
     ssr_flux = post._replace(qns=tail.qns_after_ssr, emp=tail.emp_after_ssr)
     ssr_values = outer(ssr_flux)
     final_flux = post._replace(qns=tail.qns, emp=tail.emp)
@@ -991,21 +1001,11 @@ def _surface_boundaries_for_step(kt, state_before, controls, surface):
     exit_values = outer(final_flux, use_lbc=True, include_uv=True)
 
     result = {}
-    if kt % 2:
-        outer_values = {
-            0: {}, 1: mean_fields, 2: mean_fields, 3: pre_values, 4: pre_values,
-            5: post_values, 6: post_values, 7: rnf_values, 8: ssr_values,
-            9: fwb_values, 10: lbc_values, 11: exit_values,
-        }
-    else:
-        # sbcmod.f90:444-521 skips MOD(kt-1, nn_fsbc) == 0 updates on even kt,
-        # retaining kt-1 S2_EXIT (tail) values across kid=3..10 before
-        # recomputing utauU/vtauV at kid=11 (sbcmod.f90:568-569).
-        outer_values = {
-            0: {}, 1: mean_fields, 2: mean_fields, 3: lbc_values, 4: lbc_values,
-            5: lbc_values, 6: lbc_values, 7: lbc_values, 8: lbc_values,
-            9: lbc_values, 10: lbc_values, 11: exit_values,
-        }
+    outer_values = {
+        0: {}, 1: mean_fields, 2: mean_fields, 3: pre_values, 4: pre_values,
+        5: post_values, 6: post_values, 7: rnf_values, 8: ssr_values,
+        9: fwb_values, 10: lbc_values, 11: exit_values,
+    }
     for kid, boundary in OUTER_BOUNDARIES.items():
         result[f"kt{kt:02d}/{boundary}"] = _ordered_fields(
             OUTER_FIELDS_BY_KID[kid], outer_values[kid])
@@ -1038,9 +1038,9 @@ def _surface_boundaries_for_step(kt, state_before, controls, surface):
     common = {
         "sss_m": means.sss, "sst_m": means.sst,
         "ff_f": ice_inputs.ff_f, "tmask": ice_inputs.tmask_surface,
-        "emp": post.emp if kt % 2 else tail.emp,
-        "utau": post.utau if kt % 2 else tail.utau,
-        "vtau": post.vtau if kt % 2 else tail.vtau,
+        "emp": post.emp,
+        "utau": post.utau,
+        "vtau": post.vtau,
         "ice_cover": iif.ice_cover, "sfx": tail.sfx,
         "taum": post.taum, "wndm": post.wndm, "smask0": ice_inputs.smask0,
     }
@@ -1051,8 +1051,8 @@ def _surface_boundaries_for_step(kt, state_before, controls, surface):
             ts_kbb=ts_before if kid < 2 else ts_after,
             ts_kmm=ts_before if kid < 2 else ts_after,
             fr_i=(iif.freezing_temperature if kid in (1, 2) else iif.fr_i),
-            qsr=(pre.qsr if kid < 3 else post.qsr) if kt % 2 else post.qsr,
-            qns=(pre.qns if kid < 3 else post.qns) if kt % 2 else tail.qns,
+            qsr=pre.qsr if kid < 3 else post.qsr,
+            qns=pre.qns if kid < 3 else post.qns,
         )
         boundary = f"{IIF_BOUNDARIES[kid]}_IIF"
         result[f"kt{kt:02d}/{boundary}"] = _ordered_fields(

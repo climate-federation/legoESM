@@ -451,6 +451,103 @@ def _nemo_rgb_class_row(chl: jnp.ndarray) -> jnp.ndarray:
     return jnp.clip(itab - 1.0, 0.0, 60.0).astype(jnp.int32)
 
 
+def _nemo_qsr_rgb_attenuation_coeffs(
+    chl_surface: jnp.ndarray,
+    gdepw_bottom_live: jnp.ndarray,
+    dtype,
+):
+    """Shared ``traqsr.f90:327-353,382-384`` chlorophyll-to-RGB table lookup."""
+    table = jnp.asarray(_RGB_ATTENUATION_BGR, dtype=dtype)
+    chl_z = _nemo_morel_berthon_chl_column(chl_surface, gdepw_bottom_live)
+    row = _nemo_rgb_class_row(chl_z)
+    coeffs = table[row]
+    return table, coeffs[..., 0], coeffs[..., 1], coeffs[..., 2]
+
+
+def _nemo_qsr_rgb_surface_bands(
+    sw_down: jnp.ndarray,
+    config: ShortwavePenetrationConfig,
+):
+    """Shared ``traqsr.f90:367-374`` surface band partition."""
+    sr = nemo_source_round
+    dtype = sw_down.dtype
+
+    def c(value: float) -> jnp.ndarray:
+        return jnp.asarray(value, dtype=dtype)
+
+    rn_abs = c(config.rgb_ir_fraction)
+    r1_si0 = sr(c(1.0) / c(config.rgb_ir_extinction_m))
+    visible_fraction = sr(c(1.0) - rn_abs)
+    zz0 = rn_abs
+    zz1 = sr(visible_fraction / c(3.0))
+    ze0 = sr(zz0 * sw_down)
+    zeR = sr(zz1 * sw_down)
+    zeG = sr(zz1 * sw_down)
+    zeB = sr(zz1 * sw_down)
+    return rn_abs, r1_si0, zz1, ze0, zeR, zeG, zeB
+
+
+def _nemo_qsr_rgb_attenuate_level(
+    ze0_k: jnp.ndarray,
+    zeR_k: jnp.ndarray,
+    zeG_k: jnp.ndarray,
+    zeB_k: jnp.ndarray,
+    ze3t: jnp.ndarray,
+    r1_si0: jnp.ndarray,
+    r1_LB: jnp.ndarray,
+    r1_LG: jnp.ndarray,
+    r1_LR: jnp.ndarray,
+):
+    """Shared ``traqsr.f90:388-390`` four-band level attenuation."""
+    sr = nemo_source_round
+    zze0 = sr(ze0_k * precision_exp(sr(sr(-ze3t) * r1_si0)))
+    zzeR = sr(zeR_k * precision_exp(sr(sr(-ze3t) * r1_LR)))
+    zzeG = sr(zeG_k * precision_exp(sr(sr(-ze3t) * r1_LG)))
+    zzeB = sr(zeB_k * precision_exp(sr(sr(-ze3t) * r1_LB)))
+    total0 = sr(sr(sr(zze0 + zzeB) + zzeG) + zzeR)
+    return zze0, zzeR, zzeG, zzeB, total0
+
+
+def nemo_fraqsr_1lev(
+    sw_down: jnp.ndarray,
+    chl_surface: jnp.ndarray,
+    e3t_1_live: jnp.ndarray,
+    gdepw_2_live: jnp.ndarray,
+    wmask_2: jnp.ndarray,
+    config: ShortwavePenetrationConfig,
+) -> jnp.ndarray:
+    """Literal ``fraqsr_1lev`` from NEMO ``traqsr.f90:327-402`` (`jk = 1`)."""
+    sr = nemo_source_round
+    sw_down = jnp.asarray(sw_down, dtype=jnp.float64)
+    dtype = sw_down.dtype
+    chl_surface = jnp.asarray(chl_surface, dtype=dtype)
+    e3t_1_live = jnp.asarray(e3t_1_live, dtype=dtype)
+    gdepw_2_live = jnp.asarray(gdepw_2_live, dtype=dtype)
+    wmask_2 = jnp.asarray(wmask_2, dtype=dtype)
+
+    _, k_blue, k_green, k_red = _nemo_qsr_rgb_attenuation_coeffs(
+        chl_surface, gdepw_2_live[..., jnp.newaxis], dtype
+    )
+    _, r1_si0, _, ze0, zeR, zeG, zeB = _nemo_qsr_rgb_surface_bands(
+        sw_down, config
+    )
+    _, _, _, _, total0 = _nemo_qsr_rgb_attenuate_level(
+        ze0,
+        zeR,
+        zeG,
+        zeB,
+        e3t_1_live,
+        r1_si0,
+        k_blue[..., 0],
+        k_green[..., 0],
+        k_red[..., 0],
+    )
+    zzeT = sr(total0 * wmask_2)
+    one = jnp.asarray(1.0, dtype=dtype)
+    safe_qsr = jnp.where(sw_down != 0.0, sw_down, one)
+    return jnp.where(sw_down != 0.0, sr(one - sr(zzeT / safe_qsr)), one)
+
+
 def _nemo_qsr_rgb_tendency(
     sw_down: jnp.ndarray,
     chl_surface: jnp.ndarray,
@@ -472,23 +569,15 @@ def _nemo_qsr_rgb_tendency(
     def c(value: float) -> jnp.ndarray:
         return jnp.asarray(value, dtype=dtype)
 
-    table = jnp.asarray(_RGB_ATTENUATION_BGR, dtype=dtype)
-    chl_z = _nemo_morel_berthon_chl_column(chl_surface, gdepw_bottom_live)
-    row = _nemo_rgb_class_row(chl_z)
-    coeffs = table[row]
-    k_blue, k_green, k_red = coeffs[..., 0], coeffs[..., 1], coeffs[..., 2]
+    table, k_blue, k_green, k_red = _nemo_qsr_rgb_attenuation_coeffs(
+        chl_surface, gdepw_bottom_live, dtype
+    )
 
     rho0_csw = sr(c(rho_0) * c(c_sw))
     r1_rho0_csw = sr(c(1.0) / rho0_csw)
-    rn_abs = c(config.rgb_ir_fraction)
-    r1_si0 = sr(c(1.0) / c(config.rgb_ir_extinction_m))
-    visible_fraction = sr(c(1.0) - rn_abs)
-    zz0 = rn_abs
-    zz1 = sr(visible_fraction / c(3.0))
-    ze0 = sr(zz0 * sw_down)
-    zeR = sr(zz1 * sw_down)
-    zeG = sr(zz1 * sw_down)
-    zeB = sr(zz1 * sw_down)
+    rn_abs, r1_si0, zz1, ze0, zeR, zeG, zeB = _nemo_qsr_rgb_surface_bands(
+        sw_down, config
+    )
     zeT = sw_down
 
     # ``tra_qsr_init`` uses the minimum chlorophyll class for the deepest
@@ -536,12 +625,9 @@ def _nemo_qsr_rgb_tendency(
     def level_step(carry, inputs):
         ze0_k, zeR_k, zeG_k, zeB_k, zeT_k = carry
         jk, ze3t, r1_LB, r1_LG, r1_LR, wmask = inputs
-        zze0 = sr(ze0_k * precision_exp(sr(sr(-ze3t) * r1_si0)))
-        zzeR = sr(zeR_k * precision_exp(sr(sr(-ze3t) * r1_LR)))
-        zzeG = sr(zeG_k * precision_exp(sr(sr(-ze3t) * r1_LG)))
-        zzeB = sr(zeB_k * precision_exp(sr(sr(-ze3t) * r1_LB)))
-
-        total0 = sr(sr(sr(zze0 + zzeB) + zzeG) + zzeR)
+        zze0, zzeR, zzeG, zzeB, total0 = _nemo_qsr_rgb_attenuate_level(
+            ze0_k, zeR_k, zeG_k, zeB_k, ze3t, r1_si0, r1_LB, r1_LG, r1_LR
+        )
         totalR = sr(sr(zzeR + zzeG) + zzeB)
         totalG = sr(zzeG + zzeB)
         zzeT = jnp.where(
