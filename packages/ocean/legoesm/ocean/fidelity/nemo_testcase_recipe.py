@@ -1463,6 +1463,7 @@ def build_orca2_ts_at_step(
     kt: int,
     dt_s: float,
     apply_hand_alterations: bool = True,
+    mask_evaluation: str = "where_zero",
 ):
     """ORCA2's time-interpolated T/S climatology for one NEMO step.
 
@@ -1525,6 +1526,17 @@ def build_orca2_ts_at_step(
     if apply_hand_alterations:
         apply_orca2_hand_alterations(temperature, salinity)
 
+    if mask_evaluation == "nemo_tmask_multiply":
+        # dtatsd.f90:306-311 multiplies ptsd(:,:,:,jp_tem/jp_sal) by REAL(wp)
+        # tmask(:,:,:), leaving IEEE-754 -0.0 where raw interpolated
+        # temperature is negative on dry cells.
+        mask_f64 = np.asarray(tmask, dtype=np.float64)
+        return (temperature * mask_f64, salinity * mask_f64)
+    if mask_evaluation != "where_zero":
+        raise ValueError(
+            f"unknown ORCA2 T/S mask_evaluation={mask_evaluation!r}; "
+            "expected 'where_zero' or 'nemo_tmask_multiply'"
+        )
     return (np.where(tmask, temperature, 0.0), np.where(tmask, salinity, 0.0))
 
 
@@ -1606,6 +1618,7 @@ def build_orca2_initial_ts(
     tmask,
     *,
     apply_hand_alterations: bool = True,
+    mask_evaluation: str = "where_zero",
 ):
     """ORCA2's kt=1 independent initial T/S, retained as the stable API."""
 
@@ -1613,6 +1626,51 @@ def build_orca2_initial_ts(
         temperature_path, salinity_path, tmask,
         kt=1, dt_s=10800.0,
         apply_hand_alterations=apply_hand_alterations,
+        mask_evaluation=mask_evaluation,
+    )
+
+
+def build_orca2_istate_for_mode(
+    temperature_path,
+    salinity_path,
+    tmask,
+    *,
+    f_t,
+    e1e2t,
+    initial_state: str,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Build ORCA2 initial ``(T, S, ssh)`` for an explicit card ``initial_state`` mode.
+
+    ``initial_state`` has no default:
+    * ``"si3_iceistate"`` retains the certified ORCA2+SI3 card's ``where_zero``
+      tracer mask and SI3 ``ice_istate`` levitating-ice sea-level depression
+      (``iceistate.F90:398-427``).
+    * ``"nemo_k0_istate"`` reproduces NEMO K0 (``nn_ice = 1``): ``dta_tsd``
+      masks ``T`` and ``S`` by ``REAL(wp)`` ``tmask`` multiplication
+      (``istate.f90:118``, ``dtatsd.f90:306-311``), and ``sbc_init`` skips
+      ``ice_init``/``ice_istate`` so ``ssh`` starts at ``0._wp``
+      (``sbcmod.f90:376-384``, ``restart.f90:398,405,408``).
+    """
+
+    if initial_state == "si3_iceistate":
+        temperature, salinity = build_orca2_initial_ts(
+            temperature_path, salinity_path, tmask,
+            mask_evaluation="where_zero",
+        )
+        initial_ssh = orca2_initial_ice_ssh(
+            temperature, salinity, tmask, f_t, e1e2t, ORCA2_DECK_INITIAL_ICE
+        )
+        return temperature, salinity, initial_ssh
+    if initial_state == "nemo_k0_istate":
+        temperature, salinity = build_orca2_initial_ts(
+            temperature_path, salinity_path, tmask,
+            mask_evaluation="nemo_tmask_multiply",
+        )
+        initial_ssh = np.zeros(np.asarray(tmask).shape[:2], dtype=np.float64)
+        return temperature, salinity, initial_ssh
+    raise ValueError(
+        f"unknown ORCA2 initial_state={initial_state!r}; "
+        "expected 'si3_iceistate' or 'nemo_k0_istate'"
     )
 
 
@@ -1621,7 +1679,12 @@ _ORCA2_RESTO_SHA256 = (
 
 
 def build_orca2_damping_for_step(
-    deck_root: str | Path, tmask, *, kt: int, dt_s: float,
+    deck_root: str | Path,
+    tmask,
+    *,
+    kt: int,
+    dt_s: float,
+    mask_evaluation: str = "where_zero",
 ) -> SpongeForcing:
     """Build ORCA2 ``tra_dmp`` inputs from the SHA-pinned local products."""
 
@@ -1644,6 +1707,7 @@ def build_orca2_damping_for_step(
         root / "data_1m_potential_temperature_nomask.nc",
         root / "data_1m_salinity_nomask.nc",
         tmask, kt=kt, dt_s=dt_s, apply_hand_alterations=True,
+        mask_evaluation=mask_evaluation,
     )
     return SpongeForcing(
         gamma=jnp.asarray(rate, dtype=jnp.float64),
@@ -1691,7 +1755,11 @@ def _orca2_iwm_forcing(path, surface_tmask: np.ndarray, lat_t, lon_t):
     )
 
 
-def build_orca2_zps_card(deck_root: str | Path) -> NEMOTestcaseCard:
+def build_orca2_zps_card(
+    deck_root: str | Path,
+    *,
+    initial_state: str = "si3_iceistate",
+) -> NEMOTestcaseCard:
     """Build the source-file-driven ORCA2+SI3 card through ocean kt=1 entry.
 
     This constructor intentionally requires the external deck path.  It reads
@@ -1831,12 +1899,14 @@ def build_orca2_zps_card(deck_root: str | Path) -> NEMOTestcaseCard:
         nemo_e3t_jpk=jnp.asarray(e3t_jpk, dtype=jnp.float64),
     )
 
-    temperature, salinity = build_orca2_initial_ts(
-        temperature_path, salinity_path, tmask)
-
-    initial_ssh = orca2_initial_ice_ssh(
-        temperature, salinity, tmask, np.asarray(grid.f_T),
-        metric["e1t"] * metric["e2t"], ORCA2_DECK_INITIAL_ICE)
+    temperature, salinity, initial_ssh = build_orca2_istate_for_mode(
+        temperature_path,
+        salinity_path,
+        tmask,
+        f_t=np.asarray(grid.f_T),
+        e1e2t=metric["e1t"] * metric["e2t"],
+        initial_state=initial_state,
+    )
 
     state = rest_state_latlon_cgrid_ocean(
         grid,

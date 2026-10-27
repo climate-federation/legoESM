@@ -26,7 +26,9 @@ set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
 
 
 def _k0():
-    return bulk.NemoStandaloneK0Config(1, False, True, 0, False)
+    return bulk.NemoStandaloneK0Config(
+        1, False, True, 0, False, "nemo_k0_istate"
+    )
 
 
 def _run_with_wind(u_wind):
@@ -45,6 +47,7 @@ def test_k0_is_explicit_and_calls_production_composition(monkeypatch):
     for field, wrong in (
         ("nn_ice", 0), ("ln_drgice_imp", True), ("ln_mxl0", False),
         ("nn_mxlice", 2), ("ln_icebergs", True),
+        ("initial_state", "si3_iceistate"),
     ):
         values = _k0()._asdict()
         values[field] = wrong
@@ -605,7 +608,9 @@ def test_scoring_driver_reproducibility_control_and_composed_card_flow(
     )
 
     k0 = score_driver.explicit_k0_config()
-    assert k0 == bulk.NemoStandaloneK0Config(1, False, True, 0, False)
+    assert k0 == bulk.NemoStandaloneK0Config(
+        1, False, True, 0, False, "nemo_k0_istate"
+    )
 
     if score_driver.DEFAULT_ARM_A.exists() and score_driver.DEFAULT_ARM_B.exists():
         repro = score_driver.score_reproducibility_control(
@@ -729,5 +734,193 @@ def test_scoring_driver_reproducibility_control_and_composed_card_flow(
         ]
         == 1
     )
+
+
+def test_resume7_k0_istate_ssh_and_dry_cell_signed_zero_keep_si3_bit_identical():
+    """Fixes 1 & 2: K0 istate starts from ssh=0 and preserves dry-cell -0.0 on T; SI3 stays bit-identical."""
+    from legoesm.ocean.fidelity import nemo_testcase_recipe as recipe
+
+    sig = inspect.signature(recipe.build_orca2_istate_for_mode)
+    assert sig.parameters["initial_state"].default is inspect.Parameter.empty
+    with pytest.raises(ValueError, match="unknown ORCA2 initial_state"):
+        recipe.build_orca2_istate_for_mode(
+            "unused", "unused", np.ones((1, 1, 1), dtype=bool),
+            f_t=np.ones((1, 1)), e1e2t=np.ones((1, 1)),
+            initial_state="unknown_mode",
+        )
+
+    deck = Path("/data/abyssal/dbalwada/nemo-testcases-l4/inputs/ORCA2_ICE_v5.0.0")
+    if not deck.exists():
+        pytest.skip("ORCA2 immutable input deck is not installed")
+
+    si3_card = recipe.build_orca2_zps_card(deck)
+    k0_card = bulk.build_nemo_orca2_k0_ocean_card(deck)
+    assert k0_card.k0.initial_state == "nemo_k0_istate"
+
+    active = np.asarray(si3_card.recipe.z_coord.is_active, dtype=bool)
+    wet_surface = active[..., 0]
+    si3_eta = np.asarray(si3_card.recipe.initial_state.eta.data, dtype=np.float64)
+    k0_eta = np.asarray(k0_card.ocean.recipe.initial_state.eta.data, dtype=np.float64)
+    assert int(wet_surface.sum()) == 16433
+    assert np.allclose(si3_eta[wet_surface], -0.093435058726849693, rtol=0.0, atol=1e-16)
+    assert np.all(k0_eta == 0.0) and not np.any(np.signbit(k0_eta))
+
+    si3_t = np.asarray(si3_card.recipe.initial_state.T.data, dtype=np.float64)
+    k0_t = np.asarray(k0_card.ocean.recipe.initial_state.T.data, dtype=np.float64)
+    si3_s = np.asarray(si3_card.recipe.initial_state.S.data, dtype=np.float64)
+    k0_s = np.asarray(k0_card.ocean.recipe.initial_state.S.data, dtype=np.float64)
+    # Wet cells are bit-identical between SI3 and K0 initial T and S.
+    assert np.array_equal(si3_t[active].view(np.uint64), k0_t[active].view(np.uint64))
+    assert np.array_equal(si3_s.view(np.uint64), k0_s.view(np.uint64))
+    # SI3 keeps +0.0 on all dry cells; K0 preserves -0.0 where raw T < 0 before tmask multiply.
+    assert int(np.sum(np.signbit(si3_t[~active]))) == 0
+    assert int(np.sum(np.signbit(k0_t[~active]))) == 151917
+    assert int(np.sum(np.signbit(k0_t[..., 0][~wet_surface]))) == 4668
+
+    # Plant SI3's initial_state onto the K0 card and verify _validate_k0_ocean_card refuses.
+    planted_eta = k0_card._replace(
+        ocean=k0_card.ocean._replace(
+            recipe=k0_card.ocean.recipe._replace(
+                initial_state=k0_card.ocean.recipe.initial_state._replace(
+                    eta=si3_card.recipe.initial_state.eta
+                )
+            )
+        )
+    )
+    with pytest.raises(ValueError, match="ssh = 0.0"):
+        bulk._validate_k0_ocean_card(planted_eta)
+
+    planted_t = k0_card._replace(
+        ocean=k0_card.ocean._replace(
+            recipe=k0_card.ocean.recipe._replace(
+                initial_state=k0_card.ocean.recipe.initial_state._replace(
+                    T=si3_card.recipe.initial_state.T
+                )
+            )
+        )
+    )
+    with pytest.raises(ValueError, match="ptsd \\* tmask signed zeros"):
+        bulk._validate_k0_ocean_card(planted_t)
+
+    arm_a = Path(
+        "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/"
+        "round340/s4_acquisition/orca2_s4_exact_a_np2"
+    )
+    if arm_a.exists():
+        r0 = gate.read_exact_record(arm_a / "oracle_r340_state_k00000001_s0_r0000.bin")
+        r1 = gate.read_exact_record(arm_a / "oracle_r340_state_k00000001_s0_r0001.bin")
+        entry_a = gate._join_rank_fields([r0, r1])
+        assert gate.exact_score(k0_t, entry_a["T"][..., :30])["unequal"] == 0
+        assert gate.exact_score(k0_s, entry_a["S"][..., :30])["unequal"] == 0
+        assert gate.exact_score(k0_eta, entry_a["ssh"])["unequal"] == 0
+
+
+def test_resume7_unmasked_s1_turb_and_non_nemo_caller_bit_identity():
+    """Fix 3: _nemo_ncar_turbulent is unmasked over A2D(0); non-NEMO callers stay bit-identical."""
+    args, *_ = _production_surface_case()
+    # Evaluate nemo_blk_oce_ncar on a 2x3 grid with mixed wet (1.0) and dry (0.0) mask
+    # and distinct dry-cell air/surface temperatures to prove S1_TURB diagnostics are unmasked.
+    mask = jnp.asarray([[1.0, 0.0, 1.0], [0.0, 1.0, 0.0]], dtype=jnp.float64)
+    all_wet = jnp.ones_like(mask)
+    sst_c = jnp.asarray([[15.0, -5.0, 12.0], [-10.0, 18.0, -8.0]], dtype=jnp.float64)
+    ssu = jnp.asarray([[0.1, -0.2, 0.05], [0.15, -0.1, 0.2]], dtype=jnp.float64)
+    ssv = jnp.asarray([[-0.05, 0.1, -0.15], [0.2, 0.05, -0.1]], dtype=jnp.float64)
+    t_air = jnp.asarray([[286.0, 260.0, 285.0], [255.0, 288.0, 265.0]], dtype=jnp.float64)
+    s1_args = (args[0], args[1], t_air, args[3], args[4], sst_c, ssu, ssv, *args[8:12])
+    res_masked = bulk.nemo_blk_oce_ncar(
+        *s1_args, mask, *args[13:], nn_ice=0, ice_if=None, s0=None, s2=None
+    )
+    res_unmasked = bulk.nemo_blk_oce_ncar(
+        *s1_args, all_wet, *args[13:], nn_ice=0, ice_if=None, s0=None, s2=None
+    )
+    for field in ("theta_air", "ssq", "Cd", "Ch", "Ce", "rhoa", "wndm"):
+        np.testing.assert_array_equal(
+            np.asarray(getattr(res_masked, field)).view(np.uint64),
+            np.asarray(getattr(res_unmasked, field)).view(np.uint64),
+            err_msg=field,
+        )
+    dry = np.asarray(mask) == 0.0
+    for field in ("tsk", "sensible", "latent", "evap", "qsr", "qns", "emp", "utau", "vtau", "taum"):
+        assert np.all(np.asarray(getattr(res_masked, field))[dry] == 0.0), field
+
+    # M6: verify non-NEMO callers (air_sea_fluxes, ncar_transfer_coefficients, blk_oce_2 default)
+    # never call _nemo_ncar_turbulent and remain bit-identical.
+    u10, v10, t_air, q_air, slp = s1_args[:5]
+    sst_k = sst_c + 273.15
+    ssq = bulk.seawater_q_sat(sst_k, slp)
+    theta_air, p10 = bulk.potential_air_temperature_10m(t_air, q_air, slp)
+    theta_sst = bulk.exner_potential_temperature(sst_k, slp)
+    wind = jnp.sqrt(u10 ** 2 + v10 ** 2 + 1.0e-12)
+    cd, ch, ce, ub = bulk.ncar_transfer_coefficients(
+        theta_air, q_air, theta_sst, ssq, wind, nb_iter=5
+    )
+    tau_x, tau_y, sh, lh, evap = bulk.air_sea_fluxes(
+        u10, v10, t_air, q_air, sst_k, slp_Pa=slp, algo="ncar"
+    )
+    rho = bulk.rho_air_moist(t_air, q_air, p10)
+    urho = ub * jnp.maximum(rho, 1.0)
+    np.testing.assert_array_equal(
+        np.asarray(tau_x).view(np.uint64),
+        np.asarray(-urho * cd * u10).view(np.uint64),
+    )
+    np.testing.assert_array_equal(
+        np.asarray(sh).view(np.uint64),
+        np.asarray(urho * ch * (theta_air - theta_sst) * bulk.moist_air_cp(q_air)).view(np.uint64),
+    )
+
+
+def test_resume7_s0f_tradmp_year_seam_slots_match_oracle():
+    """Fix 4: damping_call S0_F frames use sf_tsd's (nbb=1, naa=2) slots after istate's kt=1 call."""
+    deck = Path("/data/abyssal/dbalwada/nemo-testcases-l4/inputs/ORCA2_ICE_v5.0.0")
+    source = Path(
+        "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/"
+        "round5/acquisition/orca1ice_surface_entry_every_step_a_np2"
+    )
+    k0 = Path(
+        "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/"
+        "round339/k0_smoke/orca2_k0_10step_np2"
+    )
+    if not (deck.exists() and source.exists() and k0.exists()):
+        pytest.skip("ORCA2 inputs or round-339 smoke artifacts are not installed")
+
+    card = bulk.build_nemo_orca2_k0_ocean_card(deck)
+    controls = gate.build_real_composed_inputs(
+        card, deck, source / "input_files.sha256", k0 / "ice_cover_clim.nc"
+    )
+    # kt=1 c001 (istate) has nbb=2, naa=1; kt=1 c009 (tra_dmp) has nbb=1, naa=2.
+    c001_t = controls[0]["_s0f_actual"]["kt01/S0_F/c001/f001/votemper"]
+    c009_t = controls[0]["_s0f_actual"]["kt01/S0_F/c009/f001/votemper"]
+    assert c001_t["nbb"].tolist() == [2.0, 2.0]
+    assert c001_t["naa"].tolist() == [1.0, 1.0]
+    assert c001_t["nrec"].tolist() == [1.0, 1339200.0, 12.0, -1339200.0] * 2
+    assert c009_t["nbb"].tolist() == [1.0, 1.0]
+    assert c009_t["naa"].tolist() == [2.0, 2.0]
+    assert c009_t["nrec"].tolist() == [12.0, -1339200.0, 1.0, 1339200.0] * 2
+    np.testing.assert_array_equal(c001_t["fdta"][..., 0], c009_t["fdta"][..., 1])
+    np.testing.assert_array_equal(c001_t["fdta"][..., 1], c009_t["fdta"][..., 0])
+
+    arm_a = Path(
+        "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/"
+        "round340/s4_acquisition/orca2_s4_exact_a_np2"
+    )
+    if arm_a.exists():
+        for kt, control in enumerate(controls, start=1):
+            call = 9 if kt == 1 else (6 if kt % 2 else 2)
+            for f_idx, var in enumerate(("votemper", "vosaline"), start=1):
+                r0 = gate.read_exact_record(
+                    arm_a / f"oracle_r340_fld_k{kt:08d}_c{call:03d}_f{f_idx:03d}_r0000.bin"
+                )
+                r1 = gate.read_exact_record(
+                    arm_a / f"oracle_r340_fld_k{kt:08d}_c{call:03d}_f{f_idx:03d}_r0001.bin"
+                )
+                expected = gate._join_rank_fields([r0, r1])
+                actual = control["_s0f_actual"][
+                    f"kt{kt:02d}/S0_F/c{call:03d}/f{f_idx:03d}/{var}"
+                ]
+                for key, exp_val in expected.items():
+                    assert gate.exact_score(actual[key], exp_val)["unequal"] == 0, (
+                        f"kt{kt:02d}/S0_F/c{call:03d}/f{f_idx:03d}/{var}/{key}"
+                    )
+
 
 

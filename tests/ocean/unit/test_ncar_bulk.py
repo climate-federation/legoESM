@@ -531,10 +531,20 @@ def test_literal_blk_oce_zero_wind_and_masked_fill_gradients_are_finite():
             *values, **_NO_ICE, s0=None, s2=None)
         return result.theta_air + result.qns
 
-    value = masked_temperature_objective(jnp.asarray(0.0))
-    tangent = jax.grad(masked_temperature_objective)(jnp.asarray(0.0))
+    def masked_qns_objective(temperature):
+        values = list(args)
+        values[2] = temperature
+        values[12] = jnp.asarray(0.0)
+        result = nemo_blk_oce_ncar(
+            *values, **_NO_ICE, s0=None, s2=None)
+        return result.qns
+
+    value = masked_temperature_objective(jnp.asarray(250.0))
+    tangent = jax.grad(masked_temperature_objective)(jnp.asarray(250.0))
+    qns_tangent = jax.grad(masked_qns_objective)(jnp.asarray(250.0))
     assert np.isfinite(float(value))
-    assert np.isfinite(float(tangent))
+    assert np.isfinite(float(tangent)) and float(tangent) != 0.0
+    assert float(qns_tangent) == 0.0
 
 
 def test_record_object_minmax_second_operand_wins_signed_zero_ties():

@@ -666,9 +666,17 @@ def build_real_composed_inputs(
             before, after = (np.asarray(item, dtype=np.float64) for item in fdta)
             if before.ndim == 2:
                 before, after = before[..., None], after[..., None]
-            # fld_update swaps the logical before record into slot 2 and
-            # writes the logical after record into slot 1 at the year seam.
-            result["fdta"] = np.stack((after, before), axis=-1)
+            if (nbb, naa) == (1, 2):
+                slots = (before, after)
+            elif (nbb, naa) == (2, 1):
+                # fld_update swaps the logical before record into slot 2 and
+                # writes the logical after record into slot 1 at the year seam.
+                slots = (after, before)
+            else:
+                raise GateError(
+                    f"unexpected fld_read slot pair (nbb, naa)={(nbb, naa)!r}"
+                )
+            result["fdta"] = np.stack(slots, axis=-1)
         result.update(
             # The oracle joins two MPI slabs.  Scalar metadata is therefore
             # present once per rank even though the gridded arrays join into
@@ -795,6 +803,13 @@ def build_real_composed_inputs(
             nbb=2, naa=1,
             fdta=(chlorophyll_records[0], chlorophyll_records[1]))
         damping_call = ocean_call + 1
+        # istate_init (istate.f90:118) already called dta_tsd(nit000, ...) at
+        # kt=1, swapping sf_tsd to (nbb=2, naa=1).  When tra_dmp calls
+        # dta_tsd(kt, zts_dta) at kt=1 (tradmp.f90:101), fld_read sees
+        # ll_firstcall = (kt == nit000) again (fldread.f90:192,209-215) and
+        # runs fld_init + fld_update a second time on sf_tsd, swapping its
+        # year-seam slots back to (nbb=1, naa=2) with nrec=(12, -1339200,
+        # 1, 1339200) and fdta=(before, after) for kt=1..10.
         for field_index, variable in enumerate(("votemper", "vosaline"), start=1):
             before, after = damping_records[variable]
             now = bulk.nemo_fld_time_interp(
@@ -803,8 +818,8 @@ def build_real_composed_inputs(
             fld_actual[
                 f"kt{kt:02d}/S0_F/c{damping_call:03d}/f{field_index:03d}/{variable}"
             ] = fld_fields(
-                now, clock=midpoint, nrec=(1, 1339200, 12, -1339200),
-                nbb=2, naa=1, fdta=(before, after))
+                now, clock=midpoint, nrec=(12, -1339200, 1, 1339200),
+                nbb=1, naa=2, fdta=(before, after))
         controls.append({
             "s0f": s0f, "ice_if": ice_if, "s0": s0, "s2": s2,
             "chl": jnp.asarray(ladder.chlorophyll_at_step(
@@ -812,7 +827,8 @@ def build_real_composed_inputs(
             "geothermal_heat_flux_mwm2": geothermal,
             "sponge": build_orca2_damping_for_step(
                 root, np.asarray(card.ocean.recipe.z_coord.is_active) > 0.5,
-                kt=kt, dt_s=card.ocean.dt_s),
+                kt=kt, dt_s=card.ocean.dt_s,
+                mask_evaluation="nemo_tmask_multiply"),
             "_s0f_actual": fld_actual,
         })
     return tuple(controls)

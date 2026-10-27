@@ -612,19 +612,14 @@ def _nemo_ncar_turbulent(
     u = jnp.asarray(u_wind, dtype=jnp.float64)
     v = jnp.asarray(v_wind, dtype=jnp.float64)
     wet = jnp.asarray(mask, dtype=jnp.float64)
-    active = wet != 0.0
-    # Masked forcing files use zero fills.  Give every differentiated source
-    # expression a finite inactive operand; wet-cell primal values are unchanged.
-    T_air = jnp.where(
-        active, jnp.asarray(T_air_K, dtype=jnp.float64), 180.0
-    )
-    q = jnp.where(active, jnp.asarray(q_air, dtype=jnp.float64), 1.0e-6)
-    sst = jnp.where(
-        active, jnp.asarray(T_sfc_K, dtype=jnp.float64), constants.T_freeze
-    )
-    slp = jnp.where(
-        active, jnp.asarray(slp_Pa, dtype=jnp.float64), constants.p_atm_std
-    )
+    # sbcblk.f90:670-671,740-887 evaluates theta_air_zt, ssq, zcd_oce, zch_oce,
+    # zce_oce, rhoa, and pre-mask bulk fluxes unmasked over A2D(0) before
+    # multiplying psen, plat, taum, pevp by smask0(:,:) (:888-891) and ptsk by
+    # smask0(:,:) (:940).
+    T_air = jnp.asarray(T_air_K, dtype=jnp.float64)
+    q = jnp.asarray(q_air, dtype=jnp.float64)
+    sst = jnp.asarray(T_sfc_K, dtype=jnp.float64)
+    slp = jnp.asarray(slp_Pa, dtype=jnp.float64)
 
     tsk = R(sst)
     theta_sst = exner_potential_temperature(
@@ -824,7 +819,7 @@ class NemoStandaloneS0FInputs(NamedTuple):
 
 
 class NemoStandaloneK0Config(NamedTuple):
-    """Explicit Decision-175 selectors for the standalone ORCA2 card.
+    """Explicit Decision-175 and istate selectors for the standalone ORCA2 card.
 
     These fields deliberately have no defaults.  The card must carry the K0
     choices in its resolved configuration rather than inheriting library
@@ -836,6 +831,7 @@ class NemoStandaloneK0Config(NamedTuple):
     ln_mxl0: bool
     nn_mxlice: int
     ln_icebergs: bool
+    initial_state: str
 
 
 class NemoStandaloneK0OceanCard(NamedTuple):
@@ -861,7 +857,9 @@ class NemoStandaloneK0StepResult(NamedTuple):
 def validate_nemo_standalone_k0(config: NemoStandaloneK0Config) -> None:
     """Refuse every surface-card configuration other than Decision-175 K0."""
 
-    expected = NemoStandaloneK0Config(1, False, True, 0, False)
+    expected = NemoStandaloneK0Config(
+        1, False, True, 0, False, "nemo_k0_istate"
+    )
     if config != expected:
         raise ValueError(
             "standalone ORCA2 requires explicit Decision-175 K0 selectors "
@@ -870,7 +868,7 @@ def validate_nemo_standalone_k0(config: NemoStandaloneK0Config) -> None:
 
 
 def _validate_k0_ocean_card(card: NemoStandaloneK0OceanCard) -> None:
-    """Bind Decision 175 to the real rung-10 selectors that consume it."""
+    """Bind Decision 175 and K0 istate to the real rung-10 card that consumes them."""
 
     validate_nemo_standalone_k0(card.k0)
     ocean = card.ocean
@@ -897,16 +895,37 @@ def _validate_k0_ocean_card(card: NemoStandaloneK0OceanCard) -> None:
             "standalone K0 ocean selectors do not match the rung-10 card: "
             f"resolved={resolved!r}, expected={expected!r}"
         )
+    initial_state = getattr(ocean.recipe, "initial_state", None)
+    if initial_state is not None:
+        eta = np.asarray(initial_state.eta.data, dtype=np.float64)
+        if np.any(eta != 0.0) or np.any(np.signbit(eta)):
+            raise ValueError(
+                "standalone K0 initial state must start from ssh = 0.0 "
+                "(restart.f90:398,405,408; sbcmod.f90:376-384), not SI3's "
+                "ice_istate depression"
+            )
+        active = np.asarray(ocean.recipe.z_coord.is_active, dtype=bool)
+        t_init = np.asarray(initial_state.T.data, dtype=np.float64)
+        if (~active).any() and not np.any(np.signbit(t_init[~active])):
+            raise ValueError(
+                "standalone K0 initial T must preserve dtatsd.f90:307 "
+                "ptsd * tmask signed zeros on dry cells"
+            )
 
 
 def build_nemo_orca2_k0_ocean_card(deck_root):
-    """Wrap, without copying, the certified rung-10 ORCA2 ocean card."""
+    """Build the certified rung-10 ORCA2 ocean card with explicit K0 istate."""
 
     from legoesm.ocean.fidelity.nemo_testcase_recipe import build_orca2_zps_card
 
+    k0 = NemoStandaloneK0Config(
+        1, False, True, 0, False, "nemo_k0_istate"
+    )
     result = NemoStandaloneK0OceanCard(
-        ocean=build_orca2_zps_card(deck_root),
-        k0=NemoStandaloneK0Config(1, False, True, 0, False),
+        ocean=build_orca2_zps_card(
+            deck_root, initial_state=k0.initial_state
+        ),
+        k0=k0,
         albedo=0.066,
         precip_factor=1.0,
         evap_factor=1.0,

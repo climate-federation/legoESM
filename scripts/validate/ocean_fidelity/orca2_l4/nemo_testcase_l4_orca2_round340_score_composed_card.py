@@ -50,6 +50,7 @@ def explicit_k0_config() -> bulk.NemoStandaloneK0Config:
         ln_mxl0=True,
         nn_mxlice=0,
         ln_icebergs=False,
+        initial_state="nemo_k0_istate",
     )
     bulk.validate_nemo_standalone_k0(config)
     return config
