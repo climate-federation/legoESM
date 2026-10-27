@@ -11,6 +11,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
+from legoesm import constants
 from legoesm.core.field import Field
 from legoesm.core.precision import PrecisionPolicy, set_policy
 from legoesm.ocean import bulk_flux_omip as bulk
@@ -846,7 +847,7 @@ def test_resume7_unmasked_s1_turb_and_non_nemo_caller_bit_identity():
     # M6: verify non-NEMO callers (air_sea_fluxes, ncar_transfer_coefficients, blk_oce_2 default)
     # never call _nemo_ncar_turbulent and remain bit-identical.
     u10, v10, t_air, q_air, slp = s1_args[:5]
-    sst_k = sst_c + 273.15
+    sst_k = sst_c + constants.T_freeze
     ssq = bulk.seawater_q_sat(sst_k, slp)
     theta_air, p10 = bulk.potential_air_temperature_10m(t_air, q_air, slp)
     theta_sst = bulk.exner_potential_temperature(sst_k, slp)
