@@ -765,7 +765,9 @@ def test_k_profiles_epbl_uses_dt_tke_not_dt_s():
     k_a = _kv(phys_a, 1200.0)
     assert np.max(k_a) > 0.0          # forced: the comparison is not of zeros
     np.testing.assert_array_equal(k_a, _kv(phys_b, 1200.0))
-    assert not np.allclose(k_a, _kv(phys_a, 300.0))
+    # Surface diffusivity (shallowest interior interface; k=0 at the surface)
+    # must differ exactly, in every column, between the two dts.
+    assert np.all(k_a[..., 0] != _kv(phys_a, 300.0)[..., 0])
     with pytest.raises(ValueError, match="requires dt_tke"):
         compute_vertical_K_profiles(state, z_coord, forcing, phys_a,
                                     lat_deg=lat_deg)
