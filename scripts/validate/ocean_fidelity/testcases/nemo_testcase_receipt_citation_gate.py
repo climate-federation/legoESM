@@ -2183,7 +2183,7 @@ CITATION_MAP = {
     'src/OCE/DOM/dommsk.F90:146-172': [
         '!  Ocean/land mask at u-, v-, and f-points   (computed from tmask)',
         "CALL lbc_lnk( 'dommsk', umask, 'U', 1.0_wp, vmask, 'V', 1.0_wp, fmask, 'F', 1.0_wp )      ! Lateral boundary conditions", 27],
-    'packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:2063':
+    'packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:2140':
         'nemo_sh2_fold_top_v=True,',
     'tests/ocean/unit/test_nemo_sh2_fold_top_v.py:118-310': [
         'def _bottom_bc_production_case(flag: bool, fold: bool = True):',

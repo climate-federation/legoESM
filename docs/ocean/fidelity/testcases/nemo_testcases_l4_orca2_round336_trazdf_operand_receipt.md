@@ -1384,7 +1384,7 @@ departure: in NEMO, `dommsk` applies `lbc_lnk` to `vmask`
 legoESM's `_tke_bottom_dirichlet` leaves the northernmost V-face mask row at
 `compute_face_masks_3d`'s zero wall instead of restoring the card's raw NEMO
 `vmask[-1]` under `nemo_sh2_fold_top_v=True` (already set on the ORCA2 NEMO
-recipe at `packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:2063`).
+recipe at `packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:2140`).
 
 - **R336-R18-P1 (production-call-site test and `eager == jit`)**: Restoring
   `vm3[-1]` from `_zc.nemo_een_barotropic.vmask[-1]` under the existing
@@ -1424,7 +1424,7 @@ recipe at `packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:2063`).
   (`packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:12466-12495`),
   under the existing `bool(getattr(vmix.tke, "nemo_sh2_fold_top_v", False))`
   selector (no new configuration knob; already set on the ORCA2 NEMO recipe at
-  `packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:2063`),
+  `packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:2140`),
   `_tke_bottom_dirichlet` validates that `_grid.fold` is active and
   `_zc.nemo_een_barotropic.vmask` is present and restores the north-fold V-face
   mask row `vm3 = vm3.at[-1].set(jnp.asarray(_raw.vmask[-1], dtype=h_k.dtype))`
