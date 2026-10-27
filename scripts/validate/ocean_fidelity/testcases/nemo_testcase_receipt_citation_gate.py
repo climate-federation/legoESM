@@ -10370,7 +10370,7 @@ CITATION_MAP.update({
     'tests/ice/unit/test_si3_o10_salinity.py:848-864': ['def test_melted_h_i_zero_column_has_finite_temperature_and_salinity_gradients():', 'np.testing.assert_array_equal(grad_s[-1], jnp.ones(10, dtype=jnp.float64))', 17],
     'tests/ice/unit/test_si3_o10_salinity.py:867-895': [('@pytest.mark.parametrize(', 3), ('bl.si3_ice_thd_sal(**kwargs)', 2), 29],
     'tests/ice/unit/test_si3_o10_salinity.py:898-964': ['def test_o10_production_composer_calls_salinity_then_second_temperature(monkeypatch):', 'np.testing.assert_array_equal(result.t_i, sal_token + 1.0)', 67],
-    'scripts/validate/ocean_fidelity/testcases/nemo_testcase_receipt_citation_gate.py:10234-10271': [('# The inserted O10 expressions also change occurrence numbers for otherwise', 1), ('raise RuntimeError(f"unapplied O10 citation anchors: {_missing_o10_anchors}")', 1), 38],
+    'scripts/validate/ocean_fidelity/testcases/nemo_testcase_receipt_citation_gate.py:10272-10309': [('# The inserted O10 expressions also change occurrence numbers for otherwise', 1), ('raise RuntimeError(f"unapplied O10 citation anchors: {_missing_o10_anchors}")', 1), 38],
     'tests/ocean/fidelity/test_nemo_testcase_receipt_citation_gate.py:183-234': ['def test_no_citation_map_key_is_written_twice():', 'assert len(written) == len(gate.CITATION_MAP)', 52],
     'docs/ice/fidelity/si3_r19_o10_preregister.md:34-68': ['## 2. Registered master-record projection (GIVEN-NEMO-ENTRY only)', 'compiled-source line before another change.', 35],
 })

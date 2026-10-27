@@ -191,7 +191,7 @@ exactly one, at `:848-864`.
 The former helper could overwrite a live citation-map key after AST duplicate
 inspection. Historical O10 line shifts now use a single delete-and-reinsert
 operation and reject unapplied replacement anchors at
-`scripts/validate/ocean_fidelity/testcases/nemo_testcase_receipt_citation_gate.py:10234-10271`.
+`scripts/validate/ocean_fidelity/testcases/nemo_testcase_receipt_citation_gate.py:10272-10309`.
 The gate now also rejects `CITATION_MAP.update` hidden in any helper and counts
 all top-level writes at
 `tests/ocean/fidelity/test_nemo_testcase_receipt_citation_gate.py:183-234`.

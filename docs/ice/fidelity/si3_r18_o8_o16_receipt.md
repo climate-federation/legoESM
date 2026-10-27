@@ -191,3 +191,12 @@ which contains one digest for every admitted record in that projection.
   citation-map, test or receipt change.
 
 independent review: Sonnet RUN; Argon RUN (operator review of resume 7)
+
+## Resume 9 semantic rebase resolution
+
+The rebase retains both sides of the citation-gate change: O10's composed
+delete-and-reinsert reanchoring (including its moved-anchor completeness check)
+and this round's receipt registration and full citation map. This round's
+inserted map entries moved O10's self-cited gate block by 38 lines, so the O10
+receipt citation and its matching map key alone were moved from 10234--10271 to
+10272--10309. Their pinned endpoint text and 38-line extent are unchanged.
