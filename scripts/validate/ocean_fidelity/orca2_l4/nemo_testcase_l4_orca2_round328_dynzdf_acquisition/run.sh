@@ -418,7 +418,7 @@ mem_ok() { (( $(free -g | awk '$1 == "Mem:" {print $7}') >= $1 )); }
 compile_record_object() {
   "$FC" -c -fdefault-real-8 -O3 -funroll-all-loops -fcray-pointer \
     -ffree-line-length-none -fallow-argument-mismatch -fno-tree-vectorize \
-    -I "$scratch/mod" -J "$scratch/mod" "$1" -o "$2"
+    -I "$scratch/mod" -I "$CONDA/include" -J "$scratch/mod" "$1" -o "$2"
 }
 fp_disassembly_signature() {
   objdump -drwC --no-show-raw-insn "$1" \
