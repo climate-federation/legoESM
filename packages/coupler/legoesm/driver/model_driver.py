@@ -8175,6 +8175,10 @@ class ModelDriver:
             if _llc is not None:
                 _nat = _llc.to_bundle(s)
                 _save["latloncol_schema"] = np.asarray("latloncol_ckpt_v1")
+                # the div-4 scale the run stepped with (a resume refuses a
+                # different one; user decision 2026-10-26)
+                _save["latloncol_div4_scale"] = np.asarray(
+                    float(_llc.dyn.config.nu_div4_scale))
                 for _k in ("u", "v", "T", "p_s", "phis"):
                     _save[f"latloncol_{_k}"] = np.asarray(getattr(_nat, _k))
                 _names = sorted(_nat.tracers)
@@ -8969,6 +8973,19 @@ class ModelDriver:
                         "view cannot rebuild the face winds, so only a "
                         "checkpoint written by the lat-lon column lane can "
                         "restart it.")
+                # div-4 stamp (user decision 2026-10-26): a checkpoint
+                # without it predates the damping, i.e. scale 0
+                _ck_dd4 = (float(d["latloncol_div4_scale"])
+                           if "latloncol_div4_scale" in d.files else 0.0)
+                _run_dd4 = float(_llc.dyn.config.nu_div4_scale)
+                if _ck_dd4 != _run_dd4:
+                    raise ValueError(
+                        f"MPAS checkpoint {path.name} was written with div-4 "
+                        f"damping scale {_ck_dd4} (0 when the file carries no "
+                        f"latloncol_div4_scale) but this run steps with "
+                        f"{_run_dd4}: the trajectory would change at the "
+                        "restart.  Resume with the checkpoint's scale, or "
+                        "start a new run.")
                 from legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid import (
                     CGridLatLonHydrostaticState,
                 )

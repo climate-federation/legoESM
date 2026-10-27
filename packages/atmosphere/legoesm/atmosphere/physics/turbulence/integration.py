@@ -1222,7 +1222,8 @@ def _make_mpas_turbulence(
                 turb_out.evap_sfc,
                 sigma_coord.pressure_at_full(
                     jnp.asarray(constants.p_ref, dtype=T_col.dtype)),
-                turbulence_config.holtslag_boville))
+                turbulence_config.holtslag_boville,
+                p_sfc=p_half_col[:, -1]))
 
         # Cell → edge tendency projection.  Average the cell tendencies
         # of the two cells flanking each edge, then project onto the

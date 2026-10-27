@@ -590,12 +590,11 @@ def limcnv_from_pref_edge(pref_edge, pver):
 
 def zm_convr(t0, qh0, pap0, paph0, zm0, zi0, landfrac, delt, pblh, tpert, *,
              capelmt=capelmt_default, tau=tau_default, num_cin=1, dmpdz=-1.0e-3,
-             c0_lnd=0.0075, c0_ocn=0.03, alfa=0.1, pbl_top_pa=None, pref_edge=None):
+             c0_lnd=0.0075, c0_ocn=0.03, alfa=0.1, pref_edge=None):
     """zm_conv.F90:142 ``zm_convr`` for ONE column (0-based surface-last inputs).
 
-    ``delt`` is the oracle's half step (``0.5*ztodt``).  ``pblh`` None ->
-    the port's departure (launch bounded by ``pbl_top_pa``).  Returns a dict
-    of 0-based arrays.
+    ``delt`` is the oracle's half step (``0.5*ztodt``).  Returns a dict of
+    0-based arrays.
     """
     pver = len(t0)
     to1 = lambda a: np.concatenate([[0.0], np.asarray(a, dtype=np.float64)])
@@ -617,16 +616,10 @@ def zm_convr(t0, qh0, pap0, paph0, zm0, zi0, landfrac, delt, pblh, tpert, *,
         pf[k] = paph[k] * 0.01
         z[k] = zm[k] + zs
         zf[k] = zi[k] + zs
-    if pblh is None:
-        pblt = pver
-        for k in range(pver, msg, -1):
-            if pap[k] >= pbl_top_pa:
-                pblt = k
-    else:
-        pblt = pver
-        for k in range(pver - 1, msg, -1):
-            if abs(z[k] - zs - pblh) < (zf[k] - zf[k + 1]) * 0.5:
-                pblt = k
+    pblt = pver
+    for k in range(pver - 1, msg, -1):
+        if abs(z[k] - zs - pblh) < (zf[k] - zf[k + 1]) * 0.5:
+            pblt = k
     q = qh.copy()
     shat, qhat = _arr(pver), _arr(pver)
     for k in range(1, pver + 1):

@@ -331,7 +331,6 @@ __param_spec__ = {
         "scheme_key": "atm.conv.ZhangMcFarlaneConfig",
         "excluded": {
             "limcnv_p_pa": "numerics/domain: convection top cap (40 hPa reference interface), not a closure knob",
-            "pbl_top_pa": "not read: ZM refuses a call without the carried pblh (oracle row 50); field removal pending",
             "parcel_tpert": "default 0 = disabled/off (PBL temperature perturbation; CAM6 CLUBB path has none)",
         },
         "params": {
@@ -710,10 +709,6 @@ class ZhangMcFarlaneConfig(NamedTuple):
     limcnv_p_pa : float
         Convection is capped at the interface where the reference pressure
         crosses this value [Pa] (40 hPa, zm_conv_intr.F90:334).
-    pbl_top_pa : float
-        NOT READ (oracle row 50): ZM now refuses a call without the carried
-        PBL height ``pblh``, so this former carry-less launch bound [Pa] is
-        inert pending the decision to remove it.
     parcel_tpert : float
         PBL temperature perturbation ``tpert`` [K] added to the parcel; 0 on
         the CAM6 CLUBB path (no scheme writes ``tpert`` there).
@@ -737,7 +732,6 @@ class ZhangMcFarlaneConfig(NamedTuple):
     dmpdz: float = -1.0e-3
     alfa: float = 0.1
     limcnv_p_pa: float = 4000.0
-    pbl_top_pa: float = 7.0e4
     parcel_tpert: float = 0.0
     enable_cmt: bool = True
     transport_cloud_tracers: bool = True

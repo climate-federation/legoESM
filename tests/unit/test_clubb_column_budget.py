@@ -219,3 +219,114 @@ def test_removed_water_lands_and_is_tested_only_below_clubbtop():
     np.testing.assert_allclose(
         run([0.0, 0.0, 0.0], wet, [0.0, 0.0, 0.0]),
         [0.0, wet / 8.0e3, wet / 8.0e3], rtol=1e-12)
+
+
+def _run_diagnostic(kw, cfg):
+    ncol, nlev = kw["T"].shape
+    out, _ = clubb_mod.clubb_turbulence(
+        kw["u"], kw["v"], kw["T"], kw["q_v"],
+        jnp.full((ncol, nlev), 0.1, dtype=jnp.float64), kw["p_full"],
+        kw["p_half"], kw["z_full"], kw["z_half"], kw["T_sfc"], kw["q_sfc"],
+        kw["rho"], DT, cfg)
+    return out
+
+
+@pytest.mark.parametrize("p_top", [2.0e4, 2.0e3])
+def test_diagnostic_clubb_closes_column_energy(monkeypatch, p_top):
+    """Diagnostic CLUBB diffuses potential temperature, which conserves
+    sum(dp theta), not the host's sum(dp c_pd T): the same column fixer as the
+    prognostic path closes the column against shflx + lhflx (cutoff off)."""
+    kw = _column(p_top=p_top)
+    cfg = CLUBBConfig(trop_cloud_top_press=0.0)
+    out = _run_diagnostic(kw, cfg)
+    assert np.all(np.abs(np.asarray(out.shflx + out.lhflx)) > 10.0)
+    res = _energy_residual(kw, out)
+    assert np.all(np.abs(res) < 1e-7), res
+    monkeypatch.setattr(clubb_mod, "column_energy_fixer_heating",
+                        lambda r, m, w: jnp.zeros_like(w * r[..., None]))
+    jax.clear_caches()
+    res_off = _energy_residual(kw, _run_diagnostic(kw, cfg))
+    monkeypatch.undo()
+    jax.clear_caches()
+    assert np.max(np.abs(res_off)) > 1e-3, res_off
+
+
+def test_prescribed_moisture_with_bulk_heat_closes_column_energy():
+    """A prescribed water BC with the bulk heat BC: the latent-enthalpy
+    correction must follow the water actually applied (prescribed, reported at
+    L_v, so zero), not the bulk evaporation the BC no longer uses."""
+    kw = _column()
+    rho_sfc = kw["rho"][:, -1]
+    E_p = jnp.full_like(rho_sfc, 3.0e-5)                 # kg/m2/s
+    cfg = CLUBBConfig(prognostic=True, clubb_dt=CLUBB_DT,
+                      trop_cloud_top_press=15000.0)
+    ncol, nlev = kw["T"].shape
+    carry = pack_clubb_moments(init_clubb_moments(ncol, nlev, cfg))
+    out, _ = clubb_turbulence_prognostic(
+        kw["u"], kw["v"], kw["T"], kw["q_v"], carry, kw["p_full"],
+        kw["p_half"], kw["z_full"], kw["z_half"], kw["T_sfc"], kw["q_sfc"],
+        kw["rho"], DT, cfg, q_c=kw["q_c"], lat=kw["lat"],
+        sfc_wprtp=E_p / rho_sfc)
+    np.testing.assert_allclose(np.asarray(out.lhflx),
+                               np.asarray(E_p * constants.L_v), rtol=1e-12)
+    res = _energy_residual(kw, out)
+    assert np.all(np.abs(res) < 1e-7), res
+
+
+def test_prescribed_heat_with_bulk_moisture_closes_column_energy():
+    """A prescribed heat BC with the bulk water BC: the heat BC still takes the
+    bulk water's latent-enthalpy correction (lhf - L_v E), so the intake is
+    shflx + lhflx; the reported shflx stays the prescribed one."""
+    kw = _column()
+    rho_sfc = kw["rho"][:, -1]
+    H_p = jnp.full_like(rho_sfc, 20.0)                   # W/m2
+    cfg = CLUBBConfig(prognostic=True, clubb_dt=CLUBB_DT,
+                      trop_cloud_top_press=15000.0)
+    ncol, nlev = kw["T"].shape
+    carry = pack_clubb_moments(init_clubb_moments(ncol, nlev, cfg))
+    out, _ = clubb_turbulence_prognostic(
+        kw["u"], kw["v"], kw["T"], kw["q_v"], carry, kw["p_full"],
+        kw["p_half"], kw["z_full"], kw["z_half"], kw["T_sfc"], kw["q_sfc"],
+        kw["rho"], DT, cfg, q_c=kw["q_c"], lat=kw["lat"],
+        sfc_wpthlp=H_p / (rho_sfc * constants.c_pd))
+    np.testing.assert_allclose(np.asarray(out.shflx), np.asarray(H_p),
+                               rtol=1e-12)
+    corr = np.asarray(out.lhflx - constants.L_v * out.evap_sfc)
+    assert np.all(np.abs(corr) > 0.1), corr        # a real correction to book
+    res = _energy_residual(kw, out)
+    assert np.all(np.abs(res) < 1e-7), res
+
+
+def test_diagnostic_clubb_cutoff_on_closes_energy_below_the_cut():
+    """Cutoff on: the fixer heat goes uniform per unit mass over every layer at
+    or below the cut pressure (hard mask), none above, and the column closes
+    against shflx + lhflx."""
+    kw = _column(p_top=2.0e3)
+    cut = 1.5e4
+    cfg = CLUBBConfig(trop_cloud_top_press=cut)
+    out = _run_diagnostic(kw, cfg)
+    res = _energy_residual(kw, out)
+    assert np.all(np.abs(res) < 1e-7), res
+    fix = []
+    _orig = clubb_mod.column_energy_fixer_heating
+
+    def _spy(r, m, w):
+        h = _orig(r, m, w)
+        fix.append((np.asarray(r), np.asarray(h), np.asarray(w)))
+        return h
+
+    import unittest.mock as um
+    with um.patch.object(clubb_mod, "column_energy_fixer_heating", _spy):
+        jax.clear_caches()
+        _run_diagnostic(kw, cfg)
+    jax.clear_caches()
+    r, h, w = fix[0]
+    above = np.asarray(kw["p_full"]) < cut
+    assert above.any() and (~above).any()
+    assert np.all(np.abs(r) > 1e-3), r                     # a real residual
+    np.testing.assert_array_equal(w, (~above).astype(w.dtype))
+    assert np.all(h[above] == 0.0)
+    # uniform per unit mass below the cut
+    np.testing.assert_allclose(h[~above].reshape(h.shape[0], -1),
+                               h[:, -1:] * np.ones((1, (~above[0]).sum())),
+                               rtol=1e-12)

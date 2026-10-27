@@ -519,3 +519,143 @@ def test_driver_latlon_qv_smoother_refuses_an_unstable_coefficient(tmp_path):
     drv = _driver(tmp_path, microphysics="kessler", latlon_qv_smooth_del4_m4s=1e18)
     with pytest.raises(ValueError, match="stability bound"):
         drv.run()
+
+
+def test_no_retrace_after_warm_up_under_a_changing_forcing_and_dt_with_div4_on(setup):
+    """The forcing and dt are TRACED jit arguments of the adapter's step:
+    after warm-up, a new SST every step and a different dt reuse one compiled
+    program, with the per-row div-4 coefficient (0.01*area^2/dt) built from
+    the traced dt.  Warm-up: the fixture state is fp32 and the fp64 forcing
+    promotes it over the first two steps (two traces, div-4 on or off)."""
+    g, s, nat = setup
+    cfg = CGridLatLonPrimitiveEquationConfig(
+        use_polar_filter=True, polar_filter_cutoff_deg=35.9041, nu_div4_scale=1.0)
+    col = LatLonCGridColumnModel(CGridLatLonPrimitiveEquationModel(g, s, cfg, dt=DT))
+
+    def phys(cols, mesh, sigma, phys_state=None, forcing=None):
+        return _tend(cols.T.data, cols.p_s.data, du=0.0,
+                     dT=1e-6 * forcing["sst"][:, None])
+
+    # the adapter's jitted step looks _step_cgrid_impl up once per TRACE
+    traces = []
+    impl = col.dyn._step_cgrid_impl
+
+    def counting(*a, **k):
+        traces.append(1)
+        return impl(*a, **k)
+    col.dyn._step_cgrid_impl = counting
+    n = col.mesh.nCells
+    st = col.from_bundle(nat)
+    for k in range(3):
+        st = col.step(st, DT, physics_fn=phys,
+                      forcing={"sst": jnp.full((n,), 0.0)})
+    warm = len(traces)
+    assert warm >= 1
+    for k in range(1, 5):
+        st = col.step(st, DT, physics_fn=phys,
+                      forcing={"sst": jnp.full((n,), float(k))})
+    st = col.step(st, 0.5 * DT, physics_fn=phys,
+                  forcing={"sst": jnp.full((n,), 5.0)})
+    assert len(traces) == warm
+    assert np.isfinite(np.asarray(st.native.T)).all()
+    # the forcing WAS read: a different SST gives a different T
+    nat_k = st.native
+    T1 = np.asarray(col.step(col.from_bundle(nat_k), DT, physics_fn=phys,
+                             forcing={"sst": jnp.full((n,), 1.0)}).native.T)
+    T9 = np.asarray(col.step(col.from_bundle(nat_k), DT, physics_fn=phys,
+                             forcing={"sst": jnp.full((n,), 9.0)}).native.T)
+    assert np.abs(T9 - T1).max() > 0.0 and len(traces) == warm
+
+
+def test_production_deck_dt_is_not_clamped_and_keeps_the_cam6_cadence():
+    """The lat-lon production deck's dt survives BOTH clamps (the factory's
+    equatorial CFL and the driver's generic cfl_check_and_adjust, which cut
+    900 s to 600 s and would have halved every cadence; codex r1 #1), and
+    dt x the cadence counts are CAM6's 1800 s / 3600 s intervals."""
+    import yaml
+    from legoesm import constants
+    from pathlib import Path
+    from legoesm.core.cfl import cfl_check_and_adjust
+    from legoesm.grids.latlon import create_latlon_grid
+    deck = Path(__file__).resolve().parents[4] / "config" / "amip" / "amip_production_latlon48.yaml"
+    d = yaml.safe_load(deck.read_text())
+    dt, n_lat = float(d["dt"]), int(d["resolution"])
+    grid = create_latlon_grid(n_lat=n_lat, radius=constants.R_earth, omega=constants.Omega)
+    assert d["use_polar_filter"] is True and d["column_lane"] is True
+    assert cfl_check_and_adjust(dt, n_lat, model_type="primitive_eq", radius=grid.radius,
+                                grid_type="latlon", use_polar_filter=True) == dt
+    assert dt * d["physics_update_steps"] == 1800.0
+    assert dt * d["rad_update_steps"] == 3600.0
+    # the deck's own rule: 0.82 x the printed clamp, rounded down to a divisor of 1800
+    clamp = cfl_check_and_adjust(1e9, n_lat, model_type="primitive_eq", radius=grid.radius,
+                                 grid_type="latlon", use_polar_filter=True, verbose=False)
+    assert dt <= 0.82 * 604.9 + 1.0 and 1800.0 % dt == 0 and dt > clamp * 0.82 - 150.0
+
+
+def test_div4_reaches_the_adapter_step_with_the_step_dt(setup):
+    """With div-4 on, the adapter's step is the native step at the SAME dt
+    bitwise (the 0.01*area^2/dt coefficient sees the dynamics dt, not a
+    physics interval), and differs from the div-4-off step."""
+    g, s, nat = setup
+
+    def dyn(scale):
+        return CGridLatLonPrimitiveEquationModel(g, s, CGridLatLonPrimitiveEquationConfig(
+            use_polar_filter=True, polar_filter_cutoff_deg=35.9041,
+            nu_div4_scale=scale), dt=DT)
+    ref = dyn(1.0).step(nat, DT)
+    col = LatLonCGridColumnModel(dyn(1.0))
+    out = col.step(col.from_bundle(nat), DT).native
+    for k in ("u", "v", "T", "p_s"):
+        np.testing.assert_array_equal(np.asarray(getattr(out, k)),
+                                      np.asarray(getattr(ref, k)), err_msg=k)
+    off = LatLonCGridColumnModel(dyn(0.0))
+    out_off = off.step(off.from_bundle(nat), DT).native
+    assert np.abs(np.asarray(out.u) - np.asarray(out_off.u)).max() > 0.0
+    # a different dt changes the damped step (dt reaches the coefficient)
+    col2 = LatLonCGridColumnModel(dyn(1.0))
+    half = col2.step(col2.from_bundle(nat), 0.5 * DT).native
+    np.testing.assert_array_equal(np.asarray(half.u),
+                                  np.asarray(dyn(1.0).step(nat, 0.5 * DT).u))
+
+
+def test_driver_checkpoint_div4_stamp_refuses_a_different_scale(tmp_path):
+    """Checkpoints record the run's div-4 scale; a file without the stamp
+    counts as 0; a resume whose scale differs is refused (user decision
+    2026-10-26), so a pre-stamp checkpoint refuses only a damping-on run."""
+    from legoesm.driver.model_driver import ModelDriver
+
+    def cfg(d, scale, **over):
+        c = _driver_cfg(d, **over)
+        return c._replace(dycore=c.dycore._replace(mpas_div_damp4_scale=scale))
+
+    def written(scale):
+        d = tmp_path / f"w{scale}"
+        d.mkdir()
+        c = cfg(d, scale, days=1)
+        c = c._replace(output=c.output._replace(checkpoint_days=1))
+        drv = ModelDriver(c, output_dir=d)
+        drv.setup()
+        assert drv.run() == "COMPLETED"
+        f = d / "checkpoint_day_0001.npz"
+        with np.load(f) as z:
+            assert float(z["latloncol_div4_scale"]) == scale
+            unstamped = {k: z[k] for k in z.files if k != "latloncol_div4_scale"}
+        old = d / "checkpoint_day_0002.npz"
+        np.savez(old, **unstamped)
+        return f, old
+
+    def resume(f, scale):
+        d = tmp_path / f"r{scale}_{f.parent.name}_{f.stem}"
+        d.mkdir()
+        drv = ModelDriver(cfg(d, scale, days=1), output_dir=d)
+        drv.setup()
+        return drv.load_checkpoint(f)
+
+    off, old = written(0.0)
+    on, _ = written(1.0)
+    assert resume(off, 0.0)[1] == pytest.approx(1.0)
+    assert resume(old, 0.0)[1] == pytest.approx(1.0)   # no stamp == 0
+    assert resume(on, 1.0)[1] == pytest.approx(1.0)
+    for f, scale in ((off, 1.0), (old, 1.0), (on, 0.0)):
+        with pytest.raises(ValueError, match="div-4 damping scale"):
+            resume(f, scale)

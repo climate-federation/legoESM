@@ -907,11 +907,10 @@ class ZMConvr(NamedTuple):
 
 def zm_convr(t, qh, p_full, p_half, z, zf, landfrac, dt, *, pblh, tpert,
              capelmt, tau, num_cin, dmpdz, tiedke_add, lwmax, c0_lnd, c0_ocn,
-             alfa, limcnv_p_pa, pbl_top_pa, pref_edge=None):
+             alfa, limcnv_p_pa, pref_edge=None):
     """Port of ``zm_convr`` (``delt = 0.5*dt`` as in ``zm_conv_tend``).
 
     ``pblh`` is the PBL height [m] (``None`` raises: CAM always has one).
-    ``pbl_top_pa`` is no longer read.
 
     ``pref_edge`` are the REFERENCE interface pressures [Pa] (``nlev+1``, top
     first): CAM caps deep convection at the interface where they cross

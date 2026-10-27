@@ -165,7 +165,9 @@ mpas_land_params_refresh: false  # the per-step canopy rebuild is two-leaf
 # Base: off (a prescribed droplet number). On, the cloud droplet number is
 # activated from the aerosol optical depth, which is the only path by which the
 # aerosol field can change cloud brightness. Wave-4 arm `w4_noccn` measures it.
-aerosol_ccn: true
+# Off (oracle follow-up row 67): this deck's cloud scheme has no reference
+# for the in-cloud CCN droplet radius, so radiation refuses that pairing.
+aerosol_ccn: false
 
 # --- Non-orographic gravity-wave launch level --------------------------------
 # Base: launch at the surface. Launching in the free troposphere (700 hPa)

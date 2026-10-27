@@ -117,7 +117,7 @@ def test_unstable_mixes_more_than_stable():
     assert float(jnp.mean(out_unstable.Km)) > float(jnp.mean(out_stable.Km))
 
 
-def test_diagnostic_clubb_conserves_column_with_no_sfc_flux():
+def test_diagnostic_clubb_conserves_column_with_no_sfc_flux(monkeypatch):
     """The DEFAULT diagnostic ``scheme="clubb"`` conserves column moisture AND heat
     under zero surface flux — the conservation contract of the path most users
     get (the prognostic triad covers the opt-in path).
@@ -130,6 +130,10 @@ def test_diagnostic_clubb_conserves_column_with_no_sfc_flux():
     round-off. Non-vacuous WITHOUT spin-up: unlike the prognostic rest state, the
     diagnostic eddy diffusion is driven directly by the initial gradient, so it
     moves a genuine ``max|dq·dt|``~1e-4 of moisture while still conserving."""
+    # theta TRANSPORT pin: the column energy fixer (closes the host c_pd*T
+    # budget, which theta diffusion does not; test_clubb_column_budget.py)
+    # is a separate closure, zeroed so it cannot mask a transport defect.
+    _zero_energy_fixer(monkeypatch)
     kw = _column(ncol=2, nlev=24, dtheta_dz=4e-3)
     kw["T_sfc"] = kw["T"][:, -1]        # zero surface sensible-heat flux
     kw["q_sfc"] = kw["q_v"][:, -1]      # zero surface moisture flux

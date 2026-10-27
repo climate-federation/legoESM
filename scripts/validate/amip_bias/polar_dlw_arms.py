@@ -158,6 +158,7 @@ def main(argv=None) -> int:
                                    keys={"cloud_r_eff_liq", "cloud_r_eff_ice"})
         else:
             kw["cloud_path_liq"], kw["cloud_path_ice"] = jnp.asarray(lwp), jnp.asarray(iwp)
+        kw["cloud_rho_ice"] = cfg.rho_cloud_ice   # ice table size at the run's density
         cf = np.asarray(props.cloud_fraction)
         return kw, cf, lwp, iwp, n_sub
 
