@@ -780,7 +780,7 @@ fixture can no longer conceal a full-array association defect. The ordered
 record declarations and metadata are at
 `scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round336_tke_acquisition/tke_round336_writer.F90:80-128`
 and
-`:232-284`.
+`:236-288`.
 
 The record now contains `htau`, bottom `uu/vv` at `Kbb`, evaluated `gdepw`,
 `e3t`, and `e3w` at `Kmm`, all masks and top/bottom levels, and the three
