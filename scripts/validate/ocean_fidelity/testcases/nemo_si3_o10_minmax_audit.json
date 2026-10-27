@@ -2061,9 +2061,9 @@
  },
  "tie_lemmas": {
   "L0": "MINSD/MAXSD returns its source operand on an equality or unordered comparison; equal finite nonzero operands have identical bits.",
-  "L1": "For salinity-active production columns (h_i >= rn_sal_himin), the measured O10 entry has sz_i >= rn_simin = 0.1; TEMP1 therefore has t_i-rt0 <= -rTmlt*rn_simin = -0.0054 K. Melted-out columns are measured separately and do reach t_i = rt0.",
+  "L1": "ice_cor(1) bounds every positive-volume production layer at sz_i >= rn_simin = 0.1, and the conservative remap preserves positive salinity and nonnegative enthalpy.  In TEMP1, sz_i > 0 makes the discriminant strictly larger than zbbb**2, so its positive root cannot cancel to rt0; only h_i <= 0 or sz_i == 0 can return rt0.",
   "L2": "ABS produces +0 for either signed-zero input, and comparisons do not observe a zero sign.",
-  "L3": "The unrolled line-644 object emits MIN(0,zds) as (dst,src)=(zds,0) except in layer 9, and emits the outer MAX as (MIN,floor) except in layers 9 and 10; the committed bit-changing plants pin both splits."
+  "L3": "The unrolled line-644 object emits MIN(0,zds) as (dst,src)=(zds,0) except in layer 9, and emits the outer MAX as (MIN,floor) except in layers 9 and 10; finite production-NML columns at the salinity floor make the layer-9 inner role and outer role flip the brine-flux zero."
  },
  "tie_verdicts": {
   "sal:334": {
@@ -2107,8 +2107,8 @@
    "verdict": "MASKED"
   },
   "sal:538": {
-   "proof": "zds and the floor can tie as -0/+0; the flux-bit plant fires.",
-   "verdict": "FOUND"
+   "proof": "The former plant used an unordered NaN, not a finite signed-zero tie; it is removed (L0).",
+   "verdict": "NO_TIE"
   },
   "sal:569": {
    "proof": "Other operand is nonzero epsi10 (L0).",
@@ -2119,7 +2119,7 @@
    "verdict": "NO_TIE"
   },
   "sal:619": {
-   "proof": "All three measured flush-eligible production columns satisfy L1, so their zmsk and divisors are nonzero.",
+   "proof": "The analytic production TEMP1 bound makes every flush-eligible zmsk and divisor nonzero (L1).",
    "verdict": "NO_TIE"
   },
   "sal:637": {
@@ -2127,11 +2127,11 @@
    "verdict": "NO_TIE"
   },
   "sal:641": {
-   "proof": "zs_min is read only under deck-disabled ln_sal_chk (census).",
-   "verdict": "MASKED"
+   "proof": "Production sz_i is positive; exact cancellation in sz_i+zds yields +0, not the former synthetic -0 operand (L1).",
+   "verdict": "NO_TIE"
   },
   "sal:644": {
-   "proof": "Both zero-valued clamps have layer-specific survivors pinned by L3.",
+   "proof": "Finite production-NML columns hit a real layer-9 -0/+0 clamp tie and flip sfx_bri (L3).",
    "verdict": "FOUND"
   },
   "sal:677": {

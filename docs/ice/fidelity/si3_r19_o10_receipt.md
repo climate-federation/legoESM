@@ -55,7 +55,7 @@ model preserves those per-layer splits. Salinity-2/D5 code is untouched.
 
 The audit contains only real ppsrc variables, covers every executing floating
 site, and records one explicit verdict at
-`scripts/validate/ocean_fidelity/testcases/nemo_si3_o10_minmax_audit.py:12-98`.
+`scripts/validate/ocean_fidelity/testcases/nemo_si3_o10_minmax_audit.py:12-100`.
 It pins ppsrc SHA-256
 `db71f3961ffd52fdce8092f9930d69a4abd2247b5b9cc744e9a00f5f9135c216`
 and record-object SHA-256
@@ -69,12 +69,15 @@ The tie conclusions are now deliberately narrow:
 - source line 334 uses nonzero `epsi10`, not `epsi06`;
 - lines 350, 397, and 482 are `MASKED` only because checked downstream
   comparisons cannot observe the surviving zero sign;
-- lines 535 and 641 are `MASKED` only because `zs_min` is read solely by the
-  deck-disabled `ln_sal_chk` diagnostics; their distinct object roles are still
-  pinned at the real model call sites;
-- lines 538 and 644 are `FOUND`: signed-zero operand swaps change the flux bit,
-  and the per-layer line-644 object roles are pinned;
-- line 619 is `NO_TIE` only under the production TEMP1 bound proved below.
+- line 535 is `MASKED` because `zs_min` is read solely by the deck-disabled
+  `ln_sal_chk` diagnostic;
+- lines 538 and 641 are `NO_TIE`: the former line-538 plant depended on an
+  unordered NaN, and the former line-641 plant depended on impossible
+  negative-zero layer salinity; both fixtures are removed;
+- line 644 is `FOUND`: finite, subfreezing columns under the unchanged
+  production namelist reach a real `-0/+0` clamp tie and flip the brine-flux
+  zero bit when either reachable role is swapped;
+- line 619 is `NO_TIE` under the analytic production TEMP1 bound proved below.
 
 ## Independent controls and review mutants
 
@@ -91,33 +94,72 @@ flux, RJW, and salinity-core functions, and each changes output bits while the
 protected function agrees with eager, at `:455-512`. The full-output digest is
 pinned at `:551-559`.
 
-Source-compiled plants flip the real drainage, line-641, and per-layer line-644
-call sites in `_si3_ice_thd_sal4_core`; the dedicated fixture reaches the
-line-641/644 signed-zero ties with `sfx_bri = -0`, and every flip changes output
-bits at `:603-677`. The three `MASKED` downstream arguments are separately
-checked at `:680-696`.
+Source-compiled plants flip the two reachable line-644 roles in
+`_si3_ice_thd_sal4_core`. The two-column fixture uses `h_i = 1 m`,
+`t_i = T0 - 0.1 K`, `sz_i = rn_simin = 0.1`, melting of `-0.001 m`, the
+unchanged production namelist, and initial `sfx_bri = {-0,+0}`. Both columns
+flush once; the protected result is `{+0,+0}`, while either role mutant gives
+`{-0,+0}`. The former NaN and zero-salinity role fixtures no longer exist.
+The real-call test is at `tests/ice/unit/test_si3_o10_salinity.py:603-668`.
+
+The three `MASKED` zero paths are now driven through `si3_ice_thd_sal`, not
+only through scalar argument algebra. Two melted boundary columns carry `+0`
+and `-0` salinity into the permeability numerator and `-0` VC19 brine into the
+`zs_brmax` accumulation; their complete model outputs agree bit-for-bit at
+`tests/ice/unit/test_si3_o10_salinity.py:671-704`.
 
 Real `jpl=5` O9 -> SAL -> TEMP2 composition runs all five categories against
-the scalar oracle and pins the reachability census at `:699-772`. The separate
+the scalar oracle and pins the reachability census at `:740-824`. The separate
 wiring plant gives every array a distinct identity token and checks each
-keyword, SAL ordering, and TEMP2 use at `:846-912`. Required-input and selector
-refusal checks are `:815-843`. The smooth production gradient/finite-difference
-check is `:775-793`, and the melted `h_i = 0` gradient check is `:796-812`.
+keyword, SAL ordering, and TEMP2 use at `:898-964`. Required-input and selector
+refusal checks are `:867-895`. The smooth production gradient/finite-difference
+check is `:827-845`, and the melted `h_i = 0` gradient check is `:848-864`.
 
-## Edge deviations and reachability
+## Edge deviations and analytic reachability
 
-The seed-19 five-category production composition resolves the reviewer
-disagreement rather than averaging it. It produces 27 gathered columns:
+The production exclusion of `t_i = T0` at flushing is analytic, not inferred
+from the former `0/3` synthetic overlap. NEMO first bounds layer salt volume in
+`ice_cor(1)` at
+`ORCA2_SAS_ICE_O7_REF/BLD/ppsrc/nemo/icecor.f90:113-121`. For positive ice
+volume, gathering divides that bounded salt volume by the positive layer
+volume, hence `sz_i >= rn_simin = 0.1`. The production SAS `sosaline` field has
+minimum positive value `4.484964847564697 g/kg`, so its upper bound
+`rn_sinew*sss` is always above `rn_simin`. The enthalpy construction and
+conservative remap at
+`ORCA2_SAS_ICE_O7_REF/BLD/ppsrc/nemo/icevar.f90:952-960` and `:1040-1046`
+preserve positive salt and physical nonnegative enthalpy.
 
-- 19/27 are salinity-active (`h_i >= rn_sal_himin`), and 0/19 has any
-  pre-salinity layer below `rn_simin = 0.1`;
-- 3/27 are melted-out numerical-residue columns with `sz_i = 0` and every
-  `t_i = T0`; thus the global lower-bound claim is false even though its
-  salinity-active form is true;
-- 3/27 are flush-eligible, but 0/3 of those has a `T0` layer.
+TEMP1 then follows
+`ORCA2_SAS_ICE_O7_REF/BLD/ppsrc/nemo/icethd.f90:279-291`. For `h_i > 0` and
+`sz_i > 0`, write `ztmelts = -m` with `m > 0`. Its discriminant is
+`zbbb**2 + 4*rcpi*rLfus*m`, strictly greater than `zbbb**2`; therefore
+`zccc > abs(zbbb)`, `zbbb + zccc > 0`, and the returned temperature is strictly
+below `rt0`. Exact `rt0` can occur only on the explicit `h_i <= 0` arm or when
+`sz_i == 0` permits exact quadratic cancellation. Flushing requires
+`h_i >= rn_sal_himin = 0.1` at
+`ORCA2_SAS_ICE_O7_REF/BLD/ppsrc/nemo/icethd_sal.f90:569-576`, so neither case
+is flush-eligible.
 
-These counts are computed and pinned in the real composition test at
-`tests/ice/unit/test_si3_o10_salinity.py:699-772`.
+The committed fp64 scan calls TEMP1 on 2,000,000 states: 1,000 energies from
+`0` through `1e9 J/m3` crossed with 2,000 salinities from `0.1` through
+`35 g/kg`. It finds no exact `T0` and minimum `T0 - t_i =
+5.399650853860294e-3 K` (5.40e-3 K). It also pins the two legal `T0` boundary
+examples. The test is
+`tests/ice/unit/test_si3_o10_salinity.py:707-737`.
+
+Argon's
+`ORCA2_SAS_ICE_O7_REF/BLD/ppsrc/nemo/icevar.f90:1045` observation identifies
+why that line alone is not a lower-bound proof: it has a `MAX(0,...)`. The
+lower bound comes from the upstream `ice_cor(1)` floor plus conservative
+overlap, not from the `MAX` token. In the seed-19 composition, all 19
+salinity-active states have
+`sz_i >= 0.1`. Of the eight states below the salinity threshold, five are
+thin positive columns (`h_i = 0.0348..0.0380 m`) with positive salt and are
+excluded from flushing by thickness; the other three are gone-ice numerical
+residues (`h_i = 2.17e-19..2.39e-18 m`, `sz_i = 0`, `t_i = T0`) with no melt
+and are excluded by both thickness and melt. Exactly three other columns are
+flush-eligible. These state classes are pinned at
+`tests/ice/unit/test_si3_o10_salinity.py:740-824`.
 
 Two forward implementations avoid invalid intermediate values:
 
@@ -127,8 +169,8 @@ Two forward implementations avoid invalid intermediate values:
    is exactly `T0`. The relevant NEMO loop is
    `ORCA2_SAS_ICE_O7_REF/BLD/ppsrc/nemo/icethd_sal.f90:593-644`, and the model
    code is `packages/ice/legoesm/ice/bitz_lipscomb.py:1874-1882`. This deviation
-   remains unreachable in the measured composition because the overlap count
-   between flush eligibility and `T0` layers is exactly 0.
+   is unreachable by the analytic TEMP1 and salinity-floor argument above;
+   the composition census is only a regression example, not its proof.
 2. After the first drainage iteration, NEMO's repeated harmonic mean has no
    early exit; a zero volume therefore has a forward `1/0 -> infinity -> +0`
    path whose transpose produced NaN. This path is reachable in the 3 melted
@@ -142,14 +184,14 @@ The guard changes zero forward bits against the pre-fix arithmetic on the full
 as proved at `tests/ice/unit/test_si3_o10_salinity.py:516-548`. The full fixture
 digest is also pinned. The explicit `h_i = 0`, all-layer `t_i = T0` column has
 finite gradients, with temperature gradient exactly zero and salinity gradient
-exactly one, at `:796-812`.
+exactly one, at `:848-864`.
 
 ## Citation-gate repair
 
 The former helper could overwrite a live citation-map key after AST duplicate
 inspection. Historical O10 line shifts now use a single delete-and-reinsert
 operation and reject unapplied replacement anchors at
-`scripts/validate/ocean_fidelity/testcases/nemo_testcase_receipt_citation_gate.py:10233-10270`.
+`scripts/validate/ocean_fidelity/testcases/nemo_testcase_receipt_citation_gate.py:10234-10271`.
 The gate now also rejects `CITATION_MAP.update` hidden in any helper and counts
 all top-level writes at
 `tests/ocean/fidelity/test_nemo_testcase_receipt_citation_gate.py:183-234`.
@@ -161,11 +203,11 @@ The frozen F1/F2/F3 master projection remains
 tool was added. P1-P3 remain untested; P4, independent scalar/model equality,
 is confirmed.
 
-All changes in this resume were ASKED review fixes: corrected audit labels,
-real-model barrier plants, real-call-site operand-role plants, the measured
-five-category reachability census, a forward-neutral permeability gradient
-guard, and the explicit melted-column gradient fixture. No configuration
-choice was made.
+All changes in this resume were ASKED review fixes: reachable line-644 role
+plants, removal of the NaN/zero-salinity pseudo-ties, the analytic TEMP1 proof
+and two-million-state scan, a model-driven masked-zero test, and an exact
+classification of the eight thin/residual composition states. No model or
+configuration code changed.
 
 ## CONFIRMED vs PLAUSIBLE
 
@@ -174,12 +216,13 @@ CONFIRMED:
 - Sonnet independently transcribed source lines 311-683 and found model
   arithmetic bit-exact on 6,500 random/stress columns; eager == JIT and the
   object contains no FMA, square root, or reciprocal instruction;
-- every requested barrier and operand-role mutant now turns its local test red
-  in the real salinity functions/call sites, including the line-641/644 ties;
+- both reachable line-644 role mutants turn the real salinity call red on the
+  finite production-NML columns; line 538's NaN and line 641's impossible
+  negative-zero pseudo-ties are explicitly no longer claimed;
 - the record-object census and hashes regenerate, and line 644's four unrolled
   copies have the pinned operand-role split;
-- the flush `safe_brine` deviation is unreachable in the measured production
-  composition (0/3 flush-eligible columns have a `T0` layer); the repeated
+- the flush `safe_brine` deviation is unreachable by the analytic TEMP1 proof
+  and the two-million-state scan; the repeated
   permeability gradient defect is reachable in 3/27 melted columns and is now
   guarded with zero forward-bit changes on the full fixture plus fuzz;
 - no physical-input default, acquisition tool, or configuration change exists.

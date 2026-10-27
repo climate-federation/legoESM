@@ -25,10 +25,11 @@ TIE_LEMMAS = {
         "comparison; equal finite nonzero operands have identical bits."
     ),
     "L1": (
-        "For salinity-active production columns (h_i >= rn_sal_himin), the "
-        "measured O10 entry has sz_i >= rn_simin = 0.1; TEMP1 therefore has "
-        "t_i-rt0 <= -rTmlt*rn_simin = -0.0054 K. Melted-out columns are "
-        "measured separately and do reach t_i = rt0."
+        "ice_cor(1) bounds every positive-volume production layer at "
+        "sz_i >= rn_simin = 0.1, and the conservative remap preserves "
+        "positive salinity and nonnegative enthalpy.  In TEMP1, sz_i > 0 "
+        "makes the discriminant strictly larger than zbbb**2, so its positive "
+        "root cannot cancel to rt0; only h_i <= 0 or sz_i == 0 can return rt0."
     ),
     "L2": (
         "ABS produces +0 for either signed-zero input, and comparisons do not "
@@ -37,7 +38,8 @@ TIE_LEMMAS = {
     "L3": (
         "The unrolled line-644 object emits MIN(0,zds) as (dst,src)=(zds,0) "
         "except in layer 9, and emits the outer MAX as (MIN,floor) except in "
-        "layers 9 and 10; the committed bit-changing plants pin both splits."
+        "layers 9 and 10; finite production-NML columns at the salinity floor "
+        "make the layer-9 inner role and outer role flip the brine-flux zero."
     ),
 }
 
@@ -55,13 +57,13 @@ TIE_VERDICTS = {
     "sal:497": {"verdict": "NO_TIE", "proof": "zRa-rn_Rc_RJW is nonnegative under its enclosing guard (L0)."},
     "sal:534": {"verdict": "NO_TIE", "proof": "Both candidates are ABS results, hence never -0 (L2)."},
     "sal:535": {"verdict": "MASKED", "proof": "zs_min is read only under deck-disabled ln_sal_chk (census)."},
-    "sal:538": {"verdict": "FOUND", "proof": "zds and the floor can tie as -0/+0; the flux-bit plant fires."},
+    "sal:538": {"verdict": "NO_TIE", "proof": "The former plant used an unordered NaN, not a finite signed-zero tie; it is removed (L0)."},
     "sal:569": {"verdict": "NO_TIE", "proof": "Other operand is nonzero epsi10 (L0)."},
     "sal:605": {"verdict": "NO_TIE", "proof": "Both candidates are ABS results, hence never -0 (L2)."},
-    "sal:619": {"verdict": "NO_TIE", "proof": "All three measured flush-eligible production columns satisfy L1, so their zmsk and divisors are nonzero."},
+    "sal:619": {"verdict": "NO_TIE", "proof": "The analytic production TEMP1 bound makes every flush-eligible zmsk and divisor nonzero (L1)."},
     "sal:637": {"verdict": "NO_TIE", "proof": "Both candidates are ABS results, hence never -0 (L2)."},
-    "sal:641": {"verdict": "MASKED", "proof": "zs_min is read only under deck-disabled ln_sal_chk (census)."},
-    "sal:644": {"verdict": "FOUND", "proof": "Both zero-valued clamps have layer-specific survivors pinned by L3."},
+    "sal:641": {"verdict": "NO_TIE", "proof": "Production sz_i is positive; exact cancellation in sz_i+zds yields +0, not the former synthetic -0 operand (L1)."},
+    "sal:644": {"verdict": "FOUND", "proof": "Finite production-NML columns hit a real layer-9 -0/+0 clamp tie and flip sfx_bri (L3)."},
     "sal:677": {"verdict": "NO_TIE", "proof": "The inner clamp uses nonzero rn_simin and the outer clamp uses positive rn_sinew*sss on the production deck (L0)."},
 }
 

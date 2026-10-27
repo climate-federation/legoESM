@@ -135,8 +135,8 @@ def test_census_names_are_real_and_tie_labels_match_checked_object_facts():
         "verdict": "NO_TIE", "proof": "Other operand is nonzero epsi10 (L0)."
     }
     assert verdicts["sal:535"]["verdict"] == "MASKED"
-    assert verdicts["sal:538"]["verdict"] == "FOUND"
-    assert verdicts["sal:641"]["verdict"] == "MASKED"
+    assert verdicts["sal:538"]["verdict"] == "NO_TIE"
+    assert verdicts["sal:641"]["verdict"] == "NO_TIE"
     assert verdicts["sal:644"]["verdict"] == "FOUND"
     assert set(census["zs_brmax"]) == {"340", "350", "357"}
     assert "> sss_1d" in census["zs_brmax"]["357"][1]

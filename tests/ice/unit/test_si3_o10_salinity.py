@@ -600,28 +600,21 @@ def test_salinity4_branch_and_subcycle_coverage_is_real():
     }
 
 
-def _role_fixture(kind):
-    T0 = NEMO_SI3_CONSTANTS_CONFIG.T0
-    if kind == "drain":
-        temperature = T0 - np.linspace(2.0, 12.0, 10)
-        temperature[0] = np.nan
-        arrays = {
-            "h_i": [1.0], "t_su": [T0 - 5.0], "t_i": [temperature],
-            "sz_i": [np.full(10, 10.0)], "t_bo": [T0 - 1.8], "sss": [0.2],
-            "a_i": [0.8], "dh_i_sum": [0.0], "dh_s_sum": [0.0],
-            "sfx_bri": [-0.0], "sfx_res": [0.0],
-        }
-        return tuple(jnp.asarray(arrays[name]) for name in _ARRAY_NAMES), NML
+def _reachable_flush_role_fixture():
+    """Two production-NML columns at the real line-644 signed-zero tie."""
 
+    T0 = NEMO_SI3_CONSTANTS_CONFIG.T0
+    temperature = np.full(10, T0 - 0.1)
     arrays = {
-        "h_i": [0.1], "t_su": [T0 - 1.0], "t_i": [np.full(10, T0)],
-        "sz_i": [np.full(10, -0.0)], "t_bo": [T0 - 1.8], "sss": [32.0],
-        "a_i": [0.8], "dh_i_sum": [-0.001], "dh_s_sum": [0.0],
-        "sfx_bri": [-0.0], "sfx_res": [0.0],
+        "h_i": [1.0, 1.0], "t_su": [T0 - 1.0, T0 - 1.0],
+        "t_i": [temperature, temperature],
+        "sz_i": [np.full(10, NML["rn_simin"])] * 2,
+        "t_bo": [T0 - 1.8, T0 - 1.8], "sss": [32.0, 32.0],
+        "a_i": [0.8, 0.8], "dh_i_sum": [-0.001, -0.001],
+        "dh_s_sum": [0.0, 0.0], "sfx_bri": [-0.0, 0.0],
+        "sfx_res": [0.0, 0.0],
     }
-    simin = -1.0 if kind == "flush_inner_other" else 0.0
-    namelist = {**NML, "rn_simin": simin, "rn_vbrc": 0.0}
-    return tuple(jnp.asarray(arrays[name]) for name in _ARRAY_NAMES), namelist
+    return tuple(jnp.asarray(arrays[name]) for name in _ARRAY_NAMES)
 
 
 def _role_model(namelist, *values):
@@ -636,17 +629,10 @@ def _role_model(namelist, *values):
 @pytest.mark.parametrize(
     ("site", "old", "new"),
     [
-        ("drain", "_maxsd(zds_raw, floor_delta)", "_maxsd(floor_delta, zds_raw)"),
-        ("flush_smin", "_minsd(sal_min, raw_salinity)", "_minsd(raw_salinity, sal_min)"),
         (
             "flush_inner9",
             "_minsd(zero, zds_raw) if jk == 8 else _minsd(zds_raw, zero)",
             "_minsd(zds_raw, zero) if jk == 8 else _minsd(zds_raw, zero)",
-        ),
-        (
-            "flush_inner_other",
-            "_minsd(zero, zds_raw) if jk == 8 else _minsd(zds_raw, zero)",
-            "_minsd(zero, zds_raw) if jk == 8 else _minsd(zero, zds_raw)",
         ),
         (
             "flush_outer",
@@ -655,45 +641,100 @@ def _role_model(namelist, *values):
         ),
     ],
 )
-def test_real_salinity_callsite_role_plants_change_bits(site, old, new, monkeypatch):
-    kind = "drain" if site == "drain" else site
-    args, namelist = _role_fixture(kind)
-    assert _bits(args[_ARRAY_NAMES.index("sfx_bri")])[0] == np.uint64(1 << 63)
-    protected = jax.jit(lambda *values: _role_model(namelist, *values))(*args)
+def test_reachable_line_644_role_plants_flip_the_brine_flux_zero(
+    site, old, new, monkeypatch
+):
+    args = _reachable_flush_role_fixture()
+    temperature = np.asarray(args[_ARRAY_NAMES.index("t_i")])
+    salinity = np.asarray(args[_ARRAY_NAMES.index("sz_i")])
+    initial_flux = _bits(args[_ARRAY_NAMES.index("sfx_bri")])
+    assert np.all(temperature < NEMO_SI3_CONSTANTS_CONFIG.T0 - 1.0e-6)
+    assert np.all(salinity == NML["rn_simin"])
+    np.testing.assert_array_equal(initial_flux, [np.uint64(1 << 63), 0])
+
+    protected = jax.jit(lambda *values: _role_model(NML, *values))(*args)
     mutant = _source_mutant(bl._si3_ice_thd_sal4_core, old, new)
     monkeypatch.setattr(bl, "_si3_ice_thd_sal4_core", mutant)
-    planted = jax.jit(lambda *values: _role_model(namelist, *values))(*args)
+    planted = jax.jit(lambda *values: _role_model(NML, *values))(*args)
     changed = [
         np.count_nonzero(_bits(got) != _bits(want))
         for got, want in zip(planted, protected)
     ]
-    assert sum(changed) > 0
-    if site == "flush_smin":
-        assert _bits(protected.smin_flush)[0] == np.uint64(1 << 63)
-        assert changed[-1] == 1
-    if site in ("flush_inner9", "flush_outer"):
-        assert changed[1] == 1
-    if site == "flush_inner_other":
-        assert changed[0] == 8
+    np.testing.assert_array_equal(protected.nflushing, [1, 1])
+    np.testing.assert_array_equal(_bits(protected.sfx_bri), [0, 0])
+    np.testing.assert_array_equal(
+        _bits(planted.sfx_bri), [np.uint64(1 << 63), 0]
+    )
+    assert changed == [0, 1, 0, 0, 0, 0, 0, 0, 0], site
 
 
-def test_masked_signed_zero_sites_have_checked_downstream_arguments():
-    positive_zero = np.float64(0.0)
-    negative_zero = np.float64(-0.0)
+def test_masked_signed_zero_paths_are_checked_through_the_salinity_model():
+    """Melted boundary columns drive +/-0 volume and -0 ``zs_brmax`` paths."""
 
-    # sal:350 consumes zs_brmax only in a comparison with sss.  The comparison
-    # cannot observe the zero sign, so both survivors select the same branch.
-    assert not bool(positive_zero > np.float64(0.0))
-    assert not bool(negative_zero > np.float64(0.0))
+    T0 = NEMO_SI3_CONSTANTS_CONFIG.T0
+    arrays = {
+        "h_i": [0.0, 0.0], "t_su": [T0, T0],
+        "t_i": [np.full(10, T0), np.full(10, T0)],
+        "sz_i": [np.full(10, 0.0), np.full(10, -0.0)],
+        "t_bo": [T0 - 1.8, T0 - 1.8], "sss": [32.0, 32.0],
+        "a_i": [0.0, 0.0], "dh_i_sum": [0.0, 0.0],
+        "dh_s_sum": [0.0, 0.0], "sfx_bri": [0.0, 0.0],
+        "sfx_res": [0.0, 0.0],
+    }
+    args = tuple(jnp.asarray(arrays[name]) for name in _ARRAY_NAMES)
+    mask = jnp.zeros_like(args[_ARRAY_NAMES.index("sz_i")])
+    volume_numerator = bl.nemo_source_round(
+        mask * args[_ARRAY_NAMES.index("sz_i")]
+    )
+    assert np.all(_bits(volume_numerator[0]) == 0)
+    assert np.all(_bits(volume_numerator[1]) == np.uint64(1 << 63))
+    brine = bl._sal4_vc19_brine(
+        args[_ARRAY_NAMES.index("t_i")], NEMO_SI3_CONSTANTS_CONFIG.T0
+    )
+    assert np.all(_bits(brine) == np.uint64(1 << 63))
 
-    # sal:397/:482 multiply the permeability into zRa before the RJW critical
-    # comparison.  Its sign can differ, but both zeros are subcritical and the
-    # initialized velocity stays the same +0 bit pattern.
-    rayleigh = [positive_zero * np.float64(3.0), negative_zero * np.float64(3.0)]
-    assert _bits(rayleigh[0]) != _bits(rayleigh[1])
-    velocities = [np.float64(0.0) if value < np.float64(8.0) else value
-                  for value in rayleigh]
-    assert [_bits(value) for value in velocities] == [_bits(positive_zero)] * 2
+    out = jax.jit(lambda *values: _role_model(NML, *values))(*args)
+    assert np.all(np.asarray(out.ndrainage) == 0)
+    assert np.all(np.asarray(out.nflushing) == 0)
+    for leaf in out:
+        values = np.asarray(leaf)
+        if np.issubdtype(values.dtype, np.floating):
+            np.testing.assert_array_equal(_bits(values[0]), _bits(values[1]))
+        else:
+            np.testing.assert_array_equal(values[0], values[1])
+
+
+def test_temp1_two_million_state_scan_excludes_t0_for_positive_salinity():
+    """TEMP1's physical arm stays below T0 throughout a broad fp64 scan."""
+
+    n_energy, n_salinity = 1000, 2000
+    energy_axis = jnp.linspace(0.0, 1.0e9, n_energy, dtype=jnp.float64)
+    salinity_axis = jnp.linspace(0.1, 35.0, n_salinity, dtype=jnp.float64)
+    energy = jnp.broadcast_to(
+        energy_axis[:, None], (n_energy, n_salinity)
+    ).reshape(-1, 1)
+    salinity = jnp.broadcast_to(
+        salinity_axis[None, :], (n_energy, n_salinity)
+    ).reshape(-1, 1)
+    thickness = jnp.ones(n_energy * n_salinity, dtype=jnp.float64)
+    temperature = jax.jit(
+        lambda h_i, e_i, sz_i: bl.si3_ice_thd_temp(
+            h_i=h_i, e_i=e_i, sz_i=sz_i,
+            constants=NEMO_SI3_CONSTANTS_CONFIG,
+        )
+    )(thickness, energy, salinity)
+    gap = NEMO_SI3_CONSTANTS_CONFIG.T0 - np.asarray(temperature)
+    assert gap.size == 2_000_000
+    assert np.count_nonzero(
+        np.asarray(temperature) == NEMO_SI3_CONSTANTS_CONFIG.T0
+    ) == 0
+    assert 5.399e-3 < float(np.min(gap)) < 5.401e-3
+
+    boundary = bl.si3_ice_thd_temp(
+        h_i=jnp.asarray([0.0, 1.0]), e_i=jnp.zeros((2, 1)),
+        sz_i=jnp.zeros((2, 1)), constants=NEMO_SI3_CONSTANTS_CONFIG,
+    )
+    np.testing.assert_array_equal(boundary, NEMO_SI3_CONSTANTS_CONFIG.T0)
 
 
 def test_five_category_o9_sal_temp2_composition_matches_scalar_oracle():
@@ -704,6 +745,9 @@ def test_five_category_o9_sal_temp2_composition_matches_scalar_oracle():
     salinity_active = 0
     below_floor = 0
     melted_temperature = 0
+    thin_positive = 0
+    zero_salt_residue = 0
+    excluded_from_flush = 0
     flush_eligible = 0
     flush_with_melted_temperature = 0
     for jl, cells in enumerate(categories):
@@ -750,6 +794,13 @@ def test_five_category_o9_sal_temp2_composition_matches_scalar_oracle():
             flush = h_i >= NML["rn_sal_himin"] and melting
             flush_eligible += int(flush)
             flush_with_melted_temperature += int(flush and has_melted_temperature)
+            thin_positive += int(
+                0.0 < h_i < NML["rn_sal_himin"] and np.all(salt > 0.0)
+            )
+            zero_salt_residue += int(
+                0.0 < h_i < NML["rn_sal_himin"] and np.all(salt == 0.0)
+            )
+            excluded_from_flush += int(h_i < NML["rn_sal_himin"] and not flush)
             if h_i >= NML["rn_sal_himin"]:
                 salinity_active += 1
                 assert np.all(salt >= NML["rn_simin"])
@@ -770,6 +821,7 @@ def test_five_category_o9_sal_temp2_composition_matches_scalar_oracle():
     assert checked_columns == sum(len(cells) for cells in categories)
     assert (salinity_active, below_floor, melted_temperature) == (19, 3, 3)
     assert (flush_eligible, flush_with_melted_temperature) == (3, 0)
+    assert (thin_positive, zero_salt_residue, excluded_from_flush) == (5, 3, 8)
 
 
 def test_salinity4_gradient_is_finite_nonzero_and_matches_central_difference():
