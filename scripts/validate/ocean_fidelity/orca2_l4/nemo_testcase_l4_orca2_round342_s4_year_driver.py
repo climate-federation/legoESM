@@ -471,7 +471,7 @@ def run_standalone_k0_driver(
         "jax_devices": devices,
         "snapshots": saved_snapshots,
         "completed_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "worktree": worktree_stamp(allow_dirty=True),
+        "worktree": worktree_stamp(allow_dirty=False),
     }
     manifest_path = output_dir / "run_manifest.json"
     manifest_path.write_text(

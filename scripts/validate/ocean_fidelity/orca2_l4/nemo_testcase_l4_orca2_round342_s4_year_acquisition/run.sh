@@ -4,19 +4,23 @@
 #
 # Modes:
 #   --preflight-only                  Default. Runs all Checklist 1-16 preflight
-#                                     gates, Fortran fixture, FP census, and
-#                                     end-to-end stub pipeline without running NEMO.
+#                                     gates, Fortran fixture, FP census, safety
+#                                     plants, and end-to-end stub pipeline
+#                                     without running NEMO.
 #   --run                             Operator-only. Builds observer-free K0 config
 #                                     ORCA2_STANDALONE_IIF_OMIP_L4_R342S4Y (empty MY_SRC),
 #                                     runs reproducibility Twin A (orca2_k0_year1_a_np2)
 #                                     and candidate Twin B (orca2_k0_year1_b_np2) for
 #                                     2,920 steps (nn_stock=8 daily restarts, 5,400 s
-#                                     timeout per arm), and admits both twins.
-#   --admit-existing <run_root>       Admits existing Twin A + Twin B in-place, or
-#                                     quarantines failed runs to <run_root>/refused/.
+#                                     foreground timeout per arm), and admits both twins.
+#   --admit-existing <run_root>       Admits existing Twin A + Twin B in-place or
+#                                     from <run_root>/refused/, pinning to
+#                                     producer_manifest.json commit + binary digest,
+#                                     and quarantining failed in-place runs to
+#                                     <run_root>/refused/ (never deleting).
 #   --stub-run-dir <stub_root>        Replaces ONLY the ./nemo binary inside the real
 #                                     staging + mpirun + admission pipeline.
-set -euo pipefail
+set -Eeuo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../../../../.." && pwd)"
@@ -42,11 +46,14 @@ ICE_COVER_PATH="/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/rou
 EVIDENCE_DIR="/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/orca2_r342"
 PER_ARM_TIMEOUT=5400
 EXPECTED_STEPS=2920
+REQUIRED_RAM_GIB="${R342_REQUIRED_RAM_GIB:-150}"
+REQUIRED_DISK_GIB="${R342_REQUIRED_DISK_GIB:-50}"
 
 MODE="preflight"
 ADMIT_ROOT=""
 STUB_ROOT=""
 PLANT_STUB_UNPRODUCED=0
+PLANT_STUB_SLEEP=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -60,21 +67,29 @@ while [[ $# -gt 0 ]]; do
       ;;
     --admit-existing)
       MODE="admit_existing"
-      ADMIT_ROOT="$2"
+      ADMIT_ROOT="${2:-}"
       shift 2
       ;;
     --stub-run-dir)
       MODE="stub"
-      STUB_ROOT="$2"
+      STUB_ROOT="${2:-}"
       shift 2
       ;;
     --stub-steps)
       EXPECTED_STEPS="$2"
       shift 2
       ;;
+    --stub-timeout)
+      PER_ARM_TIMEOUT="$2"
+      shift 2
+      ;;
     --plant-stub-unproduced-file)
       PLANT_STUB_UNPRODUCED=1
       shift
+      ;;
+    --plant-stub-sleep)
+      PLANT_STUB_SLEEP="$2"
+      shift 2
       ;;
     --ice-cover)
       ICE_COVER_PATH="$2"
@@ -87,21 +102,70 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-check_memory_and_processes() {
-  local avail_gb
-  avail_gb="$(free -g | awk '/^Mem:/ {print $7}')"
-  if [[ -z "${avail_gb}" || "${avail_gb}" -lt 150 ]]; then
-    echo "REFUSE: available RAM is ${avail_gb:-0} GiB (< 150 GiB required by Memory Rule)" >&2
+check_clean_worktree() {
+  local check_repo="${R342_CHECK_REPO_ROOT:-${REPO_ROOT}}"
+  local dirty
+  dirty="$(git -C "${check_repo}" status --porcelain --untracked-files=all)"
+  if [[ -n "${dirty}" ]]; then
+    echo "REFUSE: git worktree ${check_repo} has uncommitted or untracked files:" >&2
+    echo "${dirty}" >&2
     exit 1
   fi
+}
+
+check_memory_and_disk() {
+  local target_dir="${1:-${RUN_ROOT}}"
+  local avail_gb
+  avail_gb="$(free -g | awk '/^Mem:/ {print $7}')"
+  if [[ -z "${avail_gb}" || "${avail_gb}" -lt "${REQUIRED_RAM_GIB}" ]]; then
+    echo "REFUSE: available RAM is ${avail_gb:-0} GiB (< ${REQUIRED_RAM_GIB} GiB required by Memory Rule)" >&2
+    exit 1
+  fi
+  local probe_dir="${target_dir}"
+  while [[ ! -d "${probe_dir}" && "${probe_dir}" != "/" ]]; do
+    probe_dir="$(dirname "${probe_dir}")"
+  done
+  local avail_kib req_kib
+  avail_kib="$(df -Pk "${probe_dir}" | awk 'NR==2 {print $4}')"
+  req_kib="$(( REQUIRED_DISK_GIB * 1024 * 1024 ))"
+  if [[ -z "${avail_kib}" || "${avail_kib}" -lt "${req_kib}" ]]; then
+    echo "REFUSE: available disk space at ${probe_dir} is $(( ${avail_kib:-0} / 1024 / 1024 )) GiB (< ${REQUIRED_DISK_GIB} GiB required)" >&2
+    exit 1
+  fi
+}
+
+check_no_active_nemo() {
   if pgrep -f '(^|/)nemo(\.exe)?([[:space:]]|$)' >/dev/null 2>&1; then
     echo "REFUSE: an active NEMO process is already running on this machine" >&2
     exit 1
   fi
 }
 
+quarantine_arms() {
+  local target_root="$1"
+  shift
+  local ts
+  ts="$(date -u +%Y%m%dT%H%M%SZ)"
+  local refused_dir="${target_root}/refused"
+  mkdir -p "${refused_dir}"
+  local arm_dir dest
+  for arm_dir in "$@"; do
+    if [[ -d "${arm_dir}" ]]; then
+      dest="${refused_dir}/${ts}_$(basename "${arm_dir}").failed.$$"
+      mv "${arm_dir}" "${dest}"
+      echo "R342_REFUSED_ARM_QUARANTINED ${dest}" >&2
+    fi
+  done
+}
+
 build_observer_free_k0_nemo() {
-  check_memory_and_processes
+  check_clean_worktree
+  check_memory_and_disk "${RUN_ROOT}"
+  check_no_active_nemo
+  if [[ -e "${BUILD_CFG}" ]]; then
+    echo "REFUSE: build config ${BUILD_CFG} already exists; move aside before re-building (never delete)" >&2
+    exit 1
+  fi
   local source_cfg="ORCA2_STANDALONE_IIF_OMIP_L4_R339K0"
   local source_root="${NEMO_ROOT}/cfgs/${source_cfg}"
   echo "Building observer-free K0 config ${TARGET_CFG_NAME} in ${NEMO_ROOT} ..."
@@ -132,40 +196,62 @@ build_observer_free_k0_nemo() {
 stage_single_arm() {
   local arm_dir="$1"
   local nemo_bin="$2"
-  rm -rf "${arm_dir}"
-  mkdir -p "${arm_dir}"
+  if [[ -e "${arm_dir}" || -L "${arm_dir}" ]]; then
+    echo "REFUSE: retained arm directory already exists: ${arm_dir} (quarantine to refused/ or move aside before re-running; never delete)" >&2
+    return 1
+  fi
+  mkdir "${arm_dir}"
   "${PYTHON_BIN}" "${GATE_PY}" \
     --stage-run-dir "${arm_dir}" \
     --ice-cover "${ICE_COVER_PATH}" \
     --expected-steps "${EXPECTED_STEPS}" >/dev/null
   if [[ "${nemo_bin}" == "__STUB__" ]]; then
-    local extra_flag=""
+    local extra_flags=()
     if [[ "${PLANT_STUB_UNPRODUCED}" -eq 1 ]]; then
-      extra_flag="--plant-stub-unproduced-file"
+      extra_flags+=("--plant-stub-unproduced-file")
+    fi
+    if [[ "${PLANT_STUB_SLEEP}" -gt 0 ]]; then
+      extra_flags+=("--plant-stub-sleep" "${PLANT_STUB_SLEEP}")
     fi
     cat > "${arm_dir}/nemo" <<EOF
 #!/usr/bin/env bash
-exec "${PYTHON_BIN}" "${GATE_PY}" --act-as-nemo-binary ${extra_flag}
+exec "${PYTHON_BIN}" "${GATE_PY}" --act-as-nemo-binary ${extra_flags[*]:-}
 EOF
     chmod +x "${arm_dir}/nemo"
   else
     cp -a "${nemo_bin}" "${arm_dir}/nemo"
   fi
+  "${PYTHON_BIN}" "${GATE_PY}" --write-run-manifest "${arm_dir}" >/dev/null
 }
 
 run_single_arm() {
   local arm_dir="$1"
   local timeout_s="$2"
-  if ! (
+  local rc=0
+  (
     cd "${arm_dir}"
-    timeout --signal=TERM --kill-after=30s "${timeout_s}" \
+    timeout --foreground --signal=TERM --kill-after=30s "${timeout_s}s" \
       mpirun -np 2 --oversubscribe ./nemo \
       >mpirun.stdout.log 2>mpirun.stderr.log
-  ); then
-    echo "REFUSE: mpirun failed in ${arm_dir}:" >&2
+  ) || rc=$?
+  if [[ "${rc}" -ne 0 ]]; then
+    echo "REFUSE: mpirun failed or timed out (rc=${rc}) in ${arm_dir}:" >&2
     cat "${arm_dir}/mpirun.stdout.log" "${arm_dir}/mpirun.stderr.log" >&2 || true
+    return "${rc}"
+  fi
+  if ! grep -F 'STOP 0' "${arm_dir}/mpirun.stdout.log" >/dev/null 2>&1; then
+    echo "REFUSE: missing clean STOP 0 in ${arm_dir}/mpirun.stdout.log" >&2
     return 1
   fi
+  if [[ ! -f "${arm_dir}/ocean.output" ]]; then
+    echo "REFUSE: missing ${arm_dir}/ocean.output" >&2
+    return 1
+  fi
+  if LC_ALL=C grep -Eq 'E R R O R|STOP [1-9][0-9]*([^0-9]|$)' "${arm_dir}/mpirun.stdout.log" "${arm_dir}/ocean.output"; then
+    echo "REFUSE: runtime error marker found in ${arm_dir}" >&2
+    return 1
+  fi
+  "${PYTHON_BIN}" "${GATE_PY}" --write-run-manifest "${arm_dir}" >/dev/null
 }
 
 run_twin_pipeline() {
@@ -176,9 +262,18 @@ run_twin_pipeline() {
   local arm_b="${target_root}/${TWIN_B_NAME}"
   mkdir -p "${target_root}"
   stage_single_arm "${arm_a}" "${nemo_bin}"
-  stage_single_arm "${arm_b}" "${nemo_bin}"
-  run_single_arm "${arm_a}" "${timeout_s}"
-  run_single_arm "${arm_b}" "${timeout_s}"
+  if ! stage_single_arm "${arm_b}" "${nemo_bin}"; then
+    quarantine_arms "${target_root}" "${arm_a}"
+    return 1
+  fi
+  if ! run_single_arm "${arm_a}" "${timeout_s}"; then
+    quarantine_arms "${target_root}" "${arm_a}" "${arm_b}"
+    return 1
+  fi
+  if ! run_single_arm "${arm_b}" "${timeout_s}"; then
+    quarantine_arms "${target_root}" "${arm_a}" "${arm_b}"
+    return 1
+  fi
   "${PYTHON_BIN}" "${GATE_PY}" \
     --admit-existing "${target_root}" \
     --build-cfg "${BUILD_CFG}" \
@@ -187,6 +282,8 @@ run_twin_pipeline() {
 
 case "${MODE}" in
   preflight)
+    check_clean_worktree
+    check_memory_and_disk "${EVIDENCE_DIR}"
     "${PYTHON_BIN}" "${GATE_PY}" \
       --preflight-only \
       --evidence-dir "${EVIDENCE_DIR}" \
@@ -199,20 +296,25 @@ case "${MODE}" in
       echo "REFUSE: --stub-run-dir requires a path" >&2
       exit 2
     fi
-    run_twin_pipeline "${STUB_ROOT}" "__STUB__" 300
+    check_clean_worktree
+    check_memory_and_disk "${STUB_ROOT}"
+    run_twin_pipeline "${STUB_ROOT}" "__STUB__" "${PER_ARM_TIMEOUT}"
     ;;
   admit_existing)
     if [[ -z "${ADMIT_ROOT}" ]]; then
       echo "REFUSE: --admit-existing requires a path" >&2
       exit 2
     fi
+    check_clean_worktree
     "${PYTHON_BIN}" "${GATE_PY}" \
       --admit-existing "${ADMIT_ROOT}" \
       --build-cfg "${BUILD_CFG}" \
       --expected-steps "${EXPECTED_STEPS}"
     ;;
   run)
-    check_memory_and_processes
+    check_clean_worktree
+    check_memory_and_disk "${RUN_ROOT}"
+    check_no_active_nemo
     "${PYTHON_BIN}" "${GATE_PY}" \
       --preflight-only \
       --evidence-dir "${EVIDENCE_DIR}" \
