@@ -113,7 +113,8 @@ def toa_net(run, lat, lon):
         with netCDF4.Dataset(_one(f"{run}/cmor/Amon/{v}_Amon_*.nc")) as d:
             x = _finite(d[v][:], v)
             if (x.shape[0] != 1 or d["time"].units != T_UNITS
-                    or float(d["time_bnds"][0, 0]) != 0.0  # record starts Jan 1
+                    or float(d["time_bnds"][0, 0]) != 0.0  # record is January:
+                    or float(d["time_bnds"][0, 1]) > 31.0  # starts Jan 1, ends by Feb 1
                     or not np.array_equal(d["lat"][:], lat)
                     or not np.array_equal(d["lon"][:], lon)):
                 raise SystemExit(f"FATAL: {run} {v} Amon record/grid unexpected")
