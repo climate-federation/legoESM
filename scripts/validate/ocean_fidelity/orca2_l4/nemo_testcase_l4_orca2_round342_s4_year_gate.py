@@ -123,6 +123,23 @@ OBSERVER_SYMBOL_PATTERNS = (
 )
 
 
+NEMO_BUILD_BINS = (
+    Path("/home/dbalwada/miniconda3/envs/nemo-build/bin"),
+    Path("/home/dbalwada/spack-envs/nemo5/.spack-env/view/bin"),
+)
+
+
+def _tool_bin(name: str) -> str:
+    found = shutil.which(name)
+    if found:
+        return found
+    for bin_dir in NEMO_BUILD_BINS:
+        candidate = bin_dir / name
+        if candidate.is_file():
+            return str(candidate)
+    return name
+
+
 def _scratch_root() -> Path:
     root = DEFAULT_EVIDENCE_DIR / "tmp"
     root.mkdir(parents=True, exist_ok=True)
@@ -562,7 +579,7 @@ end program test_r342_restart_fixture
         bin_path = Path(tmp) / "test_r342_restart_fixture"
         src_path.write_text(fortran_code, encoding="utf-8")
         comp = subprocess.run(
-            ["gfortran", "-fdefault-real-8", "-fcheck=bounds", "-g", "-O0",
+            [_tool_bin("gfortran"), "-fdefault-real-8", "-fcheck=bounds", "-g", "-O0",
              str(src_path), "-o", str(bin_path)],
             capture_output=True,
             text=True,
@@ -635,7 +652,7 @@ def verify_real_flag_fp_census(
     with tempfile.TemporaryDirectory(dir=_scratch_root()) as tmp:
         recompiled_obj = Path(tmp) / "restart.o"
         cmd = [
-            "mpif90",
+            _tool_bin("mpif90"),
             "-c",
             *flag_tokens,
             f"-I{reference_bld / 'inc'}",
@@ -674,7 +691,7 @@ def plant_fp_drift(reference_bld: Path) -> dict[str, Any]:
         planted_obj = Path(tmp) / "restart.o"
         planted_src.write_text(planted_text, encoding="utf-8")
         cmd = [
-            "mpif90",
+            _tool_bin("mpif90"),
             "-c",
             *flag_tokens,
             f"-I{reference_bld / 'inc'}",
