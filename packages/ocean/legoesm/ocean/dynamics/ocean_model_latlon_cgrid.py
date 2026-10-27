@@ -2264,7 +2264,7 @@ def _nemo_ws_stage_transport(
     momentum_velocity_form_w=False, momentum_wzv_clock=None,
     legacy_wzv_rederived_transport=False,
     legacy_aimp_midpoint_w_metric=False, runoff_mass_flux=None,
-    nemo_stage_pair=None,
+    nemo_stage_pair=None, stored_h_stage=False,
 ):
     """NEMO ``stprk3_stg.F90:257-304`` Kmm stage transport triplet.
 
@@ -2287,10 +2287,10 @@ def _nemo_ws_stage_transport(
     stage velocity (``stprk3_stg.f90:360``, the velocity indicator), or
     ``None`` on cards that do not run that second solve.  The native pair retains NEMO's product association;
     dividing it back to a metric-free flux and multiplying again is not
-    bitwise equivalent on the rotated GYRE grid.
-    """
+    bitwise equivalent on the rotated GYRE grid."""
+    if stored_h_stage and stage_index != 1: raise ValueError("stored_h_stage is Stage-2 (stage_index == 1) only")  # noqa: E501,E701
     u_stage, v_stage = stage_velocity
-    h_stage = nemo_qco_live_t_thickness(
+    h_stage = jnp.asarray(h_stage) if stored_h_stage else nemo_qco_live_t_thickness(  # noqa: E501
         eta_stage, H_bathy, z_coord, jnp.asarray(h_stage).dtype,
         e3t_0=h_ref)
     if legacy_min_face_thickness:
@@ -9568,8 +9568,8 @@ class LatLonCGridOceanModel:
                     _T_stage1, _S_stage1, _eta_live_one_third)
             # stage 2 (dt/2): Kmm = stage-1 Kaa
             _g1 = _nemo_ws_stage_transport(
-                (u1_corr, v1_corr), _h_live_one_third, 1,
-                eta_stage=_eta_live_one_third,
+                (u1_corr, v1_corr), _h_s2_kmm, 1,
+                eta_stage=_eta_live_one_third, stored_h_stage=bool(_cfg_b.rk3_stage2_tracer_nemo_stored_thickness),  # noqa: E501
                 nemo_stage_pair=(
                     _nemo_ws_stage_pair(_cfg_b, 1, _ws_eta_pair)
                     if _cfg_b.rk3_stage_transport_stored_r3uv else None),

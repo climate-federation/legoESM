@@ -22,11 +22,16 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import json
 import os
+import subprocess
 import sys
+import textwrap
+import types
 from collections import Counter
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 
@@ -76,6 +81,7 @@ for _mod_name in [
 
 from scripts.validate.ocean_fidelity.orca2_l4 import (  # noqa: E402
     nemo_testcase_l4_orca2_round1_ladder_gate as rung10,
+    nemo_testcase_l4_orca2_round276_omt_source_census_gate as r276,
     nemo_testcase_l4_orca2_round301_u_transport_factors as r301,
     nemo_testcase_l4_orca2_round329_recordice_d122_gate as r329,
     nemo_testcase_l4_orca2_round332_rescore_gate as r332,
@@ -86,6 +92,49 @@ from scripts.validate.ocean_fidelity.orca2_l4 import (  # noqa: E402
 PAIRS = r332.PAIRS
 CLASSES = r332.CLASSES
 BAR = r332.BAR
+
+PARENT_COMMIT = "a91d673b6fcff38b097f7c0fc8ddb009c05d7a32"
+PREFIX_RESCORE_COMMIT = "a104ed2a4e79a6f3a5704d221b9718113e846bc7"
+PLANTED_WRONG_PARENT_COMMIT = "0" * 40
+
+GRIDLADDER_LANE = Path(
+    "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/lanes/gridladder"
+)
+GRIDLADDER_ROUNDS = Path(
+    "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/gridladder_rounds"
+)
+GRIDLADDER_RECIPE_COMMIT = "242eaacc47"
+GRIDLADDER_VMIX_LANE = Path(
+    "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/lanes/gridladder_vmix"
+)
+GRIDLADDER_VMIX_ROUNDS = Path(
+    "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/gridladder_vmix_rounds"
+)
+GRIDLADDER_VMIX_RECIPE_COMMIT = "0b9443cef2"
+
+CALLER_ORDER = (
+    "non_nemo_folded",
+    "non_nemo_unfolded",
+    "legacy_caller_10145",
+    "faithful_dino",
+    "ORCA2V1-tke",
+    "GYRE-zco",
+    "VORTEX-zco",
+    "LOCK_EXCHANGE-zco",
+    "OVERFLOW-zps",
+    "ORCA2-rung0",
+    "ORCA2G1-flat",
+    "ORCA2G1b-vec",
+    "ORCA2G2-zps",
+    "ORCA2G3-ts",
+    "ORCA2G4-sbc",
+    "ORCA2G5-ice",
+    "ORCA2G6-vec",
+    "ORCA2G7-drg",
+    "ORCA2G8-ldf",
+    "ORCA2-zps_kt1_rest",
+    "ORCA2-zps",
+)
 
 EXPECTED_PAIR_COUNTS = {
     ("omt0", "independent"): {
@@ -119,6 +168,26 @@ EXPECTED_PAIR_COUNTS = {
         "OVER_BAR": 173,
     },
     ("rung10", "given_nemo_entry"): {
+        "BIT_EXACT": 152,
+        "AT_BAR_NOT_EXACT": 48,
+        "OVER_BAR": 0,
+    },
+    ("rung10", "independent"): {
+        "BIT_EXACT": 152,
+        "AT_BAR_NOT_EXACT": 48,
+        "OVER_BAR": 0,
+    },
+}
+
+EXPECTED_TOTAL_COUNTS = {
+    "BIT_EXACT": 475,
+    "AT_BAR_NOT_EXACT": 235,
+    "OVER_BAR": 850,
+}
+
+EXPECTED_PREFIX_PAIR_COUNTS = {
+    **EXPECTED_PAIR_COUNTS,
+    ("rung10", "given_nemo_entry"): {
         "BIT_EXACT": 151,
         "AT_BAR_NOT_EXACT": 49,
         "OVER_BAR": 0,
@@ -130,7 +199,7 @@ EXPECTED_PAIR_COUNTS = {
     },
 }
 
-EXPECTED_TOTAL_COUNTS = {
+EXPECTED_PREFIX_TOTAL_COUNTS = {
     "BIT_EXACT": 473,
     "AT_BAR_NOT_EXACT": 237,
     "OVER_BAR": 850,
@@ -142,6 +211,10 @@ PLANT_CHOICES = (
     "wet-3d-mask",
     "stage2-thickness",
     "walk-closure",
+    "exact-loss",
+    "away-row",
+    "parent-commit",
+    "caller-unequal",
 )
 
 
@@ -410,8 +483,11 @@ def measure(
     deck_root: Path,
     twin_a: Path,
     expect_commit: str,
+    *,
+    arm: str = "candidate",
 ) -> dict[str, object]:
     require((rung, label) in PAIRS, f"unsupported pair {(rung, label)}")
+    require(arm in ("control", "candidate"), f"unknown arm {arm}")
     from legoesm.ocean.dynamics import ocean_model_latlon_cgrid as model_module
 
     model_path = Path(model_module.__file__).resolve()
@@ -465,7 +541,11 @@ def measure(
         f"measured worktree {result.get('worktree')} != clean {expect_commit}",
     )
 
-    expected_counts = EXPECTED_PAIR_COUNTS[(rung, label)]
+    expected_counts = (
+        EXPECTED_PREFIX_PAIR_COUNTS[(rung, label)]
+        if arm == "control"
+        else EXPECTED_PAIR_COUNTS[(rung, label)]
+    )
     require(
         result["classification_counts"] == expected_counts,
         f"{rung}/{label} classification_counts {result['classification_counts']} != {expected_counts}",
@@ -475,26 +555,46 @@ def measure(
         wet_audit = _finalize_wet_audit(
             result["ladder"]["rows"], card_ref, ice_by_kt
         )
-        require(
-            wet_audit["wet_3d_classification_counts"]
-            == {"BIT_EXACT": 199, "AT_BAR_NOT_EXACT": 1, "OVER_BAR": 0},
-            f"rung10/{label} 3-D wet counts {wet_audit['wet_3d_classification_counts']} != 199/1/0",
-        )
-        first_3d = wet_audit["first_wet_3d_non_bit_row"]
-        require(
-            first_3d is not None
-            and (first_3d["kt"], first_3d["checkpoint"], first_3d["field"])
-            == (10, "stage2", "T")
-            and first_3d["unequal_3d_wet"] == 1
-            and first_3d["unequal_3d_dry"] == 0,
-            f"rung10/{label} unexpected first 3-D wet non-bit row: {first_3d}",
-        )
+        if arm == "control":
+            require(
+                wet_audit["wet_3d_classification_counts"]
+                == {"BIT_EXACT": 199, "AT_BAR_NOT_EXACT": 1, "OVER_BAR": 0},
+                f"rung10/{label} control 3-D wet counts {wet_audit['wet_3d_classification_counts']} != 199/1/0",
+            )
+            first_3d = wet_audit["first_wet_3d_non_bit_row"]
+            require(
+                first_3d is not None
+                and (first_3d["kt"], first_3d["checkpoint"], first_3d["field"])
+                == (10, "stage2", "T")
+                and first_3d["unequal_3d_wet"] == 1
+                and first_3d["unequal_3d_dry"] == 0,
+                f"rung10/{label} unexpected control first 3-D wet non-bit row: {first_3d}",
+            )
+        else:
+            require(
+                wet_audit["wet_3d_classification_counts"]
+                == {"BIT_EXACT": 200, "AT_BAR_NOT_EXACT": 0, "OVER_BAR": 0},
+                f"rung10/{label} 3-D wet counts {wet_audit['wet_3d_classification_counts']} != 200/0/0",
+            )
+            require(
+                wet_audit["wet_2d_classification_counts"]
+                == {"BIT_EXACT": 152, "AT_BAR_NOT_EXACT": 48, "OVER_BAR": 0},
+                f"rung10/{label} 2-D wet counts {wet_audit['wet_2d_classification_counts']} != 152/48/0",
+            )
+            first_3d = wet_audit["first_wet_3d_non_bit_row"]
+            require(
+                first_3d is None
+                and wet_audit["first_wet_value_row"] is None
+                and wet_audit["first_wet_3d_over_bar_row"] is None,
+                f"rung10/{label} unexpected 3-D wet non-bit row: {first_3d}",
+            )
         result["wet_audit"] = wet_audit
         result["first_wet_3d_non_bit_row"] = first_3d
         result["first_wet_value_row"] = wet_audit["first_wet_value_row"]
 
     result.update(
         {
+            "arm": arm,
             "format": "nemo-testcase-l4-orca2-round341-rescore-v1",
             "status": "PASS_R341_PAIR_RESCORE",
         }
@@ -1251,10 +1351,20 @@ def walk_source_order(
             "dry_3d_unequal": 7534,
             "subbottom_dry_unequal": 5550,
             "surface_dry_unequal": 1984,
+            "subbottom_dry_ssvmask_unequal": 5884,
+            "surface_dry_ssvmask_unequal": 1650,
+            "north_fold_subbottom_dry_faces": 334,
+            "legoesm_dry_word_hex": "0x8000000000000000",
+            "raw_nemo_dry_word_hex": "0x8000000000000000",
+            "canonicalized_oracle_dump_dry_word_hex": "0x0000000000000000",
             "oracle_dry_non_poszero_words": oracle_dry_nonzero_or_negzero,
             "record_build_ppsrc_citation": (
                 "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/"
                 "ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/stprk3.f90:479-525"
+            ),
+            "canonicalizer_ppsrc_citation": (
+                "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/"
+                "ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/stprk3.f90:488-520"
             ),
             "r326_ppsrc_citation": (
                 "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/"
@@ -1303,7 +1413,1076 @@ def walk_source_order(
     }
 
 
-def self_test(*, plant: str = "none") -> dict[str, object]:
+def _row(rows: list[dict[str, object]], target: tuple[int, str, str]) -> dict[str, object]:
+    for row in rows:
+        if (int(row["kt"]), str(row["checkpoint"]), str(row["field"])) == target:
+            return row
+    raise GateError(f"row {target} missing")
+
+
+def classify(
+    control_path: Path,
+    candidate_path: Path,
+    *,
+    allow_cross_tree_parent: bool = False,
+    expect_parent_commit: str = PARENT_COMMIT,
+    expect_commit: str | None = None,
+    plant: str = "none",
+) -> dict[str, object]:
+    control = json.loads(control_path.read_text(encoding="utf-8"))
+    candidate = json.loads(candidate_path.read_text(encoding="utf-8"))
+    if plant == "parent-commit":
+        control = dict(control)
+        control["worktree"] = {
+            **dict(control.get("worktree", {})),
+            "commit": PLANTED_WRONG_PARENT_COMMIT,
+        }
+    valid_statuses = ("PASS_R341_PAIR_RESCORE", "PASS_R341_D122_ARM")
+    require(
+        control.get("status") in valid_statuses,
+        f"control measurement not admitted: {control.get('status')}",
+    )
+    require(
+        candidate.get("status") in valid_statuses,
+        f"candidate measurement not admitted: {candidate.get('status')}",
+    )
+    require(
+        bool(control.get("worktree", {}).get("clean")) is True,
+        "control measurement worktree is not clean",
+    )
+    require(
+        bool(candidate.get("worktree", {}).get("clean")) is True,
+        "candidate measurement worktree is not clean",
+    )
+    require(
+        (control["rung"], control["label"]) == (candidate["rung"], candidate["label"]),
+        "control/candidate pair mismatch",
+    )
+    ctrl_commit = str(control["worktree"]["commit"]).lower()
+    cand_commit = str(candidate["worktree"]["commit"]).lower()
+    if expect_commit is not None:
+        require(
+            cand_commit == expect_commit.lower(),
+            f"candidate commit {cand_commit} != expected {expect_commit}",
+        )
+    if allow_cross_tree_parent:
+        valid_parent_commits = {
+            expect_parent_commit.lower(),
+            PREFIX_RESCORE_COMMIT.lower(),
+        }
+        require(
+            ctrl_commit in valid_parent_commits,
+            f"cross-tree control commit {ctrl_commit} not in {sorted(valid_parent_commits)}",
+        )
+        require(
+            ctrl_commit != cand_commit,
+            "cross-tree comparison has control commit == candidate commit",
+        )
+    else:
+        require(
+            ctrl_commit == cand_commit,
+            f"same-tree comparison commits differ: {ctrl_commit} vs {cand_commit}",
+        )
+
+    before = [dict(r) for r in control["ladder"]["rows"]]
+    after = [dict(r) for r in candidate["ladder"]["rows"]]
+    require(len(before) == len(after), "row count mismatch")
+    if plant == "exact-loss":
+        idx = next(i for i, r in enumerate(after) if r["bit_identical"])
+        after[idx] = {
+            **after[idx],
+            "bit_identical": False,
+            "unequal": 1,
+            "max_abs": 2.220446049250313e-16,
+            "rms": 1.0e-18,
+            "classification": "AT_BAR_NOT_EXACT",
+        }
+    elif plant == "away-row":
+        idx = next(
+            (i for i, r in enumerate(after) if not r["bit_identical"]),
+            0,
+        )
+        after[idx] = {
+            **after[idx],
+            "bit_identical": False,
+            "unequal": int(after[idx]["unequal"]) + 1,
+            "max_abs": float(after[idx]["max_abs"]) + 1.0e-12,
+            "rms": float(after[idx]["rms"]) + 1.0e-14,
+            "classification": "OVER_BAR",
+        }
+
+    pairs = list(zip(before, after, strict=True))
+    require(
+        all(
+            (a["kt"], a["checkpoint"], a["field"])
+            == (b["kt"], b["checkpoint"], b["field"])
+            for a, b in pairs
+        ),
+        "row order moved",
+    )
+    exact_losses = [
+        [a["kt"], a["checkpoint"], a["field"]]
+        for a, b in pairs
+        if a["bit_identical"] and not b["bit_identical"]
+    ]
+    exact_gains = [
+        [a["kt"], a["checkpoint"], a["field"]]
+        for a, b in pairs
+        if (not a["bit_identical"]) and b["bit_identical"]
+    ]
+    rms_directions = Counter(
+        r276.decision96._direction(a, b, "rms") for a, b in pairs
+    )
+    max_abs_directions = Counter(
+        r276.decision96._direction(a, b, "max_abs") for a, b in pairs
+    )
+    unequal_increases = [
+        [a["kt"], a["checkpoint"], a["field"], int(a["unequal"]), int(b["unequal"])]
+        for a, b in pairs
+        if int(b["unequal"]) > int(a["unequal"])
+    ]
+    unequal_decreases = [
+        [a["kt"], a["checkpoint"], a["field"], int(a["unequal"]), int(b["unequal"])]
+        for a, b in pairs
+        if int(b["unequal"]) < int(a["unequal"])
+    ]
+    old_first_over = next(
+        (row for row in before if row["classification"] == "OVER_BAR"), None
+    )
+    if old_first_over is not None:
+        target = (
+            int(old_first_over["kt"]),
+            str(old_first_over["checkpoint"]),
+            str(old_first_over["field"]),
+        )
+        old_target_row = old_first_over
+    else:
+        target = (10, "stage2", "T")
+        old_target_row = _row(before, target)
+    new_at_target = _row(after, target)
+    first_direction = r276.decision96._direction(old_target_row, new_at_target, "rms")
+    new_first_over = next(
+        (
+            [int(r["kt"]), str(r["checkpoint"]), str(r["field"])]
+            for r in after
+            if r["classification"] == "OVER_BAR"
+        ),
+        None,
+    )
+    passed = (
+        not exact_losses
+        and rms_directions["away"] == 0
+        and max_abs_directions["away"] == 0
+        and not unequal_increases
+        and first_direction in ("toward", "equal")
+    )
+    return {
+        "format": "nemo-testcase-l4-orca2-round341-d122-census-v1",
+        "status": "PASS_R341_D122_CENSUS" if passed else "FAIL_R341_D122_CENSUS",
+        "rung": candidate["rung"],
+        "label": candidate["label"],
+        "control_commit": control["worktree"]["commit"],
+        "worktree_commit": candidate["worktree"]["commit"],
+        "row_count": len(after),
+        "exact_row_losses": exact_losses,
+        "exact_row_gains": exact_gains,
+        "unequal_increases": unequal_increases,
+        "unequal_decreases": unequal_decreases,
+        "first_target": {
+            "old_target": list(target),
+            "new_first_over_bar": new_first_over,
+            "rms_direction": first_direction,
+            "old_unequal": int(old_target_row["unequal"]),
+            "new_unequal": int(new_at_target["unequal"]),
+            "old_max_abs": float(old_target_row["max_abs"]),
+            "new_max_abs": float(new_at_target["max_abs"]),
+            "old_rms": float(old_target_row["rms"]),
+            "new_rms": float(new_at_target["rms"]),
+        },
+        "registered_census": {
+            name: int(rms_directions[name]) for name in ("toward", "away", "equal")
+        },
+        "max_abs_census": {
+            name: int(max_abs_directions[name]) for name in ("toward", "away", "equal")
+        },
+        "d122_c_and_d": passed,
+    }
+
+
+def decide(
+    paths: list[Path],
+    *,
+    allow_cross_tree_parent: bool = False,
+    expect_parent_commit: str = PARENT_COMMIT,
+    expect_commit: str | None = None,
+) -> dict[str, object]:
+    docs = [json.loads(path.read_text(encoding="utf-8")) for path in paths]
+    require(
+        sorted((doc["rung"], doc["label"]) for doc in docs) == sorted(PAIRS),
+        "eight-pair set is incomplete",
+    )
+    require(
+        len({doc["worktree_commit"] for doc in docs}) == 1,
+        "censuses mix candidate commits",
+    )
+    require(
+        len({doc["control_commit"] for doc in docs}) == 1,
+        "censuses mix control commits",
+    )
+    if expect_commit is not None:
+        require(
+            str(docs[0]["worktree_commit"]).lower() == expect_commit.lower(),
+            f"decision worktree_commit {docs[0]['worktree_commit']} != {expect_commit}",
+        )
+    if allow_cross_tree_parent:
+        valid_parent_commits = {
+            expect_parent_commit.lower(),
+            PREFIX_RESCORE_COMMIT.lower(),
+        }
+        require(
+            str(docs[0]["control_commit"]).lower() in valid_parent_commits,
+            f"decision control_commit {docs[0]['control_commit']} not in {sorted(valid_parent_commits)}",
+        )
+        require(
+            str(docs[0]["worktree_commit"]).lower()
+            != str(docs[0]["control_commit"]).lower(),
+            "cross-tree decision has control_commit == worktree_commit",
+        )
+    else:
+        require(
+            docs[0]["control_commit"] == docs[0]["worktree_commit"],
+            "same-tree decision control_commit != worktree_commit",
+        )
+    require(
+        all(
+            doc["status"] == "PASS_R341_D122_CENSUS" and doc["d122_c_and_d"]
+            for doc in docs
+        ),
+        "a pair failed Decision 122",
+    )
+    return {
+        "format": "nemo-testcase-l4-orca2-round341-d122-decision-v1",
+        "status": "PASS_R341_D122_DECISION",
+        "control_commit": docs[0]["control_commit"],
+        "worktree_commit": docs[0]["worktree_commit"],
+        "cards": docs,
+        "d122_c_and_d": True,
+    }
+
+
+def _load_git_module(repo: Path, commit: str, rel_path: str, mod_name: str):
+    src = subprocess.check_output(
+        ["git", "-C", str(repo), "show", f"{commit}:{rel_path}"],
+        text=True,
+    )
+    mod = types.ModuleType(mod_name)
+    mod.__file__ = f"{repo}@{commit}:{rel_path}"
+    exec(compile(src, mod.__file__, "exec"), mod.__dict__)
+    return mod
+
+
+def _load_file_module(path: Path, mod_name: str):
+    saved_path = list(sys.path)
+    src = path.read_text(encoding="utf-8")
+    mod = types.ModuleType(mod_name)
+    mod.__file__ = str(path.resolve())
+    exec(compile(src, mod.__file__, "exec"), mod.__dict__)
+    extra = [
+        p
+        for p in sys.path
+        if p not in saved_path
+        and not p.startswith(str(GRIDLADDER_VMIX_LANE / "packages"))
+    ]
+    sys.path = [p for p in saved_path if p != str(GRIDLADDER_VMIX_LANE)] + [
+        p for p in extra if p != str(GRIDLADDER_VMIX_LANE)
+    ]
+    return mod
+
+
+def _non_nemo_stage_caller(*, fold: bool) -> tuple[dict[str, np.ndarray], dict[str, object]]:
+    import jax.numpy as jnp
+    from legoesm.core.field import Field
+    from legoesm.grids.latlon import FoldDescriptor, create_latlon_geometry
+    from legoesm.ocean.dynamics import ocean_model_latlon_cgrid as omlc
+    from legoesm.ocean.vertical import (
+        create_partial_cell_coordinate,
+        create_z_star_from_thicknesses,
+    )
+
+    ny, nx, nz = 4, 6, 4
+    perm = np.array([(nx - i) % nx for i in range(nx)], dtype=np.int32)
+    rng = np.random.default_rng(19 if fold else 23)
+    raw = create_z_star_from_thicknesses([1.0, 2.0, 3.0, 4.0])
+    z = create_partial_cell_coordinate(raw, jnp.full((ny, nx), 6.0, dtype=jnp.float64))
+    grid = create_latlon_geometry(n_lat=ny, n_lon=nx)
+    if fold:
+        grid = grid._replace(
+            fold=FoldDescriptor(
+                is_active=True,
+                fold_j=ny - 1,
+                cap_j=0,
+                perm_T=jnp.asarray(perm),
+                perm_v=jnp.asarray(perm),
+                vector_sign_u=-1.0,
+                vector_sign_v=-1.0,
+            )
+        )
+    cfg = omlc.LatLonCGridOceanConfig()
+    eta_b = jnp.asarray(rng.uniform(-0.04, 0.04, (ny, nx)), dtype=jnp.float64)
+    eta_a = jnp.asarray(rng.uniform(-0.04, 0.04, (ny, nx)), dtype=jnp.float64)
+    u = jnp.asarray(rng.uniform(-0.05, 0.05, (ny, nx + 1, nz)), dtype=jnp.float64)
+    v = jnp.asarray(rng.uniform(-0.05, 0.05, (ny + 1, nx, nz)), dtype=jnp.float64)
+    T = jnp.asarray(rng.uniform(5.0, 15.0, (ny, nx, nz)), dtype=jnp.float64)
+    S = jnp.asarray(rng.uniform(34.0, 35.5, (ny, nx, nz)), dtype=jnp.float64)
+    H = jnp.full((ny, nx), 6.0, dtype=jnp.float64)
+    d2, d3 = ("lat", "lon"), ("lat", "lon", "level")
+    state = SimpleNamespace(
+        T=Field(T, "T", d3, "degC"),
+        S=Field(S, "S", d3, "psu"),
+        u=Field(u, "u", d3, "m/s"),
+        v=Field(v, "v", d3, "m/s"),
+        eta=Field(eta_b, "eta", d2, "m"),
+        H_bathy=Field(H, "H_bathy", d2, "m"),
+        u_mask=Field(jnp.ones((ny, nx + 1), dtype=jnp.float64), "u_mask", d2, "1"),
+        v_mask=Field(jnp.ones((ny + 1, nx), dtype=jnp.float64), "v_mask", d2, "1"),
+        uu_b=Field(jnp.mean(u, axis=-1), "uu_b", d2, "m/s"),
+        vv_b=Field(jnp.mean(v, axis=-1), "vv_b", d2, "m/s"),
+    )
+    model = SimpleNamespace(
+        config=cfg,
+        z_coord=z,
+        grid=grid,
+        _nemo_ws_test_hooks=omlc._NEMOWSRK3TestHooks(),
+    )
+    return _eval_stage_transport_caller(
+        f"non_nemo_{'folded' if fold else 'unfolded'}",
+        model,
+        state,
+        1800.0,
+        eta_a=eta_a,
+        T_s1=T + 0.01,
+        S_s1=S - 0.005,
+        u1_corr=u * 0.95,
+        v1_corr=v * 0.95,
+        u2_corr=u * 0.90,
+        v2_corr=v * 0.90,
+    )
+
+
+def _eval_legacy_caller_10145(card) -> tuple[dict[str, np.ndarray], dict[str, object]]:
+    import jax.numpy as jnp
+    from legoesm.core.field import Field
+    from legoesm.ocean.dynamics import ocean_model_latlon_cgrid as omlc
+
+    zc = card.recipe.z_coord
+    grid = card.recipe.grid
+    cfg = card.recipe.model_config
+    st0 = card.recipe.initial_state
+    dt = float(card.dt_s)
+    h_ref = omlc.compute_layer_thickness(
+        jnp.zeros_like(st0.eta.data),
+        st0.H_bathy.data,
+        zc,
+        min_water_column_m=getattr(cfg, "min_water_column_m", None),
+    )
+    umask, vmask = omlc.compute_face_masks_3d(zc.is_active, grid)
+    umask = umask.astype(jnp.float64)
+    vmask = vmask.astype(jnp.float64)
+    eta_b = st0.eta.data + 0.03 * st0.land_mask.data
+    eta_a = st0.eta.data - 0.02 * st0.land_mask.data
+    u_arr = st0.u.data + 0.04 * umask
+    v_arr = st0.v.data - 0.03 * vmask
+    Hu_avg = jnp.sum(u_arr, axis=-1) * st0.u_mask.data
+    Hv_avg = jnp.sum(v_arr, axis=-1) * st0.v_mask.data
+    state = st0._replace(
+        eta=Field(eta_b, st0.eta.name, st0.eta.dims, st0.eta.units),
+        u=Field(u_arr, st0.u.name, st0.u.dims, st0.u.units),
+        v=Field(v_arr, st0.v.name, st0.v.dims, st0.v.units),
+    )
+    state_new = st0._replace(
+        eta=Field(eta_a, st0.eta.name, st0.eta.dims, st0.eta.units),
+    )
+    model_obj = SimpleNamespace(
+        config=cfg,
+        z_coord=zc,
+        grid=grid,
+        _nemo_ws_test_hooks=omlc._NEMOWSRK3TestHooks(),
+    )
+    src_lines = Path(omlc.__file__).read_text(encoding="utf-8").splitlines()
+    legacy_block = textwrap.dedent("\n".join(src_lines[10130:10162]))
+    require(
+        "_nemo_ws_stage_transport(" in legacy_block,
+        "legacy caller block at :10131-10162 missing _nemo_ws_stage_transport",
+    )
+    ns = {
+        **omlc.__dict__,
+        "h_k_old": h_ref,
+        "h_k_new": h_ref * 1.01,
+        "state": state,
+        "state_new": state_new,
+        "_zc": zc,
+        "_cfg_b": cfg,
+        "Hu_avg": Hu_avg,
+        "Hv_avg": Hv_avg,
+        "u_mask_3d_tracer": umask,
+        "v_mask_3d_tracer": vmask,
+        "_grid": grid,
+        "dt": dt,
+        "self": model_obj,
+        "_nemo_ws_velocity_stages": (
+            (u_arr, v_arr),
+            (u_arr * 0.9, v_arr * 0.9),
+            (u_arr * 0.8, v_arr * 0.8),
+        ),
+    }
+    exec(compile(legacy_block, "<legacy_caller_10145>", "exec"), ns)
+    geom = ns["_nemo_ws_stage_transport_geometry"]
+    arrays: dict[str, np.ndarray] = {}
+    for stg_idx, tup in enumerate(geom, start=1):
+        arrays[f"s{stg_idx}_u_tr"] = np.asarray(tup[0], dtype=np.float64)
+        arrays[f"s{stg_idx}_v_tr"] = np.asarray(tup[1], dtype=np.float64)
+        arrays[f"s{stg_idx}_w"] = np.asarray(tup[2], dtype=np.float64)
+        arrays[f"s{stg_idx}_h"] = np.asarray(tup[3], dtype=np.float64)
+    meta = {
+        "rk3_stage2_tracer_nemo_stored_thickness": bool(
+            getattr(cfg, "rk3_stage2_tracer_nemo_stored_thickness", False)
+        ),
+        "caller_site": "ocean_model_latlon_cgrid.py:10145",
+    }
+    return arrays, meta
+
+
+def _eval_stage_transport_caller(
+    name: str,
+    model,
+    state,
+    dt: float,
+    *,
+    eta_a,
+    T_s1,
+    S_s1,
+    u1_corr,
+    v1_corr,
+    u2_corr,
+    v2_corr,
+    Hu_avg=None,
+    Hv_avg=None,
+    freshwater=None,
+) -> tuple[dict[str, np.ndarray], dict[str, object]]:
+    import jax.numpy as jnp
+    from legoesm.core.field import Field
+    from legoesm.ocean.dynamics import ocean_model_latlon_cgrid as omlc
+
+    zc = model.z_coord
+    grid = model.grid
+    cfg = model.config
+    h_k_old = omlc.compute_layer_thickness(
+        state.eta.data,
+        state.H_bathy.data,
+        zc,
+        min_water_column_m=getattr(cfg, "min_water_column_m", None),
+    )
+    mask_3d = (
+        zc.is_active.astype(h_k_old.dtype)
+        if hasattr(zc, "is_active") and zc.is_active is not None
+        else jnp.ones_like(state.T.data)
+    )
+    u0 = state.u.data
+    v0 = state.v.data
+    if Hu_avg is None:
+        Hu_avg = jnp.sum(u0, axis=-1) * state.u_mask.data
+    if Hv_avg is None:
+        Hv_avg = jnp.sum(v0, axis=-1) * state.v_mask.data
+    target_u = (
+        state.uu_b.data
+        if getattr(state, "uu_b", None) is not None and state.uu_b is not None
+        else jnp.zeros_like(state.u_mask.data)
+    )
+    target_v = (
+        state.vv_b.data
+        if getattr(state, "vv_b", None) is not None and state.vv_b is not None
+        else jnp.zeros_like(state.v_mask.data)
+    )
+    state_new = SimpleNamespace(
+        eta=Field(eta_a, state.eta.name, state.eta.dims, state.eta.units),
+        H_bathy=state.H_bathy,
+        T=state.T,
+        S=state.S,
+        u=state.u,
+        v=state.v,
+        uu_b=getattr(state, "uu_b", None),
+        vv_b=getattr(state, "vv_b", None),
+    )
+    zero_src = jnp.zeros_like(state.T.data)
+    stage_source_rates = ((zero_src, zero_src), (zero_src, zero_src), (zero_src, zero_src))
+    stage12_source_terms = None
+
+    src_lines = Path(omlc.__file__).read_text(encoding="utf-8").splitlines()
+    block_setup = textwrap.dedent("\n".join(src_lines[8638:8840]))
+    block_helpers = textwrap.dedent("\n".join(src_lines[9275:9320]))
+    block_s1 = textwrap.dedent("\n".join(src_lines[9340:9354]))
+    block_s2 = textwrap.dedent("\n".join(src_lines[9569:9595]))
+    block_s2_tr = textwrap.dedent("\n".join(src_lines[9622:9631]))
+    block_s3 = textwrap.dedent("\n".join(src_lines[9640:9658]))
+    full_block = "\n".join(
+        (block_setup, block_helpers, block_s1, block_s2, block_s2_tr, block_s3)
+    )
+    require(
+        "_g0 = _nemo_ws_stage_transport(" in block_s1
+        and "_g1 = _nemo_ws_stage_transport(" in block_s2
+        and "_g2 = _nemo_ws_stage_transport(" in block_s3,
+        "stage transport blocks shifted in ocean_model_latlon_cgrid.py",
+    )
+    ns = {
+        **omlc.__dict__,
+        "self": model,
+        "state": state,
+        "state_new": state_new,
+        "_zc": zc,
+        "_grid": grid,
+        "_cfg_b": cfg,
+        "dt": dt,
+        "h_k_old": h_k_old,
+        "mask_3d": mask_3d,
+        "Hu_avg": Hu_avg,
+        "Hv_avg": Hv_avg,
+        "freshwater": freshwater,
+        "u0": u0,
+        "v0": v0,
+        "u1_corr": u1_corr,
+        "v1_corr": v1_corr,
+        "u2_corr": u2_corr,
+        "v2_corr": v2_corr,
+        "_T_stage1": T_s1,
+        "_S_stage1": S_s1,
+        "target_u": target_u,
+        "target_v": target_v,
+        "_stage_source_rates": stage_source_rates,
+        "_stage12_source_terms": stage12_source_terms,
+    }
+    exec(compile(full_block, f"<stage_caller_{name}>", "exec"), ns)
+    g0 = ns["_g0"]
+    g1 = ns["_g1"]
+    g2 = ns["_g2"]
+    T_s2 = ns["_T_stage2"]
+    S_s2 = ns["_S_stage2"]
+
+    arrays = {
+        "s1_u_tr": np.asarray(g0[0], dtype=np.float64),
+        "s1_v_tr": np.asarray(g0[1], dtype=np.float64),
+        "s1_w": np.asarray(g0[2], dtype=np.float64),
+        "s1_h": np.asarray(g0[3], dtype=np.float64),
+        "s2_u_tr": np.asarray(g1[0], dtype=np.float64),
+        "s2_v_tr": np.asarray(g1[1], dtype=np.float64),
+        "s2_w": np.asarray(g1[2], dtype=np.float64),
+        "s2_h": np.asarray(g1[3], dtype=np.float64),
+        "T_stage2": np.asarray(T_s2, dtype=np.float64),
+        "S_stage2": np.asarray(S_s2, dtype=np.float64),
+        "s3_u_tr": np.asarray(g2[0], dtype=np.float64),
+        "s3_v_tr": np.asarray(g2[1], dtype=np.float64),
+        "s3_w": np.asarray(g2[2], dtype=np.float64),
+        "s3_h": np.asarray(g2[3], dtype=np.float64),
+    }
+    meta = {
+        "rk3_stage2_tracer_nemo_stored_thickness": bool(
+            getattr(cfg, "rk3_stage2_tracer_nemo_stored_thickness", False)
+        ),
+        "caller_site": "ocean_model_latlon_cgrid.py:9341,9570,9626,9641",
+    }
+    return arrays, meta
+
+
+def caller_audit_dump(
+    out_dir: Path, deck_root: Path, expect_commit: str
+) -> dict[str, object]:
+    os.environ.setdefault("JAX_PLATFORMS", "cpu")
+    import jax
+    import jax.numpy as jnp
+    from legoesm.core.field import Field
+    from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
+    from legoesm.ocean.dynamics import ocean_model_latlon_cgrid as model_module
+    from legoesm.ocean.experiments.dino import (
+        dino_config_for_recipe,
+        dino_lat_lon_grid,
+        dino_lat_lon_model_config,
+        dino_lat_lon_state,
+        dino_lat_lon_vertical,
+        nemo_faithful_dino_config,
+    )
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import (
+        build_gyre_zco_card,
+        build_lock_exchange_zco_card,
+        build_orca2_zps_card,
+        build_overflow_zps_card,
+        build_vortex_zco_card,
+    )
+    from legoesm.ocean.fidelity.provenance import worktree_stamp
+    from scripts.validate.ocean_fidelity.orca2_l4 import (
+        nemo_testcase_l4_orca2_round92_rung0_card_gate as rung0,
+    )
+
+    model_file = Path(model_module.__file__).resolve()
+    require(
+        model_file.is_relative_to(ACTIVE_REPO_ROOT),
+        f"model_module {model_file} is outside active repo {ACTIVE_REPO_ROOT}",
+    )
+    stamp = worktree_stamp(repo=ACTIVE_REPO_ROOT)
+    require(
+        bool(stamp["clean"]) and str(stamp["commit"]).lower() == expect_commit.lower(),
+        f"caller_audit_dump requires clean committed tree at {expect_commit}: got {stamp}",
+    )
+    set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
+    require(
+        get_policy() == PrecisionPolicy.fp64(transcendentals="libm")
+        and bool(jax.config.jax_enable_x64),
+        "fp64/libm is not active",
+    )
+
+    cls = model_module.LatLonCGridOceanModel
+    g_recipe = _load_git_module(
+        GRIDLADDER_LANE,
+        GRIDLADDER_RECIPE_COMMIT,
+        "packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py",
+        "g_recipe",
+    )
+    v_recipe = _load_git_module(
+        GRIDLADDER_VMIX_LANE,
+        GRIDLADDER_VMIX_RECIPE_COMMIT,
+        "packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py",
+        "v_recipe",
+    )
+
+    all_arrays: dict[str, np.ndarray] = {}
+    caller_meta: dict[str, dict[str, object]] = {}
+
+    def _record_caller(
+        caller_name: str,
+        arrays: dict[str, np.ndarray],
+        meta: dict[str, object],
+    ) -> None:
+        array_meta: dict[str, dict[str, object]] = {}
+        for arr_name, arr in arrays.items():
+            contig = np.ascontiguousarray(np.asarray(arr, dtype=np.float64))
+            all_arrays[f"{caller_name}__{arr_name}"] = contig
+            array_meta[arr_name] = {
+                "shape": list(contig.shape),
+                "elements": int(contig.size),
+                "sha256": hashlib.sha256(contig.tobytes()).hexdigest(),
+            }
+        caller_meta[caller_name] = {
+            **meta,
+            "array_names": list(arrays.keys()),
+            "arrays": array_meta,
+        }
+
+    # 1-2. Non-NEMO callers (folded and unfolded)
+    arr_f, meta_f = _non_nemo_stage_caller(fold=True)
+    _record_caller("non_nemo_folded", arr_f, meta_f)
+    arr_nf, meta_nf = _non_nemo_stage_caller(fold=False)
+    _record_caller("non_nemo_unfolded", arr_nf, meta_nf)
+
+    # 3. Legacy caller (:10145)
+    gyre_card = build_gyre_zco_card()
+    arr_leg, meta_leg = _eval_legacy_caller_10145(gyre_card)
+    _record_caller("legacy_caller_10145", arr_leg, meta_leg)
+
+    def _eval_card(cname: str, model_obj, st0, dt_s: float, *, active_ssh: bool):
+        if active_ssh:
+            eta_b = st0.eta.data - 0.17 * st0.land_mask.data
+            eta_a = st0.eta.data + 0.08 * st0.land_mask.data
+            u_in = st0.u.data + 0.04 * st0.u_mask.data[..., None]
+            v_in = st0.v.data - 0.03 * st0.v_mask.data[..., None]
+        else:
+            eta_b = st0.eta.data
+            eta_a = st0.eta.data
+            u_in = st0.u.data
+            v_in = st0.v.data
+        st = st0._replace(
+            eta=Field(eta_b, st0.eta.name, st0.eta.dims, st0.eta.units),
+            u=Field(u_in, st0.u.name, st0.u.dims, st0.u.units),
+            v=Field(v_in, st0.v.name, st0.v.dims, st0.v.units),
+        )
+        return _eval_stage_transport_caller(
+            cname,
+            model_obj,
+            st,
+            dt_s,
+            eta_a=eta_a,
+            T_s1=st.T.data,
+            S_s1=st.S.data,
+            u1_corr=u_in,
+            v1_corr=v_in,
+            u2_corr=u_in,
+            v2_corr=v_in,
+        )
+
+    # 4. Faithful DINO (rk3_stage2_tracer_nemo_stored_thickness=False)
+    dino_cfg = nemo_faithful_dino_config(dino_config_for_recipe("nemo_dino_kamm_mlf"))
+    dino_grid = dino_lat_lon_grid(dino_cfg, n_lon=50)
+    dino_z = dino_lat_lon_vertical(dino_grid, dino_cfg)
+    dino_state0 = dino_lat_lon_state(dino_grid, dino_z, dino_cfg)
+    dino_mcfg, _ = dino_lat_lon_model_config(dino_grid, dino_cfg)
+    dino_model = cls(dino_grid, dino_z, dino_mcfg)
+    arr_dino, meta_dino = _eval_card(
+        "faithful_dino", dino_model, dino_state0, 2700.0, active_ssh=True
+    )
+    require(
+        not meta_dino["rk3_stage2_tracer_nemo_stored_thickness"],
+        f"faithful_dino flag unexpected: {meta_dino}",
+    )
+    _record_caller("faithful_dino", arr_dino, meta_dino)
+
+    # 5. ORCA2V1-tke
+    v1_deck = GRIDLADDER_VMIX_ROUNDS / "round1/oracle_v1_r1/twin_a"
+    v1_card = v_recipe.build_nemo_testcase_card("ORCA2V1-tke", deck_root=v1_deck)
+    v1_model = cls(
+        v1_card.recipe.grid,
+        v1_card.recipe.z_coord,
+        v1_card.recipe.model_config,
+        iwm_forcing=v1_card.recipe.iwm_forcing,
+    )
+    arr_v1, meta_v1 = _eval_card(
+        "ORCA2V1-tke",
+        v1_model,
+        v1_card.recipe.initial_state,
+        float(v1_card.dt_s),
+        active_ssh=False,
+    )
+    _record_caller("ORCA2V1-tke", arr_v1, meta_v1)
+
+    # 6-10. Standard non-ORCA2 cards + ORCA2-rung0
+    std_cards = (
+        ("GYRE-zco", gyre_card, True),
+        ("VORTEX-zco", build_vortex_zco_card(), True),
+        ("LOCK_EXCHANGE-zco", build_lock_exchange_zco_card(), True),
+        ("OVERFLOW-zps", build_overflow_zps_card(), True),
+        ("ORCA2-rung0", rung0.build_rung0_card(deck_root), False),
+    )
+    for cname, card, act_ssh in std_cards:
+        cmodel = cls(
+            card.recipe.grid,
+            card.recipe.z_coord,
+            card.recipe.model_config,
+            iwm_forcing=card.recipe.iwm_forcing,
+        )
+        c_arr, c_meta = _eval_card(
+            cname, cmodel, card.recipe.initial_state, float(card.dt_s), active_ssh=act_ssh
+        )
+        _record_caller(cname, c_arr, c_meta)
+
+    # 11-19. ORCA2G1..G8 gridladder cards
+    g_decks = (
+        ("ORCA2G1-flat", GRIDLADDER_ROUNDS / "round4/oracle_g1_r4/p3_a_100step", True),
+        ("ORCA2G1b-vec", GRIDLADDER_ROUNDS / "round22/oracle_g1b_r22/ref_100step", True),
+        ("ORCA2G2-zps", GRIDLADDER_ROUNDS / "round10/oracle_g2_r10/p3_a_100step", True),
+        ("ORCA2G3-ts", GRIDLADDER_ROUNDS / "round21/oracle_g3_r21/p3_a", True),
+        ("ORCA2G4-sbc", GRIDLADDER_ROUNDS / "round21/oracle_g4_r21/p6_a", True),
+        ("ORCA2G5-ice", GRIDLADDER_ROUNDS / "round31/oracle_g5_r31/twin_a", False),
+        ("ORCA2G6-vec", GRIDLADDER_ROUNDS / "round36/oracle_g6_r36/twin_a", False),
+        ("ORCA2G7-drg", GRIDLADDER_ROUNDS / "round41/oracle_g7_r41/twin_a", False),
+        ("ORCA2G8-ldf", GRIDLADDER_ROUNDS / "round45/oracle_g8_r45/twin_a", False),
+    )
+    for gname, gdeck, act_ssh in g_decks:
+        gcard = g_recipe.build_nemo_testcase_card(gname, deck_root=gdeck)
+        gmodel = cls(
+            gcard.recipe.grid,
+            gcard.recipe.z_coord,
+            gcard.recipe.model_config,
+            iwm_forcing=gcard.recipe.iwm_forcing,
+        )
+        g_arr, g_meta = _eval_card(
+            gname, gmodel, gcard.recipe.initial_state, float(gcard.dt_s), active_ssh=act_ssh
+        )
+        _record_caller(gname, g_arr, g_meta)
+
+    # 20. ORCA2-zps_kt1_rest (standalone K0 card at kt=1 rest entry)
+    orca2_card = build_orca2_zps_card(deck_root)
+    orca2_model = cls(
+        orca2_card.recipe.grid,
+        orca2_card.recipe.z_coord,
+        orca2_card.recipe.model_config,
+        iwm_forcing=orca2_card.recipe.iwm_forcing,
+    )
+    arr_kt1, meta_kt1 = _eval_card(
+        "ORCA2-zps_kt1_rest",
+        orca2_model,
+        orca2_card.recipe.initial_state,
+        float(orca2_card.dt_s),
+        active_ssh=False,
+    )
+    require(
+        meta_kt1["rk3_stage2_tracer_nemo_stored_thickness"],
+        f"ORCA2-zps_kt1_rest flag unexpected: {meta_kt1}",
+    )
+    _record_caller("ORCA2-zps_kt1_rest", arr_kt1, meta_kt1)
+
+    # 21. ORCA2-zps (standalone K0 card at kt=10 Stage-2 entry from admitted round-5 record)
+    r5_root = Path(
+        "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/"
+        "round5/acquisition/orca1ice_surface_entry_every_step_a_np2"
+    )
+    def _pad180_dict(d: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
+        return {
+            k: np.concatenate([v, np.zeros_like(v)], axis=1) for k, v in d.items()
+        }
+
+    ek10 = _pad180_dict(
+        rung10.read_state_frame(
+            r5_root / "oracle_step_entry_kt00000010.bin", kt=10, stage=None
+        )
+    )
+    s1_10 = _pad180_dict(
+        rung10.read_state_frame(
+            r5_root / "oracle_stage_kt00000010_s1.bin", kt=10, stage=1
+        )
+    )
+    s2_10 = _pad180_dict(
+        rung10.read_state_frame(
+            r5_root / "oracle_stage_kt00000010_s2.bin", kt=10, stage=2
+        )
+    )
+    s3_10 = _pad180_dict(
+        rung10.read_state_frame(
+            r5_root / "oracle_stage_kt00000010_s3.bin", kt=10, stage=3
+        )
+    )
+    bt10 = _pad180_dict(
+        r301.read_bt(r5_root / "oracle_bt_frames_kt00000010.bin", 10)
+    )
+    st0 = orca2_card.recipe.initial_state
+    u_b_cgrid = jnp.concatenate([ek10["u"][:, -1:, :30], ek10["u"][:, :, :30]], axis=1)
+    v_b_cgrid = jnp.concatenate([jnp.zeros_like(ek10["v"][:1, :, :30]), ek10["v"][:, :, :30]], axis=0)
+    u1_cgrid = jnp.concatenate([s1_10["u"][:, -1:, :30], s1_10["u"][:, :, :30]], axis=1)
+    v1_cgrid = jnp.concatenate([jnp.zeros_like(s1_10["v"][:1, :, :30]), s1_10["v"][:, :, :30]], axis=0)
+    u2_cgrid = jnp.concatenate([s2_10["u"][:, -1:, :30], s2_10["u"][:, :, :30]], axis=1)
+    v2_cgrid = jnp.concatenate([jnp.zeros_like(s2_10["v"][:1, :, :30]), s2_10["v"][:, :, :30]], axis=0)
+    uu_b_cgrid = jnp.concatenate([bt10["uu_b"][:, -1:], bt10["uu_b"]], axis=1)
+    vv_b_cgrid = jnp.concatenate([jnp.zeros_like(bt10["vv_b"][:1, :]), bt10["vv_b"]], axis=0)
+    Hu_10 = jnp.concatenate([bt10["un_adv"][:, -1:], bt10["un_adv"]], axis=1)
+    Hv_10 = jnp.concatenate([jnp.zeros_like(bt10["vn_adv"][:1, :]), bt10["vn_adv"]], axis=0)
+    st_kt10 = st0._replace(
+        T=Field(jnp.asarray(ek10["T"][:, :, :30], dtype=jnp.float64), st0.T.name, st0.T.dims, st0.T.units),
+        S=Field(jnp.asarray(ek10["S"][:, :, :30], dtype=jnp.float64), st0.S.name, st0.S.dims, st0.S.units),
+        u=Field(jnp.asarray(u_b_cgrid, dtype=jnp.float64), st0.u.name, st0.u.dims, st0.u.units),
+        v=Field(jnp.asarray(v_b_cgrid, dtype=jnp.float64), st0.v.name, st0.v.dims, st0.v.units),
+        eta=Field(jnp.asarray(ek10["ssh"], dtype=jnp.float64), st0.eta.name, st0.eta.dims, st0.eta.units),
+        uu_b=Field(jnp.asarray(uu_b_cgrid, dtype=jnp.float64), "uu_b", st0.u_mask.dims, "m/s"),
+        vv_b=Field(jnp.asarray(vv_b_cgrid, dtype=jnp.float64), "vv_b", st0.v_mask.dims, "m/s"),
+    )
+    arr_orca2, meta_orca2 = _eval_stage_transport_caller(
+        "ORCA2-zps",
+        orca2_model,
+        st_kt10,
+        float(orca2_card.dt_s),
+        eta_a=jnp.asarray(s3_10["ssh"], dtype=jnp.float64),
+        T_s1=jnp.asarray(s1_10["T"][:, :, :30], dtype=jnp.float64),
+        S_s1=jnp.asarray(s1_10["S"][:, :, :30], dtype=jnp.float64),
+        u1_corr=jnp.asarray(u1_cgrid, dtype=jnp.float64),
+        v1_corr=jnp.asarray(v1_cgrid, dtype=jnp.float64),
+        u2_corr=jnp.asarray(u2_cgrid, dtype=jnp.float64),
+        v2_corr=jnp.asarray(v2_cgrid, dtype=jnp.float64),
+        Hu_avg=jnp.asarray(Hu_10, dtype=jnp.float64),
+        Hv_avg=jnp.asarray(Hv_10, dtype=jnp.float64),
+    )
+    require(
+        meta_orca2["rk3_stage2_tracer_nemo_stored_thickness"],
+        f"ORCA2-zps flag unexpected: {meta_orca2}",
+    )
+    _record_caller("ORCA2-zps", arr_orca2, meta_orca2)
+
+    require(
+        tuple(caller_meta.keys()) == CALLER_ORDER,
+        f"caller order {tuple(caller_meta.keys())} != {CALLER_ORDER}",
+    )
+    out_dir.mkdir(parents=True, exist_ok=True)
+    np.savez(out_dir / "arrays.npz", **all_arrays)
+    manifest = {
+        "format": "nemo-testcase-l4-orca2-round341-caller-dump-v1",
+        "status": "PASS_R341_CALLER_DUMP",
+        "worktree": stamp,
+        "model_file": str(model_file),
+        "caller_order": list(CALLER_ORDER),
+        "callers": caller_meta,
+    }
+    (out_dir / "manifest.json").write_text(
+        json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    return manifest
+
+
+def caller_audit_compare(
+    parent_dump: Path,
+    candidate_dump: Path,
+    *,
+    expect_parent_commit: str = PARENT_COMMIT,
+    expect_commit: str | None = None,
+    plant: str = "none",
+) -> dict[str, object]:
+    parent_manifest = json.loads(
+        (parent_dump / "manifest.json").read_text(encoding="utf-8")
+    )
+    candidate_manifest = json.loads(
+        (candidate_dump / "manifest.json").read_text(encoding="utf-8")
+    )
+    if plant == "parent-commit":
+        parent_manifest = dict(parent_manifest)
+        parent_manifest["worktree"] = {
+            **dict(parent_manifest.get("worktree", {})),
+            "commit": PLANTED_WRONG_PARENT_COMMIT,
+        }
+    require(
+        parent_manifest.get("status") == "PASS_R341_CALLER_DUMP",
+        f"parent dump not admitted: {parent_manifest.get('status')}",
+    )
+    require(
+        candidate_manifest.get("status") == "PASS_R341_CALLER_DUMP",
+        f"candidate dump not admitted: {candidate_manifest.get('status')}",
+    )
+    require(
+        bool(parent_manifest.get("worktree", {}).get("clean")) is True,
+        "parent dump worktree is not clean",
+    )
+    require(
+        bool(candidate_manifest.get("worktree", {}).get("clean")) is True,
+        "candidate dump worktree is not clean",
+    )
+    parent_commit = str(parent_manifest["worktree"]["commit"])
+    candidate_commit = str(candidate_manifest["worktree"]["commit"])
+    require(
+        parent_commit.lower() == expect_parent_commit.lower(),
+        f"parent dump commit {parent_commit} != expected parent {expect_parent_commit}",
+    )
+    require(
+        candidate_commit.lower() != parent_commit.lower(),
+        "parent and candidate dumps have identical commit",
+    )
+    if expect_commit is not None:
+        require(
+            candidate_commit.lower() == expect_commit.lower(),
+            f"candidate dump commit {candidate_commit} != expected {expect_commit}",
+        )
+    require(
+        tuple(parent_manifest["caller_order"]) == CALLER_ORDER
+        and tuple(candidate_manifest["caller_order"]) == CALLER_ORDER,
+        "caller_order moved between parent and candidate dumps",
+    )
+
+    parent_npz = np.load(parent_dump / "arrays.npz")
+    candidate_npz = np.load(candidate_dump / "arrays.npz")
+
+    callers_report: dict[str, dict[str, object]] = {}
+    non_orca2_unequal_callers: list[str] = []
+
+    for caller_name in CALLER_ORDER:
+        p_info = parent_manifest["callers"][caller_name]
+        c_info = candidate_manifest["callers"][caller_name]
+        arr_names = list(p_info["array_names"])
+        require(
+            arr_names == list(c_info["array_names"]),
+            f"{caller_name}: array_names moved {arr_names} vs {c_info['array_names']}",
+        )
+        arrays_report: dict[str, dict[str, object]] = {}
+        total_elements = 0
+        total_unequal_words = 0
+        total_unequal_values = 0
+
+        for arr_name in arr_names:
+            key = f"{caller_name}__{arr_name}"
+            a = np.ascontiguousarray(np.asarray(parent_npz[key], dtype=np.float64))
+            b = np.ascontiguousarray(np.asarray(candidate_npz[key], dtype=np.float64))
+            if (
+                plant == "caller-unequal"
+                and caller_name == "ORCA2V1-tke"
+                and arr_name == "s2_h"
+            ):
+                b = b.copy()
+                b.flat[0] = b.flat[0] + np.spacing(max(abs(float(b.flat[0])), 1.0))
+            require(
+                a.shape == b.shape,
+                f"{caller_name}.{arr_name}: shape {a.shape} != {b.shape}",
+            )
+            p_sha = hashlib.sha256(a.tobytes()).hexdigest()
+            c_sha = hashlib.sha256(b.tobytes()).hexdigest()
+            require(
+                p_sha == p_info["arrays"][arr_name]["sha256"],
+                f"{caller_name}.{arr_name}: parent npz sha256 mismatch",
+            )
+            if not (
+                plant == "caller-unequal"
+                and caller_name == "ORCA2V1-tke"
+                and arr_name == "s2_h"
+            ):
+                require(
+                    c_sha == c_info["arrays"][arr_name]["sha256"],
+                    f"{caller_name}.{arr_name}: candidate npz sha256 mismatch",
+                )
+            bit_diff = a.view(np.uint64) != b.view(np.uint64)
+            val_diff = a != b
+            unequal_words = int(np.count_nonzero(bit_diff))
+            unequal_values = int(np.count_nonzero(val_diff))
+            res = a - b
+            max_abs = float(np.max(np.abs(res))) if unequal_values > 0 else 0.0
+            rms = float(np.sqrt(np.mean(res * res))) if unequal_values > 0 else 0.0
+
+            total_elements += int(a.size)
+            total_unequal_words += unequal_words
+            total_unequal_values += unequal_values
+            arrays_report[arr_name] = {
+                "shape": list(a.shape),
+                "elements": int(a.size),
+                "unequal_words": unequal_words,
+                "unequal_values": unequal_values,
+                "max_abs": max_abs,
+                "rms": rms,
+                "parent_sha256": p_sha,
+                "candidate_sha256": c_sha,
+            }
+
+        if caller_name != "ORCA2-zps" and total_unequal_words > 0:
+            non_orca2_unequal_callers.append(caller_name)
+
+        callers_report[caller_name] = {
+            "rk3_stage2_tracer_nemo_stored_thickness": c_info[
+                "rk3_stage2_tracer_nemo_stored_thickness"
+            ],
+            "caller_site": c_info["caller_site"],
+            "array_count": len(arr_names),
+            "total_elements": total_elements,
+            "total_unequal_words": total_unequal_words,
+            "total_unequal_values": total_unequal_values,
+            "arrays": arrays_report,
+        }
+
+    require(
+        not non_orca2_unequal_callers,
+        f"non-ORCA2 callers have unequal words vs parent: {non_orca2_unequal_callers}",
+    )
+    orca2_rep = callers_report["ORCA2-zps"]
+    require(
+        int(orca2_rep["total_unequal_words"]) > 0
+        and int(orca2_rep["arrays"]["s2_h"]["unequal_words"]) > 0
+        and int(orca2_rep["arrays"]["T_stage2"]["unequal_words"]) > 0
+        and int(orca2_rep["arrays"]["s1_h"]["unequal_words"]) == 0
+        and int(orca2_rep["arrays"]["s3_h"]["unequal_words"]) == 0,
+        f"ORCA2-zps card did not move as expected vs parent: {orca2_rep}",
+    )
+
+    return {
+        "format": "nemo-testcase-l4-orca2-round341-caller-audit-v1",
+        "status": "PASS_R341_CALLER_AUDIT",
+        "parent_commit": parent_commit,
+        "worktree_commit": candidate_commit,
+        "parent_worktree": parent_manifest["worktree"],
+        "worktree": candidate_manifest["worktree"],
+        "caller_order": list(CALLER_ORDER),
+        "non_orca2_unequal_callers": non_orca2_unequal_callers,
+        "callers": callers_report,
+    }
+
+
+def self_test(*, plant: str = "none", tmp_dir: Path | None = None) -> dict[str, object]:
+    import tempfile
+
     require(plant in PLANT_CHOICES, f"unknown plant {plant}")
 
     # 1. Score bar and signed-zero control
@@ -1389,6 +2568,172 @@ def self_test(*, plant: str = "none") -> dict[str, object]:
         "single-cell Stage-2 e3t(Kmm) hex control failed",
     )
 
+    # 4. Decision-122 classify and caller_audit_compare controls
+    base_row_exact = {
+        "kt": 1,
+        "checkpoint": "stage3",
+        "field": "T",
+        "bit_identical": True,
+        "unequal": 0,
+        "max_abs": 0.0,
+        "rms": 0.0,
+        "classification": "BIT_EXACT",
+    }
+    base_row_kt10_before = {
+        "kt": 10,
+        "checkpoint": "stage2",
+        "field": "T",
+        "bit_identical": False,
+        "unequal": 1,
+        "max_abs": 2.220446049250313e-16,
+        "rms": 6.185950026992371e-19,
+        "classification": "AT_BAR_NOT_EXACT",
+    }
+    base_row_kt10_after = {
+        "kt": 10,
+        "checkpoint": "stage2",
+        "field": "T",
+        "bit_identical": True,
+        "unequal": 0,
+        "max_abs": 0.0,
+        "rms": 0.0,
+        "classification": "BIT_EXACT",
+    }
+    cand_sha = "c2451f6309fc0000000000000000000000000000"
+    ctrl_same_doc = {
+        "status": "PASS_R341_PAIR_RESCORE",
+        "rung": "rung10",
+        "label": "given_nemo_entry",
+        "worktree": {"commit": cand_sha, "clean": True},
+        "ladder": {"rows": [base_row_exact, base_row_kt10_before]},
+    }
+    ctrl_parent_doc = {
+        "status": "PASS_R341_PAIR_RESCORE",
+        "rung": "rung10",
+        "label": "given_nemo_entry",
+        "worktree": {"commit": PARENT_COMMIT, "clean": True},
+        "ladder": {"rows": [base_row_exact, base_row_kt10_before]},
+    }
+    cand_doc = {
+        "status": "PASS_R341_PAIR_RESCORE",
+        "rung": "rung10",
+        "label": "given_nemo_entry",
+        "worktree": {"commit": cand_sha, "clean": True},
+        "ladder": {"rows": [base_row_exact, base_row_kt10_after]},
+    }
+    with tempfile.TemporaryDirectory(dir=tmp_dir) as td:
+        td_path = Path(td)
+        p_ctrl = td_path / "ctrl_same.json"
+        p_parent = td_path / "ctrl_parent.json"
+        p_cand = td_path / "cand.json"
+        p_ctrl.write_text(json.dumps(ctrl_same_doc), encoding="utf-8")
+        p_parent.write_text(json.dumps(ctrl_parent_doc), encoding="utf-8")
+        p_cand.write_text(json.dumps(cand_doc), encoding="utf-8")
+
+        classify_plant = (
+            plant if plant in ("exact-loss", "away-row", "parent-commit") else "none"
+        )
+        res_same = classify(p_ctrl, p_cand, expect_commit=cand_sha)
+        res_cross = classify(
+            p_parent,
+            p_cand,
+            allow_cross_tree_parent=True,
+            expect_parent_commit=PARENT_COMMIT,
+            expect_commit=cand_sha,
+            plant=classify_plant,
+        )
+        require(
+            res_same["status"] == "PASS_R341_D122_CENSUS"
+            and res_same["d122_c_and_d"]
+            and res_cross["status"] == "PASS_R341_D122_CENSUS"
+            and res_cross["d122_c_and_d"]
+            and res_cross["control_commit"] == PARENT_COMMIT,
+            f"classify failed or plant {plant} fired: {res_cross}",
+        )
+
+        p_dump = td_path / "parent_dump"
+        c_dump = td_path / "cand_dump"
+        p_dump.mkdir()
+        c_dump.mkdir()
+        p_arrays: dict[str, np.ndarray] = {}
+        c_arrays: dict[str, np.ndarray] = {}
+        p_callers: dict[str, object] = {}
+        c_callers: dict[str, object] = {}
+        names = ["s1_h", "s2_h", "T_stage2", "s3_h"]
+        for cname in CALLER_ORDER:
+            p_meta_arrs = {}
+            c_meta_arrs = {}
+            for aname in names:
+                arr_p = np.array([[1.0, 2.0]], dtype=np.float64)
+                arr_c = arr_p.copy()
+                if cname == "ORCA2-zps" and aname in ("s2_h", "T_stage2"):
+                    arr_c[0, 1] = 2.0 + np.spacing(2.0)
+                p_arrays[f"{cname}__{aname}"] = arr_p
+                c_arrays[f"{cname}__{aname}"] = arr_c
+                p_meta_arrs[aname] = {
+                    "shape": [1, 2],
+                    "elements": 2,
+                    "sha256": hashlib.sha256(arr_p.tobytes()).hexdigest(),
+                }
+                c_meta_arrs[aname] = {
+                    "shape": [1, 2],
+                    "elements": 2,
+                    "sha256": hashlib.sha256(arr_c.tobytes()).hexdigest(),
+                }
+            common_meta = {
+                "rk3_stage2_tracer_nemo_stored_thickness": cname in (
+                    "ORCA2V1-tke",
+                    "ORCA2-rung0",
+                    "ORCA2G5-ice",
+                    "ORCA2G6-vec",
+                    "ORCA2G7-drg",
+                    "ORCA2G8-ldf",
+                    "ORCA2-zps_kt1_rest",
+                    "ORCA2-zps",
+                ),
+                "caller_site": "ocean_model_latlon_cgrid.py:9341,9570,9626,9641",
+                "array_names": names,
+            }
+            p_callers[cname] = {**common_meta, "arrays": p_meta_arrs}
+            c_callers[cname] = {**common_meta, "arrays": c_meta_arrs}
+
+        np.savez(p_dump / "arrays.npz", **p_arrays)
+        np.savez(c_dump / "arrays.npz", **c_arrays)
+        (p_dump / "manifest.json").write_text(
+            json.dumps(
+                {
+                    "format": "nemo-testcase-l4-orca2-round341-caller-dump-v1",
+                    "status": "PASS_R341_CALLER_DUMP",
+                    "worktree": {"commit": PARENT_COMMIT, "clean": True},
+                    "caller_order": list(CALLER_ORDER),
+                    "callers": p_callers,
+                }
+            ),
+            encoding="utf-8",
+        )
+        (c_dump / "manifest.json").write_text(
+            json.dumps(
+                {
+                    "format": "nemo-testcase-l4-orca2-round341-caller-dump-v1",
+                    "status": "PASS_R341_CALLER_DUMP",
+                    "worktree": {"commit": cand_sha, "clean": True},
+                    "caller_order": list(CALLER_ORDER),
+                    "callers": c_callers,
+                }
+            ),
+            encoding="utf-8",
+        )
+        caller_plant = (
+            plant if plant in ("caller-unequal", "parent-commit") else "none"
+        )
+        caller_res = caller_audit_compare(
+            p_dump,
+            c_dump,
+            expect_parent_commit=PARENT_COMMIT,
+            expect_commit=cand_sha,
+            plant=caller_plant,
+        )
+
     return {
         "format": "nemo-testcase-l4-orca2-round341-selftest-v1",
         "status": "PASS_R341_SELFTEST",
@@ -1397,6 +2742,15 @@ def self_test(*, plant: str = "none") -> dict[str, object]:
         "e3t_rebuilt_hex": _hex64(e3t_rebuilt),
         "T_stage2_stored_hex": _hex64(T_stored),
         "T_stage2_rebuilt_hex": _hex64(T_rebuilt),
+        "census": res_cross,
+        "caller_audit": {
+            "status": caller_res["status"],
+            "parent_commit": caller_res["parent_commit"],
+            "worktree_commit": caller_res["worktree_commit"],
+            "orca2_unequal_words": caller_res["callers"]["ORCA2-zps"][
+                "total_unequal_words"
+            ],
+        },
     }
 
 
@@ -1406,9 +2760,11 @@ def main() -> int:
     parser.add_argument("--measure", action="store_true")
     parser.add_argument("--rung", choices=tuple(sorted({p[0] for p in PAIRS})))
     parser.add_argument("--label", choices=("independent", "given_nemo_entry"))
+    parser.add_argument("--arm", choices=("control", "candidate"), default="candidate")
     parser.add_argument("--deck-root", type=Path)
     parser.add_argument("--twin-a", type=Path)
     parser.add_argument("--expect-commit")
+    parser.add_argument("--expect-parent-commit", default=PARENT_COMMIT)
     parser.add_argument("--aggregate", nargs="+", type=Path)
     parser.add_argument("--table-out", type=Path)
     parser.add_argument("--rung10-table-out", type=Path)
@@ -1416,6 +2772,13 @@ def main() -> int:
     parser.add_argument("--record-root", type=Path)
     parser.add_argument("--r326-root", type=Path)
     parser.add_argument("--r332-v-root", type=Path)
+    parser.add_argument("--classify", nargs=2, type=Path)
+    parser.add_argument("--allow-cross-tree-parent", action="store_true")
+    parser.add_argument("--decide", nargs="+", type=Path)
+    parser.add_argument("--caller-audit-dump", type=Path)
+    parser.add_argument("--caller-audit", action="store_true")
+    parser.add_argument("--parent-dump", type=Path)
+    parser.add_argument("--candidate-dump", type=Path)
     parser.add_argument("--self-test", action="store_true")
     parser.add_argument("--plant", choices=PLANT_CHOICES, default="none")
     parser.add_argument("--output", type=Path)
@@ -1441,6 +2804,7 @@ def main() -> int:
                 args.deck_root,
                 args.twin_a,
                 args.expect_commit,
+                arm=args.arm,
             )
         elif args.aggregate:
             result = aggregate(
@@ -1460,6 +2824,45 @@ def main() -> int:
                 args.r332_v_root,
                 plant=args.plant,
             )
+        elif args.classify:
+            result = classify(
+                *args.classify,
+                allow_cross_tree_parent=args.allow_cross_tree_parent,
+                expect_parent_commit=args.expect_parent_commit,
+                expect_commit=args.expect_commit,
+                plant=args.plant,
+            )
+            require(
+                result["status"] == "PASS_R341_D122_CENSUS",
+                f"census failed: {result}",
+            )
+        elif args.decide:
+            result = decide(
+                args.decide,
+                allow_cross_tree_parent=args.allow_cross_tree_parent,
+                expect_parent_commit=args.expect_parent_commit,
+                expect_commit=args.expect_commit,
+            )
+        elif args.caller_audit_dump:
+            require(
+                bool(args.deck_root and args.expect_commit),
+                "--caller-audit-dump requires --deck-root and --expect-commit",
+            )
+            result = caller_audit_dump(
+                args.caller_audit_dump, args.deck_root, args.expect_commit
+            )
+        elif args.caller_audit:
+            require(
+                bool(args.parent_dump and args.candidate_dump),
+                "--caller-audit requires --parent-dump and --candidate-dump",
+            )
+            result = caller_audit_compare(
+                args.parent_dump,
+                args.candidate_dump,
+                expect_parent_commit=args.expect_parent_commit,
+                expect_commit=args.expect_commit,
+                plant=args.plant,
+            )
         elif args.self_test:
             result = self_test(plant=args.plant)
         else:
@@ -1473,6 +2876,7 @@ def main() -> int:
         KeyError,
         TypeError,
         ValueError,
+        StopIteration,
     ) as error:
         print(f"STATUS {'PLANT-FIRED' if args.plant != 'none' else 'REFUSE'}: {error}")
         return 2

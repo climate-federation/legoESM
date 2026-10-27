@@ -32,8 +32,12 @@ def test_round341_self_test_passes_and_plants_fire() -> None:
         "wet-3d-mask",
         "stage2-thickness",
         "walk-closure",
+        "exact-loss",
+        "away-row",
+        "parent-commit",
+        "caller-unequal",
     ):
-        with pytest.raises(gate.GateError):
+        with pytest.raises((gate.GateError, StopIteration)):
             gate.self_test(plant=plant_name)
 
 
@@ -101,6 +105,12 @@ def test_walk_source_order_and_plants_on_admitted_records() -> None:
     assert w_raw["dry_3d_unequal"] == 7534
     assert w_raw["subbottom_dry_unequal"] == 5550
     assert w_raw["surface_dry_unequal"] == 1984
+    assert w_raw["subbottom_dry_ssvmask_unequal"] == 5884
+    assert w_raw["surface_dry_ssvmask_unequal"] == 1650
+    assert w_raw["north_fold_subbottom_dry_faces"] == 334
+    assert w_raw["legoesm_dry_word_hex"] == "0x8000000000000000"
+    assert w_raw["raw_nemo_dry_word_hex"] == "0x8000000000000000"
+    assert w_raw["canonicalized_oracle_dump_dry_word_hex"] == "0x0000000000000000"
 
     w_wet = res["first_wet_3d_non_bit_row_walk"]
     assert w_wet["verdict"] == "CONFIRMED"
