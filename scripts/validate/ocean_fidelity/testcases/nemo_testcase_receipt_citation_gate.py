@@ -127,6 +127,25 @@ _OVERFLOW_R62ZDF_COMPILED = (
     NEMO / "tests/OVERFLOW_OMIP_L1_P3_R62ZDF/BLD/ppsrc/nemo")
 FILES = {
     "src/OCE/TRA/traldf_iso.F90": NEMO / "src/OCE/TRA/traldf_iso.F90",
+    # ORCA2X round 1: long-run design/receipt (DECISION 160).
+    'ORCA2_ORCA1ICE_OMIP_L4_ORCA2X_R1_LONGRUN/BLD/ppsrc/nemo/zdftke.f90': NEMO / ('cfgs/ORCA2_ORCA1ICE_OMIP_L4_ORCA2X_R1_LONGRUN/BLD/ppsrc/nemo/zdftke.f90'),
+    'orca1ice_longrun_30day_np2/namelist_cfg': Path('/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2x_rounds/round1/acquisition/orca1ice_longrun_30day_np2/namelist_cfg'),
+    'ORCA2_ORCA1ICE_OMIP_L4_ORCA2X_R1_LONGRUN/BLD/ppsrc/nemo/icestp.f90': NEMO / ('cfgs/ORCA2_ORCA1ICE_OMIP_L4_ORCA2X_R1_LONGRUN/BLD/ppsrc/nemo/icestp.f90'),
+    'ORCA2_ORCA1ICE_OMIP_L4_ORCA2X_R1_LONGRUN/BLD/ppsrc/nemo/icethd.f90': NEMO / ('cfgs/ORCA2_ORCA1ICE_OMIP_L4_ORCA2X_R1_LONGRUN/BLD/ppsrc/nemo/icethd.f90'),
+    'ORCA2_ORCA1ICE_OMIP_L4_ORCA2X_R1_LONGRUN/BLD/ppsrc/nemo/icedyn_adv_pra.f90': NEMO / ('cfgs/ORCA2_ORCA1ICE_OMIP_L4_ORCA2X_R1_LONGRUN/BLD/ppsrc/nemo/icedyn_adv_pra.f90'),
+    'ORCA2_ORCA1ICE_OMIP_L4_ORCA2X_R1_LONGRUN/BLD/ppsrc/nemo/stprk3.f90': NEMO / ('cfgs/ORCA2_ORCA1ICE_OMIP_L4_ORCA2X_R1_LONGRUN/BLD/ppsrc/nemo/stprk3.f90'),
+    'ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/restart.f90': NEMO / ('cfgs/ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/restart.f90'),
+    'ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/zdfmxl.f90': NEMO / ('cfgs/ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/zdfmxl.f90'),
+    'ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/domzgr.f90': NEMO / ('cfgs/ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/domzgr.f90'),
+    'ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/dommsk.f90': NEMO / ('cfgs/ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/dommsk.f90'),
+    'ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/domutl.f90': NEMO / ('cfgs/ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/domutl.f90'),
+    'ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/lib_fortran.f90': NEMO / ('cfgs/ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/lib_fortran.f90'),
+    'ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/sbcfwb.f90': NEMO / ('cfgs/ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/sbcfwb.f90'),
+    'orca1ice_longrun_30day_np2/ocean.output': Path('/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2x_rounds/round1/acquisition/orca1ice_longrun_30day_np2/ocean.output'),
+    'ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/domwri.f90': NEMO / ('cfgs/ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/domwri.f90'),
+    'ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/trdglo.f90': NEMO / ('cfgs/ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/trdglo.f90'),
+    'ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/domqco.f90': NEMO / ('cfgs/ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/domqco.f90'),
+    'ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/domain.f90': NEMO / ('cfgs/ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/domain.f90'),
     # ORCA2 round 328 Resume-5: the unmodified round-326 record-build chain.
     "ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/zdfphy.f90": (
         NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/zdfphy.f90"),
@@ -2100,6 +2119,32 @@ FILES = {
 # recurring symbol is refused now, and every multi-line citation states its
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
+    # ORCA2X round 1: long-run design/receipt (DECISION 160).
+    'ORCA2_ORCA1ICE_OMIP_L4_ORCA2X_R1_LONGRUN/BLD/ppsrc/nemo/zdftke.f90:195': 'CALL orca2x_longrun_hmi_write( kt, nn_mxlice, ln_mxl0 )   ! ORCA2X write-only replay input',
+    'orca1ice_longrun_30day_np2/namelist_cfg:21': 'nn_itend    =      240   !  Lane-4 registered ten-step endpoint',
+    'orca1ice_longrun_30day_np2/namelist_cfg:23': 'nn_stock    =      8   !  Lane-4 registered terminal restart',
+    'ORCA2_ORCA1ICE_OMIP_L4_ORCA2X_R1_LONGRUN/BLD/ppsrc/nemo/icestp.f90:297': 'IF( kt > nit000 + 9 ) RETURN   ! ORCA2X: cap inherited write-only observer',
+    'ORCA2_ORCA1ICE_OMIP_L4_ORCA2X_R1_LONGRUN/BLD/ppsrc/nemo/icethd.f90:309,327,339': [('IF( kt > nit000 + 9 ) RETURN   ! ORCA2X: cap inherited write-only observer', 1), ('IF( kt > nit000 + 9 ) RETURN   ! ORCA2X: cap inherited write-only observer', 2), ('IF( kt > nit000 + 9 ) RETURN   ! ORCA2X: cap inherited write-only observer', 3), 3],
+    'ORCA2_ORCA1ICE_OMIP_L4_ORCA2X_R1_LONGRUN/BLD/ppsrc/nemo/icedyn_adv_pra.f90:602': 'IF( kt > nit000 + 9 ) RETURN   ! ORCA2X: cap inherited write-only observer',
+    'ORCA2_ORCA1ICE_OMIP_L4_ORCA2X_R1_LONGRUN/BLD/ppsrc/nemo/stprk3.f90:314': 'IF( kstp > nit000 + 9 ) RETURN   ! ORCA2X: cap inherited write-only observer',
+    'ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/restart.f90:176-180': ["CALL iom_rstput( kt, nitrst, numrow, 'sshn', ssh(:,:        ,Kbb) )     ! before fields", "CALL iom_rstput( kt, nitrst, numrow, 'sn'  , ts(:,:,:,jp_sal,Kbb) )", 5],
+    'ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/zdfphy.f90:330': 'CALL zdf_mxl( kt, Kmm )                        !* mixed layer depth, and level',
+    'ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/stprk3.f90:183': 'CALL zdf_phy( kstp, Nbb, Nbb, Nrhs )   ! vertical physics update (top/bot drag, avt, avs, avm + MLD)',
+    'ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/stprk3.f90:175': 'CALL bn2    ( ts(:,:,:,:,Nbb), rab_b, rn2b, Nbb ) ! before Brunt-Vaisala frequency',
+    'ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/zdfmxl.f90:45': 'REAL(wp), PUBLIC ::   rho_c = 0.01_wp    !: density criterion for mixed layer depth',
+    'ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/zdfmxl.f90:114-118': ['zN2_c = grav * rho_c * r1_rho0      ! convert density criteria into N^2 criteria', 'IF( hmlp(ji,jj) < zN2_c )   nmln(ji,jj) = MIN( jk , ikt ) + 1   ! Mixed layer level', 5],
+    'ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/zdfmxl.f90:122-123': ['iik = nmln(ji,jj)', 'hmlp(ji,jj) = ((gdepw_1d(iik  ) ) *(1._wp+r3t(ji,jj,Kmm))) * ssmask(ji,jj)    ! Mixed layer depth', 2],
+    'ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/domzgr.f90:384-386': ['zrefdep = 10._wp - 0.1_wp * MINVAL( e3w_1d )                   ! ref. depth with tolerance (10% of minimum layer thickness)', 'nla10 = nlb10 - 1                                              ! deepest    W level Above ~10m', 3],
+    'ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/dommsk.f90:247,263-264': ['ssmask (:,:) = MAXVAL( tmask(:,:,:), DIM=3 )', "CALL dom_uniq( tmask_i, 'T' )", 'tmask_i (:,:) = ssmask(:,:) * tmask_i(:,:)', 3],
+    'ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/domutl.f90:131-132': ["CALL lbc_lnk( 'domwri', puniq, cdgrd, 1._wp )   ! apply boundary conditions", 'lluniq(:,:,1) = puniq(:,:) == ztstref(:,:)      ! check which values have not been changed', 2],
+    'ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/lib_fortran.f90:1508': ('zztmp = ptab(ji+iisht,jj+ijsht) * smask0_i(ji,jj)', 2),
+    'ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/sbcfwb.f90:212': "IF (lwp) WRITE(numout,*) 'Total Domain area (km**2):', area/1000._wp/1000._wp",
+    'orca1ice_longrun_30day_np2/ocean.output:1662': 'Total Domain area (km**2):   357005237.10546613',
+    'ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/domwri.f90:118,120': ["CALL dom_uniq( zprw, 'U' )", 'zprt(ji,jj) = ssumask(ji,jj) * zprw(ji,jj)                        !    ! unique point mask', 2],
+    'ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/trdglo.f90:108': 'zvm = e1e2t(ji,jj) * (e3t_3d(ji,jj,jk) *(1._wp+r3t(ji,jj,Kmm)*tmask(ji,jj,jk))) * tmask(ji,jj,jk) * tmask_i(ji,jj)',
+    'ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/domqco.f90:257,266': [('pr3t(ji,jj) = pssh(ji,jj) * r1_ht_0(ji,jj)   !==  ratio at t-point  ==!', 2), ('pr3u(ji,jj) = 0.5_wp * (  e1e2t(ji  ,jj) * pssh(ji  ,jj)  &', 2), 2],
+    'ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/domain.f90:198,212': ['ht_0(:,:) = ht_0(:,:) + e3t_3d(:,:,jk) * tmask(:,:,jk)', 'r1_ht_0(:,:) = ssmask (:,:) / ( ht_0(:,:) + 1._wp -  ssmask (:,:) )', 2],
+    'ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/dommsk.f90:210': 'umask(ji,jj,jk) = tmask(ji,jj  ,jk) * tmask(ji+1,jj  ,jk)',
     'zdftke_round331.patch:8-24': [
         '@@ -254,0 +259,6 @@',
         '+         CALL r331_after_solve(jj,en(ntsi:ntei,jj,1:jpkm1))', 17],
