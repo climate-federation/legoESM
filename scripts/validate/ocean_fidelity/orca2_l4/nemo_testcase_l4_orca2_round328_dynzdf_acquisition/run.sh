@@ -1386,7 +1386,9 @@ if [[ "$ACQ_TARGET" == tke336 ]]; then
   # Recompile the inherited round-326 stage observer for the plant.  The
   # source BLD object may have been refreshed independently and is therefore
   # not evidence that MY_SRC/stprk3_stg.F90 still carries the 1367-FP body.
-  fpp "$SOURCE_STAGE" "$scratch/stage.inherited.f90"
+  fpp "$SOURCE_STAGE" "$scratch/stage.inherited-with-eos.f90"
+  sed '/eos_l2_dump_next/d' "$scratch/stage.inherited-with-eos.f90" \
+    >"$scratch/stage.inherited.f90"
   compile_record_object "$scratch/stage.inherited.f90" "$scratch/stage.inherited.o"
   fp_named_signature "$scratch/stage.inherited.o" "$scratch/r336-stage.inherited.fp" \
     __stprk3_stg_MOD_stp_rk3_stg
