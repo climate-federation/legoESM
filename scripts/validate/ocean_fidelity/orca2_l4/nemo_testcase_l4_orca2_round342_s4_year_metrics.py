@@ -2,13 +2,25 @@
 """ORCA2 Round 342: month-by-month ORCA2X metric card comparison against Decision-185 reference bars.
 
 Reuses the Decision-160 ORCA2X long-run metric card (`nemo_testcase_l4_orca2x_round1_pilot_metrics.py`
-and `nemo_testcase_l4_orca2x_round1_longrun.py`) without re-implementing any metric physics.
-Applies the metric card month by month across the 12 calendar months of the 365-day
-no-leap year (`[31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]` days) for both:
-  1. The NEMO reproducibility twin comparison (Twin B vs Twin A, when both are present), and
-  2. The legoESM standalone K0 candidate vs NEMO Arm A comparison.
+and `nemo_testcase_l4_orca2x_round1_longrun.py`) verbatim without re-implementing any metric physics
+and without averaging state fields before computing nonlinear metrics (`KE`, `PSI`, `MLD`).
 
-Every metric is reported next to its Decision-185 REFERENCE bar:
+Sampling schedule (Decision 160 card, identical for both arms):
+  - Saved states are the instantaneous completed end-of-day states every `nn_stock = 8` steps
+    (`kt = 8, 16, 24, ..., 2920` for Days `d = 1..365` at `rn_Dt = 10800` s):
+      * NEMO arm (`orca2_k0_year1_{a,b}_np2`): two-rank daily restarts
+        `ORCA2_{8*d:08d}_restart_{0000,0001}.nc` holding `tn, sn, un, vn, sshn` (`Kbb` after Stage-3 swap).
+      * legoESM arm: daily snapshots `candidate_step{8*d:08d}.npz` holding `T, S, u, v, ssh`.
+  - On each saved daily state `d`, `pilot_metrics.day_metrics(cand, nemo, geo, mld, cover)`
+    evaluates all linear and nonlinear metrics (`SST`, `SSS`, `SSH`, depth-band `T`/`S`,
+    `KE`, `PSI`, `DRAKE`, `MLD`, `ICE_SST`, `ICE_SSS`) and daily difference maps.
+  - Within each of the 12 no-leap calendar months (`[31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]`
+    days), `pilot_metrics.monthly(m_rows, m_maps, geo)` averages the per-saved-state metrics
+    across the saved days in that month, identically for:
+      1. The NEMO reproducibility twin comparison (`Twin B vs Twin A`), and
+      2. The legoESM standalone K0 candidate vs NEMO Arm A comparison.
+
+Every monthly metric is reported next to its Decision-185 REFERENCE bar:
   - Monthly RMS SST and depth-band T (`0-100m`, `100-1000m`, `>1000m`): `0.01 K`
   - Monthly RMS SSS and depth-band S (`0-100m`, `100-1000m`, `>1000m`): `0.002 psu`
   - Monthly RMS SSH: `1 mm` (`0.001 m`)
@@ -44,7 +56,6 @@ from legoesm.ocean.fidelity.provenance import worktree_stamp  # noqa: E402
 from scripts.validate.ocean_fidelity.orca2_l4 import (  # noqa: E402
     nemo_testcase_l4_orca2_round339_common as common,
     nemo_testcase_l4_orca2_round340_standalone_gate as r340_s4,
-    nemo_testcase_l4_orca2x_round1_longrun as longrun,
     nemo_testcase_l4_orca2x_round1_pilot_metrics as pilot_metrics,
 )
 
@@ -72,8 +83,17 @@ class K0MLDEvaluator(pilot_metrics.MLDEvaluator):
         self.rho0 = float(cfg.constants.rho_0)
         self._bundle = jax.jit(lambda s: model._tke_step_entry_n2_bundle(s).rn2b)
 
+
 STEPS_PER_DAY = pilot_metrics.STEPS_PER_DAY
 FIELDS = pilot_metrics.FIELDS
+SAMPLING_DESCRIPTION = (
+    "Instantaneous completed end-of-day states saved every 8 steps "
+    "(kt = 8, 16, ..., 2920 for days d = 1..365 at rn_Dt = 10800 s): "
+    "NEMO two-rank restarts ORCA2_{8*d:08d}_restart_{0000,0001}.nc (nn_stock = 8, Kbb after Stage-3 swap) "
+    "and legoESM snapshots candidate_step{8*d:08d}.npz (save_stride = 8). "
+    "Each metric is evaluated on each saved daily state via pilot_metrics.day_metrics and then averaged "
+    "across the saved daily states in each month via pilot_metrics.monthly (never on state-averaged fields)."
+)
 NOLEAP_MONTHS: tuple[tuple[int, str, int], ...] = (
     (1, "M01_Jan", 31),
     (2, "M02_Feb", 28),
@@ -141,6 +161,7 @@ def calendar_month_day_ranges(max_days: int = 365) -> list[dict[str, Any]]:
                 "start_day": start_day,
                 "end_day": end_day,
                 "available_days": [],
+                "saved_kts": [],
                 "complete_month": False,
             })
             continue
@@ -153,24 +174,22 @@ def calendar_month_day_ranges(max_days: int = 365) -> list[dict[str, Any]]:
             "start_day": start_day,
             "end_day": end_day,
             "available_days": days,
+            "saved_kts": [d * STEPS_PER_DAY for d in days],
             "complete_month": len(days) == length,
         })
     return windows
 
 
-def _mean_fields(states: list[dict[str, np.ndarray]]) -> dict[str, np.ndarray]:
-    require(bool(states), "cannot average empty state list")
-    return {
-        name: np.mean([st[name] for st in states], axis=0)
-        for name in FIELDS
-    }
-
-
 def _attach_decision185_reference(
     monthly_summary: dict[str, Any],
-    mean_field_metrics: dict[str, Any],
+    daily_rows_in_window: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    """Attach Decision-185 reference bars next to each monthly metric (REFERENCE ONLY)."""
+    """Attach Decision-185 reference bars to `pilot_metrics.monthly` outputs (REFERENCE ONLY).
+
+    Every metric comes from `pilot_metrics.day_metrics` evaluated on each saved daily state
+    and averaged over the window by `pilot_metrics.monthly` — never from state-averaged fields.
+    """
+    require(bool(daily_rows_in_window), "cannot attach reference bars to empty daily row window")
     out: dict[str, Any] = {}
     for key in (
         "SST", "T_0-100m", "T_100-1000m", "T_>1000m",
@@ -180,30 +199,41 @@ def _attach_decision185_reference(
         if key not in monthly_summary:
             continue
         ref = DECISION_185_REFERENCE_BARS[key]
-        out[key] = {
-            "daily_mean_bias": monthly_summary[key]["bias"],
-            "daily_mean_rms": monthly_summary[key]["rms"],
-            "monthly_mean_field_bias": mean_field_metrics[key]["bias"],
-            "monthly_mean_field_rms": mean_field_metrics[key]["rms"],
+        entry: dict[str, Any] = {
+            "bias": float(monthly_summary[key]["bias"]),
+            "rms": float(monthly_summary[key]["rms"]),
+            "daily_mean_bias": float(monthly_summary[key]["bias"]),
+            "daily_mean_rms": float(monthly_summary[key]["rms"]),
             "decision185_reference_bar_rms": ref["reference_bar"],
             "units": ref["units"],
             "bar_mode": "REFERENCE_ONLY",
             "verdict": None,
         }
+        map_key = f"{key}_monthly_mean_map"
+        if map_key in monthly_summary:
+            entry["monthly_mean_difference_map"] = {
+                "bias": float(monthly_summary[map_key]["bias"]),
+                "rms": float(monthly_summary[map_key]["rms"]),
+            }
+        if key == "MLD" and "MLD" in daily_rows_in_window[0]:
+            entry["nemo_mean"] = float(np.mean([r["MLD"]["nemo_mean"] for r in daily_rows_in_window]))
+            entry["cand_mean"] = float(np.mean([r["MLD"]["cand_mean"] for r in daily_rows_in_window]))
+        out[key] = entry
 
     if "KE" in monthly_summary:
-        ke_m = mean_field_metrics["KE"]
-        nemo_ke = float(ke_m["nemo_mean"])
-        cand_ke = float(ke_m["cand_mean"])
+        nemo_ke = float(np.mean([r["KE"]["nemo_mean"] for r in daily_rows_in_window]))
+        cand_ke = float(np.mean([r["KE"]["cand_mean"] for r in daily_rows_in_window]))
+        ke_bias = float(monthly_summary["KE"]["bias"])
+        ke_rms = float(monthly_summary["KE"]["rms"])
         rel_bias = abs(cand_ke - nemo_ke) / nemo_ke if nemo_ke > 0.0 else 0.0
-        rel_rms = float(ke_m["rms"]) / nemo_ke if nemo_ke > 0.0 else 0.0
+        rel_rms = ke_rms / nemo_ke if nemo_ke > 0.0 else 0.0
         out["KE"] = {
             "nemo_mean": nemo_ke,
             "cand_mean": cand_ke,
-            "daily_mean_bias": monthly_summary["KE"]["bias"],
-            "daily_mean_rms": monthly_summary["KE"]["rms"],
-            "monthly_mean_field_bias": ke_m["bias"],
-            "monthly_mean_field_rms": ke_m["rms"],
+            "bias": ke_bias,
+            "rms": ke_rms,
+            "daily_mean_bias": ke_bias,
+            "daily_mean_rms": ke_rms,
             "relative_mean_diff_fraction": rel_bias,
             "relative_rms_fraction": rel_rms,
             "decision185_reference_bar_fraction": 0.01,
@@ -214,29 +244,34 @@ def _attach_decision185_reference(
         }
 
     if "PSI" in monthly_summary:
-        psi_m = mean_field_metrics["PSI"]
-        out["PSI"] = {
-            "daily_mean_bias_sv": monthly_summary["PSI"]["bias"],
-            "daily_mean_rms_sv": monthly_summary["PSI"]["rms"],
-            "daily_mean_pattern_corr": monthly_summary["PSI"]["pattern_corr"],
-            "monthly_mean_field_bias_sv": psi_m["bias"],
-            "monthly_mean_field_rms_sv": psi_m["rms"],
-            "monthly_mean_field_pattern_corr": psi_m["pattern_corr"],
+        psi_entry: dict[str, Any] = {
+            "bias_sv": float(monthly_summary["PSI"]["bias"]),
+            "rms_sv": float(monthly_summary["PSI"]["rms"]),
+            "pattern_corr": float(monthly_summary["PSI"]["pattern_corr"]),
+            "daily_mean_bias_sv": float(monthly_summary["PSI"]["bias"]),
+            "daily_mean_rms_sv": float(monthly_summary["PSI"]["rms"]),
+            "daily_mean_pattern_corr": float(monthly_summary["PSI"]["pattern_corr"]),
             "decision185_reference_bar_rms_sv": 0.1,
             "decision185_reference_bar_pattern_corr_min": 0.999,
             "units": "Sv / dimensionless",
             "bar_mode": "REFERENCE_ONLY",
             "verdict": None,
         }
+        if "PSI_monthly_mean_map" in monthly_summary:
+            psi_entry["monthly_mean_difference_map"] = {
+                "bias_sv": float(monthly_summary["PSI_monthly_mean_map"]["bias"]),
+                "rms_sv": float(monthly_summary["PSI_monthly_mean_map"]["rms"]),
+            }
+        out["PSI"] = psi_entry
 
     if "DRAKE" in monthly_summary:
         dr = monthly_summary["DRAKE"]
         diff_sv = float(dr["cand_mean_sv"] - dr["nemo_mean_sv"])
         out["DRAKE"] = {
-            "nemo_mean_sv": dr["nemo_mean_sv"],
-            "cand_mean_sv": dr["cand_mean_sv"],
-            "nemo_std_sv": dr["nemo_std_sv"],
-            "cand_std_sv": dr["cand_std_sv"],
+            "nemo_mean_sv": float(dr["nemo_mean_sv"]),
+            "cand_mean_sv": float(dr["cand_mean_sv"]),
+            "nemo_std_sv": float(dr["nemo_std_sv"]),
+            "cand_std_sv": float(dr["cand_std_sv"]),
             "mean_diff_sv": diff_sv,
             "abs_mean_diff_sv": abs(diff_sv),
             "decision185_reference_bar_sv": 0.5,
@@ -280,8 +315,6 @@ def evaluate_month_by_month(
 
     daily_rows: list[dict[str, Any]] = []
     daily_maps: list[dict[str, np.ndarray]] = []
-    cand_states_by_day: dict[int, dict[str, np.ndarray]] = {}
-    nemo_states_by_day: dict[int, dict[str, np.ndarray]] = {}
 
     for day in range(1, days + 1):
         cand = cand_day1 if day == 1 else read_cand(candidate_root, day)
@@ -289,8 +322,6 @@ def evaluate_month_by_month(
         row, mp = pilot_metrics.day_metrics(cand, nemo, geo, mld, cover)
         daily_rows.append({"day": day, "kt": day * STEPS_PER_DAY, **row})
         daily_maps.append(mp)
-        cand_states_by_day[day] = cand
-        nemo_states_by_day[day] = nemo
 
     months_out: list[dict[str, Any]] = []
     for window in calendar_month_day_ranges(days):
@@ -307,32 +338,27 @@ def evaluate_month_by_month(
         m_rows = [daily_rows[d - 1] for d in avail]
         m_maps = [daily_maps[d - 1] for d in avail]
         m_summary = pilot_metrics.monthly(m_rows, m_maps, geo)
-        cand_mean_state = _mean_fields([cand_states_by_day[d] for d in avail])
-        nemo_mean_state = _mean_fields([nemo_states_by_day[d] for d in avail])
-        mean_field_row, _ = pilot_metrics.day_metrics(
-            cand_mean_state, nemo_mean_state, geo, mld, cover
-        )
-        metrics_with_bars = _attach_decision185_reference(m_summary, mean_field_row)
+        metrics_with_bars = _attach_decision185_reference(m_summary, m_rows)
         months_out.append({
             **window,
             "status": "EVALUATED_COMPLETE_MONTH" if window["complete_month"] else "EVALUATED_PARTIAL_MONTH",
             "bar_mode": "DECISION_185_REFERENCE_ONLY",
             "verdict": None,
+            "pilot_monthly": m_summary,
             "metrics": metrics_with_bars,
         })
 
     overall_summary = pilot_metrics.monthly(daily_rows, daily_maps, geo)
-    overall_cand_mean = _mean_fields([cand_states_by_day[d] for d in range(1, days + 1)])
-    overall_nemo_mean = _mean_fields([nemo_states_by_day[d] for d in range(1, days + 1)])
-    overall_mean_row, _ = pilot_metrics.day_metrics(
-        overall_cand_mean, overall_nemo_mean, geo, mld, cover
-    )
-    overall_with_bars = _attach_decision185_reference(overall_summary, overall_mean_row)
+    overall_with_bars = _attach_decision185_reference(overall_summary, daily_rows)
 
     return {
-        "format": "orca2-r342-s4-year-metrics-v1",
+        "format": "orca2-r342-s4-year-metrics-v2",
         "round": "orca2_r342",
         "bias_convention": "candidate - NEMO",
+        "sampling": SAMPLING_DESCRIPTION,
+        "steps_per_day": STEPS_PER_DAY,
+        "saved_kts_evaluated": [d * STEPS_PER_DAY for d in range(1, days + 1)],
+        "state_averaging_before_nonlinear_metrics": False,
         "bar_mode": "DECISION_185_REFERENCE_ONLY",
         "verdict": None,
         "pass_fail_assigned": False,
@@ -348,10 +374,11 @@ def evaluate_month_by_month(
             "rho0": mld.rho0,
             "rho_c": pilot_metrics.ZDFMXL_RHO_C,
         },
+        "overall_pilot_monthly": overall_summary,
         "overall_window_metrics": overall_with_bars,
         "months": months_out,
         "daily": daily_rows,
-        "worktree": worktree_stamp(allow_dirty=True),
+        "worktree": worktree_stamp(allow_dirty=False),
     }
 
 
@@ -362,25 +389,27 @@ def format_markdown_report(report: dict[str, Any]) -> str:
         "",
         f"- **Bar mode:** `{report['bar_mode']}` (`verdict = {report['verdict']}`, `pass_fail_assigned = {report['pass_fail_assigned']}`)",
         f"- **Bias convention:** `{report['bias_convention']}`",
+        f"- **Sampling:** {report['sampling']}",
+        f"- **State averaging before nonlinear metrics:** `{report['state_averaging_before_nonlinear_metrics']}`",
         f"- **NEMO root:** `{report['nemo_root']}`",
         f"- **Candidate root:** `{report['candidate_root']}`",
-        f"- **Days evaluated:** `{report['days_evaluated']}`",
+        f"- **Days evaluated:** `{report['days_evaluated']}` (`kt = {report['saved_kts_evaluated'][0]}..{report['saved_kts_evaluated'][-1]}`)",
         "",
         "## Decision-185 Reference Bars (Reference Only — No Pass/Fail)",
         "",
-        "| Metric | Statistic | Decision-185 Reference Bar | Units |",
+        "| Metric | Statistic (mean of daily saved-state metrics) | Decision-185 Reference Bar | Units |",
         "|---|---|---:|---|",
-        "| `SST` / `T_0-100m` / `T_100-1000m` / `T_>1000m` | Monthly RMS | `0.01` | `K` |",
-        "| `SSS` / `S_0-100m` / `S_100-1000m` / `S_>1000m` | Monthly RMS | `0.002` | `psu` |",
-        "| `SSH` | Monthly RMS | `0.001` (`1 mm`) | `m` |",
-        "| `KE` (surface) | Relative diff / RMS vs NEMO mean | `0.01` (`1%`) | fraction of NEMO mean |",
-        "| `PSI` (barotropic streamfunction) | Monthly RMS / spatial corr | `0.1 Sv` / `>= 0.999` | `Sv` / dimensionless |",
-        "| `DRAKE` (Drake Passage transport) | `|cand - NEMO|` monthly mean | `0.5` | `Sv` |",
-        "| `MLD` (`Delta sigma_0 = 0.01 kg m^-3`) | Monthly RMS | `1.0` | `m` |",
+        "| `SST` / `T_0-100m` / `T_100-1000m` / `T_>1000m` | Monthly mean of daily RMS | `0.01` | `K` |",
+        "| `SSS` / `S_0-100m` / `S_100-1000m` / `S_>1000m` | Monthly mean of daily RMS | `0.002` | `psu` |",
+        "| `SSH` | Monthly mean of daily RMS | `0.001` (`1 mm`) | `m` |",
+        "| `KE` (surface) | Monthly mean of daily RMS / NEMO mean | `0.01` (`1%`) | fraction of NEMO mean |",
+        "| `PSI` (barotropic streamfunction) | Monthly mean of daily RMS / spatial corr | `0.1 Sv` / `>= 0.999` | `Sv` / dimensionless |",
+        "| `DRAKE` (Drake Passage transport) | `|cand - NEMO|` monthly mean of daily transport | `0.5` | `Sv` |",
+        "| `MLD` (`Delta sigma_0 = 0.01 kg m^-3`) | Monthly mean of daily RMS | `1.0` | `m` |",
         "",
         "## Month-by-Month Summary (Evaluated & Pending Months 1–12)",
         "",
-        "| Month | Days | Status | SST RMS (`0.01 K`) | SSS RMS (`0.002 psu`) | SSH RMS (`0.001 m`) | KE rel RMS (`0.01`) | PSI RMS (`0.1 Sv`) | PSI corr (`0.999`) | Drake `|diff|` (`0.5 Sv`) | MLD RMS (`1.0 m`) |",
+        "| Month | Days (`kt`) | Status | SST RMS (`0.01 K`) | SSS RMS (`0.002 psu`) | SSH RMS (`0.001 m`) | KE rel RMS (`0.01`) | PSI RMS (`0.1 Sv`) | PSI corr (`0.999`) | Drake `|diff|` (`0.5 Sv`) | MLD RMS (`1.0 m`) |",
         "|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for m in report["months"]:
@@ -391,19 +420,21 @@ def format_markdown_report(report: dict[str, Any]) -> str:
             )
             continue
         mt = m["metrics"]
+        kts = m["saved_kts"]
+        kt_span = f"kt={kts[0]}..{kts[-1]}"
         mld_str = (
-            f"{mt['MLD']['monthly_mean_field_rms']:.4e}"
+            f"{mt['MLD']['daily_mean_rms']:.4e}"
             if "MLD" in mt
             else "skipped"
         )
         lines.append(
-            f"| `{m['label']}` | `{day_span}` (`{len(m['available_days'])}d`) | `{m['status']}` "
-            f"| `{mt['SST']['monthly_mean_field_rms']:.4e}` "
-            f"| `{mt['SSS']['monthly_mean_field_rms']:.4e}` "
-            f"| `{mt['SSH']['monthly_mean_field_rms']:.4e}` "
+            f"| `{m['label']}` | `{day_span}` (`{len(m['available_days'])}d`, `{kt_span}`) | `{m['status']}` "
+            f"| `{mt['SST']['daily_mean_rms']:.4e}` "
+            f"| `{mt['SSS']['daily_mean_rms']:.4e}` "
+            f"| `{mt['SSH']['daily_mean_rms']:.4e}` "
             f"| `{mt['KE']['relative_rms_fraction']:.4e}` "
-            f"| `{mt['PSI']['monthly_mean_field_rms_sv']:.4e}` "
-            f"| `{mt['PSI']['monthly_mean_field_pattern_corr']:.6f}` "
+            f"| `{mt['PSI']['daily_mean_rms_sv']:.4e}` "
+            f"| `{mt['PSI']['daily_mean_pattern_corr']:.6f}` "
             f"| `{mt['DRAKE']['abs_mean_diff_sv']:.4e}` "
             f"| `{mld_str}` |"
         )
