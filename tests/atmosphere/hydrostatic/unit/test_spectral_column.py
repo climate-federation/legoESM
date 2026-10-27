@@ -190,7 +190,7 @@ def test_column_view_is_the_synthesis_and_T_edits_write_back_as_increments(grid,
     for k in ("u", "v", "T", "p_s", "phis"):
         exp = np.asarray(f[k]).reshape((ncol,) + np.asarray(f[k]).shape[2:])
         np.testing.assert_array_equal(np.asarray(getattr(st, k).data), exp, err_msg=k)
-    assert tuple(st.tracers) == NAMES
+    assert sorted(st.tracers) == sorted(NAMES)
     np.testing.assert_array_equal(np.asarray(st.tracers["q_v"].data),
                                   np.asarray(nat.tracers["q_v"].data).reshape(ncol, NLEV))
     np.testing.assert_array_equal(np.asarray(st.T_view.data), np.asarray(st.T.data))
@@ -204,7 +204,9 @@ def test_column_view_is_the_synthesis_and_T_edits_write_back_as_increments(grid,
                       tracers={**st.tracers, "q_v": st.tracers["q_v"].replace(
                           data=st.tracers["q_v"].data * 2.0)})
     back2 = col.to_bundle(st2)
-    exp_T_hat = nat.T_hat.data + sh_analysis_3d(grid, dT_cols.reshape(grid.n_lat, grid.n_lon, NLEV))
+    # the increment is the edit over the view, (T + dT) - T in floating point
+    edit = (st2.T.data - st.T.data).reshape(grid.n_lat, grid.n_lon, NLEV)
+    exp_T_hat = nat.T_hat.data + sh_analysis_3d(grid, edit)
     np.testing.assert_array_equal(np.asarray(back2.T_hat.data), np.asarray(exp_T_hat))
     np.testing.assert_array_equal(np.asarray(back2.tracers["q_v"].data),
                                   2.0 * np.asarray(nat.tracers["q_v"].data))
@@ -264,7 +266,10 @@ def test_uniform_tendencies_land_as_the_lanes_analytic_increment(grid, sigma):
     _, col = _model(grid, sigma, hyperdiff_coeff=0.0, dealiasing_fraction=0.0)
     nat = _native_ic(grid, sigma)
     n_lat, n_lon = grid.n_lat, grid.n_lon
-    du0, dv0, dT0, dq0 = 1e-4, -2e-4, 3e-4, -1e-7
+    # dq0 * DT stays above -min(q_v) (~3e-5 at the top level), so the
+    # tracer positivity after the increment is inert and the increment
+    # analytic
+    du0, dv0, dT0, dq0 = 1e-4, -2e-4, 3e-4, -1e-8
 
     def physics(state, mesh, coord, phys_state=None, forcing=None):
         o3 = jnp.ones_like(state.T.data)
@@ -290,7 +295,9 @@ def test_uniform_tendencies_land_as_the_lanes_analytic_increment(grid, sigma):
     dq = {"q_v": jnp.full((n_lat, n_lon, NLEV), dq0)}
     q_exp, p_s_exp = apply_physics_water_mass(ref.native.tracers, dq, fr["p_s"], sigma, DT)
     np.testing.assert_allclose(np.asarray(fo["p_s"]), np.asarray(p_s_exp), rtol=1e-12, atol=1e-7)
-    np.testing.assert_array_equal(np.asarray(out.native.tracers["q_v"].data), np.asarray(q_exp["q_v"].data))
+    # inside the step's jit vs eager here: fused roundoff (the p_s line's rtol)
+    np.testing.assert_allclose(np.asarray(out.native.tracers["q_v"].data),
+                               np.asarray(q_exp["q_v"].data), rtol=1e-12, atol=0.0)
     assert np.abs(np.asarray(fo["p_s"] - fr["p_s"])).max() > 0.0
     assert float(col._step_diag["dry_mass_trunc_rel_max"]) < 1e-12
     # and the columns the driver sees are the view of that native state
@@ -317,7 +324,7 @@ def test_physics_sees_the_column_view_of_the_post_dynamics_state(grid, sigma):
     st = seen["state"]
     ncol = col.mesh.nCells
     assert st.T.shape == (ncol, NLEV) and st.p_s.shape == (ncol,) and st.v is not None
-    assert tuple(st.tracers) == NAMES
+    assert sorted(st.tracers) == sorted(NAMES)
 
     def echo(state, mesh, coord, phys_state=None, forcing=None):
         return _tend(state, jnp.zeros_like(state.u.data), jnp.zeros_like(state.v.data),
@@ -372,7 +379,7 @@ def test_no_retrace_after_warm_up_under_a_changing_forcing(grid, sigma):
     col.dyn._advance_dynamics = counting
     st = col.from_bundle(nat)
     st = col.step(st, DT, physics_fn=physics, forcing={"sst": jnp.full((col.mesh.nCells,), 1.0)})
-    steps = lambda: [k for k in col._fns if k != "view"]  # noqa: E731
+    steps = lambda: list(col._fns)  # noqa: E731
     assert len(traces) == 1 and steps() == [(physics, DT)]
     for k in range(2, 6):
         st = col.step(st, DT, physics_fn=physics,
@@ -478,6 +485,38 @@ def test_projection_residuals_meet_the_acceptance(grid, sigma):
     global_resid = abs((((W_outh - W_refh) - dWh) * area).sum()) / (W_refh * area).sum()
     print(f"P4 acceptance, hyperdiffusion on: global column-water residual {global_resid:.3e} (<=1e-9)")
     assert global_resid <= 1e-9
+    # a LOCALIZED water sink (exact-zero tendency elsewhere, non-uniform
+    # background tracers): the projected ln p_s increment spreads beyond the
+    # sink column, so every column whose layer masses moved is re-weighted;
+    # each tracer's global mass changes by exactly what the physics removed
+    # (passengers: not at all).  Filters and the anchor off: the projection
+    # alone (codex 2026-10-27 P1).
+    _, col_l = _model(grid, sigma, hyperdiff_coeff=0.0)
+    sink = np.zeros((n_lat, n_lon), bool)
+    sink[n_lat // 2, n_lon // 3] = True
+
+    def local_sink(state, mesh, coord, phys_state=None, forcing=None):
+        qv = state.tracers["q_v"].data
+        dq = jnp.where(jnp.asarray(sink.reshape(-1))[:, None], -0.3 * qv / DT, 0.0)
+        return _tend(state, jnp.zeros_like(state.u.data), jnp.zeros_like(state.v.data),
+                     jnp.zeros_like(state.T.data),
+                     tracers={"q_v": state.tracers["q_v"].replace(data=dq, name="dq_v")})
+
+    def tracer_masses(st):
+        f = _grid_fields(st, grid, sigma)
+        dp_ = np.asarray(sigma.layer_thickness_dp(f["p_s"]))
+        return {k: float(((np.asarray(t.data) * dp_).sum(-1) * area).sum() / constants.g)
+                for k, t in st.tracers.items()}
+    ref_l = col_l.step(col_l.from_bundle(nat), DT)
+    out_l = col_l.step(col_l.from_bundle(nat), DT, physics_fn=local_sink)
+    m_ref, m_out = tracer_masses(ref_l.native), tracer_masses(out_l.native)
+    fr_l = _grid_fields(ref_l.native, grid, sigma)
+    dp_l = np.asarray(sigma.layer_thickness_dp(fr_l["p_s"]))
+    removed = float(((0.3 * np.asarray(ref_l.native.tracers["q_v"].data) * dp_l).sum(-1)
+                     * area * sink).sum() / constants.g)
+    assert removed > 0.0
+    np.testing.assert_allclose(m_out["q_v"], m_ref["q_v"] - removed, rtol=1e-12)
+    np.testing.assert_allclose(m_out["q_r"], m_ref["q_r"], rtol=1e-12)
     # the floor count is live: a tendency that plunges T reports hits
     def plunge(state, mesh, coord, phys_state=None, forcing=None):
         return _tend(state, jnp.zeros_like(state.u.data), jnp.zeros_like(state.v.data),
@@ -617,7 +656,7 @@ def test_checkpoint_carries_the_coefficients_and_refuses_a_file_without_them(tmp
             ("coef", {"spectralcol_schema"} | {f"spectralcol_{k}" for k in coeffs},
              "no spectral coefficients"),
             ("anchor", {"spectralcol_target_mass"}, "spectralcol_target_mass")):
-        bad = tmp_path / f"bad_{tag}.npz"
+        bad = a / f"bad_{tag}.npz"  # beside the writing run's manifest"
         np.savez(bad, **{k: v for k, v in files.items() if k not in drop})
         c = tmp_path / f"c_{tag}"
         c.mkdir()
@@ -626,7 +665,7 @@ def test_checkpoint_carries_the_coefficients_and_refuses_a_file_without_them(tmp
         assert drv_c.model.config.anchor_mass_to_initial
         with pytest.raises(ValueError, match=frag):
             drv_c.load_checkpoint(bad)
-    wide = tmp_path / "wide.npz"
+    wide = a / "wide.npz"
     np.savez(wide, **{**files, "spectralcol_tracer_names": np.asarray(["q_i"]),
                       "spectralcol_q_0": np.zeros((4, 4))})
     dd = tmp_path / "d"

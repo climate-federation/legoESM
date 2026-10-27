@@ -122,11 +122,7 @@ class SpectralColumnModel:
 
     def from_bundle(self, native):
         """The column state of a native spectral state (IC, restart)."""
-        fn = self._fns.get("view")
-        if fn is None:
-            fn = jax.jit(self._view)
-            self._fns["view"] = fn
-        return fn(native)
+        return self._view(native)
 
     def to_bundle(self, state):
         """The native state *state* stands for, with the driver's post-step

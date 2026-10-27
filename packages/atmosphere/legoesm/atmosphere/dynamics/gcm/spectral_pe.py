@@ -2945,8 +2945,9 @@ def apply_grid_physics_increments(state: SpectralHydrostaticState, tend, dt,
       is then the identity on the increment), and the tracers re-weighted
       onto the layer masses of the APPLIED surface pressure ``p_s_eff =
       exp(SH^-1 lnps_hat)`` (:func:`shift_ps_keep_tracer_mass`) so every
-      tracer's column mass is the one the physics left (codex 2026-10-14:
-      without the re-weight the truncation moved water).  The truncation's
+      tracer's column mass is the one the physics left, in every column
+      the applied increment reaches (codex 2026-10-14 / 2026-10-27: without
+      the re-weight the truncation moved water and passenger tracers).  The truncation's
       residual lands in the per-column DRY mass, which the global anchor
       restores as it does the dynamics' own drift.
 
@@ -2988,6 +2989,10 @@ def apply_grid_physics_increments(state: SpectralHydrostaticState, tend, dt,
             inc = inc * dealias_mask
         lnps_hat = lnps_hat + inc
         p_s_eff = jnp.exp(sh_synthesis(grid, lnps_hat))
+        # the truncated increment moves p_s beyond the columns whose water
+        # moved: every column with a non-zero applied ln p_s change is
+        # re-weighted (an exactly-zero increment leaves the rest bitwise)
+        reweight = moved | (sh_synthesis(grid, inc) != 0.0)
         rel = jnp.abs(p_s_eff - p_s_new) / p_s_new
         w = grid.grid_area.astype(jnp.float64)
         diag = {"dry_mass_trunc_rel_max": jnp.max(rel),
@@ -2995,7 +3000,7 @@ def apply_grid_physics_increments(state: SpectralHydrostaticState, tend, dt,
         _, shifted = shift_ps_keep_tracer_mass(
             p_s_new, tracers, sigma_coord, p_s_eff - p_s_new)
         tracers = {nm: tr.replace(data=jnp.where(
-                       moved[..., None], shifted[nm].data, tr.data))
+                       reweight[..., None], shifted[nm].data, tr.data))
                    for nm, tr in tracers.items()}
     out = state._replace(
         vor_hat=state.vor_hat.replace(data=vor_hat),
