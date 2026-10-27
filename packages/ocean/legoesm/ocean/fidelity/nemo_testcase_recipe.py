@@ -1460,8 +1460,7 @@ def build_orca2_ts_at_step(
     salinity_path,
     tmask,
     *,
-    kt: int,
-    dt_s: float,
+    kt: int, dt_s: float,
     apply_hand_alterations: bool = True,
     mask_evaluation: str = "where_zero",
 ):
@@ -1653,21 +1652,21 @@ def build_orca2_istate_for_mode(
     """
 
     if initial_state == "si3_iceistate":
-        temperature, salinity = build_orca2_initial_ts(
+        t_init, s_init = build_orca2_initial_ts(
             temperature_path, salinity_path, tmask,
             mask_evaluation="where_zero",
         )
         initial_ssh = orca2_initial_ice_ssh(
-            temperature, salinity, tmask, f_t, e1e2t, ORCA2_DECK_INITIAL_ICE
+            t_init, s_init, tmask, f_t, e1e2t, ORCA2_DECK_INITIAL_ICE
         )
-        return temperature, salinity, initial_ssh
+        return t_init, s_init, initial_ssh
     if initial_state == "nemo_k0_istate":
-        temperature, salinity = build_orca2_initial_ts(
+        t_init, s_init = build_orca2_initial_ts(
             temperature_path, salinity_path, tmask,
             mask_evaluation="nemo_tmask_multiply",
         )
         initial_ssh = np.zeros(np.asarray(tmask).shape[:2], dtype=np.float64)
-        return temperature, salinity, initial_ssh
+        return t_init, s_init, initial_ssh
     raise ValueError(
         f"unknown ORCA2 initial_state={initial_state!r}; "
         "expected 'si3_iceistate' or 'nemo_k0_istate'"
@@ -1899,14 +1898,22 @@ def build_orca2_zps_card(
         nemo_e3t_jpk=jnp.asarray(e3t_jpk, dtype=jnp.float64),
     )
 
-    temperature, salinity, initial_ssh = build_orca2_istate_for_mode(
-        temperature_path,
-        salinity_path,
-        tmask,
-        f_t=np.asarray(grid.f_T),
-        e1e2t=metric["e1t"] * metric["e2t"],
-        initial_state=initial_state,
-    )
+    if initial_state == "si3_iceistate":
+        temperature, salinity = build_orca2_initial_ts(
+            temperature_path, salinity_path, tmask)
+
+        initial_ssh = orca2_initial_ice_ssh(
+            temperature, salinity, tmask, np.asarray(grid.f_T),
+            metric["e1t"] * metric["e2t"], ORCA2_DECK_INITIAL_ICE)
+    else:
+        temperature, salinity, initial_ssh = build_orca2_istate_for_mode(
+            temperature_path,
+            salinity_path,
+            tmask,
+            f_t=np.asarray(grid.f_T),
+            e1e2t=metric["e1t"] * metric["e2t"],
+            initial_state=initial_state,
+        )
 
     state = rest_state_latlon_cgrid_ocean(
         grid,

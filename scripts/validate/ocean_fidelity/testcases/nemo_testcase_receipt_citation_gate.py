@@ -1953,6 +1953,30 @@ FILES = {
         Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/"
              "round339/k0_smoke/orca2_k0_10step_np2/build_sources/ppsrc/"
              "nemo/dommsk.f90")),
+    "ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/restart.f90": (
+        Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/"
+             "round339/k0_smoke/orca2_k0_10step_np2/build_sources/ppsrc/"
+             "nemo/restart.f90")),
+    "ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/istate.f90": (
+        Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/"
+             "round339/k0_smoke/orca2_k0_10step_np2/build_sources/ppsrc/"
+             "nemo/istate.f90")),
+    "ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/dtatsd.f90": (
+        Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/"
+             "round339/k0_smoke/orca2_k0_10step_np2/build_sources/ppsrc/"
+             "nemo/dtatsd.f90")),
+    "ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/sbcblk.f90": (
+        Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/"
+             "round339/k0_smoke/orca2_k0_10step_np2/build_sources/ppsrc/"
+             "nemo/sbcblk.f90")),
+    "ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/tradmp.f90": (
+        Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/"
+             "round339/k0_smoke/orca2_k0_10step_np2/build_sources/ppsrc/"
+             "nemo/tradmp.f90")),
+    "ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/fldread.f90": (
+        Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/"
+             "round339/k0_smoke/orca2_k0_10step_np2/build_sources/ppsrc/"
+             "nemo/fldread.f90")),
     # Round 334 (ratchet cleanup): the NEMO statements the named constants cite.
     "trabbc.F90": _OCE / "TRA/trabbc.F90",
     "phycst.F90": _OCE / "DOM/phycst.F90",
@@ -2271,6 +2295,33 @@ CITATION_MAP = {
     'ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/sbcmod.f90:444-521': [
         'CASE( jp_blk     )   ;   CALL sbc_blk       ( kt )',
         'CALL sbc_fwb( kt, nn_fwb, nn_fsbc, Kmm )', 78],
+    'ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/sbcmod.f90:376-384': [
+        ('IF( nn_ice == 0 ) THEN', 2),
+        'IF( nn_ice == 3 )   CALL cice_sbc_init( nsbc, Kbb, Kmm )', 9],
+    'ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/restart.f90:398,405,408': [
+        'ssh(:,:,Kbb) = 0._wp',
+        'ssh(:,:,Kaa) = ssh(:,:,Kbb)           !*  set ssh at Kaa (for AGRIF)',
+        'ssh(:,:,Kmm) = ssh(:,:,Kbb)           !*  set now values from to before ones',
+        3],
+    'ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/istate.f90:118':
+        'CALL dta_tsd( nit000, ts(:,:,:,:,Kbb) )',
+    'ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/dtatsd.f90:308-309': [
+        'ptsd(ji,jj,jk,jp_tem) = ptsd(ji,jj,jk,jp_tem) * tmask(ji,jj,jk)    ! Mask',
+        'ptsd(ji,jj,jk,jp_sal) = ptsd(ji,jj,jk,jp_sal) * tmask(ji,jj,jk)', 2],
+    'ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/sbcblk.f90:656-657': [
+        'zpre(:,:)         = pres_temp( q_air_zt(:,:), sf(jp_slp)%fnow(:,:,1), rn_zqt, pta=sf(jp_tair)%fnow(:,:,1) )',
+        'theta_air_zt(:,:) = theta_exner( sf(jp_tair)%fnow(:,:,1), zpre(:,:) )', 2],
+    'ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/sbcblk.f90:740-876': [
+        'ptsk(Nis0-(0):Nie0+(0),Njs0-(0):Nje0+(0)) = pst(Nis0-(0):Nie0+(0),Njs0-(0):Nje0+(0)) + rt0',
+        'pevp(:,:) = pevp(:,:) * smask0(:,:)', 137],
+    'ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/sbcblk.f90:925':
+        'ptsk(:,:) = ( ptsk(:,:) - rt0 ) * smask0(:,:)  ! Back to Celsius',
+    'ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/tradmp.f90:181':
+        'CALL dta_tsd( kt, zts_dta )            ! read and interpolates T-S data at kt',
+    'ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/fldread.f90:192,209-215': [
+        'll_firstcall = kt == nit000',
+        'IF( ll_firstcall ) THEN                      ! initialization',
+        ('ENDIF', 3), 8],
     # ORCA2 round 334: provenance of the constants the ratchet cleanup named.
     'trabbc.F90:179': "* 1.e-3 ! conversion in W/m2",
     'phycst.F90:26': "rad      = 3.141592653589793_wp / 180._wp",
@@ -2506,13 +2557,13 @@ CITATION_MAP = {
     'ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/zdftke.f90:459-477': [
         '!* Matrix inversion from level 2',
         'en(ji,jj,jk) = MAX( en(ji,jj,jk), rn_emin ) * wmask(ji,jj,jk)', 19],
-    'nemo_testcase_recipe.py:1820-1827': [
+    'nemo_testcase_recipe.py:1887-1894': [
         ('z_coord = create_partial_cell_coordinate(', 2),
         ('is_active=jnp.asarray(tmask),', 1), 8],
     'tke.py:1803-1834': [
         'if bottom_dirichlet is not None:',
         'rhs = jnp.where(is_bottom, _e_bd[..., jnp.newaxis], rhs)', 32],
-    'nemo_testcase_recipe.py:2042': 'bottom_tke_bc=True,',
+    'nemo_testcase_recipe.py:2119': 'bottom_tke_bc=True,',
     'nemo_testcase_v1_orca2tke/namelist_cfg:193':
         'ln_drg_OFF  = .true.',
     'gridladder_vmix/nemo_testcase_recipe.py:5083,5099': [
@@ -2621,7 +2672,7 @@ CITATION_MAP = {
         ('u_now=state.u.data, v_now=state.v.data,', 6),
     'ocean_model_latlon_cgrid.py:17276':
         ('u_now=state.u.data, v_now=state.v.data,', 7),
-    'nemo_testcase_recipe.py:2144': [('2920,  # DECISION 142 (user, 2026-10-20): one year, deliberate', 1)],
+    'nemo_testcase_recipe.py:2221': [('2920,  # DECISION 142 (user, 2026-10-20): one year, deliberate', 1)],
     # round 319 review: the background diffusivity floor against NEMO's avt statement
     'tke.py:2329': 'K_H = jnp.maximum(cfg.kappaH_min, K_M / Pr_or_pdlr)',
     'tke.py:2174': 'pdlr = jnp.maximum(0.1, ri_cri / jnp.maximum(ri_cri, zri))',
@@ -3372,12 +3423,12 @@ CITATION_MAP = {
     'vertical.py:922': ('class NemoEENBarotropicOperands(NamedTuple):', 1),
     'vertical.py:685': ('def nemo_qco_resolved_mesh_operands(', 1),
     'ocean_model_latlon_cgrid.py:4979': ('_nemo_filter_alpha = config.barotropic.nemo_barotropic_filter_alpha', 1),
-    'nemo_testcase_recipe.py:4099': ('def build_orca2g1_flat_card(deck_root: str | Path) -> NEMOTestcaseCard:', 1),
-    'nemo_testcase_recipe.py:4000': ('def read_orca2g1_deck(deck_root: str | Path) -> ORCA2G1Deck:', 1),
-    'nemo_testcase_recipe.py:4048': ('def orca2g1_initial_ssh(glamt_deg, gphit_deg, surface_tmask) -> np.ndarray:', 1),
-    'nemo_testcase_recipe.py:4312': ('def validate_orca2g1_flat_card(card: NEMOTestcaseCard, deck_root: str | Path) -> None:', 1),
+    'nemo_testcase_recipe.py:4176': ('def build_orca2g1_flat_card(deck_root: str | Path) -> NEMOTestcaseCard:', 1),
+    'nemo_testcase_recipe.py:4077': ('def read_orca2g1_deck(deck_root: str | Path) -> ORCA2G1Deck:', 1),
+    'nemo_testcase_recipe.py:4125': ('def orca2g1_initial_ssh(glamt_deg, gphit_deg, surface_tmask) -> np.ndarray:', 1),
+    'nemo_testcase_recipe.py:4389': ('def validate_orca2g1_flat_card(card: NEMOTestcaseCard, deck_root: str | Path) -> None:', 1),
     'vertical.py:1127': ('nemo_e3w_source="mesh_reference", allow_single_level: bool = False,', 1),
-    'nemo_testcase_recipe.py:4162': ('allow_single_level=True,               # jpk = 2: one wet level', 1),
+    'nemo_testcase_recipe.py:4239': ('allow_single_level=True,               # jpk = 2: one wet level', 1),
     # --- GRIDLADDER round 1 (G1 survey) END ---
     # --- ORCA2 round 253: kt=8 midpoint-SSH failure boundary -------
     'ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/dynspg_ts.f90:489-493': [
@@ -3574,7 +3625,7 @@ CITATION_MAP = {
     'nemo_testcase_recipe.py:1428-1479': [
         'def apply_orca2_hand_alterations(temperature, salinity):',
         'is what NEMO executes.', 52],
-    'nemo_testcase_recipe.py:1834-1835': [
+    'nemo_testcase_recipe.py:1902-1903': [
         'temperature, salinity = build_orca2_initial_ts(',
         'temperature_path, salinity_path, tmask)', 2],
     'ORCA2_OMIP_L4_R175STAGE1/BLD/ppsrc/nemo/dtatsd.f90:218-254': [
@@ -4777,12 +4828,12 @@ CITATION_MAP = {
     'OVERFLOW_OMIP_L1/EXP00/namelist_cfg:89': 'ln_dynvor_ens = .true.',
     'overflow_kt1_10/namelist_cfg:86': 'ln_dynadv_up3 = .true.',
     'overflow_kt1_10/namelist_cfg:92': 'ln_dynvor_ens = .true.',
-    'nemo_testcase_recipe.py:3473':
+    'nemo_testcase_recipe.py:3550':
         'if (cfg.momentum_advection != "vector_invariant"',
     'ocean_pe_latlon_cgrid.py:5598': ('if _mom_adv == "flux_form":', 2),
     'ocean_pe_latlon_cgrid.py:5616': (
         '_bc_horizontal_momentum_advection_flux_form(', 2),
-    'nemo_testcase_recipe.py:3476':
+    'nemo_testcase_recipe.py:3553':
         'requires ln_dynadv_vec=.true. with nn_dynkeg=0',
     # --- ORCA2 round 57: acquired OVERFLOW UP3 source-order walk ---
     'OVERFLOW_OMIP_L1_P3_R56UP3/BLD/ppsrc/nemo/dynadv_up3.f90:157-166': [
@@ -5174,7 +5225,7 @@ CITATION_MAP = {
     'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/iceistate.f90:442-459': [
         'snwice_mass  (:,:) = tmask(:,:,1) * SUM',
         'ssh(:,:,Kbb) = ssh(:,:,Kbb) - zsshadj', 18],
-    'nemo_testcase_recipe.py:1834-1839': [
+    'nemo_testcase_recipe.py:1902-1907': [
         'temperature, salinity = build_orca2_initial_ts(',
         'metric["e1t"] * metric["e2t"], ORCA2_DECK_INITIAL_ICE)', 6],
     # --- ORCA2 round 329: the record's own SI3 initial ice (DECISION 157) ---
@@ -8186,7 +8237,7 @@ CITATION_MAP = {
     # inserted the initial-state helper above the THIRD anchor only, moving it
     # 1411 -> 1493; later card additions moved all three to their current
     # merged locations without changing the anchor text.
-    'nemo_testcase_recipe.py:380,636,3457': [('pgf_scheme="nemo_sco",', 1), ('pgf_scheme="nemo_sco",', 2), 'if cfg.pgf_scheme != "nemo_sco":', 3],
+    'nemo_testcase_recipe.py:380,636,3534': [('pgf_scheme="nemo_sco",', 1), ('pgf_scheme="nemo_sco",', 2), 'if cfg.pgf_scheme != "nemo_sco":', 3],
     'BLD/ppsrc/nemo/dynspg_ts.f90:1224': 'REAL(wp), DIMENSION(jpi,jpj,jpk,jpt), INTENT(in   ) ::  puu, pvv',
     'BLD/ppsrc/nemo/dynhpg.f90:378,397': [('DO jj = ntsj-( 0), ntej+(  0 ) ; DO ji = ntsi-( 0), ntei+(  '
           '0)              ! Surface value',

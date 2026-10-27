@@ -20,7 +20,7 @@ comparison card's entry SSH is bit-identical to NEMO's on all 26,640 cells
 
 - The card's inline initial-ice/SSH block is now one recipe function; the
   shipped card calls it with its unchanged five-category ponds-on values
-  (`nemo_testcase_recipe.py:1834-1839`).
+  (`nemo_testcase_recipe.py:1902-1907`).
 - The comparison card (rung 10 only) calls that same function with the
   record's &namini values, parsed from the record's `ocean.output`: jpl = 1,
   ln_pnd = F, rn_thres_sst 2, rn_ati_ini 0.997/0.8, rn_hti_ini 2.5/1.0,

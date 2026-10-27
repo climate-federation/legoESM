@@ -155,7 +155,7 @@ ice, and pond mass, forms a domain-global levitating-ice adjustment, and
 subtracts it from both SSH time levels at
 `ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/iceistate.f90:442-459`.
 The independent legoESM card constructs its initial T/S and five-category
-ice-mass SSH state at `nemo_testcase_recipe.py:1834-1839`.  The exact
+ice-mass SSH state at `nemo_testcase_recipe.py:1902-1907`.  The exact
 owner-output replay measured above confirms that this pre-step boundary owns
 the first independent excess; no certified ladder rung constructs that
 initial SI3 identity.
