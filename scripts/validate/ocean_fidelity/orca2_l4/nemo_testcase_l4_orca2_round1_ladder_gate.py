@@ -672,31 +672,33 @@ def assemble_surface_fields(root: Path, kt: int) -> dict[str, np.ndarray]:
 def chlorophyll_at_step(
     deck_root: Path, kt: int, wet: np.ndarray, *, dt_s: float
 ) -> np.ndarray:
-    """Reproduce the first-month monthly ``fld_read`` interpolation."""
+    """Reproduce no-leap cyclic monthly ``fld_read`` interpolation."""
 
     from netCDF4 import Dataset
 
-    require(1 <= kt <= 240, "chlorophyll step must be in 1..240")
+    require(1 <= kt <= 2920, "chlorophyll step must be in 1..2920")
     path = deck_root / "chlorophyll.nc"
     require(path.is_file(), f"missing ORCA2 chlorophyll input: {path}")
     with Dataset(path) as dataset:
         source = np.asarray(dataset.variables["CHLA"][:], dtype=np.float64)
     require(source.shape == (12, 148, 180),
             f"unexpected chlorophyll shape {source.shape}")
-    # The admitted run resolves record centres at -15.5, +15.5 and +45.0 days.
-    # NEMO forms the midpoint clock and weights at fldread.f90:243-246.  The
-    # January centre is crossed between kt=124 and kt=125.
+    # chlorophyll.nc is the admitted 12-month climatology.  NEMO forms the
+    # midpoint clock and weights at fldread.f90:243-246, using no-leap month
+    # centres and cyclic December/January neighbours.
     dt_i = int(dt_s)
     require(float(dt_i) == float(dt_s) and dt_i % 2 == 0,
             f"chlorophyll clock needs an even integer dt, got {dt_s}")
     midpoint_s = (2 * kt - 1) * dt_i // 2
-    centres_s = (-1339200, 1339200, 3888000)
-    if midpoint_s < centres_s[1]:
-        before_index, after_index = 11, 0
-        before_s, after_s = centres_s[:2]
-    else:
-        before_index, after_index = 0, 1
-        before_s, after_s = centres_s[1:]
+    month_days = np.array([31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31])
+    centres_s = ((np.cumsum(month_days) - month_days / 2) * 86400).astype(np.int64)
+    extended_s = np.concatenate(([centres_s[-1] - 365 * 86400], centres_s,
+                                 [centres_s[0] + 365 * 86400]))
+    after_ext = int(np.searchsorted(extended_s, midpoint_s, side="right"))
+    before_ext = after_ext - 1
+    before_s, after_s = int(extended_s[before_ext]), int(extended_s[after_ext])
+    before_index = (before_ext - 1) % 12
+    after_index = (after_ext - 1) % 12
     after = np.float64(midpoint_s - before_s) / np.float64(after_s - before_s)
     before = np.float64(1.0) - after
     result = before * source[before_index] + after * source[after_index]

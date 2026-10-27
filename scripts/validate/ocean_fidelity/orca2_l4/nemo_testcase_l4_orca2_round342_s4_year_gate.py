@@ -1,0 +1,1437 @@
+#!/usr/bin/env python3
+"""ORCA2 Round 342: observer-free K0 2,920-step (1-year) NEMO twin acquisition gate.
+
+Extends the reviewed Round-339 K0 smoke (`nemo_testcase_l4_orca2_round339_common.py`,
+`nemo_testcase_l4_orca2_round339_k0_smoke_gate.py`) and Round-340 S4
+(`nemo_testcase_l4_orca2_round340_standalone_gate.py`) tools to acquire the
+standalone ORCA2 one-year (2,920-step, 365-day) observer-free K0 reference run
+and its reproducibility twin (`orca2_k0_year1_a_np2`, `orca2_k0_year1_b_np2`).
+
+With `nn_it000 = 1`, `nn_itend = 2920`, `nn_stock = 8`, `nn_write = 2920`, and
+`ln_rst_list = .false.`, NEMO's `rst_opn` / `rst_write`
+(`ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/restart.f90:75-150,153-253`
+called from `stprk3.f90:247-249` after the stage-3 time-level swap
+`Nbb <-> Naa` at `stprk3.f90:223-225`) writes 365 daily ocean restart pairs
+`ORCA2_{kt:08d}_restart_{0000,0001}.nc` at `kt = 8, 16, ..., 2920` containing
+the completed end-of-day state (`tn, sn, un, vn, sshn` from `Kbb`) needed by
+the Decision-160 ORCA2X long-run metric card, with zero in-loop observers.
+"""
+
+from __future__ import annotations
+
+import argparse
+from datetime import datetime, timezone
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+from typing import Any
+
+import netCDF4
+import numpy as np
+
+REPO_ROOT = Path(__file__).resolve().parents[4]
+for _pkg in reversed((REPO_ROOT, REPO_ROOT / "packages/core", REPO_ROOT / "packages/ocean")):
+    if str(_pkg) not in sys.path:
+        sys.path.insert(0, str(_pkg))
+
+from legoesm.ocean.fidelity.provenance import git_sha, worktree_stamp  # noqa: E402
+from scripts.validate.ocean_fidelity.orca2_l4 import (  # noqa: E402
+    nemo_testcase_l4_orca2_round328_dynzdf_gate as r328,
+    nemo_testcase_l4_orca2_round339_common as common,
+    nemo_testcase_l4_orca2_round339_k0_smoke_gate as r339_k0,
+    nemo_testcase_l4_orca2_round340_standalone_gate as r340_s4,
+    nemo_testcase_l4_orca2x_round1_pilot_metrics as pilot_metrics,
+)
+
+GateError = common.GateError
+require = common.require
+sha256_file = common.sha256
+
+NEMO_ROOT = Path("/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2")
+TARGET_CFG_NAME = "ORCA2_STANDALONE_IIF_OMIP_L4_R342S4Y"
+DEFAULT_BUILD_CFG = NEMO_ROOT / "cfgs" / TARGET_CFG_NAME
+PRISTINE_K0_CFG = NEMO_ROOT / "cfgs" / "ORCA2_STANDALONE_IIF_OMIP_L4_R339K0"
+NAMELIST_REF = NEMO_ROOT / "cfgs" / "SHARED" / "namelist_ref"
+
+SOURCE_RUN = Path(
+    "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round5/"
+    "acquisition/orca1ice_surface_entry_every_step_a_np2"
+)
+TOOL_A_ROOT = Path(
+    "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round339/"
+    "ice_cover_producer/orca2_full_si3_year1_np2"
+)
+DEFAULT_ICE_COVER_PATH = TOOL_A_ROOT / "ice_cover_clim.nc"
+R339_SMOKE_DIR = Path(
+    "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round339/"
+    "k0_smoke/orca2_k0_10step_np2"
+)
+R339_NAMELIST_CFG = R339_SMOKE_DIR / "namelist_cfg"
+R339_ARCHIVED_PPSRC = R339_SMOKE_DIR / "build_sources" / "ppsrc" / "nemo"
+R339_RESTART_0 = R339_SMOKE_DIR / "ORCA2_00000010_restart_0000.nc"
+R339_RESTART_1 = R339_SMOKE_DIR / "ORCA2_00000010_restart_0001.nc"
+R340_RUN_A = (
+    Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds")
+    / "round340"
+    / "s4_acquisition"
+    / "orca2_s4_exact_a_np2"
+)
+
+DEFAULT_RUN_ROOT = Path(
+    "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round342/s4_year"
+)
+TWIN_A_NAME = "orca2_k0_year1_a_np2"
+TWIN_B_NAME = "orca2_k0_year1_b_np2"
+DEFAULT_EVIDENCE_DIR = Path(
+    "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/orca2_r342"
+)
+
+YEAR_STEPS = 2920
+DAILY_STOCK_STRIDE = 8
+EXPECTED_DAILY_KTS = tuple(range(DAILY_STOCK_STRIDE, YEAR_STEPS + 1, DAILY_STOCK_STRIDE))
+PER_ARM_TIMEOUT_SECONDS = 5400
+
+FULL_YEAR_RECORD_REQUIREMENTS: dict[str, tuple[str, int]] = {
+    "u_10.15JUNE2009_fill.nc": ("U_10_MOD", 1460),
+    "v_10.15JUNE2009_fill.nc": ("V_10_MOD", 1460),
+    "t_10.15JUNE2009_fill.nc": ("T_10_MOD", 1460),
+    "q_10.15JUNE2009_fill.nc": ("Q_10_MOD", 1460),
+    "slp.15JUNE2009_fill.nc": ("SLP", 1460),
+    "ncar_rad.15JUNE2009_fill.nc": ("SWDN_MOD", 365),
+    "ncar_precip.15JUNE2009_fill.nc": ("PRC_MOD1", 12),
+    "runoff_core_monthly.nc": ("sorunoff", 12),
+    "sss_data.nc": ("sss", 12),
+    "chlorophyll.nc": ("CHLA", 12),
+    "data_1m_potential_temperature_nomask.nc": ("votemper", 12),
+    "data_1m_salinity_nomask.nc": ("vosaline", 12),
+    "ice_cover_clim.nc": ("ice_cover", 1),
+}
+
+NONZERO_RESTART_VARS = ("tn", "sn", "un", "vn", "sshn")
+
+OBSERVER_SYMBOL_PATTERNS = (
+    re.compile(r"\br340_s4_", re.IGNORECASE),
+    re.compile(r"\br336_tke_", re.IGNORECASE),
+    re.compile(r"\br328_", re.IGNORECASE),
+    re.compile(r"\borca2_s4_surface_", re.IGNORECASE),
+    re.compile(r"\borca2x_longrun_hmi_write\b", re.IGNORECASE),
+)
+
+
+def _scratch_root() -> Path:
+    root = DEFAULT_EVIDENCE_DIR / "tmp"
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def _ppsrc_dir(build_cfg: Path | None = None) -> Path:
+    if build_cfg is not None and (build_cfg / "BLD" / "ppsrc" / "nemo").is_dir():
+        return build_cfg / "BLD" / "ppsrc" / "nemo"
+    if (PRISTINE_K0_CFG / "BLD" / "ppsrc" / "nemo").is_dir():
+        return PRISTINE_K0_CFG / "BLD" / "ppsrc" / "nemo"
+    require(R339_ARCHIVED_PPSRC.is_dir(), f"missing K0 ppsrc dir: {R339_ARCHIVED_PPSRC}")
+    return R339_ARCHIVED_PPSRC
+
+
+def stage_s4_year_namelist_cfg(
+    src_namelist: Path,
+    dst_namelist: Path,
+    *,
+    nn_itend: int = YEAR_STEPS,
+    nn_stock: int = DAILY_STOCK_STRIDE,
+) -> dict[str, Any]:
+    """Stage the observer-free K0 namelist configured for 2,920 steps and daily restarts."""
+    require(nn_itend >= DAILY_STOCK_STRIDE and nn_itend % DAILY_STOCK_STRIDE == 0,
+            f"nn_itend ({nn_itend}) must be a positive multiple of {DAILY_STOCK_STRIDE}")
+    require(nn_stock == DAILY_STOCK_STRIDE,
+            f"nn_stock ({nn_stock}) must be {DAILY_STOCK_STRIDE} for daily restarts")
+    text = src_namelist.read_text(encoding="utf-8")
+    text, n_itend = re.subn(
+        r"(\bnn_itend\s*=\s*)\d+",
+        rf"\g<1>{nn_itend}",
+        text,
+        count=1,
+    )
+    text, n_stock = re.subn(
+        r"(\bnn_stock\s*=\s*)\d+",
+        rf"\g<1>{nn_stock}",
+        text,
+        count=1,
+    )
+    require(n_itend == 1 and n_stock == 1,
+            f"failed to patch nn_itend/nn_stock in {dst_namelist}")
+    require(re.search(r"\bln_rst_list\s*=\s*\.true\.", text, re.IGNORECASE) is None,
+            "namelist_cfg must not set ln_rst_list = .true. for frequency-based nn_stock")
+    dst_namelist.write_text(text, encoding="utf-8")
+    common.validate_group_membership(dst_namelist, r339_k0.GROUPS)
+    return {
+        "nn_it000": 1,
+        "nn_itend": nn_itend,
+        "nn_stock": nn_stock,
+        "expected_daily_restarts": nn_itend // nn_stock,
+        "sha256": sha256_file(dst_namelist),
+    }
+
+
+def parse_namelist_itend_stock(namelist_cfg: Path) -> tuple[int, int]:
+    """Parse nn_itend and nn_stock from a staged namelist_cfg."""
+    text = namelist_cfg.read_text(encoding="utf-8")
+    m_end = re.search(r"\bnn_itend\s*=\s*(\d+)", text)
+    m_stock = re.search(r"\bnn_stock\s*=\s*(\d+)", text)
+    require(m_end is not None and m_stock is not None,
+            f"missing nn_itend or nn_stock in {namelist_cfg}")
+    return int(m_end.group(1)), int(m_stock.group(1))
+
+
+def verify_namelist_groups_against_ppsrc(
+    namelist_cfg: Path,
+    namelist_ref: Path,
+    ppsrc_dir: Path,
+) -> dict[str, Any]:
+    """Checklist 8: validate every namelist group against namelist_ref and BLD/ppsrc/nemo/*.f90 NAMELIST declarations."""
+    required_groups = {
+        **r339_k0.GROUPS,
+        "nn_it000": "namrun",
+        "nn_itend": "namrun",
+        "nn_stock": "namrun",
+    }
+    common.validate_group_membership(namelist_ref, required_groups)
+    common.validate_group_membership(namelist_cfg, required_groups)
+
+    ppsrc_group_vars: dict[str, set[str]] = {}
+    namelist_re = re.compile(
+        r"NAMELIST\s*/\s*([A-Za-z0-9_]+)\s*/\s*([^\n!]+)",
+        re.IGNORECASE,
+    )
+    for f90 in sorted(ppsrc_dir.glob("*.f90")):
+        joined = common._strip_fortran_comments_and_join_continuations(
+            f90.read_text(encoding="utf-8", errors="replace")
+        )
+        for match in namelist_re.finditer(joined):
+            gname = match.group(1).lower()
+            vlist = {
+                tok.strip().lower()
+                for tok in match.group(2).split(",")
+                if tok.strip()
+            }
+            ppsrc_group_vars.setdefault(gname, set()).update(vlist)
+    require(len(ppsrc_group_vars) >= 40,
+            f"too few NAMELIST groups parsed from {ppsrc_dir}: {len(ppsrc_group_vars)}")
+
+    for var, grp in required_groups.items():
+        require(grp in ppsrc_group_vars,
+                f"required NAMELIST group {grp!r} missing from {ppsrc_dir}")
+        require(var.lower() in ppsrc_group_vars[grp],
+                f"variable {var!r} missing from NAMELIST /{grp}/ in {ppsrc_dir}")
+
+    group_re = re.compile(r"^\s*&([A-Za-z0-9_]+)", re.MULTILINE)
+    cfg_groups = [m.group(1).lower() for m in group_re.finditer(namelist_cfg.read_text(encoding="utf-8"))]
+    ref_groups = [m.group(1).lower() for m in group_re.finditer(namelist_ref.read_text(encoding="utf-8"))]
+    require(len(cfg_groups) >= 20, f"too few groups in {namelist_cfg}: {len(cfg_groups)}")
+    unknown_cfg = sorted(set(cfg_groups) - (set(ref_groups) | set(ppsrc_group_vars)))
+    require(not unknown_cfg,
+            f"namelist_cfg contains undeclared NAMELIST group(s): {unknown_cfg}")
+    return {
+        "ppsrc_declared_group_count": len(ppsrc_group_vars),
+        "cfg_group_count": len(cfg_groups),
+        "ref_group_count": len(ref_groups),
+        "unknown_cfg_groups": unknown_cfg,
+    }
+
+
+def plant_namelist_error(ppsrc_dir: Path) -> dict[str, Any]:
+    """Plant an undeclared namelist group and an E R R O R block in ocean.output and prove both fail."""
+    with tempfile.TemporaryDirectory(dir=_scratch_root()) as tmp:
+        root = Path(tmp)
+        bad_cfg = root / "namelist_cfg"
+        stage_s4_year_namelist_cfg(R339_NAMELIST_CFG, bad_cfg)
+        bad_cfg.write_text(
+            bad_cfg.read_text(encoding="utf-8") + "\n&nam_nonexistent_r342\n   nn_fake = 1\n/\n",
+            encoding="utf-8",
+        )
+        group_caught = False
+        group_error = ""
+        try:
+            verify_namelist_groups_against_ppsrc(bad_cfg, NAMELIST_REF, ppsrc_dir)
+        except GateError as exc:
+            group_caught = True
+            group_error = str(exc)
+        require(group_caught, "plant_namelist_error failed to catch undeclared namelist group")
+
+        bad_out = root / "ocean.output"
+        bad_out.write_text(
+            " ===>>> : E R R O R\n         =========\n misspelled namelist token\n",
+            encoding="utf-8",
+        )
+        out_caught = False
+        out_error = ""
+        try:
+            common.validate_ocean_output(bad_out, r339_k0.RESOLVED)
+        except GateError as exc:
+            out_caught = True
+            out_error = str(exc)
+        require(out_caught, "plant_namelist_error failed to catch E R R O R in ocean.output")
+    return {
+        "passed": True,
+        "undeclared_group_error": group_error,
+        "ocean_output_error": out_error,
+    }
+
+
+def _snapshot_build_sources(build_cfg: Path, dst_build_sources: Path) -> None:
+    eff_cfg = build_cfg if (build_cfg / "BLD" / "ppsrc" / "nemo").is_dir() else PRISTINE_K0_CFG
+    if (eff_cfg / "BLD" / "ppsrc").is_dir():
+        dst_build_sources.mkdir(parents=True, exist_ok=True)
+        (dst_build_sources / "MY_SRC").mkdir(parents=True, exist_ok=True)
+        (dst_build_sources / "BLD").mkdir(parents=True, exist_ok=True)
+        shutil.copytree(eff_cfg / "BLD" / "ppsrc", dst_build_sources / "ppsrc", symlinks=True, dirs_exist_ok=True)
+        for name in ("arch_nemo.fcm", "cpp.fcm", "bld.cfg", "full_key_list.txt"):
+            src = eff_cfg / "BLD" / name
+            if src.is_file():
+                shutil.copy2(src, dst_build_sources / "BLD" / name)
+    else:
+        shutil.copytree(R339_SMOKE_DIR / "build_sources", dst_build_sources, symlinks=True, dirs_exist_ok=True)
+
+
+def stage_s4_year_run_dir(
+    run_dir: Path,
+    ice_cover_path: Path = DEFAULT_ICE_COVER_PATH,
+    *,
+    build_cfg: Path = DEFAULT_BUILD_CFG,
+    nn_itend: int = YEAR_STEPS,
+    nn_stock: int = DAILY_STOCK_STRIDE,
+) -> dict[str, Any]:
+    """Checklist 9: stage all inputs and namelists for one 2,920-step K0 twin arm."""
+    run_dir.mkdir(parents=True, exist_ok=True)
+    for manifest_name in ("deck_files.sha256", "input_files.sha256"):
+        mfile = SOURCE_RUN / manifest_name
+        require(mfile.is_file(), f"missing source manifest: {mfile}")
+        for line in mfile.read_text(encoding="utf-8").splitlines():
+            parts = line.strip().split(maxsplit=1)
+            if len(parts) != 2:
+                continue
+            _, fname = parts
+            src_item = SOURCE_RUN / fname
+            dst_item = run_dir / fname
+            if dst_item.exists() or dst_item.is_symlink():
+                dst_item.unlink()
+            if src_item.is_symlink():
+                os.symlink(os.readlink(src_item), dst_item)
+            else:
+                shutil.copy2(src_item, dst_item)
+
+    require(ice_cover_path.is_file(), f"missing ice_cover_clim.nc: {ice_cover_path}")
+    shutil.copy2(ice_cover_path, run_dir / "ice_cover_clim.nc")
+
+    namelist_info = stage_s4_year_namelist_cfg(
+        R339_NAMELIST_CFG,
+        run_dir / "namelist_cfg",
+        nn_itend=nn_itend,
+        nn_stock=nn_stock,
+    )
+    shutil.copy2(run_dir / "namelist_cfg", run_dir / "staged.namelist_cfg")
+    (run_dir / "compiled_keys.txt").write_text(
+        "key_si3\nkey_qco\nkey_vco_1d3d\nkey_RK3\n", encoding="utf-8"
+    )
+    _snapshot_build_sources(build_cfg, run_dir / "build_sources")
+    record_checks = verify_staged_full_year_inputs(run_dir)
+    return {
+        "run_dir": str(run_dir),
+        "namelist_s4_year": namelist_info,
+        "full_year_record_checks": record_checks,
+    }
+
+
+def verify_staged_full_year_inputs(run_dir: Path) -> dict[str, Any]:
+    """Verify every staged NetCDF forcing file has enough records for a full 365-day year."""
+    r340_s4.read_decision171_cover(run_dir / "ice_cover_clim.nc")
+    checked: dict[str, Any] = {}
+    for fname, (var_name, min_records) in FULL_YEAR_RECORD_REQUIREMENTS.items():
+        fpath = run_dir / fname
+        require(fpath.exists(), f"missing staged full-year input: {fpath}")
+        with netCDF4.Dataset(fpath, "r") as ds:
+            require(var_name in ds.variables,
+                    f"variable {var_name!r} missing from staged {fname}")
+            shape = tuple(int(s) for s in ds.variables[var_name].shape)
+        require(len(shape) >= 3 and shape[0] >= min_records,
+                f"{fname}:{var_name} has shape {shape}, need >= {min_records} records for 2,920 steps")
+        checked[fname] = {"variable": var_name, "shape": list(shape), "min_records": min_records}
+    return checked
+
+
+def plant_missing_forcing(ice_cover_path: Path) -> dict[str, Any]:
+    """Plant a truncated-record forcing file and prove verify_staged_full_year_inputs fails."""
+    with tempfile.TemporaryDirectory(dir=_scratch_root()) as tmp:
+        run_dir = Path(tmp) / "run"
+        stage_s4_year_run_dir(run_dir, ice_cover_path)
+        slp_path = run_dir / "slp.15JUNE2009_fill.nc"
+        slp_path.unlink()
+        with netCDF4.Dataset(slp_path, "w", format="NETCDF4_CLASSIC") as ds:
+            ds.createDimension("time", 5)
+            ds.createDimension("lat", 94)
+            ds.createDimension("lon", 192)
+            v = ds.createVariable("SLP", "f8", ("time", "lat", "lon"))
+            v[:] = 101325.0
+        caught = False
+        error_msg = ""
+        try:
+            verify_staged_full_year_inputs(run_dir)
+        except GateError as exc:
+            caught = True
+            error_msg = str(exc)
+        require(caught, "plant_missing_forcing did not fail on 5-record SLP file")
+    return {"passed": True, "error": error_msg}
+
+
+def verify_allocate_extents(ppsrc_dir: Path) -> dict[str, Any]:
+    """Checklist 3: verify array extents directly from ALLOCATE in BLD/ppsrc/nemo/*.f90."""
+    expected_by_unit = {
+        "oce": {
+            "uu": "jpi,jpj,jpk,jpt",
+            "vv": "jpi,jpj,jpk,jpt",
+            "ts": "jpi,jpj,jpk,jpts,jpt",
+            "ssh": "jpi,jpj,jpt",
+        },
+        "dom_oce": {
+            "tmask": "jpi,jpj,jpk",
+            "umask": "jpi,jpj,jpk",
+            "vmask": "jpi,jpj,jpk",
+        },
+        "sbc_oce": {
+            "fr_i": "jpi,jpj",
+        },
+    }
+    verified = common.validate_nemo_allocated_extents(ppsrc_dir, expected_by_unit)
+    return {"ppsrc_dir": str(ppsrc_dir), "verified_allocates": verified}
+
+
+def plant_allocate_mismatch(ppsrc_dir: Path) -> dict[str, Any]:
+    """Plant a wrong ALLOCATE extent in a copy of oce.f90 and prove verify_allocate_extents fails."""
+    with tempfile.TemporaryDirectory(dir=_scratch_root()) as tmp:
+        fake_dir = Path(tmp)
+        for name in ("oce.f90", "dom_oce.f90", "sbc_oce.f90"):
+            shutil.copy2(ppsrc_dir / name, fake_dir / name)
+        oce_path = fake_dir / "oce.f90"
+        oce_path.write_text(
+            oce_path.read_text(encoding="utf-8").replace(
+                "ssh(jpi,jpj,jpt)", "ssh(jpi,jpj,jpk)"
+            ),
+            encoding="utf-8",
+        )
+        caught = False
+        error_msg = ""
+        try:
+            verify_allocate_extents(fake_dir)
+        except GateError as exc:
+            caught = True
+            error_msg = str(exc)
+        require(caught, "plant_allocate_mismatch did not fail on perturbed ssh ALLOCATE")
+    return {"passed": True, "error": error_msg}
+
+
+def verify_restart_fortran_fixture(
+    ppsrc_dir: Path,
+    *,
+    plant_wrong_time_level: bool = False,
+) -> dict[str, Any]:
+    """Checklist 4 & 5: compile and run a `-fcheck=bounds -g -O0` Fortran fixture."""
+    rst_src = (ppsrc_dir / "restart.f90").read_text(encoding="utf-8")
+    stprk3_src = (ppsrc_dir / "stprk3.f90").read_text(encoding="utf-8")
+    require("MOD( kt - 1, nn_stock ) == 0" in rst_src,
+            "restart.f90 missing MOD( kt - 1, nn_stock ) == 0 periodicity")
+    require("CALL iom_rstput( kt, nitrst, numrow, 'sshn', ssh(:,:        ,Kbb) )" in rst_src,
+            "restart.f90 missing sshn Kbb write")
+    require("IF( lrst_oce   )   CALL rst_write    ( kstp, Nbb, Nnn, Naa )" in stprk3_src,
+            "stprk3.f90 missing rst_write( kstp, Nbb, Nnn, Naa ) call")
+
+    time_level_expr = "Kaa" if plant_wrong_time_level else "Kbb"
+    fortran_code = f"""program test_r342_restart_fixture
+  use iso_fortran_env, only: real64, int32
+  implicit none
+  integer, parameter :: wp = real64
+  integer, parameter :: jpi = 92, jpj = 149, jpk = 31, jpts = 2, jpt = 3
+  integer, parameter :: jp_tem = 1, jp_sal = 2
+  integer, parameter :: nit000 = 1, nitend = 2920, nn_stock = 8
+  logical, parameter :: ln_rst_list = .false.
+
+  real(wp), allocatable :: ts(:,:,:,:,:), uu(:,:,:,:), vv(:,:,:,:), ssh(:,:,:)
+  real(wp), allocatable :: out_tn(:,:,:), out_sshn(:,:)
+  integer :: kt, nitrst, n_writes, first_kt, last_kt
+  integer :: Nbb, Nmm, Naa, itmp, ji, jj, jk, narea
+  logical :: lrst_oce
+
+  allocate(ts(jpi,jpj,jpk,jpts,jpt), uu(jpi,jpj,jpk,jpt), vv(jpi,jpj,jpk,jpt), ssh(jpi,jpj,jpt))
+  allocate(out_tn(jpi,jpj,jpk), out_sshn(jpi,jpj))
+
+  n_writes = 0
+  first_kt = -1
+  last_kt = -1
+  nitrst = nitend
+  lrst_oce = .false.
+  Nbb = 1
+  Nmm = 2
+  Naa = 3
+
+  do kt = nit000, nitend
+     itmp = Nbb
+     Nbb = Naa
+     Naa = itmp
+
+     if (kt == nit000) then
+        lrst_oce = .false.
+        nitrst = nitend
+     end if
+     if (.not. ln_rst_list) then
+        if (nn_stock == 0) then
+           nitrst = nitend
+        else if (mod(kt - 1, nn_stock) == 0) then
+           nitrst = kt + nn_stock - 1
+           if (nitrst > nitend) nitrst = nitend
+        end if
+     end if
+     if (kt == nitrst - 1 .or. nn_stock == 1 .or. (kt == nitend .and. .not. lrst_oce)) then
+        if (nitrst <= nitend .and. nitrst > 0) then
+           lrst_oce = .true.
+        end if
+     end if
+
+     if (lrst_oce .and. kt == nitrst) then
+        n_writes = n_writes + 1
+        if (first_kt < 0) first_kt = kt
+        last_kt = kt
+        if (mod(kt, nn_stock) /= 0) stop 11
+        lrst_oce = .false.
+     end if
+  end do
+
+  if (n_writes /= 365 .or. first_kt /= 8 .or. last_kt /= 2920) stop 12
+
+  do narea = 1, 2
+     Nbb = 1
+     Nmm = 2
+     Naa = 3
+     ts = -999.0_wp
+     ssh = -888.0_wp
+     do jk = 1, jpk
+        do jj = 1, jpj
+           do ji = 1, jpi
+              ts(ji,jj,jk,jp_tem,Naa) = real(narea * 1000000 + jk * 10000 + jj * 100 + ji, wp)
+           end do
+        end do
+     end do
+     do jj = 1, jpj
+        do ji = 1, jpi
+           ssh(ji,jj,Naa) = real(narea * 100000 + jj * 100 + ji, wp)
+        end do
+     end do
+     ssh(3,4,Naa) = -0.0_wp
+
+     itmp = Nbb
+     Nbb = Naa
+     Naa = itmp
+
+     call mock_rst_write(Nbb, Nmm, Naa)
+     if (out_tn(5,6,7) /= real(narea * 1000000 + 7 * 10000 + 6 * 100 + 5, wp)) stop 13
+     if (out_sshn(3,4) /= 0.0_wp .or. .not. ieee_is_negative_zero(out_sshn(3,4))) stop 14
+  end do
+
+  print '(A,I0,A,I0,A,I0)', 'FIXTURE_OK writes=', n_writes, ' first=', first_kt, ' last=', last_kt
+
+contains
+  subroutine mock_rst_write(Kbb, Kmm, Kaa)
+    integer, intent(in) :: Kbb, Kmm, Kaa
+    out_tn(:,:,:) = ts(:,:,:,jp_tem,{time_level_expr})
+    out_sshn(:,:) = ssh(:,:,{time_level_expr})
+  end subroutine mock_rst_write
+
+  logical function ieee_is_negative_zero(x)
+    real(wp), intent(in) :: x
+    integer(real64) :: bits
+    bits = transfer(x, bits)
+    ieee_is_negative_zero = (x == 0.0_wp) .and. (ibits(bits, 63, 1) == 1)
+  end function ieee_is_negative_zero
+end program test_r342_restart_fixture
+"""
+    with tempfile.TemporaryDirectory(dir=_scratch_root()) as tmp:
+        src_path = Path(tmp) / "test_r342_restart_fixture.f90"
+        bin_path = Path(tmp) / "test_r342_restart_fixture"
+        src_path.write_text(fortran_code, encoding="utf-8")
+        comp = subprocess.run(
+            ["gfortran", "-fdefault-real-8", "-fcheck=bounds", "-g", "-O0",
+             str(src_path), "-o", str(bin_path)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        require(comp.returncode == 0,
+                f"Fortran fixture compilation failed: {comp.stderr}")
+        run = subprocess.run(
+            [str(bin_path)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        require(run.returncode == 0 and "FIXTURE_OK writes=365 first=8 last=2920" in run.stdout,
+                f"Fortran fixture execution failed (rc={run.returncode}): {run.stdout} {run.stderr}")
+    return {"passed": True, "stdout": run.stdout.strip()}
+
+
+def plant_fixture_wrong_time_level(ppsrc_dir: Path) -> dict[str, Any]:
+    """Plant wrong time level (Kaa instead of Kbb after swap) in Fortran fixture and prove it fails."""
+    caught = False
+    error_msg = ""
+    try:
+        verify_restart_fortran_fixture(ppsrc_dir, plant_wrong_time_level=True)
+    except GateError as exc:
+        caught = True
+        error_msg = str(exc)
+    require(caught, "plant_fixture_wrong_time_level did not fail when reading Kaa instead of Kbb")
+    return {"passed": True, "error": error_msg}
+
+
+def _extract_makefile_fcflags(bld_dir: Path) -> tuple[str, list[str]]:
+    makefile = bld_dir / "Makefile"
+    require(makefile.is_file(), f"missing BLD/Makefile: {makefile}")
+    text = makefile.read_text(encoding="utf-8")
+    m = re.search(r"^(?:export\s+)?F(?:C)?FLAGS\s*=\s*(.+)$", text, re.MULTILINE)
+    require(m is not None, f"FFLAGS not found in {makefile}")
+    raw = m.group(1).strip()
+    tokens = [
+        tok for tok in raw.split()
+        if not tok.startswith("-J")
+    ]
+    return raw, tokens
+
+
+def verify_real_flag_fp_census(
+    reference_bld: Path,
+    candidate_bld: Path | None = None,
+) -> dict[str, Any]:
+    """Checklist 6: real-flag whole-executable FP instruction census + real-flag recompile check."""
+    ref_obj = reference_bld / "obj"
+    require(ref_obj.is_dir(), f"missing reference obj dir: {ref_obj}")
+    cand_obj = (candidate_bld / "obj") if (candidate_bld and (candidate_bld / "obj").is_dir()) else ref_obj
+
+    ref_files = sorted(p.name for p in ref_obj.glob("*.o"))
+    cand_files = sorted(p.name for p in cand_obj.glob("*.o"))
+    require(ref_files == cand_files and len(ref_files) == 425,
+            f"object inventory mismatch: ref={len(ref_files)} cand={len(cand_files)}")
+
+    total_functions = 0
+    total_fp_instructions = 0
+    for name in ref_files:
+        ref_c = common.fp_instruction_census(ref_obj / name)
+        cand_c = common.fp_instruction_census(cand_obj / name)
+        require(ref_c == cand_c, f"FP instruction census mismatch in {name}")
+        total_functions += len(ref_c)
+        total_fp_instructions += sum(ref_c.values())
+
+    raw_fcflags, flag_tokens = _extract_makefile_fcflags(reference_bld)
+    with tempfile.TemporaryDirectory(dir=_scratch_root()) as tmp:
+        recompiled_obj = Path(tmp) / "restart.o"
+        cmd = [
+            "mpif90",
+            "-c",
+            *flag_tokens,
+            f"-I{reference_bld / 'inc'}",
+            f"-J{tmp}",
+            str(reference_bld / "ppsrc" / "nemo" / "restart.f90"),
+            "-o",
+            str(recompiled_obj),
+        ]
+        res = subprocess.run(cmd, capture_output=True, text=True, check=False)
+        require(res.returncode == 0,
+                f"real-flag recompile of restart.f90 failed: {res.stderr}")
+        recomp_c = common.fp_instruction_census(recompiled_obj)
+        orig_c = common.fp_instruction_census(ref_obj / "restart.o")
+        require(recomp_c == orig_c,
+                "real-flag recompiled restart.o differs in FP census from reference restart.o")
+
+    return {
+        "object_count": len(ref_files),
+        "function_count": total_functions,
+        "fp_instruction_count": total_fp_instructions,
+        "fcflags": raw_fcflags,
+    }
+
+
+def plant_fp_drift(reference_bld: Path) -> dict[str, Any]:
+    """Plant a + 1.0e-30_wp perturbation in restart.f90, compile with real FCFLAGS, and prove census fails."""
+    _, flag_tokens = _extract_makefile_fcflags(reference_bld)
+    src_text = (reference_bld / "ppsrc" / "nemo" / "restart.f90").read_text(encoding="utf-8")
+    target = "CALL iom_rstput( kt, nitrst, numrow, 'sshn', ssh(:,:        ,Kbb) )"
+    replacement = "CALL iom_rstput( kt, nitrst, numrow, 'sshn', ssh(:,:        ,Kbb) + 1.0e-30_wp )"
+    require(target in src_text, "target line for plant_fp_drift not found in restart.f90")
+    planted_text = src_text.replace(target, replacement, 1)
+
+    with tempfile.TemporaryDirectory(dir=_scratch_root()) as tmp:
+        planted_src = Path(tmp) / "restart.f90"
+        planted_obj = Path(tmp) / "restart.o"
+        planted_src.write_text(planted_text, encoding="utf-8")
+        cmd = [
+            "mpif90",
+            "-c",
+            *flag_tokens,
+            f"-I{reference_bld / 'inc'}",
+            f"-J{tmp}",
+            str(planted_src),
+            "-o",
+            str(planted_obj),
+        ]
+        res = subprocess.run(cmd, capture_output=True, text=True, check=False)
+        require(res.returncode == 0,
+                f"plant_fp_drift compilation failed: {res.stderr}")
+        caught = False
+        err = ""
+        try:
+            common.compare_fp_census(
+                reference_bld / "obj" / "restart.o",
+                planted_obj,
+                function_pattern=r"rst_write",
+            )
+        except GateError as exc:
+            caught = True
+            err = str(exc)
+        require(caught, "plant_fp_drift did not fail compare_fp_census on restart.o")
+    return {"passed": True, "error": err}
+
+
+def verify_same_program_no_observer(
+    ppsrc_dir: Path,
+    my_src_dir: Path | None = None,
+    candidate_bld: Path | None = None,
+) -> dict[str, Any]:
+    """Checklist 7: verify MY_SRC is empty, ppsrc/nemo/*.f90 has zero observer hooks, and same_program_no_observer holds."""
+    if my_src_dir is not None and my_src_dir.is_dir():
+        my_src_files = sorted(
+            p.name for p in my_src_dir.iterdir() if not p.name.startswith(".")
+        )
+        require(len(my_src_files) == 0,
+                f"observer-free K0 build requires empty MY_SRC, found: {my_src_files}")
+    else:
+        my_src_files = []
+
+    f90_files = sorted(ppsrc_dir.glob("*.f90"))
+    require(len(f90_files) >= 400, f"expected >= 400 ppsrc files in {ppsrc_dir}, got {len(f90_files)}")
+    for f90 in f90_files:
+        text = f90.read_text(encoding="utf-8", errors="replace")
+        for pat in OBSERVER_SYMBOL_PATTERNS:
+            m = pat.search(text)
+            if m is not None:
+                raise GateError(
+                    f"observer symbol {m.group(0)!r} found in {f90.name}"
+                )
+
+    bld_to_check = (
+        candidate_bld
+        if (candidate_bld is not None and (candidate_bld / "obj").is_dir())
+        else (PRISTINE_K0_CFG / "BLD")
+    )
+    cfg_name = (
+        TARGET_CFG_NAME
+        if (candidate_bld is not None and (candidate_bld / "obj").is_dir())
+        else "ORCA2_STANDALONE_IIF_OMIP_L4_R339K0"
+    )
+    sp = common.same_program_no_observer(
+        bld_to_check,
+        PRISTINE_K0_CFG / "BLD",
+        new_cfg=cfg_name,
+        reference_cfg="ORCA2_STANDALONE_IIF_OMIP_L4_R339K0",
+    )
+    return {
+        "same_program_no_observer": True,
+        "my_src_files": my_src_files,
+        "ppsrc_file_count": len(f90_files),
+        "whole_program_proof": sp,
+    }
+
+
+def plant_observer_contamination(ppsrc_dir: Path) -> dict[str, Any]:
+    """Plant a non-blank observer call in stprk3.f90 and prove verify_same_program_no_observer fails."""
+    with tempfile.TemporaryDirectory(dir=_scratch_root()) as tmp:
+        fake_ppsrc = Path(tmp) / "ppsrc"
+        fake_ppsrc.mkdir()
+        for f90 in ppsrc_dir.glob("*.f90"):
+            os.symlink(f90, fake_ppsrc / f90.name)
+        stprk3_copy = fake_ppsrc / "stprk3.f90"
+        stprk3_copy.unlink()
+        stprk3_copy.write_text(
+            (ppsrc_dir / "stprk3.f90").read_text(encoding="utf-8")
+            + "\n! non-blank observer plant\nCALL r340_s4_surface_write(kstp)\n",
+            encoding="utf-8",
+        )
+        caught = False
+        error_msg = ""
+        try:
+            verify_same_program_no_observer(fake_ppsrc)
+        except GateError as exc:
+            caught = True
+            error_msg = str(exc)
+        require(caught, "plant_observer_contamination failed to catch r340_s4_surface_write")
+    return {"passed": True, "error": error_msg}
+
+
+def _load_r340_kt9_entry_rank(s4_dir: Path, rank: int) -> dict[str, np.ndarray]:
+    rec_path = s4_dir / f"oracle_r340_state_k00000009_s0_r{rank:04d}.bin"
+    require(rec_path.is_file(), f"missing admitted R340 kt=9 entry state: {rec_path}")
+    decoded = r340_s4.read_exact_record(rec_path)
+    require(decoded["kind"] == "state" and decoded["kt"] == 9 and decoded["kid"] == 0,
+            f"unexpected header in {rec_path.name}")
+    return decoded["fields"]
+
+
+def verify_day1_against_admitted_s4_kt9(
+    run_dir: Path,
+    s4_dir: Path = R340_RUN_A,
+) -> dict[str, Any]:
+    """Checklist 5 & 10: verify Day 1 (kt=8) restart equals admitted R340 S4 kt=9 entry state to 0 ULP."""
+    day1 = pilot_metrics.read_nemo_day(run_dir, 1)
+    r0 = _load_r340_kt9_entry_rank(s4_dir, 0)
+    r1 = _load_r340_kt9_entry_rank(s4_dir, 1)
+    kt9_entry = {
+        name: np.concatenate((r0[name], r1[name]), axis=1)
+        for name in ("T", "S", "u", "v", "ssh")
+    }
+    summary: dict[str, Any] = {}
+    for name in ("T", "S", "u", "v", "ssh"):
+        a = day1[name]
+        b = kt9_entry[name]
+        require(a.shape == b.shape,
+                f"day 1 restart {name} shape {a.shape} != R340 kt=9 entry {b.shape}")
+        max_abs = float(np.max(np.abs(a - b)))
+        require(max_abs == 0.0,
+                f"day 1 restart {name} differs from admitted R340 kt=9 entry: max_abs={max_abs}")
+        a_bits = (a + 0.0).view(np.uint64)
+        b_bits = (b + 0.0).view(np.uint64)
+        max_ulp = int(np.max(np.abs(a_bits.astype(np.int64) - b_bits.astype(np.int64))))
+        require(max_ulp == 0,
+                f"day 1 restart {name} ULP drift vs admitted R340 kt=9 entry: max_ulp={max_ulp}")
+        summary[name] = {"shape": list(a.shape), "max_abs_diff": max_abs, "max_ulp": max_ulp}
+    return summary
+
+
+def write_stub_s4_year_outputs(
+    run_dir: Path,
+    *,
+    plant_unproduced_file: bool = False,
+) -> dict[str, Any]:
+    """Checklist 12: write ONLY the files this observer-free K0 build can write.
+
+    Reads `nn_itend` and `nn_stock` from `run_dir / "namelist_cfg"` so the stub
+    replaces `./nemo` with zero extra arguments.
+    """
+    namelist_cfg = run_dir / "namelist_cfg"
+    require(namelist_cfg.is_file(), f"stub missing staged namelist_cfg: {namelist_cfg}")
+    nn_itend, nn_stock = parse_namelist_itend_stock(namelist_cfg)
+    require(nn_stock == DAILY_STOCK_STRIDE and nn_itend % nn_stock == 0,
+            f"invalid stub namelist cadence: nn_itend={nn_itend}, nn_stock={nn_stock}")
+
+    ocean_out = (R339_SMOKE_DIR / "ocean.output").read_text(encoding="utf-8")
+    ocean_out = re.sub(
+        r"(last\s+time\s+step\s+nn_itend\s*=\s*)\d+",
+        rf"\g<1>{nn_itend}",
+        ocean_out,
+    )
+    ocean_out = re.sub(
+        r"(frequency\s+of\s+restart\s+file\s+nn_stock\s*=\s*)\d+",
+        rf"\g<1>{nn_stock}",
+        ocean_out,
+    )
+    (run_dir / "ocean.output").write_text(ocean_out, encoding="utf-8")
+
+    namelist_dyn = (R339_SMOKE_DIR / "output.namelist.dyn").read_text(encoding="utf-8")
+    namelist_dyn = re.sub(r"(\bnn_itend\s*=\s*)\d+", rf"\g<1>{nn_itend}", namelist_dyn)
+    namelist_dyn = re.sub(r"(\bnn_stock\s*=\s*)\d+", rf"\g<1>{nn_stock}", namelist_dyn)
+    (run_dir / "output.namelist.dyn").write_text(namelist_dyn, encoding="utf-8")
+
+    for mesh_name in ("mesh_mask_0000.nc", "mesh_mask_0001.nc"):
+        shutil.copy2(R339_SMOKE_DIR / mesh_name, run_dir / mesh_name)
+
+    # Day 1 (kt = 8): populate tn, sn, un, vn, sshn from admitted R340 kt=9 entry state.
+    for rank, tmpl in ((0, R339_RESTART_0), (1, R339_RESTART_1)):
+        dst_day1 = run_dir / f"ORCA2_00000008_restart_{rank:04d}.nc"
+        shutil.copy2(tmpl, dst_day1)
+        fields = _load_r340_kt9_entry_rank(R340_RUN_A, rank)
+        with netCDF4.Dataset(dst_day1, "r+") as ds:
+            ds.variables["kt"][...] = 8.0
+            for key, nc_var in (("T", "tn"), ("S", "sn"), ("u", "un"), ("v", "vn")):
+                arr = np.moveaxis(fields[key], -1, 0)
+                ds.variables[nc_var][0, :30, :, :] = arr
+                ds.variables[nc_var][0, 30, :, :] = 0.0
+            ds.variables["sshn"][0, :, :] = fields["ssh"]
+
+        for kt in range(16, nn_itend + 1, nn_stock):
+            dst_kt = run_dir / f"ORCA2_{kt:08d}_restart_{rank:04d}.nc"
+            shutil.copy2(tmpl, dst_kt)
+            with netCDF4.Dataset(dst_kt, "r+") as ds:
+                ds.variables["kt"][...] = float(kt)
+
+    if plant_unproduced_file or os.environ.get("R342_STUB_PLANT_UNPRODUCED") == "1":
+        (run_dir / "oracle_r340_surface_kt0001_kid00_rank0000.bin").write_bytes(
+            b"UNPRODUCED_OBSERVER_FILE"
+        )
+
+    print("STOP 0")
+    return {
+        "nn_itend": nn_itend,
+        "nn_stock": nn_stock,
+        "daily_restart_pairs": nn_itend // nn_stock,
+    }
+
+
+def verify_no_unexpected_files(
+    run_dir: Path,
+    *,
+    expected_steps: int = YEAR_STEPS,
+) -> dict[str, Any]:
+    """Verify run_dir contains NO observer .bin files and ONLY the expected daily restarts."""
+    require(run_dir.is_dir(), f"missing run directory: {run_dir}")
+    expected_restarts = {
+        f"ORCA2_{kt:08d}_restart_{rank:04d}.nc"
+        for kt in range(DAILY_STOCK_STRIDE, expected_steps + 1, DAILY_STOCK_STRIDE)
+        for rank in (0, 1)
+    }
+    present_files = {p.name for p in run_dir.iterdir() if p.is_file() or p.is_symlink()}
+    observer_bins = sorted(
+        name for name in present_files
+        if name.endswith(".bin") or name.startswith("oracle_")
+    )
+    require(not observer_bins,
+            f"run directory {run_dir.name} contains unproduced observer file(s): {observer_bins}")
+
+    present_restarts = {
+        name for name in present_files
+        if re.match(r"^ORCA2_\d+_restart_\d+\.nc$", name)
+    }
+    unexpected_restarts = sorted(present_restarts - expected_restarts)
+    require(not unexpected_restarts,
+            f"run directory {run_dir.name} contains unexpected restart file(s): {unexpected_restarts}")
+    missing_restarts = sorted(expected_restarts - present_restarts)
+    require(not missing_restarts,
+            f"run directory {run_dir.name} is missing {len(missing_restarts)} daily restart file(s), "
+            f"first={missing_restarts[0] if missing_restarts else None}")
+    return {
+        "present_file_count": len(present_files),
+        "expected_restart_file_count": len(expected_restarts),
+        "observer_bins": observer_bins,
+    }
+
+
+def _compare_restart_pair_files(
+    path_a: Path,
+    path_b: Path,
+    expected_kt: int,
+    expected_size: int,
+) -> dict[str, Any]:
+    for p in (path_a, path_b):
+        require(p.is_file() and not p.is_symlink(),
+                f"restart file missing or symlink: {p}")
+        sz = p.stat().st_size
+        require(sz == expected_size,
+                f"restart file {p.name} truncated or wrong size: {sz} != {expected_size}")
+    with netCDF4.Dataset(path_a, "r") as da, netCDF4.Dataset(path_b, "r") as db:
+        require("kt" in da.variables and "kt" in db.variables,
+                f"missing kt variable in {path_a.name}")
+        kt_a = int(np.asarray(da.variables["kt"][...]))
+        kt_b = int(np.asarray(db.variables["kt"][...]))
+        require(kt_a == expected_kt and kt_b == expected_kt,
+                f"{path_a.name}: kt={kt_a}/{kt_b} != expected {expected_kt}")
+        numeric_vars = [
+            v.name for v in da.variables.values()
+            if np.issubdtype(v.dtype, np.number)
+        ]
+        require(len(numeric_vars) >= 20,
+                f"unexpectedly few numeric variables in {path_a.name}: {len(numeric_vars)}")
+        for var in NONZERO_RESTART_VARS:
+            require(var in numeric_vars, f"missing prognostic restart variable {var!r} in {path_a.name}")
+        for var in numeric_vars:
+            require(var in db.variables,
+                    f"missing restart variable {var!r} in twin B {path_b.name}")
+            va = np.asarray(da.variables[var][:], dtype=np.float64)
+            vb = np.asarray(db.variables[var][:], dtype=np.float64)
+            require(va.shape == vb.shape,
+                    f"{path_a.name}:{var} shape mismatch {va.shape} vs {vb.shape}")
+            require(bool(np.isfinite(va).all()) and bool(np.isfinite(vb).all()),
+                    f"{path_a.name}:{var} contains non-finite values (NaN/Inf)")
+            if var in NONZERO_RESTART_VARS:
+                require(float(np.max(np.abs(va))) > 0.0,
+                        f"{path_a.name}:{var} is identically zero")
+            require(np.array_equal(va.view(np.uint64), vb.view(np.uint64)),
+                    f"twin reproducibility ULP drift in {path_a.name}:{var}")
+    return {
+        "kt": expected_kt,
+        "sha256_a": sha256_file(path_a),
+        "sha256_b": sha256_file(path_b),
+    }
+
+
+def _write_and_verify_run_manifest(run_dir: Path, producer_commit: str) -> dict[str, Any]:
+    files = [
+        p for p in run_dir.rglob("*")
+        if p.is_file() and not p.is_symlink() and p.name != "producer_manifest.json"
+    ]
+    mpath = run_dir / "producer_manifest.json"
+    common.write_manifest(
+        mpath,
+        producer_commit=producer_commit,
+        binary=run_dir / "nemo",
+        files=files,
+        root=run_dir,
+        build_source_root=run_dir / "build_sources",
+    )
+    return common.verify_manifest(mpath, expected_commit=producer_commit)
+
+
+def admit_s4_year_twin_runs(
+    run_a: Path,
+    run_b: Path,
+    *,
+    build_cfg: Path = DEFAULT_BUILD_CFG,
+    expected_steps: int = YEAR_STEPS,
+    write_manifests: bool = True,
+) -> dict[str, Any]:
+    """Checklist 8, 10, 11, 13: admit the two reproducibility twin runs A and B."""
+    require(expected_steps >= DAILY_STOCK_STRIDE and expected_steps % DAILY_STOCK_STRIDE == 0,
+            f"invalid expected_steps: {expected_steps}")
+    ppsrc_dir = _ppsrc_dir(build_cfg)
+    my_src_dir = (build_cfg / "MY_SRC") if (build_cfg / "MY_SRC").is_dir() else None
+    cand_bld = (build_cfg / "BLD") if (build_cfg / "BLD" / "obj").is_dir() else None
+    no_obs = verify_same_program_no_observer(ppsrc_dir, my_src_dir, cand_bld)
+
+    inv_a = verify_no_unexpected_files(run_a, expected_steps=expected_steps)
+    inv_b = verify_no_unexpected_files(run_b, expected_steps=expected_steps)
+
+    expected_resolved = {
+        **r339_k0.RESOLVED,
+        "nn_itend": str(expected_steps),
+        "nn_stock": str(DAILY_STOCK_STRIDE),
+    }
+    for rdir in (run_a, run_b):
+        verify_namelist_groups_against_ppsrc(
+            rdir / "namelist_cfg",
+            NAMELIST_REF,
+            ppsrc_dir,
+        )
+        common.validate_ocean_output(rdir / "ocean.output", expected_resolved)
+        out_text = (rdir / "ocean.output").read_text(encoding="utf-8", errors="replace")
+        require(r339_k0.NO_ICEBERGS_BANNER in out_text,
+                f"{rdir.name}: ocean.output did not report No icebergs used")
+        require("ice_cover_clim.nc" in out_text,
+                f"{rdir.name}: ocean.output did not resolve ice_cover_clim.nc")
+        itend_cfg, stock_cfg = parse_namelist_itend_stock(rdir / "namelist_cfg")
+        require(itend_cfg == expected_steps and stock_cfg == DAILY_STOCK_STRIDE,
+                f"{rdir.name}: namelist_cfg (nn_itend={itend_cfg}, nn_stock={stock_cfg}) "
+                f"!= ({expected_steps}, {DAILY_STOCK_STRIDE})")
+
+    expected_size_0 = R339_RESTART_0.stat().st_size
+    expected_size_1 = R339_RESTART_1.stat().st_size
+    expected_kts = list(range(DAILY_STOCK_STRIDE, expected_steps + 1, DAILY_STOCK_STRIDE))
+
+    first_day_summary = {}
+    last_day_summary = {}
+    for kt in expected_kts:
+        for rank, exp_sz in ((0, expected_size_0), (1, expected_size_1)):
+            fa = run_a / f"ORCA2_{kt:08d}_restart_{rank:04d}.nc"
+            fb = run_b / f"ORCA2_{kt:08d}_restart_{rank:04d}.nc"
+            res = _compare_restart_pair_files(fa, fb, kt, exp_sz)
+            if kt == DAILY_STOCK_STRIDE:
+                first_day_summary[f"rank_{rank:04d}"] = res
+            if kt == expected_steps:
+                last_day_summary[f"rank_{rank:04d}"] = res
+
+    day1_vs_r340 = verify_day1_against_admitted_s4_kt9(run_a, R340_RUN_A)
+
+    extra = {
+        "round": "orca2_r342",
+        "stage": "S4_one_year_k0_twin_acquisition",
+        "expected_steps": expected_steps,
+        "daily_stock_stride": DAILY_STOCK_STRIDE,
+        "daily_restart_pairs": len(expected_kts),
+        "same_program_no_observer": no_obs,
+        "day1_vs_r340_s4_kt9_entry": day1_vs_r340,
+        "first_day_restarts": first_day_summary,
+        "last_day_restarts": last_day_summary,
+    }
+    if write_manifests:
+        commit = git_sha(allow_dirty=True)
+        for rdir in (run_a, run_b):
+            (rdir / "round342_s4_year_admission.json").write_text(
+                json.dumps(
+                    {
+                        "status": "PASS_R342_S4_YEAR_NEMO_TWINS",
+                        "admitted": True,
+                        **extra,
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            _write_and_verify_run_manifest(rdir, commit)
+
+    return {
+        "status": "PASS_R342_S4_YEAR_NEMO_TWINS",
+        "admitted": True,
+        "run_a": str(run_a),
+        "run_b": str(run_b),
+        "inventory_a": inv_a,
+        "inventory_b": inv_b,
+        **extra,
+    }
+
+
+def run_all_admission_plants(
+    run_a: Path,
+    run_b: Path,
+    *,
+    expected_steps: int,
+) -> dict[str, Any]:
+    """Checklist 10: plant NaN, 1-ULP twin drift, truncation, checksum mismatch, Day-1 mismatch, and unproduced file."""
+    results: dict[str, Any] = {}
+
+    # 1. NaN plant
+    r0_a = run_a / f"ORCA2_{expected_steps:08d}_restart_0000.nc"
+    backup = r0_a.with_suffix(".nc.bak")
+    shutil.copy2(r0_a, backup)
+    try:
+        with netCDF4.Dataset(r0_a, "r+") as ds:
+            arr = np.asarray(ds.variables["tn"][:], dtype=np.float64)
+            arr[0, 0, 10, 10] = np.nan
+            ds.variables["tn"][:] = arr
+        caught = False
+        err = ""
+        try:
+            admit_s4_year_twin_runs(run_a, run_b, expected_steps=expected_steps, write_manifests=False)
+        except GateError as exc:
+            caught = True
+            err = str(exc)
+        require(caught, "plant_nan did not fail admission")
+        results["plant_nan"] = {"passed": True, "error": err}
+    finally:
+        shutil.move(backup, r0_a)
+
+    # 2. 1-ULP twin drift plant
+    shutil.copy2(r0_a, backup)
+    try:
+        with netCDF4.Dataset(r0_a, "r+") as ds:
+            arr = np.asarray(ds.variables["sshn"][:], dtype=np.float64)
+            arr[0, 20, 20] = np.nextafter(arr[0, 20, 20], np.inf)
+            ds.variables["sshn"][:] = arr
+        caught = False
+        err = ""
+        try:
+            admit_s4_year_twin_runs(run_a, run_b, expected_steps=expected_steps, write_manifests=False)
+        except GateError as exc:
+            caught = True
+            err = str(exc)
+        require(caught, "plant_ulp did not fail admission")
+        results["plant_ulp"] = {"passed": True, "error": err}
+    finally:
+        shutil.move(backup, r0_a)
+
+    # 3. Truncation plant
+    shutil.copy2(r0_a, backup)
+    try:
+        with r0_a.open("r+b") as fh:
+            fh.truncate(r0_a.stat().st_size - 64)
+        caught = False
+        err = ""
+        try:
+            admit_s4_year_twin_runs(run_a, run_b, expected_steps=expected_steps, write_manifests=False)
+        except GateError as exc:
+            caught = True
+            err = str(exc)
+        require(caught, "plant_truncation did not fail admission")
+        results["plant_truncation"] = {"passed": True, "error": err}
+    finally:
+        shutil.move(backup, r0_a)
+
+    # 4. Day-1 vs R340 kt=9 entry mismatch plant
+    day1_a = run_a / "ORCA2_00000008_restart_0000.nc"
+    day1_b = run_b / "ORCA2_00000008_restart_0000.nc"
+    bak_a = day1_a.with_suffix(".nc.bak")
+    bak_b = day1_b.with_suffix(".nc.bak")
+    shutil.copy2(day1_a, bak_a)
+    shutil.copy2(day1_b, bak_b)
+    try:
+        for p in (day1_a, day1_b):
+            with netCDF4.Dataset(p, "r+") as ds:
+                arr = np.asarray(ds.variables["sshn"][:], dtype=np.float64)
+                arr[0, 15, 15] = np.nextafter(arr[0, 15, 15], np.inf)
+                ds.variables["sshn"][:] = arr
+        caught = False
+        err = ""
+        try:
+            admit_s4_year_twin_runs(run_a, run_b, expected_steps=expected_steps, write_manifests=False)
+        except GateError as exc:
+            caught = True
+            err = str(exc)
+        require(caught, "plant_day1_kt9_mismatch did not fail admission")
+        results["plant_day1_kt9_mismatch"] = {"passed": True, "error": err}
+    finally:
+        shutil.move(bak_a, day1_a)
+        shutil.move(bak_b, day1_b)
+
+    # 5. Unproduced observer file plant
+    unprod = run_a / "oracle_r340_surface_kt0001_kid00_rank0000.bin"
+    unprod.write_bytes(b"UNPRODUCED")
+    try:
+        caught = False
+        err = ""
+        try:
+            admit_s4_year_twin_runs(run_a, run_b, expected_steps=expected_steps, write_manifests=False)
+        except GateError as exc:
+            caught = True
+            err = str(exc)
+        require(caught, "plant_stub_unproduced_file did not fail admission")
+        results["plant_stub_unproduced_file"] = {"passed": True, "error": err}
+    finally:
+        unprod.unlink(missing_ok=True)
+
+    # 6. Manifest checksum plant
+    mpath = run_a / "producer_manifest.json"
+    mbak = mpath.with_suffix(".json.bak")
+    shutil.copy2(mpath, mbak)
+    try:
+        mdata = json.loads(mpath.read_text(encoding="utf-8"))
+        first_out = next(iter(mdata["files"]))
+        mdata["files"][first_out] = "0" * 64
+        mpath.write_text(json.dumps(mdata, indent=2), encoding="utf-8")
+        caught = False
+        err = ""
+        try:
+            common.verify_manifest(mpath)
+        except GateError as exc:
+            caught = True
+            err = str(exc)
+        require(caught, "plant_checksum did not fail verify_manifest")
+        results["plant_checksum"] = {"passed": True, "error": err}
+    finally:
+        shutil.move(mbak, mpath)
+
+    return results
+
+
+def admit_existing_with_quarantine(
+    run_root: Path,
+    *,
+    build_cfg: Path = DEFAULT_BUILD_CFG,
+    expected_steps: int = YEAR_STEPS,
+) -> dict[str, Any]:
+    """Checklist 11: --admit-existing in-place admission on pass; move to refused/ on failure."""
+    run_a = run_root / TWIN_A_NAME
+    run_b = run_root / TWIN_B_NAME
+    try:
+        return admit_s4_year_twin_runs(
+            run_a,
+            run_b,
+            build_cfg=build_cfg,
+            expected_steps=expected_steps,
+            write_manifests=True,
+        )
+    except Exception as exc:
+        ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        refused_dir = run_root / "refused"
+        refused_dir.mkdir(parents=True, exist_ok=True)
+        quarantined: list[str] = []
+        for rdir in (run_a, run_b):
+            if rdir.exists():
+                dest = refused_dir / f"{ts}_{rdir.name}"
+                shutil.move(str(rdir), str(dest))
+                quarantined.append(str(dest))
+        raise GateError(
+            f"--admit-existing refused twin runs ({exc}); quarantined to {quarantined}"
+        ) from exc
+
+
+def run_preflight(
+    *,
+    evidence_dir: Path = DEFAULT_EVIDENCE_DIR,
+    build_cfg: Path = DEFAULT_BUILD_CFG,
+    run_root: Path = DEFAULT_RUN_ROOT,
+    ice_cover_path: Path = DEFAULT_ICE_COVER_PATH,
+) -> dict[str, Any]:
+    """Execute all Checklist 1-16 preflight checks and plants without running NEMO."""
+    evidence_dir.mkdir(parents=True, exist_ok=True)
+    ppsrc_dir = _ppsrc_dir(build_cfg)
+    prereq = r340_s4.verify_round339_prerequisites(
+        ice_cover_path.parent, R339_SMOKE_DIR
+    )
+    alloc_check = verify_allocate_extents(ppsrc_dir)
+    alloc_plant = plant_allocate_mismatch(ppsrc_dir)
+    fixture_check = verify_restart_fortran_fixture(ppsrc_dir)
+    fixture_plant = plant_fixture_wrong_time_level(ppsrc_dir)
+    fp_check = verify_real_flag_fp_census(
+        PRISTINE_K0_CFG / "BLD",
+        (build_cfg / "BLD") if (build_cfg / "BLD" / "obj").is_dir() else None,
+    )
+    fp_plant = plant_fp_drift(PRISTINE_K0_CFG / "BLD")
+    obs_check = verify_same_program_no_observer(
+        ppsrc_dir,
+        (build_cfg / "MY_SRC") if (build_cfg / "MY_SRC").is_dir() else None,
+        (build_cfg / "BLD") if (build_cfg / "BLD" / "obj").is_dir() else None,
+    )
+    obs_plant = plant_observer_contamination(ppsrc_dir)
+    nml_plant = plant_namelist_error(ppsrc_dir)
+    forcing_plant = plant_missing_forcing(ice_cover_path)
+
+    run_sh = (
+        Path(__file__).resolve().parent
+        / "nemo_testcase_l4_orca2_round342_s4_year_acquisition"
+        / "run.sh"
+    )
+    require(run_sh.is_file(), f"missing acquisition run.sh: {run_sh}")
+
+    with tempfile.TemporaryDirectory(dir=_scratch_root()) as tmp:
+        stub_root = Path(tmp) / "stub_s4_year"
+        cmd = [
+            "bash",
+            str(run_sh),
+            "--stub-run-dir",
+            str(stub_root),
+            "--stub-steps",
+            "16",
+        ]
+        res = subprocess.run(cmd, capture_output=True, text=True, check=False)
+        require(res.returncode == 0,
+                f"run.sh --stub-run-dir failed (rc={res.returncode}):\n{res.stdout}\n{res.stderr}")
+        run_a = stub_root / TWIN_A_NAME
+        run_b = stub_root / TWIN_B_NAME
+        plants = run_all_admission_plants(run_a, run_b, expected_steps=16)
+
+        admit_ok = subprocess.run(
+            ["bash", str(run_sh), "--admit-existing", str(stub_root), "--stub-steps", "16"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        require(admit_ok.returncode == 0,
+                f"run.sh --admit-existing pass route failed:\n{admit_ok.stdout}\n{admit_ok.stderr}")
+
+        stub_bad = Path(tmp) / "stub_s4_year_bad"
+        bad_res = subprocess.run(
+            [
+                "bash",
+                str(run_sh),
+                "--stub-run-dir",
+                str(stub_bad),
+                "--stub-steps",
+                "16",
+                "--plant-stub-unproduced-file",
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        require(bad_res.returncode != 0,
+                "run.sh --stub-run-dir --plant-stub-unproduced-file did not fail")
+        refused_items = list((stub_bad / "refused").glob("*")) if (stub_bad / "refused").is_dir() else []
+        require(len(refused_items) == 2,
+                f"expected 2 quarantined twin dirs in {stub_bad / 'refused'}, found {refused_items}")
+
+    report = {
+        "status": "ORCA2_ROUND342_S4_YEAR_PREFLIGHT_READY",
+        "round": "orca2_r342",
+        "target_cfg": TARGET_CFG_NAME,
+        "build_cfg": str(build_cfg),
+        "run_root": str(run_root),
+        "twin_a": str(run_root / TWIN_A_NAME),
+        "twin_b": str(run_root / TWIN_B_NAME),
+        "year_steps": YEAR_STEPS,
+        "daily_stock_stride": DAILY_STOCK_STRIDE,
+        "expected_daily_restarts": len(EXPECTED_DAILY_KTS),
+        "per_arm_timeout_seconds": PER_ARM_TIMEOUT_SECONDS,
+        "prerequisites": prereq,
+        "allocate_extents": alloc_check,
+        "allocate_plant": alloc_plant,
+        "fortran_fixture": fixture_check,
+        "fortran_fixture_plant": fixture_plant,
+        "real_flag_fp_census": fp_check,
+        "fp_drift_plant": fp_plant,
+        "same_program_no_observer": obs_check,
+        "observer_contamination_plant": obs_plant,
+        "namelist_plant": nml_plant,
+        "missing_forcing_plant": forcing_plant,
+        "admission_plants": plants,
+        "admit_existing_routes": {
+            "in_place_pass_verified": True,
+            "refused_quarantine_verified": True,
+        },
+        "worktree": worktree_stamp(allow_dirty=True),
+    }
+    out_path = evidence_dir / "round342_s4_year_preflight.json"
+    out_path.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return report
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--preflight-only", action="store_true")
+    parser.add_argument("--stage-run-dir", type=Path, default=None)
+    parser.add_argument("--act-as-nemo-binary", action="store_true")
+    parser.add_argument("--plant-stub-unproduced-file", action="store_true")
+    parser.add_argument("--admit-twin-runs", type=Path, default=None)
+    parser.add_argument("--admit-existing", type=Path, default=None)
+    parser.add_argument("--expected-steps", type=int, default=YEAR_STEPS)
+    parser.add_argument("--ice-cover", type=Path, default=DEFAULT_ICE_COVER_PATH)
+    parser.add_argument("--build-cfg", type=Path, default=DEFAULT_BUILD_CFG)
+    parser.add_argument("--evidence-dir", type=Path, default=DEFAULT_EVIDENCE_DIR)
+    args = parser.parse_args(argv)
+
+    if args.act_as_nemo_binary:
+        rank = int(os.environ.get("OMPI_COMM_WORLD_RANK", os.environ.get("PMI_RANK", "0")))
+        if rank == 0:
+            write_stub_s4_year_outputs(
+                Path.cwd(),
+                plant_unproduced_file=args.plant_stub_unproduced_file,
+            )
+        return 0
+
+    if args.stage_run_dir is not None:
+        info = stage_s4_year_run_dir(
+            args.stage_run_dir,
+            args.ice_cover,
+            build_cfg=args.build_cfg,
+            nn_itend=args.expected_steps,
+            nn_stock=DAILY_STOCK_STRIDE,
+        )
+        print(json.dumps(info, indent=2, sort_keys=True))
+        return 0
+
+    if args.admit_twin_runs is not None:
+        res = admit_s4_year_twin_runs(
+            args.admit_twin_runs / TWIN_A_NAME,
+            args.admit_twin_runs / TWIN_B_NAME,
+            build_cfg=args.build_cfg,
+            expected_steps=args.expected_steps,
+            write_manifests=True,
+        )
+        print(json.dumps(res, indent=2, sort_keys=True))
+        return 0
+
+    if args.admit_existing is not None:
+        res = admit_existing_with_quarantine(
+            args.admit_existing,
+            build_cfg=args.build_cfg,
+            expected_steps=args.expected_steps,
+        )
+        print(json.dumps(res, indent=2, sort_keys=True))
+        return 0
+
+    report = run_preflight(
+        evidence_dir=args.evidence_dir,
+        build_cfg=args.build_cfg,
+        ice_cover_path=args.ice_cover,
+    )
+    print(json.dumps({"status": report["status"], "twin_a": report["twin_a"], "twin_b": report["twin_b"]}, indent=2))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
