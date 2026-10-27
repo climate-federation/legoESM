@@ -1,0 +1,448 @@
+
+    CNRS - NERC - Met OFFICE - MERCATOR-ocean - CMCC
+                        NEMO team
+             Ocean General Circulation Model
+                 NEMO version 5.0  (2024) 
+
+            ._      ._      ._      ._      ._    
+        _.-._)`\_.-._)`\_.-._)`\_.-._)`\_.-._)`\_ 
+
+            o         _,           _,             
+             o      .' (        .-' /             
+            o     _/..._'.    .'   /              
+       (    o .-'`      ` '-./  _.'               
+        )    ( o)           ;= <_         (       
+       (      '-.,\\__ __.-;`\   '.        )      
+        )  )       \) |`\ \)  '.   \      (   (   
+       (  (           \_/       '-._\      )   )  
+        )  ) jgs                     `    (   (   
+      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ 
+
+
+AAAAAAAA
+
+
+ par_kind : wp = Working precision = dp = double-precision
+ ~~~~~~~~                                 ****************
+
+            
+ domain_cfg : domain size read in ORCA_R2_zps_domcfg file
+ ~~~~~~~~~~ 
+                     iom_nf90_open ~~~ open existing file: ORCA_R2_zps_domcfg.nc in READ mode
+                    ---> ORCA_R2_zps_domcfg.nc OK
+                     iom_close ~~~ close file: ORCA_R2_zps_domcfg.nc ok
+    .
+    ==>>>   ORCA configuration 
+    .
+       nn_cfg =            2
+       Ni0glo =          180
+       Nj0glo =          148
+       jpkglo =           31
+    Namelist nammpp
+       jpni and jpnj will be calculated automatically
+       avoid use of mpi_allgather at the north fold  ln_nnogather =  T
+       halo width (applies to both rows and columns)       nn_hls =            2
+       choice of communication method                     nn_comm =            1
+       use delayed global communications?             ln_mppdelay =  T
+                     iom_nf90_open ~~~ open existing file: ORCA_R2_zps_domcfg.nc in READ mode
+                    ---> ORCA_R2_zps_domcfg.nc OK
+
+ mpp_init:
+ ~~~~~~~~ 
+    ==> you use the best mpi decomposition
+
+   Number of mpi processes:     2
+   Number of ocean subdomains =     2
+   Number of suppressed land subdomains =     0
+
+
+ MPI Message Passing MPI - domain lay out over processors
+
+    defines mpp subdomains
+       jpni =            2
+       jpnj =            1
+      jpnij =            2
+      nimpp =            1
+      njmpp =            1
+
+       sum ijpi(i,1) =          188  jpiglo =          184
+       sum ijpj(1,j) =          152  jpjglo =          152
+
+       *****************************
+       *             *             *
+     1 *   94 x  152 *   94 x  152 *
+       *         0   *         1   *
+       *             *             *
+       *****************************
+                1             2
+
+    resulting internal parameters : 
+       narea =            1
+       mpi nei  west =            1    mpi nei  east =            1
+       mpi nei south =           -1    mpi nei north =           -1
+       mpi nei so-we =           -1    mpi nei so-ea =           -1
+       mpi nei no-we =           -1    mpi nei no-ea =           -1
+
+    ==>>>   North fold boundary prepared for jpni >1
+
+ mpp init_ioipsl :   iloc  =           90         148
+ ~~~~~~~~~~~~~~~     iabsf =            1           1
+                     ihals =            0           0
+                     ihale =            0           0
+
+ nemo_ctl: Control prints
+ ~~~~~~~~
+    Namelist namctl
+                               sn_cfctl%l_runstat =  F
+                               sn_cfctl%l_trcstat =  F
+                               sn_cfctl%l_obsstat =  F
+                               sn_cfctl%l_oceout  =  F
+                               sn_cfctl%l_layout  =  F
+                               sn_cfctl%l_prtctl  =  F
+                               sn_cfctl%l_prttrc  =  F
+                               sn_cfctl%l_oasout  =  F
+                               sn_cfctl%procmin   =            0
+                               sn_cfctl%procmax   =      1000000
+                               sn_cfctl%procincr  =            1
+                               sn_cfctl%ptimincr  =            1
+       timing by routine               ln_timing  =  F
+       CFL diagnostics                 ln_diacfl  =  F
+       North Pole Folding check        nn_npfchk  =            0
+                nn_npfchk = 0: no check             
+                            1: verbose checking     
+                            2: stop if NPF mismatch 
+
+    Namelist namcfg
+       read domain configuration file                ln_read_cfg      =  T
+          filename to be read                           cn_domcfg     = ORCA_R2_zps_domcfg
+          keep closed seas in the domain (if exist)     ln_closea     =  F
+       create a configuration definition file        ln_write_cfg     =  F
+          filename to be written                        cn_domcfg_out = domain_cfg_out
+
+ phy_cst : initialization of ocean parameters and constants
+ ~~~~~~~
+       mathematical constant                 rpi =    3.1415926535897931     
+       day                                rday   =    86400.000000000000       s
+       sideral year                       rsiyea =    31558149.010110732       s
+       sideral day                        rsiday =    86164.099655911836       s
+       omega                              omega  =    7.2921150830460618E-005  s^-1
+
+       nb of months per year               raamo =    12.000000000000000       months
+       nb of hours per day                 rjjhh =    24.000000000000000       hours
+       nb of minutes per hour              rhhmm =    60.000000000000000       mn
+       nb of seconds per minute            rmmss =    60.000000000000000       s
+
+       earth radius                         ra   =    6371229.0000000000       m
+       gravity                              grav =    9.8066499999999994       m/s^2
+
+       freezing point of water              rt0  =    273.14999999999998       K
+
+    reference density and heat capacity now defined in eosbn2.f90
+
+       thermal conductivity of pure ice          =    2.0343960000000001       J/s/m/K
+       thermal conductivity of snow is defined in a namelist 
+       fresh ice specific heat                   =    2096.6999999999998       J/kg/K
+       latent heat of fusion of fresh ice / snow =    333360.09999999998       J/kg
+       latent heat of subl.  of fresh ice / snow =    2834400.0000000000       J/kg
+       density of sea ice                        =    917.00000000000000       kg/m^3
+       density of snow                           =    330.00000000000000       kg/m^3
+       density of freshwater (in melt ponds)     =    1000.0000000000000       kg/m^3
+       salinity of ice (for pisces)              =    6.0000000000000000       psu
+       salinity of sea (for pisces and isf)      =    34.700000000000003       psu
+       latent heat of evaporation (water)        =    2500000.0000000000       J/m^3
+       von Karman constant                       =   0.40000000000000002     
+       Stefan-Boltzmann constant                 =    5.6699999999999998E-008  J/s/m^2/K^4
+
+       conversion: degre ==> radian          rad =    1.7453292519943295E-002
+
+       smallest real computer value       rsmall =    1.1102230246251565E-016
+
+ eos_init : equation of state
+ ~~~~~~~~
+    Namelist nameos : Chosen the Equation Of Seawater (EOS)
+       TEOS-10 : rho=F(Conservative Temperature, Absolute  Salinity, depth)   ln_TEOS10 =  F
+       EOS-80  : rho=F(Potential    Temperature, Practical Salinity, depth)   ln_EOS80  =  T
+       S-EOS   : rho=F(Conservative Temperature, Absolute  Salinity, depth)   ln_SEOS   =  F
+
+    ==>>>   use of EOS-80 equation of state (pot. temp. and pract. salinity)
+
+    ==>>>   model does not use Conservative Temperature
+
+    Associated physical constant
+       volumic mass of reference           rho0  =    1026.0000000000000       kg/m^3
+       1. / rho0                        r1_rho0  =    9.7465886939571145E-004  m^3/kg
+       ocean specific heat                 rcp   =    3991.8679571196299       J/Kelvin
+       rho0 * rcp                       rho0_rcp =    4095656.5240047402     
+       1. / ( rho0 * rcp )           r1_rho0_rcp =    2.4416109948160356E-007
+
+ wad_init : Wetting and drying initialization through namelist read
+ ~~~~~~~~
+    Namelist namwad
+       Logical for Dir. Lim wd option   ln_wd_dl     =  F
+       Depth at which wet/drying starts rn_wdmin0    =   0.29999999999999999     
+       Minimum wet depth on dried cells rn_wdmin1    =   0.20000000000000001     
+       Tolerance of min wet depth       rn_wdmin2    =    1.0000000000000000E-004
+       land elevation threshold         rn_wdld      =    2.5000000000000000     
+       T => baroclinic u,v=0 at dry pts: ln_wd_dl_bc =  F
+       use a ramp for wd limiter:       ln_wd_dl_rmp =  F
+       cut off depth sbc for wd   rn_wd_sbcdep       =    5.0000000000000000     
+       fraction to start sbc wgt rn_wd_sbcfra        =   0.99900000000000000     
+
+ dom_init : domain initialization
+ ~~~~~~~~
+    Domain info
+       dimension of model:
+              Local domain      Global domain       Data domain 
+               jpi     :      94   jpiglo  :     184
+               jpj     :     152   jpjglo  :     152
+               jpk     :      31   jpkglo  :      31
+               jpij    :   13320
+       mpp local domain info (mpp):
+               jpni    :            2    nn_hls  :            2
+               jpnj    :            1    nn_hls  :            2
+               jpnij   :            2
+       lateral boundary of the Global domain:
+               cyclic east-west             : T
+               cyclic north-south           : F
+               North Pole folding           : T
+                  type of North pole Folding:T
+       Ocean model configuration used:
+               cn_cfg = ORCA   nn_cfg =            2
+
+ dom_nam : domain initialization through namelist read
+ ~~~~~~~ 
+
+    Namelist : namdom   ---   space & time domain
+       create mesh/mask file                   ln_meshmask =  T
+       ocean time step                         rn_Dt       =    10800.000000000000     
+       asselin time filter parameter           rn_atfp     =   0.10000000000000001     
+       single column domain (1x1pt)            ln_c1d      =  F
+       shuman averaging (=T)                   ln_shuman   =  F
+
+            ===>>>   Runge Kutta 3rd order (RK3) :   rDt =    10800.000000000000     
+
+    Namelist : namrun   ---   run parameters
+       Assimilation cycle              nn_no           =            0
+       experiment name for output      cn_exp          = ORCA2
+       file prefix restart input       cn_ocerst_in    = restart
+       restart input directory         cn_ocerst_indir = .
+       file prefix restart output      cn_ocerst_out   = restart
+       restart output directory        cn_ocerst_outdir= .
+       restart logical                 ln_rstart       =  F
+       start with forward time step    ln_1st_euler    =  F
+       control of time step            nn_rstctl       =            0
+       number of the first time step   nn_it000        =            1
+       number of the last time step    nn_itend        =         2920
+       initial calendar date aammjj    nn_date0        =        10101
+       initial time of day in hhmm     nn_time0        =            0
+       leap year calendar (0/1)        nn_leapy        =            0
+       initial state output            nn_istate       =            1
+       frequency of restart file       nn_stock        =            8
+       frequency of output file        nn_write        =            0
+       mask land points                ln_mskland      =  F
+       additional CF standard metadata ln_cfmeta       =  F
+       overwrite an existing file      ln_clobber      =  T
+       NetCDF chunksize (bytes)        nn_chunksz      =            0
+       READ restart for a single file using XIOS ln_xios_read = F
+       Write restart using XIOS        nn_wxios   =            0
+
+  ===>>> : W A R N I N G
+
+          ===============
+
+  nn_write =            0  it is forced to         2920
+
+
+    ==>>>   The IOIPSL calendar is "noleap", i.e. no leap year
+
+    Namelist : namtile   ---   Domain tiling decomposition
+       Tiling (T) or not (F)                ln_tile    =  F
+
+ sbc_init : surface boundary condition setting
+ ~~~~~~~~ 
+    Namelist namsbc (partly overwritten with CPP key setting)
+       frequency update of sbc (and ice)             nn_fsbc       =            2
+       Type of air-sea fluxes : 
+          user defined formulation                   ln_usr        =  F
+          flux         formulation                   ln_flx        =  F
+          bulk         formulation                   ln_blk        =  T
+          ABL          formulation                   ln_abl        =  F
+          Surface wave (forced or coupled)           ln_wave       =  F
+       Type of coupling (Ocean/Ice/Atmosphere) : 
+          ocean-atmosphere coupled formulation       ln_cpl        =  F
+          mixed forced-coupled     formulation       ln_mixcpl     =  F
+          OASIS coupling (with atm or sas)           lk_oasis      =  F
+          components of your executable              nn_components =            0
+       Sea-ice : 
+          ice management in the sbc (=0/1/2/3)       nn_ice        =            1
+          ice embedded into ocean                    ln_ice_embd   =  F
+       Misc. options of sbc : 
+          Light penetration in temperature Eq.       ln_traqsr     =  T
+             daily mean to diurnal cycle qsr            ln_dm2dc   =  F
+          Sea Surface Restoring on SST and/or SSS    ln_ssr        =  T
+          FreshWater Budget control  (=0/1/2)        nn_fwb        =            2
+          Patm gradient added in ocean & ice Eqs.    ln_apr_dyn    =  F
+          runoff / runoff mouths                     ln_rnf        =  T
+          nb of iterations if land-sea-mask applied  nn_lsm        =            0
+
+    ==>>>   NEMO configured as a single executable (i.e. including both OCE and Surface module)
+
+    ==>>>   bulk formulation
+
+ zdf_tke_init : tke turbulent closure scheme - initialisation
+ ~~~~~~~~~~~~
+    Namelist namzdf_tke : set tke mixing parameters
+       coef. to compute avt                        rn_ediff  =   0.10000000000000001     
+       Kolmogoroff dissipation coef.               rn_ediss  =   0.69999999999999996     
+       tke surface input coef.                     rn_ebb    =    67.829999999999998     
+       minimum value of tke                        rn_emin   =    9.9999999999999995E-007
+       surface minimum value of tke                rn_emin0  =    1.0000000000000000E-004
+       prandl number flag                          nn_pdl    =            1
+       background shear (>0)                       rn_bshear =    9.9999999999999995E-021
+       mixing length type                          nn_mxl    =            3
+          surface mixing length = F(stress) or not    ln_mxl0   =  T
+          surface  mixing length minimum value        rn_mxl0   =    4.0000000000000001E-002
+       type of scaling under sea-ice               nn_mxlice =            0
+    ==>>>   No scaling under sea-ice
+       Langmuir cells parametrization              ln_lc     =  T
+          coef to compute vertical velocity of LC     rn_lc  =   0.14999999999999999     
+       test param. to add tke induced by wind      nn_etau   =            1
+           type of tke penetration profile            nn_htau   =            1
+           fraction of TKE that penetrates            rn_efr    =    5.0000000000000003E-002
+       langmuir & surface wave breaking under ice  nn_eice =            1
+    ==>>>   weigthed by 1-TANH( fr_i(:,:) * 10 )
+
+    ==>>>   critical Richardson nb with your parameters  ri_cri =   0.22222222222222221     
+ zdf_drg_init : top and/or bottom drag setting
+ ~~~~~~~~~~~~
+    Namelist namdrg : top/bottom friction choices
+       free-slip       : Cd = 0                  ln_drg_OFF  =  F
+       linear  drag    : Cd = Cd0                ln_lin      =  T
+       non-linear  drag: Cd = Cd0_nl |U|         ln_non_lin  =  F
+       logarithmic drag: Cd = vkarmn/log(z/z0)   ln_loglayer =  F
+       implicit friction                         ln_drgimp   =  T
+       implicit ice-ocean drag                   ln_drgice_imp  = F
+
+    Namelist namdrg_bot : set BOTTOM friction parameters
+       drag coefficient                        rn_Cd0   =    1.0000000000000000E-003
+       characteristic velocity (linear case)   rn_Uc0   =   0.40000000000000002       m/s
+       non-linear drag maximum                 rn_Cdmax =   0.10000000000000001     
+       background kinetic energy  (n-l case)   rn_ke0   =    2.5000000000000001E-003
+       bottom roughness           (n-l case)   rn_z0    =    3.0000000000000001E-003
+       set a regional boost of Cd0             ln_boost =  F
+          associated boost factor              rn_boost =    50.000000000000000     
+
+    ==>>>   linear BOTTOM friction (constant coef = Cd0*Uc0 =    4.0000000000000002E-004 )
+
+ icb_nam : iceberg initialization through namberg namelist read
+ ~~~~~~~~ 
+
+    ==>>>   No icebergs used
+
+ ldf_slp_init : direction of lateral mixing
+ sbc_ice_if : ice-if sea-ice model
+ ~~~~~~~~~~
+    fld_fill : fill data structure with information from namelist namsbc_iif
+    ~~~~~~~~
+       list of files and frequency (>0: in hours ; <0 in months)
+       root filename: ./ice_cover_clim.nc   variable name: ice_cover
+          frequency:   -12.000000000000000         time interp:  T    climatology:  T
+          weights:    pairing:    data type: yearly     land/sea mask:
+                     iom_nf90_open ~~~ open existing file: ./ice_cover_clim.nc in READ mode
+                    ---> ./ice_cover_clim.nc OK
+ weight file:  ./weights_core2_orca2_bicub
+       ddims:           192          94
+      numwgt:            16
+      jpiwgt:           122
+      jpjwgt:            88
+     botleft:            20           6
+    topright:           141          93
+        cyclical
+        allocated
+ weight file:  ./weights_core2_orca2_bilin
+       ddims:           192          94
+      numwgt:             4
+      jpiwgt:           122
+      jpjwgt:            88
+     botleft:            20           6
+    topright:           141          93
+        cyclical
+        allocated
+           read ice_cover (rec:      1) in ./ice_cover_clim.nc ok
+           read ice_cover (rec:      1) in ./ice_cover_clim.nc ok
+   fld_read: var ice_cover kt =        1 (   0.1250 days), Y/M/D = 0001/01/01, records b/a:   0001/  0001 (days -182.5000/ 182.5000)
+                     iom_nf90_open ~~~ open existing file: ./runoff_core_monthly.nc in READ mode
+           iom_nf90_rp0123d, file: ./ORCA2_00002920_restart_0000.nc, var: vv_n defined ok
+           iom_nf90_rp0123d, file: ./ORCA2_00002920_restart_0000.nc, var: ssha defined ok
+
+ rst_write : write oce restart file  kt =        2920
+ ~~~~~~~
+           iom_nf90_rp0123d, file: ./ORCA2_00002920_restart_0000.nc, var: kt written ok
+           iom_nf90_rp0123d, file: ./ORCA2_00002920_restart_0000.nc, var: ndastp written ok
+           iom_nf90_rp0123d, file: ./ORCA2_00002920_restart_0000.nc, var: adatrj written ok
+           iom_nf90_rp0123d, file: ./ORCA2_00002920_restart_0000.nc, var: ntime written ok
+
+ sbc_ssm : sea surface mean fields written in ocean restart file at it=         2920  date=        11231
+ ~~~~~~~
+           iom_nf90_rp0123d, file: ./ORCA2_00002920_restart_0000.nc, var: nn_fsbc written ok
+           iom_nf90_rp0123d, file: ./ORCA2_00002920_restart_0000.nc, var: ssu_m write dimension variables done
+           iom_nf90_rp0123d, file: ./ORCA2_00002920_restart_0000.nc, var: ssu_m written ok
+           iom_nf90_rp0123d, file: ./ORCA2_00002920_restart_0000.nc, var: ssv_m written ok
+           iom_nf90_rp0123d, file: ./ORCA2_00002920_restart_0000.nc, var: sst_m written ok
+           iom_nf90_rp0123d, file: ./ORCA2_00002920_restart_0000.nc, var: sss_m written ok
+           iom_nf90_rp0123d, file: ./ORCA2_00002920_restart_0000.nc, var: ssh_m written ok
+           iom_nf90_rp0123d, file: ./ORCA2_00002920_restart_0000.nc, var: e3t_m written ok
+           iom_nf90_rp0123d, file: ./ORCA2_00002920_restart_0000.nc, var: frq_m written ok
+
+ sbc_fwb : writing FW-budget adjustment to ocean restart file at it =         2920
+ ~~~~
+           iom_nf90_rp0123d, file: ./ORCA2_00002920_restart_0000.nc, var: a_fwb written ok
+           iom_nf90_rp0123d, file: ./ORCA2_00002920_restart_0000.nc, var: a_fwb_b written ok
+           iom_nf90_rp0123d, file: ./ORCA2_00002920_restart_0000.nc, var: emp_corr written ok
+ sbc_fwb : Previous          year averaged liquid height (ocean + snow + ice) =    0.0000000000000000      m
+ sbc_fwb : Previous previous year averaged liquid height (ocean + snow + ice) =    0.0000000000000000      m
+ sbc_fwb : freshwater-budget correction flux =    0.0000000000000000      kg/m2/s
+ ---- tke_rst ----
+           iom_nf90_rp0123d, file: ./ORCA2_00002920_restart_0000.nc, var: en written ok
+           iom_nf90_rp0123d, file: ./ORCA2_00002920_restart_0000.nc, var: avt_k written ok
+           iom_nf90_rp0123d, file: ./ORCA2_00002920_restart_0000.nc, var: avm_k written ok
+           iom_nf90_rp0123d, file: ./ORCA2_00002920_restart_0000.nc, var: dissl written ok
+ ---- ts_rst ----
+           iom_nf90_rp0123d, file: ./ORCA2_00002920_restart_0000.nc, var: sshbb_e written ok
+           iom_nf90_rp0123d, file: ./ORCA2_00002920_restart_0000.nc, var: ubb_e written ok
+           iom_nf90_rp0123d, file: ./ORCA2_00002920_restart_0000.nc, var: vbb_e written ok
+           iom_nf90_rp0123d, file: ./ORCA2_00002920_restart_0000.nc, var: sshb_e written ok
+           iom_nf90_rp0123d, file: ./ORCA2_00002920_restart_0000.nc, var: ub_e written ok
+           iom_nf90_rp0123d, file: ./ORCA2_00002920_restart_0000.nc, var: vb_e written ok
+   fld_read: var CHLA kt =     2920 ( 364.9375 days), Y/M/D = 0001/12/31, records b/a:   0012/  0001 (days  349.5000/ 380.5000)
+                     iom_close ~~~ close file: ./chlorophyll.nc ok
+           iom_nf90_rp0123d, file: ./ORCA2_00002920_restart_0000.nc, var: fraqsr_1lev written ok
+   fld_read: var votemper kt =     2920 ( 364.9375 days), Y/M/D = 0001/12/31, records b/a:   0012/  0001 (days  349.5000/ 380.5000)
+                     iom_close ~~~ close file: ./data_1m_potential_temperature_nomask.nc ok
+   fld_read: var vosaline kt =     2920 ( 364.9375 days), Y/M/D = 0001/12/31, records b/a:   0012/  0001 (days  349.5000/ 380.5000)
+                     iom_close ~~~ close file: ./data_1m_salinity_nomask.nc ok
+ dia_wri : write model outputs in NetCDF files at         2920 time-step
+ ~~~~~~ 
+           iom_nf90_rp0123d, file: ./ORCA2_00002920_restart_0000.nc, var: rdt written ok
+           iom_nf90_rp0123d, file: ./ORCA2_00002920_restart_0000.nc, var: DELAY_re8_fwb2 written ok
+           iom_nf90_rp0123d, file: ./ORCA2_00002920_restart_0000.nc, var: DELAY_im8_fwb2 written ok
+           iom_nf90_rp0123d, file: ./ORCA2_00002920_restart_0000.nc, var: sshn written ok
+           iom_nf90_rp0123d, file: ./ORCA2_00002920_restart_0000.nc, var: un written ok
+           iom_nf90_rp0123d, file: ./ORCA2_00002920_restart_0000.nc, var: vn written ok
+           iom_nf90_rp0123d, file: ./ORCA2_00002920_restart_0000.nc, var: tn written ok
+           iom_nf90_rp0123d, file: ./ORCA2_00002920_restart_0000.nc, var: sn written ok
+           iom_nf90_rp0123d, file: ./ORCA2_00002920_restart_0000.nc, var: uu_n written ok
+           iom_nf90_rp0123d, file: ./ORCA2_00002920_restart_0000.nc, var: vv_n written ok
+           iom_nf90_rp0123d, file: ./ORCA2_00002920_restart_0000.nc, var: ssha written ok
+                     iom_close ~~~ close file: ./ORCA2_00002920_restart_0000.nc ok
+
+AAAAAAAA
+
+                     iom_close ~~~ close file: ORCA_R2_zps_domcfg.nc ok
+                     iom_close ~~~ close file: ./zdfiwm_forcing_orca2.nc ok
+                     iom_close ~~~ close file: ./zdfiwm_forcing_orca2.nc ok
+                     iom_close ~~~ close file: ./zdfiwm_forcing_orca2.nc ok
+                     iom_close ~~~ close file: ./zdfiwm_forcing_orca2.nc ok
+                     iom_close ~~~ close file: ./zdfiwm_forcing_orca2.nc ok
+                     iom_close ~~~ close file: ./zdfiwm_forcing_orca2.nc ok
+                     iom_close ~~~ close file: ./geothermal_heating.nc ok
