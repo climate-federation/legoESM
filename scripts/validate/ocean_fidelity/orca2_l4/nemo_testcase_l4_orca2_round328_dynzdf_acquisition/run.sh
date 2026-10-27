@@ -1383,7 +1383,17 @@ if [[ "$ACQ_TARGET" == tke336 ]]; then
   r336_instruction_count=$(awk '{n+=$1} END {print n+0}' "$scratch/r336-whole.pristine.fp")
   printf 'R336_WHOLE_EXECUTABLE_FP_PASS functions=%s instructions=%s stage=%s\n' \
     "$r336_function_count" "$r336_instruction_count" "$r336_stage_count"
-  cp "$SOURCE_ROOT/BLD/obj/stprk3_stg.o" "$scratch/stage.inherited.o"
+  # Recompile the inherited round-326 stage observer for the plant.  The
+  # source BLD object may have been refreshed independently and is therefore
+  # not evidence that MY_SRC/stprk3_stg.F90 still carries the 1367-FP body.
+  fpp "$SOURCE_STAGE" "$scratch/stage.inherited.f90"
+  compile_record_object "$scratch/stage.inherited.f90" "$scratch/stage.inherited.o"
+  fp_named_signature "$scratch/stage.inherited.o" "$scratch/r336-stage.inherited.fp" \
+    __stprk3_stg_MOD_stp_rk3_stg
+  r336_inherited_stage_count=$(awk '{n+=$1} END {print n+0}' \
+    "$scratch/r336-stage.inherited.fp")
+  [[ $r336_inherited_stage_count -eq 1367 ]] \
+    || refuse "round-336 inherited stage plant FP census $r336_inherited_stage_count != 1367"
   cp "$dry_bld/obj/stprk3_stg.o" "$scratch/stage.clean.o"
   cp "$scratch/stage.inherited.o" "$dry_bld/obj/stprk3_stg.o"
   plant_must_refuse r336-inherited-stage-census compare_whole_executable_fp \
