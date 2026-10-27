@@ -216,7 +216,7 @@ Rung 10 (one step) has 1-5 plus:
 | 6 | `internal_wave_mixing.py:444` | square root of the clipped N^2: infinite slope where N^2 <= 0 | 359,826 (60,973 inf) | residual |
 | 7 | `tke.py:1082` | square root in the TKE mixing length | 358,441 | residual |
 | 8 | `tke.py:3670` | square root over the dissipation length | 358,441 | residual |
-| 9 | `shortwave_penetration.py:561` | level thickness below the bottom (masked) | 21,883 | generated + residual |
+| 9 | `shortwave_penetration.py:647` | level thickness below the bottom (masked) | 21,883 | generated + residual |
 
 6, 7 and 9 also fire in the fused T-loss gradient. With 1-9 zeroed the
 rung-10 gradient is finite (dT0 . T_dir0 = -4.17882e-2; FD -4.18476e-2 at

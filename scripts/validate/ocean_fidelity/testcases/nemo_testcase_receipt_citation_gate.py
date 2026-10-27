@@ -2512,12 +2512,15 @@ CITATION_MAP = {
     'ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/traqsr.f90:327-402': [
         ('zlogc = LOG(  MAX( 0.03_wp, MIN( sf_chl(1)%fnow(ji,jj,1) ,10._wp ) )  )  ! zlogc = log(zchl)   with 0.03 <= Chl >= 10.', 1),
         ('END WHERE', 2), 76],
-    'packages/ocean/legoesm/ocean/bulk_flux_omip.py:1071-1089': [
+    'packages/ocean/legoesm/ocean/bulk_flux_omip.py:1076-1107': [
         'state_after = stepped.state_after if hasattr(stepped, "state_after") else stepped',
-        (')', 447), 19],
-    'packages/ocean/legoesm/ocean/physics/shortwave_penetration.py:1092-1115': [
+        'shortwave_fraction_top=next_shortwave_fraction,', 32],
+    'packages/ocean/legoesm/ocean/physics/shortwave_penetration.py:1178-1201': [
         'def top_layer_absorbed_fraction(dz_top, chl_surface=None,',
         'return frac_per_m[..., 0] * dz_live[..., 0]', 24],
+    'packages/ocean/legoesm/ocean/physics/shortwave_penetration.py:454-548': [
+        'def _nemo_qsr_rgb_attenuation_coeffs(',
+        'return jnp.where(sw_down != 0.0, sr(one - sr(zzeT / safe_qsr)), one)', 95],
     'packages/ocean/legoesm/ocean/physics/shortwave_penetration.py:404-451': [
         'zlogc = precision_log(jnp.clip(chl_surface, c(_CHL_MIN), c(_CHL_MAX)))',
         'return jnp.clip(itab - 1.0, 0.0, 60.0).astype(jnp.int32)', 48],
@@ -2528,9 +2531,9 @@ CITATION_MAP = {
         'CALL fld_read( kt, 1, sf_chl )                                          ! Read Chl data and provides it at the current time step',
     'ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/stprk3_stg.f90:525':
         'IF( ln_traqsr  )   CALL tra_qsr( kstp,      Kmm, ts, Krhs )  ! penetrative solar radiation qsr',
-    'packages/ocean/legoesm/ocean/bulk_flux_omip.py:1260-1265': [
+    'packages/ocean/legoesm/ocean/bulk_flux_omip.py:1279-1351': [
         'update = (int(s0.kt) - 1) % int(s0.forcing_stride) == 0',
-        'return prior_surface._replace(means=means)', 6],
+        'ice_if=retained_iif,', 73],
     'tke.py:285-289': [
         'masked_taum = jnp.maximum(taum, 0.0) * surface_tmask',
         '* masked_taum)', 5],
@@ -2916,7 +2919,7 @@ CITATION_MAP = {
     'internal_wave_mixing.py:444': 'n_pos = safe_sqrt(n2_pos)',
     'tke.py:1082': 'safe_sqrt((jnp.asarray(2.0, e.dtype) * e) / zrn2),',
     'tke.py:3670': 'dissl_new = safe_sqrt(tke_curr) / l_eps_final',
-    'shortwave_penetration.py:561': '/ jnp.where((jk <= nkB) & (ze3t != 0.0), ze3t, c(1.0)))',
+    'shortwave_penetration.py:647': '/ jnp.where((jk <= nkB) & (ze3t != 0.0), ze3t, c(1.0)))',
     # round 314 namelist audit
     'ORCA2_OMIP_L4/EXP00/namelist_cfg:21': 'nn_itend    =    5840',
     'ORCA2_OMIP_L4/EXP00/namelist_cfg:48': 'ln_tsd_dmp  = .true.',
