@@ -393,6 +393,20 @@ def _compose_nh_moist_physics(model_type: str, dt: float,
             model_type=model_type, dt=dt,
         )
 
+    def _zm_start_state(state):
+        # This driver carries no physics state.  ZM bounds its launch level by
+        # the lagged PBL height; it gets the start-of-run value pblh = 0 every
+        # step (user decision, follow-up row 23).  An empty profile carry keeps the factory's
+        # own zero fallback; cloud fraction stays absent as before.
+        from legoesm.atmosphere.physics.physics_state import PhysicsState
+        shape = state.theta_prime.data.shape
+        ncol = math.prod(shape[:-1])
+        return PhysicsState(
+            tke=None, conv_prog_profile=jnp.zeros((0,)), conv_stoch_state=None,
+            gwd_spectrum=None, prng_key=None, surface_T_sfc_override=None,
+            qke=None, clubb_moments=None, rad_heating=None, col_index=None,
+            pblh=jnp.zeros((ncol,), dtype=state.theta_prime.data.dtype))
+
     def physics_fn(*args, **kwargs):
         # Both factories return tendency callables with identical
         # *pytree shapes* but distinct Field-name metadata. Sum at
@@ -420,7 +434,7 @@ def _compose_nh_moist_physics(model_type: str, dt: float,
                 )
             summed = [a + b for a, b in zip(summed, leaves_s)]
         if conv_fn is not None:
-            t_conv = conv_fn(*args, **kwargs)
+            t_conv = conv_fn(*args, **kwargs, phys_state=_zm_start_state(args[0]))
             leaves_c = jax.tree_util.tree_leaves(t_conv)
             if len(leaves_c) != len(summed):
                 raise ValueError(
