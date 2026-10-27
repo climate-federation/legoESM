@@ -54,8 +54,9 @@ def test_verdict_thresholds():
 
 def test_global_mean_is_cos_weighted():
     m = _mod()
-    x = np.tile(np.where(LAT > 0, 1.0, 0.0)[:, None], (1, 72))
-    assert m.global_mean(x, LAT) == pytest.approx(0.5, rel=1e-12)
+    x = np.tile(np.where(LAT > 60, 1.0, 0.0)[:, None], (1, 72))
+    c = np.cos(np.deg2rad(LAT))
+    assert m.global_mean(x, LAT) == pytest.approx(c[LAT > 60].sum() / c.sum(), rel=1e-12)
 
 
 def test_window_requires_days_1_to_30(tmp_path):
