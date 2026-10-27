@@ -49,6 +49,7 @@ def test_schema_has_every_named_boundary_and_registered_projection() -> None:
 def test_schema_includes_o9_fluxes_o11_inputs_and_o16_boundary() -> None:
     names3 = {field.name for field in gate.KINDS[3].fields}
     assert {field.name for field in gate.DH_FLUXES} <= names3
+    assert {"qcn_ice_top", "qcn_ice_bot", "qtr_ice_bot"}.isdisjoint(names3)
     names8 = {field.name for field in gate.KINDS[8].fields}
     assert {"at_i", "a_i", "h_i", "h_s", "e_i", "e_s", "sz_i", "sst", "t_bo", "sfx_lam", "hfx_thd", "wfx_lam"} <= names8
     assert {field.name for field in gate.KINDS[16].fields} >= {
@@ -73,7 +74,9 @@ def test_every_reviewed_boundary_input_is_recorded() -> None:
     assert {"t_si", "sss_m", "hi_max"} <= names(18)
     assert {"uu_kbb", "vv_kbb", "umask_k1", "vmask_k1", "utau", "vtau", "taum",
             "tmod_io", "utau_oce", "vtau_oce"} <= names(19)
-    assert {"utau", "vtau", "taum", "rCdU_ice"} == names(20)
+    assert {"utau", "vtau", "taum"} == names(20)
+    for kind in range(10, 17):
+        assert {"qt_atm_oi", "qt_oce_ai"}.isdisjoint(names(kind))
     assert names(18) == {field.name for field in gate.STATE} | {"t_si", "sss_m", "hi_max"}
     assert {"rcnd_s", "rn_kappa_i", "rn_kappa_s", "rn_snwblow", "rn_sinew",
             "nn_icesal", "rn_beta", "rn_dmin"} <= set(gate.SCALAR_NAMES)
@@ -90,7 +93,6 @@ def test_every_reviewed_boundary_input_is_recorded() -> None:
     assert extents(16)["fr_i"] == "F2"
     assert extents(19)["utau"] == extents(19)["vtau"] == "F2"
     assert extents(20)["utau"] == extents(20)["vtau"] == "F2"
-    assert extents(20)["rCdU_ice"] == "H1"
     assert "vm_ibr" not in {field.name for field in gate.TOTALS}
     assert {field.name for field in gate.AGG2_DIAGNOSTICS}.isdisjoint(
         {field.name for kind in range(10, 15) for field in gate.KINDS[kind].fields}
@@ -116,14 +118,14 @@ def test_each_rung_reader_accepts_only_its_registered_projection(rung: str) -> N
 
 def test_size_and_retention_are_explicit() -> None:
     report = gate.size_report()
-    assert report["master_bytes_worst_case"] == 141_605_444_460
-    assert report["master_gib_worst_case"] == pytest.approx(131.88034711323678)
+    assert report["master_bytes_worst_case"] == 140_965_556_460
+    assert report["master_gib_worst_case"] == pytest.approx(131.2844049744308)
     assert "without copying" in report["retention"]
 
 
 def test_writer_field_counts_and_real_extent_branches_match_schema() -> None:
     text = (ACQ / "o8_o16_master_writer.F90").read_text()
-    for count in (2, 4, 10, 12, 16, 23, 26, 67, 70, 98, 118):
+    for count in (2, 3, 10, 12, 14, 16, 23, 26, 67, 96, 116):
         assert f",{count},u)" in text
     for spec in gate.KINDS.values():
         names = [field.name for field in spec.fields]
@@ -131,7 +133,7 @@ def test_writer_field_counts_and_real_extent_branches_match_schema() -> None:
     assert "SIZE(a,1)==ni" in text
     assert "SIZE(a,1)==jpi" in text
     assert "ERROR STOP 'O8-O16 I2 extent mismatch'" in text
-    assert "ERROR STOP 'O8-O16 H1 extent mismatch'" in text
+    assert "rCdU_ice" not in text
     assert "ACCESS='stream'" in text
 
 
@@ -163,7 +165,7 @@ def test_source_derived_readsets_cover_every_rung_and_plants_fire() -> None:
         report["rungs"]["O16"]["sources"]
     )
     assert all(row["scalar_coverage"] for row in report["rungs"].values())
-    assert "rCdU_ice" in {field.name for field in gate.KINDS[20].fields}
+    assert "rCdU_ice" not in {field.name for field in gate.KINDS[20].fields}
     for plant in ("drop-sst_m", "drop-qlead", "drop-rn_hinew", "drop-snwice_mass",
                   "drop-nn_snwfra", "drop-rmw-sfx_lam"):
         with pytest.raises(ValueError, match="STATUS PLANT-FIRED"):
@@ -193,6 +195,13 @@ def test_category_entry_observer_follows_every_diagnostic_zero() -> None:
     assert "@@ -146,0 +150,3 @@" in patch
     source = Path("/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/src/ICE/icethd.F90").read_text()
     assert source.index("dh_s_tot  (1:npti) = 0._wp") < source.index("dh_snowice(1:npti) = 0._wp")
+
+
+def test_category_entry_records_only_current_category_values() -> None:
+    report = gate.verify_category_entry_freshness(readset.DEFAULT_PPSRC)
+    assert report["status"] == "PASS_CATEGORY_ENTRY_CURRENT_CATEGORY_ONLY"
+    with pytest.raises(ValueError, match="previous category"):
+        gate.verify_category_entry_freshness(readset.DEFAULT_PPSRC, "previous-category-stale")
 
 
 def test_every_patch_insertion_is_inside_observer_markers() -> None:
@@ -243,9 +252,15 @@ def test_reused_o7_log_gate_accepts_the_preregistered_100_step_window(tmp_path: 
     assert report["o7_production"]["ln_icethd"] is True
     with pytest.raises(ValueError, match="nn_itend is not 2"):
         gate.verify_o7_log(tmp_path / "ocean.output")
-    assert gate.verify_resolved_drag_namelist(tmp_path / "output.namelist.dyn")["ln_drgice_imp"] is True
-    with pytest.raises(ValueError, match="STATUS PLANT-FIRED"):
-        gate.verify_resolved_drag_namelist(tmp_path / "output.namelist.dyn", "drag-disabled")
+    drag = gate.verify_sas_drag_resolution(
+        tmp_path / "output.namelist.dyn", readset.DEFAULT_PPSRC
+    )
+    assert drag["ln_drgice_imp"] is False and drag["zdf_drg_init_reachable"] is False
+    for plant in ("drag-default-true", "drag-init-call", "drag-output-fabricated"):
+        with pytest.raises(ValueError, match="STATUS PLANT-FIRED"):
+            gate.verify_sas_drag_resolution(
+                tmp_path / "output.namelist.dyn", readset.DEFAULT_PPSRC, plant
+            )
 
 
 def test_preflight_compiles_and_runs_real_patched_source_without_nemo(tmp_path: Path) -> None:
@@ -258,7 +273,7 @@ def test_preflight_compiles_and_runs_real_patched_source_without_nemo(tmp_path: 
         [str(ACQ / "run.sh"), "--preflight-only", str(report)], cwd=REPO, env=env,
         text=True, capture_output=True, check=True, timeout=1200,
     )
-    assert json.loads(report.read_text()) == {"status": "PREFLIGHT_OK", "nemo_run": False, "plants": 53}
+    assert json.loads(report.read_text()) == {"status": "PREFLIGHT_OK", "nemo_run": False, "plants": 56}
     assert "PASS_SOURCE_DERIVED_READ_SETS" in proc.stdout
     assert "PASS_REAL_PPSRC_PLACEMENT" in proc.stdout
     assert "PASS_REAL_PATCHED_BOUNDS_FIXTURE" in proc.stdout

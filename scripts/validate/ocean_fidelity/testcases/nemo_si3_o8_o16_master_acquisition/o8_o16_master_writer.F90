@@ -1,6 +1,6 @@
 MODULE o8_o16_master_writer
    USE, INTRINSIC :: iso_fortran_env, ONLY: int32, real64
-   USE par_oce, ONLY: wp, jpi, jpj, nn_hls, ntsi, ntei, ntsj, ntej
+   USE par_oce, ONLY: wp, jpi, jpj, ntsi, ntei, ntsj, ntej
    USE par_ice, ONLY: jpl, nlay_i, nlay_s, rn_kappa_i, rn_kappa_s, rn_snwblow, rn_sinew, &
       &              nn_icesal, r1_nlay_i, r1_nlay_s, rn_simin, rn_himin, nn_snwfra
    USE phycst, ONLY: rcnd_s
@@ -11,7 +11,7 @@ MODULE o8_o16_master_writer
       &               sss_m, sst_m, cloud_fra, sprecip, tprecip, utau, vtau, taum
    USE sbc_ice, ONLY: qsr_oce, qns_oce, qemp_oce, qemp_ice, emp_oce, emp_ice, qsr_ice, qns_ice, qevap_ice, &
       &               qcn_ice, qml_ice, qtr_ice_top, tn_ice, alb_ice, &
-      &               snwice_mass, snwice_mass_b, snwice_fmass, rCdU_ice, utau_ice, vtau_ice
+      &               snwice_mass, snwice_mass_b, snwice_fmass, utau_ice, vtau_ice
    IMPLICIT NONE
    PRIVATE
    PUBLIC :: o8o16_set_context, o8o16_frazil, o8o16_category, o8o16_picard
@@ -173,14 +173,6 @@ CONTAINS
       WRITE(u) a
    END SUBROUTINE put_f2
 
-   SUBROUTINE put_h1(u,a)
-      INTEGER,INTENT(in)::u
-      REAL(wp),DIMENSION(:,:),INTENT(in)::a
-      IF(SIZE(a,1)/=jpi-2*nn_hls+2 .OR. SIZE(a,2)/=jpj-2*nn_hls+2) &
-         ERROR STOP 'O8-O16 H1 extent mismatch'
-      WRITE(u) a
-   END SUBROUTINE put_h1
-
    SUBROUTINE put_i3(u,a)
       INTEGER,INTENT(in)::u
       REAL(wp),DIMENSION(:,:,:),INTENT(in)::a
@@ -331,8 +323,7 @@ CONTAINS
       IF(PRESENT(rn_dmin)) current_dmin=rn_dmin
       SELECT CASE(kind)
       CASE(3)
-         CALL open_record(kind,record_jl,npti,70,u); CALL put_idx(u); CALL put_cat_base(u); CALL put_dh(u); CALL put_dh_fluxes(u)
-         CALL put_g1(u,qcn_ice_top_1d); CALL put_g1(u,qcn_ice_bot_1d); CALL put_g1(u,qtr_ice_bot_1d)
+         CALL open_record(kind,record_jl,npti,67,u); CALL put_idx(u); CALL put_cat_base(u); CALL put_dh(u); CALL put_dh_fluxes(u)
       CASE(5,6,7,8,9)
          CALL open_record(kind,record_jl,npti,67,u); CALL put_idx(u); CALL put_cat_base(u); CALL put_dh(u); CALL put_dh_fluxes(u)
       CASE(4)
@@ -429,7 +420,7 @@ CONTAINS
       CALL put_i2(u,hfx_snw); CALL put_i2(u,hfx_err_dif); CALL put_i2(u,hfx_sub)
       CALL put_i2(u,hfx_spr); CALL put_i2(u,hfx_thd); CALL put_i2(u,hfx_dyn)
       CALL put_i2(u,hfx_res); CALL put_i2(u,qlead); CALL put_i2(u,qsb_ice_bot)
-      CALL put_i2(u,fhld); CALL put_i2(u,qt_atm_oi); CALL put_i2(u,qt_oce_ai)
+      CALL put_i2(u,fhld)
    END SUBROUTINE put_flux
 
    SUBROUTINE o8o16_global(kind)
@@ -438,7 +429,7 @@ CONTAINS
       IF(kind==21) THEN
          CALL open_record(kind,0,0,23,u); CALL put_state(u)
       ELSEIF(kind>=10 .AND. kind<=14) THEN
-         CALL open_record(kind,0,0,98,u); CALL put_state(u); CALL put_pre_agg_totals(u); CALL put_pond(u); CALL put_flux(u)
+         CALL open_record(kind,0,0,96,u); CALL put_state(u); CALL put_pre_agg_totals(u); CALL put_pond(u); CALL put_flux(u)
          CALL put_global_aux(u); CALL put_pond_forcing(u)
       ELSE
          ERROR STOP 'O9/O12-O15 global kind'
@@ -453,7 +444,7 @@ CONTAINS
          CALL open_record(kind,0,0,26,u); CALL put_state(u)
          CALL put_i3(u,t_si); CALL put_i2(u,sss_m); CALL put_c0(u,hi_max)
       ELSEIF(kind==15) THEN
-         CALL open_record(kind,0,0,118,u); CALL put_state(u); CALL put_totals(u); CALL put_flux(u)
+         CALL open_record(kind,0,0,116,u); CALL put_state(u); CALL put_totals(u); CALL put_flux(u)
          CALL put_i2(u,qsr_oce); CALL put_i2(u,qns_oce); CALL put_i2(u,qemp_oce); CALL put_i2(u,qemp_ice)
          CALL put_i2(u,emp_oce); CALL put_i2(u,emp_ice); CALL put_i2(u,qns_tot)
          CALL put_i2(u,qsr_tot); CALL put_i2(u,frq_m); CALL put_i3(u,a_i_b)
@@ -465,9 +456,9 @@ CONTAINS
          CALL put_i2(u,cloud_fra); CALL put_f2(u,tmask(:,:,1)); CALL put_i2(u,smask0)
          CALL put_f2(u,snwice_mass); CALL put_f2(u,snwice_mass_b)
       ELSEIF(kind==16) THEN
-         CALL open_record(kind,0,0,16,u)
+         CALL open_record(kind,0,0,14,u)
          CALL put_i2(u,qsr); CALL put_i2(u,qns); CALL put_i2(u,emp); CALL put_i2(u,sfx)
-         CALL put_i2(u,fwfice); CALL put_i2(u,qt_atm_oi); CALL put_i2(u,qt_oce_ai)
+         CALL put_i2(u,fwfice)
          CALL put_i2(u,wfx_ice); CALL put_i2(u,wfx_snw); CALL put_i2(u,wfx_pnd)
          CALL put_f2(u,fr_i)
          CALL put_i3(u,tn_ice); CALL put_i3(u,alb_ice)
@@ -491,8 +482,8 @@ CONTAINS
          CALL put_f2(u,utau); CALL put_f2(u,vtau); CALL put_i2(u,taum)
          CALL put_i2(u,putau_oce); CALL put_i2(u,pvtau_oce)
       ELSEIF(kind==20) THEN
-         CALL open_record(kind,0,0,4,u)
-         CALL put_f2(u,utau); CALL put_f2(u,vtau); CALL put_i2(u,taum); CALL put_h1(u,rCdU_ice)
+         CALL open_record(kind,0,0,3,u)
+         CALL put_f2(u,utau); CALL put_f2(u,vtau); CALL put_i2(u,taum)
       ELSE
          ERROR STOP 'O16 tau kind'
       ENDIF

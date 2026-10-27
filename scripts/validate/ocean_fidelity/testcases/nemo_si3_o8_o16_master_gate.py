@@ -121,7 +121,7 @@ FLUX = _fields(
     "wfx_lam wfx_res wfx_err_sub sfx_bog sfx_bom sfx_lam sfx_sum sfx_sni "
     "sfx_opw sfx_bri sfx_dyn sfx_res sfx_sub hfx_bog hfx_bom hfx_sum hfx_opw "
     "hfx_dif hfx_snw hfx_err_dif hfx_sub hfx_spr hfx_thd hfx_dyn hfx_res "
-    "qlead qsb_ice_bot fhld qt_atm_oi qt_oce_ai",
+    "qlead qsb_ice_bot fhld",
     "I2",
 )
 
@@ -142,8 +142,8 @@ KINDS: dict[int, Kind] = {
     ),
     2: Kind("frazil_exit", _fields("ht_i_new fraz_frac", "I2")),
     3: Kind(
-        "category_entry", _fields("nptidx", "G1", "i4") + CAT_BASE + DH_DIAGS + DH_FLUXES
-        + _fields("qcn_ice_top qcn_ice_bot qtr_ice_bot", "G1"), True,
+        "category_entry", _fields("nptidx", "G1", "i4") + CAT_BASE + DH_DIAGS + DH_FLUXES,
+        True,
     ),
     4: Kind(
         "zdf_exit",
@@ -182,7 +182,7 @@ KINDS: dict[int, Kind] = {
     16: Kind(
         "update_flx_exit_ocean_boundary",
         _fields(
-            "qsr qns emp sfx fwfice qt_atm_oi qt_oce_ai wfx_ice wfx_snw wfx_pnd",
+            "qsr qns emp sfx fwfice wfx_ice wfx_snw wfx_pnd",
             "I2",
         )
         + _fields("fr_i", "F2")
@@ -223,7 +223,7 @@ KINDS[19] = Kind(
     _fields("uu_kbb vv_kbb umask_k1 vmask_k1 u_ice v_ice u_oce v_oce drag_io at_i utau vtau tmod_io", "F2")
     + _fields("taum utau_oce vtau_oce", "I2"),
 )
-KINDS[20] = Kind("tau_exit", _fields("utau vtau", "F2") + _fields("taum", "I2") + _fields("rCdU_ice", "H1"))
+KINDS[20] = Kind("tau_exit", _fields("utau vtau", "F2") + _fields("taum", "I2"))
 KINDS[21] = Kind("pre_category_state", STATE)
 
 PROJECTIONS: dict[str, tuple[int, ...]] = {
@@ -243,20 +243,129 @@ def _refuse(message: str) -> ValueError:
     return ValueError(f"STATUS PLANT-FIRED: {message}")
 
 
-def verify_resolved_drag_namelist(path: Path, plant: str | None = None) -> dict[str, Any]:
-    """Require the resolved NEMO dynamics namelist to enable ice drag filling."""
+def _sas_call_graph(ppsrc: Path) -> dict[str, set[str]]:
+    """Build a conservative procedure-name call graph from the real SAS ppsrc."""
+    graph: dict[str, set[str]] = {}
+    begin = re.compile(
+        r"^\s*(?:[a-z][\w(),=* ]*\s+)?(?:subroutine|function)\s+([a-z]\w*)", re.I
+    )
+    end = re.compile(r"^\s*end\s+(?:subroutine|function)\b", re.I)
+    for path in sorted(ppsrc.glob("*.f90")):
+        current = ""
+        for raw in path.read_text(errors="replace").splitlines():
+            code = raw.split("!", 1)[0]
+            match = begin.match(code)
+            if match:
+                current = match.group(1).lower()
+                graph.setdefault(current, set())
+                continue
+            if current and end.match(code):
+                current = ""
+                continue
+            if current:
+                graph[current].update(
+                    value.lower() for value in re.findall(r"\bcall\s+([a-z]\w*)", code, re.I)
+                )
+    return graph
+
+
+def verify_sas_drag_resolution(
+    output_namelist: Path, ppsrc: Path, plant: str | None = None
+) -> dict[str, Any]:
+    """Resolve the SAS ice-drag branch from executed source, not an unwritten namelist."""
+    if not output_namelist.is_file():
+        raise _refuse(f"missing resolved dynamics namelist: {output_namelist}")
+    zdfdrg = ppsrc / "zdfdrg.f90"
+    if not zdfdrg.is_file():
+        raise _refuse(f"missing real SAS ppsrc: {zdfdrg}")
+    source = zdfdrg.read_text(errors="replace")
+    defaults = re.findall(
+        r"\bln_drgice_imp\s*=\s*(\.true\.|\.false\.)", source, flags=re.I
+    )
+    if plant == "drag-default-true":
+        defaults = [".TRUE."]
+    if not defaults or defaults[0].lower() != ".false.":
+        raise _refuse("zdfdrg does not initialize ln_drgice_imp to .FALSE.")
+
+    graph = _sas_call_graph(ppsrc)
+    if "nemo_gcm" not in graph or "zdf_drg_init" not in graph:
+        raise _refuse("SAS call-tree endpoints are absent from real ppsrc")
+    if plant == "drag-init-call":
+        graph.setdefault("nemo_init", set()).add("zdf_drg_init")
+    reachable: set[str] = set()
+    pending = ["nemo_gcm"]
+    while pending:
+        routine = pending.pop()
+        if routine in reachable:
+            continue
+        reachable.add(routine)
+        pending.extend(graph.get(routine, ()))
+    if "zdf_drg_init" in reachable:
+        raise _refuse("SAS call tree reaches zdf_drg_init; module default is not the executed value")
+
+    text = "\n".join(
+        line.split("!", 1)[0] for line in output_namelist.read_text(errors="replace").splitlines()
+    )
+    if plant == "drag-output-fabricated":
+        text += "\n&namdrg\n ln_drgice_imp=.true.\n/\n"
+    if re.search(r"^\s*&namdrg\b|\bln_drgice_imp\s*=", text, flags=re.I | re.M):
+        raise _refuse(f"SAS unexpectedly wrote a resolved namdrg value in {output_namelist}")
+    return {
+        "status": "PASS_SAS_DEFAULT_LN_DRGICE_IMP_FALSE",
+        "path": str(output_namelist),
+        "ppsrc": str(ppsrc),
+        "ln_drgice_imp": False,
+        "zdf_drg_init_reachable": False,
+        "reachable_procedures": len(reachable),
+    }
+
+
+def verify_category_entry_freshness(ppsrc: Path, plant: str | None = None) -> dict[str, Any]:
+    """Require every kind-3 category value to be filled for the current category."""
+    path = ppsrc / "icethd.f90"
     if not path.is_file():
-        raise _refuse(f"missing resolved dynamics namelist: {path}")
-    text = "\n".join(line.split("!", 1)[0] for line in path.read_text().splitlines())
-    values = re.findall(r"\bln_drgice_imp\s*=\s*([^,\s/]+)", text, flags=re.I)
-    if plant == "drag-disabled":
-        values = [".false."]
-    if not values:
-        raise _refuse(f"ln_drgice_imp is absent from {path}")
-    resolved = values[-1].strip().lower()
-    if resolved not in {".true.", "true", "t"}:
-        raise _refuse(f"resolved ln_drgice_imp is not true in {path}: {resolved}")
-    return {"status": "PASS_RESOLVED_LN_DRGICE_IMP", "path": str(path), "ln_drgice_imp": True}
+        raise _refuse(f"missing real SAS ppsrc: {path}")
+    text = path.read_text(errors="replace")
+    routine = re.search(
+        r"\bSUBROUTINE\s+ice_thd_1d2d\b([\s\S]*?)\bEND\s+SUBROUTINE\s+ice_thd_1d2d\b",
+        text,
+        flags=re.I,
+    )
+    if not routine:
+        raise _refuse("cannot locate ice_thd_1d2d in real ppsrc")
+    case1 = re.search(r"\bCASE\s*\(\s*1\s*\)([\s\S]*?)\bCASE\s*\(\s*2\s*\)", routine.group(1), re.I)
+    if not case1:
+        raise _refuse("cannot locate ice_thd_1d2d case 1")
+    block = case1.group(1)
+    fresh = {
+        match.lower()
+        for match in re.findall(
+            r"\bCALL\s+tab_2d_1d\s*\([^,]+,[^,]+,\s*([a-z]\w*)", block, re.I
+        )
+    }
+    fresh.update(
+        match.lower()
+        for match in re.findall(r"^\s*([a-z]\w*_1d)\s*(?:\([^=\n]*\))?\s*=", block, re.I | re.M)
+    )
+    current = {field.name for field in KINDS[3].fields if field.name != "nptidx"}
+    if plant == "previous-category-stale":
+        current.add("qcn_ice_top")
+    zeroed = {field.name for field in DH_DIAGS}
+    missing = sorted(name for name in current - zeroed if f"{name}_1d" not in fresh)
+    zero_missing = sorted(
+        name for name in zeroed if not re.search(rf"\b{re.escape(name)}\s*\(1:npti\)\s*=\s*0\._wp", text, re.I)
+    )
+    if missing or zero_missing:
+        raise _refuse(
+            f"category-entry fields can retain a previous category: missing={missing}, "
+            f"not_zeroed={zero_missing}"
+        )
+    return {
+        "status": "PASS_CATEGORY_ENTRY_CURRENT_CATEGORY_ONLY",
+        "fields": len(current),
+        "fresh_1d": sorted(fresh),
+        "zeroed": sorted(zeroed),
+    }
 
 
 def _shape(field: Field, meta: dict[str, int]) -> tuple[int, ...]:
@@ -600,8 +709,9 @@ def admit(root: Path, producer: str | None = None) -> dict[str, Any]:
         root / "record_100step", "record_100step", expect_icedyn=True, expect_icethd=True
     )
     verify_o7_log(root / "record_100step/ocean.output", expected_nn_itend=100)
-    verify_resolved_drag_namelist(root / "reference_100step/output.namelist.dyn")
-    verify_resolved_drag_namelist(root / "record_100step/output.namelist.dyn")
+    sas_ppsrc = DEFAULT_NEMO_ROOT / "cfgs/ORCA2_SAS_ICE_O7_REF/BLD/ppsrc/nemo"
+    verify_sas_drag_resolution(root / "reference_100step/output.namelist.dyn", sas_ppsrc)
+    verify_sas_drag_resolution(root / "record_100step/output.namelist.dyn", sas_ppsrc)
     for rung in PROJECTIONS:
         result = projection_from_directory(root / "record_100step/o8_o16_master_records", rung)
         retained = root / f"manifest/per_rung/{rung}.json"
@@ -708,11 +818,13 @@ def main(argv: list[str] | None = None) -> int:
     action.add_argument("--admit-existing", type=Path)
     action.add_argument("--same-program", type=Path, metavar="NEW_BLD")
     action.add_argument("--write-stub-records", type=Path)
-    action.add_argument("--verify-drag-namelist", type=Path)
+    action.add_argument("--verify-sas-drag", type=Path, metavar="OUTPUT_NAMELIST_DYN")
+    action.add_argument("--verify-category-freshness", action="store_true")
     parser.add_argument("--records", type=Path)
     parser.add_argument("--plant")
     parser.add_argument("--producer")
     parser.add_argument("--nemo-root", type=Path, default=DEFAULT_NEMO_ROOT)
+    parser.add_argument("--ppsrc", type=Path)
     parser.add_argument("--reference-bld", type=Path)
     parser.add_argument("--patch-dir", type=Path)
     parser.add_argument("--expected-ppsrc-dir", type=Path)
@@ -749,8 +861,14 @@ def main(argv: list[str] | None = None) -> int:
             )
         elif args.write_stub_records:
             result = write_stub_records(args.write_stub_records)
-        elif args.verify_drag_namelist:
-            result = verify_resolved_drag_namelist(args.verify_drag_namelist, args.plant)
+        elif args.verify_sas_drag:
+            if args.ppsrc is None:
+                raise _refuse("--verify-sas-drag requires --ppsrc")
+            result = verify_sas_drag_resolution(args.verify_sas_drag, args.ppsrc, args.plant)
+        elif args.verify_category_freshness:
+            if args.ppsrc is None:
+                raise _refuse("--verify-category-freshness requires --ppsrc")
+            result = verify_category_entry_freshness(args.ppsrc, args.plant)
         else:
             result = admit(args.admit_existing, args.producer)
         result["sas_time_level"] = derive_sas_time_level(args.nemo_root)

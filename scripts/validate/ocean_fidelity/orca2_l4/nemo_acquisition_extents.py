@@ -322,7 +322,7 @@ def validate_writer(
     checked = []
     for mode, actual in writer_put_calls(writer):
         expression = aliases.get(actual.lower(), actual)
-        effective_mode = "f2" if plant == "writer-mode" and actual.lower() == "rcdu_ice" else mode
+        effective_mode = "f2" if plant == "writer-mode" and actual.lower() == "qlead" else mode
         shape = _actual_shape(expression, catalog, deck)
         if not _mode_accepts(effective_mode, shape, deck):
             raise ExtentError(

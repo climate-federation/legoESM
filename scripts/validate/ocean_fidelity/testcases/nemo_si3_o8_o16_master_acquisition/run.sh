@@ -11,6 +11,8 @@ readonly NEMO_ROOT=${NEMO_ROOT:-/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2}
 readonly NEMO_SOURCE_ROOT=${NEMO_SOURCE_ROOT:-/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2}
 readonly SOURCE_CFG=ORCA2_SAS_ICE
 readonly BASE_BLD=${BASE_BLD:-$NEMO_ROOT/cfgs/ORCA2_SAS_ICE_O7_REF/BLD}
+readonly SAS_PPSRC=$BASE_BLD/ppsrc/nemo
+readonly REAL_SAS_FIXTURE=${O8O16_REAL_SAS_FIXTURE:-/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/round13/refused/oracle_o7_orca2_sas_ice_20261025T172428Z_rc2_3061284}
 readonly REF_CFG=${REF_CFG:-ORCA2_SAS_ICE_O8O16_REF}
 readonly REC_CFG=${REC_CFG:-ORCA2_SAS_ICE_O8O16_REC}
 readonly EVIDENCE_ROOT=${EVIDENCE_ROOT:-/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/round18}
@@ -44,7 +46,7 @@ readonly REC_ROOT=$NEMO_ROOT/cfgs/$REC_CFG
 readonly UNITS=(icestp icethd icethd_do icethd_da icethd_sal icethd_pnd icethd_zdf_bl99 icealb iceupdate)
 readonly MASTER_BYTES=$($PY "$GATE" --size | $PY -c 'import json,sys; print(json.load(sys.stdin)["master_bytes_worst_case"])')
 readonly MASTER_GIB=$($PY "$GATE" --size | $PY -c 'import json,sys; print("%.2f" % json.load(sys.stdin)["master_gib_worst_case"])')
-export O8O16_GATE=$GATE O8O16_PY=$PY
+export O8O16_GATE=$GATE O8O16_PY=$PY O8O16_REAL_SAS_FIXTURE=$REAL_SAS_FIXTURE
 
 mode=${1:---preflight-only}; arg=${2:-}
 case "$mode" in
@@ -299,7 +301,10 @@ assert k15['scalars']['rn_alb_sdry']==0.85 and k15['scalars']['rn_alb_hpiv']==1.
 k13=next(r for r in records if r['meta']['kind']==13)
 assert np.all(k13['fields']['sst_m']==714.5)
 k20=next(r for r in records if r['meta']['kind']==20)
-assert np.all(k20['fields']['rCdU_ice']==738.0)
+assert set(k20['fields']) == {'utau','vtau','taum'}
+assert all(name not in k20['fields'] for name in ('rCdU_ice','qt_atm_oi','qt_oce_ai'))
+k3=next(r for r in records if r['meta']['kind']==3)
+assert all(name not in k3['fields'] for name in ('qcn_ice_top','qcn_ice_bot','qtr_ice_bot'))
 print('PASS_REAL_PATCHED_WRITER_LAYOUT')
 PY
 }
@@ -364,8 +369,11 @@ stub_driver_fixture() {
   awk '{print} /O8O16_DRIVER_TRUNCATION_POINT/ {exit}' "$0" > "$scratch/run_truncated.sh"
   expect_refusal bash -n "$scratch/run_truncated.sh"
   "${envs[@]}" EVIDENCE="$evidence" "$0" --run
-  expect_refusal "$PY" "$GATE" --verify-drag-namelist \
-    "$evidence/record_100step/output.namelist.dyn" --plant drag-disabled
+  cmp -s "$REAL_SAS_FIXTURE/record_2step/output.namelist.dyn" \
+    "$evidence/record_100step/output.namelist.dyn" \
+    || refuse 'stub did not copy the admitted real SAS output.namelist.dyn'
+  "$PY" "$GATE" --verify-sas-drag "$evidence/record_100step/output.namelist.dyn" \
+    --ppsrc "$SAS_PPSRC" >/dev/null
   "${envs[@]}" EVIDENCE="$evidence" "$0" --admit-existing
   expect_refusal "${envs[@]}" EVIDENCE="$evidence" "$0" --run
   "${envs[@]}" "$0" --move-aside-builds
@@ -401,6 +409,9 @@ run_preflight() {
   expect_refusal "$PY" "$READSET" --ppsrc "$BASE_BLD/ppsrc/nemo" --plant drop-snwice_mass
   expect_refusal "$PY" "$READSET" --ppsrc "$BASE_BLD/ppsrc/nemo" --plant drop-nn_snwfra
   expect_refusal "$PY" "$READSET" --ppsrc "$BASE_BLD/ppsrc/nemo" --plant drop-rmw-sfx_lam
+  "$PY" "$GATE" --verify-category-freshness --ppsrc "$SAS_PPSRC" > "$scratch/category_freshness.json"
+  expect_refusal "$PY" "$GATE" --verify-category-freshness --ppsrc "$SAS_PPSRC" \
+    --plant previous-category-stale
   printf 'PASS_SOURCE_DERIVED_READ_SETS\n'
   for rung in O8 O9 O10 O11 O12 O13 O14 O15 O16; do
     "$PY" "$GATE" --projection-self-test "$rung" >/dev/null
@@ -429,10 +440,15 @@ run_preflight() {
   compile_real_bounds_fixture "$scratch"
   printf 'PREFLIGHT 7/10 observer-free same-program comparison and plant\n'
   same_program_fixture "$scratch"
-  printf 'PREFLIGHT 8/10 source-derived SAS time level and allocation extent evidence\n'
+  printf 'PREFLIGHT 8/10 source-derived SAS time level, drag default/call tree and allocation evidence\n'
   grep -q '"sas_time_level": 2' "$scratch/self.json"
   grep -q '"rCdU_ice_shape": \[' "$scratch/extents.json"
-  grep -q "O8-O16 H1 extent mismatch" "$WRITER"
+  "$PY" "$GATE" --verify-sas-drag "$REAL_SAS_FIXTURE/record_2step/output.namelist.dyn" \
+    --ppsrc "$SAS_PPSRC" > "$scratch/sas_drag.json"
+  for plant in drag-default-true drag-init-call drag-output-fabricated; do
+    expect_refusal "$PY" "$GATE" --verify-sas-drag \
+      "$REAL_SAS_FIXTURE/record_2step/output.namelist.dyn" --ppsrc "$SAS_PPSRC" --plant "$plant"
+  done
   printf 'PREFLIGHT 9/10 memory/disk and global wall-clock gate logic\n'
   ram_gate 1; disk_gate "$EVIDENCE" 1024
   grep -q 'remaining_timeout' "$0"
@@ -444,7 +460,7 @@ run_preflight() {
   else
     printf 'PASS_EXISTING_CFG_DIGESTS_UNCHANGED: delegated to outer preflight\n'
   fi
-  if [[ -n "${PREFLIGHT_JSON:-}" ]]; then printf '{"status":"PREFLIGHT_OK","nemo_run":false,"plants":53}\n' > "$PREFLIGHT_JSON"; fi
+  if [[ -n "${PREFLIGHT_JSON:-}" ]]; then printf '{"status":"PREFLIGHT_OK","nemo_run":false,"plants":56}\n' > "$PREFLIGHT_JSON"; fi
   printf 'PREFLIGHT_OK: no real NEMO integration was run; worst-case master %s bytes (%s GiB)\n' "$MASTER_BYTES" "$MASTER_GIB"
   rm -rf -- "$scratch"; ACTIVE_SCRATCH=""
 }
@@ -549,7 +565,7 @@ nemo=Path('/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/ORCA2_SAS_ICE_O7_R
 manifest={
  'producer_commit':commit,'binary_sha256':{'reference':sha(ev/'manifest/binaries/nemo.ref'),'record':sha(ev/'manifest/binaries/nemo.rec')},
  'source_sha256':{str(p.relative_to(repo)):sha(p) for p in sources},
- 'nemo_source_sha256':{unit:sha(nemo/f'{unit}.f90') for unit in ('icestp','icethd','icethd_do','icethd_da','icethd_sal','icethd_pnd','icethd_zdf_bl99','icealb','iceupdate')},
+ 'nemo_source_sha256':{unit:sha(nemo/f'{unit}.f90') for unit in ('nemogcm','zdfdrg','icestp','icethd','icethd_do','icethd_da','icethd_sal','icethd_pnd','icethd_zdf_bl99','icealb','iceupdate')},
  'deck_sha256':{p.name:sha(p) for p in sorted(deck.iterdir())},
  'forcing_disposition':'O7_EXACT_PRODUCTS_TO_O8_O16',
  'dynamics_disposition':'PRODUCTION_DECK_ON_EXCLUDED_FROM_PROJECTIONS',
@@ -577,7 +593,7 @@ stage_run() {
   local remaining; remaining=$(remaining_timeout)
   (cd "$dir" && printf 'RUN_STARTED\n' > run.user.time.log && timeout "$remaining" mpirun -np 1 --oversubscribe ./nemo > run.user.stdout.log 2>&1 && printf 'MPIRUN_RC=0\nRUN DONE\n' >> run.user.time.log)
   ! grep -Eiq 'E[[:space:]]+R[[:space:]]+R[[:space:]]+O[[:space:]]+R|ABORT' "$dir/ocean.output" "$dir/run.user.stdout.log" || refuse "fatal token in $dir"
-  "$PY" "$GATE" --verify-drag-namelist "$dir/output.namelist.dyn" >/dev/null
+  "$PY" "$GATE" --verify-sas-drag "$dir/output.namelist.dyn" --ppsrc "$SAS_PPSRC" >/dev/null
   touch "$dir/RUN_COMPLETE"
 }
 

@@ -55,6 +55,21 @@ ENTRY_KINDS: dict[str, tuple[int, ...]] = {
 
 HEADER_REQUIRED_SCALARS = {"nn_snwfra"}
 
+# These O9 values are outputs of the stage, not boundary inputs.  In
+# ice_thd_zdf_bl99 each is assigned for the active category before any later
+# consumption.  They must not be copied from the previous category at kind 3.
+STAGE_LOCAL_FILLS: dict[str, dict[str, tuple[str, str]]] = {
+    "O9": {
+        "qtr_ice_bot": ("ice_thd_zdf_bl99", "qtr_ice_bot_1d"),
+        "qcn_ice_bot": ("ice_thd_zdf_bl99", "qcn_ice_bot_1d"),
+        "qcn_ice_top": ("ice_thd_zdf_bl99", "qcn_ice_top_1d"),
+    },
+    "O16": {
+        "qt_atm_oi": ("ice_update_flx", "qt_atm_oi"),
+        "qt_oce_ai": ("ice_update_flx", "qt_oce_ai"),
+    },
+}
+
 # These arrays belong to diagnostics, bounds, or the observer's own sparse
 # gather machinery.  They do not enter the replayed numerical stage.
 NON_REPLAY_ARRAYS = {
@@ -384,6 +399,19 @@ def derive_and_gate(ppsrc: Path = DEFAULT_PPSRC, plant: str | None = None) -> di
             name for name in reads
             if name not in NON_REPLAY_ARRAYS and not name.startswith(("diag_", "rdiag_"))
         }
+        stage_local_fills: dict[str, str] = {}
+        for name, (producer_name, source_name) in STAGE_LOCAL_FILLS.get(rung, {}).items():
+            producer = routines[producer_name]
+            assigned = any(
+                re.search(rf"^\s*{re.escape(source_name)}\s*\([^=]*\)\s*=", statement, re.I)
+                for statement in producer.statements
+            )
+            if not assigned:
+                raise ValueError(
+                    f"STATUS PLANT-FIRED: {rung} lost stage-local fill for {name}"
+                )
+            stage_local_fills[name] = f"{producer.source}:{producer_name}"
+        reads.difference_update(stage_local_fills)
         covered: set[str] = set()
         for kind in ENTRY_KINDS[rung]:
             fields = gate.KINDS[kind].fields
@@ -396,6 +424,7 @@ def derive_and_gate(ppsrc: Path = DEFAULT_PPSRC, plant: str | None = None) -> di
             name for name in scalar_reads - reads - covered
             if not name.startswith(("diag_", "rdiag_"))
         }
+        scalar_reads.difference_update(stage_local_fills)
         if plant == "drop-sst_m":
             covered.discard("sst_m")
         elif plant == "drop-qlead":
@@ -429,6 +458,7 @@ def derive_and_gate(ppsrc: Path = DEFAULT_PPSRC, plant: str | None = None) -> di
             "scalar_reads": sorted(scalar_reads), "scalar_coverage": scalar_coverage,
             "entry_kinds": list(ENTRY_KINDS[rung]),
             "boundary_kinds": list(gate.PROJECTIONS[rung]), "coverage": sorted(covered),
+            "stage_local_fills": stage_local_fills,
         }
     if "sst_m" not in rows["O15"]["array_reads"]:
         raise ValueError("STATUS PLANT-FIRED: O15 mechanical read-set lost sst_m")
