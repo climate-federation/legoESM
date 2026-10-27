@@ -91,6 +91,9 @@ TWIN_B_NAME = "orca2_k0_year1_b_np2"
 DEFAULT_EVIDENCE_DIR = Path(
     "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/orca2_r342"
 )
+REAL_ARM_A_LOGS_DIR = (
+    REPO_ROOT / "tests" / "ocean" / "fidelity" / "data" / "orca2_round342_arm_a_real_logs"
+)
 
 YEAR_STEPS = 2920
 DAILY_STOCK_STRIDE = 8
@@ -140,6 +143,14 @@ def _tool_bin(name: str) -> str:
         if candidate.is_file():
             return str(candidate)
     return name
+
+
+def _tool_env() -> dict[str, str]:
+    env = dict(os.environ)
+    extra = ":".join(str(p) for p in NEMO_BUILD_BINS if p.is_dir())
+    if extra:
+        env["PATH"] = f"{extra}:{env.get('PATH', '')}"
+    return env
 
 
 def _scratch_root() -> Path:
@@ -841,6 +852,7 @@ end program test_r342_restart_fixture
         comp = subprocess.run(
             [_tool_bin("gfortran"), "-fdefault-real-8", "-fcheck=bounds", "-g", "-O0",
              str(src_path), "-o", str(bin_path)],
+            env=_tool_env(),
             capture_output=True,
             text=True,
             check=False,
@@ -921,7 +933,7 @@ def verify_real_flag_fp_census(
             "-o",
             str(recompiled_obj),
         ]
-        res = subprocess.run(cmd, capture_output=True, text=True, check=False)
+        res = subprocess.run(cmd, env=_tool_env(), capture_output=True, text=True, check=False)
         require(res.returncode == 0,
                 f"real-flag recompile of restart.f90 failed: {res.stderr}")
         recomp_c = common.fp_instruction_census(recompiled_obj)
@@ -960,7 +972,7 @@ def plant_fp_drift(reference_bld: Path) -> dict[str, Any]:
             "-o",
             str(planted_obj),
         ]
-        res = subprocess.run(cmd, capture_output=True, text=True, check=False)
+        res = subprocess.run(cmd, env=_tool_env(), capture_output=True, text=True, check=False)
         require(res.returncode == 0,
                 f"plant_fp_drift compilation failed: {res.stderr}")
         caught = False
@@ -1092,16 +1104,212 @@ def verify_day1_against_admitted_s4_kt9(
     return summary
 
 
+def verify_nemo_completion_signal(
+    run_dir: Path,
+    *,
+    expected_steps: int | None = None,
+) -> dict[str, Any]:
+    """Verify NEMO's real completion signal under gfortran (Checklist 8 & 16).
+
+    In `nemogcm.f90:236-240`, rank 0 (`lwm`) terminates with `STOP 0` when
+    `nstop == 0` (else `STOP 123`), which gfortran writes to `stderr`
+    (`mpirun.stderr.log`). In `stpctl.f90:106-107,159-162`, rank 0 writes the
+    completed step index `kt` to `time.step` (`WRITE(numstp, '(1x, i8)') kt`).
+    Completion therefore requires:
+      1. `STOP 0` on `stderr` (`mpirun.stderr.log`), with no `STOP [1-9]` or `E R R O R`;
+      2. `int(time.step) == nn_itend` (and `== expected_steps` when specified);
+      3. no `"E R R O R"` or nonzero `STOP` in `ocean.output` (or `mpirun.stdout.log`).
+    """
+    namelist_cfg = run_dir / "namelist_cfg"
+    require(namelist_cfg.is_file(), f"{run_dir.name}: missing namelist_cfg")
+    nn_itend, nn_stock = parse_namelist_itend_stock(namelist_cfg)
+    if expected_steps is not None:
+        require(
+            nn_itend == expected_steps and nn_stock == DAILY_STOCK_STRIDE,
+            f"{run_dir.name}: namelist_cfg (nn_itend={nn_itend}, nn_stock={nn_stock}) "
+            f"!= ({expected_steps}, {DAILY_STOCK_STRIDE})",
+        )
+
+    stderr_path = run_dir / "mpirun.stderr.log"
+    require(stderr_path.is_file(), f"{run_dir.name}: missing mpirun.stderr.log")
+    stderr_text = stderr_path.read_text(encoding="utf-8", errors="replace")
+    require(
+        "E R R O R" not in stderr_text
+        and re.search(r"\bSTOP\s+[1-9][0-9]*\b", stderr_text) is None,
+        f"{run_dir.name}: mpirun.stderr.log contains runtime error or nonzero STOP",
+    )
+    require(
+        re.search(r"(^|\s)STOP 0(\s|$)", stderr_text) is not None,
+        f"{run_dir.name}: mpirun.stderr.log lacks clean STOP 0",
+    )
+    stderr_nonempty = [ln.strip() for ln in stderr_text.splitlines() if ln.strip()]
+    require(
+        bool(stderr_nonempty) and stderr_nonempty[-1] == "STOP 0",
+        f"{run_dir.name}: mpirun.stderr.log does not end with 'STOP 0' (last={stderr_nonempty[-1] if stderr_nonempty else None!r})",
+    )
+
+    stdout_path = run_dir / "mpirun.stdout.log"
+    stdout_bytes = 0
+    if stdout_path.is_file():
+        stdout_text = stdout_path.read_text(encoding="utf-8", errors="replace")
+        stdout_bytes = stdout_path.stat().st_size
+        require(
+            "E R R O R" not in stdout_text
+            and re.search(r"\bSTOP\s+[1-9][0-9]*\b", stdout_text) is None,
+            f"{run_dir.name}: mpirun.stdout.log contains runtime error marker",
+        )
+
+    timestep_path = run_dir / "time.step"
+    require(timestep_path.is_file(), f"{run_dir.name}: missing time.step")
+    ts_raw = timestep_path.read_text(encoding="utf-8", errors="replace").strip()
+    require(ts_raw.isdigit(), f"{run_dir.name}: non-integer time.step content {ts_raw!r}")
+    time_step_val = int(ts_raw)
+    require(
+        time_step_val == nn_itend,
+        f"{run_dir.name}: time.step ({time_step_val}) != nn_itend ({nn_itend})",
+    )
+
+    ocean_out_path = run_dir / "ocean.output"
+    require(ocean_out_path.is_file(), f"{run_dir.name}: missing ocean.output")
+    ocean_text = ocean_out_path.read_text(encoding="utf-8", errors="replace")
+    require(
+        "E R R O R" not in ocean_text
+        and re.search(r"\bSTOP\s+[1-9][0-9]*\b", ocean_text) is None,
+        f"{run_dir.name}: ocean.output contains E R R O R or nonzero STOP",
+    )
+
+    return {
+        "nn_itend": nn_itend,
+        "nn_stock": nn_stock,
+        "time_step": time_step_val,
+        "stderr_stop_0": True,
+        "stderr_last_line": stderr_nonempty[-1],
+        "stdout_bytes": stdout_bytes,
+        "ocean_output_error_free": True,
+    }
+
+
+def plant_completion_signal_failures(
+    real_logs_dir: Path = REAL_ARM_A_LOGS_DIR,
+) -> dict[str, Any]:
+    """Verify the real Arm-A completion logs pass and prove planted missing STOP / short time.step / E R R O R fail."""
+    require(real_logs_dir.is_dir(), f"missing real Arm-A log fixture dir: {real_logs_dir}")
+    real_pass = verify_nemo_completion_signal(real_logs_dir, expected_steps=YEAR_STEPS)
+    expected_resolved = {
+        **r339_k0.RESOLVED,
+        "nn_itend": str(YEAR_STEPS),
+        "nn_stock": str(DAILY_STOCK_STRIDE),
+    }
+    common.validate_ocean_output(real_logs_dir / "ocean.output", expected_resolved)
+
+    with tempfile.TemporaryDirectory(dir=_scratch_root()) as tmp:
+        work = Path(tmp) / "completion_plant"
+        shutil.copytree(real_logs_dir, work)
+
+        # Plant 1: missing STOP 0 in mpirun.stderr.log
+        orig_stderr = (work / "mpirun.stderr.log").read_text(encoding="utf-8")
+        (work / "mpirun.stderr.log").write_text(
+            "Note: The following floating-point exceptions are signalling: IEEE_UNDERFLOW_FLAG IEEE_DENORMAL\n",
+            encoding="utf-8",
+        )
+        missing_stop_caught = False
+        missing_stop_err = ""
+        try:
+            verify_nemo_completion_signal(work, expected_steps=YEAR_STEPS)
+        except GateError as exc:
+            missing_stop_caught = True
+            missing_stop_err = str(exc)
+        require(missing_stop_caught, "plant_completion_signal_failures did not refuse missing STOP 0 on stderr")
+
+        # Plant 2: STOP 0 written to stdout instead of stderr must still refuse when stderr lacks STOP 0
+        (work / "mpirun.stdout.log").write_text("STOP 0\n", encoding="utf-8")
+        stdout_only_caught = False
+        stdout_only_err = ""
+        try:
+            verify_nemo_completion_signal(work, expected_steps=YEAR_STEPS)
+        except GateError as exc:
+            stdout_only_caught = True
+            stdout_only_err = str(exc)
+        require(stdout_only_caught, "plant_completion_signal_failures did not refuse STOP 0 on stdout only")
+        (work / "mpirun.stdout.log").write_text("", encoding="utf-8")
+
+        # Plant 3: nonzero STOP 123 in mpirun.stderr.log
+        (work / "mpirun.stderr.log").write_text("STOP 123\n", encoding="utf-8")
+        stop123_caught = False
+        stop123_err = ""
+        try:
+            verify_nemo_completion_signal(work, expected_steps=YEAR_STEPS)
+        except GateError as exc:
+            stop123_caught = True
+            stop123_err = str(exc)
+        require(stop123_caught, "plant_completion_signal_failures did not refuse STOP 123 on stderr")
+        (work / "mpirun.stderr.log").write_text(orig_stderr, encoding="utf-8")
+
+        # Plant 4: short time.step (e.g., 2912 < 2920)
+        orig_ts = (work / "time.step").read_text(encoding="utf-8")
+        (work / "time.step").write_text("     2912\n", encoding="utf-8")
+        short_ts_caught = False
+        short_ts_err = ""
+        try:
+            verify_nemo_completion_signal(work, expected_steps=YEAR_STEPS)
+        except GateError as exc:
+            short_ts_caught = True
+            short_ts_err = str(exc)
+        require(short_ts_caught, "plant_completion_signal_failures did not refuse short time.step")
+
+        # Plant 5: missing time.step file
+        (work / "time.step").unlink()
+        missing_ts_caught = False
+        missing_ts_err = ""
+        try:
+            verify_nemo_completion_signal(work, expected_steps=YEAR_STEPS)
+        except GateError as exc:
+            missing_ts_caught = True
+            missing_ts_err = str(exc)
+        require(missing_ts_caught, "plant_completion_signal_failures did not refuse missing time.step")
+        (work / "time.step").write_text(orig_ts, encoding="utf-8")
+
+        # Plant 6: E R R O R in ocean.output
+        orig_ocean = (work / "ocean.output").read_text(encoding="utf-8")
+        (work / "ocean.output").write_text(
+            orig_ocean + "\n ===>>> : E R R O R\n",
+            encoding="utf-8",
+        )
+        ocean_err_caught = False
+        ocean_err_msg = ""
+        try:
+            verify_nemo_completion_signal(work, expected_steps=YEAR_STEPS)
+        except GateError as exc:
+            ocean_err_caught = True
+            ocean_err_msg = str(exc)
+        require(ocean_err_caught, "plant_completion_signal_failures did not refuse E R R O R in ocean.output")
+        (work / "ocean.output").write_text(orig_ocean, encoding="utf-8")
+
+    return {
+        "passed": True,
+        "real_arm_a_signal": real_pass,
+        "missing_stop_error": missing_stop_err,
+        "stdout_only_stop_error": stdout_only_err,
+        "stop123_error": stop123_err,
+        "short_timestep_error": short_ts_err,
+        "missing_timestep_error": missing_ts_err,
+        "ocean_output_error": ocean_err_msg,
+    }
+
+
 def write_stub_s4_year_outputs(
     run_dir: Path,
     *,
     plant_unproduced_file: bool = False,
+    plant_missing_stop: bool = False,
+    plant_short_timestep: int | None = None,
     sleep_seconds: int = 0,
 ) -> dict[str, Any]:
     """Checklist 12 & 16: write ONLY the files this observer-free K0 build can write.
 
     Reads `nn_itend` and `nn_stock` from `run_dir / "namelist_cfg"` so the stub
-    replaces `./nemo` inside `run.sh`.
+    replaces `./nemo` inside `run.sh`. Emits `time.step` (`stpctl.f90:160`) and
+    writes `STOP 0` to `sys.stderr` (`nemogcm.f90:237` under gfortran).
     """
     if sleep_seconds > 0:
         time.sleep(sleep_seconds)
@@ -1128,6 +1336,9 @@ def write_stub_s4_year_outputs(
     namelist_dyn = re.sub(r"(\bnn_itend\s*=\s*)\d+", rf"\g<1>{nn_itend}", namelist_dyn)
     namelist_dyn = re.sub(r"(\bnn_stock\s*=\s*)\d+", rf"\g<1>{nn_stock}", namelist_dyn)
     (run_dir / "output.namelist.dyn").write_text(namelist_dyn, encoding="utf-8")
+
+    step_val = int(plant_short_timestep) if plant_short_timestep is not None else nn_itend
+    (run_dir / "time.step").write_text(f" {step_val:8d}\n", encoding="utf-8")
 
     for mesh_name in ("mesh_mask_0000.nc", "mesh_mask_0001.nc"):
         shutil.copy2(R339_SMOKE_DIR / mesh_name, run_dir / mesh_name)
@@ -1156,10 +1367,12 @@ def write_stub_s4_year_outputs(
             b"UNPRODUCED_OBSERVER_FILE"
         )
 
-    print("STOP 0")
+    if not plant_missing_stop:
+        print("STOP 0", file=sys.stderr, flush=True)
     return {
         "nn_itend": nn_itend,
         "nn_stock": nn_stock,
+        "time_step": step_val,
         "daily_restart_pairs": nn_itend // nn_stock,
     }
 
@@ -1199,6 +1412,111 @@ def verify_no_unexpected_files(
         "present_file_count": len(present_files),
         "expected_restart_file_count": len(expected_restarts),
         "observer_bins": observer_bins,
+    }
+
+
+def _verify_single_restart_file(
+    path: Path,
+    expected_kt: int,
+    expected_size: int,
+) -> dict[str, Any]:
+    require(path.is_file() and not path.is_symlink(),
+            f"restart file missing or symlink: {path}")
+    sz = path.stat().st_size
+    require(sz == expected_size,
+            f"restart file {path.name} truncated or wrong size: {sz} != {expected_size}")
+    with netCDF4.Dataset(path, "r") as ds:
+        require("kt" in ds.variables, f"missing kt variable in {path.name}")
+        kt_val = int(np.asarray(ds.variables["kt"][...]))
+        require(kt_val == expected_kt,
+                f"{path.name}: kt={kt_val} != expected {expected_kt}")
+        numeric_vars = [
+            v.name for v in ds.variables.values()
+            if np.issubdtype(v.dtype, np.number)
+        ]
+        require(len(numeric_vars) >= 20,
+                f"unexpectedly few numeric variables in {path.name}: {len(numeric_vars)}")
+        for var in NONZERO_RESTART_VARS:
+            require(var in numeric_vars,
+                    f"missing prognostic restart variable {var!r} in {path.name}")
+        for var in numeric_vars:
+            arr = np.asarray(ds.variables[var][:], dtype=np.float64)
+            require(bool(np.isfinite(arr).all()),
+                    f"{path.name}:{var} contains non-finite values (NaN/Inf)")
+            if var in NONZERO_RESTART_VARS:
+                require(float(np.max(np.abs(arr))) > 0.0,
+                        f"{path.name}:{var} is identically zero")
+    return {
+        "kt": expected_kt,
+        "size_bytes": sz,
+        "sha256": sha256_file(path),
+    }
+
+
+def admit_s4_year_single_arm(
+    run_dir: Path,
+    *,
+    build_cfg: Path = DEFAULT_BUILD_CFG,
+    expected_steps: int = YEAR_STEPS,
+) -> dict[str, Any]:
+    """Verify and admit a single completed 2,920-step K0 arm (e.g., kept Arm A) without modifying any file inside `run_dir`."""
+    require(expected_steps >= DAILY_STOCK_STRIDE and expected_steps % DAILY_STOCK_STRIDE == 0,
+            f"invalid expected_steps: {expected_steps}")
+    ppsrc_dir = _ppsrc_dir(build_cfg)
+    my_src_dir = (build_cfg / "MY_SRC") if (build_cfg / "MY_SRC").is_dir() else None
+    cand_bld = (build_cfg / "BLD") if (build_cfg / "BLD" / "obj").is_dir() else None
+    no_obs = verify_same_program_no_observer(ppsrc_dir, my_src_dir, cand_bld)
+    inv = verify_no_unexpected_files(run_dir, expected_steps=expected_steps)
+
+    expected_resolved = {
+        **r339_k0.RESOLVED,
+        "nn_itend": str(expected_steps),
+        "nn_stock": str(DAILY_STOCK_STRIDE),
+    }
+    verify_namelist_groups_against_ppsrc(
+        run_dir / "namelist_cfg",
+        NAMELIST_REF,
+        ppsrc_dir,
+    )
+    common.validate_ocean_output(run_dir / "ocean.output", expected_resolved)
+    out_text = (run_dir / "ocean.output").read_text(encoding="utf-8", errors="replace")
+    require(r339_k0.NO_ICEBERGS_BANNER in out_text,
+            f"{run_dir.name}: ocean.output did not report No icebergs used")
+    require("ice_cover_clim.nc" in out_text,
+            f"{run_dir.name}: ocean.output did not resolve ice_cover_clim.nc")
+    completion_signal = verify_nemo_completion_signal(run_dir, expected_steps=expected_steps)
+
+    expected_size_0 = R339_RESTART_0.stat().st_size
+    expected_size_1 = R339_RESTART_1.stat().st_size
+    expected_kts = list(range(DAILY_STOCK_STRIDE, expected_steps + 1, DAILY_STOCK_STRIDE))
+
+    first_day_summary = {}
+    last_day_summary = {}
+    for kt in expected_kts:
+        for rank, exp_sz in ((0, expected_size_0), (1, expected_size_1)):
+            fpath = run_dir / f"ORCA2_{kt:08d}_restart_{rank:04d}.nc"
+            res = _verify_single_restart_file(fpath, kt, exp_sz)
+            if kt == DAILY_STOCK_STRIDE:
+                first_day_summary[f"rank_{rank:04d}"] = res
+            if kt == expected_steps:
+                last_day_summary[f"rank_{rank:04d}"] = res
+
+    day1_vs_r340 = verify_day1_against_admitted_s4_kt9(run_dir, R340_RUN_A)
+    return {
+        "status": "PASS_R342_S4_YEAR_SINGLE_ARM",
+        "admitted": True,
+        "run_dir": str(run_dir),
+        "inventory": inv,
+        "completion_signal": completion_signal,
+        "round": "orca2_r342",
+        "stage": "S4_one_year_k0_single_arm_admission",
+        "expected_steps": expected_steps,
+        "daily_stock_stride": DAILY_STOCK_STRIDE,
+        "daily_restart_pairs": len(expected_kts),
+        "same_program_no_observer": no_obs,
+        "day1_vs_r340_s4_kt9_entry": day1_vs_r340,
+        "first_day_restarts": first_day_summary,
+        "last_day_restarts": last_day_summary,
     }
 
 
@@ -1329,6 +1647,7 @@ def admit_s4_year_twin_runs(
         "nn_itend": str(expected_steps),
         "nn_stock": str(DAILY_STOCK_STRIDE),
     }
+    completion_signals: dict[str, Any] = {}
     for rdir in (run_a, run_b):
         verify_namelist_groups_against_ppsrc(
             rdir / "namelist_cfg",
@@ -1341,18 +1660,9 @@ def admit_s4_year_twin_runs(
                 f"{rdir.name}: ocean.output did not report No icebergs used")
         require("ice_cover_clim.nc" in out_text,
                 f"{rdir.name}: ocean.output did not resolve ice_cover_clim.nc")
-        if (rdir / "mpirun.stdout.log").is_file():
-            stdout_text = (rdir / "mpirun.stdout.log").read_text(encoding="utf-8", errors="replace")
-            require("STOP 0" in stdout_text, f"{rdir.name}: mpirun.stdout.log lacks clean STOP 0")
-            require(
-                "E R R O R" not in stdout_text
-                and not any(f"STOP {c}" in stdout_text for c in range(1, 10)),
-                f"{rdir.name}: mpirun.stdout.log contains runtime error marker",
-            )
-        itend_cfg, stock_cfg = parse_namelist_itend_stock(rdir / "namelist_cfg")
-        require(itend_cfg == expected_steps and stock_cfg == DAILY_STOCK_STRIDE,
-                f"{rdir.name}: namelist_cfg (nn_itend={itend_cfg}, nn_stock={stock_cfg}) "
-                f"!= ({expected_steps}, {DAILY_STOCK_STRIDE})")
+        completion_signals[rdir.name] = verify_nemo_completion_signal(
+            rdir, expected_steps=expected_steps
+        )
 
     expected_size_0 = R339_RESTART_0.stat().st_size
     expected_size_1 = R339_RESTART_1.stat().st_size
@@ -1378,6 +1688,7 @@ def admit_s4_year_twin_runs(
         "expected_steps": expected_steps,
         "daily_stock_stride": DAILY_STOCK_STRIDE,
         "daily_restart_pairs": len(expected_kts),
+        "completion_signals": completion_signals,
         "same_program_no_observer": no_obs,
         "day1_vs_r340_s4_kt9_entry": day1_vs_r340,
         "first_day_restarts": first_day_summary,
@@ -1389,11 +1700,18 @@ def admit_s4_year_twin_runs(
         except RuntimeError as exc:
             raise GateError(f"cannot write admission manifest on dirty tree: {exc}") from exc
         for rdir in (run_a, run_b):
-            (rdir / "round342_s4_year_admission.json").write_text(
+            if (rdir / "producer_manifest.json").is_file():
+                _verify_existing_run_manifest(rdir)
+            else:
+                _write_and_verify_run_manifest(rdir, commit)
+        if run_a.parent == run_b.parent:
+            (run_a.parent / "round342_s4_year_admission.json").write_text(
                 json.dumps(
                     {
                         "status": "PASS_R342_S4_YEAR_NEMO_TWINS",
                         "admitted": True,
+                        "run_a": str(run_a),
+                        "run_b": str(run_b),
                         **extra,
                     },
                     indent=2,
@@ -1402,7 +1720,6 @@ def admit_s4_year_twin_runs(
                 + "\n",
                 encoding="utf-8",
             )
-            _write_and_verify_run_manifest(rdir, commit)
 
     return {
         "status": "PASS_R342_S4_YEAR_NEMO_TWINS",
@@ -1554,7 +1871,20 @@ def _append_admit_log(run_root: Path, entry: dict[str, Any]) -> None:
         fh.write(json.dumps(entry, sort_keys=True) + "\n")
 
 
-def _locate_retained_pair_in_refused(refused_dir: Path) -> tuple[Path, Path]:
+def _is_executed_run_dir(rdir: Path) -> bool:
+    return (
+        rdir.is_dir()
+        and (
+            (rdir / "ocean.output").is_file()
+            or (rdir / "time.step").is_file()
+            or any(rdir.glob("ORCA2_*_restart_*.nc"))
+        )
+    )
+
+
+def _locate_retained_candidates_in_refused(
+    refused_dir: Path,
+) -> tuple[list[Path], list[Path]]:
     require(refused_dir.is_dir(), f"missing refused directory: {refused_dir}")
     cand_a = sorted(
         p for p in refused_dir.iterdir()
@@ -1564,36 +1894,46 @@ def _locate_retained_pair_in_refused(refused_dir: Path) -> tuple[Path, Path]:
         p for p in refused_dir.iterdir()
         if p.is_dir() and TWIN_B_NAME in p.name
     )
-    require(
-        bool(cand_a) and bool(cand_b),
-        f"no retained twin pair ({TWIN_A_NAME}, {TWIN_B_NAME}) found inside {refused_dir}",
-    )
-    return cand_a[-1], cand_b[-1]
+    return cand_a, cand_b
 
 
 def admit_existing_with_quarantine(
-    run_root: Path,
+    run_root_or_retained: Path,
     *,
     build_cfg: Path = DEFAULT_BUILD_CFG,
     expected_steps: int = YEAR_STEPS,
+    evidence_dir: Path = DEFAULT_EVIDENCE_DIR,
 ) -> dict[str, Any]:
-    """Checklist 9 & 13: --admit-existing (in-place and refused/ routes), pinning to producer_manifest.json."""
+    """Checklist 9 & 13: --admit-existing (in-place and refused/ routes), pinning to producer_manifest.json.
+
+    Supports:
+      - `<run_root>/refused/<retained_arm_a_dir>` or `<run_root>` when only Arm A completed in `refused/`
+        (promotes kept Arm A to `<run_root>/orca2_k0_year1_a_np2` without modifying any file inside it);
+      - `<run_root>` when Arm A is already admitted at `<run_root>/orca2_k0_year1_a_np2` and Arm B is absent
+        (verifies Arm A in place without modifying any file inside it);
+      - `<run_root>` when both Twin A and Twin B are present in-place or in `refused/`.
+    """
+    explicit_retained: Path | None = None
+    if (
+        run_root_or_retained.is_dir()
+        and run_root_or_retained.parent.name == "refused"
+    ):
+        explicit_retained = run_root_or_retained
+        run_root = run_root_or_retained.parent.parent
+    else:
+        run_root = run_root_or_retained
+
     run_a = run_root / TWIN_A_NAME
     run_b = run_root / TWIN_B_NAME
     refused_dir = run_root / "refused"
     ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 
-    # Route 1: In-place admission
-    if run_a.is_dir() or run_b.is_dir():
+    # Route 1a: In-place twin pair (run_a and run_b both exist)
+    if run_a.is_dir() and run_b.is_dir() and explicit_retained is None:
+        arm_a_already_admitted = (run_root / "round342_s4_year_arm_a_admission.json").is_file()
         try:
-            require(run_a.is_dir() and run_b.is_dir(),
-                    f"incomplete in-place twin pair under {run_root}")
             manifest_a = _verify_existing_run_manifest(run_a)
             manifest_b = _verify_existing_run_manifest(run_b)
-            require(
-                manifest_a["producer_commit"] == manifest_b["producer_commit"],
-                "in-place twin manifests have different producer_commit values",
-            )
             require(
                 manifest_a["binary_sha256"] == manifest_b["binary_sha256"],
                 "in-place twin manifests have different binary_sha256 values",
@@ -1604,16 +1944,21 @@ def admit_existing_with_quarantine(
                 build_cfg=build_cfg,
                 expected_steps=expected_steps,
                 write_manifests=True,
-                producer_commit=manifest_a["producer_commit"],
+                producer_commit=manifest_b["producer_commit"],
             )
             res["admit_existing_route"] = "in_place"
+            res["producer_commit_a"] = manifest_a["producer_commit"]
+            res["producer_commit_b"] = manifest_b["producer_commit"]
+            res["binary_sha256"] = manifest_a["binary_sha256"]
             _append_admit_log(
                 run_root,
                 {
                     "timestamp_utc": ts,
                     "route": "in_place",
                     "status": "PASS",
-                    "producer_commit": manifest_a["producer_commit"],
+                    "producer_commit": manifest_b["producer_commit"],
+                    "producer_commit_a": manifest_a["producer_commit"],
+                    "producer_commit_b": manifest_b["producer_commit"],
                     "binary_sha256": manifest_a["binary_sha256"],
                     "run_a": str(run_a),
                     "run_b": str(run_b),
@@ -1623,7 +1968,8 @@ def admit_existing_with_quarantine(
         except Exception as exc:
             refused_dir.mkdir(parents=True, exist_ok=True)
             quarantined: list[str] = []
-            for rdir in (run_a, run_b):
+            arms_to_quarantine = (run_b,) if arm_a_already_admitted else (run_a, run_b)
+            for rdir in arms_to_quarantine:
                 if rdir.exists():
                     dest = refused_dir / f"{ts}_{rdir.name}"
                     shutil.move(str(rdir), str(dest))
@@ -1642,8 +1988,154 @@ def admit_existing_with_quarantine(
                 f"--admit-existing refused in-place twin runs ({exc}); quarantined to {quarantined}"
             ) from exc
 
-    # Route 2: Retained admission from refused/ (kept inside refused/ on failure; promoted on pass)
-    ret_a, ret_b = _locate_retained_pair_in_refused(refused_dir)
+    # Route 1b: In-place single Arm A (run_a exists, run_b does not exist yet)
+    if run_a.is_dir() and not run_b.exists() and explicit_retained is None:
+        try:
+            manifest_a = _verify_existing_run_manifest(run_a)
+            res = admit_s4_year_single_arm(
+                run_a,
+                build_cfg=build_cfg,
+                expected_steps=expected_steps,
+            )
+            res["admit_existing_route"] = "in_place_single_arm_a"
+            res["producer_commit"] = manifest_a["producer_commit"]
+            res["binary_sha256"] = manifest_a["binary_sha256"]
+            admission_line = (
+                f"ORCA2_ROUND342_S4_YEAR_ARM_A_ADMITTED {run_a} "
+                f"producer_commit={manifest_a['producer_commit']} "
+                f"binary_sha256={manifest_a['binary_sha256']} "
+                f"daily_restart_pairs={res['daily_restart_pairs']} "
+                f"time_step={res['completion_signal']['time_step']}"
+            )
+            res["admission_line"] = admission_line
+            (run_root / "round342_s4_year_arm_a_admission.json").write_text(
+                json.dumps(res, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            if run_root.resolve() == DEFAULT_RUN_ROOT.resolve():
+                evidence_dir.mkdir(parents=True, exist_ok=True)
+                (evidence_dir / "round342_s4_year_arm_a_admission.json").write_text(
+                    json.dumps(res, indent=2, sort_keys=True) + "\n",
+                    encoding="utf-8",
+                )
+            _append_admit_log(
+                run_root,
+                {
+                    "timestamp_utc": ts,
+                    "route": "in_place_single_arm_a",
+                    "status": "PASS_ARM_A_ADMITTED",
+                    "producer_commit": manifest_a["producer_commit"],
+                    "binary_sha256": manifest_a["binary_sha256"],
+                    "run_a": str(run_a),
+                },
+            )
+            print(admission_line)
+            return res
+        except Exception as exc:
+            refused_dir.mkdir(parents=True, exist_ok=True)
+            dest = refused_dir / f"{ts}_{run_a.name}"
+            shutil.move(str(run_a), str(dest))
+            _append_admit_log(
+                run_root,
+                {
+                    "timestamp_utc": ts,
+                    "route": "in_place_single_arm_a",
+                    "status": "REFUSED_AND_QUARANTINED",
+                    "error": str(exc),
+                    "quarantined": [str(dest)],
+                },
+            )
+            raise GateError(
+                f"--admit-existing refused in-place Arm A ({exc}); quarantined to {[str(dest)]}"
+            ) from exc
+
+    require(
+        not run_a.exists() and not run_b.exists(),
+        f"incomplete or unexpected in-place state under {run_root}: "
+        f"run_a={run_a.exists()}, run_b={run_b.exists()}",
+    )
+
+    cand_a, cand_b = _locate_retained_candidates_in_refused(refused_dir)
+    ret_a = explicit_retained if (explicit_retained is not None and TWIN_A_NAME in explicit_retained.name) else (cand_a[-1] if cand_a else None)
+    exec_b = [p for p in cand_b if _is_executed_run_dir(p)]
+    ret_b = exec_b[-1] if exec_b else (cand_b[-1] if cand_b else None)
+
+    # Route 2a: Single completed Arm A in refused/ (when explicit_retained is Arm A or ret_b was never executed)
+    if ret_a is not None and (explicit_retained is not None or ret_b is None or not _is_executed_run_dir(ret_b)):
+        try:
+            require(
+                ret_a.resolve().is_relative_to(refused_dir.resolve()),
+                f"retained Arm A directory {ret_a} is not inside {refused_dir}",
+            )
+            manifest_a = _verify_existing_run_manifest(ret_a)
+            res = admit_s4_year_single_arm(
+                ret_a,
+                build_cfg=build_cfg,
+                expected_steps=expected_steps,
+            )
+            require(not run_a.exists(), f"canonical Arm A path already exists: {run_a}")
+            shutil.move(str(ret_a), str(run_a))
+            _verify_existing_run_manifest(run_a)
+            res["run_dir"] = str(run_a)
+            res["run_a"] = str(run_a)
+            res["admit_existing_route"] = "refused_single_arm_a"
+            res["promoted_from_refused"] = str(ret_a)
+            res["producer_commit"] = manifest_a["producer_commit"]
+            res["binary_sha256"] = manifest_a["binary_sha256"]
+            admission_line = (
+                f"ORCA2_ROUND342_S4_YEAR_ARM_A_ADMITTED {run_a} "
+                f"producer_commit={manifest_a['producer_commit']} "
+                f"binary_sha256={manifest_a['binary_sha256']} "
+                f"daily_restart_pairs={res['daily_restart_pairs']} "
+                f"time_step={res['completion_signal']['time_step']}"
+            )
+            res["admission_line"] = admission_line
+            (run_root / "round342_s4_year_arm_a_admission.json").write_text(
+                json.dumps(res, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            if run_root.resolve() == DEFAULT_RUN_ROOT.resolve():
+                evidence_dir.mkdir(parents=True, exist_ok=True)
+                (evidence_dir / "round342_s4_year_arm_a_admission.json").write_text(
+                    json.dumps(res, indent=2, sort_keys=True) + "\n",
+                    encoding="utf-8",
+                )
+            _append_admit_log(
+                run_root,
+                {
+                    "timestamp_utc": ts,
+                    "route": "refused",
+                    "subroute": "single_arm_a",
+                    "status": "PASS",
+                    "producer_commit": manifest_a["producer_commit"],
+                    "binary_sha256": manifest_a["binary_sha256"],
+                    "promoted_from": [str(ret_a)],
+                    "run_a": str(run_a),
+                },
+            )
+            print(admission_line)
+            return res
+        except Exception as exc:
+            _append_admit_log(
+                run_root,
+                {
+                    "timestamp_utc": ts,
+                    "route": "refused",
+                    "subroute": "single_arm_a",
+                    "status": "REFUSED_RETAINED_IN_PLACE",
+                    "error": str(exc),
+                    "retained_a": str(ret_a),
+                },
+            )
+            raise GateError(
+                f"--admit-existing refused retained Arm A in {refused_dir} ({exc}); kept in refused/"
+            ) from exc
+
+    # Route 2b: Retained twin pair from refused/ (kept inside refused/ on failure; promoted on pass)
+    require(
+        ret_a is not None and ret_b is not None,
+        f"no retained twin pair ({TWIN_A_NAME}, {TWIN_B_NAME}) found inside {refused_dir}",
+    )
     try:
         require(
             ret_a.resolve().is_relative_to(refused_dir.resolve())
@@ -1652,10 +2144,6 @@ def admit_existing_with_quarantine(
         )
         manifest_a = _verify_existing_run_manifest(ret_a)
         manifest_b = _verify_existing_run_manifest(ret_b)
-        require(
-            manifest_a["producer_commit"] == manifest_b["producer_commit"],
-            "retained twin manifests have different producer_commit values",
-        )
         require(
             manifest_a["binary_sha256"] == manifest_b["binary_sha256"],
             "retained twin manifests have different binary_sha256 values",
@@ -1666,7 +2154,7 @@ def admit_existing_with_quarantine(
             build_cfg=build_cfg,
             expected_steps=expected_steps,
             write_manifests=True,
-            producer_commit=manifest_a["producer_commit"],
+            producer_commit=manifest_b["producer_commit"],
         )
         require(not run_a.exists() and not run_b.exists(),
                 f"canonical twin paths already exist in {run_root}")
@@ -1684,7 +2172,9 @@ def admit_existing_with_quarantine(
                 "timestamp_utc": ts,
                 "route": "refused",
                 "status": "PASS",
-                "producer_commit": manifest_a["producer_commit"],
+                "producer_commit": manifest_b["producer_commit"],
+                "producer_commit_a": manifest_a["producer_commit"],
+                "producer_commit_b": manifest_b["producer_commit"],
                 "binary_sha256": manifest_a["binary_sha256"],
                 "promoted_from": [str(ret_a), str(ret_b)],
                 "run_a": str(run_a),
@@ -1754,6 +2244,7 @@ def run_preflight(
     obs_plant = plant_observer_contamination(ppsrc_dir)
     nml_plant = plant_namelist_error(ppsrc_dir)
     forcing_plant = plant_missing_forcing(ice_cover_path)
+    completion_signal_plant = plant_completion_signal_failures(REAL_ARM_A_LOGS_DIR)
 
     with tempfile.TemporaryDirectory(dir=_scratch_root()) as tmp:
         # 1. Stub pipeline pass
@@ -1899,6 +2390,52 @@ def run_preflight(
             "re-run after quarantine did not preserve refused/ dirs alongside new admitted twins",
         )
 
+        # 4c. Missing STOP 0 on stderr plant in run.sh
+        stub_missing_stop = Path(tmp) / "stub_s4_year_missing_stop"
+        missing_stop_res = subprocess.run(
+            [
+                "bash",
+                str(run_sh),
+                "--stub-run-dir",
+                str(stub_missing_stop),
+                "--stub-steps",
+                "16",
+                "--plant-stub-missing-stop",
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        require(
+            missing_stop_res.returncode != 0
+            and "REFUSE: missing clean STOP 0" in missing_stop_res.stderr
+            and "mpirun.stderr.log" in missing_stop_res.stderr,
+            f"missing STOP 0 plant in run.sh did not fail as expected:\n{missing_stop_res.stderr}",
+        )
+
+        # 4d. Short time.step plant in run.sh
+        stub_short_ts = Path(tmp) / "stub_s4_year_short_ts"
+        short_ts_res = subprocess.run(
+            [
+                "bash",
+                str(run_sh),
+                "--stub-run-dir",
+                str(stub_short_ts),
+                "--stub-steps",
+                "16",
+                "--plant-stub-short-timestep",
+                "8",
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        require(
+            short_ts_res.returncode != 0
+            and "REFUSE: short or mismatched time.step" in short_ts_res.stderr,
+            f"short time.step plant in run.sh did not fail as expected:\n{short_ts_res.stderr}",
+        )
+
         # 5. timeout --foreground plant: stub sleeps 5s with 1s timeout; arm is quarantined to refused/
         stub_timeout = Path(tmp) / "stub_s4_year_timeout"
         timeout_res = subprocess.run(
@@ -1979,6 +2516,45 @@ def run_preflight(
             f"admit_existing.log missing refused route entries: {refused_log}",
         )
 
+        # 7. Kept Arm A in refused/ (with unrun staged Arm B in refused/) -> --admit-existing promotes Arm A -> resume Arm B only
+        stub_arm_a_only = Path(tmp) / "stub_s4_year_arm_a_only"
+        (stub_arm_a_only / "refused").mkdir(parents=True, exist_ok=True)
+        ret_single_a = stub_arm_a_only / "refused" / f"20261027T231902Z_{TWIN_A_NAME}.failed.1"
+        ret_unrun_b = stub_arm_a_only / "refused" / f"20261027T231902Z_{TWIN_B_NAME}.failed.1"
+        shutil.copytree(run_a, ret_single_a, symlinks=True)
+        stage_s4_year_run_dir(ret_unrun_b, ice_cover_path, build_cfg=build_cfg, nn_itend=16, nn_stock=8)
+        shutil.copy2(run_a / "nemo", ret_unrun_b / "nemo")
+        _write_and_verify_run_manifest(ret_unrun_b)
+
+        admit_arm_a_res = subprocess.run(
+            ["bash", str(run_sh), "--admit-existing", str(ret_single_a), "--stub-steps", "16"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        require(
+            admit_arm_a_res.returncode == 0
+            and "ORCA2_ROUND342_S4_YEAR_ARM_A_ADMITTED" in admit_arm_a_res.stdout
+            and (stub_arm_a_only / TWIN_A_NAME).is_dir()
+            and not ret_single_a.exists()
+            and ret_unrun_b.is_dir(),
+            f"single Arm A promotion from refused/ failed:\n{admit_arm_a_res.stdout}\n{admit_arm_a_res.stderr}",
+        )
+
+        resume_b_res = subprocess.run(
+            ["bash", str(run_sh), "--stub-run-dir", str(stub_arm_a_only), "--stub-steps", "16"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        require(
+            resume_b_res.returncode == 0
+            and "R342_RESUMING_ARM_B_ONLY" in resume_b_res.stdout
+            and (stub_arm_a_only / TWIN_A_NAME).is_dir()
+            and (stub_arm_a_only / TWIN_B_NAME).is_dir(),
+            f"resuming Arm B only after Arm A admission failed:\n{resume_b_res.stdout}\n{resume_b_res.stderr}",
+        )
+
     report = {
         "status": "ORCA2_ROUND342_S4_YEAR_PREFLIGHT_READY",
         "round": "orca2_r342",
@@ -2008,6 +2584,11 @@ def run_preflight(
             "quarantined_count": len(stage_refused_items),
             "rerun_rc": stage_rerun_res.returncode,
         },
+        "completion_signal_and_plants": completion_signal_plant,
+        "shell_completion_plants": {
+            "missing_stop_rc": missing_stop_res.returncode,
+            "short_timestep_rc": short_ts_res.returncode,
+        },
         "prerequisites": prereq,
         "allocate_extents": alloc_check,
         "allocate_plant": alloc_plant,
@@ -2027,6 +2608,7 @@ def run_preflight(
             "refused_quarantine_and_rerun_verified": True,
             "refused_to_admit_existing_checksum_plant_verified": True,
             "refused_to_admit_existing_promotion_verified": True,
+            "refused_single_arm_a_promotion_and_arm_b_resume_verified": True,
         },
         "worktree": worktree_check,
     }
@@ -2042,6 +2624,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--write-run-manifest", type=Path, default=None)
     parser.add_argument("--act-as-nemo-binary", action="store_true")
     parser.add_argument("--plant-stub-unproduced-file", action="store_true")
+    parser.add_argument("--plant-stub-missing-stop", action="store_true")
+    parser.add_argument("--plant-stub-short-timestep", type=int, default=None)
     parser.add_argument("--plant-stub-sleep", type=int, default=0)
     parser.add_argument("--admit-twin-runs", type=Path, default=None)
     parser.add_argument("--admit-existing", type=Path, default=None)
@@ -2057,6 +2641,8 @@ def main(argv: list[str] | None = None) -> int:
             write_stub_s4_year_outputs(
                 Path.cwd(),
                 plant_unproduced_file=args.plant_stub_unproduced_file,
+                plant_missing_stop=args.plant_stub_missing_stop,
+                plant_short_timestep=args.plant_stub_short_timestep,
                 sleep_seconds=args.plant_stub_sleep,
             )
         elif args.plant_stub_sleep > 0:
@@ -2095,6 +2681,7 @@ def main(argv: list[str] | None = None) -> int:
             args.admit_existing,
             build_cfg=args.build_cfg,
             expected_steps=args.expected_steps,
+            evidence_dir=args.evidence_dir,
         )
         print(json.dumps(res, indent=2, sort_keys=True))
         return 0
