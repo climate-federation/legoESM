@@ -3,8 +3,16 @@
 set -Eeuo pipefail
 
 readonly MODE=${1:---preflight-only}
-case "$MODE" in --preflight-only|--run|--admit-existing) ;; *) exit 64;; esac
 refuse(){ printf 'REFUSE: %s\n' "$*" >&2; exit 65; }
+failure_step=initialization
+report_failure(){
+ local rc=$? command=$BASH_COMMAND
+ trap - ERR
+ printf 'REFUSE: %s failed (rc=%s; command=%s)\n' "$failure_step" "$rc" "$command" >&2
+ exit "$rc"
+}
+trap report_failure ERR
+case "$MODE" in --preflight-only|--run|--admit-existing) ;; *) refuse "unknown mode: $MODE";; esac
 plant_must_refuse(){ local n=$1; shift; if "$@"; then refuse "plant stayed green: $n"; fi; printf 'PREFLIGHT_PLANT_FIRED %s\n' "$n"; }
 quote_ocean_errors(){
  local log=$1 lines
@@ -49,6 +57,7 @@ for f in "$GATE" "$TEST" "$SURFACE_PATCH" "$STATE_PATCH" "$STAGE_PATCH" "$FLD_PA
 
 admit_one(){
  local root=$1 parent=${2:-$K0_RUN} expected_commit
+ failure_step="admission of $root"
  expected_commit=$(git -C "$REPO" rev-parse HEAD)
  "$PY" - "$root" "$parent" "$expected_commit" <<'PY'
 import sys
@@ -63,13 +72,43 @@ for log_name in ('run.user.stdout.log','ocean.output'):
         for line_number,line in enumerate(text.splitlines(),start=1):
             if 'E R R O R' in line:
                 print(f'R340_OCEAN_ERROR {r/log_name}:{line_number}:{line}',file=sys.stderr)
-    g.require('STOP 0' in text and 'E R R O R' not in text,
-              f'admission log is not a clean STOP 0: {log_name}')
+    g.require('E R R O R' not in text and not any(
+        f'STOP {code}' in text for code in range(1,10)),
+        f'admission log contains an error marker: {log_name}')
+stdout=(r/'run.user.stdout.log').read_text(errors='replace')
+g.require('STOP 0' in stdout,'admission stdout has no clean STOP 0')
 inventory=g.inspect_acquisition_records(r)
 for rank in (0,1):
     name=f'ORCA2_00000010_restart_{rank:04d}.nc'
     g.require((r/name).read_bytes()==(parent/name).read_bytes(),f'restart changed: {name}')
 print('ORCA2_ROUND340_S4_ACQUISITION_PASS',r,inventory)
+PY
+}
+
+finalize_interrupted_manifest(){
+ local root=$1 expected_commit
+ failure_step="finalize interrupted manifest for $root"
+ expected_commit=$(git -C "$REPO" rev-parse HEAD)
+ "$PY" - "$root" "$expected_commit" "$REPO" <<'PY'
+import json,subprocess,sys
+from pathlib import Path
+from scripts.validate.ocean_fidelity.orca2_l4 import nemo_testcase_l4_orca2_round339_common as c
+r=Path(sys.argv[1]); current=sys.argv[2]; repo=sys.argv[3]
+manifest=r/'producer_manifest.json'
+payload=json.loads(manifest.read_text())
+files=payload.get('files',{})
+if 'run.user.stdout.log' in files and 'ocean.output' in files:
+    return_code=0
+else:
+    prior=payload.get('producer_commit','')
+    c.verify_manifest(manifest,expected_commit=prior)
+    return_code=subprocess.run(
+        ['git','-C',repo,'merge-base','--is-ancestor',prior,current]).returncode
+    c.require(return_code == 0,'interrupted manifest producer is not an ancestor')
+    actual=[p for p in r.rglob('*') if p.is_file() and p.name!='producer_manifest.json']
+    c.write_manifest(manifest,producer_commit=current,binary=r/'nemo',files=actual,
+                     root=r,build_source_root=r/'build_sources')
+    print('R340_INTERRUPTED_MANIFEST_FINALIZED',r)
 PY
 }
 
@@ -86,7 +125,20 @@ admit_pair(){
 admit_existing_route(){
  local existing_a=${R340_EXISTING_RUN_A:-$RUN_A}
  local existing_b=${R340_EXISTING_RUN_B:-$RUN_B}
- admit_pair "$existing_a" "$existing_b" "${R340_EXISTING_PARENT:-$K0_RUN}"
+ local parent=${R340_EXISTING_PARENT:-$K0_RUN}
+ [[ -d $existing_a ]] || refuse "retained arm A is absent: $existing_a"
+ finalize_interrupted_manifest "$existing_a"
+ if [[ -d $existing_b ]]; then
+  finalize_interrupted_manifest "$existing_b"
+  admit_pair "$existing_a" "$existing_b" "$parent"
+  return
+ fi
+ admit_one "$existing_a" "$parent"
+ if [[ $existing_a != "$RUN_A" ]]; then
+  [[ ! -e $RUN_A ]] || refuse "canonical arm A already exists: $RUN_A"
+  mv "$existing_a" "$RUN_A"
+ fi
+ printf 'ORCA2_ROUND340_S4_ARM_A_ADMITTED %s\n' "$RUN_A"
 }
 
 check_placement(){
@@ -349,6 +401,14 @@ cat >"$scratch/execute.sh" <<'DRIVER'
 #!/usr/bin/env bash
 set -Eeuo pipefail
 run=$1; nemo=$2; source_run=$3; k0_run=$4; target_build=$5; commit=$6; py=$7
+step=setup
+refuse(){ printf 'REFUSE: execute/%s: %s\n' "$step" "$*" >&2; exit 70; }
+report_failure(){
+ rc=$?; command=$BASH_COMMAND; trap - ERR
+ printf 'REFUSE: execute/%s failed (rc=%s; command=%s)\n' "$step" "$rc" "$command" >&2
+ exit "$rc"
+}
+trap report_failure ERR
 quote_ocean_errors(){
  local log=$1 lines
  lines=$(grep -nF 'E R R O R' "$log" 2>/dev/null || true)
@@ -373,19 +433,23 @@ from scripts.validate.ocean_fidelity.orca2_l4 import nemo_testcase_l4_orca2_roun
 r=Path(sys.argv[1]); files=[p for p in r.rglob('*') if p.is_file() and p.name!='producer_manifest.json']
 c.write_manifest(r/'producer_manifest.json',producer_commit=sys.argv[2],binary=r/'nemo',files=files,root=r,build_source_root=r/'build_sources')
 PY
+step='NEMO launch'
 if [[ ${R340_PREFLIGHT_DIRECT:-0} == 1 ]]; then
   (cd "$run" && { ./nemo; ./nemo; } >run.user.stdout.log 2>&1)
 else
   (cd "$run" && timeout --kill-after=10 900 mpirun -np 2 --oversubscribe ./nemo >run.user.stdout.log 2>&1)
 fi
-grep 'STOP 0' "$run/run.user.stdout.log" >/dev/null
+step='stdout STOP 0 check'
+grep -F 'STOP 0' "$run/run.user.stdout.log" >/dev/null
+step='ocean.output existence check'
 [[ -f "$run/ocean.output" ]]
-grep 'STOP 0' "$run/ocean.output" >/dev/null
+step='runtime error scan'
 if grep -Eq 'E R R O R|STOP [1-9]' "$run/run.user.stdout.log" "$run/ocean.output"; then
   quote_ocean_errors "$run/run.user.stdout.log"
   quote_ocean_errors "$run/ocean.output"
-  exit 70
+  refuse 'error marker found'
 fi
+step='final manifest write'
 "$py" - "$run" "$commit" <<'PY'
 import sys
 from pathlib import Path
@@ -409,6 +473,18 @@ printf 'program fixture\nend program fixture\n' >"$scratch/target-template/MY_SR
 printf 'program fixture_pp\nend program fixture_pp\n' >"$scratch/target-template/BLD/ppsrc/fixture.f90"
 commit=$(git -C "$REPO" rev-parse HEAD)
 R340_PREFLIGHT_DIRECT=1 "$scratch/execute.sh" "$scratch/stub-success" "$scratch/nemo-stub" "$scratch/source-template" "$scratch/k0-template" "$scratch/target-template" "$commit" "$PY"
+cat >"$scratch/nemo-no-stop" <<'STUB'
+#!/usr/bin/env bash
+printf 'run ended without marker\n'
+printf 'normal ocean log without a stop marker\n' >ocean.output
+STUB
+chmod +x "$scratch/nemo-no-stop"
+if R340_PREFLIGHT_DIRECT=1 "$scratch/execute.sh" "$scratch/stub-no-stop" "$scratch/nemo-no-stop" "$scratch/source-template" "$scratch/k0-template" "$scratch/target-template" "$commit" "$PY" >"$scratch/no-stop.log" 2>&1; then
+ refuse 'missing-STOP plant stayed green'
+fi
+grep -F 'REFUSE: execute/stdout STOP 0 check failed' "$scratch/no-stop.log" >/dev/null \
+ || refuse 'missing-STOP failure was silent'
+printf 'PREFLIGHT_PLANT_FIRED generated-named-refusal\n'
 sed 's/printf '\''STOP 0/printf '\''STOP 1/' "$scratch/nemo-stub" >"$scratch/nemo-refuse"; chmod +x "$scratch/nemo-refuse"
 plant_must_refuse generated-flow env R340_PREFLIGHT_DIRECT=1 "$scratch/execute.sh" "$scratch/stub-refuse" "$scratch/nemo-refuse" "$scratch/source-template" "$scratch/k0-template" "$scratch/target-template" "$commit" "$PY"
 find "$scratch/refused" -maxdepth 1 -type d -name 'stub-refuse.failed.*' -print -quit | grep . >/dev/null \
@@ -479,12 +555,21 @@ if [[ "$MODE" == --admit-existing ]]; then
  exit 0
 fi
 
+failure_step='run preparation'
 [[ -z $(git -C "$REPO" status --porcelain --untracked-files=all) ]] || refuse 'run requires a clean committed tree'
-[[ ! -e "$TARGET_BUILD" && ! -e "$RUN_A" && ! -e "$RUN_B" ]] || refuse 'retain/move existing build and runs before retry'
+resume_arm_b=0
+if [[ -d $RUN_A && ! -e $RUN_B && -x $TARGET_BUILD/BLD/bin/nemo.exe ]]; then
+ admit_one "$RUN_A"
+ resume_arm_b=1
+else
+ [[ ! -e "$TARGET_BUILD" && ! -e "$RUN_A" && ! -e "$RUN_B" ]] || refuse 'retain/move existing build and runs before retry'
+fi
 [[ $(free -g | awk '/^Mem:/{print $7}') -ge 150 ]] || refuse 'under 150 GB available memory'
 mkdir -p "$EVIDENCE"
 cd "$NEMO_ROOT"
-./makenemo -r ORCA2_ICE_PISCES -n "$TARGET_CFG" -m conda-scalarmath del_key 'key_xios'
+if [[ $resume_arm_b -eq 0 ]]; then
+ failure_step='NEMO build'
+ ./makenemo -r ORCA2_ICE_PISCES -n "$TARGET_CFG" -m conda-scalarmath del_key 'key_xios'
 [[ -z $(find "$TARGET_BUILD/MY_SRC" -mindepth 1 -maxdepth 1 -print -quit) ]] \
   || refuse 'new K0-derived MY_SRC is not empty'
 cp "$K0_RUN/build_sources/ppsrc/nemo/sbcmod.f90" "$TARGET_BUILD/MY_SRC/sbcmod.F90"
@@ -505,9 +590,12 @@ patch --batch -s --fuzz=0 -p0 -d "$TARGET_BUILD/MY_SRC" <"$FWB_PATCH"
 cp -a "$K0_BUILD/EXP00/." "$TARGET_BUILD/EXP00/"
 cp "$K0_BUILD/cpp_$K0_CFG.fcm" "$TARGET_BUILD/cpp_$TARGET_CFG.fcm"
 ./makenemo -n "$TARGET_CFG" -m conda-scalarmath del_key 'key_xios'
+fi
 obs=$TARGET_BUILD/BLD/bin/nemo.exe; [[ -x "$obs" ]] || refuse 'instrumented build failed'
-for run in "$RUN_A" "$RUN_B"; do
+if [[ $resume_arm_b -eq 1 ]]; then runs=("$RUN_B"); else runs=("$RUN_A" "$RUN_B"); fi
+for run in "${runs[@]}"; do
   active_runs+=("$run")
+  failure_step="execution of $run"
   "$scratch/execute.sh" "$run" "$obs" "$SOURCE_RUN" "$K0_RUN" "$TARGET_BUILD" "$(git -C "$REPO" rev-parse HEAD)" "$PY"
   admit_one "$run"
 done
