@@ -643,6 +643,154 @@ fed with the admitted kt-2 recorded matrix/RHS from
   barriered NEMO statement order, the residual is not owned by intra-statement
   XLA reassociation/contraction alone.
 
+### 1. Instrumented compiled production TKE solver stage walk
+
+A debug-only observer `_instrumented_production_tke_solve`
+(`scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round336_tke_walk.py:245-317`)
+executes the exact expressions of legoESM's production solver
+`_nemo_literal_tke_solve`
+(`packages/ocean/legoesm/ocean/physics/vertical_mixing/tke.py:1111-1224`)
+under the ORCA2 comparison card's `jax.jit(..., static_argnames=("source_rounded",))`
+(`source_rounded=True`) and `PrecisionPolicy.fp64(transcendentals="libm")`
+settings, returning `(solve_diag, solve_rhs, solve_bottom, solve_back,
+after_solve, e_new)` while asserting bit-for-bit equality of `e_new` against
+uninstrumented `_nemo_literal_tke_solve` (`0 / 772,560` interior words unequal;
+`scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round336_tke_walk.py:333-547`).
+
+1. **Fed with the admitted kt-2 recorded matrix/RHS** (`matrix_lower`,
+   `matrix_diag`, `matrix_upper`, `matrix_rhs_en` from
+   `round336/acquisition/orca1ice_tke_internal_kt2_np2`): the compiled
+   production solver reproduces NEMO's recorded stages with **0 unequal words**
+   (`max_abs = 0.0`) at every stage (`solve_diag`, `solve_rhs`, `solve_bottom`,
+   `solve_back`, and `after_solve`) on `wet30` (`0 / 430,552`), on the 11,676
+   in-solve seafloor Dirichlet slots `jk = mbkt + 1` (`0 / 11,676`), on
+   `active_solve30` (`0 / 442,228`), and on `all30` (`0 / 799,200`). The
+   preregistered falsifier of **R336-R17-P1** therefore fired: the compiled
+   production solver `_nemo_literal_tke_solve` is bit-identical to NEMO's four
+   Thomas recurrences and post-solve floor/mask
+   (`ORCA2_ORCA1ICE_OMIP_L4_R336TKE/BLD/ppsrc/nemo/zdftke.f90:480-503`).
+2. **Fed with the production card's live kt-2 matrix/RHS**
+   (`trace.matrix_lower`, `trace.matrix_diag`, `trace.matrix_upper`,
+   `trace.rhs_pre_sweep`, `trace.surface_dirichlet`, verified bit-identical to
+   `trace.en_post_sweep` on all `799,200` words):
+   - On `wet30` (`tke_wmask != 0`, 430,552 words), `solve_diag`, `solve_rhs`,
+     and `solve_bottom` are bit-identical (`0 / 430,552`), and the **first
+     differing wet solver intermediate is `solve_back` (Thomas reverse sweep)**
+     with **114 / 430,552** unequal wet words (60 on rank 0, 54 on rank 1;
+     maximum `6.589800151726445e-13`), which `after_solve`
+     (`MAX(en, rn_emin) * wmask`, `rn_emin = 1.0e-10`) clamps to
+     **17 / 430,552** wet words (11 on rank 0, 6 on rank 1; maximum
+     `6.589800151726445e-13`).
+   - On `active_solve30` (`wet30 | bottom_bc30`, 442,228 words = 430,552 wet +
+     11,676 in-solve seafloor Dirichlet boundary slots at `jk = mbkt + 1` where
+     `1 <= mbkt <= 29`, `ssmask != 0`, and `tke_wmask == 0`), `matrix_rhs`,
+     `solve_rhs`, and `solve_bottom` already differ at **51 / 442,228** words
+     (`51 / 11,676` on `bottom_bc30`: 26 on rank 0, 25 on rank 1, all on the
+     north-fold row `jj = 150`, `j = 147`, at `jk = mbkt + 1`, maximum
+     `3.1840720976217427e-08`), which `solve_back` couples into the 114 wet
+     words above (`165 / 442,228` active-solve words total).
+
+| stage | recorded matrix/RHS (`wet30` / `active_solve30`) | live card matrix/RHS `wet30` (430,552) | live card `bottom_bc30` (11,676) | live card `active_solve30` (442,228) |
+| --- | ---: | ---: | ---: | ---: |
+| `matrix_rhs` | 0 / 0 (max 0) | 0 / 430,552 (max 0) | 51 / 11,676 (26 r0, 25 r1; max 3.1840720976217427e-08) | 51 / 442,228 (max 3.1840720976217427e-08) |
+| `solve_diag` | 0 / 0 (max 0) | 0 / 430,552 (max 0) | 0 / 11,676 (max 0) | 0 / 442,228 (max 0) |
+| `solve_rhs` | 0 / 0 (max 0) | 0 / 430,552 (max 0) | 51 / 11,676 (26 r0, 25 r1; max 3.1840720976217427e-08) | 51 / 442,228 (max 3.1840720976217427e-08) |
+| `solve_bottom` | 0 / 0 (max 0) | 0 / 430,552 (max 0) | 51 / 11,676 (26 r0, 25 r1; max 3.1840720976217427e-08) | 51 / 442,228 (max 3.1840720976217427e-08) |
+| `solve_back` | 0 / 0 (max 0) | **114 / 430,552** (60 r0, 54 r1; max 6.589800151726445e-13) | 51 / 11,676 (26 r0, 25 r1; max 3.1840720976217427e-08) | 165 / 442,228 (86 r0, 79 r1; max 3.1840720976217427e-08) |
+| `after_solve` | 0 / 0 (max 0) | **17 / 430,552** (11 r0, 6 r1; max 6.589800151726445e-13) | 0 / 11,676 (max 0) | 17 / 442,228 (11 r0, 6 r1; max 6.589800151726445e-13) |
+
+### 2. Code and compiled HLO explanation (**CONFIRMED** vs **PLAUSIBLE**)
+
+- **Compiled XLA CPU HLO of `_nemo_literal_tke_solve` — CONFIRMED exact**:
+  In `jit__nemo_literal_tke_solve`
+  (`packages/ocean/legoesm/ocean/physics/vertical_mixing/tke.py:1111-1224`),
+  the three `jax.lax.scan` phases compile to sequential `while` loops
+  (`%while.16` trip count 29 for `diagonal_step`, `%while.21` trip count 29 for
+  `rhs_step`, and `%while.26` trip count 28 for `reverse_step`) rather than
+  associative parallel scans:
+  - `%fused_computation.1` (`diagonal_step`) emits `%mul.8 = multiply`,
+    `%div.10 = divide`, and `%sub.6 = subtract`
+    (`diagonal - (lower * previous_upper) / previous`), using IEEE-754 hardware
+    division with no reciprocal-multiply rewrite and no FMA contraction.
+  - `%fused_computation.3` (`rhs_step`) emits `%div.11 = divide`,
+    `%mul.9 = multiply`, the `nemo_source_round` `is-finite`/`select` barrier
+    (`%select_n.14`), and `%sub.7 = subtract`
+    (`source - rp((lower / previous_diagonal) * previous)`), preserving
+    division-before-multiply association and blocking FMA contraction.
+  - `%fused_computation.10` (`terminal`) emits `%div.13 = divide`
+    (`work[..., jpkm1] / diagonal[..., jpkm1]`).
+  - `%fused_computation.5` (`reverse_step`) emits `%mul.10 = multiply`, the
+    `nemo_source_round` barrier (`%select_n.16`), `%sub.8 = subtract`, and
+    `%div.12 = divide` (`(source - rp(upper * next_value)) / current_diagonal`).
+  - `%fused_computation.6` (post-solve floor/mask) emits `%max.0 = maximum` and
+    `%mul.11 = multiply`.
+  Any hypothesis that XLA reassociation, reciprocal multiplication, or FMA
+  contraction inside `_nemo_literal_tke_solve` causes the 17-word departure is
+  **REFUTED** (`0 / 799,200` unequal words on the recorded kt-2 matrix/RHS).
+- **North-fold V-face mask omission in `_tke_bottom_dirichlet` and reverse-sweep
+  coupling — CONFIRMED**:
+  In NEMO (`ORCA2_ORCA1ICE_OMIP_L4_R336TKE/BLD/ppsrc/nemo/zdftke.f90:303-309`),
+  the bottom-friction TKE boundary condition evaluates
+  `zmskv = 2. - vmask(ji,jj-1,mbkt) * vmask(ji,jj,mbkt)` and `zebot` from
+  `vv(ji,jj,mbkt,Kbb) + vv(ji,jj-1,mbkt,Kbb)`, writing
+  `en(ji,jj,mbkt(ji,jj)+1) = MAX( zebot, rn_emin ) * ssmask(ji,jj)` at the
+  seafloor interface `jk = mbkt + 1` where `tke_wmask == 0`. In legoESM,
+  `_tke_bottom_dirichlet`
+  (`packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:12466-12486`)
+  calls `compute_face_masks_3d(_zc.is_active, _grid)`, which sets the
+  northernmost V-face mask row `north = jnp.zeros_like(south)`
+  (`packages/ocean/legoesm/ocean/dynamics/latlon_cgrid_operators.py:5450-5451`),
+  zeroing `vm3[-1]` on the north-fold row `jj = 150` (`j = 147`) instead of
+  restoring NEMO's raw `vmask[-1]` as `_tke_step_entry_p_sh2` already does when
+  `nemo_sh2_fold_top_v=True`
+  (`packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:12872-12889`).
+  Because `compute_tke_step` records `_statement_after_boundaries`
+  (`packages/ocean/legoesm/ocean/physics/vertical_mixing/tke.py:3596-3597`)
+  before `_solve_tke_backward_euler` scatters `bottom_dirichlet` into `rhs` at
+  `is_bottom` (`packages/ocean/legoesm/ocean/physics/vertical_mixing/tke.py:1826-1834`),
+  and because `wet30` (`tke_wmask != 0`) excludes `jk = mbkt + 1`, those 51
+  north-fold departures on `rhs_pre_sweep` (`jk = mbkt + 1`) are invisible on
+  `wet30` in `matrix_rhs`, `solve_rhs`, and `solve_bottom`. At the deepest wet
+  interface `jk = mbkt`, however, NEMO's upper diagonal `zd_up(ji,mbkt)`
+  (`ORCA2_ORCA1ICE_OMIP_L4_R336TKE/BLD/ppsrc/nemo/zdftke.f90:431-436`) is
+  non-zero (`zcof * 2.e-5 / (e3t * e3w)`), whereas at `jk = mbkt + 1` the
+  identity row has `zd_lw = 0`, `zd_up = 0`, and `zdiag = 1`. During the
+  reverse sweep (`ORCA2_ORCA1ICE_OMIP_L4_R336TKE/BLD/ppsrc/nemo/zdftke.f90:480-503`),
+  `zd_up(ji,mbkt) * en(ji,150,mbkt+1)` couples the 51 `jk = mbkt + 1` Dirichlet
+  departures into 114 wet words in `solve_back`, of which 17 exceed
+  `rn_emin = 1.0e-10` and survive `after_solve` and `final_avt`.
+
+### 3. Non-landed literal fix proposal and verification on recorded inputs
+
+- **Proposal (not landed in model code)**: in `_tke_bottom_dirichlet`
+  (`packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:12466-12486`),
+  when `getattr(vmix.tke, "nemo_sh2_fold_top_v", False)` is active and
+  `_zc.nemo_een_barotropic.vmask` is present, restore the north-fold V-face
+  mask row `vm3 = vm3.at[-1].set(jnp.asarray(_raw.vmask[-1], dtype=h_k.dtype))`
+  (matching `_tke_step_entry_p_sh2` at
+  `packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:12872-12889`).
+- **Verification on the admitted kt-2 inputs**
+  (`scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round336_tke_walk.py:333-547`):
+  - `bottom_dirichlet` across all 11,676 in-solve seafloor columns drops from
+    `51 / 11,676` (26 on rank 0, 25 on rank 1; maximum
+    `3.1840720976217427e-08`) to **`0 / 11,676` (maximum `0.0`)**.
+  - Substituting the fixed `bottom_dirichlet` into the live card
+    `rhs_pre_sweep` and executing the compiled production solver
+    `_nemo_literal_tke_solve` yields **`0 / 430,552` wet words**,
+    **`0 / 11,676` bottom-BC words**, and **`0 / 442,228` active-solve words**
+    (`max_abs = 0.0`) at `matrix_rhs`, `solve_diag`, `solve_rhs`,
+    `solve_bottom`, `solve_back`, and `after_solve`.
+  - Propagating the fixed `e_new` through `nemo_etau_injection`,
+    `_length_boundaries`, and the diffusivity closure yields **`0` unequal wet
+    words (`max_abs = 0.0`)** at every downstream boundary: `after_tke`
+    (`0 / 414,119`), `pre_sweep_mxl` (`0 / 430,552`), `after_lup`
+    (`0 / 430,552`), `after_ldown` (`0 / 430,552`), `final_mxl`
+    (`0 / 430,552`), `final_mxld` (`0 / 430,552`), `zav` (`0 / 414,119`),
+    `pre_pdlr_avt` (`0 / 414,119`), and `final_avt` (`0 / 414,119`).
+
+Focused unit controls in `tests/ocean/fidelity/test_orca2_round336_tke_walk.py`
+pass 4 tests. independent review: operator.
+
 
 ## Resume 11: passive boundary repair and admitted-recorder census
 

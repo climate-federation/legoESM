@@ -1383,6 +1383,10 @@ FILES = {
     "tke.py": REPO / "packages/ocean/legoesm/ocean/physics/vertical_mixing/tke.py",
     "packages/ocean/legoesm/ocean/physics/vertical_mixing/tke.py":
         REPO / "packages/ocean/legoesm/ocean/physics/vertical_mixing/tke.py",
+    "packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py":
+        REPO / "packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py",
+    "packages/ocean/legoesm/ocean/dynamics/latlon_cgrid_operators.py":
+        REPO / "packages/ocean/legoesm/ocean/dynamics/latlon_cgrid_operators.py",
     "scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round336_tke_walk.py":
         REPO / "scripts/validate/ocean_fidelity/orca2_l4"
              / "nemo_testcase_l4_orca2_round336_tke_walk.py",
@@ -2019,6 +2023,36 @@ CITATION_MAP = {
     'scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round336_tke_walk.py:136-238': [
         'def measure(record_root: Path, deck_root: Path,',
         '"after_solve": "actual production-card JIT output",', 103],
+    'scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round336_tke_walk.py:245-317': [
+        'def _instrumented_production_tke_solve_impl(',
+        'static_argnames=("source_rounded",),', 73],
+    'scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round336_tke_walk.py:333-547': [
+        'def _evaluate_compiled_solver(',
+        '"downstream": fixed_downstream,', 215],
+    'packages/ocean/legoesm/ocean/physics/vertical_mixing/tke.py:1111-1224': [
+        'def _nemo_literal_tke_solve(',
+        '* jnp.asarray(w_active, dtype=solved_prefix.dtype))', 114],
+    'packages/ocean/legoesm/ocean/physics/vertical_mixing/tke.py:1826-1834': [
+        ('N = e_old.shape[-1]', 2),
+        'rhs = jnp.where(is_bottom, _e_bd[..., jnp.newaxis], rhs)', 9],
+    'packages/ocean/legoesm/ocean/physics/vertical_mixing/tke.py:3596-3597': [
+        '_statement_after_boundaries = jnp.concatenate(',
+        ('[_surface_row, tke_curr], axis=-1)', 1), 2],
+    'ORCA2_ORCA1ICE_OMIP_L4_R336TKE/BLD/ppsrc/nemo/zdftke.f90:303-309': [
+        'DO ji = ntsi-( 0), ntei+( 0 )             ! bottom friction',
+        'en(ji,jj,mbkt(ji,jj)+1) = MAX( zebot, rn_emin ) * ssmask(ji,jj)', 7],
+    'ORCA2_ORCA1ICE_OMIP_L4_R336TKE/BLD/ppsrc/nemo/zdftke.f90:431-436': [
+        'zzd_up = zcof * MAX(  p_avm(ji,jj,jk+1) + p_avm(ji,jj,jk  ) , 2.e-5_wp  )         &  ! upper diagonal',
+        'zd_up(ji,jk) = zzd_up               ! Matrix (zdiag, zd_up, zd_lw)', 6],
+    'packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:12466-12486': [
+        'um3, vm3 = compute_face_masks_3d(_zc.is_active, _grid)',
+        'return ssmask * nemo_bottom_tke_dirichlet(r_t, u_sum, v_sum, vmix.tke)', 21],
+    'packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:12872-12889': [
+        'fold_top_v = bool(getattr(tke_cfg, "nemo_sh2_fold_top_v", False))',
+        'jnp.asarray(_raw.vmask[-1], dtype=v_mask.dtype))', 18],
+    'packages/ocean/legoesm/ocean/dynamics/latlon_cgrid_operators.py:5450-5451': [
+        ('north = jnp.zeros_like(south)', 2),
+        ('v_mask = jnp.concatenate([south, v_mask_interior, north], axis=0)', 2), 2],
     'scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round336_tke_gate.py:344-361': [
         'if source is not None:',
         '"TKE live e3w(Kmm) differs from admitted round-333 replay")', 18],
