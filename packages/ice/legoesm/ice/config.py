@@ -312,7 +312,7 @@ def validate_si3_thermo_config(config: "SeaIceConfig") -> None:
     """Reject unsupported SI3 selector mixtures before any tendency runs."""
 
     if config.thermo_scheme != "si3_bl99":
-        return _validate_si3_orca2_o1_config(config) or _validate_si3_orca2_o4_config(config)
+        return _validate_si3_orca2_o1_config(config) or _validate_si3_orca2_o4_config(config) or _validate_si3_lev_pond_config(config)
     wanted = SI3ThermoConfig(lateral_melt=config.si3.lateral_melt, namthd_da=config.si3.namthd_da)
     if config.si3 != wanted:
         raise ValueError(
@@ -657,3 +657,66 @@ class SI3PondConfig(NamedTuple):
     rn_apnd_max: float
     rn_pnd_flush: float
     ln_pnd_lids: bool
+
+
+def _validate_si3_lev_pond_config(config: "SeaIceConfig") -> None:
+    """Reject combining ``ponds.scheme='si3_lev'`` with stages that do not yet carry ``h_il``/``v_il`` as NEMO does."""
+    if not config.ponds.enabled:
+        if config.ponds.scheme != "cesm":
+            raise ValueError(
+                "config.ponds.scheme must be 'cesm' when config.ponds.enabled is False"
+            )
+        return
+    if config.ponds.scheme not in ("cesm", "si3_lev"):
+        raise ValueError(
+            f"Unknown MeltPondConfig.scheme={config.ponds.scheme!r}; expected 'cesm' or 'si3_lev'"
+        )
+    if config.ponds.scheme == "cesm":
+        if config.ponds.namthd_pnd is not None:
+            raise ValueError(
+                "step_ponds(scheme='cesm') does not accept namthd_pnd; "
+                "set MeltPondConfig.scheme='si3_lev'"
+            )
+        return
+    if not isinstance(config.ponds.namthd_pnd, SI3PondConfig):
+        raise ValueError(
+            "step_ponds(scheme='si3_lev') requires MeltPondConfig.namthd_pnd "
+            "to be an explicit SI3PondConfig; no defaults"
+        )
+    if config.itd_remap not in ("simple", "lipscomb2001", "none"):
+        raise ValueError(
+            f"Unknown config.itd_remap={config.itd_remap!r}; expected "
+            "'simple', 'lipscomb2001', or 'none'."
+        )
+    missing_stages: list[str] = []
+    if config.dynamics != "none" or config.transport != "none":
+        missing_stages.append(
+            f"advection (dynamics={config.dynamics!r}, transport={config.transport!r}; "
+            "NEMO rung O4 Prather advection ice_dyn_adv_pra must carry v_il)"
+        )
+    if config.n_categories > 1 and config.itd_remap != "none":
+        missing_stages.append(
+            "concentration cap (_cap_multicat_concentration; NEMO rung O6/O15 ice_cor must carry v_il)"
+        )
+        missing_stages.append(
+            f"ITD remap (itd_remap={config.itd_remap!r}; NEMO rung O13 ice_itd_rem must carry v_il)"
+        )
+    elif config.n_categories == 1 and config.itd_remap == "lipscomb2001":
+        missing_stages.append(
+            f"ITD remap (itd_remap={config.itd_remap!r}; NEMO rung O13 ice_itd_rem must carry v_il)"
+        )
+    if config.ridging.enabled:
+        missing_stages.append(
+            "ridging (ridging.enabled=True; NEMO rung O6 ice_dyn_rdgrft must carry v_il)"
+        )
+    if missing_stages:
+        raise ValueError(
+            "MeltPondConfig(scheme='si3_lev', "
+            f"ln_pnd_lids={config.ponds.namthd_pnd.ln_pnd_lids}) cannot be combined "
+            "with stages that do not yet carry prognostic lid thickness/volume "
+            "(h_il/v_il) as NEMO does; missing stage(s): "
+            + "; ".join(missing_stages)
+            + ". Run thermodynamics-only O12 composition (dynamics='none', "
+            "transport='none', ridging.enabled=False, and itd_remap='none' when "
+            "n_categories > 1) until rungs O4/O6/O13 carry v_il."
+        )

@@ -417,7 +417,7 @@ def step_sea_ice(
             f"step_sea_ice: config.n_categories={config.n_categories}; must be "
             "a positive integer (>= 1)."
         )
-    if config.itd_remap not in ("simple", "lipscomb2001"):
+    if not (config.ponds.enabled and config.ponds.scheme == "si3_lev") and config.itd_remap not in ("simple", "lipscomb2001"):
         raise ValueError(
             f"Unknown config.itd_remap={config.itd_remap!r}; expected "
             "'simple' or 'lipscomb2001'."
@@ -430,7 +430,7 @@ def step_sea_ice(
     # pond conservation (the per-category tracers would sit on a stale bin
     # structure).  Require the tracer-aware Lipscomb (2001) remap whenever a
     # tracer is active in multi-category mode.
-    if config.n_categories > 1:
+    if config.n_categories > 1 and not (config.ponds.enabled and config.ponds.scheme == "si3_lev"):
         # Tracer conservation: only 'lipscomb2001' carries the snow /
         # bulk-salinity / pond tracers across category bins.  Require it (NOT
         # merely reject 'simple') so a typo cannot route to the legacy linear
@@ -1706,7 +1706,7 @@ def _ocean_exchange_from_diag(diag, conc_in, config):
     return fw, heat, atmos_mass
 
 
-def _cap_multicat_concentration(conc, h, h_snow=None, pond_depth=None):
+def _cap_multicat_concentration(conc, h, h_snow=None, pond_depth=None, *, h_il=None):
     """Restore the aggregate-area invariant ``sum_k a_k <= 1`` after a
     multi-category transport step that advected each category independently.
 
@@ -1734,6 +1734,12 @@ def _cap_multicat_concentration(conc, h, h_snow=None, pond_depth=None):
     practice (the root-cause lead-freeze area bound + sub-CFL transport keep
     overfill tiny).
     """
+    if h_il is not None:
+        raise ValueError(
+            "concentration cap (_cap_multicat_concentration) cannot run with "
+            "prognostic lid thickness h_il (MeltPondConfig.scheme='si3_lev'); "
+            "NEMO rung O6/O15 ice_cor must carry v_il"
+        )
     sum_conc = jnp.sum(conc, axis=-1, keepdims=True)
     overfill = jnp.maximum(sum_conc, 1.0)
     conc = conc / overfill
@@ -1758,6 +1764,12 @@ def _pond_area_depth_from_volume(V_pond_per_cell, conc, config):
     water above ``depth_to_area_ratio * max_area**2`` would be silently lost).
     The 1e-14 sqrt floor keeps no-pond cells no-pond and the gradient finite.
     """
+    if config.ponds.enabled and config.ponds.scheme == "si3_lev":
+        raise ValueError(
+            "_pond_area_depth_from_volume (CESM pond reconstruction after "
+            "advection/ITD remap/ridging) cannot run with MeltPondConfig.scheme='si3_lev'; "
+            "NEMO rungs O4/O6/O13 must carry v_il"
+        )
     conc_safe = jnp.maximum(conc, 1e-12)
     vol_per_ice_area = jnp.where(conc > 1e-12, V_pond_per_cell / conc_safe, 0.0)
     depth_init = jnp.sqrt(
@@ -2809,6 +2821,7 @@ def _step_dynamic_v2(
         raise ValueError(
             "config.ponds.scheme must be 'cesm' when config.ponds.enabled is False"
         )
+    validate_si3_thermo_config(config)
     if config.ponds.enabled and config.ponds.scheme == "si3_lev":
         if state.h_il is None:
             raise ValueError(
@@ -2827,9 +2840,9 @@ def _step_dynamic_v2(
     # so EVP/mEVP rheology and the F11 per-cell normalisation never see > 1
     # cell area.  No-op when sum <= 1; transport / ITD remap can re-introduce
     # overfill and are re-capped downstream.  Codex.
-    if config.n_categories > 1:
+    if config.n_categories > 1 and config.itd_remap != "none":
         conc, h, h_snow, pond_depth = _cap_multicat_concentration(
-            conc, h, h_snow, pond_depth)
+            conc, h, h_snow, pond_depth, h_il=h_il)
 
     # Pre-step concentration snapshot — used when normalising
     # per-grid-cell fluxes to per-ice-tile fluxes so a cell that
@@ -2966,9 +2979,9 @@ def _step_dynamic_v2(
     # transport.  NOTE: a uniform mechanical thickening, NOT a bin-accurate ITD
     # redistribution — realistic sub-CFL overfill is <<1% and stays within its
     # category; bin-accurate large-overfill handling is the deferred item.
-    if is_multicat:
+    if is_multicat and config.itd_remap != "none":
         conc, h, h_snow, pond_depth = _cap_multicat_concentration(
-            conc, h, h_snow, pond_depth)
+            conc, h, h_snow, pond_depth, h_il=h_il)
 
     # ---- 3. Pre-thermo per-category state (save for ITD remap) ----
     h_old = h
@@ -3180,7 +3193,7 @@ def _step_dynamic_v2(
         tau_y_resp = result["tau_y"]
 
     # ---- 5. ITD remap ----
-    if is_multicat:
+    if is_multicat and config.itd_remap != "none":
         # Cap the aggregate area BEFORE the ITD remap so neither Lipscomb nor
         # the simple remap ever consumes sum_k a_k > 1.  With the lead-freeze
         # area now bounded inside the thermo kernels this is a no-op for
@@ -3188,7 +3201,7 @@ def _step_dynamic_v2(
         # restart / transport remainder reaching the remapper (volume / snow /
         # pond / salt conserving; no-op when sum <= 1).  Codex.
         conc, h, h_snow, pond_depth = _cap_multicat_concentration(
-            conc, h, h_snow, pond_depth)
+            conc, h, h_snow, pond_depth, h_il=h_il)
         n_cat = h.shape[-1]
         # Volume of snow per cat (h_snow * a) for remap.
         V_snow_cat = h_snow * conc
@@ -3209,11 +3222,10 @@ def _step_dynamic_v2(
             # Recover h_snow from V_snow and conc.
             conc_safe = jnp.maximum(conc, 1e-12)
             h_snow = jnp.where(conc > 1e-12, remap["V_snow"] / conc_safe, 0.0)
-            if config.ponds.scheme != "si3_lev":
-                # Recover per-ice-area pond (area, depth) from the conserved
-                # per-cell pond volume (V-conserving even at the area cap).
-                pond_area, pond_depth = _pond_area_depth_from_volume(
-                    remap["V_pond"], conc, config)
+            # Recover per-ice-area pond (area, depth) from the conserved
+            # per-cell pond volume (V-conserving even at the area cap).
+            pond_area, pond_depth = _pond_area_depth_from_volume(
+                remap["V_pond"], conc, config)
         elif config.itd_remap == "simple":
             # Legacy linear remap for h, a, T only (valid only when there are
             # no snow/brine/pond tracers — enforced by the multicat guard in
@@ -3235,7 +3247,7 @@ def _step_dynamic_v2(
         # (donor area, snow/pond drainage, freshwater fluxes) never sees an
         # overfilled column.  No-op when sum <= 1.  Codex.
         conc, h, h_snow, pond_depth = _cap_multicat_concentration(
-            conc, h, h_snow, pond_depth)
+            conc, h, h_snow, pond_depth, h_il=h_il)
 
     # ---- 6. Ridging ----
     if config.ridging.enabled and is_multicat and grid is not None:
@@ -3280,9 +3292,9 @@ def _step_dynamic_v2(
     # compacted/grown category across bins and reintroduce sum_k a_k > 1, so
     # re-cap the post-remap/post-ridging state (volume / snow / pond / salt
     # conserving; no-op when sum <= 1).  Codex.
-    if is_multicat:
+    if is_multicat and config.itd_remap != "none":
         conc, h, h_snow, pond_depth = _cap_multicat_concentration(
-            conc, h, h_snow, pond_depth)
+            conc, h, h_snow, pond_depth, h_il=h_il)
 
     # ---- 7. Build response ----
     if is_multicat:
