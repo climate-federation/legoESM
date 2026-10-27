@@ -59,13 +59,17 @@ admit_one(){
  local root=$1 parent=${2:-$K0_RUN} expected_commit
  failure_step="admission of $root"
  expected_commit=$(git -C "$REPO" rev-parse HEAD)
- "$PY" - "$root" "$parent" "$expected_commit" <<'PY'
-import sys
+ "$PY" - "$root" "$parent" "$expected_commit" "$REPO" <<'PY'
+import json,subprocess,sys
 from pathlib import Path
 from scripts.validate.ocean_fidelity.orca2_l4 import nemo_testcase_l4_orca2_round339_common as c
 from scripts.validate.ocean_fidelity.orca2_l4 import nemo_testcase_l4_orca2_round340_standalone_gate as g
 r,parent=map(Path,sys.argv[1:3])
-c.verify_manifest(r/'producer_manifest.json',expected_commit=sys.argv[3])
+producer=json.loads((r/'producer_manifest.json').read_text()).get('producer_commit','')
+c.verify_manifest(r/'producer_manifest.json',expected_commit=producer)
+c.require(subprocess.run(
+    ['git','-C',sys.argv[4],'merge-base','--is-ancestor',producer,sys.argv[3]]
+).returncode == 0,'manifest producer is not an ancestor of the admission commit')
 for log_name in ('run.user.stdout.log','ocean.output'):
     text=(r/log_name).read_text(errors='replace')
     if 'E R R O R' in text:
