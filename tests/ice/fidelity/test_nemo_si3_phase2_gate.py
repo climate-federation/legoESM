@@ -36,12 +36,12 @@ def _build_card():
 
 
 def test_card_is_fp64_and_default_ice_state_layout_is_unchanged():
-    from legoesm.ice.state import DynamicSeaIceState
+    from legoesm.ice.state import init_dynamic_ice_state
 
     card = _build_card()
     assert card.initial_state.contents.dtype == jnp.float64
     assert all(moment.dtype == jnp.float64 for moment in card.initial_state.moments)
-    assert len(DynamicSeaIceState._fields) == 13
+    assert len(jax.tree.leaves(init_dynamic_ice_state((2, 2)))) == 12
 
 
 def test_prather_rung_rejects_a_nonzero_y_velocity():

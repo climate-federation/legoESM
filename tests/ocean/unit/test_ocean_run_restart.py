@@ -77,6 +77,8 @@ def _ice_state(n_categories=1):
     upd = {}
     for i, name in enumerate(DynamicSeaIceState._fields):
         ref = getattr(ice, name)
+        if ref is None:
+            continue
         upd[name] = ref.replace(
             data=jnp.asarray(rng.random(ref.data.shape) + float(i + 1),
                              dtype=ref.data.dtype))
@@ -336,7 +338,9 @@ def _fill_all_slots(state):
 
 
 def _assert_slot_equal(name, got, want):
-    if isinstance(want, Field):
+    if want is None:
+        assert got is None, f"{name}: None -> {type(got).__name__}"
+    elif isinstance(want, Field):
         assert isinstance(got, Field), f"{name}: Field -> {type(got).__name__}"
         np.testing.assert_array_equal(np.asarray(got.data),
                                       np.asarray(want.data),
@@ -390,8 +394,9 @@ def test_all_slots_round_trip_bit_exact(tmp_path):
         if _SLOT_POLICY[name] == _SLOT_DIAGNOSTIC:
             continue      # excluded by policy — covered by its own test below
         _assert_slot_equal(name, getattr(got, name), getattr(state, name))
-    # All 13 sea-ice slots, unmangled (no land-masking, no category aggregation).
-    assert len(DynamicSeaIceState._fields) == 13
+    # All 12 default sea-ice slots, unmangled (no land-masking, no category aggregation),
+    # with h_il=None on the default CESM pond scheme.
+    assert len(jax.tree.leaves(ice)) == 12 and ice.h_il is None
     for name in DynamicSeaIceState._fields:
         _assert_slot_equal(f"ice_{name}", getattr(got_ice, name),
                            getattr(ice, name))

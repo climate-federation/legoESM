@@ -472,7 +472,7 @@ def step_sea_ice(
                     "init_dynamic_ice_state(shape, n_categories=...) and "
                     "distribute_to_categories before calling step_sea_ice."
                 )
-            state = slab_to_dynamic(state)
+            state = slab_to_dynamic(state, pond_scheme=config.ponds.scheme if config.ponds.enabled else "cesm")
         # Validate dynamic-state shape against the configured number of
         # categories (grid-aware) so a stale state cannot silently run a
         # multi-category config (skipping ITD remap / ridging) or vice versa.
@@ -746,6 +746,10 @@ def _step_slab(
     dt: float,
 ) -> tuple[SeaIceState, TileResponse]:
     """Original slab sea ice model (backward compatible)."""
+    if not config.ponds.enabled and config.ponds.scheme != "cesm":
+        raise ValueError(
+            "config.ponds.scheme must be 'cesm' when config.ponds.enabled is False"
+        )
     h = state.h_ice.data
     T_ice = state.T_ice.data
     conc = state.concentration.data
@@ -936,6 +940,14 @@ def _step_dynamic(
     state : DynamicSeaIceState
     grid : CubedSphereGrid, required for dynamics/transport
     """
+    if not config.ponds.enabled and config.ponds.scheme != "cesm":
+        raise ValueError(
+            "config.ponds.scheme must be 'cesm' when config.ponds.enabled is False"
+        )
+    if state.h_il is not None:
+        raise ValueError(
+            "DynamicSeaIceState.h_il must be None unless config.ponds.enabled and config.ponds.scheme == 'si3_lev'"
+        )
     h = state.h_ice.data
     T_ice = state.T_ice.data
     conc = state.concentration.data
@@ -1257,7 +1269,6 @@ def _step_dynamic(
         S_ice=state.S_ice,
         pond_area=state.pond_area,
         pond_depth=state.pond_depth,
-        h_il=state.h_il,
     )
 
     return new_state, response
@@ -2362,23 +2373,32 @@ def _thermo_v2(
     dilute = jnp.where(conc_new > 1e-12, retained_area / jnp.maximum(conc_new, 1e-12), 0.0)
     # Per-grid-cell snow + pond mass shed to the ocean from the retired area,
     # taken from the PRE-conversion tracers (post-sublimation snow; old pond).
-    h_il_in = jnp.zeros_like(pond_depth) if h_il is None else h_il
+    if not config.ponds.enabled and config.ponds.scheme != "cesm":
+        raise ValueError(
+            "config.ponds.scheme must be 'cesm' when config.ponds.enabled is False"
+        )
+    _use_si3_lev = config.ponds.enabled and config.ponds.scheme == "si3_lev"
+    if _use_si3_lev:
+        if h_il is None:
+            raise ValueError(
+                "_thermo_v2(scheme='si3_lev') requires prognostic h_il (lid thickness)"
+            )
+    elif h_il is not None:
+        raise ValueError(
+            "_thermo_v2 requires h_il=None unless config.ponds.enabled and config.ponds.scheme == 'si3_lev'"
+        )
     shed_snow_kg = shed_area * jnp.maximum(h_snow_after_sub, 0.0) * config.snow.rho_snow
     shed_pond_kg = (
         shed_area
         * pond_area
-        * (
-            (pond_depth + h_il_in)
-            if (config.ponds.enabled and config.ponds.scheme == "si3_lev")
-            else pond_depth
-        )
+        * ((pond_depth + h_il) if _use_si3_lev else pond_depth)
         * constants.rho_water
     )
     # Surviving tracers diluted onto the new ice area (depth-diluted; the pond
     # area FRACTION is preserved, the water VOLUME per ice-area is diluted).
     h_snow_dil = jnp.maximum(h_snow_after_sub, 0.0) * dilute
     pond_depth_dil = pond_depth * dilute
-    h_il_dil = h_il_in * dilute
+    h_il_dil = h_il * dilute if _use_si3_lev else None
 
     # 10. Snow-ice flooding (white-ice formation) — on the diluted, new-area snow.
     if config.snow.enabled and config.snow.flooding:
@@ -2530,7 +2550,7 @@ def _thermo_v2(
     h_snow_new = jnp.where(ablated, 0.0, h_snow_new)
     pond_area_new = jnp.where(ablated, 0.0, pond_area_new)
     pond_depth_new = jnp.where(ablated, 0.0, pond_depth_new)
-    h_il_new = jnp.where(ablated, 0.0, h_il_new)
+    h_il_new = jnp.where(ablated, 0.0, h_il_new) if h_il_new is not None else None
 
     # 12. Brine + salt budget update — uses the *final* per-cat
     #     volume (including white-ice and refrozen-pond contributions)
@@ -2785,11 +2805,22 @@ def _step_dynamic_v2(
     S_ice = state.S_ice.data
     pond_area = state.pond_area.data
     pond_depth = state.pond_depth.data
-    if config.ponds.enabled and config.ponds.scheme == "si3_lev" and state.h_il is None:
+    if not config.ponds.enabled and config.ponds.scheme != "cesm":
         raise ValueError(
-            "DynamicSeaIceState.h_il must be a Field when config.ponds.scheme == 'si3_lev'"
+            "config.ponds.scheme must be 'cesm' when config.ponds.enabled is False"
         )
-    h_il = state.h_il.data if state.h_il is not None else jnp.zeros_like(pond_depth)
+    if config.ponds.enabled and config.ponds.scheme == "si3_lev":
+        if state.h_il is None:
+            raise ValueError(
+                "DynamicSeaIceState.h_il must be a Field when config.ponds.scheme == 'si3_lev'"
+            )
+        h_il = state.h_il.data
+    else:
+        if state.h_il is not None:
+            raise ValueError(
+                "DynamicSeaIceState.h_il must be None unless config.ponds.enabled and config.ponds.scheme == 'si3_lev'"
+            )
+        h_il = None
 
     # Cap an already-overfilled multicat state (e.g. a restart) to
     # sum_k a_k <= 1 BEFORE the dynamics aggregate and the conc_pre snapshot,
@@ -2984,7 +3015,7 @@ def _step_dynamic_v2(
                 enable_lead_freeze=(k == 0),
                 q_open_top=q_open_top,
                 ocean_dz_top_m=ocean_dz_top_m,
-                h_il=h_il[..., k],
+                h_il=h_il[..., k] if h_il is not None else None,
                 at_i=at_i_agg,
             )
             h_list.append(result["h"])
@@ -2994,7 +3025,8 @@ def _step_dynamic_v2(
             S_list.append(result["S_ice"])
             pa_list.append(result["pond_area"])
             pd_list.append(result["pond_depth"])
-            hil_list.append(result["h_il"])
+            if h_il is not None:
+                hil_list.append(result["h_il"])
             salt_flux_list.append(result["salt_flux_to_ocean"])
             fw_flux_list.append(result["freshwater_to_ocean"])
             ocean_heat_list.append(result["ocean_heat_extraction"])
@@ -3014,7 +3046,7 @@ def _step_dynamic_v2(
         S_ice = jnp.stack(S_list, axis=-1)
         pond_area = jnp.stack(pa_list, axis=-1)
         pond_depth = jnp.stack(pd_list, axis=-1)
-        h_il = jnp.stack(hil_list, axis=-1)
+        h_il = jnp.stack(hil_list, axis=-1) if h_il is not None else None
 
         # Ice->ocean EXCHANGE fluxes (freshwater / heat / salt / SW
         # penetration): ``_thermo_v2`` already multiplied the per-cat-area

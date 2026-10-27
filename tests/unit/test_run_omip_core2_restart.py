@@ -772,6 +772,9 @@ def _assert_states_match(got, want, got_ice, want_ice, *, atol=1e-10):
                                    atol=atol, rtol=0,
                                    err_msg="TKE carry diverged after resume")
     for name in DynamicSeaIceState._fields:
+        assert (getattr(got_ice, name) is None) == (getattr(want_ice, name) is None)
+        if getattr(want_ice, name) is None:
+            continue
         np.testing.assert_allclose(
             np.asarray(getattr(got_ice, name).data),
             np.asarray(getattr(want_ice, name).data), atol=atol, rtol=0,

@@ -384,7 +384,10 @@ def _iter_state_fields(state) -> list[str]:
     # NamedTuple subclasses expose ``_fields``; fall back to dir() filtered.
     fields = getattr(state, "_fields", None)
     if fields is not None:
-        return list(fields)
+        return [
+            k for k in fields
+            if not (k == "h_il" and getattr(state, k, None) is None)
+        ]
     return [k for k in dir(state) if isinstance(getattr(state, k), Field)]
 
 
@@ -853,7 +856,8 @@ def classify_restart_slots(state) -> tuple[list[str], list[str]]:
     value-only check would pass at setup and only blow up months later, at the
     first checkpoint of the first run that turns the new gate on (codex r1).
     """
-    unclassified = sorted(n for n in _iter_state_fields(state)
+    declared = getattr(state, "_fields", None) or _iter_state_fields(state)
+    unclassified = sorted(n for n in declared
                           if n not in _SLOT_POLICY)
     if unclassified:
         raise KeyError(

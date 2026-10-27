@@ -1922,7 +1922,9 @@ def test_production_step_sea_ice_and_step_ponds_wire_si3_lev_and_preserve_cesm(m
     )
     shape = (2, 2)
     t_init = SeaIceConfig().T_freeze_ocean
-    base_state = init_dynamic_ice_state(shape, S_ice_init=2.5, T_ice_init=t_init)
+    base_state = init_dynamic_ice_state(
+        shape, S_ice_init=2.5, T_ice_init=t_init, pond_scheme="si3_lev"
+    )
     state = base_state._replace(
         h_ice=base_state.h_ice.replace(data=jnp.full(shape, 1.4, dtype=jnp.float64)),
         T_ice=base_state.T_ice.replace(data=jnp.full(shape, t_init, dtype=jnp.float64)),
@@ -2121,12 +2123,14 @@ def test_production_step_sea_ice_and_step_ponds_wire_si3_lev_and_preserve_cesm(m
         snow=SnowConfig(enabled=True, flooding=False),
         ponds=MeltPondConfig(enabled=True, scheme="cesm"),
     )
+    state_cesm = state._replace(h_il=None)
     st_def, rsp_def = sea_ice_mod.step_sea_ice(
-        state, forcing, ocean_sst, zeros, zeros, cfg_cesm_default, U_min=1.0, dt=RDT
+        state_cesm, forcing, ocean_sst, zeros, zeros, cfg_cesm_default, U_min=1.0, dt=RDT
     )
     st_exp, rsp_exp = sea_ice_mod.step_sea_ice(
-        state, forcing, ocean_sst, zeros, zeros, cfg_cesm_explicit, U_min=1.0, dt=RDT
+        state_cesm, forcing, ocean_sst, zeros, zeros, cfg_cesm_explicit, U_min=1.0, dt=RDT
     )
+    assert st_def.h_il is None and st_exp.h_il is None
     for got, want in zip(jax.tree.leaves(st_def), jax.tree.leaves(st_exp), strict=True):
         np.testing.assert_array_equal(_bits(got), _bits(want))
     for got, want in zip(jax.tree.leaves(rsp_def), jax.tree.leaves(rsp_exp), strict=True):
@@ -2146,7 +2150,7 @@ def test_production_step_sea_ice_and_step_ponds_wire_si3_lev_and_preserve_cesm(m
         )
     with pytest.raises(ValueError, match="does not accept namthd_pnd"):
         sea_ice_mod.step_sea_ice(
-            state,
+            state_cesm,
             forcing,
             ocean_sst,
             zeros,
@@ -2157,12 +2161,23 @@ def test_production_step_sea_ice_and_step_ponds_wire_si3_lev_and_preserve_cesm(m
         )
     with pytest.raises(ValueError, match="DynamicSeaIceState.h_il must be a Field"):
         sea_ice_mod.step_sea_ice(
-            state._replace(h_il=None),
+            state_cesm,
             forcing,
             ocean_sst,
             zeros,
             zeros,
             cfg_si3,
+            U_min=1.0,
+            dt=RDT,
+        )
+    with pytest.raises(ValueError, match="DynamicSeaIceState.h_il must be None"):
+        sea_ice_mod.step_sea_ice(
+            state,
+            forcing,
+            ocean_sst,
+            zeros,
+            zeros,
+            cfg_cesm_default,
             U_min=1.0,
             dt=RDT,
         )
@@ -2184,7 +2199,9 @@ def test_lid_thickness_h_il_persists_across_steps_and_restart_round_trip(tmp_pat
     )
     shape = (2, 2)
     t_cold = SeaIceConfig().T_freeze_ocean  # 271.35 K (< T0, grows lid via Flocco 2010)
-    base_state = init_dynamic_ice_state(shape, S_ice_init=2.5, T_ice_init=t_cold)
+    base_state = init_dynamic_ice_state(
+        shape, S_ice_init=2.5, T_ice_init=t_cold, pond_scheme="si3_lev"
+    )
     # Four distinct cells:
     # (0, 0): starts at h_il=0.0, grows lid on step 1, evolves from that lid on step 2
     # (0, 1): starts with existing lid h_il=0.015 m, insulates pond on step 1 and step 2
@@ -2352,7 +2369,7 @@ def test_lid_thickness_h_il_persists_across_steps_and_restart_round_trip(tmp_pat
     _, got_ice, _ = load_run_restart(
         rst_path,
         ocn_state,
-        ice_template=init_dynamic_ice_state(shape),
+        ice_template=init_dynamic_ice_state(shape, pond_scheme="si3_lev"),
         grid_type="latlon",
     )
     np.testing.assert_array_equal(_bits(got_ice.h_il.data), _bits(st1_jit.h_il.data))
@@ -2406,7 +2423,9 @@ def test_multicategory_jpl5_step_sea_ice_sums_at_i_over_categories(monkeypatch):
     shape_mc = (*spatial, n_cat)
     t_melt = SeaIceConfig().T_melt_surface  # 273.15 K
     t_init = SeaIceConfig().T_freeze_ocean  # 271.35 K (< T0 so zperm > 0 without flushing ponds dry)
-    base_state = init_dynamic_ice_state(shape_mc, n_categories=n_cat, S_ice_init=2.5, T_ice_init=t_init)
+    base_state = init_dynamic_ice_state(
+        shape_mc, n_categories=n_cat, S_ice_init=2.5, T_ice_init=t_init, pond_scheme="si3_lev"
+    )
 
     # Distinct per-category AND spatially varying concentrations conc[j, i, k]
     # with sum_k conc[j, i, k] <= 1.0 in every cell, while spatial sum along axis=1 differs in every cell.
@@ -2711,8 +2730,9 @@ def test_m6_parent_commit_vs_current_across_all_other_callers(monkeypatch):
     # Caller 2: State builders (init_dynamic_ice_state, slab_to_dynamic, distribute_dynamic_state_to_categories)
     cur_init = init_dynamic_ice_state(shape_2d)
     par_init = parent_state_mod.init_dynamic_ice_state(shape_2d)
-    for name in parent_state_mod.DynamicSeaIceState._fields:
-        _compare_pair(getattr(cur_init, name).data, getattr(par_init, name).data)
+    assert cur_init.h_il is None
+    for g, w in zip(jax.tree.leaves(cur_init), jax.tree.leaves(par_init), strict=True):
+        _compare_pair(g, w)
 
     slab_cur = SeaIceState(
         h_ice=cur_init.h_ice.replace(data=jnp.asarray(0.8 + 1.2 * rng.random(shape_2d), dtype=jnp.float64)),
@@ -2726,8 +2746,9 @@ def test_m6_parent_commit_vs_current_across_all_other_callers(monkeypatch):
     )
     cur_lifted = slab_to_dynamic(slab_cur)
     par_lifted = parent_state_mod.slab_to_dynamic(slab_par)
-    for name in parent_state_mod.DynamicSeaIceState._fields:
-        _compare_pair(getattr(cur_lifted, name).data, getattr(par_lifted, name).data)
+    assert cur_lifted.h_il is None
+    for g, w in zip(jax.tree.leaves(cur_lifted), jax.tree.leaves(par_lifted), strict=True):
+        _compare_pair(g, w)
 
     cur_seeded = cur_lifted._replace(
         h_snow=cur_lifted.h_snow.replace(data=hsnow_in),
@@ -2743,8 +2764,9 @@ def test_m6_parent_commit_vs_current_across_all_other_callers(monkeypatch):
     )
     cur_mc = distribute_dynamic_state_to_categories(cur_seeded, 5)
     par_mc = parent_state_mod.distribute_dynamic_state_to_categories(par_seeded, 5)
-    for name in parent_state_mod.DynamicSeaIceState._fields:
-        _compare_pair(getattr(cur_mc, name).data, getattr(par_mc, name).data)
+    assert cur_mc.h_il is None
+    for g, w in zip(jax.tree.leaves(cur_mc), jax.tree.leaves(par_mc), strict=True):
+        _compare_pair(g, w)
 
     # Caller 3: step_sea_ice slab mode (SeaIceState, default SeaIceConfig)
     cfg_slab = SeaIceConfig()
@@ -2767,8 +2789,9 @@ def test_m6_parent_commit_vs_current_across_all_other_callers(monkeypatch):
     want_leg_st, want_leg_rsp = parent_sea_ice_mod.step_sea_ice(
         par_seeded, forcing, ocean_sst, ocean_u, ocean_v, cfg_leg_dyn, U_min=1.0, dt=RDT
     )
-    for name in parent_state_mod.DynamicSeaIceState._fields:
-        _compare_pair(getattr(got_leg_st, name).data, getattr(want_leg_st, name).data)
+    assert got_leg_st.h_il is None
+    for g, w in zip(jax.tree.leaves(got_leg_st), jax.tree.leaves(want_leg_st), strict=True):
+        _compare_pair(g, w)
     for g, w in zip(jax.tree.leaves(got_leg_rsp), jax.tree.leaves(want_leg_rsp), strict=True):
         _compare_pair(g, w)
 
@@ -2785,8 +2808,9 @@ def test_m6_parent_commit_vs_current_across_all_other_callers(monkeypatch):
     want_v2_1_st, want_v2_1_rsp = parent_sea_ice_mod.step_sea_ice(
         par_seeded, forcing, ocean_sst, ocean_u, ocean_v, cfg_v2_1cat, U_min=1.0, dt=RDT
     )
-    for name in parent_state_mod.DynamicSeaIceState._fields:
-        _compare_pair(getattr(got_v2_1_st, name).data, getattr(want_v2_1_st, name).data)
+    assert got_v2_1_st.h_il is None
+    for g, w in zip(jax.tree.leaves(got_v2_1_st), jax.tree.leaves(want_v2_1_st), strict=True):
+        _compare_pair(g, w)
     for g, w in zip(jax.tree.leaves(got_v2_1_rsp), jax.tree.leaves(want_v2_1_rsp), strict=True):
         _compare_pair(g, w)
 
@@ -2810,8 +2834,9 @@ def test_m6_parent_commit_vs_current_across_all_other_callers(monkeypatch):
     want_v2_5_st, want_v2_5_rsp = parent_sea_ice_mod.step_sea_ice(
         par_mc, forcing, ocean_sst, ocean_u, ocean_v, cfg_v2_5cat, U_min=1.0, dt=RDT, grid=grid
     )
-    for name in parent_state_mod.DynamicSeaIceState._fields:
-        _compare_pair(getattr(got_v2_5_st, name).data, getattr(want_v2_5_st, name).data)
+    assert got_v2_5_st.h_il is None
+    for g, w in zip(jax.tree.leaves(got_v2_5_st), jax.tree.leaves(want_v2_5_st), strict=True):
+        _compare_pair(g, w)
     for g, w in zip(jax.tree.leaves(got_v2_5_rsp), jax.tree.leaves(want_v2_5_rsp), strict=True):
         _compare_pair(g, w)
 
@@ -2833,3 +2858,476 @@ def test_m6_parent_commit_vs_current_across_all_other_callers(monkeypatch):
         cur_seeded, forcing, ocean_sst, ocean_u, ocean_v, cfg_v2_1cat, U_min=1.0, dt=RDT
     )
     assert np.count_nonzero(_bits(perturbed_st.pond_area.data) != _bits(want_v2_1_st.pond_area.data)) > 0
+
+
+def test_decision_184a_default_cesm_run_state_pytree_structure_and_leaves_equal_parent():
+    """DECISION 184(a): a default (CESM ponds) run's state pytree has exact parent (e31236c2f6) leaves and structure."""
+    import subprocess
+    import types
+    from legoesm.core.field import Field
+    from legoesm.grids.latlon import create_latlon_grid
+    from legoesm.ice.config import BrineConfig, RidgingConfig
+    from legoesm.ice.state import (
+        SeaIceState,
+        distribute_dynamic_state_to_categories,
+        dynamic_to_slab,
+        slab_to_dynamic,
+    )
+
+    parent_rev = "e31236c2f6"
+    repo_root = pathlib.Path(__file__).resolve().parents[3]
+
+    def _load_parent_module(name: str, relpath: str):
+        src = subprocess.check_output(
+            ["git", "show", f"{parent_rev}:{relpath}"],
+            cwd=repo_root,
+            text=True,
+        )
+        mod = types.ModuleType(name)
+        mod.__file__ = f"{parent_rev}:{relpath}"
+        exec(compile(src, mod.__file__, "exec"), mod.__dict__)
+        return mod
+
+    parent_state_mod = _load_parent_module("_par_184a_state", "packages/ice/legoesm/ice/state.py")
+    parent_ponds_mod = _load_parent_module("_par_184a_ponds", "packages/ice/legoesm/ice/ponds.py")
+    parent_sea_ice_mod = _load_parent_module("_par_184a_sea_ice", "packages/ice/legoesm/ice/sea_ice.py")
+    parent_sea_ice_mod.step_ponds = parent_ponds_mod.step_ponds
+    parent_sea_ice_mod.DynamicSeaIceState = parent_state_mod.DynamicSeaIceState
+    parent_sea_ice_mod.SeaIceState = parent_state_mod.SeaIceState
+    parent_sea_ice_mod.init_dynamic_ice_state = parent_state_mod.init_dynamic_ice_state
+    parent_sea_ice_mod.dynamic_to_slab = parent_state_mod.dynamic_to_slab
+    parent_sea_ice_mod.slab_to_dynamic = parent_state_mod.slab_to_dynamic
+
+    def _assert_exact_parent_leaves_and_structure(cur_st, par_st):
+        assert cur_st.h_il is None
+        cur_leaves = jax.tree.leaves(cur_st)
+        par_leaves = jax.tree.leaves(par_st)
+        assert len(cur_leaves) == 12 and len(par_leaves) == 12
+        # Exact Field-level pytree treedef equality (including Field name/dims/units/long_name/staggering aux-data)
+        cur_fields_tuple = tuple(getattr(cur_st, k) for k in par_state_mod.DynamicSeaIceState._fields)
+        par_fields_tuple = tuple(getattr(par_st, k) for k in par_state_mod.DynamicSeaIceState._fields)
+        assert jax.tree_util.tree_structure(cur_fields_tuple) == jax.tree_util.tree_structure(par_fields_tuple)
+        for g, w in zip(cur_leaves, par_leaves, strict=True):
+            assert g.shape == w.shape and g.dtype == w.dtype
+            np.testing.assert_array_equal(_bits(g), _bits(w))
+
+    par_state_mod = parent_state_mod
+    shape_2d = (3, 4)
+    shape_mc = (3, 4, 5)
+    # 1. init_dynamic_ice_state (1-cat and 5-cat)
+    _assert_exact_parent_leaves_and_structure(
+        init_dynamic_ice_state(shape_2d),
+        parent_state_mod.init_dynamic_ice_state(shape_2d),
+    )
+    _assert_exact_parent_leaves_and_structure(
+        init_dynamic_ice_state(shape_mc, n_categories=5),
+        parent_state_mod.init_dynamic_ice_state(shape_mc, n_categories=5),
+    )
+
+    # 2. slab_to_dynamic and distribute_dynamic_state_to_categories
+    rng = np.random.default_rng(18401)
+    base_1 = init_dynamic_ice_state(shape_2d)
+    slab_cur = SeaIceState(
+        h_ice=base_1.h_ice.replace(data=jnp.asarray(0.7 + 1.1 * rng.random(shape_2d), dtype=jnp.float64)),
+        T_ice=base_1.T_ice.replace(data=jnp.asarray(266.0 + 4.0 * rng.random(shape_2d), dtype=jnp.float64)),
+        concentration=base_1.concentration.replace(data=jnp.asarray(0.5 + 0.4 * rng.random(shape_2d), dtype=jnp.float64)),
+    )
+    slab_par = parent_state_mod.SeaIceState(
+        h_ice=slab_cur.h_ice, T_ice=slab_cur.T_ice, concentration=slab_cur.concentration
+    )
+    cur_lift = slab_to_dynamic(slab_cur)
+    par_lift = parent_state_mod.slab_to_dynamic(slab_par)
+    _assert_exact_parent_leaves_and_structure(cur_lift, par_lift)
+
+    cur_dist = distribute_dynamic_state_to_categories(cur_lift, 5)
+    par_dist = parent_state_mod.distribute_dynamic_state_to_categories(par_lift, 5)
+    _assert_exact_parent_leaves_and_structure(cur_dist, par_dist)
+
+    # 3. step_sea_ice on default (CESM ponds) runs: slab-lift, 1-cat v2, and 5-cat v2
+    zeros_2d = jnp.zeros(shape_2d, dtype=jnp.float64)
+    forcing = AtmToSurface(
+        sw_down=jnp.full(shape_2d, 140.0, dtype=jnp.float64),
+        lw_down=jnp.full(shape_2d, 250.0, dtype=jnp.float64),
+        precip_total=jnp.full(shape_2d, 1.5e-5, dtype=jnp.float64),
+        precip_snow=jnp.full(shape_2d, 0.5e-5, dtype=jnp.float64),
+        T_lowest=jnp.full(shape_2d, 272.5, dtype=jnp.float64),
+        q_lowest=jnp.full(shape_2d, 0.0025, dtype=jnp.float64),
+        u_lowest=jnp.full(shape_2d, 2.0, dtype=jnp.float64),
+        v_lowest=jnp.full(shape_2d, -1.0, dtype=jnp.float64),
+        p_lowest=jnp.full(shape_2d, 100000.0, dtype=jnp.float64),
+        p_surface=jnp.full(shape_2d, 101325.0, dtype=jnp.float64),
+        rho_lowest=jnp.full(shape_2d, 1.25, dtype=jnp.float64),
+        cos_zenith=jnp.full(shape_2d, 0.5, dtype=jnp.float64),
+        co2_ppmv=jnp.full(shape_2d, 400.0, dtype=jnp.float64),
+        has_radiation=jnp.ones(shape_2d, dtype=jnp.float64),
+        has_precipitation=jnp.ones(shape_2d, dtype=jnp.float64),
+        z_lowest=jnp.full(shape_2d, 10.0, dtype=jnp.float64),
+    )
+    ocean_sst = jnp.full(shape_2d, 271.4, dtype=jnp.float64)
+    cfg_cesm_1 = SeaIceConfig(
+        shortwave_scheme="delta_eddington",
+        snow=SnowConfig(enabled=True, flooding=True),
+        brine=BrineConfig(enabled=True),
+        ponds=MeltPondConfig(enabled=True),
+    )
+    # 3a. Lifting SeaIceState inside step_sea_ice on a CESM ponds run
+    cur_from_slab, _ = sea_ice_mod.step_sea_ice(
+        slab_cur, forcing, ocean_sst, zeros_2d, zeros_2d, cfg_cesm_1, U_min=1.0, dt=RDT
+    )
+    par_from_slab, _ = parent_sea_ice_mod.step_sea_ice(
+        slab_par, forcing, ocean_sst, zeros_2d, zeros_2d, cfg_cesm_1, U_min=1.0, dt=RDT
+    )
+    _assert_exact_parent_leaves_and_structure(cur_from_slab, par_from_slab)
+
+    # 3b. Stepping DynamicSeaIceState on a 1-cat CESM ponds run
+    cur_step_1, _ = sea_ice_mod.step_sea_ice(
+        cur_lift, forcing, ocean_sst, zeros_2d, zeros_2d, cfg_cesm_1, U_min=1.0, dt=RDT
+    )
+    par_step_1, _ = parent_sea_ice_mod.step_sea_ice(
+        par_lift, forcing, ocean_sst, zeros_2d, zeros_2d, cfg_cesm_1, U_min=1.0, dt=RDT
+    )
+    _assert_exact_parent_leaves_and_structure(cur_step_1, par_step_1)
+
+    # 3c. Stepping DynamicSeaIceState on a 5-cat CESM ponds run
+    grid = create_latlon_grid(n_lat=shape_2d[0], n_lon=shape_2d[1])
+    cfg_cesm_5 = SeaIceConfig(
+        n_categories=5,
+        dynamics="evp",
+        N_evp=4,
+        transport="advect",
+        itd_remap="lipscomb2001",
+        shortwave_scheme="delta_eddington",
+        snow=SnowConfig(enabled=True, flooding=True),
+        brine=BrineConfig(enabled=True),
+        ridging=RidgingConfig(enabled=True),
+        ponds=MeltPondConfig(enabled=True),
+    )
+    cur_step_5, _ = sea_ice_mod.step_sea_ice(
+        cur_dist, forcing, ocean_sst, zeros_2d, zeros_2d, cfg_cesm_5, U_min=1.0, dt=RDT, grid=grid
+    )
+    par_step_5, _ = parent_sea_ice_mod.step_sea_ice(
+        par_dist, forcing, ocean_sst, zeros_2d, zeros_2d, cfg_cesm_5, U_min=1.0, dt=RDT, grid=grid
+    )
+    _assert_exact_parent_leaves_and_structure(cur_step_5, par_step_5)
+
+    # Planted control: populating h_il with a zero Field (the Resume 2 bug) changes leaf count to 13 and fails!
+    resume2_bug_state = cur_step_1._replace(
+        h_il=Field(data=jnp.zeros(shape_2d), name="h_il", dims=("lat", "lon"), units="m")
+    )
+    assert len(jax.tree.leaves(resume2_bug_state)) == 13
+    with pytest.raises(AssertionError):
+        _assert_exact_parent_leaves_and_structure(resume2_bug_state, par_step_1)
+
+    # Explicit scheme validation guards (no silent fallback on unknown scheme or mismatched h_il)
+    with pytest.raises(ValueError, match="unknown pond_scheme"):
+        init_dynamic_ice_state(shape_2d, pond_scheme="invalid")
+    with pytest.raises(ValueError, match="unknown pond_scheme"):
+        slab_to_dynamic(slab_cur, pond_scheme="invalid")
+    with pytest.raises(ValueError, match="dynamic_to_slab: state.h_il must be None"):
+        dynamic_to_slab(init_dynamic_ice_state(shape_2d, pond_scheme="si3_lev"))
+
+
+def test_decision_184b_default_run_restarts_are_byte_identical_to_parent(tmp_path):
+    """DECISION 184(b): restarts of a default (CESM ponds) run are byte-identical to parent e31236c2f6."""
+    import subprocess
+    import types
+    from legoesm.grids.latlon import create_latlon_grid
+    from legoesm.ice.config import BrineConfig, RidgingConfig
+    from legoesm.ice.state import distribute_dynamic_state_to_categories
+    from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean
+    from legoesm.ocean.restart import load_run_restart, save_restart, save_run_restart
+    from legoesm.ocean.vertical import create_ocean_z_star
+
+    parent_rev = "e31236c2f6"
+    repo_root = pathlib.Path(__file__).resolve().parents[3]
+
+    def _load_parent_module(name: str, relpath: str):
+        src = subprocess.check_output(
+            ["git", "show", f"{parent_rev}:{relpath}"],
+            cwd=repo_root,
+            text=True,
+        )
+        mod = types.ModuleType(name)
+        mod.__file__ = f"{parent_rev}:{relpath}"
+        exec(compile(src, mod.__file__, "exec"), mod.__dict__)
+        return mod
+
+    parent_state_mod = _load_parent_module("_par_184b_state", "packages/ice/legoesm/ice/state.py")
+    parent_ponds_mod = _load_parent_module("_par_184b_ponds", "packages/ice/legoesm/ice/ponds.py")
+    parent_sea_ice_mod = _load_parent_module("_par_184b_sea_ice", "packages/ice/legoesm/ice/sea_ice.py")
+    parent_restart_mod = _load_parent_module("_par_184b_restart", "packages/ocean/legoesm/ocean/restart.py")
+    parent_sea_ice_mod.step_ponds = parent_ponds_mod.step_ponds
+    parent_sea_ice_mod.DynamicSeaIceState = parent_state_mod.DynamicSeaIceState
+    parent_sea_ice_mod.SeaIceState = parent_state_mod.SeaIceState
+    parent_sea_ice_mod.init_dynamic_ice_state = parent_state_mod.init_dynamic_ice_state
+    parent_sea_ice_mod.dynamic_to_slab = parent_state_mod.dynamic_to_slab
+    parent_sea_ice_mod.slab_to_dynamic = parent_state_mod.slab_to_dynamic
+
+    shape_2d = (3, 4)
+    grid = create_latlon_grid(n_lat=shape_2d[0], n_lon=shape_2d[1])
+    z_coord = create_ocean_z_star(n_levels=3, H_max=150.0)
+    ocn_state = rest_state_latlon_cgrid_ocean(
+        grid, z_coord, T_water_init_C=12.0, T_deep=2.0, S_uniform=35.0, H_max=150.0
+    )
+
+    rng = np.random.default_rng(18402)
+    cur_0 = init_dynamic_ice_state(shape_2d)
+    par_0 = parent_state_mod.init_dynamic_ice_state(shape_2d)
+    h_in = jnp.asarray(0.9 + 1.0 * rng.random(shape_2d), dtype=jnp.float64)
+    t_in = jnp.asarray(267.0 + 4.0 * rng.random(shape_2d), dtype=jnp.float64)
+    c_in = jnp.asarray(0.45 + 0.45 * rng.random(shape_2d), dtype=jnp.float64)
+    s_in = jnp.asarray(0.03 + 0.05 * rng.random(shape_2d), dtype=jnp.float64)
+    pa_in = jnp.asarray(0.05 + 0.15 * rng.random(shape_2d), dtype=jnp.float64)
+    pd_in = jnp.asarray(0.03 + 0.08 * rng.random(shape_2d), dtype=jnp.float64)
+    cur_0 = cur_0._replace(
+        h_ice=cur_0.h_ice.replace(data=h_in),
+        T_ice=cur_0.T_ice.replace(data=t_in),
+        concentration=cur_0.concentration.replace(data=c_in),
+        h_snow=cur_0.h_snow.replace(data=s_in),
+        pond_area=cur_0.pond_area.replace(data=pa_in),
+        pond_depth=cur_0.pond_depth.replace(data=pd_in),
+    )
+    par_0 = par_0._replace(
+        h_ice=par_0.h_ice.replace(data=h_in),
+        T_ice=par_0.T_ice.replace(data=t_in),
+        concentration=par_0.concentration.replace(data=c_in),
+        h_snow=par_0.h_snow.replace(data=s_in),
+        pond_area=par_0.pond_area.replace(data=pa_in),
+        pond_depth=par_0.pond_depth.replace(data=pd_in),
+    )
+
+    zeros_2d = jnp.zeros(shape_2d, dtype=jnp.float64)
+    forcing = AtmToSurface(
+        sw_down=jnp.full(shape_2d, 150.0, dtype=jnp.float64),
+        lw_down=jnp.full(shape_2d, 255.0, dtype=jnp.float64),
+        precip_total=jnp.full(shape_2d, 2.0e-5, dtype=jnp.float64),
+        precip_snow=jnp.full(shape_2d, 1.0e-5, dtype=jnp.float64),
+        T_lowest=jnp.full(shape_2d, 272.0, dtype=jnp.float64),
+        q_lowest=jnp.full(shape_2d, 0.0025, dtype=jnp.float64),
+        u_lowest=jnp.full(shape_2d, 2.5, dtype=jnp.float64),
+        v_lowest=jnp.full(shape_2d, -1.5, dtype=jnp.float64),
+        p_lowest=jnp.full(shape_2d, 100000.0, dtype=jnp.float64),
+        p_surface=jnp.full(shape_2d, 101325.0, dtype=jnp.float64),
+        rho_lowest=jnp.full(shape_2d, 1.25, dtype=jnp.float64),
+        cos_zenith=jnp.full(shape_2d, 0.5, dtype=jnp.float64),
+        co2_ppmv=jnp.full(shape_2d, 400.0, dtype=jnp.float64),
+        has_radiation=jnp.ones(shape_2d, dtype=jnp.float64),
+        has_precipitation=jnp.ones(shape_2d, dtype=jnp.float64),
+        z_lowest=jnp.full(shape_2d, 10.0, dtype=jnp.float64),
+    )
+    ocean_sst = jnp.full(shape_2d, 271.4, dtype=jnp.float64)
+
+    # 1-category default (CESM ponds) run step + restart byte-for-byte comparison
+    cfg_1 = SeaIceConfig(
+        shortwave_scheme="delta_eddington",
+        snow=SnowConfig(enabled=True, flooding=True),
+        brine=BrineConfig(enabled=True),
+        ponds=MeltPondConfig(enabled=True),
+    )
+    cur_1, _ = sea_ice_mod.step_sea_ice(cur_0, forcing, ocean_sst, zeros_2d, zeros_2d, cfg_1, U_min=1.0, dt=RDT)
+    par_1, _ = parent_sea_ice_mod.step_sea_ice(par_0, forcing, ocean_sst, zeros_2d, zeros_2d, cfg_1, U_min=1.0, dt=RDT)
+
+    cur_rst_1 = tmp_path / "cur_run_1cat.npz"
+    par_rst_1 = tmp_path / "par_run_1cat.npz"
+    save_run_restart(
+        cur_rst_1, ocn_state, step=10, time_days=5.0, grid_type="latlon", ice_state=cur_1
+    )
+    parent_restart_mod.save_run_restart(
+        par_rst_1, ocn_state, step=10, time_days=5.0, grid_type="latlon", ice_state=par_1
+    )
+    assert cur_rst_1.read_bytes() == par_rst_1.read_bytes()
+
+    # Cross-load parent restart with current load_run_restart and vice versa
+    _, got_from_par, _ = load_run_restart(
+        par_rst_1, ocn_state, ice_template=init_dynamic_ice_state(shape_2d), grid_type="latlon"
+    )
+    _, par_from_cur, _ = parent_restart_mod.load_run_restart(
+        cur_rst_1, ocn_state, ice_template=parent_state_mod.init_dynamic_ice_state(shape_2d), grid_type="latlon"
+    )
+    assert got_from_par.h_il is None
+    for g, w in zip(jax.tree.leaves(got_from_par), jax.tree.leaves(par_from_cur), strict=True):
+        np.testing.assert_array_equal(_bits(g), _bits(w))
+
+    # 5-category default (CESM ponds) run step + restart byte-for-byte comparison
+    cfg_5 = SeaIceConfig(
+        n_categories=5,
+        dynamics="evp",
+        N_evp=4,
+        transport="advect",
+        itd_remap="lipscomb2001",
+        shortwave_scheme="delta_eddington",
+        snow=SnowConfig(enabled=True, flooding=True),
+        brine=BrineConfig(enabled=True),
+        ridging=RidgingConfig(enabled=True),
+        ponds=MeltPondConfig(enabled=True),
+    )
+    cur_5_in = distribute_dynamic_state_to_categories(cur_0, 5)
+    par_5_in = parent_state_mod.distribute_dynamic_state_to_categories(par_0, 5)
+    cur_5, _ = sea_ice_mod.step_sea_ice(
+        cur_5_in, forcing, ocean_sst, zeros_2d, zeros_2d, cfg_5, U_min=1.0, dt=RDT, grid=grid
+    )
+    par_5, _ = parent_sea_ice_mod.step_sea_ice(
+        par_5_in, forcing, ocean_sst, zeros_2d, zeros_2d, cfg_5, U_min=1.0, dt=RDT, grid=grid
+    )
+    cur_rst_5 = tmp_path / "cur_run_5cat.npz"
+    par_rst_5 = tmp_path / "par_run_5cat.npz"
+    save_run_restart(
+        cur_rst_5, ocn_state, step=20, time_days=10.0, grid_type="latlon", ice_state=cur_5
+    )
+    parent_restart_mod.save_run_restart(
+        par_rst_5, ocn_state, step=20, time_days=10.0, grid_type="latlon", ice_state=par_5
+    )
+    assert cur_rst_5.read_bytes() == par_rst_5.read_bytes()
+
+    # Legacy save_restart byte-for-byte comparison on default DynamicSeaIceState
+    cur_leg_rst = tmp_path / "cur_leg.npz"
+    par_leg_rst = tmp_path / "par_leg.npz"
+    save_restart(cur_1, cur_leg_rst, time_s=3600.0, step=1)
+    parent_restart_mod.save_restart(par_1, par_leg_rst, time_s=3600.0, step=1)
+    assert cur_leg_rst.read_bytes() == par_leg_rst.read_bytes()
+
+    # Planted control: an archive written from a state carrying h_il as a Field is NOT byte-identical to parent
+    si3_init = init_dynamic_ice_state(shape_2d, pond_scheme="si3_lev")
+    si3_rst = tmp_path / "si3_planted.npz"
+    save_run_restart(
+        si3_rst,
+        ocn_state,
+        step=10,
+        time_days=5.0,
+        grid_type="latlon",
+        ice_state=cur_1._replace(h_il=si3_init.h_il),
+    )
+    assert si3_rst.read_bytes() != par_rst_1.read_bytes()
+
+
+def test_decision_184c_si3_lev_run_carries_and_restarts_h_il(tmp_path):
+    """DECISION 184(c): the si3_lev run carries and restarts h_il (single-cat and multi-cat), and refuses scheme mismatch."""
+    from legoesm.core.field import Field
+    from legoesm.grids.latlon import create_latlon_grid
+    from legoesm.ice.state import (
+        SeaIceState,
+        distribute_dynamic_state_to_categories,
+        slab_to_dynamic,
+    )
+    from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean
+    from legoesm.ocean.restart import load_restart, load_run_restart, save_restart, save_run_restart
+    from legoesm.ocean.vertical import create_ocean_z_star
+
+    namthd_pnd = SI3PondConfig(
+        rn_himin=float(DECK_PND_NML["rn_himin"]),
+        rn_apnd_min=float(DECK_PND_NML["rn_apnd_min"]),
+        rn_apnd_max=float(DECK_PND_NML["rn_apnd_max"]),
+        rn_pnd_flush=float(DECK_PND_NML["rn_pnd_flush"]),
+        ln_pnd_lids=bool(DECK_PND_NML["ln_pnd_lids"]),
+    )
+    spatial = (2, 3)
+    n_cat = 5
+    shape_mc = (*spatial, n_cat)
+    t_cold = SeaIceConfig().T_freeze_ocean
+
+    # 1. Explicit initialisation from selected scheme="si3_lev" via init_dynamic_ice_state & slab_to_dynamic
+    st_1cat = init_dynamic_ice_state(spatial, pond_scheme="si3_lev")
+    assert isinstance(st_1cat.h_il, Field) and len(jax.tree.leaves(st_1cat)) == 13
+    slab = SeaIceState(
+        h_ice=st_1cat.h_ice.replace(data=jnp.full(spatial, 1.5, dtype=jnp.float64)),
+        T_ice=st_1cat.T_ice.replace(data=jnp.full(spatial, t_cold, dtype=jnp.float64)),
+        concentration=st_1cat.concentration.replace(data=jnp.full(spatial, 0.8, dtype=jnp.float64)),
+    )
+    lifted_si3 = slab_to_dynamic(slab, pond_scheme="si3_lev")
+    assert isinstance(lifted_si3.h_il, Field) and len(jax.tree.leaves(lifted_si3)) == 13
+    lifted_si3 = lifted_si3._replace(
+        pond_area=lifted_si3.pond_area.replace(data=jnp.full(spatial, 0.18, dtype=jnp.float64)),
+        pond_depth=lifted_si3.pond_depth.replace(data=jnp.full(spatial, 0.14, dtype=jnp.float64)),
+        h_il=lifted_si3.h_il.replace(data=jnp.full(spatial, 0.012, dtype=jnp.float64)),
+    )
+    dist_si3 = distribute_dynamic_state_to_categories(lifted_si3, n_cat)
+    assert isinstance(dist_si3.h_il, Field) and dist_si3.h_il.data.shape == shape_mc
+    assert len(jax.tree.leaves(dist_si3)) == 13
+
+    # 2. Multi-category (jpl=5) si3_lev step -> save_run_restart -> load_run_restart -> step continuation
+    grid = create_latlon_grid(n_lat=spatial[0], n_lon=spatial[1])
+    z_coord = create_ocean_z_star(n_levels=2, H_max=100.0)
+    ocn_state = rest_state_latlon_cgrid_ocean(
+        grid, z_coord, T_water_init_C=12.0, T_deep=2.0, S_uniform=35.0, H_max=100.0
+    )
+    zeros_2d = jnp.zeros(spatial, dtype=jnp.float64)
+    forcing = AtmToSurface(
+        sw_down=zeros_2d,
+        lw_down=zeros_2d,
+        precip_total=zeros_2d,
+        precip_snow=zeros_2d,
+        T_lowest=jnp.full(spatial, t_cold, dtype=jnp.float64),
+        q_lowest=zeros_2d,
+        u_lowest=zeros_2d,
+        v_lowest=zeros_2d,
+        p_lowest=jnp.full(spatial, 100000.0, dtype=jnp.float64),
+        p_surface=jnp.full(spatial, 101325.0, dtype=jnp.float64),
+        rho_lowest=jnp.full(spatial, 1.25, dtype=jnp.float64),
+        cos_zenith=zeros_2d,
+        co2_ppmv=jnp.full(spatial, 400.0, dtype=jnp.float64),
+        has_radiation=zeros_2d,
+        has_precipitation=zeros_2d,
+        z_lowest=jnp.full(spatial, 10.0, dtype=jnp.float64),
+    )
+    ocean_sst = jnp.full(spatial, t_cold, dtype=jnp.float64)
+    cfg_mc_si3 = SeaIceConfig(
+        n_categories=n_cat,
+        itd_remap="lipscomb2001",
+        emissivity_ice=0.0,
+        Cd_ice=0.0,
+        Ch_ice=0.0,
+        Ce_ice=0.0,
+        ocean_heat_transfer_coeff=0.0,
+        snow=SnowConfig(enabled=True, flooding=False),
+        ponds=MeltPondConfig(enabled=True, scheme="si3_lev", namthd_pnd=namthd_pnd),
+        ice_constants=NEMO_SI3_CONSTANTS_CONFIG,
+    )
+
+    with precision_scope(PrecisionPolicy.fp64(transcendentals="libm")):
+        st1_mc, _ = sea_ice_mod.step_sea_ice(
+            dist_si3, forcing, ocean_sst, zeros_2d, zeros_2d, cfg_mc_si3, U_min=1.0, dt=RDT, grid=grid
+        )
+        st2_mc_cont, rsp2_mc_cont = sea_ice_mod.step_sea_ice(
+            st1_mc, forcing, ocean_sst, zeros_2d, zeros_2d, cfg_mc_si3, U_min=1.0, dt=RDT, grid=grid
+        )
+    assert isinstance(st1_mc.h_il, Field) and float(jnp.max(st1_mc.h_il.data)) > 0.012
+
+    rst_mc_path = tmp_path / "si3_mc_restart.npz"
+    save_run_restart(
+        rst_mc_path, ocn_state, step=1, time_days=RDT / 86400.0, grid_type="latlon", ice_state=st1_mc
+    )
+    template_mc_si3 = init_dynamic_ice_state(
+        shape_mc, n_categories=n_cat, pond_scheme=cfg_mc_si3.ponds.scheme
+    )
+    _, loaded_mc, _ = load_run_restart(
+        rst_mc_path, ocn_state, ice_template=template_mc_si3, grid_type="latlon"
+    )
+    assert isinstance(loaded_mc.h_il, Field)
+    np.testing.assert_array_equal(_bits(loaded_mc.h_il.data), _bits(st1_mc.h_il.data))
+    with precision_scope(PrecisionPolicy.fp64(transcendentals="libm")):
+        st2_mc_rst, rsp2_mc_rst = sea_ice_mod.step_sea_ice(
+            loaded_mc, forcing, ocean_sst, zeros_2d, zeros_2d, cfg_mc_si3, U_min=1.0, dt=RDT, grid=grid
+        )
+    for g, w in zip(jax.tree.leaves(st2_mc_rst), jax.tree.leaves(st2_mc_cont), strict=True):
+        np.testing.assert_array_equal(_bits(g), _bits(w))
+    for g, w in zip(jax.tree.leaves(rsp2_mc_rst), jax.tree.leaves(rsp2_mc_cont), strict=True):
+        np.testing.assert_array_equal(_bits(g), _bits(w))
+
+    # Legacy save_restart / load_restart round-trip of h_il on si3_lev state
+    leg_si3_path = tmp_path / "si3_mc_legacy.npz"
+    save_restart(st1_mc, leg_si3_path, time_s=RDT, step=1)
+    loaded_leg_mc = load_restart(leg_si3_path, template_mc_si3)
+    assert isinstance(loaded_leg_mc.h_il, Field)
+    np.testing.assert_array_equal(_bits(loaded_leg_mc.h_il.data), _bits(st1_mc.h_il.data))
+
+    # Mismatched restart / template schemes are refused loudly
+    template_mc_cesm = init_dynamic_ice_state(shape_mc, n_categories=n_cat, pond_scheme="cesm")
+    with pytest.raises(ValueError, match="h_il"):
+        load_run_restart(rst_mc_path, ocn_state, ice_template=template_mc_cesm, grid_type="latlon")
+
+    rst_cesm_path = tmp_path / "cesm_mc_restart.npz"
+    save_run_restart(
+        rst_cesm_path, ocn_state, step=1, time_days=RDT / 86400.0, grid_type="latlon", ice_state=template_mc_cesm
+    )
+    with pytest.raises(ValueError, match="h_il"):
+        load_run_restart(rst_cesm_path, ocn_state, ice_template=template_mc_si3, grid_type="latlon")
