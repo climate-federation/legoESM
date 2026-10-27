@@ -166,3 +166,18 @@ def test_column_the_oracle_rejects_is_nan():
     out = sbm_convection(T, q, pf, ph, 1800.0, SBMConfig())
     assert bool(jnp.all(jnp.isnan(out.dT_dt[0])))
     assert bool(jnp.all(out.dT_dt[1] == 0.0))
+
+
+def test_cape_threshold_default_is_the_oracle_and_inside_its_range():
+    """Tier-2 decision R3 (user 2026-10-27): default CAPE threshold is the Isca
+    oracle's CAPE > 0, and the spec range is widened to 0-210 J/kg to hold it;
+    the driver default and the tuning range agree."""
+    from legoesm.atmosphere.physics.convection import config as cc
+    from legoesm.driver.config import ExperimentConfig
+    from legoesm.tuning import TUNING_PARAMETERS
+    assert SBMConfig().cape_threshold == 0.0
+    spec = cc.__param_spec__["SBMConfig"]["params"]["cape_threshold"]
+    assert spec["bounds"] == (0.0, 210.0)
+    assert ExperimentConfig().sbm_cape_threshold == 0.0
+    tp = TUNING_PARAMETERS["sbm_cape_threshold"]
+    assert (tp.default, tp.min_val, tp.max_val) == (0.0, 0.0, 210.0)

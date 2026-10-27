@@ -4015,7 +4015,7 @@ def _resolve_convection(config):
         conv_config = SBMConfig(
             tau_c=config.sbm_tau_c,
             rh_ref=config.sbm_RH_ref,
-            cape_threshold=getattr(config, 'sbm_cape_threshold', 70.0),
+            cape_threshold=getattr(config, 'sbm_cape_threshold', 0.0),
         )
     elif scheme == "bechtold":
         # Expose the Bechtold CAPE trigger threshold so it is tunable for the

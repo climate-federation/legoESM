@@ -283,7 +283,7 @@ __param_spec__ = {
             "smooth_trigger_sharpness": "numerics: sigmoid sharpness on the smooth CAPE trigger",
         },
         "params": {
-            "cape_threshold": {"units": "J/kg", "bounds": (23.1, 210.0), "tunable_tier": 2, "transform": "sigmoid", "category": "trigger", "reference": "trainable since the trigger gained a straight-through gradient (_triggers.py); was tier 0 / AD-unreachable per #1417. Original: Frierson (2007)", "shape": None},
+            "cape_threshold": {"units": "J/kg", "bounds": (0.0, 210.0), "tunable_tier": 2, "transform": "sigmoid", "category": "trigger", "reference": "Isca qe_moist_convection oracle CAPE > 0 (default 0; range widened to include it, user 2026-10-27). Trainable since the trigger gained a straight-through gradient (_triggers.py); was tier 0 / AD-unreachable per #1417. Original: Frierson (2007)", "shape": None},
             "rh_ref": {"units": "1", "bounds": (0.4, 1.0), "tunable_tier": 1, "transform": "sigmoid", "category": "cape_closure", "reference": "Frierson (2007) reference RH", "shape": None, "legacy_name": "sbm_RH_ref"},
             "tau_c": {"units": "s", "bounds": (1800.0, 21600.0), "tunable_tier": 1, "transform": "sigmoid", "category": "relaxation_timescale", "reference": "Frierson (2007) relaxation timescale", "shape": None, "legacy_name": "sbm_tau_c"},
         },
@@ -360,14 +360,14 @@ class SBMConfig(NamedTuple):
     rh_ref : float
         Reference relative humidity for moisture profile (default 0.7).
     cape_threshold : float
-        Minimum CAPE [J/kg] to trigger convection (default 70.0).  The Isca
-        oracle convects whenever CAPE > 0 (threshold 0).
+        Minimum CAPE [J/kg] to trigger convection (default 0.0, the Isca
+        oracle's CAPE > 0; tier-2 decision R3).
     smooth_trigger_sharpness : float
         Sigmoid sharpness for smooth trigger [1/(J/kg)] (default 0.1).
     """
     tau_c: float = 7200.0
     rh_ref: float = 0.7
-    cape_threshold: float = 70.0
+    cape_threshold: float = 0.0
     # Default 0.1 (was 0.01).  At CAPE=0 the looser 0.01 gives
     # ``sigmoid(0.01·-70) ≈ 0.33`` (33 % activation when CAPE is zero
     # — gating leaks).  0.1 gives ``sigmoid(-7) ≈ 9e-4`` (effectively 0)

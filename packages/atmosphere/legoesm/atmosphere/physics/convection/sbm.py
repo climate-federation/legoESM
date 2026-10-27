@@ -47,7 +47,7 @@ Interface notes
   ``cape_trigger(CAPE, cape_threshold, smooth_trigger_sharpness)``.  With
   ``cape_threshold = 0`` and ``smooth_trigger_sharpness -> inf`` the trigger is
   the oracle's ``CAPE > 0`` and the scheme IS the oracle; at the default
-  (70 J/kg, 0.1) it is a smoothed, thresholded version of it.
+  (0 J/kg, 0.1) it is the oracle's threshold with the smooth trigger.
 * The column precipitation ``Pq`` is handed out as the existing per-level
   condensate source ``dq_c_conv_dt`` (local drying rescaled so its column
   integral equals ``Pq``), as before.

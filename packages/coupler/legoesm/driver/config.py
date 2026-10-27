@@ -1520,7 +1520,7 @@ class ExperimentConfig(NamedTuple):
     sw_exponent: float = 2.0               # SW optical-depth vertical exponent
     sbm_tau_c: float = 7200.0
     sbm_RH_ref: float = 0.7
-    sbm_cape_threshold: float = 70.0
+    sbm_cape_threshold: float = 0.0
     sundqvist_auto_rate: float = 1e-3      # Sundqvist autoconversion rate [1/s]
     # Convection / microphysics / turbulence / GWD scheme knobs exposed for
     # calibration (AIMIP commit 0c747d4).  These mirror the scheme-config
@@ -4998,7 +4998,7 @@ class ExperimentConfig(NamedTuple):
             mcfarlane_directional_spread=getattr(amip_cfg, 'mcfarlane_directional_spread', 1.0),
             sbm_tau_c=amip_cfg.sbm_tau_c,
             sbm_RH_ref=amip_cfg.sbm_RH_ref,
-            sbm_cape_threshold=getattr(amip_cfg, 'sbm_cape_threshold', 70.0),
+            sbm_cape_threshold=getattr(amip_cfg, 'sbm_cape_threshold', 0.0),
             bechtold_cape_threshold=getattr(
                 amip_cfg, 'bechtold_cape_threshold', 70.0),
             bechtold_conv_top_pa=getattr(

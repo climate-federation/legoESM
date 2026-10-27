@@ -82,7 +82,7 @@ class AMIPExperimentConfig(NamedTuple):
     S_0: float = constants.S_0
     sbm_tau_c: float = 7200.0
     sbm_RH_ref: float = 0.7
-    sbm_cape_threshold: float = 70.0
+    sbm_cape_threshold: float = 0.0
     # Bechtold convection knobs (to_amip_config round-trip; bechtold_cape_threshold
     # predates this and was never mirrored here — #821 — so the round-trip
     # crashed; add both).

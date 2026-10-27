@@ -1311,7 +1311,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "_require_full_physics_for_amip.")
     parser.add_argument("--sbm-tau-c", type=float, default=7200.0)
     parser.add_argument("--sbm-rh-ref", type=float, default=0.7)
-    parser.add_argument("--sbm-cape-threshold", type=float, default=70.0)
+    parser.add_argument("--sbm-cape-threshold", type=float, default=0.0)
     parser.add_argument("--bechtold-cape-threshold", type=float,
                         default=_EXPERIMENT_DEFAULTS.bechtold_cape_threshold,
                         dest="bechtold_cape_threshold",

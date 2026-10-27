@@ -297,9 +297,9 @@ TUNING_PARAMETERS: dict[str, TuningParameter] = {
     ),
     "sbm_cape_threshold": TuningParameter(
         name="sbm_cape_threshold",
-        default=70.0,
+        default=0.0,
         min_val=0.0,
-        max_val=200.0,
+        max_val=210.0,
         units="J/kg",
         description="Minimum CAPE to trigger SBM convection",
         category="convection",
