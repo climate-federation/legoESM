@@ -265,13 +265,13 @@ class RidgingConfig(NamedTuple):
 
 
 class MeltPondConfig(NamedTuple):
-    """Melt-pond configuration (CESM default or SI3 ``pnd_LEV`` branch).
+    """Melt-pond configuration for CESM default or SI3 ``pnd_LEV`` branch.
 
     Tracks pond area fraction (relative to ice area) and mean depth
     per category.  When ``scheme == 'cesm'``, pond water is sourced from
     surface melt and rainfall on bare ice and drains via linear Darcy;
     when ``scheme == 'si3_lev'``, ``step_ponds`` dispatches to SI3
-    ``pnd_LEV`` (``icethd_pnd.f90:369-550``) with explicit ``namthd_pnd``.
+    ``pnd_LEV`` in ``icethd_pnd.f90:369-550`` with explicit ``namthd_pnd``.
     """
     enabled: bool = False
     refreeze_threshold: float = constants.T_freeze  # Air T below which ponds refreeze [K]
@@ -281,7 +281,7 @@ class MeltPondConfig(NamedTuple):
     drainage_timescale_s: float = 86400.0  # Drainage e-folding time [s] (1 day)
     pond_to_ice_max_area: float = 0.6    # Cap pond fraction per category
     depth_to_area_ratio: float = 0.8     # Volume → area conversion (CICE)
-    # Minimum snow depth that blocks pond formation [m] (~5 mm in CICE).
+    # Minimum snow depth that blocks pond formation [m], ~5 mm in CICE.
     # Thinner snow is treated as transparent to surface melt water.
     snow_block_threshold: float = 5.0e-3
     scheme: str = "cesm"                 # "cesm" or "si3_lev"
