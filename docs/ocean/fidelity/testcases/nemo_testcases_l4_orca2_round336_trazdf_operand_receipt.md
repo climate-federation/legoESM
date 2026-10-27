@@ -911,3 +911,12 @@ instructions in affected functions, zero `values differ`, and eight
 `PLAUSIBLE` record verdicts. Its restart- and opcode-mutation plants both
 refuse, its self-test passes, and the four focused tests pass. Codex review:
 operator.
+
+At evidence commit `7b4d73266bd33668ab05bbcd322cd9585594c755`, the
+receipt citation gate passes all 43 citations with zero failures, zero
+unmapped claims, and zero map-audit failures; report SHA-256
+`ff9198f1b25ff23505f988506b3251718a7596bcb34f9f2ccbed1b175921733f`.
+The prescribed offline default battery, including the four new producer-value
+tests and the private-import ratchet, passes 156 tests in 1,141.51 seconds;
+its complete log SHA-256 is
+`fbbb1198e1af7684593eb56bb032c1368db4169a1006682f058fac5da8d23914`.
