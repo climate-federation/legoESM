@@ -997,3 +997,56 @@ The required operator handoff remains:
 ```text
 ACQUISITION_NEEDED: scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round336_tke_acquisition/run.sh
 ```
+
+## Resume 14: build-derived output admission
+
+The TKE admission now derives its admissible observer files from the
+same-program observer/writer census and the compiled writer's sole `OPEN`
+format.  It requires exactly the four terminal restarts, `ocean.output`, and
+the two rank-local TKE records for the observed run, while the twin must have
+only the five standard outputs; every restart and `ocean.output` is then
+byte-compared between the two runs
+(`scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round336_tke_gate.py:430-473`;
+`scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round328_dynzdf_acquisition/run.sh:593-609`).
+Thus round 336 no longer requires this pristine-plus-TKE build to regenerate
+the 156 inherited `oracle_*.bin` files from round 326.
+
+For a real acquisition, the driver first saves a pristine executable before
+installing the `zdftke` observer and writer
+(`scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round328_dynzdf_acquisition/run.sh:1696-1699`).
+It builds the output contract from the compiled observed build, runs the
+observer-free twin first and the observed executable second from identical
+deck/input manifests, checks both selector echoes, and only then admits
+(`scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round328_dynzdf_acquisition/run.sh:1771-1814`).
+
+The replay inputs are now the admitted round-333 tracer and LDF records plus
+the admitted round-326 ice records.  Both ranks of all three inputs are pinned
+to six literal SHA-256 digests
+(`scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round328_dynzdf_acquisition/run.sh:197-204`).
+Admission verifies those digests, reconstructs `e3t(Kmm)` and `e3w(Kmm)` from
+the round-333 records, checks the round-326 ice fields, and checks final `avt`
+against the recorded NEMO `pdlr` statement rather than consuming a
+round-336 `tra_zdf` record
+(`scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round336_tke_gate.py:337-420`).
+
+The stub copies the four explicit restarts, derives its observer records from
+the build-generated contract, and never copies an inherited round's
+`oracle_*.bin` set
+(`scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round336_tke_acquisition/run.sh:84-97`).
+Its new negative scenario writes `oracle_impossible.bin`; preflight requires
+the exact unexpected-output refusal before reporting the plant fired
+(`scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round336_tke_acquisition/run.sh:166-177`).
+
+The clean prescribed preflight exits zero, the impossible-output plant fires,
+all six stub-flow scenarios pass, and the final marker is
+`ORCA2_ROUND336_TKE_KT2_PREFLIGHT_READY`.  Its complete log is
+`round336/resume14_tke_preflight.log`, SHA-256
+`8de71e5e4cac0a6d4a4d3157f6d31eb7d6e5b9d8e86fd9a48dda78a0b38edb3f`.
+No model source, configuration value, or score changed.  Codex review:
+operator.
+
+The required operator handoff remains:
+
+```text
+ACQUISITION_NEEDED: scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round336_tke_acquisition/run.sh
+```

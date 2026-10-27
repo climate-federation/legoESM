@@ -1995,6 +1995,30 @@ CITATION_MAP = {
     'scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round336_tke_gate.py:324-375': [
         'if plant == "source-values":',
         '"taum differs from admitted surface source")', 52],
+    'scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round336_tke_gate.py:430-473': [
+        'def output_contract(same_program_path: Path, writer_source: Path) -> dict[str, object]:',
+        '"files": sorted(actual)}', 44],
+    'scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round328_dynzdf_acquisition/run.sh:593-609': [
+        'compare_r336_twin() {',
+        "printf 'R336_OBSERVER_FREE_TWIN_PASS compared=%s observer_records=2\\n' \"$count\"", 17],
+    'scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round328_dynzdf_acquisition/run.sh:1696-1699': [
+        'if [[ "$ACQ_TARGET" == tke336 && -z ${R336_TKE_STUB_FLOW_ROOT:-} ]]; then',
+        'cp "$BINARY" "$r336_twin_binary"', 4],
+    'scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round328_dynzdf_acquisition/run.sh:1771-1814': [
+        'same_program "$TARGET_ROOT/BLD" "$manifest/same_program.json"',
+        'admit', 44],
+    'scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round328_dynzdf_acquisition/run.sh:197-204': [
+        'readonly R336_TRACER_REFERENCE=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round333/acquisition/orca1ice_tracer_stage3_kt2_np2',
+        'readonly R336_ICE_R1_SHA=4c69a6733b13a8f60d419e6cd1e42a1e0f15c902f9d7804c9431ef1d6d717243', 8],
+    'scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round336_tke_gate.py:337-420': [
+        'expected_final = np.maximum(',
+        'ice=reference_digests[f"ice_r{rank:04d}"])', 84],
+    'scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round336_tke_acquisition/run.sh:84-97': [
+        'for name in ORCA2_00000010_restart_0000.nc ORCA2_00000010_restart_0001.nc \\',
+        "printf 'fabricated\\n' >\"$R336_TKE_STUB_FABRICATED_OUTPUT\"", 14],
+    'scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round336_tke_acquisition/run.sh:166-177': [
+        'if R336_TKE_STUB_FLOW_ROOT=$base/fabricated R336_TKE_STUB_NEMO=$stub \\',
+        "printf 'PREFLIGHT_PLANT_FIRED r336-tke-impossible-stub-output\\n'", 12],
     'scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round328_dynzdf_acquisition/run.sh:527-541': [
         'compare_deterministic() {',
         "printf 'DETERMINISTIC_PASSIVITY_PASS %s files=%s\\n' \"$candidate\" \"$count\"", 15],
