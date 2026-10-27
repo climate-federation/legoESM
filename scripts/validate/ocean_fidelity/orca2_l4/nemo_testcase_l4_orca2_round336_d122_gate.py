@@ -525,10 +525,15 @@ def caller_audit(deck_root: Path, expect_commit: str) -> dict[str, object]:
     }
     card_rows = {}
     for name, card in non_orca2_cards.items():
-        vmix = card.recipe.model_config.physics.vertical_mixing
-        tke_cfg = getattr(vmix, "tke", None)
+        vmix = getattr(
+            getattr(card.recipe.model_config, "physics", None),
+            "vertical_mixing",
+            None,
+        )
+        scheme = getattr(vmix, "scheme", "none") if vmix is not None else "none"
+        tke_cfg = getattr(vmix, "tke", None) if vmix is not None else None
         fold_flag = bool(getattr(tke_cfg, "nemo_sh2_fold_top_v", False))
-        bot_flag = bool(getattr(tke_cfg, "bottom_tke_bc", False)) and vmix.scheme == "tke"
+        bot_flag = bool(getattr(tke_cfg, "bottom_tke_bc", False)) and scheme == "tke"
         require(not fold_flag, f"{name} unexpectedly enables nemo_sh2_fold_top_v")
         require(not bot_flag, f"{name} unexpectedly enables bottom_tke_bc")
         model = cls(
@@ -540,7 +545,7 @@ def caller_audit(deck_root: Path, expect_commit: str) -> dict[str, object]:
         out = model._tke_bottom_dirichlet(card.recipe.initial_state)
         require(out is None, f"{name} _tke_bottom_dirichlet did not return None")
         card_rows[name] = {
-            "vmix_scheme": vmix.scheme,
+            "vmix_scheme": scheme,
             "bottom_tke_bc": bot_flag,
             "nemo_sh2_fold_top_v": fold_flag,
             "bottom_dirichlet_return": None,
