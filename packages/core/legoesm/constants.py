@@ -131,6 +131,12 @@ sigma_water = 0.0728            # Surface tension of the water-air interface [N/
 # ports (CESM, CAM, COARE, KPP, NEMO, CLM5) use 0.4; a change needs fixtures
 # regenerated or per-port config.
 kappa_von_karman = 0.4
+lmd94_c_star = 10.0             # C*, KPP nonlocal-flux constant (Large, McWilliams &
+                                # Doney 1994, Rev. Geophys.: value with eq. 19, used in eq. 20)
+nemo_mxl0_z0_m = 0.1            # z0 [m] in the factorisation rn_mxl0 = kappa*z0 of NEMO's
+                                # surface mixing-length minimum. NEMO itself sets the literal
+                                # rn_mxl0 = 0.04 (namelist_ref, zdftke.F90; ln_mxl0 comment
+                                # "F(kappa*z)"); z0 = 0.04/0.4 is inferred, not a NEMO parameter.
 nu_ocean_molecular = 1.4e-6     # Molecular kinematic viscosity of seawater
                                 # [m^2/s] (~10 degC; NEMO phycst/zdfiwm ``rnu``)
 kappa_T_ocean_molecular = 1.4e-7  # Molecular thermal diffusivity of seawater
