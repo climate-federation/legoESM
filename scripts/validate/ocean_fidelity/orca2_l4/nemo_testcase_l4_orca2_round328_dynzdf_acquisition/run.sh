@@ -1364,6 +1364,7 @@ if [[ "$ACQ_TARGET" == tke336 ]]; then
   cp "$scratch/zdftke.f90" "$dry_bld/ppsrc/nemo/zdftke.f90"
   cp "$scratch/tke_round336_writer.f90" \
     "$dry_bld/ppsrc/nemo/tke_round336_writer.f90"
+  rm -f "$dry_bld/obj/zdftke.o"
   cp "$scratch/zdftke_arithmetic_observed.o" "$dry_bld/obj/zdftke.o"
   compile_record_object "$scratch/tke_round336_writer.f90" \
     "$dry_bld/obj/tke_round336_writer.o"
@@ -1397,9 +1398,11 @@ if [[ "$ACQ_TARGET" == tke336 ]]; then
   [[ $r336_inherited_stage_count -eq 1367 ]] \
     || refuse "round-336 inherited stage plant FP census $r336_inherited_stage_count != 1367"
   cp "$dry_bld/obj/stprk3_stg.o" "$scratch/stage.clean.o"
+  rm -f "$dry_bld/obj/stprk3_stg.o"
   cp "$scratch/stage.inherited.o" "$dry_bld/obj/stprk3_stg.o"
   plant_must_refuse r336-inherited-stage-census compare_whole_executable_fp \
     "$R336_PRISTINE_BLD" "$dry_bld" r336-inherited-stage-plant
+  rm -f "$dry_bld/obj/stprk3_stg.o"
   cp "$scratch/stage.clean.o" "$dry_bld/obj/stprk3_stg.o"
 fi
 rm -f "$dry_bld/ppsrc/nemo/icevar.f90"
