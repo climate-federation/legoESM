@@ -71,7 +71,9 @@ exercise_stub_flow() {
     --phase-reference-dir \
       /data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round336/acquisition/orca1ice_trazdf_internal_kt2_np2 \
     --ice-reference-dir \
-      /data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round326/acquisition/orca1ice_tke_hmi_10step_np2
+      /data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round326/acquisition/orca1ice_tke_hmi_10step_np2 \
+    --drag-reference-dir \
+      /data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round328/acquisition/orca1ice_dynzdf_kt1_np2
   mkdir -p "$base/success" "$base/refusal" "$base/retention" "$stub_bin"
   cat >"$stub" <<'STUB'
 #!/usr/bin/env bash

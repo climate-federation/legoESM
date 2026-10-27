@@ -206,6 +206,7 @@ readonly HIST_R333_LDF_RUN=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2
 readonly BINARY=$TARGET_ROOT/BLD/bin/nemo.exe
 
 scratch=
+R336_PRISTINE_BLD=
 created_target=0
 created_run=0
 run_completed=0
@@ -274,7 +275,7 @@ r336_tke_stub_assert() {
     || refuse 'stub did not execute the real round-336 admission'
   plant_count=$(find "$TARGET_RUN" -maxdepth 1 -type f \
     -name 'round336_tke_*_plant.log' -printf x | wc -c)
-  [[ $plant_count -eq 18 ]] || refuse "stub real admission ran $plant_count/18 plants"
+  [[ $plant_count -eq 19 ]] || refuse "stub real admission ran $plant_count/19 plants"
   printf 'R336_TKE_STUB_ADMISSION_PASS scenario=%s path=%s\n' "$scenario" "$TARGET_RUN"
 }
 plant_must_refuse() {
@@ -443,6 +444,34 @@ fp_named_signature() {
   ' | sort | uniq -c >"$output"
   awk -v fn="$wanted" '$2==fn {n+=$1} END {exit !(n>0)}' "$output"
 }
+fp_whole_executable_signature() {
+  local root=$1 output=$2 object rel
+  : >"$output"
+  for object in "$root"/obj/*.o; do
+    [[ -e $object ]] || continue
+    rel=$(basename "$object")
+    [[ $rel != tke_round336_writer.o ]] || continue
+    objdump -drwC --no-show-raw-insn "$object" | awk -v object="$rel" '
+      /^[[:xdigit:]]+[[:space:]]+<[^>]+>:/ {
+        fn=$2; gsub(/[<>:]/,"",fn); next
+      }
+      /^[[:space:]]*[[:xdigit:]]+:/ {
+        op=$2
+        if (op ~ /^(f(add|sub|mul|div|sqrt)|add(s|p)[sd]|sub(s|p)[sd]|mul(s|p)[sd]|div(s|p)[sd]|sqrt(s|p)[sd]|min(s|p)[sd]|max(s|p)[sd])/) {
+          print object,fn,op
+        }
+      }
+    ' >>"$output"
+  done
+  sort "$output" | uniq -c >"$output.sorted"
+  mv "$output.sorted" "$output"
+}
+compare_whole_executable_fp() {
+  local pristine=$1 observed=$2 label=$3
+  fp_whole_executable_signature "$pristine" "$scratch/${label}.pristine.fp"
+  fp_whole_executable_signature "$observed" "$scratch/${label}.observed.fp"
+  cmp -s "$scratch/${label}.pristine.fp" "$scratch/${label}.observed.fp"
+}
 historical_fp_row() {
   local tool=$1 baseline=$2 producer=$3 function=$4 expected=$5 expected_base=$6 expected_observed=$7
   local base_count observed_count verdict
@@ -468,7 +497,7 @@ fpp() {
 }
 same_program() {
   if [[ "$ACQ_TARGET" == tke336 ]]; then
-    "$PY" "$R336_TKE_GATE" --same-program "$1" --reference-bld "$SOURCE_ROOT/BLD" \
+    "$PY" "$R336_TKE_GATE" --same-program "$1" --reference-bld "$R336_PRISTINE_BLD" \
       --observer-patch "zdftke=$R336_TKE_PATCH" \
       --new-cfg "$TARGET_CFG" --reference-cfg "$SOURCE_CFG" ${2:+--output "$2"}
   elif [[ "$ACQ_TARGET" == tke332 ]]; then
@@ -898,6 +927,50 @@ if [[ "$ACQ_TARGET" == tke332 ]]; then
     || refuse 'round-332 raw V observer call census changed'
 fi
 cp "$SOURCE_ROOT"/BLD/inc/*.mod "$scratch/mod/"
+if [[ "$ACQ_TARGET" == tke336 ]]; then
+  # The source configuration is an acquisition build with fifteen inherited
+  # observer-bearing NEMO units.  Synthesize the pristine executable baseline
+  # by replacing every one from NEMO src and removing its private writer.
+  R336_PRISTINE_BLD=$scratch/r336_pristine_bld
+  mkdir "$R336_PRISTINE_BLD"
+  cp -as "$SOURCE_ROOT/BLD/ppsrc" "$R336_PRISTINE_BLD/ppsrc"
+  cp -as "$SOURCE_ROOT/BLD/obj" "$R336_PRISTINE_BLD/obj"
+  for name in arch_nemo.fcm cpp.fcm bld.cfg; do
+    cp "$SOURCE_ROOT/BLD/$name" "$R336_PRISTINE_BLD/$name"
+  done
+  rm -f "$R336_PRISTINE_BLD/ppsrc/nemo/zdftke_round326_writer.f90" \
+    "$R336_PRISTINE_BLD/obj/zdftke_round326_writer.o"
+  r336_pristine_specs=(
+    "dynhpg:$NEMO_ROOT/src/OCE/DYN/dynhpg.F90"
+    "dynspg_ts:$NEMO_ROOT/src/OCE/DYN/dynspg_ts.F90"
+    "dynvor:$NEMO_ROOT/src/OCE/DYN/dynvor.F90"
+    "eosbn2:$NEMO_ROOT/src/OCE/TRA/eosbn2.F90"
+    "icedyn_adv_pra:$NEMO_ROOT/src/ICE/icedyn_adv_pra.F90"
+    "icedyn_rhg_evp:$NEMO_ROOT/src/ICE/icedyn_rhg_evp.F90"
+    "icestp:$NEMO_ROOT/src/ICE/icestp.F90"
+    "icethd:$NEMO_ROOT/src/ICE/icethd.F90"
+    "sbcblk:$NEMO_ROOT/src/OCE/SBC/sbcblk.F90"
+    "stp2d:$NEMO_ROOT/src/OCE/stp2d.F90"
+    "stprk3:$NEMO_ROOT/src/OCE/stprk3.F90"
+    "stprk3_stg:$NEMO_ROOT/src/OCE/stprk3_stg.F90"
+    "traadv:$NEMO_ROOT/src/OCE/TRA/traadv.F90"
+    "traqsr:$NEMO_ROOT/src/OCE/TRA/traqsr.F90"
+    "zdftke:$NEMO_ROOT/src/OCE/ZDF/zdftke.F90"
+  )
+  [[ $(find "$SOURCE_ROOT/MY_SRC" -maxdepth 1 -type f -name '*.F90' | wc -l) -eq 16 ]] \
+    || refuse 'round-326 inherited Fortran source census moved'
+  for spec in "${r336_pristine_specs[@]}"; do
+    unit=${spec%%:*}; source=${spec#*:}
+    [[ -f $source ]] || refuse "missing pristine NEMO source $source"
+    rm -f "$R336_PRISTINE_BLD/ppsrc/nemo/$unit.f90" "$R336_PRISTINE_BLD/obj/$unit.o"
+    fpp "$source" "$R336_PRISTINE_BLD/ppsrc/nemo/$unit.f90"
+    compile_record_object "$R336_PRISTINE_BLD/ppsrc/nemo/$unit.f90" \
+      "$R336_PRISTINE_BLD/obj/$unit.o"
+  done
+  printf 'R336_PRISTINE_EXECUTABLE_BASELINE_PASS replaced=%s removed_writers=1 objects=%s\n' \
+    "${#r336_pristine_specs[@]}" \
+    "$(find -L "$R336_PRISTINE_BLD/obj" -maxdepth 1 -type f -name '*.o' | wc -l)"
+fi
 syntax_units=(dynzdf_round328_writer dynzdf stprk3_stg)
 if [[ "$ACQ_TARGET" == zdfphy ]]; then
   syntax_units=(dynzdf_round328_writer zdfphy_round328_writer dynzdf \
@@ -1216,7 +1289,7 @@ for rank in (0, 1):
     assert record["header"]["rank"] == rank
     report = gate.verify_record(record)
     assert report["wet_process_interfaces"] > 0
-for plant in ("header", "field-order", "truncation", "checksum", "extent", "time-level"):
+for plant in ("header", "field-order", "truncation", "checksum", "extent", "time-level", "drag-range"):
     try:
         gate.read_record(root / gate.record_name(0), plant=plant, expected_layout=layout)
     except gate.GateError:
@@ -1235,11 +1308,14 @@ print("R336_PATCHED_TKE_BOUNDS_AND_SOURCE_EXECUTION_PASS ranks=2 fields=51")
 PY
 fi
 
-# Same-program preflight: round 326 plus both observer insertions, including
-# stprk3_stg; a non-observer source plant must refuse.
+# Same-program preflight: for tke336 the baseline is pristine NEMO, with every
+# inherited round-326 MY_SRC observer removed.  A source or FP-census plant
+# must refuse.
 dry_bld=$scratch/dry_bld; mkdir "$dry_bld"
-cp -as "$SOURCE_ROOT/BLD/ppsrc" "$dry_bld/ppsrc"
-cp -as "$SOURCE_ROOT/BLD/obj" "$dry_bld/obj"
+dry_base=$SOURCE_ROOT/BLD
+[[ "$ACQ_TARGET" != tke336 ]] || dry_base=$R336_PRISTINE_BLD
+cp -as "$dry_base/ppsrc" "$dry_bld/ppsrc"
+cp -as "$dry_base/obj" "$dry_bld/obj"
 for name in arch_nemo.fcm cpp.fcm bld.cfg; do
   sed "s|$SOURCE_CFG|$TARGET_CFG|g" "$SOURCE_ROOT/BLD/$name" >"$dry_bld/$name"
 done
@@ -1286,9 +1362,32 @@ if [[ "$ACQ_TARGET" == tke336 ]]; then
   cp "$scratch/zdftke.f90" "$dry_bld/ppsrc/nemo/zdftke.f90"
   cp "$scratch/tke_round336_writer.f90" \
     "$dry_bld/ppsrc/nemo/tke_round336_writer.f90"
-  : >"$dry_bld/obj/tke_round336_writer.o"
+  cp "$scratch/zdftke_arithmetic_observed.o" "$dry_bld/obj/zdftke.o"
+  compile_record_object "$scratch/tke_round336_writer.f90" \
+    "$dry_bld/obj/tke_round336_writer.o"
 fi
 same_program "$dry_bld"
+if [[ "$ACQ_TARGET" == tke336 ]]; then
+  compare_whole_executable_fp "$R336_PRISTINE_BLD" "$dry_bld" r336-whole \
+    || refuse 'round-336 whole executable FP census differs from pristine'
+  fp_named_signature "$R336_PRISTINE_BLD/obj/stprk3_stg.o" \
+    "$scratch/r336-stage.pristine.fp" __stprk3_stg_MOD_stp_rk3_stg
+  fp_named_signature "$dry_bld/obj/stprk3_stg.o" \
+    "$scratch/r336-stage.observed.fp" __stprk3_stg_MOD_stp_rk3_stg
+  r336_stage_count=$(awk '{n+=$1} END {print n+0}' "$scratch/r336-stage.observed.fp")
+  [[ $r336_stage_count -eq 1175 ]] \
+    || refuse "round-336 pristine stage FP census $r336_stage_count != 1175"
+  r336_function_count=$(awk '{print $2,$3}' "$scratch/r336-whole.pristine.fp" | sort -u | wc -l)
+  r336_instruction_count=$(awk '{n+=$1} END {print n+0}' "$scratch/r336-whole.pristine.fp")
+  printf 'R336_WHOLE_EXECUTABLE_FP_PASS functions=%s instructions=%s stage=%s\n' \
+    "$r336_function_count" "$r336_instruction_count" "$r336_stage_count"
+  cp "$SOURCE_ROOT/BLD/obj/stprk3_stg.o" "$scratch/stage.inherited.o"
+  cp "$dry_bld/obj/stprk3_stg.o" "$scratch/stage.clean.o"
+  cp "$scratch/stage.inherited.o" "$dry_bld/obj/stprk3_stg.o"
+  plant_must_refuse r336-inherited-stage-census compare_whole_executable_fp \
+    "$R336_PRISTINE_BLD" "$dry_bld" r336-inherited-stage-plant
+  cp "$scratch/stage.clean.o" "$dry_bld/obj/stprk3_stg.o"
+fi
 rm -f "$dry_bld/ppsrc/nemo/icevar.f90"
 { sed '1s/$/ ! planted/' "$SOURCE_ROOT/BLD/ppsrc/nemo/icevar.f90"; } >"$dry_bld/ppsrc/nemo/icevar.f90"
 plant_must_refuse same-program same_program "$dry_bld"
@@ -1306,7 +1405,7 @@ admit() {
   if [[ "$ACQ_TARGET" == tke336 ]]; then
     for plant in header field-order truncation checksum stamp extent entry rn2 \
       langmuir solve-steps pre-sweep sweep-steps north-halo-avm-k \
-      pdlr final signed-zero source-values time-level; do
+      pdlr final signed-zero source-values time-level drag-range; do
       if "$PY" "$R336_TKE_GATE" --record-dir "$TARGET_RUN" \
         --phase-reference-dir "$R336_PHASE_REFERENCE" --ice-reference-dir "$SOURCE_RUN" \
         --expect-commit "$EXPECTED_PRODUCER" \
@@ -1469,8 +1568,10 @@ else
 fi
 while IFS= read -r -d '' source; do cp -a "$source" "$TARGET_ROOT/EXP00/$(basename "$source")"; done \
   < <(find "$SOURCE_ROOT/EXP00" -maxdepth 1 \( -type f -o -type l \) -print0 | sort -z)
-while IFS= read -r -d '' source; do cp -a "$source" "$TARGET_ROOT/MY_SRC/$(basename "$source")"; done \
-  < <(find "$SOURCE_ROOT/MY_SRC" -maxdepth 1 \( -type f -o -type l \) -print0 | sort -z)
+if [[ "$ACQ_TARGET" != tke336 ]]; then
+  while IFS= read -r -d '' source; do cp -a "$source" "$TARGET_ROOT/MY_SRC/$(basename "$source")"; done \
+    < <(find "$SOURCE_ROOT/MY_SRC" -maxdepth 1 \( -type f -o -type l \) -print0 | sort -z)
+fi
 cp "$SOURCE_ROOT/cpp_$SOURCE_CFG.fcm" "$TARGET_ROOT/cpp_$TARGET_CFG.fcm"
 if [[ "$ACQ_TARGET" != tke336 ]]; then
   cp "$SOURCE_DYNZDF" "$TARGET_ROOT/MY_SRC/dynzdf.F90"
@@ -1543,6 +1644,12 @@ diff <(grep -v "^$TARGET_CFG " "$scratch/work_cfgs.before") \
      <(grep -v "^$TARGET_CFG " "$NEMO_ROOT/cfgs/work_cfgs.txt") >/dev/null \
   || refuse 'work_cfgs.txt changed beyond the target line'
 same_program "$TARGET_ROOT/BLD" "$manifest/same_program.json"
+if [[ "$ACQ_TARGET" == tke336 ]]; then
+  compare_whole_executable_fp "$R336_PRISTINE_BLD" "$TARGET_ROOT/BLD" r336-built-whole \
+    || refuse 'built round-336 whole executable FP census differs from pristine'
+  printf 'R336_BUILT_WHOLE_EXECUTABLE_FP_PASS reference=%s target=%s\n' \
+    "$R336_PRISTINE_BLD" "$TARGET_ROOT/BLD"
+fi
 
 mkdir -p "$EVIDENCE"
 created_run=1

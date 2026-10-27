@@ -18,6 +18,11 @@ from scripts.validate.ocean_fidelity.orca2_l4 import (
     nemo_testcase_l4_orca2_round331_tke_gate as r331,
     nemo_testcase_l4_orca2_round336_trazdf_gate as trazdf,
 )
+from scripts.validate.ocean_fidelity.orca2_l4.nemo_testcase_l4_orca2_round328_dynzdf_gate import (
+    BUILD_CONFIG_FILES,
+    _observer_only,
+    _regular_files,
+)
 
 MAGIC = "NEMO_L4_R336TKE"
 HEADER_NAMES = (
@@ -43,9 +48,10 @@ FULL_3D = {
     "entry_tmask", "entry_umask", "entry_vmask", "final_avm", "tke_wmask",
 }
 FULL_2D = {
-    "entry_drag_bottom", "entry_drag_top", "entry_nmln", "entry_hmlp",
-    "entry_fr_i", "entry_ssmask", "entry_mbkt", "entry_mikt",
+    "entry_nmln", "entry_hmlp", "entry_fr_i", "entry_ssmask", "entry_mbkt",
+    "entry_mikt",
 }
+FILLED_2D = {"entry_drag_bottom", "entry_drag_top"}
 INTERIOR_2D = {
     "entry_hm_i", "entry_taum", "entry_htau", "entry_avtb_2d",
 }
@@ -60,7 +66,7 @@ PLANTS = (
     "header", "field-order", "truncation", "checksum", "stamp", "extent",
     "entry", "rn2", "langmuir", "solve-steps",
     "pre-sweep", "sweep-steps", "north-halo-avm-k", "pdlr", "final",
-    "signed-zero", "source-values", "time-level",
+    "signed-zero", "source-values", "time-level", "drag-range",
 )
 OBSERVER_UNITS = ("zdftke",)
 WRITER_UNITS = ("tke_round336_writer",)
@@ -147,6 +153,9 @@ def _extent(name: str, header: dict[str, int]) -> tuple[int, int, int]:
         return header["jpi"], header["jpj"], header["jpk"]
     if name in FULL_2D:
         return header["jpi"], header["jpj"], 1
+    if name in FILLED_2D:
+        return (header["ntei"] - header["ntsi"] + 3,
+                header["ntej"] - header["ntsj"] + 3, 1)
     if name in ONE_D:
         return header["jpk"], 1, 1
     nx = header["ntei"] - header["ntsi"] + 1
@@ -157,6 +166,8 @@ def _extent(name: str, header: dict[str, int]) -> tuple[int, int, int]:
 def _origin(name: str, header: dict[str, int]) -> tuple[int, int, int]:
     if name in FULL_3D or name in FULL_2D or name in ONE_D:
         return 1, 1, 1
+    if name in FILLED_2D:
+        return header["ntsi"] - 1, header["ntsj"] - 1, 1
     return header["ntsi"], header["ntsj"], 1
 
 
@@ -193,7 +204,10 @@ def read_record(path: Path, plant: str | None = None,
         name = r331._take(stream, 24, f"field {index} name").decode("ascii").rstrip()
         rank, n1, n2, n3, i0, j0, k0 = struct.unpack(
             "=7i", r331._take(stream, 28, f"{name} metadata"))
-        expected_rank = 1 if name in ONE_D else 2 if name in INTERIOR_2D | FULL_2D else 3
+        if plant == "drag-range" and name == "entry_drag_bottom":
+            i0 -= 1
+        expected_rank = (1 if name in ONE_D else
+                         2 if name in INTERIOR_2D | FILLED_2D | FULL_2D else 3)
         require(rank == expected_rank,
                 f"{name}: bad array rank {rank}")
         require((n1, n2, n3) == _extent(name, header),
@@ -325,7 +339,10 @@ def verify_record(record: dict, phase: dict | None = None,
             "bottom level is not integer-valued")
     require(bool(np.all(fields["entry_mikt"] == np.floor(fields["entry_mikt"]))),
             "top level is not integer-valued")
-    expected_bottom_drag = np.float64(-0.0004) * fields["entry_ssmask"]
+    drag_i0, drag_i1 = header["ntsi"] - 2, header["ntei"] + 1
+    drag_j0, drag_j1 = header["ntsj"] - 2, header["ntej"] + 1
+    expected_bottom_drag = np.float64(-0.0004) * fields["entry_ssmask"][
+        drag_i0:drag_i1, drag_j0:drag_j1]
     _bits_equal(fields["entry_drag_bottom"], expected_bottom_drag,
                 "bottom drag differs from -rn_Cd0*rn_Uc0*ssmask")
     interior = wet[..., 1:-1]
@@ -390,7 +407,8 @@ def run_gate(root: Path, phase_root: Path, ice_root: Path, expect_commit: str,
             require(phase_path.is_file(), f"missing phase reference {phase_path.name}")
             require(ice_path.is_file(), f"missing ice reference {ice_path.name}")
         parser_plant = plant if rank == 0 and plant in {
-            "header", "field-order", "truncation", "checksum", "extent", "time-level"
+            "header", "field-order", "truncation", "checksum", "extent", "time-level",
+            "drag-range",
         } else None
         record = read_record(path, plant=parser_plant)
         require(record["header"]["rank"] == rank, f"{path.name}: wrong rank")
@@ -424,9 +442,38 @@ def run_gate(root: Path, phase_root: Path, ice_root: Path, expect_commit: str,
 def same_program(new_bld: Path, ref_bld: Path, patches: dict[str, Path], *,
                  new_cfg: str, ref_cfg: str) -> dict:
     require(tuple(patches) == OBSERVER_UNITS, "wrong round-336 TKE observer unit order")
-    return r331.same_program_observers(
-        new_bld, ref_bld, patches, WRITER_UNITS,
-        new_cfg=new_cfg, ref_cfg=ref_cfg)
+    for name in BUILD_CONFIG_FILES:
+        want = (ref_bld / name).read_text().replace(ref_cfg, new_cfg)
+        require((new_bld / name).read_text() == want, f"build config differs: {name}")
+    inserted = [line[1:] for line in patches["zdftke"].read_text().splitlines()
+                if line.startswith("+") and not line.startswith("+++")]
+    ref_ppsrc = _regular_files(ref_bld / "ppsrc")
+    new_ppsrc = _regular_files(new_bld / "ppsrc")
+    writers = {f"nemo/{unit}.f90" for unit in WRITER_UNITS}
+    require(new_ppsrc - ref_ppsrc == writers,
+            f"ppsrc: unexpected additions {sorted(new_ppsrc - ref_ppsrc)}")
+    require(not ref_ppsrc - new_ppsrc,
+            f"ppsrc: missing pristine files {sorted(ref_ppsrc - new_ppsrc)}")
+    observer = "nemo/zdftke.f90"
+    bad = [rel for rel in sorted(ref_ppsrc - {observer})
+           if (ref_bld / "ppsrc" / rel).read_bytes() !=
+           (new_bld / "ppsrc" / rel).read_bytes()]
+    require(not bad, "ppsrc differs from pristine beyond zdftke: " + " ".join(bad))
+    _observer_only(
+        (ref_bld / "ppsrc" / observer).read_text().splitlines(),
+        (new_bld / "ppsrc" / observer).read_text().splitlines(),
+        inserted, "zdftke")
+    ref_obj = _regular_files(ref_bld / "obj")
+    new_obj = _regular_files(new_bld / "obj")
+    writer_obj = {f"{unit}.o" for unit in WRITER_UNITS}
+    require(new_obj - ref_obj == writer_obj,
+            f"obj: unexpected additions {sorted(new_obj - ref_obj)}")
+    require(not ref_obj - new_obj,
+            f"obj: missing pristine files {sorted(ref_obj - new_obj)}")
+    return {"status": "PASS_SAME_PROGRAM_PRISTINE_PLUS_R336_OBSERVER",
+            "identical_ppsrc": len(ref_ppsrc) - 1,
+            "fp_census_obj": len(ref_obj),
+            "observer_units": list(patches), "writer_units": list(WRITER_UNITS)}
 
 
 def main() -> int:

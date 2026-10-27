@@ -17,17 +17,28 @@ The 51-field record includes `htau`, bottom velocity at `Kbb`, evaluated
 `gdepw/e3t/e3w` at `Kmm`, masks, bottom/top levels, and background viscosity
 inputs so the recorded active TKE blocks have a complete replay read set. The
 full-halo `entry_avm_k` includes the north halo consumed by `zdf_sh2`.
+The drag fields use exactly NEMO's `DO_2D(1,1,1,1)` filled range
+`ntsi-1:ntei+1,ntsj-1:ntej+1`; the unwritten outer ring is neither recorded nor
+checked. This follows `zdfdrg.F90:122,172-190,215-221` and
+`do_loop_substitute.h90:117-125`.
 
-For `tke336`, the shared driver no longer applies or compiles the round-328
-`dynzdf` patch or writer. Its preflight separately audits the pinned binaries
+For `tke336`, the shared driver copies no inherited `MY_SRC` file: the target is
+pristine NEMO plus only the round-336 `zdftke` observer and its writer. The
+preflight compares the FP opcode census of every shared function to a pristine
+425-object baseline; `stp_rk3_stg` is pinned at 1,175 instructions and a plant
+that restores the inherited 1,367-instruction object refuses. It separately
+audits the pinned binaries
 that produced admitted records in rounds 5, 326, 328, 331, 332, and 333 against
 observer-free objects compiled at the record flags; that audit is historical
 evidence only and does not add those observers to the new build.
 
 The preflight also syntax-plants the executable driver, runs a stub NEMO through
 success, quoted `E R R O R`, crash retention, in-place admission, and retained
-admission through the real gate and all 18 admission plants, including source
-value checks for ice cover and linear bottom drag. The stub also supplies the
+admission through the real gate and all 19 admission plants, including the
+one-halo drag-range check and source-value checks for ice cover and linear
+bottom drag. Its drag overlap comes from the admitted round-328 NEMO files and
+is checked against the admitted NEMO mask before the records are written; the
+stub cannot manufacture a full-domain drag field. The stub also supplies the
 inherited oracle/restart files so the byte-for-byte deterministic passivity
 check runs. Its
 default mode is read-only; it never runs NEMO unless the operator supplies

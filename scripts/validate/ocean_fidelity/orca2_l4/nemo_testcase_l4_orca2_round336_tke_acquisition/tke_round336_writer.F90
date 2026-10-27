@@ -118,7 +118,7 @@ CONTAINS
          & entry_dissl(A2D(0),jpk),entry_rn2(jpi,jpj,jpk), &
          & entry_rn2b(jpi,jpj,jpk),entry_wmask(jpi,jpj,jpk), &
          & entry_tmask(jpi,jpj,jpk),entry_umask(jpi,jpj,jpk),entry_vmask(jpi,jpj,jpk), &
-         & entry_drag_bottom(jpi,jpj),entry_drag_top(jpi,jpj), &
+         & entry_drag_bottom(T2D(1)),entry_drag_top(T2D(1)), &
          & entry_nmln(A2D(2)),entry_hmlp(A2D(2)),entry_fr_i(jpi,jpj), &
          & entry_hm_i(A2D(0)),entry_taum(A2D(0)), &
          & entry_htau(A2D(0)),entry_ssmask(jpi,jpj), &
@@ -128,7 +128,11 @@ CONTAINS
          & after_tke_en(A2D(0),jpk),after_tke_pdlr(A2D(0),jpk))
       entry_en=pen; entry_avt=pavt; entry_avm_k=pavm; entry_sh2=psh2
       entry_dissl=pdissl; entry_rn2=prn2; entry_rn2b=prn2b
-      entry_wmask=pwmask; entry_drag_bottom=pbottom; entry_drag_top=ptop
+      entry_wmask=pwmask
+      ! zdf_drg_nonlin/zdf_drg_lin and the key_si3 top update all use
+      ! DO_2D(1,1,1,1): record that one-halo filled range and no outer cells.
+      entry_drag_bottom=pbottom(ntsi-1:ntei+1,ntsj-1:ntej+1)
+      entry_drag_top=ptop(ntsi-1:ntei+1,ntsj-1:ntej+1)
       entry_nmln=REAL(pnmln,wp); entry_hmlp=phmlp
       entry_fr_i=pfr_i; entry_hm_i=phm_i; entry_taum=ptaum
       entry_htau=phtau; entry_ssmask=pssmask
@@ -238,8 +242,8 @@ CONTAINS
          CALL put3(unit,'entry_dissl',entry_dissl,ntsi,ntsj,1)
          CALL put3(unit,'entry_rn2',entry_rn2,1,1,1)
          CALL put3(unit,'entry_rn2b',entry_rn2b,1,1,1)
-         CALL put2(unit,'entry_drag_bottom',entry_drag_bottom,1,1)
-         CALL put2(unit,'entry_drag_top',entry_drag_top,1,1)
+         CALL put2(unit,'entry_drag_bottom',entry_drag_bottom,ntsi-1,ntsj-1)
+         CALL put2(unit,'entry_drag_top',entry_drag_top,ntsi-1,ntsj-1)
          CALL put2(unit,'entry_nmln',entry_nmln,1,1)
          CALL put2(unit,'entry_hmlp',entry_hmlp,1,1)
          CALL put2(unit,'entry_fr_i',entry_fr_i,1,1)

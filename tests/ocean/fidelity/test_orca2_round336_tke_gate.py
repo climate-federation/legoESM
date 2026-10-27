@@ -53,7 +53,8 @@ def _write_record(path: Path, rank: int) -> None:
             origin = gate._origin(name, header)
             stream.write(name.ljust(24).encode("ascii"))
             field_rank = (1 if name in gate.ONE_D else
-                          2 if name in gate.INTERIOR_2D | gate.FULL_2D else 3)
+                          2 if name in gate.INTERIOR_2D | gate.FILLED_2D |
+                          gate.FULL_2D else 3)
             stream.write(struct.pack("=7i", field_rank,
                                      *shape, *origin))
             stream.write(struct.pack("=Q", _checksum(array)))
@@ -74,6 +75,8 @@ def test_real_declared_extents_and_semantics(record: dict) -> None:
     assert record["fields"]["entry_avm_k"][:, header["ntej"], :].shape == (7, 5)
     assert record["fields"]["entry_fr_i"].shape == (7, 6)
     assert record["fields"]["entry_nmln"].shape == (7, 6)
+    assert record["fields"]["entry_drag_bottom"].shape == (5, 4)
+    assert gate._origin("entry_drag_bottom", header) == (2, 2, 1)
     assert record["fields"]["entry_htau"].shape == (3, 2)
     assert gate.verify_record(record)["wet_process_interfaces"] > 0
     assert gate._layout(header) == LAYOUT
@@ -91,6 +94,7 @@ def test_semantic_plants_hit_recorded_wet_boundaries(record: dict, plant: str) -
 
 @pytest.mark.parametrize("plant", [
     "header", "field-order", "truncation", "checksum", "extent", "time-level",
+    "drag-range",
 ])
 def test_layout_plants_refuse(tmp_path: Path, plant: str) -> None:
     path = tmp_path / gate.record_name(0)
@@ -146,3 +150,4 @@ def test_tke_target_excludes_round328_dynzdf_observer() -> None:
     start = parent.index('if [[ "$ACQ_TARGET" == tke336 ]]; then\n    "$PY" "$R336_TKE_GATE"')
     stop = parent.index('elif [[ "$ACQ_TARGET" == tke332 ]]', start)
     assert 'dynzdf=$PATCH' not in parent[start:stop]
+    assert 'if [[ "$ACQ_TARGET" != tke336 ]]; then\n  while IFS= read -r -d' in parent
