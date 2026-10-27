@@ -980,6 +980,18 @@ admission; all five cases pass. It ends with
 `ORCA2_ROUND336_TKE_KT2_PREFLIGHT_READY`. Argon's RUN remains satisfied and
 Sonnet's HOLDs are resolved. Codex review: operator.
 
+At evidence commit `967a912a690d2f7a0a0ada106ea6b1a7d63f6682`, the
+per-receipt citation gate passes all 55 citations with zero failures, zero
+unmapped citations, zero map-audit failures, and all nine self-tests fired;
+the report SHA-256 is
+`4a6b7eb8bfdccad6b37da923ac1b36c881a984415c8bb4230aaf7c3d6eea1776`.
+The exact default ORCA2 battery passes all 156 tests in 1,049.58 seconds; its
+log SHA-256 is
+`3e432bfc275b94f933500d148c56f61efe47d314b6e01392b40de1562203442c`.
+The explicit private-import ratchet passes all 6 tests in 4.85 seconds; its log
+SHA-256 is
+`357552e211123f746071b1da46e34b619513dc21077812ffe469614a71dd6b28`.
+
 The required operator handoff remains:
 
 ```text
