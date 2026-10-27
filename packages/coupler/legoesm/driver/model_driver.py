@@ -441,6 +441,41 @@ def _wallclock_exhausted(elapsed_s: float, max_s: float, buffer_s: float) -> boo
     return max_s > 0.0 and elapsed_s >= (max_s - buffer_s)
 
 
+def trace_windows(spec: str | None, rank: str, n_windows: str | None = None,
+                  ranks: str | None = None) -> list[tuple[int, int, str]]:
+    """Profiler windows (start_step, stop_step, out_dir) for this rank.
+
+    ``spec`` is LEGOESM_TRACE_STEPS="first:count:dir" (dir may contain ':').
+    ``n_windows`` (LEGOESM_TRACE_WINDOWS) splits the trace into back-to-back
+    windows of ``count`` steps written to dir/rank<r>/wNN; unset keeps one
+    window in dir/rank<r>.  ``ranks`` (LEGOESM_TRACE_RANKS, comma list)
+    limits tracing to those ranks; unset traces every rank.
+    """
+    if not spec:
+        return []
+    try:
+        t0, tn, tdir = spec.split(":", 2)
+        t0, tn = int(t0), int(tn)
+        nw = 1 if n_windows is None else int(n_windows)
+        sel = None if ranks is None else {int(r) for r in ranks.split(",")}
+    except ValueError:
+        raise ValueError(
+            f"LEGOESM_TRACE_STEPS={spec!r} / LEGOESM_TRACE_WINDOWS="
+            f"{n_windows!r} / LEGOESM_TRACE_RANKS={ranks!r}: expected "
+            "'first:count:dir', an integer and a comma list of integers") from None
+    if t0 < 0 or tn < 1 or nw < 1:
+        raise ValueError(
+            f"LEGOESM_TRACE_STEPS={spec!r}, LEGOESM_TRACE_WINDOWS={n_windows!r}:"
+            " need first >= 0, count >= 1, windows >= 1")
+    if sel is not None and int(rank) not in sel:
+        return []
+    base = os.path.join(tdir, "rank" + rank)
+    if n_windows is None:
+        return [(t0, t0 + tn, base)]
+    return [(t0 + k * tn, t0 + (k + 1) * tn, os.path.join(base, f"w{k:02d}"))
+            for k in range(nw)]
+
+
 def _standalone_cloud_config(cfg, cloud_scheme: str,
                              allow_convective_cloud: bool = False):
     """Tuned ``CloudConfig`` for the standalone (MPAS/spectral) radiation path.
@@ -15162,30 +15197,20 @@ class ModelDriver:
                 state = state._replace(tracers=_new_trc_sm)
             return state
 
-        # Profiling window, off unless LEGOESM_TRACE_STEPS="first:count:dir"
-        # (loop-step indices; each rank writes dir/rank<N>).  Blocks on the
-        # state at both ends so the trace holds exactly those steps; a window
-        # running past the end is stopped after the loop.
-        _trace_spec = os.environ.get("LEGOESM_TRACE_STEPS")
-        _trace_win = None
+        # Profiling windows, off unless LEGOESM_TRACE_STEPS="first:count:dir"
+        # (loop-step indices; see ``trace_windows`` for LEGOESM_TRACE_WINDOWS /
+        # LEGOESM_TRACE_RANKS).  Blocks on the state at each window edge so a
+        # trace holds exactly its steps; a window running past the end is
+        # stopped after the loop.
+        _trace_wins = trace_windows(
+            os.environ.get("LEGOESM_TRACE_STEPS"),
+            os.environ.get("SLURM_PROCID")
+            or os.environ.get("OMPI_COMM_WORLD_RANK")
+            or os.environ.get("PMI_RANK", "0"),
+            os.environ.get("LEGOESM_TRACE_WINDOWS"),
+            os.environ.get("LEGOESM_TRACE_RANKS"))
+        _trace_edges = {s for w in _trace_wins for s in w[:2]}
         _trace_on = False
-        if _trace_spec:
-            try:
-                _t0, _tn, _tdir = _trace_spec.split(":", 2)
-                _t0, _tn = int(_t0), int(_tn)
-            except ValueError:
-                raise ValueError(
-                    f"LEGOESM_TRACE_STEPS={_trace_spec!r}: expected "
-                    "'first:count:dir' with integer first and count") from None
-            if _t0 < 0 or _tn < 1:
-                raise ValueError(
-                    f"LEGOESM_TRACE_STEPS={_trace_spec!r}: need first >= 0, "
-                    "count >= 1")
-            _trace_rank = (os.environ.get("SLURM_PROCID")
-                           or os.environ.get("OMPI_COMM_WORLD_RANK")
-                           or os.environ.get("PMI_RANK", "0"))
-            _trace_win = (_t0, _t0 + _tn,
-                          os.path.join(_tdir, "rank" + _trace_rank))
         if _land_stress_on and _land_taumag_cells is None:
             raise RuntimeError(
                 "land_stress_from_land resolved ON but the land stress "
@@ -15205,14 +15230,15 @@ class ModelDriver:
         # (bitwise gate of refactors); off by default
         _DIGEST_EVERY = int(os.environ.get("LEGOESM_DIGEST_EVERY_STEPS", "0"))
         for step in range(n_steps_total):
-            if _trace_win is not None and step in _trace_win[:2]:
+            if step in _trace_edges:
                 jax.block_until_ready(self.state)
-                if step == _trace_win[0]:
-                    jax.profiler.start_trace(_trace_win[2])
-                    _trace_on = True
-                else:
+                if _trace_on:
                     jax.profiler.stop_trace()
                     _trace_on = False
+                for _w0, _w1, _wdir in _trace_wins:
+                    if step == _w0:
+                        jax.profiler.start_trace(_wdir)
+                        _trace_on = True
             if _PHASE_TIMERS:
                 _now = time.perf_counter()
                 if _phase_n:
