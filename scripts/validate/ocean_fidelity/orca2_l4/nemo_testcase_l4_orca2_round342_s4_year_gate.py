@@ -29,6 +29,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from typing import Any
 
 import netCDF4
@@ -95,6 +96,8 @@ YEAR_STEPS = 2920
 DAILY_STOCK_STRIDE = 8
 EXPECTED_DAILY_KTS = tuple(range(DAILY_STOCK_STRIDE, YEAR_STEPS + 1, DAILY_STOCK_STRIDE))
 PER_ARM_TIMEOUT_SECONDS = 5400
+REQUIRED_RAM_GIB = 150.0
+REQUIRED_DISK_GIB = 50.0
 
 FULL_YEAR_RECORD_REQUIREMENTS: dict[str, tuple[str, int]] = {
     "u_10.15JUNE2009_fill.nc": ("U_10_MOD", 1460),
@@ -121,7 +124,6 @@ OBSERVER_SYMBOL_PATTERNS = (
     re.compile(r"\borca2_s4_surface_", re.IGNORECASE),
     re.compile(r"\borca2x_longrun_hmi_write\b", re.IGNORECASE),
 )
-
 
 NEMO_BUILD_BINS = (
     Path("/home/dbalwada/miniconda3/envs/nemo-build/bin"),
@@ -153,6 +155,257 @@ def _ppsrc_dir(build_cfg: Path | None = None) -> Path:
         return PRISTINE_K0_CFG / "BLD" / "ppsrc" / "nemo"
     require(R339_ARCHIVED_PPSRC.is_dir(), f"missing K0 ppsrc dir: {R339_ARCHIVED_PPSRC}")
     return R339_ARCHIVED_PPSRC
+
+
+def verify_disk_space(
+    target_path: Path,
+    *,
+    required_gib: float = REQUIRED_DISK_GIB,
+) -> dict[str, Any]:
+    """Verify free disk space at `target_path` against the 2-twin 365-day footprint."""
+    probe = target_path.resolve()
+    while not probe.exists() and probe != probe.parent:
+        probe = probe.parent
+    usage = shutil.disk_usage(probe)
+    free_gib = float(usage.free / (2**30))
+    total_gib = float(usage.total / (2**30))
+    per_day_bytes = (
+        int(R339_RESTART_0.stat().st_size + R339_RESTART_1.stat().st_size)
+        if R339_RESTART_0.is_file() and R339_RESTART_1.is_file()
+        else 56_908_536
+    )
+    estimated_two_twins_gib = float((2 * len(EXPECTED_DAILY_KTS) * per_day_bytes) / (2**30))
+    require(
+        free_gib >= required_gib,
+        f"insufficient free disk space at {probe}: {free_gib:.2f} GiB available < {required_gib:.2f} GiB required",
+    )
+    return {
+        "probe_path": str(probe),
+        "free_gib": round(free_gib, 2),
+        "total_gib": round(total_gib, 2),
+        "estimated_two_twins_365d_gib": round(estimated_two_twins_gib, 2),
+        "required_gib": float(required_gib),
+    }
+
+
+def plant_disk_space_exhaustion(target_path: Path, run_sh: Path) -> dict[str, Any]:
+    """Plant a 10^9 GiB disk requirement in both Python and run.sh and prove both refuse."""
+    py_caught = False
+    py_error = ""
+    try:
+        verify_disk_space(target_path, required_gib=1.0e9)
+    except GateError as exc:
+        py_caught = True
+        py_error = str(exc)
+    require(py_caught, "plant_disk_space_exhaustion did not fail Python verify_disk_space")
+
+    env = dict(os.environ, R342_REQUIRED_DISK_GIB="1000000000")
+    sh_res = subprocess.run(
+        ["bash", str(run_sh), "--preflight-only"],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    require(
+        sh_res.returncode != 0 and "REFUSE: available disk space" in sh_res.stderr,
+        f"plant_disk_space_exhaustion did not fail run.sh: rc={sh_res.returncode} stderr={sh_res.stderr}",
+    )
+    return {
+        "passed": True,
+        "python_error": py_error,
+        "shell_rc": sh_res.returncode,
+        "shell_stderr": sh_res.stderr.strip(),
+    }
+
+
+def verify_available_ram(*, required_gib: float = REQUIRED_RAM_GIB) -> dict[str, Any]:
+    """Verify available system RAM meets the Standing Note Memory Rule (>= 150 GiB)."""
+    meminfo = Path("/proc/meminfo").read_text(encoding="utf-8")
+    m = re.search(r"^MemAvailable:\s+(\d+)\s+kB", meminfo, re.MULTILINE)
+    require(m is not None, "MemAvailable not found in /proc/meminfo")
+    avail_kib = int(m.group(1))
+    avail_gib = float(avail_kib / (1024.0 * 1024.0))
+    free_out = subprocess.check_output(["free", "-g"], text=True)
+    free_g = 0
+    for line in free_out.splitlines():
+        if line.startswith("Mem:"):
+            parts = line.split()
+            if len(parts) >= 7:
+                free_g = int(parts[6])
+            break
+    require(
+        avail_gib >= required_gib and free_g >= int(required_gib),
+        f"insufficient available RAM: {avail_gib:.2f} GiB (free -g: {free_g} GiB) < {required_gib:.2f} GiB required",
+    )
+    return {
+        "available_gib": round(avail_gib, 2),
+        "free_g_column7": free_g,
+        "required_gib": float(required_gib),
+    }
+
+
+def plant_ram_exhaustion(run_sh: Path) -> dict[str, Any]:
+    """Plant a 999,999 GiB RAM requirement in both Python and run.sh and prove both refuse."""
+    py_caught = False
+    py_error = ""
+    try:
+        verify_available_ram(required_gib=999_999.0)
+    except GateError as exc:
+        py_caught = True
+        py_error = str(exc)
+    require(py_caught, "plant_ram_exhaustion did not fail Python verify_available_ram")
+
+    env = dict(os.environ, R342_REQUIRED_RAM_GIB="999999")
+    sh_res = subprocess.run(
+        ["bash", str(run_sh), "--preflight-only"],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    require(
+        sh_res.returncode != 0 and "REFUSE: available RAM" in sh_res.stderr,
+        f"plant_ram_exhaustion did not fail run.sh: rc={sh_res.returncode} stderr={sh_res.stderr}",
+    )
+    return {
+        "passed": True,
+        "python_error": py_error,
+        "shell_rc": sh_res.returncode,
+        "shell_stderr": sh_res.stderr.strip(),
+    }
+
+
+def verify_clean_worktree(repo: Path = REPO_ROOT) -> dict[str, Any]:
+    """Refuse modified tracked files or untracked files in `repo` (fail-closed worktree guard)."""
+    try:
+        porcelain = subprocess.check_output(
+            ["git", "-C", str(repo), "status", "--porcelain", "--untracked-files=all"],
+            text=True,
+            stderr=subprocess.STDOUT,
+        )
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise GateError(f"git status failed on {repo}: {exc}") from exc
+    dirty_lines = [line for line in porcelain.splitlines() if line.strip()]
+    require(
+        not dirty_lines,
+        f"refusing dirty git worktree {repo}: {len(dirty_lines)} modified/untracked file(s): {dirty_lines[:5]}",
+    )
+    try:
+        sha = git_sha(allow_dirty=False, repo=repo)
+        stamp = worktree_stamp(repo=repo, allow_dirty=False)
+    except RuntimeError as exc:
+        raise GateError(f"worktree provenance check refused on {repo}: {exc}") from exc
+    require(stamp.get("clean") is True and stamp.get("commit") == sha,
+            f"worktree_stamp reported non-clean state: {stamp}")
+    return stamp
+
+
+def plant_dirty_worktree(run_sh: Path) -> dict[str, Any]:
+    """Create a temporary git repo, plant untracked and modified tracked files, and prove both Python and run.sh refuse."""
+    with tempfile.TemporaryDirectory(dir=_scratch_root()) as tmp:
+        tmp_repo = Path(tmp) / "dirty_repo_plant"
+        tmp_repo.mkdir(parents=True, exist_ok=True)
+        subprocess.run(["git", "init", "-q", str(tmp_repo)], check=True)
+        subprocess.run(["git", "-C", str(tmp_repo), "config", "user.email", "test@example.com"], check=True)
+        subprocess.run(["git", "-C", str(tmp_repo), "config", "user.name", "Test"], check=True)
+        tracked = tmp_repo / "tracked.txt"
+        tracked.write_text("clean baseline\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(tmp_repo), "add", "tracked.txt"], check=True)
+        subprocess.run(["git", "-C", str(tmp_repo), "commit", "-q", "-m", "init"], check=True)
+
+        # Verify clean temporary repo passes verify_clean_worktree
+        clean_stamp = verify_clean_worktree(tmp_repo)
+        require(clean_stamp["clean"] is True, "clean temp repo did not pass verify_clean_worktree")
+
+        # Sub-plant A: untracked file
+        untracked = tmp_repo / "untracked_plant.txt"
+        untracked.write_text("untracked dirt\n", encoding="utf-8")
+        untracked_caught = False
+        untracked_err = ""
+        try:
+            verify_clean_worktree(tmp_repo)
+        except GateError as exc:
+            untracked_caught = True
+            untracked_err = str(exc)
+        require(untracked_caught, "plant_dirty_worktree did not catch untracked file")
+
+        sh_untracked = subprocess.run(
+            ["bash", str(run_sh), "--preflight-only"],
+            env=dict(os.environ, R342_CHECK_REPO_ROOT=str(tmp_repo)),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        require(
+            sh_untracked.returncode != 0 and "REFUSE: git worktree" in sh_untracked.stderr,
+            "run.sh did not refuse untracked file in R342_CHECK_REPO_ROOT",
+        )
+        untracked.unlink()
+
+        # Sub-plant B: modified tracked file
+        tracked.write_text("modified tracked file\n", encoding="utf-8")
+        modified_caught = False
+        modified_err = ""
+        try:
+            verify_clean_worktree(tmp_repo)
+        except GateError as exc:
+            modified_caught = True
+            modified_err = str(exc)
+        require(modified_caught, "plant_dirty_worktree did not catch modified tracked file")
+
+        sha_caught = False
+        try:
+            git_sha(allow_dirty=False, repo=tmp_repo)
+        except RuntimeError:
+            sha_caught = True
+        require(sha_caught, "git_sha(allow_dirty=False) did not refuse modified tracked file")
+
+        sh_modified = subprocess.run(
+            ["bash", str(run_sh), "--preflight-only"],
+            env=dict(os.environ, R342_CHECK_REPO_ROOT=str(tmp_repo)),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        require(
+            sh_modified.returncode != 0 and "REFUSE: git worktree" in sh_modified.stderr,
+            "run.sh did not refuse modified tracked file in R342_CHECK_REPO_ROOT",
+        )
+    return {
+        "passed": True,
+        "untracked_error": untracked_err,
+        "modified_tracked_error": modified_err,
+        "shell_untracked_rc": sh_untracked.returncode,
+        "shell_modified_rc": sh_modified.returncode,
+    }
+
+
+def verify_run_sh_syntax_and_plant(run_sh: Path) -> dict[str, Any]:
+    """Checklist 15: verify `bash -n` on `run.sh` and prove a planted syntax error fails."""
+    require(run_sh.is_file(), f"missing run.sh: {run_sh}")
+    run_text = run_sh.read_text(encoding="utf-8")
+    require(
+        "rm -rf" not in run_text,
+        "run.sh must not contain 'rm -rf' (Checklist 13: quarantine to refused/, never delete)",
+    )
+    require(
+        "timeout --foreground" in run_text,
+        "run.sh must wrap mpirun with 'timeout --foreground'",
+    )
+    ok_res = subprocess.run(["bash", "-n", str(run_sh)], capture_output=True, text=True, check=False)
+    require(ok_res.returncode == 0, f"bash -n failed on {run_sh}: {ok_res.stderr}")
+
+    with tempfile.TemporaryDirectory(dir=_scratch_root()) as tmp:
+        bad_sh = Path(tmp) / "run_bad_syntax.sh"
+        bad_sh.write_text(run_text + "\nif then\n", encoding="utf-8")
+        bad_res = subprocess.run(["bash", "-n", str(bad_sh)], capture_output=True, text=True, check=False)
+        require(bad_res.returncode != 0, "planted syntax error in run.sh did not fail bash -n")
+    return {
+        "passed": True,
+        "syntax_plant_rc": bad_res.returncode,
+        "syntax_plant_stderr": bad_res.stderr.strip(),
+    }
 
 
 def stage_s4_year_namelist_cfg(
@@ -323,8 +576,17 @@ def stage_s4_year_run_dir(
     nn_itend: int = YEAR_STEPS,
     nn_stock: int = DAILY_STOCK_STRIDE,
 ) -> dict[str, Any]:
-    """Checklist 9: stage all inputs and namelists for one 2,920-step K0 twin arm."""
-    run_dir.mkdir(parents=True, exist_ok=True)
+    """Checklist 9 & 13: stage all inputs and namelists for one 2,920-step K0 twin arm without overwriting retained runs."""
+    if run_dir.exists():
+        existing_items = [p.name for p in run_dir.iterdir()]
+        require(
+            not existing_items,
+            f"refusing to stage into non-empty retained directory {run_dir} ({existing_items[:5]}); "
+            "quarantine to refused/ or move aside before re-running",
+        )
+    else:
+        run_dir.mkdir(parents=True, exist_ok=False)
+
     for manifest_name in ("deck_files.sha256", "input_files.sha256"):
         mfile = SOURCE_RUN / manifest_name
         require(mfile.is_file(), f"missing source manifest: {mfile}")
@@ -335,8 +597,6 @@ def stage_s4_year_run_dir(
             _, fname = parts
             src_item = SOURCE_RUN / fname
             dst_item = run_dir / fname
-            if dst_item.exists() or dst_item.is_symlink():
-                dst_item.unlink()
             if src_item.is_symlink():
                 os.symlink(os.readlink(src_item), dst_item)
             else:
@@ -836,12 +1096,15 @@ def write_stub_s4_year_outputs(
     run_dir: Path,
     *,
     plant_unproduced_file: bool = False,
+    sleep_seconds: int = 0,
 ) -> dict[str, Any]:
-    """Checklist 12: write ONLY the files this observer-free K0 build can write.
+    """Checklist 12 & 16: write ONLY the files this observer-free K0 build can write.
 
     Reads `nn_itend` and `nn_stock` from `run_dir / "namelist_cfg"` so the stub
-    replaces `./nemo` with zero extra arguments.
+    replaces `./nemo` inside `run.sh`.
     """
+    if sleep_seconds > 0:
+        time.sleep(sleep_seconds)
     namelist_cfg = run_dir / "namelist_cfg"
     require(namelist_cfg.is_file(), f"stub missing staged namelist_cfg: {namelist_cfg}")
     nn_itend, nn_stock = parse_namelist_itend_stock(namelist_cfg)
@@ -987,7 +1250,15 @@ def _compare_restart_pair_files(
     }
 
 
-def _write_and_verify_run_manifest(run_dir: Path, producer_commit: str) -> dict[str, Any]:
+def _write_and_verify_run_manifest(
+    run_dir: Path,
+    producer_commit: str | None = None,
+) -> dict[str, Any]:
+    if producer_commit is None:
+        try:
+            producer_commit = git_sha(allow_dirty=False)
+        except RuntimeError as exc:
+            raise GateError(f"cannot stamp run manifest on dirty tree: {exc}") from exc
     files = [
         p for p in run_dir.rglob("*")
         if p.is_file() and not p.is_symlink() and p.name != "producer_manifest.json"
@@ -1004,6 +1275,35 @@ def _write_and_verify_run_manifest(run_dir: Path, producer_commit: str) -> dict[
     return common.verify_manifest(mpath, expected_commit=producer_commit)
 
 
+def _verify_existing_run_manifest(
+    run_dir: Path,
+    *,
+    repo: Path = REPO_ROOT,
+) -> dict[str, Any]:
+    """Checklist 9: verify existing producer_manifest.json commit ancestry, binary digest, and relative file digests."""
+    mpath = run_dir / "producer_manifest.json"
+    require(mpath.is_file(), f"missing producer_manifest.json in {run_dir}")
+    payload = json.loads(mpath.read_text(encoding="utf-8"))
+    producer_commit = str(payload.get("producer_commit", "")).strip()
+    require(
+        bool(re.fullmatch(r"[0-9a-f]{40}", producer_commit)),
+        f"invalid or dirty producer_commit in {mpath}: {producer_commit!r}",
+    )
+    verified = common.verify_manifest(mpath, expected_commit=producer_commit)
+    head_commit = git_sha(allow_dirty=False, repo=repo)
+    anc = subprocess.run(
+        ["git", "-C", str(repo), "merge-base", "--is-ancestor", producer_commit, head_commit],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    require(
+        anc.returncode == 0,
+        f"manifest producer_commit {producer_commit} is not an ancestor of {head_commit}",
+    )
+    return verified
+
+
 def admit_s4_year_twin_runs(
     run_a: Path,
     run_b: Path,
@@ -1011,8 +1311,9 @@ def admit_s4_year_twin_runs(
     build_cfg: Path = DEFAULT_BUILD_CFG,
     expected_steps: int = YEAR_STEPS,
     write_manifests: bool = True,
+    producer_commit: str | None = None,
 ) -> dict[str, Any]:
-    """Checklist 8, 10, 11, 13: admit the two reproducibility twin runs A and B."""
+    """Checklist 8, 9, 10, 11, 13: admit the two reproducibility twin runs A and B."""
     require(expected_steps >= DAILY_STOCK_STRIDE and expected_steps % DAILY_STOCK_STRIDE == 0,
             f"invalid expected_steps: {expected_steps}")
     ppsrc_dir = _ppsrc_dir(build_cfg)
@@ -1040,6 +1341,14 @@ def admit_s4_year_twin_runs(
                 f"{rdir.name}: ocean.output did not report No icebergs used")
         require("ice_cover_clim.nc" in out_text,
                 f"{rdir.name}: ocean.output did not resolve ice_cover_clim.nc")
+        if (rdir / "mpirun.stdout.log").is_file():
+            stdout_text = (rdir / "mpirun.stdout.log").read_text(encoding="utf-8", errors="replace")
+            require("STOP 0" in stdout_text, f"{rdir.name}: mpirun.stdout.log lacks clean STOP 0")
+            require(
+                "E R R O R" not in stdout_text
+                and not any(f"STOP {c}" in stdout_text for c in range(1, 10)),
+                f"{rdir.name}: mpirun.stdout.log contains runtime error marker",
+            )
         itend_cfg, stock_cfg = parse_namelist_itend_stock(rdir / "namelist_cfg")
         require(itend_cfg == expected_steps and stock_cfg == DAILY_STOCK_STRIDE,
                 f"{rdir.name}: namelist_cfg (nn_itend={itend_cfg}, nn_stock={stock_cfg}) "
@@ -1075,7 +1384,10 @@ def admit_s4_year_twin_runs(
         "last_day_restarts": last_day_summary,
     }
     if write_manifests:
-        commit = git_sha(allow_dirty=True)
+        try:
+            commit = producer_commit if producer_commit is not None else git_sha(allow_dirty=False)
+        except RuntimeError as exc:
+            raise GateError(f"cannot write admission manifest on dirty tree: {exc}") from exc
         for rdir in (run_a, run_b):
             (rdir / "round342_s4_year_admission.json").write_text(
                 json.dumps(
@@ -1235,35 +1547,165 @@ def run_all_admission_plants(
     return results
 
 
+def _append_admit_log(run_root: Path, entry: dict[str, Any]) -> None:
+    run_root.mkdir(parents=True, exist_ok=True)
+    log_path = run_root / "admit_existing.log"
+    with log_path.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(entry, sort_keys=True) + "\n")
+
+
+def _locate_retained_pair_in_refused(refused_dir: Path) -> tuple[Path, Path]:
+    require(refused_dir.is_dir(), f"missing refused directory: {refused_dir}")
+    cand_a = sorted(
+        p for p in refused_dir.iterdir()
+        if p.is_dir() and TWIN_A_NAME in p.name
+    )
+    cand_b = sorted(
+        p for p in refused_dir.iterdir()
+        if p.is_dir() and TWIN_B_NAME in p.name
+    )
+    require(
+        bool(cand_a) and bool(cand_b),
+        f"no retained twin pair ({TWIN_A_NAME}, {TWIN_B_NAME}) found inside {refused_dir}",
+    )
+    return cand_a[-1], cand_b[-1]
+
+
 def admit_existing_with_quarantine(
     run_root: Path,
     *,
     build_cfg: Path = DEFAULT_BUILD_CFG,
     expected_steps: int = YEAR_STEPS,
 ) -> dict[str, Any]:
-    """Checklist 11: --admit-existing in-place admission on pass; move to refused/ on failure."""
+    """Checklist 9 & 13: --admit-existing (in-place and refused/ routes), pinning to producer_manifest.json."""
     run_a = run_root / TWIN_A_NAME
     run_b = run_root / TWIN_B_NAME
+    refused_dir = run_root / "refused"
+    ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+
+    # Route 1: In-place admission
+    if run_a.is_dir() or run_b.is_dir():
+        try:
+            require(run_a.is_dir() and run_b.is_dir(),
+                    f"incomplete in-place twin pair under {run_root}")
+            manifest_a = _verify_existing_run_manifest(run_a)
+            manifest_b = _verify_existing_run_manifest(run_b)
+            require(
+                manifest_a["producer_commit"] == manifest_b["producer_commit"],
+                "in-place twin manifests have different producer_commit values",
+            )
+            require(
+                manifest_a["binary_sha256"] == manifest_b["binary_sha256"],
+                "in-place twin manifests have different binary_sha256 values",
+            )
+            res = admit_s4_year_twin_runs(
+                run_a,
+                run_b,
+                build_cfg=build_cfg,
+                expected_steps=expected_steps,
+                write_manifests=True,
+                producer_commit=manifest_a["producer_commit"],
+            )
+            res["admit_existing_route"] = "in_place"
+            _append_admit_log(
+                run_root,
+                {
+                    "timestamp_utc": ts,
+                    "route": "in_place",
+                    "status": "PASS",
+                    "producer_commit": manifest_a["producer_commit"],
+                    "binary_sha256": manifest_a["binary_sha256"],
+                    "run_a": str(run_a),
+                    "run_b": str(run_b),
+                },
+            )
+            return res
+        except Exception as exc:
+            refused_dir.mkdir(parents=True, exist_ok=True)
+            quarantined: list[str] = []
+            for rdir in (run_a, run_b):
+                if rdir.exists():
+                    dest = refused_dir / f"{ts}_{rdir.name}"
+                    shutil.move(str(rdir), str(dest))
+                    quarantined.append(str(dest))
+            _append_admit_log(
+                run_root,
+                {
+                    "timestamp_utc": ts,
+                    "route": "in_place",
+                    "status": "REFUSED_AND_QUARANTINED",
+                    "error": str(exc),
+                    "quarantined": quarantined,
+                },
+            )
+            raise GateError(
+                f"--admit-existing refused in-place twin runs ({exc}); quarantined to {quarantined}"
+            ) from exc
+
+    # Route 2: Retained admission from refused/ (kept inside refused/ on failure; promoted on pass)
+    ret_a, ret_b = _locate_retained_pair_in_refused(refused_dir)
     try:
-        return admit_s4_year_twin_runs(
-            run_a,
-            run_b,
+        require(
+            ret_a.resolve().is_relative_to(refused_dir.resolve())
+            and ret_b.resolve().is_relative_to(refused_dir.resolve()),
+            "retained twin directories are not inside refused/",
+        )
+        manifest_a = _verify_existing_run_manifest(ret_a)
+        manifest_b = _verify_existing_run_manifest(ret_b)
+        require(
+            manifest_a["producer_commit"] == manifest_b["producer_commit"],
+            "retained twin manifests have different producer_commit values",
+        )
+        require(
+            manifest_a["binary_sha256"] == manifest_b["binary_sha256"],
+            "retained twin manifests have different binary_sha256 values",
+        )
+        res = admit_s4_year_twin_runs(
+            ret_a,
+            ret_b,
             build_cfg=build_cfg,
             expected_steps=expected_steps,
             write_manifests=True,
+            producer_commit=manifest_a["producer_commit"],
         )
+        require(not run_a.exists() and not run_b.exists(),
+                f"canonical twin paths already exist in {run_root}")
+        shutil.move(str(ret_a), str(run_a))
+        shutil.move(str(ret_b), str(run_b))
+        _verify_existing_run_manifest(run_a)
+        _verify_existing_run_manifest(run_b)
+        res["run_a"] = str(run_a)
+        res["run_b"] = str(run_b)
+        res["admit_existing_route"] = "refused"
+        res["promoted_from_refused"] = [str(ret_a), str(ret_b)]
+        _append_admit_log(
+            run_root,
+            {
+                "timestamp_utc": ts,
+                "route": "refused",
+                "status": "PASS",
+                "producer_commit": manifest_a["producer_commit"],
+                "binary_sha256": manifest_a["binary_sha256"],
+                "promoted_from": [str(ret_a), str(ret_b)],
+                "run_a": str(run_a),
+                "run_b": str(run_b),
+            },
+        )
+        return res
     except Exception as exc:
-        ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        refused_dir = run_root / "refused"
-        refused_dir.mkdir(parents=True, exist_ok=True)
-        quarantined: list[str] = []
-        for rdir in (run_a, run_b):
-            if rdir.exists():
-                dest = refused_dir / f"{ts}_{rdir.name}"
-                shutil.move(str(rdir), str(dest))
-                quarantined.append(str(dest))
+        _append_admit_log(
+            run_root,
+            {
+                "timestamp_utc": ts,
+                "route": "refused",
+                "status": "REFUSED_RETAINED_IN_PLACE",
+                "error": str(exc),
+                "retained_a": str(ret_a),
+                "retained_b": str(ret_b),
+            },
+        )
         raise GateError(
-            f"--admit-existing refused twin runs ({exc}); quarantined to {quarantined}"
+            f"--admit-existing refused retained runs in {refused_dir} ({exc}); kept in refused/"
         ) from exc
 
 
@@ -1276,6 +1718,21 @@ def run_preflight(
 ) -> dict[str, Any]:
     """Execute all Checklist 1-16 preflight checks and plants without running NEMO."""
     evidence_dir.mkdir(parents=True, exist_ok=True)
+    run_sh = (
+        Path(__file__).resolve().parent
+        / "nemo_testcase_l4_orca2_round342_s4_year_acquisition"
+        / "run.sh"
+    )
+    require(run_sh.is_file(), f"missing acquisition run.sh: {run_sh}")
+
+    worktree_check = verify_clean_worktree(REPO_ROOT)
+    dirty_plant = plant_dirty_worktree(run_sh)
+    disk_check = verify_disk_space(evidence_dir)
+    disk_plant = plant_disk_space_exhaustion(evidence_dir, run_sh)
+    ram_check = verify_available_ram()
+    ram_plant = plant_ram_exhaustion(run_sh)
+    syntax_check = verify_run_sh_syntax_and_plant(run_sh)
+
     ppsrc_dir = _ppsrc_dir(build_cfg)
     prereq = r340_s4.verify_round339_prerequisites(
         ice_cover_path.parent, R339_SMOKE_DIR
@@ -1298,14 +1755,8 @@ def run_preflight(
     nml_plant = plant_namelist_error(ppsrc_dir)
     forcing_plant = plant_missing_forcing(ice_cover_path)
 
-    run_sh = (
-        Path(__file__).resolve().parent
-        / "nemo_testcase_l4_orca2_round342_s4_year_acquisition"
-        / "run.sh"
-    )
-    require(run_sh.is_file(), f"missing acquisition run.sh: {run_sh}")
-
     with tempfile.TemporaryDirectory(dir=_scratch_root()) as tmp:
+        # 1. Stub pipeline pass
         stub_root = Path(tmp) / "stub_s4_year"
         cmd = [
             "bash",
@@ -1322,6 +1773,22 @@ def run_preflight(
         run_b = stub_root / TWIN_B_NAME
         plants = run_all_admission_plants(run_a, run_b, expected_steps=16)
 
+        # 2. Existing-arm overwrite refusal plant (Checklist 13: never rm -rf an existing arm)
+        overwrite_res = subprocess.run(
+            ["bash", str(run_sh), "--stub-run-dir", str(stub_root), "--stub-steps", "16"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        require(
+            overwrite_res.returncode != 0
+            and "REFUSE: retained arm directory already exists" in overwrite_res.stderr,
+            "run.sh --stub-run-dir did not refuse when retained arm directory already existed",
+        )
+        require(run_a.is_dir() and run_b.is_dir(),
+                "existing twin directories were deleted during overwrite refusal check")
+
+        # 3. In-place --admit-existing pass route
         admit_ok = subprocess.run(
             ["bash", str(run_sh), "--admit-existing", str(stub_root), "--stub-steps", "16"],
             capture_output=True,
@@ -1330,7 +1797,11 @@ def run_preflight(
         )
         require(admit_ok.returncode == 0,
                 f"run.sh --admit-existing pass route failed:\n{admit_ok.stdout}\n{admit_ok.stderr}")
+        admit_log = (stub_root / "admit_existing.log").read_text(encoding="utf-8")
+        require('"route": "in_place"' in admit_log and '"status": "PASS"' in admit_log,
+                f"admit_existing.log missing in_place PASS record: {admit_log}")
 
+        # 4. Failed-arm quarantine + clean re-run without deleting quarantined runs
         stub_bad = Path(tmp) / "stub_s4_year_bad"
         bad_res = subprocess.run(
             [
@@ -1348,9 +1819,108 @@ def run_preflight(
         )
         require(bad_res.returncode != 0,
                 "run.sh --stub-run-dir --plant-stub-unproduced-file did not fail")
-        refused_items = list((stub_bad / "refused").glob("*")) if (stub_bad / "refused").is_dir() else []
+        refused_items = sorted((stub_bad / "refused").glob("*")) if (stub_bad / "refused").is_dir() else []
         require(len(refused_items) == 2,
                 f"expected 2 quarantined twin dirs in {stub_bad / 'refused'}, found {refused_items}")
+        require(not (stub_bad / TWIN_A_NAME).exists() and not (stub_bad / TWIN_B_NAME).exists(),
+                "quarantined twin dirs still present at canonical paths after refusal")
+
+        rerun_res = subprocess.run(
+            ["bash", str(run_sh), "--stub-run-dir", str(stub_bad), "--stub-steps", "16"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        require(
+            rerun_res.returncode == 0,
+            f"re-run after quarantine failed:\n{rerun_res.stdout}\n{rerun_res.stderr}",
+        )
+        require(
+            all(p.is_dir() for p in refused_items)
+            and (stub_bad / TWIN_A_NAME).is_dir()
+            and (stub_bad / TWIN_B_NAME).is_dir(),
+            "re-run after quarantine did not preserve refused/ dirs alongside new admitted twins",
+        )
+
+        # 5. timeout --foreground plant: stub sleeps 5s with 1s timeout; arm is quarantined to refused/
+        stub_timeout = Path(tmp) / "stub_s4_year_timeout"
+        timeout_res = subprocess.run(
+            [
+                "bash",
+                str(run_sh),
+                "--stub-run-dir",
+                str(stub_timeout),
+                "--stub-steps",
+                "16",
+                "--stub-timeout",
+                "1",
+                "--plant-stub-sleep",
+                "5",
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        require(
+            timeout_res.returncode != 0
+            and "R342_REFUSED_ARM_QUARANTINED" in timeout_res.stderr,
+            f"timeout --foreground plant did not fail and quarantine arm:\n{timeout_res.stderr}",
+        )
+        timeout_refused = list((stub_timeout / "refused").glob("*")) if (stub_timeout / "refused").is_dir() else []
+        require(
+            len(timeout_refused) == 2,
+            f"expected 2 quarantined dirs in {stub_timeout / 'refused'} after timeout, got {timeout_refused}",
+        )
+
+        # 6. refused/ -> --admit-existing route (with checksum plant inside refused/ + promotion on pass)
+        stub_refused_route = Path(tmp) / "stub_s4_year_refused_route"
+        (stub_refused_route / "refused").mkdir(parents=True, exist_ok=True)
+        ret_a = stub_refused_route / "refused" / f"20261027T000000Z_{TWIN_A_NAME}"
+        ret_b = stub_refused_route / "refused" / f"20261027T000000Z_{TWIN_B_NAME}"
+        shutil.copytree(run_a, ret_a, symlinks=True)
+        shutil.copytree(run_b, ret_b, symlinks=True)
+
+        # Plant binary corruption in ret_a/nemo and prove --admit-existing from refused/ fails and keeps ret_a/ret_b
+        nemo_bak = ret_a / "nemo.bak"
+        shutil.copy2(ret_a / "nemo", nemo_bak)
+        (ret_a / "nemo").write_text("#!/usr/bin/env bash\n# planted binary modification\n", encoding="utf-8")
+        refused_plant_res = subprocess.run(
+            ["bash", str(run_sh), "--admit-existing", str(stub_refused_route), "--stub-steps", "16"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        require(
+            refused_plant_res.returncode != 0 and ret_a.is_dir() and ret_b.is_dir(),
+            "refused/ -> --admit-existing binary checksum plant did not fail or lost retained dirs",
+        )
+        shutil.move(str(nemo_bak), str(ret_a / "nemo"))
+
+        # Now run refused/ -> --admit-existing on the clean retained pair and verify promotion
+        refused_pass_res = subprocess.run(
+            ["bash", str(run_sh), "--admit-existing", str(stub_refused_route), "--stub-steps", "16"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        require(
+            refused_pass_res.returncode == 0,
+            f"refused/ -> --admit-existing pass route failed:\n{refused_pass_res.stdout}\n{refused_pass_res.stderr}",
+        )
+        require(
+            (stub_refused_route / TWIN_A_NAME).is_dir()
+            and (stub_refused_route / TWIN_B_NAME).is_dir()
+            and not ret_a.exists()
+            and not ret_b.exists(),
+            "refused/ -> --admit-existing did not promote retained twins to canonical paths",
+        )
+        refused_log = (stub_refused_route / "admit_existing.log").read_text(encoding="utf-8")
+        require(
+            '"route": "refused"' in refused_log
+            and '"status": "REFUSED_RETAINED_IN_PLACE"' in refused_log
+            and '"status": "PASS"' in refused_log,
+            f"admit_existing.log missing refused route entries: {refused_log}",
+        )
 
     report = {
         "status": "ORCA2_ROUND342_S4_YEAR_PREFLIGHT_READY",
@@ -1364,6 +1934,17 @@ def run_preflight(
         "daily_stock_stride": DAILY_STOCK_STRIDE,
         "expected_daily_restarts": len(EXPECTED_DAILY_KTS),
         "per_arm_timeout_seconds": PER_ARM_TIMEOUT_SECONDS,
+        "disk_space_check": disk_check,
+        "disk_space_plant": disk_plant,
+        "ram_check": ram_check,
+        "ram_plant": ram_plant,
+        "dirty_worktree_plant": dirty_plant,
+        "run_sh_syntax_and_plant": syntax_check,
+        "timeout_foreground_plant": {
+            "passed": True,
+            "rc": timeout_res.returncode,
+            "quarantined_count": len(timeout_refused),
+        },
         "prerequisites": prereq,
         "allocate_extents": alloc_check,
         "allocate_plant": alloc_plant,
@@ -1378,9 +1959,12 @@ def run_preflight(
         "admission_plants": plants,
         "admit_existing_routes": {
             "in_place_pass_verified": True,
-            "refused_quarantine_verified": True,
+            "existing_arm_overwrite_refused": True,
+            "refused_quarantine_and_rerun_verified": True,
+            "refused_to_admit_existing_checksum_plant_verified": True,
+            "refused_to_admit_existing_promotion_verified": True,
         },
-        "worktree": worktree_stamp(allow_dirty=True),
+        "worktree": worktree_check,
     }
     out_path = evidence_dir / "round342_s4_year_preflight.json"
     out_path.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -1391,8 +1975,10 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--preflight-only", action="store_true")
     parser.add_argument("--stage-run-dir", type=Path, default=None)
+    parser.add_argument("--write-run-manifest", type=Path, default=None)
     parser.add_argument("--act-as-nemo-binary", action="store_true")
     parser.add_argument("--plant-stub-unproduced-file", action="store_true")
+    parser.add_argument("--plant-stub-sleep", type=int, default=0)
     parser.add_argument("--admit-twin-runs", type=Path, default=None)
     parser.add_argument("--admit-existing", type=Path, default=None)
     parser.add_argument("--expected-steps", type=int, default=YEAR_STEPS)
@@ -1407,7 +1993,15 @@ def main(argv: list[str] | None = None) -> int:
             write_stub_s4_year_outputs(
                 Path.cwd(),
                 plant_unproduced_file=args.plant_stub_unproduced_file,
+                sleep_seconds=args.plant_stub_sleep,
             )
+        elif args.plant_stub_sleep > 0:
+            time.sleep(args.plant_stub_sleep)
+        return 0
+
+    if args.write_run_manifest is not None:
+        manifest = _write_and_verify_run_manifest(args.write_run_manifest)
+        print(json.dumps({"producer_commit": manifest["producer_commit"], "binary_sha256": manifest["binary_sha256"]}))
         return 0
 
     if args.stage_run_dir is not None:
