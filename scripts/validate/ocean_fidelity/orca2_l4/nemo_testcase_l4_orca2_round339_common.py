@@ -8,6 +8,7 @@ import json
 import re
 import subprocess
 from pathlib import Path
+from typing import Mapping
 
 from scripts.validate.ocean_fidelity.orca2_l4 import (
     nemo_testcase_l4_orca2_round328_dynzdf_gate as r328,
@@ -198,3 +199,122 @@ def compare_fp_census(reference: Path, observed: Path, *, function_pattern: str)
         require(left[name] == right[name],
                 f"floating-point census moved for {name}: {left[name]} -> {right[name]}")
     return {name: left[name] for name in names}
+
+
+def _strip_fortran_comments_and_join_continuations(text: str) -> str:
+    joined: list[str] = []
+    carry = ""
+    for raw in text.splitlines():
+        line = raw.split("!", 1)[0].strip()
+        if not line:
+            continue
+        if line.startswith("&"):
+            line = line[1:].strip()
+        if line.endswith("&"):
+            carry = f"{carry} {line[:-1].strip()}".strip()
+        else:
+            full = f"{carry} {line}".strip()
+            if full:
+                joined.append(full)
+            carry = ""
+    if carry:
+        joined.append(carry)
+    return "\n".join(joined)
+
+
+def _split_top_level(text: str, sep: str = ",") -> list[str]:
+    parts: list[str] = []
+    depth = 0
+    start = 0
+    for index, char in enumerate(text):
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+            require(depth >= 0, f"unbalanced parentheses in {text!r}")
+        elif char == sep and depth == 0:
+            parts.append(text[start:index].strip())
+            start = index + 1
+    require(depth == 0, f"unclosed parentheses in {text!r}")
+    tail = text[start:].strip()
+    if tail:
+        parts.append(tail)
+    return parts
+
+
+def parse_fortran_allocates(text: str) -> dict[str, str]:
+    """Extract normalized ``variable -> extent`` specs from Fortran ALLOCATEs."""
+    logical = _strip_fortran_comments_and_join_continuations(text)
+    allocations: dict[str, str] = {}
+    cursor = 0
+    pattern = re.compile(r"\bALLOCATE\s*\(", flags=re.IGNORECASE)
+    while True:
+        match = pattern.search(logical, cursor)
+        if match is None:
+            break
+        start = match.end()
+        depth = 1
+        pos = start
+        while pos < len(logical) and depth > 0:
+            if logical[pos] == "(":
+                depth += 1
+            elif logical[pos] == ")":
+                depth -= 1
+            pos += 1
+        require(depth == 0, "unterminated ALLOCATE statement")
+        body = logical[start:pos - 1]
+        cursor = pos
+        for item in _split_top_level(body):
+            if re.match(r"^(?:STAT|ERRMSG|MOLD|SOURCE)\s*=", item, flags=re.IGNORECASE):
+                continue
+            if "%" in item:
+                continue
+            spec = re.match(
+                r"^([A-Za-z_][A-Za-z0-9_]*)\s*\((.*)\)\s*$",
+                item,
+            )
+            if spec is None:
+                continue
+            raw_name, raw_extent = spec.groups()
+            name = raw_name.lower()
+            extent = re.sub(r"\s+", "", raw_extent)
+            if name in allocations:
+                require(
+                    allocations[name] == extent,
+                    f"conflicting ALLOCATE extents for {name}: "
+                    f"{allocations[name]} vs {extent}",
+                )
+            allocations[name] = extent
+    return allocations
+
+
+def validate_allocated_extents(
+    source: Path | str, expected: Mapping[str, str],
+) -> dict[str, str]:
+    """Require every named variable to be allocated with its exact NEMO extent."""
+    text = source.read_text(encoding="utf-8") if isinstance(source, Path) else source
+    actual = parse_fortran_allocates(text)
+    verified: dict[str, str] = {}
+    for raw_name, raw_extent in expected.items():
+        name = re.sub(r"\s+", "", raw_name).lower()
+        want = re.sub(r"\s+", "", raw_extent)
+        require(name in actual, f"missing ALLOCATE for {raw_name}")
+        require(
+            actual[name] == want,
+            f"ALLOCATE extent moved for {raw_name}: {actual[name]} != {want}",
+        )
+        verified[raw_name] = actual[name]
+    return verified
+
+
+def validate_nemo_allocated_extents(
+    ppsrc_root: Path,
+    expected_by_unit: Mapping[str, Mapping[str, str]],
+) -> dict[str, dict[str, str]]:
+    """Validate NEMO ALLOCATE extents across multiple preprocessed units."""
+    verified: dict[str, dict[str, str]] = {}
+    for unit, expected in expected_by_unit.items():
+        source = Path(ppsrc_root) / f"{unit}.f90"
+        require(source.is_file(), f"missing preprocessed unit for extent check: {source}")
+        verified[unit] = validate_allocated_extents(source, expected)
+    return verified

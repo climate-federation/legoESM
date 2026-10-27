@@ -379,3 +379,218 @@ def test_real_composed_card_n1_reverse_equals_forward():
     assert np.isfinite(np.asarray(reverse))
     assert float(np.abs(np.asarray(forward))) > 0.0
     np.testing.assert_allclose(reverse, forward, rtol=2.0e-12, atol=2.0e-12)
+
+
+def test_item1_north_fold_t_pivot_stress_lbc_and_vtauv():
+    """Item 1: right-half T-pivot fold (91..179), row -2 north fold, and vmask[-1]."""
+    from legoesm.ocean.forcing import nemo_surface
+
+    deck = Path("/data/abyssal/dbalwada/nemo-testcases-l4/inputs/ORCA2_ICE_v5.0.0")
+    if not deck.exists():
+        pytest.skip("ORCA2 immutable input deck is not installed")
+    card = bulk.build_nemo_orca2_k0_ocean_card(deck)
+    state = card.ocean.recipe.initial_state
+    mask = np.asarray(state.land_mask.data, dtype=np.float64)
+    u_mask = np.asarray(state.u_mask.data, dtype=np.float64)
+    v_mask = np.asarray(state.v_mask.data, dtype=np.float64)
+    fold = card.ocean.recipe.grid.fold
+    stress_lbc, tmask_east, tmask_north, umask, vmask = (
+        gate._build_stress_lbc_and_masks(mask, u_mask, v_mask, fold)
+    )
+    ny, nx = mask.shape
+    half = nx // 2
+    center = np.arange(ny * nx, dtype=np.int64).reshape(ny, nx)
+    perm_t = np.asarray(fold.perm_T, dtype=np.int64)
+    perm_v = np.asarray(fold.perm_v, dtype=np.int64)
+
+    # Right-half-only fold/sign on T-pivot row -1 (lbcnfd.f90:619-628).
+    np.testing.assert_array_equal(
+        np.asarray(stress_lbc.center_index)[-1, :half + 1],
+        center[-1, :half + 1],
+    )
+    np.testing.assert_array_equal(
+        np.asarray(stress_lbc.center_index)[-1, half + 1:],
+        center[-1, perm_t[half + 1:]],
+    )
+    np.testing.assert_array_equal(
+        np.asarray(stress_lbc.center_sign)[-1, :half + 1],
+        np.ones(half + 1, dtype=np.float64),
+    )
+    np.testing.assert_array_equal(
+        np.asarray(stress_lbc.center_sign)[-1, half + 1:],
+        -np.ones(nx - (half + 1), dtype=np.float64),
+    )
+    # Row -1 north neighbor folds from row -2 (lbcnfd.f90:588-606).
+    np.testing.assert_array_equal(
+        np.asarray(stress_lbc.north_index)[-1],
+        center[-2, perm_t],
+    )
+    np.testing.assert_array_equal(
+        np.asarray(stress_lbc.north_sign)[-1],
+        -np.ones(nx, dtype=np.float64),
+    )
+    # V-grid mask on row -1 folds from row -2 (dommsk.f90:232, lbcnfd.f90:688-706).
+    np.testing.assert_array_equal(vmask[-1], vmask[-2, perm_v])
+
+    arm_a = Path(
+        "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/"
+        "round340/s4_acquisition/orca2_s4_exact_a_np2"
+    )
+    if arm_a.exists():
+        def join_surface(kid: int):
+            r0 = gate.read_exact_record(
+                arm_a / f"oracle_r340_surface_k00000001_b{kid:02d}_r0000.bin"
+            )
+            r1 = gate.read_exact_record(
+                arm_a / f"oracle_r340_surface_k00000001_b{kid:02d}_r0001.bin"
+            )
+            return gate._join_rank_fields([r0, r1])
+
+        s3_exit = join_surface(5)
+        s2_lbc = join_surface(10)
+        s2_exit = join_surface(11)
+        utau_c, vtau_c, utau_e, vtau_n = (
+            nemo_surface.nemo_t_stress_lbc_neighbors(
+                jnp.asarray(s3_exit["utau"]),
+                jnp.asarray(s3_exit["vtau"]),
+                stress_lbc,
+            )
+        )
+        utau_u, vtau_v = nemo_surface.nemo_t_stress_to_uv(
+            utau_c, vtau_c, utau_e, vtau_n,
+            jnp.asarray(mask), jnp.asarray(tmask_east), jnp.asarray(tmask_north),
+            jnp.asarray(umask), jnp.asarray(vmask),
+        )
+        assert gate.exact_score(np.asarray(utau_c), s2_lbc["utau"])["unequal"] == 0
+        assert gate.exact_score(np.asarray(vtau_c), s2_lbc["vtau"])["unequal"] == 0
+        assert gate.exact_score(np.asarray(utau_u), s2_exit["utauU"])["unequal"] == 0
+        assert gate.exact_score(np.asarray(vtau_v), s2_exit["vtauV"])["unequal"] == 0
+
+
+def test_item2_even_kt_surface_boundaries_retain_prior_s2_exits():
+    """Item 2: on even kt, NEMO retains kt-1 S2_EXIT across kid=3..10 and IIF."""
+    args, s0, ice_if, s2 = _production_surface_case()
+    shape = s2.surface_mask.shape
+    one = jnp.ones(shape, dtype=jnp.float64)
+    # Give s2 nonzero runoff, restoring, and FWB so tail differs from pre/post/ssr.
+    s2 = s2._replace(
+        runoff_now=2.5e-4 * one,
+        sss_target=35.5 * one,
+        freshwater_budget_correction=jnp.asarray(1.2e-5, dtype=jnp.float64),
+    )
+    step1 = bulk.nemo_orca2_k0_surface_card(
+        *args[:5], *args[8:], k0_config=_k0(), ice_if=ice_if, s0=s0, s2=s2,
+        chl=one, geothermal_heat_flux_mwm2=one,
+    )
+    s0_kt2 = s0._replace(kt=2)
+    step2 = bulk.nemo_orca2_k0_surface_card(
+        *args[:5], *args[8:], k0_config=_k0(), ice_if=ice_if, s0=s0_kt2, s2=s2,
+        chl=one, geothermal_heat_flux_mwm2=one, prior_surface=step1,
+    )
+    State = namedtuple("State", "T")
+    state_before = State(Field(jnp.zeros(shape + (2,), dtype=jnp.float64)))
+    atmosphere = bulk.NemoStandaloneAtmosphereFields(*(one for _ in range(9)))
+    pair = bulk.NemoStandaloneFieldPair(one, one, 0, -10, 10)
+    controls = {
+        "s0f": bulk.NemoStandaloneS0FInputs(
+            atmosphere, atmosphere, 0, -10, 10, pair, pair),
+        "ice_if": ice_if,
+        "s2": s2,
+    }
+    frames_kt1 = gate._surface_boundaries_for_step(1, state_before, controls, step1)
+    frames_kt2 = gate._surface_boundaries_for_step(2, state_before, controls, step2)
+
+    s2_exit_kt1 = frames_kt1["kt01/S2_EXIT"]
+    # Sanity check: on odd kt=1, S1_EXIT (pre) and S2_EXIT (tail) differ.
+    assert not np.array_equal(
+        frames_kt1["kt01/S1_EXIT"]["emp"], s2_exit_kt1["emp"]
+    )
+    assert not np.array_equal(
+        frames_kt1["kt01/S1_EXIT"]["qns"], s2_exit_kt1["qns"]
+    )
+    # On even kt=2, kid=3..10 retain kt=1 S2_EXIT values for all non-mean fields.
+    mean_names = set(gate.OUTER_FULL_FIELDS[:7])
+    for kid in range(3, 11):
+        boundary = f"kt02/{gate.OUTER_BOUNDARIES[kid]}"
+        for name, actual in frames_kt2[boundary].items():
+            if name in mean_names:
+                continue
+            np.testing.assert_array_equal(
+                actual, s2_exit_kt1[name], err_msg=f"{boundary}/{name}"
+            )
+    for boundary in ("kt02/S3_COVER_IIF", "kt02/S3_EXIT_IIF"):
+        for name in ("emp", "utau", "vtau", "qsr", "qns", "sfx", "taum", "wndm"):
+            np.testing.assert_array_equal(
+                frames_kt2[boundary][name],
+                s2_exit_kt1[name],
+                err_msg=f"{boundary}/{name}",
+            )
+
+
+def test_item3_shared_allocate_extent_gate_and_admit_order(tmp_path):
+    """Item 3: shared NEMO-ALLOCATE extent gate and same_program_observers order."""
+    from scripts.validate.ocean_fidelity.orca2_l4 import (
+        nemo_testcase_l4_orca2_round339_common as round339,
+    )
+
+    k0_run = Path(
+        "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/"
+        "round339/k0_smoke/orca2_k0_10step_np2"
+    )
+    if k0_run.exists():
+        ppsrc = k0_run / "build_sources/ppsrc/nemo"
+        verified = gate.verify_r340_allocated_extents(
+            ppsrc, k0_run / "ocean.output"
+        )
+        assert verified["nn_hls"] == 2
+        assert set(verified["units"]) == {
+            "sbc_oce", "sbcrnf", "sbcssr", "dom_oce", "oce",
+        }
+        # Plant a non-qns A2D(0) variable (taum) changed to (jpi,jpj); the old
+        # qns-only inline regex missed this, whereas the shared gate catches it.
+        planted_ppsrc = tmp_path / "ppsrc"
+        planted_ppsrc.mkdir()
+        for unit in gate.R340_ALLOCATED_EXTENTS:
+            text = (ppsrc / f"{unit}.f90").read_text(encoding="utf-8")
+            if unit == "sbc_oce":
+                import re
+                text = re.sub(
+                    r"taum\s*\(\s*Nis0-\(0\):Nie0\+\(0\)\s*,\s*Njs0-\(0\):Nje0\+\(0\)\s*\)",
+                    "taum(jpi,jpj)",
+                    text,
+                    count=1,
+                )
+            (planted_ppsrc / f"{unit}.f90").write_text(text, encoding="utf-8")
+        with pytest.raises(gate.GateError, match="ALLOCATE extent moved for taum"):
+            gate.verify_r340_allocated_extents(
+                planted_ppsrc, k0_run / "ocean.output"
+            )
+    else:
+        sample = (
+            "SUBROUTINE alloc()\n"
+            " ALLOCATE( qns(Nis0-(0):Nie0+(0),Njs0-(0):Nje0+(0)), &\n"
+            "  & taum(jpi,jpj) )\n"
+            "END SUBROUTINE alloc\n"
+        )
+        with pytest.raises(round339.GateError, match="ALLOCATE extent moved for taum"):
+            round339.validate_allocated_extents(
+                sample,
+                {"qns": gate.A2D0_EXTENT, "taum": gate.A2D0_EXTENT},
+            )
+
+    run_sh = Path(
+        "scripts/validate/ocean_fidelity/orca2_l4/"
+        "nemo_testcase_l4_orca2_round340_s4_acquisition/run.sh"
+    ).read_text(encoding="utf-8")
+    assert "ALLOCATE\\(\\s*qns" not in run_sh
+    assert "verify_r340_allocated_extents" in run_sh
+    admit_pair_pos = run_sh.index("admit_pair(){")
+    admit_pair_body = run_sh[admit_pair_pos:run_sh.index("\n}\n", admit_pair_pos)]
+    assert admit_pair_body.index("check_same_program_build") < admit_pair_body.index("admit_one")
+    admit_existing_pos = run_sh.index("admit_existing_route(){")
+    admit_existing_body = run_sh[
+        admit_existing_pos:run_sh.index("\n}\n", admit_existing_pos)
+    ]
+    assert "check_same_program_build" in admit_existing_body
+    assert admit_existing_body.index("check_same_program_build") < admit_existing_body.index("admit_one")
+

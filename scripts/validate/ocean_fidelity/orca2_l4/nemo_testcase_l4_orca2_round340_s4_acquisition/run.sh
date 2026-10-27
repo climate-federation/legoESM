@@ -116,8 +116,21 @@ else:
 PY
 }
 
+check_same_program_build(){
+ local target_bld=${1:-${R340_EXISTING_TARGET_BLD:-$TARGET_BUILD/BLD}}
+ local ref_bld=${2:-${R340_EXISTING_K0_BLD:-$K0_BUILD/BLD}}
+ "$PY" - "$target_bld" "$ref_bld" "$SURFACE_PATCH" "$STATE_PATCH" "$STAGE_PATCH" "$FLD_PATCH" "$IIF_PATCH" "$BLK_PATCH" "$FWB_PATCH" "$TARGET_CFG" "$K0_CFG" <<'PY' || refuse "same_program_observers failed for $target_bld"
+import sys
+from pathlib import Path
+from scripts.validate.ocean_fidelity.orca2_l4 import nemo_testcase_l4_orca2_round328_dynzdf_gate as g
+result=g.same_program_observers(Path(sys.argv[1]),Path(sys.argv[2]),dict(zip(('sbcmod','stprk3','stprk3_stg','fldread','sbcice_if','sbcblk','sbcfwb'),map(Path,sys.argv[3:10]),strict=True)),('round340_surface_writer','round340_state_writer'),new_cfg=sys.argv[10],ref_cfg=sys.argv[11])
+print('R340_SAME_PROGRAM_BUILD_PASS',result)
+PY
+}
+
 admit_pair(){
- local left=$1 right=$2 parent=${3:-$K0_RUN}
+ local left=$1 right=$2 parent=${3:-$K0_RUN} target_bld=${4:-${R340_EXISTING_TARGET_BLD:-$TARGET_BUILD/BLD}} ref_bld=${5:-${R340_EXISTING_K0_BLD:-$K0_BUILD/BLD}}
+ check_same_program_build "$target_bld" "$ref_bld"
  admit_one "$left" "$parent"
  admit_one "$right" "$parent"
  diff <(cd "$left" && sha256sum oracle_r340_*.bin | sed 's|  .*\/|  |') \
@@ -130,11 +143,13 @@ admit_existing_route(){
  local existing_a=${R340_EXISTING_RUN_A:-$RUN_A}
  local existing_b=${R340_EXISTING_RUN_B:-$RUN_B}
  local parent=${R340_EXISTING_PARENT:-$K0_RUN}
+ local target_bld=${R340_EXISTING_TARGET_BLD:-$TARGET_BUILD/BLD}
+ local ref_bld=${R340_EXISTING_K0_BLD:-$K0_BUILD/BLD}
  [[ -d $existing_a ]] || refuse "retained arm A is absent: $existing_a"
  finalize_interrupted_manifest "$existing_a"
  if [[ -d $existing_b ]]; then
   finalize_interrupted_manifest "$existing_b"
-  admit_pair "$existing_a" "$existing_b" "$parent"
+  admit_pair "$existing_a" "$existing_b" "$parent" "$target_bld" "$ref_bld"
   if [[ $existing_b != "$RUN_B" ]]; then
    [[ ! -e $RUN_B ]] || refuse "canonical arm B already exists: $RUN_B"
    mv "$existing_b" "$RUN_B"
@@ -142,6 +157,7 @@ admit_existing_route(){
   fi
   return
  fi
+ check_same_program_build "$target_bld" "$ref_bld"
  admit_one "$existing_a" "$parent"
  if [[ $existing_a != "$RUN_A" ]]; then
   [[ ! -e $RUN_A ]] || refuse "canonical arm A already exists: $RUN_A"
@@ -294,6 +310,7 @@ from pathlib import Path
 from scripts.validate.ocean_fidelity.orca2_l4 import nemo_testcase_l4_orca2_round328_dynzdf_gate as g
 g.same_program_observers(Path(sys.argv[1]),Path(sys.argv[2]),dict(zip(('sbcmod','stprk3','stprk3_stg','fldread','sbcice_if','sbcblk','sbcfwb'),map(Path,sys.argv[3:10]),strict=True)),('round340_surface_writer','round340_state_writer'),new_cfg=sys.argv[10],ref_cfg=sys.argv[11])
 PY
+cp "$K0_BUILD/BLD/ppsrc/nemo/iceupdate.f90" "$scratch/dry-bld/ppsrc/nemo/iceupdate.f90"
 cp "$scratch/sbcmod.F90" "$scratch/sbcmod.arithmetic-plant.F90"
 sed -i 's/zwdht = ssh/zwdht = 1.0001_wp * ssh/' "$scratch/sbcmod.arithmetic-plant.F90"
 "$FC" -fdefault-real-8 -O3 -funroll-all-loops -fno-tree-vectorize -I "$scratch/mod" -I "$K0_BUILD/BLD/inc" -J "$scratch/mod" -c "$scratch/sbcmod.arithmetic-plant.F90" -o "$scratch/sbcmod.arithmetic-plant.o"
@@ -313,24 +330,33 @@ PY
 # checking.  Linker section GC drops unrelated production callees; explicit
 # probes keep and execute one section from each of the seven patched objects.
 # The stubs supply storage only; scientific units use admitted K0 interfaces.
-"$PY" - "$K0_RUN/build_sources/ppsrc/nemo/sbc_oce.f90" "$K0_RUN/ocean.output" "$scratch/fixture_extents.F90" <<'PY'
+"$PY" - "$K0_RUN/build_sources/ppsrc/nemo" "$K0_RUN/ocean.output" "$scratch/fixture_extents.F90" <<'PY'
 import re,sys
 from pathlib import Path
-source,output,target=map(Path,sys.argv[1:])
-allocation=re.search(
-    r'ALLOCATE\(\s*qns\s*\(Nis0-\(0\):Nie0\+\(0\),Njs0-\(0\):Nje0\+\(0\)\)',
-    source.read_text())
-if allocation is None:
-    raise AssertionError('sbc_oce A2D(0) allocation moved')
-matches=re.findall(r'halo width .* nn_hls\s*=\s*(\d+)',output.read_text())
-if matches != ['2']:
-    raise AssertionError(f'deck nn_hls moved: {matches}')
-h=int(matches[0])
-target.write_text(f'''MODULE dom_oce
+from scripts.validate.ocean_fidelity.orca2_l4 import nemo_testcase_l4_orca2_round339_common as c
+from scripts.validate.ocean_fidelity.orca2_l4 import nemo_testcase_l4_orca2_round340_standalone_gate as g
+ppsrc_root,output,target=map(Path,sys.argv[1:])
+verified=g.verify_r340_allocated_extents(ppsrc_root,output)
+planted=re.sub(
+    r'taum\s*\(\s*Nis0-\(0\):Nie0\+\(0\)\s*,\s*Njs0-\(0\):Nje0\+\(0\)\s*\)',
+    'taum(jpi,jpj)',
+    (ppsrc_root/'sbc_oce.f90').read_text(),
+    count=1,
+)
+try:
+    c.validate_allocated_extents(planted,g.R340_ALLOCATED_EXTENTS['sbc_oce'])
+except c.GateError:
+    print('PREFLIGHT_PLANT_FIRED shared-allocate-extent-taum')
+else:
+    raise AssertionError('taum A2D(0) extent plant stayed green')
+target.write_text('''MODULE dom_oce
  USE par_oce,ONLY:nn_hls,Nis0,Nie0,Njs0,Nje0
 END MODULE
 ''')
-print('R340_SOURCE_DERIVED_EXTENTS_PASS allocation=A2D(0) nn_hls=2 bounds=3:jpi-2,3:jpj-2')
+print(
+    'R340_SOURCE_DERIVED_EXTENTS_PASS allocation=A2D(0) nn_hls=2 '
+    f'bounds=3:jpi-2,3:jpj-2 units={sorted(verified["units"])}'
+)
 PY
 cat >"$scratch/fixture_stubs.F90" <<'EOF'
 MODULE par_oce
@@ -569,9 +595,21 @@ mv "$synthetic/a" "$synthetic/refused/a.failed.control"
 mv "$synthetic/b" "$synthetic/refused/b.failed.control"
 R340_PREFLIGHT_ADMIT_DIRECT=1 R340_EXISTING_RUN_A="$synthetic/refused/a.failed.control" \
  R340_EXISTING_RUN_B="$synthetic/refused/b.failed.control" R340_EXISTING_PARENT="$synthetic/parent" \
+ R340_EXISTING_TARGET_BLD="$scratch/dry-bld" \
  "$here/run.sh" --admit-existing >"$scratch/retained-admission.log"
+grep -F R340_SAME_PROGRAM_BUILD_PASS "$scratch/retained-admission.log" >/dev/null || refuse 'retained admission skipped same_program_observers'
 grep -F ORCA2_ROUND340_S4_TWINS_ADMITTED "$scratch/retained-admission.log" >/dev/null || refuse 'retained admission failed'
+awk '/R340_SAME_PROGRAM_BUILD_PASS/{s=NR}/ORCA2_ROUND340_S4_TWINS_ADMITTED/{a=NR} END{exit !(s && a && s < a)}' "$scratch/retained-admission.log" \
+  || refuse 'same_program_observers did not precede ORCA2_ROUND340_S4_TWINS_ADMITTED'
 printf 'PREFLIGHT_RETAINED_ADMISSION_PASS route=refused full=true\n'
+printf '! unregistered plant\n' >>"$scratch/dry-bld/ppsrc/nemo/iceupdate.f90"
+plant_must_refuse retained-same-program env R340_PREFLIGHT_ADMIT_DIRECT=1 \
+ R340_EXISTING_RUN_A="$synthetic/refused/a.failed.control" \
+ R340_EXISTING_RUN_B="$synthetic/refused/b.failed.control" \
+ R340_EXISTING_PARENT="$synthetic/parent" \
+ R340_EXISTING_TARGET_BLD="$scratch/dry-bld" \
+ "$here/run.sh" --admit-existing
+cp "$K0_BUILD/BLD/ppsrc/nemo/iceupdate.f90" "$scratch/dry-bld/ppsrc/nemo/iceupdate.f90"
 printf 'checksum plant\n' >>"$synthetic/refused/a.failed.control/nemo"
 plant_must_refuse retained-checksum admit_one "$synthetic/refused/a.failed.control" "$synthetic/parent"
 
@@ -625,14 +663,8 @@ for run in "${runs[@]}"; do
   "$scratch/execute.sh" "$run" "$obs" "$SOURCE_RUN" "$K0_RUN" "$TARGET_BUILD" "$(git -C "$REPO" rev-parse HEAD)" "$PY"
   admit_one "$run"
 done
+# admit_pair runs check_same_program_build before admitting the twin pair.
 admit_pair "$RUN_A" "$RUN_B"
-# The generic round-328 proof strips exactly the five observer patches and two writers.
-"$PY" - "$TARGET_BUILD/BLD" "$K0_BUILD/BLD" "$SURFACE_PATCH" "$STATE_PATCH" "$STAGE_PATCH" "$FLD_PATCH" "$IIF_PATCH" "$BLK_PATCH" "$FWB_PATCH" "$TARGET_CFG" "$K0_CFG" <<'PY'
-import sys
-from pathlib import Path
-from scripts.validate.ocean_fidelity.orca2_l4 import nemo_testcase_l4_orca2_round328_dynzdf_gate as g
-g.same_program_observers(Path(sys.argv[1]),Path(sys.argv[2]),dict(zip(('sbcmod','stprk3','stprk3_stg','fldread','sbcice_if','sbcblk','sbcfwb'),map(Path,sys.argv[3:10]),strict=True)),('round340_surface_writer','round340_state_writer'),new_cfg=sys.argv[10],ref_cfg=sys.argv[11])
-PY
 cmp -s "$RUN_A/ORCA2_00000010_restart_0000.nc" "$K0_RUN/ORCA2_00000010_restart_0000.nc" || refuse 'observer changed rank-0 restart'
 cmp -s "$RUN_A/ORCA2_00000010_restart_0001.nc" "$K0_RUN/ORCA2_00000010_restart_0001.nc" || refuse 'observer changed rank-1 restart'
 cmp -s "$RUN_B/ORCA2_00000010_restart_0000.nc" "$K0_RUN/ORCA2_00000010_restart_0000.nc" || refuse 'twin observer changed rank-0 restart'

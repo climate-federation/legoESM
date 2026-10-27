@@ -93,15 +93,83 @@ IIF_FIELDS_BY_KID = {
     2: IIF_FULL_FIELDS + IIF_REDUCED_FIELDS,
     3: IIF_FULL_FIELDS + IIF_REDUCED_FIELDS,
 }
+A2D0_EXTENT = "Nis0-(0):Nie0+(0),Njs0-(0):Nje0+(0)"
+FULL_2D_EXTENT = "jpi,jpj"
+R340_ALLOCATED_EXTENTS: dict[str, dict[str, str]] = {
+    "sbc_oce": {
+        "utau": FULL_2D_EXTENT,
+        "vtau": FULL_2D_EXTENT,
+        "utauU": FULL_2D_EXTENT,
+        "vtauV": FULL_2D_EXTENT,
+        "taum": A2D0_EXTENT,
+        "wndm": A2D0_EXTENT,
+        "qns": A2D0_EXTENT,
+        "qsr": A2D0_EXTENT,
+        "emp": FULL_2D_EXTENT,
+        "sfx": A2D0_EXTENT,
+        "rnf": FULL_2D_EXTENT,
+        "fr_i": FULL_2D_EXTENT,
+        "sst_m": FULL_2D_EXTENT,
+        "sss_m": FULL_2D_EXTENT,
+        "ssu_m": FULL_2D_EXTENT,
+        "ssv_m": FULL_2D_EXTENT,
+        "ssh_m": FULL_2D_EXTENT,
+        "e3t_m": FULL_2D_EXTENT,
+        "frq_m": FULL_2D_EXTENT,
+    },
+    "sbcrnf": {
+        "rnf_tsc": f"{A2D0_EXTENT},jpts",
+    },
+    "sbcssr": {
+        "erp": A2D0_EXTENT,
+        "qrp": A2D0_EXTENT,
+        "coefice": A2D0_EXTENT,
+    },
+    "dom_oce": {
+        "ff_f": FULL_2D_EXTENT,
+        "tmask": f"{FULL_2D_EXTENT},jpk",
+        "umask": f"{FULL_2D_EXTENT},jpk",
+        "vmask": f"{FULL_2D_EXTENT},jpk",
+        "smask0": A2D0_EXTENT,
+    },
+    "oce": {
+        "ts": f"{FULL_2D_EXTENT},jpk,jpts,jpt",
+        "uu": f"{FULL_2D_EXTENT},jpk,jpt",
+        "vv": f"{FULL_2D_EXTENT},jpk,jpt",
+        "ssh": f"{FULL_2D_EXTENT},jpt",
+    },
+}
 
 
 class GateError(RuntimeError):
-    pass
+    def __init__(
+        self, message: str, *, report: Mapping[str, object] | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.report = dict(report) if report is not None else None
 
 
-def require(condition: bool, message: str) -> None:
+def require(
+    condition: bool,
+    message: str,
+    *,
+    report: Mapping[str, object] | None = None,
+) -> None:
     if not condition:
-        raise GateError(message)
+        raise GateError(message, report=report)
+
+
+def verify_r340_allocated_extents(
+    ppsrc_root: Path, ocean_output: Path,
+) -> dict[str, object]:
+    """Validate NEMO's preprocessed ALLOCATE extents and runtime halo width."""
+    try:
+        extents = round339.validate_nemo_allocated_extents(
+            Path(ppsrc_root), R340_ALLOCATED_EXTENTS)
+        round339.validate_ocean_output(Path(ocean_output), {"nn_hls": "2"})
+    except round339.GateError as exc:
+        raise GateError(str(exc)) from exc
+    return {"nn_hls": 2, "units": extents}
 
 
 def sha256(path: Path) -> str:
@@ -437,6 +505,52 @@ def _monthly_slots(path: Path, variable: str) -> tuple[np.ndarray, np.ndarray]:
     return value[11], value[0]
 
 
+def _build_stress_lbc_and_masks(
+    mask: np.ndarray,
+    u_mask: np.ndarray,
+    v_mask: np.ndarray,
+    fold,
+):
+    """Build T-pivot stress LBC plan and folded masks (lbcnfd.f90:588-628,688-706)."""
+    import jax.numpy as jnp
+    from legoesm.ocean import bulk_flux_omip as bulk
+
+    ny, nx = mask.shape
+    require(ny >= 2 and nx >= 2 and nx % 2 == 0,
+            f"invalid T-pivot grid shape: {(ny, nx)}")
+    center = np.arange(ny * nx, dtype=np.int64).reshape(ny, nx)
+    center_index = center.copy()
+    center_sign = np.ones((ny, nx), dtype=np.float64)
+    perm_t = np.asarray(fold.perm_T, dtype=np.int64)
+    half = nx // 2
+    # lbcnfd.f90:619-628 folds and negates only ji = jpiglo/2+2 .. jpiglo
+    # (0-based 91..179) on the T-pivot row jpj-1, leaving ji = 0 and ji = 90
+    # unnegated so +0.0 is not flipped to -0.0.
+    center_index[-1, half + 1:] = center[-1, perm_t[half + 1:]]
+    center_sign[-1, half + 1:] = float(fold.vector_sign_u)
+    east_index = np.roll(center_index, -1, axis=1)
+    east_sign = np.roll(center_sign, -1, axis=1)
+    # lbcnfd.f90:588-606 folds row jpj (north neighbor of row -1) from row -2.
+    north_index = np.empty_like(center_index)
+    north_index[:-1] = center_index[1:]
+    north_index[-1] = center[-2, perm_t]
+    north_sign = np.ones((ny, nx), dtype=np.float64)
+    north_sign[:-1] = center_sign[1:]
+    north_sign[-1] = float(fold.vector_sign_u)
+    stress_lbc = bulk.NemoTStressLbcPlan(
+        *(jnp.asarray(value) for value in (
+            center_index, east_index, north_index,
+            center_sign, east_sign, north_sign)))
+    flat_mask = mask.reshape(-1)
+    tmask_east = flat_mask[east_index]
+    tmask_north = flat_mask[north_index]
+    umask = np.asarray(u_mask, dtype=np.float64)[:, 1:]
+    vmask = np.asarray(v_mask, dtype=np.float64)[1:, :].copy()
+    # dommsk.f90:232 and lbcnfd.f90:688-706 fold V-grid row jpj-1 from row -2.
+    vmask[-1] = vmask[-2, np.asarray(fold.perm_v, dtype=np.int64)]
+    return stress_lbc, tmask_east, tmask_north, umask, vmask
+
+
 def build_real_composed_inputs(
     card, deck_root: Path, core_manifest: Path, ice_cover_path: Path,
 ) -> tuple[dict[str, object], ...]:
@@ -497,25 +611,14 @@ def build_real_composed_inputs(
     mask = np.asarray(state.land_mask.data, dtype=np.float64)
     ny, nx = mask.shape
     require((ny, nx) == (148, 180), "real K0 card grid moved")
-    center = np.arange(ny * nx, dtype=np.int64).reshape(ny, nx)
-    center_index = center.copy()
-    center_sign = np.ones((ny, nx), dtype=np.float64)
-    fold = card.ocean.recipe.grid.fold
-    center_index[-1] = center[-1, np.asarray(fold.perm_T)]
-    center_sign[-1] = float(fold.vector_sign_u)
-    east_index = np.roll(center_index, -1, axis=1)
-    east_sign = np.roll(center_sign, -1, axis=1)
-    north_index = np.concatenate((center_index[1:], center_index[-1:]), axis=0)
-    north_sign = np.concatenate((center_sign[1:], center_sign[-1:]), axis=0)
-    stress_lbc = bulk.NemoTStressLbcPlan(
-        *(jnp.asarray(value) for value in (
-            center_index, east_index, north_index,
-            center_sign, east_sign, north_sign)))
-    flat_mask = mask.reshape(-1)
-    tmask_east = flat_mask[east_index]
-    tmask_north = flat_mask[north_index]
-    umask = np.asarray(state.u_mask.data, dtype=np.float64)[:, 1:]
-    vmask = np.asarray(state.v_mask.data, dtype=np.float64)[1:, :]
+    stress_lbc, tmask_east, tmask_north, umask, vmask = (
+        _build_stress_lbc_and_masks(
+            mask,
+            np.asarray(state.u_mask.data, dtype=np.float64),
+            np.asarray(state.v_mask.data, dtype=np.float64),
+            card.ocean.recipe.grid.fold,
+        )
+    )
     zero = jnp.zeros((ny, nx), dtype=jnp.float64)
     one = jnp.ones((ny, nx), dtype=jnp.float64)
     means = NemoSurfaceMeans(*(zero for _ in range(7)))
@@ -872,11 +975,21 @@ def _surface_boundaries_for_step(kt, state_before, controls, surface):
     exit_values = outer(final_flux, use_lbc=True, include_uv=True)
 
     result = {}
-    outer_values = {
-        0: {}, 1: mean_fields, 2: mean_fields, 3: pre_values, 4: pre_values,
-        5: post_values, 6: post_values, 7: rnf_values, 8: ssr_values,
-        9: fwb_values, 10: lbc_values, 11: exit_values,
-    }
+    if kt % 2:
+        outer_values = {
+            0: {}, 1: mean_fields, 2: mean_fields, 3: pre_values, 4: pre_values,
+            5: post_values, 6: post_values, 7: rnf_values, 8: ssr_values,
+            9: fwb_values, 10: lbc_values, 11: exit_values,
+        }
+    else:
+        # sbcmod.f90:444-521 skips MOD(kt-1, nn_fsbc) == 0 updates on even kt,
+        # retaining kt-1 S2_EXIT (tail) values across kid=3..10 before
+        # recomputing utauU/vtauV at kid=11 (sbcmod.f90:568-569).
+        outer_values = {
+            0: {}, 1: mean_fields, 2: mean_fields, 3: lbc_values, 4: lbc_values,
+            5: lbc_values, 6: lbc_values, 7: lbc_values, 8: lbc_values,
+            9: lbc_values, 10: lbc_values, 11: exit_values,
+        }
     for kid, boundary in OUTER_BOUNDARIES.items():
         result[f"kt{kt:02d}/{boundary}"] = _ordered_fields(
             OUTER_FIELDS_BY_KID[kid], outer_values[kid])
@@ -909,7 +1022,9 @@ def _surface_boundaries_for_step(kt, state_before, controls, surface):
     common = {
         "sss_m": means.sss, "sst_m": means.sst,
         "ff_f": ice_inputs.ff_f, "tmask": ice_inputs.tmask_surface,
-        "emp": post.emp, "utau": post.utau, "vtau": post.vtau,
+        "emp": post.emp if kt % 2 else tail.emp,
+        "utau": post.utau if kt % 2 else tail.utau,
+        "vtau": post.vtau if kt % 2 else tail.vtau,
         "ice_cover": iif.ice_cover, "sfx": tail.sfx,
         "taum": post.taum, "wndm": post.wndm, "smask0": ice_inputs.smask0,
     }
@@ -920,8 +1035,8 @@ def _surface_boundaries_for_step(kt, state_before, controls, surface):
             ts_kbb=ts_before if kid < 2 else ts_after,
             ts_kmm=ts_before if kid < 2 else ts_after,
             fr_i=(iif.freezing_temperature if kid in (1, 2) else iif.fr_i),
-            qsr=pre.qsr if kid < 3 else post.qsr,
-            qns=pre.qns if kid < 3 else post.qns,
+            qsr=(pre.qsr if kid < 3 else post.qsr) if kt % 2 else post.qsr,
+            qns=(pre.qns if kid < 3 else post.qns) if kt % 2 else tail.qns,
         )
         boundary = f"{IIF_BOUNDARIES[kid]}_IIF"
         result[f"kt{kt:02d}/{boundary}"] = _ordered_fields(
@@ -1028,10 +1143,13 @@ def score_surface_boundaries(
 ) -> dict[str, object]:
     require(tuple(actual) == tuple(expected), "surface boundary inventory/order moved")
     rows: dict[str, dict[str, object]] = {}
+    by_boundary: dict[str, dict[str, object]] = {}
+    by_step: dict[str, dict[str, object]] = {}
     for boundary in expected:
         parts = boundary.split("/")
         require(len(parts) >= 2 and parts[0].startswith("kt"),
                 f"malformed surface boundary key: {boundary}")
+        step = parts[0]
         label = parts[1]
         require(
             label == "S0_F"
@@ -1041,14 +1159,60 @@ def score_surface_boundaries(
         )
         require(tuple(actual[boundary]) == tuple(expected[boundary]),
                 f"{boundary} field inventory moved")
+        b_unequal = 0
+        b_total = 0
+        b_max_abs = 0.0
+        b_first_non_bit: str | None = None
         for name in actual[boundary]:
             key = f"{boundary}/{name}"
-            rows[key] = exact_score(actual[boundary][name], expected[boundary][name])
+            row = exact_score(actual[boundary][name], expected[boundary][name])
+            rows[key] = row
+            row_unequal = int(row["unequal"])
+            b_unequal += row_unequal
+            b_total += int(row["count"])
+            b_max_abs = max(b_max_abs, float(row["max_abs"]))
+            if row_unequal > 0 and b_first_non_bit is None:
+                b_first_non_bit = key
+        by_boundary[boundary] = {
+            "unequal": b_unequal,
+            "count": b_total,
+            "max_abs": b_max_abs,
+            "first_non_bit_row": b_first_non_bit,
+        }
+        step_entry = by_step.setdefault(step, {
+            "unequal": 0,
+            "count": 0,
+            "max_abs": 0.0,
+            "first_non_bit_row": None,
+        })
+        step_entry["unequal"] = int(step_entry["unequal"]) + b_unequal
+        step_entry["count"] = int(step_entry["count"]) + b_total
+        step_entry["max_abs"] = max(float(step_entry["max_abs"]), b_max_abs)
+        if b_first_non_bit is not None and step_entry["first_non_bit_row"] is None:
+            step_entry["first_non_bit_row"] = b_first_non_bit
     unequal = sum(int(row["unequal"]) for row in rows.values())
     total = sum(int(row["count"]) for row in rows.values())
-    require(unequal == 0, f"surface exact bar failed: {unequal} / {total}")
-    return {"status": "PASS_SURFACE_EXACT", "unequal": 0, "count": total,
-            "rows": rows}
+    max_abs = max((float(row["max_abs"]) for row in rows.values()), default=0.0)
+    first_non_bit_row = next(
+        (key for key, row in rows.items() if int(row["unequal"]) > 0),
+        None,
+    )
+    summary = {
+        "status": "PASS_SURFACE_EXACT" if unequal == 0 else "FAIL_SURFACE_EXACT",
+        "unequal": unequal,
+        "count": total,
+        "max_abs": max_abs,
+        "first_non_bit_row": first_non_bit_row,
+        "by_boundary": by_boundary,
+        "by_step": by_step,
+        "rows": rows,
+    }
+    require(
+        unequal == 0,
+        f"surface exact bar failed: {unequal} / {total}",
+        report=summary,
+    )
+    return summary
 
 
 def score_composed_card(
@@ -1060,7 +1224,14 @@ def score_composed_card(
 
     surface_expected = load_oracle_boundaries(oracle_root)
     rung10_expected = load_oracle_state_ladder(oracle_root)
-    surface = score_surface_boundaries(surface_actual, surface_expected)
+    surface_error: GateError | None = None
+    try:
+        surface = score_surface_boundaries(surface_actual, surface_expected)
+    except GateError as exc:
+        if exc.report is None:
+            raise
+        surface = exc.report
+        surface_error = exc
     require(tuple(rung10_actual) == tuple(rung10_expected), "rung-10 checkpoints moved")
     rows = {}
     for checkpoint in rung10_expected:
@@ -1073,13 +1244,30 @@ def score_composed_card(
                 np.asarray(rung10_expected[checkpoint][field], dtype=np.float64),
             )
     require(len(rows) == 200, "rung-10 scorer did not replay all 200 rows")
-    require(all(row["classification"] != "OVER_BAR" for row in rows.values()),
-            "rung-10 bar failed (existing normalized per-row predicate)")
-    return {"status": "PASS_S4_EXACT", "surface": surface, "rung10": rows,
-            "helper_provenance": {
-                "entry_and_bar": rung10.__name__,
-                "core_mapping": o1.__name__,
-                "mxlice": round326.__name__,
-                "source_order": round333.__name__,
-                "manifest": round339.__name__,
-            }}
+    rung10_passed = all(row["classification"] != "OVER_BAR" for row in rows.values())
+    report = {
+        "status": (
+            "PASS_S4_EXACT"
+            if surface_error is None and rung10_passed
+            else "FAIL_S4_SURFACE"
+            if surface_error is not None
+            else "FAIL_S4_RUNG10"
+        ),
+        "surface": surface,
+        "rung10": rows,
+        "helper_provenance": {
+            "entry_and_bar": rung10.__name__,
+            "core_mapping": o1.__name__,
+            "mxlice": round326.__name__,
+            "source_order": round333.__name__,
+            "manifest": round339.__name__,
+        },
+    }
+    if surface_error is not None:
+        raise GateError(str(surface_error), report=report) from surface_error
+    require(
+        rung10_passed,
+        "rung-10 bar failed (existing normalized per-row predicate)",
+        report=report,
+    )
+    return report
