@@ -441,6 +441,7 @@ def output_contract(same_program_path: Path, writer_source: Path) -> dict[str, o
             "compiled writer output format moved")
     return {
         "format": "nemo-testcase-l4-orca2-round336-output-contract-v1",
+        "status": "PASS_R336_OUTPUT_CONTRACT",
         "observer_units": program["observer_units"],
         "writer_units": program["writer_units"],
         "observer_outputs": [record_name(rank) for rank in (0, 1)],
