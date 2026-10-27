@@ -255,6 +255,7 @@ class GaussianGrid(NamedTuple):
     ilap: jax.Array         # Inverse Laplacian (0 for n=0), (n_sh,)
     subgrid_topo_stddev: object = None  # jax.Array (n_lat, n_lon) [m] | None — oro-GWD launch h_topo
     land_frac: jax.Array | None = None  # (n_lat * n_lon,) [0-1], optional physics mask
+    omega: float = constants.Omega  # rotation rate [1/s] behind ``f`` (the column mesh's Coriolis)
 
     # ------------------------------------------------------------------
     # GridProtocol properties
@@ -541,6 +542,7 @@ def create_gaussian_grid(
         ms=_to_jax(ms_np, np.int32),
         lap=_to_jax(lap_np, _rt_np),
         ilap=_to_jax(ilap_np, _rt_np),
+        omega=float(omega),
     )
 
 

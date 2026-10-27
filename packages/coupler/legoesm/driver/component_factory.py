@@ -760,7 +760,8 @@ def energy_fixer_wired(config: ExperimentConfig, solver_name: str) -> bool:
     (``_step_fv3``; the sub-face-TILED dynamics lanes do not run it and are
     refused at their driver entry).  Every other solver does not run it."""
     return (solver_name in _ENERGY_FIXER_SOLVERS
-            or (solver_name == "fv3_duo_primitive_equations"
+            or (solver_name in ("fv3_duo_primitive_equations",
+                                "spectral_primitive_equations")
                 and bool(config.dycore.column_lane)))
 
 
@@ -781,7 +782,7 @@ def refuse_unwired_energy_fixer(config: ExperimentConfig,
         raise ValueError(
             f"DycoreConfig.energy_fixer=True, but the dycore total-energy "
             f"fixer is wired only on the MPAS, lat-lon C-grid and cube C-D grid "
-            f"hydrostatic and FV3-duo column lanes; {solver_name!r} would run WITHOUT it and leave the "
+            f"hydrostatic and FV3-duo / spectral column lanes; {solver_name!r} would run WITHOUT it and leave the "
             f"damping/numerical energy sink open.  Set energy_fixer=False "
             f"(run_amip/run_coupled --no-energy-fixer) to accept that sink "
             f"explicitly on this lane.")
@@ -861,11 +862,12 @@ def create_atmosphere_dycore(
     """
     dc = config.dycore
     gc = config.grid
-    if dc.column_lane and dc.discretization == "latlon_cgrid":
+    if dc.column_lane and dc.discretization in ("latlon_cgrid", "spectral"):
         if latlon_native_grid is None:
             raise ValueError(
-                "create_atmosphere_dycore: the lat-lon column lane needs "
-                "latlon_native_grid (the driver builds it in _create_grid)")
+                f"create_atmosphere_dycore: the {dc.discretization} column "
+                "lane needs latlon_native_grid (the driver builds it in "
+                "_create_grid)")
         grid = latlon_native_grid
         coeff_grid = None
 
@@ -1081,10 +1083,23 @@ def create_atmosphere_dycore(
             fix_mass=dc.fix_mass and dc.conservation_fixer,
             anchor_mass_to_initial=dc.fix_mass and dc.conservation_fixer,
             conservative_tracer_clamp=dc.mpas_conservative_tracer_clamp,  # #1354/#1515 borrow (grid-general knob)
+            # the column-split step runs the global energy fixer (F15); the
+            # legacy step does not and is refused above with it on
+            energy_fixer=bool(dc.energy_fixer and dc.column_lane),
         )
-        return SpectralPrimitiveEquationModel(
+        model = SpectralPrimitiveEquationModel(
             grid=grid, sigma_coord=sigma, config=pe_config,
         )
+        if dc.column_lane:
+            if _spectral_leapfrog:
+                raise ValueError(
+                    f"time_integrator={dc.time_integrator!r} on the spectral "
+                    "column lane: it runs the explicit ssp_rk54 only (D5)")
+            from legoesm.atmosphere.dynamics.gcm.spectral_column import (
+                SpectralColumnModel,
+            )
+            model = SpectralColumnModel(model)
+        return model
 
     if solver_name == "spectral_compressible_euler":
         _reject_unselectable_time_integrator("spectral non-hydrostatic (compressible Euler)")
