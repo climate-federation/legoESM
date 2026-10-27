@@ -37,14 +37,14 @@ The executing salinity-4 source is
 The selectable model is split into source-order helpers and one core:
 
 - VC19 rounding barriers are at
-  `packages/ice/legoesm/ice/bitz_lipscomb.py:1634-1643`;
-- the initial/repeated harmonic forms are at `:1646-1672`, and the RJW chain is
-  at `:1675-1729`, including the zero-volume divisor guard at `:1687-1689`;
-- drainage, flushing, and final bounds are `:1740-1843`, `:1846-1917`, and
-  `:1921-1937`; line 641's role is at `:1891`, and line 644's per-layer roles
-  remain at the executing call site at `:1895-1897`;
-- the fail-closed public entry is `:1949-1986`, and the real O9 -> SAL -> TEMP2
-  category composition is `:1997-2020`.
+  `packages/ice/legoesm/ice/bitz_lipscomb.py:1385-1394`;
+- the initial/repeated harmonic forms are at `:1397-1423`, and the RJW chain is
+  at `:1426-1480`, including the zero-volume divisor guard at `:1438-1440`;
+- drainage, flushing, and final bounds are `:1491-1594`, `:1597-1668`, and
+  `:1672-1688`; line 641's role is at `:1642`, and line 644's per-layer roles
+  remain at the executing call site at `:1646-1648`;
+- the fail-closed public entry is `:1705-1774`, and the real O9 -> SAL -> TEMP2
+  category composition is `:1785-1808`.
 
 The corrected destination/source roles match the record object at source lines
 535, 538, 641, 644, and 677. In particular, line 644 has `MIN(0,zds)` roles
@@ -168,7 +168,7 @@ Two forward implementations avoid invalid intermediate values:
    `safe_brine` instead yields zero and blocks flushing when a layer temperature
    is exactly `T0`. The relevant NEMO loop is
    `ORCA2_SAS_ICE_O7_REF/BLD/ppsrc/nemo/icethd_sal.f90:593-644`, and the model
-   code is `packages/ice/legoesm/ice/bitz_lipscomb.py:1874-1882`. This deviation
+   code is `packages/ice/legoesm/ice/bitz_lipscomb.py:1625-1633`. This deviation
    is unreachable by the analytic TEMP1 and salinity-floor argument above;
    the composition census is only a regression example, not its proof.
 2. After the first drainage iteration, NEMO's repeated harmonic mean has no
@@ -176,8 +176,8 @@ Two forward implementations avoid invalid intermediate values:
    path whose transpose produced NaN. This path is reachable in the 3 melted
    columns above. The model now forms exact zero volume without `0/0` and stops
    the repeated harmonic mean at the same absorbing +0 without evaluating
-   `1/0`, at `packages/ice/legoesm/ice/bitz_lipscomb.py:1653-1672` and
-   `:1682-1689`.
+   `1/0`, at `packages/ice/legoesm/ice/bitz_lipscomb.py:1404-1423` and
+   `:1433-1440`.
 
 The guard changes zero forward bits against the pre-fix arithmetic on the full
 14-column fixture and deterministic 12,000-column fuzz for both harmonic forms,

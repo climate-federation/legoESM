@@ -41,9 +41,9 @@ path does not run it (`scripts/validate/ocean_fidelity/testcases/configs/c1d_omi
 already existed: `MIN`/`MAX`/`SUM`/bit-zero in the surface module
 (`packages/ice/legoesm/ice/si3_surface.py:243`, `packages/ice/legoesm/ice/si3_surface.py:253`,
 `packages/ice/legoesm/ice/si3_surface.py:262`) and the integer-only `< 0` in the
-thermodynamics module (`packages/ice/legoesm/ice/bitz_lipscomb.py:2810`). They are
+thermodynamics module (`packages/ice/legoesm/ice/bitz_lipscomb.py:2012`). They are
 reused through public aliases (`packages/ice/legoesm/ice/si3_surface.py:590-593`,
-`packages/ice/legoesm/ice/bitz_lipscomb.py:2845`), not copied.
+`packages/ice/legoesm/ice/bitz_lipscomb.py:2047`), not copied.
 
 ## Statements transcribed
 
@@ -189,9 +189,9 @@ Review: `codex review: operator`.
    `ice_thd_da` after the second `ice_thd_temp` (`ORCA2_SAS_ICE_O7_REF/BLD/ppsrc/nemo/icethd.f90:205`)
    and before `ice_thd_do` (`:227`), inside the cells gathered at `:181`
    (`IF ( a_i(ji,jj,jl) > epsi10 ) THEN`); the column step does the same at
-   `packages/ice/legoesm/ice/bitz_lipscomb.py:2758` through `:2875`, which applies the
-   gather at `:2907`. `step_sea_ice` passes the config (`packages/ice/legoesm/ice/sea_ice.py:517`;
-   keyword at `packages/ice/legoesm/ice/bitz_lipscomb.py:2700`). On needs the namelist values
+   `packages/ice/legoesm/ice/bitz_lipscomb.py:1952` through `:2077`, which applies the
+   gather at `:2116`. `step_sea_ice` passes the config (`packages/ice/legoesm/ice/sea_ice.py:517`;
+   keyword at `packages/ice/legoesm/ice/bitz_lipscomb.py:1815`). On needs the namelist values
    (`packages/ice/legoesm/ice/config.py:309`, class `:597-601`, no defaults) and `sst_m`
    (`packages/ice/legoesm/ice/bitz_lipscomb.py:42`); the identity check keeps every other field
    fixed (`packages/ice/legoesm/ice/config.py:316`). The C1D deck still disables it
