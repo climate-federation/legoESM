@@ -44,7 +44,15 @@ def test_bad_scale_or_band_raises_even_at_scale_one():
             CLUBBConfig(q_flux_scale=1.0, q_flux_scale_sigma_lo=0.9, q_flux_scale_sigma_hi=0.8))
 
 
-def test_scale_changes_only_vapour_inside_the_band():
+def test_scale_changes_only_vapour_inside_the_band(monkeypatch):
+    # Transport pin: the column energy fixer books L_v * (column vapour
+    # change), which the band leaves unchanged only approximately; it is a
+    # separate closure (test_clubb_column_budget.py), zeroed here.
+    import jax
+    from legoesm.atmosphere.physics.turbulence import clubb as clubb_mod
+    monkeypatch.setattr(clubb_mod, "column_energy_fixer_heating",
+                        lambda r, m, w: jnp.zeros_like(w * r[..., None]))
+    jax.clear_caches()
     base, _ = _run(CLUBBConfig())
     scaled, _ = _run(CLUBBConfig(**_BAND))
     # T, momentum and the surface fluxes are untouched: moisture-only.

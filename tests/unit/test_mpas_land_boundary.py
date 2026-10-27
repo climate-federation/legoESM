@@ -985,6 +985,55 @@ def test_ocean_surface_flag_refused_without_sst_or_land_stress():
     cfg._replace(land_stress_from_land=True).validate_strict()
 
 
+@pytest.mark.parametrize("kw,want", [
+    (dict(), True),
+    (dict(land_beta_soil=False), False),          # no land-flux handoff
+    (dict(radiation="none"), False),              # no SST anchor
+    (dict(land_stress_from_land=False), False),   # bulk stress over land
+], ids=["eligible", "no_handoff", "radiation_none", "land_stress_off"])
+def test_ocean_surface_auto_on_exactly_where_true_is_accepted(kw, want):
+    """AUTO (None, the default) resolves True exactly where an explicit True
+    passes validate_strict and False for each of the three ineligible
+    conditions; AUTO itself always validates; explicit True/False win."""
+    from legoesm.driver.config import (
+        ExperimentConfig, resolve_ocean_flux_on_ocean_surface as res)
+    assert ExperimentConfig().ocean_flux_on_ocean_surface is None
+    cfg = _eligible_cfg(**kw)
+    assert cfg.ocean_flux_on_ocean_surface is None
+    cfg.validate_strict()
+    assert res(cfg) is want
+    cfg._replace(ocean_flux_on_ocean_surface=res(cfg)).validate_strict()
+    explicit_true = cfg._replace(ocean_flux_on_ocean_surface=True)
+    if want:
+        explicit_true.validate_strict()
+    else:
+        with pytest.raises(ValueError, match="ocean_flux_on_ocean_surface"):
+            explicit_true.validate_strict()
+    assert res(explicit_true) is True
+    assert res(cfg._replace(ocean_flux_on_ocean_surface=False)) is False
+
+
+@pytest.mark.parametrize("kw,want", [
+    (dict(), True), (dict(land_stress_from_land=False), False),
+    (dict(ocean_flux_on_ocean_surface=False), False),
+])
+def test_ocean_surface_auto_resolved_into_driver_config(kw, want):
+    """ModelDriver setup writes the RESOLVED boolean into its config and the
+    input-config snapshot (what the manifest and a replay record)."""
+    from legoesm.driver.model_driver import ModelDriver
+    d = ModelDriver(_eligible_cfg(**kw))
+    d._resolve_ocean_flux_surface()
+    assert d.config.ocean_flux_on_ocean_surface is want
+    assert d._input_config.ocean_flux_on_ocean_surface is want
+
+
+def test_ocean_surface_truthy_non_bool_is_still_validated():
+    """A truthy non-boolean (a YAML-quoted "true") is checked like True."""
+    with pytest.raises(ValueError, match="radiation='none'"):
+        _eligible_cfg(radiation="none",
+                      ocean_flux_on_ocean_surface="true").validate_strict()
+
+
 def test_ocean_surface_flag_refused_off_the_mpas_lane():
     with pytest.raises(ValueError, match="not the MPAS lane"):
         _cdgrid_cfg(ocean_flux_on_ocean_surface=True).validate_strict()

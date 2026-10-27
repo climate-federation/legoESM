@@ -501,6 +501,11 @@ def _carry_update_with_cloud_fraction(carry_field, carry_val, turb_out):
         updates["cloud_fraction"] = turb_out.cloud_fraction
         if turb_out.relvar is not None:
             updates["relvar"] = turb_out.relvar
+    # CAM6 droplet-activation inputs (prognostic CLUBB only; None otherwise).
+    if turb_out.wp2_iface is not None:
+        updates["clubb_wp2_iface"] = turb_out.wp2_iface
+    if turb_out.Kh_iface is not None:
+        updates["clubb_kh_iface"] = turb_out.Kh_iface
     if carry_field is not None and carry_val is not None:
         updates[carry_field] = carry_val
     return updates
@@ -1217,7 +1222,8 @@ def _make_mpas_turbulence(
                 turb_out.evap_sfc,
                 sigma_coord.pressure_at_full(
                     jnp.asarray(constants.p_ref, dtype=T_col.dtype)),
-                turbulence_config.holtslag_boville))
+                turbulence_config.holtslag_boville,
+                p_sfc=p_half_col[:, -1]))
 
         # Cell → edge tendency projection.  Average the cell tendencies
         # of the two cells flanking each edge, then project onto the

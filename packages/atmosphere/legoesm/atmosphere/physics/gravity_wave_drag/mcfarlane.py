@@ -17,7 +17,7 @@ Algorithm (k = 0 model top; interface k sits above midpoint k)
    pressure is the arithmetic interface mean (CAM ``Coords1D(pint)``).
 2. Land scaling (``gw_lndscl_sgh``): ``effgw = effgw_oro*landfrac`` and
    ``sgh/sqrt(landfrac)`` where ``landfrac >= epsilon(1._r8)``, both zero
-   elsewhere (``effgw_oro = 0.125``).
+   elsewhere (``McFarlaneConfig.effgw_oro``, default 0.125).
 3. ``gw_oro_src``: displacement ``hdsp = 2*sgh``; dp-weighted source averages
    of ``rho = pmid/(R_d*T)``, ``u``, ``v``, ``nm`` over every midpoint the
    mountain penetrates (full column, shared ``depth_averaged_oro_source``);
@@ -139,7 +139,6 @@ __physics_contract__ = {
 }
 
 # --- CAM6 fixed gravity-wave parameters (ESCOMP/CAM cam_cesm2_1_rel_60) ---
-_EFFGW_ORO = 0.125        # namelist_defaults_cam.xml effgw_oro (non-WACCM L32) [1]
 _N2MIN = 5.0e-5           # gw_common.F90 gw_prof n2min [1/s^2]
 _OROHMIN_M = 10.0         # gw_oro.F90 orohmin: minimum displacement [m]
 _TAUMIN_PA = 1.0e-10      # gw_common.F90 taumin [Pa]
@@ -227,7 +226,8 @@ def mcfarlane_gwd(
     p_ref_half: jax.Array | None = None,
     land_frac_col: jax.Array | None = None,
     tracers: dict | None = None,
-) -> GWDOutput:
+    return_stress: bool = False,
+) -> GWDOutput | tuple[GWDOutput, jax.Array]:
     """CAM6 orographic gravity-wave drag tendencies.
 
     Parameters
@@ -251,6 +251,15 @@ def mcfarlane_gwd(
     tracers : dict[str, (ncol, nlev)] or None
         Per-mass mixing ratios diffused by the gravity-wave eddy diffusion;
         their tendencies are returned in ``GWDOutput.dq_dt`` (same keys).
+    return_stress : bool
+        Static flag, default False.  True returns ``(GWDOutput, tau)`` where
+        ``tau`` (ncol, nlev+1) [Pa] is CAM's ``tau`` out of ``gw_drag_prof``
+        (``lapply_effgw``): the propagated profile times ``effgw``, with
+        each interface below the top redetermined from the limited
+        tendency.  Interface k = 0 is the model top; ``tau[:, -1]`` is the
+        bottom-interface stress, equal to the launch stress ``effgw*tau0``
+        whenever no limiter binds.  Diagnostic only: the tendencies are the
+        same either way.
     """
     _hdsp = config.use_e3sm_hdsp
     # Identity (not equality) for the bool arms: ``1 == True`` would otherwise
@@ -300,11 +309,11 @@ def mcfarlane_gwd(
     else:
         sgh = jnp.clip(jnp.asarray(h_topo_col), 0.0, None).astype(u.dtype)
     if land_frac_col is None:
-        effgw = jnp.full((ncol,), _EFFGW_ORO, dtype=u.dtype)
+        effgw = jnp.full((ncol,), config.effgw_oro, dtype=u.dtype)
     else:
         lf = jnp.asarray(land_frac_col).astype(u.dtype)
         on_land = lf >= _LANDFRAC_MIN
-        effgw = jnp.where(on_land, _EFFGW_ORO * lf, 0.0)
+        effgw = jnp.where(on_land, config.effgw_oro * lf, 0.0)
         sgh = jnp.where(on_land, sgh / jnp.sqrt(jnp.where(on_land, lf, 1.0)), 0.0)
     # ``is True``: flag already resolved above.
     hdsp = sgh * (2.0 if config.use_e3sm_hdsp is True else 1.0)
@@ -379,10 +388,12 @@ def mcfarlane_gwd(
         gwut = jnp.where((0.0 - ubm[:, j]) >= 0.0, jnp.abs(ubtl), -jnp.abs(ubtl))
         over = jnp.abs(gwut) > tndmax
         gwut = gwut * jnp.where(over, tndmax / jnp.where(over, jnp.abs(gwut), 1.0), 1.0)
-        # The limited stress divergence is carried to the layer below.
-        return tau_top + jnp.abs(gwut) * dp[:, j] / g, gwut
+        # The limited stress divergence is carried to the layer below
+        # (CAM "redetermine the effective stress on the interface below").
+        tau_below = tau_top + jnp.abs(gwut) * dp[:, j] / g
+        return tau_below, (gwut, tau_below)
 
-    _, ubt = jax.lax.scan(tend_step, tau[:, 0], jnp.arange(nlev))
+    _, (ubt, tau_lim) = jax.lax.scan(tend_step, tau[:, 0], jnp.arange(nlev))
     ubt = ubt.T                                               # (ncol, nlev)
     du_dt = ubt * xv[:, None]
     dv_dt = ubt * yv[:, None]
@@ -407,5 +418,10 @@ def mcfarlane_gwd(
     dz = jnp.clip(jnp.abs(z_half[:, :-1] - z_half[:, 1:]), 1.0, None)
     eps_gwd = -jnp.sum(rho * (u * du_dt + v * dv_dt) * dz, axis=1)
 
-    return GWDOutput(du_dt=du_dt, dv_dt=dv_dt, dT_dt=dT_dt, eps_gwd=eps_gwd,
-                     dq_dt=dq_dt)
+    out = GWDOutput(du_dt=du_dt, dv_dt=dv_dt, dT_dt=dT_dt, eps_gwd=eps_gwd,
+                    dq_dt=dq_dt)
+    if not return_stress:
+        return out
+    # CAM's output tau: top interface as propagated, every interface below
+    # redetermined from the limited tendency (tend_level = pver for gw_oro).
+    return out, jnp.concatenate([tau[:, :1], tau_lim.T], axis=1)

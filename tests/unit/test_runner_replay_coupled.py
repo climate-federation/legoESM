@@ -99,6 +99,27 @@ def test_coupled_manifest_is_written_after_setup_with_component_configs(
         ":LakeConfig")
 
 
+def test_coupled_record_carries_the_resolved_ocean_flux_auto(tmp_path,
+                                                           monkeypatch):
+    """#1320: the coupled record's atmosphere config records the boolean the
+    atmosphere's setup resolved for ocean_flux_on_ocean_surface AUTO, the
+    same value as the atmosphere's own manifest (never null)."""
+    def setup(self):
+        self._atm._resolve_ocean_flux_surface()
+        restart.write_run_manifest(self.output_dir, self._atm._input_config)
+    monkeypatch.setattr(CoupledESMDriver, "setup", setup)
+    _stop_at_run(monkeypatch)
+    out = tmp_path / "r"
+    with pytest.raises(_Ran):
+        _coupled(out)
+    atm = restart.read_run_manifest(out)["config"]["resolved_config"]
+    cpl = restart.read_run_manifest(out / "coupled")["config"][
+        "resolved_config"]["atmosphere"]
+    assert isinstance(atm["ocean_flux_on_ocean_surface"], bool)
+    assert (cpl["ocean_flux_on_ocean_surface"]
+            == atm["ocean_flux_on_ocean_surface"])
+
+
 def test_clean_coupled_rerun_passes_and_forwards_the_atmosphere_record(
         tmp_path, monkeypatch):
     ref = _reference(monkeypatch, tmp_path)

@@ -370,14 +370,50 @@ def test_restart_refuses_nonfinite_checkpoint_skin(tmp_path):
 
 def test_melt_albedo_ramp_values_with_production_cold_end():
     """The lane passes albedo_cold_bare=albedo_ice (0.80); at the 2 m slab the
-    thickness factor is 1, so cold skin -> 0.80, 0 C skin -> 0.50, linear in
-    the width-K band below 0 C."""
+    thickness factor is 1, so cold skin -> 0.80, 0 C skin -> 0.50, and the
+    smoothstep midpoint is the linear midpoint 0.65."""
     from legoesm.ice.shortwave import maykut_untersteiner_albedo
     T = jnp.array([constants.T_freeze - 5.0, constants.T_freeze - 1.0,
                    constants.T_freeze - 0.5, constants.T_freeze])
     a = maykut_untersteiner_albedo(T, 2.0, albedo_cold_bare=0.80, T_width=1.0)
     np.testing.assert_allclose(np.asarray(a), [0.80, 0.80, 0.65, 0.50],
                                atol=1e-12)
+
+
+# KNOWN DIFFERENCE vs the old linear ramp, measured per case at T_width=1 K,
+# h=2 m (r = 1 + (T - T_freeze)/T_width): smoothstep minus linear albedo.
+_MU_R = np.array([0.1, 0.25, 0.5 - 0.5 / np.sqrt(3), 0.75,
+                  0.5 + 0.5 / np.sqrt(3), 0.9])
+_MU_GAPS = {
+    0.80: [0.0215999999999964, 0.028124999999999956, 0.028867513459485128,
+           -0.028124999999999956, -0.028867513459485128, -0.0215999999999964],
+    0.70: [0.014399999999997526, 0.018750000000000044, 0.019245008972990085,
+           -0.018750000000000044, -0.019245008972989974, -0.014399999999997526],
+}
+
+
+@pytest.mark.parametrize("cold", sorted(_MU_GAPS))
+def test_melt_albedo_smoothstep_gap_vs_linear_per_case(cold):
+    from legoesm.ice.shortwave import maykut_untersteiner_albedo
+    T = jnp.asarray(constants.T_freeze + (_MU_R - 1.0))
+    a = np.asarray(maykut_untersteiner_albedo(
+        T, 2.0, albedo_cold_bare=cold, T_width=1.0))
+    linear = cold - (cold - 0.5) * _MU_R
+    np.testing.assert_allclose(a - linear, _MU_GAPS[cold],
+                               rtol=1e-6, atol=1e-12)
+
+
+def test_melt_albedo_smoothstep_grad_at_default():
+    from jax.test_util import check_grads
+    from legoesm.ice.shortwave import maykut_untersteiner_albedo
+    T = jnp.asarray(constants.T_freeze + np.array([-0.95, -0.5, -0.05]))
+
+    def f(t):
+        return maykut_untersteiner_albedo(t, 2.0, albedo_cold_bare=0.80)
+
+    check_grads(f, (T,), order=2, modes=("fwd", "rev"))
+    g = np.asarray(jax.grad(lambda t: f(t).sum())(T))
+    assert np.all(np.isfinite(g)) and np.all(g < 0.0)
 
 
 def test_validate_melt_albedo_accepts_with_skin():

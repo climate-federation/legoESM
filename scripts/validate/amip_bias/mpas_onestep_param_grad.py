@@ -44,7 +44,9 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-ROOT = Path("/work/bd1083/b309178/diffESM/legoesm_pg/amip_runs")
+# Same override variable as regional_bias.py, so both tools read one run tree.
+ROOT = Path(os.environ.get(
+    "LEGOESM_AMIP_RUNS", "/work/bd1083/b309178/diffESM/legoesm_pg/amip_runs"))
 FD_KNOBS = ("atm.conv.BechtoldConfig.epsilon_deep", "atm.clouds.CloudConfig.rh_crit")
 
 
@@ -61,13 +63,15 @@ def launch_argv(run: str, day: int, out: Path) -> list[str]:
         for ln in open(lg, errors="replace"):
             # single-GPU chains write "[chain] launching:", multi-GPU ones
             # "[chain] launching on N GPU(s):"
-            if "[chain] launching" in ln and "run_amip.py" in ln:
+            # direct (non-chain) multi-GPU sbatch decks log "[run] srun ..."
+            if (("[chain] launching" in ln or ln.startswith("[run] "))
+                    and "run_amip.py" in ln):
                 line = ln
                 break
         if line:
             break
     if line is None:
-        raise SystemExit(f"{run}: no '[chain] launching' line in its slurm logs")
+        raise SystemExit(f"{run}: no '[chain] launching' / '[run]' line in its slurm logs")
     argv = shlex.split(line.split("run_amip.py", 1)[1])
 
     def drop(flag, n=2):

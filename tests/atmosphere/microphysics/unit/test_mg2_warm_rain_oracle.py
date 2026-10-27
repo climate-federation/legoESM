@@ -45,7 +45,8 @@ HARD_LIMIT = dict(
     homogeneous_freeze_sharpness=1.0e6, hom_freeze_T_sharpness=1.0e6,
     hom_ice_nuc_sharpness=1.0e9, melt_sharpness=1.0e6,
     cam_qsat_cap_sharpness=math.inf,
-    mg2_ice_slope_log_width=0.0, mg2_qi_limit_width=0.0)
+    mg2_ice_slope_log_width=0.0, mg2_qi_limit_width=0.0,
+    mg2_presence_ramp_top=1.0e-18, mg2_frozen_rain_ice_ramp_frac=0.0)
 
 
 def _fx():
@@ -63,7 +64,11 @@ def _rel(a, b):
 def _production_morrison():
     """The production deck's MorrisonConfig, resolved as the MPAS column lane
     builds it (run_amip parser -> build_config_from_args ->
-    apply_microphysics_experiment_flags -> thread_morrison_scalars)."""
+    apply_microphysics_experiment_flags -> thread_morrison_scalars), on the
+    droplet-number switch-off lane as the deck ran it before 2026-10-24
+    (aerosol-specified droplet number, nc_from_aerosol): the deck now selects
+    the prognostic number, whose activation input a bare scheme call does not
+    supply, and the MG2 fixtures carry a specified droplet number."""
     from scripts.run.run_amip import build_arg_parser, build_config_from_args
 
     from legoesm.atmosphere.physics.microphysics.config import (
@@ -87,7 +92,9 @@ def _production_morrison():
         liquid_from_closure=cfg._liquid_partition_resolved(),
         hard_sat_adjust_threshold=getattr(cfg, "hard_sat_adjust_threshold", None),
         hard_sat_max_heating_K=getattr(cfg, "hard_sat_max_heating_K", None))
-    return thread_morrison_scalars(cfg, "morrison", m)
+    m = thread_morrison_scalars(cfg, "morrison", m)
+    assert m.prognostic_droplet_number and not m.nc_from_aerosol
+    return m._replace(prognostic_droplet_number=False, nc_from_aerosol=True)
 
 
 def _run_columns(fx, cfg, relvar=None):

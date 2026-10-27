@@ -39,8 +39,7 @@ DT = 1800.0
 NLEV = 30
 KW = dict(tpert=0.0, capelmt=CFG.capelmt, tau=CFG.tau, num_cin=CFG.num_cin,
           dmpdz=CFG.dmpdz, tiedke_add=CFG.tiedke_add, lwmax=LWMAX, c0_lnd=CFG.c0_lnd,
-          c0_ocn=CFG.c0_ocn, alfa=CFG.alfa, limcnv_p_pa=CFG.limcnv_p_pa,
-          pbl_top_pa=CFG.pbl_top_pa)
+          c0_ocn=CFG.c0_ocn, alfa=CFG.alfa, limcnv_p_pa=CFG.limcnv_p_pa)
 
 
 @pytest.fixture(autouse=True)
@@ -95,7 +94,7 @@ def _port(c, pblh=None, pref_edge=None, **over):
 
 def _oracle(c, i, pblh=None, pref_edge=None, **over):
     kw = dict(capelmt=CFG.capelmt, tau=CFG.tau, num_cin=CFG.num_cin, dmpdz=CFG.dmpdz,
-              c0_lnd=CFG.c0_lnd, c0_ocn=CFG.c0_ocn, alfa=CFG.alfa, pbl_top_pa=CFG.pbl_top_pa,
+              c0_lnd=CFG.c0_lnd, c0_ocn=CFG.c0_ocn, alfa=CFG.alfa,
               pref_edge=None if pref_edge is None else np.asarray(pref_edge))
     kw.update(over)
     n = lambda a: np.asarray(a[i])

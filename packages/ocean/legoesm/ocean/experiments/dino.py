@@ -36,6 +36,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from legoesm.core.field import Field
+from legoesm.core.smooth import smoothstep_quintic
 from legoesm import constants
 from legoesm.ocean.constants_config import (
     NEMO_CONSTANTS_CONFIG as _NEMO_CONSTANTS,
@@ -2089,8 +2090,7 @@ def _smooth_step(x, a: float, b: float):
     Paper eq A2; matches Zenodo `smooth_step` (zgr_lib lines 823-825).
     Returns 0 for x ≤ a, 1 for x ≥ b, smooth in between.
     """
-    t = jnp.clip((x - a) / (b - a), 0.0, 1.0)
-    return 6.0 * t**5 - 15.0 * t**4 + 10.0 * t**3
+    return smoothstep_quintic((x - a) / (b - a))
 
 
 def _exp_bathy(x, x_left: float, x_right: float, width: float,

@@ -165,6 +165,7 @@ __param_spec__ = {
             # --- orographic launch amplitude / efficiency ---
             "G_0": {"units": "1", "bounds": (0.1, 2.0), "tunable_tier": 1, "transform": "sigmoid", "category": "orographic", "reference": "McFarlane (1987)/Palmer et al. (1986) launch-flux factor E", "shape": None},
             "efficiency": {"units": "1", "bounds": (0.0, 1.0), "tunable_tier": 1, "transform": "sigmoid", "category": "efficiency", "reference": "McFarlane (1987) breaking efficiency", "shape": None},
+            "effgw_oro": {"units": "1", "bounds": (0.0, 1.0), "tunable_tier": 1, "transform": "sigmoid", "category": "efficiency", "reference": "CAM gw_drag effgw_oro", "shape": None},
             "h_topo": {"units": "m", "bounds": (50.0, 2000.0), "tunable_tier": 1, "transform": "sigmoid", "category": "orographic", "reference": "McFarlane (1987) subgrid topographic height", "shape": None},
             # --- saturation / wave breaking ---
             "fcrit2": {"units": "1", "bounds": (0.5, 2.0), "tunable_tier": 2, "transform": "sigmoid", "category": "saturation", "reference": "McFarlane (1987); E3SM fcrit2 Froude cap", "shape": None},
@@ -386,6 +387,12 @@ class McFarlaneConfig(NamedTuple):
         Maximum fraction of ``|c - U_proj|`` the wind may change per step
         (default 0.5, CAM ``umcfac``; gw_common.F90:642).  Prevents the
         single-step tendency from reversing the wind past the phase speed.
+    effgw_oro : float
+        Orographic gravity-wave efficiency (default 0.125, CAM
+        ``effgw_oro``, namelist_defaults_cam.xml non-WACCM L32).  Scales the
+        stress profile after propagation (``tau *= effgw``); with a land
+        fraction the per-column efficiency is ``effgw_oro*landfrac`` (issue
+        #1712).
     """
     h_topo: float = 500.0
     k_wave: float = 2.0 * math.pi / 100e3
@@ -403,6 +410,7 @@ class McFarlaneConfig(NamedTuple):
     crit_level_floor: float = 0.5
     tndmax_per_day: float = 400.0
     umcfac: float = 0.5
+    effgw_oro: float = 0.125
 
 
 class HinesConfig(NamedTuple):

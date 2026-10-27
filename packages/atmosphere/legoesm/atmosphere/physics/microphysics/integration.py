@@ -189,6 +189,7 @@ def make_microphysics_physics(
     cloud_config=None,
     clubb_config=None,
     relvar_from_clubb: bool = False,
+    cam6_activation=None,
 ) -> Callable:
     """Create a physics function for microphysics matching a model's signature.
 
@@ -210,6 +211,10 @@ def make_microphysics_physics(
         Read the per-cell ``PhysicsState.relvar`` CLUBB wrote in the same
         macmic sub-step (CAM6 pbuf RELVAR) into Morrison ``kk2000_cam6``.
         hydrostatic/mpas lanes only.
+    cam6_activation : Cam6AerosolActivation, optional
+        Start-up constants of CAM6 prescribed-aerosol droplet activation;
+        required by Morrison ``prognostic_droplet_number`` (mpas lane), which
+        then reads ``forcing["cam6_aerosol"]`` every step.
 
     Returns
     -------
@@ -231,7 +236,8 @@ def make_microphysics_physics(
                                             cloud_config=cloud_config,
                                             model_type=model_type,
                                             clubb_config=clubb_config,
-                                            relvar_from_clubb=relvar_from_clubb)
+                                            relvar_from_clubb=relvar_from_clubb,
+                                            cam6_activation=cam6_activation)
     elif model_type == "nonhydrostatic":
         fn = _make_nonhydrostatic_microphysics(microphysics_config, dt)
     elif model_type == "plane":
@@ -275,6 +281,7 @@ def _make_hydrostatic_microphysics(
     model_type: str = "hydrostatic",
     clubb_config=None,
     relvar_from_clubb: bool = False,
+    cam6_activation=None,
 ) -> Callable:
     """Create microphysics physics_fn for PrimitiveEquationModel.
 
@@ -314,6 +321,19 @@ def _make_hydrostatic_microphysics(
         raise ValueError(
             "warm_rain_incloud=True is wired on the MPAS lane only (aist "
             f"needs mesh.latCell); got model_type={model_type!r}.")
+
+    _prog_nc = bool(getattr(scheme_config, "prognostic_droplet_number", False))
+    if _prog_nc and not _incloud:
+        # the scheme refuses this too (morrison.py start-up guard); fail at build
+        raise ValueError("prognostic_droplet_number=True needs warm_rain_incloud=True "
+                         "(activation reads CAM6's ast).")
+    if _prog_nc and cam6_activation is None:
+        raise ValueError(
+            "prognostic_droplet_number=True needs the CAM6 prescribed-aerosol "
+            "droplet activation (cam6_activation); none was built for this lane.")
+    if cam6_activation is not None and not _prog_nc:
+        raise ValueError("cam6_activation is read only under "
+                         "prognostic_droplet_number=True.")
 
     def physics_fn(
         state: HydrostaticState,
@@ -512,6 +532,19 @@ def _make_hydrostatic_microphysics(
                 # CAM6 MG2 reads pbuf RELVAR, set by clubb_tend_cam in the same
                 # macmic iteration (clubb_intr.F90:2416-2425).
                 _kw["relvar"] = phys_state.relvar.reshape(ncol, nlev)
+            if _prog_nc:
+                # CAM6 microp_aero_run immediately before micro_mg (user
+                # decision 2026-10-24, 2), on this sub-step's post-CLUBB state.
+                _ast = _kw["cloud_fraction"]
+                _npccn = cam6_activation_npccn(
+                    T_col, q_v_col, p_full_col, p_half_col, _get_tracer("N_c"),
+                    hydrometeors.q_c, hydrometeors.q_i, _ast, phys_state, forcing,
+                    cam6_activation, dt)
+                _kw["npccn"] = number_per_mass_to_per_volume(_npccn, rho)
+                # pbuf CLDO = ast from top_lev down (micro_mg_cam.F90:1829)
+                _below = jnp.arange(nlev) >= cam6_activation.top_lev
+                _cldo_new = jnp.where(
+                    _below, _ast, phys_state.cloud_fraction_old.reshape(ncol, nlev))
             micro_out = micro_fn(
                 T_col, q_v_col, hydrometeors,
                 p_full_col, p_half_col, rho, dz, dt, scheme_config, **_kw,
@@ -562,7 +595,7 @@ def _make_hydrostatic_microphysics(
                     name=f"d{_nname}_dt_micro", dims=dims_3d, units=_nunits,
                 )
 
-        return HydrostaticTendencies(
+        tend = HydrostaticTendencies(
             du_dt=Field(
                 data=jnp.zeros(u_shape, dtype=_state_dtype),
                 name="du_dt_micro", dims=u_dims, units="m/s^2",
@@ -593,6 +626,10 @@ def _make_hydrostatic_microphysics(
                     data=micro_out.sed_substeps_required.reshape(shape_2d),
                     name="sed_substeps_required", dims=dims_2d, units="1")),
         )
+        if _prog_nc:
+            return tend, {"cloud_fraction_old": _cldo_new.reshape(
+                phys_state.cloud_fraction_old.shape)}
+        return tend
 
     def reset_state():
         _ml_model_cache[0] = None
@@ -605,9 +642,47 @@ def _make_hydrostatic_microphysics(
     # with the legacy 3-arg signature).
     if _nc_from_aerosol:
         physics_fn._wants_forcing = True
-    if _incloud or relvar_from_clubb:
+    if _prog_nc:
+        # Writes the CLDO carry: the accumulator calls it as a carry module
+        # (accepts_ps, see make_hydrostatic combined) with the forcing.
+        physics_fn._wants_forcing = True
+        physics_fn._writes_phys_state = True
+    elif _incloud or relvar_from_clubb:
         physics_fn._wants_phys_state_ro = True
     return physics_fn
+
+
+def cam6_activation_columns(T_col, q_v_col, p_full_col, p_half_col):
+    """``(pmid, pint, rpdel, zm)`` for CAM6 droplet activation, top-first: the
+    heights are the hydrostatic ones the lane's turbulence (CLUBB) uses."""
+    from legoesm.atmosphere.physics._shared import compute_heights_from_sigma
+    zm, _ = compute_heights_from_sigma(T_col, p_half_col, q_v=q_v_col)
+    rpdel = 1.0 / (p_half_col[:, 1:] - p_half_col[:, :-1])
+    return p_full_col, p_half_col, rpdel, zm
+
+
+def cam6_activation_npccn(T_col, q_v_col, p_full_col, p_half_col, N_c_per_kg, q_c, q_i,
+                          ast, phys_state, forcing, setup, dtmicro):
+    """CAM6 ``microp_aero_run`` npccn [1/kg/s] from the prescribed aerosol in
+    ``forcing["cam6_aerosol"]`` and the carried CLUBB / CLDO fields."""
+    from legoesm.atmosphere.physics.microphysics.cam6_aerosol_climatology import (
+        aerosol_at_model_levels)
+    from legoesm.atmosphere.physics.microphysics.cam6_dropmixnuc import (
+        cam6_microp_aero_npccn)
+    aer = None if forcing is None else forcing.get("cam6_aerosol")
+    if aer is None:
+        raise ValueError(
+            "prognostic_droplet_number=True but no forcing['cam6_aerosol'] reached "
+            "the microphysics; the driver must thread the CAM6 aerosol climatology.")
+    ncol, nlev = T_col.shape
+    pmid, pint, rpdel, zm = cam6_activation_columns(T_col, q_v_col, p_full_col, p_half_col)
+    aer_num, aer_mass = aerosol_at_model_levels(aer, setup, pmid)
+    return cam6_microp_aero_npccn(
+        N_c_per_kg, T_col, pmid, pint, rpdel, zm, q_c, q_i,
+        phys_state.clubb_wp2_iface.reshape(ncol, nlev + 1),
+        phys_state.clubb_kh_iface.reshape(ncol, nlev + 1),
+        ast, phys_state.cloud_fraction_old.reshape(ncol, nlev), dtmicro,
+        aer_num, aer_mass, setup.props, setup.top_lev, setup.n_max)
 
 
 # ===========================================================================

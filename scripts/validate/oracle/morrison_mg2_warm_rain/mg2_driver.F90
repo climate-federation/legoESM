@@ -6,10 +6,27 @@
 ! (micro_mg_cam.F90:668-672), do_sb_physics=.false., berg_eff=1, dcs=500e-6
 ! (mg2, :1244), do_cldice=.true., use_hetfrz_classnuc=.true. (frzimm/cnt/dep=0),
 ! microp_uniform from argv(3).  Constants = legoESM's (constants.py).
-! usage: mg2_driver in.txt out.txt [microp_uniform T|F]
+! usage: mg2_driver in.txt out.txt [microp_uniform T|F] [P]
+! Built with -DMG2_TAP against the probe copy (build.sh, tap/) it writes three more columns: nctend right
+! after the activation re-apply (micro_mg2_0.F90:2022), nctend after sedimentation (before :2501), and the
+! droplet sedimentation sub-step count; then (S10.4) 10 columns before the ice melt (dumc, dumnc, dumi,
+! dumni, t+tlat/cpp*dt, qctend, nctend, qitend, nitend, tlat; M:2616), 5 after homogeneous freezing
+! (qctend, nctend, qitend, nitend, tlat; before M:2687) and the whole-call qitend, nitend; then (S10.4b)
+! qs, ns, qr, nr, tlat after the snow-melt pre-apply, the post-sedimentation snow-melt pools dums, dumns,
+! Tp and qstend, nstend, qrtend, nrtend, tlat before it, and those five tends after it.
+! A 4th argument P = prognostic droplet number: nccons_in=.false. (ncic = max(nc/lcldm, 0)) and a 19th input
+! column per level, npccn [1/kg/s]; without it the input has 18 columns and nccons_in=.true. as before.
+! A 5th argument I (with P) adds a 20th input column, naai [1/kg] (MG2 deposition nucleation; 0 otherwise).
+! The tap build (S10.6) also writes tap_ilim1 (25: ice/vapour limiter inputs after the qc limiter),
+! tap_ilim2 (pre, mnuccr, mnuccri, pracs, nnuccri after the rain limiter) and tap_ilim3 (8: the limited rates);
+! tap_frz (Bigg mnuccr, nnuccr, lamr, qric, nric before the ice/snow split).
 program mg2_driver
   use micro_mg_utils, only: r8
   use micro_mg2_0, only: micro_mg_init, micro_mg_tend
+#ifdef MG2_TAP
+  use micro_mg2_0, only: nctend_stage, nctend_sed, nstepc_tap, tap_pre, tap_post, &
+       tap_snow1, tap_snow2, tap_snow3, tap_ilim1, tap_ilim2, tap_ilim3, tap_frz
+#endif
   use wv_sat_methods, only: wv_sat_methods_init
   implicit none
   real(r8), parameter :: g = 9.80616_r8, rair = 287.05_r8, rh2o = 461.51_r8
@@ -17,8 +34,14 @@ program mg2_driver
   real(r8), parameter :: latvap = 2.501e6_r8, latice = 3.337e5_r8
   integer :: ncol, nlev, ic, k, m
   real(r8) :: dt, ncnst
-  character(len=512) :: fin, fout, aflag
-  logical :: uni
+  character(len=512) :: fin, fout, aflag, pflag, iflag
+  logical :: uni, prog, inuc
+  integer :: ninp
+#ifdef MG2_TAP
+  integer, parameter :: nout = 96
+#else
+  integer, parameter :: nout = 15
+#endif
   character(128) :: err
   character(len=16) :: pfm = 'in_cloud'
   real(r8), allocatable :: inp(:,:)
@@ -40,16 +63,28 @@ program mg2_driver
   call get_command_argument(2, fout)
   call get_command_argument(3, aflag)
   uni = (trim(aflag) == 'T')
+  call get_command_argument(4, pflag)
+  prog = (trim(pflag) == 'P')
+  call get_command_argument(5, iflag)
+  inuc = (trim(iflag) == 'I')
+  ninp = 18
+  if (prog) ninp = 19
+  if (inuc) ninp = 20
   call wv_sat_methods_init(r8, tmelt, 273.16_r8, 373.16_r8, 20._r8, rair/rh2o, err)
   open(10, file=trim(fin), status='old')
   read(10, *) ncol, nlev, dt
-  allocate(inp(nlev, 18), allout(ncol, nlev, 15), allprect(ncol))
+#ifdef MG2_TAP
+  if (nlev > 512) then
+     print *, 'nlev > 512: the probe array nctend_stage(1,512) is too small'; stop 4
+  end if
+#endif
+  allocate(inp(nlev, ninp), allout(ncol, nlev, nout), allprect(ncol))
   call alloc2(nlev)
   allocate(rndst(1,nlev,4), nacon(1,nlev,4)); rndst = 1.e-6_r8; nacon = 0._r8
   do ic = 1, ncol
      read(10, *) ncnst
      do k = 1, nlev
-        read(10, *) (inp(k, m), m = 1, 18)
+        read(10, *) (inp(k, m), m = 1, ninp)
      end do
      t(1,:)=inp(:,1); q(1,:)=inp(:,2); qc(1,:)=inp(:,3); qi(1,:)=inp(:,4)
      nc(1,:)=inp(:,5); ni(1,:)=inp(:,6); qr(1,:)=inp(:,7); qs(1,:)=inp(:,8)
@@ -57,6 +92,8 @@ program mg2_driver
      p(1,:)=inp(:,13); pdel(1,:)=inp(:,14); cldn(1,:)=inp(:,15); liqcldf(1,:)=inp(:,16)
      icecldf(1,:)=inp(:,17); qsatfac(1,:)=inp(:,18)
      naai = 0._r8; npccn = 0._r8
+     if (prog) npccn(1,:) = inp(:,19)
+     if (inuc) naai(1,:) = inp(:,20)
      tnd_qsnow = 0._r8; tnd_nsnow = 0._r8; re_ice = 0._r8
      frzimm = 0._r8; frzcnt = 0._r8; frzdep = 0._r8
      call micro_mg_init(kind=r8, gravit=g, rair=rair, rh2o=rh2o, cpair=cpair, &
@@ -64,7 +101,7 @@ program mg2_driver
           micro_mg_dcs=500.e-6_r8, microp_uniform_in=uni, do_cldice_in=.true., &
           use_hetfrz_classnuc_in=.true., micro_mg_precip_frac_method_in=pfm, &
           micro_mg_berg_eff_factor_in=1._r8, allow_sed_supersat_in=.false., &
-          do_sb_physics_in=.false., nccons_in=.true., nicons_in=.false., &
+          do_sb_physics_in=.false., nccons_in=.not. prog, nicons_in=.false., &
           ncnst_in=ncnst, ninst_in=0._r8, errstring=err)
      if (len_trim(err) > 0) then
         print *, 'INIT ERROR: ', trim(err); stop 2
@@ -98,9 +135,25 @@ program mg2_driver
      end if
      allprect(ic) = prect(1)
      do k = 1, nlev
-        allout(ic,k,:) = [tlat(1,k), qvlat(1,k), qctend(1,k), qrtend(1,k), nctend(1,k), &
+        allout(ic,k,1:15) = [tlat(1,k), qvlat(1,k), qctend(1,k), qrtend(1,k), nctend(1,k), &
              nrtend(1,k), nevapr(1,k), pratot(1,k), prctot(1,k), qrsedten(1,k), &
              qcsedten(1,k), umr(1,k), qcrat(1,k), rflx(1,k+1), lflx(1,k+1)]
+#ifdef MG2_TAP
+        allout(ic,k,16) = nctend_stage(1,k)
+        allout(ic,k,17) = nctend_sed(1,k)
+        allout(ic,k,18) = real(nstepc_tap(1), r8)
+        allout(ic,k,19:28) = tap_pre(1,k,:)
+        allout(ic,k,29:33) = tap_post(1,k,:)
+        allout(ic,k,34) = qitend(1,k)
+        allout(ic,k,35) = nitend(1,k)
+        allout(ic,k,36:40) = tap_snow1(1,k,:)
+        allout(ic,k,41:48) = tap_snow2(1,k,:)
+        allout(ic,k,49:53) = tap_snow3(1,k,:)
+        allout(ic,k,54:78) = tap_ilim1(1,k,:)
+        allout(ic,k,79:83) = tap_ilim2(1,k,:)
+        allout(ic,k,84:91) = tap_ilim3(1,k,:)
+        allout(ic,k,92:96) = tap_frz(1,k,:)
+#endif
      end do
   end do
   close(10)
@@ -110,7 +163,7 @@ program mg2_driver
   end do
   do ic = 1, ncol
      do k = 1, nlev
-        write(11, '(2i4,15(1x,es25.16e3))') ic, k, allout(ic,k,:)
+        write(11, '(2i4,'//char(48+nout/10)//char(48+mod(nout,10))//'(1x,es25.16e3))') ic, k, allout(ic,k,:)
      end do
   end do
   close(11)

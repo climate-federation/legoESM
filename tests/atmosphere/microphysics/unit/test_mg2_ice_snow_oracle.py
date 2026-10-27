@@ -112,12 +112,15 @@ def test_snow_kernels_match_mg2():
     i = {k[6:]: jnp.asarray(v) for k, v in fx.items() if k.startswith("pt_in_")}
     o = {k[7:]: v for k, v in fx.items() if k.startswith("pt_out_")}
     cfg = resolve_morrison_flavor(MorrisonConfig(
-        morrison_flavor="mg", ice_snow_d_auto=500.0e-6))   # CAM6 micro_mg_dcs
+        morrison_flavor="mg", ice_snow_d_auto=500.0e-6,     # CAM6 micro_mg_dcs
+        melt_sharpness=1.0e9))   # hard limit of the smooth Bigg -4 C step (2026-10-22)
     rho, T, p, pf = i["rho"], i["T"], i["p"], i["precip_frac"]
     qvl = saturation_specific_humidity_goff_gratch(T, p)
     qvi = saturation_specific_humidity_ice_goff_gratch(T, p)
     errs = {"qvl": _rel(qvl, o["qvl"]), "qvi": _rel(qvi, o["qvi"])}
-    qsic, nsic, lams, n0s = W.mg2_inprecip_snow(i["qs"], i["ns"], pf, cfg)
+    # hard limits: CAM's own slope clamp and 0 C gates (the smooth production
+    # forms depart from CAM only within a percent of a bound / 2 K of 0 C)
+    qsic, nsic, lams, n0s = W.mg2_inprecip_snow(i["qs"], i["ns"], pf, cfg, psd_sharpness=1.0e9)
     for k, v in (("qsic", qsic), ("nsic", nsic), ("lams", lams), ("n0s", n0s)):
         errs[k] = _rel(v, o[k])
     ums, uns = W.mg2_snow_fall_speeds(lams, rho, cfg)
@@ -131,10 +134,10 @@ def test_snow_kernels_match_mg2():
     errs["lamc"] = _rel(lamc, o["lamc"])
     eps_s, mu = W.mg2_snow_vent_eps(n0s, lams, T, p, rho, cfg)
     psacws, npsacws = W.mg2_accrete_cloud_water_snow(
-        T, rho, mu, uns, i["qcic"], nc_adj / rho, qsic, pgam, lamc, lams, n0s, cfg)
+        T, rho, mu, uns, i["qcic"], nc_adj / rho, qsic, pgam, lamc, lams, n0s, cfg, 1.0e-9)
     errs["psacws"] = _rel(psacws, o["psacws"])
     errs["npsacws"] = _rel(npsacws, o["npsacws"])
-    errs["bergs"] = _rel(W.mg2_bergeron_snow(T, i["qcic"], qsic, qvl, qvi, eps_s),
+    errs["bergs"] = _rel(W.mg2_bergeron_snow(T, i["qcic"], qsic, qvl, qvi, eps_s, 1.0e-9),
                          o["bergs"])
     errs["prds"] = _rel(W.mg2_snow_sublimation(
         i["qfrac"] * qvl, qvl, qvi, T, eps_s, qsic, i["lcldm"], pf, i["qcic"],
@@ -149,7 +152,7 @@ def test_snow_kernels_match_mg2():
     niic, lami = W.mg2_ice_slope(i["qi"], i["ni"], cfg.rho_cloud_ice, float(fx["dcs"]))
     errs["lami"] = _rel(lami, o["lami"])
     errs["niic"] = _rel(niic, o["niic"])
-    prci, nprci = W.ice_autoconversion_mg2(i["qi"], niic, lami, float(fx["dcs"]), T)
+    prci, nprci = W.ice_autoconversion_mg2(i["qi"], niic, lami, float(fx["dcs"]), T, 1.0e-9)
     errs["prci"] = _rel(prci, o["prci"])
     errs["nprci"] = _rel(nprci, o["nprci"])
     worst = {k: float(np.max(v)) for k, v in errs.items()}
@@ -327,7 +330,7 @@ def test_mg2_ice_slope_bounds():
              hi ** 3 * 1e-12 / (rhoi * np.pi)], rtol=1e-13)
     assert float(ni[3]) <= 1.0e-12 / 1.0e-20
     T = jnp.full(4, 250.0)
-    prci, nprci = W.ice_autoconversion_mg2(q, ni, lam, dcs, T)
+    prci, nprci = W.ice_autoconversion_mg2(q, ni, lam, dcs, T, 1.0e-9)
     d = np.asarray(lam) * dcs
     nprci_mg2 = np.asarray(ni) * np.asarray(lam) / (np.asarray(lam) * 180.0) * np.exp(-d)
     prci_mg2 = (rhoi * np.pi / 6.0) / np.asarray(lam) ** 3 * nprci_mg2 * (((d + 3) * d + 6) * d + 6)
@@ -335,7 +338,7 @@ def test_mg2_ice_slope_bounds():
     np.testing.assert_allclose(prci[:3], prci_mg2[:3], rtol=1e-12)
 
 
-@pytest.mark.parametrize("ice_to_snow", ["m2005_autoconv", "mg_ferrier"])
+@pytest.mark.parametrize("ice_to_snow", [None, "mg_ferrier"])   # mg refuses any other (2026-10-24 1a)
 def test_mg2_ice_conservation_credits_same_step_sources(ice_to_snow):
     """MG2 conservation of qi (micro_mg2_0.F90:1717-1735): ice->snow
     autoconversion + sublimation may take q_i PLUS this step's ice sources
@@ -363,7 +366,7 @@ def test_mg2_ice_conservation_credits_same_step_sources(ice_to_snow):
     Ni = jnp.full((n, 1), 2.0e3)
     z = jnp.zeros_like(T)
     ni, lam = W.mg2_ice_slope(qi, Ni, cfg.rho_cloud_ice, cfg.ice_snow_d_auto)
-    prci, _ = W.ice_autoconversion_mg2(qi, ni, lam, cfg.ice_snow_d_auto, T)
+    prci, _ = W.ice_autoconversion_mg2(qi, ni, lam, cfg.ice_snow_d_auto, T, 1.0e-9)
     assert np.all(np.asarray(prci) * dt > 2.0 * np.asarray(qi))  # limit binds
     hyd = HydrometeorState(q_c=z, q_r=z, q_i=qi, q_s=z, q_g=z, N_c=z + 5.0e7,
                            N_r=z, N_i=Ni, N_s=z)

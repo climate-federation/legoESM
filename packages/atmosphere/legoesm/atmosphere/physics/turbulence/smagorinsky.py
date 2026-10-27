@@ -75,6 +75,7 @@ from legoesm.atmosphere.physics._shared import (
     lilly_buoyancy_factor,
     mixing_length,
     virtual_temperature,
+    half_to_iface_zero_ends,
 )
 from legoesm.atmosphere.physics.turbulence.config import SmagorinskyConfig
 from legoesm.atmosphere.physics.turbulence.output import TurbulenceOutput
@@ -306,4 +307,5 @@ def smagorinsky_turbulence(
         ustar=ustar,
         h_pbl=h_pbl,
         wtheta_flux=wtheta_flux,
+        Kh_iface=half_to_iface_zero_ends(Kh_half),
     )

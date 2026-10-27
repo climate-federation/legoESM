@@ -96,6 +96,31 @@ def test_liquid_reff_matches_cam6_rel(z):
     np.testing.assert_array_equal(ours14, ours)
 
 
+def test_dead_number_reff_ignores_deep_convective_cover(z):
+    """Follow-up row 46: the dead-number REL divides the water by ast, as
+    CAM does for every level (micro_mg_cam.F90:2539), not by a radiative
+    cover that also holds deep cu.  The fixture's dead levels sit in a column
+    without convection, so give that column the deepest column's convective
+    mass flux: cover rises above ast there and CAM's REL (which never sees
+    the convective cover) must still be matched."""
+    kw = _kwargs(z)
+    dead = np.asarray(z["n_ccn"]) <= 1.0
+    cols = np.unique(np.nonzero(dead)[0])
+    mf = np.asarray(z["conv_mass_flux_up"]).copy()
+    icw = np.asarray(z["conv_icwmr"]).copy()
+    # deep convection through the whole of those columns
+    mf[cols] = np.max(mf)
+    icw[cols] = np.max(icw)
+    kw["conv_mass_flux_up"] = jnp.asarray(mf)
+    kw["conv_icwmr"] = jnp.asarray(icw)
+    props = compute_cloud_properties(**kw, n_cloud_in_cloud=True,
+                                     clubb_config=CLUBBConfig())
+    cover = np.asarray(props.cloud_fraction)
+    assert np.any(dead & (cover > np.asarray(z["ast"]) + 1e-6))
+    ours = np.asarray(props.r_eff_liq) * 1e6
+    rel = _max_rel(ours, z["rel_cam"], dead)
+    assert rel <= _TOL, f"dead-number r_eff_liq max rel {rel:.3e} > {_TOL}"
+
 def test_ice_reff_matches_mg2_effi(z):
     props = compute_cloud_properties(**_kwargs(z), n_cloud_in_cloud=True,
                                      clubb_config=CLUBBConfig())

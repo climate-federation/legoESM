@@ -84,3 +84,56 @@ def test_backend_passes_cloud_config_density():
             q_cloud=jnp.full((ncol, nlev), 1e-5), q_ice=jnp.full((ncol, nlev), 1e-5),
             rrtmgp_solver=_Spy())
     assert seen["cloud_rho_ice"] == 700.0
+
+
+def test_pipeline_rrtmgp_fn_forwards_cloud_density(monkeypatch):
+    import legoesm.atmosphere.physics.radiation.rrtmgp.rrtmgp as rrtmgp_mod
+    from legoesm.driver.config import ExperimentConfig
+    from legoesm.driver.physics_pipeline import _build_rrtmgp_radiation_fn
+
+    seen = {}
+
+    class _Spy:
+        def solve_columns(self, **kw):
+            seen.update(kw)
+            raise _Reached
+
+    monkeypatch.setattr(rrtmgp_mod.RRTMGP, "from_legoesm_config",
+                        classmethod(lambda cls, cfg: _Spy()))
+    rad_fn, _ = _build_rrtmgp_radiation_fn(ExperimentConfig(radiation="rrtmgp"))
+    ncol, nlev = 2, 2
+    p_half = jnp.broadcast_to(jnp.array([1e4, 5e4, 1e5]), (ncol, nlev + 1))
+    with jax.disable_jit(), pytest.raises(_Reached):
+        rad_fn(jnp.full((ncol, nlev), 260.0),
+               0.5 * (p_half[:, 1:] + p_half[:, :-1]), p_half,
+               jnp.full((ncol, nlev), 1e-3), jnp.full((ncol,), 290.0),
+               jnp.zeros(ncol), jnp.zeros(ncol), 80.0, 43200.0,
+               jnp.full((ncol,), 0.1), jnp.full((ncol,), 0.99),
+               jnp.zeros((ncol, nlev)), jnp.zeros((ncol, nlev)), jnp.array([]),
+               cloud_r_eff_ice=jnp.full((ncol, nlev), 30.0),
+               cloud_rho_ice=700.0)
+    assert seen["cloud_rho_ice"] == 700.0
+
+
+def test_rrtmgp_radiation_shim_forwards_cloud_density(monkeypatch):
+    import importlib
+
+    shim = importlib.import_module(
+        "legoesm.atmosphere.physics.radiation.rrtmgp_radiation")
+
+    seen = {}
+
+    class _Spy:
+        def solve_columns(self, **kw):
+            seen.update(kw)
+            raise _Reached
+
+    monkeypatch.setattr(shim, "_get_instance", lambda cfg: _Spy())
+    ncol, nlev = 2, 2
+    p_half = jnp.broadcast_to(jnp.array([1e4, 5e4, 1e5]), (ncol, nlev + 1))
+    with pytest.raises(_Reached):
+        shim.rrtmgp_radiation(
+            jnp.full((ncol, nlev), 260.0), 0.5 * (p_half[:, 1:] + p_half[:, :-1]),
+            p_half, jnp.full((ncol,), 290.0), jnp.full((ncol, nlev), 1e-3),
+            jnp.full((ncol,), 0.5), RRTMGPConfig(), cloud_rho_ice=700.0)
+    assert seen["cloud_rho_ice"] == 700.0

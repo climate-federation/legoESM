@@ -120,6 +120,12 @@ k_air = 2.40e-2                 # Thermal conductivity of air [W/(m*K)]
 sigma_water = 0.0728            # Surface tension of the water-air interface [N/m]
                                 # at ~293 K (Pruppacher & Klett 1997) — Kelvin
                                 # curvature term in Köhler droplet growth
+# CAM6 droplet-activation (ndrop.F90 ndrop_init) scheme constants: CAM evaluates
+# the Kelvin term ONCE at a fixed reference temperature with its own surface
+# tension, aten = 2*M_w*surften/(R*t0*rho_w) (ndrop.F90:120-122).  Distinct from
+# sigma_water above on purpose (user decision 2026-10-16: keep CAM's value).
+surften_cam6_activation = 0.076     # [N/m] CAM6 ndrop surften (ndrop.F90:121)
+T_ref_cam6_activation = 273.0       # [K]  CAM6 ndrop t0 (ndrop.F90:120); NOT T_freeze
 
 # ==============================================================================
 # Turbulence

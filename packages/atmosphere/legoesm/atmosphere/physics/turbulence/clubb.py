@@ -8,7 +8,7 @@ one-file-per-scheme convention, the remaining ``clubb_*.py`` helper modules are
 being absorbed here section by section (see the table of contents below); the
 CAM-default model-flag values are recorded as comments at the end of the file.
 
-Table of contents (sections, in order; flag reference table at line 7175)
+Table of contents (sections, in order; flag reference table at line 7216)
 -----------------------------------------------------------------------------
   1. [line  352] Diagnostic ADG1-PDF closure (``diagnose_cloud_and_buoyancy``)
   2. [line  473] Configuration (``CLUBBParams`` / ``CLUBBConfig`` + derived params;
@@ -50,7 +50,7 @@ Table of contents (sections, in order; flag reference table at line 7175)
   18. [line  5329] Core orchestration (``compute_clubb_diagnostics`` /
       ``compute_pdf_closure`` / ``calc_sfc_varnce`` / ``advance_clubb_core`` +
       the ``CLUBBMomentState``/``CLUBBForcing`` carry types and pack/unpack)
-  19. [line  6090] Scheme entries (``clubb_turbulence`` diagnostic default /
+  19. [line  6095] Scheme entries (``clubb_turbulence`` diagnostic default /
       ``clubb_turbulence_prognostic`` opt-in / ``clubb_step`` bridge /
       ``integrate_clubb_column`` SCM driver)
 
@@ -6117,6 +6117,21 @@ def scale_q_diffusivity_in_band(Kh_half, p_half, config: CLUBBConfig):
     return jnp.where(in_band, scale * Kh_half, Kh_half)
 
 
+def column_energy_residual(u, v, du_dt, dv_dt, dT_dt, dq_v_dt, p_half, dt,
+                           sfc_energy_in):
+    """Column total-energy residual [W/m2, + = created] of the host update
+    u += dt*du, T += dt*dT, q_v += dt*dq against the energy the lower BCs
+    supplied (``sfc_energy_in``, + up = into the air): ``sum(dp/g (c_pd dT/dt
+    + dKE/dt + L_v dq_v/dt)) - sfc_energy_in``, with the EXACT finite KE
+    change of the host update.  Liquid reference: q_c carries no latent term.
+    """
+    dp_g = (p_half[:, 1:] - p_half[:, :-1]) / constants.g
+    dke_dt = (du_dt * (u + 0.5 * dt * du_dt) + dv_dt * (v + 0.5 * dt * dv_dt))
+    return (jnp.sum(dp_g * (constants.c_pd * dT_dt + dke_dt
+                            + constants.L_v * dq_v_dt), axis=1)  # latent-ok: CAM6 clubb_intr energy-fix reference constant
+            - sfc_energy_in), dp_g
+
+
 def clubb_turbulence(
     u: jax.Array,
     v: jax.Array,
@@ -6309,6 +6324,21 @@ def clubb_turbulence(
     # +warming] (review 2026-10-10 F14; CAM6 clubb_do_energyfix=.true.,
     # always on: CLUBB's flags are the fixed CAM defaults).
     dT_dt = (T_new - T) / dt + ke_dissipation_heating(u, v, du_dt, dv_dt, dt)
+    # Column energy fixer, as the prognostic path: diffusing theta conserves
+    # sum(dp theta), not the host's sum(dp c_pd T), so mixing a stable column
+    # creates energy.  Closes the column against the energy the BCs supplied
+    # (= shflx + lhflx), uniform per unit mass over the whole column, or with
+    # the cutoff on over every layer at or below the cut pressure (hard mask,
+    # CAM's top_lev rule on the column pressure; user decision 2026-10-26).
+    # DEPARTURE from CAM, deliberate (energy conservation): the intake is the
+    # physical shflx + lhflx; CAM closes against shf + (latvap+latice)*cflx
+    # (clubb_intr.F90:2135), leaving lhf - L*E unbooked.
+    resid, dp_g = column_energy_residual(
+        u, v, du_dt, dv_dt, dT_dt, (q_new - q_v) / dt, p_half, dt,
+        constants.c_pd * sflx_T + constants.L_v * sflx_q)  # latent-ok: CAM6 clubb_intr energy-fix reference constant
+    w_fix = ((p_full >= config.trop_cloud_top_press).astype(dp_g.dtype)
+             if _trop_on else jnp.ones_like(dp_g))
+    dT_dt = dT_dt + column_energy_fixer_heating(resid, dp_g, w_fix)
     output = TurbulenceOutput(
         du_dt=du_dt,
         dv_dt=dv_dt,
@@ -6630,7 +6660,11 @@ def clubb_step(
         # Heat BC carries the latent enthalpy correction (water at L(T) vs L_v).
         # CAM host convention (clubb_intr.F90:1781): wpthlp_sfc =
         # shf/(cpair*rho_ds_zm(1)), no division by exner.
-        wpthlp_b = ((shflx_b + latent_enthalpy_correction(lhflx_b, wprtp_b * rho_sfc))
+        # The correction follows the water BC actually applied: a prescribed
+        # water flux is reported at L_v (lhflx below), so its correction is 0.
+        _corr = (latent_enthalpy_correction(lhflx_b, wprtp_b * rho_sfc)
+                 if sfc_wprtp is None else 0.0)
+        wpthlp_b = ((shflx_b + _corr)
                     / (rho_sfc * constants.c_pd))              # w'thl' [K m/s]
         # Surface stress convention is tau = -rho*Cd*|V|*u (compute_surface_fluxes),
         # so the kinematic momentum flux is u'w'_sfc = tau_x/rho (NEGATIVE for u>0 —
@@ -6638,7 +6672,12 @@ def clubb_step(
         upwp_b = tau_x / rho_sfc                                     # u'w'   [m^2/s^2]
         vpwp_b = tau_y / rho_sfc
     # Resolve each BC: prescribed kinematic flux when given, else the bulk value.
-    wpthlp_sfc = wpthlp_b if sfc_wpthlp is None else sfc_wpthlp
+    # A prescribed heat flux with the bulk water flux still takes the bulk
+    # water's latent-enthalpy correction, so the intake is shflx + lhflx
+    # (user decision 2026-10-26); the reported shflx stays the prescribed one.
+    wpthlp_sfc = wpthlp_b if sfc_wpthlp is None else (
+        sfc_wpthlp if sfc_wprtp is not None else
+        sfc_wpthlp + _corr / (rho_sfc * constants.c_pd))
     wprtp_sfc = wprtp_b if sfc_wprtp is None else sfc_wprtp
     upwp_sfc = upwp_b if sfc_upwp is None else sfc_upwp
     vpwp_sfc = vpwp_b if sfc_vpwp is None else sfc_vpwp
@@ -6952,6 +6991,7 @@ def clubb_turbulence_prognostic(
         sfc_energy_in = diags["sfc_energy_in"]
         clubbtop = diags.get("clubbtop")
         Kh_full = flip_vertical(diags["Kh_zt"])
+        Kh_iface = flip_vertical(diags["Kh_zm"])
         cloud_frac_a = diags["cloud_frac"]
         rcp2_a = diags["rcp2_zt"]
         rcm_relvar_a = diags.get("rcm_relvar")
@@ -7004,6 +7044,7 @@ def clubb_turbulence_prognostic(
         clubbtop = (diag_stk["clubbtop"][-1] if "clubbtop" in diag_stk
                     else None)
         Kh_full = flip_vertical(diag_stk["Kh_zt"][-1])
+        Kh_iface = flip_vertical(diag_stk["Kh_zm"][-1])
         # Final sub-step, like Kh: the cloud fraction must correspond to the
         # moments being returned as the carry, not to a sub-cycle average of
         # states the host never sees.
@@ -7033,11 +7074,8 @@ def clubb_turbulence_prognostic(
     # (clubb_intr.F90 2138-2150, k = clubbtop+1..pver), the whole column when
     # trop_cloud_top_press is off.  Liquid reference: q_c carries no latent
     # term; CLUBB moves no ice.
-    dp_g = (p_half[:, 1:] - p_half[:, :-1]) / constants.g
-    dke_dt = (du_dt * (u + 0.5 * dt * du_dt) + dv_dt * (v + 0.5 * dt * dv_dt))
-    resid = (jnp.sum(dp_g * (constants.c_pd * dT_dt + dke_dt
-                             + constants.L_v * dq_v_dt), axis=1)  # latent-ok: CAM6 clubb_intr energy-fix reference constant
-             - sfc_energy_in)
+    resid, dp_g = column_energy_residual(
+        u, v, du_dt, dv_dt, dT_dt, dq_v_dt, p_half, dt, sfc_energy_in)
     if config.trop_cloud_top_press > 0.0:
         w_fix = (jnp.arange(dp_g.shape[1])[None, :]
                  > clubbtop[:, None]).astype(dp_g.dtype)
@@ -7075,7 +7113,11 @@ def clubb_turbulence_prognostic(
         evap_sfc=surface_moisture_flux(config.surface, lhflx, T_sfc),
         ustar=ustar,
         h_pbl=h_pbl, cloud_fraction=cloud_fraction_td, dq_c_dt=dq_c_dt,
-        relvar=relvar)
+        relvar=relvar,
+        # CAM6 activation inputs (microp_aero/dropmixnuc): khzm_out of the LAST
+        # sub-step's advance (clubb_intr.F90:1915, :1997, surface interface
+        # included) and the end-of-sub-cycle wp2 left in WP2_nadv (:1987).
+        Kh_iface=Kh_iface, wp2_iface=flip_vertical(new_moments.wp2))
     return output, pack_clubb_moments(new_moments)
 
 

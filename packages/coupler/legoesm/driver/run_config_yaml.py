@@ -351,6 +351,7 @@ _ATM_SCALAR_PARAM_MAP: dict[str, str] = {
     "atm.gwd.HinesConfig.total_rms_wind": "hines_total_rms_wind",
     "atm.gwd.HinesConfig.Fmax": "hines_Fmax",
     "atm.gwd.McFarlaneConfig.directional_spread": "mcfarlane_directional_spread",
+    "atm.gwd.McFarlaneConfig.effgw_oro": "mcfarlane_effgw_oro",
     # NOTE: ``mcfarlane_k_wave`` is threaded too but has NO ``__param_spec__``
     # entry (its computed 2*pi/100e3 default is not a float literal, so the
     # AST-based spec gate never required one) — there is no qualified name to

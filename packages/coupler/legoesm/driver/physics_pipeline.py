@@ -2984,6 +2984,9 @@ class PhysicsPipeline:
             # centralised the helper so the bug can't resurface at a
             # third call site.
             cloud_kwargs = cloud_props.to_rrtmg_kwargs()
+            # Ice table size at the run's bulk ice density (rrtmgp rescales
+            # r_eff by rho/500; exactly 1 at CAM's 500).
+            cloud_kwargs["cloud_rho_ice"] = cloud_config.rho_cloud_ice
 
         # Issue #273 follow-up: when a column mesh is configured, place
         # every column-format input on the mesh's 'col' axis before
@@ -3018,7 +3021,8 @@ class PhysicsPipeline:
             aerosol_lw_od_precomputed = _shard(aerosol_lw_od_precomputed)
             o3_top_vmr = _shard(o3_top_vmr)
             if cloud_kwargs:
-                cloud_kwargs = {k: _shard(v) for k, v in cloud_kwargs.items()}
+                cloud_kwargs = {k: (v if k == "cloud_rho_ice" else _shard(v))
+                                for k, v in cloud_kwargs.items()}
 
         rad_out = self.radiation_fn(
             T_col, p_full_col, p_half_col, q_v_col,
@@ -3517,6 +3521,7 @@ def _build_none_radiation_fn(config):
                      cloud_path_liq=None, cloud_path_ice=None,
                      cloud_path_liq_lw=None, cloud_path_ice_lw=None,
                      cloud_r_eff_liq=None, cloud_r_eff_ice=None,
+                     cloud_rho_ice=None,
                      cloud_fraction=None):
         del aerosol_lw_od_col, o3_top_vmr_col  # zero-radiation: no-ops
         ncol, nlev = T_col.shape
@@ -3570,10 +3575,12 @@ def _build_gray_radiation_fn(config):
                      cloud_path_liq=None, cloud_path_ice=None,
                      cloud_path_liq_lw=None, cloud_path_ice_lw=None,
                      cloud_r_eff_liq=None, cloud_r_eff_ice=None,
+                     cloud_rho_ice=None,
                      cloud_fraction=None):
         del ghg_vmr_override  # gray radiation does not use GHG concentrations
         del aerosol_lw_od_col, o3_top_vmr_col  # gray: no aerosol LW od / ozone
         del cloud_path_liq, cloud_path_ice, cloud_r_eff_liq, cloud_r_eff_ice, cloud_fraction
+        del cloud_rho_ice
         del cloud_path_liq_lw, cloud_path_ice_lw  # gray: no cloud optics
         # Rebuild config with traced tau values when provided
         _cfg = gray_config
@@ -3673,6 +3680,7 @@ def _build_rrtmgp_radiation_fn(config):
                      cloud_path_liq=None, cloud_path_ice=None,
                      cloud_path_liq_lw=None, cloud_path_ice_lw=None,
                      cloud_r_eff_liq=None, cloud_r_eff_ice=None,
+                     cloud_rho_ice=None,
                      cloud_fraction=None, open_ocean_frac_col=None):
         del tau_equator, tau_pole  # RRTMGP does not use gray optical depth
         _sw_scale = None
@@ -3747,6 +3755,7 @@ def _build_rrtmgp_radiation_fn(config):
             cloud_path_ice_lw=cloud_path_ice_lw,
             cloud_r_eff_liq=cloud_r_eff_liq,
             cloud_r_eff_ice=cloud_r_eff_ice,
+            cloud_rho_ice=cloud_rho_ice,
             cloud_fraction=cloud_fraction,
         )
         if o3_top_vmr_col is not None:  # overhead-layer ozone
@@ -4367,10 +4376,13 @@ def thread_morrison_scalars(config, scheme, micro_config):
                        _ExpCfg._field_defaults["morrison_do_graupel"])
     _incloud = getattr(config, "morrison_warm_rain_incloud",
                        _ExpCfg._field_defaults["morrison_warm_rain_incloud"])
+    _prog_nc = getattr(config, "morrison_prognostic_droplet_number",
+                       _ExpCfg._field_defaults["morrison_prognostic_droplet_number"])
     for _nm, _v in (("morrison_sed_cfl_substeps", _sed_sub),
                     ("morrison_sed_cfl_substeps_strict", _sed_strict),
                     ("morrison_do_graupel", _graupel),
-                    ("morrison_warm_rain_incloud", _incloud)):
+                    ("morrison_warm_rain_incloud", _incloud),
+                    ("morrison_prognostic_droplet_number", _prog_nc)):
         if not isinstance(_v, bool):
             raise TypeError(f"{_nm} must be a bool, got {_v!r}")
     if not isinstance(_sed_max, int) or isinstance(_sed_max, bool) or _sed_max < 1:
@@ -4392,9 +4404,12 @@ def thread_morrison_scalars(config, scheme, micro_config):
     _incloud = (None if _incloud
                 is _ExpCfg._field_defaults["morrison_warm_rain_incloud"]
                 else _incloud)
+    _prog_nc = (None if _prog_nc
+                is _ExpCfg._field_defaults["morrison_prognostic_droplet_number"]
+                else _prog_nc)
     if (not _touched and _flavor is None and _sed_sub is None
             and _sed_strict is None and _sed_max is None and _graupel is None
-            and _wrs is None and _incloud is None):
+            and _wrs is None and _incloud is None and _prog_nc is None):
         return micro_config
     from legoesm.atmosphere.physics.microphysics.config import (
         apply_microphysics_experiment_flags,
@@ -4405,7 +4420,8 @@ def thread_morrison_scalars(config, scheme, micro_config):
         morrison_sed_cfl_substeps_max=_sed_max,
         morrison_sed_cfl_substeps_strict=_sed_strict,
         morrison_do_graupel=_graupel, morrison_warm_rain_scheme=_wrs,
-        morrison_warm_rain_incloud=_incloud)
+        morrison_warm_rain_incloud=_incloud,
+        morrison_prognostic_droplet_number=_prog_nc)
 
 
 def _resolve_microphysics(config):
@@ -4976,6 +4992,8 @@ def gwd_config_for(config):
         directional_spread=float(getattr(
             config, "mcfarlane_directional_spread",
             gc.mcfarlane.directional_spread)),
+        effgw_oro=float(getattr(config, "mcfarlane_effgw_oro",
+                                gc.mcfarlane.effgw_oro)),
     )
     # Hines (non-orographic) launch amplitude + saturation flux cap.
     hn = gc.hines._replace(

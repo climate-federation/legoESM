@@ -275,6 +275,15 @@ class PhysicsState(NamedTuple):
     # RELVAR).  Seeded at CAM's pbuf initial value; overwritten before any read
     # on the CLUBB lanes.  Appended LAST.
     relvar: jnp.ndarray = None
+    # CAM6 droplet activation (microp_aero_run) inputs, (ncol, nlev+1) top-first
+    # interfaces: prognostic CLUBB's final-sub-step w'^2 (pbuf WP2_nadv) and
+    # heat diffusivity Kh_zm (khzm), written by the turbulence sub-step and
+    # read by the microphysics of the same macmic sub-step.  Zeros until then.
+    clubb_wp2_iface: jnp.ndarray = None
+    clubb_kh_iface: jnp.ndarray = None
+    # CAM6 pbuf CLDO: the previous macmic sub-step's ast, set after the
+    # microphysics (micro_mg_cam.F90:1829); 0 at cold start (:1047).
+    cloud_fraction_old: jnp.ndarray = None
 
 
 # State fields that are run-level INPUTS rather than physics memory.
@@ -474,6 +483,9 @@ def init_physics_state(
         conv_icwmr=jnp.zeros((ncol, nlev), dtype=dtype),
         pblh=jnp.zeros((ncol,), dtype=dtype),
         relvar=jnp.full((ncol, nlev), _RELVAR_INIT, dtype=dtype),
+        clubb_wp2_iface=jnp.zeros((ncol, nlev + 1), dtype=dtype),
+        clubb_kh_iface=jnp.zeros((ncol, nlev + 1), dtype=dtype),
+        cloud_fraction_old=jnp.zeros((ncol, nlev), dtype=dtype),
     )
 
 
@@ -565,4 +577,8 @@ def update_physics_state(phys_state, updates):
         conv_icwmr=updates.get("conv_icwmr", phys_state.conv_icwmr),
         pblh=updates.get("pblh", phys_state.pblh),
         relvar=updates.get("relvar", phys_state.relvar),
+        clubb_wp2_iface=updates.get("clubb_wp2_iface", phys_state.clubb_wp2_iface),
+        clubb_kh_iface=updates.get("clubb_kh_iface", phys_state.clubb_kh_iface),
+        cloud_fraction_old=updates.get(
+            "cloud_fraction_old", phys_state.cloud_fraction_old),
     )

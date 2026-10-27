@@ -193,6 +193,8 @@ __param_spec__ = {
             "melt_sharpness": "numerics: solver/smoothing/tolerance/iteration parameter",
             "mg2_ice_slope_log_width": "numerics: solver/smoothing/tolerance/iteration parameter",
             "mg2_qi_limit_width": "numerics: solver/smoothing/tolerance/iteration parameter",
+            "mg2_presence_ramp_top": "numerics: solver/smoothing/tolerance/iteration parameter",
+            "mg2_frozen_rain_ice_ramp_frac": "numerics: solver/smoothing/tolerance/iteration parameter",
             "nuc_T_sharpness": "numerics: solver/smoothing/tolerance/iteration parameter",
             "nuc_rh_sharpness": "numerics: solver/smoothing/tolerance/iteration parameter",
             "saturation_sharpness": "numerics: solver/smoothing/tolerance/iteration parameter",
@@ -826,7 +828,10 @@ class MorrisonConfig(NamedTuple):
     #     N_i always and credits N_s under double-moment snow (an earlier
     #     "dropped — single-moment snow" note here was stale).
     #   "heuristic" = the legacy constant-rate agg_coeff·q_i·f_ice.
-    ice_to_snow_scheme: str = "m2005_autoconv"
+    # None = the flavour's (resolve_morrison_flavor): sam "m2005_autoconv",
+    # mg "mg_ferrier"; under mg any other explicit value raises (user
+    # decision 2026-10-24, 1a: the mg preset never overwrites a choice).
+    ice_to_snow_scheme: str | None = None
     # DCS [m]; None = the flavour's (resolve_morrison_flavor at scheme entry):
     # SAM clice_snow_Dauto 250 um, mg = CAM6 MG2 micro_mg_dcs 500 um
     # (namelist_defaults_cam.xml:1244).  An explicit value always wins.
@@ -1097,6 +1102,29 @@ class MorrisonConfig(NamedTuple):
     mg2_ice_slope_log_width: float = 0.01
     mg2_qi_limit_width: float = 1.0e-2
 
+    # CAM6 prognostic cloud-droplet number (MG2's nc budget on this scheme's
+    # state).  APPENDED AT THE TUPLE END (positional ABI).  Needs
+    # warm_rain_incloud=True, warm_rain_scheme="kk2000_cam6", predict_Nc=False,
+    # nc_from_aerosol=False and liquid_from_closure=True (start-up errors); the
+    # call must pass CLUBB's
+    # per-cell ``relvar``.  Under it the warm rain reads the prognostic number
+    # (max(N_c, 0), divided by lcldm, no 1 m^-3 floor) and CLUBB's relvar.
+    # False = main's behaviour bit for bit on the configurations without a snow
+    # number (tests/atmosphere/microphysics/unit/test_morrison_switch_off_golden.py);
+    # MG2-snow mode (warm_rain_incloud + snow number) carries the approved
+    # smooth 0 C steps and slope rounding with the switch off too (2026-10-21).
+    prognostic_droplet_number: bool = False
+    # RULE 5 smoothing of the CAM6 MG2 condensate-presence test q >= qsmall
+    # (1e-18 kg/kg) in the ported droplet-number and cloud-ice code: the C2 step
+    # reaches 1 at this value [kg/kg]; 1e-18 = MG2's hard test (user decision
+    # 2026-10-22, 1a; KNOWN DIFFERENCE in _warm_rain.mg2_presence).
+    mg2_presence_ramp_top: float = 1.0e-17
+    # RULE 5 smoothing of MG2's frozen-rain destination (cloud ice where the
+    # mean drop 1/lamr < Dcs, else snow): ramp over this fraction of Dcs below
+    # it; 0 = MG2's hard test (user decision 2026-10-22, 15a; KNOWN DIFFERENCE
+    # in _warm_rain.mg2_frozen_rain_ice_fraction).
+    mg2_frozen_rain_ice_ramp_frac: float = 0.1
+
 
 # Hard ceiling of ``sed_cfl_substeps_max`` wherever it is set (leaf, applier,
 # ExperimentConfig): the loop cost is LINEAR in the cap, so a typo ("2560")
@@ -1347,6 +1375,7 @@ def apply_microphysics_experiment_flags(
     morrison_do_graupel: bool | None = None,
     morrison_warm_rain_scheme: str | None = None,
     morrison_warm_rain_incloud: bool | None = None,
+    morrison_prognostic_droplet_number: bool | None = None,
 ):
     """Thread ExperimentConfig-level microphysics switches onto a per-scheme
     sub-config NamedTuple, raising LOUDLY on a scheme that lacks the field.
@@ -1529,6 +1558,16 @@ def apply_microphysics_experiment_flags(
                 f"scheme (got {scheme!r}).")
         scheme_config = scheme_config._replace(
             warm_rain_incloud=morrison_warm_rain_incloud)
+    if morrison_prognostic_droplet_number is not None:
+        if not isinstance(morrison_prognostic_droplet_number, bool):
+            raise TypeError("morrison_prognostic_droplet_number must be a bool, got "
+                            f"{morrison_prognostic_droplet_number!r}")
+        if scheme != "morrison":
+            raise ValueError(
+                "morrison_prognostic_droplet_number is only read by the morrison "
+                f"scheme (got {scheme!r}).")
+        scheme_config = scheme_config._replace(
+            prognostic_droplet_number=morrison_prognostic_droplet_number)
     if morrison_warm_rain_scheme is not None:
         if scheme != "morrison":
             raise ValueError(

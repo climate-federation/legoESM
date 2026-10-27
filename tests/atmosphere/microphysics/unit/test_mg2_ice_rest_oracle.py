@@ -86,14 +86,27 @@ def test_fixture_provenance_and_inputs_reproduce():
         np.testing.assert_array_equal(pts[:, j], fx[f"pt_in_{k}"])
 
 
-def test_ice_slope_and_ferrier_match_mg2_outside_the_gate_band():
-    """MG2 size_dist_param_basic on mg_ice_props (the bounds of row 26) then
-    ice_autoconversion at every fixture ice point, except two classes the
-    port does not reproduce, both recorded: (i) qsmall <= qiic <= 1e-14,
-    where MG2 converts and the port's 1e-14 gate does not (oracle row 30,
-    open: the RULE 5 form of the new gate is an ask), and (ii) qiic ==
-    qsmall exactly, where the oracle's nprci is 0/0."""
-    from legoesm import constants as C
+# KNOWN DIFFERENCE (RULE 5, user decision 2026-10-26 a): MG2's Ferrier ice
+# autoconversion runs where T <= T_freeze; the port's cold switch is the C2
+# step, exactly 0 AT 0 C, at every width.  So the 15 fixture points at exactly
+# T_freeze where MG2 converts get prci = nprci = 0: a -100 % gap, at the hard
+# limit (melt_sharpness 1e6, width 4e-6 K) and at the production width (2 K)
+# alike.  Measured per point (signed (port - MG2)/max(|port|, |MG2|)); every
+# other fixture point outside the row-30 band and the 0/0 edge: 0 gap
+# (<= 1e-10).  The fixture has no point inside the 2 K ramp (T = 250, 260 K,
+# T_freeze, 275 K), so the production width adds no further gap here.
+FERRIER_0C_GAP = {k: -1.0 for k in range(75, 90)}   # fixture index -> gap (prci and nprci)
+
+
+def _sgap(a, b):
+    a, b = np.asarray(a, np.float64), np.asarray(b, np.float64)
+    d = np.maximum(np.abs(a), np.abs(b))
+    return np.where(d > 0, (a - b) / np.where(d > 0, d, 1.0), 0.0)
+
+
+def _ferrier(cfg):
+    """MG2 size_dist_param_basic on mg_ice_props then ice_autoconversion at
+    every fixture ice point, the cold-step width the scheme derives from cfg."""
     from legoesm.atmosphere.physics.microphysics import _warm_rain as W
     fx = _fx()
     i, o = _pts(fx)
@@ -101,23 +114,85 @@ def test_ice_slope_and_ferrier_match_mg2_outside_the_gate_band():
     dcs = float(fx["dcs"])
     T, qi, ni = (jnp.asarray(i[k][ice]) for k in ("T", "qiic", "niic"))
     niic, lami = W.mg2_ice_slope(qi, ni, 500.0, dcs)
-    prci, nprci = W.ice_autoconversion_mg2(qi, niic, lami, dcs, T)
+    prci, nprci = W.ice_autoconversion_mg2(
+        qi, niic, lami, dcs, T, W.RAMP_WIDTH_PER_SHARPNESS / cfg.melt_sharpness)
+    return i, o, ice, niic, lami, prci, nprci
+
+
+def _ferrier_masks(i, ice):
+    from legoesm import constants as C
     edge = (i["qiic"][ice] == QSMALL) & (i["T"][ice] <= C.T_freeze)
-    assert np.array_equal(~np.isfinite(o["nprci"][ice]), edge)
     band = (i["qiic"][ice] >= QSMALL) & (i["qiic"][ice] <= 1.0e-14)
+    at0 = np.isin(np.flatnonzero(ice), list(FERRIER_0C_GAP))
+    return edge, band, at0
+
+
+def _assert_recorded_0c_gap(i, o, ice, prci, nprci, keep):
+    from legoesm import constants as C
+    idx = np.flatnonzero(ice)
+    hit = keep & (i["T"][ice] == C.T_freeze) & (o["prci"][ice] > 0.0)
+    assert sorted(idx[hit].tolist()) == sorted(FERRIER_0C_GAP)
+    want = np.asarray([FERRIER_0C_GAP.get(int(k), 0.0) for k in idx])
+    for v, k in ((prci, "prci"), (nprci, "nprci")):
+        got = _sgap(np.asarray(v)[keep], o[k][ice][keep])
+        np.testing.assert_allclose(got, want[keep], rtol=1e-6, atol=1e-12, err_msg=k)
+
+
+def test_ice_slope_and_ferrier_match_mg2_outside_the_gate_band():
+    """Hard limit: MG2 size_dist_param_basic on mg_ice_props (the bounds of
+    row 26) then ice_autoconversion at every fixture ice point, except three
+    classes the port does not reproduce, all recorded: (i) qsmall <= qiic <=
+    1e-14, where MG2 converts and the port's 1e-14 gate does not (oracle row
+    30, open: the RULE 5 form of the new gate is an ask), (ii) qiic == qsmall
+    exactly, where the oracle's nprci is 0/0, and (iii) the 15 points at
+    exactly 0 C (FERRIER_0C_GAP, -100 %, asserted point by point)."""
+    i, o, ice, niic, lami, prci, nprci = _ferrier(_cfg())
+    edge, band, at0 = _ferrier_masks(i, ice)
+    assert np.array_equal(~np.isfinite(o["nprci"][ice]), edge)
     keep = ~band
+    match = keep & ~at0
     errs = {"niic": _rel(niic, o["niic"][ice]), "lami": _rel(lami, o["lami"][ice]),
-            "prci": _rel(np.asarray(prci)[keep], o["prci"][ice][keep]),
-            "nprci": _rel(np.asarray(nprci)[keep], o["nprci"][ice][keep])}
+            "prci": _rel(np.asarray(prci)[match], o["prci"][ice][match]),
+            "nprci": _rel(np.asarray(nprci)[match], o["nprci"][ice][match])}
     worst = {k: float(np.max(v)) for k, v in errs.items()}
     print("ice slope / Ferrier max rel err", worst)
     assert max(worst.values()) <= TOL, worst
-    assert np.count_nonzero(o["prci"][ice][keep] > 0.0) >= 10
+    assert np.count_nonzero(o["prci"][ice][match] > 0.0) >= 10
+    _assert_recorded_0c_gap(i, o, ice, prci, nprci, keep)
     # the recorded row-30 gap: MG2 converts in the band, the port does not
     gap = band & ~edge & (o["prci"][ice] > 0.0)
     assert np.count_nonzero(gap) >= 10
     assert np.all(np.asarray(prci)[gap] == 0.0)
     print("row-30 gap: max oracle prci in band", float(np.max(o["prci"][ice][gap])))
+
+
+def test_ferrier_production_width_recorded_gaps():
+    """Production cold-step width (the deck's melt_sharpness): every fixture
+    point outside the row-30 band matches its recorded gap (FERRIER_0C_GAP;
+    0 elsewhere), 1e-6 relative with a 1e-12 absolute floor."""
+    cfg = _production_morrison()
+    i, o, ice, _, _, prci, nprci = _ferrier(cfg)
+    _, band, _ = _ferrier_masks(i, ice)
+    _assert_recorded_0c_gap(i, o, ice, prci, nprci, ~band)
+
+
+def test_ferrier_cold_step_gradient_at_production_width():
+    """check_grads (order 2) through the Ferrier cold step at the production
+    width, T inside the ramp; the T-derivative is finite and non-zero."""
+    from jax.test_util import check_grads
+    from legoesm import constants as C
+    from legoesm.atmosphere.physics.microphysics import _warm_rain as W
+    w = W.RAMP_WIDTH_PER_SHARPNESS / _production_morrison().melt_sharpness
+    q = jnp.asarray([1.0e-5, 1.0e-4])
+    ni, lam = W.mg2_ice_slope(q, jnp.asarray([1.0e5, 1.0e5]), 500.0, 500.0e-6)
+
+    def f(dT):
+        prci, nprci = W.ice_autoconversion_mg2(q, ni, lam, 500.0e-6, C.T_freeze - dT, w)
+        return prci * 1.0e9 + nprci * 1.0e-2
+    dT = jnp.asarray([0.3, 1.1])            # K below 0 C, inside the 2 K ramp
+    check_grads(f, (dT,), order=2, modes=["rev"], eps=1.0e-4, atol=1.0e-6, rtol=1.0e-4)
+    g = jax.grad(lambda d: jnp.sum(f(d)))(dT)
+    assert np.all(np.isfinite(np.asarray(g))) and np.all(np.asarray(g) != 0.0)
 
 
 @pytest.mark.parametrize("lam", [300.0, 3.0e6])
@@ -154,7 +229,7 @@ def test_mg2_mode_has_no_cloud_ice_riming():
     assert np.all(np.asarray(off.qc_budget["riming_ice"]) < 0.0)
 
 
-def _riming(qc, qs, ns, T, rho, p):
+def _riming(qc, qs, ns, T, rho, p, melt_sharpness=None):
     from legoesm.atmosphere.physics.microphysics import _warm_rain as W
     from legoesm.atmosphere.physics.microphysics.config import MorrisonConfig
     from legoesm.atmosphere.physics.microphysics.morrison import resolve_morrison_flavor
@@ -163,8 +238,10 @@ def _riming(qc, qs, ns, T, rho, p):
     qsic, nsic, lams, n0s = W.mg2_inprecip_snow(qs, ns, jnp.ones_like(qs), cfg)
     _, uns = W.mg2_snow_fall_speeds(lams, rho, cfg)
     _, mu = W.mg2_snow_vent_eps(n0s, lams, T, p, rho, cfg)
+    ms = _cfg().melt_sharpness if melt_sharpness is None else melt_sharpness
     return W.mg2_accrete_cloud_water_snow(T, rho, mu, uns, qc, nc / rho, qsic, pgam,
-                                          lamc, lams, n0s, cfg)
+                                          lamc, lams, n0s, cfg,
+                                          W.RAMP_WIDTH_PER_SHARPNESS / ms)
 
 
 def test_snow_riming_matches_mg2_including_qsmall():
@@ -194,7 +271,9 @@ def test_snow_riming_gradient_finite_at_the_cloud_floor(dtype, qc):
     ns = 2000.0 ** 3 * 1.0e-4 / (np.pi * 250.0)
     a = [jnp.asarray(x, dtype) for x in (qc, 1.0e-4, ns, T, rho, p)]
     for j in (0, 1):
-        g = jax.grad(lambda x, y: _riming(x, y, *a[2:])[j], argnums=(0, 1))(a[0], a[1])
+        g = jax.grad(lambda x, y: _riming(
+            x, y, *a[2:], melt_sharpness=_production_morrison().melt_sharpness)[j],
+            argnums=(0, 1))(a[0], a[1])
         assert all(bool(jnp.isfinite(gi)) for gi in g), (j, g)
 
 

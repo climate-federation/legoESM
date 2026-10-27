@@ -550,6 +550,38 @@ def test_ocean_surface_key_reaches_turbulence_from_the_first_step(
         "the non-land surface fluxes")
 
 
+def _find_key(obj, key):
+    """Every value stored under ``key`` anywhere in a nested JSON object."""
+    if isinstance(obj, dict):
+        hits = [obj[key]] if key in obj else []
+        return hits + [h for v in obj.values() for h in _find_key(v, key)]
+    if isinstance(obj, list):
+        return [h for v in obj for h in _find_key(v, key)]
+    return []
+
+
+@pytest.mark.parametrize("kw,want", [
+    (dict(), True), (dict(land_stress_from_land=False), False)])
+def test_ocean_surface_auto_resolves_and_is_recorded(monkeypatch, tmp_path,
+                                                     kw, want):
+    """Unset (AUTO) on an eligible run: on -- T_sfc_ocean reaches the
+    turbulence on every trace -- and the run manifest + saved config record
+    the boolean, never null; ineligible (bulk stress over land): off, and
+    recorded false."""
+    import json
+    _patch_land_loaders(monkeypatch)
+    seen, _ = _record_turbulence_forcing_keys(monkeypatch)
+    out = tmp_path / "auto"
+    d = _build_driver(str(out), TWO_STEPS_DAYS, **_LS_KW, **kw)
+    assert d.config.ocean_flux_on_ocean_surface is want
+    assert d.run() == "COMPLETED"
+    assert seen and all(("T_sfc_ocean" in s) is want for s in seen)
+    for name in ("run_manifest.json", "experiment_config.json"):
+        rec = _find_key(json.loads((out / name).read_text()),
+                        "ocean_flux_on_ocean_surface")
+        assert rec and all(v is want for v in rec), (name, rec)
+
+
 # --- review 2026-10-10 F28 / F31 -------------------------------------------
 
 def test_mpas_land_forcing_uses_moist_lowest_level_density(monkeypatch,

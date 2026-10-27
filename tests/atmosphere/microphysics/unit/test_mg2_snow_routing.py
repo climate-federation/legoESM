@@ -87,19 +87,22 @@ def _freeze_rain(cfg, N_r_per_m3):
         cfg, cloud_fraction=z)
 
 
-def test_mg2_frozen_rain_never_goes_to_graupel():
+def test_mg2_frozen_rain_follows_do_graupel():
+    """MG2 mode with do_graupel=False routes frozen rain as MG2 (no graupel);
+    do_graupel=True keeps the graupel path (user decision 2026-10-21, 14a)."""
     cfg = _production_morrison()
     assert cfg.do_graupel and cfg.warm_rain_incloud
-    out = _freeze_rain(cfg, 1.0e6)            # small drops: 1/lamr < DCS
+    out = _freeze_rain(cfg._replace(do_graupel=False), 1.0e6)   # small drops: 1/lamr < DCS
     assert float(out.dq_r_dt[0, 0]) < 0.0
     assert float(out.dq_g_dt[0, 0]) == 0.0
     assert float(out.dq_i_dt[0, 0]) > 0.0     # MG2 mnuccri: frozen small drops -> ice
     assert float(out.dN_i_dt[0, 0]) > 0.0
+    assert float(_freeze_rain(cfg, 1.0e6).dq_g_dt[0, 0]) > 0.0
 
 
 def test_mg2_frozen_large_drops_go_to_snow():
     # explicit DCS below the mean drop size: the frozen rain becomes snow
-    cfg = _production_morrison()._replace(ice_snow_d_auto=20.0e-6)
+    cfg = _production_morrison()._replace(ice_snow_d_auto=20.0e-6, do_graupel=False)
     out = _freeze_rain(cfg, 1.0e6)
     assert float(out.dq_g_dt[0, 0]) == 0.0
     assert float(out.dq_s_dt[0, 0]) > 0.0

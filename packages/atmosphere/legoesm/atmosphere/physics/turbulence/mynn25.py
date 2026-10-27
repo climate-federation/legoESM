@@ -110,6 +110,7 @@ from legoesm.atmosphere.physics._shared import (
     half_to_full,
     surface_buoyancy_flux,
     virtual_temperature,
+    half_to_iface_zero_ends,
 )
 from legoesm.atmosphere.physics.turbulence.config import MYNN25Config
 from legoesm.atmosphere.physics.turbulence.output import TurbulenceOutput
@@ -673,5 +674,6 @@ def mynn25_turbulence(
         lhflx=lhflx, evap_sfc=sflx_q,
         ustar=ustar,
         h_pbl=h_pbl,
+        Kh_iface=half_to_iface_zero_ends(Kh_half),
     )
     return output, qke_new
