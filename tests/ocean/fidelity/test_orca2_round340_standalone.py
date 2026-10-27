@@ -1315,6 +1315,181 @@ def test_resume9_orca2_recorded_utauu_vtauv_and_m6_caller_bit_identity():
     assert non_nemo_words == 107216
 
 
+def test_resume10_s0_exit_field_pairing_plant_and_kt2_offline_diagnosis(monkeypatch):
+    """Resume 10: verify S0_EXIT field pairing (sst_m..frq_m), plant field swaps
+    (frq_m <-> ssh_m, ssh_m <-> e3t_m, and key-order swap) that must fail closed,
+    and verify the kt=2 fraqsr_1lev and non-update chl retention diagnoses."""
+    from legoesm.core.source_rounding import nemo_source_round as sr
+    from legoesm.ocean.eos import nemo_r3t_rk3_stage1_stretch
+    from legoesm.ocean.forcing import nemo_surface
+    from legoesm.ocean.physics.shortwave_penetration import (
+        _RGB_ATTENUATION_BGR,
+        _nemo_morel_berthon_chl_column,
+        _nemo_rgb_class_row,
+        precision_exp,
+    )
+
+    # 1. Verify writer/decoder field order and explicit attribute-name mapping
+    # from NemoSurfaceMeans(ssu, ssv, sst, sss, ssh, e3t, frq).
+    expected_s0_fields = (
+        "sst_m", "sss_m", "ssu_m", "ssv_m", "ssh_m", "e3t_m", "frq_m",
+    )
+    assert gate.OUTER_FULL_FIELDS[:7] == expected_s0_fields
+    assert gate.OUTER_FIELDS_BY_KID[1] == expected_s0_fields
+    assert gate.OUTER_FIELDS_BY_KID[2] == expected_s0_fields
+    assert nemo_surface.NemoSurfaceMeans._fields == (
+        "ssu", "ssv", "sst", "sss", "ssh", "e3t", "frq",
+    )
+
+    distinct_surface = OrderedDict({
+        "kt02/S0_EXIT": OrderedDict({
+            "sst_m": np.full((2, 3), 15.2, dtype=np.float64),
+            "sss_m": np.full((2, 3), 34.8, dtype=np.float64),
+            "ssu_m": np.full((2, 3), 0.12, dtype=np.float64),
+            "ssv_m": np.full((2, 3), -0.07, dtype=np.float64),
+            "ssh_m": np.full((2, 3), -0.25, dtype=np.float64),
+            "e3t_m": np.full((2, 3), 10.02, dtype=np.float64),
+            "frq_m": np.full((2, 3), 0.819129, dtype=np.float64),
+        })
+    })
+    ladder = OrderedDict(
+        (f"kt{kt:02d}/{checkpoint}", OrderedDict(
+            T=np.zeros(2), S=np.ones(2), u=np.zeros(2), v=np.zeros(2), ssh=np.zeros(2)))
+        for kt in range(1, 11) for checkpoint in ("entry", "stage1", "stage2", "stage3")
+    )
+    monkeypatch.setattr(gate, "load_oracle_boundaries", lambda _root: distinct_surface)
+    monkeypatch.setattr(gate, "load_oracle_state_ladder", lambda _root: ladder)
+    assert gate.score_composed_card(
+        distinct_surface, Path("unused"), ladder
+    )["status"] == "PASS_S4_EXACT"
+
+    # Plant 1: swap frq_m and ssh_m values in kt02/S0_EXIT -> must be caught.
+    swapped_frq_ssh = OrderedDict({
+        "kt02/S0_EXIT": OrderedDict(distinct_surface["kt02/S0_EXIT"]),
+    })
+    swapped_frq_ssh["kt02/S0_EXIT"]["frq_m"] = distinct_surface["kt02/S0_EXIT"]["ssh_m"]
+    swapped_frq_ssh["kt02/S0_EXIT"]["ssh_m"] = distinct_surface["kt02/S0_EXIT"]["frq_m"]
+    with pytest.raises(gate.GateError, match="surface exact bar failed: 12 / 42") as exc_frq_ssh:
+        gate.score_composed_card(swapped_frq_ssh, Path("unused"), ladder)
+    frq_ssh_score = exc_frq_ssh.value.report["surface"]
+    assert frq_ssh_score["rows"]["kt02/S0_EXIT/frq_m"]["unequal"] == 6
+    assert frq_ssh_score["rows"]["kt02/S0_EXIT/ssh_m"]["unequal"] == 6
+    assert frq_ssh_score["rows"]["kt02/S0_EXIT/e3t_m"]["unequal"] == 0
+
+    # Plant 2: swap ssh_m and e3t_m values in kt02/S0_EXIT -> must be caught.
+    swapped_ssh_e3t = OrderedDict({
+        "kt02/S0_EXIT": OrderedDict(distinct_surface["kt02/S0_EXIT"]),
+    })
+    swapped_ssh_e3t["kt02/S0_EXIT"]["ssh_m"] = distinct_surface["kt02/S0_EXIT"]["e3t_m"]
+    swapped_ssh_e3t["kt02/S0_EXIT"]["e3t_m"] = distinct_surface["kt02/S0_EXIT"]["ssh_m"]
+    with pytest.raises(gate.GateError, match="surface exact bar failed: 12 / 42") as exc_ssh_e3t:
+        gate.score_composed_card(swapped_ssh_e3t, Path("unused"), ladder)
+    ssh_e3t_score = exc_ssh_e3t.value.report["surface"]
+    assert ssh_e3t_score["rows"]["kt02/S0_EXIT/ssh_m"]["unequal"] == 6
+    assert ssh_e3t_score["rows"]["kt02/S0_EXIT/e3t_m"]["unequal"] == 6
+    assert ssh_e3t_score["rows"]["kt02/S0_EXIT/frq_m"]["unequal"] == 0
+
+    # Plant 3: swap field key order in kt02/S0_EXIT -> must fail closed on
+    # tuple(actual[boundary]) == tuple(expected[boundary]).
+    s0_items = list(distinct_surface["kt02/S0_EXIT"].items())
+    s0_items[4], s0_items[6] = s0_items[6], s0_items[4]
+    swapped_key_order = OrderedDict({"kt02/S0_EXIT": OrderedDict(s0_items)})
+    with pytest.raises(gate.GateError, match="kt02/S0_EXIT field inventory moved"):
+        gate.score_surface_boundaries(swapped_key_order, distinct_surface)
+
+    # 3. Verify on 2x3 surface card that kt=2 non-update retention currently
+    # freezes prior_surface.surface_forcing.chl at kt=1's chl.
+    args, s0, ice_if, s2 = _production_surface_case()
+    shape = s2.surface_mask.shape
+    chl_kt1 = jnp.full(shape, 0.08, dtype=jnp.float64)
+    chl_kt2 = jnp.full(shape, 0.14, dtype=jnp.float64)
+    ggh = jnp.ones(shape, dtype=jnp.float64)
+    surf_kt1 = bulk.nemo_orca2_k0_surface_card(
+        *args[:5], *args[8:12], s2.surface_mask, 0.066, 1.0, 1.0, 5,
+        k0_config=_k0(), ice_if=ice_if, s0=s0, s2=s2,
+        chl=chl_kt1, geothermal_heat_flux_mwm2=ggh,
+    )
+    s0_kt2 = s0._replace(kt=2, prior=surf_kt1.means)
+    surf_kt2 = bulk.nemo_orca2_k0_surface_card(
+        *args[:5], *args[8:12], s2.surface_mask, 0.066, 1.0, 1.0, 5,
+        k0_config=_k0(), ice_if=ice_if, s0=s0_kt2, s2=s2,
+        prior_surface=surf_kt1, chl=chl_kt2, geothermal_heat_flux_mwm2=ggh,
+    )
+    assert np.all(np.asarray(surf_kt2.surface_forcing.chl) == 0.08)
+    assert not np.any(np.asarray(surf_kt2.surface_forcing.chl) == 0.14)
+
+    # 4. Against admitted arm A: verify kt02/S0_EXIT/frq_m is 0/26,640 bit-exact
+    # when evaluated with traqsr.f90:327-402 on kt=1 Stage-3 Kmm (Stage-2 exit),
+    # and that swapping frq_m with ssh_m or e3t_m fails on all 26,640 cells.
+    deck = Path("/data/abyssal/dbalwada/nemo-testcases-l4/inputs/ORCA2_ICE_v5.0.0")
+    arm_a = Path(
+        "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/"
+        "round340/s4_acquisition/orca2_s4_exact_a_np2"
+    )
+    if deck.exists() and arm_a.exists():
+        k0_card = bulk.build_nemo_orca2_k0_ocean_card(deck)
+        zc = k0_card.ocean.recipe.z_coord
+        state0 = k0_card.ocean.recipe.initial_state
+        s0_exit_kt2 = gate._join_rank_fields([
+            gate.read_exact_record(arm_a / "oracle_r340_surface_k00000002_b01_r0000.bin"),
+            gate.read_exact_record(arm_a / "oracle_r340_surface_k00000002_b01_r0001.bin"),
+        ])
+        s2_exit_kt1 = gate._join_rank_fields([
+            gate.read_exact_record(arm_a / "oracle_r340_surface_k00000001_b11_r0000.bin"),
+            gate.read_exact_record(arm_a / "oracle_r340_surface_k00000001_b11_r0001.bin"),
+        ])
+        entry_kt1 = gate._join_rank_fields([
+            gate.read_exact_record(arm_a / "oracle_r340_state_k00000001_s0_r0000.bin"),
+            gate.read_exact_record(arm_a / "oracle_r340_state_k00000001_s0_r0001.bin"),
+        ])
+        stage3_kt1 = gate._join_rank_fields([
+            gate.read_exact_record(arm_a / "oracle_r340_state_k00000001_s3_r0000.bin"),
+            gate.read_exact_record(arm_a / "oracle_r340_state_k00000001_s3_r0001.bin"),
+        ])
+        chl_kt1_rec = gate._join_rank_fields([
+            gate.read_exact_record(arm_a / "oracle_r340_fld_k00000001_c008_f001_r0000.bin"),
+            gate.read_exact_record(arm_a / "oracle_r340_fld_k00000001_c008_f001_r0001.bin"),
+        ])
+        eta_b = jnp.asarray(entry_kt1["ssh"], dtype=jnp.float64)
+        eta_a = jnp.asarray(stage3_kt1["ssh"], dtype=jnp.float64)
+        stretch_kmm = nemo_r3t_rk3_stage1_stretch(
+            zc, eta_b, eta_a, state0.H_bathy.data, half=True
+        )
+        gdepw_1d_2 = jnp.asarray(-zc.z_half_ref[1:2], dtype=jnp.float64)
+        gdepw_bottom_live = sr(gdepw_1d_2 * stretch_kmm[..., None])
+        chl_z = _nemo_morel_berthon_chl_column(
+            jnp.asarray(chl_kt1_rec["fnow"][..., 0], dtype=jnp.float64), gdepw_bottom_live
+        )
+        row = _nemo_rgb_class_row(chl_z)[..., 0]
+        coeffs = jnp.asarray(_RGB_ATTENUATION_BGR, dtype=jnp.float64)[row]
+        k_blue, k_green, k_red = coeffs[..., 0], coeffs[..., 1], coeffs[..., 2]
+        qsr = jnp.asarray(s2_exit_kt1["qsr"], dtype=jnp.float64)
+        rn_abs = jnp.asarray(0.58, dtype=jnp.float64)
+        r1_si0 = sr(jnp.asarray(1.0, dtype=jnp.float64) / jnp.asarray(0.35, dtype=jnp.float64))
+        zz0 = rn_abs
+        zz1 = sr(sr(jnp.asarray(1.0, dtype=jnp.float64) - rn_abs) / jnp.asarray(3.0, dtype=jnp.float64))
+        ze0 = sr(zz0 * qsr)
+        zeR = sr(zz1 * qsr)
+        zeG = sr(zz1 * qsr)
+        zeB = sr(zz1 * qsr)
+        e3t_0 = jnp.asarray(zc.nemo_e3t_0[..., 0], dtype=jnp.float64)
+        ze3t = sr(e3t_0 * stretch_kmm)
+        wmask2 = jnp.asarray(zc.is_active[..., 1], dtype=jnp.float64)
+        zze0 = sr(ze0 * precision_exp(sr(sr(-ze3t) * r1_si0)))
+        zzeR = sr(zeR * precision_exp(sr(sr(-ze3t) * k_red)))
+        zzeG = sr(zeG * precision_exp(sr(sr(-ze3t) * k_green)))
+        zzeB = sr(zeB * precision_exp(sr(sr(-ze3t) * k_blue)))
+        total0 = sr(sr(sr(zze0 + zzeB) + zzeG) + zzeR)
+        zzeT = sr(total0 * wmask2)
+        safe_qsr = jnp.where(qsr != 0.0, qsr, 1.0)
+        fraqsr = np.asarray(
+            jnp.where(qsr != 0.0, sr(1.0 - sr(zzeT / safe_qsr)), 1.0)
+        )
+        assert gate.exact_score(fraqsr, s0_exit_kt2["frq_m"])["unequal"] == 0
+        assert gate.exact_score(fraqsr, s0_exit_kt2["ssh_m"])["unequal"] == 26640
+        assert gate.exact_score(fraqsr, s0_exit_kt2["e3t_m"])["unequal"] == 26640
+
+
 
 
 

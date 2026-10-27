@@ -779,13 +779,106 @@ python3 scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round340
 
 - independent review: operator
 
+## Resume 10 — Instrument audit of `S0_EXIT` field pairing and offline localization of `kt = 2` differences
+
+### (1) Instrument audit: `S0_EXIT` field order/names, why `0.18087092394585402` was previously cited on `ssh_m`, field-swap plant, and whether `frq_m` genuinely differs
+
+1. **Writer stream order vs decoder order vs `NemoSurfaceMeans` card order**:
+   - In the NEMO surface writer (`round340_surface_writer.F90:23-25`), `r340_surface_frame` writes the 7 `sbc_ssm` fields for `kid >= 1` (`S0_EXIT`..`S2_EXIT`) in fixed unformatted stream order:
+     `sst_m, sss_m, ssu_m, ssv_m, ssh_m, e3t_m, frq_m`.
+   - In the standalone gate (`nemo_testcase_l4_orca2_round340_standalone_gate.py:57-68` and `nemo_testcase_l4_orca2_round340_standalone_gate.py:223-225`), `read_exact_record` decodes `kid = 1` (`S0_EXIT`) and `kid = 2` (`S1_ENTRY`) in the identical tuple order `OUTER_FULL_FIELDS[:7] = ("sst_m", "sss_m", "ssu_m", "ssv_m", "ssh_m", "e3t_m", "frq_m")`.
+   - In the card (`packages/ocean/legoesm/ocean/forcing/nemo_surface.py:27-34`), `NemoSurfaceMeans` declares its `NamedTuple` slots in `sbc_ssm` accumulation order `(ssu, ssv, sst, sss, ssh, e3t, frq)`. However, `_surface_boundaries_for_step` (`nemo_testcase_l4_orca2_round340_standalone_gate.py:935-940,1009-1011`) binds each field by explicit attribute name (`"sst_m": means.sst, "sss_m": means.sss, "ssu_m": means.ssu, "ssv_m": means.ssv, "ssh_m": means.ssh, "e3t_m": means.e3t, "frq_m": means.frq`) and materializes `kt02/S0_EXIT` in `OUTER_FIELDS_BY_KID[1]` order; `score_surface_boundaries` (`nemo_testcase_l4_orca2_round340_standalone_gate.py:1176-1185`) enforces `tuple(actual[boundary]) == tuple(expected[boundary])` and scores `actual[boundary][name]` against `expected[boundary][name]`.
+   - At `kt = 2` in Resume 9, all six other `S0_EXIT` fields match NEMO **bit-for-bit** (`0 / 26,640` unequal words, `max |diff| = 0.0` each) across mutually disjoint physical ranges:
+     - `kt02/S0_EXIT/sst_m`: `0 / 26,640` unequal (`range [-1.9168, 30.0923]` degC)
+     - `kt02/S0_EXIT/sss_m`: `0 / 26,640` unequal (`range [0.0, 40.3241]` PSU)
+     - `kt02/S0_EXIT/ssu_m`: `0 / 26,640` unequal (`range [-0.3289, 0.3368]` m/s)
+     - `kt02/S0_EXIT/ssv_m`: `0 / 26,640` unequal (`range [-0.5055, 0.2948]` m/s)
+     - `kt02/S0_EXIT/ssh_m`: `0 / 26,640` unequal (`range [-1.2268, 1.3251]` m)
+     - `kt02/S0_EXIT/e3t_m`: `0 / 26,640` unequal (`range [9.7952, 10.0750]` m)
+2. **Why `0.18087092394585402` was previously cited on `kt02/S0_EXIT/ssh_m` in Resume 6**:
+   - In Resume 6 (`by_boundary["kt02/S0_EXIT"]`) and Resume 7 (`by_boundary["kt02/S0_EXIT"]`), `0.18087092394585402` was the boundary-aggregate `max_abs` over all 7 fields in `kt02/S0_EXIT`.
+   - That value (`0.18087092394585402 = |0.819129076054146 - 1.0|`) always came from `kt02/S0_EXIT/frq_m` on dry cell `(j = 0, i = 0)` (where NEMO `fraqsr_1lev` is `1.0` because `qsr == 0`, while `top_layer_absorbed_fraction` with unit `sw = 1.0`, `stage3_stretch = 1.0`, `e3t_0 = 10.0`, and `chl[0, 0] = 0.06423438986142477` returns `0.819129076054146` identically in Resume 6, Resume 7, and Resume 9).
+   - In Resume 6, `kt02/S0_EXIT/ssh_m` had `max |diff| = 0.09343506101532833` (from the SI3 initial SSH depression), which was smaller than `frq_m`'s `0.18087092394585402`; Resume 6's prose parenthetical misattributed the `kt02/S0_EXIT` boundary maximum `0.18087092394585402` to `ssh_m`.
+3. **Field-swap plant (`test_resume10_s0_exit_field_pairing_plant_and_kt2_offline_diagnosis` in `tests/ocean/fidelity/test_orca2_round340_standalone.py`)**:
+   - **Plant 1 (`frq_m <-> ssh_m` value swap in `kt02/S0_EXIT`)**: `score_composed_card` raises `GateError("surface exact bar failed: 12 / 42")` with `kt02/S0_EXIT/frq_m` and `kt02/S0_EXIT/ssh_m` flagged (`6 / 6` unequal words each) and `e3t_m` at `0 / 6`.
+   - **Plant 2 (`ssh_m <-> e3t_m` value swap in `kt02/S0_EXIT`)**: `score_composed_card` raises `GateError("surface exact bar failed: 12 / 42")` with `kt02/S0_EXIT/ssh_m` and `kt02/S0_EXIT/e3t_m` flagged (`6 / 6` unequal words each) and `frq_m` at `0 / 6`.
+   - **Plant 3 (`ssh_m <-> frq_m` key-order swap in `kt02/S0_EXIT`)**: `score_surface_boundaries` raises `GateError("kt02/S0_EXIT field inventory moved")`.
+   - Against admitted arm A (`orca2_s4_exact_a_np2`), scoring the reconstructed `kt = 2` `fraqsr_1lev` against recorded `kt02/S0_EXIT/frq_m` gives `0 / 26,640` unequal words (`max |diff| = 0.0`), whereas swapping `frq_m` with `ssh_m` or `e3t_m` fails on `26,640 / 26,640` words (`max |diff| = 2.2268` and `9.2869`).
+4. **Does `frq_m` genuinely differ?**:
+   - **Yes**: `kt02/S0_EXIT/frq_m` genuinely differs on **`26,640 / 26,640` cells** (`16,433` wet cells with `max |diff| = 0.18087092394585402` on polar-night wet cells where `qsr == 0` and NEMO sets `fraqsr_1lev = 1.0`, plus `10,207` dry cells with `max |diff| = 0.18087092394585402` at `[0, 0]`; on sunlit wet cells where `qsr > 0`, `14,007` cells differ with `max |diff| = 0.0020165529064691036`).
+   - Under K0 (`nn_ice = 1`), `frq_m` is a diagnostic S0 mean field: it is never read by `sbc_blk`, `sbc_ice_if`, `sbc_rnf`, `sbc_ssr`, `sbc_fwb`, or any ocean routine (`frq_m` is only consumed by SI3 `icesbc.F90` when `nn_ice = 2`).
+
+### (2) Localization of the first genuine `kt = 2` differences and proposed literal fixes (not landed)
+
+#### (a) First non-bit surface row: `kt02/S0_EXIT/frq_m` (`26,640 / 26,640`, `max |diff| = 0.18087092394585402`) — `CONFIRMED`
+
+1. **S0 two-step means at the `nn_fsbc = 2` boundary (`sbc_ssm` time levels at `kt = 2` vs the card)**:
+   - In NEMO (`ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/sbcssm.f90:109-176`, specifically `ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/sbcssm.f90:133-162`), `sbc` is called at step entry with `Kbb = Nbb, Kmm = Nbb` (`ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/stprk3.f90:128`).
+   - At `kt = 1` (`kt == nit000 .AND. .NOT. l_ssm_mean`), `sbc_ssm` initializes `ssu_m..frq_m` to `(nn_fsbc - 1) * value = 1 * value`, adds `1 * value`, and divides by `REAL(nn_fsbc, wp) = 2._wp`, where `fraqsr_1lev` is the cold-start `1._wp` initialized by `tra_qsr_init` (`ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/traqsr.f90:1289-1293`).
+   - At `kt = 2`, `MOD(kt - 2, nn_fsbc) == 0` (`MOD(0, 2) == 0`) triggers the `ELSEIF` branch (`ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/sbcssm.f90:133-162`), which resets `ssu_m, ssv_m, sst_m, sss_m, ssh_m, e3t_m, frq_m` to `0._wp` and accumulates the `kt = 2` step-entry `Nbb` state (`kt = 1` Stage-3 exit `uu, vv, ts, ssh, r3t` plus `fraqsr_1lev` written during `kt = 1` Stage 3) without dividing by `nn_fsbc` (since `MOD(kt - 1, nn_fsbc) == 0` is false at `kt = 2`, and the division happens at `kt = 3` after adding the `kt = 3` step-entry state).
+   - Both NEMO (`ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/sbcssm.f90:133-162`) and the card (`packages/ocean/legoesm/ocean/bulk_flux_omip.py:1006-1030` -> `packages/ocean/legoesm/ocean/forcing/nemo_surface.py:143-187`) reset at `kt = 2` and accumulate the identical `kt = 2` step-entry (`kt = 1` Stage-3 exit) state for `ssu_m, ssv_m, sst_m, sss_m, ssh_m, e3t_m` (`0 / 26,640` unequal words on all six).
+2. **First differing statement (`CONFIRMED`) for `kt02/S0_EXIT/frq_m`**:
+   - **NEMO**: During `kt = 1` Stage 3 (`ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/stprk3.f90:185-197`, `CALL stp_RK3_stg( 3, kstp, Nbb, Nnn, Nrhs, Naa )`), `stp_RK3_stg` calls `IF( ln_traqsr ) CALL tra_qsr( kstp, Kmm, ts, Krhs )` with `Kmm = Nnn`, the **Stage-2 exit** `r3t` (`r3t(:,:,Kaa) = r1_2 * ( r3t(:,:,Kbb) + r3ta(:,:) )` at `ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/stprk3_stg.f90:215,525`), and `qsr_RGBc` (`ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/traqsr.f90:327-402`) updates `fraqsr_1lev` via:
+     - `zpsi = zc(ji,jj,3) * ((gdepw_1d(jk+1)) *(1._wp+r3t(ji,jj,Kmm)))` at `jk = 1` (`gdepw_1d(2) = 10.000015058326067` m, not `e3t_0(1) = 10.0` m),
+     - `itab(ji,jj,jk) = NINT( 41 + 20.*LOG10(zchl) + 1.e-15 )` with source-rounded intermediate operations,
+     - `ze0 = zz0 * qsr ; zeR = zz1 * qsr ; zeG = zz1 * qsr ; zeB = zz1 * qsr` and `zzeT = ( zze0 + zzeB + zzeG + zzeR ) * wmask(ji,jj,jk+1)` at `jk = 1` (`ze3t = (e3t_3d(ji,jj,1) *(1._wp+r3t(ji,jj,Kmm)*tmask(ji,jj,1)))`),
+     - `WHERE( qsr(:,:) /= 0._wp ) fraqsr_1lev(:,:) = 1._wp - zeT(:,:) / qsr(:,:) ELSEWHERE fraqsr_1lev(:,:) = 1._wp END WHERE`.
+   - **legoESM**: `nemo_orca2_k0_ocean_step` (`packages/ocean/legoesm/ocean/bulk_flux_omip.py:1071-1089`) and `top_layer_absorbed_fraction` (`packages/ocean/legoesm/ocean/physics/shortwave_penetration.py:1092-1115`) instead:
+     1. Read `stage3_eta = stepped.stage_outputs[-1][4]` / `state_after.eta.data` (Stage-3 `Kaa` `ssh` at `t = N + 1`) instead of Stage-3 `Kmm = Nnn` (`0.5 * (r3t(Kbb) + r3ta)` at `t = N + 1/2`),
+     2. Call `shortwave_penetration_rgb_tendency` with default `ShortwavePenetrationConfig(scheme="rgb_chl")`, which uses `gdepw_bottom = dz_live[..., 0] = e3t_0(1) * stretch` instead of `gdepw_1d(2) * stretch` and omits `+ 1.e-15` and `nemo_source_round` (whereas the ocean step's own `tra_qsr` already uses `_nemo_morel_berthon_chl_column` and `_nemo_rgb_class_row` at `packages/ocean/legoesm/ocean/physics/shortwave_penetration.py:404-451`),
+     3. Pass `wet = jnp.ones(shape + (2,))` instead of `wmask(ji,jj,2)` (`z_coord.is_active[..., 1]`, which is `0` on `11` single-level wet cells where `mbathy == 1`),
+     4. Evaluate with unit `sw = jnp.ones(shape)` and return `frac_per_m[..., 0] * dz_live[..., 0]` instead of `WHERE(qsr /= 0._wp) 1._wp - zzeT / qsr ELSEWHERE 1._wp` (causing `10,207` dry cells and `2,426` polar-night wet cells where `qsr == 0` to get `~0.819` instead of `1.0`, plus `2,718` sunlit wet cells to differ by `1-2` ULPs from `qsr` scaling before division).
+   - **Offline ablation (`CONFIRMED`)**: Replacing `next_shortwave_fraction` at `packages/ocean/legoesm/ocean/bulk_flux_omip.py:1071-1089` with the literal `ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/traqsr.f90:327-402` evaluation on `stretch_kmm = nemo_r3t_rk3_stage1_stretch(zc, state.eta.data, state_after.eta.data, state.H_bathy.data, half=True)` (`packages/ocean/legoesm/ocean/eos.py:1004-1035`) reduces `kt02/S0_EXIT/frq_m` (and all `11` `kt = 2` surface boundaries carrying `frq_m`) from `26,640 / 26,640` (`max |diff| = 0.18087092394585402`) to **`0 / 26,640` unequal words (`max |diff| = 0.0`, 100% bit-exact)**.
+
+#### (b) First `OVER_BAR` state row: `kt02/stage3/T` (`26,525 / 799,200`, `max |diff| = 3.3734852885558553e-4`) — `CONFIRMED`
+
+1. **Non-update step retention at `kt = 2` (`MOD(kt - 1, nn_fsbc) /= 0`)**:
+   - In NEMO, `sbc` (`ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/sbcmod.f90:444-521`) gates `sbc_blk`, `sbc_ice_if`, `sbc_rnf`, `sbc_ssr`, and `sbc_fwb` on `MOD(kt - 1, nn_fsbc) == 0` (`nn_fsbc = 2`), so at `kt = 2` those surface fluxes are retained unchanged from `kt = 1`.
+   - However, chlorophyll `sf_chl` is NOT a surface-module `nn_fsbc` field: `tra_qsr` (`ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/traqsr.f90:310`) executes `CALL fld_read( kt, 1, sf_chl )` with `kn_fsbc = 1` at **every** ocean time step `kt` during Stage 3 (`ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/stprk3_stg.f90:525`). Between `kt = 1` and `kt = 2`, `sf_chl(1)%fnow` changes on `14,344 / 26,640` wet cells (`max |diff| = 0.007459677455405878`), shifting the discrete RGB lookup index `itab` (`ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/traqsr.f90:327-402`) by `1` table class on `1,303` sunlit wet cells across levels `1..22`.
+2. **First differing statement (`CONFIRMED`) for `kt02/stage3/T`**:
+   - **NEMO**: `ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/traqsr.f90:310` (`CALL fld_read( kt, 1, sf_chl )` inside `tra_qsr`, called at `ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/stprk3_stg.f90:525`).
+   - **legoESM**: `packages/ocean/legoesm/ocean/bulk_flux_omip.py:1260-1265` (`if not update: ... return prior_surface._replace(means=means)`). Although `nemo_orca2_k0_ocean_step` receives the `kt = 2` `chl` array and passes `chl=chl` into `nemo_orca2_k0_surface_card`, `nemo_blk_oce_ncar` returns `prior_surface._replace(means=means)` on `not update` steps without updating `prior_surface.surface_forcing.chl` (or `geothermal_heat_flux_mwm2`). As a result, `model.step` at `kt = 2` receives `kt = 1`'s stale `chl` inside `surface.surface_forcing.chl`.
+   - **Offline ablation (`CONFIRMED`)**: Updating `surface_forcing` on the `not update` return path at `packages/ocean/legoesm/ocean/bulk_flux_omip.py:1260-1265` so `surface_forcing.chl` carries the current step's `chl` reduces `kt02/stage3/T` by **nearly 7 orders of magnitude**, from `26,525 / 799,200` (`max |diff| = 3.3734852885558553e-4`, `normalized_max_abs = 1.1208924249237574e-5`) to **`216 / 799,200` (`max |diff| = 4.622280336263884e-11`, `normalized_max_abs = 1.5358238197493165e-12`, of which `179` are dry `-0.0` words and only `37` are wet words)**.
+3. **Residual ULP-scale `kt = 2` Stage-3 differences after the `chl` fix (`kt02/stage3/{T, S, u, v}`)**:
+   - With `surface_forcing.chl` updated at `kt = 2`, the `kt = 2` Stage-3 rows become:
+     - `kt02/stage3/T`: `216 / 799,200` (`37` wet words, `max |diff| = 4.622280336263884e-11`, `normalized_max_abs = 1.5358238197493165e-12`)
+     - `kt02/stage3/S`: `29,446 / 799,200` (`144` wet words, `max |diff| = 5.802682775196445e-10`, `normalized_max_abs = 1.4383963487311444e-11`)
+     - `kt02/stage3/u`: `29,638 / 799,200` (`130` wet words, `max |diff| = 5.3600008365184126e-11`, `normalized_max_abs = 1.1869583804731195e-10`)
+     - `kt02/stage3/v`: `29,517 / 799,200` (`138` wet words, `max |diff| = 1.3563434252512031e-11`, `normalized_max_abs = 2.6606467527401134e-11`)
+     - `kt02/stage3/ssh`: `0 / 26,640` (`BIT_EXACT`, `max |diff| = 0.0`)
+   - This residual is the same `kt = 2` Stage-3 implicit vertical solver boundary (`CALL dyn_zdf` / `CALL tra_zdf` at `ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/stprk3_stg.f90:405,538` and `zdf_tke` `CASE(0)` surface mixing-length anchor at `ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/zdftke.f90:608-638` vs `tke.py:285-289`) already localized on the certified SI3 rung-10 card in Rounds 332–333 (`CALL tra_zdf` / `CALL dyn_zdf` `CONFIRMED` at the call boundary; internal solver recurrence primitive `PLAUSIBLE`).
+
+#### (c) Proposed literal fixes (do not land in Resume 10)
+
+1. **Proposed literal fix 1 (`kt02/S0_EXIT/frq_m` -> `0 / 26,640`, bit-exact at `kt = 2`)**:
+   - In `packages/ocean/legoesm/ocean/physics/shortwave_penetration.py:1092-1115`, add a literal helper `nemo_fraqsr_1lev(qsr, chl_surface, e3t_1_kmm, gdepw_2_kmm, wmask_2, config=...)` transcribing `ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/traqsr.f90:327-402` using `_nemo_morel_berthon_chl_column` and `_nemo_rgb_class_row` (`packages/ocean/legoesm/ocean/physics/shortwave_penetration.py:404-451`) on `gdepw_2_kmm = sr(gdepw_1d(2) * stretch_kmm)`, `ze3t = sr(e3t_0(1) * stretch_kmm)`, `zzeT = sr(total0 * wmask_2)`, and `jnp.where(qsr != 0.0, sr(1.0 - sr(zzeT / safe_qsr)), 1.0)`.
+   - In `packages/ocean/legoesm/ocean/bulk_flux_omip.py:1071-1089`, compute Stage-3's `Kmm` stretch via `stretch_kmm = nemo_r3t_rk3_stage1_stretch(card.ocean.recipe.z_coord, state.eta.data, state_after.eta.data, state.H_bathy.data, half=True)` (`packages/ocean/legoesm/ocean/eos.py:1004-1035`, matching `ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/stprk3_stg.f90:215,525` without depending on `stage_outputs`) and call `nemo_fraqsr_1lev` with `surface.s2.penetrative_qsr` and `z_coord.is_active[..., 1]`.
+2. **Proposed literal fix 2 (`kt02/stage3/T` -> `3.37e-4` reduced to `4.62e-11`, `0 / 10,842,528` unequal surface words at `kt = 2` when combined with Fix 1)**:
+   - In `packages/ocean/legoesm/ocean/bulk_flux_omip.py:1260-1265`, on `not update` steps (`MOD(kt - 1, nn_fsbc) /= 0`), update the carried `OceanSurfaceForcing` with the current step's `kn_fsbc = 1` ocean fields (`chl` and `geothermal_heat_flux_mwm2`) while retaining all `nn_fsbc = 2` surface fluxes (`q_net, sw_down, emp, utau_u_native, vtau_v_native, ice_concentration, runoff_tracer_content`) unchanged:
+     ```python
+     if not update:
+         if prior_surface is None:
+             raise ValueError(
+                 "nn_fsbc=2 preservation step requires prior_surface carry")
+         sf = prior_surface.surface_forcing
+         if sf is not None:
+             sf = sf._replace(
+                 chl=_crop_to_surface_interior(chl, interior_shape),
+                 geothermal_heat_flux_mwm2=_crop_to_surface_interior(
+                     geothermal_heat_flux_mwm2, interior_shape),
+             )
+         return prior_surface._replace(means=means, surface_forcing=sf)
+     ```
+
+- independent review: operator
+
 ## Verification
 
 - Round-340 focused fast tests (`test_orca2_round340_standalone.py`,
   `test_surface_forcing_sign_convention.py`,
   `test_nemo_testcase_l4_orca2_round337_surface.py`,
   `test_nemo_card_opt_in_defaults.py`, `test_ncar_bulk.py`, and
-  `test_dispatch_hardening.py`): all pass (`17 passed, 2 skipped` in
+  `test_dispatch_hardening.py`): all pass (`18 passed, 2 skipped` in
   `test_orca2_round340_standalone.py`, plus `1 passed` with
   `ORCA2_R340_REAL_GRADIENT=1`; `9 passed` in
   `test_surface_forcing_sign_convention.py`; `14 passed` in
@@ -804,7 +897,7 @@ python3 scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round340
   rows at `kt = 1` with `max |diff| = 0.0`, `0 / 15 OVER_BAR` rows on
   `kt02/{entry,stage1,stage2}` with `max |diff| = 0.0`, first non-bit surface
   row `kt02/S0_EXIT/frq_m`, first `OVER_BAR` state row `kt02/stage3/T`).
-- Per-receipt citation gate: PASS, 57 citations, zero failures, zero unmapped
+- Per-receipt citation gate: PASS, 78 citations, zero failures, zero unmapped
   citations, zero map-audit failures, and all nine self-tests fired.
 - Required receipt-citation pytest (`tests/ocean/fidelity/test_nemo_testcase_receipt_citation_gate.py`
   with `JAX_ENABLE_X64=1`): 17/17 PASS on the clean committed tree.

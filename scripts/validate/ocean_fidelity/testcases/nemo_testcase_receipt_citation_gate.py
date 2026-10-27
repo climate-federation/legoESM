@@ -2001,6 +2001,21 @@ FILES = {
         Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/"
              "round339/k0_smoke/orca2_k0_10step_np2/build_sources/ppsrc/"
              "nemo/trasbc.f90")),
+    "ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/sbcssm.f90": (
+        Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/"
+             "round339/k0_smoke/orca2_k0_10step_np2/build_sources/ppsrc/"
+             "nemo/sbcssm.f90")),
+    "ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/traqsr.f90": (
+        Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/"
+             "round339/k0_smoke/orca2_k0_10step_np2/build_sources/ppsrc/"
+             "nemo/traqsr.f90")),
+    "round340_surface_writer.F90": (
+        REPO / "scripts/validate/ocean_fidelity/orca2_l4/"
+        "nemo_testcase_l4_orca2_round340_s4_acquisition/"
+        "round340_surface_writer.F90"),
+    "nemo_testcase_l4_orca2_round340_standalone_gate.py": (
+        REPO / "scripts/validate/ocean_fidelity/orca2_l4/"
+        "nemo_testcase_l4_orca2_round340_standalone_gate.py"),
     "packages/ocean/legoesm/ocean/forcing/nemo_surface.py": (
         REPO / "packages/ocean/legoesm/ocean/forcing/nemo_surface.py"),
     "packages/ocean/legoesm/ocean/dynamics/ocean_pe_latlon_cgrid.py": (
@@ -2011,6 +2026,10 @@ FILES = {
         REPO / "packages/ocean/legoesm/ocean/bulk_flux_omip.py"),
     "packages/ocean/legoesm/ocean/state.py": (
         REPO / "packages/ocean/legoesm/ocean/state.py"),
+    "packages/ocean/legoesm/ocean/physics/shortwave_penetration.py": (
+        REPO / "packages/ocean/legoesm/ocean/physics/shortwave_penetration.py"),
+    "packages/ocean/legoesm/ocean/eos.py": (
+        REPO / "packages/ocean/legoesm/ocean/eos.py"),
     # Round 334 (ratchet cleanup): the NEMO statements the named constants cite.
     "trabbc.F90": _OCE / "TRA/trabbc.F90",
     "phycst.F90": _OCE / "DOM/phycst.F90",
@@ -2455,6 +2474,66 @@ CITATION_MAP = {
     'packages/ocean/legoesm/ocean/bulk_flux_omip.py:1044-1048': [
         'if (int(nemo_kt) - 1) % int(s0.forcing_stride) == 0:',
         'state = state._replace(T=state.T.replace(data=temperature))', 5],
+    'round340_surface_writer.F90:23-25': [
+        'IF(kid >= 1) WRITE(iu) sst_m(i0:i1,j0:j1),sss_m(i0:i1,j0:j1), &',
+        '& e3t_m(i0:i1,j0:j1),frq_m(i0:i1,j0:j1)', 3],
+    'nemo_testcase_l4_orca2_round340_standalone_gate.py:57-68': [
+        'OUTER_FULL_FIELDS = (', '2: OUTER_FULL_FIELDS[:7],', 12],
+    'nemo_testcase_l4_orca2_round340_standalone_gate.py:223-225': [
+        'for name in OUTER_FIELDS_BY_KID[kid]:',
+        ('fields[name] = _reduced(value, ni, nj)', 1), 3],
+    'packages/ocean/legoesm/ocean/forcing/nemo_surface.py:27-34': [
+        'class NemoSurfaceMeans(NamedTuple):', 'frq: jnp.ndarray', 8],
+    'nemo_testcase_l4_orca2_round340_standalone_gate.py:935-940,1009-1011': [
+        'means = surface.means', ('}', 101),
+        ('for kid, boundary in OUTER_BOUNDARIES.items():', 2),
+        'OUTER_FIELDS_BY_KID[kid], outer_values[kid])', 9],
+    'nemo_testcase_l4_orca2_round340_standalone_gate.py:1176-1185': [
+        'require(tuple(actual[boundary]) == tuple(expected[boundary]),',
+        'rows[key] = row', 10],
+    'ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/sbcssm.f90:109-176': [
+        'IF( kt == nit000 .AND. .NOT. l_ssm_mean ) THEN   !   Initialisation: 1st time-step, no input means !',
+        ('ENDIF', 8), 68],
+    'ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/sbcssm.f90:133-162': [
+        'ELSEIF( MOD( kt - 2 , nn_fsbc ) == 0 ) THEN      !   Initialisation: New mean computation   !',
+        'frq_m(:,:) = frq_m(:,:) + fraqsr_1lev(:,:)', 30],
+    'ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/traqsr.f90:1289-1293': [
+        "IF( iom_varid( numror, 'fraqsr_1lev', ldstop = .FALSE. ) > 0 ) THEN",
+        ('ENDIF', 24), 5],
+    'packages/ocean/legoesm/ocean/bulk_flux_omip.py:1006-1030': [
+        'temperature = jnp.asarray(state.T.data, dtype=jnp.float64)',
+        (')', 427), 25],
+    'packages/ocean/legoesm/ocean/forcing/nemo_surface.py:143-187': [
+        'first_from_rest = jnp.logical_and(', (')', 68), 45],
+    'ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/stprk3_stg.f90:215,525': [
+        ('r3t(:,:,Kaa) = r1_2 * ( r3t(:,:,Kbb) + r3ta(:,:) )   ! at N+1/2 (Kaa)', 2),
+        'IF( ln_traqsr  )   CALL tra_qsr( kstp,      Kmm, ts, Krhs )  ! penetrative solar radiation qsr',
+        2],
+    'ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/traqsr.f90:327-402': [
+        ('zlogc = LOG(  MAX( 0.03_wp, MIN( sf_chl(1)%fnow(ji,jj,1) ,10._wp ) )  )  ! zlogc = log(zchl)   with 0.03 <= Chl >= 10.', 1),
+        ('END WHERE', 2), 76],
+    'packages/ocean/legoesm/ocean/bulk_flux_omip.py:1071-1089': [
+        'state_after = stepped.state_after if hasattr(stepped, "state_after") else stepped',
+        (')', 447), 19],
+    'packages/ocean/legoesm/ocean/physics/shortwave_penetration.py:1092-1115': [
+        'def top_layer_absorbed_fraction(dz_top, chl_surface=None,',
+        'return frac_per_m[..., 0] * dz_live[..., 0]', 24],
+    'packages/ocean/legoesm/ocean/physics/shortwave_penetration.py:404-451': [
+        'zlogc = precision_log(jnp.clip(chl_surface, c(_CHL_MIN), c(_CHL_MAX)))',
+        'return jnp.clip(itab - 1.0, 0.0, 60.0).astype(jnp.int32)', 48],
+    'packages/ocean/legoesm/ocean/eos.py:1004-1035': [
+        'def nemo_r3t_rk3_stage1_stretch(',
+        'return jnp.where(wet, nemo_source_round(one + r3_stage), one)', 32],
+    'ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/traqsr.f90:310':
+        'CALL fld_read( kt, 1, sf_chl )                                          ! Read Chl data and provides it at the current time step',
+    'ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/stprk3_stg.f90:525':
+        'IF( ln_traqsr  )   CALL tra_qsr( kstp,      Kmm, ts, Krhs )  ! penetrative solar radiation qsr',
+    'packages/ocean/legoesm/ocean/bulk_flux_omip.py:1260-1265': [
+        'update = (int(s0.kt) - 1) % int(s0.forcing_stride) == 0',
+        'return prior_surface._replace(means=means)', 6],
+    'tke.py:285-289': [
+        'masked_taum = jnp.maximum(taum, 0.0) * surface_tmask',
+        '* masked_taum)', 5],
     # ORCA2 round 334: provenance of the constants the ratchet cleanup named.
     'trabbc.F90:179': "* 1.e-3 ! conversion in W/m2",
     'phycst.F90:26': "rad      = 3.141592653589793_wp / 180._wp",
