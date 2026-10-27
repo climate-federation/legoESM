@@ -436,6 +436,12 @@ def test_swap_microphysics_schemes(micro_scheme):
     cfg = _baseline_cfg(
         microphysics=MicrophysicsConfig(scheme=micro_scheme),
     )
+    if micro_scheme == "sundqvist":
+        # A single column has no grid-cell area until its case declares the
+        # GCM cell it stands for (pending user decision); Sundqvist refuses.
+        with pytest.raises(ValueError, match="cell area"):
+            _run_and_assert_stable(cfg)
+        return
     _run_and_assert_stable(cfg)
 
 

@@ -379,6 +379,7 @@ def test_sundqvist_rain_survival_rebuild_matches_physical_scheme():
         dz=dz,
         dt=150.0,
         config=config,
+        cell_area=1.0e10,
     )
     assert jnp.allclose(
         rebuilt.dT_dt,
@@ -419,7 +420,8 @@ def test_sundqvist_rain_survival_rebuild_gradient_finite_in_rain_free_column():
     def loss(T_, frac):
         out = apply_predicted_sundqvist_rain_survival_fraction(
             frac, T=T_, q_v=q_v, hydrometeors=hm, p_full=p_full,
-            p_half=p_half, rho=rho, dz=dz, dt=150.0, config=SundqvistConfig())
+            p_half=p_half, rho=rho, dz=dz, dt=150.0, config=SundqvistConfig(),
+            cell_area=1.0e10)
         return jnp.sum(out.dT_dt) + jnp.sum(out.dq_v_dt) + jnp.sum(out.precipitation)
 
     gT, gf = jax.grad(loss, argnums=(0, 1))(T, jnp.array([0.6, 0.6]))
@@ -470,6 +472,7 @@ def test_sundqvist_rain_survival_rebuild_drains_incoming_qr():
         jnp.ones((1,)),
         T=T, q_v=q_v, hydrometeors=hydrometeors,
         p_full=p_full, p_half=p_half, rho=rho, dz=dz, dt=dt, config=config,
+        cell_area=1.0e10,
     )
     # q_r drains in both paths.
     q_r_after_phys = q_r + physical.dq_r_dt * dt

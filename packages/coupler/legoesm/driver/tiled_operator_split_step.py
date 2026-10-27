@@ -266,6 +266,11 @@ def build_tile_step_unified(grid, sigma, config, kt: int):
         convection_scheme_traits,
     )
 
+    if getattr(config, "microphysics", None) == "sundqvist":
+        raise NotImplementedError(
+            "build_tile_step_unified: sundqvist blends its ice autoconversion "
+            "by each column's grid-cell area, a per-column bake that differs "
+            "per tile (same reason as land)")
     if getattr(config, "convection", "none") != "none":
         traits = convection_scheme_traits(config.convection)
         if (getattr(traits, "is_w_grid_consumer", False)

@@ -281,7 +281,8 @@ def test_jit_matches_eager():
     z = jnp.zeros_like(g["T"])
     hyd = HydrometeorState(q_c=g["q_c"], q_r=z, q_i=z, q_s=z, q_g=z, N_c=z, N_r=z, N_i=z)
     jitted = jax.jit(S.sundqvist_microphysics, static_argnums=(7, 8))(
-        g["T"], g["q_v"], hyd, g["p_full"], g["p_half"], g["rho"], dz, dt, cfg)
+        g["T"], g["q_v"], hyd, g["p_full"], g["p_half"], g["rho"], dz, dt, cfg,
+        cell_area=1.0e10)
     for k in ("dT_dt", "dq_v_dt", "dq_c_dt", "precipitation", "precip_frozen"):
         assert float(_rel(getattr(jitted, k), getattr(eager, k)).max()) <= TOL, k
 
