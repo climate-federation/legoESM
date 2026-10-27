@@ -227,6 +227,12 @@ class OceanSurfaceForcing(NamedTuple):
         for source-defined ocean forcing that already lives in the model
         referential (for example NEMO ``usrdef_sbc``); when present it avoids a
         lossy native→geographic→native round trip.  Both must be supplied.
+    utau_u_native, vtau_v_native : array or None
+        Optional grid-native, on-ocean stress at U/V faces [Pa] (NEMO
+        ``sbcmod.F90:565-570`` ``utauU, vtauV``, interpolated once from T
+        points with coastal unmasking).  Both must be supplied together; when
+        present, ``surface_stress_faces`` consumes them directly without a
+        second T->U/V interpolation or coastal unmasking.
     freshwater : array or None
         Net freshwater flux into ocean (P - E + R + M) [kg/m²/s].
     salt_flux : array or None
@@ -369,6 +375,8 @@ class OceanSurfaceForcing(NamedTuple):
     # Read only by ``rk3_stage3_geothermal_nemo_written``.  Native file units
     # are retained so the production path executes trabbc.f90's written
     # ``* 1.e-3`` conversion rather than pre-converting outside the model.
+    utau_u_native: object = None       # jnp.ndarray | None [Pa], NEMO utauU at U faces
+    vtau_v_native: object = None       # jnp.ndarray | None [Pa], NEMO vtauV at V faces
 
 
 class OceanConfig(NamedTuple):

@@ -4623,10 +4623,32 @@ def surface_stress_faces(
         return tau_i_u, tau_j_v
     _sf_tau_x = getattr(surface_forcing, "tau_x", None)
     _sf_tau_y = getattr(surface_forcing, "tau_y", None)
+    _native_u = getattr(surface_forcing, "utau_u_native", None)
+    _native_v = getattr(surface_forcing, "vtau_v_native", None)
+    if (_native_u is None) != (_native_v is None):
+        raise ValueError("utau_u_native and vtau_v_native must be supplied together")
     _native_i = getattr(surface_forcing, "tau_i_native", None)
     _native_j = getattr(surface_forcing, "tau_j_native", None)
     if (_native_i is None) != (_native_j is None):
         raise ValueError("tau_i_native and tau_j_native must be supplied together")
+    if _native_u is not None and _native_i is not None:
+        raise ValueError(
+            "utau_u_native/vtau_v_native and tau_i_native/tau_j_native "
+            "are mutually exclusive")
+    if _native_u is not None and use_native:
+        utau_u = jnp.asarray(_native_u, dtype=u_dtype)
+        vtau_v = jnp.asarray(_native_v, dtype=u_dtype)
+        dz_0_T = jnp.asarray(z_coord.dz_ref[0], dtype=u_dtype) * J
+        if utau_u.shape != dz_0_T.shape or vtau_v.shape != dz_0_T.shape:
+            raise ValueError(
+                "utau_u_native and vtau_v_native must match cell-field shape")
+        tau_i_u = jnp.concatenate([utau_u[:, -1:], utau_u], axis=1)
+        tau_j_v = jnp.concatenate(
+            [jnp.zeros_like(vtau_v[:1, :]), vtau_v], axis=0)
+        dz_0_u = interp_cell_to_uface(dz_0_T)
+        dz_0_v = interp_to_v_points_multi(
+            (dz_0_T,), grid=grid, source_round=True)[0]
+        return tau_i_u, tau_j_v, dz_0_u, dz_0_v
     if _native_i is not None and use_native:
         tau_i_T = jnp.asarray(_native_i, dtype=u_dtype)
         tau_j_T = jnp.asarray(_native_j, dtype=u_dtype)

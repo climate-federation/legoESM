@@ -216,3 +216,52 @@ def test_pivot_row_v_stress_refuses_without_a_fold_or_masks():
                              nemo_fold_vector_sign=True, **masks)
     with np.testing.assert_raises_regex(ValueError, "needs the NEMO masks"):
         surface_stress_faces(forcing, jnp.float64, z, jac, grid, nemo_fold_vector_sign=True)
+
+
+def test_native_face_stress_pair_direct_handoff_and_fail_closed():
+    """Explicit utau_u_native/vtau_v_native bypasses a second T->U/V interpolation."""
+    z, _, _, _, _, jac = _fields()
+    utau_u = jnp.arange(N_LAT * N_LON, dtype=jnp.float64).reshape(N_LAT, N_LON) * 0.1
+    vtau_v = -jnp.arange(N_LAT * N_LON, dtype=jnp.float64).reshape(N_LAT, N_LON) * 0.2
+    geographic_poison = jnp.full((N_LAT, N_LON), 99.0, dtype=jnp.float64)
+    forcing = OceanSurfaceForcing(
+        tau_x=geographic_poison,
+        tau_y=geographic_poison,
+        utau_u_native=utau_u,
+        vtau_v_native=vtau_v,
+    )
+    grid = SimpleNamespace(fold=None)
+    tau_u, tau_v, dz_u, dz_v = surface_stress_faces(
+        forcing, jnp.float64, z, jac, grid
+    )
+    np.testing.assert_array_equal(np.asarray(tau_u[:, 1:]), np.asarray(utau_u))
+    np.testing.assert_array_equal(np.asarray(tau_u[:, 0]), np.asarray(utau_u[:, -1]))
+    np.testing.assert_array_equal(np.asarray(tau_v[1:, :]), np.asarray(vtau_v))
+    np.testing.assert_array_equal(np.asarray(tau_v[0, :]), np.zeros(N_LON))
+    assert dz_u.shape == (N_LAT, N_LON + 1)
+    assert dz_v.shape == (N_LAT + 1, N_LON)
+
+    with np.testing.assert_raises_regex(
+        ValueError, "utau_u_native and vtau_v_native must be supplied together"
+    ):
+        surface_stress_faces(
+            OceanSurfaceForcing(utau_u_native=utau_u),
+            jnp.float64, z, jac, grid,
+        )
+    with np.testing.assert_raises_regex(ValueError, "mutually exclusive"):
+        surface_stress_faces(
+            OceanSurfaceForcing(
+                utau_u_native=utau_u, vtau_v_native=vtau_v,
+                tau_i_native=utau_u, tau_j_native=vtau_v,
+            ),
+            jnp.float64, z, jac, grid,
+        )
+    with np.testing.assert_raises_regex(ValueError, "must match cell-field shape"):
+        surface_stress_faces(
+            OceanSurfaceForcing(
+                utau_u_native=jnp.ones((N_LAT, N_LON + 1)),
+                vtau_v_native=vtau_v,
+            ),
+            jnp.float64, z, jac, grid,
+        )
+

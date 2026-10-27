@@ -405,8 +405,10 @@ def nemo_s2_to_ocean_interfaces(
         # belongs exclusively to the unrelated flux-feedback scheme.
         q_solar=None,
         taum=result.taum,
-        tau_i_native=result.utau_u,
-        tau_j_native=result.vtau_v,
+        tau_i_native=None,
+        tau_j_native=None,
+        utau_u_native=result.utau_u,
+        vtau_v_native=result.vtau_v,
         runoff_tracer_content=(
             result.runoff.temperature_content,
             result.runoff.salinity_content,

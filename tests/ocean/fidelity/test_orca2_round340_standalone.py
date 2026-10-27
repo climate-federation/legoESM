@@ -923,4 +923,398 @@ def test_resume7_s0f_tradmp_year_seam_slots_match_oracle():
                     )
 
 
+def test_resume9_production_call_site_single_interpolation_and_revert_plant():
+    """M2/M4: production S2 -> OceanSurfaceForcing -> surface_stress_faces -> ocean step
+    consumes utauU/vtauV interpolated once, matches NEMO recorded utauU/vtauV bit-for-bit,
+    and FAILS when reverted to the parent double-interpolation binding."""
+    from types import SimpleNamespace
+    from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import surface_stress_faces
+    from legoesm.ocean.forcing import nemo_surface
+    from legoesm.ocean.state import OceanSurfaceForcing
+
+    args, s0, ice_if, s2 = _production_surface_case()
+    shape = s2.surface_mask.shape
+    one = jnp.ones(shape, dtype=jnp.float64)
+    # Include a coastal wet/dry boundary on the 2x3 grid so a second interpolation
+    # and coastal unmasking visibly perturbs the face stresses.
+    mask = jnp.asarray([[1.0, 1.0, 0.0], [0.0, 1.0, 1.0]], dtype=jnp.float64)
+    u_mask_full = jnp.asarray(
+        [[0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0]], dtype=jnp.float64
+    )
+    v_mask_full = jnp.asarray(
+        [[0.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 0.0]], dtype=jnp.float64
+    )
+    s0_c = s0._replace(surface_mask=jnp.pad(mask, 1, mode="edge"))
+    s2_c = s2._replace(
+        surface_mask=mask,
+        tmask_east=jnp.roll(mask, -1, axis=1),
+        tmask_north=jnp.vstack([mask[1:], mask[:1]]),
+        umask=u_mask_full[:, 1:],
+        vmask=v_mask_full[1:, :],
+    )
+    z_coord = SimpleNamespace(
+        dz_ref=jnp.asarray([10.0, 20.0], dtype=jnp.float64),
+        nemo_e3t_0=jnp.ones(shape + (2,), dtype=jnp.float64) * 10.0,
+    )
+    grid = SimpleNamespace(fold=None, cos_alpha_u=None, sin_alpha_u=None,
+                           cos_alpha_v=None, sin_alpha_v=None)
+
+    def eval_pipeline(u_w, v_w, t_a, q_a, slp, qsr_d, qlw_d, pr, sn):
+        surf = bulk.nemo_orca2_k0_surface_card(
+            u_w, v_w, t_a, q_a, slp, qsr_d, qlw_d, pr, sn,
+            mask, 0.066, 1.0, 1.0, 5,
+            k0_config=_k0(), ice_if=ice_if, s0=s0_c, s2=s2_c,
+            chl=one, geothermal_heat_flux_mwm2=one,
+        )
+        tu, tv, dzu, dzv = surface_stress_faces(
+            surf.surface_forcing, jnp.float64, z_coord, one, grid,
+            use_native=True, cell_mask=mask, u_mask=u_mask_full, v_mask=v_mask_full,
+        )
+        return surf.s2.utau_u, surf.s2.vtau_v, tu, tv, dzu, dzv
+
+    dyn_args = (args[0], args[1], args[2], args[3], args[4],
+                args[8], args[9], args[10], args[11])
+    with jax.disable_jit():
+        eager_out = eval_pipeline(*dyn_args)
+    jit_out = jax.jit(eval_pipeline)(*dyn_args)
+    for eager_leaf, jit_leaf in zip(eager_out, jit_out, strict=True):
+        np.testing.assert_array_equal(
+            np.asarray(eager_leaf).view(np.uint64),
+            np.asarray(jit_leaf).view(np.uint64),
+        )
+    s2_utau_u, s2_vtau_v, tu, tv, _, _ = eager_out
+    np.testing.assert_array_equal(
+        np.asarray(tu[:, 1:]).view(np.uint64),
+        np.asarray(s2_utau_u).view(np.uint64),
+    )
+    np.testing.assert_array_equal(
+        np.asarray(tv[1:, :]).view(np.uint64),
+        np.asarray(s2_vtau_v).view(np.uint64),
+    )
+
+    # Revert plant (parent commit 1c8bdb666599 behavior): passing s2.utau_u/vtau_v
+    # as tau_i_native/tau_j_native causes surface_stress_faces to interpolate and
+    # coastal-unmask a second time, failing the bit-equality check.
+    surf_res = bulk.nemo_orca2_k0_surface_card(
+        *dyn_args, mask, 0.066, 1.0, 1.0, 5,
+        k0_config=_k0(), ice_if=ice_if, s0=s0_c, s2=s2_c,
+        chl=one, geothermal_heat_flux_mwm2=one,
+    )
+    assert surf_res.surface_forcing.tau_i_native is None
+    assert surf_res.surface_forcing.tau_j_native is None
+    assert surf_res.surface_forcing.utau_u_native is not None
+    assert surf_res.surface_forcing.vtau_v_native is not None
+    reverted_sf = surf_res.surface_forcing._replace(
+        tau_i_native=surf_res.s2.utau_u,
+        tau_j_native=surf_res.s2.vtau_v,
+        utau_u_native=None,
+        vtau_v_native=None,
+    )
+    rev_tu, rev_tv, _, _ = surface_stress_faces(
+        reverted_sf, jnp.float64, z_coord, one, grid,
+        use_native=True, cell_mask=mask, u_mask=u_mask_full, v_mask=v_mask_full,
+    )
+    assert not np.array_equal(
+        np.asarray(rev_tu[:, 1:]).view(np.uint64),
+        np.asarray(s2_utau_u).view(np.uint64),
+    )
+    assert not np.array_equal(
+        np.asarray(rev_tv[1:, :]).view(np.uint64),
+        np.asarray(s2_vtau_v).view(np.uint64),
+    )
+
+    # Also verify through nemo_orca2_k0_ocean_step -> surface_stress_faces and
+    # finite JVP == reverse AD wrt wind through the ocean velocity update.
+    deck = Path("/data/abyssal/dbalwada/nemo-testcases-l4/inputs/ORCA2_ICE_v5.0.0")
+    if deck.exists():
+        card = bulk.build_nemo_orca2_k0_ocean_card(deck)
+        recipe = card.ocean.recipe
+        card_small = card._replace(
+            ocean=card.ocean._replace(
+                recipe=recipe._replace(
+                    z_coord=recipe.z_coord._replace(
+                        nemo_e3t_0=jnp.ones(shape + (2,), dtype=jnp.float64)
+                    )
+                )
+            )
+        )
+        State = namedtuple(
+            "State", "T S u v eta H_bathy land_mask u_mask v_mask u_before v_before"
+        )
+        zero = jnp.zeros(shape, dtype=jnp.float64)
+        state = State(
+            Field(jnp.ones(shape + (2,), dtype=jnp.float64)),
+            Field(34.0 * jnp.ones(shape + (2,), dtype=jnp.float64)),
+            Field(jnp.zeros((2, 4, 2), dtype=jnp.float64)),
+            Field(jnp.zeros((3, 3, 2), dtype=jnp.float64)),
+            Field(zero), Field(one), Field(mask),
+            Field(u_mask_full), Field(v_mask_full), None, None,
+        )
+        fields = bulk.NemoStandaloneAtmosphereFields(*dyn_args)
+        pair = bulk.NemoStandaloneFieldPair(zero, zero, 0, -10, 10)
+        s0f = bulk.NemoStandaloneS0FInputs(fields, fields, 0, -10, 10, pair, pair)
+        means_2x3 = bulk.NemoSurfaceMeans(*(zero for _ in range(7)))
+        s0_step = s0._replace(
+            prior=means_2x3, u_before=zero, v_before=zero, temperature_now=zero,
+            salinity_now=zero, ssh_now=zero, ssh_inverse_barometer=zero,
+            e3t_reference=one, r3t_now=zero, surface_mask=mask,
+            shortwave_fraction_top=one,
+        )
+        iif_step = ice_if._replace(
+            fdta_before=0.25 * one, fdta_after=0.75 * one,
+            sss_m=zero, sst_m=zero, ts_surface=zero, ff_f=one,
+            tmask_surface=mask, smask0=mask,
+        )
+
+        class StressConsumingOcean:
+            def step(self, live, dt, *, freshwater, surface_forcing, **_):
+                tu_step, tv_step, _, _ = surface_stress_faces(
+                    surface_forcing, jnp.float64, z_coord, one, grid,
+                    use_native=True, cell_mask=live.land_mask.data,
+                    u_mask=live.u_mask.data, v_mask=live.v_mask.data,
+                )
+                u_next = live.u.data.at[..., 0].add(tu_step * jnp.asarray(dt) * 1.0e-3)
+                v_next = live.v.data.at[..., 0].add(tv_step * jnp.asarray(dt) * 1.0e-3)
+                return live._replace(u=Field(u_next), v=Field(v_next))
+
+        stepped = bulk.nemo_orca2_k0_ocean_step(
+            card_small, state, s0f=s0f, ice_if=iif_step, s0=s0_step, s2=s2_c,
+            chl=one, geothermal_heat_flux_mwm2=one,
+            model=StressConsumingOcean(), nemo_kt=1,
+        )
+        np.testing.assert_allclose(
+            np.asarray(stepped.ocean.u.data[:, 1:, 0]),
+            np.asarray(stepped.surface.s2.utau_u) * float(card_small.ocean.dt_s) * 1.0e-3,
+            rtol=0.0, atol=0.0,
+        )
+
+        direction = jnp.linspace(0.25, 1.25, dyn_args[0].size, dtype=jnp.float64).reshape(shape)
+
+        def wind_objective(u_wind_in):
+            moved = fields._replace(u_wind=u_wind_in)
+            s0f_in = s0f._replace(before=moved, after=moved)
+            res = bulk.nemo_orca2_k0_ocean_step(
+                card_small, state, s0f=s0f_in, ice_if=iif_step, s0=s0_step, s2=s2_c,
+                chl=one, geothermal_heat_flux_mwm2=one,
+                model=StressConsumingOcean(), nemo_kt=1,
+            )
+            return jnp.sum(res.ocean.u.data ** 2) + jnp.sum(res.ocean.v.data ** 2)
+
+        primal, jvp_val = jax.jvp(wind_objective, (dyn_args[0],), (direction,))
+        vjp_val = jnp.vdot(jax.grad(wind_objective)(dyn_args[0]), direction)
+        assert np.isfinite(np.asarray(primal))
+        assert np.isfinite(np.asarray(jvp_val)) and float(np.abs(np.asarray(jvp_val))) > 0.0
+        assert np.isfinite(np.asarray(vjp_val))
+        np.testing.assert_allclose(vjp_val, jvp_val, rtol=2.0e-14, atol=2.0e-14)
+
+
+def test_resume9_orca2_recorded_utauu_vtauv_and_m6_caller_bit_identity():
+    """M6: 0/532,800 unequal words vs recorded S4 utauU/vtauV across kt=1..10,
+    and 0 unequal words (parent vs current) on the certified rung-10 card and
+    every non-NEMO surface_stress_faces caller."""
+    from types import SimpleNamespace
+    from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import surface_stress_faces
+    from legoesm.ocean.forcing import nemo_surface
+    from legoesm.ocean.state import OceanSurfaceForcing
+    from legoesm.ocean.vertical import compute_ocean_jacobian
+    from scripts.validate.ocean_fidelity.orca2_l4 import (
+        nemo_testcase_l4_orca2_round1_ladder_gate as rung10,
+    )
+
+    deck = Path("/data/abyssal/dbalwada/nemo-testcases-l4/inputs/ORCA2_ICE_v5.0.0")
+    arm_a = Path(
+        "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/"
+        "round340/s4_acquisition/orca2_s4_exact_a_np2"
+    )
+    si3_round5 = Path(
+        "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/"
+        "round5/acquisition/orca1ice_surface_entry_every_step_a_np2"
+    )
+    if not (deck.exists() and arm_a.exists() and si3_round5.exists()):
+        pytest.skip("ORCA2 deck or admitted S4/SI3 records are not installed")
+
+    k0_card = bulk.build_nemo_orca2_k0_ocean_card(deck)
+    state = k0_card.ocean.recipe.initial_state
+    zc = k0_card.ocean.recipe.z_coord
+    grid = k0_card.ocean.recipe.grid
+    jac = compute_ocean_jacobian(state.eta.data, state.H_bathy.data, zc)
+    mask = np.asarray(state.land_mask.data, dtype=np.float64)
+    u_mask = np.asarray(state.u_mask.data, dtype=np.float64)
+    v_mask = np.asarray(state.v_mask.data, dtype=np.float64)
+    stress_lbc, tmask_east, tmask_north, umask, vmask = (
+        gate._build_stress_lbc_and_masks(mask, u_mask, v_mask, grid.fold)
+    )
+
+    # 1. Standalone S4:nemo_s2_to_ocean_interfaces -> surface_stress_faces vs
+    # recorded kt01..kt10/S2_EXIT/{utauU,vtauV} (and revert plant at kt=1).
+    s4_u_unequal = 0
+    s4_v_unequal = 0
+    s4_total_words = 0
+    for kt in range(1, 11):
+        r0 = gate.read_exact_record(arm_a / f"oracle_r340_surface_k{kt:08d}_b05_r0000.bin")
+        r1 = gate.read_exact_record(arm_a / f"oracle_r340_surface_k{kt:08d}_b05_r0001.bin")
+        s3_exit = gate._join_rank_fields([r0, r1])
+        e0 = gate.read_exact_record(arm_a / f"oracle_r340_surface_k{kt:08d}_b11_r0000.bin")
+        e1 = gate.read_exact_record(arm_a / f"oracle_r340_surface_k{kt:08d}_b11_r0001.bin")
+        s2_exit = gate._join_rank_fields([e0, e1])
+        utau_c, vtau_c, utau_e, vtau_n = nemo_surface.nemo_t_stress_lbc_neighbors(
+            jnp.asarray(s3_exit["utau"]), jnp.asarray(s3_exit["vtau"]), stress_lbc
+        )
+        utau_u, vtau_v = nemo_surface.nemo_t_stress_to_uv(
+            utau_c, vtau_c, utau_e, vtau_n,
+            jnp.asarray(mask), jnp.asarray(tmask_east), jnp.asarray(tmask_north),
+            jnp.asarray(umask), jnp.asarray(vmask),
+        )
+        dummy_s2 = nemo_surface.NemoS2Result(
+            runoff=SimpleNamespace(
+                mass_flux=jnp.asarray(s2_exit["rnf"]),
+                temperature_content=jnp.asarray(s2_exit["rnf_tsc_T"]),
+                salinity_content=jnp.asarray(s2_exit["rnf_tsc_S"]),
+            ),
+            restoring_coefficient=jnp.asarray(s2_exit["coefice"]),
+            erp=jnp.asarray(s2_exit["erp"]),
+            qrp=jnp.asarray(s2_exit["qrp"]),
+            qns=jnp.asarray(s2_exit["qns"]),
+            qsr=jnp.asarray(s2_exit["qsr"]),
+            emp=jnp.asarray(s2_exit["emp"]),
+            sfx=jnp.asarray(s2_exit["sfx"]),
+            taum=jnp.asarray(s2_exit["taum"]),
+            utau=utau_c,
+            vtau=vtau_c,
+            utau_u=utau_u,
+            vtau_v=vtau_v,
+            penetrative_qsr=jnp.asarray(s2_exit["qsr"]),
+            qns_after_ssr=jnp.asarray(s2_exit["qns"]),
+            emp_after_ssr=jnp.asarray(s2_exit["emp"]),
+        )
+        sf, _ = nemo_surface.nemo_s2_to_ocean_interfaces(
+            dummy_s2, chl=mask, ice_concentration=s2_exit["fr_i"],
+            geothermal_heat_flux_mwm2=mask,
+        )
+        tu, tv, _, _ = surface_stress_faces(
+            sf, jnp.float64, zc, jac, grid,
+            use_native=True, nemo_fold_vector_sign=True,
+            cell_mask=state.land_mask.data, u_mask=state.u_mask.data, v_mask=state.v_mask.data,
+        )
+        u_score = gate.exact_score(np.asarray(tu[:, 1:]), s2_exit["utauU"])
+        v_score = gate.exact_score(np.asarray(tv[1:, :]), s2_exit["vtauV"])
+        s4_u_unequal += int(u_score["unequal"])
+        s4_v_unequal += int(v_score["unequal"])
+        s4_total_words += int(u_score["count"]) + int(v_score["count"])
+        if kt == 1:
+            # Parent revert at kt=1 produces 16,977 / 26,640 and 16,865 / 26,640 unequal words.
+            parent_sf = sf._replace(
+                tau_i_native=utau_u, tau_j_native=vtau_v,
+                utau_u_native=None, vtau_v_native=None,
+            )
+            p_tu, p_tv, _, _ = surface_stress_faces(
+                parent_sf, jnp.float64, zc, jac, grid,
+                use_native=True, nemo_fold_vector_sign=True,
+                cell_mask=state.land_mask.data, u_mask=state.u_mask.data, v_mask=state.v_mask.data,
+            )
+            assert gate.exact_score(np.asarray(p_tu[:, 1:]), s2_exit["utauU"])["unequal"] == 16977
+            assert gate.exact_score(np.asarray(p_tv[1:, :]), s2_exit["vtauV"])["unequal"] == 16865
+    assert s4_u_unequal == 0
+    assert s4_v_unequal == 0
+    assert s4_total_words == 532800
+
+    # 2. Certified rung-10 SI3 card (parent vs current across kt=1..10):
+    # rung10._surface_forcings supplies tau_i_native/tau_j_native with utau_u_native=None.
+    from legoesm.core.source_rounding import nemo_source_round
+    from legoesm.grids.operators_latlon_cgrid import (
+        fold_ghost_source_T,
+        interp_cell_to_uface,
+        pad_lon_cgrid,
+        pad_ns_zero,
+    )
+    from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import interp_to_v_points_multi
+    from legoesm.ocean.fidelity import nemo_testcase_recipe as recipe_mod
+
+    si3_card = recipe_mod.build_orca2_zps_card(deck)
+    si3_state = si3_card.recipe.initial_state
+    si3_zc = si3_card.recipe.z_coord
+    si3_grid = si3_card.recipe.grid
+    si3_jac = compute_ocean_jacobian(si3_state.eta.data, si3_state.H_bathy.data, si3_zc)
+    tmask = jnp.asarray(si3_state.land_mask.data, dtype=jnp.float64)
+    umask_full = jnp.asarray(si3_state.u_mask.data, dtype=jnp.float64)
+    vmask_full = jnp.asarray(si3_state.v_mask.data, dtype=jnp.float64)
+    t_lon = pad_lon_cgrid(tmask, halo=1)
+    tmask_u = jnp.maximum(t_lon[:, :-1], t_lon[:, 1:])
+    t_lat = pad_ns_zero(tmask)
+    tmask_v = jnp.maximum(t_lat[:-1], t_lat[1:])
+    two = jnp.asarray(2.0, dtype=jnp.float64)
+    vm_top = vmask_full[-2][si3_grid.fold.perm_v]
+    tm_halo = fold_ghost_source_T(tmask, si3_grid.fold)[0][si3_grid.fold.perm_T]
+    dz_0_t = jnp.asarray(si3_zc.dz_ref[0], dtype=jnp.float64) * si3_jac
+    parent_dz_u = interp_cell_to_uface(dz_0_t)
+
+    rung10_ssf_unequal = 0
+    rung10_ssf_words = 0
+    for kt in range(1, 11):
+        fields = rung10.assemble_surface_fields(si3_round5, kt)
+        _, sf_r10 = rung10._surface_forcings(si3_card, deck, fields, kt)
+        assert sf_r10.utau_u_native is None and sf_r10.vtau_v_native is None
+        cur_out = surface_stress_faces(
+            sf_r10, jnp.float64, si3_zc, si3_jac, si3_grid,
+            use_native=True, nemo_fold_vector_sign=True,
+            cell_mask=si3_state.land_mask.data,
+            u_mask=si3_state.u_mask.data,
+            v_mask=si3_state.v_mask.data,
+        )
+        # Exact parent commit (1c8bdb666599) _native_i branch of surface_stress_faces:
+        tau_i_t = jnp.asarray(sf_r10.tau_i_native, dtype=jnp.float64)
+        tau_j_t = jnp.asarray(sf_r10.tau_j_native, dtype=jnp.float64)
+        p_u = interp_cell_to_uface(tau_i_t, source_round=True)
+        p_v, p_dz_v = interp_to_v_points_multi(
+            (tau_j_t, dz_0_t), grid=si3_grid, source_round=True
+        )
+        p_u = nemo_source_round(nemo_source_round(p_u * nemo_source_round(two - umask_full)) * tmask_u)
+        p_v = nemo_source_round(nemo_source_round(p_v * nemo_source_round(two - vmask_full)) * tmask_v)
+        halo = -fold_ghost_source_T(tau_j_t, si3_grid.fold)[0][si3_grid.fold.perm_T]
+        top = nemo_source_round(0.5 * nemo_source_round(tau_j_t[-1] + halo))
+        top = nemo_source_round(
+            nemo_source_round(top * nemo_source_round(2.0 - vm_top))
+            * jnp.maximum(tmask[-1], tm_halo)
+        )
+        p_v = p_v.at[-1].set(top)
+        for a, b in zip(cur_out, (p_u, p_v, parent_dz_u, p_dz_v), strict=True):
+            sc = gate.exact_score(np.asarray(a), np.asarray(b))
+            rung10_ssf_unequal += int(sc["unequal"])
+            rung10_ssf_words += int(sc["count"])
+    assert rung10_ssf_unequal == 0
+    assert rung10_ssf_words == 1072160
+
+    # 3. Non-NEMO callers of surface_stress_faces (geographic and native T-point
+    # without utau_u_native/vtau_v_native): verify bit-identity with parent logic.
+    tau_x_geo = jnp.asarray(fields["utau"], dtype=jnp.float64)
+    tau_y_geo = jnp.asarray(fields["vtau"], dtype=jnp.float64)
+    sf_geo = OceanSurfaceForcing(tau_x=tau_x_geo, tau_y=tau_y_geo)
+    cur_geo = surface_stress_faces(sf_geo, jnp.float64, si3_zc, si3_jac, si3_grid)
+    tau_e_u = interp_cell_to_uface(-tau_x_geo, source_round=False)
+    tau_n_u = interp_cell_to_uface(-tau_y_geo, source_round=False)
+    tau_e_v, tau_n_v, exp_dz_v = interp_to_v_points_multi(
+        (-tau_x_geo, -tau_y_geo, dz_0_t), grid=si3_grid, source_round=False
+    )
+    exp_u = (
+        tau_e_u * jnp.asarray(si3_grid.cos_alpha_u, dtype=jnp.float64)
+        + tau_n_u * jnp.asarray(si3_grid.sin_alpha_u, dtype=jnp.float64)
+    )
+    exp_v = (
+        -tau_e_v * jnp.asarray(si3_grid.sin_alpha_v, dtype=jnp.float64)
+        + tau_n_v * jnp.asarray(si3_grid.cos_alpha_v, dtype=jnp.float64)
+    )
+    exp_dz_u = interp_cell_to_uface(dz_0_t)
+    non_nemo_unequal = 0
+    non_nemo_words = 0
+    for a, b in zip(cur_geo, (exp_u, exp_v, exp_dz_u, exp_dz_v), strict=True):
+        sc = gate.exact_score(np.asarray(a), np.asarray(b))
+        non_nemo_unequal += int(sc["unequal"])
+        non_nemo_words += int(sc["count"])
+    assert non_nemo_unequal == 0
+    assert non_nemo_words == 107216
+
+
+
+
+
 
