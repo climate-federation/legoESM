@@ -7,7 +7,7 @@ REPO = Path(__file__).resolve().parents[3]
 for _pkg in (REPO, REPO / "packages/core", REPO / "packages/ocean"):
     if str(_pkg) not in sys.path:
         sys.path.insert(0, str(_pkg))
-if not str(getattr(sys.modules.get("legoesm"), "__file__", "")).startswith(str(REPO)):
+if not any(str(Path(p).resolve()).startswith(str(REPO)) for p in getattr(sys.modules.get("legoesm"), "__path__", [REPO])):
     for _mod in list(sys.modules):
         if _mod == "legoesm" or _mod.startswith("legoesm."):
             sys.modules.pop(_mod, None)

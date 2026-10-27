@@ -1611,11 +1611,25 @@ From the wet-value audit embedded in
   `_tke_bottom_dirichlet` across `scripts/validate/ocean_fidelity/testcases/nemo_testcase_receipt_citation_gate.py`
   and the ORCA2 round 331, 332, 333, and 336 receipts. Both
   `scripts/validate/ocean_fidelity/testcases/nemo_testcase_receipt_citation_gate.py --receipt docs/ocean/fidelity/testcases/nemo_testcases_l4_orca2_round336_trazdf_operand_receipt.md --from-heading "# ORCA2 round 336 — \`tra_zdf\` operand audit and acquisition handoff"`
+  (89 citations, zero failures, zero unmapped citations, zero map-audit
+  failures, 9/9 self-test controls fired; report
+  `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/orca2_r336_resume18/citation_gate_r336.json`)
   and `JAX_ENABLE_X64=1 pytest tests/ocean/fidelity/test_nemo_testcase_receipt_citation_gate.py`
-  pass with zero failures, zero unmapped citations, zero map-audit failures, and
-  all nine self-test controls firing.
-- **Default ORCA2 landing gate and private-import ratchet**: All default ORCA2
-  landing tests and `tests/test_no_private_cross_imports.py` pass on CPU under
-  `JAX_ENABLE_X64=1`.
+  (`17 passed in 6.07s`, SHA-256
+  `3efd1589200d20cc003f6d62327d66221b4cf8d44bddbefb9c2b1364c1ae9eec`) pass.
+- **Default ORCA2 landing gate and private-import ratchet**: All 152 tests in
+  the default ORCA2 landing battery pass on CPU under `JAX_ENABLE_X64=1`:
+  `140 passed in 408.65s` (fast files; log SHA-256
+  `308936d7960c7ad7059d79aca0b7568ab462c9ff759f21a4075e63c2f581ee3b`),
+  `10 passed in 65.49s` (`-n 2` parallel receipt gate + prognostic barotropic
+  state; log SHA-256
+  `882938002ff7dbfa145e0f44e2851717e3f6fac9af4ae7b1c2689607d0673048`), and
+  `2 passed in 506.67s` (`-n 2` stage face-mask rank; log SHA-256
+  `8e02d62fa573c3b21cb890d30f7d2307064ff25bb556d501001e94a8b9ca67d1`), plus
+  `11 passed in 20.08s` across the focused round-336 suites (log SHA-256
+  `33b211240f12a7b0d10cd8fc689ebffc4c761a4eb0c9a93b661b42b8f21a789f`).
+  The explicit private-import ratchet (`tests/test_no_private_cross_imports.py`)
+  passes all 6 tests in `4.86s` (log SHA-256
+  `47e19e089c96c2f2f1b88f0591fc13f532b16b0bfb8bec5947838286da148c1e`).
 - **Review**: `independent review: operator`.
 - **Disposition**: **LANDED**.
