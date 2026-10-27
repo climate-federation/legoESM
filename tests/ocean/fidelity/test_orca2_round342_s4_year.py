@@ -170,9 +170,9 @@ def test_gate_checklist_controls_and_planted_failures(tmp_path: Path) -> None:
     syntax = r342_gate.verify_run_sh_syntax_and_plant(run_sh)
     assert syntax["passed"] is True
 
-    disk = r342_gate.verify_disk_space(tmp_path)
+    disk = r342_gate.verify_disk_space(r342_gate.REPO_ROOT)
     assert disk["free_gib"] >= r342_gate.REQUIRED_DISK_GIB
-    planted_disk = r342_gate.plant_disk_space_exhaustion(tmp_path, run_sh)
+    planted_disk = r342_gate.plant_disk_space_exhaustion(r342_gate.REPO_ROOT, run_sh)
     assert planted_disk["passed"] is True
 
     ram = r342_gate.verify_available_ram()
