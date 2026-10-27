@@ -1977,6 +1977,38 @@ FILES = {
         Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/"
              "round339/k0_smoke/orca2_k0_10step_np2/build_sources/ppsrc/"
              "nemo/fldread.f90")),
+    "ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/zdfphy.f90": (
+        Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/"
+             "round339/k0_smoke/orca2_k0_10step_np2/build_sources/ppsrc/"
+             "nemo/zdfphy.f90")),
+    "ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/zdfdrg.f90": (
+        Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/"
+             "round339/k0_smoke/orca2_k0_10step_np2/build_sources/ppsrc/"
+             "nemo/zdfdrg.f90")),
+    "ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/zdftke.f90": (
+        Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/"
+             "round339/k0_smoke/orca2_k0_10step_np2/build_sources/ppsrc/"
+             "nemo/zdftke.f90")),
+    "ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/stp2d.f90": (
+        Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/"
+             "round339/k0_smoke/orca2_k0_10step_np2/build_sources/ppsrc/"
+             "nemo/stp2d.f90")),
+    "ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/dynspg_ts.f90": (
+        Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/"
+             "round339/k0_smoke/orca2_k0_10step_np2/build_sources/ppsrc/"
+             "nemo/dynspg_ts.f90")),
+    "ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/trasbc.f90": (
+        Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/"
+             "round339/k0_smoke/orca2_k0_10step_np2/build_sources/ppsrc/"
+             "nemo/trasbc.f90")),
+    "packages/ocean/legoesm/ocean/forcing/nemo_surface.py": (
+        REPO / "packages/ocean/legoesm/ocean/forcing/nemo_surface.py"),
+    "packages/ocean/legoesm/ocean/dynamics/ocean_pe_latlon_cgrid.py": (
+        REPO / "packages/ocean/legoesm/ocean/dynamics/ocean_pe_latlon_cgrid.py"),
+    "packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py": (
+        REPO / "packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py"),
+    "packages/ocean/legoesm/ocean/bulk_flux_omip.py": (
+        REPO / "packages/ocean/legoesm/ocean/bulk_flux_omip.py"),
     # Round 334 (ratchet cleanup): the NEMO statements the named constants cite.
     "trabbc.F90": _OCE / "TRA/trabbc.F90",
     "phycst.F90": _OCE / "DOM/phycst.F90",
@@ -2322,6 +2354,99 @@ CITATION_MAP = {
         'll_firstcall = kt == nit000',
         'IF( ll_firstcall ) THEN                      ! initialization',
         ('ENDIF', 3), 8],
+    # ORCA2 round 340 Resume 8: offline stage-1 sub-step discrimination under K0.
+    'ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/stprk3.f90:146-155': [
+        'CALL eos_rab( ts(:,:,:,:,Nbb), rab_b, Nbb )',
+        'CALL zdf_phy( kstp, Nbb, Nbb, Nrhs )', 10],
+    'ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/stprk3.f90:176':
+        'CALL stp_2D( kstp, Nbb, Nbb, Naa, Nrhs )',
+    'ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/sbcmod.f90:482-495': [
+        'IF( ln_icebergs ) THEN  ! save pure stresses (with no ice-ocean stress) for use by icebergs',
+        ('ENDIF', 25), 14],
+    'ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/sbcmod.f90:507':
+        'IF( ln_icebergs    )   CALL icb_stp( kt, Kmm )',
+    'ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/zdfphy.f90:327-337': [
+        "CALL zdf_drg( kt, Kmm, 'BOTTOM' )",
+        'CASE( np_GLS )   ;   CALL zdf_gls( kt, Kbb, Kmm, sh2, avm_k, avt_k )', 11],
+    'ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/zdfdrg.f90:414-416': [
+        'IF( ln_isfcav.OR.ln_drgice_imp ) THEN              ! Ocean cavities: top friction setting',
+        ('ENDIF', 14), 3],
+    'ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/zdftke.f90:260-275': [
+        'SELECT CASE ( nn_eice )',
+        ('END DO', 1), 16],
+    'ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/zdftke.f90:365,501': [
+        'zus3(ji) = MAX( 0._wp, 1._wp - zice_fra(ji) ) * zus * zus * zus * tmask(ji,jj,1)',
+        ('&                                 * MAX( 0._wp, 1._wp - zice_fra(ji) ) * wmask(ji,jj,jk) * tmask(ji,jj,1)', 1), 2],
+    'ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/zdftke.f90:608-638': [
+        'CASE( 0 )                      ! No scaling under sea-ice',
+        ('ELSE', 7), 31],
+    'ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/stp2d.f90:137-200': [
+        'CALL eos    ( ts, Kbb, rhd )',
+        ('END DO   ;   END DO', 4), 64],
+    'ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/stp2d.f90:198-199': [
+        'Ue_rhs(ji,jj) =  Ue_rhs(ji,jj) + r1_rho0 * utauU(ji,jj) * (r1_hu_0(ji,jj) /(1._wp+r3u(ji,jj,Kbb)))',
+        'Ve_rhs(ji,jj) =  Ve_rhs(ji,jj) + r1_rho0 * vtauV(ji,jj) * (r1_hv_0(ji,jj) /(1._wp+r3v(ji,jj,Kbb)))', 2],
+    'ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/stp2d.f90:242-267': [
+        'sshe_rhs(:,:) =                 emp(:,:)',
+        '&   CALL dyn_spg_ts( kt, Kbb, Kbb, Krhs, uu, vv, ssh, uu_b, vv_b, Kaa ) ! time-splitting', 26],
+    'ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/dynspg_ts.f90:650-652': [
+        'puu_b  (:,:,Kaa) = puu_b  (:,:,Kaa) / r1_wgt1s',
+        'pssh   (:,:,Kaa) = pssh   (:,:,Kaa) / r1_wgt1s', 3],
+    'ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/dynspg_ts.f90:1246-1247,1277-1300': [
+        'pCdU_v(ji,jj) = r1_2*( rCdU_bot(ji,jj+1) + rCdU_bot(ji,jj) )',
+        ('END DO   ;   END DO', 37),
+        ('IF( ln_isfcav.OR.ln_drgice_imp ) THEN', 2),
+        ('ENDIF', 53), 26],
+    'ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/stprk3_stg.f90:131-175': [
+        'ssha(:,:) = ssh (:,:,Kaa)     ! save ssh, uu_b, vv_b at N+1  (computed in dynspg_ts)',
+        '! r3f already properly set up                           ! at N     (Kmm)', 45],
+    'ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/stprk3_stg.f90:270-313': [
+        'zub(ji,jj) = un_adv(ji,jj)*(r1_hu_0(ji,jj) /(1._wp+r3u(ji,jj,Kmm))) - uu_b(ji,jj,Kmm)',
+        '!              !---------------!   Vector Inv. Form : 1st stage 3D RHS already entirely computed in stp_2D', 44],
+    'ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/stprk3_stg.f90:366-421': [
+        'IF( ln_dynadv_vec .OR. lk_linssh ) THEN   !* applied on velocity',
+        ('DEALLOCATE( zub, zvb )', 2), 56],
+    'ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/stprk3_stg.f90:431,474-507,572-573': [
+        ('CALL tra_adv_trp( kstp, kstg, nit000, Kbb, Kmm, Kaa, Krhs, zFu, zFv, zFw )', 1),
+        'CALL tra_adv    ( kstp, Kbb, Kmm, Kaa, ts, Krhs, zFu, zFv, zFw, kstg )',
+        ('END DO', 14),
+        ("CALL lbc_lnk( 'stp_RK3_stg', uu(:,:,:,       Kaa), 'U', -1._wp, vv(:,:,:       ,Kaa), 'V', -1._wp   &", 2),
+        "&                       , ts(:,:,:,jp_tem,Kaa), 'T',  1._wp, ts(:,:,:,jp_sal,Kaa), 'T',  1._wp, ldfull=.TRUE. )",
+        37],
+    'ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/stprk3_stg.f90:503-505': [
+        'ts(ji,jj,jk,jn,Kaa) = (        ( 1._wp + r3t(ji,jj,Kbb) )*ts(ji,jj,jk,jn,Kbb )                      &',
+        '&                /          ( 1._wp + r3t(ji,jj,Kaa) )', 3],
+    'ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/stprk3_stg.f90:405,538': [
+        'IF( kstg == 3 )   CALL dyn_zdf( kstp, Kbb, Kmm, Krhs, uu, vv, Kaa  )',
+        'CALL tra_zdf( kstp, Kbb, Kmm, Krhs, ts    , Kaa  )', 2],
+    'ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/trasbc.f90:283-287,307-308,318-328': [
+        ('DO jj = ntsj-( 0), ntej+(  0 ) ; DO ji = ntsi-( 0), ntei+(  0)', 9),
+        ('END DO   ;   END DO', 9),
+        'pts(ji,jj,1,jp_tem,Krhs) = pts(ji,jj,1,jp_tem,Krhs) +  r1_rcp * qns(ji,jj) * z1_rho0_e3t',
+        'pts(ji,jj,1,jp_sal,Krhs) = pts(ji,jj,1,jp_sal,Krhs) +           sfx(ji,jj) * z1_rho0_e3t',
+        ('IF( ln_rnf ) THEN         ! input of heat and salt due to river runoff', 2),
+        ('ENDIF', 24), 18],
+    'packages/ocean/legoesm/ocean/forcing/nemo_surface.py:348-358': [
+        'utau_u, vtau_v = nemo_t_stress_to_uv(',
+        (')', 126), 11],
+    'packages/ocean/legoesm/ocean/forcing/nemo_surface.py:406-412': [
+        'q_solar=None,',
+        'result.runoff.salinity_content,', 7],
+    'packages/ocean/legoesm/ocean/dynamics/ocean_pe_latlon_cgrid.py:4631-4663': [
+        'tau_i_T = jnp.asarray(_native_i, dtype=u_dtype)',
+        ('return tau_i_u, tau_j_v, dz_0_u, dz_0_v', 1), 33],
+    'packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:7132-7149': [
+        '_sfx = (surface_stress_faces(',
+        '_tau_i_u, _tau_j_v, _, _ = _sfx', 18],
+    'packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:7208-7220': [
+        ('F_slow_u = nemo_source_round(', 1),
+        ('_F_slow_wind_v = F_slow_v', 1), 13],
+    'packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:2881-2885': [
+        ('out = (', 1),
+        ('return jnp.where(active_3d > 0.5, out, base)', 1), 5],
+    'packages/ocean/legoesm/ocean/bulk_flux_omip.py:1044-1048': [
+        'if (int(nemo_kt) - 1) % int(s0.forcing_stride) == 0:',
+        'state = state._replace(T=state.T.replace(data=temperature))', 5],
     # ORCA2 round 334: provenance of the constants the ratchet cleanup named.
     'trabbc.F90:179': "* 1.e-3 ! conversion in W/m2",
     'phycst.F90:26': "rad      = 3.141592653589793_wp / 180._wp",

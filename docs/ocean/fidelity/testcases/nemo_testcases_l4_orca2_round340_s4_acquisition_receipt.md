@@ -513,6 +513,140 @@ JAX_ENABLE_X64=1`, `PrecisionPolicy.fp64(transcendentals="libm")`) for
   words, `max |diff| = 0.0006906256512557718`).
 - independent review: operator
 
+## Resume 8 — offline stage-1 sub-step discrimination under K0
+
+Offline diagnosis on the clean `34ecef485fcd` tree (no model code changed)
+discriminating why `kt01/stage1` diverges when `kt01` surface boundaries (`0 /
+18,035,664`) and `kt01/entry/*` (`5 / 5 BIT_EXACT`, `0 / 3,223,440`) are
+bit-identical against the admitted arm-A record (`orca2_s4_exact_a_np2`).
+
+### (1) Stage-1 surface and sea-ice inputs consumed by the ocean step at `kt = 1`
+
+In NEMO `stp_RK3` (`ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/stprk3.f90:128`),
+after `CALL sbc( kstp, Nbb, Nbb )` completes, the `kt = 1` pre-stage-1 and
+stage-1 ocean sequence runs `eos_rab`, `bn2`, and `zdf_phy`
+(`ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/stprk3.f90:146-155`),
+`CALL stp_2D( kstp, Nbb, Nbb, Naa, Nrhs )`
+(`ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/stprk3.f90:176`), and
+`CALL stp_RK3_stg( 1, kstp, Nbb, Nbb, Naa, Nrhs )`
+(`ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/stprk3.f90:185-197`).
+Every input from the surface/ice side is inventoried and compared below against
+admitted arm A (recorded) or reconstructed from NEMO's K0 code path:
+
+| Input field / K0 branch | Provenance (recorded vs reconstructed) | Stage-1 ocean consumer (`NEMO` / `legoESM`) | Surface-card output vs NEMO (`unequal / total`, `max \|diff\|`) | Ocean Stage-1 operand consumed vs NEMO (`unequal / total`, `max \|diff\|`) |
+| --- | --- | --- | --- | --- |
+| Clamped surface `T` (`ts(:,:,1,jp_tem,Nbb)`) | **Recorded** in `kt01/S3_EXIT_IIF/ts_kbb` (`ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/sbcice_if.f90:166`) | `eos_rab`/`bn2`/`zdf_phy`, `stp_2D` `eos(ts,Kbb)`, `stp_RK3_stg(1)` `tra_adv`/`tra_sbc_RK3` (`packages/ocean/legoesm/ocean/bulk_flux_omip.py:1044-1048`) | `0 / 26,640` (`0.0`) | `0 / 26,640` (`0.0`) |
+| `emp` (`E - P` after `sbc_ice_if`, `sbc_ssr`, `sbc_fwb`) | **Recorded** in `kt01/S2_EXIT/emp` | `stp_2D` `sshe_rhs` (`ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/stp2d.f90:242-267`) and Stage-1 `tra_sbc_RK3` dilution (`ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/trasbc.f90:283-287,307-308,318-328`) | `0 / 26,640` (`0.0`) | `0 / 26,640` (`0.0`) |
+| `rnf`, `rnf_tsc_T`, `rnf_tsc_S` (`sbc_rnf`) | **Recorded** in `kt01/S2_EXIT/{rnf,rnf_tsc_T,rnf_tsc_S}` | `rnf` in `stp_2D` `sshe_rhs` (`ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/stp2d.f90:242-267`) and Stage-1 `div_hor` (`ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/stprk3_stg.f90:270-313`); `rnf_tsc` in Stage-1 `tra_sbc_RK3` (`ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/trasbc.f90:283-287,307-308,318-328`) | `0 / 26,640` (`0.0`) | `0 / 26,640` (`0.0`) |
+| `qns` (non-solar heat flux) | **Recorded** in `kt01/S2_EXIT/qns` | Stage 3 only (`ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/trasbc.f90:283-287,307-308,318-328`); not consumed in Stage 1 (`Kmm == Kbb`) | `0 / 26,640` (`0.0`) | `0 / 26,640` (`0.0`) (Stage 3 only) |
+| `qsr` (penetrative solar heat flux) | **Recorded** in `kt01/S2_EXIT/qsr` | Stage 3 only (`tra_qsr` at `kstg == 3`); not consumed in Stage 1 | `0 / 26,640` (`0.0`) | `0 / 26,640` (`0.0`) (Stage 3 only) |
+| `sfx` (salt flux from ice) | **Recorded** in `kt01/S2_EXIT/sfx` | Identically zero under K0 (`nn_ice = 1`) and consumed at Stage 3 only (`ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/trasbc.f90:283-287,307-308,318-328`) | `0 / 26,640` (`0.0`) | `0 / 26,640` (`0.0`) (Stage 3 only) |
+| `erp`, `qrp`, `coefice` (`sbc_ssr`) | **Recorded** in `kt01/S2_EXIT/{erp,qrp,coefice}` | Already folded into `emp` and `qns` during `S2_SSR`; not read separately by ocean | `0 / 26,640` (`0.0`) | `0 / 26,640` (`0.0`) |
+| `taum`, `wndm` | **Recorded** in `kt01/S2_EXIT/{taum,wndm}` | `taum` consumed in `zdf_tke` (`ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/zdftke.f90:260-275` and `ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/zdftke.f90:608-638`), whose outputs `avt, avs, avm` are consumed at Stage 3 only (`ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/stprk3_stg.f90:405,538`) | `0 / 26,640` (`0.0`) | `0 / 26,640` (`0.0`) |
+| `fr_i` (binary `{0, 1}` ice cover from `sbc_ice_if`) | **Recorded** in `kt01/S2_EXIT/fr_i` | Consumed in `zdf_tke` (`ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/zdftke.f90:260-275` and `ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/zdftke.f90:365,501`); `zdf_tke` outputs are consumed at Stage 3 only | `0 / 26,640` (`0.0`) | `0 / 26,640` (`0.0`) |
+| **Wind stress `utau, vtau` (T-points) and `utauU, vtauV` (U/V-points)** | **Recorded** in `kt01/S2_EXIT/{utau,vtau,utauU,vtauV}` (`ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/sbcmod.f90:565-570`) | `stp_2D` adds `utauU, vtauV` to `Ue_rhs, Ve_rhs` (`ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/stp2d.f90:198-199`); in legoESM, `nemo_s2_to_ocean_interfaces` (`packages/ocean/legoesm/ocean/forcing/nemo_surface.py:406-412`) passes `result.utau_u, result.vtau_v` into `tau_i_native, tau_j_native`, which `surface_stress_faces` (`packages/ocean/legoesm/ocean/dynamics/ocean_pe_latlon_cgrid.py:4631-4663`, called at `packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:7132-7149`) interpolates T->U/V and coastal-unmasks a **second time** | `utau`: `0 / 26,640` (`0.0`)<br>`vtau`: `0 / 26,640` (`0.0`)<br>`utauU`: `0 / 26,640` (`0.0`)<br>`vtauV`: `0 / 26,640` (`0.0`) | **MISMATCH**:<br>`_wind_tau_i_u`: `16,977 / 26,640` (`16,522` non-zero, `455` signed-zero, `max \|diff\| = 0.89328994835474895 N/m^2`)<br>`_wind_tau_j_v`: `16,865 / 26,640` (`16,505` non-zero, `360` signed-zero, `max \|diff\| = 0.70509415925258379 N/m^2`) |
+| Top drag / `rCdU_top` (`ln_drgice_imp = F`, `ln_isfcav = F`) | **Reconstructed** from NEMO K0 code path (`ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/zdfdrg.f90:414-416`, `ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/zdfphy.f90:327-337`, `ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/dynspg_ts.f90:1246-1247,1277-1300`) | Under `ln_isfcav = F` and `ln_drgice_imp = F`, NEMO does not allocate `rCdU_top`, skips `zdf_drg('TOP')`, sets `pCdU_u/v` from `rCdU_bot` only, and skips the top-drag residual in `dyn_drg_init`; legoESM `implicit_ice_ocean_top_drag = False` skips all top-drag terms | `0` (not allocated / off) | `0 / 26,640` (`0.0`) |
+| TKE ice-mixing branch (`nn_ice = 1`, `ln_mxl0 = T`, `nn_mxlice = 0`) | **Reconstructed** from NEMO K0 code path (`ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/zdftke.f90:260-275`, `ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/zdftke.f90:365,501`, `ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/zdftke.f90:608-638`) | `nn_eice = 2` sets `zice_fra = fr_i`, `en(1) = MAX(rn_emin0, zbbrau * taum)`, attenuates Langmuir and `etau` by `1 - zice_fra`, and `CASE(0)` (`nn_mxlice = 0`) sets `zmxlm(1) = MAX(rn_mxl0, zraug * taum * tmask)` with no sea-ice mixing-length override; `avt/avs/avm` are consumed at Stage 3 only (`ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/stprk3_stg.f90:405,538`) | `0 / 26,640` (`0.0`) | `0 / 799,200` (`0.0`) (and Stage 3 only) |
+| Icebergs (`ln_icebergs = F`) | **Reconstructed** from NEMO K0 code path (`ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/sbcmod.f90:482-495` and `ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/sbcmod.f90:507`) | Skips `utau_icb/vtau_icb` and `CALL icb_stp( kt, Kmm )` in both NEMO and legoESM | `0` (off) | `0` (off) |
+
+### (2) Stage-1 sub-steps in NEMO order at `kt = 1`: first differing sub-step, counts, and maxima
+
+Running the `kt = 1` legoESM stage-1 sub-steps in NEMO execution order on
+production (`tau_i_native = result.utau_u, tau_j_native = result.vtau_v`) vs
+passing T-point stresses (`tau_i_native = result.utau, tau_j_native =
+result.vtau`) and comparing against the admitted arm-A checkpoints:
+
+| Order | Stage-1 sub-step (`NEMO` source -> `legoESM` function) | Comparison target | Production (`tau_i_native = utau_u`) `unequal / total` (`max \|diff\|`) | T-point stress (`tau_i_native = utau`) `unequal / total` (`max \|diff\|`) | Status |
+| --- | --- | --- | --- | --- | --- |
+| 1 | `sbc_ice_if` surface `T` clamp on `ts(:,:,1,jp_tem,Nbb)` (`ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/sbcice_if.f90:166` -> `packages/ocean/legoesm/ocean/bulk_flux_omip.py:1044-1048`) | Recorded `kt01/S3_EXIT_IIF/ts_kbb` | `0 / 26,640` (`0.0`) | `0 / 26,640` (`0.0`) | `BIT_EXACT` |
+| 2 | `eos_rab`, `bn2`, `zdf_phy`: `zdf_drg('BOTTOM')` and `zdf_tke` (`ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/stprk3.f90:146-155`, `ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/zdfphy.f90:327-337`) | Reconstructed K0 path (`16` `tke_statement_trace` leaves; consumed at Stage 3 only) | `0 / 799,200` (`0.0`) | `0 / 799,200` (`0.0`) | `BIT_EXACT` |
+| 3 | `stp_2D` 3-D momentum RHS `uu(Krhs), vv(Krhs)` on `Nbb` and pre-wind depth-average `Ue_rhs, Ve_rhs` (`ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/stp2d.f90:137-200`) | Reconstructed K0 path (`du_dt(Nbb)`, `dv_dt(Nbb)`, `depth_avg_u/v`) | `du_dt`: `0 / 799,200` (`0.0`)<br>`dv_dt`: `0 / 799,200` (`0.0`) | `0 / 799,200` (`0.0`) | `BIT_EXACT` |
+| 4 | `stp_2D` `dyn_drg_init` baroclinic drag residual on `Ue_rhs, Ve_rhs` (`ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/dynspg_ts.f90:1246-1247,1277-1300`) | Reconstructed K0 path (`post_drag_u/v`; `uu(Nbb) = 0` at `kt = 1`, top drag off) | `post_drag_u`: `0 / 26,640` (`0.0`)<br>`post_drag_v`: `0 / 26,640` (`0.0`) | `0 / 26,640` (`0.0`) | `BIT_EXACT` |
+| **5** | **FIRST DIFFERING SUB-STEP**: `stp_2D` surface wind stress addition to `Ue_rhs, Ve_rhs` (`ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/stp2d.f90:198-199` -> `packages/ocean/legoesm/ocean/dynamics/ocean_pe_latlon_cgrid.py:4631-4663`, `packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:7132-7149`, `packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:7208-7220`) | Recorded `kt01/S2_EXIT/{utauU,vtauV}` and resulting `Ue_rhs, Ve_rhs` (`post_wind_u/v`) | `utauU`: **`16,977 / 26,640`** (`0.89328994835474895 N/m^2`)<br>`vtauV`: **`16,865 / 26,640`** (`0.70509415925258379 N/m^2`)<br>`Ue_rhs`: **`15,853 / 26,640`** (`2.3875891177624881e-6 m/s^2`)<br>`Ve_rhs`: **`15,875 / 26,640`** (`2.5992867799449502e-6 m/s^2`) | `utauU`: **`0 / 26,640` (`0.0`)**<br>`vtauV`: **`0 / 26,640` (`0.0`)**<br>`Ue_rhs`: **`0 / 26,640` (`0.0`)**<br>`Ve_rhs`: **`0 / 26,640` (`0.0`)** | **FIRST DIFF** |
+| 6 | `stp_2D` `sshe_rhs` (`emp`, `rnf`) and barotropic subcycling `dyn_spg_ts` (`ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/stp2d.f90:242-267`, `ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/dynspg_ts.f90:650-652`) | Reconstructed `sshe_rhs`, `ssha`, `uu_b(Kaa)`, `vv_b(Kaa)` | `sshe_rhs`: `0 / 26,640` (`0.0`)<br>`ssha`: `16,433 / 26,640` (`0.029214012451034943 m`)<br>`uu_b(Kaa)`: `15,853 / 26,640` (`0.027140413504754879 m/s`)<br>`vv_b(Kaa)`: `15,943 / 26,640` (`0.016316870505985459 m/s`) | `0 / 26,640` (`0.0`) on all | Downstream of Sub-step 5 |
+| 7 | `stp_RK3_stg(1)` stage-1 `ssh(Kaa)`, `r3*(Kaa)`, horizontal transports `zFu, zFv`, `div_hor`, and `wzv` (`ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/stprk3_stg.f90:131-175`, `ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/stprk3_stg.f90:270-313`) | Recorded `kt01/stage1/ssh` + reconstructed `zFu, zFv, wzv` | `kt01/stage1/ssh`: **`16,433 / 26,640`** (`0.0097380041503449775 m`, `OVER_BAR`)<br>`zFu`: `414,784 / 803,640` (`3.3311550054648425e4 m^3/s`)<br>`zFv`: `415,175 / 804,600` (`2.6342172065184452e4 m^3/s`)<br>`wzv`: `430,314 / 825,840` (`4.7567815064641905e-6 m/s`) | `kt01/stage1/ssh`: **`0 / 26,640` (`0.0`, `BIT_EXACT`)**<br>`zFu, zFv, wzv`: `0` (`0.0`) | Downstream of Sub-step 5 |
+| 8 | `stp_RK3_stg(1)` stage-1 3-D velocity update `u1_raw, v1_raw` and barotropic replacement `uu(Kaa), vv(Kaa)` (`ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/stprk3_stg.f90:366-421`) | Recorded `kt01/stage1/u` and `kt01/stage1/v` | `u1_raw, v1_raw`: `0 / 799,200` (`0.0`)<br>`kt01/stage1/u`: **`438,720 / 799,200`** (`413,030` non-zero, `25,690` dry `-0.0`, `max \|diff\| = 0.027140413504754879 m/s`, `OVER_BAR`)<br>`kt01/stage1/v`: **`421,889 / 799,200`** (`415,175` non-zero, `6,714` dry `-0.0`, `max \|diff\| = 0.016316870505985459 m/s`, `OVER_BAR`) | `kt01/stage1/u`: **`25,690 / 799,200` (`0` non-zero, `max \|diff\| = 0.0`, `AT_BAR_NOT_EXACT`)**<br>`kt01/stage1/v`: **`6,529 / 799,200` (`0` non-zero, `max \|diff\| = 0.0`, `AT_BAR_NOT_EXACT`)** | Non-zero diffs downstream of Sub-step 5 |
+| 9 | `stp_RK3_stg(1)` stage-1 `tra_adv_cen`, `tra_sbc_RK3`, and `ts(Kaa)` update (`ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/stprk3_stg.f90:431,474-507,572-573`, `ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/stprk3_stg.f90:503-505`, `ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/trasbc.f90:283-287,307-308,318-328` -> `packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:2881-2885`) | Recorded `kt01/stage1/T` and `kt01/stage1/S` | `tra_sbc_RK3` RHS: `0 / 799,200` (`0.0`)<br>`kt01/stage1/T`: **`587,799 / 799,200`** (`430,343` non-zero wet-cell diffs, `157,456` dry-cell `-0.0` vs `+0.0`, `max \|diff\| = 4.6878130291605480e-4 degC`, `OVER_BAR`)<br>`kt01/stage1/S`: **`430,552 / 799,200`** (`430,552` non-zero wet-cell diffs, `max \|diff\| = 3.4781990987120537e-4 PSU`, `OVER_BAR`) | `kt01/stage1/T`: **`157,456 / 799,200` (`0` non-zero wet-cell diffs, `157,456` dry-cell `-0.0` vs `+0.0`, `max \|diff\| = 0.0`, `AT_BAR_NOT_EXACT`)**<br>`kt01/stage1/S`: **`0 / 799,200` (`max \|diff\| = 0.0`, `BIT_EXACT`)** | Wet diffs downstream of Sub-step 5; dry `-0.0` from `:2881-2885` |
+
+#### Effect of the one-variable `tau_i_native = result.utau, tau_j_native = result.vtau` ablation across all `kt = 1` checkpoints (`kt01/entry`..`kt01/stage3`)
+
+| Checkpoint / Row | Production `unequal / total` | Production `max \|diff\|` | Production status | With `tau_i/j_native = result.utau/vtau` `unequal / total` (non-zero) | With `tau_i/j_native = result.utau/vtau` `max \|diff\|` | Ablation status |
+| --- | --- | --- | --- | --- | --- | --- |
+| `kt01/entry/{T,S,u,v,ssh}` (`5` rows) | `0 / 3,223,440` | `0.0` | `5 BIT_EXACT` | `0 / 3,223,440` (`0`) | `0.0` | `5 BIT_EXACT` |
+| `kt01/stage1/T` | `587,799 / 799,200` | `4.6878130291605480e-4` | `OVER_BAR` | `157,456 / 799,200` (`0` non-zero; dry `-0.0` vs `+0.0`) | `0.0` | `AT_BAR_NOT_EXACT` |
+| `kt01/stage1/S` | `430,552 / 799,200` | `3.4781990987120537e-4` | `OVER_BAR` | `0 / 799,200` (`0`) | `0.0` | `BIT_EXACT` |
+| `kt01/stage1/u` | `438,720 / 799,200` | `0.027140413504754879` | `OVER_BAR` | `25,690 / 799,200` (`0` non-zero; dry `-0.0` vs `+0.0`) | `0.0` | `AT_BAR_NOT_EXACT` |
+| `kt01/stage1/v` | `421,889 / 799,200` | `0.016316870505985459` | `OVER_BAR` | `6,529 / 799,200` (`0` non-zero; dry `-0.0` vs `+0.0`) | `0.0` | `AT_BAR_NOT_EXACT` |
+| `kt01/stage1/ssh` | `16,433 / 26,640` | `0.0097380041503449775` | `OVER_BAR` | `0 / 26,640` (`0`) | `0.0` | `BIT_EXACT` |
+| `kt01/stage2/T` | `430,453 / 799,200` | `0.0010531521942188246` | `OVER_BAR` | `157,456 / 799,200` (`0` non-zero; dry `-0.0` vs `+0.0`) | `0.0` | `AT_BAR_NOT_EXACT` |
+| `kt01/stage2/S` | `430,552 / 799,200` | `5.2131918432110443e-4` | `OVER_BAR` | `0 / 799,200` (`0`) | `0.0` | `BIT_EXACT` |
+| `kt01/stage2/u` | `438,720 / 799,200` | `0.027141522911035032` | `OVER_BAR` | `25,690 / 799,200` (`0` non-zero; dry `-0.0` vs `+0.0`) | `0.0` | `AT_BAR_NOT_EXACT` |
+| `kt01/stage2/v` | `421,889 / 799,200` | `0.016317726569221469` | `OVER_BAR` | `6,529 / 799,200` (`0` non-zero; dry `-0.0` vs `+0.0`) | `0.0` | `AT_BAR_NOT_EXACT` |
+| `kt01/stage2/ssh` | `16,433 / 26,640` | `0.014607006225517469` | `OVER_BAR` | `0 / 26,640` (`0`) | `0.0` | `BIT_EXACT` |
+| `kt01/stage3/T` | `587,899 / 799,200` | `0.0020118983392072909` | `OVER_BAR` | `157,456 / 799,200` (`0` non-zero; dry `-0.0` vs `+0.0`) | `0.0` | `AT_BAR_NOT_EXACT` |
+| `kt01/stage3/S` | `430,552 / 799,200` | `0.0011648528991944914` | `OVER_BAR` | `0 / 799,200` (`0`) | `0.0` | `BIT_EXACT` |
+| `kt01/stage3/u` | `426,563 / 799,200` | `0.089603069930764751` | `OVER_BAR` | `25,436 / 799,200` (`0` non-zero; dry `-0.0` vs `+0.0`) | `0.0` | `AT_BAR_NOT_EXACT` |
+| `kt01/stage3/v` | `411,624 / 799,200` | `0.068089226629258877` | `OVER_BAR` | `6,349 / 799,200` (`0` non-zero; dry `-0.0` vs `+0.0`) | `0.0` | `AT_BAR_NOT_EXACT` |
+| `kt01/stage3/ssh` | `16,433 / 26,640` | `0.029214012451034943` | `OVER_BAR` | `0 / 26,640` (`0`) | `0.0` | `BIT_EXACT` |
+| **All `20` `kt01` rows** | **`5,506,511 / 12,893,760`** | **`0.089603069930764751`** | **`5 BIT_EXACT`, `15 OVER_BAR`** | **`568,591 / 12,893,760` (`0` non-zero)** | **`0.0`** | **`11 BIT_EXACT`, `9 AT_BAR_NOT_EXACT`, `0 OVER_BAR`** |
+
+### (3) Classification (`CONFIRMED` vs `PLAUSIBLE`) and (4) Exact `file:line` quotes
+
+1. **CONFIRMED — Double T->U/V interpolation and coastal unmasking of surface wind stress in `nemo_s2_to_ocean_interfaces` -> `surface_stress_faces` (100% of non-zero differences at `kt = 1` across `stage1`, `stage2`, and `stage3`)**:
+   - In NEMO `sbc` (`ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/sbcmod.f90:565-570`), T-point stresses `utau, vtau` are interpolated once onto U/V points with coastal unmasking:
+     ```fortran
+     DO jj = ntsj-( nn_hls-1), ntej+(  nn_hls-2 ) ; DO ji = ntsi-( nn_hls-1), ntei+(  nn_hls-2)
+        utauU(ji,jj) = 0.5_wp * ( utau(ji,jj) + utau(ji+1,jj) ) * MAX(tmask(ji,jj,1), tmask(ji+1,jj,1)) * ( 2. - umask(ji,jj,1) )
+        vtauV(ji,jj) = 0.5_wp * ( vtau(ji,jj) + vtau(ji,jj+1) ) * MAX(tmask(ji,jj,1), tmask(ji,jj+1,1)) * ( 2. - vmask(ji,jj,1) )
+     END DO   ;   END DO
+     ```
+     and `stp_2D` (`ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/stp2d.f90:198-199`) consumes `utauU, vtauV` directly:
+     ```fortran
+     Ue_rhs(ji,jj) =  Ue_rhs(ji,jj) + r1_rho0 * utauU(ji,jj) * (r1_hu_0(ji,jj) /(1._wp+r3u(ji,jj,Kbb)))
+     Ve_rhs(ji,jj) =  Ve_rhs(ji,jj) + r1_rho0 * vtauV(ji,jj) * (r1_hv_0(ji,jj) /(1._wp+r3v(ji,jj,Kbb)))
+     ```
+   - In legoESM, `nemo_s2_step` already computes `utau_u, vtau_v = nemo_t_stress_to_uv(...)` (`packages/ocean/legoesm/ocean/forcing/nemo_surface.py:348-358`, matching `kt01/S2_EXIT/{utauU,vtauV}` with `0 / 26,640` unequal words), and `nemo_s2_to_ocean_interfaces` (`packages/ocean/legoesm/ocean/forcing/nemo_surface.py:406-412`) then binds those U/V-point arrays into `OceanSurfaceForcing`:
+     ```python
+     tau_i_native=result.utau_u,
+     tau_j_native=result.vtau_v,
+     ```
+     However, `surface_stress_faces` (`packages/ocean/legoesm/ocean/dynamics/ocean_pe_latlon_cgrid.py:4631-4663`, called at `packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:7132-7149` and consumed at `packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:7208-7220`) treats `tau_i_native, tau_j_native` as **T-point** stresses `tau_i_T, tau_j_T` and applies T->U/V averaging, `(2 - u_wet) * jnp.maximum(t_w, t_e)` coastal unmasking, and north-fold `top` overwrite a **second time**:
+     ```python
+     tau_i_T = jnp.asarray(_native_i, dtype=u_dtype)
+     tau_j_T = jnp.asarray(_native_j, dtype=u_dtype)
+     ...
+     u_avg = jnp.float64(0.5) * (tau_i_T + tau_i_E)
+     u_coast = jnp.maximum(t_w, t_e) * (jnp.float64(2.0) - u_wet)
+     tau_i_int = u_avg * u_coast
+     ```
+   - Replacing `tau_i_native=result.utau_u, tau_j_native=result.vtau_v` with `tau_i_native=result.utau, tau_j_native=result.vtau` eliminates `100%` of the non-zero differences across all `20` rung-10 state rows at `kt = 1` (`0 / 20 OVER_BAR`, `max |diff| = 0.0` on every field of `kt01/entry`, `kt01/stage1`, `kt01/stage2`, and `kt01/stage3`), and also eliminates `100%` of the non-zero differences on `kt02/S0_EXIT/{sst_m,sss_m,ssu_m,ssv_m,ssh_m,e3t_m}` and `kt02/{entry,stage1,stage2}/*`.
+2. **CONFIRMED — Dry-cell signed-zero (`-0.0` vs `+0.0`) preservation on `kt01/stage1/T` (`157,456 / 799,200` dry cells, `max |diff| = 0.0`, `AT_BAR_NOT_EXACT`)**:
+   - In NEMO `stp_RK3_stg` (`ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/stprk3_stg.f90:503-505`), the stage tracer update runs unmasked over all cells:
+     ```fortran
+     ts(ji,jj,jk,jn,Kaa) = (        ( 1._wp + r3t(ji,jj,Kbb) )*ts(ji,jj,jk,jn,Kbb )                      &
+        &                   + rDt * ( 1._wp + r3t(ji,jj,Kmm) )*ts(ji,jj,jk,jn,Krhs) * tmask(ji,jj,jk) )  &
+        &                /          ( 1._wp + r3t(ji,jj,Kaa) )
+     ```
+     On the `151,917` interior dry cells where `istate_init` (`ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/istate.f90:118`) left `ts(Kbb) = -0.0`, IEEE-754 addition `(-0.0) + (+0.0) = +0.0` clears `-0.0` to `+0.0` (and `lbc_lnk` at `ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/stprk3_stg.f90:431,474-507,572-573` writes `+0.0` on the `5,539` border dry cells).
+   - In legoESM `_nemo_ws_rk3_tracer_pair_step` (`packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:2881-2885`), dry cells bypass the arithmetic and copy `base` (`ts(Kbb)`):
+     ```python
+     out = (
+         ((one + r3t_kbb_b) * base + dt_rk * (one + r3t_kmm_b) * rhs * active_3d)
+         / denom
+     )
+     return jnp.where(active_3d > 0.5, out, base)
+     ```
+     preserving `-0.0` on `151,917` interior + `5,539` folded border = `157,456` dry cells (`max |diff| = 0.0`, `AT_BAR_NOT_EXACT` under the rung-10 bar).
+
+### Missing-boundary check
+
+**No additional NEMO record is needed (`ACQUISITION_NEEDED: no`)**: the admitted
+arm-A record (`orca2_s4_exact_a_np2`) already contains `kt01/S2_EXIT/{utau,vtau,utauU,vtauV,...}`,
+`kt01/S3_EXIT_IIF/ts_kbb`, and `kt01/{entry,stage1,stage2,stage3}/{T,S,u,v,ssh}`,
+which completely localize 100% of the `kt = 1` differences.
+
+- independent review: operator
+
 ## Verification
 
 - Round-340 focused fast tests (`test_orca2_round340_standalone.py`,
@@ -531,7 +665,12 @@ JAX_ENABLE_X64=1`, `PrecisionPolicy.fp64(transcendentals="libm")`) for
   committed above (`0 / 18,035,664` unequal surface words at `kt = 1`,
   `0 / 57,890,304` unequal `S0_F` words across `kt = 1..10`, `5 / 5 BIT_EXACT`
   on `kt01/entry/*`).
-- Per-receipt citation gate: PASS, 27 citations, zero failures, zero unmapped
+- Resume-8 offline stage-1 sub-step discrimination: executed on CPU
+  (`JAX_PLATFORMS=cpu JAX_ENABLE_X64=1`, `PrecisionPolicy.fp64(transcendentals="libm")`)
+  against admitted arm A (`orca2_s4_exact_a_np2`), confirming `0` model-code
+  edits and localizing `100%` of `kt = 1` non-zero errors to `tau_i_native =
+  result.utau_u, tau_j_native = result.vtau_v` in `nemo_s2_to_ocean_interfaces`.
+- Per-receipt citation gate: PASS, 55 citations, zero failures, zero unmapped
   citations, zero map-audit failures, and all nine self-tests fired.
 - Required receipt-citation pytest (`tests/ocean/fidelity/test_nemo_testcase_receipt_citation_gate.py`
   with `JAX_ENABLE_X64=1`): 17/17 PASS on the clean committed tree.
