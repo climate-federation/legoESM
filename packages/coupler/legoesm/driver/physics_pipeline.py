@@ -360,6 +360,9 @@ class PhysicsPipeline:
         self.budget_ledger = False  # set by build_physics_pipeline
         # Cell areas weighting the ledger's global means (None = one column).
         self._ledger_area = None
+        # grid-cell area [m^2] for Sundqvist's GFS ice-autoconversion blend
+        # (set by the builder; None on grids without one -> Sundqvist raises)
+        self.grid_area = None
         # Opt-in convective cumulus cloud-fraction source (set by
         # build_physics_pipeline from ExperimentConfig.convective_cloud).
         # When True, compute_radiation_core feeds the lagged convective precip
@@ -1750,13 +1753,15 @@ class PhysicsPipeline:
                     dz=dz_col,
                     dt=dt,
                     config=self.micro_config,
+                    cell_area=self._sundqvist_kwargs(ad, None).get("cell_area"),
                 )
             else:
+                _sq_kw = self._sundqvist_kwargs(ad, q_i)
                 micro_out = self.micro_fn(
                     T=T_col, q_v=q_v_col, hydrometeors=hydrometeors,
                     p_full=p_full_col, p_half=p_half_col,
                     rho=rho_col, dz=dz_col, dt=dt,
-                    config=self.micro_config,
+                    config=self.micro_config, **_sq_kw,
                 )
             dT_dt_micro = ad.unflatten_3d(micro_out.dT_dt)
             dq_v_dt_micro = ad.unflatten_3d(micro_out.dq_v_dt)
@@ -2600,6 +2605,17 @@ class PhysicsPipeline:
             cover_condensate_q_ref=getattr(
                 self, "_cloud_cover_condensate_q_ref", None),
         )
+
+    def _sundqvist_kwargs(self, ad, q_i):
+        """Sundqvist's extra inputs on this lane: the cell area per column and
+        whether q_i is carried; ``{}`` for every other scheme."""
+        from legoesm.atmosphere.physics.microphysics.config import SundqvistConfig
+        if not isinstance(self.micro_config, SundqvistConfig):
+            return {}
+        return dict(
+            cell_area=None if self.grid_area is None else ad.flatten_2d(
+                jnp.asarray(self.grid_area)),
+            carries_q_i=q_i is not None)
 
     def compute_radiation_core(self, T, p_s, q_v, sst, sic, lat, lon,
                                day_of_year, seconds_of_day,
@@ -5394,6 +5410,7 @@ def build_physics_pipeline(grid, sigma, config, spacing_grid=None):
         getattr(getattr(config, 'output', None), 'budget_ledger', False))
     if pipeline.budget_ledger and not isinstance(grid, SingleColumnGrid):
         pipeline._ledger_area = grid.grid_area
+    pipeline.grid_area = getattr(grid, "grid_area", None)
     pipeline._cloud_convective = getattr(config, 'convective_cloud', False)
     pipeline._cloud_rh_crit = getattr(config, 'cloud_rh_crit', None)
     pipeline._cloud_q_c_diagnostic = getattr(config, 'cloud_q_c_diagnostic', None)

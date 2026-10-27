@@ -374,9 +374,12 @@ def apply_predicted_sundqvist_rain_survival_fraction(
     dz: jax.Array,
     dt: float,
     config,
+    cell_area=None,
 ) -> MicrophysicsOutput:
-    """Rebuild Sundqvist microphysics from a learned column rain-survival fraction."""
+    """Rebuild Sundqvist microphysics from a learned column rain-survival fraction.
+    The rebuild has no ice slot: q_i is not read (``carries_q_i=False``)."""
     rates = diagnose_sundqvist_process_rates(
+        cell_area=cell_area,
         T=T,
         q_v=q_v,
         hydrometeors=hydrometeors,

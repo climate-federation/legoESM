@@ -357,7 +357,7 @@
   "start_year": 1979,
   "subgrid_autoconversion": false,
   "subgrid_orography_path": "",
-  "sundqvist_auto_rate": 0.001,
+  "sundqvist_auto_rate": 0.00015,
   "surface_bulk_scheme": "constant",
   "surface_gustiness_zi": null,
   "surface_ocean_q_sfc_saline": null,

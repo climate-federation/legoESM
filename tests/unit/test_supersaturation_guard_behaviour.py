@@ -367,11 +367,11 @@ def test_sundqvist_off_path_never_touches_the_guard(monkeypatch):
     monkeypatch.setattr(sq, "hard_saturation_blend", _bomb)
     T, q_v, hyd, p_full, p_half, rho, dz = _column()
     sq.sundqvist_microphysics(T, q_v, hyd, p_full, p_half, rho, dz, _DT,
-                              SundqvistConfig())          # must NOT raise
+                              SundqvistConfig(), cell_area=1.0e10)          # must NOT raise
     with pytest.raises(AssertionError, match="OFF path"):
         sq.sundqvist_microphysics(
             T, q_v, hyd, p_full, p_half, rho, dz, _DT,
-            SundqvistConfig(hard_saturation_adjustment=True))
+            SundqvistConfig(hard_saturation_adjustment=True), cell_area=1.0e10)
 
 
 def test_ml_emulator_off_path_never_touches_the_guard(monkeypatch):
@@ -491,7 +491,7 @@ def test_sundqvist_default_matches_the_pre_guard_baseline_bit_for_bit():
                               2.0 * p[:, -1:] - mid[:, -1:]], axis=1)
 
     out = sundqvist_microphysics(T, q_v, hyd, p, p_half, rho, dz, 300.0,
-                                 SundqvistConfig())
+                                 SundqvistConfig(), cell_area=1.0e10)
     np.testing.assert_allclose(
         np.asarray(out.dT_dt).ravel(), np.array(_SUNDQVIST_PREGUARD_DT_DT),
         rtol=_PREGUARD_RTOL, atol=0.0)
@@ -503,7 +503,7 @@ def test_sundqvist_default_matches_the_pre_guard_baseline_bit_for_bit():
     # Turning it on must violate the same tolerance by a wide margin — without
     # this, a loosened rtol could silently render the whole test decorative.
     on = sundqvist_microphysics(T, q_v, hyd, p, p_half, rho, dz, 300.0,
-                                SundqvistConfig(hard_saturation_adjustment=True))
+                                SundqvistConfig(hard_saturation_adjustment=True), cell_area=1.0e10)
     pin = np.array(_SUNDQVIST_PREGUARD_DT_DT)
     nz = pin != 0.0
     rel = np.max(np.abs(
@@ -522,7 +522,7 @@ def test_guard_is_differentiable_end_to_end():
     def loss(qv):
         out = sundqvist_microphysics(
             T, qv, hyd, p_full, p_half, rho, dz, _DT,
-            SundqvistConfig(hard_saturation_adjustment=True))
+            SundqvistConfig(hard_saturation_adjustment=True), cell_area=1.0e10)
         return jnp.sum(out.dq_c_dt ** 2)
 
     g = jax.grad(loss)(q_v)

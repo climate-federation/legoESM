@@ -350,8 +350,7 @@ def test_sundqvist_rain_survival_rebuild_matches_physical_scheme():
         rho=rho,
         dz=dz,
         dt=150.0,
-        config=config,
-    )
+        config=config, cell_area=1.0e10)
     rates = diagnose_sundqvist_process_rates(
         T=T,
         q_v=q_v,
@@ -361,8 +360,7 @@ def test_sundqvist_rain_survival_rebuild_matches_physical_scheme():
         rho=rho,
         dz=dz,
         dt=150.0,
-        config=config,
-    )
+        config=config, cell_area=1.0e10)
     generated_flux = jnp.sum(
         rates.autoconversion * (p_half[:, 1:] - p_half[:, :-1]) / constants.g, axis=1)
     rain_survival_fraction = jnp.where(
@@ -465,8 +463,7 @@ def test_sundqvist_rain_survival_rebuild_drains_incoming_qr():
 
     physical = sundqvist_microphysics(
         T=T, q_v=q_v, hydrometeors=hydrometeors,
-        p_full=p_full, p_half=p_half, rho=rho, dz=dz, dt=dt, config=config,
-    )
+        p_full=p_full, p_half=p_half, rho=rho, dz=dz, dt=dt, config=config, cell_area=1.0e10)
     # Use survival-fraction = 1 (no rain re-evaporation) for the rebuild;
     # the q_r-drain channel is independent.
     rebuilt = apply_predicted_sundqvist_rain_survival_fraction(

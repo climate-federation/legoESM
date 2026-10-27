@@ -45,8 +45,10 @@ Two stages run in sequence:
    ``rh_crit`` = ``u00k``; ``auto_rate`` = ``prautco``; ``qc_crit`` = ``1/cmr``
    (oracle hard-codes 3e-4); ``coalescence_enh_coeff`` = ``c1`` (300);
    ``bergeron_enh_coeff`` = ``c2`` (0.5); ``evap_coeff`` = ``evpco``;
-   ``psautco``, ``wminco_liquid``, ``wminco_ice`` = the oracle namelist values
-   (``wk1 = 1``, one value per run).  The saturation humidity is the oracle's
+   ``psautco_fine``/``psautco_coarse`` = the oracle's ``psautco(1:2)``,
+   blended by grid-cell area with GFS's ``wk1`` (:func:`gfs_area_weight`, a
+   smooth clamp); ``wminco_liquid``, ``wminco_ice`` = the oracle's
+   ``wminco(1:2)``.  ``prautco`` is a single value (GFS's pair is equal).  The saturation humidity is the oracle's
    ``eps·e/(p + (eps-1)·e)`` with ``e = min(p, e_s)`` on legoESM's Tetens
    ``e_s``; the real GFS ``fpvs`` table (ice-blended below 0 °C) is NOT used.
    The only smoothing is the existing ``sigmoid_sharpness``: it multiplies the
@@ -83,6 +85,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from legoesm import constants
+from legoesm.core.smooth import smooth_clamp
 from legoesm.thermo import saturation_specific_humidity, saturation_vapor_pressure
 from legoesm.atmosphere.physics.microphysics._warm_rain import (
     hard_saturation_blend,
@@ -116,6 +119,46 @@ _ZC_F2_T_K = 268.0              # [K] Bergeron factor onset temperature [498]
 _ZC_F2_DT_CAP_K = 20.0          # [K] cap of 268-T in the Bergeron factor [498]
 _ZC_WMIN_P_SCALE = 1.0e-5       # [1/Pa] wmin = wminco * p * 1e-5 [255,262-263]
 _ZC_SR_MIN = 1.0e-13            # [kg/m^2] total surface precip below which sr = 0 [729-734]
+
+# --- GFS grid-area weight wk1 (fv3atm ufs-srw-v2.0.0 GFS_typedefs.F90:3218,
+# 4656-4659; GFS_suite_interstitial_1.F90:43-44) ---
+_GFS_MAX_LON, _GFS_MAX_LAT = 5000, 2000     # finest grid: wk1 = 1
+_GFS_MIN_LON, _GFS_MIN_LAT = 192, 94        # coarsest grid: wk1 = 0
+# Smooth clamp of wk1 and of the liquid fraction to [0, 1]: sharpness 100
+# (width 0.01), the value the user approved for smooth clamps on 2026-10-21.
+_SMOOTH_CLAMP_SHARPNESS = 100.0
+# Liquid fraction of the total condensate when the lane carries q_i: a linear
+# ramp from 0 at -15 C to 1 at 0 C (Zhao-Carr's ice/water window, user
+# 2026-10-27), smoothly clamped.
+_LIQ_RAMP_COLD_C = -15.0
+
+
+def gfs_area_weight(cell_area):
+    """GFS ``wk1 = max(0, min(1, (log(area) - dxmin) * dxinv))`` with the clip
+    as a smooth clamp: 1 on the finest grid GFS knows (5000 x 2000), 0 on the
+    coarsest (192 x 94)."""
+    tem = 2.0 * jnp.pi ** 2 * constants.R_earth ** 2
+    dxmax = jnp.log(tem / (_GFS_MAX_LON * _GFS_MAX_LAT))
+    dxmin = jnp.log(tem / (_GFS_MIN_LON * _GFS_MIN_LAT))
+    work1 = (jnp.log(cell_area) - dxmin) / (dxmax - dxmin)
+    return smooth_clamp(work1, 0.0, 1.0, _SMOOTH_CLAMP_SHARPNESS)
+
+
+def liquid_fraction(T):
+    """Liquid share of the total condensate: 0 at -15 C, 1 at 0 C, linear
+    between, smoothly clamped (differentiable everywhere)."""
+    x = (T - (constants.T_freeze + _LIQ_RAMP_COLD_C)) / -_LIQ_RAMP_COLD_C
+    return smooth_clamp(x, 0.0, 1.0, _SMOOTH_CLAMP_SHARPNESS)
+
+
+def split_condensate(T, cwm, ice_share_in):
+    """Split precpd's total condensate ``cwm`` into ``(q_c, q_i)`` by
+    :func:`liquid_fraction` of ``T`` and return the heating [K] of that
+    re-partition: ``L_f/c_pd`` per kg of ice it adds over the input ice share,
+    so ``c_pd T + L_v q_v - L_f q_i`` is unchanged by it (user 2026-10-27)."""
+    q_i = (1.0 - liquid_fraction(T)) * cwm
+    dT = constants.L_f / constants.c_pd * (q_i - ice_share_in * cwm)  # latent-ok: Zhao-Carr oracle constant (hfus)
+    return cwm - q_i, q_i, dT
 
 
 class SundqvistProcessRates(NamedTuple):
@@ -176,9 +219,12 @@ def zhao_carr_precpd(
     p_full: jax.Array,
     layer_mass: jax.Array,
     dt: float,
-    config: SundqvistConfig = SundqvistConfig(),
+    config: SundqvistConfig,
+    wk1: jax.Array,
 ) -> ZhaoCarrPrecpdResult:
     """Literal JAX port of ccpp-physics v7.0.1 ``zhaocarr_precpd_run``.
+
+    ``wk1`` (ncol,) is GFS's grid-area weight (:func:`gfs_area_weight`).
 
     Columns are (ncol, nlev) with level 0 = model top (the oracle runs bottom ->
     top; the scan here runs top -> surface, the oracle's ``k = km, 1, -1``).
@@ -210,7 +256,8 @@ def zhao_carr_precpd(
     c2 = config.bergeron_enh_coeff
     u00k = config.rh_crit
     prautco = config.auto_rate
-    psautco = config.psautco
+    # [194-198] psautco_l = psautco(1)*wk1 + psautco(2)*(1-wk1)
+    psautco = config.psautco_fine * wk1 + config.psautco_coarse * (1.0 - wk1)
     sharpness = config.sigmoid_sharpness
 
     dtype = jnp.result_type(T, q_v, cwm)
@@ -373,15 +420,22 @@ def zhao_carr_precpd(
     )
 
 
-def _sundqvist_step(T, q_v, hydrometeors, p_full, p_half, dt, config):
+def _sundqvist_step(T, q_v, hydrometeors, p_full, p_half, dt, config,
+                    cell_area, carries_q_i):
     """Condensation surrogate followed by the Zhao-Carr precipitation port.
 
     Returns ``(condensation, zc, layer_mass)``; ``zc`` is the precpd state
     update computed on the PRE-condensation T and q_v (the oracle's gscond ->
     precpd order waits for the gscond port: with this surrogate's overshoot the
     post-condensation state is sub-rh_crit and precpd re-evaporates its own
-    production) and ``layer_mass`` the oracle's ``del/g``."""
+    production); its ``cwm`` is q_c + q_i where the lane carries q_i, and
+    ``layer_mass`` is the oracle's ``del/g``."""
     _check_no_gaussian_f2_override(config)
+    if cell_area is None:
+        raise ValueError(
+            "sundqvist needs the lane's grid-cell area (GFS blends the ice "
+            "autoconversion coefficient by it); pass cell_area, or declare the "
+            "GCM cell area a single-column case stands for in its case config")
     sharpness = config.sigmoid_sharpness
 
     # 1. Condensation (NOT-YET-FAITHFUL surrogate; unchanged by the port).
@@ -403,9 +457,11 @@ def _sundqvist_step(T, q_v, hydrometeors, p_full, p_half, dt, config):
     # 2. Precipitation: the condensate after condensation, on the pre-step
     # T and q_v, with the oracle's layer mass del/g = dp/g (R9/C12: the column
     # water budget closes in the model's pressure coordinate).
-    cwm = hydrometeors.q_c + condensation * dt
+    q_c_in = hydrometeors.q_c + hydrometeors.q_i if carries_q_i else hydrometeors.q_c
+    cwm = q_c_in + condensation * dt
     layer_mass = (p_half[:, 1:] - p_half[:, :-1]) / constants.g
-    zc = zhao_carr_precpd(T, q_v, cwm, p_full, layer_mass, dt, config)
+    wk1 = gfs_area_weight(jnp.broadcast_to(jnp.asarray(cell_area, T.dtype), T.shape[:1]))
+    zc = zhao_carr_precpd(T, q_v, cwm, p_full, layer_mass, dt, config, wk1)
     return condensation, zc, layer_mass
 
 
@@ -419,12 +475,14 @@ def diagnose_sundqvist_process_rates(
     dz: jax.Array,
     dt: float,
     config: SundqvistConfig = SundqvistConfig(),
+    cell_area: jax.Array | None = None,
+    carries_q_i: bool = False,
 ) -> SundqvistProcessRates:
     """Diagnose the Sundqvist condensation, precipitation-production and
     precipitation-evaporation rates (see :class:`SundqvistProcessRates`)."""
     del rho, dz  # Signature parity with ``sundqvist_microphysics``.
     condensation, zc, _ = _sundqvist_step(
-        T, q_v, hydrometeors, p_full, p_half, dt, config)
+        T, q_v, hydrometeors, p_full, p_half, dt, config, cell_area, carries_q_i)
     return SundqvistProcessRates(
         condensation=condensation,
         autoconversion=zc.autoconversion,
@@ -486,6 +544,8 @@ def sundqvist_microphysics(
     dz: jax.Array,
     dt: float,
     config: SundqvistConfig = SundqvistConfig(),
+    cell_area: jax.Array | None = None,
+    carries_q_i: bool = False,
 ) -> MicrophysicsOutput:
     """Compute Sundqvist tendencies (condensation surrogate + Zhao-Carr precipitation).
 
@@ -493,6 +553,11 @@ def sundqvist_microphysics(
     ----------
     T, q_v, hydrometeors, p_full, p_half, rho, dz, dt, config
         Same interface as all microphysics backends.
+    cell_area : (ncol,) or scalar grid-cell area [m^2]; required (raises if None).
+    carries_q_i : static bool, whether the lane carries q_i.  If so, precpd
+        runs on q_c + q_i and its condensate returns as q_c and q_i by
+        :func:`liquid_fraction` of the post-step temperature; otherwise all
+        condensate stays in q_c and q_i is not read.
 
     Returns
     -------
@@ -501,12 +566,23 @@ def sundqvist_microphysics(
     del rho, dz  # the layer mass is the oracle's dp/g (from p_half)
     ncol, nlev = T.shape
     condensation, zc, layer_mass = _sundqvist_step(
-        T, q_v, hydrometeors, p_full, p_half, dt, config)
+        T, q_v, hydrometeors, p_full, p_half, dt, config, cell_area, carries_q_i)
 
     # Tendencies = condensation + the Zhao-Carr state update over the step.
     dT_dt = constants.L_v * condensation / constants.c_pd + (zc.T - T) / dt
     dq_v_dt = -condensation + (zc.q_v - q_v) / dt
-    dq_c_dt = (zc.cwm - hydrometeors.q_c) / dt
+    z = jnp.zeros((ncol, nlev), dtype=T.dtype)
+    if carries_q_i:
+        cwm_in = hydrometeors.q_c + hydrometeors.q_i + condensation * dt
+        pos = cwm_in > 0.0
+        share = jnp.where(pos, hydrometeors.q_i / jnp.where(pos, cwm_in, 1.0), 0.0)
+        q_c_new, q_i_new, dT_fus = split_condensate(T + dT_dt * dt, zc.cwm, share)
+        dT_dt = dT_dt + dT_fus / dt
+        dq_c_dt = (q_c_new - hydrometeors.q_c) / dt
+        dq_i_dt = (q_i_new - hydrometeors.q_i) / dt
+    else:
+        dq_c_dt = (zc.cwm - hydrometeors.q_c) / dt
+        dq_i_dt = z
 
     # Diagnostic-rain semantics (pre-port, not part of the oracle): any q_r
     # passed in is treated as already-falling rain and drained to the surface
@@ -518,14 +594,12 @@ def sundqvist_microphysics(
     q_r_drain_flux = jnp.sum(q_r_in * layer_mass, axis=1) / dt_safe
     precipitation = zc.rain_sfc + zc.snow_sfc + q_r_drain_flux
 
-    # Pin dtype to the input precision for the unused-tendency placeholders.
-    z = jnp.zeros((ncol, nlev), dtype=T.dtype)
     return MicrophysicsOutput(
         dT_dt=dT_dt,
         dq_v_dt=dq_v_dt,
         dq_c_dt=dq_c_dt,
         dq_r_dt=dq_r_dt,
-        dq_i_dt=z,
+        dq_i_dt=dq_i_dt,
         dq_s_dt=z,
         dq_g_dt=z,
         dN_c_dt=z,

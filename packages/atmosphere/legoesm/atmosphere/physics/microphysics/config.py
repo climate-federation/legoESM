@@ -340,7 +340,8 @@ __param_spec__ = {
             "sigmoid_sharpness": "numerics: solver/smoothing/tolerance/iteration parameter",
             # Zhao-Carr namelist coefficients added by the oracle port; whether
             # (and within which bounds) they are trainable is a pending user decision.
-            "psautco": "physics: Zhao-Carr namelist coefficient; trainability not yet decided",
+            "psautco_fine": "physics: Zhao-Carr namelist coefficient; trainability not yet decided",
+            "psautco_coarse": "physics: Zhao-Carr namelist coefficient; trainability not yet decided",
             "wminco_liquid": "physics: Zhao-Carr namelist coefficient; trainability not yet decided",
             "wminco_ice": "physics: Zhao-Carr namelist coefficient; trainability not yet decided",
         },
@@ -454,7 +455,9 @@ class SundqvistConfig(NamedTuple):
     # Smooth RH_crit gate of the condensation surrogate and of the precipitation
     # evaporation; the oracle is its hard-switch limit (sharpness -> inf).
     sigmoid_sharpness: float = 20.0
-    auto_rate: float = 1e-3           # Liquid release rate c_0 [1/s] (oracle prautco)
+    # Liquid release rate c_0 [1/s] (oracle prautco; GFS v16/v17 namelist pair
+    # 1.5e-4, 1.5e-4, so its grid-area blend is the identity; user 2026-10-27).
+    auto_rate: float = 1.5e-4
     # Critical cloud water m_r of the SBK89 release
     # (1 - exp(-(m*F1*F2/(m_r*max(b, 0.01)))^2)) [kg/kg] (oracle 1/cmr).
     qc_crit: float = 3e-4             # oracle m_r (tier-2 decision R14)
@@ -510,13 +513,17 @@ class SundqvistConfig(NamedTuple):
     hard_sat_adjust_threshold: float = 1.1      # blend knob here, NOT an on/off trigger [-]
     hard_sat_max_heating_K: float = 5.0         # per-step latent-heating cap [K]
     # --- Zhao-Carr ice route and conversion thresholds ---
-    # Ice -> snow autoconversion coefficient (oracle psautco) [1/s];
-    # psaut = psautco*dt*exp(0.025*(T - 273.16))*max(0, cwm - wmini).
-    psautco: float = 0.0
+    # Ice -> snow autoconversion coefficient [1/s],
+    # psaut = psautco*dt*exp(0.025*(T - 273.16))*max(0, cwm - wmini), blended
+    # by grid-cell area as GFS does (zhaocarr_precpd.f:194-198):
+    # psautco_fine*wk1 + psautco_coarse*(1 - wk1), wk1 = 1 on the finest grid
+    # (oracle psautco(1), psautco(2); GFS v16/v17 namelist 8e-4, 5e-4).
+    psautco_fine: float = 8.0e-4
+    psautco_coarse: float = 5.0e-4
     # Condensate left unconverted, wmin = wminco*p/1e5 [kg/kg] (oracle
-    # wminco(1) liquid, wminco(2) ice).
-    wminco_liquid: float = 0.0
-    wminco_ice: float = 0.0
+    # wminco(1) liquid, wminco(2) ice; fv3atm GFS_typedefs.F90:2854 default).
+    wminco_liquid: float = 1.0e-5
+    wminco_ice: float = 1.0e-5
 
 
 class SeifertBehengConfig(NamedTuple):

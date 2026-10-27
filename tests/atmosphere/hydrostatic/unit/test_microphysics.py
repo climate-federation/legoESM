@@ -320,28 +320,28 @@ class TestSundqvist:
 
     def test_output_shapes(self):
         T, q_v, h, p_full, p_half, rho, dz = _make_warm_columns()
-        out = sundqvist_microphysics(T, q_v, h, p_full, p_half, rho, dz, dt=10.0)
+        out = sundqvist_microphysics(T, q_v, h, p_full, p_half, rho, dz, dt=10.0, cell_area=1.0e10)
         assert out.dT_dt.shape == T.shape
         assert out.precipitation.shape == (T.shape[0],)
 
     def test_precipitation_non_negative(self):
         T, q_v, h, p_full, p_half, rho, dz = _make_warm_columns()
-        out = sundqvist_microphysics(T, q_v, h, p_full, p_half, rho, dz, dt=10.0)
+        out = sundqvist_microphysics(T, q_v, h, p_full, p_half, rho, dz, dt=10.0, cell_area=1.0e10)
         assert jnp.all(out.precipitation >= 0)
 
     def test_nonzero_tendencies(self):
         # The cloud in these columns is colder than -6 C and takes the
-        # Zhao-Carr ice route, which only converts with psautco > 0 (default 0,
-        # pending a user decision): 8e-4 is the GFS v16/v17 namelist value
-        # (ccpp-physics docs, FV3_GFS_v16_input.nml).
+        # Zhao-Carr ice route, which converts with psautco > 0: 8e-4 is the
+        # GFS v16/v17 namelist value (ccpp-physics docs, FV3_GFS_v16_input.nml).
         T, q_v, h, p_full, p_half, rho, dz = _make_warm_columns()
         out = sundqvist_microphysics(T, q_v, h, p_full, p_half, rho, dz, dt=10.0,
-                                     config=SundqvistConfig(psautco=8.0e-4))
+                                     config=SundqvistConfig(psautco_fine=8.0e-4, psautco_coarse=8.0e-4),
+                                     cell_area=1.0e10)
         assert float(jnp.max(jnp.abs(out.dT_dt))) > 0
 
     def test_finite_outputs(self):
         T, q_v, h, p_full, p_half, rho, dz = _make_warm_columns()
-        out = sundqvist_microphysics(T, q_v, h, p_full, p_half, rho, dz, dt=10.0)
+        out = sundqvist_microphysics(T, q_v, h, p_full, p_half, rho, dz, dt=10.0, cell_area=1.0e10)
         for field in out:
             if field is None:  # optional fields (e.g. 2-moment number tendencies)
                 continue
@@ -367,7 +367,7 @@ class TestSundqvist:
         q_c = jnp.full_like(T, 1.0e-4)
         h = h._replace(q_c=q_c)
         dt = 1800.0  # 30-min step → auto_rate·dt = 1.8
-        out = sundqvist_microphysics(T, q_v, h, p_full, p_half, rho, dz, dt=dt)
+        out = sundqvist_microphysics(T, q_v, h, p_full, p_half, rho, dz, dt=dt, cell_area=1.0e10)
         q_c_new = q_c + dt * out.dq_c_dt
         # Positivity must hold for any explicit Euler step
         assert jnp.all(q_c_new >= -1.0e-12)
@@ -384,9 +384,9 @@ class TestSundqvist:
         h = make_zero_hydrometeors(ncol, nlev)
         # Use very high sharpness to make the sigmoid effectively a step
         config = SundqvistConfig(rh_crit=0.8, sigmoid_sharpness=200.0)
-        out = sundqvist_microphysics(T, q_v, h, p_full, p_half, rho, dz, dt=10.0, config=config)
+        out = sundqvist_microphysics(T, q_v, h, p_full, p_half, rho, dz, dt=10.0, config=config, cell_area=1.0e10)
         # Condensation should be much smaller than saturated case
-        out_sat = sundqvist_microphysics(T, q_sat, h, p_full, p_half, rho, dz, dt=10.0, config=config)
+        out_sat = sundqvist_microphysics(T, q_sat, h, p_full, p_half, rho, dz, dt=10.0, config=config, cell_area=1.0e10)
         ratio = float(jnp.max(jnp.abs(out.dq_c_dt))) / float(jnp.max(jnp.abs(out_sat.dq_c_dt)) + 1e-20)
         assert ratio < 0.1
 
@@ -394,7 +394,7 @@ class TestSundqvist:
         T, q_v, h, p_full, p_half, rho, dz = _make_warm_columns()
 
         def loss(T_in):
-            out = sundqvist_microphysics(T_in, q_v, h, p_full, p_half, rho, dz, dt=10.0)
+            out = sundqvist_microphysics(T_in, q_v, h, p_full, p_half, rho, dz, dt=10.0, cell_area=1.0e10)
             return jnp.sum(out.dT_dt ** 2)
 
         grad = jax.grad(loss)(T)
