@@ -607,6 +607,43 @@ departures.  No single cited statement owns a literal fix, so the Decision
 proposal and no model code is landed in this round.  The focused walk controls
 pass 2 tests.  Codex review: operator.
 
+## Resume 17: compiled production TKE solver intermediate walk
+
+### Preregistration (frozen before measurement)
+
+Resume 16 scored a NumPy source-order replay for `solve_diag`, `solve_rhs`,
+`solve_bottom`, and `solve_back` rather than the compiled intermediates of
+legoESM's production solver `_nemo_literal_tke_solve`. This resume instruments
+a debug-only observer of the exact compiled production solver under the ORCA2
+comparison card's `jax.jit` and `PrecisionPolicy.fp64(transcendentals="libm")`
+settings (verified bit-identical to the uninstrumented production output),
+fed with the admitted kt-2 recorded matrix/RHS from
+`round336/acquisition/orca1ice_tke_internal_kt2_np2`:
+
+- **R336-R17-P1 (first compiled intermediate)**: Feeding the admitted kt-2
+  recorded matrix/RHS into the compiled production solver reproduces the
+  17 / 430,552 wet-word `after_solve` departure (`max_abs =
+  6.589800151726445e-13`) and identifies the first compiled solver stage
+  (`solve_diag`, `solve_rhs`, `solve_bottom`, or `solve_back`) that departs
+  from NEMO's recorded stage. *Falsifier*: if all four compiled stages are
+  0 / 430,552 unequal on the recorded matrix/RHS, the departure enters via
+  inputs constructed in `_solve_tke_backward_euler` rather than inside
+  `_nemo_literal_tke_solve`.
+- **R336-R17-P2 (code and HLO mechanism)**: Inspecting the solver source and
+  compiled XLA CPU HLO identifies the exact unbarriered expression or
+  compiler rewrite (reassociation, reciprocal multiplication, or contraction)
+  responsible for the first stage departure (**CONFIRMED** if present in the
+  compiled HLO and eliminated by barriering the NEMO statement order;
+  otherwise **PLAUSIBLE**).
+- **R336-R17-P3 (non-landed literal fix proposal)**: Applying
+  `nemo_source_round` barriers to each binary operation in NEMO's written
+  statement order removes all 17 wet-word departures (`0 / 430,552` unequal
+  across all four Thomas stages and `after_solve`, and `0 / 414,119` on
+  `final_avt`). *Falsifier*: if any wet word remains unequal under the
+  barriered NEMO statement order, the residual is not owned by intra-statement
+  XLA reassociation/contraction alone.
+
+
 ## Resume 11: passive boundary repair and admitted-recorder census
 
 Argon item 3 is resolved for the new acquisition. When the target is
