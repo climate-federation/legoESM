@@ -200,3 +200,34 @@ def test_no_citation_map_key_is_written_twice():
         key for key, count in collections.Counter(written).items() if count > 1)
     assert repeated == [], f"shadowed citation-map keys: {repeated}"
     assert len(written) == len(gate.CITATION_MAP)
+
+
+def test_orca2_round341_receipt_passes_citation_gate_and_plant_fires():
+    """The round-341 receipt must pass the citation gate and fail on a plant."""
+    if not gate.FILES["stp2d.F90"].is_file():
+        pytest.skip("NEMO oracle source tree not present")
+    receipt = (
+        gate.REPO
+        / "docs/ocean/fidelity/testcases"
+        / "nemo_testcases_l4_orca2_round341_rescore_walk_receipt.md"
+    )
+    heading = "# ORCA2 round 341 —"
+    report = gate.run(receipt, heading)
+    assert report["unmapped_citations"] == []
+    assert report["failures"] == []
+    assert report["map_entries_failing_audit"] == []
+    assert all(row["fired"] for row in report["self_test"])
+    assert report["status"] == "PASS"
+
+    planted = gate.run(
+        receipt,
+        heading,
+        plant="ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/stprk3_stg.f90:177",
+    )
+    assert planted["status"] == "FAIL"
+    assert any(
+        row["citation"]
+        == "ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/stprk3_stg.f90:177"
+        for row in planted["failures"]
+    )
+
