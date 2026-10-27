@@ -1,7 +1,8 @@
 # ORCA2 round 340 — exact standalone S4 acquisition tool and composed card
 
-Date: 2026-10-26. Base `d5d97cfc3121`. Disposition:
-**ACQUISITION_NEEDED**. No NEMO executable was run in this round.
+Date: 2026-10-27. Base `d5d97cfc3121`. Disposition:
+**ACQUISITION_NEEDED (arm B only)**. Operator-run arm A is admitted; no agent
+ran NEMO.
 
 ## Source order and delivered scope
 
@@ -131,10 +132,15 @@ strips exactly seven patches and two writer units; manifests use relative paths 
 pin producer commit and executable; exact readers reject duplicate, missing,
 truncated, trailing, wrong-rank, wrong-level, or nonfinite frames; refused
 evidence stays quarantined until build-source capture, manifest creation,
-clean `STOP 0` log checks, restart comparison, and admission complete; the
+clean stdout `STOP 0`, both-log error scans, restart comparison, and admission complete; the
 README gives retained/in-place admission and move-aside retry instructions. The
-actual NEMO arms and run admission remain unmeasured until the operator invokes
-`--run`.
+operator's first `--run` completed arm A, but the wrapper silently exited
+because it incorrectly required `STOP 0` in `ocean.output`; NEMO emits that
+marker in launcher stdout. The retained route finalized the interrupted
+manifest, admitted the complete record inventory, and moved arm A to its
+canonical location. Admission now scans both logs for errors, every unexpected
+shell failure names its step in a `REFUSE` line, and `--run` resumes with arm B
+only when it finds admitted arm A and the retained executable.
 
 - ASKED: exact K0 acquisition, independent twin, source boundaries, existing
   ten-step state ladder, explicit K0 model card, exact surface-first scoring,
@@ -155,8 +161,11 @@ actual NEMO arms and run admission remain unmeasured until the operator invokes
   binary64 tolerance.
 - Acquisition preflight: READY; same-program, placement, FP-census, bounds,
   namelist, checksum, generated-flow, `ocean.output` error quarantine,
-  actual-route retained admission, and generated-syntax controls pass or fire
-  as intended.
+  named-refusal plant, actual-route retained admission, and generated-syntax
+  controls pass or fire as intended.
+- Retained arm-A admission: PASS; surface 240, S1 turbulent 10, S1 flux 10,
+  state 80, ice-interface 60, and field-read 198 records; both restart files
+  are byte-identical to K0.
 - Per-receipt citation gate: PASS, 14 citations, zero failures, zero unmapped
   citations, zero map-audit failures, and all nine self-tests fired.
 - Required receipt-citation pytest: 17/17 PASS on the clean committed tree.
@@ -168,4 +177,4 @@ actual NEMO arms and run admission remain unmeasured until the operator invokes
   fails identically on parent `d5d97cfc31` and is deliberately not fixed in
   this round.
 
-NEMO acquisition is deliberately absent.
+Arm B and final twin admission remain operator work.
