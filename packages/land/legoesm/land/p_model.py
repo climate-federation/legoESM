@@ -267,6 +267,12 @@ class PModelAcclimState(NamedTuple):
     vpd_mean_pa: jax.Array
     co2_mean_ppm: jax.Array
     ps_ema: jax.Array
+    # Acclimated soil state seen by the roots (P-hydro only; ``None`` when
+    # transpiration_stress != 'phydro'): the same running mean of the
+    # conductance-weighted soil water potential [MPa] and of the soil-to-root
+    # resistance per leaf area [MPa m2 s/mol] (land/phydro.py PhydroSupply).
+    psi_s_mean_mpa: jax.Array | None = None
+    rsoil_mean: jax.Array | None = None
 
 
 class PModelCapacities(NamedTuple):
@@ -465,13 +471,16 @@ def init_pmodel_acclim(
     cfg: PModelConfig,
     co2_init_ppm: jax.Array | float | None = None,
     dtype: Any = jnp.float32,
+    soil_init: tuple[float, float] | None = None,
 ) -> PModelAcclimState:
     """Cold-start acclimation state from the recorded config constants.
 
     ``t_init_K``/``ps_init_pa`` come from the caller's initial condition;
     PPFD/VPD (and CO2 unless overridden with the run's value) come from the
     ``PModelConfig`` init fields so every cold-start choice is in the run's
-    resolved config.
+    resolved config.  ``soil_init = (psi_s_mpa, rsoil_leaf)`` (the
+    ``PHydroConfig`` init fields) switches the P-hydro soil-state means on;
+    ``None`` leaves them absent.
     """
     full = lambda v: jnp.full((ncol,), v, dtype=dtype)  # noqa: E731
     co2 = cfg.init_co2_ppm if co2_init_ppm is None else co2_init_ppm
@@ -481,6 +490,8 @@ def init_pmodel_acclim(
         vpd_mean_pa=full(cfg.init_vpd_pa),
         co2_mean_ppm=full(0.0) + jnp.asarray(co2, dtype=dtype),
         ps_ema=full(0.0) + jnp.asarray(ps_init_pa, dtype=dtype),
+        psi_s_mean_mpa=None if soil_init is None else full(soil_init[0]),
+        rsoil_mean=None if soil_init is None else full(soil_init[1]),
     )
 
 
@@ -616,6 +627,8 @@ def advance_pmodel_acclim(
     ps_pa: jax.Array,
     cfg: PModelConfig,
     dt: float,
+    psi_s_mpa: jax.Array | None = None,
+    rsoil_leaf: jax.Array | None = None,
 ) -> PModelAcclimState:
     """One acclimation step: whole-day running means of every driver.
 
@@ -624,14 +637,26 @@ def advance_pmodel_acclim(
     are the 24-hour (multi-day) averages the optimality literature sizes
     capacities for (daily / weekly / monthly means; Stocker et al. 2020).
     The light mean therefore includes the zero night values and decays
-    toward zero through a polar night (capacities -> 0, finite).
+    toward zero through a polar night (capacities -> 0, finite).  The
+    P-hydro soil-state means advance with the same gain when the step's
+    ``psi_s_mpa``/``rsoil_leaf`` are given and the state carries them.
     """
     gain = 1.0 - jnp.exp(-dt / cfg.tau_acclim_s)
     step = lambda mean, x: mean + gain * (x - mean)  # noqa: E731
+    soil = {}
+    if acclim.psi_s_mean_mpa is not None:
+        if psi_s_mpa is None or rsoil_leaf is None:
+            raise ValueError(
+                "advance_pmodel_acclim: the acclimation state carries the "
+                "P-hydro soil-state means but this step supplied no "
+                "psi_s_mpa / rsoil_leaf; they would silently freeze.")
+        soil = dict(psi_s_mean_mpa=step(acclim.psi_s_mean_mpa, psi_s_mpa),
+                    rsoil_mean=step(acclim.rsoil_mean, rsoil_leaf))
     return PModelAcclimState(
         iabs_mean=step(acclim.iabs_mean, ppfd),
         t_mean_K=step(acclim.t_mean_K, T_K),
         vpd_mean_pa=step(acclim.vpd_mean_pa, vpd_pa),
         co2_mean_ppm=step(acclim.co2_mean_ppm, co2_ppm),
         ps_ema=step(acclim.ps_ema, ps_pa),
+        **soil,
     )

@@ -1,28 +1,33 @@
 """P-hydro: profit-maximizing stomatal/capacity optimality on plant hydraulics.
 
-Joshi et al. (2022, Nature Plants) profit maximization — assimilation net of
-the cost of photosynthetic capacity and of hydraulic risk — over the
-soil-to-leaf water-potential draw-down ``dpsi`` and the leaf-internal CO2
-ratio ``chi``.  Like the least-cost P model (``land/p_model.py``), it supplies
-ACCLIMATED PARAMETERS (leaf-top Vcmax25, rjv25, and a stomatal slope for the
-active conductance model) — the host kernels compute fluxes.
+Joshi et al. (2022, Nature Plants) profit maximization on two time scales,
+as in the rphydro reference implementation (jaideep777/phydro @a59e2c6):
 
-Profit, at the P-model acclimation means and the CURRENT root-zone soil water
-potential (transcribed from jaideep777/phydro @a59e2c6, ``phydro_analytical``):
+ACCLIMATED (this module, :func:`phydro_optimum`), at the P-model acclimation
+means (light, temperature, VPD, CO2, soil water potential and soil-to-root
+resistance, all whole-day running means):
 
     F(chi, dpsi) = A - alpha * Jmax - gamma * dpsi^2          [Joshi eq. 6]
     A      = gs * ca * (1 - chi)                              (CO2 supply)
-    gs     = lsc(dpsi) * dpsi / (1.6 * D)                     (water supply)
+    gs     = lsc(psi_s, dpsi) * dpsi / (1.6 * D)              (water supply)
     J      = 4 * A * (chi + 2 g) / (chi - g),  g = Gamma*/ca  (A = A_j)
-    Jmax   = [Jlim * J / sqrt(Jlim^2 - J^2)] / f(psi_leaf),   Jlim = 4 phi0 Iabs
+    Jmax   = Jlim * J / sqrt(Jlim^2 - J^2),  Jlim = 4 phi0 Iabs (Smith)
 
-``Jmax`` is the INVESTED capacity whose water-stressed fraction
-``f(psi_leaf) * Jmax`` delivers the electron transport ``J`` (Smith light
-response, as in rpmodel / rphydro).  Vcmax follows from coordination
-(A_c = A_j) at the optimum.  The two stationarity conditions are solved by
-nested bisection (``F`` is concave in ``chi`` at fixed ``dpsi``); gradients
-come from the implicit function theorem at the optimum, never from the
-iterations.
+Vcmax follows from coordination (A_c = A_j) at the optimum.  The two
+stationarity conditions are solved by nested bisection (``F`` is concave in
+``chi`` at fixed ``dpsi``); gradients come from the implicit function theorem
+at the optimum, never from the iterations.  Only the capacities (leaf-top
+Vcmax25, rjv25) are handed on; the optimum's ``chi`` and ``dpsi`` seed the
+instantaneous solve below.
+
+INSTANTANEOUS (every canopy step, inside the two-leaf Newton closure with
+``stomatal_model="phydro"``): with the acclimated capacities fixed, each leaf
+class maximizes ``A - gamma * dpsi^2`` over its own draw-down ``dpsi``, with
+``A`` from the host FvCB kernel at the leaf temperature and ``gs`` from the
+supply curve at this step's soil state.  The stationarity condition
+(:func:`instantaneous_foc`) is one extra Newton residual per leaf class; the
+canopy solver's implicit backward pass differentiates it.  No Medlyn slope
+is involved: ``gs`` IS the supply at the optimal draw-down.
 
 Water supply (soil-to-root resistance in series with a vulnerable xylem):
 
@@ -37,14 +42,19 @@ DELIBERATE DEPARTURES from Joshi et al. (2022) / rphydro:
    hydraulic conductivity; rphydro has a plant conductance only.  The xylem
    integral runs from the bulk soil potential, not the root-surface
    potential (exact as ``rsoil_leaf -> 0``).
-2. **Non-stomatal limitation.**  ``f(psi_leaf)`` — a second Weibull curve —
-   scales the effective Jmax; Joshi has no such term (``f = 1`` recovers
-   their model).
-3. **Slope, not gs.**  The optimum's chi maps to the ACTIVE stomatal
-   model's slope at the acclimated means (valid for g0 ~ 0), see
-   :func:`slope_for_model`.
+2. **Two leaf classes.**  The instantaneous optimum is solved for the sunlit
+   and the shaded big leaf separately (each with its own leaf temperature,
+   light and draw-down); rphydro is one big leaf.  Both classes see the same
+   per-leaf-area supply curve.
+3. **Host assimilation kernel at the instantaneous scale** (co-limited FvCB
+   with the repo's temperature responses); rphydro takes the smaller of the
+   Rubisco- and light-limited rates.  The acclimated step uses the same
+   Smith/coordination form as rphydro.
 4. **Kinetics and temperature responses from the shared repo constants**
    (as ``land/p_model.py`` departures 2-3), not rphydro's literals.
+5. **Soil matric potential capped at field capacity** (-0.033 MPa) before
+   the roots see it (the Richards lane can overshoot to positive values on
+   rain).
 
 References: Joshi et al. (2022) Nat. Plants 8, 1304-1316; Bonan et al.
 (2014) GMD 7, 2193-2222 (soil-to-root resistance); Kennedy et al. (2019)
@@ -74,14 +84,16 @@ from legoesm.land.p_model import (
 
 __physics_contract__ = {
     "summary": (
-        "P-hydro (Joshi et al. 2022): maximize A - alpha*Jmax - gamma*dpsi^2 "
-        "over (chi, dpsi) with gs = lsc(dpsi)*dpsi/(1.6 D), a Weibull xylem "
-        "vulnerability curve in series with the Bonan-2014 soil-to-root "
-        "resistance, and a Weibull non-stomatal limitation on Jmax, at the "
-        "P-model acclimation means and the instantaneous conductance-weighted "
-        "soil water potential. Supplies leaf-top Vcmax25, rjv25 and a "
-        "stomatal slope for the active model; replaces the empirical theta "
-        "stress."
+        "P-hydro (Joshi et al. 2022) on two time scales: acclimated, maximize "
+        "A - alpha*Jmax - gamma*dpsi^2 over (chi, dpsi) at the P-model "
+        "acclimation means (soil state included) with gs = lsc(psi_s, dpsi)*"
+        "dpsi/(1.6 D), a Weibull xylem vulnerability curve in series with the "
+        "Bonan-2014 soil-to-root resistance, giving leaf-top Vcmax25 and "
+        "rjv25; instantaneous, maximize A - gamma*dpsi^2 over the draw-down of "
+        "each leaf class inside the canopy Newton closure (stationarity "
+        "residual instantaneous_foc), so gs is the hydraulic supply at the "
+        "optimal draw-down. Replaces the empirical theta stress and the "
+        "Medlyn slope."
     ),
     "inputs": {
         "psi_soil": "m", "theta_soil": "1", "dz": "m", "root_frac": "1",
@@ -106,17 +118,21 @@ __physics_contract__ = {
     ),
     "idealized_test": (
         "tests/land/unit/test_phydro.py: reproduces the rphydro R package "
-        "(reference table) with f = 1 and no soil resistance; the returned "
-        "optimum dominates a brute-force (chi, dpsi) grid; capacities fall "
-        "smoothly with drying soil; implicit gradients match central finite "
-        "differences and stay finite on dry and wet columns."
+        "(reference table) with no soil resistance, acclimated AND "
+        "instantaneous solutions; the returned optimum dominates a "
+        "brute-force (chi, dpsi) grid; capacities fall smoothly with drying "
+        "soil; implicit gradients match central finite differences and stay "
+        "finite on dry and wet columns."
     ),
 }
 
 __param_spec__ = {
     "PHydroConfig": {
         "scheme_key": "land.phydro",
-        "excluded": {},
+        "excluded": {
+            "init_psi_s_mpa": "initialisation constant, not a physical closure",
+            "init_rsoil_leaf": "initialisation constant, not a physical closure",
+        },
         "params": {
             "gplant_mol": {
                 "units": "mol m-2 s-1 MPa-1", "bounds": (5e-4, 2e-2),
@@ -151,20 +167,6 @@ __param_spec__ = {
                 "reference": "Joshi et al. 2022 (Weibull shape b)",
                 "shape": None,
             },
-            # Lower bound -1000 MPa is the "no non-stomatal limitation" setting
-            # (f ~ 1); a calibration should search a narrower range.
-            "psi50_jmax_mpa": {
-                "units": "MPa", "bounds": (-1000.0, -0.3), "tunable_tier": 2,
-                "transform": "sigmoid", "category": "hydraulics",
-                "reference": "non-stomatal limitation of Jmax (this module)",
-                "shape": None,
-            },
-            "ck_jmax": {
-                "units": "1", "bounds": (1.0, 6.0), "tunable_tier": 2,
-                "transform": "sigmoid", "category": "hydraulics",
-                "reference": "non-stomatal limitation of Jmax (this module)",
-                "shape": None,
-            },
             "root_biomass_gm2": {
                 "units": "g m-2", "bounds": (50.0, 2000.0),
                 "tunable_tier": 2, "transform": "sigmoid",
@@ -196,11 +198,9 @@ _PSI_SOIL_CAP_WIDTH_MPA = 0.005  # softplus width of the cap (AD safety)
 _UMOL_PER_MOL = 1.0e6
 _LN2 = float(np.log(2.0))
 # Weibull argument guards: the ratio psi/psi50 is clipped so (ratio ** ck) and
-# its derivatives stay finite for every admissible ck, and the exponent of the
-# INVERSE curve is capped so 1/f cannot overflow.
+# its derivatives stay finite for every admissible ck.
 _WEIBULL_RATIO_MIN = 1.0e-12
 _WEIBULL_RATIO_MAX = 1.0e3
-_WEIBULL_INV_EXP_MAX = 30.0
 # Gauss-Legendre nodes/weights on [0, 1] for the xylem-path mean of P.
 _GL_NODES, _GL_WEIGHTS = (
     0.5 * (np.polynomial.legendre.leggauss(8)[0] + 1.0),
@@ -221,11 +221,12 @@ class PHydroConfig(NamedTuple):
     ck_xylem: float = 1.5          # [-] Weibull shape of the xylem curve
     root_biomass_gm2: float = 500.0  # [g/m2] fine-root biomass
     # --- costs ---
-    alpha_cost: float = 0.1        # [-] cost per unit Jmax
-    gamma_cost: float = 0.0        # [umol/m2/s/MPa^2] hydraulic risk cost
-    # --- non-stomatal limitation of Jmax ---
-    psi50_jmax_mpa: float = -3.0   # [MPa] leaf potential at 50% Jmax loss
-    ck_jmax: float = 1.0           # [-] Weibull shape of the Jmax curve
+    alpha_cost: float = 0.1        # [-] cost per unit Jmax (acclimated step)
+    gamma_cost: float = 1.0        # [umol/m2/s/MPa^2] hydraulic risk cost (both steps)
+    # --- initialisation constants of the acclimated soil state (recorded
+    #     here, no hidden choice): field capacity, no soil-to-root resistance ---
+    init_psi_s_mpa: float = -0.033   # [MPa]
+    init_rsoil_leaf: float = 0.0     # [MPa m2 leaf s/mol]
 
 
 class PhydroSupply(NamedTuple):
@@ -332,22 +333,31 @@ def weibull_vulnerability(psi_mpa: jax.Array, psi50_mpa, ck) -> jax.Array:
     return jnp.exp(-_weibull_exponent(psi_mpa, psi50_mpa, ck))
 
 
-def _supply_side(dpsi: jax.Array, env: _Env, cfg: PHydroConfig):
-    """``(gs, 1/f)`` at a draw-down: CO2 conductance and the Jmax stress inverse."""
-    # Mean of P over the xylem path [psi_leaf, psi_s] (fixed-node quadrature:
-    # smooth in dpsi, psi50 and ck; no incomplete-gamma function).
+def supply_transpiration(dpsi, psi_s_mpa, rsoil_leaf, gplant_mol,
+                         psi50_xylem_mpa, ck_xylem):
+    """Transpiration the soil-to-leaf path supplies at a draw-down.
+
+    ``E = lsc(psi_s, dpsi) * dpsi`` [mol H2O / m2 leaf / s] with
+    ``lsc = 1/(rsoil + 1/(gplant * Pbar))`` and ``Pbar`` the mean of the
+    Weibull curve over the xylem path ``[psi_s - dpsi, psi_s]`` (fixed-node
+    quadrature: smooth in dpsi, psi50 and ck; no incomplete-gamma function).
+    Shared by the acclimated and the instantaneous optimum.
+    """
     pbar = sum(
         float(w) * weibull_vulnerability(
-            env.psi_s - float(t) * dpsi, cfg.psi50_xylem_mpa, cfg.ck_xylem)
+            psi_s_mpa - float(t) * dpsi, psi50_xylem_mpa, ck_xylem)
         for t, w in zip(_GL_NODES, _GL_WEIGHTS))
-    kx = cfg.gplant_mol * pbar
+    kx = gplant_mol * pbar
     # lsc = 1/(rsoil + 1/kx), written without the 1/kx so kx -> 0 is finite.
-    lsc = kx / (1.0 + env.rsoil * kx)
-    gs = lsc * dpsi / (DIFFUSIVITY_RATIO_H2O_CO2 * env.d_frac)
-    inv_f = jnp.exp(jnp.minimum(
-        _weibull_exponent(env.psi_s - dpsi, cfg.psi50_jmax_mpa, cfg.ck_jmax),
-        _WEIBULL_INV_EXP_MAX))
-    return gs, inv_f
+    lsc = kx / (1.0 + rsoil_leaf * kx)
+    return lsc * dpsi
+
+
+def _supply_side(dpsi: jax.Array, env: _Env, cfg: PHydroConfig):
+    """CO2 conductance ``gs = E / (1.6 D)`` at a draw-down (acclimated step)."""
+    e = supply_transpiration(dpsi, env.psi_s, env.rsoil, cfg.gplant_mol,
+                             cfg.psi50_xylem_mpa, cfg.ck_xylem)
+    return e / (DIFFUSIVITY_RATIO_H2O_CO2 * env.d_frac)
 
 
 def _electron_transport(chi: jax.Array, gs: jax.Array, env: _Env):
@@ -362,16 +372,15 @@ def _jmax_per_j(j: jax.Array, env: _Env) -> jax.Array:
     return env.jlim / jnp.sqrt(jnp.maximum(env.jlim ** 2 - j ** 2, 1e-30))
 
 
-def _profit_chi(chi, gs, inv_f, dpsi, env: _Env, cfg: PHydroConfig):
+def _profit_chi(chi, gs, dpsi, env: _Env, cfg: PHydroConfig):
     """Profit ``A - alpha*Jmax - gamma*dpsi^2`` at a given supply state."""
     a, j = _electron_transport(chi, gs, env)
-    jmax = j * _jmax_per_j(j, env) * inv_f
+    jmax = j * _jmax_per_j(j, env)
     return a - cfg.alpha_cost * jmax - cfg.gamma_cost * dpsi * dpsi
 
 
 def _profit(chi, dpsi, env: _Env, cfg: PHydroConfig):
-    gs, inv_f = _supply_side(dpsi, env, cfg)
-    return _profit_chi(chi, gs, inv_f, dpsi, env, cfg)
+    return _profit_chi(chi, _supply_side(dpsi, env, cfg), dpsi, env, cfg)
 
 
 def _d(fn, x):
@@ -393,7 +402,7 @@ def _chi_min(gs: jax.Array, env: _Env) -> jax.Array:
     return jnp.where(b >= 0.0, 2.0 * c / (b + root), 0.5 * (root - b))
 
 
-def _chi_opt(gs, inv_f, dpsi, env: _Env, cfg: PHydroConfig) -> jax.Array:
+def _chi_opt(gs, dpsi, env: _Env, cfg: PHydroConfig) -> jax.Array:
     """Profit-maximizing chi at a fixed supply state (bisection on dF/dchi).
 
     ``F`` is concave in chi on ``(chi_min, 1)``: A is linear and J (hence
@@ -403,7 +412,7 @@ def _chi_opt(gs, inv_f, dpsi, env: _Env, cfg: PHydroConfig) -> jax.Array:
     def step(_, bracket):
         lo, hi = bracket
         mid = 0.5 * (lo + hi)
-        rising = _d(lambda c: _profit_chi(c, gs, inv_f, dpsi, env, cfg), mid) > 0.0
+        rising = _d(lambda c: _profit_chi(c, gs, dpsi, env, cfg), mid) > 0.0
         return jnp.where(rising, mid, lo), jnp.where(rising, hi, mid)
 
     lo, hi = jax.lax.fori_loop(
@@ -421,8 +430,7 @@ def _solve(env: _Env, cfg: PHydroConfig):
     def step(_, bracket):
         lo, hi = bracket
         mid = 0.5 * (lo + hi)
-        gs, inv_f = _supply_side(mid, env, cfg)
-        chi = _chi_opt(gs, inv_f, mid, env, cfg)
+        chi = _chi_opt(_supply_side(mid, env, cfg), mid, env, cfg)
         rising = _d(lambda d: _profit(chi, d, env, cfg), mid) > 0.0
         return jnp.where(rising, mid, lo), jnp.where(rising, hi, mid)
 
@@ -430,8 +438,7 @@ def _solve(env: _Env, cfg: PHydroConfig):
         0, _N_DPSI_ITER, step,
         (jnp.zeros_like(env.psi_s), jnp.full_like(env.psi_s, _DPSI_MAX_MPA)))
     dpsi = 0.5 * (lo + hi)
-    gs, inv_f = _supply_side(dpsi, env, cfg)
-    return _chi_opt(gs, inv_f, dpsi, env, cfg), dpsi
+    return _chi_opt(_supply_side(dpsi, env, cfg), dpsi, env, cfg), dpsi
 
 
 def _implicit_refine(chi0, dpsi0, env: _Env, cfg: PHydroConfig):
@@ -456,7 +463,7 @@ def _implicit_refine(chi0, dpsi0, env: _Env, cfg: PHydroConfig):
     h22 = _d(lambda d: grad_f(chi0, d, env_sg, cfg_sg)[1], dpsi0)
     det = h11 * h22 - h12 * h12
 
-    gs0, _ = _supply_side(dpsi0, env_sg, cfg_sg)
+    gs0 = _supply_side(dpsi0, env_sg, cfg_sg)
     a0, _ = _electron_transport(chi0, gs0, env_sg)
     converged = dpsi0 < _DPSI_MAX_MPA * (1.0 - 2.0 ** (2 - _N_DPSI_ITER))
     ok = (converged & (a0 > _A_ACTIVE_UMOL) & (h11 < 0.0)
@@ -480,10 +487,12 @@ def phydro_optimum(
     """Profit-maximizing acclimated capacities on the vulnerable-xylem supply.
 
     Maximizes ``A - alpha*Jmax - gamma*dpsi^2`` over ``(chi, dpsi)`` (module
-    docstring) and returns the water-stressed capacities the host kernel
-    should run with: Vcmax from coordination at the optimum's J, and the
-    effective ``f(psi_leaf) * Jmax``, both normalised to 25 degC with the
-    host's own Kattge & Knorr responses at the growth temperature.
+    docstring) at the acclimation means in ``acclim`` and the (acclimated)
+    soil state in ``supply``, and returns the capacities the host kernel
+    should run with: Vcmax from coordination at the optimum's J and the
+    Smith-form Jmax, both normalised to 25 degC with the host's own Kattge &
+    Knorr responses at the growth temperature.  ``dpsi_mpa`` seeds the
+    instantaneous draw-down unknowns of the canopy Newton closure.
     """
     if acclim is None:
         raise ValueError(
@@ -513,7 +522,7 @@ def phydro_optimum(
         jax.tree_util.tree_map(jax.lax.stop_gradient, cfg)))
     chi, dpsi, converged = _implicit_refine(chi0, dpsi0, env, cfg)
 
-    gs, _inv_f = _supply_side(dpsi, env, cfg)
+    gs = _supply_side(dpsi, env, cfg)
     _a, j = _electron_transport(chi, gs, env)
     # Coordination (A_c = A_j): Vcmax = (J/4) * (ci + K)/(ci + 2 Gamma*).
     mj_over_mc = (chi + big_k / ca_pa) / (chi + 2.0 * env.g)
@@ -527,6 +536,74 @@ def phydro_optimum(
     return PhydroCapacities(
         vcmax25_leaf=vcmax25, rjv25=rjv25, chi=chi, dpsi_mpa=dpsi,
         psi_leaf_mpa=supply.psi_s_mpa - dpsi, gs_mol=gs, converged=converged)
+
+
+class LeafHydraulics(NamedTuple):
+    """Supply state of ONE leaf class for the instantaneous step, all ``(ncol,)``.
+
+    ``dpsi_mpa`` is the class's Newton unknown (soil-to-leaf draw-down);
+    the soil fields are THIS step's (not the acclimated) supply; the
+    hydraulic constants travel as per-column arrays so the canopy solver's
+    implicit backward pass can differentiate with respect to them.
+    """
+
+    dpsi_mpa: jax.Array        # [MPa] draw-down (Newton unknown)
+    psi_s_mpa: jax.Array       # [MPa] conductance-weighted soil potential
+    rsoil_leaf: jax.Array      # [MPa m2 leaf s/mol] soil-to-root resistance
+    lai_class: jax.Array       # [m2 leaf/m2 ground] leaf area of the class
+    gplant_mol: jax.Array      # [mol/m2 leaf/s/MPa]
+    psi50_xylem_mpa: jax.Array  # [MPa]
+    ck_xylem: jax.Array        # [-]
+    gamma_cost: jax.Array      # [umol/m2/s/MPa^2]
+
+
+def leaf_supply_gs_w(hyd: LeafHydraulics, d_frac: jax.Array) -> jax.Array:
+    """Water-vapour conductance of the whole leaf CLASS at its draw-down.
+
+    ``E_leaf = supply_transpiration(dpsi)`` per leaf area; the class
+    transpires ``lai_class * E_leaf`` per ground area, so
+    ``gs_w = lai_class * E_leaf / D`` [mol H2O / m2 ground / s].  The
+    draw-down is taken as given (>= 0): the canopy solver projects its
+    trial steps onto that bound, so no floor is applied here (a smooth floor
+    put a corner at zero that the damped Newton stalled on).
+    """
+    e_leaf = supply_transpiration(
+        hyd.dpsi_mpa, hyd.psi_s_mpa, hyd.rsoil_leaf,
+        hyd.gplant_mol, hyd.psi50_xylem_mpa, hyd.ck_xylem)
+    return hyd.lai_class * e_leaf / jnp.maximum(d_frac, 1e-9)  # coeff-ok: div-by-zero guard on VPD/P
+
+
+def instantaneous_foc(
+    hyd: LeafHydraulics,
+    d_frac: jax.Array,
+    an_prime: jax.Array,
+    ci: jax.Array,
+    ca: jax.Array,
+    gs_w_class: jax.Array,
+) -> jax.Array:
+    """Stationarity of the instantaneous profit ``A - gamma*dpsi^2`` in ``dpsi``.
+
+    Per leaf area (both terms in umol/m2 leaf/s/MPa), zero at the optimum::
+
+        dA/ddpsi - 2 gamma dpsi
+        dA/ddpsi = [A'(ci) (ca - ci) / (A'(ci) + gs_c)] * dgs_c,leaf/ddpsi
+
+    The bracket is the assimilation gain per unit CO2 conductance ALONG the
+    diffusion balance ``A(ci) = gs_c (ca - ci)`` (``A'`` = dA/dci of the
+    host kernel at the current leaf state, ``gs_c`` the class's CO2
+    conductance per ground area); the supply slope is per leaf area, so the
+    class leaf area cancels.  ``gamma`` multiplies the raw draw-down, so a
+    leaf with nothing to gain (night, ``A' = 0``) is driven to ``dpsi = 0``
+    with a well-conditioned Jacobian row.
+    """
+    gs_c = gs_w_class / DIFFUSIVITY_RATIO_H2O_CO2
+    da_dgs = an_prime * (ca - ci) / jnp.maximum(an_prime + gs_c, 1e-12)  # coeff-ok: div-by-zero guard
+    def _gs_c_leaf(dpsi):
+        return supply_transpiration(
+            dpsi, hyd.psi_s_mpa, hyd.rsoil_leaf, hyd.gplant_mol,
+            hyd.psi50_xylem_mpa, hyd.ck_xylem) / (DIFFUSIVITY_RATIO_H2O_CO2 * d_frac)
+    dgs_ddpsi = jax.jvp(_gs_c_leaf, (hyd.dpsi_mpa,), (jnp.ones_like(hyd.dpsi_mpa),))[1]
+    return da_dgs * dgs_ddpsi - 2.0 * hyd.gamma_cost * hyd.dpsi_mpa
 
 
 def slope_for_model(

@@ -98,7 +98,7 @@ def test_supply_tracks_soil_potential_and_resistance_rises_when_dry():
 
 def _reference_case(alpha):
     """The reference grid run through phydro_optimum in rphydro's own setting:
-    no soil resistance, no Jmax stress (psi50_jmax -> -inf), gamma = 1."""
+    no soil resistance, gamma = 1."""
     pd = pytest.importorskip("pandas")
     ref = pd.read_csv(_REFERENCE)
     col = lambda c: jnp.asarray(ref[c].to_numpy(), dtype=jnp.float64)
@@ -111,7 +111,7 @@ def _reference_case(alpha):
     sup = ph.PhydroSupply(rsoil_leaf=jnp.zeros((n,)), psi_s_mpa=col("psi_soil"))
     cfg = ph.PHydroConfig(
         gplant_mol=col("k_scaled"), psi50_xylem_mpa=col("psi50"), ck_xylem=1.5,
-        alpha_cost=alpha, gamma_cost=1.0, psi50_jmax_mpa=-1.0e6)
+        alpha_cost=alpha, gamma_cost=1.0)
     caps = ph.phydro_optimum(acclim, sup, cfg, PModelConfig())
     tg_c = tk - constants.T_freeze
     vcmax = caps.vcmax25_leaf * vcmax_temperature_response(tk, tg_c)
@@ -121,7 +121,7 @@ def _reference_case(alpha):
 
 @needs_x64
 def test_reproduces_rphydro_reference():
-    """With f = 1 and no soil resistance the optimum IS rphydro's
+    """With no soil resistance the optimum IS rphydro's
     (jaideep777/phydro @a59e2c6, acclimated analytical solver), on every row of
     the T x PPFD x VPD x soil-psi x psi50 grid."""
     ref, caps, vcmax, jmax = _reference_case(alpha=0.1)
@@ -168,7 +168,7 @@ def test_optimum_dominates_brute_force_grid(psi_s, gamma):
     best = -np.inf
     for dpsi in np.linspace(1e-3, 6.0, 240):
         d = jnp.full((1,), float(dpsi))
-        gs, _ = ph._supply_side(d, env, cfg)
+        gs = ph._supply_side(d, env, cfg)
         lo = float(ph._chi_min(gs, env)[0])
         chis = jnp.linspace(lo + 1e-6, 1.0, 400)
         vals = np.asarray(ph._profit(chis, d, env, cfg))
@@ -195,7 +195,10 @@ def test_drought_response_is_gradual_and_shuts_down():
     assert v[0] > 20.0
     # Gradual: no single step of the wet-to-dry sweep removes most of the capacity.
     assert np.max(-np.diff(v[:6])) < 0.5 * v[0]
-    assert v[-1] < 1e-6 and v[-2] < 1e-6
+    # rphydro closure (gamma = 1, no soil resistance): still active at -3 MPa
+    # (the xylem keeps some conductance; ~80% of the wet capacity), shut down
+    # at -30 MPa.
+    assert v[-1] < 1e-6 and 0.0 < v[-2] < v[0]
     assert np.all(np.asarray(caps.psi_leaf_mpa) <= psi + 1e-12)
 
 
@@ -224,10 +227,10 @@ def test_weibull_curve_and_its_gradients_are_finite_everywhere():
             assert all(np.isfinite(float(g)) for g in grads)
 
 
-_GRAD_ARGS = ("alpha", "gamma", "gplant", "psi50_x", "ck_x", "psi50_j", "ck_j",
+_GRAD_ARGS = ("alpha", "gamma", "gplant", "psi50_x", "ck_x",
               "psi_s", "rsoil", "vpd", "t_k", "iabs", "co2")
 _GRAD_BASE = dict(alpha=0.1, gamma=0.3, gplant=4e-3, psi50_x=-2.0, ck_x=1.5,
-                  psi50_j=-1.5, ck_j=1.0, psi_s=-0.3, rsoil=20.0, vpd=1200.0,
+                  psi_s=-0.3, rsoil=20.0, vpd=1200.0,
                   t_k=constants.T_freeze + 22.0, iabs=700.0, co2=400.0)
 
 
@@ -240,8 +243,7 @@ def _grad_loss(*x):
         ps_ema=one(constants.p_atm_std))
     cfg = ph.PHydroConfig(
         gplant_mol=a["gplant"], psi50_xylem_mpa=a["psi50_x"], ck_xylem=a["ck_x"],
-        alpha_cost=a["alpha"], gamma_cost=a["gamma"],
-        psi50_jmax_mpa=a["psi50_j"], ck_jmax=a["ck_j"])
+        alpha_cost=a["alpha"], gamma_cost=a["gamma"])
     caps = ph.phydro_optimum(
         acclim, ph.PhydroSupply(rsoil_leaf=one(a["rsoil"]), psi_s_mpa=one(a["psi_s"])),
         cfg, PModelConfig())
@@ -250,7 +252,7 @@ def _grad_loss(*x):
 
 
 @needs_x64
-@pytest.mark.parametrize("override", [{}, {"psi_s": -0.9}, {"gamma": 0.0}])
+@pytest.mark.parametrize("override", [{}, {"psi_s": -0.9}, {"gamma": 1.0}])
 def test_implicit_gradients_match_finite_differences(override):
     """IFT gradients of every output w.r.t. every input and parameter equal
     central finite differences at an interior optimum."""
@@ -262,9 +264,6 @@ def test_implicit_gradients_match_finite_differences(override):
         up = [*x]; up[i] = x[i] + h
         dn = [*x]; dn[i] = x[i] - h
         fd = (float(_grad_loss(*up)) - float(_grad_loss(*dn))) / (2.0 * h)
-        if name == "gamma" and base["gamma"] == 0.0:
-            # gamma is at its lower bound: one-sided difference.
-            fd = (float(_grad_loss(*up)) - float(_grad_loss(*x))) / h
         np.testing.assert_allclose(
             float(grads[i]), fd, rtol=2e-3, atol=1e-6 * max(1.0, abs(fd)),
             err_msg=f"d/d{name}")
@@ -320,3 +319,120 @@ def test_slope_mappings_reproduce_target_gs():
 def test_no_state_raises():
     with pytest.raises(ValueError, match="acclimation state"):
         ph.phydro_optimum(None, _supply(), ph.PHydroConfig(), PModelConfig())
+
+
+def _rphydro_assim(vcmax, jmax, iabs, tk, pcfg):
+    """rphydro's instantaneous assimilation (umol/m2/s) as a function of ci
+    [umol/mol]: the smaller of the Rubisco- and light-limited rates, Smith
+    light response, no dark respiration (the reference table's rdark = 0)."""
+    from legoesm.land.p_model import _phi0
+    _, _, _, gamma_star_pa, k_pa = optimal_chi(
+        tk, jnp.full_like(tk, 1000.0), jnp.full_like(tk, 400.0),
+        jnp.full_like(tk, constants.p_atm_std), pcfg)
+    to_ppm = 1e6 / constants.p_atm_std
+    gstar, km = gamma_star_pa * to_ppm, k_pa * to_ppm
+    phi0_i = _phi0(tk, pcfg) * iabs
+    jj = 4.0 * phi0_i / jmax
+    jlim = phi0_i / jnp.sqrt(1.0 + jj * jj)
+
+    def assim(ci):
+        ac = vcmax * (ci - gstar) / (ci + km)
+        aj = jlim * (ci - gstar) / (ci + 2.0 * gstar)
+        return jnp.minimum(ac, aj)
+    return assim
+
+
+def _instantaneous_solve(assim, hyd, d_frac, ca, n_iter=60):
+    """Root of the instantaneous stationarity condition by bisection on
+    dpsi in [0, 20] MPa with the diffusion balance solved inside (test-side
+    reference solver; the model solves the same condition inside the canopy
+    Newton closure).  ``fori_loop`` so the trace stays small."""
+    def ci_of(dpsi):
+        h = hyd._replace(dpsi_mpa=dpsi)
+        gs_c = ph.leaf_supply_gs_w(h, d_frac) / 1.6
+
+        def body(_, br):   # assim(ci) - gs_c (ca - ci) is increasing in ci
+            lo, hi = br
+            mid = 0.5 * (lo + hi)
+            up = assim(mid) - gs_c * (ca - mid) < 0.0
+            return jnp.where(up, mid, lo), jnp.where(up, hi, mid)
+        lo, hi = jax.lax.fori_loop(0, n_iter, body, (jnp.zeros_like(ca), ca))
+        return 0.5 * (lo + hi), gs_c
+
+    def foc(dpsi):
+        ci, gs_c = ci_of(dpsi)
+        h = hyd._replace(dpsi_mpa=dpsi)
+        an_prime = jax.jvp(assim, (ci,), (jnp.ones_like(ci),))[1]
+        return ph.instantaneous_foc(h, d_frac, an_prime, ci, ca, 1.6 * gs_c)
+
+    def body(_, br):
+        lo, hi = br
+        mid = 0.5 * (lo + hi)
+        rising = foc(mid) > 0.0
+        return jnp.where(rising, mid, lo), jnp.where(rising, hi, mid)
+    lo, hi = jax.lax.fori_loop(
+        0, n_iter, body, (jnp.zeros_like(ca), jnp.full_like(ca, 20.0)))
+    dpsi = 0.5 * (lo + hi)
+    ci, gs_c = ci_of(dpsi)
+    return dpsi, ci / ca, gs_c
+
+
+@needs_x64
+def test_instantaneous_reproduces_rphydro_reference():
+    """The instantaneous stationarity condition (instantaneous_foc) with
+    rphydro's own assimilation form reproduces rphydro_instantaneous_
+    analytical on every reference row: capacities from the weekly (VPD =
+    1 kPa) acclimated row of the same (T, PPFD, soil psi, psi50), this row's
+    instantaneous VPD, no soil resistance, gamma = 1."""
+    pd = pytest.importorskip("pandas")
+    ref = pd.read_csv(_REFERENCE)
+    key = ["tc", "ppfd", "psi_soil", "psi50"]
+    weekly = ref[ref.vpd == 1000].set_index(key)[["r2acc_vcmax", "r2acc_jmax"]]
+    ref = ref.join(weekly, on=key, rsuffix="_wk")
+    # The VPD = 1 kPa rows ARE the acclimated conditions, where coordination
+    # makes A_c = A_j exactly: the limiting-rate assimilation has a derivative
+    # kink at the optimum, rphydro's finite-difference derivative straddles it
+    # and this solver takes one side (0.05-0.12 MPa apart at 30 degC).  Off
+    # that measure-zero point the two agree.
+    ref = ref[np.isfinite(ref.r2ins_chi) & np.isfinite(ref.r2acc_vcmax_wk)
+              & (ref.r2ins_dpsi < 19.0) & (ref.vpd != 1000)].reset_index(drop=True)
+    assert len(ref) > 800
+    col = lambda c: jnp.asarray(ref[c].to_numpy(), dtype=jnp.float64)
+    n = len(ref)
+    tk = col("tc") + constants.T_freeze
+    assim = _rphydro_assim(col("r2acc_vcmax_wk"), col("r2acc_jmax_wk"),
+                           col("ppfd"), tk, PModelConfig())
+    hyd = ph.LeafHydraulics(
+        dpsi_mpa=jnp.zeros((n,)), psi_s_mpa=col("psi_soil"),
+        rsoil_leaf=jnp.zeros((n,)), lai_class=jnp.ones((n,)),
+        gplant_mol=col("k_scaled"), psi50_xylem_mpa=col("psi50"),
+        ck_xylem=jnp.full((n,), 1.5), gamma_cost=jnp.ones((n,)))
+    dpsi, chi, gs_c = _instantaneous_solve(
+        assim, hyd, col("vpd") / constants.p_atm_std, jnp.full((n,), 400.0))
+    np.testing.assert_allclose(np.asarray(dpsi), ref.r2ins_dpsi, rtol=1e-2, atol=1e-4)
+    np.testing.assert_allclose(np.asarray(chi), ref.r2ins_chi, rtol=1e-2)
+    np.testing.assert_allclose(np.asarray(gs_c), ref.r2ins_gs, rtol=1e-2, atol=1e-6)
+
+
+def test_instantaneous_foc_closes_stomata_without_gain():
+    """A leaf with nothing to gain (A' = 0, e.g. night) has its stationarity
+    residual equal to -2 gamma dpsi: the only root is dpsi = 0, with a
+    well-conditioned slope."""
+    one = jnp.ones((1,))
+    hyd = ph.LeafHydraulics(
+        dpsi_mpa=0.7 * one, psi_s_mpa=-0.5 * one, rsoil_leaf=0.0 * one,
+        lai_class=2.0 * one, gplant_mol=4e-3 * one, psi50_xylem_mpa=-2.0 * one,
+        ck_xylem=1.5 * one, gamma_cost=1.0 * one)
+    d = 0.01 * one
+    gs_w = ph.leaf_supply_gs_w(hyd, d)
+    r = ph.instantaneous_foc(hyd, d, 0.0 * one, 300.0 * one, 400.0 * one, gs_w)
+    np.testing.assert_allclose(float(r[0]), -2.0 * 0.7, rtol=1e-12)
+    slope = jax.jvp(lambda dp: ph.instantaneous_foc(
+        hyd._replace(dpsi_mpa=dp), d, 0.0 * one, 300.0 * one, 400.0 * one, gs_w),
+        (hyd.dpsi_mpa,), (one,))[1]
+    np.testing.assert_allclose(float(slope[0]), -2.0, rtol=1e-12)
+    # The supply is linear in a small draw-down (no floor: the canopy solver
+    # projects its trials onto dpsi >= 0).
+    g2 = ph.leaf_supply_gs_w(hyd._replace(dpsi_mpa=0.02 * one), d)
+    g1 = ph.leaf_supply_gs_w(hyd._replace(dpsi_mpa=0.01 * one), d)
+    np.testing.assert_allclose(float(g2[0] / g1[0]), 2.0, rtol=1e-2)

@@ -74,7 +74,7 @@ _GRID_TYPES = ("latlon", "gaussian", "cubed_sphere",
 _LAND_MODES = ("multilayer", "slab")
 _SURFACE_SCHEMES = ("two_leaf_canopy", "simple_seb")
 _BULK_SCHEMES = ("most", "constant")
-_STOMATA_MODELS = ("ball_berry", "medlyn")
+_STOMATA_MODELS = ("ball_berry", "medlyn", "phydro")
 # Snow thermal scheme.  Only the single-node bulk SWE budget exists on this
 # lane today; the key is validated so a config naming the (future) multilayer
 # snow column fails loudly here instead of silently running different physics.
@@ -209,13 +209,29 @@ def validate_config(data: dict) -> LMIPConfig:
             "physics.transpiration_stress='phydro' requires "
             f"land_mode='multilayer' (got {physics['land_mode']!r}); the "
             "slab land has no soil water-potential column")
-    if (physics["transpiration_stress"] == "phydro"
-            and physics["canopy_capacity_scheme"] != "p_model"
-            and physics["canopy_g1_source"] != "p_model"):
+    # The P-hydro arm is one configuration (two_leaf_canopy refuses the rest
+    # at trace time; this is the fail-early copy): the hydraulic supply
+    # replaces the empirical stress, the optimum's capacities replace the
+    # table, the instantaneous optimum replaces the stomatal slope.
+    _ph = physics["transpiration_stress"] == "phydro"
+    if _ph != (physics["stomatal_model"] == "phydro"):
         raise ValueError(
-            "physics.transpiration_stress='phydro' needs a P-model switch on "
-            "(canopy_capacity_scheme or canopy_g1_source = 'p_model'): the "
-            "hydraulic optimum supplies the acclimated capacities/slope")
+            "physics.transpiration_stress='phydro' and physics.stomatal_model="
+            "'phydro' select the two halves of the P-hydro arm and must be set "
+            f"together; got transpiration_stress={physics['transpiration_stress']!r}, "
+            f"stomatal_model={physics['stomatal_model']!r}")
+    if _ph and (physics["canopy_capacity_scheme"] != "p_model"
+                or physics["canopy_g1_source"] != "table"):
+        raise ValueError(
+            "the P-hydro arm needs canopy_capacity_scheme='p_model' and "
+            "canopy_g1_source='table' (no stomatal slope is read under "
+            f"stomatal_model='phydro'); got canopy_capacity_scheme="
+            f"{physics['canopy_capacity_scheme']!r}, canopy_g1_source="
+            f"{physics['canopy_g1_source']!r}")
+    if _ph and physics["surface_scheme"] != "two_leaf_canopy":
+        raise ValueError(
+            "the P-hydro arm (stomatal_model='phydro') lives in the two-leaf "
+            f"canopy; got surface_scheme={physics['surface_scheme']!r}")
     _pm_on = (physics["canopy_capacity_scheme"] == "p_model"
               or physics["canopy_g1_source"] == "p_model")
     if _pm_on and physics.get("calibrated_land_physics", False):

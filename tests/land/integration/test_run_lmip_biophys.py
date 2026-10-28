@@ -521,12 +521,13 @@ def test_calibrated_land_rejects_a_contradicting_config(tmp_path):
 @pytest.mark.parametrize("arm,extra", [
     ("baseline", {}),
     ("least_cost", {"canopy_capacity_scheme": "p_model", "canopy_g1_source": "p_model"}),
-    ("phydro", {"canopy_capacity_scheme": "p_model", "canopy_g1_source": "p_model",
-                "transpiration_stress": "phydro"}),
+    ("phydro", {"canopy_capacity_scheme": "p_model", "canopy_g1_source": "table",
+                "transpiration_stress": "phydro", "stomatal_model": "phydro"}),
 ])
 def test_optimality_arms_run_on_the_global_driver(tmp_path, arm, extra):
-    """The three arms of the global comparison (prescribed / least-cost /
-    P-hydro, Medlyn stomata) run on the LMIP driver and tape the SAME
+    """The three arms of the global comparison (prescribed / least-cost with
+    Medlyn stomata; P-hydro with its instantaneous optimum) run on the LMIP
+    driver and tape the SAME
     capacity / slope / water-potential diagnostics, so the arms differ only
     in the switch keys."""
     import yaml
@@ -537,7 +538,8 @@ def test_optimality_arms_run_on_the_global_driver(tmp_path, arm, extra):
     out = tmp_path / "out"
     diag = ["pmodel_chi", "pmodel_vcmax25", "pmodel_vcmax25_nostress", "pmodel_g1",
             "pmodel_wfrac", "pmodel_psi_soil", "pmodel_psi_leaf",
-            "ci_ca_sun_day", "ci_ca_shade_day", "day_frac"]
+            "ci_ca_sun_day", "ci_ca_shade_day", "day_frac",
+            "phydro_dpsi_sun", "phydro_dpsi_shade", "canopy_converged"]
     cfg = validate_config({
         "grid": {"type": "latlon", "resolution": 4},
         "physics": {"land_mode": "multilayer", "surface_scheme": "two_leaf_canopy",
@@ -555,8 +557,24 @@ def test_optimality_arms_run_on_the_global_driver(tmp_path, arm, extra):
     ds = xr.open_dataset(out / "lmip_biophys.step.nc")
     gpp = np.asarray(ds["GPP"].values)
     assert np.all(np.isfinite(gpp)) and (gpp >= 0.0).all() and gpp.max() > 0.0
-    for v in ("pmodel_vcmax25", "pmodel_g1", "pmodel_wfrac", "pmodel_psi_soil"):
+    for v in ("pmodel_vcmax25", "pmodel_wfrac", "pmodel_psi_soil"):
         assert np.all(np.isfinite(ds[v].values)), v
+    # No stomatal slope is read in the P-hydro arm; the two draw-downs are
+    # its half-hourly state (>= 0, finite) and exist in no other arm.
+    g1, dps = ds["pmodel_g1"].values, ds["phydro_dpsi_sun"].values
+    # The synthetic forcing leaves the canopy closure unsolved on ~10-17% of
+    # column-steps in EVERY arm (measured: 0.83 baseline, 0.89 P-hydro); the
+    # held columns are contained by the multilayer step.  Guard the fraction
+    # loosely so a regression that stalls most columns is still caught.
+    solved = ds["canopy_converged"].values > 0.5
+    assert solved.mean() > 0.7
+    if arm == "phydro":
+        assert np.all(np.isnan(g1))
+        # Solved columns: a non-negative draw-down (night -> 0 to tolerance);
+        # a held column's iterate is not a solution and is not judged.
+        assert np.all(np.isfinite(dps)) and dps[solved].min() >= -1e-3
+    else:
+        assert np.all(np.isfinite(g1)) and np.all(np.isnan(dps))
     # Solved Ci/Ca is written by EVERY arm: inside the kernel's clip by day,
     # exactly zero at night (flag off).
     day = ds["day_frac"].values

@@ -648,9 +648,16 @@ def test_run_site_phydro_and_profile_wiring(tmp_path):
         mod.run_site(driver_nc, "diagnostic", str(tmp_path / "o1"), chunk=8,
                      transpiration_stress="phydro")
 
+    # The P-hydro arm is one configuration: hydraulic stress + optimum
+    # capacities + the instantaneous optimum as the stomatal model.
+    with pytest.raises(ValueError, match="phydro"):
+        mod.run_site(driver_nc, "prognostic", str(tmp_path / "o2b"),
+                     chunk=96, capacity_scheme="p_model",
+                     g1_source="p_model", canopy_stomatal_model="medlyn",
+                     transpiration_stress="phydro")
     m_ph = mod.run_site(driver_nc, "prognostic", str(tmp_path / "o2"),
                         chunk=96, capacity_scheme="p_model",
-                        g1_source="p_model", canopy_stomatal_model="medlyn",
+                        g1_source="table", canopy_stomatal_model="phydro",
                         transpiration_stress="phydro")
     assert np.isfinite(m_ph["GPP"]["rmse"])
     # The prognostic two-leaf run tapes the capacity / water-potential
@@ -658,10 +665,13 @@ def test_run_site_phydro_and_profile_wiring(tmp_path):
     import glob
     import xarray as xr
     ds = xr.open_dataset(glob.glob(str(tmp_path / "o2" / "*.nc"))[0])
-    for v in ("diag_chi", "diag_vcmax25", "diag_vcmax25_nostress", "diag_slope",
-              "diag_psi_leaf", "diag_psi_soil", "diag_wfrac"):
+    for v in ("diag_chi", "diag_vcmax25", "diag_vcmax25_nostress",
+              "diag_psi_leaf", "diag_psi_soil", "diag_wfrac",
+              "diag_dpsi_sun", "diag_dpsi_sh"):
         assert np.all(np.isfinite(ds[v].values)), v
-    assert np.all(ds.diag_psi_leaf.values <= ds.diag_psi_soil.values + 1e-9)
+    assert np.all(np.isnan(ds.diag_slope.values))   # no slope under phydro
+    assert ds.diag_dpsi_sun.values.min() >= -1e-3   # night: dpsi -> 0 to solver tolerance
+    assert ds.diag_dpsi_sun.values.max() > 0.0
     assert np.all((ds.diag_chi.values > 0.0) & (ds.diag_chi.values <= 1.0))
     # no post-hoc stress on the P-hydro capacity
     np.testing.assert_allclose(ds.diag_vcmax25.values, ds.diag_vcmax25_nostress.values)

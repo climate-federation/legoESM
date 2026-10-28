@@ -69,5 +69,6 @@ output:
     vars: [T_sfc, Rnet, shflx, lhflx, LAI, GPP, ET, transp, soil_evap, runoff,
            precip, reverted, pmodel_chi, pmodel_vcmax25, pmodel_vcmax25_nostress,
            pmodel_g1, pmodel_wfrac, pmodel_psi_soil, pmodel_psi_leaf,
+           phydro_dpsi_sun, phydro_dpsi_shade, canopy_converged,
            ci_ca_sun_day, ci_ca_shade_day, day_frac,
            pmodel_n_rubisco_leaf, pmodel_n_electron_transport_leaf]

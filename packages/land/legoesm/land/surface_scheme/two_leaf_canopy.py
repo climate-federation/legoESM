@@ -48,6 +48,7 @@ from legoesm.land.canopy.sif import two_leaf_canopy_sif
 from legoesm.land.canopy.stability import (
     compute_aerodynamics, sat_specific_humidity,
 )
+from legoesm.land.phydro import PhydroSupply
 from legoesm.land.canopy.solver import (
     CanopyForcingBundle, solve_canopy_closure, canopy_forward,
 )
@@ -410,33 +411,61 @@ def compute_two_leaf_canopy_fluxes(
             f"must be one of {VALID_G1_SOURCES}")
     rjv25 = None
     chi_opt = None  # P-model optimum ci/ca (C3/C4 blend), seeds the Newton Ci
+    dpsi_seed = None  # P-hydro acclimated draw-down, seeds the Newton dpsi
+    _phydro_on = getattr(
+        land_config, "transpiration_stress", "beta_theta") == "phydro"
+    # The P-hydro arm is ONE configuration: the hydraulic supply replaces the
+    # empirical stress (transpiration_stress='phydro'), the optimum's
+    # capacities replace the table (capacity_scheme='p_model') and the
+    # instantaneous optimum replaces the stomatal slope (stomatal_model=
+    # 'phydro', g1_source='table').  Any other combination would leave a
+    # switch silently inert, so it is refused here.
+    if _phydro_on != (cc.stomatal_model == "phydro"):
+        raise ValueError(
+            "transpiration_stress='phydro' and stomatal_model='phydro' select "
+            "the two halves of the P-hydro arm and must be set together; got "
+            f"transpiration_stress={'phydro' if _phydro_on else 'beta_theta'!r}, "
+            f"stomatal_model={cc.stomatal_model!r}")
+    if _phydro_on and (cc.capacity_scheme != "p_model" or cc.g1_source != "table"):
+        raise ValueError(
+            "the P-hydro arm needs capacity_scheme='p_model' (the optimum's "
+            "capacities) and g1_source='table' (no stomatal slope is read "
+            f"under stomatal_model='phydro'); got capacity_scheme="
+            f"{cc.capacity_scheme!r}, g1_source={cc.g1_source!r}")
     if cc.capacity_scheme == "p_model" or cc.g1_source == "p_model":
         # Raises with a clear message when this caller does not carry the
         # acclimation state (slab-land / patch-mosaic until wired): no silent
         # fall-back to prescribed parameters.
-        _phydro_on = getattr(
-            land_config, "transpiration_stress", "beta_theta") == "phydro"
-        if (cc.g1_source == "p_model" and cc.stomatal_model != "medlyn"
-                and not _phydro_on):
+        if cc.g1_source == "p_model" and cc.stomatal_model != "medlyn":
             raise ValueError(
                 "g1_source='p_model' predicts a MEDLYN slope under the "
                 "least-cost stomatal model dispatch; with "
                 f"stomatal_model={cc.stomatal_model!r} select "
-                "transpiration_stress='phydro' (whose slope mapping covers "
-                "every model) or g1_source='table'.")
+                "g1_source='table'.")
         if _phydro_on and phydro_supply is None:
             raise ValueError(
                 "transpiration_stress='phydro' but no PhydroSupply was "
                 "threaded to the canopy (phydro_supply=None): this caller "
                 "does not carry the soil-to-leaf supply state.")
         if _phydro_on:
-            # C3 capacities/slope from the PROFIT optimum on the SPA supply
-            # (the empirical theta stress is replaced below); C4 columns keep
-            # the rpmodel-c4 least-cost optimum (both optimality sources).
+            # C3 capacities from the ACCLIMATED profit optimum: acclimation
+            # means of the atmosphere AND of the soil state (the running
+            # means carried in pmodel_acclim); this step's supply goes to
+            # the Newton closure below.  C4 columns keep the rpmodel-c4
+            # least-cost optimum (both optimality sources).
             from legoesm.land.phydro import phydro_optimum
+            if pmodel_acclim.psi_s_mean_mpa is None:
+                raise ValueError(
+                    "transpiration_stress='phydro' but the acclimation state "
+                    "carries no soil-state means (psi_s_mean_mpa=None): "
+                    "initialise it with soil_init (init_pmodel_acclim).")
+            _acc_supply = PhydroSupply(
+                rsoil_leaf=pmodel_acclim.rsoil_mean,
+                psi_s_mpa=pmodel_acclim.psi_s_mean_mpa)
             _hcaps = phydro_optimum(
-                pmodel_acclim, phydro_supply, land_config.phydro,
+                pmodel_acclim, _acc_supply, land_config.phydro,
                 land_config.p_model)
+            dpsi_seed = jax.lax.stop_gradient(_hcaps.dpsi_mpa)
             _caps = None
         else:
             _caps = acclimated_capacities(pmodel_acclim, land_config.p_model)
@@ -473,7 +502,7 @@ def compute_two_leaf_canopy_fluxes(
                 pmodel_acclim.co2_mean_ppm, pmodel_acclim.ps_ema,
                 land_config.p_model)
             m_C3 = slope_for_model(
-                cc.stomatal_model, _hcaps.chi if _phydro_on else _caps.chi,
+                cc.stomatal_model, _caps.chi,
                 pmodel_acclim, _gs_pa, d0_leuning_kpa=cc.d0_leuning_kpa)
             m_C4 = slope_for_model(
                 cc.stomatal_model, _caps4.chi_c4, pmodel_acclim, _gs_pa,
@@ -567,8 +596,11 @@ def compute_two_leaf_canopy_fluxes(
     q_c_init = 0.5 * (q_s_init + q_atm)
     Ci_init = ci_seed(Ca, fC4, chi_opt)
 
-    initial_state = jnp.stack(
-        [Ta, Ta, Ci_init, Ci_init, Ta, q_c_init], axis=-1)  # (ncol, 6)
+    _x0 = [Ta, Ta, Ci_init, Ci_init, Ta, q_c_init]
+    if cc.stomatal_model == "phydro":
+        # The two draw-down unknowns start at the acclimated optimum's.
+        _x0 += [dpsi_seed, dpsi_seed]
+    initial_state = jnp.stack(_x0, axis=-1)  # (ncol, 6) or (ncol, 8)
 
     def _bcast(v):
         if hasattr(v, "shape") and v.shape == (ncol,):
@@ -598,7 +630,20 @@ def compute_two_leaf_canopy_fluxes(
             # broadcast: every bundle leaf is vmapped over columns, so the
             # scalar config float must be (ncol,)
             d0_leuning_kpa=jnp.full(ncol, cc.d0_leuning_kpa),
+            **_phydro_bundle,
         )
+
+    # This step's supply + the hydraulic constants for the instantaneous
+    # optimum (stomatal_model="phydro"); nothing otherwise.
+    if cc.stomatal_model == "phydro":
+        _hc = land_config.phydro
+        _phydro_bundle = dict(
+            psi_s_mpa=phydro_supply.psi_s_mpa, rsoil_leaf=phydro_supply.rsoil_leaf,
+            gplant_mol=_bcast(_hc.gplant_mol),
+            psi50_xylem_mpa=_bcast(_hc.psi50_xylem_mpa),
+            ck_xylem=_bcast(_hc.ck_xylem), gamma_cost=_bcast(_hc.gamma_cost))
+    else:
+        _phydro_bundle = {}
 
     def _solve_one_col(x0, bun):
         return solve_canopy_closure(x0, bun, cc)
@@ -770,6 +815,8 @@ def compute_two_leaf_canopy_fluxes(
         gs_Sh=gs_Sh,
         ci_ca_sun=x_final[:, 2] / Ca,
         ci_ca_sh=x_final[:, 3] / Ca,
+        dpsi_sun_mpa=(x_final[:, 6] if cc.stomatal_model == "phydro" else None),
+        dpsi_sh_mpa=(x_final[:, 7] if cc.stomatal_model == "phydro" else None),
         n_iters=n_iters,
         # Whether the Newton closure actually reached a root on this column.
         # False means the fluxes above are a stopped iterate, not a solution —

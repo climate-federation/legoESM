@@ -6,10 +6,8 @@ this evaluates, at the same T / VPD / PPFD / CO2 / soil psi, with leaf T = air
 T (no energy balance, no canopy) and fully acclimated to the row:
 
   lc    least-cost lane (land/p_model.py): capacities + Medlyn g1
-  ph    P-hydro lane (land/phydro.py) at its DEFAULT parameters
-  phj   P-hydro lane in rphydro's own setting (no Jmax stress, gamma = 1)
-  phn   P-hydro lane with the Jmax stress switched off at psi50_jmax =
-        -1000 MPa and gamma = 1
+  ph    P-hydro ACCLIMATED optimum (land/phydro.py) at its default
+        parameters (gamma = 1, as rphydro)
 
 Each lane is reported twice: the optimum's own numbers ("c1": chi, dpsi, gs,
 A, Vcmax, Jmax) and what the host FvCB kernel + Medlyn make of the injected
@@ -92,9 +90,7 @@ def evaluate(ref: pd.DataFrame) -> pd.DataFrame:
 
     lc = acclimated_capacities(st, pcfg)
     record("lc", lc.vcmax25_leaf, lc.rjv25, lc.g1_kpa)
-    for lane, hcfg in (("ph", PHydroConfig(**xylem)),
-                       ("phj", PHydroConfig(**xylem, gamma_cost=1.0, psi50_jmax_mpa=-1.0e6)),
-                       ("phn", PHydroConfig(**xylem, gamma_cost=1.0, psi50_jmax_mpa=-1.0e3))):
+    for lane, hcfg in (("ph", PHydroConfig(**xylem)),):
         ph = phydro_optimum(st, supply, hcfg, pcfg)
         record(lane, ph.vcmax25_leaf, ph.rjv25, slope_for_model("medlyn", ph.chi, st, gstar))
         out[f"{lane}_c1_chi"], out[f"{lane}_c1_dpsi"] = ph.chi, ph.dpsi_mpa
@@ -108,13 +104,9 @@ _SERIES = {  # legend label, line style, {quantity: column}
     "rpmodel": ("k-", dict(gs="r1_gs", a="r1_a", vcmax="r1_vcmax", jmax="r1_jmax")),
     "rphydro (gamma=1, no Jmax stress)": ("C0-", dict(
         gs="r2acc_gs", a="r2acc_a", vcmax="r2acc_vcmax", jmax="r2acc_jmax", psi_l="r2acc_psi_l")),
-    "code P-hydro, rphydro setting": ("C2--", dict(
-        gs="phj_c1_gs", a="phj_c1_a", vcmax="phj_vcmax", jmax="phj_jmax", psi_l="phj_c1_psi_l")),
-    "code P-hydro, default": ("C3:", dict(
+    "code P-hydro, acclimated": ("C3:", dict(
         gs="ph_c1_gs", a="ph_c1_a", vcmax="ph_vcmax", jmax="ph_jmax", psi_l="ph_c1_psi_l")),
-    "host, P-hydro default": ("C3-", dict(gs="ph_host_gs", a="ph_host_a")),
-    "code P-hydro, Jmax-stress psi50=-1000, gamma=1": ("C4-.", dict(
-        gs="phn_c1_gs", a="phn_c1_a", vcmax="phn_vcmax", jmax="phn_jmax", psi_l="phn_c1_psi_l")),
+    "host (Medlyn g1 from chi), P-hydro": ("C3-", dict(gs="ph_host_gs", a="ph_host_a")),
     "host, least-cost": ("C1-", dict(gs="lc_host_gs", a="lc_host_a", vcmax="lc_vcmax", jmax="lc_jmax")),
 }
 _QUANTITIES = {"gs": "gs", "a": "An", "vcmax": "Vcmax", "jmax": "Jmax"}
@@ -140,8 +132,7 @@ def summarise(df: pd.DataFrame) -> str:
     blocks.append("-- leaf psi [MPa] vs soil psi, VPD 1 kPa --\n" + pd.DataFrame(
         {lab: mid[c["psi_l"]].to_numpy() for lab, (_, c) in _SERIES.items() if "psi_l" in c},
         index=mid.psi_soil).round(2).to_string())
-    blocks.append(f"P-hydro default converged on {df.ph_converged.mean():.3f} of all rows; "
-                  f"with psi50_jmax = -1000, gamma = 1 on {df.phn_converged.mean():.3f}")
+    blocks.append(f"P-hydro acclimated optimum converged on {df.ph_converged.mean():.3f} of all rows")
     return "\n\n".join(blocks)
 
 

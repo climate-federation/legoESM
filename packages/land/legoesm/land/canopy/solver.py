@@ -2,6 +2,12 @@
 
 Solves the 6-variable canopy energy balance system:
   x = [Tf_Sun, Tf_Sh, Ci_Sun, Ci_Sh, Tc, q_c]
+or, under ``stomatal_model="phydro"``, the 8-variable system with the
+soil-to-leaf draw-down of each leaf class appended:
+  x = [Tf_Sun, Tf_Sh, Ci_Sun, Ci_Sh, Tc, q_c, dpsi_Sun, dpsi_Sh]
+whose two extra residuals are the stationarity of the instantaneous
+P-hydro profit (``land/phydro.py::instantaneous_foc``); the hydraulic
+supply at that draw-down IS the leaf's stomatal conductance.
 
 The soil skin temperature ``Ts`` is **not** a Newton variable of this
 solver — it is supplied by the caller as ``bundle.Ts_bc`` and kept fixed
@@ -52,6 +58,8 @@ from typing import NamedTuple
 from legoesm.land.canopy.config import CanopyConfig, VALID_LE_MODULES
 from legoesm.land.canopy.radiative_transfer import canopy_longwave_rt
 from legoesm.land.canopy.photosynthesis import photosynthesis
+from legoesm.land.phydro import LeafHydraulics, instantaneous_foc
+from legoesm.land.leaf_biophysics import DIFFUSIVITY_RATIO_H2O_CO2
 from legoesm.land.canopy.stability import (
     monin_obukhov_stability,
     compute_boundary_layer_resistance,
@@ -60,6 +68,7 @@ from legoesm.land.canopy.stability import (
 )
 from legoesm.land.canopy.energy_balance import (
     canopy_met_variables,
+    gs_mol_per_ms,
     saturation_specific_humidity,
     leaf_energy_balance_bt,
     leaf_energy_balance_pm,
@@ -121,6 +130,30 @@ _LM_RTOL, _LM_ATOL = 1.0e-8, 1.0e-12     # [-] on the SQUARED residual norm
 # the accept-only-if-the-residual-drops rule; a component's move is
 # xscale[i]*dz[i], which the damping shrinks whenever a trial is rejected.
 _LM_XSCALE = jnp.array([5.0, 5.0, 5.0, 5.0, 5.0, 5.0e-3])
+# The two P-hydro draw-down unknowns [MPa] appended under stomatal_model="phydro".
+_LM_XSCALE_DPSI = 0.5
+# Residual weight of the two draw-down rows.  Left at 1: the stationarity
+# residual is already O(10-100) umol/m2/s/MPa at the start of a daytime solve,
+# on a par with the kelvin rows; a larger weight lets those rows dominate the
+# RELATIVE convergence test (n_sq <= rtol * n_sq_0) and loosens every other
+# row (measured: LE/H skill fell at two sites with 1e2).
+_FOC_ROW_SCALE = 1.0
+_CI_PROJ_MIN_FRAC = 0.02   # [-] lower projection bound of the Ci unknowns, as a fraction of Ca (phydro)
+_N_STATE = 6
+_N_STATE_PHYDRO = 8
+
+
+def state_size(stomatal_model: str) -> int:
+    """Length of the Newton state vector for a stomatal model."""
+    return _N_STATE_PHYDRO if stomatal_model == "phydro" else _N_STATE
+
+
+def _xscale(n: int) -> jax.Array:
+    if n == _N_STATE:
+        return _LM_XSCALE
+    if n == _N_STATE_PHYDRO:
+        return jnp.concatenate([_LM_XSCALE, jnp.full((2,), _LM_XSCALE_DPSI)])
+    raise ValueError(f"canopy Newton state of length {n}; expected 6 or 8")
 
 # The residual is already weighted where it is built: its humidity row carries a
 # factor of 1e3, which puts a kg/kg difference on the same footing as a kelvin
@@ -203,6 +236,37 @@ class CanopyForcingBundle(NamedTuple):
     # Leuning D0 [kPa] (CanopyConfig.d0_leuning_kpa) — consumed only when
     # stomatal_model == "leuning"; None otherwise.  Appended last.
     d0_leuning_kpa: jax.Array | float | None = None
+    # P-hydro instantaneous supply (stomatal_model == "phydro" only; None
+    # otherwise): THIS step's conductance-weighted soil water potential [MPa]
+    # and soil-to-root resistance per leaf area, plus the hydraulic constants
+    # as (ncol,) arrays so the implicit backward pass differentiates them.
+    psi_s_mpa: jax.Array | None = None
+    rsoil_leaf: jax.Array | None = None
+    gplant_mol: jax.Array | None = None
+    psi50_xylem_mpa: jax.Array | None = None
+    ck_xylem: jax.Array | None = None
+    gamma_cost: jax.Array | None = None
+
+
+def _leaf_hydraulics(x, bundle: CanopyForcingBundle, stomatal_model: str):
+    """``(hyd_Sun, hyd_Sh)`` from the state's draw-downs; ``(None, None)``
+    unless the stomatal model is ``"phydro"``."""
+    if stomatal_model != "phydro":
+        return None, None
+    b = bundle
+    if b.psi_s_mpa is None:
+        raise ValueError(
+            "stomatal_model='phydro' but the forcing bundle carries no "
+            "P-hydro supply (psi_s_mpa=None); the caller must thread the "
+            "step's PhydroSupply and PHydroConfig into the bundle")
+    _LAI_CLASS_FLOOR = 1.0e-3  # coeff-ok: leaf-area floor of an empty leaf class [m2/m2]
+    def _hyd(dpsi, lai_class):
+        return LeafHydraulics(
+            dpsi_mpa=dpsi, psi_s_mpa=b.psi_s_mpa, rsoil_leaf=b.rsoil_leaf,
+            lai_class=jnp.maximum(lai_class, _LAI_CLASS_FLOOR),
+            gplant_mol=b.gplant_mol, psi50_xylem_mpa=b.psi50_xylem_mpa,
+            ck_xylem=b.ck_xylem, gamma_cost=b.gamma_cost)
+    return (_hyd(x[6], b.fSun * b.LAI), _hyd(x[7], (1.0 - b.fSun) * b.LAI))
 
 
 # ---------------------------------------------------------------------------
@@ -230,6 +294,7 @@ def _canopy_residual(
     """
     Tf_Sun, Tf_Sh, Ci_Sun, Ci_Sh, Tc, q_c = (
         x[0], x[1], x[2], x[3], x[4], x[5])
+    hyd_Sun, hyd_Sh = _leaf_hydraulics(x, bundle, stomatal_model)
 
     b = bundle
     Ts = b.Ts_bc
@@ -285,26 +350,26 @@ def _canopy_residual(
             Tc, q_f_Sun, q_c, RH_c, VPD_c,
             b.lam, b.Cp, b.rhoa, Rb_Sun, b.m, b.b0,
             fwet=b.fwet, stomatal_model=stomatal_model, le_cap_mode=le_cap_mode,
-            d0_leuning_kpa=b.d0_leuning_kpa)
+            d0_leuning_kpa=b.d0_leuning_kpa, hyd=hyd_Sun)
         _, LE_Sh, H_Sh, Tf_Sh_new, gs_Sh, Ci_Sh_new = leaf_energy_balance_bt(
             An_Sh, b.ASW_Sh, ALW_Sh, Tf_Sh, b.Ps, b.Ca,
             Tc, q_f_Sh, q_c, RH_c, VPD_c,
             b.lam, b.Cp, b.rhoa, Rb_Sh, b.m, b.b0,
             fwet=b.fwet, stomatal_model=stomatal_model, le_cap_mode=le_cap_mode,
-            d0_leuning_kpa=b.d0_leuning_kpa)
+            d0_leuning_kpa=b.d0_leuning_kpa, hyd=hyd_Sh)
     else:  # PM
         _, LE_Sun, H_Sun, Tf_Sun_new, gs_Sun, Ci_Sun_new = leaf_energy_balance_pm(
             An_Sun, b.ASW_Sun, ALW_Sun, Tf_Sun, b.Ps, b.Ca,
             Tc, VPD_c, RH_c, desTc, ddesTc, gamma_c,
             b.Cp, b.rhoa, Rb_Sun, b.m, b.b0,
             fwet=b.fwet, stomatal_model=stomatal_model, le_cap_mode=le_cap_mode,
-            d0_leuning_kpa=b.d0_leuning_kpa)
+            d0_leuning_kpa=b.d0_leuning_kpa, hyd=hyd_Sun)
         _, LE_Sh, H_Sh, Tf_Sh_new, gs_Sh, Ci_Sh_new = leaf_energy_balance_pm(
             An_Sh, b.ASW_Sh, ALW_Sh, Tf_Sh, b.Ps, b.Ca,
             Tc, VPD_c, RH_c, desTc, ddesTc, gamma_c,
             b.Cp, b.rhoa, Rb_Sh, b.m, b.b0,
             fwet=b.fwet, stomatal_model=stomatal_model, le_cap_mode=le_cap_mode,
-            d0_leuning_kpa=b.d0_leuning_kpa)
+            d0_leuning_kpa=b.d0_leuning_kpa, hyd=hyd_Sh)
 
     # ---- Soil energy balance (prescribed Ts; G diagnosed as residual) ----
     q_s = saturation_specific_humidity(Ts, b.Ps)
@@ -355,18 +420,56 @@ def _canopy_residual(
     anchor_weight = 0.5 * (1.0 - jnp.tanh((b.fSun - _ANCHOR_FSUN_CENTER) / _ANCHOR_FSUN_WIDTH))
     res_Tf_Sun = (anchor_weight * (Tf_Sun - Tf_Sh)
                   + (1.0 - anchor_weight) * (Tf_Sun - Tf_Sun_new))
+    if stomatal_model == "phydro":
+        # Under the hydraulic supply gs is independent of An, so the fixed-point
+        # form ``Ci - (Ca - 1.6 An/gs)`` is stiff where gs is small (night, dry
+        # soil: dCi/dgs ~ An/gs^2) and the damped Newton creeps.  Write the SAME
+        # diffusion balance in flux form instead, ``gs_c (Ca - Ci) - An = 0``
+        # [umol/m2/s], which is smooth and O(An) everywhere.  (Medlyn ties gs
+        # to An, so its fixed-point form is a constant chi and never stiff.)
+        gs_c_Sun = gs_Sun * gs_mol_per_ms(Tf_Sun, b.Ps) / DIFFUSIVITY_RATIO_H2O_CO2
+        gs_c_Sh = gs_Sh * gs_mol_per_ms(Tf_Sh, b.Ps) / DIFFUSIVITY_RATIO_H2O_CO2
+        bal_Sun = An_Sun - gs_c_Sun * (b.Ca - Ci_Sun)
+        bal_Sh = An_Sh - gs_c_Sh * (b.Ca - Ci_Sh)
+    else:
+        bal_Sun, bal_Sh = Ci_Sun - Ci_Sun_new, Ci_Sh - Ci_Sh_new
     res_Ci_Sun = (anchor_weight * (Ci_Sun - Ci_Sh)
-                  + (1.0 - anchor_weight) * (Ci_Sun - Ci_Sun_new))
+                  + (1.0 - anchor_weight) * bal_Sun)
 
-    diff = jnp.array([
+    rows = [
         res_Tf_Sun,
         Tf_Sh  - Tf_Sh_new,
         res_Ci_Sun,
-        Ci_Sh  - Ci_Sh_new,
+        bal_Sh,
         Tc     - Tc_new,
         (q_c   - q_c_new) * 1e3,   # scale humidity residual
-    ])
-    return diff
+    ]
+    if stomatal_model == "phydro":
+        # Stationarity of each class's instantaneous profit A - gamma*dpsi^2
+        # in its draw-down, at the current leaf state: A' = dAn/dCi of the
+        # kernel, gs the class's conductance from the supply (back in mol).
+        # The sunlit row takes the same degeneracy anchor as Tf/Ci.
+        d_frac = jnp.maximum(VPD_c, 50.0) / b.Ps  # coeff-ok: 50 Pa VPD floor (as the kernel)
+        def _an_prime(T, Ci, APAR, Vc3, Vc4):
+            f = lambda c: photosynthesis(T, c, APAR, Vc3, Vc4, b.fC4, b.Ps,
+                                         b.alf, b.TgC, rjv25=b.rjv25)[0]
+            return jax.jvp(f, (Ci,), (jnp.ones_like(Ci),))[1]
+        foc_Sun = instantaneous_foc(
+            hyd_Sun, d_frac,
+            _an_prime(T_phot_sun, Ci_Sun, b.APAR_Sun, b.Vcmax25_Sun, b.Vcmax25_C4Sun),
+            Ci_Sun, b.Ca, gs_Sun * gs_mol_per_ms(Tf_Sun, b.Ps))
+        foc_Sh = instantaneous_foc(
+            hyd_Sh, d_frac,
+            _an_prime(T_phot_sh, Ci_Sh, b.APAR_Sh, b.Vcmax25_Sh, b.Vcmax25_C4Sh),
+            Ci_Sh, b.Ca, gs_Sh * gs_mol_per_ms(Tf_Sh, b.Ps))
+        # Scaled like the humidity row: the stationarity residual is O(1e-2)
+        # umol/m2/s/MPa for a 0.01 MPa miss, far below the K-sized rows, so
+        # without the factor the residual-norm convergence test would accept
+        # draw-downs 0.01 MPa off (negative at night).
+        rows += [_FOC_ROW_SCALE * (anchor_weight * (x[6] - x[7])
+                                   + (1.0 - anchor_weight) * foc_Sun),
+                 _FOC_ROW_SCALE * foc_Sh]
+    return jnp.array(rows)
 
 
 # ---------------------------------------------------------------------------
@@ -390,6 +493,7 @@ def canopy_forward(
     """
     Tf_Sun, Tf_Sh, Ci_Sun, Ci_Sh, Tc, q_c = (
         x[0], x[1], x[2], x[3], x[4], x[5])
+    hyd_Sun, hyd_Sh = _leaf_hydraulics(x, bundle, stomatal_model)
 
     b = bundle
     Ts = b.Ts_bc
@@ -444,26 +548,26 @@ def canopy_forward(
             Tc, q_f_Sun, q_c, RH_c, VPD_c,
             b.lam, b.Cp, b.rhoa, Rb_Sun, b.m, b.b0,
             fwet=b.fwet, stomatal_model=stomatal_model, le_cap_mode=le_cap_mode,
-            d0_leuning_kpa=b.d0_leuning_kpa)
+            d0_leuning_kpa=b.d0_leuning_kpa, hyd=hyd_Sun)
         Rn_Sh,  LE_Sh,  H_Sh,  _, gs_Sh, _  = leaf_energy_balance_bt(
             An_Sh, b.ASW_Sh, ALW_Sh, Tf_Sh, b.Ps, b.Ca,
             Tc, q_f_Sh, q_c, RH_c, VPD_c,
             b.lam, b.Cp, b.rhoa, Rb_Sh, b.m, b.b0,
             fwet=b.fwet, stomatal_model=stomatal_model, le_cap_mode=le_cap_mode,
-            d0_leuning_kpa=b.d0_leuning_kpa)
+            d0_leuning_kpa=b.d0_leuning_kpa, hyd=hyd_Sh)
     else:
         Rn_Sun, LE_Sun, H_Sun, _, gs_Sun, _ = leaf_energy_balance_pm(
             An_Sun, b.ASW_Sun, ALW_Sun, Tf_Sun, b.Ps, b.Ca,
             Tc, VPD_c, RH_c, desTc, ddesTc, gamma_c,
             b.Cp, b.rhoa, Rb_Sun, b.m, b.b0,
             fwet=b.fwet, stomatal_model=stomatal_model, le_cap_mode=le_cap_mode,
-            d0_leuning_kpa=b.d0_leuning_kpa)
+            d0_leuning_kpa=b.d0_leuning_kpa, hyd=hyd_Sun)
         Rn_Sh,  LE_Sh,  H_Sh,  _, gs_Sh,  _ = leaf_energy_balance_pm(
             An_Sh, b.ASW_Sh, ALW_Sh, Tf_Sh, b.Ps, b.Ca,
             Tc, VPD_c, RH_c, desTc, ddesTc, gamma_c,
             b.Cp, b.rhoa, Rb_Sh, b.m, b.b0,
             fwet=b.fwet, stomatal_model=stomatal_model, le_cap_mode=le_cap_mode,
-            d0_leuning_kpa=b.d0_leuning_kpa)
+            d0_leuning_kpa=b.d0_leuning_kpa, hyd=hyd_Sh)
 
     # Wet-leaf evaporation (interception loss): the fwet share of each leaf's
     # latent flux, which is sourced from the canopy-water store rather than
@@ -510,6 +614,9 @@ def canopy_forward(
         rah_above=rah_above, rah_below=rah_below,
         Rb_Sun=Rb_Sun, Rb_Sh=Rb_Sh,
         ALW_Sun=ALW_Sun, ALW_Sh=ALW_Sh, ALW_Soil=ALW_Soil,
+        # P-hydro draw-downs of the two classes (None unless "phydro").
+        dpsi_Sun=(None if hyd_Sun is None else hyd_Sun.dpsi_mpa),
+        dpsi_Sh=(None if hyd_Sh is None else hyd_Sh.dpsi_mpa),
     )
 
 
@@ -526,9 +633,9 @@ def solve_canopy_closure(
 
     Parameters
     ----------
-    initial_state : shape (6,)
-        [Tf_Sun, Tf_Sh, Ci_Sun, Ci_Sh, Tc, q_c].  Soil skin T is passed
-        as ``bundle.Ts_bc`` — see module docstring.
+    initial_state : shape (6,), or (8,) under stomatal_model="phydro"
+        [Tf_Sun, Tf_Sh, Ci_Sun, Ci_Sh, Tc, q_c(, dpsi_Sun, dpsi_Sh)].  Soil
+        skin T is passed as ``bundle.Ts_bc`` — see module docstring.
     bundle : CanopyForcingBundle
         All per-column forcing inputs (including ``Ts_bc``).
     config : CanopyConfig
@@ -536,7 +643,7 @@ def solve_canopy_closure(
 
     Returns
     -------
-    x_final : shape (6,)  — the final Newton iterate
+    x_final : same shape as ``initial_state`` — the final Newton iterate
     n_iters : scalar int  — iteration count when the loop stopped
     converged : scalar bool — whether the loop stopped because the Newton step
         fell below ``tol`` (True) rather than because it ran out of iterations
@@ -634,10 +741,11 @@ def _make_implicit_newton_solver(
         # silent semantic change, so it is deliberately unused on this path.
         F = partial(_F, bundle=bundle)
         Jac = jax.jacfwd(F)
+        xscale = _xscale(int(x0.shape[0]))
 
         def _res_jac(x):
             """Residual and Jacobian in SCALED variables (z = x / xscale)."""
-            return F(x), Jac(x) * _LM_XSCALE          # columns scaled
+            return F(x), Jac(x) * xscale              # columns scaled
 
         def _step(J_z, resid, lam):
             """Damped step, via QR of the augmented system.
@@ -662,10 +770,45 @@ def _make_implicit_newton_solver(
             _, _, _, _, _, _, done = state
             return ~done
 
+        def _bounds():
+            """Lower/upper bounds of the phydro unknowns (None otherwise).
+
+            The draw-downs are non-negative by definition (a leaf cannot be
+            wetter than its soil) and no stationary point lies below zero (the
+            gain term is >= 0, the risk term restoring).  Ci is kept inside
+            (0, Ca]: the flux-form balance has no clip of its own, and a trial
+            below zero puts the kernel on its Ci floor (A' = 0), where the
+            draw-down row loses its gain.
+            """
+            lo = jnp.full((_N_STATE_PHYDRO,), -jnp.inf, x0.dtype)
+            hi = jnp.full((_N_STATE_PHYDRO,), jnp.inf, x0.dtype)
+            lo = lo.at[_N_STATE:].set(0.0)
+            lo = lo.at[2:4].set(_CI_PROJ_MIN_FRAC * bundle.Ca)
+            hi = hi.at[2:4].set(bundle.Ca)
+            return lo, hi
+
         def body(state):
             x, resid, J_z, n_sq, lam, i, _ = state
             dz, n_sq_pred = _step(J_z, resid, lam)
-            x_trial = x + _LM_XSCALE * dz
+            if x0.shape[0] == _N_STATE_PHYDRO:
+                # Bound-constrained step (active set): an unknown sitting on a
+                # bound whose unconstrained step points outward is frozen (its
+                # Jacobian column zeroed) and the step re-solved, so the local
+                # model does not bank on a move the projection then cancels —
+                # the mismatch otherwise reads as a failed step, inflates the
+                # damping and stalls the column (measured: night leaves with
+                # dpsi = 0 never reached Ci = Ca).  The trial is projected
+                # onto the bounds and the predicted reduction is taken at the
+                # step actually made.
+                lo, hi = _bounds()
+                outward = ((x <= lo) & (dz < 0.0)) | ((x >= hi) & (dz > 0.0))
+                free = jnp.where(outward, 0.0, 1.0)
+                dz, _ = _step(J_z * free[None, :], resid, lam)
+                x_trial = jnp.clip(x + xscale * dz, lo, hi)
+                pred_resid = resid + J_z @ ((x_trial - x) / xscale)
+                n_sq_pred = jnp.sum(pred_resid * pred_resid)
+            else:
+                x_trial = x + xscale * dz
             resid_t = F(x_trial)
             n_sq_t = jnp.sum(resid_t * resid_t)
 
@@ -681,7 +824,7 @@ def _make_implicit_newton_solver(
             x = jnp.where(accept, x_trial, x)
             resid = jnp.where(accept, resid_t, resid)
             n_sq_new = jnp.where(accept, n_sq_t, n_sq)
-            J_z = jnp.where(accept, Jac(x_trial) * _LM_XSCALE, J_z)
+            J_z = jnp.where(accept, Jac(x_trial) * xscale, J_z)
 
             # A non-finite trial residual makes ``rho`` NaN, and every NaN
             # comparison is False — written naively that freezes the damping

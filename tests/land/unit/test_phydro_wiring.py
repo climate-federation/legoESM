@@ -26,11 +26,16 @@ def _forcing(ncol):
 
 
 def _cfg(**kw):
-    return MultiLayerLandConfig(
-        surface_scheme=CanopyConfig(
-            stomatal_model="medlyn", capacity_scheme="p_model",
-            g1_source="p_model").validate(),
-        **kw)
+    """Least-cost arm, or the one-configuration P-hydro arm when
+    ``transpiration_stress='phydro'`` (hydraulic stress + optimum capacities
+    + the instantaneous optimum as the stomatal model, no slope)."""
+    if kw.get("transpiration_stress") == "phydro":
+        cc = CanopyConfig(stomatal_model="phydro", capacity_scheme="p_model",
+                          g1_source="table").validate()
+    else:
+        cc = CanopyConfig(stomatal_model="medlyn", capacity_scheme="p_model",
+                          g1_source="p_model").validate()
+    return MultiLayerLandConfig(surface_scheme=cc, **kw)
 
 
 def test_unknown_transpiration_stress_raises():
@@ -127,10 +132,11 @@ def test_cli_round_trip():
              "--transpiration-stress", "phydro"]))
 
 
-def test_g1_nonmedlyn_requires_phydro_at_the_step():
-    """Least-cost g1 is a Medlyn quantity: p_model g1 + ball_berry WITHOUT
-    phydro is refused at the consumer; WITH phydro it runs (the slope maps
-    onto the active model)."""
+def test_g1_nonmedlyn_is_refused_and_the_phydro_arm_is_one_configuration():
+    """Least-cost g1 is a Medlyn quantity: p_model g1 + ball_berry is refused
+    at the consumer.  The P-hydro arm is one configuration: the hydraulic
+    stress without the phydro stomatal model (or with a p_model slope) is
+    refused, the full arm runs."""
     cfg_bad = MultiLayerLandConfig(surface_scheme=CanopyConfig(
         stomatal_model="ball_berry", capacity_scheme="p_model",
         g1_source="p_model").validate())
@@ -138,11 +144,17 @@ def test_g1_nonmedlyn_requires_phydro_at_the_step():
     with pytest.raises(ValueError, match="MEDLYN"):
         step_multilayer_land(st, _forcing(2), cfg_bad, U_min=1.0, dt=1800.0)
 
-    cfg_ok = MultiLayerLandConfig(
-        surface_scheme=CanopyConfig(
-            stomatal_model="ball_berry", capacity_scheme="p_model",
-            g1_source="p_model").validate(),
-        transpiration_stress="phydro")
+    for cc, msg in ((CanopyConfig(stomatal_model="medlyn", capacity_scheme="p_model",
+                                  g1_source="p_model"), "set together"),
+                    (CanopyConfig(stomatal_model="phydro", capacity_scheme="p_model",
+                                  g1_source="p_model"), "g1_source='table'")):
+        cfg_half = MultiLayerLandConfig(surface_scheme=cc.validate(),
+                                        transpiration_stress="phydro")
+        st_h = init_multilayer_land_state(2, cfg_half)
+        with pytest.raises(ValueError, match=msg):
+            step_multilayer_land(st_h, _forcing(2), cfg_half, U_min=1.0, dt=1800.0)
+
+    cfg_ok = _cfg(transpiration_stress="phydro")
     st2 = init_multilayer_land_state(2, cfg_ok)
     _, resp, _ = step_multilayer_land(st2, _forcing(2), cfg_ok, U_min=1.0,
                                       dt=1800.0)
@@ -210,7 +222,8 @@ def _two_leaf_fluxes(cc, w_frac_rz, *, transpiration_stress="beta_theta",
     one = jnp.ones(1)
     f = _forcing(1)._replace(sw_down=700.0 * one, cos_zenith=0.9 * one)
     acclim = init_pmodel_acclim(
-        1, t_init_K=292.0, ps_init_pa=1.013e5, cfg=PModelConfig())
+        1, t_init_K=292.0, ps_init_pa=1.013e5, cfg=PModelConfig(),
+        soil_init=((-0.4, 20.0) if transpiration_stress == "phydro" else None))
     out = compute_two_leaf_canopy_fluxes(
         T_soil_top=293.0 * one, forcing=f, canopy_config=cc,
         land_config=MultiLayerLandConfig(
@@ -228,13 +241,15 @@ def test_phydro_two_leaf_applies_no_empirical_stress():
     stomatal slope/intercept: with the hydraulic supply and the soil-evaporation
     stress held fixed, the solved GPP / LE / H are identical for a wet and a
     dry root-zone factor.  The same change moves the beta_theta fluxes."""
-    cc = CanopyConfig(stomatal_model="medlyn", capacity_scheme="p_model",
-                      g1_source="p_model").validate()
-    wet = _two_leaf_fluxes(cc, 1.0, transpiration_stress="phydro")
-    dry = _two_leaf_fluxes(cc, 0.2, transpiration_stress="phydro")
+    cc_ph = CanopyConfig(stomatal_model="phydro", capacity_scheme="p_model",
+                         g1_source="table").validate()
+    wet = _two_leaf_fluxes(cc_ph, 1.0, transpiration_stress="phydro")
+    dry = _two_leaf_fluxes(cc_ph, 0.2, transpiration_stress="phydro")
     assert np.all(np.isfinite(wet)) and wet[0] > 0.0
     np.testing.assert_allclose(dry, wet, rtol=1e-9, atol=1e-9)
-    bt_wet, bt_dry = _two_leaf_fluxes(cc, 1.0), _two_leaf_fluxes(cc, 0.2)
+    cc_lc = CanopyConfig(stomatal_model="medlyn", capacity_scheme="p_model",
+                         g1_source="p_model").validate()
+    bt_wet, bt_dry = _two_leaf_fluxes(cc_lc, 1.0), _two_leaf_fluxes(cc_lc, 0.2)
     assert bt_dry[0] < 0.6 * bt_wet[0]
 
 

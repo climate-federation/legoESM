@@ -31,6 +31,7 @@ from legoesm.thermo import (
 from legoesm.land.leaf_biophysics import DIFFUSIVITY_RATIO_H2O_CO2
 from legoesm.land.canopy.photosynthesis import co2_compensation_point
 from legoesm.land.stomata import ball_berry_gs, leuning_gs, medlyn_gs
+from legoesm.land.phydro import LeafHydraulics, leaf_supply_gs_w
 
 # Module-local constants.
 # NOTE: Stefan-Boltzmann, freezing point, latent heat of vaporisation, etc.
@@ -202,15 +203,19 @@ def _compute_gs_and_ci(
     b0: jax.Array,
     stomatal_model: str,
     d0_leuning_kpa: jax.Array | float | None = None,
+    hyd: LeafHydraulics | None = None,
 ) -> tuple[jax.Array, jax.Array, jax.Array]:
     """Stomatal conductance and intercellular CO2 closure for a leaf.
 
-    Dispatches between Ball-Berry (RH-based) and Medlyn (VPD-based) based
-    on the ``stomatal_model`` static argument.  Both models use the same
-    per-leaf ``(m, b0)`` pair — ``m`` is interpreted as the Ball-Berry
-    slope ``g1_bb`` for ``"ball_berry"`` and as the Medlyn slope ``g1_med``
-    [kPa^0.5] for ``"medlyn"``; ``b0`` is the residual conductance in both
-    cases.
+    Dispatches between Ball-Berry (RH-based), Medlyn (VPD-based), Leuning
+    and the P-hydro hydraulic supply based on the ``stomatal_model`` static
+    argument.  The three empirical models use the same per-leaf ``(m, b0)``
+    pair — ``m`` is interpreted as the Ball-Berry slope ``g1_bb`` for
+    ``"ball_berry"`` and as the Medlyn slope ``g1_med`` [kPa^0.5] for
+    ``"medlyn"``; ``b0`` is the residual conductance in every case.  Under
+    ``"phydro"`` the slope ``m`` is NOT read: the conductance is the water
+    the soil-to-leaf path supplies at the leaf class's draw-down
+    (``hyd``, a Newton unknown of the canopy closure; land/phydro.py).
 
     Parameters
     ----------
@@ -222,9 +227,10 @@ def _compute_gs_and_ci(
     Tf     : leaf temperature [K]  (for mol → m/s unit conversion)
     Ps     : surface pressure [Pa]
     m, b0  : stomatal slope and intercept (see above)
-    stomatal_model : ``"ball_berry"`` | ``"medlyn"`` — static Python string
-                     captured in a ``functools.partial`` closure; never
-                     traced by JAX.
+    stomatal_model : ``"ball_berry"`` | ``"medlyn"`` | ``"leuning"`` |
+                     ``"phydro"`` — static Python string captured in a
+                     ``functools.partial`` closure; never traced by JAX.
+    hyd    : the leaf class's P-hydro supply state (``"phydro"`` only)
 
     Returns
     -------
@@ -248,11 +254,21 @@ def _compute_gs_and_ci(
             An, VPD_kPa, Ca, co2_compensation_point(Tf), m, d0_leuning_kpa, b0)
     elif stomatal_model == "ball_berry":
         gs_mol = ball_berry_gs(An, RH_c, Ca, m, b0)
+    elif stomatal_model == "phydro":
+        # Hydraulic supply at the class's draw-down (the canopy Newton's
+        # extra unknown): gs_w = LAI_class * E_leaf(dpsi) / D, plus the
+        # cuticular intercept.  Same VPD floor as Medlyn.
+        if hyd is None:
+            raise ValueError(
+                "stomatal_model='phydro' needs the leaf class's LeafHydraulics "
+                "(threaded from the canopy solver); got None")
+        d_frac = jnp.maximum(VPD_c, 50.0) / Ps  # coeff-ok: 50 Pa VPD floor (as Medlyn)
+        gs_mol = leaf_supply_gs_w(hyd, d_frac) + b0
     else:
         raise ValueError(
             f"unknown stomatal_model {stomatal_model!r}; the stomatal "
             "conductance scheme must be one of "
-            "{'ball_berry', 'medlyn', 'leuning'}")
+            "{'ball_berry', 'medlyn', 'leuning', 'phydro'}")
 
     # Minimum cuticular conductance: keep gs > 0 even at full water stress with
     # the legacy ``stress_b0=True`` (m = b0 = 0), otherwise the leaf gs/Ci/An
@@ -264,17 +280,34 @@ def _compute_gs_and_ci(
     Ci = Ca - DIFFUSIVITY_RATIO_H2O_CO2 * An / jnp.maximum(gs_mol, 1e-9)
     # Clip Ci to the physically reasonable C3 range; mixed-PFT C3/C4
     # is handled upstream in ``photosynthesis()`` via the continuous fC4
-    # fraction, so the C4 bounds are not needed here.
-    Ci = jnp.clip(Ci, 0.5 * Ca, 0.9 * Ca)  # coeff-ok: clamp Ci to physical C3 range [0.5, 0.9]·Ca
+    # fraction, so the C4 bounds are not needed here.  Under the hydraulic
+    # supply the conductance is NOT tied to A, so Ci legitimately runs close
+    # to Ca on a wet leaf and well below 0.5 Ca on a shut one; the clip is
+    # then only a numerical guard, kept far from the operating range (a
+    # bound hit inside it is a corner the canopy Newton stalls on).
+    if stomatal_model == "phydro":
+        Ci = jnp.clip(Ci, 0.05 * Ca, 0.99 * Ca)  # coeff-ok: numerical guard on Ci (hydraulic supply)
+    else:
+        Ci = jnp.clip(Ci, 0.5 * Ca, 0.9 * Ca)  # coeff-ok: clamp Ci to physical C3 range [0.5, 0.9]·Ca
 
     # Unit conversion: mol m-2 s-1 → m s-1 at IUPAC STP reference
     # (T_std = T_freeze, P_std = _Ps0 = 101325 Pa, V_molar = 22.4 L/mol → 0.0224 m^3).
     # ``_CF_MOLAR_VOLUME`` encodes the reference molar volume (with the 1e-2 factor
     # below giving V_molar = 1e-2 / _CF_MOLAR_VOLUME = 0.0224 m^3/mol).
-    cf = _CF_MOLAR_VOLUME * (constants.T_freeze / Tf) * (Ps / _Ps0)
-    rs = 1.0 / (gs_mol / cf * 1e-2)   # coeff-ok: fixed molar-volume unit factor → [s m-1]
-    gs = 1.0 / rs                      # [m s-1]
+    gs = gs_mol / gs_mol_per_ms(Tf, Ps)   # [m s-1]
+    rs = 1.0 / gs
     return rs, gs, Ci
+
+
+def gs_mol_per_ms(Tf: jax.Array, Ps: jax.Array) -> jax.Array:
+    """Conductance unit factor ``[mol m-2 s-1] per [m s-1]`` at the leaf.
+
+    The reference molar volume is ``V_molar = 1e-2 / _CF_MOLAR_VOLUME =
+    0.0224 m^3/mol`` at ``(T_freeze, _Ps0)``, scaled by ``(T_freeze/Tf)
+    (Ps/_Ps0)``: ``gs_mol = gs_ms * cf / 1e-2``.
+    """
+    cf = _CF_MOLAR_VOLUME * (constants.T_freeze / Tf) * (Ps / _Ps0)
+    return cf / 1e-2   # coeff-ok: fixed molar-volume unit factor
 
 
 # ---------------------------------------------------------------------------
@@ -304,6 +337,7 @@ def leaf_energy_balance_bt(
     stomatal_model: str = "ball_berry",
     le_cap_mode: str = "soft",
     d0_leuning_kpa: jax.Array | float | None = None,
+    hyd: LeafHydraulics | None = None,
 ) -> tuple[jax.Array, ...]:
     """Leaf energy balance via direct bulk transfer (BT).
 
@@ -347,7 +381,7 @@ def leaf_energy_balance_bt(
     """
     _rs, gs, Ci = _compute_gs_and_ci(
         An, RH_c, VPD_c, Ca, Tf, Ps, m, b0, stomatal_model,
-        d0_leuning_kpa=d0_leuning_kpa)
+        d0_leuning_kpa=d0_leuning_kpa, hyd=hyd)
 
     Rn = ASW + ALW
     # Series leaf latent-heat conductance written directly in gs (= 1/rs):
@@ -412,6 +446,7 @@ def leaf_energy_balance_pm(
     stomatal_model: str = "ball_berry",
     le_cap_mode: str = "soft",
     d0_leuning_kpa: jax.Array | float | None = None,
+    hyd: LeafHydraulics | None = None,
 ) -> tuple[jax.Array, ...]:
     """Leaf energy balance via second-order Penman-Monteith (Paw & Gao 1988).
 
@@ -428,7 +463,7 @@ def leaf_energy_balance_pm(
     """
     rs, gs, Ci = _compute_gs_and_ci(
         An, RH_c, VPD_c, Ca, Tf, Ps, m, b0, stomatal_model,
-        d0_leuning_kpa=d0_leuning_kpa)
+        d0_leuning_kpa=d0_leuning_kpa, hyd=hyd)
 
     Rn = ASW + ALW
     # Wet/dry vapour-conductance blend -> effective canopy resistance.  The

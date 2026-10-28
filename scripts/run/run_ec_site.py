@@ -657,9 +657,20 @@ def _prognostic_fluxes(d: ECSiteDriver,
                 masked(u_star))
         if _want_diag:
             # From the PRE-step state: the values this step's fluxes used.
+            # P-hydro instantaneous draw-downs (NaN unless stomatal_model=phydro).
+            _dp = lambda v: masked(nan + jnp.zeros_like(out.ci_ca_sun) if v is None else v)
             emit = emit + ({**_capacity_diag(state, params_t, land_config),
                             "diag_ci_ca_sun": masked(out.ci_ca_sun),
-                            "diag_ci_ca_sh": masked(out.ci_ca_sh)},)
+                            "diag_ci_ca_sh": masked(out.ci_ca_sh),
+                            "diag_dpsi_sun": _dp(out.dpsi_sun_mpa),
+                            "diag_dpsi_sh": _dp(out.dpsi_sh_mpa),
+                            # 1 where the canopy Newton closure reached a root;
+                            # 0 = stopped iterate (the multilayer step HOLDS
+                            # such a column, but the fluxes emitted above are
+                            # the canopy's own, so score them knowing this).
+                            "diag_canopy_converged": (
+                                jnp.ones_like(out.ci_ca_sun) if out.converged is None
+                                else jnp.asarray(out.converged).astype(jnp.float64))},)
         return safe_state, emit
 
     params = (_clmml_land_params(d.canopy_params, clmml_sai) if is_clmml
@@ -1377,11 +1388,14 @@ def main() -> int:
                          "(default nitrogen profile) or 'coordination' "
                          "(fraction of the diffuse-light envelope)")
     ap.add_argument("--canopy-stomatal-model", default=None,
-                    choices=["ball_berry", "medlyn", "leuning"],
+                    choices=["ball_berry", "medlyn", "leuning", "phydro"],
                     dest="canopy_stomatal_model",
                     help="two-leaf stomatal conductance model (unset keeps the "
                          "config default ball_berry; required as 'medlyn' for "
-                         "--canopy-g1-source p_model).")
+                         "--canopy-g1-source p_model; 'phydro' = the P-hydro "
+                         "instantaneous optimum, set together with "
+                         "--transpiration-stress phydro and "
+                         "--canopy-capacity-scheme p_model).")
     ap.add_argument("--canopy-interception", dest="interception",
                     action="store_true", default=False,
                     help="enable the shared canopy-water interception scheme "

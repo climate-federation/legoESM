@@ -572,6 +572,12 @@ def _step_multilayer_land_impl(
                 "(capacity_scheme/g1_source='p_model') to feed the profit "
                 "optimum into; with prescribed parameters the switch would "
                 "be silently inert.")
+    # The supply is also needed when the state carries the P-hydro soil-state
+    # means but this configuration does not select phydro (a state shared
+    # across arms): their running means must keep advancing, never freeze.
+    _acc = state.pmodel_acclim
+    if (config.transpiration_stress == "phydro"
+            or (_acc is not None and _acc.psi_s_mean_mpa is not None)):
         from legoesm.land.phydro import soil_root_supply
         # LAI for the per-leaf-area supply: same priority the canopy resolves
         # (override > per-column params > scalar default).
@@ -1197,6 +1203,12 @@ def _step_multilayer_land_impl(
                 jnp.asarray(forcing.p_surface), _ppfd_toc.shape),
             cfg=config.p_model,
             dt=dt,
+            # P-hydro: the soil state the roots saw this step feeds the
+            # acclimated (running-mean) supply of the next optimum.
+            psi_s_mpa=(None if _phydro_supply is None
+                       else _phydro_supply.psi_s_mpa),
+            rsoil_leaf=(None if _phydro_supply is None
+                        else _phydro_supply.rsoil_leaf),
         )
     else:
         pmodel_acclim_new = None
@@ -1621,7 +1633,7 @@ def two_leaf_capacity_diagnostics(state, land_params, config) -> dict:
     """
     from legoesm.land.p_model import acclimated_capacities, optimal_chi
     from legoesm.land.phydro import (
-        phydro_optimum, slope_for_model, soil_root_supply)
+        PhydroSupply, phydro_optimum, slope_for_model, soil_root_supply)
     cc = config.surface_scheme
     lp = land_params
     theta = state.theta_soil
@@ -1644,8 +1656,15 @@ def two_leaf_capacity_diagnostics(state, land_params, config) -> dict:
         gstar = optimal_chi(acc.t_mean_K, acc.vpd_mean_pa, acc.co2_mean_ppm,
                             acc.ps_ema, config.p_model)[3]
         if phydro:
-            caps = phydro_optimum(acc, supply, config.phydro, config.p_model)
+            # The ACCLIMATED optimum (running-mean soil state), as the step
+            # solves it; the instantaneous leaf potentials are the canopy
+            # output's dpsi_sun_mpa / dpsi_sh_mpa below this step's psi_soil.
+            caps = phydro_optimum(
+                acc, PhydroSupply(rsoil_leaf=acc.rsoil_mean,
+                                  psi_s_mpa=acc.psi_s_mean_mpa),
+                config.phydro, config.p_model)
             psi_leaf = caps.psi_leaf_mpa
+            slope = nan   # no stomatal slope is read under stomatal_model="phydro"
         else:
             caps = acclimated_capacities(acc, config.p_model)
         chi = caps.chi
@@ -1658,7 +1677,7 @@ def two_leaf_capacity_diagnostics(state, land_params, config) -> dict:
     return {
         "wfrac": wfrac, "psi_soil": supply.psi_s_mpa,
         "vcmax25": vc * stress, "vcmax25_nostress": vc,
-        "slope": slope * (1.0 if cc.g1_source == "p_model" else stress),
+        "slope": slope * (1.0 if (cc.g1_source == "p_model" or phydro) else stress),
         "chi": chi, "psi_leaf": psi_leaf,
     }
 
@@ -1760,6 +1779,10 @@ def init_multilayer_land_state(
             cfg=config.p_model,
             co2_init_ppm=pmodel_co2_init_ppm,
             dtype=T_soil.dtype,
+            # P-hydro carries running means of the soil state the roots see;
+            # their cold-start values are PHydroConfig init fields.
+            soil_init=((config.phydro.init_psi_s_mpa, config.phydro.init_rsoil_leaf)
+                       if config.transpiration_stress == "phydro" else None),
         )
 
     return MultiLayerLandState(

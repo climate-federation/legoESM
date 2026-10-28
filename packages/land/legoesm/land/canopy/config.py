@@ -148,7 +148,7 @@ PFT_CANOPY_HEIGHT: dict[str, float] = {
 # ---------------------------------------------------------------------------
 # Valid values for the static leaf-gas-exchange dispatch field.  Kept next to
 # the config so the fail-early validator and the config default cannot drift.
-_VALID_STOMATAL_MODELS = ("ball_berry", "medlyn", "leuning")
+_VALID_STOMATAL_MODELS = ("ball_berry", "medlyn", "leuning", "phydro")
 VALID_LE_MODULES = ("BT", "PM")
 
 # Valid values for the CLM-ML canopy-airspace turbulence dispatch field
@@ -188,7 +188,7 @@ class CanopyConfig(NamedTuple):
     # and intercept; "medlyn" interprets ``m`` as the Medlyn g1 slope
     # [kPa^0.5] and ``b0`` as g0 [mol/m2/s].  Captured as a static
     # Python string via functools.partial — never traced.
-    stomatal_model: str = "ball_berry"      # "ball_berry" | "medlyn" | "leuning"
+    stomatal_model: str = "ball_berry"      # "ball_berry" | "medlyn" | "leuning" | "phydro"
     # Leuning (1995) VPD sensitivity scale D0 [kPa]; the slope a1 rides the
     # per-column m_C3/m_C4 slot (the same semantic overload ball_berry/medlyn
     # use for their slopes — see _compute_gs_and_ci).  CABLE C3 default.

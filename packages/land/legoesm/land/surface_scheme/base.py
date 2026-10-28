@@ -79,6 +79,11 @@ class SurfaceFluxOutput(NamedTuple):
     # every capacity/slope source).  Not meaningful at night (no assimilation).
     ci_ca_sun: jax.Array | None = None
     ci_ca_sh: jax.Array | None = None
+    # P-hydro instantaneous optimum (stomatal_model="phydro" only): the
+    # solved soil-to-leaf draw-down of each leaf class [MPa]; leaf water
+    # potential = this step's soil potential minus it.  None otherwise.
+    dpsi_sun_mpa: jax.Array | None = None
+    dpsi_sh_mpa: jax.Array | None = None
     n_iters: jax.Array | None = None       # canopy Newton iteration count
     # Per-column flag: did the canopy Newton closure reach a root?  ``False``
     # means the accompanying fluxes come from a stopped iterate (iteration cap

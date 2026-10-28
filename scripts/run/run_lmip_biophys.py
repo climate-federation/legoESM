@@ -253,9 +253,19 @@ _VAR_META = {
     "pmodel_wfrac":   {"long_name": "root-zone soil-moisture stress factor", "units": "1"},
     "pmodel_psi_soil": {"long_name": "conductance-weighted soil water potential seen by the plant",
                         "units": "MPa"},
-    "pmodel_psi_leaf": {"long_name": "P-hydro leaf water potential (NaN unless "
-                                     "transpiration_stress=phydro)",
+    "pmodel_psi_leaf": {"long_name": "P-hydro ACCLIMATED leaf water potential "
+                                     "(NaN unless transpiration_stress=phydro)",
                         "units": "MPa"},
+    "canopy_converged": {"long_name": "1 where the two-leaf canopy Newton closure reached a "
+                                      "root this step, 0 where the column was held (stopped "
+                                      "iterate; its canopy diagnostics are not a solution)",
+                         "units": "1"},
+    "phydro_dpsi_sun": {"long_name": "P-hydro instantaneous soil-to-leaf draw-down of "
+                                     "the sunlit leaf class (NaN unless stomatal_model=phydro)",
+                        "units": "MPa"},
+    "phydro_dpsi_shade": {"long_name": "P-hydro instantaneous soil-to-leaf draw-down of "
+                                       "the shaded leaf class (NaN unless stomatal_model=phydro)",
+                          "units": "MPa"},
     "pmodel_n_rubisco_leaf": {
         "long_name": "implied nitrogen in Rubisco from the C3 leaf-top acclimated "
                      "Vcmax25 (LUNA NUE 294.2 umol CO2/s/gN; diagnostic only, "
@@ -447,7 +457,12 @@ def run(args) -> int:
     # beta amip_sota disabled for over-transpiration, #730); the two-leaf canopy
     # ignores it (it has its own leaf conductance).  Only override a scalar the
     # user actually set (None -> land default / per-PFT surfdata value).
-    _stom = {"enabled": bool(args.stomata_enabled), "stomata_model": args.stomatal_model}
+    # The two-leaf P-hydro option ("phydro") has no big-leaf counterpart, and
+    # the two-leaf canopy never reads this config: leave the StomataConfig
+    # default in that case instead of naming a scheme the big leaf lacks.
+    _stom = {"enabled": bool(args.stomata_enabled)}
+    if args.stomatal_model != "phydro":
+        _stom["stomata_model"] = args.stomatal_model
     if args.surface_scheme == "simple_seb":
         # simple_seb: the P-model switches live on the big-leaf StomataConfig.
         _stom["capacity_scheme"] = args.canopy_capacity_scheme
@@ -819,6 +834,14 @@ def run(args) -> int:
             values["pmodel_wfrac"] = _d["wfrac"]
             values["pmodel_psi_soil"] = _d["psi_soil"]
             values["pmodel_psi_leaf"] = _d["psi_leaf"]
+            _nan = jnp.full_like(_d["psi_leaf"], jnp.nan)
+            values["canopy_converged"] = (
+                jnp.ones_like(_d["psi_leaf"]) if surf_out.converged is None
+                else jnp.asarray(surf_out.converged).astype(_d["psi_leaf"].dtype))
+            values["phydro_dpsi_sun"] = (_nan if surf_out.dpsi_sun_mpa is None
+                                         else surf_out.dpsi_sun_mpa)
+            values["phydro_dpsi_shade"] = (_nan if surf_out.dpsi_sh_mpa is None
+                                           else surf_out.dpsi_sh_mpa)
             # Solved Ci/Ca of every arm, daytime only: a tape mean of the
             # product divided by the mean of the flag is the daytime mean.
             _day = (forcing_t.cos_zenith > 0.0).astype(surf_out.ci_ca_sun.dtype)

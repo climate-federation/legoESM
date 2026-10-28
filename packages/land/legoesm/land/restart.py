@@ -249,7 +249,8 @@ def save_land_restart(
     _pm = getattr(state, "pmodel_acclim", None)
     if _pm is not None:
         for _fname, _val in zip(PModelAcclimState._fields, _pm):
-            payload[f"pmodel_{_fname}"] = np.asarray(_val)
+            if _val is not None:   # optional (P-hydro soil-state) fields
+                payload[f"pmodel_{_fname}"] = np.asarray(_val)
 
     out = Path(path)
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -413,10 +414,15 @@ def load_land_restart(
         for field in _MULTILAYER_OPTIONAL_ARRAY_FIELDS
         if field in data.files
     }
-    _pm_keys = [f"pmodel_{f}" for f in PModelAcclimState._fields]
+    # Required fields are the ones without a default; the optional (P-hydro
+    # soil-state) fields load as None when the archive lacks them.
+    _pm_required = [f for f in PModelAcclimState._fields
+                    if f not in PModelAcclimState._field_defaults]
     pmodel_acclim = (
-        PModelAcclimState(*[jnp.asarray(data[k]) for k in _pm_keys])
-        if all(k in data.files for k in _pm_keys) else None)
+        PModelAcclimState(**{
+            f: jnp.asarray(data[f"pmodel_{f}"])
+            for f in PModelAcclimState._fields if f"pmodel_{f}" in data.files})
+        if all(f"pmodel_{f}" in data.files for f in _pm_required) else None)
     state = MultiLayerLandState(
         T_soil=T,
         psi_soil=jnp.asarray(data["psi_soil"]),
@@ -509,6 +515,14 @@ def merge_land_restart_into_template(loaded, template,
                         f"land restart field 'pmodel_{_fname}' has shape "
                         f"{tuple(_arr.shape)}, expected {tuple(_ref.shape)} "
                         f"(resolution skew)")
+                if (_ref is not None) != (_arr is not None):
+                    raise ValueError(
+                        f"land restart field 'pmodel_{_fname}' is "
+                        f"{'missing' if _arr is None else 'present'} but the "
+                        f"run {'needs' if _ref is not None else 'does not carry'} "
+                        "it (P-hydro soil-state means); restart from an "
+                        "archive written by the same transpiration_stress "
+                        "setting or use the cold-restart flag.")
             fields["pmodel_acclim"] = _ld_pm
     return template._replace(**fields)
 
