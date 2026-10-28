@@ -178,7 +178,7 @@ def build_orca2_exact_vs_normal_switch_inventory() -> tuple[SwitchSpec, ...]:
             normal_value="jax_expression",
             switched_in_normal_mode=True,
             exact_citation="packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:2152",
-            normal_citation="packages/ocean/legoesm/ocean/physics/vertical_mixing/config.py:654",
+            normal_citation="packages/ocean/legoesm/ocean/physics/vertical_mixing/config.py:658",
             notes=(
                 "nemo_scalar_libm is guarded by _require_libm_policy "
                 "(packages/ocean/legoesm/ocean/physics/vertical_mixing/tke.py:2708-2717,2740)."
@@ -193,7 +193,7 @@ def build_orca2_exact_vs_normal_switch_inventory() -> tuple[SwitchSpec, ...]:
             normal_value="jax_expression",
             switched_in_normal_mode=True,
             exact_citation="packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:2153",
-            normal_citation="packages/ocean/legoesm/ocean/physics/vertical_mixing/config.py:648",
+            normal_citation="packages/ocean/legoesm/ocean/physics/vertical_mixing/config.py:650",
             notes=(
                 "nemo_scalar_libm is guarded by _require_libm_policy "
                 "(packages/ocean/legoesm/ocean/physics/vertical_mixing/tke.py:2815-2817)."
@@ -242,7 +242,7 @@ def build_orca2_exact_vs_normal_switch_inventory() -> tuple[SwitchSpec, ...]:
             normal_value=False,
             switched_in_normal_mode=True,
             exact_citation="packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:2137",
-            normal_citation="packages/ocean/legoesm/ocean/physics/vertical_mixing/config.py:671",
+            normal_citation="packages/ocean/legoesm/ocean/physics/vertical_mixing/config.py:675",
             notes="Statement-level source rounding in N^2 buoyancy frequency.",
         ),
         SwitchSpec(
@@ -254,7 +254,7 @@ def build_orca2_exact_vs_normal_switch_inventory() -> tuple[SwitchSpec, ...]:
             normal_value=False,
             switched_in_normal_mode=True,
             exact_citation="packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:2139",
-            normal_citation="packages/ocean/legoesm/ocean/physics/vertical_mixing/config.py:678",
+            normal_citation="packages/ocean/legoesm/ocean/physics/vertical_mixing/config.py:682",
             notes="Source rounding inside the TKE tridiagonal Thomas solve.",
         ),
         SwitchSpec(
@@ -266,7 +266,7 @@ def build_orca2_exact_vs_normal_switch_inventory() -> tuple[SwitchSpec, ...]:
             normal_value=False,
             switched_in_normal_mode=True,
             exact_citation="packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:2141",
-            normal_citation="packages/ocean/legoesm/ocean/physics/vertical_mixing/config.py:685",
+            normal_citation="packages/ocean/legoesm/ocean/physics/vertical_mixing/config.py:689",
             notes="Source rounding when assembling the TKE tridiagonal matrix and RHS.",
         ),
         SwitchSpec(
@@ -278,7 +278,7 @@ def build_orca2_exact_vs_normal_switch_inventory() -> tuple[SwitchSpec, ...]:
             normal_value=False,
             switched_in_normal_mode=True,
             exact_citation="packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:2142",
-            normal_citation="packages/ocean/legoesm/ocean/physics/vertical_mixing/config.py:689",
+            normal_citation="packages/ocean/legoesm/ocean/physics/vertical_mixing/config.py:693",
             notes="Source rounding in zdf_sh2 shear production.",
         ),
         SwitchSpec(
@@ -290,7 +290,7 @@ def build_orca2_exact_vs_normal_switch_inventory() -> tuple[SwitchSpec, ...]:
             normal_value=False,
             switched_in_normal_mode=True,
             exact_citation="packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:2143",
-            normal_citation="packages/ocean/legoesm/ocean/physics/vertical_mixing/config.py:693",
+            normal_citation="packages/ocean/legoesm/ocean/physics/vertical_mixing/config.py:697",
             notes="Multiply by stored reciprocal vs direct division in zdf_sh2.",
         ),
         SwitchSpec(
@@ -302,7 +302,7 @@ def build_orca2_exact_vs_normal_switch_inventory() -> tuple[SwitchSpec, ...]:
             normal_value="factored",
             switched_in_normal_mode=True,
             exact_citation="packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:2156",
-            normal_citation="packages/ocean/legoesm/ocean/physics/vertical_mixing/config.py:658",
+            normal_citation="packages/ocean/legoesm/ocean/physics/vertical_mixing/config.py:662",
             notes="Mixing-length raw formula operand grouping.",
         ),
         SwitchSpec(
@@ -326,7 +326,7 @@ def build_orca2_exact_vs_normal_switch_inventory() -> tuple[SwitchSpec, ...]:
             normal_value="vectorized",
             switched_in_normal_mode=True,
             exact_citation="packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:1946",
-            normal_citation="packages/ocean/legoesm/ocean/physics/vertical_mixing/config.py:698",
+            normal_citation="packages/ocean/legoesm/ocean/physics/vertical_mixing/config.py:702",
             notes="Langmuir mixing-length loop vs vectorized evaluation.",
         ),
         SwitchSpec(

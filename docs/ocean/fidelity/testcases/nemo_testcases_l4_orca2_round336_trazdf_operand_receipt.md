@@ -745,7 +745,7 @@ uninstrumented `_nemo_literal_tke_solve` (`0 / 772,560` interior words unequal;
   `nemo_sh2_fold_top_v=True`
   (`packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:12881-12898`).
   Because `compute_tke_step` records `_statement_after_boundaries`
-  (`packages/ocean/legoesm/ocean/physics/vertical_mixing/tke.py:3596-3597`)
+  (`packages/ocean/legoesm/ocean/physics/vertical_mixing/tke.py:3588-3589`)
   before `_solve_tke_backward_euler` scatters `bottom_dirichlet` into `rhs` at
   `is_bottom` (`packages/ocean/legoesm/ocean/physics/vertical_mixing/tke.py:1826-1834`),
   and because `wet30` (`tke_wmask != 0`) excludes `jk = mbkt + 1`, those 51

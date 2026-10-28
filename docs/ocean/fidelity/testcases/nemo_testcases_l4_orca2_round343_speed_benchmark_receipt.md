@@ -4,7 +4,7 @@
 - **Author**: Argon
 - **Branch**: `fidelity/nemo-testcases-orca2-rounds`
 - **Preregistration**: `docs/ocean/fidelity/testcases/PREREG_nemo_testcases_l4_orca2_round343_speed_benchmark.md`
-- **Benchmark script**: `scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round343_speed_benchmark.py:133-1750`
+- **Benchmark script**: `scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round343_speed_benchmark.py:139-1936`
 - **Direct unit test**: `tests/ocean/fidelity/test_orca2_round343_speed_benchmark.py:29-200`
 - **Evidence bundle**: `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/orca2_r343/orca2_round343_speed_benchmark_report.json` (`arm_exact_cpu_fp64.json`, `arm_normal_cpu_fp64.json`, `arm_normal_gpu_fp64.json`, `arm_normal_gpu_fp32.json`)
 - **Independent review**: `independent review: operator`
@@ -20,24 +20,24 @@ By reading the production ORCA2 K0 standalone card builder `packages/ocean/legoe
 
 ### Complete Switch Table (`build_orca2_exact_vs_normal_switch_inventory`)
 
-All 46 inventory entries verified by `scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round343_speed_benchmark.py:775-837` (`verify_switch_inventory_against_card`) against both `build_nemo_orca2_k0_ocean_card` and fresh class defaults in `packages/` (zero defaults modified):
+All 46 inventory entries verified by `scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round343_speed_benchmark.py:781-843` (`verify_switch_inventory_against_card`) against both `build_nemo_orca2_k0_ocean_card` and fresh class defaults in `packages/` (zero defaults modified):
 
 | # | Category | Owner | Switch / Field | Exact-Mode Value | Normal Default Value | Switched in Normal Mode? | Code Citations (Exact -> Normal Default) |
 |---|---|---|---|---|---|---|---|
 | 1 | **A** (`libm`-guarded) | `PrecisionPolicy` | `transcendentals` | `"libm"` | `"native"` | Yes | `packages/core/legoesm/core/precision.py:117-125` -> `packages/core/legoesm/core/precision.py:103-114` |
 | 2 | **A** (`libm`-guarded) | `NEMOTestcaseCard` | `ocean.transcendentals` | `"libm"` | `"native"` | Yes | `packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:66` -> `packages/core/legoesm/core/precision.py:103` |
-| 3 | **A** (`libm`-guarded) | `TKEConfig` | `tke_htau_evaluation` | `"nemo_scalar_libm"` | `"jax_expression"` | Yes | `packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:2152` -> `packages/ocean/legoesm/ocean/physics/vertical_mixing/config.py:654` |
-| 4 | **A** (`libm`-guarded) | `TKEConfig` | `tke_etau_exponential_evaluation` | `"nemo_scalar_libm"` | `"jax_expression"` | Yes | `packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:2153` -> `packages/ocean/legoesm/ocean/physics/vertical_mixing/config.py:648` |
+| 3 | **A** (`libm`-guarded) | `TKEConfig` | `tke_htau_evaluation` | `"nemo_scalar_libm"` | `"jax_expression"` | Yes | `packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:2152` -> `packages/ocean/legoesm/ocean/physics/vertical_mixing/config.py:658` |
+| 4 | **A** (`libm`-guarded) | `TKEConfig` | `tke_etau_exponential_evaluation` | `"nemo_scalar_libm"` | `"jax_expression"` | Yes | `packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:2153` -> `packages/ocean/legoesm/ocean/physics/vertical_mixing/config.py:650` |
 | 5 | **A** (`libm`-guarded) | `DoubleDiffusionConfig` | `(enabled, form)` | `(True, "nemo_literal")` | `(False, "hybrid")` | Yes | `packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:2174-2175` -> `packages/ocean/legoesm/ocean/physics/vertical_mixing/double_diffusion.py:245-251` |
 | 6 | **A** (`libm`-guarded) | `IWMConfig` | `(form, tsdiff)` | `("nemo_literal", True)` | `("generic", False)` | Yes | `packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:2167-2173` -> `packages/ocean/legoesm/ocean/physics/vertical_mixing/internal_wave_mixing.py:187-203` |
-| 7 | **B** (rounding/order) | `TKEConfig` | `nemo_bn2_source_rounded` | `True` | `False` | Yes | `packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:2137` -> `packages/ocean/legoesm/ocean/physics/vertical_mixing/config.py:671` |
-| 8 | **B** (rounding/order) | `TKEConfig` | `nemo_tke_solve_source_rounded` | `True` | `False` | Yes | `packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:2139` -> `packages/ocean/legoesm/ocean/physics/vertical_mixing/config.py:678` |
-| 9 | **B** (rounding/order) | `TKEConfig` | `nemo_tke_matrix_rhs_source_rounded` | `True` | `False` | Yes | `packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:2141` -> `packages/ocean/legoesm/ocean/physics/vertical_mixing/config.py:685` |
-| 10 | **B** (rounding/order) | `TKEConfig` | `nemo_sh2_r3_source_rounded` | `True` | `False` | Yes | `packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:2142` -> `packages/ocean/legoesm/ocean/physics/vertical_mixing/config.py:689` |
-| 11 | **B** (rounding/order) | `TKEConfig` | `nemo_sh2_r3_stored_reciprocal` | `True` | `False` | Yes | `packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:2143` -> `packages/ocean/legoesm/ocean/physics/vertical_mixing/config.py:693` |
-| 12 | **B** (rounding/order) | `TKEConfig` | `tke_mxl_raw_evaluation` | `"nemo_literal"` | `"factored"` | Yes | `packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:2156` -> `packages/ocean/legoesm/ocean/physics/vertical_mixing/config.py:658` |
+| 7 | **B** (rounding/order) | `TKEConfig` | `nemo_bn2_source_rounded` | `True` | `False` | Yes | `packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:2137` -> `packages/ocean/legoesm/ocean/physics/vertical_mixing/config.py:675` |
+| 8 | **B** (rounding/order) | `TKEConfig` | `nemo_tke_solve_source_rounded` | `True` | `False` | Yes | `packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:2139` -> `packages/ocean/legoesm/ocean/physics/vertical_mixing/config.py:682` |
+| 9 | **B** (rounding/order) | `TKEConfig` | `nemo_tke_matrix_rhs_source_rounded` | `True` | `False` | Yes | `packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:2141` -> `packages/ocean/legoesm/ocean/physics/vertical_mixing/config.py:689` |
+| 10 | **B** (rounding/order) | `TKEConfig` | `nemo_sh2_r3_source_rounded` | `True` | `False` | Yes | `packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:2142` -> `packages/ocean/legoesm/ocean/physics/vertical_mixing/config.py:693` |
+| 11 | **B** (rounding/order) | `TKEConfig` | `nemo_sh2_r3_stored_reciprocal` | `True` | `False` | Yes | `packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:2143` -> `packages/ocean/legoesm/ocean/physics/vertical_mixing/config.py:697` |
+| 12 | **B** (rounding/order) | `TKEConfig` | `tke_mxl_raw_evaluation` | `"nemo_literal"` | `"factored"` | Yes | `packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:2156` -> `packages/ocean/legoesm/ocean/physics/vertical_mixing/config.py:662` |
 | 13 | **B** (rounding/order) | `TKEConfig` | `tke_solver_evaluation` | `"nemo_literal"` | `"shared_thomas"` | Yes | `packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:422` -> `packages/ocean/legoesm/ocean/physics/vertical_mixing/config.py:642` |
-| 14 | **B** (rounding/order) | `TKEConfig` | `tke_langmuir_evaluation` | `"nemo_literal"` | `"vectorized"` | Yes | `packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:1946` -> `packages/ocean/legoesm/ocean/physics/vertical_mixing/config.py:698` |
+| 14 | **B** (rounding/order) | `TKEConfig` | `tke_langmuir_evaluation` | `"nemo_literal"` | `"vectorized"` | Yes | `packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:1946` -> `packages/ocean/legoesm/ocean/physics/vertical_mixing/config.py:702` |
 | 15 | **B** (rounding/order) | `GMRediConfig` | `slope_uv_source_rounding` | `True` | `False` | Yes | `packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:2934` -> `packages/ocean/legoesm/ocean/physics/lateral_mixing/config.py:417` |
 | 16 | **B** (rounding/order) | `GMRediConfig` | `redi_a33_source_ordering` | `True` | `False` | Yes | `packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:2935` -> `packages/ocean/legoesm/ocean/physics/lateral_mixing/config.py:489` |
 | 17 | **B** (rounding/order) | `GMRediConfig` | `redi_a33_evaluation` | `"nemo_literal"` | `"normalized_square"` | Yes | `packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:2912` -> `packages/ocean/legoesm/ocean/physics/lateral_mixing/config.py:485` |
@@ -107,7 +107,7 @@ All four arms run `packages/ocean/legoesm/ocean/bulk_flux_omip.py:983-1118` (`ne
 Each arm is compared at the end of every simulated day (`kt = 8, 16, 24, 32, 40, 48, 56, 64`) against the saved exact-mode snapshots in `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/orca2_r342/legoesm_year1_2920step/candidate_step{kt:08d}.npz`.
 
 - **Exact-mode control (arm `exact_cpu_fp64`)**: At Day 1 (`kt=8`, SHA-256 `ce932543...`) and Day 2 (`kt=16`, SHA-256 `cbee4521...`), `exact_cpu_fp64` reproduces the `orca2_r342` snapshots with **`0.0` SST RMS**, **`0.0` SST max**, **`0.0` 3-D `T` RMS**, and **`0.0` 3-D `T` max**.
-- **Normal `float64` CPU vs GPU consistency**: Arms **(b) `normal_cpu_fp64`** and **(c) `normal_gpu_fp64`** produce identical daily RMS and max differences to `~10⁻¹² °C` across all 8 days. Their `~1.4–5.3 × 10⁻³ °C` wet SST RMS difference relative to exact mode is dominated by the two Category A vertical-mixing parameterizations whose `"nemo_literal"` forms are hard-guarded by `transcendentals == "libm"` (`DoubleDiffusionConfig` at `packages/ocean/legoesm/ocean/physics/vertical_mixing/double_diffusion.py:325-329` and `IWMConfig` at `packages/ocean/legoesm/ocean/physics/vertical_mixing/internal_wave_mixing.py:411-415`) and therefore revert to their normal class defaults (`ddm.enabled=False`, `iwm.form="generic", tsdiff=False`).
+- **Normal `float64` CPU vs GPU consistency**: Arms **(b) `normal_cpu_fp64`** and **(c) `normal_gpu_fp64`** produce identical daily RMS and max differences to `~10⁻¹² °C` across all 8 days. Their `~1.4–5.3 × 10⁻³ °C` wet SST RMS difference relative to exact mode is dominated by the two Category A vertical-mixing substitutions that the round-343 normal-card builder made explicitly (`ddm.enabled=False`, `iwm.form="generic", tsdiff=False`) at `scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round343_speed_benchmark.py:865-870`. At the time, the literal forms refused native transcendentals; round 344 supersedes that restriction without changing this historical arm.
 
 ### Daily SST (`T[..., 0]`) and 3-D `T` Difference Table (`°C`)
 

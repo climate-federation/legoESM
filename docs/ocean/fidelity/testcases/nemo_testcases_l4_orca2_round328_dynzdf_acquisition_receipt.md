@@ -240,8 +240,8 @@ once on Nbb before the RK stages, and the card uses step-entry shear/N2.
 
 **CONFIRMED.** The corrected replay starts from the ordinary step's carried
 TKE `avm_k`/`avt_k`, applies legoESM's certified literal DDM statement
-(`double_diffusion.py:335-362`), then its certified literal IWM statement
-(`internal_wave_mixing.py:435-486`). The resulting consumed `avm` is
+(`double_diffusion.py:330-357`), then its certified literal IWM statement
+(`internal_wave_mixing.py:430-481`). The resulting consumed `avm` is
 bit-identical at 408,595 of 414,119 wet interfaces and differs at 5,524
 (1.334%). The first unequal cell is `[j,i,k]=[1,119,19]`; 666 are under ice
 and 4,858 are open water. The maximum absolute difference is
@@ -275,14 +275,14 @@ first candidates are TKE's bottom boundary/mixing-length route—NEMO's bottom
 energy assignment at `ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdftke.f90:285-293` and
 final coefficient construction at
 `ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdftke.f90:706-711`, corresponding to legoESM's carried closure and final
-K construction at `tke.py:3574-3664`—or IWM's depth distribution. For the
+K construction at `tke.py:3566-3656`—or IWM's depth distribution. For the
 interface-0 family the first IWM candidate is the column-depth normalization
 `ht_0*(1+r3t)` followed by the `gdept_1d` ladder at
 `ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfiwm.f90:234-275`; legoESM transcribes those
-operations at `internal_wave_mixing.py:435-471`. DDM cannot be excluded in
+operations at `internal_wave_mixing.py:430-466`. DDM cannot be excluded in
 either family because its NEMO-side boundary was not recorded; its momentum
 addition is `ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfddm.f90:172` and legoESM's is
-`double_diffusion.py:362`.
+`double_diffusion.py:357`.
 
 Certified coverage is **V1** for TKE, **V3** for literal double diffusion, and
 **V4** for literal internal-wave mixing. Round 313 imported V3 and V4 onto

@@ -274,7 +274,7 @@ successive live `e3t_0*(1+ssh/ht_0)` terms reproduces final recorded `zmxlm`
 bit for bit, and recorded `zmxld` is never below it.  NEMO's owning surface
 statement is lines 623--624; legoESM's first differing statement was
 `_mxl0_surface_anchor` at `tke.py:262-268`, with its materialization at
-`tke.py:4220-4227`.  The pre-fix production-JIT anchor
+`tke.py:4212-4219`.  The pre-fix production-JIT anchor
 missed all seven inputs by `+1,+1,-1,+1,-1,-1,-1` ULP (the repeated column is
 listed twice); eager already matched.  Materializing the NEMO source
 operations makes eager and JIT exact at every required input.  The owner is

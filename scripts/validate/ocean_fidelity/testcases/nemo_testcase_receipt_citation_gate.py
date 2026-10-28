@@ -2193,7 +2193,7 @@ CITATION_MAP = {
     'packages/ocean/legoesm/ocean/physics/vertical_mixing/tke.py:1826-1834': [
         ('N = e_old.shape[-1]', 2),
         'rhs = jnp.where(is_bottom, _e_bd[..., jnp.newaxis], rhs)', 9],
-    'packages/ocean/legoesm/ocean/physics/vertical_mixing/tke.py:3596-3597': [
+    'packages/ocean/legoesm/ocean/physics/vertical_mixing/tke.py:3588-3589': [
         '_statement_after_boundaries = jnp.concatenate(',
         ('[_surface_row, tke_curr], axis=-1)', 1), 2],
     'ORCA2_ORCA1ICE_OMIP_L4_R336TKE/BLD/ppsrc/nemo/zdftke.f90:303-309': [
@@ -2721,7 +2721,7 @@ CITATION_MAP = {
     'tke.py:262-268': [
         'zraug = _NEMO_MXL0_VKARMN * _NEMO_MXL0_LENGTH_SCALE / (rho_0 * g)',
         'jnp.asarray(_mxl0_anchor_floor(cfg), dtype=taum.dtype), raw)', 7],
-    'tke.py:4220-4227': [
+    'tke.py:4212-4219': [
         'def _nemo_mxlice2_anchor_raw(fr_i, hm_i, taum, zraug, surface_tmask):',
         '* jnp.asarray(surface_tmask, dtype=taum.dtype))', 8],
     'tke.py:2306-2329': [
@@ -2947,9 +2947,9 @@ CITATION_MAP = {
     'implicit_solver.py:438-450': [
         'avm_sum = jnp.asarray(2.0, dtype=dtype) * avm_face',
         'avm_product / lower_denominator) * interface_wet', 13],
-    'internal_wave_mixing.py:444': 'n_pos = safe_sqrt(n2_pos)',
+    'internal_wave_mixing.py:439': 'n_pos = safe_sqrt(n2_pos)',
     'tke.py:1082': 'safe_sqrt((jnp.asarray(2.0, e.dtype) * e) / zrn2),',
-    'tke.py:3670': 'dissl_new = safe_sqrt(tke_curr) / l_eps_final',
+    'tke.py:3662': 'dissl_new = safe_sqrt(tke_curr) / l_eps_final',
     'shortwave_penetration.py:647': '/ jnp.where((jk <= nkB) & (ze3t != 0.0), ze3t, c(1.0)))',
     # round 314 namelist audit
     'ORCA2_OMIP_L4/EXP00/namelist_cfg:21': 'nn_itend    =    5840',
@@ -5613,13 +5613,13 @@ CITATION_MAP = {
     'k_profiles.py:484-578': [
         '# NEMO-literal double diffusion (zdfddm)',
         'cfg=iwm_cfg, rho_0=physics_config.constants.rho_0)', 95],
-    'double_diffusion.py:335-362': [
+    'double_diffusion.py:330-357': [
         'zds = jnp.where(jnp.abs(zds) <= tiny, tiny, zds)',
         'avm_new = r(avm + jnp.maximum(heat, salt))', 28],
-    'internal_wave_mixing.py:435-486': [
+    'internal_wave_mixing.py:430-481': [
         'hz = r(ht_0 * stretch)',
         'avm = r(avm + zav_wave)', 52],
-    'tke.py:3574-3664': [
+    'tke.py:3566-3656': [
         'for _ in range(max(1, int(n_iterations))):',
         ('prandtl_K_M=(preclosure_K_M if _carried_coeffs else None))', 2), 91],
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdftke.f90:285-293': [
@@ -5631,10 +5631,10 @@ CITATION_MAP = {
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfiwm.f90:234-275': [
         'IF( (ht_0(ji,jj) *(1._wp+r3t(ji,jj,Kmm))) /= 0._wp ) THEN ; zfact1',
         'zfact4(ji,jj) * SQRT( MAX( 0._wp, rn2(ji,jj,jk) ) )', 42],
-    'internal_wave_mixing.py:435-471': [
+    'internal_wave_mixing.py:430-466': [
         'hz = r(ht_0 * stretch)',
         '+ r(zfact4[..., None] * n_pos))', 37],
-    'double_diffusion.py:362':
+    'double_diffusion.py:357':
         'avm_new = r(avm + jnp.maximum(heat, salt))',
     'ocean_model_latlon_cgrid.py:14931-14940': [
         'u_new = implicit_vertical_diffusion_ocean_momentum_dispatch(',
@@ -9887,7 +9887,7 @@ CITATION_MAP = {
         'def test_stage2_transport_uses_stored_h_s2_kmm_and_fails_on_revert() -> None:',
         'np.asarray(h_rev, dtype=np.float64).view(np.uint64),', 419],
     # --- ORCA2 round 343: standalone ORCA2 K0 speed and 8-day accuracy benchmark ---
-    'scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round343_speed_benchmark.py:133-1750': ['def build_orca2_exact_vs_normal_switch_inventory() -> tuple[SwitchSpec, ...]:', 'raise SystemExit(main())', 1618],
+    'scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round343_speed_benchmark.py:139-1936': ['def build_orca2_exact_vs_normal_switch_inventory() -> tuple[SwitchSpec, ...]:', 'raise SystemExit(main())', 1798],
     'tests/ocean/fidelity/test_orca2_round343_speed_benchmark.py:29-200': ['def test_switch_inventory_citations_and_class_defaults() -> None:', 'r343.validate_benchmark_report(bad_days)', 172],
     'packages/ocean/legoesm/ocean/bulk_flux_omip.py:854-927': ['next_s2: NemoS2Inputs', ('),', 31), 74],
     'packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:1942-2222': [('bbl_aht_m2_s=1000.0,', 2), ('1,', 51), 281],
@@ -9895,33 +9895,34 @@ CITATION_MAP = {
     'packages/core/legoesm/core/transcendentals.py:48-85': [('if jax.default_backend() != "cpu":', 1), (')', 38), 38],
     'packages/core/legoesm/core/precision.py:103-114': [('transcendentals: str = "native"', 1), (')', 22), 12],
     'packages/core/legoesm/core/source_rounding.py:14-35': ['def nemo_source_round(value: jax.Array) -> jax.Array:', 'def nemo_fortran_sign(magnitude: jax.Array, sign_source: jax.Array) -> jax.Array:', 22],
-    'scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round343_speed_benchmark.py:775-837': ['def verify_switch_inventory_against_card(', ('}', 10), 63],
+    'scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round343_speed_benchmark.py:781-843': ['def verify_switch_inventory_against_card(', ('}', 10), 63],
+    'scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round343_speed_benchmark.py:865-870': ['tke = vm.tke._replace(', 'iwm = vm.iwm._replace(form="generic", tsdiff=False)', 6],
     'packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:66': 'transcendentals: str = "libm"',
     'packages/core/legoesm/core/precision.py:103': ('transcendentals: str = "native"', 1),
     'packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:2152': 'tke_htau_evaluation="nemo_scalar_libm",',
-    'packages/ocean/legoesm/ocean/physics/vertical_mixing/config.py:654': 'tke_htau_evaluation: str = "jax_expression"',
+    'packages/ocean/legoesm/ocean/physics/vertical_mixing/config.py:658': 'tke_htau_evaluation: str = "jax_expression"',
     'packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:2153': 'tke_etau_exponential_evaluation="nemo_scalar_libm",',
-    'packages/ocean/legoesm/ocean/physics/vertical_mixing/config.py:648': 'tke_etau_exponential_evaluation: str = "jax_expression"',
+    'packages/ocean/legoesm/ocean/physics/vertical_mixing/config.py:650': 'tke_etau_exponential_evaluation: str = "jax_expression"',
     'packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:2174-2175': ['ddm_config = model_config.physics.vertical_mixing.ddm._replace(', 'enabled=True, form="nemo_literal", rn_avts=1.0e-4, rn_hsbfr=1.6)', 2],
     'packages/ocean/legoesm/ocean/physics/vertical_mixing/double_diffusion.py:245-251': ['enabled: bool = False', 'form: str = "hybrid"', 7],
     'packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:2167-2173': ['iwm_config = model_config.physics.vertical_mixing.iwm._replace(', (')', 668), 7],
     'packages/ocean/legoesm/ocean/physics/vertical_mixing/internal_wave_mixing.py:187-203': ['tsdiff: bool = False      # ln_tsdiff (ORCA1: .false. — avs == avt)', 'form: str = "generic"', 17],
     'packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:2137': 'nemo_bn2_source_rounded=True,',
-    'packages/ocean/legoesm/ocean/physics/vertical_mixing/config.py:671': 'nemo_bn2_source_rounded: bool = False',
+    'packages/ocean/legoesm/ocean/physics/vertical_mixing/config.py:675': 'nemo_bn2_source_rounded: bool = False',
     'packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:2139': 'nemo_tke_solve_source_rounded=True,',
-    'packages/ocean/legoesm/ocean/physics/vertical_mixing/config.py:678': 'nemo_tke_solve_source_rounded: bool = False',
+    'packages/ocean/legoesm/ocean/physics/vertical_mixing/config.py:682': 'nemo_tke_solve_source_rounded: bool = False',
     'packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:2141': 'nemo_tke_matrix_rhs_source_rounded=True,',
-    'packages/ocean/legoesm/ocean/physics/vertical_mixing/config.py:685': 'nemo_tke_matrix_rhs_source_rounded: bool = False',
+    'packages/ocean/legoesm/ocean/physics/vertical_mixing/config.py:689': 'nemo_tke_matrix_rhs_source_rounded: bool = False',
     'packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:2142': 'nemo_sh2_r3_source_rounded=True,',
-    'packages/ocean/legoesm/ocean/physics/vertical_mixing/config.py:689': 'nemo_sh2_r3_source_rounded: bool = False',
+    'packages/ocean/legoesm/ocean/physics/vertical_mixing/config.py:693': 'nemo_sh2_r3_source_rounded: bool = False',
     'packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:2143': 'nemo_sh2_r3_stored_reciprocal=True,',
-    'packages/ocean/legoesm/ocean/physics/vertical_mixing/config.py:693': 'nemo_sh2_r3_stored_reciprocal: bool = False',
+    'packages/ocean/legoesm/ocean/physics/vertical_mixing/config.py:697': 'nemo_sh2_r3_stored_reciprocal: bool = False',
     'packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:2156': 'tke_mxl_raw_evaluation="nemo_literal",',
-    'packages/ocean/legoesm/ocean/physics/vertical_mixing/config.py:658': 'tke_mxl_raw_evaluation: str = "factored"',
+    'packages/ocean/legoesm/ocean/physics/vertical_mixing/config.py:662': 'tke_mxl_raw_evaluation: str = "factored"',
     'packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:422': 'tke_solver_evaluation="nemo_literal",',
     'packages/ocean/legoesm/ocean/physics/vertical_mixing/config.py:642': 'tke_solver_evaluation: str = "shared_thomas"',
     'packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:1946': ('tke_langmuir_evaluation="nemo_literal",', 2),
-    'packages/ocean/legoesm/ocean/physics/vertical_mixing/config.py:698': 'tke_langmuir_evaluation: str = "vectorized"',
+    'packages/ocean/legoesm/ocean/physics/vertical_mixing/config.py:702': 'tke_langmuir_evaluation: str = "vectorized"',
     'packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:2934': ('redi_flux_geometry_stage="rk3_kmm", slope_uv_source_rounding=True,', 1),
     'packages/ocean/legoesm/ocean/physics/lateral_mixing/config.py:417': 'slope_uv_source_rounding: bool = False',
     'packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:2935': ('redi_a33_source_ordering=True,', 1),
@@ -9989,8 +9990,6 @@ CITATION_MAP = {
     'packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:15610-15631': ['def _carry_nemo_rk3_after_ssh(self, entry_state, new_state):', 'data=2.0 * new_state.eta.data - entry_state.eta.data))', 22],
     'packages/ocean/legoesm/ocean/bulk_flux_omip.py:1219-1459': ['def nemo_blk_oce_ncar(', 'means, bulk, tail, forcing, freshwater, bulk_before_ice, iif)', 241],
     'packages/ocean/legoesm/ocean/bulk_flux_omip.py:1280-1352': ['if not update:', (')', 554), 73],
-    'packages/ocean/legoesm/ocean/physics/vertical_mixing/double_diffusion.py:325-329': ['if get_policy().transcendentals != "libm":', 'f"transcendentals=\'libm\'; got {get_policy().transcendentals!r}")', 5],
-    'packages/ocean/legoesm/ocean/physics/vertical_mixing/internal_wave_mixing.py:411-415': ['if get_policy().transcendentals != "libm":', 'f"transcendentals=\'libm\'; got {get_policy().transcendentals!r}")', 5],
 }
 
 
