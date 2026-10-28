@@ -195,6 +195,12 @@ def main():
         rel = np.abs(o["qsen"][sat] - qs_closed[sat]) / qs_closed[sat]
         print(f"KNOWN levels checked {int(sat.sum())}/{sat.size}; max|qsen-closed|/closed = {float(np.max(rel)):.3e}")
         print("KNOWN levels above NJKT2 equal input q:", bool(np.all(o["qsen"][~sat] == inputs["q"][~sat])))
+        # fatal known-answer gates (user decision 2026-10-29)
+        assert float(np.max(rel)) <= 1e-12, "saturation humidity misses the SUPHEC closed form"
+        assert np.all(o["qsen"][~sat] == inputs["q"][~sat]), "humidity above NJKT2 changed"
+        assert not o["ldcum"] and not o["ldcum_fg"], "known-answer column convected"
+        for n in ("dT_dt", "dq_dt", "mfu"):
+            assert np.all(o[n] == 0.0), f"known-answer column has nonzero {n}"
         print("KNOWN max|dT_dt| max|dq_dt| max|mfu| =", float(np.max(np.abs(o["dT_dt"]))),
               float(np.max(np.abs(o["dq_dt"]))), float(np.max(np.abs(o["mfu"]))))
         return
