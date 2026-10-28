@@ -1678,6 +1678,7 @@ class DiagnosticCollector:
         hfss=None,
         hfls=None,
         evspsbl=None,
+        prsn=None,
         rsutcs=None,
         rlutcs=None,
         rsds=None,
@@ -1773,6 +1774,13 @@ class DiagnosticCollector:
             CMOR sign as rsut/rlut] from the clouds-off second radiation pass
             (``--clear-sky-diag``, #843).  Interval means like the other flux
             fields; absent (None) keeps the output byte-identical.
+        prsn : array, shape ``(nCells,)``, optional
+            Snowfall flux [kg/m2/s]: the frozen part of *precip* as the
+            physics publishes it (``precip_frozen``), an interval mean like
+            ``pr``.  Absent (None) keeps the output byte-identical.
+            After a mid-window restart from a checkpoint written before
+            prsn was accumulated, that one window's prsn averages the
+            post-restart steps only (kept by user decision, PR #2204).
         rsds, rsus, rlds, rlus : array, shape ``(nCells,)``, optional
             Surface downwelling / upwelling SW and LW flux [W/m2, CMOR
             ``positive`` down for rsds/rlds, up for rsus/rlus], from the
@@ -1868,8 +1876,8 @@ class DiagnosticCollector:
             flux_doy, flux_year = doy, year
         # Flux-field name sets (Amon spatial / daily / zonal) used to split
         # the PHASE-2 commits between the two calendar bins.
-        _FLUX_2D = ("pr", "rlut", "rsut", "rsdt", "hfss", "hfls", "evspsbl",
-                    "rsutcs", "rlutcs", "rsds", "rsus", "rlds", "rlus")
+        _FLUX_2D = ("pr", "prsn", "rlut", "rsut", "rsdt", "hfss", "hfls",
+                    "evspsbl", "rsutcs", "rlutcs", "rsds", "rsus", "rlds", "rlus")
         _FLUX_DAILY = ("pr", "rlut")
         _FLUX_ZONAL = ("precip",)
 
@@ -1912,6 +1920,7 @@ class DiagnosticCollector:
         hfss_np = None if hfss is None else np.asarray(hfss, dtype=_f64)
         hfls_np = None if hfls is None else np.asarray(hfls, dtype=_f64)
         evspsbl_np = None if evspsbl is None else np.asarray(evspsbl, dtype=_f64)
+        prsn_np = None if prsn is None else np.asarray(prsn, dtype=_f64)
         rsutcs_np = None if rsutcs is None else np.asarray(rsutcs, dtype=_f64)
         rlutcs_np = None if rlutcs is None else np.asarray(rlutcs, dtype=_f64)
         rsds_np = None if rsds is None else np.asarray(rsds, dtype=_f64)
@@ -1949,6 +1958,7 @@ class DiagnosticCollector:
             ("hfss", hfss_np, (_ncol,)),
             ("hfls", hfls_np, (_ncol,)),
             ("evspsbl", evspsbl_np, (_ncol,)),
+            ("prsn", prsn_np, (_ncol,)),
             ("rsutcs", rsutcs_np, (_ncol,)),
             ("rlutcs", rlutcs_np, (_ncol,)),
             ("rsds", rsds_np, (_ncol,)),
@@ -2005,6 +2015,7 @@ class DiagnosticCollector:
                 ('tos', tos_np),
                 ('ps', p_s_np),
                 ('pr', precip_np),   # CMOR kg/m2/s — native, no conversion
+                ('prsn', prsn_np),   # CMOR kg/m2/s — the frozen part of pr
                 ('psl', psl),
                 ('rlut', rlut_np),
                 ('rsut', rsut_np),

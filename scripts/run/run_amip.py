@@ -2140,7 +2140,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
                             "morrison_warm_rain_scheme"],
                         dest="morrison_warm_rain_scheme",
                         help="Morrison warm-rain autoconversion/accretion "
-                             "law (kk2000 = Khairoutdinov-Kogan 2000).")
+                             "law (kk2000 = Khairoutdinov-Kogan 2000). Unset "
+                             "resolves by --morrison-flavor: mg -> "
+                             "kk2000_cam6, sam -> kk2000.")
     parser.add_argument("--morrison-autocon-fact", type=float,
                         default=ExperimentConfig._field_defaults[
                             "morrison_autocon_fact"],

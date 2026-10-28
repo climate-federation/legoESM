@@ -93,6 +93,39 @@ def test_cesm_variant_gradient_finite_on_fixture():
     assert np.all(np.asarray(g[4])[coa] != 0.0) and np.all(np.asarray(g[4])[~coa] == 0.0)
 
 
+def test_cesm_variant_gradient_finite_at_the_cold_air_outbreak_threshold():
+    """Exactly at ``tbot - ts == td0 = -10 K`` the oracle's block is off
+    (``tdiff .lt. td0`` false, shr_flux_mod.F90:329), so the forward value
+    is the no-outbreak one; the unused branch's sqrt(0) must not turn the
+    gradient into NaN (oracle audit row 57, safe-where)."""
+    d = _fixture()
+    J = lambda k: jnp.asarray(d[k])  # noqa: E731
+    # Dyadic SST so tbot - ts is exactly -10.0 in fp64.
+    ts = jnp.round(J("in_ts") * 4.0) / 4.0
+    tb = ts - 10.0
+    assert np.all(np.asarray(tb - ts) == -10.0)
+
+    def flux(u, th, q, ts_, tb_):
+        return compute_sam_oceflx_fluxes(
+            u, J("in_vbot"), th, q, ts_, J("oracle_ssq"), J("in_rbot"),
+            z_bot=J("in_zbot"), t_bot=tb_, variant="cesm", return_2m=True)
+
+    args = (J("in_ubot"), J("in_thbot"), J("in_qbot"), ts)
+    at_td0 = flux(*args, tb)
+    no_coa = flux(*args, ts)        # tdiff = 0: block off
+    for a, b in zip(at_td0, no_coa):
+        np.testing.assert_array_equal(np.asarray(a), np.asarray(b))
+
+    def loss(u, th, q, ts_, tb_):
+        r = flux(u, th, q, ts_, tb_)
+        return jnp.sum(r[0] + r[2] + r[3] + r[4])
+
+    g = jax.grad(loss, argnums=(0, 1, 2, 3, 4))(*args, tb)
+    for x in g:
+        assert np.all(np.isfinite(np.asarray(x)))
+    assert np.all(np.asarray(g[4]) == 0.0)
+
+
 def test_generator_driver_constants_are_legoesm_constants():
     """The oracle driver hard-codes legoESM's constants (driver.F90); the
     generator's mirror of them must equal both the Fortran and

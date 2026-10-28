@@ -447,6 +447,9 @@ def main(argv: list[str] | None = None) -> int:
         "--gravity-wave-drag", args.gravity_wave_drag,
         "--clouds", args.clouds,
         "--microphysics", args.microphysics,
+        # Pinned kk2000: an unset law resolves to kk2000_cam6 under mg (needs CLUBB relvar).
+        *(["--morrison-warm-rain-scheme", "kk2000"]
+          if args.microphysics == "morrison" else []),
         # CMIP / time
         "--start-year", str(args.start_year),
         "--experiment", "amip",

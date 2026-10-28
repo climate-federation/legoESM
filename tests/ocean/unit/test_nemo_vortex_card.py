@@ -642,9 +642,11 @@ _CERTIFIED_CARD_DIGESTS_GRADGATE = {        # gradient-gate tip d678430f3
 # all nested configs) and each deck's explicit
 # rn_bt_alpha, and again for the card-selected flux-form external-mode
 # switch (True on LOCK_EXCHANGE and OVERFLOW) -- the non-config part of
-# every digest is unchanged.
+# every digest is unchanged.  GYRE re-pinned 2026-10-26 (user, PR 2160):
+# dca02dffba3eb14f -> 2dbf0074ab1a4b47; KPP gamma_T/S 6.33 -> 6.3275155 derived
+# from kappa_von_karman, and mxl0_min_m 0.04 -> kappa*z0 (+1 ulp).
 _CERTIFIED_CARD_DIGESTS = {
-    "GYRE-zco": "dca02dffba3eb14f",
+    "GYRE-zco": "2dbf0074ab1a4b47",
     "LOCK_EXCHANGE-zco": "10516c2a4d166c73",
     "OVERFLOW-zps": "9be98498ac9f50de",
 }

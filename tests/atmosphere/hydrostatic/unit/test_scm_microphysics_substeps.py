@@ -15,6 +15,7 @@ from legoesm.atmosphere.idealized.rcemip_initial_conditions import (
     wing2018_qv_profile,
     wing2018_temperature_profile,
 )
+from legoesm.atmosphere.physics.microphysics.config import MorrisonConfig
 from legoesm.atmosphere.physics import (
     ConvectionConfig,
     GravityWaveDragConfig,
@@ -261,7 +262,7 @@ def test_scm_microphysics_substeps_preserve_reverse_mode_ad() -> None:
         radiation=RadiationConfig(scheme="none"),
         convection=ConvectionConfig(scheme="none"),
         turbulence=TurbulenceConfig(scheme="none"),
-        microphysics=MicrophysicsConfig(scheme="morrison"),
+        microphysics=MicrophysicsConfig(scheme="morrison", morrison=MorrisonConfig(warm_rain_scheme="kk2000")),
         gravity_wave_drag=GravityWaveDragConfig(scheme="none"),
     )
 

@@ -320,7 +320,6 @@ def test_shapes_dtypes():
     assert out.klab.shape == (1, nlev)
 
 
-@pytest.mark.xfail(strict=True, reason="masked-arithmetic gradient hazard near the plume top, tracked")
 def test_gradient_finite():
     """d mean(PKINEU) / dT through the main ascent only (trigger outputs held fixed)."""
     T, q, p_full, p_half = column("deep")

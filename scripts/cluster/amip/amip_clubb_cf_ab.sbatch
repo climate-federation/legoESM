@@ -69,6 +69,7 @@ COMMON=(
   --convection bechtold
   --turbulence clubb
   --microphysics morrison
+  --morrison-warm-rain-scheme kk2000
   --precision fp64
   --per-step-rollout
   --days "$DAYS"

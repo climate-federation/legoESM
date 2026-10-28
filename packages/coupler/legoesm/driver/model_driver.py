@@ -1118,7 +1118,15 @@ class _MPASSfcFluxAccum:
     # 8/9 = sw_down_sfc / lw_down_sfc: CMOR rsds/rlds, and with slots 0/1
     # the upwelling pair rsus/rlus (down - net).  Strongly diurnal, so a
     # fixed-clock snapshot would carry the #1353 defect under a mean label.
-    SLOTS = (0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 13)
+    # 14 = precip_frozen (the frozen part of slot 2): CMOR prsn, a flux
+    # averaged like pr.  KNOWN BEHAVIOUR (user decision, PR #2204): a run
+    # resumed MID-WINDOW from a checkpoint written before slot 14 existed
+    # publishes prsn for that one window as the mean of the post-restart
+    # steps only (the CMOR feed gates on the window's step count,
+    # ``is_complete``, not on per-slot counts), while pr covers the whole
+    # window -- the same behaviour slots 8/9/13 shipped with.  Later
+    # windows are complete.
+    SLOTS = (0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 14)
     #: The slots the column energy budget reads (sw/lw net sfc, lw_up, sw_up,
     #: sw_dn, hfss, hfls).  After the first radiation call every one of them
     #: is non-None on EVERY step (the MPAS model holds the last radiation
@@ -10805,6 +10813,10 @@ class ModelDriver:
         hfss = _sfc_slot(6)
         hfls = _sfc_slot(7)
         evspsbl = _sfc_slot(_evap_sfc_slot())   # the column's water flux, window mean
+        # Snowfall: the physics' own frozen surface flux (microphysics
+        # ice+snow+graupel + convective snow, the slot the land's snowfall
+        # reads), published raw like pr; None when not exported.
+        prsn = _sfc_slot(_sfc_diag_slot("precip_frozen"))
         # Clear-sky TOA pair (#843): slots populated only when
         # --clear-sky-diag is on, so these are None (fields absent from the
         # CMOR output, byte-identical) in the default configuration.
@@ -10883,6 +10895,7 @@ class ModelDriver:
             u_east=u_east,
             v_north=v_north,
             precip=precip,
+            prsn=prsn,
             phis=state.phis.data,
             tas=tas,
             ts=ts,

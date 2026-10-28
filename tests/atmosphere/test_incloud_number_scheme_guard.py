@@ -73,7 +73,10 @@ def _pipeline_core(monkeypatch, radiation, aer_on):
                         staticmethod(lambda cfg: _EchoSolver()))
     pipe = pp.build_physics_pipeline(
         create_latlon_grid(4, 6), _sigma(NLEV),
+        # kk2000 named: the unset mg law resolves to kk2000_cam6, which this
+        # lane (no CLUBB relvar) refuses; kk2000 is what it ran before.
         ExperimentConfig(radiation=radiation, microphysics="morrison",
+                         morrison_warm_rain_scheme="kk2000",
                          nc_from_aerosol=True, diurnal_cycle=False))
     s2 = pipe.adapter.shape_2d
     s3 = (*s2, NLEV)

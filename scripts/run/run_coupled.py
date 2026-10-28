@@ -859,6 +859,14 @@ def build_parser():
                              "cold drift in coupled CMIP runs. Use --microphysics "
                              "kessler for the cheap warm-rain path; 'none' with "
                              "active convection gives pr=0 and a cloud-water trap)")
+    parser.add_argument("--morrison-warm-rain-scheme", default=None,
+                        choices=["kk2000", "kk2000_cam6", "seifert_beheng",
+                                 "seifert_beheng_sb2001"],
+                        dest="morrison_warm_rain_scheme",
+                        help="Morrison warm-rain law. Unset with "
+                             "--microphysics morrison runs kk2000 here (no "
+                             "CLUBB relvar on the coupled lane); an explicit "
+                             "law with another microphysics raises.")
     parser.add_argument(
         "--minimal-physics", action="store_true",
         help="Override the full-physics defaults to a cheap idealized "
@@ -1505,6 +1513,10 @@ def main(argv=None, *, build_only=False):
         cloud_diagnostic_condensate_scheme=args.cloud_diagnostic_condensate_scheme,
         cloud_adiabatic_lwc_rate=args.cloud_adiabatic_lwc_rate,
         microphysics=args.microphysics,
+        # Pinned kk2000: an unset law resolves to kk2000_cam6 under mg (needs CLUBB relvar).
+        morrison_warm_rain_scheme=(
+            args.morrison_warm_rain_scheme
+            or ("kk2000" if args.microphysics == "morrison" else None)),
         days=args.days,
         experiment=args.experiment,
         start_year=args.start_year,

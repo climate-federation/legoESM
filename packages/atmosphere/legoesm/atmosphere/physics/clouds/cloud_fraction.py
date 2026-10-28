@@ -1509,7 +1509,12 @@ def compute_cloud_properties(
             )
             q_c_ic = jnp.minimum(q_c / jnp.maximum(_ast_cam6, MG2_MINCLD),
                                  KK2000_CAM6_QC_MAX)
-            r_eff_liq = mg2_droplet_effective_radius(q_c_ic, n_cloud, rho_air)
+            # CAM's REL density is dry, p/(rair t) (micro_mg_cam.F90:2507-2508);
+            # n_cloud is per volume at the moist density, so take it back to
+            # per kg with that density first (follow-up row 47, user decision).
+            rho_dry = compute_rho(jnp.maximum(T, 1.0), p_full)
+            r_eff_liq = mg2_droplet_effective_radius(
+                q_c_ic, n_cloud / rho_air * rho_dry, rho_dry)
         else:
             _cf_psd = jnp.clip(cf, _INHOM_CF_FLOOR, 1.0)
             q_c_psd = jnp.where(_nc_is_specified, q_c / _cf_psd, q_c)

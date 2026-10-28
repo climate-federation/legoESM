@@ -476,8 +476,11 @@ def _lane_gcm(scheme: str, *, guard: bool = False):
     # coupled driver calls (kernel_registry documents it as such).
     from legoesm.driver.config import ExperimentConfig
     from legoesm.driver.physics_pipeline import _resolve_microphysics
+    # Morrison names kk2000: the unset mg law (kk2000_cam6) needs CLUBB relvar.
     cfg = ExperimentConfig(microphysics=scheme,
-                           hard_saturation_adjustment=guard)
+                           hard_saturation_adjustment=guard,
+                           morrison_warm_rain_scheme=(
+                               "kk2000" if scheme == "morrison" else None))
     _fn, micro_cfg = _resolve_microphysics(cfg)
     return micro_cfg
 

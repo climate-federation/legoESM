@@ -2047,7 +2047,9 @@ class ExperimentConfig(NamedTuple):
     # graupel riming sink.  Default equals the leaf (True).
     morrison_do_graupel: bool = True
     # Morrison warm rain (appended at the END: positional ABI).
-    morrison_warm_rain_scheme: str = "kk2000"   # MorrisonConfig.warm_rain_scheme
+    # MorrisonConfig.warm_rain_scheme; None = unset, resolved by
+    # morrison_flavor (mg -> kk2000_cam6, sam -> kk2000).
+    morrison_warm_rain_scheme: str | None = None
     morrison_autocon_fact: float = 1.0          # MorrisonConfig.autocon_fact (kk2000 only)
     morrison_accre_enhan_fact: float = 1.0      # MorrisonConfig.accre_enhan_fact (kk2000 only)
     # MorrisonConfig.warm_rain_incloud: CAM6 MG2 in-cloud warm rain on the
@@ -4230,11 +4232,11 @@ class ExperimentConfig(NamedTuple):
                 "by the hom-nucleation branch and would be silently inert.")
         _wrs = ("kk2000", "kk2000_cam6", "seifert_beheng",
                 "seifert_beheng_sb2001")
-        if self.morrison_warm_rain_scheme not in _wrs:
+        if self.morrison_warm_rain_scheme not in (None, *_wrs):
             raise ValueError(
                 f"morrison_warm_rain_scheme={self.morrison_warm_rain_scheme!r} "
-                f"unknown; choose one of {_wrs}.")
-        if (self.morrison_warm_rain_scheme != "kk2000"
+                f"unknown; choose one of {_wrs} or leave it unset (None).")
+        if (self.morrison_warm_rain_scheme is not None
                 and self.microphysics != "morrison"):
             raise ValueError(
                 f"morrison_warm_rain_scheme={self.morrison_warm_rain_scheme!r} "
@@ -4243,7 +4245,11 @@ class ExperimentConfig(NamedTuple):
         _kk_only = [f for f in ("morrison_autocon_fact",
                                 "morrison_accre_enhan_fact")
                     if f in _morrison_touched]
-        if _kk_only and self.morrison_warm_rain_scheme not in (
+        from legoesm.atmosphere.physics.microphysics.config import (
+            MorrisonConfig, resolve_warm_rain_scheme as _resolve_wrs)
+        if _kk_only and _resolve_wrs(MorrisonConfig(
+                morrison_flavor=self.morrison_flavor,
+                warm_rain_scheme=self.morrison_warm_rain_scheme)) not in (
                 "kk2000", "kk2000_cam6"):
             raise ValueError(
                 f"{_kk_only} require morrison_warm_rain_scheme='kk2000' or "

@@ -1196,6 +1196,9 @@ def resolved_inactive_fields(physics_config, *,
       per-column subgrid-orography field is wired (mcfarlane.py).
       ``subgrid_orography`` = the driver wired one (production: SSO file).
     """
+    from legoesm.atmosphere.physics.microphysics.config import (
+        resolve_warm_rain_scheme)
+
     out = set()
     micro = getattr(physics_config, "microphysics", None)
     if getattr(micro, "scheme", None) == "morrison":
@@ -1209,7 +1212,8 @@ def resolved_inactive_fields(physics_config, *,
                 for f in _mcfg.__param_spec__["SeifertBehengConfig"]["params"]
                 if f != "Nc_0"}
     if (getattr(micro, "scheme", None) == "morrison"
-            and micro.morrison.warm_rain_scheme not in _KK2000_WARM_RAIN):
+            and resolve_warm_rain_scheme(micro.morrison)
+            not in _KK2000_WARM_RAIN):
         out |= {f"atm.micro.MorrisonConfig.{f}"
                 for f in ("autocon_fact", "accre_enhan_fact")}
     gwd = getattr(physics_config, "gravity_wave_drag", None)
@@ -1733,11 +1737,16 @@ def make_aimip_classical_spectral_physics(
     # ---- Microphysics ----
     from legoesm.atmosphere.physics.microphysics.config import (
         MicrophysicsConfig,
+        MorrisonConfig,
     )
     if microphysics_scheme == "sundqvist":
         micro_cfg = MicrophysicsConfig(
             scheme="sundqvist", sundqvist=params.to_sundqvist_config(),
         )
+    elif microphysics_scheme == "morrison":
+        # Pinned kk2000: an unset law resolves to kk2000_cam6 under mg (needs CLUBB relvar).
+        micro_cfg = MicrophysicsConfig(
+            scheme="morrison", morrison=MorrisonConfig(warm_rain_scheme="kk2000"))
     else:
         micro_cfg = MicrophysicsConfig(scheme=microphysics_scheme)
 

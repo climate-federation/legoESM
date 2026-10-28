@@ -48,6 +48,9 @@ rad_update_steps: 12
 clouds: sundqvist
 microphysics: morrison      # two-moment SOTA microphysics (predicts hydrometeors;
                             # also the aerosol_ccn prereq when that is re-enabled)
+morrison_warm_rain_scheme: kk2000   # explicit: the unset default resolves to
+                                    # kk2000_cam6 under morrison_flavor mg,
+                                    # which needs CLUBB relvar (not wired here)
 convection: sbm             # the structural-bias fix (albedo+precip)
 turbulence: louis
 gravity_wave_drag: hines
