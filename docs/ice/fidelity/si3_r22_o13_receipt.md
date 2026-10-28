@@ -19,7 +19,7 @@ The compiled record build is `ORCA2_SAS_ICE_O8O16_REF`. The executing source, no
 
 Those statements and the boundary/remap eligibility logic are in `ORCA2_SAS_ICE_O8O16_REF/BLD/ppsrc/nemo/iceitd.f90:118-365`; the linear reconstruction is `:368-429`; the sequential extensive transfer, roundoff call, `rn_amax_2d` cap, and final thickness/temperature update are `:432-597`. The roundoff callee clamps negative ice/snow/age/energy and pond values, conditionally clamps lid volume, and selects layered `szv_i` for `nn_icesal == 4` in `ORCA2_SAS_ICE_O8O16_REF/BLD/ppsrc/nemo/icevar.f90:856-894`.
 
-Resolved production values are `jpl=5`, `nlay_i=10`, `nlay_s=5`, `nn_icesal=4`, `ln_pnd_LEV=True`, `ln_pnd_lids=True`, HFN `rn_himean=2.0`, `rn_himax=99.0`, and the recorded spatial `rn_amax_2d`. There is no fallback deck: the production wrapper rejects a missing `config.si3_orca2`, missing `rn_amax_2d`, mismatched category count, or mismatched spatial shape (`packages/ice/legoesm/ice/sea_ice.py:2847-2868`). The remapper also has no defaults for `epsi10`, `epsi20`, or `rt0`; production passes all three from the run's explicit `SI3ORCA2StateConfig.ice_constants` (`packages/ice/legoesm/ice/sea_ice.py:3254-3286`).
+Resolved production values are `jpl=5`, `nlay_i=10`, `nlay_s=5`, `nn_icesal=4`, `ln_pnd_LEV=True`, `ln_pnd_lids=True`, HFN `rn_himean=2.0`, `rn_himax=99.0`, and the recorded spatial `rn_amax_2d`. There is no fallback deck: the production wrapper rejects a missing `config.si3_orca2`, missing `rn_amax_2d`, mismatched category count, or mismatched spatial shape (`packages/ice/legoesm/ice/sea_ice.py:2892-2913`). The remapper also has no defaults for `epsi10`, `epsi20`, or `rt0`; production passes all three from the run's explicit `SI3ORCA2StateConfig.ice_constants` (`packages/ice/legoesm/ice/sea_ice.py:3299-3331`).
 
 ## 2. One production implementation
 
@@ -32,7 +32,7 @@ The canonical implementation is `si3_ice_itd_rem` in `packages/ice/legoesm/ice/i
 5. sequential donor transfers for area, ice/snow volume, age, surface-temperature content, pond area/volume/lid, all snow and ice energy layers, and layered or bulk salt;
 6. NEMO roundoff, `rn_amax_2d`, final `h_i`/`t_su`, and the pre-transfer area conservation target.
 
-Every NEMO source operation is materialized with `nemo_source_round`; category sums use the pre-existing sequential `fortran_sum_categories`. The production sea-ice step selects this core for the existing `n_categories > 1`, `itd_remap="lipscomb2001"`, `ponds.scheme="si3_lev"` configuration and maps the generic carrier into/out of the same extensive interface (`packages/ice/legoesm/ice/sea_ice.py:3235-3307`). Other callers retain their existing generic remap branch. The AST duplicate-arithmetic guard now treats the canonical remapper as the sole O13 kernel, catches a planted copied O13 window, and there is exactly one `si3_ice_itd_rem` definition under `packages/`.
+Every NEMO source operation is materialized with `nemo_source_round`; category sums use the pre-existing sequential `fortran_sum_categories`. The production sea-ice step selects this core for the existing `n_categories > 1`, `itd_remap="lipscomb2001"`, `ponds.scheme="si3_lev"` configuration and maps the generic carrier into/out of the same extensive interface (`packages/ice/legoesm/ice/sea_ice.py:3280-3352`). Other callers retain their existing generic remap branch. The AST duplicate-arithmetic guard now treats the canonical remapper as the sole O13 kernel, catches a planted copied O13 window, and there is exactly one `si3_ice_itd_rem` definition under `packages/`.
 
 The production-path test drives basal melt on five populated HFN categories. The exact remapper moves category area, and replacing the call by a no-op changes the returned production concentration bits; the sentinel removal plant also fires (`tests/ice/unit/test_si3_o13_itd_remap.py:294-409`).
 
@@ -68,7 +68,7 @@ Focused results:
 
 ## 5. Master score and controls
 
-The r21 scorer was extended in place. `_score_o13_step` reads verified Kind 11/12 pairs, calls the production function with arrays as JIT arguments, checks P4 conservation, and compares every one of the 96 EXIT fields (`scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:977-1007`). `score_o13` is the all-step mode of that same block, not a reimplementation (`:1010-1062`), and the integrated O8–O13 loop calls the same helper (`:1786-1790`).
+The r21 scorer was extended in place. `_score_o13_step` reads verified Kind 11/12 pairs, calls the production function with arrays as JIT arguments, checks P4 conservation, and compares every one of the 96 EXIT fields (`scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1036-1066`). `score_o13` is the all-step mode of that same block, not a reimplementation (`:1069-1121`), and the integrated O8–O13 loop calls the same helper (`:1845-1849`).
 
 Admission pins verified during the final run:
 

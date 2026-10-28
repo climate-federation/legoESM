@@ -95,7 +95,7 @@ only the C1D prognostic fields already present in its state schema.
 
 The production test spies on that call and then replaces it with a bypass;
 removing O14 changes the returned production ice thickness, so the M4 control
-can fail (`tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:261-433`).
+can fail (`tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:274-446`).
 The AST guard continues to permit only the canonical implementation and its
 updated planted duplicate fires.
 
@@ -120,11 +120,11 @@ denominator makes this plant fail with a NaN gradient. Result: `10 passed`.
 
 The existing scorer was extended rather than reimplemented. Its cached JIT
 kernel calls the production function with resolved selectors
-(`scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:875-882`).
+(`scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:882-890`).
 `score_o14` verifies admission, reads kind 12 and kind 13 through the existing
 verified reader, passes ENTRY arrays as JIT arguments, compares all 96 EXIT
 fields bitwise, and fails with the first `(kt, category, cell, field)`
-(`scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1016-1119`).
+(`scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1129-1232`).
 Admission now also compares the preregistered `ln_icedO=T` and `ln_leadhfx=T`
 selectors with the resolved record namelist and compares the kind-12/13
 `rn_hinew` scalar header with that namelist; all three mismatch plants fire.
@@ -144,7 +144,7 @@ Full report:
 
 The direct scorer test covers representative `kt=(1,2,100)`, a one-ULP
 `v_i` EXIT mutation, and a production-model bypass mutation
-(`tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:142-160`). Both
+(`tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:152-170`). Both
 plants exit nonzero and name O14 as non-bit-exact.
 
 ## 5. Caller controls and gates

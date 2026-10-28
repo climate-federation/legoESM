@@ -52,7 +52,7 @@ NEMO's final stress stores execute only for `ji=ntsi..ntei` and
 `jj=ntsj..ntej` (`iceupdate.f90:410-419`). The scorer therefore derives the
 Python slices from each record's bounds and scores only that 180 by 148 owned
 interior for full-halo `utau` and `vtau`; the recorded `taum` is already
-interior (`scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:2254-2269`).
+interior (`scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:2440-2455`).
 
 The 100-step result is 0 unequal / 7,992,000 elements, maximum 0 ULP, no first
 non-bit. A one-ULP `utau` plant at the first owned cell fails. Unwritten halo
@@ -70,11 +70,11 @@ admitted version-1 reader instead labels the first five of those as `at_i_b`,
 The reader therefore translates those three byte positions only when
 `version == 1` and `kind == 15`; every other version/kind returns unchanged,
 and unsupported master versions already fail closed
-(`scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:250-293` and
-`scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:420-529`).
+(`scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:257-300` and
+`scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:427-536`).
 The evidence checker reads the committed writer calls in source order and, at
 steps 1, 2, and 100, obtains these independent checks
-(`scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1973-2046`):
+(`scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:2159-2232`):
 
 - all 12 state fields also present in kind 18 align bit-for-bit, for 36 checks;
 - translated `qsr` equals the independently recorded `qsr_oce` block
@@ -85,7 +85,7 @@ steps 1, 2, and 100, obtains these independent checks
 
 The direct test pins the writer/schema orders, version/kind restriction, all 36
 cross-kind checks, both independent values, and the failing permutation plant
-(`tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:195-232`).
+(`tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:205-242`).
 
 Kind 19 has a separate version-1 writer/schema permutation: the writer emits
 `tmod_io`, `utau`, `vtau` (`o8_o16_master_writer.F90:476-486`), while the
@@ -101,7 +101,7 @@ The scorer reconstructs kind 18, runs the production `si3_o16_step` call site,
 which performs `ice_var_glo2eqv`, `ice_var_agg`, and `si3_ice_update_flx`, then
 scores every kind-15 state/total field and every kind-16 output field
 (`packages/ice/legoesm/ice/si3_finalize.py:894-954` and
-`scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:2112-2289`).
+`scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:2298-2475`).
 Across `kt=1..100` under CPU fp64, glibc/libm, and production JIT:
 
 - aggregation into kind 15: 0 unequal / 948,384,000 elements, maximum 0 ULP;
