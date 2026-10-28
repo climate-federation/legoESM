@@ -9990,6 +9990,19 @@ CITATION_MAP = {
     'packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:15610-15631': ['def _carry_nemo_rk3_after_ssh(self, entry_state, new_state):', 'data=2.0 * new_state.eta.data - entry_state.eta.data))', 22],
     'packages/ocean/legoesm/ocean/bulk_flux_omip.py:1219-1459': ['def nemo_blk_oce_ncar(', 'means, bulk, tail, forcing, freshwater, bulk_before_ice, iif)', 241],
     'packages/ocean/legoesm/ocean/bulk_flux_omip.py:1280-1352': ['if not update:', (')', 554), 73],
+    # --- ORCA2 round 344: native-transcendental fast-literal K0 mode ---
+    'scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round343_speed_benchmark.py:943-990': [
+        'def build_fast_literal_mode_orca2_k0_card(base_card: Any) -> Any:',
+        'return {"changed_fields": ["ocean.transcendentals"], "retained_inventory_entries": retained}', 48],
+    'packages/ocean/legoesm/ocean/physics/vertical_mixing/double_diffusion.py:309-358': [
+        'def nemo_zdf_ddm(avt, avm, zdt, zds, rn2, wmask, cfg: DoubleDiffusionConfig):',
+        'return avt_new, avs, avm_new', 50],
+    'packages/ocean/legoesm/ocean/physics/vertical_mixing/internal_wave_mixing.py:388-482': [
+        'def nemo_zdf_iwm(avt, avs, avm, forcing: IWMForcing, rn2, stretch, ht_0,',
+        'return avt, avs, avm', 95],
+    'packages/ocean/legoesm/ocean/physics/vertical_mixing/tke.py:2708-2811': [
+        'def _nemo_etau_htau(',
+        'profile = _nemo_glibc234_vector_exp(-depth_w / htau)', 104],
 }
 
 
