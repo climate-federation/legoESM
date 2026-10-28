@@ -81,9 +81,12 @@ def test_literal_ddm_matches_scalar_fortran_bit_for_bit(compiled):
     avt, avm, zdt, zds, rn2, wmask = _cases()
     # jit: rn_hsbfr is a compile-time constant there, which XLA would fold
     # into a reciprocal multiply (V3 kt 1: 9,735 fingering cells off by an ulp)
-    fn = jax.jit(lambda *a: nemo_zdf_ddm(*a, CFG)) if compiled else (
-        lambda *a: nemo_zdf_ddm(*a, CFG))
-    got = fn(*(jnp.asarray(x) for x in (avt, avm, zdt, zds, rn2, wmask)))
+    args = tuple(jnp.asarray(x) for x in (avt, avm, zdt, zds, rn2, wmask))
+    if compiled:
+        got = jax.jit(lambda *a: nemo_zdf_ddm(*a, CFG))(*args)
+    else:
+        with jax.disable_jit():
+            got = nemo_zdf_ddm(*args, CFG)
     want = np.array([_fortran(*args) for args in zip(avt, avm, zdt, zds, rn2, wmask)]).T
     for name, g, w in zip(("avt", "avs", "avm"), got, want):
         assert np.array_equal(np.asarray(g), w), (name, int(np.sum(np.asarray(g) != w)))
@@ -93,15 +96,29 @@ def test_literal_ddm_matches_scalar_fortran_bit_for_bit(compiled):
 
 
 def test_literal_ddm_refuses_other_forms_and_runs_native_exp():
-    args = tuple(jnp.ones(3) for _ in range(6))
+    # Stable wet cells on both active arms: R_rho > 1 salt fingering and
+    # 0 < R_rho < 1 diffusive convection (which executes both EXP calls).
+    args = tuple(jnp.asarray(x, dtype=jnp.float64) for x in (
+        [1.0e-4, 2.0e-4, 3.0e-4, 4.0e-4],
+        [1.0e-3, 2.0e-3, 3.0e-3, 4.0e-3],
+        [2.0, 0.75, 0.25, 1.5],
+        [1.0, 1.0, 1.0, 1.0],
+        [1.0e-5, 2.0e-5, 3.0e-5, 4.0e-5],
+        [1.0, 1.0, 1.0, 1.0],
+    ))
     with pytest.raises(ValueError, match="nemo_literal"):
         nemo_zdf_ddm(*args, CFG._replace(form="hybrid"))
     set_policy(PrecisionPolicy.fp64(transcendentals="native"))
-    eager = nemo_zdf_ddm(*args, CFG)
+    with jax.disable_jit():
+        eager = nemo_zdf_ddm(*args, CFG)
     compiled = jax.jit(lambda *values: nemo_zdf_ddm(*values, CFG))(*args)
+    avt, _, zdt, zds, _, _ = (np.asarray(x) for x in args)
+    zrau = zdt / zds
+    assert np.any(zrau > 1.0) and np.any((zrau > 0.0) & (zrau < 1.0))
     for left, right in zip(eager, compiled, strict=True):
         assert np.isfinite(np.asarray(left)).all()
         np.testing.assert_array_equal(np.asarray(left), np.asarray(right))
+    assert np.any(np.asarray(eager[0])[zrau < 1.0] != avt[zrau < 1.0])
 
 
 def _pair_inputs():

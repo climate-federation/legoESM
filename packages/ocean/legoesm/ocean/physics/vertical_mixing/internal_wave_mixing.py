@@ -469,8 +469,8 @@ def nemo_zdf_iwm(avt, avs, avm, forcing: IWMForcing, rn2, stretch, ht_0,
     zav_wave = r(jnp.minimum(jnp.maximum(cfg.k_min, zav_wave), cfg.k_max)
                  * wm)                                      # :294
     if cfg.tsdiff:                                          # :301-306
-        zlog = precision_log10(jnp.maximum(
-            _EPS_DENOM, r(r(zreb * _NEMO_IWM_TSDIFF_FIVE) * _NEMO_IWM_R1_6)))
+        zlog = r(precision_log10(jnp.maximum(
+            _EPS_DENOM, r(r(zreb * _NEMO_IWM_TSDIFF_FIVE) * _NEMO_IWM_R1_6))))
         ztanh = precision_tanh(r(_TSDIFF_TANH_SLOPE
                                  * r(zlog - _TSDIFF_LOG10_OFFSET)))
         zav_ratio = r(r(_TSDIFF_BASE + r(_TSDIFF_AMP * ztanh)) * wm)
