@@ -4491,6 +4491,9 @@ _RESTART_ENV_EXCLUDE_EXACT: frozenset[str] = frozenset({
     "LEGOESM_SCALING_KIND", "LEGOESM_DEBUG_HELD", "LEGOESM_DUMP_RAD",
     "LEGOESM_JAX_DISTRIBUTED_TEST", "LEGOESM_RUN_AMIP_INTEGRATION",
     "LEGOESM_RUN_SLOW_RCE",
+    # resume-gate switch: waives the source-revision check, never touches
+    # the state; hashing it made the bypassed leg un-resumable by the next one
+    "LEGOESM_ALLOW_VERSION_DRIFT",
 })
 
 
