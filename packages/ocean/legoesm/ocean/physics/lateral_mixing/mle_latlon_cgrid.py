@@ -82,9 +82,6 @@ from legoesm.ocean.physics.lateral_mixing._gm_redi_common import (
 # larger than float32 machine eps to prevent intermediate blow-up in the
 # backward pass (matches gm_redi_latlon_cgrid).
 
-# NEMO's fixed Fox-Kemper vertical-structure coefficient, tramle.F90:333-338.
-_NEMO_MLE_STRUCTURE_COEFFICIENT = 5.0 / 21.0
-
 
 __physics_contract__ = {
     "summary": (
@@ -366,7 +363,7 @@ def mle_tracer_tendency_latlon_cgrid(
         zu = sr(1.0 - sr(depth_u * inv_Hu[..., None]))
         zv = sr(1.0 - sr(depth_v * inv_Hv[..., None]))
         zu2, zv2 = sr(zu * zu), sr(zv * zv)
-        r5_21 = _NEMO_MLE_STRUCTURE_COEFFICIENT
+        r5_21 = 5.0 / 21.0
         mu_u = jnp.maximum(
             0.0, sr(sr(1.0 - zu2) * sr(1.0 + sr(r5_21 * zu2))))
         mu_v = jnp.maximum(
