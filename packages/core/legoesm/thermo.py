@@ -47,6 +47,14 @@ from legoesm import constants
 from legoesm.core.smooth import smooth_clamp, smooth_min
 
 
+# Tetens/Bolton coefficients of ``saturation_vapor_pressure`` (named so that a
+# scheme needing the same curve in another algebraic form -- the IFS
+# convection's R2ES/R3LES/R4LES -- reads them from here instead of copying).
+TETENS_E0_PA = 611.2   # satcurve-ok: definition site of the legoESM Tetens curve
+TETENS_A = 17.67       # satcurve-ok: definition site
+TETENS_B_K = 243.5     # satcurve-ok: definition site
+
+
 def saturation_vapor_pressure(T: jax.Array) -> jax.Array:
     """Compute saturation vapor pressure using Tetens formula.
 
@@ -77,7 +85,7 @@ def saturation_vapor_pressure(T: jax.Array) -> jax.Array:
     # there instead of inf).  satcurve-ok: identical Tetens curve for
     # T ≥ 150 K; this is an AD floor, not a new saturation formula.
     T_c = jnp.clip(T, 150.0, None) - constants.T_freeze
-    return 611.2 * jnp.exp(17.67 * T_c / (T_c + 243.5))
+    return TETENS_E0_PA * jnp.exp(TETENS_A * T_c / (T_c + TETENS_B_K))
 
 
 # ---------------------------------------------------------------------------

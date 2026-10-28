@@ -3689,6 +3689,30 @@ def test_bechtold_use_ifs_cape_closure_legacy_flat_config_gets_default():
     assert cfg.bechtold_use_ifs_cape_closure is True
 
 
+def test_bechtold_use_ifs_ascent_round_trips_and_threads():
+    """--bechtold-use-ifs-ascent reaches the hot-loop BechtoldConfig, survives
+    the AMIP flat round-trip, and the resolved default leaf passes the faithful
+    path's own guard (only its run-set fields may differ from default)."""
+    from legoesm.driver.config import ExperimentConfig
+    from legoesm.driver.physics_pipeline import _resolve_convection
+    from legoesm.atmosphere.physics.convection._ifs_faithful import _check_config
+    parser = build_arg_parser()
+    on = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--convection", "bechtold",
+        "--bechtold-use-ifs-ascent"]), parser))
+    assert on.bechtold_use_ifs_ascent is True
+    leaf = _resolve_convection(on)[1]
+    assert leaf.use_ifs_ascent is True
+    _check_config(leaf._replace(dx_m=1.0e5))
+    off = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--convection", "bechtold"]), parser))
+    assert _resolve_convection(off)[1].use_ifs_ascent is False
+    for flag in (True, False):
+        cfg = ExperimentConfig(convection="bechtold", bechtold_use_ifs_ascent=flag)
+        assert ExperimentConfig.from_amip_config(
+            cfg.to_amip_config()).bechtold_use_ifs_ascent is flag
+
+
 def test_bechtold_use_ifs_subcloud_evap_round_trips_and_threads():
     """--bechtold-use-ifs-subcloud-evap round-trips into ExperimentConfig,
     survives the flat-AMIP serialization both ways, and threads into the
@@ -5735,3 +5759,21 @@ def test_mcfarlane_effgw_oro_flag_flows_to_config():
     parser = build_arg_parser()
     # The deck sets the dest as a parser default, exactly as main() applies it.
     assert load_yaml_config(deck, parser)["mcfarlane_effgw_oro"] == 0.125
+
+
+def test_amip_bechtold_deck_runs_the_ifs_path():
+    """User 2026-10-27 (Q17 item 2): the AMIP Bechtold deck switches the
+    faithful CUMASTRN path on and drops the two legacy-only fields it refuses;
+    the deck's resolved leaf passes the path's own config guard."""
+    from legoesm.driver.physics_pipeline import _resolve_convection
+    from legoesm.driver.run_config_yaml import load_yaml_config
+    from legoesm.atmosphere.physics.convection._ifs_faithful import _check_config
+    deck = _repo_root() / "config" / "amip" / "amip_sundqvist_l36.yaml"
+    parser = build_arg_parser()
+    parser.set_defaults(**load_yaml_config(str(deck), parser))
+    cfg = build_config_from_args(_postprocess_args(
+        parser.parse_args(_AMIP_DUMMY_PATHS), parser))
+    assert cfg.convection == "bechtold" and cfg.bechtold_use_ifs_ascent is True
+    leaf = _resolve_convection(cfg)[1]
+    assert leaf.use_ifs_ascent is True
+    _check_config(leaf._replace(dx_m=1.0e5))

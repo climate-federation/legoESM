@@ -38,6 +38,7 @@
   "bechtold_rprcon": 0.0014,
   "bechtold_subcloud_evap_scale": 1.0,
   "bechtold_subsidence_solve": "implicit_flux",
+  "bechtold_use_ifs_ascent": false,
   "bechtold_use_ifs_capdcycl": true,
   "bechtold_use_ifs_cape_closure": true,
   "bechtold_use_ifs_downdraft": true,

@@ -115,6 +115,9 @@ class AMIPExperimentConfig(NamedTuple):
     # the flat schema so the to_amip_config/from_amip_config round-trip cannot
     # silently drop an explicit selection across a checkpoint/restart boundary.
     bechtold_use_ifs_cape_closure: bool = True
+    # Faithful CUMASTRN path (BechtoldConfig.use_ifs_ascent); flat schema so
+    # the AMIP round-trip carries it across a restart.
+    bechtold_use_ifs_ascent: bool = False
     # IFS Kessler sub-cloud rain evaporation (cuflxn.F90; default ON
     # 2026-07-16) — in the flat schema so round-trips cannot drop it.
     bechtold_use_ifs_subcloud_evap: bool = True

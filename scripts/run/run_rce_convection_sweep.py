@@ -301,7 +301,9 @@ def _build_convection_call(scheme: str, dt: float):
         init_carry_fn = lambda ncol, nlev, dtype: ()
 
     elif scheme == "kain_fritsch":
-        cfg = KainFritschConfig(M_b_max=M_B_MAX_RCE)
+        # The faithful KF-Eta port has no mass-flux cap (module_cu_kfeta.F);
+        # it runs uncapped, as the oracle does.
+        cfg = KainFritschConfig()
 
         def call(T, qv, pf, ph, u, v, carry):
             (prog,) = carry
@@ -309,7 +311,7 @@ def _build_convection_call(scheme: str, dt: float):
             out, prog_new = kain_fritsch_convection(
                 T=T, q_v=qv, p_full=pf, p_half=ph,
                 w_grid=w0, conv_prog_profile=prog,
-                dt=dt, config=cfg,
+                dt=dt, config=cfg, u=u, v=v,
             )
             return (
                 out.dT_dt, out.dq_v_dt, out.dq_c_conv_dt,

@@ -1445,6 +1445,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "--no-bechtold-use-ifs-cape-closure disables a "
                              "config-file default. Default "
                              f"{_EXPERIMENT_DEFAULTS.bechtold_use_ifs_cape_closure}.")
+    parser.add_argument("--bechtold-use-ifs-ascent",
+                        dest="bechtold_use_ifs_ascent",
+                        action=argparse.BooleanOptionalAction,
+                        default=_EXPERIMENT_DEFAULTS.bechtold_use_ifs_ascent,
+                        help="Run the IFS convection as CUMASTRN does (the "
+                             "faithful OpenIFS port); only the six run-set "
+                             "Bechtold fields may differ from their defaults. "
+                             "Default "
+                             f"{_EXPERIMENT_DEFAULTS.bechtold_use_ifs_ascent}.")
     parser.add_argument("--bechtold-use-ifs-subcloud-evap",
                         dest="bechtold_use_ifs_subcloud_evap",
                         action=argparse.BooleanOptionalAction,
@@ -3157,6 +3166,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         bechtold_downdraft_entrain_rate=args.bechtold_downdraft_entrain_rate,
         bechtold_downdraft_detrain_scale_m=args.bechtold_downdraft_detrain_scale_m,
         bechtold_use_ifs_cape_closure=args.bechtold_use_ifs_cape_closure,
+        bechtold_use_ifs_ascent=args.bechtold_use_ifs_ascent,
         bechtold_use_ifs_subcloud_evap=args.bechtold_use_ifs_subcloud_evap,
         bechtold_use_ifs_inplume_precip=args.bechtold_use_ifs_inplume_precip,
         bechtold_dx_m=args.bechtold_dx_m,

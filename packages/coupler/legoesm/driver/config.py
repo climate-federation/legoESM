@@ -1632,6 +1632,11 @@ class ExperimentConfig(NamedTuple):
     # neutral); --no-bechtold-use-ifs-cape-closure restores the legacy
     # surrogate byte-identically.  Mirrors BechtoldConfig.use_ifs_cape_closure.
     bechtold_use_ifs_cape_closure: bool = True
+    # Run the IFS convection as CUMASTRN does (faithful OpenIFS port; the six
+    # run-set fields bechtold_epsilon_deep/delta_deep/rprcon/dnoprc,
+    # epsilon_shallow, cape_qadv_weight reach it, every other Bechtold field
+    # must stay at its default).  Mirrors BechtoldConfig.use_ifs_ascent.
+    bechtold_use_ifs_ascent: bool = False
     # IFS Kessler sub-cloud rain evaporation (cuflxn.F90:436-475).  Default
     # ON (2026-07-16, validated: codex x3 + gray-RCE A/B + C24 AMIP A/B);
     # mirrors BechtoldConfig.use_ifs_subcloud_evap (fallbacks match).
@@ -5037,6 +5042,8 @@ class ExperimentConfig(NamedTuple):
             # fresh default run gets, not silently pin the old one.
             bechtold_use_ifs_cape_closure=getattr(
                 amip_cfg, 'bechtold_use_ifs_cape_closure', True),
+            bechtold_use_ifs_ascent=getattr(
+                amip_cfg, 'bechtold_use_ifs_ascent', False),
             bechtold_use_ifs_subcloud_evap=getattr(
                 amip_cfg, 'bechtold_use_ifs_subcloud_evap', True),
             bechtold_use_ifs_inplume_precip=getattr(
@@ -5216,6 +5223,7 @@ class ExperimentConfig(NamedTuple):
             bechtold_downdraft_alpha=self.bechtold_downdraft_alpha,
             bechtold_downdraft_rh_min=self.bechtold_downdraft_rh_min,
             bechtold_use_ifs_cape_closure=self.bechtold_use_ifs_cape_closure,
+            bechtold_use_ifs_ascent=self.bechtold_use_ifs_ascent,
             bechtold_use_ifs_subcloud_evap=self.bechtold_use_ifs_subcloud_evap,
             bechtold_use_ifs_inplume_precip=self.bechtold_use_ifs_inplume_precip,
             bechtold_dx_m=self.bechtold_dx_m,
