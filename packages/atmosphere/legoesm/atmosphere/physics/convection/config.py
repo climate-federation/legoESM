@@ -532,17 +532,17 @@ class KuoConfig(NamedTuple):
         dq/dt = −ptenq + cvgu/zint · (qvc − qv)
         zint  = Σ (qvc − qv + (tc − t)/alpha) dp/g
 
-    over levels that are buoyant AND have positive vertical velocity at
-    the LCL (``icond==2``) AND positive local convergence
-    (``ptenq > 0``).  ``tc, qvc`` come from an entraining moist-adiabat
-    ascent (entrainment ``Eps``) with condensation removed.
+    applied at levels that are buoyant AND have positive vertical velocity
+    at the LCL (``icond==2``) AND positive local convergence
+    (``ptenq > 0``); ``cvgu`` and ``zint`` are integrated over ``icond==2``
+    (so, as in the oracle, the column water is not closed when divergence
+    lies inside the cloud).  ``tc, qvc`` come from an entraining
+    moist-adiabat ascent (entrainment ``Eps``) with condensation removed.
 
     The optional ``partition="anthes"`` Kuo-Anthes (1977) closure splits
     the source between heating ``(1 − bkuo)`` and moistening ``bkuo``
-    with ``bkuo = clip(1 − RH_mean − rh_offset, 0, 1)`` — b is a
-    moistening FRACTION, so it is clamped to [0, 1] (a near-saturated
-    layer with ``RH_mean + rh_offset > 1`` moistens nothing rather than
-    flipping the term into spurious extra drying).
+    with ``bkuo = 1 − RH_mean − rh_offset``, unclamped as in the oracle
+    (negative in a layer with ``RH_mean + rh_offset > 1``).
 
     Fields
     ------
@@ -565,9 +565,11 @@ class KuoConfig(NamedTuple):
         Dimensionless sigmoid sharpness for the smooth ``icond``
         activation gates (supersaturation, buoyancy, w_lcl>0, ptenq>0).
         Each gate argument is normalised to O(1) by the scales below
-        before the sigmoid, so a single large dimensionless sharpness
-        (default 50) makes every gate a crisp Heaviside approaching the
-        oracle's hard ``if`` switches while staying differentiable.
+        before the sigmoid; the gates tend to the oracle's hard ``if``
+        switches as the sharpness goes to infinity (1e12 reproduces the
+        oracle to round-off).  The default 50 is NOT crisp: the ``w_lcl>0``
+        gate (argument ``w_lcl / max|w|``) still fires partially for a
+        slightly negative LCL velocity.
     buoyancy_scale_K : float
         Normalisation scale [K] for the buoyancy gate ``tvc − tve`` —
         the sigmoid argument is ``(tvc − tve)/buoyancy_scale_K``.  A
