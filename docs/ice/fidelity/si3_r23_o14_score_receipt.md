@@ -158,7 +158,7 @@ All 621,960 stage-field rows were evaluated. Thus the production O14 wiring
 changes no D5 output bit; other O8-O12 production paths and the production-call
 test also pass.
 
-Test evidence on this review-fix candidate:
+Test evidence on clean review-fix commit `2187e6a234`:
 
 - O14 unit, O8 edge, and O8-O14 scorer/production suite: `40 passed in
   874.85s`; the focused gradient, selector, and digest-integrity subset:
@@ -168,6 +168,11 @@ Test evidence on this review-fix candidate:
   8,760-step D5 run retained the registered hash above across 621,960 rows.
 - Receipt digest integrity: all five manifest files re-hash exactly, and the
   planted digest mismatch fails.
+- This receipt's citation gate: `PASS`, 14 citations, zero unmapped/failing
+  citations, and every self-test fired.
+- Full default receipt-citation gate: `39 passed in 9.61s`.
+- Private-import ratchet with every namespace root present: `6 passed in
+  5.01s`.
 
 ## 6. CHOICES and epistemic status
 
