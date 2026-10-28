@@ -623,25 +623,32 @@ def _si3_orca2_o1_step_with_trace(
 from legoesm.ice.si3_orca2_state import (  # noqa: E402
     SI3ORCA2O2Forcing,
 )
+from legoesm.ice.si3_finalize import (  # noqa: E402
+    SI3FinalizeForcing,
+    SI3FinalizeResponse,
+    si3_ice_update_tau,
+    si3_o15_step,
+    si3_o16_step,
+)
 
 
 def _si3_orca2_o2_step_with_trace(
     state: SI3State,
-    forcing: SI3ORCA2O2Forcing,
+    forcing: SI3ORCA2O2Forcing | SI3FinalizeForcing,
     config: SeaIceConfig,
     dt: float,
-) -> tuple[SI3State, TileResponse]:
-    """Private fidelity hook executing one O2 ORCA2 SI3 step (`iceistate.F90:83-443`, `icestp.F90:148-224`)."""
+) -> tuple[SI3State, TileResponse | SI3FinalizeResponse]:
+    """Execute the ORCA2 SI3 production entry, including its O15/O16 tail."""
 
     if not isinstance(state, SI3State):
         raise ValueError(
             "thermo_scheme='si3_orca2_o2' requires SI3State with full ORCA2 "
             "5-category 10+5-layer enthalpies/salinities and Prather moments"
         )
-    if not isinstance(forcing, SI3ORCA2O2Forcing):
+    if not isinstance(forcing, (SI3ORCA2O2Forcing, SI3FinalizeForcing)):
         raise ValueError(
-            "thermo_scheme='si3_orca2_o2' requires SI3ORCA2O2Forcing carrying "
-            "tmask, sst_m, sss_m, ff_t, gphit, and e1e2t (iceistate.F90:262-430)"
+            "thermo_scheme='si3_orca2_o2' requires SI3ORCA2O2Forcing or "
+            "SI3FinalizeForcing"
         )
     if config.si3_orca2 is None:
         raise ValueError(
@@ -654,8 +661,46 @@ def _si3_orca2_o2_step_with_trace(
             f"({float(dt)!r} != {float(config.si3_orca2.rDt_ice)!r})"
         )
 
-    # O2 adds only the initialization operator.  The production dispatcher
-    # remains fail-closed until O16 owns NEMO's heat/freshwater/salt response.
+    if isinstance(forcing, SI3FinalizeForcing):
+        correction = si3_o15_step(
+            state,
+            forcing.fluxes,
+            sss_m=forcing.sss_m,
+            sst_m=forcing.sst_m,
+            rn_amax_2d=forcing.rn_amax_2d,
+            rn_himin=forcing.rn_himin,
+            config=config.si3_orca2,
+            _plant_skip_rebin=forcing.plant_skip_rebin,
+            _plant_strip_transfer_barriers=forcing.plant_strip_transfer_barriers,
+        )
+        h = int(config.si3_orca2.nn_hls)
+        owned = (slice(h, -h), slice(h, -h)) if h else (slice(None), slice(None))
+        update_fluxes = correction.fluxes.__class__(
+            *(field[owned] for field in correction.fluxes)
+        )
+        final = si3_o16_step(
+            forcing.update_state,
+            update_fluxes,
+            forcing.update,
+            sss_m=forcing.sss_m,
+            config=config.si3_orca2,
+            surface_config=forcing.surface_config,
+            _plant_omit_hfx_res=forcing.plant_omit_hfx_res,
+        )
+        stress = si3_ice_update_tau(
+            forcing.stress,
+            config=config.si3_orca2,
+            ln_drgice_imp=forcing.ln_drgice_imp,
+        )
+        return final.state, SI3FinalizeResponse(
+            correction=correction,
+            final=final,
+            stress=stress,
+        )
+
+    # The earlier O2 initialization contract still has no heat/freshwater/salt
+    # response and remains fail-closed.  The typed late-stage forcing above is
+    # the only production continuation that owns that response.
     raise NotImplementedError(
         "SI3 ORCA2 O2 initialization is available through si3_o2_step, but "
         "step_sea_ice is refused until the NEMO ice_update_flx forcing and "

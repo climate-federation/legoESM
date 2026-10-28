@@ -557,10 +557,16 @@ def _validate_si3_orca2_o1_config(config: "SeaIceConfig") -> None:
             "SI3ORCA2StateConfig.ice_constants"
         )
     conflicts = []
-    if orca2_cfg.ln_icedyn or orca2_cfg.ln_icethd:
+    if config.thermo_scheme == "si3_orca2_o1" and (
+        orca2_cfg.ln_icedyn or orca2_cfg.ln_icethd
+    ):
         conflicts.append(
             "ln_icedyn and ln_icethd must both be False at rung O1 "
             "(icestp.F90:167,199; active dynamics/thermo enter at rungs O4-O16 and O17/C0-C4)"
+        )
+    if config.thermo_scheme == "si3_orca2_o2" and orca2_cfg.ln_icedyn:
+        conflicts.append(
+            "ln_icedyn must be False on the O2/O15/O16 state-and-finalization entry"
         )
     if config.dynamics != "none" or config.transport != "none":
         conflicts.append("dynamics and transport must both be 'none' at rung O1")

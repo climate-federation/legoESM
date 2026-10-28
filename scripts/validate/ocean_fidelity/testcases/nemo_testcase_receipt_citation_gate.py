@@ -10901,7 +10901,7 @@ CITATION_MAP.update({
 })
 
 _reanchor(
-    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1-1738',
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1-1871',
     'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1-1990',
     anchors=['#!/usr/bin/env python3', 'raise SystemExit(main())', 1990],
 )
@@ -10909,24 +10909,22 @@ _reanchor(
 # Round 24 adds O15/O16 score controls and their tests. Re-anchor every
 # affected round-21 and stopped-round citation before the mandatory map audit.
 _reanchor(
-    'tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:1-432',
+    'tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:1-424',
     'tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:1-846',
     anchors=['"""Direct unit and master-record tests for the SI3 O8--O12 0-ULP scoring driver."""',
              'assert calls == ["_cumulative_remap", "_cumulative_remap"]', 846],
 )
-_reanchor('tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:21-53',
+_reanchor('tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:22-54',
           'tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:23-55')
-_reanchor('tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:56-83',
+_reanchor('tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:57-84',
           'tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:58-85')
-_reanchor('tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:86-134',
-          'tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:88-136')
 _reanchor(
-    'tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:137-160',
+    'tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:161-175',
     'tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:182-204',
     anchors=[('@pytest.mark.parametrize(', 2), ('verify_manifests=False,', 2), 23],
 )
 _reanchor(
-    'tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:163-432',
+    'tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:187-424',
     'tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:208-846',
     anchors=['def test_production_call_sites_route_through_o8_o12_and_fail_when_reverted(',
              'assert calls == ["_cumulative_remap", "_cumulative_remap"]', 639],
@@ -10951,45 +10949,45 @@ _reanchor(
 # --- SI3 round 24 Resume 2 (Decision 187 versioned kind-15 translation) ---
 # The reader helper shifts the established O8--O12 scorer anchors; keep the
 # complete citation map audited, then register the new translation/O16 spans.
-_reanchor('scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:260-298',
+_reanchor('scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:274-312',
           'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:297-335')
-_reanchor('scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:301-356',
+_reanchor('scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:315-370',
           'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:338-392',
           anchors=['def verify_master_admission_manifests(',
                    '"rung_record_digests": rung_digests,', 55])
-_reanchor('scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:460-517',
+_reanchor('scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:474-530',
           'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:506-562',
           anchors=['def _verify_record_scalars_against_namelist(',
                    'f"scalar header {sname}={got!r} disagrees with resolved namelist {expected!r} in kind {kind}"', 57])
-_reanchor('scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:527-617',
+_reanchor('scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:541-631',
           'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:573-662',
           anchors=['class FieldScoreAccumulator:', '"fields": self.stats,', 90])
-_reanchor('scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:634-928',
+_reanchor('scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:648-953',
           'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:680-973',
           anchors=['@functools.lru_cache(maxsize=8)',
                    '"jit_prod_step_ponds": jit_prod_step_ponds,', 294])
-_reanchor('scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:931-1652',
+_reanchor('scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1064-1784',
           'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:977-1697',
           anchors=['def score_o8_to_o12(', '"rungs": rungs_report,', 721])
-_reanchor('scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:981-998',
+_reanchor('scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1114-1131',
           'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1027-1044')
-_reanchor('scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1155-1388',
+_reanchor('scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1288-1521',
           'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1201-1434')
-_reanchor('scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1277-1302',
+_reanchor('scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1410-1435',
           'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1323-1348')
-_reanchor('scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1390-1410',
+_reanchor('scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1523-1542',
           'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1436-1455',
           anchors=['# 3. Rung O10: Kind 6 -> Kind 7 (si3_ice_thd_sal) and Kind 7 -> Kind 8 (si3_ice_thd_temp)',
                    'spec.name, r7["fields"][spec.name], f8[spec.name], kt=kt, category=jl', 20])
-_reanchor('scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1412-1423',
+_reanchor('scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1545-1555',
           'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1458-1468',
           anchors=['# 4. Rung O11: Kind 8 -> Kind 9 (si3_ice_thd_da)',
                    'spec.name, r8["fields"][spec.name], f9[spec.name], kt=kt, category=jl', 11])
-_reanchor('scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1425-1501',
+_reanchor('scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1558-1630',
           'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1471-1543',
           anchors=['# Production entry point: si3_column_step_arrays (Kind 3 -> Kind 4, 5, 6, 7, 8, 9)',
                    'prod_trace.post_sal.S_layers[:npti],', 73])
-_reanchor('scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1503-1535',
+_reanchor('scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1636-1667',
           'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1549-1580',
           anchors=["# 5. Rung O12: Kind 10 -> Kind 11 (si3_ice_thd_pnd and step_ponds(scheme='si3_lev'))",
                    ('spec.name, f10[spec.name], f11[spec.name], kt=kt, category=0', 2), 32])
@@ -11041,6 +11039,222 @@ CITATION_MAP.update({
     'packages/ice/legoesm/ice/si3_finalize.py:825-882': [
         'def si3_o16_step(', 'return SI3O16Result(state=state, fluxes=fluxes_out, outputs=outputs)', 58],
 })
+
+# Resume 3 rebases O14 and wires the late stages into ``step_sea_ice``.  Keep
+# the mandatory full-map audit anchored to the combined source tree.
+_reanchor('packages/ice/legoesm/ice/config.py:524-575',
+          'packages/ice/legoesm/ice/config.py:524-574')
+_reanchor('packages/ice/legoesm/ice/config.py:528-587',
+          'packages/ice/legoesm/ice/config.py:528-586')
+_reanchor('packages/ice/legoesm/ice/config.py:597-601',
+          'packages/ice/legoesm/ice/config.py:603-607')
+_reanchor('packages/ice/legoesm/ice/config.py:571-579',
+          'packages/ice/legoesm/ice/config.py:577-585')
+_reanchor('packages/ice/legoesm/ice/config.py:531-568',
+          'packages/ice/legoesm/ice/config.py:531-574')
+_reanchor('packages/ice/legoesm/ice/config.py:583-593',
+          'packages/ice/legoesm/ice/config.py:589-600')
+_reanchor('packages/ice/legoesm/ice/config.py:635-649',
+          'packages/ice/legoesm/ice/config.py:641-655')
+_reanchor('packages/ice/legoesm/ice/config.py:267-288,311-315,652-724',
+          'packages/ice/legoesm/ice/config.py:267-288,311-315,658-730')
+_reanchor('packages/ice/legoesm/ice/config.py:311-315,662-724',
+          'packages/ice/legoesm/ice/config.py:311-315,668-730')
+_reanchor('packages/ice/legoesm/ice/sea_ice.py:620-654',
+          'packages/ice/legoesm/ice/sea_ice.py:627-700')
+_reanchor('packages/ice/legoesm/ice/sea_ice.py:1709-1787,2960-2968,3196-3289',
+          'packages/ice/legoesm/ice/sea_ice.py:1754-1832,3005-3013,3241-3334')
+_reanchor(
+    'packages/ice/legoesm/ice/sea_ice.py:420-433,475,1737-1772,2388-2413,2469-2535,2820-2845,2982-3062,3196-3250,3295-3297,3414-3432',
+    'packages/ice/legoesm/ice/sea_ice.py:420-433,475,1782-1817,2433-2458,2514-2580,2865-2890,3027-3107,3241-3295,3340-3342,3459-3477',
+)
+_reanchor(
+    'packages/ice/legoesm/ice/sea_ice.py:420-433,1737-1772,2820-2845,2982-3062,3196-3250,3295-3297',
+    'packages/ice/legoesm/ice/sea_ice.py:420-433,1782-1817,2865-2890,3027-3107,3241-3295,3340-3342',
+)
+_reanchor('packages/ice/legoesm/ice/sea_ice.py:2994-3033',
+          'packages/ice/legoesm/ice/sea_ice.py:3039-3078')
+_reanchor('packages/ice/legoesm/ice/__init__.py:264-288',
+          'packages/ice/legoesm/ice/__init__.py:264-293')
+_reanchor('packages/ice/legoesm/ice/__init__.py:290-314',
+          'packages/ice/legoesm/ice/__init__.py:296-320')
+
+_reanchor('packages/ice/legoesm/ice/si3_finalize.py:259-318',
+          'packages/ice/legoesm/ice/si3_finalize.py:325-384')
+_reanchor('packages/ice/legoesm/ice/si3_finalize.py:470-534',
+          'packages/ice/legoesm/ice/si3_finalize.py:536-601')
+_reanchor('packages/ice/legoesm/ice/si3_finalize.py:255-318',
+          'packages/ice/legoesm/ice/si3_finalize.py:321-384')
+_reanchor('packages/ice/legoesm/ice/si3_finalize.py:290-294',
+          'packages/ice/legoesm/ice/si3_finalize.py:356-360')
+_reanchor('packages/ice/legoesm/ice/si3_finalize.py:294-295',
+          'packages/ice/legoesm/ice/si3_finalize.py:360-361')
+_reanchor('packages/ice/legoesm/ice/si3_finalize.py:825-882',
+          'packages/ice/legoesm/ice/si3_finalize.py:894-954')
+
+_reanchor('scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:297-335',
+          'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:321-359')
+_reanchor('scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:338-392',
+          'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:362-416')
+_reanchor('scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:506-562',
+          'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:533-589')
+_reanchor('scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:573-662',
+          'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:600-689')
+_reanchor('scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:680-973',
+          'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:707-1000')
+_reanchor('scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:977-1697',
+          'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1123-1843')
+_reanchor('scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1027-1044',
+          'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1173-1190')
+_reanchor('scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1201-1434',
+          'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1347-1580')
+_reanchor('scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1323-1348',
+          'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1469-1494')
+_reanchor('scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1436-1455',
+          'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1582-1601')
+_reanchor('scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1458-1468',
+          'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1604-1614')
+_reanchor('scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1471-1543',
+          'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1617-1689')
+_reanchor('scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1549-1580',
+          'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1695-1726')
+_reanchor('scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1826-1899',
+          'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1973-2046')
+_reanchor('scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1903-2050',
+          'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:2112-2289')
+_reanchor('scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:2015-2030',
+          'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:2254-2269')
+_reanchor('scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:236-269',
+          'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:250-293')
+_reanchor('scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:396-502',
+          'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:420-529')
+_reanchor('scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1-2147',
+          'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1-2391')
+
+_reanchor('tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:23-55',
+          'tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:25-57')
+_reanchor('tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:58-85',
+          'tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:60-87')
+_reanchor('tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:88-136',
+          'tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:91-139')
+_reanchor('tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:139-157',
+          'tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:142-160')
+_reanchor('tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:187-359',
+          'tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:261-433')
+_reanchor('tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:194-216',
+          'tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:235-257')
+_reanchor('tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:220-858',
+          'tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:261-932')
+_reanchor('tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:170-191',
+          'tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:195-232')
+_reanchor('tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:1-858',
+          'tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:1-932')
+
+# Pin the resulting combined-tree extents as well as their independently
+# resolved endpoints.  Several of the production-wiring changes add code
+# inside an already-cited routine, so a line translation alone is not enough.
+_reanchor(
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:816-823',
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:875-882',
+)
+_reanchor(
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:957-1060',
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1016-1119',
+)
+
+_repin('packages/ice/legoesm/ice/config.py:524-574', [
+    '# Optional ORCA2 5-category 10+5-layer SI3 state configuration (`therm',
+    (')', 156), 51])
+_repin('packages/ice/legoesm/ice/config.py:528-586', [
+    'from legoesm.ice.si3_orca2_state import SI3ORCA2StateConfig  # noqa: E',
+    (')', 159), 59])
+_repin('packages/ice/legoesm/ice/config.py:531-574', [
+    'def _validate_si3_orca2_o1_config(config: "SeaIceConfig") -> None:',
+    'raise ValueError("invalid SI3 ORCA2 O1 identity: " + "; ".join(conflic',
+    44])
+_reanchor('packages/ice/legoesm/ice/config.py:589-600',
+          'packages/ice/legoesm/ice/config.py:589-599')
+_reanchor('packages/ice/legoesm/ice/config.py:267-288,311-315,658-730',
+          'packages/ice/legoesm/ice/config.py:267-288,311-315,658-727',
+          extent=97)
+_reanchor('packages/ice/legoesm/ice/config.py:311-315,668-730',
+          'packages/ice/legoesm/ice/config.py:311-315,668-727', extent=65)
+
+_reanchor('packages/ice/legoesm/ice/sea_ice.py:627-700',
+          'packages/ice/legoesm/ice/sea_ice.py:627-699', extent=73)
+_reanchor('packages/ice/legoesm/ice/sea_ice.py:1754-1832,3005-3013,3241-3334',
+          'packages/ice/legoesm/ice/sea_ice.py:1754-1832,3005-3013,3241-3314',
+          extent=162)
+_reanchor(
+    'packages/ice/legoesm/ice/sea_ice.py:420-433,475,1782-1817,2433-2458,2514-2580,2865-2890,3027-3107,3241-3295,3340-3342,3459-3477',
+    'packages/ice/legoesm/ice/sea_ice.py:420-433,475,1782-1789,2433-2458,2514-2580,2865-2890,3027-3107,3241-3295,3340-3342,3459-3466',
+    extent=289,
+)
+_reanchor(
+    'packages/ice/legoesm/ice/sea_ice.py:420-433,1782-1817,2865-2890,3027-3107,3241-3295,3340-3342',
+    'packages/ice/legoesm/ice/sea_ice.py:420-433,1782-1789,2865-2890,3027-3107,3241-3295,3340-3342',
+    extent=187,
+)
+_repin('packages/ice/legoesm/ice/sea_ice.py:3039-3078', [
+    ('if config.ponds.enabled and config.ponds.scheme == "si3_lev":', 3),
+    ('            )', 31), 40])
+
+_repin('packages/ice/legoesm/ice/__init__.py:264-293', [
+    'from legoesm.ice.config import build_si3_orca2_o2_config  # noqa: E402',
+    (')', 24), 30])
+_reanchor('packages/ice/legoesm/ice/__init__.py:296-320',
+          'packages/ice/legoesm/ice/__init__.py:296-319', extent=24)
+
+_repin('packages/ice/legoesm/ice/si3_finalize.py:536-601', [
+    'def si3_ice_cor(',
+    '_materialize_transfer_statements=not _plant_strip_transfer_barriers,',
+    66])
+_repin('packages/ice/legoesm/ice/si3_finalize.py:894-954', [
+    'def si3_o16_step(',
+    'return SI3O16Result(state=state, fluxes=fluxes_out, outputs=outputs)',
+    61])
+
+_repin(
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:533-589',
+    ['def _verify_record_scalars_against_namelist(',
+     'f"record identity {sname}={got!r} disagrees with resolved/preregistered value {expected!r} in kind {kind}"',
+     57],
+)
+_reanchor(
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:707-1000',
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:707-1012',
+    extent=306,
+)
+_repin(
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:2112-2289',
+    ['def score_o15_o16(', '"scores": summaries,', 178],
+)
+_repin(
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:250-293',
+    ['_KIND15_V1_SCHEMA_LABELS = ("cloud_fra", "qsr", "sfx")',
+     '"writer_labels": list(writer_labels),', 44],
+)
+_repin(
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:420-529',
+    ['def read_record_verified(', '"reader_translation": reader_translation,', 110],
+)
+_repin(
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1-2391',
+    ['#!/usr/bin/env python3', 'raise SystemExit(main())', 2391],
+)
+
+_repin('tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:235-257', [
+    ('@pytest.mark.parametrize(', 2), ('verify_manifests=False,', 3), 23])
+_repin('tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:261-932', [
+    'def test_production_call_sites_route_through_o8_o12_and_fail_when_reverted(',
+    'assert calls == ["_cumulative_remap", "_cumulative_remap"]', 672])
+_repin('tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:195-232', [
+    'def test_kind15_versioned_translation_evidence_and_wrong_permutation_plant() -> None:',
+    'score_o15_o16(DEFAULT_MASTER_ROOT, steps=(1,), plant="o16-model-mutation")',
+    38])
+_repin('tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:1-932', [
+    '"""Direct unit and master-record tests for the SI3 O8--O12 0-ULP scoring driver."""',
+    'assert calls == ["_cumulative_remap", "_cumulative_remap"]', 932])
 
 DEFAULT_RECEIPT = (
     REPO / "docs/ocean/fidelity/testcases"

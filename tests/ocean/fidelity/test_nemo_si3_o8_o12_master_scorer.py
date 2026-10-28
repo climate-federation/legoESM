@@ -19,6 +19,7 @@ from scripts.validate.ocean_fidelity.testcases.nemo_si3_o8_o12_master_scorer imp
     score_o8_to_o12,
     score_o15_o16,
     verify_kind15_translation_evidence,
+    verify_kind19_translation_evidence,
     verify_master_admission_manifests,
 )
 
@@ -80,7 +81,7 @@ def test_master_admission_manifests_and_plants() -> None:
 
     with pytest.raises(
         ValueError,
-        match="STATUS PLANT-FIRED.*scalar header rn_sinew=0.75 disagrees with resolved namelist",
+        match="STATUS PLANT-FIRED.*record identity rn_sinew=0.75 disagrees with resolved/preregistered value",
     ):
         score_o8_to_o12(
             DEFAULT_MASTER_ROOT,
@@ -216,6 +217,22 @@ def test_kind15_versioned_translation_evidence_and_wrong_permutation_plant() -> 
     assert evidence["translation_kind"] == 15
     with pytest.raises(ValueError, match="kind-15 qsr permutation evidence failed"):
         verify_kind15_translation_evidence(DEFAULT_MASTER_ROOT, plant=True)
+
+
+def test_kind19_versioned_translation_evidence_and_wrong_permutation_plant() -> None:
+    if not DEFAULT_MASTER_ROOT.is_dir():
+        pytest.skip(f"admitted master record not mounted at {DEFAULT_MASTER_ROOT}")
+    evidence = verify_kind19_translation_evidence(DEFAULT_MASTER_ROOT)
+    assert evidence["status"] == "KIND19_VERSIONED_TRANSLATION_PROVED"
+    assert evidence["writer_order"] == ["ptmod_io", "utau", "vtau"]
+    assert evidence["schema_order"] == ["utau", "vtau", "tmod_io"]
+    assert evidence["writer_labels"] == ["tmod_io", "utau", "vtau"]
+    assert evidence["independent_field_checks"] == 9
+    assert evidence["translation_applied"] is True
+    assert evidence["translation_version"] == 1
+    assert evidence["translation_kind"] == 19
+    with pytest.raises(ValueError, match="kind-19 .* writer evidence failed"):
+        verify_kind19_translation_evidence(DEFAULT_MASTER_ROOT, plant=True)
 
 
 def test_o16_model_arithmetic_plant_fails() -> None:
@@ -1072,3 +1089,63 @@ def test_o13_receipt_digests_and_scope_ratchet() -> None:
     assert score["rungs"]["O13"]["conservation"]["frames_checked"] == 100
     assert tuple(score["rungs"]["O13"]["conservation"]["fields"]) == tuple(sorted(O13_CONSERVED_FIELDS))
     assert _CANONICAL_O8_O12_KERNELS["packages/ice/legoesm/ice/itd.py"] == {"si3_ice_itd_rem"}
+
+
+def test_o15_o16_receipt_rehashes_every_digest_and_mismatch_plant() -> None:
+    import hashlib
+    import json
+    import re
+    from pathlib import Path
+
+    receipt = Path("docs/ice/fidelity/si3_r24_o15_o16_receipt.md")
+    cited = set(re.findall(r"\b[0-9a-f]{64}\b", receipt.read_text(encoding="utf-8")))
+    root = Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/round24")
+    files = (
+        root / "o15_kind20_score.json",
+        root / "o15_o16_translated_score_001_025.json",
+        root / "o15_o16_translated_score_026_050.json",
+        root / "o15_o16_translated_score_051_065.json",
+        root / "o15_o16_translated_score_066_080.json",
+        root / "o15_o16_translated_score_081_095.json",
+        root / "o15_o16_translated_score_096_100.json",
+        root / "o15_o16_production_score_resume3.json",
+        root / "o8_o12_master_score.json",
+        root / "d5_platform_probe.json",
+    )
+    missing = [str(path) for path in files if not path.is_file()]
+    if missing:
+        pytest.skip(f"receipt evidence files are not mounted: {missing}")
+
+    file_digests = {hashlib.sha256(path.read_bytes()).hexdigest() for path in files}
+    d5 = json.loads((root / "d5_platform_probe.json").read_text(encoding="utf-8"))
+
+    def values(value):
+        if isinstance(value, dict):
+            for item in value.values():
+                yield from values(item)
+        elif isinstance(value, list):
+            for item in value:
+                yield from values(item)
+        elif isinstance(value, str):
+            yield value
+
+    nested_digests = {value for value in values(d5) if re.fullmatch(r"[0-9a-f]{64}", value)}
+    covered = file_digests | nested_digests
+    assert cited == {
+        "6df5e4d29176246f490b6c0632242f1c23f502f3f0f1b485e41c71b290913804",
+        "ca59f204737a9ee9d92b23aab0b02d1ed85d5c94e465ebb839e003937f4ec294",
+        "f1d8baf0d1c1d7425c2db7365bfe6526d3c3a28c4d307ca525c5b160e0e08751",
+        "0ae03fd37dac18de6d7fc3d549e3110f0567bd849fe1bc30a3fbd4b3631582dd",
+        "f2f56c6dc7b8b375d76e4e134faeb6395780434d06693a85b837ea8fd8256e7f",
+        "84863b41d7cf854c6f2647d974b9108caf45a5766d9bfbec985694a4219c790b",
+        "34b79a739831aad8f9c269587a414a605d5949b47d36f22302b29363cc1e4a69",
+        "053cefcc173117e106658ad8975bac29afdbb6f6e971df7192180829095a8d6f",
+        "fa2cc5fc534b7789dc565c491d58472784bf6e568296635397afb2169c4c69bf",
+        "b7a7329bed74c17918fa3cbc11c7613acb2074851e2357a08869fcd4661e12d2",
+        "ab03c16a4f0a424d6be496733f815153f21c4e09681dd4ccbc09d0571b05c726",
+    }
+    assert cited <= covered
+    planted = set(covered)
+    planted.discard(next(iter(cited)))
+    with pytest.raises(AssertionError):
+        assert cited <= planted

@@ -95,9 +95,9 @@ __param_spec__ = {
     "ShortwavePenetrationConfig": {
         "scheme_key": "ocean.sw_penetration",
         "excluded": {
-            # scheme is a discrete selector, not a floating parameter.
-            # water_type is a discrete optical class, not a floating parameter.
-            # rgb_chl_profile is a discrete selector, not a floating parameter.
+            "scheme": "discrete NEMO/reference algorithm selector",
+            "water_type": "discrete Jerlov optical class",
+            "rgb_chl_profile": "discrete NEMO chlorophyll-profile selector",
             "nemo_time_step_s": "NEMO qsr_ext_lev discrete initialization input",
         },
         "params": {

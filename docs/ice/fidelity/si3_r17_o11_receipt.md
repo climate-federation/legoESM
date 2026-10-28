@@ -192,7 +192,7 @@ Review: `codex review: operator`.
    `packages/ice/legoesm/ice/bitz_lipscomb.py:2202` through `:2330`, which applies the
    gather at `:2369`. `step_sea_ice` passes the config (`packages/ice/legoesm/ice/sea_ice.py:525`;
    keyword at `packages/ice/legoesm/ice/bitz_lipscomb.py:2063`). On needs the namelist values
-   (`packages/ice/legoesm/ice/config.py:309`, class `:597-601`, no defaults) and `sst_m`
+   (`packages/ice/legoesm/ice/config.py:309`, class `:603-607`, no defaults) and `sst_m`
    (`packages/ice/legoesm/ice/bitz_lipscomb.py:42`); the identity check keeps every other field
    fixed (`packages/ice/legoesm/ice/config.py:316`). The C1D deck still disables it
    (`scripts/validate/ocean_fidelity/testcases/configs/c1d_omip_l3_namelist_ice_cfg:91`).

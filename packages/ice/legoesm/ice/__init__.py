@@ -274,6 +274,10 @@ from legoesm.ice.si3_orca2_state import (  # noqa: E402
     si3_o2_scalar_initial_state,
     si3_o2_step,
 )
+from legoesm.ice.si3_finalize import (  # noqa: E402
+    SI3FinalizeForcing,
+    SI3FinalizeResponse,
+)
 
 __all__.extend(
     (
@@ -281,6 +285,8 @@ __all__.extend(
         "SI3O2InitConfig",
         "SI3O2ScalarInitialState",
         "SI3ORCA2O2Forcing",
+        "SI3FinalizeForcing",
+        "SI3FinalizeResponse",
         "si3_dom_uniq_t_orca2",
         "si3_eos_fzp",
         "si3_glob_2dsum_ddpdd",

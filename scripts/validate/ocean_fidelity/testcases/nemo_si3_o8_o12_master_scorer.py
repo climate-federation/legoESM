@@ -256,6 +256,8 @@ def _refuse(message: str) -> ValueError:
 
 _KIND15_V1_SCHEMA_LABELS = ("cloud_fra", "qsr", "sfx")
 _KIND15_V1_WRITER_LABELS = ("qsr", "sfx", "cloud_fra")
+_KIND19_V1_SCHEMA_LABELS = ("utau", "vtau", "tmod_io")
+_KIND19_V1_WRITER_LABELS = ("tmod_io", "utau", "vtau")
 
 
 def _translate_versioned_record_fields(
@@ -265,28 +267,36 @@ def _translate_versioned_record_fields(
     *,
     plant_wrong_permutation: bool = False,
 ) -> tuple[dict[str, np.ndarray], dict[str, Any] | None]:
-    """Translate immutable version-1/kind-15 bytes to the writer's field labels."""
-    if version != 1 or kind != 15:
+    """Translate versioned record bytes to the committed writer's labels."""
+    translations = {
+        15: (_KIND15_V1_SCHEMA_LABELS, _KIND15_V1_WRITER_LABELS),
+        19: (_KIND19_V1_SCHEMA_LABELS, _KIND19_V1_WRITER_LABELS),
+    }
+    if version != 1 or kind not in translations:
         if plant_wrong_permutation:
-            raise _refuse("kind-15 translation plant requested for another format/kind")
+            raise _refuse("versioned translation plant requested for another format/kind")
         return fields, None
 
-    writer_labels = _KIND15_V1_WRITER_LABELS
+    schema_labels, writer_labels = translations[kind]
     if plant_wrong_permutation:
-        writer_labels = ("sfx", "qsr", "cloud_fra")
+        writer_labels = (
+            ("sfx", "qsr", "cloud_fra")
+            if kind == 15
+            else tuple(reversed(writer_labels))
+        )
     translated = dict(fields)
     translated.update(
         {
             writer_label: fields[schema_label]
             for schema_label, writer_label in zip(
-                _KIND15_V1_SCHEMA_LABELS, writer_labels, strict=True
+                schema_labels, writer_labels, strict=True
             )
         }
     )
     return translated, {
         "format_version": version,
         "kind": kind,
-        "schema_labels": list(_KIND15_V1_SCHEMA_LABELS),
+        "schema_labels": list(schema_labels),
         "writer_labels": list(writer_labels),
     }
 
@@ -419,6 +429,7 @@ def read_record_verified(
     expected_record_sha256: str | None = None,
     *,
     plant_kind15_wrong_permutation: bool = False,
+    plant_kind19_wrong_permutation: bool = False,
 ) -> dict[str, Any]:
     """Read one master binary record with full header/extent/finiteness checks."""
     raw = bytearray(path.read_bytes())
@@ -513,7 +524,9 @@ def read_record_verified(
         version,
         kind,
         fields,
-        plant_wrong_permutation=plant_kind15_wrong_permutation,
+        plant_wrong_permutation=(
+            plant_kind15_wrong_permutation or plant_kind19_wrong_permutation
+        ),
     )
     return {
         "meta": meta,
@@ -2018,13 +2031,14 @@ def _summarize_o13_conservation(reports: Sequence[Mapping[str, Any]]) -> dict[st
 
 
 from legoesm.ice.si3_finalize import (  # noqa: E402 - late-rung extension
+    SI3FinalizeForcing,
+    SI3FinalizeResponse,
     SI3Fluxes,
     SI3StressInputs,
     SI3UpdateFluxForcing,
-    si3_ice_update_tau,
-    si3_o15_step,
-    si3_o16_step,
 )
+from legoesm.ice.config import build_si3_orca2_o2_config  # noqa: E402
+from legoesm.ice.sea_ice import step_sea_ice  # noqa: E402
 from legoesm.ice.si3_orca2_state import (  # noqa: E402 - late-rung extension
     SI3AggregatedVars,
     SI3CategoryBounds,
@@ -2219,6 +2233,68 @@ def verify_kind15_translation_evidence(
     }
 
 
+def verify_kind19_translation_evidence(
+    master_root: Path = DEFAULT_MASTER_ROOT,
+    steps: Sequence[int] = (1, 2, 100),
+    *,
+    plant: bool = False,
+) -> dict[str, Any]:
+    """Prove the version-1/kind-19 mapping from writer source and owned fields."""
+    manifest = verify_master_admission_manifests(master_root)
+    digests = manifest["rung_record_digests"]["O16"]
+    records_dir = master_root / "record_100step/o8_o16_master_records"
+    writer = (
+        Path(__file__).with_name("nemo_si3_o8_o16_master_acquisition")
+        / "o8_o16_master_writer.F90"
+    ).read_text()
+    writer = writer.split("IF(kind==19) THEN", 1)[1].split(
+        "ELSEIF(kind==20) THEN", 1
+    )[0]
+    tokens = ("ptmod_io", "utau", "vtau")
+    positions = [writer.index(f"CALL put_f2(u,{name})") for name in tokens]
+    if positions != sorted(positions):
+        raise _refuse("kind-19 writer order evidence failed")
+
+    independent_checks = 0
+    for kt in steps:
+        record = read_record_verified(
+            records_dir / record_name(19, kt),
+            digests[record_name(19, kt)],
+            plant_kind19_wrong_permutation=plant,
+        )
+        translation = record["reader_translation"]
+        expected_labels = (
+            tuple(reversed(_KIND19_V1_WRITER_LABELS))
+            if plant
+            else _KIND19_V1_WRITER_LABELS
+        )
+        if translation is None or translation["writer_labels"] != list(expected_labels):
+            raise _refuse(f"kind-19 versioned translation metadata failed at kt={kt}")
+        fields = record["fields"]
+        # ``ptmod_io`` is an independently computed stress magnitude and is
+        # nonnegative, whereas both signed component stresses contain negative
+        # values.  These disjoint ranges make the three source-order labels
+        # observable rather than merely self-consistent.
+        if np.any(fields["tmod_io"] < 0.0):
+            raise _refuse(f"kind-19 tmod_io writer evidence failed at kt={kt}")
+        if not np.any(fields["utau"] < 0.0):
+            raise _refuse(f"kind-19 utau writer evidence failed at kt={kt}")
+        if not np.any(fields["vtau"] < 0.0):
+            raise _refuse(f"kind-19 vtau writer evidence failed at kt={kt}")
+        independent_checks += 3
+    return {
+        "status": "KIND19_VERSIONED_TRANSLATION_PROVED",
+        "steps": list(map(int, steps)),
+        "writer_order": list(tokens),
+        "schema_order": list(_KIND19_V1_SCHEMA_LABELS),
+        "writer_labels": list(_KIND19_V1_WRITER_LABELS),
+        "independent_field_checks": independent_checks,
+        "translation_applied": True,
+        "translation_version": 1,
+        "translation_kind": 19,
+    }
+
+
 def score_o15_o16(
     master_root: Path = DEFAULT_MASTER_ROOT,
     ppsrc: Path = DEFAULT_PPSRC,
@@ -2236,10 +2312,54 @@ def score_o15_o16(
     namelist = parse_resolved_ice_namelist(
         run_dir / "output.namelist.ice", run_dir / "output.namelist.dyn", ppsrc, plant
     )
-    translation_evidence = verify_kind15_translation_evidence(master_root)
+    translation_evidence = {
+        "kind15": verify_kind15_translation_evidence(master_root),
+        "kind19": verify_kind19_translation_evidence(
+            master_root, plant=plant == "o16-kind19-wrong-permutation"
+        ),
+    }
     surface_config = SI3SurfaceConfig.from_resolved_namelists(
         run_dir / "output.namelist.dyn", run_dir / "output.namelist.ice"
     )
+    first13_name = record_name(13, steps[0], 0)
+    first13 = read_record_verified(
+        records_dir / first13_name, digests["O15"].get(first13_name)
+    )
+    cfg16 = _late_config(namelist, first13["scalars"], nn_hls=2)
+    sea_config = build_si3_orca2_o2_config(cfg16)
+
+    @jax.jit
+    def production_step(
+        correction_state, correction_fluxes, update_state, update, stress_inputs,
+        sss, sst, amax,
+    ):
+        forcing = SI3FinalizeForcing(
+            fluxes=correction_fluxes,
+            update_state=update_state,
+            update=update,
+            stress=stress_inputs,
+            sss_m=sss,
+            sst_m=sst,
+            rn_amax_2d=amax,
+            rn_himin=float(namelist["rn_himin"]),
+            surface_config=surface_config,
+            ln_drgice_imp=bool(namelist["ln_drgice_imp"]),
+            plant_skip_rebin=plant == "o15-model-mutation",
+            plant_strip_transfer_barriers=plant == "o15-strip-transfer-barriers",
+            plant_omit_hfx_res=plant == "o16-model-mutation",
+        )
+        zero_ocean = jnp.zeros_like(sss[2:-2, 2:-2])
+        return step_sea_ice(
+            correction_state,
+            forcing,
+            zero_ocean,
+            zero_ocean,
+            zero_ocean,
+            sea_config,
+            0.0,
+            cfg16.rDt_ice,
+        )[1]
+
     o15 = FieldScoreAccumulator()
     o16_agg = FieldScoreAccumulator()
     o16_flx = FieldScoreAccumulator()
@@ -2255,24 +2375,41 @@ def score_o15_o16(
 
         f13 = records[13]["fields"]
         f14 = dict(records[14]["fields"])
-        cfg15 = _late_config(namelist, records[13]["scalars"], nn_hls=0)
-        state13 = _state_from_record(f13, cfg15, full_orca2=False)
-        flux13 = _fluxes_from_record(f13)
-        skip_rebin = plant == "o15-model-mutation"
-        strip_transfer_barriers = plant == "o15-strip-transfer-barriers"
-        out15 = jax.jit(
-            lambda state, flux, sss, sst, amax: si3_o15_step(
-                state, flux, sss_m=sss, sst_m=sst, rn_amax_2d=amax,
-                rn_himin=float(namelist["rn_himin"]), config=cfg15,
-                _plant_skip_rebin=skip_rebin,
-                _plant_strip_transfer_barriers=strip_transfer_barriers,
-            )
-        )(
-            state13, flux13, jnp.asarray(f13["sss_m"]), jnp.asarray(f13["sst_m"]),
-            jnp.asarray(f13["rn_amax_2d"]),
+        state13 = _state_from_record(f13, cfg16, full_orca2=True)
+        flux13_interior = _fluxes_from_record(f13)
+        flux13 = SI3Fluxes(*(
+            _full_orca2_field(field) for field in flux13_interior
+        ))
+        sss_full = _full_orca2_field(f13["sss_m"])
+        sst_full = _full_orca2_field(f13["sst_m"])
+        amax_full = _full_orca2_field(f13["rn_amax_2d"])
+
+        f15 = records[15]["fields"]
+        f18 = records[18]["fields"]
+        state18 = _state_from_record(f18, cfg16, full_orca2=True)
+        f19 = records[19]["fields"]
+        stress = SI3StressInputs(**{
+            name: jnp.asarray(f19[name], dtype=jnp.float64)
+            for name in SI3StressInputs._fields
+        })
+        response = production_step(
+            state13,
+            flux13,
+            state18,
+            _update_forcing(f15),
+            stress,
+            sss_full,
+            sst_full,
+            amax_full,
         )
-        got15 = _state_score_fields(out15.state)
-        got15.update({name: getattr(out15.fluxes, name) for name in SI3Fluxes._fields})
+        if not isinstance(response, SI3FinalizeResponse):
+            raise _refuse("step_sea_ice did not return the O15/O16 production response")
+        out15 = response.correction
+        got15 = _state_score_fields(out15.state, interior_halo=2)
+        got15.update({
+            name: getattr(out15.fluxes, name)[2:-2, 2:-2]
+            for name in SI3Fluxes._fields
+        })
         if plant == "o15-1ulp" and kt == steps[0]:
             f14["a_i"] = flip_1ulp(f14["a_i"], (0, 0, 0))
         owned15 = set(_DIRECT_STATE_FIELDS) | set(_EQUIVALENT_FIELDS) | set(PRE_AGG_TOTALS)
@@ -2281,25 +2418,8 @@ def score_o15_o16(
             if spec.name in owned15:
                 o15.update(spec.name, got15[spec.name], f14[spec.name], kt=kt, category=0)
 
-        f18 = records[18]["fields"]
-        f15 = records[15]["fields"]
         f16 = dict(records[16]["fields"])
-        cfg16 = _late_config(namelist, records[18]["scalars"], nn_hls=2)
-        state18 = _state_from_record(f18, cfg16, full_orca2=True)
-        flux15 = _fluxes_from_record(f15)
-        forcing15 = _update_forcing(f15)
-        omit_hfx_res = plant == "o16-model-mutation"
-        out16 = jax.jit(
-            lambda state, flux, forcing, sss: si3_o16_step(
-                state,
-                flux,
-                forcing,
-                sss_m=sss,
-                config=cfg16,
-                surface_config=surface_config,
-                _plant_omit_hfx_res=omit_hfx_res,
-            )
-        )(state18, flux15, forcing15, _full_orca2_field(f18["sss_m"]))
+        out16 = response.final
         got_agg = _state_score_fields(out16.state, interior_halo=2)
         for spec in STATE + TOTALS:
             o16_agg.update(spec.name, got_agg[spec.name], f15[spec.name], kt=kt, category=0)
@@ -2315,22 +2435,8 @@ def score_o15_o16(
                 category=0,
             )
 
-        f19 = records[19]["fields"]
         f20 = dict(records[20]["fields"])
-        stress_values = {
-            name: jnp.asarray(f19[name], dtype=jnp.float64) for name in SI3StressInputs._fields
-        }
-        # Version-1 kind 19 writer order is tmod_io, utau, vtau while its
-        # admitted schema labels those byte blocks utau, vtau, tmod_io.
-        stress_values.update(
-            tmod_io=jnp.asarray(f19["utau"], dtype=jnp.float64),
-            utau=jnp.asarray(f19["vtau"], dtype=jnp.float64),
-            vtau=jnp.asarray(f19["tmod_io"], dtype=jnp.float64),
-        )
-        stress = SI3StressInputs(**stress_values)
-        tau = jax.jit(lambda x: si3_ice_update_tau(
-            x, config=cfg16, ln_drgice_imp=bool(namelist["ln_drgice_imp"])
-        ))(stress)
+        tau = response.stress
         tau_meta = records[20]["meta"]
         owned = (
             slice(tau_meta["ntsi"] - 1, tau_meta["ntei"]),
@@ -2418,6 +2524,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             "o16-1ulp",
             "o16-model-mutation",
             "o16-tau-1ulp",
+            "o16-kind19-wrong-permutation",
             "manifest-digest",
             "namelist-mismatch",
             "swapped-exit",

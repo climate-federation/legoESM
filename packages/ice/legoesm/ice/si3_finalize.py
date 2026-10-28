@@ -22,7 +22,6 @@ from typing import NamedTuple
 
 import jax
 import jax.numpy as jnp
-from legoesm import constants as canonical_constants
 from legoesm.core.source_rounding import nemo_source_round as sr
 from legoesm.ice.si3_orca2_state import (
     SI3ORCA2StateConfig,
@@ -34,6 +33,8 @@ from legoesm.ice.si3_orca2_state import (
 )
 from legoesm.ice.si3_surface import SI3SurfaceConfig, si3_ice_alb
 from legoesm.ice.transport import si3_var_zapsmall
+
+from legoesm import constants as canonical_constants
 
 Field = jax.Array
 
@@ -183,12 +184,77 @@ class SI3StressOutputs(NamedTuple):
     vtau_oce: Field
 
 
+class SI3FinalizeForcing(NamedTuple):
+    """Resolved late-stage forcing carried through ``step_sea_ice``.
+
+    This is the production boundary for the O15 ``ice_cor`` and O16
+    ``ice_update_flx``/``ice_update_tau`` continuation.  It deliberately
+    carries the already resolved NEMO fields instead of inventing a lossy
+    ``AtmToSurface`` projection for the oracle lane.
+    """
+
+    fluxes: SI3Fluxes
+    update_state: SI3State
+    update: SI3UpdateFluxForcing
+    stress: SI3StressInputs
+    sss_m: Field
+    sst_m: Field
+    rn_amax_2d: Field
+    rn_himin: float
+    surface_config: SI3SurfaceConfig
+    ln_drgice_imp: bool
+    plant_skip_rebin: bool = False
+    plant_strip_transfer_barriers: bool = False
+    plant_omit_hfx_res: bool = False
+
+
+class SI3FinalizeResponse(NamedTuple):
+    """Observable O15/O16 stage boundaries returned by production stepping."""
+
+    correction: SI3CorrectionResult
+    final: SI3O16Result
+    stress: SI3StressOutputs
+
+
 def _safe_ratio(num: Field, den: Field, active: Field) -> Field:
     return jnp.where(active, sr(num / jnp.where(active, den, _ONE)), _ZERO)
 
 
 def _category_sum(terms: Field) -> Field:
     return fortran_sum_categories(terms, axis=-1)
+
+
+def _validate_finalize_state(state: SI3State, config: SI3ORCA2StateConfig) -> None:
+    """Reject state/config disagreement before late-stage arithmetic runs."""
+    if not isinstance(config, SI3ORCA2StateConfig):
+        raise TypeError("SI3 finalization requires an explicit SI3ORCA2StateConfig")
+    if config.jpl < 1 or config.nlay_i < 1 or config.nlay_s < 1:
+        raise ValueError("SI3 finalization requires positive jpl/nlay_i/nlay_s")
+    if config.nn_hls < 0 or config.rDt_ice <= 0.0:
+        raise ValueError("SI3 finalization requires nn_hls >= 0 and rDt_ice > 0")
+    jpi, jpj = state.a_i.shape[:2]
+    expected3 = (jpi, jpj, config.jpl)
+    expected4_i = (jpi, jpj, config.nlay_i, config.jpl)
+    expected4_s = (jpi, jpj, config.nlay_s, config.jpl)
+    checks = {
+        "a_i": (state.a_i.shape, expected3),
+        "v_i": (state.v_i.shape, expected3),
+        "v_s": (state.v_s.shape, expected3),
+        "e_i": (state.e_i.shape, expected4_i),
+        "szv_i": (state.szv_i.shape, expected4_i),
+        "e_s": (state.e_s.shape, expected4_s),
+        "hi_max": (state.bounds.hi_max.shape, (config.jpl + 1,)),
+        "hi_mean": (state.bounds.hi_mean.shape, (config.jpl,)),
+    }
+    wrong = [
+        f"{name}={actual}, expected {expected}"
+        for name, (actual, expected) in checks.items()
+        if actual != expected
+    ]
+    if wrong:
+        raise ValueError("SI3 finalization state/config shape mismatch: " + "; ".join(wrong))
+    if config.nn_hls and (jpi <= 2 * config.nn_hls or jpj <= 2 * config.nn_hls):
+        raise ValueError("SI3 finalization halo width leaves no owned interior")
 
 
 def _roundoff_after_shift(
@@ -480,8 +546,9 @@ def si3_ice_cor(
     _plant_strip_transfer_barriers: bool = False,
 ) -> SI3CorrectionResult:
     """Execute production ``ice_cor(kt,2)`` in NEMO statement order."""
-    if not isinstance(config, SI3ORCA2StateConfig):
-        raise TypeError("ice_cor requires an explicit SI3ORCA2StateConfig")
+    _validate_finalize_state(state, config)
+    if rn_himin <= 0.0:
+        raise ValueError("O15 requires rn_himin > 0")
     if config.nn_icesal != 4:
         raise ValueError("O15 owns the production-deck nn_icesal=4 arm only")
     if not (config.ln_pnd_LEV and config.ln_pnd_lids) or config.ln_pnd_TOPO:
@@ -548,10 +615,12 @@ def si3_ice_cor(
             upper = sr(
                 sr(sr(sr(config.rn_sinew * sss) * state.v_i[..., jl]) * r1_nlay_i)
             )
-            # icecor.o: MAX(current, lower) keeps current on a tie; the outer
-            # MIN(result, upper) keeps upper on a tie.
+            # icecor.o: MAX(current, lower) keeps current on a tie.  At 0x1dbe,
+            # ``minsd %xmm6,%xmm9`` has bounded_low in src and upper in dst,
+            # so bounded_low is retained on an ordered equality (including
+            # the reachable +0/-0 tie).
             bounded_low = jnp.where(lower > old, lower, old)
-            bounded = jnp.where(upper <= bounded_low, upper, bounded_low)
+            bounded = jnp.where(upper < bounded_low, upper, bounded_low)
             bounded = jnp.where(interior.astype(bool), bounded, old)
             szv_i = szv_i.at[..., jk, jl].set(bounded)
             delta = sr(bounded - old)
@@ -833,6 +902,9 @@ def si3_o16_step(
     _plant_omit_hfx_res: bool = False,
 ) -> SI3O16Result:
     """Production O16 call site: aggregate kind 18, then ``ice_update_flx``."""
+    _validate_finalize_state(state, config)
+    if surface_config.nn_hls != config.nn_hls:
+        raise ValueError("O16 surface and state configurations must use the same nn_hls")
     eqv = si3_var_glo2eqv(
         v_i=state.v_i,
         v_s=state.v_s,
@@ -894,6 +966,19 @@ def si3_ice_update_tau(
     h = int(config.nn_hls)
     if h < 1:
         raise ValueError("ice_update_tau requires at least one halo cell")
+    full_shape = inputs.u_ice.shape
+    full_fields = (
+        "uu_kbb", "vv_kbb", "umask_k1", "vmask_k1", "v_ice", "u_oce",
+        "v_oce", "drag_io", "at_i", "utau", "vtau", "tmod_io",
+    )
+    wrong = [name for name in full_fields if getattr(inputs, name).shape != full_shape]
+    interior_shape = (full_shape[0] - 2 * h, full_shape[1] - 2 * h)
+    wrong.extend(
+        name for name in ("taum", "utau_oce", "vtau_oce")
+        if getattr(inputs, name).shape != interior_shape
+    )
+    if wrong:
+        raise ValueError("ice_update_tau forcing/config shape mismatch: " + ", ".join(wrong))
     dtype = inputs.u_ice.dtype
     rho0 = jnp.asarray(config.ice_constants.rho_ocean, dtype=dtype)
 
@@ -945,6 +1030,8 @@ def si3_ice_update_tau(
 
 __all__ = (
     "SI3CorrectionResult",
+    "SI3FinalizeForcing",
+    "SI3FinalizeResponse",
     "SI3Fluxes",
     "SI3O16Result",
     "SI3StressInputs",

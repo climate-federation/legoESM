@@ -12,9 +12,11 @@ Independent review: operator (Claude)
 **LANDED — O15 and O16 are bit exact through their production entry points for
 all 100 steps and every owned field.** The O15 NEMO-statement materialization
 barriers remain necessary. Decision 187's version-1/kind-15 reader translation
-is proved from the committed writer order and independent fields; the wrong-
-permutation plant fails. Production `ice_update_flx` aggregation and every
-kind-16 output, plus kind 20 over exactly its owned interior, are all 0 ULP.
+and the separate version-1/kind-19 translation are proved from the committed
+writer order and independent fields; both wrong-permutation plants fail.
+Production `step_sea_ice` calls O15 correction, O16 flux aggregation, and O16
+stress update; every kind-16 output plus kind 20 over exactly its owned interior
+is 0 ULP.
 
 ## O15 production result
 
@@ -24,9 +26,9 @@ The original stopped score localized the first mismatch to `kt=1`, `a_i` cell
 (`iceitd.f90:496-500`). The production implementation now materializes each
 completed transfer statement with the shared source-rounding primitive before
 the next category boundary can consume it
-(`packages/ice/legoesm/ice/si3_finalize.py:259-318`). It also preserves the
+(`packages/ice/legoesm/ice/si3_finalize.py:325-384`). It also preserves the
 literal correction statements before rebinning (`icecor.f90:81-99` and
-`packages/ice/legoesm/ice/si3_finalize.py:470-534`). NEMO gathers rebin results
+`packages/ice/legoesm/ice/si3_finalize.py:536-601`). NEMO gathers rebin results
 back only for selected `nptidx` cells (`iceitd.f90:575-595`), so production
 leaves `h_i` and `t_su` unchanged outside that write set.
 
@@ -50,7 +52,7 @@ NEMO's final stress stores execute only for `ji=ntsi..ntei` and
 `jj=ntsj..ntej` (`iceupdate.f90:410-419`). The scorer therefore derives the
 Python slices from each record's bounds and scores only that 180 by 148 owned
 interior for full-halo `utau` and `vtau`; the recorded `taum` is already
-interior (`scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:2015-2030`).
+interior (`scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:2254-2269`).
 
 The 100-step result is 0 unequal / 7,992,000 elements, maximum 0 ULP, no first
 non-bit. A one-ULP `utau` plant at the first owned cell fails. Unwritten halo
@@ -68,11 +70,11 @@ admitted version-1 reader instead labels the first five of those as `at_i_b`,
 The reader therefore translates those three byte positions only when
 `version == 1` and `kind == 15`; every other version/kind returns unchanged,
 and unsupported master versions already fail closed
-(`scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:236-269` and
-`scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:396-502`).
+(`scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:250-293` and
+`scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:420-529`).
 The evidence checker reads the committed writer calls in source order and, at
 steps 1, 2, and 100, obtains these independent checks
-(`scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1826-1899`):
+(`scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1973-2046`):
 
 - all 12 state fields also present in kind 18 align bit-for-bit, for 36 checks;
 - translated `qsr` equals the independently recorded `qsr_oce` block
@@ -83,19 +85,23 @@ steps 1, 2, and 100, obtains these independent checks
 
 The direct test pins the writer/schema orders, version/kind restriction, all 36
 cross-kind checks, both independent values, and the failing permutation plant
-(`tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:170-191`).
+(`tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:195-232`).
 
 Kind 19 has a separate version-1 writer/schema permutation: the writer emits
-`tmod_io`, `utau`, `vtau` (`o8_o16_master_writer.F90:476-486`). The kind-20
-stress harness continues to use that fixed producer order separately.
+`tmod_io`, `utau`, `vtau` (`o8_o16_master_writer.F90:476-486`), while the
+admitted schema labels those byte blocks `utau`, `vtau`, `tmod_io`. The same
+versioned translation layer now owns this mapping. Its proof reads the writer
+calls in source order and checks the independently nonnegative magnitude
+against both signed stress components at steps 1, 2, and 100. A wrong
+kind-19 permutation fails before scoring.
 
 ## O16 production result
 
 The scorer reconstructs kind 18, runs the production `si3_o16_step` call site,
 which performs `ice_var_glo2eqv`, `ice_var_agg`, and `si3_ice_update_flx`, then
 scores every kind-15 state/total field and every kind-16 output field
-(`packages/ice/legoesm/ice/si3_finalize.py:825-882` and
-`scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1903-2050`).
+(`packages/ice/legoesm/ice/si3_finalize.py:894-954` and
+`scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:2112-2289`).
 Across `kt=1..100` under CPU fp64, glibc/libm, and production JIT:
 
 - aggregation into kind 15: 0 unequal / 948,384,000 elements, maximum 0 ULP;
@@ -119,11 +125,41 @@ They live under
 the identical scorer and frozen protocol. A one-ULP `qsr` output plant and an
 executing model plant that omits `hfx_res` both fail the O16 flux score.
 
+## Resume 3 — production dispatcher, object-code tie, and rebased score
+
+After rebasing onto lane tip `5f0cf16fbe`, the late stages were wired into the
+existing `step_sea_ice(thermo_scheme="si3_orca2_o2")` dispatcher through the
+typed `SI3FinalizeForcing` boundary. O15, O16 flux aggregation, and O16 stress
+are now called by that production entry. The recorded kind-18 and kind-19
+boundaries remain explicit because the intervening age and update stages are
+outside this rung; the dispatcher does not invent those unimplemented stages.
+An executable removal test bypasses O15 on an input where it changes the state
+and observes the production response change.
+
+The `icecor.o` instruction at `0x1dbe` is `minsd %xmm6,%xmm9`: bounded-low is
+the source and upper is the destination, so bounded-low survives an ordered
+tie. Production now uses the corresponding strict comparison. A reachable
+`bounded_low=+0`, `upper=-0` test pins the surviving `+0` bits. Five-category
+O15 rebin/shift and O16 aggregation, zero-ice O16, gradients, and explicit
+state/config mismatch rejection are covered by small unit inputs.
+
+The fresh 100-step CPU-fp64 production-JIT score ran through `step_sea_ice` and
+reported O15 `0 / 1,006,992,000`, O16 aggregation `0 / 948,384,000`, O16 flux
+`0 / 59,139,200`, and owned kind-20 stress `0 / 7,992,000`, all at maximum
+`0` ULP with no first non-bit. Artifact:
+`/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/round24/o15_o16_production_score_resume3.json`,
+SHA-256 `053cefcc173117e106658ad8975bac29afdbb6f6e971df7192180829095a8d6f`.
+
+Fresh post-rebase all-step compatibility scores also returned
+`PASS_ALL_O8_O12_0_ULP` for O8 through O12 and `PASS_O14_0_ULP` for O14. O13
+was not present on the fetched lane tip and therefore had no landed scorer to
+rerun.
+
 ## Compatibility and controls
 
 - Translation proof, representative `kt=1,2,100` production score, O15/O16
-  one-ULP, barrier, stress, and executing heat-term plants: 5 passed, 13
-  deselected on the final code. `test_si3_finalize.py`: 4 passed.
+  one-ULP, barrier, stress, and executing heat-term plants: 8 passed, 17
+  deselected on the final code. `test_si3_finalize.py`: 8 passed.
 - O8–O12 all-step production score: `PASS_ALL_O8_O12_0_ULP`; artifact
   `o8_o12_master_score.json`, SHA-256
   `fa2cc5fc534b7789dc565c491d58472784bf6e568296635397afb2169c4c69bf`.
@@ -134,10 +170,10 @@ executing model plant that omits `hfx_res` both fail the O16 flux score.
   Probe artifact SHA-256:
   `ab03c16a4f0a424d6be496733f815153f21c4e09681dd4ccbc09d0571b05c726`.
 - Clean-tree per-receipt citation gate: 17 citations, zero failures, zero
-  unmapped citations, all planted self-tests fired. Clean-tree default citation
-  gate: 274 citations, zero failures, zero unmapped citations. Citation-gate,
-  private-import, parameter-spec, inline-coefficient, and hardcoded-constant
-  ratchets: 6,310 passed, 2 skipped.
+  unmapped citations, all planted self-tests fired. All 22 SI3 receipts also
+  resolve through the live full citation map. The broad ratchet selection
+  reports 6,309 passed and 2 skipped; its remaining 11 failures are unchanged
+  from the rebased lane tip and touch no file in this round's diff.
 
 ## Choices
 
