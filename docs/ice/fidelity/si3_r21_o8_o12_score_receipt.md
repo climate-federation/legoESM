@@ -323,3 +323,25 @@ All certified targets were re-measured on the final committed code (`ae10c0c527d
 | **Default `_step_dynamic_v2` 1-cat (`ponds.scheme='cesm'`)** | `DynamicSeaIceState` + `TileResponse` vs parent `3d5446cca2b4` | `0 / 4` | `0.0` | `0` | `True` (`grad_h_ice = 3.980614`) | **`PASS` (`0` ULP)** |
 | **Default `_step_dynamic_v2` 5-cat (`ponds.scheme='cesm'`)** | 5-cat `DynamicSeaIceState` + `TileResponse` vs parent `3d5446cca2b4` | `0 / 20` | `0.0` | `0` | `True` (`grad_h_ice = 19.726761`) | **`PASS` (`0` ULP)** |
 | **`step_ponds(scheme='si3_lev')` vs certified `si3_ice_thd_pnd` on active ice & vanished-ice cell** (`packages/ice/legoesm/ice/ponds.py:34-311`) | Active ice (`a_i=0.16, h_i=1.4`) and vanished-ice cell (`a_i[0,0,:]=0, h_i[0,0,:]=0`, `wfx_pnd[0,0] = 0.004446 kg m^-2 s^-1`) | Active ice: **`0 / 64`**<br>Vanished-ice cell: **`0 / 64`** | `0.0` | `0` | `True` (`grad_h_ip = 4.351162`, `grad_h_ip_vanished = 104.240741`) | **`PASS` (`0` ULP on both active and vanished ice)** |
+
+---
+
+## 9. Resume 3 & 4 — Explicit `SI3ThermoConfig` Enforcement, Phase-2 Gate Routing, D5 Year Gate Fix, and Detached Re-Verification (`e349abaffc80`, `f81fd9c83d66`)
+
+1. **No silent default in `si3_column_step_arrays` (`packages/ice/legoesm/ice/bitz_lipscomb.py:1811-1998`)**:
+   - Removed the fallback `nn_icesal = 2 if si3 is None else int(si3.salinity_scheme)`; `si3_column_step_arrays` now raises `ValueError("si3_column_step_arrays requires an explicit SI3ThermoConfig (si3); no default")` if `si3` or `si3.salinity_scheme` is `None`.
+   - `C1D_OMIP_L3` (`build_c1d_omip_l3_card`) parses `nn_icesal = 2`, `rn_sinew = 0.5`, `rn_snwblow = 0.5`, `rn_hinew = 0.05`, and `ln_frazil = False` explicitly from `c1d_omip_l3_namelist_ice_cfg` and passes `si3=card.config.si3` at every call site (`tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:163-432`).
+2. **Phase-2 gate routed through production kernels & AST duplicate-arithmetic guard (`tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:163-432`)**:
+   - Routed `nemo_si3thd_phase2_gate.py` through the production `si3_ice_thd_zdf_bl99`, `si3_ice_thd_dh`, `si3_ice_thd_sal`, `si3_ice_thd_frazil`, and `si3_column_step_arrays` kernels (`-591` duplicate lines removed) and added `_assert_no_duplicate_o8_o12_arithmetic()` with an AST-level plant (`tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:163-432`).
+   - Updated `nemo_si3thd_phase2b_year_gate.py` ablation steps to call `phase2._si3_column_step_arrays_ablation(..., si3=card.config.si3, ...)`.
+3. **Detached re-verification results (`/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/si3_r21/final_checks.log`)**:
+   - **D5 `C1D_OMIP_L3` year gate (`nemo_si3thd_phase2b_year_gate.py`)**: `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/round21/d5_phase2b_year_gate_resume3.json` (`13,016,617` bytes, SHA-256 `eedbfd9862eb574d863dbca2e35655a206686f6d092180f9071830dacb797ce1`), `status = "DEBT"` (`629` over-bar rows confined to the `kt = 5842..5867` subnormal snow window; `0` normal-step over-bar rows).
+   - **D5 `C1D_OMIP_L3` platform probe & full-year hash (`scripts/validate/ocean_fidelity/testcases/nemo_si3thd_d5_platform_probe.py:806-1883`)**: `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/round21/d5_platform_probe_resume3.json` (SHA-256 `53c7aaa90d16cdc4f3dcd873497a499387ed804706abe4470428bb64744a0ffe`) and `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/round21/r21_resume4_final_remeasurement.json` (SHA-256 `8e1629cd2cc7fb0d5f1074ac554a74b34506e203858ffb106b15ffe36402cd0d`):
+     ```text
+     24125:        "full_year_output_sha256": "b7a7329bed74c17918fa3cbc11c7613acb2074851e2357a08869fcd4661e12d2",
+     18:  "platform_disposition": "D5_PLATFORM_FLOOR",
+     ```
+   - **O8–O12 100-step master-record production-entry score (`scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1425-1501`, `scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1503-1535`)**: `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/round21/o8_o12_master_score.json` (`137,492` bytes, SHA-256 `2ffd0cd63ac8503cd0abe6a2751834fc6bb19f2f76ec2b6e92248f220c8b7bd1`), `overall_verdict = "PASS_ALL_O8_O12_0_ULP"` (`O11.production_column_step_arrays_o9_o11`: `0 / 306,731,360` unequal, `0` ULP; `O12.production_step_ponds_si3_lev`: `0 / 1,145,653,900` unequal, `0` ULP).
+   - **Lane-3 (`ICE_ADV1D`, `ICE_ADV2D`, `ICE_ADV2D_RHG`) and `O1`–`O7` results**: `ICE_ADV1D` (`0 / 43,659` unequal, `0` ULP, finite gradients), `ICE_ADV2D` (`0 / 169,744` unequal, `0` ULP, finite gradients), `ICE_ADV2D_RHG` (`0 / 10,609` unequal, `0` ULP, finite gradients), and `O1`, `O2`, `O3`, `O4`, `O5`, `O7` (`PASS` / `PASS_SELF_TEST`, `0` ULP across all admitted records).
+   - **independent review: operator**
+
