@@ -48,7 +48,7 @@ def read_dump(path):
         if tok[0] in ("KLEV",):
             out["klev"] = int(tok[1])
         elif tok[0] == "CONST":
-            out.update(zip(("rlvtt", "rd", "rv", "retv", "rtt"), map(float, tok[6:])))
+            out.update(zip(("rlvtt", "rd", "rv", "retv", "rtt", "rcpd", "rg"), map(float, tok[8:])))
         elif tok[0] == "FG":
             vals = tok[6:]
             out.update(ktype_fg=int(vals[0]), ktype_rc=int(vals[1]), kcbot=int(vals[2]),
@@ -97,6 +97,8 @@ def port_case(nlev):
         fg=(r, a[4])))))
     keep.append((F, "ifs_updraught_ascent", spy(F, "ifs_updraught_ascent", lambda a, k, r: cap.update(asc=r))))
     keep.append((F, "_reclassify_ktype", spy(F, "_reclassify_ktype", lambda a, k, r: cap.update(ktype_rc=r))))
+    keep.append((F, "ifs_convective_fluxes", spy(F, "ifs_convective_fluxes", lambda a, k, r: cap.update(
+        flx=r))))
     keep.append((C, "shallow_closure", spy(C, "shallow_closure", lambda a, k, r: cap.update(mb1=r))))
     cfg = BechtoldConfig(use_ifs_ascent=True)
     out = bechtold_convection(T, q, pf, ph, config=cfg, **kw)[0]
@@ -122,6 +124,8 @@ def port_case(nlev):
                 mful_asc=np.asarray(asc.PMFUL)[0], lude_asc=np.asarray(asc.PLUDE)[0],
                 dmfup_asc=np.asarray(asc.PDMFUP)[0], dT_dt=np.asarray(out.dT_dt)[0],
                 dq_dt=np.asarray(out.dq_v_dt)[0])
+    for n, v in zip(("mfu_flx", "mfus_flx", "mfuq_flx", "mful_flx", "lude_flx", "dmfup_flx"), cap["flx"]):
+        port[n] = np.asarray(v)[0]
     return inputs, port
 
 
@@ -130,7 +134,11 @@ def known_case(nlev):
     ph = sig * 101300.0
     ph[0] = 1000.0
     pf = 0.5 * (ph[1:] + ph[:-1])
-    T = np.full(nlev, 273.16)   # const-ok: OpenIFS RTT (oracle known-answer input, checked against the dump)
+    rtt = 273.16   # const-ok: OpenIFS RTT (oracle known-answer input, checked against the dump)
+    # stable (temperature rises upward), dry; pure-ice (< RTICECU = RTT-38 after SUCUMF),
+    # triple-point and pure-liquid thirds so both saturation branches are exercised
+    T = np.where(np.arange(nlev) < nlev // 3, rtt - 40.0,
+                 np.where(np.arange(nlev) < 2 * nlev // 3, rtt, rtt + 20.0))[::-1].copy()
     q = np.full(nlev, 1.0e-6)
     gh = np.zeros(nlev + 1)
     for j in range(nlev - 1, -1, -1):   # isothermal hydrostatic; only consistency matters here
@@ -171,10 +179,14 @@ def main():
     print(f"CASE {args.case} nlev={args.nlev} repo_sha={sha}")
     print("ORACLE scalars:", {k: o[k] for k in ("ldcum_fg", "ktype_fg", "ktype_rc", "kcbot", "kctop", "zmfub_fg",
                                                  "zmfub1", "zdhpbl", "ldcum", "ktype")})
-    print("ORACLE const:", {k: o[k] for k in ("rlvtt", "rd", "rv", "retv", "rtt")})
+    print("ORACLE const:", {k: o[k] for k in ("rlvtt", "rd", "rv", "retv", "rtt", "rcpd", "rg")})
     if args.case == "known":
         eps = o["rd"] / o["rv"]
-        es = 611.21 * eps   # const-ok: satcurve-ok: R2ES/(RD/RV) of suphec.F90:231, the oracle source's own value
+        r2es = 611.21 * eps   # const-ok: satcurve-ok: suphec.F90:231 R2ES=611.21*RD/RV
+        T, rtt = inputs["T"], o["rtt"]
+        liq = r2es * np.exp(17.502 * (T - rtt) / (T - 32.19))   # satcurve-ok: suphec.F90 R3LES, R4LES
+        ice = r2es * np.exp(22.587 * (T - rtt) / (T + 0.7))     # satcurve-ok: suphec.F90 R3IES, R4IES
+        es = np.where(T >= rtt, liq, ice)   # FOEALFCU = 1 at T >= RTWAT=RTT, 0 below RTICECU (only these regimes present)
         zqs = np.minimum(0.5, es / inputs["pf"])
         qs_closed = zqs / (1.0 - o["retv"] * zqs)
         # SATUR fills JK = NJKT2..KLEV only (satur.F90 loop; sucumf.F90:285 NJKT2 = lowest
@@ -197,7 +209,18 @@ def main():
         print(f"{j:3d} {inputs['pf'][j]/100:7.1f} | {o['mfu_asc'][j]:11.4e} {port['mfu_asc'][j]:11.4e} | "
               f"{o['mfus_asc'][j]:12.5e} {port['mfus_asc'][j]:12.5e} | {o['dT_dt'][j]*86400:12.4f} "
               f"{port['dT_dt'][j]*86400:12.4f}")
-    for n in ("mfu_asc", "mfus_asc", "mful_asc", "lude_asc", "dmfup_asc", "dT_dt", "dq_dt"):
+    dpg = np.diff(inputs["ph"]) / o["rg"]
+    for who, src in (("oracle", o), ("port", port)):
+        print(f"BUDGET {who}: column sum(cp*dT + L*dq) dp/g = "
+              f"{float(np.sum((o['rcpd'] * src['dT_dt'] + o['rlvtt'] * src['dq_dt']) * dpg)):.4e} W/m2 "
+              f"(sum cp*dT = {float(np.sum(o['rcpd'] * src['dT_dt'] * dpg)):.4e})")
+    print(f"{'k':>3} {'p_hPa':>7} | flux-stage M ifs/port | MFUS ifs/port | DMFUP ifs/port | DMFDP ifs")
+    for j in range(len(inputs["pf"]) - 14, len(inputs["pf"])):
+        print(f"{j:3d} {inputs['pf'][j]/100:7.1f} | {o['mfu_flx'][j]:10.4e} {port['mfu_flx'][j]:10.4e} | "
+              f"{o['mfus_flx'][j]:11.4e} {port['mfus_flx'][j]:11.4e} | {o['dmfup_flx'][j]:10.3e} "
+              f"{port['dmfup_flx'][j]:10.3e} | {o['dmfdp_flx'][j]:10.3e}")
+    for n in ("mfu_asc", "mfus_asc", "mful_asc", "lude_asc", "dmfup_asc", "mfu_flx", "mfus_flx", "mfuq_flx",
+              "mful_flx", "lude_flx", "dmfup_flx", "dT_dt", "dq_dt"):
         d = np.abs(o[n] - port[n])
         sc = max(float(np.max(np.abs(o[n]))), 1e-300)
         print(f"DIFF {n}: max_abs={float(np.max(d)):.3e} at k={int(np.argmax(d))}  max_abs/max|ifs|={float(np.max(d))/sc:.3e}")

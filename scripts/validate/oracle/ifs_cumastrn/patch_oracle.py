@@ -1,7 +1,8 @@
 """Make an INSTRUMENTED copy of OpenIFS 8f6f722 cumastrn.F90.
 
 Insertions only: a `USE TDBG` line and plain assignments into module TDBG at
-three points (first guess, ascent + KTYPE reclassification, closure).  No
+four points (first guess, ascent + KTYPE reclassification, after CUFLXN,
+closure).  No
 oracle statement is altered or removed; every anchor is asserted unique and
 the line count is asserted to grow by exactly the inserted lines.
 usage: patch_oracle.py <cumastrn.F90> <out.F90>
@@ -66,6 +67,19 @@ ins_after(i_rc_end, [
     "DBG_MFUL_ASC(KIDIA:KFDIA,:)=ZMFUL(KIDIA:KFDIA,:)",
     "DBG_LUDE_ASC(KIDIA:KFDIA,:)=PLUDE(KIDIA:KFDIA,:)",
     "DBG_DMFUP_ASC(KIDIA:KFDIA,:)=ZDMFUP(KIDIA:KFDIA,:)",
+])
+
+# --- (2b) right after CUFLXN (:1104-1115): below-cloud-base fluxes, rain evaporation
+i_fx = next(i for i, l in enumerate(L) if l.strip() == "CALL CUFLXN &")
+i_fx_end = next(i for i in range(i_fx, len(L)) if L[i].rstrip().endswith(")") and "PMFDDE_RATE" in L[i])
+ins_after(i_fx_end, [
+    "DBG_MFU_FLX(KIDIA:KFDIA,:)=PMFU(KIDIA:KFDIA,:)",
+    "DBG_MFUS_FLX(KIDIA:KFDIA,:)=ZMFUS(KIDIA:KFDIA,:)",
+    "DBG_MFUQ_FLX(KIDIA:KFDIA,:)=ZMFUQ(KIDIA:KFDIA,:)",
+    "DBG_MFUL_FLX(KIDIA:KFDIA,:)=ZMFUL(KIDIA:KFDIA,:)",
+    "DBG_LUDE_FLX(KIDIA:KFDIA,:)=PLUDE(KIDIA:KFDIA,:)",
+    "DBG_DMFUP_FLX(KIDIA:KFDIA,:)=ZDMFUP(KIDIA:KFDIA,:)",
+    "DBG_DMFDP_FLX(KIDIA:KFDIA,:)=ZDMFDP(KIDIA:KFDIA,:)",
 ])
 
 # --- (3) the closure value entering the final scaling (:957-965)
