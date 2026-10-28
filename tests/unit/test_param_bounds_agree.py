@@ -222,6 +222,22 @@ _AIMIP_DISAGREE: dict[str, str] = {
 }
 
 
+# AIMIP knobs with NO second declaration (no scheme spec entry, no driver
+# check), so nothing is compared for them (user 2026-10-28, R10).  SHRINK-ONLY:
+# a new unchecked knob fails, and one that gains a range must leave the list.
+_AIMIP_UNCHECKED: frozenset[str] = frozenset({
+    "tiedtke_downdraft_RH_min",
+    "tiedtke_epsilon_deep",
+    "tiedtke_epsilon_shallow",
+    "tiedtke_epsilon_midlevel",
+    "tiedtke_parcel_dT",
+    "mcfarlane_k_wave",
+    "sundqvist_sigmoid_sharpness",
+    "rrtmgp_sfc_emissivity",
+    "rrtmgp_sfc_albedo",
+})
+
+
 def _aimip_knob_fields() -> dict[str, tuple[str, str]]:
     """knob -> (config class name, field), read from the code that maps them:
     ``aimip_params._canonical_scheme_defaults`` (``var = Class()`` then
@@ -303,3 +319,12 @@ def test_no_new_aimip_knob_declares_another_range():
 def test_the_aimip_disagreement_list_only_shrinks():
     fixed = sorted(set(_AIMIP_DISAGREE) - set(_aimip_disagreements()))
     assert not fixed, f"{fixed} now agree — delete their _AIMIP_DISAGREE entries."
+
+
+def test_aimip_unchecked_knobs_list_is_exact():
+    unchecked = {n for n, _, sb, db in _aimip_rows() if sb is None and db is None}
+    new = sorted(unchecked - _AIMIP_UNCHECKED)
+    gone = sorted(_AIMIP_UNCHECKED - unchecked)
+    assert not new, (f"{new}: AIMIP knob with no scheme spec and no driver "
+                     f"range. Declare one, or list it in _AIMIP_UNCHECKED.")
+    assert not gone, f"{gone} are now checked; delete them from _AIMIP_UNCHECKED."
