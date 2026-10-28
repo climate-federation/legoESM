@@ -10883,19 +10883,19 @@ CITATION_MAP.update({
     'iceitd.f90:496-500': ['a_i_2d(ii,jl1) = a_i_2d(ii,jl1) - pdaice(ii,jl)', 'v_i_2d(ii,jl2) = v_i_2d(ii,jl2) + pdvice(ii,jl)', 5],
     'iceitd.f90:575-595': ['WHERE( a_i_2d(1:npti,:) >= epsi20 )', 'CALL tab_3d_4d( npti, nptidx(1:npti), szv_i_2d(1:npti,:,:), szv_i )', 21],
     'icecor.f90:81-99': ['WHERE( a_i(Nis0-(0):Nie0+(0),Njs0-(0):Nje0+(0),:) >= epsi20 )', 'IF( jpl > 1 )   CALL ice_itd_reb( kt )', 19],
-    'packages/ice/legoesm/ice/si3_finalize.py:259-318': ['_materialize_transfer_statements: bool = True,', 'statement_result = sr if _materialize_transfer_statements else (lambda x: x)', 'sv_i = transfer3(sv_i, zworkv)', 60],
-    'packages/ice/legoesm/ice/si3_finalize.py:470-535': ['def si3_ice_cor(', 'statement_result = sr if not _plant_strip_transfer_barriers else (lambda x: x)', '_materialize_transfer_statements=not _plant_strip_transfer_barriers,', 66],
+    'packages/ice/legoesm/ice/si3_finalize.py:259-318': [('_materialize_transfer_statements: bool = True,', 1), 'sv_i = transfer3(sv_i, zworkv)', 60],
+    'packages/ice/legoesm/ice/si3_finalize.py:470-534': ['def si3_ice_cor(', '_materialize_transfer_statements=not _plant_strip_transfer_barriers,', 65],
     'packages/ice/legoesm/ice/si3_finalize.py:254-311': [('e_i: Field,', 2), 'sv_i = transfer3(sv_i, zworkv)', 58],
     'packages/ice/legoesm/ice/si3_finalize.py:286-290': ['a_i = a_i.at[..., donor].set(', 'jnp.where(active, sr(a_i[..., receiver] + pdaice), a_i[..., receiver])', 5],
     'iceupdate.f90:373-418': ['IF( MOD( kt-1, nn_fsbc ) == 0 ) THEN', 'vtau(ji,jj) = ( 1._wp - at_i(ji,jj) ) * vtau_oce(ji,jj) + at_i(ji,jj) * zvtau_ice', 46],
     'nemo_si3_o8_o16_master_gate.py:171-180': ['15: Kind(', '+ _fields("snwice_mass snwice_mass_b", "F2"),', 10],
     'o8_o16_master_writer.F90:446-457': ['ELSEIF(kind==15) THEN', ('CALL put_f2(u,snwice_mass); CALL put_f2(u,snwice_mass_b)', 1), 12],
-    'o8_o16_master_writer.F90:476-486': ['IF(kind==19) THEN', 'CALL put_f2(u,utau); CALL put_f2(u,vtau); CALL put_i2(u,taum)', 11],
+    'o8_o16_master_writer.F90:476-486': ['IF(kind==19) THEN', ('CALL put_f2(u,utau); CALL put_f2(u,vtau); CALL put_i2(u,taum)', 2), 11],
     'iceupdate.f90:410-419': [('DO jj = ntsj-( 0), ntej+(  0 ) ; DO ji = ntsi-( 0), ntei+(  0)', 7), ('END DO   ;   END DO', 11), 10],
     'sbc_phy.F90:69': 'pp_cldf = 0.81',
-    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1777-1847': ['steps: Sequence[int] = (1, 2, 100),', 'writer_tail = (', 'translation_applied": False', 71],
-    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1849-1880': ['def score_o15_o16(', 'for kind in PROJECTIONS["O15"] + (19, 20):', 32],
-    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1927-1942': ['owned = (', 'o16_tau.update(spec.name, got, expected, kt=kt, category=0)', 16],
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1778-1845': ['steps: Sequence[int] = (1, 2, 100),', '"translation_applied": False', 68],
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1849-1875': ['def score_o15_o16(', 'for kind in PROJECTIONS["O15"] + (19, 20):', 27],
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1927-1941': ['owned = (', 'o16_tau.update(spec.name, got, expected, kt=kt, category=0)', 15],
     'iceitd.f90:497': 'a_i_2d(ii,jl2) = a_i_2d(ii,jl2) + pdaice(ii,jl)',
     'packages/ice/legoesm/ice/si3_finalize.py:289-290': ['a_i = a_i.at[..., receiver].set(', 'jnp.where(active, sr(a_i[..., receiver] + pdaice), a_i[..., receiver])', 2],
 })
@@ -10904,6 +10904,48 @@ _reanchor(
     'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1-1738',
     'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1-1990',
     anchors=['#!/usr/bin/env python3', 'raise SystemExit(main())', 1990],
+)
+
+# Round 24 adds O15/O16 score controls and their tests. Re-anchor every
+# affected round-21 and stopped-round citation before the mandatory map audit.
+_reanchor(
+    'tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:1-432',
+    'tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:1-846',
+    anchors=['"""Direct unit and master-record tests for the SI3 O8--O12 0-ULP scoring driver."""',
+             'assert calls == ["_cumulative_remap", "_cumulative_remap"]', 846],
+)
+_reanchor('tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:21-53',
+          'tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:23-55')
+_reanchor('tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:56-83',
+          'tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:58-85')
+_reanchor('tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:86-134',
+          'tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:88-136')
+_reanchor(
+    'tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:137-160',
+    'tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:182-204',
+    anchors=[('@pytest.mark.parametrize(', 2), ('verify_manifests=False,', 2), 23],
+)
+_reanchor(
+    'tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:163-432',
+    'tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:208-846',
+    anchors=['def test_production_call_sites_route_through_o8_o12_and_fail_when_reverted(',
+             'assert calls == ["_cumulative_remap", "_cumulative_remap"]', 639],
+)
+_reanchor('packages/ice/legoesm/ice/si3_finalize.py:254-311',
+          'packages/ice/legoesm/ice/si3_finalize.py:255-318',
+          anchors=[('e_i: Field,', 2), 'sv_i = transfer3(sv_i, zworkv)', 64])
+_reanchor('packages/ice/legoesm/ice/si3_finalize.py:286-290',
+          'packages/ice/legoesm/ice/si3_finalize.py:290-294',
+          anchors=['a_i = a_i.at[..., donor].set(',
+                   'a_i = a_i.at[..., receiver].set(', 5])
+_reanchor('packages/ice/legoesm/ice/si3_finalize.py:289-290',
+          'packages/ice/legoesm/ice/si3_finalize.py:294-295',
+          anchors=['a_i = a_i.at[..., receiver].set(',
+                   'jnp.where(active, a_receiver_new, a_i[..., receiver])', 2])
+_reanchor(
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1-1990',
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1-2053',
+    anchors=['#!/usr/bin/env python3', 'raise SystemExit(main())', 2053],
 )
 
 DEFAULT_RECEIPT = (

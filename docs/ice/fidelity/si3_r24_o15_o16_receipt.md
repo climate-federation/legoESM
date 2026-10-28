@@ -27,7 +27,7 @@ completed transfer statement with the shared source-rounding primitive before
 the next category boundary can consume it
 (`packages/ice/legoesm/ice/si3_finalize.py:259-318`). It also preserves the
 literal correction statements before rebinning (`icecor.f90:81-99` and
-`packages/ice/legoesm/ice/si3_finalize.py:470-535`). NEMO gathers rebin results
+`packages/ice/legoesm/ice/si3_finalize.py:470-534`). NEMO gathers rebin results
 back only for selected `nptidx` cells (`iceitd.f90:575-595`), so production
 leaves `h_i` and `t_su` unchanged outside that write set.
 
@@ -51,7 +51,7 @@ NEMO's final stress stores execute only for `ji=ntsi..ntei` and
 `jj=ntsj..ntej` (`iceupdate.f90:410-419`). The scorer therefore derives the
 Python slices from each record's bounds and scores only that 180 by 148 owned
 interior for full-halo `utau` and `vtau`; the recorded `taum` is already
-interior (`scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1927-1942`).
+interior (`scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1927-1941`).
 
 The 100-step result is 0 unequal / 7,992,000 elements, maximum 0 ULP, no first
 non-bit. A one-ULP `utau` plant at the first owned cell fails. Unwritten halo
@@ -68,7 +68,7 @@ admitted version-1 reader instead labels the first five of those as `at_i_b`,
 
 The evidence-only checker verifies the committed writer sequence and, at
 steps 1, 2, and 100, obtains these independent checks
-(`scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1777-1847`):
+(`scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1778-1845`):
 
 - all 12 state fields also present in kind 18 align bit-for-bit, for 36 checks;
 - reader-labelled `cloud_fra` equals the independently recorded `qsr_oce`
@@ -79,7 +79,7 @@ steps 1, 2, and 100, obtains these independent checks
 
 The checker reports `translation_applied=false`. Kinds 15, 16, and 18 are not
 opened by the resumed scorer
-(`scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1849-1880`).
+(`scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1849-1875`).
 No versioned translation and no re-acquisition was implemented.
 
 Kind 19 has a separate version-1 writer/schema permutation: the writer emits
