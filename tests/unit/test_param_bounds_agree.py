@@ -148,3 +148,12 @@ def test_ifs_ascent_port_shares_the_bechtold_ranges():
     bec = config.__param_spec__["BechtoldConfig"]["params"]
     for name in ("rprcon", "dnoprc"):
         assert ifs[name]["bounds"] == bec[name]["bounds"], name
+
+
+def test_aimip_cloud_q_c_knob_takes_the_spec_and_driver_range():
+    """The AIMIP trainable knob is a third declaration of the same range (user
+    2026-10-28, Q35: one parameter, one range)."""
+    from legoesm.training.aimip_params import AIMIP_CLASSICAL_CONSTRAINTS
+    c = {k.name: k for k in AIMIP_CLASSICAL_CONSTRAINTS}["cloud_q_c_diagnostic"]
+    (spec,) = {b for b, _ in _spec_bounds()["q_c_diagnostic"]}
+    assert (c.min_val, c.max_val) == spec == _driver_bounds()["cloud_q_c_diagnostic"]
