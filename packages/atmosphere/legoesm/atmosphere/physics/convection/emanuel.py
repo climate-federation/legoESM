@@ -212,6 +212,16 @@ def emanuel_convection(
     out : ConvectionOutput
         ``du_dt_conv = dv_dt_conv = None`` (no convective momentum transport).
     conv_prog_profile_new : jax.Array, shape (ncol, nlev)
+
+    Known limitation
+    ----------------
+    Left as is by user decision.  The rain is placed by the column drying
+    weight ``drying / drying_col``.  A column whose drying ``drying_col`` lies
+    in (1e-30, ~1e-19] kg/m2/s is not floored, and the weight's derivative
+    carries ``1/drying_col**2``, which overflows fp32 there (fp64 is fine).
+    Measured never reached (SLURM job 28511370): 0 such columns over the 1535
+    ECMWF oracle profiles and 40962 AMIP columns x 8 configs; smallest
+    positive drying 3e-8; 0 non-finite fp32 gradients.
     """
     _check_retired_fields(config)
     # The scheme runs in the state temperature's precision: a float64 tracer
@@ -298,12 +308,7 @@ def emanuel_convection(
     drying_col = jnp.sum(drying * dp, axis=-1) / constants.g
     # The 1e-30 divisor floor goes through _div_floor (same value; a floored,
     # non-convecting column then has finite fp32 derivatives).
-    # KNOWN LIMITATION (left as is by user decision): a column whose drying
-    # ``drying_col`` lies in (1e-30, ~1e-19] kg/m2/s is not floored, and the
-    # weight's derivative carries 1/drying_col**2, which overflows fp32 there
-    # (fp64 is fine).  Measured never reached (SLURM job 28511370): 0 such
-    # columns over the 1535 ECMWF oracle profiles and 40962 AMIP columns x 8
-    # configs; smallest positive drying 3e-8; 0 non-finite fp32 gradients.
+    # fp32 derivative limitation of this weight: see the docstring.
     add_weight = _div_floor(drying, drying_col[:, None], 1e-30)  # ∫w dp/g = 1
     _residual = jnp.maximum(-net_water, 0.0)
     dq_r_conv_dt = _residual[:, None] * add_weight    # ∫dq_r dp/g = _residual
