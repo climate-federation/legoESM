@@ -155,6 +155,47 @@ Fresh post-rebase all-step compatibility scores also returned
 was not present on the fetched lane tip and therefore had no landed scorer to
 rerun.
 
+## Resume 4 — O13/O14 lane rebase resolution
+
+Before fetching, branch `backup/si3_r24-resume4-pre-rebase` preserved
+`83887b735636a65c640c1cccdc80c5ef2242bb09`. The feature branch was rebased
+onto fetched SI3 lane tip `2351cfdda9f5` (O13 plus O14). Conflicts in the
+shared master scorer, its direct tests, the receipt citation gate, and the
+affected SI3 receipts were resolved additively: the final scorer retains the
+O13 conservation scorer and dropped-transfer plant, the O14 scorer and
+selector/model-bypass plants, and all O15/O16 scoring, translation, barrier,
+model-mutation, flux, and owned-interior stress behavior. Historical receipt
+citations were translated to the combined tree without relaxing endpoint or
+extent checks. Resolution commit `586d377d8247` is clean and contains no model
+or scoring change beyond the conflict resolutions.
+
+The exhaustive CPU-fp64 production scorer ran every admitted step and emitted:
+
+- `O8_O13_STATUS: PASS_ALL_O8_O13_0_ULP`; 100 steps; every O8 through O13
+  score block had unequal sum 0 and maximum 0 ULP. JSON SHA-256
+  `ebcb768d0a6c6d0ad9f14be203495d2b10018547531fdea08e760d4360a0db8a`.
+- `O14_STATUS: PASS_O14_0_ULP`; 100 steps; `O14_SCORE: unequal=0 max_ulp=0
+  status=PASS_0_ULP`. JSON SHA-256
+  `59d59a1f464928c5ebb0cef883fa1f7b85b69d3febfb085cc79366cc36a3cc10`.
+- `O15_O16_STATUS: PASS_ALL_O15_O16_0_ULP`; 100 steps; O15, O16 aggregation,
+  O16 flux, and kind-20 owned interior each had unequal 0 and maximum 0 ULP.
+  JSON SHA-256
+  `0f322ac2098a08c8993faff34b07158b1a3dc2bbc9424d25fff7cfbd7866efa8`.
+
+The clean-tree D5 CPU probe emitted `D5_YEAR_STATUS: PASS`,
+`D5_PLATFORM: D5_PLATFORM_FLOOR`, `D5_STEPS: 8760`, and
+`D5_SNOW_TEMP_NONZERO: 0`. The shipped
+`r6_step1_plus_step2_snow_update` year hash remained
+`b7a7329bed74c17918fa3cbc11c7613acb2074851e2357a08869fcd4661e12d2`;
+probe JSON SHA-256
+`2c07a832729871c4183ce5a753df69a82ee0632ee76eb6ba3e47d196220606d5`.
+
+The exact `land.sh` T4 seven-file set emitted
+`169 passed in 1187.19s (0:19:47)`; log SHA-256
+`9be609f47d7c9c9188ca8e0db79a949347b7c2f5ba6f40f694839333ba949a01`.
+The standalone clean-tree citation-gate run also emitted
+`41 passed in 8.22s`.
+
 ## Compatibility and controls
 
 - Translation proof, representative `kt=1,2,100` production score, O15/O16
