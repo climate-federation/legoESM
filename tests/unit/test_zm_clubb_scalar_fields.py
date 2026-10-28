@@ -27,7 +27,8 @@ _DECK = (pathlib.Path(__file__).resolve().parents[2]
          / "config" / "amip" / "amip_production.yaml")
 # Inside each parameter's __param_spec__ bounds, and != its default.
 _ZM = {"zm_c0_lnd": 0.015, "zm_c0_ocn": 0.045, "zm_ke": 1.0e-5,
-       "zm_dmpdz": -2.0e-3, "zm_tau": 5400.0, "zm_capelmt": 100.0}
+       "zm_dmpdz": -2.0e-3, "zm_tau": 5400.0, "zm_capelmt": 100.0,
+       "zm_momcu": 0.4, "zm_momcd": 0.4, "zm_tiedke_add": 1.0, "zm_alfa": 0.2}
 _CLUBB = {"clubb_c14": 3.0, "clubb_c8": 5.0, "clubb_c11": 0.5,
           "clubb_c11b": 0.5, "clubb_gamma_coef": 0.25,
           "clubb_gamma_coefb": 0.25, "clubb_beta": 2.0, "clubb_c_k10": 1.0}

@@ -625,6 +625,10 @@ ZM_SCALAR_FIELDS = {
     "zm_dmpdz": "dmpdz",
     "zm_tau": "tau",
     "zm_capelmt": "capelmt",
+    "zm_momcu": "momcu",
+    "zm_momcd": "momcd",
+    "zm_tiedke_add": "tiedke_add",
+    "zm_alfa": "alfa",
 }
 CLUBB_SCALAR_FIELDS = {
     "clubb_c14": "C14",
@@ -2114,6 +2118,12 @@ class ExperimentConfig(NamedTuple):
     # read by the droplet activation.  1.0 = the climatology as on file.
     # APPENDED AT THE TUPLE END (positional ABI).
     cam6_aerosol_number_scale: float = 1.0
+    # More ZM tunables (ZM_SCALAR_FIELDS); APPENDED AT THE TUPLE END
+    # (positional ABI), so not next to the six above.  None = scheme default.
+    zm_momcu: float | None = None
+    zm_momcd: float | None = None
+    zm_tiedke_add: float | None = None
+    zm_alfa: float | None = None
 
     def _liquid_partition_resolved(self) -> bool:
         """Is CLUBB's cloud-liquid exchange selected, by ANY route?
