@@ -407,6 +407,11 @@ def rlutcs_replay(fns, state, mesh, sig, forcing, phys_state, rad_int, real_back
     print("SENSITIVITY OF THE RADIATION OPERATOR on one frozen state, not a coupled prediction.")
 
 
+# tracers accumulated per physics call in window mode: (state key, npz tag); the tag
+# "qv" keeps the earlier file layout for q_v
+WINDOW_TRACERS = (("q_v", "qv"), ("N_c", "Nc"), ("q_c", "qc"))
+
+
 def _cadence(build_kw: dict) -> int:
     """How many steps of physics one physics call applies (1 unless cadence 'write')."""
     if build_kw.get("physics_cadence", "off") == "write":
@@ -470,24 +475,27 @@ def window_budget(args, win, acc, ncall, builds, out_dir, t0):
     rows["physics_applied"] = applied
     rows["total"] = (T1 - T0) / span
     rows["dynamics_and_fixers"] = rows["total"] - applied
-    # vapour rows, same weights (radiation carries no vapour tendency); only when the
-    # window carried a q_v tracer (the unit fixture is temperature-only)
-    qrows = {}
-    qv1 = None
-    has_qv = "qv0" in win and getattr(win["last"], "tracers", None) is not None and "applied_qv" in acc
-    for m in (MODULES if has_qv else ()):
-        c = ncall.get(m + "_qv", 0)
-        if c == 0:
+    # tracer rows (q_v, N_c, q_c), same weights (radiation carries no tracer tendency);
+    # only for tracers the window carried (the unit fixture is temperature-only)
+    trows = {}
+    for _tr, _tag in WINDOW_TRACERS:
+        if f"{_tag}0" not in win or getattr(win["last"], "tracers", None) is None \
+                or f"applied_{_tag}" not in acc:
             continue
-        gate(c == ncall.get(m, 0), f"{m}: vapour calls {c} != temperature calls {ncall.get(m, 0)}")
-        wgt = 1.0 / n_mm if (n_mm > 1 and c == n_mm * n_app) else 1.0
-        qrows[m] = wgt * ncad * acc[m + "_qv"].reshape(shp) / n
-    if has_qv:
-        qv1 = np.asarray(win["last"].tracers["q_v"].data, dtype=np.float64)
-        qrows["physics_applied"] = np.reshape(acc["applied_qv"], shp) / n
-        qrows["total"] = (qv1 - win["qv0"]) / span
-        qrows["dynamics_and_fixers"] = qrows["total"] - qrows["physics_applied"]
-        qrows["physics_closure"] = qrows["physics_applied"] - sum(qrows[m] for m in MODULES if m in qrows)
+        rows_t = {}
+        for m in MODULES:
+            c = ncall.get(f"{m}_{_tag}", 0)
+            if c == 0:
+                continue
+            gate(c == ncall.get(m, 0), f"{m}: {_tr} calls {c} != temperature calls {ncall.get(m, 0)}")
+            wgt = 1.0 / n_mm if (n_mm > 1 and c == n_mm * n_app) else 1.0
+            rows_t[m] = wgt * ncad * acc[f"{m}_{_tag}"].reshape(shp) / n
+        t1 = np.asarray(win["last"].tracers[_tr].data, dtype=np.float64)
+        rows_t["physics_applied"] = np.reshape(acc[f"applied_{_tag}"], shp) / n
+        rows_t["total"] = (t1 - win[f"{_tag}0"]) / span
+        rows_t["dynamics_and_fixers"] = rows_t["total"] - rows_t["physics_applied"]
+        rows_t["physics_closure"] = rows_t["physics_applied"] - sum(rows_t[m] for m in MODULES if m in rows_t)
+        trows[_tag] = (rows_t, win[f"{_tag}0"], t1)
     ref = H.ROOT / args.run / f"checkpoint_day_{args.day + args.window_days:04d}.npz"
     if ref.exists():
         z = np.load(ref)
@@ -507,10 +515,12 @@ def window_budget(args, win, acc, ncall, builds, out_dir, t0):
         print(f"{pr:8.0f} " + " ".join(f"{gms[k][pr]:+14.3f}" for k in kd))
     np.savez(out_dir / f"heating_window_cells_{args.run}_d{args.day:04d}_{args.window_days}d.npz",
              steps=n, dt=DT, cadence=ncad, p_s0=ps0, T0=T0, T1=T1,
-             **({"qv0": win["qv0"], "qv1": qv1} if has_qv else {}),
              sigma_full=np.asarray(sig.sigma_full, dtype=np.float64),
              **{f"T_{k}": v.astype(np.float32) for k, v in kd.items()},
-             **{f"qv_{k}": (v * 86400.0).astype(np.float32) for k, v in qrows.items()})
+             **{f"{tag}0": v0 for tag, (_r, v0, _v1) in trows.items()},
+             **{f"{tag}1": v1 for tag, (_r, _v0, v1) in trows.items()},
+             **{f"{tag}_{k}": (v * 86400.0).astype(np.float32)
+                for tag, (r, _v0, _v1) in trows.items() for k, v in r.items()})
     np.savez(out_dir / f"heating_window_{args.run}_d{args.day:04d}_{args.window_days}d.npz",
              bands=BANDS, steps=n, dt=DT, cadence=ncad,
              p_hpa=band_mean(p_full, lat_deg, area) / 100.0,
@@ -612,9 +622,10 @@ def main(argv=None):
                     rec[name] = np.asarray(t.dT_dt.data, dtype=np.float64)
                 elif win_mode:
                     jax.debug.callback(functools.partial(_acc, name), t.dT_dt.data)
-                    qv = (t.tracer_tendencies or {}).get("q_v")
-                    if qv is not None:
-                        jax.debug.callback(functools.partial(_acc, name + "_qv"), qv.data)
+                    for _tr, _tag in WINDOW_TRACERS:
+                        _f = (t.tracer_tendencies or {}).get(_tr)
+                        if _f is not None:
+                            jax.debug.callback(functools.partial(_acc, f"{name}_{_tag}"), _f.data)
                 return res
             fns[name] = wrapped
             return wrapped
@@ -652,9 +663,10 @@ def main(argv=None):
             if isinstance(t.dT_dt.data, jax.core.Tracer):
                 # what the dycore adds (x physics_cadence_steps on a physics step)
                 jax.debug.callback(functools.partial(_acc, "applied"), t.dT_dt.data)
-                qv = (t.tracer_tendencies or {}).get("q_v")
-                if qv is not None:
-                    jax.debug.callback(functools.partial(_acc, "applied_qv"), qv.data)
+                for _tr, _tag in WINDOW_TRACERS:
+                    _f = (t.tracer_tendencies or {}).get(_tr)
+                    if _f is not None:
+                        jax.debug.callback(functools.partial(_acc, f"applied_{_tag}"), _f.data)
                 rh = getattr(phys_state, "rad_heating", None) if phys_state is not None else None
                 if not need_rad and rh is not None:
                     # held-radiation step: the cached heating is added inside, radiation
@@ -677,8 +689,9 @@ def main(argv=None):
             win.update(T0=np.asarray(state.T.data, dtype=np.float64),
                        ps0=np.asarray(state.p_s.data, dtype=np.float64),
                        dt=float(dt), model=self, state0=state)
-            if getattr(state, "tracers", None) and "q_v" in state.tracers:
-                win["qv0"] = np.asarray(state.tracers["q_v"].data, dtype=np.float64)
+            for _tr, _tag in WINDOW_TRACERS:
+                if getattr(state, "tracers", None) and _tr in state.tracers:
+                    win[f"{_tag}0"] = np.asarray(state.tracers[_tr].data, dtype=np.float64)
         new = real_step(self, state, dt, physics_fn=physics_fn, forcing=forcing,
                         phys_state=phys_state)
         win["n"] += 1
