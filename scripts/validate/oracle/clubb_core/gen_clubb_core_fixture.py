@@ -20,6 +20,15 @@ For each benchmark case (namelists from CLUBB's own create_case_namelist.py):
   column, one warm-up Fortran step, then N_STEPS recorded steps (exercises the
   large-rtp2 clip).
 
+With ``CLUBB_FIXTURE_IMPLEMENTED=1`` (``run.sh implemented``) every warm-up and
+recorded step calls the core with ``l_implemented = .true.``, as CAM does
+(clubb_intr.F90:113 cam_cesm2_1_rel_60), on IMPLEMENTED_CASES (three with
+subsidence wm, one without), plus ``<case>_bigup2``: s0 with wp2/up2/vp2
+scaled by BIGUP2_VAR and a linear shear BIGUP2_SHEAR [1/s] added to um and vm
+(production strong enough that the up2/vp2 <= 1000 cap binds), one warm-up
+step (closure consistent with the new state), then N_STEPS recorded steps.
+Spin-up stays standalone.
+
 The forcings/environment are held fixed over the recorded steps (asserted).
 Output: one compressed npz, keys ``<case>/<field>`` and ``<case>/s<n>/<field>``,
 plus ``meta/*`` provenance.
@@ -54,6 +63,14 @@ CASES = {
     "arm_dz160": (120, ["deltaz_nl=160.0", "nzmax=28"], "arm"),
 }
 DRYUT_CASES = ("bomex", "arm")
+IMPLEMENTED = os.environ.get("CLUBB_FIXTURE_IMPLEMENTED") == "1"
+IMPLEMENTED_CASES = ("bomex", "dycoms2_rf01", "mpace_b", "arm")
+BIGUP2_CASES = ("bomex",)
+# Test-column design (not physics): smaller values tried first did not reach
+# the cap (factor 1000 / shear 0.3-0.5 1/s bind only on later steps; wind
+# zigzags or a warm-up with scaled variances alone never bind).
+BIGUP2_VAR = 1000.0      # wp2/up2/vp2 multiplier
+BIGUP2_SHEAR = 1.0       # added d(um)/dz = d(vm)/dz [1/s]
 STATE = ("rtm", "thlm", "um", "vm", "wp2", "wp3", "up2", "vp2", "wprtp",
          "wpthlp", "upwp", "vpwp", "rtp2", "thlp2", "rtpthlp")
 CARRIED = ("rcm", "cloud_frac", "wpthvp", "wp2thvp", "rtpthvp", "thlpthvp",
@@ -68,15 +85,19 @@ ENV = ("rtm_forcing", "thlm_forcing", "um_forcing", "vm_forcing",
        "rtpthlp_forcing", "exner", "p_in_Pa", "p_sfc", "thv_ds_zt",
        "thv_ds_zm", "rho_ds_zm", "rho_ds_zt", "invrs_rho_ds_zm",
        "invrs_rho_ds_zt", "wm_zt", "wm_zm", "sfc_elevation", "fcor", "ug",
-       "vg", "wprtp_sfc", "wpthlp_sfc", "upwp_sfc", "vpwp_sfc")
+       "vg", "wprtp_sfc", "wpthlp_sfc", "upwp_sfc", "vpwp_sfc", "host_dx",
+       "host_dy")
 
 
 def main(settings: Path, out: Path):
     """Each case runs in its own process (the f2py module keeps global flag and
     scalar-index state between cases), then the parts are merged."""
     res = {}
+    cases = IMPLEMENTED_CASES if IMPLEMENTED else tuple(CASES)
+    variants = ([f"{c}_bigup2" for c in BIGUP2_CASES] if IMPLEMENTED
+                else [f"{c}_dryut" for c in DRYUT_CASES])
     with tempfile.TemporaryDirectory() as tmp:
-        for case in CASES:
+        for case in cases:
             part = Path(tmp) / f"{case}.npz"
             subprocess.run([sys.executable, __file__, str(settings), str(part),
                             case], check=True)
@@ -91,8 +112,10 @@ def main(settings: Path, out: Path):
         json.loads((settings / "cam_params.json").read_text()), sort_keys=True))
     res["meta/dt"] = np.array(DT)
     res["meta/n_steps"] = np.array(N_STEPS)
-    res["meta/cases"] = np.array(
-        list(CASES) + [f"{c}_dryut" for c in DRYUT_CASES])
+    res["meta/cases"] = np.array(list(cases) + variants)
+    res["meta/l_implemented"] = np.array(IMPLEMENTED)
+    if IMPLEMENTED:
+        res["meta/bigup2"] = np.array([BIGUP2_VAR, BIGUP2_SHEAR])
     out.parent.mkdir(parents=True, exist_ok=True)
     np.savez_compressed(out, **res)
     print("wrote", out, os.path.getsize(out), "bytes")
@@ -158,7 +181,18 @@ def run_case(settings: Path, out: Path, case: str):
     def step(st):
         st["dt_main"] = DT
         st["l_sample"] = False
-        A._advance_clubb_core_api(st)
+        if IMPLEMENTED:
+            # _advance_clubb_core_api hard-codes l_implemented=False (the SCM
+            # driver); CAM passes .true.
+            orig = clubb_api.advance_clubb_core
+            clubb_api.advance_clubb_core = (
+                lambda *a, **k: orig(*a, **dict(k, l_implemented=True)))
+            try:
+                A._advance_clubb_core_api(st)
+            finally:
+                clubb_api.advance_clubb_core = orig
+        else:
+            A._advance_clubb_core_api(st)
         err = np.array(st["err_info"].err_code)
         if np.any(err != 0):
             raise SystemExit(f"oracle err_code {err}")
@@ -231,7 +265,20 @@ def run_case(settings: Path, out: Path, case: str):
         [float(np.array(getattr(nu, f))[0])
          for f in ("nu1", "nu2", "nu6", "nu8", "nu9", "nu10")])
     res[f"meta/{case}/unknown_flags"] = np.array(unknown)
-    if case in DRYUT_CASES:
+    if IMPLEMENTED and case in BIGUP2_CASES:
+        d = copy.deepcopy(s0)
+        zt = np.array(d["gr"].zt)
+        for k in ("wp2", "up2", "vp2"):
+            d[k] = np.asfortranarray(np.array(d[k]) * BIGUP2_VAR)
+        for k in ("um", "vm"):
+            d[k] = np.asfortranarray(np.array(d[k]) + BIGUP2_SHEAR * (zt - zt[:, :1]))
+        step(d)                                   # warm-up: closure consistent
+        trajectory(f"{case}_bigup2", d)
+        for n in range(1, N_STEPS + 1):
+            print(case, "bigup2 step", n, "levels at the 1000 cap: up2",
+                  int(np.sum(res[f"{case}_bigup2/s{n}/up2"] == 1000.0)), "vp2",
+                  int(np.sum(res[f"{case}_bigup2/s{n}/vp2"] == 1000.0)), flush=True)
+    if not IMPLEMENTED and case in DRYUT_CASES:
         d = copy.deepcopy(s0)
         r = np.array(d["rtm"])
         r[:, int(0.6 * d["nzt"]):] *= 1.0e-3

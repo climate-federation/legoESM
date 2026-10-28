@@ -1230,7 +1230,8 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
         )
         grid = _EPBLGridShim(lat_deg)
         fn = make_vertical_mixing_physics(
-            vmix_cfg, apply_diffusion=False, constants_config=constants_config)
+            vmix_cfg, apply_diffusion=False, constants_config=constants_config,
+            eos_fn=eos_fn)
         tend = fn(state, grid, z_coord, surface_forcing)
         return tend.K_v, tend.A_v, None
 

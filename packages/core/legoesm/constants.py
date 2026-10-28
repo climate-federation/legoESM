@@ -279,6 +279,11 @@ R_v_fast_sbm = 461.5                # [J/(kg*K)] :1768 JERRATE_KS RV_MY=461.5D4 
 L_v_fast_sbm = 2.5e6                # [J/kg] :1816 JERRATE_KS AL1_MY(1)=2.5D10 erg/g
 k_air_fast_sbm = 2.4e-2             # [W/(m*K)] :1768 JERRATE_KS CF_MY=2.4D3 erg/(cm*s*K)
 p_zero_fast_sbm = 101300.0          # [Pa] :1782 JERRATE_KS PZERO=1.013D6 dyn/cm^2
+# WRF v4.8.0 MYNN-EDMF (phys/MYNN-EDMF/module_bl_mynnedmf.F90, submodule
+# 8f8e8b59021249949c04d1686edc5a02ca325627): qsat_blend writes the vapour/dry-air
+# molecular-weight ratio as a literal, not as R_d/R_v; the faithful port
+# (turbulence/mynnedmf_wrf.py) uses it there.
+epsilon_wrf_mynn = 0.622         # [-] qsat_blend literal
 
 # Active no-pond ice_alb identity, icealb.F90:124-185 and accepted namalb.
 albedo_snow_dry_orca1 = 0.85

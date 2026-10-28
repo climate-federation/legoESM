@@ -873,16 +873,17 @@ def init_multicontroller_distributed(coordinator: str | None = None) -> None:
 
 def maybe_init_jax_distributed(coordinator_port: int | None = None, *,
                                federate: bool = True) -> bool:
-    """Initialize ``jax.distributed`` if running under multi-node MPI.
+    """Initialize ``jax.distributed`` if running under multi-rank MPI.
 
     Detects the MPI world size from the environment (SLURM_NTASKS /
-    PMI_SIZE / OMPI_COMM_WORLD_SIZE).  When >1 rank and the ranks span
-    more than one hostname, calls ``jax.distributed.initialize()`` with
-    rank-0's hostname as coordinator.
+    PMI_SIZE / OMPI_COMM_WORLD_SIZE).  When >1 rank and ``federate`` is
+    True, calls ``jax.distributed.initialize()`` with rank-0's hostname as
+    coordinator, on one host or several.
 
     On a SERIAL run this does nothing.  On MULTI-RANK runs — single-node
     included — it first binds each rank to one GPU via
-    :func:`pin_local_gpu`; the single-node path takes no other action.  That
+    :func:`pin_local_gpu`; with ``federate=False`` the single-node path
+    takes no other action.  That
     binding is not optional bookkeeping: without it nothing assigns
     rank -> device on the single-node path and the whole job silently runs
     on GPU 0 (#1516).
@@ -1090,11 +1091,12 @@ def maybe_init_jax_distributed(coordinator_port: int | None = None, *,
               f"{effective_pin} ({when}; CUDA_VISIBLE_DEVICES="
               f"{effective_pin}; JAX will call it local device 0)",
               flush=True)
-    if len(set(hosts)) <= 1:
-        # Single-node MPI: JAX distributed is not needed — the per-rank
-        # GPU binding was already applied above (#1516); unpinned, every
-        # local rank boots on default GPU 0 and the job completes with
-        # most of the hardware idle.
+    if len(set(hosts)) <= 1 and not federate:
+        # Single-node mpi4jax lane: JAX distributed is not needed — the
+        # per-rank GPU binding was already applied above (#1516); unpinned,
+        # every local rank boots on default GPU 0 and the job completes with
+        # most of the hardware idle.  The SPMD lane federates on one host
+        # too: its later init would run after the XLA backend is up and fail.
         return False
     if not federate:
         if rank == 0:

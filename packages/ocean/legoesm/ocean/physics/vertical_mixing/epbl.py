@@ -1045,6 +1045,16 @@ def _epbl_columns(h, u, v, t0, s0, dsv_dt, dsv_ds, tke_forcing,
 # ---------------------------------------------------------------------------
 
 
+def _require_forcing(**fields):
+    """Refuse missing surface forcing, as MOM6 does: a zero default would run
+    the column unforced with no downstream guard able to see it."""
+    missing = [k for k, v in fields.items() if v is None]
+    if missing:
+        raise ValueError(
+            f"ePBL needs its surface forcing; {', '.join(missing)} is None. "
+            "Pass explicit zeros for an unforced column.")
+
+
 def epbl_vertical_mixing(
     u, v, T, S, dSV_dT, dSV_dS, h,
     cfg: EPBLConfig,
@@ -1067,15 +1077,15 @@ def epbl_vertical_mixing(
     h : array ``(..., nlev)`` or ``(nlev,)``
         Layer thicknesses [m].
     tau_x, tau_y : array ``(...)`` or None
-        Surface wind stress [Pa]. Both default to zero.
+        Surface wind stress [Pa]. Required (``None`` raises).
     B_flux : array ``(...)`` or None
         Surface buoyancy flux [m^2/s^3], POSITIVE when stabilizing (warming),
-        matching MOM6's ``buoyancyFlux``. Defaults to zero.
+        matching MOM6's ``buoyancyFlux``. Required (``None`` raises).
     tke_forcing : array ``(..., nlev)`` or None
         Energy per unit area [J/m^2] required (negative) or released
         (positive) by mixing the surface forcing through each layer. Only the
         top layer is non-zero for a non-penetrating flux; see
-        :func:`surface_tke_forcing`. Defaults to zero.
+        :func:`surface_tke_forcing`. Required (``None`` raises).
     absf : array ``(...)`` or None
         Absolute Coriolis parameter [1/s]. Defaults to zero.
     mld_guess : array ``(...)`` or None
@@ -1092,6 +1102,8 @@ def epbl_vertical_mixing(
         (Prandtl number one, as in MOM6).
     """
     validate_epbl_config(cfg)
+    _require_forcing(tau_x=tau_x, tau_y=tau_y, B_flux=B_flux,
+                     tke_forcing=tke_forcing)
     if apply_diffusion:
         raise NotImplementedError(
             "epbl_vertical_mixing does not apply the diffusion itself: ePBL "
@@ -1181,6 +1193,8 @@ def epbl_diagnostics(
     diagnosed boundary-layer depth [m] (MOM6 ``ePBL_h_ML``).
     """
     validate_epbl_config(cfg)
+    _require_forcing(tau_x=tau_x, tau_y=tau_y, B_flux=B_flux,
+                     tke_forcing=tke_forcing)
     nlev = T.shape[-1]
     horiz = T.shape[:-1]
     dtype = T.dtype

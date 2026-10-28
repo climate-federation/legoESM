@@ -71,23 +71,30 @@ def _read_run_yaml_prejax(path: str) -> dict:
     return mod.read_yaml_with_includes(path)
 
 
-def _argv_distributed_mode(argv: list[str]) -> str:
-    """``distributed_mode`` as the run will resolve it: the ``--config``
-    YAML's key (a YAML-selected spmd deck must federate too -- codex), then
-    an explicit ``--distributed-mode`` flag on top, else the default."""
-    mode = _ARGV_DISTRIBUTED_MODE_DEFAULT
+def _argv_deck(argv: list[str]) -> dict:
+    """The ``--config`` YAML's keys, or ``{}`` (no deck, ``--help``, or a deck
+    the reader refuses)."""
     opts = argv[:argv.index("--")] if "--" in argv else argv
     # `--conf` is the shortest prefix unique to --config in this parser
     cfg = _argv_option(argv, "--config", len("--conf"))
     if cfg and not ({"-h", "--help"} & set(opts)):
         try:
-            mode = str(_read_run_yaml_prejax(cfg).get("distributed_mode", mode))
+            return _read_run_yaml_prejax(cfg)
         except (SystemExit, Exception):  # noqa: BLE001 - re-raised by main()
             # a missing / cyclic / malformed deck: main() reports it with
             # the reader's own message; the hook must not pre-empt that
             # (codex). A rank-local failure cannot split the decision:
             # maybe_init_jax_distributed votes on `federate` collectively.
             pass
+    return {}
+
+
+def _argv_distributed_mode(argv: list[str], deck: dict | None = None) -> str:
+    """``distributed_mode`` as the run will resolve it: the ``--config``
+    YAML's key (a YAML-selected spmd deck must federate too -- codex), then
+    an explicit ``--distributed-mode`` flag on top, else the default."""
+    deck = _argv_deck(argv) if deck is None else deck
+    mode = str(deck.get("distributed_mode", _ARGV_DISTRIBUTED_MODE_DEFAULT))
     # longer than the exact `--distributed` flag: unique to --distributed-mode
     v = _argv_option(argv, "--distributed-mode", len("--distributed") + 1)
     if v in ("mpi", "spmd"):   # anything else argparse rejects anyway
@@ -95,11 +102,38 @@ def _argv_distributed_mode(argv: list[str]) -> str:
     return mode
 
 
+def _argv_distributed_flag(argv: list[str], deck: dict | None = None) -> bool:
+    """True iff the exact ``--distributed`` flag is on the command line, or
+    the ``--config`` deck sets ``distributed`` (a deck key counts as the flag,
+    the same way its ``distributed_mode`` key counts; user decision
+    2026-10-28, codex + GLM).
+
+    argparse semantics mirrored (pinned against the real parser by the CLI
+    test): no abbreviation can select it (every prefix is shared with
+    ``--distributed-mode``, which argparse refuses as ambiguous), and nothing
+    after a bare ``--`` is an option.  The MPI-environment auto-enable in
+    ``_postprocess_args`` is deliberately NOT read: federation needs the flag
+    or the deck key (user decision 2026-10-28).
+    """
+    opts = argv[:argv.index("--")] if "--" in argv else argv
+    if "--distributed" in opts:
+        return True
+    deck = _argv_deck(argv) if deck is None else deck
+    return bool(deck.get("distributed"))
+
+
+def _argv_federates(argv: list[str]) -> bool:
+    """The SPMD lane federates only when SPMD mode AND ``--distributed`` (flag
+    or deck key) are both set, on one host or many (user decision 2026-10-28); the mpi4jax
+    lane never does (the mixed stack deadlocks).  The deck is read once, so
+    both halves see the same file (codex)."""
+    deck = _argv_deck(argv)
+    return (_argv_distributed_mode(argv, deck) == "spmd"
+            and _argv_distributed_flag(argv, deck))
+
+
 if "--multicontroller" not in sys.argv:
-    # Only the multi-controller SPMD lane federates jax.distributed across
-    # hosts; the mpi4jax lane must not (the mixed stack deadlocks).
-    maybe_init_jax_distributed(
-        federate=_argv_distributed_mode(sys.argv) == "spmd")
+    maybe_init_jax_distributed(federate=_argv_federates(sys.argv))
 
 from legoesm.driver.config import (
     CLUBB_SCALAR_FIELDS,

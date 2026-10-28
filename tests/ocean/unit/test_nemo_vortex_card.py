@@ -645,8 +645,13 @@ _CERTIFIED_CARD_DIGESTS_GRADGATE = {        # gradient-gate tip d678430f3
 # every digest is unchanged.  GYRE re-pinned 2026-10-26 (user, PR 2160):
 # dca02dffba3eb14f -> 2dbf0074ab1a4b47; KPP gamma_T/S 6.33 -> 6.3275155 derived
 # from kappa_von_karman, and mxl0_min_m 0.04 -> kappa*z0 (+1 ulp).
+# GYRE re-pinned 2026-10-28 (user): 2dbf0074ab1a4b47 -> 9fa9fec09b9cb850.
+# Measured against the PR 2211 head: the resolved configuration differs by
+# one inserted field only, main's ePBL vertical-mixing config (PR 2122;
+# GYRE resolves vertical_mixing.scheme = "tke"); the non-config part of the
+# digest is identical.
 _CERTIFIED_CARD_DIGESTS = {
-    "GYRE-zco": "2dbf0074ab1a4b47",
+    "GYRE-zco": "9fa9fec09b9cb850",
     "LOCK_EXCHANGE-zco": "10516c2a4d166c73",
     "OVERFLOW-zps": "9be98498ac9f50de",
 }

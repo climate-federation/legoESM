@@ -166,3 +166,39 @@ def test_column_the_oracle_rejects_is_nan():
     out = sbm_convection(T, q, pf, ph, 1800.0, SBMConfig())
     assert bool(jnp.all(jnp.isnan(out.dT_dt[0])))
     assert bool(jnp.all(out.dT_dt[1] == 0.0))
+
+
+# KNOWN DIFFERENCE (user decided 2026-10-28: keep the default
+# cape_threshold = 70 J/kg; the Isca oracle convects at CAPE > 0).  Per-column
+# gap at the production setting (SBMConfig() = 70 J/kg, sharpness 0.1; no deck
+# overrides it), measured 2026-10-28 on this fixture: max over levels of
+# |ours - oracle| for dT_dt [K/s] and dq_v_dt [kg/kg/s], and |ours - oracle|
+# for the column precipitation [kg/m2/s].  The relative gap of a convecting
+# column is 1 - sigmoid(0.1 (CAPE - 70)): columns 0 and 2 (CAPE 94) 8.3 %,
+# column 13 (CAPE 34) 97.2 %, column 14 (CAPE 41) 94.6 %; every other column
+# is round-off (full trigger, or no oracle convection).
+_GAP_DT = np.array([
+    2.2447787692321292e-05, 6.1663998560113065e-19, 2.5323275051165601e-05,
+    5.9631119486702744e-19, 0.0, 0.0, 0.0, 0.0, 8.2399365108898337e-18,
+    2.3852447794681098e-18, 1.2468324983583301e-18, 2.2768245622195593e-18, 0.0,
+    5.4386292038106314e-05, 6.1575661477740413e-05, 9.8255821881498839e-20, 0.0,
+    6.8304736866586779e-18, 0.0])
+_GAP_DQ = np.array([
+    7.1763574863812163e-09, 7.4115382884751280e-22, 7.7777531027473688e-09,
+    1.1117307432712692e-21, 3.2061421221936649e-21, 0.0, 0.0, 0.0,
+    7.1997800516615529e-21, 9.5291206566108788e-22, 3.1763735522036263e-21,
+    1.4823076576950256e-21, 0.0, 2.5989197831014282e-08, 3.6883454377566788e-08,
+    1.2705494208814505e-21, 0.0, 5.0821976835258020e-21, 2.5115090708623317e-23])
+_GAP_PRECIP = np.array([
+    1.2138501486161948e-05, 0.0, 1.2118713661808504e-05, 0.0, 0.0, 0.0, 0.0,
+    0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 3.9157423151242817e-05, 5.4050048684560655e-05,
+    0.0, 0.0, 2.6020852139652106e-18, 0.0])
+
+
+def test_default_trigger_gap_to_oracle_per_column(fx):
+    out = _run(fx, SBMConfig())
+    got = {"dT": np.max(np.abs(np.asarray(out.dT_dt) - fx["ora_dT"]), axis=1),
+           "dq": np.max(np.abs(np.asarray(out.dq_v_dt) - fx["ora_dq"]), axis=1),
+           "precip": np.abs(_precip(out, fx) - fx["ora_precip"])}
+    for key, stored in (("dT", _GAP_DT), ("dq", _GAP_DQ), ("precip", _GAP_PRECIP)):
+        np.testing.assert_allclose(got[key], stored, rtol=1e-6, atol=1e-12, err_msg=key)

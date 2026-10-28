@@ -12,7 +12,9 @@ from scripts.run.run_amip import (
     _ARGV_DISTRIBUTED_MODE_DEFAULT,
     _apply_aimip_classical_overrides,
     _apply_spectral_scheme_fallback,
+    _argv_distributed_flag,
     _argv_distributed_mode,
+    _argv_federates,
     _postprocess_args,
     _print_forcing_activity,
     _require_full_physics_for_amip,
@@ -5157,6 +5159,81 @@ def test_argv_distributed_mode_reads_the_config_yaml(tmp_path):
     bad.write_text("distributed_mode: [unclosed\n")
     assert _argv_distributed_mode(["-h", "--config", str(bad)]) == "mpi"
     assert _argv_distributed_mode(["--config", str(bad)]) == "mpi"
+
+
+def test_federation_needs_spmd_mode_and_the_distributed_flag():
+    """User decision 2026-10-28: the import-time hook federates only when
+    SPMD mode AND --distributed are both set.  The flag reader agrees with
+    argparse on every spelling; SPMD mode alone, or --distributed alone,
+    does not federate.
+    """
+    p = build_arg_parser()
+    for argv in (["--distributed"], [], ["--distributed-mode", "spmd"],
+                 ["--days", "1", "--distributed", "--distributed-mode", "spmd"],
+                 ["--distributed-mode=spmd", "--distributed"]):
+        assert _argv_distributed_flag(argv) is p.parse_args(argv).distributed, argv
+    # every prefix of --distributed is ambiguous with --distributed-mode
+    for abbrev in ("--distrib", "--distribute"):
+        with pytest.raises(SystemExit):
+            p.parse_args([abbrev])
+    assert _argv_distributed_flag(["--", "--distributed"]) is False
+    assert _argv_federates(["--distributed", "--distributed-mode", "spmd"]) is True
+    assert _argv_federates(["--distributed-mode", "spmd"]) is False
+    assert _argv_federates(["--distributed"]) is False
+    assert _argv_federates(["--distributed", "--distributed-mode", "mpi"]) is False
+    assert _argv_federates(["--distributed-mode", "spmd", "--", "--distributed"]) is False
+
+
+def test_deck_distributed_key_counts_as_the_flag(tmp_path):
+    """User decision 2026-10-28 (codex + GLM): a deck's ``distributed: true``
+    counts as --distributed, as the deck's ``distributed_mode`` key already
+    counts; the hook agrees with what argparse resolves from the deck."""
+    from legoesm.driver.run_config_yaml import load_yaml_config
+    on = tmp_path / "on.yaml"
+    on.write_text("distributed_mode: spmd\ndistributed: true\n")
+    off = tmp_path / "off.yaml"
+    off.write_text("distributed_mode: spmd\ndistributed: false\n")
+    mode_only = tmp_path / "mode.yaml"
+    mode_only.write_text("distributed_mode: spmd\n")
+    inc_base = tmp_path / "inc_base.yaml"
+    inc_base.write_text("distributed: true\n")
+    inc = tmp_path / "inc.yaml"   # the key arrives through an include
+    inc.write_text(f"include: {inc_base.name}\ndistributed_mode: spmd\n")
+    for deck, want in ((on, True), (off, False), (mode_only, False),
+                       (inc, True)):
+        p = build_arg_parser()
+        p.set_defaults(**load_yaml_config(str(deck), p))
+        argv = ["--config", str(deck)]
+        assert _argv_distributed_flag(argv) is bool(p.parse_args(argv).distributed)
+        assert _argv_federates(argv) is want, deck.name
+    assert _argv_federates(["--config", str(mode_only), "--distributed"]) is True
+    assert _argv_federates(["--config", str(on), "--distributed-mode", "mpi"]) is False
+    # one deck read per decision (codex): both halves see the same file
+    import scripts.run.run_amip as ra
+    reads = []
+    real = ra._read_run_yaml_prejax
+    ra._read_run_yaml_prejax = lambda path: reads.append(path) or real(path)
+    try:
+        assert _argv_federates(["--config", str(on)]) is True
+    finally:
+        ra._read_run_yaml_prejax = real
+    assert len(reads) == 1
+
+
+def test_import_hook_hands_the_federation_decision_to_early_init(monkeypatch):
+    """The import-time call itself passes _argv_federates: SPMD mode alone
+    does not federate, SPMD mode with --distributed does."""
+    import runpy
+    import legoesm.parallel.early_init as ei
+    seen = []
+    monkeypatch.setattr(ei, "maybe_init_jax_distributed",
+                        lambda **kw: seen.append(kw["federate"]))
+    script = str(_repo_root() / "scripts" / "run" / "run_amip.py")
+    for extra in (["--distributed-mode", "spmd"],
+                  ["--distributed", "--distributed-mode", "spmd"]):
+        monkeypatch.setattr(sys, "argv", [script, *extra])
+        runpy.run_path(script, run_name="_federation_hook_probe")
+    assert seen == [False, True]
 
 
 def test_land_snow_scheme_and_emissivity_round_trip_and_decks():
