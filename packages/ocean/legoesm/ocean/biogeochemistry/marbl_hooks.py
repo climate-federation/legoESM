@@ -44,7 +44,9 @@ FORCING_VARS = ("dust_flux", "iron_flux", "nox_flux", "nhy_flux", "ifrac")
 # spin-up starting values); the inorganic pools come from GLODAP/WOA.
 _SEEDS = {
     "Lig": 1.0e-3, "DIC_ALT_CO2": None, "ALK_ALT_CO2": None,      # None -> copy of DIC / ALK
-    "DOC": 40.0, "DOCr": 40.0, "DON": 3.0, "DONr": 2.0, "DOP": 0.1, "DOPr": 0.03,
+    # semi-labile DOM: small (turns over in ~years; a 40 mmol/m^3 seed = ~640 PgC draining into DIC
+    # at ~100 PgC/yr, seen in C2_marbl_6mo); refractory DOM carries the ~40 uM deep background
+    "DOC": 1.0, "DOCr": 40.0, "DON": 0.1, "DONr": 2.0, "DOP": 0.01, "DOPr": 0.03,
     "zooC": 0.1,
     "spC": 0.1, "spChl": 0.1, "spP": 0.1 / 117.0, "spFe": 0.1 * 3.0e-6, "spCaCO3": 0.01,
     "diatC": 0.1, "diatChl": 0.1, "diatP": 0.1 / 117.0, "diatFe": 0.1 * 3.0e-6, "diatSi": 0.1 * 0.137,
@@ -146,6 +148,8 @@ class MARBLRunner(BGCRunner):
             "P": b.PO4 + b.DOP + b.DOPr + b.spP + b.diatP + b.diazP + b.zooC / 117.0,
             "N": b.NO3 + b.NH4 + b.DON + b.DONr + (b.spC + b.diatC + b.diazC + b.zooC) * (16.0 / 117.0),
             "Si": b.SiO3 + b.diatSi, "Fe": b.Fe, "DIC": b.DIC, "ALK": b.ALK,
+            # total carbon: DIC + semi-labile/refractory DOM + living + CaCO3 (closed apart from air-sea)
+            "C": b.DIC + b.DOC + b.DOCr + b.spC + b.diatC + b.diazC + b.zooC + b.spCaCO3,
         }
         stack = jnp.stack(list(pools.values()))
         inv = np.asarray(self.tr.inventory(stack, state, self.area2d))
