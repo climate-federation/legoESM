@@ -87,7 +87,9 @@ at days 1 and 2: all four SST/3-D T RMS and maximum scores are zero.
 
 Focused gates: 87 passed/1 deselected; benchmark/report gates: 7 passed/1
 deselected; real full-card gradient: 1 passed in 1269.75 s.  No NEMO executable
-was run and no process was killed.
+was run and no process was killed.  The final clean-tree default ORCA2 battery,
+including the receipt citation gate and six-test private-import ratchet, passed
+143/143 in 510.86 s.
 
 ## GPU acquisition hold
 
