@@ -169,8 +169,10 @@ def test_check_grads_at_default_sharpness(fx):
     differences (fp64, order 2), w.r.t. T.  Loss as in the finite-gradient
     test above.  ``eps = 1e-6`` (as the CLUBB relvar oracle test): at JAX's
     default 1e-4 the second-order check misses by 4.0e-3 (g60) / 9.5e-4
-    (g32) relative, falling 100x per 10x smaller eps (finite-difference
-    truncation, not a derivative defect; measured on this branch)."""
+    (g32) relative, falling 100x per 10x smaller eps (consistent with
+    finite-difference truncation; measured on this branch).  Tolerance:
+    check_grads' fp64 default.  Covers T only; the path also holds hard
+    ``max`` ops (see the module docstring) that the fixture does not sit on."""
     from jax.test_util import check_grads
 
     for g in GROUPS:

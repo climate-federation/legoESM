@@ -27,12 +27,16 @@ CAPE, cloud-water source); the per-case gaps are pinned in a test only
 after those answers.  The oracle's hard ``if`` switches (LCL condensation,
 buoyancy, ``w_lcl > 0``, ``ptenq > 0``) are sigmoids of width
 ``1 / icond_sharpness``; ``icond_sharpness -> infinity`` (1e12 in the
-oracle test) recovers the oracle to round-off.  Measured on #2136 at the
+oracle test) recovers the oracle to round-off.  Not smoothed (hard, as in
+the oracle, and open RULE 5 items): the parcel supersaturation
+``max(qv1 - qsat, 0)``, ``max(ptenq, 0)`` in ``cvgu`` and the positive part
+of the cloud-water source.  Measured on #2136 at the
 default ``icond_sharpness = 50`` (field-normalised
 ``max|ours - oracle| / max|oracle|``, fp64): L60 fixture dT 0.49, dq 0.38
 (Kuo-Anthes 0.35 / 0.47), 51 columns fire vs the oracle's 38; all 1535
 ECMWF profiles dT 0.50, dq 0.41, 758 columns fire only in ours; L32 fixture
-dT 7.2e-5, dq 4.7e-4.  Main cause: ``sigmoid(50 w_lcl / max|w|)`` lets a
+dT 7.2e-5, dq 4.7e-4 (a different column set, not a convergence).
+Main cause (read off the code, no single-gate ablation run): ``sigmoid(50 w_lcl / max|w|)`` lets a
 column with a weakly negative LCL velocity fire partially.  What the
 smoothing breaks: columns the oracle leaves off fire partially (the counts
 above).  Positivity and column-water closure are not guaranteed at either
