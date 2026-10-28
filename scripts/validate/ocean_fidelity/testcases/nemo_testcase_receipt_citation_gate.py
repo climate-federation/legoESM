@@ -10375,7 +10375,6 @@ CITATION_MAP.update({
     'docs/ice/fidelity/si3_r19_o10_preregister.md:34-68': ['## 2. Registered master-record projection (GIVEN-NEMO-ENTRY only)', 'compiled-source line before another change.', 35],
 })
 
-
 # --- SI3 round 20 (O12) melt-pond model preparation ---
 FILES.update({
     'ORCA2_SAS_ICE_O7_REF/BLD/ppsrc/nemo/icethd_pnd.f90': NEMO / "cfgs/ORCA2_SAS_ICE_O7_REF/BLD/ppsrc/nemo/icethd_pnd.f90",
@@ -10959,18 +10958,53 @@ CITATION_MAP.update({
     'ORCA2_SAS_ICE_O8O16_REF/BLD/ppsrc/nemo/iceitd.f90:432-597': ['SUBROUTINE itd_shiftice( kdonor, pdaice, pdvice )', 'END SUBROUTINE itd_shiftice', 166],
     'ORCA2_SAS_ICE_O8O16_REF/BLD/ppsrc/nemo/icevar.f90:856-894': ['SUBROUTINE ice_var_roundoff( pa_i, pv_i, pv_s, psv_i, poa_i, pa_ip, pv_ip, pv_il, pe_s, pe_i, pszv_i )', 'END SUBROUTINE ice_var_roundoff', 39],
     'packages/ice/legoesm/ice/sea_ice.py:2847-2868': ['exact_si3_itd = (', 'raise ValueError("rn_amax_2d must have the spatial (no-category) state shape")', 22],
-    'packages/ice/legoesm/ice/itd.py:823-1075': ['def si3_ice_itd_rem(', ('return result', 2), 253],
-    'packages/ice/legoesm/ice/itd.py:790-819': ['def _si3_itd_glinear(', 'jnp.where(active, h_r, 0.0),', 30],
-    'packages/ice/legoesm/ice/sea_ice.py:3228-3305': ['if is_multicat and config.itd_remap != "none":', 'h_il = jnp.where(remap["a_ip"] > 1.0e-20, remap["v_il"] / aip_safe, 0.0)', 78],
-    'tests/ice/unit/test_si3_o13_itd_remap.py:229-290': ['def test_o13_production_sea_ice_call_site_fires(monkeypatch) -> None:', ('grid=grid, rn_amax_2d=jnp.full(shape, 0.997),', 2), 62],
+    'packages/ice/legoesm/ice/itd.py:835-1099': ['def si3_ice_itd_rem(', ('return result', 2), 265],
+    'packages/ice/legoesm/ice/itd.py:802-831': ['def _si3_itd_glinear(', 'jnp.where(active, h_r, 0.0),', 30],
+    'packages/ice/legoesm/ice/itd.py:790-799': ['def _si3_o13_fused_melt_min(', 'return _nemo_minsd(_nemo_minsd(hi_max, h_r), neg_dh0)', 10],
+    'packages/ice/legoesm/ice/sea_ice.py:3235-3307': [('if not exact_si3_itd:', 1), 'h_il = jnp.where(remap["a_ip"] > 1.0e-20, remap["v_il"] / aip_safe, 0.0)', 73],
+    'packages/ice/legoesm/ice/sea_ice.py:3254-3286': ['remap = si3_ice_itd_rem(', 'rt0=si3_cfg.ice_constants.T0,', 33],
+    'tests/ice/unit/test_si3_o13_itd_remap.py:294-409': ['def test_o13_production_sea_ice_call_site_fires(monkeypatch) -> None:', ('grid=grid, rn_amax_2d=jnp.full(shape, 0.997),', 3), 116],
     'scripts/validate/ocean_fidelity/testcases/nemo_si3_o13_minmax_audit.py:1-89': ['"""Exhaustive MIN/MAX/SIGN/SQRT audit of the SI3 O13 remap object code."""', 'sys.exit(main())', 89],
     'tests/ocean/fidelity/test_nemo_si3_o13_minmax_audit.py:65-109': ['def test_committed_o13_object_audit_and_tie_verdicts() -> None:', 'assert all(census[routine][name] for name in names)', 45],
-    'tests/ice/unit/test_si3_o13_itd_remap.py:177-192': ['def test_o13_independent_scalar_oracle_true_eager_jit_and_conservation() -> None:', 'np.testing.assert_allclose(after, before, rtol=3.0e-15, atol=3.0e-15)', 16],
-    'tests/ice/unit/test_si3_o13_itd_remap.py:195-226': ['def test_o13_jit_arguments_gradient_central_difference_and_zero_edges() -> None:', 'assert bool(jnp.all(jnp.isfinite(edge_grad)))', 32],
-    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:948-972': ['def _score_o13_step(', 'accumulator.update(spec.name, got, f12[spec.name], kt=kt, category=0)', 25],
-    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:975-1029': ['def score_o13(', '}},', 55],
-    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1641-1645': ['# 6. Rung O13: Kind 11 -> Kind 12 (production si3_ice_itd_rem).', 'jit_o13_remap=jit_o13_remap, accumulator=o13_remap_acc, plant=plant,', 5],
+    'tests/ice/unit/test_si3_o13_itd_remap.py:242-257': ['def test_o13_independent_scalar_oracle_true_eager_jit_and_conservation() -> None:', 'np.testing.assert_allclose(after, before, rtol=3.0e-15, atol=3.0e-15)', 16],
+    'tests/ice/unit/test_si3_o13_itd_remap.py:260-291': ['def test_o13_jit_arguments_gradient_central_difference_and_zero_edges() -> None:', 'assert bool(jnp.all(jnp.isfinite(edge_grad)))', 32],
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:955-985': ['def _score_o13_step(', 'return conservation', 31],
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1052-1104': ['def score_o13(', '"rungs": {"O13": {', 53],
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1721-1725': ['# 6. Rung O13: Kind 11 -> Kind 12 (production si3_ice_itd_rem).', 'jit_o13_remap=jit_o13_remap, accumulator=o13_remap_acc, plant=plant,', 5],
 })
+
+# Round 22 added the O13 kernel and its conservation scorer.  Re-anchor every
+# earlier receipt span whose source moved, preserving independently pinned
+# symbols and explicit extents.
+_reanchor('packages/ice/legoesm/ice/itd.py:1078-1080', 'packages/ice/legoesm/ice/itd.py:1082-1084')
+_reanchor('packages/ice/legoesm/ice/sea_ice.py:1717-1795,2992-3000,3228-3387', 'packages/ice/legoesm/ice/sea_ice.py:1717-1795,2992-3000,3228-3389', extent=250)
+_reanchor('packages/ice/legoesm/ice/sea_ice.py:427-440,482,1745-1779,2396-2421,2477-2543,2829-2877,3014-3094,3228-3349,3394-3396,3513-3531', 'packages/ice/legoesm/ice/sea_ice.py:427-440,482,1745-1779,2396-2421,2477-2543,2829-2877,3014-3094,3228-3351,3396-3398,3515-3533', extent=419)
+_reanchor('packages/ice/legoesm/ice/sea_ice.py:427-440,1745-1779,2829-2877,3014-3094,3228-3349,3394-3396', 'packages/ice/legoesm/ice/sea_ice.py:427-440,1745-1779,2829-2877,3014-3094,3228-3351,3396-3398', extent=306)
+_reanchor('scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1-1862', 'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1-1932', extent=1932)
+_reanchor('tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:1-438', 'tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:1-444', extent=444)
+_reanchor('scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:641-944', 'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:641-947', extent=307)
+_reanchor('scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1084-1101', 'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1095-1112')
+_reanchor('scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1259-1492', 'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1271-1504')
+_reanchor('scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1381-1406', 'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1393-1418')
+_reanchor('scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1494-1513', 'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1506-1525')
+_reanchor('scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1516-1526', 'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1528-1538')
+_reanchor('scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1529-1605', 'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1541-1617')
+_reanchor('scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1607-1639', 'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1619-1651')
+_reanchor('tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:21-53', 'tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:23-55')
+_reanchor('tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:56-83', 'tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:58-85')
+_reanchor('tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:87-135', 'tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:89-137')
+_reanchor('scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1033-1768', 'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1044-1781', extent=738)
+_reanchor('tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:142-160', 'tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:147-163', extent=17)
+_reanchor('tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:170-438', 'tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:176-444')
+
+# Current-round anchors are kept separate so the O13 receipt remains auditable
+# without weakening any historical entry.
+_reanchor('packages/ice/legoesm/ice/itd.py:835-1099', 'packages/ice/legoesm/ice/itd.py:823-1079', extent=257)
+_reanchor('packages/ice/legoesm/ice/itd.py:802-831', 'packages/ice/legoesm/ice/itd.py:790-819')
+_reanchor('packages/ice/legoesm/ice/itd.py:790-799', 'packages/ice/legoesm/ice/itd.py:1088-1092', extent=5)
+_reanchor('scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:955-985', 'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:951-981')
+_reanchor('scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1052-1104', 'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:984-1036')
+_reanchor('scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1721-1725', 'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1653-1657')
 
 UNAUDITED_ROUNDS = ("1-24 -- hand-checked only; their citations are not in "
                     "CITATION_MAP and this gate does not read them")

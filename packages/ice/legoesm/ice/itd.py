@@ -842,9 +842,9 @@ def si3_ice_itd_rem(
     nn_icesal: int,
     ln_pnd: bool,
     ln_pnd_lids: bool,
-    epsi10: float = 1.0e-10,
-    epsi20: float = 1.0e-20,
-    rt0: float = constants.T_freeze,
+    epsi10: float,
+    epsi20: float,
+    rt0: float,
 ) -> dict[str, jax.Array]:
     """NEMO 5.0.2 SI3 ``ice_itd_rem`` at its production array boundary.
 
@@ -918,8 +918,10 @@ def si3_ice_itd_rem(
     )
     dh0 = sr(h_i[..., 0] - h_i_b[..., 0])
     melt = remap & (a_i[..., 0] > eps10) & (dh0 < 0.0)
-    dh0_melt = _nemo_minsd_src_first(sr(-dh0), hi_max[1])
-    eta_max = sr(_nemo_minsd(dh0_melt, h_r_first) - h_l_first)
+    dh0_melt = _si3_o13_fused_melt_min(
+        neg_dh0=sr(-dh0), hi_max=hi_max[1], h_r=h_r_first
+    )
+    eta_max = sr(dh0_melt - h_l_first)
     do_loss = melt & (eta_max > 0.0)
     x1 = eta_max
     x2 = sr(sr(0.5 * eta_max) * eta_max)
@@ -936,6 +938,7 @@ def si3_ice_itd_rem(
     v_i = v_i.at[..., 0].set(jnp.where(do_loss, v0_after, v_i[..., 0]))
     grow = remap & (a_i[..., 0] > eps10) & ~(dh0 < 0.0)
     zhbnew = zhbnew.at[..., 0].set(jnp.where(grow, _nemo_minsd_src_first(dh0, hi_max[1]), zhbnew[..., 0]))
+    area_sum_after_thin_loss = fortran_sum_categories(a_i, axis=-1)
 
     g0s = []
     g1s = []
@@ -1060,7 +1063,8 @@ def si3_ice_itd_rem(
     t_su = jnp.where(a_i >= eps20, sr(za_tsfn / a_safe), jnp.asarray(rt0, dtype=dtype))
 
     # Packed NEMO tables scatter only cells surviving the remap checks.
-    result = {"at_i": at_i, "remap_mask": remap}
+    result = {"at_i": at_i, "remap_mask": remap, "a_i_sum_target": jnp.where(
+        remap, jnp.minimum(area_sum_after_thin_loss, rn_amax_2d), at_i)}
     updates = {
         "h_i": h_i, "a_i": a_i, "v_i": v_i, "v_s": v_s,
         "sv_i": sv_i, "oa_i": oa_i, "a_ip": a_ip, "v_ip": v_ip,
@@ -1079,3 +1083,10 @@ from legoesm.ice.si3_orca2_state import (  # noqa: E402,F401
     SI3CategoryBounds,
     si3_hfn_category_bounds,
 )
+
+
+def _si3_o13_fused_melt_min(
+    *, neg_dh0: jax.Array, hi_max: jax.Array, h_r: jax.Array
+) -> jax.Array:
+    """Execute fused lines 280/282 in the record object's ``MINSD`` order."""
+    return _nemo_minsd(_nemo_minsd(hi_max, h_r), neg_dh0)

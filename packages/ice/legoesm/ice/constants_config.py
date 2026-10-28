@@ -26,6 +26,8 @@ __param_spec__ = {
             "liquidus_slope": "physical constant",
             "S_ocean_ref": "environmental reference constant",
             "lead_albedo": "reference-model surface constant",
+            "epsi10": "reference-model par_ice numerical constant",
+            "epsi20": "reference-model par_ice numerical constant",
         },
         "params": {},
     },
@@ -52,6 +54,8 @@ class IceConstantsConfig(NamedTuple):
     liquidus_slope: float = constants.mu_ice_freeze
     S_ocean_ref: float = constants.S_ocean_ref
     lead_albedo: float = 0.06  # canonical legoESM open-water albedo
+    epsi10: float = 1.0e-10  # NEMO par_ice presence threshold
+    epsi20: float = 1.0e-20  # NEMO par_ice division threshold
 
 
 # NEMO 5.0.2 values printed by the accepted C1D_OMIP_L3 run and defined at
@@ -72,6 +76,8 @@ NEMO_SI3_CONSTANTS_CONFIG = IceConstantsConfig(
     liquidus_slope=0.054,
     S_ocean_ref=34.7,
     lead_albedo=0.066,
+    epsi10=1.0e-10,
+    epsi20=1.0e-20,
 )
 
 

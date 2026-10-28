@@ -3281,6 +3281,8 @@ def _step_dynamic_v2(
                 nn_icesal=si3_cfg.nn_icesal,
                 ln_pnd=si3_cfg.ln_pnd_LEV or si3_cfg.ln_pnd_TOPO,
                 ln_pnd_lids=si3_cfg.ln_pnd_lids,
+                epsi10=si3_cfg.ice_constants.epsi10,
+                epsi20=si3_cfg.ice_constants.epsi20,
                 rt0=si3_cfg.ice_constants.T0,
             )
             h = remap["h_i"]

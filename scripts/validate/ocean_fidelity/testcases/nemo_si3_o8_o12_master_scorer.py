@@ -18,7 +18,7 @@ import json
 import re
 import struct
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Mapping, Sequence
 
 import jax
 import jax.numpy as jnp
@@ -951,6 +951,9 @@ def _build_compiled_kernels(
             nn_icesal=int(namelist["nn_icesal"]),
             ln_pnd=bool(namelist["ln_pnd_LEV"] or namelist["ln_pnd_TOPO"]),
             ln_pnd_lids=bool(namelist["ln_pnd_lids"]),
+            epsi10=constants.epsi10,
+            epsi20=constants.epsi20,
+            rt0=constants.T0,
         )
 
     return {
@@ -975,7 +978,7 @@ def _score_o13_step(
     *, records_dir: Path, kt: int, first_kt: int,
     digest_map: dict[str, str], namelist: dict[str, Any],
     jit_o13_remap, accumulator: FieldScoreAccumulator, plant: str | None,
-) -> None:
+) -> dict[str, Any]:
     """Score one admitted Kind 11 -> Kind 12 pair through the production kernel."""
     n11 = record_name(11, kt, 0)
     n12 = record_name(12, kt, 0)
@@ -993,9 +996,15 @@ def _score_o13_step(
             jnp.nextafter(remap_in["hi_max"][1], jnp.asarray(jnp.inf, jnp.float64))
         )
     remap_out = jit_o13_remap(remap_in)
+    if plant == "o13-dropped-transfer" and kt == first_kt:
+        planted = np.asarray(remap_out["v_i"]).copy()
+        planted[np.unravel_index(np.argmax(np.abs(planted)), planted.shape)] = 0.0
+        remap_out = {**remap_out, "v_i": jnp.asarray(planted, dtype=jnp.float64)}
+    conservation = check_o13_conservation(f11, remap_out, frame=kt)
     for spec in KINDS[12].fields:
         got = remap_out[spec.name] if spec.name in remap_out else f11[spec.name]
         accumulator.update(spec.name, got, f12[spec.name], kt=kt, category=0)
+    return conservation
 
 
 def score_o13(
@@ -1026,12 +1035,13 @@ def score_o13(
     )
     acc = FieldScoreAccumulator()
     digest_map = manifest_info["rung_record_digests"]["O13"]
+    conservation_reports = []
     for kt in steps:
-        _score_o13_step(
+        conservation_reports.append(_score_o13_step(
             records_dir=records_dir, kt=kt, first_kt=steps[0],
             digest_map=digest_map, namelist=namelist,
             jit_o13_remap=kernels["jit_o13_remap"], accumulator=acc, plant=plant,
-        )
+        ))
     score = acc.summary()
     if score["total_unequal"]:
         raise _refuse(
@@ -1052,6 +1062,7 @@ def score_o13(
         "rungs": {"O13": {
             "production_function": "legoesm.ice.itd.si3_ice_itd_rem",
             "entry_kind": 11, "exit_kind": 12, "score": score,
+            "conservation": _summarize_o13_conservation(conservation_reports),
         }},
     }
 
@@ -1250,6 +1261,7 @@ def score_o8_to_o12(
     prod_column_acc = FieldScoreAccumulator()
     prod_step_ponds_acc = FieldScoreAccumulator()
     o13_remap_acc = FieldScoreAccumulator()
+    o13_conservation_reports = []
 
     zdf_input_keys = (
         "h_i",
@@ -1772,11 +1784,11 @@ def score_o8_to_o12(
                 )
 
         # 6. Rung O13: Kind 11 -> Kind 12 (production si3_ice_itd_rem).
-        _score_o13_step(
+        o13_conservation_reports.append(_score_o13_step(
             records_dir=records_dir, kt=kt, first_kt=steps[0],
             digest_map=digests_by_rung["O13"], namelist=namelist,
             jit_o13_remap=jit_o13_remap, accumulator=o13_remap_acc, plant=plant,
-        )
+        ))
 
     rungs_report = {
         "O8": {
@@ -1842,6 +1854,7 @@ def score_o8_to_o12(
             "entry_kind": 11,
             "exit_kind": 12,
             "score": o13_remap_acc.summary(),
+            "conservation": _summarize_o13_conservation(o13_conservation_reports),
         },
     }
 
@@ -1902,6 +1915,62 @@ def score_o8_to_o12(
     }
 
 
+O13_CONSERVED_FIELDS = (
+    "a_i", "v_i", "v_s", "sv_i", "oa_i", "a_ip", "v_ip", "v_il",
+    "e_s", "e_i", "szv_i",
+)
+
+
+def check_o13_conservation(
+    before: Mapping[str, Any],
+    after: Mapping[str, Any],
+    *,
+    frame: int | str,
+) -> dict[str, Any]:
+    """Check every preregistered O13 extensive inventory across categories."""
+    eps = np.finfo(np.float64).eps
+    fields: dict[str, dict[str, float]] = {}
+    for name in O13_CONSERVED_FIELDS:
+        before_arr = np.asarray(before[name], dtype=np.float64)
+        after_arr = np.asarray(after[name], dtype=np.float64)
+        got = np.sum(after_arr, axis=-1, dtype=np.float64)
+        if name == "a_i":
+            if "a_i_sum_target" not in after:
+                raise ValueError("O13 conservation requires a_i_sum_target")
+            expected = np.asarray(after["a_i_sum_target"], dtype=np.float64)
+        else:
+            expected = np.sum(before_arr, axis=-1, dtype=np.float64)
+        scale = np.sum(np.abs(before_arr), axis=-1, dtype=np.float64)
+        allowed = 64.0 * eps * np.maximum(scale, np.finfo(np.float64).tiny)
+        residual = np.abs(got - expected)
+        if not np.all(np.isfinite(residual)) or np.any(residual > allowed):
+            worst = np.unravel_index(np.argmax(residual - allowed), residual.shape)
+            raise _refuse(
+                f"O13 conservation failed for {name} at frame={frame}, "
+                f"cell={list(worst)}, residual={residual[worst]!r}, "
+                f"allowed={allowed[worst]!r}"
+            )
+        fields[name] = {
+            "max_abs_residual": float(np.max(residual, initial=0.0)),
+            "max_allowed": float(np.max(allowed, initial=0.0)),
+        }
+    return {"status": "PASS_CONSERVATION", "frame": frame, "fields": fields}
+
+
+def _summarize_o13_conservation(reports: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    return {
+        "status": "PASS_CONSERVATION",
+        "frames_checked": len(reports),
+        "fields": {
+            name: {
+                key: max(float(report["fields"][name][key]) for report in reports)
+                for key in ("max_abs_residual", "max_allowed")
+            }
+            for name in O13_CONSERVED_FIELDS
+        },
+    }
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -1943,6 +2012,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             "o13-model-mutation",
             "o14-1ulp",
             "o14-model-bypass",
+            "o13-dropped-transfer",
             "manifest-digest",
             "namelist-mismatch",
             "swapped-exit",

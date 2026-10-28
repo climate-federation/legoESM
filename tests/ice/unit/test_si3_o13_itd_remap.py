@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import inspect
 
 import jax
 import jax.numpy as jnp
@@ -174,6 +175,70 @@ def _model(values: dict[str, jax.Array]) -> dict[str, jax.Array]:
     )
 
 
+def test_o13_requires_explicit_run_constants() -> None:
+    """M1: the production boundary must not infer par_ice/phycst constants."""
+    from legoesm.ice.constants_config import NEMO_SI3_CONSTANTS_CONFIG
+
+    signature = inspect.signature(si3_ice_itd_rem)
+    for name in ("epsi10", "epsi20", "rt0"):
+        assert signature.parameters[name].default is inspect.Parameter.empty
+
+    assert NEMO_SI3_CONSTANTS_CONFIG.epsi10 == 1.0e-10
+    assert NEMO_SI3_CONSTANTS_CONFIG.epsi20 == 1.0e-20
+
+    kwargs = _call_kwargs(_inputs())
+    with pytest.raises(TypeError, match="epsi10"):
+        si3_ice_itd_rem(
+            **kwargs,
+            nn_icesal=4,
+            ln_pnd=True,
+            ln_pnd_lids=True,
+        )
+
+    # Ratchet every non-test production/scorer call site: adding a new caller
+    # that omits any run constant turns this gate red.
+    import ast
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[3]
+    rel_paths = (
+        "packages/ice/legoesm/ice/sea_ice.py",
+        "scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py",
+    )
+    call_sites = []
+    for rel_path in rel_paths:
+        tree = ast.parse((root / rel_path).read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call) and getattr(node.func, "id", None) == "si3_ice_itd_rem":
+                call_sites.append((rel_path, {kw.arg for kw in node.keywords}))
+    assert [path for path, _ in call_sites] == list(rel_paths)
+    for path, keywords in call_sites:
+        assert {"epsi10", "epsi20", "rt0"} <= keywords, path
+
+
+def test_o13_fused_melt_min_ties_keep_object_code_operands() -> None:
+    """M3: execute the line-280/282 fused MIN pair on bit-changing ties."""
+    from legoesm.ice.itd import _si3_o13_fused_melt_min
+
+    pos_zero = jnp.asarray(0.0, dtype=jnp.float64)
+    neg_zero = jnp.asarray(-0.0, dtype=jnp.float64)
+
+    # minsd(dst=hi_max, src=hR) keeps hR, then
+    # minsd(dst=<that>, src=-zdh0) keeps -zdh0.
+    first_tie = _si3_o13_fused_melt_min(
+        neg_dh0=neg_zero,
+        hi_max=pos_zero,
+        h_r=neg_zero,
+    )
+    second_tie = _si3_o13_fused_melt_min(
+        neg_dh0=pos_zero,
+        hi_max=pos_zero,
+        h_r=neg_zero,
+    )
+    assert np.asarray(first_tie).view(np.uint64) == np.asarray(neg_zero).view(np.uint64)
+    assert np.asarray(second_tie).view(np.uint64) == np.asarray(pos_zero).view(np.uint64)
+
+
 def test_o13_independent_scalar_oracle_true_eager_jit_and_conservation() -> None:
     src = _inputs()
     oracle = [_oracle_column(src, col) for col in range(2)]
@@ -248,6 +313,21 @@ def test_o13_production_sea_ice_call_site_fires(monkeypatch) -> None:
         h_il=base.h_il.replace(data=jnp.full(shape, 0.01, jnp.float64)),
     )
     state = distribute_dynamic_state_to_categories(base, 5)
+    # Put every category on a valid HFN support, then drive basal melt.  This
+    # produces real boundary transfers; the old one-category distribution plus
+    # zero forcing reached the call but made the remap a no-op.
+    src = _inputs()
+    h_cat = jnp.broadcast_to(jnp.asarray(src["h_i_b"][0]), shape + (5,))
+    a_cat = jnp.broadcast_to(jnp.asarray(src["a_i_b"][0]), shape + (5,))
+    state = state._replace(
+        h_ice=state.h_ice.replace(data=h_cat),
+        concentration=state.concentration.replace(data=a_cat),
+        h_snow=state.h_snow.replace(data=0.08 * h_cat),
+        S_ice=state.S_ice.replace(data=jnp.full_like(h_cat, 4.0)),
+        pond_area=state.pond_area.replace(data=jnp.full_like(h_cat, 0.16)),
+        pond_depth=state.pond_depth.replace(data=jnp.full_like(h_cat, 0.1125)),
+        h_il=state.h_il.replace(data=jnp.full_like(h_cat, 0.009375)),
+    )
     forcing = AtmToSurface(
         sw_down=z, lw_down=z, precip_total=z, precip_snow=z,
         T_lowest=jnp.full(shape, 271.35), q_lowest=z, u_lowest=z, v_lowest=z,
@@ -265,19 +345,58 @@ def test_o13_production_sea_ice_call_site_fires(monkeypatch) -> None:
         si3_orca2=si3_cfg,
         ice_constants=NEMO_SI3_CONSTANTS_CONFIG,
         emissivity_ice=0.0, Cd_ice=0.0, Ch_ice=0.0, Ce_ice=0.0,
-        ocean_heat_transfer_coeff=0.0,
+        ocean_heat_transfer_coeff=30.0,
     )
     real = sea_ice_mod.si3_ice_itd_rem
-    calls: list[str] = []
+    calls: list[dict[str, object]] = []
+
+    def recording_remap(**kw):
+        out = real(**kw)
+        calls.append({
+            "epsi10": kw["epsi10"],
+            "epsi20": kw["epsi20"],
+            "rt0": kw["rt0"],
+            "moved": not np.array_equal(
+                np.asarray(out["a_i"]).view(np.uint64),
+                np.asarray(kw["a_i"]).view(np.uint64),
+            ),
+        })
+        return out
+
     monkeypatch.setattr(
         sea_ice_mod, "si3_ice_itd_rem",
-        lambda **kw: (calls.append("ice_itd_rem"), real(**kw))[1],
+        recording_remap,
     )
-    sea_ice_mod.step_sea_ice(
-        state, forcing, jnp.full(shape, 271.35), z, z, cfg, 1.0, 3600.0,
+    remapped_state, _ = sea_ice_mod.step_sea_ice(
+        state, forcing, jnp.full(shape, 275.0), z, z, cfg, 1.0, 3600.0,
         grid=grid, rn_amax_2d=jnp.full(shape, 0.997),
     )
-    assert calls == ["ice_itd_rem"]
+    assert calls == [{
+        "epsi10": si3_cfg.ice_constants.epsi10,
+        "epsi20": si3_cfg.ice_constants.epsi20,
+        "rt0": si3_cfg.ice_constants.T0,
+        "moved": True,
+    }]
+
+    def removed_remap(**kw):
+        return {
+            name: kw[name]
+            for name in (
+                "h_i", "a_i", "v_i", "v_s", "sv_i", "oa_i", "a_ip",
+                "v_ip", "v_il", "t_su", "e_s", "e_i", "szv_i",
+            )
+        }
+
+    with monkeypatch.context() as mp:
+        mp.setattr(sea_ice_mod, "si3_ice_itd_rem", removed_remap)
+        removed_state, _ = sea_ice_mod.step_sea_ice(
+            state, forcing, jnp.full(shape, 275.0), z, z, cfg, 1.0, 3600.0,
+            grid=grid, rn_amax_2d=jnp.full(shape, 0.997),
+        )
+    assert not np.array_equal(
+        np.asarray(remapped_state.concentration.data).view(np.uint64),
+        np.asarray(removed_state.concentration.data).view(np.uint64),
+    )
 
     class PlantFired(RuntimeError):
         pass
@@ -286,6 +405,6 @@ def test_o13_production_sea_ice_call_site_fires(monkeypatch) -> None:
         mp.setattr(sea_ice_mod, "si3_ice_itd_rem", lambda **kw: (_ for _ in ()).throw(PlantFired()))
         with pytest.raises(PlantFired):
             sea_ice_mod.step_sea_ice(
-                state, forcing, jnp.full(shape, 271.35), z, z, cfg, 1.0, 3600.0,
+                state, forcing, jnp.full(shape, 275.0), z, z, cfg, 1.0, 3600.0,
                 grid=grid, rn_amax_2d=jnp.full(shape, 0.997),
             )

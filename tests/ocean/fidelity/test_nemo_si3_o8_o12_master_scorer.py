@@ -8,12 +8,14 @@ import pytest
 from scripts.validate.ocean_fidelity.testcases.nemo_si3_o8_o12_master_scorer import (
     DEFAULT_MASTER_ROOT,
     FieldScoreAccumulator,
+    O13_CONSERVED_FIELDS,
     PINNED_PROJECTION_SHA256,
     PINNED_RECORDS_INVENTORY_SHA256,
     PINNED_RESOURCE_USAGE_SHA256,
     PINNED_RUN_MANIFEST_SHA256,
     flip_1ulp,
     score_o14,
+    check_o13_conservation,
     score_o8_to_o12,
     verify_master_admission_manifests,
 )
@@ -139,6 +141,9 @@ def test_score_o8_to_o12_representative_steps_0_ulp() -> None:
     assert rungs["O13"]["score"]["status"] == "PASS_0_ULP"
     assert rungs["O13"]["score"]["total_unequal"] == 0
     assert rungs["O13"]["score"]["first_non_bit"] is None
+    assert rungs["O13"]["conservation"]["status"] == "PASS_CONSERVATION"
+    assert rungs["O13"]["conservation"]["frames_checked"] == 3
+    assert set(rungs["O13"]["conservation"]["fields"]) == set(O13_CONSERVED_FIELDS)
 
 
 def test_score_o14_representative_steps_0_ulp_and_plants() -> None:
@@ -173,6 +178,7 @@ def test_score_o14_representative_steps_0_ulp_and_plants() -> None:
         ("o12-1ulp", r"STATUS PLANT-FIRED.*O12 non-bit-exact.*'field': 'a_ip'"),
         ("o13-1ulp", r"STATUS PLANT-FIRED.*O13 non-bit-exact.*'field': 'a_i'"),
         ("o13-model-mutation", r"STATUS PLANT-FIRED.*O13 non-bit-exact"),
+        ("o13-dropped-transfer", r"STATUS PLANT-FIRED.*O13 conservation failed for v_i"),
         ("swapped-exit", r"STATUS PLANT-FIRED.*O8 non-bit-exact"),
     ],
 )
@@ -534,6 +540,7 @@ _CANONICAL_O8_O12_KERNELS: dict[str, set[str]] = {
         "si3_pnd_lev",
         "si3_ice_perm_eff",
     },
+    "packages/ice/legoesm/ice/itd.py": {"si3_ice_itd_rem"},
 }
 
 
@@ -850,6 +857,24 @@ def test_no_duplicate_o8_o12_arithmetic_ast_guard_and_plants(monkeypatch) -> Non
     ):
         _assert_no_duplicate_o8_o12_arithmetic({phase2_rel: planted_dh})
 
+    # Plant 4: an O13 boundary/melt arithmetic window copied outside the one
+    # production remapper is caught as well.
+    itd_rel = "packages/ice/legoesm/ice/itd.py"
+    itd_src = (repo_root / itd_rel).read_text(encoding="utf-8")
+    planted_o13 = itd_src + (
+        "\ndef _planted_o13_duplicate(h_i, h_i_b, a_i, remap, eps10, hi_max, h_r_first, h_l_first, sr):\n"
+        "    dh0 = sr(h_i[..., 0] - h_i_b[..., 0])\n"
+        "    melt = remap & (a_i[..., 0] > eps10) & (dh0 < 0.0)\n"
+        "    dh0_melt = _si3_o13_fused_melt_min(neg_dh0=sr(-dh0), hi_max=hi_max[1], h_r=h_r_first)\n"
+        "    eta_max = sr(dh0_melt - h_l_first)\n"
+        "    return melt, eta_max\n"
+    )
+    with pytest.raises(
+        AssertionError,
+        match=r"duplicate O8-O12 arithmetic window in .*itd\.py:_planted_o13_duplicate",
+    ):
+        _assert_no_duplicate_o8_o12_arithmetic({itd_rel: planted_o13})
+
     # Runtime verification that phase2_gate helpers delegate to production kernels in bitz_lipscomb:
     calls: list[str] = []
     orig_remap = bl._cumulative_remap
@@ -928,3 +953,67 @@ def test_o14_receipt_rehashes_every_cited_file_digest_and_mismatch_plant() -> No
     planted[0] = (planted[0][0], "0" * 64)
     with pytest.raises(AssertionError):
         verify(planted)
+
+
+def test_o13_p4_conservation_and_each_dropped_transfer_plant() -> None:
+    """P4: a_i/sv_i included; every conserved inventory catches a dropped receipt."""
+    import copy
+    import jax
+
+    from tests.ice.unit.test_si3_o13_itd_remap import _call_kwargs, _inputs, _model
+
+    before = _inputs()
+    after = {
+        key: np.asarray(value)
+        for key, value in jax.jit(_model)(_call_kwargs(before)).items()
+    }
+    report = check_o13_conservation(before, after, frame="synthetic")
+    assert report["status"] == "PASS_CONSERVATION"
+    assert set(report["fields"]) == set(O13_CONSERVED_FIELDS)
+
+    for field in O13_CONSERVED_FIELDS:
+        planted = copy.deepcopy(after)
+        arr = planted[field].copy()
+        index = np.unravel_index(np.argmax(np.abs(arr)), arr.shape)
+        assert arr[index] != 0.0, field
+        arr[index] = 0.0
+        planted[field] = np.asarray(arr)
+        with pytest.raises(ValueError, match=rf"STATUS PLANT-FIRED.*{field}"):
+            check_o13_conservation(before, planted, frame=f"drop-{field}")
+
+
+def test_o13_receipt_digests_and_scope_ratchet() -> None:
+    """Checklist 17: re-hash every O13 receipt file and pin gate scope."""
+    import hashlib
+    import json
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[3]
+    master = DEFAULT_MASTER_ROOT
+    score_path = master.parents[1] / "round22/o13_master_score.json"
+    paths = {
+        master / "manifest/run_manifest.json": "bfb0b71d1500b7bc91c68a9e39c8af7a654b139258c0635ad5b1f25284b31fd0",
+        master / "manifest/resource_usage.json": "b30a5febe9248e5008999cb419953dad40c78658542a3c7221d301825270967c",
+        master / "manifest/records.sha256": "fbd3cb4d3450f428d8444dcb145bec3c1a832554e3e7e05d7f5b6a159daadd85",
+        master / "manifest/per_rung/O13.json": "a94d126ddaee3194a053ef437d762707dff93045287392d4e0586aaee995a4aa",
+        master / "manifest/per_rung/O14.json": "8130e5ac516cf8c1549badbab2caf90cf5cce03f3167c317a10532b836572cd6",
+        score_path: "4e95174e554347a3b5dad598af506b42bfe2295f03b1bf0f5425940697cf6cbe",
+        Path("/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/ORCA2_SAS_ICE_O8O16_REF/BLD/obj/iceitd.o"): "2642ba5ec85fc283fc288d25ade003a837a3fe6f8cccc0f32b7f3bb3d89caa71",
+        Path("/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/ORCA2_SAS_ICE_O8O16_REF/BLD/ppsrc/nemo/iceitd.f90"): "22baac67260037d4cde180d48ab1938e730b57f492c7d01eb6ade93c9403e7ba",
+    }
+    missing = [path for path in paths if not path.is_file()]
+    if missing:
+        pytest.skip(f"O13 receipt artifacts not mounted: {missing}")
+
+    receipt = (root / "docs/ice/fidelity/si3_r22_o13_receipt.md").read_text(encoding="utf-8")
+    for path, expected in paths.items():
+        assert hashlib.sha256(path.read_bytes()).hexdigest() == expected
+        assert expected in receipt, path
+
+    score = json.loads(score_path.read_text(encoding="utf-8"))
+    assert score["status"] == "PASS_O13_0_ULP"
+    assert score["steps_scored"] == 100
+    assert score["rungs"]["O13"]["score"]["total_unequal"] == 0
+    assert score["rungs"]["O13"]["conservation"]["frames_checked"] == 100
+    assert tuple(score["rungs"]["O13"]["conservation"]["fields"]) == tuple(sorted(O13_CONSERVED_FIELDS))
+    assert _CANONICAL_O8_O12_KERNELS["packages/ice/legoesm/ice/itd.py"] == {"si3_ice_itd_rem"}
