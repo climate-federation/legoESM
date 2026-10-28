@@ -163,7 +163,7 @@ pre-existing one on both trees.
   value is 0.31. O9 passes `rn_cnd_s` explicitly; the shared config was not changed.
 - C1D's flooding water enthalpy uses `t_bo - rt0` where NEMO uses `sst_1d`
   (`ORCA2_SAS_ICE_O7_REF/BLD/ppsrc/nemo/icethd_dh.f90:463`, `zEw            = rcp * sst_1d(ji)`); kept,
-  so the D5 year is unchanged (`packages/ice/legoesm/ice/bitz_lipscomb.py:1879`). PLAUSIBLE that C1D's
+  so the D5 year is unchanged (`packages/ice/legoesm/ice/bitz_lipscomb.py:2129`). PLAUSIBLE that C1D's
   `sst_m` equals `t_bo - rt0`; not measured.
 - `ice_thd_1d2d( jl, 1 )` (gather and J/m2 -> J/m3) sits upstream of O9's entry and no rung owns it.
 - The preregistered Picard frame needed an observer inside NEMO's `ji` loop, against checklist item 1;

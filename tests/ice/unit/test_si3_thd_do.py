@@ -1,0 +1,225 @@
+"""O14 ``ice_thd_do`` tests against a standalone scalar NumPy oracle."""
+
+from __future__ import annotations
+
+import math
+
+import jax
+import jax.numpy as jnp
+import numpy as np
+import pytest
+
+jax.config.update("jax_enable_x64", True)
+
+from legoesm.ice import bitz_lipscomb as bl  # noqa: E402
+from legoesm.ice.constants_config import NEMO_SI3_CONSTANTS_CONFIG  # noqa: E402
+
+
+# Frozen independently from NEMO 5.0.2 phycst/eos and the admitted namelist.
+T0 = 273.15
+RHOI = 917.0
+RCPI = 2096.7
+RCP = 3991.86795711963
+RLFUS = 333360.1
+RTMLT = 0.054
+SINEW = 0.75
+EPS10 = 1.0e-10
+EPS20 = 1.0e-20
+
+
+def _inputs(*, vanished: bool = False):
+    a = np.array([[0.62, 0.12], [0.0, 0.0] if vanished else [0.15, 0.30], [0.42, 0.20]])
+    v = np.array([[0.58, 0.36], [0.0, 0.0] if vanished else [0.12, 0.75], [0.31, 0.44]])
+    e = np.empty((3, 2, 2))
+    szv = np.empty_like(e)
+    for i in range(3):
+        for k in range(2):
+            for cat in range(2):
+                e[i, k, cat] = (2.40e8 + 2.0e6 * k + 3.0e5 * cat) * v[i, cat] / 2.0
+                szv[i, k, cat] = (4.0 + 0.4 * k + 0.2 * cat) * v[i, cat] / 2.0
+    qlead = np.array([-1.0e6, -5.0e5 if vanished else 25.0, -7.5e5])
+    ht_i_new = np.array([0.1, 0.1 if vanished else 0.0, 0.1])
+    return {
+        "a_i": a,
+        "v_i": v,
+        "sv_i": np.array([[2.4, 1.1], [0.0, 0.0] if vanished else [0.5, 2.0], [1.2, 1.8]]),
+        "e_i": e,
+        "szv_i": szv,
+        "qlead": qlead,
+        "t_bo": np.array([271.4, 271.6, 271.2]),
+        "sfx_opw": np.array([0.3, -0.2, 0.1]),
+        "wfx_opw": np.array([0.4, 0.2, -0.1]),
+        "ht_i_new": ht_i_new,
+        "fraz_frac": np.zeros(3),
+        "hfx_thd": np.array([1.0, 2.0, 3.0]),
+        "hfx_opw": np.array([-1.0, -2.0, -3.0]),
+        "rn_amax_2d": np.full(3, 0.99999),
+        "sss_m": np.array([34.2, 33.8, 35.0]),
+        "hi_max": np.array([0.0, 0.2, math.inf]),
+    }
+
+
+def _remap_scalar(h_old, c_old, nlay):
+    h0 = [0.0]
+    c0 = [0.0]
+    for h, c in zip(h_old, c_old):
+        h0.append(h0[-1] + h)
+        c0.append(c0[-1] + c)
+    hnew = h0[-1] / nlay
+    h1 = [k * hnew for k in range(nlay + 1)]
+    c1 = [0.0] * (nlay + 1)
+    for old in range(1, len(h_old) + 1):
+        for new in range(1, nlay):
+            if h1[new] <= h0[old] and h1[new] > h0[old - 1]:
+                c1[new] = (
+                    c0[old - 1] * (h0[old] - h1[new])
+                    + c0[old] * (h1[new] - h0[old - 1])
+                ) / (h0[old] - h0[old - 1])
+    c1[-1] = c0[-1]
+    return np.array([max(c1[k] - c1[k - 1], 0.0) / max(hnew, EPS20) for k in range(1, nlay + 1)])
+
+
+def _scalar_oracle(x):
+    out = {name: np.array(x[name], dtype=np.float64, copy=True) for name in (
+        "a_i", "v_i", "sv_i", "e_i", "szv_i", "sfx_opw", "wfx_opw", "hfx_thd", "hfx_opw"
+    )}
+    out["at_i"] = np.array([sum(row) for row in x["a_i"]], dtype=np.float64)
+    nlay = x["e_i"].shape[-2]
+    for i, qlead in enumerate(x["qlead"]):
+        if not qlead < 0.0:
+            continue
+        old_a = x["a_i"][i].copy()
+        old_v = x["v_i"][i].copy()
+        e = np.array([
+            [x["e_i"][i, k, c] / old_v[c] * nlay if old_v[c] > 0.0 else 0.0 for c in range(2)]
+            for k in range(nlay)
+        ])
+        sz = np.array([
+            [x["szv_i"][i, k, c] / old_v[c] * nlay if old_v[c] > 0.0 else 0.0 for c in range(2)]
+            for k in range(nlay)
+        ])
+        zs = SINEW * x["sss_m"][i]
+        ztm = -RTMLT * zs
+        tbo_c = x["t_bo"][i] - T0
+        ze = RHOI * (RCPI * (ztm - tbo_c) + RLFUS * max(0.0, 1.0 - ztm / min(tbo_c, -EPS10)) - RCP * ztm)
+        zei = -ze / RHOI
+        zew = RCP * tbo_c
+        zde = zei - zew
+        zfmdt = -qlead / zde
+        zv = -zfmdt / RHOI
+        out["hfx_thd"][i] += zfmdt * zew / 21600.0
+        out["hfx_opw"][i] -= zfmdt * zde / 21600.0
+        out["wfx_opw"][i] -= zv * RHOI / 21600.0
+        out["sfx_opw"][i] -= zv * RHOI * zs / 21600.0
+        za = zv / x["ht_i_new"][i]
+        available = max(0.0, x["rn_amax_2d"][i] - out["at_i"][i])
+        if za > available:
+            da_res = za - available
+            dv_res = da_res * x["ht_i_new"][i]
+            za = max(0.0, za - da_res)
+            zv = max(0.0, zv - dv_res)
+        else:
+            dv_res = 0.0
+        selected = next(c for c in range(2) if x["ht_i_new"][i] > x["hi_max"][c] and x["ht_i_new"][i] <= x["hi_max"][c + 1])
+        out["a_i"][i, selected] += za
+        out["v_i"][i, selected] += zv
+        if old_a[selected] > 0.0:
+            e[:, selected] = (ze * zv + e[:, selected] * old_v[selected]) / max(out["v_i"][i, selected], EPS20)
+            sz[:, selected] = (zs * zv + sz[:, selected] * old_v[selected]) / max(out["v_i"][i, selected], EPS20)
+        else:
+            e[:, selected] = ze
+            sz[:, selected] = zs
+        total_area = sum(out["a_i"][i])
+        for c in range(2):
+            new_bottom = dv_res * out["a_i"][i, c] / max(total_area, EPS20) if total_area >= EPS20 else 0.0
+            lateral_v = out["v_i"][i, c]
+            h_old = [lateral_v / nlay] * nlay + [new_bottom]
+            e_old = [e[k, c] * lateral_v / nlay for k in range(nlay)] + [ze * new_bottom]
+            sz_old = [sz[k, c] * lateral_v / nlay for k in range(nlay)] + [zs * new_bottom]
+            out["v_i"][i, c] += new_bottom
+            out["sv_i"][i, c] += zs * (out["v_i"][i, c] - old_v[c])
+            out["e_i"][i, :, c] = _remap_scalar(h_old, e_old, nlay) * out["v_i"][i, c] / nlay
+            out["szv_i"][i, :, c] = _remap_scalar(h_old, sz_old, nlay) * out["v_i"][i, c] / nlay
+    return out
+
+
+def _call(x):
+    return bl.si3_ice_thd_do(
+        **{k: jnp.asarray(v, dtype=jnp.float64) for k, v in x.items()},
+        nn_icesal=4,
+        rn_sinew=SINEW,
+        r1_Dt_ice=1.0 / 21600.0,
+        r1_nlay_i=0.5,
+        constants=NEMO_SI3_CONSTANTS_CONFIG,
+    )
+
+
+def test_scalar_oracle_category_choice_fluxes_and_all_state_fields():
+    x = _inputs()
+    want = _scalar_oracle(x)
+    got = jax.jit(_call)(x)
+    for name in got._fields:
+        np.testing.assert_allclose(np.asarray(getattr(got, name)), want[name], rtol=2e-14, atol=2e-12)
+    assert np.all(np.asarray(got.a_i)[[0, 2], 0] > x["a_i"][[0, 2], 0])
+    assert np.array_equal(np.asarray(got.a_i)[1], x["a_i"][1])
+
+
+def test_real_eager_equals_jit_with_runtime_arguments_and_vanished_categories():
+    for vanished in (False, True):
+        x = _inputs(vanished=vanished)
+        compiled = jax.jit(_call)(x)
+        with jax.disable_jit():
+            eager = _call(x)
+        for a, b in zip(compiled, eager):
+            assert np.array_equal(np.asarray(a).view(np.uint64), np.asarray(b).view(np.uint64))
+            assert np.all(np.isfinite(np.asarray(a)))
+
+
+def test_gradients_finite_and_match_central_difference_away_from_switches():
+    base = _inputs(vanished=True)
+    base = {k: jnp.asarray(v, dtype=jnp.float64) for k, v in base.items()}
+
+    def loss(q):
+        out = _call({**base, "qlead": q})
+        return jnp.sum(out.v_i) + 1.0e-10 * jnp.sum(out.e_i) + jnp.sum(out.a_i)
+
+    grad = jax.jit(jax.grad(loss))(base["qlead"])
+    assert np.all(np.isfinite(np.asarray(grad)))
+    eps = 1.0e-2
+    direction = jnp.array([1.0, 0.0, 0.0], dtype=jnp.float64)
+    central = (loss(base["qlead"] + eps * direction) - loss(base["qlead"] - eps * direction)) / (2.0 * eps)
+    assert math.isclose(float(grad[0]), float(central), rel_tol=2.0e-6, abs_tol=2.0e-10)
+
+
+def test_no_defaults_shape_refusals_and_object_code_tie_roles():
+    x = _inputs()
+    with pytest.raises(TypeError):
+        bl.si3_ice_thd_do(
+            **{k: jnp.asarray(v) for k, v in x.items()},
+            nn_icesal=4,
+            rn_sinew=SINEW,
+            r1_Dt_ice=1.0 / 21600.0,
+            r1_nlay_i=0.5,
+        )  # constants is mandatory
+    with pytest.raises(ValueError, match="nn_icesal"):
+        bl.si3_ice_thd_do(
+            **{k: jnp.asarray(v) for k, v in x.items()},
+            nn_icesal=3,
+            rn_sinew=SINEW,
+            r1_Dt_ice=1.0 / 21600.0,
+            r1_nlay_i=0.5,
+            constants=NEMO_SI3_CONSTANTS_CONFIG,
+        )
+    with pytest.raises(ValueError, match="hi_max shape"):
+        _call({**x, "hi_max": np.array([0.0, math.inf])})
+
+    # Exact O14 object: latent/area/residual MAX has candidate in dst and +0
+    # in src, so src +0 survives a signed-zero tie.  The divisor MAX has
+    # epsi20 in dst and volume in src, so the source survives equality.
+    for candidate in (-0.0,):
+        assert np.asarray(bl._maxsd(candidate, 0.0)).view(np.uint64) == 0
+    equal_volume = np.float64(EPS20)
+    assert np.asarray(bl._maxsd(equal_volume, equal_volume)).view(np.uint64) == equal_volume.view(np.uint64)
+    # The temperature MIN has -epsi10 in dst and t_bo-rt0 in src.  O14 emits
+    # no SIGN instruction/call on the admitted deck.
+    assert float(bl._minsd(-EPS10, -EPS10)) == -EPS10

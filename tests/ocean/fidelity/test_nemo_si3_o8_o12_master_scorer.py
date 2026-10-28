@@ -13,6 +13,7 @@ from scripts.validate.ocean_fidelity.testcases.nemo_si3_o8_o12_master_scorer imp
     PINNED_RESOURCE_USAGE_SHA256,
     PINNED_RUN_MANIFEST_SHA256,
     flip_1ulp,
+    score_o14,
     score_o8_to_o12,
     verify_master_admission_manifests,
 )
@@ -67,6 +68,7 @@ def test_master_admission_manifests_and_plants() -> None:
     assert len(info["rung_record_digests"]["O10"]) == 1600
     assert len(info["rung_record_digests"]["O11"]) == 1100
     assert len(info["rung_record_digests"]["O12"]) == 200
+    assert len(info["rung_record_digests"]["O14"]) == 200
 
     with pytest.raises(ValueError, match="STATUS PLANT-FIRED.*run_manifest.json SHA-256 mismatch"):
         verify_master_admission_manifests(DEFAULT_MASTER_ROOT, plant="manifest-digest")
@@ -132,6 +134,28 @@ def test_score_o8_to_o12_representative_steps_0_ulp() -> None:
     assert rungs["O12"]["production_step_ponds_si3_lev"]["status"] == "PASS_0_ULP"
     assert rungs["O12"]["production_step_ponds_si3_lev"]["total_unequal"] == 0
     assert rungs["O12"]["production_step_ponds_si3_lev"]["first_non_bit"] is None
+
+
+def test_score_o14_representative_steps_0_ulp_and_plants() -> None:
+    """Score every O14 EXIT field through production and prove both plants fire."""
+    if not DEFAULT_MASTER_ROOT.is_dir():
+        pytest.skip(f"admitted master record not mounted at {DEFAULT_MASTER_ROOT}")
+    report = score_o14(DEFAULT_MASTER_ROOT, steps=(1, 2, 100), verify_manifests=True)
+    assert report["status"] == "PASS_O14_0_ULP"
+    assert report["steps_scored"] == 3
+    assert report["score"]["status"] == "PASS_0_ULP"
+    assert report["score"]["total_unequal"] == 0
+    assert report["score"]["first_non_bit"] is None
+
+    with pytest.raises(ValueError, match=r"STATUS PLANT-FIRED.*O14 non-bit-exact.*'field': 'v_i'"):
+        score_o14(DEFAULT_MASTER_ROOT, steps=(1,), plant="o14-1ulp", verify_manifests=False)
+    with pytest.raises(ValueError, match=r"STATUS PLANT-FIRED.*O14 non-bit-exact"):
+        score_o14(
+            DEFAULT_MASTER_ROOT,
+            steps=(1,),
+            plant="o14-model-bypass",
+            verify_manifests=False,
+        )
 
 
 @pytest.mark.parametrize(
@@ -257,6 +281,7 @@ def test_production_call_sites_route_through_o8_o12_and_fail_when_reverted(
     real_sal = bl.si3_ice_thd_sal
     real_da = da_mod.si3_ice_thd_da
     real_frazil = bl.si3_ice_thd_frazil
+    real_do = bl.si3_ice_thd_do
 
     monkeypatch.setattr(
         bl,
@@ -288,6 +313,11 @@ def test_production_call_sites_route_through_o8_o12_and_fail_when_reverted(
         "si3_ice_thd_frazil",
         lambda *a, **kw: (called_stages.append(("frazil", kw["ln_frazil"])), real_frazil(*a, **kw))[1],
     )
+    monkeypatch.setattr(
+        bl,
+        "si3_ice_thd_do",
+        lambda **kw: (called_stages.append(("do", kw["nn_icesal"])), real_do(**kw))[1],
+    )
 
     next_state_c1d, _ = step_sea_ice(
         state_c1d, forcing_c1d, z1, z1, z1, cfg_c1d, 1.0, card.dt_seconds
@@ -300,7 +330,34 @@ def test_production_call_sites_route_through_o8_o12_and_fail_when_reverted(
         ("temp", 3),
         ("da", 2),
         ("frazil", False),
+        ("do", 2),
     ]
+
+    # Reverting the production O14 call must change the production result.
+    with monkeypatch.context() as mp:
+        mp.setattr(
+            bl,
+            "si3_ice_thd_do",
+            lambda **kw: bl.SI3DOOutputs(
+                a_i=kw["a_i"],
+                v_i=kw["v_i"],
+                sv_i=kw["sv_i"],
+                e_i=kw["e_i"],
+                szv_i=kw["szv_i"],
+                at_i=jnp.sum(kw["a_i"], axis=-1),
+                sfx_opw=kw["sfx_opw"],
+                wfx_opw=kw["wfx_opw"],
+                hfx_thd=kw["hfx_thd"],
+                hfx_opw=kw["hfx_opw"],
+            ),
+        )
+        rev_do_state, _ = step_sea_ice(
+            state_c1d, forcing_c1d, z1, z1, z1, cfg_c1d, 1.0, card.dt_seconds
+        )
+        assert not np.array_equal(
+            np.asarray(next_state_c1d.h_ice.data).view(np.uint64),
+            np.asarray(rev_do_state.h_ice.data).view(np.uint64),
+        )
 
     # Reverting the wiring of si3_ice_thd_sal inside si3_ice_thd_o10_category_stages must fail:
     with monkeypatch.context() as mp:
@@ -746,15 +803,15 @@ def test_no_duplicate_o8_o12_arithmetic_ast_guard_and_plants(monkeypatch) -> Non
     phase2_rel = "scripts/validate/ocean_fidelity/testcases/nemo_si3thd_phase2_gate.py"
     phase2_src = (repo_root / phase2_rel).read_text(encoding="utf-8")
 
-    # Plant 1: renamed 4-statement arithmetic window from si3_column_step_arrays
-    # injected into nemo_si3thd_phase2_gate.py is caught by the AST window detector.
+    # Plant 1: a renamed 4-statement arithmetic window from production O14
+    # injected into nemo_si3thd_phase2_gate.py is caught by the AST detector.
     planted_window = (
-        "\ndef _planted_dup_do(v_n, a_n, fr_x, p_da):\n"
-        "    res_x = jnp.maximum(v_n - a_n * fr_x.ht_i_new, 0.0)\n"
-        "    v_o = p_da.h_ice * p_da.concentration\n"
-        "    v_tot = v_o + a_n * fr_x.ht_i_new + res_x\n"
-        "    a_tot = p_da.concentration + a_n\n"
-        "    return v_tot, a_tot\n"
+        "\ndef _planted_dup_do(sr, jnp, constants, dtype, zs_newice, t_bo, eps10):\n"
+        "    ztmelts = sr(-jnp.asarray(constants.liquidus_slope, dtype=dtype) * zs_newice)\n"
+        "    t_bo_c = sr(t_bo - jnp.asarray(constants.T0, dtype=dtype))\n"
+        "    capped_t_bo = _minsd(-eps10, t_bo_c)\n"
+        "    latent_ratio = sr(ztmelts / capped_t_bo)\n"
+        "    return latent_ratio\n"
     )
     with pytest.raises(
         AssertionError,
@@ -799,4 +856,3 @@ def test_no_duplicate_o8_o12_arithmetic_ast_guard_and_plants(monkeypatch) -> Non
     phase2._nemo_snow_enthalpy_remap(h4, e4)
     phase2._nemo_ice_enthalpy_remap(h4, e4)
     assert calls == ["_cumulative_remap", "_cumulative_remap"]
-

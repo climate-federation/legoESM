@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fail-closed 0-ULP scoring driver for SI3 rungs O8, O9, O10, O11, and O12.
+"""Fail-closed 0-ULP scoring driver for SI3 rungs O8--O12 and O14.
 
 Scores the admitted 100-step O8--O16 master record at
 ``/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/round18/oracle_o8_o16_master``
@@ -36,6 +36,7 @@ from legoesm.ice.bitz_lipscomb import (
     si3_ice_thd_category_stages,
     si3_ice_thd_dh,
     si3_ice_thd_frazil,
+    si3_ice_thd_do,
     si3_ice_thd_o10_category_stages,
     si3_ice_thd_sal,
     si3_ice_thd_temp,
@@ -90,6 +91,7 @@ PINNED_PROJECTION_SHA256: dict[str, str] = {
     "O10": "ded24ddbc825a9a331d763665e51559022c97288cb7c7f516b3a587693deb554",
     "O11": "0c5197c52331975ff77d813f0154e0df6ea0aa1e0593e9ca062990d664465666",
     "O12": "fe395cab681d59a8c28a722cd7fc8222ec3ac0ee8c4e569d4043643fd4a47e50",
+    "O14": "8130e5ac516cf8c1549badbab2caf90cf5cce03f3167c317a10532b836572cd6",
 }
 
 SCORE_RUNGS = ("O8", "O9", "O10", "O11", "O12")
@@ -136,6 +138,18 @@ PND_UPDATED_FIELDS = (
     "h_il",
     "a_ip_frac",
     "wfx_pnd",
+)
+DO_UPDATED_FIELDS = (
+    "a_i",
+    "v_i",
+    "sv_i",
+    "e_i",
+    "szv_i",
+    "at_i",
+    "sfx_opw",
+    "wfx_opw",
+    "hfx_thd",
+    "hfx_opw",
 )
 CAT_ENTRY_KEYS = (
     "h_i",
@@ -799,6 +813,17 @@ def _build_compiled_kernels(
             constants=constants,
         )
 
+    @jax.jit
+    def jit_o14_do(inputs: dict[str, jax.Array]):
+        return si3_ice_thd_do(
+            **inputs,
+            nn_icesal=int(namelist["nn_icesal"]),
+            rn_sinew=float(namelist["rn_sinew"]),
+            r1_Dt_ice=r1_Dt_ice,
+            r1_nlay_i=r1_nlay_i,
+            constants=constants,
+        )
+
     si3_orca2_cfg = SI3ThermoConfig(
         n_ice_layers=10,
         n_snow_layers=5,
@@ -923,8 +948,116 @@ def _build_compiled_kernels(
         "jit_o10_category_stages": jit_o10_category_stages,
         "jit_o11_da": jit_o11_da,
         "jit_o12_pnd": jit_o12_pnd,
+        "jit_o14_do": jit_o14_do,
         "jit_prod_column_step": jit_prod_column_step,
         "jit_prod_step_ponds": jit_prod_step_ponds,
+    }
+
+
+def score_o14(
+    master_root: Path = DEFAULT_MASTER_ROOT,
+    ppsrc: Path = DEFAULT_PPSRC,
+    steps: Sequence[int] = STEPS,
+    plant: str | None = None,
+    verify_manifests: bool = True,
+) -> dict[str, Any]:
+    """Score O14 kind 12 -> kind 13 through production ``si3_ice_thd_do``."""
+    set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
+    manifest_info = (
+        verify_master_admission_manifests(master_root, plant=plant)
+        if verify_manifests
+        else {"rung_record_digests": {"O14": {}}}
+    )
+    o14_digests = manifest_info["rung_record_digests"]["O14"]
+    run_dir = master_root / "record_100step"
+    records_dir = run_dir / "o8_o16_master_records"
+    namelist = parse_resolved_ice_namelist(
+        run_dir / "output.namelist.ice",
+        run_dir / "output.namelist.dyn",
+        ppsrc=ppsrc,
+        plant=plant,
+    )
+    first = read_record_verified(
+        records_dir / record_name(12, steps[0], 0),
+        o14_digests.get(record_name(12, steps[0], 0)),
+    )
+    kernels = _build_compiled_kernels(
+        float(first["scalars"]["rDt_ice"]),
+        float(first["scalars"]["r1_Dt_ice"]),
+        float(first["scalars"]["r1_nlay_i"]),
+        tuple(sorted(namelist.items())),
+    )
+    jit_o14_do = kernels["jit_o14_do"]
+    input_keys = (
+        "a_i",
+        "v_i",
+        "sv_i",
+        "e_i",
+        "szv_i",
+        "qlead",
+        "t_bo",
+        "sfx_opw",
+        "wfx_opw",
+        "ht_i_new",
+        "fraz_frac",
+        "hfx_thd",
+        "hfx_opw",
+        "rn_amax_2d",
+        "sss_m",
+        "hi_max",
+    )
+    arg_names = {"ht_i_new": "ht_i_new"}
+    acc = FieldScoreAccumulator()
+    for kt in steps:
+        n12 = record_name(12, kt, 0)
+        n13 = record_name(13, kt, 0)
+        r12 = read_record_verified(records_dir / n12, o14_digests.get(n12))
+        r13 = read_record_verified(records_dir / n13, o14_digests.get(n13))
+        _verify_record_scalars_against_namelist(r12["scalars"], namelist, 12)
+        _verify_record_scalars_against_namelist(r13["scalars"], namelist, 13)
+        f12 = r12["fields"]
+        f13 = dict(r13["fields"])
+        if plant == "o14-1ulp" and kt == steps[0]:
+            f13["v_i"] = flip_1ulp(f13["v_i"], (0, 0, 0))
+        inputs = {
+            arg_names.get(name, name): jnp.asarray(f12[name], dtype=jnp.float64)
+            for name in input_keys
+        }
+        out = jit_o14_do(inputs)
+        for spec in KINDS[13].fields:
+            if spec.name in DO_UPDATED_FIELDS:
+                got = (
+                    f12[spec.name]
+                    if plant == "o14-model-bypass"
+                    else getattr(out, spec.name)
+                )
+            else:
+                got = f12[spec.name]
+            acc.update(spec.name, got, f13[spec.name], kt=kt, category=0)
+
+    score = acc.summary()
+    if score["total_unequal"]:
+        raise _refuse(
+            f"O14 non-bit-exact: unequal={score['total_unequal']}/{score['total_elements']}, "
+            f"max_abs_diff={score['max_abs_diff']}, max_ulp={score['max_ulp']}, "
+            f"first_non_bit={score['first_non_bit']}"
+        )
+    return {
+        "status": "PASS_O14_0_ULP",
+        "steps_scored": len(steps),
+        "first_step": int(steps[0]),
+        "last_step": int(steps[-1]),
+        "production_function": "legoesm.ice.bitz_lipscomb.si3_ice_thd_do",
+        "entry_kind": 12,
+        "exit_kind": 13,
+        "score": score,
+        "manifest_verification": {
+            "run_manifest_sha256": manifest_info.get("run_manifest_sha256"),
+            "resource_usage_sha256": manifest_info.get("resource_usage_sha256"),
+            "records_inventory_sha256": manifest_info.get("records_inventory_sha256"),
+            "projection_manifest_sha256": manifest_info.get("projection_manifest_sha256"),
+        },
+        "resolved_namelist": namelist,
     }
 
 
@@ -1655,6 +1788,12 @@ def score_o8_to_o12(
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
+        "--rung",
+        choices=("O8-O12", "O14"),
+        default="O8-O12",
+        help="Certified rung group to score",
+    )
+    parser.add_argument(
         "--master-root",
         type=Path,
         default=DEFAULT_MASTER_ROOT,
@@ -1683,6 +1822,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             "o10-1ulp",
             "o11-1ulp",
             "o12-1ulp",
+            "o14-1ulp",
+            "o14-model-bypass",
             "manifest-digest",
             "namelist-mismatch",
             "swapped-exit",
@@ -1703,34 +1844,26 @@ def main(argv: Sequence[str] | None = None) -> int:
     else:
         steps = tuple(int(x) for x in args.steps.split(",") if x.strip())
 
-    report = score_o8_to_o12(
-        master_root=args.master_root,
-        ppsrc=args.ppsrc,
-        steps=steps,
-        plant=args.plant,
-    )
+    scorer = score_o14 if args.rung == "O14" else score_o8_to_o12
+    report = scorer(master_root=args.master_root, ppsrc=args.ppsrc, steps=steps, plant=args.plant)
     if args.output_json is not None:
         args.output_json.parent.mkdir(parents=True, exist_ok=True)
         args.output_json.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
-    print(
-        json.dumps(
-            {
-                "status": report["status"],
-                "steps_scored": report["steps_scored"],
-                "rungs": {
-                    k: (
-                        v["score"]["status"]
-                        if "score" in v
-                        else v["composed_category_stages"]["status"]
-                        if "composed_category_stages" in v
-                        else v["sal_exit"]["status"]
-                    )
-                    for k, v in report["rungs"].items()
-                },
-            },
-            indent=2,
-        )
-    )
+    summary = {"status": report["status"], "steps_scored": report["steps_scored"]}
+    if "rungs" in report:
+        summary["rungs"] = {
+            k: (
+                v["score"]["status"]
+                if "score" in v
+                else v["composed_category_stages"]["status"]
+                if "composed_category_stages" in v
+                else v["sal_exit"]["status"]
+            )
+            for k, v in report["rungs"].items()
+        }
+    else:
+        summary["score"] = report["score"]["status"]
+    print(json.dumps(summary, indent=2))
     return 0
 
 

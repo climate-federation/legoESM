@@ -1808,6 +1808,254 @@ def si3_ice_thd_o10_category_stages(*, entry: dict, fluxes: SI3DHFluxes,
     return SI3O10CategoryStages(o9, sal, t_i)
 
 
+class SI3DOOutputs(NamedTuple):
+    """Updated fields from ``ice_thd_do`` (O14 kind 12 -> kind 13)."""
+
+    a_i: jax.Array
+    v_i: jax.Array
+    sv_i: jax.Array
+    e_i: jax.Array
+    szv_i: jax.Array
+    at_i: jax.Array
+    sfx_opw: jax.Array
+    wfx_opw: jax.Array
+    hfx_thd: jax.Array
+    hfx_opw: jax.Array
+
+
+def si3_ice_thd_do(
+    *,
+    a_i,
+    v_i,
+    sv_i,
+    e_i,
+    szv_i,
+    qlead,
+    t_bo,
+    sfx_opw,
+    wfx_opw,
+    ht_i_new,
+    fraz_frac,
+    hfx_thd,
+    hfx_opw,
+    rn_amax_2d,
+    sss_m,
+    hi_max,
+    nn_icesal: int,
+    rn_sinew: float,
+    r1_Dt_ice: float,
+    r1_nlay_i: float,
+    constants: IceConstantsConfig,
+) -> SI3DOOutputs:
+    """NEMO SI3 open-water growth, ``icethd_do.f90:177-384``.
+
+    Array axes are ``(..., category)`` for category state and
+    ``(..., ice_layer, category)`` for layer state.  Every source operation is
+    materialized in the order emitted by the admitted record build.  The four
+    MIN/MAX sites use that object's SSE operand roles; ``ice_thd_do`` has no
+    executing SIGN intrinsic on this deck.
+    """
+
+    if nn_icesal not in (2, 4):
+        raise ValueError(f"SI3 ice_thd_do transcribes nn_icesal 2 and 4 only; got {nn_icesal!r}")
+    sr = nemo_source_round
+    a_i = jnp.asarray(a_i)
+    dtype = a_i.dtype
+    v_i = jnp.asarray(v_i, dtype=dtype)
+    sv_i = jnp.asarray(sv_i, dtype=dtype)
+    e_i = jnp.asarray(e_i, dtype=dtype)
+    szv_i = jnp.asarray(szv_i, dtype=dtype)
+    qlead = jnp.asarray(qlead, dtype=dtype)
+    t_bo = jnp.asarray(t_bo, dtype=dtype)
+    sfx_opw = jnp.asarray(sfx_opw, dtype=dtype)
+    wfx_opw = jnp.asarray(wfx_opw, dtype=dtype)
+    ht_i_new = jnp.asarray(ht_i_new, dtype=dtype)
+    fraz_frac = jnp.asarray(fraz_frac, dtype=dtype)
+    hfx_thd = jnp.asarray(hfx_thd, dtype=dtype)
+    hfx_opw = jnp.asarray(hfx_opw, dtype=dtype)
+    rn_amax_2d = jnp.asarray(rn_amax_2d, dtype=dtype)
+    sss_m = jnp.asarray(sss_m, dtype=dtype)
+    hi_max = jnp.asarray(hi_max, dtype=dtype)
+    nlay_i, jpl = e_i.shape[-2:]
+    if a_i.shape[-1] != jpl or v_i.shape != a_i.shape or sv_i.shape != a_i.shape:
+        raise ValueError("ice_thd_do category state shapes disagree")
+    if szv_i.shape != e_i.shape or nlay_i < 1:
+        raise ValueError("ice_thd_do layer state shapes disagree")
+    if hi_max.shape != (jpl + 1,):
+        raise ValueError(f"ice_thd_do needs hi_max shape {(jpl + 1,)}, got {hi_max.shape}")
+
+    zero = sr(jnp.zeros_like(qlead))
+    one = jnp.asarray(1.0, dtype=dtype)
+    eps10 = jnp.asarray(_EPS10, dtype=dtype)
+    eps20 = jnp.asarray(_EPS20, dtype=dtype)
+    rhoi = jnp.asarray(constants.rho_ice, dtype=dtype)
+    r1_rhoi = sr(one / rhoi)
+    r1_dt = jnp.asarray(r1_Dt_ice, dtype=dtype)
+    r1_nlay = jnp.asarray(r1_nlay_i, dtype=dtype)
+    cooling = _ieee_lt_zero(qlead)
+
+    # :177 SUM starts from +0 and visits categories in Fortran order.
+    at_i_before = _sum0(a_i)
+
+    # :208-219 converts extensive layer contents to intensive values.
+    positive_volume = v_i > zero[..., None]
+    safe_volume = jnp.where(positive_volume, v_i, one)
+    e_intensive = sr(sr(e_i / safe_volume[..., None, :]) * nlay_i)
+    sz_intensive = sr(sr(szv_i / safe_volume[..., None, :]) * nlay_i)
+    e_intensive = jnp.where(positive_volume[..., None, :], e_intensive, zero[..., None, None])
+    sz_intensive = jnp.where(
+        positive_volume[..., None, :], sz_intensive, zero[..., None, None]
+    )
+
+    # :225-226, nn_icesal = 2 or 4 in the admitted identities.
+    zs_newice = sr(jnp.asarray(rn_sinew, dtype=dtype) * sss_m)
+
+    # :242-273.  Object audit: MIN keeps -epsi10 only when strictly smaller;
+    # latent MAX keeps its +0 source on a signed-zero tie.
+    ztmelts = sr(-jnp.asarray(constants.liquidus_slope, dtype=dtype) * zs_newice)
+    t_bo_c = sr(t_bo - jnp.asarray(constants.T0, dtype=dtype))
+    capped_t_bo = _minsd(-eps10, t_bo_c)
+    latent_ratio = sr(ztmelts / capped_t_bo)
+    latent_factor = _maxsd(sr(one - latent_ratio), zero)
+    sensible_ice = sr(jnp.asarray(constants.c_ice, dtype=dtype) * sr(ztmelts - t_bo_c))
+    latent_ice = sr(jnp.asarray(constants.latent_fusion, dtype=dtype) * latent_factor)
+    seawater_reference = sr(jnp.asarray(constants.c_ocean, dtype=dtype) * ztmelts)
+    ze_newice = sr(
+        rhoi * sr(sr(sensible_ice + latent_ice) - seawater_reference)
+    )
+    z_ei = -sr(ze_newice * r1_rhoi)
+    z_ew = sr(jnp.asarray(constants.c_ocean, dtype=dtype) * t_bo_c)
+    z_de = sr(z_ei - z_ew)
+    safe_de = jnp.where(cooling, z_de, one)
+    # The -O3 record object cancels the two source negations before the multiply.
+    qlead_over_de = sr(qlead / safe_de)
+    zfmdt = -qlead_over_de
+    zv_newice_initial = sr(qlead_over_de * r1_rhoi)
+
+    hfx_thd_new = sr(hfx_thd + sr(sr(zfmdt * z_ew) * r1_dt))
+    hfx_opw_new = sr(hfx_opw - sr(sr(zfmdt * z_de) * r1_dt))
+    new_ice_mass = sr(rhoi * zv_newice_initial)
+    wfx_opw_new = sr(wfx_opw - sr(new_ice_mass * r1_dt))
+    sfx_opw_new = sr(sfx_opw - sr(sr(new_ice_mass * zs_newice) * r1_dt))
+
+    # :275-283, frazil collection at the existing ice bottom.
+    has_ice = at_i_before > zero
+    zv_frazb = jnp.where(has_ice, sr(fraz_frac * zv_newice_initial), zero)
+    zv_newice = jnp.where(
+        has_ice,
+        sr(sr(one - fraz_frac) * zv_newice_initial),
+        zv_newice_initial,
+    )
+    safe_h_new = jnp.where(cooling, ht_i_new, one)
+    za_newice = sr(zv_newice / safe_h_new)
+
+    # :288-299.  The record object emits MAX(candidate,+0): +0 survives ties.
+    available_area = _maxsd(sr(rn_amax_2d - at_i_before), zero)
+    excessive = za_newice > available_area
+    zda_res = jnp.where(excessive, sr(za_newice - available_area), zero)
+    zdv_res = jnp.where(excessive, sr(zda_res * ht_i_new), zero)
+    za_newice = jnp.where(excessive, _maxsd(sr(za_newice - zda_res), zero), za_newice)
+    zv_newice = jnp.where(excessive, _maxsd(sr(zv_newice - zdv_res), zero), zv_newice)
+
+    # :301-320, one category selected by the HFN interval (lower, upper].
+    selected = (ht_i_new[..., None] > hi_max[:-1]) & (
+        ht_i_new[..., None] <= hi_max[1:]
+    )
+    a_lateral = jnp.where(selected, sr(a_i + za_newice[..., None]), a_i)
+    v_lateral = jnp.where(selected, sr(v_i + zv_newice[..., None]), v_i)
+    at_i_lateral = _sum0(a_lateral)
+    mix_divisor = _maxsd(eps20, v_lateral)
+    e_numerator = sr(
+        sr(ze_newice[..., None, None] * zv_newice[..., None, None])
+        + sr(e_intensive * v_i[..., None, :])
+    )
+    sz_numerator = sr(
+        sr(zs_newice[..., None, None] * zv_newice[..., None, None])
+        + sr(sz_intensive * v_i[..., None, :])
+    )
+    e_mixed = sr(e_numerator / mix_divisor[..., None, :])
+    sz_mixed = sr(sz_numerator / mix_divisor[..., None, :])
+    # :311 tests the saved pre-growth category area (``za_b``), not volume.
+    old_selected_ice = a_i > zero[..., None]
+    e_selected = jnp.where(old_selected_ice[..., None, :], e_mixed, ze_newice[..., None, None])
+    sz_selected = jnp.where(
+        old_selected_ice[..., None, :], sz_mixed, zs_newice[..., None, None]
+    )
+    e_intensive = jnp.where(selected[..., None, :], e_selected, e_intensive)
+    sz_intensive = jnp.where(selected[..., None, :], sz_selected, sz_intensive)
+
+    # :322-356, distribute residual/frazil volume then remap every category.
+    enough_area = at_i_lateral >= eps20
+    residual_and_frazil = sr(zdv_res + zv_frazb)
+    a_categories = []
+    v_categories = []
+    sv_categories = []
+    e_categories = []
+    szv_categories = []
+    for jl in range(jpl):
+        area = jnp.where(enough_area, a_lateral[..., jl], zero)
+        numerator = sr(residual_and_frazil * a_lateral[..., jl])
+        denominator = _maxsd(at_i_lateral, eps20)
+        zv_newfra = jnp.where(enough_area, sr(numerator / denominator), zero)
+        v_before = v_lateral[..., jl]
+        v_after = sr(v_before + zv_newfra)
+
+        layer_h = sr(v_before * r1_nlay)
+        h_old = [layer_h for _ in range(nlay_i)] + [zv_newfra]
+        e_old = [
+            sr(sr(e_intensive[..., jk, jl] * v_before) * r1_nlay)
+            for jk in range(nlay_i)
+        ] + [sr(ze_newice * zv_newfra)]
+        sz_old = [
+            sr(sr(sz_intensive[..., jk, jl] * v_before) * r1_nlay)
+            for jk in range(nlay_i)
+        ] + [sr(zs_newice * zv_newfra)]
+        e_remapped = _cumulative_remap(h_old, e_old, nlay_i, sr)
+        sz_remapped = (
+            _cumulative_remap(h_old, sz_old, nlay_i, sr)
+            if nn_icesal == 4
+            else sz_intensive[..., :, jl]
+        )
+
+        volume_change = sr(v_after - v_i[..., jl])
+        sv_after = sr(sv_i[..., jl] + sr(zs_newice * volume_change))
+        e_extensive = sr(sr(e_remapped * v_after[..., None]) * r1_nlay)
+        szv_extensive = sr(sr(sz_remapped * v_after[..., None]) * r1_nlay)
+        a_categories.append(area)
+        v_categories.append(v_after)
+        sv_categories.append(sv_after)
+        e_categories.append(e_extensive)
+        szv_categories.append(szv_extensive)
+
+    a_updated = jnp.stack(a_categories, axis=-1)
+    v_updated = jnp.stack(v_categories, axis=-1)
+    sv_updated = jnp.stack(sv_categories, axis=-1)
+    e_updated = jnp.stack(e_categories, axis=-1)
+    szv_updated = jnp.stack(szv_categories, axis=-1)
+    category_mask = cooling[..., None]
+    layer_mask = cooling[..., None, None]
+    a_out = jnp.where(category_mask, a_updated, a_i)
+    v_out = jnp.where(category_mask, v_updated, v_i)
+    sv_out = jnp.where(category_mask, sv_updated, sv_i)
+    e_out = jnp.where(layer_mask, e_updated, e_i)
+    szv_out = jnp.where(layer_mask, szv_updated, szv_i)
+    # :177 executes over every interior cell.  The gathered ``at_i_1d`` is
+    # changed below, but :366-375 does not scatter it back to the 2-D field.
+    at_i_out = at_i_before
+    return SI3DOOutputs(
+        a_i=a_out,
+        v_i=v_out,
+        sv_i=sv_out,
+        e_i=e_out,
+        szv_i=szv_out,
+        at_i=at_i_out,
+        sfx_opw=jnp.where(cooling, sfx_opw_new, sfx_opw),
+        wfx_opw=jnp.where(cooling, wfx_opw_new, wfx_opw),
+        hfx_thd=jnp.where(cooling, hfx_thd_new, hfx_thd),
+        hfx_opw=jnp.where(cooling, hfx_opw_new, hfx_opw),
+    )
+
+
 def si3_column_step_arrays(state: SI3ColumnArrays,
                            forcing: SI3SurfaceForcing,
                            dt: float,
@@ -1860,6 +2108,8 @@ def si3_column_step_arrays(state: SI3ColumnArrays,
         "ln_zdf_chkcvg": False,
         "rn_snwblow": _SNOW_BLOW_FRACTION,
         "rn_sinew": _NEW_ICE_SALINITY_FRACTION,
+        "rn_hinew": _NEW_ICE_THICKNESS,
+        "ln_frazil": False,
         "nn_icesal": nn_icesal,
         "rn_simin": _MINIMUM_ICE_SALINITY,
         "rn_sal_gd": _DRAINAGE_TARGET,
@@ -1951,44 +2201,45 @@ def si3_column_step_arrays(state: SI3ColumnArrays,
     else:
         post_da = _si3_column_thd_da(state, post_temp2, forcing, si3, dt, constants)
         da_out = None
-    # Open-water growth (`icethd_do.F90:171-307`), active only for qlead<0.
-    Tm = -constants.liquidus_slope * (
-        _NEW_ICE_SALINITY_FRACTION * forcing.sss
-    )
-    Tbo_c = forcing.t_bottom - constants.T0
-    e_new = constants.rho_ice * (
-        constants.c_ice * (Tm - Tbo_c)
-        + constants.latent_fusion * jnp.maximum(0.0, 1.0 - Tm / jnp.minimum(Tbo_c, -_EPS10))
-        - constants.c_ocean * Tm
-    )
-    zEi = -e_new / constants.rho_ice
-    zEw = constants.c_ocean * Tbo_c
-    # `ice_thd_frazil` supplies ht_i_new (O7_REF ppsrc `icethd.f90:174`); the same
-    # `qlead < 0` gathers ice_thd_do's cells (`icethd_do.f90:182`).
+    # `ice_thd_frazil` supplies ht_i_new (O7_REF ppsrc `icethd.f90:174`).
     frazil = si3_ice_thd_frazil(
         forcing.qlead,
-        rn_hinew=float(nml.get("rn_hinew", _NEW_ICE_THICKNESS)),
-        ln_frazil=bool(nml.get("ln_frazil", False)),
+        rn_hinew=float(nml["rn_hinew"]),
+        ln_frazil=bool(nml["ln_frazil"]),
     )
-    cooling = _ieee_lt_zero(forcing.qlead)
-    vnew = jnp.where(
-        cooling,
-        -(-forcing.qlead / (zEi - zEw)) / constants.rho_ice,
-        0.0,
+    a_do = post_da.concentration[..., None]
+    v_do = (post_da.h_ice * post_da.concentration)[..., None]
+    sv_do = (post_da.S_bulk * v_do[..., 0])[..., None]
+    e_do = post_da.e_ice[..., :, None] * v_do[..., None, :] / post_da.e_ice.shape[-1]
+    szv_do = post_da.S_layers[..., :, None] * v_do[..., None, :] / post_da.S_layers.shape[-1]
+    do_out = si3_ice_thd_do(
+        a_i=a_do,
+        v_i=v_do,
+        sv_i=sv_do,
+        e_i=e_do,
+        szv_i=szv_do,
+        qlead=forcing.qlead,
+        t_bo=forcing.t_bottom,
+        sfx_opw=zero,
+        wfx_opw=zero,
+        ht_i_new=frazil.ht_i_new,
+        fraz_frac=frazil.fraz_frac,
+        hfx_thd=zero,
+        hfx_opw=zero,
+        rn_amax_2d=jnp.full_like(zero, _MAXIMUM_ICE_CONCENTRATION),
+        sss_m=forcing.sss,
+        hi_max=jnp.asarray([0.0, float("inf")], dtype=dtype),
+        nn_icesal=nn_icesal,
+        rn_sinew=float(nml["rn_sinew"]),
+        r1_Dt_ice=1.0 / rDt_ice,
+        r1_nlay_i=1.0 / post_da.e_ice.shape[-1],
+        constants=constants,
     )
-    # Non-cooling cells: ht_i_new = +0 and vnew = +0; the 1 only keeps 0/0 out.
-    anew = jnp.minimum(
-        vnew / jnp.where(cooling, frazil.ht_i_new, 1.0),
-        jnp.maximum(
-            0.0,
-            _MAXIMUM_ICE_CONCENTRATION - post_da.concentration,
-        ),
-    )
-    residual = jnp.maximum(vnew - anew * frazil.ht_i_new, 0.0)
-    v_old = post_da.h_ice * post_da.concentration
-    v_total = v_old + anew * frazil.ht_i_new + residual
-    a_total = post_da.concentration + anew
+    a_total = do_out.a_i[..., 0]
+    v_total = do_out.v_i[..., 0]
     h_total = jnp.where(a_total > _EPS10, v_total / a_total, 0.0)
+    # C1D retains its certified prognostic set; O14's layer/salt/flux outputs
+    # are carried by the full five-category production stage above.
     post_do = post_da._replace(concentration=a_total, h_ice=h_total)
     exit_state = post_do._replace(age_volume=post_do.age_volume + a_total * dt)
     trace = SI3StepTrace(state, post_zdf, post_dh, post_temp1, post_sal,
@@ -2066,6 +2317,8 @@ __all__ = (
     "si3_column_step_arrays",
     "SI3Frazil",
     "si3_ice_thd_frazil",
+    "si3_ice_thd_do",
+    "SI3DOOutputs",
     "ieee_lt_zero",
     "SI3SalinityOutputs",
     "SI3O10CategoryStages",

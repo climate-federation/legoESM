@@ -10683,6 +10683,248 @@ _reanchor('packages/ice/legoesm/ice/si3_thd_pnd.py:766-954', 'packages/ice/legoe
 _reanchor('packages/ice/legoesm/ice/ponds.py:34-212', 'packages/ice/legoesm/ice/ponds.py:34-311', anchors=['def step_ponds(', (')', 70), 278])
 
 
+# --- SI3 round 23 (O14) production/scorer insertions and receipt ---
+# Re-anchor every pre-existing citation shifted by the single production
+# implementation and scorer extension.  The two deleted inline expressions
+# move to their exact equivalents inside ``si3_ice_thd_do``.
+def _o14_bitz_line(line: int) -> int:
+    if line <= 1810:
+        return line
+    if line <= 1862:
+        return line + 248
+    if line <= 1953:
+        return line + 250
+    if line == 1968:
+        return 2205
+    if line == 1973:
+        return 1895
+    if line == 1981:
+        return 1950
+    if line == 1998:
+        return 2249
+    if 1999 <= line <= 2068:
+        return line + 251
+    if line > 2068:
+        return line + 253
+    raise RuntimeError(f"O14 needs an explicit anchor for replaced bitz_lipscomb line {line}")
+
+
+def _o14_spec(spec: str, mapper) -> str:
+    pieces = []
+    for piece in spec.split(","):
+        if "-" in piece:
+            first, last = map(int, piece.split("-", 1))
+            pieces.append(f"{mapper(first)}-{mapper(last)}")
+        else:
+            pieces.append(str(mapper(int(piece))))
+    return ",".join(pieces)
+
+
+for _old in [key for key in CITATION_MAP
+             if key.startswith("packages/ice/legoesm/ice/bitz_lipscomb.py:")]:
+    _prefix, _spec = _old.rsplit(":", 1)
+    _new = f"{_prefix}:{_o14_spec(_spec, _o14_bitz_line)}"
+    if _new != _old:
+        _reanchor(_old, _new)
+
+
+def _o14_scorer_line(line: int) -> int:
+    if line == 1:
+        return 1
+    if line <= 928:
+        return line + 14
+    return line + 133
+
+
+for _old in [key for key in CITATION_MAP if key.startswith(
+        "scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:")]:
+    _prefix, _spec = _old.rsplit(":", 1)
+    _new = f"{_prefix}:{_o14_spec(_spec, _o14_scorer_line)}"
+    if _new != _old:
+        _reanchor(_old, _new)
+
+_reanchor(
+    'tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:1-432',
+    'tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:1-424',
+)
+_reanchor(
+    'tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:21-53',
+    'tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:22-54',
+)
+_reanchor(
+    'tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:56-83',
+    'tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:57-85',
+)
+_reanchor(
+    'tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:86-134',
+    'tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:88-136',
+)
+_reanchor(
+    'tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:137-160',
+    'tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:161-184',
+)
+_reanchor(
+    'tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:163-432',
+    'tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:187-424',
+)
+
+FILES.update({
+    'docs/ice/fidelity/si3_r23_o14_score_preregister.md': REPO / 'docs/ice/fidelity/si3_r23_o14_score_preregister.md',
+    'docs/ice/fidelity/si3_r23_o14_score_receipt.md': REPO / 'docs/ice/fidelity/si3_r23_o14_score_receipt.md',
+    'tests/ice/unit/test_si3_thd_do.py': REPO / 'tests/ice/unit/test_si3_thd_do.py',
+    'ORCA2_SAS_ICE_O8O16_REF/BLD/ppsrc/nemo/icethd_do.f90': Path('/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/round18/refused/builds_20261026T210237Z_2/ORCA2_SAS_ICE_O8O16_REF/BLD/ppsrc/nemo/icethd_do.f90'),
+})
+
+CITATION_MAP.update({
+    'docs/ice/fidelity/si3_r23_o14_score_preregister.md:1-51': ['# SI3 Ladder Round 23 (`si3_r23`) — O14 Model Preparation and Scoring Preregistration', 'No configuration, threshold, cadence, state schema, or scoring choice is made', 51],
+    'ORCA2_SAS_ICE_O8O16_REF/BLD/ppsrc/nemo/icethd_do.f90:177-219': ['at_i(Nis0-(0):Nie0+(0),Njs0-(0):Nje0+(0)) = SUM(', 'END DO', 43],
+    'ORCA2_SAS_ICE_O8O16_REF/BLD/ppsrc/nemo/icethd_do.f90:225-273': ['! --- Salinity of new ice --- !', 'sfx_opw_1d(ii) = sfx_opw_1d(ii) - zv_newice * rhoi * zs_newice(ii) * r1_Dt_ice', 49],
+    'ORCA2_SAS_ICE_O8O16_REF/BLD/ppsrc/nemo/icethd_do.f90:275-320': ['! A fraction fraz_frac of frazil ice is accreted at the ice bottom', 'ENDIF', 46],
+    'ORCA2_SAS_ICE_O8O16_REF/BLD/ppsrc/nemo/icethd_do.f90:322-375': ['! --- bottom ice growth + ice enthalpy remapping --- !', 'CALL tab_1d_2d( npti, nptidx(1:npti), hfx_opw_1d(1:npti), hfx_opw )', 54],
+    'packages/ice/legoesm/ice/bitz_lipscomb.py:1811-2056': ['class SI3DOOutputs(NamedTuple):', (')', 930), 246],
+    'packages/ice/legoesm/ice/bitz_lipscomb.py:2204-2249': ['# `ice_thd_frazil` supplies ht_i_new', ('return trace', 2), 46],
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:816-825': ['@jax.jit', ('}', 38), 10],
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:957-1061': ['def score_o14(', ('}', 52), 105],
+    'tests/ice/unit/test_si3_thd_do.py:82-143': ['def _scalar_oracle(x):', 'return out', 62],
+    'tests/ice/unit/test_si3_thd_do.py:157-225': ['def test_scalar_oracle_category_choice_fluxes_and_all_state_fields():', 'assert float(bl._minsd(-EPS10, -EPS10)) == -EPS10', 69],
+    'tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:139-158': ['def test_score_o14_representative_steps_0_ulp_and_plants() -> None:', (')', 48), 20],
+    'tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:187-360': ['def test_production_call_sites_route_through_o8_o12_and_fail_when_reverted(', (')', 141), 174],
+})
+
+
+def _repin(citation: str, anchors) -> None:
+    if citation not in CITATION_MAP:
+        raise RuntimeError(f"cannot repin missing citation {citation}")
+    CITATION_MAP[citation] = anchors
+
+
+_repin('packages/ice/legoesm/ice/bitz_lipscomb.py:1895', 'cooling = _ieee_lt_zero(qlead)')
+_repin('packages/ice/legoesm/ice/bitz_lipscomb.py:1950', 'za_newice = sr(zv_newice / safe_h_new)')
+_repin('packages/ice/legoesm/ice/bitz_lipscomb.py:41,980-1011,1121-1209,1231-1252,2059-2189', [
+    'frq_m: jax.Array | float = 1.0', 'def _cumulative_remap(h_old, content_old, nlay, sr):',
+    '_maxsd(e_cum1[k] - e_cum1[k - 1], 0.0) / divisor for k in range(1, nlay + 1)',
+    'def melt_layer(jk, heat, internal_melt, active, kind):',
+    'zq_bot = melt_layer(jk, zq_bot, internal_melt, active, "bom")',
+    'zh_i[0] = zh_i[0] + dh_sni', ('s_i_new = s_i', 1),
+    'def si3_column_step_arrays(state: SI3ColumnArrays,',
+    '# `ice_thd_temp` is diagnostic because enthalpy is prognostic (:221-247).', 275])
+_reanchor(
+    'packages/ice/legoesm/ice/bitz_lipscomb.py:2059-2177',
+    'packages/ice/legoesm/ice/bitz_lipscomb.py:2059-2176',
+    anchors=['def si3_column_step_arrays(state: SI3ColumnArrays,', 'e_snow=o10.o9.zdf.e_s,', 118],
+)
+_repin('packages/ice/legoesm/ice/bitz_lipscomb.py:2059-2249', [
+    'def si3_column_step_arrays(state: SI3ColumnArrays,', ('return trace', 2), 191])
+_repin('packages/ice/legoesm/ice/bitz_lipscomb.py:2059-2189', [
+    'def si3_column_step_arrays(state: SI3ColumnArrays,',
+    '# `ice_thd_temp` is diagnostic because enthalpy is prognostic (:221-247).', 131])
+
+_repin('scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1-1871', [
+    '#!/usr/bin/env python3', 'raise SystemExit(main())', 1871])
+_reanchor(
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:474-531',
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:474-530',
+    anchors=['def _verify_record_scalars_against_namelist(', 'f"scalar header {sname}={got!r} disagrees with resolved namelist {expected!r} in kind {kind}"', 57],
+)
+_reanchor(
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:648-942',
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:648-953',
+    anchors=['@functools.lru_cache(maxsize=8)', '"jit_prod_step_ponds": jit_prod_step_ponds,', 306],
+)
+_reanchor(
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1523-1543',
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1523-1542',
+    anchors=['# 3. Rung O10:', 'spec.name, r7["fields"][spec.name], f8[spec.name], kt=kt, category=jl', 20],
+)
+_reanchor(
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1545-1556',
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1545-1555',
+    anchors=['# 4. Rung O11:', 'spec.name, r8["fields"][spec.name], f9[spec.name], kt=kt, category=jl', 11],
+)
+_reanchor(
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1558-1634',
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1558-1630',
+    anchors=['# Production entry point:', 'prod_trace.post_sal.S_layers[:npti],', 73],
+)
+_reanchor(
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1636-1668',
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1636-1666',
+    anchors=["# 5. Rung O12:", 'spec.name, f10[spec.name], f11[spec.name], kt=kt, category=0', 31],
+)
+_reanchor(
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1064-1785',
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1064-1784',
+    anchors=['def score_o8_to_o12(', '"rungs": rungs_report,', 721],
+)
+
+_repin('tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:1-424', [
+    '"""Direct unit and master-record tests for the SI3 O8--O12 0-ULP scoring driver."""',
+    'co2_ppmv=jnp.full(shape_2d, 400.0, dtype=jnp.float64),', 424])
+_reanchor(
+    'tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:57-85',
+    'tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:57-84',
+    anchors=['def test_master_admission_manifests_and_plants() -> None:',
+             ('verify_manifests=False,', 1), 28],
+)
+_reanchor(
+    'tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:161-184',
+    'tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:161-175',
+    anchors=[('@pytest.mark.parametrize(', 1), '"""Prove that a 1-ULP perturbation in one exit field of each rung O8..O12 is caught."""', 15],
+)
+_repin('tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:187-424', [
+    'def test_production_call_sites_route_through_o8_o12_and_fail_when_reverted(',
+    'co2_ppmv=jnp.full(shape_2d, 400.0, dtype=jnp.float64),', 238])
+
+_reanchor(
+    'docs/ice/fidelity/si3_r23_o14_score_preregister.md:1-51',
+    'docs/ice/fidelity/si3_r23_o14_score_preregister.md:1-52',
+    anchors=['# SI3 Ladder Round 23 (`si3_r23`) — O14 Model Preparation and Scoring Preregistration',
+             'No configuration, threshold, cadence, state schema, or scoring choice is made', 52],
+)
+_repin('ORCA2_SAS_ICE_O8O16_REF/BLD/ppsrc/nemo/icethd_do.f90:177-219', [
+    'at_i(Nis0-(0):Nie0+(0),Njs0-(0):Nje0+(0)) = SUM(', ('END DO', 3), 43])
+_repin('ORCA2_SAS_ICE_O8O16_REF/BLD/ppsrc/nemo/icethd_do.f90:225-273', [
+    'CASE ( 2 , 4 )', 'sfx_opw_1d(ii) = sfx_opw_1d(ii) - zv_newice * rhoi * zs_newice(ii) * r1_Dt_ice', 49])
+_repin('ORCA2_SAS_ICE_O8O16_REF/BLD/ppsrc/nemo/icethd_do.f90:275-320', [
+    '! A fraction fraz_frac of frazil ice is accreted at the ice bottom', ('ENDIF', 5), 46])
+_repin('ORCA2_SAS_ICE_O8O16_REF/BLD/ppsrc/nemo/icethd_do.f90:322-375', [
+    '! --- bottom ice growth + ice enthalpy remapping --- !',
+    'CALL tab_3d_4d( npti, nptidx(1:npti), szv_i_2d(1:npti,:,:), szv_i )', 54])
+_reanchor(
+    'packages/ice/legoesm/ice/bitz_lipscomb.py:1811-2056',
+    'packages/ice/legoesm/ice/bitz_lipscomb.py:1811-2055',
+    anchors=['class SI3DOOutputs(NamedTuple):', 'hfx_opw=jnp.where(cooling, hfx_opw_new, hfx_opw),', 245],
+)
+_reanchor(
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:816-825',
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:816-823',
+    anchors=[('@jax.jit', 11), ('r1_nlay_i=r1_nlay_i,', 3), 8],
+)
+_reanchor(
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:957-1061',
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:957-1060',
+    anchors=['def score_o14(', ('"resolved_namelist": namelist,', 1), 104],
+)
+_reanchor(
+    'tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:139-158',
+    'tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:139-157',
+    anchors=['def test_score_o14_representative_steps_0_ulp_and_plants() -> None:',
+             ('verify_manifests=False', 3), 19],
+)
+_reanchor(
+    'tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:187-360',
+    'tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:187-359',
+    anchors=['def test_production_call_sites_route_through_o8_o12_and_fail_when_reverted(',
+             'np.asarray(rev_do_state.h_ice.data).view(np.uint64),', 173],
+)
+_reanchor(
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1636-1666',
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1636-1667',
+    anchors=["# 5. Rung O12:",
+             ('spec.name, f10[spec.name], f11[spec.name], kt=kt, category=0', 2), 32],
+)
+
+
 DEFAULT_RECEIPT = (
     REPO / "docs/ocean/fidelity/testcases"
     / "nemo_testcases_l2_gyre_phase3_round8_receipt.md")
