@@ -32,7 +32,7 @@ for package in ("core", "ocean", "ice", "atmosphere", "land", "coupler", "driver
 SOURCE_UNITS = (
     "icethd", "icethd_do", "icethd_zdf", "icethd_zdf_bl99", "icethd_dh",
     "icethd_sal", "icethd_da", "icethd_pnd", "iceitd", "icecor", "icevar",
-    "iceupdate", "icealb",
+    "iceupdate", "icealb", "icedyn_adv_pra",
 )
 
 ROOTS: dict[str, tuple[str, ...]] = {
@@ -104,7 +104,7 @@ KEYWORDS = set(
     "stat type use volatile where while write".split()
 )
 INTRINSICS = set(
-    "abs allocated all any ceiling cos count dim exp huge int lbound log max maxloc "
+    "abs allocated all any ceiling cos count dim exp huge int nint lbound log max maxloc "
     "maxval merge min minloc minval mod pack present product real reshape shape "
     "iom_use iom_varid sign sin size sqrt sum tanh tiny transpose trim ubound unpack".split()
 )

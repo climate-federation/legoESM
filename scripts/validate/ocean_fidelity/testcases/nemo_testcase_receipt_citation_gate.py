@@ -11263,6 +11263,25 @@ DEFAULT_HEADING = "## Round 25 —"
 # those rounds' citations rest on hand-checking, which is exactly what failed
 # three rounds running.
 AUDITED_ROUNDS = "25 and later (heading to end of file)"
+# --- SI3 round 25 (O4 Prather acquisition tool; no NEMO run) ---
+FILES.update({
+    'docs/ice/fidelity/si3_r25_o4_acquisition_preregister.md': REPO / 'docs/ice/fidelity/si3_r25_o4_acquisition_preregister.md',
+    'docs/ice/fidelity/si3_r25_o4_acquisition_receipt.md': REPO / 'docs/ice/fidelity/si3_r25_o4_acquisition_receipt.md',
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o4_orca2_prather_gate.py': REPO / 'scripts/validate/ocean_fidelity/testcases/nemo_si3_o4_orca2_prather_gate.py',
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o4_orca2_prather_passivity.py': REPO / 'scripts/validate/ocean_fidelity/testcases/nemo_si3_o4_orca2_prather_passivity.py',
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o4_orca2_prather_readset.py': REPO / 'scripts/validate/ocean_fidelity/testcases/nemo_si3_o4_orca2_prather_readset.py',
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o4_orca2_prather_acquisition/run.sh': REPO / 'scripts/validate/ocean_fidelity/testcases/nemo_si3_o4_orca2_prather_acquisition/run.sh',
+    'tests/ocean/fidelity/test_nemo_si3_o4_prather_acquisition.py': REPO / 'tests/ocean/fidelity/test_nemo_si3_o4_prather_acquisition.py',
+})
+CITATION_MAP.update({
+    'docs/ice/fidelity/si3_r25_o4_acquisition_preregister.md:1-131': ['# SI3 Rung O4 (`si3_r25`) Acquisition Preregistration', 'record contract.', 131],
+    'scripts/validate/ocean_fidelity/orca2_l4/nemo_acquisition_extents.py:309-350': ['def validate_writer(', '    }', 42],
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o4_orca2_prather_gate.py:68-239': ['def read_record(path: str | Path, plant: str | None = None) -> dict[str, Any]:', '    return {"status": "PASS", "criterion": "every exit, seam, and fold cell == 0 ULP", "scores": scores}', 172],
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o4_orca2_prather_passivity.py:26-98': ['def census(build: Path = BUILD, toolchain: Path = TOOLCHAIN) -> dict[str, object]:', 'if __name__=="__main__": raise SystemExit(main())', 73],
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o4_orca2_prather_readset.py:21-71': ['def derive_and_gate(ppsrc: Path = DEFAULT_PPSRC, plant: str | None = None) -> dict[str, object]:', 'if __name__=="__main__": raise SystemExit(main())', 51],
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o4_orca2_prather_acquisition/run.sh:1-156': ['#!/usr/bin/env bash', 'admit "$active"; active=""', 156],
+    'tests/ocean/fidelity/test_nemo_si3_o4_prather_acquisition.py:1-67': ['from __future__ import annotations', '    assert "--preflight-only" in text and "manifest_before_run" in text', 67],
+})
 # --- SI3 round 22 (O13 exact ITD remap); appended for merge isolation ---
 FILES.update({
     'docs/ice/fidelity/si3_r22_o13_score_preregister.md': REPO / 'docs/ice/fidelity/si3_r22_o13_score_preregister.md',

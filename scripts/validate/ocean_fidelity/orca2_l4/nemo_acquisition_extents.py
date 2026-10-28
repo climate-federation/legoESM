@@ -314,15 +314,26 @@ def validate_writer(
     aliases = {
         "pu_oce": "uu(:,:,1,1)", "pv_oce": "vv(:,:,1,1)",
         "ptmod_io": "tmod_io", "putau_oce": "utau_oce", "pvtau_oce": "vtau_oce",
+        "tmask_surface": "tmask(:,:,1)", "umask_surface": "umask(:,:,1)",
+        "vmask_surface": "vmask(:,:,1)",
     }
+    calls = writer_put_calls(writer)
     if plant == "missing-allocation":
-        catalog.pop("rcdu_ice", None)
+        target = "rcdu_ice" if any(actual.lower() == "rcdu_ice" for _, actual in calls) else calls[0][1].lower()
+        if catalog.pop(target, None) is not None:
+            raise ExtentError(
+                f"STATUS PLANT-FIRED: missing allocation/declaration for recorded array {target}"
+            )
     if plant == "dummy-actual":
         aliases["pu_oce"] = "qlead"
     checked = []
-    for mode, actual in writer_put_calls(writer):
+    for index, (mode, actual) in enumerate(calls):
         expression = aliases.get(actual.lower(), actual)
+        if plant == "dummy-actual" and index == 0 and actual.lower() != "pu_oce":
+            expression = "rCdU_ice"
         effective_mode = "f2" if plant == "writer-mode" and actual.lower() == "qlead" else mode
+        if plant == "writer-mode" and index == 0 and not any(a.lower() == "qlead" for _, a in calls):
+            effective_mode = "i3"
         shape = _actual_shape(expression, catalog, deck)
         if not _mode_accepts(effective_mode, shape, deck):
             raise ExtentError(
