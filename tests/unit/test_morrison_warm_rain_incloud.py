@@ -362,7 +362,9 @@ def _mpas_physics_hydrostatic():
                                   cloud_config=CloudConfig(scheme="cam6_clubb")),
         turbulence=TurbulenceConfig(scheme="clubb"),
         microphysics=MicrophysicsConfig(
-            scheme="morrison", morrison=_cfg(warm_rain_scheme="kk2000_cam6",
+            # kk2000: the relvar guard runs before the lane factory, and
+            # this helper tests the factory's MPAS-only refusal
+            scheme="morrison", morrison=_cfg(warm_rain_scheme="kk2000",
                                              warm_rain_incloud=True))),
         model_type="hydrostatic", dt=600.0, cld_macmic_num_steps=2)
 
@@ -380,7 +382,8 @@ def test_lane_guard_needs_clubb_and_the_subcycle():
     from legoesm.atmosphere.physics.microphysics.integration import (
         make_microphysics_physics,
     )
-    mc = MicrophysicsConfig(scheme="morrison", morrison=_cfg(warm_rain_incloud=True))
+    mc = MicrophysicsConfig(scheme="morrison", morrison=_cfg(
+        warm_rain_incloud=True, warm_rain_scheme="kk2000"))
     for cc in (None, __import__("legoesm.atmosphere.physics.clouds.config",
                                 fromlist=["CloudConfig"]).CloudConfig(scheme="sundqvist")):
         with pytest.raises(ValueError, match="cam6_clubb"):

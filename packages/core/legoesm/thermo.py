@@ -212,9 +212,23 @@ def saturation_vapor_pressure_goff(T: jax.Array) -> jax.Array:
 # formula at an oracle boundary (same as :func:`nemo_si3_saturation_over_ice`).
 
 
+def _cam_r8(*xs):
+    """CAM evaluates the Goff-Gratch curves in r8: compute at the widest
+    float JAX allows (fp64 under x64, else fp32) and hand back the inputs'
+    precision, so an fp32 caller under x64 stays fp32."""
+    out = jnp.result_type(*xs, 1.0)  # a float even for integer inputs
+    wide = jax.dtypes.canonicalize_dtype(jnp.float64)
+    return out, [jnp.asarray(x, dtype=wide) for x in xs]
+
+
 def saturation_vapor_pressure_goff_gratch(T: jax.Array) -> jax.Array:
     """Saturation vapour pressure over liquid water [Pa], CAM
     ``GoffGratch_svp_water`` (wv_sat_methods.F90:369-380)."""
+    out, (T,) = _cam_r8(T)
+    return _svp_water_goff_gratch_wide(T).astype(out)
+
+
+def _svp_water_goff_gratch_wide(T):
     tboil = constants.T_boil_cam
     return 10.0 ** (-7.90298 * (tboil / T - 1.0)
                     + 5.02808 * jnp.log10(tboil / T)
@@ -226,6 +240,11 @@ def saturation_vapor_pressure_goff_gratch(T: jax.Array) -> jax.Array:
 def saturation_vapor_pressure_ice_goff_gratch(T: jax.Array) -> jax.Array:
     """Saturation vapour pressure over ice [Pa], CAM ``GoffGratch_svp_ice``
     (wv_sat_methods.F90:382-391)."""
+    out, (T,) = _cam_r8(T)
+    return _svp_ice_goff_gratch_wide(T).astype(out)
+
+
+def _svp_ice_goff_gratch_wide(T):
     h2otrip = constants.T_triple_cam
     return 10.0 ** (-9.09718 * (h2otrip / T - 1.0)
                     - 3.56654 * jnp.log10(h2otrip / T)
@@ -267,8 +286,9 @@ def saturation_specific_humidity_goff_gratch(T: jax.Array, p: jax.Array, *,
     """Saturation specific humidity over liquid [kg/kg], CAM
     ``wv_sat_qsat_water`` (wv_sat_methods.F90:195-218), the ``qsat_water``
     MG2 calls (micro_mg2_0.F90:113-115)."""
-    return _specific_humidity_from_esat_cam(saturation_vapor_pressure_goff_gratch(T), p,
-                                            cap_sharpness=cap_sharpness)
+    out, (T, p) = _cam_r8(T, p)
+    return _specific_humidity_from_esat_cam(_svp_water_goff_gratch_wide(T), p,
+                                            cap_sharpness=cap_sharpness).astype(out)
 
 
 def saturation_specific_humidity_ice_goff_gratch(T: jax.Array, p: jax.Array, *,
@@ -276,8 +296,9 @@ def saturation_specific_humidity_ice_goff_gratch(T: jax.Array, p: jax.Array, *,
                                                  ) -> jax.Array:
     """Saturation specific humidity over ice [kg/kg], CAM ``wv_sat_qsat_ice``
     (wv_sat_methods.F90:220-243), the ``qsat_ice`` MG2 calls."""
-    return _specific_humidity_from_esat_cam(saturation_vapor_pressure_ice_goff_gratch(T), p,
-                                            cap_sharpness=cap_sharpness)
+    out, (T, p) = _cam_r8(T, p)
+    return _specific_humidity_from_esat_cam(_svp_ice_goff_gratch_wide(T), p,
+                                            cap_sharpness=cap_sharpness).astype(out)
 
 
 # ---------------------------------------------------------------------------

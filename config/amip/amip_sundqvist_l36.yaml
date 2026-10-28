@@ -142,6 +142,9 @@ clouds: sundqvist
 # newer curve; that is a different experiment.
 cloud_saturation_scheme: liquid
 microphysics: morrison
+morrison_warm_rain_scheme: kk2000   # explicit: the unset default resolves to
+                                    # kk2000_cam6 under morrison_flavor mg,
+                                    # which needs CLUBB relvar (not wired here)
 morrison_sed_cfl_substeps: true  # user decision 2026-09-22: MG2 CFL sub-stepped
                                  # sedimentation (micro_mg2_0.F90 loop). The
                                  # one-pass form moved a hydrometeor at most one

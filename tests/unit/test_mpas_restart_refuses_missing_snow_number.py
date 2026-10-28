@@ -32,6 +32,7 @@ def _driver(tmpdir: str) -> ModelDriver:
         output=OutputConfig(output_dir="", diag_days=0, checkpoint_days=1),
         days=TWO_STEPS_DAYS, dataset="analytical", radiation="rrtmgp",
         microphysics="morrison", morrison_flavor="mg",
+        morrison_warm_rain_scheme="kk2000",
         # CAM6 MG2 mode (the only mode that carries N_s) needs the CLUBB host
         morrison_warm_rain_incloud=True, turbulence="clubb",
         cloud_scheme="cam6_clubb", use_clubb_cloud_fraction=True,

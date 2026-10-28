@@ -382,3 +382,39 @@ def test_driver_set_bechtold_values_reach_the_ifs_closure_and_trigger(monkeypatc
     assert seen["ta"].entr_deep_base == 2.5e-3
     assert seen["clo"].rcapqadv == 0.6
 
+
+def _param_grad_and_fd(nlev, field):
+    """d(sum dT_dt)/d(field) on the deep sounding: reverse mode and a central
+    difference with relative step 1e-4."""
+    T, q, p_full, p_half = [a.astype(jnp.float64) for a in _deep_column(nlev=nlev)]
+    kw = _kwargs(*T.shape)
+    base = BechtoldConfig(use_ifs_ascent=True)
+    v = float(getattr(base, field))
+
+    def f(x):
+        out, _, _ = bechtold_convection(T, q, p_full, p_half,
+                                        config=base._replace(**{field: x}), **kw)
+        return jnp.sum(out.dT_dt)
+
+    g = float(jax.grad(f)(jnp.asarray(v)))
+    h = 1e-4 * v
+    fd = (float(f(jnp.asarray(v + h))) - float(f(jnp.asarray(v - h)))) / (2 * h)
+    return g, fd
+
+
+@pytest.mark.parametrize("field", ["epsilon_deep", "rprcon"])
+def test_reverse_grad_matches_fd_on_convecting_column(_x64, field):
+    """At 90 levels the deep sounding convects and both parameters move the
+    heating; reverse mode was NaN here (sqrt of a clamped zero)."""
+    g, fd = _param_grad_and_fd(90, field)
+    assert fd != 0.0
+    assert g == pytest.approx(fd, rel=1e-3)
+
+
+@pytest.mark.parametrize("field", ["epsilon_deep", "rprcon"])
+def test_reverse_grad_finite_on_non_convecting_column(_x64, field):
+    """At 30 levels the column is shallow and neither parameter matters: the
+    gradient must be the finite zero the finite difference measures."""
+    g, fd = _param_grad_and_fd(30, field)
+    assert np.isfinite(g)
+    assert g == fd == 0.0

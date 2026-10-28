@@ -244,7 +244,8 @@ def cmd_reproduce(args):
                 f"`legoesm reproduce` cannot rerun {tag or kind!r} manifests "
                 f"yet (supported runners: {sorted(RUNNER_REPLAY_SPECS)}). "
                 "Re-run it with its runner, then compare result.state_digest "
-                "against the reference manifest."
+                "(and result.ice_state_digest, when recorded) against the "
+                "reference manifest."
             )
             # --check asks for a bit-identical rerun comparison. We did NOT
             # rerun or compare digests, so we must NOT exit 0.

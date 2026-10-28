@@ -879,7 +879,8 @@ def test_driver_column_lane_accepts_ice_microphysics_with_nine_slots(tmp_path):
     the run starts with one slot per name (no silent 3-slot bundle)."""
     from legoesm.driver.model_driver import ModelDriver
     cfg = _driver_cfg(tmp_path, days=2 * 600.0 / 86400.0, dt=600.0,
-                      microphysics="morrison")
+                      microphysics="morrison",
+                      morrison_warm_rain_scheme="kk2000")
     drv = ModelDriver(cfg, output_dir=tmp_path)
     drv.setup()
     assert drv.model.tracer_names == FULL_NAMES and drv.model.nwat == 6

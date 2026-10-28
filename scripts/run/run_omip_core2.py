@@ -3331,7 +3331,7 @@ def run_fesom_forced_loop(args, grid, z_coord, model, state) -> None:
             ice_state, grid, state.land_mask.data)
         print(f"[fesom-forced] final ice: area={_af / 1.0e12:.3f}e6 km2 "
               f"mean_conc={_cf:.3f} max_h={_hf:.3f} m")
-    _record_final_state_digest(manifest_path, state)
+    _record_final_state_digest(manifest_path, state, ice_state)
     print(f"[fesom-forced] done: {n_steps} steps; snapshots in {out}")
 
 
@@ -6214,18 +6214,28 @@ class _PersistentStateResidency:
         return self._gather_fn(st)
 
 
-def _record_final_state_digest(manifest_path, state) -> None:
+def _record_final_state_digest(manifest_path, state, ice_state=None) -> None:
     """Record the final ocean state digest into the run manifest (#376 Phase 4).
 
     Best-effort: a digest/record failure must not fail an otherwise-complete run.
     Gives ``legoesm reproduce --check`` a reference to compare a rerun against.
+    A prognostic sea-ice state is digested separately into
+    ``result.ice_state_digest`` (#2176); the ocean ``state_digest`` is unchanged.
     """
     if manifest_path is None:
         return
     try:
         from legoesm.driver.restart import pytree_state_digest, record_state_digest
         digest = pytree_state_digest(state)
-        record_state_digest(manifest_path, digest)
+        ice_digest = None
+        if ice_state is not None:
+            # Its own best-effort: an ice failure must not cost the ocean digest.
+            try:
+                ice_digest = pytree_state_digest(ice_state)
+            except Exception as exc:  # noqa: BLE001
+                print(f"[warn] ice_state_digest not recorded: "
+                      f"{type(exc).__name__}: {exc}")
+        record_state_digest(manifest_path, digest, ice_state_digest=ice_digest)
         print(f"[done] recorded state_digest {digest[:16]}... in {manifest_path}")
     except Exception as exc:  # noqa: BLE001 — provenance is best-effort
         print(f"[warn] state_digest not recorded: {type(exc).__name__}: {exc}")
@@ -11153,7 +11163,7 @@ def main() -> int:
                             n_steps * dt / _SEC_PER_DAY)
     _gateway_cumulative_close(_gw_csv)
     _gateway_transport_diag(_gw_acc, out_dir, io_proc=_io)
-    _record_final_state_digest(manifest_path, state)
+    _record_final_state_digest(manifest_path, state, ice_state)
     _close_csv()
     rate = (n_steps - start_step) / (time.time() - t_wall)
     if _spmd_persistent:

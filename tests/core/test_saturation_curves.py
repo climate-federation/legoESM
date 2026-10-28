@@ -215,6 +215,29 @@ def test_cam_table_clamp_default_gradients(T):
                 (jnp.float64(T),), order=2, modes=("rev",), eps=1e-4)
 
 
+@pytest.mark.parametrize("fn", ["saturation_vapor_pressure_goff_gratch",
+                                "saturation_vapor_pressure_ice_goff_gratch",
+                                "saturation_specific_humidity_goff_gratch",
+                                "saturation_specific_humidity_ice_goff_gratch"])
+def test_goff_gratch_returns_input_precision_computed_in_fp64(fn):
+    """CAM evaluates Goff-Gratch in r8: an fp32 caller (x64 on) gets the
+    fp64 value cast to fp32, not an fp64 array leaking into its state."""
+    import legoesm.thermo as th
+    f = getattr(th, fn)
+    with jax.enable_x64(True):  # the fp64 reference must really be fp64
+        args64 = [jnp.linspace(190.0, 310.0, 13)]
+        if "humidity" in fn:
+            args64.append(jnp.linspace(2.0e3, 1.0e5, 13))
+        args32 = [a.astype(jnp.float32) for a in args64]
+        out32 = f(*args32)
+        assert out32.dtype == jnp.float32
+        ref = f(*[a.astype(jnp.float64) for a in args32]).astype(jnp.float32)
+        np.testing.assert_array_equal(np.asarray(out32), np.asarray(ref))
+        ints = [300] + ([100000] if "humidity" in fn else [])
+        assert jnp.issubdtype(f(*ints).dtype, jnp.floating)
+        assert float(f(*ints)) > 0.0
+
+
 def test_cam_table_is_built_in_fp64_then_cast():
     """Follow-up row 4: CAM builds estbl in r8 (wv_saturation.F90:226); an
     fp32 run reads that table cast once, not a table evaluated in fp32.  The

@@ -613,7 +613,8 @@ def _load_monthly_latlon_anchored(path: str, varname: str, band: str = "gray"):
 
     Returns ``(mid_days, first_date, lat, lon, data)`` with ``data`` of shape
     ``(ntime, nlat, nlon)`` float64, or ``None`` when ``varname`` has no
-    longitude dimension (a zonal file has nothing to resolve).
+    longitude dimension (a zonal file has nothing to resolve).  Raises
+    ``ValueError`` if the band-collapsed field holds any NaN.
     """
     ds = _open_forcing_dataset(path)
     if varname not in ds.data_vars:
@@ -644,6 +645,14 @@ def _load_monthly_latlon_anchored(path: str, varname: str, band: str = "gray"):
         return slab
 
     data = np.stack([_record(i) for i in range(var.sizes["time"])])
+    if np.isnan(data).any():
+        ds.close()
+        bad = np.argwhere(np.isnan(data))
+        raise ValueError(
+            f"{path!r}: {varname} (band {band!r}) has {len(bad)} NaN value(s) "
+            f"after the band collapse, first at (time, lat, lon) index "
+            f"{tuple(int(x) for x in bad[0])}; a NaN AOD would reach radiation "
+            "and the droplet number, so the file is refused.")
     lat = np.asarray(ds[lat_name].values, dtype=np.float64)
     lon = np.asarray(ds[lon_name].values, dtype=np.float64) % 360.0
     order = np.argsort(lon)
@@ -2143,7 +2152,9 @@ def get_aerosol_at_time(config: AerosolConfig, day: float,
         given and ``config.path`` has a longitude dimension, the file is read
         longitude-resolved and regridded bilinearly to the columns with the
         AMIP SST/SIC regridder (:func:`legoesm.forcing.amip.
-        regrid_monthly_latlon_to_grid`) instead of zonally averaged.
+        regrid_monthly_latlon_to_grid`) instead of zonally averaged.  A
+        ``config.path`` without a longitude dimension then raises
+        ``ValueError`` (no silent zonal fallback).
 
     Returns
     -------
@@ -2164,6 +2175,13 @@ def get_aerosol_at_time(config: AerosolConfig, day: float,
         # anchor is present.  Without this dispatch, a 36-year aerosol
         # file would be sampled cyclically (mod 365.25), throwing away
         # interannual evolution.
+        if lon_grid is not None and latlon is None:
+            raise ValueError(
+                f"get_aerosol_at_time: {config.path!r} has no longitude "
+                "dimension, but the aerosol is read at each column's own "
+                "longitude (as CAM's prescribed-aerosol read, tracer_data.F90); "
+                "a zonal file would silently give every column at one latitude "
+                "the same aerosol.  Use a (time, [band,] lat, lon) file.")
         if latlon is not None:
             mid_days, first_date, lat, lon, data = latlon
         else:

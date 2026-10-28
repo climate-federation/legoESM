@@ -1814,6 +1814,107 @@ class TestSurfaceRadiationFeed:
         assert 9 in _MPASSfcFluxAccum.SLOTS
 
 
+
+class TestSnowfallFeed:
+    """CMOR prsn = the physics' own frozen surface flux (``_sfc_diag``
+    ``precip_frozen`` slot, the one the land's snowfall reads), an interval
+    mean like pr; absent when the physics does not export it."""
+
+    PR, PRSN = 3.0e-5, 1.2e-5
+
+    def _fake(self, mesh, dc, *, with_frozen, via_accum):
+        import types
+
+        from legoesm.core.state import (
+            MPAS_SFC_DIAG_BASE_KEYS, MPAS_SFC_DIAG_EXTRA_KEYS)
+        from legoesm.driver.model_driver import (
+            _MPASSfcFluxAccum, _sfc_diag_slot)
+
+        f = _base_fields(mesh, np.linspace(0.05, 0.98, NLEV))
+        n = f["p_s"].shape[0]
+        n_slots = len(MPAS_SFC_DIAG_BASE_KEYS) + len(MPAS_SFC_DIAG_EXTRA_KEYS)
+        k = _sfc_diag_slot("precip_frozen")
+
+        def _field(a):
+            return types.SimpleNamespace(data=np.asarray(a))
+
+        def _slots(pr, prsn):
+            sfc = [None] * n_slots
+            sfc[2] = _field(np.full(n, pr))
+            if with_frozen:
+                sfc[k] = _field(np.full(n, prsn))
+            return tuple(sfc)
+
+        acc = None
+        if via_accum:
+            acc = _MPASSfcFluxAccum()
+            acc.add(_slots(self.PR - 1e-5, self.PRSN - 1e-5))
+            acc.add(_slots(self.PR + 1e-5, self.PRSN + 1e-5))
+            snap = _slots(self.PR * 9, self.PRSN * 9)   # must not leak
+        else:
+            snap = _slots(self.PR, self.PRSN)
+        ns = types.SimpleNamespace(
+            diagnostics=dc, grid=mesh,
+            config=types.SimpleNamespace(
+                output=types.SimpleNamespace(diag_days=1.0)),
+            state=types.SimpleNamespace(
+                u=_field(np.zeros((int(mesh.nEdges), NLEV))),
+                T=_field(f["T"]), p_s=_field(f["p_s"]),
+                phis=_field(f["phis"]), tracers=None, v=None),
+            model=types.SimpleNamespace(_sfc_diag=snap),
+        )
+        if acc is not None:
+            ns._mpas_sfc_accum = acc
+        return _as_driver(ns)
+
+    @pytest.mark.parametrize("via_accum", [False, True])
+    def test_prsn_published_from_frozen_slot(self, mesh, via_accum):
+        from legoesm.driver.model_driver import ModelDriver
+
+        dc, _ = _make_collector(mesh)
+        ModelDriver._feed_mpas_cmip_accumulators(
+            self._fake(mesh, dc, with_frozen=True, via_accum=via_accum),
+            day=15.0)
+        out = dc._spatial_monthly.finalize(min_sample_fraction=0)
+        np.testing.assert_allclose(out["field_2d_prsn"], self.PRSN, rtol=1e-9)
+        np.testing.assert_allclose(out["field_2d_pr"], self.PR, rtol=1e-9)
+
+    def test_without_frozen_slot_publishes_no_prsn(self, mesh):
+        from legoesm.driver.model_driver import ModelDriver
+
+        dc, _ = _make_collector(mesh)
+        ModelDriver._feed_mpas_cmip_accumulators(
+            self._fake(mesh, dc, with_frozen=False, via_accum=False),
+            day=15.0)
+        out = dc._spatial_monthly.finalize(min_sample_fraction=0)
+        assert "field_2d_prsn" not in out
+        assert "field_2d_pr" in out
+
+    def test_frozen_slot_is_accumulated(self):
+        from legoesm.driver.model_driver import (
+            _MPASSfcFluxAccum, _sfc_diag_slot)
+
+        assert _sfc_diag_slot("precip_frozen") in _MPASSfcFluxAccum.SLOTS
+
+    def test_prsn_written_to_amon(self, mesh, tmp_path):
+        xr = pytest.importorskip("xarray")
+        from legoesm.io.cmor_output import CFWriter
+
+        dc, _ = _make_collector(mesh)
+        dc.cf_writer = CFWriter(
+            output_dir=tmp_path, experiment_id="amip",
+            model_id="legoESM", ref_date="1979-01-01")
+        nlat, nlon = dc._cmip_nlat, dc._cmip_nlon
+        dc._write_cmip_data({
+            "months": [(0, 1)],
+            "field_2d_prsn": np.full((1, nlat, nlon), self.PRSN)})
+        files = sorted(tmp_path.rglob("prsn_Amon_*.nc"))
+        assert files
+        with xr.open_dataset(files[0]) as ds:
+            assert ds["prsn"].attrs["units"] == "kg m-2 s-1"
+            np.testing.assert_allclose(ds["prsn"].values, self.PRSN)
+
+
 class TestSeaIceSnowFeed:
     """Prescribed sea-ice concentration (SImon siconc) and the land's snow
     water equivalent (LImon snw, a mean WHERE LAND) reach the CMOR feed as

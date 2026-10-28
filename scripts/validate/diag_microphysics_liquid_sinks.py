@@ -173,7 +173,7 @@ def main():
         cf_eff = jnp.ones_like(q_c)
     q_c_ic = q_c / cf_eff
     q_r_ic = q_r / cf_eff
-    scheme = getattr(cfg, "warm_rain_scheme", "kk2000")
+    scheme = cfg.warm_rain_scheme   # resolved by resolve_morrison_flavor
     if scheme == "kk2000":
         dq_au, _, _ = autoconversion_kk2000(q_c_ic, N_c_eff, rho, dt_micro)
         dq_au = dq_au * cf_eff

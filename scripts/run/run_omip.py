@@ -4367,6 +4367,79 @@ class MonthlyMldSstWriter:
     def close(self) -> None:
         self._flush()
 
+    def restart_payload(self) -> dict:
+        """The in-flight month (key, sample count, running sums) for the
+        restart npz, so a resumed run continues the month exactly (#2182)."""
+        key = self.month if self.month is not None else (-1, -1)
+        empty = np.zeros(0)
+        return {
+            "monthly_key": np.asarray(key, dtype=np.int64),
+            "monthly_n": np.int64(self.n),
+            # Months flushed so far: a resume with the file gone loses them.
+            "monthly_n_done": np.int64(len(self.done)),
+            "monthly_sum_sst": (empty if self.sum_sst is None
+                                else self.sum_sst.copy()),
+            "monthly_sum_mld": (empty if self.sum_mld is None
+                                else self.sum_mld.copy()),
+        }
+
+    @staticmethod
+    def month_end_day(year: int, month: int) -> float:
+        return 365.0 * year + float(_NOLEAP_MONTH_END_DAYS[month - 1])
+
+    def resume(self, restart_day: float, payload) -> None:
+        """Continue from a restart at ``restart_day`` (#2182).
+
+        Restores the in-flight month from the restart's ``monthly_*`` keys and
+        reloads the months already in the file that precede it.  A month is
+        flushed only when the next month's first sample arrives, so every
+        restart past day 0 has an unflushed month: a restart without the keys
+        (written before they existed, or by a run without --monthly-mld-sst)
+        is refused.  File months from the in-flight month on, or ending after
+        the restart day (a later leg that was killed), are dropped and
+        recomputed.  A file missing, or holding fewer months than the
+        restarted run had written, cannot be recovered: refused.
+        """
+        import xarray as xr
+        restart_day = float(restart_day)
+        if "monthly_n" not in payload:
+            if restart_day > 0.0:
+                raise ValueError(
+                    f"--monthly-mld-sst: the restart (day {restart_day:g}) "
+                    "carries no in-flight monthly mean (monthly_* keys), so "
+                    "the month it stops in cannot be completed. Restart from "
+                    "a checkpoint written with --monthly-mld-sst.")
+            return
+        key = tuple(int(k) for k in np.asarray(payload["monthly_key"]))
+        n = int(payload["monthly_n"])
+        if n > 0:
+            self.month, self.n = key, n
+            self.sum_sst = np.array(payload["monthly_sum_sst"])
+            self.sum_mld = np.array(payload["monthly_sum_mld"])
+        if self.path.exists():
+            with xr.open_dataset(self.path) as ds:
+                ds = ds.load()
+            for i in range(ds.sizes["time"]):
+                y, m = int(ds["year_index"][i]), int(ds["month"][i])
+                if n > 0 and (y, m) >= key:
+                    continue
+                if self.month_end_day(y, m) > restart_day:
+                    continue
+                self.done.append((y, m, ds["sst"].values[i],
+                                  ds["mld"].values[i]))
+        n_done = int(payload["monthly_n_done"])
+        if len(self.done) < n_done:
+            raise ValueError(
+                f"--monthly-mld-sst: the restart had written {n_done} months "
+                f"but {self.path} holds {len(self.done)} of them (missing or "
+                "truncated file), so months before the restart would be "
+                "lost. Restore the file or rerun.")
+
+
+# Extra restart-npz payload supplied by an active writer (the monthly
+# SST/MLD means, #2182); ``None`` = nothing extra.
+_RESTART_EXTRA_PAYLOAD = [None]
+
 
 def _extract_scalars(state, grid_type, grid, z_coord):
     """Compute scalar diagnostics from ocean state."""
@@ -4804,6 +4877,8 @@ def _save_restart(state, day, step, output_dir, ice_state=None,
             if obj is None or not hasattr(obj, "data"):
                 continue
             payload[f"ice_{f}"] = np.asarray(obj.data)
+    if _RESTART_EXTRA_PAYLOAD[0] is not None:
+        payload.update(_RESTART_EXTRA_PAYLOAD[0]())
     fname = output_dir / f"restart_day{int(round(day)):06d}.npz"
     # Async + atomic write.  The device->host pulls above are synchronous
     # (they snapshot the state), but the gzip+disk write (seconds to
@@ -7188,6 +7263,11 @@ def run_omip_single(grid_type: str, args) -> dict:
             Path(args.output) / grid_type / resolution / "monthly_mld_sst.nc",
             z_coord=z_coord, lat_deg=np.rad2deg(np.asarray(grid.lat)),
             lon_deg=np.rad2deg(np.asarray(grid.lon)))
+        if args.restart is not None:
+            with np.load(args.restart) as _rz:
+                # The NpzFile itself: only the monthly_* keys are read.
+                _monthly.resume(float(_rz["time_days"]), _rz)
+        _RESTART_EXTRA_PAYLOAD[0] = _monthly.restart_payload
         _monthly_fn = _monthly.add
     # Disarm the process-global SPMD backend on EVERY exit of the loop (a
     # direct run_omip_single() caller has no main()-loop finally).
@@ -7225,6 +7305,7 @@ def run_omip_single(grid_type: str, args) -> dict:
             state = spmd_gather(state)
             _gather_final_ice(jra55_state, spmd_gather_ice)
     finally:
+        _RESTART_EXTRA_PAYLOAD[0] = None
         if _monthly is not None:
             _monthly.close()
         if run_config.enable_mpas_spmd and spmd_step is not None:

@@ -62,6 +62,7 @@ from jax import lax
 from legoesm import constants
 from legoesm.thermo import saturation_specific_humidity
 from legoesm.atmosphere.physics._shared import virtual_temperature
+from legoesm.core.profile_metrics import safe_sqrt_nan
 
 
 # --- IFS cubasen / sucumf defaults (OpenIFS main 8f6f722; sucumf.F90 lines cited) ---
@@ -1090,7 +1091,7 @@ def ifs_departure_search(T, q_v, p_full, p_half, geo_full, geo_half,
         # (the source never resets them; review finding 3)
         jkb = jnp.clip(icbot, 0, nlev - 1); jkt = jnp.clip(ictop, 0, nlev - 1)
         depth = p_half[idx, jkb] - p_half[idx, jkt]
-        wb = jnp.sqrt(jnp.maximum(w2h[idx, jkb], 0.0))       # :670 / :716
+        wb = safe_sqrt_nan(w2h[idx, jkb])                     # :670 / :716
         # PCAPE = MAXVAL(ZCAPE(JL,:)) over ALL departures (cubasen.F90:741)
         cape_out = jnp.maximum(carry["cape_out"], zcape)
 

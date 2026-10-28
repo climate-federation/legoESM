@@ -703,3 +703,115 @@ def test_budget_check_catches_overspending():
     """Control: tripling ePBL's Kd must break the bound, or the check above
     could not fail (measured: 17 of the 18 columns go red at x3)."""
     assert _budget_residual(_ref_cfg(), 0.0, 0.05, kd_scale=3.0) > 1e-6
+
+
+# --- missing forcing (#2179) ------------------------------------------------
+
+@pytest.mark.parametrize("drop", ["tau_x", "tau_y", "q_net", "freshwater"])
+def test_factory_refuses_missing_forcing(drop):
+    """A missing wind, heat or freshwater channel raises (as MOM6 does)
+    instead of silently running the boundary layer unforced."""
+    import types
+    from legoesm.ocean.scm_forcing import build_ocean_surface_forcing_struct
+    scm, _ = _epbl_scm(-200.0, False, nsteps=1)
+    sfc = build_ocean_surface_forcing_struct(
+        scm.forcing, 0.0, scm.state.eta.data.shape, scm.state.T.data.dtype)
+    grid = types.SimpleNamespace(grid_lat=jnp.deg2rad(40.0))
+    scm.physics_fn(scm.state, grid, scm.z_coord, surface_forcing=sfc)
+    with pytest.raises(ValueError, match=drop):
+        scm.physics_fn(scm.state, grid, scm.z_coord,
+                       surface_forcing=sfc._replace(**{drop: None}))
+    with pytest.raises(ValueError, match="tau_x"):
+        scm.physics_fn(scm.state, grid, scm.z_coord, surface_forcing=None)
+
+
+@pytest.mark.parametrize("fn", ["epbl_vertical_mixing", "epbl_diagnostics"])
+@pytest.mark.parametrize("drop", ["tau_x", "tau_y", "B_flux", "tke_forcing"])
+def test_kernels_refuse_missing_forcing(fn, drop):
+    """The public kernels no longer default absent forcing to zero."""
+    from legoesm.ocean.physics.vertical_mixing import epbl as mod
+    cfg = _ref_cfg()
+    h, T, S, dSV_dT, dSV_dS = _column()
+    kw = dict(tau_x=jnp.asarray([0.2]), tau_y=jnp.asarray([0.0]),
+              B_flux=jnp.asarray([0.0]), tke_forcing=jnp.zeros_like(T)[None],
+              absf=jnp.asarray([1e-4]), g=G, rho_0=RHO0)
+    args = (T[None] * 0.0, T[None] * 0.0, T[None], S[None],
+            dSV_dT[None], dSV_dS[None], h, cfg)
+    getattr(mod, fn)(*args, **kw)
+    kw[drop] = None
+    with pytest.raises(ValueError, match=drop):
+        getattr(mod, fn)(*args, **kw)
+
+
+# --- surface buoyancy through the shared helper (#2178) ---------------------
+
+def _factory_forcing(monkeypatch, salt):
+    """Run the ePBL factory on a 20-level SCM column and capture the B_flux
+    and TKE forcing it hands the closure."""
+    import types
+    from legoesm.ocean.physics.vertical_mixing import integration
+    from legoesm.ocean.scm_forcing import build_ocean_surface_forcing_struct
+    scm, _ = _epbl_scm(-200.0, False, nsteps=1)
+    sfc = build_ocean_surface_forcing_struct(
+        scm.forcing, 0.0, scm.state.eta.data.shape, scm.state.T.data.dtype)
+    sfc = sfc._replace(freshwater=jnp.full_like(sfc.q_net, 3e-5),
+                       salt_flux=(None if salt is None
+                                  else jnp.full_like(sfc.q_net, salt)))
+    from legoesm.ocean.physics.vertical_mixing.epbl import (
+        epbl_vertical_mixing as real,
+    )
+    seen = {}
+
+    def spy(*a, **kw):
+        seen.update(kw, args=a)
+        return real(*a, **kw)
+
+    monkeypatch.setattr(integration, "epbl_vertical_mixing", spy)
+    grid = types.SimpleNamespace(grid_lat=jnp.deg2rad(40.0))
+    scm.physics_fn(scm.state, grid, scm.z_coord, surface_forcing=sfc)
+    # Uninstall the spy: the next call's SCM run must not overwrite `seen`.
+    monkeypatch.setattr(integration, "epbl_vertical_mixing", real)
+    st = scm.state
+    return seen, sfc, st.T.data[..., 0], st.S.data[..., 0]
+
+
+def test_buoyancy_flux_is_mom6_rho0_form_with_brine(monkeypatch):
+    """B_flux = -(g/rho_0)(drho_dT netHeat + drho_dS netSalt) at p = 0, with
+    netSalt = -S*fw/rho_0 + brine*1e3/rho_0 (MOM6 calculateBuoyancyFlux1d,
+    GoRho = g/Rho0).  Reverting to the inline form drops the brine term;
+    the helper's default rho(T,S,0) normalisation is off by ~0.1-0.3 %."""
+    from legoesm.ocean.constants_config import ConstantsConfig
+    cc = ConstantsConfig()
+    g, rho0, c_sw = cc.g, cc.rho_0, cc.c_sw
+    brine = 2e-6                                   # kg salt / m^2 / s
+    seen, sfc, T0, S0 = _factory_forcing(monkeypatch, brine)
+    drho_dT, drho_dS = eos_density_derivatives(
+        make_eos_fn(), T0, S0, jnp.zeros_like(T0))
+    net_heat = sfc.q_net / (rho0 * c_sw)
+    net_salt = -S0 * sfc.freshwater / rho0 + brine * 1e3 / rho0
+    want = -(g / rho0) * (drho_dT * net_heat + drho_dS * net_salt)
+    np.testing.assert_allclose(np.asarray(seen["B_flux"]), np.asarray(want),
+                               rtol=1e-12, atol=0.0)
+    # Top-layer TKE forcing: MOM6 cTKE with the same net salt flux
+    # [psu kg/m^2/s] = -S*fw + brine*1e3.
+    _, _, _, _, dSV_dT, dSV_dS, h, cfg = seen["args"]
+    tke_want = surface_tke_forcing(
+        sfc.q_net, -S0 * sfc.freshwater + brine * 1e3, h[..., 0],
+        dSV_dT[..., 0], dSV_dS[..., 0], g=g, rho_0=rho0, c_sw=c_sw,
+        dt=cfg.dt_s)
+    np.testing.assert_allclose(np.asarray(seen["tke_forcing"][..., 0]),
+                               np.asarray(tke_want), rtol=1e-12, atol=0.0)
+
+
+def test_brine_enters_buoyancy_and_tke_forcing(monkeypatch):
+    """Brine rejection makes the surface denser: B_flux falls (less
+    stabilizing) and the top-layer TKE forcing changes; salt_flux None
+    is zero brine."""
+    with_b, *_ = _factory_forcing(monkeypatch, 2e-6)
+    none_b, *_ = _factory_forcing(monkeypatch, None)
+    zero_b, *_ = _factory_forcing(monkeypatch, 0.0)
+    assert float(with_b["B_flux"].ravel()[0]) < float(none_b["B_flux"].ravel()[0])
+    assert (float(with_b["tke_forcing"][..., 0].ravel()[0])
+            != float(none_b["tke_forcing"][..., 0].ravel()[0]))
+    np.testing.assert_array_equal(np.asarray(none_b["B_flux"]),
+                                  np.asarray(zero_b["B_flux"]))

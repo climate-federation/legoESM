@@ -21,7 +21,8 @@
 !
 ! usage: oracle_driver <in.bin> <out.bin>
 !   in.bin : n, dcs, rhow, then qc qi ni ncnst cldf rho (n each; ni per kg grid mean,
-!            ncnst per m3 in-cloud, cldf = CAM6 ast, rho = legoESM moist density)
+!            ncnst per m3 in-cloud, cldf = CAM6 ast, rho = legoESM moist density,
+!            rhod = p/(R_d T), the REL density micro_mg_cam.F90:2507-2508)
 !   out.bin: lcldm dumc effc_mg2 effi_mg2 ni_adj effc_wrf rel_cam  (n each)
 program oracle_driver
   use micro_mg_utils, only: r8, pi, rhoi, rhows, mincld, qsmall, micro_mg_utils_init, &
@@ -32,7 +33,7 @@ program oracle_driver
   real(r8) :: dcs, rhow_lego
   character(len=512) :: fin, fout
   character(128) :: errstring
-  real(r8), allocatable :: a_qc(:), a_qi(:), a_ni(:), a_nc(:), a_cf(:), a_rho(:)
+  real(r8), allocatable :: a_qc(:), a_qi(:), a_ni(:), a_nc(:), a_cf(:), a_rho(:), a_rhod(:)
   real(r8), allocatable :: o_lcldm(:), o_dumc(:), o_effc(:), o_effi(:), o_niadj(:), o_wrf(:), o_rel(:)
   ! micro_mg_cam locals (shapes (pcols,pver) = (1,1); top_lev = ngrdcol = 1)
   type :: state_t
@@ -58,10 +59,10 @@ program oracle_driver
   call get_command_argument(2, fout)
   open(newunit=u, file=trim(fin), access='stream', form='unformatted', status='old')
   read(u) n, dcs, rhow_lego
-  allocate(a_qc(n), a_qi(n), a_ni(n), a_nc(n), a_cf(n), a_rho(n))
+  allocate(a_qc(n), a_qi(n), a_ni(n), a_nc(n), a_cf(n), a_rho(n), a_rhod(n))
   allocate(o_lcldm(n), o_dumc(n), o_effc(n), o_effi(n), o_niadj(n), o_wrf(n), o_rel(n))
   ngrdcol = 1; top_lev = 1
-  read(u) a_qc, a_qi, a_ni, a_nc, a_cf, a_rho
+  read(u) a_qc, a_qi, a_ni, a_nc, a_cf, a_rho, a_rhod
   close(u)
   ! Only dcs reaches effc/effi (ice lambda bounds); the thermodynamic constants
   ! set rain/snow properties that are not used here.
@@ -89,7 +90,7 @@ program oracle_driver
      i = 1; k = 1
 #include "mgcam_icw.inc"
      icwmrst_grid = icwmrst; liqcldf_grid = liqcldf      ! L2445, L2447
-     nc_grid = state_loc%q(:,:,ixnumliq); rho_grid = rho  ! L2455, L2512
+     nc_grid = state_loc%q(:,:,ixnumliq); rho_grid = a_rhod(j)  ! L2455; L2507-2512 dry rho
 #include "mgcam_rel.inc"
      o_rel(j) = rel_grid(1,1)
      ! WRF M2005 PSD on MG2's in-cloud water and the in-cloud number per kg of air

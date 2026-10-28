@@ -396,3 +396,17 @@ def test_default_droplet_number_is_wrf_nccnst():
     """User decision 2026-10-21: the P3 default specified droplet number is
     WRF's nccnst (module_mp_p3.F:196)."""
     assert P3Config().Nc_0 == WRF_NCCNST
+
+
+def test_fp32_cold_cloud_immersion_freezing_is_finite():
+    """Tier-2 decision C8: liquid cloud at 190 K in fp32.  WRF's literal
+    product cdist1*exp(aimm*(T0-T))*gamma(7+mu_c) overflows fp32 before the
+    small dumh**2 factor; the log-space form keeps every output finite."""
+    f = lambda x: jnp.full((1, 1), x, jnp.float32)  # noqa: E731
+    z = f(0.0)
+    hyd = HydrometeorState(q_c=f(2.0e-4), q_r=z, q_i=z, q_s=z, q_g=z, N_c=z, N_r=z, N_i=z)
+    s, pl, ps = P3.p3_step(f(190.0), f(1.0e-6), hyd, f(2.0e4), f(0.37), f(500.0), 20.0, HARD)
+    for k, v in s.items():
+        assert bool(jnp.all(jnp.isfinite(v))), k
+    assert bool(jnp.all(jnp.isfinite(pl))) and bool(jnp.all(jnp.isfinite(ps)))
+
