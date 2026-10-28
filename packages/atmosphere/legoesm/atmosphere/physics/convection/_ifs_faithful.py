@@ -15,7 +15,8 @@ pipeline.  Everything that is NOT the oracle lives here, at the seam:
   PTENT/PTENQ/PTENU/PTENV; detrained condensate (liquid + ice, PLUDE) -> the
   cloud-water source; precipitation generated in the column (ZDMFUP) plus the
   detrained rain and snow (PSNDE) -> the rain source, so the host gets back
-  exactly the water CUDTDQN removes from the vapour.
+  exactly the water CUDTDQN removes from the vapour; the surface snow flux
+  PMFLXS(KLEV+1) -> the frozen surface precipitation.
 
 Six run-set constants come from BechtoldConfig (``_TUNABLES``): epsilon_deep
 -> ENTRORG (organized entrainment and the test parcel), delta_deep -> DETRPEN,
@@ -143,5 +144,6 @@ def ifs_faithful_convection(T, q_v, p_full, p_half, u, v, dt, config, shf_w_m2,
         du_dt_conv=o.ptenu,
         dv_dt_conv=o.ptenv,
         dq_r_conv_dt=g_dp * (o.pdmfup + o.psnde[:, 0] + o.psnde[:, 1]),
+        precip_frozen_sfc=o.pmflxs[:, -1],
     )
     return out, o.pmfu

@@ -341,11 +341,77 @@ def test_reverse_grad_matches_fd_on_convecting_column(_x64, field):
     assert g == pytest.approx(fd, rel=1e-3)
 
 
+def _stable_column(nlev=30, ps=101300.0):
+    """Dry, statically stable sounding (potential temperature rising 40 K
+    across the column, 0.1 g/kg): nothing convects."""
+    from legoesm import constants
+
+    p_half = np.linspace(0.0, ps, nlev + 1)[None, :]
+    p_half[0, 0] = 1000.0
+    p_full = 0.5 * (p_half[:, 1:] + p_half[:, :-1])
+    theta = 300.0 + 40.0 * (1.0 - p_full / ps)
+    T = theta * (p_full / ps) ** (constants.R_d / constants.c_pd)
+    q = np.full_like(T, 1.0e-4)
+    return tuple(jnp.asarray(a, jnp.float64) for a in (T, q, p_full, p_half))
+
+
 @pytest.mark.parametrize("field", ["epsilon_deep", "rprcon"])
-def test_reverse_grad_finite_on_non_convecting_column(_x64, field):
-    g, fd = _param_grad_and_fd(30, field)
+def test_reverse_grad_finite_zero_where_nothing_convects(_x64, field):
+    """#2209's clamped-zero case: on a column where nothing convects the
+    gradient is the finite zero the finite difference measures."""
+    from legoesm.atmosphere.physics.convection.bechtold import bechtold_convection
+    from legoesm.atmosphere.physics.convection.config import BechtoldConfig
+
+    T, q, p_full, p_half = _stable_column()
+    kw = _kwargs(*T.shape)
+    base = BechtoldConfig(use_ifs_ascent=True, dx_m=_DX)
+    out, _, _ = bechtold_convection(T, q, p_full, p_half, config=base, **kw)
+    assert not bool(np.any(np.asarray(out.convective_mask)))
+    v = float(getattr(base, field))
+
+    def f(x):
+        o, _, _ = bechtold_convection(T, q, p_full, p_half,
+                                      config=base._replace(**{field: x}), **kw)
+        return jnp.sum(o.dT_dt)
+
+    g = float(jax.grad(f)(jnp.asarray(v)))
+    h = 1e-4 * v
+    fd = (float(f(jnp.asarray(v + h))) - float(f(jnp.asarray(v - h)))) / (2 * h)
     assert np.isfinite(g)
     assert g == fd == 0.0
+
+
+@pytest.mark.parametrize("g", _GROUPS)
+def test_wrapper_hands_the_host_water_that_closes(fix, g):
+    """What the host receives -- vapour tendency, cloud-water source and rain
+    source -- sums to zero over the column.  Same metric as the oracle
+    budget."""
+    from legoesm.atmosphere.physics.convection.config import BechtoldConfig
+
+    out, _ = _wrapper_out(fix, BechtoldConfig(use_ifs_ascent=True, dx_m=_DX), g)
+    dp = np.diff(fix[f"{g}_p_half"], axis=1)
+    rg = _thermo(fix, "L").RG
+    col = lambda a: np.sum(np.asarray(a) * dp, axis=1) / rg
+    dry = col(out.dq_v_dt)
+    res = dry + col(out.dq_c_conv_dt) + col(out.dq_r_conv_dt)
+    if np.max(np.abs(dry)) == 0.0:
+        assert np.max(np.abs(res)) == 0.0
+        return
+    assert np.max(np.abs(res)) / np.max(np.abs(dry)) <= _TOL
+
+
+def test_wrapper_publishes_the_surface_snow_flux(fix):
+    """F29: the frozen surface precipitation is CUMASTRN's surface snow flux,
+    within the column's surface precipitation."""
+    from legoesm.atmosphere.physics.convection.config import BechtoldConfig
+
+    out, _ = _wrapper_out(fix, BechtoldConfig(use_ifs_ascent=True, dx_m=_DX))
+    snow = np.asarray(out.precip_frozen_sfc)
+    dp = np.diff(fix["L32_p_half"], axis=1)
+    total = np.sum(np.asarray(out.dq_r_conv_dt) * dp, axis=1) / _thermo(fix, "L").RG
+    assert snow.shape == total.shape and np.all(snow >= 0.0)
+    assert np.any(snow > 0.0)
+    assert np.all(snow <= total)
 
 
 def test_clamped_square_roots_pass_nan_through(fix, monkeypatch):
