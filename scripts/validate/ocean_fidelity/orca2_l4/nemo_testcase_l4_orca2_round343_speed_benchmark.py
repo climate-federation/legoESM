@@ -25,6 +25,7 @@ import resource
 import subprocess
 import sys
 import time
+import warnings
 from typing import Any, Mapping, NamedTuple, Sequence
 
 import jax
@@ -1370,6 +1371,11 @@ def run_single_benchmark_arm(
     else:  # normal_gpu_fp32
         require(not jax.config.jax_enable_x64, "normal_gpu_fp32 requires JAX_ENABLE_X64=0")
         require(jax.default_backend() == "gpu", f"normal_gpu_fp32 requires GPU backend, got {jax.default_backend()!r}")
+        warnings.filterwarnings(
+            "ignore",
+            message="Explicitly requested dtype",
+            category=UserWarning,
+        )
         set_policy(PrecisionPolicy.fp32(transcendentals="native"))
         steps = NORMAL_BENCHMARK_STEPS
         daily_check_steps = DAILY_CHECK_STEPS_8D
@@ -1573,6 +1579,41 @@ def validate_benchmark_report(
                 )
 
 
+def assemble_benchmark_report_from_arm_files(
+    *,
+    deck_root: Path = DEFAULT_DECK_ROOT,
+    core_manifest: Path = DEFAULT_CORE_MANIFEST,
+    ice_cover_path: Path = DEFAULT_ICE_COVER_PATH,
+    exact_ref_dir: Path = DEFAULT_EXACT_REF_DIR,
+    output_dir: Path = DEFAULT_OUTPUT_DIR,
+) -> dict[str, Any]:
+    """Assemble and validate the combined 4-arm report from saved arm JSON artifacts."""
+    arms_out: dict[str, Any] = {}
+    for arm_id in ARM_IDS:
+        arm_file = output_dir / f"arm_{arm_id}.json"
+        require(arm_file.is_file(), f"missing arm artifact {arm_file}")
+        arms_out[arm_id] = json.loads(arm_file.read_text(encoding="utf-8"))
+
+    inventory = [spec._asdict() for spec in build_orca2_exact_vs_normal_switch_inventory()]
+    combined = {
+        "round": "orca2_r343",
+        "author": "Argon",
+        "description": "Standalone ORCA2 K0 speed and 8-day accuracy benchmark (exact vs normal mode)",
+        "provenance": worktree_stamp(),
+        "deck_root": str(deck_root),
+        "core_manifest": str(core_manifest),
+        "ice_cover_path": str(ice_cover_path),
+        "exact_ref_dir": str(exact_ref_dir),
+        "switch_inventory": inventory,
+        "arms": arms_out,
+        "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+    }
+    validate_benchmark_report(combined)
+    combined_path = output_dir / "orca2_round343_speed_benchmark_report.json"
+    combined_path.write_text(json.dumps(combined, indent=2) + "\n", encoding="utf-8")
+    return combined
+
+
 def run_all_arms_via_subprocesses(
     *,
     deck_root: Path = DEFAULT_DECK_ROOT,
@@ -1594,7 +1635,6 @@ def run_all_arms_via_subprocesses(
         "normal_gpu_fp32": {"JAX_ENABLE_X64": "0", "CUDA_VISIBLE_DEVICES": str(gpu_device)},
     }
 
-    arms_out: dict[str, Any] = {}
     for arm_id in ARM_IDS:
         env = dict(os.environ)
         env.pop("JAX_PLATFORMS", None)
@@ -1621,37 +1661,23 @@ def run_all_arms_via_subprocesses(
         proc = subprocess.run(cmd, env=env, check=True, text=True, capture_output=True)
         if proc.stdout:
             print(proc.stdout, end="", flush=True)
-        arm_file = output_dir / f"arm_{arm_id}.json"
-        require(arm_file.is_file(), f"subprocess for {arm_id} did not write {arm_file}")
-        arms_out[arm_id] = json.loads(arm_file.read_text(encoding="utf-8"))
 
-    inventory = [spec._asdict() for spec in build_orca2_exact_vs_normal_switch_inventory()]
-    combined = {
-        "round": "orca2_r343",
-        "author": "Argon",
-        "description": "Standalone ORCA2 K0 speed and 8-day accuracy benchmark (exact vs normal mode)",
-        "provenance": worktree_stamp(REPO_ROOT),
-        "deck_root": str(deck_root),
-        "core_manifest": str(core_manifest),
-        "ice_cover_path": str(ice_cover_path),
-        "exact_ref_dir": str(exact_ref_dir),
-        "switch_inventory": inventory,
-        "arms": arms_out,
-        "timestamp_utc": datetime.now(timezone.utc).isoformat(),
-    }
-    validate_benchmark_report(combined)
-    combined_path = output_dir / "orca2_round343_speed_benchmark_report.json"
-    combined_path.write_text(json.dumps(combined, indent=2) + "\n", encoding="utf-8")
-    return combined
+    return assemble_benchmark_report_from_arm_files(
+        deck_root=deck_root,
+        core_manifest=core_manifest,
+        ice_cover_path=ice_cover_path,
+        exact_ref_dir=exact_ref_dir,
+        output_dir=output_dir,
+    )
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--arm",
-        choices=(*ARM_IDS, "all"),
+        choices=(*ARM_IDS, "all", "assemble"),
         default="all",
-        help="Benchmark arm to execute, or 'all' to run all 4 arms in isolated subprocesses.",
+        help="Benchmark arm to execute, 'all' to run all 4 arms, or 'assemble' from saved arm JSONs.",
     )
     parser.add_argument("--deck-root", type=Path, default=DEFAULT_DECK_ROOT)
     parser.add_argument("--core-manifest", type=Path, default=DEFAULT_CORE_MANIFEST)
@@ -1669,18 +1695,27 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv)
-    if args.arm == "all":
-        report = run_all_arms_via_subprocesses(
-            deck_root=args.deck_root,
-            core_manifest=args.core_manifest,
-            ice_cover_path=args.ice_cover_path,
-            exact_ref_dir=args.exact_ref_dir,
-            output_dir=args.output_dir,
-            gpu_device=args.gpu_device,
-            variant=args.variant,
-        )
+    if args.arm in ("all", "assemble"):
+        if args.arm == "all":
+            report = run_all_arms_via_subprocesses(
+                deck_root=args.deck_root,
+                core_manifest=args.core_manifest,
+                ice_cover_path=args.ice_cover_path,
+                exact_ref_dir=args.exact_ref_dir,
+                output_dir=args.output_dir,
+                gpu_device=args.gpu_device,
+                variant=args.variant,
+            )
+        else:
+            report = assemble_benchmark_report_from_arm_files(
+                deck_root=args.deck_root,
+                core_manifest=args.core_manifest,
+                ice_cover_path=args.ice_cover_path,
+                exact_ref_dir=args.exact_ref_dir,
+                output_dir=args.output_dir,
+            )
         print(
-            f"[round343] completed all 4 arms -> "
+            f"[round343] completed 4-arm report -> "
             f"{args.output_dir / 'orca2_round343_speed_benchmark_report.json'}"
         )
         for arm_id, arm in report["arms"].items():
