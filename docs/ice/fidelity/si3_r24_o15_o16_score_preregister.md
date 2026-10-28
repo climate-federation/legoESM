@@ -78,3 +78,33 @@ Any nonzero baseline O15 field/category result, a barrier-stripped control
 that remains 0 ULP, a changed D5 hash, or a changed O8--O12 score refutes the
 corresponding prediction.  The resumed choices are all explicit in the user
 instruction; no O16 kind-15 implementation choice is made.
+
+## Resume 2 preregistration — Decision 187 (2026-10-28)
+
+The user selected the versioned kind-15 reader translation, with re-acquisition
+as the mandatory fallback if the proof or O16 score is not clean.  Before the
+reader and score changes, the frozen predictions are:
+
+1. For master format version 1 and kind 15 only, translating the three reader
+   labels at the writer positions from `cloud_fra,qsr,sfx` to
+   `qsr,sfx,cloud_fra` will make the immutable bytes agree with the committed
+   writer's actual calls at `o8_o16_master_writer.F90:454-457`.  Other versions
+   and kinds remain unchanged or fail closed.
+2. At `kt=1,2,100`, all 12 state fields common to kinds 15 and 18 remain
+   bit-identical; translated `qsr` remains bit-identical to the independently
+   recorded `qsr_oce`; translated `cloud_fra` remains uniformly equal to
+   `pp_cldf=0.81` from `src/OCE/SBC/sbc_phy.F90:69`.
+3. A wrong permutation plant will fail those independent checks before any
+   production score is accepted.
+4. Kind 18 followed through the production `si3_o16_step` call site, including
+   `si3_ice_update_flx`, will match every kind-15 aggregation field and every
+   kind-16 output field at 0 ULP for all `kt=1..100`.  The already certified
+   O15 and kind-20 owned-interior scores remain 0 ULP.
+5. A one-ULP kind-16 output plant and an executing O16 heat-flux arithmetic
+   mutation will each fail.  Any nonzero baseline result, failed proof check,
+   or plant that stays green stops this round and requires re-acquisition with
+   corrected writer order.
+
+ASKED choices: version-1/kind-15-only translation; writer-source and independent
+field proof; wrong-permutation plant; all-step/all-field production scoring;
+0-ULP bar; re-acquisition fallback.  UNASKED choices: none.
