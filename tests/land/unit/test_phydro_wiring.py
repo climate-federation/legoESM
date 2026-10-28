@@ -30,7 +30,7 @@ def _cfg(**kw):
     ``transpiration_stress='phydro'`` (hydraulic stress + optimum capacities
     + the instantaneous optimum as the stomatal model, no slope)."""
     if kw.get("transpiration_stress") == "phydro":
-        cc = CanopyConfig(stomatal_model="phydro", capacity_scheme="p_model",
+        cc = CanopyConfig(stomatal_model="phydro", capacity_scheme="phydro",
                           g1_source="table").validate()
     else:
         cc = CanopyConfig(stomatal_model="medlyn", capacity_scheme="p_model",
@@ -49,7 +49,7 @@ def test_phydro_requires_pmodel_switch():
     cfg = MultiLayerLandConfig(surface_scheme=CanopyConfig(),
                                transpiration_stress="phydro")
     st = init_multilayer_land_state(2, cfg)
-    with pytest.raises(ValueError, match="P-model switch"):
+    with pytest.raises(ValueError, match="together|P-model switch"):
         step_multilayer_land(st, _forcing(2), cfg, U_min=1.0, dt=1800.0)
 
 
@@ -145,9 +145,11 @@ def test_g1_nonmedlyn_is_refused_and_the_phydro_arm_is_one_configuration():
         step_multilayer_land(st, _forcing(2), cfg_bad, U_min=1.0, dt=1800.0)
 
     for cc, msg in ((CanopyConfig(stomatal_model="medlyn", capacity_scheme="p_model",
-                                  g1_source="p_model"), "set together"),
+                                  g1_source="p_model"), "together"),
                     (CanopyConfig(stomatal_model="phydro", capacity_scheme="p_model",
-                                  g1_source="p_model"), "g1_source='table'")):
+                                  g1_source="table"), "together"),
+                    (CanopyConfig(stomatal_model="phydro", capacity_scheme="phydro",
+                                  g1_source="p_model"), "g1_source must be 'table'")):
         cfg_half = MultiLayerLandConfig(surface_scheme=cc.validate(),
                                         transpiration_stress="phydro")
         st_h = init_multilayer_land_state(2, cfg_half)
@@ -241,7 +243,7 @@ def test_phydro_two_leaf_applies_no_empirical_stress():
     stomatal slope/intercept: with the hydraulic supply and the soil-evaporation
     stress held fixed, the solved GPP / LE / H are identical for a wet and a
     dry root-zone factor.  The same change moves the beta_theta fluxes."""
-    cc_ph = CanopyConfig(stomatal_model="phydro", capacity_scheme="p_model",
+    cc_ph = CanopyConfig(stomatal_model="phydro", capacity_scheme="phydro",
                          g1_source="table").validate()
     wet = _two_leaf_fluxes(cc_ph, 1.0, transpiration_stress="phydro")
     dry = _two_leaf_fluxes(cc_ph, 0.2, transpiration_stress="phydro")

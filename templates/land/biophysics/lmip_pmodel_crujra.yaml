@@ -30,20 +30,20 @@ physics:
   land_mode: multilayer
   surface_scheme: two_leaf_canopy
   bulk_scheme: most
-  stomatal_model: medlyn          # required by g1_source=p_model
+  # stomatal_model is set by 'optimality' below (medlyn for least_cost, phydro
+  # for phydro); the baseline arm gives it explicitly (optimality: none).
   snow_albedo_feedback: true
   snow_scheme: single
   enable_freeze_thaw: true        # REQUIRED globally (boreal columns NaN without)
   soil_n_layers: 10
   soil_depth_m: 3.0
   soil_growth_factor: 2.0
-  # --- the optimality switches (each named explicitly, no reliance on defaults).
-  # Shipped value = the least-cost arm; submit_lmip_ginsburg.sh --arm overrides
-  # these three for the baseline and P-hydro arms. ---
-  canopy_capacity_scheme: p_model
-  canopy_g1_source: p_model
+  # --- the optimality arm.  'optimality' fills canopy_capacity_scheme,
+  # canopy_g1_source, transpiration_stress and stomatal_model at once
+  # (least_cost | phydro | none = give the switches explicitly).  Shipped
+  # value = the least-cost arm; submit_lmip_ginsburg.sh --arm overrides it. ---
+  optimality: least_cost
   canopy_vcmax_profile: kn              # unchanged from the baseline (one variable at a time)
-  transpiration_stress: beta_theta
   vc_max25: null
   g1: null
   gs_max: null
@@ -85,6 +85,7 @@ output:
            runoff, precip, reverted, pmodel_chi, pmodel_vcmax25,
            pmodel_vcmax25_nostress, pmodel_g1, pmodel_wfrac, pmodel_psi_soil,
            pmodel_psi_leaf, ci_ca_sun_day, ci_ca_shade_day, day_frac,
+           phydro_dpsi_sun, phydro_dpsi_shade, canopy_converged,
            pmodel_n_rubisco_leaf, pmodel_n_electron_transport_leaf]
   - name: monthly_state
     freq: monthly

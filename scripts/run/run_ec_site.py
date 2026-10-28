@@ -820,6 +820,31 @@ def _best_year_slice(driver_nc: str, d) -> tuple[int, int, int]:
     return int(idx[0]), int(len(idx)), best
 
 
+def _resolve_optimality(args) -> dict:
+    """The four optimality switches from ``--optimality`` and/or the explicit
+    flags (same table as lmip_config: OPTIMALITY_SWITCHES).  An explicit flag
+    must agree with the wrapper; absent flags take the driver defaults."""
+    from legoesm.land.lmip_config import OPTIMALITY_SWITCHES
+    # config key -> (argparse dest, run_site keyword)
+    _map = {"canopy_capacity_scheme": ("canopy_capacity_scheme", "capacity_scheme"),
+            "canopy_g1_source": ("canopy_g1_source", "g1_source"),
+            "transpiration_stress": ("transpiration_stress", "transpiration_stress"),
+            "stomatal_model": ("canopy_stomatal_model", "canopy_stomatal_model")}
+    given = {k: getattr(args, dest) for k, (dest, _) in _map.items()}
+    if args.optimality is not None:
+        for k, v in OPTIMALITY_SWITCHES[args.optimality].items():
+            if given[k] is not None and given[k] != v:
+                raise ValueError(
+                    f"--optimality {args.optimality} sets {k}={v!r} but "
+                    f"--{_map[k][0].replace('_', '-')} {given[k]} was also given; "
+                    "set one or the other")
+            given[k] = v
+    defaults = {"canopy_capacity_scheme": "prescribed", "canopy_g1_source": "table",
+                "transpiration_stress": "beta_theta", "stomatal_model": None}
+    return {kw: (defaults[k] if given[k] is None else given[k])
+            for k, (_, kw) in _map.items()}
+
+
 def run_site(driver_nc: str, mode: str, out_dir: str, chunk: int,
              max_steps: int | None = None, start_step: int = 0,
              soil: str = "default", bottom_bc: str = "free_drainage",
@@ -855,7 +880,7 @@ def run_site(driver_nc: str, mode: str, out_dir: str, chunk: int,
     # P-model switches vs the manual scale flags: the canopy overwrites the
     # scaled quantity when the optimality source is on, so a non-default scale
     # would be silently inert — refuse loudly (no hidden choices).
-    _pm_cap = capacity_scheme == "p_model"
+    _pm_cap = capacity_scheme in ("p_model", "phydro")
     _pm_g1 = g1_source == "p_model"
     if transpiration_stress != "beta_theta" and mode != "prognostic":
         # Diagnostic mode drives the canopy directly (no multilayer land
@@ -1354,15 +1379,22 @@ def main() -> int:
                     help="PLANT wilting point [m3/m3] for root-zone transpiration, "
                          "SEPARATE from the soil wilting point; below the soil "
                          "value = deep-rooted extraction (e.g. phreatophytes)")
-    ap.add_argument("--canopy-capacity-scheme", default="prescribed",
-                    choices=["prescribed", "p_model"],
+    ap.add_argument("--optimality", default=None, choices=["least_cost", "phydro"],
+                    help="wrapper that sets the optimality switches at once: "
+                         "'least_cost' (p_model capacities + p_model g1, "
+                         "beta_theta stress, medlyn) or 'phydro' (phydro "
+                         "capacities, table g1, phydro stress, phydro stomata). "
+                         "Any switch also given must agree.")
+    ap.add_argument("--canopy-capacity-scheme", default=None,
+                    choices=["prescribed", "p_model", "phydro"],
                     dest="canopy_capacity_scheme",
                     help="source of the leaf photosynthetic capacities: "
-                         "'prescribed' (default, site/PFT values) or 'p_model' "
-                         "(acclimated optimality Vcmax25 + Jmax ratio; "
-                         "incompatible with the --vcmax-*-scale flags and "
-                         "--clmml-vcmax25).")
-    ap.add_argument("--canopy-g1-source", default="table",
+                         "'prescribed' (default, site/PFT values), 'p_model' "
+                         "(least-cost acclimated Vcmax25 + Jmax ratio) or "
+                         "'phydro' (P-hydro acclimated optimum; two-leaf only); "
+                         "the optimality values are incompatible with the "
+                         "--vcmax-*-scale flags and --clmml-vcmax25.")
+    ap.add_argument("--canopy-g1-source", default=None,
                     choices=["table", "p_model"], dest="canopy_g1_source",
                     help="source of the Medlyn slope: 'table' (default) or "
                          "'p_model' (least-cost xi; requires the medlyn "
@@ -1374,13 +1406,14 @@ def main() -> int:
                          "(e.g. land.p_model.kphio), validated against each "
                          "scheme's __param_spec__ bounds and spliced into the "
                          "land config - the same layer run_lmip --params uses")
-    ap.add_argument("--transpiration-stress", default="beta_theta",
+    ap.add_argument("--transpiration-stress", default=None,
                     choices=["beta_theta", "phydro"],
                     dest="transpiration_stress",
                     help="root-zone transpiration limitation: 'beta_theta' "
                          "(default, empirical soil-moisture stress) or "
-                         "'phydro' (Joshi-2022 hydraulic profit optimum; "
-                         "prognostic mode + a P-model switch required)")
+                         "'phydro' (Joshi-2022 hydraulic supply; the P-hydro "
+                         "arm, with --canopy-capacity-scheme phydro and "
+                         "--canopy-stomatal-model phydro; prognostic mode)")
     ap.add_argument("--canopy-vcmax-profile", default="kn",
                     choices=["kn", "coordination"],
                     dest="canopy_vcmax_profile",
@@ -1437,10 +1470,7 @@ def main() -> int:
                  plant_wilting_point=args.plant_wilting_point,
                  spinup_steps=args.spinup_steps,
                  interception=args.interception,
-                 capacity_scheme=args.canopy_capacity_scheme,
-                 g1_source=args.canopy_g1_source,
-                 canopy_stomatal_model=args.canopy_stomatal_model,
-                 transpiration_stress=args.transpiration_stress,
+                 **_resolve_optimality(args),
                  vcmax_profile=args.canopy_vcmax_profile,
                  params_path=args.params)
     return 0

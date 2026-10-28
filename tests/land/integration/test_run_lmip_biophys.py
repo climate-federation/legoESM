@@ -519,10 +519,9 @@ def test_calibrated_land_rejects_a_contradicting_config(tmp_path):
 
 
 @pytest.mark.parametrize("arm,extra", [
-    ("baseline", {}),
-    ("least_cost", {"canopy_capacity_scheme": "p_model", "canopy_g1_source": "p_model"}),
-    ("phydro", {"canopy_capacity_scheme": "p_model", "canopy_g1_source": "table",
-                "transpiration_stress": "phydro", "stomatal_model": "phydro"}),
+    ("baseline", {"stomatal_model": "medlyn"}),
+    ("least_cost", {"optimality": "least_cost"}),
+    ("phydro", {"optimality": "phydro"}),
 ])
 def test_optimality_arms_run_on_the_global_driver(tmp_path, arm, extra):
     """The three arms of the global comparison (prescribed / least-cost with
@@ -544,7 +543,7 @@ def test_optimality_arms_run_on_the_global_driver(tmp_path, arm, extra):
     cfg = validate_config({
         "grid": {"type": "latlon", "resolution": 4},
         "physics": {"land_mode": "multilayer", "surface_scheme": "two_leaf_canopy",
-                    "bulk_scheme": "most", "stomatal_model": "medlyn", **extra},
+                    "bulk_scheme": "most", **extra},
         "forcing": {"source": "synthetic", "data_dir": "",
                     "year_start": 2000, "year_end": 2000},
         "surfdata": {"path": str(sd)},

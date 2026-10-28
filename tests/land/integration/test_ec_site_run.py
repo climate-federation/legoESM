@@ -656,7 +656,7 @@ def test_run_site_phydro_and_profile_wiring(tmp_path):
                      g1_source="p_model", canopy_stomatal_model="medlyn",
                      transpiration_stress="phydro")
     m_ph = mod.run_site(driver_nc, "prognostic", str(tmp_path / "o2"),
-                        chunk=96, capacity_scheme="p_model",
+                        chunk=96, capacity_scheme="phydro",
                         g1_source="table", canopy_stomatal_model="phydro",
                         transpiration_stress="phydro")
     assert np.isfinite(m_ph["GPP"]["rmse"])
@@ -700,3 +700,25 @@ def test_run_site_vcmax25_source(tmp_path, capsys):
                          chunk=96, vcmax25_source=src)
         assert np.isfinite(m["GPP"]["rmse"])
         assert f"vcmax25-source={src}" in capsys.readouterr().out
+
+
+def test_cli_optimality_wrapper_resolves_and_refuses_disagreement():
+    """--optimality fills the four switches the driver passes to run_site;
+    an explicit flag must agree; without it the explicit flags/defaults pass."""
+    import argparse
+    import pytest
+    mod = _load_driver_module()
+    ns = lambda **kw: argparse.Namespace(**{"optimality": None, "canopy_capacity_scheme": None,
+                                            "canopy_g1_source": None, "transpiration_stress": None,
+                                            "canopy_stomatal_model": None, **kw})
+    assert mod._resolve_optimality(ns(optimality="phydro")) == {
+        "capacity_scheme": "phydro", "g1_source": "table",
+        "transpiration_stress": "phydro", "canopy_stomatal_model": "phydro"}
+    assert mod._resolve_optimality(ns(optimality="least_cost")) == {
+        "capacity_scheme": "p_model", "g1_source": "p_model",
+        "transpiration_stress": "beta_theta", "canopy_stomatal_model": "medlyn"}
+    assert mod._resolve_optimality(ns(canopy_stomatal_model="medlyn")) == {
+        "capacity_scheme": "prescribed", "g1_source": "table",
+        "transpiration_stress": "beta_theta", "canopy_stomatal_model": "medlyn"}
+    with pytest.raises(ValueError, match="set one or the other"):
+        mod._resolve_optimality(ns(optimality="phydro", canopy_stomatal_model="medlyn"))

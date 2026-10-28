@@ -185,7 +185,8 @@ def test_init_state_uses_config_constants_and_override():
 
 
 def test_valid_selector_tuples():
-    assert pm.VALID_CAPACITY_SCHEMES == ("prescribed", "p_model")
+    assert pm.VALID_CAPACITY_SCHEMES == ("prescribed", "p_model", "phydro")
+    assert pm.OPTIMALITY_CAPACITY_SCHEMES == ("p_model", "phydro")
     assert pm.VALID_G1_SOURCES == ("table", "p_model")
 
 

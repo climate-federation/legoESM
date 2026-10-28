@@ -102,6 +102,10 @@ def compute_effective_beta(
     # Acclimated Vcmax25 replaces the prescribed capacity, the predicted
     # Medlyn slope replaces g1_med (when selected), and the coordination
     # rjv25 + acclimated growth temperature thread into the FvCB solve.
+    if config.stomata.capacity_scheme == "phydro":
+        raise ValueError(
+            "capacity_scheme='phydro' (the P-hydro arm) lives in the two-leaf "
+            "canopy; the big-leaf stomata have no instantaneous hydraulic optimum")
     _pm_on = (config.stomata.capacity_scheme == "p_model"
               or config.stomata.g1_source == "p_model")
     _rjv25 = None

@@ -248,7 +248,10 @@ class PModelConfig(NamedTuple):
 
 # Valid selector values for the CanopyConfig switches wired in
 # surface_scheme/two_leaf_canopy.py; imported by canopy/config.py.
-VALID_CAPACITY_SCHEMES = ("prescribed", "p_model")
+# capacity_scheme: "prescribed" (table) | "p_model" (least-cost acclimated
+# optimum) | "phydro" (P-hydro acclimated optimum, two-leaf canopy only).
+VALID_CAPACITY_SCHEMES = ("prescribed", "p_model", "phydro")
+OPTIMALITY_CAPACITY_SCHEMES = ("p_model", "phydro")
 VALID_G1_SOURCES = ("table", "p_model")
 
 
@@ -297,7 +300,7 @@ def pmodel_switches_active(surface_scheme=None, stomata=None) -> bool:
     for obj in (surface_scheme, stomata):
         if obj is None:
             continue
-        if getattr(obj, "capacity_scheme", "prescribed") == "p_model":
+        if getattr(obj, "capacity_scheme", "prescribed") in OPTIMALITY_CAPACITY_SCHEMES:
             return True
         if getattr(obj, "g1_source", "table") == "p_model":
             return True

@@ -956,6 +956,11 @@ class CLMMLCanopyConfig(NamedTuple):
             raise ValueError(
                 f"unknown g1_source {self.g1_source!r}; the Medlyn-slope "
                 f"scheme must be one of {VALID_G1_SOURCES}")
+        if self.capacity_scheme == "phydro":
+            raise ValueError(
+                "capacity_scheme='phydro' (the P-hydro arm) lives in the "
+                "two-leaf canopy; the CLM-ML scheme carries its own plant "
+                "hydraulics")
         if self.g1_source == "p_model" and self.stomatal_model != "medlyn":
             raise ValueError(
                 "g1_source='p_model' predicts a MEDLYN slope and requires "

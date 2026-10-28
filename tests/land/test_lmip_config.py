@@ -414,3 +414,39 @@ def test_co2_file_defaults_to_empty_and_must_be_a_string():
     base["forcing"]["co2_file"] = 412
     with pytest.raises(ValueError, match="co2_file"):
         validate_config(base)
+
+
+def test_optimality_wrapper_fills_the_switches_and_refuses_disagreement():
+    """physics.optimality fills the four optimality switches (least_cost |
+    phydro); a switch also given must agree; the P-hydro arm's three 'phydro'
+    switches must come together."""
+    import copy
+    from legoesm.land.lmip_config import OPTIMALITY_SWITCHES, validate_config
+    base = {
+        "grid": {"type": "latlon", "resolution": 4},
+        "physics": {"land_mode": "multilayer", "surface_scheme": "two_leaf_canopy",
+                    "bulk_scheme": "most"},
+        "forcing": {"source": "synthetic", "data_dir": "", "year_start": 2000, "year_end": 2000},
+        "surfdata": {"path": "x.nc"},
+        "time": {"dt": 3600.0, "n_steps": 24, "start_doy": 0.0},
+        "output": {"tapes": [{"name": "d", "freq": "daily", "average": "mean", "vars": ["GPP"]}]},
+    }
+    for arm, switches in OPTIMALITY_SWITCHES.items():
+        cfg = copy.deepcopy(base); cfg["physics"]["optimality"] = arm
+        phys = validate_config(cfg).physics
+        assert "optimality" not in phys
+        for k, v in switches.items():
+            assert phys[k] == v, (arm, k)
+    cfg = copy.deepcopy(base); cfg["physics"]["optimality"] = "phydro"
+    cfg["physics"]["stomatal_model"] = "medlyn"
+    with pytest.raises(ValueError, match="set one or the other"):
+        validate_config(cfg)
+    cfg = copy.deepcopy(base); cfg["physics"]["optimality"] = "wue"
+    with pytest.raises(ValueError, match="optimality"):
+        validate_config(cfg)
+    # Half an arm by hand is refused; the whole arm by hand is accepted.
+    cfg = copy.deepcopy(base); cfg["physics"]["transpiration_stress"] = "phydro"
+    with pytest.raises(ValueError, match="together"):
+        validate_config(cfg)
+    cfg = copy.deepcopy(base); cfg["physics"].update(OPTIMALITY_SWITCHES["phydro"])
+    assert validate_config(cfg).physics["canopy_capacity_scheme"] == "phydro"

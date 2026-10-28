@@ -31,10 +31,8 @@ physics:
   soil_depth_m: 3.0
   soil_growth_factor: 2.0
   # --- the switches under test (each named explicitly, no reliance on defaults) ---
-  canopy_capacity_scheme: p_model
-  canopy_g1_source: p_model
+  optimality: least_cost                # = p_model capacities + p_model g1, beta_theta, medlyn
   canopy_vcmax_profile: kn              # unchanged from the baseline (one variable at a time)
-  transpiration_stress: beta_theta
   vc_max25: null
   g1: null
   gs_max: null

@@ -22,9 +22,12 @@
 #   ... --override forcing.co2_file=
 #
 # Arms (tests/land/integration/test_run_lmip_biophys.py):
-#   baseline    prescribed capacities + table g1
-#   least_cost  P-model capacities + P-model g1, beta(theta) stress
-#   phydro      P-model capacities + P-model g1, P-hydro stress
+#   baseline    optimality=none + prescribed capacities, table g1, beta(theta)
+#               stress, medlyn stomata (all given explicitly)
+#   least_cost  physics.optimality=least_cost (p_model capacities + p_model g1,
+#               beta(theta) stress, medlyn)
+#   phydro      physics.optimality=phydro (phydro capacities, table g1, phydro
+#               stress, phydro instantaneous optimum as the stomatal model)
 set -euo pipefail
 
 ARM=least_cost
@@ -72,9 +75,9 @@ while [[ $# -gt 0 ]]; do
 done
 
 case "$ARM" in
-    baseline)   ARM_OVR=(canopy_capacity_scheme=prescribed canopy_g1_source=table transpiration_stress=beta_theta) ;;
-    least_cost) ARM_OVR=(canopy_capacity_scheme=p_model canopy_g1_source=p_model transpiration_stress=beta_theta) ;;
-    phydro)     ARM_OVR=(canopy_capacity_scheme=p_model canopy_g1_source=p_model transpiration_stress=phydro) ;;
+    baseline)   ARM_OVR=(optimality=none canopy_capacity_scheme=prescribed canopy_g1_source=table transpiration_stress=beta_theta stomatal_model=medlyn) ;;
+    least_cost) ARM_OVR=(optimality=least_cost) ;;
+    phydro)     ARM_OVR=(optimality=phydro) ;;
     *) echo "unknown --arm '$ARM' (baseline | least_cost | phydro)" >&2; exit 2 ;;
 esac
 (( YEAR_END >= YEAR_START )) || { echo "--year-end < --year-start" >&2; exit 2; }

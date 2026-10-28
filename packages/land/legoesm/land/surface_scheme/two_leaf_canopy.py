@@ -40,6 +40,7 @@ from legoesm.land.p_model import (
     acclimated_capacities,
     acclimated_capacities_c4,
     stressed_rjv25_factor,
+    OPTIMALITY_CAPACITY_SCHEMES,
 )
 from legoesm.land.canopy.radiative_transfer import (
     split_sw_components, canopy_shortwave_rt, coordination_kn,
@@ -414,25 +415,29 @@ def compute_two_leaf_canopy_fluxes(
     dpsi_seed = None  # P-hydro acclimated draw-down, seeds the Newton dpsi
     _phydro_on = getattr(
         land_config, "transpiration_stress", "beta_theta") == "phydro"
-    # The P-hydro arm is ONE configuration: the hydraulic supply replaces the
-    # empirical stress (transpiration_stress='phydro'), the optimum's
-    # capacities replace the table (capacity_scheme='p_model') and the
-    # instantaneous optimum replaces the stomatal slope (stomatal_model=
-    # 'phydro', g1_source='table').  Any other combination would leave a
-    # switch silently inert, so it is refused here.
-    if _phydro_on != (cc.stomatal_model == "phydro"):
+    # The P-hydro arm is ONE configuration, named "phydro" on every switch it
+    # replaces: the acclimated optimum's capacities (capacity_scheme), the
+    # hydraulic supply in place of the empirical stress (transpiration_
+    # stress) and the instantaneous optimum in place of a stomatal slope
+    # (stomatal_model; g1_source='table').  Any other combination would leave
+    # a switch silently inert, so it is refused here (physics.optimality in
+    # the run configs fills all three at once).
+    _ph_flags = {"capacity_scheme": cc.capacity_scheme == "phydro",
+                 "transpiration_stress": _phydro_on,
+                 "stomatal_model": cc.stomatal_model == "phydro"}
+    if any(_ph_flags.values()) and not all(_ph_flags.values()):
         raise ValueError(
-            "transpiration_stress='phydro' and stomatal_model='phydro' select "
-            "the two halves of the P-hydro arm and must be set together; got "
-            f"transpiration_stress={'phydro' if _phydro_on else 'beta_theta'!r}, "
+            "the P-hydro arm sets capacity_scheme='phydro', "
+            "transpiration_stress='phydro' and stomatal_model='phydro' "
+            "together (physics.optimality=phydro does this); got "
+            f"capacity_scheme={cc.capacity_scheme!r}, transpiration_stress="
+            f"{'phydro' if _phydro_on else 'beta_theta'!r}, "
             f"stomatal_model={cc.stomatal_model!r}")
-    if _phydro_on and (cc.capacity_scheme != "p_model" or cc.g1_source != "table"):
+    if _phydro_on and cc.g1_source != "table":
         raise ValueError(
-            "the P-hydro arm needs capacity_scheme='p_model' (the optimum's "
-            "capacities) and g1_source='table' (no stomatal slope is read "
-            f"under stomatal_model='phydro'); got capacity_scheme="
-            f"{cc.capacity_scheme!r}, g1_source={cc.g1_source!r}")
-    if cc.capacity_scheme == "p_model" or cc.g1_source == "p_model":
+            "the P-hydro arm reads no stomatal slope (stomatal_model='phydro'); "
+            f"g1_source must be 'table', got {cc.g1_source!r}")
+    if cc.capacity_scheme in OPTIMALITY_CAPACITY_SCHEMES or cc.g1_source == "p_model":
         # Raises with a clear message when this caller does not carry the
         # acclimation state (slab-land / patch-mosaic until wired): no silent
         # fall-back to prescribed parameters.
@@ -472,7 +477,7 @@ def compute_two_leaf_canopy_fluxes(
         _caps4 = acclimated_capacities_c4(pmodel_acclim, land_config.p_model)
         chi_opt = ((1.0 - fC4) * (_hcaps.chi if _phydro_on else _caps.chi)
                    + fC4 * _caps4.chi_c4)
-        if cc.capacity_scheme == "p_model":
+        if cc.capacity_scheme in OPTIMALITY_CAPACITY_SCHEMES:
             # C3 leaf-top capacity + Jmax25/Vcmax25 ratio, and the C4 leaf-top
             # capacity (rpmodel c4 method: full-kinetics chi with beta/9,
             # mj = mc = 1; no Jmax — the Collatz branch has none).

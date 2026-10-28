@@ -1634,7 +1634,10 @@ def two_leaf_capacity_diagnostics(state, land_params, config) -> dict:
     ``vcmax25_nostress``  the same before the empirical stress factor
     ``slope``             stomatal slope fed to the kernel, after stress
     ``chi``               optimum ci/ca (NaN for prescribed capacities)
-    ``psi_leaf``          P-hydro leaf water potential [MPa] (NaN otherwise)
+    ``psi_leaf``          P-hydro acclimated leaf water potential [MPa] (NaN otherwise)
+    ``rsoil``             this step's soil-to-root resistance per leaf area [MPa m2 s/mol]
+    ``psi_soil_acc``      P-hydro acclimated (running-mean) soil potential [MPa] (NaN otherwise)
+    ``rsoil_acc``         P-hydro acclimated soil-to-root resistance (NaN otherwise)
     """
     from legoesm.land.p_model import acclimated_capacities, optimal_chi
     from legoesm.land.phydro import (
@@ -1656,6 +1659,7 @@ def two_leaf_capacity_diagnostics(state, land_params, config) -> dict:
     phydro = config.transpiration_stress == "phydro"
     vc, slope = _get(lp, "Vcmax25_C3_leaf", nan), _get(lp, "m_C3", nan)
     chi, psi_leaf = nan, nan
+    psi_s_acc, rsoil_acc = nan, nan
     acc = state.pmodel_acclim
     if acc is not None:
         gstar = optimal_chi(acc.t_mean_K, acc.vpd_mean_pa, acc.co2_mean_ppm,
@@ -1669,11 +1673,12 @@ def two_leaf_capacity_diagnostics(state, land_params, config) -> dict:
                                   psi_s_mpa=acc.psi_s_mean_mpa),
                 config.phydro, config.p_model)
             psi_leaf = caps.psi_leaf_mpa
+            psi_s_acc, rsoil_acc = acc.psi_s_mean_mpa, acc.rsoil_mean
             slope = nan   # no stomatal slope is read under stomatal_model="phydro"
         else:
             caps = acclimated_capacities(acc, config.p_model)
         chi = caps.chi
-        if cc.capacity_scheme == "p_model":
+        if cc.capacity_scheme in ("p_model", "phydro"):
             vc = caps.vcmax25_leaf
         if cc.g1_source == "p_model":
             slope = slope_for_model(cc.stomatal_model, chi, acc, gstar,
@@ -1684,6 +1689,7 @@ def two_leaf_capacity_diagnostics(state, land_params, config) -> dict:
         "vcmax25": vc * stress, "vcmax25_nostress": vc,
         "slope": slope * (1.0 if (cc.g1_source == "p_model" or phydro) else stress),
         "chi": chi, "psi_leaf": psi_leaf,
+        "rsoil": supply.rsoil_leaf, "psi_soil_acc": psi_s_acc, "rsoil_acc": rsoil_acc,
     }
 
 
