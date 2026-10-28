@@ -20,6 +20,23 @@ Not the oracle (open questions, not ported):
   moisture convergence (the oracle always reads a vertical velocity);
 - ``cape`` is a non-entraining parcel CAPE, not the oracle's ``zcape``.
 
+KNOWN DIFFERENCE (RULE 5), PENDING the user's answers to the nine open
+questions of #2136 (scan top, saturation curve, default sharpness,
+``w_grid=None`` fallback, zero-argument gate, fp32 gradient, positivity,
+CAPE, cloud-water source); the per-case gaps are pinned in a test only
+after those answers.  The oracle's hard ``if`` switches (LCL condensation,
+buoyancy, ``w_lcl > 0``, ``ptenq > 0``) are sigmoids of width
+``1 / icond_sharpness``; ``icond_sharpness -> infinity`` (1e12 in the
+oracle test) recovers the oracle to round-off.  Measured on #2136 at the
+default ``icond_sharpness = 50`` (field-normalised
+``max|ours - oracle| / max|oracle|``, fp64): L60 fixture dT 0.49, dq 0.38
+(Kuo-Anthes 0.35 / 0.47), 51 columns fire vs the oracle's 38; all 1535
+ECMWF profiles dT 0.50, dq 0.41, 758 columns fire only in ours; L32 fixture
+dT 7.2e-5, dq 4.7e-4.  Main cause: ``sigmoid(50 w_lcl / max|w|)`` lets a
+column with a weakly negative LCL velocity fire partially.  Invariants the
+smoothing breaks: none beyond the oracle's own (no positivity, column water
+not closed with divergence in the cloud).
+
 The whole point of Kuo's parameterization
 -----------------------------------------
 Kuo's moisture/heat source is the **large-scale moisture convergence**

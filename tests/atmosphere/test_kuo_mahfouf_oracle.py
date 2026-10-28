@@ -163,6 +163,27 @@ def test_gradients_finite_fp64_and_fp32(fx):
             assert float(jnp.max(jnp.abs(grads[0]))) > 0.0
 
 
+def test_check_grads_at_default_sharpness(fx):
+    """RULE 5 gradient test: forward- and reverse-mode derivatives through the
+    smooth gates at the default ``icond_sharpness`` agree with finite
+    differences (fp64, order 2), w.r.t. T.  Loss as in the finite-gradient
+    test above."""
+    from jax.test_util import check_grads
+
+    for g in GROUPS:
+        q, pf, ph, w, pq = (
+            jnp.asarray(fx[f"{g}_{k}"], jnp.float64) for k in ("q", "p_full", "p_half", "w", "ptenq")
+        )
+
+        def loss(T):
+            o = kuo_convection(T, q, pf, ph, 900.0, KuoConfig(), pq, w)
+            return jnp.sum(o.dT_dt) + 1.0e3 * jnp.sum(o.dq_v_dt)
+
+        T = jnp.asarray(fx[f"{g}_T"], jnp.float64)
+        assert float(jnp.max(jnp.abs(jax.grad(loss)(T)))) > 0.0, g
+        check_grads(loss, (T,), order=2, modes=("fwd", "rev"))
+
+
 def test_eager_jit_parity(fx):
     for g in GROUPS:
         a = _run(fx, g, KuoConfig())
