@@ -1,21 +1,20 @@
-# SI3 round 24 receipt — O15 landed; O16 kind 15 held
+# SI3 round 24 receipt — O15 and O16 landed
 
 Date: 2026-10-28
 Round: `si3_r24`
 Parent: `87a1c8843803f0cb6263a2a84f44f8d83183ee96`
-Preregistration commits: `cac0b9a415`, `ac2ad34834`
-Production implementation commit: `276014c01b`
+Preregistration commits: `cac0b9a415`, `ac2ad34834`, `ccb248ae0d`
+Production implementation and scorer commits: `276014c01b`, `254406a53a`
 Independent review: operator (Claude)
 
 ## Verdict
 
-**LANDED — O15 is bit exact through the production entry point for all 100
-steps, fields, cells, and category elements.** The NEMO-statement
-materialization barriers are necessary: the barrier-stripped control restores
-the confirmed +1-ULP result. Kind 20 is also 0 ULP over exactly the owned
-interior. O16 kind 15 remains deliberately untranslated and unscored while the
-user chooses translation or re-acquisition; only translation-option evidence
-was prepared.
+**LANDED — O15 and O16 are bit exact through their production entry points for
+all 100 steps and every owned field.** The O15 NEMO-statement materialization
+barriers remain necessary. Decision 187's version-1/kind-15 reader translation
+is proved from the committed writer order and independent fields; the wrong-
+permutation plant fails. Production `ice_update_flx` aggregation and every
+kind-16 output, plus kind 20 over exactly its owned interior, are all 0 ULP.
 
 ## O15 production result
 
@@ -51,13 +50,13 @@ NEMO's final stress stores execute only for `ji=ntsi..ntei` and
 `jj=ntsj..ntej` (`iceupdate.f90:410-419`). The scorer therefore derives the
 Python slices from each record's bounds and scores only that 180 by 148 owned
 interior for full-halo `utau` and `vtau`; the recorded `taum` is already
-interior (`scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1927-1941`).
+interior (`scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:2015-2030`).
 
 The 100-step result is 0 unequal / 7,992,000 elements, maximum 0 ULP, no first
 non-bit. A one-ULP `utau` plant at the first owned cell fails. Unwritten halo
 bytes are neither recorded as NEMO-owned outputs nor scored.
 
-## O16 kind-15 translation evidence — no implementation
+## O16 versioned kind-15 reader translation
 
 The committed writer fixes the kind-15 tail order as `at_i_b`,
 `wfx_snw_dyn`, `qsr`, `sfx`, `cloud_fra`, `tmask`, `smask0`,
@@ -66,31 +65,64 @@ admitted version-1 reader instead labels the first five of those as `at_i_b`,
 `wfx_snw_dyn`, `cloud_fra`, `qsr`, `sfx`
 (`nemo_si3_o8_o16_master_gate.py:171-180`).
 
-The evidence-only checker verifies the committed writer sequence and, at
+The reader therefore translates those three byte positions only when
+`version == 1` and `kind == 15`; every other version/kind returns unchanged,
+and unsupported master versions already fail closed
+(`scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:236-270,396-503`).
+The evidence checker reads the committed writer calls in source order and, at
 steps 1, 2, and 100, obtains these independent checks
-(`scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1778-1845`):
+(`scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1826-1900`):
 
 - all 12 state fields also present in kind 18 align bit-for-bit, for 36 checks;
-- reader-labelled `cloud_fra` equals the independently recorded `qsr_oce`
-  block bit-for-bit;
-- reader-labelled `sfx` is uniformly 0.81, matching NEMO's independently
+- translated `qsr` equals the independently recorded `qsr_oce` block
+  bit-for-bit;
+- translated `cloud_fra` is uniformly 0.81, matching NEMO's independently
   defined `pp_cldf` (`sbc_phy.F90:69`);
-- a planted writer-order permutation fails the evidence check.
+- a planted wrong reader permutation fails the independent `qsr` check.
 
-The checker reports `translation_applied=false`. Kinds 15, 16, and 18 are not
-opened by the resumed scorer
-(`scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1849-1875`).
-No versioned translation and no re-acquisition was implemented.
+The direct test pins the writer/schema orders, version/kind restriction, all 36
+cross-kind checks, both independent values, and the failing permutation plant
+(`tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:170-191`).
 
 Kind 19 has a separate version-1 writer/schema permutation: the writer emits
 `tmod_io`, `utau`, `vtau` (`o8_o16_master_writer.F90:476-486`). The kind-20
-stress harness uses that fixed producer order only to reconstruct the already
-authorized kind-20 input; it does not translate kind 15.
+stress harness continues to use that fixed producer order separately.
+
+## O16 production result
+
+The scorer reconstructs kind 18, runs the production `si3_o16_step` call site,
+which performs `ice_var_glo2eqv`, `ice_var_agg`, and `si3_ice_update_flx`, then
+scores every kind-15 state/total field and every kind-16 output field
+(`packages/ice/legoesm/ice/si3_finalize.py:825-882` and
+`scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1903-2051`).
+Across `kt=1..100` under CPU fp64, glibc/libm, and production JIT:
+
+- aggregation into kind 15: 0 unequal / 948,384,000 elements, maximum 0 ULP;
+- all 14 kind-16 fields: 0 unequal / 59,139,200 elements, maximum 0 ULP;
+- kind-20 owned interior: 0 unequal / 7,992,000 elements, maximum 0 ULP;
+- every score has `first_non_bit = None`.
+
+The headless-safe disjoint artifacts cover every step exactly once:
+
+- `001..025`: SHA-256 `ca59f204737a9ee9d92b23aab0b02d1ed85d5c94e465ebb839e003937f4ec294`;
+- `026..050`: SHA-256 `f1d8baf0d1c1d7425c2db7365bfe6526d3c3a28c4d307ca525c5b160e0e08751`;
+- `051..065`: SHA-256 `0ae03fd37dac18de6d7fc3d549e3110f0567bd849fe1bc30a3fbd4b3631582dd`;
+- `066..080`: SHA-256 `f2f56c6dc7b8b375d76e4e134faeb6395780434d06693a85b837ea8fd8256e7f`;
+- `081..095`: SHA-256 `84863b41d7cf854c6f2647d974b9108caf45a5766d9bfbec985694a4219c790b`;
+- `096..100`: SHA-256 `34b79a739831aad8f9c269587a414a605d5949b47d36f22302b29363cc1e4a69`.
+
+They live under
+`/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/round24/` as
+`o15_o16_translated_score_<range>.json`. The monolithic command hit its fixed
+10-minute wrapper before producing an artifact; the six completed ranges use
+the identical scorer and frozen protocol. A one-ULP `qsr` output plant and an
+executing model plant that omits `hfx_res` both fail the O16 flux score.
 
 ## Compatibility and controls
 
-- Focused O15/kind-20/evidence scorer tests: 4 passed, 12 deselected;
-  `test_si3_finalize.py`: 4 passed.
+- Translation proof plus representative `kt=1,2,100` score: 2 passed, 16
+  deselected. O15/O16 one-ULP, barrier, stress, and executing heat-term plants:
+  4 passed, 14 deselected. `test_si3_finalize.py`: 4 passed.
 - O8–O12 all-step production score: `PASS_ALL_O8_O12_0_ULP`; artifact
   `o8_o12_master_score.json`, SHA-256
   `fa2cc5fc534b7789dc565c491d58472784bf6e568296635397afb2169c4c69bf`.
@@ -100,8 +132,8 @@ authorized kind-20 input; it does not translate kind 15.
   b7a7329bed74c17918fa3cbc11c7613acb2074851e2357a08869fcd4661e12d2`.
   Probe artifact SHA-256:
   `ab03c16a4f0a424d6be496733f815153f21c4e09681dd4ccbc09d0571b05c726`.
-- Receipt citation gate, default gate, and ratchets are recorded after the
-  final receipt anchors are committed.
+- Per-receipt citation gate, default citation gate, and focused ratchets are
+  recorded after the final receipt anchors are committed.
 
 ## Choices
 
@@ -112,23 +144,22 @@ authorized kind-20 input; it does not translate kind 15.
 - Score O15 through production at 0 ULP for every step, field, and category;
   retain the D5 year hash and O8–O12 score.
 - Score kind 20 only where NEMO's loop writes the owned interior.
-- For kind 15, prepare translation evidence only and wait for the user's
-  translation-versus-re-acquisition decision.
+- Per Decision 187, translate only version-1/kind-15 bytes according to the
+  writer's actual order; prove it with independent fields and a wrong-
+  permutation plant, then score every O16 step and field at 0 ULP.
 
 ### UNASKED
 
 - No NEMO configuration or admitted master-byte change.
 - No relaxation of the 0-ULP bar.
-- No kind-15 reader translation or re-acquisition.
+- No re-acquisition because the proof and all-step O16 score are clean.
 - No nested Codex review; independent review is the operator (Claude).
 
 ## CONFIRMED versus PLAUSIBLE
 
 CONFIRMED: O15's 0-ULP all-step production score; the barrier-stripped +1-ULP
-control; kind 20's loop-derived owned domain and 0-ULP score; the writer-fixed
-kind-15 permutation and independent-value alignment; unchanged O8–O12 and D5
-results.
+control; the version-1/kind-15 writer-order translation and failing wrong-
+permutation plant; production O16 aggregation, every kind-16 field, and the
+kind-20 owned domain at 0 ULP for every step; unchanged O8–O12 and D5 results.
 
-PLAUSIBLE, not claimed: a future versioned kind-15 translation would make its
-remaining O16 outputs admissibly scoreable. That option remains a user
-decision.
+PLAUSIBLE: none within the O15/O16 claim.
