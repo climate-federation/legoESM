@@ -857,14 +857,16 @@ def si3_ice_dyn_rdgrft(
     selected = c0 & (fortran_sum0(prep[0][..., 1:]) > 0.0) & (prep[8] > 0.0)  # :311-323
     diag0 = (jnp.zeros(c0.shape, jnp.int32), c0 & prep[10], c0 & prep[11])
 
-    def one_pass(_, carry):
-        st, cn, op, dv, active, n, (n_sh, exc, opf) = carry
+    def active_pass(carry):
+        st, cn, op, dv, _, n, (n_sh, exc, opf) = carry
         pr = _rdgrft_prep(st["a_i"], st["v_i"], st["ato_i"], cn, op, config)  # :346-348
         op_p = jnp.where(selected, pr[9], op)
         new = _rdgrft_shift(st, selected, pr[:9] + (op_p,), sst, sss, hi_max, config)  # :351-352
-        on = active & selected
-        donated = on & (pr[8] > 0.0) & jnp.any(pr[0][..., 1:] > 0.0, axis=-1)  # :727-729 for some jl1
-        diag = (n_sh + donated.astype(jnp.int32), exc | (on & pr[10]), opf | (on & pr[11]))
+        donated = (
+            selected & (pr[8] > 0.0) & jnp.any(pr[0][..., 1:] > 0.0, axis=-1)
+        )  # :727-729 for some jl1
+        diag = (n_sh + donated.astype(jnp.int32), exc | (selected & pr[10]),
+                opf | (selected & pr[11]))
         zfac = sr(1.0 - sr(new["ato_i"] + fortran_sum0(new["a_i"])))  # :371
         conv = jnp.abs(zfac) < _RDG_EPSI10
         dv_new = jnp.where(selected & ~conv, sr(zfac * r1), dv)  # :378
@@ -872,13 +874,18 @@ def si3_ice_dyn_rdgrft(
         op_new = jnp.where(selected, jnp.where(conv, 0.0, fmax(0.0, dv_new)), op_p)  # :374,380
         ato_conv = fmax(0.0, sr(1.0 - fortran_sum0(new["a_i"])))  # :375
         new["ato_i"] = jnp.where(selected & conv, ato_conv, new["ato_i"])
-        keep = {k: jnp.where(active, new[k], st[k]) for k in st}
-        nxt = active & jnp.any(selected & ~conv)  # :358,377 iterate_ridging
-        return (keep, jnp.where(active, cn_new, cn), jnp.where(active, op_new, op),
-                jnp.where(active, dv_new, dv), nxt, n + active.astype(jnp.int32), diag)
+        nxt = jnp.any(selected & ~conv)  # :358,377 iterate_ridging
+        return (new, cn_new, op_new, dv_new, nxt, n + jnp.asarray(1, jnp.int32), diag)
+
+    def one_pass(_, carry):
+        # A static bound keeps reverse-mode AD, while the data-dependent
+        # branch executes NEMO's expensive body only while iterate_ridging > 0.
+        return jax.lax.cond(carry[4], active_pass, lambda c: c, carry)
 
     active0 = jnp.any(selected)  # :334 IF( npti > 0 )
     carry = (s, closing_net, opning, zdivu, active0, jnp.asarray(0, jnp.int32), diag0)
-    s, _, _, _, _, n_passes, diag = jax.lax.fori_loop(0, _RDG_ITERMAX - 1, one_pass, carry)  # :341
+    s, _, _, _, _, n_passes, diag = jax.lax.fori_loop(
+        0, _RDG_ITERMAX - 1, one_pass, carry
+    )  # :341 DO WHILE( iterate_ridging > 0 .AND. iter < jp_itermax )
     return SI3RdgrftResult(SI3RdgrftState(**{k: s[k] for k in SI3RdgrftState._fields}),
                            selected, n_passes, *diag)

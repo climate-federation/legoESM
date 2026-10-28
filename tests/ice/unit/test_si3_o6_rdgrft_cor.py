@@ -683,6 +683,24 @@ def test_eager_equals_jit():
     _assert_bits(jit_c, eag_c._asdict(), SI3IceCorState._fields, "cor eager")
 
 
+def test_rdgrft_stops_calling_shift_after_nemo_converges(monkeypatch):
+    """The primal executes NEMO's active passes, not 19 masked expensive calls."""
+    s, divu, delta, sst, sss = _inputs()
+    calls = 0
+    original = rdg_mod._rdgrft_shift
+
+    def counted(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(rdg_mod, "_rdgrft_shift", counted)
+    with jax.disable_jit():
+        got = _run_rdgrft(s, divu, delta, sst, sss, jit=False)
+    assert calls == int(got.n_passes)
+    assert 1 < calls < rdg_mod._RDG_ITERMAX - 1
+
+
 def test_gradient_finite_and_matches_central_difference():
     s, divu, delta, sst, sss = _inputs()
     ji, jj = 3, 3
