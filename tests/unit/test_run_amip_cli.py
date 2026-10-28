@@ -4127,6 +4127,20 @@ def test_morrison_ice_snow_d_auto_round_trips():
     assert d.morrison_ice_snow_d_auto is None
 
 
+def test_cam6_aerosol_number_scale_round_trips():
+    """--cam6-aerosol-number-scale reaches ExperimentConfig; default 1.0."""
+    parser = build_arg_parser()
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--microphysics", "morrison",
+        "--morrison-prognostic-droplet-number", "--cam6-aerosol-dir", "/x",
+        "--cam6-aerosol-number-scale", "2.5",
+    ]), parser))
+    assert cfg.cam6_aerosol_number_scale == 2.5
+    d = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert d.cam6_aerosol_number_scale == 1.0
+
+
 def test_morrison_flavor_yaml_route():
     """--config YAML route (keys become parser defaults): morrison_flavor: sam
     must reach ExperimentConfig, and an explicit CLI flag must still win."""

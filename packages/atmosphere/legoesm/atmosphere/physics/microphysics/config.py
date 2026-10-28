@@ -285,6 +285,7 @@ __param_spec__ = {
             # kk2000 laws read, so the production core set trains warm rain.
             "autocon_fact": {"units": "1", "bounds": (0.1, 20.0), "tunable_tier": 1, "transform": "sigmoid", "category": "autoconversion", "reference": "CAM6 MG2 kk2000 (micro_mg_utils.F90) = 0.01*1350*qc^2.47*Nc^-1.1 vs this port's 1350*qc^2.47*Nc^-1.79: ratio 0.01*Nc^0.69 = 0.10-0.51 over Nc 30-300 cm^-3; lower bound covers that CAM6-equivalent range; upper bound 20 leaves room for enhancement tests", "shape": None},
             "accre_enhan_fact": {"units": "1", "bounds": (0.1, 10.0), "tunable_tier": 1, "transform": "sigmoid", "category": "accretion", "reference": "CAM6 MG2 accre_enhan multiplier on KK2000 accretion (micro_mg_utils.F90 accrete_cloud_water_rain; micro_mg_cam.F90 sets it to 1); bounds one decade each way. MG2 pairs it with the cloud-number sink npra=pra*nc/qc, which this port lacks (N_c is not evolved when predict_Nc=False)", "shape": None},
+            "cam6_aerosol_number_scale": {"units": "1", "bounds": (0.3, 3.0), "tunable_tier": 1, "transform": "sigmoid", "category": "number_concentration", "reference": "proposed, pending user approval 2026-10-28: scale on the prescribed CAM6 PPE MAM4 aerosol number (and mass) entering microp_aero_run", "shape": None},
         },
     },
     "P3Config": {
@@ -1124,6 +1125,11 @@ class MorrisonConfig(NamedTuple):
     # it; 0 = MG2's hard test (user decision 2026-10-22, 15a; KNOWN DIFFERENCE
     # in _warm_rain.mg2_frozen_rain_ice_fraction).
     mg2_frozen_rain_ice_ramp_frac: float = 0.1
+    # Multiplier on the prescribed CAM6 aerosol (per-mode number AND species
+    # masses, so the per-mode size is unchanged) handed to the droplet
+    # activation; read only under prognostic_droplet_number.  1.0 = the
+    # climatology as on file (bit-identical).  APPENDED AT THE TUPLE END.
+    cam6_aerosol_number_scale: float = 1.0
 
 
 # Hard ceiling of ``sed_cfl_substeps_max`` wherever it is set (leaf, applier,

@@ -225,17 +225,22 @@ def trop_cloud_top_lev(pref_mid, trop_cloud_top_press: float) -> int:
     return int(above[0]) if above.size else len(pref_mid)
 
 
-def aerosol_at_model_levels(aer: dict, setup: Cam6AerosolActivation, pmid):
+def aerosol_at_model_levels(aer: dict, setup: Cam6AerosolActivation, pmid,
+                            number_scale: float = 1.0):
     """Per-step ``forcing["cam6_aerosol"]`` (``{"rec": {var: (2, lev, ncol)},
     "PS": (2, ncol), "fact1": ()}``) time- and vertically interpolated to
     ``pmid`` (ncol, nlev): ``(aer_num (nmode, ncol, nlev) [1/kg], aer_mass)``,
-    ``aer_mass`` a per-mode tuple of (nspec, ncol, nlev) [kg/kg] in MAM4_SPECIES order."""
+    ``aer_mass`` a per-mode tuple of (nspec, ncol, nlev) [kg/kg] in MAM4_SPECIES order.
+    ``number_scale`` (``MorrisonConfig.cam6_aerosol_number_scale``) multiplies
+    the number and every species mass alike, so each mode's size is unchanged;
+    1.0 returns the climatology exactly."""
     def one(var):
         r = aer["rec"][var]
         return interpolate_to_model(r[0].T, r[1].T, aer["PS"][0], aer["PS"][1], aer["fact1"],
                                     setup.hyam, setup.hybm, setup.p0, pmid)
-    num = jnp.stack([one(v) for v in PPE_NUMBER_FIELDS])
-    mass = tuple(jnp.stack([one(f"{s}_a{m + 1}") for s in sp]) for m, sp in enumerate(MAM4_SPECIES))
+    num = number_scale * jnp.stack([one(v) for v in PPE_NUMBER_FIELDS])
+    mass = tuple(number_scale * jnp.stack([one(f"{s}_a{m + 1}") for s in sp])
+                 for m, sp in enumerate(MAM4_SPECIES))
     return num, mass
 
 

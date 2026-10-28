@@ -2109,6 +2109,11 @@ class ExperimentConfig(NamedTuple):
     # sharpness=1/width).  0 = the hard clip (pre-#2106 behaviour).
     ice_skin_melt_cap_width_K: float = _ICE_SFC_DEFAULTS[
         "ice_skin_melt_cap_width_K"]
+    # MorrisonConfig.cam6_aerosol_number_scale: multiplier on the prescribed
+    # CAM6 aerosol number (and species masses, so mode sizes are unchanged)
+    # read by the droplet activation.  1.0 = the climatology as on file.
+    # APPENDED AT THE TUPLE END (positional ABI).
+    cam6_aerosol_number_scale: float = 1.0
 
     def _liquid_partition_resolved(self) -> bool:
         """Is CLUBB's cloud-liquid exchange selected, by ANY route?
@@ -4193,6 +4198,7 @@ class ExperimentConfig(NamedTuple):
             ("morrison_hom_ice_nuc_N", 1.0e4, 1.0e7),
             ("morrison_autocon_fact", 0.1, 20.0),
             ("morrison_accre_enhan_fact", 0.1, 10.0),
+            ("cam6_aerosol_number_scale", 0.3, 3.0),
         ):
             _v = getattr(self, _f)
             if _v is None and _f == "morrison_ice_snow_d_auto":
@@ -4220,6 +4226,15 @@ class ExperimentConfig(NamedTuple):
                 f"microphysics='morrison' (got {self.microphysics!r}); on "
                 "any other scheme they would be silently inert or retune a "
                 "foreign scheme. Drop them or switch schemes.")
+        # cam6_aerosol_number_scale is read ONLY by the prescribed-aerosol
+        # droplet activation: overriding it with that off would be inert.
+        if ("cam6_aerosol_number_scale" in _morrison_touched
+                and not self.morrison_prognostic_droplet_number):
+            raise ValueError(
+                "cam6_aerosol_number_scale override requires "
+                "morrison_prognostic_droplet_number=True — the leaf is read "
+                "only by the CAM6 droplet activation and would be silently "
+                "inert.")
         # morrison_hom_ice_nuc_N is read ONLY inside the homogeneous-
         # nucleation branch: overriding it with the flag off would be the
         # exact silently-inert class the scheme gate above closes.

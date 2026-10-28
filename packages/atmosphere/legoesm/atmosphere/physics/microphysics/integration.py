@@ -539,7 +539,8 @@ def _make_hydrostatic_microphysics(
                 _npccn = cam6_activation_npccn(
                     T_col, q_v_col, p_full_col, p_half_col, _get_tracer("N_c"),
                     hydrometeors.q_c, hydrometeors.q_i, _ast, phys_state, forcing,
-                    cam6_activation, dt)
+                    cam6_activation, dt,
+                    number_scale=scheme_config.cam6_aerosol_number_scale)
                 _kw["npccn"] = number_per_mass_to_per_volume(_npccn, rho)
                 # pbuf CLDO = ast from top_lev down (micro_mg_cam.F90:1829)
                 _below = jnp.arange(nlev) >= cam6_activation.top_lev
@@ -662,9 +663,10 @@ def cam6_activation_columns(T_col, q_v_col, p_full_col, p_half_col):
 
 
 def cam6_activation_npccn(T_col, q_v_col, p_full_col, p_half_col, N_c_per_kg, q_c, q_i,
-                          ast, phys_state, forcing, setup, dtmicro):
+                          ast, phys_state, forcing, setup, dtmicro, number_scale=1.0):
     """CAM6 ``microp_aero_run`` npccn [1/kg/s] from the prescribed aerosol in
-    ``forcing["cam6_aerosol"]`` and the carried CLUBB / CLDO fields."""
+    ``forcing["cam6_aerosol"]`` (scaled by ``number_scale``, see
+    ``aerosol_at_model_levels``) and the carried CLUBB / CLDO fields."""
     from legoesm.atmosphere.physics.microphysics.cam6_aerosol_climatology import (
         aerosol_at_model_levels)
     from legoesm.atmosphere.physics.microphysics.cam6_dropmixnuc import (
@@ -676,7 +678,7 @@ def cam6_activation_npccn(T_col, q_v_col, p_full_col, p_half_col, N_c_per_kg, q_
             "the microphysics; the driver must thread the CAM6 aerosol climatology.")
     ncol, nlev = T_col.shape
     pmid, pint, rpdel, zm = cam6_activation_columns(T_col, q_v_col, p_full_col, p_half_col)
-    aer_num, aer_mass = aerosol_at_model_levels(aer, setup, pmid)
+    aer_num, aer_mass = aerosol_at_model_levels(aer, setup, pmid, number_scale)
     return cam6_microp_aero_npccn(
         N_c_per_kg, T_col, pmid, pint, rpdel, zm, q_c, q_i,
         phys_state.clubb_wp2_iface.reshape(ncol, nlev + 1),

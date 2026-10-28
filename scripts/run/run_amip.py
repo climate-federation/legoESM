@@ -2198,6 +2198,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         help="Directory of the CAM6 PPE member-000 aerosol "
                              "climatology and MAM4 property files (sha256-pinned) "
                              "read by --morrison-prognostic-droplet-number.")
+    parser.add_argument("--cam6-aerosol-number-scale", type=float,
+                        default=ExperimentConfig._field_defaults[
+                            "cam6_aerosol_number_scale"],
+                        dest="cam6_aerosol_number_scale",
+                        help="Multiplier on the prescribed CAM6 aerosol number "
+                             "(and species masses, so mode sizes are unchanged) "
+                             "read by --morrison-prognostic-droplet-number. "
+                             "1.0 = the climatology as on file.")
     parser.add_argument("--morrison-flavor", choices=["mg", "sam"],
                         default="mg", dest="morrison_flavor",
                         help="Morrison parameter flavor: 'mg' (E3SM/CESM "
@@ -3021,6 +3029,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         morrison_warm_rain_incloud=args.morrison_warm_rain_incloud,
         morrison_prognostic_droplet_number=args.morrison_prognostic_droplet_number,
         cam6_aerosol_dir=args.cam6_aerosol_dir,
+        cam6_aerosol_number_scale=args.cam6_aerosol_number_scale,
         land_canopy_rh_cap_smoothing_width=args.land_canopy_rh_cap_smoothing_width,
         land_canopy_zeta_cap_smoothing_width=args.land_canopy_zeta_cap_smoothing_width,
         land_canopy_most_n_iters=args.land_canopy_most_n_iters,

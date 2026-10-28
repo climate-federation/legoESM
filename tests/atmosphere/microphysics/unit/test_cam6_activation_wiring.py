@@ -79,6 +79,63 @@ def test_aerosol_at_model_levels_is_interpolate_to_model_per_field():
     np.testing.assert_array_equal(np.asarray(num[1]), np.asarray(want))
 
 
+def test_aerosol_number_scale_multiplies_number_and_mass_alike():
+    """``number_scale`` scales every mode's number and species masses by the
+    same factor (mode size unchanged); the default is the climatology exactly."""
+    ncol, nlev, nlevf = 3, 5, 4
+    recs = {k: jnp.asarray(v) for k, v in _fake_records(nlevf, ncol).items()}
+    aer = {"rec": {k: v for k, v in recs.items() if k != "PS"}, "PS": recs["PS"],
+           "fact1": jnp.asarray(0.25)}
+    setup = C.Cam6AerosolActivation(None, np.zeros(nlevf), np.linspace(0.1, 0.9, nlevf),
+                                    1.0e5, 0, 1)
+    pmid = jnp.linspace(5.0e3, 9.5e4, nlev)[None, :] * jnp.ones((ncol, 1))
+    num1, mass1 = C.aerosol_at_model_levels(aer, setup, pmid)
+    for m, v in enumerate(C.PPE_NUMBER_FIELDS):            # default: bit-identical
+        r = recs[v]
+        want = C.interpolate_to_model(r[0].T, r[1].T, recs["PS"][0], recs["PS"][1], 0.25,
+                                      setup.hyam, setup.hybm, 1.0e5, pmid)
+        np.testing.assert_array_equal(np.asarray(num1[m]), np.asarray(want))
+    num, mass = C.aerosol_at_model_levels(aer, setup, pmid, 2.5)
+    np.testing.assert_array_equal(np.asarray(num), 2.5 * np.asarray(num1))
+    for a, b in zip(mass, mass1):
+        np.testing.assert_array_equal(np.asarray(a), 2.5 * np.asarray(b))
+
+
+def test_aerosol_number_scale_threads_from_the_flat_config():
+    """ExperimentConfig scalar -> MorrisonConfig leaf through the resolver both
+    lanes share (MPAS included), the --params scalar map, and validate_strict."""
+    from legoesm.atmosphere.physics.microphysics.config import MorrisonConfig
+    from legoesm.driver.config import ExperimentConfig
+    from legoesm.driver.physics_pipeline import thread_morrison_scalars
+    from legoesm.driver.run_config_yaml import (
+        apply_params_to_config, build_atm_scalar_param_map)
+    leaf = MorrisonConfig()
+    assert leaf.cam6_aerosol_number_scale == 1.0
+    assert ExperimentConfig._field_defaults["cam6_aerosol_number_scale"] == 1.0
+    on = dict(microphysics="morrison", morrison_prognostic_droplet_number=True,
+              cam6_aerosol_dir="/x")
+    base = thread_morrison_scalars(ExperimentConfig(**on), "morrison", leaf)
+    assert base.cam6_aerosol_number_scale == 1.0
+    cfg = ExperimentConfig(**on, cam6_aerosol_number_scale=2.5)
+    cfg.validate_strict()
+    scaled = thread_morrison_scalars(cfg, "morrison", leaf)
+    assert scaled == base._replace(cam6_aerosol_number_scale=2.5)
+    smap = build_atm_scalar_param_map()
+    q = "atm.micro.MorrisonConfig.cam6_aerosol_number_scale"
+    assert smap[q] == "cam6_aerosol_number_scale"
+    got = apply_params_to_config(ExperimentConfig(**on), {q: 0.5}, driver="run_amip",
+                                 scalar_param_map=smap)
+    assert got.cam6_aerosol_number_scale == 0.5
+    with pytest.raises(SystemExit):                       # spec bounds (0.3, 3.0)
+        apply_params_to_config(ExperimentConfig(**on), {q: 5.0}, driver="run_amip",
+                               scalar_param_map=smap)
+    with pytest.raises(ValueError, match="cam6_aerosol_number_scale"):
+        ExperimentConfig(**on, cam6_aerosol_number_scale=5.0).validate_strict()
+    with pytest.raises(ValueError, match="cam6_aerosol_number_scale"):
+        ExperimentConfig(microphysics="morrison",
+                         cam6_aerosol_number_scale=2.0).validate_strict()
+
+
 def test_turbulence_publishes_the_activation_inputs():
     from legoesm.atmosphere.physics.turbulence import integration as ti
     from legoesm.atmosphere.physics.turbulence.output import TurbulenceOutput
@@ -158,7 +215,7 @@ def test_mg_preset_never_overwrites_an_explicit_ice_to_snow_choice():
             r(morrison_flavor="mg", ice_to_snow_scheme=bad)
 
 
-def _lane(n=2):
+def _lane(n=2, aerosol_scale=1.0):
     from legoesm.atmosphere.physics.clouds.config import CloudConfig
     from legoesm.atmosphere.physics.combined import PhysicsConfig, make_physics
     from legoesm.atmosphere.physics.convection import ConvectionConfig
@@ -175,7 +232,8 @@ def _lane(n=2):
                                     clubb=CLUBBConfig(prognostic=True)),
         microphysics=MicrophysicsConfig(scheme="morrison", morrison=MorrisonConfig(
             warm_rain_scheme="kk2000_cam6", warm_rain_incloud=True,
-            liquid_from_closure=True, prognostic_droplet_number=True)))
+            liquid_from_closure=True, prognostic_droplet_number=True,
+            cam6_aerosol_number_scale=aerosol_scale)))
     nlevf = 4
     setup = C.Cam6AerosolActivation(_parse()[2], np.zeros(nlevf), np.linspace(0.05, 1.0, nlevf),
                                     1.0e5, 0, 40)
@@ -248,6 +306,33 @@ def test_activation_runs_before_microphysics_with_carried_inputs(monkeypatch):
         assert np.all(np.isfinite(a["npccn"])) and np.any(a["npccn"] != 0.0)
         # per kg -> per m^3 by a positive density: same zeros and signs
         np.testing.assert_array_equal(np.sign(m["npccn"]), np.sign(a["npccn"]))
+
+
+def test_lane_hands_the_activation_the_scaled_aerosol(monkeypatch):
+    """The MPAS physics lane passes MorrisonConfig.cam6_aerosol_number_scale to
+    the activation: x2 doubles the aerosol number and mass it sees."""
+    from legoesm.atmosphere.physics.physics_state import init_physics_state
+    seen = []
+    real_act = D.cam6_microp_aero_npccn
+
+    def act(*a, **k):
+        seen.append((np.asarray(a[13]), [np.asarray(m) for m in a[14]]))
+        return real_act(*a, **k)
+    monkeypatch.setattr(D, "cam6_microp_aero_npccn", act)
+    mesh, sigma, state = _moist_mg2_state()
+    ncol, nlev = state.T.data.shape
+    runs = []
+    for scale in (1.0, 2.0):
+        fn, cfg, nlevf = _lane(2, scale)
+        seen.clear()
+        fn(state, mesh, sigma, phys_state=init_physics_state(ncol, nlev, cfg),
+           forcing=_forcing(ncol, nlevf))
+        runs.append(seen[0])
+    (n1, m1), (n2, m2) = runs
+    np.testing.assert_array_equal(n2, 2.0 * n1)
+    for a, b in zip(m2, m1):
+        np.testing.assert_array_equal(a, 2.0 * b)
+    assert np.any(n1 > 0.0)
 
 
 def test_gradient_through_the_aerosol_is_finite_and_nonzero():
