@@ -10992,7 +10992,7 @@ _reanchor('scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scor
 _reanchor('scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1503-1535',
           'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1549-1580',
           anchors=["# 5. Rung O12: Kind 10 -> Kind 11 (si3_ice_thd_pnd and step_ponds(scheme='si3_lev'))",
-                   'spec.name, f10[spec.name], f11[spec.name], kt=kt, category=0', 32])
+                   ('spec.name, f10[spec.name], f11[spec.name], kt=kt, category=0', 2), 32])
 _reanchor(
     'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1778-1845',
     'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1826-1899',
