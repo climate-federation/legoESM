@@ -28,6 +28,15 @@ from legoesm.ocean.eos import (
 # S ≫ floor, so this is a no-op on wet cells.
 _EOS_SALINITY_FLOOR = 1.0e-3
 
+
+def eos_salinity(S, eos_fn):
+    """Salinity to hand an EOS autodiff: floored at ``_EOS_SALINITY_FLOOR``
+    unless the EOS is Wright (``None`` or ``wright_eos``), which has no
+    sqrt(S) term and stays bit-identical."""
+    if eos_fn is None or eos_fn is wright_eos:
+        return S
+    return jnp.maximum(S, _EOS_SALINITY_FLOOR)
+
 # Shared float32-eps floor for the vertical-mixing kernels.
 _EPS = float(jnp.finfo(jnp.float32).eps)
 
@@ -781,9 +790,9 @@ def surface_buoyancy_flux(
     # ρ/N²/Ri use S-EOS — a half-applied closure).
     if rho_0_norm:
         fn = wright_eos if eos_fn is None else eos_fn
-        # Same salinity floor as the generic-EOS path below; none for Wright.
-        S_eval = (S_sfc if eos_fn is None
-                  else jnp.maximum(S_sfc, _EOS_SALINITY_FLOOR))
+        # Same salinity floor as the generic-EOS path below; none for Wright
+        # (given or defaulted), so a run passing wright_eos stays bit-identical.
+        S_eval = eos_salinity(S_sfc, fn)
 
         def _alpha_sfc():
             drho_dT, _ = eos_density_derivatives(fn, T_sfc, S_eval, p_sfc)
