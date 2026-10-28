@@ -1576,6 +1576,7 @@ def run_single_benchmark_arm(
         "memory": memory,
         "daily_accuracy": daily_accuracy,
         "switch_inventory_check": inventory_check,
+        "provenance": worktree_stamp(),
         "timestamp_utc": datetime.now(timezone.utc).isoformat(),
     }
 
