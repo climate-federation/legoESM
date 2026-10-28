@@ -250,13 +250,16 @@ def _shift_boundary(
     v_ip: Field,
     v_il: Field,
     t_su: Field,
+    h_i: Field,
     e_s: Field,
     e_i: Field,
     szv_i: Field,
     rn_amax_2d: Field,
     config: SI3ORCA2StateConfig,
+    _materialize_transfer_statements: bool = True,
 ) -> tuple[Field, ...]:
     """One ``itd_shiftice`` call, including its roundoff and cap sections."""
+    statement_result = sr if _materialize_transfer_statements else (lambda x: x)
     v_d = v_i[..., donor]
     a_d = a_i[..., donor]
     zworkv = _safe_ratio(pdvice, v_d, active & (v_d >= _EPSI10))
@@ -265,8 +268,8 @@ def _shift_boundary(
 
     def transfer3(x: Field, fraction: Field) -> Field:
         ztrans = sr(x[..., donor] * fraction)
-        donor_new = sr(x[..., donor] - ztrans)
-        receiver_new = sr(x[..., receiver] + ztrans)
+        donor_new = statement_result(x[..., donor] - ztrans)
+        receiver_new = statement_result(x[..., receiver] + ztrans)
         x = x.at[..., donor].set(jnp.where(active, donor_new, x[..., donor]))
         return x.at[..., receiver].set(
             jnp.where(active, receiver_new, x[..., receiver])
@@ -274,8 +277,8 @@ def _shift_boundary(
 
     def transfer4(x: Field, fraction: Field) -> Field:
         ztrans = sr(x[..., donor] * fraction[..., None])
-        donor_new = sr(x[..., donor] - ztrans)
-        receiver_new = sr(x[..., receiver] + ztrans)
+        donor_new = statement_result(x[..., donor] - ztrans)
+        receiver_new = statement_result(x[..., receiver] + ztrans)
         x = x.at[..., donor].set(
             jnp.where(active[..., None], donor_new, x[..., donor])
         )
@@ -283,17 +286,21 @@ def _shift_boundary(
             jnp.where(active[..., None], receiver_new, x[..., receiver])
         )
 
+    a_donor_new = statement_result(a_i[..., donor] - pdaice)
     a_i = a_i.at[..., donor].set(
-        jnp.where(active, sr(a_i[..., donor] - pdaice), a_i[..., donor])
+        jnp.where(active, a_donor_new, a_i[..., donor])
     )
+    a_receiver_new = statement_result(a_i[..., receiver] + pdaice)
     a_i = a_i.at[..., receiver].set(
-        jnp.where(active, sr(a_i[..., receiver] + pdaice), a_i[..., receiver])
+        jnp.where(active, a_receiver_new, a_i[..., receiver])
     )
+    v_donor_new = statement_result(v_i[..., donor] - pdvice)
     v_i = v_i.at[..., donor].set(
-        jnp.where(active, sr(v_i[..., donor] - pdvice), v_i[..., donor])
+        jnp.where(active, v_donor_new, v_i[..., donor])
     )
+    v_receiver_new = statement_result(v_i[..., receiver] + pdvice)
     v_i = v_i.at[..., receiver].set(
-        jnp.where(active, sr(v_i[..., receiver] + pdvice), v_i[..., receiver])
+        jnp.where(active, v_receiver_new, v_i[..., receiver])
     )
     v_s = transfer3(v_s, zworkv)
     oa_i = transfer3(oa_i, zworka)
@@ -345,12 +352,18 @@ def _shift_boundary(
         a_i = a_i.at[..., jl].set(jnp.where(over, scaled, a_i[..., jl]))
 
     present = a_i >= _EPSI20
-    h_i = jnp.where(present, sr(v_i / jnp.where(present, a_i, _ONE)), _ZERO)
-    t_su = jnp.where(
+    h_i_updated = jnp.where(
+        present, sr(v_i / jnp.where(present, a_i, _ONE)), _ZERO
+    )
+    t_su_updated = jnp.where(
         present,
         sr(za_tsfn / jnp.where(present, a_i, _ONE)),
         jnp.asarray(config.ice_constants.T0, dtype=a_i.dtype),
     )
+    # itd_shiftice gathers only nptidx-selected cells; inactive cells are not
+    # written by iceitd.f90:575-595.
+    h_i = jnp.where(active[..., None], h_i_updated, h_i)
+    t_su = jnp.where(active[..., None], t_su_updated, t_su)
     return a_i, v_i, v_s, sv_i, oa_i, a_ip, v_ip, v_il, t_su, e_s, e_i, szv_i, h_i
 
 
@@ -358,6 +371,8 @@ def _ice_itd_reb(
     state: SI3State,
     rn_amax_2d: Field,
     config: SI3ORCA2StateConfig,
+    *,
+    _materialize_transfer_statements: bool = True,
 ) -> SI3State:
     """Production ``ice_itd_reb``/``itd_shiftice`` for five categories."""
     if config.jpl <= 1:
@@ -366,7 +381,6 @@ def _ice_itd_reb(
     oa_i, a_ip, v_ip, v_il = state.oa_i, state.a_ip, state.v_ip, state.v_il
     t_su, e_s, e_i, szv_i = state.t_su, state.e_s, state.e_i, state.szv_i
     h_i = state.equivalent.h_i
-
     for jl in range(config.jpl - 1):
         active = (a_i[..., jl] > _ZERO) & (
             v_i[..., jl] > sr(a_i[..., jl] * state.bounds.hi_max[jl + 1])
@@ -392,11 +406,13 @@ def _ice_itd_reb(
             v_ip=v_ip,
             v_il=v_il,
             t_su=t_su,
+            h_i=h_i,
             e_s=e_s,
             e_i=e_i,
             szv_i=szv_i,
             rn_amax_2d=rn_amax_2d,
             config=config,
+            _materialize_transfer_statements=_materialize_transfer_statements,
         )
 
     for jl in range(config.jpl - 2, -1, -1):
@@ -424,11 +440,13 @@ def _ice_itd_reb(
             v_ip=v_ip,
             v_il=v_il,
             t_su=t_su,
+            h_i=h_i,
             e_s=e_s,
             e_i=e_i,
             szv_i=szv_i,
             rn_amax_2d=rn_amax_2d,
             config=config,
+            _materialize_transfer_statements=_materialize_transfer_statements,
         )
 
     eqv = state.equivalent._replace(h_i=h_i, a_i=a_i, v_s=v_s)
@@ -459,6 +477,7 @@ def si3_ice_cor(
     rn_himin: float,
     config: SI3ORCA2StateConfig,
     _plant_skip_rebin: bool = False,
+    _plant_strip_transfer_barriers: bool = False,
 ) -> SI3CorrectionResult:
     """Execute production ``ice_cor(kt,2)`` in NEMO statement order."""
     if not isinstance(config, SI3ORCA2StateConfig):
@@ -474,17 +493,26 @@ def si3_ice_cor(
     sl = (slice(h, -h), slice(h, -h)) if h else (slice(None), slice(None))
     interior = interior.at[sl].set(_ONE)
     interior3 = interior[..., None].astype(bool)
+    statement_result = sr if not _plant_strip_transfer_barriers else (lambda x: x)
+    # icecor.f90:81-87 are separate stored statements.  Materializing the
+    # divisor also prevents XLA replacing `/ rn_himin` by a rounded reciprocal
+    # multiply before the result enters the category-transfer sum.
+    rn_himin_value = statement_result(jnp.asarray(rn_himin, dtype=state.a_i.dtype))
     present = state.a_i >= _EPSI20
     h_i = jnp.where(present, sr(state.v_i / jnp.where(present, state.a_i, _ONE)), _ZERO)
-    a_ip = jnp.where(
-        interior3 & (h_i < rn_himin),
-        sr(sr(state.a_ip * h_i) / rn_himin),
-        state.a_ip,
+    a_ip = statement_result(
+        jnp.where(
+            interior3 & (h_i < rn_himin),
+            sr(sr(state.a_ip * h_i) / rn_himin_value),
+            state.a_ip,
+        )
     )
-    a_i = jnp.where(
-        interior3 & (h_i < rn_himin),
-        sr(sr(state.a_i * h_i) / rn_himin),
-        state.a_i,
+    a_i = statement_result(
+        jnp.where(
+            interior3 & (h_i < rn_himin),
+            sr(sr(state.a_i * h_i) / rn_himin_value),
+            state.a_i,
+        )
     )
     at_i = _category_sum(a_i)
     over = interior.astype(bool) & (at_i > rn_amax_2d)
@@ -499,7 +527,12 @@ def si3_ice_cor(
     )
 
     if config.jpl > 1 and not _plant_skip_rebin:
-        state = _ice_itd_reb(state, rn_amax_2d, config)
+        state = _ice_itd_reb(
+            state,
+            rn_amax_2d,
+            config,
+            _materialize_transfer_statements=not _plant_strip_transfer_barriers,
+        )
 
     dtype = state.a_i.dtype
     r1_nlay_i = sr(jnp.asarray(_ONE / float(config.nlay_i), dtype=dtype))
@@ -638,6 +671,7 @@ def si3_o15_step(
     rn_himin: float,
     config: SI3ORCA2StateConfig,
     _plant_skip_rebin: bool = False,
+    _plant_strip_transfer_barriers: bool = False,
 ) -> SI3CorrectionResult:
     """Production O15 call site; removing ``si3_ice_cor`` changes this result."""
     return si3_ice_cor(
@@ -649,6 +683,7 @@ def si3_o15_step(
         rn_himin=rn_himin,
         config=config,
         _plant_skip_rebin=_plant_skip_rebin,
+        _plant_strip_transfer_barriers=_plant_strip_transfer_barriers,
     )
 
 

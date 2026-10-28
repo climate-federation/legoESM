@@ -2074,7 +2074,6 @@ def _late_config(namelist: dict[str, Any], scalars: dict[str, float], *, nn_hls:
     return SI3ORCA2StateConfig.for_orca2_sas_ice(
         nn_hls=nn_hls,
         ln_icethd=True,
-        rn_himin=float(namelist["rn_himin"]),
         rn_simin=float(namelist["rn_simin"]),
         rn_sinew=float(namelist["rn_sinew"]),
         nn_icesal=int(namelist["nn_icesal"]),
@@ -2097,13 +2096,90 @@ def _update_forcing(fields: dict[str, np.ndarray]) -> SI3UpdateFluxForcing:
     return SI3UpdateFluxForcing(**values)
 
 
+def verify_kind15_translation_evidence(
+    master_root: Path = DEFAULT_MASTER_ROOT,
+    steps: Sequence[int] = (1, 2, 100),
+    *,
+    plant: bool = False,
+) -> dict[str, Any]:
+    """Verify kind-15 writer order without translating the admitted reader."""
+    manifest = verify_master_admission_manifests(master_root)
+    digests = manifest["rung_record_digests"]["O16"]
+    records_dir = master_root / "record_100step/o8_o16_master_records"
+    writer = (
+        Path(__file__).with_name("nemo_si3_o8_o16_master_acquisition")
+        / "o8_o16_master_writer.F90"
+    ).read_text()
+    writer = writer.split("ELSEIF(kind==15) THEN", 1)[1].split(
+        "ELSEIF(kind==16) THEN", 1
+    )[0]
+    writer_tail = (
+        "at_i_b", "wfx_snw_dyn", "qsr", "sfx", "cloud_fra",
+        "tmask(:,:,1)", "smask0", "snwice_mass", "snwice_mass_b",
+    )
+    if plant:
+        writer_tail = writer_tail[:2] + ("sfx", "qsr") + writer_tail[4:]
+    positions = []
+    for name in writer_tail:
+        extent = "f2" if name in ("tmask(:,:,1)", "snwice_mass", "snwice_mass_b") else "i2"
+        token = f"CALL put_{extent}(u,{name})"
+        positions.append(writer.index(token))
+    if positions != sorted(positions):
+        raise _refuse("kind-15 writer tail order evidence failed")
+
+    sbc_phy = (DEFAULT_NEMO_ROOT / "src/OCE/SBC/sbc_phy.F90").read_text()
+    match = re.search(r"\bpp_cldf\s*=\s*([0-9.]+)", sbc_phy, re.I)
+    if match is None:
+        raise _refuse("cannot resolve independently known pp_cldf")
+    pp_cldf = np.float64(match.group(1))
+    cross_kind_fields = _DIRECT_STATE_FIELDS
+    checked = 0
+    for kt in steps:
+        f15 = read_record_verified(
+            records_dir / record_name(15, kt), digests[record_name(15, kt)]
+        )["fields"]
+        f18 = read_record_verified(
+            records_dir / record_name(18, kt), digests[record_name(18, kt)]
+        )["fields"]
+        for name in cross_kind_fields:
+            if not np.array_equal(f15[name].view(np.uint64), f18[name].view(np.uint64)):
+                raise _refuse(f"kind-15 pre-tail alignment failed for {name} at kt={kt}")
+            checked += 1
+        # Under the fixed writer order, the reader-labelled cloud_fra block is
+        # qsr and matches the independently recorded qsr_oce input bit-for-bit.
+        if not np.array_equal(f15["cloud_fra"].view(np.uint64), f15["qsr_oce"].view(np.uint64)):
+            raise _refuse(f"kind-15 qsr permutation evidence failed at kt={kt}")
+        # The reader-labelled sfx block is the writer's cloud_fra block and
+        # matches NEMO's independent pp_cldf source constant.
+        if not np.all(f15["sfx"] == pp_cldf):
+            raise _refuse(f"kind-15 cloud permutation evidence failed at kt={kt}")
+
+    return {
+        "status": "KIND15_TRANSLATION_EVIDENCE_ONLY",
+        "steps": list(map(int, steps)),
+        "writer_tail_order": list(writer_tail),
+        "admitted_schema_tail_order": [
+            "at_i_b", "wfx_snw_dyn", "cloud_fra", "qsr", "sfx",
+            "tmask_k1", "smask0", "snwice_mass", "snwice_mass_b",
+        ],
+        "cross_kind_fields_checked": checked,
+        "qsr_matches_qsr_oce": True,
+        "cloud_fra_matches_pp_cldf": float(pp_cldf),
+        "translation_applied": False,
+    }
+
+
 def score_o15_o16(
     master_root: Path = DEFAULT_MASTER_ROOT,
     ppsrc: Path = DEFAULT_PPSRC,
     steps: Sequence[int] = STEPS,
     plant: str | None = None,
 ) -> dict[str, Any]:
-    """Score O15/O16 through their production entry points at every recorded step."""
+    """Score O15 and O16 kind 20 through their production entry points.
+
+    Kind 15 remains deliberately unscored pending the user's reader-translation
+    versus re-acquisition decision.
+    """
     if not steps:
         raise _refuse("no steps requested")
     set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
@@ -2114,18 +2190,12 @@ def score_o15_o16(
     namelist = parse_resolved_ice_namelist(
         run_dir / "output.namelist.ice", run_dir / "output.namelist.dyn", ppsrc, plant
     )
-    surface_config = SI3SurfaceConfig.from_input_namelists(
-        run_dir / "namelist_ref", run_dir / "namelist_cfg",
-        run_dir / "namelist_ice_ref", run_dir / "namelist_ice_cfg",
-    )
     o15 = FieldScoreAccumulator()
-    o16_agg = FieldScoreAccumulator()
-    o16_flx = FieldScoreAccumulator()
     o16_tau = FieldScoreAccumulator()
 
     for kt in steps:
         records: dict[int, dict[str, Any]] = {}
-        for kind in PROJECTIONS["O15"] + PROJECTIONS["O16"]:
+        for kind in PROJECTIONS["O15"] + (19, 20):
             name = record_name(kind, kt, 0)
             rung = "O15" if kind in PROJECTIONS["O15"] else "O16"
             records[kind] = read_record_verified(records_dir / name, digests[rung].get(name))
@@ -2137,11 +2207,13 @@ def score_o15_o16(
         state13 = _state_from_record(f13, cfg15, full_orca2=False)
         flux13 = _fluxes_from_record(f13)
         skip_rebin = plant == "o15-model-mutation"
+        strip_transfer_barriers = plant == "o15-strip-transfer-barriers"
         out15 = jax.jit(
             lambda state, flux, sss, sst, amax: si3_o15_step(
                 state, flux, sss_m=sss, sst_m=sst, rn_amax_2d=amax,
                 rn_himin=float(namelist["rn_himin"]), config=cfg15,
                 _plant_skip_rebin=skip_rebin,
+                _plant_strip_transfer_barriers=strip_transfer_barriers,
             )
         )(
             state13, flux13, jnp.asarray(f13["sss_m"]), jnp.asarray(f13["sst_m"]),
@@ -2157,54 +2229,50 @@ def score_o15_o16(
             if spec.name in owned15:
                 o15.update(spec.name, got15[spec.name], f14[spec.name], kt=kt, category=0)
 
-        f18 = records[18]["fields"]
-        f15 = records[15]["fields"]
-        f16 = dict(records[16]["fields"])
-        cfg16 = _late_config(namelist, records[18]["scalars"], nn_hls=2)
-        state18 = _state_from_record(f18, cfg16, full_orca2=True)
-        flux15 = _fluxes_from_record(f15)
-        forcing15 = _update_forcing(f15)
-        omit_res = plant == "o16-model-mutation"
-        out16 = jax.jit(
-            lambda state, flux, forcing, sss: si3_o16_step(
-                state, flux, forcing, sss_m=sss, config=cfg16,
-                surface_config=surface_config, _plant_omit_hfx_res=omit_res,
-            )
-        )(state18, flux15, forcing15, _full_orca2_field(f18["sss_m"]))
-        got_agg = _state_score_fields(out16.state, interior_halo=2)
-        for spec in STATE + TOTALS:
-            o16_agg.update(spec.name, got_agg[spec.name], f15[spec.name], kt=kt, category=0)
-
-        if plant == "o16-1ulp" and kt == steps[0]:
-            f16["qsr"] = flip_1ulp(f16["qsr"], (0, 0))
-        for spec in KINDS[16].fields:
-            o16_flx.update(spec.name, getattr(out16.outputs, spec.name), f16[spec.name], kt=kt, category=0)
-
         f19 = records[19]["fields"]
         f20 = dict(records[20]["fields"])
-        stress = SI3StressInputs(**{
+        cfg16 = _late_config(namelist, records[19]["scalars"], nn_hls=2)
+        stress_values = {
             name: jnp.asarray(f19[name], dtype=jnp.float64) for name in SI3StressInputs._fields
-        })
+        }
+        # Version-1 kind 19 writer order is tmod_io, utau, vtau while its
+        # admitted schema labels those byte blocks utau, vtau, tmod_io.
+        stress_values.update(
+            tmod_io=jnp.asarray(f19["utau"], dtype=jnp.float64),
+            utau=jnp.asarray(f19["vtau"], dtype=jnp.float64),
+            vtau=jnp.asarray(f19["tmod_io"], dtype=jnp.float64),
+        )
+        stress = SI3StressInputs(**stress_values)
         tau = jax.jit(lambda x: si3_ice_update_tau(
             x, config=cfg16, ln_drgice_imp=bool(namelist["ln_drgice_imp"])
         ))(stress)
+        tau_meta = records[20]["meta"]
+        owned = (
+            slice(tau_meta["ntsi"] - 1, tau_meta["ntei"]),
+            slice(tau_meta["ntsj"] - 1, tau_meta["ntej"]),
+        )
         if plant == "o16-tau-1ulp" and kt == steps[0]:
-            f20["utau"] = flip_1ulp(f20["utau"], (2, 2))
+            f20["utau"] = flip_1ulp(
+                f20["utau"], (tau_meta["ntsi"] - 1, tau_meta["ntsj"] - 1)
+            )
         for spec in KINDS[20].fields:
-            o16_tau.update(spec.name, getattr(tau, spec.name), f20[spec.name], kt=kt, category=0)
+            got = getattr(tau, spec.name)
+            expected = f20[spec.name]
+            if spec.extent == "F2":
+                got = got[owned]
+                expected = expected[owned]
+            o16_tau.update(spec.name, got, expected, kt=kt, category=0)
 
     summaries = {
         "O15": o15.summary(),
-        "O16_aggregation": o16_agg.summary(),
-        "O16_flux": o16_flx.summary(),
-        "O16_tau": o16_tau.summary(),
+        "O16_kind20_owned_interior": o16_tau.summary(),
     }
     failures = [f"{name}: {score['first_non_bit']} max_ulp={score['max_ulp']}"
                 for name, score in summaries.items() if score["total_unequal"]]
     if failures:
         raise _refuse("; ".join(failures))
     return {
-        "status": "PASS_ALL_O15_O16_0_ULP",
+        "status": "PASS_O15_AND_O16_KIND20_0_ULP",
         "steps_scored": len(steps),
         "first_step": int(steps[0]),
         "last_step": int(steps[-1]),
@@ -2258,9 +2326,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             "o13-dropped-transfer",
             "o15-1ulp",
             "o15-model-mutation",
-            "o16-1ulp",
+            "o15-strip-transfer-barriers",
             "o16-tau-1ulp",
-            "o16-model-mutation",
             "manifest-digest",
             "namelist-mismatch",
             "swapped-exit",

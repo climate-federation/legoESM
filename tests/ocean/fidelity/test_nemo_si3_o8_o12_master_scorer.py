@@ -17,6 +17,8 @@ from scripts.validate.ocean_fidelity.testcases.nemo_si3_o8_o12_master_scorer imp
     score_o14,
     check_o13_conservation,
     score_o8_to_o12,
+    score_o15_o16,
+    verify_kind15_translation_evidence,
     verify_master_admission_manifests,
 )
 
@@ -166,6 +168,49 @@ def test_score_o14_representative_steps_0_ulp_and_plants() -> None:
             plant="o14-model-bypass",
             verify_manifests=False,
         )
+
+
+def test_score_o15_and_kind20_owned_interior_representative_steps_0_ulp() -> None:
+    if not DEFAULT_MASTER_ROOT.is_dir():
+        pytest.skip(f"admitted master record not mounted at {DEFAULT_MASTER_ROOT}")
+    report = score_o15_o16(DEFAULT_MASTER_ROOT, steps=(1, 2, 100))
+    assert report["status"] == "PASS_O15_AND_O16_KIND20_0_ULP"
+    assert report["scores"]["O15"]["total_elements"] == 3 * 10_069_920
+    assert report["scores"]["O15"]["total_unequal"] == 0
+    # NEMO writes ji=ntsi..ntei, jj=ntsj..ntej: 180*148 cells for
+    # each of utau, vtau, and the already-interior taum record.
+    tau = report["scores"]["O16_kind20_owned_interior"]
+    assert tau["total_elements"] == 3 * 79_920
+    assert tau["total_unequal"] == 0
+
+
+@pytest.mark.parametrize(
+    ("plant", "field"),
+    [
+        ("o15-strip-transfer-barriers", "a_i"),
+        ("o16-tau-1ulp", "utau"),
+    ],
+)
+def test_o15_barrier_and_kind20_score_plants_fail(plant: str, field: str) -> None:
+    if not DEFAULT_MASTER_ROOT.is_dir():
+        pytest.skip(f"admitted master record not mounted at {DEFAULT_MASTER_ROOT}")
+    with pytest.raises(ValueError, match=rf"STATUS PLANT-FIRED.*'field': '{field}'"):
+        score_o15_o16(DEFAULT_MASTER_ROOT, steps=(1,), plant=plant)
+
+
+def test_kind15_translation_evidence_without_translation_and_plant() -> None:
+    if not DEFAULT_MASTER_ROOT.is_dir():
+        pytest.skip(f"admitted master record not mounted at {DEFAULT_MASTER_ROOT}")
+    evidence = verify_kind15_translation_evidence(DEFAULT_MASTER_ROOT)
+    assert evidence["status"] == "KIND15_TRANSLATION_EVIDENCE_ONLY"
+    assert evidence["writer_tail_order"][2:5] == ["qsr", "sfx", "cloud_fra"]
+    assert evidence["admitted_schema_tail_order"][2:5] == ["cloud_fra", "qsr", "sfx"]
+    assert evidence["cross_kind_fields_checked"] == 36
+    assert evidence["qsr_matches_qsr_oce"] is True
+    assert evidence["cloud_fra_matches_pp_cldf"] == 0.81
+    assert evidence["translation_applied"] is False
+    with pytest.raises(ValueError, match="kind-15 writer tail order evidence failed"):
+        verify_kind15_translation_evidence(DEFAULT_MASTER_ROOT, plant=True)
 
 
 @pytest.mark.parametrize(
@@ -888,8 +933,6 @@ def test_no_duplicate_o8_o12_arithmetic_ast_guard_and_plants(monkeypatch) -> Non
     phase2._nemo_snow_enthalpy_remap(h4, e4)
     phase2._nemo_ice_enthalpy_remap(h4, e4)
     assert calls == ["_cumulative_remap", "_cumulative_remap"]
-
-
 @pytest.mark.parametrize(
     ("selector", "bad_value", "expected_pattern"),
     [
