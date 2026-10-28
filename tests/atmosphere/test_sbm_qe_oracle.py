@@ -217,8 +217,8 @@ def test_aimip_sbm_decks_name_the_cape_threshold(deck):
 
 
 def test_aimip_builder_hands_the_deck_threshold_to_sbm(monkeypatch):
-    """The AIMIP physics builder passes aimip_sbm_cape_threshold to SBMConfig
-    (None keeps the scheme default)."""
+    """The AIMIP physics builder passes aimip_sbm_cape_threshold to SBMConfig,
+    and refuses sbm without one (user 2026-10-28, ASK A)."""
     from legoesm.atmosphere.physics import combined
     from legoesm.grids.gaussian import create_gaussian_grid
     from legoesm.training.aimip_params import (
@@ -234,13 +234,14 @@ def test_aimip_builder_hands_the_deck_threshold_to_sbm(monkeypatch):
 
     monkeypatch.setattr(combined, "make_physics", spy)
     grid = create_gaussian_grid(21, dealiasing="quadratic")
-    for thr in (50.0, None):
-        with pytest.raises(_Stop):
-            make_aimip_classical_spectral_physics(
-                AIMIPClassicalParams.from_defaults(), grid, dt=1800.0,
-                radiation="gray", convection_scheme="sbm",
-                sbm_cape_threshold=thr)
-    assert seen == [50.0, SBMConfig().cape_threshold]
+    build = lambda thr: make_aimip_classical_spectral_physics(
+        AIMIPClassicalParams.from_defaults(), grid, dt=1800.0,
+        radiation="gray", convection_scheme="sbm", sbm_cape_threshold=thr)
+    with pytest.raises(_Stop):
+        build(50.0)
+    assert seen == [50.0]
+    with pytest.raises(ValueError, match="aimip_sbm_cape_threshold"):
+        build(None)
 
 
 def test_every_deck_driven_aimip_caller_forwards_the_threshold():

@@ -196,6 +196,7 @@ def _train_and_eval(schemes: dict, spec_cfg, grid, sigma, base_cfg, cache_dir):
             # declares the waiver instead of tripping over it.
             allow_unfilled_families=True,
             **schemes,
+            sbm_cape_threshold=base_cfg.get("aimip_sbm_cape_threshold"),
         )
 
     params_trained, loss_history = _train_spectral_loop(
@@ -235,6 +236,7 @@ def _train_and_eval(schemes: dict, spec_cfg, grid, sigma, base_cfg, cache_dir):
         radiation=radiation,
         rad_update_interval_steps=rad_update_interval,
         **schemes,
+        sbm_cape_threshold=base_cfg.get("aimip_sbm_cape_threshold"),
         # Same waiver as the training call above: one arm of this sweep
         # deliberately runs without microphysics.
         allow_unfilled_families=True,

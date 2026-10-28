@@ -187,6 +187,7 @@ def main():
                 radiation=radiation,
                 rad_update_interval_steps=rad_update_interval,
                 **schemes,
+                sbm_cape_threshold=base.get("aimip_sbm_cape_threshold"),
             )
 
         params_trained, loss_history = _train_spectral_loop(
@@ -230,6 +231,7 @@ def main():
             radiation=radiation,
             rad_update_interval_steps=rad_update_interval,
             **schemes,
+            sbm_cape_threshold=base.get("aimip_sbm_cape_threshold"),
         )
 
         per_var_acc = {v: {"rmse": [], "bias": []}
