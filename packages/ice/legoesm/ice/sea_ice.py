@@ -48,6 +48,8 @@ from legoesm.ice.itd import (
     aggregate_state,
     linear_remap,
     lipscomb_2001_remap,
+    si3_hfn_category_bounds,
+    si3_ice_itd_rem,
 )
 from legoesm.ice.snow import (
     accumulate_snowfall,
@@ -218,6 +220,7 @@ def step_sea_ice(
     q_open_top=None,
     ocean_dz_top_m=None,
     ocean_freezing_temperature_K=None,
+    rn_amax_2d=None,
 ):
     """Step the sea ice model forward by dt seconds.
 
@@ -230,6 +233,10 @@ def step_sea_ice(
     constant. The ocean/driver owns the EOS; ice consumes this boundary value
     for basal conduction, turbulent ocean heat and lead formation together.
     The freshwater surface melt point ``T_melt_surface`` is independent.
+
+    ``rn_amax_2d`` is the explicit NEMO per-cell ice-area ceiling required by
+    the exact SI3-LEV O13 remap.  It has the spatial (no-category) shape and is
+    ignored by configurations which do not select that production branch.
 
     Dispatches to slab or dynamic model based on config.
 
@@ -480,7 +487,8 @@ def step_sea_ice(
         return _step_dynamic_v2(state, forcing, ocean_sst, ocean_u, ocean_v,
                                 config, U_min, dt, grid,
                                 q_open_top=q_open_top,
-                                ocean_dz_top_m=ocean_dz_top_m)
+                                ocean_dz_top_m=ocean_dz_top_m,
+                                rn_amax_2d=rn_amax_2d)
     else:
         if config.lead_freeze_source != "ice_skin":
             raise ValueError(
@@ -2798,6 +2806,7 @@ def _step_dynamic_v2(
     *,
     q_open_top=None,
     ocean_dz_top_m=None,
+    rn_amax_2d=None,
 ) -> tuple[DynamicSeaIceState, TileResponse]:
     """Extended dynamic sea-ice step with Tier-1 + Tier-2 physics.
 
@@ -2835,12 +2844,35 @@ def _step_dynamic_v2(
             )
         h_il = None
 
+    exact_si3_itd = (
+        config.n_categories > 1
+        and config.itd_remap == "lipscomb2001"
+        and config.ponds.enabled
+        and config.ponds.scheme == "si3_lev"
+    )
+    if exact_si3_itd:
+        if config.si3_orca2 is None:
+            raise ValueError(
+                "the exact SI3 O13 ITD remap requires explicit config.si3_orca2 "
+                "for jpl/nn_icesal/HFN bounds; deck values are not inferred"
+            )
+        if rn_amax_2d is None:
+            raise ValueError(
+                "the exact SI3 O13 ITD remap requires explicit rn_amax_2d "
+                "with the spatial (no-category) shape"
+            )
+        if config.si3_orca2.jpl != config.n_categories:
+            raise ValueError("config.si3_orca2.jpl must equal config.n_categories for O13")
+        rn_amax_2d = jnp.asarray(rn_amax_2d, dtype=h.dtype)
+        if rn_amax_2d.shape != h.shape[:-1]:
+            raise ValueError("rn_amax_2d must have the spatial (no-category) state shape")
+
     # Cap an already-overfilled multicat state (e.g. a restart) to
     # sum_k a_k <= 1 BEFORE the dynamics aggregate and the conc_pre snapshot,
     # so EVP/mEVP rheology and the F11 per-cell normalisation never see > 1
     # cell area.  No-op when sum <= 1; transport / ITD remap can re-introduce
     # overfill and are re-capped downstream.  Codex.
-    if config.n_categories > 1 and config.itd_remap != "none":
+    if config.n_categories > 1 and config.itd_remap != "none" and not exact_si3_itd:
         conc, h, h_snow, pond_depth = _cap_multicat_concentration(
             conc, h, h_snow, pond_depth, h_il=h_il)
 
@@ -2979,7 +3011,7 @@ def _step_dynamic_v2(
     # transport.  NOTE: a uniform mechanical thickening, NOT a bin-accurate ITD
     # redistribution — realistic sub-CFL overfill is <<1% and stays within its
     # category; bin-accurate large-overfill handling is the deferred item.
-    if is_multicat and config.itd_remap != "none":
+    if is_multicat and config.itd_remap != "none" and not exact_si3_itd:
         conc, h, h_snow, pond_depth = _cap_multicat_concentration(
             conc, h, h_snow, pond_depth, h_il=h_il)
 
@@ -3200,12 +3232,78 @@ def _step_dynamic_v2(
         # thermo-generated overfill, but it still guards against an overfilled
         # restart / transport remainder reaching the remapper (volume / snow /
         # pond / salt conserving; no-op when sum <= 1).  Codex.
-        conc, h, h_snow, pond_depth = _cap_multicat_concentration(
-            conc, h, h_snow, pond_depth, h_il=h_il)
+        if not exact_si3_itd:
+            conc, h, h_snow, pond_depth = _cap_multicat_concentration(
+                conc, h, h_snow, pond_depth, h_il=h_il)
         n_cat = h.shape[-1]
         # Volume of snow per cat (h_snow * a) for remap.
         V_snow_cat = h_snow * conc
-        if config.itd_remap == "lipscomb2001":
+        if exact_si3_itd:
+            si3_cfg = config.si3_orca2
+            bounds = si3_hfn_category_bounds(
+                jpl=si3_cfg.jpl,
+                rn_himean=si3_cfg.rn_himean,
+                opt_hips=si3_cfg.opt_hips,
+                rn_himax=si3_cfg.rn_himax,
+            )
+            v_i_cat = h * conc
+            a_ip_cat = pond_area * conc
+            bulk_salt = S_ice * v_i_cat
+            zero_cat = jnp.zeros_like(conc)
+            zero_layered = jnp.zeros(conc.shape[:-1] + (0, n_cat), dtype=conc.dtype)
+            remap = si3_ice_itd_rem(
+                h_i_b=h_old,
+                a_i_b=conc_old,
+                h_i=h,
+                a_i=conc,
+                v_i=v_i_cat,
+                v_s=V_snow_cat,
+                sv_i=jnp.where(si3_cfg.nn_icesal == 4, zero_cat, bulk_salt),
+                oa_i=zero_cat,
+                a_ip=a_ip_cat,
+                v_ip=pond_area * pond_depth * conc,
+                v_il=pond_area * h_il * conc,
+                t_su=T_ice,
+                e_s=zero_layered,
+                e_i=zero_layered,
+                # DynamicSeaIceState carries bulk salinity rather than ten
+                # SI3 layers.  Select the same extensive carrier as the
+                # configured SI3 salinity scheme: sv_i for bulk salinity, or
+                # one szv_i layer for nn_icesal=4.  The full O13 entry point
+                # and scorer supply all ten production-deck layers.
+                szv_i=jnp.where(
+                    si3_cfg.nn_icesal == 4,
+                    bulk_salt[..., None, :],
+                    zero_cat[..., None, :],
+                ),
+                hi_max=bounds.hi_max,
+                rn_amax_2d=rn_amax_2d,
+                nn_icesal=si3_cfg.nn_icesal,
+                ln_pnd=si3_cfg.ln_pnd_LEV or si3_cfg.ln_pnd_TOPO,
+                ln_pnd_lids=si3_cfg.ln_pnd_lids,
+                rt0=si3_cfg.ice_constants.T0,
+            )
+            h = remap["h_i"]
+            conc = remap["a_i"]
+            T_ice = remap["t_su"]
+            a_safe = jnp.where(conc > 1.0e-20, conc, 1.0)
+            v_safe = jnp.where(remap["v_i"] > 1.0e-20, remap["v_i"], 1.0)
+            aip_safe = jnp.where(remap["a_ip"] > 1.0e-20, remap["a_ip"], 1.0)
+            h_snow = jnp.where(conc > 1.0e-20, remap["v_s"] / a_safe, 0.0)
+            salt_inventory = jnp.where(
+                si3_cfg.nn_icesal == 4,
+                remap["szv_i"][..., 0, :],
+                remap["sv_i"],
+            )
+            S_ice = jnp.where(
+                remap["v_i"] > 1.0e-20,
+                salt_inventory / v_safe,
+                0.0,
+            )
+            pond_area = jnp.where(conc > 1.0e-20, remap["a_ip"] / a_safe, 0.0)
+            pond_depth = jnp.where(remap["a_ip"] > 1.0e-20, remap["v_ip"] / aip_safe, 0.0)
+            h_il = jnp.where(remap["a_ip"] > 1.0e-20, remap["v_il"] / aip_safe, 0.0)
+        elif config.itd_remap == "lipscomb2001":
             remap = lipscomb_2001_remap(
                 h_old=h_old, a_old=conc_old,
                 h_new=h, a_new=conc,
@@ -3246,8 +3344,9 @@ def _step_dynamic_v2(
         # reintroduce sum_k a_k > 1; re-cap BEFORE ridging so the ridging kernel
         # (donor area, snow/pond drainage, freshwater fluxes) never sees an
         # overfilled column.  No-op when sum <= 1.  Codex.
-        conc, h, h_snow, pond_depth = _cap_multicat_concentration(
-            conc, h, h_snow, pond_depth, h_il=h_il)
+        if not exact_si3_itd:
+            conc, h, h_snow, pond_depth = _cap_multicat_concentration(
+                conc, h, h_snow, pond_depth, h_il=h_il)
 
     # ---- 6. Ridging ----
     if config.ridging.enabled and is_multicat and grid is not None:
@@ -3292,7 +3391,7 @@ def _step_dynamic_v2(
     # compacted/grown category across bins and reintroduce sum_k a_k > 1, so
     # re-cap the post-remap/post-ridging state (volume / snow / pond / salt
     # conserving; no-op when sum <= 1).  Codex.
-    if is_multicat and config.itd_remap != "none":
+    if is_multicat and config.itd_remap != "none" and not exact_si3_itd:
         conc, h, h_snow, pond_depth = _cap_multicat_concentration(
             conc, h, h_snow, pond_depth, h_il=h_il)
 

@@ -1,0 +1,1576 @@
+{
+ "build": "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/ORCA2_SAS_ICE_O8O16_REF/BLD",
+ "flags": [
+  "-fdefault-real-8",
+  "-O3",
+  "-funroll-all-loops",
+  "-fcray-pointer",
+  "-ffree-line-length-none",
+  "-fallow-argument-mismatch",
+  "-fno-tree-vectorize"
+ ],
+ "objects": {
+  "iceitd": {
+   "census": {
+    "ice_itd_rem": {
+     "jdonor": {
+      "328": [
+       "w",
+       "jdonor(ii,jl) = jl",
+       [
+        "IF( npti > 0 )",
+        "DO jl = 1, jpl - 1",
+        "DO ii = 1, npti",
+        "IF(zhbnew(ii,jl) > hi_max(jl))"
+       ]
+      ],
+      "332": [
+       "w",
+       "jdonor(ii,jl) = jl + 1",
+       [
+        "IF( npti > 0 )",
+        "DO jl = 1, jpl - 1",
+        "DO ii = 1, npti",
+        "ELSE of IF(zhbnew(ii,jl) > hi_max(jl))"
+       ]
+      ],
+      "343": [
+       "r",
+       "jcat = jdonor(ii,jl)",
+       [
+        "IF( npti > 0 )",
+        "DO jl = 1, jpl - 1",
+        "DO ii = 1, npti"
+       ]
+      ],
+      "353": [
+       "r",
+       "CALL itd_shiftice ( jdonor(1:npti,:), zdaice(1:npti,:), zdvice(1:npti,:) )",
+       [
+        "IF( npti > 0 )"
+       ]
+      ]
+     },
+     "zda0": {
+      "287": [
+       "w",
+       "zda0 = g1(ii,1) * zx2 + g0(ii,1) * zx1",
+       [
+        "IF( npti > 0 )",
+        "DO jl = 1, jpl",
+        "IF( jl == 1 )",
+        "DO ii = 1, npti",
+        "IF( a_i_1d(ii) > epsi10 )",
+        "IF( zdh0 < 0.0 )",
+        "IF( zetamax > 0.0 )"
+       ]
+      ],
+      "289": [
+       "wr",
+       "zda0 = MIN( zda0, zdamax )",
+       [
+        "IF( npti > 0 )",
+        "DO jl = 1, jpl",
+        "IF( jl == 1 )",
+        "DO ii = 1, npti",
+        "IF( a_i_1d(ii) > epsi10 )",
+        "IF( zdh0 < 0.0 )",
+        "IF( zetamax > 0.0 )"
+       ]
+      ],
+      "291": [
+       "r",
+       "h_i_1d(ii) = h_i_1d(ii) * a_i_1d(ii) / ( a_i_1d(ii) - zda0 )",
+       [
+        "IF( npti > 0 )",
+        "DO jl = 1, jpl",
+        "IF( jl == 1 )",
+        "DO ii = 1, npti",
+        "IF( a_i_1d(ii) > epsi10 )",
+        "IF( zdh0 < 0.0 )",
+        "IF( zetamax > 0.0 )"
+       ]
+      ],
+      "292": [
+       "r",
+       "a_i_1d(ii) = a_i_1d(ii) - zda0",
+       [
+        "IF( npti > 0 )",
+        "DO jl = 1, jpl",
+        "IF( jl == 1 )",
+        "DO ii = 1, npti",
+        "IF( a_i_1d(ii) > epsi10 )",
+        "IF( zdh0 < 0.0 )",
+        "IF( zetamax > 0.0 )"
+       ]
+      ]
+     },
+     "zdaice": {
+      "344": [
+       "w",
+       "zdaice(ii,jl) = g1(ii,jcat)*zx2 + g0(ii,jcat)*zx1",
+       [
+        "IF( npti > 0 )",
+        "DO jl = 1, jpl - 1",
+        "DO ii = 1, npti"
+       ]
+      ],
+      "345": [
+       "r",
+       "zdvice(ii,jl) = g1(ii,jcat)*zx3 + g0(ii,jcat)*zx2 + zdaice(ii,jl)*hL(ii,jcat)",
+       [
+        "IF( npti > 0 )",
+        "DO jl = 1, jpl - 1",
+        "DO ii = 1, npti"
+       ]
+      ],
+      "353": [
+       "r",
+       "CALL itd_shiftice ( jdonor(1:npti,:), zdaice(1:npti,:), zdvice(1:npti,:) )",
+       [
+        "IF( npti > 0 )"
+       ]
+      ]
+     },
+     "zdamax": {
+      "288": [
+       "w",
+       "zdamax = a_i_1d(ii) * (1.0 - h_i_1d(ii) / h_ib_1d(ii) )",
+       [
+        "IF( npti > 0 )",
+        "DO jl = 1, jpl",
+        "IF( jl == 1 )",
+        "DO ii = 1, npti",
+        "IF( a_i_1d(ii) > epsi10 )",
+        "IF( zdh0 < 0.0 )",
+        "IF( zetamax > 0.0 )"
+       ]
+      ],
+      "289": [
+       "r",
+       "zda0 = MIN( zda0, zdamax )",
+       [
+        "IF( npti > 0 )",
+        "DO jl = 1, jpl",
+        "IF( jl == 1 )",
+        "DO ii = 1, npti",
+        "IF( a_i_1d(ii) > epsi10 )",
+        "IF( zdh0 < 0.0 )",
+        "IF( zetamax > 0.0 )"
+       ]
+      ]
+     },
+     "zdhice": {
+      "171": [
+       "w",
+       "zdhice(:,:) = 0._wp",
+       [
+        "IF( npti > 0 )"
+       ]
+      ],
+      "182": [
+       "w",
+       "IF( a_i_2d(ii,jl) > epsi10 ) zdhice(ii,jl) = h_i_2d(ii,jl) - h_ib_2d(ii,jl)",
+       [
+        "IF( npti > 0 )",
+        "DO jl = 1, jpl",
+        "DO ii = 1, npti",
+        "IF( a_i_2d(ii,jl) > epsi10 )"
+       ]
+      ],
+      "195": [
+       "r",
+       "zslope = ( zdhice(ii,jl+1) - zdhice(ii,jl) ) / ( h_ib_2d(ii,jl+1) - h_ib_2d(ii,jl) )",
+       [
+        "IF( npti > 0 )",
+        "DO jl = 1, jpl - 1",
+        "DO ii = 1, npti",
+        "IF( a_ib_2d(ii,jl) > epsi10 .AND. a_ib_2d(ii,jl+1) > epsi10 )"
+       ]
+      ],
+      "196": [
+       "r",
+       "zhbnew(ii,jl) = hi_max(jl) + zdhice(ii,jl) + zslope * ( hi_max(jl) - h_ib_2d(ii,jl) )",
+       [
+        "IF( npti > 0 )",
+        "DO jl = 1, jpl - 1",
+        "DO ii = 1, npti",
+        "IF( a_ib_2d(ii,jl) > epsi10 .AND. a_ib_2d(ii,jl+1) > epsi10 )"
+       ]
+      ],
+      "198": [
+       "r",
+       "zhbnew(ii,jl) = hi_max(jl) + zdhice(ii,jl)",
+       [
+        "IF( npti > 0 )",
+        "DO jl = 1, jpl - 1",
+        "DO ii = 1, npti",
+        "ELSEIF( a_ib_2d(ii,jl) > epsi10 .AND. a_ib_2d(ii,jl+1) <= epsi10 )"
+       ]
+      ],
+      "200": [
+       "r",
+       "zhbnew(ii,jl) = hi_max(jl) + zdhice(ii,jl+1)",
+       [
+        "IF( npti > 0 )",
+        "DO jl = 1, jpl - 1",
+        "DO ii = 1, npti",
+        "ELSEIF( a_ib_2d(ii,jl) <= epsi10 .AND. a_ib_2d(ii,jl+1) > epsi10 )"
+       ]
+      ]
+     },
+     "zdvice": {
+      "345": [
+       "w",
+       "zdvice(ii,jl) = g1(ii,jcat)*zx3 + g0(ii,jcat)*zx2 + zdaice(ii,jl)*hL(ii,jcat)",
+       [
+        "IF( npti > 0 )",
+        "DO jl = 1, jpl - 1",
+        "DO ii = 1, npti"
+       ]
+      ],
+      "353": [
+       "r",
+       "CALL itd_shiftice ( jdonor(1:npti,:), zdaice(1:npti,:), zdvice(1:npti,:) )",
+       [
+        "IF( npti > 0 )"
+       ]
+      ]
+     },
+     "zetamax": {
+      "282": [
+       "w",
+       "zetamax = MIN( zdh0, hR(ii,1) ) - hL(ii,1)",
+       [
+        "IF( npti > 0 )",
+        "DO jl = 1, jpl",
+        "IF( jl == 1 )",
+        "DO ii = 1, npti",
+        "IF( a_i_1d(ii) > epsi10 )",
+        "IF( zdh0 < 0.0 )"
+       ]
+      ],
+      "284": [
+       "r",
+       "IF( zetamax > 0.0 ) THEN",
+       [
+        "IF( npti > 0 )",
+        "DO jl = 1, jpl",
+        "IF( jl == 1 )",
+        "DO ii = 1, npti",
+        "IF( a_i_1d(ii) > epsi10 )",
+        "IF( zdh0 < 0.0 )"
+       ]
+      ],
+      "285": [
+       "r",
+       "zx1 = zetamax",
+       [
+        "IF( npti > 0 )",
+        "DO jl = 1, jpl",
+        "IF( jl == 1 )",
+        "DO ii = 1, npti",
+        "IF( a_i_1d(ii) > epsi10 )",
+        "IF( zdh0 < 0.0 )",
+        "IF( zetamax > 0.0 )"
+       ]
+      ],
+      "286": [
+       "r",
+       "zx2 = 0.5 * zetamax * zetamax",
+       [
+        "IF( npti > 0 )",
+        "DO jl = 1, jpl",
+        "IF( jl == 1 )",
+        "DO ii = 1, npti",
+        "IF( a_i_1d(ii) > epsi10 )",
+        "IF( zdh0 < 0.0 )",
+        "IF( zetamax > 0.0 )"
+       ]
+      ],
+      "327": [
+       "w",
+       "zetamax = MIN( zhbnew(ii,jl), hR(ii,jl) ) - hL(ii,jl)",
+       [
+        "IF( npti > 0 )",
+        "DO jl = 1, jpl - 1",
+        "DO ii = 1, npti",
+        "IF(zhbnew(ii,jl) > hi_max(jl))"
+       ]
+      ],
+      "331": [
+       "w",
+       "zetamax = MIN( hi_max(jl), hR(ii,jl+1) ) - hL(ii,jl+1)",
+       [
+        "IF( npti > 0 )",
+        "DO jl = 1, jpl - 1",
+        "DO ii = 1, npti",
+        "ELSE of IF(zhbnew(ii,jl) > hi_max(jl))"
+       ]
+      ],
+      "334": [
+       "wr",
+       "zetamax = MAX( zetamax, zetamin )",
+       [
+        "IF( npti > 0 )",
+        "DO jl = 1, jpl - 1",
+        "DO ii = 1, npti"
+       ]
+      ],
+      "336": [
+       "r",
+       "zx1 = zetamax - zetamin",
+       [
+        "IF( npti > 0 )",
+        "DO jl = 1, jpl - 1",
+        "DO ii = 1, npti"
+       ]
+      ],
+      "338": [
+       "r",
+       "zwk2 = zetamax * zetamax",
+       [
+        "IF( npti > 0 )",
+        "DO jl = 1, jpl - 1",
+        "DO ii = 1, npti"
+       ]
+      ],
+      "341": [
+       "r",
+       "zwk2 = zwk2 * zetamax",
+       [
+        "IF( npti > 0 )",
+        "DO jl = 1, jpl - 1",
+        "DO ii = 1, npti"
+       ]
+      ]
+     },
+     "zetamin": {
+      "326": [
+       "w",
+       "zetamin = MAX( hi_max(jl) , hL(ii,jl) ) - hL(ii,jl)",
+       [
+        "IF( npti > 0 )",
+        "DO jl = 1, jpl - 1",
+        "DO ii = 1, npti",
+        "IF(zhbnew(ii,jl) > hi_max(jl))"
+       ]
+      ],
+      "330": [
+       "w",
+       "zetamin = 0.0",
+       [
+        "IF( npti > 0 )",
+        "DO jl = 1, jpl - 1",
+        "DO ii = 1, npti",
+        "ELSE of IF(zhbnew(ii,jl) > hi_max(jl))"
+       ]
+      ],
+      "334": [
+       "r",
+       "zetamax = MAX( zetamax, zetamin )",
+       [
+        "IF( npti > 0 )",
+        "DO jl = 1, jpl - 1",
+        "DO ii = 1, npti"
+       ]
+      ],
+      "336": [
+       "r",
+       "zx1 = zetamax - zetamin",
+       [
+        "IF( npti > 0 )",
+        "DO jl = 1, jpl - 1",
+        "DO ii = 1, npti"
+       ]
+      ],
+      "337": [
+       "r",
+       "zwk1 = zetamin * zetamin",
+       [
+        "IF( npti > 0 )",
+        "DO jl = 1, jpl - 1",
+        "DO ii = 1, npti"
+       ]
+      ],
+      "340": [
+       "r",
+       "zwk1 = zwk1 * zetamin",
+       [
+        "IF( npti > 0 )",
+        "DO jl = 1, jpl - 1",
+        "DO ii = 1, npti"
+       ]
+      ]
+     },
+     "zhbnew": {
+      "172": [
+       "w",
+       "zhbnew(:,:) = 0._wp",
+       [
+        "IF( npti > 0 )"
+       ]
+      ],
+      "196": [
+       "w",
+       "zhbnew(ii,jl) = hi_max(jl) + zdhice(ii,jl) + zslope * ( hi_max(jl) - h_ib_2d(ii,jl) )",
+       [
+        "IF( npti > 0 )",
+        "DO jl = 1, jpl - 1",
+        "DO ii = 1, npti",
+        "IF( a_ib_2d(ii,jl) > epsi10 .AND. a_ib_2d(ii,jl+1) > epsi10 )"
+       ]
+      ],
+      "198": [
+       "w",
+       "zhbnew(ii,jl) = hi_max(jl) + zdhice(ii,jl)",
+       [
+        "IF( npti > 0 )",
+        "DO jl = 1, jpl - 1",
+        "DO ii = 1, npti",
+        "ELSEIF( a_ib_2d(ii,jl) > epsi10 .AND. a_ib_2d(ii,jl+1) <= epsi10 )"
+       ]
+      ],
+      "200": [
+       "w",
+       "zhbnew(ii,jl) = hi_max(jl) + zdhice(ii,jl+1)",
+       [
+        "IF( npti > 0 )",
+        "DO jl = 1, jpl - 1",
+        "DO ii = 1, npti",
+        "ELSEIF( a_ib_2d(ii,jl) <= epsi10 .AND. a_ib_2d(ii,jl+1) > epsi10 )"
+       ]
+      ],
+      "202": [
+       "w",
+       "zhbnew(ii,jl) = hi_max(jl)",
+       [
+        "IF( npti > 0 )",
+        "DO jl = 1, jpl - 1",
+        "DO ii = 1, npti",
+        "ELSE of ELSEIF( a_ib_2d(ii,jl) <= epsi10 .AND. a_ib_2d(ii,jl+1) > epsi10 )"
+       ]
+      ],
+      "209": [
+       "r",
+       "IF( a_i_2d(ii,jl ) > epsi10 .AND. h_i_2d(ii,jl ) > ( zhbnew(ii,jl) - epsi10 ) ) nptidx(ii) = 0",
+       [
+        "IF( npti > 0 )",
+        "DO jl = 1, jpl - 1",
+        "DO ii = 1, npti",
+        "IF( a_i_2d(ii,jl ) > epsi10 .AND. h_i_2d(ii,jl ) > ( zhbnew(ii,jl) - epsi10 ) )"
+       ]
+      ],
+      "210": [
+       "r",
+       "IF( a_i_2d(ii,jl+1) > epsi10 .AND. h_i_2d(ii,jl+1) < ( zhbnew(ii,jl) + epsi10 ) ) nptidx(ii) = 0",
+       [
+        "IF( npti > 0 )",
+        "DO jl = 1, jpl - 1",
+        "DO ii = 1, npti",
+        "IF( a_i_2d(ii,jl+1) > epsi10 .AND. h_i_2d(ii,jl+1) < ( zhbnew(ii,jl) + epsi10 ) )"
+       ]
+      ],
+      "213": [
+       "r",
+       "IF( zhbnew(ii,jl) < hi_max(jl-1) ) nptidx(ii) = 0",
+       [
+        "IF( npti > 0 )",
+        "DO jl = 1, jpl - 1",
+        "DO ii = 1, npti",
+        "IF( zhbnew(ii,jl) < hi_max(jl-1) )"
+       ]
+      ],
+      "214": [
+       "r",
+       "IF( zhbnew(ii,jl) > hi_max(jl+1) ) nptidx(ii) = 0",
+       [
+        "IF( npti > 0 )",
+        "DO jl = 1, jpl - 1",
+        "DO ii = 1, npti",
+        "IF( zhbnew(ii,jl) > hi_max(jl+1) )"
+       ]
+      ],
+      "222": [
+       "wr",
+       "zhbnew(ii,jpl) = MAX( hi_max(jpl-1), 3._wp * h_i_2d(ii,jpl) - 2._wp * zhbnew(ii,jpl-1) )",
+       [
+        "IF( npti > 0 )",
+        "DO ii = 1, npti",
+        "IF( a_i_2d(ii,jpl) > epsi10 )"
+       ]
+      ],
+      "224": [
+       "w",
+       "zhbnew(ii,jpl) = hi_max(jpl)",
+       [
+        "IF( npti > 0 )",
+        "DO ii = 1, npti",
+        "ELSE of IF( a_i_2d(ii,jpl) > epsi10 )"
+       ]
+      ],
+      "243": [
+       "wr",
+       "zhbnew(ipti,:) = zhbnew(ii,:)",
+       [
+        "IF( npti > 0 )",
+        "DO ii = 1, npti",
+        "IF( nptidx(ii) /= 0 )"
+       ]
+      ],
+      "298": [
+       "w",
+       "zhbnew(ii,0) = MIN( zdh0, hi_max(1) )",
+       [
+        "IF( npti > 0 )",
+        "DO jl = 1, jpl",
+        "IF( jl == 1 )",
+        "DO ii = 1, npti",
+        "IF( a_i_1d(ii) > epsi10 )",
+        "ELSE of IF( zdh0 < 0.0 )"
+       ]
+      ],
+      "312": [
+       "r",
+       "CALL itd_glinear( zhbnew(1:npti,jl-1), zhbnew(1:npti,jl), h_i_1d(1:npti) , a_i_1d(1:npti) , g0 (1:npti,jl ), g1 (1:npti,jl), hL (1:npti,jl), hR (1:npti,jl) )",
+       [
+        "IF( npti > 0 )",
+        "DO jl = 1, jpl"
+       ]
+      ],
+      "325": [
+       "r",
+       "IF (zhbnew(ii,jl) > hi_max(jl)) THEN",
+       [
+        "IF( npti > 0 )",
+        "DO jl = 1, jpl - 1",
+        "DO ii = 1, npti"
+       ]
+      ],
+      "327": [
+       "r",
+       "zetamax = MIN( zhbnew(ii,jl), hR(ii,jl) ) - hL(ii,jl)",
+       [
+        "IF( npti > 0 )",
+        "DO jl = 1, jpl - 1",
+        "DO ii = 1, npti",
+        "IF(zhbnew(ii,jl) > hi_max(jl))"
+       ]
+      ]
+     }
+    },
+    "itd_glinear": {
+     "pg0": {
+      "417": [
+       "w",
+       "pg0(ii) = zwk1 * ( z2_3 - zwk2 )",
+       [
+        "DO ii = 1, npti",
+        "IF( paice(ii) > epsi10 .AND. phice(ii) > epsi10 )"
+       ]
+      ],
+      "423": [
+       "w",
+       "pg0(ii) = 0._wp",
+       [
+        "DO ii = 1, npti",
+        "ELSE of IF( paice(ii) > epsi10 .AND. phice(ii) > epsi10 )"
+       ]
+      ]
+     },
+     "pg1": {
+      "418": [
+       "w",
+       "pg1(ii) = 2._wp * zdhr * zwk1 * ( zwk2 - 0.5_wp )",
+       [
+        "DO ii = 1, npti",
+        "IF( paice(ii) > epsi10 .AND. phice(ii) > epsi10 )"
+       ]
+      ],
+      "424": [
+       "w",
+       "pg1(ii) = 0._wp",
+       [
+        "DO ii = 1, npti",
+        "ELSE of IF( paice(ii) > epsi10 .AND. phice(ii) > epsi10 )"
+       ]
+      ]
+     },
+     "phL": {
+      "398": [
+       "w",
+       "phL(ii) = HbL(ii)",
+       [
+        "DO ii = 1, npti",
+        "IF( paice(ii) > epsi10 .AND. phice(ii) > epsi10 )"
+       ]
+      ],
+      "403": [
+       "r",
+       "zh13 = z1_3 * ( 2._wp * phL(ii) + phR(ii) )",
+       [
+        "DO ii = 1, npti",
+        "IF( paice(ii) > epsi10 .AND. phice(ii) > epsi10 )"
+       ]
+      ],
+      "404": [
+       "r",
+       "zh23 = z1_3 * ( phL(ii) + 2._wp * phR(ii) )",
+       [
+        "DO ii = 1, npti",
+        "IF( paice(ii) > epsi10 .AND. phice(ii) > epsi10 )"
+       ]
+      ],
+      "406": [
+       "r",
+       "IF ( phice(ii) < zh13 ) THEN ; phR(ii) = 3._wp * phice(ii) - 2._wp * phL(ii)",
+       [
+        "DO ii = 1, npti",
+        "IF( paice(ii) > epsi10 .AND. phice(ii) > epsi10 )"
+       ]
+      ],
+      "407": [
+       "w",
+       "ELSEIF( phice(ii) > zh23 ) THEN ; phL(ii) = 3._wp * phice(ii) - 2._wp * phR(ii)",
+       [
+        "DO ii = 1, npti",
+        "IF( paice(ii) > epsi10 .AND. phice(ii) > epsi10 )"
+       ]
+      ],
+      "411": [
+       "r",
+       "IF( phR(ii) > phL(ii) ) THEN ; zdhr = 1._wp / (phR(ii) - phL(ii))",
+       [
+        "DO ii = 1, npti",
+        "IF( paice(ii) > epsi10 .AND. phice(ii) > epsi10 )"
+       ]
+      ],
+      "416": [
+       "r",
+       "zwk2 = ( phice(ii) - phL(ii) ) * zdhr",
+       [
+        "DO ii = 1, npti",
+        "IF( paice(ii) > epsi10 .AND. phice(ii) > epsi10 )"
+       ]
+      ],
+      "421": [
+       "w",
+       "phL(ii) = 0._wp",
+       [
+        "DO ii = 1, npti",
+        "ELSE of IF( paice(ii) > epsi10 .AND. phice(ii) > epsi10 )"
+       ]
+      ]
+     },
+     "phR": {
+      "399": [
+       "w",
+       "phR(ii) = HbR(ii)",
+       [
+        "DO ii = 1, npti",
+        "IF( paice(ii) > epsi10 .AND. phice(ii) > epsi10 )"
+       ]
+      ],
+      "403": [
+       "r",
+       "zh13 = z1_3 * ( 2._wp * phL(ii) + phR(ii) )",
+       [
+        "DO ii = 1, npti",
+        "IF( paice(ii) > epsi10 .AND. phice(ii) > epsi10 )"
+       ]
+      ],
+      "404": [
+       "r",
+       "zh23 = z1_3 * ( phL(ii) + 2._wp * phR(ii) )",
+       [
+        "DO ii = 1, npti",
+        "IF( paice(ii) > epsi10 .AND. phice(ii) > epsi10 )"
+       ]
+      ],
+      "406": [
+       "w",
+       "IF ( phice(ii) < zh13 ) THEN ; phR(ii) = 3._wp * phice(ii) - 2._wp * phL(ii)",
+       [
+        "DO ii = 1, npti",
+        "IF( paice(ii) > epsi10 .AND. phice(ii) > epsi10 )"
+       ]
+      ],
+      "407": [
+       "r",
+       "ELSEIF( phice(ii) > zh23 ) THEN ; phL(ii) = 3._wp * phice(ii) - 2._wp * phR(ii)",
+       [
+        "DO ii = 1, npti",
+        "IF( paice(ii) > epsi10 .AND. phice(ii) > epsi10 )"
+       ]
+      ],
+      "411": [
+       "r",
+       "IF( phR(ii) > phL(ii) ) THEN ; zdhr = 1._wp / (phR(ii) - phL(ii))",
+       [
+        "DO ii = 1, npti",
+        "IF( paice(ii) > epsi10 .AND. phice(ii) > epsi10 )"
+       ]
+      ],
+      "422": [
+       "w",
+       "phR(ii) = 0._wp",
+       [
+        "DO ii = 1, npti",
+        "ELSE of IF( paice(ii) > epsi10 .AND. phice(ii) > epsi10 )"
+       ]
+      ]
+     },
+     "zdhr": {
+      "411": [
+       "w",
+       "IF( phR(ii) > phL(ii) ) THEN ; zdhr = 1._wp / (phR(ii) - phL(ii))",
+       [
+        "DO ii = 1, npti",
+        "IF( paice(ii) > epsi10 .AND. phice(ii) > epsi10 )"
+       ]
+      ],
+      "412": [
+       "w",
+       "ELSE ; zdhr = 0._wp",
+       [
+        "DO ii = 1, npti",
+        "IF( paice(ii) > epsi10 .AND. phice(ii) > epsi10 )"
+       ]
+      ],
+      "415": [
+       "r",
+       "zwk1 = 6._wp * paice(ii) * zdhr",
+       [
+        "DO ii = 1, npti",
+        "IF( paice(ii) > epsi10 .AND. phice(ii) > epsi10 )"
+       ]
+      ],
+      "416": [
+       "r",
+       "zwk2 = ( phice(ii) - phL(ii) ) * zdhr",
+       [
+        "DO ii = 1, npti",
+        "IF( paice(ii) > epsi10 .AND. phice(ii) > epsi10 )"
+       ]
+      ],
+      "418": [
+       "r",
+       "pg1(ii) = 2._wp * zdhr * zwk1 * ( zwk2 - 0.5_wp )",
+       [
+        "DO ii = 1, npti",
+        "IF( paice(ii) > epsi10 .AND. phice(ii) > epsi10 )"
+       ]
+      ]
+     },
+     "zh13": {
+      "403": [
+       "w",
+       "zh13 = z1_3 * ( 2._wp * phL(ii) + phR(ii) )",
+       [
+        "DO ii = 1, npti",
+        "IF( paice(ii) > epsi10 .AND. phice(ii) > epsi10 )"
+       ]
+      ],
+      "406": [
+       "r",
+       "IF ( phice(ii) < zh13 ) THEN ; phR(ii) = 3._wp * phice(ii) - 2._wp * phL(ii)",
+       [
+        "DO ii = 1, npti",
+        "IF( paice(ii) > epsi10 .AND. phice(ii) > epsi10 )"
+       ]
+      ]
+     },
+     "zh23": {
+      "404": [
+       "w",
+       "zh23 = z1_3 * ( phL(ii) + 2._wp * phR(ii) )",
+       [
+        "DO ii = 1, npti",
+        "IF( paice(ii) > epsi10 .AND. phice(ii) > epsi10 )"
+       ]
+      ],
+      "407": [
+       "r",
+       "ELSEIF( phice(ii) > zh23 ) THEN ; phL(ii) = 3._wp * phice(ii) - 2._wp * phR(ii)",
+       [
+        "DO ii = 1, npti",
+        "IF( paice(ii) > epsi10 .AND. phice(ii) > epsi10 )"
+       ]
+      ]
+     }
+    },
+    "itd_shiftice": {
+     "rn_amax_1d": {
+      "464": [
+       "r",
+       "CALL tab_2d_1d( npti, nptidx(1:npti), rn_amax_1d(1:npti), rn_amax_2d )",
+       []
+      ],
+      "568": [
+       "r",
+       "WHERE( ztmp(1:npti) > rn_amax_1d(1:npti) ) a_i_2d(1:npti,jl) = a_i_2d(1:npti,jl) * rn_amax_1d(1:npti) / ztmp(1:npti)",
+       [
+        "DO jl = 1, jpl",
+        "WHERE( ztmp(1:npti) > rn_amax_1d(1:npti) )"
+       ]
+      ]
+     },
+     "zaTsfn": {
+      "471": [
+       "w",
+       "zaTsfn(ii,jl) = a_i_2d(ii,jl) * t_su_2d(ii,jl)",
+       [
+        "DO jl = 1, jpl",
+        "DO ii = 1, npti"
+       ]
+      ],
+      "510": [
+       "r",
+       "ztrans = zaTsfn(ii,jl1) * zworka",
+       [
+        "DO jl = 1, jpl - 1",
+        "DO ii = 1, npti",
+        "IF( jl1 > 0 )"
+       ]
+      ],
+      "511": [
+       "wr",
+       "zaTsfn(ii,jl1) = zaTsfn(ii,jl1) - ztrans",
+       [
+        "DO jl = 1, jpl - 1",
+        "DO ii = 1, npti",
+        "IF( jl1 > 0 )"
+       ]
+      ],
+      "512": [
+       "wr",
+       "zaTsfn(ii,jl2) = zaTsfn(ii,jl2) + ztrans",
+       [
+        "DO jl = 1, jpl - 1",
+        "DO ii = 1, npti",
+        "IF( jl1 > 0 )"
+       ]
+      ],
+      "577": [
+       "r",
+       "t_su_2d(1:npti,:) = zaTsfn(1:npti,:) / a_i_2d(1:npti,:)",
+       [
+        "WHERE( a_i_2d(1:npti,:) >= epsi20 )"
+       ]
+      ]
+     },
+     "ztmp": {
+      "566": [
+       "w",
+       "ztmp(1:npti) = SUM( a_i_2d(1:npti,:), dim=2 )",
+       []
+      ],
+      "568": [
+       "r",
+       "WHERE( ztmp(1:npti) > rn_amax_1d(1:npti) ) a_i_2d(1:npti,jl) = a_i_2d(1:npti,jl) * rn_amax_1d(1:npti) / ztmp(1:npti)",
+       [
+        "DO jl = 1, jpl",
+        "WHERE( ztmp(1:npti) > rn_amax_1d(1:npti) )"
+       ]
+      ]
+     },
+     "ztrans": {
+      "502": [
+       "w",
+       "ztrans = v_s_2d(ii,jl1) * zworkv",
+       [
+        "DO jl = 1, jpl - 1",
+        "DO ii = 1, npti",
+        "IF( jl1 > 0 )"
+       ]
+      ],
+      "503": [
+       "r",
+       "v_s_2d(ii,jl1) = v_s_2d(ii,jl1) - ztrans",
+       [
+        "DO jl = 1, jpl - 1",
+        "DO ii = 1, npti",
+        "IF( jl1 > 0 )"
+       ]
+      ],
+      "504": [
+       "r",
+       "v_s_2d(ii,jl2) = v_s_2d(ii,jl2) + ztrans",
+       [
+        "DO jl = 1, jpl - 1",
+        "DO ii = 1, npti",
+        "IF( jl1 > 0 )"
+       ]
+      ],
+      "506": [
+       "w",
+       "ztrans = oa_i_2d(ii,jl1) * zworka",
+       [
+        "DO jl = 1, jpl - 1",
+        "DO ii = 1, npti",
+        "IF( jl1 > 0 )"
+       ]
+      ],
+      "507": [
+       "r",
+       "oa_i_2d(ii,jl1) = oa_i_2d(ii,jl1) - ztrans",
+       [
+        "DO jl = 1, jpl - 1",
+        "DO ii = 1, npti",
+        "IF( jl1 > 0 )"
+       ]
+      ],
+      "508": [
+       "r",
+       "oa_i_2d(ii,jl2) = oa_i_2d(ii,jl2) + ztrans",
+       [
+        "DO jl = 1, jpl - 1",
+        "DO ii = 1, npti",
+        "IF( jl1 > 0 )"
+       ]
+      ],
+      "510": [
+       "w",
+       "ztrans = zaTsfn(ii,jl1) * zworka",
+       [
+        "DO jl = 1, jpl - 1",
+        "DO ii = 1, npti",
+        "IF( jl1 > 0 )"
+       ]
+      ],
+      "511": [
+       "r",
+       "zaTsfn(ii,jl1) = zaTsfn(ii,jl1) - ztrans",
+       [
+        "DO jl = 1, jpl - 1",
+        "DO ii = 1, npti",
+        "IF( jl1 > 0 )"
+       ]
+      ],
+      "512": [
+       "r",
+       "zaTsfn(ii,jl2) = zaTsfn(ii,jl2) + ztrans",
+       [
+        "DO jl = 1, jpl - 1",
+        "DO ii = 1, npti",
+        "IF( jl1 > 0 )"
+       ]
+      ],
+      "515": [
+       "w",
+       "ztrans = a_ip_2d(ii,jl1) * zworka",
+       [
+        "DO jl = 1, jpl - 1",
+        "DO ii = 1, npti",
+        "IF( jl1 > 0 )",
+        "IF( ln_pnd_LEV .OR. ln_pnd_TOPO )"
+       ]
+      ],
+      "516": [
+       "r",
+       "a_ip_2d(ii,jl1) = a_ip_2d(ii,jl1) - ztrans",
+       [
+        "DO jl = 1, jpl - 1",
+        "DO ii = 1, npti",
+        "IF( jl1 > 0 )",
+        "IF( ln_pnd_LEV .OR. ln_pnd_TOPO )"
+       ]
+      ],
+      "517": [
+       "r",
+       "a_ip_2d(ii,jl2) = a_ip_2d(ii,jl2) + ztrans",
+       [
+        "DO jl = 1, jpl - 1",
+        "DO ii = 1, npti",
+        "IF( jl1 > 0 )",
+        "IF( ln_pnd_LEV .OR. ln_pnd_TOPO )"
+       ]
+      ],
+      "519": [
+       "w",
+       "ztrans = v_ip_2d(ii,jl1) * zworkv",
+       [
+        "DO jl = 1, jpl - 1",
+        "DO ii = 1, npti",
+        "IF( jl1 > 0 )",
+        "IF( ln_pnd_LEV .OR. ln_pnd_TOPO )"
+       ]
+      ],
+      "520": [
+       "r",
+       "v_ip_2d(ii,jl1) = v_ip_2d(ii,jl1) - ztrans",
+       [
+        "DO jl = 1, jpl - 1",
+        "DO ii = 1, npti",
+        "IF( jl1 > 0 )",
+        "IF( ln_pnd_LEV .OR. ln_pnd_TOPO )"
+       ]
+      ],
+      "521": [
+       "r",
+       "v_ip_2d(ii,jl2) = v_ip_2d(ii,jl2) + ztrans",
+       [
+        "DO jl = 1, jpl - 1",
+        "DO ii = 1, npti",
+        "IF( jl1 > 0 )",
+        "IF( ln_pnd_LEV .OR. ln_pnd_TOPO )"
+       ]
+      ],
+      "524": [
+       "w",
+       "ztrans = v_il_2d(ii,jl1) * zworkv",
+       [
+        "DO jl = 1, jpl - 1",
+        "DO ii = 1, npti",
+        "IF( jl1 > 0 )",
+        "IF( ln_pnd_LEV .OR. ln_pnd_TOPO )",
+        "IF( ln_pnd_lids )"
+       ]
+      ],
+      "525": [
+       "r",
+       "v_il_2d(ii,jl1) = v_il_2d(ii,jl1) - ztrans",
+       [
+        "DO jl = 1, jpl - 1",
+        "DO ii = 1, npti",
+        "IF( jl1 > 0 )",
+        "IF( ln_pnd_LEV .OR. ln_pnd_TOPO )",
+        "IF( ln_pnd_lids )"
+       ]
+      ],
+      "526": [
+       "r",
+       "v_il_2d(ii,jl2) = v_il_2d(ii,jl2) + ztrans",
+       [
+        "DO jl = 1, jpl - 1",
+        "DO ii = 1, npti",
+        "IF( jl1 > 0 )",
+        "IF( ln_pnd_LEV .OR. ln_pnd_TOPO )",
+        "IF( ln_pnd_lids )"
+       ]
+      ],
+      "531": [
+       "w",
+       "ztrans = e_s_2d(ii,jk,jl1) * zworkv",
+       [
+        "DO jl = 1, jpl - 1",
+        "DO ii = 1, npti",
+        "IF( jl1 > 0 )",
+        "DO jk = 1, nlay_s"
+       ]
+      ],
+      "532": [
+       "r",
+       "e_s_2d(ii,jk,jl1) = e_s_2d(ii,jk,jl1) - ztrans",
+       [
+        "DO jl = 1, jpl - 1",
+        "DO ii = 1, npti",
+        "IF( jl1 > 0 )",
+        "DO jk = 1, nlay_s"
+       ]
+      ],
+      "533": [
+       "r",
+       "e_s_2d(ii,jk,jl2) = e_s_2d(ii,jk,jl2) + ztrans",
+       [
+        "DO jl = 1, jpl - 1",
+        "DO ii = 1, npti",
+        "IF( jl1 > 0 )",
+        "DO jk = 1, nlay_s"
+       ]
+      ],
+      "536": [
+       "w",
+       "ztrans = e_i_2d(ii,jk,jl1) * zworkv",
+       [
+        "DO jl = 1, jpl - 1",
+        "DO ii = 1, npti",
+        "IF( jl1 > 0 )",
+        "DO jk = 1, nlay_i"
+       ]
+      ],
+      "537": [
+       "r",
+       "e_i_2d(ii,jk,jl1) = e_i_2d(ii,jk,jl1) - ztrans",
+       [
+        "DO jl = 1, jpl - 1",
+        "DO ii = 1, npti",
+        "IF( jl1 > 0 )",
+        "DO jk = 1, nlay_i"
+       ]
+      ],
+      "538": [
+       "r",
+       "e_i_2d(ii,jk,jl2) = e_i_2d(ii,jk,jl2) + ztrans",
+       [
+        "DO jl = 1, jpl - 1",
+        "DO ii = 1, npti",
+        "IF( jl1 > 0 )",
+        "DO jk = 1, nlay_i"
+       ]
+      ],
+      "543": [
+       "w",
+       "ztrans = szv_i_2d(ii,jk,jl1) * zworkv",
+       [
+        "DO jl = 1, jpl - 1",
+        "DO ii = 1, npti",
+        "IF( jl1 > 0 )",
+        "IF( nn_icesal == 4 )",
+        "DO jk = 1, nlay_i"
+       ]
+      ],
+      "544": [
+       "r",
+       "szv_i_2d(ii,jk,jl1) = szv_i_2d(ii,jk,jl1) - ztrans",
+       [
+        "DO jl = 1, jpl - 1",
+        "DO ii = 1, npti",
+        "IF( jl1 > 0 )",
+        "IF( nn_icesal == 4 )",
+        "DO jk = 1, nlay_i"
+       ]
+      ],
+      "545": [
+       "r",
+       "szv_i_2d(ii,jk,jl2) = szv_i_2d(ii,jk,jl2) + ztrans",
+       [
+        "DO jl = 1, jpl - 1",
+        "DO ii = 1, npti",
+        "IF( jl1 > 0 )",
+        "IF( nn_icesal == 4 )",
+        "DO jk = 1, nlay_i"
+       ]
+      ],
+      "548": [
+       "w",
+       "ztrans = sv_i_2d(ii,jl1) * zworkv",
+       [
+        "DO jl = 1, jpl - 1",
+        "DO ii = 1, npti",
+        "IF( jl1 > 0 )",
+        "ELSE of IF( nn_icesal == 4 )"
+       ]
+      ],
+      "549": [
+       "r",
+       "sv_i_2d(ii,jl1) = sv_i_2d(ii,jl1) - ztrans",
+       [
+        "DO jl = 1, jpl - 1",
+        "DO ii = 1, npti",
+        "IF( jl1 > 0 )",
+        "ELSE of IF( nn_icesal == 4 )"
+       ]
+      ],
+      "550": [
+       "r",
+       "sv_i_2d(ii,jl2) = sv_i_2d(ii,jl2) + ztrans",
+       [
+        "DO jl = 1, jpl - 1",
+        "DO ii = 1, npti",
+        "IF( jl1 > 0 )",
+        "ELSE of IF( nn_icesal == 4 )"
+       ]
+      ]
+     },
+     "zworka": {
+      "492": [
+       "w",
+       "IF( a_i_2d(ii,jl1) >= epsi10 ) THEN ; zworka = pdaice(ii,jl) / a_i_2d(ii,jl1)",
+       [
+        "DO jl = 1, jpl - 1",
+        "DO ii = 1, npti",
+        "IF( jl1 > 0 )"
+       ]
+      ],
+      "493": [
+       "w",
+       "ELSE ; zworka = 0._wp",
+       [
+        "DO jl = 1, jpl - 1",
+        "DO ii = 1, npti",
+        "IF( jl1 > 0 )"
+       ]
+      ],
+      "506": [
+       "r",
+       "ztrans = oa_i_2d(ii,jl1) * zworka",
+       [
+        "DO jl = 1, jpl - 1",
+        "DO ii = 1, npti",
+        "IF( jl1 > 0 )"
+       ]
+      ],
+      "510": [
+       "r",
+       "ztrans = zaTsfn(ii,jl1) * zworka",
+       [
+        "DO jl = 1, jpl - 1",
+        "DO ii = 1, npti",
+        "IF( jl1 > 0 )"
+       ]
+      ],
+      "515": [
+       "r",
+       "ztrans = a_ip_2d(ii,jl1) * zworka",
+       [
+        "DO jl = 1, jpl - 1",
+        "DO ii = 1, npti",
+        "IF( jl1 > 0 )",
+        "IF( ln_pnd_LEV .OR. ln_pnd_TOPO )"
+       ]
+      ]
+     },
+     "zworkv": {
+      "489": [
+       "w",
+       "IF( v_i_2d(ii,jl1) >= epsi10 ) THEN ; zworkv = pdvice(ii,jl) / v_i_2d(ii,jl1)",
+       [
+        "DO jl = 1, jpl - 1",
+        "DO ii = 1, npti",
+        "IF( jl1 > 0 )"
+       ]
+      ],
+      "490": [
+       "w",
+       "ELSE ; zworkv = 0._wp",
+       [
+        "DO jl = 1, jpl - 1",
+        "DO ii = 1, npti",
+        "IF( jl1 > 0 )"
+       ]
+      ],
+      "502": [
+       "r",
+       "ztrans = v_s_2d(ii,jl1) * zworkv",
+       [
+        "DO jl = 1, jpl - 1",
+        "DO ii = 1, npti",
+        "IF( jl1 > 0 )"
+       ]
+      ],
+      "519": [
+       "r",
+       "ztrans = v_ip_2d(ii,jl1) * zworkv",
+       [
+        "DO jl = 1, jpl - 1",
+        "DO ii = 1, npti",
+        "IF( jl1 > 0 )",
+        "IF( ln_pnd_LEV .OR. ln_pnd_TOPO )"
+       ]
+      ],
+      "524": [
+       "r",
+       "ztrans = v_il_2d(ii,jl1) * zworkv",
+       [
+        "DO jl = 1, jpl - 1",
+        "DO ii = 1, npti",
+        "IF( jl1 > 0 )",
+        "IF( ln_pnd_LEV .OR. ln_pnd_TOPO )",
+        "IF( ln_pnd_lids )"
+       ]
+      ],
+      "531": [
+       "r",
+       "ztrans = e_s_2d(ii,jk,jl1) * zworkv",
+       [
+        "DO jl = 1, jpl - 1",
+        "DO ii = 1, npti",
+        "IF( jl1 > 0 )",
+        "DO jk = 1, nlay_s"
+       ]
+      ],
+      "536": [
+       "r",
+       "ztrans = e_i_2d(ii,jk,jl1) * zworkv",
+       [
+        "DO jl = 1, jpl - 1",
+        "DO ii = 1, npti",
+        "IF( jl1 > 0 )",
+        "DO jk = 1, nlay_i"
+       ]
+      ],
+      "543": [
+       "r",
+       "ztrans = szv_i_2d(ii,jk,jl1) * zworkv",
+       [
+        "DO jl = 1, jpl - 1",
+        "DO ii = 1, npti",
+        "IF( jl1 > 0 )",
+        "IF( nn_icesal == 4 )",
+        "DO jk = 1, nlay_i"
+       ]
+      ],
+      "548": [
+       "r",
+       "ztrans = sv_i_2d(ii,jl1) * zworkv",
+       [
+        "DO jl = 1, jpl - 1",
+        "DO ii = 1, npti",
+        "IF( jl1 > 0 )",
+        "ELSE of IF( nn_icesal == 4 )"
+       ]
+      ]
+     }
+    }
+   },
+   "instructions_without_token": [],
+   "ppsrc_sha256": "22baac67260037d4cde180d48ab1938e730b57f492c7d01eb6ade93c9403e7ba",
+   "record_object_sha256": "2642ba5ec85fc283fc288d25ade003a837a3fe6f8cccc0f32b7f3bb3d89caa71",
+   "routines": {
+    "ice_itd_rem": [
+     118,
+     365
+    ],
+    "itd_glinear": [
+     368,
+     429
+    ],
+    "itd_shiftice": [
+     432,
+     597
+    ]
+   },
+   "sign_tokens": [],
+   "sites": {
+    "222": {
+     "enclosing": [
+      "IF( npti > 0 )",
+      "DO ii = 1, npti",
+      "IF( a_i_2d(ii,jpl) > epsi10 )"
+     ],
+     "instructions": [
+      {
+       "count": 7,
+       "dst": "VAR",
+       "dst_defs": "subsd@222",
+       "op": "maxsd",
+       "src": "VAR",
+       "src_defs": "load@222"
+      }
+     ],
+     "statement": "zhbnew(ii,jpl) = MAX( hi_max(jpl-1), 3._wp * h_i_2d(ii,jpl) - 2._wp * zhbnew(ii,jpl-1) )",
+     "tokens": [
+      "MAX"
+     ]
+    },
+    "282": {
+     "enclosing": [
+      "IF( npti > 0 )",
+      "DO jl = 1, jpl",
+      "IF( jl == 1 )",
+      "DO ii = 1, npti",
+      "IF( a_i_1d(ii) > epsi10 )",
+      "IF( zdh0 < 0.0 )"
+     ],
+     "instructions": [
+      {
+       "count": 7,
+       "dst": "VAR",
+       "dst_defs": "load@280",
+       "op": "minsd",
+       "src": "VAR",
+       "src_defs": "load@282"
+      },
+      {
+       "count": 7,
+       "dst": "VAR",
+       "dst_defs": "minsd@282",
+       "op": "minsd",
+       "src": "VAR",
+       "src_defs": "xorpd@280"
+      }
+     ],
+     "statement": "zetamax = MIN( zdh0, hR(ii,1) ) - hL(ii,1)",
+     "tokens": [
+      "MIN"
+     ]
+    },
+    "289": {
+     "enclosing": [
+      "IF( npti > 0 )",
+      "DO jl = 1, jpl",
+      "IF( jl == 1 )",
+      "DO ii = 1, npti",
+      "IF( a_i_1d(ii) > epsi10 )",
+      "IF( zdh0 < 0.0 )",
+      "IF( zetamax > 0.0 )"
+     ],
+     "instructions": [
+      {
+       "count": 7,
+       "dst": "VAR",
+       "dst_defs": "addsd@287",
+       "op": "minsd",
+       "src": "VAR",
+       "src_defs": "mulsd@288"
+      }
+     ],
+     "statement": "zda0   = MIN( zda0, zdamax )",
+     "tokens": [
+      "MIN"
+     ]
+    },
+    "298": {
+     "enclosing": [
+      "IF( npti > 0 )",
+      "DO jl = 1, jpl",
+      "IF( jl == 1 )",
+      "DO ii = 1, npti",
+      "IF( a_i_1d(ii) > epsi10 )",
+      "ELSE of IF( zdh0 < 0.0 )"
+     ],
+     "instructions": [
+      {
+       "count": 7,
+       "dst": "VAR",
+       "dst_defs": "load@280",
+       "op": "minsd",
+       "src": "VAR",
+       "src_defs": "subsd@278"
+      }
+     ],
+     "statement": "zhbnew(ii,0) = MIN( zdh0, hi_max(1) )",
+     "tokens": [
+      "MIN"
+     ]
+    },
+    "326": {
+     "enclosing": [
+      "IF( npti > 0 )",
+      "DO jl = 1, jpl - 1",
+      "DO ii = 1, npti",
+      "IF(zhbnew(ii,jl) > hi_max(jl))"
+     ],
+     "instructions": [
+      {
+       "count": 3,
+       "dst": "VAR",
+       "dst_defs": "load@325",
+       "op": "maxsd",
+       "src": "VAR",
+       "src_defs": "load@326"
+      }
+     ],
+     "statement": "zetamin = MAX( hi_max(jl)   , hL(ii,jl) ) - hL(ii,jl)",
+     "tokens": [
+      "MAX"
+     ]
+    },
+    "327": {
+     "enclosing": [
+      "IF( npti > 0 )",
+      "DO jl = 1, jpl - 1",
+      "DO ii = 1, npti",
+      "IF(zhbnew(ii,jl) > hi_max(jl))"
+     ],
+     "instructions": [
+      {
+       "count": 3,
+       "dst": "VAR",
+       "dst_defs": "load@325",
+       "op": "minsd",
+       "src": "VAR",
+       "src_defs": "load@327"
+      }
+     ],
+     "statement": "zetamax = MIN( zhbnew(ii,jl), hR(ii,jl) ) - hL(ii,jl)",
+     "tokens": [
+      "MIN"
+     ]
+    },
+    "331": {
+     "enclosing": [
+      "IF( npti > 0 )",
+      "DO jl = 1, jpl - 1",
+      "DO ii = 1, npti",
+      "ELSE of IF(zhbnew(ii,jl) > hi_max(jl))"
+     ],
+     "instructions": [
+      {
+       "count": 3,
+       "dst": "VAR",
+       "dst_defs": "load@331",
+       "op": "minsd",
+       "src": "VAR",
+       "src_defs": "load@325"
+      }
+     ],
+     "statement": "zetamax = MIN( hi_max(jl), hR(ii,jl+1) ) - hL(ii,jl+1)",
+     "tokens": [
+      "MIN"
+     ]
+    },
+    "334": {
+     "enclosing": [
+      "IF( npti > 0 )",
+      "DO jl = 1, jpl - 1",
+      "DO ii = 1, npti"
+     ],
+     "instructions": [
+      {
+       "count": 3,
+       "dst": "VAR",
+       "op": "maxsd",
+       "src": "MIXED(VAR|ZERO)"
+      }
+     ],
+     "statement": "zetamax = MAX( zetamax, zetamin )",
+     "tokens": [
+      "MAX"
+     ]
+    }
+   },
+   "token_statements_without_instruction": {
+    "280": {
+     "statement": "zdh0 = MIN( -zdh0, hi_max(1) )",
+     "tokens": [
+      "MIN"
+     ]
+    }
+   }
+  }
+ },
+ "tie_lemmas": {
+  "L0": "MINSD/MAXSD returns its source operand on an equality or unordered comparison; finite equal nonzero operands have identical bits.",
+  "L1": "All nine executing O13 MIN/MAX sites have two finite nonnegative physical operands except the displaced-boundary upper expression; signed-zero distinctions are either impossible under the strict remap guards or overwritten by the subsequent extensive update."
+ },
+ "tie_verdicts": {
+  "itd:222": {
+   "proof": "hi_max(jpl-1) is strictly positive (L0).",
+   "verdict": "NO_TIE"
+  },
+  "itd:280": {
+   "proof": "The melt arm has -zdh0 strictly positive (L1).",
+   "verdict": "NO_TIE"
+  },
+  "itd:282": {
+   "proof": "A signed-zero tie cannot change the subsequent positive-eta guard (L1).",
+   "verdict": "NO_TIE"
+  },
+  "itd:289": {
+   "proof": "The loss arm has positive area and thickness loss (L1).",
+   "verdict": "NO_TIE"
+  },
+  "itd:298": {
+   "proof": "A zero sign is consumed only as a category boundary in finite subtraction/comparison (L1).",
+   "verdict": "MASKED"
+  },
+  "itd:326": {
+   "proof": "Equal bounds make eta_min zero; its sign is masked by the following interval arithmetic (L1).",
+   "verdict": "MASKED"
+  },
+  "itd:327": {
+   "proof": "Equal bounds make a zero-width transfer whose sign is masked by line 334 (L1).",
+   "verdict": "MASKED"
+  },
+  "itd:331": {
+   "proof": "Equal bounds make a zero-width transfer whose sign is masked by line 334 (L1).",
+   "verdict": "MASKED"
+  },
+  "itd:334": {
+   "proof": "A zero interval yields exactly zero area/volume transfer and cannot alter outputs (L1).",
+   "verdict": "MASKED"
+  }
+ }
+}

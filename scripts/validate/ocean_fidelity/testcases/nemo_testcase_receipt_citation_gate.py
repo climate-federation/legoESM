@@ -2392,8 +2392,8 @@ CITATION_MAP = {
     'src/ICE/icethd.F90:442': 'e_i_1d(1:npti,jk) = e_i_1d(1:npti,jk) * h_i_1d(1:npti) * a_i_1d(1:npti',
     'src/ICE/icethd.F90:442,445': ['e_i_1d(1:npti,jk) = e_i_1d(1:npti,jk) * h_i_1d(1:npti) * a_i_1d(1:npti', 'e_s_1d(1:npti,jk) = e_s_1d(1:npti,jk) * h_s_1d(1:npti) * a_i_1d(1:npti', 2],
     'src/ICE/icethd_dh.F90:204-225,441-496': ['! Snow melting', ('END DO', 5), '! Snow-Ice formation', 'e_s_1d(ji,:) = snw_ent( zh_s, ze_s )', 78],
-    'packages/ice/legoesm/ice/sea_ice.py:286-298,500-517': [('if config.thermo_scheme == "si3_bl99":', 1), ('return new_state, response', 1), 'def _si3_step_with_trace(state: SI3ColumnState,', 'trace = si3_column_step_arrays(arrays, forcing, dt, config.ice_constan', 31],
-    'packages/ice/legoesm/ice/sea_ice.py:297,500-517': ['new_state, response, _ = _si3_step_with_trace(state, forcing, config, ', 'def _si3_step_with_trace(state: SI3ColumnState,', 'trace = si3_column_step_arrays(arrays, forcing, dt, config.ice_constan', 19],
+    'packages/ice/legoesm/ice/sea_ice.py:293-305,508-525': [('if config.thermo_scheme == "si3_bl99":', 1), ('return new_state, response', 1), 'def _si3_step_with_trace(state: SI3ColumnState,', 'trace = si3_column_step_arrays(arrays, forcing, dt, config.ice_constan', 31],
+    'packages/ice/legoesm/ice/sea_ice.py:304,508-525': ['new_state, response, _ = _si3_step_with_trace(state, forcing, config, ', 'def _si3_step_with_trace(state: SI3ColumnState,', 'trace = si3_column_step_arrays(arrays, forcing, dt, config.ice_constan', 19],
     'tests/ocean/fidelity/test_nemo_si3thd_phase2b_year_gate.py:64-85': ['def test_snow_free_entry_uses_nemo_zero_volume_convention(gate) -> Non', 'assert found, "seasonal C1D stream never exercised its snow-free state', 22],
     'scripts/validate/ocean_fidelity/testcases/nemo_si3thd_d5_platform_probe.py:144-2072': ['def run_stage_a_subnormal_probe(*, plant_zero_input: bool = False) -> ', ('}', 102), 1929],
     'scripts/validate/ocean_fidelity/testcases/nemo_si3thd_d5_platform_probe.py:1985-2008': ['"predicate_true_count": pred_true_count,', ('zdf_layer_reciprocals=False,', 2), 24],
@@ -2514,8 +2514,8 @@ CITATION_MAP = {
     'packages/ice/legoesm/ice/state.py:338-345': ['from legoesm.ice.si3_orca2_state import (  # noqa: E402,F401', (')', 115), 8],
     'packages/ice/legoesm/ice/config.py:524-575': ['# Optional ORCA2 5-category 10+5-layer SI3 state configuration (`therm', (')', 156), 52],
     'packages/ice/legoesm/ice/sea_ice.py:364-365': ['if config.thermo_scheme == "si3_orca2_o1":', 'return _si3_orca2_o1_step_with_trace(state, forcing, config, dt)', 2],
-    'packages/ice/legoesm/ice/itd.py:769-772': ['from legoesm.ice.si3_orca2_state import (  # noqa: E402,F401', (')', 283), 4],
-    'packages/ice/legoesm/ice/__init__.py:199-225': [']', (')', 17), 27],
+    'packages/ice/legoesm/ice/itd.py:1078-1080': ['from legoesm.ice.si3_orca2_state import (  # noqa: E402,F401', 'si3_hfn_category_bounds,', 3],
+    'packages/ice/legoesm/ice/__init__.py:201-227': [']', (')', 17), 27],
     'scripts/validate/ocean_fidelity/testcases/nemo_testcase_g1_orca2grid/run.sh:1-382': ['#!/usr/bin/env bash', ('admit', 18), 382],
     'scripts/validate/ocean_fidelity/testcases/nemo_testcase_l2_orca2_tke_boundary_acquisition/run.sh:1-903': ['#!/usr/bin/env bash', ('finalize_existing', 3), 903],
     'scripts/validate/ocean_fidelity/testcases/nemo502_si3thd_MY_SRC/icethd_zdf_bl99.F90:1-947': [('MODULE icethd_zdf_BL99', 1), 'END MODULE icethd_zdf_BL99', 947],
@@ -9843,7 +9843,7 @@ CITATION_MAP = {
     'packages/ice/legoesm/ice/bitz_lipscomb.py:1735': 'post_da = _si3_column_thd_da(state, post_temp2, forcing, si3, dt, constants)',
     'packages/ice/legoesm/ice/bitz_lipscomb.py:1848': 'def _si3_column_thd_da(entry, post_temp2, forcing, si3, dt, constants):',
     'packages/ice/legoesm/ice/bitz_lipscomb.py:1880': 'gathered = entry.concentration > _EPS10',
-    'packages/ice/legoesm/ice/sea_ice.py:517': 'trace = si3_column_step_arrays(arrays, forcing, dt, config.ice_constants, si3=config.si3)',
+    'packages/ice/legoesm/ice/sea_ice.py:525': 'trace = si3_column_step_arrays(arrays, forcing, dt, config.ice_constants, si3=config.si3)',
     'packages/ice/legoesm/ice/config.py:309': 'namthd_da: SI3LateralMeltConfig | None = None',
     'packages/ice/legoesm/ice/config.py:316': 'wanted = SI3ThermoConfig(lateral_melt=config.si3.lateral_melt, namthd_da=config.si3.namthd_da)',
     'packages/ice/legoesm/ice/config.py:597-601': ['class SI3LateralMeltConfig(NamedTuple):', 'rn_dmin: float', 5],
@@ -9989,12 +9989,12 @@ _reanchor('scripts/validate/ocean_fidelity/testcases/nemo_si3_o2_orca2_sas_acqui
 _reanchor('scripts/validate/ocean_fidelity/testcases/nemo_si3_o2_orca2_sas_gate.py:1-1599', 'scripts/validate/ocean_fidelity/testcases/nemo_si3_o2_orca2_sas_gate.py:1-1718', extent=1718)
 _reanchor('packages/ice/legoesm/ice/si3_orca2_state.py:2105-2210', 'packages/ice/legoesm/ice/si3_orca2_state.py:2261-2367', anchors=['class SI3O2InitConfig(NamedTuple):', ('apply_halos: bool', 5), 107])
 # Round 11 removed one import line near the top of sea_ice.py: every later line moved up by one.
-_reanchor('packages/ice/legoesm/ice/sea_ice.py:89-121', 'packages/ice/legoesm/ice/sea_ice.py:88-120')
-_reanchor('packages/ice/legoesm/ice/sea_ice.py:329-362', 'packages/ice/legoesm/ice/sea_ice.py:328-361')
-_reanchor('packages/ice/legoesm/ice/sea_ice.py:364-365', 'packages/ice/legoesm/ice/sea_ice.py:363-364')
-_reanchor('packages/ice/legoesm/ice/sea_ice.py:364-367', 'packages/ice/legoesm/ice/sea_ice.py:363-366')
-_reanchor('packages/ice/legoesm/ice/sea_ice.py:592-612', 'packages/ice/legoesm/ice/sea_ice.py:591-611')
-_reanchor('packages/ice/legoesm/ice/sea_ice.py:621-655', 'packages/ice/legoesm/ice/sea_ice.py:620-654')
+_reanchor('packages/ice/legoesm/ice/sea_ice.py:89-121', 'packages/ice/legoesm/ice/sea_ice.py:90-122')
+_reanchor('packages/ice/legoesm/ice/sea_ice.py:329-362', 'packages/ice/legoesm/ice/sea_ice.py:335-368')
+_reanchor('packages/ice/legoesm/ice/sea_ice.py:364-365', 'packages/ice/legoesm/ice/sea_ice.py:370-371')
+_reanchor('packages/ice/legoesm/ice/sea_ice.py:364-367', 'packages/ice/legoesm/ice/sea_ice.py:370-373')
+_reanchor('packages/ice/legoesm/ice/sea_ice.py:592-612', 'packages/ice/legoesm/ice/sea_ice.py:599-619')
+_reanchor('packages/ice/legoesm/ice/sea_ice.py:621-655', 'packages/ice/legoesm/ice/sea_ice.py:628-662')
 _reanchor('packages/ice/legoesm/ice/si3_orca2_state.py:2105-2156', 'packages/ice/legoesm/ice/si3_orca2_state.py:2261-2314', extent=54)
 _reanchor('packages/ice/legoesm/ice/si3_orca2_state.py:2159-2193', 'packages/ice/legoesm/ice/si3_orca2_state.py:2317-2351')
 _reanchor('packages/ice/legoesm/ice/config.py:578-587', 'packages/ice/legoesm/ice/config.py:583-593', anchors=['def build_si3_orca2_o2_config(', ('si3_orca2=cfg,', 2), 11])
@@ -10194,7 +10194,7 @@ _reanchor('tests/ice/unit/test_si3_o5_strength_aevp.py:400', 'tests/ice/unit/tes
 # above has finished so the mandatory full-map audit sees the composed tree.
 _reanchor('packages/ice/legoesm/ice/si3_orca2_state.py:55-66', 'packages/ice/legoesm/ice/si3_orca2_state.py:56-67')
 _reanchor('packages/ice/legoesm/ice/si3_orca2_state.py:2058-2068', 'packages/ice/legoesm/ice/si3_orca2_state.py:2078-2088')
-_reanchor('packages/ice/legoesm/ice/__init__.py:227-251', 'packages/ice/legoesm/ice/__init__.py:264-288', anchors=['from legoesm.ice.config import build_si3_orca2_o2_config  # noqa: E402', (')', 24), 25])
+_reanchor('packages/ice/legoesm/ice/__init__.py:227-251', 'packages/ice/legoesm/ice/__init__.py:266-290', anchors=['from legoesm.ice.config import build_si3_orca2_o2_config  # noqa: E402', (')', 24), 25])
 _reanchor('packages/ice/legoesm/ice/si3_orca2_state.py:1219-1245', 'packages/ice/legoesm/ice/si3_orca2_state.py:1222-1248')
 _reanchor('packages/ice/legoesm/ice/si3_orca2_state.py:1383', 'packages/ice/legoesm/ice/si3_orca2_state.py:1389')
 _reanchor('packages/ice/legoesm/ice/si3_orca2_state.py:363', 'packages/ice/legoesm/ice/si3_orca2_state.py:367')
@@ -10483,22 +10483,22 @@ CITATION_MAP.update({
     'ORCA2_SAS_ICE_O7_REF/BLD/ppsrc/nemo/icethd_pnd.f90:1419': 'IF( ztmp > 0._wp )   ice_perm_eff = REAL( nlay_i, wp ) / ztmp',
     'packages/ice/legoesm/ice/si3_thd_pnd.py:214-232': ['cell_shape = t_i.shape[:-1]', 'return jnp.where(valid, sr(nlay_f / ztmp_safe), zero)', 19],
     'packages/ice/legoesm/ice/si3_thd_pnd.py:766-954': ['def si3_ice_thd_o12_stages(', 'return SI3O12Stages(categories=tuple(cat_outputs), pnd=pnd_out)', 189],
-    'packages/ice/legoesm/ice/__init__.py:290-314': ['from legoesm.ice.config import SI3PondConfig  # noqa: E402', (')', 27), 25],
-    'packages/ice/legoesm/ice/config.py:267-288,311-315,652-724': ['class MeltPondConfig(NamedTuple):', 'namthd_pnd: SI3PondConfig | None = None', 'def validate_si3_thermo_config(config: "SeaIceConfig") -> None:', 'return _validate_si3_orca2_o1_config(config) or _validate_si3_orca2_o4_config(config) or _validate_si3_lev_pond_config(config)', 'class SI3PondConfig(NamedTuple):', (')', 209), 100],
-    'packages/ice/legoesm/ice/config.py:311-315,662-724': ['def validate_si3_thermo_config(config: "SeaIceConfig") -> None:', 'return _validate_si3_orca2_o1_config(config) or _validate_si3_orca2_o4_config(config) or _validate_si3_lev_pond_config(config)', 'def _validate_si3_lev_pond_config(config: "SeaIceConfig") -> None:', (')', 209), 68],
+    'packages/ice/legoesm/ice/__init__.py:292-316': ['from legoesm.ice.config import SI3PondConfig  # noqa: E402', (')', 27), 25],
+    'packages/ice/legoesm/ice/config.py:267-288,311-315,652-727': ['class MeltPondConfig(NamedTuple):', 'namthd_pnd: SI3PondConfig | None = None', 'def validate_si3_thermo_config(config: "SeaIceConfig") -> None:', 'return _validate_si3_orca2_o1_config(config) or _validate_si3_orca2_o4_config(config) or _validate_si3_lev_pond_config(config)', 'class SI3PondConfig(NamedTuple):', (')', 209), 103],
+    'packages/ice/legoesm/ice/config.py:311-315,662-727': ['def validate_si3_thermo_config(config: "SeaIceConfig") -> None:', 'return _validate_si3_orca2_o1_config(config) or _validate_si3_orca2_o4_config(config) or _validate_si3_lev_pond_config(config)', 'def _validate_si3_lev_pond_config(config: "SeaIceConfig") -> None:', (')', 209), 71],
     'ORCA2_SAS_ICE_O7_REF/BLD/ppsrc/nemo/icedyn_adv_pra.f90:255-261,308-315,358-365,391-397,421-425,435,1004-1007,1146-1147': [('IF ( ln_pnd_LEV .OR. ln_pnd_TOPO ) THEN', 2), ('ENDIF', 8), ('IF ( ln_pnd_LEV .OR. ln_pnd_TOPO ) THEN', 3), ('ENDIF', 10), ('IF ( ln_pnd_LEV .OR. ln_pnd_TOPO ) THEN', 4), ('ENDIF', 12), ('IF ( ln_pnd_LEV .OR. ln_pnd_TOPO ) THEN', 5), ('ENDIF', 15), 'CALL Hbig_pra( ihls, jl, rDt_ice, zhi_max, zhs_max, zhip_max, zsi_max, zes_max, zei_max, zszi_max, &', 'CALL Hsnow_pra( ihls, jl, rDt_ice, pv_i, pv_s, pa_i, pa_ip, pe_s )', 'CALL ice_var_zapneg( ihls, rDt_ice, pv_i, pv_s, psv_i, poa_i, pa_i, pa_ip, pv_ip, pv_il, pe_s, pe_i, pszv_i )', 'IF( ln_pnd_LEV .OR. ln_pnd_TOPO .AND. pv_ip(ji,jj,jcat) > 0._wp ) THEN', 'pa_ip(ji,jj,jcat) = pv_ip(ji,jj,jcat) / phip_max(ji,jj)', '!-- correct pond concentration to avoid a_ip > a_i -- !', 'pa_ip(ji,jj,jcat) = MIN( pa_ip(ji,jj,jcat), pa_i(ji,jj,jcat) )', 42],
     'ORCA2_SAS_ICE_O7_REF/BLD/ppsrc/nemo/icecor.f90:84-95': ['IF( ln_pnd_LEV .OR. ln_pnd_TOPO ) THEN', ('END DO', 1), 12],
     'ORCA2_SAS_ICE_O7_REF/BLD/ppsrc/nemo/iceitd.f90:456-458,514-528,589-591': ['CALL tab_3d_2d( npti, nptidx(1:npti), a_ip_2d (1:npti,:)  , a_ip  )', 'CALL tab_3d_2d( npti, nptidx(1:npti), v_il_2d (1:npti,:)  , v_il  )', 'IF ( ln_pnd_LEV .OR. ln_pnd_TOPO ) THEN', ('ENDIF', 19), 'CALL tab_2d_3d( npti, nptidx(1:npti), a_ip_2d (1:npti,:)  , a_ip  )', 'CALL tab_2d_3d( npti, nptidx(1:npti), v_il_2d (1:npti,:)  , v_il  )', 21],
     'ORCA2_SAS_ICE_O7_REF/BLD/ppsrc/nemo/icedyn_rdgrft.f90:764-773,802-809,824-828,919-925': [('IF ( ln_pnd_LEV .OR. ln_pnd_TOPO ) THEN', 1), ('ENDIF', 24), ('IF ( ln_pnd_LEV .OR. ln_pnd_TOPO ) THEN', 2), ('ENDIF', 27), ('IF ( ln_pnd_LEV .OR. ln_pnd_TOPO ) THEN', 3), ('ENDIF', 29), ('IF ( ln_pnd_LEV .OR. ln_pnd_TOPO ) THEN', 4), ('ENDIF', 36), 30],
-    'packages/ice/legoesm/ice/sea_ice.py:1709-1787,2960-2968,3196-3289': ['def _cap_multicat_concentration(conc, h, h_snow=None, pond_depth=None, *, h_il=None):', 'return area, depth', ('if config.ponds.enabled:', 3), 'jnp.maximum(pond_thick, 0.0) * conc, conc, config)', ('if is_multicat and config.itd_remap != "none":', 2), (')', 1068), 182],
-    'packages/ice/legoesm/ice/itd.py:262-335,634-635': ['def linear_remap(', 'a_deficit = a_new * deficit_frac', 'pond_factor = jnp.where(V_new_cat > 1e-30, V_pond_new / V_safe, 0.0)', 'V_pond_remap = jnp.sum(int_vol * pond_factor[None, :], axis=1)', 76],
+    'packages/ice/legoesm/ice/sea_ice.py:1717-1795,2992-3000,3228-3387': ['def _cap_multicat_concentration(conc, h, h_snow=None, pond_depth=None, *, h_il=None):', 'return area, depth', ('if config.ponds.enabled:', 3), 'jnp.maximum(pond_thick, 0.0) * conc, conc, config)', 'if is_multicat and config.itd_remap != "none":', '+ ridge_result["pond_to_ocean"]', 248],
+    'packages/ice/legoesm/ice/itd.py:263-336,635-636': ['def linear_remap(', 'a_deficit = a_new * deficit_frac', 'pond_factor = jnp.where(V_new_cat > 1e-30, V_pond_new / V_safe, 0.0)', 'V_pond_remap = jnp.sum(int_vol * pond_factor[None, :], axis=1)', 76],
     'packages/ice/legoesm/ice/ridging.py:422-423,459-559': ['# Donor pond water is drained (not redistributed into the ridge).', 'Vpond_new = jnp.maximum(V_pond_cat - dVpond_per_cat, 0.0)', 'def apply_ridging(', ('}', 1), 103],
     'packages/ice/legoesm/ice/state.py:52-76,89-177,213-258,315-335': ['class DynamicSeaIceState(NamedTuple):', 'h_il: Field | None = None  # Mean melt pond lid thickness [m]', 'def init_dynamic_ice_state(', (')', 55), 'def slab_to_dynamic(', (')', 82), 'return state._replace(', (')', 114), 181],
     'packages/ocean/legoesm/ocean/restart.py:322-329,382-392,859-861': ['# --- sea ice (SeaIceState + the 13-field DynamicSeaIceState) -----------', '"h_il": _SLOT_PROGNOSTIC,', 'def _iter_state_fields(state) -> list[str]:', ('', 392), 'declared = getattr(state, "_fields", None) or _iter_state_fields(state)', 'if n not in _SLOT_POLICY)', 22],
     'packages/ice/legoesm/ice/ponds.py:34-212': ['def step_ponds(', (')', 55), 179],
-    'packages/ice/legoesm/ice/sea_ice.py:420-433,475,1737-1772,2388-2413,2469-2535,2820-2845,2982-3062,3196-3250,3295-3297,3414-3432': ['if not (config.ponds.enabled and config.ponds.scheme == "si3_lev") and config.itd_remap not in ("simple", "lipscomb2001"):', 'if config.n_categories > 1 and not (config.ponds.enabled and config.ponds.scheme == "si3_lev"):', 'state = slab_to_dynamic(state, pond_scheme=config.ponds.scheme if config.ponds.enabled else "cesm")', ('if h_il is not None:', 1), (')', 575), ('if not config.ponds.enabled and config.ponds.scheme != "cesm":', 3), 'h_il_dil = h_il * dilute if _use_si3_lev else None', 'if config.ponds.scheme == "si3_lev":', ('h_il_new = h_il_dil', 1), ('if not config.ponds.enabled and config.ponds.scheme != "cesm":', 4), ('conc, h, h_snow, pond_depth, h_il=h_il)', 1), ('if is_multicat and config.itd_remap != "none":', 1), 'h_il = jnp.stack(hil_list, axis=-1) if h_il is not None else None', ('if is_multicat and config.itd_remap != "none":', 2), ('conc, h, h_snow, pond_depth, h_il=h_il)', 4), ('if is_multicat and config.itd_remap != "none":', 3), ('conc, h, h_snow, pond_depth, h_il=h_il)', 5), ('new_state = DynamicSeaIceState(', 2), (')', 1123), 328],
-    'packages/ice/legoesm/ice/sea_ice.py:420-433,1737-1772,2820-2845,2982-3062,3196-3250,3295-3297': ['if not (config.ponds.enabled and config.ponds.scheme == "si3_lev") and config.itd_remap not in ("simple", "lipscomb2001"):', 'if config.n_categories > 1 and not (config.ponds.enabled and config.ponds.scheme == "si3_lev"):', ('if h_il is not None:', 1), (')', 575), ('if not config.ponds.enabled and config.ponds.scheme != "cesm":', 4), ('conc, h, h_snow, pond_depth, h_il=h_il)', 1), ('if is_multicat and config.itd_remap != "none":', 1), 'h_il = jnp.stack(hil_list, axis=-1) if h_il is not None else None', ('if is_multicat and config.itd_remap != "none":', 2), ('conc, h, h_snow, pond_depth, h_il=h_il)', 4), ('if is_multicat and config.itd_remap != "none":', 3), ('conc, h, h_snow, pond_depth, h_il=h_il)', 5), 215],
-    'packages/ice/legoesm/ice/sea_ice.py:2994-3033': [('if config.ponds.enabled and config.ponds.scheme == "si3_lev":', 3), (')', 968), 40],
+    'packages/ice/legoesm/ice/sea_ice.py:427-440,482,1745-1779,2396-2421,2477-2543,2829-2877,3014-3094,3228-3349,3394-3396,3513-3531': ['if not (config.ponds.enabled and config.ponds.scheme == "si3_lev") and config.itd_remap not in ("simple", "lipscomb2001"):', 'if config.n_categories > 1 and not (config.ponds.enabled and config.ponds.scheme == "si3_lev"):', 'state = slab_to_dynamic(state, pond_scheme=config.ponds.scheme if config.ponds.enabled else "cesm")', ('if h_il is not None:', 1), (')', 575), ('if not config.ponds.enabled and config.ponds.scheme != "cesm":', 3), 'h_il_dil = h_il * dilute if _use_si3_lev else None', 'if config.ponds.scheme == "si3_lev":', ('h_il_new = h_il_dil', 1), ('if not config.ponds.enabled and config.ponds.scheme != "cesm":', 4), ('conc, h, h_snow, pond_depth, h_il=h_il)', 1), ('if is_multicat and config.itd_remap != "none" and not exact_si3_itd:', 1), 'h_il = jnp.stack(hil_list, axis=-1) if h_il is not None else None', 'if is_multicat and config.itd_remap != "none":', ('conc, h, h_snow, pond_depth, h_il=h_il)', 4), ('if is_multicat and config.itd_remap != "none" and not exact_si3_itd:', 2), ('conc, h, h_snow, pond_depth, h_il=h_il)', 5), ('new_state = DynamicSeaIceState(', 2), ('    )', 193), 417],
+    'packages/ice/legoesm/ice/sea_ice.py:427-440,1745-1779,2829-2877,3014-3094,3228-3349,3394-3396': ['if not (config.ponds.enabled and config.ponds.scheme == "si3_lev") and config.itd_remap not in ("simple", "lipscomb2001"):', 'if config.n_categories > 1 and not (config.ponds.enabled and config.ponds.scheme == "si3_lev"):', ('if h_il is not None:', 1), (')', 575), ('if not config.ponds.enabled and config.ponds.scheme != "cesm":', 4), ('conc, h, h_snow, pond_depth, h_il=h_il)', 1), ('if is_multicat and config.itd_remap != "none" and not exact_si3_itd:', 1), 'h_il = jnp.stack(hil_list, axis=-1) if h_il is not None else None', 'if is_multicat and config.itd_remap != "none":', ('conc, h, h_snow, pond_depth, h_il=h_il)', 4), ('if is_multicat and config.itd_remap != "none" and not exact_si3_itd:', 2), ('conc, h, h_snow, pond_depth, h_il=h_il)', 5), 304],
+    'packages/ice/legoesm/ice/sea_ice.py:3026-3065': [('if config.ponds.enabled and config.ponds.scheme == "si3_lev":', 3), ('            )', 33), 40],
     'scripts/validate/ocean_fidelity/testcases/nemo_si3_o9_minmax_audit.py:644-656': ['flags = _flags(build)', 'same = _stream(gobj) == _stream(record)', 13],
     'scripts/validate/ocean_fidelity/testcases/nemo_si3_o12_minmax_audit.py:1-193': ['"""Exhaustive MIN/MAX/SIGN/SQRT audit of the SI3 O12 melt-pond object code."""', 'sys.exit(main())', 193],
     'tests/ocean/fidelity/test_nemo_si3_o12_minmax_audit.py:1-161': ['"""Pins every MIN/MAX/SIGN/SQRT site in O12\'s compiled production routines."""', 'assert (min_522["dst_defs"], min_522["src_defs"]) == ("mulsd@522", "load@519")', 161],
@@ -10544,7 +10544,7 @@ CITATION_MAP.update({
     'tests/ice/unit/test_si3_o12_pnd.py:2863-3027': ['def test_decision_184a_default_cesm_run_state_pytree_structure_and_leaves_equal_parent():', 'dynamic_to_slab(init_dynamic_ice_state(shape_2d, pond_scheme="si3_lev"))', 165],
     'tests/ice/unit/test_si3_o12_pnd.py:3030-3200': ['def test_decision_184b_default_run_restarts_are_byte_identical_to_parent(tmp_path):', 'assert si3_rst.read_bytes() != par_rst_1.read_bytes()', 171],
     'tests/ice/unit/test_si3_o12_pnd.py:3203-3333': ['def test_decision_184c_si3_lev_run_carries_and_restarts_h_il(tmp_path):', 'load_run_restart(rst_cesm_path, ocn_state, ice_template=template_mc_si3, grid_type="latlon")', 131],
-    'tests/ice/unit/test_si3_o12_pnd.py:3336-3794': ['def test_si3_lev_lids_refuses_advection_concentration_cap_itd_remap_and_ridging_while_thermo_only_runs(', ('assert jnp.all(jnp.isfinite(rsp_out_5.freshwater_flux))', 2), 459],
+    'tests/ice/unit/test_si3_o12_pnd.py:3336-3793': ['def test_si3_lev_lids_refuses_advection_concentration_cap_itd_remap_and_ridging_while_thermo_only_runs(', ('assert jnp.all(jnp.isfinite(rsp_out_5.freshwater_flux))', 2), 458],
     'docs/ice/fidelity/si3_r20_o12_preregister.md:66-74': ['- **P1 (Object-code MIN/MAX/SQRT/comparison audit)**: Disassembly of `ORCA2_SAS_ICE_O7_REF/BLD/obj/icethd_pnd.o` maps every `minsd`, `maxsd`, `sqrtsd`, and `comisd`/`ucomisd` in `ice_thd_pnd`, `pnd_LEV`, and `ice_perm_eff`. In particular, gfortran `-O3` fuses lines `522-524` (`zdv_flush = -zperm * ...`, `zdv_flush = MAX( zdv_flush, -v_ip_1d(ii) )`, `v_ip_1d(ii) = v_ip_1d(ii) + zdv_flush`) into positive `pos_flush = +zperm * ...`, `capped = minsd(dst=pos_flush, src=v_ip_1d)`, `v_ip_1d = v_ip_1d - capped` (`instructions_without_token = [522]`, `token_statements_without_instruction = [523]`), and lines `465` and `472` have opposite `minsd` `dst`/`src` operand roles (`465`: `dst = zv_ip_max - v_ip_1d, src = zdv_mlt`; `472`: `dst = zdv_mlt, src = zv_ip_max - v_ip_1d`).', '- **REFUTE**: Any `NaN`/`Inf` gradient or FD mismatch.', 9],
 })
 
@@ -10561,32 +10561,32 @@ FILES.update({
 CITATION_MAP.update({
     'docs/ice/fidelity/si3_r21_o8_o12_score_preregister.md:1-51': ['# SI3 Ladder Round 21 (`si3_r21`) — O8, O9, O10, O11, O12 Master-Record Scoring Preregistration', '- A 1-ULP change planted in one exit field of each rung (`O8` `ht_i_new`, `O9` `t_su`/`h_i`/`t_i`, `O10` `sz_i`/`t_i`, `O11` `a_i`, `O12` `v_ip`) is caught by the scorer (`unequal >= 1`, `max_ulp >= 1`, nonzero exit status), and parameter/checksum/swapped-field plants fail closed.', 51],
     'docs/ice/fidelity/si3_r18_o8_o16_receipt.md:154-180': ['`STATUS: ADMITTED`', '| O16 | 18, 15, 16, 19, 20 | 500 | `6a3f9ed6f9330af1c65b603726c2ba407a28683f2de1b2a9dcaf9fd7dd3dc5e0` |', 27],
-    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1-1738': ['#!/usr/bin/env python3', 'raise SystemExit(main())', 1738],
-    'tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:1-432': ['"""Direct unit and master-record tests for the SI3 O8--O12 0-ULP scoring driver."""', (')', 166), 432],
-    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:301-356': ['def verify_master_admission_manifests(', ('}', 22), 56],
-    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:260-298': ['def parse_resolved_ice_namelist(', 'return parsed', 39],
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1-1862': ['#!/usr/bin/env python3', 'raise SystemExit(main())', 1862],
+    'tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:1-438': ['"""Direct unit and master-record tests for the SI3 O8--O12 0-ULP scoring driver."""', 'np.asarray(rev_state_pnd.pond_depth.data).view(np.uint64),', 438],
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:308-363': ['def verify_master_admission_manifests(', ('}', 22), 56],
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:267-305': ['def parse_resolved_ice_namelist(', 'return parsed', 39],
     'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o16_master_gate.py:40-55': ['SCALAR_NAMES = (', (')', 5), 16],
-    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:460-517': ['def _verify_record_scalars_against_namelist(', (')', 164), 58],
-    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:634-928': ['@functools.lru_cache(maxsize=8)', ('}', 47), 295],
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:467-523': ['def _verify_record_scalars_against_namelist(', 'f"scalar header {sname}={got!r} disagrees', 57],
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:641-944': ['@functools.lru_cache(maxsize=8)', '"jit_o13_remap": jit_o13_remap,', 304],
     'docs/ice/fidelity/si3_r15_o8_receipt.md:1-195': ['# SI3 round 15 receipt — O8 model preparation: frazil collection bookkeeping', 'Reviews: Argon LAND; codex HOLD (production wiring) then LAND after resume 1. DECISION 173 (user: "Your pick"): O8 is admitted from the ONE shared 100-step ORCA2_SAS_ICE master record for O8-O16 (si3_ladder_design.md:205-209); no separate O8 run. The O8 acquisition therefore waits for the master-record tool.', 195],
     'docs/ice/fidelity/si3_r16_o9_receipt.md:1-336': ['# SI3 round 16 receipt — O9 model preparation: ZDF, DH and TEMP at jpl = 5, 10 + 5 layers', 'default citation-gate test `33 passed`; private-import ratchet `6 passed`. Review of the rebase: UNREVIEWED.', 336],
     'docs/ice/fidelity/si3_r19_o10_receipt.md:1-245': ['# SI3 Ladder Round 19 (`si3_r19`) — O10 model-preparation receipt', 'lines produced `SYMBOL-NOT-AT-LINE`, gate status `FAIL`, and exit status 1.', 245],
     'docs/ice/fidelity/si3_r17_o11_receipt.md:1-251': ['# SI3 round 17 receipt — O11 model preparation: lateral melt (ice_thd_da)', 'Review: `codex review: operator`; GLM: not run (NO GATE).', 251],
     'docs/ice/fidelity/si3_r20_o12_receipt.md:1-188': ['# SI3 Ladder Round 20 (`si3_r20`) — O12 model-preparation receipt', '`======================= 165 passed in 1097.07s (0:18:17) =======================`', 188],
-    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:981-998': ['# 1. Rung O8: Kind 1 -> Kind 2 (si3_ice_thd_frazil)', 'o8_acc.update("fraz_frac", out_o8.fraz_frac, f2["fraz_frac"], kt=kt, category=0)', 18],
-    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1155-1388': ['# Check Kind 21 -> Kind 3 gather for intensive/state fields', 'picard_iconv_matches += 1', 234],
-    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1277-1302': ['# Spot-check unpadded (npti,) JIT execution on kt == steps[0]', 'unpadded_spot_checks += 1', 26],
-    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1390-1410': ['# 3. Rung O10: Kind 6 -> Kind 7 (si3_ice_thd_sal) and Kind 7 -> Kind 8 (si3_ice_thd_temp)', (')', 439), 21],
-    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1412-1423': ['# 4. Rung O11: Kind 8 -> Kind 9 (si3_ice_thd_da)', (')', 445), 12],
-    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1425-1501': ['# Production entry point: si3_column_step_arrays (Kind 3 -> Kind 4, 5, 6, 7, 8, 9)', (')', 465), 77],
-    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1503-1535': ["# 5. Rung O12: Kind 10 -> Kind 11 (si3_ice_thd_pnd and step_ponds(scheme='si3_lev'))", (')', 483), 33],
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1084-1101': ['# 1. Rung O8: Kind 1 -> Kind 2 (si3_ice_thd_frazil)', 'o8_acc.update("fraz_frac", out_o8.fraz_frac, f2["fraz_frac"], kt=kt, category=0)', 18],
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1259-1492': ['# Check Kind 21 -> Kind 3 gather for intensive/state fields', 'picard_iconv_matches += 1', 234],
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1381-1406': ['# Spot-check unpadded (npti,) JIT execution on kt == steps[0]', 'unpadded_spot_checks += 1', 26],
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1494-1513': ['# 3. Rung O10: Kind 6 -> Kind 7 (si3_ice_thd_sal) and Kind 7 -> Kind 8 (si3_ice_thd_temp)', 'spec.name, r7["fields"][spec.name], f8[spec.name], kt=kt, category=jl', 20],
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1516-1526': ['# 4. Rung O11: Kind 8 -> Kind 9 (si3_ice_thd_da)', 'spec.name, r8["fields"][spec.name], f9[spec.name], kt=kt, category=jl', 11],
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1529-1605': ['# Production entry point: si3_column_step_arrays (Kind 3 -> Kind 4, 5, 6, 7, 8, 9)', ('            )', 58), 77],
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1607-1639': ["# 5. Rung O12: Kind 10 -> Kind 11 (si3_ice_thd_pnd and step_ponds(scheme='si3_lev'))", ('                )', 49), 33],
     'tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:21-53': ['def test_field_score_accumulator_catches_1ulp_and_signed_zero() -> None:', 'assert acc.summary()["status"] == "NON_BIT_EXACT"', 33],
-    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:527-617': ['class FieldScoreAccumulator:', ('}', 44), 91],
-    'tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:56-83': ['def test_master_admission_manifests_and_plants() -> None:', (')', 26), 28],
-    'tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:86-134': ['def test_score_o8_to_o12_representative_steps_0_ulp() -> None:', 'assert rungs["O12"]["production_step_ponds_si3_lev"]["first_non_bit"] is None', 49],
-    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:931-1652': ['def score_o8_to_o12(', ('}', 76), 722],
-    'tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:137-160': ['@pytest.mark.parametrize(', (')', 48), 24],
-    'tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:163-432': ['def test_production_call_sites_route_through_o8_o12_and_fail_when_reverted(', (')', 166), 270],
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:534-624': ['class FieldScoreAccumulator:', ('}', 44), 91],
+    'tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:56-83': ['def test_master_admission_manifests_and_plants() -> None:', ('verify_manifests=False,', 1), 28],
+    'tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:87-135': ['def test_score_o8_to_o12_representative_steps_0_ulp() -> None:', 'assert rungs["O12"]["production_step_ponds_si3_lev"]["first_non_bit"] is None', 49],
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1033-1768': ['def score_o8_to_o12(', '"rungs": rungs_report,', 736],
+    'tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:142-160': ['@pytest.mark.parametrize(', (')', 48), 19],
+    'tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:170-438': ['def test_production_call_sites_route_through_o8_o12_and_fail_when_reverted(', 'np.asarray(rev_state_pnd.pond_depth.data).view(np.uint64),', 269],
     'packages/ice/legoesm/ice/bitz_lipscomb.py:2024-2042': ['def si3_ice_thd_frazil(qlead, *, rn_hinew, ln_frazil) -> SI3Frazil:', 'return SI3Frazil(ht_i_new=ht_i_new, fraz_frac=zero)', 19],
     'packages/ice/legoesm/ice/bitz_lipscomb.py:834-919': ['def si3_ice_thd_zdf_bl99(', 'hfx_dif, cnd_ice, t1_ice, t_si, core.iterations)', 86],
     'packages/ice/legoesm/ice/bitz_lipscomb.py:1288-1311': ['def si3_ice_thd_dh(*, fluxes: SI3DHFluxes, rDt_ice, rn_snwblow, rn_sinew,', (')', 587), 24],
@@ -10939,6 +10939,39 @@ DEFAULT_HEADING = "## Round 25 —"
 # those rounds' citations rest on hand-checking, which is exactly what failed
 # three rounds running.
 AUDITED_ROUNDS = "25 and later (heading to end of file)"
+# --- SI3 round 22 (O13 exact ITD remap); appended for merge isolation ---
+FILES.update({
+    'docs/ice/fidelity/si3_r22_o13_score_preregister.md': REPO / 'docs/ice/fidelity/si3_r22_o13_score_preregister.md',
+    'docs/ice/fidelity/si3_r22_o13_receipt.md': REPO / 'docs/ice/fidelity/si3_r22_o13_receipt.md',
+    'packages/ice/legoesm/ice/itd.py': REPO / 'packages/ice/legoesm/ice/itd.py',
+    'packages/ice/legoesm/ice/sea_ice.py': REPO / 'packages/ice/legoesm/ice/sea_ice.py',
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o13_minmax_audit.py': REPO / 'scripts/validate/ocean_fidelity/testcases/nemo_si3_o13_minmax_audit.py',
+    'tests/ice/unit/test_si3_o13_itd_remap.py': REPO / 'tests/ice/unit/test_si3_o13_itd_remap.py',
+    'tests/ocean/fidelity/test_nemo_si3_o13_minmax_audit.py': REPO / 'tests/ocean/fidelity/test_nemo_si3_o13_minmax_audit.py',
+    'ORCA2_SAS_ICE_O8O16_REF/BLD/ppsrc/nemo/iceitd.f90': NEMO / 'cfgs/ORCA2_SAS_ICE_O8O16_REF/BLD/ppsrc/nemo/iceitd.f90',
+    'ORCA2_SAS_ICE_O8O16_REF/BLD/ppsrc/nemo/icevar.f90': NEMO / 'cfgs/ORCA2_SAS_ICE_O8O16_REF/BLD/ppsrc/nemo/icevar.f90',
+})
+
+CITATION_MAP.update({
+    'docs/ice/fidelity/si3_r22_o13_score_preregister.md:1-65': ['# SI3 round 22 — O13 model preparation and master-record scoring preregistration', 'the admitted record, the field set, or the equality bar.', 65],
+    'ORCA2_SAS_ICE_O8O16_REF/BLD/ppsrc/nemo/iceitd.f90:118-365': ['SUBROUTINE ice_itd_rem( kt )', 'END SUBROUTINE ice_itd_rem', 248],
+    'ORCA2_SAS_ICE_O8O16_REF/BLD/ppsrc/nemo/iceitd.f90:368-429': ['SUBROUTINE itd_glinear( HbL, Hbr, phice, paice, pg0, pg1, phL, phR )', 'END SUBROUTINE itd_glinear', 62],
+    'ORCA2_SAS_ICE_O8O16_REF/BLD/ppsrc/nemo/iceitd.f90:432-597': ['SUBROUTINE itd_shiftice( kdonor, pdaice, pdvice )', 'END SUBROUTINE itd_shiftice', 166],
+    'ORCA2_SAS_ICE_O8O16_REF/BLD/ppsrc/nemo/icevar.f90:856-894': ['SUBROUTINE ice_var_roundoff( pa_i, pv_i, pv_s, psv_i, poa_i, pa_ip, pv_ip, pv_il, pe_s, pe_i, pszv_i )', 'END SUBROUTINE ice_var_roundoff', 39],
+    'packages/ice/legoesm/ice/sea_ice.py:2847-2868': ['exact_si3_itd = (', 'raise ValueError("rn_amax_2d must have the spatial (no-category) state shape")', 22],
+    'packages/ice/legoesm/ice/itd.py:823-1075': ['def si3_ice_itd_rem(', ('return result', 2), 253],
+    'packages/ice/legoesm/ice/itd.py:790-819': ['def _si3_itd_glinear(', 'jnp.where(active, h_r, 0.0),', 30],
+    'packages/ice/legoesm/ice/sea_ice.py:3228-3305': ['if is_multicat and config.itd_remap != "none":', 'h_il = jnp.where(remap["a_ip"] > 1.0e-20, remap["v_il"] / aip_safe, 0.0)', 78],
+    'tests/ice/unit/test_si3_o13_itd_remap.py:229-290': ['def test_o13_production_sea_ice_call_site_fires(monkeypatch) -> None:', ('grid=grid, rn_amax_2d=jnp.full(shape, 0.997),', 2), 62],
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o13_minmax_audit.py:1-89': ['"""Exhaustive MIN/MAX/SIGN/SQRT audit of the SI3 O13 remap object code."""', 'sys.exit(main())', 89],
+    'tests/ocean/fidelity/test_nemo_si3_o13_minmax_audit.py:65-109': ['def test_committed_o13_object_audit_and_tie_verdicts() -> None:', 'assert all(census[routine][name] for name in names)', 45],
+    'tests/ice/unit/test_si3_o13_itd_remap.py:177-192': ['def test_o13_independent_scalar_oracle_true_eager_jit_and_conservation() -> None:', 'np.testing.assert_allclose(after, before, rtol=3.0e-15, atol=3.0e-15)', 16],
+    'tests/ice/unit/test_si3_o13_itd_remap.py:195-226': ['def test_o13_jit_arguments_gradient_central_difference_and_zero_edges() -> None:', 'assert bool(jnp.all(jnp.isfinite(edge_grad)))', 32],
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:948-972': ['def _score_o13_step(', 'accumulator.update(spec.name, got, f12[spec.name], kt=kt, category=0)', 25],
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:975-1029': ['def score_o13(', '}},', 55],
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1641-1645': ['# 6. Rung O13: Kind 11 -> Kind 12 (production si3_ice_itd_rem).', 'jit_o13_remap=jit_o13_remap, accumulator=o13_remap_acc, plant=plant,', 5],
+})
+
 UNAUDITED_ROUNDS = ("1-24 -- hand-checked only; their citations are not in "
                     "CITATION_MAP and this gate does not read them")
 

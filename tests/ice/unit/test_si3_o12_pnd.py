@@ -3336,7 +3336,7 @@ def test_decision_184c_si3_lev_run_carries_and_restarts_h_il(tmp_path):
 def test_si3_lev_lids_refuses_advection_concentration_cap_itd_remap_and_ridging_while_thermo_only_runs(
     monkeypatch,
 ):
-    """Verify si3_lev with lids refuses advection (O4), concentration cap + ITD remap (O13), and ridging (O6) at config time, while thermo-only O12 composition runs."""
+    """Verify lids refuse unwired O4/O6 and non-exact O13 selections while O12 runs."""
     from legoesm.grids.latlon import create_latlon_grid
     from legoesm.ice.config import BrineConfig, RidgingConfig, validate_si3_thermo_config
     from legoesm.ice.state import distribute_dynamic_state_to_categories
@@ -3414,7 +3414,6 @@ def test_si3_lev_lids_refuses_advection_concentration_cap_itd_remap_and_ridging_
         assert "ln_pnd_lids=True" in msg
         assert "a_ip, v_ip, v_il (pond_area, pond_depth, h_il)" in msg
         assert "advection" in msg and "O4" in msg
-        assert "concentration cap" in msg
         assert "ITD remap" in msg and "O13" in msg
         assert "ridging" in msg and "O6" in msg
 
@@ -3439,7 +3438,8 @@ def test_si3_lev_lids_refuses_advection_concentration_cap_itd_remap_and_ridging_
                 st_1cat, forcing, ocean_sst, zeros_2d, zeros_2d, cfg_adv, U_min=1.0, dt=RDT, grid=grid
             )
 
-    # (b) Concentration cap + ITD remap (n_categories > 1 with lipscomb2001 or simple; n_categories=1 with lipscomb2001)
+    # (b) O13 requires the exact lipscomb2001 branch plus explicit SI3 deck config;
+    #     simple and 1-category selections remain unsupported.
     for cfg_rem in (
         SeaIceConfig(
             n_categories=n_cat,
@@ -3456,12 +3456,12 @@ def test_si3_lev_lids_refuses_advection_concentration_cap_itd_remap_and_ridging_
     ):
         with pytest.raises(
             ValueError,
-            match=r"concentration cap.*does not carry a_ip, v_ip, v_il \(pond_area, pond_depth, h_il\).*ITD remap.*does not carry a_ip, v_ip, v_il \(pond_area, pond_depth, h_il\).*O13",
+            match=r".*(?:exact O13 ITD remap|ITD remap).*",
         ):
             validate_si3_thermo_config(cfg_rem)
         with pytest.raises(
             ValueError,
-            match=r"concentration cap.*does not carry a_ip, v_ip, v_il \(pond_area, pond_depth, h_il\).*ITD remap.*does not carry a_ip, v_ip, v_il \(pond_area, pond_depth, h_il\).*O13",
+            match=r".*(?:exact O13 ITD remap|ITD remap).*",
         ):
             sea_ice_mod.step_sea_ice(
                 st_5cat, forcing, ocean_sst, zeros_2d, zeros_2d, cfg_rem, U_min=1.0, dt=RDT, grid=grid
@@ -3577,7 +3577,7 @@ def test_si3_lev_lids_refuses_advection_concentration_cap_itd_remap_and_ridging_
 
 
 def test_si3_lev_lids_off_refuses_advection_concentration_cap_itd_remap_and_ridging_while_thermo_only_runs():
-    """Verify si3_lev with ln_pnd_lids=False refuses advection (O4), concentration cap + ITD remap (O13), and ridging (O6) naming a_ip, v_ip (pond_area, pond_depth), while thermo-only runs."""
+    """Verify no-lid ponds refuse unwired O4/O6 and non-exact O13 selections."""
     from legoesm.grids.latlon import create_latlon_grid
     from legoesm.ice.config import BrineConfig, RidgingConfig, validate_si3_thermo_config
     from legoesm.ice.state import distribute_dynamic_state_to_categories
@@ -3655,7 +3655,6 @@ def test_si3_lev_lids_off_refuses_advection_concentration_cap_itd_remap_and_ridg
         assert "a_ip, v_ip (pond_area, pond_depth)" in msg
         assert "v_il" not in msg and "h_il" not in msg
         assert "advection" in msg and "O4" in msg
-        assert "concentration cap" in msg
         assert "ITD remap" in msg and "O13" in msg
         assert "ridging" in msg and "O6" in msg
 
@@ -3695,12 +3694,12 @@ def test_si3_lev_lids_off_refuses_advection_concentration_cap_itd_remap_and_ridg
     ):
         with pytest.raises(
             ValueError,
-            match=r"concentration cap.*does not carry a_ip, v_ip \(pond_area, pond_depth\).*ITD remap.*does not carry a_ip, v_ip \(pond_area, pond_depth\).*O13",
+            match=r".*(?:exact O13 ITD remap|ITD remap).*",
         ):
             validate_si3_thermo_config(cfg_rem)
         with pytest.raises(
             ValueError,
-            match=r"concentration cap.*does not carry a_ip, v_ip \(pond_area, pond_depth\).*ITD remap.*does not carry a_ip, v_ip \(pond_area, pond_depth\).*O13",
+            match=r".*(?:exact O13 ITD remap|ITD remap).*",
         ):
             sea_ice_mod.step_sea_ice(
                 st_5cat, forcing, ocean_sst, zeros_2d, zeros_2d, cfg_rem, U_min=1.0, dt=RDT, grid=grid

@@ -84,6 +84,7 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
+from legoesm.core.source_rounding import nemo_source_round
 
 # Lipscomb (2001) piecewise-linear g(h) slope coefficient: the first-moment term
 # of the linear thickness reconstruction is 12*eta/H^3 (fixed published).
@@ -766,8 +767,315 @@ def lipscomb_2001_remap(
     return result
 
 
+def _nemo_minsd(first: jax.Array, second: jax.Array) -> jax.Array:
+    """gfortran ``MINSD``: choose the second operand on a tie/unordered pair."""
+    return jnp.where(first < second, first, second)
+
+
+def _nemo_maxsd(first: jax.Array, second: jax.Array) -> jax.Array:
+    """gfortran ``MAXSD``: choose the second operand on a tie/unordered pair."""
+    return jnp.where(first > second, first, second)
+
+
+def _nemo_minsd_src_first(first: jax.Array, second: jax.Array) -> jax.Array:
+    """``MINSD`` site whose emitted source register holds the first operand."""
+    return jnp.where(second < first, second, first)
+
+
+def _nemo_maxsd_src_first(first: jax.Array, second: jax.Array) -> jax.Array:
+    """``MAXSD`` site whose emitted source register holds the first operand."""
+    return jnp.where(second > first, second, first)
+
+
+def _si3_itd_glinear(
+    hb_l: jax.Array,
+    hb_r: jax.Array,
+    h_ice: jax.Array,
+    a_ice: jax.Array,
+    *,
+    epsi10: jax.Array,
+) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
+    """Exact ``itd_glinear`` transcription (compiled ``iceitd.f90:368-429``)."""
+    sr = nemo_source_round
+    active = (a_ice > epsi10) & (h_ice > epsi10)
+    one_third = sr(jnp.asarray(1.0, h_ice.dtype) / jnp.asarray(3.0, h_ice.dtype))
+    h_l0 = jnp.where(active, hb_l, 0.0)
+    h_r0 = jnp.where(active, hb_r, 0.0)
+    h_13 = sr(one_third * sr(sr(2.0 * h_l0) + h_r0))
+    h_23 = sr(one_third * sr(h_l0 + sr(2.0 * h_r0)))
+    h_r = jnp.where(active & (h_ice < h_13), sr(sr(3.0 * h_ice) - sr(2.0 * h_l0)), h_r0)
+    h_l = jnp.where(active & ~(h_ice < h_13) & (h_ice > h_23), sr(sr(3.0 * h_ice) - sr(2.0 * h_r)), h_l0)
+    width = sr(h_r - h_l)
+    width_safe = jnp.where(width > 0.0, width, 1.0)
+    inv_width = jnp.where(width > 0.0, sr(1.0 / width_safe), 0.0)
+    work1 = sr(sr(6.0 * a_ice) * inv_width)
+    work2 = sr(sr(h_ice - h_l) * inv_width)
+    g0 = sr(work1 * sr(sr(2.0 * one_third) - work2))
+    g1 = sr(sr(sr(2.0 * inv_width) * work1) * sr(work2 - 0.5))
+    return (
+        jnp.where(active, g0, 0.0),
+        jnp.where(active, g1, 0.0),
+        jnp.where(active, h_l, 0.0),
+        jnp.where(active, h_r, 0.0),
+    )
+
+
+def si3_ice_itd_rem(
+    *,
+    h_i_b: jax.Array,
+    a_i_b: jax.Array,
+    h_i: jax.Array,
+    a_i: jax.Array,
+    v_i: jax.Array,
+    v_s: jax.Array,
+    sv_i: jax.Array,
+    oa_i: jax.Array,
+    a_ip: jax.Array,
+    v_ip: jax.Array,
+    v_il: jax.Array,
+    t_su: jax.Array,
+    e_s: jax.Array,
+    e_i: jax.Array,
+    szv_i: jax.Array,
+    hi_max: jax.Array,
+    rn_amax_2d: jax.Array,
+    nn_icesal: int,
+    ln_pnd: bool,
+    ln_pnd_lids: bool,
+    epsi10: float = 1.0e-10,
+    epsi20: float = 1.0e-20,
+    rt0: float = constants.T_freeze,
+) -> dict[str, jax.Array]:
+    """NEMO 5.0.2 SI3 ``ice_itd_rem`` at its production array boundary.
+
+    This is the single exact implementation used by the ORCA2 O13 scorer and
+    by the production multi-category SI3-LEV remap branch.  Category is the
+    last axis; snow/ice layer is the penultimate axis of ``e_s/e_i/szv_i``.
+    The transcription follows the executing reference-build source at
+    ``ORCA2_SAS_ICE_O8O16_REF/BLD/ppsrc/nemo/iceitd.f90:118-597``.
+    """
+    sr = nemo_source_round
+    dtype = h_i.dtype
+    eps10 = jnp.asarray(epsi10, dtype=dtype)
+    eps20 = jnp.asarray(epsi20, dtype=dtype)
+    zero = jnp.asarray(0.0, dtype=dtype)
+    jpl = h_i.shape[-1]
+    if jpl < 2:
+        raise ValueError("si3_ice_itd_rem requires at least two categories")
+    if hi_max.shape != (jpl + 1,):
+        raise ValueError(f"hi_max must have shape ({jpl + 1},)")
+    if nn_icesal not in (1, 2, 3, 4):
+        raise ValueError("nn_icesal must be an explicit NEMO selector in 1..4")
+
+    originals = {
+        "h_i": h_i, "a_i": a_i, "v_i": v_i, "v_s": v_s,
+        "sv_i": sv_i, "oa_i": oa_i, "a_ip": a_ip, "v_ip": v_ip,
+        "v_il": v_il, "t_su": t_su, "e_s": e_s, "e_i": e_i,
+        "szv_i": szv_i,
+    }
+
+    # iceitd.f90:164-237 -- identify ice and construct displaced boundaries.
+    from legoesm.ice.si3_orca2_state import fortran_sum_categories
+    at_i = fortran_sum_categories(a_i, axis=-1)
+    remap = at_i > eps10
+    zdh = jnp.where(a_i > eps10, sr(h_i - h_i_b), zero)
+    bounds = [jnp.zeros_like(at_i)]
+    for jl in range(jpl - 1):
+        left_before = a_i_b[..., jl] > eps10
+        right_before = a_i_b[..., jl + 1] > eps10
+        denom = sr(h_i_b[..., jl + 1] - h_i_b[..., jl])
+        denom_safe = jnp.where(left_before & right_before, denom, 1.0)
+        slope = sr(sr(zdh[..., jl + 1] - zdh[..., jl]) / denom_safe)
+        both = sr(sr(hi_max[jl + 1] + zdh[..., jl]) + sr(slope * sr(hi_max[jl + 1] - h_i_b[..., jl])))
+        left_only = sr(hi_max[jl + 1] + zdh[..., jl])
+        right_only = sr(hi_max[jl + 1] + zdh[..., jl + 1])
+        boundary = jnp.where(
+            left_before & right_before,
+            both,
+            jnp.where(left_before, left_only, jnp.where(right_before, right_only, hi_max[jl + 1])),
+        )
+        bounds.append(boundary)
+        remap = remap & ~((a_i[..., jl] > eps10) & (h_i[..., jl] > sr(boundary - eps10)))
+        remap = remap & ~((a_i[..., jl + 1] > eps10) & (h_i[..., jl + 1] < sr(boundary + eps10)))
+        remap = remap & ~(boundary < hi_max[jl]) & ~(boundary > hi_max[jl + 2])
+
+    last_expr = sr(sr(3.0 * h_i[..., -1]) - sr(2.0 * bounds[-1]))
+    last = jnp.where(
+        a_i[..., -1] > eps10,
+        _nemo_maxsd_src_first(hi_max[-2], last_expr),
+        hi_max[-1],
+    )
+    bounds.append(last)
+    remap = remap & ~(h_i_b[..., 0] < sr(hi_max[0] + eps10))
+    remap = remap & ~(h_i_b[..., 0] > sr(hi_max[1] - eps10))
+    zhbnew = jnp.stack(bounds, axis=-1)
+
+    # iceitd.f90:252-312 -- thin-ice loss and g(h) for every category.
+    g0_first, g1_first, h_l_first, h_r_first = _si3_itd_glinear(
+        jnp.broadcast_to(hi_max[0], at_i.shape),
+        jnp.broadcast_to(hi_max[1], at_i.shape),
+        h_i_b[..., 0], a_i[..., 0], epsi10=eps10,
+    )
+    dh0 = sr(h_i[..., 0] - h_i_b[..., 0])
+    melt = remap & (a_i[..., 0] > eps10) & (dh0 < 0.0)
+    dh0_melt = _nemo_minsd_src_first(sr(-dh0), hi_max[1])
+    eta_max = sr(_nemo_minsd(dh0_melt, h_r_first) - h_l_first)
+    do_loss = melt & (eta_max > 0.0)
+    x1 = eta_max
+    x2 = sr(sr(0.5 * eta_max) * eta_max)
+    da0_raw = sr(sr(g1_first * x2) + sr(g0_first * x1))
+    hb_safe = jnp.where(jnp.abs(h_i_b[..., 0]) > eps20, h_i_b[..., 0], 1.0)
+    da_max = sr(a_i[..., 0] * sr(1.0 - sr(h_i[..., 0] / hb_safe)))
+    da0 = _nemo_minsd(da0_raw, da_max)
+    a0_after = sr(a_i[..., 0] - da0)
+    a0_safe = jnp.where(do_loss & (jnp.abs(a0_after) > eps20), a0_after, 1.0)
+    h0_after = sr(sr(h_i[..., 0] * a_i[..., 0]) / a0_safe)
+    v0_after = sr(a0_after * h0_after)
+    h_i = h_i.at[..., 0].set(jnp.where(do_loss, h0_after, h_i[..., 0]))
+    a_i = a_i.at[..., 0].set(jnp.where(do_loss, a0_after, a_i[..., 0]))
+    v_i = v_i.at[..., 0].set(jnp.where(do_loss, v0_after, v_i[..., 0]))
+    grow = remap & (a_i[..., 0] > eps10) & ~(dh0 < 0.0)
+    zhbnew = zhbnew.at[..., 0].set(jnp.where(grow, _nemo_minsd_src_first(dh0, hi_max[1]), zhbnew[..., 0]))
+
+    g0s = []
+    g1s = []
+    h_ls = []
+    h_rs = []
+    for jl in range(jpl):
+        g0_j, g1_j, h_l_j, h_r_j = _si3_itd_glinear(
+            zhbnew[..., jl], zhbnew[..., jl + 1], h_i[..., jl], a_i[..., jl], epsi10=eps10,
+        )
+        g0s.append(g0_j)
+        g1s.append(g1_j)
+        h_ls.append(h_l_j)
+        h_rs.append(h_r_j)
+    g0 = jnp.stack(g0s, axis=-1)
+    g1 = jnp.stack(g1s, axis=-1)
+    h_l = jnp.stack(h_ls, axis=-1)
+    h_r = jnp.stack(h_rs, axis=-1)
+
+    # iceitd.f90:317-342 -- integrations across each fixed boundary.
+    donors_up = []
+    da_transfers = []
+    dv_transfers = []
+    for jl in range(jpl - 1):
+        up = zhbnew[..., jl + 1] > hi_max[jl + 1]
+        eta_min_up = sr(_nemo_maxsd(hi_max[jl + 1], h_l[..., jl]) - h_l[..., jl])
+        eta_max_up = sr(_nemo_minsd(zhbnew[..., jl + 1], h_r[..., jl]) - h_l[..., jl])
+        eta_min = jnp.where(up, eta_min_up, zero)
+        eta_max_down = sr(_nemo_minsd_src_first(hi_max[jl + 1], h_r[..., jl + 1]) - h_l[..., jl + 1])
+        eta_max = jnp.where(up, eta_max_up, eta_max_down)
+        eta_max = _nemo_maxsd(eta_max, eta_min)
+        x1 = sr(eta_max - eta_min)
+        work1 = sr(eta_min * eta_min)
+        work2 = sr(eta_max * eta_max)
+        x2 = sr(0.5 * sr(work2 - work1))
+        work1 = sr(work1 * eta_min)
+        work2 = sr(work2 * eta_max)
+        x3 = sr(sr(1.0 / 3.0) * sr(work2 - work1))
+        donor_g0 = jnp.where(up, g0[..., jl], g0[..., jl + 1])
+        donor_g1 = jnp.where(up, g1[..., jl], g1[..., jl + 1])
+        donor_hl = jnp.where(up, h_l[..., jl], h_l[..., jl + 1])
+        da = sr(sr(donor_g1 * x2) + sr(donor_g0 * x1))
+        dv = sr(sr(sr(donor_g1 * x3) + sr(donor_g0 * x2)) + sr(da * donor_hl))
+        donors_up.append(up)
+        da_transfers.append(jnp.where(remap, da, zero))
+        dv_transfers.append(jnp.where(remap, dv, zero))
+
+    # iceitd.f90:432-597 -- sequential category shifts of every extensive field.
+    za_tsfn = sr(a_i * t_su)
+
+    def shift_pair(field, jl, transfer, up):
+        left = field[..., jl]
+        right = field[..., jl + 1]
+        return field.at[..., jl].set(jnp.where(up, sr(left - transfer), sr(left + transfer))).at[..., jl + 1].set(
+            jnp.where(up, sr(right + transfer), sr(right - transfer)))
+
+    def shift_ratio(field, jl, ratio, up):
+        donor = jnp.where(up, field[..., jl], field[..., jl + 1])
+        transfer = sr(donor * ratio)
+        return shift_pair(field, jl, transfer, up)
+
+    def shift_ratio_layered(field, jl, ratio, up):
+        donor = jnp.where(up[..., None], field[..., :, jl], field[..., :, jl + 1])
+        transfer = sr(donor * ratio[..., None])
+        left = field[..., :, jl]
+        right = field[..., :, jl + 1]
+        return field.at[..., :, jl].set(jnp.where(up[..., None], sr(left - transfer), sr(left + transfer))).at[..., :, jl + 1].set(
+            jnp.where(up[..., None], sr(right + transfer), sr(right - transfer)))
+
+    for jl in range(jpl - 1):
+        up = donors_up[jl]
+        da = da_transfers[jl]
+        dv = dv_transfers[jl]
+        donor_v = jnp.where(up, v_i[..., jl], v_i[..., jl + 1])
+        donor_a = jnp.where(up, a_i[..., jl], a_i[..., jl + 1])
+        donor_v_safe = jnp.where(donor_v >= eps10, donor_v, 1.0)
+        donor_a_safe = jnp.where(donor_a >= eps10, donor_a, 1.0)
+        work_v = jnp.where(donor_v >= eps10, sr(dv / donor_v_safe), zero)
+        work_a = jnp.where(donor_a >= eps10, sr(da / donor_a_safe), zero)
+        a_i = shift_pair(a_i, jl, da, up)
+        v_i = shift_pair(v_i, jl, dv, up)
+        v_s = shift_ratio(v_s, jl, work_v, up)
+        oa_i = shift_ratio(oa_i, jl, work_a, up)
+        za_tsfn = shift_ratio(za_tsfn, jl, work_a, up)
+        if ln_pnd:
+            a_ip = shift_ratio(a_ip, jl, work_a, up)
+            v_ip = shift_ratio(v_ip, jl, work_v, up)
+            if ln_pnd_lids:
+                v_il = shift_ratio(v_il, jl, work_v, up)
+        e_s = shift_ratio_layered(e_s, jl, work_v, up)
+        e_i = shift_ratio_layered(e_i, jl, work_v, up)
+        if nn_icesal == 4:
+            szv_i = shift_ratio_layered(szv_i, jl, work_v, up)
+        else:
+            sv_i = shift_ratio(sv_i, jl, work_v, up)
+
+    # ice_var_roundoff, then the NEMO per-cell concentration cap.
+    a_i = jnp.where(a_i < 0.0, zero, a_i)
+    v_i = jnp.where(v_i < 0.0, zero, v_i)
+    v_s = jnp.where(v_s < 0.0, zero, v_s)
+    oa_i = jnp.where(oa_i < 0.0, zero, oa_i)
+    e_i = jnp.where(e_i < 0.0, zero, e_i)
+    e_s = jnp.where(e_s < 0.0, zero, e_s)
+    if ln_pnd:
+        a_ip = jnp.where(a_ip < 0.0, zero, a_ip)
+        v_ip = jnp.where(v_ip < 0.0, zero, v_ip)
+        if ln_pnd_lids:
+            v_il = jnp.where((v_il < 0.0) & (v_il > -eps10), zero, v_il)
+    if nn_icesal == 4:
+        szv_i = jnp.where(szv_i < 0.0, zero, szv_i)
+    else:
+        sv_i = jnp.where(sv_i < 0.0, zero, sv_i)
+
+    total_a = fortran_sum_categories(a_i, axis=-1)
+    cap = total_a > rn_amax_2d
+    total_safe = jnp.where(cap, total_a, 1.0)
+    for jl in range(jpl):
+        capped = sr(sr(a_i[..., jl] * rn_amax_2d) / total_safe)
+        a_i = a_i.at[..., jl].set(jnp.where(cap, capped, a_i[..., jl]))
+
+    a_safe = jnp.where(a_i >= eps20, a_i, 1.0)
+    h_i = jnp.where(a_i >= eps20, sr(v_i / a_safe), zero)
+    t_su = jnp.where(a_i >= eps20, sr(za_tsfn / a_safe), jnp.asarray(rt0, dtype=dtype))
+
+    # Packed NEMO tables scatter only cells surviving the remap checks.
+    result = {"at_i": at_i, "remap_mask": remap}
+    updates = {
+        "h_i": h_i, "a_i": a_i, "v_i": v_i, "v_s": v_s,
+        "sv_i": sv_i, "oa_i": oa_i, "a_ip": a_ip, "v_ip": v_ip,
+        "v_il": v_il, "t_su": t_su, "e_s": e_s, "e_i": e_i,
+        "szv_i": szv_i,
+    }
+    for name, value in updates.items():
+        mask = remap
+        while mask.ndim < value.ndim:
+            mask = mask[..., None]
+        result[name] = jnp.where(mask, value, originals[name])
+    return result
+
+
 from legoesm.ice.si3_orca2_state import (  # noqa: E402,F401
     SI3CategoryBounds,
     si3_hfn_category_bounds,
 )
-

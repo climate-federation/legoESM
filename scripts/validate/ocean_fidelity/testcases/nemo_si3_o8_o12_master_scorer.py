@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Fail-closed 0-ULP scoring driver for SI3 rungs O8--O12 and O14.
+"""Fail-closed 0-ULP scoring driver for SI3 rungs O8 through O14.
 
 Scores the admitted 100-step O8--O16 master record at
 ``/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/round18/oracle_o8_o16_master``
-in order O8, O9, O10, O11, O12 against legoESM's production implementations under
+in order O8 through O14 against legoESM's production implementations under
 ``jax.jit`` (CPU ``fp64``, ``PrecisionPolicy.fp64(transcendentals="libm")``,
 inputs passed as runtime JIT arguments, and the rung's resolved namelist from
 ``record_100step/output.namelist.ice`` and ``record_100step/output.namelist.dyn``).
@@ -44,6 +44,7 @@ from legoesm.ice.bitz_lipscomb import (
 )
 from legoesm.ice.config import SI3LateralMeltConfig, SI3PondConfig, SI3ThermoConfig
 from legoesm.ice.constants_config import NEMO_SI3_CONSTANTS_CONFIG
+from legoesm.ice.itd import si3_ice_itd_rem
 from legoesm.ice.ponds import step_ponds
 from legoesm.ice.si3_thd_da import si3_ice_thd_da
 from legoesm.ice.si3_thd_pnd import si3_ice_thd_pnd
@@ -91,10 +92,11 @@ PINNED_PROJECTION_SHA256: dict[str, str] = {
     "O10": "ded24ddbc825a9a331d763665e51559022c97288cb7c7f516b3a587693deb554",
     "O11": "0c5197c52331975ff77d813f0154e0df6ea0aa1e0593e9ca062990d664465666",
     "O12": "fe395cab681d59a8c28a722cd7fc8222ec3ac0ee8c4e569d4043643fd4a47e50",
+    "O13": "a94d126ddaee3194a053ef437d762707dff93045287392d4e0586aaee995a4aa",
     "O14": "8130e5ac516cf8c1549badbab2caf90cf5cce03f3167c317a10532b836572cd6",
 }
 
-SCORE_RUNGS = ("O8", "O9", "O10", "O11", "O12")
+SCORE_RUNGS = ("O8", "O9", "O10", "O11", "O12", "O13")
 N_PAD_1D = 4099
 
 ZDF_UPDATED_FIELDS = (
@@ -138,6 +140,11 @@ PND_UPDATED_FIELDS = (
     "h_il",
     "a_ip_frac",
     "wfx_pnd",
+)
+O13_REMAP_KEYS = (
+    "h_i_b", "a_i_b", "h_i", "a_i", "v_i", "v_s", "sv_i", "oa_i",
+    "a_ip", "v_ip", "v_il", "t_su", "e_s", "e_i", "szv_i", "hi_max",
+    "rn_amax_2d",
 )
 DO_UPDATED_FIELDS = (
     "a_i",
@@ -937,6 +944,15 @@ def _build_compiled_kernels(
             _return_si3_outputs=True,
         )
 
+    @jax.jit
+    def jit_o13_remap(inputs: dict[str, jax.Array]):
+        return si3_ice_itd_rem(
+            **inputs,
+            nn_icesal=int(namelist["nn_icesal"]),
+            ln_pnd=bool(namelist["ln_pnd_LEV"] or namelist["ln_pnd_TOPO"]),
+            ln_pnd_lids=bool(namelist["ln_pnd_lids"]),
+        )
+
     return {
         "jit_o8_frazil": jit_o8_frazil,
         "jit_o9_zdf": jit_o9_zdf,
@@ -948,9 +964,95 @@ def _build_compiled_kernels(
         "jit_o10_category_stages": jit_o10_category_stages,
         "jit_o11_da": jit_o11_da,
         "jit_o12_pnd": jit_o12_pnd,
+        "jit_o13_remap": jit_o13_remap,
         "jit_o14_do": jit_o14_do,
         "jit_prod_column_step": jit_prod_column_step,
         "jit_prod_step_ponds": jit_prod_step_ponds,
+    }
+
+
+def _score_o13_step(
+    *, records_dir: Path, kt: int, first_kt: int,
+    digest_map: dict[str, str], namelist: dict[str, Any],
+    jit_o13_remap, accumulator: FieldScoreAccumulator, plant: str | None,
+) -> None:
+    """Score one admitted Kind 11 -> Kind 12 pair through the production kernel."""
+    n11 = record_name(11, kt, 0)
+    n12 = record_name(12, kt, 0)
+    r11 = read_record_verified(records_dir / n11, digest_map.get(n11))
+    r12 = read_record_verified(records_dir / n12, digest_map.get(n12))
+    _verify_record_scalars_against_namelist(r11["scalars"], namelist, 11)
+    _verify_record_scalars_against_namelist(r12["scalars"], namelist, 12)
+    f11 = r11["fields"]
+    f12 = dict(r12["fields"])
+    if plant == "o13-1ulp" and kt == first_kt:
+        f12["a_i"] = flip_1ulp(f12["a_i"], (0, 0, 0))
+    remap_in = {key: jnp.asarray(f11[key], dtype=jnp.float64) for key in O13_REMAP_KEYS}
+    if plant == "o13-model-mutation" and kt == first_kt:
+        remap_in["hi_max"] = remap_in["hi_max"].at[1].set(
+            jnp.nextafter(remap_in["hi_max"][1], jnp.asarray(jnp.inf, jnp.float64))
+        )
+    remap_out = jit_o13_remap(remap_in)
+    for spec in KINDS[12].fields:
+        got = remap_out[spec.name] if spec.name in remap_out else f11[spec.name]
+        accumulator.update(spec.name, got, f12[spec.name], kt=kt, category=0)
+
+
+def score_o13(
+    master_root: Path = DEFAULT_MASTER_ROOT,
+    ppsrc: Path = DEFAULT_PPSRC,
+    steps: Sequence[int] = STEPS,
+    plant: str | None = None,
+    verify_manifests: bool = True,
+) -> dict[str, Any]:
+    """O13-only mode of the extended r21 scorer; uses the identical scoring block."""
+    set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
+    manifest_info = (
+        verify_master_admission_manifests(master_root, plant=plant)
+        if verify_manifests else {"rung_record_digests": {"O13": {}}}
+    )
+    run_dir = master_root / "record_100step"
+    records_dir = run_dir / "o8_o16_master_records"
+    namelist = parse_resolved_ice_namelist(
+        run_dir / "output.namelist.ice", run_dir / "output.namelist.dyn",
+        ppsrc=ppsrc, plant=plant,
+    )
+    first = read_record_verified(records_dir / record_name(11, steps[0], 0))
+    kernels = _build_compiled_kernels(
+        float(first["scalars"]["rDt_ice"]),
+        float(first["scalars"]["r1_Dt_ice"]),
+        float(first["scalars"]["r1_nlay_i"]),
+        tuple(sorted(namelist.items())),
+    )
+    acc = FieldScoreAccumulator()
+    digest_map = manifest_info["rung_record_digests"]["O13"]
+    for kt in steps:
+        _score_o13_step(
+            records_dir=records_dir, kt=kt, first_kt=steps[0],
+            digest_map=digest_map, namelist=namelist,
+            jit_o13_remap=kernels["jit_o13_remap"], accumulator=acc, plant=plant,
+        )
+    score = acc.summary()
+    if score["total_unequal"]:
+        raise _refuse(
+            f"O13 non-bit-exact: unequal={score['total_unequal']}/{score['total_elements']}, "
+            f"max_abs_diff={score['max_abs_diff']}, max_ulp={score['max_ulp']}, "
+            f"first_non_bit={score['first_non_bit']}"
+        )
+    return {
+        "status": "PASS_O13_0_ULP", "steps_scored": len(steps),
+        "first_step": int(steps[0]), "last_step": int(steps[-1]),
+        "manifest_verification": {
+            key: manifest_info.get(key) for key in (
+                "run_manifest_sha256", "resource_usage_sha256",
+                "records_inventory_sha256", "projection_manifest_sha256",
+            )
+        },
+        "resolved_namelist": namelist,
+        "rungs": {"O13": {
+            "production_function": "legoesm.ice.itd.si3_ice_itd_rem",
+            "entry_kind": 11, "exit_kind": 12, "score": score,
+        }},
     }
 
 
@@ -1068,7 +1170,7 @@ def score_o8_to_o12(
     plant: str | None = None,
     verify_manifests: bool = True,
 ) -> dict[str, Any]:
-    """Score rungs O8, O9, O10, O11, and O12 in order against the master record."""
+    """Score rungs O8 through O13 in order against the master record."""
     set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
 
     manifest_info = (
@@ -1108,6 +1210,7 @@ def score_o8_to_o12(
     jit_o10_category_stages = kernels["jit_o10_category_stages"]
     jit_o11_da = kernels["jit_o11_da"]
     jit_o12_pnd = kernels["jit_o12_pnd"]
+    jit_o13_remap = kernels["jit_o13_remap"]
     jit_prod_column_step = kernels["jit_prod_column_step"]
     jit_prod_step_ponds = kernels["jit_prod_step_ponds"]
 
@@ -1146,6 +1249,7 @@ def score_o8_to_o12(
     o12_pnd_acc = FieldScoreAccumulator()
     prod_column_acc = FieldScoreAccumulator()
     prod_step_ponds_acc = FieldScoreAccumulator()
+    o13_remap_acc = FieldScoreAccumulator()
 
     zdf_input_keys = (
         "h_i",
@@ -1667,6 +1771,13 @@ def score_o8_to_o12(
                     spec.name, f10[spec.name], f11[spec.name], kt=kt, category=0
                 )
 
+        # 6. Rung O13: Kind 11 -> Kind 12 (production si3_ice_itd_rem).
+        _score_o13_step(
+            records_dir=records_dir, kt=kt, first_kt=steps[0],
+            digest_map=digests_by_rung["O13"], namelist=namelist,
+            jit_o13_remap=jit_o13_remap, accumulator=o13_remap_acc, plant=plant,
+        )
+
     rungs_report = {
         "O8": {
             "production_function": "legoesm.ice.bitz_lipscomb.si3_ice_thd_frazil",
@@ -1726,6 +1837,12 @@ def score_o8_to_o12(
             "score": o12_pnd_acc.summary(),
             "production_step_ponds_si3_lev": prod_step_ponds_acc.summary(),
         },
+        "O13": {
+            "production_function": "legoesm.ice.itd.si3_ice_itd_rem",
+            "entry_kind": 11,
+            "exit_kind": 12,
+            "score": o13_remap_acc.summary(),
+        },
     }
 
     # Check if any rung had a non-0-ULP difference (e.g. under a plant)
@@ -1770,7 +1887,7 @@ def score_o8_to_o12(
         raise _refuse("; ".join(failures))
 
     return {
-        "status": "PASS_ALL_O8_O12_0_ULP",
+        "status": "PASS_ALL_O8_O13_0_ULP",
         "steps_scored": len(steps),
         "first_step": int(steps[0]),
         "last_step": int(steps[-1]),
@@ -1789,8 +1906,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--rung",
-        choices=("O8-O12", "O14"),
-        default="O8-O12",
+        choices=("O8-O13", "O13", "O14"),
+        default="O8-O13",
         help="Certified rung group to score",
     )
     parser.add_argument(
@@ -1822,6 +1939,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             "o10-1ulp",
             "o11-1ulp",
             "o12-1ulp",
+            "o13-1ulp",
+            "o13-model-mutation",
             "o14-1ulp",
             "o14-model-bypass",
             "manifest-digest",
@@ -1829,6 +1948,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             "swapped-exit",
         ),
         help="Optional planted violation to verify fail-closed detection",
+    )
+    parser.add_argument(
+        "--only-o13", action="store_true",
+        help="run the shared O13 scoring block only (same manifest and EXIT-field gates)",
     )
     parser.add_argument(
         "--output-json",
@@ -1844,7 +1967,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     else:
         steps = tuple(int(x) for x in args.steps.split(",") if x.strip())
 
-    scorer = score_o14 if args.rung == "O14" else score_o8_to_o12
+    scorer = (
+        score_o14
+        if args.rung == "O14"
+        else score_o13
+        if args.rung == "O13" or args.only_o13
+        else score_o8_to_o12
+    )
     report = scorer(master_root=args.master_root, ppsrc=args.ppsrc, steps=steps, plant=args.plant)
     if args.output_json is not None:
         args.output_json.parent.mkdir(parents=True, exist_ok=True)

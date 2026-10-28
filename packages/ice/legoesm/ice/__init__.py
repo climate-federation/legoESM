@@ -48,6 +48,7 @@ from legoesm.ice.itd import (
     distribute_to_categories,
     linear_remap,
     lipscomb_2001_remap,
+    si3_ice_itd_rem,
     upper_bounds,
 )
 from legoesm.ice.ponds import step_ponds
@@ -134,6 +135,7 @@ __all__ = [
     "distribute_to_categories",
     "linear_remap",
     "lipscomb_2001_remap",
+    "si3_ice_itd_rem",
     # Transport
     "advect_ice_tracers",
     # Configs
@@ -312,4 +314,3 @@ __all__.extend(
         "si3_ice_thd_o12_stages",
     )
 )
-

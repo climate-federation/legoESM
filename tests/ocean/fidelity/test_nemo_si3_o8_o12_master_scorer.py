@@ -1,4 +1,4 @@
-"""Direct unit and master-record tests for the SI3 O8--O12 0-ULP scoring driver."""
+"""Direct unit and master-record tests for the SI3 O8--O14 0-ULP scoring driver."""
 
 from __future__ import annotations
 
@@ -68,6 +68,7 @@ def test_master_admission_manifests_and_plants() -> None:
     assert len(info["rung_record_digests"]["O10"]) == 1600
     assert len(info["rung_record_digests"]["O11"]) == 1100
     assert len(info["rung_record_digests"]["O12"]) == 200
+    assert len(info["rung_record_digests"]["O13"]) == 200
     assert len(info["rung_record_digests"]["O14"]) == 200
 
     with pytest.raises(ValueError, match="STATUS PLANT-FIRED.*run_manifest.json SHA-256 mismatch"):
@@ -86,7 +87,7 @@ def test_master_admission_manifests_and_plants() -> None:
 
 
 def test_score_o8_to_o12_representative_steps_0_ulp() -> None:
-    """Score rungs O8, O9, O10, O11, O12 across steps (1, 2, 100) including all Picard steps."""
+    """Score rungs O8--O13 across steps (1, 2, 100), including all Picard steps."""
     if not DEFAULT_MASTER_ROOT.is_dir():
         pytest.skip(f"admitted master record not mounted at {DEFAULT_MASTER_ROOT}")
     report = score_o8_to_o12(
@@ -94,7 +95,7 @@ def test_score_o8_to_o12_representative_steps_0_ulp() -> None:
         steps=(1, 2, 100),
         verify_manifests=True,
     )
-    assert report["status"] == "PASS_ALL_O8_O12_0_ULP"
+    assert report["status"] == "PASS_ALL_O8_O13_0_ULP"
     assert report["steps_scored"] == 3
     rungs = report["rungs"]
 
@@ -135,6 +136,10 @@ def test_score_o8_to_o12_representative_steps_0_ulp() -> None:
     assert rungs["O12"]["production_step_ponds_si3_lev"]["total_unequal"] == 0
     assert rungs["O12"]["production_step_ponds_si3_lev"]["first_non_bit"] is None
 
+    assert rungs["O13"]["score"]["status"] == "PASS_0_ULP"
+    assert rungs["O13"]["score"]["total_unequal"] == 0
+    assert rungs["O13"]["score"]["first_non_bit"] is None
+
 
 def test_score_o14_representative_steps_0_ulp_and_plants() -> None:
     """Score every O14 EXIT field through production and prove both plants fire."""
@@ -166,13 +171,15 @@ def test_score_o14_representative_steps_0_ulp_and_plants() -> None:
         ("o10-1ulp", r"STATUS PLANT-FIRED.*O10 non-bit-exact.*'field': 'sz_i'"),
         ("o11-1ulp", r"STATUS PLANT-FIRED.*O11 non-bit-exact.*'field': 'a_i'"),
         ("o12-1ulp", r"STATUS PLANT-FIRED.*O12 non-bit-exact.*'field': 'a_ip'"),
+        ("o13-1ulp", r"STATUS PLANT-FIRED.*O13 non-bit-exact.*'field': 'a_i'"),
+        ("o13-model-mutation", r"STATUS PLANT-FIRED.*O13 non-bit-exact"),
         ("swapped-exit", r"STATUS PLANT-FIRED.*O8 non-bit-exact"),
     ],
 )
 def test_one_ulp_exit_field_plants_caught_per_rung(
     plant: str, expected_pattern: str
 ) -> None:
-    """Prove that a 1-ULP perturbation in one exit field of each rung O8..O12 is caught."""
+    """Prove that exit or model plants in every rung O8--O13 are caught."""
     if not DEFAULT_MASTER_ROOT.is_dir():
         pytest.skip(f"admitted master record not mounted at {DEFAULT_MASTER_ROOT}")
     with pytest.raises(ValueError, match=expected_pattern):

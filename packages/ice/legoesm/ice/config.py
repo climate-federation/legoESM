@@ -700,12 +700,15 @@ def _validate_si3_lev_pond_config(config: "SeaIceConfig") -> None:
             f"does not carry {pnd_qty} as NEMO rung O4 Prather advection ice_dyn_adv_pra does)"
         )
     if config.n_categories > 1 and config.itd_remap != "none":
-        missing_stages.append(
-            f"concentration cap (_cap_multicat_concentration; does not carry {pnd_qty} as NEMO rung O6/O15 ice_cor does)"
-        )
-        missing_stages.append(
-            f"ITD remap (itd_remap={config.itd_remap!r}; does not carry {pnd_qty} as NEMO rung O13 ice_itd_rem does)"
-        )
+        if config.itd_remap != "lipscomb2001":
+            missing_stages.append(
+                f"ITD remap (itd_remap={config.itd_remap!r}; does not carry {pnd_qty} as NEMO rung O13 ice_itd_rem does)"
+            )
+        elif config.si3_orca2 is None:
+            missing_stages.append(
+                "exact O13 ITD remap (requires explicit config.si3_orca2 for "
+                "jpl/nn_icesal/HFN bounds; deck values are not inferred)"
+            )
     elif config.n_categories == 1 and config.itd_remap == "lipscomb2001":
         missing_stages.append(
             f"ITD remap (itd_remap={config.itd_remap!r}; does not carry {pnd_qty} as NEMO rung O13 ice_itd_rem does)"
