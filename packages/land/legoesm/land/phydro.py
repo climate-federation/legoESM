@@ -37,11 +37,13 @@ Water supply (soil-to-root resistance in series with a vulnerable xylem):
 
 DELIBERATE DEPARTURES from Joshi et al. (2022) / rphydro:
 
-1. **Soil-to-root resistance in series** (Bonan et al. 2014, GMD 7,
-   2193-2222, eqs. A23-A25) from root geometry + the Richards lane's own
-   hydraulic conductivity; rphydro has a plant conductance only.  The xylem
-   integral runs from the bulk soil potential, not the root-surface
-   potential (exact as ``rsoil_leaf -> 0``).
+1. **Conductance-weighted soil potential.**  The potential the roots see is
+   the mean over soil layers weighted by each layer's soil-to-root
+   conductance (Bonan et al. 2014, GMD 7, 2193-2222, eqs. A23-A24, from
+   root geometry + the Richards lane's own hydraulic conductivity), so a
+   dried-out layer drops out.  The soil-to-root RESISTANCE itself is masked
+   to zero (``soil_root_supply``): like rphydro, the supply is the xylem
+   alone, from that potential.
 2. **Two leaf classes.**  The instantaneous optimum is solved for the sunlit
    and the shaded big leaf separately (each with its own leaf temperature,
    light and draw-down); rphydro is one big leaf.  Both classes see the same
@@ -275,8 +277,9 @@ def soil_root_supply(
     layers.  The bulk soil potential is the CONDUCTANCE-weighted mean — the
     exact effective potential of parallel layers feeding one root — so a
     dried-out layer drops out through its own collapsing conductance.
-    ``rsoil_leaf`` is the per-LEAF-area resistance (A25); the xylem resistance
-    is added inside :func:`phydro_optimum`, where it depends on the draw-down.
+    ``rsoil_leaf`` is returned as ZERO (see the note at the return); the xylem
+    resistance is added inside :func:`phydro_optimum`, where it depends on the
+    draw-down.
 
     Shapes: ``psi_soil_m``/``theta_soil``/``root_frac`` are
     ``(ncol, nlev)``; ``dz_m`` is ``(nlev,)``; ``lai`` is ``(ncol,)``.
@@ -312,8 +315,14 @@ def soil_root_supply(
     g_soil_ground = jnp.maximum(jnp.sum(g_layers, axis=-1), 1e-30)  # [mol/m2 ground/s/MPa]
     psi_s = jnp.sum(smp_mpa * g_layers, axis=-1) / g_soil_ground
 
-    # A25: per-leaf-area soil resistance.
-    rsoil_leaf = jnp.maximum(lai, _LAI_FLOOR) / g_soil_ground
+    # The soil-to-root resistance is MASKED to zero (user decision 2026-10-28):
+    # the plant sees the conductance-weighted soil potential at its root
+    # surface, as in rphydro.  The layer conductances above still weight that
+    # potential.  (The per-leaf-area resistance, Bonan A25, would be
+    # ``max(lai, _LAI_FLOOR) / g_soil_ground``; its running mean, needed by the
+    # acclimated optimum, is dominated by dry-spell spikes of 1e7-1e8 and shut
+    # the plant down for weeks after rain.)
+    rsoil_leaf = jnp.zeros_like(psi_s)
     return PhydroSupply(rsoil_leaf=rsoil_leaf, psi_s_mpa=psi_s)
 
 

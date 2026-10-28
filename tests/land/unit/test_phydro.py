@@ -68,9 +68,8 @@ def test_supply_tracks_soil_potential_and_resistance_rises_when_dry():
     mpa_per_m = constants.rho_water * constants.g * 1e-6
     psi, theta, dz, rf, lai, hyd = _soil_column(psi_m=-1.0)  # wet (~-0.01 MPa)
     sup = ph.soil_root_supply(psi, theta, dz, rf, lai, hyd, cfg)
-    assert np.all(np.isfinite(np.asarray(sup.rsoil_leaf)))
-    # Wet soil: the soil-to-root path is a minor resistance next to the xylem.
-    assert 0.0 < float(sup.rsoil_leaf[0]) < 1.0 / cfg.gplant_mol
+    # The soil-to-root resistance is masked to zero (rphydro supply).
+    assert np.all(np.asarray(sup.rsoil_leaf) == 0.0)
     # Wetter than field capacity (and the Richards lane's positive overshoot
     # on rain) is capped smoothly at the cap, with a finite gradient.
     cap, width = ph._PSI_SOIL_CAP_MPA, ph._PSI_SOIL_CAP_WIDTH_MPA
@@ -81,13 +80,12 @@ def test_supply_tracks_soil_potential_and_resistance_rises_when_dry():
         g = jax.grad(lambda p: ph.soil_root_supply(
             p, theta, dz, rf, lai, hyd, cfg).psi_s_mpa[0])(psi_w)
         assert np.all(np.isfinite(np.asarray(g)))
-    # Very dry soil: the bulk potential is the soil's own (no floor) and the
-    # soil-to-root resistance rises.
+    # Very dry soil: the bulk potential is the soil's own (no floor).
     psi_d, theta_d, *_ = _soil_column(psi_m=-300.0)  # ~ -2.9 MPa
     sup_d = ph.soil_root_supply(psi_d, jnp.full_like(theta_d, 0.12), dz, rf,
                                 lai, hyd, cfg)
     np.testing.assert_allclose(float(sup_d.psi_s_mpa[0]), -300.0 * mpa_per_m, rtol=1e-12)
-    assert float(sup_d.rsoil_leaf[0]) > float(sup.rsoil_leaf[0])
+    assert float(sup_d.rsoil_leaf[0]) == 0.0
     # A dried-out layer drops out of the bulk potential through its own
     # collapsing conductance: one wet layer dominates five dry ones.
     psi_mix = psi_d.at[:, -1].set(-1.0)

@@ -83,8 +83,9 @@ def test_phydro_two_leaf_step_runs_and_switch_binds():
         assert np.all(np.isfinite(np.asarray(r.lhflx)))
     assert not np.allclose(np.asarray(resp_ph.lhflx),
                            np.asarray(resp_bt.lhflx), atol=1e-3)
-    # And the SUPPLY responds to drying: a drier column has a higher
-    # soil-to-root resistance.
+    # And the SUPPLY responds to drying: a drier column has a lower
+    # (more negative) soil potential; the soil-to-root resistance is masked
+    # to zero.
     from legoesm.land.phydro import soil_root_supply
     from legoesm.land.soil_grid import make_soil_grid
     grid = make_soil_grid(cfg_ph.soil_grid)
@@ -96,7 +97,8 @@ def test_phydro_two_leaf_step_runs_and_switch_binds():
                                cfg_ph.hydraulics, cfg_ph.phydro)
     sup_dry = soil_root_supply(st_dry.psi_soil, st_dry.theta_soil, grid.dz,
                                rf, lai, cfg_ph.hydraulics, cfg_ph.phydro)
-    assert float(sup_dry.rsoil_leaf[0]) > float(sup_wet.rsoil_leaf[0])
+    assert float(sup_dry.psi_s_mpa[0]) < float(sup_wet.psi_s_mpa[0])
+    assert float(sup_dry.rsoil_leaf[0]) == 0.0 == float(sup_wet.rsoil_leaf[0])
 
 
 def test_beta_theta_default_unchanged():
