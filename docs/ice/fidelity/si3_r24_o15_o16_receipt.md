@@ -121,9 +121,9 @@ executing model plant that omits `hfx_res` both fail the O16 flux score.
 
 ## Compatibility and controls
 
-- Translation proof plus representative `kt=1,2,100` score: 2 passed, 16
-  deselected. O15/O16 one-ULP, barrier, stress, and executing heat-term plants:
-  4 passed, 14 deselected. `test_si3_finalize.py`: 4 passed.
+- Translation proof, representative `kt=1,2,100` production score, O15/O16
+  one-ULP, barrier, stress, and executing heat-term plants: 5 passed, 13
+  deselected on the final code. `test_si3_finalize.py`: 4 passed.
 - O8–O12 all-step production score: `PASS_ALL_O8_O12_0_ULP`; artifact
   `o8_o12_master_score.json`, SHA-256
   `fa2cc5fc534b7789dc565c491d58472784bf6e568296635397afb2169c4c69bf`.
@@ -133,8 +133,11 @@ executing model plant that omits `hfx_res` both fail the O16 flux score.
   b7a7329bed74c17918fa3cbc11c7613acb2074851e2357a08869fcd4661e12d2`.
   Probe artifact SHA-256:
   `ab03c16a4f0a424d6be496733f815153f21c4e09681dd4ccbc09d0571b05c726`.
-- Per-receipt citation gate, default citation gate, and focused ratchets are
-  recorded after the final receipt anchors are committed.
+- Clean-tree per-receipt citation gate: 17 citations, zero failures, zero
+  unmapped citations, all planted self-tests fired. Clean-tree default citation
+  gate: 274 citations, zero failures, zero unmapped citations. Citation-gate,
+  private-import, parameter-spec, inline-coefficient, and hardcoded-constant
+  ratchets: 6,310 passed, 2 skipped.
 
 ## Choices
 
