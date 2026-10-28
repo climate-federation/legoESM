@@ -4350,6 +4350,14 @@ def thread_morrison_scalars(config, scheme, micro_config):
          getattr(config, "morrison_accre_enhan_fact", None)),
         ("cam6_aerosol_number_scale", "cam6_aerosol_number_scale",
          getattr(config, "cam6_aerosol_number_scale", None)),
+        ("morrison_rain_vent_f1", "rain_vent_f1",
+         getattr(config, "morrison_rain_vent_f1", None)),
+        ("morrison_rain_vent_f2", "rain_vent_f2",
+         getattr(config, "morrison_rain_vent_f2", None)),
+        ("morrison_N_i0", "N_i0",
+         getattr(config, "morrison_N_i0", None)),
+        ("morrison_cooper_a", "cooper_a",
+         getattr(config, "morrison_cooper_a", None)),
     ):
         if _val is not None and not math.isclose(
                 float(_val), float(_ExpCfg._field_defaults[_exp_name]),

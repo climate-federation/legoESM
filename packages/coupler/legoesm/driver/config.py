@@ -639,13 +639,48 @@ CLUBB_SCALAR_FIELDS = {
     "clubb_gamma_coefb": "gamma_coefb",
     "clubb_beta": "beta",
     "clubb_c_k10": "c_K10",
+    "clubb_c1": "C1",
+    "clubb_c12": "C12",
+    "clubb_c2rt": "C2rt",
+    "clubb_c2rtthl": "C2rtthl",
+    "clubb_c2thl": "C2thl",
+    "clubb_c4": "C4",
+    "clubb_c6rt": "C6rt",
+    "clubb_c6rtb": "C6rtb",
+    "clubb_c6thl": "C6thl",
+    "clubb_c6thlb": "C6thlb",
+    "clubb_c7": "C7",
+    "clubb_c_uu_buoy": "C_uu_buoy",
+    "clubb_c_uu_shr": "C_uu_shr",
+    "clubb_c_wp3_pr_turb": "C_wp3_pr_turb",
+    "clubb_c_k": "c_K",
+    "clubb_c_k1": "c_K1",
+    "clubb_c_k2": "c_K2",
+    "clubb_c_k6": "c_K6",
+    "clubb_c_k8": "c_K8",
+    "clubb_c_k9": "c_K9",
+    "clubb_lambda0_stability_coef": "lambda0_stability_coef",
+    "clubb_lmin_coef": "lmin_coef",
+    "clubb_mu": "mu",
+    "clubb_nu1": "nu1",
+    "clubb_nu2": "nu2",
+    "clubb_nu6": "nu6",
+    "clubb_nu8": "nu8",
+    "clubb_nu9": "nu9",
 }
 # Read only by the prognostic CLUBB path (advance_clubb_core and its
 # advance_xp2_xpyp / advance_wp2_wp3 / compute_clubb_diagnostics); the
-# diagnostic path (clubb_turbulence) reads gamma_coef and beta only.
+# diagnostic path (clubb_turbulence) reads gamma_coef, beta, c_K, lmin_coef,
+# mu (and the unmapped Skw_max_mag) only.
 CLUBB_PROGNOSTIC_ONLY = frozenset({
     "clubb_c14", "clubb_c8", "clubb_c11", "clubb_c11b", "clubb_gamma_coefb",
-    "clubb_c_k10"})
+    "clubb_c_k10",
+    "clubb_c1", "clubb_c12", "clubb_c2rt", "clubb_c2rtthl", "clubb_c2thl",
+    "clubb_c4", "clubb_c6rt", "clubb_c6rtb", "clubb_c6thl", "clubb_c6thlb",
+    "clubb_c7", "clubb_c_uu_buoy", "clubb_c_uu_shr", "clubb_c_wp3_pr_turb",
+    "clubb_c_k1", "clubb_c_k2", "clubb_c_k6", "clubb_c_k8", "clubb_c_k9",
+    "clubb_lambda0_stability_coef", "clubb_nu1", "clubb_nu2", "clubb_nu6",
+    "clubb_nu8", "clubb_nu9"})
 
 
 def resolve_sea_ice_albedo_scheme(cfg) -> str:
@@ -2126,6 +2161,43 @@ class ExperimentConfig(NamedTuple):
     zm_momcd: float | None = None
     zm_tiedke_add: float | None = None
     zm_alfa: float | None = None
+    # More CLUBB tunables (CLUBB_SCALAR_FIELDS); APPENDED AT THE TUPLE END
+    # (positional ABI).  None = the scheme's CLUBBParams default.
+    clubb_c1: float | None = None
+    clubb_c12: float | None = None
+    clubb_c2rt: float | None = None
+    clubb_c2rtthl: float | None = None
+    clubb_c2thl: float | None = None
+    clubb_c4: float | None = None
+    clubb_c6rt: float | None = None
+    clubb_c6rtb: float | None = None
+    clubb_c6thl: float | None = None
+    clubb_c6thlb: float | None = None
+    clubb_c7: float | None = None
+    clubb_c_uu_buoy: float | None = None
+    clubb_c_uu_shr: float | None = None
+    clubb_c_wp3_pr_turb: float | None = None
+    clubb_c_k: float | None = None
+    clubb_c_k1: float | None = None
+    clubb_c_k2: float | None = None
+    clubb_c_k6: float | None = None
+    clubb_c_k8: float | None = None
+    clubb_c_k9: float | None = None
+    clubb_lambda0_stability_coef: float | None = None
+    clubb_lmin_coef: float | None = None
+    clubb_mu: float | None = None
+    clubb_nu1: float | None = None
+    clubb_nu2: float | None = None
+    clubb_nu6: float | None = None
+    clubb_nu8: float | None = None
+    clubb_nu9: float | None = None
+    # More Morrison tunables (thread_morrison_scalars); APPENDED AT THE TUPLE
+    # END (positional ABI).  Defaults MUST equal the MorrisonConfig leaves so
+    # the wiring is a no-op at rest.
+    morrison_rain_vent_f1: float = 0.78    # MorrisonConfig.rain_vent_f1
+    morrison_rain_vent_f2: float = 0.308   # MorrisonConfig.rain_vent_f2
+    morrison_N_i0: float = 5.0             # MorrisonConfig.N_i0
+    morrison_cooper_a: float = 0.304       # MorrisonConfig.cooper_a
 
     def _liquid_partition_resolved(self) -> bool:
         """Is CLUBB's cloud-liquid exchange selected, by ANY route?
@@ -4211,6 +4283,10 @@ class ExperimentConfig(NamedTuple):
             ("morrison_autocon_fact", 0.1, 20.0),
             ("morrison_accre_enhan_fact", 0.1, 10.0),
             ("cam6_aerosol_number_scale", 0.3, 3.0),
+            ("morrison_rain_vent_f1", 0.3, 2.5),
+            ("morrison_rain_vent_f2", 0.1, 1.0),
+            ("morrison_N_i0", 1.0, 50.0),
+            ("morrison_cooper_a", 0.1, 0.9),
         ):
             _v = getattr(self, _f)
             if _v is None and _f == "morrison_ice_snow_d_auto":

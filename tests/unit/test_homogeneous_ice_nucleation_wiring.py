@@ -232,7 +232,11 @@ class TestMorrisonScalarOverlay:
                           ("morrison_k_au", "k_au"),
                           ("morrison_fall_a_i", "fall_a_i"),
                           ("morrison_ice_snow_d_auto", "ice_snow_d_auto"),
-                          ("morrison_hom_ice_nuc_N", "hom_ice_nuc_N")):
+                          ("morrison_hom_ice_nuc_N", "hom_ice_nuc_N"),
+                          ("morrison_rain_vent_f1", "rain_vent_f1"),
+                          ("morrison_rain_vent_f2", "rain_vent_f2"),
+                          ("morrison_N_i0", "N_i0"),
+                          ("morrison_cooper_a", "cooper_a")):
             assert getattr(e, exp) == getattr(m, leaf), (exp, leaf)
 
     @pytest.mark.parametrize("exp,leaf,val", [
@@ -244,6 +248,10 @@ class TestMorrisonScalarOverlay:
         ("morrison_fall_a_i", "fall_a_i", 2100.0),
         ("morrison_ice_snow_d_auto", "ice_snow_d_auto", 100.0e-6),
         ("morrison_hom_ice_nuc_N", "hom_ice_nuc_N", 1.0e5),
+        ("morrison_rain_vent_f1", "rain_vent_f1", 1.2),
+        ("morrison_rain_vent_f2", "rain_vent_f2", 0.5),
+        ("morrison_N_i0", "N_i0", 20.0),
+        ("morrison_cooper_a", "cooper_a", 0.5),
     ])
     def test_each_scalar_reaches_its_leaf(self, exp, leaf, val):
         if exp == "morrison_hom_ice_nuc_N":
@@ -378,7 +386,11 @@ class TestMorrisonScalarOverlay:
                            ("k_au", "morrison_k_au"),
                            ("fall_a_i", "morrison_fall_a_i"),
                            ("ice_snow_d_auto", "morrison_ice_snow_d_auto"),
-                           ("hom_ice_nuc_N", "morrison_hom_ice_nuc_N")):
+                           ("hom_ice_nuc_N", "morrison_hom_ice_nuc_N"),
+                           ("rain_vent_f1", "morrison_rain_vent_f1"),
+                           ("rain_vent_f2", "morrison_rain_vent_f2"),
+                           ("N_i0", "morrison_N_i0"),
+                           ("cooper_a", "morrison_cooper_a")):
             assert M[f"atm.micro.MorrisonConfig.{leaf}"] == flat
 
     def test_tuning_catalog_agrees_with_the_leaf_default(self):

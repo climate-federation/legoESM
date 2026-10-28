@@ -2201,6 +2201,34 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "(unset = the flavor's DCS: SAM 250e-6, mg = CAM6 "
                              "MG2 micro_mg_dcs 500e-6; an explicit value always "
                              "wins).")
+    parser.add_argument("--morrison-rain-vent-f1", type=float,
+                        default=ExperimentConfig._field_defaults[
+                            "morrison_rain_vent_f1"],
+                        dest="morrison_rain_vent_f1",
+                        help="MorrisonConfig.rain_vent_f1 (legal range: its "
+                             "__param_spec__ bounds). Default: the scheme's "
+                             "own value.")
+    parser.add_argument("--morrison-rain-vent-f2", type=float,
+                        default=ExperimentConfig._field_defaults[
+                            "morrison_rain_vent_f2"],
+                        dest="morrison_rain_vent_f2",
+                        help="MorrisonConfig.rain_vent_f2 (legal range: its "
+                             "__param_spec__ bounds). Default: the scheme's "
+                             "own value.")
+    parser.add_argument("--morrison-n-i0", type=float,
+                        default=ExperimentConfig._field_defaults[
+                            "morrison_N_i0"],
+                        dest="morrison_N_i0",
+                        help="MorrisonConfig.N_i0 (legal range: its "
+                             "__param_spec__ bounds). Default: the scheme's "
+                             "own value.")
+    parser.add_argument("--morrison-cooper-a", type=float,
+                        default=ExperimentConfig._field_defaults[
+                            "morrison_cooper_a"],
+                        dest="morrison_cooper_a",
+                        help="MorrisonConfig.cooper_a (legal range: its "
+                             "__param_spec__ bounds). Default: the scheme's "
+                             "own value.")
     parser.add_argument("--morrison-accre-enhan-fact", type=float,
                         default=ExperimentConfig._field_defaults[
                             "morrison_accre_enhan_fact"],
@@ -3058,6 +3086,10 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         morrison_autocon_fact=args.morrison_autocon_fact,
         morrison_ice_snow_d_auto=args.morrison_ice_snow_d_auto,
         morrison_accre_enhan_fact=args.morrison_accre_enhan_fact,
+        morrison_rain_vent_f1=args.morrison_rain_vent_f1,
+        morrison_rain_vent_f2=args.morrison_rain_vent_f2,
+        morrison_N_i0=args.morrison_N_i0,
+        morrison_cooper_a=args.morrison_cooper_a,
         morrison_sed_cfl_substeps=args.morrison_sed_cfl_substeps,
         morrison_sed_cfl_substeps_max=args.morrison_sed_cfl_substeps_max,
         morrison_sed_cfl_substeps_strict=args.morrison_sed_cfl_substeps_strict,

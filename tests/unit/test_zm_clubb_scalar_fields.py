@@ -31,7 +31,17 @@ _ZM = {"zm_c0_lnd": 0.015, "zm_c0_ocn": 0.045, "zm_ke": 1.0e-5,
        "zm_momcu": 0.4, "zm_momcd": 0.4, "zm_tiedke_add": 1.0, "zm_alfa": 0.2}
 _CLUBB = {"clubb_c14": 3.0, "clubb_c8": 5.0, "clubb_c11": 0.5,
           "clubb_c11b": 0.5, "clubb_gamma_coef": 0.25,
-          "clubb_gamma_coefb": 0.25, "clubb_beta": 2.0, "clubb_c_k10": 1.0}
+          "clubb_gamma_coefb": 0.25, "clubb_beta": 2.0, "clubb_c_k10": 1.0,
+          "clubb_c1": 1.5, "clubb_c12": 1.5, "clubb_c2rt": 1.5,
+          "clubb_c2rtthl": 2.0, "clubb_c2thl": 1.5, "clubb_c4": 6.0,
+          "clubb_c6rt": 5.0, "clubb_c6rtb": 7.0, "clubb_c6thl": 5.0,
+          "clubb_c6thlb": 7.0, "clubb_c7": 0.7, "clubb_c_uu_buoy": 0.5,
+          "clubb_c_uu_shr": 0.5, "clubb_c_wp3_pr_turb": 1.0, "clubb_c_k": 0.3,
+          "clubb_c_k1": 1.0, "clubb_c_k2": 0.25, "clubb_c_k6": 0.5,
+          "clubb_c_k8": 2.0, "clubb_c_k9": 0.5,
+          "clubb_lambda0_stability_coef": 0.1, "clubb_lmin_coef": 0.2,
+          "clubb_mu": 0.002, "clubb_nu1": 30.0, "clubb_nu2": 10.0,
+          "clubb_nu6": 10.0, "clubb_nu8": 30.0, "clubb_nu9": 30.0}
 
 
 def _parse(argv):

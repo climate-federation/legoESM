@@ -4143,6 +4143,80 @@ def test_cam6_aerosol_number_scale_round_trips():
     assert d.cam6_aerosol_number_scale == 1.0
 
 
+_MORRISON_PPE = (   # (flat field, CLI flag, MorrisonConfig leaf, value != default)
+    ("morrison_rain_vent_f1", "--morrison-rain-vent-f1", "rain_vent_f1", 1.2),
+    ("morrison_rain_vent_f2", "--morrison-rain-vent-f2", "rain_vent_f2", 0.5),
+    ("morrison_N_i0", "--morrison-n-i0", "N_i0", 20.0),
+    ("morrison_cooper_a", "--morrison-cooper-a", "cooper_a", 0.5),
+)
+
+
+@pytest.mark.parametrize("field,flag,leaf,value", _MORRISON_PPE)
+def test_morrison_ppe_scalars_round_trip(field, flag, leaf, value):
+    """--morrison-<leaf> reaches ExperimentConfig and the resolved
+    MorrisonConfig; the default equals the MorrisonConfig leaf."""
+    from legoesm.atmosphere.physics.microphysics.config import MorrisonConfig
+    from legoesm.driver.physics_pipeline import thread_morrison_scalars
+    parser = build_arg_parser()
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--microphysics", "morrison",
+        flag, str(value),
+    ]), parser))
+    assert getattr(cfg, field) == value
+    cfg.validate_strict()
+    # The overlay both the FV and the MPAS lane apply to the scheme leaf.
+    got = thread_morrison_scalars(cfg, "morrison", MorrisonConfig())
+    assert getattr(got, leaf) == value
+    d = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert getattr(d, field) == getattr(MorrisonConfig(), leaf)
+
+
+def test_morrison_ppe_scalars_settable_from_a_params_file():
+    """The --params route: atm.micro.MorrisonConfig.<leaf> keys go through the
+    atm scalar map into the resolved MorrisonConfig."""
+    from legoesm.atmosphere.physics.microphysics.config import MorrisonConfig
+    from legoesm.driver.config import ExperimentConfig
+    from legoesm.driver.physics_pipeline import thread_morrison_scalars
+    from legoesm.driver.run_config_yaml import (
+        apply_params_to_config,
+        build_atm_scalar_param_map,
+    )
+    cfg = apply_params_to_config(
+        ExperimentConfig(microphysics="morrison"),
+        {f"atm.micro.MorrisonConfig.{leaf}": v
+         for _f, _fl, leaf, v in _MORRISON_PPE},
+        driver="run_amip", scalar_param_map=build_atm_scalar_param_map())
+    got = thread_morrison_scalars(cfg, "morrison", MorrisonConfig())
+    for field, _fl, leaf, v in _MORRISON_PPE:
+        assert getattr(cfg, field) == v
+        assert getattr(got, leaf) == v, leaf
+
+
+def test_morrison_ppe_scalars_production_deck_writes_the_defaults():
+    """The explicit deck rows must not change a production run."""
+    import pathlib
+
+    import yaml
+    from legoesm.atmosphere.physics.microphysics.config import MorrisonConfig
+    deck = yaml.safe_load((pathlib.Path(__file__).resolve().parents[2]
+                           / "config" / "amip" / "amip_production.yaml"
+                           ).read_text())
+    for field, _fl, leaf, _v in _MORRISON_PPE:
+        assert deck[field] == getattr(MorrisonConfig(), leaf), field
+
+
+@pytest.mark.parametrize("field,bad", [
+    ("morrison_rain_vent_f1", 3.0),     # spec bounds (0.3, 2.5)
+    ("morrison_N_i0", 0.5),             # spec bounds (1.0, 50.0)
+])
+def test_morrison_ppe_scalars_out_of_spec_refused(field, bad):
+    from legoesm.driver.config import ExperimentConfig
+    with pytest.raises(ValueError, match=field):
+        ExperimentConfig(microphysics="morrison",
+                         **{field: bad}).validate_strict()
+
+
 def test_morrison_flavor_yaml_route():
     """--config YAML route (keys become parser defaults): morrison_flavor: sam
     must reach ExperimentConfig, and an explicit CLI flag must still win."""
