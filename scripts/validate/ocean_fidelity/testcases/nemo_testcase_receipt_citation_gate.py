@@ -11267,6 +11267,7 @@ AUDITED_ROUNDS = "25 and later (heading to end of file)"
 FILES.update({
     'docs/ice/fidelity/si3_r25_o4_acquisition_preregister.md': REPO / 'docs/ice/fidelity/si3_r25_o4_acquisition_preregister.md',
     'docs/ice/fidelity/si3_r25_o4_acquisition_receipt.md': REPO / 'docs/ice/fidelity/si3_r25_o4_acquisition_receipt.md',
+    'scripts/validate/ocean_fidelity/orca2_l4/nemo_acquisition_extents.py': REPO / 'scripts/validate/ocean_fidelity/orca2_l4/nemo_acquisition_extents.py',
     'scripts/validate/ocean_fidelity/testcases/nemo_si3_o4_orca2_prather_gate.py': REPO / 'scripts/validate/ocean_fidelity/testcases/nemo_si3_o4_orca2_prather_gate.py',
     'scripts/validate/ocean_fidelity/testcases/nemo_si3_o4_orca2_prather_passivity.py': REPO / 'scripts/validate/ocean_fidelity/testcases/nemo_si3_o4_orca2_prather_passivity.py',
     'scripts/validate/ocean_fidelity/testcases/nemo_si3_o4_orca2_prather_readset.py': REPO / 'scripts/validate/ocean_fidelity/testcases/nemo_si3_o4_orca2_prather_readset.py',
@@ -11274,8 +11275,8 @@ FILES.update({
     'tests/ocean/fidelity/test_nemo_si3_o4_prather_acquisition.py': REPO / 'tests/ocean/fidelity/test_nemo_si3_o4_prather_acquisition.py',
 })
 CITATION_MAP.update({
-    'docs/ice/fidelity/si3_r25_o4_acquisition_preregister.md:1-131': ['# SI3 Rung O4 (`si3_r25`) Acquisition Preregistration', 'record contract.', 131],
-    'scripts/validate/ocean_fidelity/orca2_l4/nemo_acquisition_extents.py:309-350': ['def validate_writer(', '    }', 42],
+    'docs/ice/fidelity/si3_r25_o4_acquisition_preregister.md:1-131': ['# SI3 Ladder Round 25 (`si3_r25`) Preregistration — O4 Prather Acquisition and Exact-Input Score', 'record contract.', 131],
+    'scripts/validate/ocean_fidelity/orca2_l4/nemo_acquisition_extents.py:309-350': ['def validate_writer(', ('    }', 5), 42],
     'scripts/validate/ocean_fidelity/testcases/nemo_si3_o4_orca2_prather_gate.py:68-239': ['def read_record(path: str | Path, plant: str | None = None) -> dict[str, Any]:', '    return {"status": "PASS", "criterion": "every exit, seam, and fold cell == 0 ULP", "scores": scores}', 172],
     'scripts/validate/ocean_fidelity/testcases/nemo_si3_o4_orca2_prather_passivity.py:26-98': ['def census(build: Path = BUILD, toolchain: Path = TOOLCHAIN) -> dict[str, object]:', 'if __name__=="__main__": raise SystemExit(main())', 73],
     'scripts/validate/ocean_fidelity/testcases/nemo_si3_o4_orca2_prather_readset.py:21-71': ['def derive_and_gate(ppsrc: Path = DEFAULT_PPSRC, plant: str | None = None) -> dict[str, object]:', 'if __name__=="__main__": raise SystemExit(main())', 51],
