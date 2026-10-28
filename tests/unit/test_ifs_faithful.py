@@ -42,8 +42,8 @@ def _kwargs(ncol, nlev):
     z = jnp.zeros((ncol, nlev))
     return dict(u=z, v=z, conv_prog_profile=z, conv_stoch_state=jnp.zeros(ncol),
                 prng_key=None, dt=112.5, land_frac=jnp.zeros(ncol),
-                shf_w_m2=jnp.full((ncol,), -20.0),
-                lhf_w_m2=jnp.full((ncol,), -100.0),
+                shf_w_m2=jnp.full((ncol,), 20.0),     # positive upward (model sign)
+                lhf_w_m2=jnp.full((ncol,), 100.0),
                 dT_dt_dyn=z, dq_dt_dyn=z)
 
 
@@ -418,3 +418,45 @@ def test_reverse_grad_finite_on_non_convecting_column(_x64, field):
     g, fd = _param_grad_and_fd(30, field)
     assert np.isfinite(g)
     assert g == fd == 0.0
+
+
+def test_faithful_chain_receives_ifs_signed_surface_fluxes(monkeypatch):
+    """bechtold takes positive-upward fluxes; the IFS trigger reads PAHFS /
+    PQHFL positive downward (cubasen.F90:341), so the chain must see them
+    negated."""
+    T, q, p_full, p_half = _deep_column()
+    kw = _kwargs(*T.shape)
+    seen = {}
+    orig = F.ifs_departure_search_refined
+
+    def spy(*a, **k):
+        seen["shf"], seen["lhf"] = k["shf_w_m2"], k["lhf_w_m2"]
+        return orig(*a, **k)
+
+    monkeypatch.setattr(F, "ifs_departure_search_refined", spy)
+    bechtold_convection(T, q, p_full, p_half,
+                        config=BechtoldConfig(use_ifs_ascent=True), **kw)
+    np.testing.assert_array_equal(np.asarray(seen["shf"]), -np.asarray(kw["shf_w_m2"]))
+    np.testing.assert_array_equal(np.asarray(seen["lhf"]), -np.asarray(kw["lhf_w_m2"]))
+
+
+def test_upward_surface_fluxes_launch_the_surface_parcel(monkeypatch):
+    """Upward surface heat and moisture fluxes, as the surface layer passes
+    them (positive upward), must let the surface test parcel go (the 30-level
+    sounding departs from the surface); with the sign unflipped the buoyancy
+    flux had the wrong sign and convection was switched off."""
+    T, q, p_full, p_half = _deep_column()
+    kw = _kwargs(*T.shape)
+    got = {}
+    orig = F.ifs_departure_search_refined
+
+    def spy(*a, **k):
+        got["trig"] = orig(*a, **k)
+        return got["trig"]
+
+    monkeypatch.setattr(F, "ifs_departure_search_refined", spy)
+    bechtold_convection(T, q, p_full, p_half,
+                        config=BechtoldConfig(use_ifs_ascent=True), **kw)
+    trig = got["trig"]
+    assert float(np.asarray(trig.ldcum)[0]) > 0.5
+    assert int(np.asarray(trig.k_dpl)[0]) == T.shape[1] - 1

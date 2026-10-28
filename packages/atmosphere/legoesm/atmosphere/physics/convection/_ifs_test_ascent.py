@@ -50,7 +50,8 @@ over the static nlev).
 
 Surface flux sign convention: shf_w_m2 / lhf_w_m2 follow the IFS PAHFS /
 PQHFL convention, NEGATIVE = upward (into the atmosphere); the latent
-mass flux is PQHFL [kg m-2 s-1] = -lhf_w_m2 / L_v (cubasen.F90:335).
+mass flux is PQHFL [kg m-2 s-1] = lhf_w_m2 / L_v (cubasen.F90:335).  Callers
+holding positive-upward fluxes negate them first (bechtold does).
 """
 
 from typing import NamedTuple
@@ -206,7 +207,7 @@ __physics_contract__ = {
         "T": "K", "q_v": "kg/kg (specific humidity, PQEN)", "p_full": "Pa", "p_half": "Pa",
         "geo_full": "m2/s2 (geopotential, surface-relative; geo_half[:, nlev] = 0)",
         "geo_half": "m2/s2", "shf_w_m2": "W/m2 (PAHFS sign: negative = upward)",
-        "lhf_w_m2": "W/m2 (PQHFL sign: negative = upward; PQHFL = -lhf/L_v [kg m-2 s-1])",
+        "lhf_w_m2": "W/m2 (PQHFL sign: negative = upward; PQHFL = lhf/L_v [kg m-2 s-1])",
         "ustar": "m/s", "land_frac": "1 (0..1)", "dq_dt_adv": "kg/kg/s (PTENQA)",
     },
     "outputs": {
@@ -218,7 +219,7 @@ __physics_contract__ = {
         "w2": "m2/s2 (ZWU2H/PWU2H of the selected ascent)",
     },
     "sign_convention": "surface fluxes follow the IFS PAHFS/PQHFL convention: "
-                       "NEGATIVE = upward (into the atmosphere); PQHFL = -lhf_w_m2 / L_v.",
+                       "NEGATIVE = upward (into the atmosphere); PQHFL = lhf_w_m2 / L_v.",
     "conserves": ["none"],
     "differentiable": True,
     "reference": "OpenIFS cubasen.F90 (main 8f6f722)",
