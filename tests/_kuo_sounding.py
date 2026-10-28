@@ -1,5 +1,6 @@
-"""Shared 60-level tropical Kuo test sounding (moved verbatim from
-``tests/unit/test_kuo_oracle_faithful.py`` so other Kuo tests can use it).
+"""Shared 60-level tropical Kuo test sounding (moved from
+``tests/unit/test_kuo_oracle_faithful.py`` so other Kuo tests can use it;
+the calculations are unchanged, the helpers lost their leading underscore).
 
 The sounding uses the water branch of the oracle's Huang (2018) saturation
 curve and oracle constants only to BUILD a humidity profile; the scheme
