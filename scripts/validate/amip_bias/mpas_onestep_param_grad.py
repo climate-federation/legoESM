@@ -70,9 +70,17 @@ def launch_argv(run: str, day: int, out: Path) -> list[str]:
                 break
         if line:
             break
-    if line is None:
-        raise SystemExit(f"{run}: no '[chain] launching' / '[run]' line in its slurm logs")
-    argv = shlex.split(line.split("run_amip.py", 1)[1])
+    if line is not None:
+        argv = shlex.split(line.split("run_amip.py", 1)[1])
+    else:
+        # runs without a chain/[run] log line: the driver's own record of its
+        # arguments (a restarted run keeps its first link's as run_manifest.link1.json)
+        mans = [ROOT / run / m for m in ("run_manifest.link1.json", "run_manifest.json")]
+        mans = [m for m in mans if m.exists()]
+        if not mans:
+            raise SystemExit(f"{run}: no '[chain] launching' / '[run]' line in its slurm logs "
+                             "and no run_manifest")
+        argv = list(json.load(open(mans[0]))["run"]["argv"][1:])
 
     def drop(flag, n=2):
         while flag in argv:
@@ -84,10 +92,13 @@ def launch_argv(run: str, day: int, out: Path) -> list[str]:
     # The relaunch is one process on a gathered (global) checkpoint, so a
     # multi-GPU run's MPI flag must not carry over.
     drop("--distributed", 1)
+    argv += ["--output", str(out), "--days", "1"]
+    if day == 0:                       # the run's own initial state (its IC flags)
+        return argv
     ckpt = ROOT / run / f"checkpoint_day_{day:04d}.npz"
     if not ckpt.exists():
         raise SystemExit(f"missing {ckpt}")
-    argv += ["--output", str(out), "--restart-from", str(ckpt), "--days", "1"]
+    argv += ["--restart-from", str(ckpt)]
     return argv
 
 

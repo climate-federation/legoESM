@@ -405,6 +405,121 @@ def rlutcs_replay(fns, state, mesh, sig, forcing, phys_state, rad_int, real_back
         for m in ("dT", "dq", "both"):
             print(f"  {m:>4s} covers {100 * (g[m] - g['base']) / -target:6.1f} %")
     print("SENSITIVITY OF THE RADIATION OPERATOR on one frozen state, not a coupled prediction.")
+
+
+def _cadence(build_kw: dict) -> int:
+    """How many steps of physics one physics call applies (1 unless cadence 'write')."""
+    if build_kw.get("physics_cadence", "off") == "write":
+        return int(build_kw.get("physics_cadence_steps", 1))
+    return 1
+
+
+def _gm_at(field, p_full, w, levels=P_REF_HPA):
+    """Global mean on model levels, then log-p interpolation at the mean level pressure."""
+    gm, lp = (field * w[:, None]).sum(0), np.log((p_full * w[:, None]).sum(0) / 100.0)
+    o = np.argsort(lp)
+    return {pr: float(np.interp(np.log(pr), lp[o], gm[o])) for pr in levels
+            if lp[o[0]] <= np.log(pr) <= lp[o[-1]]}
+
+
+def window_budget(args, win, acc, ncall, builds, out_dir, t0):
+    """Window-mean process rows from the run's own N-day integration.
+
+    total = (T_end - T_start) / window; physics rows = sum over physics calls of
+    cadence x module rate, divided by the step count; dynamics (incl. the dycore's
+    energy / mass fixers and positivity) = total - applied physics.  Gated on two
+    closures: modules vs applied physics, and the end state vs the run's checkpoint.
+    """
+    n, DT = win["n"], win["dt"]
+    if n == 0:
+        raise SystemExit("driver never called model.step")
+    full = [b for b in builds if b[2].get("need_rad", True) is not False]
+    ncad = _cadence(full[-1][2])
+    T0, ps0 = win["T0"], win["ps0"]
+    T1 = np.asarray(win["last"].T.data, dtype=np.float64)
+    model = win["model"]
+    mesh, sig = model.mesh, model.sigma_coord
+    shp = T0.shape
+    span = n * DT
+    print(f"window: {n} steps x {DT:g} s = {span / 86400:.3f} days, cadence {ncad}, "
+          f"physics calls {ncall.get('applied', 0)} (radiation {ncall.get('radiation', 0)}, "
+          f"held-radiation {ncall.get('rad_held', 0)})  ({time.time() - t0:.0f}s)", flush=True)
+    rows = {}
+    # Turbulence and microphysics are sub-cycled cld_macmic_num_steps times inside
+    # one physics call, each pass weighted 1/N (combined._accumulate_step); every
+    # other module runs once per call (radiation only on full-radiation calls).
+    # The weight is read from the call counts and refused if they fit neither.
+    n_mm = int(full[-1][2].get("cld_macmic_num_steps", 1))
+    n_app, n_rad = ncall.get("applied", 0), ncall.get("radiation", 0)
+    for m in MODULES:
+        c = ncall.get(m, 0)
+        if c == 0:
+            wgt = 0.0
+        elif n_mm > 1 and c == n_mm * n_app:
+            wgt = 1.0 / n_mm
+        elif c in (n_app, n_rad):
+            wgt = 1.0
+        else:
+            gate(False, f"{m}: {c} calls fit neither once per physics call ({n_app}), "
+                        f"per radiation call ({n_rad}) nor {n_mm} macmic passes")
+        print(f"  {m}: {c} calls, weight {wgt:g}")
+        rows[m] = wgt * ncad * acc.get(m, np.zeros(shp)).reshape(shp) / n
+    rows["radiation"] = rows["radiation"] + ncad * np.reshape(acc.get("rad_held", np.zeros(shp)), shp) / n
+    applied = np.reshape(acc["applied"], shp) / n
+    rows["physics_closure"] = applied - sum(rows[m] for m in MODULES)
+    rows["physics_applied"] = applied
+    rows["total"] = (T1 - T0) / span
+    rows["dynamics_and_fixers"] = rows["total"] - applied
+    # vapour rows, same weights (radiation carries no vapour tendency); only when the
+    # window carried a q_v tracer (the unit fixture is temperature-only)
+    qrows = {}
+    qv1 = None
+    has_qv = "qv0" in win and getattr(win["last"], "tracers", None) is not None and "applied_qv" in acc
+    for m in (MODULES if has_qv else ()):
+        c = ncall.get(m + "_qv", 0)
+        if c == 0:
+            continue
+        gate(c == ncall.get(m, 0), f"{m}: vapour calls {c} != temperature calls {ncall.get(m, 0)}")
+        wgt = 1.0 / n_mm if (n_mm > 1 and c == n_mm * n_app) else 1.0
+        qrows[m] = wgt * ncad * acc[m + "_qv"].reshape(shp) / n
+    if has_qv:
+        qv1 = np.asarray(win["last"].tracers["q_v"].data, dtype=np.float64)
+        qrows["physics_applied"] = np.reshape(acc["applied_qv"], shp) / n
+        qrows["total"] = (qv1 - win["qv0"]) / span
+        qrows["dynamics_and_fixers"] = qrows["total"] - qrows["physics_applied"]
+        qrows["physics_closure"] = qrows["physics_applied"] - sum(qrows[m] for m in MODULES if m in qrows)
+    ref = H.ROOT / args.run / f"checkpoint_day_{args.day + args.window_days:04d}.npz"
+    if ref.exists():
+        z = np.load(ref)
+        rows["total_reference_run"] = (np.asarray(z["T"], dtype=np.float64) - T0) / span
+        print(f"reference checkpoint {ref.name}: max |T_end - T_ref| = "
+              f"{np.abs(T1 - z['T']).max():.3e} K, global-mean |dT| = "
+              f"{np.average(np.abs(T1 - z['T']).mean(1), weights=np.asarray(mesh.areaCell)):.3e} K")
+    area = np.asarray(mesh.areaCell, dtype=np.float64)
+    w = area / area.sum()
+    p_full = ps0[:, None] * np.asarray(sig.sigma_full, dtype=np.float64)[None, :]
+    lat_deg = np.rad2deg(np.asarray(mesh.latCell, dtype=np.float64))
+    kd = {k: v * 86400.0 for k, v in rows.items()}
+    gms = {k: _gm_at(v, p_full, w) for k, v in kd.items()}
+    print(f"\n{args.run} days {args.day}-{args.day + args.window_days}: window-mean global K/day")
+    print("   p[hPa] " + " ".join(f"{k:>14s}" for k in kd))
+    for pr in gms["total"]:
+        print(f"{pr:8.0f} " + " ".join(f"{gms[k][pr]:+14.3f}" for k in kd))
+    np.savez(out_dir / f"heating_window_cells_{args.run}_d{args.day:04d}_{args.window_days}d.npz",
+             steps=n, dt=DT, cadence=ncad, p_s0=ps0, T0=T0, T1=T1,
+             **({"qv0": win["qv0"], "qv1": qv1} if has_qv else {}),
+             sigma_full=np.asarray(sig.sigma_full, dtype=np.float64),
+             **{f"T_{k}": v.astype(np.float32) for k, v in kd.items()},
+             **{f"qv_{k}": (v * 86400.0).astype(np.float32) for k, v in qrows.items()})
+    np.savez(out_dir / f"heating_window_{args.run}_d{args.day:04d}_{args.window_days}d.npz",
+             bands=BANDS, steps=n, dt=DT, cadence=ncad,
+             p_hpa=band_mean(p_full, lat_deg, area) / 100.0,
+             **{k: band_mean(v, lat_deg, area) for k, v in kd.items()},
+             **{f"gm_{k}": np.array([[pr, v] for pr, v in g.items()]) for k, g in gms.items()})
+    print(f"wrote heating_window npz ({time.time() - t0:.0f}s)")
+    worst = max(abs(v) for v in gms["physics_closure"].values())
+    gate(worst <= 0.01, f"physics closure: modules sum to the applied physics within "
+                        f"0.01 K/day at every reference level (worst {worst:.4f})")
     return 0
 
 
@@ -445,6 +560,11 @@ def main(argv=None):
     ap.add_argument("--target", type=float, default=None,
                     help="rlutcs model-minus-obs error to be explained [W/m2]")
     ap.add_argument("--n-times", type=int, default=8)
+    ap.add_argument("--window-days", type=int, default=None,
+                    help="instead of one step, let the run's own driver integrate N days from "
+                         "--day and accumulate every physics call (window-mean process rows); "
+                         "dynamics = total change - applied physics, checked against the "
+                         "run's checkpoint at day+N")
     args = ap.parse_args(argv)
     t0 = time.time()
     out_dir = Path(args.out or (H.ROOT / "_tools" / "heating_budget"))
@@ -452,6 +572,14 @@ def main(argv=None):
     scratch = out_dir / f"_launch_{args.run}"
     scratch.mkdir(exist_ok=True)
     argv_run = H.launch_argv(args.run, args.day, scratch)
+    if args.window_days is not None:
+        argv_run = argv_run[:argv_run.index("--days")] + ["--days", str(args.window_days)] \
+            + argv_run[argv_run.index("--days") + 2:]
+    import os as _os
+    _extra = _os.environ.get("HB_EXTRA_ARGS", "").split()   # one-lever window arms (e.g. --k-h-scale)
+    if _extra:
+        argv_run += _extra
+        print(f"window arm: extra run flags {_extra}", flush=True)
 
     import jax
     import jax.numpy as jnp
@@ -461,6 +589,14 @@ def main(argv=None):
 
     rec: dict[str, np.ndarray] = {}
     fns: dict = {}
+    win_mode = args.window_days is not None
+    acc: dict[str, np.ndarray] = {}
+    ncall: dict[str, int] = {}
+
+    def _acc(name, x):                    # host side of the per-step accumulation
+        x = np.asarray(x, dtype=np.float64)
+        acc[name] = acc.get(name, 0.0) + x
+        ncall[name] = ncall.get(name, 0) + 1
     rad_calls: list = []
 
     def spy_builder(name, real):
@@ -474,6 +610,11 @@ def main(argv=None):
                 t = res if hasattr(res, "dT_dt") else res[0]   # tendencies are NamedTuples
                 if not isinstance(t.dT_dt.data, jax.core.Tracer):   # setup traces under jit
                     rec[name] = np.asarray(t.dT_dt.data, dtype=np.float64)
+                elif win_mode:
+                    jax.debug.callback(functools.partial(_acc, name), t.dT_dt.data)
+                    qv = (t.tracer_tendencies or {}).get("q_v")
+                    if qv is not None:
+                        jax.debug.callback(functools.partial(_acc, name + "_qv"), qv.data)
                 return res
             fns[name] = wrapped
             return wrapped
@@ -499,7 +640,28 @@ def main(argv=None):
 
     def spy_make_physics(config, *a, **kw):
         builds.append((config, a, dict(kw)))
-        return real_make_physics(config, *a, **kw)
+        fn = real_make_physics(config, *a, **kw)
+        if not win_mode:
+            return fn
+        need_rad = kw.get("need_rad", True) is not False
+
+        @functools.wraps(fn)              # keeps the _wants_* markers
+        def applied(state, grid, sigma_coord, phys_state=None, forcing=None):
+            out = fn(state, grid, sigma_coord, phys_state=phys_state, forcing=forcing)
+            t = out[0] if type(out) is tuple else out
+            if isinstance(t.dT_dt.data, jax.core.Tracer):
+                # what the dycore adds (x physics_cadence_steps on a physics step)
+                jax.debug.callback(functools.partial(_acc, "applied"), t.dT_dt.data)
+                qv = (t.tracer_tendencies or {}).get("q_v")
+                if qv is not None:
+                    jax.debug.callback(functools.partial(_acc, "applied_qv"), qv.data)
+                rh = getattr(phys_state, "rad_heating", None) if phys_state is not None else None
+                if not need_rad and rh is not None:
+                    # held-radiation step: the cached heating is added inside, radiation
+                    # module not called
+                    jax.debug.callback(functools.partial(_acc, "rad_held"), rh)
+            return out
+        return applied
     cap: dict = {}
 
     def spy_step(self, state, dt, physics_fn=None, forcing=None, phys_state=None):
@@ -507,9 +669,28 @@ def main(argv=None):
                    forcing=forcing, phys_state=phys_state)
         raise H._Captured()
     combined.make_physics = spy_make_physics
-    MPASPrimitiveEquationModel.step = spy_step
+    win: dict = {"n": 0}
+    real_step = MPASPrimitiveEquationModel.step
+
+    def win_step(self, state, dt, physics_fn=None, forcing=None, phys_state=None):
+        if win["n"] == 0:
+            win.update(T0=np.asarray(state.T.data, dtype=np.float64),
+                       ps0=np.asarray(state.p_s.data, dtype=np.float64),
+                       dt=float(dt), model=self, state0=state)
+            if getattr(state, "tracers", None) and "q_v" in state.tracers:
+                win["qv0"] = np.asarray(state.tracers["q_v"].data, dtype=np.float64)
+        new = real_step(self, state, dt, physics_fn=physics_fn, forcing=forcing,
+                        phys_state=phys_state)
+        win["n"] += 1
+        win["last"] = new
+        return new
+    MPASPrimitiveEquationModel.step = win_step if win_mode else spy_step
     sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "run"))
     import run_amip
+    if win_mode:
+        run_amip.main(argv_run)
+        jax.effects_barrier()
+        return window_budget(args, win, acc, ncall, builds, out_dir, t0)
     try:
         run_amip.main(argv_run)
     except H._Captured:
@@ -592,7 +773,12 @@ def main(argv=None):
                                       forcing, phys_state)
     T1 = np.asarray(new.T.data, dtype=np.float64)
     total = (T1 - T0) / DT
-    dyn = total - sum(phys.values())
+    # The physics-cadence "write" step returns the tendencies times
+    # physics_cadence_steps (the whole n-step increment lands on this step);
+    # the module rows are the unscaled rates, so the step applied ncad x their sum.
+    ncad = _cadence(pkw)
+    dyn = total - ncad * sum(phys.values())
+    print(f"physics cadence: this step applies {ncad} x the physics rates", flush=True)
     from legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas import vertical_del4_T_tendency
     nu4 = float(model.config.nu_vert4_T)
     vfilt = np.asarray(vertical_del4_T_tendency(jnp.asarray(T0), nu4, jnp.asarray(sig.dsigma)),
@@ -808,7 +994,12 @@ def main(argv=None):
              omega_ps_term=extra_rows["omega_ps_term_hpa_day"], lat_deg=lat_deg,
              lon_deg=np.rad2deg(np.asarray(mesh.lonCell, dtype=np.float64)),
              area=area, p_full=p_full,
-             phis=np.asarray(state.phis.data, dtype=np.float64))
+             phis=np.asarray(state.phis.data, dtype=np.float64),
+             vert_del4_kday=(vfilt * 86400.0).astype(np.float32),
+             dynamics_kday=(dyn * 86400.0).astype(np.float32),
+             physics_sum_kday=(ncad * sum(phys.values()) * 86400.0).astype(np.float32),
+             total_kday=(total * 86400.0).astype(np.float32),
+             **{k + "_kday": (v * 86400.0).astype(np.float32) for k, v in dyn_terms.items()})
 
     import matplotlib
     matplotlib.use("Agg")
