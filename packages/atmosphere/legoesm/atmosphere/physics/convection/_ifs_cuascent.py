@@ -14,11 +14,16 @@ The caller vmaps over columns (KLON = 1 per call, as the oracle was run).
 Hard switches are ``jnp.where`` (piecewise differentiable, exactly the
 source); branches that are not taken are evaluated on sanitised arguments so
 no inf/NaN reaches the gradient (value-identical, see ``ssqrt``/``spow``/``sdiv``).
+The cloud-base vertical velocity (cubasen), the organised-detrainment and the
+Bergeron precipitation-enhancement square roots use ``core.profile_metrics.safe_sqrt_nan``
+instead, so a NaN reaching them passes through (user-approved, #2209).
 """
 from __future__ import annotations
 
 import jax
 import jax.numpy as jnp
+
+from legoesm.core.profile_metrics import safe_sqrt_nan
 
 from ._ifs_cuthermo import (
     cuadjtq, foealfa, foealfcu, foeewm, QSAT_CAP, RKAP,
@@ -399,7 +404,7 @@ def cubasen(th, K, ptenh, pqenh, pgeoh, paph, pqhfl_sfc, pahfs_sfc, ptenqa,
         lldeep = kget(paph, jkb) - kget(paph, jkt) > RDEPTHS
         lldcum = jnp.where(lldeep & (kindex < K - 1), False, st["lldcum"])
         go_s = jnp.where(kindex == K - 1, ~lldcum, True)
-        wub = ssqrt(jnp.maximum(kget(st["zwu2h"], jkb), 0.0))
+        wub = safe_sqrt_nan(jnp.maximum(kget(st["zwu2h"], jkb), 0.0))
         st["lldcum"] = jnp.where(sfc, lldcum, st["lldcum"])
         st["ldsc"] = jnp.where(sfc, st["lldsc"], st["ldsc"])
         st["kbotsc"] = jnp.where(sfc, jnp.where(st["lldsc"], st["ibotsc"], -1), st["kbotsc"])
@@ -436,7 +441,8 @@ def cubasen(th, K, ptenh, pqenh, pgeoh, paph, pqhfl_sfc, pahfs_sfc, ptenqa,
         st["ldsc"] = jnp.where(reset, False, st["ldsc"])
         st["kbotsc"] = jnp.where(reset, -1, st["kbotsc"])
         st["pwubase"] = jnp.where(
-            reset, ssqrt(jnp.maximum(kget(st["zwu2h"], st["icbot"]), 0.0)), st["pwubase"])
+            reset, safe_sqrt_nan(jnp.maximum(kget(st["zwu2h"], st["icbot"]), 0.0)),
+            st["pwubase"])
         st["first"] = jnp.where(reset, False, st["first"])
         st["go"] = jnp.where(el, ~deep, st["go"])
         st["deep"] = deep
@@ -662,7 +668,7 @@ def cuascn(th, K, dt, ptenh, pqenh, pten, pqen, pqsen, plitot, pgeo, pgeoh,
         neg = zbuoc < 0.0
         zkedke = ke / jnp.maximum(ZKEDKE_FLOOR, kget(s["pkineu"], jk + 1))
         zkedke = jnp.maximum(0.0, jnp.minimum(1.0, zkedke))
-        zmfun = (ZDETR_RH - rh) * ssqrt(zkedke)
+        zmfun = (ZDETR_RH - rh) * safe_sqrt_nan(zkedke)
         de_n = jnp.maximum(zdmfde, mfu1 * (1.0 - zmfun))
         zdmfde_ic = jnp.where(neg, de_n, zdmfde)
         lude_ic = jnp.where(neg, kget(s["plu"], jk + 1) * de_n, kget(s["plude"], jk))
@@ -713,7 +719,7 @@ def cuascn(th, K, dt, ptenh, pqenh, pten, pqen, pqsen, plitot, pgeo, pgeoh,
         zzco = 1.0 + ZZCO_LIQ * foealfcu(th, tuk)
         zprcon = zprcdgw / (ZPRC_W * zwu) * zzco
         zdt = jnp.minimum(th.RTBERCU - th.RTICECU, jnp.maximum(th.RTBERCU - tuk, 0.0))
-        zcbf = 1.0 + Z_CPRC2 * ssqrt(zdt)
+        zcbf = 1.0 + Z_CPRC2 * safe_sqrt_nan(zdt)
         zzco = zprcon * zcbf
         zlcrit = zdnoprc / zcbf
         zdfi = kget(pgeoh, jk) - kget(pgeoh, jk + 1)

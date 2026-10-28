@@ -268,3 +268,102 @@ def test_wrapper_tunable_reaches_cumastrn(fix, field):
     ref, _ = _wrapper_out(fix, base)
     alt, _ = _wrapper_out(fix, base._replace(**{field: 1.5 * v0 if field != "cape_qadv_weight" else 0.5}))
     assert np.max(np.abs(np.asarray(alt.dT_dt) - np.asarray(ref.dT_dt))) > 0.0, field
+
+
+# --- #2209 (main): reverse-mode gradients through the clamped square roots,
+# carried onto this port.  Sounding and kwargs as main's test_ifs_faithful.py.
+
+def _deep_column(nlev=30, ps=101300.0):
+    from legoesm import constants
+    from legoesm.atmosphere.physics.thermodynamics import compute_moist_adiabat
+    from legoesm.thermo import saturation_specific_humidity
+
+    sig_h = np.linspace(0.0, 1.0, nlev + 1)
+    p_half = (sig_h * ps)[None, :].astype(np.float32).copy()
+    p_half[0, 0] = max(p_half[0, 0], 1000.0)
+    p_full = 0.5 * (p_half[:, 1:] + p_half[:, :-1])
+    pf = p_full[0].astype(np.float64)
+    T0, q0 = 300.0, 0.017
+    rcpl = constants.R_d / constants.c_pd
+    Tad = np.asarray(compute_moist_adiabat(
+        jnp.array([T0]), jnp.array(pf)[None, :], jnp.array([q0])))[0]
+    T = np.where(pf > 95000, T0 * (pf / ps) ** rcpl, Tad - 1.0)
+    T = np.where(pf < 15000, np.maximum(T, 200.0), T)
+    qs = np.asarray(saturation_specific_humidity(jnp.array(T), jnp.array(pf)))
+    q = np.minimum(np.where(pf > 95000, q0, 0.8 * qs), q0)
+    return (jnp.asarray(T[None, :], jnp.float32), jnp.asarray(q[None, :], jnp.float32),
+            jnp.asarray(p_full), jnp.asarray(p_half))
+
+
+def _kwargs(ncol, nlev):
+    z = jnp.zeros((ncol, nlev))
+    return dict(u=z, v=z, conv_prog_profile=z, conv_stoch_state=jnp.zeros(ncol),
+                prng_key=None, dt=112.5, land_frac=jnp.zeros(ncol),
+                shf_w_m2=jnp.full((ncol,), -20.0),
+                lhf_w_m2=jnp.full((ncol,), -100.0),
+                dT_dt_dyn=z, dq_dt_dyn=z)
+
+
+@pytest.fixture
+def _x64():
+    orig = jax.config.jax_enable_x64
+    jax.config.update("jax_enable_x64", True)
+    yield
+    jax.config.update("jax_enable_x64", orig)
+
+
+def _param_grad_and_fd(nlev, field):
+    """d(sum dT_dt)/d(field) on the deep sounding: reverse mode and a central
+    difference with relative step 1e-4."""
+    from legoesm.atmosphere.physics.convection.bechtold import bechtold_convection
+    from legoesm.atmosphere.physics.convection.config import BechtoldConfig
+
+    T, q, p_full, p_half = [a.astype(jnp.float64) for a in _deep_column(nlev=nlev)]
+    kw = _kwargs(*T.shape)
+    base = BechtoldConfig(use_ifs_ascent=True, dx_m=_DX)
+    v = float(getattr(base, field))
+
+    def f(x):
+        out, _, _ = bechtold_convection(T, q, p_full, p_half,
+                                        config=base._replace(**{field: x}), **kw)
+        return jnp.sum(out.dT_dt)
+
+    g = float(jax.grad(f)(jnp.asarray(v)))
+    h = 1e-4 * v
+    fd = (float(f(jnp.asarray(v + h))) - float(f(jnp.asarray(v - h)))) / (2 * h)
+    return g, fd
+
+
+@pytest.mark.parametrize("field", ["epsilon_deep", "rprcon"])
+def test_reverse_grad_matches_fd_on_convecting_column(_x64, field):
+    g, fd = _param_grad_and_fd(90, field)
+    assert fd != 0.0
+    assert g == pytest.approx(fd, rel=1e-3)
+
+
+@pytest.mark.parametrize("field", ["epsilon_deep", "rprcon"])
+def test_reverse_grad_finite_on_non_convecting_column(_x64, field):
+    g, fd = _param_grad_and_fd(30, field)
+    assert np.isfinite(g)
+    assert g == fd == 0.0
+
+
+def test_clamped_square_roots_pass_nan_through(fix, monkeypatch):
+    """#2209 (user-approved): the cloud-base velocity, organised-detrainment
+    and Bergeron square roots let a NaN through instead of masking it to 0.
+    Every one of the four call sites must reach the shared helper."""
+    import inspect
+
+    from legoesm.atmosphere.physics.convection import _ifs_cuascent as A
+    from legoesm.core.profile_metrics import safe_sqrt_nan
+
+    sites = set()
+
+    def spy(x):
+        sites.add(inspect.stack()[1].lineno)
+        return safe_sqrt_nan(x)
+
+    monkeypatch.setattr(A, "safe_sqrt_nan", spy)
+    with jax.disable_jit():
+        _run(fix, "L", _GROUPS[0])
+    assert len(sites) == 4, sorted(sites)
