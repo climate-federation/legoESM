@@ -396,7 +396,9 @@ def nemo_zdf_iwm(avt, avs, avm, forcing: IWMForcing, rn2, stretch, ht_0,
     1-D reference ladders ``(nif + 1,)`` (index 0 = ``jk = 1``).  Every
     operation is rounded in source order (the build has no FMA), the
     ``zfact3``/``zfact4`` sums run in NEMO's level order, and EXP, TANH and
-    LOG10 are the precision policy's (scalar libm in certification).
+    LOG10 are the precision policy's: scalar libm in exact certification,
+    native XLA in fast-literal mode.  The latter changes only transcendental
+    round-off, not these formulas or their operation order.
     """
     if cfg.form != "nemo_literal":
         raise ValueError(
@@ -406,13 +408,6 @@ def nemo_zdf_iwm(avt, avs, avm, forcing: IWMForcing, rn2, stretch, ht_0,
         raise ValueError(
             "IWMConfig.form='nemo_literal' transcribes ln_mevar=.false. only "
             "(zdfiwm.f90:283-291 is not built)")
-    from legoesm.core.precision import get_policy
-
-    if get_policy().transcendentals != "libm":
-        raise ValueError(
-            "IWMConfig.form='nemo_literal' evaluates EXP/TANH/LOG10 as NEMO's "
-            "scalar libm and requires the precision policy's "
-            f"transcendentals='libm'; got {get_policy().transcendentals!r}")
     r = nemo_source_round
     dtype = avt.dtype
     zero = jnp.asarray(0.0, dtype)

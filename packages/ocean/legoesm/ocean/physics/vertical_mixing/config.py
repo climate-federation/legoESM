@@ -643,14 +643,18 @@ class TKEConfig(NamedTuple):
     # Arithmetic used by the nn_etau penetration profile. ``jax_expression``
     # is the historical single jnp.exp call. ``nemo_literal`` reproduces the
     # ordinary-range glibc-2.34 vector EXP linked into the DINO oracle; only
-    # the two complete DINO oracle cards select it. ``nemo_scalar_libm`` calls
-    # the precision policy's scalar exp (NEMO builds without libmvec, V1).
+    # the two complete DINO oracle cards select it. ``nemo_scalar_libm`` is the
+    # historical selector name for the source-written expression: it calls the
+    # precision policy's exp (scalar libm on exact cards, native XLA on the
+    # explicitly selected fast-literal card; round-off-only difference).
     tke_etau_exponential_evaluation: str = "jax_expression"
     # Latitude-profile arithmetic for nn_htau=1. ``jax_expression`` is the
     # historical jnp.deg2rad+jnp.sin path. ``nemo_literal`` consumes native
     # mesh degrees and transcribes glibc-2.34's two-lane vector SIN arithmetic.
     # Only complete DINO oracle cards select it. ``nemo_scalar_libm`` takes the
-    # same native-degree phase through the precision policy's scalar sin.
+    # same native-degree phase through the precision policy's sin (scalar libm
+    # on exact cards, native XLA on the explicitly selected fast-literal card;
+    # round-off-only difference).
     tke_htau_evaluation: str = "jax_expression"
     # Raw nn_mxl buoyancy length. ``factored`` preserves the historical
     # sqrt(2)*sqrt(e)/sqrt(max(N2,1e-12)) expression. ``nemo_literal`` uses

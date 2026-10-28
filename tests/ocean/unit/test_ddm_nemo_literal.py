@@ -92,13 +92,16 @@ def test_literal_ddm_matches_scalar_fortran_bit_for_bit(compiled):
     assert np.sum(avs != avt_new) > 1000 and np.sum(avt_new != avt) > 1000
 
 
-def test_literal_ddm_refuses_other_forms_and_native_exp():
+def test_literal_ddm_refuses_other_forms_and_runs_native_exp():
     args = tuple(jnp.ones(3) for _ in range(6))
     with pytest.raises(ValueError, match="nemo_literal"):
         nemo_zdf_ddm(*args, CFG._replace(form="hybrid"))
     set_policy(PrecisionPolicy.fp64(transcendentals="native"))
-    with pytest.raises(ValueError, match="libm"):
-        nemo_zdf_ddm(*args, CFG)
+    eager = nemo_zdf_ddm(*args, CFG)
+    compiled = jax.jit(lambda *values: nemo_zdf_ddm(*values, CFG))(*args)
+    for left, right in zip(eager, compiled, strict=True):
+        assert np.isfinite(np.asarray(left)).all()
+        np.testing.assert_array_equal(np.asarray(left), np.asarray(right))
 
 
 def _pair_inputs():

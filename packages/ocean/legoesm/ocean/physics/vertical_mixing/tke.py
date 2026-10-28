@@ -2705,18 +2705,6 @@ def _nemo_glibc234_vector_sin(argument: jnp.ndarray) -> jnp.ndarray:
     return jnp.where(ordinary, literal, jnp.sin(argument))
 
 
-def _require_libm_policy(field: str) -> None:
-    """'nemo_scalar_libm' promises NEMO's scalar libm; the native policy
-    would silently substitute XLA's own sin/exp."""
-    from legoesm.core.precision import get_policy
-
-    if get_policy().transcendentals != "libm":
-        raise ValueError(
-            f"TKEConfig.{field}='nemo_scalar_libm' requires the precision "
-            "policy's transcendentals='libm'; got "
-            f"{get_policy().transcendentals!r}")
-
-
 def _nemo_etau_htau(
     lat_deg: jnp.ndarray,
     cfg: TKEConfig,
@@ -2737,7 +2725,10 @@ def _nemo_etau_htau(
         if evaluation == "nemo_literal":
             sine = _nemo_glibc234_vector_sin(phase)
         else:
-            _require_libm_policy("tke_htau_evaluation")
+            # Historical selector name: the active precision policy owns the
+            # transcendental backend.  Exact cards select scalar libm; the
+            # fast-literal card selects native XLA.  Phase construction and
+            # all surrounding NEMO operation-order barriers are identical.
             sine = precision_sin(phase)
     else:
         raise ValueError(
@@ -2813,7 +2804,8 @@ def nemo_etau_injection(
     if exp_evaluation == "jax_expression":
         profile = jnp.exp(-depth_w / htau)
     elif exp_evaluation == "nemo_scalar_libm":
-        _require_libm_policy("tke_etau_exponential_evaluation")
+        # As for htau, exact and fast-literal modes share this written
+        # expression and differ only in the policy-dispatched EXP rounding.
         profile = precision_exp(-depth_w / htau)
     else:  # validated above
         profile = _nemo_glibc234_vector_exp(-depth_w / htau)

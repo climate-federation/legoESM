@@ -314,19 +314,14 @@ def nemo_zdf_ddm(avt, avm, zdt, zds, rn2, wmask, cfg: DoubleDiffusionConfig):
     temperature/salinity contributions (eosbn2.f90:1632-1636 share zrw, zaw,
     zbw); ``rn2`` the same step's N2; ``wmask`` NEMO's W mask (:136).  Every
     operation is rounded in source order (the build has no FMA) and EXP is
-    the precision policy's (scalar libm in certification).
+    the precision policy's: scalar libm in exact certification, native XLA in
+    fast-literal mode.  The latter changes only transcendental round-off, not
+    this formula or its operation order.
     """
     if cfg.form != "nemo_literal":
         raise ValueError(
             "nemo_zdf_ddm requires DoubleDiffusionConfig.form='nemo_literal', "
             f"got {cfg.form!r}")
-    from legoesm.core.precision import get_policy
-
-    if get_policy().transcendentals != "libm":
-        raise ValueError(
-            "DoubleDiffusionConfig.form='nemo_literal' evaluates EXP as NEMO's "
-            "scalar libm (zdfddm.f90:166) and requires the precision policy's "
-            f"transcendentals='libm'; got {get_policy().transcendentals!r}")
     r = nemo_source_round
     dtype = avt.dtype
     one = jnp.asarray(1.0, dtype)

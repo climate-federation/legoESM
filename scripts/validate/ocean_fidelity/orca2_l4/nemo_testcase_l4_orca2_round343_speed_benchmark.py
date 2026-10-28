@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""ORCA2 Round 343: standalone ORCA2 K0 speed & 8-day accuracy benchmark.
+"""ORCA2 standalone K0 speed & 8-day accuracy benchmark.
 
 Measures execution speed (compile time, steady-state s/step over >= 20 steps
 after warm-up, host/GPU memory, and projected 1-year / 2,920-step wall-clock)
@@ -11,7 +11,8 @@ from Round 342 across four arms on the standalone ORCA2 K0 composed card:
   (c) normal_gpu_fp64 : Normal mode on 1 idle GPU (float64, transcendentals='native')
   (d) normal_gpu_fp32 : Normal mode on 1 idle GPU (float32, transcendentals='native')
 
-Measurement only: no model code or default in ``packages/`` is modified.
+Round 344 reuses the same implementation for native-transcendental
+fast-literal fp64 CPU/GPU arms while retaining the round-343 interface.
 """
 
 from __future__ import annotations
@@ -88,6 +89,7 @@ DEFAULT_EXACT_REF_DIR = Path(
 DEFAULT_OUTPUT_DIR = Path(
     "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/orca2_r343"
 )
+DEFAULT_ROUND343_REPORT = DEFAULT_OUTPUT_DIR / "orca2_round343_speed_benchmark_report.json"
 
 YEAR_STEPS = 2920
 STEPS_PER_DAY = 8
@@ -112,6 +114,10 @@ ARM_IDS = (
     "normal_cpu_fp64",
     "normal_gpu_fp64",
     "normal_gpu_fp32",
+)
+FAST_LITERAL_ARM_IDS = (
+    "fast_literal_cpu_fp64",
+    "fast_literal_gpu_fp64",
 )
 
 
@@ -934,6 +940,56 @@ def build_normal_mode_orca2_k0_card(
     return base_card._replace(ocean=ocean)
 
 
+def build_fast_literal_mode_orca2_k0_card(base_card: Any) -> Any:
+    """Keep the exact K0 recipe and select only native XLA transcendentals."""
+    require(
+        base_card.ocean.transcendentals == "libm",
+        "fast-literal source card must be the exact scalar-libm card",
+    )
+    require(
+        base_card.ocean.precision_policy == "fp64",
+        "fast-literal source card must be fp64",
+    )
+    return base_card._replace(
+        ocean=base_card.ocean._replace(transcendentals="native")
+    )
+
+
+def verify_fast_literal_card(base_card: Any, fast_card: Any) -> dict[str, Any]:
+    """Prove native transcendentals are the fast card's only configuration delta."""
+    require(base_card.ocean.transcendentals == "libm", "base card is not exact/libm")
+    require(fast_card.ocean.transcendentals == "native", "fast card is not native")
+    require(
+        fast_card.ocean.precision_policy == base_card.ocean.precision_policy == "fp64",
+        "fast card changed the fp64 precision policy",
+    )
+    retained = 0
+    for spec in build_orca2_exact_vs_normal_switch_inventory():
+        if spec.path_in_card in ("policy.transcendentals", "ocean.transcendentals"):
+            continue
+        if spec.path_in_card == "unconditional_helper":
+            retained += 1
+            continue
+        base_value = _extract_switch_value(base_card, spec)
+        fast_value = _extract_switch_value(fast_card, spec)
+        require(
+            fast_value == base_value,
+            f"fast-literal card changed retained selector {spec.name}: "
+            f"{base_value!r} -> {fast_value!r}",
+        )
+        retained += 1
+    require(
+        fast_card.ocean.recipe is base_card.ocean.recipe,
+        "fast-literal card replaced the exact recipe object",
+    )
+    require(fast_card.k0 == base_card.k0, "fast-literal card changed K0 selectors")
+    require(
+        fast_card._replace(ocean=base_card.ocean) == base_card,
+        "fast-literal card changed a non-ocean top-level field",
+    )
+    return {"changed_fields": ["ocean.transcendentals"], "retained_inventory_entries": retained}
+
+
 def compute_step_timing_summary(
     step_times_s: Sequence[float],
     *,
@@ -1347,7 +1403,8 @@ def run_single_benchmark_arm(
     variant: str = "cat_a_plus_b",
 ) -> dict[str, Any]:
     """Execute one benchmark arm in the current process and save its JSON artifact."""
-    require(arm_id in ARM_IDS, f"unknown benchmark arm {arm_id!r}; expected one of {ARM_IDS}")
+    valid_arms = (*ARM_IDS, *FAST_LITERAL_ARM_IDS)
+    require(arm_id in valid_arms, f"unknown benchmark arm {arm_id!r}; expected one of {valid_arms}")
     output_dir.mkdir(parents=True, exist_ok=True)
 
     if arm_id == "exact_cpu_fp64":
@@ -1356,6 +1413,18 @@ def run_single_benchmark_arm(
         set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
         steps = EXACT_BENCHMARK_STEPS
         daily_check_steps = DAILY_CHECK_STEPS_EXACT
+    elif arm_id == "fast_literal_cpu_fp64":
+        require(jax.config.jax_enable_x64, "fast_literal_cpu_fp64 requires JAX_ENABLE_X64=1")
+        require(jax.default_backend() == "cpu", f"fast_literal_cpu_fp64 requires CPU backend, got {jax.default_backend()!r}")
+        set_policy(PrecisionPolicy.fp64(transcendentals="native"))
+        steps = NORMAL_BENCHMARK_STEPS
+        daily_check_steps = DAILY_CHECK_STEPS_8D
+    elif arm_id == "fast_literal_gpu_fp64":
+        require(jax.config.jax_enable_x64, "fast_literal_gpu_fp64 requires JAX_ENABLE_X64=1")
+        require(jax.default_backend() == "gpu", f"fast_literal_gpu_fp64 requires GPU backend, got {jax.default_backend()!r}")
+        set_policy(PrecisionPolicy.fp64(transcendentals="native"))
+        steps = NORMAL_BENCHMARK_STEPS
+        daily_check_steps = DAILY_CHECK_STEPS_8D
     elif arm_id == "normal_cpu_fp64":
         require(jax.config.jax_enable_x64, "normal_cpu_fp64 requires JAX_ENABLE_X64=1")
         require(jax.default_backend() == "cpu", f"normal_cpu_fp64 requires CPU backend, got {jax.default_backend()!r}")
@@ -1387,6 +1456,9 @@ def run_single_benchmark_arm(
 
     if arm_id == "exact_cpu_fp64":
         card = base_card
+    elif arm_id in FAST_LITERAL_ARM_IDS:
+        card = build_fast_literal_mode_orca2_k0_card(base_card)
+        inventory_check = verify_fast_literal_card(base_card, card)
     else:
         pol_name = "fp32" if arm_id == "normal_gpu_fp32" else "fp64"
         card = build_normal_mode_orca2_k0_card(
@@ -1489,7 +1561,11 @@ def run_single_benchmark_arm(
 
     arm_report = {
         "arm_id": arm_id,
-        "variant": "exact" if arm_id == "exact_cpu_fp64" else variant,
+        "variant": (
+            "exact" if arm_id == "exact_cpu_fp64"
+            else "fast_literal" if arm_id in FAST_LITERAL_ARM_IDS
+            else variant
+        ),
         "backend": jax.default_backend(),
         "device_kind": getattr(dev, "device_kind", str(dev)),
         "dtype": str(expected_dtype),
@@ -1577,6 +1653,95 @@ def validate_benchmark_report(
                     float(entry["t3d_max_abs_c"]) >= float(entry["t3d_rms_all_c"]),
                     f"arm {arm_id} kt={entry['kt']}: t3d_max_abs_c < t3d_rms_all_c",
                 )
+
+
+_ACCURACY_METRICS = (
+    "sst_rms_all_c",
+    "sst_rms_wet_c",
+    "sst_max_abs_c",
+    "t3d_rms_all_c",
+    "t3d_rms_wet_c",
+    "t3d_max_abs_c",
+)
+
+
+def validate_fast_literal_benchmark_report(report: Mapping[str, Any]) -> None:
+    """Validate round 344 arms and its preregistered direction vs round 343."""
+    arms = report.get("arms", {})
+    baseline = report.get("round343_normal_fp64", {})
+    pairs = {
+        "fast_literal_cpu_fp64": "normal_cpu_fp64",
+        "fast_literal_gpu_fp64": "normal_gpu_fp64",
+    }
+    for fast_id, normal_id in pairs.items():
+        require(fast_id in arms, f"round344 report missing {fast_id}")
+        require(normal_id in baseline, f"round344 report missing baseline {normal_id}")
+        fast = arms[fast_id]
+        normal = baseline[normal_id]
+        require(fast.get("variant") == "fast_literal", f"{fast_id} is not fast_literal")
+        require(fast.get("dtype") == "float64", f"{fast_id} is not fp64")
+        require(fast.get("transcendentals") == "native", f"{fast_id} is not native")
+        require(
+            int(fast.get("timing", {}).get("steady_state_steps", 0)) >= MIN_STEADY_STEPS,
+            f"{fast_id} has fewer than {MIN_STEADY_STEPS} steady steps",
+        )
+        fast_daily = fast.get("daily_accuracy", [])
+        normal_daily = normal.get("daily_accuracy", [])
+        require(
+            tuple(row.get("kt") for row in fast_daily) == DAILY_CHECK_STEPS_8D,
+            f"{fast_id} does not contain all eight daily scores",
+        )
+        require(
+            tuple(row.get("kt") for row in normal_daily) == DAILY_CHECK_STEPS_8D,
+            f"{normal_id} does not contain all eight daily scores",
+        )
+        for fast_row, normal_row in zip(fast_daily, normal_daily, strict=True):
+            for metric in _ACCURACY_METRICS:
+                fast_value = float(fast_row[metric])
+                normal_value = float(normal_row[metric])
+                require(
+                    np.isfinite(fast_value) and fast_value >= 0.0,
+                    f"{fast_id} kt={fast_row['kt']} has invalid {metric}={fast_value}",
+                )
+                require(
+                    fast_value < normal_value,
+                    f"{fast_id} kt={fast_row['kt']} {metric}={fast_value} is not "
+                    f"closer than {normal_id}={normal_value}",
+                )
+
+
+def assemble_fast_literal_benchmark_report(
+    *,
+    output_dir: Path,
+    round343_report: Path = DEFAULT_ROUND343_REPORT,
+) -> dict[str, Any]:
+    """Assemble the two round-344 fp64 arms beside round 343's normal arms."""
+    arms = {}
+    for arm_id in FAST_LITERAL_ARM_IDS:
+        path = output_dir / f"arm_{arm_id}.json"
+        require(path.is_file(), f"missing fast-literal arm artifact {path}")
+        arms[arm_id] = json.loads(path.read_text(encoding="utf-8"))
+    require(round343_report.is_file(), f"missing round-343 report {round343_report}")
+    old = json.loads(round343_report.read_text(encoding="utf-8"))
+    baseline = {
+        arm_id: old["arms"][arm_id]
+        for arm_id in ("normal_cpu_fp64", "normal_gpu_fp64")
+    }
+    report = {
+        "round": "orca2_r344",
+        "author": "Codex",
+        "description": "Standalone ORCA2 K0 native-transcendental fast-literal benchmark",
+        "provenance": worktree_stamp(),
+        "round343_report": str(round343_report),
+        "round343_report_sha256": sha256_file(round343_report),
+        "arms": arms,
+        "round343_normal_fp64": baseline,
+        "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+    }
+    validate_fast_literal_benchmark_report(report)
+    path = output_dir / "orca2_round344_fast_literal_benchmark_report.json"
+    path.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+    return report
 
 
 def assemble_benchmark_report_from_arm_files(
@@ -1675,15 +1840,19 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--arm",
-        choices=(*ARM_IDS, "all", "assemble"),
+        choices=(*ARM_IDS, *FAST_LITERAL_ARM_IDS, "all", "assemble", "assemble-fast"),
         default="all",
-        help="Benchmark arm to execute, 'all' to run all 4 arms, or 'assemble' from saved arm JSONs.",
+        help=("Benchmark arm to execute, 'all' to run round 343's four arms, "
+              "'assemble' for round 343, or 'assemble-fast' for round 344."),
     )
     parser.add_argument("--deck-root", type=Path, default=DEFAULT_DECK_ROOT)
     parser.add_argument("--core-manifest", type=Path, default=DEFAULT_CORE_MANIFEST)
     parser.add_argument("--ice-cover-path", type=Path, default=DEFAULT_ICE_COVER_PATH)
     parser.add_argument("--exact-ref-dir", type=Path, default=DEFAULT_EXACT_REF_DIR)
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
+    parser.add_argument(
+        "--round343-report", type=Path, default=DEFAULT_ROUND343_REPORT,
+    )
     parser.add_argument("--gpu-device", type=str, default="0")
     parser.add_argument(
         "--variant",
@@ -1695,7 +1864,23 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv)
-    if args.arm in ("all", "assemble"):
+    if args.arm == "assemble-fast":
+        report = assemble_fast_literal_benchmark_report(
+            output_dir=args.output_dir,
+            round343_report=args.round343_report,
+        )
+        print(
+            f"[round344] completed 2-arm report -> "
+            f"{args.output_dir / 'orca2_round344_fast_literal_benchmark_report.json'}"
+        )
+        for arm_id, arm in report["arms"].items():
+            timing = arm["timing"]
+            print(
+                f"  {arm_id}: compile_warmup={timing['compile_warmup_total_s']:.2f}s "
+                f"median={timing['steady_median_s']:.4f}s/step "
+                f"1yr_steady={timing['projected_year_steady_min']:.2f}min"
+            )
+    elif args.arm in ("all", "assemble"):
         if args.arm == "all":
             report = run_all_arms_via_subprocesses(
                 deck_root=args.deck_root,

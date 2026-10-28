@@ -146,15 +146,22 @@ def test_tsdiff_false_ratio_is_the_wet_mask():
         assert np.array_equal(g, w)
 
 
-def test_literal_form_refuses_mevar_native_policy_and_the_generic_form():
+def test_literal_form_refuses_mevar_and_generic_form_but_runs_native_policy():
     case = _cases(4)
     with pytest.raises(ValueError, match="ln_mevar"):
         _card(case, cfg=CFG._replace(mevar=True))
     with pytest.raises(ValueError, match="form='nemo_literal'"):
         _card(case, cfg=CFG._replace(form="generic"))
     set_policy(PrecisionPolicy.fp64(transcendentals="native"))
-    with pytest.raises(ValueError, match="libm"):
-        _card(case)
+    eager = _card(case)
+    compiled = _card(case, jax.jit(
+        nemo_zdf_iwm, static_argnames=("cfg", "rho_0")))
+    for left, right in zip(eager, compiled, strict=True):
+        assert np.isfinite(left).all()
+        ulp = np.abs(
+            left.view(np.int64) - right.view(np.int64)
+        )
+        assert int(ulp.max(initial=0)) <= 1
 
 
 def test_literal_iwm_reverse_gradient_is_finite_where_n2_is_clipped(monkeypatch):
