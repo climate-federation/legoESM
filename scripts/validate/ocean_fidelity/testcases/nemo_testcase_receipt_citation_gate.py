@@ -10870,8 +10870,10 @@ _reanchor(
 # --- SI3 round 24 (O15/O16 stopped score) ---
 FILES.update({
     'docs/ice/fidelity/si3_r24_o15_o16_receipt.md': REPO / 'docs/ice/fidelity/si3_r24_o15_o16_receipt.md',
+    'icecor.f90': Path('/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/round18/refused/builds_20261026T210237Z_2/ORCA2_SAS_ICE_O8O16_REC/BLD/ppsrc/nemo/icecor.f90'),
     'iceitd.f90': Path('/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/round18/refused/builds_20261026T210237Z_2/ORCA2_SAS_ICE_O8O16_REC/BLD/ppsrc/nemo/iceitd.f90'),
     'iceupdate.f90': Path('/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/round18/refused/builds_20261026T210237Z_2/ORCA2_SAS_ICE_O8O16_REC/BLD/ppsrc/nemo/iceupdate.f90'),
+    'sbc_phy.F90': NEMO / 'src/OCE/SBC/sbc_phy.F90',
     'packages/ice/legoesm/ice/si3_finalize.py': REPO / 'packages/ice/legoesm/ice/si3_finalize.py',
     'nemo_si3_o8_o16_master_gate.py': REPO / 'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o16_master_gate.py',
     'o8_o16_master_writer.F90': REPO / 'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o16_master_acquisition/o8_o16_master_writer.F90',
@@ -10879,12 +10881,21 @@ FILES.update({
 
 CITATION_MAP.update({
     'iceitd.f90:496-500': ['a_i_2d(ii,jl1) = a_i_2d(ii,jl1) - pdaice(ii,jl)', 'v_i_2d(ii,jl2) = v_i_2d(ii,jl2) + pdvice(ii,jl)', 5],
+    'iceitd.f90:575-595': ['WHERE( a_i_2d(1:npti,:) >= epsi20 )', 'CALL tab_3d_4d( npti, nptidx(1:npti), szv_i_2d(1:npti,:,:), szv_i )', 21],
+    'icecor.f90:81-99': ['WHERE( a_i(Nis0-(0):Nie0+(0),Njs0-(0):Nje0+(0),:) >= epsi20 )', 'IF( jpl > 1 )   CALL ice_itd_reb( kt )', 19],
+    'packages/ice/legoesm/ice/si3_finalize.py:259-318': ['_materialize_transfer_statements: bool = True,', 'statement_result = sr if _materialize_transfer_statements else (lambda x: x)', 'sv_i = transfer3(sv_i, zworkv)', 60],
+    'packages/ice/legoesm/ice/si3_finalize.py:470-535': ['def si3_ice_cor(', 'statement_result = sr if not _plant_strip_transfer_barriers else (lambda x: x)', '_materialize_transfer_statements=not _plant_strip_transfer_barriers,', 66],
     'packages/ice/legoesm/ice/si3_finalize.py:254-311': [('e_i: Field,', 2), 'sv_i = transfer3(sv_i, zworkv)', 58],
     'packages/ice/legoesm/ice/si3_finalize.py:286-290': ['a_i = a_i.at[..., donor].set(', 'jnp.where(active, sr(a_i[..., receiver] + pdaice), a_i[..., receiver])', 5],
     'iceupdate.f90:373-418': ['IF( MOD( kt-1, nn_fsbc ) == 0 ) THEN', 'vtau(ji,jj) = ( 1._wp - at_i(ji,jj) ) * vtau_oce(ji,jj) + at_i(ji,jj) * zvtau_ice', 46],
     'nemo_si3_o8_o16_master_gate.py:171-180': ['15: Kind(', '+ _fields("snwice_mass snwice_mass_b", "F2"),', 10],
     'o8_o16_master_writer.F90:446-457': ['ELSEIF(kind==15) THEN', ('CALL put_f2(u,snwice_mass); CALL put_f2(u,snwice_mass_b)', 1), 12],
+    'o8_o16_master_writer.F90:476-486': ['IF(kind==19) THEN', 'CALL put_f2(u,utau); CALL put_f2(u,vtau); CALL put_i2(u,taum)', 11],
     'iceupdate.f90:410-419': [('DO jj = ntsj-( 0), ntej+(  0 ) ; DO ji = ntsi-( 0), ntei+(  0)', 7), ('END DO   ;   END DO', 11), 10],
+    'sbc_phy.F90:69': 'pp_cldf = 0.81',
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1777-1847': ['steps: Sequence[int] = (1, 2, 100),', 'writer_tail = (', 'translation_applied": False', 71],
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1849-1880': ['def score_o15_o16(', 'for kind in PROJECTIONS["O15"] + (19, 20):', 32],
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1927-1942': ['owned = (', 'o16_tau.update(spec.name, got, expected, kt=kt, category=0)', 16],
     'iceitd.f90:497': 'a_i_2d(ii,jl2) = a_i_2d(ii,jl2) + pdaice(ii,jl)',
     'packages/ice/legoesm/ice/si3_finalize.py:289-290': ['a_i = a_i.at[..., receiver].set(', 'jnp.where(active, sr(a_i[..., receiver] + pdaice), a_i[..., receiver])', 2],
 })

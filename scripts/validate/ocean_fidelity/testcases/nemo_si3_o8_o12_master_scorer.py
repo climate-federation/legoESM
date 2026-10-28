@@ -1977,7 +1977,6 @@ from legoesm.ice.si3_finalize import (  # noqa: E402 - late-rung extension
     SI3UpdateFluxForcing,
     si3_ice_update_tau,
     si3_o15_step,
-    si3_o16_step,
 )
 from legoesm.ice.si3_orca2_state import (  # noqa: E402 - late-rung extension
     SI3AggregatedVars,
@@ -1987,11 +1986,8 @@ from legoesm.ice.si3_orca2_state import (  # noqa: E402 - late-rung extension
     SI3State,
     si3_lbc_lnk_orca2,
 )
-from legoesm.ice.si3_surface import SI3SurfaceConfig  # noqa: E402
 from scripts.validate.ocean_fidelity.testcases.nemo_si3_o8_o16_master_gate import (  # noqa: E402
     PRE_AGG_TOTALS,
-    STATE,
-    TOTALS,
 )
 
 PINNED_PROJECTION_SHA256.update({
