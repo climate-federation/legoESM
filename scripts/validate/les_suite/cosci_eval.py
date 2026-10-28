@@ -54,6 +54,7 @@ from legoesm.atmosphere.les_suite import (  # noqa: E402
 from legoesm.atmosphere.les_suite.bridge import (  # noqa: E402
     CUM_CHANNELS,
     load_artifact,
+    surface_drag_law,
     surface_roughness,
     total_turbulent_flux,
 )
@@ -195,7 +196,10 @@ class Arm:
 
     def prepare(self, artifact, *, turb=None, nlev, dt):
         """Build the SCM for ``artifact`` once (concrete config): ``(scm, physics,
-        u_geo, v_geo, f_c)`` on the column, reusable across parameter values."""
+        u_geo, v_geo, f_c, sfc_drag_most)`` on the column, reusable across parameter
+        values. ``sfc_drag_most`` is the LES run's recorded wall-drag law (user
+        2026-10-28: each run's own law reaches the candidate; refuse a run without
+        a record)."""
         _require_kessler(artifact)
         turb = _case_turb(self.base_turb if turb is None else turb, artifact)
         scm, _grid = build_cbl_scm_from_artifact(artifact, turb, les_tuned=False,
@@ -207,13 +211,14 @@ class Arm:
             return None if fn is None else jnp.asarray(fn(scm.t_seconds))[::-1]
         ug = None if forcing is None else _geo(forcing.u_geo)
         vg = None if forcing is None else _geo(forcing.v_geo)
-        return scm, scm_physics_config(artifact, turb), ug, vg, f_c
+        return (scm, scm_physics_config(artifact, turb), ug, vg, f_c,
+                surface_drag_law(artifact) == "most")
 
     def run_prepared(self, prep, nsteps, params=None):
-        scm, phys, ug, vg, f_c = prep
+        scm, phys, ug, vg, f_c, drag_most = prep
         return rollout(scm, phys, nsteps, candidate=self.candidate, params=params,
                        heat_form=self.heat_form, ke_heating=self.ke_heating,
-                       f_c=f_c, u_geo=ug, v_geo=vg)
+                       f_c=f_c, u_geo=ug, v_geo=vg, sfc_drag_most=drag_most)
 
     def run_with_turb(self, prep, artifact, nsteps, turb):
         """BASELINE rollout of a column prepared with the concrete base, with its
@@ -224,11 +229,12 @@ class Arm:
         rebuild at perturbed values is tested."""
         if self.candidate is not None:
             raise ValueError("run_with_turb is for baseline arms (no candidate)")
-        scm, _, ug, vg, f_c = prep
+        scm, _, ug, vg, f_c, drag_most = prep
         cfg = scm_physics_config(artifact, _case_turb(turb, artifact))
         col = copy.copy(scm)
         col.physics_fn = make_physics(cfg, model_type="hydrostatic", dt=scm.dt)
-        return rollout(col, cfg, nsteps, f_c=f_c, u_geo=ug, v_geo=vg)
+        return rollout(col, cfg, nsteps, f_c=f_c, u_geo=ug, v_geo=vg,
+                       sfc_drag_most=drag_most)
 
     def run(self, artifact, nsteps, *, params=None, turb=None, nlev, dt):
         return self.run_prepared(self.prepare(artifact, turb=turb, nlev=nlev, dt=dt),

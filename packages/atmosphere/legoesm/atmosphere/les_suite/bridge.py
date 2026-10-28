@@ -470,6 +470,29 @@ def surface_roughness(artifact: LESReferenceArtifact) -> tuple[float, float]:
     return z0, z0h
 
 
+SURFACE_DRAG_LAWS = ("neutral", "most")
+
+
+def surface_drag_law(artifact: LESReferenceArtifact) -> str:
+    """The LES run's wall-drag law under its prescribed surface flux, read from the
+    run record (``les_setup['sfc_flux_drag']``): ``"neutral"`` (log law) or
+    ``"most"`` (Businger-Dyer stability-corrected). Raises :class:`BridgeError` when
+    the artifact does not record it (user 2026-10-28: no run without a record), and
+    when the run recorded a prescribed surface temperature instead of a flux: the LES
+    then drags through its coupled MOST layer whatever ``sfc_flux_drag`` says."""
+    setup = artifact.les_setup or {}
+    law = setup.get("sfc_flux_drag")
+    if law not in SURFACE_DRAG_LAWS:
+        raise BridgeError(f"{artifact.case_name}: artifact records wall-drag law "
+                          f"{law!r} (les_setup['sfc_flux_drag']); expected one of "
+                          f"{SURFACE_DRAG_LAWS}")
+    bc = setup.get("surface_bc")
+    if bc is not None and bc != "flux_K_m_s":
+        raise BridgeError(f"{artifact.case_name}: surface_bc {bc!r} is not a prescribed "
+                          "flux, so sfc_flux_drag does not describe the applied drag")
+    return law
+
+
 def total_turbulent_flux(
     resolved: Array, sgs: Array | None
 ) -> Array:

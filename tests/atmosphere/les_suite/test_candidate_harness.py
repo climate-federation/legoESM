@@ -238,7 +238,7 @@ def _cbl_artifact(nz=20, nt=3, seconds=600.0):
         w_theta_s_cum=0.06 * times, f_c=0.0,
         uw_resolved=np.zeros((nt, nz)), uw_sgs=np.zeros((nt, nz)),
         vw_resolved=np.zeros((nt, nz)), vw_sgs=np.zeros((nt, nz)),
-        les_setup={"z0_m": _RGH["z0_m"]})
+        les_setup={"z0_m": _RGH["z0_m"], "sfc_flux_drag": "neutral"})
 
 
 def test_pure_step_with_physics_matches_pure_step():
@@ -260,7 +260,8 @@ def _hb_rollouts(candidate, nsteps=30):
     base = _base_turbulence("holtslag_boville", **_RGH)[0]
     # the case's roughness differs from the base's, with z0h != z0, so the
     # candidate must take it from the column inputs
-    art = dataclasses.replace(_cbl_artifact(), les_setup={"z0_m": 0.05, "z0h_m": 0.005})
+    art = dataclasses.replace(_cbl_artifact(), les_setup={
+        "z0_m": 0.05, "z0h_m": 0.005, "sfc_flux_drag": "neutral"})
     rb, _ = Arm(base).run(art, nsteps, nlev=16, dt=10.0)
     rc, _ = Arm(base, candidate, "theta", False).run(
         art, nsteps, params=candidate.default_params(), nlev=16, dt=10.0)
@@ -305,7 +306,8 @@ def test_harness_scores_moist_cases_with_recorded_kessler_only():
     from tune_scm_to_les import _base_turbulence
     arm = Arm(_base_turbulence("louis", **_RGH)[0])
     art = _moist_artifact()
-    no_record = dataclasses.replace(art, les_setup={"z0_m": _RGH["z0_m"]})
+    no_record = dataclasses.replace(art, les_setup={"z0_m": _RGH["z0_m"],
+                                                    "sfc_flux_drag": "neutral"})
     with pytest.raises(ValueError, match="records no LES microphysics"):
         arm.prepare(no_record, nlev=16, dt=10.0)
     sund = dataclasses.replace(art, les_setup=dict(
@@ -732,7 +734,8 @@ def test_every_run_uses_the_les_cases_roughness():
     from cosci_eval import Arm
     from tune_scm_to_les import _base_turbulence
     art = dataclasses.replace(_cbl_artifact(),
-                              les_setup={"z0_m": 0.05, "z0h_m": 0.005})
+                              les_setup={"z0_m": 0.05, "z0h_m": 0.005,
+                                         "sfc_flux_drag": "neutral"})
     arm = Arm(_base_turbulence("louis", **_RGH)[0])       # built with z0 = 0.1
     prep = arm.prepare(art, nlev=16, dt=10.0)
     surf = prep[1].turbulence.louis.surface
@@ -989,3 +992,43 @@ def test_cli_both_needs_both_choices():
     for hf, ke in ((None, "on"), ("theta", None), (None, None)):
         with pytest.raises(SystemExit):
             cosci_eval.check_kind_choices("both", hf, ke)
+
+
+@pytest.mark.parametrize("law, want", [("neutral", 0.0), ("most", 1.0)])
+def test_the_closure_sees_the_les_runs_wall_drag_law(tmp_path, law, want):
+    """User 2026-10-28: each LES run's recorded wall-drag law reaches the closure as
+    ColumnInputs.sfc_drag_most, on candidate and baseline rollouts alike."""
+    import dataclasses
+
+    from cosci_eval import Arm
+    from tune_scm_to_les import _base_turbulence
+    art = _forced_artifact()
+    art = dataclasses.replace(art, les_setup=dict(art.les_setup, sfc_flux_drag=law))
+    cand = _write(tmp_path, "both_drag", _GOOD_BOTH)
+    base = _base_turbulence("louis", **_RGH)[0]
+    for arm, params in ((Arm(base), None),
+                        (Arm(base, cand, "theta", True), cand.default_params())):
+        rec, _ = arm.run(art, 3, params=params, nlev=16, dt=10.0)
+        got = np.asarray(rec.inputs.sfc_drag_most)
+        assert got.shape == (3,) and np.all(got == want), got
+        assert float(rec.final_inputs.sfc_drag_most) == want
+
+
+def test_a_run_without_a_wall_drag_record_is_refused_and_idealized_columns_are_most():
+    """User 2026-10-28: no LES run without a recorded wall-drag law; the idealized check
+    columns hand the closure the stability-corrected law; a column built without a law
+    carries NaN."""
+    import dataclasses
+
+    from cosci_eval import Arm
+    from legoesm.atmosphere.les_suite.bridge import BridgeError
+    from tune_scm_to_les import _base_turbulence
+    art = _forced_artifact()
+    bare = dataclasses.replace(art, les_setup={"z0_m": _RGH["z0_m"]})
+    with pytest.raises(BridgeError, match="wall-drag law"):
+        Arm(_base_turbulence("louis", **_RGH)[0]).prepare(bare, nlev=16, dt=10.0)
+    z = jnp.arange(10.0, 500.0, 20.0)
+    syn = ev.synthetic_artifact("syn", z, 300.0 + 0.0 * z, 5.0 + 0.0 * z, 0.0 * z,
+                                w_theta_s=0.0, hours=1.0, nframes=2, z0_m=0.1)
+    assert syn.les_setup["sfc_flux_drag"] == "most"
+    assert np.isnan(float(_column().sfc_drag_most))

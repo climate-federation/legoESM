@@ -83,7 +83,8 @@ def _col(field) -> Array:
 
 
 def scm_column_inputs(state, sigma_coord, phys_state, *, f_c, u_geo, v_geo, dt,
-                      uw_s, vw_s, z0_m=None, z0h_m=None) -> ColumnInputs:
+                      uw_s, vw_s, z0_m=None, z0h_m=None,
+                      sfc_drag_most=None) -> ColumnInputs:
     """:class:`ColumnInputs` for the SCM column, built with the SAME height/density
     helpers the roster's turbulence wrapper uses (moist hypsometric heights, moist
     density). Surface heat/moisture fluxes are the kinematic overrides the forcing
@@ -116,7 +117,8 @@ def scm_column_inputs(state, sigma_coord, phys_state, *, f_c, u_geo, v_geo, dt,
         w_qt_s=zero if w_qv is None else jnp.reshape(w_qv, ()),
         uw_s=uw_s, vw_s=vw_s, f_c=f_c,
         u_geo=u_geo, v_geo=v_geo,
-        dt=dt, temp=temp[::-1], q_v=q_v[::-1], q_c=q_c[::-1], z0_m=z0_m, z0h_m=z0h_m)
+        dt=dt, temp=temp[::-1], q_v=q_v[::-1], q_c=q_c[::-1], z0_m=z0_m, z0h_m=z0h_m,
+        sfc_drag_most=sfc_drag_most)
 
 
 class Fluxes(NamedTuple):
@@ -199,13 +201,16 @@ class RolloutRecord(NamedTuple):
 
 def rollout(scm, physics_config, nsteps: int, *, candidate: Candidate | None = None,
             params: dict | None = None, heat_form: str | None = None,
-            ke_heating: bool | None = None, f_c: float = 0.0, u_geo=None, v_geo=None):
+            ke_heating: bool | None = None, f_c: float = 0.0, u_geo=None, v_geo=None,
+            sfc_drag_most: bool | None = None):
     """Free-run ``scm`` for ``nsteps`` with ``candidate`` owning its part (or the pure
     baseline when ``candidate is None``). Returns ``(RolloutRecord, aux_final)``.
 
     The baseline closure is ``physics_config.turbulence``; ``scm`` must have been
     built with the same config (its physics is the baseline total). Forward Euler
     only (one physics call per step, so the candidate sees the same stage state).
+    ``sfc_drag_most`` (the LES case's wall-drag law) reaches the candidate as
+    ``ColumnInputs.sfc_drag_most`` (NaN when not given).
     """
     if scm.time_integrator != "forward_euler":
         raise ValueError("rollout supports forward_euler only (one stage per step)")
@@ -251,7 +256,7 @@ def rollout(scm, physics_config, nsteps: int, *, candidate: Candidate | None = N
         ug, vg = _geo(t)
         base = scm_column_inputs(state, sigma, phys_state, f_c=f_c, u_geo=ug,
                                  v_geo=vg, dt=dt, uw_s=zero, vw_s=zero, z0_m=z0_m,
-                                 z0h_m=z0h_m)
+                                 z0h_m=z0h_m, sfc_drag_most=sfc_drag_most)
         imp = implied_fluxes(tend_turb, base)
         if kind == "both":  # the candidate computes its own surface stress
             nan = jnp.full((), jnp.nan, zero.dtype)
@@ -507,7 +512,7 @@ def synthetic_artifact(name: str, heights_m, theta, u, v, *, w_theta_s: float,
         wtheta_sgs=rep(jnp.zeros_like(z)), prescribe="fluxes",
         w_theta_s=jnp.full((nt,), w_theta_s, z.dtype),
         w_theta_s_cum=w_theta_s * times, f_c=f_c, u_geo=prof(u_geo), v_geo=prof(v_geo),
-        les_setup={"z0_m": float(z0_m)})
+        les_setup={"z0_m": float(z0_m), "sfc_flux_drag": "most"})
 
 
 # --- E0: static checks -------------------------------------------------------------

@@ -406,6 +406,7 @@ def _les_setup(args, g, dt0, micro_cfg):
         "pr_sgs": float(g.cfg.pr_sgs),
         "scalar_advection": g.cfg.scalar_advection,
         "z0_m": float(g.cfg.z0),
+        "sfc_flux_drag": g.cfg.sfc_flux_drag,
         "positive_mode": args.positive_mode,
         "micro_every": int(args.micro_every),
         "subsidence_species": ["q_v"],

@@ -13,6 +13,7 @@ from legoesm.atmosphere.les_suite.bridge import (
     load_artifact,
     prognostic_truth,
     save_artifact,
+    surface_drag_law,
     surface_roughness,
     total_turbulent_flux,
 )
@@ -487,6 +488,25 @@ def test_surface_roughness_comes_from_the_run_record(tmp_path):
                   {"z0_m": float("nan")}, {"z0_m": "invalid"}, {"z0_m": 0.1, "z0h_m": []}):
         with pytest.raises(BridgeError, match="roughness"):
             surface_roughness(_dry_artifact(les_setup=setup))
+
+
+def test_surface_drag_law_comes_from_the_run_record(tmp_path):
+    """The wall-drag law is read from les_setup, survives a save/load round trip, and a
+    run without a valid record is refused (user 2026-10-28), never defaulted."""
+    art = _dry_artifact(les_setup={"z0_m": 0.1, "sfc_flux_drag": "most"})
+    path = tmp_path / "a.npz"
+    save_artifact(art, path)
+    assert surface_drag_law(load_artifact(path)) == "most"
+    assert surface_drag_law(_dry_artifact(les_setup={"sfc_flux_drag": "neutral"})) == "neutral"
+    for setup in (None, {}, {"z0_m": 0.1}, {"sfc_flux_drag": None},
+                  {"sfc_flux_drag": "businger_dyer"}, {"sfc_flux_drag": 1}):
+        with pytest.raises(BridgeError, match="wall-drag law"):
+            surface_drag_law(_dry_artifact(les_setup=setup))
+    flux = {"sfc_flux_drag": "neutral", "surface_bc": "flux_K_m_s"}
+    assert surface_drag_law(_dry_artifact(les_setup=flux)) == "neutral"
+    for bc in ("cooling_K_per_h", "surface_theta_series"):
+        with pytest.raises(BridgeError, match="not a prescribed flux"):
+            surface_drag_law(_dry_artifact(les_setup=dict(flux, surface_bc=bc)))
 
 
 def test_theta_adv_cum_is_one_channel_and_integrates_exactly():
