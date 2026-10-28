@@ -141,15 +141,17 @@ All 621,960 stage-field rows were evaluated. Thus the production O14 wiring
 changes no D5 output bit; other O8-O12 production paths and the production-call
 test also pass.
 
-Test evidence on the candidate:
+Test evidence on the clean candidate commit `f0db1c8ac7`:
 
-- O14 unit, O8 edge, and O8-O14 scorer/production suite: 29 passed; its sole
-  initial failure was the deliberately stale AST plant copied from the deleted
-  inline O14 block. The plant was re-registered against the new canonical O14
-  statement window and passed independently.
+- O14 unit, O8 edge, and O8-O14 scorer/production suite: `30 passed in
+  517.12s`. During development, the deliberately stale AST plant copied from
+  the deleted inline O14 block failed; it was re-registered against the new
+  canonical O14 statement window before this final clean pass.
 - Full 100-step O14 score: `PASS_O14_0_ULP`.
-- Receipt citation map audit: pending final committed-tree run.
-- Default receipt-citation gate and private-import ratchet: pending final run.
+- This receipt's citation gate: `PASS`, 14 citations, zero unmapped/failing
+  citations, and every self-test fired.
+- Full default receipt-citation gate: `39 passed in 7.82s`.
+- Private-import ratchet: `6 passed in 5.42s`.
 
 ## 6. CHOICES and epistemic status
 
