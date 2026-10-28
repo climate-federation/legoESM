@@ -2,6 +2,7 @@ aimip_convection: tiedtke
 aimip_turbulence: none
 aimip_gwd: mcfarlane
 aimip_microphysics: sundqvist
+aimip_sundqvist_auto_rate: 1.5e-4   # GFS prautco (declared); a trained run starts at 5.95e-4 (5% edge pull-in)
 
 # This ablation drops one family ON PURPOSE (that is the experiment); the
 # completeness gate is waived here and the result is NOT comparable to a

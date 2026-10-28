@@ -542,7 +542,8 @@ def _train_aimip_classical(
     # NO INERT PARAMETERS (review F5): only the knobs the RESOLVED schemes
     # read are trainable; the other families' knobs stay in the pytree as
     # frozen (non-array) values, so the checkpoint leaf layout is unchanged.
-    from legoesm.training.aimip_params import aimip_classical_trainable_names
+    from legoesm.training.aimip_params import (
+        aimip_classical_trainable_names, aimip_declared_knobs)
     _trainable = aimip_classical_trainable_names(
         convection=conv_scheme, turbulence=turb_scheme, gwd=gwd_scheme,
         microphysics=micro_scheme, cloud=cloud_scheme, radiation=radiation,
@@ -552,6 +553,7 @@ def _train_aimip_classical(
         spatial_init_std=float(cfg.get("aimip_spatial_init_std", 0.0)),
         spatial_seed=int(cfg.get("aimip_spatial_seed", 0)),
         trainable=_trainable,
+        declared=aimip_declared_knobs(cfg),
     )
     n_spatial = (
         params.spatial_surface.n_trainable() if params.spatial_surface else 0

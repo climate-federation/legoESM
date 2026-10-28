@@ -1523,9 +1523,14 @@ def _main(argv=None):
             # any one of them missing makes the other two unresumable.
             # On-disk view: frozen (float) knobs as arrays, so the file
             # also loads into an all-array template (checkpoint_view).
+            from legoesm.ml.checkpoint_io import (
+                knob_record_path, write_knob_record,
+            )
             from legoesm.ml.training import checkpoint_view
+            knob_record_path(ppath).unlink(missing_ok=True)
             _atomic_write(ppath, lambda t: eqx.tree_serialise_leaves(
                 t, checkpoint_view(eqx.combine(cur_arr, _static_h))))
+            write_knob_record(eqx.combine(cur_arr, _static_h), ppath)
             _atomic_write(opath, lambda t: eqx.tree_serialise_leaves(
                 t, cur_opt_state))
             # Written LAST: it is the marker that says this epoch is

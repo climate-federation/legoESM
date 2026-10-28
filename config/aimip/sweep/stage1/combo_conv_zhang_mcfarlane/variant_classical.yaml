@@ -2,3 +2,4 @@ aimip_convection: zhang_mcfarlane
 aimip_turbulence: louis
 aimip_gwd: mcfarlane
 aimip_microphysics: sundqvist
+aimip_sundqvist_auto_rate: 1.5e-4   # GFS prautco (declared); a trained run starts at 5.95e-4 (5% edge pull-in)
