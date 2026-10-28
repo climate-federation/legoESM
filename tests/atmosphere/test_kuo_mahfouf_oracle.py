@@ -167,7 +167,10 @@ def test_check_grads_at_default_sharpness(fx):
     """RULE 5 gradient test: forward- and reverse-mode derivatives through the
     smooth gates at the default ``icond_sharpness`` agree with finite
     differences (fp64, order 2), w.r.t. T.  Loss as in the finite-gradient
-    test above."""
+    test above.  ``eps = 1e-6`` (as the CLUBB relvar oracle test): at JAX's
+    default 1e-4 the second-order check misses by 4.0e-3 (g60) / 9.5e-4
+    (g32) relative, falling 100x per 10x smaller eps (finite-difference
+    truncation, not a derivative defect; measured on this branch)."""
     from jax.test_util import check_grads
 
     for g in GROUPS:
@@ -181,7 +184,7 @@ def test_check_grads_at_default_sharpness(fx):
 
         T = jnp.asarray(fx[f"{g}_T"], jnp.float64)
         assert float(jnp.max(jnp.abs(jax.grad(loss)(T)))) > 0.0, g
-        check_grads(loss, (T,), order=2, modes=("fwd", "rev"))
+        check_grads(loss, (T,), order=2, modes=("fwd", "rev"), eps=1e-6)
 
 
 def test_eager_jit_parity(fx):

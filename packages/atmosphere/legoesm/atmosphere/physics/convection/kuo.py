@@ -33,9 +33,10 @@ default ``icond_sharpness = 50`` (field-normalised
 (Kuo-Anthes 0.35 / 0.47), 51 columns fire vs the oracle's 38; all 1535
 ECMWF profiles dT 0.50, dq 0.41, 758 columns fire only in ours; L32 fixture
 dT 7.2e-5, dq 4.7e-4.  Main cause: ``sigmoid(50 w_lcl / max|w|)`` lets a
-column with a weakly negative LCL velocity fire partially.  Invariants the
-smoothing breaks: none beyond the oracle's own (no positivity, column water
-not closed with divergence in the cloud).
+column with a weakly negative LCL velocity fire partially.  What the
+smoothing breaks: columns the oracle leaves off fire partially (the counts
+above).  Positivity and column-water closure are not guaranteed at either
+setting (the oracle guarantees neither).
 
 The whole point of Kuo's parameterization
 -----------------------------------------
