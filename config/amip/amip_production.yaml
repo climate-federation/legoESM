@@ -467,4 +467,5 @@ checkpoint_days: 30         # run control, carried from the outgoing production
                             # deck (not a CAM6 choice)
 monthly_means: true
 cmip_output: true
+cmip_resolution_deg: 5.0    # CMOR lat-lon output spacing; pass --cmip-resolution-deg 1.0 for 1 deg (user choice 2026-10-27)
 clear_sky_diag: true
