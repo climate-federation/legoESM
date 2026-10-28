@@ -103,7 +103,7 @@ __physics_contract__ = {
         "c_l": "J/kg/K (CONVECT liquid-water heat capacity CL)",
     },
     "outputs": {
-        "dT_dt": "K/s", "dq_v_dt": "kg/kg/s", "dq_c_conv_dt": "kg/kg/s",
+        "dT_dt": "K/s", "dq_v_dt": "kg/kg/s",
         "cbmf": "kg/m^2/s (oracle CBMF out)",
         "ment": "kg/m^2/s ((i,j) mixing matrix, diagnostic)",
         "m_profile": "kg/m^2/s (per-level updraught mixing mass flux)",
@@ -112,8 +112,8 @@ __physics_contract__ = {
     "sign_convention": (
         "Heats and dries/moistens the environment by the oracle's mass-flux "
         "convergence; the mixture condensate AWAT detrained below its origin "
-        "is a non-negative cloud-water source (dq_c_conv_dt>=0); the "
-        "precipitating fraction EP*CLW leaves the column; column enthalpy is "
+        "and the precipitating fraction EP*CLW leave the vapour/cloud budget "
+        "as precipitation (the oracle's WDTRAIN); column enthalpy is "
         "closed by the caller's ENTS pass; surface at the last vertical index."
     ),
     "conserves": ["none"],
@@ -168,7 +168,7 @@ _STRICT_INDEX_SHARPNESS = 20.0
 class EmanuelMixingOutput(NamedTuple):
     """Output of :func:`emanuel_mixing_tendencies`.
 
-    ``dT_dt``, ``dq_v_dt``, ``dq_c_conv_dt`` and ``convective_layer_mask`` are
+    ``dT_dt``, ``dq_v_dt`` and ``convective_layer_mask`` are
     surface-LAST; every oracle intermediate is SURFACE-FIRST, 0-based.
     ``dT_dt``/``dq_v_dt`` are the oracle's DO 410-500 mixing terms only: the
     downdraught terms, ``FRAC`` and ``ENTS`` are added by the caller.
@@ -176,7 +176,6 @@ class EmanuelMixingOutput(NamedTuple):
 
     dT_dt: jax.Array
     dq_v_dt: jax.Array
-    dq_c_conv_dt: jax.Array
     ment: jax.Array
     m_profile: jax.Array
     convective_layer_mask: jax.Array
@@ -275,7 +274,6 @@ def emanuel_mixing_tendencies(
     dtmax: float,
     alpha_closure: float,
     damp_coefficient: float,
-    M_b_max: float,
     level_window_sharpness: float,
     sij_gate_sharpness: float,
     sij_upper_gate: float,
@@ -297,8 +295,6 @@ def emanuel_mixing_tendencies(
     c_l, elcrit, tlcrit, entp, dtmax, alpha_closure, damp_coefficient,
     epmax, sij_upper_gate, denom_floor : oracle CL, ELCRIT, TLCRIT, ENTP,
         DTMAX, ALPHA, DAMP, EPMAX, the 0.9 band edge and the 0.01 floor.
-    M_b_max : cap on the TRANSPORT mass flux (no oracle counterpart; the
-        carried ``cbmf`` is returned uncapped).
     level_window_sharpness, sij_gate_sharpness, sat_branch_sharpness,
     strict_index_sharpness, lcl_pressure_sharpness : smoothing of the oracle
         switches named in the module docstring; large values are the oracle.
@@ -425,7 +421,7 @@ def emanuel_mixing_tendencies(
     cbmf_new = jnp.maximum((1.0 - damps) * cbmf_old + _CBMF_RELAX * alpha_closure * dtma, 0.0)
     passed = ~(gate_a | gate_b | gate_c | stable)
     cbmf = jnp.where(passed, cbmf_new, 0.0)
-    M_b = jnp.clip(cbmf, 0.0, M_b_max)
+    M_b = cbmf
 
     # ---- M(I) (DO 103/110) -------------------------------------------------
     dbo_full = jnp.abs(tv - tvp) + entp * _DBO_ENTRAIN_COEFF_PER_HPA * dph
@@ -558,16 +554,16 @@ def emanuel_mixing_tendencies(
     k_lt_j = j_gt_i                                   # origin k (axis 1) < level j
     detr = MENT * (QENT - k_lt_j * AWAT - Q_j)
     fq = fq + g * dpinv * jnp.sum(detr, axis=1)
-    # Mixture condensate AWAT detrained below its origin's level is kept as
-    # cloud water (the oracle sends it to WDTRAIN; routing unchanged here).
-    dqc = g * dpinv * jnp.sum(k_lt_j * MENT * AWAT, axis=1)
+    # Mixture condensate AWAT detrained below its origin's level is NOT a
+    # cloud-water source: as in the oracle it goes to WDTRAIN (precipitation;
+    # the downdraught receives it there), so it leaves through the caller's
+    # column rain residual.
 
     ents_mask = jax.nn.sigmoid(level_window_sharpness * (inb_f - lvl + 0.5))
 
     return EmanuelMixingOutput(
         dT_dt=ft[:, ::-1],
         dq_v_dt=fq[:, ::-1],
-        dq_c_conv_dt=dqc[:, ::-1],
         ment=MENT,
         m_profile=m_i,
         convective_layer_mask=ents_mask[:, ::-1],

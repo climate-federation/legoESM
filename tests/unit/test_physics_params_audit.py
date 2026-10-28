@@ -103,9 +103,7 @@ class TestConvectionAudit:
         from legoesm.atmosphere.physics.convection.config import EmanuelConfig
         # ``cu_coefficient`` belonged to the retired single-sigmoid surrogate
         # (it now raises when set).  Audit AD-reachability of the CONVECT
-        # closure slope ALPHA instead.  The shared column convects from rest
-        # with a cloud-base mass flux below the M_b_max transport cap (a
-        # hotter boundary layer saturates the cap and zeroes the gradient).
+        # closure slope ALPHA instead.  The shared column convects from rest.
         T, q_v, p_full, p_half = _column()
 
         def loss(x):

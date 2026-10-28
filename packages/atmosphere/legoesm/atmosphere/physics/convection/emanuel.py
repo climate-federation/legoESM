@@ -5,8 +5,8 @@ The scheme IS Kerry Emanuel's ``convect43c.f`` (CONVECT version 4.3c, 20 May
 lowest local minimum, a prognostic cloud-base mass flux relaxed toward
 sub-cloud quasi-equilibrium (the DTMA closure), an ensemble of mixtures of
 cloud and environmental air sorted by buoyancy (the ``(i,j)`` episodic-mixing
-matrix), and, when ``enable_unsaturated_downdraft`` is set, the precipitating
-unsaturated downdraught.  Each piece is ported line by line:
+matrix), and the precipitating unsaturated downdraught (on by default,
+``enable_unsaturated_downdraft``; off takes the oracle's downdraught skip).  Each piece is ported line by line:
 
 * :mod:`._emanuel_mixing` -- column setup, source/cloud-base/cloud-top
   diagnosis, rejection gates, TLIFT, the closure and the mixing matrix with its
@@ -25,16 +25,11 @@ What is NOT the oracle (stated, not hidden):
 * No convective momentum transport (CONVECT's FU/FV): this scheme's signature
   takes no winds, so ``du_dt_conv = dv_dt_conv = None``.
 * The oracle's WD/TPRIME/QPRIME surface-flux scales are not returned.
-* Water routing: CONVECT returns a scalar PRECIP.  Here the mixture condensate
-  ``AWAT`` detrained below its origin is handed to the cloud-water tracer
-  (``dq_c_conv_dt``) and the rest of the column water deficit is emitted as
-  the in-updraught rain source ``dq_r_conv_dt``; their column sum equals
-  ``-sum(FQ dp/g)``.
-* ``M_b_max`` caps the transport mass flux and ``cbmf_carry_max`` the carried
-  cloud-base mass flux; the oracle has neither (they do not bind on the oracle
-  fixture columns).
-* ``enable_unsaturated_downdraft`` defaults to False; the oracle always runs
-  its downdraught.
+* Water routing: CONVECT returns a scalar PRECIP.  Here the whole column
+  water deficit ``-sum(FQ dp/g)`` (the precipitating ``EP*CLW`` and the mixture
+  condensate ``AWAT`` detrained below its origin, both the oracle's WDTRAIN,
+  minus downdraught re-evaporation) is emitted as the in-updraught rain source
+  ``dq_r_conv_dt``, placed by the column drying profile; ``dq_c_conv_dt`` is 0.
 * ``cape``/``convective_mask`` are diagnostics (surface-parcel moist-adiabat
   CAPE and a smooth CAPE indicator); they do not gate the scheme.
 
@@ -77,8 +72,8 @@ __physics_contract__ = {
     "summary": (
         "Emanuel (1991) convection, a faithful port of CONVECT v4.3c "
         "(convect43c.f): buoyancy-sorting episodic mixing with a prognostic "
-        "cloud-base mass flux (DTMA quasi-equilibrium closure) and an optional "
-        "precipitating downdraught; returns convective T/q_v/q_c/q_r "
+        "cloud-base mass flux (DTMA quasi-equilibrium closure) and the "
+        "precipitating downdraught (default on); returns convective T/q_v/q_c/q_r "
         "tendencies plus the updated CBMF carry."
     ),
     "inputs": {
@@ -87,7 +82,7 @@ __physics_contract__ = {
         "dt": "s",
     },
     "outputs": {
-        "dT_dt": "K/s", "dq_v_dt": "kg/kg/s", "dq_c_conv_dt": "kg/kg/s",
+        "dT_dt": "K/s", "dq_v_dt": "kg/kg/s", "dq_c_conv_dt": "kg/kg/s (0)",
         "dq_r_conv_dt": "kg/kg/s",
         "cape": "J/kg (diagnostic)",
         "convective_mask": "1 (0-1 diagnostic CAPE indicator)",
@@ -95,10 +90,9 @@ __physics_contract__ = {
     },
     "sign_convention": (
         "Oracle FT/FQ: warms and dries the convecting layer; the ENTS pass "
-        "closes c_pn*FT + L_v(T)*FQ over levels 1..INB exactly; the retained "
-        "mixture condensate is a non-negative cloud-water source and the "
-        "precipitating remainder a non-negative rain source, together equal "
-        "to the column vapour loss; the prognostic cloud-base mass flux is "
+        "closes c_pn*FT + L_v(T)*FQ over levels 1..INB exactly; the column "
+        "vapour loss is a non-negative rain source (no cloud-water source); "
+        "the prognostic cloud-base mass flux is "
         ">=0; surface at the last vertical index."
     ),
     "conserves": ["energy"],
@@ -124,6 +118,8 @@ _RETIRED_FIELDS = (
     "precip_efficiency_lcl", "parcel_perturb_T", "parcel_perturb_q",
     "smooth_trigger_sharpness", "epsilon_0", "delta_0",
     "mse_min_search_offset",
+    # mass-flux caps with no CONVECT counterpart (removed, #2213 split):
+    "M_b_max", "cbmf_carry_max",
 )
 
 
@@ -145,8 +141,8 @@ def _check_retired_fields(config: EmanuelConfig) -> None:
         value = getattr(config, name)
         if _is_concrete(value) and np.any(np.asarray(value) != getattr(default, name)):
             raise ValueError(
-                f"EmanuelConfig.{name}={value!r}: this field belonged to the "
-                "retired Emanuel surrogate and has no counterpart in CONVECT "
+                f"EmanuelConfig.{name}={value!r}: this field is retired and "
+                "has no counterpart in CONVECT "
                 "v4.3c; it no longer affects the scheme.  Leave it at its "
                 f"default ({getattr(default, name)!r}).")
 
@@ -212,6 +208,10 @@ def emanuel_convection(
     conv_prog_profile_new : jax.Array, shape (ncol, nlev)
     """
     _check_retired_fields(config)
+    # The scheme runs in the state temperature's precision: a float64 tracer
+    # or pressure in a float32 run would make the downdraught's scan carry and
+    # outputs differ in dtype (reviewer decision, #2213 split).
+    q_v, p_full, p_half = (jnp.asarray(x, T.dtype) for x in (q_v, p_full, p_half))
     ncol, nlev = T.shape
     dp = p_half[:, 1:] - p_half[:, :-1]
 
@@ -221,7 +221,7 @@ def emanuel_convection(
     cape_weight = cape_trigger(cape, config.cape_threshold, config.cape_sharpness)
 
     # -- CONVECT through the mixing tendencies (carry: oracle CBMF in) --------
-    cbmf_old = jnp.maximum(conv_prog_profile[:, -1], 0.0)
+    cbmf_old = jnp.maximum(conv_prog_profile[:, -1], 0.0).astype(T.dtype)
     mixing = emanuel_mixing_tendencies(
         T, q_v, p_full, p_half, cbmf_old, dt,
         c_l=config.c_l_emanuel,
@@ -231,7 +231,6 @@ def emanuel_convection(
         dtmax=config.dtmax,
         alpha_closure=config.alpha_closure,
         damp_coefficient=config.damp_coefficient,
-        M_b_max=config.M_b_max,
         level_window_sharpness=config.level_window_sharpness,
         sij_gate_sharpness=config.sij_gate_sharpness,
         sij_upper_gate=config.sij_upper_gate,
@@ -244,8 +243,6 @@ def emanuel_convection(
     _rev = lambda x: x[:, ::-1]  # noqa: E731 - surface-last <-> surface-first
     ft = _rev(mixing.dT_dt)                       # surface-FIRST from here
     fq = _rev(mixing.dq_v_dt)
-    dq_c_conv_dt_raw = mixing.dq_c_conv_dt        # surface-last
-    dq_c_conv_dt = dq_c_conv_dt_raw
 
     # -- Precipitating downdraught (oracle l.713-830 and its FT/FQ terms) -----
     # Static Python branch: no trace overhead when disabled.  Disabled is the
@@ -275,17 +272,6 @@ def emanuel_convection(
         ft = ft + downdraft.dT_dt
         fq = fq + downdraft.dq_v_dt
 
-        # WATER BOOKKEEPING (this model's, not the oracle's): the vapour the
-        # shaft adds is taken back out of the cloud-water source,
-        # column-integral for column-integral, where that condensate is
-        # PRODUCED; the column rain residual below then closes the budget.
-        col_evap = jnp.sum(
-            _rev(downdraft.dq_v_dt) * dp, axis=-1) / constants.g
-        col_dq_c = jnp.sum(dq_c_conv_dt_raw * dp, axis=-1) / constants.g
-        weight = dq_c_conv_dt_raw / jnp.maximum(col_dq_c[:, None], 1e-12)
-        weight = jnp.where((col_dq_c > 1e-12)[:, None], weight, 0.0)
-        dq_c_conv_dt = dq_c_conv_dt - col_evap[:, None] * weight
-
     # -- Cloud-top adjustment (oracle l.940-950), on FT+FQ incl. downdraught --
     phf = _rev(p_half) * _HPA_PER_PA
     dph = phf[:, :-1] - phf[:, 1:]
@@ -294,23 +280,18 @@ def emanuel_convection(
     dT_dt = _rev(ft)
     dq_v_dt = _rev(fq)
 
-    dq_c_conv_dt = jnp.maximum(dq_c_conv_dt, 0.0)
-
-    # -- Column water: retained condensate -> cloud, remainder -> rain --------
-    # ``net_water`` < 0 is the precipitating condensate (EP*CLW, minus any
-    # downdraught re-evaporation): CONVECT's PRECIP.  It is emitted as the
-    # in-updraught rain source ``dq_r_conv_dt`` (column-integrated into
-    # same-step surface precipitation by the physics pipeline), distributed
-    # by the column drying weight.  A positive residual (more cloud water
-    # than vapour lost) is removed from the cloud-water source by a uniform
-    # down-scaling.  No heating accompanies either: the latent heat is
-    # already in FT.
-    net_water = jnp.sum((dq_v_dt + dq_c_conv_dt) * dp, axis=-1) / constants.g
-    col_dq_c_mass = jnp.sum(dq_c_conv_dt * dp, axis=-1) / constants.g
+    # -- Column water -> rain ---------------------------------------------------
+    # ``net_water`` < 0 is the precipitating condensate (WDTRAIN: EP*CLW and
+    # AWAT, minus any downdraught re-evaporation): CONVECT's PRECIP.  It is
+    # emitted as the in-updraught rain source ``dq_r_conv_dt`` (column-
+    # integrated into same-step surface precipitation by the physics
+    # pipeline), distributed by the column drying weight.  No heating
+    # accompanies it: the latent heat is already in FT.
+    net_water = jnp.sum(dq_v_dt * dp, axis=-1) / constants.g
     drying = jnp.maximum(-dq_v_dt, 0.0)
     drying_col = jnp.sum(drying * dp, axis=-1) / constants.g
-    # The 1e-30 divisor floors below go through _div_floor (same value; a
-    # floored, non-convecting column then has finite fp32 derivatives).
+    # The 1e-30 divisor floor goes through _div_floor (same value; a floored,
+    # non-convecting column then has finite fp32 derivatives).
     add_weight = _div_floor(drying, drying_col[:, None], 1e-30)  # ∫w dp/g = 1
     _residual = jnp.maximum(-net_water, 0.0)
     dq_r_conv_dt = _residual[:, None] * add_weight    # ∫dq_r dp/g = _residual
@@ -323,11 +304,6 @@ def emanuel_convection(
         (_residual - _placed)[:, None] * constants.g / _col_dp,
         0.0,
     )
-    qc_scale = jnp.clip(
-        1.0 - _div_floor(jnp.maximum(net_water, 0.0), col_dq_c_mass, 1e-30),
-        0.0, 1.0,
-    )
-    dq_c_conv_dt = dq_c_conv_dt * qc_scale[:, None]
 
     # -- ENTS: exact enthalpy conservation over levels 1..INB (l.969-984) -----
     # ENTS = sum (CPN*FT + LV*FQ) dp / (PH(1)-PH(INB+1)); FT -= ENTS/CPN.
@@ -344,7 +320,7 @@ def emanuel_convection(
     out = ConvectionOutput(
         dT_dt=dT_dt,
         dq_v_dt=dq_v_dt,
-        dq_c_conv_dt=dq_c_conv_dt,
+        dq_c_conv_dt=jnp.zeros_like(dq_v_dt),
         dq_r_conv_dt=dq_r_conv_dt,
         precip_frozen_sfc=jnp.zeros_like(cape),  # L_v-only: liquid at sfc (F29)
         cape=cape,
@@ -352,9 +328,8 @@ def emanuel_convection(
         du_dt_conv=None,
         dv_dt_conv=None,
     )
-    # Carry CONVECT's CBMF (uncapped by the transport limit ``M_b_max``),
-    # bounded only by the anti-runaway ``cbmf_carry_max``.
-    cbmf_carry = jnp.clip(mixing.cbmf, 0.0, config.cbmf_carry_max)
+    # Carry CONVECT's CBMF (>= 0 by the oracle's own MAX; no cap).
+    cbmf_carry = mixing.cbmf
     conv_prog_profile_new = (
         jnp.zeros((ncol, nlev), dtype=T.dtype).at[:, -1].set(cbmf_carry)
     )

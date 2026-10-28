@@ -168,13 +168,13 @@ __param_spec__ = {
             "sat_branch_sharpness": "numerics: sigmoid sharpness on the saturated-mixture re-solve switch",
             "sij_gate_sharpness": "numerics: sigmoid sharpness on the 0<SIJ<0.9 entrainment band gate",
             "smooth_trigger_sharpness": "RETIRED: field of the former Emanuel surrogate, no CONVECT v4.3c counterpart; non-default values raise",
+            "M_b_max": "RETIRED: transport mass-flux cap, no CONVECT v4.3c counterpart; non-default values raise",
+            "cbmf_carry_max": "RETIRED: carried cloud-base mass-flux cap, no CONVECT v4.3c counterpart; non-default values raise",
             "strict_index_sharpness": "numerics: sigmoid sharpness on the strict integer-index inequalities",
         },
         "params": {
-            "M_b_max": {"units": "kg/m^2/s", "bounds": (0.02, 0.15), "tunable_tier": 2, "transform": "sigmoid", "category": "mass_flux", "reference": "Emanuel (1991) stability cap", "shape": None},
             "alpha_closure": {"units": "1", "bounds": (0.05, 0.6), "tunable_tier": 1, "transform": "sigmoid", "category": "cape_closure", "reference": "Emanuel (1991) CONVECT v4.3c ALPHA", "shape": None},
             "c_l_emanuel": {"units": "J/kg/K", "bounds": (2000.0, 4500.0), "tunable_tier": 3, "transform": "sigmoid", "category": "mixing", "reference": "Emanuel (1991) CONVECT v4.3c CL", "shape": None},
-            "cbmf_carry_max": {"units": "kg/m^2/s", "bounds": (0.099, 0.9), "tunable_tier": 3, "transform": "sigmoid", "category": "mass_flux", "reference": "Emanuel (1991) anti-runaway guard", "shape": None},
             "damp_coefficient": {"units": "1", "bounds": (0.0, 0.3), "tunable_tier": 2, "transform": "sigmoid", "category": "cape_closure", "reference": "Emanuel (1991) CONVECT v4.3c DAMP", "shape": None},
             "downdraft_sigd": {"units": "1", "bounds": (0.01, 0.3), "tunable_tier": 1, "transform": "sigmoid", "category": "downdraft", "reference": "CONVECT v4.3c SIGD, fractional area of the unsaturated downdraft (convect43c.f:192)", "shape": None},
             "downdraft_sigs": {"units": "1", "bounds": (0.0, 0.5), "tunable_tier": 2, "transform": "sigmoid", "category": "downdraft", "reference": "CONVECT v4.3c SIGS, fraction of precipitation falling outside the cloud (convect43c.f:193)", "shape": None},
@@ -972,16 +972,16 @@ class EmanuelConfig(NamedTuple):
     The ``*_sharpness`` / ``*_width`` / ``*_transition_K`` fields smooth oracle
     switches for differentiability; their hard limit is the oracle.
 
-    No oracle counterpart, kept: ``M_b_max`` (cap on the transport mass flux),
-    ``cbmf_carry_max`` (cap on the carried CBMF), ``cape_threshold`` and
-    ``cape_sharpness`` (shape the diagnostic ``convective_mask`` only).
+    No oracle counterpart, kept: ``cape_threshold`` and ``cape_sharpness``
+    (shape the diagnostic ``convective_mask`` only).
 
     RETIRED (fields of the former single-sigmoid surrogate, kept so existing
     configs load; any non-default value raises): ``n_mixing_fractions``,
     ``cu_coefficient``, ``precip_efficiency_water``, ``precip_efficiency_lcl``,
     ``parcel_perturb_T``, ``parcel_perturb_q``, ``smooth_trigger_sharpness``,
-    ``epsilon_0``, ``delta_0``, ``mse_min_search_offset``, and
-    ``use_genuine_mixing`` (must stay True).
+    ``epsilon_0``, ``delta_0``, ``mse_min_search_offset``,
+    ``M_b_max`` and ``cbmf_carry_max`` (the two mass-flux caps, no oracle
+    counterpart), and ``use_genuine_mixing`` (must stay True).
     """
     n_mixing_fractions: int = 8
     cu_coefficient: float = 0.7
@@ -1008,17 +1008,13 @@ class EmanuelConfig(NamedTuple):
     # 1e-3 gives an O(1 kPa) transition; the large-sharpness limit is the
     # oracle.
     lcl_pressure_sharpness: float = 1.0e-3
-    # Upper bound [kg/m²/s] on the *carried* prognostic CBMF — looser than
-    # the per-step transport cap ``M_b_max`` so the closure's memory can
-    # ramp to the oracle's deep-tropical CBMF (~0.12 kg/m²/s) instead of
-    # being frozen at ``M_b_max``.  Set well above the oracle peak; the
-    # plume transport is still bounded at ``M_b_max``.  Acts only as an
-    # anti-runaway guard for a persistently violently-unstable column.
+    # RETIRED (no oracle counterpart; non-default raises): cap on the carried
+    # CBMF.
     cbmf_carry_max: float = 0.3
-    # Default-OFF: the oracle's downdraught skip (its EP(INB) < 1e-4 branch)
-    # is taken.  CONVECT itself always runs the precipitating downdraught
-    # (convect43c.f lines 713-830), ported in ``_emanuel_downdraft``.
-    enable_unsaturated_downdraft: bool = False
+    # Default ON, as CONVECT, which always runs the precipitating downdraught
+    # (convect43c.f lines 713-830), ported in ``_emanuel_downdraft``.  False
+    # takes the oracle's downdraught skip (its EP(INB) < 1e-4 branch).
+    enable_unsaturated_downdraft: bool = True
     # --- CONVECT v4.3c downdraft constants (convect43c.f lines 186-201) --
     # Read ONLY when ``enable_unsaturated_downdraft`` is set.  Defaults are
     # Emanuel's published values.
@@ -1038,7 +1034,7 @@ class EmanuelConfig(NamedTuple):
     # RETIRED surrogate fields (see the class docstring).
     epsilon_0: float = 2.0e-4
     delta_0: float = 2.0e-4
-    M_b_max: float = 0.05
+    M_b_max: float = 0.05  # RETIRED: the transport mass-flux cap
     # RETIRED: False selected the former single-sigmoid surrogate and now
     # raises; the scheme is the CONVECT v4.3c port only.
     use_genuine_mixing: bool = True

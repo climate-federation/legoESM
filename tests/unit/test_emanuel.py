@@ -116,15 +116,29 @@ def test_emanuel_no_cmt():
     assert out.dv_dt_conv is None
 
 
-def test_emanuel_cloud_water_source_non_negative():
-    """The convective cloud-water source is non-negative even after
-    the unsaturated-downdraft evaporation step subtracts column
-    condensate (we ``maximum(., 0)`` the result)."""
+@pytest.mark.parametrize("dd", (False, True))
+def test_emanuel_condensate_goes_to_rain_not_cloud(dd):
+    """As CONVECT (WDTRAIN), the mixture condensate AWAT detrained below its
+    origin is precipitation: no cloud-water source, and the rain source
+    carries the whole column vapour loss."""
     T, q, pf, ph = _column()
     ncol, nlev = T.shape
-    cpp = jnp.zeros((ncol, nlev))
-    out, _ = emanuel_convection(T, q, pf, ph, cpp, dt=300.0)
-    assert jnp.all(out.dq_c_conv_dt >= 0.0)
+    cpp = jnp.zeros((ncol, nlev)).at[:, -1].set(0.1)
+    out, _ = emanuel_convection(
+        T, q, pf, ph, cpp, dt=300.0,
+        config=EmanuelConfig(enable_unsaturated_downdraft=dd))
+    dpg = (ph[:, 1:] - ph[:, :-1]) / constants.g
+    loss = -jnp.sum(out.dq_v_dt * dpg, axis=-1)
+    assert float(jnp.max(loss)) > 0.0
+    assert float(jnp.max(jnp.abs(out.dq_c_conv_dt))) == 0.0
+    np.testing.assert_allclose(
+        np.asarray(jnp.sum(out.dq_r_conv_dt * dpg, axis=-1)),
+        np.asarray(jnp.maximum(loss, 0.0)), rtol=1e-10, atol=0.0)
+
+
+def test_emanuel_downdraught_on_by_default():
+    """The oracle always runs its downdraught: so does the default config."""
+    assert EmanuelConfig().enable_unsaturated_downdraft is True
 
 
 # ---------------------------------------------------------------------------
@@ -137,6 +151,7 @@ def test_emanuel_cloud_water_source_non_negative():
     dict(smooth_trigger_sharpness=1.0), dict(parcel_perturb_T=0.0),
     dict(parcel_perturb_q=0.0), dict(precip_efficiency_water=0.5),
     dict(precip_efficiency_lcl=0.1), dict(mse_min_search_offset=4e4),
+    dict(M_b_max=0.2), dict(cbmf_carry_max=1.0),
 ])
 def test_emanuel_retired_surrogate_fields_are_refused(override):
     T, q, pf, ph = _column()

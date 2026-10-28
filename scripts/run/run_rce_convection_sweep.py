@@ -246,7 +246,7 @@ def _build_convection_call(scheme: str, dt: float):
         )
 
     elif scheme == "emanuel":
-        cfg = EmanuelConfig(M_b_max=M_B_MAX_RCE)
+        cfg = EmanuelConfig()  # no mass-flux cap: CONVECT has none (#2213 split)
 
         def call(T, qv, pf, ph, u, v, carry):
             (prog,) = carry
