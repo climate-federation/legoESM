@@ -92,8 +92,11 @@ at days 1 and 2: all four SST/3-D T RMS and maximum scores are zero.
    under the registered `rtol=atol=2e-12` comparator.
 
 The repaired focused battery passes 13 tests with one operator-only test
-deselected.  No NEMO executable was run and no process was killed.  Final
-receipt-citation, default, and ratchet results are recorded after this repair.
+deselected.  The clean-tree receipt gate finds 4 citations, 0 failures, 0
+unmapped citations, and all 9 self-test plants fire.  The default ORCA2 landing
+battery passes 155/155 in 1321.90 s, including the 20-test citation suite and
+six-test private-import ratchet.  No NEMO executable was run and no process was
+killed.
 
 ## GPU acquisition status
 
