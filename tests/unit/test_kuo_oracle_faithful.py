@@ -305,6 +305,18 @@ def test_kuo_convergence_without_w_grid_raises():
                        moisture_convergence=ptenq, w_grid=None)
 
 
+def test_kuo_convective_mask_bounded_below_in_divergent_column():
+    """A weakly divergent column (cvgu slightly < 0 from the smooth positive
+    part's undershoot) keeps convective_mask >= -0.28 / icond_sharpness
+    (the bare tanh(cvgu / scale) measured -0.997 here)."""
+    T, qv, pf, ph, ptenq = _build_sounding()
+    cfg = KuoConfig()
+    out = kuo_convection(T, qv, pf, ph, dt=900.0, config=cfg,
+                         moisture_convergence=jnp.full_like(ptenq, -1.0e-11),
+                         w_grid=jnp.full_like(ptenq, W_UP))
+    assert float(jnp.min(out.convective_mask)) >= -0.28 / cfg.icond_sharpness
+
+
 def test_kuo_w_grid_gradients_finite():
     """jax.grad through the w_grid gate is finite."""
     T, qv, pf, ph, ptenq = _build_sounding()

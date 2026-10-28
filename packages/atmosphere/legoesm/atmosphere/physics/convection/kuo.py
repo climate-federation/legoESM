@@ -133,7 +133,8 @@ __physics_contract__ = {
     "outputs": {
         "dT_dt": "K/s", "dq_v_dt": "kg/kg/s",
         "dq_c_conv_dt": "kg/kg/s (convective cloud-water source to microphysics, signed dT_dt/alpha)",
-        "cape": "J/kg (oracle entraining-cloud zcape)", "convective_mask": "1 (0-1 activation)",
+        "cape": "J/kg (oracle entraining-cloud zcape)",
+        "convective_mask": "1 (0-1 activation, >= -0.28/icond_sharpness from the smoothing)",
     },
     "sign_convention": (
         "z up; surface at [:, -1]. Where a column is buoyant with positive "
@@ -616,7 +617,12 @@ def kuo_convection(
     # ptenq_scale / icond_sharpness per level).  The activation scale is
     # a KuoConfig field (matching the sibling ``buoyancy_scale_K`` /
     # ``supersat_scale`` trigger normalisers), not an inline literal.
-    convective_mask = jnp.tanh(cvgu / config.cvgu_activation_scale)
+    # The column total gets the same smooth positive part, so a divergent
+    # column (cvgu slightly < 0 from the per-level undershoot) reports a mask
+    # >= -0.28 / icond_sharpness instead of down to -1 (exactly 0 at cvgu = 0).
+    cvgu_pos = cvgu * smooth_step(
+        cvgu / config.cvgu_activation_scale, config.icond_sharpness)
+    convective_mask = jnp.tanh(cvgu_pos / config.cvgu_activation_scale)
 
     return ConvectionOutput(
         dT_dt=dT_dt,
