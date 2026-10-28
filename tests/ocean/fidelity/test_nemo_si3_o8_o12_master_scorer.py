@@ -186,8 +186,7 @@ def test_production_call_sites_route_through_o8_o12_and_fail_when_reverted(
 
     set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
 
-    # 1. Duplicate helpers must not exist on legoesm.ice.bitz_lipscomb AND
-    #    AST duplicate-arithmetic guard must pass across ice/ and testcases/.
+    # 1. Duplicate helpers must not exist on bitz_lipscomb + AST arithmetic guard:
     for deleted_name in (
         "_si3_zdf_bl99_step",
         "_dh_step",
@@ -198,7 +197,6 @@ def test_production_call_sites_route_through_o8_o12_and_fail_when_reverted(
     ):
         assert not hasattr(bl, deleted_name), f"duplicate {deleted_name} still exists on bitz_lipscomb"
     _assert_no_duplicate_o8_o12_arithmetic()
-
     # 2. Production step_sea_ice(thermo_scheme='si3_bl99') -> si3_column_step_arrays calls
     #    si3_ice_thd_zdf_bl99, si3_ice_thd_dh, si3_ice_thd_temp (x2), si3_ice_thd_sal(nn_icesal=2),
     #    si3_ice_thd_da (when lateral_melt=True), and si3_ice_thd_frazil.
