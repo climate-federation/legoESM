@@ -242,6 +242,7 @@ def main() -> None:
     cwd = Path.cwd()
     for section, field in (("surfdata", "path"),
                             ("forcing", "data_dir"),
+                            ("forcing", "co2_file"),
                             ("restart", "from"),
                             (None, "land_mask_file")):
         d = cfg if section is None else cfg.setdefault(section, {})

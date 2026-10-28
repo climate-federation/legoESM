@@ -1,0 +1,96 @@
+# 2 deg global LMIP with the P-model (optimality) switches, forced by CRU-JRA.
+#
+# The real-forcing counterpart of config/lmip/lmip_pmodel_synthetic_smoke.yaml:
+# identical grid and physics, CRU-JRA v2.5 forcing instead of synthetic weather.
+# Shipped as ONE year (2000, cold start); longer periods are the same template
+# with shifted years + a restart, which scripts/run/submit_lmip_ginsburg.sh does
+# in chained blocks:
+#
+#   scripts/run/submit_lmip_ginsburg.sh --arm least_cost \
+#       --year-start 2000 --year-end 2000            # the one-year test
+#   scripts/run/submit_lmip_ginsburg.sh --arm least_cost \
+#       --year-start 2000 --year-end 2014            # the full period
+#
+# Forcing is the PUBLIC CESM mirror variant (unfilled over Antarctica/Greenland),
+# staged with scripts/data/download_lmip_data.sh --crujra-only --year <Y>.
+#
+# Soil state: cold start, so the first years carry soil-moisture/temperature
+# spin-up.  The published 1985 soil IC (data/lmip_soil_ic) was spun up under the
+# calibrated per-PFT root tables, which this config does not use.
+template_name: biophysics/lmip_pmodel_crujra
+template_version: 1.1.0
+description: 2 deg CRU-JRA LMIP with the P-model switches, hourly, two-leaf canopy
+  + MOST, one-year cold start
+
+grid:
+  type: latlon
+  resolution: 90                  # 90 x 180 ~ 2 deg (the production LMIP grid)
+
+physics:
+  land_mode: multilayer
+  surface_scheme: two_leaf_canopy
+  bulk_scheme: most
+  stomatal_model: medlyn          # required by g1_source=p_model
+  snow_albedo_feedback: true
+  snow_scheme: single
+  enable_freeze_thaw: true        # REQUIRED globally (boreal columns NaN without)
+  soil_n_layers: 10
+  soil_depth_m: 3.0
+  soil_growth_factor: 2.0
+  # --- the optimality switches (each named explicitly, no reliance on defaults).
+  # Shipped value = the least-cost arm; submit_lmip_ginsburg.sh --arm overrides
+  # these three for the baseline and P-hydro arms. ---
+  canopy_capacity_scheme: p_model
+  canopy_g1_source: p_model
+  canopy_vcmax_profile: kn              # unchanged from the baseline (one variable at a time)
+  transpiration_stress: beta_theta
+  vc_max25: null
+  g1: null
+  gs_max: null
+  stomata_enabled: false
+
+forcing:
+  source: cru_jra
+  data_dir: data/crujra
+  prefix: clmforc.CRUJRAv2.5_0.5x0.5
+  suffix: ''
+  year_start: 2000
+  year_end: 2000
+  k_neighbors: 4
+  # Annual global-mean CO2 per model year (CMIP6 input4MIPs UoM-CMIP-1-2-0,
+  # 0-2014).  The P-model optimum and photosynthesis both read it.
+  co2_file: data/cmip6_forcing/ghg_cmip6_UoM-CMIP-1-2-0_0000-2014.nc
+
+surfdata:
+  path: data/legoesm_surfdata_c260716.nc
+  land_cover_dataset: clm5
+
+time:
+  dt: 3600.0
+  n_steps: 8760                   # 1 noleap year hourly; keep = 8760 * n_years
+  start_doy: 0.0
+
+restart:
+  from: ''                        # cold start; the launcher chains blocks via --restart-from
+
+land_frac_min: 0.0
+land_mask_file: ''
+
+output:
+  tapes:
+  - name: monthly
+    freq: monthly
+    average: mean
+    vars: [T_sfc, Rnet, shflx, lhflx, albedo, LAI, GPP, ET, transp, soil_evap,
+           runoff, precip, reverted, pmodel_chi, pmodel_vcmax25,
+           pmodel_vcmax25_nostress, pmodel_g1, pmodel_wfrac, pmodel_psi_soil,
+           pmodel_psi_leaf, ci_ca_sun_day, ci_ca_shade_day, day_frac,
+           pmodel_n_rubisco_leaf, pmodel_n_electron_transport_leaf]
+  - name: monthly_state
+    freq: monthly
+    average: inst
+    vars: [T_soil_top, theta_soil_top, snow_depth]
+  - name: daily
+    freq: daily
+    average: mean
+    vars: [GPP, ET, transp, lhflx, shflx, T_sfc]

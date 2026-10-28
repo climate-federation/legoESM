@@ -127,6 +127,25 @@ def build_model_times(start_doy: float, dt: float, n_steps: int, *, synthetic: b
     return t0 + dt * np.arange(n_steps, dtype=np.float64)
 
 
+def annual_co2_ppm(co2_file: str, years) -> dict:
+    """Annual global-mean CO2 [ppm] for each model year, from a CMIP6 GHG file.
+
+    The file's time axis holds annual means at mid-year (``Y + 0.5``).  A year
+    outside the file is refused rather than clamped to the nearest edge."""
+    from legoesm.forcing.external import _load_ghg_annual_file
+    file_years, data = _load_ghg_annual_file(str(co2_file))
+    lo, hi = float(file_years.min()), float(file_years.max())
+    out = {}
+    for y in years:
+        t = float(y) + 0.5
+        if not lo <= t <= hi:
+            raise SystemExit(
+                f"forcing.co2_file {co2_file} covers {lo - 0.5:.0f}-{hi - 0.5:.0f}; "
+                f"model year {y} is outside it")
+        out[int(y)] = float(np.interp(t, file_years, data["CO2"])) * 1.0e6
+    return out
+
+
 def _args_from_config(cfg, cli_args) -> argparse.Namespace:
     """Build the internal argument namespace from a validated LMIPConfig.
     CLI still supplies ``--output-dir`` and (optional) ``--restart-from``
@@ -174,6 +193,7 @@ def _args_from_config(cfg, cli_args) -> argparse.Namespace:
         dt=float(cfg.time["dt"]),
         n_steps=int(cfg.time["n_steps"]),
         k_neighbors=int(cfg.forcing.get("k_neighbors", 4)),
+        co2_file=cfg.forcing.get("co2_file", ""),
         land_mask_file=cfg.land_mask_file,
         land_frac_min=cfg.land_frac_min,
         # CLI overrides the config here for chaining ergonomics.
@@ -223,6 +243,13 @@ _VAR_META = {
                        "standard_name": "transpiration_flux"},
     "soil_evap":      {"long_name": "soil / ground evaporation (LE_soil / L_v)", "units": "mm day-1",
                        "standard_name": "water_evaporation_flux_from_soil"},
+    "soil_water":     {"long_name": "column water store: soil + surface pond + snow "
+                                    "water equivalent + canopy interception store",
+                       "units": "kg m-2"},
+    "water_budget":   {"long_name": "land water budget residual, d(column water store)/dt "
+                                    "- (precip - surface evaporation mass flux - runoff); "
+                                    "0 when the step conserved water, > 0 = water created",
+                       "units": "mm day-1"},
     "reverted":       {"long_name": "NaN-revert guard rate (fraction of steps reverted; "
                                     ">0 = numerically diverging cell)", "units": "1"},
     "land_fraction":  {"long_name": "surfdata land fraction (land + lake + glacier)", "units": "1",
@@ -649,6 +676,15 @@ def run(args) -> int:
     if not year_masks:
         raise SystemExit(
             f"no model times fall within years [{year_start}, {year_end}]")
+    _co2_file = getattr(args, "co2_file", "")
+    if _co2_file:
+        co2_by_year = annual_co2_ppm(_co2_file, [y for y, _ in year_masks])
+        print("CO2 (annual global mean, ppm): " + ", ".join(
+            f"{y} {c:.1f}" for y, c in co2_by_year.items()))
+    else:
+        co2_by_year = {}
+        print("CO2: constant default (no forcing.co2_file)")
+    _co2_init = co2_by_year.get(year_masks[0][0])
 
     # T0 seed for cold-start soil temperature: stage just the first year's
     # first step (one AtmToSurface slice, ~100 KB) and extract T_lowest[0].
@@ -711,14 +747,16 @@ def run(args) -> int:
             # raises a carry pytree-structure mismatch.  Graft onto a canonical
             # cold-start template, as model_driver and run_land_spinup do.
             state = merge_land_restart_into_template(
-                loaded, init_multilayer_land_state(ncol, config, T_init=288.0),
+                loaded, init_multilayer_land_state(
+                    ncol, config, T_init=288.0, pmodel_co2_init_ppm=_co2_init),
                 allow_pmodel_cold_start=bool(
                     getattr(args, "pmodel_cold_restart", False)))
             print(f"restart: loaded state from {args.restart_from} "
                   f"(t_end_s={restart_meta['t_end_s']:.1f}, "
                   f"steps_completed={restart_meta['n_steps_completed']})")
         else:
-            state = init_multilayer_land_state(ncol, config, T_init=288.0)
+            state = init_multilayer_land_state(
+                ncol, config, T_init=288.0, pmodel_co2_init_ppm=_co2_init)
             state = state._replace(T_soil=jnp.broadcast_to(T0[:, None], state.T_soil.shape))
 
     update_land_params = make_step_land_params_updater(
@@ -819,8 +857,29 @@ def run(args) -> int:
             values["T_soil_top"] = new_state.T_soil[:, 0]
             values["theta_soil_top"] = new_state.theta_soil[:, 0]
             values["snow_depth"] = new_state.snow_depth
+            # Closed water budget of the land step from the stores the state
+            # carries and the fluxes the tape reports: the residual is zero when
+            # every sink was feasible, positive when water was created (the dry
+            # floor's clip) and negative when water vanished.
+            from legoesm.land.soil_grid import make_soil_grid as _msg_budget
+            _dz_rho = jnp.asarray(_msg_budget(config.soil_grid).dz) * constants.rho_water
+            def _store(st):
+                w = jnp.sum(st.theta_soil * _dz_rho[None, :], axis=1) + st.snow_depth
+                if st.surface_water is not None:
+                    w = w + st.surface_water * constants.rho_water
+                if st.W_canopy is not None:
+                    w = w + st.W_canopy
+                return w
+            _w_new = _store(new_state)
+            values["soil_water"] = _w_new
+            values["water_budget"] = (
+                (_w_new - _store(state)) / dt
+                - (forcing_t.precip_total - resp.surface_mass_flux - resp.freshwater_flux)
+            ) * _SEC_PER_DAY
         else:
             values["T_soil_top"] = _ZEROS
+            values["soil_water"] = _ZEROS
+            values["water_budget"] = _ZEROS
             values["theta_soil_top"] = _ZEROS
             values["snow_depth"] = _ZEROS
         if is_multilayer and isinstance(config.surface_scheme, CanopyConfig):
@@ -865,6 +924,11 @@ def run(args) -> int:
                 _n_etr = jnp.where(_c4_only, jnp.nan, _n_etr)
             values["pmodel_n_rubisco_leaf"] = _n_rub
             values["pmodel_n_electron_transport_leaf"] = _n_etr
+        else:
+            # No acclimated optimum on prescribed capacities: NaN, so the same
+            # tape list serves every arm.
+            values["pmodel_n_rubisco_leaf"] = jnp.full(ncol, jnp.nan)
+            values["pmodel_n_electron_transport_leaf"] = jnp.full(ncol, jnp.nan)
         # --- atomic per-column NaN-revert guard (ported from run_ec_site) ---
         # Columns are independent, so if a column's state update goes non-finite,
         # revert THAT column to its previous state (jnp.where): a diverging boreal
@@ -1040,7 +1104,8 @@ def run(args) -> int:
             lat_rad, lon_rad, tq_local,
             year=year, data_dir=(None if synthetic else args.forcing_dir),
             prefix=args.prefix, suffix=args.suffix,
-            k_neighbors=args.k_neighbors, allow_synthetic=allow_syn)
+            k_neighbors=args.k_neighbors, allow_synthetic=allow_syn,
+            **({"co2_ppmv": co2_by_year[year]} if co2_by_year else {}))
         doy_year = jnp.asarray(tq_year / _SEC_PER_DAY)
         # Transient cover: broadcast this chunk's calendar year across its steps as
         # a TRACED scan input (not a Python constant baked into the closure) so
