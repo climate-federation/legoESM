@@ -4131,6 +4131,7 @@ def _resolve_convection(config):
             conv_config = conv_config._replace(
                 land_fraction=config.zm_land_fraction,
                 transport_cloud_tracers=config.zm_transport_cloud_tracers,
+                detrain_number_source=config.zm_detrain_number_source,
                 **_zm_set)
 
         # Tiedtke plume buoyancy-death memory (ExperimentConfig /

@@ -44,6 +44,8 @@ coefficients everywhere).
 
 from __future__ import annotations
 
+from typing import NamedTuple
+
 import jax
 import jax.numpy as jnp
 
@@ -61,7 +63,13 @@ from legoesm.atmosphere.physics.convection.mass_flux import compute_column_geome
 from legoesm.atmosphere.physics.convection.output import ConvectionOutput
 
 
-__all__ = ("CONVTRAN1_TRACERS", "zhang_mcfarlane_convection")
+__all__ = ("CONVTRAN1_TRACERS", "DetrainedCondensatePartition",
+           "cam6_detrained_condensate_partition", "zhang_mcfarlane_convection")
+
+# CAM6 clubb_intr.F90:2369/2373 writes pi as the literal 3.14 in the
+# detrained number sources; kept exact so the oracle match is exact (same
+# convention as microphysics._warm_rain._MG2_HOMOG_PI).
+_CAM6_DETRAIN_PI = 3.14
 
 # CAM6 constituents with ``is_convtran1`` (micro_mg_cam.F90:416-435, MG2) that
 # zm_conv_intr.F90:829-846 transports with ``convtran``, mapped to legoESM
@@ -122,9 +130,58 @@ __physics_contract__ = {
     "idealized_test": (
         "tests/atmosphere/hydrostatic/unit/test_zm_cam6_oracle.py (Fortran "
         "transcription pin, water closure, jit parity, gradients); "
-        "tests/unit/test_zhang_mcfarlane.py (host-level behaviour)."
+        "tests/unit/test_zhang_mcfarlane.py (host-level behaviour); "
+        "tests/atmosphere/test_zm_detrain_cam6_oracle.py (CAM6 clubb_intr "
+        "detrained-condensate partition vs the Fortran)."
     ),
 }
+
+
+class DetrainedCondensatePartition(NamedTuple):
+    """Tendencies from :func:`cam6_detrained_condensate_partition`."""
+    dq_c: jax.Array      # cloud-liquid source [kg/kg/s]
+    dq_i: jax.Array      # cloud-ice source [kg/kg/s]
+    dN_c: jax.Array      # droplet-number source [1/kg/s] (per mass of air)
+    dN_i: jax.Array      # ice-number source [1/kg/s] (per mass of air)
+    dT_dt: jax.Array     # fusion heating of the ice part [K/s]
+
+
+def cam6_detrained_condensate_partition(dlf, T, config=ZhangMcFarlaneConfig()):
+    """CAM6 host treatment of the ZM detrained condensate ``dlf``.
+
+    Port of ``clubb_intr.F90:2345-2376`` (cam_cesm2_1_rel), the
+    non-``zmconv_microp`` branch with the shallow term ``dlf2 = 0`` (CLUBB
+    replaces shallow convection)::
+
+        dum1 = 0 (T > T_warm), 1 (T < T_cold), (T_warm - T)/(T_warm - T_cold)
+        dq_c = dlf (1 - dum1);            dq_i = dlf dum1
+        dN_c = 3 max(0, dlf)(1 - dum1) / (4 pi r_liq^3 rho_liq)
+        dN_i = 3 max(0, dlf) dum1      / (4 pi r_ice^3 rho_ice)
+        ds   = dlf dum1 L_f            ->  dT/dt = ds / c_pd
+
+    ``T`` is the layer temperature the ramp reads.  CAM reads ``state1%t``,
+    the state after deep convection and that sub-step's CLUBB update; the
+    bridge passes its input-state temperature (parallel-split convention),
+    a KNOWN DIFFERENCE.  The ramp is the oracle's own piecewise-linear
+    clamp (``jnp.clip``, differentiable away from its two ends); no further
+    smoothing.  ``dq_c + dq_i == dlf`` exactly up to rounding.  The number
+    sources are per mass of air [1/kg/s], legoESM's ``N_c``/``N_i`` carry
+    convention (= CAM's NUMLIQ/NUMICE).
+
+    SIGN: every output is a source (>= 0 for dlf >= 0); ``dT_dt > 0`` warms.
+    """
+    t_warm, t_cold = config.detrain_ice_t_warm_K, config.detrain_ice_t_cold_K
+    dum1 = jnp.clip((t_warm - T) / (t_warm - t_cold), 0.0, 1.0)
+    dlf_pos = jnp.maximum(dlf, 0.0)
+    m_liq = 4.0 * _CAM6_DETRAIN_PI * config.detrain_r_liq_m ** 3 * config.detrain_rho_liq
+    m_ice = 4.0 * _CAM6_DETRAIN_PI * config.detrain_r_ice_m ** 3 * config.detrain_rho_ice
+    return DetrainedCondensatePartition(
+        dq_c=dlf * (1.0 - dum1),
+        dq_i=dlf * dum1,
+        dN_c=3.0 * (dlf_pos * (1.0 - dum1)) / m_liq,
+        dN_i=3.0 * (dlf_pos * dum1) / m_ice,
+        dT_dt=dlf * dum1 * constants.L_f / constants.c_pd,
+    )
 
 
 def zhang_mcfarlane_convection(

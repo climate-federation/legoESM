@@ -285,6 +285,9 @@ zm_dmpdz: -1.0e-3           # dilute-plume entrainment [1/m]
 zm_tau: 3600.0              # CAPE consumption timescale [s]
 zm_capelmt: 70.0            # deep-convection CAPE threshold [J/kg]
 zm_transport_cloud_tracers: true  # ZM convtran of carried cloud/precip water + numbers (CAM6)
+zm_detrain_number_source: true    # ZM detrained condensate as CAM6 clubb_intr: liquid/ice
+                                  # split 268-238 K, droplet (8 um) + ice (25 um) number
+                                  # sources, fusion heating; false = all to cloud liquid
 
 # ---- turbulence ---------------------------------------------------------------
 turbulence: clubb

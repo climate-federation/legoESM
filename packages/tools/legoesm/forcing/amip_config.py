@@ -230,6 +230,7 @@ class AMIPExperimentConfig(NamedTuple):
     morrison_do_graupel: bool = True  # Morrison graupel category (CAM6 MG2 has none)
     zm_land_fraction: str = "required"  # ZM land mask policy: "required" | "none" (aquaplanet)
     zm_transport_cloud_tracers: bool = True  # ZM convtran of carried cloud/precip tracers (CAM6)
+    zm_detrain_number_source: bool = True  # ZM detrained condensate: CAM6 ice split + number sources + fusion heat
 
 
 def config_to_dict(config) -> dict:

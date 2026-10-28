@@ -119,6 +119,7 @@ from legoesm.atmosphere.physics.convection.mass_flux import (
 )
 from legoesm.atmosphere.physics.convection.zhang_mcfarlane import (
     CONVTRAN1_TRACERS,
+    cam6_detrained_condensate_partition,
     zhang_mcfarlane_convection,
 )
 from legoesm.atmosphere.physics.convection.kain_fritsch import (
@@ -870,6 +871,27 @@ def _make_hydrostatic_convection(
             _to_sfc = _to_sfc or _tr.rain_is_net_flux
             if _dq_r_conv is not None and not _has_qr and not _to_sfc:
                 dq_c_conv_dt = dq_c_conv_dt + _dq_r_conv.reshape(shape_3d)
+            # CAM6 clubb_intr.F90:2345-2376 treatment of the ZM detrained
+            # condensate (ZhangMcFarlaneConfig.detrain_number_source): liquid/
+            # ice split by temperature, droplet + ice-crystal number sources,
+            # fusion heating.  Needs a carried q_i (without one the condensate
+            # stays all-liquid, as before); each number source only where its
+            # tracer is carried (per mass, the N_c/N_i carry convention).  The
+            # ramp reads the bridge's input T (parallel split; CAM: state1%t).
+            # The fusion heating enters dT_dt but NOT the conv_heating carry
+            # below (CAM's Beres source reads ZM's own heating only).
+            _detrain_extra = {}
+            if (scheme_name == "zhang_mcfarlane"
+                    and scheme_config.detrain_number_source
+                    and state.tracers is not None and "q_i" in state.tracers):
+                _part = cam6_detrained_condensate_partition(
+                    dq_c_conv_dt, T, scheme_config)
+                dq_c_conv_dt = _part.dq_c
+                dT_dt = dT_dt + _part.dT_dt
+                _detrain_extra["q_i"] = (_part.dq_i, "kg/kg/s")
+                for _nm, _src in (("N_c", _part.dN_c), ("N_i", _part.dN_i)):
+                    if _nm in state.tracers:
+                        _detrain_extra[_nm] = (_src, "1/kg/s")
             tracer_tends = {
                 "q_v": Field(
                     data=dq_v_dt, name="dq_v_dt_conv",
@@ -880,6 +902,10 @@ def _make_hydrostatic_convection(
                     dims=dims_3d, units="kg/kg/s",
                 ),
             }
+            for _nm, (_src, _units) in _detrain_extra.items():
+                tracer_tends[_nm] = Field(
+                    data=_src, name=f"d{_nm}_dt_detrain", dims=dims_3d,
+                    units=_units)
             if _dq_r_conv is not None and _has_qr and not _to_sfc:
                 tracer_tends["q_r"] = Field(
                     data=_dq_r_conv.reshape(shape_3d), name="dq_r_conv_dt",

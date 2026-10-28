@@ -1600,6 +1600,10 @@ class ExperimentConfig(NamedTuple):
     # Zhang-McFarlane convective transport of the carried cloud/precipitation
     # tracers (ZhangMcFarlaneConfig.transport_cloud_tracers; CAM6 convtran).
     zm_transport_cloud_tracers: bool = True
+    # Zhang-McFarlane detrained condensate handled as CAM6 clubb_intr: liquid/
+    # ice split by temperature + droplet/ice number sources + fusion heating
+    # (ZhangMcFarlaneConfig.detrain_number_source). False = all to cloud liquid.
+    zm_detrain_number_source: bool = True
     # Bechtold convective-top pressure [Pa]; terminates the (non-detraining)
     # plume + subsidence gate. 150 hPa stability cap (see BechtoldConfig.
     # p_conv_top_pa); raise toward 100 hPa if deep tropical tops are clipped.
@@ -2633,6 +2637,11 @@ class ExperimentConfig(NamedTuple):
             errors.append(
                 f"zm_transport_cloud_tracers must be a bool, got "
                 f"{self.zm_transport_cloud_tracers!r}"
+            )
+        if not isinstance(self.zm_detrain_number_source, bool):
+            errors.append(
+                f"zm_detrain_number_source must be a bool, got "
+                f"{self.zm_detrain_number_source!r}"
             )
         if self.bechtold_rain_vapor_sink not in ("formation", "vapour_mass"):
             errors.append(
@@ -5051,6 +5060,7 @@ class ExperimentConfig(NamedTuple):
             bechtold_rain_vapor_sink=getattr(amip_cfg, 'bechtold_rain_vapor_sink', "formation"),
             zm_land_fraction=getattr(amip_cfg, 'zm_land_fraction', "required"),
             zm_transport_cloud_tracers=getattr(amip_cfg, 'zm_transport_cloud_tracers', True),
+            zm_detrain_number_source=getattr(amip_cfg, 'zm_detrain_number_source', True),
             convective_buoyancy_death_memory=getattr(amip_cfg, 'convective_buoyancy_death_memory', False),
             convective_cloud=getattr(amip_cfg, 'convective_cloud', False),
             bechtold_use_ifs_downdraft=getattr(
@@ -5230,6 +5240,7 @@ class ExperimentConfig(NamedTuple):
             bechtold_rain_vapor_sink=self.bechtold_rain_vapor_sink,
             zm_land_fraction=self.zm_land_fraction,
             zm_transport_cloud_tracers=self.zm_transport_cloud_tracers,
+            zm_detrain_number_source=self.zm_detrain_number_source,
             convective_buoyancy_death_memory=self.convective_buoyancy_death_memory,
             convective_cloud=self.convective_cloud,
             bechtold_use_ifs_downdraft=self.bechtold_use_ifs_downdraft,
