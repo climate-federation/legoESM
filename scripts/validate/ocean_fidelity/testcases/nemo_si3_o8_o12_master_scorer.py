@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Fail-closed 0-ULP scoring driver for SI3 rungs O8 through O14.
+"""Fail-closed 0-ULP scoring driver for admitted SI3 production rungs.
 
 Scores the admitted 100-step O8--O16 master record at
 ``/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/round18/oracle_o8_o16_master``
-in order O8 through O14 against legoESM's production implementations under
+in order O8 through O16 against legoESM's production implementations under
 ``jax.jit`` (CPU ``fp64``, ``PrecisionPolicy.fp64(transcendentals="libm")``,
 inputs passed as runtime JIT arguments, and the rung's resolved namelist from
 ``record_100step/output.namelist.ice`` and ``record_100step/output.namelist.dyn``).
@@ -1971,11 +1971,254 @@ def _summarize_o13_conservation(reports: Sequence[Mapping[str, Any]]) -> dict[st
     }
 
 
+from legoesm.ice.si3_finalize import (  # noqa: E402 - late-rung extension
+    SI3Fluxes,
+    SI3StressInputs,
+    SI3UpdateFluxForcing,
+    si3_ice_update_tau,
+    si3_o15_step,
+    si3_o16_step,
+)
+from legoesm.ice.si3_orca2_state import (  # noqa: E402 - late-rung extension
+    SI3AggregatedVars,
+    SI3CategoryBounds,
+    SI3EquivalentVars,
+    SI3ORCA2StateConfig,
+    SI3State,
+    si3_lbc_lnk_orca2,
+)
+from legoesm.ice.si3_surface import SI3SurfaceConfig  # noqa: E402
+from scripts.validate.ocean_fidelity.testcases.nemo_si3_o8_o16_master_gate import (  # noqa: E402
+    PRE_AGG_TOTALS,
+    STATE,
+    TOTALS,
+)
+
+PINNED_PROJECTION_SHA256.update({
+    "O15": "e1cd64c354294a071aca8496b014b59eb0b8f7be93d0304219e5c94b192ea292",
+    "O16": "6a3f9ed6f9330af1c65b603726c2ba407a28683f2de1b2a9dcaf9fd7dd3dc5e0",
+})
+
+
+_DIRECT_STATE_FIELDS = (
+    "v_i", "v_s", "sv_i", "a_i", "t_su", "oa_i", "a_ip", "v_ip",
+    "v_il", "e_s", "e_i", "szv_i",
+)
+_EQUIVALENT_FIELDS = SI3EquivalentVars._fields
+_AGGREGATED_FIELDS = SI3AggregatedVars._fields
+
+
+def _full_orca2_field(value: np.ndarray, nn_hls: int = 2) -> jax.Array:
+    """Harness-only reconstruction of an interior record's production halos."""
+    arr = jnp.asarray(value, dtype=jnp.float64)
+    pad = ((nn_hls, nn_hls), (nn_hls, nn_hls)) + ((0, 0),) * (arr.ndim - 2)
+    return si3_lbc_lnk_orca2(jnp.pad(arr, pad), "T", 1.0, nn_hls)
+
+
+def _state_from_record(
+    fields: dict[str, np.ndarray],
+    config: SI3ORCA2StateConfig,
+    *,
+    full_orca2: bool,
+) -> SI3State:
+    sample = fields["a_i"]
+    ni, nj = sample.shape[:2]
+    h = config.nn_hls if full_orca2 else 0
+    conv = (lambda x: _full_orca2_field(x, h)) if full_orca2 else (
+        lambda x: jnp.asarray(x, dtype=jnp.float64)
+    )
+    state = SI3State.zeros(ni + 2 * h, nj + 2 * h, config=config)
+    direct = {name: conv(fields[name]) for name in _DIRECT_STATE_FIELDS}
+    eqv = state.equivalent._replace(
+        **{name: conv(fields[name]) for name in _EQUIVALENT_FIELDS if name in fields}
+    )
+    agg = state.aggregated._replace(
+        **{name: conv(fields[name]) for name in _AGGREGATED_FIELDS if name in fields}
+    )
+    t_si = conv(fields["t_si"]) if "t_si" in fields else state.t_si
+    if "hi_max" not in fields:
+        raise _refuse("state record lacks explicit hi_max")
+    hi_mean = fields.get("hi_mean", np.asarray(state.bounds.hi_mean))
+    bounds = SI3CategoryBounds(
+        hi_max=jnp.asarray(fields["hi_max"], dtype=jnp.float64),
+        hi_mean=jnp.asarray(hi_mean, dtype=jnp.float64),
+    )
+    return state._replace(
+        **direct,
+        t_si=t_si,
+        equivalent=eqv,
+        aggregated=agg,
+        bounds=bounds,
+    )
+
+
+def _fluxes_from_record(fields: dict[str, np.ndarray]) -> SI3Fluxes:
+    return SI3Fluxes(
+        **{name: jnp.asarray(fields[name], dtype=jnp.float64) for name in SI3Fluxes._fields}
+    )
+
+
+def _state_score_fields(state: SI3State, *, interior_halo: int = 0) -> dict[str, jax.Array]:
+    sl = (
+        (slice(interior_halo, -interior_halo), slice(interior_halo, -interior_halo))
+        if interior_halo
+        else (slice(None), slice(None))
+    )
+    out = {name: getattr(state, name)[sl] for name in _DIRECT_STATE_FIELDS}
+    out.update({name: getattr(state.equivalent, name)[sl] for name in _EQUIVALENT_FIELDS})
+    out.update({name: getattr(state.aggregated, name)[sl] for name in _AGGREGATED_FIELDS})
+    return out
+
+
+def _late_config(namelist: dict[str, Any], scalars: dict[str, float], *, nn_hls: int) -> SI3ORCA2StateConfig:
+    return SI3ORCA2StateConfig.for_orca2_sas_ice(
+        nn_hls=nn_hls,
+        ln_icethd=True,
+        rn_himin=float(namelist["rn_himin"]),
+        rn_simin=float(namelist["rn_simin"]),
+        rn_sinew=float(namelist["rn_sinew"]),
+        nn_icesal=int(namelist["nn_icesal"]),
+        ln_pnd=bool(namelist["ln_pnd"]),
+        ln_pnd_LEV=bool(namelist["ln_pnd_LEV"]),
+        ln_pnd_TOPO=bool(namelist["ln_pnd_TOPO"]),
+        ln_pnd_lids=bool(namelist["ln_pnd_lids"]),
+        ln_pnd_alb=bool(namelist["ln_pnd_alb"]),
+        nn_snwfra=int(namelist["nn_snwfra"]),
+        nn_fsbc=1,
+        rDt_ice=float(scalars["rDt_ice"]),
+    )
+
+
+def _update_forcing(fields: dict[str, np.ndarray]) -> SI3UpdateFluxForcing:
+    values: dict[str, jax.Array] = {}
+    for name in SI3UpdateFluxForcing._fields:
+        source = "tmask_k1" if name == "tmask" else name
+        values[name] = jnp.asarray(fields[source], dtype=jnp.float64)
+    return SI3UpdateFluxForcing(**values)
+
+
+def score_o15_o16(
+    master_root: Path = DEFAULT_MASTER_ROOT,
+    ppsrc: Path = DEFAULT_PPSRC,
+    steps: Sequence[int] = STEPS,
+    plant: str | None = None,
+) -> dict[str, Any]:
+    """Score O15/O16 through their production entry points at every recorded step."""
+    if not steps:
+        raise _refuse("no steps requested")
+    set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
+    manifest = verify_master_admission_manifests(master_root, plant=plant)
+    digests = manifest["rung_record_digests"]
+    run_dir = master_root / "record_100step"
+    records_dir = run_dir / "o8_o16_master_records"
+    namelist = parse_resolved_ice_namelist(
+        run_dir / "output.namelist.ice", run_dir / "output.namelist.dyn", ppsrc, plant
+    )
+    surface_config = SI3SurfaceConfig.from_input_namelists(
+        run_dir / "namelist_ref", run_dir / "namelist_cfg",
+        run_dir / "namelist_ice_ref", run_dir / "namelist_ice_cfg",
+    )
+    o15 = FieldScoreAccumulator()
+    o16_agg = FieldScoreAccumulator()
+    o16_flx = FieldScoreAccumulator()
+    o16_tau = FieldScoreAccumulator()
+
+    for kt in steps:
+        records: dict[int, dict[str, Any]] = {}
+        for kind in PROJECTIONS["O15"] + PROJECTIONS["O16"]:
+            name = record_name(kind, kt, 0)
+            rung = "O15" if kind in PROJECTIONS["O15"] else "O16"
+            records[kind] = read_record_verified(records_dir / name, digests[rung].get(name))
+            _verify_record_scalars_against_namelist(records[kind]["scalars"], namelist, kind)
+
+        f13 = records[13]["fields"]
+        f14 = dict(records[14]["fields"])
+        cfg15 = _late_config(namelist, records[13]["scalars"], nn_hls=0)
+        state13 = _state_from_record(f13, cfg15, full_orca2=False)
+        flux13 = _fluxes_from_record(f13)
+        skip_rebin = plant == "o15-model-mutation"
+        out15 = jax.jit(
+            lambda state, flux, sss, sst, amax: si3_o15_step(
+                state, flux, sss_m=sss, sst_m=sst, rn_amax_2d=amax,
+                rn_himin=float(namelist["rn_himin"]), config=cfg15,
+                _plant_skip_rebin=skip_rebin,
+            )
+        )(
+            state13, flux13, jnp.asarray(f13["sss_m"]), jnp.asarray(f13["sst_m"]),
+            jnp.asarray(f13["rn_amax_2d"]),
+        )
+        got15 = _state_score_fields(out15.state)
+        got15.update({name: getattr(out15.fluxes, name) for name in SI3Fluxes._fields})
+        if plant == "o15-1ulp" and kt == steps[0]:
+            f14["a_i"] = flip_1ulp(f14["a_i"], (0, 0, 0))
+        owned15 = set(_DIRECT_STATE_FIELDS) | set(_EQUIVALENT_FIELDS) | set(PRE_AGG_TOTALS)
+        owned15 |= set(SI3Fluxes._fields)
+        for spec in KINDS[14].fields:
+            if spec.name in owned15:
+                o15.update(spec.name, got15[spec.name], f14[spec.name], kt=kt, category=0)
+
+        f18 = records[18]["fields"]
+        f15 = records[15]["fields"]
+        f16 = dict(records[16]["fields"])
+        cfg16 = _late_config(namelist, records[18]["scalars"], nn_hls=2)
+        state18 = _state_from_record(f18, cfg16, full_orca2=True)
+        flux15 = _fluxes_from_record(f15)
+        forcing15 = _update_forcing(f15)
+        omit_res = plant == "o16-model-mutation"
+        out16 = jax.jit(
+            lambda state, flux, forcing, sss: si3_o16_step(
+                state, flux, forcing, sss_m=sss, config=cfg16,
+                surface_config=surface_config, _plant_omit_hfx_res=omit_res,
+            )
+        )(state18, flux15, forcing15, _full_orca2_field(f18["sss_m"]))
+        got_agg = _state_score_fields(out16.state, interior_halo=2)
+        for spec in STATE + TOTALS:
+            o16_agg.update(spec.name, got_agg[spec.name], f15[spec.name], kt=kt, category=0)
+
+        if plant == "o16-1ulp" and kt == steps[0]:
+            f16["qsr"] = flip_1ulp(f16["qsr"], (0, 0))
+        for spec in KINDS[16].fields:
+            o16_flx.update(spec.name, getattr(out16.outputs, spec.name), f16[spec.name], kt=kt, category=0)
+
+        f19 = records[19]["fields"]
+        f20 = dict(records[20]["fields"])
+        stress = SI3StressInputs(**{
+            name: jnp.asarray(f19[name], dtype=jnp.float64) for name in SI3StressInputs._fields
+        })
+        tau = jax.jit(lambda x: si3_ice_update_tau(
+            x, config=cfg16, ln_drgice_imp=bool(namelist["ln_drgice_imp"])
+        ))(stress)
+        if plant == "o16-tau-1ulp" and kt == steps[0]:
+            f20["utau"] = flip_1ulp(f20["utau"], (2, 2))
+        for spec in KINDS[20].fields:
+            o16_tau.update(spec.name, getattr(tau, spec.name), f20[spec.name], kt=kt, category=0)
+
+    summaries = {
+        "O15": o15.summary(),
+        "O16_aggregation": o16_agg.summary(),
+        "O16_flux": o16_flx.summary(),
+        "O16_tau": o16_tau.summary(),
+    }
+    failures = [f"{name}: {score['first_non_bit']} max_ulp={score['max_ulp']}"
+                for name, score in summaries.items() if score["total_unequal"]]
+    if failures:
+        raise _refuse("; ".join(failures))
+    return {
+        "status": "PASS_ALL_O15_O16_0_ULP",
+        "steps_scored": len(steps),
+        "first_step": int(steps[0]),
+        "last_step": int(steps[-1]),
+        "manifest_verification": manifest,
+        "resolved_namelist": namelist,
+        "scores": summaries,
+    }
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--rung",
-        choices=("O8-O13", "O13", "O14"),
+        choices=("O8-O13", "O13", "O14", "O15-O16"),
         default="O8-O13",
         help="Certified rung group to score",
     )
@@ -2013,6 +2256,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             "o14-1ulp",
             "o14-model-bypass",
             "o13-dropped-transfer",
+            "o15-1ulp",
+            "o15-model-mutation",
+            "o16-1ulp",
+            "o16-tau-1ulp",
+            "o16-model-mutation",
             "manifest-digest",
             "namelist-mismatch",
             "swapped-exit",
@@ -2040,6 +2288,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     scorer = (
         score_o14
         if args.rung == "O14"
+        else score_o15_o16
+        if args.rung == "O15-O16"
         else score_o13
         if args.rung == "O13" or args.only_o13
         else score_o8_to_o12
@@ -2061,7 +2311,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             for k, v in report["rungs"].items()
         }
     else:
-        summary["score"] = report["score"]["status"]
+        summary["score"] = (
+            report["score"]["status"]
+            if "score" in report
+            else {key: value["status"] for key, value in report["scores"].items()}
+        )
     print(json.dumps(summary, indent=2))
     return 0
 

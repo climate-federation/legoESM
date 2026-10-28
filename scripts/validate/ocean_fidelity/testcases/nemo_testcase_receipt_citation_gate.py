@@ -10860,6 +10860,41 @@ _reanchor(
     anchors=['def test_production_call_sites_route_through_o8_o12_and_fail_when_reverted(',
              'np.asarray(rev_do_state.h_ice.data).view(np.uint64),', 173],
 )
+_reanchor(
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1636-1666',
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1636-1667',
+    anchors=["# 5. Rung O12:",
+             ('spec.name, f10[spec.name], f11[spec.name], kt=kt, category=0', 2), 32],
+)
+
+# --- SI3 round 24 (O15/O16 stopped score) ---
+FILES.update({
+    'docs/ice/fidelity/si3_r24_o15_o16_receipt.md': REPO / 'docs/ice/fidelity/si3_r24_o15_o16_receipt.md',
+    'iceitd.f90': Path('/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/round18/refused/builds_20261026T210237Z_2/ORCA2_SAS_ICE_O8O16_REC/BLD/ppsrc/nemo/iceitd.f90'),
+    'iceupdate.f90': Path('/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/round18/refused/builds_20261026T210237Z_2/ORCA2_SAS_ICE_O8O16_REC/BLD/ppsrc/nemo/iceupdate.f90'),
+    'packages/ice/legoesm/ice/si3_finalize.py': REPO / 'packages/ice/legoesm/ice/si3_finalize.py',
+    'nemo_si3_o8_o16_master_gate.py': REPO / 'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o16_master_gate.py',
+    'o8_o16_master_writer.F90': REPO / 'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o16_master_acquisition/o8_o16_master_writer.F90',
+})
+
+CITATION_MAP.update({
+    'iceitd.f90:496-500': ['a_i_2d(ii,jl1) = a_i_2d(ii,jl1) - pdaice(ii,jl)', 'v_i_2d(ii,jl2) = v_i_2d(ii,jl2) + pdvice(ii,jl)', 5],
+    'packages/ice/legoesm/ice/si3_finalize.py:254-311': [('e_i: Field,', 2), 'sv_i = transfer3(sv_i, zworkv)', 58],
+    'packages/ice/legoesm/ice/si3_finalize.py:286-290': ['a_i = a_i.at[..., donor].set(', 'jnp.where(active, sr(a_i[..., receiver] + pdaice), a_i[..., receiver])', 5],
+    'iceupdate.f90:373-418': ['IF( MOD( kt-1, nn_fsbc ) == 0 ) THEN', 'vtau(ji,jj) = ( 1._wp - at_i(ji,jj) ) * vtau_oce(ji,jj) + at_i(ji,jj) * zvtau_ice', 46],
+    'nemo_si3_o8_o16_master_gate.py:171-180': ['15: Kind(', '+ _fields("snwice_mass snwice_mass_b", "F2"),', 10],
+    'o8_o16_master_writer.F90:446-457': ['ELSEIF(kind==15) THEN', ('CALL put_f2(u,snwice_mass); CALL put_f2(u,snwice_mass_b)', 1), 12],
+    'iceupdate.f90:410-419': [('DO jj = ntsj-( 0), ntej+(  0 ) ; DO ji = ntsi-( 0), ntei+(  0)', 7), ('END DO   ;   END DO', 11), 10],
+    'iceitd.f90:497': 'a_i_2d(ii,jl2) = a_i_2d(ii,jl2) + pdaice(ii,jl)',
+    'packages/ice/legoesm/ice/si3_finalize.py:289-290': ['a_i = a_i.at[..., receiver].set(', 'jnp.where(active, sr(a_i[..., receiver] + pdaice), a_i[..., receiver])', 2],
+})
+
+_reanchor(
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1-1738',
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1-1990',
+    anchors=['#!/usr/bin/env python3', 'raise SystemExit(main())', 1990],
+)
+
 DEFAULT_RECEIPT = (
     REPO / "docs/ocean/fidelity/testcases"
     / "nemo_testcases_l2_gyre_phase3_round8_receipt.md")
