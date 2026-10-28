@@ -2,12 +2,17 @@
 
 - **Round**: `orca2_r344`
 - **Author**: Codex
-- **Disposition**: **HELD for GPU acquisition**; CPU implementation and evidence complete
+- **Disposition**: **ACQUISITION_NEEDED**; the source-barrier repair changed the
+  CPU arm, so the operator must repeat the GPU arm on the repaired commit
 - **Preregistration**: `docs/ocean/fidelity/testcases/PREREG_nemo_testcases_l4_orca2_round344_fast_literal.md`
-- **CPU artifact**: `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/orca2_r344/arm_fast_literal_cpu_fp64.json` (SHA-256 `5f490521693c16da8609eca5b389520d406d0636d1759aad20f11d15d5e631aa`)
+- **Repaired CPU artifact**: `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/orca2_r344/arm_fast_literal_cpu_fp64.json` (SHA-256 `3881e7f0cd5575f2c09be004053c9e10dcb5ae5f4864967dd7faf62465f5478c`)
 - **Exact control artifact**: `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/orca2_r344/arm_exact_cpu_fp64.json` (SHA-256 `dfc177f2893fb206583e220be61e1c724aceaabac0c7227163980e19f81edaf5`)
 - **Round-343 comparison report**: `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/orca2_r343/orca2_round343_speed_benchmark_report.json` (SHA-256 `e1e8c4a241fb201ac3d8f72a35e3964eb8ad78fa95e309a9da09d2da58f710e1`)
-- independent review: operator (Claude)
+- **Pre-repair GPU artifact**: `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/orca2_r344/arm_fast_literal_gpu_fp64.json` (SHA-256 `07da6c63b170a209e48c99fe17931b4dc9f46136ce18cf73b2ee595218377a41`)
+- **Pre-repair two-arm report**: `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/orca2_r344/orca2_round344_fast_literal_benchmark_report.json` (SHA-256 `64a0315a69c886eb19f12d608ac8a5744c7a1447c3b470dfbab1e5c819d52125`)
+- independent review: Gemini Flash **LAND**; Argon **HOLD** addressed by the
+  source barrier, exact eager/JIT assertion, live DDM branch inputs, and GPU
+  evidence recorded here; final rereview remains operator-owned
 
 ## Verdict
 
@@ -22,8 +27,8 @@ formulas and operation-order barriers at
 and `packages/ocean/legoesm/ocean/physics/vertical_mixing/tke.py:2708-2811`.
 Only the precision policy dispatches EXP/LOG10/TANH/SIN to native XLA.
 
-The CPU result is the intended outcome: **1.5802 s/step**, a **13.64x** speedup
-over round 343 exact CPU, with day-8 wet SST RMS **7.16e-11 C** instead of the
+The repaired CPU result is the intended outcome: **1.5395 s/step**, a **14.00x**
+speedup over round 343 exact CPU, with day-8 wet SST RMS **6.35e-11 C** instead of the
 normal-mode **5.29e-3 C**.  The native result therefore preserves the exact
 physics to round-off growth rather than switching formulas.
 
@@ -32,19 +37,21 @@ physics to round-off growth rather than switching formulas.
 All CPU values use fp64, 64 steps, two warm-up steps, and the round-343 timing
 protocol.  The normal/exact columns are the frozen round-343 measurements.
 
-| Metric | Exact CPU | Normal CPU | Fast-literal CPU | Normal GPU | Fast-literal GPU |
+| Metric | Exact CPU | Normal CPU | Repaired fast-literal CPU | Normal GPU | Pre-repair fast-literal GPU |
 |---|---:|---:|---:|---:|---:|
-| Steady median (s/step) | 21.5587 | 1.3185 | **1.5802** | 0.4680 | **UNMEASURED** |
-| Odd-kt median (s/step) | 22.5248 | 1.3837 | **1.7528** | 0.7576 | **UNMEASURED** |
-| Even-kt median (s/step) | 19.5232 | 1.2021 | **1.2829** | 0.1898 | **UNMEASURED** |
-| Compile + warm-up (s) | 239.44 | 175.42 | **231.09** | 263.73 | **UNMEASURED** |
-| Projected 2,920-step year, steady (min) | 1049.19 | 64.16 | **76.90** | 22.77 | **UNMEASURED** |
-| Projected year including compile (min) | 1052.46 | 67.04 | **80.70** | 27.15 | **UNMEASURED** |
-| Host peak RSS (MiB) | 11290.5 | 9847.1 | **10472.7** | 6739.1 | **UNMEASURED** |
+| Steady median (s/step) | 21.5587 | 1.3185 | **1.5395** | 0.4680 | **0.5670** |
+| Odd-kt median (s/step) | 22.5248 | 1.3837 | **1.7780** | 0.7576 | **0.9500** |
+| Even-kt median (s/step) | 19.5232 | 1.2021 | **1.3943** | 0.1898 | **0.2307** |
+| Compile + warm-up (s) | 239.44 | 175.42 | **246.58** | 263.73 | **360.50** |
+| Projected 2,920-step year, steady (min) | 1049.19 | 64.16 | **74.92** | 22.77 | **27.60** |
+| Projected year including compile (min) | 1052.46 | 67.04 | **78.98** | 27.15 | **33.59** |
+| Host peak RSS (MiB) | 11290.5 | 9847.1 | **10015.3** | 6739.1 | **6785.0** |
 
-Fast-literal CPU is 13.64x faster than exact CPU and 1.20x slower than the
+Repaired fast-literal CPU is 14.00x faster than exact CPU and 1.17x slower than the
 formula-switching normal CPU arm.  The latter comparison is descriptive, not
-a changed acceptance bar.
+a changed acceptance bar.  The GPU column is the operator's completed run at
+parent `0eefc2ea5f`; it measured 0.5670 s/step and 27.6 min/year, but is not a
+final repaired-code comparison.
 
 ## Eight-day accuracy against saved exact states
 
@@ -53,14 +60,14 @@ round-344 CPU arm; `Normal` is round-343 `normal_cpu_fp64` beside it.
 
 | Day | SST RMS Fast | SST RMS Normal | SST max Fast | SST max Normal | 3-D T RMS Fast | 3-D T RMS Normal | 3-D T max Fast | 3-D T max Normal |
 |---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| 1 | 3.351e-11 | 1.748e-3 | 3.313e-9 | 8.255e-2 | 4.366e-11 | 1.754e-3 | 2.325e-8 | 2.451e-1 |
-| 2 | 3.578e-11 | 2.820e-3 | 2.084e-9 | 2.028e-1 | 2.882e-11 | 3.295e-3 | 8.234e-9 | 5.977e-1 |
-| 3 | 1.860e-10 | 4.390e-3 | 2.332e-8 | 2.998e-1 | 1.290e-10 | 4.742e-3 | 5.556e-8 | 6.654e-1 |
-| 4 | 9.188e-11 | 4.337e-3 | 8.411e-9 | 1.895e-1 | 8.898e-11 | 5.289e-3 | 3.040e-8 | 5.840e-1 |
-| 5 | 5.207e-11 | 4.464e-3 | 2.447e-9 | 1.508e-1 | 5.123e-11 | 5.517e-3 | 1.835e-8 | 6.699e-1 |
-| 6 | 5.959e-11 | 5.319e-3 | 4.957e-9 | 3.494e-1 | 5.201e-11 | 5.793e-3 | 1.339e-8 | 7.020e-1 |
-| 7 | 6.646e-11 | 4.836e-3 | 5.123e-9 | 1.744e-1 | 6.089e-11 | 6.251e-3 | 2.372e-8 | 7.040e-1 |
-| 8 | **7.163e-11** | **5.293e-3** | **3.414e-9** | **1.604e-1** | **7.772e-11** | **6.891e-3** | **1.652e-8** | **8.072e-1** |
+| 1 | 3.229e-11 | 1.748e-3 | 3.351e-9 | 8.255e-2 | 4.515e-11 | 1.754e-3 | 2.357e-8 | 2.451e-1 |
+| 2 | 3.763e-11 | 2.820e-3 | 3.180e-9 | 2.028e-1 | 2.898e-11 | 3.295e-3 | 6.731e-9 | 5.977e-1 |
+| 3 | 2.190e-10 | 4.390e-3 | 2.753e-8 | 2.998e-1 | 1.483e-10 | 4.742e-3 | 6.347e-8 | 6.654e-1 |
+| 4 | 7.038e-11 | 4.337e-3 | 5.317e-9 | 1.895e-1 | 7.081e-11 | 5.289e-3 | 2.957e-8 | 5.840e-1 |
+| 5 | 4.584e-11 | 4.464e-3 | 2.236e-9 | 1.508e-1 | 4.419e-11 | 5.517e-3 | 1.520e-8 | 6.699e-1 |
+| 6 | 5.284e-11 | 5.319e-3 | 2.888e-9 | 3.494e-1 | 5.191e-11 | 5.793e-3 | 1.493e-8 | 7.020e-1 |
+| 7 | 5.696e-11 | 4.836e-3 | 3.152e-9 | 1.744e-1 | 5.121e-11 | 6.251e-3 | 1.378e-8 | 7.040e-1 |
+| 8 | **6.349e-11** | **5.293e-3** | **2.806e-9** | **1.604e-1** | **6.432e-11** | **6.891e-3** | **1.101e-8** | **8.072e-1** |
 
 Fast CPU is closer to exact than normal CPU for every preregistered day and
 metric.  The exact/libm control reproduced the saved exact states bit for bit
@@ -68,12 +75,11 @@ at days 1 and 2: all four SST/3-D T RMS and maximum scores are zero.
 
 ## Predictions and controls
 
-1. **Native reachability: confirmed with one qualified refutation.** DDM, IWM,
-   htau, and etau all execute with native fp64 under eager and JIT.  The frozen
-   prediction of bit-identical eager/whole-call-JIT IWM was refuted: 7 of 116
-   output words differ by exactly one ULP.  This is XLA-context round-off; the
-   formula, selector, and operation order are unchanged.  The gate now records
-   the observed maximum of one ULP instead of hiding the refutation.
+1. **Native reachability: confirmed exactly.** DDM, IWM, htau, and etau all
+   execute with native fp64 under truly eager whole calls and JIT.  Rounding the
+   LOG10 result before NEMO's following subtraction restores bit-identical IWM
+   output.  A plant that strips only this barrier reproduces 7 unequal words in
+   the 116-word salinity output; the exact eager/JIT assertion then fails.
 2. **Exact/libm preservation: confirmed.** The scalar-libm unit outputs are
    bit-identical; rung-10 and standalone S4 K0 resolve identically; class
    defaults and all non-fast callers are unchanged.  The preservation battery
@@ -85,22 +91,26 @@ at days 1 and 2: all four SST/3-D T RMS and maximum scores are zero.
    and VJP are finite, the derivative is nonzero, and reverse equals forward
    under the registered `rtol=atol=2e-12` comparator.
 
-Focused gates: 87 passed/1 deselected; benchmark/report gates: 7 passed/1
-deselected; real full-card gradient: 1 passed in 1269.75 s.  No NEMO executable
-was run and no process was killed.  The final clean-tree default ORCA2 battery,
-including the receipt citation gate and six-test private-import ratchet, passed
-143/143 in 510.86 s.
+The repaired focused battery passes 13 tests with one operator-only test
+deselected.  No NEMO executable was run and no process was killed.  Final
+receipt-citation, default, and ratchet results are recorded after this repair.
 
-## GPU acquisition hold
+## GPU acquisition status
 
-`nvidia-smi` could not communicate with the NVIDIA driver, so no GPU could be
-proven idle at 0 MiB.  In accordance with the preregistration and user kill
-rule, the GPU arm was not launched.  The committed completion runner refuses
-unless the selected device reports exactly 0 MiB used and 0% utilization, then
-runs only `fast_literal_gpu_fp64` and assembles the comparison report:
+The operator completed the original GPU arm and two-arm report at parent
+`0eefc2ea5f`.  It measured **0.5670 s/step**, **27.6 min/year**, and day-8 wet
+SST RMS **1.10e-10 C** with maximum **1.10e-8 C**.  Their SHA-256 digests are
+recorded at the top of this receipt and were computed directly with
+`sha256sum`.
+
+The added IWM source-rounding barrier changed the CPU arm, so controlled
+comparison requires the operator to repeat the GPU arm at the repaired commit.
+The committed completion runner refuses unless the selected device reports
+exactly 0 MiB used and 0% utilization, then runs only
+`fast_literal_gpu_fp64` and assembles the replacement two-arm report:
 
 `scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round344_fast_literal_gpu/run.sh --run GPU_INDEX`
 
-This receipt is therefore **HELD**, not a completed two-backend benchmark.
-No scientific decision is needed; only the missing idle-GPU acquisition and
-the designated operator review remain.
+This receipt is therefore **ACQUISITION_NEEDED**, not a final two-backend
+benchmark.  No scientific decision is needed; only the repaired-code GPU
+acquisition and designated operator rereview remain.
