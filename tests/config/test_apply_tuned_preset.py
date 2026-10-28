@@ -37,6 +37,7 @@ def test_header_only_preset_is_a_noop():
     cfg = camp.make_physics_config(convection="kuo")
     out, n = camp.apply_tuned_preset(cfg, "kuo", _PRESETS)
     assert n == 0 and out is cfg
+    assert (_PRESETS / "emanuel.yaml").exists()  # a missing file is also a no-op
     cfg = camp.make_physics_config(convection="emanuel")
     out, n = camp.apply_tuned_preset(cfg, "emanuel", _PRESETS)
     assert n == 0 and out is cfg
