@@ -1,13 +1,15 @@
 # ORCA2 round 342 — standalone one-year S4 acquisition tool, legoESM K0 driver, and Decision-185 metric card comparison
 
 Date: 2026-10-27. Base `6b5e8413eb3b`; preregistration `75cc6fec9`.
-Disposition: **ACQUISITION_NEEDED**. This round built and preflighted the
-observer-free one-year (2,920-step, 365-day) standalone K0 NEMO twin
-acquisition tool, executed the 20-step standalone K0 legoESM smoke run, and
-built and smoke-verified the month-by-month Decision-160 ORCA2X metric card
-comparison next to the Decision-185 reference bars. It did not build or run
-NEMO (`--run` is operator-only) and did not start the full 2,920-step legoESM
-year.
+Disposition: **ACQUISITION_NEEDED** (Arm B only; Arm A completed and admitted).
+This round built and preflighted the observer-free one-year (2,920-step,
+365-day) standalone K0 NEMO twin acquisition tool, executed the 20-step
+standalone K0 legoESM smoke run, built and smoke-verified the month-by-month
+Decision-160 ORCA2X metric card comparison next to the Decision-185 reference
+bars, and (in Resume 3) fixed the gfortran `stderr` `STOP 0` + `time.step`
+completion check, admitted the completed operator-run Arm A
+(`/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round342/s4_year/orca2_k0_year1_a_np2`),
+and stopped for operator execution of reproducibility Twin B (`arm B only`).
 
 ## Source basis and frozen experiment
 
@@ -245,15 +247,23 @@ pattern correlation `1.000000`) on `M01_Jan` (`1d` partial month) and
     Under `--stub-run-dir <stub_root>` (invoked by `--preflight-only`),
     `stage_single_arm` in `run.sh` installs a 2-line wrapper at `${arm_dir}/nemo`
     that `exec`s `nemo_testcase_l4_orca2_round342_s4_year_gate.py
-    --act-as-nemo-binary` (with optional `--plant-stub-unproduced-file` or
+    --act-as-nemo-binary` (with optional `--plant-stub-unproduced-file`,
+    `--plant-stub-missing-stop`, `--plant-stub-short-timestep <steps>`, or
     `--plant-stub-sleep <seconds>`), calling `write_stub_s4_year_outputs(Path.cwd(), ...)`
     to read `nn_itend` and `nn_stock` directly from `namelist_cfg` in the staged
-    arm directory and write only `ocean.output`, `output.namelist.dyn`,
-    `mesh_mask_{0000,0001}.nc`, and `ORCA2_{kt:08d}_restart_{0000,0001}.nc` (with
-    Day 1 `kt = 8` populated from admitted R340 S4 `kt = 9` entry state).
-    `verify_no_unexpected_files` refuses any `.bin` or `oracle_*` file.
+    arm directory, write `time.step`
+    (`ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/stpctl.f90:106-107` and
+    `ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/stpctl.f90:160-161`),
+    emit `"STOP 0"` to `sys.stderr`
+    (`ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/nemogcm.f90:237-238`
+    under gfortran), and write only `ocean.output`, `output.namelist.dyn`,
+    `time.step`, `mesh_mask_{0000,0001}.nc`, and
+    `ORCA2_{kt:08d}_restart_{0000,0001}.nc` (with Day 1 `kt = 8` populated
+    from admitted R340 S4 `kt = 9` entry state). `verify_no_unexpected_files`
+    refuses any `.bin` or `oracle_*` file.
 11. **Checklist 14–16 (No symlinked outputs, disk-space & RAM preflight + plants,
-    `timeout --foreground` + plant, clean worktree + plants, and `run.sh` syntax
+    `timeout --foreground` + plant, clean worktree + plants, gfortran `stderr`
+    `STOP 0` + `time.step` completion signal + plants, and `run.sh` syntax
     plant):**
     - All outputs are regular files (`not p.is_symlink()`).
     - `verify_disk_space` checks free space (`351,076.36 GiB` available on
@@ -278,9 +288,69 @@ pattern correlation `1.000000`) on `M01_Jan` (`1d` partial month) and
       plants both an untracked file and a modified tracked file in a temporary
       git repository and proves both Python (`verify_clean_worktree`) and
       `run.sh` (`check_clean_worktree` with `R342_CHECK_REPO_ROOT`) refuse.
+    - `verify_nemo_completion_signal` and `run_single_arm` verify NEMO's real
+      completion signal where gfortran writes it
+      (`ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/nemogcm.f90:237-238`,
+      `ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/stpctl.f90:106-107`,
+      and `ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/stpctl.f90:160-161`):
+      `STOP 0` on `stderr` (`mpirun.stderr.log`), `int(time.step) == nn_itend`
+      (`2920`), and no `"E R R O R"` or nonzero `STOP` in `ocean.output` (or
+      `mpirun.stderr.log` / `mpirun.stdout.log`). `plant_completion_signal_failures`
+      and `test_real_arm_a_completion_signal_and_plants` verify the copied real
+      Arm-A log files in
+      `tests/ocean/fidelity/data/orca2_round342_arm_a_real_logs/` pass and prove
+      missing `STOP 0` on `stderr`, `STOP 0` on `stdout` only, `STOP 123`, short
+      `time.step` (`2912` / `2919`), missing `time.step`, and `"E R R O R"` in
+      `ocean.output` all refuse (plus shell plants `--plant-stub-missing-stop`
+      and `--plant-stub-short-timestep 8` in `run.sh`).
     - `verify_run_sh_syntax_and_plant` checks `bash -n` on `run.sh` and plants a
       syntax error (`if then`) in a temporary copy, proving `bash -n` refuses
       (`rc = 2`).
+
+## Resume 3: Kept Arm A admission (`--admit-existing`) and Arm-B-only resume
+
+The operator ran the NEMO 1-year acquisition at `HEAD 5ba77a9d6cd041b929d6982444cd4727c60c791a`
+using the compiled observer-free K0 binary
+`/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/ORCA2_STANDALONE_IIF_OMIP_L4_R342S4Y/BLD/bin/nemo.exe`
+(`sha256 = 835f03b99a3c96e80d23f35c415d099fde292678ae30572e9c5412be4b67e16d`).
+Arm A (`orca2_k0_year1_a_np2`) completed all `2,920` steps (`time.step = 2920`,
+`365` daily restart pairs `ORCA2_00000008_restart_{0000,0001}.nc` through
+`ORCA2_00002920_restart_{0000,0001}.nc`, `mpirun.stderr.log` ending `"STOP 0"`,
+and zero `"E R R O R"` lines in `ocean.output`), and was quarantined unmodified
+at
+`/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round342/s4_year/refused/20261027T231902Z_orca2_k0_year1_a_np2.failed.4171609`
+because the prior `run.sh` check looked for `STOP 0` in `mpirun.stdout.log`
+instead of `mpirun.stderr.log`.
+
+After fixing the completion check in `run.sh` and
+`nemo_testcase_l4_orca2_round342_s4_year_gate.py`, kept Arm A was admitted and
+promoted (without modifying any file inside the run directory) via:
+```bash
+bash scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round342_s4_year_acquisition/run.sh \
+  --admit-existing /data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round342/s4_year/refused/20261027T231902Z_orca2_k0_year1_a_np2.failed.4171609
+```
+producing the admission line:
+```text
+ORCA2_ROUND342_S4_YEAR_ARM_A_ADMITTED /data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round342/s4_year/orca2_k0_year1_a_np2 producer_commit=5ba77a9d6cd041b929d6982444cd4727c60c791a binary_sha256=835f03b99a3c96e80d23f35c415d099fde292678ae30572e9c5412be4b67e16d daily_restart_pairs=365 time_step=2920
+```
+- Promoted canonical Arm A path:
+  `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round342/s4_year/orca2_k0_year1_a_np2`
+- Admission evidence JSON:
+  `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/orca2_r342/round342_s4_year_arm_a_admission.json`
+  (and `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round342/s4_year/round342_s4_year_arm_a_admission.json`).
+- Day 1 (`kt = 8`) restart vs admitted Round-340 S4 `kt = 9` entry state:
+  `max_abs_diff = 0.0`, `max_ulp = 0` across all wet cells on `T, S, u, v, ssh`.
+- Day 1 (`kt = 8`) restart SHA-256:
+  `rank_0000 = 3fbed2281e66f7d51cd34247e799d1b76c8a102d36d5b64c0a3b80aba56dd2e3`,
+  `rank_0001 = a5660f4c44b70a7cf7d70500b2df8e2d2145f08a205b266301c7312517413023`.
+- Day 365 (`kt = 2920`) restart SHA-256:
+  `rank_0000 = c42e8d90ba488b2074f3b0e5651aeefcdb21ffb3ae2791c95c745917cb56a216`,
+  `rank_0001 = c362626213814f1738fed7fd6004618e00366bf71b2eeb97061aae150f0980e8`.
+- When the operator runs `run.sh --run`, `build_observer_free_k0_nemo` reuses
+  the verified `ORCA2_STANDALONE_IIF_OMIP_L4_R342S4Y/BLD/bin/nemo.exe` binary and
+  `run_twin_pipeline` detects admitted Arm A, prints `R342_RESUMING_ARM_B_ONLY`,
+  stages and executes **Arm B only** (`orca2_k0_year1_b_np2`), and admits the
+  full twin pair `(orca2_k0_year1_a_np2, orca2_k0_year1_b_np2)`.
 
 ## Preflight result
 
@@ -289,20 +359,23 @@ Executed
 - Status: **`ORCA2_ROUND342_S4_YEAR_PREFLIGHT_READY`**
 - Evidence JSON:
   `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/orca2_r342/round342_s4_year_preflight.json`.
-- All Checklist 1–16 controls and all 19 planted failure modes (including
+- All Checklist 1–16 controls and all 28 planted failure modes (including
   disk-space `10^9 GiB`, RAM `999,999 GiB`, `timeout --foreground`, dirty-tree
-  untracked + modified-tracked, `run.sh` syntax, arm-A staging-failure
-  quarantine + re-run, failed-arm quarantine + re-run, and
-  `refused/ -> --admit-existing` binary-checksum plant + clean promotion) fired
-  and refused as expected.
+  untracked + modified-tracked, `run.sh` syntax, real-Arm-A log completion
+  plants + shell missing-`STOP` / short-`time.step` plants, arm-A
+  staging-failure quarantine + re-run, failed-arm quarantine + re-run,
+  `refused/ -> --admit-existing` binary-checksum plant + clean promotion, and
+  single-Arm-A promotion + Arm-B-only resume) fired and refused as expected.
 
 ## Choices and review
 
 - ASKED: Decision 171/181 yearly-mean ice-cover climatology, Decision 175 K0
   selectors, Decision 160 ORCA2X long-run metric card reused month by month,
   Decision 185 reference-only bars (`verdict = None`, no pass/fail), 20-step
-  standalone K0 legoESM smoke run, no NEMO execution, and no full-year legoESM
-  launch until operator instruction.
+  standalone K0 legoESM smoke run, gfortran `stderr` `STOP 0` + `time.step == nn_itend`
+  completion check with real-run log test and plants, kept Arm A admission via
+  `--admit-existing`, no NEMO execution, and stop for operator execution of
+  Arm B (`arm B only`).
 - UNASKED: none.
 - independent review: operator
 
@@ -310,7 +383,7 @@ Executed
 
 - Focused Round-342 and ORCA2X metric card tests
   (`tests/ocean/fidelity/test_orca2_round342_s4_year.py` and
-  `tests/ocean/fidelity/test_orca2x_round1_pilot_metrics.py`): **13 / 13 PASS**.
+  `tests/ocean/fidelity/test_orca2x_round1_pilot_metrics.py`): **14 / 14 PASS**.
 - Card-fingerprint gate (`nemo_testcase_l4_orca2_card_fingerprint.py`): **PASS**
   (`0` changed arrays across all 6 certified cards).
 - Default ORCA2 ladder gate (`nemo_testcase_l4_orca2_round1_ladder_gate.py`):

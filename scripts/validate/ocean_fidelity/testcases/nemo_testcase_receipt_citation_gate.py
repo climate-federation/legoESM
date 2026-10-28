@@ -2036,6 +2036,10 @@ FILES = {
         Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/"
              "round339/k0_smoke/orca2_k0_10step_np2/build_sources/ppsrc/"
              "nemo/traqsr.f90")),
+    "ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/stpctl.f90": (
+        Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/"
+             "round339/k0_smoke/orca2_k0_10step_np2/build_sources/ppsrc/"
+             "nemo/stpctl.f90")),
     "round340_surface_writer.F90": (
         REPO / "scripts/validate/ocean_fidelity/orca2_l4/"
         "nemo_testcase_l4_orca2_round340_s4_acquisition/"
@@ -10058,6 +10062,18 @@ CITATION_MAP = {
         'Nrhs = Nbb   ;   Nbb  = Naa   ;   Naa  = Nrhs    ! Swap: Nnn unchanged, Nbb <==> Naa',
     'ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/stprk3.f90:241':
         'IF( lrst_oce   )   CALL rst_write    ( kstp, Nbb, Nnn, Naa )   ! write output ocean restart file',
+    'ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/nemogcm.f90:237-238': [
+        'IF( nstop == 0 ) THEN   ;   STOP 0',
+        'ELSE                    ;   STOP 123',
+        2],
+    'ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/stpctl.f90:106-107': [
+        '!                                ! open time.step    ascii file, done only by 1st subdomain',
+        "IF( lwm )   CALL ctl_opn( numstp, 'time.step', 'REPLACE', 'FORMATTED', 'SEQUENTIAL', -1, numout, lwp, narea )",
+        2],
+    'ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/stpctl.f90:160-161': [
+        "WRITE ( numstp, '(1x, i8)' )   kt",
+        'REWIND( numstp )',
+        2],
 }
 
 
