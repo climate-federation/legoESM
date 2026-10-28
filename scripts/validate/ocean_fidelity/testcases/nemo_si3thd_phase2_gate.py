@@ -375,22 +375,21 @@ def _si3_zdf_bl99_step(
     _nemo_glo2eqv_snow_temp: bool = True,
     _nemo_source_round: bool = True,
 ):
-    """D5 harness adapter exposing single-iterate Picard and historical ablation arms."""
+    """D5 harness adapter: delegates to `bl.si3_ice_thd_zdf_bl99` unless a historical ablation arm is requested."""
     import jax.numpy as jnp
     from legoesm.core.source_rounding import nemo_source_round
     from legoesm.ice import bitz_lipscomb as bl
 
-    sr = nemo_source_round if _nemo_source_round else (lambda x: x)
     e_ice = jnp.asarray(e_ice)
     dtype = e_ice.dtype
     h_ice = jnp.asarray(h_ice, dtype=dtype)
     h_snow = jnp.asarray(h_snow, dtype=dtype)
     S_layers = jnp.asarray(S_layers, dtype=dtype)
+    e_snow = jnp.asarray(e_snow, dtype=dtype)
     T_i_old = bl.ice_temperature_from_enthalpy(
         e_ice, S_layers, constants,
         _nemo_order=_nemo_eos_order, _nemo_source_round=_nemo_source_round,
     )
-    e_snow = jnp.asarray(e_snow, dtype=dtype)
     T_s_old = bl.snow_temperature_from_enthalpy(
         e_snow, constants,
         _nemo_order=_nemo_eos_order,
@@ -405,6 +404,35 @@ def _si3_zdf_bl99_step(
             + constants.latent_fusion * inverse_c_ice
         )
     T_s_old = jnp.where((h_snow > 0.0)[..., None], T_s_old, constants.T0)
+    if all((
+        _nemo_branch_ranges,
+        _nemo_snow_temperature_bounds,
+        _nemo_eos_order,
+        _nemo_zdf_layer_reciprocals,
+        _nemo_glo2eqv_snow_temp,
+        _nemo_source_round,
+    )):
+        zero = jnp.zeros_like(h_ice)
+        out = bl.si3_ice_thd_zdf_bl99(
+            h_i=h_ice, h_s=h_snow, t_su=jnp.asarray(T_surface, dtype=dtype),
+            t_i=T_i_old, t_s=T_s_old, e_i=e_ice, e_s=e_snow, sz_i=S_layers,
+            a_i=zero, t_bo=jnp.asarray(forcing.t_bottom, dtype=dtype),
+            qns_ice=jnp.asarray(forcing.qns_ice, dtype=dtype),
+            qsr_ice=jnp.asarray(forcing.qsr_ice, dtype=dtype),
+            dqns_ice=jnp.asarray(forcing.dqns_ice, dtype=dtype),
+            qtr_ice_top=jnp.asarray(forcing.qtr_ice_top, dtype=dtype),
+            hfx_err_dif=zero, hfx_dif=zero, rDt_ice=dt,
+            rn_cnd_s=float(constants.k_snow),
+            rn_kappa_i=bl._ICE_EXTINCTION, rn_kappa_s=bl._SNOW_EXTINCTION,
+            nn_qtrice=0, nn_snwfra=2, ln_cndi_P07=True, ln_cndflx=False,
+            ln_virtual_itd=False, ln_zdf_chkcvg=False, constants=constants,
+            _maximum_iterations=_maximum_iterations,
+        )
+        return bl.SI3ZDFResult(
+            out.t_su, out.t_i, out.t_s, out.e_i, out.e_s, out.qns_ice,
+            out.qtr_ice_bot, out.qcn_ice_top, out.qcn_ice_bot, out.n_picard,
+        )
+    sr = nemo_source_round if _nemo_source_round else (lambda x: x)
     T_bottom = jnp.asarray(forcing.t_bottom, dtype=dtype)
     core = bl._si3_zdf_bl99_core(
         h_i=h_ice, h_s=h_snow, t_su=jnp.asarray(T_surface, dtype=dtype),
@@ -484,63 +512,20 @@ def _nemo_snow_enthalpy_remap(
     *,
     _nemo_source_round: bool = True,
 ):
-    """D5 3-layer NEMO ``snw_ent`` cumulative remap ablation helper."""
+    """D5 3-layer NEMO ``snw_ent`` cumulative remap delegating to `bl._cumulative_remap`."""
     import jax.numpy as jnp
     from legoesm.core.source_rounding import nemo_source_round
     from legoesm.ice import bitz_lipscomb as bl
 
     sr = nemo_source_round if _nemo_source_round else (lambda x: x)
-    zero = jnp.zeros_like(thickness[..., 0])
-    old_h_cumulative = [zero]
-    old_e_cumulative = [zero]
-    total = zero
-    for layer in range(4):
-        total = total + thickness[..., layer]
-        old_h_cumulative.append(total)
-        old_e_cumulative.append(
-            old_e_cumulative[-1]
-            + sr(enthalpy[..., layer] * thickness[..., layer])
-        )
-    old_h_cumulative = jnp.stack(old_h_cumulative, axis=-1)
-    old_e_cumulative = jnp.stack(old_e_cumulative, axis=-1)
-
-    new_layer = total * (1.0 / 3.0)
-    new_h_cumulative = [zero]
-    for _ in range(3):
-        new_h_cumulative.append(new_h_cumulative[-1] + new_layer)
-    new_h_cumulative = jnp.stack(new_h_cumulative, axis=-1)
-    new_e_cumulative = jnp.zeros_like(new_h_cumulative)
-    for old in range(1, 5):
-        for new in range(1, 3):
-            selected = (
-                (new_h_cumulative[..., new] <= old_h_cumulative[..., old])
-                & (new_h_cumulative[..., new] > old_h_cumulative[..., old - 1])
-            )
-            denominator = old_h_cumulative[..., old] - old_h_cumulative[..., old - 1]
-            safe_denominator = jnp.where(selected, denominator, 1.0)
-            interpolated = (
-                sr(
-                    old_e_cumulative[..., old - 1]
-                    * (old_h_cumulative[..., old] - new_h_cumulative[..., new])
-                )
-                + sr(
-                    old_e_cumulative[..., old]
-                    * (new_h_cumulative[..., new] - old_h_cumulative[..., old - 1])
-                )
-            ) / safe_denominator
-            new_e_cumulative = new_e_cumulative.at[..., new].set(jnp.where(
-                selected, interpolated, new_e_cumulative[..., new]
-            ))
-    new_e_cumulative = new_e_cumulative.at[..., 3].set(
-        old_e_cumulative[..., 4]
+    h_arr, e_arr = jnp.asarray(thickness), jnp.asarray(enthalpy)
+    n_seg = h_arr.shape[-1]
+    return bl._cumulative_remap(
+        [h_arr[..., k] for k in range(n_seg)],
+        [sr(e_arr[..., k] * h_arr[..., k]) for k in range(n_seg)],
+        3,
+        sr,
     )
-    return jnp.stack([
-        jnp.maximum(
-            0.0,
-            new_e_cumulative[..., layer] - new_e_cumulative[..., layer - 1],
-        ) / jnp.maximum(new_layer, bl._EPS20)
-        for layer in range(1, 4)
-    ], axis=-1)
 
 
 def _nemo_ice_enthalpy_remap(
@@ -550,77 +535,40 @@ def _nemo_ice_enthalpy_remap(
     content=None,
     _nemo_source_round: bool = True,
 ):
-    """D5 3-layer NEMO ``ice_var_vremap`` cumulative-content interpolation ablation helper."""
+    """D5 3-layer NEMO ``ice_var_vremap`` delegating to `bl._cumulative_remap`."""
     import jax.numpy as jnp
     from legoesm.core.source_rounding import nemo_source_round
     from legoesm.ice import bitz_lipscomb as bl
 
     sr = nemo_source_round if _nemo_source_round else (lambda x: x)
-    pts_old = content if content is not None else sr(thickness * enthalpy)
-    zero = jnp.zeros_like(thickness[..., 0])
-    old_h_cumulative = [zero]
-    old_e_cumulative = [zero]
-    total = zero
-    for layer in range(5):
-        total = total + thickness[..., layer]
-        old_h_cumulative.append(total)
-        old_e_cumulative.append(old_e_cumulative[-1] + pts_old[..., layer])
-    old_h_cumulative = jnp.stack(old_h_cumulative, axis=-1)
-    old_e_cumulative = jnp.stack(old_e_cumulative, axis=-1)
-
-    new_layer = total * (1.0 / 3.0)
-    new_h_cumulative = [zero]
-    for _ in range(3):
-        new_h_cumulative.append(new_h_cumulative[-1] + new_layer)
-    new_h_cumulative = jnp.stack(new_h_cumulative, axis=-1)
-    new_e_cumulative = jnp.zeros_like(new_h_cumulative)
-    for old in range(1, 6):
-        for new in range(1, 3):
-            selected = (
-                (new_h_cumulative[..., new] <= old_h_cumulative[..., old])
-                & (new_h_cumulative[..., new] > old_h_cumulative[..., old - 1])
-            )
-            denominator = old_h_cumulative[..., old] - old_h_cumulative[..., old - 1]
-            safe_denominator = jnp.where(selected, denominator, 1.0)
-            interpolated = (
-                sr(
-                    old_e_cumulative[..., old - 1]
-                    * (old_h_cumulative[..., old] - new_h_cumulative[..., new])
-                )
-                + sr(
-                    old_e_cumulative[..., old]
-                    * (new_h_cumulative[..., new] - old_h_cumulative[..., old - 1])
-                )
-            ) / safe_denominator
-            new_e_cumulative = new_e_cumulative.at[..., new].set(jnp.where(
-                selected, interpolated, new_e_cumulative[..., new]
-            ))
-    new_e_cumulative = new_e_cumulative.at[..., 3].set(
-        old_e_cumulative[..., 5]
+    h_arr = jnp.asarray(thickness)
+    pts_old = (
+        jnp.asarray(content)
+        if content is not None
+        else sr(h_arr * jnp.asarray(enthalpy))
     )
-    return jnp.stack([
-        jnp.maximum(
-            0.0,
-            new_e_cumulative[..., layer] - new_e_cumulative[..., layer - 1],
-        ) / jnp.maximum(new_layer, bl._EPS20)
-        for layer in range(1, 4)
-    ], axis=-1)
+    n_seg = h_arr.shape[-1]
+    return bl._cumulative_remap(
+        [h_arr[..., k] for k in range(n_seg)],
+        [pts_old[..., k] for k in range(n_seg)],
+        3,
+        sr,
+    )
 
 
-def _c1d_dh_via_core(state, zdf, forcing, dt, constants):
-    """C1D card (jpl = 1, nn_icesal = 2) through the shared DH core."""
+def _call_prod_dh(state, zdf, forcing, dt, constants, *, _snow_ice_salinity: bool = True):
+    """Delegate C1D DH step to production `bl.si3_ice_thd_dh`."""
     import jax.numpy as jnp
     from legoesm.ice import bitz_lipscomb as bl
 
     a = state.concentration
     dtype = zdf.e_ice.dtype
     zero = jnp.zeros_like(state.h_ice)
-    out = bl._si3_ice_thd_dh_core(
+    out = bl.si3_ice_thd_dh(
         h_i=state.h_ice, h_s=state.h_snow, t_su=zdf.T_surface, a_i=a, at_i=a,
         t_i=zdf.T_ice, t_s=zdf.T_snow, e_i=zdf.e_ice, e_s=zdf.e_snow,
         sz_i=state.S_layers, s_i=state.S_bulk, t_bo=forcing.t_bottom,
-        sss=forcing.sss,
-        sst=forcing.t_bottom - constants.T0,
+        sss=forcing.sss, sst=forcing.t_bottom - constants.T0,
         qns_ice=zdf.qns_ice, qsr_ice=forcing.qsr_ice,
         qtr_ice_top=forcing.qtr_ice_top, qcn_ice_top=zdf.qcn_ice_top,
         qcn_ice_bot=zdf.qcn_ice_bottom, qtr_ice_bot=zdf.qtr_ice_bottom,
@@ -630,10 +578,14 @@ def _c1d_dh_via_core(state, zdf, forcing, dt, constants):
         evap_ice=forcing.evaporation,
         fluxes=bl.SI3DHFluxes(*([zero] * len(bl.SI3DHFluxes._fields))),
         rDt_ice=dt, rn_snwblow=bl._SNOW_BLOW_FRACTION,
-        rn_sinew=bl._NEW_ICE_SALINITY_FRACTION, nn_icesal=2, constants=constants,
+        rn_sinew=bl._NEW_ICE_SALINITY_FRACTION, nn_icesal=2,
+        ln_cndflx=False, ln_cndemulate=False, constants=constants,
     )
+    s_i = out.s_i
+    if not _snow_ice_salinity:
+        s_i = jnp.where(out.dh.dh_snowice > 0.0, state.S_bulk, s_i)
     return bl.SI3ColumnArrays(out.a_i, out.h_i, out.h_s, out.t_su, out.e_i, out.e_s,
-                              out.s_i, state.S_layers, state.age_volume)
+                              s_i, state.S_layers, state.age_volume)
 
 
 def _dh_step(
@@ -656,18 +608,22 @@ def _dh_step(
     _nemo_dh_snow_update: bool = True,
     _nemo_source_round: bool = True,
 ):
-    """D5 harness thickness sequence with historical ablation arms."""
+    """D5 harness thickness sequence: delegates to `bl.si3_ice_thd_dh` unless an ablation arm is requested."""
     import jax.numpy as jnp
     from legoesm.core.source_rounding import nemo_source_round
     from legoesm.ice import bitz_lipscomb as bl
     from legoesm.ice.snow import snow_ice_flooding
 
-    if all((_snow_deposition, _surface_melt, _basal_melt, _nemo_basal_layer_loop,
-            _snow_ice_salinity, _nemo_snow_sublimation_order, _nemo_snow_remap,
-            _nemo_ice_remap, _nemo_dh_ice_density_reciprocal,
-            _nemo_dh_ice_content_accumulation, _nemo_dh_snow_update,
-            _nemo_source_round)):
-        return _c1d_dh_via_core(state, zdf, forcing, dt, constants)
+    base_flags = (
+        _snow_deposition, _surface_melt, _basal_melt, _nemo_basal_layer_loop,
+        _nemo_snow_sublimation_order, _nemo_snow_remap, _nemo_ice_remap,
+        _nemo_dh_ice_density_reciprocal, _nemo_source_round,
+    )
+    if all(base_flags) and _nemo_dh_ice_content_accumulation and _nemo_dh_snow_update:
+        return _call_prod_dh(
+            state, zdf, forcing, dt, constants,
+            _snow_ice_salinity=_snow_ice_salinity,
+        )
     sr = nemo_source_round if _nemo_source_round else (lambda x: x)
     a = state.concentration
     h_i0, h_s0 = state.h_ice, state.h_snow
@@ -676,20 +632,10 @@ def _dh_step(
     )
     inverse_snow_density = 1.0 / constants.rho_snow
     if _nemo_snow_sublimation_order:
-        if _nemo_dh_snow_update:
-            h_precip_raw = (
-                sr(sr(sr(snow_partition * forcing.snow_precipitation) * dt)
-                   * inverse_snow_density)
-                / a
-            )
-            h_precip = jnp.where(
-                forcing.snow_precipitation > 0.0, h_precip_raw, 0.0
-            )
-        else:
-            h_precip = (
-                snow_partition * forcing.snow_precipitation * dt
-                * inverse_snow_density / jnp.maximum(a, bl._EPS10)
-            )
+        h_precip = (
+            snow_partition * forcing.snow_precipitation * dt
+            * inverse_snow_density / jnp.maximum(a, bl._EPS10)
+        )
         old_snow_layer = h_s0 * (1.0 / 3.0)
     else:
         h_precip = snow_partition * forcing.snow_precipitation * dt / (
@@ -720,20 +666,11 @@ def _dh_step(
             forcing.evaporation,
             0.0,
         )
-        if _nemo_dh_snow_update:
-            snow_delta = jnp.maximum(
-                sr(sr(-evaporation * inverse_snow_density) * dt),
-                -h_s_work,
-            )
-            remaining_mass = (
-                sr(evaporation * dt) + sr(snow_delta * constants.rho_snow)
-            )
-        else:
-            snow_delta = jnp.maximum(
-                -evaporation * inverse_snow_density * dt,
-                -h_s_work,
-            )
-            remaining_mass = evaporation * dt + snow_delta * constants.rho_snow
+        snow_delta = jnp.maximum(
+            -evaporation * inverse_snow_density * dt,
+            -h_s_work,
+        )
+        remaining_mass = evaporation * dt + snow_delta * constants.rho_snow
         eseg_s = eseg_s.at[..., 0].set(jnp.where(
             (snow_delta > 0.0) & (eseg_s[..., 0] == 0.0),
             deposited_enthalpy,
@@ -788,11 +725,7 @@ def _dh_step(
             ),
             0.0,
         )
-        melted_snow.append(
-            jnp.maximum(0.0, hseg_s[..., k] + delta)
-            if _nemo_dh_snow_update
-            else hseg_s[..., k] + delta
-        )
+        melted_snow.append(hseg_s[..., k] + delta)
         h_s_work = jnp.maximum(0.0, h_s_work + delta)
         surface_energy = jnp.maximum(
             surface_energy + sr(delta * eseg_s[..., k]), 0.0
@@ -803,198 +736,83 @@ def _dh_step(
     ice_density_divisor = jax.lax.optimization_barrier(
         jnp.asarray(constants.rho_ice, dtype=zdf.e_ice.dtype)
     )
-    if _nemo_dh_ice_content_accumulation:
-        old_dz = sr(h_i0 * (1.0 / 3.0))
-        zh_i_layers = [old_dz, old_dz, old_dz]
-        zh_i_old_layers = [old_dz, old_dz, old_dz]
-        ze_i_old_layers = [sr(old_dz * zdf.e_ice[..., k]) for k in range(3)]
-        h_i_work = h_i0
-        zevap_rema = remaining_mass
-        icount_layers = []
-        for k in range(3):
-            ztmelts = sr(-constants.liquidus_slope * state.S_layers[..., k])
-            internal_melt = _surface_melt & (
-                zdf.T_ice[..., k] >= sr(ztmelts + constants.T0)
-            )
-            ice_specific = (
-                sr(-zdf.e_ice[..., k] * inverse_ice_density)
-                if _nemo_dh_ice_density_reciprocal
-                else sr(-zdf.e_ice[..., k] / ice_density_divisor)
-            )
-            water_specific = sr(constants.c_ocean * ztmelts)
-            energy_difference = sr(ice_specific - water_specific)
-            zfmdt = sr(-surface_energy / energy_difference)
-            zdum_melt = jnp.where(
+    old_dz = h_i0 / 3.0
+    old_h = jnp.broadcast_to(old_dz[..., None], state.e_ice.shape)
+    melt_temperature = (
+        constants.T0 - constants.liquidus_slope * state.S_layers
+    )
+    for k in range(3):
+        internal_melt = _surface_melt & (
+            zdf.T_ice[..., k] >= melt_temperature[..., k]
+        )
+        ice_specific = (
+            sr(-zdf.e_ice[..., k] * inverse_ice_density)
+            if _nemo_dh_ice_density_reciprocal
+            else sr(-zdf.e_ice[..., k] / ice_density_divisor)
+        )
+        water_specific = sr(
+            constants.c_ocean
+            * (-constants.liquidus_slope * state.S_layers[..., k])
+        )
+        energy_difference = ice_specific - water_specific
+        surface_remove = jnp.where(
+            internal_melt,
+            old_h[..., k],
+            jnp.where(
                 _surface_melt,
-                jnp.where(
-                    internal_melt,
-                    jnp.minimum(0.0, -zh_i_layers[k]),
-                    jnp.minimum(
-                        0.0,
-                        jnp.maximum(
-                            sr(-zfmdt * inverse_ice_density), -zh_i_layers[k]
-                        ),
-                    ),
-                ),
-                0.0,
-            )
-            surface_energy = jnp.where(
-                internal_melt,
-                surface_energy,
-                jnp.maximum(
-                    0.0,
-                    surface_energy
-                    - sr(sr(zdum_melt * constants.rho_ice) * energy_difference),
-                ),
-            )
-            zh_i_layers[k] = jnp.maximum(0.0, zh_i_layers[k] + zdum_melt)
-            h_i_work = jnp.maximum(0.0, h_i_work + zdum_melt)
-            ze_i_old_layers[k] = ze_i_old_layers[k] + sr(
-                zdum_melt * zdf.e_ice[..., k]
-            )
-            zh_i_old_layers[k] = zh_i_old_layers[k] + zdum_melt
-
-            zdum_subl = jnp.maximum(
-                -zh_i_layers[k], sr(-zevap_rema * inverse_ice_density)
-            )
-            zevap_rema = zevap_rema + sr(zdum_subl * constants.rho_ice)
-            zh_i_layers[k] = jnp.maximum(0.0, zh_i_layers[k] + zdum_subl)
-            h_i_work = jnp.maximum(0.0, h_i_work + zdum_subl)
-            ze_i_old_layers[k] = ze_i_old_layers[k] + sr(
-                zdum_subl * zdf.e_ice[..., k]
-            )
-            zh_i_old_layers[k] = zh_i_old_layers[k] + zdum_subl
-            icount_layers.append(jnp.where(zh_i_layers[k] > 0.0, 0, 1))
-
-        frq_m = getattr(forcing, "frq_m", 1.0)
-        zf = sr(
-            sr(sr(zdf.qcn_ice_bottom + forcing.qsb_ice_bottom) + forcing.fhld)
-            + sr(zdf.qtr_ice_bottom * frq_m)
-        )
-        S_new = sr(bl._NEW_ICE_SALINITY_FRACTION * forcing.sss)
-        Tm = sr(-constants.liquidus_slope * S_new)
-        Tnew_c = sr(forcing.t_bottom - constants.T0)
-        e_i_specific = (
-            sr(
-                sr(
-                    constants.c_ice
-                    * sr(forcing.t_bottom - sr(Tm + constants.T0))
-                )
-                - sr(
-                    constants.latent_fusion
-                    * jnp.maximum(
-                        0.0, 1.0 - sr(Tm / jnp.minimum(Tnew_c, -bl._EPS10))
-                    )
-                )
-            )
-            + sr(constants.c_ocean * Tm)
-        )
-        e_water = sr(constants.c_ocean * Tnew_c)
-        dE = sr(e_i_specific - e_water)
-        dh_growth = jnp.where(
-            zf < 0.0,
-            sr(dt * jnp.maximum(0.0, sr(zf / sr(dE * constants.rho_ice)))),
-            0.0,
-        )
-        h_i_work = h_i_work + dh_growth
-        zh_i_old_bog = dh_growth
-        ze_i_old_bog = sr(dh_growth * sr(-e_i_specific * constants.rho_ice))
-
-        basal_energy = jnp.maximum(0.0, sr(zf * dt))
-        if _nemo_basal_layer_loop:
-            for k in (2, 1, 0):
-                jk_1based = k + 1
-                layer_active = (
-                    _basal_melt
-                    & (zf > 0.0)
-                    & (jk_1based > icount_layers[k])
-                )
-                ztmelts = sr(
-                    -constants.liquidus_slope * state.S_layers[..., k]
-                )
-                internal_melt = layer_active & (
-                    zdf.T_ice[..., k] >= sr(ztmelts + constants.T0)
-                )
-                ice_specific = (
-                    sr(-zdf.e_ice[..., k] * inverse_ice_density)
-                    if _nemo_dh_ice_density_reciprocal
-                    else sr(-zdf.e_ice[..., k] / ice_density_divisor)
-                )
-                water_specific = sr(constants.c_ocean * ztmelts)
-                energy_difference = sr(ice_specific - water_specific)
-                zfmdt = sr(-basal_energy / energy_difference)
-                zdum_basal = jnp.where(
-                    layer_active,
-                    jnp.where(
-                        internal_melt,
-                        jnp.minimum(0.0, -zh_i_layers[k]),
-                        jnp.minimum(
-                            0.0,
-                            jnp.maximum(
-                                sr(-zfmdt * inverse_ice_density),
-                                -zh_i_layers[k],
-                            ),
-                        ),
-                    ),
-                    0.0,
-                )
-                basal_energy = jnp.where(
-                    internal_melt | (~layer_active),
-                    basal_energy,
-                    jnp.maximum(
-                        0.0,
-                        basal_energy
-                        - sr(
-                            sr(zdum_basal * constants.rho_ice)
-                            * energy_difference
-                        ),
-                    ),
-                )
-                zh_i_layers[k] = jnp.maximum(0.0, zh_i_layers[k] + zdum_basal)
-                h_i_work = jnp.maximum(0.0, h_i_work + zdum_basal)
-                ze_i_old_layers[k] = ze_i_old_layers[k] + sr(
-                    zdum_basal * zdf.e_ice[..., k]
-                )
-                zh_i_old_layers[k] = zh_i_old_layers[k] + zdum_basal
-            h_i_pre_flood = h_i_work
-        else:
-            bottom_specific = (
-                sr(-zdf.e_ice[..., -1] * inverse_ice_density)
-                if _nemo_dh_ice_density_reciprocal
-                else sr(-zdf.e_ice[..., -1] / ice_density_divisor)
-            )
-            bottom_water = sr(
-                constants.c_ocean
-                * (-constants.liquidus_slope * state.S_layers[..., -1])
-            )
-            bottom_difference = bottom_specific - bottom_water
-            legacy_remove = jnp.where(
-                _basal_melt,
                 jnp.minimum(
                     jnp.maximum(
-                        -basal_energy / (bottom_difference * constants.rho_ice),
+                        surface_energy
+                        / jnp.maximum(
+                            -energy_difference * constants.rho_ice, 1.0e-20
+                        ),
                         0.0,
                     ),
-                    jnp.sum(jnp.stack(zh_i_old_layers, axis=-1), axis=-1),
+                    old_h[..., k],
                 ),
                 0.0,
-            )
-            zh_i_old_layers[-1] = jnp.maximum(
-                zh_i_old_layers[-1] - legacy_remove, 0.0
-            )
-            ze_i_old_layers[-1] = ze_i_old_layers[-1] - sr(
-                legacy_remove * zdf.e_ice[..., -1]
-            )
-            h_i_pre_flood = jnp.maximum(0.0, h_i_work - legacy_remove)
-        old_h = jnp.stack(zh_i_old_layers, axis=-1)
-    else:
-        old_dz = h_i0 / 3.0
-        old_h = jnp.broadcast_to(old_dz[..., None], state.e_ice.shape)
-        melt_temperature = (
-            constants.T0 - constants.liquidus_slope * state.S_layers
+            ),
         )
-        for k in range(3):
-            internal_melt = _surface_melt & (
+        old_h = old_h.at[..., k].add(-surface_remove)
+        surface_energy = jnp.where(
+            internal_melt,
+            surface_energy,
+            jnp.maximum(
+                surface_energy
+                - surface_remove * (-energy_difference * constants.rho_ice),
+                0.0,
+            ),
+        )
+        sublimation = jnp.minimum(
+            remaining_mass / constants.rho_ice, old_h[..., k]
+        )
+        old_h = old_h.at[..., k].add(-sublimation)
+        remaining_mass = jnp.maximum(
+            remaining_mass - sublimation * constants.rho_ice, 0.0
+        )
+
+    zf = (
+        zdf.qcn_ice_bottom
+        + forcing.qsb_ice_bottom
+        + forcing.fhld
+        + zdf.qtr_ice_bottom * getattr(forcing, "frq_m", 1.0)
+    )
+    S_new = bl._NEW_ICE_SALINITY_FRACTION * forcing.sss
+    Tm = -constants.liquidus_slope * S_new
+    Tnew_c = forcing.t_bottom - constants.T0
+    e_i_specific = (
+        constants.c_ice * (Tnew_c - Tm)
+        - constants.latent_fusion
+        * jnp.maximum(0.0, 1.0 - Tm / jnp.minimum(Tnew_c, -bl._EPS10))
+        + constants.c_ocean * Tm
+    )
+    e_water = constants.c_ocean * (forcing.t_bottom - constants.T0)
+    dE = e_i_specific - e_water
+    dh_growth = dt * jnp.maximum(0.0, zf / (dE * constants.rho_ice))
+    basal_energy = dt * jnp.maximum(zf, 0.0)
+    if _nemo_basal_layer_loop:
+        for k in (2, 1, 0):
+            internal_melt = (zf > 0.0) & (
                 zdf.T_ice[..., k] >= melt_temperature[..., k]
             )
             ice_specific = (
@@ -1007,133 +825,63 @@ def _dh_step(
                 * (-constants.liquidus_slope * state.S_layers[..., k])
             )
             energy_difference = ice_specific - water_specific
-            surface_remove = jnp.where(
-                internal_melt,
-                old_h[..., k],
+            basal_remove = jnp.where(
+                _basal_melt,
                 jnp.where(
-                    _surface_melt,
+                    internal_melt,
+                    old_h[..., k],
                     jnp.minimum(
                         jnp.maximum(
-                            surface_energy
+                            basal_energy
                             / jnp.maximum(
-                                -energy_difference * constants.rho_ice, 1.0e-20
+                                -energy_difference * constants.rho_ice,
+                                1.0e-20,
                             ),
                             0.0,
                         ),
                         old_h[..., k],
                     ),
-                    0.0,
-                ),
-            )
-            old_h = old_h.at[..., k].add(-surface_remove)
-            surface_energy = jnp.where(
-                internal_melt,
-                surface_energy,
-                jnp.maximum(
-                    surface_energy
-                    - surface_remove * (-energy_difference * constants.rho_ice),
-                    0.0,
-                ),
-            )
-            sublimation = jnp.minimum(
-                remaining_mass / constants.rho_ice, old_h[..., k]
-            )
-            old_h = old_h.at[..., k].add(-sublimation)
-            remaining_mass = jnp.maximum(
-                remaining_mass - sublimation * constants.rho_ice, 0.0
-            )
-
-        zf = (
-            zdf.qcn_ice_bottom
-            + forcing.qsb_ice_bottom
-            + forcing.fhld
-            + zdf.qtr_ice_bottom * getattr(forcing, "frq_m", 1.0)
-        )
-        S_new = bl._NEW_ICE_SALINITY_FRACTION * forcing.sss
-        Tm = -constants.liquidus_slope * S_new
-        Tnew_c = forcing.t_bottom - constants.T0
-        e_i_specific = (
-            constants.c_ice * (Tnew_c - Tm)
-            - constants.latent_fusion
-            * jnp.maximum(0.0, 1.0 - Tm / jnp.minimum(Tnew_c, -bl._EPS10))
-            + constants.c_ocean * Tm
-        )
-        e_water = constants.c_ocean * (forcing.t_bottom - constants.T0)
-        dE = e_i_specific - e_water
-        dh_growth = dt * jnp.maximum(0.0, zf / (dE * constants.rho_ice))
-        basal_energy = dt * jnp.maximum(zf, 0.0)
-        if _nemo_basal_layer_loop:
-            for k in (2, 1, 0):
-                internal_melt = (zf > 0.0) & (
-                    zdf.T_ice[..., k] >= melt_temperature[..., k]
-                )
-                ice_specific = (
-                    sr(-zdf.e_ice[..., k] * inverse_ice_density)
-                    if _nemo_dh_ice_density_reciprocal
-                    else sr(-zdf.e_ice[..., k] / ice_density_divisor)
-                )
-                water_specific = sr(
-                    constants.c_ocean
-                    * (-constants.liquidus_slope * state.S_layers[..., k])
-                )
-                energy_difference = ice_specific - water_specific
-                basal_remove = jnp.where(
-                    _basal_melt,
-                    jnp.where(
-                        internal_melt,
-                        old_h[..., k],
-                        jnp.minimum(
-                            jnp.maximum(
-                                basal_energy
-                                / jnp.maximum(
-                                    -energy_difference * constants.rho_ice,
-                                    1.0e-20,
-                                ),
-                                0.0,
-                            ),
-                            old_h[..., k],
-                        ),
-                    ),
-                    0.0,
-                )
-                old_h = old_h.at[..., k].add(-basal_remove)
-                basal_energy = jnp.where(
-                    internal_melt,
-                    basal_energy,
-                    jnp.maximum(
-                        basal_energy
-                        - basal_remove
-                        * (-energy_difference * constants.rho_ice),
-                        0.0,
-                    ),
-                )
-            h_i_pre_flood = jnp.sum(old_h, axis=-1) + dh_growth
-        else:
-            bottom_specific = (
-                sr(-zdf.e_ice[..., -1] * inverse_ice_density)
-                if _nemo_dh_ice_density_reciprocal
-                else sr(-zdf.e_ice[..., -1] / ice_density_divisor)
-            )
-            bottom_water = sr(
-                constants.c_ocean
-                * (-constants.liquidus_slope * state.S_layers[..., -1])
-            )
-            bottom_difference = bottom_specific - bottom_water
-            legacy_remove = jnp.where(
-                _basal_melt,
-                jnp.minimum(
-                    jnp.maximum(
-                        -basal_energy / (bottom_difference * constants.rho_ice),
-                        0.0,
-                    ),
-                    jnp.sum(old_h, axis=-1),
                 ),
                 0.0,
             )
-            h_i_pre_flood = jnp.sum(old_h, axis=-1) + dh_growth - legacy_remove
-            old_h = old_h.at[..., -1].set(
-                jnp.maximum(old_h[..., -1] - legacy_remove, 0.0)
+            old_h = old_h.at[..., k].add(-basal_remove)
+            basal_energy = jnp.where(
+                internal_melt,
+                basal_energy,
+                jnp.maximum(
+                    basal_energy
+                    - basal_remove
+                    * (-energy_difference * constants.rho_ice),
+                    0.0,
+                ),
             )
+        h_i_pre_flood = jnp.sum(old_h, axis=-1) + dh_growth
+    else:
+        bottom_specific = (
+            sr(-zdf.e_ice[..., -1] * inverse_ice_density)
+            if _nemo_dh_ice_density_reciprocal
+            else sr(-zdf.e_ice[..., -1] / ice_density_divisor)
+        )
+        bottom_water = sr(
+            constants.c_ocean
+            * (-constants.liquidus_slope * state.S_layers[..., -1])
+        )
+        bottom_difference = bottom_specific - bottom_water
+        legacy_remove = jnp.where(
+            _basal_melt,
+            jnp.minimum(
+                jnp.maximum(
+                    -basal_energy / (bottom_difference * constants.rho_ice),
+                    0.0,
+                ),
+                jnp.sum(old_h, axis=-1),
+            ),
+            0.0,
+        )
+        h_i_pre_flood = jnp.sum(old_h, axis=-1) + dh_growth - legacy_remove
+        old_h = old_h.at[..., -1].set(
+            jnp.maximum(old_h[..., -1] - legacy_remove, 0.0)
+        )
 
     hseg_i = jnp.concatenate(
         [jnp.zeros_like(h_i0)[..., None], old_h,
@@ -1154,49 +902,26 @@ def _dh_step(
     )
     hseg_i = hseg_i.at[..., 0].set(flood)
     flood_remaining = flood
-    if _nemo_dh_ice_content_accumulation:
-        zfmdt_sni = sr((constants.rho_snow - constants.rho_ice) * flood)
-        zEw_sni = sr(constants.c_ocean * sr(forcing.t_bottom - constants.T0))
-        flood_content = sr(zfmdt_sni * zEw_sni)
-    else:
-        flood_content = (
-            (constants.rho_snow - constants.rho_ice)
-            * flood
-            * constants.c_ocean
-            * (forcing.t_bottom - constants.T0)
-        )
+    flood_content = (
+        (constants.rho_snow - constants.rho_ice)
+        * flood
+        * constants.c_ocean
+        * (forcing.t_bottom - constants.T0)
+    )
     flooded_snow = list(jnp.moveaxis(hseg_s, -1, 0))
     for k in (3, 2, 1, 0):
         amount = jnp.minimum(flood_remaining, flooded_snow[k])
         flooded_snow[k] = jnp.maximum(flooded_snow[k] - amount, 0.0)
-        flood_content = flood_content + (
-            sr(amount * eseg_s[..., k])
-            if _nemo_dh_ice_content_accumulation
-            else amount * eseg_s[..., k]
-        )
+        flood_content = flood_content + amount * eseg_s[..., k]
         flood_remaining = jnp.maximum(flood_remaining - amount, 0.0)
     hseg_s = jnp.stack(flooded_snow, axis=-1)
     eseg_i = eseg_i.at[..., 0].set(jnp.where(
         flood > 0.0, flood_content / jnp.maximum(flood, 1.0e-20), 0.0
     ))
-    if _nemo_dh_ice_content_accumulation:
-        ze_i_old = jnp.stack(
-            [
-                flood_content,
-                ze_i_old_layers[0],
-                ze_i_old_layers[1],
-                ze_i_old_layers[2],
-                ze_i_old_bog,
-            ],
-            axis=-1,
-        )
-    else:
-        ze_i_old = None
     e_i = (
         _nemo_ice_enthalpy_remap(
             hseg_i,
             eseg_i,
-            content=ze_i_old,
             _nemo_source_round=_nemo_source_round,
         )
         if _nemo_ice_remap
@@ -1223,8 +948,19 @@ def _dh_step(
     S_bulk = state.S_bulk + (
         snow_ice_salt_change + (S_new - state.S_bulk) * dh_growth
     ) / jnp.maximum(h_i, bl._EPS10)
-    return bl.SI3ColumnArrays(a, h_i, h_s_final, zdf.T_surface, e_i, e_s,
-                              S_bulk, state.S_layers, state.age_volume)
+    legacy = bl.SI3ColumnArrays(a, h_i, h_s_final, zdf.T_surface, e_i, e_s,
+                                S_bulk, state.S_layers, state.age_volume)
+    if all(base_flags) and (_nemo_dh_ice_content_accumulation or _nemo_dh_snow_update):
+        prod = _call_prod_dh(
+            state, zdf, forcing, dt, constants,
+            _snow_ice_salinity=_snow_ice_salinity,
+        )
+        return (
+            prod._replace(h_snow=legacy.h_snow, e_snow=legacy.e_snow)
+            if _nemo_dh_ice_content_accumulation
+            else legacy._replace(h_snow=prod.h_snow, e_snow=prod.e_snow)
+        )
+    return legacy
 
 
 def _si3_column_step_arrays_ablation(
@@ -1255,8 +991,11 @@ def _si3_column_step_arrays_ablation(
 ):
     """D5 harness step wrapper: delegates to production `si3_column_step_arrays` unless an ablation arm is requested."""
     import jax.numpy as jnp
+    from legoesm import constants as canonical_constants
     from legoesm.ice import bitz_lipscomb as bl
 
+    if si3 is None or getattr(si3, "salinity_scheme", None) is None:
+        raise ValueError("_si3_column_step_arrays_ablation requires an explicit SI3ThermoConfig (si3); no default")
     if all((
         _snow_deposition,
         _surface_melt,
@@ -1306,68 +1045,42 @@ def _si3_column_step_arrays_ablation(
         _nemo_dh_snow_update=_nemo_dh_snow_update,
         _nemo_source_round=_nemo_source_round,
     )
-    post_temp1 = post_dh
-    drain = jnp.where(
-        post_dh.T_surface >= constants.T0,
-        -jnp.maximum(post_dh.S_bulk - bl._FLUSHING_TARGET, 0.0)
-        * dt
-        / bl._FLUSHING_TIMESCALE,
-        jnp.where(
-            post_dh.T_surface <= forcing.t_bottom,
-            -jnp.maximum(post_dh.S_bulk - bl._DRAINAGE_TARGET, 0.0)
-            * dt
-            / bl._DRAINAGE_TIMESCALE,
-            0.0,
-        ),
+    zero = jnp.zeros_like(post_dh.h_ice)
+    sal_out = bl.si3_ice_thd_sal(
+        h_i=post_dh.h_ice, t_su=post_dh.T_surface, t_i=zdf.T_ice,
+        sz_i=post_dh.S_layers, s_i=post_dh.S_bulk, t_bo=forcing.t_bottom,
+        sss=forcing.sss, a_i=post_dh.concentration, dh_i_sum=zero,
+        dh_s_sum=zero, sfx_bri=zero, sfx_res=zero,
+        namelist={
+            "nn_icesal": int(si3.salinity_scheme),
+            "rn_simin": bl._MINIMUM_ICE_SALINITY,
+            "rn_sinew": bl._NEW_ICE_SALINITY_FRACTION,
+            "rn_sal_gd": bl._DRAINAGE_TARGET,
+            "rn_time_gd": bl._DRAINAGE_TIMESCALE,
+            "rn_sal_fl": bl._FLUSHING_TARGET,
+            "rn_time_fl": bl._FLUSHING_TIMESCALE,
+        },
+        rDt_ice=float(dt), r1_Dt_ice=1.0 / float(dt),
+        r1_nlay_i=1.0 / post_dh.S_layers.shape[-1],
+        rho_i=constants.rho_ice, rho_s=constants.rho_snow,
+        rho_w=canonical_constants.rho_water, gravity=canonical_constants.g_nemo,
+        constants=constants,
     )
-    S_bulk = jnp.clip(
-        post_dh.S_bulk + drain,
-        bl._MINIMUM_ICE_SALINITY,
-        bl._NEW_ICE_SALINITY_FRACTION * forcing.sss,
+    S_bulk = sal_out.smin_drain
+    S_layers = (
+        sal_out.sz_i
+        if (_nemo_source_round and _nemo_salprof_factoring)
+        else bl.option2_salinity_profile(
+            S_bulk,
+            forcing.sss,
+            _nemo_source_round=_nemo_source_round,
+            _nemo_salprof_factoring=_nemo_salprof_factoring,
+        )
     )
-    S_layers = bl.option2_salinity_profile(
-        S_bulk,
-        forcing.sss,
-        _nemo_source_round=_nemo_source_round,
-        _nemo_salprof_factoring=_nemo_salprof_factoring,
+    return bl.si3_column_step_arrays(
+        state, forcing, dt, constants, si3=si3,
+        _zdf_dh_override=(post_zdf, post_dh, S_bulk, S_layers),
     )
-    post_sal = post_temp1._replace(S_bulk=S_bulk, S_layers=S_layers)
-    post_temp2 = post_sal
-    post_da = bl._si3_column_thd_da(state, post_temp2, forcing, si3, dt, constants)
-    Tm = -constants.liquidus_slope * (
-        bl._NEW_ICE_SALINITY_FRACTION * forcing.sss
-    )
-    Tbo_c = forcing.t_bottom - constants.T0
-    e_new = constants.rho_ice * (
-        constants.c_ice * (Tm - Tbo_c)
-        + constants.latent_fusion * jnp.maximum(0.0, 1.0 - Tm / jnp.minimum(Tbo_c, -bl._EPS10))
-        - constants.c_ocean * Tm
-    )
-    zEi = -e_new / constants.rho_ice
-    zEw = constants.c_ocean * Tbo_c
-    frazil = bl.si3_ice_thd_frazil(forcing.qlead, rn_hinew=bl._NEW_ICE_THICKNESS, ln_frazil=False)
-    cooling = bl._ieee_lt_zero(forcing.qlead)
-    vnew = jnp.where(
-        cooling,
-        -(-forcing.qlead / (zEi - zEw)) / constants.rho_ice,
-        0.0,
-    )
-    anew = jnp.minimum(
-        vnew / jnp.where(cooling, frazil.ht_i_new, 1.0),
-        jnp.maximum(
-            0.0,
-            bl._MAXIMUM_ICE_CONCENTRATION - post_da.concentration,
-        ),
-    )
-    residual = jnp.maximum(vnew - anew * frazil.ht_i_new, 0.0)
-    v_old = post_da.h_ice * post_da.concentration
-    v_total = v_old + anew * frazil.ht_i_new + residual
-    a_total = post_da.concentration + anew
-    h_total = jnp.where(a_total > bl._EPS10, v_total / a_total, 0.0)
-    post_do = post_da._replace(concentration=a_total, h_ice=h_total)
-    exit_state = post_do._replace(age_volume=post_do.age_volume + a_total * dt)
-    return bl.SI3StepTrace(state, post_zdf, post_dh, post_temp1, post_sal,
-                           post_temp2, post_do, exit_state)
 
 
 def run(*, plant_geometry=False, plant_stage=False, plant_selector=False):
@@ -1474,6 +1187,7 @@ def run(*, plant_geometry=False, plant_stage=False, plant_selector=False):
             step_forcing,
             card.dt_seconds,
             card.config.ice_constants,
+            si3=card.config.si3,
         )
         stage_states = (
             trace.post_zdf,

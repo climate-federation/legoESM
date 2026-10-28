@@ -127,14 +127,14 @@ def test_d5_zdf_layer_reciprocals_statement_is_bit_exact_and_fails_when_reverted
         jax_entry_4242,
         forcing_4242,
         card.dt_seconds,
-        c,
+        c, si3=card.config.si3,
         # _nemo_zdf_layer_reciprocals=True default in O9
     )
     trace_rev_4242 = _si3_column_step_arrays_ablation(
         jax_entry_4242,
         forcing_4242,
         card.dt_seconds,
-        c,
+        c, si3=card.config.si3,
         _nemo_zdf_layer_reciprocals=False,
     )
     zdf_fixed_4242 = _si3_zdf_bl99_step(
@@ -981,7 +981,7 @@ def test_d5_non_si3_callers_are_bit_identical(monkeypatch, probe_module) -> None
     # Planted control 5b (in `_si3_step_with_trace` -> `si3_column_step_arrays`
     # call at `sea_ice.py:514`): reverting `_nemo_dh_ice_content_accumulation=False`
     # inside the dispatcher must make the Statement Family 1 check (`kt = 5241, 3996`) fail.
-    orig_si3_arrays = sea_ice_mod.si3_column_step_arrays
+    orig_si3_arrays = probe_module.phase2._si3_column_step_arrays_ablation
 
     def _planted_si3_arrays_no_r6_step1(arrays, forcing, dt, ice_constants, **kw):
         return orig_si3_arrays(
@@ -1556,7 +1556,7 @@ def test_r3_step4_cpu_fusion_prevention_is_bit_exact_and_fails_when_reverted(
                 ent,
                 f,
                 card.dt_seconds,
-                c,
+                c, si3=card.config.si3,
                 _nemo_dh_ice_content_accumulation=False,
                 _nemo_dh_snow_update=False,
                 _nemo_source_round=True,
@@ -1567,7 +1567,7 @@ def test_r3_step4_cpu_fusion_prevention_is_bit_exact_and_fails_when_reverted(
                 ent,
                 f,
                 card.dt_seconds,
-                c,
+                c, si3=card.config.si3,
                 _nemo_dh_ice_content_accumulation=False,
                 _nemo_dh_snow_update=False,
                 _nemo_source_round=False,
@@ -1755,7 +1755,7 @@ def test_r5_step1_nemo_ice_enthalpy_remap_is_bit_exact_and_fails_when_reverted(
             ent,
             f,
             card.dt_seconds,
-            c,
+            c, si3=card.config.si3,
             # _nemo_ice_remap=True,
             # _nemo_source_round=True,
         )
@@ -1765,7 +1765,7 @@ def test_r5_step1_nemo_ice_enthalpy_remap_is_bit_exact_and_fails_when_reverted(
             ent,
             f,
             card.dt_seconds,
-            c,
+            c, si3=card.config.si3,
             _nemo_ice_remap=False,
             _nemo_source_round=True,
         )
@@ -1846,7 +1846,7 @@ def test_r5_step2_ice_density_reciprocal_in_dh_step_is_bit_exact_and_fails_when_
             e,
             f,
             card.dt_seconds,
-            c,
+            c, si3=card.config.si3,
             _nemo_ice_remap=True,
             _nemo_dh_ice_density_reciprocal=True,
             _nemo_dh_ice_content_accumulation=False,
@@ -1859,7 +1859,7 @@ def test_r5_step2_ice_density_reciprocal_in_dh_step_is_bit_exact_and_fails_when_
             e,
             f,
             card.dt_seconds,
-            c,
+            c, si3=card.config.si3,
             _nemo_ice_remap=True,
             _nemo_dh_ice_density_reciprocal=False,
             _nemo_dh_ice_content_accumulation=False,
@@ -1913,7 +1913,7 @@ def test_r5_step3_option2_salinity_profile_factoring_is_bit_exact_and_fails_when
             e,
             f,
             card.dt_seconds,
-            c,
+            c, si3=card.config.si3,
             # _nemo_ice_remap=True,
             # _nemo_dh_ice_density_reciprocal=True,
             # _nemo_salprof_factoring=True,
@@ -1924,7 +1924,7 @@ def test_r5_step3_option2_salinity_profile_factoring_is_bit_exact_and_fails_when
             e,
             f,
             card.dt_seconds,
-            c,
+            c, si3=card.config.si3,
             _nemo_ice_remap=True,
             _nemo_dh_ice_density_reciprocal=True,
             _nemo_salprof_factoring=False,
@@ -2131,7 +2131,7 @@ def test_r5_all_touched_functions_gradients_and_forward_bits(
     def col_tuple(h_i, e_i, s_bulk, qns):
         st = ent._replace(h_ice=h_i, e_ice=e_i, S_bulk=s_bulk)
         fc = forc._replace(qns_ice=qns)
-        tr = bl_mod.si3_column_step_arrays(st, fc, card.dt_seconds, c)
+        tr = bl_mod.si3_column_step_arrays(st, fc, card.dt_seconds, c, si3=card.config.si3)
         return (
             tr.post_dh.h_ice,
             tr.post_dh.e_ice,
@@ -2223,7 +2223,7 @@ def test_r6_step1_dh_ice_content_accumulation_is_bit_exact_and_fails_when_revert
             ent,
             f,
             card.dt_seconds,
-            c,
+            c, si3=card.config.si3,
             _nemo_dh_ice_content_accumulation=True,
             _nemo_dh_snow_update=False,
         )
@@ -2233,7 +2233,7 @@ def test_r6_step1_dh_ice_content_accumulation_is_bit_exact_and_fails_when_revert
             ent,
             f,
             card.dt_seconds,
-            c,
+            c, si3=card.config.si3,
             _nemo_dh_ice_content_accumulation=False,
             _nemo_dh_snow_update=False,
         )
@@ -2369,7 +2369,7 @@ def test_r6_step2_dh_snow_update_is_bit_exact_and_fails_when_reverted(
             ent,
             f,
             card.dt_seconds,
-            c,
+            c, si3=card.config.si3,
             # _nemo_dh_ice_content_accumulation=True,
             # _nemo_dh_snow_update=True,
         )
@@ -2379,7 +2379,7 @@ def test_r6_step2_dh_snow_update_is_bit_exact_and_fails_when_reverted(
             ent,
             f,
             card.dt_seconds,
-            c,
+            c, si3=card.config.si3,
             _nemo_dh_ice_content_accumulation=True,
             _nemo_dh_snow_update=False,
         )
@@ -2559,7 +2559,7 @@ def test_r6_all_touched_functions_gradients_and_forward_bits(
                 st,
                 fc,
                 card.dt_seconds,
-                c,
+                c, si3=card.config.si3,
                 # _nemo_dh_ice_content_accumulation=True
                 # _nemo_dh_snow_update=True
             )
@@ -2722,7 +2722,7 @@ def test_r6_literal_denominators_never_zero_under_record_and_frq_m_scales_qtr_ic
             s,
             f,
             card.dt_seconds,
-            c,
+            c, si3=card.config.si3,
             # _nemo_dh_ice_content_accumulation=True,
             # _nemo_dh_snow_update=True,
         )
@@ -2800,7 +2800,7 @@ def _o8_production_exit(probe_module):
                else jnp.broadcast_to(getattr(forcing, name), (n,)))
         for name in ("qns_ice", "qsr_ice", "dqns_ice", "qtr_ice_top", "t_bottom", "sss", "evaporation",
                      "snow_precipitation", "qprec_ice", "qcn_ice_bottom", "qsb_ice_bottom", "fhld", "qlead")})
-    step = jax.jit(lambda s, f: bl_mod.si3_column_step_arrays(s, f, card.dt_seconds, card.config.ice_constants))
+    step = jax.jit(lambda s, f: bl_mod.si3_column_step_arrays(s, f, card.dt_seconds, card.config.ice_constants, si3=card.config.si3))
     out = step(*jax.device_put((entry, forcing), jax.devices("cpu")[0])).post_do
     return np.stack([np.asarray(out.concentration), np.asarray(out.h_ice)]).view(np.uint64)
 

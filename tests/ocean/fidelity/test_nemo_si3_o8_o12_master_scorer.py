@@ -186,7 +186,8 @@ def test_production_call_sites_route_through_o8_o12_and_fail_when_reverted(
 
     set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
 
-    # 1. Duplicate helpers must not exist on legoesm.ice.bitz_lipscomb
+    # 1. Duplicate helpers must not exist on legoesm.ice.bitz_lipscomb AND
+    #    AST duplicate-arithmetic guard must pass across ice/ and testcases/.
     for deleted_name in (
         "_si3_zdf_bl99_step",
         "_dh_step",
@@ -196,6 +197,7 @@ def test_production_call_sites_route_through_o8_o12_and_fail_when_reverted(
         "_nemo_ice_enthalpy_remap",
     ):
         assert not hasattr(bl, deleted_name), f"duplicate {deleted_name} still exists on bitz_lipscomb"
+    _assert_no_duplicate_o8_o12_arithmetic()
 
     # 2. Production step_sea_ice(thermo_scheme='si3_bl99') -> si3_column_step_arrays calls
     #    si3_ice_thd_zdf_bl99, si3_ice_thd_dh, si3_ice_thd_temp (x2), si3_ice_thd_sal(nn_icesal=2),
@@ -430,3 +432,373 @@ def test_production_call_sites_route_through_o8_o12_and_fail_when_reverted(
             np.asarray(next_state_pnd.pond_depth.data).view(np.uint64),
             np.asarray(rev_state_pnd.pond_depth.data).view(np.uint64),
         )
+
+
+_KNOWN_ARITH_CALLS = frozenset({
+    "nemo_source_round",
+    "sr",
+    "_minsd",
+    "_maxsd",
+    "_div_const",
+    "_sum0",
+    "ice_enthalpy_from_temperature",
+    "snow_enthalpy_from_temperature",
+    "ice_temperature_from_enthalpy",
+    "snow_temperature_from_enthalpy",
+    "option2_salinity_profile",
+    "p07_conductivity",
+})
+
+_CANONICAL_O8_O12_KERNELS: dict[str, set[str]] = {
+    "packages/ice/legoesm/ice/bitz_lipscomb.py": {
+        "_si3_zdf_bl99_core",
+        "si3_ice_thd_zdf_bl99",
+        "_cumulative_remap",
+        "_si3_ice_thd_dh_core",
+        "si3_ice_thd_dh",
+        "si3_ice_thd_temp",
+        "_sal_gd",
+        "_sal_fl",
+        "si3_ice_thd_sal",
+        "si3_ice_thd_o10_category_stages",
+        "si3_column_step_arrays",
+        "_si3_column_thd_da",
+        "si3_ice_thd_do",
+        "si3_ice_thd_frazil",
+    },
+    "packages/ice/legoesm/ice/si3_thd_da.py": {"si3_ice_thd_da"},
+    "packages/ice/legoesm/ice/si3_thd_pnd.py": {
+        "si3_ice_thd_pnd",
+        "si3_pnd_lev",
+        "si3_ice_perm_eff",
+    },
+}
+
+
+def _assert_no_duplicate_o8_o12_arithmetic(
+    source_overrides: dict[str, str] | None = None,
+) -> None:
+    """AST-level guard forbidding duplicated O8--O12 arithmetic in ice/ and testcases/."""
+    import ast
+    from pathlib import Path
+
+    repo_root = Path(__file__).resolve().parents[3]
+    overrides = source_overrides or {}
+
+    def _read_src(rel_path: str) -> str:
+        if rel_path in overrides:
+            return overrides[rel_path]
+        return (repo_root / rel_path).read_text(encoding="utf-8")
+
+    def _count_arith(stmts: list[ast.stmt]) -> int:
+        return sum(
+            isinstance(n, (ast.BinOp, ast.UnaryOp, ast.Compare))
+            for s in stmts
+            for n in ast.walk(s)
+        )
+
+    def _norm_stmts(stmts: list[ast.stmt]):
+        var_map: dict[str, int] = {}
+
+        def _norm(node):
+            if isinstance(node, list):
+                return tuple(_norm(x) for x in node)
+            if not isinstance(node, ast.AST):
+                return node
+            if isinstance(node, ast.Name):
+                if node.id in _KNOWN_ARITH_CALLS:
+                    return ("CallName", node.id)
+                return ("Var", var_map.setdefault(node.id, len(var_map)))
+            if isinstance(node, ast.Attribute):
+                return ("Attr", node.attr)
+            if isinstance(node, ast.Constant):
+                if isinstance(node.value, (int, float, bool)):
+                    return ("Const", type(node.value).__name__, node.value)
+                return ("Const", type(node.value).__name__)
+            fields = []
+            for fname, fval in ast.iter_fields(node):
+                if fname in (
+                    "ctx",
+                    "lineno",
+                    "col_offset",
+                    "end_lineno",
+                    "end_col_offset",
+                    "type_comment",
+                ):
+                    continue
+                fields.append((fname, _norm(fval)))
+            return (type(node).__name__, tuple(fields))
+
+        return _norm(stmts)
+
+    def _iter_blocks(func_node: ast.FunctionDef):
+        for node in ast.walk(func_node):
+            for attr in ("body", "orelse"):
+                blk = getattr(node, attr, None)
+                if isinstance(blk, list) and len(blk) >= 4:
+                    yield blk
+
+    canon_windows: dict[object, tuple[str, str, int]] = {}
+    for rel, fnames in _CANONICAL_O8_O12_KERNELS.items():
+        tree = ast.parse(_read_src(rel), filename=rel)
+        for node in tree.body:
+            if isinstance(node, ast.FunctionDef) and node.name in fnames:
+                for blk in _iter_blocks(node):
+                    for i in range(len(blk) - 3):
+                        win = blk[i : i + 4]
+                        if _count_arith(win) >= 5:
+                            sig = _norm_stmts(win)
+                            canon_windows.setdefault(
+                                sig, (rel, node.name, win[0].lineno)
+                            )
+
+    scan_files = [
+        *sorted(
+            str(p.relative_to(repo_root))
+            for p in (repo_root / "packages/ice/legoesm/ice").glob("*.py")
+        ),
+        "scripts/validate/ocean_fidelity/testcases/nemo_si3thd_phase2_gate.py",
+        "scripts/validate/ocean_fidelity/testcases/nemo_si3thd_phase2b_year_gate.py",
+        "scripts/validate/ocean_fidelity/testcases/nemo_si3thd_d5_platform_probe.py",
+    ]
+    for rel in scan_files:
+        tree = ast.parse(_read_src(rel), filename=rel)
+        canon_set = _CANONICAL_O8_O12_KERNELS.get(rel, set())
+        for node in tree.body:
+            if isinstance(node, ast.FunctionDef) and node.name not in canon_set:
+                for blk in _iter_blocks(node):
+                    for i in range(len(blk) - 3):
+                        win = blk[i : i + 4]
+                        if _count_arith(win) >= 5:
+                            sig = _norm_stmts(win)
+                            if sig in canon_windows:
+                                c_rel, c_fn, c_ln = canon_windows[sig]
+                                raise AssertionError(
+                                    f"duplicate O8-O12 arithmetic window in {rel}:{node.name}:{win[0].lineno} "
+                                    f"matches canonical kernel {c_rel}:{c_fn}:{c_ln}"
+                                )
+
+    # AST structure and delegation checks on nemo_si3thd_phase2_gate.py:
+    phase2_rel = "scripts/validate/ocean_fidelity/testcases/nemo_si3thd_phase2_gate.py"
+    phase2_tree = ast.parse(_read_src(phase2_rel), filename=phase2_rel)
+    phase2_funcs = {
+        n.name: n for n in phase2_tree.body if isinstance(n, ast.FunctionDef)
+    }
+    assert "_c1d_dh_via_core" not in phase2_funcs, (
+        "duplicate _c1d_dh_via_core still exists in nemo_si3thd_phase2_gate.py"
+    )
+
+    def _called_names(fn_node: ast.AST) -> set[str]:
+        out: set[str] = set()
+        for n in ast.walk(fn_node):
+            if isinstance(n, ast.Call):
+                if isinstance(n.func, ast.Name):
+                    out.add(n.func.id)
+                elif isinstance(n.func, ast.Attribute):
+                    out.add(n.func.attr)
+        return out
+
+    for remap_name in ("_nemo_snow_enthalpy_remap", "_nemo_ice_enthalpy_remap"):
+        r_fn = phase2_funcs[remap_name]
+        loops = [n for n in ast.walk(r_fn) if isinstance(n, (ast.For, ast.While, ast.If))]
+        binops = [n for n in ast.walk(r_fn) if isinstance(n, ast.BinOp)]
+        assert not loops, f"{remap_name} contains duplicate control flow: {loops}"
+        assert len(binops) <= 2, f"{remap_name} contains duplicate arithmetic ({len(binops)} BinOps)"
+        assert "_cumulative_remap" in _called_names(r_fn), (
+            f"{remap_name} does not delegate to _cumulative_remap"
+        )
+
+    zdf_fn = phase2_funcs["_si3_zdf_bl99_step"]
+    assert "si3_ice_thd_zdf_bl99" in _called_names(zdf_fn), (
+        "_si3_zdf_bl99_step does not delegate to si3_ice_thd_zdf_bl99"
+    )
+
+    dh_fn = phase2_funcs["_dh_step"]
+    assert "_call_prod_dh" in _called_names(dh_fn), (
+        "_dh_step does not delegate to _call_prod_dh -> si3_ice_thd_dh"
+    )
+    assert "si3_ice_thd_dh" in _called_names(phase2_funcs["_call_prod_dh"]), (
+        "_call_prod_dh does not delegate to si3_ice_thd_dh"
+    )
+    for n in ast.walk(dh_fn):
+        if isinstance(n, ast.If) and isinstance(n.test, ast.Name):
+            assert n.test.id not in (
+                "_nemo_dh_ice_content_accumulation",
+                "_nemo_dh_snow_update",
+            ), f"duplicate {n.test.id} branch still exists in _dh_step"
+
+    abl_fn = phase2_funcs["_si3_column_step_arrays_ablation"]
+    abl_calls = _called_names(abl_fn)
+    assert "si3_column_step_arrays" in abl_calls, (
+        "_si3_column_step_arrays_ablation does not delegate to si3_column_step_arrays"
+    )
+    assert "si3_ice_thd_sal" in abl_calls, (
+        "_si3_column_step_arrays_ablation does not delegate to si3_ice_thd_sal"
+    )
+    abl_binops = [n for n in ast.walk(abl_fn) if isinstance(n, ast.BinOp)]
+    assert len(abl_binops) <= 3, (
+        f"_si3_column_step_arrays_ablation contains duplicate O8/O10 arithmetic ({len(abl_binops)} BinOps)"
+    )
+
+
+def test_si3_column_step_arrays_requires_explicit_si3_and_c1d_reads_namelist(
+    tmp_path,
+) -> None:
+    """Verify missing SI3 config raises ValueError (no silent nn_icesal default) and C1D reads nn_icesal from its namelist."""
+    from pathlib import Path
+    import jax.numpy as jnp
+    from legoesm.core.precision import PrecisionPolicy, set_policy
+    from legoesm.ice import bitz_lipscomb as bl
+    from legoesm.ice.c1d_omip_l3 import (
+        C1D_OMIP_L3_NAMELIST_ICE_CFG,
+        build_c1d_omip_l3_card,
+    )
+    from legoesm.ice.config import SI3ThermoConfig
+    from legoesm.ice.constants_config import NEMO_SI3_CONSTANTS_CONFIG
+
+    set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
+
+    card = build_c1d_omip_l3_card()
+    assert card.config.si3.salinity_scheme == 2
+
+    z1 = jnp.zeros(1, dtype=jnp.float64)
+    z3 = jnp.zeros((1, 3), dtype=jnp.float64)
+    st = bl.SI3ColumnArrays(
+        jnp.asarray([0.85], dtype=jnp.float64),
+        jnp.asarray([1.8], dtype=jnp.float64),
+        jnp.asarray([0.15], dtype=jnp.float64),
+        jnp.asarray([268.0], dtype=jnp.float64),
+        z3,
+        z3,
+        jnp.asarray([5.0], dtype=jnp.float64),
+        z3,
+        z1,
+    )
+    forcing = bl.SI3SurfaceForcing(
+        qns_ice=z1,
+        qsr_ice=z1,
+        dqns_ice=z1,
+        qtr_ice_top=z1,
+        t_bottom=jnp.asarray([271.35], dtype=jnp.float64),
+        sss=jnp.asarray([34.0], dtype=jnp.float64),
+        evaporation=z1,
+        snow_precipitation=z1,
+        qprec_ice=z1,
+        qcn_ice_bottom=z1,
+        qsb_ice_bottom=z1,
+        fhld=z1,
+        qlead=z1,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match=r"si3_column_step_arrays requires an explicit SI3ThermoConfig \(si3\); no default",
+    ):
+        bl.si3_column_step_arrays(st, forcing, 3600.0, NEMO_SI3_CONSTANTS_CONFIG)
+
+    with pytest.raises(
+        ValueError,
+        match=r"si3_column_step_arrays requires an explicit SI3ThermoConfig \(si3\); no default",
+    ):
+        bl.si3_column_step_arrays(
+            st,
+            forcing,
+            3600.0,
+            NEMO_SI3_CONSTANTS_CONFIG,
+            si3=SI3ThermoConfig(salinity_scheme=None),  # type: ignore[arg-type]
+        )
+
+    with pytest.raises(
+        ValueError,
+        match=r"_si3_column_thd_da requires an explicit SI3ThermoConfig \(si3\); no default",
+    ):
+        bl._si3_column_thd_da(st, st, forcing, None, 3600.0, NEMO_SI3_CONSTANTS_CONFIG)
+
+    # Verify C1D actually parses nn_icesal from its namelist file:
+    orig_nml = Path(C1D_OMIP_L3_NAMELIST_ICE_CFG).read_text(encoding="utf-8")
+    nml_scheme4 = tmp_path / "namelist_ice_cfg_4"
+    nml_scheme4.write_text(
+        orig_nml.replace("nn_icesal        = 2", "nn_icesal        = 4"),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="salinity_scheme=4"):
+        build_c1d_omip_l3_card(namelist_ice_path=nml_scheme4)
+
+    nml_missing = tmp_path / "namelist_ice_cfg_missing"
+    nml_missing.write_text(
+        orig_nml.replace("nn_icesal        = 2", "! nn_icesal omitted"),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="nn_icesal"):
+        build_c1d_omip_l3_card(namelist_ice_path=nml_missing)
+
+
+def test_no_duplicate_o8_o12_arithmetic_ast_guard_and_plants(monkeypatch) -> None:
+    """Verify the AST no-duplicate-arithmetic guard passes on repo and fails on planted duplicates."""
+    from pathlib import Path
+    import jax.numpy as jnp
+    from legoesm.core.precision import PrecisionPolicy, set_policy
+    from legoesm.ice import bitz_lipscomb as bl
+    from scripts.validate.ocean_fidelity.testcases import nemo_si3thd_phase2_gate as phase2
+
+    set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
+    _assert_no_duplicate_o8_o12_arithmetic()
+
+    repo_root = Path(__file__).resolve().parents[3]
+    phase2_rel = "scripts/validate/ocean_fidelity/testcases/nemo_si3thd_phase2_gate.py"
+    phase2_src = (repo_root / phase2_rel).read_text(encoding="utf-8")
+
+    # Plant 1: renamed 4-statement arithmetic window from si3_column_step_arrays
+    # injected into nemo_si3thd_phase2_gate.py is caught by the AST window detector.
+    planted_window = (
+        "\ndef _planted_dup_do(v_n, a_n, fr_x, p_da):\n"
+        "    res_x = jnp.maximum(v_n - a_n * fr_x.ht_i_new, 0.0)\n"
+        "    v_o = p_da.h_ice * p_da.concentration\n"
+        "    v_tot = v_o + a_n * fr_x.ht_i_new + res_x\n"
+        "    a_tot = p_da.concentration + a_n\n"
+        "    return v_tot, a_tot\n"
+    )
+    with pytest.raises(
+        AssertionError,
+        match=r"duplicate O8-O12 arithmetic window in .*nemo_si3thd_phase2_gate\.py:_planted_dup_do",
+    ):
+        _assert_no_duplicate_o8_o12_arithmetic({phase2_rel: phase2_src + planted_window})
+
+    # Plant 2: re-introducing a loop into _nemo_snow_enthalpy_remap is caught.
+    planted_remap = phase2_src.replace(
+        "    return bl._cumulative_remap(\n",
+        "    for _k in range(3):\n        pass\n    return bl._cumulative_remap(\n",
+        1,
+    )
+    with pytest.raises(
+        AssertionError,
+        match=r"_nemo_snow_enthalpy_remap contains duplicate control flow",
+    ):
+        _assert_no_duplicate_o8_o12_arithmetic({phase2_rel: planted_remap})
+
+    # Plant 3: re-introducing an `if _nemo_dh_ice_content_accumulation:` branch into _dh_step is caught.
+    planted_dh = phase2_src.replace(
+        "    h_i0, h_s0 = state.h_ice, state.h_snow\n",
+        "    if _nemo_dh_ice_content_accumulation:\n        pass\n    h_i0, h_s0 = state.h_ice, state.h_snow\n",
+        1,
+    )
+    with pytest.raises(
+        AssertionError,
+        match=r"duplicate _nemo_dh_ice_content_accumulation branch still exists in _dh_step",
+    ):
+        _assert_no_duplicate_o8_o12_arithmetic({phase2_rel: planted_dh})
+
+    # Runtime verification that phase2_gate helpers delegate to production kernels in bitz_lipscomb:
+    calls: list[str] = []
+    orig_remap = bl._cumulative_remap
+    monkeypatch.setattr(
+        bl,
+        "_cumulative_remap",
+        lambda *a, **kw: (calls.append("_cumulative_remap"), orig_remap(*a, **kw))[1],
+    )
+    h4 = jnp.asarray([[0.01, 0.05, 0.05, 0.05]], dtype=jnp.float64)
+    e4 = jnp.full((1, 4), 1.0e8, dtype=jnp.float64)
+    phase2._nemo_snow_enthalpy_remap(h4, e4)
+    phase2._nemo_ice_enthalpy_remap(h4, e4)
+    assert calls == ["_cumulative_remap", "_cumulative_remap"]
+

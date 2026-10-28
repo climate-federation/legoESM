@@ -311,7 +311,7 @@ def _evaluate_subnormal_window_arm(
             b_forc,
             card.dt_seconds,
             card.config.ice_constants,
-            _nemo_zdf_layer_reciprocals=zdf_layer_reciprocals,
+            si3=card.config.si3, _nemo_zdf_layer_reciprocals=zdf_layer_reciprocals,
         )
     )
     traces = jax.device_get(step_fn(batch_entry, batch_forcing))
@@ -1089,7 +1089,7 @@ def run_year_rescore(
                     b_forcing,
                     card.dt_seconds,
                     card.config.ice_constants,
-                    **k_dict,
+                    si3=card.config.si3, **k_dict,
                 )
 
             return jax.jit(_runner) if use_jit else _runner

@@ -828,7 +828,7 @@ class SI3ZDFOutputs(NamedTuple):
 def _required(name, value):
     if value is None:
         raise ValueError(f"SI3 thermodynamics requires {name!r}; no default")
-    return jnp.asarray(value, dtype=jnp.float64)
+    return jnp.asarray(value) if getattr(value, "dtype", None) == jnp.float32 else jnp.asarray(value, dtype=jnp.float64)
 
 
 def si3_ice_thd_zdf_bl99(
@@ -837,7 +837,7 @@ def si3_ice_thd_zdf_bl99(
     qns_ice, qsr_ice, dqns_ice, qtr_ice_top, hfx_err_dif, hfx_dif,
     rDt_ice, rn_cnd_s, rn_kappa_i, rn_kappa_s, nn_qtrice, nn_snwfra,
     ln_cndi_P07, ln_cndflx, ln_virtual_itd, ln_zdf_chkcvg,
-    constants: IceConstantsConfig,
+    constants: IceConstantsConfig, _maximum_iterations: int = _MAX_ITERATIONS,
 ) -> SI3ZDFOutputs:
     """Exact-input SI3 heat diffusion for one gathered category (any nlay_i >= 2, nlay_s).
 
@@ -880,7 +880,7 @@ def si3_ice_thd_zdf_bl99(
         h_i=h_i, h_s=h_s, t_su=t_su, t_i_old=t_i, t_s_old=t_s, sz_i=sz_i,
         t_bo=t_bo, qns_ice=qns_ice, qsr_ice=qsr_ice, dqns_ice=dqns_ice,
         qtr_ice_top=qtr_ice_top, dt=rDt_ice, constants=cst,
-        rn_kappa_i=float(rn_kappa_i), rn_kappa_s=float(rn_kappa_s),
+        rn_kappa_i=float(rn_kappa_i), rn_kappa_s=float(rn_kappa_s), _maximum_iterations=_maximum_iterations,
     )
     qcn_bot, qcn_top = _zdf_interface_fluxes(core, t_bo, sr)
     hfx_err_dif = hfx_err_dif - sr((core.qns_ice - qns_ice) * a_i)  # :786
@@ -1824,7 +1824,7 @@ def si3_column_step_arrays(state: SI3ColumnArrays,
                            sfx_lam=None,
                            hfx_thd=None,
                            wfx_lam=None,
-                           _return_stage_outputs: bool = False) -> SI3StepTrace:
+                           _return_stage_outputs: bool = False, _zdf_dh_override=None) -> SI3StepTrace:
     """Execute the selected `ice_thd` chain and retain every oracle boundary."""
 
     e_ice = jnp.asarray(state.e_ice)
@@ -1844,8 +1844,8 @@ def si3_column_step_arrays(state: SI3ColumnArrays,
     else:
         T_s_old = jnp.asarray(t_s_entry, dtype=dtype)
     zero = jnp.zeros_like(h_ice)
-    fluxes_in = SI3DHFluxes(*([zero] * len(SI3DHFluxes._fields))) if fluxes is None else fluxes
-    nn_icesal = 2 if si3 is None else int(si3.salinity_scheme)
+    if si3 is None or getattr(si3, "salinity_scheme", None) is None: raise ValueError("si3_column_step_arrays requires an explicit SI3ThermoConfig (si3); no default")
+    nn_icesal, fluxes_in = int(si3.salinity_scheme), SI3DHFluxes(*([zero] * len(SI3DHFluxes._fields))) if fluxes is None else fluxes
     nml = {
         "ln_icedH": True,
         "rn_cnd_s": float(constants.k_snow),
@@ -1906,7 +1906,7 @@ def si3_column_step_arrays(state: SI3ColumnArrays,
         "hfx_dif": zero if hfx_dif is None else jnp.asarray(hfx_dif, dtype=dtype),
     }
     rDt_ice = float(dt)
-    o10 = si3_ice_thd_o10_category_stages(
+    o10 = None if _zdf_dh_override else si3_ice_thd_o10_category_stages(
         entry=entry,
         fluxes=fluxes_in,
         sfx_bri=zero if sfx_bri is None else jnp.asarray(sfx_bri, dtype=dtype),
@@ -1920,12 +1920,12 @@ def si3_column_step_arrays(state: SI3ColumnArrays,
         gravity=canonical_constants.g_nemo,
         constants=constants,
     )
-    post_zdf = state._replace(
+    post_zdf = _zdf_dh_override[0] if _zdf_dh_override else state._replace(
         T_surface=o10.o9.zdf.t_su,
         e_ice=o10.o9.zdf.e_i,
         e_snow=o10.o9.zdf.e_s,
     )
-    post_dh = SI3ColumnArrays(
+    post_dh = _zdf_dh_override[1] if _zdf_dh_override else SI3ColumnArrays(
         o10.o9.dh.a_i,
         o10.o9.dh.h_i,
         o10.o9.dh.h_s,
@@ -1938,8 +1938,8 @@ def si3_column_step_arrays(state: SI3ColumnArrays,
     )
     # `ice_thd_temp` is diagnostic because enthalpy is prognostic (:221-247).
     post_temp1 = post_dh
-    S_bulk = o10.sal.smin_drain if nml["nn_icesal"] == 2 else post_dh.S_bulk
-    post_sal = post_temp1._replace(S_bulk=S_bulk, S_layers=o10.sal.sz_i)
+    S_bulk = _zdf_dh_override[2] if _zdf_dh_override else (o10.sal.smin_drain if nml["nn_icesal"] == 2 else post_dh.S_bulk)
+    post_sal = post_temp1._replace(S_bulk=S_bulk, S_layers=_zdf_dh_override[3] if _zdf_dh_override else o10.sal.sz_i)
     post_temp2 = post_sal
     if _return_stage_outputs:
         post_da, da_out = _si3_column_thd_da(
@@ -2015,7 +2015,7 @@ def _ieee_lt_zero(value):
     True for every negative non-NaN, including a negative subnormal that XLA CPU
     ``jit`` would flush to ``-0`` before a float compare; ``-0`` and NaN are false.
     """
-    bits = jax.lax.bitcast_convert_type(value, jnp.uint64)
+    bits = jax.lax.bitcast_convert_type(jnp.asarray(value, dtype=jnp.float64), jnp.uint64)
     shifted = bits << jnp.uint64(1)
     return ((bits >> jnp.uint64(_SIGN_BIT_SHIFT)) == jnp.uint64(1)) & (
         shifted != jnp.uint64(0)) & (shifted <= jnp.uint64(_NAN_SHIFTED_FLOOR))
@@ -2079,16 +2079,16 @@ def _si3_column_thd_da(entry, post_temp2, forcing, si3, dt, constants, *,
                        _return_da_outputs: bool = False):
     """``IF( ln_icedA ) CALL ice_thd_da`` on the C1D column (O7_REF ppsrc ``icethd.f90:210``).
 
-    ``si3`` is ``SeaIceConfig.si3``; ``None`` or ``lateral_melt=False`` is
-    ``ln_icedA = .false.`` and returns ``post_temp2`` itself.  NEMO's inputs at
-    the call: ``at_i_1d`` is the gather-time total (one category: the entry
-    ``a_i``), the rest is the state after the second ``ice_thd_temp``; only cells
-    gathered at entry (``a_i > epsi10``, ``icethd.f90:181``) change.  The column
-    carries no ice-ocean flux accumulators, so ``sfx_lam``/``hfx_thd``/``wfx_lam``
-    start at +0 and are not returned (as for every other stage of this column).
+    ``si3`` is ``SeaIceConfig.si3`` (required; ``lateral_melt=False`` is
+    ``ln_icedA = .false.`` and returns ``post_temp2`` itself).  NEMO's inputs:
+    ``at_i_1d`` is the gather-time total (one category: entry ``a_i``), and only
+    cells gathered at entry (``a_i > epsi10``, ``icethd.f90:181``) change.
+    Flux accumulators start at +0 unless passed explicitly.
     """
-    if si3 is None or not si3.lateral_melt:
-        if si3 is not None and si3.namthd_da is not None:
+    if si3 is None:
+        raise ValueError("_si3_column_thd_da requires an explicit SI3ThermoConfig (si3); no default")
+    if not si3.lateral_melt:
+        if si3.namthd_da is not None:
             raise ValueError("si3.namthd_da is set but lateral_melt is False (ln_icedA)")
         if _return_da_outputs:
             return post_temp2, None

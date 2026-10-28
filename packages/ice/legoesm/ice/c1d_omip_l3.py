@@ -5,7 +5,9 @@ from __future__ import annotations
 from pathlib import Path
 from typing import NamedTuple
 
+from legoesm.core.nemo_namelist import parse_namelist
 from legoesm.ice.config import (
+    SI3ThermoConfig,
     SeaIceConfig,
     validate_si3_bulk_config,
     validate_si3_thermo_config,
@@ -13,6 +15,11 @@ from legoesm.ice.config import (
 from legoesm.ice.constants_config import NEMO_SI3_CONSTANTS_CONFIG
 
 from legoesm import constants
+
+C1D_OMIP_L3_NAMELIST_ICE_CFG = (
+    Path(__file__).resolve().parents[4]
+    / "scripts/validate/ocean_fidelity/testcases/configs/c1d_omip_l3_namelist_ice_cfg"
+)
 
 FORCING_SHA256 = "e5ec49445d2569019c45dec24255b9c7daf050079444b0e6e6d86a5b82317afe"
 THERMO_STREAM_SHA256 = "7fc9df2707a85581075e3c69b26784155151a55640a5693eb32c34fb710ea49b"
@@ -60,9 +67,14 @@ def build_c1d_omip_l3_card(
         "ERA5_NorthGreenland_surface_84N_-36E_1h_y2018.nc"
     ),
     oracle_root: Path = ORACLE_V2_ROOT,
+    namelist_ice_path: Path = C1D_OMIP_L3_NAMELIST_ICE_CFG,
 ) -> C1DOMIPL3Card:
     """Return the scope-exact 1-hour, one-category SI3 column card."""
 
+    nml = parse_namelist(namelist_ice_path, "ice")
+    if ("ice", "namthd_sal", "nn_icesal") not in nml:
+        raise ValueError(f"missing namthd_sal.nn_icesal in {namelist_ice_path}")
+    nn_icesal = int(nml[("ice", "namthd_sal", "nn_icesal")][0])
     config = SeaIceConfig(
         dynamics="none",
         transport="none",
@@ -74,6 +86,7 @@ def build_c1d_omip_l3_card(
         emissivity_ice=constants.emissivity_ice_nemo,
         thermo_scheme="si3_bl99",
         ice_constants=NEMO_SI3_CONSTANTS_CONFIG,
+        si3=SI3ThermoConfig(salinity_scheme=nn_icesal),
     )
     validate_si3_thermo_config(config)
     validate_si3_bulk_config(config)

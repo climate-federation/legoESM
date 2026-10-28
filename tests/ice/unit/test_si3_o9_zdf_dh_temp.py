@@ -776,7 +776,7 @@ def test_c1d_card_routes_its_dh_through_the_shared_core(monkeypatch):
     st = bl.SI3ColumnArrays(z + 0.9, z + 1.0, z + 0.1, z + RT0 - 15.0, jnp.full((1, 3), 3.0e8),
                             jnp.full((1, 3), 1.1e8), z + 4.0, jnp.full((1, 3), 4.0), z)
     forcing = bl.SI3SurfaceForcing(*(z for _ in range(13)), frq_m=1.0)._replace(t_bottom=z + RT0 - 1.8, sss=z + 34.0)
-    bl.si3_column_step_arrays(st, forcing, 3600.0, NEMO_SI3_CONSTANTS_CONFIG)
+    bl.si3_column_step_arrays(st, forcing, 3600.0, NEMO_SI3_CONSTANTS_CONFIG, si3=__import__("legoesm.ice.c1d_omip_l3", fromlist=["build_c1d_omip_l3_card"]).build_c1d_omip_l3_card().config.si3)
     assert calls == [(2, 3)]
 
 

@@ -342,7 +342,7 @@ def _dh_owner_evidence(root: Path, card, *, plant=False,
         )
         return jax.device_get(si3_column_step_arrays(
             state, _forcing(exact, jnp.float64), card.dt_seconds,
-            card.config.ice_constants, **kwargs,
+            card.config.ice_constants, si3=card.config.si3, **kwargs,
         ))
 
     enabled = trace(5734)
@@ -1083,12 +1083,12 @@ def _scope_ablation_sweep(thd_path: Path, zin_path: Path, card) -> dict[str, obj
             ))
             enabled_maps = _stage_maps(jax.device_get(si3_column_step_arrays(
                 batch_entry, batch_forcing, card.dt_seconds,
-                card.config.ice_constants,
+                card.config.ice_constants, si3=card.config.si3,
             )))
             disabled_maps = {
                 arm_name: _stage_maps(jax.device_get(phase2._si3_column_step_arrays_ablation(
                     batch_entry, batch_forcing, card.dt_seconds,
-                    card.config.ice_constants, **kwargs,
+                    card.config.ice_constants, si3=card.config.si3, **kwargs,
                 )))
                 for arm_name, kwargs in SCOPE_ARM_KWARGS.items()
             }
@@ -1463,7 +1463,7 @@ def _owner_arms(root: Path, card, *, plant_deposition=False,
         )
         return jax.device_get(si3_column_step_arrays(
             state, _forcing(exact, jnp.float64), card.dt_seconds,
-            card.config.ice_constants, **kwargs,
+            card.config.ice_constants, si3=card.config.si3, **kwargs,
         ))
 
     frames74, exact74 = selected[74]
@@ -1618,21 +1618,21 @@ def _melt_scaling(root: Path, card) -> dict[str, object]:
                 for name in phase2.ZDF_INPUT_NAMES
             ))
             full = si3_column_step_arrays(
-                state, forcing, card.dt_seconds, card.config.ice_constants
+                state, forcing, card.dt_seconds, card.config.ice_constants, si3=card.config.si3
             )
             no_surface = phase2._si3_column_step_arrays_ablation(
                 state, forcing, card.dt_seconds, card.config.ice_constants,
-                _surface_melt=False,
+                si3=card.config.si3, _surface_melt=False,
             )
             no_basal = phase2._si3_column_step_arrays_ablation(
                 state, forcing, card.dt_seconds, card.config.ice_constants,
-                _basal_melt=False,
+                si3=card.config.si3, _basal_melt=False,
             )
             no_shortwave = si3_column_step_arrays(
                 state,
                 forcing._replace(qtr_ice_top=jnp.zeros_like(forcing.qtr_ice_top)),
                 card.dt_seconds,
-                card.config.ice_constants,
+                card.config.ice_constants, si3=card.config.si3,
             )
             values = {
                 "surface_ice_m": np.asarray(
@@ -1830,26 +1830,26 @@ def run(*, root: Path = REPLAY_ROOT, plant_arithmetic=False,
 
     def eager_step(state, forcing):
         return si3_column_step_arrays(
-            state, forcing, card.dt_seconds, card.config.ice_constants
+            state, forcing, card.dt_seconds, card.config.ice_constants, si3=card.config.si3
         )
 
     step = jax.jit(lambda state, forcing: si3_column_step_arrays(
-        state, forcing, card.dt_seconds, card.config.ice_constants
+        state, forcing, card.dt_seconds, card.config.ice_constants, si3=card.config.si3
     ))
-    no_surface_step = jax.jit(lambda state, forcing: si3_column_step_arrays(
+    no_surface_step = jax.jit(lambda state, forcing: phase2._si3_column_step_arrays_ablation(
         state, forcing, card.dt_seconds, card.config.ice_constants,
-        _surface_melt=False,
+        si3=card.config.si3, _surface_melt=False,
     ))
-    no_basal_step = jax.jit(lambda state, forcing: si3_column_step_arrays(
+    no_basal_step = jax.jit(lambda state, forcing: phase2._si3_column_step_arrays_ablation(
         state, forcing, card.dt_seconds, card.config.ice_constants,
-        _basal_melt=False,
+        si3=card.config.si3, _basal_melt=False,
     ))
     scope_steps = {
         arm_name: jax.jit(
             lambda state, forcing, arm_kwargs=arm_kwargs:
-            si3_column_step_arrays(
+            phase2._si3_column_step_arrays_ablation(
                 state, forcing, card.dt_seconds, card.config.ice_constants,
-                **arm_kwargs,
+                si3=card.config.si3, **arm_kwargs,
             )
         )
         for arm_name, arm_kwargs in SCOPE_ARM_KWARGS.items()

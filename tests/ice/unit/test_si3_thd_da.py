@@ -566,7 +566,7 @@ def _production_expected(card, state, forcing, beta, dmin):
     from legoesm.ice.bitz_lipscomb import SI3ColumnArrays, si3_column_step_arrays
 
     arrays = SI3ColumnArrays(*(f.data for f in state))
-    pre = jax.jit(lambda s, f: si3_column_step_arrays(s, f, card.dt_seconds, ICE))(
+    pre = jax.jit(lambda s, f: si3_column_step_arrays(s, f, card.dt_seconds, ICE, si3=card.config.si3))(
         *jax.device_put((arrays, forcing), jax.devices("cpu")[0])).post_temp2
     pre = jax.tree.map(np.asarray, pre)
     entry_a = np.asarray(state.concentration.data)
