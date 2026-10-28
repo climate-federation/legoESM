@@ -152,27 +152,30 @@ __param_spec__ = {
     "EmanuelConfig": {
         "scheme_key": "atm.conv.EmanuelConfig",
         "excluded": {
-            "cape_sharpness": "numerics: sigmoid sharpness on the CAPE gate",
+            "cape_sharpness": "diagnostic only: sharpness of the convective_mask CAPE indicator (no tendency effect)",
+            "cape_threshold": "diagnostic only: threshold of the convective_mask CAPE indicator; CONVECT has no CAPE gate (no tendency effect)",
             "denom_floor": "numerics: SIJ denominator magnitude floor (oracle ABS(DENOM)<0.01)",
-            "epsilon_0": "entrainment: near-undilute bulk-plume rate held fixed (mixing handled by the ensemble)",
+            "epsilon_0": "RETIRED: field of the former Emanuel surrogate, no CONVECT v4.3c counterpart; non-default values raise",
+            "cu_coefficient": "RETIRED: field of the former Emanuel surrogate, no CONVECT v4.3c counterpart; non-default values raise",
+            "delta_0": "RETIRED: field of the former Emanuel surrogate, no CONVECT v4.3c counterpart; non-default values raise",
+            "mse_min_search_offset": "RETIRED: field of the former Emanuel surrogate, no CONVECT v4.3c counterpart; non-default values raise",
+            "parcel_perturb_T": "RETIRED: field of the former Emanuel surrogate, no CONVECT v4.3c counterpart; non-default values raise",
+            "parcel_perturb_q": "RETIRED: field of the former Emanuel surrogate, no CONVECT v4.3c counterpart; non-default values raise",
             "level_window_sharpness": "numerics: sigmoid sharpness on the ICB/INB cloud-layer windows",
             "lcl_pressure_sharpness": "numerics: sigmoid sharpness on the pressure-bounded sub-cloud layer",
-            "precip_efficiency_lcl": "default 0 = disabled/off (enable via config, not training)",
-            "precip_efficiency_water": "precipitation_efficiency: default 1.0 at domain boundary (not sigmoid-tunable, fix via config)",
+            "precip_efficiency_lcl": "RETIRED: field of the former Emanuel surrogate, no CONVECT v4.3c counterpart; non-default values raise",
+            "precip_efficiency_water": "RETIRED: field of the former Emanuel surrogate, no CONVECT v4.3c counterpart; non-default values raise",
             "sat_branch_sharpness": "numerics: sigmoid sharpness on the saturated-mixture re-solve switch",
             "sij_gate_sharpness": "numerics: sigmoid sharpness on the 0<SIJ<0.9 entrainment band gate",
-            "smooth_trigger_sharpness": "numerics: sigmoid sharpness on the buoyancy-sort weighting",
+            "smooth_trigger_sharpness": "RETIRED: field of the former Emanuel surrogate, no CONVECT v4.3c counterpart; non-default values raise",
             "strict_index_sharpness": "numerics: sigmoid sharpness on the strict integer-index inequalities",
         },
         "params": {
             "M_b_max": {"units": "kg/m^2/s", "bounds": (0.02, 0.15), "tunable_tier": 2, "transform": "sigmoid", "category": "mass_flux", "reference": "Emanuel (1991) stability cap", "shape": None},
             "alpha_closure": {"units": "1", "bounds": (0.05, 0.6), "tunable_tier": 1, "transform": "sigmoid", "category": "cape_closure", "reference": "Emanuel (1991) CONVECT v4.3c ALPHA", "shape": None},
             "c_l_emanuel": {"units": "J/kg/K", "bounds": (2000.0, 4500.0), "tunable_tier": 3, "transform": "sigmoid", "category": "mixing", "reference": "Emanuel (1991) CONVECT v4.3c CL", "shape": None},
-            "cape_threshold": {"units": "J/kg", "bounds": (23.1, 210.0), "tunable_tier": 2, "transform": "sigmoid", "category": "trigger", "reference": "trainable since the trigger gained a straight-through gradient (_triggers.py); was tier 0 / AD-unreachable per #1417. Original: Emanuel (1991)", "shape": None},
             "cbmf_carry_max": {"units": "kg/m^2/s", "bounds": (0.099, 0.9), "tunable_tier": 3, "transform": "sigmoid", "category": "mass_flux", "reference": "Emanuel (1991) anti-runaway guard", "shape": None},
-            "cu_coefficient": {"units": "1", "bounds": (0.231, 2.1), "tunable_tier": 1, "transform": "sigmoid", "category": "entrainment", "reference": "Emanuel (1991) alpha entrainment scale", "shape": None},
             "damp_coefficient": {"units": "1", "bounds": (0.0, 0.3), "tunable_tier": 2, "transform": "sigmoid", "category": "cape_closure", "reference": "Emanuel (1991) CONVECT v4.3c DAMP", "shape": None},
-            "delta_0": {"units": "1/m", "bounds": (6.6e-05, 0.0006), "tunable_tier": 2, "transform": "sigmoid", "category": "detrainment", "reference": "Emanuel (1991) bulk plume", "shape": None},
             "downdraft_sigd": {"units": "1", "bounds": (0.01, 0.3), "tunable_tier": 1, "transform": "sigmoid", "category": "downdraft", "reference": "CONVECT v4.3c SIGD, fractional area of the unsaturated downdraft (convect43c.f:192)", "shape": None},
             "downdraft_sigs": {"units": "1", "bounds": (0.0, 0.5), "tunable_tier": 2, "transform": "sigmoid", "category": "downdraft", "reference": "CONVECT v4.3c SIGS, fraction of precipitation falling outside the cloud (convect43c.f:193)", "shape": None},
             "downdraft_omtrain_pa_s": {"units": "Pa/s", "bounds": (10.0, 120.0), "tunable_tier": 2, "transform": "sigmoid", "category": "downdraft", "reference": "CONVECT v4.3c OMTRAIN, rain fall speed (convect43c.f:194)", "shape": None},
@@ -188,9 +191,6 @@ __param_spec__ = {
             "dtmax": {"units": "K", "bounds": (0.297, 2.7), "tunable_tier": 3, "transform": "sigmoid", "category": "trigger", "reference": "Emanuel (1991) CONVECT v4.3c DTMAX", "shape": None},
             "elcrit": {"units": "kg/kg", "bounds": (0.000363, 0.0033), "tunable_tier": 1, "transform": "sigmoid", "category": "precipitation_efficiency", "reference": "Emanuel (1991) CONVECT v4.3c ELCRIT", "shape": None},
             "entp": {"units": "1", "bounds": (0.495, 4.5), "tunable_tier": 2, "transform": "sigmoid", "category": "entrainment", "reference": "Emanuel (1991) CONVECT v4.3c ENTP", "shape": None},
-            "mse_min_search_offset": {"units": "Pa", "bounds": (16500.0, 150000.0), "tunable_tier": 3, "transform": "sigmoid", "category": "numerics", "reference": "Emanuel (1991) source-level search offset", "shape": None},
-            "parcel_perturb_T": {"units": "K", "bounds": (0.0, 1.5), "tunable_tier": 2, "transform": "sigmoid", "category": "trigger", "reference": "Emanuel (1991) sub-cloud perturbation", "shape": None},
-            "parcel_perturb_q": {"units": "kg/kg", "bounds": (0.0, 0.003), "tunable_tier": 3, "transform": "sigmoid", "category": "trigger", "reference": "Emanuel (1991) sub-cloud perturbation", "shape": None},
             "precip_efficiency_max": {"units": "1", "bounds": (0.5, 1.0), "tunable_tier": 2, "transform": "sigmoid", "category": "precipitation_efficiency", "reference": "Emanuel (1991) CONVECT v4.3c EPMAX", "shape": None},
             "sij_upper_gate": {"units": "1", "bounds": (0.297, 2.7), "tunable_tier": 3, "transform": "sigmoid", "category": "mixing", "reference": "Emanuel (1991) CONVECT v4.3c SIJ upper bound", "shape": None},
             "tlcrit": {"units": "degC", "bounds": (-165.0, -18.15), "tunable_tier": 2, "transform": "sigmoid", "category": "precipitation_efficiency", "reference": "Emanuel (1991) CONVECT v4.3c TLCRIT", "shape": None},
@@ -956,54 +956,32 @@ class KainFritschConfig(NamedTuple):
 
 
 class EmanuelConfig(NamedTuple):
-    """Configuration for the Emanuel (1991) buoyancy-sorting scheme.
+    """Configuration for Emanuel convection, the CONVECT v4.3c port.
 
-    Single-plume mass-flux scheme with a buoyancy-sorted ensemble of
-    mixed parcels: at every cloud level the parcel may mix with
-    environmental air in a discrete spectrum of mixing fractions; the
-    fractions with positive buoyancy continue to ascend while the
-    fractions with negative buoyancy descend.  The smooth-everywhere
-    formulation replaces the hard ascend/descend switch with a
-    sigmoid weighting on buoyancy.
+    The scheme is Kerry Emanuel's ``convect43c.f`` (CONVECT 4.3c) ported line
+    by line (see :mod:`legoesm.atmosphere.physics.convection.emanuel`).  The
+    oracle's parameters map to fields as follows: ELCRIT ``elcrit``, TLCRIT
+    ``tlcrit``, ENTP ``entp``, SIGD/SIGS/OMTRAIN/OMTSNOW/COEFFR/COEFFS the
+    ``downdraft_*`` fields, DTMAX ``dtmax``, ALPHA ``alpha_closure``, DAMP
+    ``damp_coefficient``, CL ``c_l_emanuel``, EPMAX
+    ``precip_efficiency_max``, the 0.9 entrainment-band edge
+    ``sij_upper_gate``, the 0.01 denominator floor ``denom_floor``.  CU and
+    BETA (momentum transport, downdraught velocity scale) are not used: the
+    port returns no momentum tendency and no WD/TPRIME/QPRIME.
 
-    Distinct from Zhang-McFarlane (single bulk plume) and Kain-Fritsch
-    (single plume with deep/shallow blend) by the per-level
-    distribution of detrainment that the buoyancy-sorted ensemble
-    produces.
+    The ``*_sharpness`` / ``*_width`` / ``*_transition_K`` fields smooth oracle
+    switches for differentiability; their hard limit is the oracle.
 
-    Fields
-    ------
-    n_mixing_fractions : int
-        Number of discrete mixing fractions in the buoyancy-sort
-        ensemble.  Default 8 — Emanuel 1991 uses 50; the smaller
-        value here is a cost / accuracy compromise.
-    cu_coefficient : float
-        Entrainment scale factor (Emanuel's α).  Default 0.7.
-    precip_efficiency_water : float
-        Precipitation efficiency above LCL (default 1.0).
-    precip_efficiency_lcl : float
-        Precipitation efficiency below LCL (default 0.0).
-    cape_threshold : float
-        CAPE gate [J/kg] (default 70.0).
-    cape_sharpness : float
-        Sigmoid sharpness on the CAPE gate [1/(J/kg)] (default 0.02).
-    parcel_perturb_T : float
-        Sub-cloud parcel temperature perturbation [K] (default 0.5).
-    parcel_perturb_q : float
-        Sub-cloud parcel humidity perturbation [kg/kg] (default 1e-3).
-    enable_unsaturated_downdraft : bool
-        Whether to include the unsaturated downdraft branch (rain
-        evaporation cooling) (default ``False``).
-    smooth_trigger_sharpness : float
-        Sigmoid sharpness on the buoyancy-sort weighting [1/K]
-        (default 0.5).
-    epsilon_0 : float
-        Bulk-plume entrainment rate [1/m] (default 1.5e-3).
-    delta_0 : float
-        Bulk-plume detrainment rate [1/m] (default 1.5e-3).
-    M_b_max : float
-        Hard upper bound on the cloud-base mass flux ``M_b`` [kg/m²/s]
-        (default 0.005 — about 1/20 of the literature peak tropical value 0.1; tighter than peak because the unbounded CAPE/tau closure can spike to ~2 kg/m²/s in a high-CAPE column and the per-layer heating ~M·(T_u−T)·δ scales linearly).
+    No oracle counterpart, kept: ``M_b_max`` (cap on the transport mass flux),
+    ``cbmf_carry_max`` (cap on the carried CBMF), ``cape_threshold`` and
+    ``cape_sharpness`` (shape the diagnostic ``convective_mask`` only).
+
+    RETIRED (fields of the former single-sigmoid surrogate, kept so existing
+    configs load; any non-default value raises): ``n_mixing_fractions``,
+    ``cu_coefficient``, ``precip_efficiency_water``, ``precip_efficiency_lcl``,
+    ``parcel_perturb_T``, ``parcel_perturb_q``, ``smooth_trigger_sharpness``,
+    ``epsilon_0``, ``delta_0``, ``mse_min_search_offset``, and
+    ``use_genuine_mixing`` (must stay True).
     """
     n_mixing_fractions: int = 8
     cu_coefficient: float = 0.7
@@ -1025,10 +1003,10 @@ class EmanuelConfig(NamedTuple):
     alpha_closure: float = 0.2
     damp_coefficient: float = 0.1
     dtmax: float = 0.9
-    # Pressure sharpness [1/Pa] for the differentiable mask that bounds
-    # the DTPBL average to levels between the launch level NK and cloud
-    # base ICB (CONVECT v4.3c lines 553-557).  1e-3 gives an O(1 kPa)
-    # transition, matching the shared LCL crossing sharpness.
+    # Pressure sharpness [1/Pa] of the mask that bounds the DTPBL average to
+    # levels NK..ICB-1 (above NK: P > PLCL; CONVECT v4.3c lines 553-557).
+    # 1e-3 gives an O(1 kPa) transition; the large-sharpness limit is the
+    # oracle.
     lcl_pressure_sharpness: float = 1.0e-3
     # Upper bound [kg/m²/s] on the *carried* prognostic CBMF — looser than
     # the per-step transport cap ``M_b_max`` so the closure's memory can
@@ -1037,19 +1015,13 @@ class EmanuelConfig(NamedTuple):
     # plume transport is still bounded at ``M_b_max``.  Acts only as an
     # anti-runaway guard for a persistently violently-unstable column.
     cbmf_carry_max: float = 0.3
-    # Default-OFF.  Emanuel 1991's downdraft re-evaporates a fraction
-    # of *precipitation* (rain) back to vapor in the BL.  In a model
-    # without an explicit q_r tracer the implementation can only draw
-    # from ``dq_c_conv_dt`` (the cloud-water source), so enabling it
-    # produces a column-net moistening on CAPE-positive soundings —
-    # the wrong sign of ``Q_v`` that the validation script flags.
-    # Production runs with a full microphysics chain that owns q_r
-    # should override this to ``True``.
+    # Default-OFF: the oracle's downdraught skip (its EP(INB) < 1e-4 branch)
+    # is taken.  CONVECT itself always runs the precipitating downdraught
+    # (convect43c.f lines 713-830), ported in ``_emanuel_downdraft``.
     enable_unsaturated_downdraft: bool = False
     # --- CONVECT v4.3c downdraft constants (convect43c.f lines 186-201) --
-    # Read ONLY when ``enable_unsaturated_downdraft`` is set, which selects
-    # the ported shaft (``_emanuel_downdraft``) rather than the legacy
-    # column-integrated stand-in.  Defaults are Emanuel's published values.
+    # Read ONLY when ``enable_unsaturated_downdraft`` is set.  Defaults are
+    # Emanuel's published values.
     downdraft_sigd: float = 0.05
     downdraft_sigs: float = 0.12
     downdraft_omtrain_pa_s: float = 50.0
@@ -1063,29 +1035,12 @@ class EmanuelConfig(NamedTuple):
     downdraft_ep_gate_threshold: float = 1.0e-4
     downdraft_ep_gate_width: float = 1.0e-5
     smooth_trigger_sharpness: float = 0.5
-    # Bulk-plume entrainment/detrainment for the cloud-base updraft.
-    # Deep-convection value (~2e-4 /m): in Emanuel's scheme the
-    # cloud-environment mixing is represented explicitly by the
-    # buoyancy-sorted ensemble (``n_mixing_fractions``), so the bulk
-    # ascent should be near-undilute.  The earlier ``1.5e-3`` (shallow-
-    # cumulus range) double-counted dilution — it over-entrained the
-    # bulk plume on top of the ensemble mixing, collapsing the updraft
-    # buoyancy in the lower troposphere so deep convection could not
-    # warm the free troposphere (anti-convective, super-adiabatic,
-    # ~30 K-too-cold RCE).
+    # RETIRED surrogate fields (see the class docstring).
     epsilon_0: float = 2.0e-4
     delta_0: float = 2.0e-4
     M_b_max: float = 0.05
-    # --- GENUINE (i,j) episodic-mixing buoyancy-sort spectrum ----------
-    # Faithful port of the Fortran CONVECT v4.3c SIJ/ELIJ/MENT mixing
-    # matrix (convect43c.f lines 588-712).  When ``use_genuine_mixing``
-    # is True (default) the scheme builds the full ``(nlev, nlev)``
-    # mixing matrix — every origin level i mixes with environment air in
-    # the neutral-buoyancy fraction spectrum, each mixture's buoyancy
-    # sets its detrainment level j, and the environmental tendencies are
-    # assembled from MENT(i,j).  When False it falls back to the legacy
-    # single-sigmoid ``_mixture_buoyancy`` surrogate (kept for back-compat
-    # / ablation).  See ``_emanuel_mixing.py``.
+    # RETIRED: False selected the former single-sigmoid surrogate and now
+    # raises; the scheme is the CONVECT v4.3c port only.
     use_genuine_mixing: bool = True
     # Emanuel's effective liquid-water heat capacity CL [J/kg/K] (oracle
     # value 2500).  This is a scheme-internal thermodynamic coefficient
@@ -1102,11 +1057,11 @@ class EmanuelConfig(NamedTuple):
     # Mixing-rate coefficient ENTP in M(i) (oracle 1.5).
     entp: float = 1.5
     # --- Smoothing sharpnesses for the discrete sort (AD-safety) -------
-    # Each replaces a hard Fortran switch with a smooth surrogate; the
-    # forward result tracks the discrete sort to a stated tolerance (see
-    # the oracle-vs-ours mixing-matrix comparison in
-    # ``.physics-validator/emanuel``).
-    # Sigmoid sharpness [1/level] for the ICB/INB cloud-layer windows.
+    # Each smooths a hard CONVECT switch; at large sharpness the scheme
+    # reproduces the running oracle to round-off
+    # (tests/atmosphere/test_emanuel_convect43c_oracle.py).
+    # Sigmoid sharpness [1/level] for the ICB/INB cloud-layer windows
+    # (evaluated half a level off the integer index, so they tend to 0/1).
     level_window_sharpness: float = 6.0
     # Sigmoid sharpness [dimensionless] for the ``0 < SIJ < 0.9``
     # entrainment gate (oracle counts a mixture only inside this band).
@@ -1115,7 +1070,8 @@ class EmanuelConfig(NamedTuple):
     sij_upper_gate: float = 0.9
     # Magnitude floor for the SIJ denominator (oracle ``ABS(DENOM)<0.01``).
     denom_floor: float = 0.01
-    # Offset [Pa] for the smooth max-MSE (NK) source-level selection.
+    # RETIRED: offset of the former smooth source-level selector (NK is now
+    # the oracle's discrete max-HM level below IHMIN).
     mse_min_search_offset: float = 5.0e4
     # Sigmoid sharpness for the saturated-mixture re-solve switch
     # (oracle ``SIJ<0 .or. SIJ>1 .or. ALTEM>CWAT``).

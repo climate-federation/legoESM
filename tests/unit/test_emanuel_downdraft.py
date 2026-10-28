@@ -19,7 +19,6 @@ jax.config.update("jax_enable_x64", True)
 
 from legoesm import constants
 from legoesm.atmosphere.physics.convection._emanuel_downdraft import (
-    _taper_mass_flux_to_surface,
     emanuel_downdraft,
 )
 
@@ -73,9 +72,12 @@ def _column(*, ep_level: int | None = None, ep_value: float = 0.5,
             # need a SINGLE unambiguous source open the gate instead (see
             # _OPEN_GATE) rather than adding a second one.
             ep = ep.at[:, -1].set(max(ep_value, 1.0e-2))
+    # The sweep starts at INB; here the top level, so the whole column runs.
+    inb = jnp.asarray([_NLEV - 1])
     return dict(T=T, q=q, qs=qs, p_full=p_full, p_half=p_half,
                 h_dry_static=h_dry_static, gz=gz, lv=lv, cpn=cpn,
-                m_profile=m_profile, ment=ment, elij=elij, clw=clw, ep=ep)
+                m_profile=m_profile, ment=ment, elij=elij, clw=clw, ep=ep,
+                inb=inb, c_l=2500.0)
 
 
 def test_no_detrained_condensate_gives_exactly_zero():
@@ -168,23 +170,21 @@ def test_evaporation_moistens_and_cools():
     assert dT[k] < 0.0, "evaporation warmed the layer"
 
 
-def test_a_saturated_environment_still_evaporates():
-    """A saturated ENVIRONMENT does not stop the shaft, and that is correct.
+def test_a_saturated_environment_does_not_evaporate():
+    """In a saturated column the oracle's shaft evaporates nothing.
 
-    The ventilation factor is driven by ``QS(I) - 0.5*(Q(I) + QP(I+1))``
-    (convect43c.f line 754): the deficit of the MIXTURE of environmental and
-    downdraft air, not of the environment alone.  The shaft descends carrying
-    air from aloft, so ``QP`` sits below the local ``QS`` and evaporation
-    continues even at ``Q == QS``.
-
-    Written as an explicit expectation because the obvious guess -- saturate
-    the column, evaporation stops -- is wrong, and an earlier version of this
-    file (and of the module's physics contract) asserted it.
+    AFAC is driven by ``QS(I) - 0.5*(Q(I) + QP(I+1))`` (convect43c.f line
+    754).  At INB, QP(INB+1) is its initialisation Q(INB) = QS(INB); with no
+    downdraught flux QP(I) keeps Q(I-1) all the way down (lines 500-502,
+    796-817), so the mixture is saturated at every level and AFAC = 0.  (An
+    earlier version of this test asserted the opposite: it was pinned to a
+    port that carried QP down from the top where the oracle does not.)
     """
     col = _column(ep_level=12)
     col["q"] = col["qs"]
     out = emanuel_downdraft(**col, **_ORACLE)
-    assert np.max(np.asarray(out.evap)) > 0.0
+    assert np.max(np.abs(np.asarray(out.evap))) == 0.0
+    assert np.max(np.abs(np.asarray(out.mp))) == 0.0
 
 
 def test_supersaturating_the_mixture_floors_evaporation_at_zero():
@@ -229,35 +229,6 @@ def test_gradient_is_finite_on_a_column_with_no_source():
     assert np.all(np.isfinite(np.asarray(jax.grad(loss)(col["q"]))))
 
 
-def test_surface_taper_is_linear_to_zero_and_anchored_at_the_band_top():
-    """The JTT construct, checked against its closed form directly."""
-    p_sfc = 100_000.0
-    p = jnp.asarray([[p_sfc, 99_000.0, 96_000.0, 94_000.0, 80_000.0]])
-    mp = jnp.asarray([[7.0, 3.0, 5.0, 9.0, 11.0]])
-    out = np.asarray(_taper_mass_flux_to_surface(
-        mp, p, taper_p_fraction=0.949))[0]
-    # Band is p > 94_900: indices 0,1,2 -> anchor jtt = 2.
-    anchor = 5.0
-    assert out[2] == pytest.approx(anchor), "the anchor level must be a no-op"
-    expected1 = anchor * (p_sfc - 99_000.0) / (p_sfc - 96_000.0)
-    assert out[1] == pytest.approx(expected1)
-    assert out[3] == pytest.approx(9.0), "a level above the band was tapered"
-    assert out[4] == pytest.approx(11.0)
-    # Index 0 is left to the caller's surface mask, matching the oracle's
-    # ``IF(I.EQ.1)GOTO 360``.
-    assert out[0] == pytest.approx(7.0)
-
-
-def test_taper_survives_two_levels_at_equal_pressure():
-    """GLM's edge case: the oracle divides by ``P(1)-P(JTT)`` and produces NaN
-    when the two lowest levels share a pressure."""
-    p = jnp.asarray([[100_000.0, 100_000.0, 80_000.0]])
-    mp = jnp.asarray([[2.0, 3.0, 4.0]])
-    out = np.asarray(_taper_mass_flux_to_surface(
-        mp, p, taper_p_fraction=0.949))
-    assert np.all(np.isfinite(out)), "degenerate pressures produced NaN"
-
-
 # --------------------------------------------------------------------------- #
 # Integration through the PUBLIC Emanuel entry point.
 #
@@ -290,8 +261,7 @@ def _emanuel_tendencies(*, downdraft: bool):
     )
 
     T, q_v, p_full, p_half = _production_column()
-    cfg = EmanuelConfig(use_genuine_mixing=True,
-                        enable_unsaturated_downdraft=downdraft)
+    cfg = EmanuelConfig(enable_unsaturated_downdraft=downdraft)
     # ``conv_prog_profile`` is the carried cloud-base mass flux; a zero
     # profile is the cold start the scheme is documented to accept.
     cbmf = jnp.zeros_like(T)
@@ -314,18 +284,16 @@ def test_the_flag_actually_changes_the_production_tendencies():
         "flag is advertising a scheme it does not run")
 
 
-def test_the_downdraft_is_refused_on_the_legacy_surrogate():
-    """It is driven by the buoyancy-sort mixing matrix, which the surrogate
-    does not produce; running silently would be different physics under the
-    same flag."""
-    from legoesm.atmosphere.physics.convection.config import EmanuelConfig
-    from legoesm.atmosphere.physics.convection.emanuel import (
-        emanuel_convection,
-    )
-
-    T, q_v, p_full, p_half = _production_column()
-    cfg = EmanuelConfig(use_genuine_mixing=False,
-                        enable_unsaturated_downdraft=True)
-    with pytest.raises(ValueError, match="requires use_genuine_mixing"):
-        emanuel_convection(
-            T, q_v, p_full, p_half, jnp.zeros_like(T), 600.0, cfg)
+def test_humidity_without_downdraft_flux_keeps_its_initialisation():
+    """Where MP(I) <= MP(I+1) = 0 neither oracle branch assigns QP(I), so it
+    keeps its initialisation Q(I-1) (convect43c.f lines 500-502, 796-817),
+    clipped to [0, QS(I-1)].  A supersaturated upper shaft evaporates nothing,
+    so MP is zero there; the first level below it must read that value."""
+    col = _column(ep_level=12)
+    q = np.asarray(col["q"]).copy()
+    qs = np.asarray(col["qs"])
+    q[0, 15:] = 3.0 * qs[0, 15:]
+    col["q"] = jnp.asarray(q)
+    out = emanuel_downdraft(**col, **_ORACLE)
+    assert np.max(np.asarray(out.mp)[0, 15:]) == 0.0
+    assert float(out.qp[0, 15]) == pytest.approx(min(q[0, 14], qs[0, 14]), rel=1e-12)
