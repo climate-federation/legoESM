@@ -146,10 +146,12 @@ def test_split_reads_the_end_of_step_temperature(monkeypatch):
 
     monkeypatch.setattr(sq, "split_condensate", spy)
     T, q_v, hyd, p_full, p_half, rho, dz = _cold_columns()
+    q_v = q_v * (1.3 / 0.95)       # supersaturated: condensation heats the step
     dt = 300.0
-    out = sq.sundqvist_microphysics(T, q_v, hyd, p_full, p_half, rho, dz, dt,
-                                    cell_area=1.0e10, carries_q_i=True)
+    args = (T, q_v, hyd, p_full, p_half, rho, dz, dt)
+    cond = sq.diagnose_sundqvist_process_rates(*args, cell_area=1.0e10).condensation
+    assert float(jnp.max(cond)) > 0.0   # end-of-step T differs from precpd's T
+    out = sq.sundqvist_microphysics(*args, cell_area=1.0e10, carries_q_i=True)
     end_T = T + out.dT_dt * dt - seen["dT_fus"]
     np.testing.assert_allclose(np.asarray(seen["T"]), np.asarray(end_T),
                                rtol=1e-13, atol=0.0)
-    assert float(jnp.max(jnp.abs(end_T - T))) > 1e-3   # the step heats: not vacuous
