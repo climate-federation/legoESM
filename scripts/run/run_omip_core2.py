@@ -9765,6 +9765,9 @@ def main() -> int:
                 make_sharded_ocean_step,
                 shard_state_latlon,
             )
+            # Same step-stable carry seeding as the non-persistent lane: without it
+            # None->Field fields break shard_map out_specs.  [seed_persistent]
+            state = model.seed_scan_carry(state, dt)
             _spmd_inner = make_sharded_ocean_step(model, _spmd_mesh)
             _ocean_step = (lambda st, sf, fw, t_sec=None:
                            _spmd_inner(st, dt, surface_forcing=sf,
