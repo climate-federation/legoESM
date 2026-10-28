@@ -89,7 +89,8 @@ authorized kind-20 input; it does not translate kind 15.
 
 ## Compatibility and controls
 
-- Focused O15/kind-20/evidence tests: 8 passed, 12 deselected.
+- Focused O15/kind-20/evidence scorer tests: 4 passed, 12 deselected;
+  `test_si3_finalize.py`: 4 passed.
 - O8–O12 all-step production score: `PASS_ALL_O8_O12_0_ULP`; artifact
   `o8_o12_master_score.json`, SHA-256
   `fa2cc5fc534b7789dc565c491d58472784bf6e568296635397afb2169c4c69bf`.
