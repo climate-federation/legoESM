@@ -41,7 +41,7 @@ def qsat_huang(p, T):
 
 
 def build_sounding():
-    """Return (T, qv, p_full, p_half, ptenq) each (1, NLEV)."""
+    """Return (T, qv, p_full, p_half, ptenq); p_half is (1, NLEV + 1), the rest (1, NLEV)."""
     ph = np.linspace(P_TOP, PS, NLEV + 1)
     p = 0.5 * (ph[:-1] + ph[1:])
     z = -8000.0 * np.log(p / PS)
