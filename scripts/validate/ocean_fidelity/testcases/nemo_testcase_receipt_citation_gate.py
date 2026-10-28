@@ -10948,6 +10948,78 @@ _reanchor(
     anchors=['#!/usr/bin/env python3', 'raise SystemExit(main())', 2053],
 )
 
+# --- SI3 round 24 Resume 2 (Decision 187 versioned kind-15 translation) ---
+# The reader helper shifts the established O8--O12 scorer anchors; keep the
+# complete citation map audited, then register the new translation/O16 spans.
+_reanchor('scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:260-298',
+          'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:297-335')
+_reanchor('scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:301-356',
+          'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:338-393')
+_reanchor('scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:460-517',
+          'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:506-563')
+_reanchor('scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:527-617',
+          'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:573-663')
+_reanchor('scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:634-928',
+          'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:680-974')
+_reanchor('scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:931-1652',
+          'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:977-1698')
+_reanchor('scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:981-998',
+          'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1027-1044')
+_reanchor('scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1155-1388',
+          'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1201-1434')
+_reanchor('scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1277-1302',
+          'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1323-1348')
+_reanchor('scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1390-1410',
+          'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1436-1456')
+_reanchor('scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1412-1423',
+          'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1458-1469')
+_reanchor('scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1425-1501',
+          'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1471-1547')
+_reanchor('scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1503-1535',
+          'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1549-1581')
+_reanchor(
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1778-1845',
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1826-1900',
+    anchors=['def verify_kind15_translation_evidence(', '"translation_kind": 15,', 75],
+)
+_reanchor(
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1849-1875',
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1903-2051',
+    anchors=['def score_o15_o16(', '"scores": summaries,', 149],
+)
+_reanchor('scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1927-1941',
+          'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:2015-2030')
+_reanchor(
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1-2053',
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1-2147',
+    anchors=['#!/usr/bin/env python3', 'raise SystemExit(main())', 2147],
+)
+_reanchor(
+    'tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:1-846',
+    'tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:1-858',
+    anchors=['"""Direct unit and master-record tests for the SI3 O8--O12 0-ULP scoring driver."""',
+             'assert calls == ["_cumulative_remap", "_cumulative_remap"]', 858],
+)
+_reanchor('tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:182-204',
+          'tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:194-216')
+_reanchor(
+    'tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:208-846',
+    'tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:220-858',
+    anchors=['def test_production_call_sites_route_through_o8_o12_and_fail_when_reverted(',
+             'assert calls == ["_cumulative_remap", "_cumulative_remap"]', 639],
+)
+
+CITATION_MAP.update({
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:236-270,396-503': [
+        '_KIND15_V1_SCHEMA_LABELS = ("cloud_fra", "qsr", "sfx")',
+        '"reader_translation": reader_translation,', 143],
+    'tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:170-191': [
+        'def test_kind15_versioned_translation_evidence_and_wrong_permutation_plant() -> None:',
+        'score_o15_o16(DEFAULT_MASTER_ROOT, steps=(1,), plant="o16-model-mutation")', 22],
+    'packages/ice/legoesm/ice/si3_finalize.py:825-882': [
+        'def si3_o16_step(', 'return SI3O16Result(state=state, fluxes=fluxes_out, outputs=outputs)', 58],
+})
+
 DEFAULT_RECEIPT = (
     REPO / "docs/ocean/fidelity/testcases"
     / "nemo_testcases_l2_gyre_phase3_round8_receipt.md")
