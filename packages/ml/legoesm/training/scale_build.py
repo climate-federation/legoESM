@@ -542,7 +542,7 @@ _WB_CLASSICAL_KEYS = frozenset({
     "convective_rain_to_surface", "orbital_insolation",
     "param_fixed", "param_init",
     "rad_update_interval_steps", "rrtmgp_column_chunk_size",
-    "rrtmgp_gpoint_batch_size", "spatial_init_std",
+    "rrtmgp_gpoint_batch_size", "sbm_cape_threshold", "spatial_init_std",
     "spatial_seed", "spatial_surface", "surface_bulk", "trainable_schemes",
     "turbulence",
 })
@@ -1004,6 +1004,7 @@ def _build_mode_components_spectral(cfg, yml, column_mesh=None):
                 clubb_top_press=_clubb_top,
                 clubb_liquid_partition=_liq_part,
                 cld_macmic_num_steps=_macmic, column_mesh=column_mesh,
+                sbm_cape_threshold=_cl.get("sbm_cape_threshold"),
                 **_schemes)
         # The sample's forcing carries ERA5 skin temperature and the scene's
         # real calendar.  It used to be dropped here: the surface then sat at

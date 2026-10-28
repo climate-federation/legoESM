@@ -153,6 +153,9 @@ aimip_rad_update_interval: 36   # v12: 1 RRTMGP call per 6 sim hours
 # (an unknown value raises rather than silently falling back to constant).
 aimip_surface_bulk_scheme: "constant"
 
+# ----- SBM convection (read only when a run selects sbm) -----------
+aimip_sbm_cape_threshold: 0.0   # Isca oracle: convect when CAPE > 0 (tier-2 R3); the ablation sbm arm reads it
+
 # ----- Spatial surface parameters (over land) ----------------------
 # When true, the AIMIP classical variant exposes seven surface and
 # surface-radiation knobs (Cd_neutral, Ch_neutral, z0, sfc_emissivity,

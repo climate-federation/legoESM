@@ -332,3 +332,36 @@ def test_build_latlon_config_resolves_the_ice_skin_auto():
         cfg, dict(base, ice_skin_prognostic=False)).ice_skin_prognostic is False
     with pytest.raises(ValueError, match="ice_skin_prognostic"):
         build_latlon_config(cfg, dict(base, ice_skin_prognostic="yes"))
+
+
+def test_wb_classical_sbm_threshold_key_reaches_the_builder(monkeypatch):
+    """User 2026-10-28 (Q37): the WB classical block names sbm's CAPE threshold
+    (classical.sbm_cape_threshold) and the build hands it to the AIMIP builder."""
+    import yaml
+
+    import legoesm.training.aimip_params as ap
+    from legoesm.training.scale_build import build_mode_components
+    from scripts.run.train_weatherbench_scale import _resolve_training_keys
+
+    deck = "config/wb/campaign/spectral_t63_era5flux.yaml"
+    yml = yaml.safe_load(open(deck))
+    yml["classical"]["sbm_cape_threshold"] = 25.0
+    cfg = build_scale_config_from_args(
+        ["--config", deck, "--mode", "physics", "--training-core", "spectral",
+         "--smoke"])
+    cfg, _, _ = _resolve_training_keys(cfg, yml)
+    cfg = _apply_smoke_overrides(cfg, yml)
+    seen = {}
+
+    class _Stop(Exception):
+        pass
+
+    def spy(*a, **k):
+        seen.update(k)
+        raise _Stop
+
+    monkeypatch.setattr(ap, "make_aimip_classical_spectral_physics", spy)
+    _m, _g, _s, params, make_run_seg, _lc, _dt = build_mode_components(cfg, yml)
+    with pytest.raises(_Stop):
+        make_run_seg(params)
+    assert seen["sbm_cape_threshold"] == 25.0
