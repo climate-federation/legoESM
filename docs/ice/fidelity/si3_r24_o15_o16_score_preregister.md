@@ -52,3 +52,29 @@ be localized, and that rung will stop without a post-score model change.
   0-ULP bar, all exit fields, and required plants are fixed by the round prompt
   and Decisions 158, 159, 162, 173, 179, 180, 184, and 186.
 - UNASKED: none.
+
+## Resume preregistration (2026-10-28)
+
+The user confirmed the localized O15 mechanism and resumed this same round
+after commit `2ca7bf533a`.  Before the resumed model edit, the predictions are:
+
+1. Materializing each completed donor and receiver statement through the
+   shared `nemo_source_round` primitive will preserve NEMO's nested transfer
+   order under CPU JIT.  O15 will score every recorded field and category at
+   0 ULP for all `kt=1..100` through `si3_o15_step`.
+2. Removing those inter-statement materializations while retaining the same
+   arithmetic will reproduce a nonzero O15 score; the control must fail.
+3. Kind 20 will score only the owned interior written by NEMO's loops,
+   `ji=ntsi..ntei` and `jj=ntsj..ntej`, excluding both two-cell halos.
+4. Kind 15 remains unscored and untranslated while the user decides between
+   a versioned translation and re-acquisition.  This round will record only
+   the writer-fixed field order and a permutation check using independently
+   known values.
+5. The D5 full-year output hash remains
+   `b7a7329bed74c17918fa3cbc11c7613acb2074851e2357a08869fcd4661e12d2`,
+   and the unchanged O8--O12 production score remains 0 ULP.
+
+Any nonzero baseline O15 field/category result, a barrier-stripped control
+that remains 0 ULP, a changed D5 hash, or a changed O8--O12 score refutes the
+corresponding prediction.  The resumed choices are all explicit in the user
+instruction; no O16 kind-15 implementation choice is made.
