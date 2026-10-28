@@ -99,6 +99,20 @@ def read_knob_record(path) -> dict | None:
     return rec
 
 
+def check_knob_record(path, skeleton) -> None:
+    """For loaders that call equinox directly: raise when the knob record
+    beside ``path`` does not fit the AIMIP modules in ``skeleton`` (ranges).
+    No record: nothing to check."""
+    import jax.tree_util as jtu
+
+    rec = read_knob_record(path)
+    if rec is None:
+        return
+    has = lambda x: hasattr(x, "checkpoint_load_spec")  # noqa: E731
+    jtu.tree_map(lambda x: x.checkpoint_load_spec(rec) if has(x) else None,
+                 skeleton, is_leaf=has)
+
+
 def checkpoint_path(path) -> Path:
     """The file :func:`load_checkpoint_or_fail` opens for ``path``.
 

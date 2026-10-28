@@ -233,3 +233,24 @@ def test_optimizer_moment_copies_carry_no_record():
                            for k, v in p.raw_values.items()})
     assert moments.knob_record() is None
     assert knob_record((p, moments))["frozen"] == p.knob_record()["frozen"]
+
+
+def test_raw_loaders_check_the_record_ranges(tmp_path):
+    """Loaders that call equinox directly (trainer resume, EMA, WB) run the
+    same range check first."""
+    import json
+
+    from legoesm.ml.checkpoint_io import check_knob_record, knob_record_path
+    from legoesm.ml.training import save_checkpoint
+    c, p = _frozen_rate_params()
+    path = tmp_path / "c.eqx"
+    save_checkpoint((p, 0), path)
+    check_knob_record(path, (p, 0))
+    side = knob_record_path(path)
+    rec = json.loads(side.read_text())
+    rec["ranges"][c.name] = [c.min_val, 2 * c.max_val]
+    side.write_text(json.dumps(rec))
+    with pytest.raises(ValueError, match="other AIMIP knob ranges"):
+        check_knob_record(path, (p, 0))
+    side.unlink()
+    check_knob_record(path, (p, 0))
