@@ -68,7 +68,7 @@ Focused results:
 
 ## 5. Master score and controls
 
-The r21 scorer was extended in place. `_score_o13_step` reads verified Kind 11/12 pairs, calls the production function with arrays as JIT arguments, checks P4 conservation, and compares every one of the 96 EXIT fields (`scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:951-981`). `score_o13` is the all-step mode of that same block, not a reimplementation (`:984-1036`), and the integrated O8–O13 loop calls the same helper (`:1653-1657`).
+The r21 scorer was extended in place. `_score_o13_step` reads verified Kind 11/12 pairs, calls the production function with arrays as JIT arguments, checks P4 conservation, and compares every one of the 96 EXIT fields (`scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:977-1007`). `score_o13` is the all-step mode of that same block, not a reimplementation (`:1010-1062`), and the integrated O8–O13 loop calls the same helper (`:1786-1790`).
 
 Admission pins verified during the final run:
 
@@ -110,6 +110,22 @@ Current D5 `C1D_OMIP_L3` was re-run for all 8,760 JIT steps through `run_year_re
 
 - None used for the landing verdict. The generic `DynamicSeaIceState` wrapper represents bulk salinity as one extensive layer because that carrier does not expose ten SI3 layers; the scored O13 production boundary receives and verifies all ten layers directly.
 
-## 7. Landing statement
+## 7. O14 lane rebase resolution
+
+O13 was rebased onto lane commit `5f0cf16fbe`, which already contained O14.
+The shared master scorer and direct tests retain both production scoring paths:
+O13 Kind 11 -> 12 with its conservation gate and O14 Kind 12 -> 13 with its
+two firing plants.  The round-21, O13, and O14 receipt citations were
+re-anchored to the combined source layout, and the citation map audits that
+layout without weakening either rung's endpoints.
+
+Immediately after the rebase and before this resolution note, the binary
+full-index patch for every path outside the seven O13/O14 shared paths had
+SHA-256 `56495f01c3cf59660bfb756f9d9c40c41d8c4e2313717c9eb982fde7dcfdd5cf`
+both before and after the rebase (`NON_SHARED_DELTA_BYTE_IDENTICAL: PASS`).
+Thus the conflict resolution changes only the shared scorer, its tests, the
+citation gate, and the receipts whose line anchors moved.
+
+## 8. Landing statement
 
 O13 is implemented, production-wired, and scored at the bar. No acquisition or configuration decision is needed. Receipt citations, missing-default behavior, canonical-kernel scope, field inventory, and every cited-file digest are machine-gated.
