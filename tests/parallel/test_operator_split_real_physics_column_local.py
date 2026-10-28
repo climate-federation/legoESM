@@ -178,7 +178,11 @@ def test_sundqvist_band_build_reads_the_band_cell_areas():
     the band's own areas from ``cell_area``: band 1's columns through the
     band-0 build + band 1's areas equal the global build's band-1 slice, and
     without the override (band 0's baked areas) they do not."""
-    grid = create_latlon_grid(n_lat=N_LAT, n_lon=N_LON, radius=constants.R_earth,
+    # A 1/30-radius sphere puts these 8x8 cells (~1e10 m2) inside GFS's area
+    # ramp; at Earth radius every cell is coarser than its coarsest grid and
+    # the blend saturates identically in both bands.
+    grid = create_latlon_grid(n_lat=N_LAT, n_lon=N_LON,
+                              radius=constants.R_earth / 30.0,
                               omega=constants.Omega)
     bands = build_band_grids_atm(grid, N_DEV)
     sigma = create_sigma_coordinate(n_levels=NLEV)

@@ -51,6 +51,7 @@ Two honest readings of that table, both of which the assertions encode:
 from __future__ import annotations
 
 import ast
+import functools
 import os
 import pathlib
 
@@ -96,7 +97,8 @@ _P0 = 90000.0
 _RH0 = 1.4
 
 _SCHEMES = {
-    "sundqvist": (sundqvist_microphysics, SundqvistConfig),
+    "sundqvist": (functools.partial(sundqvist_microphysics, cell_area=1.0e10),
+                  SundqvistConfig),
     "seifert_beheng": (seifert_beheng_microphysics, SeifertBehengConfig),
     "morrison": (morrison_microphysics, MorrisonConfig),
     "thompson": (thompson_microphysics, ThompsonConfig),
@@ -206,17 +208,15 @@ def test_sundqvist_default_overshoots_and_the_guard_fixes_it():
     is partly rained out (Zhao-Carr then stops releasing: RH < rh_crit gives
     cloud cover 0). With the guard the landing point is the enthalpy-consistent
     equilibrium and the per-step heating is capped."""
-    rh_off, tw_off = _integrate("sundqvist", hard=False, nstep=40)
-    rh_on, tw_on = _integrate("sundqvist", hard=True, nstep=40)
+    rh_off, _ = _integrate("sundqvist", hard=False, nstep=40)
+    rh_on, _ = _integrate("sundqvist", hard=True, nstep=40)
     assert rh_off[0] < 0.4, (
         f"expected the documented one-step overshoot; got RH = {rh_off[0]}")
     assert 0.99 <= rh_on[0] <= 1.001, (
         f"guarded arm should land ON the curve; got RH = {rh_on[0]}")
-    # The overshoot is not free: it dumps condensate into autoconversion, so
-    # far more column water leaves as precipitation.
-    assert tw_off[-1] < tw_on[-1], (
-        f"guarded arm should retain MORE column water ({tw_on[-1]}) than the "
-        f"overshooting default ({tw_off[-1]})")
+    # (A 40-step "the overshoot rains out more water" assertion held only at
+    # the old 1e-3 liquid release rate; at GFS prautco 1.5e-4 the guarded arm
+    # keeps 0.0331 vs 0.0343 kg/kg, so it was dropped, user 2026-10-28.)
 
 
 @pytest.mark.parametrize(
@@ -459,8 +459,10 @@ _PREGUARD_RTOL = 1.0e-13
 # no cloud-cover gate) were dT_dt (0.07790655134982057, 0.0042109453424112216,
 # -2.6370890683278935e-06, 0.00120314759851969, 0.00021895372484426559).
 # 2026-10-27: the fixture is now top-down with real interfaces (Zhao-Carr reads
-# dp/g); re-measured, the same values in top-down order.
-_SUNDQVIST_PREGUARD_DT_DT = (0.0002189537248470955, 0.0012031476025026462, 0.0, 0.0042110534620482185, 0.07790655142391562)
+# dp/g); re-measured, the same values in top-down order.  Then the GFS area
+# blend, wminco 1e-5 and prautco 1.5e-4 (cell_area 1e10) move level 3 only:
+# 0.0042110534620482185 -> 0.0040742395304712515.
+_SUNDQVIST_PREGUARD_DT_DT = (0.0002189537248470955, 0.0012031476025026462, 0.0, 0.0040742395304712515, 0.07790655142391562)
 _SUNDQVIST_PREGUARD_DQ_V_DT = (-8.795268697736346e-08, -4.83298763445925e-07, 0.0, -1.6915604758545073e-06, -3.129469725010899e-05)
 
 

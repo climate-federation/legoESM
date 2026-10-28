@@ -52,7 +52,7 @@ def test_sundqvist_precpd_runs_on_pre_condensation_state():
     rh_crit and precpd re-evaporates its own production.  Until then precpd
     sees the pre-step T and q_v, and condensation adds on top."""
     from legoesm.atmosphere.physics.microphysics.sundqvist import (
-        diagnose_sundqvist_process_rates, zhao_carr_precpd)
+        diagnose_sundqvist_process_rates, gfs_area_weight, zhao_carr_precpd)
     T, q_v, hydro, p_full, p_half, rho, dz = _make_column(
         T_sfc=290.0, q_c_val=1e-3, supersaturated=True)
     cfg = SundqvistConfig()
@@ -62,7 +62,8 @@ def test_sundqvist_precpd_runs_on_pre_condensation_state():
     assert float(jnp.max(cond)) > 0.0
     zc = zhao_carr_precpd(
         T, q_v, hydro.q_c + cond * dt, p_full,
-        (p_half[:, 1:] - p_half[:, :-1]) / constants.g, dt, cfg, wk1=1.0)
+        (p_half[:, 1:] - p_half[:, :-1]) / constants.g, dt, cfg,
+        wk1=gfs_area_weight(jnp.full(T.shape[:1], 1.0e10)))
     out = sundqvist_microphysics(T, q_v, hydro, p_full, p_half, rho, dz, dt, cfg, cell_area=1.0e10)
     np.testing.assert_allclose(
         np.asarray(T + out.dT_dt * dt),

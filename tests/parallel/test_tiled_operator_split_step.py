@@ -265,6 +265,7 @@ def test_pack_unpack_carry_roundtrip():
 
 def test_tiled_operator_split_matches_serial():
     import dataclasses
+    import functools
 
     mesh = _mesh()
     model, cdgrid, coord, cfg, carry0, statics, forcing = _build()
@@ -441,14 +442,13 @@ def test_build_tile_step_unified_refuses_column_sharding():
         build_tile_step_unified(grid, coord, cfg, KT)
 
 
-def _mock_area_step(*args, **kwargs):
+def _mock_area_step(*args, a0, **kwargs):
     """The column mock with an extra drying proportional to the cell area the
     lane hands in (Sundqvist's GFS area blend reads it the same way)."""
     area = kwargs.get("cell_area")
     assert area is not None, "lane did not pass its cell areas"
     out, *rest = _mock_step_unified(*args, **kwargs)
     T = args[1]
-    a0 = float(jnp.mean(jnp.asarray(area)))
     extra = -1e-9 * (jnp.asarray(area).reshape(T.shape[:-1]) / a0)[..., None]
     out.dq_v_dt = out.dq_v_dt + extra
     return (out, *rest)
@@ -459,10 +459,12 @@ def test_each_tile_gets_its_own_cell_areas():
     each tile must hand physics its OWN cell areas.  q_v (column-local) tracks
     the serial run only if every tile received its own slice of grid.area."""
     import dataclasses
+    import functools
 
     mesh = _mesh()
     model, cdgrid, coord, cfg, carry0, statics, forcing = _build()
-    statics = dataclasses.replace(statics, step_unified=_mock_area_step)
+    statics = dataclasses.replace(statics, step_unified=functools.partial(
+        _mock_area_step, a0=float(np.mean(np.asarray(statics.grid.area)))))
     statics_ref = dataclasses.replace(statics, forcing=forcing,
                                       cell_area=statics.grid.area)
     ref = carry0

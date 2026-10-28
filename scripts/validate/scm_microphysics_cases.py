@@ -48,6 +48,7 @@ from legoesm.atmosphere.physics.microphysics.integration import (
     min_tracer_slots,
 )
 from legoesm.atmosphere.physics.microphysics.output import HydrometeorState
+from legoesm.atmosphere.idealized.rcemip_initial_conditions import RCE_CELL_AREA_M2
 from legoesm.thermo import saturation_mixing_ratio
 
 
@@ -195,6 +196,9 @@ def run_case(scheme, case, dtype, n_steps=None, verbose=False):
     scheme_name, micro_fn, scheme_cfg = get_microphysics_fn(
         _scheme_config(scheme, env))
     nslots = max(min_tracer_slots(scheme_name), 9)
+    # Sundqvist blends by the GCM cell a column stands for: the production
+    # MPAS mean cell, as the RCE case (user 2026-10-28, ASK G).
+    area_kw = {"cell_area": RCE_CELL_AREA_M2} if scheme_name == "sundqvist" else {}
     Nc0 = env.get("Nc", 1.0e8)
 
     # State: q_v, q_c, q_r, q_i, q_s, q_g, N_c, N_r, N_i.
@@ -216,7 +220,7 @@ def run_case(scheme, case, dtype, n_steps=None, verbose=False):
             q_c=st["q_c"], q_r=st["q_r"], q_i=st["q_i"], q_s=st["q_s"],
             q_g=st["q_g"], N_c=st["N_c"], N_r=st["N_r"], N_i=st["N_i"])
         out = micro_fn(st["T"], st["q_v"], hyd, p_full, p_half, rho, dz_col,
-                       dt, scheme_cfg)
+                       dt, scheme_cfg, **area_kw)
         return out
 
     micro_jit = jax.jit(micro_step)

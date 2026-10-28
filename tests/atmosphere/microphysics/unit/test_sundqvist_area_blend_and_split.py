@@ -131,3 +131,25 @@ def test_lane_kwargs_carry_the_grid_area_per_column():
     assert kw["carries_q_i"] is True
     assert sundqvist_lane_kwargs("kessler", G(), 6, True) == {}
     assert sundqvist_lane_kwargs("sundqvist", object(), 6, False)["cell_area"] is None
+
+
+def test_split_reads_the_end_of_step_temperature(monkeypatch):
+    """The liquid/ice ramp reads the temperature after condensation heating and
+    precipitation (user 2026-10-28), not the pre-step or precpd-only T."""
+    import legoesm.atmosphere.physics.microphysics.sundqvist as sq
+    seen = {}
+
+    def spy(T_in, cwm, share):
+        out = split_condensate(T_in, cwm, share)
+        seen["T"], seen["dT_fus"] = T_in, out[2]
+        return out
+
+    monkeypatch.setattr(sq, "split_condensate", spy)
+    T, q_v, hyd, p_full, p_half, rho, dz = _cold_columns()
+    dt = 300.0
+    out = sq.sundqvist_microphysics(T, q_v, hyd, p_full, p_half, rho, dz, dt,
+                                    cell_area=1.0e10, carries_q_i=True)
+    end_T = T + out.dT_dt * dt - seen["dT_fus"]
+    np.testing.assert_allclose(np.asarray(seen["T"]), np.asarray(end_T),
+                               rtol=1e-13, atol=0.0)
+    assert float(jnp.max(jnp.abs(end_T - T))) > 1e-3   # the step heats: not vacuous
