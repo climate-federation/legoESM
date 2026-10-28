@@ -318,11 +318,21 @@ def test_evaluate_month_by_month_on_day1_smoke(
     assert m01["status"] == "EVALUATED_PARTIAL_MONTH"
     assert m01["verdict"] is None
     assert m01["metrics"]["SST"]["daily_mean_rms"] == 0.0
+    assert m01["metrics"]["SST"]["nemo_mean"] == m01["metrics"]["SST"]["cand_mean"]
     assert m01["metrics"]["SSS"]["daily_mean_rms"] == 0.0
+    assert m01["metrics"]["SSS"]["nemo_mean"] == m01["metrics"]["SSS"]["cand_mean"]
     assert m01["metrics"]["SSH"]["daily_mean_rms"] == 0.0
+    assert m01["metrics"]["SSH"]["nemo_rms"] == m01["metrics"]["SSH"]["cand_rms"]
+    assert m01["metrics"]["T_0-100m"]["nemo_mean"] == m01["metrics"]["T_0-100m"]["cand_mean"]
+    assert m01["metrics"]["S_0-100m"]["nemo_mean"] == m01["metrics"]["S_0-100m"]["cand_mean"]
     assert m01["metrics"]["PSI"]["daily_mean_rms_sv"] == 0.0
+    assert m01["metrics"]["PSI"]["nemo_rms_sv"] == m01["metrics"]["PSI"]["cand_rms_sv"]
     assert m01["metrics"]["PSI"]["daily_mean_pattern_corr"] == pytest.approx(1.0)
     assert m01["metrics"]["DRAKE"]["abs_mean_diff_sv"] == 0.0
+    assert m01["metrics"]["ICE_SST"]["nemo_mean"] == m01["metrics"]["ICE_SST"]["cand_mean"]
+    assert m01["metrics"]["ICE_SSS"]["nemo_mean"] == m01["metrics"]["ICE_SSS"]["cand_mean"]
+    md = r342_metrics.format_markdown_report(report, twin_report=report)
+    assert "## Day-by-Day SST RMS Difference Curve" in md
     for m_pending in report["months"][1:]:
         assert m_pending["status"] == "PENDING_ACQUISITION"
         assert m_pending["verdict"] is None
