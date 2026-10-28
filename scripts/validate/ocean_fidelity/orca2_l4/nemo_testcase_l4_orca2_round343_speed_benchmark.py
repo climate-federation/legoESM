@@ -142,12 +142,12 @@ def build_orca2_exact_vs_normal_switch_inventory() -> tuple[SwitchSpec, ...]:
             exact_value="libm",
             normal_value="native",
             switched_in_normal_mode=True,
-            exact_citation="packages/core/legoesm/core/precision.py:117-126",
-            normal_citation="packages/core/legoesm/core/precision.py:103-115",
+            exact_citation="packages/core/legoesm/core/precision.py:117-125",
+            normal_citation="packages/core/legoesm/core/precision.py:103-114",
             notes=(
                 "libm dispatches tx.exp/log/log10/sin/cos/tanh/atan/pow through "
                 "jax.pure_callback + Python scalar ctypes loop over libm.so.6 on CPU "
-                "(packages/core/legoesm/core/transcendentals.py:32-85); native uses "
+                "(packages/core/legoesm/core/transcendentals.py:48-85); native uses "
                 "vectorized XLA jnp primitives on CPU/GPU."
             ),
         ),
@@ -172,7 +172,7 @@ def build_orca2_exact_vs_normal_switch_inventory() -> tuple[SwitchSpec, ...]:
             normal_value="jax_expression",
             switched_in_normal_mode=True,
             exact_citation="packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:2152",
-            normal_citation="packages/ocean/legoesm/ocean/physics/vertical_mixing/config.py:424",
+            normal_citation="packages/ocean/legoesm/ocean/physics/vertical_mixing/config.py:654",
             notes=(
                 "nemo_scalar_libm is guarded by _require_libm_policy "
                 "(packages/ocean/legoesm/ocean/physics/vertical_mixing/tke.py:2708-2717,2740)."
@@ -187,7 +187,7 @@ def build_orca2_exact_vs_normal_switch_inventory() -> tuple[SwitchSpec, ...]:
             normal_value="jax_expression",
             switched_in_normal_mode=True,
             exact_citation="packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:2153",
-            normal_citation="packages/ocean/legoesm/ocean/physics/vertical_mixing/config.py:432",
+            normal_citation="packages/ocean/legoesm/ocean/physics/vertical_mixing/config.py:648",
             notes=(
                 "nemo_scalar_libm is guarded by _require_libm_policy "
                 "(packages/ocean/legoesm/ocean/physics/vertical_mixing/tke.py:2815-2817)."
@@ -236,7 +236,7 @@ def build_orca2_exact_vs_normal_switch_inventory() -> tuple[SwitchSpec, ...]:
             normal_value=False,
             switched_in_normal_mode=True,
             exact_citation="packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:2137",
-            normal_citation="packages/ocean/legoesm/ocean/physics/vertical_mixing/config.py:356",
+            normal_citation="packages/ocean/legoesm/ocean/physics/vertical_mixing/config.py:671",
             notes="Statement-level source rounding in N^2 buoyancy frequency.",
         ),
         SwitchSpec(
@@ -248,7 +248,7 @@ def build_orca2_exact_vs_normal_switch_inventory() -> tuple[SwitchSpec, ...]:
             normal_value=False,
             switched_in_normal_mode=True,
             exact_citation="packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:2139",
-            normal_citation="packages/ocean/legoesm/ocean/physics/vertical_mixing/config.py:373",
+            normal_citation="packages/ocean/legoesm/ocean/physics/vertical_mixing/config.py:678",
             notes="Source rounding inside the TKE tridiagonal Thomas solve.",
         ),
         SwitchSpec(
@@ -260,7 +260,7 @@ def build_orca2_exact_vs_normal_switch_inventory() -> tuple[SwitchSpec, ...]:
             normal_value=False,
             switched_in_normal_mode=True,
             exact_citation="packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:2141",
-            normal_citation="packages/ocean/legoesm/ocean/physics/vertical_mixing/config.py:389",
+            normal_citation="packages/ocean/legoesm/ocean/physics/vertical_mixing/config.py:685",
             notes="Source rounding when assembling the TKE tridiagonal matrix and RHS.",
         ),
         SwitchSpec(
@@ -272,7 +272,7 @@ def build_orca2_exact_vs_normal_switch_inventory() -> tuple[SwitchSpec, ...]:
             normal_value=False,
             switched_in_normal_mode=True,
             exact_citation="packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:2142",
-            normal_citation="packages/ocean/legoesm/ocean/physics/vertical_mixing/config.py:397",
+            normal_citation="packages/ocean/legoesm/ocean/physics/vertical_mixing/config.py:689",
             notes="Source rounding in zdf_sh2 shear production.",
         ),
         SwitchSpec(
@@ -284,7 +284,7 @@ def build_orca2_exact_vs_normal_switch_inventory() -> tuple[SwitchSpec, ...]:
             normal_value=False,
             switched_in_normal_mode=True,
             exact_citation="packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:2143",
-            normal_citation="packages/ocean/legoesm/ocean/physics/vertical_mixing/config.py:406",
+            normal_citation="packages/ocean/legoesm/ocean/physics/vertical_mixing/config.py:693",
             notes="Multiply by stored reciprocal vs direct division in zdf_sh2.",
         ),
         SwitchSpec(
@@ -296,7 +296,7 @@ def build_orca2_exact_vs_normal_switch_inventory() -> tuple[SwitchSpec, ...]:
             normal_value="factored",
             switched_in_normal_mode=True,
             exact_citation="packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:2156",
-            normal_citation="packages/ocean/legoesm/ocean/physics/vertical_mixing/config.py:439",
+            normal_citation="packages/ocean/legoesm/ocean/physics/vertical_mixing/config.py:658",
             notes="Mixing-length raw formula operand grouping.",
         ),
         SwitchSpec(
@@ -308,7 +308,7 @@ def build_orca2_exact_vs_normal_switch_inventory() -> tuple[SwitchSpec, ...]:
             normal_value="shared_thomas",
             switched_in_normal_mode=True,
             exact_citation="packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:422",
-            normal_citation="packages/ocean/legoesm/ocean/physics/vertical_mixing/config.py:415",
+            normal_citation="packages/ocean/legoesm/ocean/physics/vertical_mixing/config.py:642",
             notes="NEMO literal tridiagonal sweep vs shared Thomas solver.",
         ),
         SwitchSpec(
@@ -320,7 +320,7 @@ def build_orca2_exact_vs_normal_switch_inventory() -> tuple[SwitchSpec, ...]:
             normal_value="vectorized",
             switched_in_normal_mode=True,
             exact_citation="packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:1946",
-            normal_citation="packages/ocean/legoesm/ocean/physics/vertical_mixing/config.py:446",
+            normal_citation="packages/ocean/legoesm/ocean/physics/vertical_mixing/config.py:698",
             notes="Langmuir mixing-length loop vs vectorized evaluation.",
         ),
         SwitchSpec(
@@ -355,7 +355,7 @@ def build_orca2_exact_vs_normal_switch_inventory() -> tuple[SwitchSpec, ...]:
             exact_value="nemo_literal",
             normal_value="normalized_square",
             switched_in_normal_mode=True,
-            exact_citation="packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:2929",
+            exact_citation="packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:2912",
             normal_citation="packages/ocean/legoesm/ocean/physics/lateral_mixing/config.py:485",
             notes="Literal triad square vs normalized square in Redi K33.",
         ),
@@ -367,7 +367,7 @@ def build_orca2_exact_vs_normal_switch_inventory() -> tuple[SwitchSpec, ...]:
             exact_value="nemo_literal",
             normal_value="normalized_sums",
             switched_in_normal_mode=True,
-            exact_citation="packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:2928",
+            exact_citation="packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:2911",
             normal_citation="packages/ocean/legoesm/ocean/physics/lateral_mixing/config.py:480",
             notes="Literal triad sums vs normalized sums in Redi vertical skew flux.",
         ),
@@ -379,7 +379,7 @@ def build_orca2_exact_vs_normal_switch_inventory() -> tuple[SwitchSpec, ...]:
             exact_value="nemo_reciprocal",
             normal_value="division",
             switched_in_normal_mode=True,
-            exact_citation="packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:2920",
+            exact_citation="packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:2898",
             normal_citation="packages/ocean/legoesm/ocean/physics/lateral_mixing/config.py:412",
             notes="Stored metric reciprocal vs direct division in GM/Redi slopes.",
         ),
@@ -392,7 +392,7 @@ def build_orca2_exact_vs_normal_switch_inventory() -> tuple[SwitchSpec, ...]:
             normal_value=False,
             switched_in_normal_mode=True,
             exact_citation="packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:2990",
-            normal_citation="packages/ocean/legoesm/ocean/physics/lateral_mixing/mle.py:130",
+            normal_citation="packages/ocean/legoesm/ocean/physics/lateral_mixing/mle.py:121",
             notes="NEMO parenthesis association in Fox-Kemper MLE streamfunction.",
         ),
         SwitchSpec(
@@ -404,7 +404,7 @@ def build_orca2_exact_vs_normal_switch_inventory() -> tuple[SwitchSpec, ...]:
             normal_value=False,
             switched_in_normal_mode=True,
             exact_citation="packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:2209",
-            normal_citation="packages/ocean/legoesm/ocean/vertical.py:157",
+            normal_citation="packages/ocean/legoesm/ocean/vertical.py:1531",
             notes="Source-rounded stored r3t stretch product in z* thickness.",
         ),
         SwitchSpec(
@@ -416,7 +416,7 @@ def build_orca2_exact_vs_normal_switch_inventory() -> tuple[SwitchSpec, ...]:
             normal_value=False,
             switched_in_normal_mode=True,
             exact_citation="packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:1983",
-            normal_citation="packages/ocean/legoesm/ocean/state.py:2686",
+            normal_citation="packages/ocean/legoesm/ocean/state.py:3224",
             notes="Source-rounded gdept_0 * (1 + r3t) product in EOS depth.",
         ),
         SwitchSpec(
@@ -428,7 +428,7 @@ def build_orca2_exact_vs_normal_switch_inventory() -> tuple[SwitchSpec, ...]:
             normal_value=False,
             switched_in_normal_mode=True,
             exact_citation="packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:1976",
-            normal_citation="packages/ocean/legoesm/ocean/state.py:3171",
+            normal_citation="packages/ocean/legoesm/ocean/state.py:3233",
             notes="Source-rounded layer thickness in implicit tracer vertical diffusion.",
         ),
         SwitchSpec(
@@ -440,7 +440,7 @@ def build_orca2_exact_vs_normal_switch_inventory() -> tuple[SwitchSpec, ...]:
             normal_value=False,
             switched_in_normal_mode=True,
             exact_citation="packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:1977",
-            normal_citation="packages/ocean/legoesm/ocean/state.py:2739",
+            normal_citation="packages/ocean/legoesm/ocean/state.py:3237",
             notes="Sequential ascending k=1..jpkm1 loop with barriers vs jnp.sum for barotropic RHS.",
         ),
         SwitchSpec(
@@ -452,7 +452,7 @@ def build_orca2_exact_vs_normal_switch_inventory() -> tuple[SwitchSpec, ...]:
             normal_value=False,
             switched_in_normal_mode=True,
             exact_citation="packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:1978",
-            normal_citation="packages/ocean/legoesm/ocean/state.py:2631",
+            normal_citation="packages/ocean/legoesm/ocean/state.py:3179",
             notes="Stage-1 momentum RHS accumulation in NEMO written order.",
         ),
         SwitchSpec(
@@ -464,7 +464,7 @@ def build_orca2_exact_vs_normal_switch_inventory() -> tuple[SwitchSpec, ...]:
             normal_value=False,
             switched_in_normal_mode=True,
             exact_citation="packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:1979",
-            normal_citation="packages/ocean/legoesm/ocean/state.py:2641",
+            normal_citation="packages/ocean/legoesm/ocean/state.py:3184",
             notes="Source-rounded written order for WS-RK3 stage velocity update.",
         ),
         SwitchSpec(
@@ -476,7 +476,7 @@ def build_orca2_exact_vs_normal_switch_inventory() -> tuple[SwitchSpec, ...]:
             normal_value=False,
             switched_in_normal_mode=True,
             exact_citation="packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:1991",
-            normal_citation="packages/ocean/legoesm/ocean/state.py:2651",
+            normal_citation="packages/ocean/legoesm/ocean/state.py:3264",
             notes="Source-rounded written order for WS-RK3 stage-1/2 tracer update.",
         ),
         SwitchSpec(
@@ -488,7 +488,7 @@ def build_orca2_exact_vs_normal_switch_inventory() -> tuple[SwitchSpec, ...]:
             normal_value=False,
             switched_in_normal_mode=True,
             exact_citation="packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:1981",
-            normal_citation="packages/ocean/legoesm/ocean/state.py:2670",
+            normal_citation="packages/ocean/legoesm/ocean/state.py:3214",
             notes="Interpolate stored r3fb/r3fa ratios vs ratio of interpolated SSH.",
         ),
         SwitchSpec(
@@ -500,7 +500,7 @@ def build_orca2_exact_vs_normal_switch_inventory() -> tuple[SwitchSpec, ...]:
             normal_value=False,
             switched_in_normal_mode=True,
             exact_citation="packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:1982",
-            normal_citation="packages/ocean/legoesm/ocean/state.py:2678",
+            normal_citation="packages/ocean/legoesm/ocean/state.py:3219",
             notes="Interpolate stored r3t ratios vs ratio of interpolated stage SSH.",
         ),
         SwitchSpec(
@@ -512,7 +512,7 @@ def build_orca2_exact_vs_normal_switch_inventory() -> tuple[SwitchSpec, ...]:
             normal_value=False,
             switched_in_normal_mode=True,
             exact_citation="packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:1984",
-            normal_citation="packages/ocean/legoesm/ocean/state.py:2694",
+            normal_citation="packages/ocean/legoesm/ocean/state.py:3229",
             notes="Interpolate stored r3u/r3v ratios vs ratio of interpolated stage SSH.",
         ),
         SwitchSpec(
@@ -524,7 +524,7 @@ def build_orca2_exact_vs_normal_switch_inventory() -> tuple[SwitchSpec, ...]:
             normal_value=False,
             switched_in_normal_mode=True,
             exact_citation="packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:2002",
-            normal_citation="packages/ocean/legoesm/ocean/state.py:3270",
+            normal_citation="packages/ocean/legoesm/ocean/state.py:3301",
             notes="Statement-rounded bottom drag coefficient evaluation.",
         ),
         SwitchSpec(
@@ -536,7 +536,7 @@ def build_orca2_exact_vs_normal_switch_inventory() -> tuple[SwitchSpec, ...]:
             normal_value=False,
             switched_in_normal_mode=True,
             exact_citation="packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:2014",
-            normal_citation="packages/ocean/legoesm/ocean/state.py:2747",
+            normal_citation="packages/ocean/legoesm/ocean/state.py:3342",
             notes="NEMO written addition order for vector-form momentum RHS.",
         ),
         SwitchSpec(
@@ -548,7 +548,7 @@ def build_orca2_exact_vs_normal_switch_inventory() -> tuple[SwitchSpec, ...]:
             normal_value=False,
             switched_in_normal_mode=True,
             exact_citation="packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:2015",
-            normal_citation="packages/ocean/legoesm/ocean/state.py:2492",
+            normal_citation="packages/ocean/legoesm/ocean/state.py:3190",
             notes="NEMO written triad summation order in EEN vorticity Coriolis/vorticity.",
         ),
         SwitchSpec(
@@ -560,7 +560,7 @@ def build_orca2_exact_vs_normal_switch_inventory() -> tuple[SwitchSpec, ...]:
             normal_value=False,
             switched_in_normal_mode=True,
             exact_citation="packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:2017",
-            normal_citation="packages/ocean/legoesm/ocean/state.py:2756",
+            normal_citation="packages/ocean/legoesm/ocean/state.py:3321",
             notes="Use stored r3t/r3u/r3v ratios in wzv vertical velocity diagnostic.",
         ),
         SwitchSpec(
@@ -572,7 +572,7 @@ def build_orca2_exact_vs_normal_switch_inventory() -> tuple[SwitchSpec, ...]:
             normal_value=False,
             switched_in_normal_mode=True,
             exact_citation="packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:2018",
-            normal_citation="packages/ocean/legoesm/ocean/state.py:2764",
+            normal_citation="packages/ocean/legoesm/ocean/state.py:3327",
             notes="NEMO written parenthesis association in vertical momentum advection (dynzad).",
         ),
         SwitchSpec(
@@ -584,7 +584,7 @@ def build_orca2_exact_vs_normal_switch_inventory() -> tuple[SwitchSpec, ...]:
             normal_value=False,
             switched_in_normal_mode=True,
             exact_citation="packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:2019",
-            normal_citation="packages/ocean/legoesm/ocean/state.py:2772",
+            normal_citation="packages/ocean/legoesm/ocean/state.py:3333",
             notes="Stage-2 wzv half-step thickness ratio rounding.",
         ),
         SwitchSpec(
@@ -596,7 +596,7 @@ def build_orca2_exact_vs_normal_switch_inventory() -> tuple[SwitchSpec, ...]:
             normal_value=False,
             switched_in_normal_mode=True,
             exact_citation="packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:2020",
-            normal_citation="packages/ocean/legoesm/ocean/state.py:2781",
+            normal_citation="packages/ocean/legoesm/ocean/state.py:3338",
             notes="Stored Kmm ratios in stage wzv vertical velocity.",
         ),
         SwitchSpec(
@@ -608,7 +608,7 @@ def build_orca2_exact_vs_normal_switch_inventory() -> tuple[SwitchSpec, ...]:
             normal_value=False,
             switched_in_normal_mode=True,
             exact_citation="packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:2026",
-            normal_citation="packages/ocean/legoesm/ocean/state.py:2790",
+            normal_citation="packages/ocean/legoesm/ocean/state.py:3348",
             notes="Use stored F-cell area reciprocal in lateral friction.",
         ),
         SwitchSpec(
@@ -620,7 +620,7 @@ def build_orca2_exact_vs_normal_switch_inventory() -> tuple[SwitchSpec, ...]:
             normal_value=False,
             switched_in_normal_mode=True,
             exact_citation="packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:2027",
-            normal_citation="packages/ocean/legoesm/ocean/state.py:2798",
+            normal_citation="packages/ocean/legoesm/ocean/state.py:3367",
             notes="Stage r3f ratio in lateral momentum diffusion.",
         ),
         SwitchSpec(
@@ -632,7 +632,7 @@ def build_orca2_exact_vs_normal_switch_inventory() -> tuple[SwitchSpec, ...]:
             normal_value=False,
             switched_in_normal_mode=True,
             exact_citation="packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:2028",
-            normal_citation="packages/ocean/legoesm/ocean/state.py:2806",
+            normal_citation="packages/ocean/legoesm/ocean/state.py:3361",
             notes="Stage-1 lateral diffusion accumulation order in Krhs.",
         ),
         SwitchSpec(
@@ -644,7 +644,7 @@ def build_orca2_exact_vs_normal_switch_inventory() -> tuple[SwitchSpec, ...]:
             normal_value=False,
             switched_in_normal_mode=True,
             exact_citation="packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:1957",
-            normal_citation="packages/ocean/legoesm/ocean/state.py:1572",
+            normal_citation="packages/ocean/legoesm/ocean/state.py:1646",
             notes="NEMO literal substep rdt_e rounding in barotropic solver.",
         ),
         SwitchSpec(
@@ -656,7 +656,7 @@ def build_orca2_exact_vs_normal_switch_inventory() -> tuple[SwitchSpec, ...]:
             normal_value=False,
             switched_in_normal_mode=True,
             exact_citation="packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:2053",
-            normal_citation="packages/ocean/legoesm/ocean/state.py:1600",
+            normal_citation="packages/ocean/legoesm/ocean/state.py:1667",
             notes="NEMO written order for barotropic EEN thickness ratio.",
         ),
         # --- Category C: Unconditional source-rounding barriers (1 representative entry) ---
@@ -685,8 +685,8 @@ def build_orca2_exact_vs_normal_switch_inventory() -> tuple[SwitchSpec, ...]:
             exact_value="nemo_literal",
             normal_value="shared_thomas",
             switched_in_normal_mode=False,
-            exact_citation="packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:421",
-            normal_citation="packages/ocean/legoesm/ocean/state.py:3162",
+            exact_citation="packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:544",
+            normal_citation="packages/ocean/legoesm/ocean/state.py:3163",
             notes=(
                 "Retained at 'nemo_literal' on ORCA2 K0 because _zdf_literal is the "
                 "only branch in _apply_implicit_vertical_mixing "
@@ -702,8 +702,8 @@ def build_orca2_exact_vs_normal_switch_inventory() -> tuple[SwitchSpec, ...]:
             exact_value=True,
             normal_value=False,
             switched_in_normal_mode=False,
-            exact_citation="packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:1926-1940",
-            normal_citation="packages/ocean/legoesm/ocean/state.py:2822",
+            exact_citation="packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:2954-2975",
+            normal_citation="packages/ocean/legoesm/ocean/state.py:3423",
             notes=(
                 "Required by LatLonCGridOceanModel constructor validation when "
                 "rk3_ws + gm_bolus_advection='through_fct' + bbl_diffusive_option=1 "
@@ -718,8 +718,8 @@ def build_orca2_exact_vs_normal_switch_inventory() -> tuple[SwitchSpec, ...]:
             exact_value="nemo_metric_literal",
             normal_value="cosine_scaled",
             switched_in_normal_mode=False,
-            exact_citation="packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:2923",
-            normal_citation="packages/ocean/legoesm/ocean/physics/lateral_mixing/config.py:466",
+            exact_citation="packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:2909",
+            normal_citation="packages/ocean/legoesm/ocean/physics/lateral_mixing/config.py:473",
             notes=(
                 "Required by constructor validation on tripolar / WS-RK3 cards "
                 "(ocean_model_latlon_cgrid.py:3248-3256,4507-4523; tke.py:3283-3287)."

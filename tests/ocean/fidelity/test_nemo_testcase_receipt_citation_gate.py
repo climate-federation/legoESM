@@ -231,3 +231,33 @@ def test_orca2_round341_receipt_passes_citation_gate_and_plant_fires():
         for row in planted["failures"]
     )
 
+
+def test_orca2_round343_receipt_passes_citation_gate_and_plant_fires():
+    """The round-343 receipt must pass the citation gate and fail on a plant."""
+    if not gate.FILES["stp2d.F90"].is_file():
+        pytest.skip("NEMO oracle source tree not present")
+    receipt = (
+        gate.REPO
+        / "docs/ocean/fidelity/testcases"
+        / "nemo_testcases_l4_orca2_round343_speed_benchmark_receipt.md"
+    )
+    heading = "# ORCA2 round 343 —"
+    report = gate.run(receipt, heading)
+    assert report["unmapped_citations"] == []
+    assert report["failures"] == []
+    assert report["map_entries_failing_audit"] == []
+    assert all(row["fired"] for row in report["self_test"])
+    assert report["status"] == "PASS"
+
+    planted = gate.run(
+        receipt,
+        heading,
+        plant="packages/core/legoesm/core/precision.py:117-125",
+    )
+    assert planted["status"] == "FAIL"
+    assert any(
+        row["citation"] == "packages/core/legoesm/core/precision.py:117-125"
+        for row in planted["failures"]
+    )
+
+
