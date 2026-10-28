@@ -196,7 +196,7 @@ def option2_salinity_profile(
         alpha,
     )
     if _nemo_salprof_factoring:
-        jk_minus_half = jnp.asarray((0.5, 1.5, 2.5), dtype=S_bulk.dtype)
+        jk_minus_half = jnp.asarray((0.5, 1.5, 2.5), dtype=S_bulk.dtype)  # coeff-ok: NEMO icevar.F90 option-2 layer coordinates
         r1_nlay_i = jnp.asarray(1.0 / 3.0, dtype=S_bulk.dtype)
         sloped = sr(
             sr(
@@ -1764,7 +1764,7 @@ def si3_ice_thd_sal(*, h_i, t_su, t_i, sz_i, t_bo, sss, a_i, dh_i_sum,
         raise ValueError(f"SI3 ice_thd_sal missing namelist values {missing}")
     expected = {
         "nn_icesal": 4, "ln_drainage": True, "ln_flushing": True,
-        "nn_liquidus": 2, "nn_drainage": 50, "nn_flushing": 5,
+        "nn_liquidus": 2, "nn_drainage": 50, "nn_flushing": 5,  # coeff-ok: fixed production namelist selectors, not coefficients
         "nn_sal_scheme": 1, "ln_sal_chk": False,
     }
     wrong = {name: (nml[name], value) for name, value in expected.items() if nml[name] != value}

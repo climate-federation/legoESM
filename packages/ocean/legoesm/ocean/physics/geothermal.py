@@ -210,7 +210,7 @@ def nemo_geothermal_bottom_heating_tendency(
     r1_rho0_rcp = nemo_source_round(
         jnp.asarray(1.0, dtype=dtype) / rho0_rcp)
     qgh_trd0 = nemo_source_round(nemo_source_round(
-        r1_rho0_rcp * heatflow) * jnp.asarray(1.0e-3, dtype=dtype))
+        r1_rho0_rcp * heatflow) * jnp.asarray(1.0e-3, dtype=dtype))  # coeff-ok: exact mW-to-W unit conversion
     safe_e3t = jnp.where(bottom > 0.5, e3t, jnp.asarray(1.0, dtype=dtype))
     return nemo_source_round(qgh_trd0 / safe_e3t) * bottom
 

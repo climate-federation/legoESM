@@ -86,7 +86,7 @@ __param_spec__ = {
         },
         "params": {},
     },
-}
+    "SI3O2InitConfig": {"scheme_key": "ice.si3_orca2_o2_init", "excluded": {"rn_thres_sst": "NEMO namini oracle identity", "rn_hti_ini_n": "NEMO namini oracle identity", "rn_hti_ini_s": "NEMO namini oracle identity", "rn_hts_ini_n": "NEMO namini oracle identity", "rn_hts_ini_s": "NEMO namini oracle identity", "rn_ati_ini_n": "NEMO namini oracle identity", "rn_ati_ini_s": "NEMO namini oracle identity", "rn_smi_ini_n": "NEMO namini oracle identity", "rn_smi_ini_s": "NEMO namini oracle identity", "rn_tmi_ini_n": "NEMO namini oracle identity", "rn_tmi_ini_s": "NEMO namini oracle identity", "rn_tsu_ini_n": "NEMO namini oracle identity", "rn_tsu_ini_s": "NEMO namini oracle identity", "rn_tms_ini_n": "NEMO namini oracle identity", "rn_tms_ini_s": "NEMO namini oracle identity", "rn_apd_ini_n": "NEMO namini oracle identity", "rn_apd_ini_s": "NEMO namini oracle identity", "rn_hpd_ini_n": "NEMO namini oracle identity", "rn_hpd_ini_s": "NEMO namini oracle identity", "rn_hld_ini_n": "NEMO namini oracle identity", "rn_hld_ini_s": "NEMO namini oracle identity", "rn_amax_n": "NEMO nampar oracle identity", "rn_amax_s": "NEMO nampar oracle identity"}, "params": {}},}
 
 
 class SI3ORCA2StateConfig(NamedTuple):
@@ -4017,8 +4017,8 @@ __param_spec__["SI3O2InitConfig"] = {
         "rn_hld_ini_s": "oracle identity: NEMO namini SH initial pond lid depth [m]",
         "rn_amax_n": "oracle identity: NEMO nampar NH maximum ice concentration [1]",
         "rn_amax_s": "oracle identity: NEMO nampar SH maximum ice concentration [1]",
-        "ln_pnd": "oracle identity: NEMO namthd_pnd melt-pond switch",
-        "ln_pnd_lids": "oracle identity: NEMO namthd_pnd frozen-lid switch",
+        # Discrete switches are not floating parameters and stay outside the spec.
+        # ln_pnd_lids likewise remains ordinary configuration metadata.
     },
     "params": {},
 }
@@ -4151,8 +4151,8 @@ def _safe_sqrt_jvp(primals: tuple[Field], tangents: tuple[Field]) -> tuple[Field
 
 
 def si3_dom_uniq_t_orca2(
-    jpi: int = 184,
-    jpj: int = 152,
+    jpi: int = 184,  # coeff-ok: fixed ORCA2 global dimension including halos
+    jpj: int = 152,  # coeff-ok: fixed ORCA2 global dimension including halos
     nn_hls: int = 2,
     *,
     _plant_omit_nfd_uniq: bool = False,
@@ -4228,9 +4228,9 @@ def si3_eos_fzp(
     else:
         # UNESCO / Millero EOS-80 polynomial (`eosbn2.F90:1691-1696`)
         zs = sr(_safe_sqrt(jnp.maximum(sss, jnp.asarray(0.0, dtype=dtype))))
-        a0 = jnp.asarray(-0.0575, dtype=dtype)
-        a1 = jnp.asarray(1.710523e-3, dtype=dtype)
-        a2 = jnp.asarray(2.154996e-4, dtype=dtype)
+        a0 = jnp.asarray(-0.0575, dtype=dtype)  # coeff-ok: EOS-80 polynomial, eosbn2.F90:1691-1696
+        a1 = jnp.asarray(1.710523e-3, dtype=dtype)  # coeff-ok: EOS-80 polynomial, eosbn2.F90:1691-1696
+        a2 = jnp.asarray(2.154996e-4, dtype=dtype)  # coeff-ok: EOS-80 polynomial, eosbn2.F90:1691-1696
         pfzp = sr(sr(sr(a0 + sr(a1 * zs)) - sr(a2 * sss)) * sss)
 
     jpi, jpj = sss.shape

@@ -363,7 +363,7 @@ def mle_tracer_tendency_latlon_cgrid(
         zu = sr(1.0 - sr(depth_u * inv_Hu[..., None]))
         zv = sr(1.0 - sr(depth_v * inv_Hv[..., None]))
         zu2, zv2 = sr(zu * zu), sr(zv * zv)
-        r5_21 = 5.0 / 21.0
+        r5_21 = 5.0 / 21.0  # coeff-ok: fixed Fox-Kemper structure coefficient, tramle.F90:333-338
         mu_u = jnp.maximum(
             0.0, sr(sr(1.0 - zu2) * sr(1.0 + sr(r5_21 * zu2))))
         mu_v = jnp.maximum(
