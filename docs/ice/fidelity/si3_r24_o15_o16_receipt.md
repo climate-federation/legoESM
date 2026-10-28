@@ -68,10 +68,11 @@ admitted version-1 reader instead labels the first five of those as `at_i_b`,
 The reader therefore translates those three byte positions only when
 `version == 1` and `kind == 15`; every other version/kind returns unchanged,
 and unsupported master versions already fail closed
-(`scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:236-270,396-503`).
+(`scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:236-269` and
+`scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:396-502`).
 The evidence checker reads the committed writer calls in source order and, at
 steps 1, 2, and 100, obtains these independent checks
-(`scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1826-1900`):
+(`scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1826-1899`):
 
 - all 12 state fields also present in kind 18 align bit-for-bit, for 36 checks;
 - translated `qsr` equals the independently recorded `qsr_oce` block
@@ -94,7 +95,7 @@ The scorer reconstructs kind 18, runs the production `si3_o16_step` call site,
 which performs `ice_var_glo2eqv`, `ice_var_agg`, and `si3_ice_update_flx`, then
 scores every kind-15 state/total field and every kind-16 output field
 (`packages/ice/legoesm/ice/si3_finalize.py:825-882` and
-`scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1903-2051`).
+`scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1903-2050`).
 Across `kt=1..100` under CPU fp64, glibc/libm, and production JIT:
 
 - aggregation into kind 15: 0 unequal / 948,384,000 elements, maximum 0 ULP;

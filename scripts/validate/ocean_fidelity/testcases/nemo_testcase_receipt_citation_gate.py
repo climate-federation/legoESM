@@ -10954,15 +10954,23 @@ _reanchor(
 _reanchor('scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:260-298',
           'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:297-335')
 _reanchor('scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:301-356',
-          'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:338-393')
+          'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:338-392',
+          anchors=['def verify_master_admission_manifests(',
+                   '"rung_record_digests": rung_digests,', 55])
 _reanchor('scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:460-517',
-          'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:506-563')
+          'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:506-562',
+          anchors=['def _verify_record_scalars_against_namelist(',
+                   'f"scalar header {sname}={got!r} disagrees with resolved namelist {expected!r} in kind {kind}"', 57])
 _reanchor('scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:527-617',
-          'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:573-663')
+          'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:573-662',
+          anchors=['class FieldScoreAccumulator:', '"fields": self.stats,', 90])
 _reanchor('scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:634-928',
-          'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:680-974')
+          'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:680-973',
+          anchors=['@functools.lru_cache(maxsize=8)',
+                   '"jit_prod_step_ponds": jit_prod_step_ponds,', 294])
 _reanchor('scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:931-1652',
-          'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:977-1698')
+          'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:977-1697',
+          anchors=['def score_o8_to_o12(', '"rungs": rungs_report,', 721])
 _reanchor('scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:981-998',
           'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1027-1044')
 _reanchor('scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1155-1388',
@@ -10970,25 +10978,37 @@ _reanchor('scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scor
 _reanchor('scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1277-1302',
           'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1323-1348')
 _reanchor('scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1390-1410',
-          'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1436-1456')
+          'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1436-1455',
+          anchors=['# 3. Rung O10: Kind 6 -> Kind 7 (si3_ice_thd_sal) and Kind 7 -> Kind 8 (si3_ice_thd_temp)',
+                   'spec.name, r7["fields"][spec.name], f8[spec.name], kt=kt, category=jl', 20])
 _reanchor('scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1412-1423',
-          'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1458-1469')
+          'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1458-1468',
+          anchors=['# 4. Rung O11: Kind 8 -> Kind 9 (si3_ice_thd_da)',
+                   'spec.name, r8["fields"][spec.name], f9[spec.name], kt=kt, category=jl', 11])
 _reanchor('scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1425-1501',
-          'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1471-1547')
+          'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1471-1543',
+          anchors=['# Production entry point: si3_column_step_arrays (Kind 3 -> Kind 4, 5, 6, 7, 8, 9)',
+                   'prod_trace.post_sal.S_layers[:npti],', 73])
 _reanchor('scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1503-1535',
-          'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1549-1581')
+          'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1549-1580',
+          anchors=["# 5. Rung O12: Kind 10 -> Kind 11 (si3_ice_thd_pnd and step_ponds(scheme='si3_lev'))",
+                   'spec.name, f10[spec.name], f11[spec.name], kt=kt, category=0', 32])
 _reanchor(
     'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1778-1845',
-    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1826-1900',
-    anchors=['def verify_kind15_translation_evidence(', '"translation_kind": 15,', 75],
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1826-1899',
+    anchors=['def verify_kind15_translation_evidence(', '"translation_kind": 15,', 74],
 )
 _reanchor(
     'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1849-1875',
-    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1903-2051',
-    anchors=['def score_o15_o16(', '"scores": summaries,', 149],
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1903-2050',
+    anchors=['def score_o15_o16(', '"scores": summaries,', 148],
 )
-_reanchor('scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1927-1941',
-          'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:2015-2030')
+_reanchor(
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1927-1941',
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:2015-2030',
+    anchors=['tau_meta = records[20]["meta"]',
+             'o16_tau.update(spec.name, got, expected, kt=kt, category=0)', 16],
+)
 _reanchor(
     'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1-2053',
     'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:1-2147',
@@ -11010,9 +11030,11 @@ _reanchor(
 )
 
 CITATION_MAP.update({
-    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:236-270,396-503': [
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:236-269': [
         '_KIND15_V1_SCHEMA_LABELS = ("cloud_fra", "qsr", "sfx")',
-        '"reader_translation": reader_translation,', 143],
+        '"writer_labels": list(writer_labels),', 34],
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:396-502': [
+        'def read_record_verified(', '"reader_translation": reader_translation,', 107],
     'tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:170-191': [
         'def test_kind15_versioned_translation_evidence_and_wrong_permutation_plant() -> None:',
         'score_o15_o16(DEFAULT_MASTER_ROOT, steps=(1,), plant="o16-model-mutation")', 22],
