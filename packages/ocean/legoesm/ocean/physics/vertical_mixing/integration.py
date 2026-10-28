@@ -321,26 +321,36 @@ def _make_epbl(config: VerticalMixingConfig,
         tau_y = getattr(surface_forcing, "tau_y", None) if surface_forcing else None
         q_net = getattr(surface_forcing, "q_net", None) if surface_forcing else None
         fw = getattr(surface_forcing, "freshwater", None) if surface_forcing else None
+        salt = getattr(surface_forcing, "salt_flux", None) if surface_forcing else None
+        # Missing forcing is an error, as in MOM6: a zero would run the
+        # boundary layer unforced and no downstream guard could see it.
+        missing = [n for n, x in (("tau_x", tau_x), ("tau_y", tau_y),
+                                  ("q_net", q_net), ("freshwater", fw))
+                   if x is None]
+        if missing:
+            raise ValueError(
+                "ePBL needs wind stress, net heat and freshwater forcing; "
+                f"surface_forcing supplies no {', '.join(missing)}. Pass "
+                "explicit zeros for an unforced column.")
 
-        # Surface buoyancy flux, MOM6 sign convention: POSITIVE = stabilizing.
-        # calculateBuoyancyFlux1d uses surface-pressure density derivatives.
-        drho_dT_s, drho_dS_s = eos_density_derivatives(
-            eos_fn, T[..., 0], S[..., 0], jnp.zeros_like(T[..., 0]))
+        # Surface buoyancy flux through the shared helper (#2178), MOM6 form:
+        # derivatives at surface pressure divided by rho_0 (GoRho = g/Rho0),
+        # brine salt included with the freshwater dilution (MOM6 netSalt).
+        # The helper's sign is POSITIVE = destabilizing; ePBL's (MOM6's
+        # buoyancyFlux) is POSITIVE = stabilizing, hence the minus.
         c_sw = constants_config.c_sw
-        net_heat = (jnp.zeros_like(T[..., 0]) if q_net is None
-                    else q_net / (rho_0 * c_sw))
-        # A freshwater gain dilutes the surface: the equivalent salt flux is
-        # -S * (water flux) / rho_0, matching netSalt's dilution adjustment.
-        net_salt = (jnp.zeros_like(S[..., 0]) if fw is None
-                    else -S[..., 0] * fw / rho_0)
-        B_flux = -(g / rho_0) * (drho_dT_s * net_heat + drho_dS_s * net_salt)
+        B_f, _, Q_sfc_S = surface_buoyancy_flux(
+            q_net, fw, salt, T[..., 0], S[..., 0],
+            g=g, rho_0=rho_0, c_sw=c_sw, real_salt_in_qs=True,
+            rho_0_norm=True)
+        B_flux = -B_f        # never None: q_net and fw are required above
 
         # Energy released (or required) by mixing the surface fluxes through
-        # the top layer.  Only the top layer is forced: no penetrating
-        # shortwave profile is supplied on this path.
+        # the top layer, with the same net salt flux [psu kg/m^2/s] as the
+        # buoyancy.  Only the top layer is forced: no penetrating shortwave
+        # profile is supplied on this path.
         tke_top = surface_tke_forcing(
-            jnp.zeros_like(T[..., 0]) if q_net is None else q_net,
-            None if fw is None else -S[..., 0] * fw,
+            q_net, Q_sfc_S * rho_0,
             h[..., 0], dSV_dT[..., 0], dSV_dS[..., 0],
             g=g, rho_0=rho_0, c_sw=c_sw, dt=cfg.dt_s)
         tke_forcing = jnp.zeros_like(T).at[..., 0].set(tke_top)

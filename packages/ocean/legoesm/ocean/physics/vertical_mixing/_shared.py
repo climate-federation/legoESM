@@ -18,6 +18,7 @@ from legoesm.ocean.eos import (
     thermal_expansion_coeff,
     haline_contraction_coeff,
     eos_density_derivatives,
+    wright_eos,
 )
 
 # EOS salinity floor [PSU] for the generic-EOS surface α/β autodiff path.
@@ -715,6 +716,7 @@ def surface_buoyancy_flux(
     c_sw: float,
     real_salt_in_qs: bool,
     eos_fn=None,
+    rho_0_norm: bool = False,
 ):
     """Surface buoyancy flux ``B_f`` [m^2/s^3] (>0 destabilising) + the kinematic
     surface heat / salt fluxes for the KPP / CATKE boundary-layer closures.
@@ -758,6 +760,10 @@ def surface_buoyancy_flux(
         constant source (``constants_config`` for lat-lon, module constants for
         MPAS; both equal the canonical values by default).
     real_salt_in_qs : see above.
+    rho_0_norm : ``False`` (KPP / CATKE): ``alpha``/``beta`` divide the EOS
+        derivatives by the surface density ``rho(T, S, 0)``.  ``True`` (ePBL):
+        divide by ``rho_0`` instead, MOM6's ``calculateBuoyancyFlux1d`` form
+        (``GoRho = g / Rho0``).
 
     Returns
     -------
@@ -773,7 +779,20 @@ def surface_buoyancy_flux(
     # different surface α/β, so the KPP/CATKE surface buoyancy forcing must use
     # it (else the boundary layer mixes against Wright while the interior
     # ρ/N²/Ri use S-EOS — a half-applied closure).
-    if eos_fn is None:
+    if rho_0_norm:
+        fn = wright_eos if eos_fn is None else eos_fn
+        # Same salinity floor as the generic-EOS path below; none for Wright.
+        S_eval = (S_sfc if eos_fn is None
+                  else jnp.maximum(S_sfc, _EOS_SALINITY_FLOOR))
+
+        def _alpha_sfc():
+            drho_dT, _ = eos_density_derivatives(fn, T_sfc, S_eval, p_sfc)
+            return -drho_dT / rho_0
+
+        def _beta_sfc():
+            _, drho_dS = eos_density_derivatives(fn, T_sfc, S_eval, p_sfc)
+            return drho_dS / rho_0
+    elif eos_fn is None:
         def _alpha_sfc():
             return thermal_expansion_coeff(T_sfc, S_sfc, p_sfc)
 

@@ -278,8 +278,8 @@ def test_single_node_multi_rank_pins_before_early_return(
     monkeypatch.setenv("SLURM_NTASKS", "2")
     monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0,1")
     _stub_mpi(monkeypatch, rank=rank, hosts=["node01", "node01"])
-    # Single node -> returns False (no jax.distributed), but pinned first.
-    assert ei.maybe_init_jax_distributed() is False
+    # Single node, mpi lane -> False (no jax.distributed), but pinned first.
+    assert ei.maybe_init_jax_distributed(federate=False) is False
     assert os.environ["CUDA_VISIBLE_DEVICES"] == expect
 
 
@@ -334,7 +334,7 @@ def test_launcher_local_rank_outranks_mpi_rank_order(monkeypatch):
     monkeypatch.setenv("SLURM_LOCALID", "0")
     monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0,1")
     _stub_mpi(monkeypatch, rank=1, hosts=["node01", "node01"])
-    assert ei.maybe_init_jax_distributed() is False
+    assert ei.maybe_init_jax_distributed(federate=False) is False
     assert os.environ["CUDA_VISIBLE_DEVICES"] == "0"
 
 
@@ -400,7 +400,7 @@ def test_gpu_bind_shim_with_distinct_device_sets_is_accepted(monkeypatch):
     monkeypatch.setattr(ei, "openable_nvidia_nodes", lambda: ["/dev/nvidia0"])
     _stub_mpi(monkeypatch, rank=0, hosts=["node01", "node01"],
               node_fps=[(("/dev/nvidia0",), None, "0"), (("/dev/nvidia1",), None, "0")])
-    assert ei.maybe_init_jax_distributed() is False
+    assert ei.maybe_init_jax_distributed(federate=False) is False
     assert os.environ["CUDA_VISIBLE_DEVICES"] == "0"  # untouched
 
 
@@ -422,7 +422,7 @@ def test_cpu_masked_allocation_is_not_a_gpu(monkeypatch, masked):
     same = (("/dev/nvidia0", "/dev/nvidia1"), None, masked)
     _stub_mpi(monkeypatch, rank=0, hosts=["node01", "node01"],
               node_fps=[same, same])
-    assert ei.maybe_init_jax_distributed() is False
+    assert ei.maybe_init_jax_distributed(federate=False) is False
 
 
 @pytest.mark.parametrize("value,allowed", [("1", True), ("0", False)])
@@ -439,7 +439,7 @@ def test_shared_gpu_override_only_on_exact_1(monkeypatch, value, allowed):
     _stub_mpi(monkeypatch, rank=0, hosts=["node01", "node01"],
               node_fps=[same, same])
     if allowed:
-        assert ei.maybe_init_jax_distributed() is False
+        assert ei.maybe_init_jax_distributed(federate=False) is False
     else:
         with pytest.raises(RuntimeError, match="resolve to the SAME GPU"):
             ei.maybe_init_jax_distributed()
@@ -463,7 +463,7 @@ def test_shm_split_undergrouping_falls_back_to_hostnames(monkeypatch):
     _sys.modules["mpi4py"].MPI.COMM_WORLD.Split_type = lambda _t: (
         types.SimpleNamespace(Get_rank=lambda: 0, Get_size=lambda: 1,
                               Free=lambda: None))
-    assert ei.maybe_init_jax_distributed() is False
+    assert ei.maybe_init_jax_distributed(federate=False) is False
     assert os.environ["CUDA_VISIBLE_DEVICES"] == "1"
 
 
@@ -547,7 +547,7 @@ def test_post_mpi_pin_cpu_platform_is_not_refused(monkeypatch):
     monkeypatch.setenv("JAX_PLATFORMS", "cpu")
     monkeypatch.setattr(ei, "_cuda_driver_fds_open", lambda: True)
     _stub_mpi(monkeypatch, rank=1, hosts=["node01", "node01"])
-    assert ei.maybe_init_jax_distributed() is False
+    assert ei.maybe_init_jax_distributed(federate=False) is False
     assert os.environ["CUDA_VISIBLE_DEVICES"] == "1"
 
 
@@ -562,7 +562,7 @@ def test_early_pin_applies_before_the_post_mpi_machinery(monkeypatch):
     # Driver fds "open": irrelevant, the early pin came first.
     monkeypatch.setattr(ei, "_cuda_driver_fds_open", lambda: True)
     _stub_mpi(monkeypatch, rank=1, hosts=["node01", "node01"])
-    assert ei.maybe_init_jax_distributed() is False
+    assert ei.maybe_init_jax_distributed(federate=False) is False
     assert os.environ["CUDA_VISIBLE_DEVICES"] == "1"
     assert os.environ["LEGOESM_HOST_CUDA_VISIBLE_DEVICES"] == "0,1"
 
@@ -613,6 +613,52 @@ def test_mpi_lane_never_federates_across_hosts(monkeypatch, capsys):
     assert ei._INITIALIZED is False
     assert os.environ["CUDA_VISIBLE_DEVICES"] == "0"
     assert "jax.distributed NOT initialised" in capsys.readouterr().out
+
+
+def test_spmd_lane_federates_on_one_host(monkeypatch):
+    """``federate=True`` (run_amip's SPMD lane) with every process on ONE
+    host must still initialise jax.distributed early: the driver's later
+    init runs after the XLA backend is up and raises (Derecho CPU, 2/3/6
+    processes on one node, every rank).
+
+    Non-vacuous: restore the unconditional single-host return and
+    initialize never fires and the call returns False.
+    """
+    monkeypatch.setattr(ei, "_INITIALIZED", False)
+    monkeypatch.setenv("SLURM_NTASKS", "2")
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0,1")
+    _stub_mpi(monkeypatch, rank=1, hosts=["node01", "node01"])
+    jax = _stub_jax(monkeypatch, process_count=2)
+    fired = []
+    jax.distributed = types.SimpleNamespace(
+        initialize=lambda **kw: fired.append(
+            (kw, os.environ["CUDA_VISIBLE_DEVICES"])))
+    assert ei.maybe_init_jax_distributed(federate=True) is True
+    assert len(fired) == 1
+    kw, cvd_at_init = fired[0]
+    assert kw["num_processes"] == 2 and kw["process_id"] == 1
+    assert kw["coordinator_address"].startswith("node01:")
+    assert kw["local_device_ids"] == [0]
+    assert cvd_at_init == "1"            # pinned before initialize
+    assert ei._INITIALIZED is True
+    ei.init_jax_distributed_with_fallback()   # the driver's late init: no-op
+    assert len(fired) == 1
+
+
+def test_mpi_lane_on_one_host_never_federates(monkeypatch):
+    """``federate=False`` on one host keeps the early return (no jax
+    import, no initialize): the mpi4jax lane must never federate.
+    """
+    monkeypatch.setattr(ei, "_INITIALIZED", False)
+    monkeypatch.setenv("SLURM_NTASKS", "2")
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0,1")
+    _stub_mpi(monkeypatch, rank=0, hosts=["node01", "node01"])
+    jax = _stub_jax(monkeypatch, process_count=2)
+    fired = []
+    jax.distributed = types.SimpleNamespace(
+        initialize=lambda **kw: fired.append(kw))
+    assert ei.maybe_init_jax_distributed(federate=False) is False
+    assert fired == [] and ei._INITIALIZED is False
 
 
 def test_federation_vote_disagreement_aborts_every_rank(monkeypatch):

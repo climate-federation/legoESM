@@ -1188,3 +1188,131 @@ def test_monthly_writer_month_boundaries_and_means(tmp_path):
     assert ds.sst.values[0, 0, 0] == 15.0 and ds.sst.values[1, 0, 0] == 7.0
     assert np.isnan(ds.sst.values[0, 0, 1])          # land
     assert np.isfinite(ds.mld.values[0, 0, 0])
+
+
+def _monthly_writer_and_state(path):
+    import numpy as np
+    from types import SimpleNamespace
+
+    from scripts.run.run_omip import MonthlyMldSstWriter
+
+    zc = SimpleNamespace(z_half_ref=-np.array([0.0, 10.0, 20.0, 40.0, 80.0]))
+
+    def make():
+        return MonthlyMldSstWriter(path, z_coord=zc, lat_deg=np.array([0.0]),
+                                   lon_deg=np.array([0.0, 1.0]))
+
+    def st(sst):
+        T = np.full((1, 2, 4), 5.0)
+        T[..., 0] = sst
+        f = lambda a: SimpleNamespace(data=a)
+        return SimpleNamespace(T=f(T), S=f(np.full((1, 2, 4), 35.0)),
+                               land_mask=f(np.array([[1.0, 0.0]])),
+                               H_bathy=f(np.full((1, 2), 80.0)))
+    return make, st
+
+
+def test_monthly_writer_restart_continues_exactly(tmp_path):
+    """#2182: a run checkpointed mid-February and resumed into the same
+    folder writes the same file as one uninterrupted run, even when the
+    killed first leg had run past the checkpoint and flushed February."""
+    import numpy as np
+    import xarray as xr
+
+    samples = [(10.0, 15.0), (20.0, 31.0), (7.0, 45.0), (9.0, 50.0),
+               (11.0, 59.0), (3.0, 60.0)]
+    make, st = _monthly_writer_and_state(tmp_path / "one.nc")
+    w = make()
+    for sst, day in samples:
+        w.add(st(sst), day)
+    w.close()
+    ref = xr.open_dataset(tmp_path / "one.nc").load()
+
+    path = tmp_path / "two.nc"
+    make, st = _monthly_writer_and_state(path)
+    w = make()
+    for sst, day in samples[:3]:                # checkpoint at day 45
+        w.add(st(sst), day)
+    payload = w.restart_payload()
+    for sst, day in samples[3:]:                # killed leg: flushes Feb
+        w.add(st(sst), day)
+    w2 = make()
+    w2.resume(45.0, payload)
+    for sst, day in samples[3:]:
+        w2.add(st(sst), day)
+    w2.close()
+    got = xr.open_dataset(path).load()
+    assert list(got.month.values) == list(ref.month.values) == [1, 2, 3]
+    np.testing.assert_array_equal(got.sst.values, ref.sst.values)
+    np.testing.assert_array_equal(got.mld.values, ref.mld.values)
+
+
+def test_monthly_writer_restart_refusals(tmp_path):
+    """#2182: a restart without the in-flight keys (day > 0), or with the
+    monthly file gone past the first month, is refused."""
+    import pytest
+
+    make, st = _monthly_writer_and_state(tmp_path / "m.nc")
+    with pytest.raises(ValueError, match="in-flight"):
+        make().resume(10.0, {})
+    make().resume(0.0, {})                       # fresh start: nothing lost
+    w = make()
+    w.add(st(10.0), 20.0)
+    w.add(st(7.0), 40.0)                         # flushes January
+    (tmp_path / "m.nc").unlink()
+    with pytest.raises(ValueError, match="missing"):
+        make().resume(40.0, w.restart_payload())
+    import xarray as xr
+    w3 = make()                                  # Jan + Feb flushed
+    for sst, day in ((1.0, 20.0), (2.0, 40.0), (3.0, 70.0)):
+        w3.add(st(sst), day)
+    payload = w3.restart_payload()
+    with xr.open_dataset(tmp_path / "m.nc") as ds:     # truncate: Jan only
+        ds.load().isel(time=[0]).to_netcdf(tmp_path / "t.nc")
+    (tmp_path / "t.nc").replace(tmp_path / "m.nc")
+    with pytest.raises(ValueError, match="holds 1"):
+        make().resume(70.0, payload)
+    sparse = make()                              # first sample in February
+    sparse.add(st(7.0), 40.0)                    # (diag cadence > 31 days)
+    sparse.resume(60.0, sparse.restart_payload())   # nothing flushed: fine
+
+
+def test_restart_npz_carries_the_monthly_payload():
+    """The checkpoint writer adds the active writer's payload, and
+    run_omip_single wires and clears it."""
+    import inspect
+    from scripts.run import run_omip
+
+    assert "_RESTART_EXTRA_PAYLOAD[0]()" in inspect.getsource(
+        run_omip._save_restart)
+    src = inspect.getsource(run_omip.run_omip_single)
+    assert "_RESTART_EXTRA_PAYLOAD[0] = _monthly.restart_payload" in src
+    assert "_monthly.resume(" in src
+
+
+def test_checkpoint_npz_round_trips_the_monthly_payload(tmp_path):
+    """The real checkpoint writer stores the active writer's in-flight month
+    and a writer resumed from that npz continues it."""
+    import numpy as np
+    from collections import namedtuple
+    from types import SimpleNamespace
+
+    from scripts.run import run_omip
+
+    make, st = _monthly_writer_and_state(tmp_path / "m.nc")
+    w = make()
+    w.add(st(10.0), 15.0)
+    w.add(st(20.0), 20.0)
+    state = namedtuple("St", ["T"])(SimpleNamespace(data=np.ones((1, 2, 4))))
+    run_omip._RESTART_EXTRA_PAYLOAD[0] = w.restart_payload
+    try:
+        fname = run_omip._save_restart(state, 20.0, 40, tmp_path / "rst")
+    finally:
+        run_omip._RESTART_EXTRA_PAYLOAD[0] = None
+    run_omip._join_restart_writer()
+    w2 = make()
+    with np.load(fname) as z:                 # the NpzFile, as the driver
+        w2.resume(float(z["time_days"]), z)
+    assert (w2.month, w2.n) == (w.month, w.n) == ((0, 1), 2)
+    np.testing.assert_array_equal(w2.sum_sst, w.sum_sst)
+    np.testing.assert_array_equal(w2.sum_mld, w.sum_mld)

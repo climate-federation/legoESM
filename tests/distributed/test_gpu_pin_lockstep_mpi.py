@@ -93,8 +93,8 @@ def test_production_path_gives_each_rank_a_DISTINCT_device(fresh, monkeypatch):
     monkeypatch.setattr(ei, "openable_nvidia_nodes",
                         lambda: [f"/dev/nvidia{i}" for i in range(n)])
     if len(set(comm.allgather(MPI.Get_processor_name()))) > 1:
-        pytest.skip("multi-node launch: would call jax.distributed.initialize")
-    ei.maybe_init_jax_distributed()
+        pytest.skip("multi-node launch: single-node case only")
+    ei.maybe_init_jax_distributed(federate=False)
     mine = os.environ["CUDA_VISIBLE_DEVICES"]
     all_pins = comm.allgather(mine)
     assert len(set(all_pins)) == n, f"ranks share a device: {all_pins}"
@@ -109,13 +109,12 @@ def test_healthy_multi_rank_launch_still_returns(fresh, monkeypatch):
     test nodes; what is exercised is the gather sequencing around it.
     """
     monkeypatch.setattr(ei, "pin_local_gpu", lambda local_rank, n_local: None)
-    # Single-node launch -> False (no jax.distributed); multi-node -> the real
-    # initialize() would run, which a test must not do, so assert only the
-    # single-node case and skip otherwise.
+    # mpi lane (federate=False): no jax.distributed on any host count; the
+    # single-node case is the one asserted here, as before.
     comm = MPI.COMM_WORLD
     if len(set(comm.allgather(MPI.Get_processor_name()))) > 1:
-        pytest.skip("multi-node launch: would call jax.distributed.initialize")
-    assert ei.maybe_init_jax_distributed() is False
+        pytest.skip("multi-node launch: single-node case only")
+    assert ei.maybe_init_jax_distributed(federate=False) is False
 
 
 @pytest.mark.timeout(60)
@@ -178,5 +177,5 @@ def test_shared_gpu_override_lets_the_duplicate_launch_through(fresh,
     monkeypatch.setattr(ei, "openable_nvidia_nodes", lambda: ["/dev/nvidia0"])
     comm = MPI.COMM_WORLD
     if len(set(comm.allgather(MPI.Get_processor_name()))) > 1:
-        pytest.skip("multi-node launch: would call jax.distributed.initialize")
-    assert ei.maybe_init_jax_distributed() is False
+        pytest.skip("multi-node launch: single-node case only")
+    assert ei.maybe_init_jax_distributed(federate=False) is False

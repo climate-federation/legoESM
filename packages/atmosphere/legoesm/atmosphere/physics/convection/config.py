@@ -362,7 +362,8 @@ class SBMConfig(NamedTuple):
         Reference relative humidity for moisture profile (default 0.7).
     cape_threshold : float
         Minimum CAPE [J/kg] to trigger convection (default 70.0).  The Isca
-        oracle convects whenever CAPE > 0 (threshold 0).
+        oracle convects whenever CAPE > 0 (threshold 0); the measured gap is a
+        KNOWN DIFFERENCE recorded in ``sbm.py``'s module docstring.
     smooth_trigger_sharpness : float
         Sigmoid sharpness for smooth trigger [1/(J/kg)] (default 0.1).
     """

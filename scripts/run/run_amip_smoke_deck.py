@@ -7,7 +7,9 @@ machine paths of ``config/amip/amip_production{,.ginsburg}.sh``.  This script
 (formerly ``run_amip_cmip6_deck.py``; renamed by review 2026-10-10 F34) runs a
 historical C16/L30 smoke stack -- RRTMG + Sundqvist clouds + Morrison + SBM +
 Louis + McFarlane -- with FLAT topography (no land anywhere), no sub-grid
-orography file and, by default, the SYNTHETIC ``data/forcing_amip`` deck.  It
+orography file and, by default, the SYNTHETIC ``data/forcing_amip`` deck for
+every channel but aerosol, which defaults to the production aerosol file
+(``--aerosol-file``; Levante only, #2212).  It
 exercises the forcing plumbing end to end; its climate means nothing.
 
 It wraps :mod:`scripts.run_amip` and orchestrates the forcing suite (SST/SIC +
@@ -63,6 +65,14 @@ _DEFAULT_ARCO_ERA5 = (
     "full_37-1h-0p25deg-chunk-1.zarr-v3"
 )
 
+# Production aerosol (radiation + droplet-number) file: the AEROSOL default in
+# config/amip/amip_production.sh (Levante only; pinned equal by a unit test).
+# Override with --aerosol-file.
+_PRODUCTION_AEROSOL_FILE = (
+    "/work/bb1596/b309178/diffESM/legoesm_ap/data/forcing/cmip6_1979-2014/"
+    "aeropt_macv2sp_sw_b14_tot_1850-2014_MACv1bg.nc"
+)
+
 # CLAUDE.md "Constant and Parameter Discipline": never hardcode 273.15 etc.
 sys.path.insert(0, str(_REPO_ROOT / "src"))
 from legoesm import constants  # noqa: E402
@@ -70,10 +80,11 @@ from legoesm import constants  # noqa: E402
 
 def _check_forcing_files(
     forcing_dir: Path, start_year: int, end_year: int,
-    *, require_aerosol: bool = True, require_volcanic: bool = True,
-    require_sst: bool = True,
+    *, aerosol_file: str | Path, require_aerosol: bool = True,
+    require_volcanic: bool = True, require_sst: bool = True,
 ) -> dict[str, Path]:
-    """Verify the canonical 6-file deck exists in ``forcing_dir``.
+    """Verify the canonical 6-file deck exists (the aerosol file at
+    ``aerosol_file``, the other five in ``forcing_dir``).
 
     Ozone resolution (``ozone_amip_<sy>-<ey>.nc`` interannual *vs.*
     ``ozone_amip_clim.nc`` 12-month climatology): if both are present
@@ -85,6 +96,9 @@ def _check_forcing_files(
 
     Parameters
     ----------
+    aerosol_file : str or Path
+        Required keyword: the aerosol file (``--aerosol-file``); it is
+        checked at this path, not in ``forcing_dir``.
     require_aerosol, require_volcanic : bool
         When False, the corresponding file is omitted from the
         missing-file check.  This lets users intentionally disable a
@@ -106,7 +120,7 @@ def _check_forcing_files(
         "ghg": forcing_dir / f"ghg_amip_{start_year}-{end_year}.nc",
         "ozone": ozone_path,
         "solar": forcing_dir / f"solar_amip_{start_year}-{end_year}.nc",
-        "aerosol": forcing_dir / "aerosol_amip_clim.nc",
+        "aerosol": Path(aerosol_file),
         "volcanic": forcing_dir / f"volcanic_amip_{start_year}-{end_year}.nc",
     }
     # Skip aerosol/volcanic from the *required* set when the caller
@@ -121,8 +135,11 @@ def _check_forcing_files(
         # A real --sst-file is supplied separately; don't require the
         # synthetic sst_sic deck file.
         skip.add("sst")
+    # the aerosol path is user-supplied: it must be a file (Path("") is the
+    # current directory and exists; codex + GLM 2026-10-28)
     missing = [name for name, p in files.items()
-               if name not in skip and not p.exists()]
+               if name not in skip
+               and not (p.is_file() if name == "aerosol" else p.exists())]
     if missing:
         return {"_missing": ",".join(missing), **files}
     return files
@@ -155,7 +172,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--start-year", type=int, default=1979)
     parser.add_argument("--end-year", type=int, default=2014)
     parser.add_argument("--auto-generate", action="store_true", default=False,
-                        help="Generate forcing files if any are missing")
+                        help="Generate forcing files if any are missing "
+                             "(the aerosol is read from --aerosol-file, not "
+                             "the generated synthetic file)")
 
     # Run-time configuration
     parser.add_argument("--resolution", type=int, default=16,
@@ -285,6 +304,11 @@ def main(argv: list[str] | None = None) -> int:
     # Auxiliary
     parser.add_argument("--volcanic-aerosol-scale", type=float, default=1.0,
                         help="Multiplier on volcanic AOD (0.0 disables)")
+    parser.add_argument("--aerosol-file", type=str,
+                        default=_PRODUCTION_AEROSOL_FILE,
+                        help="Aerosol AOD file (time, [band,] lat, lon) for "
+                             "radiation and the droplet-number proxy "
+                             "(default: the production file)")
     parser.add_argument("--no-aerosol", action="store_true", default=False,
                         help="Skip aerosol forcing entirely")
     parser.add_argument("--no-volcanic", action="store_true", default=False,
@@ -342,6 +366,7 @@ def main(argv: list[str] | None = None) -> int:
     # would hit a spurious missing-file error before the model starts.
     files = _check_forcing_files(
         forcing_dir, args.start_year, args.end_year,
+        aerosol_file=args.aerosol_file,
         require_aerosol=aerosol_active,
         require_volcanic=volcanic_active,
         require_sst=not args.sst_file,
@@ -352,6 +377,7 @@ def main(argv: list[str] | None = None) -> int:
             _auto_generate(forcing_dir, args.start_year, args.end_year)
             files = _check_forcing_files(
                 forcing_dir, args.start_year, args.end_year,
+                aerosol_file=args.aerosol_file,
                 require_aerosol=aerosol_active,
                 require_volcanic=volcanic_active,
                 require_sst=not args.sst_file,
@@ -359,13 +385,15 @@ def main(argv: list[str] | None = None) -> int:
             if "_missing" in files:
                 raise RuntimeError(
                     f"Auto-generation completed but files still missing: "
-                    f"{files['_missing']}"
+                    f"{files['_missing']} (the aerosol is read from "
+                    f"--aerosol-file {files['aerosol']})"
                 )
         else:
             print(f"[deck] ERROR — forcing dir {forcing_dir} is missing files: "
                   f"{files['_missing']}")
             print(f"[deck]   re-run with --auto-generate to create them, or "
-                  "run scripts/data/generate_amip_forcing.py manually first.")
+                  "run scripts/data/generate_amip_forcing.py manually first; "
+                  f"the aerosol is read from --aerosol-file {files['aerosol']}.")
             return 2
 
     # Resolve the SST source + its var-name/unit convention.  A real
