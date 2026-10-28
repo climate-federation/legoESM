@@ -44,6 +44,7 @@ from legoesm.atmosphere.physics.convection.integration import (
     make_convection_physics,
 )
 from legoesm import constants
+from tests._kuo_sounding import W_UP, build_sounding
 
 
 # ===========================================================================
@@ -796,19 +797,21 @@ class TestKuo:
         assert out.convective_mask.shape == (ncol,)
 
     def test_cloud_water_source_is_signed_rain_integrand(self):
-        """Convective cloud-water source = dT_dt / alpha, signed (oracle)."""
+        """Convective cloud-water source = dT_dt / alpha, signed (oracle).
+
+        The shared 60-level sounding cools at some levels, so a clip of the
+        source at zero fails the equality below.
+        """
         from legoesm.thermo import latent_heat_vaporization
-        T, q_v, p_full, p_half = _make_unstable_columns()
-        nlev = q_v.shape[-1]
-        ptenq = jnp.broadcast_to(
-            (2.0e-8 * (jnp.arange(nlev) >= nlev // 3))[None, :], q_v.shape,
-        ).astype(q_v.dtype)
-        out = kuo_convection(T, q_v, p_full, p_half, dt=300.0, config=KuoConfig(),
+        T, q_v, p_full, p_half, ptenq = build_sounding()
+        out = kuo_convection(T, q_v, p_full, p_half, dt=900.0, config=KuoConfig(),
                              moisture_convergence=ptenq,
-                             w_grid=jnp.full_like(ptenq, 0.01))
+                             w_grid=jnp.full_like(ptenq, W_UP))
         alpha = latent_heat_vaporization(T) / (
             constants.c_pd * (1.0 - q_v) + q_v * constants.c_pv)
         assert jnp.allclose(out.dq_c_conv_dt, out.dT_dt / alpha, rtol=1e-12, atol=0.0)
+        # non-vacuity: the fixture must carry a negative source
+        assert float(jnp.min(out.dq_c_conv_dt)) < 0.0
 
     def test_nonzero_tendencies(self):
         """Canonical Kuo fires under a positive large-scale moisture-
