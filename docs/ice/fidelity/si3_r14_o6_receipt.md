@@ -265,3 +265,40 @@ negative `v_s`; `at_i` above `amax` flagged for `icecor`, not for
 - O7's three helpers made public by appended aliases (the `__all__` line changed). UNASKED; offered for revert.
 - Test-local layer counts 3/2 and a 9 x 8 grid. Tests only.
 - No configuration default or production config changed.
+
+## Resume 5: Decision 177 merge slowdown
+
+Decision 177 is taken: lane 3 routes through the single O6 ridging and
+`ice_cor` implementation.  The first merged full walk was stopped after 37 h,
+so a preregistered 10-step parent/current diagnostic separated eager setup,
+odd/even compilation, compiled execution, stage timing, callback counts and
+scientific rows before another full walk
+(`nemo_si3_r14_short_window_diagnosis.py`; artifacts
+`round14/r3/diag_{parent_committed,fixed_84e070f19d}_10steps.json`).
+
+CONFIRMED root cause: the static 19-slot transcription executed
+`_rdgrft_prep` and `_rdgrft_shift` before masking an inactive result, so all
+19 expensive bodies ran after NEMO had converged in one pass.  The unfixed
+merged window averaged 225.1791 s/step and made 83 libm callbacks per step;
+the parent averaged 41.7903 s/step.  This was execution, not compilation or
+retracing: odd/even caches were stable and the precompiled handles were reused.
+The landed loop retains NEMO's 19-pass upper bound and native reverse-mode AD,
+but wraps the expensive body in the `iterate_ridging` condition.  A direct
+eager regression requires `_rdgrft_shift` calls to equal `n_passes` and to
+stop below 19 (`test_si3_o6_rdgrft_cor.py`).
+
+The committed fix (`84e070f19d`) measured 43.6059 s/step (34.7941--49.0975),
+with odd/even compilation 10.2498/9.6771 s.  The parent measured 41.7903
+s/step (41.5101--42.1918), with compilation 23.5981/23.4984 s.  At step 11,
+both report one active ridging pass, 996004 selected cells and one maximum
+cell shift; fixed ridging is 15.2192 s versus parent 23.4590 s.  The fixed
+merged literal kernel performs 11 ridging libm callbacks for that one active
+pass, versus 82 ridging callbacks in the unfixed merged arm.  It does not
+repeat callbacks after convergence.
+
+The 390 scientific rows (320 AT-BAR) are exactly equal as serialized row
+objects, hash
+`96dece7431e96cd71fa4a151c49507315305f882d7a9cede292d3f6a9ad82cf1`.
+Thus the short-window fix changes no lane-3 certified row.  PLAUSIBLE only:
+the small timing spread is host scheduling and parallel callback variance;
+it is not used for numerical certification.
