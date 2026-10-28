@@ -65,6 +65,13 @@ _SALPROF_AMPLITUDE = 1.6
 _SNOW_FRACTION_EXPONENT = -0.2
 _LANE3_REFERENCE_SALINITY = 34.0
 _ORCA2_RN_HIMAX_M = 99.0
+# Fixed ORCA2 global T-domain dimensions including two halo rows on each side.
+_ORCA2_JPI_WITH_HALO = 184
+_ORCA2_JPJ_WITH_HALO = 152
+# UNESCO/Millero EOS-80 freezing-point polynomial, eosbn2.F90:1691-1696.
+_EOS80_FREEZING_A0 = -0.0575
+_EOS80_FREEZING_A1 = 1.710523e-3
+_EOS80_FREEZING_A2 = 2.154996e-4
 
 __param_spec__ = {
     "SI3ORCA2StateConfig": {
@@ -83,6 +90,35 @@ __param_spec__ = {
             "rn_pnd_hl_min": "oracle identity: NEMO namelist_ice_ref lid threshold",
             "rn_pnd_hl_max": "oracle identity: NEMO namelist_ice_ref lid threshold",
             "rDt_ice": "oracle identity: NEMO ORCA2_SAS_ICE ice timestep [s]",
+        },
+        "params": {},
+    },
+    "SI3O2InitConfig": {
+        "scheme_key": "ice.si3_orca2_o2_init",
+        "excluded": {
+            "rn_thres_sst": "oracle identity: NEMO namini SST freezing threshold [degC]",
+            "rn_hti_ini_n": "oracle identity: NEMO namini NH initial ice thickness [m]",
+            "rn_hti_ini_s": "oracle identity: NEMO namini SH initial ice thickness [m]",
+            "rn_hts_ini_n": "oracle identity: NEMO namini NH initial snow thickness [m]",
+            "rn_hts_ini_s": "oracle identity: NEMO namini SH initial snow thickness [m]",
+            "rn_ati_ini_n": "oracle identity: NEMO namini NH initial ice concentration [1]",
+            "rn_ati_ini_s": "oracle identity: NEMO namini SH initial ice concentration [1]",
+            "rn_smi_ini_n": "oracle identity: NEMO namini NH initial ice salinity [g/kg]",
+            "rn_smi_ini_s": "oracle identity: NEMO namini SH initial ice salinity [g/kg]",
+            "rn_tmi_ini_n": "oracle identity: NEMO namini NH initial ice temperature [K]",
+            "rn_tmi_ini_s": "oracle identity: NEMO namini SH initial ice temperature [K]",
+            "rn_tsu_ini_n": "oracle identity: NEMO namini NH initial surface temperature [K]",
+            "rn_tsu_ini_s": "oracle identity: NEMO namini SH initial surface temperature [K]",
+            "rn_tms_ini_n": "oracle identity: NEMO namini NH initial snow temperature [K]",
+            "rn_tms_ini_s": "oracle identity: NEMO namini SH initial snow temperature [K]",
+            "rn_apd_ini_n": "oracle identity: NEMO namini NH initial pond fraction [1]",
+            "rn_apd_ini_s": "oracle identity: NEMO namini SH initial pond fraction [1]",
+            "rn_hpd_ini_n": "oracle identity: NEMO namini NH initial pond depth [m]",
+            "rn_hpd_ini_s": "oracle identity: NEMO namini SH initial pond depth [m]",
+            "rn_hld_ini_n": "oracle identity: NEMO namini NH initial pond lid depth [m]",
+            "rn_hld_ini_s": "oracle identity: NEMO namini SH initial pond lid depth [m]",
+            "rn_amax_n": "oracle identity: NEMO nampar NH maximum ice concentration [1]",
+            "rn_amax_s": "oracle identity: NEMO nampar SH maximum ice concentration [1]",
         },
         "params": {},
     },
@@ -3991,39 +4027,6 @@ __all__ = [
 ]
 
 
-__param_spec__["SI3O2InitConfig"] = {
-    "scheme_key": "ice.si3_orca2_o2_init",
-    "excluded": {
-        "rn_thres_sst": "oracle identity: NEMO namini SST freezing threshold [degC]",
-        "rn_hti_ini_n": "oracle identity: NEMO namini NH initial ice thickness [m]",
-        "rn_hti_ini_s": "oracle identity: NEMO namini SH initial ice thickness [m]",
-        "rn_hts_ini_n": "oracle identity: NEMO namini NH initial snow thickness [m]",
-        "rn_hts_ini_s": "oracle identity: NEMO namini SH initial snow thickness [m]",
-        "rn_ati_ini_n": "oracle identity: NEMO namini NH initial ice concentration [1]",
-        "rn_ati_ini_s": "oracle identity: NEMO namini SH initial ice concentration [1]",
-        "rn_smi_ini_n": "oracle identity: NEMO namini NH initial ice salinity [g/kg]",
-        "rn_smi_ini_s": "oracle identity: NEMO namini SH initial ice salinity [g/kg]",
-        "rn_tmi_ini_n": "oracle identity: NEMO namini NH initial ice temperature [K]",
-        "rn_tmi_ini_s": "oracle identity: NEMO namini SH initial ice temperature [K]",
-        "rn_tsu_ini_n": "oracle identity: NEMO namini NH initial surface temperature [K]",
-        "rn_tsu_ini_s": "oracle identity: NEMO namini SH initial surface temperature [K]",
-        "rn_tms_ini_n": "oracle identity: NEMO namini NH initial snow temperature [K]",
-        "rn_tms_ini_s": "oracle identity: NEMO namini SH initial snow temperature [K]",
-        "rn_apd_ini_n": "oracle identity: NEMO namini NH initial pond fraction [1]",
-        "rn_apd_ini_s": "oracle identity: NEMO namini SH initial pond fraction [1]",
-        "rn_hpd_ini_n": "oracle identity: NEMO namini NH initial pond depth [m]",
-        "rn_hpd_ini_s": "oracle identity: NEMO namini SH initial pond depth [m]",
-        "rn_hld_ini_n": "oracle identity: NEMO namini NH initial pond lid depth [m]",
-        "rn_hld_ini_s": "oracle identity: NEMO namini SH initial pond lid depth [m]",
-        "rn_amax_n": "oracle identity: NEMO nampar NH maximum ice concentration [1]",
-        "rn_amax_s": "oracle identity: NEMO nampar SH maximum ice concentration [1]",
-        "ln_pnd": "oracle identity: NEMO namthd_pnd melt-pond switch",
-        "ln_pnd_lids": "oracle identity: NEMO namthd_pnd frozen-lid switch",
-    },
-    "params": {},
-}
-
-
 class SI3O2InitConfig(NamedTuple):
     """Rung-O2 `&namini` and `&nampar` scalar initial-state configuration.
 
@@ -4151,8 +4154,8 @@ def _safe_sqrt_jvp(primals: tuple[Field], tangents: tuple[Field]) -> tuple[Field
 
 
 def si3_dom_uniq_t_orca2(
-    jpi: int = 184,
-    jpj: int = 152,
+    jpi: int = _ORCA2_JPI_WITH_HALO,
+    jpj: int = _ORCA2_JPJ_WITH_HALO,
     nn_hls: int = 2,
     *,
     _plant_omit_nfd_uniq: bool = False,
@@ -4228,9 +4231,9 @@ def si3_eos_fzp(
     else:
         # UNESCO / Millero EOS-80 polynomial (`eosbn2.F90:1691-1696`)
         zs = sr(_safe_sqrt(jnp.maximum(sss, jnp.asarray(0.0, dtype=dtype))))
-        a0 = jnp.asarray(-0.0575, dtype=dtype)
-        a1 = jnp.asarray(1.710523e-3, dtype=dtype)
-        a2 = jnp.asarray(2.154996e-4, dtype=dtype)
+        a0 = jnp.asarray(_EOS80_FREEZING_A0, dtype=dtype)
+        a1 = jnp.asarray(_EOS80_FREEZING_A1, dtype=dtype)
+        a2 = jnp.asarray(_EOS80_FREEZING_A2, dtype=dtype)
         pfzp = sr(sr(sr(a0 + sr(a1 * zs)) - sr(a2 * sss)) * sss)
 
     jpi, jpj = sss.shape

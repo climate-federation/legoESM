@@ -103,6 +103,20 @@ _SNOW_SSL_DEPTH = 0.03
 _ICE_SSL_DEPTH = 0.10
 _SNOW_FRACTION_DEPTH = 0.02
 _SNOW_BLOW_FRACTION = 0.66
+# NEMO option-2 three-layer salinity-profile coordinates, icevar.F90:521-527.
+_SALINITY_LAYER_MIDPOINTS_3 = (0.5, 1.5, 2.5)
+# The only selector tuple implemented by the production option-4 transcription;
+# cfgs/SHARED/namelist_ice_ref:244-282.
+_SAL4_PRODUCTION_SELECTORS = {
+    "nn_icesal": 4,
+    "ln_drainage": True,
+    "ln_flushing": True,
+    "nn_liquidus": 2,
+    "nn_drainage": 50,
+    "nn_flushing": 5,
+    "nn_sal_scheme": 1,
+    "ln_sal_chk": False,
+}
 _MINIMUM_ICE_SALINITY = 0.1
 _NEW_ICE_SALINITY_FRACTION = 0.75
 _DRAINAGE_TARGET = 5.0
@@ -196,7 +210,7 @@ def option2_salinity_profile(
         alpha,
     )
     if _nemo_salprof_factoring:
-        jk_minus_half = jnp.asarray((0.5, 1.5, 2.5), dtype=S_bulk.dtype)
+        jk_minus_half = jnp.asarray(_SALINITY_LAYER_MIDPOINTS_3, dtype=S_bulk.dtype)
         r1_nlay_i = jnp.asarray(1.0 / 3.0, dtype=S_bulk.dtype)
         sloped = sr(
             sr(
@@ -1762,11 +1776,7 @@ def si3_ice_thd_sal(*, h_i, t_su, t_i, sz_i, t_bo, sss, a_i, dh_i_sum,
     missing = [name for name in _SAL4_NAMELIST if nml.get(name) is None]
     if missing:
         raise ValueError(f"SI3 ice_thd_sal missing namelist values {missing}")
-    expected = {
-        "nn_icesal": 4, "ln_drainage": True, "ln_flushing": True,
-        "nn_liquidus": 2, "nn_drainage": 50, "nn_flushing": 5,
-        "nn_sal_scheme": 1, "ln_sal_chk": False,
-    }
+    expected = _SAL4_PRODUCTION_SELECTORS
     wrong = {name: (nml[name], value) for name, value in expected.items() if nml[name] != value}
     if wrong:
         raise ValueError(f"SI3 ice_thd_sal transcribes only the production selectors; got {wrong}")

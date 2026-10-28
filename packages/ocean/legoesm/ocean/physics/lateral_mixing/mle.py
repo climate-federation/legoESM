@@ -49,6 +49,8 @@ _RC_F_LENGTH_SCALE_M = 5.0e3
 # Mirrors MLEConfig.rho_c_mle so the standalone helper's signature default is a
 # named reference (the Config field is the single source of truth at call sites).
 _RHO_C_MLE_DEFAULT = 0.01
+# NEMO's literal degree-to-radian association, tramle.F90:697.
+_NEMO_DEGREES_TO_RADIANS = 3.141592653589793 / 180.0
 
 __param_spec__ = {
     "MLEConfig": {
@@ -64,7 +66,6 @@ __param_spec__ = {
             # Numerics guards: grid-scale cap and the optional bolus-CFL clamp.
             "max_grid_scale_m": "numerics: min(111 km, e1u) grid-scale cap",
             "bolus_cfl_cap": "numerics: optional |w_mle| Courant clamp (0 = off = oracle)",
-            "nemo_association": "numerics: NEMO statement association and reductions",
         },
         "params": {
             # The single FK efficiency knob (NEMO rn_ce); typical 0.06-0.08.
@@ -149,7 +150,7 @@ def mle_coefficient(
         if omega is None:
             raise ValueError("nemo_association requires the card's omega")
         # tramle.f90:697, verbatim left-to-right denominator association.
-        rad = 3.141592653589793 / 180.0
+        rad = _NEMO_DEGREES_TO_RADIANS
         return ce / (_RC_F_LENGTH_SCALE_M * 2.0 * float(omega)
                      * math.sin(rad * lat))
     f0 = 2.0 * float(constants.Omega) * math.sin(math.radians(lat))

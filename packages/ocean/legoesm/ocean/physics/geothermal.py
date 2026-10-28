@@ -45,6 +45,8 @@ _GEOTHERMAL_FLUX_MEAN_WM2 = 0.0864      # [W/m^2]
 # Below this live-thickness a level is treated as dry (rock) for bottom-cell
 # detection and as a safe heating denominator.
 _DRY_THICKNESS_M = 1.0e-3               # [m]
+# Exact conversion from the NEMO input unit mW/m² to the model unit W/m².
+_MILLIWATT_TO_WATT = 1.0e-3
 
 __physics_contract__ = {
     "summary": (
@@ -210,7 +212,7 @@ def nemo_geothermal_bottom_heating_tendency(
     r1_rho0_rcp = nemo_source_round(
         jnp.asarray(1.0, dtype=dtype) / rho0_rcp)
     qgh_trd0 = nemo_source_round(nemo_source_round(
-        r1_rho0_rcp * heatflow) * jnp.asarray(1.0e-3, dtype=dtype))
+        r1_rho0_rcp * heatflow) * jnp.asarray(_MILLIWATT_TO_WATT, dtype=dtype))
     safe_e3t = jnp.where(bottom > 0.5, e3t, jnp.asarray(1.0, dtype=dtype))
     return nemo_source_round(qgh_trd0 / safe_e3t) * bottom
 
