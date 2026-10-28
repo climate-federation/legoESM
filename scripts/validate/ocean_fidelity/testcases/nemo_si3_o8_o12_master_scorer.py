@@ -254,6 +254,43 @@ def _refuse(message: str) -> ValueError:
     return ValueError(f"STATUS PLANT-FIRED: {message}")
 
 
+_KIND15_V1_SCHEMA_LABELS = ("cloud_fra", "qsr", "sfx")
+_KIND15_V1_WRITER_LABELS = ("qsr", "sfx", "cloud_fra")
+
+
+def _translate_versioned_record_fields(
+    version: int,
+    kind: int,
+    fields: dict[str, np.ndarray],
+    *,
+    plant_wrong_permutation: bool = False,
+) -> tuple[dict[str, np.ndarray], dict[str, Any] | None]:
+    """Translate immutable version-1/kind-15 bytes to the writer's field labels."""
+    if version != 1 or kind != 15:
+        if plant_wrong_permutation:
+            raise _refuse("kind-15 translation plant requested for another format/kind")
+        return fields, None
+
+    writer_labels = _KIND15_V1_WRITER_LABELS
+    if plant_wrong_permutation:
+        writer_labels = ("sfx", "qsr", "cloud_fra")
+    translated = dict(fields)
+    translated.update(
+        {
+            writer_label: fields[schema_label]
+            for schema_label, writer_label in zip(
+                _KIND15_V1_SCHEMA_LABELS, writer_labels, strict=True
+            )
+        }
+    )
+    return translated, {
+        "format_version": version,
+        "kind": kind,
+        "schema_labels": list(_KIND15_V1_SCHEMA_LABELS),
+        "writer_labels": list(writer_labels),
+    }
+
+
 def _shape(field: Field, meta: dict[str, int]) -> tuple[int, ...]:
     ni = meta["ntei"] - meta["ntsi"] + 1
     nj = meta["ntej"] - meta["ntsj"] + 1
@@ -380,6 +417,8 @@ def verify_master_admission_manifests(
 def read_record_verified(
     path: Path,
     expected_record_sha256: str | None = None,
+    *,
+    plant_kind15_wrong_permutation: bool = False,
 ) -> dict[str, Any]:
     """Read one master binary record with full header/extent/finiteness checks."""
     raw = bytearray(path.read_bytes())
@@ -470,11 +509,18 @@ def read_record_verified(
         nonzero = [field.name for field in DH_DIAGS if np.any(fields[field.name] != 0.0)]
         if nonzero:
             raise _refuse(f"category-entry diagnostics were not zeroed: {nonzero}")
+    fields, reader_translation = _translate_versioned_record_fields(
+        version,
+        kind,
+        fields,
+        plant_wrong_permutation=plant_kind15_wrong_permutation,
+    )
     return {
         "meta": meta,
         "scalars": dict(zip(SCALAR_NAMES, map(float, scalars), strict=True)),
         "fields": fields,
         "record_sha256": record_sha,
+        "reader_translation": reader_translation,
     }
 
 
@@ -1977,6 +2023,7 @@ from legoesm.ice.si3_finalize import (  # noqa: E402 - late-rung extension
     SI3UpdateFluxForcing,
     si3_ice_update_tau,
     si3_o15_step,
+    si3_o16_step,
 )
 from legoesm.ice.si3_orca2_state import (  # noqa: E402 - late-rung extension
     SI3AggregatedVars,
@@ -1986,8 +2033,11 @@ from legoesm.ice.si3_orca2_state import (  # noqa: E402 - late-rung extension
     SI3State,
     si3_lbc_lnk_orca2,
 )
+from legoesm.ice.si3_surface import SI3SurfaceConfig  # noqa: E402
 from scripts.validate.ocean_fidelity.testcases.nemo_si3_o8_o16_master_gate import (  # noqa: E402
     PRE_AGG_TOTALS,
+    STATE,
+    TOTALS,
 )
 
 PINNED_PROJECTION_SHA256.update({
@@ -2098,7 +2148,7 @@ def verify_kind15_translation_evidence(
     *,
     plant: bool = False,
 ) -> dict[str, Any]:
-    """Verify kind-15 writer order without translating the admitted reader."""
+    """Prove the version-1/kind-15 reader translation from independent values."""
     manifest = verify_master_admission_manifests(master_root)
     digests = manifest["rung_record_digests"]["O16"]
     records_dir = master_root / "record_100step/o8_o16_master_records"
@@ -2113,8 +2163,6 @@ def verify_kind15_translation_evidence(
         "at_i_b", "wfx_snw_dyn", "qsr", "sfx", "cloud_fra",
         "tmask(:,:,1)", "smask0", "snwice_mass", "snwice_mass_b",
     )
-    if plant:
-        writer_tail = writer_tail[:2] + ("sfx", "qsr") + writer_tail[4:]
     positions = []
     for name in writer_tail:
         extent = "f2" if name in ("tmask(:,:,1)", "snwice_mass", "snwice_mass_b") else "i2"
@@ -2131,9 +2179,17 @@ def verify_kind15_translation_evidence(
     cross_kind_fields = _DIRECT_STATE_FIELDS
     checked = 0
     for kt in steps:
-        f15 = read_record_verified(
-            records_dir / record_name(15, kt), digests[record_name(15, kt)]
-        )["fields"]
+        record15 = read_record_verified(
+            records_dir / record_name(15, kt),
+            digests[record_name(15, kt)],
+            plant_kind15_wrong_permutation=plant,
+        )
+        translation = record15["reader_translation"]
+        if translation is None or translation["writer_labels"] != list(
+            ("sfx", "qsr", "cloud_fra") if plant else _KIND15_V1_WRITER_LABELS
+        ):
+            raise _refuse(f"kind-15 versioned translation metadata failed at kt={kt}")
+        f15 = record15["fields"]
         f18 = read_record_verified(
             records_dir / record_name(18, kt), digests[record_name(18, kt)]
         )["fields"]
@@ -2141,17 +2197,13 @@ def verify_kind15_translation_evidence(
             if not np.array_equal(f15[name].view(np.uint64), f18[name].view(np.uint64)):
                 raise _refuse(f"kind-15 pre-tail alignment failed for {name} at kt={kt}")
             checked += 1
-        # Under the fixed writer order, the reader-labelled cloud_fra block is
-        # qsr and matches the independently recorded qsr_oce input bit-for-bit.
-        if not np.array_equal(f15["cloud_fra"].view(np.uint64), f15["qsr_oce"].view(np.uint64)):
+        if not np.array_equal(f15["qsr"].view(np.uint64), f15["qsr_oce"].view(np.uint64)):
             raise _refuse(f"kind-15 qsr permutation evidence failed at kt={kt}")
-        # The reader-labelled sfx block is the writer's cloud_fra block and
-        # matches NEMO's independent pp_cldf source constant.
-        if not np.all(f15["sfx"] == pp_cldf):
+        if not np.all(f15["cloud_fra"] == pp_cldf):
             raise _refuse(f"kind-15 cloud permutation evidence failed at kt={kt}")
 
     return {
-        "status": "KIND15_TRANSLATION_EVIDENCE_ONLY",
+        "status": "KIND15_VERSIONED_TRANSLATION_PROVED",
         "steps": list(map(int, steps)),
         "writer_tail_order": list(writer_tail),
         "admitted_schema_tail_order": [
@@ -2161,7 +2213,9 @@ def verify_kind15_translation_evidence(
         "cross_kind_fields_checked": checked,
         "qsr_matches_qsr_oce": True,
         "cloud_fra_matches_pp_cldf": float(pp_cldf),
-        "translation_applied": False,
+        "translation_applied": True,
+        "translation_version": 1,
+        "translation_kind": 15,
     }
 
 
@@ -2171,11 +2225,7 @@ def score_o15_o16(
     steps: Sequence[int] = STEPS,
     plant: str | None = None,
 ) -> dict[str, Any]:
-    """Score O15 and O16 kind 20 through their production entry points.
-
-    Kind 15 remains deliberately unscored pending the user's reader-translation
-    versus re-acquisition decision.
-    """
+    """Score O15 and every O16 output through their production entry points."""
     if not steps:
         raise _refuse("no steps requested")
     set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
@@ -2186,12 +2236,18 @@ def score_o15_o16(
     namelist = parse_resolved_ice_namelist(
         run_dir / "output.namelist.ice", run_dir / "output.namelist.dyn", ppsrc, plant
     )
+    translation_evidence = verify_kind15_translation_evidence(master_root)
+    surface_config = SI3SurfaceConfig.from_resolved_namelists(
+        run_dir / "output.namelist.dyn", run_dir / "output.namelist.ice"
+    )
     o15 = FieldScoreAccumulator()
+    o16_agg = FieldScoreAccumulator()
+    o16_flx = FieldScoreAccumulator()
     o16_tau = FieldScoreAccumulator()
 
     for kt in steps:
         records: dict[int, dict[str, Any]] = {}
-        for kind in PROJECTIONS["O15"] + (19, 20):
+        for kind in PROJECTIONS["O15"] + PROJECTIONS["O16"]:
             name = record_name(kind, kt, 0)
             rung = "O15" if kind in PROJECTIONS["O15"] else "O16"
             records[kind] = read_record_verified(records_dir / name, digests[rung].get(name))
@@ -2225,9 +2281,42 @@ def score_o15_o16(
             if spec.name in owned15:
                 o15.update(spec.name, got15[spec.name], f14[spec.name], kt=kt, category=0)
 
+        f18 = records[18]["fields"]
+        f15 = records[15]["fields"]
+        f16 = dict(records[16]["fields"])
+        cfg16 = _late_config(namelist, records[18]["scalars"], nn_hls=2)
+        state18 = _state_from_record(f18, cfg16, full_orca2=True)
+        flux15 = _fluxes_from_record(f15)
+        forcing15 = _update_forcing(f15)
+        omit_hfx_res = plant == "o16-model-mutation"
+        out16 = jax.jit(
+            lambda state, flux, forcing, sss: si3_o16_step(
+                state,
+                flux,
+                forcing,
+                sss_m=sss,
+                config=cfg16,
+                surface_config=surface_config,
+                _plant_omit_hfx_res=omit_hfx_res,
+            )
+        )(state18, flux15, forcing15, _full_orca2_field(f18["sss_m"]))
+        got_agg = _state_score_fields(out16.state, interior_halo=2)
+        for spec in STATE + TOTALS:
+            o16_agg.update(spec.name, got_agg[spec.name], f15[spec.name], kt=kt, category=0)
+
+        if plant == "o16-1ulp" and kt == steps[0]:
+            f16["qsr"] = flip_1ulp(f16["qsr"], (0, 0))
+        for spec in KINDS[16].fields:
+            o16_flx.update(
+                spec.name,
+                getattr(out16.outputs, spec.name),
+                f16[spec.name],
+                kt=kt,
+                category=0,
+            )
+
         f19 = records[19]["fields"]
         f20 = dict(records[20]["fields"])
-        cfg16 = _late_config(namelist, records[19]["scalars"], nn_hls=2)
         stress_values = {
             name: jnp.asarray(f19[name], dtype=jnp.float64) for name in SI3StressInputs._fields
         }
@@ -2261,6 +2350,8 @@ def score_o15_o16(
 
     summaries = {
         "O15": o15.summary(),
+        "O16_aggregation": o16_agg.summary(),
+        "O16_flux": o16_flx.summary(),
         "O16_kind20_owned_interior": o16_tau.summary(),
     }
     failures = [f"{name}: {score['first_non_bit']} max_ulp={score['max_ulp']}"
@@ -2268,12 +2359,13 @@ def score_o15_o16(
     if failures:
         raise _refuse("; ".join(failures))
     return {
-        "status": "PASS_O15_AND_O16_KIND20_0_ULP",
+        "status": "PASS_ALL_O15_O16_0_ULP",
         "steps_scored": len(steps),
         "first_step": int(steps[0]),
         "last_step": int(steps[-1]),
         "manifest_verification": manifest,
         "resolved_namelist": namelist,
+        "kind15_translation_evidence": translation_evidence,
         "scores": summaries,
     }
 
@@ -2323,6 +2415,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             "o15-1ulp",
             "o15-model-mutation",
             "o15-strip-transfer-barriers",
+            "o16-1ulp",
+            "o16-model-mutation",
             "o16-tau-1ulp",
             "manifest-digest",
             "namelist-mismatch",

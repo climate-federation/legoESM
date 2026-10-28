@@ -174,9 +174,11 @@ def test_score_o15_and_kind20_owned_interior_representative_steps_0_ulp() -> Non
     if not DEFAULT_MASTER_ROOT.is_dir():
         pytest.skip(f"admitted master record not mounted at {DEFAULT_MASTER_ROOT}")
     report = score_o15_o16(DEFAULT_MASTER_ROOT, steps=(1, 2, 100))
-    assert report["status"] == "PASS_O15_AND_O16_KIND20_0_ULP"
+    assert report["status"] == "PASS_ALL_O15_O16_0_ULP"
     assert report["scores"]["O15"]["total_elements"] == 3 * 10_069_920
     assert report["scores"]["O15"]["total_unequal"] == 0
+    assert report["scores"]["O16_aggregation"]["total_unequal"] == 0
+    assert report["scores"]["O16_flux"]["total_unequal"] == 0
     # NEMO writes ji=ntsi..ntei, jj=ntsj..ntej: 180*148 cells for
     # each of utau, vtau, and the already-interior taum record.
     tau = report["scores"]["O16_kind20_owned_interior"]
@@ -188,6 +190,7 @@ def test_score_o15_and_kind20_owned_interior_representative_steps_0_ulp() -> Non
     ("plant", "field"),
     [
         ("o15-strip-transfer-barriers", "a_i"),
+        ("o16-1ulp", "qsr"),
         ("o16-tau-1ulp", "utau"),
     ],
 )
@@ -198,19 +201,28 @@ def test_o15_barrier_and_kind20_score_plants_fail(plant: str, field: str) -> Non
         score_o15_o16(DEFAULT_MASTER_ROOT, steps=(1,), plant=plant)
 
 
-def test_kind15_translation_evidence_without_translation_and_plant() -> None:
+def test_kind15_versioned_translation_evidence_and_wrong_permutation_plant() -> None:
     if not DEFAULT_MASTER_ROOT.is_dir():
         pytest.skip(f"admitted master record not mounted at {DEFAULT_MASTER_ROOT}")
     evidence = verify_kind15_translation_evidence(DEFAULT_MASTER_ROOT)
-    assert evidence["status"] == "KIND15_TRANSLATION_EVIDENCE_ONLY"
+    assert evidence["status"] == "KIND15_VERSIONED_TRANSLATION_PROVED"
     assert evidence["writer_tail_order"][2:5] == ["qsr", "sfx", "cloud_fra"]
     assert evidence["admitted_schema_tail_order"][2:5] == ["cloud_fra", "qsr", "sfx"]
     assert evidence["cross_kind_fields_checked"] == 36
     assert evidence["qsr_matches_qsr_oce"] is True
     assert evidence["cloud_fra_matches_pp_cldf"] == 0.81
-    assert evidence["translation_applied"] is False
-    with pytest.raises(ValueError, match="kind-15 writer tail order evidence failed"):
+    assert evidence["translation_applied"] is True
+    assert evidence["translation_version"] == 1
+    assert evidence["translation_kind"] == 15
+    with pytest.raises(ValueError, match="kind-15 qsr permutation evidence failed"):
         verify_kind15_translation_evidence(DEFAULT_MASTER_ROOT, plant=True)
+
+
+def test_o16_model_arithmetic_plant_fails() -> None:
+    if not DEFAULT_MASTER_ROOT.is_dir():
+        pytest.skip(f"admitted master record not mounted at {DEFAULT_MASTER_ROOT}")
+    with pytest.raises(ValueError, match=r"STATUS PLANT-FIRED.*O16_flux"):
+        score_o15_o16(DEFAULT_MASTER_ROOT, steps=(1,), plant="o16-model-mutation")
 
 
 @pytest.mark.parametrize(
