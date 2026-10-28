@@ -30,6 +30,11 @@ What is NOT the oracle (stated, not hidden):
   condensate ``AWAT`` detrained below its origin, both the oracle's WDTRAIN,
   minus downdraught re-evaporation) is emitted as the in-updraught rain source
   ``dq_r_conv_dt``, placed by the column drying profile; ``dq_c_conv_dt`` is 0.
+  A column whose net vapour tendency is POSITIVE emits no rain and the gain
+  is not balanced (pre-existing; measured 2026-10-28 at the default
+  smoothing on all 40962 columns of an MPAS AMIP checkpoint: 234 columns
+  with the downdraught off, 1488 with it on, max gain 6.8e-6 kg/m2/s vs a
+  max column vapour loss of 7.8e-4; none on the 1535 ECMWF profiles).
 * ``cape``/``convective_mask`` are diagnostics (surface-parcel moist-adiabat
   CAPE and a smooth CAPE indicator); they do not gate the scheme.
 
@@ -91,7 +96,8 @@ __physics_contract__ = {
     "sign_convention": (
         "Oracle FT/FQ: warms and dries the convecting layer; the ENTS pass "
         "closes c_pn*FT + L_v(T)*FQ over levels 1..INB exactly; the column "
-        "vapour loss is a non-negative rain source (no cloud-water source); "
+        "vapour loss is a non-negative rain source (no cloud-water source; "
+        "a net column vapour gain is not balanced); "
         "the prognostic cloud-base mass flux is "
         ">=0; surface at the last vertical index."
     ),
