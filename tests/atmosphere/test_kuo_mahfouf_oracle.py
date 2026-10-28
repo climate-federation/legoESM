@@ -15,6 +15,14 @@ Tolerance (user decision 2026-10-19): max relative error <= 1e-10 in fp64 at
 the hard limit of the existing smoothing field (``icond_sharpness = 1e12``).
 Error metric: the tier-1 CLUBB oracle test's field-normalised
 ``max|ours - oracle| / max|oracle|`` over all columns of a group.
+
+RULE 5 gap at the default smoothing: pinned PER COLUMN in
+``oracle_fixtures/kuo_mahfouf_default_gaps.json`` (per partition, per output
+dT_dt / dq_v_dt / cape; per column ``max_k|ours - oracle| / max_k|oracle|``,
+absolute where the oracle column is all zero), asserted to 1e-6 relative with
+a 1e-12 absolute floor.  Regenerate (only with a change to the smooth form or
+a default width, stating why) with
+``python tests/atmosphere/test_kuo_mahfouf_oracle.py``.
 """
 
 from __future__ import annotations
@@ -34,17 +42,22 @@ from legoesm import constants
 jax.config.update("jax_enable_x64", True)
 
 FIXTURE = Path(__file__).resolve().parent / "oracle_fixtures" / "kuo_mahfouf.npz"
+GAPS = FIXTURE.with_name("kuo_mahfouf_default_gaps.json")
 TOL = 1.0e-10
 HARD = 1.0e12
 GROUPS = ("g60", "g32")
 PARTITIONS = {"kuo1965": ("dT_k65", "dq_k65"), "anthes": ("dT_anth", "dq_anth")}
 
 
-@pytest.fixture(scope="module")
-def fx():
+def _load():
     z = dict(np.load(FIXTURE))
     z["meta"] = json.loads(str(z["meta"]))
     return z
+
+
+@pytest.fixture(scope="module")
+def fx():
+    return _load()
 
 
 def _run(fx, g, cfg, dtype=jnp.float64, fn=kuo_convection):
@@ -60,6 +73,29 @@ def _err(a, b):
     if not (np.all(np.isfinite(a)) and np.all(np.isfinite(b))):
         return np.inf
     return float(np.max(np.abs(a - b)) / max(np.max(np.abs(b)), 1e-300))
+
+
+def _per_case(a, b):
+    """Per column: max_k|a - b| / max_k|b|, or max_k|a - b| where b is all 0."""
+    a = np.asarray(a, np.float64)
+    b = np.asarray(b, np.float64)
+    d = np.max(np.abs(a - b), axis=1)
+    s = np.max(np.abs(b), axis=1)
+    return np.where(s > 0.0, d / np.where(s > 0.0, s, 1.0), d)
+
+
+def _default_gaps(fx):
+    gaps = {}
+    for partition, (kT, kq) in PARTITIONS.items():
+        for g in GROUPS:
+            out = _run(fx, g, KuoConfig(partition=partition))
+            for name, ours, ora in (
+                ("dT_dt", out.dT_dt, fx[f"{g}_ora_{kT}"]),
+                ("dq_v_dt", out.dq_v_dt, fx[f"{g}_ora_{kq}"]),
+                ("cape", np.asarray(out.cape)[:, None], fx[f"{g}_ora_zcape"][:, None]),
+            ):
+                gaps[f"{partition}/{g}/{name}"] = _per_case(ours, ora).tolist()
+    return gaps
 
 
 def test_fixture_provenance_and_coverage(fx):
@@ -85,6 +121,9 @@ def test_fixture_provenance_and_coverage(fx):
     for nm in ("reentry_w_up_then_down", "reentry_w_down_then_up"):
         cond = (fx["g60_ora_icond"][names.index(nm)][::-1] >= 1).astype(int)
         assert np.any((cond[2:] == 1) & (cond[1:-1] == 0) & (cond[:-2] == 1)), nm
+    # non-zero oracle CAPE in both groups
+    for g in GROUPS:
+        assert np.any(fx[f"{g}_ora_zcape"] > 0.0), g
 
 
 @pytest.mark.parametrize("partition", list(PARTITIONS))
@@ -96,25 +135,24 @@ def test_matches_mahfouf_oracle_at_hard_limit(fx, partition):
         out = _run(fx, g, cfg)
         errs[f"{g}_dT_dt"] = _err(out.dT_dt, fx[f"{g}_ora_{kT}"])
         errs[f"{g}_dq_v_dt"] = _err(out.dq_v_dt, fx[f"{g}_ora_{kq}"])
+        errs[f"{g}_cape"] = _err(out.cape, fx[f"{g}_ora_zcape"])
     print(f"Kuo {partition} vs Mahfouf oracle, hard limit, max rel err", errs)
     assert max(errs.values()) <= TOL, errs
 
 
 @pytest.mark.parametrize("partition", list(PARTITIONS))
-def test_default_smoothing_gap_reported(fx, partition):
-    """Not a fidelity gate: prints the gap at the default ``icond_sharpness``
-    (quoted in the PR) and checks it is finite."""
-    kT, kq = PARTITIONS[partition]
-    for g in GROUPS:
-        out = _run(fx, g, KuoConfig(partition=partition))
-        e = (_err(out.dT_dt, fx[f"{g}_ora_{kT}"]), _err(out.dq_v_dt, fx[f"{g}_ora_{kq}"]))
-        fires = np.max(np.abs(np.asarray(out.dT_dt)), axis=1) > 0.0
-        ora = fx[f"{g}_ora_n_icond2"] > 0
-        print(
-            f"Kuo {partition} {g} default sharpness: dT {e[0]:.3e} dq {e[1]:.3e}; "
-            f"columns firing ours {int(fires.sum())} / oracle {int(ora.sum())} of {len(ora)}"
-        )
-        assert np.all(np.isfinite(e))
+def test_default_smoothing_gap_pinned_per_case(fx, partition):
+    """RULE 5: the gap at the default smoothing, per fixture column, equals the
+    recorded value to 1e-6 relative / 1e-12 absolute."""
+    pinned = {k: v for k, v in json.loads(GAPS.read_text())["gaps"].items()
+              if k.startswith(partition + "/")}
+    measured = {k: v for k, v in _default_gaps(fx).items() if k.startswith(partition + "/")}
+    assert set(measured) == set(pinned)
+    for key, ref in pinned.items():
+        got, ref = np.asarray(measured[key]), np.asarray(ref)
+        print(f"Kuo {key} default gap: max over columns {np.max(got):.3e}")
+        assert got.shape == ref.shape, key
+        assert np.all(np.abs(got - ref) <= 1.0e-12 + 1.0e-6 * np.abs(ref)), key
 
 
 def test_column_water_residual_matches_oracle(fx):
@@ -137,17 +175,20 @@ def test_column_water_residual_matches_oracle(fx):
             f"{g}: max |oracle column water residual| / max cvgu = {np.max(np.abs(ora)) / scale:.3e}"
         )
         assert np.max(np.abs(ours - ora)) <= TOL * scale
+        # the cloud-water source is the signed rain integrand: its column sum
+        # is the oracle's signed surface rain
+        rain = np.sum(np.asarray(out.dq_c_conv_dt) * dpg, axis=1)
+        assert np.max(np.abs(rain - fx[f"{g}_ora_rain"])) <= TOL * scale
 
 
 def test_gradients_finite_fp64_and_fp32(fx):
-    """Gradients w.r.t. T, q_v and the moisture convergence in fp64, and w.r.t.
-    T and q_v in fp32.  (In fp32 the gradient w.r.t. the moisture convergence
-    is NaN at levels where it is exactly zero: the existing sign gate
-    ``ptenq / (|ptenq| + ptenq_sign_floor)`` differentiates through
-    ``(|ptenq| + 1e-30)**2``, which underflows to 0.  Not changed here: an
-    open question in the PR.)"""
+    """Gradients w.r.t. T, q_v and the moisture convergence, fp64 and fp32.
+    g32 holds levels of exactly zero convergence, where the former sign gate
+    ``ptenq / (|ptenq| + 1e-30)`` gave a NaN fp32 gradient (its derivative
+    formed ``(|ptenq| + 1e-30)**2``, which underflows)."""
+    assert np.any(fx["g32_ptenq"] == 0.0)
     for g in GROUPS:
-        for dtype, argnums in ((jnp.float64, (0, 1, 2)), (jnp.float32, (0, 1))):
+        for dtype in (jnp.float64, jnp.float32):
             T, q, pf, ph, w, pq = (
                 jnp.asarray(fx[f"{g}_{k}"], dtype)
                 for k in ("T", "q", "p_full", "p_half", "w", "ptenq")
@@ -157,7 +198,7 @@ def test_gradients_finite_fp64_and_fp32(fx):
                 o = kuo_convection(T, q, pf, ph, 900.0, KuoConfig(), pq, w)
                 return jnp.sum(o.dT_dt) + 1.0e3 * jnp.sum(o.dq_v_dt)
 
-            grads = jax.grad(loss, argnums=argnums)(T, q, pq)
+            grads = jax.grad(loss, argnums=(0, 1, 2))(T, q, pq)
             for x in grads:
                 assert bool(jnp.all(jnp.isfinite(x))), (g, dtype)
             assert float(jnp.max(jnp.abs(grads[0]))) > 0.0
@@ -166,28 +207,33 @@ def test_gradients_finite_fp64_and_fp32(fx):
 def test_check_grads_at_default_sharpness(fx):
     """RULE 5 gradient test: forward- and reverse-mode derivatives through the
     smooth gates at the default ``icond_sharpness`` agree with finite
-    differences (fp64, order 2), w.r.t. T.  Loss as in the finite-gradient
-    test above.  ``eps = 1e-6`` (as the CLUBB relvar oracle test): at JAX's
-    default 1e-4 the second-order check misses by 4.0e-3 (g60) / 9.5e-4
-    (g32) relative, falling 10-100x per 10x smaller eps (consistent with
-    finite-difference truncation; measured on this branch).  Tolerance:
-    check_grads' fp64 default.  Covers T only, so the ``max(ptenq, 0)`` kink
-    (``ptenq`` is an input; g32 holds exact zeros) is not crossed; whether a
-    parcel level sits within eps of ``max(qv1 - qsat, 0)`` was not checked."""
+    differences (fp64, order 2), w.r.t. T and, separately, q_v.  Loss as in
+    the finite-gradient test above.  Tolerance: check_grads' fp64 default.
+    The convergence is an input here.  Step: T ``eps = 1e-6`` (as the CLUBB
+    relvar oracle test; at JAX's default 1e-4 the check missed by 4.0e-3
+    (g60) / 9.5e-4 (g32) relative).  q_v ``eps = 1e-9`` (reviewer decision
+    2026-10-28): a 1e-6 kg/kg step exceeds the condensation-gate width
+    ``supersat_scale / icond_sharpness = 2e-7``, so the stencil crosses gates;
+    measured, the q_v check fails at 1e-6 (3.1e-2 g60 / 1.0e-3 g32 relative)
+    and 1e-7, g32 also at 1e-8 (1.1e-5), and passes at 1e-9 and 1e-10."""
     from jax.test_util import check_grads
 
     for g in GROUPS:
-        q, pf, ph, w, pq = (
-            jnp.asarray(fx[f"{g}_{k}"], jnp.float64) for k in ("q", "p_full", "p_half", "w", "ptenq")
+        T0, q0, pf, ph, w, pq = (
+            jnp.asarray(fx[f"{g}_{k}"], jnp.float64)
+            for k in ("T", "q", "p_full", "p_half", "w", "ptenq")
         )
 
-        def loss(T):
+        def loss(T, q):
             o = kuo_convection(T, q, pf, ph, 900.0, KuoConfig(), pq, w)
             return jnp.sum(o.dT_dt) + 1.0e3 * jnp.sum(o.dq_v_dt)
 
-        T = jnp.asarray(fx[f"{g}_T"], jnp.float64)
-        assert float(jnp.max(jnp.abs(jax.grad(loss)(T)))) > 0.0, g
-        check_grads(loss, (T,), order=2, modes=("fwd", "rev"), eps=1e-6)
+        for name, f, x, eps in (
+            ("T", jax.jit(lambda T: loss(T, q0)), T0, 1e-6),
+            ("q_v", jax.jit(lambda q: loss(T0, q)), q0, 1e-9),
+        ):
+            assert float(jnp.max(jnp.abs(jax.grad(f)(x)))) > 0.0, (g, name)
+            check_grads(f, (x,), order=2, modes=("fwd", "rev"), eps=eps)
 
 
 def test_eager_jit_parity(fx):
@@ -197,3 +243,21 @@ def test_eager_jit_parity(fx):
         for x, y in zip(a, b):
             if x is not None:
                 assert _err(y, x) <= TOL
+
+
+if __name__ == "__main__":  # regenerate the pinned default gaps
+    GAPS.write_text(
+        json.dumps(
+            {
+                "_note": (
+                    "Kuo default-smoothing gap per fixture column vs the running oracle "
+                    "(max_k|ours-oracle|/max_k|oracle|, absolute where the oracle column is "
+                    "0); written by tests/atmosphere/test_kuo_mahfouf_oracle.py, fp64, "
+                    f"KuoConfig() = {KuoConfig()._asdict()}"
+                ),
+                "gaps": _default_gaps(_load()),
+            },
+            indent=1,
+        )
+        + "\n"
+    )

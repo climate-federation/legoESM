@@ -257,6 +257,8 @@ __param_spec__ = {
             "buoyancy_scale_K": {"units": "K", "bounds": (0.033, 0.3), "tunable_tier": 3, "transform": "sigmoid", "category": "trigger", "reference": "Kuo (1974) buoyancy-gate normalisation", "shape": None},
             "entrainment": {"units": "1/m", "bounds": (1.65e-05, 0.00015), "tunable_tier": 1, "transform": "sigmoid", "category": "entrainment", "reference": "Kuo (1974) Mahfouf reference Eps", "shape": None},
             "supersat_scale": {"units": "kg/kg", "bounds": (3.3e-06, 3e-05), "tunable_tier": 3, "transform": "sigmoid", "category": "trigger", "reference": "Kuo (1974) condensation-gate normalisation", "shape": None},
+            "w_lcl_scale_ms": {"units": "m/s", "bounds": (0.0033, 0.03), "tunable_tier": 3, "transform": "sigmoid", "category": "trigger", "reference": "smoothing scale of the Mahfouf oracle's w_lcl > 0 gate", "shape": None},
+            "ptenq_scale": {"units": "kg/kg/s", "bounds": (3.3e-10, 3e-09), "tunable_tier": 3, "transform": "sigmoid", "category": "trigger", "reference": "smoothing scale of the Mahfouf oracle's max(0, ptenq) in cvgu", "shape": None},
         },
     },
     "MassFluxConfig": {
@@ -567,9 +569,9 @@ class KuoConfig(NamedTuple):
         Each gate argument is normalised to O(1) by the scales below
         before the sigmoid; the gates tend to the oracle's hard ``if``
         switches as the sharpness goes to infinity (1e12 reproduces the
-        oracle to round-off).  The default 50 is NOT crisp: the ``w_lcl>0``
-        gate (argument ``w_lcl / max|w|``) still fires partially for a
-        slightly negative LCL velocity.
+        oracle to round-off).  The same sharpness smooths the two ``max(x, 0)``
+        cut-offs (parcel excess over saturation, on ``supersat_scale``;
+        positive convergence in ``cvgu``, on ``ptenq_scale``).
     buoyancy_scale_K : float
         Normalisation scale [K] for the buoyancy gate ``tvc − tve`` —
         the sigmoid argument is ``(tvc − tve)/buoyancy_scale_K``.  A
@@ -585,6 +587,13 @@ class KuoConfig(NamedTuple):
         magnitude); the scale-free sign makes the smooth gate ~1 across
         the whole convergent column down to its exponential tail and ~0
         only for clear subsidence.  1e-30 = pure numerical guard.
+    w_lcl_scale_ms : float
+        Fixed speed scale [m/s] of the ``w_lcl > 0`` gate, argument
+        ``w_lcl / w_lcl_scale_ms`` (transition width
+        ``w_lcl_scale_ms / icond_sharpness``).
+    ptenq_scale : float
+        Scale [kg/kg/s] of the smoothed ``max(0, ptenq)`` in ``cvgu``,
+        ``ptenq * sigmoid(s ptenq / ptenq_scale)`` with ``s = icond_sharpness``.
     zint_floor : float
         Safety floor [kg/m²] on the ``|zint|`` normalisation denominator
         so the closure is finite when the convective layer is empty.
@@ -608,6 +617,8 @@ class KuoConfig(NamedTuple):
     ptenq_sign_floor: float = 1.0e-30
     zint_floor: float = 1.0e-12
     cvgu_activation_scale: float = 1.0e-8
+    w_lcl_scale_ms: float = 0.01
+    ptenq_scale: float = 1.0e-9
 
 
 class MassFluxConfig(NamedTuple):

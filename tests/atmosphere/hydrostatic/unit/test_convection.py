@@ -795,12 +795,20 @@ class TestKuo:
         assert out.cape.shape == (ncol,)
         assert out.convective_mask.shape == (ncol,)
 
-    def test_precipitation_non_negative(self):
-        """Convective cloud-water source should always be >= 0."""
+    def test_cloud_water_source_is_signed_rain_integrand(self):
+        """Convective cloud-water source = dT_dt / alpha, signed (oracle)."""
+        from legoesm.thermo import latent_heat_vaporization
         T, q_v, p_full, p_half = _make_unstable_columns()
-        config = KuoConfig()
-        out = kuo_convection(T, q_v, p_full, p_half, dt=300.0, config=config)
-        assert jnp.all(out.dq_c_conv_dt >= 0)
+        nlev = q_v.shape[-1]
+        ptenq = jnp.broadcast_to(
+            (2.0e-8 * (jnp.arange(nlev) >= nlev // 3))[None, :], q_v.shape,
+        ).astype(q_v.dtype)
+        out = kuo_convection(T, q_v, p_full, p_half, dt=300.0, config=KuoConfig(),
+                             moisture_convergence=ptenq,
+                             w_grid=jnp.full_like(ptenq, 0.01))
+        alpha = latent_heat_vaporization(T) / (
+            constants.c_pd * (1.0 - q_v) + q_v * constants.c_pv)
+        assert jnp.allclose(out.dq_c_conv_dt, out.dT_dt / alpha, rtol=1e-12, atol=0.0)
 
     def test_nonzero_tendencies(self):
         """Canonical Kuo fires under a positive large-scale moisture-
@@ -816,7 +824,8 @@ class TestKuo:
         ).astype(q_v.dtype)
         config = KuoConfig()
         out = kuo_convection(T, q_v, p_full, p_half, dt=300.0, config=config,
-                             moisture_convergence=ptenq)
+                             moisture_convergence=ptenq,
+                             w_grid=jnp.full_like(ptenq, 0.01))
         assert float(jnp.max(jnp.abs(out.dT_dt))) > 1e-7
 
     def test_quiescent_without_convergence(self):
@@ -839,7 +848,8 @@ class TestKuo:
 
         def loss(T_in):
             out = kuo_convection(T_in, q_v, p_full, p_half, dt=300.0,
-                                 config=config, moisture_convergence=ptenq)
+                                 config=config, moisture_convergence=ptenq,
+                                 w_grid=jnp.full_like(ptenq, 0.01))
             return jnp.sum(out.dT_dt ** 2)
 
         grad_T = jax.grad(loss)(T)

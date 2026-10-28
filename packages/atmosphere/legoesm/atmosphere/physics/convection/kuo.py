@@ -11,36 +11,35 @@ where the existing division guards (``zint_floor`` on the closure
 denominators, a 1e-12 floor on ``q_sat`` in the relative humidity) do not
 bind; the oracle divides without guards.
 
-Not the oracle (open questions, not ported):
+Not the oracle (user decisions 2026-10-28, #2213 split):
 - the oracle's ``klev_max = 20`` scan top, a level index of its ECMWF L60
-  grid, is not applied (the parcel is scanned to the model top);
+  grid, is not applied (the parcel is scanned to the model top; identical
+  tendencies on all 1535 ECMWF profiles);
 - saturation curve and constants are legoESM's (the oracle uses Huang 2018
-  with an ice branch and its own Cp, Rd, g, 0.608, 273.16);
-- with ``w_grid=None`` the ``w_lcl > 0`` gate reads the sign of the
-  moisture convergence (the oracle always reads a vertical velocity);
-- ``cape`` is a non-entraining parcel CAPE, not the oracle's ``zcape``.
+  with an ice branch and its own Cp, Rd, g, 0.608, 273.16; worth -18% of
+  column heating);
+- no positivity guard, as the oracle: one step can drive ``q_v`` negative.
 
-KNOWN DIFFERENCE (RULE 5), PENDING the user's answers to the nine open
-questions of #2136 (scan top, saturation curve, default sharpness,
-``w_grid=None`` fallback, zero-argument gate, fp32 gradient, positivity,
-CAPE, cloud-water source); the per-case gaps are pinned in a test only
-after those answers.  The oracle's hard ``if`` switches (LCL condensation,
-buoyancy, ``w_lcl > 0``, ``ptenq > 0``) are sigmoids of width
-``1 / icond_sharpness``; ``icond_sharpness -> infinity`` (1e12 in the
-oracle test) recovers the oracle to round-off.  Not smoothed (hard, as in
-the oracle, and open RULE 5 items): the parcel supersaturation
-``max(qv1 - qsat, 0)``, ``max(ptenq, 0)`` in ``cvgu`` and the positive part
-of the cloud-water source.  Measured on #2136 at the
-default ``icond_sharpness = 50`` (field-normalised
-``max|ours - oracle| / max|oracle|``, fp64): L60 fixture dT 0.49, dq 0.38
-(Kuo-Anthes 0.35 / 0.47), 51 columns fire vs the oracle's 38; all 1535
-ECMWF profiles dT 0.50, dq 0.41, 758 columns fire only in ours; L32 fixture
-dT 7.2e-5, dq 4.7e-4 (a different column set, not a convergence).
-Main cause (read off the code, no single-gate ablation run): ``sigmoid(50 w_lcl / max|w|)`` lets a
-column with a weakly negative LCL velocity fire partially.  What the
-smoothing breaks: columns the oracle leaves off fire partially (the counts
-above).  Positivity and column-water closure are not guaranteed at either
-setting (the oracle guarantees neither).
+KNOWN DIFFERENCE (RULE 5).  The oracle's hard switches on model state are
+smooth at the default ``icond_sharpness = 50`` and recovered at its hard
+limit (1e12 reproduces the oracle to round-off, dT, dq and CAPE):
+sigmoids for LCL condensation (scale ``supersat_scale``), buoyancy
+(``buoyancy_scale_K``), ``w_lcl > 0`` (fixed speed scale ``w_lcl_scale_ms``)
+and ``ptenq > 0`` (scale-free sign); ``x * sigmoid`` smooth positive parts
+for the parcel excess ``max(qv1 - qsat, 0)`` (``supersat_scale``) and
+``max(ptenq, 0)`` in ``cvgu`` (``ptenq_scale``), which undershoot to at most
+``-0.28 scale / icond_sharpness`` for a negative argument.  An argument of exactly 0
+gives a half-open sigmoid gate where the oracle's strict ``>`` gives 0.
+Measured gap at the defaults (fp64, field-normalised
+``max|ours - oracle| / max|oracle|``, fixture of
+``tests/atmosphere/test_kuo_mahfouf_oracle.py``): Kuo-1965 L60 dT 0.175,
+dq 0.150, CAPE 2.2e-4, 45 columns fire vs the oracle's 38 of 51; L32 dT
+7.2e-5, dq 4.7e-4, CAPE 3.8e-7, 15 vs 15 of 18; Kuo-Anthes L60 dT 0.114, dq
+0.167; L32 dT 1.2e-4, dq 2.4e-4.  Per-column gaps are pinned
+in ``tests/atmosphere/oracle_fixtures/kuo_mahfouf_default_gaps.json``.
+What the smoothing breaks: columns the oracle leaves off fire partially;
+positivity and column-water closure are not guaranteed at either setting
+(the oracle guarantees neither).
 
 The whole point of Kuo's parameterization
 -----------------------------------------
@@ -81,19 +80,13 @@ for Bechtold (``compute_moisture_convergence`` = ``−∇·(q_v u)``).
 
 Differentiability and positivity
 --------------------------------
-All hard ``if`` switches in the oracle (LCL condensation, buoyancy,
-``w_lcl>0``, ``ptenq>0``) are smooth sigmoid gates
-(``config.icond_sharpness``) so the scheme is fully ``jax.grad`` / ``jit``
-/ ``vmap`` compatible; they become the oracle's switches as the sharpness
-goes to infinity (except at an argument of exactly zero, where a sigmoid
-gives 0.5 and the oracle's strict ``>`` gives 0).  The default sharpness
-(50) is NOT a crisp switch: the ``w_lcl > 0`` gate is
-``sigmoid(50 · w_lcl / max|w|)``, so a column whose LCL velocity is slightly
-negative still fires partially.  The entraining parcel ascent is a
-``lax.scan`` from the surface upward.  There is no positivity limiter (the
-oracle has none): one forward-Euler step can drive ``q_v`` negative where
-the oracle would.  The convective cloud-water source handed to microphysics
-is the positive part of the condensation implied by ``dT_dt``.
+All hard switches in the oracle are smooth (see KNOWN DIFFERENCE above) so
+the scheme is ``jax.grad`` / ``jit`` / ``vmap`` compatible; the entraining
+parcel ascent is a ``lax.scan`` from the surface upward.  There is no
+positivity limiter (the oracle has none).  The convective cloud-water source
+handed to microphysics is the SIGNED condensation implied by ``dT_dt``
+(``dT_dt / alpha``, the oracle's rain integrand), so it is negative where
+the scheme cools.  ``cape`` is the oracle's entraining-cloud ``zcape``.
 
 References
 ----------
@@ -116,10 +109,6 @@ from legoesm.thermo import (
     saturation_specific_humidity_dT,
     latent_heat_vaporization,
 )
-from legoesm.atmosphere.physics.thermodynamics import (
-    compute_moist_adiabat,
-    compute_cape,
-)
 from legoesm.atmosphere.physics.convection.config import KuoConfig
 from legoesm.atmosphere.physics.convection.output import ConvectionOutput
 from legoesm.atmosphere.physics.convection._triggers import smooth_step
@@ -139,12 +128,12 @@ __physics_contract__ = {
     "inputs": {
         "T": "K", "q_v": "kg/kg", "p_full": "Pa", "p_half": "Pa", "dt": "s",
         "moisture_convergence": "kg/kg/s (large-scale dq/dt|dyn source; None -> quiescent)",
-        "w_grid": "m/s (resolved ascent for the w_lcl>0 gate; optional)",
+        "w_grid": "m/s (resolved ascent for the w_lcl>0 gate; required with moisture_convergence)",
     },
     "outputs": {
         "dT_dt": "K/s", "dq_v_dt": "kg/kg/s",
-        "dq_c_conv_dt": "kg/kg/s (convective cloud-water source to microphysics, >=0)",
-        "cape": "J/kg", "convective_mask": "1 (0-1 activation)",
+        "dq_c_conv_dt": "kg/kg/s (convective cloud-water source to microphysics, signed dT_dt/alpha)",
+        "cape": "J/kg (oracle entraining-cloud zcape)", "convective_mask": "1 (0-1 activation)",
     },
     "sign_convention": (
         "z up; surface at [:, -1]. Where a column is buoyant with positive "
@@ -156,7 +145,7 @@ __physics_contract__ = {
         "source-driven by external convergence, and, as in the oracle, the "
         "tendencies are applied only where ptenq>0 while cvgu/zint are "
         "integrated over the whole icond==2 layer. dq_c_conv_dt is the "
-        "per-level positive part of dT_dt/alpha."
+        "per-level signed dT_dt/alpha (the oracle's rain integrand)."
     ),
     # Source-driven: the scheme consumes/removes an EXTERNAL large-scale
     # moisture-convergence tendency and, as the oracle, applies the
@@ -173,8 +162,8 @@ __physics_contract__ = {
         "at the hard-gate limit); tests/unit/test_kuo_oracle_faithful.py: "
         "moisture_convergence=None -> zero tendencies (quiescent single "
         "column); a conditionally-unstable column with positive large-scale "
-        "convergence -> heating + moistening with a positive cloud-water "
-        "source and convective_mask>0."
+        "convergence and ascent -> heating + moistening with "
+        "convective_mask>0; convergence without w raises."
     ),
 }
 
@@ -240,7 +229,7 @@ def _parcel_ascent(
     The parcel launches from the surface (``[:, -1]``) and ascends to the
     top, so we scan over levels reversed to surface-first.
 
-    Returns ``(tc, qvc, icond2)`` each (ncol, nlev), where ``tc`` and
+    Returns ``(tc, qvc, icond2, cape)``; the first three are (ncol, nlev), where ``tc`` and
     ``qvc`` are the in-cloud temperature / vapor and ``icond2`` is the
     smooth [0,1] activation gate (oracle ``icond==2`` = buoyant AND
     ``w_lcl>0`` AND condensing).  At the launch (surface) level ``tc=T`` and
@@ -249,7 +238,10 @@ def _parcel_ascent(
     ``qvc`` the parcel's carried vapour (oracle ``t2 = t1``, ``qv1 = qv2``),
     not the environment.  The oracle's ``klev_max`` scan top (a level index
     of its ECMWF L60 grid) is NOT ported: the parcel is scanned to the model
-    top, which equals the oracle run with ``klev_max = 1``.
+    top, which equals the oracle run with ``klev_max = 1``.  ``cape`` (ncol,)
+    is the oracle's entraining-cloud ``zcape``: the sum over levels that
+    condense AND are buoyant of ``-g dz (tvc - tve)/tve``, with the same
+    smooth gates.
     """
     ncol, nlev = T.shape
     sharp = config.icond_sharpness
@@ -259,14 +251,10 @@ def _parcel_ascent(
     c_pw = constants.c_pw
     g = constants.g
 
-    # Normalise the vertical-velocity proxy to its column-max magnitude so
-    # the ``w_lcl > 0`` gate tends to the oracle's Heaviside on the sign as
-    # ``icond_sharpness`` grows (the raw magnitude of the ``ptenq`` proxy,
-    # ~1e-8, would otherwise sit a dimensionless sigmoid at its 0.5
-    # mid-point).  At the default sharpness it is not crisp: an LCL velocity
-    # of -0.1 max|w| still gives a gate of 0.007.
-    w_scale = jnp.max(jnp.abs(w), axis=1, keepdims=True)        # (ncol, 1)
-    w_norm = w / jnp.maximum(w_scale, 1e-30)                    # in [-1, 1]
+    # The ``w_lcl > 0`` gate argument is ``w / w_lcl_scale_ms``, a FIXED
+    # physical speed scale (not a state-dependent column maximum), so the
+    # gate width is ``w_lcl_scale_ms / icond_sharpness`` [m/s] everywhere.
+    w_norm = w / config.w_lcl_scale_ms
 
     # Surface-first ordering for the scan.
     T_s = T[:, ::-1]
@@ -343,7 +331,11 @@ def _parcel_ascent(
         )
 
         # In-cloud values: condensing → (t2, qsat); else dry → (t1, qv1).
-        qc = jnp.maximum(qv1 - qsat_k, 0.0) * cond_gate
+        # ``max(qv1 - qsat, 0)`` smoothed as ``x * sigmoid(s x / c)`` on the
+        # condensation gate's own scale and sharpness (exactly 0 at x = 0;
+        # hard limit: icond_sharpness -> infinity).
+        excess = qv1 - qsat_k
+        qc = excess * smooth_step(excess / config.supersat_scale, sharp) * cond_gate
         t_cloud = cond_gate * t2 + (1.0 - cond_gate) * t1
         qv_cloud = cond_gate * qsat_k + (1.0 - cond_gate) * qv1
 
@@ -361,6 +353,8 @@ def _parcel_ascent(
         # icond==2: condensing AND buoyant AND w_lcl > 0.
         w_pos = smooth_step(w_lcl_new, sharp)
         icond2 = cond_gate * buoyant * w_pos
+        # Oracle zcape increment: condensing AND buoyant (icond==1 there).
+        dcape = cond_gate * buoyant * (-g * dz * (tvc - tve_k) / tve_k)
 
         # Advance carry: new MSE from the condensing branch (oracle uses
         # the updated t2/qv1 = condensing values for the next level).
@@ -383,6 +377,7 @@ def _parcel_ascent(
             t_cloud.astype(carry_dtype),
             qv_cloud.astype(carry_dtype),
             icond2.astype(carry_dtype),
+            dcape.astype(carry_dtype),
         )
         return carry_new, out
 
@@ -398,7 +393,9 @@ def _parcel_ascent(
         jnp.moveaxis(tve_s[:, 1:], 1, 0),
         jnp.moveaxis(w_s[:, 1:], 1, 0),
     )
-    _, (tc_scan, qvc_scan, icond2_scan) = jax.lax.scan(step, init, inputs)
+    _, (tc_scan, qvc_scan, icond2_scan, dcape_scan) = jax.lax.scan(
+        step, init, inputs)
+    cape = jnp.sum(dcape_scan, axis=0)
 
     # Move level axis back; prepend the launch level (cloud = env there).
     tc_scan = jnp.moveaxis(tc_scan, 0, 1)
@@ -415,7 +412,7 @@ def _parcel_ascent(
     tc = tc_s[:, ::-1]
     qvc = qvc_s[:, ::-1]
     icond2 = icond2_s[:, ::-1]
-    return tc, qvc, icond2
+    return tc, qvc, icond2, cape
 
 
 def kuo_convection(
@@ -455,19 +452,18 @@ def kuo_convection(
         Resolved grid-scale vertical velocity [m/s] at full levels,
         shape (ncol, nlev), positive = ascent.  Used for the oracle's
         ``w_lcl > 0`` activation gate (the oracle reads an INDEPENDENT
-        ``w(k)`` there).  When ``None`` the gate falls back to the SIGN
-        of the local moisture convergence as the ascent proxy — exact
-        whenever convergence and resolved ascent share sign, and the
-        bridge derives a real ``w`` from the dycore continuity equation
-        where it can (Codex review-1/2 finding #1).
+        ``w(k)`` there).  Required whenever ``moisture_convergence`` is
+        given: convergence is not a stand-in for ascent, so a call with
+        convergence and no ``w_grid`` raises ``ValueError``.
 
     Returns
     -------
     ConvectionOutput
         Convective tendencies and diagnostics.  ``dq_c_conv_dt`` (the
         convective cloud-water source handed to microphysics) is the
-        positive part, per level, of the condensation implied by
-        ``dT_dt``.
+        signed condensation implied by ``dT_dt`` (``dT_dt / alpha``, the
+        oracle's rain integrand); ``cape`` is the oracle's entraining-cloud
+        ``zcape``.
     """
     ncol, nlev = T.shape
     dp = p_half[:, 1:] - p_half[:, :-1]  # (ncol, nlev), >0 (top->surface)
@@ -479,6 +475,12 @@ def kuo_convection(
     if moisture_convergence is None:
         ptenq = jnp.zeros_like(q_v)
     else:
+        if w_grid is None:
+            raise ValueError(
+                "kuo_convection: moisture_convergence was given without "
+                "w_grid. The oracle's w_lcl > 0 gate reads an independent "
+                "vertical velocity; convergence is not a substitute. Pass the "
+                "resolved grid-scale w [m/s].")
         ptenq = moisture_convergence
 
     # --- Column geometry: geopotential from the hydrostatic integral ---
@@ -500,24 +502,14 @@ def kuo_convection(
     gz_s = 0.5 * (gzh_below_s + gzh_above_s)
     gz = gz_s[:, ::-1]                        # back to top->surface
 
-    # Vertical-velocity field for the oracle's ``w_lcl > 0`` gate.  The
-    # oracle reads an INDEPENDENT ``w(k)`` at the LCL.  When the caller
-    # supplies the resolved grid-scale ``w_grid`` (the convection bridge
-    # derives it from the dycore continuity equation, exactly as the
-    # Kain-Fritsch trigger does) we use it directly — FAITHFUL to the
-    # oracle's independent-``w`` gate (Codex review-1/2 finding #1).
-    # Otherwise we fall back to the SIGN of the local large-scale
-    # convergence as the ascent proxy (positive convergence ⇒ ascent),
-    # which is exact whenever convergence and ascent share sign (tropical
-    # convective regime).  ``moisture_convergence is None`` ⇒ proxy ≡ 0 ⇒
-    # gate off (quiescent), regardless of ``w_grid``.
-    if w_grid is not None:
-        w_proxy = w_grid
-    else:
-        w_proxy = ptenq
+    # Vertical velocity for the oracle's ``w_lcl > 0`` gate (the oracle's
+    # independent ``w(k)``).  Quiescent path (no convergence): ptenq = 0, so
+    # cvgu = 0 and every tendency is 0 whatever ``w`` is.
+    w_proxy = w_grid if w_grid is not None else jnp.zeros_like(q_v)
 
     # --- Entraining parcel ascent (faithful oracle loop) ---
-    tc, qvc, icond2 = _parcel_ascent(T, q_v, p_full, gz, tve, w_proxy, config)
+    tc, qvc, icond2, cape = _parcel_ascent(
+        T, q_v, p_full, gz, tve, w_proxy, config)
 
     # --- Environmental thermodynamic factors ---
     Cps_env = constants.c_pd * (1.0 - q_v) + q_v * constants.c_pv
@@ -534,16 +526,25 @@ def kuo_convection(
     # clearly-positive ptenq, → −1 for subsidence, 0 only at exactly 0)
     # into the sigmoid so the gate is ~1 across the whole convergent
     # column down to its exponential tail, not 0.5 at the cloud top.
-    # ``ptenq_sign_floor`` (1e-30) is a pure division-by-zero guard.
-    pq_sign = ptenq / (jnp.abs(ptenq) + config.ptenq_sign_floor)
+    # ``ptenq_sign_floor`` (1e-30) is a pure division-by-zero guard.  Written
+    # as ``z / (|z| + 1)`` with ``z = ptenq / floor`` (same value): the
+    # derivative never forms ``(|ptenq| + 1e-30)**2``, which underflows to 0
+    # in fp32 and made the fp32 gradient w.r.t. ptenq NaN at ptenq = 0.
+    pq_z = ptenq / config.ptenq_sign_floor
+    pq_sign = pq_z / (jnp.abs(pq_z) + 1.0)
     pq_gate = smooth_step(pq_sign, config.icond_sharpness)
     active = icond2 * pq_gate                    # (ncol, nlev) in [0,1]
     dpg = dp / g                                 # mass / area per layer
 
     # --- Convergence + normalization integrals over active layers ---
     # cvgu = Σ max(0, ptenq) dp/g over icond==2 (oracle uses icond==2,
-    # not the ptenq>0 mask, for the integral).
-    cvgu = jnp.sum(jnp.maximum(ptenq, 0.0) * icond2 * dpg, axis=1)  # (ncol,)
+    # not the ptenq>0 mask, for the integral).  ``max(0, ptenq)`` is smoothed
+    # as ``ptenq * sigmoid(s ptenq / ptenq_scale)``, s = icond_sharpness:
+    # exactly 0 at ptenq = 0, so a column without convergence stays exactly
+    # quiescent (hard limit: sharpness -> inf).
+    ptenq_pos = ptenq * smooth_step(
+        ptenq / config.ptenq_scale, config.icond_sharpness)
+    cvgu = jnp.sum(ptenq_pos * icond2 * dpg, axis=1)               # (ncol,)
     zint = jnp.sum(
         (qvc - q_v + (tc - T) / alpha_env) * icond2 * dpg, axis=1,
     )                                                              # (ncol,)
@@ -597,20 +598,13 @@ def kuo_convection(
     # The heating is supplied by condensation: ``Cps·dT = Lh·dcond`` so
     # ``dcond = dT/dt / alpha_env`` with ``alpha_env = Lh/Cps_env``, the
     # factor of the oracle's surface-rain diagnostic
-    # (``rain = Σ dtdt·dp/(g·alpha_env)``, signed).  Only the positive
-    # (condensation) part per level is handed to microphysics, so the
-    # column sum differs from the oracle's signed rain where ``dT_dt < 0``.
-    cond_signed = dT_dt / alpha_env
-    dq_c_conv_dt = jnp.maximum(cond_signed, 0.0)
+    # (``rain = Σ dtdt·dp/(g·alpha_env)``, signed).  Handed to microphysics
+    # SIGNED, per level, so its column sum is the oracle's rain (negative
+    # where ``dT_dt < 0``).
+    dq_c_conv_dt = dT_dt / alpha_env
 
     # No positivity limiter: the oracle has none (``q_v + dt·dq_v_dt`` may go
     # negative, as in the oracle).  ``dt`` is unused, as in the oracle.
-
-    # --- CAPE diagnostic (parcel from surface, env reference) ---
-    T_base = T[:, -1]
-    q_base = q_v[:, -1]
-    T_moist = compute_moist_adiabat(T_base, p_full, q_v_base=q_base)
-    cape = compute_cape(T, T_moist, p_full, p_half)
 
     # Column convective indicator (smooth 0-1): does the column actually
     # convect?  Gated on the CONVERGENCE source ``cvgu`` (a small positive
@@ -618,7 +612,8 @@ def kuo_convection(
     # so the quiescent path — no large-scale convergence, zero tendencies
     # — reports a zero mask (``tanh(0)=0``) rather than the spurious 0.5
     # the ``ptenq>0`` sign gate gives at exactly ptenq=0.  ``cvgu>=0`` by
-    # construction so ``tanh`` is monotone here.  The activation scale is
+    # construction up to the smooth positive part's undershoot (>= -0.28
+    # ptenq_scale / icond_sharpness per level).  The activation scale is
     # a KuoConfig field (matching the sibling ``buoyancy_scale_K`` /
     # ``supersat_scale`` trigger normalisers), not an inline literal.
     convective_mask = jnp.tanh(cvgu / config.cvgu_activation_scale)
