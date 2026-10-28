@@ -2237,7 +2237,7 @@ def si3_column_step_arrays(state: SI3ColumnArrays,
     )
     a_total = do_out.a_i[..., 0]
     v_total = do_out.v_i[..., 0]
-    h_total = jnp.where(a_total > _EPS10, v_total / a_total, 0.0)
+    h_total = jnp.where(a_total > _EPS10, v_total / jnp.where(a_total > _EPS10, a_total, 1.0), 0.0)
     # C1D retains its certified prognostic set; O14's layer/salt/flux outputs
     # are carried by the full five-category production stage above.
     post_do = post_da._replace(concentration=a_total, h_ice=h_total)

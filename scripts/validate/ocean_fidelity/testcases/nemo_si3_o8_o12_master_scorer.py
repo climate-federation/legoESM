@@ -514,8 +514,8 @@ def _verify_record_scalars_against_namelist(
         ("rn_pnd_hl_max", float(namelist["rn_pnd_hl_max"])),
         ("nn_snwfra", float(namelist["nn_snwfra"])),
     ]
-    if kind in (1, 2):
-        checks.append(("rn_hinew", float(namelist["rn_hinew"])))
+    if kind in (1, 2, 12, 13):
+        checks += [("rn_hinew", float(namelist["rn_hinew"]))] + ([("ln_icedO", 1.0), ("ln_leadhfx", 1.0)] if kind in (12, 13) else [])
     if kind in (8, 9):
         checks.extend(
             [
@@ -524,10 +524,10 @@ def _verify_record_scalars_against_namelist(
             ]
         )
     for sname, expected in checks:
-        got = scalars[sname]
+        got = float(namelist[sname]) if sname in ("ln_icedO", "ln_leadhfx") else scalars[sname]
         if np.float64(got).view(np.uint64) != np.float64(expected).view(np.uint64):
             raise _refuse(
-                f"scalar header {sname}={got!r} disagrees with resolved namelist {expected!r} in kind {kind}"
+                f"record identity {sname}={got!r} disagrees with resolved/preregistered value {expected!r} in kind {kind}"
             )
 
 

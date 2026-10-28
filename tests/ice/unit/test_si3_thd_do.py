@@ -175,20 +175,88 @@ def test_real_eager_equals_jit_with_runtime_arguments_and_vanished_categories():
             assert np.all(np.isfinite(np.asarray(a)))
 
 
-def test_gradients_finite_and_match_central_difference_away_from_switches():
+@pytest.mark.parametrize(
+    ("name", "index", "eps"),
+    [
+        ("qlead", (0,), 1.0e-2),
+        ("a_i", (0, 1), 1.0e-6),
+        ("v_i", (0, 1), 1.0e-6),
+        ("sv_i", (0, 1), 1.0e-6),
+        ("e_i", (0, 0, 1), 1.0e2),
+        ("szv_i", (0, 0, 1), 1.0e-6),
+    ],
+)
+def test_gradients_finite_and_match_central_difference_away_from_switches(
+    name, index, eps
+):
     base = _inputs(vanished=True)
     base = {k: jnp.asarray(v, dtype=jnp.float64) for k, v in base.items()}
 
-    def loss(q):
-        out = _call({**base, "qlead": q})
-        return jnp.sum(out.v_i) + 1.0e-10 * jnp.sum(out.e_i) + jnp.sum(out.a_i)
+    def loss(value):
+        out = _call({**base, name: value})
+        return (
+            jnp.sum(out.a_i)
+            + jnp.sum(out.v_i)
+            + 0.1 * jnp.sum(out.sv_i)
+            + 1.0e-10 * jnp.sum(out.e_i)
+            + 0.01 * jnp.sum(out.szv_i)
+        )
 
-    grad = jax.jit(jax.grad(loss))(base["qlead"])
+    value = base[name]
+    grad = jax.jit(jax.grad(loss))(value)
     assert np.all(np.isfinite(np.asarray(grad)))
-    eps = 1.0e-2
-    direction = jnp.array([1.0, 0.0, 0.0], dtype=jnp.float64)
-    central = (loss(base["qlead"] + eps * direction) - loss(base["qlead"] - eps * direction)) / (2.0 * eps)
-    assert math.isclose(float(grad[0]), float(central), rel_tol=2.0e-6, abs_tol=2.0e-10)
+    direction = jnp.zeros_like(value).at[index].set(1.0)
+    central = (loss(value + eps * direction) - loss(value - eps * direction)) / (2.0 * eps)
+    analytic = jnp.sum(grad * direction)
+    assert math.isclose(
+        float(analytic), float(central), rel_tol=2.0e-6, abs_tol=2.0e-10
+    )
+
+
+def test_column_step_vanished_ice_has_finite_concentration_and_thickness_gradients():
+    from legoesm.ice.c1d_omip_l3 import build_c1d_omip_l3_card
+
+    card = build_c1d_omip_l3_card()
+    z1 = jnp.zeros(1, dtype=jnp.float64)
+    z3 = jnp.zeros((1, 3), dtype=jnp.float64)
+    state = bl.SI3ColumnArrays(z1, z1, z1, z1, z3, z3, z1, z3, z1)
+    forcing = bl.SI3SurfaceForcing(
+        qns_ice=z1,
+        qsr_ice=z1,
+        dqns_ice=z1,
+        qtr_ice_top=z1,
+        t_bottom=jnp.asarray([271.35], dtype=jnp.float64),
+        sss=jnp.asarray([34.0], dtype=jnp.float64),
+        evaporation=z1,
+        snow_precipitation=z1,
+        qprec_ice=z1,
+        qcn_ice_bottom=z1,
+        qsb_ice_bottom=z1,
+        fhld=z1,
+        qlead=z1,
+    )
+
+    def loss(concentration, h_ice):
+        trace = bl.si3_column_step_arrays(
+            state._replace(concentration=concentration, h_ice=h_ice),
+            forcing,
+            card.dt_seconds,
+            NEMO_SI3_CONSTANTS_CONFIG,
+            si3=card.config.si3,
+            t_i_entry=z3,
+            t_s_entry=z3,
+            _zdf_dh_override=(
+                state,
+                state._replace(concentration=concentration, h_ice=h_ice),
+                state.S_bulk,
+                state.S_layers,
+            ),
+        )
+        return jnp.sum(trace.post_do.concentration + trace.post_do.h_ice)
+
+    grads = jax.jit(jax.grad(loss, argnums=(0, 1)))(z1, z1)
+    for grad in grads:
+        assert np.all(np.isfinite(np.asarray(grad)))
 
 
 def test_no_defaults_shape_refusals_and_object_code_tie_roles():
@@ -213,13 +281,15 @@ def test_no_defaults_shape_refusals_and_object_code_tie_roles():
     with pytest.raises(ValueError, match="hi_max shape"):
         _call({**x, "hi_max": np.array([0.0, math.inf])})
 
-    # Exact O14 object: latent/area/residual MAX has candidate in dst and +0
-    # in src, so src +0 survives a signed-zero tie.  The divisor MAX has
-    # epsi20 in dst and volume in src, so the source survives equality.
-    for candidate in (-0.0,):
-        assert np.asarray(bl._maxsd(candidate, 0.0)).view(np.uint64) == 0
-    equal_volume = np.float64(EPS20)
-    assert np.asarray(bl._maxsd(equal_volume, equal_volume)).view(np.uint64) == equal_volume.view(np.uint64)
-    # The temperature MIN has -epsi10 in dst and t_bo-rt0 in src.  O14 emits
-    # no SIGN instruction/call on the admitted deck.
-    assert float(bl._minsd(-EPS10, -EPS10)) == -EPS10
+    # Exact O14 object: all executing MIN/MAX sites keep src on a numeric tie.
+    # Bit-distinct signed zeros make the survivor observable; swapping operands
+    # is the plant and flips every result bit.
+    dst = jnp.asarray([-0.0, 0.0], dtype=jnp.float64)
+    src = jnp.asarray([0.0, -0.0], dtype=jnp.float64)
+    sign_bit = np.uint64(1 << 63)
+    expected = np.asarray([np.uint64(0), sign_bit], dtype=np.uint64)
+    for helper in (bl._maxsd, bl._minsd):
+        got = np.asarray(jax.jit(helper)(dst, src)).view(np.uint64)
+        swapped = np.asarray(jax.jit(lambda d, s: helper(s, d))(dst, src)).view(np.uint64)
+        np.testing.assert_array_equal(got, expected)
+        assert np.all(swapped != got)

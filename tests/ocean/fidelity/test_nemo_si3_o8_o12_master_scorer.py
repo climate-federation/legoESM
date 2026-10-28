@@ -856,3 +856,68 @@ def test_no_duplicate_o8_o12_arithmetic_ast_guard_and_plants(monkeypatch) -> Non
     phase2._nemo_snow_enthalpy_remap(h4, e4)
     phase2._nemo_ice_enthalpy_remap(h4, e4)
     assert calls == ["_cumulative_remap", "_cumulative_remap"]
+
+
+@pytest.mark.parametrize(
+    ("selector", "bad_value", "expected_pattern"),
+    [
+        ("ln_icedO", False, r"STATUS PLANT-FIRED.*record identity ln_icedO=0.0.*preregistered value 1.0"),
+        ("ln_leadhfx", False, r"STATUS PLANT-FIRED.*record identity ln_leadhfx=0.0.*preregistered value 1.0"),
+        ("rn_hinew", 0.15, r"STATUS PLANT-FIRED.*record identity rn_hinew=0.1.*preregistered value 0.15"),
+    ],
+)
+def test_score_o14_refuses_preregistered_selector_mismatches(
+    selector: str, bad_value: object, expected_pattern: str
+) -> None:
+    from scripts.validate.ocean_fidelity.testcases.nemo_si3_o8_o12_master_scorer import (
+        DEFAULT_PPSRC,
+        _verify_record_scalars_against_namelist,
+        parse_resolved_ice_namelist,
+        read_record_verified,
+        record_name,
+    )
+
+    if not DEFAULT_MASTER_ROOT.is_dir():
+        pytest.skip(f"admitted master record not mounted at {DEFAULT_MASTER_ROOT}")
+    run_dir = DEFAULT_MASTER_ROOT / "record_100step"
+    namelist = parse_resolved_ice_namelist(
+        run_dir / "output.namelist.ice", run_dir / "output.namelist.dyn", ppsrc=DEFAULT_PPSRC
+    )
+    scalars = read_record_verified(
+        run_dir / "o8_o16_master_records" / record_name(12, 1, 0)
+    )["scalars"]
+    namelist[selector] = bad_value
+    with pytest.raises(ValueError, match=expected_pattern):
+        _verify_record_scalars_against_namelist(scalars, namelist, 12)
+
+
+def test_o14_receipt_rehashes_every_cited_file_digest_and_mismatch_plant() -> None:
+    import hashlib
+    import re
+    from pathlib import Path
+
+    receipt = Path("docs/ice/fidelity/si3_r23_o14_score_receipt.md")
+    text = receipt.read_text(encoding="utf-8")
+    match = re.search(
+        r"<!-- BEGIN REHASHABLE_SHA256 -->(.*?)<!-- END REHASHABLE_SHA256 -->",
+        text,
+        flags=re.S,
+    )
+    assert match is not None
+    entries = re.findall(r"^- `(/[^`]+)` SHA-256 `([0-9a-f]{64})`$", match.group(1), re.M)
+    assert len(entries) == 5
+    missing = [raw_path for raw_path, _ in entries if not Path(raw_path).is_file()]
+    if missing:
+        pytest.skip(f"receipt evidence files are not mounted: {missing}")
+
+    def verify(items):
+        for raw_path, expected in items:
+            path = Path(raw_path)
+            assert path.is_file(), path
+            assert hashlib.sha256(path.read_bytes()).hexdigest() == expected
+
+    verify(entries)
+    planted = list(entries)
+    planted[0] = (planted[0][0], "0" * 64)
+    with pytest.raises(AssertionError):
+        verify(planted)

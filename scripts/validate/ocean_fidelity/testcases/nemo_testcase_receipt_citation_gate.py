@@ -10786,7 +10786,7 @@ CITATION_MAP.update({
     'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:816-825': ['@jax.jit', ('}', 38), 10],
     'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:957-1061': ['def score_o14(', ('}', 52), 105],
     'tests/ice/unit/test_si3_thd_do.py:82-143': ['def _scalar_oracle(x):', 'return out', 62],
-    'tests/ice/unit/test_si3_thd_do.py:157-225': ['def test_scalar_oracle_category_choice_fluxes_and_all_state_fields():', 'assert float(bl._minsd(-EPS10, -EPS10)) == -EPS10', 69],
+    'tests/ice/unit/test_si3_thd_do.py:157-295': ['def test_scalar_oracle_category_choice_fluxes_and_all_state_fields():', 'assert np.all(swapped != got)', 139],
     'tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:139-158': ['def test_score_o14_representative_steps_0_ulp_and_plants() -> None:', (')', 48), 20],
     'tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:187-360': ['def test_production_call_sites_route_through_o8_o12_and_fail_when_reverted(', (')', 141), 174],
 })
@@ -10824,7 +10824,7 @@ _repin('scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.
 _reanchor(
     'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:474-531',
     'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:474-530',
-    anchors=['def _verify_record_scalars_against_namelist(', 'f"scalar header {sname}={got!r} disagrees with resolved namelist {expected!r} in kind {kind}"', 57],
+    anchors=['def _verify_record_scalars_against_namelist(', 'f"record identity {sname}={got!r} disagrees with resolved/preregistered value {expected!r} in kind {kind}"', 57],
 )
 _reanchor(
     'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:648-942',

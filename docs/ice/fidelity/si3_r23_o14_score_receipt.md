@@ -19,11 +19,22 @@ independent review: operator (Claude)
 The retained record build is
 `round18/refused/builds_20261026T210237Z_2/ORCA2_SAS_ICE_O8O16_REF`.
 Its `nemo.exe` SHA-256 is
-`d3a805bc6c500ac7b8fdd45cc7482b92fa3e7b5ca2ae08d17ae5b7562c8fa39d`;
+`d3a805bcbc358c0eff1c91599b9547017de85e2a89b2cb5ee4a5380496e1289f`;
 its preprocessed `icethd_do.f90` SHA-256 is
-`bdaababeb859314e4b581560c24d6fc47064821ee9fd3bfaad6ab1050eaef7e4`;
+`bdaabab890d5cd4d886d315901c793c70a4ef353ff2bfb7bce6e0cdf014c7c8e`;
 and `BLD/obj/icethd_do.o` SHA-256 is
-`bee1eae5bbf2998f0a0cfb958caaf14acbbb7028f27f2a34295747915aa2e39c`.
+`bee1eae9780e89a47ea68ac53bef028c497b105f895414da6500200e6004e5d9`.
+
+The following manifest is parsed by the receipt-integrity test. Every value
+was computed from the named file with `sha256sum`:
+
+<!-- BEGIN REHASHABLE_SHA256 -->
+- `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/round18/refused/builds_20261026T210237Z_2/ORCA2_SAS_ICE_O8O16_REF/BLD/bin/nemo.exe` SHA-256 `d3a805bcbc358c0eff1c91599b9547017de85e2a89b2cb5ee4a5380496e1289f`
+- `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/round18/refused/builds_20261026T210237Z_2/ORCA2_SAS_ICE_O8O16_REF/BLD/ppsrc/nemo/icethd_do.f90` SHA-256 `bdaabab890d5cd4d886d315901c793c70a4ef353ff2bfb7bce6e0cdf014c7c8e`
+- `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/round18/refused/builds_20261026T210237Z_2/ORCA2_SAS_ICE_O8O16_REF/BLD/obj/icethd_do.o` SHA-256 `bee1eae9780e89a47ea68ac53bef028c497b105f895414da6500200e6004e5d9`
+- `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/round18/oracle_o8_o16_master/manifest/run_manifest.json` SHA-256 `bfb0b71d1500b7bc91c68a9e39c8af7a654b139258c0635ad5b1f25284b31fd0`
+- `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/round23/o14_master_score.json` SHA-256 `a1ca351c714f791415f757d916544879814b9831dfa9546f4cee4da10f199b0b`
+<!-- END REHASHABLE_SHA256 -->
 
 The complete executing statement blocks were transcribed from the compiled
 record build, not from a different checkout:
@@ -95,12 +106,15 @@ NumPy: it imports no production helper or production constant and independently
 implements category choice, fluxes, capping, bulk salt, and cumulative heat/salt
 remapping.
 
-`tests/ice/unit/test_si3_thd_do.py:157-225` checks every returned state/flux
+`tests/ice/unit/test_si3_thd_do.py:157-295` checks every returned state/flux
 field against that oracle, passes arrays as runtime JIT arguments, requires
 real eager execution under `jax.disable_jit()` to equal JIT bit-for-bit, checks
-finite vanished-ice and zero-category states, compares `jax.grad` with a
-central difference away from switches, refuses missing/invalid inputs, and
-pins the audited MIN/MAX signed-zero roles. Result: `4 passed`.
+finite vanished-ice and zero-category states, compares `jax.grad` for `qlead`,
+`a_i`, `v_i`, `sv_i`, `e_i`, and `szv_i` with central differences away from
+switches, refuses missing/invalid inputs, and pins the audited MIN/MAX
+signed-zero roles with bit-distinct tied operands. The vanished-ice adapter
+test also differentiates concentration and thickness; restoring the unsafe
+denominator makes this plant fail with a NaN gradient. Result: `10 passed`.
 
 ## 4. Admitted-master scoring
 
@@ -111,6 +125,9 @@ kernel calls the production function with resolved selectors
 verified reader, passes ENTRY arrays as JIT arguments, compares all 96 EXIT
 fields bitwise, and fails with the first `(kt, category, cell, field)`
 (`scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o12_master_scorer.py:957-1060`).
+Admission now also compares the preregistered `ln_icedO=T` and `ln_leadhfx=T`
+selectors with the resolved record namelist and compares the kind-12/13
+`rn_hinew` scalar header with that namelist; all three mismatch plants fire.
 
 Full report:
 `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/round23/o14_master_score.json`,
@@ -141,17 +158,16 @@ All 621,960 stage-field rows were evaluated. Thus the production O14 wiring
 changes no D5 output bit; other O8-O12 production paths and the production-call
 test also pass.
 
-Test evidence on the clean candidate commit `f0db1c8ac7`:
+Test evidence on this review-fix candidate:
 
-- O14 unit, O8 edge, and O8-O14 scorer/production suite: `30 passed in
-  517.12s`. During development, the deliberately stale AST plant copied from
-  the deleted inline O14 block failed; it was re-registered against the new
-  canonical O14 statement window before this final clean pass.
+- O14 unit, O8 edge, and O8-O14 scorer/production suite: `40 passed in
+  874.85s`; the focused gradient, selector, and digest-integrity subset:
+  `14 passed in 26.29s`.
 - Full 100-step O14 score: `PASS_O14_0_ULP`.
-- This receipt's citation gate: `PASS`, 14 citations, zero unmapped/failing
-  citations, and every self-test fired.
-- Full default receipt-citation gate: `39 passed in 7.82s`.
-- Private-import ratchet: `6 passed in 5.42s`.
+- Safe-denominator forward proof: the full score remained 0 ULP, and the
+  8,760-step D5 run retained the registered hash above across 621,960 rows.
+- Receipt digest integrity: all five manifest files re-hash exactly, and the
+  planted digest mismatch fails.
 
 ## 6. CHOICES and epistemic status
 
