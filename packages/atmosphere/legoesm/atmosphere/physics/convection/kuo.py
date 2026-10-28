@@ -600,8 +600,10 @@ def kuo_convection(
     # ``dcond = dT/dt / alpha_env`` with ``alpha_env = Lh/Cps_env``, the
     # factor of the oracle's surface-rain diagnostic
     # (``rain = Σ dtdt·dp/(g·alpha_env)``, signed).  Handed to microphysics
-    # SIGNED, per level, so its column sum is the oracle's rain (negative
-    # where ``dT_dt < 0``).
+    # SIGNED, per level, so its column sum equals the oracle's signed rain
+    # diagnostic (negative where ``dT_dt < 0``).  The physics pipeline's
+    # surface precipitation for Kuo is computed separately, from the column
+    # vapour sink; the two differ where the column water is not closed.
     dq_c_conv_dt = dT_dt / alpha_env
 
     # No positivity limiter: the oracle has none (``q_v + dt·dq_v_dt`` may go
