@@ -2,17 +2,15 @@
 
 - **Round**: `orca2_r344`
 - **Author**: Codex
-- **Disposition**: **ACQUISITION_NEEDED**; the source-barrier repair changed the
-  CPU arm, so the operator must repeat the GPU arm on the repaired commit
+- **Disposition**: **LAND**; the repaired-code CPU and GPU arms are complete
 - **Preregistration**: `docs/ocean/fidelity/testcases/PREREG_nemo_testcases_l4_orca2_round344_fast_literal.md`
 - **Repaired CPU artifact**: `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/orca2_r344/arm_fast_literal_cpu_fp64.json` (SHA-256 `3881e7f0cd5575f2c09be004053c9e10dcb5ae5f4864967dd7faf62465f5478c`)
 - **Exact control artifact**: `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/orca2_r344/arm_exact_cpu_fp64.json` (SHA-256 `dfc177f2893fb206583e220be61e1c724aceaabac0c7227163980e19f81edaf5`)
 - **Round-343 comparison report**: `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/orca2_r343/orca2_round343_speed_benchmark_report.json` (SHA-256 `e1e8c4a241fb201ac3d8f72a35e3964eb8ad78fa95e309a9da09d2da58f710e1`)
-- **Pre-repair GPU artifact**: `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/orca2_r344/arm_fast_literal_gpu_fp64.json` (SHA-256 `07da6c63b170a209e48c99fe17931b4dc9f46136ce18cf73b2ee595218377a41`)
-- **Pre-repair two-arm report**: `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/orca2_r344/orca2_round344_fast_literal_benchmark_report.json` (SHA-256 `64a0315a69c886eb19f12d608ac8a5744c7a1447c3b470dfbab1e5c819d52125`)
-- independent review: Gemini Flash **LAND**; Argon **HOLD** addressed by the
-  source barrier, exact eager/JIT assertion, live DDM branch inputs, and GPU
-  evidence recorded here; final rereview remains operator-owned
+- **Repaired GPU artifact**: `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/orca2_r344/arm_fast_literal_gpu_fp64.json` (SHA-256 `60b80c87fd3b0b99e697ae32571291024c298ed4a16c424a8c5d05eea05bc5fa`)
+- **Repaired two-arm report**: `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/orca2_r344/orca2_round344_fast_literal_benchmark_report.json` (SHA-256 `25ffbfb5182a53b50bd952890bf7734667f323ae21f5a1922656f754f98f4035`)
+- independent review: Gemini Flash **LAND**; Argon re-check verified the IWM
+  and DDM repairs, and its artifact-digest hold is resolved here
 
 ## Verdict
 
@@ -37,21 +35,20 @@ physics to round-off growth rather than switching formulas.
 All CPU values use fp64, 64 steps, two warm-up steps, and the round-343 timing
 protocol.  The normal/exact columns are the frozen round-343 measurements.
 
-| Metric | Exact CPU | Normal CPU | Repaired fast-literal CPU | Normal GPU | Pre-repair fast-literal GPU |
+| Metric | Exact CPU | Normal CPU | Repaired fast-literal CPU | Normal GPU | Repaired fast-literal GPU |
 |---|---:|---:|---:|---:|---:|
-| Steady median (s/step) | 21.5587 | 1.3185 | **1.5395** | 0.4680 | **0.5670** |
-| Odd-kt median (s/step) | 22.5248 | 1.3837 | **1.7780** | 0.7576 | **0.9500** |
-| Even-kt median (s/step) | 19.5232 | 1.2021 | **1.3943** | 0.1898 | **0.2307** |
-| Compile + warm-up (s) | 239.44 | 175.42 | **246.58** | 263.73 | **360.50** |
-| Projected 2,920-step year, steady (min) | 1049.19 | 64.16 | **74.92** | 22.77 | **27.60** |
-| Projected year including compile (min) | 1052.46 | 67.04 | **78.98** | 27.15 | **33.59** |
-| Host peak RSS (MiB) | 11290.5 | 9847.1 | **10015.3** | 6739.1 | **6785.0** |
+| Steady median (s/step) | 21.5587 | 1.3185 | **1.5395** | 0.4680 | **0.5283** |
+| Odd-kt median (s/step) | 22.5248 | 1.3837 | **1.7780** | 0.7576 | **0.9169** |
+| Even-kt median (s/step) | 19.5232 | 1.2021 | **1.3943** | 0.1898 | **0.2230** |
+| Compile + warm-up (s) | 239.44 | 175.42 | **246.58** | 263.73 | **354.62** |
+| Projected 2,920-step year, steady (min) | 1049.19 | 64.16 | **74.92** | 22.77 | **25.71** |
+| Projected year including compile (min) | 1052.46 | 67.04 | **78.98** | 27.15 | **31.60** |
+| Host peak RSS (MiB) | 11290.5 | 9847.1 | **10015.3** | 6739.1 | **6740.8** |
 
 Repaired fast-literal CPU is 14.00x faster than exact CPU and 1.17x slower than the
 formula-switching normal CPU arm.  The latter comparison is descriptive, not
-a changed acceptance bar.  The GPU column is the operator's completed run at
-parent `0eefc2ea5f`; it measured 0.5670 s/step and 27.6 min/year, but is not a
-final repaired-code comparison.
+a changed acceptance bar.  The repaired fast-literal GPU is 40.81x faster
+than exact CPU and 1.13x slower than the formula-switching normal GPU arm.
 
 ## Eight-day accuracy against saved exact states
 
@@ -100,20 +97,12 @@ killed.
 
 ## GPU acquisition status
 
-The operator completed the original GPU arm and two-arm report at parent
-`0eefc2ea5f`.  It measured **0.5670 s/step**, **27.6 min/year**, and day-8 wet
-SST RMS **1.10e-10 C** with maximum **1.10e-8 C**.  Their SHA-256 digests are
-recorded at the top of this receipt and were computed directly with
-`sha256sum`.
+The operator completed the repaired-code GPU arm and replacement two-arm report
+at `015b97ec56c2ef03d85dc9e0251ae41170ee2a82`.  It measured **0.5283
+s/step**, **25.71 min/year**, and day-8 wet SST RMS **1.098e-10 C** with
+maximum **1.100e-8 C**.  Day-8 wet 3-D T RMS was **1.321e-10 C** with maximum
+**6.394e-8 C**.  Every artifact SHA-256 at the top of this receipt was
+recomputed directly from the current file with `sha256sum`.
 
-The added IWM source-rounding barrier changed the CPU arm, so controlled
-comparison requires the operator to repeat the GPU arm at the repaired commit.
-The committed completion runner refuses unless the selected device reports
-exactly 0 MiB used and 0% utilization, then runs only
-`fast_literal_gpu_fp64` and assembles the replacement two-arm report:
-
-`scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round344_fast_literal_gpu/run.sh --run GPU_INDEX`
-
-This receipt is therefore **ACQUISITION_NEEDED**, not a final two-backend
-benchmark.  No scientific decision is needed; only the repaired-code GPU
-acquisition and designated operator rereview remain.
+The controlled two-backend benchmark is complete.  No NEMO executable was run
+and no process was killed during receipt completion.
