@@ -133,6 +133,24 @@ MOM6 reference: `ocean_only` single column (`BUOY_CONFIG="const"`,
 `WIND_CONFIG="const"`), ePBL as the only mixing, the same parameters as above
 in `MOM_override`.
 
+**Committed fixture (#2181).** MOM6 0e9a561 was rebuilt and the six cases
+rerun; the inputs, the MOM6 parameter record, the MOM6 temperature profiles and
+the build provenance are in `tests/ocean/unit/fixtures/mom6_epbl_scm/`, and
+`tests/ocean/unit/test_epbl_mom6_oracle.py` reruns legoESM (MOM6 order) against
+them. The MOM6 side sets, beyond the table above: a 2x2 doubly periodic 1-degree
+f-plane (`F_0 = 2 OMEGA sin 40`), 50 uniform 1 m Z* layers,
+`EQN_OF_STATE="WRIGHT_REDUCED"` (legoESM's Wright coefficients),
+`VON_KARMAN_CONST=0.4` (legoESM's value; MOM6's default is 0.41),
+`BBL_EFFIC=0` (no bottom-drag diffusivity), and the momentum-only `HBBL=10`,
+`HMIX_FIXED=0.01`, `NIHALO=NJHALO=2`, `UPWIND_1ST_CONTINUITY=True` of the
+MOM6-examples single column, plus output-only settings (8 h run via
+`TIMEUNIT`/`DAYMAX`, `SAVE_INITIAL_CONDS`, `ENERGYSAVEDAYS`, `RESTART_CONTROL`);
+everything else is MOM6's default (`MOM_parameter_doc.all` in the fixture). The test
+runs legoESM under the fp64 precision policy. The rebuilt gaps reproduce the
+table below (MOM6-order column) to the digits shown, except Q = 0, where they
+are round-off (2.6e-13 and 1.0e-12 at 1200 s and 300 s, vs 1.1e-7 and 5.2e-8;
+under the default fp32 policy the rebuild gives 1.0e-7 and 4.9e-8).
+
 legoESM side:
 
 ```python

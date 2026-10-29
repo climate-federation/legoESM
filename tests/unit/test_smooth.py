@@ -5,7 +5,7 @@ import jax.numpy as jnp
 import pytest
 
 from legoesm.core.smooth import (
-    sigmoid_switch, smooth_max, smooth_min, smooth_clamp,
+    pnorm_smooth_min, sigmoid_switch, smooth_max, smooth_min, smooth_clamp,
     smooth_relu, smooth_abs, smoothstep_cubic, smoothstep_quintic,
 )
 
@@ -109,3 +109,15 @@ def test_infinite_sharpness_is_the_exact_hard_limit():
     assert jnp.array_equal(sigmoid_switch(x, np.float64(inf)), (x >= 0).astype(x.dtype))
     # a traced sharpness still takes the smooth path
     assert float(jax.jit(lambda s: sigmoid_switch(jnp.array(0.0), s))(10.0)) == 0.5
+
+
+def test_pnorm_smooth_min():
+    """Never above min(a, b); 2^(-1/p) of both where equal; zero stays zero."""
+    a = jnp.array([1.0, 2.0, 3.0, 0.0, 0.0, 1e-3])
+    b = jnp.array([2.0, 2.0, 1.0, 5.0, 0.0, 1e3])
+    out = pnorm_smooth_min(a, b, 50.0, 1e-10)
+    assert bool(jnp.all(out <= jnp.minimum(a, b)))
+    assert jnp.allclose(out[1], 2.0 * 2.0 ** (-1.0 / 50.0))
+    assert float(out[3]) == 0.0 and float(out[4]) == 0.0
+    g = jax.grad(lambda x: pnorm_smooth_min(x, jnp.array(2.0), 50.0, 1e-10))(jnp.array(2.0))
+    assert bool(jnp.isfinite(g)) and 0.0 < float(g) < 1.0

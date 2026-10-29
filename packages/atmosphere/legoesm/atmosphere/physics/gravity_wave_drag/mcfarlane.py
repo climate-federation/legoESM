@@ -42,12 +42,21 @@ Algorithm (k = 0 model top; interface k sits above midpoint k)
 Smoothing (differentiability).  The existing sharpness/width fields each
 reduce to the CAM hard switch at their limit: ``min_wind_sharpness`` (the
 ``U > 2 m/s`` launch gate, applied as ``sigmoid*U``), ``softmin_sharpness``
-(``min(taudmp, tausat)``), ``crit_level_sharpness`` / ``crit_level_floor``
+(p of the p-norm smooth min ``(taudmp^-p + tausat^-p)^(-1/p)`` of
+``min(taudmp, tausat)``, the Lindzen form: C-infinity, never above either
+stress, ``2^(-1/50)`` = 0.986 of both where they are equal at the default
+p = 50), ``crit_level_sharpness`` / ``crit_level_floor``
 (the sign-agreement test of ``ubi`` across the layer; CAM's ``c = 0`` is
 ``crit_level_floor -> 0``).  The ``hdsp > 10 m`` gate, ``n2min``, ``taumin``,
 ``ubmc2mn`` and the limiters are hard, as in CAM (piecewise smooth; finite
-gradients).  The production smoothing values are NOT the hard limit; the
-oracle test reports that gap.
+gradients).  The production smoothing values are NOT the hard limit.
+KNOWN DIFFERENCE at the defaults (vs the CAM6 oracle, 14 columns, pinned per
+column in the oracle test): field max-norm relative 3.5e-3 in du/dt, 4.2e-3 in
+dT/dt, 1.3e-4 in dq/dt; per column up to 2.9e-2 in du/dt and 2.7e-2 in dT/dt
+(column 11).  Measured 2026-10-29 when the smooth min became the p-norm
+(#2241); the earlier sigmoid blend, not C1 at taudmp = tausat, gave field
+max-norm 1.2e-2 in du/dt.  The hard limit is every sharpness -> inf (1e12)
+with ``crit_level_floor = 0``.
 
 Departures kept from the shared signature, not from the oracle:
 ``use_e3sm_hdsp`` / ``use_depth_averaged_source`` keep their
@@ -86,6 +95,7 @@ from legoesm.atmosphere.physics.gravity_wave_drag.oro_source import (
     depth_averaged_oro_source,
 )
 from legoesm.atmosphere.physics.gravity_wave_drag.output import GWDOutput
+from legoesm.core.smooth import pnorm_smooth_min
 
 # Machine-checked scheme contract (see tests/test_physics_contracts.py).
 __physics_contract__ = {
@@ -366,10 +376,9 @@ def mcfarlane_gwd(
             -2.0 * mi * (R_d / g) * T[:, j] * (piln[:, j + 1] - piln[:, j]))
         tausat = jnp.where(tausat <= _TAUMIN_PA, 0.0, tausat)
         taudmp = jnp.where(taudmp <= _TAUMIN_PA, 0.0, taudmp)
-        # Smooth min(taudmp, tausat) -> exact min at softmin_sharpness -> inf.
-        excess = safe_divide(taudmp, tausat, eps=_TAUMIN_PA) - 1.0
-        f_break = jax.nn.sigmoid(config.softmin_sharpness * excess)
-        tau_new = jnp.minimum(taudmp * (1.0 - f_break) + tausat * f_break, taudmp)
+        # Smooth min(taudmp, tausat): p-norm, p = softmin_sharpness (the
+        # Lindzen form, #2241); exact min at softmin_sharpness -> inf.
+        tau_new = pnorm_smooth_min(taudmp, tausat, config.softmin_sharpness, _TAUMIN_PA)
         tau_new = jnp.where(tausat > 0.0, tau_new, 0.0)
         # Interfaces at and below src_level hold tau0 (gw_oro.F90 source hold).
         tau_new = jnp.where(j < src_level, tau_new, tau_below)

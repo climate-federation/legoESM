@@ -1169,7 +1169,8 @@ def test_monthly_writer_month_boundaries_and_means(tmp_path):
     nz = 4
     zc = SimpleNamespace(z_half_ref=-np.array([0.0, 10.0, 20.0, 40.0, 80.0]))
     w = MonthlyMldSstWriter(tmp_path / "m.nc", z_coord=zc,
-                            lat_deg=np.array([0.0]), lon_deg=np.array([0.0, 1.0]))
+                            lat_deg=np.array([0.0]), lon_deg=np.array([0.0, 1.0]),
+                            io_rank=True, multiproc=False)
 
     def st(sst):
         T = np.full((1, 2, nz), 5.0)
@@ -1198,9 +1199,10 @@ def _monthly_writer_and_state(path):
 
     zc = SimpleNamespace(z_half_ref=-np.array([0.0, 10.0, 20.0, 40.0, 80.0]))
 
-    def make():
+    def make(io_rank=True, multiproc=False):
         return MonthlyMldSstWriter(path, z_coord=zc, lat_deg=np.array([0.0]),
-                                   lon_deg=np.array([0.0, 1.0]))
+                                   lon_deg=np.array([0.0, 1.0]),
+                                   io_rank=io_rank, multiproc=multiproc)
 
     def st(sst):
         T = np.full((1, 2, 4), 5.0)
@@ -1288,6 +1290,30 @@ def test_restart_npz_carries_the_monthly_payload():
     src = inspect.getsource(run_omip.run_omip_single)
     assert "_RESTART_EXTRA_PAYLOAD[0] = _monthly.restart_payload" in src
     assert "_monthly.resume(" in src
+    # The fresh-run refusal precedes the first write into the run folder.
+    i = src.index("MonthlyMldSstWriter.start_fresh(_monthly_path)")
+    assert ('    if (getattr(args, "monthly_mld_sst", False) and args.restart '
+            'is None\n            and grid_type == "latlon"\n'
+            '            and args.forcing_mode == "jra55_do_tropical"):\n'
+            ) in src
+    assert "MonthlyMldSstWriter(\n            _monthly_path," in src
+    assert i < src.index("config_dir.mkdir(")
+    assert i < src.index("write_run_manifest_on_root(")
+
+
+def test_monthly_writer_fresh_run_refuses_existing_file(tmp_path):
+    """#2182: a fresh run into a folder that already holds the monthly file
+    refuses to start instead of overwriting it; an empty folder is fine."""
+    import pytest
+
+    from scripts.run.run_omip import MonthlyMldSstWriter
+
+    path = tmp_path / "m.nc"
+    MonthlyMldSstWriter.start_fresh(path)        # no file yet: fine
+    path.write_bytes(b"x")
+    with pytest.raises(ValueError, match="already exists") as err:
+        MonthlyMldSstWriter.start_fresh(path)
+    assert "Pass --restart" in str(err.value)       # says how to proceed
 
 
 def test_checkpoint_npz_round_trips_the_monthly_payload(tmp_path):
@@ -1316,3 +1342,67 @@ def test_checkpoint_npz_round_trips_the_monthly_payload(tmp_path):
     assert (w2.month, w2.n) == (w.month, w.n) == ((0, 1), 2)
     np.testing.assert_array_equal(w2.sum_sst, w.sum_sst)
     np.testing.assert_array_equal(w2.sum_mld, w.sum_mld)
+
+
+def test_monthly_writer_only_the_io_rank_writes(tmp_path):
+    """#2237: a non-I/O rank accumulates the same months but writes nothing;
+    the I/O rank writes them."""
+    import numpy as np
+
+    make, st = _monthly_writer_and_state(tmp_path / "m.nc")
+    other = make(io_rank=False, multiproc=True)
+    other.add(st(10.0), 15.0)
+    other.add(st(20.0), 40.0)          # month 2 starts: month 1 flushed
+    other.close()
+    assert not (tmp_path / "m.nc").exists()
+    assert not (tmp_path / "m.nc.tmp").exists()
+    assert len(other.done) == 2
+    root = make(io_rank=True, multiproc=True)
+    root.add(st(10.0), 15.0)
+    root.close()
+    assert (tmp_path / "m.nc").exists()
+    np.testing.assert_array_equal(root.done[0][2], other.done[0][2])
+
+
+def test_monthly_writer_failed_write_warns_only_multiprocess(tmp_path,
+                                                             monkeypatch,
+                                                             capsys):
+    """#2237: in a multi-process run a failed rank-0 write warns and the run
+    continues (the next flush rewrites every month); single-process raises."""
+    import os
+
+    import pytest
+
+    from scripts.run import run_omip
+
+    make, st = _monthly_writer_and_state(tmp_path / "m.nc")
+    real = os.replace
+
+    def boom(*a):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(run_omip.os, "replace", boom)
+    single = make()
+    single.add(st(10.0), 15.0)
+    with pytest.raises(OSError, match="disk full"):
+        single.close()
+    multi = make(multiproc=True)
+    multi.add(st(10.0), 15.0)
+    multi.add(st(20.0), 40.0)          # month 1 flush fails: warning
+    assert "WARNING" in capsys.readouterr().out
+    monkeypatch.setattr(run_omip.os, "replace", real)
+    multi.close()                      # month 2 flush rewrites both months
+    import xarray as xr
+    with xr.open_dataset(tmp_path / "m.nc") as ds:
+        assert ds.sizes["time"] == 2
+
+
+def test_run_omip_passes_the_io_rank_to_the_monthly_writer():
+    """#2237: the run builds the writer with the I/O-rank gate."""
+    import inspect
+
+    from scripts.run import run_omip
+
+    src = inspect.getsource(run_omip.run_omip_single)
+    assert ("io_rank=jax.process_index() == 0,\n"
+            "            multiproc=jax.process_count() > 1)") in src

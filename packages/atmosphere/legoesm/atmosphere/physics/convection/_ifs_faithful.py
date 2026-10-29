@@ -48,9 +48,10 @@ from ._ifs_ascent import ifs_updraught_ascent
 from ._ifs_closure import (
     first_guess_mass_flux, ifs_closure, IFSClosureConfig,
     subcloud_mse_supply,
-    RG, RCPD, RLVTT, ZDQMIN_FRAC, ZDQMIN_ABS_FLOOR, ZDH_DQMIN_SCALE,
+    RG, RCPD, RLVTT, RMFCFL, ZDQMIN_FRAC, ZDQMIN_ABS_FLOOR, ZDH_DQMIN_SCALE,
 )
 from ._ifs_tendencies import ifs_convective_tendencies
+from .bechtold import ifs_subcloud_rain_evaporation
 
 __physics_contract__ = {
     "summary": (
@@ -166,8 +167,12 @@ def ifs_ascent_config(config) -> IFSAscentConfig:
 
 def ifs_closure_config(config) -> IFSClosureConfig:
     """The run's closure parameters: RCAPQADV = cape_qadv_weight (both the
-    unitless IFS 0.8); the IFS source defaults for the rest."""
-    return IFSClosureConfig()._replace(rcapqadv=config.cape_qadv_weight)
+    unitless IFS 0.8), the no-supply shallow mode and its smoothing width by
+    name; the IFS source defaults for the rest."""
+    return IFSClosureConfig()._replace(
+        rcapqadv=config.cape_qadv_weight,
+        shallow_nosupply=config.ifs_shallow_nosupply,
+        shallow_supply_width_w_m2=config.ifs_shallow_supply_width_w_m2)
 
 
 def ifs_test_ascent_config(config) -> IFSTestAscentConfig:
@@ -317,6 +322,47 @@ def ifs_faithful_convection(T, q_v, p_full, p_half, u, v, conv_prog_profile,
     PMFUQ_abs = jnp.where(_below, M_uf * _q_sub,
                           jnp.where(_cloud, M_uf * asc.q_u, PMFUQf))
 
+    # --- 3c. CUFLXN below-cloud rain evaporation (cuflxn.F90:443-500) on the
+    # shared Bechtold leaf, fed this chain's cloud base, KTYPE and saturation.
+    # cuflxn.F90:489 ``PDMFUP(JL,JK)=PDMFUP(JL,JK)+ZDRFL`` puts the
+    # evaporation into PDMFUP at the evaporating level, so CUDTDQN books its
+    # cooling and moistening there.  KNOWN DIFFERENCES vs OpenIFS, measured
+    # on the 60-level deep sounding against the single-column oracle
+    # (scripts/validate/oracle/ifs_cumastrn, compare_subcloud_evap.py):
+    # * detrained precipitation (LMFDSNOW=.TRUE., PSNDE, cuflxn.F90:413-419)
+    #   is not removed from the falling flux first.  In the source's
+    #   no-supply mode (ifs_shallow_nosupply="first_guess") the chain
+    #   evaporates +5.5 % at both evaporating levels vs the oracle default
+    #   (dT -69.6 / -97.8 vs -67.8 / -94.7 K/day; -34.8 / -38.5 before
+    #   this step); with LMFDSNOW=.FALSE. the leaf reproduces the oracle
+    #   to 5e-5, the constants.g vs RG ratio in RCPECONS.
+    #   Ported later with the rest of the precipitation-flux bookkeeping.
+    # * the rain handed to the host is the formed rain times ONE column-wide
+    #   factor (the Bechtold convention, non-negative), not the source's
+    #   per-level signed PDMFUP of :489; surface rain and the T/q tendencies
+    #   are unaffected, only the host's in-column rain-source profile.
+    # * melting (PDPMEL) and the melting-level PQSEN rewrite (:386-400) are
+    #   not ported (no snow reaches these levels on the deep sounding).
+    # * the land RH break blends by land fraction (Bechtold path, gated on
+    #   use_ifs_land_rhebc) where the source switches on LDLAND (:222-226).
+    # * saturation is the model's (qs), not PQSEN: about 0.2 % in evaporation.
+    dp_full = p_half[:, 1:] - p_half[:, :-1]
+    zdp = g / dp_full
+    _below_cb = (clo["ldcum"][:, None]
+                 & (jj >= k_cbot[:, None])).astype(T.dtype)    # JK >= KCBOT
+    _rh = q_v / qs
+    _rh_cb = jnp.take_along_axis(_rh, kb[:, None], axis=1)[:, 0]
+    _rh_ct = jnp.take_along_axis(
+        _rh, jnp.asarray(asc.k_ctop).astype(jnp.int32)[:, None], axis=1)[:, 0]
+    evap_rate, rain_scale, _ = ifs_subcloud_rain_evaporation(
+        q_v, qs, p_half, dp_full, zdp * PDMFUPf, _below_cb, _rh_cb, _rh_ct,
+        (ktype == 1).astype(T.dtype), dt,
+        land_frac=land_frac if config.use_ifs_land_rhebc else None,
+        rhebc_land_val=config.rhebc_land,
+        rhebc_land_deep_val=config.rhebc_land_deep,
+        rmfcfl=RMFCFL)
+    PDMFUPe = PDMFUPf - evap_rate / zdp                        # :489
+
     # --- 4. tendencies.  DECLARED GAP: the downdraught is not part of this
     # chain yet, so M_d = 0, lddraf = False and the PMFD* fluxes are zero.
     zero = jnp.zeros_like(M_uf)
@@ -327,7 +373,7 @@ def ifs_faithful_convection(T, q_v, p_full, p_half, u, v, conv_prog_profile,
         jnp.zeros_like(clo["ldcum"], dtype=bool),   # lddraf
         M_uf, zero,
         PMFUS_abs, zero, PMFUQ_abs, zero,
-        PMFULf, PLUDEf, PDMFUPf,
+        PMFULf, PLUDEf, PDMFUPe,
         dt, IFSTendencyConfig())
 
     # --- 4b. hand the detrained condensate and the generated precipitation
@@ -339,14 +385,13 @@ def ifs_faithful_convection(T, q_v, p_full, p_half, u, v, conv_prog_profile,
     # mass -- the receiving scheme does), and zdp is built exactly as
     # _ifs_tendencies.py builds its own ZDP (cudtdqn.F90:234), so the host
     # source and the cudtdqn sink cannot drift apart.
-    zdp = g / (p_half[:, 1:] - p_half[:, :-1])
     # No clip: PLUDE (detrainment rate x updraught liquid) and PDMFUP
     # (cuascn.F90:787) are products of non-negative factors all the way down
     # this chain, so a negative value here would be a sign bug to surface,
     # not to clip away -- a silent clip at this seam is a water leak in the
     # opposite direction.
     dq_c_conv_dt = zdp * PLUDEf
-    dq_r_conv_dt = zdp * PDMFUPf
+    dq_r_conv_dt = zdp * PDMFUPf * rain_scale      # column-wide debit of the evaporation
 
     out = out_ctor(
         dT_dt=dT_dt,

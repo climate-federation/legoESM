@@ -205,7 +205,8 @@ def capture_physics_teacher_snapshot(
                 dt=dt,
                 config=micro_config,
             )
-            generated_rain_flux = jnp.sum(rates.autoconversion * rho_col * dz_col, axis=1)
+            layer_mass = (p_half_col[:, 1:] - p_half_col[:, :-1]) / constants.g
+            generated_rain_flux = jnp.sum(rates.autoconversion * layer_mass, axis=1)
             rain_survival_fraction = _copy_array(
                 jnp.where(
                     generated_rain_flux > 1.0e-12,

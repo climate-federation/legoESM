@@ -61,7 +61,7 @@ class _Stop(Exception):
     pass
 
 
-def _pipeline_core(monkeypatch, radiation, aer_on):
+def _pipeline_core(monkeypatch, radiation, aer_on, cloud_scheme="sundqvist"):
     from legoesm.atmosphere.physics.radiation.rrtmgp import rrtmgp as rrtmgp_mod
     from legoesm.driver import physics_pipeline as pp
     from legoesm.driver.config import ExperimentConfig
@@ -85,7 +85,7 @@ def _pipeline_core(monkeypatch, radiation, aer_on):
         jnp.full(s3, 270.0), jnp.full(s2, 1.0e5), jnp.full(s3, 3.0e-3),
         jnp.full(s2, 295.0), jnp.zeros(s2), jnp.full(s2, 0.4),
         jnp.zeros(s2), 80.0, 43200.0, jnp.zeros(0), constants.S_0, None, aer,
-        cloud_scheme="sundqvist", q_c=jnp.full(s3, 1.0e-4),
+        cloud_scheme=cloud_scheme, q_c=jnp.full(s3, 1.0e-4),
         N_c=jnp.zeros(s3), u=jnp.zeros(s3), v=jnp.zeros(s3), dt=600.0)
 
 
@@ -105,6 +105,29 @@ def test_pipeline_flags_ccn_number_in_cloud(monkeypatch, radiation, aer_on, want
     with pytest.raises(_Stop):
         _pipeline_core(monkeypatch, radiation, aer_on)
     assert seen["n_cloud_in_cloud"] is want
+
+
+def test_pipeline_cam6_ice_radius_gets_the_runs_mg2_params(monkeypatch):
+    """The coupled pipeline hands the CAM6 ice radius the run's MG2 dcs and
+    ice-slope width (as the MPAS radiation lane does); the CAM6 ice path
+    refuses a call without them."""
+    from legoesm.atmosphere.physics.microphysics.config import (
+        MorrisonConfig, mg2_rel_ice_params,
+    )
+    seen = {}
+
+    def _spy(**kw):
+        seen.update(kw)
+        raise _Stop
+
+    monkeypatch.setattr(cf_mod, "compute_cloud_properties", _spy)
+    with pytest.raises(_Stop):
+        _pipeline_core(monkeypatch, "rrtmgp", True, cloud_scheme="cam6_clubb")
+    assert seen["n_cloud_in_cloud"] is True
+    # the run's leaf: the deck names no dcs / slope width, so the defaults
+    want = mg2_rel_ice_params(MorrisonConfig())
+    assert None not in want
+    assert (seen["mg2_ice_dcs_m"], seen["mg2_ice_slope_log_width"]) == want
 
 
 def test_pipeline_rrtmgp_refuses_ccn_number_without_oracle(monkeypatch):
@@ -139,3 +162,4 @@ def test_pipeline_gray_ccn_run_unaffected(monkeypatch):
     """Gray discards the droplet radius, so the guard never fires there."""
     out = _pipeline_core(monkeypatch, "gray", True)
     assert np.all(np.isfinite(np.asarray(out[0])))
+

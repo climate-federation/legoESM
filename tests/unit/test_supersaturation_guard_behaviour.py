@@ -117,13 +117,15 @@ def _column():
     shape = (1, 4)
     T = jnp.full(shape, _T0, dtype=jnp.float64)
     p_full = jnp.full(shape, _P0, dtype=jnp.float64)
-    p_half = jnp.full((1, 5), _P0, dtype=jnp.float64)
     q_v = _RH0 * saturation_specific_humidity(T, p_full)
     z = jnp.zeros(shape, dtype=jnp.float64)
     hyd = HydrometeorState(q_c=z, q_r=z, q_i=z, q_s=z, q_g=z,
                            N_c=z, N_r=z, N_i=z)
     rho = p_full / (constants.R_d * T)
     dz = jnp.full(shape, 500.0, dtype=jnp.float64)
+    # top-down interfaces around _P0 with dp/g == rho*dz in every layer
+    p_half = _P0 + constants.g * rho[:, :1] * 500.0 * (
+        jnp.arange(5, dtype=jnp.float64) - 2.0)
     return T, q_v, hyd, p_full, p_half, rho, dz
 
 
@@ -456,21 +458,29 @@ _PREGUARD_RTOL = 1.0e-13
 # guard-OFF path must stay byte-identical to these.  Pre-port values (Gaussian-F2,
 # no cloud-cover gate) were dT_dt (0.07790655134982057, 0.0042109453424112216,
 # -2.6370890683278935e-06, 0.00120314759851969, 0.00021895372484426559).
-_SUNDQVIST_PREGUARD_DT_DT = (0.07790655142391562, 0.0042110534620482185, 0.0, 0.0012031476025026462, 0.0002189537248470955)
-_SUNDQVIST_PREGUARD_DQ_V_DT = (-3.129469725010899e-05, -1.6915604758545073e-06, 0.0, -4.83298763445925e-07, -8.795268697736346e-08)
+# 2026-10-27: the fixture is now top-down with real interfaces (Zhao-Carr reads
+# dp/g); re-measured, the same values in top-down order.  Since then these are
+# re-pinned on the current scheme, NOT the pre-guard numbers: the test proves the
+# guard-OFF path is unchanged by the guard, not that results are comparable with
+# runs made before the 2026-10-20 port or the 2026-10-27 default changes.
+_SUNDQVIST_PREGUARD_DT_DT = (0.0002189537248470955, 0.0012031476025026462, 0.0, 0.0042110534620482185, 0.07790655142391562)
+_SUNDQVIST_PREGUARD_DQ_V_DT = (-8.795268697736346e-08, -4.83298763445925e-07, 0.0, -1.6915604758545073e-06, -3.129469725010899e-05)
 
 
 def test_sundqvist_default_matches_the_pre_guard_baseline_bit_for_bit():
-    """Numeric byte-identity against values computed BEFORE the guard existed.
+    """Guard-OFF tripwire: the default path matches pinned numbers.
 
-    The monkeypatch "bomb" tests prove the new code is not INVOKED; this proves
-    the numbers are unchanged, which is the claim that actually protects every
-    tuned parameter set and prior comparison. Arrays are compared, never
-    printed summaries (CLAUDE.md)."""
-    T = jnp.array([[300.0, 285.0, 260.0, 230.0, 205.0]], dtype=jnp.float64)
-    p = jnp.array([[95000.0, 85000.0, 60000.0, 35000.0, 15000.0]],
+    The pins were first measured BEFORE the guard existed and have since been
+    re-pinned on the current scheme (2026-10-20 port, 2026-10-27 top-down
+    fixture and defaults), so this proves the guard does not leak into the
+    guard-OFF path; it does NOT prove results are comparable with runs made
+    before those re-pins.  The monkeypatch "bomb" tests prove the new code is
+    not INVOKED.  Arrays are compared, never printed summaries (CLAUDE.md)."""
+    # top-down (level 0 = model top), the scheme's convention
+    T = jnp.array([[205.0, 230.0, 260.0, 285.0, 300.0]], dtype=jnp.float64)
+    p = jnp.array([[15000.0, 35000.0, 60000.0, 85000.0, 95000.0]],
                   dtype=jnp.float64)
-    rh = jnp.array([[1.40, 1.05, 0.90, 1.60, 2.00]], dtype=jnp.float64)
+    rh = jnp.array([[2.00, 1.60, 0.90, 1.05, 1.40]], dtype=jnp.float64)
     q_v = rh * saturation_specific_humidity(T, p)
     shape = T.shape
     z = jnp.zeros(shape, dtype=jnp.float64)
@@ -480,7 +490,10 @@ def test_sundqvist_default_matches_the_pre_guard_baseline_bit_for_bit():
         q_i=z, q_s=z, q_g=z, N_c=z, N_r=z, N_i=z)
     rho = p / (constants.R_d * T)
     dz = jnp.full(shape, 400.0, dtype=jnp.float64)
-    p_half = jnp.concatenate([p, p[:, -1:]], axis=1)
+    # interfaces at the level midpoints, end layers mirrored (positive dp/g)
+    mid = 0.5 * (p[:, 1:] + p[:, :-1])
+    p_half = jnp.concatenate([2.0 * p[:, :1] - mid[:, :1], mid,
+                              2.0 * p[:, -1:] - mid[:, -1:]], axis=1)
 
     out = sundqvist_microphysics(T, q_v, hyd, p, p_half, rho, dz, 300.0,
                                  SundqvistConfig())

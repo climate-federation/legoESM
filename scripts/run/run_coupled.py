@@ -780,7 +780,9 @@ def build_parser():
                              "Arctic/strong-stable forms; "
                              "'beljaars_holtslag1991' avoids the stable flux "
                              "collapse of -5*zeta. Unstable branch stays "
-                             "Businger-Dyer (Fairall blend on coare3).")
+                             "Businger-Dyer (Fairall blend on coare3; heat "
+                             "scaled by Pr0 = 0.98 for gryanik2020 on "
+                             "most/large_yeager, as in SurfaceFluxes.jl).")
     # `choices=` cannot express the '+'-joined composites validate_strict
     # accepts (#834), so this list silently made them unreachable here while
     # run_amip allowed them. The shared validator restores composites AND keeps
@@ -1195,6 +1197,31 @@ def build_parser():
         "--cmip-resolution-deg", type=float, default=5.0,
         help="Lat-lon grid spacing for CMIP output [deg] (default: 5.0)",
     )
+    # CMOR writer identity / layout: same OutputConfig fields and flags as
+    # run_amip, defaults read from OutputConfig itself.
+    from legoesm.driver.config import OutputConfig as _OutputDefaults
+    _out0 = _OutputDefaults()
+    parser.add_argument(
+        "--cmip-drs-tree", action=argparse.BooleanOptionalAction,
+        default=_out0.cmip_drs_tree,
+        help="Write CMOR files into the ESGF DRS directory tree instead of "
+             f"<output>/cmor/<table>/ (default: {_out0.cmip_drs_tree})",
+    )
+    parser.add_argument(
+        "--cmip-institution-id", type=str, default=_out0.cmip_institution_id,
+        help="CMIP6 institution_id of the CMOR files (must be registered in "
+             f"the CMIP6 CV to publish; default: {_out0.cmip_institution_id!r})",
+    )
+    parser.add_argument(
+        "--cmip-source-id", type=str, default=_out0.cmip_source_id,
+        help="CMIP6 source_id of the CMOR files (must be registered in the "
+             f"CMIP6 CV to publish; default: {_out0.cmip_source_id!r})",
+    )
+    parser.add_argument(
+        "--cmip-variant-label", type=str, default=_out0.cmip_variant_label,
+        help="CMIP6 variant_label r<k>i<l>p<m>f<n> of the CMOR files "
+             f"(default: {_out0.cmip_variant_label!r})",
+    )
 
     # Devices
     parser.add_argument(
@@ -1288,6 +1315,16 @@ def require_forcing_files(args) -> None:
         raise SystemExit("--ghg-file is required with --ghg-forcing external")
     if args.aerosol_forcing == "external" and not args.aerosol_file:
         raise SystemExit("--aerosol-file is required with --aerosol-forcing external")
+
+
+def cmip_writer_output_kwargs(args) -> dict:
+    """OutputConfig CMOR-writer fields from the parsed --cmip-* flags."""
+    return dict(
+        cmip_drs_tree=args.cmip_drs_tree,
+        cmip_institution_id=args.cmip_institution_id,
+        cmip_source_id=args.cmip_source_id,
+        cmip_variant_label=args.cmip_variant_label,
+    )
 
 
 def main(argv=None, *, build_only=False):
@@ -1456,6 +1493,7 @@ def main(argv=None, *, build_only=False):
             diag_days=args.diag_days,
             cmip_output=args.cmip_output,
             cmip_resolution_deg=args.cmip_resolution_deg,
+            **cmip_writer_output_kwargs(args),
             # Periodic checkpoint cadence (days) + a wallclock budget that
             # triggers a clean checkpoint+exit before SLURM kills the job — both
             # needed so a long dynamic-3D-ocean equilibration survives an abrupt

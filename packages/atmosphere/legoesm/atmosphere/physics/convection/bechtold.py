@@ -1193,7 +1193,7 @@ def _ifs_inplume_precip_conversion(
     return L_new, precip_frac
 
 
-def _ifs_subcloud_rain_evaporation(
+def ifs_subcloud_rain_evaporation(
     q_v: jax.Array,
     q_sat_env: jax.Array,
     p_half: jax.Array,
@@ -1211,6 +1211,7 @@ def _ifs_subcloud_rain_evaporation(
     evap_scale: float = 1.0,
     rhebc_land_val: float = _IFS_RHEBC_LAND,
     rhebc_land_deep_val: float = _IFS_RHEBC_LAND_DEEP,
+    rmfcfl: float = 1.0,
 ) -> tuple[jax.Array, jax.Array, jax.Array]:
     r"""IFS Kessler sub-cloud evaporation of convective rain (cuflxn.F90:436-475).
 
@@ -1243,6 +1244,9 @@ def _ifs_subcloud_rain_evaporation(
       applies the evap tendency EXPLICITLY (``subsidence_solve`` affects
       only the mass-flux kernel, not this coupling), so ``RMFCFL = 1`` is
       the value that cannot overshoot the break within a step (codex R1 #3).
+      ``rmfcfl`` sets this factor; the default 1 is the Bechtold path, the
+      faithful IFS chain passes the source's 3 (its tendencies are the
+      implicit cudtdqn port).
     * The rain SOURCE profile feeding the flux is the scheme's post-split
       ``dq_r_conv_dt`` (rain forms in the cloud layer and accumulates
       downward; a layer's own source joins the flux BELOW it —
@@ -1329,7 +1333,7 @@ def _ifs_subcloud_rain_evaporation(
                  + (1.0 - land_frac) * rhebc_ocean).astype(_dtype)
     else:
         rhebc = rhebc_ocean.astype(_dtype)                     # (ncol,)
-    zcons2 = 1.0 / (g * dt)                                    # RMFCFL=1 branch
+    zcons2 = rmfcfl / (g * dt)                                 # ZCONS2, cuflxn.F90:209
 
     src_flux = jnp.maximum(dq_r_conv_dt, 0.0) * dp_full / g    # (ncol, nlev)
     sqrt_p = jnp.sqrt(p_half[:, :-1] / p_half[:, -1:])         # layer-top / sfc
@@ -2139,6 +2143,11 @@ def bechtold_convection(
         Pressure vertical velocity [Pa/s] (``PVERVEL``) for the RCAPQADV
         resolved-ascent gate at ~500 hPa.  ``None`` disables only that
         OR-branch (faithful where ``|omega| << 100 Pa/s``).
+    shf_w_m2, lhf_w_m2 : jax.Array or None, shape (ncol,)
+        Surface sensible / latent heat flux [W/m2], POSITIVE UPWARD (into
+        the atmosphere), the convention of the surface layer that produces
+        them.  The faithful IFS chain negates them at its entry into the
+        IFS PAHFS/PQHFL convention (positive downward).
 
     Returns
     -------
@@ -2156,10 +2165,16 @@ def bechtold_convection(
         from legoesm.atmosphere.physics.convection._ifs_faithful import (
             ifs_faithful_convection,
         )
+        if shf_w_m2 is None or lhf_w_m2 is None:
+            raise ValueError(
+                "use_ifs_ascent needs the surface heat fluxes shf_w_m2 and "
+                "lhf_w_m2 (the IFS trigger reads PAHFS/PQHFL).")
         out, M_u_new = ifs_faithful_convection(
             T, q_v, p_full, p_half, u, v, conv_prog_profile,
             conv_stoch_state, prng_key, dt, config,
-            shf_w_m2=shf_w_m2, lhf_w_m2=lhf_w_m2, land_frac=land_frac,
+            # positive-upward model fluxes -> IFS PAHFS/PQHFL sign (positive
+            # downward, cubasen.F90:341 ZKHVFL=(PAHFS*ZRCPD+RETV*PTEN*PQHFL)/...)
+            shf_w_m2=-shf_w_m2, lhf_w_m2=-lhf_w_m2, land_frac=land_frac,
             dT_dt_adv=dT_dt_dyn, dq_dt_adv=dq_dt_dyn,
             # PTENT/PTENQ: cumastrn's TOTAL model tendency, which in IFS holds
             # dynamics + radiation + vertical diffusion accumulated before the
@@ -3143,7 +3158,7 @@ def bechtold_convection(
         _rh_base = _ifs_cloud_base_qsat(_rh_evap, k_lcl_smooth, levels_arr)[:, 0]
         _rh_top = _ifs_cloud_base_qsat(_rh_evap, k_lnb_smooth, levels_arr)[:, 0]
         evap_rate_ifs, rain_scale_ifs, melt_rate_ifs = (
-            _ifs_subcloud_rain_evaporation(
+            ifs_subcloud_rain_evaporation(
                 q_v, _q_sat_evap, p_half, dp_full, dq_r_conv_dt,
                 _below_lcl_evap, _rh_base, _rh_top, deep_weight, dt,
                 land_frac=(land_frac if config.use_ifs_land_rhebc else None),

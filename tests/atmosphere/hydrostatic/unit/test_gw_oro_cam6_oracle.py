@@ -31,6 +31,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
+from jax.test_util import check_grads
 
 from legoesm.atmosphere.physics.gravity_wave_drag.config import McFarlaneConfig
 from legoesm.atmosphere.physics.gravity_wave_drag.mcfarlane import mcfarlane_gwd
@@ -167,3 +168,81 @@ def test_effgw_oro_is_read(fx):
     assert np.abs(np.asarray(base.du_dt)).max() > 0.0
     assert not np.allclose(np.asarray(dbl.du_dt), np.asarray(base.du_dt),
                            rtol=1e-3, atol=0.0)
+
+
+# Per-column gap of the production smoothing (McFarlaneConfig() defaults:
+# softmin_sharpness=50 (p-norm), min_wind_sharpness=20, crit_level_sharpness /
+# crit_level_floor defaults) vs the CAM6 oracle, metric = per-column
+# max|ours - oracle| / max|oracle| (absolute where the oracle column is zero).
+# Measured 2026-10-29 when the smooth min became the p-norm (#2241; was the
+# not-C1 sigmoid blend); a change to the smooth form or its default widths
+# re-measures these (CLAUDE.md RULE 5).
+_DEFAULT_GAP = {
+    "du_dt": [0.005859040034893811, 6.472889827836152e-08, 3.4061152711683333e-07, 4.3204513047210216e-17, 8.746006123670688e-08, 0.0, 1.7624749877984122e-12, 0.0, 3.9375029599815744e-05, 9.49897006228089e-09, 0.0035221403110434184, 0.028638863439120362, 0.0014128529417248372, 0.006028398688773056],
+    "dv_dt": [0.0058590400348939725, 6.472889832271714e-08, 3.4061152711164494e-07, 1.7858574851330124e-16, 8.746006120341078e-08, 0.0, 6.417260889483866e-13, 0.0, 3.937502959984183e-05, 0.0, 0.0035221403110434627, 0.028638863439120338, 0.00141285294172484, 0.0060283986887730776],
+    "dT_dt": [0.009321124470501766, 1.3582883901485324e-07, 1.1650960963797554e-07, 2.2454514043272096e-09, 1.1613159687254673e-07, 0.0, 4.446515471276407e-15, 0.0, 3.84647821312094e-05, 1.4866842787362648e-08, 0.004234812123315956, 0.026811860105715277, 0.0014107509469490007, 0.009777855450530558],
+    "dq_v_dt": [0.0008319519855585455, 1.4664196005087715e-07, 1.0431723648327666e-07, 5.051315779127953e-11, 5.919641014073965e-09, 0.0, 2.1587669923266932e-19, 0.0, 1.2754865724296474e-06, 1.976997972882354e-08, 1.6988157670128806e-10, 3.228541565997711e-05, 0.0014109857194621717, 9.995812882304257e-05],
+}
+# Column 3 (Antarctic): its dT/dq entries are the oracle's eddy-diffusion
+# round-off floor (identical at the hard limit), so they are bounded, not
+# pinned (codex + GLM, 2026-10-29).
+_ROUNDOFF_FLOOR_COLS = {"dT_dt": (3,), "dq_v_dt": (3,)}
+_ROUNDOFF_BOUND = 1.0e-8
+
+
+def _per_column_err(ours, oracle):
+    diff = np.abs(np.asarray(ours) - oracle).max(axis=-1)
+    scale = np.abs(oracle).max(axis=-1)
+    return np.where(scale > 0, diff / np.where(scale > 0, scale, 1.0), diff)
+
+
+def test_default_smoothing_gap_per_column(fx):
+    """Production smoothing departs from the CAM6 oracle by the recorded per-column gap."""
+    out = _run(fx, McFarlaneConfig())
+    got_all = {
+        "du_dt": _per_column_err(out.du_dt, fx["oracle_utgw"]),
+        "dv_dt": _per_column_err(out.dv_dt, fx["oracle_vtgw"]),
+        "dT_dt": _per_column_err(out.dT_dt, fx["oracle_ttgw"]),
+        "dq_v_dt": _per_column_err(out.dq_dt["q_v"], fx["oracle_qtgw1"]),
+    }
+    for k, got in got_all.items():
+        want = np.asarray(_DEFAULT_GAP[k])
+        floor = list(_ROUNDOFF_FLOOR_COLS.get(k, ()))
+        keep = np.setdiff1d(np.arange(want.size), floor)
+        np.testing.assert_allclose(got[keep], want[keep], rtol=1e-6, atol=1e-12, err_msg=k)
+        assert np.all(got[floor] <= _ROUNDOFF_BOUND), (k, got[floor])
+
+
+# (column, s*) points where the HARD-limit tendency has a derivative jump in
+# the wind scale s (u, v of that column times s) that the default smoothing
+# removes.  Found 2026-10-29 by scanning s in [0.8, 1.2] (step 5e-4) and
+# bisecting each jump; check_grads FAILS at every point at the hard limit
+# and, measured with mutated copies, with the former sigmoid-blend smooth
+# min at its default (non-vacuity of the p-norm form).
+_KINKS = ((8, 0.8726731705528938), (13, 0.8381197667884639),
+          (0, 1.0223618009933202), (4, 1.175774103074568))
+
+
+@pytest.mark.parametrize("col,s_star", _KINKS)
+def test_check_grads_through_the_smoothing_at_default(fx, col, s_star):
+    """RULE 5 gradient test: finite, non-zero derivative through a switch the
+    default smoothing removes.  Reverse mode only: the eddy-diffusion
+    tridiagonal solve is a custom_vjp (no jvp).  eps = 1e-5 as in Lindzen."""
+    cfg = McFarlaneConfig()
+    keys = ("u", "v", "T", "p_full", "p_half", "z_full", "z_half", "rho", "lat",
+            "sgh", "lf", "q", "p_ref_half")
+    f1 = {k: jnp.asarray(fx[k][col:col + 1]) if k != "p_ref_half" else jnp.asarray(fx[k])
+          for k in keys}
+
+    def f(s):
+        out = mcfarlane_gwd(
+            f1["u"] * s, f1["v"] * s, f1["T"], f1["p_full"], f1["p_half"], f1["z_full"],
+            f1["z_half"], f1["rho"], f1["lat"], float(fx["dt"]), cfg,
+            h_topo_col=f1["sgh"], p_ref_half=f1["p_ref_half"],
+            land_frac_col=f1["lf"], tracers={"q_v": f1["q"]})
+        return jnp.sum(out.du_dt) + jnp.sum(out.dv_dt) + jnp.sum(out.dT_dt)
+
+    f = jax.jit(f)
+    s0 = jnp.asarray(s_star)
+    check_grads(f, (s0,), order=2, modes=("rev",), eps=1e-5)
+    assert float(jax.grad(f)(s0)) != 0.0

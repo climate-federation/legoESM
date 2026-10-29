@@ -559,15 +559,10 @@ def _isothermal_column(ncol=2, nlev=10):
 class TestGWDADSafety:
 
     def test_lindzen_tau_sat_floor_preserves_breaking(self):
-        """Forward-physics regression: when ``tau_sat`` saturates at its
-        ``1e-10`` pre-clip floor and ``tau_carry`` is well above the
-        floor, the smooth-breaking sigmoid must still fire.  The first
-        AD-fix iteration used ``safe_divide(eps=1e-10)`` with the
-        default ``fill=0.0``, which silently zeroed ``excess`` in
-        floor-clipped cells and disabled breaking — a forward-physics
-        change Codex flagged in adversarial review of issue #249.  The
-        production fix tightens ``eps`` to ``1e-12`` (strictly below
-        the pre-clip floor) so the divide always proceeds.
+        """Near-calm column (0.05 m/s).  The former surrogate floored |U| at
+        0.1 m/s and still broke the wave here; the E3SM v3.0.1 port launches
+        nothing below the orovmin = 2 m/s source-wind gate (gw_oro.F90:165),
+        so the outputs must be finite and exactly zero, with a finite gradient.
         """
         ncol, nlev = 2, 6
         u = jnp.full((ncol, nlev), 0.05)  # below the 0.1 m/s |U_proj| floor
@@ -588,17 +583,15 @@ class TestGWDADSafety:
         out = lindzen_gwd(
             u, v, T, p_full, p_half, z_full, z_half, rho, lat, 300.0, cfg,
         )
-        # If the safe_divide fill kicks in at the floor, ``excess =
-        # - 1`` (the pinned threshold) and the breaking sigmoid clamps to ≈0, so
-        # column dissipation collapses to zero.  Production behaviour
-        # (and the legacy clip+divide) launches a finite tau_0 that
-        # saturates against the tau_sat floor and dissipates.
         assert jnp.all(jnp.isfinite(out.eps_gwd))
-        assert jnp.any(jnp.abs(out.eps_gwd) > 0.0), (
-            "Lindzen breaking did not fire at the tau_sat floor — "
-            "safe_divide eps choice is masking out the floor branch "
-            "(issue #249 codex follow-up)"
-        )
+        assert jnp.all(out.eps_gwd == 0.0)
+        assert jnp.all(out.du_dt == 0.0) and jnp.all(out.dT_dt == 0.0)
+
+        def loss(uu):
+            o = lindzen_gwd(uu, v, T, p_full, p_half, z_full, z_half, rho,
+                            lat, 300.0, cfg)
+            return jnp.sum(o.du_dt ** 2) + jnp.sum(o.dT_dt ** 2)
+        assert jnp.all(jnp.isfinite(jax.grad(loss)(u)))
 
     def test_lindzen_grad_finite_in_neutral_column(self):
         u, v, T, p_full, p_half, z_full, z_half, rho, lat = _isothermal_column()

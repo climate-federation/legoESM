@@ -317,10 +317,17 @@ def _hb_lane_config(stability_scheme):
     )
 
 
-def _hb_shflx(stability_scheme):
+# Surface 5 K below the lowest air level: stable, but not so stable that
+# AeroBulk's Cx_min = 1e-4 floor binds for every stability scheme (it does
+# for T_sfc <= 285 K on this column, where all schemes give the same flux).
+_HB_T_SFC = 295.0
+
+
+def _hb_shflx(stability_scheme, t_sfc=_HB_T_SFC):
     """Sensible flux from the EXACT lane chain: resolver -> dispatched HB
     kernel -> its internal compute_surface_fluxes, on a strongly stable
-    synthetic column (+80 K surface inversion, 10 m/s wind)."""
+    synthetic column (+5 K surface inversion, 10 m/s wind; the original +80 K
+    column sits on coare3's Cx_min floor since the AeroBulk port)."""
     from legoesm.atmosphere.physics.turbulence.holtslag_boville import (
         holtslag_boville_turbulence,
     )
@@ -358,7 +365,7 @@ def _hb_shflx(stability_scheme):
     out = turb_fn(
         u=10.0 * ones, v=0.0 * ones, T=T, q_v=0.002 * ones,
         p_full=p_full, p_half=p_half, z_full=z_full, z_half=z_half,
-        T_sfc=jnp.full((ncol,), 220.0), q_sfc=jnp.full((ncol,), 3e-4),
+        T_sfc=jnp.full((ncol,), t_sfc), q_sfc=jnp.full((ncol,), 3e-4),
         rho=rho, dt=600.0, config=sub,
     )
     return np.asarray(out.shflx)

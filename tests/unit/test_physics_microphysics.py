@@ -10,6 +10,7 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 import pytest
+import numpy as np
 
 from legoesm import constants
 from legoesm.atmosphere.physics.microphysics.kessler import kessler_microphysics
@@ -26,6 +27,57 @@ from legoesm.atmosphere.physics.microphysics.output import (
     HydrometeorState,
 )
 from legoesm.thermo import saturation_specific_humidity
+
+
+def test_sundqvist_water_closes_on_dp_over_g_not_rho_dz():
+    """Tier-2 decision R9/C12: the layer mass is the oracle's del/g = dp/g, so
+    the column water budget closes in the pressure coordinate even when the
+    caller's rho*dz disagrees with dp/g (here rho is 20% off)."""
+    T, q_v, hydro, p_full, p_half, rho, dz = _make_column(T_sfc=290.0, q_c_val=1e-3)
+    q_v = saturation_specific_humidity(T, p_full)
+    hydro = hydro._replace(q_r=jnp.zeros_like(hydro.q_r).at[..., 8:12].set(5e-4))
+    out = sundqvist_microphysics(
+        T, q_v, hydro, p_full, p_half, 1.2 * rho, dz, 300.0, SundqvistConfig())
+    dp = p_half[:, 1:] - p_half[:, :-1]
+    tend = jnp.sum((out.dq_v_dt + out.dq_c_dt + out.dq_r_dt) * dp, axis=1) / constants.g
+    imbalance = float(jnp.max(jnp.abs(tend + out.precipitation)))
+    assert float(jnp.max(out.precipitation)) > 0.0
+    assert imbalance < 1e-12 * max(float(jnp.max(out.precipitation)), 1.0), imbalance
+
+
+def test_sundqvist_precpd_runs_on_pre_condensation_state():
+    """R17 (precpd on the post-condensation state, the oracle's gscond ->
+    precpd order) is deferred to the gscond port (user 2026-10-27): with the
+    condensation surrogate's overshoot the post-condensation column is below
+    rh_crit and precpd re-evaporates its own production.  Until then precpd
+    sees the pre-step T and q_v, and condensation adds on top."""
+    from legoesm.atmosphere.physics.microphysics.sundqvist import (
+        diagnose_sundqvist_process_rates, zhao_carr_precpd)
+    T, q_v, hydro, p_full, p_half, rho, dz = _make_column(
+        T_sfc=290.0, q_c_val=1e-3, supersaturated=True)
+    cfg = SundqvistConfig()
+    dt = 300.0
+    cond = diagnose_sundqvist_process_rates(
+        T, q_v, hydro, p_full, p_half, rho, dz, dt, cfg).condensation
+    assert float(jnp.max(cond)) > 0.0
+    zc = zhao_carr_precpd(
+        T, q_v, hydro.q_c + cond * dt, p_full,
+        (p_half[:, 1:] - p_half[:, :-1]) / constants.g, dt, cfg)
+    out = sundqvist_microphysics(T, q_v, hydro, p_full, p_half, rho, dz, dt, cfg)
+    np.testing.assert_allclose(
+        np.asarray(T + out.dT_dt * dt),
+        np.asarray(zc.T + constants.L_v * cond * dt / constants.c_pd),
+        rtol=1e-13, atol=0.0)
+    np.testing.assert_allclose(np.asarray(q_v + out.dq_v_dt * dt),
+                               np.asarray(zc.q_v - cond * dt),
+                               rtol=1e-12, atol=1e-18)
+
+
+def test_sundqvist_release_constants_default_to_the_oracle():
+    """Tier-2 decisions R13/R14: zhaocarr_precpd hard-codes c2 = 0.5 and
+    m_r = 3e-4; the config defaults are those values."""
+    assert SundqvistConfig().bergeron_enh_coeff == 0.5
+    assert SundqvistConfig().qc_crit == 3.0e-4
 
 
 # ---------------------------------------------------------------------------

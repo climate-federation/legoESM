@@ -68,7 +68,8 @@ def _inputs(fx, g, dtype=jnp.float64, hard=True):
     if hard:  # gSAM's own hard switches (RULE 5 hard limit)
         cfg = cfg._replace(gsam_satadj_excess_sharpness=math.inf,
                            gsam_satadj_qc_floor_sharpness=math.inf,
-                           gsam_satadj_p_min_width_pa=0.0)
+                           gsam_satadj_p_min_width_pa=0.0,
+                           sb2001_autoconv_ramp_top=0.0)
     return (flip("T"), flip("q_v"), hyd, flip("p_full"),
             jnp.asarray(fx[f"{g}_p_half"][:, ::-1], dtype=dtype), rho,
             flip("dz"), float(fx[f"{g}_dt"]), cfg)
@@ -214,3 +215,83 @@ def test_fields_without_gsam_counterpart_raise(field, value):
     *args, cfg = _inputs(fx, "warm15")
     with pytest.raises(ValueError, match="no counterpart"):
         seifert_beheng_microphysics(*args, cfg._replace(**{field: value}))
+
+
+def test_warm_rain_sedimentation_has_no_dz_floor(monkeypatch):
+    """gSAM floors nothing: all three warm-rain sedimentation calls (rain mass,
+    rain number, cloud) run without the shared MG2 machinery's 1 m dz floor
+    (tier-2 warm-rain #2, user 2026-10-27).  The shared default keeps it."""
+    from legoesm.atmosphere.physics.microphysics import _warm_rain, output
+    seen = []
+
+    def spy(*a, **k):
+        seen.append(k.get("dz_floor", True))
+        return output.sedimentation_tendency(*a, **k)
+
+    monkeypatch.setattr(_warm_rain, "sedimentation_tendency", spy)
+    _run(_fx(), "warm15")
+    assert seen == [False, False, False]
+
+
+def test_unfloored_divergence_is_exact_below_one_metre():
+    """A 0.5 m layer divides by 0.5 m without the floor and by 1 m with it."""
+    from legoesm.atmosphere.physics.microphysics.output import sedimentation_tendency
+    q = jnp.array([[1.0e-3, 5.0e-4, 0.0]])
+    rho = jnp.array([[0.9, 1.0, 1.1]])
+    V = jnp.array([[2.0, 3.0, 4.0]])
+    dz = jnp.array([[200.0, 0.5, 300.0]])
+    flux = V * q * rho
+    flux_in = jnp.pad(flux[:, :-1], ((0, 0), (1, 0)))
+    exact = (flux_in - flux) / (rho * dz)
+    off = sedimentation_tendency(q, rho, V, dz, dz_floor=False)
+    on = sedimentation_tendency(q, rho, V, dz)
+    np.testing.assert_allclose(np.asarray(off), np.asarray(exact), rtol=1e-14)
+    assert float(off[0, 1]) == pytest.approx(2.0 * float(on[0, 1]), rel=1e-14)
+    np.testing.assert_array_equal(np.asarray(off[:, ::2]), np.asarray(on[:, ::2]))
+
+
+def test_unfloored_sedimentation_gradients():
+    """Reverse and forward gradients through the unfloored divergence (q, dz)."""
+    from jax.test_util import check_grads
+    from legoesm.atmosphere.physics.microphysics.output import sedimentation_tendency
+    rho = jnp.array([[0.9, 1.0, 1.1]])
+    V = jnp.array([[2.0, 3.0, 4.0]])
+
+    def f(q, dz):
+        return sedimentation_tendency(q, rho, V, dz, dz_floor=False)
+
+    check_grads(f, (jnp.array([[1.0e-3, 5.0e-4, 2.0e-4]]),
+                    jnp.array([[200.0, 0.5, 300.0]])), order=2)
+
+
+def test_unfloored_substepped_path_uses_raw_dz():
+    """The CFL sub-stepped loop (the path the warm-rain step runs) also drops
+    the floor: its sub-step count and its divergence see the 0.5 m layer."""
+    from legoesm.atmosphere.physics.microphysics.output import sedimentation_tendency
+    q = jnp.array([[1.0e-3, 5.0e-4, 0.0]])
+    rho = jnp.array([[0.9, 1.0, 1.1]])
+    V = jnp.array([[2.0, 3.0, 4.0]])
+    dz = jnp.array([[200.0, 0.5, 300.0]])
+    dt = 1.0
+    kw = dict(dt=dt, n_substeps_max=64, return_substeps=True)
+    off, n_off = sedimentation_tendency(q, rho, V, dz, dz_floor=False, **kw)
+    on, n_on = sedimentation_tendency(q, rho, V, dz, **kw)
+    assert int(n_off[0]) == 1 + int(3.0 * dt / 0.5)   # 7: raw 0.5 m layer
+    assert int(n_on[0]) == 1 + int(3.0 * dt / 1.0)    # 4: floored to 1 m
+    assert not np.allclose(np.asarray(off), np.asarray(on), rtol=1e-6, atol=0.0)
+
+
+def test_unfloored_substepped_divergence_uses_raw_dz():
+    """Same sub-step count on both sides (both capped at 2), so only the
+    loop's flux divergence can tell the floored and unfloored paths apart."""
+    from legoesm.atmosphere.physics.microphysics.output import sedimentation_tendency
+    q = jnp.array([[1.0e-3, 5.0e-4, 0.0]])
+    rho = jnp.array([[0.9, 1.0, 1.1]])
+    V = jnp.array([[2.0, 3.0, 4.0]])
+    dz = jnp.array([[200.0, 0.5, 300.0]])
+    kw = dict(dt=1.0, n_substeps_max=2, return_substeps=True)
+    off, n_off = sedimentation_tendency(q, rho, V, dz, dz_floor=False, **kw)
+    on, n_on = sedimentation_tendency(q, rho, V, dz, **kw)
+    assert int(n_off[0]) > 2 and int(n_on[0]) > 2     # both clipped to 2 passes
+    assert not np.allclose(np.asarray(off[0, 1]), np.asarray(on[0, 1]),
+                           rtol=1e-6, atol=0.0)

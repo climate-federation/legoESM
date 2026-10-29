@@ -40,6 +40,7 @@ from legoesm.atmosphere.physics.microphysics.config import SeifertBehengConfig
 
 
 jax.config.update("jax_enable_x64", True)
+_RAMP_TOP = SeifertBehengConfig._field_defaults["sb2001_autoconv_ramp_top"]
 
 
 # --- Independent numpy transcriptions of the gSAM IRAIN=1 oracle ---------------
@@ -109,7 +110,7 @@ def test_simplified_autoconv_is_a_departure_qc_squared_not_qc_fourth():
         # Hold tau fixed at 0.2 (q_r = 0.25·q_c) ⇒ only the q_c^4 factor varies.
         dq, _, _ = autoconversion_sb2001(
             jnp.array(q_c), jnp.array(0.25 * q_c),
-            jnp.array(N_c_faithful), jnp.array(rho))
+            jnp.array(N_c_faithful), jnp.array(rho), ramp_top=_RAMP_TOP)
         return float(dq)
 
     def simplified(q_c):
@@ -190,10 +191,12 @@ def test_sb2001_warm_rain_ad_safe_at_zero():
     the tau=0/1 boundaries (safe_pow + floored denominators)."""
     N_c, rho = jnp.array(1.0e8), jnp.array(1.1)
     g_au_qc = jax.grad(
-        lambda q: autoconversion_sb2001(q, jnp.array(1.0e-4), N_c, rho)[0]
+        lambda q: autoconversion_sb2001(q, jnp.array(1.0e-4), N_c, rho,
+                                        ramp_top=_RAMP_TOP)[0]
     )(jnp.array(0.0))
     g_au_qr = jax.grad(
-        lambda q: autoconversion_sb2001(jnp.array(5.0e-4), q, N_c, rho)[0]
+        lambda q: autoconversion_sb2001(jnp.array(5.0e-4), q, N_c, rho,
+                                        ramp_top=_RAMP_TOP)[0]
     )(jnp.array(0.0))
     g_ac_qc = jax.grad(
         lambda q: accretion_sb2001(q, jnp.array(1.0e-4), rho)

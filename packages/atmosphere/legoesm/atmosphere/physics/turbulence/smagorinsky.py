@@ -60,6 +60,22 @@ DEPARTURES / RE-TUNED (vs the published papers):
     AD-safety sense — the forward is continuous but NON-C¹ at the cutoff (the on-side
     √ slope diverges); a bare ``√(max(·,0))`` would instead leak a 0·∞ NaN.
 Behavior/assembly pins: ``tests/atmosphere/hydrostatic/unit/test_smagorinsky_faithful.py``.
+
+Running-oracle comparison (tier-2 oracle audit, les_sgs_closures, 2026-10-19)
+-------------------------------------------------------------------------------
+The audit fed legoESM's own ``S²`` and ``N²`` to two running kernels (fp64):
+microhh received the length ``C_s·l``, SAM received ``l`` and ``C_s`` separately.  The algebra matches; only the floors differ, and those
+departures are KEPT here pending a user decision (NOT faithful to either kernel):
+  * ``stability_form="lilly"`` vs microhh 2.0.2 (736a2f5e) ``diff_smag2.cxx``
+    ``calc_evisc``: microhh adds ``dsmall = 1e-9`` to ``2 S_ij S_ij``
+    (``include/diff_kernels.h:140``) where this module adds 1e-10, and clamps
+    ``Ri/Pr_t`` at ``1 − 1e-9`` instead of cutting ``K_m`` to exactly 0 at
+    ``Ri ≥ Pr_t``.  Measured: up to 2.0e-4 / 5.2e-4 m²/s (CBL, default /
+    LES-tuned config), 7.7e-3 / 2.6e-2 m²/s at near-zero-shear levels (ratio
+    √0.1), 7.3e-5 / 1.9e-4 m²/s in stable levels (ours 0, microhh its √1e-9
+    residual).  With both microhh floors applied the result is bitwise.
+  * ``stability_form="deardorff"``: see
+    :func:`legoesm.atmosphere.physics._shared.deardorff_stable_eddy_viscosity`.
 """
 
 from __future__ import annotations
