@@ -1458,8 +1458,9 @@ def admit_s4_year_single_arm(
     *,
     build_cfg: Path = DEFAULT_BUILD_CFG,
     expected_steps: int = YEAR_STEPS,
+    day1_reference_run: Path | None = R340_RUN_A,
 ) -> dict[str, Any]:
-    """Verify and admit a single completed 2,920-step K0 arm (e.g., kept Arm A) without modifying any file inside `run_dir`."""
+    """Verify one completed K0 arm, optionally against the unperturbed Day-1 reference."""
     require(expected_steps >= DAILY_STOCK_STRIDE and expected_steps % DAILY_STOCK_STRIDE == 0,
             f"invalid expected_steps: {expected_steps}")
     ppsrc_dir = _ppsrc_dir(build_cfg)
@@ -1501,7 +1502,11 @@ def admit_s4_year_single_arm(
             if kt == expected_steps:
                 last_day_summary[f"rank_{rank:04d}"] = res
 
-    day1_vs_r340 = verify_day1_against_admitted_s4_kt9(run_dir, R340_RUN_A)
+    day1_vs_r340 = (
+        verify_day1_against_admitted_s4_kt9(run_dir, day1_reference_run)
+        if day1_reference_run is not None
+        else None
+    )
     return {
         "status": "PASS_R342_S4_YEAR_SINGLE_ARM",
         "admitted": True,
