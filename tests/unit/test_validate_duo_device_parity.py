@@ -75,7 +75,7 @@ def test_gaps_inside_their_bounds_pass(tmp_path, capsys):
     "dry_column_above_measured", "dry_column_new_field", "missing_key",
     "grouped_key_absent", "both_missing", "extra_key", "shape", "nan",
     "nan_both_arms", "inf", "inf_both_arms", "zero_peak", "bool", "canopy_nan_moved",
-    "canopy_nan_count", "canopy_inf"])
+    "canopy_nan_count", "canopy_inf", "canopy_finite_diverges", "dtype"])
 def test_each_violation_fails(tmp_path, violation):
     ref, got = _pair()
     m, c = got["model_step.npz"], got["driver_checkpoint.npz"]
@@ -115,6 +115,10 @@ def test_each_violation_fails(tmp_path, violation):
     elif violation == "canopy_nan_count":
         rc[v.CANOPY_NAN_KEY][9, 0] = np.nan
         c[v.CANOPY_NAN_KEY][9, 0] = np.nan
+    elif violation == "canopy_finite_diverges":     # NaN entries still match
+        c[v.CANOPY_NAN_KEY][100:] *= 1.01
+    elif violation == "dtype":
+        m["s0_dyn_state_u"] = m["s0_dyn_state_u"].astype(np.float32)
     elif violation == "canopy_inf":
         c[v.CANOPY_NAN_KEY][7, 1] = np.inf
     elif violation == "inf":

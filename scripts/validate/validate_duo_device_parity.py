@@ -327,6 +327,7 @@ def compare_files(fname: str, ref, got) -> list[str]:
     worst = {}
     for k in sorted(set(ref) & set(got)):
         a, b = np.asarray(ref[k]), np.asarray(got[k])
+        # a shape or dtype mismatch is refused by leaf_rel below
         if a.dtype.kind in "fc" and b.dtype.kind in "fc" and a.shape == b.shape:
             nan_a, nan_b = np.isnan(a), np.isnan(b)
             if np.isinf(a).any() or np.isinf(b).any():
