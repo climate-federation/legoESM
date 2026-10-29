@@ -302,3 +302,18 @@ objects, hash
 Thus the short-window fix changes no lane-3 certified row.  PLAUSIBLE only:
 the small timing spread is host scheduling and parallel callback variance;
 it is not used for numerical certification.
+
+Both 720-step arms then ran concurrently under detached `setsid`/`nohup`
+jobs with pidfiles.  The parent completed in 36475.2 s (29.25 GiB peak RSS)
+and fixed current in 36535.3 s (28.70 GiB); both reached the sparse 9, 10,
+50, 100, 200, 485 and 720 checkpoints.  Their gate exit is 1 because the
+lane remains DEBT, not because either walk failed.
+
+The full JSON artifacts are not byte-identical.  Comparing all 553 row
+objects finds 308 numerical differences, all in rows already classified
+DEBT: zero parent AT-BAR rows differ and zero statuses change.  By growth
+checkpoint, differing rows are 0 at steps 9 and 10, 3 at step 50, and 33 at
+each of 100, 200, 485 and 720; none is parent AT-BAR.  The final debt count
+is 173 in both arms.  Therefore Decision 177's certified-row condition is
+met, while the debt trajectory is explicitly not claimed bit-identical
+(`round14/r3/walk_{parent_resume5,fixed_5b0a9b7994}.json`).
