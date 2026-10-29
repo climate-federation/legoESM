@@ -32,7 +32,6 @@ from __future__ import annotations
 import argparse
 import datetime as _dt
 import logging
-import os
 from pathlib import Path
 
 import equinox as eqx
@@ -495,11 +494,10 @@ def main():
             # not lose the whole fine-tune. The bias-corrected EMA is only
             # meaningful at the end; the resumable artifact is the raw
             # params. (~10 KB — cheap.)
+            # save_checkpoint is itself atomic (tmp + rename) and writes the
+            # knob record beside its own path, so it saves to _ck directly.
             _ck = args.out_ckpt.with_name(args.out_ckpt.stem + "_latest_raw.eqx")
-            _tmp = _ck.with_suffix(".eqx.tmp")
-            _ck.parent.mkdir(parents=True, exist_ok=True)
-            save_checkpoint(params, _tmp)
-            os.replace(_tmp, _ck)
+            save_checkpoint(params, _ck)
             # BEST-drift raw params across the whole fine-tune: a late-phase
             # divergence (colnn v3: 15d drift 4.2 -> 424 K^2) must not
             # overwrite the best stability state. Drift normalised by the
@@ -509,9 +507,7 @@ def main():
             if _drift_per_day < best_drift_per_day:
                 best_drift_per_day = _drift_per_day
                 _bk = args.out_ckpt.with_name(args.out_ckpt.stem + "_best_raw.eqx")
-                _btmp = _bk.with_suffix(".eqx.tmp")
-                save_checkpoint(params_at_drift, _btmp)  # the params that produced it
-                os.replace(_btmp, _bk)
+                save_checkpoint(params_at_drift, _bk)  # the params that produced it
                 logger.info(
                     f"  new BEST drift/day^2 {_drift_per_day:.4f} "
                     f"[K^2/d^2 @rd={rd}d] -> {_bk.name}"
