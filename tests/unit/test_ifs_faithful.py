@@ -478,9 +478,12 @@ _NOSUPPLY_FIRST_GUESS = {
     "rad_cooling": (0.45912254813980874, 292.0799722680822),
     "supply": (0.20041796379722074, 129.81216574308928),
 }
+# Re-measured 2026-10-29 when the faithful chain gained below-cloud rain
+# evaporation: in these two weak cases the peak is now the sub-cloud cooling
+# (was 0.7339 and 1.2954e-4 K/day); M_b1 unchanged.
 _NOSUPPLY_DEFAULT = {   # KNOWN DIFFERENCE: default "zero", width 1 W/m2
-    "no_supply": (0.0010753948197864782, 0.7338989438430872),
-    "rad_cooling": (1.8977114269968982e-07, 0.00012954043631907552),
+    "no_supply": (0.0010753948197864782, 1.2393810288776876),
+    "rad_cooling": (1.8977114269968982e-07, 0.000248384298174642),
     "supply": (0.20041796379722074, 129.81216574308928),
 }
 
@@ -558,3 +561,126 @@ def test_shallow_nosupply_gradient_through_the_supply_ramp(_x64, monkeypatch):
         check_grads(f, (z,), order=2, modes=("fwd", "rev"))
         d = float(jax.grad(lambda x: f(x).sum())(z)[0])
         assert np.isfinite(d) and d > 0.0
+
+
+# --- below-cloud rain evaporation (cuflxn.F90:443-500) on the faithful chain ---
+# OpenIFS single-column oracle on the port_deep column (scripts/validate/oracle/
+# ifs_cumastrn, run.sh + compare_subcloud_evap.py, 2026-10-29): its production
+# sum, PQSEN and inputs at the levels the evaporation uses (0-based: 48 = KCTOP,
+# 57 = KCBOT, 58-59 evaporate), and PDMFUP after CUFLXN at 58, 59.
+_ORC_PROD = 0.0004629992212176128              # sum of PDMFUP > 0 [kg/m2/s]
+_ORC_DT = 112.5
+_ORC_Q = {48: 0.010755470022559166, 57: 0.017000000923871994,
+          58: 0.017000000923871994, 59: 0.017000000923871994}
+_ORC_QSEN = {48: 0.013439665915219487, 57: 0.01843255585663878,
+             58: 0.019799489482692344, 59: 0.021232030435932126}
+_ORC_PH = (96235.0, 97923.3359375, 99611.6640625, 101300.0)   # PAPH 57..60
+_ORC_EVAP_NODSNOW = (-3.0949592889734816e-05, -4.5176587955529223e-05)  # LMFDSNOW=F
+_ORC_EVAP_DEFAULT = (-2.9062759385935807e-05, -4.2339741776857620e-05)  # source defaults
+# leaf/oracle(LMFDSNOW=F) - 1: constants.g vs the oracle's RG in RCPECONS=5.44e-4/RG
+_LEAF_FORMULA_GAP = (4.996859e-05, 4.790063e-05)
+# KNOWN DIFFERENCE: chain/oracle(default) - 1 in PDMFUP at 58, 59; detrained
+# precipitation (LMFDSNOW, PSNDE) is not removed from the falling flux.
+_CHAIN_EVAP_GAP = (5.465891e-02, 5.511759e-02)
+# measured 2026-10-29 (x64): chain PDMFUP into CUDTDQN at 58, 59 [kg/m2/s]
+_EVAP_PER_CASE = {
+    ("no_supply", "first_guess"): (-3.065129820791043e-05, -4.467340613930167e-05),
+    ("rad_cooling", "first_guess"): (-3.065129820791043e-05, -4.467340613930167e-05),
+    ("supply", "first_guess"): (-1.8988099923941898e-05, -2.7185109827724597e-05),
+    ("no_supply", "zero"): (-9.265940506730531e-07, -1.3440622970114357e-07),
+    ("rad_cooling", "zero"): (-1.8723098894160612e-10, 0.0),
+    ("supply", "zero"): (-1.8988099923941898e-05, -2.7185109827724597e-05),
+}
+
+
+def _leaf_on_oracle_column(q58, q59):
+    """The shared leaf on a 3-layer stand-in for the oracle column: layer 0
+    carries the whole cloud-layer production (not evaporated, it is above
+    KCBOT), layers 1-2 are the oracle's levels 58-59; the half levels are the
+    oracle's PAPH, the last one its surface."""
+    from legoesm.atmosphere.physics.convection.bechtold import (
+        ifs_subcloud_rain_evaporation)
+    ph = jnp.asarray([_ORC_PH], dtype=jnp.float64)
+    dp = ph[:, 1:] - ph[:, :-1]
+    q = jnp.stack([jnp.asarray(_ORC_Q[57]), q58, q59])[None]
+    qs = jnp.asarray([[_ORC_QSEN[57], _ORC_QSEN[58], _ORC_QSEN[59]]])
+    src = jnp.asarray([[_ORC_PROD, 0.0, 0.0]]) * constants.g / dp
+    rh_b = _ORC_Q[57] / _ORC_QSEN[57]
+    rh_t = _ORC_Q[48] / _ORC_QSEN[48]
+    ev, _, _ = ifs_subcloud_rain_evaporation(
+        q, qs, ph, dp, src, jnp.asarray([[0.0, 1.0, 1.0]]),
+        jnp.asarray([rh_b]), jnp.asarray([rh_t]), jnp.asarray([0.0]), _ORC_DT,
+        rmfcfl=F.RMFCFL)
+    return -ev[0, 1:] * dp[0, 1:] / constants.g      # as PDMFUP increments
+
+
+def test_subcloud_evap_leaf_is_the_openifs_formula(_x64):
+    """The leaf on the oracle's own production and PQSEN reproduces OpenIFS
+    with detrained precipitation off; the stored gap is the gravity constant."""
+    got = np.asarray(_leaf_on_oracle_column(jnp.asarray(_ORC_Q[58]),
+                                            jnp.asarray(_ORC_Q[59])))
+    gap = got / np.asarray(_ORC_EVAP_NODSNOW) - 1.0
+    np.testing.assert_allclose(gap, _LEAF_FORMULA_GAP, rtol=1e-6, atol=1e-12)
+
+
+def _evap_run(case, mode, monkeypatch):
+    T, q, p_full, p_half = [a.astype(jnp.float64) for a in _deep_column(nlev=60)]
+    kw = _kwargs(*T.shape)
+    dq, rad = _NOSUPPLY_CASES[case]
+    kw["dq_dt_dyn"] = jnp.full(T.shape, dq)
+    if rad is not None:
+        kw["dT_dt_rad"] = jnp.full(T.shape, rad / 86400.0)
+    seen = {}
+    orig = F.ifs_convective_tendencies
+
+    def spy(*a, **k):
+        seen["pdmfup"] = np.asarray(a[-3])[0]
+        return orig(*a, **k)
+
+    monkeypatch.setattr(F, "ifs_convective_tendencies", spy)
+    out, _, _ = bechtold_convection(
+        T, q, p_full, p_half,
+        config=BechtoldConfig(use_ifs_ascent=True, ifs_shallow_nosupply=mode), **kw)
+    return seen["pdmfup"], out
+
+
+def test_faithful_subcloud_evap_gap_vs_openifs(_x64, monkeypatch):
+    """KNOWN DIFFERENCE per level: in the source's no-supply mode the chain
+    evaporates 5.5 % more than OpenIFS (detrained precipitation unported)."""
+    up, _ = _evap_run("no_supply", "first_guess", monkeypatch)
+    gap = up[58:60] / np.asarray(_ORC_EVAP_DEFAULT) - 1.0
+    np.testing.assert_allclose(gap, _CHAIN_EVAP_GAP, rtol=1e-6, atol=1e-12)
+    assert np.all(up[:58] >= 0.0)        # evaporation only below cloud base
+
+
+@pytest.mark.parametrize("case,mode", sorted(_EVAP_PER_CASE))
+def test_faithful_subcloud_evap_per_case(_x64, case, mode, monkeypatch):
+    """Stored per-case PDMFUP at the evaporating levels; host rain stays a
+    non-negative source and carries the column-wide evaporation debit."""
+    up, out = _evap_run(case, mode, monkeypatch)
+    np.testing.assert_allclose(up[58:60], _EVAP_PER_CASE[(case, mode)],
+                               rtol=1e-6, atol=1e-12)
+    assert np.all(np.asarray(out.dq_r_conv_dt) >= 0.0)
+    # column water closes with the evaporation in it (budget and tolerance of
+    # test_convective_water_is_conserved)
+    _, _, _, p_half = _deep_column(nlev=60)
+    mass = np.diff(np.asarray(p_half[0], np.float64)) / float(constants.g)
+    terms = [np.asarray(x[0], np.float64) for x in
+             (out.dq_v_dt, out.dq_c_conv_dt, out.dq_r_conv_dt)]
+    residual = sum(float(np.sum(t * mass)) for t in terms)
+    scale = float(np.sum(sum(np.abs(t) for t in terms) * mass))
+    assert abs(residual) <= 1.0e-5 * scale, (residual, scale)
+
+
+def test_subcloud_evap_gradient(_x64):
+    """Finite, non-zero derivative of the evaporation with respect to the
+    sub-cloud humidity through the faithful-path leaf call."""
+    from jax.test_util import check_grads
+
+    def f(q58, q59):
+        return _leaf_on_oracle_column(q58, q59).sum()
+
+    args = (jnp.asarray(_ORC_Q[58]), jnp.asarray(_ORC_Q[59]))
+    check_grads(f, args, order=2, modes=("fwd", "rev"))
+    d = jax.grad(f, argnums=(0, 1))(*args)
+    assert all(np.isfinite(float(x)) and float(x) > 0.0 for x in d)

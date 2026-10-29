@@ -1193,7 +1193,7 @@ def _ifs_inplume_precip_conversion(
     return L_new, precip_frac
 
 
-def _ifs_subcloud_rain_evaporation(
+def ifs_subcloud_rain_evaporation(
     q_v: jax.Array,
     q_sat_env: jax.Array,
     p_half: jax.Array,
@@ -1211,6 +1211,7 @@ def _ifs_subcloud_rain_evaporation(
     evap_scale: float = 1.0,
     rhebc_land_val: float = _IFS_RHEBC_LAND,
     rhebc_land_deep_val: float = _IFS_RHEBC_LAND_DEEP,
+    rmfcfl: float = 1.0,
 ) -> tuple[jax.Array, jax.Array, jax.Array]:
     r"""IFS Kessler sub-cloud evaporation of convective rain (cuflxn.F90:436-475).
 
@@ -1243,6 +1244,9 @@ def _ifs_subcloud_rain_evaporation(
       applies the evap tendency EXPLICITLY (``subsidence_solve`` affects
       only the mass-flux kernel, not this coupling), so ``RMFCFL = 1`` is
       the value that cannot overshoot the break within a step (codex R1 #3).
+      ``rmfcfl`` sets this factor; the default 1 is the Bechtold path, the
+      faithful IFS chain passes the source's 3 (its tendencies are the
+      implicit cudtdqn port).
     * The rain SOURCE profile feeding the flux is the scheme's post-split
       ``dq_r_conv_dt`` (rain forms in the cloud layer and accumulates
       downward; a layer's own source joins the flux BELOW it —
@@ -1329,7 +1333,7 @@ def _ifs_subcloud_rain_evaporation(
                  + (1.0 - land_frac) * rhebc_ocean).astype(_dtype)
     else:
         rhebc = rhebc_ocean.astype(_dtype)                     # (ncol,)
-    zcons2 = 1.0 / (g * dt)                                    # RMFCFL=1 branch
+    zcons2 = rmfcfl / (g * dt)                                 # ZCONS2, cuflxn.F90:209
 
     src_flux = jnp.maximum(dq_r_conv_dt, 0.0) * dp_full / g    # (ncol, nlev)
     sqrt_p = jnp.sqrt(p_half[:, :-1] / p_half[:, -1:])         # layer-top / sfc
@@ -3154,7 +3158,7 @@ def bechtold_convection(
         _rh_base = _ifs_cloud_base_qsat(_rh_evap, k_lcl_smooth, levels_arr)[:, 0]
         _rh_top = _ifs_cloud_base_qsat(_rh_evap, k_lnb_smooth, levels_arr)[:, 0]
         evap_rate_ifs, rain_scale_ifs, melt_rate_ifs = (
-            _ifs_subcloud_rain_evaporation(
+            ifs_subcloud_rain_evaporation(
                 q_v, _q_sat_evap, p_half, dp_full, dq_r_conv_dt,
                 _below_lcl_evap, _rh_base, _rh_top, deep_weight, dt,
                 land_frac=(land_frac if config.use_ifs_land_rhebc else None),
