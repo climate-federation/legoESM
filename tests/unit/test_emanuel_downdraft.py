@@ -10,6 +10,8 @@ rain water must appear BELOW it.
 
 from __future__ import annotations
 
+import math
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -29,6 +31,7 @@ _ORACLE = dict(
     sigd=0.05, sigs=0.12, omtrain=50.0, omtsnow=5.5, coeffr=1.0, coeffs=0.8,
     freeze_transition_K=1.0, inertia_scale_hPa=20.0, taper_p_fraction=0.949,
     dhdp_min=10.0, ep_gate_threshold=1.0e-4, ep_gate_width=1.0e-5,
+    condensate_sharpness=math.inf,
 )
 
 

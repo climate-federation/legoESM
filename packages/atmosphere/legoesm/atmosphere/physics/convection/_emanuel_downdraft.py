@@ -74,6 +74,7 @@ import jax.numpy as jnp
 from jax import lax
 
 from legoesm import constants
+from legoesm.core.smooth import smooth_relu
 
 __physics_contract__ = {
     "summary": (
@@ -248,6 +249,7 @@ def emanuel_downdraft(
     dhdp_min: float,
     ep_gate_threshold: float,
     ep_gate_width: float,
+    condensate_sharpness: float,
 ) -> EmanuelDowndraftOutput:
     """Diagnose the precipitating downdraft and its tendencies.
 
@@ -274,6 +276,8 @@ def emanuel_downdraft(
         sweep starts there (DO 400 I=INB,1,-1); above it every array keeps its
         DO 70 initialisation, and the whole shaft is gated on EP(INB).
     c_l : CONVECT's liquid-water heat capacity CL (the same CL as the mixer).
+    condensate_sharpness : softplus sharpness [1/(kg/kg)] of the ``AWAT``
+        ``MAX(0, .)``; ``math.inf`` is the oracle.
     """
     _ncol, nlev = T.shape
     g = constants.g
@@ -290,7 +294,10 @@ def emanuel_downdraft(
     # than from intuition.
     idx = jnp.arange(nlev)
     lower = (idx[:, None] < idx[None, :])[None, :, :]
-    awat = jnp.maximum(elij - (1.0 - ep)[:, None, :] * clw[:, None, :], 0.0)
+    # MAX(0, ...) smoothed by condensate_sharpness [kg/kg]^-1 (RULE 5), as the
+    # mixing module's AWAT; exact at inf.
+    awat = smooth_relu(elij - (1.0 - ep)[:, None, :] * clw[:, None, :],
+                       condensate_sharpness)
     wdtrain = g * ep * m_profile * clw + g * jnp.sum(
         jnp.where(lower, awat * ment, 0.0), axis=1)
 

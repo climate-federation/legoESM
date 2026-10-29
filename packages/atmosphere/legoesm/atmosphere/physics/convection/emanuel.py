@@ -48,6 +48,8 @@ References
 
 from __future__ import annotations
 
+import math
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -66,6 +68,7 @@ from legoesm.atmosphere.physics.thermodynamics import (
     compute_cape,
     compute_moist_adiabat,
 )
+from legoesm.core.smooth import positive_part_c1, smoothstep_cubic
 from legoesm.thermo import latent_heat_vaporization
 
 from legoesm import constants
@@ -131,6 +134,38 @@ _RETIRED_FIELDS = (
 
 def _is_concrete(value) -> bool:
     return not isinstance(value, jax.core.Tracer)
+
+
+# RULE 5 sharpness fields passed straight to the mixing module.
+_MIXING_SHARPNESS_FIELDS = (
+    "source_temperature_gate_sharpness", "source_humidity_gate_sharpness",
+    "plcl_gate_sharpness", "stable_exit_sharpness", "cold_start_sharpness",
+    "cbmf_sharpness", "precip_efficiency_sharpness", "condensate_sharpness",
+    "scrit_floor_sharpness", "frac_sharpness", "defrac_floor_sharpness",
+    "tlift_floor_sharpness", "denom_floor_sharpness", "nent_count_sharpness",
+    "bsum_sharpness", "asij_floor_sharpness", "sort_sharpness",
+)
+
+
+def _check_smoothing_fields(config: EmanuelConfig) -> None:
+    """Refuse values the smooth forms are not valid for (concrete values only)."""
+    t = config.tlcrit
+    if _is_concrete(t) and np.any(np.asarray(t) >= 0.0):
+        raise ValueError(
+            f"EmanuelConfig.tlcrit={t!r}: must be < 0 degC (ELACRIT is written "
+            "as ELCRIT*clip(1 - TCA/TLCRIT, 0, 1), which needs TLCRIT < 0).")
+    s, f = config.denom_floor_sharpness, config.denom_floor
+    if (_is_concrete(s) and _is_concrete(f) and s != math.inf
+            and np.any(np.asarray(s) * np.asarray(f) < 120.0)):
+        raise ValueError(
+            f"EmanuelConfig.denom_floor_sharpness={s!r} with denom_floor={f!r}: "
+            "the reciprocal blend needs sharpness*floor >= 120 (else 1/DENOM is "
+            "formed near DENOM = 0); use math.inf for the oracle's hard floor.")
+    for name in _MIXING_SHARPNESS_FIELDS + ("rain_placement_sharpness",
+                                            "rain_column_sharpness"):
+        v = getattr(config, name)
+        if _is_concrete(v) and np.any(~(np.asarray(v) > 0.0)):
+            raise ValueError(f"EmanuelConfig.{name}={v!r}: must be > 0 (math.inf = oracle).")
 
 
 def _check_retired_fields(config: EmanuelConfig) -> None:
@@ -224,6 +259,7 @@ def emanuel_convection(
     positive drying 3e-8; 0 non-finite fp32 gradients.
     """
     _check_retired_fields(config)
+    _check_smoothing_fields(config)
     # The scheme runs in the state temperature's precision: a float64 tracer
     # or pressure in a float32 run would make the downdraught's scan carry and
     # outputs differ in dtype (reviewer decision, #2213 split).
@@ -255,6 +291,7 @@ def emanuel_convection(
         lcl_pressure_sharpness=config.lcl_pressure_sharpness,
         strict_index_sharpness=config.strict_index_sharpness,
         epmax=config.precip_efficiency_max,
+        **{name: getattr(config, name) for name in _MIXING_SHARPNESS_FIELDS},
     )
     _rev = lambda x: x[:, ::-1]  # noqa: E731 - surface-last <-> surface-first
     ft = _rev(mixing.dT_dt)                       # surface-FIRST from here
@@ -284,6 +321,7 @@ def emanuel_convection(
             dhdp_min=config.downdraft_dhdp_min,
             ep_gate_threshold=config.downdraft_ep_gate_threshold,
             ep_gate_width=config.downdraft_ep_gate_width,
+            condensate_sharpness=config.condensate_sharpness,
         )
         ft = ft + downdraft.dT_dt
         fq = fq + downdraft.dq_v_dt
@@ -303,24 +341,29 @@ def emanuel_convection(
     # integrated into same-step surface precipitation by the physics
     # pipeline), distributed by the column drying weight.  No heating
     # accompanies it: the latent heat is already in FT.
+    # RULE 5: the positive parts are C1 ramps, exactly 0 below 0 and exact
+    # above 1/sharpness (positive_part_c1), so nothing rains from a
+    # moistening level or column.
     net_water = jnp.sum(dq_v_dt * dp, axis=-1) / constants.g
-    drying = jnp.maximum(-dq_v_dt, 0.0)
+    drying = positive_part_c1(-dq_v_dt, config.rain_placement_sharpness)
     drying_col = jnp.sum(drying * dp, axis=-1) / constants.g
     # The 1e-30 divisor floor goes through _div_floor (same value; a floored,
     # non-convecting column then has finite fp32 derivatives).
     # fp32 derivative limitation of this weight: see the docstring.
     add_weight = _div_floor(drying, drying_col[:, None], 1e-30)  # ∫w dp/g = 1
-    _residual = jnp.maximum(-net_water, 0.0)
-    dq_r_conv_dt = _residual[:, None] * add_weight    # ∫dq_r dp/g = _residual
+    _residual = positive_part_c1(-net_water, config.rain_column_sharpness)
     # A residual that cannot be placed (no drying anywhere) is spread uniformly
-    # in mass rather than dropped.
-    _placed = jnp.sum(dq_r_conv_dt * dp, axis=-1) / constants.g
+    # in mass rather than dropped: weight f on the uniform profile, 1 - f on
+    # the drying profile, both of unit mass, so ∫dq_r dp/g = _residual.  f is
+    # [drying_col <= 0] at the hard limit and 1 - smoothstep(s*drying_col)
+    # otherwise.
     _col_dp = jnp.sum(dp, axis=-1, keepdims=True)
-    dq_r_conv_dt = dq_r_conv_dt + jnp.where(
-        (drying_col <= 0.0)[:, None],
-        (_residual - _placed)[:, None] * constants.g / _col_dp,
-        0.0,
-    )
+    if config.rain_column_sharpness == math.inf:
+        f_unif = (drying_col <= 0.0).astype(dq_v_dt.dtype)[:, None]
+    else:
+        f_unif = 1.0 - smoothstep_cubic(drying_col * config.rain_column_sharpness)[:, None]
+    dq_r_conv_dt = _residual[:, None] * (
+        (1.0 - f_unif) * add_weight + f_unif * constants.g / _col_dp)
 
     # -- ENTS: exact enthalpy conservation over levels 1..INB (l.969-984) -----
     # ENTS = sum (CPN*FT + LV*FQ) dp / (PH(1)-PH(INB+1)); FT -= ENTS/CPN.
@@ -345,7 +388,8 @@ def emanuel_convection(
         du_dt_conv=None,
         dv_dt_conv=None,
     )
-    # Carry CONVECT's CBMF (>= 0 by the oracle's own MAX; no cap).
+    # Carry CONVECT's CBMF (>= 0: the oracle's MAX at the hard limit, a
+    # softplus at the default cbmf_sharpness; no cap).
     cbmf_carry = mixing.cbmf
     conv_prog_profile_new = (
         jnp.zeros((ncol, nlev), dtype=T.dtype).at[:, -1].set(cbmf_carry)

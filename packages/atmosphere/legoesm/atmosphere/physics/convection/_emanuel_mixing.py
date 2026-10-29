@@ -38,13 +38,15 @@ What is ported, in oracle order:
    detrainment, ``AWAT``), with the undilute updraught flux counted only at
    and above ``NK``.
 
-Differentiability
------------------
-Integer indices (``NK``, ``ICB``, ``INB``, ``INB1``) are discrete in the oracle
-and stay discrete here (``argmax`` / ``take_along_axis``); gradients flow
-through the gathered values.  Every oracle switch that the shipped code had
-already smoothed through a config field keeps that field, and the field's
-large-sharpness limit IS the oracle switch:
+Differentiability (RULE 5)
+--------------------------
+Integer indices (``NK``, ``IHMIN``, ``ICB``, ``INB``, ``INB1``) are index
+picks: discrete here as in the oracle (``argmax`` / ``take_along_axis``),
+gradients flow through the gathered values, and the two index rejection
+gates (``IHMIN = NL-1``, ``ICB >= NL-1``) stay hard.  Every switch on traced
+state is smooth, its sharpness an :class:`EmanuelConfig` field whose
+``math.inf`` value (``1e3``/``1e12`` for the five older sigmoid fields) is
+the oracle exactly:
 
 * ``level_window_sharpness`` -- the ``ICB``/``INB`` level windows, evaluated at
   half-integer offsets (``sigmoid(s*(level - ICB + 1/2))``) so they tend to
@@ -52,13 +54,48 @@ large-sharpness limit IS the oracle switch:
 * ``sij_gate_sharpness`` -- the ``0 < SIJ < sij_upper_gate`` entrainment band;
 * ``sat_branch_sharpness`` -- the saturated re-solve switch;
 * ``strict_index_sharpness`` -- the strict ``J > I`` / ``K < I`` inequalities;
-* ``lcl_pressure_sharpness`` -- the sub-cloud ``DTPBL`` layer above ``NK``.
+* ``lcl_pressure_sharpness`` -- the sub-cloud ``DTPBL`` layer above ``NK``;
+* ``source_temperature_gate_sharpness``, ``source_humidity_gate_sharpness``,
+  ``plcl_gate_sharpness`` -- the IFLAG 0/2 rejections ``T(NK) < 250 K``,
+  ``Q(NK) <= 0``, ``PLCL`` outside [200, 2000) hPa (weights on CBMF);
+* ``stable_exit_sharpness``, ``cold_start_sharpness`` -- the cold-start
+  stable exit (``TVP(ICB) <= TV(ICB) - DTMAX`` and ``CBMF = 0``, the latter as
+  ``exp(-s*CBMF_old)``);
+* ``cbmf_sharpness`` -- ``CBMF = MAX(..., 0)`` (softplus);
+* ``precip_efficiency_sharpness`` -- the ``ELACRIT`` and ``EP`` clips;
+* ``condensate_sharpness`` -- ``CLW``, ``ELIJ`` and ``AWAT`` positivity and
+  the ``SCRIT = 1`` humidity test;
+* ``scrit_floor_sharpness`` -- ``MAX(SCRIT, 0)``;
+* ``frac_sharpness``, ``defrac_floor_sharpness`` -- the ``FRAC`` clip and its
+  ``MAX(.., 0.001)`` denominator;
+* ``tlift_floor_sharpness`` -- TLIFT's ``MAX(TG, 35)``;
+* ``denom_floor_sharpness`` -- the ``ABS(DENOM) < 0.01`` floors, blended in
+  the reciprocal (see :func:`_floor_recip`);
+* ``nent_count_sharpness``, ``bsum_sharpness`` -- the ``NENT = 0`` /
+  ``BSUM < 1e-18`` local-detrainment switch;
+* ``asij_floor_sharpness`` -- ``MAX(ASIJ, 1e-21)``;
+* ``sort_sharpness`` -- the ``DO 200`` SMIN march (its min/max/abs and the
+  strict SMIN tests) and the ``[0, 1]`` clip of the stored ``SIJ``.
 
-Every other oracle switch is ported hard (``jnp.where``), including the
-``ABS(DENOM) < 0.01`` guards.  Where a hard branch can produce a non-finite
-value on the unselected side, the input is replaced before the operation
-(``where(ok, x, 1)``) so the forward value is unchanged and no NaN reaches
-the gradient.
+KNOWN DIFFERENCE: at the default sharpnesses the port does not reproduce the
+oracle; the per-column gap (FT, FQ, CBMF) is pinned in
+``tests/atmosphere/oracle_fixtures/emanuel_convect43c_default_gaps.json``.
+Setting every field above to its hard value recovers the oracle (<= 1e-10).
+Invariants the smoothing breaks: a column the oracle rejects, or that sits
+stably at the cold start, carries a small positive CBMF and so small nonzero
+tendencies (the softplus CBMF never reaches exactly 0); ``CLW``/``ELIJ``/
+``AWAT`` carry a softplus offset of up to ``ln2/condensate_sharpness``
+(7e-7 kg/kg) where the oracle has exactly 0.  The ENTS enthalpy closure
+still holds exactly; column water closes exactly where the column's net
+vapour loss is >= ``1/rain_column_sharpness`` and the rain falls short by
+at most ``4/(27 rain_column_sharpness)`` below that (see
+:func:`legoesm.core.smooth.positive_part_c1`, used by :mod:`.emanuel`).
+
+Kept hard, as division/NaN guards on values that never select a branch on
+an atmospheric column: ``MAX(CLW, 1e-8)`` in ``EP``; ``RH = 1`` for
+``Q(NK) <= 0`` (avoids ``0**chi``; that column's CBMF weight is ~0); the
+non-negativity of the running ``M`` sum above a level (rounding only); the
+``DPINV`` and ``DTPBL`` denominator floors.
 
 Conventions
 -----------
@@ -72,6 +109,7 @@ input) is :func:`_oracle_qsat`.
 
 from __future__ import annotations
 
+import math
 from typing import NamedTuple
 
 import jax
@@ -79,6 +117,7 @@ import jax.numpy as jnp
 from jax import lax
 
 from legoesm import constants
+from legoesm.core.smooth import sigmoid_switch, smooth_relu
 from legoesm.thermo import saturation_vapor_pressure
 
 
@@ -125,7 +164,7 @@ __physics_contract__ = {
     "idealized_test": (
         "tests/atmosphere/test_emanuel_convect43c_oracle.py: FT, FQ and CBMF "
         "match the running convect43c.f oracle to <= 1e-10 (fp64) at the hard "
-        "limit of the smoothing fields; a stable column returns zero."
+        "limit of the smoothing fields; a stable column returns zero there."
     ),
 }
 
@@ -156,6 +195,12 @@ _DEFRAC_FLOOR = 0.001
 # --- DO 200 normalisation floors (convect43c.f l.690, 698) ---
 _ASIJ_FLOOR = 1.0e-21
 _BSUM_MIN = 1.0e-18
+# Rows with ASIJ above this many floors divide by ASIJ directly (the smooth
+# floor equals ASIJ there to < 1e-30 relative at any sharpness >= 1/10).
+_ASIJ_SPLIT = 1.0e3
+# |DENOM| below FLOOR - _RECIP_GUARD/s: the smooth weight on 1/DENOM is
+# < sigmoid(-_RECIP_GUARD) ~ 1e-26 and 1/DENOM is not formed (no pole).
+_RECIP_GUARD = 60.0
 # --- closure (convect43c.f l.563-566): CBMF += 0.1*ALPHA*DTMA, DELT0=300 s ---
 _CBMF_RELAX = 0.1
 _DELT0_S = 300.0
@@ -219,11 +264,12 @@ def _tlift_es_hpa(tg):
     return jnp.where(tg - constants.T_freeze >= 0.0, es_warm, es_cold)
 
 
-def _tlift_moist(T, qs, p_hpa, gz, T_nk, q_nk, gz_nk, *, c_l):
+def _tlift_moist(T, qs, p_hpa, gz, T_nk, q_nk, gz_nk, *, c_l, tlift_floor_sharpness):
     """TLIFT saturated-parcel branch at every level (convect43c.f l.1042-1073).
 
     Returns ``(TPK, QG)``.  ``S`` and ``ALV`` use the ENVIRONMENT ``T(I)``;
-    ``QG`` starts from the host ``QS(I)``; two Newton steps.
+    ``QG`` starts from the host ``QS(I)``; two Newton steps.  The oracle's
+    ``MAX(TG, 35)`` is smoothed by ``tlift_floor_sharpness`` [1/K].
     """
     cpd = constants.c_pd
     rv = constants.R_v
@@ -237,16 +283,70 @@ def _tlift_moist(T, qs, p_hpa, gz, T_nk, q_nk, gz_nk, *, c_l):
     for _ in range(_TLIFT_NEWTON_ITERS):
         s = 1.0 / (cpd + alv * alv * qg / (rv * T * T))
         ahg = cpd * tg + (c_l - cpd) * q_nk * T + alv * qg + gz
-        tg = jnp.maximum(tg + s * (ah0 - ahg), _TLIFT_TG_FLOOR_K)
+        tg = _smax(tg + s * (ah0 - ahg), _TLIFT_TG_FLOOR_K, tlift_floor_sharpness)
         es = _tlift_es_hpa(tg)
         qg = eps * es / (p_hpa - es * (1.0 - eps))
     tpk = (ah0 - (c_l - cpd) * q_nk * T - gz - alv * qg) / cpd
     return tpk, qg
 
 
-def _hard_denom(d, floor):
-    """Oracle ``IF(ABS(D).LT.floor) D = floor`` (positive floor)."""
-    return jnp.where(jnp.abs(d) < floor, floor, d)
+def _hard(s):
+    return s == math.inf
+
+
+def _relu(x, s):
+    """``max(x, 0)``; softplus at finite ``s``."""
+    return smooth_relu(x, s)
+
+
+def _smax(a, b, s):
+    """``max(a, b)``; ``b + softplus`` at finite ``s``."""
+    return jnp.maximum(a, b) if _hard(s) else b + smooth_relu(a - b, s)
+
+
+def _smin(a, b, s):
+    """``min(a, b)``; ``a - softplus`` at finite ``s``."""
+    return jnp.minimum(a, b) if _hard(s) else a - smooth_relu(a - b, s)
+
+
+def _sclip(x, lo, hi, s):
+    """``clip(x, lo, hi)``; nested softplus max/min at finite ``s``."""
+    return jnp.clip(x, lo, hi) if _hard(s) else _smin(_smax(x, lo, s), hi, s)
+
+
+def _sabs(x, s):
+    """``|x|`` = ``max(x, -x)``; softplus at finite ``s``."""
+    return jnp.abs(x) if _hard(s) else smooth_relu(2.0 * x, s) - x
+
+
+def _lt(a, b, s):
+    """Indicator of the STRICT ``a < b`` (exact at ``s = inf``)."""
+    return 1.0 - sigmoid_switch(a - b, s)
+
+
+def _blend(w, a, b, s):
+    """``w*a + (1-w)*b``; at ``s = inf`` the exact ``where(w, a, b)``."""
+    return jnp.where(w > 0.5, a, b) if _hard(s) else w * a + (1.0 - w) * b
+
+
+def _floor_recip(d, floor, s):
+    """``1/D`` after the oracle's ``IF(ABS(D).LT.floor) D = floor``.
+
+    The floor is discontinuous (``D = -1.01 floor`` stays, ``-0.99 floor``
+    becomes ``+floor``), and any continuous blend of the DENOMINATORS passes
+    through 0.  So the RECIPROCAL is blended: ``w/D + (1-w)/floor`` with
+    ``w = sigmoid(s(|D| - floor))``; ``1/D`` is replaced by 0 where
+    ``|D| < floor - 60/s`` (there ``w < 1e-26``), so no pole is formed.
+    Exactly the oracle at ``s = inf``.  The caller validates
+    ``s * floor >= 120`` so that guard band stays above ``floor/2``.
+    """
+    if _hard(s):
+        return 1.0 / jnp.where(jnp.abs(d) < floor, floor, d)
+    ad = jnp.abs(d)
+    w = sigmoid_switch(ad - floor, s)
+    far = ad > floor - _RECIP_GUARD / s
+    inv = jnp.where(far, 1.0 / jnp.where(far, d, 1.0), 0.0)
+    return w * inv + (1.0 - w) / floor
 
 
 def _last_true(mask, idx):
@@ -280,6 +380,23 @@ def emanuel_mixing_tendencies(
     denom_floor: float,
     sat_branch_sharpness: float,
     lcl_pressure_sharpness: float,
+    source_temperature_gate_sharpness: float,
+    source_humidity_gate_sharpness: float,
+    plcl_gate_sharpness: float,
+    stable_exit_sharpness: float,
+    cold_start_sharpness: float,
+    cbmf_sharpness: float,
+    precip_efficiency_sharpness: float,
+    condensate_sharpness: float,
+    scrit_floor_sharpness: float,
+    frac_sharpness: float,
+    defrac_floor_sharpness: float,
+    tlift_floor_sharpness: float,
+    denom_floor_sharpness: float,
+    nent_count_sharpness: float,
+    bsum_sharpness: float,
+    asij_floor_sharpness: float,
+    sort_sharpness: float,
     strict_index_sharpness: float = _STRICT_INDEX_SHARPNESS,
     epmax: float = _EPMAX_DEFAULT,
 ) -> EmanuelMixingOutput:
@@ -296,8 +413,11 @@ def emanuel_mixing_tendencies(
     epmax, sij_upper_gate, denom_floor : oracle CL, ELCRIT, TLCRIT, ENTP,
         DTMAX, ALPHA, DAMP, EPMAX, the 0.9 band edge and the 0.01 floor.
     level_window_sharpness, sij_gate_sharpness, sat_branch_sharpness,
-    strict_index_sharpness, lcl_pressure_sharpness : smoothing of the oracle
-        switches named in the module docstring; large values are the oracle.
+    strict_index_sharpness, lcl_pressure_sharpness, and the remaining
+    ``*_sharpness`` arguments : smoothing of the oracle switches named in the
+        module docstring (fields of :class:`EmanuelConfig`, documented there);
+        large values are the oracle and ``math.inf`` is exactly the oracle
+        for every field read through :func:`legoesm.core.smooth`.
     """
     ncol, nlev = T.shape
     dtype = T.dtype
@@ -342,21 +462,28 @@ def emanuel_mixing_tendencies(
     T_nk = _at(Tf, nk)
     q_nk = _at(qf, nk)
     gz_nk = _at(gz, nk)
-    gate_a = (T_nk < _T_SOURCE_MIN_K) | (q_nk <= 0.0) | (ihmin == nl - 2)
+    # IFLAG 0 (l.384): T(NK) < 250 K, Q(NK) <= 0 smoothed; IHMIN = NL-1 is an
+    # index pick and stays hard.
+    gate_idx = ihmin == nl - 2
+    pass_a = (sigmoid_switch(T_nk - _T_SOURCE_MIN_K, source_temperature_gate_sharpness)
+              * (1.0 - sigmoid_switch(-q_nk, source_humidity_gate_sharpness)))
 
     # ---- LCL (l.392-394) and ICB (l.402-408) -------------------------------
     rh = q_nk / _at(qs, nk)
     rh = jnp.where(q_nk > 0.0, rh, 1.0)             # IFLAG-0 column: avoid 0**chi
     chi = T_nk / (_EMANUEL_CHI_A - _EMANUEL_CHI_B * rh - T_nk)
     plcl = _at(pf, nk) * rh ** chi
-    gate_b = (plcl < _PLCL_MIN_HPA) | (plcl >= _PLCL_MAX_HPA)
+    # IFLAG 2 (l.395): PLCL < 200 or >= 2000 hPa, smoothed [1/Pa].
+    pass_b = (sigmoid_switch((plcl - _PLCL_MIN_HPA) / _HPA_PER_PA, plcl_gate_sharpness)
+              * _lt(plcl / _HPA_PER_PA, _PLCL_MAX_HPA / _HPA_PER_PA, plcl_gate_sharpness))
     above_lcl = (idx[None, :] > nk[:, None]) & (idx[None, :] <= nl - 1) & (pf < plcl[:, None])
     icb = jnp.where(jnp.any(above_lcl, axis=-1), jnp.argmax(above_lcl, axis=-1), nl - 2)
-    gate_c = icb >= nl - 2
+    gate_idx = gate_idx | (icb >= nl - 2)            # IFLAG 3: index, hard
 
     # ---- TLIFT (KK=1 and KK=2) ---------------------------------------------
     tpk_m, qg = _tlift_moist(Tf, qs, pf, gz, T_nk[:, None], q_nk[:, None],
-                             gz_nk[:, None], c_l=c_l)
+                             gz_nk[:, None], c_l=c_l,
+                             tlift_floor_sharpness=tlift_floor_sharpness)
     q_nk2 = q_nk[:, None]
     cpp = cpd * (1.0 - q_nk2) + q_nk2 * cpv
     tpk_d = T_nk[:, None] - (gz - gz_nk[:, None]) / cpp
@@ -367,15 +494,25 @@ def emanuel_mixing_tendencies(
     above_icb = jax.nn.sigmoid(level_window_sharpness * (lvl - icb_f + 0.5))
     tp = above_icb * tpk_m + (1.0 - above_icb) * tpk_d
     tvp = above_icb * tvp_m + (1.0 - above_icb) * tvp_d
-    clw = jnp.where(idx[None, :] >= icb[:, None], jnp.maximum(q_nk2 - qg, 0.0), 0.0)
+    clw = jnp.where(idx[None, :] >= icb[:, None],
+                    _relu(q_nk2 - qg, condensate_sharpness), 0.0)
 
-    # Cold-start stable exit (l.429-432).
-    stable = (cbmf_old == 0.0) & (_at(tvp, icb) <= _at(tv, icb) - dtmax)
+    # Cold-start stable exit (l.429-432): CBMF = 0 and TVP(ICB) <= TV(ICB)-DTMAX.
+    if _hard(cold_start_sharpness):
+        cold = (cbmf_old == 0.0).astype(dtype)
+    else:
+        cold = jnp.exp(-cold_start_sharpness * cbmf_old)
+    stable_w = cold * sigmoid_switch(_at(tv, icb) - dtmax - _at(tvp, icb),
+                                     stable_exit_sharpness)
 
     # ---- EP (l.446-464) ----------------------------------------------------
     tca = tp - constants.T_freeze
-    elacrit = jnp.maximum(jnp.where(tca >= 0.0, elcrit, elcrit * (1.0 - tca / tlcrit)), 0.0)
-    ep = jnp.clip(epmax * (1.0 - elacrit / jnp.maximum(clw, _CLW_EP_FLOOR)), 0.0, epmax)
+    # MAX(WHERE(TCA >= 0, ELCRIT, ELCRIT*(1 - TCA/TLCRIT)), 0) is
+    # ELCRIT*CLIP(1 - TCA/TLCRIT, 0, 1) for TLCRIT < 0 (validated).
+    elacrit = elcrit * _sclip(1.0 - tca / tlcrit, 0.0, 1.0, precip_efficiency_sharpness)
+    # MAX(CLW, 1e-8) is the oracle's division guard, kept exact.
+    ep = _sclip(epmax * (1.0 - elacrit / jnp.maximum(clw, _CLW_EP_FLOOR)), 0.0, epmax,
+                precip_efficiency_sharpness)
     ep = jnp.where(idx[None, :] > nk[:, None], ep, 0.0)
 
     # ---- INB, INB1, FRAC (DO 82, l.511-533) --------------------------------
@@ -393,8 +530,8 @@ def emanuel_mixing_tendencies(
     capem = jnp.where(anyc, _at(cape_run, lastc_s), 0.0)
     inb = jnp.maximum(inb, inb1)
     cape = capem + byp
-    defrac = jnp.maximum(capem - cape, _DEFRAC_FLOOR)
-    frac = jnp.clip(-cape / defrac, 0.0, 1.0)
+    defrac = _smax(capem - cape, _DEFRAC_FLOOR, defrac_floor_sharpness)
+    frac = _sclip(-cape / defrac, 0.0, 1.0, frac_sharpness)
     inb_f = inb.astype(dtype)[:, None]
 
     # ---- HP (DO 95): H(NK)+(LV+(CPD-CPV)T)*EP*CLW on ICB..INB --------------
@@ -418,9 +555,11 @@ def emanuel_mixing_tendencies(
         jnp.sum(pbl * dph, axis=-1), _HPA_PER_PA)
     dtma = tvpplcl - tvaplcl + dtmax + dtpbl
     damps = damp_coefficient * dt / _DELT0_S
-    cbmf_new = jnp.maximum((1.0 - damps) * cbmf_old + _CBMF_RELAX * alpha_closure * dtma, 0.0)
-    passed = ~(gate_a | gate_b | gate_c | stable)
-    cbmf = jnp.where(passed, cbmf_new, 0.0)
+    cbmf_new = _relu((1.0 - damps) * cbmf_old + _CBMF_RELAX * alpha_closure * dtma,
+                     cbmf_sharpness)
+    # Rejected column (IFLAG 0/2/3, the stable exit): CBMF = 0, zero
+    # tendencies.  The state gates weight CBMF smoothly; index gates are hard.
+    cbmf = jnp.where(gate_idx, 0.0, pass_a * pass_b * (1.0 - stable_w) * cbmf_new)
     M_b = cbmf
 
     # ---- M(I) (DO 103/110) -------------------------------------------------
@@ -443,7 +582,7 @@ def emanuel_mixing_tendencies(
 
     ANUM = H_j - HP_i + (cpv - cpd) * T_j * (QTI - Q_j)
     DENOM = H_i - HP_i + (cpd - cpv) * (Q_i - QTI) * T_j
-    SIJ = jnp.where(eye, 1.0, ANUM / _hard_denom(DENOM, denom_floor))
+    SIJ = jnp.where(eye, 1.0, ANUM * _floor_recip(DENOM, denom_floor, denom_floor_sharpness))
     ALTEM = (SIJ * Q_i + (1.0 - SIJ) * QTI - QS_j) / BF2
     CWAT = (clw * (1.0 - ep))[:, None, :]
     j_gt_i = jax.nn.sigmoid(
@@ -454,7 +593,7 @@ def emanuel_mixing_tendencies(
         + jax.nn.sigmoid(sat_branch_sharpness * (ALTEM - CWAT)), 0.0, 1.0) * j_gt_i
     ANUM2 = ANUM - LV_j * (QTI - QS_j - CWAT * BF2)
     DENOM2 = DENOM + LV_j * (Q_i - QTI)
-    SIJ2 = ANUM2 / _hard_denom(DENOM2, denom_floor)
+    SIJ2 = ANUM2 * _floor_recip(DENOM2, denom_floor, denom_floor_sharpness)
     ALTEM2 = SIJ2 * Q_i + (1.0 - SIJ2) * QTI - QS_j - (BF2 - 1.0) * CWAT
     # The oracle's diagonal is exactly 1 (SIJ(I,I)=1, never re-solved: J>I).
     SIJ_eff = jnp.where(eye, 1.0, (1.0 - cond) * SIJ + cond * SIJ2)
@@ -473,57 +612,84 @@ def emanuel_mixing_tendencies(
            & win_i[:, :, None] & win_j[:, None, :])
 
     QENT = SIJ_eff * Q_i + (1.0 - SIJ_eff) * QTI
-    ELIJ = jnp.maximum(ALTEM_eff, 0.0) * sij_active
+    ELIJ = _relu(ALTEM_eff, condensate_sharpness) * sij_active
     one_minus_sij = jnp.clip(1.0 - SIJ_eff, 1.0 - sij_upper_gate, None)
     MENT_raw = (m_i[:, :, None] / one_minus_sij) * sij_active
     nent = jnp.sum(act, axis=-1)
+    # Smooth NENT for the soft local-detrainment weight: the same band and
+    # windows, smoothed, off the diagonal.
+    nent_soft = jnp.sum(jnp.where(eye, 0.0, sij_active), axis=-1)
 
     # ---- SCRIT and the DO 200 normalisation --------------------------------
     qp1 = q_nk[:, None] - ep * clw
-    scrit = (h - hp - lv * (qp1 - qs)) / _hard_denom(h - hp + lv * (qf - qp1), denom_floor)
-    scrit = jnp.where(qp1 - qs + scrit * (qf - qp1) < 0.0, 1.0, scrit)
-    scrit = jnp.maximum(scrit, 0.0)                   # (ncol, i)
+    scrit = (h - hp - lv * (qp1 - qs)) * _floor_recip(
+        h - hp + lv * (qf - qp1), denom_floor, denom_floor_sharpness)
+    # IF(QP1 - QS + SCRIT*(Q - QP1) < 0) SCRIT = 1 [kg/kg], then MAX(SCRIT, 0).
+    sat_w = _lt(qp1 - qs + scrit * (qf - qp1), 0.0, condensate_sharpness)
+    scrit = _blend(sat_w, 1.0, scrit, condensate_sharpness)
+    scrit = _relu(scrit, scrit_floor_sharpness)       # (ncol, i)
 
     # Clipped SIJ as stored by the oracle: J window only, 1 on the diagonal.
-    S = jnp.where(win_j[:, None, :], jnp.clip(SIJ_eff, 0.0, 1.0), 0.0)
+    S = jnp.where(win_j[:, None, :], _sclip(SIJ_eff, 0.0, 1.0, sort_sharpness), 0.0)
     S = jnp.where(eye & win_i[:, :, None], 1.0, S)
     Sp = jnp.concatenate([S[:, :, 1:], jnp.zeros_like(S[:, :, :1])], axis=-1)
     Sm = jnp.concatenate([jnp.zeros_like(S[:, :, :1]), S[:, :, :-1]], axis=-1)
 
+    # The march's min/max/abs and its strict SMIN tests are smoothed by
+    # ``sort_sharpness``; ``J > I`` is an index test and stays hard.  The
+    # band indicator is the hard NENT band at ``sort_sharpness = inf`` and
+    # the smooth ``sij_active`` (off the diagonal) otherwise.
+    ss = sort_sharpness
+    act_w = (act.astype(dtype) if _hard(ss)
+             else jnp.where(eye, 0.0, sij_active))
+
     def _norm_step(smin, xs):
         j, s_j, sp_j, sm_j, a_j = xs
         gt = j > idx[None, :]
-        smid_u = jnp.minimum(s_j, scrit)
-        upd = a_j & gt & (smid_u < smin) & (sp_j < smid_u)
-        sjmax_u = jnp.where(upd, jnp.minimum(jnp.minimum(sp_j, s_j), scrit), smid_u)
-        sjmin_u = jnp.where(upd, jnp.minimum(jnp.maximum(sm_j, s_j), scrit), smid_u)
-        smin = jnp.where(upd, smid_u, smin)
-        smid_d = jnp.maximum(s_j, scrit)
-        sjmax_d = jnp.maximum(sp_j, scrit)
-        sjmin_d = jnp.maximum(sm_j, scrit)            # Sm = 0 at the lowest level
+        smid_u = _smin(s_j, scrit, ss)
+        upd = a_j * gt * _lt(smid_u, smin, ss) * _lt(sp_j, smid_u, ss)
+        sjmax_u = _blend(upd, _smin(_smin(sp_j, s_j, ss), scrit, ss), smid_u, ss)
+        sjmin_u = _blend(upd, _smin(_smax(sm_j, s_j, ss), scrit, ss), smid_u, ss)
+        smin = _blend(upd, smid_u, smin, ss)
+        smid_d = _smax(s_j, scrit, ss)
+        sjmax_d = _smax(sp_j, scrit, ss)
+        sjmin_d = _smax(sm_j, scrit, ss)              # Sm = 0 at the lowest level
         smid = jnp.where(gt, smid_u, smid_d)
-        w = (jnp.abs(jnp.where(gt, sjmax_u, sjmax_d) - smid)
-             + jnp.abs(jnp.where(gt, sjmin_u, sjmin_d) - smid))
+        w = (_sabs(jnp.where(gt, sjmax_u, sjmax_d) - smid, ss)
+             + _sabs(jnp.where(gt, sjmin_u, sjmin_d) - smid, ss))
         return smin, w
 
     xs = (idx, jnp.moveaxis(S, 2, 0), jnp.moveaxis(Sp, 2, 0),
-          jnp.moveaxis(Sm, 2, 0), jnp.moveaxis(act, 2, 0))
+          jnp.moveaxis(Sm, 2, 0), jnp.moveaxis(act_w, 2, 0))
     _, dw = lax.scan(_norm_step, jnp.ones_like(scrit), xs)
     prob_w = jnp.moveaxis(dw, 0, 2) * dph[:, None, :] * sij_active
     # ASIJ = MAX(1e-21, ASIJ), written so a floored row divides by the
     # constant: same value, but no derivative through 1/ASIJ**2, which
     # overflows in fp32 (1e-21**-2) and turns gradients/tangents into NaN.
     asij = jnp.sum(prob_w, axis=-1, keepdims=True)
-    ok = asij > _ASIJ_FLOOR
-    MENT = jnp.where(ok, MENT_raw * prob_w / jnp.where(ok, asij, 1.0),
-                     MENT_raw * prob_w / _ASIJ_FLOOR)
+    if _hard(asij_floor_sharpness):
+        ok = asij > _ASIJ_FLOOR
+        MENT = jnp.where(ok, MENT_raw * prob_w / jnp.where(ok, asij, 1.0),
+                         MENT_raw * prob_w / _ASIJ_FLOOR)
+    else:
+        # Smooth MAX(ASIJ, 1e-21) in units of the floor, so no 1/1e-21**2
+        # (fp32 overflow) is formed; rows far above the floor divide by ASIJ.
+        big = asij > _ASIJ_SPLIT * _ASIJ_FLOOR
+        a_small = jnp.where(big, 1.0, asij / _ASIJ_FLOOR)
+        MENT = jnp.where(
+            big, MENT_raw * prob_w / jnp.where(big, asij, 1.0),
+            MENT_raw * (prob_w / _ASIJ_FLOOR) / _smax(a_small, 1.0, asij_floor_sharpness))
     bsum = jnp.sum(MENT, axis=-1)
-    # Local detrainment: NENT = 0 (DO 170) or BSUM < 1e-18 (DO 190).
-    local = (nent == 0) | (bsum < _BSUM_MIN)
-    diag_local = eye & local[:, :, None]
-    MENT = MENT + jnp.where(diag_local, m_i[:, :, None], 0.0)
-    QENT = jnp.where(diag_local, QTI, QENT)
-    ELIJ = jnp.where(diag_local, clw[:, :, None], ELIJ)
+    # Local detrainment: NENT = 0 (DO 170) or BSUM < 1e-18 (DO 190), as the
+    # weight w_local = 1 - [NENT > 0]*[BSUM >= 1e-18], each factor smoothed.
+    has_ent = ((nent > 0).astype(dtype) if _hard(nent_count_sharpness)
+               else sigmoid_switch(nent_soft - 0.5, nent_count_sharpness))
+    w_local = 1.0 - has_ent * sigmoid_switch(bsum - _BSUM_MIN, bsum_sharpness)
+    wl = jnp.where(eye, w_local[:, :, None], 0.0)
+    hard_local = _hard(nent_count_sharpness) and _hard(bsum_sharpness)
+    MENT = MENT + wl * m_i[:, :, None]
+    QENT = _blend(wl, QTI, QENT, math.inf if hard_local else 1.0)
+    ELIJ = _blend(wl, clw[:, :, None], ELIJ, math.inf if hard_local else 1.0)
 
     # ---- tendencies (DO 410-500, mixing terms) -----------------------------
     m_above = jnp.maximum(jnp.cumsum(m_i[:, ::-1], axis=-1)[:, ::-1] - m_i, 0.0)
@@ -550,7 +716,7 @@ def emanuel_mixing_tendencies(
     ment_ii = jnp.sum(jnp.where(eye, MENT, 0.0), axis=-1)
     qent_ii = jnp.sum(jnp.where(eye, QENT, 0.0), axis=-1)
     ft = ft + g * dpinv * ment_ii * (hp - h + Tf * (cpv - cpd) * (qf - qent_ii)) * cpn_inv
-    AWAT = jnp.maximum(ELIJ - ((1.0 - ep) * clw)[:, None, :], 0.0)
+    AWAT = _relu(ELIJ - ((1.0 - ep) * clw)[:, None, :], condensate_sharpness)
     k_lt_j = j_gt_i                                   # origin k (axis 1) < level j
     detr = MENT * (QENT - k_lt_j * AWAT - Q_j)
     fq = fq + g * dpinv * jnp.sum(detr, axis=1)

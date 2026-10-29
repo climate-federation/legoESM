@@ -12,14 +12,24 @@ downdraught (``dd``) and with the oracle's downdraught skip taken (``nodd``,
 what ``enable_unsaturated_downdraft=False`` selects).
 
 Tolerance (user decision 2026-10-19): max relative error <= 1e-10 in fp64 at
-the hard limit of the existing smoothing fields.  Error metric: the tier-1
-oracle tests' field-normalised ``max|ours - oracle| / max|oracle|`` over all
-columns of a group.
+the hard limit of the smoothing fields (``HARD``: ``math.inf`` for every
+RULE 5 field, 1e3/1e12 for the five older sigmoid fields).  Error metric: the
+tier-1 oracle tests' field-normalised ``max|ours - oracle| / max|oracle|``
+over all columns of a group.
+
+RULE 5 gap at the default smoothing: pinned PER COLUMN in
+``oracle_fixtures/emanuel_convect43c_default_gaps.json`` (per group, per
+output FT / FQ / CBMF; per column ``max_k|ours - oracle| / max_k|oracle|``,
+absolute where the oracle column is all zero), asserted to 1e-6 relative with
+a 1e-12 absolute floor.  Regenerate (only with a change to a smooth form or a
+default sharpness, stating why) with
+``python tests/atmosphere/test_emanuel_convect43c_oracle.py``.
 """
 
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 
 import jax
@@ -34,7 +44,18 @@ from legoesm import constants
 jax.config.update("jax_enable_x64", True)
 
 FIXTURE = Path(__file__).resolve().parent / "oracle_fixtures" / "emanuel_convect43c.npz"
+GAPS = FIXTURE.with_name("emanuel_convect43c_default_gaps.json")
 TOL = 1.0e-10
+# RULE 5 fields whose hard limit is math.inf exactly.
+RULE5_FIELDS = (
+    "source_temperature_gate_sharpness", "source_humidity_gate_sharpness",
+    "plcl_gate_sharpness", "stable_exit_sharpness", "cold_start_sharpness",
+    "cbmf_sharpness", "precip_efficiency_sharpness", "condensate_sharpness",
+    "scrit_floor_sharpness", "frac_sharpness", "defrac_floor_sharpness",
+    "tlift_floor_sharpness", "denom_floor_sharpness", "nent_count_sharpness",
+    "bsum_sharpness", "asij_floor_sharpness", "sort_sharpness",
+    "rain_placement_sharpness", "rain_column_sharpness",
+)
 HARD = dict(
     level_window_sharpness=1.0e3,
     sij_gate_sharpness=1.0e12,
@@ -43,15 +64,22 @@ HARD = dict(
     lcl_pressure_sharpness=1.0e3,
     downdraft_freeze_transition_K=1.0e-9,
     downdraft_ep_gate_width=1.0e-12,
+    **{name: math.inf for name in RULE5_FIELDS},
 )
 GROUPS = [(v, cb) for v in ("nodd", "dd") for cb in ("cb0", "cbw")]
+# check_grads step per input (measured, see test_check_grads_at_default_sharpness).
+CHECK_GRADS_EPS = {"T": 1.0e-6, "q": 1.0e-9}
+
+
+def _load():
+    z = dict(np.load(FIXTURE))
+    z["meta"] = json.loads(str(z["meta"]))
+    return z
 
 
 @pytest.fixture(scope="module")
 def fx():
-    z = dict(np.load(FIXTURE))
-    z["meta"] = json.loads(str(z["meta"]))
-    return z
+    return _load()
 
 
 def _cfg(v, hard=True):
@@ -120,19 +148,57 @@ def test_matches_convect43c_oracle_at_hard_limit(fx, v, cb):
     assert max(errs.values()) <= TOL, errs
 
 
-@pytest.mark.parametrize("v,cb", GROUPS)
-def test_default_smoothing_gap_reported(fx, v, cb):
-    """Not a fidelity gate: prints the gap at the default smoothing (quoted in
-    the PR) and checks it is finite."""
-    out, prog = _run(fx, v, cb, _cfg(v, hard=False))
-    p = f"{v}_{cb}"
-    e = (
-        _err(out.dT_dt, fx[f"{p}_FT"]),
-        _err(out.dq_v_dt, fx[f"{p}_FQ"]),
-        _err(prog[:, -1], fx[f"{p}_cbmf"]),
-    )
-    print(f"Emanuel {p} default smoothing: FT {e[0]:.3e} FQ {e[1]:.3e} CBMF {e[2]:.3e}")
-    assert np.all(np.isfinite(e))
+def _per_case(a, b):
+    """Per column: max_k|a - b| / max_k|b|, absolute where b's column is 0."""
+    a = np.asarray(a, np.float64).reshape(len(b), -1)
+    b = np.asarray(b, np.float64).reshape(len(b), -1)
+    d = np.max(np.abs(a - b), axis=1)
+    s = np.max(np.abs(b), axis=1)
+    return np.where(s > 0.0, d / np.where(s > 0.0, s, 1.0), d)
+
+
+def _default_gaps(fx):
+    gaps = {}
+    for v, cb in GROUPS:
+        out, prog = _run(fx, v, cb, _cfg(v, hard=False))
+        p = f"{v}_{cb}"
+        for name, ours, ora in (
+            ("FT", out.dT_dt, fx[f"{p}_FT"]),
+            ("FQ", out.dq_v_dt, fx[f"{p}_FQ"]),
+            ("CBMF", prog[:, -1], fx[f"{p}_cbmf"]),
+        ):
+            gaps[f"{p}/{name}"] = _per_case(ours, ora).tolist()
+    return gaps
+
+
+def test_default_smoothing_gap_pinned_per_case(fx):
+    """RULE 5: the gap at the default smoothing, per fixture column, equals the
+    recorded value to 1e-6 relative / 1e-12 absolute."""
+    pinned = json.loads(GAPS.read_text())["gaps"]
+    measured = _default_gaps(fx)
+    assert set(measured) == set(pinned)
+    for key, ref in pinned.items():
+        got, ref = np.asarray(measured[key]), np.asarray(ref)
+        print(f"Emanuel {key} default gap: max over columns {np.max(got):.3e}")
+        assert got.shape == ref.shape, key
+        assert np.all(np.abs(got - ref) <= 1.0e-12 + 1.0e-6 * np.abs(ref)), key
+
+
+def test_smoothing_field_validation():
+    """The smooth forms refuse settings they are not valid for."""
+    T, q, pf, ph = _toy_column()
+    prog = jnp.zeros_like(T)
+    for bad in (dict(tlcrit=1.0), dict(denom_floor_sharpness=1.0e3),
+                dict(cbmf_sharpness=0.0), dict(sort_sharpness=-1.0)):
+        with pytest.raises(ValueError):
+            emanuel_convection(T, q, pf, ph, prog, 1800.0, EmanuelConfig(**bad))
+    emanuel_convection(T, q, pf, ph, prog, 1800.0,
+                       EmanuelConfig(denom_floor_sharpness=math.inf))
+
+
+def _toy_column():
+    fx_ = _load()
+    return tuple(jnp.asarray(fx_[k][:1]) for k in ("T", "q", "p_full", "p_half"))
 
 
 @pytest.mark.parametrize("v,cb", GROUPS)
@@ -219,3 +285,49 @@ def test_eager_jit_parity(fx, v):
         if x is not None:
             assert _err(y, x) <= TOL
     assert _err(pb, pa) <= TOL
+
+
+@pytest.mark.parametrize("v", ("nodd", "dd"))
+def test_check_grads_at_default_sharpness(fx, v):
+    """RULE 5 gradient test: reverse-mode derivatives at the default
+    smoothing agree with finite differences (fp64, order 1, reviewer pick
+    2026-10-29), w.r.t. T and, separately, q, on every fixture column at once,
+    from the carried CBMF 0 (cold start) and 0.01.  The loss sums the outputs
+    every switch feeds (FT, FQ, rain, CBMF)."""
+    from jax.test_util import check_grads
+
+    T0, q0, pf, ph = (jnp.asarray(fx[k], jnp.float64) for k in ("T", "q", "p_full", "p_half"))
+    cfg = _cfg(v, hard=False)
+    for cb in ("cb0", "cbw"):
+        prog = jnp.zeros_like(T0).at[:, -1].set(fx["meta"]["cbmf_in"][cb])
+
+        def loss(T, q):
+            o, pr = emanuel_convection(T, q, pf, ph, prog, 1800.0, cfg)
+            return (jnp.sum(o.dT_dt) + 1.0e3 * jnp.sum(o.dq_v_dt)
+                    + 1.0e3 * jnp.sum(o.dq_r_conv_dt) + 1.0e2 * jnp.sum(pr))
+
+        for name, f, x, eps in (
+            ("T", jax.jit(lambda T: loss(T, q0)), T0, CHECK_GRADS_EPS["T"]),
+            ("q", jax.jit(lambda q: loss(T0, q)), q0, CHECK_GRADS_EPS["q"]),
+        ):
+            assert float(jnp.max(jnp.abs(jax.grad(f)(x)))) > 0.0, (v, cb, name)
+            check_grads(f, (x,), order=1, modes=("rev",), eps=eps)
+
+
+if __name__ == "__main__":  # regenerate the pinned default gaps
+    GAPS.write_text(
+        json.dumps(
+            {
+                "_note": (
+                    "Emanuel CONVECT v4.3c default-smoothing gap per fixture column vs the "
+                    "running oracle (max_k|ours-oracle|/max_k|oracle|, absolute where the "
+                    "oracle column is 0); written by "
+                    "tests/atmosphere/test_emanuel_convect43c_oracle.py, fp64, "
+                    f"EmanuelConfig() = {EmanuelConfig()._asdict()}"
+                ),
+                "gaps": _default_gaps(_load()),
+            },
+            indent=1,
+        )
+        + "\n"
+    )

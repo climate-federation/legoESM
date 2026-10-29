@@ -172,6 +172,25 @@ __param_spec__ = {
             "M_b_max": "RETIRED: transport mass-flux cap, no CONVECT v4.3c counterpart; non-default values raise",
             "cbmf_carry_max": "RETIRED: carried cloud-base mass-flux cap, no CONVECT v4.3c counterpart; non-default values raise",
             "strict_index_sharpness": "numerics: sigmoid sharpness on the strict integer-index inequalities",
+            "source_temperature_gate_sharpness": "numerics: RULE 5 smoothing sharpness of the T(NK) < 250 K rejection (inf = oracle)",
+            "source_humidity_gate_sharpness": "numerics: RULE 5 smoothing sharpness of the Q(NK) <= 0 rejection (inf = oracle)",
+            "plcl_gate_sharpness": "numerics: RULE 5 smoothing sharpness of the PLCL [200, 2000) hPa rejection (inf = oracle)",
+            "stable_exit_sharpness": "numerics: RULE 5 smoothing sharpness of the cold-start stable exit TVP <= TV - DTMAX (inf = oracle)",
+            "cold_start_sharpness": "numerics: RULE 5 smoothing sharpness of the cold-start test CBMF_old = 0 (inf = oracle)",
+            "cbmf_sharpness": "numerics: RULE 5 smoothing sharpness of the CBMF >= 0 floor (inf = oracle)",
+            "precip_efficiency_sharpness": "numerics: RULE 5 smoothing sharpness of the ELACRIT/EP clips (inf = oracle)",
+            "condensate_sharpness": "numerics: RULE 5 smoothing sharpness of the CLW/ELIJ/AWAT positivity and the SCRIT humidity test (inf = oracle)",
+            "scrit_floor_sharpness": "numerics: RULE 5 smoothing sharpness of the SCRIT >= 0 floor (inf = oracle)",
+            "frac_sharpness": "numerics: RULE 5 smoothing sharpness of the FRAC clip (inf = oracle)",
+            "defrac_floor_sharpness": "numerics: RULE 5 smoothing sharpness of the FRAC denominator floor (inf = oracle)",
+            "tlift_floor_sharpness": "numerics: RULE 5 smoothing sharpness of the TLIFT 35 K floor (inf = oracle)",
+            "denom_floor_sharpness": "numerics: RULE 5 smoothing sharpness of the |DENOM| < 0.01 floor (reciprocal blend) (inf = oracle)",
+            "nent_count_sharpness": "numerics: RULE 5 smoothing sharpness of the NENT = 0 local-detrainment test (inf = oracle)",
+            "bsum_sharpness": "numerics: RULE 5 smoothing sharpness of the BSUM < 1e-18 local-detrainment test (inf = oracle)",
+            "asij_floor_sharpness": "numerics: RULE 5 smoothing sharpness of the ASIJ 1e-21 floor (inf = oracle)",
+            "sort_sharpness": "numerics: RULE 5 smoothing sharpness of the DO 200 SMIN march (inf = oracle)",
+            "rain_placement_sharpness": "numerics: RULE 5 smoothing sharpness of the per-level rain-placement drying weight (inf = oracle)",
+            "rain_column_sharpness": "numerics: RULE 5 smoothing sharpness of the column rain residual and no-drying fallback (inf = oracle)",
         },
         "params": {
             "alpha_closure": {"units": "1", "bounds": (0.05, 0.6), "tunable_tier": 1, "transform": "sigmoid", "category": "cape_closure", "reference": "Emanuel (1991) CONVECT v4.3c ALPHA", "shape": None},
@@ -1100,6 +1119,51 @@ class EmanuelConfig(NamedTuple):
     # EPMAX·(1 − ELACRIT/CLW), clipped to [0, EPMAX] (oracle convect43c.f
     # ``EPMAX = 0.999``).
     precip_efficiency_max: float = 0.999
+    # --- RULE 5 smoothing of the remaining oracle switches (#2158) --------
+    # Each smooths one CONVECT switch on traced state (see the module
+    # docstring of ``_emanuel_mixing``); ``math.inf`` is the oracle exactly.
+    # Defaults: reviewer picks 2026-10-29 (codex + GLM, split rule).
+    # IFLAG 0 rejection T(NK) < 250 K [1/K].
+    source_temperature_gate_sharpness: float = 1.0
+    # IFLAG 0 rejection Q(NK) <= 0 [1/(kg/kg)].
+    source_humidity_gate_sharpness: float = 1.0e6
+    # IFLAG 2 rejection PLCL outside [200, 2000) hPa [1/Pa].
+    plcl_gate_sharpness: float = 1.0e-3
+    # Cold-start stable exit TVP(ICB) <= TV(ICB) - DTMAX [1/K].
+    stable_exit_sharpness: float = 10.0
+    # Cold-start test CBMF_old = 0, as exp(-s*CBMF_old) [m^2 s/kg].
+    cold_start_sharpness: float = 1.0e4
+    # CBMF = MAX(..., 0), softplus [m^2 s/kg] (width 1e-4 kg/m^2/s).
+    cbmf_sharpness: float = 1.0e4
+    # ELACRIT and EP clips [dimensionless].
+    precip_efficiency_sharpness: float = 1.0e3
+    # CLW / ELIJ / AWAT positivity and the SCRIT = 1 humidity test [1/(kg/kg)].
+    condensate_sharpness: float = 1.0e6
+    # MAX(SCRIT, 0) [dimensionless].
+    scrit_floor_sharpness: float = 1.0e3
+    # FRAC = CLIP(-CAPE/DEFRAC, 0, 1) [dimensionless].
+    frac_sharpness: float = 100.0
+    # DEFRAC = MAX(CAPEM - CAPE, 0.001) [1/K].
+    defrac_floor_sharpness: float = 1.0e4
+    # TLIFT MAX(TG, 35 K) [1/K].
+    tlift_floor_sharpness: float = 1.0
+    # ABS(DENOM) < denom_floor -> denom_floor, blended in the reciprocal
+    # [kg/J]; must satisfy sharpness*denom_floor >= 120 (validated).
+    denom_floor_sharpness: float = 1.0e5
+    # Local detrainment NENT = 0 (soft count, threshold 0.5) [1/count].
+    nent_count_sharpness: float = 10.0
+    # Local detrainment BSUM < 1e-18 [m^2 s/kg].
+    bsum_sharpness: float = 1.0e8
+    # MAX(ASIJ, 1e-21), in units of the floor [dimensionless].
+    asij_floor_sharpness: float = 10.0
+    # DO 200 SMIN march min/max/abs and strict tests, and the [0, 1] clip of
+    # the stored SIJ [dimensionless].
+    sort_sharpness: float = 40.0
+    # Rain placement: the per-level drying MAX(-FQ, 0) [1/(kg/kg/s)] and the
+    # column residual MAX(-net water, 0) plus the no-drying uniform fallback
+    # [m^2 s/kg]; C1 ramps exactly 0 below 0 and exact above 1/sharpness.
+    rain_placement_sharpness: float = 1.0e9
+    rain_column_sharpness: float = 1.0e5
     # NOTE: Emanuel deliberately has NO ``subsidence_solve`` selector, unlike
     # the rest of the mass-flux family.  Its SHIPPED path
     # (``use_genuine_mixing=True``) is a buoyancy-sorting MIXING MATRIX that
