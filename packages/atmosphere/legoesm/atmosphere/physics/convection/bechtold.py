@@ -2139,6 +2139,11 @@ def bechtold_convection(
         Pressure vertical velocity [Pa/s] (``PVERVEL``) for the RCAPQADV
         resolved-ascent gate at ~500 hPa.  ``None`` disables only that
         OR-branch (faithful where ``|omega| << 100 Pa/s``).
+    shf_w_m2, lhf_w_m2 : jax.Array or None, shape (ncol,)
+        Surface sensible / latent heat flux [W/m2], POSITIVE UPWARD (into
+        the atmosphere), the convention of the surface layer that produces
+        them.  The faithful IFS chain negates them at its entry into the
+        IFS PAHFS/PQHFL convention (positive downward).
 
     Returns
     -------
@@ -2156,10 +2161,16 @@ def bechtold_convection(
         from legoesm.atmosphere.physics.convection._ifs_faithful import (
             ifs_faithful_convection,
         )
+        if shf_w_m2 is None or lhf_w_m2 is None:
+            raise ValueError(
+                "use_ifs_ascent needs the surface heat fluxes shf_w_m2 and "
+                "lhf_w_m2 (the IFS trigger reads PAHFS/PQHFL).")
         out, M_u_new = ifs_faithful_convection(
             T, q_v, p_full, p_half, u, v, conv_prog_profile,
             conv_stoch_state, prng_key, dt, config,
-            shf_w_m2=shf_w_m2, lhf_w_m2=lhf_w_m2, land_frac=land_frac,
+            # positive-upward model fluxes -> IFS PAHFS/PQHFL sign (positive
+            # downward, cubasen.F90:341 ZKHVFL=(PAHFS*ZRCPD+RETV*PTEN*PQHFL)/...)
+            shf_w_m2=-shf_w_m2, lhf_w_m2=-lhf_w_m2, land_frac=land_frac,
             dT_dt_adv=dT_dt_dyn, dq_dt_adv=dq_dt_dyn,
             # PTENT/PTENQ: cumastrn's TOTAL model tendency, which in IFS holds
             # dynamics + radiation + vertical diffusion accumulated before the

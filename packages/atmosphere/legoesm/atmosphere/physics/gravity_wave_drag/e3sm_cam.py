@@ -169,6 +169,7 @@ from legoesm.atmosphere.physics.gravity_wave_drag.oro_source import (
     depth_averaged_oro_source,
 )
 from legoesm.atmosphere.physics.gravity_wave_drag.output import GWDOutput
+from legoesm.core.smooth import pnorm_smooth_min
 
 # Machine-checked scheme contract (see tests/test_physics_contracts.py). Applies
 # to the top-level driver ``e3sm_cam_gwd``; the ``gw_*`` functions above/below
@@ -1013,6 +1014,11 @@ def gw_drag_prof(
     orographic_only: bool,
     do_taper: bool = False,
     alpha_iface: jax.Array | None = None,
+    *,
+    softmin_sharpness: float | None = None,
+    crit_level_sharpness: float | None = None,
+    crit_level_floor: float = 0.0,
+    tndmax_per_day: float | None = None,
 ):
     """Stress-profile + tendency solver, faithful to ``gw_drag_prof``.
 
@@ -1030,6 +1036,16 @@ def gw_drag_prof(
         Height-dependent Newtonian-cooling coefficient [1/s] at interfaces
         (E3SM ``alpha(0:pver)``).  ``None`` -> uniform ``cfg.alpha_newtonian``
         at every interface (the default clean-oracle behaviour).
+    softmin_sharpness, crit_level_sharpness, crit_level_floor : optional
+        Smoothing used by callers that carry their own sharpness fields
+        (``lindzen.py``): a p-norm smooth min (p = ``softmin_sharpness``) for
+        ``min(taudmp, tausat)``, and, in the form ``mcfarlane.py`` uses, a smooth XNOR of the two
+        ``(u - c) - crit_level_floor`` sign tests for the critical level.
+        Each reduces to the E3SM hard switch at infinite sharpness (floor 0).
+        ``None`` (default) = the exact E3SM kinks, unchanged.
+    tndmax_per_day : optional
+        Tendency ceiling [m/s/day] overriding the E3SM value selected by
+        ``orographic_only`` (500 orographic-only, else ``cfg.tndmax_per_day``).
 
     Returns
     -------
@@ -1053,7 +1069,8 @@ def gw_drag_prof(
     kwv = cfg.kwv
     # E3SM: tndmax = 400/86400 for spectral (multi-source), 500/86400 when
     # orographic_only (gw_common.F90:156).  (codex iter-1 finding #4)
-    tndmax_per_day = _TNDMAX_ORO_PER_DAY if orographic_only else cfg.tndmax_per_day
+    if tndmax_per_day is None:
+        tndmax_per_day = _TNDMAX_ORO_PER_DAY if orographic_only else cfg.tndmax_per_day
     tndmax = tndmax_per_day / 86400.0
     # Newtonian cooling: a height profile (E3SM alpha(k)) when supplied, else
     # a single uniform value at every interface.  alpha_arr is (ncol, nlev+1).
@@ -1093,12 +1110,22 @@ def gw_drag_prof(
         ubmc = ubi_k - c_col                     # (ncol,nwav)  (u-c) at k
         ubmc_below = ubi_kp1 - c_col             # (u-c) at k+1
 
-        same_sign = (ubmc * ubmc_below) > 0.0
         tausat = jnp.abs(
             effkwv * rhoi[:, k][:, None] * ubmc ** 3
             / (2.0 * ni[:, k][:, None])
         )
-        tausat = jnp.where(same_sign, tausat, 0.0)
+        if crit_level_sharpness is None:
+            same_sign = (ubmc * ubmc_below) > 0.0
+            tausat = jnp.where(same_sign, tausat, 0.0)
+        else:
+            # Smooth XNOR of the two sign tests (mcfarlane.py form).
+            s_top = jax.nn.sigmoid(crit_level_sharpness * (ubmc - crit_level_floor))
+            s_bot = jax.nn.sigmoid(
+                crit_level_sharpness * (ubmc_below - crit_level_floor))
+            tausat = tausat * (s_top * s_bot + (1.0 - s_top) * (1.0 - s_bot))
+            # E3SM's strict test (product > 0) fails at an exactly zero wind,
+            # where the sigmoids sit at 1/2 for any sharpness.
+            tausat = jnp.where(ubmc * ubmc_below == 0.0, 0.0, tausat)
         tausat = jnp.where(tausat <= cfg.taumin, 0.0, tausat)
 
         # diffusivity: d = max(dback, dscal*dsat) over waves.  alpha is the
@@ -1139,7 +1166,15 @@ def gw_drag_prof(
         )
         taudmp = tau_below * jnp.exp(wrk)
         taudmp = jnp.where(taudmp <= cfg.taumin, 0.0, taudmp)
-        tau_computed = jnp.minimum(taudmp, tausat)
+        if softmin_sharpness is None:
+            tau_computed = jnp.minimum(taudmp, tausat)
+        else:
+            # Smooth min(taudmp, tausat): p-norm (taudmp^-p + tausat^-p)^(-1/p),
+            # p = softmin_sharpness (shared with mcfarlane.py; user decision
+            # 2026-10-28).  C-infinity for positive stresses, in
+            # [0, min(taudmp, tausat)]; exact min at p -> inf.
+            tau_computed = pnorm_smooth_min(taudmp, tausat, softmin_sharpness, cfg.taumin)
+            tau_computed = jnp.where(tausat > 0.0, tau_computed, 0.0)
         # In the source region keep the launched value at interface k.
         tau_k = jnp.where(active, tau_computed, tau_launched_iface[:, :, k])
 

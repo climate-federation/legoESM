@@ -166,8 +166,12 @@ def ifs_ascent_config(config) -> IFSAscentConfig:
 
 def ifs_closure_config(config) -> IFSClosureConfig:
     """The run's closure parameters: RCAPQADV = cape_qadv_weight (both the
-    unitless IFS 0.8); the IFS source defaults for the rest."""
-    return IFSClosureConfig()._replace(rcapqadv=config.cape_qadv_weight)
+    unitless IFS 0.8), the no-supply shallow mode and its smoothing width by
+    name; the IFS source defaults for the rest."""
+    return IFSClosureConfig()._replace(
+        rcapqadv=config.cape_qadv_weight,
+        shallow_nosupply=config.ifs_shallow_nosupply,
+        shallow_supply_width_w_m2=config.ifs_shallow_supply_width_w_m2)
 
 
 def ifs_test_ascent_config(config) -> IFSTestAscentConfig:

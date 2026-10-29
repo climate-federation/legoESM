@@ -42,8 +42,8 @@ def _kwargs(ncol, nlev):
     z = jnp.zeros((ncol, nlev))
     return dict(u=z, v=z, conv_prog_profile=z, conv_stoch_state=jnp.zeros(ncol),
                 prng_key=None, dt=112.5, land_frac=jnp.zeros(ncol),
-                shf_w_m2=jnp.full((ncol,), -20.0),
-                lhf_w_m2=jnp.full((ncol,), -100.0),
+                shf_w_m2=jnp.full((ncol,), 20.0),     # positive upward (model sign)
+                lhf_w_m2=jnp.full((ncol,), 100.0),
                 dT_dt_dyn=z, dq_dt_dyn=z)
 
 
@@ -418,3 +418,143 @@ def test_reverse_grad_finite_on_non_convecting_column(_x64, field):
     g, fd = _param_grad_and_fd(30, field)
     assert np.isfinite(g)
     assert g == fd == 0.0
+
+
+def test_faithful_chain_receives_ifs_signed_surface_fluxes(monkeypatch):
+    """bechtold takes positive-upward fluxes; the IFS trigger reads PAHFS /
+    PQHFL positive downward (cubasen.F90:341), so the chain must see them
+    negated."""
+    T, q, p_full, p_half = _deep_column()
+    kw = _kwargs(*T.shape)
+    seen = {}
+    orig = F.ifs_departure_search_refined
+
+    def spy(*a, **k):
+        seen["shf"], seen["lhf"] = k["shf_w_m2"], k["lhf_w_m2"]
+        return orig(*a, **k)
+
+    monkeypatch.setattr(F, "ifs_departure_search_refined", spy)
+    bechtold_convection(T, q, p_full, p_half,
+                        config=BechtoldConfig(use_ifs_ascent=True), **kw)
+    np.testing.assert_array_equal(np.asarray(seen["shf"]), -np.asarray(kw["shf_w_m2"]))
+    np.testing.assert_array_equal(np.asarray(seen["lhf"]), -np.asarray(kw["lhf_w_m2"]))
+
+
+def test_upward_surface_fluxes_launch_the_surface_parcel(monkeypatch):
+    """Upward surface heat and moisture fluxes, as the surface layer passes
+    them (positive upward), must let the surface test parcel go (the 30-level
+    sounding departs from the surface); with the sign unflipped the buoyancy
+    flux had the wrong sign and convection was switched off."""
+    T, q, p_full, p_half = _deep_column()
+    kw = _kwargs(*T.shape)
+    got = {}
+    orig = F.ifs_departure_search_refined
+
+    def spy(*a, **k):
+        got["trig"] = orig(*a, **k)
+        return got["trig"]
+
+    monkeypatch.setattr(F, "ifs_departure_search_refined", spy)
+    bechtold_convection(T, q, p_full, p_half,
+                        config=BechtoldConfig(use_ifs_ascent=True), **kw)
+    trig = got["trig"]
+    assert float(np.asarray(trig.ldcum)[0]) > 0.5
+    assert int(np.asarray(trig.k_dpl)[0]) == T.shape[1] - 1
+
+
+# ---------------------------------------------------------------------------
+# Shallow closure with no sub-cloud supply (BechtoldConfig.ifs_shallow_nosupply)
+# 60-level deep sounding: first triggered deep, reclassified shallow.
+# ---------------------------------------------------------------------------
+
+_NOSUPPLY_CASES = {   # case -> (dq_dt_dyn [kg/kg/s], dT_dt_rad [K/day] or None)
+    "no_supply": (0.0, None),
+    "rad_cooling": (0.0, -1.5),
+    "supply": (1e-7, None),
+}
+# measured 2026-10-29 (x64): (cloud-base flux M_b1 [kg/m2/s], peak |dT/dt| [K/day])
+_NOSUPPLY_FIRST_GUESS = {
+    "no_supply": (0.45912254813980874, 292.0799722680822),
+    "rad_cooling": (0.45912254813980874, 292.0799722680822),
+    "supply": (0.20041796379722074, 129.81216574308928),
+}
+_NOSUPPLY_DEFAULT = {   # KNOWN DIFFERENCE: default "zero", width 1 W/m2
+    "no_supply": (0.0010753948197864782, 0.7338989438430872),
+    "rad_cooling": (1.8977114269968982e-07, 0.00012954043631907552),
+    "supply": (0.20041796379722074, 129.81216574308928),
+}
+
+
+def _nosupply_run(case, monkeypatch, **cfg_kw):
+    from legoesm.atmosphere.physics.convection import _ifs_closure as C
+    T, q, p_full, p_half = [a.astype(jnp.float64) for a in _deep_column(nlev=60)]
+    kw = _kwargs(*T.shape)
+    dq, rad = _NOSUPPLY_CASES[case]
+    kw["dq_dt_dyn"] = jnp.full(T.shape, dq)
+    if rad is not None:
+        kw["dT_dt_rad"] = jnp.full(T.shape, rad / 86400.0)
+    seen = {}
+    orig = C.shallow_closure
+
+    def spy(*a):
+        seen["args"] = a
+        seen["mb1"] = orig(*a)
+        return seen["mb1"]
+
+    monkeypatch.setattr(C, "shallow_closure", spy)
+    out, _, _ = bechtold_convection(
+        T, q, p_full, p_half,
+        config=BechtoldConfig(use_ifs_ascent=True, **cfg_kw), **kw)
+    peak = float(np.max(np.abs(np.asarray(out.dT_dt[0])))) * 86400.0
+    return float(np.asarray(seen["mb1"])[0]), peak, seen["args"]
+
+
+@pytest.mark.parametrize("case", sorted(_NOSUPPLY_CASES))
+def test_shallow_nosupply_first_guess_is_the_source(_x64, case, monkeypatch):
+    """'first_guess' = cumastrn.F90:912: with ZDHPBL <= 0 the closure keeps
+    the first guess (0.1*ZMFMAX for a deep-triggered column); the OpenIFS
+    single-column oracle reproduces 0.45910 kg/m2/s and 292.30 K/day here
+    (the 5e-5 offset is the two models' gravity constants)."""
+    mb1, peak, args = _nosupply_run(case, monkeypatch, ifs_shallow_nosupply="first_guess")
+    zmfub, zdhpbl = np.asarray(args[10])[0], float(np.asarray(args[4])[0])
+    if zdhpbl <= 0.0:
+        assert mb1 == zmfub
+    np.testing.assert_allclose([mb1, peak], _NOSUPPLY_FIRST_GUESS[case], rtol=1e-6, atol=1e-12)
+
+
+@pytest.mark.parametrize("case", sorted(_NOSUPPLY_CASES))
+def test_shallow_nosupply_hard_limit_is_max_supply_zero(_x64, case, monkeypatch):
+    """Width 0 is the hard max(ZDHPBL, 0): no supply gives exactly no
+    cloud-base flux; a positive supply is the source's ZDHPBL/ZDH."""
+    mb1, _, _ = _nosupply_run(case, monkeypatch, ifs_shallow_supply_width_w_m2=0.0)
+    if _NOSUPPLY_CASES[case][0] == 0.0:
+        assert mb1 == 0.0
+    else:
+        assert mb1 == _NOSUPPLY_FIRST_GUESS[case][0]
+
+
+@pytest.mark.parametrize("case", sorted(_NOSUPPLY_CASES))
+def test_shallow_nosupply_default_gap_per_case(_x64, case, monkeypatch):
+    """KNOWN DIFFERENCE at the default ('zero', width 1 W/m2), per case."""
+    mb1, peak, _ = _nosupply_run(case, monkeypatch)
+    np.testing.assert_allclose([mb1, peak], _NOSUPPLY_DEFAULT[case], rtol=1e-6, atol=1e-12)
+
+
+def test_shallow_nosupply_gradient_through_the_supply_ramp(_x64, monkeypatch):
+    """Finite, non-zero derivative of the cloud-base flux with respect to the
+    supply at the default width, on both sides of zero supply."""
+    from jax.test_util import check_grads
+    from legoesm.atmosphere.physics.convection import _ifs_closure as C
+    _, _, args = _nosupply_run("no_supply", monkeypatch)
+    g = constants.g
+
+    def f(z):
+        a = list(args)
+        a[4] = z
+        return C.shallow_closure(*a)
+
+    for z0 in (-g, 0.0, g):
+        z = jnp.asarray([z0])
+        check_grads(f, (z,), order=2, modes=("fwd", "rev"))
+        d = float(jax.grad(lambda x: f(x).sum())(z)[0])
+        assert np.isfinite(d) and d > 0.0

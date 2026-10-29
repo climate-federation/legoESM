@@ -535,7 +535,9 @@ def parse_args(argv: list[str] | None = None):
                         "'grachev2007_sheba' = SHEBA Arctic stable functions "
                         "(the sea-ice reference); 'gryanik2020' = modified "
                         "SHEBA; 'beljaars_holtslag1991' avoids stable flux "
-                        "collapse. Unstable branch stays Businger-Dyer.")
+                        "collapse. Unstable branch stays Businger-Dyer "
+                        "(heat scaled by Pr0 = 0.98 for gryanik2020, as in "
+                        "SurfaceFluxes.jl).")
     p.add_argument("--grid", type=str, default="all",
                    choices=GRID_TYPES + ["all"])
     p.add_argument("--resolution", type=str, default=None,
@@ -2961,6 +2963,7 @@ def _jra55_step(state, step_idx, dt, model, jra55_state):
         jra55_to_freshwater,
         load_jra55_slice,
     )
+    from legoesm.ocean.freshwater import net_freshwater_flux
     from legoesm.ocean.state import OceanSurfaceForcing
 
     day = float(step_idx) * dt / 86400.0
@@ -3023,7 +3026,10 @@ def _jra55_step(state, step_idx, dt, model, jra55_state):
         q_net=q_net,
         tau_x=tile_resp.tau_x * ramp,
         tau_y=tile_resp.tau_y * ramp,
-        freshwater=None,  # using the structured FreshwaterForcing path
+        # Mass and salt go through model.step(freshwater=fw); this copy is the
+        # vertical-mixing surface-buoyancy channel only (#2234), same form as
+        # the sea-ice blend: P - E + R + ice_fw, SSS restoring excluded.
+        freshwater=net_freshwater_flux(fw._replace(restoring=None)),
     )
 
     if jra55_state.get("enable_sponge", False):
@@ -3607,7 +3613,7 @@ def _build_jra55_block_fn(model, jra55_state, dt, spmd_step=None):
     from legoesm.coupler.coupler import ocean_tile_response
     from legoesm.coupler.ocean_forcing import omip_sea_ice_surface_forcing
     from legoesm.core.coupling_fields import AtmToSurface
-    from legoesm.ocean.freshwater import FreshwaterForcing
+    from legoesm.ocean.freshwater import FreshwaterForcing, net_freshwater_flux
     from legoesm.ocean.state import OceanSurfaceForcing
 
     coupler_cfg = jra55_state["coupler_cfg"]
@@ -3842,6 +3848,12 @@ def _build_jra55_block_fn(model, jra55_state, dt, spmd_step=None):
                     dt=dt, grid=ice_grid,
                     ocean_mask=state_in.land_mask.data,
                 )
+            else:
+                # Ice off: fill the vertical-mixing buoyancy channel the blend
+                # fills when ice is on (#2234); mass and salt still go through
+                # freshwater=fw only.
+                sf = sf._replace(freshwater=net_freshwater_flux(
+                    fw._replace(restoring=None)))
             if zero_fluxes:
                 fw = jax.tree_util.tree_map(jnp.zeros_like, fw)
                 sf = jax.tree_util.tree_map(jnp.zeros_like, sf)
@@ -3923,7 +3935,7 @@ def _build_jra55_block_fn_interp(model, jra55_state, dt, spmd_step=None):
     from legoesm.coupler.coupler import ocean_tile_response
     from legoesm.coupler.ocean_forcing import omip_sea_ice_surface_forcing
     from legoesm.core.coupling_fields import AtmToSurface
-    from legoesm.ocean.freshwater import FreshwaterForcing
+    from legoesm.ocean.freshwater import FreshwaterForcing, net_freshwater_flux
     from legoesm.ocean.state import OceanSurfaceForcing
     from legoesm.atmosphere.physics.radiation.solar import (
         cos_zenith_angle, solar_declination,
@@ -4218,6 +4230,11 @@ def _build_jra55_block_fn_interp(model, jra55_state, dt, spmd_step=None):
                         dt=dt, grid=ice_grid,
                         ocean_mask=state_in.land_mask.data,
                     )
+                else:
+                    # Ice off: same buoyancy-channel fill as the block path
+                    # (#2234).
+                    sf = sf._replace(freshwater=net_freshwater_flux(
+                        fw._replace(restoring=None)))
                 if zero_fluxes:
                     fw = jax.tree_util.tree_map(jnp.zeros_like, fw)
                     sf = jax.tree_util.tree_map(jnp.zeros_like, sf)
@@ -4304,7 +4321,13 @@ class MonthlyMldSstWriter:
     the shared de Boyer Montegut diagnostic (0.03 kg/m3 wrt 10 m).
     """
 
-    def __init__(self, path, *, z_coord, lat_deg, lon_deg):
+    def __init__(self, path, *, z_coord, lat_deg, lon_deg, io_rank,
+                 multiproc):
+        # Every rank accumulates the same (gathered) samples; only the I/O
+        # rank writes the file (#2237).  In a multi-process run a failed write
+        # warns instead of raising, so the ranks stay in lockstep; the next
+        # flush rewrites every completed month.
+        self.io_rank, self.multiproc = bool(io_rank), bool(multiproc)
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         zh = np.asarray(z_coord.z_half_ref)
@@ -4360,9 +4383,19 @@ class MonthlyMldSstWriter:
             coords={"year_index": ("time", [d[0] for d in self.done]),
                     "month": ("time", [d[1] for d in self.done]),
                     "lat": self.lat, "lon": self.lon})
+        if not self.io_rank:
+            return
         tmp = self.path.with_name(self.path.name + ".tmp")
-        ds.to_netcdf(tmp)
-        os.replace(tmp, self.path)
+        try:
+            ds.to_netcdf(tmp)
+            os.replace(tmp, self.path)
+        except Exception as e:
+            if not self.multiproc:
+                raise
+            print(f"    WARNING: rank-0 monthly MLD/SST write failed "
+                  f"(continuing to keep the ranks in lockstep; the next "
+                  f"month rewrites the file): {type(e).__name__}: {e}",
+                  flush=True)
 
     def close(self) -> None:
         self._flush()
@@ -7282,7 +7315,9 @@ def run_omip_single(grid_type: str, args) -> dict:
         _monthly = MonthlyMldSstWriter(
             _monthly_path,
             z_coord=z_coord, lat_deg=np.rad2deg(np.asarray(grid.lat)),
-            lon_deg=np.rad2deg(np.asarray(grid.lon)))
+            lon_deg=np.rad2deg(np.asarray(grid.lon)),
+            io_rank=jax.process_index() == 0,
+            multiproc=jax.process_count() > 1)
         if args.restart is not None:
             with np.load(args.restart) as _rz:
                 # The NpzFile itself: only the monthly_* keys are read.
