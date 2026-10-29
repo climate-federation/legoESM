@@ -96,6 +96,34 @@ def test_build_train_argv_epochs_from_yaml():
     assert "--smoke" not in argv
 
 
+def test_val_windows_from_yaml(tmp_path):
+    base = C._load_campaign_yaml(C._resolve_config_path(
+        "config/wb/campaign/spectral_t63.yaml"))
+    assert "--val-windows" not in C.build_train_argv(
+        C.build_campaign_config_from_args([]), "physics")
+    import yaml
+    for n, ok in ((6, True), (-1, False)):
+        p = tmp_path / f"v{n}.yaml"
+        p.write_text(yaml.safe_dump({**base, "n_val_windows": n}))
+        if not ok:
+            with pytest.raises(SystemExit):
+                C.build_campaign_config_from_args(["--config", str(p)])
+            continue
+        argv = C.build_train_argv(
+            C.build_campaign_config_from_args(["--config", str(p)]), "sfno")
+        assert argv[argv.index("--val-windows") + 1] == "6"
+
+
+@pytest.mark.parametrize("deck", ["spectral_t63_sfno_lr3e-3.yaml",
+                                  "spectral_t63_ngcm_lr3e-3_e24.yaml"])
+def test_val_window_decks_pass_trainer_key_check(deck):
+    from legoesm.training import scale_build
+    path = C._resolve_config_path(f"config/wb/campaign/{deck}")
+    yml = C._load_campaign_yaml(path)
+    assert yml["n_val_windows"] == 6
+    scale_build.validate_wb_campaign_yaml(yml)
+
+
 def test_allow_missing_artifacts_flag():
     assert C.build_campaign_config_from_args([]).allow_missing_artifacts is False
     cfg = C.build_campaign_config_from_args(["--allow-missing-artifacts"])

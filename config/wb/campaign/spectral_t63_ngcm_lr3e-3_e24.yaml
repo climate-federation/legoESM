@@ -149,6 +149,9 @@ era5_cadence_hours: 6
 n_epochs: 24
 optimizer: "adamw"
 lr: 3.0e-3
+# Held-out windows scored each epoch (per-term validation curves); same
+# count as the CAM6 run's --val-windows 6.
+n_val_windows: 6
 warmup_steps: 500
 weight_decay: 1.0e-5
 grad_clip_norm: 1.0

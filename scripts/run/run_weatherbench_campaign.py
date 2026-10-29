@@ -75,6 +75,7 @@ class CampaignConfig(NamedTuple):
     metric: str
     smoke: bool
     resume: bool = False
+    n_val_windows: int = 0
 
 
 def _parse_csv_ints(s, name):
@@ -189,6 +190,12 @@ def build_campaign_config_from_args(argv=None) -> CampaignConfig:
         n_epochs = _yml_int(yml, "n_epochs", None)
         if n_epochs < 1:
             raise SystemExit(f"{a.config}: n_epochs must be >= 1, got {n_epochs}")
+    # Held-out windows the trainer scores each epoch (its per-term validation
+    # losses); 0 = no validation pass, the trainer's own default.
+    from train_weatherbench_scale import _yml_int
+    n_val_windows = _yml_int(yml, "n_val_windows", 0)
+    if n_val_windows < 0:
+        raise SystemExit(f"{a.config}: n_val_windows must be >= 0, got {n_val_windows}")
     eval_year = a.eval_year
     if eval_year is None:
         _years = yml.get("eval_years")
@@ -212,6 +219,7 @@ def build_campaign_config_from_args(argv=None) -> CampaignConfig:
         metric=a.metric,
         smoke=a.smoke,
         resume=a.resume,
+        n_val_windows=n_val_windows,
     )
 
 
@@ -242,6 +250,8 @@ def build_train_argv(cfg: CampaignConfig, mode: str) -> list:
         argv += ["--epochs", str(cfg.n_epochs)]
     if cfg.smoke:
         argv += ["--smoke"]
+    if cfg.n_val_windows > 0:
+        argv += ["--val-windows", str(cfg.n_val_windows)]
     return argv
 
 

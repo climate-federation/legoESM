@@ -497,7 +497,9 @@ _WB_CONSUMED_TOP_KEYS = frozenset({
 # Deck metadata this trainer never reads but the decks legitimately carry
 # (documentation / other tooling).  Kept OUT of the consumed set so the
 # distinction stays visible; anything here is tolerated, not honoured.
-_WB_METADATA_TOP_KEYS = frozenset({"grid"})
+# ``n_val_windows`` is read by run_weatherbench_campaign.py, which forwards it
+# as --val-windows.
+_WB_METADATA_TOP_KEYS = frozenset({"grid", "n_val_windows"})
 # Exactly the keys _spectral_pe_config + the dt lookup read from the
 # ``spectral`` block.  ``si_substep`` (typo) silently reverting a deck to the
 # unstable full step is the same defect class as the inert lr.
