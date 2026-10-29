@@ -195,6 +195,7 @@ __param_spec__ = {
         "excluded": {
             "blend_pbl_sharpness": "numerics: solver/smoothing/tolerance/iteration parameter",
             "blend_ri_sharpness": "numerics: solver/smoothing/tolerance/iteration parameter",
+            "entrainment_cutoff_sharpness": "numerics: solver/smoothing/tolerance/iteration parameter",
             "pbl_smooth_sharpness": "numerics: solver/smoothing/tolerance/iteration parameter",
             "sfc_excess_zfrac": "measurement convention: surface-layer z/h (top of the surface layer) at which w_s is evaluated for the θ_T excess parcel, not a tuned closure",
         },
@@ -803,6 +804,10 @@ class YSUConfig(NamedTuple):
         not a tuned closure.
     surface : SurfaceLayerConfig
         Surface layer parameters.
+    entrainment_cutoff_sharpness : float
+        WRF YSU path only (``surface_layer`` given): sigmoid sharpness
+        [1/entfac] of the entrainment-layer cutoff ``entfac < 4.6`` (default
+        2.0; 1e300 = the oracle's hard cutoff).  Inert on the legacy path.
     """
     l_mix_max: float = 100.0
     Pr_t: float = 1.0
@@ -819,6 +824,7 @@ class YSUConfig(NamedTuple):
     ws_conv_coeff: float = 8.0  # convective coeff in w_s = (u*³ + c·κ·w*³·z/h)^{1/3}
     sfc_excess_zfrac: float = 0.1  # surface-layer z/h for the θ_T excess parcel
     surface: SurfaceLayerConfig = SurfaceLayerConfig()
+    entrainment_cutoff_sharpness: float = 2.0
 
 
 class TurbulentEDMFConfig(NamedTuple):

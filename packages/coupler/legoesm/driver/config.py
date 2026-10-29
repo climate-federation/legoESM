@@ -1520,8 +1520,11 @@ class ExperimentConfig(NamedTuple):
     tau_pole: float = 1.8
     tau_moist_coeff: float = 0.0115        # gray-rad moisture LW optical depth [m²/kg]
     # Additional gray-radiation knobs (GrayRadiationConfig fields), exposed on
-    # ExperimentConfig so the calibration can tune them.  They are threaded to
-    # the gray radiation kernel as a `gray_cfg_overrides` dict.  NOTE:
+    # ExperimentConfig so the calibration can tune them.  NOT YET WIRED: no
+    # consumer threads them to the gray kernel (the pipeline gray builder passes
+    # only tau_equator, tau_pole, S_0 and albedo_ocean), so linear_frac,
+    # lw_diff_factor, sw_tau_0, sw_exponent and tau_moist_coeff currently have
+    # no effect on gray radiation (tier-2 oracle audit probe).  NOTE:
     # sfc_emissivity (above) is NOT honoured by gray radiation — gray keeps its
     # idealized black-surface convention (eps=1.0, Held-Suarez/Frierson); the
     # sfc_emissivity value feeds RRTMGP and the dynamic surface-emissivity blend

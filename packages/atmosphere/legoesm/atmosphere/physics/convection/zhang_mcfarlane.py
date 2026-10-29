@@ -44,6 +44,8 @@ coefficients everywhere).
 
 from __future__ import annotations
 
+import math
+
 import jax
 import jax.numpy as jnp
 
@@ -59,15 +61,34 @@ from legoesm.atmosphere.physics.convection._zm_dilute import LWMAX
 from legoesm.atmosphere.physics.convection.config import ZhangMcFarlaneConfig
 from legoesm.atmosphere.physics.convection.mass_flux import compute_column_geometry
 from legoesm.atmosphere.physics.convection.output import ConvectionOutput
+from legoesm.core.smooth import smooth_clamp, smooth_relu
 
 
-__all__ = ("CONVTRAN1_TRACERS", "zhang_mcfarlane_convection")
+__all__ = ("CONVTRAN1_TRACERS", "cam6_detrain_condensate",
+           "zhang_mcfarlane_convection")
 
 # CAM6 constituents with ``is_convtran1`` (micro_mg_cam.F90:416-435, MG2) that
 # zm_conv_intr.F90:829-846 transports with ``convtran``, mapped to legoESM
 # tracer names: CLDLIQ, CLDICE, NUMLIQ, NUMICE, RAINQM, SNOWQM, NUMRAI.  CAM's
 # NUMSNO has no legoESM tracer.
 CONVTRAN1_TRACERS = ("q_c", "q_i", "N_c", "N_i", "q_r", "q_s", "N_r")
+
+
+# --- CAM6 detrainment of ZM condensate (clubb_intr.F90:2345-2376) ---
+# The CLUBB host books ZM's detrained condensate ``dlf`` on the post-CLUBB
+# state of every macmic sub-step.  Literals exactly as the oracle writes them
+# (cam_cesm2_1_rel_60, a03b84b7c4e34f965b115686f22a043b85739e56): the
+# all-liquid / all-ice temperatures and ramp width (:2347-2352), and the
+# deep-convection droplet / crystal radii and densities of the number source
+# (:2365-2372, CAM's ``3.14``, not pi).  The all-ice temperature 238.15 K is
+# ``_DETRAIN_T_LIQ_K - _DETRAIN_RAMP_K``: the clamp's upper end.
+_DETRAIN_T_LIQ_K = 268.15
+_DETRAIN_RAMP_K = 30.0
+_DETRAIN_PI = 3.14
+_DETRAIN_R_LIQ_M = 8.0e-6
+_DETRAIN_R_ICE_M = 25.0e-6
+_DETRAIN_RHO_LIQ = 997.0
+_DETRAIN_RHO_ICE = 500.0
 
 
 __physics_contract__ = {
@@ -265,3 +286,61 @@ def zhang_mcfarlane_convection(
     mb_kg = conv.mb * 100.0 / constants.g
     conv_prog_profile_new = jnp.zeros_like(conv_prog_profile).at[:, -1].set(mb_kg)
     return out, conv_prog_profile_new
+
+
+def cam6_detrain_condensate(T: jax.Array, dlf: jax.Array,
+                            config: ZhangMcFarlaneConfig):
+    """CAM6 detrainment of ZM condensate, clubb_intr.F90:2345-2376.
+
+    ``T`` is the state the CLUBB host holds after its own update in the
+    macmic sub-step (``state1``, clubb_intr.F90:2251); ``dlf`` [kg/kg/s] is
+    ZM's detrained condensate (pbuf DLF).  The ``zmconv_microp = .false.``
+    branch (namelist default) with CAM6's shallow detrainment ``dlf2 = 0``
+    (clubb_intr.F90:2327), whose terms therefore vanish:
+
+    ``dum1 = 0`` above 268.15 K, ``1`` below 238.15 K, ``(268.15 - T)/30``
+    between; ``dq_c = dlf (1 - dum1)``, ``dq_i = dlf dum1``,
+    ``dN_c = 3 max(0, dlf) (1 - dum1) / (4 3.14 (8e-6)^3 997)``,
+    ``dN_i = 3 max(0, dlf) dum1 / (4 3.14 (25e-6)^3 500)``,
+    ``s = dlf dum1 latice`` (fusion heating, applied as ``s/cpair``).
+
+    KNOWN DIFFERENCE (RULE 5): both switches depend on traced state and are
+    smoothed by default.  The ice fraction is
+    ``smooth_clamp((268.15 - T)/30, 0, 1, sharpness=30/w_T)`` with
+    ``w_T = config.detrain_phase_width_K`` (0.1 K), and ``max(0, dlf)`` in the
+    number sources is ``w_n smooth_relu(dlf/w_n, 1)`` with
+    ``w_n = config.detrain_number_width_kgkg_s`` (1e-12 kg/kg/s).  A width
+    of 0 recovers CAM's hard switch exactly (oracle match 1e-10).  At the
+    default: ``dum1`` departs from CAM by up to ``ln 2 w_T/30`` (~2.3e-3) at
+    the 268.15 / 238.15 K corners; it never exceeds 1 but dips ~1e-133 below
+    0 well above 268.15 K (fp64), so ``dq_i`` can be that fraction of ``dlf``
+    negative there;
+    the number sources gain ``~ln 2 w_n`` of ``dlf`` where CAM's ``dlf`` is 0
+    (a spurious droplet source ~0.3 /kg/s).  ``dq_c + dq_i = dlf`` still
+    holds.  Measured on the 15 CAM oracle columns (max |ours - CAM| / max |CAM|
+    per field): heating and dq_c / dq_i <= 1.6e-8, dN_c 1.1e-4 and dN_i
+    1.3e-4 (the dlf = 0 levels).  Per-case gaps are stored in
+    tests/atmosphere/test_zm_detrain_oracle.py.
+
+    Returns ``(dT_dt [K/s], dq_c_dt, dq_i_dt [kg/kg/s], dN_c_dt, dN_i_dt
+    [1/kg/s])``; signed as sources (+ = gain), same shape as ``T``.
+    """
+    w_T = config.detrain_phase_width_K
+    w_n = config.detrain_number_width_kgkg_s
+    if w_T < 0 or w_n < 0:
+        raise ValueError(
+            "ZhangMcFarlaneConfig detrain_phase_width_K / "
+            "detrain_number_width_kgkg_s must be >= 0 (0 = CAM's hard switch); "
+            f"got {w_T!r}, {w_n!r}.")
+    dum1 = smooth_clamp((_DETRAIN_T_LIQ_K - T) / _DETRAIN_RAMP_K, 0.0, 1.0,
+                        math.inf if w_T == 0 else _DETRAIN_RAMP_K / w_T)
+    dlf_pos = (jnp.maximum(0.0, dlf) if w_n == 0
+               else w_n * smooth_relu(dlf / w_n, 1.0))
+    dq_c = dlf * (1.0 - dum1)
+    dq_i = dlf * dum1
+    dN_c = 3.0 * (dlf_pos * (1.0 - dum1)) / (
+        4.0 * _DETRAIN_PI * _DETRAIN_R_LIQ_M**3 * _DETRAIN_RHO_LIQ)
+    dN_i = 3.0 * (dlf_pos * dum1) / (
+        4.0 * _DETRAIN_PI * _DETRAIN_R_ICE_M**3 * _DETRAIN_RHO_ICE)
+    dT = dlf * dum1 * constants.L_f / constants.c_pd
+    return dT, dq_c, dq_i, dN_c, dN_i
