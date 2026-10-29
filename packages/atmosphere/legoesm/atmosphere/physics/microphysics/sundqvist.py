@@ -39,15 +39,15 @@ Two stages run in sequence:
    * the frozen fraction of the surface flux, ``sr`` (0 when the total is below
      1e-13 kg m-2) [729-734].
 
-   Mapping (legoESM -> oracle): ``q_c`` is ``cwm`` (the one condensate variable;
-   ``q_i`` is not read, as before the port); the layer mass ``del/g`` is
+   Mapping (legoESM -> oracle): ``cwm`` is ``q_c`` (plus ``q_i`` on a lane that
+   carries it, re-split after precpd by :func:`split_condensate`); the layer mass ``del/g`` is
    ``dp/g`` from ``p_half`` (``rho``/``dz`` are not read);
    ``rh_crit`` = ``u00k``; ``auto_rate`` = ``prautco``; ``qc_crit`` = ``1/cmr``
    (oracle hard-codes 3e-4); ``coalescence_enh_coeff`` = ``c1`` (300);
    ``bergeron_enh_coeff`` = ``c2`` (0.5); ``evap_coeff`` = ``evpco``;
    ``psautco_fine``/``psautco_coarse`` = the oracle's ``psautco(1:2)``,
-   blended by grid-cell area with GFS's ``wk1`` (:func:`gfs_area_weight`, a
-   smooth clamp); ``wminco_liquid``, ``wminco_ice`` = the oracle's
+   blended by grid-cell area with GFS's ``wk1`` (:func:`gfs_area_weight`, GFS's
+   hard clip); ``wminco_liquid``, ``wminco_ice`` = the oracle's
    ``wminco(1:2)``.  ``prautco`` is a single value (GFS's pair is equal).  The saturation humidity is the oracle's
    ``eps·e/(p + (eps-1)·e)`` with ``e = min(p, e_s)`` on legoESM's Tetens
    ``e_s``; the real GFS ``fpvs`` table (ice-blended below 0 °C) is NOT used.
@@ -56,7 +56,9 @@ Two stages run in sequence:
    (the gate the pre-port evaporation carried), which is exactly the oracle at
    the hard limit (the oracle's ``max(0, RH_crit-RH)`` already vanishes where
    the sigmoid switches).  Every other oracle switch is ported as a hard
-   ``jnp.where`` (piecewise differentiable).
+   ``jnp.where`` (piecewise differentiable).  Outside the oracle, the
+   liquid/ice split's -15..0 C ramp (user decision) is smoothly clamped with
+   ``liquid_fraction_clamp_sharpness`` (``math.inf`` = hard clip; RULE 5).
 
    ``bergeron_T_peak_K`` / ``bergeron_T_width_K`` parameterised the pre-port
    Gaussian F2 and have no counterpart in the oracle: setting either to a
