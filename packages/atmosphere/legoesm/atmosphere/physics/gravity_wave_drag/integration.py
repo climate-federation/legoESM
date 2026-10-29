@@ -42,8 +42,7 @@ from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
 )
 from legoesm.grids.gaussian import (
     sh_analysis_3d,
-    sh_analysis_oc2_3d,
-    sh_analysis_dmu_3d,
+    vordiv_from_uv_exact_3d,
 )
 from legoesm.atmosphere.physics.gravity_wave_drag.rayleigh import rayleigh_gwd
 from legoesm.atmosphere.physics.gravity_wave_drag.lindzen import lindzen_gwd
@@ -1165,23 +1164,10 @@ def _make_spectral_pe_gwd(
         dv_dt = gwd_out.dv_dt.reshape(n_lat, n_lon, nlev)
         dT_dt = gwd_out.dT_dt.reshape(n_lat, n_lon, nlev)
 
-        # Project wind tendencies to spectral vorticity/divergence
-        a = grid.radius
-        im_over_a = 1j * grid.ms.astype(jnp.float64) / a
-        one_over_a = 1.0 / a
-
-        cos_lat_3d = grid.cos_lat[:, None, None]
-        du_cos = du_dt * cos_lat_3d
-        dv_cos = dv_dt * cos_lat_3d
-
-        dvor_hat = (
-            im_over_a[:, None] * sh_analysis_oc2_3d(grid, dv_cos)
-            + one_over_a * sh_analysis_dmu_3d(grid, du_cos)
-        )
-        ddiv_hat = (
-            im_over_a[:, None] * sh_analysis_oc2_3d(grid, du_cos)
-            - one_over_a * sh_analysis_dmu_3d(grid, dv_cos)
-        )
+        # Exact left-inverse of the dycore's wind synthesis: the plain
+        # Bourke oc2/dmu analysis amplifies a pole-row tendency ~6x per
+        # pass, which the macmic sub-cycle compounds into a blow-up (#976).
+        dvor_hat, ddiv_hat = vordiv_from_uv_exact_3d(grid, du_dt, dv_dt)
 
         dT_hat = sh_analysis_3d(grid, dT_dt)
 

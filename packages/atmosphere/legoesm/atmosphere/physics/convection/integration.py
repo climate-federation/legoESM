@@ -109,7 +109,9 @@ from legoesm.atmosphere.physics._shared import (
 )
 from legoesm.core.operators_3d import divergence_3d as _div3_cs
 from legoesm.core.operators_latlon_3d import divergence_3d as _div3_latlon
-from legoesm.grids.gaussian import sh_analysis_3d, vordiv_from_uv_3d
+from legoesm.grids.gaussian import (
+    sh_analysis_3d, vordiv_from_uv_3d, vordiv_from_uv_exact_3d,
+)
 from legoesm.atmosphere.physics.convection.sbm import sbm_convection
 from legoesm.atmosphere.physics.convection.dca import dca_convection
 from legoesm.atmosphere.physics.convection.kuo import kuo_convection
@@ -1516,7 +1518,7 @@ def _make_spectral_pe_convection(
         # grid-space wind reconstructed by ``spectral_pe_to_grid`` so
         # the leaf produces meaningful CMT.  The grid→spectral round-trip
         # for the resulting (du_dt_conv, dv_dt_conv) is handled below
-        # via :func:`vordiv_from_uv_3d`.
+        # via :func:`vordiv_from_uv_exact_3d`.
         if is_cmt_capable:
             u_grid = fields['u'].astype(_state_dtype)   # (n_lat, n_lon, nlev)
             v_grid = fields['v'].astype(_state_dtype)
@@ -1925,7 +1927,7 @@ def _make_spectral_pe_convection(
             tracers_tend = tt
 
         # Convective momentum transport: round-trip the grid CMT
-        # tendencies through ``vordiv_from_uv_3d`` to obtain spectral
+        # tendencies through ``vordiv_from_uv_exact_3d`` to obtain spectral
         # vor/div tendencies.  CMT-capable schemes (Zhang-McFarlane,
         # Tiedtke, Bechtold) emit ``du_dt_conv``/``dv_dt_conv`` in grid
         # space; non-CMT schemes leave both as ``None`` and we fall back
@@ -1939,7 +1941,9 @@ def _make_spectral_pe_convection(
         ):
             du_dt_grid = conv_out.du_dt_conv.reshape(n_lat, n_lon, nlev)
             dv_dt_grid = conv_out.dv_dt_conv.reshape(n_lat, n_lon, nlev)
-            dvor_dt_hat, ddiv_dt_hat = vordiv_from_uv_3d(
+            # Exact left-inverse, not the plain Bourke analysis: the latter
+            # amplifies a pole-row tendency ~6x per pass (#976).
+            dvor_dt_hat, ddiv_dt_hat = vordiv_from_uv_exact_3d(
                 grid, du_dt_grid, dv_dt_grid,
             )
             # Cast back to the spectral-state dtype so we don't silently
