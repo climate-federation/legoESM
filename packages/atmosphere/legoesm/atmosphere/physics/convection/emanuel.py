@@ -136,6 +136,10 @@ def _is_concrete(value) -> bool:
     return not isinstance(value, jax.core.Tracer)
 
 
+# denom_floor_sharpness * denom_floor below this lets the reciprocal blend's
+# guard band (|D| < floor - 60/s) fall under floor/2 (see _emanuel_mixing).
+_DENOM_SHARPNESS_FLOOR_MIN = 120.0
+
 # RULE 5 sharpness fields passed straight to the mixing module.
 _MIXING_SHARPNESS_FIELDS = (
     "source_temperature_gate_sharpness", "source_humidity_gate_sharpness",
@@ -161,7 +165,7 @@ def _check_smoothing_fields(config: EmanuelConfig) -> None:
             "as ELCRIT*clip(1 - TCA/TLCRIT, 0, 1), which needs TLCRIT < 0).")
     s, f = config.denom_floor_sharpness, config.denom_floor
     if (_is_concrete(s) and _is_concrete(f) and s != math.inf
-            and np.any(np.asarray(s) * np.asarray(f) < 120.0)):
+            and np.any(np.asarray(s) * np.asarray(f) < _DENOM_SHARPNESS_FLOOR_MIN)):
         raise ValueError(
             f"EmanuelConfig.denom_floor_sharpness={s!r} with denom_floor={f!r}: "
             "the reciprocal blend needs sharpness*floor >= 120 (else 1/DENOM is "
