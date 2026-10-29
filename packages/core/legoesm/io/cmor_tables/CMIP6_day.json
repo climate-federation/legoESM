@@ -19,6 +19,48 @@
   "Conventions": "CF-1.7 CMIP-6.2"
  },
  "variable_entry": {
+  "clt": {
+   "frequency": "day",
+   "modeling_realm": "atmos",
+   "standard_name": "cloud_area_fraction",
+   "units": "%",
+   "cell_methods": "area: time: mean",
+   "cell_measures": "area: areacella",
+   "long_name": "Total Cloud Cover Percentage",
+   "comment": "Total cloud area fraction (reported as a percentage) for the whole atmospheric column, as seen from the surface or the top of the atmosphere. Includes both large-scale and convective cloud.",
+   "dimensions": "longitude latitude time",
+   "out_name": "clt",
+   "type": "real",
+   "positive": ""
+  },
+  "hfls": {
+   "frequency": "day",
+   "modeling_realm": "atmos",
+   "standard_name": "surface_upward_latent_heat_flux",
+   "units": "W m-2",
+   "cell_methods": "area: time: mean",
+   "cell_measures": "area: areacella",
+   "long_name": "Surface Upward Latent Heat Flux",
+   "comment": "The surface called 'surface' means the lower boundary of the atmosphere. 'Upward' indicates a vector component which is positive when directed upward (negative downward). The surface latent heat flux is the exchange of heat between the surface and the air on account of evaporation (including sublimation). In accordance with common usage in geophysical disciplines, 'flux' implies per unit area, called 'flux density' in physics.",
+   "dimensions": "longitude latitude time",
+   "out_name": "hfls",
+   "type": "real",
+   "positive": "up"
+  },
+  "hfss": {
+   "frequency": "day",
+   "modeling_realm": "atmos",
+   "standard_name": "surface_upward_sensible_heat_flux",
+   "units": "W m-2",
+   "cell_methods": "area: time: mean",
+   "cell_measures": "area: areacella",
+   "long_name": "Surface Upward Sensible Heat Flux",
+   "comment": "The surface sensible heat flux, also called turbulent heat flux, is the exchange of heat between the surface and the air by motion of air.",
+   "dimensions": "longitude latitude time",
+   "out_name": "hfss",
+   "type": "real",
+   "positive": "up"
+  },
   "pr": {
    "frequency": "day",
    "modeling_realm": "atmos",
@@ -30,6 +72,20 @@
    "comment": "includes both liquid and solid phases",
    "dimensions": "longitude latitude time",
    "out_name": "pr",
+   "type": "real",
+   "positive": ""
+  },
+  "prsn": {
+   "frequency": "day",
+   "modeling_realm": "atmos",
+   "standard_name": "snowfall_flux",
+   "units": "kg m-2 s-1",
+   "cell_methods": "area: time: mean",
+   "cell_measures": "area: areacella",
+   "long_name": "Snowfall Flux",
+   "comment": "At surface; includes precipitation of all forms of water in the solid phase",
+   "dimensions": "longitude latitude time",
+   "out_name": "prsn",
    "type": "real",
    "positive": ""
   },
@@ -47,6 +103,34 @@
    "type": "real",
    "positive": ""
   },
+  "rlds": {
+   "frequency": "day",
+   "modeling_realm": "atmos",
+   "standard_name": "surface_downwelling_longwave_flux_in_air",
+   "units": "W m-2",
+   "cell_methods": "area: time: mean",
+   "cell_measures": "area: areacella",
+   "long_name": "Surface Downwelling Longwave Radiation",
+   "comment": "The surface called 'surface' means the lower boundary of the atmosphere. 'longwave' means longwave radiation. Downwelling radiation is radiation from above. It does not mean 'net downward'. When thought of as being incident on a surface, a radiative flux is sometimes called 'irradiance'. In addition, it is identical with the quantity measured by a cosine-collector light-meter and sometimes called 'vector irradiance'. In accordance with common usage in geophysical disciplines, 'flux' implies per unit area, called 'flux density' in physics.",
+   "dimensions": "longitude latitude time",
+   "out_name": "rlds",
+   "type": "real",
+   "positive": "down"
+  },
+  "rlus": {
+   "frequency": "day",
+   "modeling_realm": "atmos",
+   "standard_name": "surface_upwelling_longwave_flux_in_air",
+   "units": "W m-2",
+   "cell_methods": "area: time: mean",
+   "cell_measures": "area: areacella",
+   "long_name": "Surface Upwelling Longwave Radiation",
+   "comment": "The surface called 'surface' means the lower boundary of the atmosphere. 'longwave' means longwave radiation. Upwelling radiation is radiation from below. It does not mean 'net upward'. When thought of as being incident on a surface, a radiative flux is sometimes called 'irradiance'. In addition, it is identical with the quantity measured by a cosine-collector light-meter and sometimes called 'vector irradiance'. In accordance with common usage in geophysical disciplines, 'flux' implies per unit area, called 'flux density' in physics.",
+   "dimensions": "longitude latitude time",
+   "out_name": "rlus",
+   "type": "real",
+   "positive": "up"
+  },
   "rlut": {
    "frequency": "day",
    "modeling_realm": "atmos",
@@ -60,6 +144,48 @@
    "out_name": "rlut",
    "type": "real",
    "positive": "up"
+  },
+  "rsds": {
+   "frequency": "day",
+   "modeling_realm": "atmos",
+   "standard_name": "surface_downwelling_shortwave_flux_in_air",
+   "units": "W m-2",
+   "cell_methods": "area: time: mean",
+   "cell_measures": "area: areacella",
+   "long_name": "Surface Downwelling Shortwave Radiation",
+   "comment": "Surface solar irradiance for UV calculations.",
+   "dimensions": "longitude latitude time",
+   "out_name": "rsds",
+   "type": "real",
+   "positive": "down"
+  },
+  "rsus": {
+   "frequency": "day",
+   "modeling_realm": "atmos",
+   "standard_name": "surface_upwelling_shortwave_flux_in_air",
+   "units": "W m-2",
+   "cell_methods": "area: time: mean",
+   "cell_measures": "area: areacella",
+   "long_name": "Surface Upwelling Shortwave Radiation",
+   "comment": "The surface called 'surface' means the lower boundary of the atmosphere. 'shortwave' means shortwave radiation. Upwelling radiation is radiation from below. It does not mean 'net upward'. When thought of as being incident on a surface, a radiative flux is sometimes called 'irradiance'. In addition, it is identical with the quantity measured by a cosine-collector light-meter and sometimes called 'vector irradiance'. In accordance with common usage in geophysical disciplines, 'flux' implies per unit area, called 'flux density' in physics.",
+   "dimensions": "longitude latitude time",
+   "out_name": "rsus",
+   "type": "real",
+   "positive": "up"
+  },
+  "snw": {
+   "frequency": "day",
+   "modeling_realm": "landIce land",
+   "standard_name": "surface_snow_amount",
+   "units": "kg m-2",
+   "cell_methods": "area: mean where land time: mean",
+   "cell_measures": "area: areacella",
+   "long_name": "Surface Snow Amount",
+   "comment": "The mass of surface snow on the land portion of the grid cell divided by the land area in the grid cell; reported as missing where the land fraction is 0; excludes snow on vegetation canopy or on sea ice.",
+   "dimensions": "longitude latitude time",
+   "out_name": "snw",
+   "type": "real",
+   "positive": ""
   },
   "tas": {
    "frequency": "day",

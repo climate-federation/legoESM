@@ -810,7 +810,9 @@ def surface_buoyancy_flux(
     else:
         # Floor salinity before the EOS-generic autodiff (sqrt(S) EOSes diverge
         # at S=0 land cells; later masking is a multiply ⇒ 0·NaN unsafe).
-        S_eval = jnp.maximum(S_sfc, _EOS_SALINITY_FLOOR)
+        # Wright passed explicitly is not floored, so it matches None bit for
+        # bit, also below the floor (#2243).
+        S_eval = eos_salinity(S_sfc, eos_fn)
 
         def _alpha_sfc():
             drho_dT, _ = eos_density_derivatives(eos_fn, T_sfc, S_eval, p_sfc)

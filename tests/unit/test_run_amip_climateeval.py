@@ -139,6 +139,18 @@ def test_cmor_nc_paths(tmp_path):
     assert [p.name for p in cmor_nc_paths(cmor / "Amon")] == ["tas.nc"]
 
 
+def test_cmor_nc_paths_finds_drs_tree(tmp_path):
+    """--cmip-drs-tree output: monthly tables found, day table excluded."""
+    cmor = tmp_path / "cmor"
+    base = cmor / "CMIP6" / "CMIP" / "CU" / "legoESM-1-0" / "amip" / "r1i1p1f1"
+    for table, var in [("Amon", "tas"), ("fx", "areacella"), ("day", "tas")]:
+        d = base / table / var / "gr" / "v20261029"
+        d.mkdir(parents=True)
+        (d / f"{var}_{table}.nc").write_text("")
+    got = {p.name for p in cmor_nc_paths(cmor)}
+    assert got == {"tas_Amon.nc", "areacella_fx.nc"}
+
+
 def test_build_arg_parser_multiple_suites_flow_through():
     parser = build_arg_parser()
     args = parser.parse_args([

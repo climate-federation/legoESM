@@ -5762,3 +5762,96 @@ def test_mcfarlane_effgw_oro_flag_flows_to_config():
     parser = build_arg_parser()
     # The deck sets the dest as a parser default, exactly as main() applies it.
     assert load_yaml_config(deck, parser)["mcfarlane_effgw_oro"] == 0.125
+
+
+_CMIP_ID_FLAGS = (
+    ("cmip_drs_tree", "--cmip-drs-tree", True),
+    ("cmip_institution_id", "--cmip-institution-id", "INST-X"),
+    ("cmip_source_id", "--cmip-source-id", "SRC-1-0"),
+    ("cmip_variant_label", "--cmip-variant-label", "r2i1p1f1"),
+)
+
+
+def test_cmip_writer_identity_flags_round_trip_and_keep_defaults():
+    """drs_tree / institution_id / source_id / variant_label reach
+    OutputConfig from the CLI; unset, they equal CFWriter's own defaults."""
+    import inspect
+    from legoesm.io.cmor_output import CFWriter
+    parser = build_arg_parser()
+    base = ["--dataset", "analytical"]
+    out0 = build_config_from_args(_postprocess_args(
+        parser.parse_args(base), parser)).output
+    sig = inspect.signature(CFWriter).parameters
+    assert out0.cmip_drs_tree is sig["drs_tree"].default is False
+    assert out0.cmip_institution_id == sig["institution_id"].default
+    assert out0.cmip_variant_label == sig["variant_label"].default
+    assert out0.cmip_source_id == "legoESM-1-0"   # the collector's old literal
+    argv = list(base)
+    for _f, flag, val in _CMIP_ID_FLAGS:
+        argv += [flag] if val is True else [flag, val]
+    out1 = build_config_from_args(_postprocess_args(
+        parser.parse_args(argv), parser)).output
+    for field, _flag, val in _CMIP_ID_FLAGS:
+        assert getattr(out1, field) == val, field
+
+
+def test_cmip_writer_identity_keys_are_deckable(tmp_path):
+    from legoesm.driver.run_config_yaml import load_yaml_config
+    deck = tmp_path / "deck.yaml"
+    deck.write_text("cmip_drs_tree: true\ncmip_institution_id: INST-X\n"
+                    "cmip_source_id: SRC-1-0\ncmip_variant_label: r2i1p1f1\n")
+    parser = build_arg_parser()
+    parser.set_defaults(**load_yaml_config(str(deck), parser))
+    out = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser)).output
+    for field, _flag, val in _CMIP_ID_FLAGS:
+        assert getattr(out, field) == val, field
+
+
+def test_model_driver_threads_cmip_identity_to_the_collector(monkeypatch):
+    """ModelDriver._create_diagnostics hands the OutputConfig fields to the
+    DiagnosticCollector (captured before any grid work)."""
+    import types
+    import numpy as np
+    from legoesm.driver import model_driver as md
+    from legoesm.driver.config import ExperimentConfig, OutputConfig
+
+    class _Stop(Exception):
+        pass
+
+    seen = {}
+
+    def _capture(**kw):
+        seen.update(kw)
+        raise _Stop
+
+    monkeypatch.setattr(md, "DiagnosticCollector", _capture)
+    out = OutputConfig(cmip_output=True, cmip_drs_tree=True,
+                       cmip_institution_id="INST-X",
+                       cmip_source_id="SRC-1-0",
+                       cmip_variant_label="r2i1p1f1")
+    sig = types.SimpleNamespace(sigma_full=np.ones(2), dsigma=np.ones(2))
+    ns = types.SimpleNamespace(
+        config=ExperimentConfig(output=out, cloud_scheme="none"),
+        sigma=sig, _output_dir="")
+    with pytest.raises(_Stop):
+        md.ModelDriver._create_diagnostics(ns)
+    for field, _flag, val in _CMIP_ID_FLAGS:
+        assert seen[field] == val, field
+
+
+def test_climateeval_ids_follow_cmip_flags_unless_given():
+    from unittest.mock import MagicMock, patch
+    from legoesm.driver.climateeval_hook import maybe_run_climateeval
+    parser = build_arg_parser()
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args(
+        ["--dataset", "analytical", "--cmip-source-id", "SRC-1-0",
+         "--cmip-variant-label", "r2i1p1f1"]), parser))
+    out = cfg.output._replace(
+        evaluation=cfg.output.evaluation._replace(enabled=True))
+    with patch("legoesm.driver.climateeval_hook.subprocess.run",
+               return_value=MagicMock(returncode=0)) as run:
+        maybe_run_climateeval(cfg._replace(output=out), "/tmp/run")
+    cmd = run.call_args.args[0]
+    assert cmd[cmd.index("--model-id") + 1] == "SRC-1-0"
+    assert cmd[cmd.index("--variant-id") + 1] == "r2i1p1f1"

@@ -50,7 +50,8 @@ def make_vertical_mixing_physics(
     eos_fn : callable or None
         The run's EOS ``fn(T, S, p) -> rho`` for the Richardson density and
         ePBL's specific-volume derivatives and surface buoyancy (#2177).
-        ``None`` = Wright 1997 (unchanged). KPP does not take it yet.
+        Also KPP's density, surface buoyancy and boundary-layer reference
+        density (#2243). ``None`` = Wright 1997 (unchanged).
 
     Returns
     -------
@@ -113,7 +114,7 @@ def make_vertical_mixing_physics(
                                 eos_fn=eos_fn)
     elif scheme == "kpp":
         return _make_kpp(config, apply_diffusion=apply_diffusion,
-                         constants_config=constants_config)
+                         constants_config=constants_config, eos_fn=eos_fn)
     elif scheme == "epbl":
         return _make_epbl(config, apply_diffusion=apply_diffusion,
                           constants_config=constants_config, eos_fn=eos_fn)
@@ -187,8 +188,12 @@ def _make_richardson(config: VerticalMixingConfig,
 
 def _make_kpp(config: VerticalMixingConfig,
               apply_diffusion: bool = True,
-              constants_config: ConstantsConfig = ConstantsConfig()) -> Callable:
+              constants_config: ConstantsConfig = ConstantsConfig(),
+              eos_fn=None) -> Callable:
     cfg = config.kpp
+    # eos_fn is the run's EOS (#2243): density, surface buoyancy and the
+    # boundary-layer reference density, as the implicit K-profile fallback's
+    # KPP branch already does.  None -> Wright, unchanged.
 
     def physics_fn(state: OceanState, grid: CubedSphereGrid,
                    z_coord: OceanZStarCoordinate,
@@ -196,7 +201,11 @@ def _make_kpp(config: VerticalMixingConfig,
         J = compute_ocean_jacobian(state.eta.data, state.H_bathy.data, z_coord)
         # The run's constants, not the library's: this density is what
         # every downstream pressure integrates (#1627).
-        rho = _compute_rho(state, z_coord, J,
+        # sqrt(S) EOSes have an infinite dRho/dS at S = 0 (land / fill
+        # cells): floor S for the density as ePBL does; Wright as is.
+        rho_state = state._replace(
+            S=state.S.replace(data=eos_salinity(state.S.data, eos_fn)))
+        rho = _compute_rho(rho_state, z_coord, J, eos_fn=eos_fn,
                            rho0=constants_config.rho_0,
                            g=constants_config.g)
 
@@ -224,6 +233,7 @@ def _make_kpp(config: VerticalMixingConfig,
             rho_0=constants_config.rho_0,
             c_sw=constants_config.c_sw,
             real_salt_in_qs=True,
+            eos_fn=eos_fn,
         )
 
         # KPP expects u, v at cell centers (same shape as T).
@@ -252,6 +262,7 @@ def _make_kpp(config: VerticalMixingConfig,
             tau_x=tau_x, tau_y=tau_y, B_f=B_f,
             Q_sfc_T=Q_sfc_T, Q_sfc_S=Q_sfc_S,
             apply_diffusion=apply_diffusion, ice_frac=_kpp_ice_fr,
+            eos_fn=eos_fn,
         )
         # When apply_diffusion is False, KPP returns zero du/dv at
         # cell-center shape (from the C-grid u/v interpolation above).

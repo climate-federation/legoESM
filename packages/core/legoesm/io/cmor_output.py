@@ -610,50 +610,93 @@ def _parse_variant_label(variant_label: str) -> Tuple[int, int, int, int]:
     )
 
 
-# Ordered, descending CMIP6 nominal_resolution CV thresholds [km].
-# See https://github.com/PCMDI/cmip6-cmor-tables/blob/main/Tables/CMIP6_CV.json
-# ``nominal_resolution`` — the smallest bucket whose upper bound is ≥ the
-# actual grid spacing.  We follow the CMIP6 spec: pick the CV value that
-# best brackets the mean great-circle cell dimension in km.
+# CMIP6 ``nominal_resolution`` bins, from "CMIP6 Global Attributes, DRS,
+# Filenames, Directory Structure, and CV's" (K. E. Taylor et al., v6.2.8,
+# 9 June 2025, no substantive edits since 10 Sep 2018), Appendix 2 item 3:
+# the mean resolution (km) is binned with STRICT upper bounds; >= 7200 km is
+# "10000 km".  Every label is a value of the vendored CV list.
 _NOMINAL_RES_BUCKETS_KM: Tuple[Tuple[float, str], ...] = (
-    (0.5, "0.5 km"),
-    (1.0, "1 km"),
-    (2.5, "2.5 km"),
-    (5.0, "5 km"),
-    (10.0, "10 km"),
-    (25.0, "25 km"),
-    (50.0, "50 km"),
-    (100.0, "100 km"),
-    (250.0, "250 km"),
-    (500.0, "500 km"),
-    (1000.0, "1000 km"),
-    (2500.0, "2500 km"),
-    (5000.0, "5000 km"),
-    (10000.0, "10000 km"),
+    (0.72, "0.5 km"),
+    (1.6, "1 km"),
+    (3.6, "2.5 km"),
+    (7.2, "5 km"),
+    (16.0, "10 km"),
+    (36.0, "25 km"),
+    (72.0, "50 km"),
+    (160.0, "100 km"),
+    (360.0, "250 km"),
+    (720.0, "500 km"),
+    (1600.0, "1000 km"),
+    (3600.0, "2500 km"),
+    (7200.0, "5000 km"),
 )
+_NOMINAL_RES_TOP = "10000 km"
+# Appendix 2 item 4: the one WIP "standard grid" (360 x 180 cells of 1 deg,
+# a longitude centred at 0.5 E) is labelled "1x1 degree", not "100 km".
+_NOMINAL_RES_STANDARD_1X1 = "1x1 degree"
+
+
+def _mean_resolution_km(lat: np.ndarray, lon: np.ndarray) -> float:
+    """CMIP6 "mean resolution" of a regular lat-lon grid [km].
+
+    Appendix 2 items 1-2 of the CMIP6 global-attributes document (see
+    ``_NOMINAL_RES_BUCKETS_KM``): per cell, the largest great-circle
+    distance between any pair of its vertices (``dmax``, the diagonal for a
+    lon x lat cell), averaged over all cells weighted by cell area.  Cell
+    vertices are the bounds the files carry (``_make_lat_bnds_da`` /
+    ``_make_lon_bnds_da``).
+    """
+    from legoesm import constants
+    from legoesm.grids.cubed_sphere import great_circle_distance
+
+    lat_b = np.radians(np.clip(_cell_bounds_from_centers(lat), -90.0, 90.0))
+    lon_b = np.radians(_cell_bounds_from_centers(lon))
+    la0, la1 = lat_b[:, 0][:, None], lat_b[:, 1][:, None]
+    lo0, lo1 = lon_b[:, 0][None, :], lon_b[:, 1][None, :]
+    shape = np.broadcast_shapes(la0.shape, lo0.shape)
+    corners = [
+        (np.broadcast_to(lo, shape), np.broadcast_to(la, shape))
+        for la, lo in ((la0, lo0), (la0, lo1), (la1, lo1), (la1, lo0))
+    ]
+    dmax = np.zeros(shape)
+    for a in range(4):
+        for b in range(a + 1, 4):
+            d = np.asarray(great_circle_distance(
+                corners[a][0], corners[a][1], corners[b][0], corners[b][1],
+                radius=constants.R_earth / 1000.0))
+            dmax = np.maximum(dmax, d)
+    area = np.broadcast_to((np.sin(la1) - np.sin(la0)) * (lo1 - lo0), shape)
+    return float(np.sum(area * dmax) / np.sum(area))
 
 
 def _compute_nominal_resolution(
     lat: np.ndarray, lon: np.ndarray,
 ) -> str:
-    """Pick the CMIP6 CV ``nominal_resolution`` string for a lat-lon grid.
+    """CMIP6 CV ``nominal_resolution`` of a regular lat-lon output grid.
 
-    Uses the mean grid spacing in degrees, converted to km at the equator
-    (1° ≈ 111.19 km), and rounds up to the nearest CMIP6 CV bucket.
+    Implements Appendix 2 of "CMIP6 Global Attributes, DRS, Filenames,
+    Directory Structure, and CV's" (Taylor et al., v6.2.8): the CMIP6
+    standard 1x1 degree grid is "1x1 degree" (item 4); any other grid is
+    its area-weighted mean cell-diagonal distance (:func:`_mean_resolution_km`)
+    binned by ``_NOMINAL_RES_BUCKETS_KM`` (item 3).
     """
     lat_np = np.asarray(lat, dtype=np.float64)
     lon_np = np.asarray(lon, dtype=np.float64)
     if lat_np.size < 2 or lon_np.size < 2:
         return "unknown"
-    dlat = float(np.mean(np.abs(np.diff(lat_np))))
-    dlon = float(np.mean(np.abs(np.diff(lon_np))))
-    # Equatorial km for the longer side (coarser spacing dominates)
-    spacing_deg = max(dlat, dlon)
-    spacing_km = spacing_deg * 111.19
-    for threshold, label in _NOMINAL_RES_BUCKETS_KM:
-        if spacing_km <= threshold:
+    # Same 1e-6 deg label tolerance set_cmip_grid_info uses to call a native
+    # grid identical to the CMOR target.
+    if (lat_np.size == 180 and lon_np.size == 360
+            and np.allclose(lat_np, np.linspace(-89.5, 89.5, 180),
+                            rtol=0.0, atol=1e-6)
+            and np.allclose(np.diff(lon_np), 1.0, rtol=0.0, atol=1e-6)
+            and np.isclose(lon_np[0] % 1.0, 0.5, rtol=0.0, atol=1e-6)):
+        return _NOMINAL_RES_STANDARD_1X1
+    mean_km = _mean_resolution_km(lat_np, lon_np)
+    for upper, label in _NOMINAL_RES_BUCKETS_KM:
+        if mean_km < upper:
             return label
-    return "10000 km"
+    return _NOMINAL_RES_TOP
 
 
 def _generate_tracking_id() -> str:
@@ -686,6 +729,8 @@ class _DailyRemap(NamedTuple):
 # is a DATA change and out of scope for this metadata fix.
 _DAILY_VARIABLE_REMAP: Dict[str, _DailyRemap] = {
     "rsut": _DailyRemap("rsut", "CFday"),
+    # Daily rsdt is CFday-only as well.
+    "rsdt": _DailyRemap("rsdt", "CFday"),
     # Daily ps is a CFday variable too (the day table has none).
     "ps": _DailyRemap("ps", "CFday"),
     "ua850": _DailyRemap("ua", "day", plev_pa=85_000.0),
@@ -1092,20 +1137,31 @@ class CFWriter:
         full ESGF DRS tree
         ``<mip_era>/<activity>/<institution>/<source>/<experiment>/
         <variant>/<table>/<var>/<grid_label>/<version>/`` is available via
-        ``CFWriter(drs_tree=True)`` but is NOT the default: every
-        downstream legoESM consumer (``scripts/validate/
-        run_amip_climateeval.py`` and the analysis notebooks) globs
-        ``cmor/<table>/*.nc``, so flipping the default would break them
-        for a layout that only matters at the moment of ESGF submission.
+        ``CFWriter(drs_tree=True)`` (run flag ``--cmip-drs-tree``) but is
+        NOT the default: the analysis notebooks and the AMIP bias
+        validators glob ``cmor/<table>/*.nc`` (``scripts/validate/
+        run_amip_climateeval.py`` reads both layouts), so flipping the
+        default would break them for a layout that only matters at the
+        moment of ESGF submission.  A dataset that already has a
+        ``v<YYYYMMDD>`` directory is extended in its latest one.
         The filenames -- which are what validators actually check -- are
         DRS-correct either way.
         """
         if self.drs_tree:
-            table_dir = (
+            dataset_dir = (
                 self.output_dir / "CMIP6" / "CMIP" / self.institution_id
                 / self.model_id / self.experiment_id / self.variant_label
-                / table_id / var_name / self.grid_label / self._drs_version
+                / table_id / var_name / self.grid_label
             )
+            # A restart leg on a later UTC date would otherwise open a new
+            # vYYYYMMDD directory and split the series; extend the latest
+            # version an earlier leg already wrote.
+            existing = sorted(
+                d.name for d in dataset_dir.glob("v*")
+                if d.is_dir() and re.fullmatch(r"v\d{8}", d.name)
+            ) if dataset_dir.is_dir() else []
+            table_dir = dataset_dir / (existing[-1] if existing
+                                       else self._drs_version)
         else:
             table_dir = self.output_dir / table_id
         table_dir.mkdir(parents=True, exist_ok=True)

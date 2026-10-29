@@ -72,8 +72,11 @@ WANTED: Dict[str, tuple] = {
     # ``rsut`` is NOT a CMIP6 ``day`` variable -- it lives in ``CFday``.
     # ``ua850``/``va850`` do not exist in ANY CMIP6 table; the 850 hPa winds
     # are ``ua``/``va`` on the ``plev8`` coordinate in ``day``.
-    "day": ("pr", "psl", "rlut", "tas", "tasmax", "tasmin", "ua", "va", "zg"),
-    "CFday": ("ps", "rsut"),
+    "day": (
+        "clt", "hfls", "hfss", "pr", "prsn", "psl", "rlds", "rlus", "rlut",
+        "rsds", "rsus", "snw", "tas", "tasmax", "tasmin", "ua", "va", "zg",
+    ),
+    "CFday": ("ps", "rsdt", "rsut"),
     "fx": ("areacella", "orog", "sftlf"),
     "Lmon": ("gpp", "lai", "mrso", "mrsos", "tsl"),
     "Omon": (
