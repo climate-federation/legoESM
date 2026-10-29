@@ -899,6 +899,25 @@ def _make_hydrostatic_convection(
                     data=_dq_r_conv.reshape(shape_3d), name="dq_r_conv_dt",
                     dims=dims_3d, units="kg/kg/s",
                 )
+            # Detrained precipitation (IFS PSNDE) goes to the rain and snow
+            # species, never to the surface or to cloud water (user
+            # 2026-10-28, S1''/R12); no species to take it -> refuse.
+            for _nm, _detr in (("q_r", getattr(conv_out, "dq_r_detr_dt", None)),
+                               ("q_s", getattr(conv_out, "dq_s_detr_dt", None))):
+                if _detr is None:
+                    continue
+                if state.tracers is None or _nm not in state.tracers:
+                    raise ValueError(
+                        f"convection detrains precipitation into {_nm} (IFS "
+                        f"PSNDE) but the state carries no {_nm} tracer")
+                _d = _detr.reshape(shape_3d)
+                if _nm in tracer_tends:
+                    tracer_tends[_nm] = tracer_tends[_nm].replace(
+                        data=tracer_tends[_nm].data + _d)
+                else:
+                    tracer_tends[_nm] = Field(
+                        data=_d, name=f"d{_nm}_detr_dt", dims=dims_3d,
+                        units="kg/kg/s")
             # Convective transport of carried tracers (ZM convtran): signed,
             # column-conserving, ADDED to any other tendency of that tracer.
             for _nm, _dtr in (getattr(conv_out, "tracer_transport", None) or {}).items():

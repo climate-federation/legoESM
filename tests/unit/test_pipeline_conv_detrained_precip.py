@@ -77,7 +77,7 @@ def test_detrained_precip_without_a_snow_species_is_refused():
 
 
 @pytest.mark.parametrize("micro,ok", [("morrison", True), ("thompson", True),
-                                      ("seifert_beheng", True), ("kessler", False),
+                                      ("seifert_beheng", False), ("kessler", False),
                                       ("sundqvist", False), ("p3", False), ("none", False)])
 def test_ifs_convection_needs_rain_and_snow_species(micro, ok):
     """R12 (user 2026-10-28): the faithful IFS path is refused at config check
@@ -92,3 +92,52 @@ def test_ifs_convection_needs_rain_and_snow_species(micro, ok):
     except ValueError as e:
         msg = str(e)
     assert ("carries rain and snow" in msg) is (not ok)
+
+
+def _bridge(tracer_names, r, s):
+    import types
+
+    from legoesm.atmosphere.physics.convection import integration as ci
+    from legoesm.atmosphere.physics.convection.config import ConvectionConfig
+    from legoesm.core.field import Field
+    from legoesm.core.state import HydrostaticState
+    from legoesm.grids.vertical import create_sigma_coordinate
+
+    ncol, nlev = r.shape
+    T = jnp.broadcast_to(jnp.linspace(298.0, 215.0, nlev)[None, :], (ncol, nlev))
+    q = jnp.broadcast_to(jnp.linspace(0.017, 1e-5, nlev)[None, :], (ncol, nlev))
+    z = jnp.zeros((ncol, nlev))
+    tracers = {"q_v": Field(q), **{n: Field(z) for n in tracer_names}}
+    state = HydrostaticState(
+        u=Field(z), T=Field(T), p_s=Field(jnp.full((ncol,), 1.0e5)),
+        phis=Field(jnp.zeros((ncol,))), v=Field(z), tracers=tracers)
+    grid = types.SimpleNamespace(grid_shape_2d=(ncol,), land_frac=np.zeros(ncol))
+    real = ci.bechtold_convection
+
+    def spy(*a, **k):
+        out, m_u, stoch = real(*a, **k)
+        return out._replace(dq_r_conv_dt=None, dq_r_detr_dt=r, dq_s_detr_dt=s), m_u, stoch
+
+    ci.bechtold_convection = spy
+    try:
+        fn = ci.make_convection_physics(
+            ConvectionConfig(scheme="bechtold", rain_to_surface=True),
+            model_type="mpas", dt=DT)
+        tend, _ = fn(state, grid, create_sigma_coordinate(nlev))
+    finally:
+        ci.bechtold_convection = real
+    return tend
+
+
+def test_bridge_routes_detrained_precip_to_rain_and_snow():
+    r = jnp.full((4, NLEV), 2.0e-7)
+    s = jnp.full((4, NLEV), 3.0e-7)
+    tend = _bridge(("q_c", "q_r", "q_s"), r, s)
+    np.testing.assert_allclose(np.asarray(tend.tracer_tendencies["q_r"].data).reshape(4, NLEV), 2.0e-7)
+    np.testing.assert_allclose(np.asarray(tend.tracer_tendencies["q_s"].data).reshape(4, NLEV), 3.0e-7)
+
+
+def test_bridge_refuses_detrained_precip_without_snow():
+    z = jnp.zeros((4, NLEV))
+    with pytest.raises(ValueError, match="no q_s tracer"):
+        _bridge(("q_c", "q_r"), z, z)
