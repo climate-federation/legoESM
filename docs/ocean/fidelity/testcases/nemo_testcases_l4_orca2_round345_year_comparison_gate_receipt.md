@@ -104,6 +104,8 @@ The safety/restart implementation is committed as
 and all-month envelope repair is
 `8e91ec01953e048586c296094361d9fd37df346c`. These values were copied from
 `git rev-parse`, and the document gate resolves every quoted git object.
+The rank-local, input-preserving stub repair is
+`527dd75f1e043278d41693dc11a0cd9781cd65ec`.
 
 Focused round-345, inherited round-342 year, and ORCA2X pilot tests pass 23/23.
 The seven Decision-188 controls fire, including independent refusal of a zero
@@ -127,11 +129,13 @@ failing in-place admission quarantined, and both retained arms promoted, but
 the committed default preflight remains fail-closed and must be run by the
 operator in the acquisition environment.
 
-Resume 3 locally passes the new concurrent rank-env regression for both arms
-plus the existing restart-control test (3/3). This test reproduces both
-confirmed failure mechanisms against the pre-repair writer without invoking
-MPI or NEMO. The operator must re-run the complete control-plus-perturbed
-preflight because this sandbox still cannot launch `mpirun`.
+Resume 3 passes the complete focused round-342/345 battery (18/18), including
+the new concurrent rank-env regression for both arms. The receipt citation gate
+passes 1/1 with zero failures and its shifted-line plant refuses. The new test
+reproduces both confirmed failure mechanisms against the pre-repair writer
+without invoking MPI or NEMO. The operator must re-run the complete
+control-plus-perturbed preflight because this sandbox still cannot launch
+`mpirun`.
 
 The per-receipt citation gate passes its one citation with zero failures and
 its shifted-line plant refuses. The exact default ORCA2 landing battery passes
