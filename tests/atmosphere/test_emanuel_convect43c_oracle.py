@@ -71,7 +71,7 @@ HARD = dict(
 )
 GROUPS = [(v, cb) for v in ("nodd", "dd") for cb in ("cb0", "cbw")]
 # check_grads step per input (measured, see test_check_grads_at_default_sharpness).
-CHECK_GRADS_EPS = {"T": 1.0e-6, "q": 1.0e-9}
+CHECK_GRADS_EPS = {"T": 1.0e-6, "q": 1.0e-9, "cb": 1.0e-9}
 
 
 def _load():
@@ -315,6 +315,88 @@ def test_check_grads_at_default_sharpness(fx, v):
         ):
             assert float(jnp.max(jnp.abs(jax.grad(f)(x)))) > 0.0, (v, cb, name)
             check_grads(f, (x,), order=1, modes=("rev",), eps=eps)
+
+
+# RULE 5 per-switch gradient test.  A switch whose transition no fixture
+# column reaches is exercised on a column CONSTRUCTED from a convecting
+# fixture column by one-parameter families (reviewer pick 2026-10-29):
+# uniform warming/cooling at fixed RH, scaled humidity, the carried CBMF, and
+# a cooled upper troposphere.  Only a switch no such column can reach is
+# listed, with the reason.
+UNREACHABLE = {
+    "tlift_floor_sharpness": "TLIFT's MAX(TG, 35 K) acts only on a parcel colder than 35 K",
+}
+
+
+def _candidate_columns(fx):
+    from legoesm.atmosphere.physics.convection._emanuel_mixing import _oracle_qsat
+
+    T, q, pf, ph = (np.asarray(fx[k], np.float64) for k in ("T", "q", "p_full", "p_half"))
+    conv = np.flatnonzero(np.isin(fx["dd_cbw_iflag"], (1, 4)) & (fx["dd_cbw_cbmf"] > 0))
+    c = int(conv[0])
+    qs = lambda TT: np.asarray(_oracle_qsat(jnp.asarray(TT), jnp.asarray(pf[c:c + 1])))[0]
+    cols = [(T[i], q[i], pf[i], ph[i], cb) for i in range(len(T)) for cb in (0.0, 0.01)]
+    rh = q[c] / qs(T[c][None])
+    for a in np.linspace(-60.0, 10.0, 29):                 # warm/cool at fixed RH
+        Ta = T[c] + a
+        for cb in (0.0, 0.01):
+            cols.append((Ta, rh * qs(Ta[None]), pf[c], ph[c], cb))
+    for a in np.linspace(-7.0, 0.3, 30):                   # scaled humidity
+        cols.append((T[c], q[c] * 10.0 ** a, pf[c], ph[c], 0.01))
+    for a in np.linspace(-8.0, -1.0, 29):                  # carried CBMF
+        cols.append((T[c], q[c], pf[c], ph[c], 10.0 ** a))
+    upper = pf[c] < 3.0e4
+    for a in np.linspace(-6.0, 6.0, 25):                   # cold upper troposphere
+        cols.append((np.where(upper, 180.0 + a, T[c]), q[c], pf[c], ph[c], 0.01))
+    return tuple(jnp.asarray(np.stack([x[k] for x in cols])) for k in range(4)) + (
+        jnp.asarray([x[4] for x in cols]),)
+
+
+def _col_outputs(cfg, T, q, pf, ph, cb):
+    prog = jnp.zeros_like(T).at[:, -1].set(cb)
+    o, pr = emanuel_convection(T, q, pf, ph, prog, 1800.0, cfg)
+    return jnp.concatenate([o.dT_dt, 1.0e3 * o.dq_v_dt, 1.0e3 * o.dq_r_conv_dt,
+                            1.0e2 * pr[:, -1:]], axis=-1)
+
+
+@pytest.mark.parametrize("field", RULE5_FIELDS)
+def test_each_switch_carries_gradient_at_default(fx, field):
+    """RULE 5 gradient test per switch: all RULE 5 fields at inf except
+    ``field`` at its default.  On the candidate column where that changes the
+    output most, (i) the change is real (> 1e-9 of the output scale), (ii)
+    check_grads (order 1, rev) passes w.r.t. T, q and the carried CBMF, and
+    (iii) the gradient differs from the all-hard gradient."""
+    from jax.test_util import check_grads
+
+    if field in UNREACHABLE:
+        pytest.skip(UNREACHABLE[field])
+    T, q, pf, ph, cb = _candidate_columns(fx)
+    hard = _cfg("dd")
+    soft = hard._replace(**{field: getattr(EmanuelConfig(), field)})
+    oh = np.asarray(_col_outputs(hard, T, q, pf, ph, cb))
+    os_ = np.asarray(_col_outputs(soft, T, q, pf, ph, cb))
+    scale = np.maximum(np.max(np.abs(oh), axis=1), 1e-300)
+    d = np.max(np.abs(os_ - oh), axis=1) / scale
+    k = int(np.nanargmax(d))
+    print(f"{field}: exercised on candidate column {k}, output change {d[k]:.3e}")
+    assert d[k] > 1.0e-9, (field, d[k])
+    Tk, qk, pk, hk, cbk = T[k:k + 1], q[k:k + 1], pf[k:k + 1], ph[k:k + 1], cb[k:k + 1]
+
+    def loss(cfg):
+        return lambda T_, q_, c_: jnp.sum(_col_outputs(cfg, T_, q_, pk, hk, c_))
+
+    f = jax.jit(loss(soft))
+    for argnum, eps in ((0, CHECK_GRADS_EPS["T"]), (1, CHECK_GRADS_EPS["q"]),
+                        (2, CHECK_GRADS_EPS["cb"])):
+        args = [Tk, qk, cbk]
+        g = lambda x, i=argnum: f(*[x if j == i else a for j, a in enumerate(args)])
+        check_grads(g, (args[argnum],), order=1, modes=("rev",), eps=eps)
+    gs = jax.grad(f, argnums=(0, 1, 2))(Tk, qk, cbk)
+    gh = jax.grad(jax.jit(loss(hard)), argnums=(0, 1, 2))(Tk, qk, cbk)
+    diff = max(float(jnp.max(jnp.abs(a - b))) for a, b in zip(gs, gh))
+    ref = max(float(jnp.max(jnp.abs(b))) for b in gh)
+    print(f"{field}: max |grad(default) - grad(hard)| = {diff:.3e} (hard scale {ref:.3e})")
+    assert diff > 1.0e-12 * max(ref, 1e-300), field
 
 
 if __name__ == "__main__":  # regenerate the pinned default gaps
