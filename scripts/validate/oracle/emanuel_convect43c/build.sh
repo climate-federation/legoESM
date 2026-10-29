@@ -14,6 +14,14 @@
 # switches, set to the oracle's values by make_fixture.py.  driver.f90 reads
 # columns from text and writes outputs.  gfortran 8.5.0, fp64, -O2
 # -fno-fast-math (the audit's flags) was used for the committed fixture.
+#
+# Provenance (#2158 ask 6): the oracle is the sha256-pinned audited copy
+# above, which is NOT in git.  Regenerating the fixture needs a copy with
+# exactly that sha256; a different file (including climt's convect43c.f90,
+# a reading copy of the same algorithm, not this oracle) is refused by the
+# check below.  CI never rebuilds the oracle: the tests load the committed
+# fixture tests/atmosphere/oracle_fixtures/emanuel_convect43c.npz and assert
+# the sha256 recorded in it.
 set -euo pipefail
 SRC=$(cd "$(dirname "$1")" && pwd)/$(basename "$1")
 mkdir -p "$2"
