@@ -23,7 +23,10 @@ from legoesm.ocean.physics.vertical_mixing.epbl import (
     epbl_vertical_mixing,
     surface_tke_forcing,
 )
-from legoesm.ocean.physics.vertical_mixing._shared import surface_buoyancy_flux
+from legoesm.ocean.physics.vertical_mixing._shared import (
+    eos_salinity,
+    surface_buoyancy_flux,
+)
 from legoesm.ocean.physics.tendencies import make_none_physics_fn, wrap_ocean_tendencies
 
 
@@ -31,6 +34,7 @@ def make_vertical_mixing_physics(
     config: VerticalMixingConfig,
     apply_diffusion: bool = True,
     constants_config: ConstantsConfig = ConstantsConfig(),
+    eos_fn=None,
 ) -> Callable:
     """Create a vertical mixing physics function.
 
@@ -43,6 +47,11 @@ def make_vertical_mixing_physics(
         (for KPP) the non-local counter-gradient flux.  Use this with the
         implicit backward-Euler vertical diffusion solver in the
         dynamics step.
+    eos_fn : callable or None
+        The run's EOS ``fn(T, S, p) -> rho`` for the Richardson density and
+        ePBL's specific-volume derivatives and surface buoyancy (#2177).
+        Also KPP's density, surface buoyancy and boundary-layer reference
+        density (#2243). ``None`` = Wright 1997 (unchanged).
 
     Returns
     -------
@@ -101,13 +110,14 @@ def make_vertical_mixing_physics(
         return _make_constant(config, apply_diffusion=apply_diffusion)
     elif scheme == "richardson":
         return _make_richardson(config, apply_diffusion=apply_diffusion,
-                                constants_config=constants_config)
+                                constants_config=constants_config,
+                                eos_fn=eos_fn)
     elif scheme == "kpp":
         return _make_kpp(config, apply_diffusion=apply_diffusion,
-                         constants_config=constants_config)
+                         constants_config=constants_config, eos_fn=eos_fn)
     elif scheme == "epbl":
         return _make_epbl(config, apply_diffusion=apply_diffusion,
-                          constants_config=constants_config)
+                          constants_config=constants_config, eos_fn=eos_fn)
     elif scheme == "tke":
         return _make_tke(config, apply_diffusion=apply_diffusion)
     elif scheme == "catke":
@@ -143,7 +153,8 @@ def _make_constant(config: VerticalMixingConfig,
 
 def _make_richardson(config: VerticalMixingConfig,
                      apply_diffusion: bool = True,
-                     constants_config: ConstantsConfig = ConstantsConfig()) -> Callable:
+                     constants_config: ConstantsConfig = ConstantsConfig(),
+                     eos_fn=None) -> Callable:
     cfg = config.richardson
 
     def physics_fn(state: OceanState, grid: CubedSphereGrid,
@@ -152,21 +163,22 @@ def _make_richardson(config: VerticalMixingConfig,
         J = compute_ocean_jacobian(state.eta.data, state.H_bathy.data, z_coord)
         # The adiabatic PP81 N² trigger needs the cell-centre hydrostatic
         # pressure; compute it (with rho) only when opted in so the default
-        # in-situ path stays bit-identical.  eos_fn is None here (this factory
-        # does not thread a recipe EOS) → Wright, matching the density path.
+        # in-situ path stays bit-identical.  eos_fn is the run's EOS (#2177);
+        # None → Wright.
         if cfg.n2_mode == "adiabatic":
             rho, p_cell = _compute_rho_and_pressure(
-                state, z_coord, J, g=constants_config.g,
+                state, z_coord, J, eos_fn=eos_fn, g=constants_config.g,
                 rho0=constants_config.rho_0)
         else:
-            rho = _compute_rho(state, z_coord, J, g=constants_config.g,
+            rho = _compute_rho(state, z_coord, J, eos_fn=eos_fn,
+                               g=constants_config.g,
                                rho0=constants_config.rho_0)
             p_cell = None
         out = richardson_vertical_mixing(
             state.u.data, state.v.data, state.T.data, state.S.data,
             rho, z_coord, J, cfg,
             apply_diffusion=apply_diffusion,
-            p_cell=p_cell,
+            p_cell=p_cell, eos_fn=eos_fn,
         )
         return _wrap_tendencies(out.du_dt, out.dv_dt, out.dT_dt, out.dS_dt, state,
                                 K_v=out.K_v if not apply_diffusion else None,
@@ -176,8 +188,12 @@ def _make_richardson(config: VerticalMixingConfig,
 
 def _make_kpp(config: VerticalMixingConfig,
               apply_diffusion: bool = True,
-              constants_config: ConstantsConfig = ConstantsConfig()) -> Callable:
+              constants_config: ConstantsConfig = ConstantsConfig(),
+              eos_fn=None) -> Callable:
     cfg = config.kpp
+    # eos_fn is the run's EOS (#2243): density, surface buoyancy and the
+    # boundary-layer reference density, as the implicit K-profile fallback's
+    # KPP branch already does.  None -> Wright, unchanged.
 
     def physics_fn(state: OceanState, grid: CubedSphereGrid,
                    z_coord: OceanZStarCoordinate,
@@ -185,7 +201,11 @@ def _make_kpp(config: VerticalMixingConfig,
         J = compute_ocean_jacobian(state.eta.data, state.H_bathy.data, z_coord)
         # The run's constants, not the library's: this density is what
         # every downstream pressure integrates (#1627).
-        rho = _compute_rho(state, z_coord, J,
+        # sqrt(S) EOSes have an infinite dRho/dS at S = 0 (land / fill
+        # cells): floor S for the density as ePBL does; Wright as is.
+        rho_state = state._replace(
+            S=state.S.replace(data=eos_salinity(state.S.data, eos_fn)))
+        rho = _compute_rho(rho_state, z_coord, J, eos_fn=eos_fn,
                            rho0=constants_config.rho_0,
                            g=constants_config.g)
 
@@ -213,6 +233,7 @@ def _make_kpp(config: VerticalMixingConfig,
             rho_0=constants_config.rho_0,
             c_sw=constants_config.c_sw,
             real_salt_in_qs=True,
+            eos_fn=eos_fn,
         )
 
         # KPP expects u, v at cell centers (same shape as T).
@@ -241,6 +262,7 @@ def _make_kpp(config: VerticalMixingConfig,
             tau_x=tau_x, tau_y=tau_y, B_f=B_f,
             Q_sfc_T=Q_sfc_T, Q_sfc_S=Q_sfc_S,
             apply_diffusion=apply_diffusion, ice_frac=_kpp_ice_fr,
+            eos_fn=eos_fn,
         )
         # When apply_diffusion is False, KPP returns zero du/dv at
         # cell-center shape (from the C-grid u/v interpolation above).
@@ -257,7 +279,8 @@ def _make_kpp(config: VerticalMixingConfig,
 
 def _make_epbl(config: VerticalMixingConfig,
                apply_diffusion: bool = True,
-               constants_config: ConstantsConfig = ConstantsConfig()) -> Callable:
+               constants_config: ConstantsConfig = ConstantsConfig(),
+               eos_fn=None) -> Callable:
     """Factory for the energetic PBL closure (Reichl & Hallberg 2018).
 
     ePBL is implicit-only: it returns the interface diffusivity/viscosity for
@@ -296,7 +319,9 @@ def _make_epbl(config: VerticalMixingConfig,
             "diagnoses K before the surface flux. Set it to False."
         )
 
-    eos_fn = make_eos_fn()
+    # The run's EOS (#2177); None -> Wright, as before.
+    run_eos = eos_fn
+    eos_fn = make_eos_fn() if eos_fn is None else eos_fn
 
     def physics_fn(state: OceanState, grid, z_coord: OceanZStarCoordinate,
                    surface_forcing=None) -> OceanTendencies:
@@ -311,8 +336,11 @@ def _make_epbl(config: VerticalMixingConfig,
         # applyBoundaryFluxesInOut computes them (MOM_diabatic_aux.F90:909).
         d_pres = (g * rho_0) * h
         p_lay = jnp.cumsum(d_pres, axis=-1) - 0.5 * d_pres
-        rho = eos_fn(T, S, p_lay)
-        drho_dT, drho_dS = eos_density_derivatives(eos_fn, T, S, p_lay)
+        # sqrt(S) EOSes have an infinite dRho/dS at S = 0 (land / fill cells):
+        # floor S for them as the surface-buoyancy helper does; Wright as is.
+        S_eos = eos_salinity(S, eos_fn)
+        rho = eos_fn(T, S_eos, p_lay)
+        drho_dT, drho_dS = eos_density_derivatives(eos_fn, T, S_eos, p_lay)
         inv_rho2 = 1.0 / (rho * rho)
         dSV_dT = -drho_dT * inv_rho2
         dSV_dS = -drho_dS * inv_rho2
@@ -321,26 +349,36 @@ def _make_epbl(config: VerticalMixingConfig,
         tau_y = getattr(surface_forcing, "tau_y", None) if surface_forcing else None
         q_net = getattr(surface_forcing, "q_net", None) if surface_forcing else None
         fw = getattr(surface_forcing, "freshwater", None) if surface_forcing else None
+        salt = getattr(surface_forcing, "salt_flux", None) if surface_forcing else None
+        # Missing forcing is an error, as in MOM6: a zero would run the
+        # boundary layer unforced and no downstream guard could see it.
+        missing = [n for n, x in (("tau_x", tau_x), ("tau_y", tau_y),
+                                  ("q_net", q_net), ("freshwater", fw))
+                   if x is None]
+        if missing:
+            raise ValueError(
+                "ePBL needs wind stress, net heat and freshwater forcing; "
+                f"surface_forcing supplies no {', '.join(missing)}. Pass "
+                "explicit zeros for an unforced column.")
 
-        # Surface buoyancy flux, MOM6 sign convention: POSITIVE = stabilizing.
-        # calculateBuoyancyFlux1d uses surface-pressure density derivatives.
-        drho_dT_s, drho_dS_s = eos_density_derivatives(
-            eos_fn, T[..., 0], S[..., 0], jnp.zeros_like(T[..., 0]))
+        # Surface buoyancy flux through the shared helper (#2178), MOM6 form:
+        # derivatives at surface pressure divided by rho_0 (GoRho = g/Rho0),
+        # brine salt included with the freshwater dilution (MOM6 netSalt).
+        # The helper's sign is POSITIVE = destabilizing; ePBL's (MOM6's
+        # buoyancyFlux) is POSITIVE = stabilizing, hence the minus.
         c_sw = constants_config.c_sw
-        net_heat = (jnp.zeros_like(T[..., 0]) if q_net is None
-                    else q_net / (rho_0 * c_sw))
-        # A freshwater gain dilutes the surface: the equivalent salt flux is
-        # -S * (water flux) / rho_0, matching netSalt's dilution adjustment.
-        net_salt = (jnp.zeros_like(S[..., 0]) if fw is None
-                    else -S[..., 0] * fw / rho_0)
-        B_flux = -(g / rho_0) * (drho_dT_s * net_heat + drho_dS_s * net_salt)
+        B_f, _, Q_sfc_S = surface_buoyancy_flux(
+            q_net, fw, salt, T[..., 0], S[..., 0],
+            g=g, rho_0=rho_0, c_sw=c_sw, real_salt_in_qs=True,
+            rho_0_norm=True, eos_fn=run_eos)
+        B_flux = -B_f        # never None: q_net and fw are required above
 
         # Energy released (or required) by mixing the surface fluxes through
-        # the top layer.  Only the top layer is forced: no penetrating
-        # shortwave profile is supplied on this path.
+        # the top layer, with the same net salt flux [psu kg/m^2/s] as the
+        # buoyancy.  Only the top layer is forced: no penetrating shortwave
+        # profile is supplied on this path.
         tke_top = surface_tke_forcing(
-            jnp.zeros_like(T[..., 0]) if q_net is None else q_net,
-            None if fw is None else -S[..., 0] * fw,
+            q_net, Q_sfc_S * rho_0,
             h[..., 0], dSV_dT[..., 0], dSV_dS[..., 0],
             g=g, rho_0=rho_0, c_sw=c_sw, dt=cfg.dt_s)
         tke_forcing = jnp.zeros_like(T).at[..., 0].set(tke_top)

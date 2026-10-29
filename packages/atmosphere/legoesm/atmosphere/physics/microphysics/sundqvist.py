@@ -502,8 +502,10 @@ __physics_contract__ = {
     ),
     "inputs": {
         "T": "K", "q_v": "kg/kg", "hydrometeors.q_c": "kg/kg",
-        "hydrometeors.q_r": "kg/kg", "p_full": "Pa", "rho": "kg/m^3",
-        "dz": "m", "dt": "s",
+        "hydrometeors.q_r": "kg/kg", "p_full": "Pa",
+        "p_half": "Pa (interfaces, top-down; layer mass dp/g, R9)",
+        "rho": "kg/m^3 (unused since R9; signature parity)",
+        "dz": "m (unused since R9; signature parity)", "dt": "s",
     },
     "outputs": {
         "dT_dt": "K/s", "dq_v_dt": "kg/kg/s", "dq_c_dt": "kg/kg/s",

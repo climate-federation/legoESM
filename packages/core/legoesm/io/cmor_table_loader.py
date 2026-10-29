@@ -44,10 +44,15 @@ from typing import Any, Dict, Optional, Tuple
 
 _TABLE_DIR = Path(__file__).resolve().parent / "cmor_tables"
 
-# Official CMIP6 table IDs legoESM writes into.
+# Official CMIP6 table IDs legoESM writes into.  ORDER MATTERS:
+# ``lookup_cmor_entry(name)`` without a table returns the FIRST table that
+# holds *name*, and the monthly writer relies on that.  The daily tables
+# (``day``/``CFday``/``Oday``) therefore come LAST, so a variable vendored in
+# both a monthly and a daily table (``snw``: ``LImon`` and ``day``) still
+# resolves to its monthly table; the daily writer always passes its table.
 CMIP6_TABLE_IDS: Tuple[str, ...] = (
-    "Amon", "day", "CFday", "fx", "Lmon", "Omon", "Ofx", "SImon", "LImon",
-    "Oday",
+    "Amon", "fx", "Lmon", "Omon", "Ofx", "SImon", "LImon",
+    "day", "CFday", "Oday",
 )
 
 # Legacy table aliases kept so pre-existing callers/tests keep working.

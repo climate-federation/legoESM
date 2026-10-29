@@ -121,7 +121,8 @@ def test_convection_smoke(scheme):
 def test_microphysics_smoke(scheme):
     """Each microphysics scheme produces finite tendencies."""
     from legoesm.atmosphere.physics.microphysics.integration import make_microphysics_physics
-    from legoesm.atmosphere.physics.microphysics.config import MicrophysicsConfig
+    from legoesm.atmosphere.physics.microphysics.config import (
+        MicrophysicsConfig, MorrisonConfig)
 
     state, grid, sigma = make_hydrostatic_setup()
     # Put some cloud water in lowest 5 levels to trigger microphysics
@@ -134,7 +135,8 @@ def test_microphysics_smoke(scheme):
                          dims=("face", "x", "y", "level"), units="kg/kg"),
         }
     )
-    config = MicrophysicsConfig(scheme=scheme)
+    config = MicrophysicsConfig(
+        scheme=scheme, morrison=MorrisonConfig(warm_rain_scheme="kk2000"))
     micro_fn = make_microphysics_physics(config, model_type="hydrostatic", dt=300.0)
     tend = micro_fn(state, grid, sigma)
     check_tendencies_finite(tend, f"microphysics({scheme})")

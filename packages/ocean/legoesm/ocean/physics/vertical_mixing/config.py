@@ -346,7 +346,7 @@ class TKEConfig(NamedTuple):
     #   NEMO-literal cards select it (GYRE and everything built on it, the
     #   ORCA2-zps testcase card, and the NEMO DINO cards).
     nemo_mxl0_rmxl_min_overwrite: bool = False
-    mxl0_min_m: float = 0.04             # NEMO rn_mxl0 [m] (kappa*z0 = 0.4*0.1)
+    mxl0_min_m: float = constants.kappa_von_karman * constants.nemo_mxl0_z0_m  # NEMO rn_mxl0 [m] = kappa*z0
     kappaM_min: float = 2.0e-4
     kappaM_max: float = 100.0            # convective ceiling on K_M [m^2/s] (Veros default)
     kappaH_min: float = 2.0e-5
@@ -871,12 +871,11 @@ class TKEConfig(NamedTuple):
 
 
 # --- LMD94 nonlocal-transport constants (Large, McWilliams & Doney 1994, eq. 20 + App. B) ---
-_LMD94_C_STAR = 10.0     # C*, nonlocal flux constant (eq. 20)
 _LMD94_C_S = 98.96       # c_s, scalar convective constant (App. B)
 _LMD94_EPSILON = 0.1     # epsilon, surface-layer fraction (App. A/B)
 # C_s = C* kappa (c_s kappa epsilon)^(1/3) (LMD94 eq. 20; POP/CVMix ``Cg``). At kappa = 0.4
-# this is 6.3275155 -- the published 6.33 and CVMix's 6.32739901 are roundings of it.
-_LMD94_GAMMA_NONLOCAL = (_LMD94_C_STAR * constants.kappa_von_karman
+# this is 6.3275155; LMD94 prints 6.33 (rounded) and CVMix hard-codes 6.32739901.
+_LMD94_GAMMA_NONLOCAL = (constants.lmd94_c_star * constants.kappa_von_karman
                          * (_LMD94_C_S * constants.kappa_von_karman * _LMD94_EPSILON) ** (1.0 / 3.0))
 
 

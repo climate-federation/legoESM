@@ -90,6 +90,11 @@ def build_morrison_config(resolved: dict):
             resolved.get("homogeneous_ice_nucleation", False)),
         morrison_scalars=scalars,
         morrison_flavor=resolved.get("morrison_flavor"),
+        # The run's recorded law; a recorded unset (None) resolves by the
+        # recorded flavour.  A manifest without the key predates the field and
+        # replays at kk2000, as this probe always did.
+        morrison_warm_rain_scheme=resolved.get("morrison_warm_rain_scheme",
+                                               "kk2000"),
     )
 
 

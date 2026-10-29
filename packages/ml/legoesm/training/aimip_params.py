@@ -242,17 +242,22 @@ _SURFACE_CARRYING_TURBULENCE = frozenset({
 # Surface knobs each bulk scheme reads (core/bulk_flux.py via
 # turbulence/surface_layer.py compute_surface_fluxes), pinned against measured
 # gradients by test_aimip_classical_inert_knobs: the constant law reads only
-# Cd/Ch; "most" reads z0, the Businger-Dyer pair and z0h/z0; coare3 has its own
-# stability functions and scalar roughness (z0 only seeds its iteration);
-# large_yeager keeps the Businger-Dyer pair but not z0h/z0; large_yeager_cesm
-# reads none.
+# Cd/Ch; "most" reads z0, the Businger-Dyer pair and z0h/z0; coare3 (the
+# AeroBulk TURB_COARE3P0 port) reads none of them (its first guess has no z0
+# seed and its stability functions and roughness are its own);
+# large_yeager (the AeroBulk TURB_NCAR port) keeps the Businger-Dyer pair but
+# not z0 (its first guess is the neutral 10 m drag of the wind, no roughness
+# seed) nor z0h/z0; large_yeager_cesm reads none.
+# No migration (user decision 2026-10-28): an AIMIP checkpoint trained with
+# coare3 or large_yeager AND the spatial z0 field no longer loads: surface_z0
+# (and so the spatial z0 read with it) left those schemes' trained set because
+# the AeroBulk ports do not read it.  No such checkpoint is committed.
 _SURFACE_KNOBS_BY_BULK = {
     "constant": ("surface_Cd_neutral", "surface_Ch_neutral"),
     "most": ("surface_z0", "surface_most_unstable_gamma",
              "surface_most_stable_beta", "surface_z0h_z0_ratio"),
-    "coare3": ("surface_z0",),
-    "large_yeager": ("surface_z0", "surface_most_unstable_gamma",
-                     "surface_most_stable_beta"),
+    "coare3": (),
+    "large_yeager": ("surface_most_unstable_gamma", "surface_most_stable_beta"),
     "large_yeager_cesm": (),
     # No surface exchange: every exchange knob is inert, so none is trainable.
     "none": (),
@@ -1296,6 +1301,9 @@ def resolved_inactive_fields(physics_config, *,
       per-column subgrid-orography field is wired (mcfarlane.py).
       ``subgrid_orography`` = the driver wired one (production: SSO file).
     """
+    from legoesm.atmosphere.physics.microphysics.config import (
+        resolve_warm_rain_scheme)
+
     out = set()
     micro = getattr(physics_config, "microphysics", None)
     if getattr(micro, "scheme", None) == "morrison":
@@ -1309,7 +1317,8 @@ def resolved_inactive_fields(physics_config, *,
                 for f in _mcfg.__param_spec__["SeifertBehengConfig"]["params"]
                 if f != "Nc_0"}
     if (getattr(micro, "scheme", None) == "morrison"
-            and micro.morrison.warm_rain_scheme not in _KK2000_WARM_RAIN):
+            and resolve_warm_rain_scheme(micro.morrison)
+            not in _KK2000_WARM_RAIN):
         out |= {f"atm.micro.MorrisonConfig.{f}"
                 for f in ("autocon_fact", "accre_enhan_fact")}
     gwd = getattr(physics_config, "gravity_wave_drag", None)
@@ -1833,11 +1842,16 @@ def make_aimip_classical_spectral_physics(
     # ---- Microphysics ----
     from legoesm.atmosphere.physics.microphysics.config import (
         MicrophysicsConfig,
+        MorrisonConfig,
     )
     if microphysics_scheme == "sundqvist":
         micro_cfg = MicrophysicsConfig(
             scheme="sundqvist", sundqvist=params.to_sundqvist_config(),
         )
+    elif microphysics_scheme == "morrison":
+        # Pinned kk2000: an unset law resolves to kk2000_cam6 under mg (needs CLUBB relvar).
+        micro_cfg = MicrophysicsConfig(
+            scheme="morrison", morrison=MorrisonConfig(warm_rain_scheme="kk2000"))
     else:
         micro_cfg = MicrophysicsConfig(scheme=microphysics_scheme)
 

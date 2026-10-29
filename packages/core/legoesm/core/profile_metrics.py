@@ -32,6 +32,14 @@ def safe_sqrt(x: Array) -> Array:
     return jnp.where(x > 0, jnp.sqrt(safe_x), jnp.zeros_like(x))
 
 
+def safe_sqrt_nan(x: Array) -> Array:
+    """:func:`safe_sqrt` that passes a NaN input through instead of masking it
+    to 0, so a corrupted state surfaces downstream; same finite (zero)
+    gradient at ``x <= 0``."""
+    x = jnp.asarray(x)
+    return jnp.where(jnp.isnan(x), x, safe_sqrt(x))
+
+
 def weighted_std(profile: Array, weights: Array) -> Array:
     """Mass-weighted vertical standard deviation (weights should sum to 1).
 

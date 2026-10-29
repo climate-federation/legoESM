@@ -71,23 +71,30 @@ def _read_run_yaml_prejax(path: str) -> dict:
     return mod.read_yaml_with_includes(path)
 
 
-def _argv_distributed_mode(argv: list[str]) -> str:
-    """``distributed_mode`` as the run will resolve it: the ``--config``
-    YAML's key (a YAML-selected spmd deck must federate too -- codex), then
-    an explicit ``--distributed-mode`` flag on top, else the default."""
-    mode = _ARGV_DISTRIBUTED_MODE_DEFAULT
+def _argv_deck(argv: list[str]) -> dict:
+    """The ``--config`` YAML's keys, or ``{}`` (no deck, ``--help``, or a deck
+    the reader refuses)."""
     opts = argv[:argv.index("--")] if "--" in argv else argv
     # `--conf` is the shortest prefix unique to --config in this parser
     cfg = _argv_option(argv, "--config", len("--conf"))
     if cfg and not ({"-h", "--help"} & set(opts)):
         try:
-            mode = str(_read_run_yaml_prejax(cfg).get("distributed_mode", mode))
+            return _read_run_yaml_prejax(cfg)
         except (SystemExit, Exception):  # noqa: BLE001 - re-raised by main()
             # a missing / cyclic / malformed deck: main() reports it with
             # the reader's own message; the hook must not pre-empt that
             # (codex). A rank-local failure cannot split the decision:
             # maybe_init_jax_distributed votes on `federate` collectively.
             pass
+    return {}
+
+
+def _argv_distributed_mode(argv: list[str], deck: dict | None = None) -> str:
+    """``distributed_mode`` as the run will resolve it: the ``--config``
+    YAML's key (a YAML-selected spmd deck must federate too -- codex), then
+    an explicit ``--distributed-mode`` flag on top, else the default."""
+    deck = _argv_deck(argv) if deck is None else deck
+    mode = str(deck.get("distributed_mode", _ARGV_DISTRIBUTED_MODE_DEFAULT))
     # longer than the exact `--distributed` flag: unique to --distributed-mode
     v = _argv_option(argv, "--distributed-mode", len("--distributed") + 1)
     if v in ("mpi", "spmd"):   # anything else argparse rejects anyway
@@ -95,11 +102,38 @@ def _argv_distributed_mode(argv: list[str]) -> str:
     return mode
 
 
+def _argv_distributed_flag(argv: list[str], deck: dict | None = None) -> bool:
+    """True iff the exact ``--distributed`` flag is on the command line, or
+    the ``--config`` deck sets ``distributed`` (a deck key counts as the flag,
+    the same way its ``distributed_mode`` key counts; user decision
+    2026-10-28, codex + GLM).
+
+    argparse semantics mirrored (pinned against the real parser by the CLI
+    test): no abbreviation can select it (every prefix is shared with
+    ``--distributed-mode``, which argparse refuses as ambiguous), and nothing
+    after a bare ``--`` is an option.  The MPI-environment auto-enable in
+    ``_postprocess_args`` is deliberately NOT read: federation needs the flag
+    or the deck key (user decision 2026-10-28).
+    """
+    opts = argv[:argv.index("--")] if "--" in argv else argv
+    if "--distributed" in opts:
+        return True
+    deck = _argv_deck(argv) if deck is None else deck
+    return bool(deck.get("distributed"))
+
+
+def _argv_federates(argv: list[str]) -> bool:
+    """The SPMD lane federates only when SPMD mode AND ``--distributed`` (flag
+    or deck key) are both set, on one host or many (user decision 2026-10-28); the mpi4jax
+    lane never does (the mixed stack deadlocks).  The deck is read once, so
+    both halves see the same file (codex)."""
+    deck = _argv_deck(argv)
+    return (_argv_distributed_mode(argv, deck) == "spmd"
+            and _argv_distributed_flag(argv, deck))
+
+
 if "--multicontroller" not in sys.argv:
-    # Only the multi-controller SPMD lane federates jax.distributed across
-    # hosts; the mpi4jax lane must not (the mixed stack deadlocks).
-    maybe_init_jax_distributed(
-        federate=_argv_distributed_mode(sys.argv) == "spmd")
+    maybe_init_jax_distributed(federate=_argv_federates(sys.argv))
 
 from legoesm.driver.config import (
     CLUBB_SCALAR_FIELDS,
@@ -579,6 +613,33 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "refinement away, and the tropical rain band -- one "
                              "to two cells wide -- becomes unscorable. "
                              f"Default {_OUTPUT_DEFAULTS.cmip_resolution_deg}.")
+    parser.add_argument("--cmip-drs-tree",
+                        action=argparse.BooleanOptionalAction,
+                        default=_OUTPUT_DEFAULTS.cmip_drs_tree,
+                        help="Write CMOR files into the ESGF DRS directory "
+                             "tree (CMIP6/CMIP/<institution>/<source>/...) "
+                             "instead of <output>/cmor/<table>/. Default "
+                             f"{_OUTPUT_DEFAULTS.cmip_drs_tree}.")
+    parser.add_argument("--cmip-institution-id", type=str,
+                        default=_OUTPUT_DEFAULTS.cmip_institution_id,
+                        help="CMIP6 institution_id stamped on CMOR files "
+                             "(must be registered in the CMIP6 CV to "
+                             "publish). Default "
+                             f"{_OUTPUT_DEFAULTS.cmip_institution_id!r} "
+                             "(unregistered placeholder).")
+    parser.add_argument("--cmip-source-id", type=str,
+                        default=_OUTPUT_DEFAULTS.cmip_source_id,
+                        help="CMIP6 source_id stamped on CMOR files and in "
+                             "their names (must be registered in the CMIP6 "
+                             "CV to publish). Default "
+                             f"{_OUTPUT_DEFAULTS.cmip_source_id!r} "
+                             "(unregistered placeholder).")
+    parser.add_argument("--cmip-variant-label", type=str,
+                        default=_OUTPUT_DEFAULTS.cmip_variant_label,
+                        help="CMIP6 variant_label r<k>i<l>p<m>f<n> of the "
+                             "CMOR files (a malformed label is refused when "
+                             "the writer is built). Default "
+                             f"{_OUTPUT_DEFAULTS.cmip_variant_label!r}.")
     parser.add_argument("--aimip-classical-checkpoint", type=str, default=None,
                         help="Path to an AIMIP-classical trained params .eqx "
                              "(e.g. results/aimip_001/classical/epoch_0019.eqx). "
@@ -1458,6 +1519,24 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "correction (openifs cumastrn.F90:780-833; land "
                              "deep convection peaks late afternoon). Default "
                              f"{_EXPERIMENT_DEFAULTS.bechtold_use_ifs_capdcycl}.")
+    parser.add_argument("--bechtold-use-ifs-ascent",
+                        dest="bechtold_use_ifs_ascent",
+                        action=argparse.BooleanOptionalAction,
+                        default=_EXPERIMENT_DEFAULTS.bechtold_use_ifs_ascent,
+                        help="Run the faithful OpenIFS convection chain "
+                             "(cubasen/cuascn/cumastrn/cudtdqn port) instead "
+                             "of the legacy Bechtold scheme. Default "
+                             f"{_EXPERIMENT_DEFAULTS.bechtold_use_ifs_ascent}.")
+    parser.add_argument("--bechtold-ifs-shallow-nosupply",
+                        dest="bechtold_ifs_shallow_nosupply",
+                        choices=("zero", "first_guess"),
+                        default=_EXPERIMENT_DEFAULTS.bechtold_ifs_shallow_nosupply,
+                        help="Faithful IFS chain: shallow closure with no "
+                             "sub-cloud supply. 'zero' = flux ramps smoothly to "
+                             "~0 (ln2*g*width/ZDH at zero supply; exact 0 at "
+                             "width 0); 'first_guess' = OpenIFS (cumastrn.F90:912 keeps "
+                             "0.1 of the CFL limit, grows as 1/dt). Default "
+                             f"{_EXPERIMENT_DEFAULTS.bechtold_ifs_shallow_nosupply}.")
     parser.add_argument("--bechtold-use-ifs-land-rhebc",
                         dest="bechtold_use_ifs_land_rhebc",
                         action=argparse.BooleanOptionalAction,
@@ -2138,7 +2217,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
                             "morrison_warm_rain_scheme"],
                         dest="morrison_warm_rain_scheme",
                         help="Morrison warm-rain autoconversion/accretion "
-                             "law (kk2000 = Khairoutdinov-Kogan 2000).")
+                             "law (kk2000 = Khairoutdinov-Kogan 2000). Unset "
+                             "resolves by --morrison-flavor: mg -> "
+                             "kk2000_cam6, sam -> kk2000.")
     parser.add_argument("--morrison-autocon-fact", type=float,
                         default=ExperimentConfig._field_defaults[
                             "morrison_autocon_fact"],
@@ -2411,7 +2492,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--evaluation-model-id", dest="evaluation_model_id", type=str,
         default=_EVALUATION_DEFAULTS.model_id,
         help="Model identifier for ClimateEval DataSourceInformation "
-             f"(default: {_EVALUATION_DEFAULTS.model_id!r}).")
+             "(default: empty = the CMOR files' --cmip-source-id).")
     parser.add_argument(
         "--evaluation-experiment-id", dest="evaluation_experiment_id", type=str,
         default=_EVALUATION_DEFAULTS.experiment_id,
@@ -2421,7 +2502,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--evaluation-variant-id", dest="evaluation_variant_id", type=str,
         default=_EVALUATION_DEFAULTS.variant_id,
         help="Variant identifier for ClimateEval "
-             f"(default: {_EVALUATION_DEFAULTS.variant_id!r}).")
+             "(default: empty = the CMOR files' --cmip-variant-label).")
     parser.add_argument(
         "--evaluation-data-root-dir", dest="evaluation_data_root_dir", type=str,
         default=os.environ.get(
@@ -2768,6 +2849,10 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         diag_days=args.diag_days,
         checkpoint_days=args.checkpoint_days,
         cmip_resolution_deg=args.cmip_resolution_deg,
+        cmip_drs_tree=args.cmip_drs_tree,
+        cmip_institution_id=args.cmip_institution_id,
+        cmip_source_id=args.cmip_source_id,
+        cmip_variant_label=args.cmip_variant_label,
         max_wallclock_seconds=args.max_wallclock_seconds,
         monthly_means=args.monthly_means,
         cmip_output=args.cmip_output,
@@ -3129,6 +3214,8 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         bechtold_enable_cmt=args.bechtold_enable_cmt,
         bechtold_M_b_max=args.bechtold_M_b_max,
         bechtold_use_ifs_capdcycl=args.bechtold_use_ifs_capdcycl,
+        bechtold_use_ifs_ascent=args.bechtold_use_ifs_ascent,
+        bechtold_ifs_shallow_nosupply=args.bechtold_ifs_shallow_nosupply,
         bechtold_use_ifs_land_rhebc=args.bechtold_use_ifs_land_rhebc,
         bechtold_use_ifs_snow_melt=args.bechtold_use_ifs_snow_melt,
         held_suarez_forcing=args.held_suarez_forcing,

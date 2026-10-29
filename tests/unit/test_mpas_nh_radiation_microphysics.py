@@ -191,7 +191,7 @@ class TestMPASNHMicrophysics:
         """Sister of the plane test: Morrison writes through slot 8;
         the fixture has 3 slots → must raise."""
         cfg = MicrophysicsConfig(
-            scheme="morrison", morrison=MorrisonConfig(),
+            scheme="morrison", morrison=MorrisonConfig(warm_rain_scheme="kk2000"),
         )
         physics_fn = make_microphysics_physics(
             cfg, model_type="mpas_nh", dt=1.0,
@@ -213,7 +213,7 @@ class TestMPASNHMicrophysics:
             tracers=mpas_setup["state"].tracers.replace(data=tracers),
         )
         cfg = MicrophysicsConfig(
-            scheme="morrison", morrison=MorrisonConfig(),
+            scheme="morrison", morrison=MorrisonConfig(warm_rain_scheme="kk2000"),
         )
         tend = make_microphysics_physics(
             cfg, model_type="mpas_nh", dt=1.0,

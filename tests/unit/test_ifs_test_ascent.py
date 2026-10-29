@@ -246,7 +246,6 @@ def test_output_validity_ensemble():
             assert int(res.k_dpl[i]) == -1 and float(res.w_base[i]) == 0.0
 
 
-@pytest.mark.xfail(strict=True, reason="masked-arithmetic gradient hazard, tracked")
 def test_gradient_finite():
     T, q, p_full, p_half = column("deep", nlev=30)
     geo_half, geo_full = _geopotential(T.astype(np.float64), q.astype(np.float64),

@@ -21,12 +21,10 @@ Departures from the oracle (all documented, measured where numeric):
 * ``ientropy`` Brent inversion (data-dependent iteration count) is replaced
   by the fixed-iteration Newton solve of ``_zm_dilute.invert_entropy``
   (converges to the same root; AD-safe).
-* Saturation: CAM ``qsat_water`` (Goff-Gratch) / ``qsat`` (mixed phase)
-  return the saturation SPECIFIC humidity ``ε·e/(p − (1−ε)·e)``
-  (``wv_sat_methods.F90`` ``wv_sat_svp_to_qsat``); the port uses the shared
-  ``legoesm.thermo.saturation_specific_humidity`` (same expression over the
-  shared Tetens curve, smooth cap) per CLAUDE.md.  The curve difference is
-  measured in ``tests/atmosphere/hydrostatic/unit/test_zm_cam6_oracle.py``.
+* Saturation: the plume (``qsat_hPa`` -> CAM ``qsat_water``, zm_conv.F90:
+  4702-4716) is Goff-Gratch over water with CAM's ``wv_sat_svp_to_qsat``
+  (``legoesm.thermo.saturation_specific_humidity_goff_gratch``; its q = 1
+  cap is smooth by default, RULE 5).
   ``zm_conv_evap`` uses CAM's own ``qsat``
   (``legoesm.thermo.saturation_specific_humidity_cam_table``): the 1-K table
   of the Goff-Gratch ``svp_trans`` water->ice blend (0 to -20 degC), linearly
@@ -64,9 +62,9 @@ import jax.numpy as jnp
 
 from legoesm import constants
 from legoesm.thermo import (
-    saturation_specific_humidity,
     saturation_specific_humidity_cam_table,
-    saturation_vapor_pressure,
+    saturation_specific_humidity_goff_gratch,
+    saturation_vapor_pressure_goff_gratch,
 )
 from legoesm.atmosphere.physics.convection._zm_dilute import (
     invert_entropy,
@@ -220,14 +218,15 @@ def _scan_levels(body, init, xs, *, descending):
 
 def _qsat_hpa(t, p_hpa):
     """Oracle ``qsat_hPa``: saturation specific humidity at ``p`` in hPa."""
-    return saturation_specific_humidity(t, p_hpa * 100.0)
+    return saturation_specific_humidity_goff_gratch(t, p_hpa * 100.0)
 
 
 def _qst_cldprp(t, p_hpa):
     """``cldprp``'s environment saturation: ``qst = 1`` where ``p - es <= 0``
     (zm_conv.F90:2937-2941; the only qsat call in the oracle with this guard)."""
     p_pa = p_hpa * 100.0
-    return jnp.where(p_pa - saturation_vapor_pressure(t) <= 0.0, 1.0, _qsat_hpa(t, p_hpa))
+    return jnp.where(p_pa - saturation_vapor_pressure_goff_gratch(t) <= 0.0, 1.0,
+                     _qsat_hpa(t, p_hpa))
 
 
 def _div_md_floor(num, md):
@@ -907,11 +906,10 @@ class ZMConvr(NamedTuple):
 
 def zm_convr(t, qh, p_full, p_half, z, zf, landfrac, dt, *, pblh, tpert,
              capelmt, tau, num_cin, dmpdz, tiedke_add, lwmax, c0_lnd, c0_ocn,
-             alfa, limcnv_p_pa, pbl_top_pa, pref_edge=None):
+             alfa, limcnv_p_pa, pref_edge=None):
     """Port of ``zm_convr`` (``delt = 0.5*dt`` as in ``zm_conv_tend``).
 
     ``pblh`` is the PBL height [m] (``None`` raises: CAM always has one).
-    ``pbl_top_pa`` is no longer read.
 
     ``pref_edge`` are the REFERENCE interface pressures [Pa] (``nlev+1``, top
     first): CAM caps deep convection at the interface where they cross

@@ -213,3 +213,74 @@ def test_cam_table_clamp_default_gradients(T):
     jax.config.update("jax_enable_x64", True)
     check_grads(lambda t: saturation_specific_humidity_cam_table(t, jnp.float64(1.0e6)),
                 (jnp.float64(T),), order=2, modes=("rev",), eps=1e-4)
+
+
+@pytest.mark.parametrize("fn", ["saturation_vapor_pressure_goff_gratch",
+                                "saturation_vapor_pressure_ice_goff_gratch",
+                                "saturation_specific_humidity_goff_gratch",
+                                "saturation_specific_humidity_ice_goff_gratch"])
+def test_goff_gratch_returns_input_precision_computed_in_fp64(fn):
+    """CAM evaluates Goff-Gratch in r8: an fp32 caller (x64 on) gets the
+    fp64 value cast to fp32, not an fp64 array leaking into its state."""
+    import legoesm.thermo as th
+    f = getattr(th, fn)
+    with jax.enable_x64(True):  # the fp64 reference must really be fp64
+        args64 = [jnp.linspace(190.0, 310.0, 13)]
+        if "humidity" in fn:
+            args64.append(jnp.linspace(2.0e3, 1.0e5, 13))
+        args32 = [a.astype(jnp.float32) for a in args64]
+        out32 = f(*args32)
+        assert out32.dtype == jnp.float32
+        ref = f(*[a.astype(jnp.float64) for a in args32]).astype(jnp.float32)
+        np.testing.assert_array_equal(np.asarray(out32), np.asarray(ref))
+        ints = [300] + ([100000] if "humidity" in fn else [])
+        assert jnp.issubdtype(f(*ints).dtype, jnp.floating)
+        assert float(f(*ints)) > 0.0
+
+
+def test_cam_table_is_built_in_fp64_then_cast():
+    """Follow-up row 4: CAM builds estbl in r8 (wv_saturation.F90:226); an
+    fp32 run reads that table cast once, not a table evaluated in fp32.  The
+    first build happens inside a jit trace, under fp32."""
+    import numpy as np
+
+    from legoesm import thermo
+    thermo._cam_svp_table_fp64.cache_clear()
+    with jax.enable_x64(False):
+        q32 = jax.jit(lambda t: thermo.saturation_specific_humidity_cam_table(
+            t, jnp.float32(8.0e4)))(jnp.float32(250.0))
+        t32 = np.asarray(thermo.cam_svp_table(jnp.float32))
+        direct32 = np.asarray(thermo.saturation_vapor_pressure_trans(
+            127.16 + jnp.arange(t32.size, dtype=jnp.float32)))
+    with jax.enable_x64(True):
+        t64 = np.asarray(thermo.cam_svp_table(jnp.float64))
+        direct64 = np.asarray(thermo.saturation_vapor_pressure_trans(
+            127.16 + jnp.arange(t64.size, dtype=jnp.float64)))
+    assert q32.dtype == jnp.float32 and np.isfinite(q32)
+    assert t32.dtype == np.float32 and t64.dtype == np.float64
+    np.testing.assert_array_equal(t64, direct64)
+    np.testing.assert_array_equal(t32, t64.astype(np.float32))
+    assert np.any(direct32 != t32)  # the fp32-evaluated table differs
+
+
+def test_cam_qsat_reads_the_fp64_built_table_in_fp32(monkeypatch):
+    """Follow-up row 4, consumer side: an fp32 qsat interpolates the
+    fp64-built table cast to fp32, not an fp32-evaluated table (the two give
+    different q somewhere on a 0.1 K sweep)."""
+    import numpy as np
+
+    from legoesm import thermo
+    with jax.enable_x64(False):
+        T = jnp.arange(180.0, 320.0, 0.1, dtype=jnp.float32)
+        p = jnp.float32(8.0e4)
+        n = thermo.cam_svp_table(jnp.float32).shape[0]
+        direct32 = thermo.saturation_vapor_pressure_trans(
+            127.16 + jnp.arange(n, dtype=jnp.float32))
+        q = np.asarray(thermo.saturation_specific_humidity_cam_table(T, p))
+        cast64 = thermo.cam_svp_table(jnp.float32)
+        monkeypatch.setattr(thermo, "cam_svp_table", lambda dtype: cast64)
+        q_cast = np.asarray(thermo.saturation_specific_humidity_cam_table(T, p))
+        monkeypatch.setattr(thermo, "cam_svp_table", lambda dtype: direct32)
+        q_fp32_table = np.asarray(thermo.saturation_specific_humidity_cam_table(T, p))
+    np.testing.assert_array_equal(q, q_cast)
+    assert np.any(q != q_fp32_table)

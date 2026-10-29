@@ -1012,6 +1012,11 @@ def make_physics_config(
     # flag raises instead of silently ignoring it — never a private copy of
     # that dispatch.
     micro_cfg = cfg.microphysics._replace(scheme=microphysics)
+    if microphysics == "morrison" and micro_cfg.morrison.warm_rain_scheme is None:
+        # Pinned: an unset law resolves to kk2000_cam6 under mg, which needs
+        # CLUBB's per-cell relvar; the SCM-RCE columns run kk2000.
+        micro_cfg = micro_cfg._replace(morrison=micro_cfg.morrison._replace(
+            warm_rain_scheme="kk2000"))
     if (hard_saturation_adjustment
             or hard_sat_adjust_threshold is not None
             or hard_sat_max_heating_K is not None):

@@ -168,7 +168,8 @@ def make_cfg(overrides: dict, *, rad_interval: int,
     lean deck is the right tool for the ranking objective (the full RCEMIP deck
     is for absolute-realism scoring, out of scope here)."""
     _assert_in_bounds(overrides)
-    morrison = MorrisonConfig()._replace(
+    # Pinned kk2000: an unset law resolves to kk2000_cam6 under mg (needs CLUBB relvar).
+    morrison = MorrisonConfig(warm_rain_scheme="kk2000")._replace(
         **{k: float(v) for k, v in overrides.items()})
     return PhysicsConfig(
         radiation=_radiation_cfg(radiation, rad_interval),

@@ -50,7 +50,8 @@ over the static nlev).
 
 Surface flux sign convention: shf_w_m2 / lhf_w_m2 follow the IFS PAHFS /
 PQHFL convention, NEGATIVE = upward (into the atmosphere); the latent
-mass flux is PQHFL [kg m-2 s-1] = -lhf_w_m2 / L_v (cubasen.F90:335).
+mass flux is PQHFL [kg m-2 s-1] = lhf_w_m2 / L_v (cubasen.F90:335).  Callers
+holding positive-upward fluxes negate them first (bechtold does).
 """
 
 from typing import NamedTuple
@@ -62,6 +63,7 @@ from jax import lax
 from legoesm import constants
 from legoesm.thermo import saturation_specific_humidity
 from legoesm.atmosphere.physics._shared import virtual_temperature
+from legoesm.core.profile_metrics import safe_sqrt_nan
 
 
 # --- IFS cubasen / sucumf defaults (OpenIFS main 8f6f722; sucumf.F90 lines cited) ---
@@ -205,7 +207,7 @@ __physics_contract__ = {
         "T": "K", "q_v": "kg/kg (specific humidity, PQEN)", "p_full": "Pa", "p_half": "Pa",
         "geo_full": "m2/s2 (geopotential, surface-relative; geo_half[:, nlev] = 0)",
         "geo_half": "m2/s2", "shf_w_m2": "W/m2 (PAHFS sign: negative = upward)",
-        "lhf_w_m2": "W/m2 (PQHFL sign: negative = upward; PQHFL = -lhf/L_v [kg m-2 s-1])",
+        "lhf_w_m2": "W/m2 (PQHFL sign: negative = upward; PQHFL = lhf/L_v [kg m-2 s-1])",
         "ustar": "m/s", "land_frac": "1 (0..1)", "dq_dt_adv": "kg/kg/s (PTENQA)",
     },
     "outputs": {
@@ -217,7 +219,7 @@ __physics_contract__ = {
         "w2": "m2/s2 (ZWU2H/PWU2H of the selected ascent)",
     },
     "sign_convention": "surface fluxes follow the IFS PAHFS/PQHFL convention: "
-                       "NEGATIVE = upward (into the atmosphere); PQHFL = -lhf_w_m2 / L_v.",
+                       "NEGATIVE = upward (into the atmosphere); PQHFL = lhf_w_m2 / L_v.",
     "conserves": ["none"],
     "differentiable": True,
     "reference": "OpenIFS cubasen.F90 (main 8f6f722)",
@@ -1090,7 +1092,7 @@ def ifs_departure_search(T, q_v, p_full, p_half, geo_full, geo_half,
         # (the source never resets them; review finding 3)
         jkb = jnp.clip(icbot, 0, nlev - 1); jkt = jnp.clip(ictop, 0, nlev - 1)
         depth = p_half[idx, jkb] - p_half[idx, jkt]
-        wb = jnp.sqrt(jnp.maximum(w2h[idx, jkb], 0.0))       # :670 / :716
+        wb = safe_sqrt_nan(w2h[idx, jkb])                     # :670 / :716
         # PCAPE = MAXVAL(ZCAPE(JL,:)) over ALL departures (cubasen.F90:741)
         cape_out = jnp.maximum(carry["cape_out"], zcape)
 

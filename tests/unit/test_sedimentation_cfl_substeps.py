@@ -370,7 +370,8 @@ def test_required_count_rides_the_combined_tendency_and_the_cadence_cache():
     cfg = PhysicsConfig(
         turbulence=TurbulenceConfig(scheme="tke"),
         microphysics=MicrophysicsConfig(scheme="morrison",
-                                        morrison=MorrisonConfig(sed_cfl_substeps=True)))
+                                        morrison=MorrisonConfig(warm_rain_scheme="kk2000",
+                                                               sed_cfl_substeps=True)))
     ps = init_physics_state(*state.T.data.shape, cfg)
     f3 = make_physics(cfg, model_type="mpas", dt=1800.0, cld_macmic_num_steps=3,
                       physics_cadence="write", physics_cadence_steps=2)
@@ -409,7 +410,8 @@ def test_combined_count_is_the_max_over_the_macmic_window(monkeypatch):
     cfg = cmb.PhysicsConfig(
         turbulence=TurbulenceConfig(scheme="tke"),
         microphysics=MicrophysicsConfig(scheme="morrison",
-                                        morrison=MorrisonConfig(sed_cfl_substeps=True)))
+                                        morrison=MorrisonConfig(warm_rain_scheme="kk2000",
+                                                               sed_cfl_substeps=True)))
     seen = []
     orig = cmb.make_microphysics_physics
 
@@ -466,7 +468,8 @@ def _morrison_mpas(cap=256, strict=False, dt=112.5):
         turbulence=TurbulenceConfig(scheme="tke"),
         microphysics=MicrophysicsConfig(
             scheme="morrison",
-            morrison=MorrisonConfig(sed_cfl_substeps=True, sed_cfl_substeps_max=cap,
+            morrison=MorrisonConfig(warm_rain_scheme="kk2000",
+                                    sed_cfl_substeps=True, sed_cfl_substeps_max=cap,
                                     sed_cfl_substeps_strict=strict)))
     model = MPASPrimitiveEquationModel(mesh, sigma, MPASPrimitiveEquationConfig())
     ps = init_physics_state(*state.T.data.shape, cfg)

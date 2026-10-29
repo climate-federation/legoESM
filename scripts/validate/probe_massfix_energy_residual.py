@@ -185,12 +185,29 @@ def _instrument_latlon():
     M._apply_safety_rails, pl.gridded_energy_fixer_dT = rails, ef
 
 
-def _convert_p3_latlon(src, out_dir):
+def _p3_div4_scale(config_json):
+    """The div-4 scale of the run that wrote the P3 checkpoint, read from that
+    run's RAW experiment_config.json (the config loader would fill a missing
+    field with its default; a missing scale is refused, never defaulted)."""
+    with open(config_json) as f:
+        dyc = json.load(f).get("dycore")
+    if not isinstance(dyc, dict) or "mpas_div_damp4_scale" not in dyc:
+        raise SystemExit(
+            f"{config_json}: no dycore.mpas_div_damp4_scale, so the converted "
+            "checkpoint's div-4 stamp is unknown; refusing to guess")
+    return float(dyc["mpas_div_damp4_scale"])
+
+
+def _convert_p3_latlon(src, out_dir, config_json):
     """Re-key a fu/composable-p3 lat-lon column checkpoint (``llc_u_face`` /
     ``llc_v_face`` + flattened column fields) into main's ``latloncol_ckpt_v1``
     schema.  Same data: C-grid face winds as stored, cell fields reshaped
-    row-major (n_lat, n_lon) -- the ColumnMesh order."""
+    row-major (n_lat, n_lon) -- the ColumnMesh order.  Stamps the div-4 scale
+    of the run that wrote it (``config_json``, that run's own config), which
+    the driver's restore compares with the resuming run's scale."""
+    scale = _p3_div4_scale(config_json)
     d = dict(np.load(src, allow_pickle=False))
+    d["latloncol_div4_scale"] = np.asarray(scale)
     nlat, nlon1, nlev = d["llc_u_face"].shape
     nlon = nlon1 - 1
     to2 = lambda x: x.reshape((nlat, nlon) + x.shape[1:])  # noqa: E731
@@ -204,7 +221,8 @@ def _convert_p3_latlon(src, out_dir):
         d[f"latloncol_q_{i}"] = to2(d[f"trc_{nm}"])
     out = os.path.join(out_dir, "converted_" + os.path.basename(src))
     np.savez(out, **d)
-    print(f"converted {src} -> {out} (nlat={nlat} nlon={nlon} nlev={nlev})",
+    print(f"converted {src} -> {out} (nlat={nlat} nlon={nlon} nlev={nlev}, "
+          f"div-4 stamp {scale} from {config_json})",
           flush=True)
     return out
 
@@ -269,7 +287,7 @@ def main():
           flush=True)
     os.makedirs(a.out, exist_ok=True)
     if a.convert_p3:
-        a.restart = _convert_p3_latlon(a.restart, a.out)
+        a.restart = _convert_p3_latlon(a.restart, a.out, a.config_json)
     from legoesm.driver.model_driver import ModelDriver
     drv = ModelDriver(cfg)
     drv.setup()

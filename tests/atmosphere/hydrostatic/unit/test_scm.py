@@ -8,6 +8,7 @@ import numpy as np
 import pytest
 
 from legoesm import constants
+from legoesm.atmosphere.physics.microphysics.config import MorrisonConfig
 from legoesm.atmosphere.physics import (
     PhysicsConfig,
     RadiationConfig,
@@ -437,7 +438,9 @@ def test_swap_turbulence_schemes(turb_scheme):
 )
 def test_swap_microphysics_schemes(micro_scheme):
     cfg = _baseline_cfg(
-        microphysics=MicrophysicsConfig(scheme=micro_scheme),
+        microphysics=MicrophysicsConfig(
+            scheme=micro_scheme,
+            morrison=MorrisonConfig(warm_rain_scheme="kk2000")),
     )
     if micro_scheme == "sundqvist":
         # This case declares no GCM cell area (cell_area_m2=None), so

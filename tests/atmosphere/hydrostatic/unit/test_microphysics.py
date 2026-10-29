@@ -1024,7 +1024,7 @@ class TestSchemeSelection:
         """All 6 scheme strings are accepted by the factory."""
         for scheme in ["kessler", "sundqvist", "seifert_beheng",
                        "morrison", "thompson", "ml_emulator", "none"]:
-            config = MicrophysicsConfig(scheme=scheme)
+            config = MicrophysicsConfig(scheme=scheme, morrison=MorrisonConfig(warm_rain_scheme="kk2000"))
             physics_fn = make_microphysics_physics(config, "hydrostatic", dt=300.0)
             assert callable(physics_fn)
 

@@ -142,6 +142,9 @@ clouds: sundqvist
 # newer curve; that is a different experiment.
 cloud_saturation_scheme: liquid
 microphysics: morrison
+morrison_warm_rain_scheme: kk2000   # explicit: the unset default resolves to
+                                    # kk2000_cam6 under morrison_flavor mg,
+                                    # which needs CLUBB relvar (not wired here)
 morrison_sed_cfl_substeps: true  # user decision 2026-09-22: MG2 CFL sub-stepped
                                  # sedimentation (micro_mg2_0.F90 loop). The
                                  # one-pass form moved a hydrometeor at most one
@@ -506,11 +509,13 @@ energy_consistent_moisture_clip: true
 # why that one is off above.
 cloud_vertical_overlap_optics: max_random
 cloud_n_subcolumns: 8
-# Microphysics: saturation over ice below freezing, a homogeneous freezing
-# source for ice number, and droplet number from the aerosol field.
+# Microphysics: saturation over ice below freezing and a homogeneous freezing
+# source for ice number; droplet number is prescribed (see below).
 hard_sat_ice_curve: true
 homogeneous_ice_nucleation: true
-aerosol_ccn: true
+# Off (oracle follow-up row 67): this deck's cloud scheme has no reference
+# for the in-cloud CCN droplet radius, so radiation refuses that pairing.
+aerosol_ccn: false
 # Grid-scale moisture smoothing, the positivity fixer that borrows within a
 # column rather than creating water, and the prognostic sea-ice skin.
 # The moisture filter is a SCALE-SELECTIVE biharmonic, not a Laplacian, since

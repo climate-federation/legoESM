@@ -57,7 +57,8 @@ def _args(fx, dtype=jnp.float64):
 
 def _pblh(fx, cfg_kw, dtype=jnp.float64):
     return HB.cam_pblintd_height(*_args(fx, dtype),
-                                 HoltslagBovilleConfig()._replace(**cfg_kw))
+                                 HoltslagBovilleConfig()._replace(**cfg_kw),
+                                 p_sfc=jnp.asarray(fx["in_p_half"], dtype)[:, -1])
 
 
 def test_fixture_provenance(fx):
@@ -81,7 +82,8 @@ def test_pblh_matches_cam_oracle_at_hard_limit(fx):
 def test_surface_scales_match_cam_oracle(fx):
     """calc_ustar / calc_obklen as the clubb_intr block calls them."""
     T, q, *_ = _args(fx)
-    th, thv = HB._theta_thetav(T, q, jnp.asarray(fx["in_p_full"]))
+    th, thv = HB._theta_thetav_se(T, q, jnp.asarray(fx["in_p_full"]),
+                                  jnp.asarray(fx["in_p_half"])[:, -1])
     ustar, _, _, kbfs, obklen = HB._calc_ustar_obklen(
         T[:, -1], jnp.asarray(fx["in_p_full"])[:, -1],
         jnp.asarray(fx["in_taux"]), jnp.asarray(fx["in_tauy"]),
@@ -99,7 +101,8 @@ def test_gradient_is_finite_at_production_smoothing(fx, dtype):
 
     def loss(T, u, sh):
         return jnp.sum(HB.cam_pblintd_height(
-            T, q, u, v, pf, zm, zi, tx, ty, sh, qf, pref, cfg) ** 2)
+            T, q, u, v, pf, zm, zi, tx, ty, sh, qf, pref, cfg,
+            p_sfc=jnp.asarray(fx["in_p_half"])[:, -1]) ** 2)
     grads = jax.grad(loss, argnums=(0, 1, 2))(T, u, sh)
     for g in grads:
         assert np.all(np.isfinite(np.asarray(g)))
@@ -173,9 +176,9 @@ def test_mpas_clubb_lane_publishes_cam_pblintd_on_the_post_clubb_state(
     cap = {}
     real = TI.cam_pblintd_height
 
-    def spy(*a):
-        cap["args"] = a
-        cap["out"] = real(*a)
+    def spy(*a, **k):
+        cap["args"], cap["kw"] = a, k
+        cap["out"] = real(*a, **k)
         return cap["out"]
     monkeypatch.setattr(TI, "cam_pblintd_height", spy)
     dt = 600.0
@@ -188,6 +191,9 @@ def test_mpas_clubb_lane_publishes_cam_pblintd_on_the_post_clubb_state(
     np.testing.assert_array_equal(np.asarray(carry["pblh"]), np.asarray(cap["out"]))
     p_full = sigma.pressure_at_full(state.p_s.data)
     p_half = sigma.pressure_at_half(state.p_s.data)
+    # CAM-SE exner reference (follow-up row 20): the column's own surface
+    np.testing.assert_array_equal(np.asarray(cap["kw"]["p_sfc"]),
+                                  np.asarray(p_half)[:, -1])
     T_post = state.T.data + dt * tend.dT_dt.data
     q_post = state.tracers["q_v"] + dt * tend.tracer_tendencies["q_v"]
     np.testing.assert_allclose(np.asarray(T), np.asarray(T_post), rtol=1e-14)

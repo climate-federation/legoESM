@@ -1961,7 +1961,7 @@ def _m2005_cloud_slope(qc_s, N_c, rho, pgam):
     return lamc, lammin, lammax, gamma_ratio, cons26
 
 
-def autoconversion_sb2001(q_c, q_r, N_c_eff, rho):
+def autoconversion_sb2001(q_c, q_r, N_c_eff, rho, *, ramp_top):
     """Seifert & Beheng (2001) autoconversion as gSAM M2005 runs it
     (IRAIN=1, module_mp_graupel.f90:1830-1844 / :2868-2880)::
 
@@ -1984,9 +1984,25 @@ def autoconversion_sb2001(q_c, q_r, N_c_eff, rho):
     gSAM's SB2001 cloud-number sink ``NPRC = 2·PRC/x_*`` (only reached with
     ``predict_Nc=True``, whose droplet activation is not ported either).
 
+    RULE 5 (#2232): gSAM's ``q_c >= 1e-6`` step is replaced by the C2 step
+    :func:`smoothstep_quintic`, exactly 0 at ``q_c = 1e-6`` and 1 from
+    ``ramp_top`` [kg/kg] up (``MorrisonConfig`` / ``SeifertBehengConfig``
+    ``.sb2001_autoconv_ramp_top``, default 2e-6, codex+GLM 2026-10-29);
+    ``ramp_top <= 1e-6`` is gSAM's hard step.  The rate stays exactly 0 below
+    1e-6.  KNOWN DIFFERENCE at the default: only cloud water in [1e-6, 2e-6)
+    kg/kg sees a reduced rate (the number source scales with it).  Measured on
+    the gSAM SB2001 kernel fixture: 168 of 1680 points change (those at
+    q_c = 1e-6, rate 0 instead of gSAM's), largest change 1.5e-17 kg/kg/s =
+    2.5e-14 of the fixture's largest rate; per-point and per-column gaps are
+    pinned in test_sb2001_autoconv_ramp.py.  No invariant is broken (the rate
+    only shrinks, stays >= 0).
+
     AD: piecewise-differentiable (gates and clamps are ``jnp.where``);
     ``dum^0.68`` goes through ``safe_pow`` (finite gradient at ``q_r = 0``).
     """
+    if not ramp_top >= 0.0 or not math.isfinite(ramp_top):
+        raise ValueError(
+            f"ramp_top must be finite and >= 0 [kg/kg], got {ramp_top}")
     q_c_pos = jnp.clip(q_c, 0.0)
     q_r_pos = jnp.clip(q_r, 0.0)
     gate = q_c_pos >= _SB2001_PRC_QC_MIN
@@ -2002,6 +2018,9 @@ def autoconversion_sb2001(q_c, q_r, N_c_eff, rho):
         / (nc_adj * _NC_PERM3_TO_PERCM3) ** 2
         * (1.0 + dum1 / (1.0 - dum) ** 2) * _MASSRATE_GCM3_TO_MIXR / rho
     )
+    if ramp_top > _SB2001_PRC_QC_MIN:
+        prc = prc * smoothstep_quintic(
+            (qc_s - _SB2001_PRC_QC_MIN) / (ramp_top - _SB2001_PRC_QC_MIN))
     dq_c_au = jnp.where(gate, prc, 0.0)
     x_c = q_c_pos * rho / jnp.clip(N_c_eff, 1.0)
     # NPRC1 = 0.5·NPRC = PRC/x_* (newborn drops carry the separation mass);
@@ -2956,7 +2975,7 @@ def _m2005_fill_down(v):
 
 
 def m2005_liquid_step(T, q_v, q_c, q_r, N_r, p, rho, dz, dt, N_c_spec, params,
-                      n_substeps_max):
+                      n_substeps_max, *, sb2001_autoconv_ramp_top):
     """One gSAM M2005 call, liquid only, SB2001 warm rain, specified N_c.
 
     Port of gSAM 1.8.8 ``M2005MICRO_GRAUPEL`` (SRC/MICRO_M2005/
@@ -2988,16 +3007,18 @@ def m2005_liquid_step(T, q_v, q_c, q_r, N_r, p, rho, dz, dt, N_c_spec, params,
     6. state update, then the step-1 removal again on the new state (:4664-
        4679), QSMALL zeroing, and the rain-number reset at the slope bounds.
 
+    ``sb2001_autoconv_ramp_top`` [kg/kg] is the autoconversion gate's RULE 5
+    ramp top (:func:`autoconversion_sb2001`; <= 1e-6 = gSAM's hard step).
+
     ``N_r`` is per-VOLUME [1/m^3] in and out (gSAM's per-kg NR3D times rho).
     Arrays are (ncol, nlev) TOP-DOWN (surface last).  ``params`` supplies the
     gSAM M2005 rain constants (AR, BR, F1R, F2R, LAMMINR/LAMMAXR, RHOSU, the
     NRAGG constants): a ``MorrisonConfig`` at the sam flavour.  The
     data-dependent ``NSTEP`` runs in a fixed ``n_substeps_max`` loop (passes
     past a column's own count are masked); the per-column REQUIRED count is
-    returned so the caller can refuse a column that needs more.  The reused
-    sedimentation routine floors the layer thickness at 1 m
-    (``sedimentation_tendency``); gSAM uses the actual ``dz``, so the port is
-    NOT faithful for layers thinner than 1 m.
+    returned so the caller can refuse a column that needs more.  Sedimentation
+    uses the actual ``dz`` as gSAM does (``dz_floor=False``; the shared
+    routine's 1 m floor stays for the MG2-family schemes).
 
     Returns ``(T, q_v, q_c, q_r, N_r, precipitation [kg/m^2/s], required
     sub-steps (ncol,))``.  Piecewise differentiable (gates are ``jnp.where``
@@ -3029,7 +3050,8 @@ def m2005_liquid_step(T, q_v, q_c, q_r, N_r, p, rho, dz, dt, N_c_spec, params,
     _, _, N_c_adj = m2005_cloud_droplet_psd(q_c, N_c, rho)
 
     # 3. process rates
-    prc, nprc1, _ = autoconversion_sb2001(q_c, q_r, N_c, rho)
+    prc, nprc1, _ = autoconversion_sb2001(q_c, q_r, N_c, rho,
+                                          ramp_top=sb2001_autoconv_ramp_top)
     pra = accretion_sb2001(q_c, q_r, rho)
     nragg = self_collection_breakup_sb2001(N_r, q_r, rho, params)
     pre = -rain_evaporation_m2005(q_v, q_r, N_r, q_sat, T, p, rho, params)
@@ -3086,13 +3108,15 @@ def m2005_liquid_step(T, q_v, q_c, q_r, N_r, p, rho, dz, dt, N_c_spec, params,
     umr, unr, umc, unc = (_m2005_fill_down(v) for v in (umr, unr, umc, unc))
     sed_r, sfc_r, req_r = sedimentation_tendency(
         dumr, rho, umr, dz, dt=dt, return_surface_flux=True,
-        n_substeps_max=n_substeps_max, cfl_speed=unr, return_substeps=True)
+        n_substeps_max=n_substeps_max, cfl_speed=unr, return_substeps=True,
+        dz_floor=False)
     sed_nr = sedimentation_tendency(
         dumfnr, rho, unr, dz, dt=dt, n_substeps_max=n_substeps_max,
-        cfl_speed=umr)
+        cfl_speed=umr, dz_floor=False)
     sed_c, sfc_c, req_c = sedimentation_tendency(
         dumc, rho, umc, dz, dt=dt, return_surface_flux=True,
-        n_substeps_max=n_substeps_max, cfl_speed=unc, return_substeps=True)
+        n_substeps_max=n_substeps_max, cfl_speed=unc, return_substeps=True,
+        dz_floor=False)
 
     # 6. update (:4512-4535) and post-step cleanup (:4664-4783)
     q_c = q_c + (qc_t + sed_c) * dt

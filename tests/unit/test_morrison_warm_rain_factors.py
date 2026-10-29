@@ -200,7 +200,7 @@ def test_validate_strict_refuses_inert_or_foreign_use():
     m = MorrisonConfig()
     assert d["morrison_autocon_fact"] == m.autocon_fact == 1.0
     assert d["morrison_accre_enhan_fact"] == m.accre_enhan_fact == 1.0
-    assert d["morrison_warm_rain_scheme"] == m.warm_rain_scheme == "kk2000"
+    assert d["morrison_warm_rain_scheme"] is m.warm_rain_scheme is None
 
 
 def test_cli_round_trip_and_production_deck_selects_the_mg2_law():
@@ -336,7 +336,7 @@ def test_cam6_accretion_uses_the_capped_water():
 
     cam = MorrisonConfig(warm_rain_scheme="kk2000_cam6")
     np.testing.assert_allclose(acc(cam, 1.0e-2), acc(cam, 5.0e-3), rtol=1e-10)
-    sam = MorrisonConfig()
+    sam = MorrisonConfig(warm_rain_scheme="kk2000")
     assert not np.allclose(acc(sam, 1.0e-2), acc(sam, 5.0e-3), rtol=1e-3)
 
 
@@ -344,8 +344,9 @@ def test_kk2000_path_unchanged_by_the_cam6_option():
     """Adding the option leaves the default kk2000 budget bit-identical to the
     same leaf with the (unread) CAM6 relvar changed."""
     from legoesm.atmosphere.physics.microphysics.config import MorrisonConfig
-    a, _, _ = _morrison_budget(MorrisonConfig())
-    b, _, _ = _morrison_budget(MorrisonConfig(kk2000_cam6_relvar=0.3))
+    a, _, _ = _morrison_budget(MorrisonConfig(warm_rain_scheme="kk2000"))
+    b, _, _ = _morrison_budget(MorrisonConfig(warm_rain_scheme="kk2000",
+                                              kk2000_cam6_relvar=0.3))
     for k in ("autoconversion", "accretion"):
         np.testing.assert_array_equal(np.asarray(a[k]).view(np.uint64),
                                       np.asarray(b[k]).view(np.uint64))

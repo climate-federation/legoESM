@@ -544,11 +544,13 @@ def test_an_override_cannot_smuggle_the_lever_past_the_ordering_guard():
     import pytest
     from legoesm.atmosphere.physics.combined import PhysicsConfig, make_physics
     from legoesm.atmosphere.physics.turbulence.config import TurbulenceConfig
-    from legoesm.atmosphere.physics.microphysics.config import MicrophysicsConfig
+    from legoesm.atmosphere.physics.microphysics.config import (
+        MicrophysicsConfig, MorrisonConfig)
 
     cfg = PhysicsConfig(
         turbulence=TurbulenceConfig(scheme="clubb", clubb=_ON, liquid_partition=True),
-        microphysics=MicrophysicsConfig(scheme="morrison"))
+        microphysics=MicrophysicsConfig(
+            scheme="morrison", morrison=MorrisonConfig(warm_rain_scheme="kk2000")))
     with pytest.raises(ValueError, match="cld_macmic_num_steps>=2"):
         make_physics(cfg, model_type="mpas", cld_macmic_num_steps=1)
     # ... and it builds once the sub-cycle is on, so the guard is about the
@@ -557,7 +559,8 @@ def test_an_override_cannot_smuggle_the_lever_past_the_ordering_guard():
     # The lever off is untouched at every N.
     off = PhysicsConfig(
         turbulence=TurbulenceConfig(scheme="clubb", clubb=_OFF),
-        microphysics=MicrophysicsConfig(scheme="morrison"))
+        microphysics=MicrophysicsConfig(
+            scheme="morrison", morrison=MorrisonConfig(warm_rain_scheme="kk2000")))
     make_physics(off, model_type="mpas", cld_macmic_num_steps=1)
 
 

@@ -535,7 +535,9 @@ def parse_args(argv: list[str] | None = None):
                         "'grachev2007_sheba' = SHEBA Arctic stable functions "
                         "(the sea-ice reference); 'gryanik2020' = modified "
                         "SHEBA; 'beljaars_holtslag1991' avoids stable flux "
-                        "collapse. Unstable branch stays Businger-Dyer.")
+                        "collapse. Unstable branch stays Businger-Dyer "
+                        "(heat scaled by Pr0 = 0.98 for gryanik2020, as in "
+                        "SurfaceFluxes.jl).")
     p.add_argument("--grid", type=str, default="all",
                    choices=GRID_TYPES + ["all"])
     p.add_argument("--resolution", type=str, default=None,
@@ -2961,6 +2963,7 @@ def _jra55_step(state, step_idx, dt, model, jra55_state):
         jra55_to_freshwater,
         load_jra55_slice,
     )
+    from legoesm.ocean.freshwater import net_freshwater_flux
     from legoesm.ocean.state import OceanSurfaceForcing
 
     day = float(step_idx) * dt / 86400.0
@@ -3023,7 +3026,10 @@ def _jra55_step(state, step_idx, dt, model, jra55_state):
         q_net=q_net,
         tau_x=tile_resp.tau_x * ramp,
         tau_y=tile_resp.tau_y * ramp,
-        freshwater=None,  # using the structured FreshwaterForcing path
+        # Mass and salt go through model.step(freshwater=fw); this copy is the
+        # vertical-mixing surface-buoyancy channel only (#2234), same form as
+        # the sea-ice blend: P - E + R + ice_fw, SSS restoring excluded.
+        freshwater=net_freshwater_flux(fw._replace(restoring=None)),
     )
 
     if jra55_state.get("enable_sponge", False):
@@ -3607,7 +3613,7 @@ def _build_jra55_block_fn(model, jra55_state, dt, spmd_step=None):
     from legoesm.coupler.coupler import ocean_tile_response
     from legoesm.coupler.ocean_forcing import omip_sea_ice_surface_forcing
     from legoesm.core.coupling_fields import AtmToSurface
-    from legoesm.ocean.freshwater import FreshwaterForcing
+    from legoesm.ocean.freshwater import FreshwaterForcing, net_freshwater_flux
     from legoesm.ocean.state import OceanSurfaceForcing
 
     coupler_cfg = jra55_state["coupler_cfg"]
@@ -3842,6 +3848,12 @@ def _build_jra55_block_fn(model, jra55_state, dt, spmd_step=None):
                     dt=dt, grid=ice_grid,
                     ocean_mask=state_in.land_mask.data,
                 )
+            else:
+                # Ice off: fill the vertical-mixing buoyancy channel the blend
+                # fills when ice is on (#2234); mass and salt still go through
+                # freshwater=fw only.
+                sf = sf._replace(freshwater=net_freshwater_flux(
+                    fw._replace(restoring=None)))
             if zero_fluxes:
                 fw = jax.tree_util.tree_map(jnp.zeros_like, fw)
                 sf = jax.tree_util.tree_map(jnp.zeros_like, sf)
@@ -3923,7 +3935,7 @@ def _build_jra55_block_fn_interp(model, jra55_state, dt, spmd_step=None):
     from legoesm.coupler.coupler import ocean_tile_response
     from legoesm.coupler.ocean_forcing import omip_sea_ice_surface_forcing
     from legoesm.core.coupling_fields import AtmToSurface
-    from legoesm.ocean.freshwater import FreshwaterForcing
+    from legoesm.ocean.freshwater import FreshwaterForcing, net_freshwater_flux
     from legoesm.ocean.state import OceanSurfaceForcing
     from legoesm.atmosphere.physics.radiation.solar import (
         cos_zenith_angle, solar_declination,
@@ -4218,6 +4230,11 @@ def _build_jra55_block_fn_interp(model, jra55_state, dt, spmd_step=None):
                         dt=dt, grid=ice_grid,
                         ocean_mask=state_in.land_mask.data,
                     )
+                else:
+                    # Ice off: same buoyancy-channel fill as the block path
+                    # (#2234).
+                    sf = sf._replace(freshwater=net_freshwater_flux(
+                        fw._replace(restoring=None)))
                 if zero_fluxes:
                     fw = jax.tree_util.tree_map(jnp.zeros_like, fw)
                     sf = jax.tree_util.tree_map(jnp.zeros_like, sf)
@@ -4304,7 +4321,13 @@ class MonthlyMldSstWriter:
     the shared de Boyer Montegut diagnostic (0.03 kg/m3 wrt 10 m).
     """
 
-    def __init__(self, path, *, z_coord, lat_deg, lon_deg):
+    def __init__(self, path, *, z_coord, lat_deg, lon_deg, io_rank,
+                 multiproc):
+        # Every rank accumulates the same (gathered) samples; only the I/O
+        # rank writes the file (#2237).  In a multi-process run a failed write
+        # warns instead of raising, so the ranks stay in lockstep; the next
+        # flush rewrites every completed month.
+        self.io_rank, self.multiproc = bool(io_rank), bool(multiproc)
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         zh = np.asarray(z_coord.z_half_ref)
@@ -4360,12 +4383,107 @@ class MonthlyMldSstWriter:
             coords={"year_index": ("time", [d[0] for d in self.done]),
                     "month": ("time", [d[1] for d in self.done]),
                     "lat": self.lat, "lon": self.lon})
+        if not self.io_rank:
+            return
         tmp = self.path.with_name(self.path.name + ".tmp")
-        ds.to_netcdf(tmp)
-        os.replace(tmp, self.path)
+        try:
+            ds.to_netcdf(tmp)
+            os.replace(tmp, self.path)
+        except Exception as e:
+            if not self.multiproc:
+                raise
+            print(f"    WARNING: rank-0 monthly MLD/SST write failed "
+                  f"(continuing to keep the ranks in lockstep; the next "
+                  f"month rewrites the file): {type(e).__name__}: {e}",
+                  flush=True)
 
     def close(self) -> None:
         self._flush()
+
+    @staticmethod
+    def start_fresh(path) -> None:
+        """A fresh run (no --restart) refuses a folder that already holds the
+        monthly file: its first flush would overwrite every earlier month
+        (#2182, user decision).  Called before the run writes anything."""
+        if Path(path).exists():
+            raise ValueError(
+                f"--monthly-mld-sst: {path} already exists and a fresh "
+                "run (no --restart) would overwrite it. Pass --restart with "
+                "the run's last checkpoint to continue it, or move the file "
+                "(or choose another --output) to start over.")
+
+    def restart_payload(self) -> dict:
+        """The in-flight month (key, sample count, running sums) for the
+        restart npz, so a resumed run continues the month exactly (#2182)."""
+        key = self.month if self.month is not None else (-1, -1)
+        empty = np.zeros(0)
+        return {
+            "monthly_key": np.asarray(key, dtype=np.int64),
+            "monthly_n": np.int64(self.n),
+            # Months flushed so far: a resume with the file gone loses them.
+            "monthly_n_done": np.int64(len(self.done)),
+            "monthly_sum_sst": (empty if self.sum_sst is None
+                                else self.sum_sst.copy()),
+            "monthly_sum_mld": (empty if self.sum_mld is None
+                                else self.sum_mld.copy()),
+        }
+
+    @staticmethod
+    def month_end_day(year: int, month: int) -> float:
+        return 365.0 * year + float(_NOLEAP_MONTH_END_DAYS[month - 1])
+
+    def resume(self, restart_day: float, payload) -> None:
+        """Continue from a restart at ``restart_day`` (#2182).
+
+        Restores the in-flight month from the restart's ``monthly_*`` keys and
+        reloads the months already in the file that precede it.  A month is
+        flushed only when the next month's first sample arrives, so every
+        restart past day 0 has an unflushed month: a restart without the keys
+        (written before they existed, or by a run without --monthly-mld-sst)
+        is refused.  File months from the in-flight month on, or ending after
+        the restart day (a later leg that was killed), are dropped and
+        recomputed.  A file missing, or holding fewer months than the
+        restarted run had written, cannot be recovered: refused.
+        """
+        import xarray as xr
+        restart_day = float(restart_day)
+        if "monthly_n" not in payload:
+            if restart_day > 0.0:
+                raise ValueError(
+                    f"--monthly-mld-sst: the restart (day {restart_day:g}) "
+                    "carries no in-flight monthly mean (monthly_* keys), so "
+                    "the month it stops in cannot be completed. Restart from "
+                    "a checkpoint written with --monthly-mld-sst.")
+            return
+        key = tuple(int(k) for k in np.asarray(payload["monthly_key"]))
+        n = int(payload["monthly_n"])
+        if n > 0:
+            self.month, self.n = key, n
+            self.sum_sst = np.array(payload["monthly_sum_sst"])
+            self.sum_mld = np.array(payload["monthly_sum_mld"])
+        if self.path.exists():
+            with xr.open_dataset(self.path) as ds:
+                ds = ds.load()
+            for i in range(ds.sizes["time"]):
+                y, m = int(ds["year_index"][i]), int(ds["month"][i])
+                if n > 0 and (y, m) >= key:
+                    continue
+                if self.month_end_day(y, m) > restart_day:
+                    continue
+                self.done.append((y, m, ds["sst"].values[i],
+                                  ds["mld"].values[i]))
+        n_done = int(payload["monthly_n_done"])
+        if len(self.done) < n_done:
+            raise ValueError(
+                f"--monthly-mld-sst: the restart had written {n_done} months "
+                f"but {self.path} holds {len(self.done)} of them (missing or "
+                "truncated file), so months before the restart would be "
+                "lost. Restore the file or rerun.")
+
+
+# Extra restart-npz payload supplied by an active writer (the monthly
+# SST/MLD means, #2182); ``None`` = nothing extra.
+_RESTART_EXTRA_PAYLOAD = [None]
 
 
 def _extract_scalars(state, grid_type, grid, z_coord):
@@ -4804,6 +4922,8 @@ def _save_restart(state, day, step, output_dir, ice_state=None,
             if obj is None or not hasattr(obj, "data"):
                 continue
             payload[f"ice_{f}"] = np.asarray(obj.data)
+    if _RESTART_EXTRA_PAYLOAD[0] is not None:
+        payload.update(_RESTART_EXTRA_PAYLOAD[0]())
     fname = output_dir / f"restart_day{int(round(day)):06d}.npz"
     # Async + atomic write.  The device->host pulls above are synchronous
     # (they snapshot the state), but the gzip+disk write (seconds to
@@ -5929,6 +6049,14 @@ def run_omip_single(grid_type: str, args) -> dict:
             resolution = args.resolution
     else:
         resolution = GRID_DEFAULTS[grid_type]["resolution"]
+    _monthly_path = (Path(args.output) / grid_type / resolution
+                     / "monthly_mld_sst.nc")
+    if (getattr(args, "monthly_mld_sst", False) and args.restart is None
+            and grid_type == "latlon"
+            and args.forcing_mode == "jra55_do_tropical"):
+        # Before run_config.json / the manifest are written (#2182).  An
+        # unsupported grid/forcing keeps the "lat-lon JRA55-do only" error.
+        MonthlyMldSstWriter.start_fresh(_monthly_path)
     dt = args.dt or GRID_DEFAULTS[grid_type]["dt"]
     run_config = with_kpp_cfl_dt(run_config, dt)
     check_epbl_dt(run_config, dt)
@@ -7185,9 +7313,16 @@ def run_omip_single(grid_type: str, args) -> dict:
             raise ValueError("--monthly-mld-sst is implemented for the "
                              "lat-lon JRA55-do path only.")
         _monthly = MonthlyMldSstWriter(
-            Path(args.output) / grid_type / resolution / "monthly_mld_sst.nc",
+            _monthly_path,
             z_coord=z_coord, lat_deg=np.rad2deg(np.asarray(grid.lat)),
-            lon_deg=np.rad2deg(np.asarray(grid.lon)))
+            lon_deg=np.rad2deg(np.asarray(grid.lon)),
+            io_rank=jax.process_index() == 0,
+            multiproc=jax.process_count() > 1)
+        if args.restart is not None:
+            with np.load(args.restart) as _rz:
+                # The NpzFile itself: only the monthly_* keys are read.
+                _monthly.resume(float(_rz["time_days"]), _rz)
+        _RESTART_EXTRA_PAYLOAD[0] = _monthly.restart_payload
         _monthly_fn = _monthly.add
     # Disarm the process-global SPMD backend on EVERY exit of the loop (a
     # direct run_omip_single() caller has no main()-loop finally).
@@ -7225,6 +7360,7 @@ def run_omip_single(grid_type: str, args) -> dict:
             state = spmd_gather(state)
             _gather_final_ice(jra55_state, spmd_gather_ice)
     finally:
+        _RESTART_EXTRA_PAYLOAD[0] = None
         if _monthly is not None:
             _monthly.close()
         if run_config.enable_mpas_spmd and spmd_step is not None:

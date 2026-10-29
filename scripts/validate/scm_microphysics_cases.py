@@ -126,6 +126,9 @@ def _saturation_adjust(thl, qt, exner, p, dtype):
 
 def _scheme_config(scheme, env):
     cfg = MicrophysicsConfig(scheme=scheme)
+    if scheme == "morrison":
+        # Pinned kk2000: unset resolves to kk2000_cam6 under mg (needs CLUBB relvar).
+        cfg = cfg._replace(morrison=cfg.morrison._replace(warm_rain_scheme="kk2000"))
     return cfg
 
 

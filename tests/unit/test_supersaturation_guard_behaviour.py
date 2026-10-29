@@ -461,18 +461,23 @@ _PREGUARD_RTOL = 1.0e-13
 # 2026-10-27: the fixture is now top-down with real interfaces (Zhao-Carr reads
 # dp/g); re-measured, the same values in top-down order.  Then the GFS area
 # blend, wminco 1e-5 and prautco 1.5e-4 (cell_area 1e10) move level 3 only:
-# 0.0042110534620482185 -> 0.0040742395304712515.
+# 0.0042110534620482185 -> 0.0040742395304712515.  Since then these are
+# re-pinned on the current scheme, NOT the pre-guard numbers: the test proves the
+# guard-OFF path is unchanged by the guard, not that results are comparable with
+# runs made before the 2026-10-20 port or the 2026-10-27 default changes.
 _SUNDQVIST_PREGUARD_DT_DT = (0.0002189537248470955, 0.0012031476025026462, 0.0, 0.0040742395304712515, 0.07790655142391562)
 _SUNDQVIST_PREGUARD_DQ_V_DT = (-8.795268697736346e-08, -4.83298763445925e-07, 0.0, -1.6915604758545073e-06, -3.129469725010899e-05)
 
 
 def test_sundqvist_default_matches_the_pre_guard_baseline_bit_for_bit():
-    """Numeric byte-identity against values computed BEFORE the guard existed.
+    """Guard-OFF tripwire: the default path matches pinned numbers.
 
-    The monkeypatch "bomb" tests prove the new code is not INVOKED; this proves
-    the numbers are unchanged, which is the claim that actually protects every
-    tuned parameter set and prior comparison. Arrays are compared, never
-    printed summaries (CLAUDE.md)."""
+    The pins were first measured BEFORE the guard existed and have since been
+    re-pinned on the current scheme (2026-10-20 port, 2026-10-27 top-down
+    fixture and defaults), so this proves the guard does not leak into the
+    guard-OFF path; it does NOT prove results are comparable with runs made
+    before those re-pins.  The monkeypatch "bomb" tests prove the new code is
+    not INVOKED.  Arrays are compared, never printed summaries (CLAUDE.md)."""
     # top-down (level 0 = model top), the scheme's convention
     T = jnp.array([[205.0, 230.0, 260.0, 285.0, 300.0]], dtype=jnp.float64)
     p = jnp.array([[15000.0, 35000.0, 60000.0, 85000.0, 95000.0]],

@@ -7,7 +7,7 @@ Python transcription of ``zm_conv.F90`` in ``_zm_cam6_oracle.py`` at rel
 static-energy budgets, momentum conservation, jit parity, finite gradients
 through the state and the CAM6 namelist parameters, a non-vacuity check that
 the pin fails when the oracle is run with a different parameter, and the
-measured size of the saturation-curve departure (Goff-Gratch vs Tetens).
+plume saturation pinned to CAM's Goff-Gratch ``qsat_water``.
 """
 
 from __future__ import annotations
@@ -21,7 +21,10 @@ import numpy as np
 import pytest
 
 from legoesm import constants
-from legoesm.thermo import saturation_specific_humidity, saturation_vapor_pressure
+from legoesm.thermo import (
+    saturation_specific_humidity,
+    saturation_vapor_pressure_goff_gratch,
+)
 from legoesm.atmosphere.physics.convection import _zm_cam6 as Z
 from legoesm.atmosphere.physics.convection._zm_dilute import LWMAX
 from legoesm.atmosphere.physics.convection.config import ZhangMcFarlaneConfig
@@ -39,8 +42,7 @@ DT = 1800.0
 NLEV = 30
 KW = dict(tpert=0.0, capelmt=CFG.capelmt, tau=CFG.tau, num_cin=CFG.num_cin,
           dmpdz=CFG.dmpdz, tiedke_add=CFG.tiedke_add, lwmax=LWMAX, c0_lnd=CFG.c0_lnd,
-          c0_ocn=CFG.c0_ocn, alfa=CFG.alfa, limcnv_p_pa=CFG.limcnv_p_pa,
-          pbl_top_pa=CFG.pbl_top_pa)
+          c0_ocn=CFG.c0_ocn, alfa=CFG.alfa, limcnv_p_pa=CFG.limcnv_p_pa)
 
 
 @pytest.fixture(autouse=True)
@@ -95,7 +97,7 @@ def _port(c, pblh=None, pref_edge=None, **over):
 
 def _oracle(c, i, pblh=None, pref_edge=None, **over):
     kw = dict(capelmt=CFG.capelmt, tau=CFG.tau, num_cin=CFG.num_cin, dmpdz=CFG.dmpdz,
-              c0_lnd=CFG.c0_lnd, c0_ocn=CFG.c0_ocn, alfa=CFG.alfa, pbl_top_pa=CFG.pbl_top_pa,
+              c0_lnd=CFG.c0_lnd, c0_ocn=CFG.c0_ocn, alfa=CFG.alfa,
               pref_edge=None if pref_edge is None else np.asarray(pref_edge))
     kw.update(over)
     n = lambda a: np.asarray(a[i])
@@ -317,14 +319,17 @@ def _goff_gratch_water_pa(t):
                     + math.log10(1013.246)) * 100.0
 
 
-def test_saturation_curve_departure_is_small():
-    """CAM qsat_water is Goff-Gratch; the port uses the shared Tetens curve."""
+def test_plume_saturation_is_cam_goff_gratch():
+    """Follow-up row 5: the plume's ``qsat_hPa`` is CAM ``qsat_water``
+    (zm_conv.F90:4702-4716), Goff-Gratch over water, written out here
+    independently of legoesm.thermo.  The shared Tetens curve is 1-6 % off
+    over this range, so a port left on it fails."""
     ts = np.linspace(230.0, 315.0, 60)
-    rel = np.array([abs(float(saturation_vapor_pressure(jnp.float64(t))) / _goff_gratch_water_pa(t) - 1.0)
-                    for t in ts])
-    # measured: < 1 % above 250 K, ~4 % at 230 K (Tetens over-estimates cold-air e_s)
-    assert rel[ts >= 250.0].max() < 0.01, rel[ts >= 250.0].max()
-    assert rel.max() < 0.06, rel.max()
+    ps = np.full_like(ts, 700.0)
+    es = np.array([_goff_gratch_water_pa(t) for t in ts])
+    cam = constants.epsilon * es / (ps * 100.0 - (1.0 - constants.epsilon) * es)
+    port = np.asarray(Z._qsat_hpa(jnp.asarray(ts), jnp.asarray(ps)))
+    np.testing.assert_allclose(port, cam, rtol=1e-10, atol=0.0)
 
 
 def test_qsat_is_cam_specific_humidity_not_mixing_ratio():
@@ -333,11 +338,10 @@ def test_qsat_is_cam_specific_humidity_not_mixing_ratio():
     ``ε·es/(p − es)`` is 0.08-2.3 % high over this range and fails."""
     ts = np.array([240.0, 280.0, 300.0])
     ps = np.array([300.0, 850.0, 1000.0])
-    es = np.array([float(saturation_vapor_pressure(jnp.float64(t))) for t in ts])
+    es = np.array([_goff_gratch_water_pa(t) for t in ts])
     cam = constants.epsilon * es / (ps * 100.0 - (1.0 - constants.epsilon) * es)
     port = np.asarray(Z._qsat_hpa(jnp.asarray(ts), jnp.asarray(ps)))
-    # 1e-6: the shared smooth cap shifts q by ~1e-10 kg/kg (measured <= 1.4e-7 relative)
-    np.testing.assert_allclose(port, cam, rtol=1e-6, atol=0.0)
+    np.testing.assert_allclose(port, cam, rtol=1e-10, atol=0.0)
 
 
 # ---------------------------------------------------------------------------
@@ -407,7 +411,7 @@ def test_cldprp_saturation_guard_matches_fortran():
     p_hpa = jnp.array([[1000.0, 150.0, 300.0, 5.0]])
     got = Z._qst_cldprp(t, p_hpa)
     want = np.array([[O.qsat_hpa(300.0, 1000.0), 1.0, 1.0, 1.0]])
-    fires = np.asarray(p_hpa * 100.0 - saturation_vapor_pressure(t) <= 0.0)
+    fires = np.asarray(p_hpa * 100.0 - saturation_vapor_pressure_goff_gratch(t) <= 0.0)
     assert fires.tolist() == [[False, True, True, True]], "fixture must fire the guard"
     _close(got, want, what="qst guard")
 

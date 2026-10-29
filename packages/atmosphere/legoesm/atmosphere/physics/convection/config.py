@@ -52,6 +52,7 @@ __param_spec__ = {
     "BechtoldConfig": {
         "scheme_key": "atm.conv.BechtoldConfig",
         "excluded": {
+            "ifs_shallow_supply_width_w_m2": "smoothing width of the faithful-chain max(ZDHPBL, 0) shallow supply ramp (RULE 5 differentiable form), not a tunable",
             "cape_sharpness": "numerics: sigmoid sharpness on the CAPE trigger gate",
             "depth_split_sharpness": "numerics: sigmoid sharpness on the deep/shallow depth blend",
             "downdraft_RH_min": "trigger: column-mean RH threshold below which the downdraft fires (not sigmoid-tunable, fix via config)",
@@ -331,7 +332,6 @@ __param_spec__ = {
         "scheme_key": "atm.conv.ZhangMcFarlaneConfig",
         "excluded": {
             "limcnv_p_pa": "numerics/domain: convection top cap (40 hPa reference interface), not a closure knob",
-            "pbl_top_pa": "not read: ZM refuses a call without the carried pblh (oracle row 50); field removal pending",
             "parcel_tpert": "default 0 = disabled/off (PBL temperature perturbation; CAM6 CLUBB path has none)",
         },
         "params": {
@@ -361,7 +361,8 @@ class SBMConfig(NamedTuple):
         Reference relative humidity for moisture profile (default 0.7).
     cape_threshold : float
         Minimum CAPE [J/kg] to trigger convection (default 70.0).  The Isca
-        oracle convects whenever CAPE > 0 (threshold 0).
+        oracle convects whenever CAPE > 0 (threshold 0); the measured gap is a
+        KNOWN DIFFERENCE recorded in ``sbm.py``'s module docstring.
     smooth_trigger_sharpness : float
         Sigmoid sharpness for smooth trigger [1/(J/kg)] (default 0.1).
     """
@@ -710,10 +711,6 @@ class ZhangMcFarlaneConfig(NamedTuple):
     limcnv_p_pa : float
         Convection is capped at the interface where the reference pressure
         crosses this value [Pa] (40 hPa, zm_conv_intr.F90:334).
-    pbl_top_pa : float
-        NOT READ (oracle row 50): ZM now refuses a call without the carried
-        PBL height ``pblh``, so this former carry-less launch bound [Pa] is
-        inert pending the decision to remove it.
     parcel_tpert : float
         PBL temperature perturbation ``tpert`` [K] added to the parcel; 0 on
         the CAM6 CLUBB path (no scheme writes ``tpert`` there).
@@ -737,7 +734,6 @@ class ZhangMcFarlaneConfig(NamedTuple):
     dmpdz: float = -1.0e-3
     alfa: float = 0.1
     limcnv_p_pa: float = 4000.0
-    pbl_top_pa: float = 7.0e4
     parcel_tpert: float = 0.0
     enable_cmt: bool = True
     transport_cloud_tracers: bool = True
@@ -1527,7 +1523,7 @@ class BechtoldConfig(NamedTuple):
     # deep closure byte-identically.
     use_ifs_cape_closure: bool = True
     # IFS Kessler sub-cloud evaporation of convective rain (cuflxn.F90:436-475;
-    # see bechtold._ifs_subcloud_rain_evaporation): the post-split rain flux
+    # see bechtold.ifs_subcloud_rain_evaporation): the post-split rain flux
     # accumulates downward and evaporates below cloud base at the oracle
     # RCPECONS Kessler rate, limited by the ZRHEBC RH break (deep-ocean 0.85 /
     # non-deep 0.92, deep-weight blended; land values need an absent land
@@ -1615,6 +1611,13 @@ class BechtoldConfig(NamedTuple):
     # (CUASCN has it INOUT and clears it for mid-level columns, cuascn.F90:389
     # and :627), which is harmless only while this port has no KTYPE=3 branch.
     use_ifs_ascent: bool = False
+    # Faithful chain only: shallow closure with no sub-cloud supply.
+    # "zero" (default) = flux max(supply, 0)/ZDH, smoothed over
+    # ifs_shallow_supply_width_w_m2; "first_guess" = OpenIFS (cumastrn.F90:912
+    # keeps the first-guess 0.1*ZMFMAX).  KNOWN DIFFERENCE in
+    # _ifs_closure.shallow_closure.
+    ifs_shallow_nosupply: str = "zero"
+    ifs_shallow_supply_width_w_m2: float = 1.0  # W/m2, 0 = hard max
     # IFS RCAPDCYCL=2 diurnal-cycle CAPE correction (cumastrn.F90:780-833;
     # see bechtold._ifs_capdcycl): subtracts the sub-cloud CAPE production
     # over a BL timescale so land deep convection peaks late afternoon.
@@ -1667,7 +1670,7 @@ class BechtoldConfig(NamedTuple):
     # melt inside the sub-cloud precip march, FOLD variant (surface snow
     # forcibly melted into the lowest layer; formation-side freezing heat
     # paired so column enthalpy closes exactly — see
-    # _ifs_subcloud_rain_evaporation).  Requires use_ifs_subcloud_evap.
+    # ifs_subcloud_rain_evaporation).  Requires use_ifs_subcloud_evap.
     # Default True since 2026-07-17 (RCE A/B: T-drift 0.052 -> 0.026 K/day;
     # AMIP stable).
     use_ifs_snow_melt: bool = True

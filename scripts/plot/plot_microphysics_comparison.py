@@ -49,7 +49,8 @@ SCHEMES = [
     ("Sundqvist",      functools.partial(sundqvist_microphysics, cell_area=RCE_CELL_AREA_M2),
                        SundqvistConfig(),     "#f4a261", "--", 1.2),
     ("Seifert-Beheng", seifert_beheng_microphysics, SeifertBehengConfig(), "#00aaaa", "-",  1.2),
-    ("Morrison",       morrison_microphysics,       MorrisonConfig(),      "#2166ac", "-",  2.0),
+    # Morrison pinned kk2000: an unset law resolves to kk2000_cam6 under mg.
+    ("Morrison",       morrison_microphysics,       MorrisonConfig(warm_rain_scheme="kk2000"), "#2166ac", "-",  2.0),
     ("Thompson",       thompson_microphysics,       ThompsonConfig(),      "#762a83", "--", 2.0),
     ("P3",             p3_microphysics,             P3Config(),            "#d6604d", "-.", 2.0),
 ]

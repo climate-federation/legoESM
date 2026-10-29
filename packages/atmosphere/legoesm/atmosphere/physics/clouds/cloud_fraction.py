@@ -1500,18 +1500,21 @@ def compute_cloud_properties(
             # in-cloud number, MG2 droplet PSD size_dist_param_liq
             # (exponential Martin pgam >= 2, mean diameter 2-50 um), REL =
             # (pgam+3)/(2 lambda) where icwmrst >= qsmall, else 10 um.  The
-            # dead-number branch keeps q_c over the radiative cover, floored
-            # at MG2's mincld (micro_mg_utils.F90:123).
+            # dead-number branch divides by ast too (micro_mg_cam.F90:2539
+            # divides by the liquid cloud fraction, not the radiative cover).
             from legoesm.atmosphere.physics.microphysics._warm_rain import (
                 KK2000_CAM6_QC_MAX,
                 MG2_MINCLD,
                 mg2_droplet_effective_radius,
             )
-            q_c_ic = jnp.where(_nc_is_specified,
-                               q_c / jnp.clip(cf, MG2_MINCLD, 1.0),
-                               q_c / jnp.maximum(_ast_cam6, MG2_MINCLD))
-            q_c_ic = jnp.minimum(q_c_ic, KK2000_CAM6_QC_MAX)
-            r_eff_liq = mg2_droplet_effective_radius(q_c_ic, n_cloud, rho_air)
+            q_c_ic = jnp.minimum(q_c / jnp.maximum(_ast_cam6, MG2_MINCLD),
+                                 KK2000_CAM6_QC_MAX)
+            # CAM's REL density is dry, p/(rair t) (micro_mg_cam.F90:2507-2508);
+            # n_cloud is per volume at the moist density, so take it back to
+            # per kg with that density first (follow-up row 47, user decision).
+            rho_dry = compute_rho(jnp.maximum(T, 1.0), p_full)
+            r_eff_liq = mg2_droplet_effective_radius(
+                q_c_ic, n_cloud / rho_air * rho_dry, rho_dry)
         else:
             _cf_psd = jnp.clip(cf, _INHOM_CF_FLOOR, 1.0)
             q_c_psd = jnp.where(_nc_is_specified, q_c / _cf_psd, q_c)

@@ -3003,6 +3003,9 @@ class PhysicsPipeline:
             # centralised the helper so the bug can't resurface at a
             # third call site.
             cloud_kwargs = cloud_props.to_rrtmg_kwargs()
+            # Ice table size at the run's bulk ice density (rrtmgp rescales
+            # r_eff by rho/500; exactly 1 at CAM's 500).
+            cloud_kwargs["cloud_rho_ice"] = cloud_config.rho_cloud_ice
 
         # Issue #273 follow-up: when a column mesh is configured, place
         # every column-format input on the mesh's 'col' axis before
@@ -3037,7 +3040,8 @@ class PhysicsPipeline:
             aerosol_lw_od_precomputed = _shard(aerosol_lw_od_precomputed)
             o3_top_vmr = _shard(o3_top_vmr)
             if cloud_kwargs:
-                cloud_kwargs = {k: _shard(v) for k, v in cloud_kwargs.items()}
+                cloud_kwargs = {k: (v if k == "cloud_rho_ice" else _shard(v))
+                                for k, v in cloud_kwargs.items()}
 
         rad_out = self.radiation_fn(
             T_col, p_full_col, p_half_col, q_v_col,
@@ -3539,6 +3543,7 @@ def _build_none_radiation_fn(config):
                      cloud_path_liq=None, cloud_path_ice=None,
                      cloud_path_liq_lw=None, cloud_path_ice_lw=None,
                      cloud_r_eff_liq=None, cloud_r_eff_ice=None,
+                     cloud_rho_ice=None,
                      cloud_fraction=None):
         del aerosol_lw_od_col, o3_top_vmr_col  # zero-radiation: no-ops
         ncol, nlev = T_col.shape
@@ -3592,10 +3597,12 @@ def _build_gray_radiation_fn(config):
                      cloud_path_liq=None, cloud_path_ice=None,
                      cloud_path_liq_lw=None, cloud_path_ice_lw=None,
                      cloud_r_eff_liq=None, cloud_r_eff_ice=None,
+                     cloud_rho_ice=None,
                      cloud_fraction=None):
         del ghg_vmr_override  # gray radiation does not use GHG concentrations
         del aerosol_lw_od_col, o3_top_vmr_col  # gray: no aerosol LW od / ozone
         del cloud_path_liq, cloud_path_ice, cloud_r_eff_liq, cloud_r_eff_ice, cloud_fraction
+        del cloud_rho_ice
         del cloud_path_liq_lw, cloud_path_ice_lw  # gray: no cloud optics
         # Rebuild config with traced tau values when provided
         _cfg = gray_config
@@ -3695,6 +3702,7 @@ def _build_rrtmgp_radiation_fn(config):
                      cloud_path_liq=None, cloud_path_ice=None,
                      cloud_path_liq_lw=None, cloud_path_ice_lw=None,
                      cloud_r_eff_liq=None, cloud_r_eff_ice=None,
+                     cloud_rho_ice=None,
                      cloud_fraction=None, open_ocean_frac_col=None):
         del tau_equator, tau_pole  # RRTMGP does not use gray optical depth
         _sw_scale = None
@@ -3769,6 +3777,7 @@ def _build_rrtmgp_radiation_fn(config):
             cloud_path_ice_lw=cloud_path_ice_lw,
             cloud_r_eff_liq=cloud_r_eff_liq,
             cloud_r_eff_ice=cloud_r_eff_ice,
+            cloud_rho_ice=cloud_rho_ice,
             cloud_fraction=cloud_fraction,
         )
         if o3_top_vmr_col is not None:  # overhead-layer ozone
@@ -4118,6 +4127,8 @@ def _resolve_convection(config):
                 config, 'bechtold_use_ifs_shallow_closure', False),
             use_ifs_capdcycl=getattr(
                 config, 'bechtold_use_ifs_capdcycl', True),
+            use_ifs_ascent=config.bechtold_use_ifs_ascent,
+            ifs_shallow_nosupply=config.bechtold_ifs_shallow_nosupply,
             use_ifs_land_rhebc=getattr(
                 config, 'bechtold_use_ifs_land_rhebc', True),
             use_ifs_snow_melt=getattr(

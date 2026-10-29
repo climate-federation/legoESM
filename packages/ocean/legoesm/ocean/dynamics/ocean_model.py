@@ -37,6 +37,7 @@ from legoesm.ocean.state import OceanState, OceanConfig
 from legoesm.core.precision import cast_pytree
 from legoesm.ocean.dynamics.barotropic import barotropic_substeps
 from legoesm.ocean.dynamics.ocean_pe_cdgrid import ocean_baroclinic_tendencies_cdgrid
+from legoesm.ocean.eos import make_eos_fn
 from legoesm.ocean.dynamics.barotropic_cgrid import (
     barotropic_substeps_cgrid, barotropic_substeps_fv3sw,
     barotropic_substeps_fv3edge,
@@ -160,7 +161,11 @@ class OceanModel:
 
         # Build physics function if configured
         if self.config.physics is not None:
-            self._physics_fn = make_ocean_physics(self.config.physics)
+            # The run's EOS for the vertical-mixing closures (#2243), built
+            # as the cube dynamics build theirs.
+            self._physics_fn = make_ocean_physics(
+                self.config.physics,
+                eos_fn=make_eos_fn(self.config.eos, self.config.eos_linear))
         else:
             self._physics_fn = None
 

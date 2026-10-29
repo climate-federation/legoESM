@@ -7,6 +7,7 @@ import pytest
 from legoesm.core.profile_metrics import (
     layer_weights_from_heights,
     safe_sqrt,
+    safe_sqrt_nan,
     weighted_rmse,
     weighted_std,
 )
@@ -21,6 +22,15 @@ def test_safe_sqrt_finite_grad_at_zero():
     g = jax.grad(lambda x: safe_sqrt(x))(0.0)
     assert jnp.isfinite(g)
     assert g == pytest.approx(0.0)
+
+
+def test_safe_sqrt_nan_passes_nan_and_matches_sqrt_of_clamp():
+    x = jnp.array([4.0, 0.0, -1.0, jnp.nan])
+    got = safe_sqrt_nan(x)
+    assert jnp.array_equal(got[:3], jnp.sqrt(jnp.maximum(x[:3], 0.0)))
+    assert jnp.isnan(got[3])
+    g = jax.grad(lambda v: safe_sqrt_nan(v).sum())(x[:3])
+    assert jnp.array_equal(g, jnp.array([0.25, 0.0, 0.0]))
 
 
 def test_weighted_rmse_perfect_fit_zero_and_finite_grad():

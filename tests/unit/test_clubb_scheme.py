@@ -117,7 +117,7 @@ def test_unstable_mixes_more_than_stable():
     assert float(jnp.mean(out_unstable.Km)) > float(jnp.mean(out_stable.Km))
 
 
-def test_diagnostic_clubb_conserves_column_with_no_sfc_flux():
+def test_diagnostic_clubb_conserves_column_with_no_sfc_flux(monkeypatch):
     """The DEFAULT diagnostic ``scheme="clubb"`` conserves column moisture AND heat
     under zero surface flux — the conservation contract of the path most users
     get (the prognostic triad covers the opt-in path).
@@ -130,6 +130,10 @@ def test_diagnostic_clubb_conserves_column_with_no_sfc_flux():
     round-off. Non-vacuous WITHOUT spin-up: unlike the prognostic rest state, the
     diagnostic eddy diffusion is driven directly by the initial gradient, so it
     moves a genuine ``max|dq·dt|``~1e-4 of moisture while still conserving."""
+    # theta TRANSPORT pin: the column energy fixer (closes the host c_pd*T
+    # budget, which theta diffusion does not; test_clubb_column_budget.py)
+    # is a separate closure, zeroed so it cannot mask a transport defect.
+    _zero_energy_fixer(monkeypatch)
     kw = _column(ncol=2, nlev=24, dtheta_dz=4e-3)
     kw["T_sfc"] = kw["T"][:, -1]        # zero surface sensible-heat flux
     kw["q_sfc"] = kw["q_v"][:, -1]      # zero surface moisture flux
@@ -751,7 +755,11 @@ def test_prognostic_clubb_couples_to_microphysics_total_water_budget():
     CLUBB conserves total water (``Σ mass·dq_v|clubb ≈ 0`` at zero surface flux),
     and ``sundqvist``'s column water budget closes to the surface precip sink, so
 
-        Σ mass·(dq_v|clubb + dq_v|μ + dq_c|μ + dq_r|μ) + precip ≈ 0 .
+        Σ (rho dz)·dq_v|clubb + Σ (dp/g)·(dq_v|μ + dq_c|μ + dq_r|μ) + precip ≈ 0 ,
+
+    each scheme in its own layer mass (CLUBB rho*dz, ``sundqvist`` dp/g since
+    R9).  Where rho*dz != dp/g this is the sum of two separate closures, not
+    the summed inventory in one coordinate.
 
     Scope: the spun-up column is supersaturated (independent of CLUBB), so the
     branch exercised is condensation → autoconversion → surface precip — exactly
@@ -814,8 +822,11 @@ def test_prognostic_clubb_couples_to_microphysics_total_water_budget():
         SundqvistConfig(**_SUNDQVIST_ZC), cell_area=1.0e10)
     fusion_cap = constants.L_f * np.sum(mass_mu * np.asarray(rates.autoconversion), axis=1)
     assert np.all(-np.sum(mass_mu * resid_h, axis=1) <= fusion_cap * (1.0 + 1e-12))
-    # (c) Headline: summed turbulence+microphysics tendencies close the column
-    # water budget to the surface precip sink (CLUBB conserves; sundqvist closes).
+    # (c) Headline: on the same state, CLUBB conserves column water and
+    # Sundqvist closes its budget to the surface precip sink, EACH in its own
+    # layer mass (CLUBB rho*dz, Sundqvist dp/g since R9).  This is NOT a check
+    # of the summed inventory in one coordinate: where rho*dz != dp/g the two
+    # schemes' weights disagree and that sum is not tested here.
     clubb_col_dqv = np.sum(mass * np.asarray(out.dq_v_dt), axis=1)
     micro_col = np.sum(mass_mu * (dqv_m + dqc + dqr), axis=1)
     col_water = np.sum(mass * np.asarray(q_f), axis=1)

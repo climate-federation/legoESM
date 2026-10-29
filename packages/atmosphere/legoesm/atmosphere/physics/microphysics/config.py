@@ -167,6 +167,7 @@ __param_spec__ = {
             "gsam_satadj_excess_sharpness": "numerics: smooth-switch sharpness (RULE 5), value approved by user 2026-10-21",
             "gsam_satadj_qc_floor_sharpness": "numerics: smooth-switch sharpness (RULE 5), value approved by user 2026-10-21",
             "gsam_satadj_p_min_width_pa": "numerics: smooth-switch width (RULE 5), value approved by user 2026-10-21",
+            "sb2001_autoconv_ramp_top": "numerics: smooth-switch width (RULE 5), value decided by codex+GLM 2026-10-29 (#2232)",
             "cam_qsat_cap_sharpness": "numerics: smooth-switch sharpness (RULE 5), value approved by user 2026-10-21",
             # Fall-speed power-law EXPONENTS feed math.gamma(4 + b) / math.gamma(1 + b)
             # (morrison.py, _warm_rain.py) to precompute the cons* moment factors.
@@ -316,6 +317,7 @@ __param_spec__ = {
             "gsam_satadj_excess_sharpness": "numerics: smooth-switch sharpness (RULE 5), value approved by user 2026-10-21",
             "gsam_satadj_qc_floor_sharpness": "numerics: smooth-switch sharpness (RULE 5), value approved by user 2026-10-21",
             "gsam_satadj_p_min_width_pa": "numerics: smooth-switch width (RULE 5), value approved by user 2026-10-21",
+            "sb2001_autoconv_ramp_top": "numerics: smooth-switch width (RULE 5), value decided by codex+GLM 2026-10-29 (#2232)",
             "autoconversion_sharpness": "numerics: solver/smoothing/tolerance/iteration parameter",
             "breakup_sharpness": "numerics: solver/smoothing/tolerance/iteration parameter",
             "saturation_sharpness": "numerics: solver/smoothing/tolerance/iteration parameter",
@@ -565,6 +567,11 @@ class SeifertBehengConfig(NamedTuple):
     gsam_satadj_excess_sharpness: float = 1.0e4   # saturation step [-]
     gsam_satadj_qc_floor_sharpness: float = 1.0e4  # positivity, on T1 - T_l [1/K]
     gsam_satadj_p_min_width_pa: float = 100.0     # p >= 5000 Pa gate width [Pa]
+    # RULE 5 smoothing of gSAM's SB2001 autoconversion gate q_c >= 1e-6 kg/kg
+    # (module_mp_graupel.f90:1806/2843): the C2 step reaches 1 at this value
+    # [kg/kg]; <= 1e-6 = gSAM's hard step (codex+GLM 2026-10-29, #2232; KNOWN
+    # DIFFERENCE in _warm_rain.autoconversion_sb2001).
+    sb2001_autoconv_ramp_top: float = 2.0e-6
 
 
 # Unset Morrison DCS per flavour [m] (MorrisonConfig.ice_snow_d_auto=None,
@@ -587,6 +594,21 @@ def resolve_unset_ice_snow_d_auto(cfg):
     return cfg      # unknown flavour: resolve_morrison_flavor raises
 
 
+def resolve_warm_rain_scheme(cfg) -> str:
+    """THE warm-rain law a Morrison config runs: an explicit
+    ``warm_rain_scheme`` as set; unset (None) by flavour, ``mg`` -> the CAM6
+    MG2 law ``kk2000_cam6``, ``sam`` -> gSAM M2005's ``kk2000``."""
+    if cfg.warm_rain_scheme is not None:
+        return cfg.warm_rain_scheme
+    if cfg.morrison_flavor == "mg":
+        return "kk2000_cam6"
+    if cfg.morrison_flavor == "sam":
+        return "kk2000"
+    raise ValueError(
+        f"Unknown morrison_flavor: {cfg.morrison_flavor!r}; choose 'mg' or "
+        "'sam' (an unset warm_rain_scheme resolves by flavour).")
+
+
 # Unset (None) spec'd fields -> the resolver that gives their value from a
 # config instance.  The trainable collector seeds from it (the class default
 # when no run config is passed, i.e. the default "mg" flavour), and the
@@ -607,7 +629,9 @@ class MorrisonConfig(NamedTuple):
     # rain (kk2000) and ice deposition (m2005) are ALREADY MG-faithful in both.
     morrison_flavor: str = "mg"      # "mg" (global default) | "sam" (CRM)
     # Warm-rain autoconversion + accretion scheme:
-    #   "kk2000" (default) = Khairoutdinov-Kogan 2000, the SAM M2005
+    #   None (default, unset) = resolved by flavour
+    #     (resolve_warm_rain_scheme): mg -> "kk2000_cam6", sam -> "kk2000".
+    #   "kk2000" = Khairoutdinov-Kogan 2000, the SAM M2005
     #     DEFAULT (IRAIN=0): PRC=1350·qc^2.47·(Nc[#/cm³])^-1.79,
     #     PRA=67·(qc·qr)^1.15. Faithful to the gSAM oracle.
     #   "seifert_beheng" = the same law as "seifert_beheng_sb2001" (below);
@@ -622,7 +646,7 @@ class MorrisonConfig(NamedTuple):
     #     and the droplet-slope clamp on N_c, plus the au/x_* rain-number
     #     source. Oracle-pinned at predict_Nc=False; the SB2001-specific
     #     cloud-NUMBER sinks (predict_Nc=True only) are not represented.
-    warm_rain_scheme: str = "kk2000"
+    warm_rain_scheme: str | None = None
     predict_Nc: bool = False         # SAM M2005 dopredictNc. False (SAM DEFAULT) =
                                      # SPECIFIED constant droplet number Nc_0: the
                                      # size distribution uses Nc_0 and cloud number is
@@ -1099,6 +1123,11 @@ class MorrisonConfig(NamedTuple):
     gsam_satadj_excess_sharpness: float = 1.0e4   # saturation step, on (q_t - q_s)/q_sat [-]
     gsam_satadj_qc_floor_sharpness: float = 1.0e4  # positivity, on T1 - T_l [1/K]
     gsam_satadj_p_min_width_pa: float = 100.0     # on/off, p >= 5000 Pa gate width [Pa]
+    # RULE 5 smoothing of gSAM's SB2001 autoconversion gate q_c >= 1e-6 kg/kg
+    # (module_mp_graupel.f90:1806/2843): the C2 step reaches 1 at this value
+    # [kg/kg]; <= 1e-6 = gSAM's hard step (codex+GLM 2026-10-29, #2232; KNOWN
+    # DIFFERENCE in _warm_rain.autoconversion_sb2001).
+    sb2001_autoconv_ramp_top: float = 2.0e-6
     # MG2's CAM Goff-Gratch q_sat = 1 cap (RULE 5, limiter class): sharpness
     # on e_sat/p; math.inf = CAM's hard cap.  Value approved by user 2026-10-21.
     cam_qsat_cap_sharpness: float = CAM_QSAT_CAP_SHARPNESS

@@ -35,6 +35,9 @@ rad_update_steps: 6
 # scheme validated realistic in amip_production.yaml (albedo 0.292, precip 3.2).
 convection: sbm
 microphysics: morrison
+morrison_warm_rain_scheme: kk2000   # explicit: the unset default resolves to
+                                    # kk2000_cam6 under morrison_flavor mg,
+                                    # which needs CLUBB relvar (not wired here)
 clouds: sundqvist
 turbulence: louis           # Louis required by the tiled/coare3 surface
 gravity_wave_drag: hines

@@ -157,6 +157,9 @@ def build_latlon_config(args):
         "--convection", args.convection,
         "--turbulence", args.turbulence,
         "--microphysics", args.microphysics,
+        # Pinned kk2000: an unset law resolves to kk2000_cam6 under mg (needs CLUBB relvar).
+        *(["--morrison-warm-rain-scheme", "kk2000"]
+          if args.microphysics == "morrison" else []),
         "--clouds", args.clouds,
         "--gravity-wave-drag", args.gravity_wave_drag,
         # Match the training-segment sub-cycling (also resolves the None that

@@ -210,7 +210,7 @@ def zhang_mcfarlane_convection(
         num_cin=int(config.num_cin), dmpdz=config.dmpdz,
         tiedke_add=config.tiedke_add, lwmax=LWMAX, c0_lnd=config.c0_lnd,
         c0_ocn=config.c0_ocn, alfa=config.alfa, limcnv_p_pa=config.limcnv_p_pa,
-        pbl_top_pa=config.pbl_top_pa, pref_edge=pref_edge)
+        pref_edge=pref_edge)
 
     # zm_conv_tend: physics_update before zm_conv_evap (zm_conv_intr.F90:686).
     T1 = T + conv.heat / cp * dt

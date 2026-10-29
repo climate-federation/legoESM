@@ -12,7 +12,7 @@ Input columns are the committed Holtslag-Boville oracle fixture's 21 L32
 columns (``tests/atmosphere/oracle_fixtures/holtslag_boville.npz``: state,
 heights, reference pressures and prescribed surface stress / sensible heat /
 water flux; sha256 recorded in ``meta``).  ``exner`` handed to the oracle is
-``1/exner_function(p_full)``, the mapping the port uses.  Constants handed to
+CAM-SE's ``(ps/pmid)**cappa`` (dp_coupling.F90:834), ps the bottom interface.  Constants handed to
 the oracle's init routines are legoESM's (``legoesm.constants``).
 """
 from __future__ import annotations
@@ -47,7 +47,7 @@ def build_inputs(src):
     d = {k: np.asarray(src[f"in_{k}"], float)
          for k in ("T", "q", "u", "v", "p_full", "p_half", "zm", "zi",
                    "taux", "tauy", "shflx", "qflx", "pref_mid")}
-    d["exner"] = 1.0 / (d["p_full"] / C.p_ref) ** C.kappa
+    d["exner"] = (d["p_half"][:, -1:] / d["p_full"]) ** C.kappa
     return d
 
 

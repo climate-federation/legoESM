@@ -148,6 +148,7 @@ from legoesm.atmosphere.physics.microphysics.config import (
     SED_CFL_SUBSTEPS_MAX_LIMIT,
     MorrisonConfig,
     resolve_unset_ice_snow_d_auto,
+    resolve_warm_rain_scheme,
 )
 from legoesm.atmosphere.physics.microphysics.output import (
     HydrometeorState,
@@ -271,11 +272,12 @@ def resolve_morrison_flavor(config: MorrisonConfig) -> MorrisonConfig:
     =====================  ============  =============
 
     The rain rows are CAM6 MG2 (cam_cesm2_1_rel_60 micro_mg_utils.F90).
-    ``warm_rain_scheme`` is NOT resolved here: ``kk2000`` is the SAM/E3SM law,
-    ``kk2000_cam6`` the CAM6 MG2 law (select it explicitly).  Ice deposition
-    (``m2005``) is unchanged.
+    An unset ``warm_rain_scheme`` resolves by flavour
+    (``resolve_warm_rain_scheme``: mg -> ``kk2000_cam6``, sam -> ``kk2000``);
+    an explicit one is kept.  Ice deposition (``m2005``) is unchanged.
     """
     config = resolve_unset_ice_snow_d_auto(config)
+    config = config._replace(warm_rain_scheme=resolve_warm_rain_scheme(config))
     if config.morrison_flavor == "mg":
         if config.ice_to_snow_scheme not in (None, "mg_ferrier"):
             raise ValueError(
@@ -613,7 +615,7 @@ def morrison_microphysics(
         _, uns_ic = mg2_snow_fall_speeds(lams_ic, rho, config)
         eps_s, mu_air = mg2_snow_vent_eps(n0s_ic, lams_ic, T, p_full, rho,
                                           config)
-    # Warm-rain autoconversion + accretion. KK2000 (default) is the SAM
+    # Warm-rain autoconversion + accretion (law resolved above). KK2000 is the SAM
     # M2005 oracle scheme; Seifert-Beheng retained for back-compat.
     if config.warm_rain_scheme == "kk2000":
         dq_c_au, dN_r_au, x_c = autoconversion_kk2000(
@@ -670,6 +672,7 @@ def morrison_microphysics(
         # ``-dq_c_au·rho/x_c`` sink below is used instead.
         dq_c_au, dN_r_au, x_c = autoconversion_sb2001(
             q_c_ic, q_r_ic, N_c_ic, rho,
+            ramp_top=config.sb2001_autoconv_ramp_top,
         )
         dq_c_au = dq_c_au * cf_eff
         dN_r_au = dN_r_au * cf_eff

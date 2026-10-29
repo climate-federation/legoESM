@@ -588,7 +588,8 @@ def main():
         from legoesm.atmosphere.physics.microphysics.output import HydrometeorState
         # Warm-phase M2005 on the coarse RCE columns (deep-ice is a follow-up):
         # condense -> q_c, autoconvert/accrete -> q_r, sediment/evaporate rain.
-        morrison_config = MorrisonConfig()
+        # Pinned kk2000: an unset law resolves to kk2000_cam6 under mg (needs CLUBB relvar).
+        morrison_config = MorrisonConfig(warm_rain_scheme="kk2000")
         # Subgrid cloud fraction + condensate floor for the RRTMGP optics. The
         # coarse grid-mean saturation adjustment condenses ~0 in a subsaturated
         # column, so the resolved q_c alone leaves clouds optically inert and RCE
@@ -671,7 +672,8 @@ def main():
                 rad = rrtmgp_radiation(
                     T=T_col, p_full=p_full_col, p_half=p_half_col,
                     sfc_temperature=T_sfc_col, q_v=q_v_col, cos_zenith=mu0,
-                    config=rrtmgp_config, **cloud_props.to_rrtmg_kwargs())
+                    config=rrtmgp_config, cloud_rho_ice=cloud_config.rho_cloud_ice,
+                    **cloud_props.to_rrtmg_kwargs())
             else:
                 rad = rrtmgp_radiation(
                     T=T_col, p_full=p_full_col, p_half=p_half_col,

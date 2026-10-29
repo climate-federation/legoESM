@@ -35,7 +35,8 @@ from legoesm.grids.vertical import (
 )
 from legoesm import constants
 
-from legoesm.atmosphere.physics.microphysics.config import MicrophysicsConfig
+from legoesm.atmosphere.physics.microphysics.config import (
+    MicrophysicsConfig, resolve_warm_rain_scheme)
 from legoesm.atmosphere.physics.microphysics.output import HydrometeorState
 from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
     SpectralHydrostaticState,
@@ -231,6 +232,7 @@ def make_microphysics_physics(
             f"relvar_from_clubb=True on model_type={model_type!r}: only the "
             "hydrostatic/mpas lane forwards CLUBB's per-cell relvar to "
             "microphysics; this lane would silently use the constant.")
+    require_relvar_for_kk2000_cam6(microphysics_config, relvar_from_clubb)
     if model_type in ("hydrostatic", "mpas"):
         fn = _make_hydrostatic_microphysics(microphysics_config, dt,
                                             cloud_config=cloud_config,
@@ -252,7 +254,6 @@ def make_microphysics_physics(
             f"Choose from 'hydrostatic', 'nonhydrostatic', 'plane', "
             f"'mpas_nh', 'spectral_pe', 'mpas'."
         )
-    require_relvar_for_kk2000_cam6(microphysics_config, relvar_from_clubb)
     return fn
 
 
@@ -261,13 +262,16 @@ def require_relvar_for_kk2000_cam6(microphysics_config, relvar_wired: bool):
     CLUBB's per-cell relvar (it would run the CAM6 law at a constant)."""
     m = getattr(microphysics_config, "morrison", None)
     if (microphysics_config.scheme == "morrison" and m is not None
-            and m.warm_rain_scheme == "kk2000_cam6" and not relvar_wired):
+            and resolve_warm_rain_scheme(m) == "kk2000_cam6"
+            and not relvar_wired):
         raise ValueError(
             "warm_rain_scheme='kk2000_cam6' needs CLUBB's per-cell relvar "
             "(clubb_intr.F90:2416-2425), which only the MPAS/hydrostatic "
             "lane wires, with prognostic CLUBB and its liquid partition "
             "(cld_macmic_num_steps>=2); this lane passes none.  Select "
-            "warm_rain_scheme='kk2000' (or another law) here.")
+            "warm_rain_scheme='kk2000' (or another law) here; an unset "
+            "warm_rain_scheme resolves to kk2000_cam6 under morrison_flavor="
+            "'mg'.")
 
 
 # ===========================================================================

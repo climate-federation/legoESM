@@ -137,6 +137,12 @@ T_ref_cam6_activation = 273.0       # [K]  CAM6 ndrop t0 (ndrop.F90:120); NOT T_
 # ports (CESM, CAM, COARE, KPP, NEMO, CLM5) use 0.4; a change needs fixtures
 # regenerated or per-port config.
 kappa_von_karman = 0.4
+lmd94_c_star = 10.0             # C*, KPP nonlocal-flux constant (Large, McWilliams &
+                                # Doney 1994, Rev. Geophys.: value with eq. 19, used in eq. 20)
+nemo_mxl0_z0_m = 0.1            # z0 [m] in the factorisation rn_mxl0 = kappa*z0 of NEMO's
+                                # surface mixing-length minimum. NEMO itself sets the literal
+                                # rn_mxl0 = 0.04 (namelist_ref, zdftke.F90; ln_mxl0 comment
+                                # "F(kappa*z)"); z0 = 0.04/0.4 is inferred, not a NEMO parameter.
 nu_ocean_molecular = 1.4e-6     # Molecular kinematic viscosity of seawater
                                 # [m^2/s] (~10 degC; NEMO phycst/zdfiwm ``rnu``)
 kappa_T_ocean_molecular = 1.4e-7  # Molecular thermal diffusivity of seawater
@@ -273,6 +279,11 @@ R_v_fast_sbm = 461.5                # [J/(kg*K)] :1768 JERRATE_KS RV_MY=461.5D4 
 L_v_fast_sbm = 2.5e6                # [J/kg] :1816 JERRATE_KS AL1_MY(1)=2.5D10 erg/g
 k_air_fast_sbm = 2.4e-2             # [W/(m*K)] :1768 JERRATE_KS CF_MY=2.4D3 erg/(cm*s*K)
 p_zero_fast_sbm = 101300.0          # [Pa] :1782 JERRATE_KS PZERO=1.013D6 dyn/cm^2
+# WRF v4.8.0 MYNN-EDMF (phys/MYNN-EDMF/module_bl_mynnedmf.F90, submodule
+# 8f8e8b59021249949c04d1686edc5a02ca325627): qsat_blend writes the vapour/dry-air
+# molecular-weight ratio as a literal, not as R_d/R_v; the faithful port
+# (turbulence/mynnedmf_wrf.py) uses it there.
+epsilon_wrf_mynn = 0.622         # [-] qsat_blend literal
 
 # Active no-pond ice_alb identity, icealb.F90:124-185 and accepted namalb.
 albedo_snow_dry_orca1 = 0.85

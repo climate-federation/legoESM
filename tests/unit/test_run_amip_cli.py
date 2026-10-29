@@ -12,7 +12,9 @@ from scripts.run.run_amip import (
     _ARGV_DISTRIBUTED_MODE_DEFAULT,
     _apply_aimip_classical_overrides,
     _apply_spectral_scheme_fallback,
+    _argv_distributed_flag,
     _argv_distributed_mode,
+    _argv_federates,
     _postprocess_args,
     _print_forcing_activity,
     _require_full_physics_for_amip,
@@ -3834,6 +3836,33 @@ def test_bechtold_capdcycl_and_land_rhebc_round_trip():
         assert back.bechtold_use_ifs_land_rhebc is flag
 
 
+
+def test_bechtold_ifs_ascent_and_shallow_nosupply_round_trip():
+    from legoesm.driver.config import ExperimentConfig
+    from legoesm.driver.physics_pipeline import _resolve_convection
+    parser = build_arg_parser()
+    d = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--convection", "bechtold"]), parser))
+    assert d.bechtold_use_ifs_ascent is False
+    assert d.bechtold_ifs_shallow_nosupply == "zero"
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--convection", "bechtold",
+        "--bechtold-use-ifs-ascent",
+        "--bechtold-ifs-shallow-nosupply", "first_guess"]), parser))
+    cc = _resolve_convection(cfg)[1]
+    assert cc.use_ifs_ascent is True and cc.ifs_shallow_nosupply == "first_guess"
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--bechtold-ifs-shallow-nosupply", "typo"])
+    for flag, mode in ((True, "first_guess"), (False, "zero")):
+        e = ExperimentConfig(convection="bechtold", bechtold_use_ifs_ascent=flag,
+                             bechtold_ifs_shallow_nosupply=mode)
+        back = ExperimentConfig.from_amip_config(e.to_amip_config())
+        assert back.bechtold_use_ifs_ascent is flag
+        assert back.bechtold_ifs_shallow_nosupply == mode
+    bad = ExperimentConfig(convection="bechtold", bechtold_ifs_shallow_nosupply="typo")
+    with pytest.raises(ValueError, match="bechtold_ifs_shallow_nosupply"):
+        bad.validate_strict()
+
 def test_bechtold_use_ifs_snow_melt_round_trip():
     from legoesm.driver.config import ExperimentConfig
     from legoesm.driver.physics_pipeline import _resolve_convection
@@ -5159,6 +5188,81 @@ def test_argv_distributed_mode_reads_the_config_yaml(tmp_path):
     assert _argv_distributed_mode(["--config", str(bad)]) == "mpi"
 
 
+def test_federation_needs_spmd_mode_and_the_distributed_flag():
+    """User decision 2026-10-28: the import-time hook federates only when
+    SPMD mode AND --distributed are both set.  The flag reader agrees with
+    argparse on every spelling; SPMD mode alone, or --distributed alone,
+    does not federate.
+    """
+    p = build_arg_parser()
+    for argv in (["--distributed"], [], ["--distributed-mode", "spmd"],
+                 ["--days", "1", "--distributed", "--distributed-mode", "spmd"],
+                 ["--distributed-mode=spmd", "--distributed"]):
+        assert _argv_distributed_flag(argv) is p.parse_args(argv).distributed, argv
+    # every prefix of --distributed is ambiguous with --distributed-mode
+    for abbrev in ("--distrib", "--distribute"):
+        with pytest.raises(SystemExit):
+            p.parse_args([abbrev])
+    assert _argv_distributed_flag(["--", "--distributed"]) is False
+    assert _argv_federates(["--distributed", "--distributed-mode", "spmd"]) is True
+    assert _argv_federates(["--distributed-mode", "spmd"]) is False
+    assert _argv_federates(["--distributed"]) is False
+    assert _argv_federates(["--distributed", "--distributed-mode", "mpi"]) is False
+    assert _argv_federates(["--distributed-mode", "spmd", "--", "--distributed"]) is False
+
+
+def test_deck_distributed_key_counts_as_the_flag(tmp_path):
+    """User decision 2026-10-28 (codex + GLM): a deck's ``distributed: true``
+    counts as --distributed, as the deck's ``distributed_mode`` key already
+    counts; the hook agrees with what argparse resolves from the deck."""
+    from legoesm.driver.run_config_yaml import load_yaml_config
+    on = tmp_path / "on.yaml"
+    on.write_text("distributed_mode: spmd\ndistributed: true\n")
+    off = tmp_path / "off.yaml"
+    off.write_text("distributed_mode: spmd\ndistributed: false\n")
+    mode_only = tmp_path / "mode.yaml"
+    mode_only.write_text("distributed_mode: spmd\n")
+    inc_base = tmp_path / "inc_base.yaml"
+    inc_base.write_text("distributed: true\n")
+    inc = tmp_path / "inc.yaml"   # the key arrives through an include
+    inc.write_text(f"include: {inc_base.name}\ndistributed_mode: spmd\n")
+    for deck, want in ((on, True), (off, False), (mode_only, False),
+                       (inc, True)):
+        p = build_arg_parser()
+        p.set_defaults(**load_yaml_config(str(deck), p))
+        argv = ["--config", str(deck)]
+        assert _argv_distributed_flag(argv) is bool(p.parse_args(argv).distributed)
+        assert _argv_federates(argv) is want, deck.name
+    assert _argv_federates(["--config", str(mode_only), "--distributed"]) is True
+    assert _argv_federates(["--config", str(on), "--distributed-mode", "mpi"]) is False
+    # one deck read per decision (codex): both halves see the same file
+    import scripts.run.run_amip as ra
+    reads = []
+    real = ra._read_run_yaml_prejax
+    ra._read_run_yaml_prejax = lambda path: reads.append(path) or real(path)
+    try:
+        assert _argv_federates(["--config", str(on)]) is True
+    finally:
+        ra._read_run_yaml_prejax = real
+    assert len(reads) == 1
+
+
+def test_import_hook_hands_the_federation_decision_to_early_init(monkeypatch):
+    """The import-time call itself passes _argv_federates: SPMD mode alone
+    does not federate, SPMD mode with --distributed does."""
+    import runpy
+    import legoesm.parallel.early_init as ei
+    seen = []
+    monkeypatch.setattr(ei, "maybe_init_jax_distributed",
+                        lambda **kw: seen.append(kw["federate"]))
+    script = str(_repo_root() / "scripts" / "run" / "run_amip.py")
+    for extra in (["--distributed-mode", "spmd"],
+                  ["--distributed", "--distributed-mode", "spmd"]):
+        monkeypatch.setattr(sys, "argv", [script, *extra])
+        runpy.run_path(script, run_name="_federation_hook_probe")
+    assert seen == [False, True]
+
+
 def test_land_snow_scheme_and_emissivity_round_trip_and_decks():
     """--land-snow-scheme / --land-snow-emissivity reach ExperimentConfig, and each
     deck states its snowpack explicitly: both bulk (moving production to the
@@ -5608,6 +5712,36 @@ def test_dry_run_exit_code_reaches_the_shell(tmp_path):
     assert proc.returncode == 1, proc.stderr[-2000:]
 
 
+def test_latlon48_deck_resolves_div4_and_cam_polar_cutoff_into_the_dycore():
+    """The lat-lon production deck (NEW lat-lon baseline 2026-10-13) resolves
+    to the MPAS deck's div-4 scale and CAM's polar-filter start, and both
+    reach the dycore the run steps (resolved config + factory, not deck text)."""
+    import math
+    from legoesm.driver.component_factory import create_atmosphere_dycore
+    from legoesm.driver.run_config_yaml import load_yaml_config
+    from legoesm.grids.latlon import create_latlon_grid
+    from legoesm.grids.vertical import make_cam6_l32_levels
+    amip = _repo_root() / "config" / "amip"
+    ll = _resolved_deck_fields(amip / "amip_production_latlon48.yaml")
+    mpas = _resolved_deck_fields(amip / "amip_production.yaml")
+    assert ll["dycore.mpas_div_damp4_scale"] == mpas["dycore.mpas_div_damp4_scale"] == 1.0
+    assert ll["dycore.use_polar_filter"] is True
+    # CAM: acos(min(0.81, 96/94)), a LATITUDE (CAM compares cos(lat) with it)
+    assert ll["dycore.polar_filter_cutoff_deg"] == 35.9041
+    assert abs(ll["dycore.polar_filter_cutoff_deg"] - math.degrees(math.acos(0.81))) < 1e-4
+    parser = build_arg_parser()
+    keys = load_yaml_config(str(amip / "amip_production_latlon48.yaml"), parser)
+    parser.set_defaults(**keys, _config_keys=frozenset(keys))
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args(
+        _AMIP_DUMMY_PATHS + ["--clm-surfdata-path", "/dummy/surfdata.nc"]), parser))
+    grid = create_latlon_grid(n_lat=cfg.grid.resolution, radius=constants.R_earth,
+                              omega=constants.Omega)
+    dyn = create_atmosphere_dycore(cfg, grid, make_cam6_l32_levels(),
+                                   latlon_native_grid=grid).dyn
+    assert dyn.config.nu_div4_scale == 1.0
+    assert dyn.config.use_polar_filter is True
+    assert dyn.config.polar_filter_cutoff_deg == 35.9041
+    assert dyn.dt == cfg.dycore.dt == 450.0
 def test_mcfarlane_effgw_oro_flag_flows_to_config():
     """--mcfarlane-effgw-oro round-trips into ExperimentConfig (#1712); the
     default is CAM6's 0.125 and the production deck pins that value."""
@@ -5628,3 +5762,96 @@ def test_mcfarlane_effgw_oro_flag_flows_to_config():
     parser = build_arg_parser()
     # The deck sets the dest as a parser default, exactly as main() applies it.
     assert load_yaml_config(deck, parser)["mcfarlane_effgw_oro"] == 0.125
+
+
+_CMIP_ID_FLAGS = (
+    ("cmip_drs_tree", "--cmip-drs-tree", True),
+    ("cmip_institution_id", "--cmip-institution-id", "INST-X"),
+    ("cmip_source_id", "--cmip-source-id", "SRC-1-0"),
+    ("cmip_variant_label", "--cmip-variant-label", "r2i1p1f1"),
+)
+
+
+def test_cmip_writer_identity_flags_round_trip_and_keep_defaults():
+    """drs_tree / institution_id / source_id / variant_label reach
+    OutputConfig from the CLI; unset, they equal CFWriter's own defaults."""
+    import inspect
+    from legoesm.io.cmor_output import CFWriter
+    parser = build_arg_parser()
+    base = ["--dataset", "analytical"]
+    out0 = build_config_from_args(_postprocess_args(
+        parser.parse_args(base), parser)).output
+    sig = inspect.signature(CFWriter).parameters
+    assert out0.cmip_drs_tree is sig["drs_tree"].default is False
+    assert out0.cmip_institution_id == sig["institution_id"].default
+    assert out0.cmip_variant_label == sig["variant_label"].default
+    assert out0.cmip_source_id == "legoESM-1-0"   # the collector's old literal
+    argv = list(base)
+    for _f, flag, val in _CMIP_ID_FLAGS:
+        argv += [flag] if val is True else [flag, val]
+    out1 = build_config_from_args(_postprocess_args(
+        parser.parse_args(argv), parser)).output
+    for field, _flag, val in _CMIP_ID_FLAGS:
+        assert getattr(out1, field) == val, field
+
+
+def test_cmip_writer_identity_keys_are_deckable(tmp_path):
+    from legoesm.driver.run_config_yaml import load_yaml_config
+    deck = tmp_path / "deck.yaml"
+    deck.write_text("cmip_drs_tree: true\ncmip_institution_id: INST-X\n"
+                    "cmip_source_id: SRC-1-0\ncmip_variant_label: r2i1p1f1\n")
+    parser = build_arg_parser()
+    parser.set_defaults(**load_yaml_config(str(deck), parser))
+    out = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser)).output
+    for field, _flag, val in _CMIP_ID_FLAGS:
+        assert getattr(out, field) == val, field
+
+
+def test_model_driver_threads_cmip_identity_to_the_collector(monkeypatch):
+    """ModelDriver._create_diagnostics hands the OutputConfig fields to the
+    DiagnosticCollector (captured before any grid work)."""
+    import types
+    import numpy as np
+    from legoesm.driver import model_driver as md
+    from legoesm.driver.config import ExperimentConfig, OutputConfig
+
+    class _Stop(Exception):
+        pass
+
+    seen = {}
+
+    def _capture(**kw):
+        seen.update(kw)
+        raise _Stop
+
+    monkeypatch.setattr(md, "DiagnosticCollector", _capture)
+    out = OutputConfig(cmip_output=True, cmip_drs_tree=True,
+                       cmip_institution_id="INST-X",
+                       cmip_source_id="SRC-1-0",
+                       cmip_variant_label="r2i1p1f1")
+    sig = types.SimpleNamespace(sigma_full=np.ones(2), dsigma=np.ones(2))
+    ns = types.SimpleNamespace(
+        config=ExperimentConfig(output=out, cloud_scheme="none"),
+        sigma=sig, _output_dir="")
+    with pytest.raises(_Stop):
+        md.ModelDriver._create_diagnostics(ns)
+    for field, _flag, val in _CMIP_ID_FLAGS:
+        assert seen[field] == val, field
+
+
+def test_climateeval_ids_follow_cmip_flags_unless_given():
+    from unittest.mock import MagicMock, patch
+    from legoesm.driver.climateeval_hook import maybe_run_climateeval
+    parser = build_arg_parser()
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args(
+        ["--dataset", "analytical", "--cmip-source-id", "SRC-1-0",
+         "--cmip-variant-label", "r2i1p1f1"]), parser))
+    out = cfg.output._replace(
+        evaluation=cfg.output.evaluation._replace(enabled=True))
+    with patch("legoesm.driver.climateeval_hook.subprocess.run",
+               return_value=MagicMock(returncode=0)) as run:
+        maybe_run_climateeval(cfg._replace(output=out), "/tmp/run")
+    cmd = run.call_args.args[0]
+    assert cmd[cmd.index("--model-id") + 1] == "SRC-1-0"
+    assert cmd[cmd.index("--variant-id") + 1] == "r2i1p1f1"

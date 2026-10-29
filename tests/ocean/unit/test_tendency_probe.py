@@ -265,7 +265,13 @@ def test_epbl_probe_passes_latitude_to_the_closure(state, grid, z_coord):
         implicit_vertical_mixing=False,
         physics=OceanPhysicsConfig(vertical_mixing=vm),
     )
-    result = probe_latlon_cgrid(state, grid, z_coord, cfg, dt=600.0)
+    from legoesm.ocean.state import OceanSurfaceForcing
+    zero = jnp.zeros_like(state.T.data[..., 0])
+    # ePBL refuses missing forcing (#2179): pass an explicitly unforced column.
+    sfc = OceanSurfaceForcing(tau_x=zero, tau_y=zero, q_net=zero,
+                              freshwater=zero)
+    result = probe_latlon_cgrid(state, grid, z_coord, cfg, dt=600.0,
+                                surface_forcing=sfc)
     assert result.dT_zdf is not None
     assert bool(jnp.isfinite(result.dT_zdf).all())
 

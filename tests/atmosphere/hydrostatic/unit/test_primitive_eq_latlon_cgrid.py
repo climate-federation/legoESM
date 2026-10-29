@@ -1282,3 +1282,254 @@ class TestHyperdiffusion:
                             * grid.area[..., None])
             assert float(want) < 0.0
             assert float(var) == pytest.approx(float(want), rel=1e-8)
+
+
+class TestDivergenceDamping4:
+    """``nu_div4_scale``: CAM-FV ldiv4, (du, dv) -= grad(nu_row lap(div)),
+    nu_row = scale * 0.01 * area_row^2 / dt; 0.0 is OFF."""
+
+    DT = 450.0
+
+    @pytest.fixture
+    def grid(self):
+        """fp64 metrics: the identities below are checked to round-off."""
+        return create_latlon_grid(n_lat=32, radius=constants.R_earth,
+                                  omega=constants.Omega, dtype=jnp.float64)
+
+    def _div4_part(self, state, grid, sigma, scale=1.0, dt=None):
+        dt = self.DT if dt is None else dt
+        on = CGridLatLonPrimitiveEquationConfig(nu_div4_scale=scale)
+        t_on = cgrid_latlon_hydrostatic_tendencies(state, grid, sigma, on, dt=dt)
+        t_off = cgrid_latlon_hydrostatic_tendencies(state, grid, sigma)
+        return [a - b for a, b in zip(t_on[:4], t_off[:4])]
+
+    def _checkerboard(self, grid, sigma, amp=1.0):
+        st = _make_rest_state(grid, sigma)
+        sgn_u = jnp.where(jnp.arange(grid.n_lon + 1) % 2 == 0, 1.0, -1.0)
+        return st._replace(u=st.u + amp * sgn_u[None, :, None])
+
+    def _rotational(self, grid, sigma):
+        """Winds from a random corner streamfunction (constant on each pole
+        row): the C-grid divergence of this flow telescopes to round-off."""
+        nlev = sigma.n_levels
+        psi = 1.0e6 * jax.random.normal(
+            jax.random.PRNGKey(3), (grid.n_lat + 1, grid.n_lon, nlev))
+        psi = psi.at[0].set(0.0).at[-1].set(0.0)
+        psi_u = jnp.concatenate([psi, psi[:, :1]], axis=1)       # periodic lon
+        # the divergence's own face lengths: u-face 0.5*dy, v-face
+        # R*dlon*cos(mid-latitude of the adjacent cells), 0 at the poles
+        u = -(psi_u[1:] - psi_u[:-1]) / (0.5 * grid.dy)[:, None, None]
+        cos_v = jnp.cos(0.5 * (grid.lat[:-1] + grid.lat[1:]))
+        dx_v = grid.radius * grid.dlon * jnp.concatenate(
+            [jnp.zeros(1), cos_v, jnp.zeros(1)])
+        dpsi = jnp.roll(psi, -1, axis=1) - psi
+        v = jnp.where(dx_v[:, None, None] > 0,
+                      dpsi / jnp.where(dx_v > 0, dx_v, 1.0)[:, None, None], 0.0)
+        return _make_rest_state(grid, sigma)._replace(u=u, v=v)
+
+    def test_off_is_byte_identical(self, grid, sigma):
+        state = self._checkerboard(grid, sigma)
+        a = cgrid_latlon_hydrostatic_tendencies(
+            state, grid, sigma,
+            CGridLatLonPrimitiveEquationConfig(nu_div4_scale=0.0), dt=self.DT)
+        b = cgrid_latlon_hydrostatic_tendencies(state, grid, sigma)
+        for x, y in zip(a[:4], b[:4]):
+            assert jnp.array_equal(x, y)
+        # control: the same state with the damping ON does differ
+        assert float(jnp.max(jnp.abs(self._div4_part(state, grid, sigma)[0]))) > 0.0
+
+    def test_requires_dt(self, grid, sigma):
+        cfg = CGridLatLonPrimitiveEquationConfig(nu_div4_scale=1.0)
+        with pytest.raises(ValueError, match="requires"):
+            cgrid_latlon_hydrostatic_tendencies(
+                _make_rest_state(grid, sigma), grid, sigma, cfg)
+
+    def test_nondivergent_flow_gets_zero_tendency(self, grid, sigma):
+        """A zonally uniform zonal jet has an exactly-zero discrete divergence,
+        so the damping adds exactly nothing; a rotational flow from a random
+        streamfunction gets round-off only, against a divergent control."""
+        from legoesm.grids.operators_latlon_cgrid import divergence_cgrid
+        st = _make_rest_state(grid, sigma)
+        jet = st._replace(u=st.u + (20.0 * grid.cos_lat)[:, None, None]
+                          * jnp.linspace(0.2, 1.0, sigma.n_levels)[None, None, :])
+        assert float(jnp.max(jnp.abs(divergence_cgrid(jet.u, jet.v, grid)))) == 0.0
+        for d in self._div4_part(jet, grid, sigma)[:2]:
+            assert float(jnp.max(jnp.abs(d))) == 0.0
+        rot = self._rotational(grid, sigma)
+        du_rot, dv_rot = self._div4_part(rot, grid, sigma)[:2]
+        # divergent control of the same wind amplitude
+        amp = float(jnp.max(jnp.abs(rot.u)))
+        du_div, dv_div = self._div4_part(
+            self._checkerboard(grid, sigma, amp=amp), grid, sigma)[:2]
+        ref = max(float(jnp.max(jnp.abs(du_div))), float(jnp.max(jnp.abs(dv_div))))
+        assert ref > 0.0
+        got = max(float(jnp.max(jnp.abs(du_rot))), float(jnp.max(jnp.abs(dv_rot))))
+        tol = 1.0e4 * float(jnp.finfo(rot.u.dtype).eps)
+        assert got / ref < tol, (got / ref, tol)
+
+    def test_divergent_2dx_mode_decays(self, grid, sigma):
+        """The increment's divergence is exactly -lap(nu lap D) (the operator
+        acts on divergence alone), and it opposes D: <D, dD>_area < 0.  (No
+        RK3 bound here: this is the UNFILTERED tendency, whose pole rows are
+        stiff; the polar filter of du/dv is what keeps the step stable.)"""
+        from legoesm.grids.operators_latlon_cgrid import (
+            divergence_cgrid, laplacian_cgrid)
+        st = self._checkerboard(grid, sigma)
+        du, dv = self._div4_part(st, grid, sigma)[:2]
+        D = divergence_cgrid(st.u, st.v, grid)
+        dD = divergence_cgrid(du, dv, grid)
+        nu_row = 0.01 * grid.area[:, 0] ** 2 / self.DT
+        want = -laplacian_cgrid(nu_row[:, None, None] * laplacian_cgrid(D, grid), grid)
+        scale = float(jnp.max(jnp.abs(want)))
+        assert scale > 0.0
+        assert float(jnp.max(jnp.abs(dD - want))) <= 1e-9 * scale
+        a = grid.area[..., None]
+        proj = float(jnp.sum(D * dD * a))
+        norm = float(jnp.sum(D * D * a))
+        assert proj < 0.0 < norm
+
+    def test_coefficient_is_per_row_cam_rate(self, grid, sigma):
+        """Per row 0.01 * (exact spherical-cap cell area)^2 / dt, inside the
+        final gradient; linear in the scale and in 1/dt."""
+        from legoesm.grids.operators_latlon_cgrid import (
+            divergence_cgrid, laplacian_cgrid, gradient_x_cgrid, gradient_y_cgrid)
+        st = self._checkerboard(grid, sigma)
+        st = st._replace(v=st.v.at[1:-1].add(0.3))   # meridional part too
+        du, dv = self._div4_part(st, grid, sigma)[:2]
+        R = grid.radius
+        cap = 2.0 * R ** 2 * grid.dlon * jnp.sin(0.5 * grid.dlat) * grid.cos_lat
+        area = grid.area[:, 0]          # the grid's own exact spherical-cap area
+        assert float(jnp.max(jnp.abs(area / cap - 1.0))) < 1e-12
+        psi = (0.01 * area ** 2 / self.DT)[:, None, None] * laplacian_cgrid(
+            divergence_cgrid(st.u, st.v, grid), grid)
+        for got, want in ((du, -gradient_x_cgrid(psi, grid)),
+                          (dv, -gradient_y_cgrid(psi, grid))):
+            s = float(jnp.max(jnp.abs(want)))
+            assert s > 0.0
+            assert float(jnp.max(jnp.abs(got - want))) <= 1e-9 * s
+        half = self._div4_part(st, grid, sigma, scale=0.5)[0]
+        assert float(jnp.max(jnp.abs(half - 0.5 * du))) <= 1e-9 * float(jnp.max(jnp.abs(du)))
+        slow = self._div4_part(st, grid, sigma, dt=2.0 * self.DT)[0]
+        assert float(jnp.max(jnp.abs(slow - 0.5 * du))) <= 1e-9 * float(jnp.max(jnp.abs(du)))
+
+    def test_refuses_without_the_polar_filter(self, grid, sigma):
+        """Unfiltered, the pole rows are unstable at any dt (the coefficient
+        scales as 1/dt), so the model refuses the combination."""
+        with pytest.raises(ValueError, match="use_polar_filter"):
+            CGridLatLonPrimitiveEquationModel(
+                grid, sigma, CGridLatLonPrimitiveEquationConfig(nu_div4_scale=1.0),
+                dt=self.DT)
+        CGridLatLonPrimitiveEquationModel(        # filtered: accepted
+            grid, sigma, CGridLatLonPrimitiveEquationConfig(
+                nu_div4_scale=1.0, use_polar_filter=True,
+                polar_filter_cutoff_deg=35.9041), dt=self.DT)
+
+    def test_refuses_filter_cutoff_above_60(self, grid, sigma):
+        """Stability under the filter was measured only for filter starts of
+        35.9041 and 60 deg: a higher start is refused with the damping on,
+        60 itself is accepted, and scale 0 adds no refusal."""
+        with pytest.raises(ValueError, match="polar_filter_cutoff_deg"):
+            CGridLatLonPrimitiveEquationModel(
+                grid, sigma, CGridLatLonPrimitiveEquationConfig(
+                    nu_div4_scale=1.0, use_polar_filter=True,
+                    polar_filter_cutoff_deg=60.5), dt=self.DT)
+        for scale, cutoff in ((1.0, 60.0), (0.0, 75.0)):
+            CGridLatLonPrimitiveEquationModel(
+                grid, sigma, CGridLatLonPrimitiveEquationConfig(
+                    nu_div4_scale=scale, use_polar_filter=True,
+                    polar_filter_cutoff_deg=cutoff), dt=self.DT)
+
+    def test_filtered_spectrum_inside_rk3_region(self):
+        """Per-wavenumber stability on the production deck's grid (96x48,
+        dt 450 s, scale 1): eigenvalues of dt * F_k B_k, with B_k the zonal
+        wavenumber-k block of the REAL tendency's div-4 part (impulse
+        responses, Fourier-transformed in longitude; one level, poles walled)
+        and F_k the model's own polar-filter masks.  The most negative
+        Re(eig*dt) stays above -2.0 (SSP-RK3 real-axis limit ~-2.51) for
+        filter starts 35.9041 and 60 deg, and every eigenvalue's SSP-RK3
+        amplification |1 + z + z^2/2 + z^3/6| is <= 1.  Control: unfiltered
+        it is far past the limit, so the check can fail."""
+        import numpy as np
+        g = create_latlon_grid(n_lat=48, radius=constants.R_earth,
+                               omega=constants.Omega, dtype=jnp.float64)
+        sig = create_sigma_coordinate(n_levels=2)
+        n_lat, n_lon = g.n_lat, g.n_lon
+        assert n_lon == 96
+        rest = _make_rest_state(g, sig)
+        n_u = n_lat                     # u rows (interior lon faces)
+        n = n_u + n_lat - 1             # + interior v faces
+
+        def incr(x):                    # x: (n, n_lon), same on every level
+            u = jnp.concatenate([x[:n_u], x[:n_u, :1]], axis=1)  # closure col
+            v = jnp.zeros((n_lat + 1, n_lon)).at[1:-1].set(x[n_u:])
+            st = rest._replace(u=rest.u + u[..., None], v=rest.v + v[..., None])
+            du, dv = self._div4_part(st, g, sig)[:2]
+            return jnp.concatenate([du[:, :-1, 0], dv[1:-1, :, 0]], axis=0)
+
+        imp = jnp.zeros((n, n, n_lon)).at[jnp.arange(n), jnp.arange(n), 0].set(1.0)
+        resp = np.asarray(jax.vmap(incr)(imp))                 # (in, out, lon)
+        B = np.fft.rfft(resp, axis=-1).transpose(2, 1, 0)      # (k, out, in)
+        # instrument check: the blocks reproduce the operator on a random field
+        x = np.random.default_rng(0).standard_normal((n, n_lon))
+        pred = np.fft.irfft(np.einsum("koi,ik->ok", B, np.fft.rfft(x, axis=-1)),
+                            n=n_lon, axis=-1)
+        got = np.asarray(incr(jnp.asarray(x)))
+        assert np.max(np.abs(pred - got)) <= 1e-9 * np.max(np.abs(got))
+
+        def spectrum(masks):
+            """(most negative Re z, largest SSP-RK3 amplification |R3(z)|)."""
+            zmin, amp = 0.0, 0.0
+            for k in range(n_lon // 2 + 1):
+                M = self.DT * B[k]
+                if masks is not None:
+                    mu, mv = masks
+                    f = np.concatenate([mu[:, k], mv[1:-1, k]])
+                    M = f[:, None] * M          # filter acts on the increment
+                z = np.linalg.eigvals(M)
+                zmin = min(zmin, float(z.real.min()))
+                amp = max(amp, float(np.abs(1 + z + z**2 / 2 + z**3 / 6).max()))
+            return zmin, amp
+
+        for cutoff in (35.9041, 60.0):
+            m = CGridLatLonPrimitiveEquationModel(
+                g, sig, CGridLatLonPrimitiveEquationConfig(
+                    nu_div4_scale=1.0, use_polar_filter=True,
+                    polar_filter_cutoff_deg=cutoff), dt=self.DT)
+            z, amp = spectrum((np.asarray(m._polar_mask),
+                               np.asarray(m._polar_mask_v)))
+            print("cutoff %.4f: most negative Re(eig*dt) %.4f, max|R3| %.12f"
+                  % (cutoff, z, amp))
+            assert -2.0 < z < 0.0, (cutoff, z)
+            # every eigenvalue, complex or growing, inside the RK3 region
+            assert amp <= 1.0 + 1e-9, (cutoff, amp)
+        z_off, amp_off = spectrum(None)
+        print("no filter: most negative Re(eig*dt) %.4f, max|R3| %.4g"
+              % (z_off, amp_off))
+        assert z_off < -2.51 * 10.0, z_off
+        assert amp_off > 2.0, amp_off
+
+    def test_filtered_rk3_steps_damp_the_divergence(self, grid, sigma):
+        """Through the real step (SSP-RK3, polar filter from 35.9 deg, dt
+        450 s), a grid-scale divergent wind decays faster with the damping
+        than without it, and stays finite.  Scored equatorward of the filter
+        start: poleward, the filter removes this wavenumber from every
+        tendency, so the mode is frozen with or without the damping."""
+        from legoesm.grids.operators_latlon_cgrid import divergence_cgrid
+        st = self._checkerboard(grid, sigma, amp=2.0)
+        band = (jnp.abs(jnp.degrees(grid.lat)) < 35.9041)[:, None, None]
+        a = grid.area[..., None] * band
+
+        def rms_div(scale, n=10):
+            m = CGridLatLonPrimitiveEquationModel(
+                grid, sigma, CGridLatLonPrimitiveEquationConfig(
+                    nu_div4_scale=scale, use_polar_filter=True,
+                    polar_filter_cutoff_deg=35.9041), dt=self.DT)
+            s = st
+            for _ in range(n):
+                s, _ = m._step_cgrid_impl(s, self.DT)
+            assert all(bool(jnp.all(jnp.isfinite(x))) for x in (s.u, s.v, s.T, s.p_s))
+            D = divergence_cgrid(s.u, s.v, grid)
+            return float(jnp.sqrt(jnp.sum(D * D * a) / jnp.sum(a * jnp.ones_like(D))))
+        on, off = rms_div(1.0), rms_div(0.0)
+        print("rms div in the unfiltered band after 10 steps: on %.4g off %.4g" % (on, off))
+        assert 0.0 < on < 0.5 * off, (on, off)

@@ -454,9 +454,12 @@ class EvaluationConfig(NamedTuple):
     """
     enabled: bool = False
     suites: tuple[str, ...] = ()  # empty = ALL bundled suites (every tier)
-    model_id: str = "legoESM-1-0"
+    # Empty = the CMOR writer's OutputConfig.cmip_source_id /
+    # cmip_variant_label (one source of truth: the ids ClimateEval looks
+    # up are the ones stamped on the files; owner decision 2026-10-28).
+    model_id: str = ""
     experiment_id: str = "amip"
-    variant_id: str = "r1i1p1f1"
+    variant_id: str = ""
     data_root_dir: str = ""
     fail_on_missing_data: bool = False
     download_missing_data: bool = False
@@ -491,6 +494,15 @@ class OutputConfig(NamedTuple):
     checkpoint_format: str = "npz"  # npz, zarr
     diagnostics_perf_mode: str = "auto"  # auto, always, never
     cmip_resolution_deg: float = 5.0  # lat-lon grid spacing for CMIP output [degrees]
+    # CMOR writer identity / layout (CFWriter's own defaults).  The
+    # institution_id / source_id defaults are NOT registered in the CMIP6
+    # CV (docs/validation/cmip6_publication_blockers.md); registration and
+    # the values are the owner's call.  cmip_drs_tree=True writes the ESGF
+    # DRS directory tree instead of cmor/<table>/.
+    cmip_drs_tree: bool = False
+    cmip_institution_id: str = "CU"
+    cmip_source_id: str = "legoESM-1-0"
+    cmip_variant_label: str = "r1i1p1f1"
     # Wallclock-aware mid-job checkpointing for long (century-scale) HPC chains.
     # ``max_wallclock_seconds=0`` disables it (default); set it to the SLURM
     # ``--time`` budget so the run checkpoints and exits cleanly with
@@ -1681,6 +1693,10 @@ class ExperimentConfig(NamedTuple):
     bechtold_use_ifs_capdcycl: bool = True
     bechtold_use_ifs_land_rhebc: bool = True
     bechtold_use_ifs_snow_melt: bool = True
+    # Faithful OpenIFS convection chain (mirrors BechtoldConfig.use_ifs_ascent)
+    # and its no-supply shallow mode (BechtoldConfig.ifs_shallow_nosupply).
+    bechtold_use_ifs_ascent: bool = False
+    bechtold_ifs_shallow_nosupply: str = "zero"
     sigma_b: float = 0.7
     k_BL_max_per_day: float = 1.0
     k_free_per_day: float = 0.1
@@ -2047,7 +2063,9 @@ class ExperimentConfig(NamedTuple):
     # graupel riming sink.  Default equals the leaf (True).
     morrison_do_graupel: bool = True
     # Morrison warm rain (appended at the END: positional ABI).
-    morrison_warm_rain_scheme: str = "kk2000"   # MorrisonConfig.warm_rain_scheme
+    # MorrisonConfig.warm_rain_scheme; None = unset, resolved by
+    # morrison_flavor (mg -> kk2000_cam6, sam -> kk2000).
+    morrison_warm_rain_scheme: str | None = None
     morrison_autocon_fact: float = 1.0          # MorrisonConfig.autocon_fact (kk2000 only)
     morrison_accre_enhan_fact: float = 1.0      # MorrisonConfig.accre_enhan_fact (kk2000 only)
     # MorrisonConfig.warm_rain_incloud: CAM6 MG2 in-cloud warm rain on the
@@ -2645,6 +2663,11 @@ class ExperimentConfig(NamedTuple):
             errors.append(
                 f"convective_precip_efficiency must be in [0, 1] or None, got "
                 f"{self.convective_precip_efficiency}"
+            )
+        if self.bechtold_ifs_shallow_nosupply not in ("zero", "first_guess"):
+            errors.append(
+                "bechtold_ifs_shallow_nosupply must be 'zero' or 'first_guess', "
+                f"got {self.bechtold_ifs_shallow_nosupply!r}"
             )
         if self.convective_precip_split not in ("constant", "autoconversion"):
             errors.append(
@@ -3936,13 +3959,24 @@ class ExperimentConfig(NamedTuple):
                 f"a_h_scale={d.a_h_scale!r} turns the del2 viscosity off; use a_h_scale > 0 "
                 "or set mpas_sponge_del2_top_layers=0")
         _dd4s = getattr(d, "mpas_div_damp4_scale", 0.0)
+        # Consumers: the hydrostatic MPAS dycore and the lat-lon C-grid PE
+        # (which builds its own per-row CAM coefficient from the scale).  The
+        # lat-lon lane is keyed on the factory's own dispatch matrix, so every
+        # (model_type, discretization) alias that reaches that solver counts.
+        from legoesm.driver.component_factory import supported_matrix
+        _latlon_pe = any(
+            r["solver"] == "latlon_cgrid_primitive_equations"
+            and (r["model_type"], r["discretization"], r["grid_type"])
+            == (d.model_type, d.discretization, normalize_grid_type(g.grid_type))
+            for r in supported_matrix())
         if (isinstance(_dd4s, (int, float)) and not isinstance(_dd4s, bool)
-                and _dd4s > 0
+                and _dd4s > 0 and not _latlon_pe
                 and (d.discretization != "mpas" or d.model_type != "hydrostatic")):
             errors.append(
                 "dycore.mpas_div_damp4_scale is wired into the hydrostatic MPAS dycore "
-                f"only; on discretization={d.discretization!r}/model_type={d.model_type!r} "
-                "it would be silently inert")
+                "and the lat-lon C-grid PE only; on "
+                f"discretization={d.discretization!r}/model_type={d.model_type!r}/"
+                f"grid_type={g.grid_type!r} it would be silently inert")
         # Names must be known per-mass water/number tracers (typo guard; the
         # dycore skips a valid name its state does not carry).  No inertness
         # error: the default is non-empty and, like mpas_nu_vert4_T, simply
@@ -4211,11 +4245,11 @@ class ExperimentConfig(NamedTuple):
                 "by the hom-nucleation branch and would be silently inert.")
         _wrs = ("kk2000", "kk2000_cam6", "seifert_beheng",
                 "seifert_beheng_sb2001")
-        if self.morrison_warm_rain_scheme not in _wrs:
+        if self.morrison_warm_rain_scheme not in (None, *_wrs):
             raise ValueError(
                 f"morrison_warm_rain_scheme={self.morrison_warm_rain_scheme!r} "
-                f"unknown; choose one of {_wrs}.")
-        if (self.morrison_warm_rain_scheme != "kk2000"
+                f"unknown; choose one of {_wrs} or leave it unset (None).")
+        if (self.morrison_warm_rain_scheme is not None
                 and self.microphysics != "morrison"):
             raise ValueError(
                 f"morrison_warm_rain_scheme={self.morrison_warm_rain_scheme!r} "
@@ -4224,7 +4258,11 @@ class ExperimentConfig(NamedTuple):
         _kk_only = [f for f in ("morrison_autocon_fact",
                                 "morrison_accre_enhan_fact")
                     if f in _morrison_touched]
-        if _kk_only and self.morrison_warm_rain_scheme not in (
+        from legoesm.atmosphere.physics.microphysics.config import (
+            MorrisonConfig, resolve_warm_rain_scheme as _resolve_wrs)
+        if _kk_only and _resolve_wrs(MorrisonConfig(
+                morrison_flavor=self.morrison_flavor,
+                warm_rain_scheme=self.morrison_warm_rain_scheme)) not in (
                 "kk2000", "kk2000_cam6"):
             raise ValueError(
                 f"{_kk_only} require morrison_warm_rain_scheme='kk2000' or "
@@ -5048,6 +5086,8 @@ class ExperimentConfig(NamedTuple):
                 amip_cfg, 'bechtold_use_ifs_shallow_closure', False),
             bechtold_use_ifs_capdcycl=getattr(
                 amip_cfg, 'bechtold_use_ifs_capdcycl', True),
+            bechtold_use_ifs_ascent=amip_cfg.bechtold_use_ifs_ascent,
+            bechtold_ifs_shallow_nosupply=amip_cfg.bechtold_ifs_shallow_nosupply,
             bechtold_use_ifs_land_rhebc=getattr(
                 amip_cfg, 'bechtold_use_ifs_land_rhebc', True),
             bechtold_use_ifs_snow_melt=getattr(
@@ -5224,6 +5264,8 @@ class ExperimentConfig(NamedTuple):
             bechtold_use_ifs_downdraft=self.bechtold_use_ifs_downdraft,
             bechtold_use_ifs_shallow_closure=self.bechtold_use_ifs_shallow_closure,
             bechtold_use_ifs_capdcycl=self.bechtold_use_ifs_capdcycl,
+            bechtold_use_ifs_ascent=self.bechtold_use_ifs_ascent,
+            bechtold_ifs_shallow_nosupply=self.bechtold_ifs_shallow_nosupply,
             bechtold_use_ifs_land_rhebc=self.bechtold_use_ifs_land_rhebc,
             bechtold_use_ifs_snow_melt=self.bechtold_use_ifs_snow_melt,
             sigma_b=self.sigma_b,
