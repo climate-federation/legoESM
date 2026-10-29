@@ -875,7 +875,8 @@ def si3_ice_dyn_rdgrft(
         ato_conv = fmax(0.0, sr(1.0 - fortran_sum0(new["a_i"])))  # :375
         new["ato_i"] = jnp.where(selected & conv, ato_conv, new["ato_i"])
         nxt = jnp.any(selected & ~conv)  # :358,377 iterate_ridging
-        return (new, cn_new, op_new, dv_new, nxt, n + jnp.asarray(1, jnp.int32), diag)
+        return (new, cn_new, op_new, dv_new, nxt,
+                n + jnp.asarray(1, jnp.int32).astype(jnp.int32), diag)
 
     def one_pass(_, carry):
         # A static bound keeps reverse-mode AD, while the data-dependent

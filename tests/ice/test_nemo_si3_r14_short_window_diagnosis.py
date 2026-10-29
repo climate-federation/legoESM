@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib.util
 from pathlib import Path
 
+import jax.numpy as jnp
 
 TOOL = (
     Path(__file__).parents[2]
@@ -37,3 +38,16 @@ def test_libm_counter_reset_and_snapshot_are_independent():
 
     assert snapshot["by_name"]["exp"]["calls"] == 2
     assert stats == {"calls": 0, "elements": 0, "wall_s": 0.0, "by_name": {}}
+
+
+def test_tree_leaf_hashes_pin_bits_dtype_shape_and_leaf_path():
+    base = {"x": jnp.asarray([0.0, -0.0], dtype=jnp.float64)}
+    same = {"x": jnp.asarray([0.0, -0.0], dtype=jnp.float64)}
+    sign_changed = {"x": jnp.asarray([0.0, 0.0], dtype=jnp.float64)}
+    reshaped = {"x": jnp.asarray([[0.0, -0.0]], dtype=jnp.float64)}
+
+    got = diagnosis._tree_leaf_sha256(base)
+    assert got == diagnosis._tree_leaf_sha256(same)
+    assert got != diagnosis._tree_leaf_sha256(sign_changed)
+    assert got != diagnosis._tree_leaf_sha256(reshaped)
+    assert list(got) == ["['x']"]

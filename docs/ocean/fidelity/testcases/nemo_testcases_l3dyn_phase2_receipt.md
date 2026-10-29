@@ -1961,3 +1961,14 @@ thermodynamic, landfast, alternate-rheology, or alternate-ridging selector arm;
 no AT-BAR or causal-owner claim past the rung-3.4 first-divergence boundary
 (round 9 measures the continuation as DEBT); no tolerance relaxation, GPU,
 MPI, or push.
+
+## Round-14 Decision 177 amendment: ridging-projection leaf
+
+This amendment preserves the Round-8 text above as history and corrects only
+its scope after Decision 177 removed lane 3's separate one-category ridging
+arm.  `minimum_open_water_before` remains `0.009999990410122006`, but
+`minimum_open_water_after` moved from `0.00999999040071575` in the old arm to
+`0.009999990445945461` in the merged O6 literal kernel.  The earlier “zero
+trajectory movement” sentence is therefore superseded for this non-row gate
+leaf.  Open water remains positive, and the scored-row result is unchanged:
+the full-walk comparison has no status transitions and no changed AT-BAR row.

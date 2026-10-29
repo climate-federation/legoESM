@@ -317,3 +317,59 @@ each of 100, 200, 485 and 720; none is parent AT-BAR.  The final debt count
 is 173 in both arms.  Therefore Decision 177's certified-row condition is
 met, while the debt trajectory is explicitly not claimed bit-identical
 (`round14/r3/walk_{parent_resume5,fixed_5b0a9b7994}.json`).
+
+## Resume 6 amendment: scope and Decision 177 drift
+
+This amendment preserves the Resume-5 record above and corrects its scope.
+The 390 scientific rows, of which 320 are AT-BAR, belong only to the
+preregistered 10-step timing window.  Across every serialized row collection
+in the full-walk receipts there are 553 row objects: all 134 AT-BAR rows are
+identical, 308 of 387 rows already classified DEBT differ, 32 are
+UNINFORMATIVE, and no row changes status.  The three first differences at
+step 50 are already-DEBT `u_ice`, `stress1_i`, and `stress2_i`; their reported
+metrics move at about the `1e-13` absolute scale or below.  At step 485 the
+merged-to-parent field-relative ratio is about `1.4` for the inventory rows
+(for example `v_i`, `1.3986025227886831`).  This is drift within admitted
+DEBT, not a certified-row regression.
+
+The active gate's non-row ridging-projection leaf also moved.  Its common
+`minimum_open_water_before` is `0.009999990410122006`;
+`minimum_open_water_after` is `0.00999999040071575` for the parent arm and
+`0.009999990445945461` for the merged literal O6 arm.  The lane-3 receipt now
+contains an appended amendment that supersedes its earlier zero-movement
+sentence without rewriting that historical record.  Both values remain
+positive, and this diagnostic leaf is not one of the 553 scored row objects.
+
+The drift attribution is **CONFIRMED** at its first seed.  Independent native
+parent and merged processes carry bit-identical state through completed step
+45.  On the common step-46 input, rheology and transport output hashes remain
+identical; ridging is the first differing stage, and `ice_cor` only carries
+that changed inventory onward.  An aligned expression probe finds zero
+unequal elements in the parent/literal closing-rate and opening statements.
+The ordered first-pass preparation trace then remains identical through total
+area, inverse area, cumulative open-water fraction, `1/rn_astar`, the constant
+exponential and its normalization, and the per-cell exponential argument.
+The first different statement is the per-cell
+`EXP(-zGsum(ii,jl)*z1_astar)` at
+`ORCA2_SAS_ICE_O7_REC/BLD/ppsrc/nemo/icedyn_rdgrft.f90:504`; `g_zero`,
+`participation_open`, and `participation_ice` differ immediately afterward.
+The parent one-category arm used native XLA `jnp.exp`; the merged O6 arm uses
+the scalar-libm path and NEMO statement barriers, matching the recorded
+Fortran kernel.  Therefore the DEBT-only drift is the expected consequence of
+making those rows more literal, not a defect in the converged-loop speed fix.
+The subsequent nonlinear growth pattern--from the step-50 seed to the roughly
+`1.4` step-485 ratio--is **PLAUSIBLE** propagation of that confirmed seed; no
+claim assigns each later field's magnitude to a separate source statement.
+Evidence is `round14/r4/{parent,merged}_native_step46_prep.json`.
+
+Resume-6 verification: the integer pass counter again carries the rounding
+audit's explicit integer-cast exemption, and the complete default O6 unit-file
+scope is `27 passed, 1 deselected in 1599.98s`; the short-window diagnostic's
+direct controls are `3 passed`.  The per-receipt citation gate finds 65
+citations with zero unmapped citations, failures, or map-audit failures; its
+11 self-test controls all fire.  The default citation suite is `31 passed`,
+and the private-import ratchet is `6 passed`.  The inline-coefficient,
+hardcoded-constant, dispatch, parameter-spec, and saturation ratchets report
+`11 failed, 12033 passed, 4 skipped`; a clean detached `4fd244ebbdec` worktree
+has the same counts and the same 11 failure identities, so the ratchet delta
+is empty.
