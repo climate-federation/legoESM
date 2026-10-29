@@ -190,6 +190,11 @@ def test_radiation_split_reuses_the_step_mesh():
 
     Non-vacuous: make radiation_column_mesh return create_column_mesh(n)
     again and the jit raises.
+
+    KNOWN DIFFERENCE: this split-vs-one-call check is exact, but a whole
+    1-vs-2-device duo run is not bitwise (summation order in the dynamics,
+    fp32 radiation); the measured gaps and their bounds are in
+    scripts/validate/validate_duo_device_parity.py.
     """
     out = _run4("""
         import equinox as eqx, jax, jax.numpy as jnp, numpy as np
