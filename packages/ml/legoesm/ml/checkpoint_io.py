@@ -99,18 +99,30 @@ def read_knob_record(path) -> dict | None:
     return rec
 
 
-def check_knob_record(path, skeleton) -> None:
-    """For loaders that call equinox directly: raise when the knob record
-    beside ``path`` does not fit the AIMIP modules in ``skeleton`` (ranges).
-    No record: nothing to check."""
+def knob_filter_spec(path, skeleton):
+    """The equinox filter spec for loading ``path`` into ``skeleton``: each
+    AIMIP module's ``checkpoint_load_spec`` (fed the record beside ``path``,
+    or None), equinox's default for every other leaf."""
+    import equinox as eqx
     import jax.tree_util as jtu
 
-    rec = read_knob_record(path)
-    if rec is None:
-        return
+    record = read_knob_record(path)
     has = lambda x: hasattr(x, "checkpoint_load_spec")  # noqa: E731
-    jtu.tree_map(lambda x: x.checkpoint_load_spec(rec) if has(x) else None,
-                 skeleton, is_leaf=has)
+    return jtu.tree_map(
+        lambda x: (x.checkpoint_load_spec(record) if has(x)
+                   else eqx.default_deserialise_filter_spec),
+        skeleton, is_leaf=has)
+
+
+def deserialise_knob_aware(path, skeleton):
+    """For loaders that call equinox directly (trainer mid-epoch and EMA
+    resume, WB resume and FD check): ``eqx.tree_deserialise_leaves`` with the
+    same knob spec as :func:`load_checkpoint_or_fail`, so the dtype and range
+    rules match it.  Errors propagate unwrapped; no trailing-bytes check."""
+    import equinox as eqx
+
+    return eqx.tree_deserialise_leaves(
+        str(checkpoint_path(path)), skeleton, knob_filter_spec(path, skeleton))
 
 
 def checkpoint_path(path) -> Path:
@@ -168,12 +180,7 @@ def load_checkpoint_or_fail(path, skeleton: Any, *, what: str = "") -> Any:
         # happen to line up loads SILENTLY and wrong, which is exactly what a
         # 59-knob file does against the 50-knob skeleton when the dropped
         # entries sit at the end.
-        record = read_knob_record(path)
-        has_spec = lambda x: hasattr(x, "checkpoint_load_spec")  # noqa: E731
-        spec = jtu.tree_map(
-            lambda x: (x.checkpoint_load_spec(record) if has_spec(x)
-                       else eqx.default_deserialise_filter_spec),
-            skeleton, is_leaf=has_spec)
+        spec = knob_filter_spec(path, skeleton)
         with open(path, "rb") as handle:
             loaded = eqx.tree_deserialise_leaves(handle, skeleton, spec)
             leftover = handle.read(1)

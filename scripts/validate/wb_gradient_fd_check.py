@@ -208,9 +208,8 @@ def main(argv=None):
         place, _, rep_in_trace = _column_placers(
             mesh, int(grid.n_lat), int(grid.n_lat) * int(grid.n_lon))
     if a.checkpoint:
-        from legoesm.ml.checkpoint_io import check_knob_record
-        check_knob_record(a.checkpoint, params)
-        params = eqx.tree_deserialise_leaves(a.checkpoint, params)
+        from legoesm.ml.checkpoint_io import deserialise_knob_aware
+        params = deserialise_knob_aware(a.checkpoint, params)
     samples = load_era5_samples(cfg, yml, grid, sigma, rank=0, nproc=1,
                                 host_resident=True)
     if mesh is not None:

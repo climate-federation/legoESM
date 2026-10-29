@@ -1200,9 +1200,8 @@ def _main(argv=None):
                          "starting from epoch 0", cfg.out_dir)
         else:
             _pp, _op, _fp = _checkpoint_paths(cfg.out_dir, _ep)
-            from legoesm.ml.checkpoint_io import check_knob_record
-            check_knob_record(_pp, params)
-            params = eqx.tree_deserialise_leaves(_pp, params)
+            from legoesm.ml.checkpoint_io import deserialise_knob_aware
+            params = deserialise_knob_aware(_pp, params)
             _manifest = json.loads(open(_fp).read())
             _saved_fp = (_manifest.get("fingerprint")
                          if isinstance(_manifest, dict) else None)

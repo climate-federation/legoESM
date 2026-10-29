@@ -56,7 +56,7 @@ from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
 from legoesm import constants
 from legoesm.core.conservation import conservative_positive_clip
 from legoesm.core.field import Field
-from legoesm.ml.checkpoint_io import check_knob_record
+from legoesm.ml.checkpoint_io import deserialise_knob_aware
 from legoesm.core.tracers import (
     make_full_moisture_registry,
     make_moisture_registry,
@@ -429,13 +429,11 @@ def _load_midepoch_checkpoint(
     _tmpl5 = (model_template, opt_state_template, _ema_t, _zero, _zero)
 
     def _read4():
-        check_knob_record(path, _tmpl4)
-        m, o, e, c = eqx.tree_deserialise_leaves(str(path), _tmpl4)
+        m, o, e, c = deserialise_knob_aware(path, _tmpl4)
         return m, o, None, int(e), int(c)
 
     def _read5():
-        check_knob_record(path, _tmpl5)
-        m, o, em, e, c = eqx.tree_deserialise_leaves(str(path), _tmpl5)
+        m, o, em, e, c = deserialise_knob_aware(path, _tmpl5)
         return m, o, em, int(e), int(c)
 
     # ALWAYS attempt the 5-tuple layout FIRST, then fall back to 4-tuple.
@@ -3717,8 +3715,7 @@ def _train_spectral_loop(
                 Path(resume_from_dir) / f"epoch_{start_epoch - 1:04d}_ema.eqx"
             )
             if _cand.exists():
-                check_knob_record(_cand, ema_model)
-                ema_model = eqx.tree_deserialise_leaves(_cand, ema_model)
+                ema_model = deserialise_knob_aware(_cand, ema_model)
                 logger.info(f"EMA resume: restored {_cand}")
             else:
                 logger.warning(
@@ -5596,8 +5593,7 @@ def _train_sfno_full_loop(
                 / f"epoch_{start_epoch - 1:04d}_ema.eqx"
             )
             if _cand.exists():
-                check_knob_record(_cand, ema_model)
-                ema_model = eqx.tree_deserialise_leaves(_cand, ema_model)
+                ema_model = deserialise_knob_aware(_cand, ema_model)
                 logger.info(f"EMA resume: restored {_cand}")
             else:
                 logger.warning(

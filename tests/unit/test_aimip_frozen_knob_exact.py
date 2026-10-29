@@ -260,22 +260,70 @@ def test_optimizer_moment_copies_carry_no_record():
     assert knob_record((p, moments))["frozen"] == p.knob_record()["frozen"]
 
 
-def test_raw_loaders_check_the_record_ranges(tmp_path):
-    """Loaders that call equinox directly (trainer resume, EMA, WB) run the
-    same range check first."""
+def _trained_fp32_checkpoint(tmp_path, payload=lambda p: p):
+    from legoesm.core.precision import PrecisionPolicy
+    from legoesm.ml.training import save_checkpoint
+    p = _with_policy(PrecisionPolicy.fp32(),
+                     lambda: AIMIPClassicalParams.from_defaults(trainable=list(_C)))
+    save_checkpoint(payload(p), tmp_path / "c.eqx")
+    tmpl = _with_policy(PrecisionPolicy.fp64(), AIMIPClassicalParams.from_defaults)
+    return p, tmpl, tmp_path / "c.eqx"
+
+
+def test_raw_loaders_share_the_load_checkpoint_rules(tmp_path):
+    """Loaders that call equinox directly widen fp32 -> fp64 like
+    load_checkpoint (plain equinox refuses) and check the record ranges."""
     import json
 
-    from legoesm.ml.checkpoint_io import check_knob_record, knob_record_path
-    from legoesm.ml.training import save_checkpoint
-    c, p = _frozen_rate_params()
-    path = tmp_path / "c.eqx"
-    save_checkpoint((p, 0), path)
-    check_knob_record(path, (p, 0))
+    from legoesm.ml.checkpoint_io import deserialise_knob_aware, knob_record_path
+    c = _C["sundqvist_auto_rate"]
+    p, tmpl, path = _trained_fp32_checkpoint(tmp_path, lambda p: (p, 0))
+    back, _ = deserialise_knob_aware(path, (tmpl, 0))
+    assert back.raw_values[c.name].dtype == np.float64
+    assert float(back.raw_values[c.name]) == float(p.raw_values[c.name])
     side = knob_record_path(path)
     rec = json.loads(side.read_text())
     rec["ranges"][c.name] = [c.min_val, 2 * c.max_val]
     side.write_text(json.dumps(rec))
     with pytest.raises(ValueError, match="other AIMIP knob ranges"):
-        check_knob_record(path, (p, 0))
-    side.unlink()
-    check_knob_record(path, (p, 0))
+        deserialise_knob_aware(path, (tmpl, 0))
+
+
+@pytest.mark.parametrize("with_ema", [False, True])
+def test_midepoch_resume_widens_a_trained_fp32_knob(tmp_path, with_ema):
+    from legoesm.training.neural_gcm_spectral import (
+        _load_midepoch_checkpoint, _save_midepoch_checkpoint)
+    c = _C["sundqvist_auto_rate"]
+    p, tmpl, _ = _trained_fp32_checkpoint(tmp_path)
+    _save_midepoch_checkpoint(tmp_path, p, p, 1, 2,
+                              ema_model=p if with_ema else None)
+    out = _load_midepoch_checkpoint(tmp_path, tmpl, tmpl,
+                                    ema_template=tmpl if with_ema else None)
+    for m in out[:3 if with_ema else 2]:
+        assert m.raw_values[c.name].dtype == np.float64
+        assert float(m.raw_values[c.name]) == float(p.raw_values[c.name])
+
+
+# The EMA, WB-resume and WB-FD loaders sit inside training/driver bodies too
+# large to run here: each named function must load model checkpoints through
+# the knob-aware spec, never bare equinox.  (WB _main keeps one bare call, the
+# optimizer state, which holds plain arrays and no AIMIP module.)
+_RAW_LOADERS = [
+    ("packages/ml/legoesm/training/neural_gcm_spectral.py", "_train_spectral_loop", 0),
+    ("packages/ml/legoesm/training/neural_gcm_spectral.py", "_train_sfno_full_loop", 0),
+    ("scripts/run/train_weatherbench_scale.py", "_main", 1),
+    ("scripts/validate/wb_gradient_fd_check.py", "main", 0),
+]
+
+
+@pytest.mark.parametrize("rel,func,n_bare", _RAW_LOADERS)
+def test_raw_loader_routes_through_the_knob_spec(rel, func, n_bare):
+    import ast
+
+    tree = ast.parse((_ROOT / rel).read_text())
+    fn = next(n for n in ast.walk(tree)
+              if isinstance(n, ast.FunctionDef) and n.name == func)
+    names = [getattr(n.func, "attr", getattr(n.func, "id", None))
+             for n in ast.walk(fn) if isinstance(n, ast.Call)]
+    assert names.count("tree_deserialise_leaves") == n_bare
+    assert "deserialise_knob_aware" in names
