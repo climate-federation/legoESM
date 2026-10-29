@@ -158,7 +158,7 @@ rerun.
 ## Resume 4 — O13/O14 lane rebase resolution
 
 Before fetching, branch `backup/si3_r24-resume4-pre-rebase` preserved
-`83887b735636a65c640c1cccdc80c5ef2242bb09`. The feature branch was rebased
+`83887b735636a65c640c1cccdc80c5ef2242bb09`. Amendment (2026-10-29 provenance audit): this was a pre-rebase commit and is no longer reachable. The feature branch was rebased
 onto fetched SI3 lane tip `2351cfdda9f5` (O13 plus O14). Conflicts in the
 shared master scorer, its direct tests, the receipt citation gate, and the
 affected SI3 receipts were resolved additively: the final scorer retains the

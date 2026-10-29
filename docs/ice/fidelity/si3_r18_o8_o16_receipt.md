@@ -157,7 +157,7 @@ The admitted master contains 4,815 rank-0 binary records totaling
 **81,440,242,576 bytes (75.85 GiB)**. The run manifest records **2,342.5088832378387
 seconds (39 minutes 2.509 seconds)** wall clock. The measured evidence footprint
 is 85,771,108 KiB. The producer is
-`cd34f1be648a05abbb23e4cb6bb2a9ed66e60fc5`; the run-manifest SHA-256 is
+`cd34f1be648a05abbb23e4cb6bb2a9ed66e60fc5`; Amendment (2026-10-29 provenance audit): this was a pre-rebase commit and is no longer reachable. The run-manifest SHA-256 is
 `bfb0b71d1500b7bc91c68a9e39c8af7a654b139258c0635ad5b1f25284b31fd0`,
 the resource-usage SHA-256 is
 `b30a5febe9248e5008999cb419953dad40c78658542a3c7221d301825270967c`, and

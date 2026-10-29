@@ -1,6 +1,6 @@
 # ORCA2 round 188 preregistration — restart-list terminal sentinel
 
-Date: 2026-10-08. Base: `b79a200ae8b7f93e1c26717b1393d4dca45e9dac`.
+Date: 2026-10-08. Base: `b79a200ae8b7f93e1c26717b1393d4dca45e9dac`. Amendment (2026-10-29 provenance audit): the full SHA is `b79a200ae24ddedf34794fe689eb27f278771fcc`; the tail of the value above was mistyped.
 Every scientific number remains **independent**: the rung-0 card starts from
 its own corrected, bit-exact initial state. No given-entry rung-7 number is
 mixed into the tables.

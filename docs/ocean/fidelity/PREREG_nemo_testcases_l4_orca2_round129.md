@@ -1,6 +1,6 @@
 # Preregistration — ORCA2 round 129 substep-2 U residual
 
-Date: 2026-10-03. Base: `1635f0a4ae3bcb2f23ee8b70d57cba6b29a70c35`.
+Date: 2026-10-03. Base: `1635f0a4ae3bcb2f23ee8b70d57cba6b29a70c35`. Amendment (2026-10-29 provenance audit): the full SHA is `1635f0a4ae6c0bd1922920961950f962177cdf51`; the tail of the value above was mistyped.
 Every hierarchy-rung-0 number is **independent**. No configuration, forcing,
 initial state, carried state, stabilizer, sea-ice selector, or
 `unmeasured_features` entry may change.

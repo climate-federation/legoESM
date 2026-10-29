@@ -154,7 +154,7 @@ read-only, while `--run` has RAM, disk, timeout, ERR and EXIT gates.
 ## O5 record results
 
 CONFIRMED: admission returned `PASS_O5_ADMISSION` for producer
-`5eb81c94a9d6b711919b3b053b86a4ba19c0d82d`. It verified both retained
+`5eb81c94a9d6b711919b3b053b86a4ba19c0d82d`. Amendment (2026-10-29 provenance audit): this was a pre-rebase commit and is no longer reachable; this receipt identifies its post-rebase stable-patch equivalent as `68e9fcb17ab3236ec732f44a63f8978ff4d0e068` below. It verified both retained
 binaries, all 82 record checksums and payload checksums, independent `STOP 0`
 completion of both runs, and byte identity of the step-3 ocean and ice
 restarts. The 22 retained-evidence refusal plants all refused. The admitted

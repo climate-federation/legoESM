@@ -13,7 +13,7 @@
 
 Master root:
 `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/round18/oracle_o8_o16_master`.
-Producer commit: `cd34f1be648a05abbb23e4cb6bb2a9ed66e60fc5`.
+Producer commit: `cd34f1be648a05abbb23e4cb6bb2a9ed66e60fc5`. Amendment (2026-10-29 provenance audit): this was a pre-rebase commit and is no longer reachable.
 
 - `manifest/run_manifest.json`: `bfb0b71d1500b7bc91c68a9e39c8af7a654b139258c0635ad5b1f25284b31fd0`
 - `manifest/resource_usage.json`: `b30a5febe9248e5008999cb419953dad40c78658542a3c7221d301825270967c`

@@ -1,6 +1,6 @@
 # Preregistration — ORCA2 round 111 EEN fraction admission and operand walk
 
-Date: 2026-10-02. Base: `1eb05f36d7cc5654412645cbe069f71f4605c35e`.
+Date: 2026-10-02. Base: `1eb05f36d7cc5654412645cbe069f71f4605c35e`. Amendment (2026-10-29 provenance audit): the full SHA is `1eb05f36d712111bcc5a86a80fcf065e840b42cb`; the tail of the value above was mistyped.
 Scope is measurement-only on hierarchy rung 0. Every ocean number is
 **independent** because rung 0 starts from NEMO's own from-rest state. No model
 physics, card field, configuration value, carried state, threshold,

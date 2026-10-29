@@ -35,7 +35,7 @@ carried. No acquisition is needed.
 | R137-P1 | **CONFIRMED** | all 49 ordinary state leaves and the independent T/S/u/v/ssh repeat are bit-identical; four plants fire |
 | R137-P2 | **CONFIRMED** | first target non-finite field is `coef_v`, after finite low-order, midpoint, averaged-upstream, upstream-RHS, and antidiffusive rows |
 | R137-P3 | **CONFIRMED** | `coef_v` → limited V flux → corrected divergence → final RHS → caller content → pre-ZDF level 3 is non-finite in source order |
-| R137-P4 | **CONFIRMED** | base and tip `packages/` tree IDs are both `a369750741385921838cc500f378c491f7125a26`; shared trajectories cannot move |
+| R137-P4 | **CONFIRMED** | base and tip `packages/` tree IDs are both `a369750741385921838cc500f378c491f7125a26`; shared trajectories cannot move. Amendment (2026-10-29 provenance audit): this is a Git tree SHA, not a commit SHA; `git cat-file -e` resolves it. |
 
 The first runtime attempt refused before classification because the new
 checker asked the admitted round-136 JSON for `content_T`; its self-described

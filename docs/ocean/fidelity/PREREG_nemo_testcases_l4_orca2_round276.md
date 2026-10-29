@@ -2,7 +2,7 @@
 
 Date: 2026-10-14
 
-Lane base: `2eaeaf515d818df52b1fd88413a299c5db7b8b6f`
+Lane base: `2eaeaf515d818df52b1fd88413a299c5db7b8b6f`. Amendment (2026-10-29 provenance audit): the full SHA is `2eaeaf515d2fa69ccdcaba8e9fe6e17cd8a64959`; the tail of the value above was mistyped.
 
 Primary label: **independent**.  Given-NEMO-entry rows are landing gates only
 after a unit qualifies independently.  Counts always keep OMT rungs separate.
@@ -92,4 +92,3 @@ battery.  A red predicate leaves all production selectors off.
 The classifier's exact-loss and inherited-selector plants must fire.  The
 citation shift plant must fire.  No configuration choice, carried-state
 change, clip, floor, stabiliser, or sea-ice edit is authorised.
-

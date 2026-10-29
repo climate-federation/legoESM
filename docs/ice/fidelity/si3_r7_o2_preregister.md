@@ -3,7 +3,7 @@
 - **Date**: 2026-10-24
 - **Lane**: `si3` (Phase-3 NEMO 5.0.2 Sea-Ice Ladder, Round 7 / `si3_r7`)
 - **Rung**: **O2** (`DECISION 153`, `DECISION 159`, `docs/ice/fidelity/si3_ladder_design.md:222`)
-- **Parent commit**: `fe19fb330ecbe42737ac71b2fe152a492f82ac15` (Rung O1 / `si3_r4`, built on `a572f4b2540325343f71225777438411f1cb0803`)
+- **Parent commit**: `fe19fb330ecbe42737ac71b2fe152a492f82ac15` (Rung O1 / `si3_r4`, built on `a572f4b2540325343f71225777438411f1cb0803`). Amendment (2026-10-29 provenance audit): `fe19fb330ecbe42737ac71b2fe152a492f82ac15` was a pre-rebase commit and is no longer reachable; this preregistration's own later amendment identifies post-rebase lane commit `042c7bd74c2944dab8c39318687ab0cef54f9d2b`. The full SHA for the second value above is `a572f4b2540351bf49328d1533211427f9c9d772`; the tail of the value above was mistyped.
 - **Reference configuration**: `/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/ORCA2_SAS_ICE` (`jpl = 5`, `nlay_i = 10`, `nlay_s = 5`, `Ni0glo = 180`, `Nj0glo = 148`, `nn_hls = 2`, `jpi = 184`, `jpj = 152`)
 
 ---

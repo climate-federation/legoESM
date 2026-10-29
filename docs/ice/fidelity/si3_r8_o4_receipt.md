@@ -179,9 +179,9 @@ parent-vs-current controls below. No O4 acquisition tool was run.
 
 All commands in this section ran in the foreground with the repository source
 roots first on `PYTHONPATH`, CPU JAX, and float64 enabled. O1/O2/O3/O4/O5 and
-the three parent controls ran on clean `38a64e9dadaa938f231d53f61f49a71a8992d45d`.
+the three parent controls ran on clean `38a64e9dadaa938f231d53f61f49a71a8992d45d`. Amendment (2026-10-29 provenance audit): this was a pre-rebase commit and is no longer reachable.
 The final O7/O8, D5, citation, default, and ratchet runs used clean
-`fb76ac2fe4493007a00415892f96d751341c8fd9`; a path-limited tree diff reported
+`fb76ac2fe4493007a00415892f96d751341c8fd9`; Amendment (2026-10-29 provenance audit): this was a pre-rebase commit and is no longer reachable. A path-limited tree diff reported
 `O4_TESTED_CLOSURE_BYTE_IDENTICAL_PASS` for the O4 model, shared kernels,
 dump, and tests between those commits. The exact decisive lines were:
 

@@ -5,7 +5,7 @@
 O1 is **LANDED**. The kept completed run at
 `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/round4/refused/oracle_o1_orca2_sas_ice_admission_refused_20261024T161410Z_1010784`
 was re-admitted with `--admit-existing`; NEMO was not rebuilt or rerun. Admission
-was pinned to producer commit `4fefbe7cba0afbc76f26bc94a744b5650b26285f`,
+was pinned to producer commit `4fefbe7cba0afbc76f26bc94a744b5650b26285f`, which was a pre-rebase commit and is no longer reachable (Amendment, 2026-10-29 provenance audit),
 the recorded inputs, and both recorded executable digests. The repaired gate is
 intentionally newer than the producer (`gate_changed_since_run=true`).
 
@@ -91,7 +91,7 @@ receipt citation gate and private-import ratchet pass.
 
 Run only after the two `nvidia-smi` queries show an idle device; replace
 `<idle-gpu-index>` without changing any scientific option:
-
+Amendment (2026-10-29 provenance audit): the `--expect-commit` value below was a pre-rebase commit and is no longer reachable.
 ```bash
 nvidia-smi --query-gpu=index,memory.used,utilization.gpu --format=csv
 nvidia-smi --query-compute-apps=pid,used_memory --format=csv

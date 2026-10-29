@@ -326,7 +326,7 @@ certified path imports six symbols from `barotropic_common`, not four, and my
 line-grep could not see the two deferred imports; and `make_none_physics_fn`
 IS on the certified path, so `main` does have one edited line a certified card
 executes. It also proved the merge stronger than I had: `git merge-tree
---write-tree 4646a680e 87144e259` yields `74004f5e401f30e97bb12e60a2922af983f6ee21`,
+--write-tree 4646a680e 87144e259` yields `74004f5e401f30e97bb12e60a2922af983f6ee21` (Amendment, 2026-10-29 provenance audit: this is a Git tree SHA, not a commit SHA; `git cat-file -e` resolves it),
 identical to `d8f908a41^{tree}` over the WHOLE tree, not only `packages/`.
 
 **Reviewer 2, on the PR body's claims against the receipts: SHIP WITH FIXES**
