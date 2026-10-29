@@ -3836,6 +3836,33 @@ def test_bechtold_capdcycl_and_land_rhebc_round_trip():
         assert back.bechtold_use_ifs_land_rhebc is flag
 
 
+
+def test_bechtold_ifs_ascent_and_shallow_nosupply_round_trip():
+    from legoesm.driver.config import ExperimentConfig
+    from legoesm.driver.physics_pipeline import _resolve_convection
+    parser = build_arg_parser()
+    d = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--convection", "bechtold"]), parser))
+    assert d.bechtold_use_ifs_ascent is False
+    assert d.bechtold_ifs_shallow_nosupply == "zero"
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--convection", "bechtold",
+        "--bechtold-use-ifs-ascent",
+        "--bechtold-ifs-shallow-nosupply", "first_guess"]), parser))
+    cc = _resolve_convection(cfg)[1]
+    assert cc.use_ifs_ascent is True and cc.ifs_shallow_nosupply == "first_guess"
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--bechtold-ifs-shallow-nosupply", "typo"])
+    for flag, mode in ((True, "first_guess"), (False, "zero")):
+        e = ExperimentConfig(convection="bechtold", bechtold_use_ifs_ascent=flag,
+                             bechtold_ifs_shallow_nosupply=mode)
+        back = ExperimentConfig.from_amip_config(e.to_amip_config())
+        assert back.bechtold_use_ifs_ascent is flag
+        assert back.bechtold_ifs_shallow_nosupply == mode
+    bad = ExperimentConfig(convection="bechtold", bechtold_ifs_shallow_nosupply="typo")
+    with pytest.raises(ValueError, match="bechtold_ifs_shallow_nosupply"):
+        bad.validate_strict()
+
 def test_bechtold_use_ifs_snow_melt_round_trip():
     from legoesm.driver.config import ExperimentConfig
     from legoesm.driver.physics_pipeline import _resolve_convection
