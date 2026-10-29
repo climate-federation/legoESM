@@ -349,8 +349,9 @@ class TestSundqvist:
 
     def test_autoconversion_does_not_drive_qc_negative(self):
         """With dt large enough that auto_rate·dt > 1, an explicit Euler
-        step on q_c must NOT drive q_c below zero.  Default
-        ``auto_rate = 1e-3`` and ``dt = 1800 s`` give ``auto_rate·dt = 1.8``;
+        step on q_c must NOT drive q_c below zero.  ``auto_rate = 1e-3``
+        (set explicitly: the GFS default 1.5e-4 gives only 0.27) and
+        ``dt = 1800 s`` give ``auto_rate·dt = 1.8``;
         without the donor clamp added in clean_physics iter-22, the
         autoconversion sink would exceed available ``q_c`` and the
         explicit update ``q_c + dt·dq_c_dt`` would go negative."""
@@ -367,7 +368,9 @@ class TestSundqvist:
         q_c = jnp.full_like(T, 1.0e-4)
         h = h._replace(q_c=q_c)
         dt = 1800.0  # 30-min step → auto_rate·dt = 1.8
-        out = sundqvist_microphysics(T, q_v, h, p_full, p_half, rho, dz, dt=dt, cell_area=1.0e10)
+        out = sundqvist_microphysics(T, q_v, h, p_full, p_half, rho, dz, dt=dt,
+                                     config=SundqvistConfig(auto_rate=1.0e-3),
+                                     cell_area=1.0e10)
         q_c_new = q_c + dt * out.dq_c_dt
         # Positivity must hold for any explicit Euler step
         assert jnp.all(q_c_new >= -1.0e-12)
