@@ -10063,6 +10063,8 @@ CITATION_MAP = {
         5],
     'ORCA2_STANDALONE_IIF_OMIP_L4_R342S4Y/BLD/ppsrc/nemo/restart.f90:291-296,311-316': [
         "!*  Read Kbb fields   (NB: in RK3 Kmm = Kbb = Nbb)",
+        "CALL iom_get( numror, jpdom_auto, 'sn'   , ts(:,:,:,jp_sal,Kbb) )",
+        "uu(:,:,:  ,Kmm) = uu(:,:,:  ,Kbb)",
         "vv_b(:,:,Kmm)   = vv_b(:,:,Kbb)",
         12],
     'ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/stprk3.f90:203':
