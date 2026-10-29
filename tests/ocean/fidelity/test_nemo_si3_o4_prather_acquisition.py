@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -79,7 +80,7 @@ def test_o4_shared_readset_registration_and_plant() -> None:
         derive_and_gate(PPSRC, "drop-sxice")
 
 
-def test_o4_patch_and_driver_are_read_only_preflight_tools() -> None:
+def test_o4_every_patch_applies_fuzz_zero_to_pristine_nemo(tmp_path: Path) -> None:
     source_root = Path("/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/src/ICE")
     groups = {
         "icedyn_adv_pra": ("icedyn_adv_pra_o4.patch", "icedyn_adv_pra_o4_use.patch", "icedyn_adv_pra_o4_capture.patch"),
@@ -88,8 +89,13 @@ def test_o4_patch_and_driver_are_read_only_preflight_tools() -> None:
     }
     for unit, patches in groups.items():
         for patch in patches:
-            subprocess.run(["patch", "--dry-run", "--batch", "--fuzz=0",
-                            str(source_root/f"{unit}.F90"), str(HERE/patch)], check=True)
+            pristine = tmp_path / f"{patch}.F90"
+            shutil.copyfile(source_root/f"{unit}.F90", pristine)
+            subprocess.run(["patch", "--batch", "--fuzz=0", str(pristine), str(HERE/patch)], check=True)
+            assert pristine.read_bytes() != (source_root/f"{unit}.F90").read_bytes()
+
+
+def test_o4_driver_is_a_read_only_preflight_tool() -> None:
     subprocess.run(["bash", "-n", str(HERE/"run.sh")], check=True)
     text = (HERE/"run.sh").read_text()
     assert "--preflight-only" in text and "write_manifest" in text

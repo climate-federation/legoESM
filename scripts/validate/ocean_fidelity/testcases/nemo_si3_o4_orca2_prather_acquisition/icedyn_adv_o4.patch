@@ -1,12 +1,15 @@
 --- icedyn_adv.F90
 +++ icedyn_adv.F90
-@@ -24,3 +24,6 @@
+@@ -24,6 +24,9 @@
     USE iom            ! I/O manager library
     USE lib_mpp        ! MPP library
     USE timing         ! Timing
 +   ! O4_OBSERVER_BEGIN
 +   USE o4_prather_writer, ONLY : o4_capture_adv
 +   ! O4_OBSERVER_END
+ 
+    IMPLICIT NONE
+    PRIVATE
 @@ -88,5 +91,11 @@
        CASE( np_advPRA )                ! PRATHER scheme        !
 +         ! O4_OBSERVER_BEGIN
