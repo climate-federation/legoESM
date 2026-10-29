@@ -216,8 +216,18 @@ def test_stub_pipeline_uses_byte_identical_executables(tmp_path: Path) -> None:
         "nemo_testcase_l4_orca2_round345_sst_ulp_acquisition/run.sh"
     )
     stub_root = tmp_path / "stub_round345"
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    timeout = fake_bin / "timeout"
+    timeout.write_text(
+        "#!/usr/bin/env bash\n"
+        "OMPI_COMM_WORLD_RANK=0 ./nemo && OMPI_COMM_WORLD_RANK=1 ./nemo\n",
+        encoding="utf-8",
+    )
+    timeout.chmod(0o755)
     env = dict(
         os.environ,
+        PATH=f"{fake_bin}:{os.environ['PATH']}",
         R345_CHECK_REPO_ROOT=str(repo),
         R345_REQUIRED_RAM_GIB="0",
         R345_REQUIRED_DISK_GIB="0",
