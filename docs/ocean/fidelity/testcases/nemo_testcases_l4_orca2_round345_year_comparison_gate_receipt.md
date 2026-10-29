@@ -94,6 +94,10 @@ round-345-specific pipeline above was therefore also exercised directly, but
 the committed default preflight remains fail-closed and must be run by the
 operator in the acquisition environment.
 
+The per-receipt citation gate passes its one citation with zero failures and
+its shifted-line plant refuses. The exact default ORCA2 landing battery passes
+155/155 in 1,104.74 seconds; the explicit private-import ratchet passes 6/6.
+
 ## Choices and review
 
 - ASKED: option-1 fixed bars; monthly 3x KE envelope with 1% floor; perturb the
