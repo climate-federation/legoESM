@@ -191,6 +191,12 @@ __param_spec__ = {
             "sort_sharpness": "numerics: RULE 5 smoothing sharpness of the DO 200 SMIN march (inf = oracle)",
             "rain_placement_sharpness": "numerics: RULE 5 smoothing sharpness of the per-level rain-placement drying weight (inf = oracle)",
             "rain_column_sharpness": "numerics: RULE 5 smoothing sharpness of the column rain residual and no-drying fallback (inf = oracle)",
+            "tlift_freeze_sharpness": "numerics: RULE 5 smoothing sharpness of the TLIFT warm/cold vapour-pressure switch (inf = oracle)",
+            "qsat_floor_sharpness": "numerics: RULE 5 smoothing sharpness of the 180 K QS floor (inf = oracle)",
+            "downdraft_evap_sharpness": "numerics: RULE 5 smoothing sharpness of the downdraught AFAC >= 0 floor (inf = oracle)",
+            "downdraft_dhdp_sharpness": "numerics: RULE 5 smoothing sharpness of the downdraught DHDP floor (inf = oracle)",
+            "downdraft_mp_sharpness": "numerics: RULE 5 smoothing sharpness of the downdraught QP mass-flux branches (inf = oracle)",
+            "downdraft_taper_band_sharpness": "numerics: RULE 5 smoothing sharpness of the downdraught 950 hPa taper band (inf = oracle)",
         },
         "params": {
             "alpha_closure": {"units": "1", "bounds": (0.05, 0.6), "tunable_tier": 1, "transform": "sigmoid", "category": "cape_closure", "reference": "Emanuel (1991) CONVECT v4.3c ALPHA", "shape": None},
@@ -1164,6 +1170,18 @@ class EmanuelConfig(NamedTuple):
     # [m^2 s/kg]; C1 ramps exactly 0 below 0 and exact above 1/sharpness.
     rain_placement_sharpness: float = 1.0e9
     rain_column_sharpness: float = 1.0e5
+    # TLIFT warm/cold vapour-pressure switch at 0 C (a ~0.7 % jump) [1/K].
+    tlift_freeze_sharpness: float = 1.0
+    # 180 K floor of the host QS [1/K] (never binds on atmospheric columns).
+    qsat_floor_sharpness: float = 1.0
+    # Downdraught (``_emanuel_downdraft``): MAX(AFAC, 0) [1] (C1 ramp);
+    # MAX(DHDP, downdraft_dhdp_min) [hPa kg/J] (softplus); the MP(I) > MP(I+1)
+    # and MP(I+1) > 0 QP branches [m^2 s/kg] (C1 strict indicators); the
+    # P > 0.949 P(1) taper band's value blend [1/Pa].
+    downdraft_evap_sharpness: float = 1.0e7
+    downdraft_dhdp_sharpness: float = 10.0
+    downdraft_mp_sharpness: float = 1.0e4
+    downdraft_taper_band_sharpness: float = 1.0e-2
     # NOTE: Emanuel deliberately has NO ``subsidence_solve`` selector, unlike
     # the rest of the mass-flux family.  Its SHIPPED path
     # (``use_genuine_mixing=True``) is a buoyancy-sorting MIXING MATRIX that

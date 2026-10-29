@@ -45,8 +45,9 @@ picks: discrete here as in the oracle (``argmax`` / ``take_along_axis``),
 gradients flow through the gathered values, and the two index rejection
 gates (``IHMIN = NL-1``, ``ICB >= NL-1``) stay hard.  Every switch on traced
 state is smooth, its sharpness an :class:`EmanuelConfig` field whose
-``math.inf`` value (``1e3``/``1e12`` for the five older sigmoid fields) is
-the oracle exactly:
+``math.inf`` value (``1e3``/``1e12`` for the five older sigmoid fields) makes
+that switch the oracle's (to <= 1 ulp: e.g. ``ANUM*(1/D)`` for ``ANUM/D``);
+all of them at those values reproduce the oracle (<= 1e-10):
 
 * ``level_window_sharpness`` -- the ``ICB``/``INB`` level windows, evaluated at
   half-integer offsets (``sigmoid(s*(level - ICB + 1/2))``) so they tend to
@@ -57,7 +58,8 @@ the oracle exactly:
 * ``lcl_pressure_sharpness`` -- the sub-cloud ``DTPBL`` layer above ``NK``;
 * ``source_temperature_gate_sharpness``, ``source_humidity_gate_sharpness``,
   ``plcl_gate_sharpness`` -- the IFLAG 0/2 rejections ``T(NK) < 250 K``,
-  ``Q(NK) <= 0``, ``PLCL`` outside [200, 2000) hPa (weights on CBMF);
+  ``Q(NK) <= 0``, ``PLCL`` outside [200, 2000) hPa (weights on CBMF); the
+  humidity field also smooths the ``RH = 1`` guard for ``Q(NK) <= 0``;
 * ``stable_exit_sharpness``, ``cold_start_sharpness`` -- the cold-start
   stable exit (``TVP(ICB) <= TV(ICB) - DTMAX`` and ``CBMF = 0``, the latter as
   ``exp(-s*CBMF_old)``);
@@ -68,7 +70,9 @@ the oracle exactly:
 * ``scrit_floor_sharpness`` -- ``MAX(SCRIT, 0)``;
 * ``frac_sharpness``, ``defrac_floor_sharpness`` -- the ``FRAC`` clip and its
   ``MAX(.., 0.001)`` denominator;
-* ``tlift_floor_sharpness`` -- TLIFT's ``MAX(TG, 35)``;
+* ``tlift_floor_sharpness``, ``tlift_freeze_sharpness`` -- TLIFT's
+  ``MAX(TG, 35)`` and its warm/cold vapour-pressure switch at 0 C;
+* ``qsat_floor_sharpness`` -- the 180 K floor of the host ``QS``;
 * ``denom_floor_sharpness`` -- the ``ABS(DENOM) < 0.01`` floors, blended in
   the reciprocal (see :func:`_floor_recip`);
 * ``nent_count_sharpness``, ``bsum_sharpness`` -- the ``NENT = 0`` /
@@ -81,9 +85,11 @@ KNOWN DIFFERENCE: at the default sharpnesses the port does not reproduce the
 oracle; the per-column gap (FT, FQ, CBMF) is pinned in
 ``tests/atmosphere/oracle_fixtures/emanuel_convect43c_default_gaps.json``.
 Setting every field above to its hard value recovers the oracle (<= 1e-10).
-Invariants the smoothing breaks: a column the oracle rejects, or that sits
-stably at the cold start, carries a small positive CBMF and so small nonzero
-tendencies (the softplus CBMF never reaches exactly 0); ``CLW``/``ELIJ``/
+Invariants the smoothing breaks: a column the oracle rejects on a STATE gate
+(IFLAG 0 temperature/humidity, IFLAG 2, the stable exit) carries a small
+positive CBMF and so small nonzero tendencies (softplus CBMF and sigmoid
+weights; in fp32 a weight can underflow to exactly 0); the index gates
+still give exactly 0; ``CLW``/``ELIJ``/
 ``AWAT`` carry a softplus offset of up to ``ln2/condensate_sharpness``
 (7e-7 kg/kg) where the oracle has exactly 0.  The ENTS enthalpy closure
 still holds exactly; column water closes exactly where the column's net
@@ -91,11 +97,13 @@ vapour loss is >= ``1/rain_column_sharpness`` and the rain falls short by
 at most ``4/(27 rain_column_sharpness)`` below that (see
 :func:`legoesm.core.smooth.positive_part_c1`, used by :mod:`.emanuel`).
 
-Kept hard, as division/NaN guards on values that never select a branch on
-an atmospheric column: ``MAX(CLW, 1e-8)`` in ``EP``; ``RH = 1`` for
-``Q(NK) <= 0`` (avoids ``0**chi``; that column's CBMF weight is ~0); the
-non-negativity of the running ``M`` sum above a level (rounding only); the
-``DPINV`` and ``DTPBL`` denominator floors.
+Kept hard: the index picks above and their consequences -- ``CAPEM`` and
+``BYP`` are gathered at the last level of positive running CAPE, so they
+jump when that level jumps (same class as ``INB``); and, as division guards
+on values that never select a branch on an atmospheric column,
+``MAX(CLW, 1e-8)`` in ``EP``, the non-negativity of the running ``M`` sum
+above a level (rounding only), and the ``DPINV`` and ``DTPBL`` denominator
+floors.
 
 Conventions
 -----------
@@ -239,37 +247,44 @@ class EmanuelMixingOutput(NamedTuple):
     frac: jax.Array = None      # FRAC, (ncol,)
 
 
-def _oracle_qsat(T, p):
+def _oracle_qsat(T, p, floor_sharpness=math.inf):
     """Saturation specific humidity [kg/kg], ``eps*es/(p - es*(1-eps))``.
 
     This is the host-supplied ``QS`` CONVECT takes as an input (the warm
     Tetens curve of :func:`legoesm.thermo.saturation_vapor_pressure`); the
-    oracle fixture was produced with the same ``QS``.  The 180 K floor and the
+    oracle fixture was produced with the same ``QS`` (``floor_sharpness =
+    inf``; the scheme passes ``EmanuelConfig.qsat_floor_sharpness``).  The
+    180 K floor (softplus at finite ``floor_sharpness`` [1/K]) and the
     softplus on the denominator are AD guards that do not act on atmospheric
     columns.
     """
     eps = constants.epsilon
-    T_safe = jnp.maximum(T, _TETENS_MIN_VALID_K)
+    T_safe = _smax(T, _TETENS_MIN_VALID_K, floor_sharpness)
     es = saturation_vapor_pressure(T_safe)
     denom = jax.nn.softplus(p - es * (1.0 - eps) - 1.0) + 1.0
     return eps * es / denom
 
 
-def _tlift_es_hpa(tg):
+def _tlift_es_hpa(tg, freeze_sharpness):
     """TLIFT vapour pressure [hPa] (convect43c.f l.1058-1065): warm Tetens for
-    ``TC >= 0``, the oracle's cold-branch fit below."""
+    ``TC >= 0``, the oracle's cold-branch fit below.  The two curves differ by
+    ~0.7 % at 0 C, so the switch is a jump: blended by a sigmoid of sharpness
+    ``freeze_sharpness`` [1/K] (``inf`` = the oracle's switch)."""
     es_warm = saturation_vapor_pressure(tg) * _HPA_PER_PA
     es_cold = jnp.exp(
         _TLIFT_ES_COLD_A - _TLIFT_ES_COLD_B / tg + _TLIFT_ES_COLD_C * jnp.log(tg))
-    return jnp.where(tg - constants.T_freeze >= 0.0, es_warm, es_cold)
+    w = sigmoid_switch(tg - constants.T_freeze, freeze_sharpness)
+    return _blend(w, es_warm, es_cold, freeze_sharpness)
 
 
-def _tlift_moist(T, qs, p_hpa, gz, T_nk, q_nk, gz_nk, *, c_l, tlift_floor_sharpness):
+def _tlift_moist(T, qs, p_hpa, gz, T_nk, q_nk, gz_nk, *, c_l, tlift_floor_sharpness,
+                 tlift_freeze_sharpness):
     """TLIFT saturated-parcel branch at every level (convect43c.f l.1042-1073).
 
     Returns ``(TPK, QG)``.  ``S`` and ``ALV`` use the ENVIRONMENT ``T(I)``;
     ``QG`` starts from the host ``QS(I)``; two Newton steps.  The oracle's
-    ``MAX(TG, 35)`` is smoothed by ``tlift_floor_sharpness`` [1/K].
+    ``MAX(TG, 35)`` is smoothed by ``tlift_floor_sharpness`` [1/K], its
+    warm/cold vapour-pressure switch by ``tlift_freeze_sharpness`` [1/K].
     """
     cpd = constants.c_pd
     rv = constants.R_v
@@ -284,7 +299,7 @@ def _tlift_moist(T, qs, p_hpa, gz, T_nk, q_nk, gz_nk, *, c_l, tlift_floor_sharpn
         s = 1.0 / (cpd + alv * alv * qg / (rv * T * T))
         ahg = cpd * tg + (c_l - cpd) * q_nk * T + alv * qg + gz
         tg = _smax(tg + s * (ah0 - ahg), _TLIFT_TG_FLOOR_K, tlift_floor_sharpness)
-        es = _tlift_es_hpa(tg)
+        es = _tlift_es_hpa(tg, tlift_freeze_sharpness)
         qg = eps * es / (p_hpa - es * (1.0 - eps))
     tpk = (ah0 - (c_l - cpd) * q_nk * T - gz - alv * qg) / cpd
     return tpk, qg
@@ -397,6 +412,8 @@ def emanuel_mixing_tendencies(
     bsum_sharpness: float,
     asij_floor_sharpness: float,
     sort_sharpness: float,
+    tlift_freeze_sharpness: float,
+    qsat_floor_sharpness: float,
     strict_index_sharpness: float = _STRICT_INDEX_SHARPNESS,
     epmax: float = _EPMAX_DEFAULT,
 ) -> EmanuelMixingOutput:
@@ -436,7 +453,7 @@ def emanuel_mixing_tendencies(
     qf = q_v[:, ::-1]
     pf = p_full[:, ::-1] * _HPA_PER_PA
     phf = p_half[:, ::-1] * _HPA_PER_PA             # (ncol, nlev+1), PH(1)=sfc
-    qs = _oracle_qsat(T, p_full)[:, ::-1]
+    qs = _oracle_qsat(T, p_full, qsat_floor_sharpness)[:, ::-1]
     idx = jnp.arange(nlev)
     lvl = idx.astype(dtype)[None, :]
     dph = phf[:, :-1] - phf[:, 1:]                  # PH(I)-PH(I+1) > 0 [hPa]
@@ -469,8 +486,12 @@ def emanuel_mixing_tendencies(
               * (1.0 - sigmoid_switch(-q_nk, source_humidity_gate_sharpness)))
 
     # ---- LCL (l.392-394) and ICB (l.402-408) -------------------------------
-    rh = q_nk / _at(qs, nk)
-    rh = jnp.where(q_nk > 0.0, rh, 1.0)             # IFLAG-0 column: avoid 0**chi
+    if _hard(source_humidity_gate_sharpness):
+        rh = jnp.where(q_nk > 0.0, q_nk / _at(qs, nk), 1.0)   # IFLAG-0: avoid 0**chi
+    else:
+        # Softplus keeps RH > 0, so RH**chi and its derivative stay finite; the
+        # Q(NK) <= 0 column is rejected by the same field's CBMF weight.
+        rh = smooth_relu(q_nk, source_humidity_gate_sharpness) / _at(qs, nk)
     chi = T_nk / (_EMANUEL_CHI_A - _EMANUEL_CHI_B * rh - T_nk)
     plcl = _at(pf, nk) * rh ** chi
     # IFLAG 2 (l.395): PLCL < 200 or >= 2000 hPa, smoothed [1/Pa].
@@ -483,7 +504,8 @@ def emanuel_mixing_tendencies(
     # ---- TLIFT (KK=1 and KK=2) ---------------------------------------------
     tpk_m, qg = _tlift_moist(Tf, qs, pf, gz, T_nk[:, None], q_nk[:, None],
                              gz_nk[:, None], c_l=c_l,
-                             tlift_floor_sharpness=tlift_floor_sharpness)
+                             tlift_floor_sharpness=tlift_floor_sharpness,
+                             tlift_freeze_sharpness=tlift_freeze_sharpness)
     q_nk2 = q_nk[:, None]
     cpp = cpd * (1.0 - q_nk2) + q_nk2 * cpv
     tpk_d = T_nk[:, None] - (gz - gz_nk[:, None]) / cpp
@@ -685,11 +707,12 @@ def emanuel_mixing_tendencies(
     has_ent = ((nent > 0).astype(dtype) if _hard(nent_count_sharpness)
                else sigmoid_switch(nent_soft - 0.5, nent_count_sharpness))
     w_local = 1.0 - has_ent * sigmoid_switch(bsum - _BSUM_MIN, bsum_sharpness)
+    # Blended on the diagonal; with both fields at inf, wl is exactly 0/1 and
+    # the blend is the oracle's assignment.
     wl = jnp.where(eye, w_local[:, :, None], 0.0)
-    hard_local = _hard(nent_count_sharpness) and _hard(bsum_sharpness)
     MENT = MENT + wl * m_i[:, :, None]
-    QENT = _blend(wl, QTI, QENT, math.inf if hard_local else 1.0)
-    ELIJ = _blend(wl, clw[:, :, None], ELIJ, math.inf if hard_local else 1.0)
+    QENT = wl * QTI + (1.0 - wl) * QENT
+    ELIJ = wl * clw[:, :, None] + (1.0 - wl) * ELIJ
 
     # ---- tendencies (DO 410-500, mixing terms) -----------------------------
     m_above = jnp.maximum(jnp.cumsum(m_i[:, ::-1], axis=-1)[:, ::-1] - m_i, 0.0)

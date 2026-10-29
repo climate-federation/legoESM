@@ -144,6 +144,11 @@ _MIXING_SHARPNESS_FIELDS = (
     "scrit_floor_sharpness", "frac_sharpness", "defrac_floor_sharpness",
     "tlift_floor_sharpness", "denom_floor_sharpness", "nent_count_sharpness",
     "bsum_sharpness", "asij_floor_sharpness", "sort_sharpness",
+    "tlift_freeze_sharpness", "qsat_floor_sharpness",
+)
+_DOWNDRAFT_SHARPNESS_FIELDS = (
+    "downdraft_evap_sharpness", "downdraft_dhdp_sharpness",
+    "downdraft_mp_sharpness", "downdraft_taper_band_sharpness",
 )
 
 
@@ -161,8 +166,8 @@ def _check_smoothing_fields(config: EmanuelConfig) -> None:
             f"EmanuelConfig.denom_floor_sharpness={s!r} with denom_floor={f!r}: "
             "the reciprocal blend needs sharpness*floor >= 120 (else 1/DENOM is "
             "formed near DENOM = 0); use math.inf for the oracle's hard floor.")
-    for name in _MIXING_SHARPNESS_FIELDS + ("rain_placement_sharpness",
-                                            "rain_column_sharpness"):
+    for name in _MIXING_SHARPNESS_FIELDS + _DOWNDRAFT_SHARPNESS_FIELDS + (
+            "rain_placement_sharpness", "rain_column_sharpness"):
         v = getattr(config, name)
         if _is_concrete(v) and np.any(~(np.asarray(v) > 0.0)):
             raise ValueError(f"EmanuelConfig.{name}={v!r}: must be > 0 (math.inf = oracle).")
@@ -322,6 +327,10 @@ def emanuel_convection(
             ep_gate_threshold=config.downdraft_ep_gate_threshold,
             ep_gate_width=config.downdraft_ep_gate_width,
             condensate_sharpness=config.condensate_sharpness,
+            evap_sharpness=config.downdraft_evap_sharpness,
+            dhdp_sharpness=config.downdraft_dhdp_sharpness,
+            mp_sharpness=config.downdraft_mp_sharpness,
+            taper_band_sharpness=config.downdraft_taper_band_sharpness,
         )
         ft = ft + downdraft.dT_dt
         fq = fq + downdraft.dq_v_dt
@@ -342,8 +351,10 @@ def emanuel_convection(
     # pipeline), distributed by the column drying weight.  No heating
     # accompanies it: the latent heat is already in FT.
     # RULE 5: the positive parts are C1 ramps, exactly 0 below 0 and exact
-    # above 1/sharpness (positive_part_c1), so nothing rains from a
-    # moistening level or column.
+    # above 1/sharpness (positive_part_c1): a moistening level gets no drying
+    # weight and a moistening column no rain.  Only the no-drying fallback
+    # below spreads rain uniformly (moistening levels included), as the hard
+    # code does at zero column drying.
     net_water = jnp.sum(dq_v_dt * dp, axis=-1) / constants.g
     drying = positive_part_c1(-dq_v_dt, config.rain_placement_sharpness)
     drying_col = jnp.sum(drying * dp, axis=-1) / constants.g

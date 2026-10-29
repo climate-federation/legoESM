@@ -55,6 +55,9 @@ RULE5_FIELDS = (
     "tlift_floor_sharpness", "denom_floor_sharpness", "nent_count_sharpness",
     "bsum_sharpness", "asij_floor_sharpness", "sort_sharpness",
     "rain_placement_sharpness", "rain_column_sharpness",
+    "tlift_freeze_sharpness", "qsat_floor_sharpness",
+    "downdraft_evap_sharpness", "downdraft_dhdp_sharpness",
+    "downdraft_mp_sharpness", "downdraft_taper_band_sharpness",
 )
 HARD = dict(
     level_window_sharpness=1.0e3,
