@@ -82,6 +82,10 @@ Acquisition command:
   managed sandbox refused PMIx listener socket creation (`errno=1`, rc 213).
   It did not start NEMO. The operator must run the same default preflight outside
   this socket-restricted sandbox before `--run`.
+- Round-345 per-receipt citation gate: **PASS**, 2 citations, 0 failures, 0
+  unmapped citations, and all 9 self-tests fired. Campaign-default citation
+  gate: **PASS**. Standalone citation-gate tests: **20 / 20 PASS** with
+  `JAX_ENABLE_X64=1`.
 
 ## Choices and review
 
