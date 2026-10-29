@@ -132,11 +132,9 @@ stage_arm() {
     if [[ -n "${PLANT_STUB_SHORT_TIMESTEP}" ]]; then
       extra_flags+=("--plant-stub-short-timestep" "${PLANT_STUB_SHORT_TIMESTEP}")
     fi
-    local control_flag=""
-    if [[ "${arm_kind}" == "control" ]]; then control_flag="--stub-control"; fi
     cat > "${arm_dir}/nemo" <<EOF
 #!/usr/bin/env bash
-exec "${PYTHON_BIN}" "${GATE_PY}" --act-as-nemo-binary ${control_flag} ${extra_flags[*]:-}
+exec "${PYTHON_BIN}" "${GATE_PY}" --act-as-nemo-binary ${extra_flags[*]:-}
 EOF
     chmod +x "${arm_dir}/nemo"
   else
