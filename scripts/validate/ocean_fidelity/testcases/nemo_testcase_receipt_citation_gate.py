@@ -11275,13 +11275,13 @@ FILES.update({
     'tests/ocean/fidelity/test_nemo_si3_o4_prather_acquisition.py': REPO / 'tests/ocean/fidelity/test_nemo_si3_o4_prather_acquisition.py',
 })
 CITATION_MAP.update({
-    'docs/ice/fidelity/si3_r25_o4_acquisition_preregister.md:1-131': ['# SI3 Ladder Round 25 (`si3_r25`) Preregistration — O4 Prather Acquisition and Exact-Input Score', 'record contract.', 131],
+    'docs/ice/fidelity/si3_r25_o4_acquisition_preregister.md:1-132': ['# SI3 Ladder Round 25 (`si3_r25`) Preregistration — O4 Prather Acquisition and Exact-Input Score', 'record contract.', 132],
     'scripts/validate/ocean_fidelity/orca2_l4/nemo_acquisition_extents.py:309-350': ['def validate_writer(', ('    }', 5), 42],
-    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o4_orca2_prather_gate.py:68-239': ['def read_record(path: str | Path, plant: str | None = None) -> dict[str, Any]:', '    return {"status": "PASS", "criterion": "every exit, seam, and fold cell == 0 ULP", "scores": scores}', 172],
-    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o4_orca2_prather_passivity.py:26-98': ['def census(build: Path = BUILD, toolchain: Path = TOOLCHAIN) -> dict[str, object]:', 'if __name__=="__main__": raise SystemExit(main())', 73],
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o4_orca2_prather_gate.py:71-242': ['def read_record(path: str | Path, plant: str | None = None) -> dict[str, Any]:', '    return {"status": "PASS", "criterion": "every exit, seam, and fold cell == 0 ULP", "scores": scores}', 172],
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o4_orca2_prather_passivity.py:26-109': ['def _canonical(rows: dict[str, dict[str, int]]) -> dict[str, dict[str, int]]:', '                "pass":total>0 and not diffs and plant_fired and same_program_source_body}', 84],
     'scripts/validate/ocean_fidelity/testcases/nemo_si3_o4_orca2_prather_readset.py:21-71': ['def derive_and_gate(ppsrc: Path = DEFAULT_PPSRC, plant: str | None = None) -> dict[str, object]:', 'if __name__=="__main__": raise SystemExit(main())', 51],
-    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o4_orca2_prather_acquisition/run.sh:1-156': ['#!/usr/bin/env bash', 'admit "$active"; active=""', 156],
-    'tests/ocean/fidelity/test_nemo_si3_o4_prather_acquisition.py:1-67': ['from __future__ import annotations', '    assert "--preflight-only" in text and "manifest_before_run" in text', 67],
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o4_orca2_prather_acquisition/run.sh:286-456': ['move_builds_aside() {', 'admit "$COMMIT"; ACTIVE_RUN=""', 171],
+    'tests/ocean/fidelity/test_nemo_si3_o4_prather_acquisition.py:1-85': ['from __future__ import annotations', '    assert "run.user.stdout.log" in text and "run.user.stderr.log" in text', 85],
 })
 # --- SI3 round 22 (O13 exact ITD remap); appended for merge isolation ---
 FILES.update({

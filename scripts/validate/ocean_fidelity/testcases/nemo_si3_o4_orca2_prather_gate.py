@@ -6,6 +6,8 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -44,6 +46,7 @@ KINDS = {1: GRID, 2: STATE, 3: MOMENTS, 4: (), 5: STATE, 6: MOMENTS}
 # Used by the shared static read-set gate.  Entry kinds are 1--4; kinds 5--6
 # are outputs and therefore cannot justify a production read.
 PROJECTIONS = {(kind, name): name.replace(".", "_") for kind in KINDS for name in KINDS[kind]}
+REPO_ROOT = Path(__file__).resolve().parents[4]
 
 
 def _refuse(message: str) -> ValueError:
@@ -239,12 +242,134 @@ def score_deck(root: str | Path, plant: str | None = None) -> dict[str, Any]:
     return {"status": "PASS", "criterion": "every exit, seam, and fold cell == 0 ULP", "scores": scores}
 
 
+def _sha(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _relative(root: Path, raw: str, label: str) -> Path:
+    path = Path(raw)
+    if path.is_absolute() or ".." in path.parts:
+        raise _refuse(f"{label} path is not relative: {raw}")
+    resolved = (root / path).resolve()
+    try:
+        resolved.relative_to(root.resolve())
+    except ValueError as exc:
+        raise _refuse(f"{label} path escapes evidence: {raw}") from exc
+    return resolved
+
+
+def admit_evidence(root: str | Path, expect_commit: str | None = None,
+                   plant: str | None = None) -> dict[str, Any]:
+    """Admit a completed reference/record pair against its pre-run manifest."""
+    root = Path(root)
+    manifest_path = root / "manifest/run_manifest.json"
+    if not manifest_path.is_file():
+        raise _refuse("missing pre-run manifest")
+    manifest = json.loads(manifest_path.read_text())
+    required = {"producer_commit", "binary_sha256", "binary_paths", "source_sha256",
+                "deck_sha256", "input_sha256", "planned_records", "steps", "ranks"}
+    if required - set(manifest):
+        raise _refuse(f"manifest missing keys {sorted(required-set(manifest))}")
+    producer = str(manifest["producer_commit"])
+    if plant == "producer":
+        producer = "0" * 40
+    if expect_commit is not None and producer != expect_commit:
+        raise _refuse(f"producer commit mismatch: {producer} != {expect_commit}")
+    try:
+        subprocess.run(["git", "-C", str(REPO_ROOT), "cat-file", "-e", f"{producer}^{{commit}}"],
+                       check=True, capture_output=True)
+    except subprocess.SubprocessError as exc:
+        raise _refuse(f"producer commit is unavailable: {producer}") from exc
+    for label, raw in manifest["binary_paths"].items():
+        path = _relative(root, raw, f"binary {label}")
+        if not path.is_file():
+            raise _refuse(f"missing retained {label} binary")
+        want = manifest["binary_sha256"].get(label)
+        if plant == "binary" and label == sorted(manifest["binary_paths"])[0]:
+            want = "0" * 64
+        if _sha(path) != want:
+            raise _refuse(f"retained {label} binary digest mismatch")
+    fixture = bool(manifest.get("fixture", False)) and os.environ.get("O4_DRIVER_FIXTURE_ACTIVE") == "1"
+    for raw, want in manifest["source_sha256"].items():
+        if Path(raw).is_absolute() or ".." in Path(raw).parts:
+            raise _refuse(f"source path is not repository-relative: {raw}")
+        if fixture:
+            got = _sha(REPO_ROOT / raw)
+        else:
+            try:
+                blob = subprocess.check_output(["git", "-C", str(REPO_ROOT), "show", f"{producer}:{raw}"])
+            except subprocess.SubprocessError as exc:
+                raise _refuse(f"source is not pinned by producer commit: {raw}") from exc
+            got = hashlib.sha256(blob).hexdigest()
+        if got != want:
+            raise _refuse(f"producer source digest mismatch: {raw}")
+    for section in ("deck_sha256", "input_sha256"):
+        for raw, want in manifest[section].items():
+            path = _relative(root, raw, section)
+            if not path.is_file() or _sha(path) != want:
+                raise _refuse(f"{section} digest mismatch: {raw}")
+    if plant == "missing-complete" or not (root / "RUN_COMPLETE").is_file():
+        raise _refuse("missing acquisition RUN_COMPLETE")
+    for lane in ("reference_2step", "record_2step"):
+        run = root / lane
+        for name in ("ocean.output", "run.user.stdout.log", "run.user.stderr.log",
+                     "run.user.time.log", "RUN_COMPLETE"):
+            if not (run / name).is_file():
+                raise _refuse(f"missing {lane}/{name}")
+        joined = (run / "ocean.output").read_text(errors="replace") + "\n" + \
+                 (run / "run.user.stdout.log").read_text(errors="replace") + "\n" + \
+                 (run / "run.user.stderr.log").read_text(errors="replace")
+        if plant == "error-log" and lane == "record_2step":
+            joined += "\nE R R O R planted"
+        if __import__("re").search(r"E\s+R\s+R\s+O\s+R|ABORT|STOP\s+[1-9]", joined, __import__("re").I):
+            raise _refuse(f"fatal NEMO token in {lane}")
+        if "STOP 0" not in joined or "MPIRUN_RC=0" not in (run / "run.user.time.log").read_text():
+            raise _refuse(f"{lane} lacks STOP 0 / successful launcher status")
+    ref_restarts = sorted((root / "reference_2step").glob("ORCA2_SAS_00000002_restart*.nc"))
+    rec_restarts = sorted((root / "record_2step").glob("ORCA2_SAS_00000002_restart*.nc"))
+    if not ref_restarts or [p.name for p in ref_restarts] != [p.name for p in rec_restarts]:
+        raise _refuse("reference/record restart sets differ")
+    for ref, rec in zip(ref_restarts, rec_restarts, strict=True):
+        if plant == "restart" and rec.name.endswith("restart_ice.nc"):
+            raise _refuse("observer changed planted ice restart")
+        if ref.read_bytes() != rec.read_bytes():
+            raise _refuse(f"observer changed restart bytes: {ref.name}")
+    records = root / "record_2step/o4_prather_records"
+    expected = set(manifest["planned_records"])
+    actual = {p.name for p in records.glob("*.bin")}
+    if plant == "missing-frame" and actual:
+        actual.remove(sorted(actual)[0])
+    if actual != expected:
+        raise _refuse(f"record set mismatch: missing={sorted(expected-actual)} extra={sorted(actual-expected)}")
+    score_plant = "one-bit" if plant == "wet-1ulp" else None
+    score = score_deck(records, score_plant)
+    checksums = root / "manifest/artifacts.sha256"
+    if not checksums.is_file():
+        raise _refuse("missing artifact checksum list")
+    for line in checksums.read_text().splitlines():
+        want, raw = line.split(None, 1)
+        path = _relative(root, raw.strip(), "checksum")
+        if not path.is_file() or _sha(path) != ("0" * 64 if plant == "checksum" else want):
+            raise _refuse(f"artifact checksum mismatch: {raw.strip()}")
+    return {"status": "PASS_O4_ADMISSION", "producer_commit": producer,
+            "records": len(actual), "restarts": [p.name for p in ref_restarts], "score": score}
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("records", type=Path)
-    parser.add_argument("--plant", choices=("header", "truncation", "step", "one-bit", "invert-sweep", "wrong-fold-sign", "omit-subcycle-lbc"))
+    parser.add_argument("records", type=Path, nargs="?")
+    parser.add_argument("--admit-evidence", type=Path)
+    parser.add_argument("--expect-commit")
+    parser.add_argument("--plant", choices=("header", "truncation", "step", "one-bit", "invert-sweep", "wrong-fold-sign", "omit-subcycle-lbc",
+                                             "producer", "binary", "checksum", "missing-complete", "error-log", "restart", "missing-frame", "wet-1ulp"))
     args = parser.parse_args()
-    print(json.dumps(score_deck(args.records, args.plant), indent=2, sort_keys=True))
+    if args.admit_evidence:
+        result = admit_evidence(args.admit_evidence, args.expect_commit, args.plant)
+    elif args.records:
+        result = score_deck(args.records, args.plant)
+    else:
+        parser.error("records or --admit-evidence is required")
+    print(json.dumps(result, indent=2, sort_keys=True))
 
 
 if __name__ == "__main__":

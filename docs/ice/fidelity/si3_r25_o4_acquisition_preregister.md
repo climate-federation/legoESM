@@ -87,9 +87,10 @@ nonfinite values, wrong step/boundary, missing frames, absolute manifest paths,
 binary/producer drift, and a one-ULP change in a wet cell. The preflight creates
 every script that `--run` can execute, checks each with `bash -n`, and exercises
 success, refusal, retention, move-aside, and `--admit-existing` end to end with
-a stub executable. The stub emits only the two entry and two exit files named
-by the real observer list and derives payload values plus NEMO log/namelist
-outputs from the admitted O7 SAS record.
+a stub executable. The stub emits exactly the twelve files (six kinds at each
+of two steps) named by the real observer list. Its analytic zero-transport
+payload is independent of the production Prather path; its grid seed and
+NEMO log/namelist outputs derive from the admitted O7 SAS record.
 
 Falsifiers: each listed reader plant exits nonzero; a generated-script syntax
 error exits nonzero; a stub-only fabricated filename or namelist fails the

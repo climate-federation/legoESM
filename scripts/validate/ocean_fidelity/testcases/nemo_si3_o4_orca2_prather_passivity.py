@@ -23,6 +23,36 @@ BASE_ROUTINE = "__icedyn_adv_pra_MOD_ice_dyn_adv_pra"
 OBS_ROUTINE = "__icedyn_adv_pra_MOD_ice_dyn_adv_pra_physics"
 
 
+def _canonical(rows: dict[str, dict[str, int]]) -> dict[str, dict[str, int]]:
+    out: dict[str, dict[str, int]] = {}
+    for function, counts in rows.items():
+        name = re.sub(r"\.(?:constprop|isra)\.\d+", "", function)
+        target = out.setdefault(name, {})
+        for mnemonic, count in counts.items():
+            target[mnemonic] = target.get(mnemonic, 0) + count
+    return out
+
+
+def census_real_objects(reference: Path, record: Path, arch: Path) -> dict[str, object]:
+    """Compare the actual objects linked into the REF/REC executables."""
+    flags = _flags(arch.parent)
+    required = ("-O3", "-funroll-all-loops", "-fno-tree-vectorize")
+    missing = [flag for flag in required if flag not in flags]
+    a, b = _canonical(fp_counts(reference)), _canonical(fp_counts(record))
+    ref_counts, rec_counts = a.get(BASE_ROUTINE, {}), b.get(OBS_ROUTINE, {})
+    diff = {key: [ref_counts.get(key, 0), rec_counts.get(key, 0)]
+            for key in sorted(set(ref_counts) | set(rec_counts))
+            if ref_counts.get(key, 0) != rec_counts.get(key, 0)}
+    result = {"flags": flags, "required_flags_missing": missing,
+              "reference_object": str(reference), "record_object": str(record),
+              "reference_fp_total": sum(ref_counts.values()),
+              "record_fp_total": sum(rec_counts.values()),
+              "differing_mnemonics": diff,
+              "scope": "actual icedyn_adv_pra.o objects linked into retained binaries"}
+    result["pass"] = not missing and result["reference_fp_total"] > 0 and not diff
+    return result
+
+
 def census(build: Path = BUILD, toolchain: Path = TOOLCHAIN) -> dict[str, object]:
     flags = _flags(build)
     raw = NEMO / "src/ICE/icedyn_adv_pra.F90"
@@ -60,14 +90,7 @@ def census(build: Path = BUILD, toolchain: Path = TOOLCHAIN) -> dict[str, object
                            check=True,env=env,capture_output=True,text=True)
             return obj
         a,b,c = (fp_counts(compile_one(path)) for path in (plain,observed,planted))
-        def canonical(rows):
-            out={}
-            for function,counts in rows.items():
-                name=re.sub(r"\.(?:constprop|isra)\.\d+", "", function)
-                target=out.setdefault(name,{})
-                for mnemonic,count in counts.items(): target[mnemonic]=target.get(mnemonic,0)+count
-            return out
-        a,b,c=canonical(a),canonical(b),canonical(c)
+        a,b,c=_canonical(a),_canonical(b),_canonical(c)
         # The observer boundary intentionally changes which private helper clones
         # GCC retains.  Census the preserved physics function itself, not dead or
         # duplicated IPA clones; its complete mnemonic map is the passivity claim.
@@ -88,11 +111,21 @@ def census(build: Path = BUILD, toolchain: Path = TOOLCHAIN) -> dict[str, object
 
 def main() -> int:
     parser=argparse.ArgumentParser(); parser.add_argument("--build",type=Path,default=BUILD); parser.add_argument("--toolchain",type=Path,default=TOOLCHAIN)
+    parser.add_argument("--reference-object",type=Path); parser.add_argument("--record-object",type=Path)
+    parser.add_argument("--arch",type=Path); parser.add_argument("--json",type=Path)
     args=parser.parse_args()
-    try: result=census(args.build,args.toolchain)
+    try:
+        if args.reference_object or args.record_object or args.arch:
+            if not (args.reference_object and args.record_object and args.arch):
+                raise ValueError("actual-object census requires --reference-object, --record-object and --arch")
+            result=census_real_objects(args.reference_object,args.record_object,args.arch)
+        else:
+            result=census(args.build,args.toolchain)
     except (OSError,ValueError,subprocess.SubprocessError) as exc:
         print(f"STATUS PLANT-FIRED: {exc}"); return 1
-    print(json.dumps(result,indent=2,sort_keys=True)); return 0 if result["pass"] else 1
+    text=json.dumps(result,indent=2,sort_keys=True)+"\n"
+    if args.json: args.json.write_text(text)
+    print(text,end=""); return 0 if result["pass"] else 1
 
 
 if __name__=="__main__": raise SystemExit(main())

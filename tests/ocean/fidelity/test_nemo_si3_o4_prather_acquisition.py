@@ -22,6 +22,16 @@ PPSRC = Path("/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/ORCA2_SAS_ICE_O
 def records(tmp_path_factory: pytest.TempPathFactory) -> Path:
     out = tmp_path_factory.mktemp("o4_records")
     subprocess.run(["python3", str(HERE/"write_stub_records.py"), str(out), "--source-real",
+                    str(ROOT/"scripts/validate/ocean_fidelity/testcases/nemo_si3_o7_orca2_sas_acquisition/ocean.output.excerpt"),
+                    "--nontrivial-score-fixture"],
+                   check=True, cwd=ROOT)
+    return out
+
+
+@pytest.fixture(scope="module")
+def independent_records(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    out = tmp_path_factory.mktemp("o4_independent_records")
+    subprocess.run(["python3", str(HERE/"write_stub_records.py"), str(out), "--source-real",
                     str(ROOT/"scripts/validate/ocean_fidelity/testcases/nemo_si3_o7_orca2_sas_acquisition/ocean.output.excerpt")],
                    check=True, cwd=ROOT)
     return out
@@ -41,6 +51,13 @@ def test_o4_production_scorer_and_plants(records: Path) -> None:
     for plant in ("one-bit", "invert-sweep", "wrong-fold-sign", "omit-subcycle-lbc"):
         with pytest.raises(ValueError, match="STATUS PLANT-FIRED"):
             score_deck(records, plant)
+
+
+def test_o4_stub_records_are_independent_and_score(independent_records: Path) -> None:
+    assert score_deck(independent_records)["status"] == "PASS"
+    stub = (HERE/"stub_nemo.sh").read_text()
+    assert "--nontrivial-score-fixture" not in stub
+    assert "write_stub_records.py" not in stub  # path is supplied explicitly by run.sh
 
 
 def test_o4_shared_extent_gate_and_plants() -> None:
@@ -64,4 +81,5 @@ def test_o4_patch_and_driver_are_read_only_preflight_tools() -> None:
     subprocess.run(["patch", "--dry-run", "--batch", "--fuzz=0", str(source), str(HERE/"icedyn_adv_pra_o4.patch")], check=True)
     subprocess.run(["bash", "-n", str(HERE/"run.sh")], check=True)
     text = (HERE/"run.sh").read_text()
-    assert "--preflight-only" in text and "manifest_before_run" in text
+    assert "--preflight-only" in text and "write_manifest" in text
+    assert "run.user.stdout.log" in text and "run.user.stderr.log" in text
