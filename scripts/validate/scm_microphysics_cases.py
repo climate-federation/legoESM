@@ -201,7 +201,10 @@ def run_case(scheme, case, dtype, n_steps=None, verbose=False):
     nslots = max(min_tracer_slots(scheme_name), 9)
     # Sundqvist blends by the GCM cell a column stands for: the production
     # MPAS mean cell, as the RCE case (user 2026-10-28, ASK G).
-    area_kw = {"cell_area": RCE_CELL_AREA_M2} if scheme_name == "sundqvist" else {}
+    # The state below carries q_i, so Sundqvist splits liquid/ice here as on
+    # every lane that carries it (codex 2026-10-29).
+    area_kw = ({"cell_area": RCE_CELL_AREA_M2, "carries_q_i": True}
+               if scheme_name == "sundqvist" else {})
     Nc0 = env.get("Nc", 1.0e8)
 
     # State: q_v, q_c, q_r, q_i, q_s, q_g, N_c, N_r, N_i.

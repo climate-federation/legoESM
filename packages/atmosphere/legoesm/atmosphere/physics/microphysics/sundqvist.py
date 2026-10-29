@@ -511,23 +511,27 @@ __physics_contract__ = {
     ),
     "inputs": {
         "T": "K", "q_v": "kg/kg", "hydrometeors.q_c": "kg/kg",
-        "hydrometeors.q_r": "kg/kg", "p_full": "Pa",
+        "hydrometeors.q_r": "kg/kg",
+        "hydrometeors.q_i": "kg/kg (read only when carries_q_i)",
+        "p_full": "Pa",
         "p_half": "Pa (interfaces, top-down; layer mass dp/g, R9)",
+        "cell_area": "m^2 (GCM cell area for the GFS psautco blend; required)",
         "rho": "kg/m^3 (unused since R9; signature parity)",
         "dz": "m (unused since R9; signature parity)", "dt": "s",
     },
     "outputs": {
         "dT_dt": "K/s", "dq_v_dt": "kg/kg/s", "dq_c_dt": "kg/kg/s",
-        "dq_r_dt": "kg/kg/s", "precipitation": "kg/m^2/s",
-        "precip_frozen": "kg/m^2/s",
+        "dq_r_dt": "kg/kg/s", "dq_i_dt": "kg/kg/s (0 unless carries_q_i)",
+        "precipitation": "kg/m^2/s", "precip_frozen": "kg/m^2/s",
     },
     "sign_convention": (
         "z up; level 0 = model top, surface at [:, -1]. Precipitation is "
-        "positive downward and leaves the column: int (dq_v + dq_c + dq_r) "
-        "dp/g = -precipitation. Condensation heats with L_v; rain "
+        "positive downward and leaves the column: int (dq_v + dq_c + dq_r "
+        "+ dq_i) dp/g = -precipitation. Condensation heats with L_v; rain "
         "evaporation cools with L_v, snow sublimation with L_v+L_f, melting "
         "with L_f (Zhao-Carr); conversion of condensate to precipitation "
-        "carries no latent heat."
+        "carries no latent heat; the liquid/ice re-split (carries_q_i) heats "
+        "with L_f per kg of ice it adds."
     ),
     "conserves": ["none"],
     "differentiable": True,
