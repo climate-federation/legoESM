@@ -21,7 +21,11 @@ def _pair():
     for name in ("land_ml_theta_soil", "land_ml_psi_soil", "land_ml_T_soil"):
         ck[name] = rng.uniform(1.0, 2.0, (N, 3))
     ck["land_held_albedo"] = rng.uniform(1.0, 2.0, N)
+    ck["land_held_lhflx"] = rng.uniform(1.0, 2.0, N)   # not in the defect record
     ck["land_taumag_valid"] = np.ones(N, bool)
+    canopy = rng.uniform(1.0, 2.0, (N, 2))
+    canopy[:5] = np.nan                       # never-converged columns
+    ck[v.CANOPY_NAN_KEY] = canopy
     got = {f: {k: x.copy() for k, x in d.items()} for f, d in ref.items()}
     # a gap inside every bound, and the dry-soil jump at half its measured size
     for f in got:
@@ -37,6 +41,16 @@ def _pair():
         else:
             x[c, 0] += 0.5 * size * peak
     return ref, got
+
+
+@pytest.fixture(autouse=True)
+def _recorded(monkeypatch):
+    """The synthetic dumps' own key lists and canopy NaN count stand in for
+    the measured C24 records."""
+    ref, _ = _pair()
+    monkeypatch.setattr(v, "MODEL_STEP_KEYS", frozenset(ref["model_step.npz"]))
+    monkeypatch.setattr(v, "CHECKPOINT_KEYS", frozenset(ref["driver_checkpoint.npz"]))
+    monkeypatch.setattr(v, "CANOPY_NAN_COUNT", 10)
 
 
 def _run(tmp_path, ref, got):
@@ -59,7 +73,9 @@ def test_gaps_inside_their_bounds_pass(tmp_path, capsys):
 @pytest.mark.parametrize("violation", [
     "atmosphere", "radiation", "cloud_variance", "land_other_column",
     "dry_column_above_measured", "dry_column_new_field", "missing_key",
-    "grouped_key_absent", "shape", "nan", "bool"])
+    "grouped_key_absent", "both_missing", "extra_key", "shape", "nan",
+    "nan_both_arms", "inf", "inf_both_arms", "zero_peak", "bool", "canopy_nan_moved",
+    "canopy_nan_count", "canopy_inf"])
 def test_each_violation_fails(tmp_path, violation):
     ref, got = _pair()
     m, c = got["model_step.npz"], got["driver_checkpoint.npz"]
@@ -76,9 +92,7 @@ def test_each_violation_fails(tmp_path, violation):
         k = "land_ml_T_soil"
         c[k][495, 2] += 2 * v.DRY_SOIL_DEFECT[(k, 495)] * np.max(rc[k])
     elif violation == "dry_column_new_field":
-        c["land_held_albedo2"] = rc["land_held_albedo"].copy()
-        rc["land_held_albedo2"] = rc["land_held_albedo"].copy()
-        c["land_held_albedo2"][470] += 1e-3
+        c["land_held_lhflx"][470] += 1e-3
     elif violation == "missing_key":
         del c["u"]
     elif violation == "grouped_key_absent":
@@ -87,6 +101,31 @@ def test_each_violation_fails(tmp_path, violation):
         m["s0_dyn_state_u"] = m["s0_dyn_state_u"][:, :2]
     elif violation == "nan":
         c["u"][1, 1] = np.nan
+    elif violation == "both_missing":
+        del rc["u"], c["u"]
+    elif violation == "extra_key":
+        rm["s0_new_extra"] = np.ones(2)
+        m["s0_new_extra"] = np.ones(2)
+    elif violation == "nan_both_arms":
+        rc["u"][:] = np.nan
+        c["u"][:] = np.nan
+    elif violation == "canopy_nan_moved":
+        c[v.CANOPY_NAN_KEY][4, 0] = 1.5
+        c[v.CANOPY_NAN_KEY][9, 0] = np.nan
+    elif violation == "canopy_nan_count":
+        rc[v.CANOPY_NAN_KEY][9, 0] = np.nan
+        c[v.CANOPY_NAN_KEY][9, 0] = np.nan
+    elif violation == "canopy_inf":
+        c[v.CANOPY_NAN_KEY][7, 1] = np.inf
+    elif violation == "inf":
+        c["u"][1, 1] = np.inf
+    elif violation == "inf_both_arms":
+        rc["u"][1, 1] = np.inf
+        c["u"][1, 1] = np.inf
+    elif violation == "zero_peak":
+        rm["s0_dyn_state_u"][:] = 0.0
+        m["s0_dyn_state_u"][:] = 0.0
+        m["s0_dyn_state_u"][2, 1] = 1e-300
     elif violation == "bool":
         c["land_taumag_valid"][3] = False
     assert _run(tmp_path, ref, got) == 1
