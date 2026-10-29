@@ -28,7 +28,7 @@ not been acquired. No NEMO process was run.
 
 The active restart reader loads `un`, `vn`, `tn`, and `sn` into `Kbb` and then
 copies that state to `Kmm`
-(`ORCA2_STANDALONE_IIF_OMIP_L4_R342S4Y/BLD/ppsrc/nemo/restart.f90:290-306`).
+(`ORCA2_STANDALONE_IIF_OMIP_L4_R342S4Y/BLD/ppsrc/nemo/restart.f90:291-296,311-316`).
 The acquisition tool copies admitted arm A's `kt = 8` restart pair, advances
 only finite wet `tn[0, 0, :, :]` values by one float64 ULP toward positive
 infinity, and starts the continuation at step 9. It keeps the perturbed pair as
