@@ -2168,6 +2168,18 @@ class ExperimentConfig(NamedTuple):
         g = self.grid
         d = self.dycore
         errors: list[str] = []
+        # The faithful IFS convection hands its detrained rain and snow
+        # (PSNDE) to the host's rain and snow species (user 2026-10-28, R12):
+        # only schemes that carry and process both may run it.  p3's snow
+        # slot holds rime, fast_sbm's ice slots stay zero, the ML emulator's
+        # layout is generic.
+        if (self.convection == "bechtold" and self.bechtold_use_ifs_ascent
+                and self.microphysics not in (
+                    "morrison", "thompson", "seifert_beheng")):
+            errors.append(
+                f"bechtold_use_ifs_ascent needs a microphysics that carries "
+                f"rain and snow (morrison, thompson, seifert_beheng) for the "
+                f"detrained precipitation, not {self.microphysics!r}")
         # Owner decision 2026-08-16: conserving form always, and any
         # NON-conserving form must ANNOUNCE itself when invoked. These are
         # warnings, not errors — the legacy/exception paths stay selectable
