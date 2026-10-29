@@ -49,7 +49,9 @@ def test_decision188_plants_fire() -> None:
         "ke_inside_3x_envelope_plant": "PASS",
         "ke_floor_plant": "PASS",
         "zero_envelope_refusal_plant": "PASS",
+        "partial_zero_envelope_refusal_plant": "PASS",
         "nonperturbed_envelope_refusal_plant": "PASS",
+        "missing_unperturbed_control_refusal_plant": "PASS",
     }
 
 
@@ -74,6 +76,26 @@ def test_decision188_refuses_different_month_windows() -> None:
     with pytest.raises(decision188.GateError, match="saved steps differ"):
         decision188.evaluate_decision188(
             candidate, envelope, decision188.minimal_envelope_admission())
+
+
+def test_decision188_refuses_zero_envelope_in_any_month() -> None:
+    candidate = decision188.minimal_year_report(sst=0.0, ke=0.0)
+    envelope = decision188.minimal_year_report(sst=0.0, ke=0.001)
+    envelope["months"][7]["metrics"]["KE"]["relative_rms_fraction"] = 0.0
+    with pytest.raises(decision188.GateError, match="must be > 0"):
+        decision188.evaluate_decision188(
+            candidate, envelope, decision188.minimal_envelope_admission())
+
+
+def test_decision188_refuses_missing_restart_control() -> None:
+    admission = decision188.minimal_envelope_admission()
+    admission.pop("unperturbed_restart_control")
+    with pytest.raises(decision188.GateError, match="restart-continuation control"):
+        decision188.evaluate_decision188(
+            decision188.minimal_year_report(sst=0.0, ke=0.0),
+            decision188.minimal_year_report(sst=0.0, ke=0.001),
+            admission,
+        )
 
 
 def _write_restart(path: Path, rank: int) -> np.ndarray:
@@ -151,6 +173,31 @@ def test_day1_restart_gets_exact_uniform_fp64_one_ulp_pattern(tmp_path: Path) ->
         ulp_gate.verify_perturbation_manifest(refused)
 
 
+def test_unperturbed_restart_control_requires_every_daily_file_exact(
+    tmp_path: Path,
+) -> None:
+    baseline = tmp_path / "baseline"
+    control = tmp_path / "control"
+    baseline.mkdir()
+    control.mkdir()
+    for kt in (8, 16):
+        for rank in (0, 1):
+            name = f"ORCA2_{kt:08d}_restart_{rank:04d}.nc"
+            payload = f"restart {kt} rank {rank}\n".encode()
+            (baseline / name).write_bytes(payload)
+            (control / name).write_bytes(payload)
+    result = ulp_gate.verify_restart_continuation_control(
+        control, baseline_arm=baseline, expected_steps=16
+    )
+    assert result["all_daily_restarts_byte_identical"] is True
+    assert result["restart_files_compared"] == 4
+    (control / "ORCA2_00000016_restart_0001.nc").write_bytes(b"drift\n")
+    with pytest.raises(ulp_gate.GateError, match="differs from arm A"):
+        ulp_gate.verify_restart_continuation_control(
+            control, baseline_arm=baseline, expected_steps=16
+        )
+
+
 def test_round345_document_git_shas_resolve_and_are_full_length() -> None:
     repo = Path(__file__).resolve().parents[3]
     round342_repo = Path(
@@ -178,12 +225,16 @@ def test_round345_document_git_shas_resolve_and_are_full_length() -> None:
             assert local.returncode == 0 or external.returncode == 0, sha
 
 
-def test_round345_document_file_shas_rehash() -> None:
+def test_round345_document_file_shas_rehash(tmp_path: Path) -> None:
     repo = Path(__file__).resolve().parents[3]
     baseline = Path(
         "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round342/"
         "s4_year/orca2_k0_year1_a_np2"
     )
+    perturbed = tmp_path / "perturbed"
+    perturbed.mkdir()
+    shutil.copy2(baseline / ulp_gate.DOMAIN_FILE, perturbed / ulp_gate.DOMAIN_FILE)
+    ulp_gate.perturb_day1_restart_pair(perturbed, baseline)
     expected = {
         "835f03b99a3c96e80d23f35c415d099fde292678ae30572e9c5412be4b67e16d":
             baseline / "nemo",
@@ -191,6 +242,10 @@ def test_round345_document_file_shas_rehash() -> None:
             baseline / "ORCA2_00000008_restart_0000.nc",
         "a5660f4c44b70a7cf7d70500b2df8e2d2145f08a205b266301c7312517413023":
             baseline / "ORCA2_00000008_restart_0001.nc",
+        "bb25179365e776ae73e6ead9d2bad42e222f2094f687c22ede3b0eb3bcae1f01":
+            perturbed / "ORCA2_00000008_restart_0000.nc",
+        "0279bb4021ef1b557e178ef01b5c4cac732479102404871b557b984433fff8cf":
+            perturbed / "ORCA2_00000008_restart_0001.nc",
     }
     documents = (
         repo / "docs/ocean/fidelity/testcases" /
