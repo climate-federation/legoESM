@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ORCA2 round 345 — one observer-free K0 year with +1 float32 ULP initial SST.
+# ORCA2 round 345 — restart admitted K0 arm A at day 1 with +1 fp64 ULP SST.
 # Default: inherited round-342 plus round-345 preflight only.  --run is operator-only.
 set -Eeuo pipefail
 
@@ -89,7 +89,10 @@ check_no_active_nemo() {
 
 quarantine_arm() {
   local arm_dir="$1"
-  if [[ -d "${arm_dir}" ]]; then
+  local owner_token="$2"
+  if [[ -d "${arm_dir}" ]] \
+     && [[ -f "${arm_dir}/.round345_attempt" ]] \
+     && [[ "$(<"${arm_dir}/.round345_attempt")" == "${owner_token}" ]]; then
     local refused timestamp destination
     refused="$(dirname "${arm_dir}")/refused"
     timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
@@ -107,6 +110,12 @@ stage_arm() {
     echo "REFUSE: retained arm already exists: ${arm_dir}" >&2
     return 1
   fi
+  if ! mkdir "${arm_dir}"; then
+    echo "REFUSE: could not claim new round-345 arm: ${arm_dir}" >&2
+    return 1
+  fi
+  local owner_token="${R345_ATTEMPT_TOKEN:?missing R345_ATTEMPT_TOKEN}"
+  printf '%s\n' "${owner_token}" >"${arm_dir}/.round345_attempt"
   "${PYTHON_BIN}" "${GATE_PY}" \
     --stage-run-dir "${arm_dir}" \
     --build-cfg "${BUILD_CFG}" \
@@ -121,7 +130,7 @@ stage_arm() {
     fi
     cat > "${arm_dir}/nemo" <<EOF
 #!/usr/bin/env bash
-exec "${PYTHON_BIN}" "${R342_GATE_PY}" --act-as-nemo-binary ${extra_flags[*]:-}
+exec "${PYTHON_BIN}" "${GATE_PY}" --act-as-nemo-binary ${extra_flags[*]:-}
 EOF
     chmod +x "${arm_dir}/nemo"
   else
@@ -166,14 +175,23 @@ run_pipeline() {
   local binary="$2"
   local arm="${root}/${ARM_NAME}"
   mkdir -p "${root}"
+  if [[ -e "${arm}" || -L "${arm}" ]]; then
+    echo "REFUSE: retained arm already exists and will not be moved: ${arm}" >&2
+    return 1
+  fi
+  local owner_token="round345.$$.${RANDOM}"
+  export R345_ATTEMPT_TOKEN="${owner_token}"
+  local admission_flags=()
+  if [[ "${binary}" == "__STUB__" ]]; then admission_flags+=("--allow-stub-binary"); fi
   if ! stage_arm "${arm}" "${binary}" \
      || ! run_arm "${arm}" \
      || ! "${PYTHON_BIN}" "${GATE_PY}" \
           --admit-run-dir "${arm}" --build-cfg "${BUILD_CFG}" \
-          --expected-steps "${EXPECTED_STEPS}"; then
-    quarantine_arm "${arm}"
+          --expected-steps "${EXPECTED_STEPS}" "${admission_flags[@]}"; then
+    quarantine_arm "${arm}" "${owner_token}"
     return 1
   fi
+  rm -f "${arm}/.round345_attempt"
 }
 
 case "${MODE}" in
@@ -194,8 +212,13 @@ case "${MODE}" in
   admit)
     [[ -n "${ADMIT_ROOT}" ]] || { echo "REFUSE: --admit-existing needs a path" >&2; exit 2; }
     check_clean_worktree
-    "${PYTHON_BIN}" "${GATE_PY}" --admit-run-dir "${ADMIT_ROOT}/${ARM_NAME}" \
-      --build-cfg "${BUILD_CFG}" --expected-steps "${EXPECTED_STEPS}"
+    admit_flags=()
+    if [[ "${R345_PREFLIGHT_ALLOW_STUB:-0}" == "1" \
+       && "${ADMIT_ROOT}" == /data/abyssal/dbalwada/nemo-testcases-l2/phase3/work/* ]]; then
+      admit_flags+=("--allow-stub-binary")
+    fi
+    "${PYTHON_BIN}" "${GATE_PY}" --admit-run-dir "${ADMIT_ROOT}" \
+      --build-cfg "${BUILD_CFG}" --expected-steps "${EXPECTED_STEPS}" "${admit_flags[@]}"
     ;;
   run)
     check_clean_worktree

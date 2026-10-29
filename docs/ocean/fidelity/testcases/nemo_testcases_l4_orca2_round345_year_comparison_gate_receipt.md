@@ -1,104 +1,90 @@
 # ORCA2 round 345 receipt — Decision-188 year-comparison gate
 
-Round: 345 (Codex). Base: `d3a0a329c692`. Preregistration commit:
-`8bb1ab115`. Implementation commit: `304cad7ea`.
-Disposition: **STOPPED_FOR_RECORD** — the gate is committed and the one extra
-NEMO year requires operator acquisition.
+Round: 345 (Codex). Base: `d3a0a329c6925786815c4684593e88ff7d58167d`.
+Review-resume base: `acef9cc04e314d10ce6e1bb7cbb795d32c5ffacb`.
+Round-342 tool HEAD: `c983dc345a0b30c3ac5287d796986a069d981289`.
+Admitted arm-A binary SHA-256:
+`835f03b99a3c96e80d23f35c415d099fde292678ae30572e9c5412be4b67e16d`.
+Admitted arm-A day-1 restart SHA-256 values:
+`3fbed2281e66f7d51cd34247e799d1b76c8a102d36d5b64c0a3b80aba56dd2e3` and
+`a5660f4c44b70a7cf7d70500b2df8e2d2145f08a205b266301c7312517413023`.
+Disposition: **STOPPED_FOR_RECORD** — corrected preflight is pending; the
+perturbed NEMO continuation remains operator acquisition.
 
 ## Result
 
-Decision 188 is now executable month by month. The committed gate consumes a
-candidate-vs-NEMO Decision-160 metric report and a NEMO-vs-perturbed-NEMO
-envelope report. It applies the frozen temperature, salinity, SSH, streamfunction,
-Drake, and MLD bars exactly; surface KE instead uses
-`max(0.01, 3 * envelope_relative_RMS)` for the matching month. Complete year
-reports must contain all 12 no-leap months, use the same NEMO baseline root,
-and have identical day and saved-step windows. The original ORCA2X 30-day pilot
-format remains explicitly admitted as one partial month.
+Decision 188 remains executable month by month with its frozen fixed bars and
+surface-KE rule `max(0.01, 3 * envelope_relative_RMS)`. The gate now refuses an
+identically zero envelope and requires the envelope report to bind to an
+admitted round-345 fp64 restart perturbation, admitted arm-A forcing/damping,
+and the arm-A binary. The original ORCA2X 30-day schema remains a single
+partial-month input.
 
-No scientific year verdict is claimed in this round because the perturbed-NEMO
-envelope does not exist yet. No NEMO process was run.
+No scientific year verdict is claimed because the perturbed-NEMO envelope has
+not been acquired. No NEMO process was run.
 
-## NEMO arm and perturbation
+## Corrected NEMO perturbation
 
-The first non-bit source statement is that the active K0 cold-start branch
-loads T/S data into `Kbb` through `dta_tsd`
-(`ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/istate.f90:118`), while
-the active damping branch calls that same reader for its interpolated target
-(`ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/tradmp.f90:181`). The
-round-345 tool therefore records, rather than conceals, that the staged
-temperature file supplies both the cold-start state and the configured T/S
-damping target.
+The active restart reader loads `un`, `vn`, `tn`, and `sn` into `Kbb` and then
+copies that state to `Kmm`
+(`ORCA2_STANDALONE_IIF_OMIP_L4_R342S4Y/BLD/ppsrc/nemo/restart.f90:290-306`).
+The acquisition tool copies admitted arm A's `kt = 8` restart pair, advances
+only finite wet `tn[0, 0, :, :]` values by one float64 ULP toward positive
+infinity, and starts the continuation at step 9. It keeps the perturbed pair as
+day 1 and writes the remaining daily restart pairs through step 2920.
 
-The operator-only acquisition script reuses round 342's admitted observer-free
-K0 binary and deck for one 2,920-step arm. Before launch it replaces only the
-staged `data_1m_potential_temperature_nomask.nc` symlink by a regular NetCDF
-copy. In every one of its 12 records, every finite wet
-`votemper[:, 0, :, :]` float32 is advanced by exactly one representable value
-toward positive infinity. This is one uniform deterministic wet-surface
-pattern. Land, deeper levels, other variables, attributes, and every other
-input remain bit-identical.
+The perturbation manifest records both restart source and perturbed SHA-256
+digests, variable, double dtype, selected/changed counts, direction, and exact
+ULP distance. Its verifier compares every restart variable, dimension, and
+attribute, proving all unselected state and metadata are bit-identical. The
+cold-start temperature input is no longer modified; all forcing and damping
+files are re-hashed against admitted arm A.
 
-`initial_sst_ulp_perturbation.json` records the resolved source path, source,
-perturbed, and domain SHA-256 digests, variable and dtype, selection and
-direction, selected/changed counts, exact ULP distance, and dual NEMO use. The
-admission gate re-derives the bitwise pattern and digests; a two-ULP corruption
-plant fails. The run inherits round 342's real-flags census, source/build,
-namelist/forcing, bounds-fixture, timeout, clean completion, retention,
-manifest, and stub pipeline controls. It adds shell-syntax, generated-runner,
-overwrite-refusal, exact-ULP, and one-arm admission checks.
+## Safety and retention
+
+The shell claims a new arm with an atomic directory creation and a per-attempt
+token. Quarantine requires that exact token. A target that already exists
+refuses before the attempt is claimed, so admitted evidence from round 342 or a
+previous round-345 attempt cannot be moved.
+
+The stub scratch is under
+`/data/abyssal/dbalwada/nemo-testcases-l2/phase3/work`. The preflight covers a
+successful pipeline, safe overwrite refusal, a missing-STOP refusal retaining
+the binary and build snapshot, in-place admission, and direct re-admission of a
+completed arm retained beneath `refused/`.
 
 Acquisition command:
 
 `scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round345_sst_ulp_acquisition/run.sh --run`
 
-## Decision-188 gate controls
+Re-admit a completed retained arm without deleting it:
 
-- A report exactly at the SST bar of `0.01 K` passes; the next representable
-  float above it fails.
-- KE relative RMS `0.02` passes against an envelope of `0.007`, because the
-  monthly bar is `0.021`.
-- KE relative RMS `0.011` fails against a zero envelope, proving the `0.01`
-  floor applies; `0.01` passes.
-- Candidate and envelope reports with different saved-step windows refuse.
-- The committed ORCA2X pilot artifact at
-  `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2x_rounds/round1/pilot/metrics/pilot_metrics.json`
-  ran through the CLI as one partial month and returned PASS when used as both
-  schema arms. That is a compatibility check only, not a chaos-envelope claim.
+`scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round345_sst_ulp_acquisition/run.sh --admit-existing /absolute/path/to/refused/<retained-arm>`
+
+## Integrity
+
+The base and round-342 git SHAs above are full values obtained with
+`git rev-parse`. The document integrity test rejects abbreviated or unresolved
+git SHAs and resolves citations against this clone or the round-342 clone. File
+digests in the eventual acquisition manifest and receipt are emitted by the
+gate from `sha256sum`-equivalent byte hashing and immediately re-hashed.
 
 ## Verification
 
-- Round-345, round-342, and ORCA2X pilot metric tests: **18 / 18 PASS**.
-- Ruff on all three new Python files: **PASS**.
-- Decision-188 fixed-bar, 3x-envelope, floor, window, and exact-bit ULP plants:
-  **PASS**.
-- Certified-card fingerprint gate: **PASS**, all six card fingerprints
-  unchanged.
-- Full ten-file source ratchet: **12,380 passed, 4 skipped, 3 failed**. The
-  failures are outside this round's diff: two audits encounter the pre-existing
-  indentation error in round 336's `make_stub_records.py`, and the known
-  shortwave parameter-spec failure. There is no round-345 ratchet failure.
-- The clean-tree inherited acquisition preflight reached its MPI stub, then the
-  managed sandbox refused PMIx listener socket creation (`errno=1`, rc 213).
-  It did not start NEMO. The operator must run the same default preflight outside
-  this socket-restricted sandbox before `--run`.
-- Round-345 per-receipt citation gate: **PASS**, 2 citations, 0 failures, 0
-  unmapped citations, and all 9 self-tests fired. Campaign-default citation
-  gate: **PASS**. Standalone citation-gate tests: **20 / 20 PASS** with
-  `JAX_ENABLE_X64=1`.
+Verification and the default preflight will be recorded after the corrected
+implementation is committed on a clean worktree.
 
 ## Choices and review
 
-- ASKED: option-1 fixed bars, monthly 3x KE envelope with a 1% floor, one
-  observer-free perturbed K0 year, reuse of Decision-160 metrics, controls, and
-  ORCA2X pilot compatibility.
+- ASKED: option-1 fixed bars; monthly 3x KE envelope with 1% floor; perturb the
+  admitted day-1 NEMO double-precision restart SST by one ULP; leave forcing and
+  damping untouched; compare from day 1; refuse zero/non-perturbed envelopes.
 - UNASKED: none.
-- independent review: operator (Claude)
+- independent review: operator (Claude Sonnet; HOLD under repair)
 
 ## Open
 
-The operator runs the acquisition script, then evaluates the admitted
-perturbed-NEMO year against the unperturbed NEMO baseline with round 342's
-Decision-160 metric reporter. That report is the envelope input for the
-committed Decision-188 gate; the existing legoESM-vs-NEMO report is the
-candidate input.
+Run the corrected clean-tree preflight. If it passes, the operator runs the
+acquisition command, evaluates admitted arm A versus the perturbed continuation
+with the Decision-160 reporter, and supplies that report plus the round-345
+admission JSON to the Decision-188 gate.
