@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import re
+import shlex
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import netCDF4
@@ -196,6 +199,121 @@ def test_unperturbed_restart_control_requires_every_daily_file_exact(
         ulp_gate.verify_restart_continuation_control(
             control, baseline_arm=baseline, expected_steps=16
         )
+
+
+def _stub_rank_env(name: str, rank: int) -> dict[str, str]:
+    env = os.environ.copy()
+    for rank_name in ("OMPI_COMM_WORLD_RANK", "PMIX_RANK", "PMI_RANK"):
+        env.pop(rank_name, None)
+    env[name] = str(rank)
+    return env
+
+
+@pytest.mark.parametrize("control", [True, False], ids=["control", "perturbed"])
+def test_restart_stub_two_concurrent_rank_processes_preserve_input_and_ownership(
+    tmp_path: Path,
+    control: bool,
+) -> None:
+    """Exercise the generated stub executable without relying on mpirun."""
+    run_dir = tmp_path / ("control" if control else "perturbed")
+    run_dir.mkdir()
+    stage = ulp_gate.stage_control_arm if control else ulp_gate.stage_perturbed_arm
+    stage(run_dir, expected_steps=16)
+
+    gate_path = Path(ulp_gate.__file__).resolve()
+    control_flag = " --stub-control" if control else ""
+    stub = run_dir / "nemo"
+    stub.write_text(
+        "#!/usr/bin/env bash\n"
+        f"exec {shlex.quote(sys.executable)} {shlex.quote(str(gate_path))} "
+        f"--act-as-nemo-binary{control_flag}\n",
+        encoding="utf-8",
+    )
+    stub.chmod(0o755)
+
+    input_paths = [
+        run_dir / f"ORCA2_{ulp_gate.RESTART_KT:08d}_restart_{rank:04d}.nc"
+        for rank in (0, 1)
+    ]
+    input_before = [ulp_gate.common.sha256(path) for path in input_paths]
+
+    # Rank 1 alone must not touch rank-0 or shared outputs.  This isolates file
+    # ownership before the two actual stub processes are launched concurrently.
+    shared_or_rank0 = [
+        run_dir / "ocean.output",
+        run_dir / "output.namelist.dyn",
+        run_dir / "time.step",
+        run_dir / "mesh_mask_0000.nc",
+        run_dir / "ORCA2_00000016_restart_0000.nc",
+    ]
+
+    def snapshot(paths: list[Path]) -> dict[str, str | None]:
+        return {
+            path.name: ulp_gate.common.sha256(path) if path.is_file() else None
+            for path in paths
+        }
+
+    before_rank1 = snapshot(shared_or_rank0)
+    rank1_probe = subprocess.run(
+        [str(stub)], cwd=run_dir,
+        env=_stub_rank_env("PMIX_RANK", 1),
+        capture_output=True, text=True, check=False,
+    )
+    assert rank1_probe.returncode == 0, rank1_probe.stderr
+    assert rank1_probe.stderr == ""
+    assert snapshot(shared_or_rank0) == before_rank1
+    assert (run_dir / "mesh_mask_0001.nc").is_file()
+    assert (run_dir / "ORCA2_00000016_restart_0001.nc").is_file()
+    assert [ulp_gate.common.sha256(path) for path in input_paths] == input_before
+
+    rank0 = subprocess.Popen(
+        [str(stub)], cwd=run_dir,
+        env=_stub_rank_env("OMPI_COMM_WORLD_RANK", 0),
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+    )
+    rank1 = subprocess.Popen(
+        [str(stub)], cwd=run_dir,
+        env=_stub_rank_env("PMIX_RANK", 1),
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+    )
+    stdout0, stderr0 = rank0.communicate()
+    stdout1, stderr1 = rank1.communicate()
+    assert rank0.returncode == 0, stderr0
+    assert rank1.returncode == 0, stderr1
+    assert stderr0.strip() == "STOP 0"
+    assert stderr1 == ""
+
+    (run_dir / "mpirun.stdout.log").write_text(stdout0 + stdout1, encoding="utf-8")
+    (run_dir / "mpirun.stderr.log").write_text(stderr0 + stderr1, encoding="utf-8")
+    assert [ulp_gate.common.sha256(path) for path in input_paths] == input_before
+
+    inventory = ulp_gate.r342.verify_no_unexpected_files(run_dir, expected_steps=16)
+    assert inventory["expected_restart_file_count"] == 4
+    completion = ulp_gate.r342.verify_nemo_completion_signal(run_dir, expected_steps=16)
+    assert completion["time_step"] == 16
+    expected_sizes = (
+        ulp_gate.r342.R339_RESTART_0.stat().st_size,
+        ulp_gate.r342.R339_RESTART_1.stat().st_size,
+    )
+    for kt in (8, 16):
+        for local_rank, expected_size in enumerate(expected_sizes):
+            ulp_gate.r342._verify_single_restart_file(
+                run_dir / f"ORCA2_{kt:08d}_restart_{local_rank:04d}.nc",
+                kt,
+                expected_size,
+            )
+    for local_rank in (0, 1):
+        output = run_dir / f"ORCA2_00000016_restart_{local_rank:04d}.nc"
+        baseline = ulp_gate.BASELINE_ARM / output.name
+        assert ulp_gate.common.sha256(output) == ulp_gate.common.sha256(baseline)
+    if control:
+        continuation = ulp_gate.verify_restart_continuation_control(
+            run_dir, expected_steps=16
+        )
+        assert continuation["all_daily_restarts_byte_identical"] is True
+    else:
+        perturbation = ulp_gate.verify_perturbation_manifest(run_dir)
+        assert perturbation["exact_ulp_distance"] == 1
 
 
 def test_round345_document_git_shas_resolve_and_are_full_length() -> None:

@@ -1297,9 +1297,27 @@ def plant_completion_signal_failures(
     }
 
 
+def stub_mpi_rank_from_env() -> int:
+    """Return the two-rank launcher identity and refuse ambiguity or fallback."""
+    values = {
+        name: int(os.environ[name])
+        for name in ("OMPI_COMM_WORLD_RANK", "PMIX_RANK", "PMI_RANK")
+        if name in os.environ
+    }
+    require(bool(values),
+            "stub binary requires OMPI_COMM_WORLD_RANK, PMIX_RANK, or PMI_RANK")
+    require(len(set(values.values())) == 1,
+            f"stub binary has conflicting launcher ranks: {values}")
+    rank = next(iter(values.values()))
+    require(rank in (0, 1), f"stub binary expects exactly ranks 0 and 1, got {rank}")
+    return rank
+
+
 def write_stub_s4_year_outputs(
     run_dir: Path,
     *,
+    rank: int | None = None,
+    first_restart_kt: int = DAILY_STOCK_STRIDE,
     plant_unproduced_file: bool = False,
     plant_missing_stop: bool = False,
     plant_short_timestep: int | None = None,
@@ -1309,7 +1327,9 @@ def write_stub_s4_year_outputs(
 
     Reads `nn_itend` and `nn_stock` from `run_dir / "namelist_cfg"` so the stub
     replaces `./nemo` inside `run.sh`. Emits `time.step` (`stpctl.f90:160`) and
-    writes `STOP 0` to `sys.stderr` (`nemogcm.f90:237` under gfortran).
+    writes `STOP 0` to `sys.stderr` (`nemogcm.f90:237` under gfortran) on rank
+    zero only.  An MPI-launched invocation writes only its rank-local mesh and
+    restart files; `rank=None` retains the serial test-helper behavior.
     """
     if sleep_seconds > 0:
         time.sleep(sleep_seconds)
@@ -1318,62 +1338,77 @@ def write_stub_s4_year_outputs(
     nn_itend, nn_stock = parse_namelist_itend_stock(namelist_cfg)
     require(nn_stock == DAILY_STOCK_STRIDE and nn_itend % nn_stock == 0,
             f"invalid stub namelist cadence: nn_itend={nn_itend}, nn_stock={nn_stock}")
+    require(rank is None or rank in (0, 1), f"stub rank must be 0 or 1, got {rank}")
+    require(first_restart_kt >= nn_stock and first_restart_kt % nn_stock == 0,
+            f"invalid first stub restart step: {first_restart_kt}")
+    ranks = (0, 1) if rank is None else (rank,)
+    writes_shared = rank in (None, 0)
 
-    ocean_out = (R339_SMOKE_DIR / "ocean.output").read_text(encoding="utf-8")
-    ocean_out = re.sub(
-        r"(last\s+time\s+step\s+nn_itend\s*=\s*)\d+",
-        rf"\g<1>{nn_itend}",
-        ocean_out,
-    )
-    ocean_out = re.sub(
-        r"(frequency\s+of\s+restart\s+file\s+nn_stock\s*=\s*)\d+",
-        rf"\g<1>{nn_stock}",
-        ocean_out,
-    )
-    (run_dir / "ocean.output").write_text(ocean_out, encoding="utf-8")
+    if writes_shared:
+        ocean_out = (R339_SMOKE_DIR / "ocean.output").read_text(encoding="utf-8")
+        ocean_out = re.sub(
+            r"(last\s+time\s+step\s+nn_itend\s*=\s*)\d+",
+            rf"\g<1>{nn_itend}",
+            ocean_out,
+        )
+        ocean_out = re.sub(
+            r"(frequency\s+of\s+restart\s+file\s+nn_stock\s*=\s*)\d+",
+            rf"\g<1>{nn_stock}",
+            ocean_out,
+        )
+        (run_dir / "ocean.output").write_text(ocean_out, encoding="utf-8")
 
-    namelist_dyn = (R339_SMOKE_DIR / "output.namelist.dyn").read_text(encoding="utf-8")
-    namelist_dyn = re.sub(r"(\bnn_itend\s*=\s*)\d+", rf"\g<1>{nn_itend}", namelist_dyn)
-    namelist_dyn = re.sub(r"(\bnn_stock\s*=\s*)\d+", rf"\g<1>{nn_stock}", namelist_dyn)
-    (run_dir / "output.namelist.dyn").write_text(namelist_dyn, encoding="utf-8")
+        namelist_dyn = (R339_SMOKE_DIR / "output.namelist.dyn").read_text(encoding="utf-8")
+        namelist_dyn = re.sub(r"(\bnn_itend\s*=\s*)\d+", rf"\g<1>{nn_itend}", namelist_dyn)
+        namelist_dyn = re.sub(r"(\bnn_stock\s*=\s*)\d+", rf"\g<1>{nn_stock}", namelist_dyn)
+        (run_dir / "output.namelist.dyn").write_text(namelist_dyn, encoding="utf-8")
 
-    step_val = int(plant_short_timestep) if plant_short_timestep is not None else nn_itend
-    (run_dir / "time.step").write_text(f" {step_val:8d}\n", encoding="utf-8")
+        step_val = int(plant_short_timestep) if plant_short_timestep is not None else nn_itend
+        (run_dir / "time.step").write_text(f" {step_val:8d}\n", encoding="utf-8")
+    else:
+        step_val = int(plant_short_timestep) if plant_short_timestep is not None else nn_itend
 
-    for mesh_name in ("mesh_mask_0000.nc", "mesh_mask_0001.nc"):
+    for local_rank in ranks:
+        mesh_name = f"mesh_mask_{local_rank:04d}.nc"
         shutil.copy2(R339_SMOKE_DIR / mesh_name, run_dir / mesh_name)
 
-    # Day 1 (kt = 8): populate tn, sn, un, vn, sshn from admitted R340 kt=9 entry state.
-    for rank, tmpl in ((0, R339_RESTART_0), (1, R339_RESTART_1)):
-        dst_day1 = run_dir / f"ORCA2_00000008_restart_{rank:04d}.nc"
-        shutil.copy2(tmpl, dst_day1)
-        fields = _load_r340_kt9_entry_rank(R340_RUN_A, rank)
-        with netCDF4.Dataset(dst_day1, "r+") as ds:
-            ds.variables["kt"][...] = 8.0
-            for key, nc_var in (("T", "tn"), ("S", "sn"), ("u", "un"), ("v", "vn")):
-                arr = np.moveaxis(fields[key], -1, 0)
-                ds.variables[nc_var][0, :30, :, :] = arr
-                ds.variables[nc_var][0, 30, :, :] = 0.0
-            ds.variables["sshn"][0, :, :] = fields["ssh"]
+    for local_rank in ranks:
+        tmpl = (R339_RESTART_0, R339_RESTART_1)[local_rank]
+        if first_restart_kt == nn_stock:
+            # Day 1 (kt = 8): populate the cold-start arm's first saved state.
+            dst_day1 = run_dir / f"ORCA2_{nn_stock:08d}_restart_{local_rank:04d}.nc"
+            shutil.copy2(tmpl, dst_day1)
+            fields = _load_r340_kt9_entry_rank(R340_RUN_A, local_rank)
+            with netCDF4.Dataset(dst_day1, "r+") as ds:
+                ds.variables["kt"][...] = float(nn_stock)
+                for key, nc_var in (("T", "tn"), ("S", "sn"), ("u", "un"), ("v", "vn")):
+                    arr = np.moveaxis(fields[key], -1, 0)
+                    ds.variables[nc_var][0, :30, :, :] = arr
+                    ds.variables[nc_var][0, 30, :, :] = 0.0
+                ds.variables["sshn"][0, :, :] = fields["ssh"]
 
-        for kt in range(16, nn_itend + 1, nn_stock):
-            dst_kt = run_dir / f"ORCA2_{kt:08d}_restart_{rank:04d}.nc"
+        for kt in range(max(first_restart_kt, 2 * nn_stock), nn_itend + 1, nn_stock):
+            dst_kt = run_dir / f"ORCA2_{kt:08d}_restart_{local_rank:04d}.nc"
             shutil.copy2(tmpl, dst_kt)
             with netCDF4.Dataset(dst_kt, "r+") as ds:
                 ds.variables["kt"][...] = float(kt)
 
-    if plant_unproduced_file or os.environ.get("R342_STUB_PLANT_UNPRODUCED") == "1":
+    if writes_shared and (
+        plant_unproduced_file or os.environ.get("R342_STUB_PLANT_UNPRODUCED") == "1"
+    ):
         (run_dir / "oracle_r340_surface_kt0001_kid00_rank0000.bin").write_bytes(
             b"UNPRODUCED_OBSERVER_FILE"
         )
 
-    if not plant_missing_stop:
+    if writes_shared and not plant_missing_stop:
         print("STOP 0", file=sys.stderr, flush=True)
     return {
+        "rank": rank,
         "nn_itend": nn_itend,
         "nn_stock": nn_stock,
         "time_step": step_val,
-        "daily_restart_pairs": nn_itend // nn_stock,
+        "first_restart_kt": first_restart_kt,
+        "daily_restart_pairs": (nn_itend - first_restart_kt) // nn_stock + 1,
     }
 
 
@@ -2641,17 +2676,14 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     if args.act_as_nemo_binary:
-        rank = int(os.environ.get("OMPI_COMM_WORLD_RANK", os.environ.get("PMI_RANK", "0")))
-        if rank == 0:
-            write_stub_s4_year_outputs(
-                Path.cwd(),
-                plant_unproduced_file=args.plant_stub_unproduced_file,
-                plant_missing_stop=args.plant_stub_missing_stop,
-                plant_short_timestep=args.plant_stub_short_timestep,
-                sleep_seconds=args.plant_stub_sleep,
-            )
-        elif args.plant_stub_sleep > 0:
-            time.sleep(args.plant_stub_sleep)
+        write_stub_s4_year_outputs(
+            Path.cwd(),
+            rank=stub_mpi_rank_from_env(),
+            plant_unproduced_file=args.plant_stub_unproduced_file,
+            plant_missing_stop=args.plant_stub_missing_stop,
+            plant_short_timestep=args.plant_stub_short_timestep,
+            sleep_seconds=args.plant_stub_sleep,
+        )
         return 0
 
     if args.write_run_manifest is not None:
