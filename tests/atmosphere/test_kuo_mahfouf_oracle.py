@@ -215,7 +215,12 @@ def test_check_grads_at_default_sharpness(fx):
     2026-10-28): a 1e-6 kg/kg step exceeds the condensation-gate width
     ``supersat_scale / icond_sharpness = 2e-7``, so the stencil crosses gates;
     measured, the q_v check fails at 1e-6 (3.1e-2 g60 / 1.0e-3 g32 relative)
-    and 1e-7, g32 also at 1e-8 (1.1e-5), and passes at 1e-9 and 1e-10."""
+    and 1e-7, g32 also at 1e-8 (1.1e-5), and passes at 1e-9 and 1e-10.
+    w_grid (the ``w_lcl > 0`` gate), g60 only, ``eps = 1e-7`` (reviewer
+    decision 2026-10-29; measured: fails at 1e-4, passes 1e-6..1e-9).  g32 is
+    not checked: its uniform w = 0.01 gives max|dL/dw| = 5.5e-22.  ``ptenq``
+    is not checked: its sign gate is effectively hard (see the module
+    docstring of ``kuo``); check_grads fails at every eps 1e-12..1e-16."""
     from jax.test_util import check_grads
 
     for g in GROUPS:
@@ -224,14 +229,17 @@ def test_check_grads_at_default_sharpness(fx):
             for k in ("T", "q", "p_full", "p_half", "w", "ptenq")
         )
 
-        def loss(T, q):
+        def loss(T, q, w):
             o = kuo_convection(T, q, pf, ph, 900.0, KuoConfig(), pq, w)
             return jnp.sum(o.dT_dt) + 1.0e3 * jnp.sum(o.dq_v_dt)
 
-        for name, f, x, eps in (
-            ("T", jax.jit(lambda T: loss(T, q0)), T0, 1e-6),
-            ("q_v", jax.jit(lambda q: loss(T0, q)), q0, 1e-9),
-        ):
+        cases = [
+            ("T", jax.jit(lambda T: loss(T, q0, w)), T0, 1e-6),
+            ("q_v", jax.jit(lambda q: loss(T0, q, w)), q0, 1e-9),
+        ]
+        if g == "g60":
+            cases.append(("w", jax.jit(lambda ww: loss(T0, q0, ww)), w, 1e-7))
+        for name, f, x, eps in cases:
             assert float(jnp.max(jnp.abs(jax.grad(f)(x)))) > 0.0, (g, name)
             check_grads(f, (x,), order=2, modes=("fwd", "rev"), eps=eps)
 

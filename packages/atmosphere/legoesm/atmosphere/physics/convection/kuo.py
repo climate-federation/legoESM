@@ -22,7 +22,8 @@ Not the oracle (user decisions 2026-10-28, #2213 split):
 
 KNOWN DIFFERENCE (RULE 5).  The oracle's hard switches on model state are
 smooth at the default ``icond_sharpness = 50`` and recovered at its hard
-limit (1e12 reproduces the oracle to round-off, dT, dq and CAPE):
+limit (1e12 reproduces the oracle to round-off, dT, dq and CAPE, on the
+fixture, where no gate argument at a firing level is exactly 0):
 sigmoids for LCL condensation (scale ``supersat_scale``), buoyancy
 (``buoyancy_scale_K``), ``w_lcl > 0`` (fixed speed scale ``w_lcl_scale_ms``)
 and ``ptenq > 0`` (scale-free sign); ``x * sigmoid`` smooth positive parts
@@ -30,6 +31,11 @@ for the parcel excess ``max(qv1 - qsat, 0)`` (``supersat_scale``) and
 ``max(ptenq, 0)`` in ``cvgu`` (``ptenq_scale``), which undershoot to at most
 ``-0.28 scale / icond_sharpness`` for a negative argument.  An argument of exactly 0
 gives a half-open sigmoid gate where the oracle's strict ``>`` gives 0.
+The ``ptenq > 0`` sign gate is effectively HARD at the default too: its
+transition width is ``ptenq_sign_floor`` (1e-30 kg/kg/s), so it has no usable
+derivative and ``check_grads`` with respect to ``ptenq`` fails at every step
+1e-12..1e-16 (measured 2026-10-29); whether to give it a real width (which
+changes the default tendencies and the pinned gaps) is an open user decision.
 Measured gap at the defaults (fp64, field-normalised
 ``max|ours - oracle| / max|oracle|``, fixture of
 ``tests/atmosphere/test_kuo_mahfouf_oracle.py``): Kuo-1965 L60 dT 0.175,
@@ -334,7 +340,9 @@ def _parcel_ascent(
         # In-cloud values: condensing → (t2, qsat); else dry → (t1, qv1).
         # ``max(qv1 - qsat, 0)`` smoothed as ``x * sigmoid(s x / c)`` on the
         # condensation gate's own scale and sharpness (exactly 0 at x = 0;
-        # hard limit: icond_sharpness -> infinity).
+        # hard limit: icond_sharpness -> infinity), then weighted by the
+        # condensing-branch gate ``cond_gate`` like ``t_cloud``/``qv_cloud``
+        # (``cond_gate`` contains the same sigmoid, so it enters squared).
         excess = qv1 - qsat_k
         qc = excess * smooth_step(excess / config.supersat_scale, sharp) * cond_gate
         t_cloud = cond_gate * t2 + (1.0 - cond_gate) * t1

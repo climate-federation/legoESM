@@ -571,7 +571,9 @@ class KuoConfig(NamedTuple):
         Each gate argument is normalised to O(1) by the scales below
         before the sigmoid; the gates tend to the oracle's hard ``if``
         switches as the sharpness goes to infinity (1e12 reproduces the
-        oracle to round-off).  The same sharpness smooths the two ``max(x, 0)``
+        oracle to round-off on the fixture; an argument of exactly 0 gives
+        0.5).  The ``ptenq > 0`` sign gate's width is ``ptenq_sign_floor``,
+        not this sharpness.  The same sharpness smooths the two ``max(x, 0)``
         cut-offs (parcel excess over saturation, on ``supersat_scale``;
         positive convergence in ``cvgu``, on ``ptenq_scale``).
     buoyancy_scale_K : float
