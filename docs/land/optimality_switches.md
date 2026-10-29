@@ -21,7 +21,8 @@ Meaning of the values:
   `p_model` = the least-cost chi mapped to a slope (requires `medlyn`).  The
   P-hydro arm reads no slope.
 * `transpiration_stress`: `beta_theta` = the empirical root-zone
-  soil-moisture factor on Vcmax (and, with table slopes, on the slope);
+  soil-moisture factor on Vcmax and on the Medlyn slope (tabulated or
+  least-cost);
   `phydro` = the hydraulic supply curve replaces it.
 * `stomatal_model`: the half-hourly leaf conductance.  `phydro` = the
   instantaneous P-hydro optimum solved inside the canopy Newton closure

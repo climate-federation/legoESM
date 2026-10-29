@@ -257,11 +257,11 @@ def test_phydro_two_leaf_applies_no_empirical_stress():
     assert bt_dry[0] < 0.6 * bt_wet[0]
 
 
-def test_least_cost_slope_is_not_stressed():
-    """rpmodel structure: the empirical stress scales the capacities only.
-    With prescribed capacities, a P-model slope under stress w gives exactly
-    the fluxes of a TABULATED slope g1/w under the same stress (whose stressed
-    product is g1) — i.e. the predicted slope itself was left unstressed."""
+def test_least_cost_slope_is_stressed_like_a_tabulated_one():
+    """The least-cost slope is stressed by the empirical soil-moisture factor
+    at the half-hourly step exactly like a tabulated slope: with prescribed
+    capacities, a P-model slope under stress w gives the fluxes of a TABULATED
+    slope of the same value g1 under the same stress, not those of g1/w."""
     from types import SimpleNamespace
     from legoesm.land.p_model import (
         PModelConfig, acclimated_capacities, init_pmodel_acclim, optimal_chi)
@@ -277,14 +277,14 @@ def test_least_cost_slope_is_not_stressed():
         CanopyConfig(stomatal_model="medlyn", g1_source="p_model").validate(), w)
     table = _two_leaf_fluxes(
         CanopyConfig(stomatal_model="medlyn").validate(), w,
-        canopy_params=SimpleNamespace(m_C3=g1 / w))
+        canopy_params=SimpleNamespace(m_C3=g1))
     # rtol: the two runs start the Newton solve from different Ci seeds
     # (chi* vs the fixed 0.7) and agree to the solver tolerance.
     np.testing.assert_allclose(pm_slope, table, rtol=1e-4)
-    stressed = _two_leaf_fluxes(
+    unstressed = _two_leaf_fluxes(
         CanopyConfig(stomatal_model="medlyn").validate(), w,
-        canopy_params=SimpleNamespace(m_C3=g1))
-    assert not np.allclose(pm_slope, stressed, rtol=1e-3)
+        canopy_params=SimpleNamespace(m_C3=g1 / w))
+    assert not np.allclose(pm_slope, unstressed, rtol=1e-3)
 
 
 def test_least_cost_slope_reproduces_the_full_least_cost_chi():

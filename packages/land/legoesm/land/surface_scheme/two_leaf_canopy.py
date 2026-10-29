@@ -514,11 +514,10 @@ def compute_two_leaf_canopy_fluxes(
                 rjv25 = _caps.rjv25
             Vc4_leaf = _caps4.vcmax25_c4_leaf
         if cc.g1_source == "p_model":
-            # Predicted slopes replace the tabulated C3 AND C4 slopes.  They
-            # are NOT multiplied by the empirical soil-moisture stress below
-            # (rpmodel structure: the stress scales the capacities, hence A
-            # and with it gs, at unchanged chi); under phydro that stress is
-            # replaced entirely.
+            # Predicted slopes replace the tabulated C3 AND C4 slopes and are
+            # stressed by the empirical soil-moisture factor below exactly
+            # like the tabulated ones; under phydro that stress is replaced
+            # entirely.
             # ONE chi -> slope mapping for every optimality source: the slope
             # that makes the active stomatal model reproduce the optimum's chi
             # at the acclimated means (``phydro.slope_for_model``).  For the
@@ -565,10 +564,11 @@ def compute_two_leaf_canopy_fluxes(
         # limitation inside the optimum and is left alone.
         rjv25 = rjv25 * stressed_rjv25_factor(_caps.jmaxlim, fStress_vcmax)
     Vc4_leaf_stressed = Vc4_leaf * fStress_vcmax
-    # Stomatal-slope stress: the tabulated slopes are stressed like Vcmax;
-    # P-model-predicted slopes are not (see the g1_source dispatch above).
-    _slope_stress = (jnp.ones_like(w_frac_rz) if cc.g1_source == "p_model"
-                     else fStress_vcmax)
+    # Stomatal-slope stress: every Medlyn slope, tabulated or predicted by the
+    # least-cost optimum, is stressed like Vcmax at the half-hourly step, so
+    # the least-cost arm differs from the baseline only in where its
+    # acclimated capacities and slope come from.
+    _slope_stress = fStress_vcmax
     m_eff  = m_C3  * _slope_stress
     # The Ball-Berry INTERCEPT b0 is the cuticular / residual minimum conductance.
     # ``cc.stress_b0`` (static Python bool) controls whether soil-moisture stress
