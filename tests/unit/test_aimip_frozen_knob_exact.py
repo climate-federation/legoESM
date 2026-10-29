@@ -295,11 +295,12 @@ def test_midepoch_resume_widens_a_trained_fp32_knob(tmp_path, with_ema):
         _load_midepoch_checkpoint, _save_midepoch_checkpoint)
     c = _C["sundqvist_auto_rate"]
     p, tmpl, _ = _trained_fp32_checkpoint(tmp_path)
-    _save_midepoch_checkpoint(tmp_path, p, p, 1, 2,
+    opt = np.zeros(3)   # plain-array optimizer state, same dtype both sides
+    _save_midepoch_checkpoint(tmp_path, p, opt, 1, 2,
                               ema_model=p if with_ema else None)
-    out = _load_midepoch_checkpoint(tmp_path, tmpl, tmpl,
+    out = _load_midepoch_checkpoint(tmp_path, tmpl, opt,
                                     ema_template=tmpl if with_ema else None)
-    for m in out[:3 if with_ema else 2]:
+    for m in (out[0], out[2]) if with_ema else (out[0],):
         assert m.raw_values[c.name].dtype == np.float64
         assert float(m.raw_values[c.name]) == float(p.raw_values[c.name])
 

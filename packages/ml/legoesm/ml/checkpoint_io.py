@@ -118,7 +118,9 @@ def deserialise_knob_aware(path, skeleton):
     """For loaders that call equinox directly (trainer mid-epoch and EMA
     resume, WB resume and FD check): ``eqx.tree_deserialise_leaves`` with the
     same knob spec as :func:`load_checkpoint_or_fail`, so the dtype and range
-    rules match it.  Errors propagate unwrapped; no trailing-bytes check."""
+    rules match it (non-AIMIP leaves, e.g. optimizer moments, keep equinox's
+    exact-dtype check, as there).  Errors propagate unwrapped; no
+    trailing-bytes check."""
     import equinox as eqx
 
     return eqx.tree_deserialise_leaves(
