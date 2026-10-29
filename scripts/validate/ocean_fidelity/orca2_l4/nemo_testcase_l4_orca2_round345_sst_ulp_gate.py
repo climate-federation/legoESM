@@ -40,8 +40,10 @@ RESTART_VARIABLE = "tn"
 RESTART_KT = 8
 FIRST_RUN_STEP = 9
 PERTURBATION_MANIFEST = "restart_sst_ulp_perturbation.json"
+CONTROL_INPUT_MANIFEST = "restart_unperturbed_control_input.json"
 INPUT_AUDIT = "round342_arm_a_input_identity.json"
 PERTURBED_ARM_NAME = "orca2_k0_year1_sst_plus_1ulp_np2"
+CONTROL_ARM_NAME = "orca2_k0_year1_restart_control_np2"
 BASELINE_ARM = (
     Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds")
     / "round342/s4_year/orca2_k0_year1_a_np2"
@@ -179,6 +181,64 @@ def verify_restart_pair_perturbation(
         "unselected_restart_values_and_metadata_bit_identical": True,
         "rank_files": rank_rows,
     }
+
+
+def verify_unperturbed_restart_pair(
+    source_arm: Path,
+    control_arm: Path,
+) -> dict[str, Any]:
+    """Prove the control starts from the exact admitted arm-A kt=8 restart bytes."""
+    rows = []
+    for rank in (0, 1):
+        name = f"ORCA2_{RESTART_KT:08d}_restart_{rank:04d}.nc"
+        source = source_arm / name
+        control = control_arm / name
+        require(source.is_file(), f"missing admitted day-1 restart: {source}")
+        require(control.is_file() and not control.is_symlink(),
+                f"control day-1 restart must be a regular file: {control}")
+        source_sha = common.sha256(source)
+        control_sha = common.sha256(control)
+        require(control_sha == source_sha,
+                f"{name}: unperturbed control input differs from admitted arm A")
+        rows.append({
+            "rank": rank,
+            "source_path": str(source.resolve()),
+            "source_sha256": source_sha,
+            "control_file": name,
+            "control_sha256": control_sha,
+        })
+    return {
+        "status": "PASS_R345_DAY1_RESTART_UNPERTURBED_CONTROL",
+        "source_arm": str(source_arm.resolve()),
+        "control_arm": ".",
+        "restart_kt": RESTART_KT,
+        "first_run_step": FIRST_RUN_STEP,
+        "restart_pair_byte_identical": True,
+        "rank_files": rows,
+    }
+
+
+def copy_unperturbed_day1_restart_pair(
+    run_dir: Path,
+    source_arm: Path = BASELINE_ARM,
+) -> dict[str, Any]:
+    for rank in (0, 1):
+        name = f"ORCA2_{RESTART_KT:08d}_restart_{rank:04d}.nc"
+        shutil.copy2(source_arm / name, run_dir / name)
+    audit = verify_unperturbed_restart_pair(source_arm, run_dir)
+    (run_dir / CONTROL_INPUT_MANIFEST).write_text(
+        json.dumps(audit, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    return audit
+
+
+def verify_control_input_manifest(run_dir: Path) -> dict[str, Any]:
+    manifest_path = run_dir / CONTROL_INPUT_MANIFEST
+    require(manifest_path.is_file(), f"missing control-input manifest: {manifest_path}")
+    recorded = json.loads(manifest_path.read_text(encoding="utf-8"))
+    measured = verify_unperturbed_restart_pair(Path(recorded["source_arm"]), run_dir)
+    require(recorded == measured, "recorded control-input manifest does not match re-audit")
+    return measured
 
 
 def perturb_day1_restart_pair(run_dir: Path, source_arm: Path = BASELINE_ARM) -> dict[str, Any]:
@@ -335,9 +395,10 @@ def verify_baseline_admission(baseline_arm: Path = BASELINE_ARM) -> dict[str, An
     }
 
 
-def stage_perturbed_arm(
+def _stage_restart_arm(
     run_dir: Path,
     *,
+    perturb: bool,
     ice_cover_path: Path = r342.DEFAULT_ICE_COVER_PATH,
     build_cfg: Path = r342.DEFAULT_BUILD_CFG,
     expected_steps: int = r342.YEAR_STEPS,
@@ -363,14 +424,48 @@ def stage_perturbed_arm(
     )
     shutil.copy2(run_dir / "namelist_cfg", run_dir / "staged.namelist_cfg")
     input_identity = verify_arm_a_inputs_untouched(run_dir)
-    perturbation = perturb_day1_restart_pair(run_dir)
+    restart_audit = (
+        perturb_day1_restart_pair(run_dir)
+        if perturb
+        else copy_unperturbed_day1_restart_pair(run_dir)
+    )
     staged.update({
         "baseline_admission": baseline,
         "restart_namelist": restart_namelist,
         "arm_a_input_identity": input_identity,
-        "restart_sst_perturbation": perturbation,
+        (
+            "restart_sst_perturbation"
+            if perturb
+            else "unperturbed_restart_control_input"
+        ): restart_audit,
     })
     return staged
+
+
+def stage_perturbed_arm(
+    run_dir: Path,
+    *,
+    ice_cover_path: Path = r342.DEFAULT_ICE_COVER_PATH,
+    build_cfg: Path = r342.DEFAULT_BUILD_CFG,
+    expected_steps: int = r342.YEAR_STEPS,
+) -> dict[str, Any]:
+    return _stage_restart_arm(
+        run_dir, perturb=True, ice_cover_path=ice_cover_path,
+        build_cfg=build_cfg, expected_steps=expected_steps,
+    )
+
+
+def stage_control_arm(
+    run_dir: Path,
+    *,
+    ice_cover_path: Path = r342.DEFAULT_ICE_COVER_PATH,
+    build_cfg: Path = r342.DEFAULT_BUILD_CFG,
+    expected_steps: int = r342.YEAR_STEPS,
+) -> dict[str, Any]:
+    return _stage_restart_arm(
+        run_dir, perturb=False, ice_cover_path=ice_cover_path,
+        build_cfg=build_cfg, expected_steps=expected_steps,
+    )
 
 
 def write_run_manifest(run_dir: Path) -> dict[str, Any]:
@@ -393,15 +488,114 @@ def write_run_manifest(run_dir: Path) -> dict[str, Any]:
     return common.verify_manifest(manifest, expected_commit=commit)
 
 
-def admit_perturbed_arm(
+def verify_restart_continuation_control(
+    control_arm: Path,
+    *,
+    baseline_arm: Path = BASELINE_ARM,
+    expected_steps: int = r342.YEAR_STEPS,
+) -> dict[str, Any]:
+    """Require byte-identical baseline/control restart files at every daily save."""
+    rows = []
+    for kt in range(RESTART_KT, expected_steps + 1, r342.DAILY_STOCK_STRIDE):
+        for rank in (0, 1):
+            name = f"ORCA2_{kt:08d}_restart_{rank:04d}.nc"
+            baseline = baseline_arm / name
+            control = control_arm / name
+            require(baseline.is_file(), f"missing admitted arm-A restart: {baseline}")
+            require(control.is_file() and not control.is_symlink(),
+                    f"missing regular control restart: {control}")
+            baseline_sha = common.sha256(baseline)
+            control_sha = common.sha256(control)
+            require(control_sha == baseline_sha,
+                    f"unperturbed restart control differs from arm A: {name}")
+            rows.append({
+                "kt": kt,
+                "rank": rank,
+                "file": name,
+                "baseline_sha256": baseline_sha,
+                "control_sha256": control_sha,
+            })
+    expected_files = (expected_steps // r342.DAILY_STOCK_STRIDE) * 2
+    require(len(rows) == expected_files,
+            f"control compared {len(rows)} restart files, expected {expected_files}")
+    return {
+        "status": "PASS_R345_UNPERTURBED_RESTART_CONTROL",
+        "baseline_arm": str(baseline_arm.resolve()),
+        "control_arm": str(control_arm.resolve()),
+        "restart_kt_first": RESTART_KT,
+        "restart_kt_last": expected_steps,
+        "daily_restart_pairs_compared": expected_steps // r342.DAILY_STOCK_STRIDE,
+        "restart_files_compared": len(rows),
+        "all_daily_restarts_byte_identical": True,
+        "restart_files": rows,
+    }
+
+
+def admit_control_arm(
     run_dir: Path,
     *,
     build_cfg: Path = r342.DEFAULT_BUILD_CFG,
     expected_steps: int = r342.YEAR_STEPS,
     allow_stub_binary: bool = False,
 ) -> dict[str, Any]:
+    control_input = verify_control_input_manifest(run_dir)
+    manifest = r342._verify_existing_run_manifest(run_dir)
+    baseline = verify_baseline_admission()
+    actual_binary = common.sha256(run_dir / "nemo")
+    if not allow_stub_binary:
+        require(actual_binary == baseline["binary_sha256"],
+                "round-345 control binary differs from admitted round-342 arm A")
+    input_identity = verify_arm_a_inputs_untouched(run_dir)
+    inventory = r342.verify_no_unexpected_files(run_dir, expected_steps=expected_steps)
+    ppsrc_dir = r342._ppsrc_dir(build_cfg)
+    r342.verify_namelist_groups_against_ppsrc(
+        run_dir / "namelist_cfg", r342.NAMELIST_REF, ppsrc_dir
+    )
+    expected_resolved = {
+        **r342.r339_k0.RESOLVED,
+        "nn_it000": str(FIRST_RUN_STEP),
+        "nn_itend": str(expected_steps),
+        "nn_stock": str(r342.DAILY_STOCK_STRIDE),
+        "ln_rstart": "T",
+        "nn_rstctl": "2",
+        "cn_ocerst_in": f"ORCA2_{RESTART_KT:08d}_restart",
+    }
+    common.validate_ocean_output(run_dir / "ocean.output", expected_resolved)
+    completion = r342.verify_nemo_completion_signal(run_dir, expected_steps=expected_steps)
+    continuation = verify_restart_continuation_control(
+        run_dir, expected_steps=expected_steps
+    )
+    return {
+        "status": "PASS_R345_UNPERTURBED_RESTART_CONTROL_ARM",
+        "admitted": True,
+        "run_dir": str(run_dir.resolve()),
+        "round": "orca2_r345",
+        "stage": "Decision_188_unperturbed_restart_control",
+        "restart_kt": RESTART_KT,
+        "first_run_step": FIRST_RUN_STEP,
+        "expected_steps": expected_steps,
+        "inventory": inventory,
+        "completion_signal": completion,
+        "baseline_admission": baseline,
+        "binary_sha256": actual_binary,
+        "binary_equal_arm_a": actual_binary == baseline["binary_sha256"],
+        "arm_a_input_identity": input_identity,
+        "unperturbed_restart_control_input": control_input,
+        "restart_continuation_control": continuation,
+        "producer_manifest": manifest,
+    }
+
+
+def admit_perturbed_arm(
+    run_dir: Path,
+    *,
+    build_cfg: Path = r342.DEFAULT_BUILD_CFG,
+    expected_steps: int = r342.YEAR_STEPS,
+    allow_stub_binary: bool = False,
+    write_output: bool = True,
+) -> dict[str, Any]:
     perturbation = verify_perturbation_manifest(run_dir)
-    manifest = common.verify_manifest(run_dir / "producer_manifest.json")
+    manifest = r342._verify_existing_run_manifest(run_dir)
     baseline = verify_baseline_admission()
     actual_binary = common.sha256(run_dir / "nemo")
     if not allow_stub_binary:
@@ -449,26 +643,211 @@ def admit_perturbed_arm(
         "restart_sst_perturbation": perturbation,
         "producer_manifest": manifest,
     }
-    output = run_dir.parent / "round345_s4_year_sst_ulp_admission.json"
-    output.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    if write_output:
+        output = run_dir.parent / "round345_s4_year_sst_ulp_admission.json"
+        output.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return result
+
+
+def admit_restart_pair(
+    run_root: Path,
+    *,
+    build_cfg: Path = r342.DEFAULT_BUILD_CFG,
+    expected_steps: int = r342.YEAR_STEPS,
+    allow_stub_binary: bool = False,
+) -> dict[str, Any]:
+    control_arm = run_root / CONTROL_ARM_NAME
+    perturbed_arm = run_root / PERTURBED_ARM_NAME
+    control = admit_control_arm(
+        control_arm, build_cfg=build_cfg, expected_steps=expected_steps,
+        allow_stub_binary=allow_stub_binary,
+    )
+    perturbed = admit_perturbed_arm(
+        perturbed_arm, build_cfg=build_cfg, expected_steps=expected_steps,
+        allow_stub_binary=allow_stub_binary, write_output=False,
+    )
+    require(
+        control["producer_manifest"]["producer_commit"]
+        == perturbed["producer_manifest"]["producer_commit"],
+        "control and perturbed arms have different producer commits",
+    )
+    require(control["binary_sha256"] == perturbed["binary_sha256"],
+            "control and perturbed arms have different binary digests")
+    perturbed["unperturbed_restart_control"] = control
+    perturbed["restart_continuation_control"] = control["restart_continuation_control"]
+    output = run_root / "round345_s4_year_sst_ulp_admission.json"
+    output.write_text(json.dumps(perturbed, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return perturbed
+
+
+def _append_admit_log(run_root: Path, entry: dict[str, Any]) -> None:
+    run_root.mkdir(parents=True, exist_ok=True)
+    with (run_root / "admit_existing.log").open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(entry, sort_keys=True) + "\n")
+
+
+def _retained_arm(refused: Path, arm_name: str, explicit: Path | None) -> Path:
+    candidates = sorted(
+        path for path in refused.iterdir()
+        if path.is_dir() and arm_name in path.name
+    )
+    if explicit is not None and arm_name in explicit.name:
+        return explicit
+    require(bool(candidates), f"no retained {arm_name} arm found inside {refused}")
+    return candidates[-1]
+
+
+def admit_existing_with_quarantine(
+    run_root_or_retained: Path,
+    *,
+    build_cfg: Path = r342.DEFAULT_BUILD_CFG,
+    expected_steps: int = r342.YEAR_STEPS,
+    allow_stub_binary: bool = False,
+) -> dict[str, Any]:
+    """Checklist 9/13 admission with fail-in-place retention and promotion."""
+    explicit = None
+    if run_root_or_retained.parent.name == "refused":
+        explicit = run_root_or_retained
+        run_root = run_root_or_retained.parent.parent
+    else:
+        run_root = run_root_or_retained
+    control = run_root / CONTROL_ARM_NAME
+    perturbed = run_root / PERTURBED_ARM_NAME
+    refused = run_root / "refused"
+    timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+
+    if explicit is None and control.is_dir() and perturbed.is_dir():
+        try:
+            result = admit_restart_pair(
+                run_root, build_cfg=build_cfg, expected_steps=expected_steps,
+                allow_stub_binary=allow_stub_binary,
+            )
+            _append_admit_log(run_root, {
+                "timestamp_utc": timestamp,
+                "route": "in_place",
+                "status": "PASS",
+                "producer_commit": result["producer_manifest"]["producer_commit"],
+                "binary_sha256": result["binary_sha256"],
+                "control_arm": str(control),
+                "perturbed_arm": str(perturbed),
+            })
+            return result
+        except Exception as exc:
+            refused.mkdir(parents=True, exist_ok=True)
+            moved = []
+            for arm in (control, perturbed):
+                if arm.exists():
+                    destination = refused / f"{timestamp}_{arm.name}"
+                    shutil.move(str(arm), str(destination))
+                    moved.append(str(destination))
+            _append_admit_log(run_root, {
+                "timestamp_utc": timestamp,
+                "route": "in_place",
+                "status": "REFUSED_AND_QUARANTINED",
+                "error": str(exc),
+                "quarantined": moved,
+            })
+            (run_root / "round345_s4_year_sst_ulp_admission.json").write_text(
+                json.dumps({
+                    "status": "REFUSED_R345_ADMIT_EXISTING",
+                    "admitted": False,
+                    "timestamp_utc": timestamp,
+                    "error": str(exc),
+                    "quarantined": moved,
+                }, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            raise GateError(
+                f"--admit-existing refused in-place restart arms ({exc}); "
+                f"quarantined to {moved}"
+            ) from exc
+
+    require(not control.exists() and not perturbed.exists(),
+            f"incomplete canonical round-345 arm pair under {run_root}")
+    require(refused.is_dir(), f"missing refused directory: {refused}")
+    retained_control = _retained_arm(refused, CONTROL_ARM_NAME, explicit)
+    retained_perturbed = _retained_arm(refused, PERTURBED_ARM_NAME, explicit)
+    try:
+        require(retained_control.resolve().is_relative_to(refused.resolve())
+                and retained_perturbed.resolve().is_relative_to(refused.resolve()),
+                "retained arms are not inside refused/")
+        # Validate manifests, ancestry, binary/file digests, and both scientific
+        # arms before any promotion.  No admission receipt is written in refused/.
+        r342._verify_existing_run_manifest(retained_control)
+        r342._verify_existing_run_manifest(retained_perturbed)
+        admit_control_arm(
+            retained_control, build_cfg=build_cfg, expected_steps=expected_steps,
+            allow_stub_binary=allow_stub_binary,
+        )
+        admit_perturbed_arm(
+            retained_perturbed, build_cfg=build_cfg, expected_steps=expected_steps,
+            allow_stub_binary=allow_stub_binary, write_output=False,
+        )
+        shutil.move(str(retained_control), str(control))
+        shutil.move(str(retained_perturbed), str(perturbed))
+        result = admit_restart_pair(
+            run_root, build_cfg=build_cfg, expected_steps=expected_steps,
+            allow_stub_binary=allow_stub_binary,
+        )
+        result["admit_existing_route"] = "refused"
+        result["promoted_from_refused"] = [
+            str(retained_control), str(retained_perturbed),
+        ]
+        _append_admit_log(run_root, {
+            "timestamp_utc": timestamp,
+            "route": "refused",
+            "status": "PASS_PROMOTED",
+            "producer_commit": result["producer_manifest"]["producer_commit"],
+            "binary_sha256": result["binary_sha256"],
+            "promoted_from": [str(retained_control), str(retained_perturbed)],
+            "control_arm": str(control),
+            "perturbed_arm": str(perturbed),
+        })
+        return result
+    except Exception as exc:
+        # Promotion is transactional: if the canonical-path recheck fails,
+        # return either moved arm to its original retained refused/ path.
+        if control.exists() and not retained_control.exists():
+            shutil.move(str(control), str(retained_control))
+        if perturbed.exists() and not retained_perturbed.exists():
+            shutil.move(str(perturbed), str(retained_perturbed))
+        _append_admit_log(run_root, {
+            "timestamp_utc": timestamp,
+            "route": "refused",
+            "status": "REFUSED_RETAINED_IN_PLACE",
+            "error": str(exc),
+            "retained_control": str(retained_control),
+            "retained_perturbed": str(retained_perturbed),
+        })
+        raise GateError(
+            f"--admit-existing refused retained restart arms ({exc}); kept in refused/"
+        ) from exc
 
 
 def write_stub_outputs(
     run_dir: Path,
     *,
+    control: bool = False,
     plant_unproduced_file: bool = False,
     plant_missing_stop: bool = False,
     plant_short_timestep: int | None = None,
 ) -> dict[str, Any]:
-    """Replace only NEMO, preserving the staged perturbed kt=8 restart input."""
+    """Replace only NEMO using restart content from admitted arm A."""
     result = r342.write_stub_s4_year_outputs(
         run_dir,
         plant_unproduced_file=plant_unproduced_file,
         plant_missing_stop=plant_missing_stop,
         plant_short_timestep=plant_short_timestep,
     )
-    perturb_day1_restart_pair(run_dir)
+    expected_steps, _stock = r342.parse_namelist_itend_stock(run_dir / "namelist_cfg")
+    for kt in range(RESTART_KT, expected_steps + 1, r342.DAILY_STOCK_STRIDE):
+        for rank in (0, 1):
+            name = f"ORCA2_{kt:08d}_restart_{rank:04d}.nc"
+            shutil.copy2(BASELINE_ARM / name, run_dir / name)
+    if control:
+        copy_unperturbed_day1_restart_pair(run_dir)
+    else:
+        perturb_day1_restart_pair(run_dir)
     ocean_output = run_dir / "ocean.output"
     text = ocean_output.read_text(encoding="utf-8")
     replacements = {
@@ -502,13 +881,72 @@ def verify_run_sh(run_sh: Path) -> dict[str, Any]:
     return {"passed": True, "syntax_plant_rc": bad.returncode}
 
 
+def plant_nonancestor_manifest() -> dict[str, Any]:
+    """Prove checklist-9 producer commits must be ancestors of admission HEAD."""
+    PREFLIGHT_SCRATCH_ROOT.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(dir=PREFLIGHT_SCRATCH_ROOT) as tmp:
+        root = Path(tmp)
+        repo = root / "repo"
+        subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
+        marker = repo / "marker"
+        marker.write_text("main\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(repo), "add", "marker"], check=True)
+        subprocess.run([
+            "git", "-C", str(repo), "-c", "user.name=Round 345 preflight",
+            "-c", "user.email=round345@example.invalid", "commit", "-q", "-m", "main",
+        ], check=True)
+        main_commit = subprocess.run(
+            ["git", "-C", str(repo), "rev-parse", "HEAD"],
+            check=True, capture_output=True, text=True,
+        ).stdout.strip()
+        subprocess.run(["git", "-C", str(repo), "switch", "-q", "--orphan", "other"], check=True)
+        marker.write_text("other\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(repo), "add", "marker"], check=True)
+        subprocess.run([
+            "git", "-C", str(repo), "-c", "user.name=Round 345 preflight",
+            "-c", "user.email=round345@example.invalid", "commit", "-q", "-m", "other",
+        ], check=True)
+        other_commit = subprocess.run(
+            ["git", "-C", str(repo), "rev-parse", "HEAD"],
+            check=True, capture_output=True, text=True,
+        ).stdout.strip()
+        subprocess.run(["git", "-C", str(repo), "switch", "-q", "main"], check=True)
+        run_dir = root / "retained"
+        run_dir.mkdir()
+        binary = run_dir / "nemo"
+        binary.write_bytes(b"stub binary\n")
+        (run_dir / "build_sources").mkdir()
+        source_file = run_dir / "build_sources" / "source.f90"
+        source_file.write_text(
+            "PROGRAM source\nEND PROGRAM source\n", encoding="utf-8"
+        )
+        common.write_manifest(
+            run_dir / "producer_manifest.json",
+            producer_commit=other_commit,
+            binary=binary,
+            files=[binary, source_file],
+            root=run_dir,
+            build_source_root=run_dir / "build_sources",
+        )
+        caught = False
+        error = ""
+        try:
+            r342._verify_existing_run_manifest(run_dir, repo=repo)
+        except GateError as exc:
+            caught = True
+            error = str(exc)
+        require(caught and main_commit != other_commit and "not an ancestor" in error,
+                "non-ancestor producer_commit plant did not fail")
+    return {"passed": True, "error": error}
+
+
 def run_preflight(
     *,
     evidence_dir: Path = DEFAULT_EVIDENCE_DIR,
     build_cfg: Path = r342.DEFAULT_BUILD_CFG,
     ice_cover_path: Path = r342.DEFAULT_ICE_COVER_PATH,
 ) -> dict[str, Any]:
-    """Run inherited checklist gates plus the one-arm perturbation controls."""
+    """Run inherited checklist gates plus paired restart-arm controls."""
     evidence_dir.mkdir(parents=True, exist_ok=True)
     r342.verify_clean_worktree(REPO_ROOT)
     run_sh = Path(__file__).resolve().parent / (
@@ -529,53 +967,106 @@ def run_preflight(
         )
         require(result.returncode == 0,
                 f"round345 stub pipeline failed:\n{result.stdout}\n{result.stderr}")
-        arm = stub_root / PERTURBED_ARM_NAME
-        audit = verify_perturbation_manifest(arm)
+        control_arm = stub_root / CONTROL_ARM_NAME
+        perturbed_arm = stub_root / PERTURBED_ARM_NAME
+        perturbation_audit = verify_perturbation_manifest(perturbed_arm)
+        control_input_audit = verify_control_input_manifest(control_arm)
+        continuation_audit = verify_restart_continuation_control(
+            control_arm, expected_steps=16
+        )
         overwrite = subprocess.run(
             ["bash", str(run_sh), "--stub-run-dir", str(stub_root), "--stub-steps", "16"],
             capture_output=True, text=True, check=False,
         )
-        require(overwrite.returncode != 0 and arm.is_dir(),
-                "retained perturbed arm overwrite plant did not refuse safely")
+        require(overwrite.returncode != 0 and control_arm.is_dir() and perturbed_arm.is_dir(),
+                "retained restart-arm overwrite plant did not refuse safely")
         require(not (stub_root / "refused").exists(),
                 "overwrite refusal moved an already admitted arm")
         env = dict(os.environ, R345_PREFLIGHT_ALLOW_STUB="1")
         in_place = subprocess.run(
-            ["bash", str(run_sh), "--admit-existing", str(arm), "--stub-steps", "16"],
+            ["bash", str(run_sh), "--admit-existing", str(stub_root), "--stub-steps", "16"],
             capture_output=True, text=True, check=False, env=env,
         )
         require(in_place.returncode == 0,
                 f"in-place --admit-existing failed:\n{in_place.stdout}\n{in_place.stderr}")
-        restart = arm / f"ORCA2_{RESTART_KT:08d}_restart_0000.nc"
-        backup = arm / f"ORCA2_{RESTART_KT:08d}_restart_0000.nc.preplant"
+        admit_log = (stub_root / "admit_existing.log").read_text(encoding="utf-8")
+        require('"route": "in_place"' in admit_log and '"status": "PASS"' in admit_log,
+                "admit_existing.log lacks the in-place PASS record")
+
+        restart = perturbed_arm / f"ORCA2_{RESTART_KT:08d}_restart_0000.nc"
+        backup = Path(tmp) / "perturbed_restart.preplant"
         shutil.copy2(restart, backup)
         with netCDF4.Dataset(restart, "r+") as dataset:
             variable = dataset.variables[RESTART_VARIABLE]
             variable.set_auto_maskandscale(False)
             value = np.asarray(variable[0, 0], dtype=np.float64)
-            wet = _rank_wet_mask(arm / DOMAIN_FILE, 0, tuple(value.shape))
+            wet = _rank_wet_mask(perturbed_arm / DOMAIN_FILE, 0, tuple(value.shape))
             j, i = np.argwhere(wet & np.isfinite(value))[0]
             value[j, i] = np.nextafter(value[j, i], np.float64(np.inf))
             variable[0, 0] = value
         caught = False
         try:
-            verify_perturbation_manifest(arm)
+            verify_perturbation_manifest(perturbed_arm)
         except GateError:
             caught = True
         require(caught, "two-ULP perturbation plant did not fail")
         shutil.move(backup, restart)
-        verify_perturbation_manifest(arm)
+        verify_perturbation_manifest(perturbed_arm)
 
-        refused = stub_root / "refused"
-        refused.mkdir()
-        retained = refused / "retained_completed_round345_arm"
-        shutil.move(arm, retained)
-        from_refused = subprocess.run(
-            ["bash", str(run_sh), "--admit-existing", str(retained), "--stub-steps", "16"],
+        control_restart = control_arm / "ORCA2_00000016_restart_0000.nc"
+        control_backup = Path(tmp) / "control_restart.preplant"
+        shutil.copy2(control_restart, control_backup)
+        with netCDF4.Dataset(control_restart, "r+") as dataset:
+            variable = dataset.variables[RESTART_VARIABLE]
+            variable.set_auto_maskandscale(False)
+            value = np.asarray(variable[0, 0], dtype=np.float64)
+            wet = _rank_wet_mask(control_arm / DOMAIN_FILE, 0, tuple(value.shape))
+            j, i = np.argwhere(wet & np.isfinite(value))[0]
+            value[j, i] = np.nextafter(value[j, i], np.float64(np.inf))
+            variable[0, 0] = value
+        control_drift_caught = False
+        try:
+            verify_restart_continuation_control(control_arm, expected_steps=16)
+        except GateError:
+            control_drift_caught = True
+        require(control_drift_caught, "unperturbed-control drift plant did not fail")
+        shutil.move(control_backup, control_restart)
+        verify_restart_continuation_control(control_arm, expected_steps=16)
+
+        # A failing in-place admission must quarantine both arms and log the
+        # refusal.  Once repaired, the refused/ route must promote both arms.
+        failed_backup = Path(tmp) / "failed_admission_restart.preplant"
+        shutil.copy2(restart, failed_backup)
+        with restart.open("ab") as handle:
+            handle.write(b"manifest checksum plant")
+        failed_in_place = subprocess.run(
+            ["bash", str(run_sh), "--admit-existing", str(stub_root), "--stub-steps", "16"],
             capture_output=True, text=True, check=False, env=env,
         )
-        require(from_refused.returncode == 0 and retained.is_dir(),
+        refused = stub_root / "refused"
+        retained_controls = list(refused.glob(f"*{CONTROL_ARM_NAME}*"))
+        retained_perturbed = list(refused.glob(f"*{PERTURBED_ARM_NAME}*"))
+        require(failed_in_place.returncode != 0
+                and len(retained_controls) == 1 and len(retained_perturbed) == 1,
+                "failing in-place admission did not quarantine both restart arms")
+        require('"status": "REFUSED_AND_QUARANTINED"' in
+                (stub_root / "admit_existing.log").read_text(encoding="utf-8"),
+                "admit_existing.log lacks the failing in-place admission record")
+        shutil.move(failed_backup, retained_perturbed[0] / restart.name)
+        require(not (refused / "round345_s4_year_sst_ulp_admission.json").exists(),
+                "admission receipt was written inside refused/")
+        from_refused = subprocess.run(
+            ["bash", str(run_sh), "--admit-existing", str(retained_perturbed[0]),
+             "--stub-steps", "16"],
+            capture_output=True, text=True, check=False, env=env,
+        )
+        require(from_refused.returncode == 0
+                and control_arm.is_dir() and perturbed_arm.is_dir()
+                and not retained_controls[0].exists() and not retained_perturbed[0].exists(),
                 f"refused/ --admit-existing failed:\n{from_refused.stdout}\n{from_refused.stderr}")
+        admit_log = (stub_root / "admit_existing.log").read_text(encoding="utf-8")
+        require('"status": "PASS_PROMOTED"' in admit_log,
+                "admit_existing.log lacks the refused/ promotion record")
 
         refusal_root = Path(tmp) / "stub_refusal"
         refusal = subprocess.run(
@@ -583,12 +1074,13 @@ def run_preflight(
              "--stub-steps", "16", "--plant-stub-missing-stop"],
             capture_output=True, text=True, check=False,
         )
-        refused_arms = list((refusal_root / "refused").glob(f"*{PERTURBED_ARM_NAME}*"))
+        refused_arms = list((refusal_root / "refused").glob(f"*{CONTROL_ARM_NAME}*"))
         require(refusal.returncode != 0 and len(refused_arms) == 1,
                 "missing-STOP refusal did not retain exactly one failed round-345 arm")
         require((refused_arms[0] / "nemo").is_file()
                 and (refused_arms[0] / "build_sources").is_dir(),
                 "refused arm did not retain its binary and build snapshot")
+        ancestry_plant = plant_nonancestor_manifest()
     report = {
         "status": "ORCA2_ROUND345_SST_ULP_PREFLIGHT_READY",
         "round": "orca2_r345",
@@ -600,7 +1092,11 @@ def run_preflight(
         "refused_admit_existing_plant": True,
         "refusal_retention_plant": True,
         "two_ulp_plant": True,
-        "perturbation_audit": audit,
+        "control_drift_plant": True,
+        "producer_commit_ancestry_plant": ancestry_plant,
+        "perturbation_audit": perturbation_audit,
+        "control_input_audit": control_input_audit,
+        "restart_continuation_control": continuation_audit,
         "worktree": worktree_stamp(allow_dirty=False),
         "timestamp_utc": datetime.now(UTC).isoformat(),
     }
@@ -612,10 +1108,13 @@ def run_preflight(
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--stage-run-dir", type=Path)
+    parser.add_argument("--stage-control-run-dir", type=Path)
     parser.add_argument("--admit-run-dir", type=Path)
+    parser.add_argument("--admit-existing", type=Path)
     parser.add_argument("--write-run-manifest", type=Path)
     parser.add_argument("--verify-perturbation", type=Path)
     parser.add_argument("--act-as-nemo-binary", action="store_true")
+    parser.add_argument("--stub-control", action="store_true")
     parser.add_argument("--plant-stub-unproduced-file", action="store_true")
     parser.add_argument("--plant-stub-missing-stop", action="store_true")
     parser.add_argument("--plant-stub-short-timestep", type=int)
@@ -627,7 +1126,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--expected-steps", type=int, default=r342.YEAR_STEPS)
     args = parser.parse_args(argv)
     selected = sum(value is not None and value is not False for value in (
-        args.stage_run_dir, args.admit_run_dir, args.write_run_manifest,
+        args.stage_run_dir, args.stage_control_run_dir, args.admit_run_dir,
+        args.admit_existing, args.write_run_manifest,
         args.verify_perturbation, args.preflight_only, args.act_as_nemo_binary,
     ))
     require(selected == 1, "select exactly one gate action")
@@ -636,9 +1136,19 @@ def main(argv: list[str] | None = None) -> int:
             args.stage_run_dir, ice_cover_path=args.ice_cover,
             build_cfg=args.build_cfg, expected_steps=args.expected_steps,
         )
+    elif args.stage_control_run_dir is not None:
+        result = stage_control_arm(
+            args.stage_control_run_dir, ice_cover_path=args.ice_cover,
+            build_cfg=args.build_cfg, expected_steps=args.expected_steps,
+        )
     elif args.admit_run_dir is not None:
         result = admit_perturbed_arm(
             args.admit_run_dir, build_cfg=args.build_cfg,
+            expected_steps=args.expected_steps, allow_stub_binary=args.allow_stub_binary,
+        )
+    elif args.admit_existing is not None:
+        result = admit_existing_with_quarantine(
+            args.admit_existing, build_cfg=args.build_cfg,
             expected_steps=args.expected_steps, allow_stub_binary=args.allow_stub_binary,
         )
     elif args.write_run_manifest is not None:
@@ -648,6 +1158,7 @@ def main(argv: list[str] | None = None) -> int:
     elif args.act_as_nemo_binary:
         result = write_stub_outputs(
             Path.cwd(),
+            control=args.stub_control,
             plant_unproduced_file=args.plant_stub_unproduced_file,
             plant_missing_stop=args.plant_stub_missing_stop,
             plant_short_timestep=args.plant_stub_short_timestep,

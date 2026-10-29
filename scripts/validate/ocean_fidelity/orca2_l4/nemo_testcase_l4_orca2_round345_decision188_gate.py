@@ -9,6 +9,7 @@ module only validates their report schema and applies the frozen bars.
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import math
 import sys
@@ -237,6 +238,32 @@ def _verify_envelope_admission(
     identity = envelope_admission.get("arm_a_input_identity", {})
     require(identity.get("forcing_and_damping_untouched") is True,
             "envelope forcing or damping inputs are not proven equal to arm A")
+    control = envelope_admission.get("unperturbed_restart_control", {})
+    control_input = control.get("unperturbed_restart_control_input", {})
+    continuation = envelope_admission.get(
+        "restart_continuation_control",
+        control.get("restart_continuation_control", {}),
+    )
+    require(
+        control.get("status") == "PASS_R345_UNPERTURBED_RESTART_CONTROL_ARM"
+        and control.get("admitted") is True
+        and control.get("binary_equal_arm_a") is True
+        and control_input.get("status")
+        == "PASS_R345_DAY1_RESTART_UNPERTURBED_CONTROL"
+        and control_input.get("restart_pair_byte_identical") is True
+        and continuation.get("status") == "PASS_R345_UNPERTURBED_RESTART_CONTROL"
+        and continuation.get("all_daily_restarts_byte_identical") is True
+        and continuation.get("restart_kt_first") == 8
+        and continuation.get("restart_kt_last") == 2920
+        and continuation.get("daily_restart_pairs_compared") == 365
+        and continuation.get("restart_files_compared") == 730,
+        "envelope lacks the passed 365-day unperturbed restart-continuation control",
+    )
+    require(
+        Path(str(continuation.get("baseline_arm", ""))).resolve()
+        == Path(str(identity.get("baseline_arm", ""))).resolve(),
+        "restart control and envelope admission name different arm-A baselines",
+    )
     if envelope_report.get("format") == "orca2-r342-s4-year-metrics-v2":
         require(envelope_report.get("candidate_is_nemo_restart") is True,
                 "year envelope candidate must be a NEMO restart arm")
@@ -280,11 +307,10 @@ def evaluate_decision188(
             envelope["metrics"]["KE"]["relative_rms_fraction"],
             f"{envelope['label']} envelope KE relative RMS",
         )
-        if envelope_ke > 0.0:
-            nonzero_envelope_months += 1
+        require(envelope_ke > 0.0,
+                f"{envelope['label']}: Decision-188 KE envelope must be > 0")
+        nonzero_envelope_months += 1
         scored.append(_score_month(candidate, envelope))
-    require(nonzero_envelope_months > 0,
-            "Decision-188 envelope is identically zero and cannot set a chaos bar")
     passed = all(month["verdict"] == "PASS" for month in scored)
     return {
         "format": "orca2-decision188-gate-v1",
@@ -324,7 +350,7 @@ def minimal_year_report(
                 "status": "EVALUATED_COMPLETE_MONTH",
                 "available_days": [month_index],
                 "saved_kts": [month_index * year_metrics.STEPS_PER_DAY],
-                "metrics": metrics,
+                "metrics": copy.deepcopy(metrics),
             }
             for month_index, label, _length in year_metrics.NOLEAP_MONTHS
         ],
@@ -352,6 +378,26 @@ def minimal_envelope_admission(*, changed_values: int = 4) -> dict[str, Any]:
             "changed_values": changed_values,
             "unselected_restart_values_and_metadata_bit_identical": True,
         },
+        "unperturbed_restart_control": {
+            "status": "PASS_R345_UNPERTURBED_RESTART_CONTROL_ARM",
+            "admitted": True,
+            "run_dir": "/synthetic/unperturbed-control",
+            "binary_equal_arm_a": True,
+            "unperturbed_restart_control_input": {
+                "status": "PASS_R345_DAY1_RESTART_UNPERTURBED_CONTROL",
+                "restart_pair_byte_identical": True,
+            },
+        },
+        "restart_continuation_control": {
+            "status": "PASS_R345_UNPERTURBED_RESTART_CONTROL",
+            "baseline_arm": "/synthetic/nemo-baseline",
+            "control_arm": "/synthetic/unperturbed-control",
+            "restart_kt_first": 8,
+            "restart_kt_last": 2920,
+            "daily_restart_pairs_compared": 365,
+            "restart_files_compared": 730,
+            "all_daily_restarts_byte_identical": True,
+        },
     }
 
 
@@ -378,6 +424,14 @@ def run_plants() -> dict[str, Any]:
             minimal_year_report(sst=0.0, ke=0.0), admission)
     except GateError:
         zero_caught = True
+    partial_zero_caught = False
+    try:
+        partial_zero = minimal_year_report(sst=0.0, ke=0.001)
+        partial_zero["months"][5]["metrics"]["KE"]["relative_rms_fraction"] = 0.0
+        evaluate_decision188(
+            minimal_year_report(sst=0.0, ke=0.0), partial_zero, admission)
+    except GateError:
+        partial_zero_caught = True
     nonperturbed_caught = False
     try:
         evaluate_decision188(
@@ -385,18 +439,30 @@ def run_plants() -> dict[str, Any]:
             minimal_envelope_admission(changed_values=0))
     except GateError:
         nonperturbed_caught = True
+    control_caught = False
+    try:
+        no_control = minimal_envelope_admission()
+        no_control.pop("unperturbed_restart_control")
+        evaluate_decision188(
+            minimal_year_report(sst=0.0, ke=0.0), envelope_floor, no_control)
+    except GateError:
+        control_caught = True
     require(at_bar["verdict"] == "PASS", "at-bar plant did not pass")
     require(over_bar["verdict"] == "FAIL", "over-bar plant did not fail")
     require(inside_envelope["verdict"] == "PASS", "inside-envelope KE plant did not pass")
     require(over_floor["verdict"] == "FAIL", "KE floor plant did not fail")
     require(zero_caught, "zero-envelope plant did not refuse")
+    require(partial_zero_caught, "partial-zero-envelope plant did not refuse")
     require(nonperturbed_caught, "non-perturbed-envelope plant did not refuse")
+    require(control_caught, "missing unperturbed-control plant did not refuse")
     return {
         "fixed_bar_plant": "PASS",
         "ke_inside_3x_envelope_plant": "PASS",
         "ke_floor_plant": "PASS",
         "zero_envelope_refusal_plant": "PASS",
+        "partial_zero_envelope_refusal_plant": "PASS",
         "nonperturbed_envelope_refusal_plant": "PASS",
+        "missing_unperturbed_control_refusal_plant": "PASS",
     }
 
 
