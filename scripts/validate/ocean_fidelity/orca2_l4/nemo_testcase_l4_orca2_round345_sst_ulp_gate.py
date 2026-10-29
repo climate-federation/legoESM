@@ -827,41 +827,74 @@ def admit_existing_with_quarantine(
 def write_stub_outputs(
     run_dir: Path,
     *,
+    rank: int | None = None,
     control: bool = False,
     plant_unproduced_file: bool = False,
     plant_missing_stop: bool = False,
     plant_short_timestep: int | None = None,
 ) -> dict[str, Any]:
-    """Replace only NEMO using restart content from admitted arm A."""
+    """Replace only NEMO, preserving the staged restart input byte-for-byte."""
+    ranks = (0, 1) if rank is None else (rank,)
+    require(all(local_rank in (0, 1) for local_rank in ranks),
+            f"stub rank must be 0 or 1, got {rank}")
+    if control:
+        verify_control_input_manifest(run_dir)
+    else:
+        verify_perturbation_manifest(run_dir)
+    input_before = {
+        local_rank: common.sha256(
+            run_dir / f"ORCA2_{RESTART_KT:08d}_restart_{local_rank:04d}.nc"
+        )
+        for local_rank in ranks
+    }
     result = r342.write_stub_s4_year_outputs(
         run_dir,
+        rank=rank,
+        first_restart_kt=RESTART_KT + r342.DAILY_STOCK_STRIDE,
         plant_unproduced_file=plant_unproduced_file,
         plant_missing_stop=plant_missing_stop,
         plant_short_timestep=plant_short_timestep,
     )
     expected_steps, _stock = r342.parse_namelist_itend_stock(run_dir / "namelist_cfg")
-    for kt in range(RESTART_KT, expected_steps + 1, r342.DAILY_STOCK_STRIDE):
-        for rank in (0, 1):
-            name = f"ORCA2_{kt:08d}_restart_{rank:04d}.nc"
+    for kt in range(
+        RESTART_KT + r342.DAILY_STOCK_STRIDE,
+        expected_steps + 1,
+        r342.DAILY_STOCK_STRIDE,
+    ):
+        for local_rank in ranks:
+            name = f"ORCA2_{kt:08d}_restart_{local_rank:04d}.nc"
             shutil.copy2(BASELINE_ARM / name, run_dir / name)
-    if control:
-        copy_unperturbed_day1_restart_pair(run_dir)
-    else:
-        perturb_day1_restart_pair(run_dir)
-    ocean_output = run_dir / "ocean.output"
-    text = ocean_output.read_text(encoding="utf-8")
-    replacements = {
-        "cn_ocerst_in": f"ORCA2_{RESTART_KT:08d}_restart",
-        "ln_rstart": "T",
-        "nn_rstctl": "2",
-        "nn_it000": str(FIRST_RUN_STEP),
-    }
-    for name, value in replacements.items():
-        text, count = re.subn(
-            rf"(?im)(^\s*[^\n]*\b{name}\s*=\s*)\S+", rf"\g<1>{value}", text, count=1
+    input_after = {
+        local_rank: common.sha256(
+            run_dir / f"ORCA2_{RESTART_KT:08d}_restart_{local_rank:04d}.nc"
         )
-        require(count == 1, f"stub ocean.output lacks {name}")
-    ocean_output.write_text(text, encoding="utf-8")
+        for local_rank in ranks
+    }
+    require(input_after == input_before,
+            f"stub changed staged kt={RESTART_KT} restart input: "
+            f"before={input_before}, after={input_after}")
+    if control:
+        verify_control_input_manifest(run_dir)
+    else:
+        verify_perturbation_manifest(run_dir)
+
+    if rank in (None, 0):
+        ocean_output = run_dir / "ocean.output"
+        text = ocean_output.read_text(encoding="utf-8")
+        replacements = {
+            "cn_ocerst_in": f"ORCA2_{RESTART_KT:08d}_restart",
+            "ln_rstart": "T",
+            "nn_rstctl": "2",
+            "nn_it000": str(FIRST_RUN_STEP),
+        }
+        for name, value in replacements.items():
+            text, count = re.subn(
+                rf"(?im)(^\s*[^\n]*\b{name}\s*=\s*)\S+", rf"\g<1>{value}", text, count=1
+            )
+            require(count == 1, f"stub ocean.output lacks {name}")
+        ocean_output.write_text(text, encoding="utf-8")
+    result["input_restart_sha256_before"] = input_before
+    result["input_restart_sha256_after"] = input_after
     return result
 
 
@@ -1158,6 +1191,7 @@ def main(argv: list[str] | None = None) -> int:
     elif args.act_as_nemo_binary:
         result = write_stub_outputs(
             Path.cwd(),
+            rank=r342.stub_mpi_rank_from_env(),
             control=args.stub_control,
             plant_unproduced_file=args.plant_stub_unproduced_file,
             plant_missing_stop=args.plant_stub_missing_stop,

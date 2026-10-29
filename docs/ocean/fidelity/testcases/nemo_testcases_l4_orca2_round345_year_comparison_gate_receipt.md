@@ -11,9 +11,10 @@ Admitted arm-A day-1 restart SHA-256 values:
 Deterministic perturbed day-1 restart SHA-256 values:
 `bb25179365e776ae73e6ead9d2bad42e222f2094f687c22ede3b0eb3bcae1f01` and
 `0279bb4021ef1b557e178ef01b5c4cac732479102404871b557b984433fff8cf`.
-Disposition: **STOPPED_FOR_RECORD** — the corrected round-345 pipeline is
-verified; the full preflight must be repeated outside this sandbox before the
-control and perturbed NEMO continuations are acquired by the operator.
+Disposition: **STOPPED_FOR_RECORD** — the rank-local round-345 stub repair is
+verified without MPI; the full preflight must be repeated outside this sandbox
+before the control and perturbed NEMO continuations are acquired by the
+operator.
 
 ## Result
 
@@ -65,6 +66,20 @@ successful paired pipeline, safe overwrite refusal, a missing-STOP refusal
 retaining the binary and build snapshot, a failing in-place admission trap,
 ancestry refusal, and promotion of a passed pair from `refused/`.
 
+The operator's resume-3 preflight REFUSED in the retained control arm. This
+CONFIRMED two stub defects that invalidate the earlier direct-stub claim: both
+MPI processes entered the all-ranks writer concurrently, and the restart-arm
+writer overwrote the staged `kt = 8` restart that the continuation reads. The
+stub now requires an unambiguous launcher rank, gives shared outputs and the
+clean-stop signal to rank 0 only, and gives each mesh/restart file to its own
+rank. In both restart arms it hashes the staged `kt = 8` input before and after,
+leaves it unchanged, and writes only cadence outputs from `kt = 16` through
+`kt = 2920`. A no-MPI regression launches the generated executable as two
+concurrent processes with Open MPI and PMIx rank variables for both the control
+and perturbed arms; it separately proves rank 1 cannot change shared/rank-0
+files and applies the same inventory, completion, restart-content, control, and
+perturbation checks used by admission.
+
 Acquisition command:
 
 `scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round345_sst_ulp_acquisition/run.sh --run`
@@ -111,6 +126,12 @@ under `work/` with four control restart files compared in the two-day stub, a
 failing in-place admission quarantined, and both retained arms promoted, but
 the committed default preflight remains fail-closed and must be run by the
 operator in the acquisition environment.
+
+Resume 3 locally passes the new concurrent rank-env regression for both arms
+plus the existing restart-control test (3/3). This test reproduces both
+confirmed failure mechanisms against the pre-repair writer without invoking
+MPI or NEMO. The operator must re-run the complete control-plus-perturbed
+preflight because this sandbox still cannot launch `mpirun`.
 
 The per-receipt citation gate passes its one citation with zero failures and
 its shifted-line plant refuses. The exact default ORCA2 landing battery passes
