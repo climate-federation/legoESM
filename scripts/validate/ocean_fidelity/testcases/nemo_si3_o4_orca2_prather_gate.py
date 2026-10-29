@@ -15,13 +15,18 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from legoesm import constants as canonical_constants
 from legoesm.core.precision import PrecisionPolicy, set_policy
 from legoesm.ice.si3_orca2_state import (
     SI3AllPratherMoments,
     SI3ORCA2AdvectionGrid,
     SI3ORCA2StateConfig,
     SI3PratherMoments,
+    SI3State,
     si3_dyn_adv_pra_orca2,
+    si3_lbc_lnk_orca2,
+    si3_o4_step,
+    si3_var_zapsmall,
 )
 from scripts.validate.ocean_fidelity.testcases.nemo_si3_o1_orca2_sas_gate import max_ulp_diff
 
@@ -31,19 +36,22 @@ STEPS = (1, 2)
 
 GRID = (
     "e1u", "e2v", "r1_e1u", "r1_e2v", "e2u", "e1v", "e1e2t",
-    "r1_e1e2t", "tmask", "umask", "vmask", "u_ice", "v_ice",
+    "r1_e1e2t", "tmask", "umask", "vmask", "u_ice", "v_ice", "sss_m", "sst_m",
 )
 STATE = (
-    "ato_i", "h_i", "h_s", "h_ip", "v_i", "v_s", "sv_i", "oa_i",
-    "a_i", "a_ip", "v_ip", "v_il", "e_s", "e_i", "szv_i", "wfx_res",
-    "hfx_res", "sfx_res", "diag_adv_mass", "diag_adv_salt", "diag_adv_heat",
+    "ato_i", "h_i", "h_s", "h_ip", "h_il", "v_i", "v_s", "sv_i", "oa_i",
+    "a_i", "a_ip", "v_ip", "v_il", "t_su", "e_s", "e_i", "szv_i", "sz_i", "t_i", "t_s",
+    "at_i", "vt_i", "snwice_mass", "wfx_res", "hfx_res", "sfx_res", "diag_adv_mass",
+    "diag_adv_salt", "diag_adv_heat", "diag_trp_vi", "diag_trp_vs", "diag_trp_ei",
+    "diag_trp_es", "diag_trp_sv",
 )
 FAMILIES = ("ice", "sn", "a", "age", "sal", "ap", "vp", "vl", "c0", "e", "si")
 COMPONENTS = ("sx", "sy", "sxx", "syy", "sxy")
 MOMENTS = tuple(f"{family}.{component}" for family in FAMILIES for component in COMPONENTS)
-KINDS = {1: GRID, 2: STATE, 3: MOMENTS, 4: (), 5: STATE, 6: MOMENTS}
+KINDS = {1: GRID, 2: STATE, 3: MOMENTS, 4: (), 5: STATE, 6: MOMENTS,
+         7: STATE, 8: STATE, 9: STATE}
 
-# Used by the shared static read-set gate.  Entry kinds are 1--4; kinds 5--6
+# Used by the shared static read-set gate.  Entry kinds are 1--4; kinds 5--9
 # are outputs and therefore cannot justify a production read.
 PROJECTIONS = {(kind, name): name.replace(".", "_") for kind in KINDS for name in KINDS[kind]}
 REPO_ROOT = Path(__file__).resolve().parents[4]
@@ -56,14 +64,15 @@ def _refuse(message: str) -> ValueError:
 def _shape(kind: int, name: str, meta: dict[str, int]) -> tuple[int, ...]:
     full = (meta["jpi"], meta["jpj"])
     interior = (meta["nie0"] - meta["nis0"] + 1, meta["nje0"] - meta["njs0"] + 1)
-    if kind == 1 or name == "ato_i":
+    if kind == 1 or name in {"ato_i", "at_i", "vt_i", "snwice_mass"}:
         return full
-    if name in {"wfx_res", "hfx_res", "sfx_res", "diag_adv_mass", "diag_adv_salt", "diag_adv_heat"}:
+    if name in {"wfx_res", "hfx_res", "sfx_res", "diag_adv_mass", "diag_adv_salt", "diag_adv_heat",
+                "diag_trp_vi", "diag_trp_vs", "diag_trp_ei", "diag_trp_es", "diag_trp_sv"}:
         return interior
     family = name.split(".", 1)[0]
-    if family == "c0" or name == "e_s":
+    if family == "c0" or name in {"e_s", "t_s"}:
         return full + (meta["nlay_s"], meta["jpl"])
-    if family in {"e", "si"} or name in {"e_i", "szv_i"}:
+    if family in {"e", "si"} or name in {"e_i", "szv_i", "sz_i", "t_i"}:
         return full + (meta["nlay_i"], meta["jpl"])
     return full + (meta["jpl"],)
 
@@ -108,6 +117,8 @@ def read_record(path: str | Path, plant: str | None = None) -> dict[str, Any]:
         if stop > len(raw):
             raise _refuse(f"truncated field {name} in {p}")
         fields[name] = np.frombuffer(raw, dtype="<f8", count=count, offset=offset).copy().reshape(shape, order="F")
+        if not np.all(np.isfinite(fields[name])):
+            raise _refuse(f"non-finite field {name} in {p}")
         offset = stop
     if offset != len(raw):
         raise _refuse(f"undeclared trailing bytes in {p}")
@@ -160,13 +171,87 @@ def _crop_interior(a: np.ndarray, meta: dict[str, int]) -> np.ndarray:
     return a[h:meta["jpi"] - h, h:meta["jpj"] - h]
 
 
+RESIDUALS = ("wfx_res", "hfx_res", "sfx_res", "diag_adv_mass", "diag_adv_salt", "diag_adv_heat")
+TRANSPORT_DIAGNOSTICS = ("diag_trp_vi", "diag_trp_vs", "diag_trp_ei", "diag_trp_es", "diag_trp_sv")
+
+
+def _build_entry_state(entry: dict[str, np.ndarray], moments: dict[str, np.ndarray],
+                       grid_f: dict[str, np.ndarray], cfg: SI3ORCA2StateConfig,
+                       delayed_cfl: float) -> SI3State:
+    base = SI3State.zeros(entry["v_i"].shape[0], entry["v_i"].shape[1], config=cfg)
+    eqv = base.equivalent._replace(
+        h_i=jnp.asarray(entry["h_i"]), h_s=jnp.asarray(entry["h_s"]),
+        h_ip=jnp.asarray(entry["h_ip"]), h_il=jnp.asarray(entry["h_il"]),
+        sz_i=jnp.asarray(entry["sz_i"]), t_i=jnp.asarray(entry["t_i"]),
+        t_s=jnp.asarray(entry["t_s"]), a_i=jnp.asarray(entry["a_i"]),
+        v_s=jnp.asarray(entry["v_s"]),
+    )
+    agg = base.aggregated._replace(
+        ato_i=jnp.asarray(entry["ato_i"]), at_i=jnp.asarray(entry["at_i"]),
+        vt_i=jnp.asarray(entry["vt_i"]),
+    )
+    return base._replace(
+        v_i=jnp.asarray(entry["v_i"]), v_s=jnp.asarray(entry["v_s"]),
+        sv_i=jnp.asarray(entry["sv_i"]), a_i=jnp.asarray(entry["a_i"]),
+        t_su=jnp.asarray(entry["t_su"]), u_ice=jnp.asarray(grid_f["u_ice"]),
+        v_ice=jnp.asarray(grid_f["v_ice"]), oa_i=jnp.asarray(entry["oa_i"]),
+        a_ip=jnp.asarray(entry["a_ip"]), v_ip=jnp.asarray(entry["v_ip"]),
+        v_il=jnp.asarray(entry["v_il"]), e_s=jnp.asarray(entry["e_s"]),
+        e_i=jnp.asarray(entry["e_i"]), szv_i=jnp.asarray(entry["szv_i"]),
+        snwice_mass=jnp.asarray(entry["snwice_mass"]), prather=_moments(moments),
+        equivalent=eqv, aggregated=agg, cflice_delayed=jnp.asarray(delayed_cfl),
+    )
+
+
+def _state_and_diagnostics(state: SI3State, diagnostics: Any) -> dict[str, np.ndarray]:
+    out = {
+        "ato_i": np.asarray(state.aggregated.ato_i), "h_i": np.asarray(state.equivalent.h_i),
+        "h_s": np.asarray(state.equivalent.h_s), "h_ip": np.asarray(state.equivalent.h_ip),
+        "h_il": np.asarray(state.equivalent.h_il), "v_i": np.asarray(state.v_i),
+        "v_s": np.asarray(state.v_s), "sv_i": np.asarray(state.sv_i), "oa_i": np.asarray(state.oa_i),
+        "a_i": np.asarray(state.a_i), "a_ip": np.asarray(state.a_ip), "v_ip": np.asarray(state.v_ip),
+        "v_il": np.asarray(state.v_il), "t_su": np.asarray(state.t_su), "e_s": np.asarray(state.e_s),
+        "e_i": np.asarray(state.e_i), "szv_i": np.asarray(state.szv_i),
+        "sz_i": np.asarray(state.equivalent.sz_i), "t_i": np.asarray(state.equivalent.t_i),
+        "t_s": np.asarray(state.equivalent.t_s), "at_i": np.asarray(state.aggregated.at_i),
+        "vt_i": np.asarray(state.aggregated.vt_i), "snwice_mass": np.asarray(state.snwice_mass),
+    }
+    out.update({name: np.asarray(getattr(diagnostics, name)) for name in RESIDUALS + TRANSPORT_DIAGNOSTICS})
+    return out
+
+
+def _compare_stage(label: str, got: dict[str, np.ndarray], expected: dict[str, np.ndarray],
+                   meta: dict[str, int], wet: np.ndarray, seam: np.ndarray,
+                   fold: np.ndarray) -> tuple[int, dict[str, int], list[str]]:
+    failures: list[str] = []
+    maximum = 0
+    regional = {f"{label}_seam": 0, f"{label}_fold": 0}
+    for name in STATE:
+        actual = got[name]
+        ulp = max_ulp_diff(actual, expected[name], strict_signed_zero=True)
+        maximum = max(maximum, ulp)
+        if ulp:
+            failures.append(f"{label}.{name}={ulp}")
+        if name in RESIDUALS + TRANSPORT_DIAGNOSTICS:
+            h = meta["nn_hls"]
+            masks = ((seam[h:-h, h:-h] & wet[h:-h, h:-h]),
+                     (fold[h:-h, h:-h] & wet[h:-h, h:-h]))
+        else:
+            masks = (seam & wet, fold & wet)
+        for region_name, mask in zip((f"{label}_seam", f"{label}_fold"), masks, strict=True):
+            regional[region_name] = max(
+                regional[region_name],
+                max_ulp_diff(actual, expected[name], mask, strict_signed_zero=True),
+            )
+    return maximum, regional, failures
+
+
 def score_step(records: dict[tuple[int, int], dict[str, Any]], step: int, plant: str | None = None) -> dict[str, Any]:
-    """Replay a recorded entry through the production O4 path and demand 0 ULP."""
+    """Replay every registered O4 boundary and demand strict signed-zero 0 ULP."""
     grid_f = records[(step, 1)]["fields"]
     entry = records[(step, 2)]["fields"]
     moment_entry = records[(step, 3)]["fields"]
     cfl = records[(step, 4)]
-    expected = dict(records[(step, 5)]["fields"])
     meta = records[(step, 1)]["meta"]
     cfg = SI3ORCA2StateConfig.for_orca2_sas_ice(
         jpl=meta["jpl"], nlay_i=meta["nlay_i"], nlay_s=meta["nlay_s"],
@@ -174,8 +259,7 @@ def score_step(records: dict[tuple[int, int], dict[str, Any]], step: int, plant:
         ln_dynadv_pra=True, rDt_ice=float(cfl["scalars"][0]),
     )
     grid = SI3ORCA2AdvectionGrid(*(jnp.asarray(grid_f[name]) for name in GRID[:11]))
-    residual_names = ("wfx_res", "hfx_res", "sfx_res", "diag_adv_mass", "diag_adv_salt", "diag_adv_heat")
-    kwargs = {name: jnp.asarray(_pad_interior(entry[name], meta)) for name in residual_names}
+    kwargs = {name: jnp.asarray(_pad_interior(entry[name], meta)) for name in RESIDUALS}
     hooks: dict[str, Any] = {}
     if plant == "invert-sweep":
         hooks["_plant_invert_sweep_order"] = True
@@ -193,36 +277,89 @@ def score_step(records: dict[tuple[int, int], dict[str, Any]], step: int, plant:
         prather=_moments(moment_entry), grid=grid, config=cfg, hi_max_top=float(cfl["scalars"][1]),
         cflice_delayed=jnp.asarray(cfl["scalars"][3]), **kwargs, **hooks,
     )
-    state_names = STATE[:1] + STATE[4:15]
-    actual = {name: np.asarray(value) for name, value in zip(state_names, out[:12], strict=True)}
-    actual.update({name: _crop_interior(np.asarray(value), meta) for name, value in zip(residual_names, out[13:19], strict=True)})
-    actual.update({"h_i": entry["h_i"], "h_s": entry["h_s"], "h_ip": entry["h_ip"]})
+    actual_adv = {name: np.asarray(entry[name]) for name in STATE}
+    for name, value in zip(("ato_i", "v_i", "v_s", "sv_i", "oa_i", "a_i", "a_ip", "v_ip", "v_il",
+                            "e_s", "e_i", "szv_i"), out[:12], strict=True):
+        actual_adv[name] = np.asarray(value)
+    actual_adv.update({name: _crop_interior(np.asarray(value), meta)
+                       for name, value in zip(RESIDUALS, out[13:19], strict=True)})
     actual_moments = _flatten_moments(out[12])
-    if plant == "one-bit":
-        expected["v_i"] = expected["v_i"].copy()
-        expected["v_i"].flat[0] = np.nextafter(expected["v_i"].flat[0], np.inf)
+
+    zap = si3_var_zapsmall(
+        v_i=out[1], v_s=out[2], sv_i=out[3], oa_i=out[4], a_i=out[5], a_ip=out[6],
+        v_ip=out[7], v_il=out[8], t_su=jnp.asarray(entry["t_su"]),
+        h_i=jnp.asarray(entry["h_i"]), h_s=jnp.asarray(entry["h_s"]),
+        h_ip=jnp.asarray(entry["h_ip"]), h_il=jnp.asarray(entry["h_il"]),
+        e_s=out[9], e_i=out[10], szv_i=out[11], sz_i=jnp.asarray(entry["sz_i"]),
+        t_i=jnp.asarray(entry["t_i"]), t_s=jnp.asarray(entry["t_s"]),
+        at_i=jnp.asarray(entry["at_i"]), vt_i=jnp.asarray(entry["vt_i"]), ato_i=out[0],
+        wfx_res=out[13], hfx_res=out[14], sfx_res=out[15], rDt_ice=float(cfl["scalars"][0]),
+        sss_m=jnp.asarray(grid_f["sss_m"]), sst_m=jnp.asarray(grid_f["sst_m"]),
+        nn_hls=meta["nn_hls"], nn_icesal=4, rn_simin=cfg.rn_simin, rn_sinew=cfg.rn_sinew,
+        rt0=cfg.ice_constants.T0, rhoi=cfg.ice_constants.rho_ice,
+        rhos=cfg.ice_constants.rho_snow, rhow=canonical_constants.rho_water,
+    )
+    actual_zap = dict(actual_adv)
+    for name, value in zip(("v_i", "v_s", "sv_i", "oa_i", "a_i", "a_ip", "v_ip", "v_il", "t_su",
+                            "h_i", "h_s", "h_ip", "h_il", "e_s", "e_i", "szv_i", "sz_i", "t_i", "t_s",
+                            "at_i", "vt_i", "ato_i", "wfx_res", "hfx_res", "sfx_res"), zap, strict=True):
+        actual_zap[name] = _crop_interior(np.asarray(value), meta) if name in RESIDUALS else np.asarray(value)
+
+    entry_state = _build_entry_state(entry, moment_entry, grid_f, cfg, float(cfl["scalars"][3]))
+    final_state, final_diag = si3_o4_step(
+        entry_state, grid, kt=step, sss_m=jnp.asarray(grid_f["sss_m"]),
+        sst_m=jnp.asarray(grid_f["sst_m"]), rn_uice=0.5, rn_vice=0.5,
+        config=cfg, apply_halos=False, **hooks,
+    )
+    for name in TRANSPORT_DIAGNOSTICS:
+        actual_zap[name] = _crop_interior(np.asarray(getattr(final_diag, name)), meta)
+    actual_lbc = dict(actual_zap)
+    for name in ("a_i", "v_i", "v_s", "sv_i", "oa_i", "t_su", "e_i", "e_s", "szv_i"):
+        actual_lbc[name] = np.asarray(si3_lbc_lnk_orca2(
+            jnp.asarray(actual_zap[name]), "T", 1.0, nn_hls=meta["nn_hls"], ldfull=True))
+    actual_final = _state_and_diagnostics(final_state, final_diag)
+    for name in RESIDUALS + TRANSPORT_DIAGNOSTICS:
+        actual_final[name] = _crop_interior(actual_final[name], meta)
+
+    seam = np.zeros((meta["jpi"], meta["jpj"]), dtype=bool)
+    h = meta["nn_hls"]
+    seam[:2 * h, :] = True; seam[-2 * h:, :] = True
+    fold = np.zeros_like(seam); fold[:, -3 * h:] = True
+    wet = np.asarray(grid_f["tmask"]) > 0
+    if (not np.any(seam & wet) or not np.any(fold & wet) or
+            not np.any(seam[h:-h, h:-h] & wet[h:-h, h:-h]) or
+            not np.any(fold[h:-h, h:-h] & wet[h:-h, h:-h])):
+        raise _refuse("empty wet seam/fold score region")
+    expected_by_stage = {"adv": dict(records[(step, 5)]["fields"]),
+                         "zapsmall": dict(records[(step, 7)]["fields"]),
+                         "lbc": dict(records[(step, 8)]["fields"]),
+                         "step": dict(records[(step, 9)]["fields"])}
+    plant_stage = {"one-bit": "adv", "one-bit-zapsmall": "zapsmall",
+                   "one-bit-lbc": "lbc", "one-bit-step": "step"}.get(plant)
+    if plant_stage:
+        target = expected_by_stage[plant_stage]["v_i"].copy()
+        wet_indices = np.argwhere(wet)
+        i, j = wet_indices[len(wet_indices) // 2]
+        target[i, j, 0] = np.nextafter(target[i, j, 0], np.inf)
+        expected_by_stage[plant_stage]["v_i"] = target
     failures: list[str] = []
     max_ulp = 0
-    for name, got in actual.items():
-        ulp = max_ulp_diff(got, expected[name], strict_signed_zero=True)
-        max_ulp = max(max_ulp, ulp)
-        if ulp:
-            failures.append(f"{name}={ulp}")
+    regional_max: dict[str, int] = {}
+    for label, actual in (("adv", actual_adv), ("zapsmall", actual_zap),
+                          ("lbc", actual_lbc), ("step", actual_final)):
+        maximum, regional, stage_failures = _compare_stage(
+            label, actual, expected_by_stage[label], meta, wet, seam, fold)
+        max_ulp = max(max_ulp, maximum)
+        regional_max.update(regional)
+        failures.extend(stage_failures)
     expected_moments = records[(step, 6)]["fields"]
-    seam = np.zeros((meta["jpi"], meta["jpj"]), dtype=bool)
-    seam[:meta["nn_hls"], :] = True; seam[-meta["nn_hls"]:, :] = True
-    fold = np.zeros_like(seam); fold[:, -2 * meta["nn_hls"]:] = True
-    wet = np.asarray(grid_f["tmask"]) > 0
-    if not np.any(seam & wet) or not np.any(fold & wet):
-        raise _refuse("empty wet seam/fold score region")
-    regional_max = {"seam": 0, "fold": 0}
     for name, got in actual_moments.items():
         ulp = max_ulp_diff(got, expected_moments[name], strict_signed_zero=True)
         max_ulp = max(max_ulp, ulp)
         if ulp:
             failures.append(f"{name}={ulp}")
-        regional_max["seam"] = max(regional_max["seam"], max_ulp_diff(got, expected_moments[name], seam & wet, strict_signed_zero=True))
-        regional_max["fold"] = max(regional_max["fold"], max_ulp_diff(got, expected_moments[name], fold & wet, strict_signed_zero=True))
+        regional_max["adv_seam"] = max(regional_max["adv_seam"], max_ulp_diff(got, expected_moments[name], seam & wet, strict_signed_zero=True))
+        regional_max["adv_fold"] = max(regional_max["adv_fold"], max_ulp_diff(got, expected_moments[name], fold & wet, strict_signed_zero=True))
     if int(np.asarray(out[21])) != cfl["meta"]["icycle"]:
         failures.append("icycle")
     if max_ulp_diff(np.asarray(out[19]), np.asarray(cfl["scalars"][3]), strict_signed_zero=True):
@@ -360,7 +497,8 @@ def main() -> None:
     parser.add_argument("records", type=Path, nargs="?")
     parser.add_argument("--admit-evidence", type=Path)
     parser.add_argument("--expect-commit")
-    parser.add_argument("--plant", choices=("header", "truncation", "step", "one-bit", "invert-sweep", "wrong-fold-sign", "omit-subcycle-lbc",
+    parser.add_argument("--plant", choices=("header", "truncation", "step", "one-bit", "one-bit-zapsmall", "one-bit-lbc", "one-bit-step",
+                                             "invert-sweep", "wrong-fold-sign", "omit-subcycle-lbc",
                                              "producer", "binary", "checksum", "missing-complete", "error-log", "restart", "missing-frame", "wet-1ulp"))
     args = parser.parse_args()
     if args.admit_evidence:

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import re
 import subprocess
 from pathlib import Path
 
@@ -39,7 +41,7 @@ def independent_records(tmp_path_factory: pytest.TempPathFactory) -> Path:
 
 def test_o4_record_schema_and_reader_plants(records: Path) -> None:
     deck = load_deck(records)
-    assert len(deck) == 12
+    assert len(deck) == 18
     path = records / "o4_kind01_step0001_rank0000.bin"
     for plant in ("header", "truncation", "step"):
         with pytest.raises(ValueError, match="STATUS PLANT-FIRED"):
@@ -48,7 +50,8 @@ def test_o4_record_schema_and_reader_plants(records: Path) -> None:
 
 def test_o4_production_scorer_and_plants(records: Path) -> None:
     assert score_deck(records)["status"] == "PASS"
-    for plant in ("one-bit", "invert-sweep", "wrong-fold-sign", "omit-subcycle-lbc"):
+    for plant in ("one-bit", "one-bit-zapsmall", "one-bit-lbc", "one-bit-step",
+                  "invert-sweep", "wrong-fold-sign", "omit-subcycle-lbc"):
         with pytest.raises(ValueError, match="STATUS PLANT-FIRED"):
             score_deck(records, plant)
 
@@ -62,7 +65,7 @@ def test_o4_stub_records_are_independent_and_score(independent_records: Path) ->
 
 def test_o4_shared_extent_gate_and_plants() -> None:
     deck = DeckDimensions(184, 152, 31, 2)
-    assert validate_writer(PPSRC, HERE/"o4_prather_writer.F90", deck)["arrays_checked"] == 89
+    assert validate_writer(PPSRC, HERE/"o4_prather_writer.F90", deck)["arrays_checked"] == 104
     for plant in ("missing-allocation", "writer-mode", "dummy-actual"):
         with pytest.raises(ExtentError, match="STATUS PLANT-FIRED"):
             validate_writer(PPSRC, HERE/"o4_prather_writer.F90", deck, plant)
@@ -77,9 +80,27 @@ def test_o4_shared_readset_registration_and_plant() -> None:
 
 
 def test_o4_patch_and_driver_are_read_only_preflight_tools() -> None:
-    source = Path("/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/src/ICE/icedyn_adv_pra.F90")
-    subprocess.run(["patch", "--dry-run", "--batch", "--fuzz=0", str(source), str(HERE/"icedyn_adv_pra_o4.patch")], check=True)
+    source_root = Path("/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/src/ICE")
+    groups = {
+        "icedyn_adv_pra": ("icedyn_adv_pra_o4.patch", "icedyn_adv_pra_o4_use.patch", "icedyn_adv_pra_o4_capture.patch"),
+        "icedyn_adv": ("icedyn_adv_o4.patch",), "icedyn": ("icedyn_o4.patch",),
+        "icestp": ("icestp_o4.patch", "icestp_o4_capture.patch"),
+    }
+    for unit, patches in groups.items():
+        for patch in patches:
+            subprocess.run(["patch", "--dry-run", "--batch", "--fuzz=0",
+                            str(source_root/f"{unit}.F90"), str(HERE/patch)], check=True)
     subprocess.run(["bash", "-n", str(HERE/"run.sh")], check=True)
     text = (HERE/"run.sh").read_text()
     assert "--preflight-only" in text and "write_manifest" in text
     assert "run.user.stdout.log" in text and "run.user.stderr.log" in text
+
+
+def test_o4_receipt_digests_rehash_exact_files() -> None:
+    receipt = (ROOT/"docs/ice/fidelity/si3_r25_o4_acquisition_receipt.md").read_text()
+    rows = re.findall(r"^SHA256 ([^ ]+) ([0-9a-f]{64})$", receipt, re.MULTILINE)
+    assert len(rows) >= 6
+    for relative, expected in rows:
+        path = ROOT/relative
+        assert path.is_file(), relative
+        assert hashlib.sha256(path.read_bytes()).hexdigest() == expected, relative

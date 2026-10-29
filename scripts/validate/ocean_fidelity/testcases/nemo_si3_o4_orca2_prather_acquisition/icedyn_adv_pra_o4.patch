@@ -1,97 +1,24 @@
 --- icedyn_adv_pra.F90
 +++ icedyn_adv_pra.F90
-@@ -25,6 +25,10 @@
-    USE lib_mpp        ! MPP library
-    USE lbclnk         ! lateral boundary conditions (or mpp links)
+@@ -31,6 +31,21 @@
  
+    PUBLIC   ice_dyn_adv_pra   ! called by icedyn_adv
+    PUBLIC   adv_pra_init      ! called by icedyn_adv
 +   ! O4_OBSERVER_BEGIN
-+   USE o4_prather_writer, ONLY : o4_set_context, o4_grid, o4_state, o4_moments, o4_cfl
++   ! Read-only visibility for the caller-boundary observer.  No executable
++   ! statement is inserted into this production routine or any of its helpers.
++   PUBLIC   sxice, syice, sxxice, syyice, sxyice
++   PUBLIC   sxsn , sysn , sxxsn , syysn , sxysn
++   PUBLIC   sxa  , sya  , sxxa  , syya  , sxya
++   PUBLIC   sxsal, sysal, sxxsal, syysal, sxysal
++   PUBLIC   sxage, syage, sxxage, syyage, sxyage
++   PUBLIC   sxc0 , syc0 , sxxc0 , syyc0 , sxyc0
++   PUBLIC   sxe  , sye  , sxxe  , syye  , sxye
++   PUBLIC   sxsi , sysi , sxxsi , syysi , sxysi
++   PUBLIC   sxap , syap , sxxap , syyap , sxyap
++   PUBLIC   sxvp , syvp , sxxvp , syyvp , sxyvp
++   PUBLIC   sxvl , syvl , sxxvl , syyvl , sxyvl
 +   ! O4_OBSERVER_END
-+
-    IMPLICIT NONE
-    PRIVATE
  
-@@ -46,4 +50,9 @@
-    REAL(wp), ALLOCATABLE, SAVE, DIMENSION(:,:,:)   ::   sxvl , syvl , sxxvl , syyvl , sxyvl    ! melt pond lid volume
- 
-+   ! O4_OBSERVER_BEGIN
-+   REAL(wp), SAVE :: o4_zcfl_current, o4_zcfl_delayed
-+   INTEGER, SAVE :: o4_icycle
-+   ! O4_OBSERVER_END
-+
-    !! * Substitutions
- #  include "do_loop_substitute.h90"
-@@ -55,6 +64,39 @@
- CONTAINS
- 
-+   ! O4_OBSERVER_BEGIN
-+   SUBROUTINE ice_dyn_adv_pra( kt, pu_ice, pv_ice, ph_i, ph_s, ph_ip, pato_i, pv_i, pv_s, psv_i, &
-+      & poa_i, pa_i, pa_ip, pv_ip, pv_il, pe_s, pe_i, pszv_i )
-+      INTEGER, INTENT(in) :: kt
-+      REAL(wp), DIMENSION(:,:), INTENT(in) :: pu_ice, pv_ice
-+      REAL(wp), DIMENSION(:,:,:), INTENT(in) :: ph_i, ph_s, ph_ip
-+      REAL(wp), DIMENSION(:,:), INTENT(inout) :: pato_i
-+      REAL(wp), DIMENSION(:,:,:), INTENT(inout) :: pv_i,pv_s,psv_i,poa_i,pa_i,pa_ip,pv_ip,pv_il
-+      REAL(wp), DIMENSION(:,:,:,:), INTENT(inout) :: pe_s,pe_i,pszv_i
-+      CALL o4_set_context( kt, narea-1, jpi, jpj, jpl, nlay_i, nlay_s, nn_hls, &
-+         & NIS0, NIE0, NJS0, NJE0, rDt_ice, hi_max(jpl) )
-+      CALL o4_grid( e1u,e2v,r1_e1u,r1_e2v,e2u,e1v,e1e2t,r1_e1e2t, &
-+         & tmask(:,:,1),umask(:,:,1),vmask(:,:,1),pu_ice,pv_ice )
-+      CALL o4_state( 2,pato_i,ph_i,ph_s,ph_ip,pv_i,pv_s,psv_i,poa_i,pa_i,pa_ip,pv_ip,pv_il, &
-+         & pe_s,pe_i,pszv_i,wfx_res,hfx_res,sfx_res,diag_adv_mass,diag_adv_salt,diag_adv_heat )
-+      CALL o4_moments( 3,sxice,syice,sxxice,syyice,sxyice,sxsn,sysn,sxxsn,syysn,sxysn, &
-+         & sxa,sya,sxxa,syya,sxya,sxage,syage,sxxage,syyage,sxyage, &
-+         & sxsal,sysal,sxxsal,syysal,sxysal,sxap,syap,sxxap,syyap,sxyap, &
-+         & sxvp,syvp,sxxvp,syyvp,sxyvp,sxvl,syvl,sxxvl,syyvl,sxyvl, &
-+         & sxc0,syc0,sxxc0,syyc0,sxyc0,sxe,sye,sxxe,syye,sxye,sxsi,sysi,sxxsi,syysi,sxysi )
-+      CALL ice_dyn_adv_pra_physics( kt,pu_ice,pv_ice,ph_i,ph_s,ph_ip,pato_i,pv_i,pv_s,psv_i, &
-+         & poa_i,pa_i,pa_ip,pv_ip,pv_il,pe_s,pe_i,pszv_i )
-+      CALL o4_cfl( o4_zcfl_current,o4_zcfl_delayed,o4_icycle )
-+      CALL o4_state( 5,pato_i,ph_i,ph_s,ph_ip,pv_i,pv_s,psv_i,poa_i,pa_i,pa_ip,pv_ip,pv_il, &
-+         & pe_s,pe_i,pszv_i,wfx_res,hfx_res,sfx_res,diag_adv_mass,diag_adv_salt,diag_adv_heat )
-+      CALL o4_moments( 6,sxice,syice,sxxice,syyice,sxyice,sxsn,sysn,sxxsn,syysn,sxysn, &
-+         & sxa,sya,sxxa,syya,sxya,sxage,syage,sxxage,syyage,sxyage, &
-+         & sxsal,sysal,sxxsal,syysal,sxysal,sxap,syap,sxxap,syyap,sxyap, &
-+         & sxvp,syvp,sxxvp,syyvp,sxyvp,sxvl,syvl,sxxvl,syyvl,sxyvl, &
-+         & sxc0,syc0,sxxc0,syyc0,sxyc0,sxe,sye,sxxe,syye,sxye,sxsi,sysi,sxxsi,syysi,sxysi )
-+   END SUBROUTINE ice_dyn_adv_pra
-+   ! O4_OBSERVER_END
-+
--   SUBROUTINE ice_dyn_adv_pra(         kt, pu_ice, pv_ice, ph_i, ph_s, ph_ip,  &
-+   SUBROUTINE ice_dyn_adv_pra_physics( kt, pu_ice, pv_ice, ph_i, ph_s, ph_ip,  &
-       &                        pato_i, pv_i, pv_s, psv_i, poa_i, pa_i, pa_ip, pv_ip, pv_il, pe_s, pe_i, pszv_i )
-       !!----------------------------------------------------------------------
-       !!                **  routine ice_dyn_adv_pra  **
-@@ -91,5 +95,8 @@
-       REAL(wp) ::   zati2
-       REAL(wp) ::   zcfl
-+      ! O4_OBSERVER_BEGIN
-+      REAL(wp) ::   zcfl_current
-+      ! O4_OBSERVER_END
-       REAL(wp), DIMENSION(A2D(0))         ::   zati1
-       REAL(wp), DIMENSION(jpi,jpj)        ::   zudy, zvdx
-       REAL(wp), DIMENSION(jpi,jpj)        ::   zh_i, zh_s, zhi_max, zhs_max, zhip_max, zsi_max
-@@ -119,5 +126,8 @@
-       zcfl =            MAXVAL( ABS( pu_ice(:,:) ) * rDt_ice * r1_e1u(:,:) )
-       zcfl = MAX( zcfl, MAXVAL( ABS( pv_ice(:,:) ) * rDt_ice * r1_e2v(:,:) ) )
-+      ! O4_OBSERVER_BEGIN
-+      zcfl_current = zcfl
-+      ! O4_OBSERVER_END
- 
-       CALL mpp_max( 'icedyn_adv_pra', zcfl, cdelay = 'cflice' )
- 
-@@ -133,6 +163,11 @@
- !!$      !!test clem      
-       zdt = rDt_ice / REAL(icycle)
-       z1_dt = 1._wp / zdt
-+      ! O4_OBSERVER_BEGIN
-+      o4_zcfl_current = zcfl_current
-+      o4_zcfl_delayed = zcfl
-+      o4_icycle = icycle
-+      ! O4_OBSERVER_END
- 
-       ! --- transport --- !
-       zudy(:,:) = pu_ice(:,:) * e2u(:,:)
-@@ -496,1 +568,1 @@
--   END SUBROUTINE ice_dyn_adv_pra
-+   END SUBROUTINE ice_dyn_adv_pra_physics
+    ! Moments for advection
+    REAL(wp), ALLOCATABLE, SAVE, DIMENSION(:,:,:)   ::   sxice, syice, sxxice, syyice, sxyice   ! ice thickness

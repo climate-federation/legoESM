@@ -1,0 +1,11 @@
+--- icestp.F90
++++ icestp.F90
+@@ -78,5 +78,8 @@
+    USE timing         ! Timing
+    USE prtctl         ! Print control
++   ! O4_OBSERVER_BEGIN
++   USE o4_prather_writer, ONLY : o4_capture_stage
++   ! O4_OBSERVER_END
+ 
+    IMPLICIT NONE
+    PRIVATE

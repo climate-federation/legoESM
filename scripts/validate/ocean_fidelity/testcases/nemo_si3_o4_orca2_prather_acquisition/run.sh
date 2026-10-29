@@ -36,7 +36,14 @@ readonly READSET=$here/../nemo_si3_o4_orca2_prather_readset.py
 readonly PASSIVITY=$here/../nemo_si3_o4_orca2_prather_passivity.py
 readonly EXTENTS=$here/../../orca2_l4/nemo_acquisition_extents.py
 readonly WRITER=$here/o4_prather_writer.F90
-readonly PATCH=$here/icedyn_adv_pra_o4.patch
+readonly TAP=$here/o4_prather_tap.F90
+readonly PATCH_PRA_PUBLIC=$here/icedyn_adv_pra_o4.patch
+readonly PATCH_PRA_USE=$here/icedyn_adv_pra_o4_use.patch
+readonly PATCH_PRA_CAPTURE=$here/icedyn_adv_pra_o4_capture.patch
+readonly PATCH_ADV=$here/icedyn_adv_o4.patch
+readonly PATCH_DYN=$here/icedyn_o4.patch
+readonly PATCH_STP=$here/icestp_o4.patch
+readonly PATCH_STP_CAPTURE=$here/icestp_o4_capture.patch
 readonly STUB_WRITER=$here/write_stub_records.py
 readonly STUB_NEMO=$here/stub_nemo.sh
 readonly STUB_MPIRUN=$here/stub_mpirun.sh
@@ -173,20 +180,33 @@ preprocess() {
 prepare_patched_ppsrc() {
   local scratch=$1
   mkdir -p "$scratch"
-  cp "$NEMO_SOURCE_ROOT/src/ICE/icedyn_adv_pra.F90" "$scratch/icedyn_adv_pra.F90"
-  patch --batch --fuzz=0 "$scratch/icedyn_adv_pra.F90" "$PATCH" >/dev/null
-  preprocess "$scratch/icedyn_adv_pra.F90" "$scratch/icedyn_adv_pra.f90"
+  local unit
+  for unit in icedyn_adv_pra icedyn_adv icedyn icestp; do
+    cp "$NEMO_SOURCE_ROOT/src/ICE/$unit.F90" "$scratch/$unit.F90"
+  done
+  patch --batch --fuzz=0 "$scratch/icedyn_adv_pra.F90" "$PATCH_PRA_PUBLIC" >/dev/null
+  patch --batch --fuzz=0 "$scratch/icedyn_adv_pra.F90" "$PATCH_PRA_USE" >/dev/null
+  patch --batch --fuzz=0 "$scratch/icedyn_adv_pra.F90" "$PATCH_PRA_CAPTURE" >/dev/null
+  patch --batch --fuzz=0 "$scratch/icedyn_adv.F90" "$PATCH_ADV" >/dev/null
+  patch --batch --fuzz=0 "$scratch/icedyn.F90" "$PATCH_DYN" >/dev/null
+  patch --batch --fuzz=0 "$scratch/icestp.F90" "$PATCH_STP" >/dev/null
+  patch --batch --fuzz=0 "$scratch/icestp.F90" "$PATCH_STP_CAPTURE" >/dev/null
+  for unit in icedyn_adv_pra icedyn_adv icedyn icestp; do
+    preprocess "$scratch/$unit.F90" "$scratch/$unit.f90"
+  done
 }
 
 same_program_gate() {
   local observed=$1 reference=$2 plant=${3:-none}
-  "$PY" - "$observed" "$reference" "$plant" <<'PY'
+  "$PY" - "$observed" "$reference" "$plant" "$here" <<'PY'
 import re,sys
 from pathlib import Path
-observed=Path(sys.argv[1]).read_text().splitlines(); expected_observers=list(observed)
-reference=Path(sys.argv[2]).read_text().splitlines(); plant=sys.argv[3]
-if plant == 'unmarked': observed.insert(len(observed)//2,'pato_i(1,1)=pato_i(1,1)+1._wp')
-if plant == 'marked-content': observed=[line.replace('CALL o4_cfl(','CALL o4_cfl_changed(',1) for line in observed]
+observed_root,reference_root,plant,here=Path(sys.argv[1]),Path(sys.argv[2]),sys.argv[3],Path(sys.argv[4])
+units={
+ 'icedyn_adv_pra':('icedyn_adv_pra_o4_use.patch','icedyn_adv_pra_o4.patch','icedyn_adv_pra_o4_capture.patch'),
+ 'icedyn_adv':('icedyn_adv_o4.patch',),'icedyn':('icedyn_o4.patch',),
+ 'icestp':('icestp_o4.patch','icestp_o4_capture.patch'),
+}
 def split(lines):
     out=[]; inside=False; blocks=0
     observer=[]
@@ -198,36 +218,53 @@ def split(lines):
             if not inside: raise SystemExit('STATUS PLANT-FIRED: unmatched observer marker')
             inside=False; observer.append(line.strip()); continue
         if inside: observer.append(re.sub(r'\s+',' ',line.strip()))
-        else: out.append(line.replace('ice_dyn_adv_pra_physics','ice_dyn_adv_pra'))
-    if inside or blocks != 6: raise SystemExit(f'STATUS PLANT-FIRED: observer block count {blocks}')
+        else: out.append(line)
+    if inside: raise SystemExit('STATUS PLANT-FIRED: unterminated observer marker')
     return [re.sub(r'\s+',' ',x.strip()) for x in out if x.strip()],observer
-body,observer=split(observed); _expected_body,expected=split(expected_observers)
-if observer != expected: raise SystemExit('STATUS PLANT-FIRED: marked observer insertion differs from expected real ppsrc')
-if body != [re.sub(r'\s+',' ',x.strip()) for x in reference if x.strip()]:
-    raise SystemExit('STATUS PLANT-FIRED: observer-stripped ppsrc differs from real reference ppsrc')
-print('PASS_REAL_PPSRC_SAME_PROGRAM')
+for index,(unit,patches) in enumerate(units.items()):
+    observed=(observed_root/f'{unit}.f90').read_text().splitlines()
+    reference=(reference_root/f'{unit}.f90').read_text().splitlines()
+    if plant == 'unmarked' and index == 0:
+        observed.insert(len(observed)//2,'pato_i(1,1)=pato_i(1,1)+1._wp')
+    if plant == 'marked-content' and index == 0:
+        observed=[line.replace('o4_capture_cfl','o4_capture_cfl_changed',1) for line in observed]
+    body,observer=split(observed)
+    added=[]
+    for patch in patches:
+        added.extend(line[1:] for line in (here/patch).read_text().splitlines()
+                     if line.startswith('+') and not line.startswith('+++'))
+    _discard,expected=split(added)
+    blocks=sum('! O4_OBSERVER_BEGIN' in line for line in observed)
+    want_blocks=len(patches) if unit!='icedyn_adv' and unit!='icedyn' else 3
+    if blocks != want_blocks: raise SystemExit(f'STATUS PLANT-FIRED: {unit} observer block count {blocks}')
+    if observer != expected: raise SystemExit(f'STATUS PLANT-FIRED: {unit} marked observer insertion differs from patches')
+    ref=[re.sub(r'\s+',' ',x.strip()) for x in reference if x.strip()]
+    if body != ref: raise SystemExit(f'STATUS PLANT-FIRED: {unit} observer-stripped whole unit differs')
+print('PASS_REAL_PPSRC_WHOLE_UNITS_SAME_PROGRAM')
 PY
 }
 
 placement_gate() {
-  local ppsrc=$1 plant=${2:-none}
-  "$PY" - "$ppsrc" "$plant" <<'PY'
+  local ppsrc_dir=$1 plant=${2:-none}
+  "$PY" - "$ppsrc_dir" "$plant" <<'PY'
 import sys
 from pathlib import Path
-text=Path(sys.argv[1]).read_text(); plant=sys.argv[2]
-pairs=[('entry','CALL o4_state( 2','CALL ice_dyn_adv_pra_physics('),
- ('current-cfl','zcfl = MAX( zcfl','zcfl_current = zcfl'),
- ('current-before-delay','zcfl_current = zcfl',"CALL mpp_max( 'icedyn_adv_pra'"),
- ('delayed-cfl',"IF    ( zcfl > 1.5 )",'o4_zcfl_current = zcfl_current'),
- ('delayed-after-timestep','z1_dt = 1._wp / zdt','o4_icycle = icycle'),
- ('delayed-before-loop','o4_icycle = icycle','zudy(:,:) = pu_ice(:,:)'),
- ('exit','CALL ice_dyn_adv_pra_physics(','CALL o4_cfl('),
- ('exit-state','CALL o4_cfl(','CALL o4_state( 5')]
-for name,a,b in pairs:
-    ai=text.find(a); bi=text.find(b,ai+1)
-    if plant == name: ai=bi+1
-    if ai < 0 or bi < 0 or ai >= bi: raise SystemExit(f'STATUS PLANT-FIRED: placement {name}: {a} !< {b}')
-print('PASS_O4_ENTRY_INBODY_EXIT_PLACEMENT')
+root=Path(sys.argv[1]); plant=sys.argv[2]
+checks={
+ 'adv-entry':('icedyn_adv','SELECT CASE','CALL o4_capture_adv( 2, kt )','CALL ice_dyn_adv_pra('),
+ 'adv-exit':('icedyn_adv','CALL ice_dyn_adv_pra(','CALL o4_capture_adv( 5, kt )','END SELECT'),
+ 'cfl-exit':('icedyn_adv_pra','! --- Deallocate arrays --- !','CALL o4_capture_cfl( zcfl, icycle )','END SUBROUTINE ice_dyn_adv_pra'),
+ 'zapsmall-exit':('icedyn','CALL ice_var_zapsmall','CALL o4_capture_stage( 7, kt )','END SELECT'),
+ 'lbc-exit':('icedyn',"CALL lbc_lnk( 'icedyn'","CALL o4_capture_stage( 8, kt )",'IF( ln_timing'),
+ 'step-exit':('icestp','CALL ice_update_flx','CALL o4_capture_stage( 9, kt )','CALL ice_dia'),
+}
+for name,(unit,left,capture,right) in checks.items():
+    text=(root/f'{unit}.f90').read_text(); ci=text.find(capture)
+    li=text.rfind(left,0,ci); ri=text.find(right,ci+1)
+    if plant == name: ci=ri+1
+    if li < 0 or ci < 0 or ri < 0 or not li < ci < ri:
+        raise SystemExit(f'STATUS PLANT-FIRED: placement {name}: {left} !< {capture} !< {right}')
+print('PASS_O4_ALL_CAPTURE_PPSRC_PLACEMENTS')
 PY
 }
 
@@ -238,12 +275,13 @@ compile_bounds_fixture() {
   flags_text=$(production_flags); read -r -a flags <<< "$flags_text"
   mkdir -p "$scratch/mod" "$scratch/records/o4_prather_records"
   "$FC" -c -cpp "${flags[@]}" -fcheck=bounds -J"$scratch/mod" "$BOUNDS_STUBS" -o "$scratch/stubs.o"
-  "$FC" -c -cpp "${flags[@]}" -fcheck=bounds -I"$scratch/mod" -J"$scratch/mod" "$WRITER" -o "$scratch/writer.o"
+  "$FC" -c -cpp "${flags[@]}" -fcheck=bounds -I"$scratch/mod" -J"$scratch/mod" "$TAP" -o "$scratch/tap.o"
   "$FC" -c "${flags[@]}" -fcheck=bounds -I"$scratch/mod" -J"$scratch/mod" "$scratch/../patched/icedyn_adv_pra.f90" -o "$scratch/icedyn_adv_pra.o"
+  "$FC" -c -cpp "${flags[@]}" -fcheck=bounds -I"$scratch/mod" -J"$scratch/mod" "$WRITER" -o "$scratch/writer.o"
   "$FC" -c -cpp "${flags[@]}" -fcheck=bounds -I"$scratch/mod" -J"$scratch/mod" "$BOUNDS_DRIVER" -o "$scratch/driver.o"
-  "$FC" -fcheck=bounds "$scratch/stubs.o" "$scratch/writer.o" "$scratch/icedyn_adv_pra.o" "$scratch/driver.o" -o "$scratch/o4_bounds"
+  "$FC" -fcheck=bounds "$scratch/stubs.o" "$scratch/tap.o" "$scratch/icedyn_adv_pra.o" "$scratch/writer.o" "$scratch/driver.o" -o "$scratch/o4_bounds"
   (cd "$scratch/records" && ../o4_bounds)
-  [[ $(find "$scratch/records/o4_prather_records" -type f | wc -l) -eq 12 ]] || refuse 'patched O4 bounds fixture did not emit twelve observer frames'
+  [[ $(find "$scratch/records/o4_prather_records" -type f | wc -l) -eq 18 ]] || refuse 'patched O4 bounds fixture did not emit eighteen observer frames'
   "$PY" - "$scratch/records/o4_prather_records" <<'PY'
 import sys
 from pathlib import Path
@@ -271,7 +309,7 @@ stub_score_and_plants() {
   "$PY" - "$root/o4_prather_records" "$root/nontrivial_records" <<'PY'
 import sys
 from scripts.validate.ocean_fidelity.testcases.nemo_si3_o4_orca2_prather_gate import score_deck
-for records,plants in ((sys.argv[1],('header','truncation','step','one-bit')),
+for records,plants in ((sys.argv[1],('header','truncation','step','one-bit','one-bit-zapsmall','one-bit-lbc','one-bit-step')),
                        (sys.argv[2],('invert-sweep','wrong-fold-sign','omit-subcycle-lbc'))):
     for plant in plants:
         try: score_deck(records,plant)
@@ -299,7 +337,8 @@ import hashlib,json,sys
 from pathlib import Path
 ev,repo,here,commit,fixture=Path(sys.argv[1]),Path(sys.argv[2]),Path(sys.argv[3]),sys.argv[4],bool(int(sys.argv[5]))
 sha=lambda p:hashlib.sha256(p.read_bytes()).hexdigest()
-sources=[here/'run.sh',here/'stub_nemo.sh',here/'stub_mpirun.sh',here/'write_stub_records.py',here/'o4_prather_writer.F90',here/'icedyn_adv_pra_o4.patch',here/'o4_bounds_stubs.F90',here/'o4_bounds_driver.F90',here.parent/'nemo_si3_o4_orca2_prather_gate.py',here.parent/'nemo_si3_o4_orca2_prather_passivity.py',here.parent/'nemo_si3_o4_orca2_prather_readset.py',here.parents[1]/'orca2_l4/nemo_acquisition_extents.py']
+sources=[here/name for name in ('run.sh','stub_nemo.sh','stub_mpirun.sh','write_stub_records.py','o4_prather_writer.F90','o4_prather_tap.F90','icedyn_adv_pra_o4.patch','icedyn_adv_pra_o4_use.patch','icedyn_adv_pra_o4_capture.patch','icedyn_adv_o4.patch','icedyn_o4.patch','icestp_o4.patch','icestp_o4_capture.patch','o4_bounds_stubs.F90','o4_bounds_driver.F90')]
+sources += [here.parent/'nemo_si3_o4_orca2_prather_gate.py',here.parent/'nemo_si3_o4_orca2_prather_passivity.py',here.parent/'nemo_si3_o4_orca2_prather_readset.py',here.parents[1]/'orca2_l4/nemo_acquisition_extents.py']
 deck=ev/'manifest/production_deck'; inputs=ev/'input'
 manifest={'schema':'si3-o4-prather-v2','producer_commit':commit,'fixture':fixture,
  'binary_paths':{'reference':'manifest/binaries/nemo.ref','recording':'manifest/binaries/nemo.rec'},
@@ -307,7 +346,7 @@ manifest={'schema':'si3-o4-prather-v2','producer_commit':commit,'fixture':fixtur
  'source_sha256':{str(p.relative_to(repo)):sha(p) for p in sources},
  'deck_sha256':{str(p.relative_to(ev)):sha(p) for p in sorted(deck.iterdir())},
  'input_sha256':{str(p.relative_to(ev)):sha(p) for p in sorted(inputs.iterdir()) if p.is_file()},
- 'planned_records':[f'o4_kind{k:02d}_step{s:04d}_rank0000.bin' for s in (1,2) for k in range(1,7)],
+ 'planned_records':[f'o4_kind{k:02d}_step{s:04d}_rank0000.bin' for s in (1,2) for k in range(1,10)],
  'steps':[1,2],'ranks':1,'nn_stock':2,
  'dynamics':{'ln_dynALL':False,'ln_dynRHGADV':False,'ln_dynADV1D':False,'ln_dynADV2D':True,'ln_adv_Pra':True,'ln_adv_UMx':False,'rn_uice':0.5,'rn_vice':0.5},
  'retention':'failed evidence and both builds retained; rerun uses --move-aside-builds'}
@@ -361,18 +400,18 @@ run_preflight() {
   fi
   printf 'PREFLIGHT 2/10 fuzz-zero patch and real recorded CPP output\n'; prepare_patched_ppsrc "$scratch/patched"
   printf 'PREFLIGHT 3/10 like-with-like same-program proof and plants\n'
-  same_program_gate "$scratch/patched/icedyn_adv_pra.f90" "$BASE_BLD/ppsrc/nemo/icedyn_adv_pra.f90"
-  expect_refusal same_program_gate "$scratch/patched/icedyn_adv_pra.f90" "$BASE_BLD/ppsrc/nemo/icedyn_adv_pra.f90" unmarked
-  expect_refusal same_program_gate "$scratch/patched/icedyn_adv_pra.f90" "$BASE_BLD/ppsrc/nemo/icedyn_adv_pra.f90" marked-content
-  printf 'PREFLIGHT 4/10 entry/in-body/exit placement and one plant per capture\n'; placement_gate "$scratch/patched/icedyn_adv_pra.f90"
-  for plant in entry current-cfl current-before-delay delayed-cfl delayed-after-timestep delayed-before-loop exit exit-state; do expect_refusal placement_gate "$scratch/patched/icedyn_adv_pra.f90" "$plant"; done
+  same_program_gate "$scratch/patched" "$BASE_BLD/ppsrc/nemo"
+  expect_refusal same_program_gate "$scratch/patched" "$BASE_BLD/ppsrc/nemo" unmarked
+  expect_refusal same_program_gate "$scratch/patched" "$BASE_BLD/ppsrc/nemo" marked-content
+  printf 'PREFLIGHT 4/10 caller-boundary placement and one misplacement plant per capture\n'; placement_gate "$scratch/patched"
+  for plant in adv-entry adv-exit cfl-exit zapsmall-exit lbc-exit step-exit; do expect_refusal placement_gate "$scratch/patched" "$plant"; done
   printf 'PREFLIGHT 5/10 source-derived extents/read-set and plants\n'
   "$PY" "$EXTENTS" --ppsrc "$BASE_BLD/ppsrc/nemo" --writer "$WRITER" --deck-log "$REAL_EXCERPT" > "$scratch/extents.json"
   for plant in missing-allocation writer-mode dummy-actual; do expect_refusal "$PY" "$EXTENTS" --ppsrc "$BASE_BLD/ppsrc/nemo" --writer "$WRITER" --deck-log "$REAL_EXCERPT" --plant "$plant"; done
   expect_refusal "$PY" "$EXTENTS" --ppsrc "$BASE_BLD/ppsrc/nemo" --writer "$WRITER" --deck-log "$REAL_EXCERPT" --fixture-include "$scratch/planted.inc" --plant fixture-allocation
   "$PY" "$READSET" --ppsrc "$BASE_BLD/ppsrc/nemo" > "$scratch/readset.json"; expect_refusal "$PY" "$READSET" --ppsrc "$BASE_BLD/ppsrc/nemo" --plant drop-sxice
   printf 'PREFLIGHT 6/10 real patched source compiled and run with -fcheck=bounds\n'; compile_bounds_fixture "$scratch/bounds"
-  printf 'PREFLIGHT 7/10 real -O3 per-function FP census and injected-op plant\n'; "$PY" "$PASSIVITY" > "$scratch/passivity.json"
+  printf 'PREFLIGHT 7/10 real -O3 every-emitted-function FP census and injected-op plant\n'; "$PY" "$PASSIVITY" > "$scratch/passivity.json"
   printf 'PREFLIGHT 8/10 independent stub records, reader and production-score plants\n'; stub_score_and_plants "$scratch/scorer"
   printf 'PREFLIGHT 9/10 generated shell syntax, resources, and full stub driver control flow\n'; ram_gate 1; disk_gate "$EVIDENCE" 1024; grep -q 'run.user.stderr.log' "$0"
   if [[ ${O4_DRIVER_FIXTURE_ACTIVE:-0} == 0 ]]; then stub_driver_fixture "$scratch"; fi
@@ -413,8 +452,20 @@ build_target() {
   if [[ -n "${NEMO_EXE_OVERRIDE:-}" ]]; then mkdir -p "$root/BLD/bin"; cp "$NEMO_EXE_OVERRIDE" "$root/BLD/bin/nemo.exe"; chmod +x "$root/BLD/bin/nemo.exe"; return; fi
   cd "$NEMO_ROOT"; ./makenemo -r "$SOURCE_CFG" -n "$cfg" -m conda-scalarmath del_key 'key_xios'
   if [[ "$instrument" -eq 1 ]]; then
-    cp "$NEMO_SOURCE_ROOT/src/ICE/icedyn_adv_pra.F90" "$root/MY_SRC/icedyn_adv_pra.F90"; patch --batch --fuzz=0 "$root/MY_SRC/icedyn_adv_pra.F90" "$PATCH" >/dev/null
-    cp "$WRITER" "$root/MY_SRC/o4_prather_writer.F90"; ./makenemo -n "$cfg" -m conda-scalarmath del_key 'key_xios'
+    local staged=$root/MY_SRC
+    cp "$NEMO_SOURCE_ROOT/src/ICE/icedyn_adv_pra.F90" "$staged/icedyn_adv_pra.F90"
+    cp "$NEMO_SOURCE_ROOT/src/ICE/icedyn_adv.F90" "$staged/icedyn_adv.F90"
+    cp "$NEMO_SOURCE_ROOT/src/ICE/icedyn.F90" "$staged/icedyn.F90"
+    cp "$NEMO_SOURCE_ROOT/src/ICE/icestp.F90" "$staged/icestp.F90"
+    patch --batch --fuzz=0 "$staged/icedyn_adv_pra.F90" "$PATCH_PRA_PUBLIC" >/dev/null
+    patch --batch --fuzz=0 "$staged/icedyn_adv_pra.F90" "$PATCH_PRA_USE" >/dev/null
+    patch --batch --fuzz=0 "$staged/icedyn_adv_pra.F90" "$PATCH_PRA_CAPTURE" >/dev/null
+    patch --batch --fuzz=0 "$staged/icedyn_adv.F90" "$PATCH_ADV" >/dev/null
+    patch --batch --fuzz=0 "$staged/icedyn.F90" "$PATCH_DYN" >/dev/null
+    patch --batch --fuzz=0 "$staged/icestp.F90" "$PATCH_STP" >/dev/null
+    patch --batch --fuzz=0 "$staged/icestp.F90" "$PATCH_STP_CAPTURE" >/dev/null
+    cp "$TAP" "$staged/o4_prather_tap.F90"; cp "$WRITER" "$staged/o4_prather_writer.F90"
+    ./makenemo -n "$cfg" -m conda-scalarmath del_key 'key_xios'
   fi
   [[ -x "$root/BLD/bin/nemo.exe" ]] || refuse "$cfg lacks nemo.exe"
 }
@@ -423,10 +474,12 @@ build_target "$REF_CFG" 0; build_target "$REC_CFG" 1
 cp "$REF_ROOT/BLD/bin/nemo.exe" "$EVIDENCE/manifest/binaries/nemo.ref"; cp "$REC_ROOT/BLD/bin/nemo.exe" "$EVIDENCE/manifest/binaries/nemo.rec"
 if [[ ${O4_DRIVER_FIXTURE_ACTIVE:-0} == 0 ]]; then
   mkdir -p "$EVIDENCE/manifest/expected_ppsrc"; prepare_patched_ppsrc "$EVIDENCE/manifest/expected_ppsrc"
-  cmp -s "$EVIDENCE/manifest/expected_ppsrc/icedyn_adv_pra.f90" "$REC_ROOT/BLD/ppsrc/nemo/icedyn_adv_pra.f90" || refuse 'real record build ppsrc differs from expected patch'
-  same_program_gate "$REC_ROOT/BLD/ppsrc/nemo/icedyn_adv_pra.f90" "$REF_ROOT/BLD/ppsrc/nemo/icedyn_adv_pra.f90" > "$EVIDENCE/manifest/same_program.txt"
-  "$PY" "$PASSIVITY" --reference-object "$REF_ROOT/BLD/obj/icedyn_adv_pra.o" \
-    --record-object "$REC_ROOT/BLD/obj/icedyn_adv_pra.o" --arch "$REC_ROOT/BLD/arch_nemo.fcm" \
+  for unit in icedyn_adv_pra icedyn_adv icedyn icestp; do
+    cmp -s "$EVIDENCE/manifest/expected_ppsrc/$unit.f90" "$REC_ROOT/BLD/ppsrc/nemo/$unit.f90" || refuse "real record build $unit ppsrc differs from expected patch"
+  done
+  same_program_gate "$REC_ROOT/BLD/ppsrc/nemo" "$REF_ROOT/BLD/ppsrc/nemo" > "$EVIDENCE/manifest/same_program.txt"
+  "$PY" "$PASSIVITY" --reference-dir "$REF_ROOT/BLD/obj" \
+    --record-dir "$REC_ROOT/BLD/obj" --arch "$REC_ROOT/BLD/arch_nemo.fcm" \
     --json "$EVIDENCE/manifest/fp_census.json" >/dev/null
 else
   printf 'STUB_SAME_PROGRAM_EXERCISED_BY_PREFLIGHT\n' > "$EVIDENCE/manifest/same_program.txt"; printf '{"fixture":true,"pass":true}\n' > "$EVIDENCE/manifest/fp_census.json"

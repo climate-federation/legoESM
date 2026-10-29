@@ -1,77 +1,96 @@
 # SI3 Ladder Round 25 (`si3_r25`) — O4 acquisition-tool receipt
 
-Date: 2026-10-29. Parent: `fb6a6b736bf6`. Scope: O4 acquisition tooling only;
-NEMO was not run. The measurement and confirm/refute decisions were frozen in
-`docs/ice/fidelity/si3_r25_o4_acquisition_preregister.md:1-132` and committed as
-`700a161af7` before the observer, reader, or scorer was exercised.
+Date: 2026-10-29. Base: `d09c737c5a`. Scope: acquisition tooling only; no
+real NEMO build or integration run was performed. The measurement contract was
+frozen before implementation in
+`docs/ice/fidelity/si3_r25_o4_acquisition_preregister.md:1-132` at commit
+`700a161af7`.
 
-**Verdict: `PREFLIGHT_PASS`; ACQUISITION NEEDED.** The default route is
-read-only. The resumed preflight rendered the exact two-step overlay, compiled
-and ran the patched NEMO source under `-fcheck=bounds`, completed the real-flag
-1,225 = 1,225 FP census, replayed both sweep orders at 0 ULP, fired every plant,
-and exercised generated-driver success, refusal, retention, move-aside, rerun,
-and `--admit-existing`. No real `nemo.exe` was invoked.
+Verdict: **PREFLIGHT PASS; ACQUISITION NEEDED.** The default route is read-only.
+The complete preflight compiled and ran the patched Prather source with bounds
+checking, proved production arithmetic unchanged for every emitted function,
+scored every registered boundary at strict signed-zero 0 ULP, fired the
+fail-closed plants, and exercised the generated acquisition driver end to end
+with a stub executable. No `makenemo` or real `mpirun` was invoked.
 
-independent review: operator (Claude)
+## Same program and observer placement
 
-## Acquisition contract
+The patch no longer splits `ice_dyn_adv_pra`. Public moment visibility is
+declarative; entry and advection-exit copies occur at the call boundary in
+`icedyn_adv`; zapsmall and final-link copies occur after their completed
+operations in `icedyn`; the step copy occurs after `ice_update_flx` in
+`icestp`; and the delayed CFL scalar is copied only after the Prather loop
+nests and deallocation block. The scalar tap breaks module dependency cycles.
 
-The tool implements the O4 design row (`docs/ice/fidelity/si3_ladder_design.md:224`)
-and Decision 170's prescribed-velocity overlay. It records, at the wrapper around
-NEMO's production Prather routine, the horizontal metrics and surface masks,
-constant ice velocities, the full five-category state, all 55 moment arrays,
-the current and one-call-delayed CFL values, `icycle`, the six accumulators, and
-the full exit. Steps 1 and 2 prove x-then-y and y-then-x ordering respectively.
-The writer uses declared full/interior/ice-layer/snow-layer shapes; the shared
-allocation gate resolved 89 calls at `(jpi,jpj,jpl,nlay_i,nlay_s) =
-(184,152,5,10,5)` (`scripts/validate/ocean_fidelity/orca2_l4/nemo_acquisition_extents.py:309-350`).
+The same-program gate strips marked blocks and compares the complete
+preprocessed `icedyn_adv_pra`, `icedyn_adv`, `icedyn`, and `icestp` units with
+their pristine production units. It derives the allowed nonblank insertions
+from the fuzz-zero patches themselves. Unmarked-arithmetic and changed-marked-
+content plants fail. Six preprocessed-source placement checks each have a
+dedicated misplacement plant. The complete implementation and lifecycle are
+in `scripts/validate/ocean_fidelity/testcases/nemo_si3_o4_orca2_prather_acquisition/run.sh:180-510`.
 
-The fail-closed binary reader rejects bad magic/version, truncation, extra bytes,
-undeclared kinds, inconsistent extents, wrong step parity, and cross-record
-metadata drift. The scorer constructs the explicit O4 configuration, feeds each
-recorded entry through `si3_dyn_adv_pra_orca2`, and requires strict signed-zero
-0 ULP equality for every state, diagnostic and moment exit, including nonempty
-wet seam and north-fold regions (`scripts/validate/ocean_fidelity/testcases/nemo_si3_o4_orca2_prather_gate.py:71-242`).
+The production-flag census preserves exact symbol names instead of merging
+`.constprop`, `.isra`, `.part`, or `.cold` clones. It compares the emitted
+function set and every FP mnemonic multiset, including zero-FP functions, and
+maps each exact symbol back to a source routine only for reporting. The four
+whole-unit totals are identical: Prather 3851 = 3851, advection caller 279 =
+279, dynamics 310 = 310, and step 455 = 455. An unmarked in-function FP-add
+plant changes the census. The census and actual-object admission path are in
+`scripts/validate/ocean_fidelity/testcases/nemo_si3_o4_orca2_prather_passivity.py:20-173`.
 
-## Observer and same-program controls
+## Record and score contract
 
-Observation is outside the physics body in a wrapper. Only three marked scalar
-capture blocks remain inside the preserved body for current/delayed CFL and
-`icycle`. Every executable capture has a real-ppsrc line-order plant. Under
-NEMO's real `-O3 -funroll-all-loops -fno-tree-vectorize` flags the observer-free and instrumented
-physics functions each contain 1,225 FP instructions with no mnemonic-count
-difference. The planted arithmetic statement changes the census. Admission
-repeats that census on the actual `icedyn_adv_pra.o` objects linked into the
-retained REF/REC binaries. The normalized same-program proof compares the
-marked nonblank insertions against real CPP output and rejects marked-content
-or unmarked-statement plants
-(`scripts/validate/ocean_fidelity/testcases/nemo_si3_o4_orca2_prather_passivity.py:26-109`).
+Each of two steps emits nine records: grid; state entry; moments entry; CFL;
+advection state exit; moments exit; post-zapsmall state; post-final-link state;
+and end-of-step state. State records include the full prognostic/equivalent/
+aggregated state, signed residual and advection accumulators, all five
+transport diagnostics, surface temperature/salinity inputs, and snow/ice mass.
+The source-derived extent gate validates 104 writer calls, including the
+interior-only diagnostics.
 
-The O4 registration imports the admitted shared read-set scanner and follows
-the production root plus locally resolvable callees. Dropping `sxice` fires the
-control. The shared extent gate's missing-allocation, writer-mode,
-dummy/actual, and generated-fixture plants all fire
-(`scripts/validate/ocean_fidelity/testcases/nemo_si3_o4_orca2_prather_readset.py:21-71`).
+The scorer replays both sweep orders and demands strict signed-zero 0 ULP at
+the advection, zapsmall, final-link, and end-of-step boundaries. Every state,
+residual, advection diagnostic, transport diagnostic, and moment participates;
+full-domain and nonempty wet seam/north-fold regional maxima are required.
+Separate wet one-bit plants cover all four state exits, and the sweep-order,
+fold-sign, and subcycle-link plants use a nontrivial deck. The schema and score
+implementation are in
+`scripts/validate/ocean_fidelity/testcases/nemo_si3_o4_orca2_prather_gate.py:37-379`.
 
-## Execution, retention and tests
+## Driver, admission, and tests
 
-The runner defaults to `--preflight-only`; only explicit `--run` builds or runs
-NEMO. It reuses the admitted ORCA2/SAS bundle staging and `makenemo` REF/REC
-recipe, uses separate user stdout/stderr logs, compares the real
-`ORCA2_SAS_00000002_restart*.nc` sets byte-for-byte, and sets
-`nn_stock=nn_itend=2`. The pre-run manifest pins repository-relative sources,
-producer commit, resolved deck, inputs and retained binary digests. Admission
-re-hashes them and every artifact before scoring. Failed evidence and both
-builds remain under `refused/`; the documented rerun moves builds aside and
-never deletes them (`scripts/validate/ocean_fidelity/testcases/nemo_si3_o4_orca2_prather_acquisition/run.sh:286-456`).
+The O4 overlay is exactly two steps with `nn_stock=2`, thermodynamics off,
+all dynamics off except prescribed-velocity ADV2D, Prather on, UMx off, and
+both prescribed velocities equal to 0.5. Every variable is checked against
+its owning reference-namelist group, with misspelling and misplacement plants.
 
-The stub writes only real-build output names. Its twelve records come from an
-independent analytic zero-transport construction; production code is used only
-by the scorer. A separate nontrivial fixture makes the sweep, fold-sign and
-subcycle plants red. Six focused tests cover both fixtures, schema/physics
-plants, shared extent/read-set gates, fuzz-zero patching and shell syntax
-(`tests/ocean/fidelity/test_nemo_si3_o4_prather_acquisition.py:1-85`). They pass
-in `103.72 s`; the complete default preflight also passes. The acquisition
-itself remains deliberately unrun.
+The bounds fixture compiles and runs the patched NEMO source with the exact
+writer under `-fcheck=bounds`, emits 18 records, distinguishes two ranks, and
+checks signed negative zero. The stub uses an admitted SAS output, emits only
+the real observer list and real restart names, reports `STOP 0`, and exercises
+success, retained failure, in-place admission, rerun refusal, and move-aside
+recovery. Admission pins and rehashes relative source, deck, input, binary,
+record, artifact, and restart paths against the producer commit.
+
+Seven focused tests cover schema, all score plants, independent and nontrivial
+decks, extent/read-set controls, fuzz-zero patching, shell syntax, and the
+receipt digest ratchet
+(`tests/ocean/fidelity/test_nemo_si3_o4_prather_acquisition.py:1-106`). The
+complete default preflight passes and explicitly reports that no real NEMO
+integration was run.
+
+## Computed SHA-256 evidence
+
+Every digest below is produced with `sha256sum` and is rehashed by the focused
+test; placeholders are replaced only from command output before commit.
+
+SHA256 scripts/validate/ocean_fidelity/testcases/nemo_si3_o4_orca2_prather_acquisition/run.sh b4ec6a36027786ac64d39d9e98f3a6b7e2cf962ad9608fa32d3320999bead144
+SHA256 scripts/validate/ocean_fidelity/testcases/nemo_si3_o4_orca2_prather_acquisition/o4_prather_writer.F90 5feebd59538f8179db6e76d82a09f64380faa8fd2adcb7eb6323c6ab7dc1c0fa
+SHA256 scripts/validate/ocean_fidelity/testcases/nemo_si3_o4_orca2_prather_acquisition/o4_prather_tap.F90 ff80219ebea345f57c11bdebe58b85a4ec6e572ded576919819b38dba6def33d
+SHA256 scripts/validate/ocean_fidelity/testcases/nemo_si3_o4_orca2_prather_acquisition/write_stub_records.py 4717c99e3e8952d3d99d80eeeed8db4268d54d1a24f6ee5c48f6a461fdb32806
+SHA256 scripts/validate/ocean_fidelity/testcases/nemo_si3_o4_orca2_prather_gate.py c12296389df15c4c1c34ee1ec0054820a168a90ed787122ab65e2d3f1d913c25
+SHA256 scripts/validate/ocean_fidelity/testcases/nemo_si3_o4_orca2_prather_passivity.py f393f8c226ef87d4a3502b2cae6f2dac3784757abe0df9d3463aeeab39551815
+SHA256 tests/ocean/fidelity/test_nemo_si3_o4_prather_acquisition.py cd73c73dc9c468f9e5dc21630747bf08a1273613e7bfd0091308dafa84c39bff
 
 ACQUISITION_NEEDED: scripts/validate/ocean_fidelity/testcases/nemo_si3_o4_orca2_prather_acquisition/run.sh

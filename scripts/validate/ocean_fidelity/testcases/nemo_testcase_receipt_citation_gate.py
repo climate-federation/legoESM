@@ -11276,12 +11276,10 @@ FILES.update({
 })
 CITATION_MAP.update({
     'docs/ice/fidelity/si3_r25_o4_acquisition_preregister.md:1-132': ['# SI3 Ladder Round 25 (`si3_r25`) Preregistration — O4 Prather Acquisition and Exact-Input Score', 'record contract.', 132],
-    'scripts/validate/ocean_fidelity/orca2_l4/nemo_acquisition_extents.py:309-350': ['def validate_writer(', ('    }', 5), 42],
-    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o4_orca2_prather_gate.py:71-242': ['def read_record(path: str | Path, plant: str | None = None) -> dict[str, Any]:', '    return {"status": "PASS", "criterion": "every exit, seam, and fold cell == 0 ULP", "scores": scores}', 172],
-    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o4_orca2_prather_passivity.py:26-109': ['def _canonical(rows: dict[str, dict[str, int]]) -> dict[str, dict[str, int]]:', '                "pass":total>0 and not diffs and plant_fired and same_program_source_body}', 84],
-    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o4_orca2_prather_readset.py:21-71': ['def derive_and_gate(ppsrc: Path = DEFAULT_PPSRC, plant: str | None = None) -> dict[str, object]:', 'if __name__=="__main__": raise SystemExit(main())', 51],
-    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o4_orca2_prather_acquisition/run.sh:286-456': ['move_builds_aside() {', 'admit "$COMMIT"; ACTIVE_RUN=""', 171],
-    'tests/ocean/fidelity/test_nemo_si3_o4_prather_acquisition.py:1-85': ['from __future__ import annotations', '    assert "run.user.stdout.log" in text and "run.user.stderr.log" in text', 85],
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o4_orca2_prather_gate.py:37-379': ['GRID = (', '    return {"status": "PASS", "criterion": "every exit, seam, and fold cell == 0 ULP", "scores": scores}', 343],
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o4_orca2_prather_passivity.py:20-173': ['NEMO = Path("/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2")', '    raise SystemExit(main())', 154],
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o4_orca2_prather_acquisition/run.sh:180-510': ['prepare_patched_ppsrc() {', 'printf \'ACQUISITION_DONE: %s\\n\' "$EVIDENCE"', 331],
+    'tests/ocean/fidelity/test_nemo_si3_o4_prather_acquisition.py:1-106': ['from __future__ import annotations', '        assert hashlib.sha256(path.read_bytes()).hexdigest() == expected, relative', 106],
 })
 # --- SI3 round 22 (O13 exact ITD remap); appended for merge isolation ---
 FILES.update({

@@ -2,9 +2,17 @@ MODULE o4_prather_writer
    !! Passive write-only boundary observer for SI3 rung O4.
    USE, INTRINSIC :: iso_fortran_env, ONLY : int32, real64
    USE par_kind, ONLY : wp
+   USE par_ice, ONLY : jpl,nlay_i,nlay_s,rDt_ice
+   USE dom_oce, ONLY : jpi,jpj,nn_hls,Nis0,Nie0,Njs0,Nje0,narea, &
+      e1u,e2v,r1_e1u,r1_e2v,e2u,e1v,e1e2t,r1_e1e2t,tmask,umask,vmask
+   USE ice
+   USE sbc_oce, ONLY : sss_m,sst_m
+   USE sbc_ice, ONLY : snwice_mass
+   USE icedyn_adv_pra
+   USE o4_prather_tap, ONLY : o4_zcfl_delayed, o4_icycle
    IMPLICIT NONE
    PRIVATE
-   PUBLIC :: o4_set_context, o4_grid, o4_state, o4_moments, o4_cfl
+   PUBLIC :: o4_capture_adv, o4_capture_stage
 
    CHARACTER(len=8), PARAMETER :: magic='O4PRA001'
    INTEGER(int32), PARAMETER :: version=1_int32
@@ -12,8 +20,35 @@ MODULE o4_prather_writer
    INTEGER(int32), SAVE :: c_jpl=-1, c_nlay_i=-1, c_nlay_s=-1, c_nn_hls=-1
    INTEGER(int32), SAVE :: c_nis0=-1, c_nie0=-1, c_njs0=-1, c_nje0=-1
    REAL(real64), SAVE :: c_rdt=-1.0_real64, c_hi_max=-1.0_real64
+   REAL(wp), SAVE :: c_zcfl_current=0.0_wp
 
 CONTAINS
+
+   SUBROUTINE o4_capture_adv(kind,kt)
+      INTEGER,INTENT(in)::kind,kt
+      IF(kind/=2 .AND. kind/=5) ERROR STOP 'O4 advection capture kind mismatch'
+      IF(kind==2) THEN
+         CALL o4_set_context(kt,narea-1,jpi,jpj,jpl,nlay_i,nlay_s,nn_hls, &
+            Nis0,Nie0,Njs0,Nje0,rDt_ice,hi_max(jpl))
+         c_zcfl_current=MAXVAL(ABS(u_ice(:,:))*rDt_ice*r1_e1u(:,:))
+         c_zcfl_current=MAX(c_zcfl_current,MAXVAL(ABS(v_ice(:,:))*rDt_ice*r1_e2v(:,:)))
+         CALL o4_grid
+         CALL o4_state(2)
+         CALL o4_moments(3)
+      ELSE
+         IF(c_kt/=kt .OR. o4_icycle<1) ERROR STOP 'O4 CFL capture missing before exit'
+         CALL o4_cfl(c_zcfl_current,o4_zcfl_delayed,o4_icycle)
+         CALL o4_state(5)
+         CALL o4_moments(6)
+      ENDIF
+   END SUBROUTINE o4_capture_adv
+
+   SUBROUTINE o4_capture_stage(kind,kt)
+      INTEGER,INTENT(in)::kind,kt
+      IF(kind<7 .OR. kind>9) ERROR STOP 'O4 stage capture kind mismatch'
+      IF(c_kt/=kt) ERROR STOP 'O4 stage capture step mismatch'
+      CALL o4_state(kind)
+   END SUBROUTINE o4_capture_stage
 
    SUBROUTINE o4_set_context(kt,rank,jpi,jpj,jpl,nlay_i,nlay_s,nn_hls, &
                              nis0,nie0,njs0,nje0,rdt,hi_max_top)
@@ -90,51 +125,37 @@ CONTAINS
       WRITE(u) a
    END SUBROUTINE put_is4
 
-   SUBROUTINE o4_grid(e1u,e2v,r1_e1u,r1_e2v,e2u,e1v,e1e2t,r1_e1e2t, &
-                      tmask_surface,umask_surface,vmask_surface,u_ice,v_ice)
-      REAL(wp),DIMENSION(:,:),INTENT(in)::e1u,e2v,r1_e1u,r1_e2v,e2u,e1v
-      REAL(wp),DIMENSION(:,:),INTENT(in)::e1e2t,r1_e1e2t,tmask_surface,umask_surface,vmask_surface,u_ice,v_ice
+   SUBROUTINE o4_grid
       INTEGER::u
-      CALL open_record(u,1,13,0,0._wp,0._wp)
+      CALL open_record(u,1,15,0,0._wp,0._wp)
       CALL put_f2(u,e1u); CALL put_f2(u,e2v); CALL put_f2(u,r1_e1u); CALL put_f2(u,r1_e2v)
       CALL put_f2(u,e2u); CALL put_f2(u,e1v); CALL put_f2(u,e1e2t); CALL put_f2(u,r1_e1e2t)
-      CALL put_f2(u,tmask_surface); CALL put_f2(u,umask_surface); CALL put_f2(u,vmask_surface)
-      CALL put_f2(u,u_ice); CALL put_f2(u,v_ice); CLOSE(u)
+      CALL put_f2(u,tmask(:,:,1)); CALL put_f2(u,umask(:,:,1)); CALL put_f2(u,vmask(:,:,1))
+      CALL put_f2(u,u_ice); CALL put_f2(u,v_ice); CALL put_f2(u,sss_m); CALL put_f2(u,sst_m); CLOSE(u)
    END SUBROUTINE o4_grid
 
-   SUBROUTINE o4_state(kind,ato_i,h_i,h_s,h_ip,v_i,v_s,sv_i,oa_i,a_i,a_ip,v_ip,v_il,e_s,e_i,szv_i, &
-                       wfx_res,hfx_res,sfx_res,diag_adv_mass,diag_adv_salt,diag_adv_heat)
+   SUBROUTINE o4_state(kind)
       INTEGER,INTENT(in)::kind
-      REAL(wp),DIMENSION(:,:),INTENT(in)::ato_i,wfx_res,hfx_res,sfx_res
-      REAL(wp),DIMENSION(:,:),INTENT(in)::diag_adv_mass,diag_adv_salt,diag_adv_heat
-      REAL(wp),DIMENSION(:,:,:),INTENT(in)::h_i,h_s,h_ip,v_i,v_s,sv_i,oa_i,a_i,a_ip,v_ip,v_il
-      REAL(wp),DIMENSION(:,:,:,:),INTENT(in)::e_s,e_i,szv_i
       INTEGER::u
-      IF(kind/=2 .AND. kind/=5) ERROR STOP 'O4 state kind mismatch'
-      CALL open_record(u,kind,21,0,0._wp,0._wp)
+      IF(kind/=2 .AND. kind/=5 .AND. kind/=7 .AND. kind/=8 .AND. kind/=9) ERROR STOP 'O4 state kind mismatch'
+      CALL open_record(u,kind,34,0,0._wp,0._wp)
       CALL put_f2(u,ato_i)
-      CALL put_i3(u,h_i); CALL put_i3(u,h_s); CALL put_i3(u,h_ip)
+      CALL put_i3(u,h_i); CALL put_i3(u,h_s); CALL put_i3(u,h_ip); CALL put_i3(u,h_il)
       CALL put_i3(u,v_i); CALL put_i3(u,v_s); CALL put_i3(u,sv_i); CALL put_i3(u,oa_i)
       CALL put_i3(u,a_i); CALL put_i3(u,a_ip); CALL put_i3(u,v_ip); CALL put_i3(u,v_il)
+      CALL put_i3(u,t_su)
       CALL put_is4(u,e_s); CALL put_ii4(u,e_i); CALL put_ii4(u,szv_i)
+      CALL put_ii4(u,sz_i); CALL put_ii4(u,t_i); CALL put_is4(u,t_s)
+      CALL put_f2(u,at_i); CALL put_f2(u,vt_i); CALL put_f2(u,snwice_mass)
       CALL put_i2(u,wfx_res); CALL put_i2(u,hfx_res); CALL put_i2(u,sfx_res)
       CALL put_i2(u,diag_adv_mass); CALL put_i2(u,diag_adv_salt); CALL put_i2(u,diag_adv_heat)
+      CALL put_i2(u,diag_trp_vi); CALL put_i2(u,diag_trp_vs); CALL put_i2(u,diag_trp_ei)
+      CALL put_i2(u,diag_trp_es); CALL put_i2(u,diag_trp_sv)
       CLOSE(u)
    END SUBROUTINE o4_state
 
-   SUBROUTINE o4_moments(kind,sxice,syice,sxxice,syyice,sxyice, &
-      sxsn,sysn,sxxsn,syysn,sxysn,sxa,sya,sxxa,syya,sxya,sxage,syage,sxxage,syyage,sxyage, &
-      sxsal,sysal,sxxsal,syysal,sxysal,sxap,syap,sxxap,syyap,sxyap, &
-      sxvp,syvp,sxxvp,syyvp,sxyvp,sxvl,syvl,sxxvl,syyvl,sxyvl, &
-      sxc0,syc0,sxxc0,syyc0,sxyc0,sxe,sye,sxxe,syye,sxye,sxsi,sysi,sxxsi,syysi,sxysi)
+   SUBROUTINE o4_moments(kind)
       INTEGER,INTENT(in)::kind
-      REAL(wp),DIMENSION(:,:,:),INTENT(in)::sxice,syice,sxxice,syyice,sxyice
-      REAL(wp),DIMENSION(:,:,:),INTENT(in)::sxsn,sysn,sxxsn,syysn,sxysn,sxa,sya,sxxa,syya,sxya
-      REAL(wp),DIMENSION(:,:,:),INTENT(in)::sxage,syage,sxxage,syyage,sxyage,sxsal,sysal,sxxsal,syysal,sxysal
-      REAL(wp),DIMENSION(:,:,:),INTENT(in)::sxap,syap,sxxap,syyap,sxyap,sxvp,syvp,sxxvp,syyvp,sxyvp
-      REAL(wp),DIMENSION(:,:,:),INTENT(in)::sxvl,syvl,sxxvl,syyvl,sxyvl
-      REAL(wp),DIMENSION(:,:,:,:),INTENT(in)::sxc0,syc0,sxxc0,syyc0,sxyc0
-      REAL(wp),DIMENSION(:,:,:,:),INTENT(in)::sxe,sye,sxxe,syye,sxye,sxsi,sysi,sxxsi,syysi,sxysi
       INTEGER::u
       IF(kind/=3 .AND. kind/=6) ERROR STOP 'O4 moment kind mismatch'
       CALL open_record(u,kind,55,0,0._wp,0._wp)

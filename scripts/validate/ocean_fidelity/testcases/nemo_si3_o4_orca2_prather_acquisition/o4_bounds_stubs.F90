@@ -9,9 +9,17 @@ MODULE par_ice
    INTEGER,PARAMETER :: Nis0=3,Nie0=10,Njs0=3,Nje0=8,ntsi=3,ntei=10,ntsj=3,ntej=8
    INTEGER :: nn_icesal=4
    REAL(wp) :: rDt_ice=10800._wp,r1_Dt_ice=1._wp/10800._wp
-   REAL(wp) :: hi_max(2)=[99._wp,99._wp]
    LOGICAL :: ln_pnd_LEV=.TRUE.,ln_pnd_TOPO=.FALSE.
 END MODULE par_ice
+
+MODULE dom_oce
+   USE par_kind, ONLY: wp
+   USE par_ice, ONLY: jpi,jpj,nn_hls,Nis0,Nie0,Njs0,Nje0
+   INTEGER :: narea=1
+   REAL(wp) :: e1u(jpi,jpj),e2v(jpi,jpj),r1_e1u(jpi,jpj),r1_e2v(jpi,jpj)
+   REAL(wp) :: e2u(jpi,jpj),e1v(jpi,jpj),e1e2t(jpi,jpj),r1_e1e2t(jpi,jpj)
+   REAL(wp) :: tmask(jpi,jpj,1),umask(jpi,jpj,1),vmask(jpi,jpj,1)
+END MODULE dom_oce
 
 MODULE phycst
    USE par_kind, ONLY: wp
@@ -21,18 +29,36 @@ END MODULE phycst
 
 MODULE ice
    USE par_kind, ONLY: wp
-   USE par_ice, ONLY: jpi,jpj,Nis0,Nie0,Njs0,Nje0
-   REAL(wp) :: e1u(jpi,jpj),e2v(jpi,jpj),r1_e1u(jpi,jpj),r1_e2v(jpi,jpj)
-   REAL(wp) :: e2u(jpi,jpj),e1v(jpi,jpj),e1e2t(jpi,jpj),r1_e1e2t(jpi,jpj)
-   REAL(wp) :: tmask(jpi,jpj,1),umask(jpi,jpj,1),vmask(jpi,jpj,1)
+   USE par_ice, ONLY: jpi,jpj,jpl,nlay_i,nlay_s,Nis0,Nie0,Njs0,Nje0
+   USE dom_oce
    REAL(wp) :: wfx_res(Nis0:Nie0,Njs0:Nje0),hfx_res(Nis0:Nie0,Njs0:Nje0)
    REAL(wp) :: sfx_res(Nis0:Nie0,Njs0:Nje0),diag_adv_mass(Nis0:Nie0,Njs0:Nje0)
    REAL(wp) :: diag_adv_salt(Nis0:Nie0,Njs0:Nje0),diag_adv_heat(Nis0:Nie0,Njs0:Nje0)
+   REAL(wp) :: diag_trp_vi(Nis0:Nie0,Njs0:Nje0),diag_trp_vs(Nis0:Nie0,Njs0:Nje0)
+   REAL(wp) :: diag_trp_ei(Nis0:Nie0,Njs0:Nje0),diag_trp_es(Nis0:Nie0,Njs0:Nje0)
+   REAL(wp) :: diag_trp_sv(Nis0:Nie0,Njs0:Nje0)
+   REAL(wp) :: u_ice(jpi,jpj),v_ice(jpi,jpj),ato_i(jpi,jpj),at_i(jpi,jpj),vt_i(jpi,jpj)
+   REAL(wp) :: hi_max(jpl)=[99._wp,99._wp]
+   REAL(wp) :: h_i(jpi,jpj,jpl),h_s(jpi,jpj,jpl),h_ip(jpi,jpj,jpl),h_il(jpi,jpj,jpl)
+   REAL(wp) :: v_i(jpi,jpj,jpl),v_s(jpi,jpj,jpl),sv_i(jpi,jpj,jpl),oa_i(jpi,jpj,jpl)
+   REAL(wp) :: a_i(jpi,jpj,jpl),a_ip(jpi,jpj,jpl),v_ip(jpi,jpj,jpl),v_il(jpi,jpj,jpl)
+   REAL(wp) :: t_su(jpi,jpj,jpl),e_s(jpi,jpj,nlay_s,jpl),e_i(jpi,jpj,nlay_i,jpl)
+   REAL(wp) :: szv_i(jpi,jpj,nlay_i,jpl),sz_i(jpi,jpj,nlay_i,jpl),t_i(jpi,jpj,nlay_i,jpl)
+   REAL(wp) :: t_s(jpi,jpj,nlay_s,jpl)
 END MODULE ice
 
 MODULE sbc_oce
+   USE par_kind, ONLY: wp
+   USE par_ice, ONLY: jpi,jpj
    INTEGER :: nn_fsbc=1
+   REAL(wp) :: sss_m(jpi,jpj),sst_m(jpi,jpj)
 END MODULE sbc_oce
+
+MODULE sbc_ice
+   USE par_kind, ONLY: wp
+   USE par_ice, ONLY: jpi,jpj
+   REAL(wp) :: snwice_mass(jpi,jpj)
+END MODULE sbc_ice
 
 MODULE icevar
    USE par_kind, ONLY: wp
@@ -91,7 +117,7 @@ END MODULE iom
 
 MODULE lib_mpp
    USE par_kind, ONLY: wp
-   INTEGER :: narea=1
+   USE dom_oce, ONLY: narea
    INTERFACE mpp_sum
       MODULE PROCEDURE mpp_sum_i
    END INTERFACE
