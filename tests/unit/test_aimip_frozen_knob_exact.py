@@ -87,6 +87,10 @@ def test_generators_name_the_rain_rate_only_for_sundqvist():
         "aimip_sundqvist_auto_rate"] == 1.5e-4
     assert "aimip_sundqvist_auto_rate" not in declare_sundqvist_rate(
         {"aimip_microphysics": "kessler"})
+    # an explicitly stated rate is kept, never overwritten by the default
+    assert declare_sundqvist_rate({"aimip_microphysics": "sundqvist",
+                                   "aimip_sundqvist_auto_rate": 2.0e-4})[
+        "aimip_sundqvist_auto_rate"] == 2.0e-4
 
 
 

@@ -350,8 +350,10 @@ AIMIP_DECLARED_KNOB_KEYS = {"aimip_sundqvist_auto_rate": "sundqvist_auto_rate"}
 
 def declare_sundqvist_rate(deck: dict) -> dict:
     """``deck`` with aimip_sundqvist_auto_rate named when it selects sundqvist
-    microphysics (generated configs state the GFS prautco explicitly)."""
-    if deck.get("aimip_microphysics") != "sundqvist":
+    microphysics (generated configs state the GFS prautco explicitly).  A rate
+    the deck already states is kept (codex + GLM 2026-10-29)."""
+    if (deck.get("aimip_microphysics") != "sundqvist"
+            or "aimip_sundqvist_auto_rate" in deck):
         return dict(deck)
     from legoesm.atmosphere.physics.microphysics.config import SundqvistConfig
     return {**deck, "aimip_sundqvist_auto_rate": float(SundqvistConfig().auto_rate)}
