@@ -13,6 +13,7 @@ ORCA2/OMT cards; no physics statement lands in this round.
 The predictions and falsifiers are frozen in
 `PREREG_nemo_testcases_l4_orca2_round276.md`, committed at lane base
 `2eaeaf515d818df52b1fd88413a299c5db7b8b6f`.  Counts below are RMS directions
+Amendment (2026-10-29 provenance audit): the full SHA is `2eaeaf515d2fa69ccdcaba8e9fe6e17cd8a64959`; the tail of the value above was mistyped.
 over bit-touched rows, written `toward / away / score-equal`.  Early means
 kt=1..3 and late means kt>=4.  Rung 0 and OMT measurements are
 **independent** (legoESM's corrected from-rest entry); the shipped rung-10

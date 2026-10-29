@@ -986,6 +986,8 @@ producing rebased tip `424890bbbc18d3e718d214d89f689e39b620a144` and re-anchored
 commit `8a74ac5dd1697d36ecfaa264e081a751d77adcfd`. No model code, configuration
 value, or test file was changed during or after the rebase.
 
+Amendment (2026-10-29 provenance audit): the backup value above was a pre-rebase commit no longer reachable; the post-rebase landing commit is `424890bbbc18d3e718d214d89f689e39b620a144`.
+
 1. **Conflict resolution and citation re-anchor (`1` conflict hunk, `1` shifted citation key)**:
    - **Conflict (`1` hunk)**: At commit `eb4909b171` (rebased as `b9dc379088`,
      step `1/23`), `scripts/validate/ocean_fidelity/testcases/nemo_testcase_receipt_citation_gate.py`

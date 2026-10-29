@@ -3,6 +3,7 @@
 Date: 2026-10-27
 
 Base: `a91d673b6fcf` (`a91d673b6fcff38b097f7c0fc8ddb009c05d7a32`, Round 336 landed); preregistration: `5fae40ddd` (`5fae40dddf5a6f280448a5b326c8c3df5f5c6335`, `docs/ocean/fidelity/testcases/PREREG_nemo_testcases_l4_orca2_round341.md`); rescore and source-order walk gate: `a104ed2a4` (`a104ed2a4e79a6f3a5704d221b9718113e846bc7`).
+Amendment (2026-10-29 provenance audit): the full SHA is `5fae40dddf6b09178bd9008464227adb76b9ebf7`; the tail of the value above was mistyped.
 Disposition: **HELD (STOP WITH CONFIRMED SINGLE-STATEMENT FIX PROPOSAL AND VERIFICATION ON RECORDED INPUTS; NO MODEL CODE LANDED THIS ROUND)**.
 independent review: operator.
 
@@ -340,6 +341,7 @@ With the single-statement fix proposal (`e3t_kmm_stored` = `_h_s2_kmm`), both `T
 Date: 2026-10-27
 
 Parent before Round 341: `a91d673b6fcf` (`a91d673b6fcff38b097f7c0fc8ddb009c05d7a32`); Round-341 Held tip: `ca77c284e0a5` (`ca77c284e0a5a8ccabbbdf46b776621330e663f0`); Landed model/test/gate commit: `86dfcb7e0ea5` (`86dfcb7e0ea58ccaee71c80e8135644037151267`).
+Amendment (2026-10-29 provenance audit): the full SHA is `ca77c284e0a5b9c5d804d9e25bc61581350e87bd`; the tail of the value above was mistyped.
 Disposition: **LANDED (STAGE-2 `e3t(Kmm)` STORED THICKNESS IN `_nemo_ws_stage_transport`; RUNG 10 `200 / 200` 3-D-WET `BIT_EXACT`, `152 / 200` RAW `BIT_EXACT`, `48 / 200` `AT_BAR_NOT_EXACT` DRY `-0.0` `u`/`v` ROWS, `0 / 200` `OVER_BAR`)**.
 independent review: operator.
 
@@ -442,4 +444,3 @@ Every pair is bit-identical or strictly closer to the NEMO oracle (`0` exact los
   - Per-receipt and suite citation gates (`scripts/validate/ocean_fidelity/testcases/nemo_testcase_receipt_citation_gate.py --receipt docs/ocean/fidelity/testcases/nemo_testcases_l4_orca2_round341_rescore_walk_receipt.md --from-heading "# ORCA2 round 341 —"` and `tests/ocean/fidelity/test_nemo_testcase_receipt_citation_gate.py`): `0` failures, `0` unmapped citations, `0` map-audit failures, `9 / 9` self-test controls fired (`18 passed`).
 - **Review**: `independent review: operator`.
 - **Disposition**: **LANDED** — Stage-2 stored `e3t(Kmm)` thickness (`_h_s2_kmm`) wired into `_nemo_ws_stage_transport`'s Stage-2 call (`ocean_model_latlon_cgrid.py:2267`, `:2291-2295`, `:9570-9572`); Rung 10 is **`200 / 200` 3-D-wet `BIT_EXACT`** (`152 / 200` raw `BIT_EXACT`, `48 / 200` `AT_BAR_NOT_EXACT` dry `-0.0` `u`/`v` rows, `0 / 200` `OVER_BAR`).
-

@@ -1,6 +1,7 @@
 # ORCA2 round 88 preregistration — rung-0 frame admission and entry boundary
 
 Base: `5317f16b452224049844fdf282dd75fd60daf738`. Claim label:
+Amendment (2026-10-29 provenance audit): the full SHA is `5317f16b42e37b56ef0e5ea6bf4e91db3e167c50`; the tail of the value above was mistyped.
 **independent**. This round first consumes the operator-run round-87 optimized
 record. It changes no hierarchy switch, model package, NEMO physics statement,
 carried state, threshold, stabilizer, shipped ORCA2 card, or sea-ice selector.

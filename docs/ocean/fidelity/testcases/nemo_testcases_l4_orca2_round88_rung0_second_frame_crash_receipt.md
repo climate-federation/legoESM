@@ -8,6 +8,7 @@ threshold, stabilizer, carried state, or sea-ice selector changed. Every
 scientific label remains **independent**.
 
 Base: `5317f16b452224049844fdf282dd75fd60daf738`. Preregistration:
+Amendment (2026-10-29 provenance audit): the full SHA is `5317f16b42e37b56ef0e5ea6bf4e91db3e167c50`; the tail of the value above was mistyped.
 `PREREG_nemo_testcases_l4_orca2_round88.md` was committed before the target was
 measured.
 

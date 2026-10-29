@@ -373,6 +373,7 @@ The reports are `round336/resume6_citation_gate.json`,
 The manifest-pinned retained-record route admitted producer
 `5e9bf388bd0ab4f08b16af86517e4adbe55f6204` with copied executable SHA-256
 `24420ae44505ece369af01fcb8303d9e5881ae4ab70e5bd128153ffee3188328`.
+Amendment (2026-10-29 provenance audit): the producer value above was a pre-rebase commit no longer reachable; the receipt identifies post-rebase landing tip `e58c7cb69599331b7c810e5530398bf0f2d382f9`.
 Its final line was exactly:
 
 ```text
@@ -1223,6 +1224,7 @@ At evidence commit `7b4d73266bd33668ab05bbcd322cd9585594c755`, the
 receipt citation gate passes all 43 citations with zero failures, zero
 unmapped claims, and zero map-audit failures; report SHA-256
 `ff9198f1b25ff23505f988506b3251718a7596bcb34f9f2ccbed1b175921733f`.
+Amendment (2026-10-29 provenance audit): the evidence value above was a pre-rebase commit no longer reachable; the receipt identifies post-rebase landing tip `e58c7cb69599331b7c810e5530398bf0f2d382f9`.
 The prescribed offline default battery, including the four new producer-value
 tests and the private-import ratchet, passes 156 tests in 1,141.51 seconds;
 its complete log SHA-256 is
@@ -1292,6 +1294,7 @@ per-receipt citation gate passes all 55 citations with zero failures, zero
 unmapped citations, zero map-audit failures, and all nine self-tests fired;
 the report SHA-256 is
 `4a6b7eb8bfdccad6b37da923ac1b36c881a984415c8bb4230aaf7c3d6eea1776`.
+Amendment (2026-10-29 provenance audit): the evidence value above was a pre-rebase commit no longer reachable; the receipt identifies post-rebase landing tip `e58c7cb69599331b7c810e5530398bf0f2d382f9`.
 The exact default ORCA2 battery passes all 156 tests in 1,049.58 seconds; its
 log SHA-256 is
 `3e432bfc275b94f933500d148c56f61efe47d314b6e01392b40de1562203442c`.
@@ -1357,6 +1360,7 @@ per-receipt citation gate passes all 63 citations with zero failures, zero
 unmapped citations, zero map-audit failures, and all nine self-tests fired;
 its log SHA-256 is
 `95276d63d9c763de2e8dbcd34ea1d41cf80f309a51e729d99b5db753c6ee4cb6`.
+Amendment (2026-10-29 provenance audit): the evidence value above was a pre-rebase commit no longer reachable; the receipt identifies post-rebase landing tip `e58c7cb69599331b7c810e5530398bf0f2d382f9`.
 The exact default ORCA2 battery passes all 156 tests in 1,076.03 seconds; its
 log SHA-256 is
 `d178cd62618f9277ba2a45d789fc8b76e5813ef29eaaa072bf4e2417668122bd`.
@@ -1644,6 +1648,8 @@ pre-rebase tip preserved on branch `backup/r336_pre_rebase` at
 producing rebased tip `e58c7cb69599331b7c810e5530398bf0f2d382f9` (`8ad851012b8b`
 before the three-entry `d122_gate` citation re-anchor). No model code,
 configuration value, or measurement artifact changed.
+
+Amendment (2026-10-29 provenance audit): the backup value above was a pre-rebase commit no longer reachable; the post-rebase landing commit is `e58c7cb69599331b7c810e5530398bf0f2d382f9`.
 
 ### Conflict resolution and re-anchored citations
 

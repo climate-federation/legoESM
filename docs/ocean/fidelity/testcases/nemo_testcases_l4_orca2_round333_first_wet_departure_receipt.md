@@ -37,6 +37,8 @@ signed-zero differences only, never a wet value difference.
 The clean CPU/fp64/production-JIT artifacts were produced at
 `c238f7232cc6cf24a7243cd6bc554c599cc6e0fa`:
 
+Amendment (2026-10-29 provenance audit): the value above was a pre-rebase commit no longer reachable.
+
 - `orca2_rounds/round333/first_wet/given_nemo_entry.json`, SHA-256
   `b4c72b84aeaa22d58d29299c9b13af18ba403e31beae7bedd0007226f2bcd930`;
 - `orca2_rounds/round333/first_wet/independent.json`, SHA-256
@@ -592,6 +594,7 @@ Its exact call-site revert failed the provisional test. At candidate commit
 pairs: zero exact rows lost, every registered row equal, and both rung-10
 labels equal on all 200 rows. The decision artifact SHA-256 is
 `67edc2f9bc9e0d149c2662951eb5a35f13cbcec4e705894b0a223b5cff5c7017`.
+Amendment (2026-10-29 provenance audit): the candidate value above was a pre-rebase commit no longer reachable.
 The candidate's preliminary grid-ladder battery passed 111 tests, and its
 three-step faithful DINO probe reproduced all 66 baseline leaf-step hashes;
 the DINO artifact SHA-256 is
@@ -604,6 +607,7 @@ produced 799,200 non-finite T cotangents for both T and SSH objectives and NaN
 reverse `rn_Ud` gradients, while forward `dL/dln(rn_Ud)` was finite at
 `-4.511704487056347e-05`; artifact SHA-256
 `63a138bf22b184e39955a7643a6d00eec06e4395ceaaf5bcbadb3c7184792393`.
+Amendment (2026-10-29 provenance audit): the candidate value above was a pre-rebase commit no longer reachable.
 A rebuilt-tangent custom JVP and an explicit stored-graph cut retained the
 same all-NaN reverse result, with artifact SHA-256 values
 `4444c35e5b5371dd991443630c1a87f07411fbc9dc79a984885c27b41dab523d`

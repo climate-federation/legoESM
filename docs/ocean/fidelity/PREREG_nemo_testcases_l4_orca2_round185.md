@@ -1,6 +1,7 @@
 # ORCA2 round 185 preregistration — land the atomic HPG fold unit
 
 Date: 2026-10-08. Base: `6d4ac63bef22e17c3fb280552d8818e5a36f0718`.
+Amendment (2026-10-29 provenance audit): the full SHA is `6d4ac63bef22af06293666165d5a133bed8e6c05`; the tail of the value above was mistyped.
 Claim labels are **independent hierarchy rung 0** and **given NEMO's entry**;
 their ladder results remain separate.
 

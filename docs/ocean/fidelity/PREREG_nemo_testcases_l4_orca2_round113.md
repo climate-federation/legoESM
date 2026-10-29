@@ -1,6 +1,7 @@
 # Preregistration — ORCA2 round 113 southern EEN thickness association
 
 Date: 2026-10-02. Base: `877e334f10676745e6600a295d92f38a191bf472`.
+Amendment (2026-10-29 provenance audit): the full SHA is `877e334f10cc688b4a67c49fe5f30cad2373fc2d`; the tail of the value above was mistyped.
 Scope is one hierarchy-rung-0 source statement, measured **given NEMO's
 recorded entry**. No configuration, forcing, initial state, carried state,
 threshold, stabilizer, sea-ice selector, or `unmeasured_features` entry may
