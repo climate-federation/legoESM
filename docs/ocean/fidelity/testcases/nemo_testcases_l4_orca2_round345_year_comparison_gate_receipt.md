@@ -8,8 +8,9 @@ Admitted arm-A binary SHA-256:
 Admitted arm-A day-1 restart SHA-256 values:
 `3fbed2281e66f7d51cd34247e799d1b76c8a102d36d5b64c0a3b80aba56dd2e3` and
 `a5660f4c44b70a7cf7d70500b2df8e2d2145f08a205b266301c7312517413023`.
-Disposition: **STOPPED_FOR_RECORD** — corrected preflight is pending; the
-perturbed NEMO continuation remains operator acquisition.
+Disposition: **STOPPED_FOR_RECORD** — the corrected round-345 pipeline is
+verified; the full preflight must be repeated outside this sandbox before the
+perturbed NEMO continuation is acquired by the operator.
 
 ## Result
 
@@ -71,8 +72,27 @@ gate from `sha256sum`-equivalent byte hashing and immediately re-hashed.
 
 ## Verification
 
-Verification and the default preflight will be recorded after the corrected
-implementation is committed on a clean worktree.
+The safety/restart implementation is committed as
+`4e175e60e1223eb2f98188d0f102ac037aa27ceb`; the retained-arm relocation fix is
+`95eb6b45a12508e4b2d32eef1f89a3af938a76cc`. Both values were copied from
+`git rev-parse`, and the document gate resolves every quoted git object.
+
+Focused round-345, inherited round-342 year, and ORCA2X pilot tests pass 20/20.
+The five Decision-188 controls fire, including independent refusal of a zero
+envelope and a non-perturbed envelope. A real-arm staging probe verifies
+16,433 changed wet SST values, 59 unchanged forcing/deck inputs, the admitted
+binary, and the step-9 restart deck. A direct end-to-end stub flow passes
+staging, completion, admission, in-place re-admission, and re-admission after
+moving the completed arm beneath `refused/`. A separate existing-target probe
+refuses while retaining the target in place and creating no refused copy.
+
+The clean default preflight was re-run. Its inherited round-342 MPI stub stops
+before the round-345 stub because this managed sandbox denies the Open MPI
+PMIx listener socket (launcher exit 213). The same sandbox failure occurs for
+`mpirun --version`; it is not a scientific or admission result. The
+round-345-specific pipeline above was therefore also exercised directly, but
+the committed default preflight remains fail-closed and must be run by the
+operator in the acquisition environment.
 
 ## Choices and review
 
@@ -80,11 +100,12 @@ implementation is committed on a clean worktree.
   admitted day-1 NEMO double-precision restart SST by one ULP; leave forcing and
   damping untouched; compare from day 1; refuse zero/non-perturbed envelopes.
 - UNASKED: none.
-- independent review: operator (Claude Sonnet; HOLD under repair)
+- independent review: Claude Sonnet HOLD received; every listed finding is
+  repaired here; operator re-review remains open (Argon may follow)
 
 ## Open
 
-Run the corrected clean-tree preflight. If it passes, the operator runs the
-acquisition command, evaluates admitted arm A versus the perturbed continuation
-with the Decision-160 reporter, and supplies that report plus the round-345
-admission JSON to the Decision-188 gate.
+The operator runs the acquisition command (which first runs the same
+fail-closed preflight), evaluates admitted arm A versus the perturbed
+continuation with the Decision-160 reporter, and supplies that report plus the
+round-345 admission JSON to the Decision-188 gate.
