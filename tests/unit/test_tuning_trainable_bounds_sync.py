@@ -60,7 +60,8 @@ def test_shared_names_exist():
 
 def test_sundqvist_evap_coeff_tuning_range_is_the_spec_range():
     """One parameter, one range: the tuning catalog carries the scheme spec's
-    bounds (both reviewers 2026-10-29: 1.5e-3, not the catalog's former 2e-3)."""
+    bounds (both reviewers 2026-10-29: 1.5e-3, not the catalog's former 2e-3).
+    The AIMIP trainable's 5e-3 is a third declaration, not reconciled here."""
     from legoesm.atmosphere.physics.microphysics.config import __param_spec__
     lo, hi = __param_spec__["SundqvistConfig"]["params"]["evap_coeff"]["bounds"]
     t = TUNING_PARAMETERS["sundqvist_evap_coeff"]
