@@ -81,3 +81,11 @@ def test_crps_zero_residual_scale_uses_the_mse_floor():
     lev_w = np.asarray(level_weights(SIGMA, config=cfg))
     assert np.isfinite(loss)
     np.testing.assert_allclose(loss, 2.0 * np.mean(lev_w) / 1e-15, rtol=1e-6)
+
+
+@pytest.mark.parametrize("field", ["T_scale", "wind_resid_scale"])
+def test_wb_loss_config_refuses_negative_scale(field):
+    from legoesm.training.scale_build import make_loss_config
+
+    with pytest.raises(ValueError, match="must be >= 0"):
+        make_loss_config(None, {"loss": {field: -1.0}})

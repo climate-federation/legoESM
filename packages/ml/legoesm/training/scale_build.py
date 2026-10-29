@@ -647,6 +647,14 @@ def make_loss_config(cfg, yml):
         raise ValueError(
             f"WeatherBench training does not implement {unsupported}; these "
             "loss settings would be silently ignored. Remove them from the deck.")
+    # A negative scale flips the sign of the |error| (CRPS) terms, which divide
+    # by the scale itself rather than its square, so the loss would reward error.
+    negative = [f for f in ("T_scale", "wind_scale", "q_scale", "ps_scale",
+                            "T_resid_scale", "wind_resid_scale",
+                            "q_resid_scale", "ps_resid_scale")
+                if getattr(lc, f) < 0.0]
+    if negative:
+        raise ValueError(f"WeatherBench loss scales must be >= 0, got negative {negative}.")
     return lc
 
 
