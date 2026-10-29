@@ -168,6 +168,8 @@ BASELINE_DISPATCHERS: frozenset[tuple[str, str]] = frozenset(
         # physical Sundqvist-1978 autoconversion on the plume q_c_u); a typo must
         # raise, not silently run the wrong precip physics.
         ("packages/atmosphere/legoesm/atmosphere/physics/convection/bechtold.py", "bechtold_convection"),
+        # faithful IFS shallow closure: unknown no-supply mode must raise
+        ("packages/atmosphere/legoesm/atmosphere/physics/convection/_ifs_closure.py", "shallow_closure"),
         ("packages/atmosphere/legoesm/atmosphere/physics/convection/tiedtke.py", "tiedtke_convection"),
         # ZM land-fraction policy ("required" | "none"): a typo must raise, not
         # silently run every column with ocean coefficients.

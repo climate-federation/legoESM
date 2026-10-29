@@ -187,13 +187,14 @@ def build_columns(oracle, zm_columns):
     import jax
 
     jax.config.update("jax_enable_x64", True)  # the sounding is built with jnp
-    sys.path.insert(0, str(Path(__file__).resolve().parents[4] / "tests" / "unit"))
-    import test_kuo_oracle_faithful as tk  # the unit-test sounding (w = moisture convergence)
+    sys.path.insert(0, str(Path(__file__).resolve().parents[4]))  # repo root
+    from tests._kuo_sounding import build_sounding
+    from tests.unit.test_kuo_oracle_faithful import _build_sounding_with_rh
 
     C = {}
-    for nm, cols in (
-        ("unit_test_sounding", tk._build_sounding()),
-        ("unit_test_rh098", tk._build_sounding_with_rh(0.98)),
+    for nm, cols in (  # the unit-test sounding (w = moisture convergence)
+        ("unit_test_sounding", build_sounding()),
+        ("unit_test_rh098", _build_sounding_with_rh(0.98)),
     ):
         Tt, qt, pft, pht, pqt = (np.asarray(x) for x in cols)
         C[nm] = dict(

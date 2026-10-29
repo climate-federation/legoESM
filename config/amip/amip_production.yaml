@@ -277,6 +277,9 @@ convection: zhang_mcfarlane # CAM6: faithful zm_conv port (f09 mg2+clubb namelis
                             # off, lane default)
 convective_rain_to_surface: true
 convective_cloud: false     # refused by cam6_clubb (deepcu is CAM6's version)
+# Bechtold/IFS settings written explicitly (inert here: convection is ZM).
+bechtold_use_ifs_ascent: false         # faithful OpenIFS chain off
+bechtold_ifs_shallow_nosupply: zero    # no sub-cloud supply -> shallow flux ramps to ~0 (OpenIFS: first_guess)
 # ZM tunables written explicitly (values = the scheme defaults = the CAM6 f09
 # namelist above), so a campaign arm's change is one visible row.
 zm_c0_lnd: 0.0075           # rain conversion over land [1/m]

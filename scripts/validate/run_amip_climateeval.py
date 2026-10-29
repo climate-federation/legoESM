@@ -187,12 +187,17 @@ def cmor_nc_paths(cmor_dir: Path) -> list[Path]:
     table), load those (back-compat). Otherwise treat it as the ``cmor``
     root and load the monthly MIP tables + fx (see ``_MONTHLY_CMOR_TABLES``);
     ``day``/sub-daily tables are excluded to avoid frequency collisions.
+    A run written with ``--cmip-drs-tree`` keeps the same tables under the
+    ESGF DRS tree ``CMIP6/<activity>/<inst>/<source>/<expt>/<variant>/
+    <table>/<var>/<grid>/<version>/``; those are found too.
     """
     direct = sorted(cmor_dir.glob("*.nc"))
     if direct:
         return direct
     return sorted(
-        p for table in _MONTHLY_CMOR_TABLES for p in (cmor_dir / table).glob("*.nc")
+        p for table in _MONTHLY_CMOR_TABLES
+        for pattern in (f"{table}/*.nc", f"CMIP6/*/*/*/*/*/{table}/*/*/v*/*.nc")
+        for p in cmor_dir.glob(pattern)
     )
 
 

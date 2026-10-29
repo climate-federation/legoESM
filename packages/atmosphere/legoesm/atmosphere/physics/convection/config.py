@@ -52,6 +52,7 @@ __param_spec__ = {
     "BechtoldConfig": {
         "scheme_key": "atm.conv.BechtoldConfig",
         "excluded": {
+            "ifs_shallow_supply_width_w_m2": "smoothing width of the faithful-chain max(ZDHPBL, 0) shallow supply ramp (RULE 5 differentiable form), not a tunable",
             "cape_sharpness": "numerics: sigmoid sharpness on the CAPE trigger gate",
             "depth_split_sharpness": "numerics: sigmoid sharpness on the deep/shallow depth blend",
             "downdraft_RH_min": "trigger: column-mean RH threshold below which the downdraft fires (not sigmoid-tunable, fix via config)",
@@ -257,6 +258,8 @@ __param_spec__ = {
             "buoyancy_scale_K": {"units": "K", "bounds": (0.033, 0.3), "tunable_tier": 3, "transform": "sigmoid", "category": "trigger", "reference": "Kuo (1974) buoyancy-gate normalisation", "shape": None},
             "entrainment": {"units": "1/m", "bounds": (1.65e-05, 0.00015), "tunable_tier": 1, "transform": "sigmoid", "category": "entrainment", "reference": "Kuo (1974) Mahfouf reference Eps", "shape": None},
             "supersat_scale": {"units": "kg/kg", "bounds": (3.3e-06, 3e-05), "tunable_tier": 3, "transform": "sigmoid", "category": "trigger", "reference": "Kuo (1974) condensation-gate normalisation", "shape": None},
+            "w_lcl_scale_ms": {"units": "m/s", "bounds": (0.0033, 0.03), "tunable_tier": 3, "transform": "sigmoid", "category": "trigger", "reference": "smoothing scale of the Mahfouf oracle's w_lcl > 0 gate", "shape": None},
+            "ptenq_scale": {"units": "kg/kg/s", "bounds": (3.3e-10, 3e-09), "tunable_tier": 3, "transform": "sigmoid", "category": "trigger", "reference": "smoothing scale of the Mahfouf oracle's max(0, ptenq) in cvgu", "shape": None},
         },
     },
     "MassFluxConfig": {
@@ -568,9 +571,11 @@ class KuoConfig(NamedTuple):
         Each gate argument is normalised to O(1) by the scales below
         before the sigmoid; the gates tend to the oracle's hard ``if``
         switches as the sharpness goes to infinity (1e12 reproduces the
-        oracle to round-off).  The default 50 is NOT crisp: the ``w_lcl>0``
-        gate (argument ``w_lcl / max|w|``) still fires partially for a
-        slightly negative LCL velocity.
+        oracle to round-off on the fixture; an argument of exactly 0 gives
+        0.5).  The ``ptenq > 0`` sign gate's width is ``ptenq_sign_floor``,
+        not this sharpness.  The same sharpness smooths the two ``max(x, 0)``
+        cut-offs (parcel excess over saturation, on ``supersat_scale``;
+        positive convergence in ``cvgu``, on ``ptenq_scale``).
     buoyancy_scale_K : float
         Normalisation scale [K] for the buoyancy gate ``tvc − tve`` —
         the sigmoid argument is ``(tvc − tve)/buoyancy_scale_K``.  A
@@ -586,6 +591,13 @@ class KuoConfig(NamedTuple):
         magnitude); the scale-free sign makes the smooth gate ~1 across
         the whole convergent column down to its exponential tail and ~0
         only for clear subsidence.  1e-30 = pure numerical guard.
+    w_lcl_scale_ms : float
+        Fixed speed scale [m/s] of the ``w_lcl > 0`` gate, argument
+        ``w_lcl / w_lcl_scale_ms`` (transition width
+        ``w_lcl_scale_ms / icond_sharpness``).
+    ptenq_scale : float
+        Scale [kg/kg/s] of the smoothed ``max(0, ptenq)`` in ``cvgu``,
+        ``ptenq * sigmoid(s ptenq / ptenq_scale)`` with ``s = icond_sharpness``.
     zint_floor : float
         Safety floor [kg/m²] on the ``|zint|`` normalisation denominator
         so the closure is finite when the convective layer is empty.
@@ -609,6 +621,8 @@ class KuoConfig(NamedTuple):
     ptenq_sign_floor: float = 1.0e-30
     zint_floor: float = 1.0e-12
     cvgu_activation_scale: float = 1.0e-8
+    w_lcl_scale_ms: float = 0.01
+    ptenq_scale: float = 1.0e-9
 
 
 class MassFluxConfig(NamedTuple):
@@ -1564,6 +1578,13 @@ class BechtoldConfig(NamedTuple):
     # (CUASCN has it INOUT and clears it for mid-level columns, cuascn.F90:389
     # and :627), which is harmless only while this port has no KTYPE=3 branch.
     use_ifs_ascent: bool = False
+    # Faithful chain only: shallow closure with no sub-cloud supply.
+    # "zero" (default) = flux max(supply, 0)/ZDH, smoothed over
+    # ifs_shallow_supply_width_w_m2; "first_guess" = OpenIFS (cumastrn.F90:912
+    # keeps the first-guess 0.1*ZMFMAX).  KNOWN DIFFERENCE in
+    # _ifs_closure.shallow_closure.
+    ifs_shallow_nosupply: str = "zero"
+    ifs_shallow_supply_width_w_m2: float = 1.0  # W/m2, 0 = hard max
     # IFS RCAPDCYCL=2 diurnal-cycle CAPE correction (cumastrn.F90:780-833;
     # see bechtold._ifs_capdcycl): subtracts the sub-cloud CAPE production
     # over a BL timescale so land deep convection peaks late afternoon.

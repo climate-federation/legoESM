@@ -192,6 +192,32 @@ def _land_columns_to_local(arr, partition):
     return arr
 
 
+def _wait_for_mpi_device_work():
+    """Block until every dispatched mpi4jax op has run.  Host mpi4py
+    collectives share COMM_WORLD with mpi4jax, whose ops execute on the XLA
+    thread after async dispatch; issuing a host collective while one is in
+    flight lets ranks enter collectives in different orders (Cray MPICH:
+    "collective tags ... do not match", or a hang).  mpi4jax ops carry an
+    ordered effect, so effects_barrier waits for them.  A failure it
+    surfaces may be on this rank only, while peers walk into the next host
+    collective, so under MPI it aborts the job rather than strand them."""
+    try:
+        jax.effects_barrier()
+    except BaseException as exc:  # noqa: BLE001 - re-raised after Abort
+        try:
+            from mpi4py import MPI
+        except ImportError:
+            raise exc from None
+        comm = MPI.COMM_WORLD
+        if comm.Get_size() > 1:
+            logger.critical(
+                "  queued device work FAILED on rank %d before a host "
+                "collective (%s: %s); aborting so peers do not hang.",
+                comm.Get_rank(), type(exc).__name__, exc)
+            comm.Abort(1)
+        raise
+
+
 def _exchange_halo_cell_fields(halo_ex, fields):
     """Refresh the halo rows of several ``(n_local_cells,)`` cell fields from
     their owners in ONE message: stack the non-None fields along a trailing
@@ -5565,6 +5591,10 @@ class ModelDriver:
             n_days=self.config.days,
             output_dir=self._output_dir,
             cmip_resolution_deg=self.config.output.cmip_resolution_deg,
+            cmip_drs_tree=self.config.output.cmip_drs_tree,
+            cmip_institution_id=self.config.output.cmip_institution_id,
+            cmip_source_id=self.config.output.cmip_source_id,
+            cmip_variant_label=self.config.output.cmip_variant_label,
             start_year=self.config.start_year,
             cloud_config=diag_cloud_config,
             clubb_config=diag_clubb_config,
@@ -7781,6 +7811,7 @@ class ModelDriver:
         canonical file.  For replicated state, only rank 0 writes and
         signals completion via a lightweight barrier.
         """
+        _wait_for_mpi_device_work()
         self._last_checkpoint_step = step
         elapsed_day = day - self.config.start_day
 
@@ -10022,6 +10053,7 @@ class ModelDriver:
         from legoesm.diagnostics.energy_budget import (
             column_moist_static_energy,
         )
+        _wait_for_mpi_device_work()
         comm = _MPI.COMM_WORLD
         root = comm.Get_rank() == 0
         nan_out = {k: float("nan") for k in self._ENERGY_SERIES_KEYS}
@@ -10037,6 +10069,7 @@ class ModelDriver:
         # --- B: edge halo refresh (collective).
         try:
             u_ex = vl.halo_exchange.exchange_edge_field(self.state.u.data)
+            _wait_for_mpi_device_work()
         except BaseException as exc:  # noqa: BLE001 - re-raised after Abort
             logger.critical(
                 "  energy tracker: the edge halo exchange FAILED on rank %d "
@@ -10134,6 +10167,7 @@ class ModelDriver:
         quasi-uniform SCVT).
         """
         from mpi4py import MPI as _MPI
+        _wait_for_mpi_device_work()
         vl = self._voronoi_layout
         om_c = vl.owned_mask_cells          # (n_local_cells,) bool
         om_e = vl.owned_mask_edges          # (n_local_edges,) bool
@@ -10973,6 +11007,7 @@ class ModelDriver:
         # deadlocking it.
         try:
             u_ex = vlayout.halo_exchange.exchange_edge_field(u_local)
+            _wait_for_mpi_device_work()
         except BaseException as exc:  # noqa: BLE001 - re-raised after Abort
             logger.critical(
                 "  CMOR feed at day %.2f: the edge halo exchange FAILED on "

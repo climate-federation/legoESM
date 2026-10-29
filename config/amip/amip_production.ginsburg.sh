@@ -164,6 +164,11 @@ CMIP6_FORCING_FLAGS+=( --rrtmgp-overhead-layer )
 # Caspian/Aral 1.0, open ocean 0.0).
 : "${AMIP_LAND_MASK:=${CLM_SURFDATA%/*}/sftlf_clm_1.9x2.5.nc}"
 
+# CAM6 prescribed-aerosol optics (PPE-000 MAM4) for droplet activation: the
+# production deck names the Levante path.  Staged 2026-10-27 (31 files, sha256
+# match the code pins).
+: "${CAM6_AEROSOL_DIR:=/burg-archive/glab/users/pg2328/legoESM/data/cam6_optics}"
+
 # --- machine-specific PATH flags (everything else is in the YAML) -------------
 AMIP_PATH_FLAGS=(
   --ic-path "${ERA5_IC}"
@@ -178,6 +183,7 @@ AMIP_PATH_FLAGS=(
   --aerosol-file "${AEROSOL}"
   --aerosol-ccn-file "${AEROSOL_CCN}"
   --volcanic-aerosol-file "${VOLCANIC}"
+  --cam6-aerosol-dir "${CAM6_AEROSOL_DIR}"
 )
 # Volcanic LW (ext_earth) on, as the Levante twin; AMIP_VOLCANIC_LW=0 opts out
 # for EVERY lane (AMIP and the coupled CMIP6_FORCING_FLAGS) -- one policy.

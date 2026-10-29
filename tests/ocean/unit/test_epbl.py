@@ -1025,3 +1025,155 @@ def test_epbl_sqrt_s_eos_is_finite_at_zero_salinity(monkeypatch):
     for dsv in seen["args"][4:6]:
         assert bool(jnp.all(jnp.isfinite(dsv)))
     assert bool(jnp.all(jnp.isfinite(tend.K_v)))
+
+
+# --- the run's EOS reaches KPP and the other callers (#2243) ----------------
+
+def test_kpp_uses_the_supplied_eos(monkeypatch):
+    """The explicit KPP factory hands the run's EOS to its density, surface
+    buoyancy and boundary-layer depth, as the K-profile fallback does;
+    eos_fn=None and an explicit Wright give the same inputs."""
+    import types
+    from legoesm.ocean.eos import wright_eos
+    from legoesm.ocean.physics.vertical_mixing import integration
+    from legoesm.ocean.physics.vertical_mixing.kpp import (
+        kpp_vertical_mixing as real,
+    )
+    from legoesm.ocean.scm_forcing import build_ocean_surface_forcing_struct
+
+    scm, _ = _epbl_scm(-200.0, False, nsteps=1)
+    sfc = build_ocean_surface_forcing_struct(
+        scm.forcing, 0.0, scm.state.eta.data.shape, scm.state.T.data.dtype)
+    sfc = sfc._replace(freshwater=jnp.full_like(sfc.q_net, 3e-5))
+    vm = VerticalMixingConfig(scheme="kpp")
+
+    def inputs(eos_fn):
+        seen = {}
+
+        def spy(*a, **kw):
+            seen.update(kw, args=a)
+            return real(*a, **kw)
+
+        monkeypatch.setattr(integration, "kpp_vertical_mixing", spy)
+        fn = integration.make_vertical_mixing_physics(
+            vm, apply_diffusion=False, eos_fn=eos_fn)
+        fn(scm.state, types.SimpleNamespace(), scm.z_coord,
+           surface_forcing=sfc)
+        monkeypatch.setattr(integration, "kpp_vertical_mixing", real)
+        return seen
+
+    lin_eos = _linear_eos()
+    base, wright, lin = inputs(None), inputs(wright_eos), inputs(lin_eos)
+    assert lin["eos_fn"] is lin_eos and base["eos_fn"] is None
+    np.testing.assert_array_equal(np.asarray(base["B_f"]),
+                                  np.asarray(wright["B_f"]))
+    assert not np.allclose(np.asarray(base["B_f"]), np.asarray(lin["B_f"]),
+                           rtol=1e-3)
+    np.testing.assert_array_equal(np.asarray(base["args"][4]),
+                                  np.asarray(wright["args"][4]))
+    assert not np.allclose(np.asarray(base["args"][4]),
+                           np.asarray(lin["args"][4]), rtol=1e-6)
+
+
+def test_cube_model_hands_its_eos_to_the_physics(monkeypatch):
+    """The cubed-sphere ocean model builds its physics with its own EOS."""
+    from legoesm.grids.cubed_sphere import create_cubed_sphere
+    from legoesm.ocean.dynamics import ocean_model as mod
+    from legoesm.ocean.eos import LinearEOSConfig
+    from legoesm.ocean.physics.combined import OceanPhysicsConfig
+    from legoesm.ocean.state import OceanConfig
+    from legoesm.ocean.vertical import create_ocean_z_star
+
+    seen = {}
+    real = mod.make_ocean_physics
+
+    def spy(*a, **kw):
+        seen.update(kw)
+        return real(*a, **kw)
+
+    monkeypatch.setattr(mod, "make_ocean_physics", spy)
+    lin = LinearEOSConfig()
+    mod.OceanModel(create_cubed_sphere(8),
+                   create_ocean_z_star(n_levels=4, H_max=400.0),
+                   OceanConfig(eos="linear", eos_linear=lin,
+                               physics=OceanPhysicsConfig(),
+                               enable_runtime_checks=False))
+    T, S, p = jnp.asarray(10.0), jnp.asarray(35.0), jnp.asarray(0.0)
+    want = make_eos_fn(eos="linear", eos_linear=lin)(T, S, p)
+    assert float(seen["eos_fn"](T, S, p)) == float(want)
+    assert float(want) != float(make_eos_fn()(T, S, p))
+
+
+def test_momentum_diagnostic_script_passes_its_eos():
+    """The momentum-balance diagnostic builds its physics with the
+    config's EOS (#2243)."""
+    import inspect
+
+    from scripts.run.global_overturning import diagnose_momentum_balance as d
+
+    src = inspect.getsource(d.main)
+    assert ("eos_fn=make_eos_fn(eos=ocean_config.eos,\n"
+            "                           eos_linear=ocean_config.eos_linear,\n"
+            "                           eos_nemo_seos=ocean_config.eos_nemo_seos)"
+            ) in src
+
+
+def test_kpp_buoyancy_same_for_none_and_explicit_wright():
+    """The KPP / CATKE surface buoyancy (rho(T,S,0)-normalised form) is the
+    same bit for bit for eos_fn=None and an explicit wright_eos, also where
+    the surface is nearly fresh: Wright gets no salinity floor (#2243).
+    The EOS comes from make_eos_fn, as the models build it."""
+    from legoesm.ocean.physics.vertical_mixing._shared import (
+        surface_buoyancy_flux,
+    )
+    wright_eos = make_eos_fn("wright")
+    T = jnp.asarray([10.0, 10.0, 20.0])
+    S = jnp.asarray([0.0, 1e-4, 35.0])
+    q, fw, salt = jnp.full(3, -150.0), jnp.full(3, 3e-5), jnp.full(3, 1e-6)
+    kw = dict(g=G, rho_0=RHO0, c_sw=C_SW, real_salt_in_qs=True)
+    a = surface_buoyancy_flux(q, fw, salt, T, S, **kw)
+    b = surface_buoyancy_flux(q, fw, salt, T, S, eos_fn=wright_eos, **kw)
+    for x, y in zip(a, b):
+        np.testing.assert_array_equal(np.asarray(x), np.asarray(y))
+
+
+@pytest.mark.parametrize("path", ["explicit", "k_profile_fallback"])
+def test_kpp_sqrt_s_eos_gradient_finite_at_zero_salinity(path):
+    """A sqrt(S) EOS (veros_gsw) has an infinite dRho/dS at S = 0; KPP's
+    density sees the floored salinity in both paths (explicit factory and
+    implicit K-profile fallback), as ePBL's does, so d(sum K_v)/dS stays
+    finite at a zero-salinity cell (#2243)."""
+    import types
+    from legoesm.ocean.physics.combined import OceanPhysicsConfig
+    from legoesm.ocean.physics.vertical_mixing import integration
+    from legoesm.ocean.physics.vertical_mixing.k_profiles import (
+        compute_vertical_K_profiles,
+    )
+    from legoesm.ocean.scm_forcing import build_ocean_surface_forcing_struct
+
+    scm, _ = _epbl_scm(-200.0, False, nsteps=1)
+    st = scm.state
+    sfc = build_ocean_surface_forcing_struct(
+        scm.forcing, 0.0, st.eta.data.shape, st.T.data.dtype)
+    vm = VerticalMixingConfig(scheme="kpp")
+    eos = make_eos_fn(eos="veros_gsw")
+    if path == "explicit":
+        fn = integration.make_vertical_mixing_physics(
+            vm, apply_diffusion=False, eos_fn=eos)
+
+        def k_v(s):
+            return fn(st._replace(S=st.S.replace(data=s)),
+                      types.SimpleNamespace(), scm.z_coord,
+                      surface_forcing=sfc).K_v
+    else:
+        phys = OceanPhysicsConfig(vertical_mixing=vm)
+
+        def k_v(s):
+            return compute_vertical_K_profiles(
+                st._replace(S=st.S.replace(data=s)), scm.z_coord, sfc,
+                phys, eos_fn=eos)[0]
+
+    S0 = st.S.data.at[..., -1].set(0.0)
+    grad = jax.grad(lambda s: jnp.sum(k_v(s)))(S0)
+    assert bool(jnp.all(jnp.isfinite(k_v(S0))))
+    assert bool(jnp.all(jnp.isfinite(grad)))

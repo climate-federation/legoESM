@@ -200,8 +200,10 @@ def _run_dca_ahmed(T, q, pf, ph, **kw):
 
 
 def _run_kuo(T, q, pf, ph, mc=None, **kw):
+    # resolved ascent for the w_lcl > 0 gate wherever a convergence is given
+    w = None if mc is None else jnp.full_like(mc, 0.01)
     return kuo_convection(
-        T, q, pf, ph, DT, KuoConfig(**kw), moisture_convergence=mc,
+        T, q, pf, ph, DT, KuoConfig(**kw), moisture_convergence=mc, w_grid=w,
     )
 
 
@@ -307,10 +309,11 @@ def test_tier1_outputs_finite_and_shaped(name):
 # Tier 2 — SIGNS
 # ===========================================================================
 
-@pytest.mark.parametrize("name", SCHEME_NAMES)
+@pytest.mark.parametrize("name", [n for n in SCHEME_NAMES if n != "kuo"])
 def test_tier2_cloud_water_source_non_negative(name):
     """The convective condensate source handed to microphysics must be >= 0
-    for EVERY scheme (documented invariant of ConvectionOutput)."""
+    (ConvectionOutput) for every scheme except Kuo, whose source is the
+    oracle's SIGNED rain integrand dT_dt/alpha (#2213 split decision)."""
     T, q, pf, ph, u, v = _capped_column() if name in _LNB_SCHEMES else _column()
     ncol, nlev = T.shape
     w = jnp.full((ncol, nlev), 0.05)

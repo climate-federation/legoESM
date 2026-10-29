@@ -41,6 +41,7 @@ from legoesm.ocean.experiments.global_overturning import (
     GlobalOverturningConfig, create_initial_conditions,
     create_forcings, create_eos_config,
 )
+from legoesm.ocean.eos import make_eos_fn
 from legoesm.ocean.physics.combined import make_ocean_physics
 
 
@@ -110,7 +111,13 @@ def main():
     print(f"State loaded: u={state.u.data.shape}, T={state.T.data.shape}")
 
     # ---- Compute momentum tendencies ----
-    physics_fn = make_ocean_physics(ocean_config.physics) if ocean_config.physics else None
+    # The config's (linear) EOS for the vertical-mixing closures (#2243).
+    physics_fn = (make_ocean_physics(
+        ocean_config.physics,
+        eos_fn=make_eos_fn(eos=ocean_config.eos,
+                           eos_linear=ocean_config.eos_linear,
+                           eos_nemo_seos=ocean_config.eos_nemo_seos))
+        if ocean_config.physics else None)
     print("Computing momentum tendencies (diagnose_momentum=True)...")
     tendencies, mom_diag = latlon_cgrid_ocean_baroclinic_tendencies(
         state, grid, z_coord, ocean_config,

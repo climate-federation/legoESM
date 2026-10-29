@@ -1,0 +1,24 @@
+{
+  "issue": "climate-federation/legoESM#2181 (MOM6 oracle fixture for the PR #2122 ePBL single-column case)",
+  "mom6": {"repo": "https://github.com/mom-ocean/MOM6", "commit": "0e9a5611a9f6c99bfea12665da3a9146183521ee",
+           "driver": "config_src/drivers/solo_driver", "build": "MOM6 autoconf (top-level make, BUILD=build)"},
+  "fms": {"repo": "https://github.com/NOAA-GFDL/FMS", "tag": "2023.03", "commit": "527a42f3ff36d75aac68b65757b35f73a74146bb",
+          "note": "MOM6's own pin (ac/deps/Makefile FMS_COMMIT)"},
+  "toolchain": {"modules": ["gcc/11.2.0-gcc-11.2.0", "openmpi/4.1.2-gcc-11.2.0", "netcdf-c/4.8.1-openmpi-4.1.2-gcc-11.2.0",
+                            "netcdf-fortran/4.5.3-openmpi-4.1.2-gcc-11.2.0"],
+                "FC": "mpif90 (GNU Fortran 11.2.0)", "FCFLAGS": "-g -O2 -fallow-argument-mismatch", "machine": "DKRZ Levante, compute partition",
+                "mpi_ranks": 1},
+  "slurm_jobs": {"build": 28519949, "runs": 28520329, "legoesm_measurement": 28520579, "legoesm_measurement_fp64_policy": 28522629},
+  "cases": {"q{Q}_dt{DT}": "MOM_input + MOM_override_q{Q}_dt{DT} (DT [s], SENSIBLE_HEAT_FLUX [W/m2, + into ocean]); Q in -200, 0, 200; DT in 1200, 300; 8 h run"},
+  "parameter_record": "MOM_parameter_doc.all is from case q-200_dt1200; the other cases differ only in DT (and the DT_* defaults that follow it) and SENSIBLE_HEAT_FLUX",
+  "npz_keys": {
+    "{case}_T_init": "MOM_IC.nc Temp, column (1,1), 50 layers surface->bottom [degC]",
+    "{case}_S_init": "MOM_IC.nc Salt [psu]",
+    "{case}_T_hourly": "prog.nc temp, instantaneous double-precision diag at hours 1..8, column (1,1) [degC]",
+    "{case}_T_8h": "temp at hour 8; when the fixture was packed it was checked bit-identical to RESTART/MOM.res.nc Temp (restart not committed) and identical in all 2x2 columns",
+    "{case}_S_8h": "salt at hour 8 [psu]",
+    "{case}_hml_hourly": "ePBL_h_ML at hours 1..8 [m]",
+    "{case}_time_h": "diag times [h]"
+  },
+  "sensitivity_checks": "q-200_dt1200: HBBL=1/HMIX_FIXED=1 and CDRAG=0 each give bit-identical T (u changes by 3e-4 m/s for HBBL/HMIX_FIXED)"
+}
