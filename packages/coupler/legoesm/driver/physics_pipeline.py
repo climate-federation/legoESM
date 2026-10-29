@@ -2970,6 +2970,11 @@ class PhysicsPipeline:
             if getattr(self, "_use_clubb_cloud_fraction", False) \
                     and cloud_fraction is not None:
                 _cf_ovr = cloud_fraction.reshape(T_col.shape)
+            from legoesm.atmosphere.physics.microphysics.config import (
+                mg2_rel_ice_params,
+            )
+            _mg2_ice_dcs_m, _mg2_ice_slope_w = mg2_rel_ice_params(
+                self.micro_config)
             cloud_props = compute_cloud_properties(
                 T=T_col, p_full=p_full_col, q_v=q_v_col, dp=dp_col,
                 config=cloud_config, q_cloud=q_c_col, q_ice=q_i_col,
@@ -2977,6 +2982,10 @@ class PhysicsPipeline:
                 conv_precip=conv_precip_col,
                 cloud_fraction_override=_cf_ovr,
                 n_cloud_in_cloud=_nc_in_cloud,
+                # CAM6 ice radius: the run's MG2 dcs + ice-slope width (same
+                # helper and refusal as the MPAS radiation lane).
+                mg2_ice_dcs_m=_mg2_ice_dcs_m,
+                mg2_ice_slope_log_width=_mg2_ice_slope_w,
             )
             # ``to_rrtmg_kwargs`` builds the kwargs without
             # ``cloud_fraction`` (commit 4c9591bb, lost in AIMIP-#312

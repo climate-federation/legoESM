@@ -1608,12 +1608,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     # Sundqvist large-scale-condensation tunables (override the SundqvistConfig
     # defaults / AIMIP-trained leaves).  These are the precipitation-efficiency
     # knobs: qc_crit is the autoconversion cloud-water threshold (rain forms only
-    # for q_c >~ qc_crit; the default 5e-4 suppresses drizzle from thin clouds),
+    # for q_c >~ qc_crit; the default 3e-4 is the Zhao-Carr oracle m_r),
     # auto_rate the autoconversion rate, rh_crit the condensation onset RH.
     parser.add_argument("--sundqvist-qc-crit", dest="sundqvist_qc_crit",
                         type=float, default=None,
                         help="Sundqvist autoconversion cloud-water threshold "
-                             "[kg/kg] (None=scheme/trained default 5e-4; bounds "
+                             "[kg/kg] (None=scheme/trained default 3e-4; bounds "
                              "1e-4..1.5e-3). Lower it to rain out thin clouds.")
     parser.add_argument("--sundqvist-rh-crit", dest="sundqvist_rh_crit",
                         type=float, default=None,

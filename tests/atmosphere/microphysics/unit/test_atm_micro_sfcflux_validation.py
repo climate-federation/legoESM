@@ -22,7 +22,8 @@ The conserved-water invariant is the *mass-weighted* column integral
 ``int (sum dq_x) * rho * dz = -precipitation`` — the schemes weight
 sedimentation by ``rho*dz`` (NOT ``dp/g``); on synthetic profiles where
 ``dp/g != rho*dz`` only the ``rho*dz`` form closes (verified in the probe
-that motivated this file).
+that motivated this file). Sundqvist is the exception: it ports the
+Zhao-Carr oracle's ``del/g`` and closes in ``dp/g`` (tier-2 R9/C12).
 """
 
 from __future__ import annotations
@@ -86,6 +87,11 @@ def _warm_column(ncol=2, nlev=8, rh=1.05, with_ice=False):
             N_i=jnp.full((ncol, nlev), 1.0e4),
         )
     return T, q_v, hyd, p_full, p_half, rho, dz
+
+
+def _layer_mass(p_half):
+    """``dp/g`` per layer (top-down interfaces)."""
+    return (p_half[:, 1:] - p_half[:, :-1]) / constants.g
 
 
 def _column_water_residual(out, rho, dz):
@@ -234,19 +240,16 @@ class TestSundqvist:
     def test_conservation_total_water(self):
         T, q_v, hyd, p_full, p_half, rho, dz = _warm_column(rh=1.05)
         out = sundqvist_microphysics(T, q_v, hyd, p_full, p_half, rho, dz, 1800.0)
-        res = _column_water_residual(out, rho, dz)
+        res = _column_water_residual(out, _layer_mass(p_half), 1.0)
         assert jnp.max(jnp.abs(res)) < 1e-15
 
     def test_conservation_qr_drain(self):
         """Pre-existing q_r is drained to surface in one step (diagnostic).
 
-        Regression for the q_r-drain mass-weighting fix: the drained mass
-        added to the precipitation diagnostic now uses the same ``rho*dz``
-        weighting as the tracer tendencies (was ``dp/g``), so the column
-        water budget closes even on a NON-hydrostatically-consistent profile
-        (``dz`` chosen independently of ``dp/(rho*g)``). The ``dp/g`` form
-        closed only when ``dp/g == rho*dz`` (hydrostatic balance), masking a
-        latent within-scheme mass-weighting inconsistency.
+        The drained mass uses the same layer mass as the tendencies, the
+        Zhao-Carr oracle's ``del/g = dp/g`` (tier-2 R9/C12), so the column
+        water budget closes in ``dp/g`` even where ``dz`` is chosen
+        independently of ``dp/(rho*g)``.
         """
         T, q_v, hyd, p_full, p_half, rho, dz = _warm_column(rh=0.9)
         hyd = hyd._replace(q_r=jnp.full_like(hyd.q_r, 2.0e-4))
@@ -254,7 +257,7 @@ class TestSundqvist:
         out = sundqvist_microphysics(T, q_v, hyd, p_full, p_half, rho, dz, dt)
         # dq_r_dt = -q_r/dt exactly (drained)
         np.testing.assert_allclose(out.dq_r_dt, -hyd.q_r / dt, rtol=1e-12)
-        res = _column_water_residual(out, rho, dz)
+        res = _column_water_residual(out, _layer_mass(p_half), 1.0)
         assert jnp.max(jnp.abs(res)) < 1e-15
 
     def test_sign_qc_nonneg_under_step(self):

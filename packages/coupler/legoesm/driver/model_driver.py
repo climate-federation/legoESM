@@ -10147,6 +10147,23 @@ class ModelDriver:
                         else float("nan"))
         return out
 
+    def _checkpoint_state_finite(self) -> bool:
+        """True iff every prognostic (u, T, p_s, phis) is finite.  Under a
+        cell partition each rank sees only its own cells, so the verdict is
+        AND-reduced across ranks: a NaN on one rank must stop every rank,
+        or that rank breaks out while its peers walk into the checkpoint's
+        collectives and hang."""
+        s = self.state
+        ok = bool(jnp.all(jnp.isfinite(s.u.data))
+                  & jnp.all(jnp.isfinite(s.T.data))
+                  & jnp.all(jnp.isfinite(s.p_s.data))
+                  & jnp.all(jnp.isfinite(s.phis.data)))
+        if _is_mpas_cell_partitioned(self):
+            from mpi4py import MPI as _MPI
+            _wait_for_mpi_device_work()
+            ok = bool(_MPI.COMM_WORLD.allreduce(ok, op=_MPI.LAND))
+        return ok
+
     def _mpas_global_diag(self, T_data, p_s_data, u_data, cwv_field,
                           ni_field=None):
         """Global owned-cell diagnostics for an MPAS cell-partition MPI run.
@@ -16380,12 +16397,7 @@ class ModelDriver:
                 # diagnostic steps, so a u-only guard could persist a state
                 # with finite u but NaN T — poisoning every subsequent chain
                 # link.
-                _s = self.state
-                _finite = (jnp.all(jnp.isfinite(_s.u.data))
-                           & jnp.all(jnp.isfinite(_s.T.data))
-                           & jnp.all(jnp.isfinite(_s.p_s.data))
-                           & jnp.all(jnp.isfinite(_s.phis.data)))
-                if not bool(_finite):
+                if not self._checkpoint_state_finite():
                     _bad_day = START_DAY + (step + 1) * DT / 86400.0
                     run_status = f"BLOWUP at day {_bad_day - START_DAY:.1f}"
                     logger.error(

@@ -387,11 +387,12 @@ def apply_predicted_sundqvist_rain_survival_fraction(
         dt=dt,
         config=config,
     )
-    # Both fluxes share the ``rho * dz`` weight on the level axis; fuse
-    # the autoconversion and base-evaporation column reductions.
+    # Both fluxes share the scheme's layer mass dp/g (Zhao-Carr del/g) on the
+    # level axis; fuse the autoconversion and base-evaporation reductions.
+    layer_mass = (p_half[:, 1:] - p_half[:, :-1]) / constants.g
     _flux_pair = jnp.sum(
         jnp.stack([rates.autoconversion, rates.evaporation], axis=-1)
-        * (rho * dz)[..., None],
+        * layer_mass[..., None],
         axis=-2,
     )
     generated_rain_flux = _flux_pair[..., 0]
@@ -417,10 +418,9 @@ def apply_predicted_sundqvist_rain_survival_fraction(
     dt_safe = jnp.maximum(dt, 1e-10)
     q_r_in = jnp.clip(hydrometeors.q_r, 0.0, None)
     dq_r_dt = -q_r_in / dt_safe
-    dp = p_half[:, 1:] - p_half[:, :-1]
-    q_r_drain_flux = jnp.sum(q_r_in * dp, axis=1) / (constants.g * dt_safe)
+    q_r_drain_flux = jnp.sum(q_r_in * layer_mass, axis=1) / dt_safe
     precipitation = jnp.clip(
-        generated_rain_flux - jnp.sum(evaporation * rho * dz, axis=1)
+        generated_rain_flux - jnp.sum(evaporation * layer_mass, axis=1)
         + q_r_drain_flux,
         0.0,
         None,
