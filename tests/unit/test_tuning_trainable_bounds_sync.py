@@ -56,3 +56,12 @@ def test_shared_names_exist():
     shared = set(constraints) & set(TUNING_PARAMETERS)
     assert {"sbm_tau_c", "albedo_ocean"} <= shared, (
         f"expected sbm_tau_c + albedo_ocean shared; got {sorted(shared)[:10]}")
+
+
+def test_sundqvist_evap_coeff_tuning_range_is_the_spec_range():
+    """One parameter, one range: the tuning catalog carries the scheme spec's
+    bounds (both reviewers 2026-10-29: 1.5e-3, not the catalog's former 2e-3)."""
+    from legoesm.atmosphere.physics.microphysics.config import __param_spec__
+    lo, hi = __param_spec__["SundqvistConfig"]["params"]["evap_coeff"]["bounds"]
+    t = TUNING_PARAMETERS["sundqvist_evap_coeff"]
+    assert (t.min_val, t.max_val) == (lo, hi) == (1.0e-5, 1.5e-3)
