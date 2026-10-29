@@ -27,8 +27,9 @@ def test_cli_column_devices():
         mod.build_scale_config_from_args(["--column-devices", "-1"])
 
 
-def _run4(body: str) -> str:
-    env = dict(os.environ, XLA_FLAGS="--xla_force_host_platform_device_count=4",
+def _run4(body: str, n_dev: int = 4) -> str:
+    env = dict(os.environ,
+               XLA_FLAGS=f"--xla_force_host_platform_device_count={n_dev}",
                JAX_PLATFORMS="cpu", JAX_ENABLE_X64="1")
     code = textwrap.dedent(f"""
         import importlib.util, sys
@@ -175,3 +176,54 @@ def test_physical_params_runs():
         as_dict=lambda: {"a": np.asarray(2.0), "b": np.ones((2, 1))}))
     assert mod._physical_params(p) == {"classical.a": 2.0,
                                        "classical.b": [1.0, 1.0]}
+
+
+def test_radiation_split_reuses_the_step_mesh():
+    """Inside a jit already on the dycore's step mesh (the duo physics step),
+    the radiation column split must use that same mesh: a second mesh over
+    the same devices fails lowering ("mesh should be the same across the
+    entire program"), which stopped every multi-device duo run.  JAX runs
+    that check only when the program holds a host callback; the model's
+    runtime error checks supply one, so the test does too.  1-D face mesh
+    and the 3-D window-layout shape, values and gradients exact.
+
+    Non-vacuous: make radiation_column_mesh return create_column_mesh(n)
+    again and the jit raises.
+    """
+    out = _run4("""
+        import equinox as eqx, jax, jax.numpy as jnp, numpy as np
+        from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
+        from legoesm.atmosphere.physics.radiation import integration as ri
+        from legoesm.driver.model_driver import radiation_column_mesh
+        from legoesm.parallel.column_shard import shard_columns
+        devs = np.array(jax.devices())
+        for step in (Mesh(devs, ("face",)),
+                     Mesh(devs.reshape(2, 1, 1), ("face", "ti", "tj"))):
+            mesh = radiation_column_mesh(step, 2)
+            cons = ri._column_constraint(mesh, 8)
+            pin = NamedSharding(step, P(tuple(step.axis_names)))
+            # the duo radiation path: inputs placed on the column mesh
+            # (shard_columns), solver arrays constrained (_column_constraint),
+            # plus a runtime error check like the model's: its host callback
+            # is what makes JAX enforce one mesh per program
+            def f(x):
+                y = cons(shard_columns(
+                    jax.lax.with_sharding_constraint(x, pin), mesh) ** 2)
+                checked = eqx.error_if(
+                    y, ~jnp.all(jnp.isfinite(y)), "non-finite")
+                return checked, y
+            f = jax.jit(f)
+            # committed to the step mesh, as the duo physics inputs are
+            x = jax.device_put(jnp.arange(24.0).reshape(8, 3), pin)
+            y, split = f(x)
+            g = jax.grad(lambda x: jnp.sum(f(x)[0]))(x)
+            print("VAL", np.array_equal(np.asarray(y), np.asarray(x) ** 2))
+            print("GRAD", np.array_equal(np.asarray(g), 2.0 * np.asarray(x)))
+            # the check's callback hands back a replicated copy, so the
+            # split is read on the radiation result itself
+            print("SPLIT", not split.sharding.is_fully_replicated)
+        print("COL", radiation_column_mesh(None, 2).axis_names == ("col",))
+    """, n_dev=2)
+    for tag in ("VAL True", "GRAD True", "SPLIT True"):
+        assert out.count(tag) == 2, out
+    assert "COL True" in out, out

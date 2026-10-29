@@ -803,10 +803,15 @@ def _column_constraint(column_mesh, ncol: int):
     """Sharding constraint for arrays whose leading axis is the ``ncol`` columns.
 
     Every other leaf (scalars, per-band tables, None) passes through unchanged.
+    The columns are split over ALL axes of ``column_mesh`` (a 1-D ``'col'``
+    mesh, or the dycore's own step mesh, e.g. the duo ``'face'`` mesh or its
+    3-D window mesh: one mesh per compiled physics step).
     """
     from jax.sharding import NamedSharding, PartitionSpec as P
 
-    n_dev = column_mesh.shape["col"]
+    names = column_mesh.axis_names
+    axis = names[0] if len(names) == 1 else tuple(names)
+    n_dev = column_mesh.size
     if ncol % n_dev:
         raise ValueError(
             f"column_mesh: solver column count {ncol} is not divisible by "
@@ -814,7 +819,7 @@ def _column_constraint(column_mesh, ncol: int):
 
     def cons(x):
         if getattr(x, "ndim", 0) >= 1 and x.shape[0] == ncol:
-            spec = P("col", *((None,) * (x.ndim - 1)))
+            spec = P(axis, *((None,) * (x.ndim - 1)))
             return jax.lax.with_sharding_constraint(
                 x, NamedSharding(column_mesh, spec))
         return x
@@ -1761,7 +1766,7 @@ def _make_hydrostatic_radiation(
         # backend kernels are purely functional over the column axis.
         if column_mesh is not None:
             from legoesm.parallel.column_shard import shard_columns
-            n_dev = column_mesh.shape["col"]
+            n_dev = column_mesh.size
             if ncol % n_dev != 0:
                 raise ValueError(
                     f"column_mesh requires ncol={ncol} divisible by "

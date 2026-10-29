@@ -324,6 +324,31 @@ def gather_land_step(run, ncol, padded, proc, allgather):
             + (jnp.max(g_cnt[:, -1]).astype(jnp.asarray(out[-1]).dtype),))
 
 
+def radiation_column_mesh(step_mesh, n_devices):
+    """The mesh radiation splits its columns over.  A dycore that runs on its
+    own step mesh (the FV3 duo face / window layouts) gets that SAME mesh:
+    JAX lowers a compiled step against one mesh only, and the physics runs
+    inside the duo step's jit.  Every other lane gets a new 1-D ``'col'``
+    mesh over ``n_devices`` devices, as before."""
+    if step_mesh is not None:
+        return step_mesh
+    from legoesm.parallel.column_shard import create_column_mesh
+    return create_column_mesh(n_devices)
+
+
+def land_device_mesh(step_mesh, local_devices):
+    """The mesh the land device split runs on: the step mesh itself when this
+    process owns all of its devices (one mesh per compiled step, as for
+    radiation), else a 1-D ``'land'`` mesh over this process's devices.
+    KNOWN GAP: several processes each driving more than one device still
+    get that per-process ``'land'`` mesh, which differs from the step mesh
+    inside the duo physics jit."""
+    if step_mesh is not None and len(local_devices) == step_mesh.size:
+        return step_mesh
+    from jax.sharding import Mesh
+    return Mesh(np.array(local_devices), ("land",))
+
+
 def shard_land_columns(cols, n_dev):
     """This process's land columns ``cols`` laid out for ``n_dev`` local
     devices: the same near-equal contiguous shares as the process split
@@ -345,7 +370,8 @@ def shard_land_columns(cols, n_dev):
 
 def solve_land_on_devices(step, args, is_col, mesh, keep):
     """``step(*args)`` (the land step on packed slots, leading axis = slot)
-    run one equal shard per device of the 1-D ``mesh`` under a shard_map,
+    run one equal shard per device of ``mesh`` (split over all its axes, so
+    the duo's 3-D window mesh works too) under a shard_map,
     then cut to the real slots ``keep``.  ``is_col`` is ``args``' tree of
     booleans marking the per-column array leaves (split over the devices);
     every other leaf is shared.  Every OUTPUT leaf must be per column (its
@@ -359,7 +385,8 @@ def solve_land_on_devices(step, args, is_col, mesh, keep):
     from legoesm.parallel.shard_map_compat import shard_map
 
     n_dev = int(np.prod(mesh.devices.shape))
-    axis = mesh.axis_names[0]
+    names = mesh.axis_names
+    axis = names[0] if len(names) == 1 else tuple(names)
     leaves, tdef = jax.tree_util.tree_flatten(args)
     cols = jax.tree_util.tree_leaves(is_col)
     if len(cols) != len(leaves):
@@ -13091,12 +13118,13 @@ class ModelDriver:
         _column_mesh = None
         _single_process = (self._device_config is None
                            or not self._device_config.is_distributed)
-        _n_dev = len(jax.devices())
+        _rad_step_mesh = getattr(self.model, "step_spmd_mesh", None)
+        _n_dev = (int(_rad_step_mesh.size) if _rad_step_mesh is not None
+                  else len(jax.devices()))
         _ncell = int(self.state.T.data.shape[0])
         if (_rad_scheme == "rrtmgp" and _single_process
                 and _n_dev > 1 and _ncell % _n_dev == 0):
-            from legoesm.parallel.column_shard import create_column_mesh
-            _column_mesh = create_column_mesh(_n_dev)
+            _column_mesh = radiation_column_mesh(_rad_step_mesh, _n_dev)
             logger.info(
                 f"  RRTMGP column-sharding: {_ncell} cells / {_n_dev} devices "
                 f"= {_ncell // _n_dev} cols/device"
@@ -14072,10 +14100,9 @@ class ModelDriver:
                     and (_land_split is not None
                          or not self._is_spmd_multiprocess())
                     and _land_pack_idx_np.size >= len(_land_devs)):
-                from jax.sharding import Mesh
                 _land_pack_idx_np, _land_keep = shard_land_columns(
                     _land_pack_idx_np, len(_land_devs))
-                _land_mesh = Mesh(np.array(_land_devs), ("land",))
+                _land_mesh = land_device_mesh(_step_mesh, _land_devs)
             # the device fallback is per process (shares differ by one
             # column), the process fallback is the same on every process
             if _land_mesh is None and (

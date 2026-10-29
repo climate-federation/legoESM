@@ -4,6 +4,11 @@ the land columns are split over the devices and solved under a shard_map.
 Runs on however many devices jax sees; run ALONE with
 ``XLA_FLAGS=--xla_force_host_platform_device_count=6`` to cover 2 and 6.
 """
+import os
+import subprocess
+import sys
+import textwrap
+from pathlib import Path
 from typing import NamedTuple
 
 import jax
@@ -98,3 +103,67 @@ def test_a_shared_output_is_refused(bad):
                                      jnp.asarray(0.0)),
                               (True, _Cfg(True, False, False), False),
                               mesh, keep)
+
+
+def test_land_split_reuses_the_step_mesh():
+    """One process driving the duo's devices: the land split must run on
+    the dycore's own step mesh, since the land solve sits inside a jit
+    already on that mesh and a second mesh over the same devices fails
+    lowering ("mesh should be the same across the entire program").  Runs
+    with 2 forced CPU devices in a subprocess; 1-D face mesh and the 3-D
+    window-layout shape; result and gradient equal the one-call solve.
+
+    Non-vacuous: make land_device_mesh build Mesh(devs, ("land",)) again and
+    the jit raises.
+    """
+    body = f"""
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("t", {__file__!r})
+        t = importlib.util.module_from_spec(spec); spec.loader.exec_module(t)
+        import jax, jax.numpy as jnp, numpy as np
+        from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
+        from legoesm.driver.model_driver import (
+            land_device_mesh, shard_land_columns, solve_land_on_devices)
+        devs = list(jax.devices())
+        rng = np.random.default_rng(1)
+        cols = np.sort(rng.choice(100, 37, replace=False))
+        st = jnp.asarray(rng.uniform(0.0, 1.0, 100))
+        sc = jnp.asarray(rng.uniform(0.5, 1.5, 100))
+        slots, keep = shard_land_columns(cols, 2)
+        layers = jnp.asarray(rng.uniform(0.0, 1.0, slots.size))
+        one = lambda s, c: t._step(s, t._Cfg(c, layers, "x"), 0.25)
+        ref = jax.jit(one)(st[cols], sc[cols])
+        gref = jax.grad(lambda s: jnp.sum(one(s, sc[cols])[0]))(st[cols])
+        is_col = (True, t._Cfg(True, False, False), False)
+        for step in (Mesh(np.array(devs), ("face",)),
+                     Mesh(np.array(devs).reshape(2, 1, 1),
+                          ("face", "ti", "tj"))):
+            mesh = land_device_mesh(step, devs)
+            pin = NamedSharding(step, P(tuple(step.axis_names)))
+            def split(s, c):
+                s = jax.lax.with_sharding_constraint(s, pin)
+                return solve_land_on_devices(
+                    t._step, (s, t._Cfg(c, layers, "x"), 0.25), is_col,
+                    mesh, keep)
+            # committed to the step mesh, as the duo physics inputs are
+            s_in = jax.device_put(st[slots], pin)
+            got = jax.jit(split)(s_in, sc[slots])
+            same = all(np.array_equal(np.asarray(a), np.asarray(b))
+                       for a, b in zip(jax.tree_util.tree_leaves(ref),
+                                       jax.tree_util.tree_leaves(got)))
+            g = jax.grad(lambda s: jnp.sum(jax.jit(split)(s, sc[slots])[0]))(
+                s_in)
+            print("SAME", mesh is step and same)
+            print("GRAD", np.array_equal(np.asarray(g)[keep], np.asarray(gref)))
+        print("LAND", land_device_mesh(Mesh(np.array(devs), ("face",)),
+                                       devs[:1]).axis_names == ("land",))
+    """
+    env = dict(os.environ, XLA_FLAGS="--xla_force_host_platform_device_count=2",
+               JAX_PLATFORMS="cpu", JAX_ENABLE_X64="1")
+    out = subprocess.run([sys.executable, "-c", textwrap.dedent(body)],
+                         env=env, capture_output=True, text=True, timeout=600,
+                         cwd=Path(__file__).resolve().parents[2])
+    assert out.returncode == 0, out.stderr[-3000:]
+    for tag in ("SAME True", "GRAD True"):
+        assert out.stdout.count(tag) == 2, out.stdout
+    assert "LAND True" in out.stdout, out.stdout
