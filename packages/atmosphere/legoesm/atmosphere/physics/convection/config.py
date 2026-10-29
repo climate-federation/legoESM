@@ -52,6 +52,7 @@ __param_spec__ = {
     "BechtoldConfig": {
         "scheme_key": "atm.conv.BechtoldConfig",
         "excluded": {
+            "ifs_shallow_supply_width_w_m2": "smoothing width of the faithful-chain max(ZDHPBL, 0) shallow supply ramp (RULE 5 differentiable form), not a tunable",
             "cape_sharpness": "numerics: sigmoid sharpness on the CAPE trigger gate",
             "depth_split_sharpness": "numerics: sigmoid sharpness on the deep/shallow depth blend",
             "downdraft_RH_min": "trigger: column-mean RH threshold below which the downdraft fires (not sigmoid-tunable, fix via config)",
@@ -1522,7 +1523,7 @@ class BechtoldConfig(NamedTuple):
     # deep closure byte-identically.
     use_ifs_cape_closure: bool = True
     # IFS Kessler sub-cloud evaporation of convective rain (cuflxn.F90:436-475;
-    # see bechtold._ifs_subcloud_rain_evaporation): the post-split rain flux
+    # see bechtold.ifs_subcloud_rain_evaporation): the post-split rain flux
     # accumulates downward and evaporates below cloud base at the oracle
     # RCPECONS Kessler rate, limited by the ZRHEBC RH break (deep-ocean 0.85 /
     # non-deep 0.92, deep-weight blended; land values need an absent land
@@ -1601,6 +1602,13 @@ class BechtoldConfig(NamedTuple):
     # BechtoldConfig field raises.  Default False keeps the legacy smooth
     # reduction below, which is NOT the oracle.
     use_ifs_ascent: bool = False
+    # Faithful chain only: shallow closure with no sub-cloud supply.
+    # "zero" (default) = flux max(supply, 0)/ZDH, smoothed over
+    # ifs_shallow_supply_width_w_m2; "first_guess" = OpenIFS (cumastrn.F90:912
+    # keeps the first-guess 0.1*ZMFMAX).  KNOWN DIFFERENCE in
+    # _ifs_cumastrn.cumastrn_column (shallow closure).
+    ifs_shallow_nosupply: str = "zero"
+    ifs_shallow_supply_width_w_m2: float = 1.0  # W/m2, 0 = hard max
     # IFS RCAPDCYCL=2 diurnal-cycle CAPE correction (cumastrn.F90:780-833;
     # see bechtold._ifs_capdcycl): subtracts the sub-cloud CAPE production
     # over a BL timescale so land deep convection peaks late afternoon.
@@ -1653,7 +1661,7 @@ class BechtoldConfig(NamedTuple):
     # melt inside the sub-cloud precip march, FOLD variant (surface snow
     # forcibly melted into the lowest layer; formation-side freezing heat
     # paired so column enthalpy closes exactly — see
-    # _ifs_subcloud_rain_evaporation).  Requires use_ifs_subcloud_evap.
+    # ifs_subcloud_rain_evaporation).  Requires use_ifs_subcloud_evap.
     # Default True since 2026-07-17 (RCE A/B: T-drift 0.052 -> 0.026 K/day;
     # AMIP stable).
     use_ifs_snow_melt: bool = True

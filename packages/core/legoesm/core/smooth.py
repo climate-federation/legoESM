@@ -98,6 +98,26 @@ def smooth_min(a: jax.Array, b: jax.Array, sharpness: float = 100.0) -> jax.Arra
     return -smooth_max(-a, -b, sharpness)
 
 
+def pnorm_smooth_min(a: jax.Array, b: jax.Array, p: float, eps: float) -> jax.Array:
+    """p-norm smooth min of two NON-NEGATIVE arrays: ``(a^-p + b^-p)^(-1/p)``.
+
+    Written overflow-free as ``lo*(1 + (lo/hi)^p)^(-1/p)`` (``lo``/``hi`` =
+    elementwise min/max); the ratio is 0 where ``hi <= eps`` (where-before-
+    divide, AD-safe), so there the result is the exact ``min`` and it jumps
+    (from ``eps`` to ``2^(-1/p)*eps`` where ``a = b``) as ``hi`` crosses
+    ``eps``: callers zero inputs ``<= eps`` first (both GWD callers zero
+    stresses ``<= taumin = eps``).  Above ``eps``: scale-free (unlike the
+    additive :func:`smooth_min`), C-infinity, never above ``min(a, b)``,
+    equal to ``2^(-1/p)*a`` where ``a = b``; exact ``min`` as ``p -> inf``.
+    Used for the GWD stress cap ``min(taudmp, tausat)`` (Lindzen, McFarlane).
+    """
+    lo = jnp.minimum(a, b)
+    hi = jnp.maximum(a, b)
+    ok = hi > eps
+    ratio = jnp.where(ok, lo / jnp.where(ok, hi, jnp.ones_like(hi)), jnp.zeros_like(lo))
+    return lo * (1.0 + ratio ** p) ** (-1.0 / p)
+
+
 def smooth_clamp(
     x: jax.Array, lo: float, hi: float, sharpness: float = 100.0
 ) -> jax.Array:

@@ -235,7 +235,10 @@ def test_wrapper_tunable_defaults_are_sucumf():
     from legoesm.atmosphere.physics.convection._ifs_faithful import _tunables
     from legoesm.atmosphere.physics.convection.config import BechtoldConfig
 
-    assert _tunables(BechtoldConfig(use_ifs_ascent=True, dx_m=_DX)) == IfsTunables()
+    tun = _tunables(BechtoldConfig(use_ifs_ascent=True, dx_m=_DX))
+    # main #2253 (user 2026-10-28): the run's default no-supply shallow mode
+    # is "zero", a recorded departure; everything else is sucumf's.
+    assert tun == IfsTunables()._replace(shallow_nosupply="zero")
 
 
 def _wrapper_out(fix, cfg, g="L32"):
@@ -271,7 +274,8 @@ def test_wrapper_tunable_reaches_cumastrn(fix, field):
 
 
 # --- #2209 (main): reverse-mode gradients through the clamped square roots,
-# carried onto this port.  Sounding and kwargs as main's test_ifs_faithful.py.
+# carried onto this port.  Sounding and kwargs as the removed reduced chain's
+# tests/unit/test_ifs_faithful.py.
 
 def _deep_column(nlev=30, ps=101300.0):
     from legoesm import constants
@@ -464,3 +468,46 @@ def test_clamped_square_roots_pass_nan_through(fix, monkeypatch):
     with jax.disable_jit():
         _run(fix, "L", _GROUPS[0])
     assert len(sites) == 4, sorted(sites)
+
+
+# --- main #2253 (user 2026-10-28): no-supply shallow closure, RULE 5 -------
+# "first_guess" is the source and is the hard limit the oracle tests above
+# run; the default "zero" closes on smooth_max(ZDHPBL, 0) of width 1 W/m2.
+
+def _wrapper_cols(fix, g, **cfg_kw):
+    from legoesm.atmosphere.physics.convection.config import BechtoldConfig
+
+    out, mu = _wrapper_out(fix, BechtoldConfig(use_ifs_ascent=True, dx_m=_DX, **cfg_kw), g)
+    return np.asarray(out.dT_dt), np.asarray(out.dq_v_dt), np.asarray(mu)
+
+
+def _per_column_gap(a, ref):
+    """Per column: max|a - ref| / max|ref| (0 where the column's ref is 0)."""
+    num = np.max(np.abs(a - ref), axis=1)
+    den = np.max(np.abs(ref), axis=1)
+    return np.where(den > 0.0, num / np.where(den > 0.0, den, 1.0), num)
+
+
+@pytest.mark.parametrize("g", _GROUPS)
+def test_nosupply_first_guess_is_the_oracle(fix, g):
+    dT, dq, mu = _wrapper_cols(fix, g, ifs_shallow_nosupply="first_guess")
+    o = lambda t: fix[f"L0_{g}_{t}"]
+    assert _err(dT, o("PTENT") - fix[f"{g}_dT_other"]) <= _TOL
+    assert _err(dq, o("PTENQ") - fix[f"{g}_dq_other"]) <= _TOL
+    assert _err(mu, o("PMFU")) <= _TOL
+
+
+# Per-column gap of the default ("zero", 1 W/m2) against the oracle, measured
+# 2026-10-29 (x64, CPU): (dT_dt, dq_v_dt, M_u) per fixture column.
+_NOSUPPLY_GAP = None  # filled from the measurement
+
+
+@pytest.mark.parametrize("g", _GROUPS)
+def test_nosupply_default_gap_per_case(fix, g):
+    dT, dq, mu = _wrapper_cols(fix, g)
+    o = lambda t: fix[f"L0_{g}_{t}"]
+    got = (_per_column_gap(dT, o("PTENT") - fix[f"{g}_dT_other"]),
+           _per_column_gap(dq, o("PTENQ") - fix[f"{g}_dq_other"]),
+           _per_column_gap(mu, o("PMFU")))
+    for a, want in zip(got, _NOSUPPLY_GAP[g]):
+        np.testing.assert_allclose(a, np.asarray(want), rtol=1e-6, atol=1e-12)

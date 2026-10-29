@@ -27,6 +27,8 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from legoesm.core.smooth import smooth_max
+
 from .mass_flux import ifs_ztaures
 from ._ifs_cuthermo import cuadjtq, foealfcu, foeewmcu, foelhmcu
 from ._ifs_cuascent import (
@@ -154,6 +156,16 @@ class IfsTunables(NamedTuple):
     rprcon: float = RPRCON
     zdnoprc: float = ZDNOPRC
     rcapqadv: float = RCAPQADV
+    # Shallow closure with no sub-cloud supply (ZDHPBL <= 0), main #2253 (user
+    # decision 2026-10-28).  "first_guess" is the source (:912 ZMFUB1=ZMFUB);
+    # "zero" closes on smooth_max(ZDHPBL, 0) of width shallow_supply_width_w_m2
+    # [W/m2] (0 = hard max).  Defaults are the source's; the host passes its
+    # run's BechtoldConfig.ifs_shallow_nosupply / ifs_shallow_supply_width_w_m2.
+    shallow_nosupply: str = "first_guess"
+    shallow_supply_width_w_m2: float = 1.0
+
+
+SHALLOW_NOSUPPLY_MODES = ("zero", "first_guess")
 
 
 class CumastrnOut(NamedTuple):
@@ -798,10 +810,27 @@ def cumastrn_column(th, K, dt, pgaw, pten, pqen, puen, pven, plitot, pvervel, pq
                     - (1.0 - zeps) * kget(ztenh, ikb - 1)) + rlvtt * zqumqe)
     zdh = 0.5 * (zdh + zdh2)
     zdh = rg * jnp.maximum(zdh, ZDH_MIN * rcpd)
-    m2 = zdhpbl / zdh
+    # KNOWN DIFFERENCE (RULE 5 / departure from OpenIFS, main #2253, user
+    # decision 2026-10-28) when tun.shallow_nosupply == "zero": a column first
+    # triggered deep and reclassified shallow with no sub-cloud supply keeps
+    # the first guess 0.1*ZMFMAX in OpenIFS (:912), which grows as 1/dt; "zero"
+    # uses the supply smooth_max(ZDHPBL, 0) (width shallow_supply_width_w_m2,
+    # ZDHPBL being W/m2 times g) in place of ZDHPBL, so the no-supply flux is
+    # ln2*g*width/ZDH and a supply of one width gets ln(1+e) = 1.31x the
+    # source.  Width 0 is the hard max; "first_guess" is the source.  Per-case
+    # gaps: tests/atmosphere/test_bechtold_ifs_oracle.py.
+    if tun.shallow_nosupply == "first_guess":
+        supply = zdhpbl
+    else:
+        w = tun.shallow_supply_width_w_m2
+        supply = smooth_max(zdhpbl, 0.0,
+                            sharpness=float("inf") if w == 0.0 else 1.0 / (rg * w))
+    m2 = supply / zdh
     weak = (m2 > ZSHAL_MF * zmfmax / RMFCFL) & (zdh < ZSHAL_DH * rg * rcpd)
-    m2 = jnp.where(weak, zdhpbl / (ZSHAL_DH2 * rcpd * rg), m2)
-    m2 = jnp.minimum(jnp.where(zdhpbl > 0.0, m2, zmfub), zmfmax)
+    m2 = jnp.where(weak, supply / (ZSHAL_DH2 * rcpd * rg), m2)
+    if tun.shallow_nosupply == "first_guess":
+        m2 = jnp.where(zdhpbl > 0.0, m2, zmfub)                    # :905 / :912
+    m2 = jnp.minimum(m2, zmfmax)
     m3 = jnp.maximum(zmfub, ZMID_MF * zkhfl / kget(pgeoh, ikb)) * (1.0 + zeps)
     m3 = jnp.where(kget(pgeoh, ikb) < ZMID_GEO, jnp.minimum(m3, zmfmax / (ZMID_CFL * RMFCFL)),
                    jnp.minimum(m3, zmfmax))
@@ -1021,6 +1050,15 @@ def cumastrn(th, dt, pgaw, T, q, u, v, plitot, omega, qsat, ahfs, qhfl, p_full,
     with the padding removed: level arrays (ncol, nlev) [half: nlev+1],
     level indices (KCBOT, KCTOP, KBOTSC) in Fortran numbering 1..nlev.
     """
+    if tun.shallow_nosupply not in SHALLOW_NOSUPPLY_MODES:
+        raise ValueError(
+            f"unknown shallow-closure no-supply scheme "
+            f"shallow_nosupply={tun.shallow_nosupply!r}; choose one of "
+            f"{SHALLOW_NOSUPPLY_MODES}.")
+    if not tun.shallow_supply_width_w_m2 >= 0.0:
+        raise ValueError(
+            "shallow_supply_width_w_m2 must be >= 0 (0 = hard max(ZDHPBL, 0)), "
+            f"got {tun.shallow_supply_width_w_m2!r}.")
     K = T.shape[-1]
 
     def col(pg, t, qq, uu, vv, lit, om, qs, hf, qf, pf, ph, gf, gh, ld, tt, tq,

@@ -42,9 +42,10 @@ def maybe_run_climateeval(config: ExperimentConfig, output_dir: str) -> int | No
         evaluation.climateeval_python,
         str(RUNNER_SCRIPT),
         "--cmor-dir", str(cmor_dir),
-        "--model-id", evaluation.model_id,
+        # Empty ids = the CMOR writer's own (EvaluationConfig docstring).
+        "--model-id", evaluation.model_id or config.output.cmip_source_id,
         "--experiment-id", evaluation.experiment_id,
-        "--variant-id", evaluation.variant_id,
+        "--variant-id", evaluation.variant_id or config.output.cmip_variant_label,
         "--data-root-dir", evaluation.data_root_dir,
         "--output-dir", str(output_dir),
     ]

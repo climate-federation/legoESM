@@ -3596,6 +3596,7 @@ class LatLonCGridOceanModel:
                 physics_for_combined = physics_for_combined._replace(
                     vertical_mixing=physics_for_combined.vertical_mixing
                     ._replace(scheme="none"))
+            from legoesm.ocean.eos import make_eos_fn as _make_eos_fn_physics
             self._physics_fn = make_ocean_physics(
                 physics_for_combined,
                 apply_vertical_diffusion=not self.config.implicit_vertical_mixing,
@@ -3604,6 +3605,11 @@ class LatLonCGridOceanModel:
                 # alpha/beta from NemoSEOSConfig()'s DINO defaults whatever
                 # fluid the card actually runs.
                 seos_cfg=self.config.eos_nemo_seos,
+                # The run's EOS for the Richardson / ePBL closures (#2177),
+                # built as the implicit K-profile fallback builds its own.
+                eos_fn=_make_eos_fn_physics(
+                    eos=self.config.eos, eos_linear=self.config.eos_linear,
+                    eos_nemo_seos=getattr(self.config, "eos_nemo_seos", None)),
             )
         else:
             self._physics_fn = None

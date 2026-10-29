@@ -8,7 +8,7 @@ one-file-per-scheme convention, the remaining ``clubb_*.py`` helper modules are
 being absorbed here section by section (see the table of contents below); the
 CAM-default model-flag values are recorded as comments at the end of the file.
 
-Table of contents (sections, in order; flag reference table at line 7376)
+Table of contents (sections, in order; flag reference table at line 7378)
 -----------------------------------------------------------------------------
   1. [line  354] Diagnostic ADG1-PDF closure (``diagnose_cloud_and_buoyancy``)
   2. [line  475] Configuration (``CLUBBParams`` / ``CLUBBConfig`` + derived params;
@@ -17,40 +17,40 @@ Table of contents (sections, in order; flag reference table at line 7376)
       ``make_clubb_grid[_from_levels]`` / ``flip_vertical``)
   4. [line  1115] Flatau saturation adapters (``sat_mixrat_liq``/``sat_mixrat_ice`` over
       the canonical ``legoesm.thermo`` curves)
-  5. [line  1169] Closure helpers (``safe_sqrt`` / ``compute_sigma_sqd_w`` /
+  5. [line  1171] Closure helpers (``safe_sqrt`` / ``compute_sigma_sqd_w`` /
       ``calc_brunt_vaisala_freq_sqd``)
-  6. [line  1343] Parcel buoyant-sorting mixing length (``compute_mixing_length`` /
+  6. [line  1345] Parcel buoyant-sorting mixing length (``compute_mixing_length`` /
       ``set_Lscale_max``)
-  7. [line  1791] Implicit band solvers (``tridiag_solve`` / ``penta_solve``)
-  8. [line  1919] Mass-conserving hole filling (``fill_holes_vertical`` /
+  7. [line  1793] Implicit band solvers (``tridiag_solve`` / ``penta_solve``)
+  8. [line  1921] Mass-conserving hole filling (``fill_holes_vertical`` /
       ``fill_holes_wp2_from_horz_tke``)
-  9. [line  2100] Skewness diagnostics (``Skx_func`` / ``compute_gamma_Skw`` / LG05 /
+  9. [line  2102] Skewness diagnostics (``Skx_func`` / ``compute_gamma_Skw`` / LG05 /
       ``compute_skewness_diagnostics``)
-  10. [line  2288] Dissipation time-scale family (``compute_tke`` / ``compute_tau_family``)
-  11. [line  2369] ADG1 assumed-PDF parameter closure (``ADG1_pdf_driver`` + the liquid
+  10. [line  2290] Dissipation time-scale family (``compute_tke`` / ``compute_tau_family``)
+  11. [line  2371] ADG1 assumed-PDF parameter closure (``ADG1_pdf_driver`` + the liquid
       cloud-fraction closure)
-  12. [line  2691] ADG1 PDF moment integrals + buoyancy-flux assembly
+  12. [line  2693] ADG1 PDF moment integrals + buoyancy-flux assembly
       (``calc_pdf_higher_order_moments`` / ``calc_pdf_xprcp_fluxes`` /
       ``calc_xpthvp_terms``) + the two-level-set reconciliation
       (``calc_trapezoid_zt`` / ``calc_trapezoid_zm`` / ``clip_rcm`` /
       ``compute_cloud_cover``). Every routine in this section is
       grid-agnostic: CAM evaluates the closure once per level set, so all
       regridding is the caller's.
-  13. [line  3052] Moment-advance building blocks + the xp2_xpyp / windm advances
+  13. [line  3054] Moment-advance building blocks + the xp2_xpyp / windm advances
       (diffusion/mean-advection LHS builders, Cauchy-Schwarz clips,
       ``advance_xp2_xpyp`` / ``advance_windm_edsclrm``)
-  14. [line  4015] Skewness-dependent C-coefficient family (``compute_skw_fnc`` users:
+  14. [line  4017] Skewness-dependent C-coefficient family (``compute_skw_fnc`` users:
       ``damp_coefficient`` / ``compute_C6_C7_Skw_fnc``)
-  15. [line  4080] Coupled wp2/wp3 advance (``advance_wp2_wp3`` + penta LHS/RHS builders +
+  15. [line  4082] Coupled wp2/wp3 advance (``advance_wp2_wp3`` + penta LHS/RHS builders +
       ``clip_skewness``)
-  16. [line  4753] Monotonic turbulent-flux limiter (``monotonic_turbulent_flux_limit`` +
+  16. [line  4755] Monotonic turbulent-flux limiter (``monotonic_turbulent_flux_limit`` +
       ``calc_turb_adv_range``)
-  17. [line  5034] Coupled xm/wpxp advance (``advance_xm_wpxp`` + the monotonic-flux-limiter
+  17. [line  5036] Coupled xm/wpxp advance (``advance_xm_wpxp`` + the monotonic-flux-limiter
       coupling + ``solve_xm_wpxp_with_single_lhs``)
-  18. [line  5417] Core orchestration (``compute_clubb_diagnostics`` /
+  18. [line  5419] Core orchestration (``compute_clubb_diagnostics`` /
       ``compute_pdf_closure`` / ``calc_sfc_varnce`` / ``advance_clubb_core`` +
       the ``CLUBBMomentState``/``CLUBBForcing`` carry types and pack/unpack)
-  19. [line  6195] Scheme entries (``clubb_turbulence`` diagnostic default /
+  19. [line  6197] Scheme entries (``clubb_turbulence`` diagnostic default /
       ``clubb_turbulence_prognostic`` opt-in / ``clubb_step`` bridge /
       ``integrate_clubb_column`` SCM driver)
 
@@ -1117,7 +1117,9 @@ def make_clubb_grid_from_levels(z_full: jax.Array, z_half: jax.Array) -> CLUBBGr
 # Thin adapters over the CANONICAL Flatau (1992) saturation curves in
 # legoesm.thermo (per the CLAUDE.md no-saturation-reimpl rule): saturation
 # mixing ratio over liquid / ice with CLUBB's denominator guard
-# (saturation.F90, CAM ``saturation_formula = flatau``).
+# (saturation.F90 with ``saturation_formula = saturation_flatau``, the
+# standalone clubb_release default; CAM6 instead selects "gfdl" Goff-Gratch,
+# CESM2.1 ``clubb_intr.F90:66``).
 
 _SAT_DENOM_MIN_PA = 1.0  # p - esat floor [Pa] (saturation.F90 convention)
 

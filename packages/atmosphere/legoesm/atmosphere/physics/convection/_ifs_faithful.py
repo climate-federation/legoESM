@@ -24,7 +24,10 @@ Six run-set constants come from BechtoldConfig (``_TUNABLES``): epsilon_deep
 -> ENTRORG (organized entrainment and the test parcel), delta_deep -> DETRPEN,
 epsilon_shallow/epsilon_deep -> ENTSHALP (so the shallow rate is
 epsilon_shallow), rprcon -> RPRCON, dnoprc -> ZDNOPRC, cape_qadv_weight ->
-RCAPQADV; their defaults are sucumf's.  No other BechtoldConfig field reaches
+RCAPQADV; their defaults are sucumf's.  ifs_shallow_nosupply and
+ifs_shallow_supply_width_w_m2 select main #2253's no-supply shallow closure
+(default "zero", a recorded departure from the source; see the cumastrn
+closure).  No other BechtoldConfig field reaches
 this path: a non-default value of any of them raises (they configure the
 legacy reduction only).
 """
@@ -70,7 +73,9 @@ __physics_contract__ = {
 # BechtoldConfig fields this path reads; every other field must stay default.
 _TUNABLES = ("epsilon_deep", "delta_deep", "epsilon_shallow", "rprcon", "dnoprc",
              "cape_qadv_weight")
-_READ_FIELDS = ("use_ifs_ascent", "dx_m") + _TUNABLES
+# Main #2253's no-supply shallow mode and its smoothing width, by name.
+_NOSUPPLY_FIELDS = ("ifs_shallow_nosupply", "ifs_shallow_supply_width_w_m2")
+_READ_FIELDS = ("use_ifs_ascent", "dx_m") + _TUNABLES + _NOSUPPLY_FIELDS
 
 
 def _hydrostatic_geopotential(T, q_v, p_half):
@@ -107,13 +112,22 @@ def _check_config(config):
     if not (isinstance(config.dx_m, (int, float)) and config.dx_m > 0.0):
         raise ValueError("BechtoldConfig.use_ifs_ascent needs the grid length dx_m > 0 "
                          "(cumastrn's ZDX); got %r" % (config.dx_m,))
+    # ENTSHALP = epsilon_shallow / epsilon_deep (_tunables): a non-positive
+    # epsilon_deep would divide by zero or flip the shallow entrainment sign.
+    # A traced value cannot be checked here and passes through.
+    if isinstance(config.epsilon_deep, (int, float)) and not config.epsilon_deep > 0.0:
+        raise ValueError("BechtoldConfig.use_ifs_ascent needs epsilon_deep > 0 "
+                         "(ENTRORG; ENTSHALP = epsilon_shallow/epsilon_deep); got %r"
+                         % (config.epsilon_deep,))
 
 
 def _tunables(config):
     return IfsTunables(
         entrorg=config.epsilon_deep, detrpen=config.delta_deep,
         entshalp=config.epsilon_shallow / config.epsilon_deep, rprcon=config.rprcon,
-        zdnoprc=config.dnoprc, rcapqadv=config.cape_qadv_weight)
+        zdnoprc=config.dnoprc, rcapqadv=config.cape_qadv_weight,
+        shallow_nosupply=config.ifs_shallow_nosupply,
+        shallow_supply_width_w_m2=config.ifs_shallow_supply_width_w_m2)
 
 
 def ifs_faithful_convection(T, q_v, p_full, p_half, u, v, dt, config, shf_w_m2,

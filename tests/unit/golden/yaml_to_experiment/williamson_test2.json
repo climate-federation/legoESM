@@ -32,6 +32,7 @@
   "bechtold_dx_m": 0.0,
   "bechtold_enable_cmt": null,
   "bechtold_epsilon_deep": 0.00175,
+  "bechtold_ifs_shallow_nosupply": "zero",
   "bechtold_rain_vapor_sink": "formation",
   "bechtold_rhebc_land": 0.75,
   "bechtold_rhebc_land_deep": 0.7,

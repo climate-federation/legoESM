@@ -100,6 +100,8 @@ from legoesm.grids.vertical import HeightCoordinate, TerrainMetric
 from legoesm.timestepping.split_explicit import SplitExplicitConfig
 from legoesm.timestepping.tridiagonal import thomas_solve_batched
 from legoesm.atmosphere.physics.thermodynamics import sanitize_theta_rho
+from legoesm.atmosphere.physics.turbulence.amd import AMD_FLOOR_WIDTH
+from legoesm.atmosphere.physics.turbulence.vreman import VREMAN_BBETA_GUARD_WIDTH
 from legoesm import constants
 
 
@@ -338,6 +340,14 @@ class CompressibleEulerConfig(NamedTuple):
                                           # is NOT SAM-faithful (SAM uses
                                           # Smagorinsky) — for experimentation, not
                                           # the gSAM-match runs. K_h = K_m/smagorinsky_prandtl.
+    vreman_bbeta_guard_width: float = VREMAN_BBETA_GUARD_WIDTH
+                                          # Vreman zero-guard smoothstep half-width
+                                          # [m^4/s^4] (RULE 5 smooth default 1e-13;
+                                          # 0.0 = the author's hard switch).
+    amd_floor_width: float = AMD_FLOOR_WIDTH
+                                          # AMD softplus output-floor width [m^2/s]
+                                          # (RULE 5 smooth default 1e-8; 0.0 =
+                                          # AMR-Wind's hard floor).
     amd_c: float = 0.3                    # Anisotropic Minimum-Dissipation constant
                                           # (modified Poincaré const ≈0.3; Rozema 2015
                                           # / Abkar-Bae-Moin 2016) for

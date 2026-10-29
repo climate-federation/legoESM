@@ -9,7 +9,8 @@ and ``dopredictNc=.false.``, compiled with gfortran 8.5.0 in fp64, via
 --build <dir> --out sb2001_warm_rain.npz`` (metadata in the npz ``meta``).
 
 Tolerance (user decision 2026-10-19): max relative error <= 1e-10 in fp64.
-The SB2001 kernels have no smoothing fields, so the hard limit is the default.
+Autoconversion is checked at gSAM's hard step (``ramp_top=HARD``, RULE 5;
+the smooth default's gap is pinned in test_sb2001_autoconv_ramp.py).
 Relative error is ``|a-b| / max(|a|, |b|)`` (0 where both are exactly 0); no
 floor (the tier-1 oracle tests' metric).
 """
@@ -36,6 +37,7 @@ ROOT = Path(__file__).resolve().parents[4]
 FIXTURE = ROOT / "tests/atmosphere/microphysics/oracle_fixtures/sb2001_warm_rain.npz"
 GENERATOR = ROOT / "scripts/validate/oracle/sb2001_warm_rain/make_fixture.py"
 TOL = 1.0e-10
+HARD = 0.0          # sb2001_autoconv_ramp_top at gSAM's hard step
 QSMALL = 1.0e-14     # gSAM M2005 QSMALL: the PSD is only diagnosed above it
 
 
@@ -77,7 +79,7 @@ def test_fixture_provenance_and_inputs_reproduce():
 def test_rates_match_gsam():
     fx = _fx()
     q_c, q_r, N_c, rho = _inputs(fx)
-    prc, dnr, _ = autoconversion_sb2001(q_c, q_r, N_c, rho)
+    prc, dnr, _ = autoconversion_sb2001(q_c, q_r, N_c, rho, ramp_top=HARD)
     pra = accretion_sb2001(q_c, q_r, rho)
     errs = {
         "PRC": _rel(prc, fx["ora_prc"]).max(),
@@ -114,7 +116,7 @@ def test_gradients_finite_on_fixture_points(dtype):
     q_c, q_r, N_c, rho = _inputs(fx, dtype)
 
     def loss(q_c, q_r, N_c):
-        prc, dnr, _ = autoconversion_sb2001(q_c, q_r, N_c, rho)
+        prc, dnr, _ = autoconversion_sb2001(q_c, q_r, N_c, rho, ramp_top=HARD)
         return jnp.sum(prc * 1e6 + dnr * 1e-6 + accretion_sb2001(q_c, q_r, rho) * 1e6)
 
     g = jax.grad(loss, argnums=(0, 1, 2))(q_c, q_r, N_c)
@@ -127,7 +129,7 @@ def test_jit_matches_eager():
     args = _inputs(fx)
 
     def f(q_c, q_r, N_c, rho):
-        prc, dnr, _ = autoconversion_sb2001(q_c, q_r, N_c, rho)
+        prc, dnr, _ = autoconversion_sb2001(q_c, q_r, N_c, rho, ramp_top=HARD)
         return prc, dnr, accretion_sb2001(q_c, q_r, rho)
 
     for a, b in zip(f(*args), jax.jit(f)(*args)):

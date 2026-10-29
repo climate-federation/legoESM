@@ -176,3 +176,47 @@ def test_latlon_lane_exact_label_grid_passes_through():
     assert dc._structured_regrid is None
     field = np.arange(nlat * nlon, dtype=float).reshape(nlat, nlon)
     np.testing.assert_array_equal(dc._regrid_to_latlon_2d(field), field)
+
+
+# --- CMIP6 grid_label / grid: "gr" wherever the files hold regridded data ---
+
+def test_mpas_lane_is_labelled_regridded_with_the_real_method(mesh, tmp_path):
+    dc = _collector(str(tmp_path))
+    dc.set_cmip_grid_info(grid_type="mpas", grid=mesh, start_year=1979)
+    w = dc.cf_writer
+    assert w.grid_label == "gr"
+    k = dc._voronoi_regrid_weights.idx.shape[1]
+    assert w.grid == (
+        f"data regridded from the MPAS Voronoi (SCVT) mesh of "
+        f"{np.asarray(mesh.latCell).size} cells to a regular 5 x 5 degree "
+        f"latitude-longitude grid by inverse-distance weighting of the {k} "
+        "nearest cell centres")
+    dc.set_fixed_fields(land_fraction=np.full(np.asarray(mesh.latCell).size, 0.5))
+    dc.finalize_cmip_fixed()
+    [f] = glob.glob(f"{tmp_path}/**/sftlf_fx_*_gr.nc", recursive=True)
+    with xr.open_dataset(f) as ds:
+        assert ds.attrs["grid_label"] == "gr"
+        assert ds.attrs["grid"] == w.grid
+
+
+def test_cube_and_interpolated_latlon_lanes_are_gr():
+    dc = _collector()
+    dc.set_cmip_grid_info(grid_type="cubed_sphere",
+                          grid=types.SimpleNamespace(n=8), start_year=1979)
+    assert dc.cf_writer.grid_label == "gr"
+    assert "C8 cubed-sphere grid" in dc.cf_writer.grid
+    assert "face-aware bilinear interpolation" in dc.cf_writer.grid
+    nlat, nlon = int(180 / RES), int(360 / RES)
+    lat = np.linspace(-90 + RES / 2, 90 - RES / 2, nlat)
+    dc2 = _structured(lat, np.arange(nlon) * RES)          # half a cell off
+    assert dc2.cf_writer.grid_label == "gr"
+    assert "bilinear interpolation" in dc2.cf_writer.grid
+
+
+def test_native_label_grid_keeps_gn():
+    nlat, nlon = int(180 / RES), int(360 / RES)
+    lat = np.linspace(-90 + RES / 2, 90 - RES / 2, nlat)
+    dc = _structured(lat, np.arange(nlon) * RES + RES / 2)
+    assert dc._structured_regrid is None
+    assert dc.cf_writer.grid_label == "gn"
+    assert dc.cf_writer.grid == "native regular latitude-longitude grid"

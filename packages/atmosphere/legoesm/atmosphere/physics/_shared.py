@@ -510,6 +510,23 @@ def deardorff_stable_eddy_viscosity(strain_sq, n2, length, c_s, Pr_t):
     ``Pr_t ∈ (0.33, 3)``, so the repo convention is used here and SAM's is NOT
     transplanted.
 
+    Running-oracle comparison (tier-2 oracle audit, les_sgs_closures): fed
+    the same ``S²``, ``N²``, ``l`` and ``tk``, this helper equals gSAM 1.8.8
+    ``SGS_TKE/tke_full.f90`` ``dosmagor`` (lines 279-305, SAM ``Pr`` := 1/Pr_t)
+    to 4.6e-16 relative once the floors are removed.  Departures KEPT pending a
+    user decision (NOT faithful to SAM):
+      * the buoyancy-corrected strain is floored at ``_STRAIN_FLOOR = 1e-11``
+        (SAM: ``max(0., def2 − Pr·buoy_sgs)``), and the single-column caller
+        additionally floors ``S²`` at ``+1e-10`` (SAM: none).  Measured: up to
+        6.6e-5 m²/s in stable layers and 3.0e-3 / 9.6e-3 m²/s at zero shear
+        (default / LES-tuned config);
+      * ``N`` inside ``smix`` is ``√max(N², 1e-11)`` (SAM: ``√(N² + 1e-10)``,
+        evaluated only where ``N² > 0``);
+      * ``tk`` inside ``smix`` is THIS step's diagnostic ``c_s²·l²·strain``;
+        SAM uses the PREVIOUS step's prognostic ``tk`` (legoESM's column
+        scheme carries no ``tk`` state).  The effect of this lag is not
+        measured.
+
     Parameters
     ----------
     strain_sq : array

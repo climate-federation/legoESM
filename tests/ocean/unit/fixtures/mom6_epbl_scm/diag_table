@@ -1,0 +1,7 @@
+"MOM6 ePBL single column (#2181)"
+1 1 1 0 0 0
+"prog", 1, "hours", 1, "days", "time",
+"ocean_model", "temp", "temp", "prog", "all", .false., "none", 1
+"ocean_model", "salt", "salt", "prog", "all", .false., "none", 1
+"ocean_model", "ePBL_h_ML", "ePBL_h_ML", "prog", "all", .false., "none", 1
+"ocean_model", "Kd_interface", "Kd_interface", "prog", "all", .false., "none", 1

@@ -613,6 +613,33 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "refinement away, and the tropical rain band -- one "
                              "to two cells wide -- becomes unscorable. "
                              f"Default {_OUTPUT_DEFAULTS.cmip_resolution_deg}.")
+    parser.add_argument("--cmip-drs-tree",
+                        action=argparse.BooleanOptionalAction,
+                        default=_OUTPUT_DEFAULTS.cmip_drs_tree,
+                        help="Write CMOR files into the ESGF DRS directory "
+                             "tree (CMIP6/CMIP/<institution>/<source>/...) "
+                             "instead of <output>/cmor/<table>/. Default "
+                             f"{_OUTPUT_DEFAULTS.cmip_drs_tree}.")
+    parser.add_argument("--cmip-institution-id", type=str,
+                        default=_OUTPUT_DEFAULTS.cmip_institution_id,
+                        help="CMIP6 institution_id stamped on CMOR files "
+                             "(must be registered in the CMIP6 CV to "
+                             "publish). Default "
+                             f"{_OUTPUT_DEFAULTS.cmip_institution_id!r} "
+                             "(unregistered placeholder).")
+    parser.add_argument("--cmip-source-id", type=str,
+                        default=_OUTPUT_DEFAULTS.cmip_source_id,
+                        help="CMIP6 source_id stamped on CMOR files and in "
+                             "their names (must be registered in the CMIP6 "
+                             "CV to publish). Default "
+                             f"{_OUTPUT_DEFAULTS.cmip_source_id!r} "
+                             "(unregistered placeholder).")
+    parser.add_argument("--cmip-variant-label", type=str,
+                        default=_OUTPUT_DEFAULTS.cmip_variant_label,
+                        help="CMIP6 variant_label r<k>i<l>p<m>f<n> of the "
+                             "CMOR files (a malformed label is refused when "
+                             "the writer is built). Default "
+                             f"{_OUTPUT_DEFAULTS.cmip_variant_label!r}.")
     parser.add_argument("--aimip-classical-checkpoint", type=str, default=None,
                         help="Path to an AIMIP-classical trained params .eqx "
                              "(e.g. results/aimip_001/classical/epoch_0019.eqx). "
@@ -1501,6 +1528,24 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "correction (openifs cumastrn.F90:780-833; land "
                              "deep convection peaks late afternoon). Default "
                              f"{_EXPERIMENT_DEFAULTS.bechtold_use_ifs_capdcycl}.")
+    parser.add_argument("--bechtold-use-ifs-ascent",
+                        dest="bechtold_use_ifs_ascent",
+                        action=argparse.BooleanOptionalAction,
+                        default=_EXPERIMENT_DEFAULTS.bechtold_use_ifs_ascent,
+                        help="Run the faithful OpenIFS convection chain "
+                             "(cubasen/cuascn/cumastrn/cudtdqn port) instead "
+                             "of the legacy Bechtold scheme. Default "
+                             f"{_EXPERIMENT_DEFAULTS.bechtold_use_ifs_ascent}.")
+    parser.add_argument("--bechtold-ifs-shallow-nosupply",
+                        dest="bechtold_ifs_shallow_nosupply",
+                        choices=("zero", "first_guess"),
+                        default=_EXPERIMENT_DEFAULTS.bechtold_ifs_shallow_nosupply,
+                        help="Faithful IFS chain: shallow closure with no "
+                             "sub-cloud supply. 'zero' = flux ramps smoothly to "
+                             "~0 (ln2*g*width/ZDH at zero supply; exact 0 at "
+                             "width 0); 'first_guess' = OpenIFS (cumastrn.F90:912 keeps "
+                             "0.1 of the CFL limit, grows as 1/dt). Default "
+                             f"{_EXPERIMENT_DEFAULTS.bechtold_ifs_shallow_nosupply}.")
     parser.add_argument("--bechtold-use-ifs-land-rhebc",
                         dest="bechtold_use_ifs_land_rhebc",
                         action=argparse.BooleanOptionalAction,
@@ -1572,12 +1617,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     # Sundqvist large-scale-condensation tunables (override the SundqvistConfig
     # defaults / AIMIP-trained leaves).  These are the precipitation-efficiency
     # knobs: qc_crit is the autoconversion cloud-water threshold (rain forms only
-    # for q_c >~ qc_crit; the default 5e-4 suppresses drizzle from thin clouds),
+    # for q_c >~ qc_crit; the default 3e-4 is the Zhao-Carr oracle m_r),
     # auto_rate the autoconversion rate, rh_crit the condensation onset RH.
     parser.add_argument("--sundqvist-qc-crit", dest="sundqvist_qc_crit",
                         type=float, default=None,
                         help="Sundqvist autoconversion cloud-water threshold "
-                             "[kg/kg] (None=scheme/trained default 5e-4; bounds "
+                             "[kg/kg] (None=scheme/trained default 3e-4; bounds "
                              "1e-4..1.5e-3). Lower it to rain out thin clouds.")
     parser.add_argument("--sundqvist-rh-crit", dest="sundqvist_rh_crit",
                         type=float, default=None,
@@ -2456,7 +2501,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--evaluation-model-id", dest="evaluation_model_id", type=str,
         default=_EVALUATION_DEFAULTS.model_id,
         help="Model identifier for ClimateEval DataSourceInformation "
-             f"(default: {_EVALUATION_DEFAULTS.model_id!r}).")
+             "(default: empty = the CMOR files' --cmip-source-id).")
     parser.add_argument(
         "--evaluation-experiment-id", dest="evaluation_experiment_id", type=str,
         default=_EVALUATION_DEFAULTS.experiment_id,
@@ -2466,7 +2511,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--evaluation-variant-id", dest="evaluation_variant_id", type=str,
         default=_EVALUATION_DEFAULTS.variant_id,
         help="Variant identifier for ClimateEval "
-             f"(default: {_EVALUATION_DEFAULTS.variant_id!r}).")
+             "(default: empty = the CMOR files' --cmip-variant-label).")
     parser.add_argument(
         "--evaluation-data-root-dir", dest="evaluation_data_root_dir", type=str,
         default=os.environ.get(
@@ -2813,6 +2858,10 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         diag_days=args.diag_days,
         checkpoint_days=args.checkpoint_days,
         cmip_resolution_deg=args.cmip_resolution_deg,
+        cmip_drs_tree=args.cmip_drs_tree,
+        cmip_institution_id=args.cmip_institution_id,
+        cmip_source_id=args.cmip_source_id,
+        cmip_variant_label=args.cmip_variant_label,
         max_wallclock_seconds=args.max_wallclock_seconds,
         monthly_means=args.monthly_means,
         cmip_output=args.cmip_output,
@@ -3175,6 +3224,8 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         bechtold_enable_cmt=args.bechtold_enable_cmt,
         bechtold_M_b_max=args.bechtold_M_b_max,
         bechtold_use_ifs_capdcycl=args.bechtold_use_ifs_capdcycl,
+        bechtold_use_ifs_ascent=args.bechtold_use_ifs_ascent,
+        bechtold_ifs_shallow_nosupply=args.bechtold_ifs_shallow_nosupply,
         bechtold_use_ifs_land_rhebc=args.bechtold_use_ifs_land_rhebc,
         bechtold_use_ifs_snow_melt=args.bechtold_use_ifs_snow_melt,
         held_suarez_forcing=args.held_suarez_forcing,
