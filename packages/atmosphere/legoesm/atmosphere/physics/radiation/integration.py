@@ -1266,9 +1266,11 @@ def make_radiation_physics(
     column_mesh : jax.sharding.Mesh or None, optional
         Issue #273 follow-up.  When supplied, the per-column radiation
         kernel (which is naturally embarrassingly parallel across
-        columns) is sharded across the mesh's ``'col'`` axis.  Use
-        ``legoesm.parallel.column_shard.create_column_mesh`` to build
-        one.  Required invariant: ``ncol`` (the flattened horizontal
+        columns) is sharded across all of the mesh's axes.  A dycore that
+        runs on its own step mesh must pass that mesh (one mesh per
+        compiled step; see ``model_driver.radiation_column_mesh``);
+        otherwise ``legoesm.parallel.column_shard.create_column_mesh``
+        builds a 1-D ``'col'`` mesh.  Required invariant: ``ncol`` (the flattened horizontal
         column count = ``6 · n · n`` on the cubed sphere) must be
         divisible by the mesh's device count.  Default ``None``
         preserves single-mesh behavior bit-exact.
