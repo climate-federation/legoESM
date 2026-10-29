@@ -224,7 +224,7 @@ class PHydroConfig(NamedTuple):
     root_biomass_gm2: float = 500.0  # [g/m2] fine-root biomass
     # --- costs ---
     alpha_cost: float = 0.1        # [-] cost per unit Jmax (acclimated step)
-    gamma_cost: float = 1.0        # [umol/m2/s/MPa^2] hydraulic risk cost (both steps)
+    gamma_cost: float = 3.0        # [umol/m2/s/MPa^2] hydraulic risk cost (both steps)
     # --- initialisation constants of the acclimated soil state (recorded
     #     here, no hidden choice): field capacity, no soil-to-root resistance ---
     init_psi_s_mpa: float = -0.033   # [MPa]
