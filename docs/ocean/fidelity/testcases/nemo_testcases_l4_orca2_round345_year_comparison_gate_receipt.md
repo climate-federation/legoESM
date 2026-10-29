@@ -99,11 +99,16 @@ staging, completion, admission, in-place re-admission, failed-admission
 quarantine, and promotion from `refused/`. A separate existing-target probe
 refuses while retaining both targets in place and creating no refused copy.
 
-The clean default preflight was re-run. Its inherited round-342 MPI stub stops
+The clean default preflight was re-run at
+`b8db53c7d2fc60f1aa2615d83f6dcb742b1600bd` with evidence rooted under
+`/data/abyssal/dbalwada/nemo-testcases-l2/phase3/work/r345-resume2-preflight`.
+Its inherited round-342 MPI stub stops
 before the round-345 stub because this managed sandbox denies the Open MPI
 PMIx listener socket (launcher exit 213). The same sandbox failure occurs for
 `mpirun --version`; it is not a scientific or admission result. The
-round-345-specific pipeline above was therefore also exercised directly, but
+round-345-specific paired pipeline above was therefore exercised directly
+under `work/` with four control restart files compared in the two-day stub, a
+failing in-place admission quarantined, and both retained arms promoted, but
 the committed default preflight remains fail-closed and must be run by the
 operator in the acquisition environment.
 
