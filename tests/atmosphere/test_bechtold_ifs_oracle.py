@@ -499,7 +499,23 @@ def test_nosupply_first_guess_is_the_oracle(fix, g):
 
 # Per-column gap of the default ("zero", 1 W/m2) against the oracle, measured
 # 2026-10-29 (x64, CPU): (dT_dt, dq_v_dt, M_u) per fixture column.
-_NOSUPPLY_GAP = None  # filled from the measurement
+_NOSUPPLY_GAP = {
+    "L32": (
+        [1.155408049270849e-13, 6.382851606121968e-13, 9.329321598065945e-13, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.527033819234069e-16, 4.2997772808050026e-14, 0.0, 0.0, 4.061234644816772e-12, 8.597091978769083e-13, 1.5572484289018971e-12],
+        [1.2208611804052711e-14, 8.208652670311285e-14, 3.7711641379674507e-13, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 7.768519006471387e-15, 0.0, 0.0, 7.768887789727816e-13, 5.056799592526267e-14, 1.101205278761102e-13],
+        [1.4981262394187682e-14, 9.01139097311247e-14, 3.817870639265198e-13, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0292097072507253e-15, 6.920393684326509e-16, 0.0, 0.0, 7.545950343192183e-13, 4.6335526034809616e-14, 3.560926557233197e-14],
+    ),
+    "L137": (
+        [0.005643546933347423, 0.0, 0.0, 0.0, 0.0],
+        [0.005643546936583219, 0.0, 0.0, 0.0, 0.0],
+        [0.006329754723205587, 0.0, 0.0, 0.0, 0.0],
+    ),
+    "STRESS": (
+        [1.722849855972394e-13, 4.5420032351625236e-14, 1.775404919440501e-12],
+        [3.9659361647976153e-14, 7.704682611898458e-15, 4.996926756862235e-13],
+        [1.1361043895744794e-13, 6.838908281453185e-16, 5.255835484158918e-13],
+    ),
+}
 
 
 @pytest.mark.parametrize("g", _GROUPS)
@@ -511,3 +527,73 @@ def test_nosupply_default_gap_per_case(fix, g):
            _per_column_gap(mu, o("PMFU")))
     for a, want in zip(got, _NOSUPPLY_GAP[g]):
         np.testing.assert_allclose(a, np.asarray(want), rtol=1e-6, atol=1e-12)
+
+
+def test_nosupply_guards_raise(fix):
+    from legoesm.atmosphere.physics.convection._ifs_cumastrn import IfsTunables
+
+    for bad, match in ((dict(shallow_nosupply="typo"), "unknown shallow-closure"),
+                       (dict(shallow_supply_width_w_m2=-1.0), "shallow_supply_width_w_m2")):
+        with pytest.raises(ValueError, match=match):
+            _run(fix, "L", "L32", fn=lambda *a, **k: cumastrn(*a, tun=IfsTunables(**bad), **k))
+
+
+def test_wrapper_rejects_nonpositive_epsilon_deep():
+    from legoesm.atmosphere.physics.convection._ifs_faithful import _check_config
+    from legoesm.atmosphere.physics.convection.config import BechtoldConfig
+
+    for v in (0.0, -1.0e-4):
+        with pytest.raises(ValueError, match="epsilon_deep > 0"):
+            _check_config(BechtoldConfig(use_ifs_ascent=True, dx_m=_DX, epsilon_deep=v))
+
+
+def test_bechtold_hands_the_seam_positive_up_fluxes(_x64, monkeypatch):
+    """#2252 on this port: bechtold_convection forwards the model's
+    positive-upward fluxes unchanged; the seam negates them once into the IFS
+    PAHFS/PQHFL sign (test_wrapper_matches_openifs).  A second negation at the
+    bechtold call would flip the trigger's surface parcel."""
+    from legoesm.atmosphere.physics.convection import _ifs_faithful as F
+    from legoesm.atmosphere.physics.convection.bechtold import bechtold_convection
+    from legoesm.atmosphere.physics.convection.config import BechtoldConfig
+
+    cap, orig = {}, F.ifs_faithful_convection
+    def spy(*a, **k):
+        cap.update(k)
+        return orig(*a, **k)
+    monkeypatch.setattr(F, "ifs_faithful_convection", spy)
+    T, q, p_full, p_half = [a.astype(jnp.float64) for a in _deep_column()]
+    kw = _kwargs(*T.shape)
+    kw.update(shf_w_m2=jnp.full((1,), 20.0), lhf_w_m2=jnp.full((1,), 100.0))
+    bechtold_convection(T, q, p_full, p_half,
+                        config=BechtoldConfig(use_ifs_ascent=True, dx_m=_DX), **kw)
+    assert float(cap["shf_w_m2"][0]) == 20.0 and float(cap["lhf_w_m2"][0]) == 100.0
+
+
+def test_nosupply_gradient_through_the_supply_ramp(fix):
+    """RULE 5 gradient test at the default: L137 column 0 is the fixture
+    column whose shallow supply sits on the smooth ramp (its default gap above
+    is the only nonzero one).  check_grads (order 2, reverse) of the column's
+    updraught mass flux with respect to a scale on the pre-convection
+    tendencies that set ZDHPBL; the derivative differs from the hard max's."""
+    from legoesm.atmosphere.physics.convection._ifs_faithful import ifs_faithful_convection
+    from legoesm.atmosphere.physics.convection.config import BechtoldConfig
+    from legoesm.atmosphere.physics.convection.output import ConvectionOutput
+    from jax.test_util import check_grads
+
+    a = lambda k: jnp.asarray(fix[f"L137_{k}"])[:1]  # noqa: E731
+
+    def f(scale, width):
+        cfg = BechtoldConfig(use_ifs_ascent=True, dx_m=_DX,
+                             ifs_shallow_supply_width_w_m2=width)
+        _, mu = ifs_faithful_convection(
+            a("T"), a("q"), a("p_full"), a("p_half"), a("u"), a("v"), float(fix["dt"]),
+            cfg, a("shf_up"), a("lhf_up"), a("land"), a("dT_adv"), a("dq_adv"),
+            scale * a("dT_other"), scale * a("dq_other"), a("omega"), ConvectionOutput)
+        return jnp.sum(mu)
+
+    width = BechtoldConfig().ifs_shallow_supply_width_w_m2
+    one = jnp.asarray(1.0)
+    check_grads(lambda s: f(s, width), (one,), order=2, modes=("rev",), eps=1e-6)
+    g = float(jax.grad(lambda s: f(s, width))(one))
+    g_hard = float(jax.grad(lambda s: f(s, 0.0))(one))
+    assert np.isfinite(g) and g != 0.0 and g != g_hard
