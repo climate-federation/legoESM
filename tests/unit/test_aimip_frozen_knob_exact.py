@@ -166,6 +166,27 @@ def test_save_writes_a_versioned_knob_record(tmp_path):
     assert set(rec["ranges"]) == set(_C)
 
 
+def test_a_failed_overwrite_keeps_the_old_record(tmp_path, monkeypatch):
+    """Serialisation runs before the stale record is dropped, so a save that
+    fails while overwriting leaves the old payload WITH its record (codex +
+    GLM 2026-10-29)."""
+    import equinox as eqx
+
+    from legoesm.ml.checkpoint_io import knob_record_path
+    from legoesm.ml.training import save_checkpoint
+    _, p = _frozen_rate_params()
+    save_checkpoint(p, tmp_path / "c.eqx")
+    before = knob_record_path(tmp_path / "c.eqx").read_text()
+
+    def boom(*a, **k):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(eqx, "tree_serialise_leaves", boom)
+    with pytest.raises(OSError, match="disk full"):
+        save_checkpoint(p, tmp_path / "c.eqx")
+    assert knob_record_path(tmp_path / "c.eqx").read_text() == before
+
+
 def _trained_fp64_checkpoint(tmp_path):
     from legoesm.core.precision import PrecisionPolicy
     from legoesm.ml.training import save_checkpoint
