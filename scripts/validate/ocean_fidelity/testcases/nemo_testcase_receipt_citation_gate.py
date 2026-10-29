@@ -1984,6 +1984,9 @@ FILES = {
         Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/"
              "round339/k0_smoke/orca2_k0_10step_np2/build_sources/ppsrc/"
              "nemo/restart.f90")),
+    "ORCA2_STANDALONE_IIF_OMIP_L4_R342S4Y/BLD/ppsrc/nemo/restart.f90": (
+        NEMO / "cfgs/ORCA2_STANDALONE_IIF_OMIP_L4_R342S4Y/BLD/ppsrc/"
+        "nemo/restart.f90"),
     "ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/istate.f90": (
         Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/"
              "round339/k0_smoke/orca2_k0_10step_np2/build_sources/ppsrc/"
@@ -10058,6 +10061,10 @@ CITATION_MAP = {
         "CALL iom_rstput( kt, nitrst, numrow, 'sshn', ssh(:,:        ,Kbb) )",
         "CALL iom_rstput( kt, nitrst, numrow, 'sn'  , ts(:,:,:,jp_sal,Kbb) )",
         5],
+    'ORCA2_STANDALONE_IIF_OMIP_L4_R342S4Y/BLD/ppsrc/nemo/restart.f90:291-296,311-316': [
+        "!*  Read Kbb fields   (NB: in RK3 Kmm = Kbb = Nbb)",
+        "vv_b(:,:,Kmm)   = vv_b(:,:,Kbb)",
+        12],
     'ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/stprk3.f90:203':
         'Nrhs = Nbb   ;   Nbb  = Naa   ;   Naa  = Nrhs    ! Swap: Nnn unchanged, Nbb <==> Naa',
     'ORCA2_STANDALONE_IIF_OMIP_L4_R339K0/BLD/ppsrc/nemo/stprk3.f90:241':
