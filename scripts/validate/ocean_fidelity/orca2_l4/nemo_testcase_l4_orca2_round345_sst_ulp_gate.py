@@ -160,13 +160,13 @@ def verify_restart_pair_perturbation(
             "rank": rank,
             "source_path": str(source_file.resolve()),
             "source_sha256": source_sha,
-            "perturbed_path": str(perturbed_file.resolve()),
+            "perturbed_file": name,
             "perturbed_sha256": perturbed_sha,
         })
     return {
         "status": "PASS_R345_DAY1_RESTART_SST_PLUS_ONE_FP64_ULP",
         "source_arm": str(source_arm.resolve()),
-        "perturbed_arm": str(perturbed_arm.resolve()),
+        "perturbed_arm": ".",
         "restart_kt": RESTART_KT,
         "first_run_step": FIRST_RUN_STEP,
         "variable": RESTART_VARIABLE,

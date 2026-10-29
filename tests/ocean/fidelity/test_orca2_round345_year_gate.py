@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -133,7 +134,12 @@ def test_day1_restart_gets_exact_uniform_fp64_one_ulp_pattern(tmp_path: Path) ->
         expected[0, 0][rank_wet] = np.nextafter(expected[0, 0][rank_wet], np.inf)
         np.testing.assert_array_equal(actual.view(np.uint64), expected.view(np.uint64))
 
-    target = run_dir / "ORCA2_00000008_restart_0000.nc"
+    refused = tmp_path / "refused" / "retained"
+    refused.parent.mkdir()
+    shutil.move(run_dir, refused)
+    assert ulp_gate.verify_perturbation_manifest(refused) == audit
+
+    target = refused / "ORCA2_00000008_restart_0000.nc"
     with netCDF4.Dataset(target, "r+") as dataset:
         variable = dataset.variables["tn"]
         variable.set_auto_maskandscale(False)
@@ -142,7 +148,7 @@ def test_day1_restart_gets_exact_uniform_fp64_one_ulp_pattern(tmp_path: Path) ->
         surface[j, i] = np.nextafter(surface[j, i], np.inf)
         variable[0, 0] = surface
     with pytest.raises(ulp_gate.GateError, match=r"exact \+1-fp64-ULP pattern"):
-        ulp_gate.verify_perturbation_manifest(run_dir)
+        ulp_gate.verify_perturbation_manifest(refused)
 
 
 def test_round345_document_git_shas_resolve_and_are_full_length() -> None:
