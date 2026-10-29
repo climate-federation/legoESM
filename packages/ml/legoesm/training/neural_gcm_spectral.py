@@ -445,12 +445,12 @@ def _load_midepoch_checkpoint(
     # 5-tuple template RELIABLY raises (the file's int32 epoch scalar lands
     # where the 5-tuple template expects the EMA model's float array leaf,
     # a dtype/shape mismatch), so control reaches the 4-tuple fallback.
-    _last_exc = None
+    _excs = []
     for _reader in (_read5, _read4):
         try:
             m, o, em, e, c = _reader()
         except Exception as exc:  # equinox mismatch: broad by design
-            _last_exc = exc
+            _excs.append(exc)
             continue
         if ema_template is None:
             # Caller does not want the EMA (EMA disabled this run) — drop it.
@@ -458,7 +458,7 @@ def _load_midepoch_checkpoint(
         return m, o, em, int(e), int(c)
     raise RuntimeError(
         f"Could not deserialise {path} as either the 5-tuple or 4-tuple "
-        f"mid-epoch layout: {_last_exc!r}"
+        f"mid-epoch layout: 5-tuple {_excs[0]!r}; 4-tuple {_excs[1]!r}"
     )
 
 

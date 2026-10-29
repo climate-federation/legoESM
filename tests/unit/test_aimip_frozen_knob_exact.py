@@ -300,6 +300,8 @@ def test_midepoch_resume_widens_a_trained_fp32_knob(tmp_path, with_ema):
                               ema_model=p if with_ema else None)
     out = _load_midepoch_checkpoint(tmp_path, tmpl, opt,
                                     ema_template=tmpl if with_ema else None)
+    np.testing.assert_array_equal(out[1], opt)
+    assert out[-2:] == (1, 2)
     for m in (out[0], out[2]) if with_ema else (out[0],):
         assert m.raw_values[c.name].dtype == np.float64
         assert float(m.raw_values[c.name]) == float(p.raw_values[c.name])
@@ -307,14 +309,21 @@ def test_midepoch_resume_widens_a_trained_fp32_knob(tmp_path, with_ema):
 
 # The EMA, WB-resume and WB-FD loaders sit inside training/driver bodies too
 # large to run here: each named function must load model checkpoints through
-# the knob-aware spec, never bare equinox.  (WB _main keeps one bare call, the
+# the knob-aware spec, never bare equinox, and no bare equinox call in the
+# whole file may take a model skeleton.  (WB _main keeps one bare call, the
 # optimizer state, which holds plain arrays and no AIMIP module.)
 _RAW_LOADERS = [
     ("packages/ml/legoesm/training/neural_gcm_spectral.py", "_train_spectral_loop", 0),
     ("packages/ml/legoesm/training/neural_gcm_spectral.py", "_train_sfno_full_loop", 0),
+    ("packages/ml/legoesm/training/neural_gcm_spectral.py", "_load_midepoch_checkpoint", 0),
     ("scripts/run/train_weatherbench_scale.py", "_main", 1),
     ("scripts/validate/wb_gradient_fd_check.py", "main", 0),
 ]
+_MODEL_SKELETONS = {"params", "ema_model", "model", "_tmpl4", "_tmpl5"}
+
+
+def _call_name(n):
+    return getattr(n.func, "attr", getattr(n.func, "id", None))
 
 
 @pytest.mark.parametrize("rel,func,n_bare", _RAW_LOADERS)
@@ -324,7 +333,13 @@ def test_raw_loader_routes_through_the_knob_spec(rel, func, n_bare):
     tree = ast.parse((_ROOT / rel).read_text())
     fn = next(n for n in ast.walk(tree)
               if isinstance(n, ast.FunctionDef) and n.name == func)
-    names = [getattr(n.func, "attr", getattr(n.func, "id", None))
-             for n in ast.walk(fn) if isinstance(n, ast.Call)]
+    calls = [n for n in ast.walk(fn) if isinstance(n, ast.Call)]
+    names = [_call_name(n) for n in calls]
     assert names.count("tree_deserialise_leaves") == n_bare
     assert "deserialise_knob_aware" in names
+    bare_file = [n for n in ast.walk(tree) if isinstance(n, ast.Call)
+                 and _call_name(n) == "tree_deserialise_leaves"]
+    for n in bare_file:
+        skel = n.args[1] if len(n.args) > 1 else None
+        assert not (isinstance(skel, ast.Name) and skel.id in _MODEL_SKELETONS), (
+            f"{rel}:{n.lineno} loads a model skeleton with bare equinox")
