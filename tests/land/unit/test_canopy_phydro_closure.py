@@ -78,8 +78,15 @@ def test_night_closes_the_draw_down():
     x, conv, f = _solve(_bundle(APAR_Sun=0.0, APAR_Sh=0.0, ASW_Sun=0.0,
                                 ASW_Sh=0.0, ASW_Soil=0.0))
     assert conv
-    assert abs(float(x[6])) < 1e-3 and abs(float(x[7])) < 1e-3
-    assert float(f["An_Sun"]) == 0.0
+    # The draw-down rows are KKT (Fischer-Burmeister) residuals, flat near the
+    # dpsi = 0 corner, so the converged draw-down is "closed" to the solver's
+    # residual tolerance: a few 1e-3 MPa, i.e. a transpiration of ~1e-5
+    # mol/m2/s (< 0.5 W/m2).
+    assert abs(float(x[6])) < 5e-3 and abs(float(x[7])) < 5e-3
+    # A dark leaf respires: net An = -Rd < 0 (not floored at zero), and the
+    # diffusion balance puts its Ci above Ca.
+    assert float(f["An_Sun"]) < 0.0 and float(f["An_Sh"]) < 0.0
+    assert float(x[2]) > 400.0 and float(x[3]) > 400.0
 
 
 def test_six_state_models_unchanged():

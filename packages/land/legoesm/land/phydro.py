@@ -566,6 +566,26 @@ class LeafHydraulics(NamedTuple):
     gamma_cost: jax.Array      # [umol/m2/s/MPa^2]
 
 
+# --- leaf VPD floor of the supply conductance gs = E / D ---
+_VPD_FLOOR_PA = 50.0        # [Pa] floor on the leaf-to-air VPD in gs = E / D (as the rphydro kernel)
+_VPD_FLOOR_WIDTH_PA = 0.0   # [Pa] width of the smooth floor; 0 = hard max
+
+
+def floored_vpd(vpd_pa: jax.Array) -> jax.Array:
+    """Leaf VPD with the kernel's 50 Pa floor, optionally smoothed.
+
+    The hard ``max(VPD, 50)`` has a derivative jump at the floor; a shaded
+    leaf colder than the canopy-air dew point sits exactly there and the
+    canopy Newton stalls on the kink.  With a width ``w`` the floor is the
+    smooth-max ``50 + 0.5 (v + sqrt(v^2 + w^2))``, ``v = VPD - 50``: same
+    limits, continuous derivative, ``w/2`` above the hard floor at VPD = 50.
+    """
+    v = vpd_pa - _VPD_FLOOR_PA
+    if _VPD_FLOOR_WIDTH_PA <= 0.0:
+        return jnp.maximum(vpd_pa, _VPD_FLOOR_PA)
+    return _VPD_FLOOR_PA + 0.5 * (v + jnp.sqrt(v * v + _VPD_FLOOR_WIDTH_PA ** 2))
+
+
 def leaf_supply_gs_w(hyd: LeafHydraulics, d_frac: jax.Array) -> jax.Array:
     """Water-vapour conductance of the whole leaf CLASS at its draw-down.
 

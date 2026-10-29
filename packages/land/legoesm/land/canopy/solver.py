@@ -58,7 +58,7 @@ from typing import NamedTuple
 from legoesm.land.canopy.config import CanopyConfig, VALID_LE_MODULES
 from legoesm.land.canopy.radiative_transfer import canopy_longwave_rt
 from legoesm.land.canopy.photosynthesis import photosynthesis
-from legoesm.land.phydro import LeafHydraulics, instantaneous_foc
+from legoesm.land.phydro import LeafHydraulics, floored_vpd, instantaneous_foc
 from legoesm.land.leaf_biophysics import DIFFUSIVITY_RATIO_H2O_CO2
 from legoesm.land.canopy.stability import (
     monin_obukhov_stability,
@@ -138,7 +138,9 @@ _LM_XSCALE_DPSI = 0.5
 # RELATIVE convergence test (n_sq <= rtol * n_sq_0) and loosens every other
 # row (measured: LE/H skill fell at two sites with 1e2).
 _FOC_ROW_SCALE = 1.0
-_CI_PROJ_MIN_FRAC = 0.02   # [-] lower projection bound of the Ci unknowns, as a fraction of Ca (phydro)
+_ANCHOR_DPSI_LO = 0.12     # [-] anchor weight below which the draw-down row is pure stationarity (and 1-this above which it is pure anchor)
+_CI_PROJ_MIN_FRAC = 0.25   # [-] lower projection bound of the Ci unknowns, as a fraction of Ca (phydro)
+_CI_PROJ_MAX_FRAC = 1.5    # [-] upper projection bound of the Ci unknowns, as a fraction of Ca (phydro)
 _N_STATE = 6
 _N_STATE_PHYDRO = 8
 
@@ -272,6 +274,18 @@ def _leaf_hydraulics(x, bundle: CanopyForcingBundle, stomatal_model: str):
 # ---------------------------------------------------------------------------
 # Residual function (defines the closure equations)
 # ---------------------------------------------------------------------------
+
+_KKT_FB_EPS = 1e-6  # [umol m-2 s-1 MPa-1] smoothing of the Fischer-Burmeister function at the origin
+
+
+def _kkt_fischer_burmeister(a: jax.Array, b: jax.Array) -> jax.Array:
+    """Fischer-Burmeister complementarity residual ``a + b - sqrt(a^2 + b^2)``.
+
+    Zero iff ``a >= 0``, ``b >= 0`` and ``a b = 0``; smooth everywhere except
+    the origin, where ``_KKT_FB_EPS`` regularises the square root.
+    """
+    return a + b - jnp.sqrt(a * a + b * b + _KKT_FB_EPS ** 2)
+
 
 def _canopy_residual(
     x: jax.Array,
@@ -431,6 +445,21 @@ def _canopy_residual(
         gs_c_Sh = gs_Sh * gs_mol_per_ms(Tf_Sh, b.Ps) / DIFFUSIVITY_RATIO_H2O_CO2
         bal_Sun = An_Sun - gs_c_Sun * (b.Ca - Ci_Sun)
         bal_Sh = An_Sh - gs_c_Sh * (b.Ca - Ci_Sh)
+        # Ci is projected onto [_CI_PROJ_MIN_FRAC, _CI_PROJ_MAX_FRAC] Ca, and
+        # the balance's root can lie outside (a dark leaf with cuticular
+        # conductance only has Ci = Ca + 1.6 Rd/g0, above the ceiling for
+        # Rd ~ 1 umol/m2/s).  The row is therefore the KKT condition of the
+        # bounded balance: zero at an interior root, or at a bound with the
+        # residual pointing outward.  Nested Fischer-Burmeister, slack in
+        # flux units (gs_c times the Ci room left to the bound); the balance
+        # rises with Ci, so below its root it is negative and above positive.
+        def _bounded(bal, gs_c, Ci):
+            lo = _CI_PROJ_MIN_FRAC * b.Ca
+            hi = _CI_PROJ_MAX_FRAC * b.Ca
+            at_floor = _kkt_fischer_burmeister(gs_c * (Ci - lo), bal)
+            return _kkt_fischer_burmeister(gs_c * (hi - Ci), -at_floor)
+        bal_Sun = _bounded(bal_Sun, gs_c_Sun, Ci_Sun)
+        bal_Sh = _bounded(bal_Sh, gs_c_Sh, Ci_Sh)
     else:
         bal_Sun, bal_Sh = Ci_Sun - Ci_Sun_new, Ci_Sh - Ci_Sh_new
     res_Ci_Sun = (anchor_weight * (Ci_Sun - Ci_Sh)
@@ -449,7 +478,7 @@ def _canopy_residual(
         # in its draw-down, at the current leaf state: A' = dAn/dCi of the
         # kernel, gs the class's conductance from the supply (back in mol).
         # The sunlit row takes the same degeneracy anchor as Tf/Ci.
-        d_frac = jnp.maximum(VPD_c, 50.0) / b.Ps  # coeff-ok: 50 Pa VPD floor (as the kernel)
+        d_frac = floored_vpd(VPD_c) / b.Ps
         def _an_prime(T, Ci, APAR, Vc3, Vc4):
             f = lambda c: photosynthesis(T, c, APAR, Vc3, Vc4, b.fC4, b.Ps,
                                          b.alf, b.TgC, rjv25=b.rjv25)[0]
@@ -466,9 +495,33 @@ def _canopy_residual(
         # umol/m2/s/MPa for a 0.01 MPa miss, far below the K-sized rows, so
         # without the factor the residual-norm convergence test would accept
         # draw-downs 0.01 MPa off (negative at night).
-        rows += [_FOC_ROW_SCALE * (anchor_weight * (x[6] - x[7])
-                                   + (1.0 - anchor_weight) * foc_Sun),
-                 _FOC_ROW_SCALE * foc_Sh]
+        # The draw-down row's anchor must SATURATE at 1: the tanh blend used for
+        # Tf/Ci leaves ~1% of the stationarity residual in the row, and at a
+        # degenerate sunlit fraction (low sun: dawn, dusk, winter) that leak is
+        # as large as the anchor term itself and puts the row's root below the
+        # dpsi >= 0 bound, where the column can never converge (measured: the
+        # unsolved site steps were all low-sun).  Piecewise-linear remap of the
+        # same weight: exactly 1 for fSun below ~0.05, 0 above ~0.11.
+        # The anchor term is expressed in the stationarity residual's own
+        # units, 2 gamma (dpsi_sun - dpsi_sh): the draw-down "distance" the
+        # risk-cost slope converts a residual into.  Blending two quantities
+        # of the same scale keeps the row's root between the shaded draw-down
+        # and the sunlit optimum, hence feasible, at every weight.
+        w_dpsi = jnp.clip((anchor_weight - _ANCHOR_DPSI_LO) / (1.0 - 2.0 * _ANCHOR_DPSI_LO), 0.0, 1.0)
+        anchor_dpsi = 2.0 * b.gamma_cost * (x[6] - x[7])
+        # The draw-down is bounded below by zero, so its optimality condition
+        # is the KKT pair "dpsi >= 0, dP/ddpsi <= 0, one of them zero", not
+        # the bare stationarity dP/ddpsi = 0: a respiring leaf (night, Ci >
+        # Ca, An < 0) LOSES profit for any opening, its optimum is dpsi = 0
+        # with a strictly negative slope, and a residual that insists on
+        # slope = 0 there can never converge.  Fischer-Burmeister form
+        # a + b - sqrt(a^2 + b^2), zero exactly on the KKT set, with a = 2 gamma
+        # dpsi (the draw-down in the slope's units) and b = -dP/ddpsi; the eps
+        # keeps it differentiable at the origin.
+        kkt_Sun = _kkt_fischer_burmeister(2.0 * b.gamma_cost * x[6], -foc_Sun)
+        kkt_Sh = _kkt_fischer_burmeister(2.0 * b.gamma_cost * x[7], -foc_Sh)
+        rows += [_FOC_ROW_SCALE * (w_dpsi * anchor_dpsi + (1.0 - w_dpsi) * kkt_Sun),
+                 _FOC_ROW_SCALE * kkt_Sh]
     return jnp.array(rows)
 
 
@@ -776,15 +829,18 @@ def _make_implicit_newton_solver(
             The draw-downs are non-negative by definition (a leaf cannot be
             wetter than its soil) and no stationary point lies below zero (the
             gain term is >= 0, the risk term restoring).  Ci is kept inside
-            (0, Ca]: the flux-form balance has no clip of its own, and a trial
-            below zero puts the kernel on its Ci floor (A' = 0), where the
-            draw-down row loses its gain.
+            [0.25, 1.5] Ca: the floor sits above Gamma* for leaf temperatures
+            up to ~43 degC, so dAn/dCi > 0 and the draw-down row keeps its
+            gain (below Gamma* the kernel's gross floors make A' = 0 and the
+            leaf freezes in a non-transpiring state); the ceiling lies above
+            the respiring root Ci = Ca + 1.6 Rd/g0 (night, An < 0), so that
+            root is not a corner of the projection.
             """
             lo = jnp.full((_N_STATE_PHYDRO,), -jnp.inf, x0.dtype)
             hi = jnp.full((_N_STATE_PHYDRO,), jnp.inf, x0.dtype)
             lo = lo.at[_N_STATE:].set(0.0)
             lo = lo.at[2:4].set(_CI_PROJ_MIN_FRAC * bundle.Ca)
-            hi = hi.at[2:4].set(bundle.Ca)
+            hi = hi.at[2:4].set(_CI_PROJ_MAX_FRAC * bundle.Ca)
             return lo, hi
 
         def body(state):

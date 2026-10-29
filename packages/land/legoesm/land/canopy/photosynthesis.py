@@ -500,8 +500,8 @@ def photosynthesis(
 
     Returns
     -------
-    An : net assimilation rate [umol m-2 s-1], clamped to >= 0 — drives the
-        leaf energy/CO2 flux + SIF in the canopy residual.
+    An : net assimilation rate [umol m-2 s-1], NOT floored at zero (>= -Rd) —
+        drives the leaf energy/CO2 flux + SIF in the canopy residual.
     A_gross : gross assimilation (GPP, before dark respiration) [umol m-2 s-1] —
         the carbon-model uptake the caller consumes downstream so foliar
         respiration is not double-counted (see ``solver.canopy_forward``).
@@ -509,9 +509,9 @@ def photosynthesis(
     The two big-leaf callers (``_canopy_residual``, ``canopy_forward``) unpack
     both; a single-value return crashes their ``An, _ = photosynthesis(...)``
     unpack ("iteration over a 0-d array").  The public ``c3_photosynthesis`` /
-    ``c4_photosynthesis`` wrappers keep their single-value (net) contract for
-    their standalone callers; NET here is byte-identical to blending those
-    wrappers — ``An = max(a_gross - rd, 0)``, weighted by fC4.
+    ``c4_photosynthesis`` wrappers keep their single-value (net, floored at
+    zero) contract for their standalone callers; NET here is the unfloored
+    ``a_gross - rd``, weighted by fC4.
     """
     del Ps, alf  # signature parity; FvCB uses _PHI_PSII and mole-fraction Ci
     # Use the inner FvCB assimilation (which exposes a_gross + rd) so GROSS GPP
@@ -519,8 +519,13 @@ def photosynthesis(
     # c3/c4_photosynthesis wrappers relied on elsewhere.
     r_c3 = c3_assimilation(Tf, Ci, APAR, Vcmax25_C3, TgC, rjv25=rjv25)
     r_c4 = c4_assimilation(Tf, Ci, APAR, Vcmax25_C4)
-    An_C3 = jnp.where(r_c3.a_gross - r_c3.rd < 0.0, 0.0, r_c3.a_gross - r_c3.rd)
-    An_C4 = jnp.where(r_c4.a_gross - r_c4.rd < 0.0, 0.0, r_c4.a_gross - r_c4.rd)
+    # NET assimilation is NOT floored at zero: a respiring leaf (night, hot
+    # and dry) returns An = -Rd, so the leaf CO2 diffusion balance has its
+    # physical root Ci > Ca and dAn/dCi stays > 0 above Gamma* (a zero floor
+    # made the canopy Newton's Ci unknowns inert there).  Consumers that need
+    # a non-negative rate take max(An, 0) themselves (stomata.py, sif.py).
+    An_C3 = r_c3.a_gross - r_c3.rd
+    An_C4 = r_c4.a_gross - r_c4.rd
     # Continuous weighted averages — fully differentiable wrt fC4
     An = (1.0 - fC4) * An_C3 + fC4 * An_C4
     A_gross = (1.0 - fC4) * r_c3.a_gross + fC4 * r_c4.a_gross

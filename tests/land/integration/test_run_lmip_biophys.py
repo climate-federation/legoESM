@@ -575,14 +575,15 @@ def test_optimality_arms_run_on_the_global_driver(tmp_path, arm, extra):
         assert np.all(np.isfinite(dps)) and dps[solved].min() >= -1e-3
     else:
         assert np.all(np.isfinite(g1)) and np.all(np.isnan(dps))
-    # Solved Ci/Ca is written by EVERY arm: inside the kernel's clip by day,
+    # Solved Ci/Ca is written by EVERY arm: positive and below the 1.5 Ca
+    # ceiling by day (a respiring leaf at dawn/dusk, An < 0, sits above Ca),
     # exactly zero at night (flag off).
     day = ds["day_frac"].values
     assert day.min() == 0.0 and day.max() == 1.0
     for v in ("ci_ca_sun_day", "ci_ca_shade_day"):
         c = ds[v].values
         assert np.all(c[day == 0.0] == 0.0)
-        assert np.all((c[day == 1.0] > 0.0) & (c[day == 1.0] <= 1.0))
+        assert np.all((c[day == 1.0] > 0.0) & (c[day == 1.0] <= 1.5))
     chi, psil = ds["pmodel_chi"].values, ds["pmodel_psi_leaf"].values
     n_rub = ds["pmodel_n_rubisco_leaf"].values
     if arm == "baseline":

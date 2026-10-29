@@ -179,6 +179,31 @@ def advance_TgC_ema(
     return TgC_old + alpha * (T_air_C - TgC_old)
 
 
+# Debug instrument (never on in production): with LEGOESM_DUMP_UNSOLVED=<dir>
+# set, every Picard pass writes the forcing bundle, start state and stopped
+# iterate of the columns whose Newton closure did not converge, one npz per
+# pass, so a failing column can be replayed in isolation.
+import os as _os
+_DUMP_UNSOLVED_DIR = _os.environ.get("LEGOESM_DUMP_UNSOLVED", "")
+
+
+def _dump_unsolved(bundles, x0, x, n_iters, converged):
+    import numpy as _np
+
+    def _cb(bund, x0_, x_, n_, conv_):
+        bad = _np.asarray(conv_) == False  # noqa: E712
+        if not bad.any():
+            return
+        _os.makedirs(_DUMP_UNSOLVED_DIR, exist_ok=True)
+        k = len(_os.listdir(_DUMP_UNSOLVED_DIR))
+        payload = {f"b_{name}": _np.asarray(val)[bad] for name, val in zip(bund._fields, bund)
+                   if val is not None and _np.ndim(val) >= 1}
+        payload.update(x0=_np.asarray(x0_)[bad], x=_np.asarray(x_)[bad], n_iters=_np.asarray(n_)[bad])
+        _np.savez(_os.path.join(_DUMP_UNSOLVED_DIR, f"unsolved_{k:06d}.npz"), **payload)
+
+    jax.debug.callback(_cb, bundles, x0, x, n_iters, converged)
+
+
 def ci_seed(Ca, fC4, chi_opt=None):
     """Starting intercellular CO2 for the canopy Newton solve [umol/mol].
 
@@ -596,12 +621,19 @@ def compute_two_leaf_canopy_fluxes(
     Ca    = forcing.co2_ppmv
 
     # ---- Initial Newton state ----
+    # Canopy air starts half-way between the air above and the soil below,
+    # for humidity AND temperature.  Starting the temperature at Ta lands
+    # the hot-soil midday column on the stable branch of the Monin-Obukhov
+    # closure, where its heat balance has no root (the canopy air must be
+    # warmer than Ta to export the soil's sensible heat), and the damped
+    # Newton stalls there.
     Ts_old   = T_soil_top
     q_s_init = sat_specific_humidity(Ts_old, Ps)
     q_c_init = 0.5 * (q_s_init + q_atm)
+    Tc_init  = 0.5 * (Ts_old + Ta)
     Ci_init = ci_seed(Ca, fC4, chi_opt)
 
-    _x0 = [Ta, Ta, Ci_init, Ci_init, Ta, q_c_init]
+    _x0 = [Ta, Ta, Ci_init, Ci_init, Tc_init, q_c_init]
     if cc.stomatal_model == "phydro":
         # The two draw-down unknowns start at the acclimated optimum's.
         _x0 += [dpsi_seed, dpsi_seed]
@@ -670,6 +702,8 @@ def compute_two_leaf_canopy_fluxes(
         bundles_k = _build_bundle(Ts_bc_k)
         x_final, n_iters, converged = jax.vmap(_solve_one_col)(
             initial_state, bundles_k)
+        if _DUMP_UNSOLVED_DIR:
+            _dump_unsolved(bundles_k, initial_state, x_final, n_iters, converged)
         fluxes_per_col = jax.vmap(_fwd_one_col)(x_final, bundles_k)
 
         G_k = jnp.clip(fluxes_per_col["G"], -500.0, 700.0)  # coeff-ok: physical range clamp on ground heat flux [W m-2]

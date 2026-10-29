@@ -31,7 +31,7 @@ from legoesm.thermo import (
 from legoesm.land.leaf_biophysics import DIFFUSIVITY_RATIO_H2O_CO2
 from legoesm.land.canopy.photosynthesis import co2_compensation_point
 from legoesm.land.stomata import ball_berry_gs, leuning_gs, medlyn_gs
-from legoesm.land.phydro import LeafHydraulics, leaf_supply_gs_w
+from legoesm.land.phydro import LeafHydraulics, floored_vpd, leaf_supply_gs_w
 
 # Module-local constants.
 # NOTE: Stefan-Boltzmann, freezing point, latent heat of vaporisation, etc.
@@ -192,6 +192,11 @@ def canopy_met_variables(
 # Stomatal conductance dispatch (Ball-Berry or Medlyn)
 # ---------------------------------------------------------------------------
 
+# --- Ci range of the empirical stomatal models' diffusion closure ---
+_CI_EMPIRICAL_MIN_FRAC = 0.5   # [-] floor of the diffusion Ci, as a fraction of Ca (C3 operating range)
+_CI_EMPIRICAL_MAX_FRAC = 1.5   # [-] ceiling; above Ca so a respiring leaf (An < 0) reaches its physical Ci
+
+
 def _compute_gs_and_ci(
     An: jax.Array,
     RH_c: jax.Array,
@@ -262,7 +267,7 @@ def _compute_gs_and_ci(
             raise ValueError(
                 "stomatal_model='phydro' needs the leaf class's LeafHydraulics "
                 "(threaded from the canopy solver); got None")
-        d_frac = jnp.maximum(VPD_c, 50.0) / Ps  # coeff-ok: 50 Pa VPD floor (as Medlyn)
+        d_frac = floored_vpd(VPD_c) / Ps
         gs_mol = leaf_supply_gs_w(hyd, d_frac) + b0
     else:
         raise ValueError(
@@ -278,17 +283,17 @@ def _compute_gs_and_ci(
     gs_mol = jnp.maximum(gs_mol, _GS_MIN_MOL)
 
     Ci = Ca - DIFFUSIVITY_RATIO_H2O_CO2 * An / jnp.maximum(gs_mol, 1e-9)
-    # Clip Ci to the physically reasonable C3 range; mixed-PFT C3/C4
-    # is handled upstream in ``photosynthesis()`` via the continuous fC4
-    # fraction, so the C4 bounds are not needed here.  Under the hydraulic
-    # supply the conductance is NOT tied to A, so Ci legitimately runs close
-    # to Ca on a wet leaf and well below 0.5 Ca on a shut one; the clip is
-    # then only a numerical guard, kept far from the operating range (a
-    # bound hit inside it is a corner the canopy Newton stalls on).
-    if stomatal_model == "phydro":
-        Ci = jnp.clip(Ci, 0.05 * Ca, 0.99 * Ca)  # coeff-ok: numerical guard on Ci (hydraulic supply)
-    else:
-        Ci = jnp.clip(Ci, 0.5 * Ca, 0.9 * Ca)  # coeff-ok: clamp Ci to physical C3 range [0.5, 0.9]·Ca
+    if stomatal_model != "phydro":
+        # The empirical models' Ci equation is this diffusion value (the
+        # canopy residual equates the Ci unknown to it).  Clip to the C3
+        # operating range: floor 0.5 Ca, ceiling 1.5 Ca so a respiring leaf
+        # (An < 0: night, hot and dry) reaches its physical Ci > Ca instead of
+        # being pinned by the clip.  Mixed C3/C4 is handled upstream in
+        # ``photosynthesis()`` via the continuous fC4 fraction.  Under the
+        # hydraulic supply this value is not read (Ci is its own unknown with
+        # a flux-form row and the solver's projection bounds), so it is left
+        # unclipped there.
+        Ci = jnp.clip(Ci, _CI_EMPIRICAL_MIN_FRAC * Ca, _CI_EMPIRICAL_MAX_FRAC * Ca)
 
     # Unit conversion: mol m-2 s-1 → m s-1 at IUPAC STP reference
     # (T_std = T_freeze, P_std = _Ps0 = 101325 Pa, V_molar = 22.4 L/mol → 0.0224 m^3).
