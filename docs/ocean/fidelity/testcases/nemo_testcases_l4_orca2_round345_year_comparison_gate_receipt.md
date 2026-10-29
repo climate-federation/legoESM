@@ -8,18 +8,23 @@ Admitted arm-A binary SHA-256:
 Admitted arm-A day-1 restart SHA-256 values:
 `3fbed2281e66f7d51cd34247e799d1b76c8a102d36d5b64c0a3b80aba56dd2e3` and
 `a5660f4c44b70a7cf7d70500b2df8e2d2145f08a205b266301c7312517413023`.
+Deterministic perturbed day-1 restart SHA-256 values:
+`bb25179365e776ae73e6ead9d2bad42e222f2094f687c22ede3b0eb3bcae1f01` and
+`0279bb4021ef1b557e178ef01b5c4cac732479102404871b557b984433fff8cf`.
 Disposition: **STOPPED_FOR_RECORD** — the corrected round-345 pipeline is
 verified; the full preflight must be repeated outside this sandbox before the
-perturbed NEMO continuation is acquired by the operator.
+control and perturbed NEMO continuations are acquired by the operator.
 
 ## Result
 
 Decision 188 remains executable month by month with its frozen fixed bars and
-surface-KE rule `max(0.01, 3 * envelope_relative_RMS)`. The gate now refuses an
-identically zero envelope and requires the envelope report to bind to an
+surface-KE rule `max(0.01, 3 * envelope_relative_RMS)`. The gate now requires a
+strictly positive envelope in every evaluated month and binds the report to an
 admitted round-345 fp64 restart perturbation, admitted arm-A forcing/damping,
-and the arm-A binary. The original ORCA2X 30-day schema remains a single
-partial-month input.
+and the arm-A binary. Before using that envelope, it also requires a second NEMO
+continuation from the exact same unperturbed restart to be byte-identical to arm
+A at all 365 daily restart pairs. The original ORCA2X 30-day schema remains a
+single partial-month input.
 
 No scientific year verdict is claimed because the perturbed-NEMO envelope has
 not been acquired. No NEMO process was run.
@@ -48,11 +53,17 @@ token. Quarantine requires that exact token. A target that already exists
 refuses before the attempt is claimed, so admitted evidence from round 342 or a
 previous round-345 attempt cannot be moved.
 
+`--admit-existing` validates producer-commit ancestry and relative manifest and
+binary digests. A failing in-place admission quarantines both new arms and logs
+the refusal; a failure already in `refused/` stays there. A passed retained pair
+is promoted to the canonical paths, and the passed admission JSON is written
+only under the run root.
+
 The stub scratch is under
 `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/work`. The preflight covers a
-successful pipeline, safe overwrite refusal, a missing-STOP refusal retaining
-the binary and build snapshot, in-place admission, and direct re-admission of a
-completed arm retained beneath `refused/`.
+successful paired pipeline, safe overwrite refusal, a missing-STOP refusal
+retaining the binary and build snapshot, a failing in-place admission trap,
+ancestry refusal, and promotion of a passed pair from `refused/`.
 
 Acquisition command:
 
@@ -74,17 +85,19 @@ gate from `sha256sum`-equivalent byte hashing and immediately re-hashed.
 
 The safety/restart implementation is committed as
 `4e175e60e1223eb2f98188d0f102ac037aa27ceb`; the retained-arm relocation fix is
-`95eb6b45a12508e4b2d32eef1f89a3af938a76cc`. Both values were copied from
+`95eb6b45a12508e4b2d32eef1f89a3af938a76cc`; and the paired-control, admission,
+and all-month envelope repair is
+`8e91ec01953e048586c296094361d9fd37df346c`. These values were copied from
 `git rev-parse`, and the document gate resolves every quoted git object.
 
-Focused round-345, inherited round-342 year, and ORCA2X pilot tests pass 20/20.
-The five Decision-188 controls fire, including independent refusal of a zero
-envelope and a non-perturbed envelope. A real-arm staging probe verifies
+Focused round-345, inherited round-342 year, and ORCA2X pilot tests pass 23/23.
+The seven Decision-188 controls fire, including independent refusal of a zero
+month, a non-perturbed envelope, and a missing restart control. A real-arm staging probe verifies
 16,433 changed wet SST values, 59 unchanged forcing/deck inputs, the admitted
 binary, and the step-9 restart deck. A direct end-to-end stub flow passes
-staging, completion, admission, in-place re-admission, and re-admission after
-moving the completed arm beneath `refused/`. A separate existing-target probe
-refuses while retaining the target in place and creating no refused copy.
+staging, completion, admission, in-place re-admission, failed-admission
+quarantine, and promotion from `refused/`. A separate existing-target probe
+refuses while retaining both targets in place and creating no refused copy.
 
 The clean default preflight was re-run. Its inherited round-342 MPI stub stops
 before the round-345 stub because this managed sandbox denies the Open MPI
@@ -102,14 +115,16 @@ its shifted-line plant refuses. The exact default ORCA2 landing battery passes
 
 - ASKED: option-1 fixed bars; monthly 3x KE envelope with 1% floor; perturb the
   admitted day-1 NEMO double-precision restart SST by one ULP; leave forcing and
-  damping untouched; compare from day 1; refuse zero/non-perturbed envelopes.
+  damping untouched; compare from day 1; refuse zero/non-perturbed envelopes;
+  require the exact unperturbed restart continuation before using the envelope.
 - UNASKED: none.
-- independent review: Claude Sonnet HOLD received; every listed finding is
-  repaired here; operator re-review remains open (Argon may follow)
+- independent review: Claude Sonnet RUN confirmed the prior repair; Argon HOLD
+  received; all four findings are repaired here; operator re-review remains open
 
 ## Open
 
 The operator runs the acquisition command (which first runs the same
-fail-closed preflight), evaluates admitted arm A versus the perturbed
-continuation with the Decision-160 reporter, and supplies that report plus the
-round-345 admission JSON to the Decision-188 gate.
+fail-closed preflight), acquires both the exact restart control and perturbed
+continuation, evaluates admitted arm A versus the perturbed continuation with
+the Decision-160 reporter, and supplies that report plus the paired round-345
+admission JSON to the Decision-188 gate.
