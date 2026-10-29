@@ -1436,10 +1436,10 @@ def _make_hydrostatic_radiation(
     Signature: (state, grid_or_mesh, sigma_coord) -> HydrostaticTendencies
 
     When ``column_mesh`` is provided (issue #273 follow-up), the
-    per-column radiation kernel runs sharded across the mesh's
-    ``'col'`` axis.  Caller is responsible for ensuring the flattened
-    column count ``ncol = ∏ shape_2d`` divides the mesh's device
-    count.
+    per-column radiation kernel runs sharded across all of the mesh's
+    axes (a 1-D ``'col'`` mesh, or the dycore's own step mesh).  Caller
+    is responsible for ensuring the flattened column count
+    ``ncol = ∏ shape_2d`` is divisible by the mesh's device count.
 
     When the attached cloud config enables ``convective_cloud``, the fn
     reads the LAGGED ``phys_state.conv_precip`` carry (published by the

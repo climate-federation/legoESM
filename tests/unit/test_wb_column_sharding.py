@@ -185,7 +185,8 @@ def test_radiation_split_reuses_the_step_mesh():
     entire program"), which stopped every multi-device duo run.  JAX runs
     that check only when the program holds a host callback; the model's
     runtime error checks supply one, so the test does too.  1-D face mesh
-    and the 3-D window-layout shape, values and gradients exact.
+    and 3-D window-layout meshes (devices on the face axis, then on a tile
+    axis), values and gradients exact.
 
     Non-vacuous: make radiation_column_mesh return create_column_mesh(n)
     again and the jit raises.
@@ -197,8 +198,11 @@ def test_radiation_split_reuses_the_step_mesh():
         from legoesm.driver.model_driver import radiation_column_mesh
         from legoesm.parallel.column_shard import shard_columns
         devs = np.array(jax.devices())
+        # (1, 2, 1): the devices sit on a tile axis, so a split over
+        # 'face' alone would leave the columns unsplit (SPLIT False)
         for step in (Mesh(devs, ("face",)),
-                     Mesh(devs.reshape(2, 1, 1), ("face", "ti", "tj"))):
+                     Mesh(devs.reshape(2, 1, 1), ("face", "ti", "tj")),
+                     Mesh(devs.reshape(1, 2, 1), ("face", "ti", "tj"))):
             mesh = radiation_column_mesh(step, 2)
             cons = ri._column_constraint(mesh, 8)
             pin = NamedSharding(step, P(tuple(step.axis_names)))
@@ -225,5 +229,5 @@ def test_radiation_split_reuses_the_step_mesh():
         print("COL", radiation_column_mesh(None, 2).axis_names == ("col",))
     """, n_dev=2)
     for tag in ("VAL True", "GRAD True", "SPLIT True"):
-        assert out.count(tag) == 2, out
+        assert out.count(tag) == 3, out
     assert "COL True" in out, out

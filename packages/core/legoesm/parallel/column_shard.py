@@ -128,8 +128,8 @@ def shard_columns(field: jax.Array, mesh: Mesh) -> jax.Array:
     The leading axis is treated as the column index.  Trailing axes
     (vertical levels, bands, etc.) are replicated on each device.
 
-    The caller is responsible for ensuring ``field.shape[0]`` divides
-    ``mesh.size`` — use ``pad_to_shardable`` first if not.
+    The caller is responsible for ensuring ``field.shape[0]`` is divisible
+    by ``mesh.size`` — use ``pad_to_shardable`` first if not.
     """
     if field.ndim == 0:
         return jax.device_put(field, NamedSharding(mesh, P()))
