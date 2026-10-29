@@ -599,6 +599,16 @@ def resolve_unset_ice_snow_d_auto(cfg):
     return cfg      # unknown flavour: resolve_morrison_flavor raises
 
 
+def mg2_rel_ice_params(micro_leaf):
+    """``(dcs [m], ice-slope RULE 5 width)`` the CAM6 radiation ice radius
+    reads from the run's microphysics leaf config (dcs resolved by flavour);
+    ``(None, None)`` for a leaf without them, which that path refuses."""
+    if micro_leaf is None or not hasattr(micro_leaf, "mg2_ice_slope_log_width"):
+        return None, None
+    m = resolve_unset_ice_snow_d_auto(micro_leaf)
+    return m.ice_snow_d_auto, m.mg2_ice_slope_log_width
+
+
 def resolve_warm_rain_scheme(cfg) -> str:
     """THE warm-rain law a Morrison config runs: an explicit
     ``warm_rain_scheme`` as set; unset (None) by flavour, ``mg`` -> the CAM6
