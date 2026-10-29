@@ -366,14 +366,18 @@ def _any_flux_weight(config: LossConfig) -> bool:
     )
 
 
-def carry_mse(
+def carry_mse_terms(
     pred_carry,
     target_carry,
     sigma_full: jax.Array,
     lat_weights: jax.Array | None = None,
     config: LossConfig = LossConfig(),
-) -> jax.Array:
-    """Compute weighted MSE between two SegmentCarry states.
+) -> tuple[jax.Array, dict]:
+    """``carry_mse`` plus each weighted term it summed, as ``(loss, terms)``.
+
+    ``terms`` maps names such as ``mse_T``/``bias_u``/``crps_q``/``flux`` to
+    the exact increments added to ``loss``, in the same order, so ``loss`` is
+    bit-identical to ``carry_mse``.
 
     Works directly on SegmentCarry fields (raw arrays on the model grid),
     avoiding regridding in the loss computation.
@@ -390,12 +394,18 @@ def carry_mse(
 
     Returns
     -------
-    scalar — weighted MSE loss
+    (scalar loss, dict of scalar terms)
     """
     lev_w = level_weights(sigma_full, config=config)
 
     from legoesm.core.precision import resolve_dtype
     loss = jnp.array(0.0, dtype=resolve_dtype(None, "accumulate"))
+    terms = {}
+
+    def _add(name, x):
+        nonlocal loss
+        terms[name] = x
+        loss = loss + x
 
     # Area weighting uses the shared module-level ``_lat_weighted_mean``
     # (also used by ``radiation_flux_loss``) — one implementation, no
@@ -425,21 +435,21 @@ def carry_mse(
 
     # Temperature: (..., nlev)
     dT = pred_carry.T - target_carry.T
-    loss = loss + config.w_T * _lat_weighted_mean(dT ** 2 * lev_w, lat_weights) / T_norm
+    _add("mse_T", config.w_T * _lat_weighted_mean(dT ** 2 * lev_w, lat_weights) / T_norm)
 
     # Winds: (..., nlev)
     du = pred_carry.u - target_carry.u
     dv = pred_carry.v - target_carry.v
-    loss = loss + config.w_u * _lat_weighted_mean(du ** 2 * lev_w, lat_weights) / wind_norm
-    loss = loss + config.w_v * _lat_weighted_mean(dv ** 2 * lev_w, lat_weights) / wind_norm
+    _add("mse_u", config.w_u * _lat_weighted_mean(du ** 2 * lev_w, lat_weights) / wind_norm)
+    _add("mse_v", config.w_v * _lat_weighted_mean(dv ** 2 * lev_w, lat_weights) / wind_norm)
 
     # Moisture: (..., nlev)
     dq = pred_carry.q_v - target_carry.q_v
-    loss = loss + config.w_q * _lat_weighted_mean(dq ** 2 * lev_w, lat_weights) / q_norm
+    _add("mse_q", config.w_q * _lat_weighted_mean(dq ** 2 * lev_w, lat_weights) / q_norm)
 
     # Surface pressure: (...)
     dp = pred_carry.p_s - target_carry.p_s
-    loss = loss + config.w_ps * _lat_weighted_mean(dp ** 2, lat_weights) / ps_norm
+    _add("mse_ps", config.w_ps * _lat_weighted_mean(dp ** 2, lat_weights) / ps_norm)
 
     # Bias-penalty terms.  Squared (level-weighted) area-mean error
     # for each variable, normalised by the same scale as the MSE
@@ -452,16 +462,16 @@ def carry_mse(
     # both training paths.
     if config.w_bias_T > 0.0:
         bias_T = _lat_weighted_mean(dT * lev_w, lat_weights)
-        loss = loss + config.w_bias_T * bias_T ** 2 / T_norm
+        _add("bias_T", config.w_bias_T * bias_T ** 2 / T_norm)
     if config.w_bias_u > 0.0:
         bias_u = _lat_weighted_mean(du * lev_w, lat_weights)
-        loss = loss + config.w_bias_u * bias_u ** 2 / wind_norm
+        _add("bias_u", config.w_bias_u * bias_u ** 2 / wind_norm)
     if config.w_bias_v > 0.0:
         bias_v = _lat_weighted_mean(dv * lev_w, lat_weights)
-        loss = loss + config.w_bias_v * bias_v ** 2 / wind_norm
+        _add("bias_v", config.w_bias_v * bias_v ** 2 / wind_norm)
     if config.w_bias_ps > 0.0:
         bias_ps = _lat_weighted_mean(dp, lat_weights)
-        loss = loss + config.w_bias_ps * bias_ps ** 2 / ps_norm
+        _add("bias_ps", config.w_bias_ps * bias_ps ** 2 / ps_norm)
 
     # Grid-space CRPS, deterministic (M=1) limit of the almost-fair estimator
     # = |error|, as in ``neural_gcm_spectral``: normalised by scale (not
@@ -476,24 +486,37 @@ def carry_mse(
     else:
         T_s = wind_s = q_s = ps_s = 1.0
     if config.w_crps_T > 0.0:
-        loss = loss + config.w_crps_T * _lat_weighted_mean(jnp.abs(dT) * lev_w, lat_weights) / T_s
+        _add("crps_T", config.w_crps_T * _lat_weighted_mean(jnp.abs(dT) * lev_w, lat_weights) / T_s)
     if config.w_crps_u > 0.0:
-        loss = loss + config.w_crps_u * _lat_weighted_mean(jnp.abs(du) * lev_w, lat_weights) / wind_s
+        _add("crps_u", config.w_crps_u * _lat_weighted_mean(jnp.abs(du) * lev_w, lat_weights) / wind_s)
     if config.w_crps_v > 0.0:
-        loss = loss + config.w_crps_v * _lat_weighted_mean(jnp.abs(dv) * lev_w, lat_weights) / wind_s
+        _add("crps_v", config.w_crps_v * _lat_weighted_mean(jnp.abs(dv) * lev_w, lat_weights) / wind_s)
     if config.w_crps_q > 0.0:
-        loss = loss + config.w_crps_q * _lat_weighted_mean(jnp.abs(dq) * lev_w, lat_weights) / q_s
+        _add("crps_q", config.w_crps_q * _lat_weighted_mean(jnp.abs(dq) * lev_w, lat_weights) / q_s)
     if config.w_crps_ps > 0.0:
-        loss = loss + config.w_crps_ps * _lat_weighted_mean(jnp.abs(dp), lat_weights) / ps_s
+        _add("crps_ps", config.w_crps_ps * _lat_weighted_mean(jnp.abs(dp), lat_weights) / ps_s)
 
     # Radiation-flux supervision (TOA + surface) — shared helper, only
     # active when a ``w_flux_*`` / ``w_bias_flux_*`` weight is >0.
     if _any_flux_weight(config):
-        loss = loss + radiation_flux_loss(
+        _add("flux", radiation_flux_loss(
             pred_carry, target_carry, lat_weights=lat_weights, config=config,
-        )
+        ))
 
-    return loss
+    return loss, terms
+
+
+def carry_mse(
+    pred_carry,
+    target_carry,
+    sigma_full: jax.Array,
+    lat_weights: jax.Array | None = None,
+    config: LossConfig = LossConfig(),
+) -> jax.Array:
+    """Weighted MSE (+ bias, CRPS and flux terms) between two SegmentCarry
+    states; see :func:`carry_mse_terms` for the per-term breakdown."""
+    return carry_mse_terms(pred_carry, target_carry, sigma_full,
+                           lat_weights=lat_weights, config=config)[0]
 
 
 def carry_spectral_loss(
@@ -573,14 +596,33 @@ def combined_loss(
     if lat_weights is None and grid is not None:
         lat_weights = getattr(grid, "weights", None)
 
-    loss = carry_mse(
+    return combined_loss_terms(pred_carry, target_carry, sigma_full,
+                               grid=grid, lat_weights=lat_weights,
+                               config=config)[0]
+
+
+def combined_loss_terms(
+    pred_carry,
+    target_carry,
+    sigma_full: jax.Array,
+    grid=None,
+    lat_weights: jax.Array | None = None,
+    config: LossConfig = LossConfig(),
+) -> tuple[jax.Array, dict]:
+    """``combined_loss`` plus its weighted terms (``carry_mse_terms`` names and
+    ``spectral``), as ``(loss, terms)``; ``loss`` is the same value."""
+    if lat_weights is None and grid is not None:
+        lat_weights = getattr(grid, "weights", None)
+
+    loss, terms = carry_mse_terms(
         pred_carry, target_carry, sigma_full,
         lat_weights=lat_weights, config=config,
     )
 
     if config.spectral_weight > 0.0 and grid is not None:
-        loss = loss + config.spectral_weight * carry_spectral_loss(
+        terms["spectral"] = config.spectral_weight * carry_spectral_loss(
             pred_carry, target_carry, grid, config=config,
         )
+        loss = loss + terms["spectral"]
 
-    return loss
+    return loss, terms

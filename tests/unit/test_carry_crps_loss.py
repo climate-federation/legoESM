@@ -89,3 +89,21 @@ def test_wb_loss_config_refuses_negative_scale(field):
 
     with pytest.raises(ValueError, match="must be >= 0"):
         make_loss_config(None, {"loss": {field: -1.0}})
+
+
+def test_terms_sum_to_the_loss_and_name_every_active_term():
+    from legoesm.training.losses import carry_mse_terms, combined_loss_terms
+
+    cfg = LossConfig(w_crps_T=0.5, w_crps_ps=0.15, w_bias_u=1.0,
+                     level_weighting="pressure")
+    rng = np.random.default_rng(0)
+    pred = _Carry(*(jnp.asarray(rng.normal(size=(NLAT, NLON, NLEV)))
+                    for _ in range(4)), jnp.asarray(rng.normal(size=(NLAT, NLON))))
+    loss, terms = carry_mse_terms(pred, _carry(), SIGMA, config=cfg)
+    assert set(terms) == {"mse_T", "mse_u", "mse_v", "mse_q", "mse_ps",
+                          "bias_u", "crps_T", "crps_ps"}
+    assert float(loss) == float(carry_mse(pred, _carry(), SIGMA, config=cfg))
+    np.testing.assert_allclose(sum(float(v) for v in terms.values()),
+                               float(loss), rtol=1e-12)
+    c_loss, c_terms = combined_loss_terms(pred, _carry(), SIGMA, config=cfg)
+    assert float(c_loss) == float(loss) and set(c_terms) == set(terms)

@@ -1196,7 +1196,7 @@ def _main(argv=None):
              len(local))
 
     # --- data-parallel loss over Equinox array-leaves ---
-    from legoesm.training.losses import combined_loss
+    from legoesm.training.losses import combined_loss, combined_loss_terms
     from legoesm.training.scale_build import rollout_hours
     sigma_full = jnp.asarray(sigma.sigma_full)
 
@@ -1228,13 +1228,16 @@ def _main(argv=None):
                  "leaf reachable only before the window is frozen.",
                  roll_steps, cfg.adjoint_steps)
 
-    def _loss(trainable, sample):
+    def _loss(trainable, sample, terms=False):
         if _in_trace_rep is not None:
             trainable = _in_trace_rep(trainable)
         ic, target, forcing = sample
         # Only the spectral segment takes the kwarg (checked above).
         _kw = {"adjoint_steps": cfg.adjoint_steps} if cfg.adjoint_steps else {}
         pred = make_run_seg(trainable).raw(ic, roll_steps, forcing, **_kw)
+        if terms:
+            return combined_loss_terms(pred, target, sigma_full, grid=grid,
+                                       config=loss_config)
         return combined_loss(pred, target, sigma_full, grid=grid, config=loss_config)
 
     # Sized here rather than next to the optimizer because the resume check
@@ -1572,6 +1575,9 @@ def _main(argv=None):
     def loss_fn(arr_leaves, sample):
         return _loss(eqx.combine(arr_leaves, static), sample)
 
+    def loss_terms_fn(arr_leaves, sample):
+        return _loss(eqx.combine(arr_leaves, static), sample, terms=True)
+
     optimizer = create_optimizer(TrainingConfig(
         lr=cfg.lr, optimizer=cfg.optimizer,
         warmup_steps=warmup, total_steps=total_steps,
@@ -1633,8 +1639,10 @@ def _main(argv=None):
 
     # Sharded: the same placement as training, and one compiled forward (an
     # eager rollout of this deck does not fit on the mesh).
-    _val_loss = (loss_fn if column_mesh is None
-                 else eqx.filter_jit(loss_fn))
+    # Same forward as the training loss, returning each weighted term too, so
+    # the per-term curves add up to the validation loss.
+    _val_loss = (loss_terms_fn if column_mesh is None
+                 else eqx.filter_jit(loss_terms_fn))
     _val_place = _device_sample if column_mesh is None else place_sample
 
     def _validation_loss(cur_arr):
@@ -1643,26 +1651,35 @@ def _main(argv=None):
         # blocked in the allreduce for the rest of the walltime (GLM). The
         # per-rank sum and count are reduced together, so the mean is over the
         # samples that exist rather than over the ranks that have any.
+        # Returns (mean loss, {term: mean}).
         if not val_samples and nproc <= 1:
-            return None
-        total = 0.0
+            return None, {}
+        total, sums = 0.0, {}
         for _s in val_samples:
-            total += float(_val_loss(cur_arr, _val_place(_s)))
+            _l, _t = _val_loss(cur_arr, _val_place(_s))
+            total += float(_l)
+            for _k, _v in _t.items():
+                sums[_k] = sums.get(_k, 0.0) + float(_v)
         if nproc <= 1:
-            return total / len(val_samples)
+            return (total / len(val_samples),
+                    {k: v / len(val_samples) for k, v in sums.items()})
         from mpi4py import MPI
         g_total = float(MPI.COMM_WORLD.allreduce(total, op=MPI.SUM))
         g_count = int(MPI.COMM_WORLD.allreduce(len(val_samples), op=MPI.SUM))
         if g_count == 0:
-            return None
-        return g_total / g_count
+            return None, {}
+        # A rank with an empty shard has no keys of its own: take the union.
+        _names = sorted(set().union(*MPI.COMM_WORLD.allgather(sorted(sums))))
+        g_sums = {k: float(MPI.COMM_WORLD.allreduce(sums.get(k, 0.0), op=MPI.SUM))
+                  for k in _names}
+        return g_total / g_count, {k: v / g_count for k, v in g_sums.items()}
 
     _history_path = os.path.join(cfg.out_dir, "training_history.jsonl")
     _static_h = static if column_mesh is None else jax.device_get(static)
 
     def on_epoch(epoch, mean_loss, cur_arr, cur_opt_state):
         # Every rank runs the validation pass: it ends in a collective.
-        val_loss = _validation_loss(cur_arr)
+        val_loss, val_terms = _validation_loss(cur_arr)
         if column_mesh is not None:
             # Host copies: rank 0 alone must not launch computations on
             # arrays that span every process.
@@ -1678,6 +1695,7 @@ def _main(argv=None):
             # without loading a checkpoint and inverting the transforms.
             _row = {"epoch": int(epoch), "train_loss": float(mean_loss),
                     "val_loss": None if val_loss is None else float(val_loss),
+                    "val_terms": val_terms,
                     "params": _physical_params(eqx.combine(cur_arr, _static_h))}
             # A link killed after this row but before the manifest replays the
             # epoch, so the row is replaced rather than appended twice.
