@@ -393,11 +393,42 @@ def test_wrapper_hands_the_host_water_that_closes(fix, g):
     rg = _thermo(fix, "L").RG
     col = lambda a: np.sum(np.asarray(a) * dp, axis=1) / rg
     dry = col(out.dq_v_dt)
-    res = dry + col(out.dq_c_conv_dt) + col(out.dq_r_conv_dt)
+    res = (dry + col(out.dq_c_conv_dt) + col(out.dq_r_conv_dt)
+           + col(out.dq_r_detr_dt) + col(out.dq_s_detr_dt))
     if np.max(np.abs(dry)) == 0.0:
         assert np.max(np.abs(res)) == 0.0
         return
     assert np.max(np.abs(res)) / np.max(np.abs(dry)) <= _TOL
+
+
+@pytest.mark.parametrize("g", _GROUPS)
+def test_wrapper_surface_rain_is_cumastrn_surface_flux(fix, g, monkeypatch):
+    """S1'' (user 2026-10-28): the host's surface rain (the column sum of the
+    rain source) is CUMASTRN's surface rain + snow flux, and the detrained
+    rain and snow (PSNDE) go to the host's species instead."""
+    from legoesm.atmosphere.physics.convection import _ifs_faithful as F
+    from legoesm.atmosphere.physics.convection.config import BechtoldConfig
+
+    cap, orig = {}, F.cumastrn
+    def spy(*a, **k):
+        cap["o"] = orig(*a, **k)
+        return cap["o"]
+    monkeypatch.setattr(F, "cumastrn", spy)
+    out, _ = _wrapper_out(fix, BechtoldConfig(use_ifs_ascent=True, dx_m=_DX), g)
+    o = cap["o"]
+    dp = np.diff(fix[f"{g}_p_half"], axis=1)
+    col = lambda a: np.sum(np.asarray(a) * dp, axis=1) / _thermo(fix, "L").RG
+    sfc = np.asarray(o.pmflxr)[:, -1] + np.asarray(o.pmflxs)[:, -1]
+    psnde = np.asarray(o.psnde)
+    pairs = ((col(out.dq_r_conv_dt), sfc),
+             (col(out.dq_r_detr_dt), psnde[:, 0].sum(-1)),
+             (col(out.dq_s_detr_dt), psnde[:, 1].sum(-1)))
+    for got, want in pairs:
+        scale = np.max(np.abs(want))
+        if scale == 0.0:
+            assert np.max(np.abs(got)) == 0.0
+        else:
+            assert np.max(np.abs(got - want)) / scale <= _TOL
 
 
 def test_wrapper_publishes_the_surface_snow_flux(fix):

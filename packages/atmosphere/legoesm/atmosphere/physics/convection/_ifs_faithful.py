@@ -13,9 +13,11 @@ pipeline.  Everything that is NOT the oracle lives here, at the seam:
   PQSEN from SATUR (mixed phase); LDSHCV = .TRUE.;
 * outputs: convective T/q/u/v tendency = CUMASTRN's increment of
   PTENT/PTENQ/PTENU/PTENV; detrained condensate (liquid + ice, PLUDE) -> the
-  cloud-water source; precipitation generated in the column (ZDMFUP) plus the
-  detrained rain and snow (PSNDE) -> the rain source, so the host gets back
-  exactly the water CUDTDQN removes from the vapour; the surface snow flux
+  cloud-water source; the net precipitation flux divergence (ZDMFUP, whose
+  column sum is CUMASTRN's surface rain + snow) -> the surface precipitation;
+  the detrained rain and snow (PSNDE) -> the host's rain and snow species, as
+  CUDTDQN hands them to the grid-scale cloud scheme.  The host gets back
+  exactly the water CUDTDQN removes from the vapour.  The surface snow flux
   PMFLXS(KLEV+1) -> the frozen surface precipitation.
 
 Six run-set constants come from BechtoldConfig (``_TUNABLES``): epsilon_deep
@@ -143,7 +145,9 @@ def ifs_faithful_convection(T, q_v, p_full, p_half, u, v, dt, config, shf_w_m2,
         convective_mask=o.ldcum,
         du_dt_conv=o.ptenu,
         dv_dt_conv=o.ptenv,
-        dq_r_conv_dt=g_dp * (o.pdmfup + o.psnde[:, 0] + o.psnde[:, 1]),
+        dq_r_conv_dt=g_dp * o.pdmfup,
         precip_frozen_sfc=o.pmflxs[:, -1],
+        dq_r_detr_dt=g_dp * o.psnde[:, 0],
+        dq_s_detr_dt=g_dp * o.psnde[:, 1],
     )
     return out, o.pmfu

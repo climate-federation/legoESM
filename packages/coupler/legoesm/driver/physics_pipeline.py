@@ -1813,6 +1813,12 @@ class PhysicsPipeline:
             _bl_conv_q = dq_v_dt_conv + (
                 dq_c_dt_conv if _ctr.detrains_to_cloud
                 else jnp.zeros_like(dq_v_dt_conv))
+            # detrained precipitation handed to the rain/snow species stays
+            # in the column (IFS PSNDE)
+            for _detr in (getattr(conv_out, "dq_r_detr_dt", None),
+                          getattr(conv_out, "dq_s_detr_dt", None)):
+                if _detr is not None:
+                    _bl_conv_q = _bl_conv_q + ad.unflatten_3d(_detr)
             _bl_conv = ledger_entry(_bl_conv_q, dT_dt_conv, p_s, _bl_dsigma,
                                     area=self._ledger_area)
 
@@ -1867,6 +1873,18 @@ class PhysicsPipeline:
                     jnp.sum(dq_r_dt_conv * _dp_r / constants.g, axis=-1),
                     0.0)  # (..., n, n) kg/m2/s in-updraft rain to the surface
                 precip = precip + precip_conv_rain
+            # Detrained precipitation (IFS PSNDE) goes to the host's rain and
+            # snow species, as CUDTDQN hands it to the grid-scale cloud
+            # scheme; its condensation heat is already in dT_dt_conv.
+            _detr_r = getattr(conv_out, "dq_r_detr_dt", None)
+            _detr_s = getattr(conv_out, "dq_s_detr_dt", None)
+            if _detr_r is not None or _detr_s is not None:
+                if q_s is None:
+                    raise ValueError(
+                        "convection detrains rain and snow (IFS PSNDE) but "
+                        "this run carries no snow species")
+                dq_r_dt = dq_r_dt + ad.unflatten_3d(_detr_r)
+                dq_s_dt = dq_s_dt + ad.unflatten_3d(_detr_s)
         else:
             # Convective precip = the column-net VAPOUR sink of the convective
             # tendency (mass-EXACT for every adjustment scheme: water removed
