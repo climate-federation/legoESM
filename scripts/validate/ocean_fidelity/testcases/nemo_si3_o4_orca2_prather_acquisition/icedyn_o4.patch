@@ -1,6 +1,6 @@
 --- icedyn.F90
 +++ icedyn.F90
-@@ -29,6 +29,9 @@
+@@ -29,4 +29,7 @@
     USE lib_fortran    ! to use sign with key_nosignedzero
     USE lbclnk         ! lateral boundary conditions (or mpp links)
     USE timing         ! Timing
@@ -8,8 +8,6 @@
 +   USE o4_prather_writer, ONLY : o4_capture_stage
 +   ! O4_OBSERVER_END
     USE fldread        ! read input fields
- 
-    IMPLICIT NONE
 @@ -169,1 +172,4 @@
 +         ! O4_OBSERVER_BEGIN
 +         CALL o4_capture_stage( 7, kt )
