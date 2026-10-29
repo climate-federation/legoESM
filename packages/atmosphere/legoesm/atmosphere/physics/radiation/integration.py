@@ -803,10 +803,15 @@ def _column_constraint(column_mesh, ncol: int):
     """Sharding constraint for arrays whose leading axis is the ``ncol`` columns.
 
     Every other leaf (scalars, per-band tables, None) passes through unchanged.
+    The columns are split over ALL axes of ``column_mesh`` (a 1-D ``'col'``
+    mesh, or the dycore's own step mesh, e.g. the duo ``'face'`` mesh or its
+    3-D window mesh: one mesh per compiled physics step).
     """
     from jax.sharding import NamedSharding, PartitionSpec as P
 
-    n_dev = column_mesh.shape["col"]
+    names = column_mesh.axis_names
+    axis = names[0] if len(names) == 1 else tuple(names)
+    n_dev = column_mesh.size
     if ncol % n_dev:
         raise ValueError(
             f"column_mesh: solver column count {ncol} is not divisible by "
@@ -814,7 +819,7 @@ def _column_constraint(column_mesh, ncol: int):
 
     def cons(x):
         if getattr(x, "ndim", 0) >= 1 and x.shape[0] == ncol:
-            spec = P("col", *((None,) * (x.ndim - 1)))
+            spec = P(axis, *((None,) * (x.ndim - 1)))
             return jax.lax.with_sharding_constraint(
                 x, NamedSharding(column_mesh, spec))
         return x
@@ -1266,9 +1271,11 @@ def make_radiation_physics(
     column_mesh : jax.sharding.Mesh or None, optional
         Issue #273 follow-up.  When supplied, the per-column radiation
         kernel (which is naturally embarrassingly parallel across
-        columns) is sharded across the mesh's ``'col'`` axis.  Use
-        ``legoesm.parallel.column_shard.create_column_mesh`` to build
-        one.  Required invariant: ``ncol`` (the flattened horizontal
+        columns) is sharded across all of the mesh's axes.  A dycore that
+        runs on its own step mesh must pass that mesh (one mesh per
+        compiled step; see ``model_driver.radiation_column_mesh``);
+        otherwise ``legoesm.parallel.column_shard.create_column_mesh``
+        builds a 1-D ``'col'`` mesh.  Required invariant: ``ncol`` (the flattened horizontal
         column count = ``6 · n · n`` on the cubed sphere) must be
         divisible by the mesh's device count.  Default ``None``
         preserves single-mesh behavior bit-exact.
@@ -1439,10 +1446,10 @@ def _make_hydrostatic_radiation(
     Signature: (state, grid_or_mesh, sigma_coord) -> HydrostaticTendencies
 
     When ``column_mesh`` is provided (issue #273 follow-up), the
-    per-column radiation kernel runs sharded across the mesh's
-    ``'col'`` axis.  Caller is responsible for ensuring the flattened
-    column count ``ncol = ∏ shape_2d`` divides the mesh's device
-    count.
+    per-column radiation kernel runs sharded across all of the mesh's
+    axes (a 1-D ``'col'`` mesh, or the dycore's own step mesh).  Caller
+    is responsible for ensuring the flattened column count
+    ``ncol = ∏ shape_2d`` is divisible by the mesh's device count.
 
     When the attached cloud config enables ``convective_cloud``, the fn
     reads the LAGGED ``phys_state.conv_precip`` carry (published by the
@@ -1773,7 +1780,7 @@ def _make_hydrostatic_radiation(
         # backend kernels are purely functional over the column axis.
         if column_mesh is not None:
             from legoesm.parallel.column_shard import shard_columns
-            n_dev = column_mesh.shape["col"]
+            n_dev = column_mesh.size
             if ncol % n_dev != 0:
                 raise ValueError(
                     f"column_mesh requires ncol={ncol} divisible by "
