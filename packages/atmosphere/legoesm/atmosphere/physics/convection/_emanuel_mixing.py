@@ -101,7 +101,8 @@ Kept hard: the index picks above and their consequences -- ``CAPEM`` and
 ``BYP`` are gathered at the last level of positive running CAPE, so they
 jump when that level jumps (same class as ``INB``); and, as division guards
 on values that never select a branch on an atmospheric column,
-``MAX(CLW, 1e-8)`` in ``EP``, the non-negativity of the running ``M`` sum
+``MAX(CLW, 1e-8)`` in ``EP``, the ``1e-12`` floor on the smooth ``RH`` (an
+``RH**chi`` singularity guard), the non-negativity of the running ``M`` sum
 above a level (rounding only), and the ``DPINV`` and ``DTPBL`` denominator
 floors.
 
@@ -214,6 +215,8 @@ _CBMF_RELAX = 0.1
 _DELT0_S = 300.0
 # _oracle_qsat AD floor (pre-existing; Tetens pole near 29.65 K)
 _TETENS_MIN_VALID_K = 180.0
+# RH floor under the smooth RH = 1 guard (RH**chi singularity guard)
+_RH_MIN = 1.0e-12
 _EPMAX_DEFAULT = 0.999
 _STRICT_INDEX_SHARPNESS = 20.0
 
@@ -489,9 +492,12 @@ def emanuel_mixing_tendencies(
     if _hard(source_humidity_gate_sharpness):
         rh = jnp.where(q_nk > 0.0, q_nk / _at(qs, nk), 1.0)   # IFLAG-0: avoid 0**chi
     else:
-        # Softplus keeps RH > 0, so RH**chi and its derivative stay finite; the
-        # Q(NK) <= 0 column is rejected by the same field's CBMF weight.
-        rh = smooth_relu(q_nk, source_humidity_gate_sharpness) / _at(qs, nk)
+        # Softplus of Q(NK) (the Q(NK) <= 0 column is rejected by the same
+        # field's CBMF weight); the softplus underflows to 0 for Q(NK) below
+        # ~-1e-4 kg/kg, so RH is floored at 1e-12 (singularity guard: RH**chi,
+        # chi < 1, has an infinite derivative at 0).
+        rh = jnp.maximum(smooth_relu(q_nk, source_humidity_gate_sharpness) / _at(qs, nk),
+                         _RH_MIN)
     chi = T_nk / (_EMANUEL_CHI_A - _EMANUEL_CHI_B * rh - T_nk)
     plcl = _at(pf, nk) * rh ** chi
     # IFLAG 2 (l.395): PLCL < 200 or >= 2000 hPa, smoothed [1/Pa].

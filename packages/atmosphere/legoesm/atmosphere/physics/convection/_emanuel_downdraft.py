@@ -45,25 +45,27 @@ model level, ``i+1`` is ABOVE ``i``), exactly as the oracle indexes it and as
 backwards produces a plausible-looking wrong answer with every shape intact;
 ``tests/unit/test_emanuel_downdraft.py`` checks the orientation.
 
-FAITHFUL WHERE?  The arithmetic is line-by-line faithful.  TWO branches are
-deliberately NOT: the ``T(I) > 273`` phase switch (line 749) and the
-``EP(INB) < 1e-4`` whole-shaft skip (line 717) are replaced by sigmoids, so
-inside their transition intervals this produces numbers the Fortran does not.
-That is the price of a scheme that has to train, and it is bounded: both
-widths are arguments, and driving them to zero recovers the oracle's hard
-branches exactly, which is asserted by a test rather than argued.  Every other
-departure would be a defect.
+FAITHFUL WHERE?  The arithmetic is line-by-line faithful.  The branches are
+smoothed, deliberately: the ``T(I) > 273`` phase switch (line 749) and the
+``EP(INB) < 1e-4`` whole-shaft skip (line 717) by sigmoids whose widths are
+arguments, and the switches listed under RULE 5 below by sharpness
+arguments; inside their transition intervals this produces numbers the
+Fortran does not.  That is the price of a scheme that has to train, and it
+is bounded: driving every width to zero / sharpness to ``inf`` recovers the
+oracle's hard branches, which is asserted by a test rather than argued.  Any
+other departure would be a defect.
 
 RULE 5 (#2158).  The remaining switches on traced state are smooth too, each
 exact at ``math.inf`` of its sharpness: ``AFAC = MAX(AFAC, 0)`` (C1 positive
 part, ``evap_sharpness``); ``DHDP = MAX(DHDP, dhdp_min)`` (softplus,
-``dhdp_sharpness``); the ``MP(I) > MP(I+1)`` / ``MP(I+1) > 0`` QP branches
+``dhdp_sharpness``; KNOWN DIFFERENCE: a ``ln2/dhdp_sharpness`` = 0.07
+J/kg/hPa offset on every level at the default); ``MAX(MP_raw, 0)`` (C1
+positive part, ``mp_sharpness``); the ``MP(I) > MP(I+1)`` / ``MP(I+1) > 0`` QP branches
 (C1 strict indicators, exactly the oracle's fallback at equality,
 ``mp_sharpness``); ``QP = CLIP(QP, 0, QS(I-1))`` (bound-preserving C1 clip,
 ``condensate_sharpness``); the ``P > 0.949 P(1)`` taper band's value blend
 (``taper_band_sharpness``; ``JTT`` stays an index pick); ``AWAT``'s
-``MAX(0, .)``.  ``MAX(MP_raw, 0)`` is dropped: its argument is >= 0 by
-construction once ``AFAC`` >= 0 and ``DHDP`` >= ``dhdp_min``.  Kept hard,
+``MAX(0, .)``.  Kept hard,
 documented: the ``_safe_divide`` / ``_safe_sqrt`` singularity guards (0 value
 and 0 derivative where the divisor is <= 1e-12 or the radicand <= 1e-30).
 
@@ -417,9 +419,9 @@ def emanuel_downdraft(
         dhdp_raw = _safe_divide(h_i - h_below_i, dp_below_i, _DENOM_FLOOR)
         dhdp = (jnp.maximum(dhdp_raw, dhdp_min) if _hard(dhdp_sharpness)
                 else dhdp_min + smooth_relu(dhdp_raw - dhdp_min, dhdp_sharpness))
-        # Oracle MAX(MP_raw, 0) is the identity here (AFAC >= 0, DHDP > 0).
-        mp_raw = (_HPA_TO_PA * ginv * lv_i * sigd
-                  * _safe_divide(evap_i, dhdp, _DENOM_FLOOR))
+        mp_raw = positive_part_c1(
+            _HPA_TO_PA * ginv * lv_i * sigd
+            * _safe_divide(evap_i, dhdp, _DENOM_FLOOR), mp_sharpness)
         fac = _safe_divide(jnp.full_like(dph_below_i, inertia_scale_hPa),
                            dph_below_i, _DENOM_FLOOR)
         mp_i = jnp.where(surf_i, jnp.zeros_like(mp_raw),
