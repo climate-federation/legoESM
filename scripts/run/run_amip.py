@@ -1528,14 +1528,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "correction (openifs cumastrn.F90:780-833; land "
                              "deep convection peaks late afternoon). Default "
                              f"{_EXPERIMENT_DEFAULTS.bechtold_use_ifs_capdcycl}.")
-    parser.add_argument("--bechtold-use-ifs-ascent",
-                        dest="bechtold_use_ifs_ascent",
-                        action=argparse.BooleanOptionalAction,
-                        default=_EXPERIMENT_DEFAULTS.bechtold_use_ifs_ascent,
-                        help="Run the faithful OpenIFS convection chain "
-                             "(cubasen/cuascn/cumastrn/cudtdqn port) instead "
-                             "of the legacy Bechtold scheme. Default "
-                             f"{_EXPERIMENT_DEFAULTS.bechtold_use_ifs_ascent}.")
     parser.add_argument("--bechtold-ifs-shallow-nosupply",
                         dest="bechtold_ifs_shallow_nosupply",
                         choices=("zero", "first_guess"),
@@ -3224,7 +3216,6 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         bechtold_enable_cmt=args.bechtold_enable_cmt,
         bechtold_M_b_max=args.bechtold_M_b_max,
         bechtold_use_ifs_capdcycl=args.bechtold_use_ifs_capdcycl,
-        bechtold_use_ifs_ascent=args.bechtold_use_ifs_ascent,
         bechtold_ifs_shallow_nosupply=args.bechtold_ifs_shallow_nosupply,
         bechtold_use_ifs_land_rhebc=args.bechtold_use_ifs_land_rhebc,
         bechtold_use_ifs_snow_melt=args.bechtold_use_ifs_snow_melt,
