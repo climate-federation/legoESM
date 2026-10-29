@@ -211,12 +211,53 @@ def _score_month(
             "metrics": rows, "verdict": "PASS" if passed else "FAIL"}
 
 
+def _verify_envelope_admission(
+    envelope_report: dict[str, Any],
+    envelope_admission: dict[str, Any],
+) -> None:
+    """Bind the metric envelope to the admitted nonzero fp64 restart perturbation."""
+    require(envelope_admission.get("status") == "PASS_R345_S4_YEAR_SST_PLUS_ONE_ULP_ARM"
+            and envelope_admission.get("admitted") is True,
+            "envelope lacks a passed round-345 perturbed-restart admission")
+    perturbation = envelope_admission.get("restart_sst_perturbation", {})
+    require(
+        perturbation.get("status") == "PASS_R345_DAY1_RESTART_SST_PLUS_ONE_FP64_ULP"
+        and perturbation.get("variable") == "tn"
+        and perturbation.get("dtype") == "float64"
+        and perturbation.get("restart_kt") == 8
+        and perturbation.get("first_run_step") == 9
+        and perturbation.get("exact_ulp_distance") == 1
+        and int(perturbation.get("changed_values", 0)) > 0
+        and perturbation.get("changed_values") == perturbation.get("selected_values")
+        and perturbation.get("unselected_restart_values_and_metadata_bit_identical") is True,
+        "envelope admission is zero, non-perturbed, or not the Decision-188 fp64 restart pattern",
+    )
+    require(envelope_admission.get("binary_equal_arm_a") is True,
+            "envelope binary differs from admitted arm A")
+    identity = envelope_admission.get("arm_a_input_identity", {})
+    require(identity.get("forcing_and_damping_untouched") is True,
+            "envelope forcing or damping inputs are not proven equal to arm A")
+    if envelope_report.get("format") == "orca2-r342-s4-year-metrics-v2":
+        require(envelope_report.get("candidate_is_nemo_restart") is True,
+                "year envelope candidate must be a NEMO restart arm")
+        candidate_root = Path(str(envelope_report.get("candidate_root", ""))).resolve()
+        nemo_root = Path(str(envelope_report.get("nemo_root", ""))).resolve()
+        admitted_root = Path(str(envelope_admission.get("run_dir", ""))).resolve()
+        baseline_root = Path(str(identity.get("baseline_arm", ""))).resolve()
+        require(candidate_root == admitted_root and nemo_root == baseline_root,
+                "envelope report roots do not match its perturbed-arm admission")
+        require(candidate_root != nemo_root,
+                "envelope compares the baseline arm with itself")
+
+
 def evaluate_decision188(
     candidate_report: dict[str, Any],
     envelope_report: dict[str, Any],
+    envelope_admission: dict[str, Any],
 ) -> dict[str, Any]:
     """Apply the Decision-188 bars to matching candidate/envelope months."""
     _verify_bars_match_decision160_reporter()
+    _verify_envelope_admission(envelope_report, envelope_admission)
     if candidate_report.get("format") == "orca2-r342-s4-year-metrics-v2":
         candidate_nemo_root = candidate_report.get("nemo_root")
         envelope_nemo_root = envelope_report.get("nemo_root")
@@ -227,6 +268,7 @@ def evaluate_decision188(
     require(len(candidate_months) == len(envelope_months),
             "candidate and envelope reports have different evaluated-month counts")
     scored = []
+    nonzero_envelope_months = 0
     for candidate, envelope in zip(candidate_months, envelope_months, strict=True):
         require(candidate["label"] == envelope["label"],
                 f"month labels differ: {candidate['label']} != {envelope['label']}")
@@ -234,7 +276,15 @@ def evaluate_decision188(
                 f"{candidate['label']}: candidate and envelope day windows differ")
         require(candidate["saved_kts"] == envelope["saved_kts"],
                 f"{candidate['label']}: candidate and envelope saved steps differ")
+        envelope_ke = _finite(
+            envelope["metrics"]["KE"]["relative_rms_fraction"],
+            f"{envelope['label']} envelope KE relative RMS",
+        )
+        if envelope_ke > 0.0:
+            nonzero_envelope_months += 1
         scored.append(_score_month(candidate, envelope))
+    require(nonzero_envelope_months > 0,
+            "Decision-188 envelope is identically zero and cannot set a chaos bar")
     passed = all(month["verdict"] == "PASS" for month in scored)
     return {
         "format": "orca2-decision188-gate-v1",
@@ -244,11 +294,16 @@ def evaluate_decision188(
         "envelope_metric_format": envelope_report.get("format"),
         "months": scored,
         "months_evaluated": len(scored),
+        "nonzero_envelope_months": nonzero_envelope_months,
         "verdict": "PASS" if passed else "FAIL",
     }
 
 
-def minimal_year_report(*, sst: float, ke: float) -> dict[str, Any]:
+def minimal_year_report(
+    *, sst: float, ke: float,
+    nemo_root: str = "/synthetic/nemo-baseline",
+    candidate_root: str = "/synthetic/perturbed-nemo",
+) -> dict[str, Any]:
     metrics = {key: {"rms": 0.0} for key in FIXED_RMS_BARS}
     metrics["SST"]["rms"] = sst
     metrics.update({
@@ -259,7 +314,9 @@ def minimal_year_report(*, sst: float, ke: float) -> dict[str, Any]:
     return {
         "format": "orca2-r342-s4-year-metrics-v2",
         "bias_convention": "candidate - NEMO",
-        "nemo_root": "/synthetic/nemo-baseline",
+        "nemo_root": nemo_root,
+        "candidate_root": candidate_root,
+        "candidate_is_nemo_restart": True,
         "state_averaging_before_nonlinear_metrics": False,
         "months": [
             {
@@ -274,26 +331,72 @@ def minimal_year_report(*, sst: float, ke: float) -> dict[str, Any]:
     }
 
 
+def minimal_envelope_admission(*, changed_values: int = 4) -> dict[str, Any]:
+    return {
+        "status": "PASS_R345_S4_YEAR_SST_PLUS_ONE_ULP_ARM",
+        "admitted": True,
+        "run_dir": "/synthetic/perturbed-nemo",
+        "binary_equal_arm_a": True,
+        "arm_a_input_identity": {
+            "baseline_arm": "/synthetic/nemo-baseline",
+            "forcing_and_damping_untouched": True,
+        },
+        "restart_sst_perturbation": {
+            "status": "PASS_R345_DAY1_RESTART_SST_PLUS_ONE_FP64_ULP",
+            "variable": "tn",
+            "dtype": "float64",
+            "restart_kt": 8,
+            "first_run_step": 9,
+            "exact_ulp_distance": 1,
+            "selected_values": changed_values,
+            "changed_values": changed_values,
+            "unselected_restart_values_and_metadata_bit_identical": True,
+        },
+    }
+
+
 def run_plants() -> dict[str, Any]:
     """Run the three Decision-188 non-vacuity plants."""
-    envelope_zero = minimal_year_report(sst=0.0, ke=0.0)
-    at_bar = evaluate_decision188(minimal_year_report(sst=0.01, ke=0.01), envelope_zero)
+    admission = minimal_envelope_admission()
+    envelope_floor = minimal_year_report(sst=0.0, ke=0.001)
+    at_bar = evaluate_decision188(
+        minimal_year_report(sst=0.01, ke=0.01), envelope_floor, admission)
     over_bar = evaluate_decision188(
-        minimal_year_report(sst=math.nextafter(0.01, math.inf), ke=0.0), envelope_zero)
+        minimal_year_report(sst=math.nextafter(0.01, math.inf), ke=0.0),
+        envelope_floor, admission)
     inside_envelope = evaluate_decision188(
         minimal_year_report(sst=0.0, ke=0.02),
         minimal_year_report(sst=0.0, ke=0.007),
+        admission,
     )
     over_floor = evaluate_decision188(
-        minimal_year_report(sst=0.0, ke=0.011), envelope_zero)
+        minimal_year_report(sst=0.0, ke=0.011), envelope_floor, admission)
+    zero_caught = False
+    try:
+        evaluate_decision188(
+            minimal_year_report(sst=0.0, ke=0.0),
+            minimal_year_report(sst=0.0, ke=0.0), admission)
+    except GateError:
+        zero_caught = True
+    nonperturbed_caught = False
+    try:
+        evaluate_decision188(
+            minimal_year_report(sst=0.0, ke=0.0), envelope_floor,
+            minimal_envelope_admission(changed_values=0))
+    except GateError:
+        nonperturbed_caught = True
     require(at_bar["verdict"] == "PASS", "at-bar plant did not pass")
     require(over_bar["verdict"] == "FAIL", "over-bar plant did not fail")
     require(inside_envelope["verdict"] == "PASS", "inside-envelope KE plant did not pass")
     require(over_floor["verdict"] == "FAIL", "KE floor plant did not fail")
+    require(zero_caught, "zero-envelope plant did not refuse")
+    require(nonperturbed_caught, "non-perturbed-envelope plant did not refuse")
     return {
         "fixed_bar_plant": "PASS",
         "ke_inside_3x_envelope_plant": "PASS",
         "ke_floor_plant": "PASS",
+        "zero_envelope_refusal_plant": "PASS",
+        "nonperturbed_envelope_refusal_plant": "PASS",
     }
 
 
@@ -301,17 +404,20 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--candidate-metrics", type=Path)
     parser.add_argument("--envelope-metrics", type=Path)
+    parser.add_argument("--envelope-admission", type=Path)
     parser.add_argument("--output", type=Path)
     parser.add_argument("--self-test", action="store_true")
     args = parser.parse_args(argv)
     if args.self_test:
         print(json.dumps(run_plants(), indent=2, sort_keys=True))
         return 0
-    require(args.candidate_metrics is not None and args.envelope_metrics is not None,
-            "--candidate-metrics and --envelope-metrics are required")
+    require(args.candidate_metrics is not None and args.envelope_metrics is not None
+            and args.envelope_admission is not None,
+            "--candidate-metrics, --envelope-metrics, and --envelope-admission are required")
     candidate = json.loads(args.candidate_metrics.read_text(encoding="utf-8"))
     envelope = json.loads(args.envelope_metrics.read_text(encoding="utf-8"))
-    result = evaluate_decision188(candidate, envelope)
+    admission = json.loads(args.envelope_admission.read_text(encoding="utf-8"))
+    result = evaluate_decision188(candidate, envelope, admission)
     rendered = json.dumps(result, indent=2, sort_keys=True) + "\n"
     if args.output is not None:
         args.output.parent.mkdir(parents=True, exist_ok=True)

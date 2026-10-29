@@ -1,13 +1,19 @@
 # ORCA2 round 345 one-ULP envelope arm
 
-`run.sh` defaults to read-only preflight. The operator-only `--run` mode
-reuses the admitted round-342 observer-free K0 binary and runs one additional
-2,920-step year. It stages the round-342 inputs, replaces only the staged
-potential-temperature file by an audited regular copy, and advances every
-finite wet surface float32 value in all 12 records one ULP toward positive
-infinity.
+`run.sh` defaults to preflight. Operator-only `--run` copies admitted round-342
+arm A's day-1 (`kt = 8`) double-precision restart pair, advances only finite wet
+surface `tn` values by one float64 ULP toward positive infinity, then restarts
+the same binary at step 9 and continues through step 2920. The perturbed
+restart remains day 1 of the envelope.
 
-The generated `initial_sst_ulp_perturbation.json` records the resolved source,
-source/perturbed/domain SHA-256 digests, selected count, exact ULP distance,
-and the fact that NEMO reads this file for both cold-start T/S and the configured
-T/S damping target. No NEMO source or model option is changed.
+The cold-start, forcing, and damping inputs are unchanged and re-hashed against
+arm A. `restart_sst_ulp_perturbation.json` records both rank-file digests,
+variable, dtype, direction, and selected/changed counts; admission re-derives
+the pattern and proves every other restart value and all metadata are identical.
+
+Failed arms created by this invocation move to `refused/` with their builds
+retained. Existing arms never move. Re-admit a completed retained arm directly:
+
+```bash
+run.sh --admit-existing /absolute/path/to/refused/<retained-arm>
+```
