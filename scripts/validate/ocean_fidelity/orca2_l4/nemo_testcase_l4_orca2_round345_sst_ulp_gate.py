@@ -828,7 +828,6 @@ def write_stub_outputs(
     run_dir: Path,
     *,
     rank: int | None = None,
-    control: bool = False,
     plant_unproduced_file: bool = False,
     plant_missing_stop: bool = False,
     plant_short_timestep: int | None = None,
@@ -837,6 +836,11 @@ def write_stub_outputs(
     ranks = (0, 1) if rank is None else (rank,)
     require(all(local_rank in (0, 1) for local_rank in ranks),
             f"stub rank must be 0 or 1, got {rank}")
+    has_control_manifest = (run_dir / CONTROL_INPUT_MANIFEST).is_file()
+    has_perturbation_manifest = (run_dir / PERTURBATION_MANIFEST).is_file()
+    require(has_control_manifest != has_perturbation_manifest,
+            "stub run directory must identify exactly one restart arm")
+    control = has_control_manifest
     if control:
         verify_control_input_manifest(run_dir)
     else:
@@ -1002,6 +1006,10 @@ def run_preflight(
                 f"round345 stub pipeline failed:\n{result.stdout}\n{result.stderr}")
         control_arm = stub_root / CONTROL_ARM_NAME
         perturbed_arm = stub_root / PERTURBED_ARM_NAME
+        require(
+            (control_arm / "nemo").read_bytes() == (perturbed_arm / "nemo").read_bytes(),
+            "control and perturbed stub executables are not byte-identical",
+        )
         perturbation_audit = verify_perturbation_manifest(perturbed_arm)
         control_input_audit = verify_control_input_manifest(control_arm)
         continuation_audit = verify_restart_continuation_control(
@@ -1147,7 +1155,6 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--write-run-manifest", type=Path)
     parser.add_argument("--verify-perturbation", type=Path)
     parser.add_argument("--act-as-nemo-binary", action="store_true")
-    parser.add_argument("--stub-control", action="store_true")
     parser.add_argument("--plant-stub-unproduced-file", action="store_true")
     parser.add_argument("--plant-stub-missing-stop", action="store_true")
     parser.add_argument("--plant-stub-short-timestep", type=int)
@@ -1192,7 +1199,6 @@ def main(argv: list[str] | None = None) -> int:
         result = write_stub_outputs(
             Path.cwd(),
             rank=r342.stub_mpi_rank_from_env(),
-            control=args.stub_control,
             plant_unproduced_file=args.plant_stub_unproduced_file,
             plant_missing_stop=args.plant_stub_missing_stop,
             plant_short_timestep=args.plant_stub_short_timestep,

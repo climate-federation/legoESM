@@ -209,6 +209,32 @@ def _stub_rank_env(name: str, rank: int) -> dict[str, str]:
     return env
 
 
+def test_stub_pipeline_uses_byte_identical_executables(tmp_path: Path) -> None:
+    repo = Path(__file__).resolve().parents[3]
+    run_sh = repo / (
+        "scripts/validate/ocean_fidelity/orca2_l4/"
+        "nemo_testcase_l4_orca2_round345_sst_ulp_acquisition/run.sh"
+    )
+    stub_root = tmp_path / "stub_round345"
+    env = dict(
+        os.environ,
+        R345_CHECK_REPO_ROOT=str(repo),
+        R345_REQUIRED_RAM_GIB="0",
+        R345_REQUIRED_DISK_GIB="0",
+    )
+    result = subprocess.run(
+        ["bash", str(run_sh), "--stub-run-dir", str(stub_root), "--stub-steps", "16"],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=env,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    control = stub_root / ulp_gate.CONTROL_ARM_NAME / "nemo"
+    perturbed = stub_root / ulp_gate.PERTURBED_ARM_NAME / "nemo"
+    assert control.read_bytes() == perturbed.read_bytes()
+
+
 @pytest.mark.parametrize("control", [True, False], ids=["control", "perturbed"])
 def test_restart_stub_two_concurrent_rank_processes_preserve_input_and_ownership(
     tmp_path: Path,
@@ -221,12 +247,11 @@ def test_restart_stub_two_concurrent_rank_processes_preserve_input_and_ownership
     stage(run_dir, expected_steps=16)
 
     gate_path = Path(ulp_gate.__file__).resolve()
-    control_flag = " --stub-control" if control else ""
     stub = run_dir / "nemo"
     stub.write_text(
         "#!/usr/bin/env bash\n"
         f"exec {shlex.quote(sys.executable)} {shlex.quote(str(gate_path))} "
-        f"--act-as-nemo-binary{control_flag}\n",
+        "--act-as-nemo-binary\n",
         encoding="utf-8",
     )
     stub.chmod(0o755)
