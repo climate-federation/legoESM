@@ -124,9 +124,6 @@ _ZC_SR_MIN = 1.0e-13            # [kg/m^2] total surface precip below which sr =
 # 4656-4659; GFS_suite_interstitial_1.F90:43-44) ---
 _GFS_MAX_LON, _GFS_MAX_LAT = 5000, 2000     # finest grid: wk1 = 1
 _GFS_MIN_LON, _GFS_MIN_LAT = 192, 94        # coarsest grid: wk1 = 0
-# Smooth clamp of wk1 and of the liquid fraction to [0, 1]: sharpness 100
-# (width 0.01), the value the user approved for smooth clamps on 2026-10-21.
-_SMOOTH_CLAMP_SHARPNESS = 100.0
 # Liquid fraction of the total condensate when the lane carries q_i: a linear
 # ramp from 0 at -15 C to 1 at 0 C (Zhao-Carr's ice/water window, user
 # 2026-10-27), smoothly clamped.
@@ -134,29 +131,39 @@ _LIQ_RAMP_COLD_C = -15.0
 
 
 def gfs_area_weight(cell_area):
-    """GFS ``wk1 = max(0, min(1, (log(area) - dxmin) * dxinv))`` with the clip
-    as a smooth clamp: 1 on the finest grid GFS knows (5000 x 2000), 0 on the
-    coarsest (192 x 94)."""
+    """GFS ``wk1 = max(0, min(1, (log(area) - dxmin) * dxinv))``, the clip
+    exactly as GFS (cell area is grid geometry, not traced state: RULE 5 out of
+    scope; codex + GLM 2026-10-29): 1 on the finest grid GFS knows
+    (5000 x 2000) and finer, 0 on the coarsest (192 x 94) and coarser."""
     tem = 2.0 * jnp.pi ** 2 * constants.R_earth ** 2
     dxmax = jnp.log(tem / (_GFS_MAX_LON * _GFS_MAX_LAT))
     dxmin = jnp.log(tem / (_GFS_MIN_LON * _GFS_MIN_LAT))
     work1 = (jnp.log(cell_area) - dxmin) / (dxmax - dxmin)
-    return smooth_clamp(work1, 0.0, 1.0, _SMOOTH_CLAMP_SHARPNESS)
+    return jnp.clip(work1, 0.0, 1.0)
 
 
-def liquid_fraction(T):
+def liquid_fraction(T, sharpness):
     """Liquid share of the total condensate: 0 at -15 C, 1 at 0 C, linear
-    between, smoothly clamped (differentiable everywhere)."""
+    between, smoothly clamped with ``sharpness``
+    (``SundqvistConfig.liquid_fraction_clamp_sharpness``; ``math.inf`` is the
+    hard clip of the ramp, RULE 5).
+
+    KNOWN DIFFERENCE at the default sharpness 100 vs the hard clip (pinned per
+    temperature in test_sundqvist_area_blend_and_split.py): ln(2)/100 = 6.9e-3
+    in liquid fraction exactly at -15 C and 0 C, 4.1e-3 at -14.9 C and
+    -0.1 C, 0 at mid-ramp (-7.5 C) and beyond 5 C of either end (< 1e-16 at
+    -20 C).  Measured 2026-10-29 (#2251).
+    """
     x = (T - (constants.T_freeze + _LIQ_RAMP_COLD_C)) / -_LIQ_RAMP_COLD_C
-    return smooth_clamp(x, 0.0, 1.0, _SMOOTH_CLAMP_SHARPNESS)
+    return smooth_clamp(x, 0.0, 1.0, sharpness)
 
 
-def split_condensate(T, cwm, ice_share_in):
+def split_condensate(T, cwm, ice_share_in, sharpness):
     """Split precpd's total condensate ``cwm`` into ``(q_c, q_i)`` by
     :func:`liquid_fraction` of ``T`` and return the heating [K] of that
     re-partition: ``L_f/c_pd`` per kg of ice it adds over the input ice share,
     so ``c_pd T + L_v q_v - L_f q_i`` is unchanged by it (user 2026-10-27)."""
-    q_i = (1.0 - liquid_fraction(T)) * cwm
+    q_i = (1.0 - liquid_fraction(T, sharpness)) * cwm
     dT = constants.L_f / constants.c_pd * (q_i - ice_share_in * cwm)  # latent-ok: Zhao-Carr oracle constant (hfus)
     return cwm - q_i, q_i, dT
 
@@ -578,7 +585,8 @@ def sundqvist_microphysics(
         cwm_in = hydrometeors.q_c + hydrometeors.q_i + condensation * dt
         pos = cwm_in > 0.0
         share = jnp.where(pos, hydrometeors.q_i / jnp.where(pos, cwm_in, 1.0), 0.0)
-        q_c_new, q_i_new, dT_fus = split_condensate(T + dT_dt * dt, zc.cwm, share)
+        q_c_new, q_i_new, dT_fus = split_condensate(
+            T + dT_dt * dt, zc.cwm, share, config.liquid_fraction_clamp_sharpness)
         dT_dt = dT_dt + dT_fus / dt
         dq_c_dt = (q_c_new - hydrometeors.q_c) / dt
         dq_i_dt = (q_i_new - hydrometeors.q_i) / dt

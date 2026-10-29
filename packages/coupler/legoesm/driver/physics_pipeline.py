@@ -1753,6 +1753,7 @@ class PhysicsPipeline:
                     dz=dz_col,
                     dt=dt,
                     config=self.micro_config,
+                    carries_q_i=q_i is not None,
                     cell_area=self._sundqvist_kwargs(
                         ad, None, cell_area).get("cell_area"),
                 )

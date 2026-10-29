@@ -2,6 +2,8 @@
 precpd's condensate with the heat of fusion of the re-partition (R18)."""
 from __future__ import annotations
 
+import math
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -23,6 +25,7 @@ jax.config.update("jax_enable_x64", True)
 _TEM = 2.0 * np.pi ** 2 * constants.R_earth ** 2
 _FINE = _TEM / (5000 * 2000)        # GFS's finest grid: wk1 -> 1
 _COARSE = _TEM / (192 * 94)         # GFS's coarsest grid: wk1 -> 0
+_K = SundqvistConfig().liquid_fraction_clamp_sharpness   # default clamp sharpness
 
 
 def _cold_columns(ncol=2, nlev=10, q_i=0.0):
@@ -40,11 +43,13 @@ def _cold_columns(ncol=2, nlev=10, q_i=0.0):
     return T, q_v, hyd, p_full, p_half, rho, dz
 
 
-def test_area_weight_spans_gfs_grids_and_is_differentiable():
-    w = gfs_area_weight(jnp.array([_FINE, _COARSE, np.sqrt(_FINE * _COARSE)]))
-    assert 0.99 < float(w[0]) <= 1.0 and 0.0 <= float(w[1]) < 0.01
-    assert abs(float(w[2]) - 0.5) < 0.01
-    for a in (_FINE, _COARSE, 1.0e10, 4.0e10):
+def test_area_weight_is_the_gfs_clip_and_differentiable_inside():
+    """wk1 is GFS's hard clip (grid geometry, not traced state): exactly 1 at
+    and finer than the finest grid, 0 at and coarser than the coarsest."""
+    w = gfs_area_weight(jnp.array([_FINE / 2, _COARSE * 2, np.sqrt(_FINE * _COARSE)]))
+    assert float(w[0]) == 1.0 and float(w[1]) == 0.0
+    assert float(w[2]) == pytest.approx(0.5, abs=1e-12)
+    for a in (1.0e10, 4.0e10, 1.0e9):
         x = jnp.log(jnp.asarray(a))
         f = lambda la: gfs_area_weight(jnp.exp(la))   # noqa: E731
         check_grads(f, (x,), order=1, modes=("rev",))
@@ -53,15 +58,43 @@ def test_area_weight_spans_gfs_grids_and_is_differentiable():
 
 
 def test_liquid_fraction_ramp_is_differentiable_inside_and_at_the_ends():
+    """RULE 5 gradient test at the default sharpness, incl. the clamp ends."""
     T0 = constants.T_freeze
+    lf = lambda T: liquid_fraction(T, _K)   # noqa: E731
     for T in (T0 - 15.0, T0 - 7.5, T0, T0 - 3.0):
         x = jnp.asarray(T)
-        check_grads(liquid_fraction, (x,), order=1, modes=("rev",))
-        g = float(jax.grad(liquid_fraction)(x))
+        check_grads(lf, (x,), order=1, modes=("rev",))
+        g = float(jax.grad(lf)(x))
         assert np.isfinite(g) and g > 0.0, (T, g)
-    assert float(liquid_fraction(jnp.asarray(T0 - 7.5))) == pytest.approx(0.5, abs=1e-12)
-    assert float(liquid_fraction(jnp.asarray(T0 - 40.0))) < 1e-12
-    assert float(liquid_fraction(jnp.asarray(T0 + 20.0))) > 1.0 - 1e-12
+    assert float(lf(jnp.asarray(T0 - 7.5))) == pytest.approx(0.5, abs=1e-12)
+    assert float(lf(jnp.asarray(T0 - 40.0))) < 1e-12
+    assert float(lf(jnp.asarray(T0 + 20.0))) > 1.0 - 1e-12
+
+
+# RULE 5 cases: temperatures [C] across and beyond the -15..0 C ramp.
+_LF_CASES_C = (-20.0, -15.0, -14.9, -7.5, -0.1, 0.0, 5.0)
+# |smooth - hard| per case at the default sharpness 100, measured 2026-10-29
+# (#2251); a change to the smooth form or its default re-measures these.
+_LF_DEFAULT_GAP = [3.330669073875464e-17, 0.006931471805599453, 0.004143700868521745, 0.0, 0.004143700868521671, 0.006931471805599498, 0.0]
+
+
+def _hard_ramp(T_c):
+    return np.clip((np.asarray(T_c) + 15.0) / 15.0, 0.0, 1.0)
+
+
+def test_liquid_fraction_hard_limit_is_the_clipped_ramp():
+    """RULE 5: sharpness = inf reproduces the user's hard-clipped linear ramp."""
+    T = constants.T_freeze + jnp.asarray(_LF_CASES_C)
+    got = np.asarray(liquid_fraction(T, math.inf))
+    np.testing.assert_allclose(got, _hard_ramp(_LF_CASES_C), rtol=0.0, atol=1e-14)
+
+
+def test_liquid_fraction_default_gap_per_case():
+    """RULE 5: the default smooth clamp departs from the hard ramp by the
+    recorded per-case gap."""
+    T = constants.T_freeze + jnp.asarray(_LF_CASES_C)
+    gap = np.abs(np.asarray(liquid_fraction(T, _K)) - _hard_ramp(_LF_CASES_C))
+    np.testing.assert_allclose(gap, np.asarray(_LF_DEFAULT_GAP), rtol=1e-6, atol=1e-12)
 
 
 def test_sundqvist_refuses_a_missing_cell_area():
@@ -109,7 +142,7 @@ def test_split_condensate_conserves_mass_and_enthalpy_with_an_input_ice_share():
     T = jnp.linspace(250.0, 280.0, 7)
     cwm = jnp.full((7,), 2e-3)
     share = jnp.linspace(0.0, 1.0, 7)
-    q_c, q_i, dT = split_condensate(T, cwm, share)
+    q_c, q_i, dT = split_condensate(T, cwm, share, _K)
     np.testing.assert_allclose(np.asarray(q_c + q_i), np.asarray(cwm), rtol=1e-15)
     resid = constants.c_pd * dT - constants.L_f * (q_i - share * cwm)
     assert float(jnp.max(jnp.abs(resid))) <= 1e-12 * constants.L_f * 2e-3
@@ -139,8 +172,8 @@ def test_split_reads_the_end_of_step_temperature(monkeypatch):
     import legoesm.atmosphere.physics.microphysics.sundqvist as sq
     seen = {}
 
-    def spy(T_in, cwm, share):
-        out = split_condensate(T_in, cwm, share)
+    def spy(T_in, cwm, share, sharpness):
+        out = split_condensate(T_in, cwm, share, sharpness)
         seen["T"], seen["dT_fus"] = T_in, out[2]
         return out
 

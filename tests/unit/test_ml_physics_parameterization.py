@@ -379,6 +379,7 @@ def test_sundqvist_rain_survival_rebuild_matches_physical_scheme():
         dz=dz,
         dt=150.0,
         config=config,
+        carries_q_i=False,
         cell_area=1.0e10,
     )
     assert jnp.allclose(
@@ -421,6 +422,7 @@ def test_sundqvist_rain_survival_rebuild_gradient_finite_in_rain_free_column():
         out = apply_predicted_sundqvist_rain_survival_fraction(
             frac, T=T_, q_v=q_v, hydrometeors=hm, p_full=p_full,
             p_half=p_half, rho=rho, dz=dz, dt=150.0, config=SundqvistConfig(),
+            carries_q_i=False,
             cell_area=1.0e10)
         return jnp.sum(out.dT_dt) + jnp.sum(out.dq_v_dt) + jnp.sum(out.precipitation)
 
@@ -465,13 +467,15 @@ def test_sundqvist_rain_survival_rebuild_drains_incoming_qr():
 
     physical = sundqvist_microphysics(
         T=T, q_v=q_v, hydrometeors=hydrometeors,
-        p_full=p_full, p_half=p_half, rho=rho, dz=dz, dt=dt, config=config, cell_area=1.0e10)
+        p_full=p_full, p_half=p_half, rho=rho, dz=dz, dt=dt, config=config,
+        carries_q_i=False, cell_area=1.0e10)
     # Use survival-fraction = 1 (no rain re-evaporation) for the rebuild;
     # the q_r-drain channel is independent.
     rebuilt = apply_predicted_sundqvist_rain_survival_fraction(
         jnp.ones((1,)),
         T=T, q_v=q_v, hydrometeors=hydrometeors,
         p_full=p_full, p_half=p_half, rho=rho, dz=dz, dt=dt, config=config,
+        carries_q_i=False,
         cell_area=1.0e10,
     )
     # q_r drains in both paths.
@@ -487,3 +491,20 @@ def test_sundqvist_rain_survival_rebuild_drains_incoming_qr():
     assert expected_drain > 0.0
     assert float(physical.precipitation[0]) >= expected_drain - 1e-12
     assert float(rebuilt.precipitation[0]) >= expected_drain - 1e-12
+
+
+def test_sundqvist_rain_survival_rebuild_refuses_a_q_i_lane():
+    """The rebuild has no liquid/ice split, so a lane carrying q_i is refused
+    (the physical path splits there; codex + GLM 2026-10-29)."""
+    import pytest
+
+    n = 4
+    z = jnp.zeros((1, n))
+    hyd = HydrometeorState(q_c=z, q_r=z, q_i=z, q_s=z, q_g=z, N_c=z, N_r=z, N_i=z)
+    p_half = jnp.linspace(2e4, 1e5, n + 1)[None, :]
+    with pytest.raises(ValueError, match="carries q_i"):
+        apply_predicted_sundqvist_rain_survival_fraction(
+            jnp.ones((1,)), T=jnp.full((1, n), 270.0), q_v=jnp.full((1, n), 1e-3),
+            hydrometeors=hyd, p_full=0.5 * (p_half[:, 1:] + p_half[:, :-1]),
+            p_half=p_half, rho=jnp.ones((1, n)), dz=jnp.full((1, n), 100.0),
+            dt=150.0, config=SundqvistConfig(), carries_q_i=True, cell_area=1.0e10)

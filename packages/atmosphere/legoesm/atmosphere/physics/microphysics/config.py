@@ -340,6 +340,7 @@ __param_spec__ = {
         "scheme_key": "atm.micro.SundqvistConfig",
         "excluded": {
             "sigmoid_sharpness": "numerics: solver/smoothing/tolerance/iteration parameter",
+            "liquid_fraction_clamp_sharpness": "numerics: smoothing width of the liquid-fraction clamp (RULE 5), not a closure",
             # Zhao-Carr namelist coefficients added by the oracle port; whether
             # (and within which bounds) they are trainable is a pending user decision.
             "psautco_fine": "physics: Zhao-Carr namelist coefficient; trainability not yet decided",
@@ -526,6 +527,10 @@ class SundqvistConfig(NamedTuple):
     # wminco(1) liquid, wminco(2) ice; fv3atm GFS_typedefs.F90:2854 default).
     wminco_liquid: float = 1.0e-5
     wminco_ice: float = 1.0e-5
+    # Sharpness of the smooth clamp of the -15..0 C liquid-fraction ramp (the
+    # liquid/ice split, lanes carrying q_i); the hard clip is math.inf
+    # (RULE 5; codex + GLM 2026-10-29; 100 = the 2026-10-21 smooth-clamp value).
+    liquid_fraction_clamp_sharpness: float = 100.0
 
 
 class SeifertBehengConfig(NamedTuple):
