@@ -673,6 +673,29 @@ def _extract_tracer_columns(state, ncol, nlev, dtype=None,
     return q_v_col, q_cloud_col, q_ice_col, n_cloud_col, n_ice_col
 
 
+def _specified_droplet_number(radiation_config, micro_leaf, nc_from_aerosol):
+    """MG2's specified droplet number Nc_0 [1/m3] for the radiation when
+    ``CloudConfig.cam6_rad_specified_nc`` is on, else ``None``.  Refused
+    when the droplets are not specified (prognostic number, gSAM predict_Nc
+    or the aerosol-CCN field), where the radiation has its own number."""
+    cc = radiation_config.cloud_config
+    if radiation_config.cloud_scheme == "none" or not getattr(
+            cc, "cam6_rad_specified_nc", False):
+        return None
+    if micro_leaf is None or not hasattr(micro_leaf, "Nc_0"):
+        raise ValueError(
+            "CloudConfig.cam6_rad_specified_nc reads Nc_0 from the run's "
+            "Morrison/MG2 microphysics config; none was passed to the "
+            "radiation factory.")
+    if (getattr(micro_leaf, "prognostic_droplet_number", False)
+            or getattr(micro_leaf, "predict_Nc", False)
+            or getattr(micro_leaf, "nc_from_aerosol", False) or nc_from_aerosol):
+        raise ValueError(
+            "CloudConfig.cam6_rad_specified_nc is for SPECIFIED droplets; "
+            "this run predicts them or takes them from the aerosol field.")
+    return float(micro_leaf.Nc_0)
+
+
 def _extract_snow_columns(state, ncol, nlev):
     """Snow mass q_s [kg/kg] and number N_s [1/kg] columns for CAM6 snow in
     the radiation; raises when the state carries no two-moment snow."""
@@ -955,6 +978,7 @@ def _call_radiation_backend(
     mg2_ice_slope_log_width: float | None = None,
     q_snow: jnp.ndarray | None = None,
     n_snow: jnp.ndarray | None = None,
+    n_cloud_specified: float | None = None,
 ):
     """Call configured radiation backend with a unified integration interface.
 
@@ -1152,6 +1176,7 @@ def _call_radiation_backend(
             mg2_ice_slope_log_width=mg2_ice_slope_log_width,
             q_snow=q_snow,
             n_snow=n_snow,
+            n_cloud_specified=n_cloud_specified,
         )
         if cloud_config.cap_floor_on:
             from legoesm.atmosphere.physics.clouds.cloud_fraction import apply_cap_cloud_floor
@@ -1699,6 +1724,10 @@ def _make_hydrostatic_radiation(
     # CAM6 snow in the radiation reads the snow tracers (static gate).
     _cam6_snow_active = _cam6_cf_active and bool(getattr(
         radiation_config.cloud_config, "cam6_snow_in_rad", False))
+    # Specified droplets (MG2 nccons): the radiation takes the microphysics'
+    # own Nc_0 instead of the N_c tracer (CloudConfig.cam6_rad_specified_nc).
+    _nc_specified = _specified_droplet_number(
+        radiation_config, micro_leaf_config, nc_from_aerosol)
     # Clear-sky TOA diagnostic (#843 lean-lane port): a STATIC clouds-off
     # config variant for the second radiation pass.  ``cloud_scheme="none"``
     # skips the cloud diagnosis entirely (no cloud kwargs -> the solver's
@@ -2103,6 +2132,7 @@ def _make_hydrostatic_radiation(
             mg2_ice_slope_log_width=_mg2_ice_slope_w,
             q_snow=q_snow_col,
             n_snow=n_snow_col,
+            n_cloud_specified=_nc_specified,
         )
 
         # #843 lean-lane clear-sky second pass: SAME column state and

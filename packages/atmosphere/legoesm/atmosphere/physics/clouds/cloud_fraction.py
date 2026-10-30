@@ -1116,6 +1116,7 @@ def compute_cloud_properties(
     subcolumn_inhomogeneity: bool = False,
     q_snow: jnp.ndarray | None = None,
     n_snow: jnp.ndarray | None = None,
+    n_cloud_specified: float | None = None,
 ) -> CloudProperties:
     """Compute diagnostic cloud fraction and cloud optical properties.
 
@@ -1206,6 +1207,14 @@ def compute_cloud_properties(
             "radiation would run an unreferenced pairing. Use one of "
             f"{_IN_CLOUD_NUMBER_SCHEMES} or drop the aerosol CCN coupling "
             "(--aerosol-ccn).")
+    if config.cam6_rad_specified_nc and n_cloud_specified is None:
+        raise ValueError(
+            "CloudConfig.cam6_rad_specified_nc needs the microphysics' "
+            "specified droplet number (n_cloud_specified = MG2 ncnst, Nc_0).")
+    if n_cloud_specified is not None and not config.cam6_rad_specified_nc:
+        raise ValueError(
+            "n_cloud_specified given but CloudConfig.cam6_rad_specified_nc is "
+            "off; the radiation would read the tracer anyway.")
     q_sat = cover_saturation_specific_humidity(T, p_full, config)
     RH = q_v / jnp.maximum(q_sat, 1.0e-10)
 
@@ -1551,6 +1560,25 @@ def compute_cloud_properties(
     # broadcast form keeps the HLO graph small and avoids two
     # allocator round-trips per cloud_optics call.
     _scalar_dtype = T.dtype
+    _cam6_rel_liq = n_cloud_in_cloud
+    if config.cam6_rad_specified_nc:
+        if config.scheme != "cam6_clubb":
+            raise ValueError(
+                "CloudConfig.cam6_rad_specified_nc needs scheme 'cam6_clubb' "
+                f"(the CAM6 REL path over ast); got {config.scheme!r}.")
+        # CAM6 nccons: the number MG2 leaves in the state, ncnst/rho * lcldm
+        # (micro_mg2_0.F90:2824, lcldm = max(alst, mincld) :878), taken in
+        # cloud over max(ast, mincld) (micro_mg_cam.F90:2539).  rho is MG2's
+        # dry p/(R T).  Handed to the REL branch below as a per-volume number
+        # at the moist density, the convention that branch converts from.
+        from legoesm.atmosphere.physics._shared import compute_rho
+        from legoesm.atmosphere.physics.microphysics._warm_rain import MG2_MINCLD
+        _rho_d = compute_rho(jnp.maximum(T, 1.0), p_full)
+        _ncic_kg = (n_cloud_specified / _rho_d
+                    * jnp.maximum(_alst_cam6, MG2_MINCLD)
+                    / jnp.maximum(_ast_cam6, MG2_MINCLD))
+        n_cloud = _ncic_kg * compute_rho(jnp.maximum(T, 1.0), p_full, q_v)
+        _cam6_rel_liq = True
     if n_cloud is not None:
         # RAD-1-liq: SAM+Morrison M2005 cloud-water effective RADIUS from the
         # gamma PSD, ``reffc = (PGAM+3)/(2·LAMC)`` (module_mp_graupel.f90:495).
@@ -1594,7 +1622,7 @@ def compute_cloud_properties(
         # r_eff — by ~(1+0.61 q_v)^(1/3) systematically (codex P2).
         from legoesm.atmosphere.physics._shared import compute_rho
         rho_air = compute_rho(jnp.maximum(T, 1.0), p_full, q_v)
-        if n_cloud_in_cloud and _ast_cam6 is not None:
+        if _cam6_rel_liq and _ast_cam6 is not None:
             # CAM6 REL (micro_mg_cam.F90:2277, 2296, 2534-2554): in-cloud
             # water icwmrst = min(q_c/max(ast, mincld), 5 g/kg) (ast, not the
             # radiative cover that also holds deepcu), paired with the

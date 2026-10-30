@@ -436,6 +436,16 @@ class CloudConfig(NamedTuple):
     # mitchell_ice_optics.ICEOPTICS_SHA256), given by path.
     cam6_snow_in_rad: bool = False
     cam6_snow_optics_file: str = ""
+    # Radiation droplet number under SPECIFIED droplets (MG2 nccons, legoESM
+    # prognostic_droplet_number False).  False (default) = the radiation
+    # reads the N_c tracer, as before; that tracer still receives ZM
+    # detrainment while nothing removes it.  True = the radiation uses MG2's
+    # own specified number, as CAM6 does with micro_mg_nccons: MG2 resets the
+    # grid number to ncnst/rho * lcldm (micro_mg2_0.F90:2818-2824) and the
+    # radiation takes it in cloud over ast (micro_mg_cam.F90:2539-2554), so
+    # REL sees ncnst/rho * max(alst, mincld)/max(ast, mincld) per kg.
+    # Scheme "cam6_clubb" only; ncnst is the microphysics Nc_0.
+    cam6_rad_specified_nc: bool = False
 
 
 def build_cloud_config(
@@ -475,6 +485,7 @@ def build_cloud_config(
     cam6_conv_water_frac_limit: float | None = None,
     cam6_snow_in_rad: bool | None = None,
     cam6_snow_optics_file: str | None = None,
+    cam6_rad_specified_nc: bool | None = None,
 ) -> "CloudConfig":
     """Assemble a ``CloudConfig`` from the ``ExperimentConfig``-level cloud
     fields (``cloud_scheme`` + the optional ``cloud_rh_crit`` /
@@ -532,7 +543,8 @@ def build_cloud_config(
                         ("cam6_conv_water_in_rad", cam6_conv_water_in_rad),
                         ("cam6_conv_water_frac_limit", cam6_conv_water_frac_limit),
                         ("cam6_snow_in_rad", cam6_snow_in_rad),
-                        ("cam6_snow_optics_file", cam6_snow_optics_file)):
+                        ("cam6_snow_optics_file", cam6_snow_optics_file),
+                        ("cam6_rad_specified_nc", cam6_rad_specified_nc)):
         if _val is not None:
             overrides[_name] = _val
     for _name, _val in (("cap_floor_on", cap_floor_on), ("cap_floor_lat_deg", cap_floor_lat_deg),

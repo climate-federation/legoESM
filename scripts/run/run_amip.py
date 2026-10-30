@@ -1456,6 +1456,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         help="path of CESM inputdata "
                              "atm/cam/physprops/iceoptics_c080917.nc (Mitchell "
                              "table, sha256 checked) for --cloud-cam6-snow-in-rad")
+    parser.add_argument("--cloud-cam6-rad-specified-nc",
+                        dest="cloud_cam6_rad_specified_nc",
+                        action=argparse.BooleanOptionalAction, default=False,
+                        help="With specified droplets (Morrison/MG2, no "
+                             "prognostic number) the radiation uses MG2's "
+                             "Nc_0 in cloud, as CAM6 micro_mg_nccons, not the "
+                             "N_c tracer. Default off.")
     parser.add_argument("--cloud-cover-condensate-q-ref",
                         dest="cloud_cover_condensate_q_ref", type=float,
                         default=None,
@@ -3295,6 +3302,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         cloud_cam6_conv_water_frac_limit=args.cloud_cam6_conv_water_frac_limit,
         cloud_cam6_snow_in_rad=args.cloud_cam6_snow_in_rad,
         cloud_cam6_snow_optics_file=args.cloud_cam6_snow_optics_file,
+        cloud_cam6_rad_specified_nc=args.cloud_cam6_rad_specified_nc,
         cloud_cap_floor_on=args.cloud_cap_floor_on,
         cloud_cap_floor_lat_deg=args.cloud_cap_floor_lat_deg,
         cloud_cap_floor_p_max_pa=args.cloud_cap_floor_p_max_pa,
