@@ -2724,6 +2724,9 @@ class SpectralPrimitiveEquationModel:
 
     def _integrate_on_cpu(self, state, n_steps, dt, save_every, physics_fn=None):
         """Batch integration on CPU: transfer once, not per step."""
+        # This loop does not integrate the surface precip (#2277): publish
+        # none rather than a value left over from an earlier step().
+        self._sfc_precip = None
         # The batch loop drives the generic SSP/SI ``_step_on_cpu`` only;
         # it has no two-time-level leapfrog state machine (``_state_prev``,
         # RA filter, Euler startup).  Silently stepping a leapfrog config

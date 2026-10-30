@@ -1691,7 +1691,10 @@ def _make_spectral_pe_combined(
             for fn, accepts_ps, field_name in fns:
                 _fwd = ({"forcing": forcing}
                         if getattr(fn, "_wants_forcing", False) else {})
-                _emits = getattr(fn, "_emits_sfc_precip", False)
+                # only when the caller asked: the default call keeps every
+                # module's own default (and its checks) unchanged
+                _emits = (return_sfc_precip
+                          and getattr(fn, "_emits_sfc_precip", False))
                 if _emits:
                     _fwd = {**_fwd, "return_sfc_precip": True}
                 if accepts_ps:

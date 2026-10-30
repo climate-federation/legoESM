@@ -344,3 +344,37 @@ def test_leapfrog_publishes_the_lagged_physics_precip(grid, sigma_coord):
                                    rtol=1e-13, atol=0.0)
         if k > 0:
             assert abs(expect - cur) > 1e-6 * cur    # lag is observable
+
+
+def test_combined_default_call_keeps_module_defaults(grid, sigma_coord):
+    """Without ``return_sfc_precip`` the combined physics does not ask its
+    modules for precip, so the microphysics species check stays off: a
+    q_v-only state runs as before (codex review 2026-10-31)."""
+    state = _moist_state(grid, sigma_coord, 1.10, 0.5)
+    state = state._replace(tracers={"q_v": state.tracers["q_v"]})
+    pc = PhysicsConfig(radiation=RadiationConfig(scheme="none"),
+                       microphysics=MicrophysicsConfig(scheme="kessler"))
+    fn = make_physics(pc, model_type="spectral_pe", dt=DT,
+                      surface_bulk_coeffs=None)
+    out = fn(state, grid, sigma_coord)
+    assert len(out) == 2
+    with pytest.raises(ValueError, match="q_c"):
+        fn(state, grid, sigma_coord, return_sfc_precip=True)
+
+
+def test_cpu_batch_integrate_publishes_none(grid, sigma_coord):
+    """The CPU batch loop does not integrate the precip: no stale value from
+    an earlier step() survives it (codex review 2026-10-31)."""
+    model = SpectralPrimitiveEquationModel(
+        grid, sigma_coord, SpectralPEConfig(time_integrator="ssp_rk54"))
+    state = isothermal_rest_state_spectral(grid, sigma_coord,
+                                           perturbation_amplitude=0.0)
+    P = jnp.full((grid.n_lat, grid.n_lon), 1e-5)
+    fn = _constant_precip_physics(P, P)
+    model.step(state, DT, physics_fn=fn)
+    assert model._sfc_precip is not None
+    cpu = jax.devices("cpu")[0]
+    model._use_cpu_for_spectral = True
+    model._cpu_device = model._default_device = cpu
+    model.integrate(state, DT, DT, physics_fn=fn)
+    assert model._sfc_precip is None

@@ -17115,10 +17115,12 @@ class ModelDriver:
                     if _full_physics:
                         if not _sp_seg["ok"] or _sp_seg["p"] is None:
                             raise RuntimeError(
-                                "coupled spectral lane: the step published no "
-                                "surface precipitation (the semi-implicit RK "
-                                "path cannot integrate it); run the driver's "
-                                "explicit ssp_rk54 or leapfrog_si integrator.")
+                                "coupled spectral lane: a step since the last "
+                                "coupling boundary published no surface "
+                                "precipitation (model._sfc_precip is None: the "
+                                "step path does not integrate it, e.g. the "
+                                "semi-implicit RK); run the driver's explicit "
+                                "ssp_rk54 or leapfrog_si integrator.")
                         _seg_s = _sp_seg["n"] * DT
                         self._carry_aux["seg_precip"] = (
                             _sp_seg["p"] / _seg_s).reshape(shape_2d)
