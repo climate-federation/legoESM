@@ -15,6 +15,8 @@ Usage
     JAX_ENABLE_X64=1 python scripts/plot_microphysics_comparison.py
 """
 
+import functools
+
 import jax.numpy as jnp
 import matplotlib
 matplotlib.use("Agg")
@@ -25,6 +27,7 @@ import numpy as np
 from legoesm import constants
 from legoesm.atmosphere.physics.microphysics.kessler import kessler_microphysics
 from legoesm.atmosphere.physics.microphysics.sundqvist import sundqvist_microphysics
+from legoesm.atmosphere.idealized.rcemip_initial_conditions import RCE_CELL_AREA_M2
 from legoesm.atmosphere.physics.microphysics.seifert_beheng import seifert_beheng_microphysics
 from legoesm.atmosphere.physics.microphysics.morrison import morrison_microphysics
 from legoesm.atmosphere.physics.microphysics.thompson import thompson_microphysics
@@ -43,7 +46,8 @@ from legoesm.thermo import saturation_mixing_ratio
 
 SCHEMES = [
     ("Kessler",        kessler_microphysics,       KesslerConfig(),       "#888888", "-",  1.2),
-    ("Sundqvist",      sundqvist_microphysics,      SundqvistConfig(),     "#f4a261", "--", 1.2),
+    ("Sundqvist",      functools.partial(sundqvist_microphysics, cell_area=RCE_CELL_AREA_M2),
+                       SundqvistConfig(),     "#f4a261", "--", 1.2),
     ("Seifert-Beheng", seifert_beheng_microphysics, SeifertBehengConfig(), "#00aaaa", "-",  1.2),
     # Morrison pinned kk2000: an unset law resolves to kk2000_cam6 under mg.
     ("Morrison",       morrison_microphysics,       MorrisonConfig(warm_rain_scheme="kk2000"), "#2166ac", "-",  2.0),

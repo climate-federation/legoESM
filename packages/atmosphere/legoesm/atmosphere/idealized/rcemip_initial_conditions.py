@@ -78,6 +78,13 @@ WING_Z_Q1 = 4_000.0         # m, q_v lower-troposphere e-folding scale
 WING_Z_Q2 = 7_500.0         # m, q_v upper-troposphere Gaussian scale
 WING_Q_T = 1.0e-11          # kg/kg, stratospheric humidity floor
 WING_P_SFC = 101_480.0      # Pa (1014.8 hPa per Wing Tab A1)
+# --- the GCM cell a single RCE column stands for (user 2026-10-27) ---
+# The production MPAS mean cell area: 4 pi R^2 over the 40962 cells of
+# amip_production (resolution 6, ~112 km).  Area-aware column schemes (the
+# Sundqvist GFS area blend) read it; the column itself has no horizontal extent.
+RCE_PRODUCTION_MPAS_N_CELLS = 40962
+RCE_CELL_AREA_M2 = (4.0 * jnp.pi * constants.R_earth ** 2
+                    / RCE_PRODUCTION_MPAS_N_CELLS)
 # --- ALTERNATE RCE300 calibration, measured against the gSAM sounding --------
 # NOT the module default.  These are the same three free constants fitted to
 # gSAM's own RCEMIP1 sounding instead of taken from the published protocol.

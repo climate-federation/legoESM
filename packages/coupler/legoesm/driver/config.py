@@ -638,6 +638,16 @@ ZM_SCALAR_FIELDS = {
     "zm_tau": "tau",
     "zm_capelmt": "capelmt",
 }
+# Flat ExperimentConfig scalar -> ZhangMcFarlaneConfig smoothing width of the
+# CAM6 detrainment booking (zhang_mcfarlane.cam6_detrain_condensate, RULE 5).
+# Excluded from __param_spec__ (tier 0, no --params route); the one legal range
+# is zhang_mcfarlane.validate_detrain_widths.  Read only by the MPAS macmic
+# loop with ZM + CLUBB (combined.py ``_defer_dlf``), so validate_strict refuses
+# them elsewhere.  None = keep the scheme's own default.
+ZM_WIDTH_FIELDS = {
+    "zm_detrain_phase_width_K": "detrain_phase_width_K",
+    "zm_detrain_number_width_kgkg_s": "detrain_number_width_kgkg_s",
+}
 CLUBB_SCALAR_FIELDS = {
     "clubb_c14": "C14",
     "clubb_c8": "C8",
@@ -1544,7 +1554,7 @@ class ExperimentConfig(NamedTuple):
     sbm_tau_c: float = 7200.0
     sbm_RH_ref: float = 0.7
     sbm_cape_threshold: float = 70.0
-    sundqvist_auto_rate: float = 1e-3      # Sundqvist autoconversion rate [1/s]
+    sundqvist_auto_rate: float = 1.5e-4    # Sundqvist autoconversion rate [1/s] (GFS prautco)
     # Convection / microphysics / turbulence / GWD scheme knobs exposed for
     # calibration (AIMIP commit 0c747d4).  These mirror the scheme-config
     # defaults; the calibration threads them to the schemes as a
@@ -2134,6 +2144,10 @@ class ExperimentConfig(NamedTuple):
     # sharpness=1/width).  0 = the hard clip (pre-#2106 behaviour).
     ice_skin_melt_cap_width_K: float = _ICE_SFC_DEFAULTS[
         "ice_skin_melt_cap_width_K"]
+    # ZM detrainment smoothing widths (ZM_WIDTH_FIELDS).  None = the scheme
+    # default; the production deck names both.
+    zm_detrain_phase_width_K: float | None = None
+    zm_detrain_number_width_kgkg_s: float | None = None
 
     def _liquid_partition_resolved(self) -> bool:
         """Is CLUBB's cloud-liquid exchange selected, by ANY route?
@@ -3065,6 +3079,34 @@ class ExperimentConfig(NamedTuple):
                 if not _ok:
                     errors.append(f"{_f} must be a number in [{_lo}, {_hi}] "
                                   f"(the scheme's __param_spec__), got {_v!r}")
+        _zw = {f: getattr(self, f) for f in ZM_WIDTH_FIELDS
+               if getattr(self, f) is not None}
+        if _zw:
+            _nmm_w = self.cld_macmic_num_steps
+            if not (self.convection == "zhang_mcfarlane"
+                    and self.turbulence == "clubb"
+                    and isinstance(_nmm_w, int) and _nmm_w >= 2):
+                errors.append(
+                    f"{sorted(_zw)} are read only by the ZM detrainment booking "
+                    "of the MPAS macro/micro sub-cycle (convection="
+                    "'zhang_mcfarlane', turbulence='clubb', "
+                    "cld_macmic_num_steps>=2); got convection="
+                    f"{self.convection!r}, turbulence={self.turbulence!r}, "
+                    f"cld_macmic_num_steps={_nmm_w!r}, where they would be "
+                    "silently inert")
+            from legoesm.atmosphere.physics.convection.config import (
+                ZhangMcFarlaneConfig as _ZMC,
+            )
+            from legoesm.atmosphere.physics.convection.zhang_mcfarlane import (
+                validate_detrain_widths,
+            )
+            _zmd = _ZMC()
+            try:
+                validate_detrain_widths(*(
+                    _zw.get(f, getattr(_zmd, leaf))
+                    for f, leaf in ZM_WIDTH_FIELDS.items()))
+            except (TypeError, ValueError) as exc:
+                errors.append(f"{sorted(_zw)}: {exc}")
         if (self.clubb_trop_cloud_top_press is not None
                 and self.turbulence != "clubb"):
             errors.append(
@@ -5054,7 +5096,7 @@ class ExperimentConfig(NamedTuple):
             lw_diff_factor=getattr(amip_cfg, 'lw_diff_factor', 1.66),
             sw_tau_0=getattr(amip_cfg, 'sw_tau_0', 0.22),
             sw_exponent=getattr(amip_cfg, 'sw_exponent', 2.0),
-            sundqvist_auto_rate=getattr(amip_cfg, 'sundqvist_auto_rate', 1e-3),
+            sundqvist_auto_rate=getattr(amip_cfg, 'sundqvist_auto_rate', 1.5e-4),
             cloud_rh_crit=getattr(amip_cfg, 'cloud_rh_crit', 0.7),
             louis_l_mix_max=getattr(amip_cfg, 'louis_l_mix_max', 100.0),
             louis_Ri_crit=getattr(amip_cfg, 'louis_Ri_crit', 0.25),
@@ -5251,7 +5293,7 @@ class ExperimentConfig(NamedTuple):
             lw_diff_factor=getattr(self, 'lw_diff_factor', 1.66),
             sw_tau_0=getattr(self, 'sw_tau_0', 0.22),
             sw_exponent=getattr(self, 'sw_exponent', 2.0),
-            sundqvist_auto_rate=getattr(self, 'sundqvist_auto_rate', 1e-3),
+            sundqvist_auto_rate=getattr(self, 'sundqvist_auto_rate', 1.5e-4),
             cloud_rh_crit=getattr(self, 'cloud_rh_crit', 0.7),
             louis_l_mix_max=getattr(self, 'louis_l_mix_max', 100.0),
             louis_Ri_crit=getattr(self, 'louis_Ri_crit', 0.25),

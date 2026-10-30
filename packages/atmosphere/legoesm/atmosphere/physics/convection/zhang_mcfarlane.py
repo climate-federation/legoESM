@@ -65,7 +65,7 @@ from legoesm.core.smooth import smooth_clamp, smooth_relu
 
 
 __all__ = ("CONVTRAN1_TRACERS", "cam6_detrain_condensate",
-           "zhang_mcfarlane_convection")
+           "validate_detrain_widths", "zhang_mcfarlane_convection")
 
 # CAM6 constituents with ``is_convtran1`` (micro_mg_cam.F90:416-435, MG2) that
 # zm_conv_intr.F90:829-846 transports with ``convtran``, mapped to legoESM
@@ -288,6 +288,28 @@ def zhang_mcfarlane_convection(
     return out, conv_prog_profile_new
 
 
+def validate_detrain_widths(w_T, w_n) -> None:
+    """The one legal range of the two detrainment smoothing widths: 0 (CAM's
+    hard switch) or finite in [sqrt(t), 1/sqrt(t)] with t = finfo(float32).tiny
+    (~[1.08e-19, 9.22e18]).  Shared by :func:`cam6_detrain_condensate` and
+    ``ExperimentConfig.validate_strict``.  Outside it the ramp sharpness
+    ``30 / w_T`` and the quotient ``dlf / w_n`` leave the normal float32 range
+    (measured: fp32 outputs non-finite at w_T = 1.2e-38 and w_n = 1e-100, fp64
+    NaN at w_n = 1e-320); the run's dtype is unknown here, so the float32 bound
+    covers both.  It is a numerics bound only, not a physical range.  Booleans
+    are refused (a YAML ``false`` would otherwise read as the hard switch)."""
+    lo = math.sqrt(float(jnp.finfo(jnp.float32).tiny))
+    hi = 1.0 / lo
+    if not all(not isinstance(w, bool)
+               and (w == 0 or (math.isfinite(w) and lo <= w <= hi))
+               for w in (w_T, w_n)):
+        raise ValueError(
+            "ZhangMcFarlaneConfig detrain_phase_width_K / "
+            "detrain_number_width_kgkg_s must be finite and >= 0, and either 0 "
+            f"(CAM's hard switch) or in [{lo:.3e}, {hi:.3e}]; got {w_T!r}, "
+            f"{w_n!r}.")
+
+
 def cam6_detrain_condensate(T: jax.Array, dlf: jax.Array,
                             config: ZhangMcFarlaneConfig):
     """CAM6 detrainment of ZM condensate, clubb_intr.F90:2345-2376.
@@ -327,11 +349,7 @@ def cam6_detrain_condensate(T: jax.Array, dlf: jax.Array,
     """
     w_T = config.detrain_phase_width_K
     w_n = config.detrain_number_width_kgkg_s
-    if w_T < 0 or w_n < 0:
-        raise ValueError(
-            "ZhangMcFarlaneConfig detrain_phase_width_K / "
-            "detrain_number_width_kgkg_s must be >= 0 (0 = CAM's hard switch); "
-            f"got {w_T!r}, {w_n!r}.")
+    validate_detrain_widths(w_T, w_n)
     dum1 = smooth_clamp((_DETRAIN_T_LIQ_K - T) / _DETRAIN_RAMP_K, 0.0, 1.0,
                         math.inf if w_T == 0 else _DETRAIN_RAMP_K / w_T)
     dlf_pos = (jnp.maximum(0.0, dlf) if w_n == 0

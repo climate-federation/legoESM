@@ -139,6 +139,7 @@ from legoesm.driver.config import (
     CLUBB_SCALAR_FIELDS,
     VALID_RADIATION,
     ZM_SCALAR_FIELDS,
+    ZM_WIDTH_FIELDS,
     VALID_TURBULENCE,
     DycoreConfig,
     EvaluationConfig,
@@ -1115,6 +1116,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
                             help=f"{_cls}.{_leaf} (legal range: the scheme's "
                                  "__param_spec__). Default: the scheme's own "
                                  "value.")
+    for _f, _leaf in ZM_WIDTH_FIELDS.items():
+        parser.add_argument("--" + _f.replace("_", "-"), type=float,
+                            default=None, dest=_f,
+                            help=f"ZhangMcFarlaneConfig.{_leaf}: RULE 5 "
+                                 "smoothing width of the CAM6 detrainment "
+                                 "booking (0 = CAM's hard switch; MPAS ZM + "
+                                 "CLUBB with cld_macmic_num_steps>=2 only). "
+                                 "Default: the scheme's own value.")
     parser.add_argument("--clubb-q-flux-scale", type=float, default=None,
                         dest="clubb_q_flux_scale",
                         help="Moisture-only multiplier on CLUBB's q_v eddy "
@@ -1622,7 +1631,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--sundqvist-auto-rate", dest="sundqvist_auto_rate",
                         type=float, default=None,
                         help="Sundqvist autoconversion rate c_0 [1/s] (None="
-                             "default 1e-3; bounds 1e-4..1e-2).")
+                             "default 1.5e-4, GFS prautco; bounds 1e-4..1e-2).")
     parser.add_argument("--aerosol-ccn", action=argparse.BooleanOptionalAction, default=False,
                         help="Diagnose the specified cloud-droplet number "
                              "from the prescribed aerosol optical depth "
@@ -2958,7 +2967,8 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         clubb_liquid_partition=args.clubb_liquid_partition,
         clubb_trop_cloud_top_press=args.clubb_trop_cloud_top_press,
         **{_f: getattr(args, _f)
-           for _f in {**ZM_SCALAR_FIELDS, **CLUBB_SCALAR_FIELDS}},
+           for _f in {**ZM_SCALAR_FIELDS, **ZM_WIDTH_FIELDS,
+                      **CLUBB_SCALAR_FIELDS}},
         clubb_q_flux_scale=args.clubb_q_flux_scale,
         clubb_q_flux_scale_sigma_band=(tuple(args.clubb_q_flux_scale_sigma_band)
                                        if args.clubb_q_flux_scale_sigma_band
