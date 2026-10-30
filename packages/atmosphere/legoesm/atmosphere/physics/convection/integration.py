@@ -1917,13 +1917,21 @@ def _make_spectral_pe_convection(
         # the prescribed surface this way).  Column water then closes by the
         # scheme's own contract, sum dp*dq_r = -sum dp*(dq_v + dq_c), which
         # requires BOTH q_v and q_c to be carried -- without q_c the detrained
-        # condensate would vanish unrecorded.
-        _rain_to_sfc = conv_fn is not None and _tr.rain_is_net_flux
+        # condensate would vanish unrecorded.  ``rain_to_surface`` sends a
+        # mass-flux scheme's survivor rain (bechtold/tiedtke) the same way, as
+        # on the hydrostatic bridge, instead of handing it to q_r where the
+        # microphysics would evaporate it a second time.  KNOWN DIFFERENCE
+        # (user decision 2026-10-30): this lane has no surface-precipitation
+        # output, so the routed rain leaves the column unrecorded -- no precip
+        # diagnostic, and the coupled lane's freshwater export (seg_precip) is
+        # zero -- exactly as Zhang-McFarlane's net rain flux already does here.
+        _rain_to_sfc = conv_fn is not None and (
+            _tr.rain_is_net_flux or convection_config.rain_to_surface)
         if (_rain_to_sfc and conv_out.dq_r_conv_dt is not None
                 and (state.tracers is None or "q_v" not in state.tracers
                      or "q_c" not in state.tracers)):
             raise ValueError(
-                f"convection scheme '{scheme_name}' routes its net rain flux "
+                f"convection scheme '{scheme_name}' routes its rain "
                 "(dq_r_conv_dt) to the surface and books vapour and detrained "
                 "condensate into q_v and q_c; the spectral state must carry "
                 "both tracers, got "
