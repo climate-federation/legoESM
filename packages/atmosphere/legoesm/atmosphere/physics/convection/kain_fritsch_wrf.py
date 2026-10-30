@@ -40,7 +40,7 @@ What this wrapper adds, and nothing else (each is a recorded seam choice):
   WRF ``NCA`` hold over ``TIMEC`` is not carried);
 * convective precipitation ``PRATEC`` leaves through ``dq_r_conv_dt``,
   distributed over the levels in proportion to the oracle's own net
-  precipitation production ``(PPTLIQ+PPTICE)*AINC*FRC2`` (its rain
+  precipitation production ``(PPTLIQ+PPTICE)*AINC*(1-FBFRC)*FRC2`` (its rain
   feedback profile); the column integral equals ``PRATEC``; the oracle's
   resolved-rain tendency ``DQRDT`` (shallow fallback with ``FBFRC=1``) is
   added to it;
