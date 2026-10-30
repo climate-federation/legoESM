@@ -1622,7 +1622,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--sundqvist-auto-rate", dest="sundqvist_auto_rate",
                         type=float, default=None,
                         help="Sundqvist autoconversion rate c_0 [1/s] (None="
-                             "default 1e-3; bounds 1e-4..1e-2).")
+                             "default 1.5e-4, GFS prautco; bounds 1e-4..1e-2).")
     parser.add_argument("--aerosol-ccn", action=argparse.BooleanOptionalAction, default=False,
                         help="Diagnose the specified cloud-droplet number "
                              "from the prescribed aerosol optical depth "

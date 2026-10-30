@@ -463,10 +463,11 @@ def _read_probe_progress(out_dir, expect_fp, content):
         return None
 
 
-def _atomic_write(path, write_fn):
+def _atomic_write(path, write_fn, before_replace=None):
     """Write via a temporary file and rename, so a job killed mid-write leaves
     the PREVIOUS checkpoint intact rather than a truncated one that resume
-    would happily load."""
+    would happily load.  ``before_replace`` runs after a successful write,
+    just before the rename."""
     import os
     import socket
 
@@ -474,6 +475,8 @@ def _atomic_write(path, write_fn):
     # can share one, and they see the same shared filesystem.
     tmp = f"{path}.tmp.{socket.gethostname()}.{os.getpid()}"
     write_fn(tmp)
+    if before_replace is not None:
+        before_replace()
     os.replace(tmp, path)
 
 
@@ -1197,7 +1200,8 @@ def _main(argv=None):
                          "starting from epoch 0", cfg.out_dir)
         else:
             _pp, _op, _fp = _checkpoint_paths(cfg.out_dir, _ep)
-            params = eqx.tree_deserialise_leaves(_pp, params)
+            from legoesm.ml.checkpoint_io import deserialise_knob_aware
+            params = deserialise_knob_aware(_pp, params)
             _manifest = json.loads(open(_fp).read())
             _saved_fp = (_manifest.get("fingerprint")
                          if isinstance(_manifest, dict) else None)
@@ -1523,9 +1527,17 @@ def _main(argv=None):
             # any one of them missing makes the other two unresumable.
             # On-disk view: frozen (float) knobs as arrays, so the file
             # also loads into an all-array template (checkpoint_view).
+            from legoesm.ml.checkpoint_io import (
+                knob_record_path, write_knob_record,
+            )
             from legoesm.ml.training import checkpoint_view
+            # The stale record goes only once the new payload is written
+            # (codex + GLM 2026-10-29: a failed write keeps old payload+record).
             _atomic_write(ppath, lambda t: eqx.tree_serialise_leaves(
-                t, checkpoint_view(eqx.combine(cur_arr, _static_h))))
+                t, checkpoint_view(eqx.combine(cur_arr, _static_h))),
+                before_replace=lambda: knob_record_path(ppath).unlink(
+                    missing_ok=True))
+            write_knob_record(eqx.combine(cur_arr, _static_h), ppath)
             _atomic_write(opath, lambda t: eqx.tree_serialise_leaves(
                 t, cur_opt_state))
             # Written LAST: it is the marker that says this epoch is

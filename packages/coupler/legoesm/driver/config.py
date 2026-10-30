@@ -1544,7 +1544,7 @@ class ExperimentConfig(NamedTuple):
     sbm_tau_c: float = 7200.0
     sbm_RH_ref: float = 0.7
     sbm_cape_threshold: float = 70.0
-    sundqvist_auto_rate: float = 1e-3      # Sundqvist autoconversion rate [1/s]
+    sundqvist_auto_rate: float = 1.5e-4    # Sundqvist autoconversion rate [1/s] (GFS prautco)
     # Convection / microphysics / turbulence / GWD scheme knobs exposed for
     # calibration (AIMIP commit 0c747d4).  These mirror the scheme-config
     # defaults; the calibration threads them to the schemes as a
@@ -5054,7 +5054,7 @@ class ExperimentConfig(NamedTuple):
             lw_diff_factor=getattr(amip_cfg, 'lw_diff_factor', 1.66),
             sw_tau_0=getattr(amip_cfg, 'sw_tau_0', 0.22),
             sw_exponent=getattr(amip_cfg, 'sw_exponent', 2.0),
-            sundqvist_auto_rate=getattr(amip_cfg, 'sundqvist_auto_rate', 1e-3),
+            sundqvist_auto_rate=getattr(amip_cfg, 'sundqvist_auto_rate', 1.5e-4),
             cloud_rh_crit=getattr(amip_cfg, 'cloud_rh_crit', 0.7),
             louis_l_mix_max=getattr(amip_cfg, 'louis_l_mix_max', 100.0),
             louis_Ri_crit=getattr(amip_cfg, 'louis_Ri_crit', 0.25),
@@ -5251,7 +5251,7 @@ class ExperimentConfig(NamedTuple):
             lw_diff_factor=getattr(self, 'lw_diff_factor', 1.66),
             sw_tau_0=getattr(self, 'sw_tau_0', 0.22),
             sw_exponent=getattr(self, 'sw_exponent', 2.0),
-            sundqvist_auto_rate=getattr(self, 'sundqvist_auto_rate', 1e-3),
+            sundqvist_auto_rate=getattr(self, 'sundqvist_auto_rate', 1.5e-4),
             cloud_rh_crit=getattr(self, 'cloud_rh_crit', 0.7),
             louis_l_mix_max=getattr(self, 'louis_l_mix_max', 100.0),
             louis_Ri_crit=getattr(self, 'louis_Ri_crit', 0.25),

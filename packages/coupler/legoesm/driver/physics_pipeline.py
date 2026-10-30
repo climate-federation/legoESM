@@ -365,6 +365,9 @@ class PhysicsPipeline:
         self.budget_ledger = False  # set by build_physics_pipeline
         # Cell areas weighting the ledger's global means (None = one column).
         self._ledger_area = None
+        # grid-cell area [m^2] for Sundqvist's GFS ice-autoconversion blend
+        # (set by the builder; None on grids without one -> Sundqvist raises)
+        self.grid_area = None
         # Opt-in convective cumulus cloud-fraction source (set by
         # build_physics_pipeline from ExperimentConfig.convective_cloud).
         # When True, compute_radiation_core feeds the lagged convective precip
@@ -1166,7 +1169,7 @@ class PhysicsPipeline:
                             tke=None, qke=None, gwd_spectrum=None,
                             w_land=None, snow=None, land_ml=None,
                             land_ml_params=None, cloud_fraction=None,
-                            T_ice_skin=None):
+                            T_ice_skin=None, cell_area=None):
         """Convection + microphysics + BL exchange with held radiation.
 
         ``T_ice_skin`` (optional, per column, grid shape) replaces the scalar
@@ -1755,13 +1758,17 @@ class PhysicsPipeline:
                     dz=dz_col,
                     dt=dt,
                     config=self.micro_config,
+                    carries_q_i=q_i is not None,
+                    cell_area=self._sundqvist_kwargs(
+                        ad, None, cell_area).get("cell_area"),
                 )
             else:
+                _sq_kw = self._sundqvist_kwargs(ad, q_i, cell_area)
                 micro_out = self.micro_fn(
                     T=T_col, q_v=q_v_col, hydrometeors=hydrometeors,
                     p_full=p_full_col, p_half=p_half_col,
                     rho=rho_col, dz=dz_col, dt=dt,
-                    config=self.micro_config,
+                    config=self.micro_config, **_sq_kw,
                 )
             dT_dt_micro = ad.unflatten_3d(micro_out.dT_dt)
             dq_v_dt_micro = ad.unflatten_3d(micro_out.dq_v_dt)
@@ -2638,6 +2645,19 @@ class PhysicsPipeline:
                 self, "_cloud_cover_condensate_q_ref", None),
         )
 
+    def _sundqvist_kwargs(self, ad, q_i, cell_area=None):
+        """Sundqvist's extra inputs on this lane: the cell area per column and
+        whether q_i is carried; ``{}`` for every other scheme.  ``cell_area``
+        (the band's / tile's own areas, grid shape) overrides the pipeline's
+        build-time ``grid_area`` on lanes that share one build across bands."""
+        from legoesm.atmosphere.physics.microphysics.config import SundqvistConfig
+        if not isinstance(self.micro_config, SundqvistConfig):
+            return {}
+        area = self.grid_area if cell_area is None else cell_area
+        return dict(
+            cell_area=None if area is None else ad.flatten_2d(jnp.asarray(area)),
+            carries_q_i=q_i is not None)
+
     def compute_radiation_core(self, T, p_s, q_v, sst, sic, lat, lon,
                                day_of_year, seconds_of_day,
                                solar_weights, s_0,
@@ -3297,7 +3317,8 @@ class PhysicsPipeline:
                          tke=None, qke=None, gwd_spectrum=None,
                          conv_precip=None, land_ml=None, w_land=None,
                          snow=None, land_ml_params=None, cloud_fraction=None,
-                         conv_precip_frozen=None, ice_T_skin=None):
+                         conv_precip_frozen=None, ice_T_skin=None,
+                         cell_area=None):
 
             if pipeline.ice_skin_prognostic and ice_T_skin is None:
                 raise ValueError(
@@ -3407,6 +3428,7 @@ class PhysicsPipeline:
                     sfc_taux_override=sfc_taux_override,
                     sfc_tauy_override=sfc_tauy_override,
                     tke=tke, qke=qke, gwd_spectrum=gwd_spectrum,
+                    cell_area=cell_area,
                     w_land=w_land, snow=snow, land_ml=land_ml,
                     land_ml_params=land_ml_params, cloud_fraction=cloud_fraction,
                     T_ice_skin=ice_T_skin,
@@ -3477,6 +3499,7 @@ class PhysicsPipeline:
                     sfc_taux_override=sfc_taux_override,
                     sfc_tauy_override=sfc_tauy_override,
                     tke=tke, qke=qke, gwd_spectrum=gwd_spectrum,
+                    cell_area=cell_area,
                     w_land=w_land, snow=snow, land_ml=land_ml,
                     land_ml_params=land_ml_params, cloud_fraction=cloud_fraction,
                     T_ice_skin=ice_T_skin,
@@ -5455,6 +5478,7 @@ def build_physics_pipeline(grid, sigma, config, spacing_grid=None):
         getattr(getattr(config, 'output', None), 'budget_ledger', False))
     if pipeline.budget_ledger and not isinstance(grid, SingleColumnGrid):
         pipeline._ledger_area = grid.grid_area
+    pipeline.grid_area = getattr(grid, "grid_area", None)
     pipeline._cloud_convective = getattr(config, 'convective_cloud', False)
     pipeline._cloud_rh_crit = getattr(config, 'cloud_rh_crit', None)
     pipeline._cloud_q_c_diagnostic = getattr(config, 'cloud_q_c_diagnostic', None)

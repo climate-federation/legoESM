@@ -278,6 +278,16 @@ def require_relvar_for_kk2000_cam6(microphysics_config, relvar_wired: bool):
 # Hydrostatic PE
 # ===========================================================================
 
+def sundqvist_lane_kwargs(scheme_name, grid, ncol, carries_q_i):
+    """Sundqvist's lane inputs: the grid-cell area [m^2] per column (None where
+    the grid has none; Sundqvist then raises) and whether the lane carries q_i."""
+    if scheme_name != "sundqvist":
+        return {}
+    area = getattr(grid, "grid_area", None)
+    return dict(cell_area=None if area is None else jnp.asarray(area).reshape(ncol),
+                carries_q_i=carries_q_i)
+
+
 def _make_hydrostatic_microphysics(
     microphysics_config: MicrophysicsConfig,
     dt: float,
@@ -549,6 +559,9 @@ def _make_hydrostatic_microphysics(
                 _below = jnp.arange(nlev) >= cam6_activation.top_lev
                 _cldo_new = jnp.where(
                     _below, _ast, phys_state.cloud_fraction_old.reshape(ncol, nlev))
+            _kw.update(sundqvist_lane_kwargs(
+                scheme_name, grid, ncol,
+                state.tracers is not None and "q_i" in state.tracers))
             micro_out = micro_fn(
                 T_col, q_v_col, hydrometeors,
                 p_full_col, p_half_col, rho, dz, dt, scheme_config, **_kw,
@@ -809,6 +822,7 @@ def _make_nonhydrostatic_microphysics(
             micro_out = micro_fn(
                 T_col, q_v_col, hydrometeors,
                 p_full_col, p_half, rho_col, dz, dt, scheme_config,
+                **sundqvist_lane_kwargs(scheme_name, grid, ncol, n_tracers > 3),
             )
 
         # Convert dT/dt -> dtheta'/dt using local Exner (T = theta * exner).
@@ -1027,6 +1041,7 @@ def _make_plane_microphysics(
             micro_out = micro_fn(
                 T_col, q_v_col, hydrometeors,
                 p_full_col, p_half, rho_col, dz, dt, scheme_config,
+                **sundqvist_lane_kwargs(scheme_name, grid, ncol, n_tracers > 3),
             )
 
         dT_dt = micro_out.dT_dt.reshape(shape_3d)
@@ -1231,6 +1246,7 @@ def _make_mpas_nh_microphysics(
             micro_out = micro_fn(
                 T_col, q_v_col, hydrometeors,
                 p_full_col, p_half, rho_col, dz, dt, scheme_config,
+                **sundqvist_lane_kwargs(scheme_name, mesh, ncol, n_tracers > 3),
             )
 
         dT_dt = micro_out.dT_dt
@@ -1406,6 +1422,9 @@ def _make_spectral_pe_microphysics(
             micro_out = micro_fn(
                 T_col, q_v_col, hydrometeors,
                 p_full_col, p_half_col, rho, dz, dt, scheme_config,
+                **sundqvist_lane_kwargs(
+                    scheme_name, grid, ncol,
+                    state.tracers is not None and "q_i" in state.tracers),
             )
 
         dT_dt = micro_out.dT_dt.reshape(n_lat, n_lon, nlev)

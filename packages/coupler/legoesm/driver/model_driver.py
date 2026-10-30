@@ -6793,6 +6793,10 @@ class ModelDriver:
                             self.physics.f_land, layout)
                         self.physics.albedo_land = scatter(
                             self.physics.albedo_land, layout)
+                    # rank-local cell areas (Sundqvist's GFS area blend)
+                    if self.physics.grid_area is not None:
+                        self.physics.grid_area = scatter(
+                            self.physics.grid_area, layout)
                     # Rank-local SSO for the pipeline's column GWD path
                     # (same ownership as f_land / _physics_lat).
                     if getattr(self.physics, "subgrid_topo_stddev", None) \

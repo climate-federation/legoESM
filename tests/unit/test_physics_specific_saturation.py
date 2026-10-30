@@ -140,7 +140,7 @@ def test_warm_rain_mixed_phase_curve_and_sundqvist_rates_are_specific():
         jnp.arange(p.shape[1] + 1) - 0.5 * p.shape[1])
     rates = diagnose_sundqvist_process_rates(
         T=T, q_v=q, hydrometeors=hyd, p_full=p, p_half=ph, rho=rho,
-        dz=jnp.full_like(T, 500.0), dt=300.0, config=SundqvistConfig())
+        dz=jnp.full_like(T, 500.0), dt=300.0, config=SundqvistConfig(), cell_area=1.0e10)
     # exactly saturated: no supersaturation to remove, gate fully open
     assert float(jnp.abs(rates.condensation).max()) == 0.0
     # the basis discriminator (GLM 2026-09-29: the zero above also holds
@@ -149,14 +149,14 @@ def test_warm_rain_mixed_phase_curve_and_sundqvist_rates_are_specific():
     q_mid = 0.5 * (q + saturation_mixing_ratio(T, p))
     rates_mid = diagnose_sundqvist_process_rates(
         T=T, q_v=q_mid, hydrometeors=hyd, p_full=p, p_half=ph, rho=rho,
-        dz=jnp.full_like(T, 500.0), dt=300.0, config=SundqvistConfig())
+        dz=jnp.full_like(T, 500.0), dt=300.0, config=SundqvistConfig(), cell_area=1.0e10)
     assert float(rates_mid.condensation.min()) > 0.0
     # a 1 % supersaturated column condenses; the OLD reading of a
     # saturated column was RH 0.977, i.e. it saw q - r_sat < 0 as well,
     # so the discriminating check is the exact zero above plus this:
     rates_ss = diagnose_sundqvist_process_rates(
         T=T, q_v=1.01 * q, hydrometeors=hyd, p_full=p, p_half=ph, rho=rho,
-        dz=jnp.full_like(T, 500.0), dt=300.0, config=SundqvistConfig())
+        dz=jnp.full_like(T, 500.0), dt=300.0, config=SundqvistConfig(), cell_area=1.0e10)
     cfg = SundqvistConfig()
     gate = jax.nn.sigmoid(cfg.sigmoid_sharpness * (1.01 - cfg.rh_crit))   # the scheme's own RH gate at RH 1.01
     np.testing.assert_allclose(np.asarray(rates_ss.condensation * 300.0),
