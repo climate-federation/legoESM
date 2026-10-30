@@ -1,6 +1,6 @@
 """Reverse-mode derivative of prognostic CLUBB on real production columns.
 
-Measured 2026-10-29 on the production MPAS deck (res 3, ERA5 1979-01-05, first
+Measured 2026-10-29 on the production deck run at res 3 (ERA5 1979-01-05, first
 physics call, x64, one CLUBB sub-step): reverse AD of the turbulence module
 with respect to temperature was NaN in ~45 % of the entries under ``jit`` (and
 under the calibration branch's loop remat), finite when the same gradient was
