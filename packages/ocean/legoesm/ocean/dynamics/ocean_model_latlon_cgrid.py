@@ -3081,6 +3081,12 @@ def _nemo_ws_rk3_tracer_pair_step(
     return out_a, out_b
 
 
+# Fixed-point passes of the trapezoidal Coriolis rotation (coriolis_time_scheme
+# = "trapezoidal"): the error falls by about |f| dt / 2 per pass, so 6 passes
+# leave about 1e-7 of the increment at |f| dt = 0.13 (30N, dt = 1800 s).
+_N_CORIOLIS_TRAPEZOIDAL_ITER = 6
+
+
 def _forward_backward_coriolis_3d(
     u: jnp.ndarray,
     v: jnp.ndarray,
@@ -3161,17 +3167,7 @@ def _forward_backward_coriolis_3d(
     from legoesm.ocean.dynamics.barotropic_common import coriolis_at_faces
     f_u, f_v = coriolis_at_faces(grid, u.dtype)  # (n_lat, n_lon+1), (n_lat+1, n_lon)
 
-    # --- Forward step: update u' using old v' ---
-    # Average v' to u-points (Sadourny 4-point average)
-    v_west = jnp.roll(v_prime, 1, axis=1)
-    v_at_u = 0.25 * (v_prime[:-1] + v_prime[1:]
-                      + v_west[:-1] + v_west[1:])
-    v_at_u = jnp.concatenate([v_at_u, v_at_u[:, 0:1, :]], axis=1)
-
-    u_prime_new = (u_prime + dt * f_u[:, :, jnp.newaxis] * v_at_u) * u_mask_3d
-
-    # --- Backward step: update v' using NEW u' ---
-    # Average u'_new to v-points (Sadourny 4-point average) via the
+    # Average u' to v-points (Sadourny 4-point average) via the
     # shared cell-pad-first helper: the MPI band partition-cut v-face
     # averages the neighbour rank's true u' row instead of the old
     # interior-then-pad_ns_vector_u refill (one face row off at a cut).
@@ -3180,9 +3176,33 @@ def _forward_backward_coriolis_3d(
     from legoesm.ocean.dynamics.latlon_cgrid_operators import (
         interp_u_to_vface_4pt,
     )
-    u_at_v = interp_u_to_vface_4pt(u_prime_new, grid)
 
-    v_prime_new = (v_prime - dt * f_v[:, :, jnp.newaxis] * u_at_v) * v_mask_3d
+    def _v_to_u(vp):
+        # Average v' to u-points (Sadourny 4-point average)
+        v_west = jnp.roll(vp, 1, axis=1)
+        v_at_u = 0.25 * (vp[:-1] + vp[1:] + v_west[:-1] + v_west[1:])
+        return jnp.concatenate([v_at_u, v_at_u[:, 0:1, :]], axis=1)
+
+    if getattr(config, "coriolis_time_scheme",
+               "forward_backward") == "trapezoidal":
+        # Crank-Nicolson rotation x1 = x0 + dt L((x0 + x1)/2), solved by
+        # fixed-point iteration; each pass contracts the error by about
+        # |f| dt / 2 (0.066 at 30N, dt = 1800 s).
+        u_prime_new, v_prime_new = u_prime, v_prime
+        for _ in range(_N_CORIOLIS_TRAPEZOIDAL_ITER):
+            u_mid = 0.5 * (u_prime + u_prime_new)
+            v_mid = 0.5 * (v_prime + v_prime_new)
+            u_prime_new = (u_prime + dt * f_u[:, :, jnp.newaxis]
+                           * _v_to_u(v_mid)) * u_mask_3d
+            v_prime_new = (v_prime - dt * f_v[:, :, jnp.newaxis]
+                           * interp_u_to_vface_4pt(u_mid, grid)) * v_mask_3d
+    else:
+        # --- Forward step: update u' using old v' ---
+        u_prime_new = (u_prime + dt * f_u[:, :, jnp.newaxis]
+                       * _v_to_u(v_prime)) * u_mask_3d
+        # --- Backward step: update v' using NEW u' ---
+        u_at_v = interp_u_to_vface_4pt(u_prime_new, grid)
+        v_prime_new = (v_prime - dt * f_v[:, :, jnp.newaxis] * u_at_v) * v_mask_3d
 
     # --- Reconstruct full velocity ---
     u_new = u_prime_new + U_bar[..., jnp.newaxis]
@@ -4225,6 +4245,11 @@ class LatLonCGridOceanModel:
             raise ValueError(
                 "momentum_face_mask must be '2d' or '3d', got "
                 f"{config.momentum_face_mask!r}")
+        if getattr(config, "coriolis_time_scheme", "forward_backward") not in (
+                "forward_backward", "trapezoidal"):
+            raise ValueError(
+                "coriolis_time_scheme must be 'forward_backward' or "
+                f"'trapezoidal', got {config.coriolis_time_scheme!r}")
         nonnegative = {
             "A_h": config.lateral_viscosity.A_h,
             "B_h": config.lateral_viscosity.B_h,

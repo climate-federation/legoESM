@@ -3535,6 +3535,21 @@ class LatLonCGridOceanConfig(NamedTuple):
     #   coordinate (pure z* has no such faces).  Tested with the forward
     #   Euler outer integrator.
     momentum_face_mask: str = "2d"
+    # Time scheme of the baroclinic Coriolis rotation of the matsuno_split
+    # path (_forward_backward_coriolis_3d).
+    # "forward_backward" (default, bit-identical): u' with the old v', then
+    #   v' with the new u', in that order every step.  For collocated
+    #   velocities one step changes the kinetic energy by (1/2)(f dt)^2
+    #   (u'^2 - v'^2) to leading order, so zonal flow gains energy every step
+    #   (Sielecki 1968); with the pressure gradient applied before the
+    #   rotation a zonal geostrophic jet keeps growing (1.2 percent of the
+    #   energy of a zonal flow per step at 20N to 32N with dt = 1800 s,
+    #   tests/ocean/unit/test_coriolis_time_scheme.py).
+    # "trapezoidal": Crank-Nicolson rotation, x1 = x0 + dt L((x0 + x1)/2),
+    #   with the same spatial operator L, solved by fixed-point iteration.
+    #   Exactly energy neutral for any dt when L is (as here, to the
+    #   residual of the metric terms) skew in the kinetic energy norm.
+    coriolis_time_scheme: str = "forward_backward"
 
     @classmethod
     def from_flat(cls, **flat) -> "LatLonCGridOceanConfig":
