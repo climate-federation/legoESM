@@ -1780,6 +1780,7 @@ def _run_substep_loop(
     nemo_t_pivot_north_neighbor_test_override=False,
     nemo_fold_top_v_wet=None,
     return_boundary_association_trace=False,
+    open_boundary=None,
 ):
     """The forward-backward substep loop (verbatim extraction).
 
@@ -2422,6 +2423,18 @@ def _run_substep_loop(
                 "v_"):
             V_bar_new = association_post[1]
 
+        # Open lateral boundaries (regional runs): characteristic normal
+        # velocity on the open faces, zero-gradient sea level in the ring,
+        # volume correction -- CROCO u2dbc/v2dbc/zetabc/obc_volcons, once per
+        # fast substep.  None (every non-regional caller) changes nothing.
+        if open_boundary is not None:
+            from legoesm.ocean.dynamics.open_boundary_latlon import (
+                apply_barotropic_open_boundary,
+            )
+            U_bar_new, V_bar_new, eta_new = apply_barotropic_open_boundary(
+                eta_c, U_bar_c, V_bar_c, eta_new, U_bar_new, V_bar_new,
+                H_bathy, grid, dt_s, g, open_boundary, u_mask, v_mask, mask)
+
         # Primary average.  In NEMO's RK3 flux-form branch this is a transport,
         # not a velocity: dynspg_ts.F90:823-834 accumulates
         # wgtbtp1*ua_e*hu_e, and :956-979 divides the completed mean by the
@@ -3010,6 +3023,7 @@ def barotropic_substeps_latlon_cgrid(
     _nemo_final_mean_association_test_override=False,
     _nemo_t_pivot_north_neighbor_test_override=False,
     _nemo_boundary_association_trace_test_hook=False,
+    open_boundary=None,
 ) -> LatLonCGridOceanState:
     """Run barotropic substeps on a C-grid lat-lon grid.
 
@@ -3550,6 +3564,7 @@ def barotropic_substeps_latlon_cgrid(
                 "raw barotropic-history substitution requires six arrays")
     _loop_result = _run_substep_loop(
         eta, U_bar, V_bar,
+        open_boundary=open_boundary,
         dt_s=dt_s, n_loop=n_loop, w_filter=w_filter, w_transport=w_transport,
         grid=grid, config=config, g=g, H_bathy=H_bathy, mask=mask,
         u_mask=u_mask, v_mask=v_mask, min_water_col=min_water_col,

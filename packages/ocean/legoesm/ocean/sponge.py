@@ -58,6 +58,9 @@ class SpongeForcing(NamedTuple):
     u_ref: jnp.ndarray | None = None
     v_ref: jnp.ndarray | None = None
     nemo_kt: int | None = None
+    # Open lateral boundaries of a regional lat-lon run (OpenBoundaryData of
+    # dynamics/open_boundary_latlon.py); None keeps every side a wall.
+    open_boundary: object | None = None
 
 
 def compute_sponge_gamma(

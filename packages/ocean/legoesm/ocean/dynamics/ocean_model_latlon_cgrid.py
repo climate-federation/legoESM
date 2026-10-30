@@ -8597,6 +8597,20 @@ class LatLonCGridOceanModel:
                     "the standard-halo explicit substep solver's loop-entry "
                     "seed; this configuration routes the external solve "
                     "elsewhere, so the control would silently not land.")
+            _open_boundary = getattr(sponge, "open_boundary", None)
+            if _open_boundary is not None:
+                if _cfg_b.fix_eta_drift:
+                    raise ValueError(
+                        "fix_eta_drift=True holds the domain volume fixed after "
+                        "every step and cancels any net flow through open "
+                        "boundaries; set fix_eta_drift=False with open_boundary "
+                        "(the boundary's own volume correction is in "
+                        "OpenBoundaryData)")
+                if _baro_fn is not barotropic_substeps_latlon_cgrid:
+                    raise ValueError(
+                        "open lateral boundaries are implemented in the "
+                        "standard-halo explicit substep solver only")
+                _baro_seed = {**_baro_seed, "open_boundary": _open_boundary}
             _baro_result = _baro_fn(
                 state_mid, dt_s, _nbaro,
                 _grid, _zc, _cfg_b,
