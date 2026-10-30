@@ -318,10 +318,9 @@ def test_check_grads_at_default_sharpness(fx, v):
 
 
 # RULE 5 per-switch gradient test, at the FULL default config.  Each switch
-# is exercised on a column built to sit inside its transition: a fixture
-# column, or a one-parameter family of a fixture column (``fix``:
-# the column itself; ``warm``: uniform warming at fixed RH; ``qall``/``qlow``:
-# humidity scaled by 10**a everywhere / below 850 hPa; ``qnear``: humidity
+# is exercised on a column built to sit inside its transition, from a
+# fixture column (``warm``: uniform warming at fixed RH; ``qlow``:
+# humidity scaled by 10**a below 850 hPa; ``qnear``: humidity
 # scaled by 1 + a; ``free``: warming above 850 hPa; ``cold``: 180 + a K above
 # 300 hPa; ``band``: two full levels moved inside the downdraught taper band
 # edge; ``dT``: a solved temperature increment)
@@ -366,6 +365,10 @@ SWITCH_COLUMNS = {
     # (output change 1.9e-9): the floor moves SCRIT by at most ln2/1e3.
     "scrit_floor_sharpness": ("free", 1, 1.49296875, 0.01),
 }
+# Smallest output scale (max over the concatenated FT [K/s], 1e3*FQ, 1e3*rain
+# [kg/kg/s] and 1e2*CBMF [kg/m^2/s] of _col_outputs) a switch column must
+# carry at both settings (reviewer finding 2026-10-30).
+SWITCH_COLUMN_MIN_OUTPUT = 1.0e-8
 UNREACHABLE = {
     "tlift_floor_sharpness": "TLIFT's MAX(TG, 35 K) acts only on a parcel colder than 35 K",
     # Measured (sw_probe2.py, bisection onto the switch argument over 15
@@ -390,8 +393,6 @@ def _switch_column(fx, kind, c, a, cb):
     qs = lambda TT: np.asarray(_oracle_qsat(jnp.asarray(TT[None]), jnp.asarray(pf[None])))[0]
     if kind == "warm":
         T, q = T + a, q / qs(T) * qs(T + a)
-    elif kind == "qall":
-        q = q * 10.0 ** a
     elif kind == "qlow":
         q = np.where(pf > 8.5e4, q * 10.0 ** a, q)
     elif kind == "qnear":
@@ -404,7 +405,8 @@ def _switch_column(fx, kind, c, a, cb):
         T = T + np.asarray(a)
     elif kind == "band":
         # Two levels just inside the downdraught taper band edge P > 0.949 P(1):
-        # its top at 0.949 P(1) + a[0] Pa and the level below a[1] Pa lower,
+        # its top at 0.949 P(1) + a[0] Pa and the level beneath it (nearer the
+        # surface) at a further a[1] Pa,
         # the half levels re-centred (one level near the edge sits at JTT,
         # where the band blend is the identity).
         thr = 0.949 * pf[-1]
@@ -413,7 +415,7 @@ def _switch_column(fx, kind, c, a, cb):
         pf[k], pf[k + 1] = thr + a[0], thr + a[0] + a[1]
         ph[k], ph[k + 1] = 0.5 * (pf[k - 1] + pf[k]), 0.5 * (pf[k] + pf[k + 1])
         assert pf[k - 1] < ph[k] < pf[k] < ph[k + 1] < pf[k + 1] < ph[k + 2]
-    elif kind != "fix":
+    else:
         raise ValueError(kind)
     return tuple(jnp.asarray(x)[None] for x in (T, q, pf, ph)) + (jnp.asarray([cb]),)
 
@@ -477,11 +479,15 @@ def test_each_switch_carries_gradient_at_default(fx, field):
     hard = soft._replace(**{field: math.inf})
     os_ = np.asarray(_col_outputs(soft, T, q, pf, ph, cb))
     oh = np.asarray(_col_outputs(hard, T, q, pf, ph, cb))
-    # Normalised by the larger of the two outputs, so a column the hard
-    # switch rejects (output 0) cannot pass on a vanishing soft output.
-    d = float(np.max(np.abs(os_ - oh))
-              / max(np.max(np.abs(oh)), np.max(np.abs(os_)), 1e-300))
-    print(f"{field}: column {SWITCH_COLUMNS[field]}, output change {d:.3e}")
+    # The column must convect at BOTH settings (output scale above
+    # SWITCH_COLUMN_MIN_OUTPUT, the probe's selection floor), so a column one
+    # setting rejects cannot pass on a vanishing output; the change is
+    # normalised by the larger of the two.
+    sh, ss = float(np.max(np.abs(oh))), float(np.max(np.abs(os_)))
+    d = float(np.max(np.abs(os_ - oh))) / max(sh, ss, 1e-300)
+    print(f"{field}: column {SWITCH_COLUMNS[field]}, output scale {ss:.3e}/{sh:.3e}, "
+          f"change {d:.3e}")
+    assert min(sh, ss) > SWITCH_COLUMN_MIN_OUTPUT, (field, sh, ss)
     assert d > 1.0e-9, (field, d)
 
     def loss(cfg):
