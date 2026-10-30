@@ -1027,8 +1027,8 @@ def _build_mode_components_spectral(cfg, yml, column_mesh=None):
         _cn["era5_surface_fluxes"] = bool(yml.get("era5_surface_fluxes", False))
         params = build_variant("column_nn", nlev=nlev, grid=grid, overrides=_cn)
 
-        # #1464: the learned arm has no momentum head, so without this it runs
-        # with NO surface turbulent drag while the `physics` arm it is scored
+        # #1464: the learned arm's only momentum physics is its own wind head,
+        # so without this it runs with NO surface turbulent drag while the `physics` arm it is scored
         # against inherits TurbulenceConfig.scheme="smagorinsky". Opt-in so no
         # existing campaign changes silently; `neural_gcm.surface_drag: true`
         # in the campaign YAML makes the two arms differ in thermodynamics

@@ -202,7 +202,7 @@ neural_gcm:
   # owner 2026-09-16: spatial embedding OFF by default when the surface
   # fluxes are prescribed.
   spatial_embedding: false
-  # #1464: the learned column has NO momentum head, so without this it runs
+  # #1464: the learned column's only momentum physics is its wind head, so without this it runs
   # with no physical surface stress at all, while the classical arm it is
   # scored against carries `classical.turbulence` below. The scheme here MUST
   # equal that one — giving the learned arm a *different* momentum scheme

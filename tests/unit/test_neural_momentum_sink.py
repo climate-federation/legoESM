@@ -301,7 +301,7 @@ def test_the_learned_arm_gets_the_SAME_momentum_scheme_as_the_classical_arm():
 
     1. A campaign whose classical arm runs a scheme the drag builder accepts
        MUST enable the drag. This is the original defect: the learned column
-       has no momentum head, so with the drag off it runs with no physical
+       has no physical momentum scheme, so with the drag off it runs with no physical
        surface stress at all while the classical arm has one.
     2. It must NAME the scheme, and that name must equal the classical arm's.
        Handing the learned arm a different scheme is the same confound wearing

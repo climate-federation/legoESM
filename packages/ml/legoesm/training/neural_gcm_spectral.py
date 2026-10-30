@@ -911,9 +911,9 @@ def make_turbulence_only_spectral_physics(dt,
     vor/div/lnps from its momentum source and always keeps the network's
     thermodynamics.
 
-    Built to pair with ``make_column_mlp_spectral_physics``, whose network has
-    no momentum head and therefore returns zero vor/div — a model with no
-    surface drag at all. Passing this in gives the learned arm the SAME
+    Built to pair with ``make_column_mlp_spectral_physics``, whose network's
+    only momentum physics is its learned wind head (zero at init) — a model
+    with no surface drag at all. Passing this in gives the learned arm the SAME
     momentum sink the classical arm gets by default
     (``TurbulenceConfig.scheme = "smagorinsky"``, inherited whenever a
     ``PhysicsConfig`` is built with only radiation and convection named), so

@@ -142,6 +142,8 @@ class SFNOPhysics(eqx.Module):
         # Unpack tendency channels
         dT_dt = out[..., spec.T_slice]
         dq_v_dt = out[..., spec.q_slice]
+        du_dt = out[..., spec.u_slice]
+        dv_dt = out[..., spec.v_slice]
 
         zeros_3d = jnp.zeros(T.shape, dtype=T.dtype)
         zeros_2d = jnp.zeros(p_s.shape, dtype=p_s.dtype)
@@ -173,6 +175,8 @@ class SFNOPhysics(eqx.Module):
                 lw_up_toa=lw_up_toa,
                 sw_down_toa=zeros_2d,
                 reference_3d=T,
+                du_dt=du_dt,
+                dv_dt=dv_dt,
             )
         )
 
@@ -292,6 +296,8 @@ def make_sfno_step_unified(
                 reference_3d=trad_out.dT_dt,
                 template=trad_out,
                 conv_prog=conv_prog,
+                du_dt=trad_out.du_dt + sfno_out.du_dt,
+                dv_dt=trad_out.dv_dt + sfno_out.dv_dt,
             )
         )
         return corrected, held_new, _trad_T_land
@@ -309,7 +315,7 @@ def make_sfno_step_unified_latlon(
     The SFNO's spherical-harmonic transforms need Gaussian quadrature
     latitudes, so the model's lat-lon prognostics are remapped onto the
     SFNO's own Gaussian grid, the SFNO predicts tendencies there, and the
-    dT/dt, dq_v/dt tendencies are remapped back to the lat-lon grid.
+    dT/dt, dq_v/dt, du/dt, dv/dt tendencies are remapped back to the lat-lon grid.
     Replacement mode only (the SFNO IS the physics; there is no lat-lon
     traditional pipeline to correct against in the WB scale trainer).
 
@@ -394,6 +400,8 @@ def make_sfno_step_unified_latlon(
                 lw_up_toa=zeros_2d,
                 sw_down_toa=zeros_2d,
                 reference_3d=T,
+                du_dt=to_latlon(sfno_out.du_dt),
+                dv_dt=to_latlon(sfno_out.dv_dt),
             )
         )
         if "conv_prog" in _PHYSICS_OUTPUT_FIELDS and conv_prog is not None:

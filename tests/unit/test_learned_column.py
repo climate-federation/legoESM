@@ -83,7 +83,7 @@ def test_neural_tendency_output_is_bounded():
                        key=jax.random.PRNGKey(7),
                        residual_scale=1e-5, tendency_cap=5.0)
     y = nn(jnp.full((nn.n_input,), 1.0e6))   # extreme input
-    n_rate = nn.nlev * 4 + 1
+    n_rate = nn.nlev * 6 + 1
     tend = y[:n_rate]
     ceil = nn.residual_scale * nn.tendency_cap
     assert float(jnp.abs(tend).max()) <= ceil * 1.0001   # saturated, finite

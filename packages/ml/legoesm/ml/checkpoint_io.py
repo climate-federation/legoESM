@@ -28,6 +28,8 @@ _KNOWN_LAYOUT_BREAKS = (
     "  - 2026-10-15: AIMIP spatial surface fields the selected schemes never "
     "read (e.g. z0 under the constant bulk law) are no longer built, so a "
     "checkpoint that still holds them has extra leaves.\n"
+    "  - 2026-10-30: the NeuralPhysics column network gained a u/v wind "
+    "output (final layer 4*nlev+6 -> 6*nlev+6 outputs).\n"
     "Those checkpoints are not migrated by design — retrain from scratch "
     "with the current code.")
 

@@ -530,7 +530,7 @@ class TestNeuralPhysics:
         assert nn.n_input == n_input
         x = jnp.ones(n_input)
         out = nn(x)
-        assert out.shape[0] == NLEV * 4 + 6
+        assert out.shape[0] == NLEV * 6 + 6
 
     def test_untrained_network_emits_exactly_zero_tendencies(self):
         """Epoch-0 stability contract (#797 neural_gcm smoke loss=nan).

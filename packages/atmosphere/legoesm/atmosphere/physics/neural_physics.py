@@ -20,8 +20,8 @@ The two surface-forcing features are what give the learned physics a
 prescribed-SST (AMIP) pathway: without them the network cannot respond
 to interannual SST variability (AIMIP Phase-1 protocol).
 
-Output per column (nlev * 4 + 6):
-    dT_dt, dq_v_dt, dq_c_dt, dq_r_dt at each level
+Output per column (nlev * 6 + 6):
+    dT_dt, dq_v_dt, dq_c_dt, dq_r_dt, du_dt, dv_dt at each level
     + precip, sw_net_sfc, lw_net_sfc, sw_up_toa, lw_up_toa, sw_down_toa
 
 Integration modes
@@ -139,6 +139,9 @@ _DEFAULT_TENDENCY_CAP = 5.0
 # grid pipeline's tanh cap bounds it).  The two paths diverge here by design;
 # unifying is a numerics change gated on a controlled column_nn re-run.
 _Q_HEAD_TENDENCY_FACTOR = 1.0e-4
+# Wind-head rescale (both adapters): with residual_scale 0.01 one raw unit is
+# 1e-4 m/s^2 and the tanh cap 5e-4 m/s^2 (~43 m/s per day).
+_WIND_HEAD_TENDENCY_FACTOR = 1.0e-2
 
 
 
@@ -182,6 +185,8 @@ def build_physics_output_kwargs(
     reference_3d,
     template=None,
     conv_prog=None,
+    du_dt=None,
+    dv_dt=None,
 ):
     kwargs = dict(
         dT_dt=dT_dt,
@@ -202,6 +207,9 @@ def build_physics_output_kwargs(
                 getattr(template, field_name, zeros_3d)
                 if template is not None else zeros_3d
             )
+    if du_dt is not None:
+        kwargs["du_dt"] = du_dt
+        kwargs["dv_dt"] = dv_dt
     if "conv_prog" in _PHYSICS_OUTPUT_FIELDS:
         conv_prog_value = (
             getattr(template, "conv_prog", conv_prog)
@@ -300,7 +308,8 @@ class NeuralPhysics(eqx.Module):
         # Then the optional groups, in pack order: static spatial features,
         # ERA5 surface-flux planes, learned embedding.
         self.n_input = nlev * 4 + 4 + self.n_static + self.n_flux + self.n_embed
-        self.n_output = nlev * 4 + 6   # tendencies per level + 6 surface fluxes
+        # T, q_v, q_c, q_r, u, v tendencies per level + precip + 5 fluxes
+        self.n_output = nlev * 6 + 6
         self.residual_scale = residual_scale
         self.flux_output_scale = flux_output_scale
         self.tendency_cap = tendency_cap
@@ -347,13 +356,13 @@ class NeuralPhysics(eqx.Module):
         for layer in self.layers[:-1]:
             x = jax.nn.gelu(layer(x))
         raw = self.layers[-1](x)
-        # Tendencies (4*nlev) + precip are per-second rates -> residual_scale,
+        # Tendencies (6*nlev) + precip are per-second rates -> residual_scale,
         # tanh-BOUNDED so a trained weight blow-up can never push a single
         # step's tendency past CFL into an inf/nan moist rollout (the NN-variant
         # training crash). The 5 radiation fluxes (sw_net_sfc, lw_net_sfc,
         # sw_up_toa, lw_up_toa, sw_down_toa) are O(100 W/m^2) ->
         # flux_output_scale (they do not drive the state, so left unbounded).
-        n_rate = self.nlev * 4 + 1  # tendencies + precip
+        n_rate = self.nlev * 6 + 1  # tendencies + precip
         cap = self.tendency_cap
         rate = self.residual_scale * cap * jnp.tanh(raw[:n_rate] / cap)
         return jnp.concatenate([rate, raw[n_rate:] * self.flux_output_scale])
@@ -419,7 +428,7 @@ def _unpack_column_output(
 
     Parameters
     ----------
-    y : jax.Array, shape (nlev * 4 + 6,)
+    y : jax.Array, shape (nlev * 6 + 6,)
     nlev : int
 
     Returns
@@ -432,7 +441,9 @@ def _unpack_column_output(
     dq_v_dt = y[nlev:2 * nlev]
     dq_c_dt = y[2 * nlev:3 * nlev]
     dq_r_dt = y[3 * nlev:4 * nlev]
-    sfc = y[4 * nlev:]
+    du_dt = y[4 * nlev:5 * nlev] * _WIND_HEAD_TENDENCY_FACTOR
+    dv_dt = y[5 * nlev:6 * nlev] * _WIND_HEAD_TENDENCY_FACTOR
+    sfc = y[6 * nlev:]
     return PhysicsOutput(
         **build_physics_output_kwargs(
             dT_dt=dT_dt,
@@ -446,6 +457,8 @@ def _unpack_column_output(
             lw_up_toa=sfc[4],
             sw_down_toa=sfc[5],
             reference_3d=dT_dt,
+            du_dt=du_dt,
+            dv_dt=dv_dt,
         )
     )
 
@@ -681,6 +694,8 @@ def make_neural_step_unified(
                 sw_down_toa=adapter.unflatten_2d(col_out.sw_down_toa),
                 reference_3d=T,
                 conv_prog=conv_prog,
+                du_dt=adapter.unflatten_3d(col_out.du_dt),
+                dv_dt=adapter.unflatten_3d(col_out.dv_dt),
             )
         )
 
@@ -773,11 +788,12 @@ def make_column_physics_fn(
 
     1. Spectral -> grid (SH synthesis)
     2. Flatten to columns, build surface forcing, forward (neural_column_forward)
-    3. Extract dT/dt (+ rescaled dq_v/dt) and SH-analyse back to spectral
+    3. Extract dT/dt (+ rescaled dq_v/dt, du/dt, dv/dt) and analyse back to
+       spectral (winds via the exact (u, v) -> (vor, div) inverse)
 
-    MOMENTUM (#1464).  The column MLP has no momentum head, so on its own this
-    adapter returns ZERO vor/div tendencies — the arm has **no surface
-    turbulent drag**.
+    MOMENTUM (#1464).  The network's wind head is ADDED to the vor/div of
+    ``momentum_physics_fn``; without one the network is the only momentum
+    physics, and the arm has **no surface turbulent drag**.
 
     STATED PRECISELY, because the first version of this note overclaimed and
     adversarial review refuted it: this is NOT "no momentum sink of any kind".
@@ -795,8 +811,8 @@ def make_column_physics_fn(
     decisive test is a controlled re-score, not this docstring.
 
     Pass ``momentum_physics_fn`` — any ``physics_fn(state, grid, sigma_coord)``
-    returning a tendency state — to supply the vor/div tendencies the network
-    cannot.  ``None`` keeps the historical zero behaviour bit-identically.
+    returning a tendency state — to add a physical drag to the network's own
+    wind tendency.
 
     ``lnps`` is deliberately NOT taken from that source.  Surface stress has no
     surface-pressure tendency; the PE already forms ``dlnps/dt`` from
@@ -826,7 +842,7 @@ def make_column_physics_fn(
         SpectralHydrostaticState,
         spectral_pe_to_grid,
     )
-    from legoesm.grids.gaussian import sh_analysis_3d
+    from legoesm.grids.gaussian import sh_analysis_3d, vordiv_from_uv_exact_3d
     from legoesm.atmosphere.physics.radiation.solar import cos_zenith_angle
     from legoesm.atmosphere.physics._shared import zero_like_tracers
 
@@ -943,12 +959,12 @@ def make_column_physics_fn(
         dT_hat = sh_analysis_3d(grid_, dT_dt.astype(jnp.float64))
 
         # Column physics: T tendency (spectral) + q_v tendency (grid-space
-        # tracer path); zero for vor, div, lnps.  Mirror remaining tracers as
+        # tracer path); vor/div below; zero lnps.  Mirror remaining tracers as
         # zeros so orchestrator + dycore RHS see a consistent tendency pytree.
         zero_3d = jnp.zeros_like(state.vor_hat.data)
         zero_2d = jnp.zeros_like(state.lnps_hat.data)
 
-        # Momentum + lnps: from the supplied physics when given, else zero
+        # Drag vor/div: from the supplied physics when given, else zero
         # (#1464 -- see the factory docstring for why zero is not neutral).
         # Python-level branch on a build-time argument, so only one side is
         # ever traced (the CLAUDE.md feature-gating exception).
@@ -961,6 +977,15 @@ def make_column_physics_fn(
                     momentum_physics_fn(state, grid_, sigma_coord))
             vor_t = _mom.vor_hat.data
             div_t = _mom.div_hat.data
+        # Network wind head (outputs 4*nlev:6*nlev), ADDED to the drag.
+        du_dt = (y[:, 4 * nlev:5 * nlev] * _WIND_HEAD_TENDENCY_FACTOR
+                 ).reshape(n_lat, n_lon, nlev)
+        dv_dt = (y[:, 5 * nlev:6 * nlev] * _WIND_HEAD_TENDENCY_FACTOR
+                 ).reshape(n_lat, n_lon, nlev)
+        dvor_nn, ddiv_nn = vordiv_from_uv_exact_3d(
+            grid_, du_dt.astype(jnp.float64), dv_dt.astype(jnp.float64))
+        vor_t = vor_t + dvor_nn.astype(vor_t.dtype)
+        div_t = div_t + ddiv_nn.astype(div_t.dtype)
         # lnps stays ZERO regardless of the source — see the factory docstring
         # (a momentum source has no surface-pressure tendency, and injecting a
         # mean dlnps/dt here would break dry-mass conservation).

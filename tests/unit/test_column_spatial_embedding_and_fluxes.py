@@ -142,7 +142,7 @@ def test_flag_on_forward_wrong_width_raises():
 def test_flag_off_forward_with_none_is_legacy_path():
     net = _mini_net()
     out = nph.neural_column_forward(net, extra_col=None, **_columns(net))
-    assert out.shape == (5, NLEV * 4 + 6)
+    assert out.shape == (5, NLEV * 6 + 6)
     assert jnp.all(out == 0)  # zero-initialised last layer
 
 
@@ -150,7 +150,7 @@ def test_flag_on_forward_correct_width_runs():
     net = _mini_net(spatial_embedding=True, era5_surface_fluxes=True, n_columns=5)
     extra = jnp.zeros((5, net.n_extra_dyn))
     out = nph.neural_column_forward(net, extra_col=extra, **_columns(net))
-    assert out.shape == (5, NLEV * 4 + 6)
+    assert out.shape == (5, NLEV * 6 + 6)
 
 
 # ------------------------------------------------- physics_fn assembly
