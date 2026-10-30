@@ -76,7 +76,9 @@ all of them at those values reproduce the oracle (<= 1e-10):
 * ``denom_floor_sharpness`` -- the ``ABS(DENOM) < 0.01`` floors, blended in
   the reciprocal (see :func:`_floor_recip`);
 * ``nent_count_sharpness``, ``bsum_sharpness`` -- the ``NENT = 0`` /
-  ``BSUM < 1e-18`` local-detrainment switch;
+  ``BSUM < 1e-18`` local-detrainment switch (the BSUM sigmoid is centred
+  ``_BSUM_CENTRE_WIDTHS/bsum_sharpness`` above 1e-18, so a row with BSUM
+  exactly 0 takes local detrainment to ``sigmoid(-12)``, not one half);
 * ``asij_floor_sharpness`` -- ``MAX(ASIJ, 1e-21)``;
 * ``sort_sharpness`` -- the ``DO 200`` SMIN march (its min/max/abs and the
   strict SMIN tests) and the ``[0, 1]`` clip of the stored ``SIJ``.
@@ -204,6 +206,11 @@ _DEFRAC_FLOOR = 0.001
 # --- DO 200 normalisation floors (convect43c.f l.690, 698) ---
 _ASIJ_FLOOR = 1.0e-21
 _BSUM_MIN = 1.0e-18
+# BSUM sigmoid centre offset in transition widths (reviewer pick 2026-10-30,
+# codex + GLM): centred on 1e-18 a row with BSUM exactly 0 got sigmoid(0) =
+# 1/2 at every finite sharpness (measured: one-field FT gap 0.71 on fixture
+# column 12 for 1e4 <= s <= 1e16); 12 widths above it gives 8.7e-6.
+_BSUM_CENTRE_WIDTHS = 12.0
 # Rows with ASIJ above this many floors divide by ASIJ directly (the smooth
 # floor equals ASIJ there to < 1e-30 relative at any sharpness >= 1/10).
 _ASIJ_SPLIT = 1.0e3
@@ -712,7 +719,8 @@ def emanuel_mixing_tendencies(
     # weight w_local = 1 - [NENT > 0]*[BSUM >= 1e-18], each factor smoothed.
     has_ent = ((nent > 0).astype(dtype) if _hard(nent_count_sharpness)
                else sigmoid_switch(nent_soft - 0.5, nent_count_sharpness))
-    w_local = 1.0 - has_ent * sigmoid_switch(bsum - _BSUM_MIN, bsum_sharpness)
+    w_local = 1.0 - has_ent * sigmoid_switch(
+        bsum - _BSUM_MIN - _BSUM_CENTRE_WIDTHS / bsum_sharpness, bsum_sharpness)
     # Blended on the diagonal; with both fields at inf, wl is exactly 0/1 and
     # the blend is the oracle's assignment.
     wl = jnp.where(eye, w_local[:, :, None], 0.0)

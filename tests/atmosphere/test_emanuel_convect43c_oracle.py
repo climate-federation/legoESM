@@ -317,39 +317,105 @@ def test_check_grads_at_default_sharpness(fx, v):
             check_grads(f, (x,), order=1, modes=("rev",), eps=eps)
 
 
-# RULE 5 per-switch gradient test.  A switch whose transition no fixture
-# column reaches is exercised on a column CONSTRUCTED from a convecting
-# fixture column by one-parameter families (reviewer pick 2026-10-29):
-# uniform warming/cooling at fixed RH, scaled humidity, the carried CBMF, and
-# a cooled upper troposphere.  Only a switch no such column can reach is
-# listed, with the reason.
+# RULE 5 per-switch gradient test, at the FULL default config.  Each switch
+# is exercised on a column built to sit inside its transition: a fixture
+# column, or a one-parameter family of a fixture column (``fix``:
+# the column itself; ``warm``: uniform warming at fixed RH; ``qall``/``qlow``:
+# humidity scaled by 10**a everywhere / below 850 hPa; ``qnear``: humidity
+# scaled by 1 + a; ``free``: warming above 850 hPa; ``cold``: 180 + a K above
+# 300 hPa; ``band``: two full levels moved inside the downdraught taper band
+# edge; ``dT``: a solved temperature increment)
+# with the carried CBMF ``cb``.  Columns found by searching ~5200 such
+# columns and bisecting onto the switch argument (SLURM probes
+# sw_probe4.py / sw_probe2.py / sw_probe3.py, 2026-10-30, full default config, fp64).
+# defrac_floor: fixture column 10 with its level temperatures Newton-solved
+# (sw_probe3.py, against the scheme's own BY) so that INB stays fixed, CAPEM
+# = 2e-4 on one level and BYP = -1e-3, the MAX(CAPEM - CAPE, 0.001) floor
+# (codex construction, reviewer pick 2026-10-30); surface-last, K.
+DEFRAC_DT_K = (
+    0.0, 0.0, -4.87042, -5.609691, -6.15788, -6.53336,
+    -6.855447, -7.181987, -7.531112, -7.846367, -8.068969, -4.301848,
+    6.644441, 17.472228, 27.70961, 27.894709, 25.696573, 23.053171,
+    20.070189, 17.151664, 14.161767, 11.320178, 8.92128, 7.059824,
+    3.94143, 3.405363, 1.097448, 0.279503, 0.0, 0.0,
+    0.0, 0.0,
+)
+SWITCH_COLUMNS = {
+    "source_temperature_gate_sharpness": ("warm", 0, -28.0, 1.0e-4),
+    "source_humidity_gate_sharpness": ("cold", 0, 6.0, 0.01),
+    "plcl_gate_sharpness": ("cold", 2, -5.0, 0.01),
+    "stable_exit_sharpness": ("qnear", 1, -0.15500000000000003, 0.0),
+    "cold_start_sharpness": ("warm", 9, -16.5, 1.0e-4),
+    "cbmf_sharpness": ("warm", 9, -10.5, 1.0e-4),
+    "precip_efficiency_sharpness": ("qlow", 9, 0.2499999999999991, 0.0),
+    "condensate_sharpness": ("warm", 10, -1.5, 0.01),
+    "frac_sharpness": ("cold", 0, 0.0, 0.01),
+    "nent_count_sharpness": ("free", 5, 10.0, 0.0),
+    "bsum_sharpness": ("cold", 2, -14.0, 0.01),
+    "sort_sharpness": ("warm", 10, 10.0, 0.0),
+    "rain_placement_sharpness": ("free", 9, -9.4, 0.0),
+    "rain_column_sharpness": ("free", 5, -1.4000000000000004, 0.0),
+    "tlift_freeze_sharpness": ("warm", 10, -26.0, 0.01),
+    "qsat_floor_sharpness": ("cold", 5, 0.0, 0.01),
+    "downdraft_evap_sharpness": ("warm", 10, -19.0, 0.01),
+    "downdraft_dhdp_sharpness": ("warm", 10, 4.0, 0.01),
+    "downdraft_mp_sharpness": ("qnear", 5, -0.020000000000000018, 0.01),
+    "downdraft_taper_band_sharpness": ("band", 10, (5.0, 20.0), 0.0),
+    "defrac_floor_sharpness": ("dT", 10, DEFRAC_DT_K, 0.0),
+    # SCRIT bisected onto 0 at level 8 (surface-first, 0-based); thin margin
+    # (output change 1.9e-9): the floor moves SCRIT by at most ln2/1e3.
+    "scrit_floor_sharpness": ("free", 1, 1.49296875, 0.01),
+}
 UNREACHABLE = {
     "tlift_floor_sharpness": "TLIFT's MAX(TG, 35 K) acts only on a parcel colder than 35 K",
+    # Measured (sw_probe2.py, bisection onto the switch argument over 15
+    # columns x 5 families x 3 carried CBMF): best output change 0.0; where
+    # ASIJ < 1e-21 the row's weights are < 1e-21 too, so MENT is 1e-21-scale
+    # at both limits.  Its smooth form is tested at the helper below.
+    "asij_floor_sharpness": "MAX(ASIJ, 1e-21) binds only on rows whose MENT is ~1e-21",
+    # Measured as above: ~800 bisected DENOM = -0.01 crossings, best output
+    # change 8e-14; with |DENOM| ~ 0.01, SIJ ~ 1e5 is outside the 0 < SIJ <
+    # 0.9 band at both limits.  Smooth form tested at the helper below.
+    "denom_floor_sharpness": "|DENOM| ~ 0.01 gives SIJ ~ 1e5, outside the entrainment band",
 }
+# Unreached switches: the smooth form the scheme calls, at its default
+# sharpness, with inputs inside the transition (reviewer pick 2026-10-30).
+HELPER_TESTED = ("asij_floor_sharpness", "denom_floor_sharpness")
 
 
-def _candidate_columns(fx):
+def _switch_column(fx, kind, c, a, cb):
     from legoesm.atmosphere.physics.convection._emanuel_mixing import _oracle_qsat
 
-    T, q, pf, ph = (np.asarray(fx[k], np.float64) for k in ("T", "q", "p_full", "p_half"))
-    conv = np.flatnonzero(np.isin(fx["dd_cbw_iflag"], (1, 4)) & (fx["dd_cbw_cbmf"] > 0))
-    c = int(conv[0])
-    qs = lambda TT: np.asarray(_oracle_qsat(jnp.asarray(TT), jnp.asarray(pf[c:c + 1])))[0]
-    cols = [(T[i], q[i], pf[i], ph[i], cb) for i in range(len(T)) for cb in (0.0, 0.01)]
-    rh = q[c] / qs(T[c][None])
-    for a in np.linspace(-60.0, 10.0, 29):                 # warm/cool at fixed RH
-        Ta = T[c] + a
-        for cb in (0.0, 0.01):
-            cols.append((Ta, rh * qs(Ta[None]), pf[c], ph[c], cb))
-    for a in np.linspace(-7.0, 0.3, 30):                   # scaled humidity
-        cols.append((T[c], q[c] * 10.0 ** a, pf[c], ph[c], 0.01))
-    for a in np.linspace(-8.0, -1.0, 29):                  # carried CBMF
-        cols.append((T[c], q[c], pf[c], ph[c], 10.0 ** a))
-    upper = pf[c] < 3.0e4
-    for a in np.linspace(-6.0, 6.0, 25):                   # cold upper troposphere
-        cols.append((np.where(upper, 180.0 + a, T[c]), q[c], pf[c], ph[c], 0.01))
-    return tuple(jnp.asarray(np.stack([x[k] for x in cols])) for k in range(4)) + (
-        jnp.asarray([x[4] for x in cols]),)
+    T, q, pf, ph = (np.asarray(fx[k][c], np.float64) for k in ("T", "q", "p_full", "p_half"))
+    qs = lambda TT: np.asarray(_oracle_qsat(jnp.asarray(TT[None]), jnp.asarray(pf[None])))[0]
+    if kind == "warm":
+        T, q = T + a, q / qs(T) * qs(T + a)
+    elif kind == "qall":
+        q = q * 10.0 ** a
+    elif kind == "qlow":
+        q = np.where(pf > 8.5e4, q * 10.0 ** a, q)
+    elif kind == "qnear":
+        q = q * (1.0 + a)
+    elif kind == "free":
+        T = np.where(pf < 8.5e4, T + a, T)
+    elif kind == "cold":
+        T = np.where(pf < 3.0e4, 180.0 + a, T)
+    elif kind == "dT":
+        T = T + np.asarray(a)
+    elif kind == "band":
+        # Two levels just inside the downdraught taper band edge P > 0.949 P(1):
+        # its top at 0.949 P(1) + a[0] Pa and the level below a[1] Pa lower,
+        # the half levels re-centred (one level near the edge sits at JTT,
+        # where the band blend is the identity).
+        thr = 0.949 * pf[-1]
+        k = int(np.flatnonzero(pf > thr)[0])
+        pf, ph = pf.copy(), ph.copy()
+        pf[k], pf[k + 1] = thr + a[0], thr + a[0] + a[1]
+        ph[k], ph[k + 1] = 0.5 * (pf[k - 1] + pf[k]), 0.5 * (pf[k] + pf[k + 1])
+        assert pf[k - 1] < ph[k] < pf[k] < ph[k + 1] < pf[k + 1] < ph[k + 2]
+    elif kind != "fix":
+        raise ValueError(kind)
+    return tuple(jnp.asarray(x)[None] for x in (T, q, pf, ph)) + (jnp.asarray([cb]),)
 
 
 def _col_outputs(cfg, T, q, pf, ph, cb):
@@ -359,43 +425,79 @@ def _col_outputs(cfg, T, q, pf, ph, cb):
                             1.0e2 * pr[:, -1:]], axis=-1)
 
 
+def test_switch_columns_cover_every_field():
+    assert set(SWITCH_COLUMNS) | set(UNREACHABLE) == set(RULE5_FIELDS)
+    assert not set(SWITCH_COLUMNS) & set(UNREACHABLE)
+    assert set(HELPER_TESTED) <= set(UNREACHABLE)
+
+
+@pytest.mark.parametrize("field", HELPER_TESTED)
+def test_unreached_switch_smooth_form_at_default(field):
+    """RULE 5 gradient test for a switch no column reaches: the helper the
+    scheme calls for it, at the scheme's default sharpness, on inputs inside
+    the transition: check_grads passes, the derivative differs from the hard
+    one, and at inf it is exactly the oracle's form."""
+    from jax.test_util import check_grads
+    from legoesm.atmosphere.physics.convection._emanuel_mixing import _floor_recip, _smax
+
+    cfg = EmanuelConfig()
+    s = getattr(cfg, field)
+    if field == "asij_floor_sharpness":       # MAX(ASIJ, 1e-21) in floor units
+        f = lambda x, s_: _smax(x, 1.0, s_)
+        x = jnp.linspace(1.0 - 3.0 / s, 1.0 + 3.0 / s, 13)
+        oracle = lambda x: jnp.maximum(x, 1.0)
+    else:                                     # 1/D after IF(|D| < floor) D = floor
+        fl = cfg.denom_floor
+        f = lambda x, s_: _floor_recip(x, fl, s_)
+        w = jnp.linspace(-3.0 / s, 3.0 / s, 7)
+        x = jnp.concatenate([-fl + w, fl + w])
+        oracle = lambda x: 1.0 / jnp.where(jnp.abs(x) < fl, fl, x)
+    check_grads(lambda x: f(x, s), (x,), order=1, modes=("rev",), eps=1.0e-3 / s)
+    gs = jax.vmap(jax.grad(lambda v: f(v, s)))(x)
+    gh = jax.vmap(jax.grad(lambda v: f(v, math.inf)))(x)
+    assert np.all(np.isfinite(np.asarray(gs))) and float(jnp.max(jnp.abs(gs))) > 0.0
+    assert float(jnp.max(jnp.abs(gs - gh))) > 1.0e-6 * float(jnp.max(jnp.abs(gh))), field
+    np.testing.assert_array_equal(np.asarray(f(x, math.inf)), np.asarray(oracle(x)))
+
+
 @pytest.mark.parametrize("field", RULE5_FIELDS)
 def test_each_switch_carries_gradient_at_default(fx, field):
-    """RULE 5 gradient test per switch: all RULE 5 fields at inf except
-    ``field`` at its default.  On the candidate column where that changes the
-    output most, (i) the change is real (> 1e-9 of the output scale), (ii)
-    check_grads (order 1, rev) passes w.r.t. T, q and the carried CBMF, and
-    (iii) the gradient differs from the all-hard gradient."""
+    """RULE 5 gradient test per switch at the full default config, on the
+    column built for that switch: (i) setting ``field`` alone to inf changes
+    the output (> 1e-9 of its scale), so the column sits inside the
+    switch's transition; (ii) check_grads (order 1, rev) passes w.r.t. T, q
+    and the carried CBMF; (iii) the gradient differs from the one with
+    ``field`` alone at inf."""
     from jax.test_util import check_grads
 
     if field in UNREACHABLE:
         pytest.skip(UNREACHABLE[field])
-    T, q, pf, ph, cb = _candidate_columns(fx)
-    hard = _cfg("dd")
-    soft = hard._replace(**{field: getattr(EmanuelConfig(), field)})
-    oh = np.asarray(_col_outputs(hard, T, q, pf, ph, cb))
+    T, q, pf, ph, cb = _switch_column(fx, *SWITCH_COLUMNS[field])
+    soft = EmanuelConfig()
+    hard = soft._replace(**{field: math.inf})
     os_ = np.asarray(_col_outputs(soft, T, q, pf, ph, cb))
-    scale = np.maximum(np.max(np.abs(oh), axis=1), 1e-300)
-    d = np.max(np.abs(os_ - oh), axis=1) / scale
-    k = int(np.nanargmax(d))
-    print(f"{field}: exercised on candidate column {k}, output change {d[k]:.3e}")
-    assert d[k] > 1.0e-9, (field, d[k])
-    Tk, qk, pk, hk, cbk = T[k:k + 1], q[k:k + 1], pf[k:k + 1], ph[k:k + 1], cb[k:k + 1]
+    oh = np.asarray(_col_outputs(hard, T, q, pf, ph, cb))
+    # Normalised by the larger of the two outputs, so a column the hard
+    # switch rejects (output 0) cannot pass on a vanishing soft output.
+    d = float(np.max(np.abs(os_ - oh))
+              / max(np.max(np.abs(oh)), np.max(np.abs(os_)), 1e-300))
+    print(f"{field}: column {SWITCH_COLUMNS[field]}, output change {d:.3e}")
+    assert d > 1.0e-9, (field, d)
 
     def loss(cfg):
-        return lambda T_, q_, c_: jnp.sum(_col_outputs(cfg, T_, q_, pk, hk, c_))
+        return lambda T_, q_, c_: jnp.sum(_col_outputs(cfg, T_, q_, pf, ph, c_))
 
     f = jax.jit(loss(soft))
+    args = [T, q, cb]
     for argnum, eps in ((0, CHECK_GRADS_EPS["T"]), (1, CHECK_GRADS_EPS["q"]),
                         (2, CHECK_GRADS_EPS["cb"])):
-        args = [Tk, qk, cbk]
         g = lambda x, i=argnum: f(*[x if j == i else a for j, a in enumerate(args)])
         check_grads(g, (args[argnum],), order=1, modes=("rev",), eps=eps)
-    gs = jax.grad(f, argnums=(0, 1, 2))(Tk, qk, cbk)
-    gh = jax.grad(jax.jit(loss(hard)), argnums=(0, 1, 2))(Tk, qk, cbk)
+    gs = jax.grad(f, argnums=(0, 1, 2))(*args)
+    gh = jax.grad(jax.jit(loss(hard)), argnums=(0, 1, 2))(*args)
     diff = max(float(jnp.max(jnp.abs(a - b))) for a, b in zip(gs, gh))
-    ref = max(float(jnp.max(jnp.abs(b))) for b in gh)
-    print(f"{field}: max |grad(default) - grad(hard)| = {diff:.3e} (hard scale {ref:.3e})")
+    ref = max(float(jnp.max(jnp.abs(b))) for b in gs + gh)
+    print(f"{field}: max |grad(default) - grad(field inf)| = {diff:.3e} (scale {ref:.3e})")
     assert diff > 1.0e-12 * max(ref, 1e-300), field
 
 
