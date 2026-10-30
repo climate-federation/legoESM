@@ -250,6 +250,13 @@ rrtmgp_gpoint_batch_size: 0          # CPU: one g-point at a time (code default 
                                      # cores: radiation step 13.8 s at 16, 7.9 s at 0
                                      # (~139 s per simulated day); fluxes differ only by
                                      # summation order (<= 6.1e-4 W/m2).
+rrtmgp_use_scan: true                # scan the RRTMGP column recurrence (code default:
+                                     # unrolled on CPU, scan on GPU, so GPU is unchanged).
+                                     # Measured 2026-10-29, this deck, MPAS res6 CPU: step
+                                     # -4% at 1 node, -7% at 8; round-off only (fp32 fluxes
+                                     # <= 1.1e-7 of max after one step), dry mass unchanged,
+                                     # 127-step divergence (0.66 K) matched by a 1e-14 T
+                                     # perturbation control (0.27 K).  User 2026-10-30.
 hard_sat_ice_curve: false          # the ice-curve blend of that same
                                    # post-step drain; inert once the drain
                                    # is off, set explicitly so no row rests
