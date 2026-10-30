@@ -602,6 +602,9 @@ class OceanColumnModel:
         physics_fn = make_ocean_physics(
             physics_config,
             apply_vertical_diffusion=not implicit_vertical_mixing,
+            # The SCM's q_net is non-solar and this scheme deposits sw_down,
+            # so ePBL can price the penetrating shortwave (#2178).
+            epbl_shortwave=physics_config.shortwave_penetration,
         )
         return cls(
             physics_fn=physics_fn, state=state, grid=grid, z_coord=z_coord,

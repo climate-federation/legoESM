@@ -20,5 +20,14 @@
     "{case}_hml_hourly": "ePBL_h_ML at hours 1..8 [m]",
     "{case}_time_h": "diag times [h]"
   },
-  "sensitivity_checks": "q-200_dt1200: HBBL=1/HMIX_FIXED=1 and CDRAG=0 each give bit-identical T (u changes by 3e-4 m/s for HBBL/HMIX_FIXED)"
+  "sensitivity_checks": "q-200_dt1200: HBBL=1/HMIX_FIXED=1 and CDRAG=0 each give bit-identical T (u changes by 3e-4 m/s for HBBL/HMIX_FIXED)",
+  "shortwave_cases": {
+    "issue": "climate-federation/legoESM#2178 (penetrating shortwave in ePBL); same MOM6/FMS build and toolchain as above",
+    "npz": "mom6_epbl_scm_sw_0e9a561.npz, same key layout; cases sw200_q{Q}_dt{DT}, Q in -200, 0; DT in 1200, 300",
+    "inputs": "MOM_input + MOM_override_sw200_q{Q}_dt{DT}; BUOY_CONFIG = file reading forcing.nc from make_sw_forcing.py forcing.nc 200.0 Q (constant 2x2: SW = 200 W/m2, sensible = Q W/m2, both + into ocean; LW, evap, latent, precip, runoff = 0)",
+    "optics": "EXP_OPACITY_SCHEME = DOUBLE_EXP, PEN_SW_NBANDS = 2, PEN_SW_SCALE = 0.35 m, PEN_SW_SCALE_2ND = 23 m, SW_1ST_EXP_RATIO = 0.58 (legoESM Jerlov type I)",
+    "parameter_record": "MOM_parameter_doc_sw200.all (case sw200_q-200_dt1200)",
+    "slurm_jobs": {"runs": 28592698, "pack_and_measure": 28592876, "measure_profile": 28593015},
+    "checks": "8 h diag bit-identical to RESTART Temp and identical in all 2x2 columns (asserted when packed)"
+  }
 }

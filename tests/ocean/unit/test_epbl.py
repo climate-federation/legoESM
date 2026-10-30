@@ -1181,3 +1181,170 @@ def test_kpp_sqrt_s_eos_gradient_finite_at_zero_salinity(path):
     grad = jax.grad(lambda s: jnp.sum(k_v(s)))(S0)
     assert bool(jnp.all(jnp.isfinite(k_v(S0))))
     assert bool(jnp.all(jnp.isfinite(grad)))
+
+
+# --- penetrating shortwave in the TKE forcing and buoyancy (#2178) ----------
+
+def _mom6_pen_tke_loop(sw_bands, inv_scale, h, dsv_dt, dt, c_sw, g, rho0):
+    """Line-by-line numpy transcription of MOM6 absorbRemainingSW's TKE
+    (MOM_opacity.F90, adjustAbsorptionProfile=.false.), without its
+    small-heating absorption threshold."""
+    pen = np.asarray(sw_bands, float) * dt / (rho0 * c_sw)
+    tke = np.zeros(len(h))
+    g_hconv2 = g * rho0**2
+    for k in range(len(h)):
+        for n in range(len(pen)):
+            od = h[k] * inv_scale[n]
+            sw_trans = math.exp(-od)
+            heat = pen[n] * (1.0 - sw_trans)
+            if od > 1e-2:
+                fac = (od * (1.0 + sw_trans) - 2.0 * (1.0 - sw_trans)) / (
+                    od * (1.0 - sw_trans))
+            else:
+                fac = (od / 6.0) * (1.0 - od**2 / 60.0)
+            tke[k] -= heat * dsv_dt[k] * (0.5 * h[k] * g_hconv2) * fac
+            pen[n] *= sw_trans
+    return tke
+
+
+_PEN_H = np.array([1.0e-3, 0.5, 1.0, 2.0, 5.0, 1.0e-3, 10.0, 30.0])
+
+
+def test_penetrating_sw_tke_matches_mom6_loop():
+    """Both shape-factor branches (1 mm layers take the Taylor form) and the
+    band attenuation through the layers above."""
+    from legoesm.ocean.physics.vertical_mixing.epbl import penetrating_sw_tke
+    rng = np.random.default_rng(0)
+    dsv = 2e-7 * (1.0 + rng.random(_PEN_H.size))
+    sw, inv = np.array([116.0, 84.0]), np.array([1 / 0.35, 1 / 23.0])
+    kw = dict(dt=1200.0, c_sw=3994.0, g=constants.g, rho0=1025.0)
+    want = _mom6_pen_tke_loop(sw, inv, _PEN_H, dsv, **kw)
+    got = penetrating_sw_tke(
+        jnp.asarray(sw), jnp.asarray(inv), jnp.asarray(_PEN_H),
+        jnp.asarray(dsv), c_sw=kw["c_sw"], dt=kw["dt"], g=kw["g"],
+        rho_0=kw["rho0"])
+    np.testing.assert_allclose(np.asarray(got), want, rtol=1e-12, atol=0.0)
+    assert np.all(want <= 0.0) and np.any(want < 0.0)   # heating stabilises
+
+
+def test_penetrating_sw_tke_gradients_through_both_branches():
+    from jax.test_util import check_grads
+    from legoesm.ocean.physics.vertical_mixing.epbl import penetrating_sw_tke
+    inv = jnp.asarray([1 / 0.35, 1 / 23.0])
+    dsv = jnp.full(_PEN_H.size, 2e-7)
+
+    def f(sw, h):
+        return penetrating_sw_tke(sw, inv, h, dsv, c_sw=3994.0, dt=1200.0)
+
+    check_grads(f, (jnp.asarray([116.0, 84.0]), jnp.asarray(_PEN_H)),
+                order=2, modes=("fwd", "rev"))
+    g = jax.grad(lambda h: jnp.sum(f(jnp.asarray([116.0, 84.0]), h)))(
+        jnp.asarray(_PEN_H))
+    assert np.all(np.isfinite(np.asarray(g))) and np.any(np.asarray(g) != 0)
+
+
+def _sw_scm(sw_cfg, sw_down=200.0, q_net=-100.0):
+    from legoesm.ocean.physics.combined import OceanPhysicsConfig
+    from legoesm.ocean.physics.convection.config import OceanConvectionConfig
+    from legoesm.ocean.scm import OceanColumnModel
+    from legoesm.ocean.scm_forcing import OceanSCMForcing
+    from legoesm.ocean.vertical import create_ocean_z_star
+    nz = 20
+    phys = OceanPhysicsConfig(
+        vertical_mixing=VerticalMixingConfig(
+            scheme="epbl", epbl=EPBLConfig(dt_s=1200.0)),
+        convection=OceanConvectionConfig(scheme="none"),
+        shortwave_penetration=sw_cfg)
+    forcing = OceanSCMForcing(
+        f_c=2.0 * OMEGA * math.sin(math.radians(40.0)),
+        tau_x=lambda t: 0.2, tau_y=lambda t: 0.0, q_net=lambda t: q_net,
+        e_minus_p=lambda t: 0.0,
+        sw_down=None if sw_down is None else (lambda t: sw_down))
+    return OceanColumnModel.create(
+        nlev=nz, dt=1200.0,
+        T_profile=20.0 - 5.0 * (np.arange(nz) + 0.5) / nz, S_profile=35.0,
+        physics_config=phys,
+        z_coord=create_ocean_z_star(n_levels=nz, H_max=20.0, dz_surface=1.0,
+                                    dz_deep=1.0),
+        latitude_deg=40.0, forcing=forcing, implicit_vertical_mixing=True)
+
+
+def test_scm_shortwave_enters_epbl_buoyancy_and_tke(monkeypatch):
+    """MOM6 applyBoundaryFluxesInOut: buoyancy from netHeat + netPen (q_net +
+    sw_down here), cTKE = top-layer non-penetrating term + the penetrating
+    shortwave's per-layer energy for the scheme's Jerlov bands."""
+    import types
+    from legoesm.ocean.physics.shortwave_penetration import (
+        JERLOV_TYPES, ShortwavePenetrationConfig)
+    from legoesm.ocean.physics.vertical_mixing import integration
+    from legoesm.ocean.physics.vertical_mixing.epbl import (
+        epbl_vertical_mixing as real, penetrating_sw_tke)
+    from legoesm.ocean.physics.vertical_mixing._shared import (
+        surface_buoyancy_flux)
+    from legoesm.ocean.constants_config import ConstantsConfig
+    from legoesm.ocean.scm_forcing import build_ocean_surface_forcing_struct
+    cc = ConstantsConfig()
+    scm = _sw_scm(ShortwavePenetrationConfig(water_type="I"))
+    st = scm.state
+    sfc = build_ocean_surface_forcing_struct(
+        scm.forcing, 0.0, st.eta.data.shape, st.T.data.dtype)
+    seen = {}
+
+    def spy(*a, **kw):
+        seen.update(kw, args=a)
+        return real(*a, **kw)
+
+    monkeypatch.setattr(integration, "epbl_vertical_mixing", spy)
+    scm.physics_fn(st, types.SimpleNamespace(grid_lat=jnp.deg2rad(40.0)),
+                   scm.z_coord, surface_forcing=sfc)
+    _, _, T, S, dSV_dT, dSV_dS, h, cfg = seen["args"]
+    B_f, _, _ = surface_buoyancy_flux(
+        sfc.q_net + sfc.sw_down, sfc.freshwater, None, T[..., 0], S[..., 0],
+        g=cc.g, rho_0=cc.rho_0, c_sw=cc.c_sw, real_salt_in_qs=True,
+        rho_0_norm=True)
+    np.testing.assert_allclose(np.asarray(seen["B_flux"]), np.asarray(-B_f),
+                               rtol=1e-12, atol=0.0)
+    jer = JERLOV_TYPES["I"]
+    sw_b = sfc.sw_down[..., None] * jnp.asarray([jer.R, 1.0 - jer.R])
+    want = penetrating_sw_tke(
+        sw_b, jnp.asarray([1 / jer.zeta1, 1 / jer.zeta2]), h, dSV_dT,
+        c_sw=cc.c_sw, dt=cfg.dt_s, g=cc.g, rho_0=cc.rho_0)
+    want = want.at[..., 0].add(surface_tke_forcing(
+        sfc.q_net, -S[..., 0] * sfc.freshwater, h[..., 0], dSV_dT[..., 0],
+        dSV_dS[..., 0], g=cc.g, rho_0=cc.rho_0, c_sw=cc.c_sw, dt=cfg.dt_s))
+    np.testing.assert_allclose(np.asarray(seen["tke_forcing"]),
+                               np.asarray(want), rtol=1e-12, atol=1e-300)
+    assert float(seen["tke_forcing"][..., 5].ravel()[0]) < 0.0
+
+
+def test_shortwave_without_a_penetration_scheme_raises():
+    scm = _sw_scm(None)
+    with pytest.raises(ValueError, match="sw_down"):
+        scm.step()
+
+
+def test_shortwave_with_a_non_jerlov_scheme_raises():
+    from legoesm.ocean.physics.shortwave_penetration import (
+        ShortwavePenetrationConfig)
+    scm = _sw_scm(ShortwavePenetrationConfig(scheme="sweeney_2band"))
+    with pytest.raises(NotImplementedError, match="jerlov_2band"):
+        scm.step()
+
+
+def test_shortwave_outside_the_scm_raises():
+    """Lat-lon lanes build ePBL without epbl_shortwave (their q_net already
+    holds the solar heat), so a supplied sw_down must not be ignored."""
+    import types
+    from legoesm.ocean.physics.vertical_mixing.integration import (
+        make_vertical_mixing_physics)
+    from legoesm.ocean.scm_forcing import build_ocean_surface_forcing_struct
+    scm = _sw_scm(None)
+    fn = make_vertical_mixing_physics(
+        VerticalMixingConfig(scheme="epbl", epbl=EPBLConfig(dt_s=1200.0)),
+        apply_diffusion=False)
+    st = scm.state
+    sfc = build_ocean_surface_forcing_struct(
+        scm.forcing, 0.0, st.eta.data.shape, st.T.data.dtype)
+    with pytest.raises(ValueError, match="sw_down"):
+        fn(st, types.SimpleNamespace(grid_lat=jnp.deg2rad(40.0)), scm.z_coord,
+           surface_forcing=sfc)
