@@ -2548,11 +2548,14 @@ def test_sundqvist_l36_deck_still_round_trips():
     # what makes this deck the neither-lever baseline.
     assert cfg.dycore.mpas_div_damp4_scale == 0.0
     assert cfg.convection == "bechtold"
-    # Q17 (user 2026-10-27): the deck runs the faithful IFS convection, which
-    # carries its own momentum transport and refuses the legacy CMT pin; runs
-    # from before that switch used the legacy reduction (not comparable).
+    # User decision 2026-10-30: production runs the SMOOTH Bechtold chain
+    # (the faithful IFS path is oracle-only, issue #2281), with the CMT-off
+    # and 0.8 rain-split pins it last ran with (resolved, not just the keys).
     from legoesm.driver.physics_pipeline import convection_config_for
-    assert convection_config_for(cfg).bechtold.use_ifs_ascent is True
+    _bech = convection_config_for(cfg).bechtold
+    assert _bech.use_ifs_ascent is False
+    assert _bech.enable_cmt is False
+    assert _bech.precip_efficiency == pytest.approx(0.8)
     assert cfg.cloud_scheme == "sundqvist"
     assert cfg.gravity_wave_drag == "mcfarlane+e3sm_cam"
     assert cfg.surface_bulk_scheme == "coare3"
@@ -2580,6 +2583,98 @@ def test_sundqvist_l36_deck_still_round_trips():
     assert cfg.cloud_optics_inhomogeneity == "two_region"
     assert cfg.cloud_fsd == 1.0
     _assert_optics_thinning(cfg, thinned=True)
+
+
+# The RESOLVED Bechtold leaf of amip_sundqvist_l36.yaml as built at the
+# commit before #2249 (fec6aacafe^1), i.e. the smooth chain production last
+# ran.  Captured by building that commit; a drift in any leaf value -- a moved
+# code default included -- fails here instead of silently changing the runs.
+_SMOOTH_BECHTOLD_LEAF_PRE2249 = {
+    'M_b_max': 0.05, 'autoconv_pe_max': 0.9, 'autoconv_q_c_crit': 0.0005,
+    'buoyancy_death_memory': False, 'capdcycl_land_tau_scale': 1.0,
+    'cape_pbl_depth': 500.0, 'cape_qadv_weight': 0.8, 'cape_sharpness': 0.1,
+    'cape_threshold': 70.0, 'cloud_depth_deep': 3000.0,
+    'cloud_depth_shallow_max': 1500.0, 'cmt_c_d': 0.7, 'cmt_c_u': 0.7,
+    'delta_deep': 7.5e-05, 'delta_midlevel': 0.0002, 'delta_shallow': 7.5e-05,
+    'depth_split_sharpness': 0.001, 'dnoprc': 0.0003, 'downdraft_RH_min': 0.2,
+    'downdraft_alpha': 0.3, 'downdraft_detrain_scale_m': 700.0,
+    'downdraft_entrain_rate': 0.0003, 'downdraft_evap_efficiency': 0.05,
+    'downdraft_rh_sharpness': 10.0, 'downdraft_transport': False, 'dx_m': 0.0,
+    'enable_cmt': False, 'enable_downdraft': True, 'enable_stochastic': False,
+    'epsilon_deep': 0.00175, 'epsilon_midlevel': 0.0001,
+    'epsilon_shallow': 0.0035, 'ifs_shallow_nosupply': 'zero',
+    'ifs_shallow_supply_width_w_m2': 1.0, 'lcl_membership_sharpness': 2.0,
+    'mc_normalize_scale': 0.05, 'p_conv_top_pa': 15000.0, 'parcel_dT': 0.5,
+    'parcel_dq': 0.001, 'precip_efficiency': 0.8,
+    'precip_split_scheme': 'constant', 'rain_vapor_sink': 'formation',
+    'rhebc_land': 0.75, 'rhebc_land_deep': 0.7, 'rprcon': 0.0014,
+    'stochastic_amplitude': 0.5, 'stochastic_decorrelation': 7200.0,
+    'subcloud_evap_scale': 1.0, 'subsidence_solve': 'implicit_flux',
+    'tau_M_u_relax': 1800.0, 'tau_bl': 3600.0, 'theta_implicit': 1.0,
+    'use_convective_turnover_tau': True, 'use_ifs_ascent': False,
+    'use_ifs_capdcycl': True, 'use_ifs_cape_closure': True,
+    'use_ifs_cape_qadv': False, 'use_ifs_downdraft': True,
+    'use_ifs_inplume_precip': True, 'use_ifs_land_rhebc': True,
+    'use_ifs_shallow_closure': False, 'use_ifs_snow_melt': True,
+    'use_ifs_subcloud_evap': True, 'use_pbl_cape': True,
+}
+
+
+def _sundqvist_l36_bechtold_decks():
+    """Every config/amip deck whose include chain reaches amip_sundqvist_l36,
+    with ``include:`` read and resolved as the loader does (YAML value,
+    relative to the including file)."""
+    import yaml
+    amip = (_repo_root() / "config" / "amip").resolve()
+    base = amip / "amip_sundqvist_l36.yaml"
+    found = []
+    for f in sorted(amip.glob("*.yaml")):
+        cur, seen = f.resolve(), set()
+        while cur not in seen:
+            seen.add(cur)
+            doc = yaml.safe_load(cur.read_text(encoding="utf-8")) or {}
+            ref = doc.get("include") if isinstance(doc, dict) else None
+            if ref is None:
+                break
+            cur = (cur.parent / ref).resolve()
+            if cur == base:
+                found.append(f.name)
+                break
+    return found
+
+
+def _bechtold_leaf(deck):
+    from legoesm.driver.run_config_yaml import load_yaml_config
+    from legoesm.driver.physics_pipeline import convection_config_for
+    parser = build_arg_parser()
+    parser.set_defaults(**load_yaml_config(
+        str(_repo_root() / "config" / "amip" / deck), parser))
+    cfg = build_config_from_args(
+        _postprocess_args(parser.parse_args(_AMIP_DUMMY_PATHS), parser))
+    return cfg, convection_config_for(cfg).bechtold
+
+
+def test_sundqvist_l36_and_inheritors_resolve_to_the_smooth_bechtold_chain():
+    """User decision 2026-10-30: production runs the smooth Bechtold chain
+    (IFS CUMASTRN path off, issue #2281).  The base deck and every Bechtold
+    deck inheriting it resolve to the pre-#2249 leaf, field for field."""
+    decks = _sundqvist_l36_bechtold_decks()
+    # The walk must find at least the inheritors known today (non-vacuous).
+    assert {"amip_production_l36.yaml", "amip_campaign_mpas.yaml",
+            "amip_aug13_control.yaml", "amip_aug13_land.yaml",
+            "amip_reference_r5_land.yaml",
+            "amip_sundqvist_latlon24.yaml"} <= set(decks), decks
+    known = {"amip_sundqvist_l36.yaml", "amip_production_l36.yaml",
+             "amip_campaign_mpas.yaml", "amip_aug13_control.yaml",
+             "amip_aug13_land.yaml", "amip_reference_r5_land.yaml"}
+    for deck in ["amip_sundqvist_l36.yaml"] + decks:
+        cfg, leaf = _bechtold_leaf(deck)
+        if cfg.convection != "bechtold":
+            # Only a deck that is not one of the known Bechtold decks may
+            # select another scheme (amip_sundqvist_latlon24: sbm).
+            assert deck not in known, (deck, cfg.convection)
+            continue
+        assert leaf._asdict() == _SMOOTH_BECHTOLD_LEAF_PRE2249, deck
 
 
 def test_config_yaml_explicit_cli_flag_overrides_file():
@@ -5853,24 +5948,6 @@ def test_amip_kain_fritsch_wrf_deck_selects_the_opt_in():
     assert cc.kain_fritsch.variant == "wrf_kfeta"
     check_wrf_kfeta_config(cc.kain_fritsch)
     cfg.validate_strict()
-
-
-def test_amip_bechtold_deck_runs_the_ifs_path():
-    """User 2026-10-27 (Q17 item 2): the AMIP Bechtold deck switches the
-    faithful CUMASTRN path on and drops the two legacy-only fields it refuses;
-    the deck's resolved leaf passes the path's own config guard."""
-    from legoesm.driver.physics_pipeline import _resolve_convection
-    from legoesm.driver.run_config_yaml import load_yaml_config
-    from legoesm.atmosphere.physics.convection._ifs_faithful import _check_config
-    deck = _repo_root() / "config" / "amip" / "amip_sundqvist_l36.yaml"
-    parser = build_arg_parser()
-    parser.set_defaults(**load_yaml_config(str(deck), parser))
-    cfg = build_config_from_args(_postprocess_args(
-        parser.parse_args(_AMIP_DUMMY_PATHS), parser))
-    assert cfg.convection == "bechtold" and cfg.bechtold_use_ifs_ascent is True
-    leaf = _resolve_convection(cfg)[1]
-    assert leaf.use_ifs_ascent is True
-    _check_config(leaf._replace(dx_m=1.0e5))
 
 
 _CMIP_ID_FLAGS = (
