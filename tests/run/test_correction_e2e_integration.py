@@ -57,7 +57,7 @@ def _run_tiny_latlon_coupled(days=1, n_lat=8, nlev=5):
 
     atm_config = ExperimentConfig(
         grid=GridConfig(grid_type="latlon", resolution=n_lat, nlev=nlev),
-        dycore=DycoreConfig(dt=600.0, model_type="hydrostatic",
+        dycore=DycoreConfig(energy_fixer=False, dt=600.0, model_type="hydrostatic",
                             discretization="finite_volume"),
         output=OutputConfig(diag_days=max(days, 1)),
         radiation="gray", days=days,
@@ -172,7 +172,7 @@ def _run_clubb_coupled(clubb, *, resolution=4, nlev=5, days=1, grid_type="latlon
 
     atm = ExperimentConfig(
         grid=GridConfig(grid_type=grid_type, resolution=resolution, nlev=nlev),
-        dycore=DycoreConfig(dt=600.0, model_type="hydrostatic",
+        dycore=DycoreConfig(energy_fixer=False, dt=600.0, model_type="hydrostatic",
                             discretization="finite_volume"),
         output=OutputConfig(diag_days=max(days, 1)), radiation="gray", days=days,
         turbulence="clubb_lite",
@@ -652,7 +652,7 @@ def _amip_base_with_forcing(tmp_path, *, resolution=4, nlev=5):
         str(tmp_path), "20200101", str(tmp_path / "amip_forcing.nc"), hour_stride=24)
     base = ExperimentConfig(
         grid=GridConfig(grid_type="latlon", resolution=resolution, nlev=nlev),
-        dycore=DycoreConfig(dt=600.0, model_type="hydrostatic",
+        dycore=DycoreConfig(energy_fixer=False, dt=600.0, model_type="hydrostatic",
                             discretization="finite_volume"),
         output=OutputConfig(diag_days=1), radiation="gray", days=1,
         turbulence="clubb_lite")

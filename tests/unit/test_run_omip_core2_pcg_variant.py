@@ -74,10 +74,9 @@ def test_config_fields_exist_with_measured_defaults():
 
     from legoesm.ocean.mpas_config import MPASOceanConfig
 
-    # MPAS default standard with gpoly x 15 (owner decision 2026-10-02: the
-    # recurrence gpoly x 15 was measured with; single_reduce and
-    # single_reduce_deep are opt-in, evidence in mpas_config.py).
-    assert MPASOceanConfig().barotropic_implicit_pcg_variant == "standard"
+    # MPAS: resolved per JAX backend when the model is built (owner decision
+    # 2026-10-04; table MPAS_BAROTROPIC_PCG_DEFAULTS in mpas_config.py).
+    assert MPASOceanConfig().barotropic_implicit_pcg_variant is None
 
 
 # ------------------------------------------------- builder threading

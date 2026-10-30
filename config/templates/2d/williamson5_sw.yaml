@@ -1,7 +1,10 @@
 # legoESM experiment template — Williamson Test Case 5
 # Zonal flow over an isolated mountain (global shallow-water).
-# See williamson2_sw.yaml for the template/override/reproduce workflow.
-
+#
+# Names the `williamson5` idealized atmosphere matrix case via the `setup:`
+# selector (#388). Routes (exact match) to:
+#   run_atmosphere_test_matrix.py --test =williamson5 --grid cubed_sphere
+# See williamson2_sw.yaml for why shallow water uses the matrix runner.
 experiment:
   tier: tier1
   complexity: shallow_water
@@ -12,37 +15,12 @@ experiment:
     mountain; exercises orographic forcing + gravity-wave generation in the
     shallow-water dycore. No external data needed.
   data: []
-  conservation_gates:
-    - mass
-    - energy
-
+  conservation_gates: [mass, energy]
 model:
   name: "Williamson Test Case 5"
   type: atmosphere_only
-
-grid:
-  type: cubed_sphere
-  resolution: 48
-  n_levels: 1
-  vertical_coord: none
-
-atmosphere:
-  dynamics: shallow_water      # canonical key -> ExperimentConfig.dycore.model_type
-  time_integrator: ssp_rk3
-  dt_seconds: 600
-  hyperdiff_scale: 0.0
-
-conservation:
-  fix_mass: true
-
-time:
-  duration_hours: 360          # 15 days
-  output_interval_hours: 6
-
+setup:
+  name: williamson5
+  grid: cubed_sphere
 output:
   path: output/williamson_test5/
-
-hardware:
-  precision:
-    dynamics: float32
-  devices: auto

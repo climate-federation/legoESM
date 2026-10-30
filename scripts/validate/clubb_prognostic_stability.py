@@ -113,7 +113,7 @@ def production(dt=75.0, nsteps=1152, nlev=30, sfc_dT=2.0, arm="prognostic",
     That is the comparison of interest, but it is not a one-variable A/B.
     """
     col = _production_column(nlev=nlev)
-    cfg = CLUBBConfig(prognostic=(arm == "prognostic"))
+    cfg = CLUBBConfig(prognostic=(arm == "prognostic"), trop_cloud_top_press=0.0)
     T_sfc = col["T"][:, -1] + sfc_dT
     idx = {n: i for i, n in enumerate(CLUBBMomentState._fields)}
     moments = pack_clubb_moments(
@@ -186,7 +186,7 @@ def _column(ncol, nlev, dtheta_dz, q0):
 
 
 def characterize(dt=200.0, nsteps=40, nlev=24, q0=1e-5, heat=1.0):
-    cfg = CLUBBConfig()
+    cfg = CLUBBConfig(trop_cloud_top_press=0.0)
     print(f"# dt={dt} nsteps={nsteps} nlev={nlev} q0={q0} surface_dT={heat}")
     print(f"# {'dtheta/dz':>10} {'wp2max':>10} {'osc':>8} {'Tmin':>7} {'verdict':>9}")
     for dthdz in (8e-3, 4e-3, 2e-3, 1e-3):

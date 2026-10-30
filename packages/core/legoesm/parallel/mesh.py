@@ -688,6 +688,11 @@ def multiprocess_safe_device_put(leaf, sharding):
     # gathered result or a temporary of the gather, was not established.
     if not isinstance(leaf, (jax.Array, np.ndarray)):
         return jax.device_put(leaf, sharding)
+    # A NumPy leaf is placed shard by shard from host memory. Staging it
+    # through jnp.asarray first copied the WHOLE stacked array onto one device
+    # per process, and those stacked meshes grow with the device count.
+    if isinstance(leaf, np.ndarray) and not isinstance(leaf, np.ma.MaskedArray):
+        leaf = leaf.astype(jax.dtypes.canonicalize_dtype(leaf.dtype), copy=False)
     if isinstance(leaf, jax.Array) and not leaf.is_fully_addressable:
         return leaf  # already a global sharded array; nothing to place
     if jax.process_count() > 1:

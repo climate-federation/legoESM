@@ -839,7 +839,7 @@ class CDGridShallowWaterModel(IntegrationMixin):
         same shared edges; the non-owner side (higher face index)
         overwrites its local value with the owner's strip.
 
-        Vertex sync uses ``mpi4jax.allreduce(SUM)`` on a per-rank
+        Vertex sync uses ``global_sum_mpi`` (allreduce SUM) on a per-rank
         ``(8, 2)`` array where each rank fills the owner-face value
         for vertices it owns and zeros elsewhere.  After the
         allreduce every rank has the owner value for all 8 cube
@@ -1041,13 +1041,11 @@ class CDGridShallowWaterModel(IntegrationMixin):
             if _is_owned(owner_face):
                 my_vtx = my_vtx.at[i, 0].set(ue[owner_face, oi, oj])
                 my_vtx = my_vtx.at[i, 1].set(vn[owner_face, oi, oj])
-        # Allreduce SUM: exactly one rank contributes non-zero per row.
-        # mpi4jax.allreduce returns (result, token) or just result; use
-        # ``mpi4jax_array_result`` helper to normalize.
-        from legoesm.parallel.reductions import mpi4jax_array_result
-        all_vtx = mpi4jax_array_result(
-            mpi4jax.allreduce(my_vtx, op=_MPI.SUM, comm=comm)
-        )
+        # Allreduce SUM: exactly one rank contributes non-zero per row; every
+        # rank then writes the shared value into its owned faces, so the sum
+        # needs the allreduce backward pass of global_sum_mpi (#1814).
+        from legoesm.parallel.reductions import global_sum_mpi
+        all_vtx = global_sum_mpi(my_vtx, comm=comm)
         # Apply: for each vertex, set all owned face positions.
         for i, vtx in enumerate(_vtx):
             ue_own = all_vtx[i, 0]

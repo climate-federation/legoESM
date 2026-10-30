@@ -269,6 +269,21 @@ def snow_cover_fraction(
     return jnp.tanh(snow_depth / jnp.maximum(config.snow_depth_crit, 1e-6))
 
 
+def ground_snow_cover(
+    snow_depth: jnp.ndarray,
+    config: LandAlbedoConfig = LandAlbedoConfig(),
+) -> jnp.ndarray:
+    """Snow-covered fraction of the GROUND as the land albedo blend uses it:
+    :func:`snow_cover_fraction` times the per-cell ``snow_cover_scale`` (when
+    set), clipped to [0, 1]: the cover the albedo BLEND uses.  The canopy snow
+    burial deliberately uses the unscaled :func:`snow_cover_fraction` instead
+    (the scale is a brightness calibration, not snow area; user 2026-10-03)."""
+    f_snow = snow_cover_fraction(snow_depth, config)
+    if config.snow_cover_scale is not None:
+        f_snow = jnp.clip(f_snow * jnp.asarray(config.snow_cover_scale), 0.0, 1.0)
+    return f_snow
+
+
 def dry_soil_brightening(
     theta_top: jnp.ndarray,
     config: LandAlbedoConfig = LandAlbedoConfig(),
@@ -344,16 +359,14 @@ def land_albedo(
     # albedo map and the snow feedback coexist (bright deserts AND bright ice sheets).
     alpha_veg = (land_vegetation_albedo(lat, config) if base_albedo is None
                  else base_albedo)
-    f_snow = (snow_cover_fraction(snow_depth, config) if f_snow_override is None
+    # Per-cell snow_cover_scale (forest canopies hide ground snow, scale<1; open
+    # tundra whitens faster, scale>1) is applied ONLY when this function computes
+    # the cover itself: a caller that supplies f_snow_override (the elevation-band
+    # path) must scale each BAND's cover before aggregating — post-aggregate
+    # scaling can push the snow contribution above alpha_snow at scale>1 on
+    # saturated bands (codex).
+    f_snow = (ground_snow_cover(snow_depth, config) if f_snow_override is None
               else f_snow_override)
-    if config.snow_cover_scale is not None and f_snow_override is None:
-        # Canopy snow masking: scale the effective snow-covered fraction (forest
-        # canopies hide ground snow, scale<1; open tundra whitens faster, scale>1).
-        # Applied ONLY when this function computed the cover itself: a caller that
-        # supplies f_snow_override (the elevation-band path) must scale each BAND's
-        # cover before aggregating — post-aggregate scaling can push the snow
-        # contribution above alpha_snow at scale>1 on saturated bands (codex).
-        f_snow = jnp.clip(f_snow * jnp.asarray(config.snow_cover_scale), 0.0, 1.0)
     if snow_contrib_override is not None:
         # Banded path: each elevation band already blended its own age-decayed snow
         # albedo; the aggregate snow contribution replaces alpha_snow * f_snow.

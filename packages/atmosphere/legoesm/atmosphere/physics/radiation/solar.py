@@ -31,10 +31,15 @@ from legoesm import constants
 
 # Earth orbital / calendar constants (fixed).
 _EARTH_OBLIQUITY_DEG = 23.45
-# Day of the vernal equinox in a 365-day no-leap calendar (≈ March 21).
-# The simplified declination crosses zero here; the orbital longitude is
-# measured from this point.
+# Day of the vernal equinox in a 365-day no-leap calendar (≈ March 21) for the
+# CIRCULAR-orbit (Cooper) declination, which crosses zero here.
 _SOLSTICE_OFFSET_DAYS = 80.0
+# Calendar day of the vernal equinox for the Berger (1978) ORBITAL longitude,
+# as in CESM2.1 cime5.6.47 share/util/shr_orb_mod.F90 shr_orb_decl
+# (``ve = 80.5_SHR_KIND_R8``, "Calday of vernal equinox, assumes Jan 1 = calday
+# 1"; March 21 at noon).  Calday 1.0 is Jan 1 00Z, the same origin as the
+# ``day_of_year`` this module receives (forcing.time_utils.day_to_calendar).
+_VERNAL_EQUINOX_CALDAY_SHR_ORB = 80.5
 _DAYS_PER_YEAR = 365.0
 
 # Machine-checked scheme contract (see tests/test_physics_contracts.py).
@@ -102,16 +107,16 @@ def _orbital_solar_longitude(
     """True solar ecliptic longitude lambda [rad], measured from the
     vernal equinox.
 
-    Berger (1978) eccentricity series: the series COEFFICIENTS match CESM
-    ``shr_orb_mod`` / climlab ``solar_longitude``, while the vernal-equinox
-    calendar day (``_SOLSTICE_OFFSET_DAYS = 80``) follows climlab's convention
-    (CESM/CLM5 document ``d_ve = 80.5`` — a ~½-day calendar offset).  Captures
-    the non-uniform apparent motion of the Sun caused by the elliptical orbit,
-    which the simple ``obliquity·sin`` declination ignores.
+    Berger (1978) eccentricity series and vernal-equinox calendar day
+    (``_VERNAL_EQUINOX_CALDAY_SHR_ORB = 80.5``) as in CESM2.1 ``shr_orb_decl``
+    (cime5.6.47); matched to round-off against the compiled Fortran
+    (tests/atmosphere/test_rad_boundary_oracle.py).  Captures the non-uniform
+    apparent motion of the Sun caused by the elliptical orbit, which the simple
+    ``obliquity·sin`` declination ignores.
     """
     e = orbit.eccentricity
     w = orbit.long_perihelion_deg * constants.DEG_TO_RAD
-    delta_lambda = (day_of_year - _SOLSTICE_OFFSET_DAYS) * (
+    delta_lambda = (day_of_year - _VERNAL_EQUINOX_CALDAY_SHR_ORB) * (
         2.0 * jnp.pi / _DAYS_PER_YEAR
     )
     beta = jnp.sqrt(1.0 - e * e)
@@ -156,11 +161,15 @@ def solar_declination(
 ) -> float:
     """Compute solar declination angle.
 
-    With ``orbit=None`` (default) uses the simplified "Spencer" formula
+    With ``orbit=None`` (default) uses the single-harmonic approximation
     ``delta = obliquity * sin(2*pi * (day_of_year - 80) / 365)``.
 
-    The circular-orbit form above is the Cooper (1969) single-harmonic
-    declination approximation.  With an ``OrbitalParameters`` the realistic
+    This is a Cooper (1969)-type form, but Cooper's phase is ``(284 + n)``, i.e.
+    ``n - 81``, one day from the ``n - 80`` used here; it is not the Spencer
+    (1971) Fourier series. It also differs from the exact circular-orbit
+    declination ``asin(sin(obliquity) sin(lambda))`` (Isca/FMS
+    ``astronomy.f90``) by up to 0.256 deg, which moves daily-mean insolation by
+    up to 5.9 W/m^2 near the polar-night edges (tier-2 oracle audit).  With an ``OrbitalParameters`` the realistic
     Berger (1978) declination ``sin(delta) = sin(obliquity) * sin(lambda)`` is
     used instead, where ``lambda`` is the true solar longitude (the obliquity
     is then taken from the orbit, not the ``obliquity`` argument).
@@ -425,8 +434,13 @@ def perpetual_equinox_insolation(
 
         Q(lat) = (S_0 / pi) * cos(lat)   for |lat| < pi/2
 
-    This is the standard forcing for idealized aquaplanet experiments
-    (Frierson et al. 2006).
+    This is the equinox diurnal mean. It is NOT the Frierson et al. (2006)
+    forcing: FHZ06 and Isca's default gray setup use the annual-mean
+    profile ``0.25*S_0*(1 + del_sol*p2)`` with Isca's normalisation
+    ``p2 = (1 - 3*sin(lat)**2)/4`` and ``del_sol = 1.4`` (Isca v1.0
+    ``two_stream_gray_rad.F90`` l.452-454); Isca uses this ``cos(lat)`` form
+    only for its SCHNEIDER_LIU scheme (l.450). The two differ by up to
+    ``0.075*S_0`` (about 102 W/m^2) at the poles.
 
     Parameters
     ----------

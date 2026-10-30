@@ -41,6 +41,10 @@ VARIANT_DEFAULTS: dict[str, dict[str, Any]] = {
         "spatial_surface": False,
         "spatial_init_std": 0.0,
         "spatial_seed": 0,
+        # Knob names that train; every other knob is a plain float, outside
+        # the differentiated tree (AIMIPClassicalParams.from_defaults).  None
+        # = every knob an array (checkpoint templates, tests).
+        "trainable": None,
     },
     # `residual_scale` is present but NULL: the sentinel means "pass nothing",
     # so `build_column_physics` applies its own value (0.01) — what BOTH lanes
@@ -209,6 +213,7 @@ def build_variant(variant: str, *, nlev: int, grid=None, seed: int = 0,
             spatial_surface=bool(kw["spatial_surface"]),
             spatial_init_std=float(kw["spatial_init_std"]),
             spatial_seed=int(kw["spatial_seed"]),
+            trainable=kw["trainable"],
         )
 
     import jax

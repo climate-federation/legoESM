@@ -393,7 +393,7 @@ def _stateful_driver_config(**overrides):
     # MPAS memory test), which would mask a dropped carry.
     kwargs = dict(
         grid=GridConfig(resolution=8, nlev=5),
-        dycore=DycoreConfig(dt=1.0),
+        dycore=DycoreConfig(energy_fixer=False, dt=1.0),
         output=OutputConfig(diag_days=1),
         days=6.0 / 86400.0,             # 6 steps at dt=1
         dataset="analytical",
@@ -496,7 +496,7 @@ def test_checkpoint_roundtrip_restores_stateful_carries(tmp_path):
 
 def test_mpas_checkpoint_roundtrip_restores_physics_state(tmp_path):
     """#413 item 3 (MPAS/npz path): the full PhysicsState is persisted
-    as physstate_* fields and restored into the _run_mpas seed."""
+    as physstate_* fields and restored into the _run_column seed."""
     from legoesm.driver.model_driver import ModelDriver
     from legoesm.driver.config import (
         ExperimentConfig, GridConfig, DycoreConfig, OutputConfig,
@@ -846,10 +846,11 @@ def test_mpas_step_refuses_stateful_physics_without_carry():
         model.step(state, 1.0, physics_fn=fn)
 
 
+@pytest.mark.usefixtures("allow_version_drift")
 def test_mpas_repeated_load_clears_stale_physstate(tmp_path):
     """Codex adversarial (#413 stale-persistence class): reusing a driver
     to load a checkpoint WITHOUT physstate_* must drop the carry from a
-    PRIOR load, so _run_mpas freshly seeds rather than resuming carry
+    PRIOR load, so _run_column freshly seeds rather than resuming carry
     from the wrong checkpoint."""
     from legoesm.driver.model_driver import ModelDriver
     from legoesm.driver.config import (
@@ -887,7 +888,7 @@ def test_mpas_repeated_load_clears_stale_physstate(tmp_path):
     # Reload a physstate-free checkpoint into the SAME driver.
     driver_b.load_checkpoint(legacy)
     assert not any(k.startswith("physstate_") for k in driver_b._carry_aux), (
-        "stale physstate_* survived a physstate-free reload — _run_mpas "
+        "stale physstate_* survived a physstate-free reload — _run_column "
         "would resume carry from the WRONG checkpoint (issue #413)"
     )
 
@@ -914,7 +915,7 @@ def test_mpas_load_then_save_without_run_refuses_and_drops_stale(tmp_path):
     """Codex adversarial rounds 2+4-7 (#413): load_checkpoint clears the
     stale save channel and does NOT adopt the staged carry — validating
     it faithfully (shape / dtype / scheme / completeness) needs the
-    run-time seed _run_mpas builds.  So a save before any run REFUSES
+    run-time seed _run_column builds.  So a save before any run REFUSES
     rather than emitting an unvalidated / stale / fresh-seed checkpoint,
     and the normal load->run->save path remains the way to persist a
     restored carry."""
@@ -938,13 +939,14 @@ def test_mpas_load_then_save_without_run_refuses_and_drops_stale(tmp_path):
     # Stale carry dropped; the staged carry is NOT adopted before a run.
     assert driver_b._mpas_phys_state is None, "stale carry survived the load"
     assert any(k.startswith("physstate_") for k in driver_b._carry_aux), (
-        "load should still stage the checkpoint's carry for _run_mpas"
+        "load should still stage the checkpoint's carry for _run_column"
     )
     # A save before the validating run is refused (no laundering).
     with pytest.raises(ValueError, match="launder"):
         driver_b.save_checkpoint(0, 7.0)
 
 
+@pytest.mark.usefixtures("allow_version_drift")
 def test_mpas_partial_physstate_checkpoint_rejected(tmp_path):
     """Codex adversarial round 2 (#413): a checkpoint carrying only a
     SUBSET of the physstate_* fields must be REJECTED loudly at restart —
@@ -973,6 +975,37 @@ def test_mpas_partial_physstate_checkpoint_rejected(tmp_path):
         driver_b.run()
 
 
+@pytest.mark.usefixtures("allow_version_drift")
+def test_mpas_pre_pblh_checkpoint_restart_is_refused(tmp_path):
+    """Oracle row 47 (user decision 2026-10-20): a checkpoint written before
+    the carried PBL height existed lacks ``physstate_pblh``.  CAM zero-seeds
+    PBLH only on an initial run (physpkg.F90:419-424, phys_inidat called only
+    if initial_run, :803); a restart without the pbuf field is an error
+    (physics_buffer.F90.in:1591).  So the restart must be REFUSED as
+    INCOMPLETE, naming pblh, with ZM (the consumer) configured."""
+    from legoesm.driver.model_driver import ModelDriver
+
+    cfg = _mpas_driver_cfg(convection="zhang_mcfarlane",
+                           zm_land_fraction="none")
+    driver_a = ModelDriver(cfg, output_dir=tmp_path / "a")
+    driver_a.setup()
+    assert driver_a.run() == "COMPLETED"
+    ckpt = sorted((tmp_path / "a").glob("checkpoint_day_*.npz"))[-1]
+
+    old = tmp_path / "pre_pblh.npz"
+    with np.load(ckpt) as d:
+        assert "physstate_pblh" in d.files, "save must persist pblh"
+        kept = {k: d[k] for k in d.files if k != "physstate_pblh"}
+    np.savez(old, **kept)
+
+    driver_b = ModelDriver(cfg, output_dir=tmp_path / "b")
+    driver_b.setup()
+    driver_b.load_checkpoint(old)
+    with pytest.raises(ValueError, match=r"INCOMPLETE.*missing \['pblh'\]"):
+        driver_b.run()
+
+
+@pytest.mark.usefixtures("allow_version_drift")
 def test_mpas_meta_only_physstate_checkpoint_rejected(tmp_path):
     """Codex adversarial round 3 (#413): a checkpoint left with only the
     physstate_meta_* scheme tag and NO carry fields is a corrupted
@@ -1006,6 +1039,7 @@ def test_mpas_meta_only_physstate_checkpoint_rejected(tmp_path):
         driver_b.run()
 
 
+@pytest.mark.usefixtures("allow_version_drift")
 def test_mpas_bad_carry_load_then_save_refused(tmp_path):
     """Codex adversarial round 5 (#413): a load-then-save with no
     intervening run must NOT launder a bad MPAS restart.  A partial,
@@ -1055,6 +1089,7 @@ def test_mpas_bad_carry_load_then_save_refused(tmp_path):
     )
 
 
+@pytest.mark.usefixtures("allow_version_drift")
 def test_mpas_unknown_physstate_field_rejected(tmp_path):
     """Codex adversarial round 6 (#413): a checkpoint carrying a
     physstate_* field absent from this build's PhysicsState schema
@@ -1288,6 +1323,7 @@ def test_dyn_tendency_inputs_are_consumed_not_carried_forward():
     assert nxt2.dyn_tendency_qv is None  # the un-supplied one still resets
 
 
+@pytest.mark.usefixtures("allow_version_drift")
 def test_mpas_legacy_dyn_tendency_checkpoint_entry_is_dropped_on_load(tmp_path):
     """Codex r2 finding-2: a legacy / hand-edited MPAS checkpoint that carries
     a ``physstate_dyn_tendency_*`` entry — including a None-derived OBJECT array

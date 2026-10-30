@@ -81,6 +81,10 @@ def thomas_solve(
         the sea-ice vertical heat solve (``ice/bitz_lipscomb.py``), builds a
         diagonally dominant matrix, whose pivots stay bounded away from zero.
         A new caller must establish the same property before selecting it.
+      * ``"e3sm_vd_lu"`` transcribes E3SM ``vd_lu_decomp``/``vd_lu_solve``
+        (bottom-up elimination with reciprocal pivots, top-down back
+        substitution), keeping the ``_TINY`` pivot clamp.  Caller: the E3SM
+        gravity-wave eddy diffusion (``e3sm_cam.gw_diff_tend``).
 
     Limitations (by design, not bugs):
       * The adjoint is the VJP of the IDEAL solve ``A⁻¹d``.  Where the forward
@@ -178,6 +182,41 @@ def _thomas_solve_impl(
         )
         return jax.lax.convert_element_type(solution, out_dtype)
 
+    if operation_order == "e3sm_vd_lu":
+        # E3SM vdiff_lu_solver.F90 (v3.0.1) vd_lu_decomp + vd_lu_solve: the
+        # elimination runs BOTTOM-UP with reciprocal pivots
+        #   dnom(k) = 1/(1 + ca + cc - ca*ze(k+1)),  ze(k) = cc*dnom(k),
+        #   zf(k) = (q(k) + ca*zf(k+1))*dnom(k)
+        # and the back substitution top-down, q(k) = zf(k) + ze(k)*q(k-1),
+        # with ca = -c (super-diagonal), cc = -a (sub-diagonal) and
+        # b = 1 + ca + cc.  The pivot keeps the ``+ _TINY`` clamp of the
+        # default order (the caller e3sm_cam gw_diff_tend had it before):
+        # for an O(1) implicit-diffusion pivot it rounds away exactly, so
+        # the arithmetic is the Fortran's.
+        ca, cc_, b_, d_ = (jnp.moveaxis(v, -1, 0)
+                           for v in jnp.broadcast_arrays(-c, -a, b, d))
+
+        def lu_up(carry, row):
+            ze_next, zf_next = carry
+            ca_k, cc_k, b_k, d_k = row
+            dnom = 1.0 / ((b_k - ca_k * ze_next) + _TINY)
+            ze_k = cc_k * dnom
+            zf_k = (d_k + ca_k * zf_next) * dnom
+            return (ze_k, zf_k), (ze_k, zf_k)
+
+        zero = jnp.zeros_like(d_[0])
+        _, (ze, zf) = jax.lax.scan(lu_up, (zero, zero), (ca, cc_, b_, d_),
+                                   reverse=True)
+
+        def lu_down(x_prev, row):
+            ze_k, zf_k = row
+            x_k = zf_k + ze_k * x_prev
+            return x_k, x_k
+
+        _, x = jax.lax.scan(lu_down, zero, (ze, zf))
+        x = jnp.moveaxis(x, 0, -1)
+        return jax.lax.convert_element_type(x, out_dtype)
+
     if operation_order != "normalised":
         raise ValueError(f"unknown Thomas operation order {operation_order!r}")
 
@@ -191,33 +230,10 @@ def _thomas_solve_impl(
     # the full broadcast shape by construction.
     a, b, c, d = (jnp.moveaxis(v, -1, 0)
                   for v in jnp.broadcast_arrays(a, b, c, d))
-    c0_star = c[0] / (b[0] + _TINY)
-    d0_star = d[0] / (b[0] + _TINY)
-
-    def forward_body(carry, xs):
-        c_prev, d_prev = carry
-        ak, bk, ck, dk = xs
-        denom = bk - ak * c_prev
-        denom = jnp.where(jnp.abs(denom) < _TINY, _TINY, denom)
-        c_star_k = ck / denom
-        d_star_k = (dk - ak * d_prev) / denom
-        return (c_star_k, d_star_k), (c_star_k, d_star_k)
-
-    _, (c_star, d_star) = jax.lax.scan(
-        forward_body, (c0_star, d0_star), (a[1:], b[1:], c[1:], d[1:]))
-    c_star = jnp.concatenate([c0_star[None], c_star])
-    d_star = jnp.concatenate([d0_star[None], d_star])
-
-    # Backward substitution: x[n-1] = d_star[n-1], x[k] = d*[k] - c*[k] x[k+1]
-    def backward_body(x_next, xs):
-        c_k, d_k = xs
-        x_k = d_k - c_k * x_next
-        return x_k, x_k
-
-    _, x = jax.lax.scan(backward_body, d_star[-1], (c_star[:-1], d_star[:-1]),
-                        reverse=True)
-    x = jnp.moveaxis(jnp.concatenate([x, d_star[-1:]]), 0, -1)
-
+    # n == 1: no sweep (lax.scan refuses zero-length scans without jit)
+    x = (d[:1] / (b[:1] + _TINY) if n == 1 else
+         _sweep_levels_first(b[0], c[0], d, (a[1:], b[1:], c[1:]), lambda abc: abc))
+    x = jnp.moveaxis(x, 0, -1)
     return jax.lax.convert_element_type(x, out_dtype)
 
 
@@ -293,6 +309,136 @@ def _sum_to_shape(g: jax.Array, shape: tuple[int, ...]) -> jax.Array:
 
 
 thomas_solve.defvjp(_thomas_solve_fwd, _thomas_solve_bwd)
+
+
+def _sweep_levels_first(b0, c0, rhs, xs, bands):
+    """Normalised Thomas sweep over a LEADING level axis, with the bands of
+    level k (k >= 1) computed inside the scan by ``bands(xs_k)``.  Same
+    operations and clamps as ``_thomas_solve_impl``."""
+    c_s0 = c0 / (b0 + _TINY)
+    d_s0 = rhs[0] / (b0 + _TINY)
+
+    def forward_body(carry, xk):
+        c_prev, d_prev = carry
+        ak, bk, ck = bands(xk[:-1])
+        denom = bk - ak * c_prev
+        denom = jnp.where(jnp.abs(denom) < _TINY, _TINY, denom)
+        c_s = ck / denom
+        d_s = (xk[-1] - ak * d_prev) / denom
+        return (c_s, d_s), (c_s, d_s)
+
+    _, (c_s, d_s) = jax.lax.scan(forward_body, (c_s0, d_s0), (*xs, rhs[1:]))
+    c_s = jnp.concatenate([c_s0[None], c_s])
+    d_s = jnp.concatenate([d_s0[None], d_s])
+
+    def backward_body(x_next, xk):
+        c_k, d_k = xk
+        x_k = d_k - c_k * x_next
+        return x_k, x_k
+
+    _, x = jax.lax.scan(backward_body, d_s[-1], (c_s[:-1], d_s[:-1]),
+                        reverse=True)
+    return jnp.concatenate([x, d_s[-1:]])
+
+
+def _diffusion_xs(dtf, inv, extra):
+    """Scan inputs for levels 1..n-1: flux above, flux below (zero below the
+    bottom level), inverse thickness and, if per-level, the extra diagonal."""
+    dtf_bot = jnp.concatenate([dtf[1:], jnp.zeros_like(dtf[:1])])
+    xs = (dtf, dtf_bot, inv[1:])
+    return xs + ((extra[1:],) if extra.ndim else ()), dtf_bot
+
+
+@jax.custom_vjp
+def diffusion_thomas_solve(dtf, inv, extra, rhs):
+    """Backward-Euler diffusion solve ``(1 - dt d/dz K d/dz + extra) x = rhs``
+    with the LEVEL axis FIRST and the matrix built inside the sweep.
+
+    ``dtf`` (n-1, ...) is ``dt * K / dz_half`` at the interior interfaces,
+    ``inv`` (n, ...) is ``1 / dz``, ``extra`` is a scalar or an (n, ...) array
+    added to the diagonal, ``rhs`` is (n, ...).  Zero flux through the top and
+    bottom.  The bands are those of ``implicit_solver._build_implicit_tridiag``
+    (``alpha_k = dtf[k-1]*inv[k]``, ``beta_k = dtf[k]*inv[k]``,
+    ``a=-alpha, b=1+alpha+beta+extra, c=-beta``); results agree with
+    ``thomas_solve`` on those bands to rounding.
+
+    Building the bands per level inside the scan avoids materialising and
+    transposing four (columns, n) band arrays.  The VJP solves A^T lambda = x_bar
+    with the bands rebuilt the same way and only plain JAX ops, so
+    forward-over-reverse works (as for ``thomas_solve``).
+    """
+    if rhs.shape[0] < 2:
+        raise ValueError(f"need at least 2 levels, got {rhs.shape[0]}")
+    if jnp.ndim(extra) and jnp.shape(extra) != rhs.shape:
+        raise ValueError(f"extra must be a scalar or shaped like rhs {rhs.shape}, "
+                         f"got {jnp.shape(extra)}")
+    return _diffusion_solve_impl(dtf, inv, extra, rhs)
+
+
+def _diffusion_solve_impl(dtf, inv, extra, rhs):
+    # Bands are rounded in the coefficients' own dtype, then promoted to the
+    # RHS (work) dtype -- as thomas_solve promotes prebuilt bands.
+    extra = jnp.asarray(extra)
+    w = rhs.dtype
+    xs, _ = _diffusion_xs(dtf, inv, extra)
+
+    def bands(xk):
+        dtf_top, dtf_bot, inv_k = xk[:3]
+        e = xk[3] if extra.ndim else extra
+        alpha = dtf_top * inv_k
+        beta = dtf_bot * inv_k
+        return ((-alpha).astype(w), (1.0 + alpha + beta + e).astype(w),
+                (-beta).astype(w))
+
+    beta0 = dtf[0] * inv[0]
+    b0 = (1.0 + beta0 + (extra[0] if extra.ndim else extra)).astype(w)
+    return _sweep_levels_first(b0, (-beta0).astype(w), rhs, xs, bands)
+
+
+def _diffusion_solve_fwd(dtf, inv, extra, rhs):
+    x = _diffusion_solve_impl(dtf, inv, extra, rhs)
+    return x, (dtf, inv, extra, x)
+
+
+def _diffusion_solve_bwd(res, x_bar):
+    dtf, inv, extra, x = res
+    extra = jnp.asarray(extra)
+    w = x.dtype
+    xs, dtf_bot = _diffusion_xs(dtf, inv, extra)
+    inv_next = jnp.concatenate([inv[2:], inv[-1:]])   # multiplied by dtf_bot = 0 at the bottom
+
+    # A^T at level k: sub = c[k-1] = -beta[k-1], diag = b[k], super = a[k+1] = -alpha[k+1].
+    def bands_t(xk):
+        dtf_top, dtf_b, inv_k, inv_prev, inv_nxt = xk[:5]
+        e = xk[5] if extra.ndim else extra
+        alpha = dtf_top * inv_k
+        beta = dtf_b * inv_k
+        return ((-(dtf_top * inv_prev)).astype(w),
+                (1.0 + alpha + beta + e).astype(w),
+                (-(dtf_b * inv_nxt)).astype(w))
+
+    xs_t = (dtf, dtf_bot, inv[1:], inv[:-1], inv_next) + xs[3:]
+    b0 = (1.0 + dtf[0] * inv[0] + (extra[0] if extra.ndim else extra)).astype(w)
+    lam = _sweep_levels_first(b0, (-(dtf[0] * inv[1])).astype(w),
+                              x_bar.astype(w), xs_t, bands_t)
+
+    zero = jnp.zeros_like(x[:1])
+    x_km1 = jnp.concatenate([zero, x[:-1]])
+    x_kp1 = jnp.concatenate([x[1:], zero])
+    # a_bar = -lam x[k-1], b_bar = -lam x[k], c_bar = -lam x[k+1];
+    # alpha enters a (-1) and b (+1), beta enters b (+1) and c (-1).
+    b_bar = -lam * x
+    alpha_bar = lam * x_km1 + b_bar
+    beta_bar = b_bar + lam * x_kp1
+    dtf_bar = alpha_bar[1:] * inv[1:] + beta_bar[:-1] * inv[:-1]
+    inv_bar = (jnp.concatenate([zero, alpha_bar[1:] * dtf])
+               + jnp.concatenate([beta_bar[:-1] * dtf, zero]))
+    extra_bar = b_bar if extra.ndim else jnp.sum(b_bar)
+    return (dtf_bar.astype(dtf.dtype), inv_bar.astype(inv.dtype),
+            jnp.asarray(extra_bar, extra.dtype), lam.astype(x.dtype))
+
+
+diffusion_thomas_solve.defvjp(_diffusion_solve_fwd, _diffusion_solve_bwd)
 
 
 def pcr_solve_batched(
@@ -476,52 +622,56 @@ def thomas_solve_shared(
     c = jnp.asarray(c, work_dtype)
     ds = tuple(jnp.asarray(d, work_dtype) for d in ds)
 
+    # Same scan form as _thomas_solve_impl (see the note there on why not
+    # fori_loop + .at[k].set).
     c0_star = c[..., 0] / (b[..., 0] + _TINY)
-    c_star = jnp.zeros_like(c)
-    c_star = c_star.at[..., 0].set(c0_star)
-    d_stars = tuple(
-        jnp.zeros_like(d).at[..., 0].set(d[..., 0] / (b[..., 0] + _TINY))
-        for d in ds
-    )
+    d0_stars = tuple(d[..., 0] / (b[..., 0] + _TINY) for d in ds)
+    if n == 1:
+        return tuple(
+            jax.lax.convert_element_type(d0[..., None], out_dtype)
+            for d0 in d0_stars
+        )
+    am, bm, cm = (jnp.moveaxis(v, -1, 0) for v in (a, b, c))
+    dms = tuple(jnp.moveaxis(d, -1, 0) for d in ds)
 
-    def forward_body(k, carry):
-        c_star_c, d_stars_c = carry
-        ak = a[..., k]
-        bk = b[..., k]
-        ck = c[..., k]
-        c_prev = c_star_c[..., k - 1]
-
+    def forward_body(carry, k_inputs):
+        c_prev, d_prevs = carry
+        ak, bk, ck, dks = k_inputs
         denom = bk - ak * c_prev
         denom = jnp.where(jnp.abs(denom) < _TINY, _TINY, denom)
-
-        c_star_c = c_star_c.at[..., k].set(ck / denom)
-        d_stars_c = tuple(
-            d_star_c.at[..., k].set(
-                (d[..., k] - ak * d_star_c[..., k - 1]) / denom
-            )
-            for d, d_star_c in zip(ds, d_stars_c)
+        c_star_k = ck / denom
+        d_star_ks = tuple(
+            (dk - ak * d_prev) / denom for dk, d_prev in zip(dks, d_prevs)
         )
-        return (c_star_c, d_stars_c)
+        return (c_star_k, d_star_ks), (c_star_k, d_star_ks)
 
-    c_star, d_stars = jax.lax.fori_loop(
-        1, n, forward_body, (c_star, d_stars),
+    _, (c_rest, d_rests) = jax.lax.scan(
+        forward_body, (c0_star, d0_stars),
+        (am[1:], bm[1:], cm[1:], tuple(dm[1:] for dm in dms)),
+    )
+    c_star = jnp.concatenate([c0_star[None], c_rest], axis=0)
+    d_stars = tuple(
+        jnp.concatenate([d0[None], dr], axis=0)
+        for d0, dr in zip(d0_stars, d_rests)
     )
 
+    def backward_body(x_nexts, k_inputs):
+        c_star_k, d_star_ks = k_inputs
+        x_ks = tuple(
+            d_star_k - c_star_k * x_next
+            for d_star_k, x_next in zip(d_star_ks, x_nexts)
+        )
+        return x_ks, x_ks
+
+    x_lasts = tuple(ds_[-1] for ds_ in d_stars)
+    _, x_rests = jax.lax.scan(
+        backward_body, x_lasts,
+        (c_star[:-1], tuple(ds_[:-1] for ds_ in d_stars)), reverse=True,
+    )
     xs = tuple(
-        jnp.zeros_like(d).at[..., -1].set(d_star[..., -1])
-        for d, d_star in zip(ds, d_stars)
+        jnp.moveaxis(jnp.concatenate([xr, xl[None]], axis=0), 0, -1)
+        for xr, xl in zip(x_rests, x_lasts)
     )
-
-    def backward_body(k_rev, xs_c):
-        k = n - 2 - k_rev
-        return tuple(
-            x_c.at[..., k].set(
-                d_star[..., k] - c_star[..., k] * x_c[..., k + 1]
-            )
-            for x_c, d_star in zip(xs_c, d_stars)
-        )
-
-    xs = jax.lax.fori_loop(0, n - 1, backward_body, xs)
     return tuple(
         jax.lax.convert_element_type(x, out_dtype) for x in xs
     )

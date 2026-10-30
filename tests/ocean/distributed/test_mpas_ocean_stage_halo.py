@@ -107,6 +107,8 @@ def _all_frontier_config(base, barotropic_solver):
         barotropic_solver=barotropic_solver,
         # The MPI Voronoi lane refuses the default "gpoly" (no deep halo).
         barotropic_implicit_pcg_precond="poly",
+        barotropic_implicit_pcg_variant="standard",
+        barotropic_implicit_pcg_fixed_iters=20,
         A_h=1.0e3, B_h=1.0e9, C_smag=0.05, C_leith=1.0, K_bih=1.0e9,
         K_h=100.0,
         K_zeta_bih=1.0e9,          # T3 vertex-channel site (codex r1 #2)
@@ -261,7 +263,8 @@ def test_np2_stage_correct_parity_and_tripwire(solver, tmp_path_factory):
     non-vacuity tripwire (entry-refresh-only must be measurably worse).
 
     The serial reference is computed by rank 0 in a subprocess with the
-    MPI launcher environment scrubbed (OMPI_/PMIX_/PMI_) so it runs at
+    MPI launcher environment scrubbed (OMPI_/PMIX_/PMI_/PMI2_/SLURM_, and PALS_ for Cray
+    PALS, without which the child joins the job and hangs) so it runs at
     world=1 under the SAME interpreter — no guard weakening, no
     cross-environment numerics skew."""
     import os
@@ -298,7 +301,8 @@ def test_np2_stage_correct_parity_and_tripwire(solver, tmp_path_factory):
     ok, err = True, ""
     if comm.Get_rank() == 0:
         env = {k: v for k, v in os.environ.items()
-               if not k.startswith(("OMPI_", "PMIX_", "PMI_"))}
+               if not k.startswith(("OMPI_", "PMIX_", "PMI_", "PMI2_",
+                                     "PALS_", "SLURM_"))}
         try:
             subprocess.run(
                 [sys.executable, os.path.abspath(__file__), solver,

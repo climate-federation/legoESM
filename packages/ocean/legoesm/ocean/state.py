@@ -1550,6 +1550,14 @@ class BarotropicConfig(NamedTuple):
     # the PCG's global dots are plain local sums (``is_multi_process()``
     # gate), so this is safe pre-arming inside an MPI job.
     barotropic_implicit_force_pcg: bool = False
+    # Diagnostic only (default off = hot path unchanged): after every
+    # implicit-CN solve, compute the TRUE global relative residual
+    # ||rhs - A eta|| / ||rhs|| of the returned eta (post mass projection,
+    # unweighted, so every PCG variant is scored in the same norm) and hand
+    # it to the host via barotropic_common.record_true_residual.  Costs one
+    # extra A_op + one reduction + a host callback per step: never time a
+    # run with it on.
+    barotropic_implicit_record_true_residual: bool = False
     # Distributed-PCG body variant (only used on the fixed-M PCG path):
     #   "standard"      — 2 sequentially-dependent reductions/iter.
     #   "single_reduce" — Chronopoulos-Gear recurrences, ONE batched
@@ -1663,6 +1671,12 @@ class BarotropicConfig(NamedTuple):
     # vector/flux branch (dynspg_ts.f90:413-421, :436-438, :594).  False
     # keeps the unit to flux-form decks only.
     barotropic_literal_fold_unit_vector_form: bool = False
+    # Card-selected: the literal external-mode bundle (raw reference face
+    # depths, unmasked/materialised V transport, boundary association) on a
+    # FLUX-form card.  Selected by OVERFLOW and LOCK_EXCHANGE, whose kt=1-10
+    # NEMO-record distances it leaves equal; not by the VORTEX cards, where it
+    # moved VORTEX-SMT further from its record (user decision 2026-10-17).
+    nemo_literal_external_mode_flux_form: bool = False
 
 
 class RuntimeChecksConfig(NamedTuple):
@@ -2011,6 +2025,13 @@ def wet_min_spacing(grid, land_mask, *, clamp_floor_m: float = 0.0) -> float:
             "with a smaller floor, or pin the coefficient explicitly.")
     return d_min
 
+class ENSVorticityConfig(NamedTuple):
+    """Required NEMO ENS production choices; no physical defaults."""
+
+    scheme: str
+    ln_dynvor_msk: bool
+
+
 class LatLonCGridOceanConfig(NamedTuple):
     """Configuration for the lat-lon C-grid FV ocean model.
 
@@ -2266,8 +2287,14 @@ class LatLonCGridOceanConfig(NamedTuple):
     #     which is byte-identical to ENE-planetary on a uniform-metric grid.
     #     ``pv_flux_ene`` CAN fold planetary f into the same ``q=(f+ζ)/h`` operator
     #     (pass ``f_vtx``), but that is not the wired default. NEMO oracle fidelity.
+    #   "ens_total" — NEMO ``vor_ens`` Sadourny-1975 ENSTROPHY-conserving
+    #     form with total vorticity and the optional compiled relative-
+    #     vorticity mask.  The shipped SWG card selects this arm.
     #     Dispatched in ``_bc_pv_flux``; an unknown value raises ValueError there.
-    vorticity_scheme: str = "al81"
+    # ENS cards pass ``ENSVorticityConfig(scheme="ens_total",
+    # ln_dynvor_msk=...)`` so the NEMO mask switch is required and carries no
+    # default.  Plain strings retain every pre-existing card byte-for-byte.
+    vorticity_scheme: str | ENSVorticityConfig = "al81"
     # Boundary-q convention for the AL81/EEN PV flux at land-adjacent vertices:
     # "neumann_fill" (default; smooth fill — WENO-stencil safety) or "nemo_live"
     # (NEMO vor_een ln_dynvor_msk=F: coast shear-vorticity stays LIVE in the
@@ -2595,7 +2622,9 @@ class LatLonCGridOceanConfig(NamedTuple):
     # WHERE the "nemo_div_curl" operator's ahmt/ahmf coefficient comes from,
     # mirroring NEMO's namdyn_ldf nn_ahm_ijk_t.  "nemo_ldf_c2d" (default,
     # bit-identical) is nn_ahm_ijk_t=20: ldf_c2d builds 1/2*rn_Uv*MAX(e1,e2)
-    # from the grid metrics.  "nemo_ahm_3d_file" is nn_ahm_ijk_t=-30: the whole
+    # from the grid metrics. "nemo_constant" is nn_ahm_ijk_t=0: A_h is the
+    # resolved 1/2*rn_Uv*rn_Lv scalar assigned directly at every T/F point.
+    # "nemo_ahm_3d_file" is nn_ahm_ijk_t=-30: the whole
     # 3-D field is READ (ldfdyn.f90:348-353) and supplied by the card on
     # z_coord.nemo_ldf_ahmt / nemo_ldf_ahmf; A_h's MAGNITUDE is then unused by
     # this operator and only its positivity still selects it, exactly as rn_Uv
@@ -2854,6 +2883,13 @@ class LatLonCGridOceanConfig(NamedTuple):
     # tripole) -- WRONG on a genuinely period-nx regular lat-lon grid.  Default
     # False -> bit-exact for every existing grid/config; set only for tripole.
     ew_cyclic_overlap: bool = False
+    # --- Meridional (j) periodicity (NEMO ln_Jperio) ------------------------
+    # Every public model entry point traces inside
+    # ``halo_latlon.meridional_periodicity(<this value>)``, True or False, so
+    # the caller's scope never decides it.  True: every j-neighbour statement
+    # takes the periodic copy NEMO's lbc_lnk writes (lbclnk.f90:1868).
+    # Default False = the walled N/S boundary.
+    meridionally_periodic: bool = False
     # --- River-runoff depth spreading (NEMO rn_dep_max) --------------------
     # When > 0, the RUNOFF component of the freshwater forcing dilutes the
     # top ``runoff_depth_spread_m`` metres of the column (NEMO sbcrnf spreads

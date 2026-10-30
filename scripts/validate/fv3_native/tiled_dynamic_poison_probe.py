@@ -857,7 +857,10 @@ def main(argv=None):
     from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
 
     from legoesm.atmosphere.dynamics.gcm.fv3_duo_dynamics import (
-        FV3DuoConfig, FV3DuoDynamicsModel)
+    FV3DuoConfig,
+    FV3DuoDynamicsModel,
+    ORACLE_DAMPING,
+)
     from legoesm.grids.factory import create_fv3_duo_grid
     from legoesm.grids.fv3_duo_spmd import (
         build_tiled_ext_scalar_a_split, build_tiled_ext_scalar_b_split,
@@ -871,7 +874,7 @@ def main(argv=None):
     tshard = NamedSharding(tmesh, P("face"))
     pmesh = Mesh(np.array(devs[:6]), ("face",))
     pshard = NamedSharding(pmesh, P("face"))
-    cfg = FV3DuoConfig(km=args.km, hydrostatic=not args.nh)
+    cfg = FV3DuoConfig(**ORACLE_DAMPING, km=args.km, hydrostatic=not args.nh)
     bundle_grid = create_fv3_duo_grid(args.resolution)
     n, ng = bundle_grid.n, bundle_grid.ng
 

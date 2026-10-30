@@ -160,3 +160,32 @@ def test_differentiable():
 
     g = jax.grad(loss)(jnp.asarray(8.0 * qsi))
     assert jnp.isfinite(g)
+
+
+def test_warm_trace_ice_cell_has_bounded_number_sensitivity():
+    """A real captured sub-step cell (WB CAM6 deck, T21): 267 K, trace ice mass,
+    ZERO ice number. The homogeneous gate is never exactly zero, so without the
+    QSMALL cut the cell received ~1e-126 crystals/kg and EPSI's N^(2/3) gave a
+    ~1e30 sensitivity to N_i, which the macro/micro sub-cycle compounded into a
+    NaN parameter gradient."""
+    cfg = MorrisonConfig()._replace(
+        homogeneous_ice_nucleation=True, hard_saturation_adjustment=False,
+        liquid_from_closure=True)
+    one = lambda v: jnp.full((1, 1), v)
+
+    def tend(n_i):
+        z = jnp.zeros((1, 1))
+        hm = HydrometeorState(q_c=z, q_r=z, q_i=one(8.470329472543003e-22),
+                              q_s=one(4.4885009816952306e-10), q_g=z,
+                              N_c=z, N_r=z, N_i=n_i)
+        out = morrison_microphysics(
+            one(266.8466879450952), one(2.993031347952088e-4), hm,
+            one(49539.37049564838),
+            jnp.array([[47973.97102001926, 51104.7699712775]]),
+            one(0.6466244493715798), one(493.7465602057144), 600.0, cfg)
+        return sum(jnp.sum(getattr(out, f) * 600.0) for f in out._fields
+                   if hasattr(getattr(out, f), "shape")
+                   and getattr(out, f).shape == (1, 1))
+
+    g = float(jax.grad(tend)(jnp.zeros((1, 1)))[0, 0])
+    assert abs(g) < 1.0e3, g

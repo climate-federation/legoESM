@@ -135,13 +135,17 @@ def test_the_TIMED_function_returns_more_than_the_temperature_tendency(mod, col)
 # nlev=74 measurement here would be a claim carried across a configuration
 # change. The bench decides per run from its own activity flag; this suite
 # only pins the reason that is resolution-independent.
-_EXPECTED_INACTIVE = ("kuo",)
+#
+# `dca` is pinned for a reason that is also structural: GFDL moist_conv adjusts
+# only pairs of SUPERSATURATED levels, and build_state's column is RH 0.85 at
+# every level and every nlev.
+_EXPECTED_INACTIVE = ("kuo", "dca")
 
 # Schemes expected to trigger AT THIS MODULE'S nlev. `emanuel` belongs here
 # precisely because it is active at nlev=16.
 @pytest.mark.parametrize(
     "scheme", [s for s in (
-        "sbm", "dca", "mass_flux", "edmf", "zhang_mcfarlane",
+        "sbm", "mass_flux", "edmf", "zhang_mcfarlane",
         "kain_fritsch", "tiedtke", "bechtold", "emanuel") ])
 def test_active_schemes_are_reported_active(mod, col, scheme):
     """codex round 1 findings 14/19: an all-zero tendency is finite and times

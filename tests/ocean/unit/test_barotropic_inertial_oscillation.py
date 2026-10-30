@@ -81,7 +81,7 @@ def _fp64():
     set_policy(prev)
 
 
-def _build(flat=False):
+def _build(flat=False, periodic=False):
     # FLAT-y masks are built at rest-state construction (before the model), so set
     # the global here too; the config field then keeps the stepping operators flat.
     from legoesm.grids.halo_latlon import set_meridionally_flat
@@ -98,11 +98,12 @@ def _build(flat=False):
         barotropic_solver="implicit_cn", coriolis_scheme="explicit_ab2",
         bottom_drag_r=0.0, tracer_advection="weno5", weno_smoothness="split",
         meridionally_flat=flat)
+    cfg = cfg._replace(meridionally_periodic=periodic)
     wall = jnp.ones((_NY, _NX), dtype=jnp.asarray(grid.cos_lat).dtype)
     Hb = jnp.full((_NY, _NX), _H, dtype=wall.dtype)
     state = rest_state_latlon_cgrid_ocean(
         grid, z, land_mask_override=wall, H_bathy_override=Hb,
-        T_water_init_C=10.0, T_deep=10.0)
+        T_water_init_C=10.0, T_deep=10.0, meridionally_periodic=periodic)
     # The AB2 slow-forcing carry must be SEEDED before the first step: the
     # model stores a Field each step, and a step-1 None->Field transition
     # breaks the lax.scan carry, so the model now refuses an unseeded state.
@@ -237,21 +238,15 @@ def test_meridionally_periodic_poc_oscillates():
     physical only within the first quarter period (stable regime); the full sweep
     is the production feature. Default-OFF is asserted bit-identical by
     test_closed_basin_geostrophic_adjustment."""
-    from legoesm.grids.halo_latlon import set_meridionally_periodic
-
     def quarter_period_u(periodic):
-        set_meridionally_periodic(periodic)
-        try:
-            grid, z, state, model = _build()
-            u = np.full((_NY, _NX + 1, _NZ), _U0)
-            state = state._replace(u=state.u.replace(data=jnp.asarray(u)))
-            step = jax.jit(lambda s: model.step(s, _DT, surface_forcing=None))
-            for _ in range(_quarter_steps()):
-                state = step(state)
-            uu = np.asarray(state.u.data)[_NY // 2]
-            return float(uu[uu[:, 0] != 0, 0].mean())
-        finally:
-            set_meridionally_periodic(False)
+        grid, z, state, model = _build(periodic=periodic)
+        u = np.full((_NY, _NX + 1, _NZ), _U0)
+        state = state._replace(u=state.u.replace(data=jnp.asarray(u)))
+        step = jax.jit(lambda s: model.step(s, _DT, surface_forcing=None))
+        for _ in range(_quarter_steps()):
+            state = step(state)
+        uu = np.asarray(state.u.data)[_NY // 2]
+        return float(uu[uu[:, 0] != 0, 0].mean())
 
     u_walled = quarter_period_u(False)
     u_periodic = quarter_period_u(True)

@@ -436,6 +436,12 @@ class GMRediConfig(NamedTuple):
     # historical path.  ``rk3_kmm`` selects the materialized stage-2 half-step
     # state consumed as Kmm by stage-3 tra_ldf; ORCA2 L2 alone opts in.
     redi_flux_geometry_stage: str = "step_entry"
+    # T-point thickness used by traldf_iso's final flux-divergence divisor.
+    # ``reference_jacobian`` preserves the historical reference/Jacobian
+    # thickness. ``nemo_qco_live`` uses NEMO's live e3t(Kmm), independently
+    # of the horizontal face-thickness choice above. NEMO-identity cards state
+    # this field explicitly; the library default preserves pre-round-237 runs.
+    redi_divisor_thickness_evaluation: str = "reference_jacobian"
     # Live depths and U/V-point depth accumulation used by ldfslp's mixed-
     # layer ramp. ``legacy_jacobian_t_surface`` preserves the historical
     # Jacobian and T-column subtraction. ``nemo_qco_live_literal`` uses raw

@@ -52,6 +52,7 @@ __param_spec__ = {
     "BechtoldConfig": {
         "scheme_key": "atm.conv.BechtoldConfig",
         "excluded": {
+            "ifs_shallow_supply_width_w_m2": "smoothing width of the faithful-chain max(ZDHPBL, 0) shallow supply ramp (RULE 5 differentiable form), not a tunable",
             "cape_sharpness": "numerics: sigmoid sharpness on the CAPE trigger gate",
             "depth_split_sharpness": "numerics: sigmoid sharpness on the deep/shallow depth blend",
             "downdraft_RH_min": "trigger: column-mean RH threshold below which the downdraft fires (not sigmoid-tunable, fix via config)",
@@ -142,8 +143,8 @@ __param_spec__ = {
         "scheme_key": "atm.conv.DCAConfig",
         "excluded": {
             "cape_sharpness": "numerics: sigmoid sharpness on the CAPE gate",
-            "instability_blend_sharpness": "numerics: sigmoid sharpness on the per-pair superadiabatic blend",
-            "mixing_fraction": "numerics: per-iteration adjustment fraction (default 1.0 at domain boundary, not sigmoid-tunable)",
+            "instability_blend_sharpness": "inert: belonged to the replaced pairwise sweep; the GFDL moist_conv port has no counterpart and raises on a non-default value",
+            "mixing_fraction": "inert: belonged to the replaced pairwise sweep; the GFDL moist_conv port has no counterpart and raises on a non-default value",
         },
         "params": {
             "cape_threshold": {"units": "J/kg", "bounds": (33.0, 300.0), "tunable_tier": 2, "transform": "sigmoid", "category": "trigger", "reference": "trainable since the trigger gained a straight-through gradient (_triggers.py); was tier 0 / AD-unreachable per #1417. Original: Manabe et al. (1965) moist adjustment", "shape": None},
@@ -257,6 +258,8 @@ __param_spec__ = {
             "buoyancy_scale_K": {"units": "K", "bounds": (0.033, 0.3), "tunable_tier": 3, "transform": "sigmoid", "category": "trigger", "reference": "Kuo (1974) buoyancy-gate normalisation", "shape": None},
             "entrainment": {"units": "1/m", "bounds": (1.65e-05, 0.00015), "tunable_tier": 1, "transform": "sigmoid", "category": "entrainment", "reference": "Kuo (1974) Mahfouf reference Eps", "shape": None},
             "supersat_scale": {"units": "kg/kg", "bounds": (3.3e-06, 3e-05), "tunable_tier": 3, "transform": "sigmoid", "category": "trigger", "reference": "Kuo (1974) condensation-gate normalisation", "shape": None},
+            "w_lcl_scale_ms": {"units": "m/s", "bounds": (0.0033, 0.03), "tunable_tier": 3, "transform": "sigmoid", "category": "trigger", "reference": "smoothing scale of the Mahfouf oracle's w_lcl > 0 gate", "shape": None},
+            "ptenq_scale": {"units": "kg/kg/s", "bounds": (3.3e-10, 3e-09), "tunable_tier": 3, "transform": "sigmoid", "category": "trigger", "reference": "smoothing scale of the Mahfouf oracle's max(0, ptenq) in cvgu", "shape": None},
         },
     },
     "MassFluxConfig": {
@@ -279,7 +282,7 @@ __param_spec__ = {
     "SBMConfig": {
         "scheme_key": "atm.conv.SBMConfig",
         "excluded": {
-            "cloud_mask_sharpness": "numerics: sigmoid sharpness on the cloud-layer (T_moist - T) mask",
+            "cloud_mask_sharpness": "inert: belonged to the replaced T_moist >= T layer mask; the Isca qe_moist_convection port has no such mask and raises on a non-default value",
             "smooth_trigger_sharpness": "numerics: sigmoid sharpness on the smooth CAPE trigger",
         },
         "params": {
@@ -331,8 +334,9 @@ __param_spec__ = {
         "scheme_key": "atm.conv.ZhangMcFarlaneConfig",
         "excluded": {
             "limcnv_p_pa": "numerics/domain: convection top cap (40 hPa reference interface), not a closure knob",
-            "pbl_top_pa": "measurement convention: launch-search bound standing in for the host's missing pblh",
             "parcel_tpert": "default 0 = disabled/off (PBL temperature perturbation; CAM6 CLUBB path has none)",
+            "detrain_phase_width_K": "numerics: RULE 5 smoothing width of the detrainment liquid/ice ramp corners (0 = CAM hard switch)",
+            "detrain_number_width_kgkg_s": "numerics: RULE 5 smoothing width of max(0, dlf) in the detrainment number source (0 = CAM hard switch)",
         },
         "params": {
             "c0_lnd": {"units": "1/m", "bounds": (0.002, 0.02), "tunable_tier": 1, "transform": "sigmoid", "category": "autoconversion", "reference": "CAM zmconv_c0_lnd namelist span (0.002-0.0075 across configurations)", "shape": None},
@@ -360,9 +364,11 @@ class SBMConfig(NamedTuple):
     rh_ref : float
         Reference relative humidity for moisture profile (default 0.7).
     cape_threshold : float
-        Minimum CAPE [J/kg] to trigger convection (default 70.0).
+        Minimum CAPE [J/kg] to trigger convection (default 70.0).  The Isca
+        oracle convects whenever CAPE > 0 (threshold 0); the measured gap is a
+        KNOWN DIFFERENCE recorded in ``sbm.py``'s module docstring.
     smooth_trigger_sharpness : float
-        Sigmoid sharpness for smooth trigger [1/(J/kg)] (default 0.01).
+        Sigmoid sharpness for smooth trigger [1/(J/kg)] (default 0.1).
     """
     tau_c: float = 7200.0
     rh_ref: float = 0.7
@@ -372,12 +378,10 @@ class SBMConfig(NamedTuple):
     # — gating leaks).  0.1 gives ``sigmoid(-7) ≈ 9e-4`` (effectively 0)
     # while preserving smoothness near the threshold.
     smooth_trigger_sharpness: float = 0.1
-    # Sigmoid sharpness for the cloud-layer mask (T_moist - T) [1/K].
-    # Hard ``T_moist >= T`` boolean masks kill ``jax.grad`` through layer
-    # top/bottom transitions; the smoothed sigmoid keeps gradients alive.
-    # 5/K gives ~0.5 at T_moist == T and ~0.01 at T_moist - T = -1 K, which
-    # is sharp enough to behave like a hard mask in forward integration but
-    # differentiable for training.
+    # INERT since the Isca qe_moist_convection port (2026-10-19): this was the
+    # sigmoid sharpness of the replaced per-level ``T_moist >= T`` layer mask.
+    # The oracle's convecting layer is kLZB..surface; sbm_convection raises
+    # if this is set to anything but its default.
     cloud_mask_sharpness: float = 5.0
 
 
@@ -480,9 +484,8 @@ class DCAConfig(NamedTuple):
 
     Two variants are routed by the ``variant`` field:
 
-    * ``variant="manabe"`` (default): the Manabe-Smagorinsky-Strickler
-      (1965) pairwise moist-adiabatic adjustment (the historical legoESM
-      ``dca`` scheme).  Behaviour of all existing configs is unchanged.
+    * ``variant="manabe"`` (default): Manabe moist convective adjustment,
+      a port of GFDL atmos_phys 2021.02 ``moist_conv`` (see ``dca.py``).
     * ``variant="ahmed_neelin"``: the Ahmed-Neelin-Adames (2020)
       lower-tropospheric-buoyancy (B_L) precipitation-buoyancy closure
       (see :class:`AhmedNeelinDCAConfig`).
@@ -492,29 +495,19 @@ class DCAConfig(NamedTuple):
     variant : str
         ``"manabe"`` (default) or ``"ahmed_neelin"``.
     n_iterations : int
-        (Manabe only) Number of bottom-to-top adjustment sweeps per call
-        (default 3).  A single sweep only partially relaxes a deep column
-        toward the moist adiabat, so one call per physics step leaves the
-        free troposphere several K too cold under steady radiative
-        cooling; free-tropospheric ``mean|T - T_moist|`` falls
-        monotonically with sweeps (≈9.0/8.4/7.3/5.5 K at 1/3/5/10) with
-        the column maximum temperature unchanged (the simultaneous pair
-        solve keeps every sweep enthalpy-conserving and bounded).
+        INERT (belonged to the replaced pairwise sweep; ``moist_conv`` iterates
+        to its own tolerance).  Must stay 3; anything else raises.
     mixing_fraction : float
-        (Manabe only) Fraction of adjustment applied per iteration
-        (default 1.0).
+        INERT (replaced pairwise sweep).  Must stay 1.0; anything else raises.
     cape_threshold : float
-        (Manabe only) Minimum CAPE [J/kg] to trigger convection (default
-        100.0).  Columns with CAPE below this are not adjusted.
+        (Manabe only) Threshold [J/kg] of the CAPE gate on the adjustment
+        (default 100.0).  The gate has no counterpart in ``moist_conv``; a
+        negative threshold with a hard sharpness disables it.
     cape_sharpness : float
-        (Manabe only) Sigmoid sharpness [1/(J/kg)] for smooth CAPE gating
+        (Manabe only) Sigmoid sharpness [1/(J/kg)] of the CAPE gate
         (default 0.1).
     instability_blend_sharpness : float
-        (Manabe only) Dimensionless sigmoid sharpness on the
-        superadiabatic-instability metric controlling per-pair adjustment
-        blending inside the ``lax.scan`` sweep (default 10.0).  Lifted
-        from a hardcoded literal so the trigger transition width is
-        tunable.
+        INERT (replaced pairwise sweep).  Must stay 10.0; anything else raises.
     ahmed_neelin : AhmedNeelinDCAConfig
         Sub-configuration for the ``variant="ahmed_neelin"`` closure.
     """
@@ -545,17 +538,17 @@ class KuoConfig(NamedTuple):
         dq/dt = −ptenq + cvgu/zint · (qvc − qv)
         zint  = Σ (qvc − qv + (tc − t)/alpha) dp/g
 
-    over levels that are buoyant AND have positive vertical velocity at
-    the LCL (``icond==2``) AND positive local convergence
-    (``ptenq > 0``).  ``tc, qvc`` come from an entraining moist-adiabat
-    ascent (entrainment ``Eps``) with condensation removed.
+    applied at levels that are buoyant AND have positive vertical velocity
+    at the LCL (``icond==2``) AND positive local convergence
+    (``ptenq > 0``); ``cvgu`` and ``zint`` are integrated over ``icond==2``
+    (so, as in the oracle, the column water is not closed when divergence
+    lies inside the cloud).  ``tc, qvc`` come from an entraining
+    moist-adiabat ascent (entrainment ``Eps``) with condensation removed.
 
     The optional ``partition="anthes"`` Kuo-Anthes (1977) closure splits
     the source between heating ``(1 − bkuo)`` and moistening ``bkuo``
-    with ``bkuo = clip(1 − RH_mean − rh_offset, 0, 1)`` — b is a
-    moistening FRACTION, so it is clamped to [0, 1] (a near-saturated
-    layer with ``RH_mean + rh_offset > 1`` moistens nothing rather than
-    flipping the term into spurious extra drying).
+    with ``bkuo = 1 − RH_mean − rh_offset``, unclamped as in the oracle
+    (negative in a layer with ``RH_mean + rh_offset > 1``).
 
     Fields
     ------
@@ -578,9 +571,13 @@ class KuoConfig(NamedTuple):
         Dimensionless sigmoid sharpness for the smooth ``icond``
         activation gates (supersaturation, buoyancy, w_lcl>0, ptenq>0).
         Each gate argument is normalised to O(1) by the scales below
-        before the sigmoid, so a single large dimensionless sharpness
-        (default 50) makes every gate a crisp Heaviside approaching the
-        oracle's hard ``if`` switches while staying differentiable.
+        before the sigmoid; the gates tend to the oracle's hard ``if``
+        switches as the sharpness goes to infinity (1e12 reproduces the
+        oracle to round-off on the fixture; an argument of exactly 0 gives
+        0.5).  The ``ptenq > 0`` sign gate's width is ``ptenq_sign_floor``,
+        not this sharpness.  The same sharpness smooths the two ``max(x, 0)``
+        cut-offs (parcel excess over saturation, on ``supersat_scale``;
+        positive convergence in ``cvgu``, on ``ptenq_scale``).
     buoyancy_scale_K : float
         Normalisation scale [K] for the buoyancy gate ``tvc − tve`` —
         the sigmoid argument is ``(tvc − tve)/buoyancy_scale_K``.  A
@@ -596,6 +593,13 @@ class KuoConfig(NamedTuple):
         magnitude); the scale-free sign makes the smooth gate ~1 across
         the whole convergent column down to its exponential tail and ~0
         only for clear subsidence.  1e-30 = pure numerical guard.
+    w_lcl_scale_ms : float
+        Fixed speed scale [m/s] of the ``w_lcl > 0`` gate, argument
+        ``w_lcl / w_lcl_scale_ms`` (transition width
+        ``w_lcl_scale_ms / icond_sharpness``).
+    ptenq_scale : float
+        Scale [kg/kg/s] of the smoothed ``max(0, ptenq)`` in ``cvgu``,
+        ``ptenq * sigmoid(s ptenq / ptenq_scale)`` with ``s = icond_sharpness``.
     zint_floor : float
         Safety floor [kg/m²] on the ``|zint|`` normalisation denominator
         so the closure is finite when the convective layer is empty.
@@ -619,6 +623,8 @@ class KuoConfig(NamedTuple):
     ptenq_sign_floor: float = 1.0e-30
     zint_floor: float = 1.0e-12
     cvgu_activation_scale: float = 1.0e-8
+    w_lcl_scale_ms: float = 0.01
+    ptenq_scale: float = 1.0e-9
 
 
 class MassFluxConfig(NamedTuple):
@@ -722,17 +728,16 @@ class ZhangMcFarlaneConfig(NamedTuple):
     limcnv_p_pa : float
         Convection is capped at the interface where the reference pressure
         crosses this value [Pa] (40 hPa, zm_conv_intr.F90:334).
-    pbl_top_pa : float
-        DEPARTURE: the host does not carry the PBL height ``pblh`` that the
-        oracle's ``pblt`` launch-level bound needs, so the max-MSE launch
-        search is restricted to levels with ``p >= pbl_top_pa`` [Pa] unless
-        ``pblh`` is passed explicitly.
     parcel_tpert : float
         PBL temperature perturbation ``tpert`` [K] added to the parcel; 0 on
         the CAM6 CLUBB path (no scheme writes ``tpert`` there).
     enable_cmt : bool
         Run ``momtran`` (convective momentum transport + KE-dissipation
         heating); when False ``du_dt_conv``/``dv_dt_conv`` are ``None``.
+    transport_cloud_tracers : bool
+        Run ``convtran`` on the carried CAM6 convtran1 tracers
+        (``zm_conv_intr.F90:829-846``); when False they are not transported
+        and ``tracer_transport`` is ``None``.
     """
     c0_lnd: float = 0.0075
     c0_ocn: float = 0.03
@@ -746,15 +751,21 @@ class ZhangMcFarlaneConfig(NamedTuple):
     dmpdz: float = -1.0e-3
     alfa: float = 0.1
     limcnv_p_pa: float = 4000.0
-    pbl_top_pa: float = 7.0e4
     parcel_tpert: float = 0.0
     enable_cmt: bool = True
+    transport_cloud_tracers: bool = True
     # Column land fraction policy (static, closure-time).  "required": the host
     # must pass ``land_frac`` (it picks c0_lnd vs c0_ocn per column); a missing
     # one raises instead of silently treating every column as ocean.  "none":
     # an aquaplanet run with no land, recorded as a choice -- ocean
     # coefficients everywhere, and passing a land fraction is an error.
     land_fraction: str = "required"
+    # RULE 5 smoothing widths of CAM6's detrainment of ZM condensate
+    # (zhang_mcfarlane.cam6_detrain_condensate, clubb_intr.F90:2345-2376):
+    # the liquid/ice ramp's corners [K] and the max(0, dlf) of the number
+    # source [kg/kg/s].  0 = CAM's hard switch.
+    detrain_phase_width_K: float = 0.1
+    detrain_number_width_kgkg_s: float = 1.0e-12
 
 
 class KainFritschConfig(NamedTuple):
@@ -1535,7 +1546,7 @@ class BechtoldConfig(NamedTuple):
     # deep closure byte-identically.
     use_ifs_cape_closure: bool = True
     # IFS Kessler sub-cloud evaporation of convective rain (cuflxn.F90:436-475;
-    # see bechtold._ifs_subcloud_rain_evaporation): the post-split rain flux
+    # see bechtold.ifs_subcloud_rain_evaporation): the post-split rain flux
     # accumulates downward and evaporates below cloud base at the oracle
     # RCPECONS Kessler rate, limited by the ZRHEBC RH break (deep-ocean 0.85 /
     # non-deep 0.92, deep-weight blended; land values need an absent land
@@ -1623,6 +1634,13 @@ class BechtoldConfig(NamedTuple):
     # (CUASCN has it INOUT and clears it for mid-level columns, cuascn.F90:389
     # and :627), which is harmless only while this port has no KTYPE=3 branch.
     use_ifs_ascent: bool = False
+    # Faithful chain only: shallow closure with no sub-cloud supply.
+    # "zero" (default) = flux max(supply, 0)/ZDH, smoothed over
+    # ifs_shallow_supply_width_w_m2; "first_guess" = OpenIFS (cumastrn.F90:912
+    # keeps the first-guess 0.1*ZMFMAX).  KNOWN DIFFERENCE in
+    # _ifs_closure.shallow_closure.
+    ifs_shallow_nosupply: str = "zero"
+    ifs_shallow_supply_width_w_m2: float = 1.0  # W/m2, 0 = hard max
     # IFS RCAPDCYCL=2 diurnal-cycle CAPE correction (cumastrn.F90:780-833;
     # see bechtold._ifs_capdcycl): subtracts the sub-cloud CAPE production
     # over a BL timescale so land deep convection peaks late afternoon.
@@ -1675,7 +1693,7 @@ class BechtoldConfig(NamedTuple):
     # melt inside the sub-cloud precip march, FOLD variant (surface snow
     # forcibly melted into the lowest layer; formation-side freezing heat
     # paired so column enthalpy closes exactly — see
-    # _ifs_subcloud_rain_evaporation).  Requires use_ifs_subcloud_evap.
+    # ifs_subcloud_rain_evaporation).  Requires use_ifs_subcloud_evap.
     # Default True since 2026-07-17 (RCE A/B: T-drift 0.052 -> 0.026 K/day;
     # AMIP stable).
     use_ifs_snow_melt: bool = True

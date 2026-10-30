@@ -395,7 +395,8 @@ def mpi_data_parallel_train_step(value_and_grad_fn, params, opt_state, optimizer
 @mpi_abort_on_uncaught
 def mpi_data_parallel_training_loop(loss_fn, params, opt_state, optimizer,
                                     local_samples, n_epochs, num_processes, *,
-                                    comm=None, on_epoch=None, start_epoch=0):
+                                    comm=None, on_epoch=None, start_epoch=0,
+                                    place=None):
     """Per-rank loop over this rank's ERA5 shard, gradients averaged across ranks
     each step. All ranks run lockstep (balanced shards from ``shard_samples`` with
     ``drop_remainder``), so the per-step ``allreduce`` never deadlocks. Rank-0
@@ -411,6 +412,9 @@ def mpi_data_parallel_training_loop(loss_fn, params, opt_state, optimizer,
     job stopped, so its checkpoints do not overwrite that job's.  The learning
     -rate schedule is NOT re-derived from it — the schedule position lives in
     the optimizer state, which a resuming caller restores.
+
+    ``place(sample)`` stages one host sample on the device(s); default
+    ``jax.device_put``.  A column-sharded run passes its mesh placement here.
     """
     if not 0 <= start_epoch <= n_epochs:
         raise ValueError(
@@ -420,6 +424,7 @@ def mpi_data_parallel_training_loop(loss_fn, params, opt_state, optimizer,
     # #1364: ONE trace/compile for the whole run. Hoisted above BOTH loops --
     # inside either one it would be rebuilt per step and recompile every time.
     value_and_grad_fn = build_dp_value_and_grad(loss_fn)
+    place = jax.device_put if place is None else place
     n_traces = getattr(value_and_grad_fn, "n_traces", None)
     retrace_warned = False
     n_steps_done = 0
@@ -428,13 +433,15 @@ def mpi_data_parallel_training_loop(loss_fn, params, opt_state, optimizer,
     for epoch in range(start_epoch, n_epochs):
         losses = []
         n_skipped = 0
-        for sample in local_samples:
+        for i_step, sample in enumerate(local_samples):
+            import time as _time
+            _t0 = _time.perf_counter()
             # #1286 fix A: samples are kept HOST-resident (numpy leaves) so the
             # whole training set is never parked in device memory; move ONE
             # sample onto the device here and let it free at the next iteration.
             # A no-op (cheap) when the sample is already device-resident (the
             # legacy eager path), so this is safe for both.
-            sample = jax.device_put(sample)
+            sample = place(sample)
             params, opt_state, loss = mpi_data_parallel_train_step(
                 value_and_grad_fn, params, opt_state, optimizer, sample,
                 num_processes, comm=comm)
@@ -446,6 +453,10 @@ def mpi_data_parallel_training_loop(loss_fn, params, opt_state, optimizer,
                 n_skipped += 1
             else:
                 losses.append(float(loss))
+            import logging as _logging
+            _logging.getLogger(__name__).info(
+                "epoch %d step %d/%d loss=%.6g %.1f s", epoch, i_step + 1,
+                len(local_samples), float(loss), _time.perf_counter() - _t0)
             n_steps_done += 1
             # #1364 retrace guard: with fixed-shape samples the rollout must be
             # traced exactly once for the whole run. More than that means a

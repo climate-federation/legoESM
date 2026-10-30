@@ -135,16 +135,21 @@ def test_bulk_charge_and_kernel_inverse_round_trip_exactly():
 
 
 def test_coupled_hook_hands_the_tiles_water_flux():
-    """The coupled driver's hook returns (shflx, physical lhflx, mass flux) and
-    refuses a response without the water flux."""
+    """The coupled driver hands back (shflx, physical lhflx, mass flux, stress),
+    the segment mean the segment hook accumulates, and refuses a response
+    without the water flux (F38 moved both into _segment_hook)."""
     import inspect
     from legoesm.driver import coupled_esm_driver as m
     src = inspect.getsource(m)
     hook = src[src.index("def _coupled_get_sfc_flux_override(day):"):]
     hook = hook[:hook.index("self._atm.get_sfc_flux_override = ")]
-    assert "return r.shflx, r.lhflx, r.surface_mass_flux" in hook
-    assert "carries no " in hook and "surface_mass_flux;" in hook
-    assert "* constants.L_v" not in hook and "/ constants.L_v" not in hook
+    seg = src[src.index("def _segment_hook("):src.index("def _log_coupled_diag(")]
+    assert "return hb" in hook
+    assert ("_m.shflx, _m.lhflx, _m.surface_mass_flux, _m.tau_x, _m.tau_y"
+            in seg)
+    assert "carries no " in seg and "surface_mass_flux;" in seg
+    for body in (hook, seg):
+        assert "* constants.L_v" not in body and "/ constants.L_v" not in body
 
 
 def test_cesm_ocean_law_water_inverts_with_the_constant_it_charges():
@@ -159,7 +164,8 @@ def test_cesm_ocean_law_water_inverts_with_the_constant_it_charges():
     u, v = jnp.full((n,), 6.0), jnp.full((n,), 1.0)
     T_air, q_v, q_sfc, rho = T_sfc - 1.5, jnp.full((n,), 0.008), jnp.full((n,), 0.02), jnp.full((n,), 1.15)
     cfg = SurfaceLayerConfig(bulk_scheme="large_yeager_cesm", z_ref=10.0)
-    _, _, _, lhflx, _ = compute_surface_fluxes(u, v, T_air, q_v, T_sfc, q_sfc, rho, cfg)
+    _, _, _, lhflx, _ = compute_surface_fluxes(u, v, T_air, q_v, T_sfc, q_sfc, rho, cfg,
+                                               t_bot=T_air)
     assert float(jnp.min(jnp.abs(lhflx))) > 1.0
     E_ref = lhflx / constants.L_v
     np.testing.assert_allclose(np.asarray(surface_moisture_flux(cfg, lhflx, T_sfc)),

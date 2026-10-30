@@ -69,20 +69,19 @@ mpas = create_grid("mpas", 4, density_fn=lambda lat, lon: 1.0 + 5.0 * np.exp(-(l
 From the command line:
 
 ```bash
-legoesm run    config/williamson_test2.yaml        # run a simulation from a config
+legoesm run    config/templates/3d_idealized/held_suarez.yaml  # run a simulation from a config
 legoesm test   williamson --case 2                 # standard validation cases
 legoesm reproduce <manifest> --check               # bit-identical reproducibility gate
 ```
 
 ## The three Lego axes
 
-Everything is assembled from interchangeable bricks along three independent axes —
-inspect the full capability map via [`legoesm.taxonomy`](#capability-taxonomy):
+Everything is assembled from interchangeable bricks along three independent axes:
 
 | Axis | What varies | Where it lives |
 |------|-------------|----------------|
 | **Complexity** | fixed-SST → slab → multilayer → full-3-D ocean; shallow-water → hydrostatic → nonhydrostatic atmosphere; … | `legoesm.components.complexity` |
-| **Bricks** | run a component standalone **or** fully coupled | `legoesm.components` (Dycore/Forced/Surface/Prescribed bricks) |
+| **Bricks** | run a component standalone **or** fully coupled | `legoesm.components` (component protocols); `legoesm.driver.component_factory` builds the components |
 | **Extent** | global, regional (limited-area), or idealized; uniform or **refined** | `legoesm.grids.factory` |
 
 Grids are shared between components: lat-lon FV, spectral Gaussian, cubed-sphere
@@ -93,15 +92,6 @@ See [Composability & architecture](architecture/composability.md) for how to ins
 axis (grids, regional/idealized extent, the SCM/LES/CRM/shallow-water/3-D complexity
 ladder), a high-level tour of the packages, and the research → operational
 (AMIP/OMIP/CMIP) progression.
-
-(capability-taxonomy)=
-## Capability taxonomy
-
-```python
-from legoesm import taxonomy
-taxonomy.capability_report()   # the full complexity × extent × grid/core map
-taxonomy.grid_capability("mpas").variable_resolution   # True
-```
 
 ## Reproducibility
 
@@ -150,6 +140,7 @@ performance/REAL_HARDWARE_SCALING
 :caption: Architecture & development
 
 architecture/DISTRIBUTED_ARCHITECTURE
+architecture/reproducibility
 user-guide/developers
 user-guide/api
 ```

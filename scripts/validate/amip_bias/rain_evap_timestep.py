@@ -58,7 +58,7 @@ def main(argv=None):
     q_v, q_r, N_r_m = (np.asarray(z[k]) for k in ("trc_q_v", "trc_q_r", "trc_N_r"))
     T_v = T * (1.0 + (1.0 / constants.epsilon - 1.0) * q_v)
     rho = p_full / (constants.R_d * T_v)
-    cfg = MorrisonConfig()
+    cfg = MorrisonConfig(warm_rain_scheme="kk2000")  # Pinned kk2000: an unset law resolves to kk2000_cam6 under mg (needs CLUBB relvar).
     q_sat = np.asarray(saturation_mixing_ratio(jnp.asarray(T), jnp.asarray(p_full)))
     N_r = np.asarray(number_per_mass_to_per_volume(jnp.asarray(N_r_m), jnp.asarray(rho)))
     ev = np.asarray(rain_evaporation_m2005(

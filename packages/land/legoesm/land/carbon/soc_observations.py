@@ -219,6 +219,63 @@ def per_archetype_cover_weighted_mean(
     return out
 
 
+def load_gridded_obs(path, candidates, label, *, ncell, var=None):
+    """Per-cell observed field ``(ncell,)`` from a gridded NetCDF already on the surfdata grid.
+
+    ``X(..., nlat, nlon)`` is time-averaged (any leading axes collapsed via ``nanmean``,
+    ignoring NaN gaps: a cell observed on SOME months keeps that partial mean, a cell never
+    observed stays NaN) then reshaped to the SAME row-major ``(ncell = nlat*nlon)`` order the
+    CLM5 cover loader uses, so cell indices align with the archetype membership.  Missing
+    cells are PRESERVED as ``NaN`` (never fabricated to 0), so the per-archetype
+    cover-weighted mean (:func:`per_archetype_cover_weighted_mean`) averages only observed
+    cells.  The product MUST already be on the surfdata grid (same shape AND lat/lon
+    orientation) and in model units; a shape mismatch is a hard error, never a silent
+    misalignment.
+
+    Parameters
+    ----------
+    path : str
+        Gridded NetCDF path (``--<label>-obs``).
+    candidates : tuple of str
+        Variable names auto-detected, in order, when ``var`` is omitted.
+    label : str
+        Short product name used in error text and the ``--<label>-var`` hint
+        (``"sif"``, ``"d13c"``).
+    ncell : int
+        Expected number of cells (= the cover ``ncell``); a mismatch raises.
+    var : str, optional
+        Variable name; overrides ``candidates``.
+    """
+    import xarray as xr
+
+    ds = xr.open_dataset(path, decode_times=False)
+    try:
+        var = var or next((v for v in candidates if v in ds), None)
+        if var is None:
+            raise SystemExit(
+                f"gridded {label} {path} has no recognised {label} variable "
+                f"(looked for {candidates}); pass --{label}-var. Available: "
+                f"{sorted(ds.data_vars)[:40]}")
+        arr = np.asarray(ds[var].values, dtype=float)
+    finally:
+        ds.close()
+    while arr.ndim > 2:
+        with np.errstate(invalid="ignore"):
+            arr = np.nanmean(arr, axis=0)
+    if arr.ndim != 2:
+        raise SystemExit(
+            f"gridded {label} variable expected 2-D (nlat, nlon) after time-averaging; "
+            f"got shape {arr.shape}.")
+    cell = np.asarray(arr, dtype=float).reshape(-1)   # row-major (i_lat, i_lon)
+    if cell.shape[0] != int(ncell):
+        raise SystemExit(
+            f"gridded {label} ncell {cell.shape[0]} (= {arr.shape[0]}x{arr.shape[1]}) "
+            f"!= cover ncell {int(ncell)}; the {label} product must be pre-regridded onto "
+            f"the surfdata grid (same shape AND lat/lon orientation) -- a data-prep "
+            f"follow-up. Use --dry-run-synthetic for a self-contained test.")
+    return cell
+
+
 def per_archetype_observed_soc(
     organic,
     dz,

@@ -44,7 +44,9 @@ class ConvectionOutput(NamedTuple):
         ``precipitation``: convective condensate now joins the
         cloud-water bucket and is processed by microphysics, which
         owns the resulting surface precipitation diagnostic. By
-        construction this field is non-negative.
+        construction this field is non-negative, except for Kuo, whose
+        source is the Mahfouf oracle's signed rain integrand
+        ``dT_dt / alpha`` (negative where the scheme cools).
     cape : jax.Array
         CAPE diagnostic [J/kg], shape (ncol,).
     convective_mask : jax.Array
@@ -92,6 +94,17 @@ class ConvectionOutput(NamedTuple):
     icwmr: jax.Array | None = None
     """Optional deep in-cloud condensate mixing ratio [kg/kg], shape
     (ncol, nlev) (CAM ``dp_icwmr``); companion of ``mass_flux_up``."""
+    precip_frozen_sfc: jax.Array | None = None
+    """Optional FROZEN surface precipitation [kg/m^2/s, +into surface],
+    shape (ncol,), of a scheme that books its own surface precip (CAM ZM's
+    ``zm_conv_evap`` snow flux, whose fusion heat the scheme's heating
+    already carries).  The interactive land takes its snow from it (F29).
+    ``None`` = not published."""
+    tracer_transport: dict | None = None
+    """Optional convective transport tendencies of carried tracers, keyed by
+    tracer name (e.g. ``"q_c"``), each (ncol, nlev) [tracer units / s],
+    SIGNED and column-conserving (CAM ZM ``convtran``).  Hosts ADD them to
+    any other tendency of the same tracer.  ``None`` = no transport."""
 
 
 def split_convective_rain(dq_c_conv_dt, precip_efficiency):

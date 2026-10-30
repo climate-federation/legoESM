@@ -40,7 +40,7 @@ own grid and reference thicknesses.
   `:4830,:4844,:4862` on both cards because
   `momentum_time_integrator == tracer_time_integrator == "rk3_ws"`):
   `hu_stage = min_cell_to_uface(h_stage)` with
-  `h_stage = e3t_0*(1 + eta/H)` (`vertical.py:1127 compute_layer_thickness`).
+  `h_stage = e3t_0*(1 + eta/H)` (`vertical.py:1134 compute_layer_thickness`).
   `min(e3t_0_i*(1+r3t_i), e3t_0_{i+1}*(1+r3t_{i+1})) != e3u_0*(1+r3u)`; the
   difference is first order in the ssh difference across the face.
 * `stprk3_stg.F90:373-378` (`key_qco`, reached because

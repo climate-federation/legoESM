@@ -21,6 +21,8 @@ SUPERSESSION_RE = re.compile(
     r"`(?P<path>[^`\n]+)`$"
 )
 MINIMUM_DOCUMENTS = 1389
+POST_CUTOFF_ORIGINS: dict[Path, dict[int, tuple[str, int]]] = {}
+_MERGE_PARENT_LINES: dict[tuple[str, Path], list[str] | None] = {}
 
 
 def run(*args: str, cwd: Path = ROOT, check: bool = True) -> subprocess.CompletedProcess[str]:
@@ -32,31 +34,94 @@ def documents() -> tuple[Path, ...]:
 
 
 def post_cutoff_changes() -> dict[Path, set[int]]:
-    """Map current lines added or changed after the cutoff to their documents."""
-    base = run("git", "rev-list", "-1", f"--before={CUTOFF}", "HEAD").stdout.strip()
+    """Map first-parent prospective lines to their current documents.
+
+    A catch-up merge imports an independently authored history.  A plain
+    ``base..HEAD`` tree diff would relabel every imported second-parent line as
+    a new lane citation, even though those lines were not authored or changed
+    on the guarded lane.  Follow the first-parent chain, inspect non-merge
+    commits plus combined merge resolutions, then use blame to retain only
+    lines actually introduced by those prospective first-parent commits.
+    """
+    base = run(
+        "git", "rev-list", "--first-parent", "-1", f"--before={CUTOFF}",
+        "HEAD").stdout.strip()
     if not base:
         raise AssertionError(f"no repository commit exists before {CUTOFF}")
-    diff = run("git", "diff", "--unified=0", base, "HEAD", "--", "docs").stdout
+
+    prospective = set(run(
+        "git", "rev-list", "--first-parent", f"{base}..HEAD").stdout.splitlines())
+    candidate_names = set(run(
+        "git", "log", "--first-parent", "--no-merges", "--format=",
+        "--name-only", f"{base}..HEAD", "--", "docs").stdout.splitlines())
+    merges = run(
+        "git", "rev-list", "--first-parent", "--merges",
+        f"{base}..HEAD").stdout.splitlines()
+    for merge in merges:
+        candidate_names.update(run(
+            "git", "diff-tree", "--cc", "--name-only", "--format=", merge,
+            "--", "docs").stdout.splitlines())
+
     changed: dict[Path, set[int]] = {}
-    path: Path | None = None
-    current_line = 0
-    for line in diff.splitlines():
-        if line.startswith("+++ b/"):
-            path = ROOT / line[6:]
-        elif line.startswith("@@"):
-            match = re.search(r"\+(\d+)(?:,(\d+))?", line)
-            assert match
-            current_line = int(match.group(1))
-        elif line.startswith("+") and not line.startswith("+++"):
-            if path is not None and DOC_RE.search(path.name):
-                changed.setdefault(path, set()).add(current_line)
-            current_line += 1
-        elif not line.startswith("-"):
-            current_line += 1
+    header = re.compile(
+        r"^(?P<sha>[0-9a-f]{40}) (?P<origin>\d+) "
+        r"(?P<line>\d+)(?: \d+)?$")
+    for name in sorted(candidate_names):
+        if not name:
+            continue
+        path = ROOT / name
+        if not path.is_file() or not DOC_RE.search(path.name):
+            continue
+        blame = run(
+            "git", "blame", "--line-porcelain", "--root", "HEAD", "--",
+            name).stdout
+        selected: set[int] = set()
+        origins: dict[int, tuple[str, int]] = {}
+        for line in blame.splitlines():
+            match = header.fullmatch(line)
+            if match is None or match.group("sha") not in prospective:
+                continue
+            line_number = int(match.group("line"))
+            selected.add(line_number)
+            origins[line_number] = (
+                match.group("sha"), int(match.group("origin")))
+        if selected:
+            changed[path] = selected
+            POST_CUTOFF_ORIGINS[path] = origins
     return changed
 
 
 POST_CUTOFF_CHANGES = post_cutoff_changes()
+
+
+def inherited_merge_sha(path: Path, line_number: int, value: str) -> bool:
+    """Whether a merge re-anchor carried this SHA token from parent one.
+
+    Only a token on the same original line of a merge's first parent is
+    carried forward.  New tokens, copied tokens, and ordinary post-cutoff
+    commits remain subject to the normal resolution/digest checks.
+    """
+    origin = POST_CUTOFF_ORIGINS.get(path, {}).get(line_number)
+    if origin is None:
+        return False
+    commit, original_line = origin
+    parents = run(
+        "git", "rev-list", "--parents", "-n", "1", commit).stdout.split()
+    if len(parents) < 3:
+        return False
+    relative = path.relative_to(ROOT)
+    key = (commit, relative)
+    if key not in _MERGE_PARENT_LINES:
+        shown = run(
+            "git", "show", f"{commit}^1:{relative}", check=False)
+        _MERGE_PARENT_LINES[key] = (
+            shown.stdout.splitlines() if shown.returncode == 0 else None)
+    lines = _MERGE_PARENT_LINES[key]
+    return (
+        lines is not None
+        and 1 <= original_line <= len(lines)
+        and value in HEX_RE.findall(lines[original_line - 1])
+    )
 
 
 def cited_path(path: Path, lines: list[str], index: int, start: int) -> Path | None:
@@ -127,6 +192,8 @@ def validate_document(path: Path, selected: set[int] | None = None) -> list[str]
         line = lines[line_number - 1]
         for match in HEX_RE.finditer(line):
             value = match.group().lower()
+            if inherited_merge_sha(path, line_number, value):
+                continue
             if len(value) == 40:
                 if value in superseded:
                     continue

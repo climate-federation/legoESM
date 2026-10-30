@@ -104,7 +104,7 @@ def _experiment(grid_type, resolution, nlev=5):
     from legoesm.driver.config import DycoreConfig, ExperimentConfig, GridConfig
     return ExperimentConfig(
         grid=GridConfig(grid_type=grid_type, resolution=resolution, nlev=nlev),
-        dycore=DycoreConfig(dt=600.0, model_type="hydrostatic",
+        dycore=DycoreConfig(energy_fixer=False, dt=600.0, model_type="hydrostatic",
                             discretization="finite_volume"),
         radiation="gray", turbulence="clubb_lite",
     )
@@ -152,7 +152,7 @@ def test_compare_state_shape_matches_physics_adapter_real_driver():
 
     atm = ExperimentConfig(
         grid=GridConfig(grid_type="latlon", resolution=8, nlev=5),
-        dycore=DycoreConfig(dt=600.0, model_type="hydrostatic",
+        dycore=DycoreConfig(energy_fixer=False, dt=600.0, model_type="hydrostatic",
                             discretization="finite_volume"),
         output=OutputConfig(diag_days=1.0), radiation="gray",
         turbulence="clubb_lite", days=1,

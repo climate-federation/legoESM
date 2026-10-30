@@ -70,6 +70,18 @@ TwoLeafCanopyConfig = CanopyConfig
 _DEFAULT_N_PICARD = 6
 _DEFAULT_PICARD_OMEGA = 0.15
 
+# Columns per group in the canopy Newton solve.  Under one vmap every column
+# iterates until the slowest column on the rank stops, so one hard column costs
+# the whole rank up to the iteration cap; groups stop independently.  Pure
+# performance: measured on recorded production batches, iteration counts and
+# converged flags identical, state differs only by rounding (<= 5e-13 K).
+_CANOPY_SOLVE_GROUP = 64
+# Picard passes after the first order their columns by the previous pass's
+# Newton iterations before grouping, so hard columns share groups.  Pure
+# performance: same per-column solve, results equal to rounding (measured at 8
+# nodes: slowest rank's land solve 515 -> 383 ms, step -2.6 %).
+_SORT_BY_PREV_ITERS = True
+
 # Time constant of the growth-temperature exponential moving average [s].
 # 30 days * 86400 s/day = 2.592e6 s.  At dt = 1800 s, ~76 days reach 95 %
 # of the equilibrium.  Used by the caller (``step_*_land``) to advance
@@ -171,6 +183,17 @@ def advance_TgC_ema(
     return TgC_old + alpha * (T_air_C - TgC_old)
 
 
+def static_canopy_roughness(lp, ncol):
+    """(z0m, d) from the PRESCRIBED canopy geometry with exactly the defaults
+    and the aerodynamics function of the canopy solve below."""
+    _lp_lai = _get(lp, "LAI", None)
+    LAI = jnp.full(ncol, _DEFAULT_LAI) if _lp_lai is None else _lp_lai
+    return compute_aerodynamics(
+        _get(lp, "hc", jnp.full(ncol, _DEFAULT_HC)), LAI,
+        _get(lp, "rz0m", jnp.full(ncol, _DEFAULT_RZ0M)),
+        _get(lp, "rd", jnp.full(ncol, _DEFAULT_RD)))
+
+
 def _get(lp, name: str, fallback):
     """Read from per-column params if available; else return fallback.
 
@@ -207,6 +230,8 @@ def compute_two_leaf_canopy_fluxes(
     soil_surface_relsat: jnp.ndarray | None = None,
     fwet: jnp.ndarray | None = None,
     canopy_seed: jnp.ndarray | None = None,  # (ncol, 6) warm start; see below
+    ground_emissivity: jnp.ndarray | None = None,  # (ncol,) overrides cc.epss
+    ground_latent_heat: jnp.ndarray | None = None,  # (ncol,) [J/kg] soil LE charge
 ) -> SurfaceFluxOutput:
     """Compute surface fluxes via the two-leaf canopy Newton + Picard closure.
 
@@ -238,6 +263,14 @@ def compute_two_leaf_canopy_fluxes(
                     single-layer update; multilayer callers wrap
                     ``solve_soil_thermal``.
     dt          : time step [s].
+    ground_emissivity : optional per-column emissivity of the ground under the
+                    canopy (e.g. the snow-cover blend of snow and soil); ``None``
+                    uses the configured soil emissivity ``epss``.
+    ground_latent_heat : optional per-column latent heat [J/kg] charged to the
+                    ground latent flux inside the solve (over snow the caller's
+                    ``surface_latent_heat(T, snow weight)``, #1875); ``None``
+                    charges ``L_v(T_soil_top)`` like the leaves.  Returned as
+                    ``SurfaceFluxOutput.L_soil``.
 
     Returns
     -------
@@ -438,14 +471,15 @@ def compute_two_leaf_canopy_fluxes(
     def _build_bundle(Ts_bc):
         return CanopyForcingBundle(
             LAI=LAI, SZA=SZA, La=forcing.lw_down,
-            epsf=_bcast(cc.epsf), epss=_bcast(cc.epss),
+            epsf=_bcast(cc.epsf),
+            epss=_bcast(cc.epss if ground_emissivity is None else ground_emissivity),
             fSun=sw_rt.fSun,
             APAR_Sun=sw_rt.APAR_Sun, APAR_Sh=sw_rt.APAR_Sh,
             Vcmax25_Sun=sw_rt.Vcmax25_C3Sun, Vcmax25_Sh=sw_rt.Vcmax25_C3Sh,
             Vcmax25_C4Sun=sw_rt.Vcmax25_C4Sun, Vcmax25_C4Sh=sw_rt.Vcmax25_C4Sh,
             ASW_Sun=sw_rt.ASW_Sun, ASW_Sh=sw_rt.ASW_Sh, ASW_Soil=sw_rt.ASW_Soil,
             Ts_bc=Ts_bc,
-            Ca=Ca, Ps=Ps, Ta=Ta,
+            Ca=_bcast(Ca), Ps=Ps, Ta=Ta,
             lam=_bcast(lam), Cp=_bcast(Cp), rhoa=rhoa, Tv_atm=Tv_atm, q_atm=q_atm,
             m=m_mix, b0=b0_mix, alf=alf, TgC=TgC,
             fC4=fC4, fStress_soil=fStress_soil,
@@ -454,6 +488,7 @@ def compute_two_leaf_canopy_fluxes(
             r_soil_surface=r_soil_surface,
             fwet=(jnp.zeros_like(w_frac_rz) if fwet is None
                   else jnp.broadcast_to(fwet, w_frac_rz.shape)),
+            lam_soil=None if ground_latent_heat is None else _bcast(ground_latent_heat),
         )
 
     def _solve_one_col(x0, bun):
@@ -465,7 +500,10 @@ def compute_two_leaf_canopy_fluxes(
 
     def _fwd_one_col(xf, bun):
         return canopy_forward(xf, bun, cc.LE_module, cc.stomatal_model,
-                               cc.le_cap_mode, cc.use_ta_for_photosynthesis)
+                               cc.le_cap_mode, cc.use_ta_for_photosynthesis,
+                               cc.rh_cap_smoothing_width,
+                               cc.zeta_cap_smoothing_width,
+                               cc.most_n_iters)
 
     # ---- Outer Picard loop: canopy closure ↔ soil thermal ----
     # See canopy_land.py module notes for the stability analysis.  The
@@ -489,31 +527,45 @@ def compute_two_leaf_canopy_fluxes(
     # A column with no converged solution yet alternates its seed across passes
     # between the caller's seed and the COLD state, so a warm seed that led the
     # solve astray gets a cold retry inside the same call.  The passes run over
-    # every column anyway (vmap), so this costs nothing; for a column that never
-    # converges, its frozen soil boundary makes later passes repeat passes 0/1.
-    # A pass that did not converge must not move the soil boundary either: its
-    # ground flux is not physics.  Acceptance stays tied to the LAST pass.
+    # every column anyway (vmap), so this costs nothing.  A failed pass still
+    # relaxes the soil boundary with its cold-state fallback flux (the one the
+    # land step accepts if the column ends unsolved); freezing it held desert
+    # columns at their start-of-step soil.  Acceptance stays tied to the LAST pass.
     x_conv = jnp.full_like(initial_state, jnp.nan)
+    n_iters = None  # set by each pass; the sort reads the previous pass's
     for _picard_iter in range(n_picard):
         bundles_k = _build_bundle(Ts_bc_k)
         _fallback = initial_state if _picard_iter % 2 == 0 else cold_state
         _seed_k = jnp.where(jnp.all(jnp.isfinite(x_conv), axis=-1, keepdims=True),
                             jnp.nan_to_num(x_conv), _fallback)
-        (x_final, n_iters, converged, resid_sq, resid_rel, lam_f,
-         hit_cap) = jax.vmap(_solve_one_col)(_seed_k, bundles_k)
+        _args = (_seed_k, bundles_k)
+        if _picard_iter > 0 and _SORT_BY_PREV_ITERS:
+            # Each group iterates until its slowest column stops, so hard
+            # columns scattered over many groups make every group run to the
+            # cap.  Order this pass by the previous pass's iteration counts:
+            # hard columns share groups, the rest stop early.  Same per-column
+            # solve; only group membership changes.
+            _perm = jnp.argsort(n_iters, descending=True)
+            _inv = jnp.argsort(_perm)
+            _args = jax.tree_util.tree_map(lambda a: a[_perm], _args)
+        _out = jax.lax.map(lambda a: _solve_one_col(*a), _args,
+                           batch_size=_CANOPY_SOLVE_GROUP)
+        if _picard_iter > 0 and _SORT_BY_PREV_ITERS:
+            _out = jax.tree_util.tree_map(lambda a: a[_inv], _out)
+        (x_final, n_iters, converged, resid_sq, resid_rel, lam_f, hit_cap) = _out
         x_conv = jnp.where(converged[:, None], x_final, x_conv)
         # A rejected iterate may be non-finite: evaluate the fluxes of a failed
         # column at the (finite) cold state instead, so no NaN enters a
-        # reverse-mode tangent.  Those fluxes are not physics either way -- the
-        # column reports converged=False and the caller holds it.
+        # reverse-mode tangent.  Those fluxes are the column's FALLBACK, not a
+        # root: it reports converged=False, and the multilayer land step closes
+        # their energy into sensible heat and accepts the column (or reverts it
+        # if non-finite or beyond the fallback guards).
         x_final = jnp.where(converged[:, None], x_final, cold_state)
         fluxes_per_col = jax.vmap(_fwd_one_col)(x_final, bundles_k)
 
         G_k = jnp.clip(fluxes_per_col["G"], -500.0, 700.0)  # coeff-ok: physical range clamp on ground heat flux [W m-2]
-        Ts_thermal = soil_thermal_fn(jnp.where(converged, G_k, 0.0), dt)
-        Ts_bc_k = jnp.where(converged,
-                            (1.0 - omega) * Ts_bc_k + omega * Ts_thermal,
-                            Ts_bc_k)
+        Ts_thermal = soil_thermal_fn(G_k, dt)
+        Ts_bc_k = (1.0 - omega) * Ts_bc_k + omega * Ts_thermal
 
     # ---- Converged state ----
     # State vector order: [Tf_Sun, Tf_Sh, Ci_Sun, Ci_Sh, Tc, q_c].
@@ -626,9 +678,11 @@ def compute_two_leaf_canopy_fluxes(
     G_clamped = jnp.clip(G, -500.0, 700.0)  # coeff-ok: physical range clamp on ground heat flux [W m-2]
 
     # ---- Wind stress from MOST ustar ----
+    # Sign: stress ON THE AIR (opposes the wind), the convention of the ocean
+    # bulk and SimpleSEB stresses this vector is tile-blended with (#2031).
     tau_mag = rhoa * ustar**2
-    tau_x = tau_mag * wind_dir_x
-    tau_y = tau_mag * wind_dir_y
+    tau_x = -tau_mag * wind_dir_x
+    tau_y = -tau_mag * wind_dir_y
 
     # ---- Surface specific humidity (proxy; refined post-step by the caller) ----
     # The canopy solver tracks q_c (canopy-air humidity) as part of its
@@ -668,9 +722,9 @@ def compute_two_leaf_canopy_fluxes(
         gs_Sh=gs_Sh,
         n_iters=n_iters,
         # Whether the Newton closure actually reached a root on this column.
-        # False means the fluxes above are a stopped iterate, not a solution —
-        # the caller decides what to do with the column; it must not simply
-        # spend them.  Carried from the LAST Picard pass.
+        # False means the fluxes above are the cold-state fallback, not a
+        # solution — the caller must close their energy before spending them
+        # (multilayer land does).  Carried from the LAST Picard pass.
         converged=converged,
         f_veg=f_veg,
         fSun=fSun,
@@ -687,4 +741,6 @@ def compute_two_leaf_canopy_fluxes(
         Rn_ext=Rn_ext_d,
         residual_ext=residual_ext_d,
         stomatal_ratio=jnp.ones_like(T_soil_top),
+        tau_mag=tau_mag,
+        L_soil=_bcast(lam if ground_latent_heat is None else ground_latent_heat),
     )

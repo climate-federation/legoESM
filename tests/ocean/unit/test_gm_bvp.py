@@ -24,7 +24,7 @@ jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp  # noqa: E402
 
 from legoesm import constants  # noqa: E402
-from legoesm.ocean.physics.lateral_mixing.gm_bvp import (  # noqa: E402
+from legoesm.ocean.dynamics._future.gm_bvp import (  # noqa: E402
     GMBVPConfig,
     _assemble,
     baroclinic_wave_speed,
@@ -360,3 +360,8 @@ def test_sign_flattens_the_density_surface():
     # And the diagnostic limit fixes the sign: Gamma has the sign of
     # -grad_h(rho), so sigma_x < 0 gives Gamma_x > 0.
     assert np.max(np.asarray(pos)) > 0.0
+
+
+# Parked module: see its docstring.
+pytestmark = pytest.mark.skip(
+    reason="parked in _future/: not wired into production (ponytail #11)")

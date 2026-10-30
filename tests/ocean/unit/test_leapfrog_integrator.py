@@ -201,7 +201,8 @@ def test_boxcar_ab3_live_split_runs_no_nan():
     # must step finite.
     state, model = _leapfrog_channel(
         barotropic_coriolis="een", barotropic_coriolis_split="live",
-        barotropic_time_filter="nemo_boxcar_ab3")
+        barotropic_time_filter="nemo_boxcar_ab3",
+        nemo_barotropic_filter_alpha=0.0)   # DINO kamm deck rn_bt_alpha
     assert model.config.barotropic.barotropic_time_filter == "nemo_boxcar_ab3"
     s = state
     for _ in range(6):
@@ -235,6 +236,7 @@ def test_ab3am4_live_split_runs_no_nan():
     state, model = _leapfrog_channel(
         barotropic_coriolis="een", barotropic_coriolis_split="live",
         barotropic_time_filter="nemo_ab3am4",
+        nemo_barotropic_filter_alpha=0.07,   # GYRE deck rn_bt_alpha
         _nemo_prognostic_barotropic_velocity=True)
     s = state
     for _ in range(4):

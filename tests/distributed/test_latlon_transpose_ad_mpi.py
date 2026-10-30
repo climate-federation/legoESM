@@ -102,7 +102,7 @@ def test_transpose_grad_finite():
         # 180° lon roll = the pole-fold shift; mixes blocks so grad must
         # route through the ring adjoint.
         mixed = full * jnp.roll(full, n_lon // 2, axis=1)
-        return global_sum_mpi(jnp.sum(mixed), comm)
+        return global_sum_mpi(jnp.sum(mixed), comm, final_loss=True)
 
     grd = np.asarray(jax.grad(loss)(local))
     assert np.all(np.isfinite(grd)), f"rank {rank}: non-finite transpose grad"

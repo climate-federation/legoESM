@@ -16,32 +16,41 @@ separate operation because it is deck metadata, not spatial interpolation.
 from __future__ import annotations
 
 import ctypes
+import functools
 import math
 
 import jax
 import jax.numpy as jnp
 import numpy as np
-
 from legoesm.core.source_rounding import nemo_source_round as _sr
+from legoesm.core.transcendentals import glibc_libm
 
-_LIBM = ctypes.CDLL("libm.so.6")
-_LIBM_SINCOS = _LIBM.sincos
-_LIBM_SINCOS.argtypes = (
-    ctypes.c_double,
-    ctypes.POINTER(ctypes.c_double),
-    ctypes.POINTER(ctypes.c_double),
-)
-_LIBM_SINCOS.restype = None
-_LIBM_TAN = _LIBM.tan
-_LIBM_TAN.argtypes = (ctypes.c_double,)
-_LIBM_TAN.restype = ctypes.c_double
+
+@functools.cache
+def _libm_sincos():
+    function = glibc_libm().sincos
+    function.argtypes = (
+        ctypes.c_double,
+        ctypes.POINTER(ctypes.c_double),
+        ctypes.POINTER(ctypes.c_double),
+    )
+    function.restype = None
+    return function
+
+
+@functools.cache
+def _libm_tan():
+    function = glibc_libm().tan
+    function.argtypes = (ctypes.c_double,)
+    function.restype = ctypes.c_double
+    return function
 
 
 def _scalar_sincos(value: float) -> tuple[float, float]:
     """The glibc scalar ``sincos`` call emitted by the oracle compiler."""
     sine = ctypes.c_double()
     cosine = ctypes.c_double()
-    _LIBM_SINCOS(value, ctypes.byref(sine), ctypes.byref(cosine))
+    _libm_sincos()(value, ctypes.byref(sine), ctypes.byref(cosine))
     return sine.value, cosine.value
 
 
@@ -154,9 +163,9 @@ def nemo_t_rotation_from_domain(
             sin_lam, cos_lam = _scalar_sincos(float(rad) * lam)
             sin_v, cos_v = _scalar_sincos(float(rad) * lam_v)
             sin_b, cos_b = _scalar_sincos(float(rad) * lam_b)
-            tan_lam = _LIBM_TAN(float(rpi) / 4.0 - float(rad) * phi / 2.0)
-            tan_v = _LIBM_TAN(float(rpi) / 4.0 - float(rad) * phi_v / 2.0)
-            tan_b = _LIBM_TAN(float(rpi) / 4.0 - float(rad) * phi_b / 2.0)
+            tan_lam = _libm_tan()(float(rpi) / 4.0 - float(rad) * phi / 2.0)
+            tan_v = _libm_tan()(float(rpi) / 4.0 - float(rad) * phi_v / 2.0)
+            tan_b = _libm_tan()(float(rpi) / 4.0 - float(rad) * phi_b / 2.0)
             xn = 0.0 - (cos_lam + cos_lam) * tan_lam
             yn = 0.0 - (sin_lam + sin_lam) * tan_lam
             xv = (cos_v + cos_v) * tan_v - (cos_b + cos_b) * tan_b

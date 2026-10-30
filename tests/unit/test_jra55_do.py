@@ -980,7 +980,7 @@ def test_ocean_loader_refuses_celsius_and_transposed_fields(two_year_builder_cac
     good = two_year_builder_cache
     load_jra55_do(1958, cache_dir=good)                       # the control passes
     for name, edit, match in (
-        ("celsius", lambda ds: ds.assign(tas=ds["tas"] - 273.15), "Celsius"),
+        ("celsius", lambda ds: ds.assign(tas=ds["tas"] - constants.T_freeze), "Celsius"),
         ("transposed", lambda ds: ds.assign(uas=ds["uas"].transpose("time", "lon", "lat")),
          "expected \\('time', 'lat', 'lon'\\)"),
     ):

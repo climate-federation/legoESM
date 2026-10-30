@@ -184,7 +184,7 @@ Rung 0, one step (OMT-4 runs the same path), in reverse-pass order:
 
 | # | statement | what is zero | lanes | class | reaches |
 |---|---|---|---|---|---|
-| 1 | `implicit_solver.py:363-382` | pivot of the vertical momentum solve, one row of V faces | 180 | residual | land- and V-mask cotangents only |
+| 1 | `implicit_solver.py:377-396` | pivot of the vertical momentum solve, one row of V faces | 180 | residual | land- and V-mask cotangents only |
 | 2 | `ocean_model_latlon_cgrid.py:13455` | top V-face thickness in the surface-stress division, same row | 180 | generated + residual | the same two masks only |
 | 3 | `:2568-2570` | `q_after` in the stage-1/2 tracer combine (masked by `:2576`) | 368,648 | residual | every leaf |
 | 4 | `:1946` | `e3t_kmm` in the vertical tracer flux divergence | 368,648 | generated + residual | every leaf |
@@ -215,7 +215,7 @@ Rung 10 (one step) has 1-5 plus:
 |---|---|---|---|---|
 | 6 | `internal_wave_mixing.py:444` | square root of the clipped N^2: infinite slope where N^2 <= 0 | 359,826 (60,973 inf) | residual |
 | 7 | `tke.py:1082` | square root in the TKE mixing length | 358,441 | residual |
-| 8 | `tke.py:3647` | square root over the dissipation length | 358,441 | residual |
+| 8 | `tke.py:3643-3654` | square root over the dissipation length | 358,441 | residual |
 | 9 | `shortwave_penetration.py:561` | level thickness below the bottom (masked) | 21,883 | generated + residual |
 
 6, 7 and 9 also fire in the fused T-loss gradient. With 1-9 zeroed the
@@ -239,7 +239,7 @@ cards; the tracer helpers are in the WS-RK3 path GYRE also runs, so the GYRE
    divide by a denominator equal to 1 on dry lanes and the live value on wet
    lanes (same operands on wet lanes; dry lanes stay masked). Measured: zeroing
    exactly these makes rung 0 finite and equal to forward mode. Pick: yes.
-2. Sources 1-2 (`implicit_solver.py:363-382`, `ocean_model_latlon_cgrid.py:13455`):
+2. Sources 1-2 (`implicit_solver.py:377-396`, `ocean_model_latlon_cgrid.py:13455`):
    same guard on the zero pivot / zero face thickness. Reach only the mask
    cotangents. Pick: yes, after 1.
 3. Sources 6-9 (rung 10): a square root whose derivative is zero where its

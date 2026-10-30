@@ -28,7 +28,7 @@ The admitted `NEMO_L2_BTADV_2` record contains `va_e`, `zhvp2_e`, and `zhV`
 for all 65 external substeps. Its static `e1v` comes from the admitted
 source-complete ordered stream. Both record twins are exact on every defined
 payload. The candidate product replays
-`barotropic_latlon_cgrid.py:789-809` and reproduces the production trace
+`barotropic_latlon_cgrid.py:799-819` and reproduces the production trace
 bit-for-bit before any oracle comparison. The observer leaves every completed
 state array bit-identical to the unobserved run. Execution is production JIT,
 CPU, fp64, x64 enabled, and libm transcendental policy; every instantiated

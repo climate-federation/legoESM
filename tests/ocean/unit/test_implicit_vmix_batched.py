@@ -628,8 +628,19 @@ class TestDifferentiable:
 
 
 class TestPairSolveBitFaithful:
-    """``implicit_vertical_diffusion_ocean_pair`` == two separate solves,
-    bitwise (shared forward factors are arithmetic-identical per RHS)."""
+    """``implicit_vertical_diffusion_ocean_pair`` == two separate
+    ``thomas_solve`` calls on the same prebuilt bands, bitwise (shared forward
+    factors are arithmetic-identical per RHS).  The single-field solve builds
+    its bands inside the sweep instead, so it agrees with the pair to
+    rounding, not bitwise."""
+
+    @staticmethod
+    def _prebuilt_single(f, K, dz, dz_half, dt):
+        from legoesm.ocean.physics.vertical_mixing.implicit_solver import (
+            _build_implicit_tridiag,
+        )
+        from legoesm.timestepping.tridiagonal import thomas_solve
+        return thomas_solve(*_build_implicit_tridiag(f, K, dz, dz_half, dt))
 
     def _problem(self, dtype, seed=0, shape=(6, 8), nlev=12):
         rng = np.random.default_rng(seed)
@@ -655,10 +666,15 @@ class TestPairSolveBitFaithful:
         dt = 900.0
         x1, x2 = implicit_vertical_diffusion_ocean_pair(
             f1, f2, K, dz, dz_half, dt)
+        np.testing.assert_array_equal(
+            np.asarray(x1), np.asarray(self._prebuilt_single(f1, K, dz, dz_half, dt)))
+        np.testing.assert_array_equal(
+            np.asarray(x2), np.asarray(self._prebuilt_single(f2, K, dz, dz_half, dt)))
+        tol = 1e-13 if dtype == jnp.float64 else 1e-5
         y1 = implicit_vertical_diffusion_ocean(f1, K, dz, dz_half, dt)
         y2 = implicit_vertical_diffusion_ocean(f2, K, dz, dz_half, dt)
-        np.testing.assert_array_equal(np.asarray(x1), np.asarray(y1))
-        np.testing.assert_array_equal(np.asarray(x2), np.asarray(y2))
+        np.testing.assert_allclose(np.asarray(x1), np.asarray(y1), rtol=tol, atol=tol)
+        np.testing.assert_allclose(np.asarray(x2), np.asarray(y2), rtol=tol, atol=tol)
         assert x1.dtype == dtype and x2.dtype == dtype
 
     def test_mixed_dtype_falls_back_faithfully(self):
@@ -673,11 +689,15 @@ class TestPairSolveBitFaithful:
         )
         a, b, c, d1 = _build_implicit_tridiag(f1, K, dz, dz_half, 900.0)
         x1, x2 = thomas_solve_shared(a, b, c, (d1, f2_32))
+        np.testing.assert_array_equal(
+            np.asarray(x1), np.asarray(self._prebuilt_single(f1, K, dz, dz_half, 900.0)))
+        np.testing.assert_array_equal(
+            np.asarray(x2), np.asarray(self._prebuilt_single(f2_32, K, dz, dz_half, 900.0)))
         y1 = implicit_vertical_diffusion_ocean(f1, K, dz, dz_half, 900.0)
         y2 = implicit_vertical_diffusion_ocean(
             f2_32, K, dz, dz_half, 900.0)
-        np.testing.assert_array_equal(np.asarray(x1), np.asarray(y1))
-        np.testing.assert_array_equal(np.asarray(x2), np.asarray(y2))
+        np.testing.assert_allclose(np.asarray(x1), np.asarray(y1), rtol=1e-13, atol=1e-13)
+        np.testing.assert_allclose(np.asarray(x2), np.asarray(y2), rtol=1e-6, atol=1e-6)
         assert x2.dtype == jnp.float32
 
     def test_shape_mismatch_raises(self):

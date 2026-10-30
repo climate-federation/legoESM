@@ -73,10 +73,10 @@ def test_template_path_unknown_raises(mod):
 
 # --- init_experiment end-to-end --------------------------------------------
 
-def test_init_writes_runnable_dir(mod, tmp_path):
+def test_init_writes_runnable_dir(mod, tmp_path, capsys):
     init, _ = mod
-    out = tmp_path / "w2"
-    rc = init.main(["2d/williamson2_sw", "--name", "w2",
+    out = tmp_path / "hs"
+    rc = init.main(["3d_idealized/held_suarez", "--name", "hs",
                     "--output-dir", str(out), "--machine", "default"])
     assert rc == 0
     assert (out / "config.yaml").exists()
@@ -85,13 +85,15 @@ def test_init_writes_runnable_dir(mod, tmp_path):
     run_sh = (out / "run.sh").read_text()
     assert "legoesm run config.yaml" in run_sh
     assert "JAX_PLATFORMS=cpu" in run_sh
+    manifest = out / "output" / "held_suarez" / "run_manifest.json"
+    assert f"legoesm reproduce {manifest} --check" in capsys.readouterr().out
 
 
 def test_init_applies_overrides(mod, tmp_path):
     init, _ = mod
     from legoesm.config import Config
-    out = tmp_path / "w2hi"
-    init.main(["2d/williamson2_sw", "--name", "w2hi", "--output-dir", str(out),
+    out = tmp_path / "hshi"
+    init.main(["3d_idealized/held_suarez", "--name", "hshi", "--output-dir", str(out),
                "--machine", "default", "-o", "grid.resolution=96"])
     cfg = Config.from_yaml(str(out / "config.yaml"))
     assert cfg.get("grid.resolution") == 96
@@ -101,7 +103,7 @@ def test_init_bad_override_fails_fast_no_dir(mod, tmp_path):
     init, _ = mod
     out = tmp_path / "bad"
     with pytest.raises(SystemExit):
-        init.main(["2d/williamson2_sw", "--name", "bad", "--output-dir", str(out),
+        init.main(["3d_idealized/held_suarez", "--name", "bad", "--output-dir", str(out),
                    "--machine", "default", "-o", "grid.resolution=-5"])
     assert not out.exists()
 
@@ -112,5 +114,5 @@ def test_init_refuses_nonempty_output(mod, tmp_path):
     out.mkdir()
     (out / "stuff.txt").write_text("x")
     with pytest.raises(SystemExit):
-        init.main(["2d/williamson2_sw", "--name", "x", "--output-dir", str(out),
+        init.main(["3d_idealized/held_suarez", "--name", "x", "--output-dir", str(out),
                    "--machine", "default"])

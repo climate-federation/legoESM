@@ -45,6 +45,7 @@ from jax import lax
 
 from legoesm.constants import g, R_d, R_v, c_pd, L_v, epsilon, T_freeze
 from legoesm.atmosphere.physics._shared import virtual_temperature
+from legoesm.core.profile_metrics import safe_sqrt_nan
 from legoesm.atmosphere.physics.convection._ifs_test_ascent import (
     cuadjtq_condense,
     dqsat_dT,
@@ -177,15 +178,17 @@ __param_spec__ = {
                 "category": "convection",
                 "reference": "cuascn.F90:686", "shape": None,
             },
+            # rprcon / dnoprc: the SAME parameters as BechtoldConfig's; one
+            # range for both (test_param_bounds_agree holds them equal).
             "rprcon": {
-                "units": "1/m", "bounds": (5.0e-4, 5.0e-3),
+                "units": "1/m", "bounds": (3.5e-4, 1.4e-2),
                 "tunable_tier": 2, "transform": "none",
                 "category": "convection",
                 "reference": "sucumf.F90:175 (ZPRCDGW = RPRCON*RPLRG)",
                 "shape": None,
             },
             "dnoprc": {
-                "units": "kg/kg", "bounds": (1.0e-4, 1.0e-3),
+                "units": "kg/kg", "bounds": (7.5e-5, 1.2e-3),
                 "tunable_tier": 2, "transform": "none",
                 "category": "convection",
                 "reference": "cuascn.F90:284 (ZDNOPRC)", "shape": None,
@@ -461,14 +464,15 @@ def organized_detrainment(D, M_below, K, K_below, rh_env, cfg):
 
       NOTE: this helper expects the caller to have already applied the
       ``ZBUOC < 0`` gate to ``K`` (K is passed as the where-selected,
-      in-branch value); the sqrt dummy ``ZKEDKE`` is floored to >= 0
-      before sqrt on the evaluated branch.
+      in-branch value).  ``ZKEDKE`` is exactly 0 where K = 0, so the sqrt
+      goes through ``safe_sqrt_nan`` (a bare sqrt there has an infinite
+      derivative and made the reverse-mode gradient NaN).
     """
     rh1 = jnp.minimum(1.0, rh_env)
     ZKEDKE = K / jnp.maximum(cfg.ke_ratio_floor, jnp.maximum(K_below, TINY))
     ZKEDKE = jnp.clip(ZKEDKE, 0.0, 1.0)
     ZOCUDET = cfg.rh_detr_offset - rh1
-    ZMFUN = ZOCUDET * jnp.sqrt(jnp.maximum(ZKEDKE, 0.0))
+    ZMFUN = ZOCUDET * safe_sqrt_nan(ZKEDKE)
     D_new = jnp.maximum(D, M_below * (1.0 - ZMFUN))
     return D_new
 
@@ -673,7 +677,7 @@ def _ascent_layer(carry, j, T, q, qs, p_full, p_half, geo_full, geo_half,
     ZPRCON = (cfg.rprcon / g) / (_ZWU_DENOM * ZWU) * _ZZCO_LIQ
     ZDT = jnp.minimum(_RTBERCU - _RTICECU,
                       jnp.maximum(_RTBERCU - T_u_j, 0.0))
-    ZCBF = 1.0 + cfg.cprc2 * jnp.sqrt(ZDT)
+    ZCBF = 1.0 + cfg.cprc2 * safe_sqrt_nan(ZDT)
     ZZCO2 = ZPRCON * ZCBF
     ZLCRIT = cfg.dnoprc / ZCBF
     ZC = l_u_j - ZLUOLD

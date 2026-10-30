@@ -483,7 +483,7 @@ def test_surface_cd_is_the_neutral_log_law_at_the_les_roughness():
     from legoesm import constants
     case = _bomex_case()
     surf = drv.build_surface_config(case)
-    expect = (constants.kappa_vk / math.log(surf.z_ref / surf.z0)) ** 2
+    expect = (constants.kappa_von_karman / math.log(surf.z_ref / surf.z0)) ** 2
     assert surf.Cd_neutral == pytest.approx(expect, rel=1e-12)
     assert surf.z0 == pytest.approx(case.spec.les_z0_m)
     # z_ref must be the level whose wind the flux routine is handed
@@ -631,7 +631,7 @@ def test_neutral_drag_matches_the_in_loop_log_law():
 
     for z_ref, z0, u in ((20.0, 1e-4, 8.75), (10.0, 0.1, 5.0), (30.0, 1e-3, 12.0)):
         cd = float(neutral_drag_coefficient(z_ref, z0))
-        in_loop_ustar = constants.kappa_vk * u / max(
+        in_loop_ustar = constants.kappa_von_karman * u / max(
             float(jnp.log(z_ref / z0)), 0.5)
         assert cd ** 0.5 * u == pytest.approx(in_loop_ustar, rel=1e-12), (
             z_ref, z0)

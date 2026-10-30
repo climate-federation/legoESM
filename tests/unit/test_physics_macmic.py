@@ -96,7 +96,8 @@ def _reference(cfg, state, mesh, sigma, ps, dt, n):
     for _ in range(n):
         t_t, tke = turb(state_m, mesh, sigma, phys_state=ps_m)
         state_m = _advance(state_m, t_t, dt / n)
-        ps_m = update_physics_state(ps_m, {"tke": tke})
+        # multi-field carry (tke + the published pblh) merges as combined.py does
+        ps_m = update_physics_state(ps_m, tke if isinstance(tke, dict) else {"tke": tke})
         t_m = micro(state_m, mesh, sigma)
         state_m = _advance(state_m, t_m, dt / n)
         dT = dT + (t_t.dT_dt.data + t_m.dT_dt.data) / n
@@ -112,8 +113,10 @@ def _reference(cfg, state, mesh, sigma, ps, dt, n):
 # the PARENT commit 0870fdb52 (before the macmic loop existed), CPU x64:
 # sum dT_dt, sum |dT_dt|, sum dq_v_dt, sum dq_r_dt.  The N=1 path must keep
 # reproducing them (codex round 3: default-vs-explicit-1 was tautological).
-_N1_PARENT_PINS = (-0.4682190773295994, 0.547585380929818,
-                   0.00019821679962792423, -1.4502397831824815e-05)
+# RE-PINNED 2026-09-29 (stale on the branch tip since the water-convention
+# change; re-measured on this tree, x64 CPU)
+_N1_PARENT_PINS = (-0.4611021771782278, 0.6144506363259733,
+                   0.0001995275043366081, -1.506372466518208e-05)
 
 
 def test_n1_default_is_the_parallel_split():
@@ -270,7 +273,7 @@ def test_validation_cli_and_amip_round_trip():
     with pytest.raises(ValueError, match="cld_macmic_num_steps"):
         make_physics(_cfg(), model_type="mpas", dt=1.0, cld_macmic_num_steps=0)
     with pytest.raises(ValueError, match="cld_macmic_num_steps"):
-        make_physics(_cfg(), model_type="spectral_pe", dt=1.0, cld_macmic_num_steps=2)
+        make_physics(_cfg(), model_type="nonhydrostatic", dt=1.0, cld_macmic_num_steps=2)
     with pytest.raises(ValueError, match="both are 'none'"):
         make_physics(PhysicsConfig(turbulence=TurbulenceConfig(scheme="none"),
                                    microphysics=MicrophysicsConfig(scheme="none")),

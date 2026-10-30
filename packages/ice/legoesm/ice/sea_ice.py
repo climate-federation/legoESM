@@ -35,6 +35,7 @@ from legoesm.thermo import (
 from legoesm.core.bulk_flux import (
     simple_bulk_fluxes,
     compute_most_fluxes,
+    surface_reference_state,
     nemo_si3_constant_fluxes,
     validate_bulk_scheme,
 )
@@ -761,11 +762,14 @@ def _bulk_flux_dispatch(
         shflx, lhflx = raw[6], raw[7]
     elif config.bulk_scheme in ("most", "coare3", "large_yeager"):
         q_sfc = saturation_mixing_ratio_ice(T_ice, forcing.p_surface)
+        # Model-level forcing: surface-referenced T at its own height (#1818).
+        T_air, z_air = surface_reference_state(
+            forcing.T_lowest, config.z_ref, forcing.z_lowest)
         tau_x, tau_y, shflx, lhflx, _ = compute_most_fluxes(
             forcing.u_lowest, forcing.v_lowest,
-            forcing.T_lowest, forcing.q_lowest,
+            T_air, forcing.q_lowest,
             T_ice, q_sfc, rho,
-            z_ref=config.z_ref,
+            z_ref=z_air,
             z0_init=config.z0_ice,
             scheme=config.bulk_scheme,
             n_iter=config.bulk_n_iter,
@@ -2490,6 +2494,10 @@ def _thermo_v2(
             (forcing.precip_total - forcing.precip_snow) * dt / constants.rho_water,
             0.0,
         )
+        if config.core2_precipitation_closure:
+            # Same precipitation gate as the snow and no-pond rain paths.
+            rain_m_liquid = rain_m_liquid * jnp.asarray(
+                forcing.has_precipitation, dtype=h_new.dtype)
         # Surface-melt thickness is in *layer* meters (snow, ice).
         # Ponds collect liquid-water equivalent — convert with the
         # density ratio before passing to ``step_ponds``.
@@ -2518,6 +2526,12 @@ def _thermo_v2(
         pond_captured_melt_m_liquid = (
             pond_captured_m_liquid * melt_fraction_of_capture
         )
+        if config.core2_precipitation_closure:
+            # Rain the ponds cannot take (snow-blocked, or no ice before this
+            # step) runs off to the ocean instead of vanishing.
+            rain_uncaptured_m_liquid = jnp.where(
+                ice_mask & (~snow_blocks), 0.0, rain_m_liquid,
+            )
 
         if config.ponds.scheme == "si3_lev":
             if h_il is None:
@@ -2712,9 +2726,15 @@ def _thermo_v2(
             pond_captured_melt_m_liquid * constants.rho_water * conc_new / dt
         )
         pond_drain_per_cell = pond_drain_to_ocean_kg_s * conc_new
-        # Rain over the ice fraction is collected by the ponds (captured or
-        # drained) — no separate runoff channel needed.
-        rain_runoff_per_cell = jnp.zeros_like(h_new)
+        if config.core2_precipitation_closure:
+            # Rain over the ice fraction is collected by the ponds where they
+            # can form; the rest runs off (per-ice-area -> per-cell).
+            rain_runoff_per_cell = (
+                rain_uncaptured_m_liquid * constants.rho_water * conc_new / dt
+            )
+        else:
+            # Certified SI3 path: pond rain has no separate runoff channel.
+            rain_runoff_per_cell = jnp.zeros_like(h_new)
     else:
         pond_drain_per_cell = pond_drain_to_ocean_kg_s  # zero array
         # No pond scheme: rain falling on the ice fraction runs off directly to
@@ -2730,6 +2750,15 @@ def _thermo_v2(
             forcing.precip_total - forcing.precip_snow, 0.0,
         ) * jnp.asarray(forcing.has_precipitation, dtype=h_new.dtype)
         rain_runoff_per_cell = rain_rate * conc_new
+    # Snow off: snowfall on the ice fraction has no pack to enter, so it goes
+    # straight to the ocean (+ve into ocean) and the ocean pays its latent heat
+    # of fusion (+ve extraction).  Same ``conc_new`` frame and precipitation
+    # gate as the rain runoff above.
+    if config.snow.enabled or not config.core2_precipitation_closure:
+        snow_off_fw_per_cell = jnp.zeros_like(h_new)
+    else:
+        snow_off_fw_per_cell = forcing.precip_snow * jnp.asarray(
+            forcing.has_precipitation, dtype=h_new.dtype) * conc_new
     fw_from_lead_freeze_per_cell = -delta_V_lead_freeze * config.rho_ice / dt
     # Snow-ice flooding draws seawater ``(rho_ice - rho_snow)*ΔV_white`` [kg/m^2
     # per ice area] into the snow pores; the ocean LOSES that water (negative
@@ -2746,8 +2775,10 @@ def _thermo_v2(
         # NOTE: open-water snowfall is intentionally NOT included here — the
         # ocean tile delivers it via ``precip_total`` (F11; see snow step).
         + pond_drain_per_cell
-        # Rain runoff over the ice fraction (no-pond path; zero when ponds on).
+        # Rain runoff over the ice fraction (all of it without ponds; the
+        # share the ponds could not take with ponds on).
         + rain_runoff_per_cell
+        + snow_off_fw_per_cell
         + fw_from_lead_freeze_per_cell
         + fw_from_flooding_per_cell
         # Orphaned ice/snow/pond mass from fully-ablated cells (11b) — sent
@@ -2788,6 +2819,7 @@ def _thermo_v2(
         F_ocean * conc * ocean_heat_scale
         + _lead_latent_sign * delta_V_lead_freeze * config.rho_ice * config.L_f / dt
         + refreeze_ice_m * config.rho_ice * config.L_f / dt * conc_new
+        + snow_off_fw_per_cell * config.L_f
         # Surplus surface-melt heat from a melt-out step warms the ocean
         # (ocean GAINS -> NEGATIVE extraction); previously this energy was
         # dropped on the floor (finding #6).
@@ -3269,6 +3301,12 @@ def _step_dynamic_v2(
         tau_x_resp = result["tau_x"]
         tau_y_resp = result["tau_y"]
 
+    # Post-thermo aggregate cover: the frame the thermodynamics forwarded
+    # ice-fraction precip (rain, untracked snow) to the ocean in, before the
+    # ITD remap / caps / ridging below change the area.
+    conc_precip_fwd = jnp.clip(
+        jnp.sum(conc, axis=-1) if is_multicat else conc, 0.0, 1.0)
+
     # ---- 5. ITD remap ----
     if is_multicat and config.itd_remap != "none":
         # Cap the aggregate area BEFORE the ITD remap so neither Lipscomb nor
@@ -3555,6 +3593,9 @@ def _step_dynamic_v2(
         ice_concentration_thermo=jnp.clip(
             (jnp.sum(conc_old, axis=-1) if is_multicat else conc_old),
             0.0, 1.0),
+        ice_concentration_precip=(
+            conc_precip_fwd
+            if config.core2_precipitation_closure else None),
     )
 
     new_state = DynamicSeaIceState(

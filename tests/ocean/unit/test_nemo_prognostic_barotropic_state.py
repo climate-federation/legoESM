@@ -148,6 +148,9 @@ def test_identity_path_has_one_external_mode_writer_for_carried_pair():
         # classification as the flat card above: construction, not a live
         # model writer.
         ("fidelity/nemo_testcase_recipe.py", "build_vortex_smt_zps_card"),
+        # The TSUNAMI card (round 1) builds its construction-time carried pair
+        # from the rest state the same way: construction, not a live writer.
+        ("fidelity/nemo_testcase_recipe.py", "build_tsunami_zco_card"),
         ("fidelity/nemo_state_bridge.py", "bridge_nemo_to_legoesm"),
         ("fidelity/nemo_state_bridge.py", "bridge_nemo_to_legoesm_topo"),
     ])

@@ -100,9 +100,9 @@ def test_section_2_reports_both_flags_as_load_bearing(checker):
 
 def test_section_2_covers_every_ice_scheme(checker):
     """A cap that reaches morrison and nothing else must not pass: section 3
-    only reads config fields, so an ignored flag in thompson or p3 would be
+    only reads config fields, so an ignored flag in thompson would be
     invisible without this."""
-    assert set(checker.ICE_SCHEMES) == {"morrison", "thompson", "p3"}
+    assert set(checker.ICE_SCHEMES) == {"morrison", "thompson"}
     seen = []
     real = checker._on_off
 
@@ -117,7 +117,14 @@ def test_section_2_covers_every_ice_scheme(checker):
         checker._on_off = real
     for scheme in checker.ICE_SCHEMES:
         assert (scheme, checker.ICE_FIELD) in seen, (scheme, seen)
-        assert (scheme, checker.LIQUID_FIELD) in seen, (scheme, seen)
+    assert set(checker.LIQUID_SCHEMES) == {"morrison", "thompson", "p3"}
+    for scheme in checker.LIQUID_SCHEMES:
+        if scheme in checker.LIQUID_GUARD_REJECTED:
+            # sam-flavour Morrison: the guard is rejected (checked inside
+            # section 2), gSAM's own adjustment runs unconditionally.
+            assert (scheme, checker.LIQUID_FIELD) not in seen, (scheme, seen)
+        else:
+            assert (scheme, checker.LIQUID_FIELD) in seen, (scheme, seen)
 
 
 def test_section_2_fails_when_a_scheme_ignores_the_flag(checker):
@@ -128,7 +135,7 @@ def test_section_2_fails_when_a_scheme_ignores_the_flag(checker):
 
     def _inert(scheme, field, q_v, rest):
         on, off = real(scheme, field, q_v, rest)
-        return (off, off) if scheme == "p3" else (on, off)
+        return (off, off) if scheme == "thompson" else (on, off)
 
 
     checker._on_off = _inert
@@ -136,7 +143,7 @@ def test_section_2_fails_when_a_scheme_ignores_the_flag(checker):
         failures = checker.section_2_load_bearing()
     finally:
         checker._on_off = real
-    assert any("p3" in f for f in failures), failures
+    assert any("thompson" in f for f in failures), failures
 
 
 def test_section_2_fails_on_a_barely_nonzero_liquid_effect(checker):
@@ -225,6 +232,8 @@ def test_section_3_fails_when_a_lane_turns_the_ice_allowance_off(checker):
         checker.LANES = real_lanes
     assert failures, "a lane with the ice allowance disabled passed"
     assert all(checker.ICE_FIELD in f for f in failures), failures
+    # p3 carries the ice field only to refuse it: its value is not certified.
+    assert not any("/p3:" in f for f in failures), failures
 
 
 def test_section_2b_reports_the_target_isolation_residual(checker, capsys):

@@ -184,3 +184,27 @@ def test_state_checkpoint_git_hash_uses_module_repo(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path / "repo_b")
     assert sc._get_git_hash() == head_a
     assert sc._get_git_hash() != head_b
+
+
+def _stale_stat_index(repo: Path) -> tuple[Path, int]:
+    """Make the index's cached stat info stale (content unchanged) and age the
+    index, so a refreshing ``git status`` would rewrite it under index.lock."""
+    import os
+    os.utime(repo / "a.txt", (1_000_000_000, 1_000_000_000))
+    index = repo / ".git" / "index"
+    os.utime(index, (1_100_000_000, 1_100_000_000))
+    return index, index.stat().st_mtime_ns
+
+
+def test_git_provenance_never_writes_the_index(tmp_path):
+    """A provenance call killed by its timeout mid index-write left a stale
+    index.lock (#1971); the call must not take that optional lock at all."""
+    repo = tmp_path / "pkg"
+    _make_repo(repo)
+    index, before = _stale_stat_index(repo)
+    prov = git_provenance(repo / "a.txt")
+    assert prov.dirty is False
+    assert index.stat().st_mtime_ns == before
+    # Control: plain `git status` does rewrite this index, so the assert binds.
+    _git(repo, "status", "--porcelain")
+    assert index.stat().st_mtime_ns != before

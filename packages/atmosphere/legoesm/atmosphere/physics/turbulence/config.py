@@ -96,6 +96,7 @@ __param_spec__ = {
     "LouisConfig": {
         "scheme_key": "atm.turb.LouisConfig",
         "excluded": {
+            "shear_floor_sharpness": "numerics: smoothing sharpness of the RULE 5 smooth OpenIFS shear floor (inf = hard MAX), not a tunable",
             "blend_ri_sharpness": "numerics: solver/smoothing/tolerance/iteration parameter",
             "cloudtop_entrainment_efficiency": "opt-in marine-Sc cloud-top entrainment lever, default 0.0 (off) = the physical floor; not a well-posed sigmoid tunable (default on the bound)",
         },
@@ -179,10 +180,9 @@ __param_spec__ = {
             "Pr_t": {"units": "1", "bounds": (0.3, 1.5), "tunable_tier": 2, "transform": "sigmoid", "category": "diffusivity", "reference": "turbulent Prandtl number Kh = Km/Pr_t", "shape": None},
             "a_updraft": {"units": "1", "bounds": (0.01, 0.3), "tunable_tier": 2, "transform": "sigmoid", "category": "mass_flux", "reference": "Siebesma et al. (2007) updraft area fraction", "shape": None},
             "entrainment_rate": {"units": "1/m", "bounds": (1e-04, 1e-02), "tunable_tier": 1, "transform": "sigmoid", "category": "entrainment", "reference": "Siebesma et al. (2007) lateral entrainment rate", "shape": None},
-            # parcel_dT is the LIVE initial plume potential-temperature excess
-            # (theta_u_init = theta + parcel_dT, edmf.py:177) — a buoyancy
-            # calibration knob, not numerics.
-            "parcel_dT": {"units": "K", "bounds": (0.1, 2.0), "tunable_tier": 2, "transform": "sigmoid", "category": "mass_flux", "reference": "Siebesma et al. (2007) EDMF initial updraft thermal excess", "shape": None},
+            # Capped at 2 until the plume carries heat: the MF theta transport
+            # leaks 0.85 % of the surface heat flux at 1, 2.1 % at 2, 5.6 % at 4, 15.4 % at 8.
+            "surface_excess_prefactor": {"units": "1", "bounds": (0.3, 2.0), "tunable_tier": 2, "transform": "sigmoid", "category": "mass_flux", "reference": "Siebesma et al. (2007) Eq. 17 prefactor (LES ~1; Troen & Mahrt 1986 ~8)", "shape": None},
             "l_mix_max": {"units": "m", "bounds": (10.0, 300.0), "tunable_tier": 1, "transform": "sigmoid", "category": "mixing_length", "reference": "Blackadar (1962) asymptotic mixing length", "shape": None},
             # w_updraft_min is LIVE: it floors the initial updraft velocity
             # (edmf.py:173) and sets the velocity scale of the deactivation
@@ -196,6 +196,7 @@ __param_spec__ = {
         "excluded": {
             "blend_pbl_sharpness": "numerics: solver/smoothing/tolerance/iteration parameter",
             "blend_ri_sharpness": "numerics: solver/smoothing/tolerance/iteration parameter",
+            "entrainment_cutoff_sharpness": "numerics: solver/smoothing/tolerance/iteration parameter",
             "pbl_smooth_sharpness": "numerics: solver/smoothing/tolerance/iteration parameter",
             "sfc_excess_zfrac": "measurement convention: surface-layer z/h (top of the surface layer) at which w_s is evaluated for the θ_T excess parcel, not a tuned closure",
         },
@@ -438,11 +439,14 @@ class LouisConfig(NamedTuple):
         one, ``b_h / b_m`` (Louis, Tiedtke & Geleyn 1982 use 3b for heat
         vs 2b for momentum ⇒ 1.5).  Gives a stratification-dependent
         turbulent Prandtl number Pr_t = K_m/K_h (>1 stable, <1 unstable);
-        ``1.0`` recovers the Louis (1979) ``f_h = f_m`` simplification.
+        ``1.0`` gives ``f_h = f_m`` on the unstable branch only (the stable
+        heat function multiplies by √(1+d·Ri) where momentum divides).
         Momentum K_m is independent of this ratio (default 1.5).  Must be
         positive: like ``b_louis``/``d_louis`` it appears in the stable
-        denominator ``1 + 2·b_h·Ri/√(1+d·Ri)``, which a negative value
-        could drive through zero (singular K_h).
+        heat denominator ``1 + 2·b_h·Ri·√(1+d·Ri)`` (OpenIFS vdfexcu.F90:395),
+        which a negative value could drive through zero (singular K_h).
+        The running oracles use 1.0 (OpenIFS, stable) and 1.5 (ECHAM/ICON,
+        unstable).
     surface : SurfaceLayerConfig
         Surface layer parameters.
     """
@@ -468,6 +472,10 @@ class LouisConfig(NamedTuple):
     # constant float, so --params can both SET and ACTIVATE it (no separate bool
     # that --params could not reach).
     cloudtop_entrainment_efficiency: float = 0.0   # A: K_ent = A·W_REF·dz·(drying·inverted·cloudy); 0 = off
+    # Smooth OpenIFS shear floor (RULE 5): |dV|^2 -> smooth_max(|dV|^2, REPDU2,
+    # s) [s^2/m^2]; inf = vdfexcu.F90:361 hard MAX.  At 1e4 the floor adds
+    # log(2)/s = 6.9e-5 m^2/s^2 where |dV|^2 = REPDU2 = 0.01 m^2/s^2.
+    shear_floor_sharpness: float = 1.0e4
 
 
 class TKEConfig(NamedTuple):
@@ -804,6 +812,10 @@ class YSUConfig(NamedTuple):
         not a tuned closure.
     surface : SurfaceLayerConfig
         Surface layer parameters.
+    entrainment_cutoff_sharpness : float
+        WRF YSU path only (``surface_layer`` given): sigmoid sharpness
+        [1/entfac] of the entrainment-layer cutoff ``entfac < 4.6`` (default
+        2.0; 1e300 = the oracle's hard cutoff).  Inert on the legacy path.
     """
     l_mix_max: float = 100.0
     Pr_t: float = 1.0
@@ -820,6 +832,7 @@ class YSUConfig(NamedTuple):
     ws_conv_coeff: float = 8.0  # convective coeff in w_s = (u*³ + c·κ·w*³·z/h)^{1/3}
     sfc_excess_zfrac: float = 0.1  # surface-layer z/h for the θ_T excess parcel
     surface: SurfaceLayerConfig = SurfaceLayerConfig()
+    entrainment_cutoff_sharpness: float = 2.0
 
 
 class TurbulentEDMFConfig(NamedTuple):
@@ -845,12 +858,10 @@ class TurbulentEDMFConfig(NamedTuple):
         Minimum updraft velocity [m/s] (default 0.1).
     entrainment_rate : float
         Lateral entrainment rate [1/m] (default 1e-3).
-    parcel_dT : float
-        Initial updraft potential-temperature perturbation [K]
-        (default 0.5).  Was hardcoded as ``+0.5`` in the scan body
-        prior to the audit-driven config migration; lifting it to a
-        config field lets users tune the initial buoyancy of the
-        plume against scheme calibration data.
+    surface_excess_prefactor : float
+        Prefactor alpha of the updraft surface scalar excess
+        ``alpha * (w'phi')_s / sigma_w`` (SST07 Eq. 17; LES suggests ~1,
+        Troen & Mahrt 1986 used ~8) [-] (default 1.0).
     updraft_deactivation_sharpness : float
         Sigmoid sharpness [s/m] for smoothly deactivating the updraft as
         its vertical velocity falls below ``w_updraft_min`` (default 20.0).
@@ -868,7 +879,7 @@ class TurbulentEDMFConfig(NamedTuple):
     a_updraft: float = 0.1
     w_updraft_min: float = 0.1
     entrainment_rate: float = 1e-3
-    parcel_dT: float = 0.5
+    surface_excess_prefactor: float = 1.0
     updraft_deactivation_sharpness: float = 20.0
     surface: SurfaceLayerConfig = SurfaceLayerConfig()
 

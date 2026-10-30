@@ -63,6 +63,7 @@ def _cfg(**physics) -> ExperimentConfig:
     config = ExperimentConfig(
         grid=GridConfig(grid_type="cubed_sphere", resolution=4, nlev=5),
         dycore=DycoreConfig(
+            energy_fixer=False,  # explicit opt-out: pins pre-fixer numerics (F15b vote V5)
             model_type="hydrostatic", discretization="cdgrid",
         ),
         **physics,
@@ -79,6 +80,10 @@ class TestSchemeLiteralsResolveOrExplicitNIE:
 
     @pytest.mark.parametrize("scheme", CONVECTION_LITERALS)
     def test_convection(self, scheme):
+        if scheme == "zhang_mcfarlane":  # CMT dropped on the pipeline (P1)
+            with pytest.raises(ValueError, match="momentum transport"):
+                _cfg(convection=scheme)
+            return
         config = _cfg(convection=scheme)
         if scheme in _PIPELINE_UNSUPPORTED_CONVECTION:
             with pytest.raises(NotImplementedError, match="bridge"):
@@ -89,7 +94,8 @@ class TestSchemeLiteralsResolveOrExplicitNIE:
 
     @pytest.mark.parametrize("scheme", MICROPHYSICS_LITERALS)
     def test_microphysics(self, scheme):
-        config = _cfg(microphysics=scheme)
+        config = _cfg(microphysics=scheme, **(
+            {"morrison_warm_rain_scheme": "kk2000"} if scheme == "morrison" else {}))
         if scheme == "none":
             assert _resolve_microphysics(config) == (None, None)
         elif scheme in _PIPELINE_UNSUPPORTED_MICROPHYSICS:
@@ -174,7 +180,7 @@ class TestDataDrivenRowsBuildable:
         nlev = 8
         config = ExperimentConfig(
             grid=GridConfig(grid_type="gaussian", resolution=8, nlev=nlev),
-            dycore=DycoreConfig(model_type=model_type, discretization=disc),
+            dycore=DycoreConfig(energy_fixer=False, model_type=model_type, discretization=disc),
         )
         grid, sigma = _gaussian_grid_and_sigma(nlev)
         model = create_atmosphere_dycore(config, grid, sigma)
@@ -192,6 +198,7 @@ class TestDataDrivenRowsBuildable:
         config = ExperimentConfig(
             grid=GridConfig(grid_type="gaussian", resolution=8, nlev=nlev),
             dycore=DycoreConfig(
+                energy_fixer=False,  # explicit opt-out: pins pre-fixer numerics (F15b vote V5)
                 model_type="hydrostatic", discretization="u_cast",
             ),
         )

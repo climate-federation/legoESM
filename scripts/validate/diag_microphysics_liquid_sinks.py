@@ -173,13 +173,14 @@ def main():
         cf_eff = jnp.ones_like(q_c)
     q_c_ic = q_c / cf_eff
     q_r_ic = q_r / cf_eff
-    scheme = getattr(cfg, "warm_rain_scheme", "kk2000")
+    scheme = cfg.warm_rain_scheme   # resolved by resolve_morrison_flavor
     if scheme == "kk2000":
         dq_au, _, _ = autoconversion_kk2000(q_c_ic, N_c_eff, rho, dt_micro)
         dq_au = dq_au * cf_eff
         dq_ac = accretion_kk2000(q_c_ic, q_r_ic) * cf_eff
     elif scheme == "seifert_beheng_sb2001":
-        dq_au, _, _ = autoconversion_sb2001(q_c_ic, q_r_ic, N_c_eff, rho)
+        dq_au, _, _ = autoconversion_sb2001(
+            q_c_ic, q_r_ic, N_c_eff, rho, ramp_top=cfg.sb2001_autoconv_ramp_top)
         dq_au = dq_au * cf_eff
         dq_ac = accretion_sb2001(q_c_ic, q_r_ic, rho) * cf_eff
     elif scheme == "seifert_beheng":
@@ -244,7 +245,8 @@ def main():
             d_au, _, _ = autoconversion_kk2000(qci, N_c_eff, rhox, dtx)
             d_ac = accretion_kk2000(qci, qri)
         elif scheme == "seifert_beheng_sb2001":
-            d_au, _, _ = autoconversion_sb2001(qci, qri, N_c_eff, rhox)
+            d_au, _, _ = autoconversion_sb2001(
+                qci, qri, N_c_eff, rhox, ramp_top=cfg.sb2001_autoconv_ramp_top)
             d_ac = accretion_sb2001(qci, qri, rhox)
         else:
             d_au, _, _ = autoconversion_sb(qci, N_c_eff, rhox, cfg.k_au,

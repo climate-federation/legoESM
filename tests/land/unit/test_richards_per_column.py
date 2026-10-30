@@ -2,7 +2,7 @@
 
 The surfdata loader populates ``SoilHydraulicsConfig`` with per-column
 ``(ncol, 1)`` arrays for theta_sat/psi_sat/b_ch/K_sat (Cosby pedotransfer of
-texture).  Before the ``slice_layer`` hardening, ``hydraulic_conductivity(
+texture).  Before the per-column shape hardening, ``hydraulic_conductivity(
 psi[:, 0], theta[:, 0], hydro_config)`` mixed an ``(ncol,)`` state with a
 ``(ncol, 1)`` param and silently broadcast to ``(ncol, ncol)``, corrupting
 the infiltration capacity and the bottom-layer drainage flux.
@@ -136,7 +136,7 @@ def test_per_layer_params_run_through_solver():
     # Sandy O-horizon (top 2 layers) over clayey B-horizon (bottom 6), same in
     # every column.  Tests that the layer axis carries through hydraulic_
     # conductivity / moisture_capacity / theta_from_psi inside the Picard loop
-    # and that slice_layer(cfg, 0) and slice_layer(cfg, -1) pick the right
+    # and that the solver picks the top / bottom
     # layer's texture for K_top / K_bot.
     sand_profile = jnp.where(jnp.arange(nlayer) < 2, 92.0, 10.0)   # (nlayer,)
     clay_profile = jnp.where(jnp.arange(nlayer) < 2, 3.0, 60.0)

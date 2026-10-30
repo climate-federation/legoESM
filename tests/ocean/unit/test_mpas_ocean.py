@@ -848,6 +848,21 @@ class TestMPASLandFill:
         assert float(got[3]) == 3.0
         assert float(got[4]) == 9.0
 
+    def test_held_edge_with_missing_far_cell_is_not_a_neighbour(self):
+        """The MPI-per-rank partition keeps an edge when either cell is local
+        and marks the missing far cell -1 in cellsOnEdge.  Chain 0-1-2-3-4-5,
+        land cell 3, far cell of edge 3 (cells 3-4) cut to -1: cell 3 fills
+        from cell 2 only.  Read as an index, -1 is the LAST cell (ocean, 7.0)
+        and gives (3 + 7) / 2 = 5.0."""
+        from legoesm.ocean.dynamics.mpas_fill import fill_land_cells_mpas
+
+        field = jnp.array([1.0, 2.0, 3.0, 0.0, 9.0, 7.0])
+        mask = jnp.array([1.0, 1.0, 1.0, 0.0, 1.0, 1.0])
+        c1, c2, eoc, neoc = self._chain_connectivity(6)
+        got = fill_land_cells_mpas(field, mask, c1, c2.at[3].set(-1), eoc, neoc,
+                                   n_iter=1)
+        assert float(got[3]) == 3.0
+
     def test_gather_matches_frozen_edge_scatter_on_mesh(self):
         """The per-cell gather visits exactly the edges the former per-edge
         scatter-add did: on a real SCVT mesh with a random coastline the two
@@ -1584,3 +1599,70 @@ class TestMPASMultiRankFreshwaterGuard:
         tend = mpas_ocean_baroclinic_tendencies(
             state, mesh, z_coord, cfg, freshwater=self._fw(mesh))
         assert tend is not None
+
+
+class TestMPASLandFillBand:
+    """``band_capacity``: the fill swept over the coastal band only must equal
+    the all-cells fill bit for bit, including the over-capacity fallback."""
+
+    @staticmethod
+    def _case(nlev=5):
+        from legoesm.grids.voronoi import create_voronoi_mesh
+        mesh = create_voronoi_mesh(3)
+        lat = np.degrees(np.asarray(mesh.latCell))
+        lon = np.degrees(np.asarray(mesh.lonCell))
+        mask = jnp.asarray(((lat < 40.0) & ~((lon > 30.0) & (lon < 90.0))).astype(float))
+        rng = np.random.default_rng(3)
+        f2 = jnp.asarray(rng.standard_normal((mesh.nCells, nlev)))
+        conn = (mesh.cellsOnEdge[0], mesh.cellsOnEdge[1], mesh.edgesOnCell, mesh.nEdgesOnCell)
+        return mesh, mask, f2, conn
+
+    @staticmethod
+    def _bits(x):
+        return np.asarray(x).view(np.uint64)
+
+    def test_band_equals_full_for_exact_padded_and_short_capacity(self):
+        from legoesm.ocean.dynamics.mpas_fill import fill_land_cells_mpas, land_fill_band_size
+        _, mask, f2, conn = self._case()
+        k = land_fill_band_size(mask, *conn)
+        assert 0 < k < int((np.asarray(mask) < 0.5).sum())   # deep land exists
+        for f in (f2, f2[:, 0]):
+            ref = fill_land_cells_mpas(f, mask, *conn)
+            assert int((np.asarray(ref) != np.asarray(f)).reshape(f.shape[0], -1).any(1).sum()) == k
+            for cap in (k, k + 7, k - 1, 0):
+                got = jax.jit(lambda x, c=cap: fill_land_cells_mpas(x, mask, *conn,
+                                                                    band_capacity=c))(f)
+                assert np.array_equal(self._bits(got), self._bits(ref)), cap
+
+    def test_nan_in_deep_land_and_gradient_match(self):
+        from legoesm.ocean.dynamics.mpas_fill import (
+            fill_land_cells_mpas, land_fill_band, land_fill_band_size)
+        _, mask, f2, conn = self._case()
+        k = land_fill_band_size(mask, *conn)
+        deep = np.where((np.asarray(mask) < 0.5) & ~np.asarray(land_fill_band(mask, *conn)))[0]
+        f_nan = f2.at[deep[0], 2].set(jnp.nan)
+        ref = fill_land_cells_mpas(f_nan, mask, *conn)
+        got = fill_land_cells_mpas(f_nan, mask, *conn, band_capacity=k)
+        assert np.array_equal(self._bits(got), self._bits(ref))
+
+        def loss(x, cap):
+            return jnp.sum(fill_land_cells_mpas(x, mask, *conn, band_capacity=cap) ** 2)
+        g_ref = jax.grad(loss)(f2, None)
+        # Forward bits match; the backward pass (inside lax.cond, and the
+        # band's scatter/gather) sums cotangents in another order: measured
+        # max |diff| 7.1e-15 (band) and 8.9e-16 (fallback).
+        for cap in (k, k - 1):
+            np.testing.assert_allclose(jax.grad(loss)(f2, cap), g_ref, rtol=1e-12, atol=0)
+
+    def test_float32_field_with_float64_mask_keeps_the_all_cells_dtype(self):
+        from legoesm.ocean.dynamics.mpas_fill import fill_land_cells_mpas, land_fill_band_size
+        _, mask, f2, conn = self._case()
+        f = f2.astype(jnp.float32)
+        k = land_fill_band_size(mask, *conn)
+        ref = fill_land_cells_mpas(f, mask, *conn)
+        for cap in (k, k - 1):
+            got = fill_land_cells_mpas(f, mask, *conn, band_capacity=cap)
+            assert got.dtype == ref.dtype
+            assert np.array_equal(self._bits(got), self._bits(ref)), cap
+        got0 = fill_land_cells_mpas(f, mask, *conn, n_iter=0, band_capacity=k)
+        assert got0.dtype == f.dtype and np.array_equal(np.asarray(got0), np.asarray(f))

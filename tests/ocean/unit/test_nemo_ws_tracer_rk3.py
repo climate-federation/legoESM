@@ -97,6 +97,43 @@ def test_nemo_r3t_stage1_interpolates_endpoint_ratios_in_source_order():
     assert "_qt_13 = nemo_r3t_rk3_stage1_stretch(" in source
 
 
+def test_nemo_r3t_stage2_averages_endpoint_ratios_in_source_order():
+    set_policy(PrecisionPolicy.fp64())
+    depth = jnp.asarray([[0.8399433435364629]], dtype=jnp.float64)
+    before = jnp.asarray([[-1.6251504175017768]], dtype=jnp.float64)
+    after = jnp.asarray([[1.0774671157751738]], dtype=jnp.float64)
+    z_coord = SimpleNamespace(linear_free_surface=False)
+
+    def evaluate(a, b):
+        return eos_module.nemo_r3t_rk3_stage2_stretch(
+            z_coord, a, b, depth)
+
+    eager = evaluate(before, after)
+    compiled = jax.jit(evaluate)(before, after)
+    np.testing.assert_array_equal(np.asarray(compiled), np.asarray(eager))
+
+    r1_depth = np.float64(1.0) / np.asarray(depth)
+    r3_before = np.asarray(before) * r1_depth
+    r3_after = np.asarray(after) * r1_depth
+    expected = np.float64(1.0) + np.float64(0.5) * (
+        r3_before + r3_after)
+    np.testing.assert_array_equal(np.asarray(compiled), expected)
+
+    ratio_of_mean = np.float64(1.0) + (
+        np.float64(0.5) * (np.asarray(before) + np.asarray(after))
+    ) * r1_depth
+    assert not np.array_equal(np.asarray(compiled), ratio_of_mean)
+
+    gradients = jax.grad(
+        lambda a, b: jnp.sum(evaluate(a, b)), argnums=(0, 1))(
+            before, after)
+    assert all(np.isfinite(np.asarray(value)).all() for value in gradients)
+    assert all(np.any(np.asarray(value) != 0.0) for value in gradients)
+
+    source = inspect.getsource(model_module.LatLonCGridOceanModel._step_impl)
+    assert "_nemo_qsr_kmm_stretch = nemo_r3t_rk3_stage2_stretch(" in source
+
+
 def test_nemo_qco_live_t_thickness_matches_literal_source_bits():
     """Pin domain/domqco/e3t macro association on awkward partial cells."""
     set_policy(PrecisionPolicy.fp64())
@@ -175,6 +212,7 @@ def test_nemo_cen2_tracer_rhs_matches_literal_source_bits():
         (np.float64(0.5) * p_w[..., 1:-1]) * sum_w) * wmask_inner
     expected = expected - (
         (flux_w[..., :-1] - flux_w[..., 1:]) * r1_area) / e3t
+    expected[tmask == 0.0] = 0.0
 
     actual = np.asarray(jax.jit(
         lambda tr, pu, pv, pw, h, tm: model_module._nemo_cen2_tracer_rhs(
@@ -182,6 +220,28 @@ def test_nemo_cen2_tracer_rhs_matches_literal_source_bits():
         jnp.asarray(tracer), jnp.asarray(p_u), jnp.asarray(p_v),
         jnp.asarray(p_w), jnp.asarray(e3t), jnp.asarray(tmask)))
     np.testing.assert_array_equal(actual.view(np.uint64), expected.view(np.uint64))
+
+    # The cropped GYRE card stores its unowned perimeter as zero-thickness
+    # cells.  Seed the pullback only at such a cell: the outer selection must
+    # make every operand cotangent finite and exactly zero, including the
+    # denominator cotangent that was poisoned before the active-cell guard.
+    inactive_e3t = e3t.copy()
+    inactive_e3t[0, 0, 1] = 0.0
+    args = tuple(map(jnp.asarray, (
+        tracer, p_u, p_v, p_w, inactive_e3t, tmask)))
+    actual_inactive, pullback = jax.vjp(
+        lambda tr, pu, pv, pw, h, tm: model_module._nemo_cen2_tracer_rhs(
+            tr, pu, pv, pw, h, tm, grid),
+        *args,
+    )
+    assert float(actual_inactive[0, 0, 1]) == 0.0
+    output_cotangent = np.zeros_like(expected)
+    output_cotangent[0, 0, 1] = 1.0
+    operand_cotangents = pullback(jnp.asarray(output_cotangent))
+    for cotangent in operand_cotangents:
+        cotangent_np = np.asarray(cotangent)
+        assert np.all(np.isfinite(cotangent_np))
+        np.testing.assert_array_equal(cotangent_np, np.zeros_like(cotangent_np))
 
     # Non-vacuity: the old path materialised averages, cancelled them with 2,
     # and multiplied a precomputed inverse thickness.
@@ -530,6 +590,29 @@ def test_nemo_ws_public_step_is_same_production_kernel_under_outer_disable_jit()
             np.asarray(getattr(eager_context, field).data),
             np.asarray(getattr(production_context, field).data),
         )
+
+
+def test_nemo_ws_production_routes_stage3_eta_to_redi_divisor(monkeypatch):
+    """The production RK3 step passes Kmm SSH to the independent divisor."""
+    set_policy(PrecisionPolicy.fp64())
+    card = build_nemo_testcase_card("GYRE-zco")
+    gm_cfg = card.recipe.model_config.gm_redi._replace(
+        redi_divisor_thickness_evaluation="nemo_qco_live")
+    cfg = card.recipe.model_config._replace(gm_redi=gm_cfg)
+    model = model_module.LatLonCGridOceanModel(
+        card.recipe.grid, card.recipe.z_coord, cfg)
+    seen = []
+
+    def capture(T, S, *_args, **kwargs):
+        seen.append(kwargs.get("redi_divisor_eta"))
+        return jnp.zeros_like(T), jnp.zeros_like(S)
+
+    monkeypatch.setattr(model_module, "gm_redi_tracer_tendency_latlon", capture)
+    model._step_impl(
+        card.recipe.initial_state, card.dt_s, _apply_implicit_vmix=False)
+    assert len(seen) == 1
+    assert seen[0] is not None
+    assert seen[0].shape == card.recipe.initial_state.eta.data.shape
 
 
 def test_rk3_tke_nbb_mapping_is_independent_of_evd_selector():

@@ -7,7 +7,7 @@ Bigg rate (oracle ``FREEZ``, Fortran l. 6560–6636):
     B(m) = B0 + (B_max − B0)/m_top · m         (mass-dependent slope; with
                                                 the oracle defaults B_max=B0
                                                 so B is constant)
-    frozen fraction = 1 − exp(−P_k · dt)
+    YKK = exp(−P_k · dt);  f_liq ← f_liq·YKK;  Δf = f_liq·(1 − YKK)
 
 The frozen liquid leaves the drop spectrum and enters the ice spectrum
 (oracle routes ``KR ≤ KRFREEZ`` to pristine ice crystals and the larger
@@ -15,8 +15,8 @@ bins to hail; this warm→ice first step produces a single mass-preserving
 ice spectrum and defers the crystal/hail habit split to the ice-collision
 iteration). Freezing releases the latent heat of fusion:
 
-    ΔT_heat = (L_f / c_pd) · Δq_ice           (oracle ``333·SUM_ICE/RO`` —
-                                                333 ≈ L_f/c_pd in CGS)
+    ΔT_heat = 333 K · Δq_ice                  (oracle ``333·SUM_ICE/RO`` —
+                                                its literal for L_f/c_pd)
 
 The oracle's Bigg coefficients are CGS (drop mass in grams); the port keeps
 them as ``FastSBMConfig`` fields and converts ``masses`` kg→g internally so
@@ -55,7 +55,8 @@ __physics_contract__ = {
     "sign_convention": (
         "Freezing acts only for T < T_freeze; it moves number/mass from "
         "liquid to ice at fixed per-bin mass (no mass change), so "
-        "q_liquid+q_ice is conserved and ΔT = (L_f/c_pd)·Δq_ice >= 0. "
+        "q_liquid+q_ice is conserved (to round-off: oracle f·YKK + "
+        "f·(1-YKK) form) and ΔT = 333 K·Δq_ice >= 0 (oracle literal). "
         "At or above freezing nothing happens."
     ),
     "conserves": ["mass"],
@@ -67,8 +68,8 @@ __physics_contract__ = {
     "idealized_test": (
         "No freezing at T >= 0 °C; frozen fraction 1−exp(−m·A·exp(−B·ΔT)·dt) "
         "matches the oracle per bin; deeper supercooling and larger drops "
-        "freeze more; liquid+ice mass conserved exactly; ΔT = "
-        "(L_f/c_pd)·Δq_ice; differentiable in T."
+        "freeze more; liquid+ice mass conserved to round-off; ΔT = "
+        "333 K·Δq_ice; differentiable in T."
     ),
 }
 
@@ -102,7 +103,7 @@ def bigg_freezing_rate(
     m_g = masses * _KG_TO_G
     cfreeze = (config.bigg_b_max - config.bigg_b0) / (masses[-1] * _KG_TO_G)
     B = config.bigg_b0 + cfreeze * m_g
-    rate = m_g * config.bigg_a * jnp.exp(-B * dT)
+    rate = m_g * (config.bigg_a * jnp.exp(-B * dT))   # PF=ARG_M*PF_1
     return jnp.where(dT < 0.0, rate, 0.0)
 
 
@@ -118,14 +119,16 @@ def freeze_step(
 
     Returns the depleted liquid spectrum, the frozen-drop ice spectrum
     (same bin masses — freezing preserves particle mass), and the fusion
-    warming ``ΔT = (L_f/c_pd)·Δq_ice``.
+    warming ``ΔT = 333 K·Δq_ice`` (oracle literal).
     """
     P = bigg_freezing_rate(masses, T, config)
-    frozen_frac = -jnp.expm1(-P * dt)          # 1 − exp(−P dt), stable
-    df = f_liquid * frozen_frac
-    f_liquid_new = f_liquid - df
+    # Oracle FREEZ (l. 6612-6616): YKK=EXP(-PF*DT); DF1=FF1*(1.-YKK);
+    # FF1=FF1*YKK — this exact form (not expm1), so the port reproduces it.
+    ykk = jnp.exp(-P * dt)
+    df = f_liquid * (1.0 - ykk)
+    f_liquid_new = f_liquid * ykk
     dq_ice = mass_density(df, masses) / rho
-    dT = (constants.L_f / constants.c_pd) * dq_ice
+    dT = constants.lf_over_cp_fast_sbm * dq_ice   # ARG_1=333.*SUM_ICE/RO
     return FreezeResult(f_liquid=f_liquid_new, f_ice=df, dT=dT)
 
 
@@ -149,9 +152,9 @@ def freeze_step_routed(
     exactly.
     """
     P = bigg_freezing_rate(masses, T, config)
-    frozen_frac = -jnp.expm1(-P * dt)
-    df = f_liquid * frozen_frac
-    f_liquid_new = f_liquid - df
+    ykk = jnp.exp(-P * dt)              # oracle FREEZ YKK form (see above)
+    df = f_liquid * (1.0 - ykk)
+    f_liquid_new = f_liquid * ykk
     # Bin split: bins 0..KRFREEZ-1 (0-based) → crystals, ≥ KRFREEZ → hail.
     # Oracle routes crystals to FF2(:,ICE_TYPE=2) (plates) at this call site;
     # collapsing the three oracle ice-crystal habits (ICEMAX=3 — columns,
@@ -161,6 +164,6 @@ def freeze_step_routed(
     f_crystals = jnp.where(is_crystal, df, 0.0)
     f_hail = jnp.where(is_crystal, 0.0, df)
     dq_ice = mass_density(df, masses) / rho
-    dT = (constants.L_f / constants.c_pd) * dq_ice
+    dT = constants.lf_over_cp_fast_sbm * dq_ice   # ARG_1=333.*SUM_ICE/RO
     return FreezeRoutedResult(f_liquid=f_liquid_new, f_crystals=f_crystals,
                               f_hail=f_hail, dT=dT)

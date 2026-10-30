@@ -19,13 +19,13 @@ from legoesm.atmosphere.physics.microphysics.morrison import (
     morrison_microphysics,
 )
 from legoesm.atmosphere.physics.microphysics.output import HydrometeorState
-from legoesm.thermo import saturation_mixing_ratio
+from legoesm.thermo import saturation_specific_humidity
 
 
 def _run(wbf, q_c=5.0e-4, q_i=1.0e-5, N_i=1.0e5, T=260.0, p=6.0e4,
          berg_rate=1.0e-3):
     """Return (dq_c_dt, dq_i_dt) in a mixed-phase, liquid-saturated cell."""
-    qsl = float(saturation_mixing_ratio(jnp.asarray(T), jnp.asarray(p)))
+    qsl = float(saturation_specific_humidity(jnp.asarray(T), jnp.asarray(p)))
     q_v = qsl                              # liquid-saturated ⇒ ice-supersat
     z = jnp.zeros((1, 1))
     hm = HydrometeorState(
@@ -66,7 +66,7 @@ def test_emergent_is_deposition_limited_vs_heuristic():
 def test_no_wbf_without_ice():
     """No ice (and nucleation off via N_i0=0) ⇒ no deposition surface ⇒
     no emergent glaciation of cloud water."""
-    qsl = float(saturation_mixing_ratio(jnp.asarray(260.0), jnp.asarray(6.0e4)))
+    qsl = float(saturation_specific_humidity(jnp.asarray(260.0), jnp.asarray(6.0e4)))
     z = jnp.zeros((1, 1))
     hm = HydrometeorState(
         q_c=jnp.full((1, 1), 5.0e-4), q_r=z, q_i=z, q_s=z, q_g=z,
@@ -93,7 +93,7 @@ def test_heuristic_scheme_still_available():
 def test_emergent_wbf_ad_safe():
     """jax.grad through the emergent (zero-Bergeron) mixed-phase path is
     finite wrt cloud water."""
-    qsl = float(saturation_mixing_ratio(jnp.asarray(260.0), jnp.asarray(6.0e4)))
+    qsl = float(saturation_specific_humidity(jnp.asarray(260.0), jnp.asarray(6.0e4)))
 
     def loss(q_c):
         z = jnp.zeros((1, 1))
@@ -121,7 +121,7 @@ def test_emergent_wbf_no_spurious_water_source():
     tendency ≈ 0, and the residual MATCHES the heuristic scheme (so the
     emergent path adds no new imbalance — only re-partitions the rate)."""
     T, p = 260.0, 6.0e4
-    qsl = float(saturation_mixing_ratio(jnp.asarray(T), jnp.asarray(p)))
+    qsl = float(saturation_specific_humidity(jnp.asarray(T), jnp.asarray(p)))
     z = jnp.zeros((1, 1))
     hm = HydrometeorState(
         q_c=jnp.full((1, 1), 5.0e-4), q_r=z,

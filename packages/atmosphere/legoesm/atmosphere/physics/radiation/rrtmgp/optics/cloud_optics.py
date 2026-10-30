@@ -25,6 +25,7 @@ def _tiny(x=None):
   dtype = x.dtype if x is not None else jnp.float_
   return float(jnp.finfo(dtype).tiny)
 
+from legoesm import constants
 from legoesm.atmosphere.physics._shared import safe_divide
 from legoesm.atmosphere.physics.radiation.rrtmgp.optics import lookup_cloud_optics
 from legoesm.atmosphere.physics.radiation.rrtmgp.optics import optics_utils
@@ -36,6 +37,15 @@ IndexAndWeight: TypeAlias = optics_utils.IndexAndWeight
 _EPSILON = 1e-6
 _KG_TO_G_FACTOR = 1e3
 _M_TO_MICRONS_FACTOR = 1e6
+
+# --- CAM6 ice-optics particle size (CAM cam_cesm2_1_rel_60, micro_mg2_0.F90:2795;
+# micro_mg_utils.F90:126,128) ---
+# CAM passes the ice optics ``deffi = effi*rhoi/rhows*2``: the PSD effective
+# radius of bulk-density ice (rhoi = 500 kg/m^3, the density the M2005/MG2 ice
+# PSD assumes) converted to the effective DIAMETER of solid ice
+# (rhows = 917 kg/m^3 = ``constants.rho_ice``), which is what the RRTMGP ice
+# table is indexed by (rte-rrtmgp v1.9 relabels that axis as diameter).
+RHO_ICE_BULK_CAM_MG2 = 500.0  # [kg/m^3] CAM micro_mg_utils.F90 ``rhoi``
 
 
 def _particle_size_interpolant(
@@ -60,6 +70,7 @@ def compute_optical_properties(
     radius_eff_liq: Array,
     radius_eff_ice: Array,
     ibnd: Array,
+    absorption_only: bool = False,
 ) -> dict[str, Array]:
   """Computes the optical properties of clouds from lookup tables.
 
@@ -82,8 +93,15 @@ def compute_optical_properties(
     radius_eff_liq: The effective radius of cloud droplets in each atmospheric
       grid cell [m].
     radius_eff_ice: The effective radius of cloud ice particles in each
-      atmospheric grid cell [m].
+      atmospheric grid cell [m], bulk-density (500 kg/m^3) PSD convention; the
+      table coordinate is CAM6's solid-ice diameter ``2 r 500/917``.
     ibnd: The spectral band index.
+    absorption_only: If True, return the absorption-only (no-scattering)
+      properties RTE-RRTMGP computes for a ``ty_optical_props_1scl`` target
+      (mo_cloud_optics_rrtmgp.F90:527-541): optical depth
+      ``(tau_liq - tau_ssa_liq) + (tau_ice - tau_ssa_ice)``, ssa = g = 0.  This
+      is the longwave cloud treatment of the RRTMGP reference configuration
+      (examples/all-sky/rrtmgp_allsky.F90) and of CAM6 RRTMG LW.
 
   Returns:
   A dictionary containing:
@@ -104,7 +122,8 @@ def compute_optical_properties(
           lookup.radius_liq_upper,
       ),
       jnp.clip(
-          _M_TO_MICRONS_FACTOR * 2.0 * radius_eff_ice,
+          _M_TO_MICRONS_FACTOR * radius_eff_ice
+          * RHO_ICE_BULK_CAM_MG2 / constants.rho_ice * 2.0,
           lookup.diameter_ice_lower,
           lookup.diameter_ice_upper,
       ),
@@ -159,6 +178,12 @@ def compute_optical_properties(
         optics_utils.interpolate(asy, interp) * props['tau_ssa']
     )
     optical_props.append(props)
+
+  if absorption_only:
+    liq, ice = optical_props
+    tau_abs = (liq['tau'] - liq['tau_ssa']) + (ice['tau'] - ice['tau_ssa'])
+    zero = jnp.zeros_like(tau_abs)
+    return {'optical_depth': tau_abs, 'ssa': zero, 'asymmetry_factor': zero}
 
   combined_props = jax.tree.map(jnp.add, *optical_props)
   # AD-safe denominators (restored from commit 59407953 after AIMIP-#312

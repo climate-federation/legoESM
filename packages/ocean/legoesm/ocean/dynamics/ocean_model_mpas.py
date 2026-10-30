@@ -226,6 +226,11 @@ class MPASOceanModel(IntegrationMixin):
         else:
             self._constants_config = _model_cc
 
+        # Barotropic PCG bundle per JAX backend, written back so the run's
+        # config records the solver it used.
+        from legoesm.ocean.mpas_config import resolve_barotropic_pcg_defaults
+        self.config = resolve_barotropic_pcg_defaults(self.config)
+
         # Resolution-scaled biharmonic vorticity damping.  Resolved HERE --
         # the one place every driver, experiment and test hands a mesh and a
         # configuration to the same constructor -- so no mesh can silently
@@ -621,15 +626,6 @@ class MPASOceanModel(IntegrationMixin):
         T_new = state.T.data + dt * tend.dT_dt.data
         S_new = state.S.data + dt * tend.dS_dt.data
 
-        # Fill land cells with ocean-neighbor average (Neumann BC) so that
-        # subsequent operators see smooth values at coastlines instead of
-        # the sharp ocean-to-zero discontinuity that `* mask` would create.
-        c1_m = mesh.cellsOnEdge[0]
-        c2_m = mesh.cellsOnEdge[1]
-        T_new = fill_land_cells_mpas(T_new, mask, c1_m, c2_m,
-                                     mesh.edgesOnCell, mesh.nEdgesOnCell)
-        S_new = fill_land_cells_mpas(S_new, mask, c1_m, c2_m,
-                                     mesh.edgesOnCell, mesh.nEdgesOnCell)
         # 2a (coefficients). Vertical-mixing coefficients for the implicit
         # tracer solve (after the halo exchange below) and the momentum
         # solve (3a).  When KPP and/or convective adjustment are enabled,
@@ -853,6 +849,20 @@ class MPASOceanModel(IntegrationMixin):
         if halo_refresh is not None:
             (u_star,), (T_new, S_new) = halo_refresh.both(
                 (u_star,), (T_new, S_new))
+
+        # Fill land cells with ocean-neighbor average (Neumann BC) so that
+        # subsequent operators see smooth values at coastlines instead of
+        # the sharp ocean-to-zero discontinuity that `* mask` would create.
+        # After the R1 refresh: a land cell near a rank boundary then fills
+        # from the owners' ocean values, not this rank's stale outer halo.
+        c1_m = mesh.cellsOnEdge[0]
+        c2_m = mesh.cellsOnEdge[1]
+        T_new = fill_land_cells_mpas(T_new, mask, c1_m, c2_m,
+                                     mesh.edgesOnCell, mesh.nEdgesOnCell,
+                                     band_capacity=config.land_fill_band_capacity)
+        S_new = fill_land_cells_mpas(S_new, mask, c1_m, c2_m,
+                                     mesh.edgesOnCell, mesh.nEdgesOnCell,
+                                     band_capacity=config.land_fill_band_capacity)
 
         # 2a (solve). Implicit vertical tracer diffusion (backward-Euler),
         # BEFORE GM/Redi and advection, on per-cell layer thickness (partial

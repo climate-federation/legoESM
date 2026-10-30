@@ -501,8 +501,8 @@ class TestLouis:
     def test_separate_heat_function_prandtl(self):
         """Faithful Louis: heat function f_h ≠ f_m (b_h/b_m = 1.5), giving
         a stratification-dependent Pr_t = K_m/K_h > 1 stable, < 1 unstable;
-        ``b_heat_ratio=1`` recovers the old f_h=f_m (Pr_t≡1).  Momentum K_m
-        must be unaffected by the ratio."""
+        with ``b_heat_ratio=1`` stable Pr_t stays > 1 (OpenIFS heat form).
+        Momentum K_m must be unaffected by the ratio."""
         ncol, nlev = 2, 10
         z_half = jnp.linspace(2000.0, 0.0, nlev + 1)[None, :].repeat(ncol, 0)
         z_full = 0.5 * (z_half[:, 1:] + z_half[:, :-1])
@@ -531,9 +531,11 @@ class TestLouis:
         assert pr_unstable < 1.0
         assert pr_stable > 1.0
 
-        # b_heat_ratio = 1.0 collapses to Pr_t ≡ 1, and K_m is identical.
-        _, out_ratio1 = mean_prandtl(+0.005, ratio=1.0)
-        assert jnp.allclose(out_ratio1.Km, out_ratio1.Kh)
+        # b_heat_ratio = 1.0 (the OpenIFS stable coefficients): the stable heat
+        # function still multiplies by sqrt(1+d*Ri) where momentum divides
+        # (vdfexcu.F90:394-395), so Pr_t > 1 stays; K_m is identical.
+        pr_ratio1, out_ratio1 = mean_prandtl(+0.005, ratio=1.0)
+        assert pr_ratio1 > 1.0
         assert jnp.allclose(out_stable.Km, out_ratio1.Km)  # momentum unaffected
 
 

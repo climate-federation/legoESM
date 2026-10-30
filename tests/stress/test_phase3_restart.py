@@ -34,7 +34,7 @@ def _make_driver(preset="aquaplanet", days=10, output_dir=None, **kwargs):
     # identical between a straight run and a restarted run.
     atm_config = ExperimentConfig(
         grid=GridConfig(grid_type="cubed_sphere", resolution=8, nlev=5),
-        dycore=DycoreConfig(dt=600.0, model_type="hydrostatic"),
+        dycore=DycoreConfig(energy_fixer=False, dt=600.0, model_type="hydrostatic"),
         output=OutputConfig(diag_days=1, checkpoint_days=0),
         radiation="gray",
         days=days,
@@ -118,7 +118,7 @@ class TestCoupledRestart:
 class TestCarbonRestart:
     """slab_carbon: CO2 field should match after restart."""
 
-    def test_carbon_restart_co2_field(self, tmp_path):
+    def test_carbon_restart_co2_box(self, tmp_path):
         """slab_carbon 6-day run matches 3+3 with restart."""
         # --- Run A: 6 days straight ---
         dir_a = tmp_path / "run_a"
@@ -128,9 +128,8 @@ class TestCarbonRestart:
 
         T_ref = np.asarray(driver_a.state.T.data)
         sst_ref = np.asarray(driver_a.ocean_state.T_sfc.data)
-        co2_ref = None
-        if hasattr(driver_a, '_co2_field') and driver_a._co2_field is not None:
-            co2_ref = np.asarray(driver_a._co2_field)
+        assert getattr(driver_a, '_co2_mass', None) is not None, "no CO2 box"
+        co2_ref = float(driver_a._co2_box_vmr()) * 1e6  # ppmv
 
         # --- Run B: 3 + 3 ---
         dir_b = tmp_path / "run_b"
@@ -160,12 +159,14 @@ class TestCarbonRestart:
         np.testing.assert_allclose(sst_restart, sst_ref, atol=_ATOL, rtol=_RTOL,
                                    err_msg="SST mismatch after carbon restart")
 
-        if co2_ref is not None and hasattr(driver_b2, '_co2_field'):
-            co2_restart = np.asarray(driver_b2._co2_field)
-            np.testing.assert_allclose(
-                co2_restart, co2_ref, atol=_ATOL, rtol=_RTOL,
-                err_msg="CO2 field mismatch after restart",
-            )
+        assert getattr(driver_b2, '_co2_mass', None) is not None, "no CO2 box"
+        co2_restart = float(driver_b2._co2_box_vmr()) * 1e6  # ppmv
+        # Tolerance PENDING user decision (no ppmv tolerance exists in
+        # this file; _ATOL/_RTOL are the pre-existing CO2 tolerances).
+        np.testing.assert_allclose(
+            co2_restart, co2_ref, atol=_ATOL, rtol=_RTOL,
+            err_msg="CO2 box [ppmv] mismatch after restart",
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -241,13 +242,18 @@ def _make_dynamic_driver(days=4, output_dir=None, nlev=4):
         # runtime — straight and restarted runs then share an identical step
         # schedule (steps_per_day below stays exact).
         grid=GridConfig(grid_type="latlon", resolution=16, nlev=5),
-        dycore=DycoreConfig(dt=150.0, model_type="hydrostatic",
+        dycore=DycoreConfig(energy_fixer=False, dt=150.0, model_type="hydrostatic",
                             discretization="latlon_cgrid"),
         output=OutputConfig(diag_days=1, checkpoint_days=0),
         radiation="gray", convection="none", days=days,
     )
+    # Decision 90: an RK3 ocean card must STATE the slow-forcing depth
+    # average; this restart test states the pre-decision default.
+    _ocn = LatLonCGridOceanConfig()
+    _ocn = _ocn._replace(barotropic=_ocn.barotropic._replace(
+        barotropic_slow_forcing_depth_evaluation="min_rule_live"))
     coupled_cfg = CoupledConfig(
-        ocean_mode="dynamic", ocean_config=LatLonCGridOceanConfig(),
+        ocean_mode="dynamic", ocean_config=_ocn,
         ocean_nlev=nlev, ocean_dt_s=300.0, ocean_ic="rest",
     )
     driver = CoupledESMDriver(atm_config, coupled_cfg, output_dir=output_dir)

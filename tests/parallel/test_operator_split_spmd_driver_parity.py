@@ -177,3 +177,40 @@ def test_operator_split_spmd_segment_callback_fold_back(tmp_path):
         f"segment-2 T drift {drift:.3f}K vs control is far below the injected "
         f"{DELTA_T}K bump — the first-segment callback mutation was NOT folded "
         f"back into the sharded carry (dropped fold-back).")
+
+
+def test_band_physics_takes_bechtold_dx_from_global_grid(tmp_path, monkeypatch):
+    """#1968: the lane builds physics on ONE band grid; Bechtold's dx_m must
+    still be the global spacing a serial run uses, not band 0's (polar)
+    cells.  Stops right after the band build — the step is not needed."""
+    import legoesm.driver.model_driver as md
+    from legoesm.driver.physics_pipeline import mean_grid_spacing_m
+    from legoesm.grids.factory import create_grid
+
+    n_dev = 4
+    if len(jax.devices()) < n_dev:
+        pytest.skip(f"needs --xla_force_host_platform_device_count={n_dev}")
+    built = []
+
+    class _Stop(Exception):
+        pass
+
+    def _capture(*a, **k):
+        built.append(md_build(*a, **k))
+        if len(built) == 2:  # [0] = setup's pipeline, [1] = the band build
+            raise _Stop
+        return built[-1]
+
+    md_build = md.build_physics_pipeline
+    monkeypatch.setattr(md, "build_physics_pipeline", _capture)
+    cfg = _make_cfg(str(tmp_path), spmd=True)._replace(
+        convection="bechtold", n_devices=n_dev)
+    driver = ModelDriver(cfg, output_dir=str(tmp_path))
+    driver.setup()
+    with pytest.raises(_Stop):
+        driver.run(compiled=True)
+    assert len(built) == 2
+    band = built[1]
+    assert band.adapter.ncol == (RES // n_dev) * 2 * RES  # band ncol
+    assert band.convection_config.dx_m == mean_grid_spacing_m(
+        create_grid("latlon", RES))

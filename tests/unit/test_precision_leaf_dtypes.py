@@ -58,7 +58,7 @@ def _cast_to_storage(state, storage):
     )
 
 
-def _run_mpas(mode):
+def _run_column(mode):
     """MPAS PE — the NEGATIVE control, and it is labelled as one.
 
     Measured: this core does not promote in mixed even without the
@@ -201,7 +201,7 @@ def test_sharded_ps_carry_guard():
 
 @pytest.mark.parametrize("mode", MODES)
 def test_mpas_pe_leaf_dtypes(mode):
-    state, storage, accum = _run_mpas(mode)
+    state, storage, accum = _run_column(mode)
     _assert_leaf_dtypes(state, storage, accum)
 
 

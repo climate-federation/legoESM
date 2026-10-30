@@ -2162,12 +2162,12 @@ def score_process_budget(nemo_process_root: Path, lego_trace_root: Path,
     print(f"  {'rank':>4s} {'owner':>22s} {'signed carry K':>16s} "
           f"{'component rms K':>16s} {'birth days':>14s}")
     for rank, row in enumerate(ranking, 1):
+        birth_days = str(row['birth'].get(
+            'strongest_interval_days', row['birth'].get('interval_days')))
         print(f"  {rank:4d} {row['owner']:>22s} "
               f"{row['signed_carry_K']:16.8e} "
               f"{row['component_rms_K']:16.8e} "
-              f"{str(row['birth'].get('strongest_interval_days',
-                                      row['birth'].get(
-                                          'interval_days'))):>14s}")
+              f"{birth_days:>14s}")
     print(f"  day-240 T rms {endpoint_rms:.17e} K; signed carry sum "
           f"{signed_sum:.17e} K; max reconstruction residual "
           f"{max_reconstruction:.3e} K")
@@ -14214,7 +14214,9 @@ def developed_vertical_day240_sensitivity(
                     target_e3t = np.array(vertical["e3t_after"], copy=True)
                     target_content = np.array(
                         vertical["content_T"], copy=True)
-                    replace = np.zeros(6, dtype=np.bool_)
+                    target_content_s = np.array(
+                        vertical["content_S"], copy=True)
+                    replace = np.zeros(7, dtype=np.bool_)
                     if name != "fixed_disabled":
                         replace[:] = True
                     if name.startswith("fixed_complete_K_e3w"):
@@ -14256,6 +14258,7 @@ def developed_vertical_day240_sensitivity(
                         tracer_e3w=jnp.asarray(target_e3w),
                         tracer_e3t=jnp.asarray(target_e3t),
                         temperature_content=jnp.asarray(target_content),
+                        salinity_content=jnp.asarray(target_content_s),
                         replace=jnp.asarray(replace),
                     )
                     identity_reference = probe.state_after

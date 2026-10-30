@@ -112,9 +112,32 @@ def test_e3sm_cam_f_land_none_sends_no_kwarg():
     assert "land_frac_col" not in rec.kwargs
 
 
-@pytest.mark.parametrize("scheme", ["mcfarlane", "lindzen", "hines"])
+def test_mcfarlane_pipeline_threads_f_land_and_reference_pressures():
+    """CAM6 gw_oro (``mcfarlane``): the pipeline forwards f_land as the
+    (ncol,) ``land_frac_col`` and the coordinate's interfaces at p_ref as
+    ``p_ref_half`` (CAM pref_edge)."""
+    from legoesm import constants
+    grid, pipe = _pipe("mcfarlane")
+    assert pipe._gwd_mcfarlane is True
+    f_land = jnp.asarray(
+        np.linspace(0.0, 1.0, NLAT * NLON).reshape(grid.grid_lat.shape)
+    )
+    pipe.f_land = f_land
+    rec = _Recorder()
+    pipe.gwd_fn = rec
+    _run_step(grid, pipe)
+    assert rec.kwargs is not None, "GWD kernel was never called"
+    np.testing.assert_allclose(
+        np.asarray(rec.kwargs["land_frac_col"]), np.asarray(f_land).reshape(-1))
+    np.testing.assert_allclose(
+        np.asarray(rec.kwargs["p_ref_half"]),
+        np.asarray(pipe.sigma_coord.pressure_at_half(
+            jnp.asarray([constants.p_ref]))).reshape(-1))
+
+
+@pytest.mark.parametrize("scheme", ["lindzen", "hines"])
 def test_other_gwd_schemes_never_send_land_frac(scheme):
-    """mcfarlane/lindzen/hines kernels do NOT accept ``land_frac_col`` —
+    """lindzen/hines kernels do NOT accept ``land_frac_col`` —
     sending it would TypeError in production.  Even with f_land set, the
     pipeline must not forward it (builder flag False + recorder proof)."""
     grid, pipe = _pipe(scheme)

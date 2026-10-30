@@ -196,9 +196,15 @@ def _block(state):
                            if leaf is not None])
 
 
-def _global_dry_mass(state, mesh):
-    """sum(p_s * areaCell) on host arrays — the quantity fix_mass pins."""
-    ps = np.asarray(state.p_s.data)
+def _global_dry_mass(state, mesh, sigma_coord):
+    """sum(p_dry * areaCell) on host arrays — the quantity fix_mass pins.
+
+    The fixer conserves DRY air (water leaves through p_s with the rain),
+    so a moist run's total p_s legitimately drifts by the water budget.
+    """
+    from legoesm.core.conservation import dry_surface_pressure
+    ps = np.asarray(dry_surface_pressure(
+        state.p_s.data, state.tracers, sigma_coord))
     area = np.asarray(mesh.areaCell)
     return float(np.sum(ps * area))
 
@@ -335,6 +341,8 @@ def main() -> int:
             jax.distributed.initialize(
                 coordinator_address=args.coordinator,
                 num_processes=n_procs, process_id=proc_id)
+            from legoesm.parallel.early_init import pin_gloo_interface
+            pin_gloo_interface()
         else:
             # Environment-routed: SLURM/OMPI -> bare auto-detect; PALS/PMI
             # (Derecho mpiexec) -> mpi4py bootstrap. Real init failures
@@ -454,7 +462,7 @@ def main() -> int:
 
     mass_before = None
     if args.check_conservation:
-        mass_before = _global_dry_mass(s0_global, mesh)
+        mass_before = _global_dry_mass(s0_global, mesh, model.sigma_coord)
 
     if args.wide_halo:
         os.environ["LEGOESM_MPAS_WIDE_HALO"] = "1"
@@ -593,7 +601,7 @@ def main() -> int:
         prec = "float64" if jax.config.jax_enable_x64 else "float32"
         rank0 = jax.process_index() == 0
         if args.check_conservation:
-            mass_after = _global_dry_mass(final_global, mesh)
+            mass_after = _global_dry_mass(final_global, mesh, model.sigma_coord)
             tol = (args.mass_rtol if args.mass_rtol is not None
                    else MASS_RTOL_DEFAULTS[prec])
             rel = abs(mass_after - mass_before) / abs(mass_before)

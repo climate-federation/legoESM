@@ -26,7 +26,10 @@ def rss(stage, t0):
 
 def main(n, kt):
     from legoesm.atmosphere.dynamics.gcm.fv3_duo_dynamics import (
-        FV3DuoConfig, FV3DuoDynamicsModel)
+    FV3DuoConfig,
+    FV3DuoDynamicsModel,
+    ORACLE_DAMPING,
+)
     from legoesm.core.fv3_cgrid_phase_3d import state_3d_to_jax
     from legoesm.core.fv3_dynamics import p_var_hydrostatic
     from legoesm.core.fv3_native_dcmip16_ic import dcmip16_bc_six_face_state
@@ -38,7 +41,7 @@ def main(n, kt):
     rss("grid", t0)
     mesh = Mesh(np.array(jax.devices()[:6 * kt * kt]).reshape(6, kt, kt),
                 ("face", "tile_i", "tile_j"))
-    cfg = FV3DuoConfig(km=10, hydrostatic=True, n_split=3)
+    cfg = FV3DuoConfig(**ORACLE_DAMPING, km=10, hydrostatic=True, n_split=3)
     m = FV3DuoDynamicsModel(grid, cfg, step_spmd_mesh=mesh,
                             step_windows=(kt, 11))
     rss("window model built", t0)

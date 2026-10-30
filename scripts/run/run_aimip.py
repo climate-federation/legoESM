@@ -458,23 +458,6 @@ def _train_aimip_classical(
     )
 
     spatial_surface = bool(cfg.get("aimip_spatial_surface", False))
-    params = AIMIPClassicalParams.from_defaults(
-        spatial_surface=spatial_surface,
-        spatial_init_std=float(cfg.get("aimip_spatial_init_std", 0.0)),
-        spatial_seed=int(cfg.get("aimip_spatial_seed", 0)),
-    )
-    n_scalar = len(params.raw_values)
-    n_spatial = (
-        params.spatial_surface.n_trainable() if params.spatial_surface else 0
-    )
-    logger.info(
-        f"AIMIPClassicalParams: {n_scalar} trainable scheme knobs"
-        + (
-            f" + {n_spatial} spatial coefs across "
-            f"{len(params.spatial_surface.fields)} surface fields"
-            if spatial_surface else ""
-        )
-    )
 
     # Host-resident dataset (#1155): classical loads ALL pairs up front (no
     # chunking) — at T106 all-years the eager device build is ~130 GB, an
@@ -527,10 +510,10 @@ def _train_aimip_classical(
     # (scripts/run/run_aimip_classical_sweep_stage1.py).
     from legoesm.training.aimip_params import CLASSICAL_DEFAULT_SCHEMES as _DS
     conv_scheme = str(cfg.get("aimip_convection", _DS["convection"]))
-    from legoesm.training.aimip_spatial import grid_with_zm_land_fraction
-    grid = grid_with_zm_land_fraction(grid, conv_scheme, land_mask)
-    turb_scheme = str(cfg.get("aimip_turbulence", _DS["turbulence"]))
     gwd_scheme = str(cfg.get("aimip_gwd", _DS["gwd"]))
+    from legoesm.training.aimip_spatial import grid_with_land_fraction
+    grid = grid_with_land_fraction(grid, land_mask)
+    turb_scheme = str(cfg.get("aimip_turbulence", _DS["turbulence"]))
     # Was "none", which produced classical runs missing a whole family.
     micro_scheme = str(cfg.get("aimip_microphysics", _DS["microphysics"]))
     cloud_scheme = str(cfg.get("aimip_cloud", _DS["cloud"]))
@@ -556,6 +539,35 @@ def _train_aimip_classical(
     # activates the Monin-Obukhov stability functions + log-law local z0 so
     # the trained surface_most_* / z0h_z0_ratio leaves become live gradients.
     surface_bulk_scheme = str(cfg.get("aimip_surface_bulk_scheme", "constant"))
+    # NO INERT PARAMETERS (review F5): only the knobs the RESOLVED schemes
+    # read are trainable; the other families' knobs stay in the pytree as
+    # frozen (non-array) values, so the checkpoint leaf layout is unchanged.
+    from legoesm.training.aimip_params import (
+        aimip_classical_trainable_names, aimip_declared_knobs)
+    _trainable = aimip_classical_trainable_names(
+        convection=conv_scheme, turbulence=turb_scheme, gwd=gwd_scheme,
+        microphysics=micro_scheme, cloud=cloud_scheme, radiation=radiation,
+        surface_bulk_scheme=surface_bulk_scheme)
+    params = AIMIPClassicalParams.from_defaults(
+        spatial_surface=spatial_surface,
+        spatial_init_std=float(cfg.get("aimip_spatial_init_std", 0.0)),
+        spatial_seed=int(cfg.get("aimip_spatial_seed", 0)),
+        trainable=_trainable,
+        declared=aimip_declared_knobs(cfg),
+    )
+    n_spatial = (
+        params.spatial_surface.n_trainable() if params.spatial_surface else 0
+    )
+    logger.info(
+        f"AIMIPClassicalParams: {len(_trainable)} trainable scheme knobs "
+        f"({len(params.raw_values) - len(_trainable)} frozen: their schemes "
+        "are not selected)"
+        + (
+            f" + {n_spatial} spatial coefs across "
+            f"{len(params.spatial_surface.fields)} surface fields"
+            if spatial_surface else ""
+        )
+    )
     # OPT-IN: train the ACTIVE schemes' spec-declared parameters too.
     #
     # AIMIPClassicalParams maps its leaves through hand-written to_<scheme>_
@@ -599,7 +611,10 @@ def _train_aimip_classical(
             active_scheme_keys=_active,
             tier=(_scheme_tier if isinstance(_scheme_tier, str) else "extended"),
             exclude=tuple(sorted(
-                _owned | aimip_inactive_fields(cloud_scheme=cloud_scheme))),
+                _owned | aimip_inactive_fields(
+                    cloud_scheme=cloud_scheme, microphysics=micro_scheme,
+                    gwd=gwd_scheme, subgrid_orography=getattr(
+                        grid, "subgrid_topo_stddev", None) is not None))),
         )
         _n_scheme = sum(len(v) for v in _scheme_params.to_overrides().values())
         if _n_scheme == 0:
@@ -695,6 +710,7 @@ def _train_aimip_classical(
         start_epoch=start_epoch,
         host_staged=True,   # dataset loaded host-resident above (#1155)
         resume_from_dir=resume_from_dir,   # EMA resume needs the dir too
+        assert_no_inert_params=True,   # review F5: abort on a dead knob
     )
 
 
@@ -769,9 +785,8 @@ def _evaluate_variant(
     ic_states, target_carries, eval_ic_times = load_training_data(
         eval_cfg, grid, sigma, cache_dir, windows=eval_cfg.windows,
     )
-    from legoesm.training.aimip_spatial import grid_with_zm_land_fraction
-    grid = grid_with_zm_land_fraction(
-        grid, str(cfg.get("aimip_convection", "tiedtke")))
+    from legoesm.training.aimip_spatial import grid_with_land_fraction
+    grid = grid_with_land_fraction(grid)
     # NN variants trained WITH prescribed surface forcing must be
     # evaluated with the same inputs (a forced network scored unforced
     # would see out-of-distribution proxies and mis-rank the variants).

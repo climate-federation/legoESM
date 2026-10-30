@@ -320,3 +320,30 @@ def test_training_sample_indices_smoke_stops_after_one_window():
     idx = list(_training_sample_indices(cfg, {}, times, _SNAPS_PER_DAY, stride=1))
     assert {y for y, _, _ in idx} == {2015}
     assert len(idx) == _SNAPS_PER_DAY                   # only the first window
+
+
+def test_spectral_core_raw_two_leg_matches_raw():
+    """``raw_two_leg(self, ...)`` is the same forecast as ``raw`` (the FD
+    probe's self-check), and the wrapper itself runs: it once shipped calling
+    an unimported ``jax`` and crashed only on the GPU."""
+    from legoesm.training.scale_build import build_mode_components
+
+    yml = _yml()
+    model, grid, sigma, params, make_run_seg, loss_config, dt = (
+        build_mode_components(_cfg("physics"), yml))
+    ic = _synthetic_carry(grid, int(yml["nlev"]))
+    ncol = int(grid.n_lat) * int(grid.n_lon)
+    forcing = {
+        "T_sfc": jnp.full((ncol,), 300.0),
+        "sic": jnp.zeros((ncol,)),
+        "land_frac": jnp.zeros((int(grid.n_lat), int(grid.n_lon))),
+        "day_of_year": jnp.asarray(80.0),
+        "seconds_of_day": jnp.asarray(0.0),
+    }
+    seg = make_run_seg(params)
+    one = seg.raw(ic, 3, forcing)
+    two = seg.raw_two_leg(seg, ic, 3, forcing, 1)
+    for name in ("u", "v", "T", "p_s", "q_v"):
+        np.testing.assert_allclose(np.asarray(getattr(two, name)),
+                                   np.asarray(getattr(one, name)),
+                                   rtol=1e-10, atol=1e-10, err_msg=name)

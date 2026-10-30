@@ -1,0 +1,11 @@
+--- namelist_cfg
++++ namelist_cfg
+@@ -46,7 +46,7 @@
+ &namdom        !   time and space domain
+ !-----------------------------------------------------------------------
+    rn_Dt      =     1000.  !  time step for the dynamics (and tracer if nn_acc=0)
+-   ln_meshmask =  .false.  !  =T create a mesh file
++   ln_meshmask =  .true.   !  =T create a mesh file  (lane r1: geometry receipt)
+ /
+ !!======================================================================
+ !!            ***  Surface Boundary Condition namelists  ***          !!

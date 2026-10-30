@@ -135,6 +135,9 @@ def discover_hardened_dispatchers() -> tuple[set[tuple[str, str]], list[str]]:
 # justification) only when a dispatcher is intentionally renamed/removed.
 BASELINE_DISPATCHERS: frozenset[tuple[str, str]] = frozenset(
     {
+        # Richards post-solve psi update: retention curve -> shift (PDI/Lu) or
+        # exact reset; an unknown curve must raise, never pick one silently.
+        ("packages/land/legoesm/land/richards.py", "solve_richards"),
         # Distributed PCG preconditioner selection ("jacobi" | "poly"):
         # an unknown name must raise, never fall back to Jacobi.
         ("packages/ocean/legoesm/ocean/dynamics/barotropic_implicit_mpas.py", "barotropic_implicit_mpas"),
@@ -151,6 +154,9 @@ BASELINE_DISPATCHERS: frozenset[tuple[str, str]] = frozenset(
         # bare ``else`` silently fell back to the energy-conserving PV flux).
         ("packages/atmosphere/legoesm/atmosphere/dynamics/gcm/compressible_euler_mpas.py", "mpas_compressible_euler_slow_tendencies"),
         ("packages/atmosphere/legoesm/atmosphere/dynamics/gcm/primitive_eq_mpas.py", "mpas_hydrostatic_tendencies"),
+        # Vertical-filter form selection: a misspelled tracer name raises even
+        # with the filter off, never sits silently unused.
+        ("packages/atmosphere/legoesm/atmosphere/dynamics/gcm/primitive_eq_mpas.py", "validate_vert4_flux_form_tracers"),
         ("packages/atmosphere/legoesm/atmosphere/dynamics/gcm/shallow_water_mpas.py", "mpas_shallow_water_tendencies"),
         ("packages/atmosphere/legoesm/atmosphere/physics/clouds/cloud_fraction.py", "compute_cloud_properties"),
         ("packages/atmosphere/legoesm/atmosphere/physics/combined.py", "make_physics"),
@@ -162,6 +168,8 @@ BASELINE_DISPATCHERS: frozenset[tuple[str, str]] = frozenset(
         # physical Sundqvist-1978 autoconversion on the plume q_c_u); a typo must
         # raise, not silently run the wrong precip physics.
         ("packages/atmosphere/legoesm/atmosphere/physics/convection/bechtold.py", "bechtold_convection"),
+        # faithful IFS shallow closure: unknown no-supply mode must raise
+        ("packages/atmosphere/legoesm/atmosphere/physics/convection/_ifs_closure.py", "shallow_closure"),
         ("packages/atmosphere/legoesm/atmosphere/physics/convection/tiedtke.py", "tiedtke_convection"),
         # ZM land-fraction policy ("required" | "none"): a typo must raise, not
         # silently run every column with ocean coefficients.
@@ -189,6 +197,9 @@ BASELINE_DISPATCHERS: frozenset[tuple[str, str]] = frozenset(
         ("packages/atmosphere/legoesm/atmosphere/physics/turbulence/clubb.py", "diagnose_cloud_and_buoyancy"),
         ("packages/atmosphere/legoesm/atmosphere/forcing/scm/scm.py", "__init__"),
         ("packages/core/legoesm/core/bulk_flux.py", "validate_bulk_scheme"),
+        # Latent heat a surface scheme charged (thermo.charged_latent_heat):
+        # an unknown scheme must raise, never fall back to one family.
+        ("packages/core/legoesm/thermo.py", "charged_latent_heat"),
         # Stable-regime MOST stability-function dispatch (stability_scheme):
         # the validator + the shared stable-branch dispatch twins (grow-only
         # lock so a silent-Dyer fallback can't be reintroduced).  2026-08-02:
@@ -232,6 +243,8 @@ BASELINE_DISPATCHERS: frozenset[tuple[str, str]] = frozenset(
         ("packages/coupler/legoesm/driver/kernel_registry.py", "resolve_kernel"),
         ("packages/coupler/legoesm/driver/physics_pipeline.py", "_resolve_physics_parameterization"),
         ("packages/coupler/legoesm/driver/physics_pipeline.py", "build_physics_pipeline"),
+        # MPAS column lane sea_ice_albedo_scheme ("constant" | "maykut_untersteiner").
+        ("packages/coupler/legoesm/driver/model_driver.py", "_run_column"),
         ("packages/ice/legoesm/ice/sea_ice.py", "_bulk_flux_dispatch"),
         ("packages/ice/legoesm/ice/sea_ice.py", "step_sea_ice"),
         ("packages/ice/legoesm/ice/sea_ice.py", "_closing_rate_from_velocity"),
@@ -244,7 +257,14 @@ BASELINE_DISPATCHERS: frozenset[tuple[str, str]] = frozenset(
         # the code.
         ("packages/land/legoesm/land/surface_scheme/simple_seb.py",
          "compute_simple_seb_fluxes"),
-        ("packages/land/legoesm/land/slab_land.py", "step_land"),
+        # 642481601 moved step_land's body (surface_scheme + runoff_scheme
+        # raises) into step_land_with_diagnostics; step_land now only
+        # delegates to it, so the guards live there.
+        ("packages/land/legoesm/land/slab_land.py", "step_land_with_diagnostics"),
+        # The two-leaf canopy branch carries its own runoff_scheme raise.
+        ("packages/land/legoesm/land/slab_land.py", "_step_land_canopy"),
+        # Multilayer-land snowpack dispatch (bulk|layered), 2026-09-26.
+        ("packages/land/legoesm/land/multilayer_land.py", "_step_multilayer_land_impl"),
         # Two-leaf canopy stomatal-model dispatch (ball_berry|medlyn): hardened
         # 2026-07-08 during the stomata consolidation — a bare ``else`` used to
         # silently run Ball-Berry on any typo. Guarded at BOTH ends: a fail-early
@@ -265,6 +285,8 @@ BASELINE_DISPATCHERS: frozenset[tuple[str, str]] = frozenset(
         # above covers both canopy configs) and the applier itself.
         ("packages/land/legoesm/land/canopy/clm_ml_interface.py",
          "_apply_turbulence_scheme"),
+        # GenBE horizontal_scheme ("explicit" | "implicit_matern", #1819).
+        ("packages/ml/legoesm/da/gen_be.py", "__init__"),
         ("packages/ml/legoesm/ml/physics/model.py", "_validate_microphysics_scheme"),
         ("packages/ml/legoesm/ml/training.py", "create_optimizer"),
         ("packages/ml/legoesm/training/aimip_params.py", "make_aimip_classical_spectral_physics"),

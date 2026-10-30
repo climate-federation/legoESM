@@ -36,14 +36,14 @@ FEDERATION_MEMBERS: dict[str, tuple[str, ...]] = {
 #:     core, not from the meta package above it;
 #:   * ``tuning`` ships with legoesm-ml — its only importer is ml/training, and it
 #:     imports forcing/driver, so it cannot live in the meta layer above ml;
-#:   * ``cli``/``config``/``dycore_factory``/``supported_matrix``/``taxonomy`` are the
+#:   * ``cli``/``config``/``dycore_factory``/``supported_matrix`` are the
 #:     meta orchestration layer (the root ``legoesm`` member) — nothing below them
 #:     imports them, and they pull the whole stack.
 FEDERATION_LOOSE_MODULES: dict[str, tuple[str, ...]] = {
     "legoesm-core": ("constants", "thermo", "registry", "surface_albedo"),
     "legoesm-ml": ("tuning",),
     "legoesm": ("cli", "config", "dycore_factory", "experiment_registry",
-                "scaling_preflight", "supported_matrix", "taxonomy"),
+                "scaling_preflight", "supported_matrix"),
 }
 
 #: The four mutually-independent Earth-system components (import-linter contract #2).

@@ -297,7 +297,7 @@ CANONICAL_FORMULAS = {
         ),
         # 42 inline (p/p0)^κ sites across 29 modules (iter 2026-06-09).
         "budget": {
-            "packages/atmosphere/legoesm/atmosphere/dynamics/gcm/_fv3_lin_pgf.py": 2,
+            "packages/atmosphere/legoesm/atmosphere/_future/_fv3_lin_pgf.py": 2,
             "packages/atmosphere/legoesm/atmosphere/dynamics/les/compressible_euler_plane.py": 1,
             "packages/atmosphere/legoesm/atmosphere/forcing/idealized/held_suarez.py": 1,
             "packages/atmosphere/legoesm/atmosphere/idealized/rcemip_initial_conditions.py": 1,

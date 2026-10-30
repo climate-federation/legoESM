@@ -53,6 +53,7 @@ def test_driver_factory_creates_plane_dycore_from_experiment_config():
     config = ExperimentConfig(
         grid=GridConfig(grid_type="plane", resolution=8, nlev=6),
         dycore=DycoreConfig(
+            energy_fixer=False,  # unwired lane opts out (F15)
             model_type="nonhydrostatic", discretization="plane", dt=1.0,
         ),
     )
@@ -91,6 +92,7 @@ def test_driver_dispatch_rejects_unsupported_plane_combination(
     config = ExperimentConfig(
         grid=GridConfig(grid_type="plane", resolution=8, nlev=6),
         dycore=DycoreConfig(
+            energy_fixer=False,  # unwired lane opts out (F15)
             model_type=model_type, discretization=discretization, dt=1.0,
         ),
     )

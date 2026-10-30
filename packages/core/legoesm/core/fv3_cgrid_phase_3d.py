@@ -492,9 +492,10 @@ def _csw_phase_3d_batched(ctx, states, dt2, km, *, names, nord,
     """The vmap-over-faces arm of :func:`csw_phase_3d` (C2a).
 
     Entry gates already ran in the caller.  The FACE loop becomes one
-    ``jax.vmap`` per level over the batched gridstruct view; the LEVEL
-    loop stays Python, exactly as on the loop path (the oracle's own
-    ``do k=1,npz``, dyn_core.F90:488).  ``bounded_domain`` is passed as
+    ``jax.vmap`` over the batched gridstruct view, nested inside a
+    second ``jax.vmap`` over the LEVEL axis (the oracle's own
+    ``do k=1,npz``, dyn_core.F90:488, is a batch axis here: the bodies
+    are independent and identical, R1a).  ``bounded_domain`` is passed as
     ONE static value: it is uniform across faces by
     ``build_batched_gs``'s common-mode gate, and ``c_sw`` branches on it
     in Python, so it could not be batched anyway.
@@ -514,33 +515,31 @@ def _csw_phase_3d_batched(ctx, states, dt2, km, *, names, nord,
                     bounded_domain=bounded)
 
     vf = jax.vmap(one_face, in_axes=(0, 0, 0, 0, 0, 0))
-    per_level = {name: [] for name in names}
-    for k in range(km):
-        got = vf(states["delp"][:, :, :, k], states["pt"][:, :, :, k],
-                 states["w"][:, :, :, k], states["u"][:, :, :, k],
-                 states["v"][:, :, :, k], bview["gs"])
-        for name in names:
-            if name not in got:
-                raise KeyError(
-                    f"c_sw returned no {name!r}; keys are "
-                    f"{sorted(got)}. The 3-D assembler must not "
-                    f"silently drop a stage output.")
-            per_level[name].append(got[name])
+    # LEVELS: one outer vmap over the trailing level axis (2026-09-29,
+    # the km=32 compile): the per-level bodies are independent and
+    # identical (R1a; nothing but data varies with k), so the former
+    # Python level loop -- which traced the c_sw body km times -- is a
+    # batch axis.  Level axis 3 in, 3 out: the same (6, i, j, km) layout
+    # the loop path and the former jnp.stack(axis=3) produced.
+    vfk = jax.vmap(vf, in_axes=(3, 3, 3, 3, 3, None), out_axes=3)
+    got = vfk(states["delp"], states["pt"], states["w"], states["u"],
+              states["v"], bview["gs"])
     out = {}
     for name in names:
+        if name not in got:
+            raise KeyError(
+                f"c_sw returned no {name!r}; keys are "
+                f"{sorted(got)}. The 3-D assembler must not "
+                f"silently drop a stage output.")
         want = (batch_size(ctx),) + field_shape(CSW_OUT_LIKE[name], n, ng,
-                                               km)[:2]
-        for k, arr in enumerate(per_level[name]):
-            if tuple(arr.shape) != want:
-                raise ValueError(
-                    f"csw_phase_3d[batched]: level {k} output {name!r} "
-                    f"has shape {arr.shape}, the face-batched container "
-                    f"expects {want}. A stagger or window mismatch here "
-                    f"would broadcast, not raise.")
-        # Level axis at position 3 == the loop path's per-face axis 2
-        # with the face axis prepended, so both arms return the SAME
-        # (6, i, j, km) layout.
-        out[name] = jnp.stack(per_level[name], axis=3)
+                                               km)[:2] + (km,)
+        if tuple(got[name].shape) != want:
+            raise ValueError(
+                f"csw_phase_3d[batched]: output {name!r} has shape "
+                f"{got[name].shape}, the level-batched container expects "
+                f"{want}. A stagger or window mismatch here would "
+                f"broadcast, not raise.")
+        out[name] = got[name]
     return out
 
 

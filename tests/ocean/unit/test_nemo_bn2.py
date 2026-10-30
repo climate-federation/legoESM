@@ -468,6 +468,21 @@ def test_nemo_reciprocal_r3t_is_selectable_jittable_and_differentiable():
         nemo_r3t_stretch(_Z(), eta, H, evaluation="typo")
 
 
+def test_r3t_unknown_selector_raises_under_linear_free_surface():
+    """The selector is validated before the linear-free-surface shortcut."""
+
+    class _Linear:
+        linear_free_surface = True
+
+    eta = jnp.asarray([0.25, -0.5])
+    H = jnp.asarray([500.0, 500.0])
+    for evaluation in ("quotient", "nemo_reciprocal"):
+        ones = nemo_r3t_stretch(_Linear(), eta, H, evaluation=evaluation)
+        assert np.array_equal(np.asarray(ones), np.ones(2))
+    with pytest.raises(ValueError, match="unknown r3t evaluation"):
+        nemo_r3t_stretch(_Linear(), eta, H, evaluation="typo")
+
+
 def test_native_e3w_coordinate_validation_wrappers_and_ad():
     """Raw mesh fields survive both wrappers; JIT and T/S/eta gradients work."""
     import jax

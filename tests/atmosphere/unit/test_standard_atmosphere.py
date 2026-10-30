@@ -232,7 +232,7 @@ class TestDriverStandardIC:
         from legoesm.driver.model_driver import ModelDriver
         cfg = ExperimentConfig(
             grid=GridConfig(grid_type="latlon", resolution=24, nlev=30),
-            dycore=DycoreConfig(model_type="hydrostatic",
+            dycore=DycoreConfig(energy_fixer=False, model_type="hydrostatic",
                                 discretization="finite_volume", dt=300.0),
             dataset="analytical", radiation="gray", ic=ic,
             topography=topography,
@@ -346,7 +346,7 @@ class TestDriverStandardIC:
         from legoesm.driver.model_driver import ModelDriver
         cfg = ExperimentConfig(
             grid=GridConfig(grid_type="cubed_sphere", resolution=8, nlev=20),
-            dycore=DycoreConfig(model_type="hydrostatic",
+            dycore=DycoreConfig(energy_fixer=False, model_type="hydrostatic",
                                 discretization="cdgrid", dt=300.0),
             dataset="analytical", radiation="gray", ic=ic,
         )
@@ -388,7 +388,7 @@ class TestDriverStandardIC:
         )
         cfg = ExperimentConfig(
             grid=GridConfig(grid_type="cubed_sphere", resolution=8, nlev=20),
-            dycore=DycoreConfig(model_type="hydrostatic",
+            dycore=DycoreConfig(energy_fixer=False, model_type="hydrostatic",
                                 discretization="cdgrid", dt=300.0),
             ic="standard",
         )
@@ -403,7 +403,7 @@ class TestDriverStandardIC:
         )
         cfg = ExperimentConfig(
             grid=GridConfig(grid_type="gaussian", resolution=21, nlev=10),
-            dycore=DycoreConfig(model_type="hydrostatic",
+            dycore=DycoreConfig(energy_fixer=False, model_type="hydrostatic",
                                 discretization="spectral", dt=600.0),
             ic="standard",
         )
@@ -416,7 +416,7 @@ class TestDriverStandardIC:
         )
         cfg = ExperimentConfig(
             grid=GridConfig(grid_type="latlon", resolution=16, nlev=10),
-            dycore=DycoreConfig(model_type="hydrostatic",
+            dycore=DycoreConfig(energy_fixer=False, model_type="hydrostatic",
                                 discretization="finite_volume", dt=300.0),
             ic="standard",
         )
@@ -434,7 +434,7 @@ class TestDriverStandardIC:
         )
         cfg = ExperimentConfig(
             grid=GridConfig(grid_type="cubed_sphere", resolution=16, nlev=10),
-            dycore=DycoreConfig(model_type="hydrostatic",
+            dycore=DycoreConfig(energy_fixer=False, model_type="hydrostatic",
                                 discretization="cdgrid", dt=300.0),
             ic="standard",
         )
@@ -447,7 +447,7 @@ class TestDriverStandardIC:
         for bad in (30.0, 400.0):
             cfg = ExperimentConfig(
                 grid=GridConfig(grid_type="latlon", resolution=16, nlev=10),
-                dycore=DycoreConfig(model_type="hydrostatic",
+                dycore=DycoreConfig(energy_fixer=False, model_type="hydrostatic",
                                     discretization="finite_volume", dt=300.0),
                 ic="standard", T_init=bad,
             )

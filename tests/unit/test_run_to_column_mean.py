@@ -266,7 +266,7 @@ def _tiny_coupled(days, diag_days, n_lat=8, nlev=5):
 
     atm_config = ExperimentConfig(
         grid=GridConfig(grid_type="latlon", resolution=n_lat, nlev=nlev),
-        dycore=DycoreConfig(dt=600.0, model_type="hydrostatic",
+        dycore=DycoreConfig(energy_fixer=False, dt=600.0, model_type="hydrostatic",
                             discretization="finite_volume"),
         output=OutputConfig(diag_days=diag_days),
         radiation="gray", days=days,

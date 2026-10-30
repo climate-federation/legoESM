@@ -36,6 +36,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from legoesm.core.field import Field
+from legoesm.core.smooth import smoothstep_quintic
 from legoesm import constants
 from legoesm.ocean.constants_config import (
     NEMO_CONSTANTS_CONFIG as _NEMO_CONSTANTS,
@@ -723,6 +724,10 @@ class DINOConfig:
     # traldf_iso zA11/zA22 face thickness. The generic default retains the
     # historical T-point Jacobian; the two NEMO cards consume live QCO faces.
     gm_redi_flux_face_thickness_evaluation: str = "tpoint_jacobian"
+    # traldf_iso final T-point divisor. The generic default preserves the
+    # reference/Jacobian thickness; the two NEMO cards select live e3t(Kmm)
+    # independently of their horizontal face-thickness selection.
+    gm_redi_divisor_thickness_evaluation: str = "reference_jacobian"
     # Static Redi coefficient arithmetic. Generic cards preserve the grouped
     # equatorial-kappa*cos(lat) path; the two NEMO cards use ldf_c2d literally.
     gm_redi_horizontal_evaluation: str = "cosine_scaled"
@@ -864,7 +869,7 @@ class DINOConfig:
     rigid_lid_dt_mom_ratio: float = 9.0
     # Barotropic averaging filter (explicit_substep only): "cosine"
     # (legacy) | "power_law" | "box" | "nemo_boxcar_centred" (dynspg_ts
-    # ln_bt_fw=F + nn_bt_flt=1 — the DINO namelist selection).
+    # ln_bt_fw=F + nn_bt_flt=2 — the DINO namelist selection).
     barotropic_time_filter: str = "cosine"
     # NEMO namdyn_spg rn_bt_alpha.  The NEMO DINO cards state the deck's 0.0
     # explicitly even though nn_bt_flt=2 takes the hard-coded coefficient arm.
@@ -1427,6 +1432,7 @@ DINO_RECIPES: dict[str, dict] = {
         "gm_redi_slope_metric_evaluation": "nemo_reciprocal",
         "gm_redi_slope_face_thickness_evaluation": "nemo_qco_live",
         "gm_redi_flux_face_thickness_evaluation": "nemo_qco_live",
+        "gm_redi_divisor_thickness_evaluation": "nemo_qco_live",
         "gm_redi_horizontal_evaluation": "nemo_metric_literal",
         "gm_redi_vertical_skew_evaluation": "nemo_literal",
         "gm_redi_a33_evaluation": "nemo_literal",
@@ -2084,8 +2090,7 @@ def _smooth_step(x, a: float, b: float):
     Paper eq A2; matches Zenodo `smooth_step` (zgr_lib lines 823-825).
     Returns 0 for x ≤ a, 1 for x ≥ b, smooth in between.
     """
-    t = jnp.clip((x - a) / (b - a), 0.0, 1.0)
-    return 6.0 * t**5 - 15.0 * t**4 + 10.0 * t**3
+    return smoothstep_quintic((x - a) / (b - a))
 
 
 def _exp_bathy(x, x_left: float, x_right: float, width: float,
@@ -3673,6 +3678,12 @@ def dino_lat_lon_model_config(
             "unknown DINOConfig.gm_redi_flux_face_thickness_evaluation "
             f"{cfg.gm_redi_flux_face_thickness_evaluation!r}; expected "
             "'tpoint_jacobian' or 'nemo_qco_live'")
+    if cfg.gm_redi_divisor_thickness_evaluation not in (
+            "reference_jacobian", "nemo_qco_live"):
+        raise ValueError(
+            "unknown DINOConfig.gm_redi_divisor_thickness_evaluation "
+            f"{cfg.gm_redi_divisor_thickness_evaluation!r}; expected "
+            "'reference_jacobian' or 'nemo_qco_live'")
     if cfg.gm_redi_horizontal_evaluation not in (
             "cosine_scaled", "nemo_metric_literal"):
         raise ValueError(
@@ -3792,6 +3803,8 @@ def dino_lat_lon_model_config(
                 cfg.gm_redi_slope_face_thickness_evaluation),
             redi_flux_face_thickness_evaluation=(
                 cfg.gm_redi_flux_face_thickness_evaluation),
+            redi_divisor_thickness_evaluation=(
+                cfg.gm_redi_divisor_thickness_evaluation),
             kappa_redi_horizontal_evaluation=(
                 cfg.gm_redi_horizontal_evaluation),
             redi_vertical_skew_evaluation=(
@@ -3842,6 +3855,8 @@ def dino_lat_lon_model_config(
                 cfg.gm_redi_slope_face_thickness_evaluation),
             redi_flux_face_thickness_evaluation=(
                 cfg.gm_redi_flux_face_thickness_evaluation),
+            redi_divisor_thickness_evaluation=(
+                cfg.gm_redi_divisor_thickness_evaluation),
             redi_vertical_skew_evaluation=(
                 cfg.gm_redi_vertical_skew_evaluation),
             redi_a33_evaluation=cfg.gm_redi_a33_evaluation,
@@ -3907,6 +3922,8 @@ def dino_lat_lon_model_config(
                         cfg.gm_redi_slope_face_thickness_evaluation),
                     redi_flux_face_thickness_evaluation=(
                         cfg.gm_redi_flux_face_thickness_evaluation),
+                    redi_divisor_thickness_evaluation=(
+                        cfg.gm_redi_divisor_thickness_evaluation),
                     kappa_redi_horizontal_evaluation=(
                         cfg.gm_redi_horizontal_evaluation),
                     redi_vertical_skew_evaluation=(

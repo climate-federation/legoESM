@@ -22,12 +22,20 @@ def _coupled_driver(insolation_start_doy):
 
     atm = ExperimentConfig(
         grid=GridConfig(grid_type="latlon", resolution=4, nlev=4),
-        dycore=DycoreConfig(dt=600.0, model_type="hydrostatic",
+        dycore=DycoreConfig(energy_fixer=False, dt=600.0, model_type="hydrostatic",
                             discretization="latlon_cgrid"),
         radiation="gray", convection="none", turbulence="none", days=1,
         insolation_start_doy=insolation_start_doy)
     drv = CoupledESMDriver(atm, CoupledConfig())     # slab ocean (default)
     drv.setup()
+    return _as_after_one_segment(drv)
+
+
+def _as_after_one_segment(drv):
+    """Stash the surface fields an advanced atmosphere segment leaves in ``_carry_aux``:
+    the coupler refuses to build surface forcing before one exists."""
+    z = jnp.zeros_like(drv._atm.state.p_s.data)
+    drv._atm._carry_aux = {"held_sw_net_sfc": z, "held_lw_net_sfc": z, "seg_precip": z}
     return drv
 
 
@@ -75,12 +83,12 @@ def _earth_system_driver(insolation_start_doy, tmp_path):
 
     cfg = ExperimentConfig(
         grid=GridConfig(resolution=8, nlev=4),
-        dycore=DycoreConfig(dt=600.0),
+        dycore=DycoreConfig(energy_fixer=False, dt=600.0),
         output=OutputConfig(diag_days=1), days=1, dataset="analytical", precision="fp64",
         insolation_start_doy=insolation_start_doy)
     drv = EarthSystemDriver(cfg, output_dir=tmp_path)
     drv.setup()
-    return drv
+    return _as_after_one_segment(drv)
 
 
 def test_earth_system_driver_insolation_uses_the_atm_seasonal_offset(tmp_path):
@@ -93,3 +101,17 @@ def test_earth_system_driver_insolation_uses_the_atm_seasonal_offset(tmp_path):
                                rtol=1e-6, atol=1e-6)
     assert not np.allclose(np.asarray(cos_zen), np.asarray(_cos_zen_ref(lat, 1.0)),
                            rtol=1e-3, atol=1e-3)
+
+
+def test_coupled_land_co2_is_the_radiation_co2(tmp_path):
+    """Both coupled drivers hand the land canopy the CO2 radiation uses (review F30),
+    not the fixed config value; without a GHG override they fall back to it."""
+    for drv in (_coupled_driver(None), _earth_system_driver(None, tmp_path)):
+        fixed = float(drv._atm.config.co2_ppmv)
+        assert drv._atm.radiation_ghg_vmr(0.0) is None
+        np.testing.assert_allclose(
+            np.asarray(drv._build_atm_forcing(0.0).co2_ppmv), fixed)
+        drv._atm.radiation_ghg_vmr = lambda day: {"co2": jnp.asarray(337.0e-6)}
+        np.testing.assert_allclose(
+            np.asarray(drv._build_atm_forcing(0.0).co2_ppmv), 337.0, rtol=1e-12)
+        assert fixed != 337.0

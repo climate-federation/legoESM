@@ -190,9 +190,9 @@ Review: `codex review: operator`.
    and before `ice_thd_do` (`:227`), inside the cells gathered at `:181`
    (`IF ( a_i(ji,jj,jl) > epsi10 ) THEN`); the column step does the same at
    `packages/ice/legoesm/ice/bitz_lipscomb.py:2202` through `:2330`, which applies the
-   gather at `:2369`. `step_sea_ice` passes the config (`packages/ice/legoesm/ice/sea_ice.py:525`;
+   gather at `:2369`. `step_sea_ice` passes the config (`packages/ice/legoesm/ice/sea_ice.py:526`;
    keyword at `packages/ice/legoesm/ice/bitz_lipscomb.py:2063`). On needs the namelist values
-   (`packages/ice/legoesm/ice/config.py:309`, class `:603-607`, no defaults) and `sst_m`
+   (`packages/ice/legoesm/ice/config.py:309`, class `:607-611`, no defaults) and `sst_m`
    (`packages/ice/legoesm/ice/bitz_lipscomb.py:42`); the identity check keeps every other field
    fixed (`packages/ice/legoesm/ice/config.py:316`). The C1D deck still disables it
    (`scripts/validate/ocean_fidelity/testcases/configs/c1d_omip_l3_namelist_ice_cfg:91`).

@@ -1,0 +1,831 @@
+{
+  "schema": "swg-dg-compiled-namelist-reads-v1",
+  "provenance": {
+    "derived_on": "2026-10-14",
+    "derived_from": "preprocessed sources tests/SWG_DG/BLD/ppsrc/nemo of the reference SWG_DG build (NEMO 5.0.2, revision dcc7fb8c1779fa8409e41e4ce3ab7d45b9ceb796, built by build_swg_dg.sh; CPP keys key_qco key_vco_3d key_RK3)",
+    "command": "nemo_testcase_l1_swg_namelist_inventory.py --source-root <NEMO>/tests/SWG_DG/BLD/ppsrc/nemo --json <file>",
+    "rule": "every READ from a namelist buffer (numnam*) in a routine reachable from nemo_gcm through any CALL or function reference, whatever IF or SELECT guards it"
+  },
+  "entry_routine": "nemo_gcm",
+  "reachable_routines": 606,
+  "groups": {
+    "nam_vvl": {
+      "fields": [
+        "ln_vvl_zstar",
+        "ln_vvl_ztilde",
+        "ln_vvl_layer",
+        "ln_vvl_ztilde_as_zstar",
+        "ln_vvl_zstar_at_eqtor",
+        "rn_ahe3",
+        "rn_rst_e3t",
+        "rn_lf_cutoff",
+        "rn_zdef_max",
+        "ln_vvl_dbg",
+        "nn_vvl_interp"
+      ],
+      "read_sites": [
+        [
+          "domqco.f90",
+          "qco_ctl",
+          309
+        ],
+        [
+          "domqco.f90",
+          "qco_ctl",
+          310
+        ]
+      ],
+      "echo_written": true
+    },
+    "nambdy": {
+      "fields": [
+        "ln_bdy",
+        "nb_bdy",
+        "ln_coords_file",
+        "cn_coords_file",
+        "ln_mask_file",
+        "cn_mask_file",
+        "cn_dyn2d",
+        "nn_dyn2d_dta",
+        "cn_dyn3d",
+        "nn_dyn3d_dta",
+        "cn_tra",
+        "nn_tra_dta",
+        "ln_tra_dmp",
+        "ln_dyn3d_dmp",
+        "rn_time_dmp",
+        "rn_time_dmp_out",
+        "cn_ice",
+        "nn_ice_dta",
+        "ln_vol",
+        "nn_volctl",
+        "nn_rimwidth"
+      ],
+      "read_sites": [
+        [
+          "dommsk.f90",
+          "dom_msk",
+          193
+        ],
+        [
+          "dommsk.f90",
+          "dom_msk",
+          194
+        ],
+        [
+          "mppini.f90",
+          "mpp_init",
+          201
+        ],
+        [
+          "mppini.f90",
+          "mpp_init",
+          202
+        ]
+      ],
+      "echo_written": false
+    },
+    "namc1d": {
+      "fields": [
+        "rn_lat1d",
+        "rn_lon1d",
+        "ln_dyndmp",
+        "ln_uvd_init",
+        "ln_uvd_dyndmp",
+        "cn_dir",
+        "sn_ucur",
+        "sn_vcur"
+      ],
+      "read_sites": [
+        [
+          "c1d.f90",
+          "c1d_init",
+          154
+        ],
+        [
+          "c1d.f90",
+          "c1d_init",
+          155
+        ]
+      ],
+      "echo_written": true
+    },
+    "namcfg": {
+      "fields": [
+        "ln_read_cfg",
+        "cn_domcfg",
+        "ln_closea",
+        "ln_write_cfg",
+        "cn_domcfg_out"
+      ],
+      "read_sites": [
+        [
+          "nemogcm.f90",
+          "nemo_init",
+          289
+        ],
+        [
+          "nemogcm.f90",
+          "nemo_init",
+          290
+        ]
+      ],
+      "echo_written": true
+    },
+    "namclo": {
+      "fields": [
+        "ln_maskcs",
+        "ln_mask_csundef",
+        "ln_clo_rnf"
+      ],
+      "read_sites": [
+        [
+          "closea.f90",
+          "dom_clo",
+          140
+        ],
+        [
+          "closea.f90",
+          "dom_clo",
+          141
+        ]
+      ],
+      "echo_written": true
+    },
+    "namctl": {
+      "fields": [
+        "sn_cfctl",
+        "ln_timing",
+        "ln_diacfl",
+        "nn_isplt",
+        "nn_jsplt",
+        "nn_ictls",
+        "nn_npfchk",
+        "nn_ictle",
+        "nn_jctls",
+        "nn_jctle"
+      ],
+      "read_sites": [
+        [
+          "nemogcm.f90",
+          "nemo_init",
+          233
+        ],
+        [
+          "nemogcm.f90",
+          "nemo_init",
+          234
+        ]
+      ],
+      "echo_written": true
+    },
+    "namdom": {
+      "fields": [
+        "rn_dt",
+        "rn_atfp",
+        "ln_c1d",
+        "ln_meshmask",
+        "ln_shuman"
+      ],
+      "read_sites": [
+        [
+          "domain.f90",
+          "dom_nam",
+          302
+        ],
+        [
+          "domain.f90",
+          "dom_nam",
+          303
+        ]
+      ],
+      "echo_written": true
+    },
+    "namdyn_adv": {
+      "fields": [
+        "ln_dynadv_off",
+        "ln_dynadv_vec",
+        "nn_dynkeg",
+        "ln_dynadv_cen2",
+        "ln_dynadv_up3"
+      ],
+      "read_sites": [
+        [
+          "dynadv.f90",
+          "dyn_adv_init",
+          171
+        ],
+        [
+          "dynadv.f90",
+          "dyn_adv_init",
+          172
+        ]
+      ],
+      "echo_written": true
+    },
+    "namdyn_ldf": {
+      "fields": [
+        "ln_dynldf_off",
+        "nn_dynldf_typ",
+        "ln_dynldf_lap",
+        "ln_dynldf_blp",
+        "ln_dynldf_lev",
+        "ln_dynldf_hor",
+        "ln_dynldf_iso",
+        "nn_ahm_ijk_t",
+        "rn_uv",
+        "rn_lv",
+        "rn_ahm_b",
+        "rn_csmc",
+        "rn_minfac",
+        "rn_maxfac"
+      ],
+      "read_sites": [
+        [
+          "ldfdyn.f90",
+          "ldf_dyn_init",
+          183
+        ],
+        [
+          "ldfdyn.f90",
+          "ldf_dyn_init",
+          184
+        ]
+      ],
+      "echo_written": true
+    },
+    "namdyn_vor": {
+      "fields": [
+        "ln_dynvor_ens",
+        "ln_dynvor_ene",
+        "ln_dynvor_ent",
+        "ln_dynvor_een",
+        "nn_e3f_typ",
+        "ln_dynvor_mix",
+        "ln_dynvor_msk"
+      ],
+      "read_sites": [
+        [
+          "dynvor.f90",
+          "dyn_vor_init",
+          823
+        ],
+        [
+          "dynvor.f90",
+          "dyn_vor_init",
+          824
+        ]
+      ],
+      "echo_written": true
+    },
+    "namlbc": {
+      "fields": [
+        "rn_shlat",
+        "ln_vorlat"
+      ],
+      "read_sites": [
+        [
+          "dommsk.f90",
+          "dom_msk",
+          158
+        ],
+        [
+          "dommsk.f90",
+          "dom_msk",
+          159
+        ]
+      ],
+      "echo_written": true
+    },
+    "nammpp": {
+      "fields": [
+        "jpni",
+        "jpnj",
+        "nn_hls",
+        "ln_nnogather",
+        "ln_mppdelay",
+        "ln_listonly",
+        "nn_comm"
+      ],
+      "read_sites": [
+        [
+          "mppini.f90",
+          "mpp_init",
+          168
+        ],
+        [
+          "mppini.f90",
+          "mpp_init",
+          169
+        ]
+      ],
+      "echo_written": true
+    },
+    "namnc4": {
+      "fields": [
+        "nn_nchunks_i",
+        "nn_nchunks_j",
+        "nn_nchunks_k",
+        "ln_nc4zip"
+      ],
+      "read_sites": [
+        [
+          "domain.f90",
+          "dom_nam",
+          478
+        ],
+        [
+          "domain.f90",
+          "dom_nam",
+          479
+        ]
+      ],
+      "echo_written": true
+    },
+    "namrun": {
+      "fields": [
+        "cn_ocerst_indir",
+        "cn_ocerst_outdir",
+        "nn_stocklist",
+        "ln_rst_list",
+        "nn_no",
+        "cn_exp",
+        "cn_ocerst_in",
+        "cn_ocerst_out",
+        "ln_rstart",
+        "nn_rstctl",
+        "nn_it000",
+        "nn_itend",
+        "nn_date0",
+        "nn_time0",
+        "nn_leapy",
+        "nn_istate",
+        "nn_stock",
+        "nn_write",
+        "ln_mskland",
+        "ln_clobber",
+        "nn_chunksz",
+        "ln_1st_euler",
+        "ln_cfmeta",
+        "ln_xios_read",
+        "nn_wxios",
+        "ln_top"
+      ],
+      "read_sites": [
+        [
+          "domain.f90",
+          "dom_nam",
+          332
+        ],
+        [
+          "domain.f90",
+          "dom_nam",
+          333
+        ]
+      ],
+      "echo_written": true
+    },
+    "namsbc": {
+      "fields": [
+        "nn_fsbc",
+        "ln_usr",
+        "ln_flx",
+        "ln_blk",
+        "ln_abl",
+        "ln_cpl",
+        "ln_mixcpl",
+        "nn_components",
+        "nn_ice",
+        "ln_ice_embd",
+        "ln_traqsr",
+        "ln_dm2dc",
+        "ln_rnf",
+        "nn_fwb",
+        "ln_ssr",
+        "ln_apr_dyn",
+        "ln_wave",
+        "nn_lsm"
+      ],
+      "read_sites": [
+        [
+          "sbcmod.f90",
+          "sbc_init",
+          173
+        ],
+        [
+          "sbcmod.f90",
+          "sbc_init",
+          174
+        ]
+      ],
+      "echo_written": true
+    },
+    "namsbc_apr": {
+      "fields": [
+        "cn_dir",
+        "sn_apr",
+        "nn_ref_apr",
+        "rn_pref",
+        "ln_apr_obc",
+        "sn_apref"
+      ],
+      "read_sites": [
+        [
+          "sbcapr.f90",
+          "sbc_apr_init",
+          129
+        ],
+        [
+          "sbcapr.f90",
+          "sbc_apr_init",
+          130
+        ]
+      ],
+      "echo_written": true
+    },
+    "namsbc_blk": {
+      "fields": [
+        "ln_ncar",
+        "ln_coare_3p0",
+        "ln_coare_3p6",
+        "ln_ecmwf",
+        "ln_andreas",
+        "ln_mfs",
+        "rn_zqt",
+        "rn_zu",
+        "nn_iter_algo",
+        "ln_skin_cs",
+        "ln_skin_wl",
+        "rn_pfac",
+        "rn_efac",
+        "ln_crt_fbk",
+        "rn_stau_a",
+        "rn_stau_b",
+        "ln_humi_sph",
+        "ln_humi_dpt",
+        "ln_humi_rlh",
+        "ln_tair_pot",
+        "ln_prec_met",
+        "ln_cx_ice_cst",
+        "rn_cd_ia",
+        "rn_ce_ia",
+        "rn_ch_ia",
+        "ln_cx_ice_frm",
+        "nn_frm",
+        "rn_cs_io",
+        "rn_cs_ia",
+        "rn_cr_ia",
+        "rn_cr_io",
+        "rn_cf_ia",
+        "rn_cf_io",
+        "ln_cx_ice_an05",
+        "ln_cx_ice_lu12",
+        "ln_cx_ice_lg15",
+        "cn_dir",
+        "sn_wndi",
+        "sn_wndj",
+        "sn_qsr",
+        "sn_qlw",
+        "sn_tair",
+        "sn_humi",
+        "sn_prec",
+        "sn_snow",
+        "sn_slp",
+        "sn_uoatm",
+        "sn_voatm",
+        "sn_cc",
+        "sn_hpgi",
+        "sn_hpgj"
+      ],
+      "read_sites": [
+        [
+          "sbcblk.f90",
+          "sbc_blk_init",
+          284
+        ],
+        [
+          "sbcblk.f90",
+          "sbc_blk_init",
+          285
+        ]
+      ],
+      "echo_written": true
+    },
+    "namsbc_cpl": {
+      "fields": [
+        "nn_cplmodel",
+        "ln_usecplmask",
+        "nn_cats_cpl",
+        "ln_scale_ice_flux",
+        "sn_snd_temp",
+        "sn_snd_alb",
+        "sn_snd_thick",
+        "sn_snd_crt",
+        "sn_snd_co2",
+        "sn_snd_ttilyr",
+        "sn_snd_cond",
+        "sn_snd_mpnd",
+        "sn_snd_sstfrz",
+        "sn_snd_thick1",
+        "sn_snd_ifrac",
+        "sn_snd_crtw",
+        "sn_snd_wlev",
+        "sn_rcv_hsig",
+        "sn_rcv_phioc",
+        "sn_rcv_w10m",
+        "sn_rcv_taumod",
+        "sn_rcv_tau",
+        "sn_rcv_dqnsdt",
+        "sn_rcv_qsr",
+        "sn_rcv_sdrfx",
+        "sn_rcv_sdrfy",
+        "sn_rcv_wper",
+        "sn_rcv_wnum",
+        "sn_rcv_wstrf",
+        "sn_rcv_charn",
+        "sn_rcv_taw",
+        "sn_rcv_bhd",
+        "sn_rcv_tusd",
+        "sn_rcv_tvsd",
+        "sn_rcv_wdrag",
+        "sn_rcv_qns",
+        "sn_rcv_emp",
+        "sn_rcv_rnf",
+        "sn_rcv_cal",
+        "sn_rcv_iceflx",
+        "sn_rcv_co2",
+        "sn_rcv_icb",
+        "sn_rcv_isf",
+        "sn_rcv_ts_ice",
+        "sn_rcv_qtrice",
+        "sn_rcv_mslp"
+      ],
+      "read_sites": [
+        [
+          "sbccpl.f90",
+          "sbc_cpl_init",
+          348
+        ],
+        [
+          "sbccpl.f90",
+          "sbc_cpl_init",
+          349
+        ]
+      ],
+      "echo_written": true
+    },
+    "namsbc_flx": {
+      "fields": [
+        "cn_dir",
+        "sn_utau",
+        "sn_vtau",
+        "sn_qtot",
+        "sn_qsr",
+        "sn_emp"
+      ],
+      "read_sites": [
+        [
+          "sbcflx.f90",
+          "sbc_flx",
+          160
+        ],
+        [
+          "sbcflx.f90",
+          "sbc_flx",
+          161
+        ]
+      ],
+      "echo_written": true
+    },
+    "namsbc_fwb": {
+      "fields": [
+        "rn_fwb0",
+        "nn_fwb_voltype",
+        "ln_hvolg_var",
+        "rn_hvolg_amp",
+        "rn_hvolg_trd",
+        "nn_hvolg_mth"
+      ],
+      "read_sites": [
+        [
+          "sbcfwb.f90",
+          "sbc_fwb",
+          153
+        ],
+        [
+          "sbcfwb.f90",
+          "sbc_fwb",
+          154
+        ]
+      ],
+      "echo_written": true
+    },
+    "namsbc_iif": {
+      "fields": [
+        "cn_dir",
+        "sn_ice"
+      ],
+      "read_sites": [
+        [
+          "sbcice_if.f90",
+          "sbc_ice_if",
+          135
+        ],
+        [
+          "sbcice_if.f90",
+          "sbc_ice_if",
+          136
+        ]
+      ],
+      "echo_written": true
+    },
+    "namsbc_rnf": {
+      "fields": [
+        "cn_dir",
+        "ln_rnf_depth",
+        "ln_rnf_tem",
+        "ln_rnf_sal",
+        "ln_rnf_icb",
+        "sn_rnf",
+        "sn_cnf",
+        "sn_i_rnf",
+        "sn_s_rnf",
+        "sn_t_rnf",
+        "sn_dep_rnf",
+        "ln_rnf_mouth",
+        "rn_hrnf",
+        "rn_avt_rnf",
+        "rn_rfact",
+        "ln_rnf_depth_ini",
+        "rn_dep_max",
+        "rn_rnf_max",
+        "nn_rnf_depth_file"
+      ],
+      "read_sites": [
+        [
+          "sbcrnf.f90",
+          "sbc_rnf_init",
+          327
+        ],
+        [
+          "sbcrnf.f90",
+          "sbc_rnf_init",
+          328
+        ]
+      ],
+      "echo_written": true
+    },
+    "namsbc_ssr": {
+      "fields": [
+        "cn_dir",
+        "nn_sstr",
+        "nn_sssr",
+        "rn_dqdt",
+        "rn_deds",
+        "sn_sst",
+        "sn_sss",
+        "ln_sssr_bnd",
+        "rn_sssr_bnd",
+        "nn_sssr_ice"
+      ],
+      "read_sites": [
+        [
+          "sbcssr.f90",
+          "sbc_ssr_init",
+          243
+        ],
+        [
+          "sbcssr.f90",
+          "sbc_ssr_init",
+          244
+        ]
+      ],
+      "echo_written": true
+    },
+    "namsbc_wave": {
+      "fields": [
+        "cn_dir",
+        "sn_cdg",
+        "sn_usd",
+        "sn_vsd",
+        "sn_hsw",
+        "sn_wmp",
+        "sn_wnum",
+        "sn_tauoc",
+        "ln_cdgw",
+        "ln_sdw",
+        "ln_tauoc",
+        "ln_stcor",
+        "ln_charn",
+        "ln_taw",
+        "ln_phioc",
+        "ln_wave_test",
+        "ln_bern_srfc",
+        "ln_breivikfv_2016",
+        "ln_vortex_force",
+        "ln_stshear"
+      ],
+      "read_sites": [
+        [
+          "sbcwave.f90",
+          "sbc_wave_init",
+          441
+        ],
+        [
+          "sbcwave.f90",
+          "sbc_wave_init",
+          442
+        ]
+      ],
+      "echo_written": true
+    },
+    "namtile": {
+      "fields": [
+        "ln_tile",
+        "nn_ltile_i",
+        "nn_ltile_j"
+      ],
+      "read_sites": [
+        [
+          "domain.f90",
+          "dom_nam",
+          433
+        ],
+        [
+          "domain.f90",
+          "dom_nam",
+          434
+        ]
+      ],
+      "echo_written": true
+    },
+    "namtsd": {
+      "fields": [
+        "ln_tsd_init",
+        "ln_tsd_dmp",
+        "cn_dir",
+        "sn_tem",
+        "sn_sal"
+      ],
+      "read_sites": [
+        [
+          "dtatsd.f90",
+          "dta_tsd_init",
+          144
+        ],
+        [
+          "dtatsd.f90",
+          "dta_tsd_init",
+          145
+        ]
+      ],
+      "echo_written": true
+    },
+    "namusr_def": {
+      "fields": [
+        "nn_swg",
+        "rn_theta",
+        "jpkglo",
+        "nn_gc",
+        "rn_domsiz",
+        "rn_dx",
+        "rn_f0",
+        "rn_beta",
+        "rn_modified_grav",
+        "rn_rfr",
+        "rn_tau",
+        "nn_dynldf_lap_typ",
+        "ln_dynldf_lap_pm",
+        "rn_abp",
+        "nn_cnp",
+        "rn_fsp"
+      ],
+      "read_sites": [
+        [
+          "usrdef_nam.f90",
+          "usr_def_nam",
+          146
+        ]
+      ],
+      "echo_written": true
+    }
+  },
+  "excluded_reads": [
+    {
+      "group": "nl1",
+      "file": "lib_mpp.f90",
+      "routine": "load_nml",
+      "line": 2784,
+      "unit": "cltest"
+    },
+    {
+      "group": "nl2",
+      "file": "lib_mpp.f90",
+      "routine": "load_nml",
+      "line": 2786,
+      "unit": "cltest"
+    }
+  ],
+  "group_count": 27,
+  "field_count": 336
+}

@@ -1385,7 +1385,7 @@ def _biharmonic_visc_latlon(n_lat: int, efold_hours: float = 9.0) -> float:
     modon/Rossby-wave scales this coefficient must preserve.  At n_lat=72: nu4 ~ 2.9e15 m^4/s ->
     tau(checkerboard) = 9 h, tau(1-D 2*dy Nyquist) = 36 h,
     tau(L=3000 km) ~ 0.6 yr, tau(L=4000 km) ~ 2 yr.  Pole rows are
-    further capped inside the model (see ``_nu_del4_row_profiles``).
+    further capped inside the model (see ``nu_del4_row_profiles``).
     """
     import math
     from legoesm import constants
@@ -1407,10 +1407,28 @@ def _laplacian_visc_ico(mesh, frac: float = 0.1) -> float:
 # ---------------------------------------------------------------------------
 
 def _create_vertical(nlev: int, vertical_coord: str):
-    """Create vertical coordinate (sigma or hybrid)."""
+    """Create vertical coordinate (sigma or hybrid).
+
+    ``LEGOESM_MATRIX_TRANSITION_EXPONENT`` (#1029 probe override, 2 or 3)
+    changes only the hybrid ``B = eta**exponent`` power; the reference-state
+    level pressures do not move.  Unset -> the standard tier, unchanged.
+    """
     from legoesm.grids.vertical import create_sigma_coordinate, standard_hybrid_levels
+    env = os.environ.get("LEGOESM_MATRIX_TRANSITION_EXPONENT")
+    exponent = None
+    if env is not None:
+        if env not in ("2", "3"):
+            raise ValueError(
+                f"LEGOESM_MATRIX_TRANSITION_EXPONENT must be 2 or 3; got {env!r}")
+        if vertical_coord != "hybrid":
+            raise ValueError(
+                "LEGOESM_MATRIX_TRANSITION_EXPONENT is inert on the "
+                f"{vertical_coord!r} coordinate; unset it")
+        exponent = int(env)
+        print(f"  #1029 LEGOESM_MATRIX_TRANSITION_EXPONENT override: "
+              f"B = eta**{exponent}")
     if vertical_coord == "hybrid":
-        return standard_hybrid_levels(nlev)
+        return standard_hybrid_levels(nlev, transition_exponent=exponent)
     return create_sigma_coordinate(nlev)
 
 
@@ -1552,7 +1570,8 @@ def _make_rrtmgp_physics(model_type: str, dt: float, hs_fn=None,
         microphysics=MicrophysicsConfig(scheme="none"),
         gravity_wave_drag=GravityWaveDragConfig(scheme="none"),
     )
-    rrtmgp_fn = make_physics(phys_cfg, model_type=model_type, dt=dt)
+    rrtmgp_fn = make_physics(phys_cfg, model_type=model_type, dt=dt,
+                             surface_bulk_coeffs=None)   # radiation only
 
     if hs_fn is None:
         return rrtmgp_fn
@@ -4226,6 +4245,12 @@ def run_cosine_bell(tc: TestCase, output_dir: Path, days: float, *,
 # Runner: Held-Suarez
 # ===========================================================================
 
+def _hs_persistent_d_enabled() -> bool:
+    """#1028 persistent-D for the cube HS case: ON unless LEGOESM_HS_PERSISTENT_D=0."""
+    return ((os.environ.get("LEGOESM_HS_PERSISTENT_D", "").strip().lower()
+             or "1") in ("1", "true", "yes", "on"))
+
+
 def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
                     radiation: str = "gray") -> tuple[str, float, str]:
     """Run a Held-Suarez test on the given test case.
@@ -4450,7 +4475,8 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
                       if radiation == "rrtmgp" else held_suarez_forcing)
 
         # --- #1028 persistent-D option (2026-08-03) ---------------------
-        # LEGOESM_HS_PERSISTENT_D=1 keeps the prognostic state in FV3 D
+        # ON by default (user decision 2026-10-13); LEGOESM_HS_PERSISTENT_D=0
+        # restores the damped cc round trip.  It keeps the prognostic state in FV3 D
         # staggering BETWEEN steps, instead of the default cc -> corner ->
         # cc round trip every step.  Measured motivation (frozen-threshold
         # A/B, C48/L30/20d, config mirrored to this lane): the extra outer
@@ -4461,14 +4487,12 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
         # the existing physics adapter still converts D -> cc at every RK
         # stage and lifts the wind tendencies back (primitive_eq_cdgrid.py
         # :1613/:1045), so the inner conversions remain.  Matrix
-        # diagnostics convert D -> cc at diagnostic cadence.  Unset =>
-        # bit-identical (the state never converts, _cc is the identity).
+        # diagnostics convert D -> cc at diagnostic cadence.  =0 => the old
+        # path bit-identically (the state never converts, _cc is the identity).
         # NOTE the #1028 gate consumes scalar_fn["max_wind"] =
         # sqrt(u^2+v^2) at centres -- the same operator either way, since
         # the legacy wrapper also exits through fv3_to_hydrostatic.
-        _hs_persistent_d = (
-            os.environ.get("LEGOESM_HS_PERSISTENT_D", "0").strip().lower()
-            in ("1", "true", "yes", "on"))
+        _hs_persistent_d = _hs_persistent_d_enabled()
         if _hs_persistent_d:
             from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
                 fv3_to_hydrostatic as _f2h,
@@ -4616,12 +4640,18 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
         config = CGridLatLonPrimitiveEquationConfig(
             A_h=ah, fix_mass=True, anchor_mass_to_initial=True,
             use_polar_filter=_latlon_polar_filter_on(tc.case),
+            sb81_omega_conversion=True,
+            # del-4 on u, v, T (lat-lon shallow-water lane's law and per-row
+            # pole cap); set explicitly for both lat-lon HS cases.
+            nu_del4=_biharmonic_visc_latlon(n_lat),
             sponge_coeff=_sponge_coeff,
             sponge_width_m=_SPONGE_WIDTH_M,
             sponge_scale_height_m=_SPONGE_SCALE_H_M,
             sponge_shape=_SPONGE_SHAPE,
         )
         model = CGridLatLonPrimitiveEquationModel(grid, sigma, config, dt=dt)
+        print(f"  latlon HS dissipation: A_h={config.A_h:.4e} m^2/s, "
+              f"nu_del4={config.nu_del4:.4e} m^4/s, dt={dt:g} s")
         if _topo:
             from legoesm.atmosphere.idealized.held_suarez_topo import (
                 held_suarez_topo_init_latlon)
@@ -5192,6 +5222,7 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
         config = CGridLatLonPrimitiveEquationConfig(
             A_h=ah, fix_mass=True, anchor_mass_to_initial=True,
             use_polar_filter=_latlon_polar_filter_on(tc.case),
+            sb81_omega_conversion=True,
         )
         model = CGridLatLonPrimitiveEquationModel(grid, sigma, config, dt=dt)
         if _rotated:
@@ -5809,6 +5840,7 @@ def run_amip(tc: TestCase, output_dir: Path, days: float, *,
         config = CGridLatLonPrimitiveEquationConfig(
             A_h=ah, fix_mass=True, anchor_mass_to_initial=True,
             use_polar_filter=_latlon_polar_filter_on(tc.case),
+            sb81_omega_conversion=True,
         )
         model = CGridLatLonPrimitiveEquationModel(grid, sigma, config, dt=dt)
         state_cc = held_suarez_init_latlon(grid, sigma, T_init=280.0)

@@ -125,7 +125,8 @@ def main(argv=None) -> int:
                 cloud_path_liq=kw["cloud_path_liq"],
                 cloud_path_ice=path_ice,
                 cloud_r_eff_liq=kw["cloud_r_eff_liq"],
-                cloud_r_eff_ice=kw.get("cloud_r_eff_ice"))
+                cloud_r_eff_ice=kw.get("cloud_r_eff_ice"),
+                cloud_rho_ice=ccfg.rho_cloud_ice)
             day_mask = jnp.asarray(mu > 0.0)
             sw = sw + jnp.sum(area_w * jnp.where(
                 day_mask, out.sw_flux_up[:, 0], 0.0))

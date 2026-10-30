@@ -117,3 +117,70 @@ def test_cli_roundtrip_writes_loader_compatible_file(tmp_path):
         assert "SSO_STDH" in ds.data_vars          # load_subgrid_orography default
         assert set(ds["SSO_STDH"].dims) == {"lat", "lon"}
         assert float(ds["SSO_STDH"].max()) > 0.0
+
+
+# --- anchored decomposition (#1712) -----------------------------------------
+from legoesm.grids.topography import (  # noqa: E402
+    EFFECTIVE_RESOLUTION_DX, _check_sso_scale_decomposition,
+    voronoi_cell_spacing_deg)
+
+
+@pytest.mark.parametrize("ncells", [2562, 10242, 40962, 163842, 655362])
+@pytest.mark.parametrize("fine", [0.25, 1.0 / 60.0])
+def test_anchored_scales_tile_and_pass_the_loader_guard(ncells, fine):
+    cell = voronoi_cell_spacing_deg(ncells)
+    if cell < 2 * fine:
+        pytest.skip("fine grid too coarse for this mesh")
+    block, cutoff = prep.anchored_sso_scales(cell, fine)
+    assert block <= cell + 1e-9 and block >= 2 * fine - 1e-12
+    assert round(180 / fine) % round(block / fine) == 0
+    assert round(360 / fine) % round(block / fine) == 0
+    assert block <= cutoff <= EFFECTIVE_RESOLUTION_DX * cell + 1e-9
+    built = {"block_deg": block, "fine_res_deg": fine,
+             "resolved_cutoff_deg": cutoff}
+    assert _check_sso_scale_decomposition(built, cell, "f.nc", "warn") is None
+
+
+def test_the_old_recipe_cutoffs_trip_the_guard():
+    # regen_subgrid_orography_1712.sbatch used 4.0 deg at level 6 and 7.5 deg
+    # at level 5: both above the guard's tolerance on those meshes.
+    for ncells, block, cutoff in ((40962, 1.0, 4.0), (10242, 2.0, 7.5)):
+        cell = voronoi_cell_spacing_deg(ncells)
+        built = {"block_deg": block, "fine_res_deg": 0.25,
+                 "resolved_cutoff_deg": cutoff}
+        assert _check_sso_scale_decomposition(
+            built, cell, f"old{ncells}.nc", "warn") is not None
+
+
+def test_cli_model_cell_stamps_the_anchor_and_refuses_explicit_scales(tmp_path):
+    src = tmp_path / "elev.nc"
+    _synthetic_elevation().to_netcdf(src)
+    out_path = tmp_path / "sso.nc"
+    cell = 4.0
+    rc = prep.main(["--input", str(src), "--out", str(out_path),
+                    "--fine-res-deg", "1.0", "--model-cell-deg", str(cell)])
+    assert rc == 0
+    block, cutoff = prep.anchored_sso_scales(cell, 1.0)
+    with xr.open_dataset(out_path) as ds:
+        assert ds.attrs["model_cell_deg"] == cell
+        assert ds.attrs["block_deg"] == block
+        assert ds.attrs["resolved_cutoff_deg"] == cutoff
+        assert ds.attrs["construction"] == "residual_stddev"
+    with pytest.raises(SystemExit):
+        prep.main(["--input", str(src), "--out", str(out_path),
+                   "--fine-res-deg", "1.0", "--model-cell-deg", "4.0",
+                   "--block-deg", "4.0"])
+
+
+def test_anchor_refuses_a_fine_grid_too_coarse_for_the_cell():
+    with pytest.raises(ValueError, match="too coarse"):
+        prep.anchored_sso_scales(1.0, 1.0)
+
+
+def test_residual_estimator_without_a_cutoff_is_refused(tmp_path):
+    src = tmp_path / "elev.nc"
+    _synthetic_elevation().to_netcdf(src)
+    with pytest.raises(SystemExit):
+        prep.main(["--input", str(src), "--out", str(tmp_path / "o.nc"),
+                   "--fine-res-deg", "1.0", "--block-deg", "4.0",
+                   "--residual-estimator", "rms"])

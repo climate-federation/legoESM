@@ -262,7 +262,7 @@ the first rung that composes the live, already certified ocean mean producer.
 ## 4. Recipe shape
 
 The ocean catalog makes recipes named pure scheme bundles, returns copies, and
-assembles recipe + setup + explicit overrides (`packages/ocean/legoesm/ocean/recipes.py:272-377`).
+assembles recipe + setup + explicit overrides (`packages/ocean/legoesm/ocean/recipes.py:288-393`).
 Its NEMO fidelity recipe is explicitly config-only—no solver, bridge, grid,
 forcing or state translation (`packages/ocean/legoesm/ocean/fidelity/nemo_recipe.py:1-7`).
 SI3 should copy that separation:

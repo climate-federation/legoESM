@@ -260,13 +260,17 @@ class TestSpectralPECMT:
         zeros = jnp.zeros((grid.n_lat, grid.n_lon, sigma_coord.n_levels))
         q_v = Field(data=zeros, name="q_v", dims=("lat", "lon", "level"), units="kg/kg")
         q_c = Field(data=zeros, name="q_c", dims=("lat", "lon", "level"), units="kg/kg")
+        from tests._zm_cold_start import cold_phys_state
+        ps = cold_phys_state(zeros)  # ZM needs the carried pblh: CAM cold start
         tendencies, _ = physics_fn(
-            _state_with_tracers(rest_state, {"q_v": q_v, "q_c": q_c}), grid, sigma_coord)
+            _state_with_tracers(rest_state, {"q_v": q_v, "q_c": q_c}), grid, sigma_coord,
+            phys_state=ps)
         assert set(tendencies.tracers) == {"q_v", "q_c"}
         for k in ("q_v", "q_c"):
             assert bool(jnp.all(jnp.isfinite(tendencies.tracers[k].data)))
         with pytest.raises(ValueError, match="must carry both tracers"):
-            physics_fn(_state_with_tracers(rest_state, {"q_v": q_v}), grid, sigma_coord)
+            physics_fn(_state_with_tracers(rest_state, {"q_v": q_v}), grid, sigma_coord,
+                       phys_state=ps)
 
     def test_tiedtke_with_cape_and_winds_yields_nonzero_cmt(
         self, grid, sigma_coord, rest_state,
@@ -633,14 +637,10 @@ class TestSpectralPECMT:
 def profile_scheme_config(request):
     """Yield a (name, ConvectionConfig) pair for each new scheme."""
     name, scheme_field, scheme_cls = request.param
-    # #929: this dispatch / finite-output regression shares one condensate-less
-    # (``q_v``-only) spectral state across all five schemes.  Default Bechtold
-    # now emits an in-updraft rain split (``precip_efficiency=0.7``) that the
-    # spectral bridge REQUIRES a ``q_c``/``q_r`` tracer to receive — otherwise
-    # it raises loudly rather than silently leaking the un-booked rain water.
-    # Pin ``precip_efficiency=0.0`` here so Bechtold exercises its pre-#929
-    # no-split dispatch path on this condensate-less state; the rain-split
-    # routing and the raise are covered by
+    # #929: the spectral bridge raises whenever a scheme emits a rain-split
+    # field (even all-zero), so the shared state carries a zero ``q_c`` tracer
+    # to receive it.  ``precip_efficiency=0.0`` pins Bechtold's no-split
+    # amount; the rain-split routing and the raise are covered by
     # ``test_convection_rain_split_bridges.py``.
     if scheme_cls is BechtoldConfig:
         kwargs = {scheme_field: scheme_cls(precip_efficiency=0.0)}
@@ -681,9 +681,14 @@ class TestSpectralPEAllProfileSchemes:
             data=q_v_grid, name="q_v",
             dims=("lat", "lon", "level"), units="kg/kg",
         )
+        # q_c receives the convective rain split (#929 raises without one).
+        q_c_field = Field(
+            data=jnp.zeros_like(q_v_grid), name="q_c",
+            dims=("lat", "lon", "level"), units="kg/kg",
+        )
         return rest_state._replace(
             T_hat=rest_state.T_hat.replace(data=T_hat),
-            tracers={"q_v": q_v_field},
+            tracers={"q_v": q_v_field, "q_c": q_c_field},
         )
 
     def test_bridge_call_succeeds(

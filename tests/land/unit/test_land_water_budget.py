@@ -163,7 +163,7 @@ class TestBucketOverflowRunoff(unittest.TestCase):
 
         # Water budget: W_new = W_old + (P - E - runoff) * dt
         precip = float(forcing.precip_total[0])
-        evap = float(resp.lhflx[0] / constants.L_v)
+        evap = float(resp.surface_mass_flux[0])   # the water the step removed [kg/m2/s]
         runoff = float(state2.runoff[0])
         W_new = float(state2.W_bucket.data[0])
         W_old = float(W_init)

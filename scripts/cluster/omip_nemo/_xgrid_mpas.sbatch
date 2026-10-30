@@ -26,7 +26,7 @@
 # tracer advection, runoff/SSS-restoring, ice, bottom drag, geothermal, iwm.
 # WHAT CANNOT MATCH (grid-intrinsic, list them with every result):
 #   tripole: --mesh eORCA1.2, --ew-cyclic-overlap, --C-smag-lap, --pgf-scheme
-#   MPAS   : --mpas-level 7, --mpas-lloyd 20, --mpas-vmix (not --tripole-vmix)
+#   MPAS   : --mpas-level 7, --mpas-lloyd 50, --mpas-vmix (not --tripole-vmix)
 #
 # SPLIT into one job PER ARM so they run in PARALLEL: sequential was
 # ~11.5h + ~11.5h = 23h against a 24h walltime, and the second arm's
@@ -75,7 +75,7 @@ COMMON="--dt 150 --nemo-vertical --partial-cell --adaptive-implicit-vertadv \
 --ice-ocean-heat-coeff 70 --gateway-transports"
 TKE=""   # card defaults on BOTH grids -- see MATCHED-TKE FIX above
 echo "########## ARM: MPAS"
-$PY -u scripts/run/run_omip_core2.py --grid mpas --mpas-level 7 --mpas-lloyd 20 \
+$PY -u scripts/run/run_omip_core2.py --grid mpas --mpas-level 7 --mpas-lloyd 50 \
   $COMMON $IC $TKE --mpas-vmix tke \
   --output $R/results/omip_nemo/xgrid_mpas_mxl${MXL}_d30
 rc2=$?; echo "=== mpas rc=$rc2 ==="

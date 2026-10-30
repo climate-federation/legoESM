@@ -29,7 +29,6 @@ scripts/cluster/omip_nemo/_fesom2_core2_d30.sbatch):
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import sys
 import time
@@ -98,9 +97,35 @@ def build_arg_parser() -> argparse.ArgumentParser:
     return p
 
 
-def _git_sha() -> str:
-    from legoesm.io.git_provenance import git_provenance
-    return git_provenance(__file__).commit or "unknown"
+def write_fesom_core2_manifest(out: Path, args, n_days: int) -> Path | None:
+    """Write run_manifest.json through the canonical writer (#2102).
+
+    The hashed config is the former hand-written file's ``config`` block plus
+    the fesom_jax install path (the code that runs lives outside legoESM's
+    git provenance).  Call after ``fesom_jax`` is imported."""
+    from legoesm.driver.restart import write_run_manifest_on_root
+    payload = {
+        "runner": "run_fesom_core2",
+        "fesom_jax": str(Path(sys.modules["fesom_jax"].__file__).parent),
+        "dt_s": args.dt, "days": n_days, "year": args.year,
+        "forcing": args.forcing, "nyf_zarr": args.nyf_zarr,
+        "ice_ic": args.ice_ic, "ice_init_file": args.ice_init_file,
+        "tke_surface_bc": args.tke_surface_bc,
+        "tke_mxl0_anchor": args.tke_mxl0_anchor,
+        "allow_half_ported_tke": bool(args.allow_half_ported_tke),
+        "physics": ("core2_full.yaml paper card: zstar ALE + "
+                    "prognostic TKE + GM + mEVP ice (whichEVP=1); "
+                    "AB2-continuous day chunks (bootstrap once)"),
+        "protocol_note": (
+            "CORE-II NYF atmosphere (NEMO-matched) + PHC3.0 winter "
+            "cold start; SSS/runoff/chl remain fesom-side"
+            if args.forcing == "core2_nyf" else
+            "JRA55-do year forcing + PHC3.0 winter "
+            "cold start; NOT the xgrid matched-pair "
+            "protocol -- three-model comparison"),
+    }
+    return write_run_manifest_on_root(out, payload, config_kind="ocean",
+                                      runner_tag="run_fesom_core2")
 
 
 def write_snapshot(out_dir: Path, tag: str, state, mesh) -> Path:
@@ -258,30 +283,7 @@ def main() -> int:
 
     steps_per_day = int(round(86400.0 / args.dt))
     n_days = int(round(args.days))
-    manifest = {
-        "run": {"command_line": " ".join(sys.argv),
-                "creation_time": time.strftime("%Y-%m-%dT%H:%M:%S")},
-        "reproducibility": {"git_sha": _git_sha(),
-                            "fesom_jax": str(Path(
-                                sys.modules["fesom_jax"].__file__).parent)},
-        "config": {"dt_s": args.dt, "days": n_days, "year": args.year,
-                   "forcing": args.forcing, "nyf_zarr": args.nyf_zarr,
-                   "ice_ic": args.ice_ic, "ice_init_file": args.ice_init_file,
-                   "tke_surface_bc": args.tke_surface_bc,
-                   "tke_mxl0_anchor": args.tke_mxl0_anchor,
-                   "allow_half_ported_tke": bool(args.allow_half_ported_tke),
-                   "physics": ("core2_full.yaml paper card: zstar ALE + "
-                               "prognostic TKE + GM + mEVP ice (whichEVP=1); "
-                               "AB2-continuous day chunks (bootstrap once)"),
-                   "protocol_note": (
-                       "CORE-II NYF atmosphere (NEMO-matched) + PHC3.0 winter "
-                       "cold start; SSS/runoff/chl remain fesom-side"
-                       if args.forcing == "core2_nyf" else
-                       "JRA55-do year forcing + PHC3.0 winter "
-                       "cold start; NOT the xgrid matched-pair "
-                       "protocol -- three-model comparison")},
-    }
-    (out / "run_manifest.json").write_text(json.dumps(manifest, indent=2))
+    manifest_path = write_fesom_core2_manifest(out, args, n_days)
 
     # AB2-CONTINUOUS DAY CHUNKS.  integrate() bootstraps AB2 on its first
     # step by design, so calling it once per day re-bootstrapped the momentum
@@ -346,6 +348,8 @@ def main() -> int:
             print(f"[snapshot] {p_out}", flush=True)
 
     write_snapshot(out, "final", state, mesh)
+    from legoesm.driver.restart import record_final_state_digest
+    record_final_state_digest(manifest_path, state)
     print("[done]", flush=True)
     return 0
 

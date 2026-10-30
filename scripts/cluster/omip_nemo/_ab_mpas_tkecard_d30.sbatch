@@ -78,7 +78,7 @@ JAX_PLATFORMS=cpu $PY -m pytest -q tests/ocean/unit/test_tripole_vmix_cli.py 2>&
 rc=$?; [ $rc -eq 0 ] || { echo "FATAL: gate tests failed rc=$rc"; exit 1; }
 
 JAX_ENABLE_X64=1 $PY -u scripts/run/run_omip_core2.py \
-  --grid mpas --mpas-level 7 --mpas-lloyd 20 --mpas-vmix tke $KNOBS \
+  --grid mpas --mpas-level 7 --mpas-lloyd 50 --mpas-vmix tke $KNOBS \
   --dt 150 --nemo-vertical --partial-cell --adaptive-implicit-vertadv \
   --momentum-rk3 --geothermal --runoff --sss-restore \
   --sss-restore-tau-days 45.5 --sss-restore-bound-mmday 4 --sss-ice-gate-nemo \

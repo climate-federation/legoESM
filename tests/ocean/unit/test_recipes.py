@@ -76,6 +76,12 @@ class TestRegistry:
         assert LATLON_RECIPES["legoesm_linear_v1"]["n_barotropic_substeps"] == 30
         assert LATLON_RECIPES["nemo_dino_v1"]["A_h_lat_scaling"] is True
 
+    def test_implicit_cn_variant_differs_only_in_barotropic_solver(self):
+        # #2114: the IGW channel recipe is default_wright_v1 + implicit_cn.
+        base = dict(LATLON_RECIPES["default_wright_v1"],
+                    barotropic_solver="implicit_cn")
+        assert LATLON_RECIPES["default_wright_implicit_cn_v1"] == base
+
 
 class TestCatalogMatchesFactories:
     """A catalog entry must equal the dycore its source factory produces — so the
@@ -281,7 +287,9 @@ class TestOMIPNemoMatchFactories:
             forcing_mode="restoring",
         )
         assert kind == "mpas"
-        factory_mc = nemo_match_mpas_model_config()
+        from legoesm.ocean.mpas_config import resolve_barotropic_pcg_defaults
+        # The model resolves the backend's barotropic PCG bundle at build.
+        factory_mc = resolve_barotropic_pcg_defaults(nemo_match_mpas_model_config())
         # Every field EXCEPT physics (SETUP) and the mesh-DERIVED vorticity
         # damping must match the factory exactly.
         for f in MPASOceanConfig._fields:

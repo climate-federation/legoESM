@@ -226,3 +226,34 @@ def test_the_radiation_column_block_size_is_a_deck_key_that_reaches_the_solver()
 
     # ...and it is what radiation will actually block the column axis by.
     assert int(rad.radiation_config.rrtmgp.column_chunk_size) == 4608
+
+
+def test_the_cam6_deck_pins_the_condensate_floor_off_and_builds():
+    """Owner 2026-09-27: q_c_diagnostic is PINNED at 0.0 (floor off, as in
+    the production deck), not trained -- 0.0 is outside its trainable spec
+    bounds, so seeding it as a starting value killed the build."""
+    import copy
+    import pathlib
+    from types import SimpleNamespace
+
+    import jax
+    import yaml
+
+    from legoesm.training.scale_build import build_mode_components
+
+    repo = pathlib.Path(__file__).resolve().parents[2]
+    deck = yaml.safe_load((repo / "config" / "wb" / "campaign"
+                           / "spectral_t63_cam6.yaml").read_text())
+    cl = deck["classical"]
+    assert cl["param_fixed"]["atm.clouds.CloudConfig"]["q_c_diagnostic"] == 0.0
+    assert "atm.clouds.CloudConfig.q_c_diagnostic" not in cl.get(
+        "param_init", {})
+    yml = copy.deepcopy(deck)
+    yml["spectral"] = dict(yml["spectral"], n_max=10)   # build, not resolution
+    cfg = SimpleNamespace(mode="physics", training_core="spectral",
+                          smoke=False, multi_step_hours=(6,), n_days=1)
+    *_, params, mk, _loss, _dt = build_mode_components(cfg, yml)
+    names = params.schemes.as_dict() if hasattr(params, "schemes") else {}
+    assert "atm.clouds.CloudConfig.q_c_diagnostic" not in names
+    mk(params)
+    assert jax.tree.leaves(params)

@@ -22,6 +22,7 @@ jax.config.update("jax_enable_x64", True)
 from legoesm import constants
 from legoesm.core.coupling_fields import AtmToSurface
 from legoesm.land.config import MultiLayerLandConfig
+from legoesm.land.surface_scheme import SimpleSEBConfig
 from legoesm.land.multilayer_land import (
     init_multilayer_land_state,
     step_multilayer_land,
@@ -596,7 +597,9 @@ class TestBandRadiation(unittest.TestCase):
 class TestMultilayerIntegration(unittest.TestCase):
 
     def _config(self, std_elev):
+        # Elevation bands are refused with the canopy schemes (now the default).
         return MultiLayerLandConfig(
+            surface_scheme=SimpleSEBConfig(),
             snow_albedo_feedback=True,
             elev_bands=(_band_cfg(std_elev) if std_elev is not None else None),
         )
@@ -751,6 +754,7 @@ class TestMultilayerIntegration(unittest.TestCase):
 
         def loss(lapse):
             cfg = MultiLayerLandConfig(
+                surface_scheme=SimpleSEBConfig(),
                 snow_albedo_feedback=True,
                 elev_bands=ElevationSnowBandConfig(
                     band_dz=band_elevation_anomalies(jnp.asarray(std)),

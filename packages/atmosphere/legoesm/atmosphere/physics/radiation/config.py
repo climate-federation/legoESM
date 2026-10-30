@@ -313,6 +313,12 @@ class RRTMGPConfig(NamedTuple):
     # existing positional RRTMGPConfig(...) argument binding shifts.
     aerosol_ssa_bands: tuple[float, ...] | None = None
     aerosol_g_bands: tuple[float, ...] | None = None
+    # CAM RRTMG-style transported layer from the model top to a 1 Pa lid
+    # (T, q_v of the top layer; no cloud/aerosol; overhead column-mean ozone).
+    # Its heating is discarded and TOA fluxes are reported at the lid, so the
+    # ~2 W/m2 SW absorbed above the model top leaves the column budget.
+    # False (default) = byte-identical.  Appended last (positional binding).
+    overhead_layer: bool = False
 
 
 class OzoneProfileConfig(NamedTuple):

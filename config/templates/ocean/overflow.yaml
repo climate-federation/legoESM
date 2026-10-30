@@ -8,7 +8,7 @@ experiment:
   tier: tier2
   complexity: primitive_equation
   extent: idealized
-  maturity: structurally_validated
+  maturity: run_tested
   description: >
     Dense-water overflow down a tanh slope (DOME-like): tests the partial-cell
     pressure-gradient force and tracer advection over variable bathymetry.

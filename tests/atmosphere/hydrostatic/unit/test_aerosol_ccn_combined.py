@@ -32,6 +32,7 @@ from legoesm.atmosphere.physics.combined import (
 from legoesm.atmosphere.physics.radiation.config import RadiationConfig
 from legoesm.atmosphere.physics.microphysics.config import (
     MicrophysicsConfig,
+    MorrisonConfig,
     apply_microphysics_experiment_flags,
 )
 from legoesm.atmosphere.physics.microphysics.integration import (
@@ -46,7 +47,7 @@ jax.config.update("jax_enable_x64", True)
 
 
 def _morrison_aerosol_config():
-    cfg = MicrophysicsConfig(scheme="morrison")
+    cfg = MicrophysicsConfig(scheme="morrison", morrison=MorrisonConfig(warm_rain_scheme="kk2000"))
     return cfg._replace(morrison=cfg.morrison._replace(nc_from_aerosol=True))
 
 
@@ -92,12 +93,12 @@ def test_active_detection_morrison_on():
 
 
 def test_active_detection_default_off():
-    cfg = PhysicsConfig(microphysics=MicrophysicsConfig(scheme="morrison"))
+    cfg = PhysicsConfig(microphysics=MicrophysicsConfig(scheme="morrison", morrison=MorrisonConfig(warm_rain_scheme="kk2000")))
     assert _aerosol_ccn_active(cfg) is False
 
 
 def test_active_detection_predict_nc_excluded():
-    mc = MicrophysicsConfig(scheme="morrison")
+    mc = MicrophysicsConfig(scheme="morrison", morrison=MorrisonConfig(warm_rain_scheme="kk2000"))
     mc = mc._replace(
         morrison=mc.morrison._replace(nc_from_aerosol=True, predict_Nc=True)
     )
@@ -118,7 +119,7 @@ def test_wants_forcing_only_when_active(model_type):
     fn_on = make_microphysics_physics(
         _morrison_aerosol_config(), model_type, dt=300.0)
     fn_off = make_microphysics_physics(
-        MicrophysicsConfig(scheme="morrison"), model_type, dt=300.0)
+        MicrophysicsConfig(scheme="morrison", morrison=MorrisonConfig(warm_rain_scheme="kk2000")), model_type, dt=300.0)
     assert getattr(fn_on, "_wants_forcing", False) is True
     # Off path stays byte-identical (legacy 3-arg call in the accumulator).
     assert getattr(fn_off, "_wants_forcing", False) is False
@@ -196,7 +197,7 @@ def test_end_to_end_combined_threads_forcing_to_both_modules():
 # ---------------------------------------------------------------------------
 # apply_microphysics_experiment_flags — the ONE shared helper both the coupled
 # (physics_pipeline._resolve_microphysics) and the combined-physics / MPAS
-# (model_driver._run_mpas) paths route through, so the two ExperimentConfig
+# (model_driver._run_column) paths route through, so the two ExperimentConfig
 # warm-rain switches (nc_from_aerosol + subgrid_autoconversion) are threaded
 # identically on every grid (closes the Morrison-only MPAS parity gap).
 # ---------------------------------------------------------------------------
@@ -205,7 +206,7 @@ def test_flags_helper_threads_nc_from_aerosol_on_morrison():
     # The aerosol-CCN switch this bundle owns; the ``subgrid_autoconversion``
     # field + its threading test ship with the microphysics PR (#590) that
     # adds the field to MorrisonConfig.
-    mc = MicrophysicsConfig(scheme="morrison").morrison
+    mc = MicrophysicsConfig(scheme="morrison", morrison=MorrisonConfig(warm_rain_scheme="kk2000")).morrison
     assert mc.nc_from_aerosol is False  # default
     out = apply_microphysics_experiment_flags(
         mc, "morrison", nc_from_aerosol=True)
@@ -213,7 +214,7 @@ def test_flags_helper_threads_nc_from_aerosol_on_morrison():
 
 
 def test_flags_helper_identity_when_both_false():
-    mc = MicrophysicsConfig(scheme="morrison").morrison
+    mc = MicrophysicsConfig(scheme="morrison", morrison=MorrisonConfig(warm_rain_scheme="kk2000")).morrison
     out = apply_microphysics_experiment_flags(
         mc, "morrison", nc_from_aerosol=False, subgrid_autoconversion=False)
     # Byte-identical: no _replace called -> same instance.
@@ -245,3 +246,40 @@ def test_fill_matches_specified_nc_field():
     assert n_c.shape == (ncol, nlev)
     assert jnp.all(n_c > 0.0)
     assert jnp.allclose(n_c, n_c[0, 0])
+
+
+# ---------------------------------------------------------------------------
+# radiation factory: the aerosol number reaches the cloud optics as IN-CLOUD
+# ---------------------------------------------------------------------------
+
+class _BackendReached(Exception):
+    pass
+
+
+@pytest.mark.parametrize("nc_from_aerosol", [True, False])
+def test_radiation_flags_aerosol_number_in_cloud(monkeypatch, nc_from_aerosol):
+    """The hydrostatic/MPAS radiation physics_fn (_make_hydrostatic_radiation,
+    the MPAS ``_run_column`` lane) must hand the activated CCN number to the
+    cloud optics with ``n_cloud_in_cloud=True`` (CAM6 MG2 nccons footing), and
+    the prognostic-tracer path with False (#1521)."""
+    from legoesm.atmosphere.physics.radiation import integration as rad_int
+    from legoesm.atmosphere.physics.radiation.config import RRTMGPConfig
+
+    seen = {}
+
+    def _spy(**kw):
+        seen.update(kw)
+        raise _BackendReached
+
+    monkeypatch.setattr(rad_int, "_call_radiation_backend", _spy)
+    grid, sigma = _setup()
+    state = _moist_state(grid, sigma)
+    fn = rad_int.make_radiation_physics(
+        RadiationConfig(scheme="rrtmgp", rrtmgp=RRTMGPConfig(include_clouds=True)),
+        model_type="hydrostatic", nc_from_aerosol=nc_from_aerosol)
+    with pytest.raises(_BackendReached):
+        fn(state, grid, sigma, forcing={**_aerosol_forcing(grid, sigma, 0.1),
+                                        "day_of_year": jnp.asarray(80.0)})
+    assert seen["n_cloud_in_cloud"] is nc_from_aerosol
+    if nc_from_aerosol:
+        assert float(jnp.min(seen["n_cloud"])) > 1.0  # the CCN number, not the dead carry

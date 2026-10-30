@@ -29,9 +29,11 @@ import jax
 import jax.numpy as jnp
 
 from legoesm.core.conservation import (
+    BORROW_ELIGIBLE_TRACERS,
     conservative_positive_clip,
     conservative_positive_clip_global,
     is_borrow_eligible_tracer,
+    voronoi_energy_fixer_dT,
 )
 from legoesm.core.precision import cast_pytree, finalize_to_storage
 
@@ -111,7 +113,7 @@ class MPASPrimitiveEquationConfig(NamedTuple):
     budget_ledger_level_weight: object = None
     # #1354/#1515: applies ONLY to the plain-max hard-floor path (i.e. when
     # conservative_tracer_clamp=False).  Then the q_v floor removes the latent
-    # heat tied to the clipped vapour (energy_consistent_moisture_floor) so
+    # heat tied to the clipped vapour (energy_consistent_water_floor) so
     # column MSE is conserved instead of leaving +L_v*deficit of spurious heat.
     # The default conservative BORROW is already column-MSE-neutral (it
     # preserves the q_v integral with T untouched), so this is a no-op there and
@@ -138,7 +140,7 @@ class MPASPrimitiveEquationConfig(NamedTuple):
     # This supersedes the earlier "undamped gravity wave on the imaginary
     # axis / hidden-CFL at ~300 s any resolution" explanation, which the
     # zero-dissipation sweep disproved.  The separate ~450 s dt-ceiling seen
-    # with the gray AMIP deck (driver ``_run_mpas``) is a radiative startup
+    # with the gray AMIP deck (driver ``_run_column``) is a radiative startup
     # transient (T=300 K isothermal IC), integrator-independent — and well
     # above the production dt=240 s, which is stable for both integrators.
     #
@@ -212,6 +214,24 @@ class MPASPrimitiveEquationConfig(NamedTuple):
     # 0.0 = off, byte-identical.  Appended at the tuple END: preserves
     # POSITIONAL CONSTRUCTION by existing callers.
     nu_div4: float = 0.0
+    # CAM-style global total-energy fixer (``check_energy_fix``): the energy
+    # the dynamics window loses -- the KE removed by the del2 sponge / del4 /
+    # div4 damping and any numerical dissipation -- is returned each step as a
+    # uniform heating (``core.conservation.voronoi_energy_fixer_dT``), before
+    # physics.  False on the raw dycore (idealized dycore tests unchanged); the
+    # driver sets it from ``DycoreConfig.energy_fixer`` (default True, review
+    # 2026-10-10 F15).
+    energy_fixer: bool = False
+    # (appended last: positional ABI)
+    # Tracer names whose vertical del4 filter uses the mass-weighted FLUX form
+    # (``vertical_del4_tracer_tendency_flux``) instead of the projected form.
+    # Empty = every tracer projected (pre-2026-10 behaviour, bit-identical).
+    vert4_flux_form_tracers: tuple = ()
+    # Tracer names whose vertical del4 filter acts on ln(q + q_eps) with a
+    # water-weighted, mass-conserving interface flux
+    # (``vertical_del4_tracer_tendency_log``).  Must not overlap
+    # ``vert4_flux_form_tracers``.  Empty = unused (bit-identical).
+    vert4_log_form_tracers: tuple = ()
 
 
 # ============================================================================
@@ -340,6 +360,133 @@ def vertical_del4_T_tendency(
                    / _w.sum(axis=-1, keepdims=True))
 
 
+def validate_vert4_flux_form_tracers(names, log_names=()) -> None:
+    """Raise on a vertical-filter form selection that names no known per-mass
+    water/number tracer (a typo, or a string that ``tuple()`` split into
+    characters), in either the flux-form list ``names`` or the log-form list
+    ``log_names``, or that puts one tracer in both lists.  Static Python check
+    on the config value."""
+    _unknown = [n for n in names if n not in BORROW_ELIGIBLE_TRACERS]
+    if _unknown:
+        raise ValueError(
+            f"vert4_flux_form_tracers: unknown tracer names {_unknown} for the "
+            f"vertical filter scheme (expected per-mass water/number tracers "
+            f"such as q_v)")
+    _unknown_log = [n for n in log_names if n not in BORROW_ELIGIBLE_TRACERS]
+    if _unknown_log:
+        raise ValueError(
+            f"vert4_log_form_tracers: unknown tracer names {_unknown_log} for "
+            f"the vertical filter scheme (expected per-mass water/number "
+            f"tracers such as q_v)")
+    _both = sorted(set(names) & set(log_names))
+    if _both:
+        raise ValueError(
+            f"tracers {_both} are in both vert4_flux_form_tracers and "
+            f"vert4_log_form_tracers; each tracer takes one filter form")
+
+
+def vertical_del4_tracer_tendency_flux(
+    q_3d: jax.Array, nu_vert4: float, layer_mass: jax.Array,
+    mobility: jax.Array | None = None,
+) -> jax.Array:
+    """Vertical biharmonic filter of a mixing ratio in MASS-WEIGHTED FLUX form.
+
+    Same inner operator as :func:`vertical_del4_T_tendency` (index-space
+    Laplacian with linearly extrapolated ghosts, so a linear profile gives zero),
+    but the OUTER Laplacian is a mass-weighted flux divergence with no-flux top
+    and bottom::
+
+        L_k = (w_{k+1/2} (g_{k+1} - g_k) - w_{k-1/2} (g_k - g_{k-1})) / dp_k,
+        w_{k+1/2} = min(dp_k, dp_{k+1}),   w_{1/2} = w_{nlev+1/2} = 0
+
+    so ``sum_k L_k dp_k == 0`` by telescoping, column by column, with NO
+    projection.  The projected form removes the column's index-space
+    non-conservation as a UNIFORM mixing-ratio offset at every level; for water
+    vapour (four decades between surface and stratosphere) that offset is a
+    -0.4 ppmv/day (45-70N) to -3 ppmv/day (tropics) sink in the stratosphere
+    (measured on e12_year, 2026-10-07), which dried it to ~1 ppmv.  Here the
+    redistribution is between ADJACENT layers only.  On a uniform grid
+    ``w/dp == 1`` and this equals the projected form (whose projection is then
+    zero) to round-off.
+
+    Stability: spectral radius <= 16 for any positive layer masses (the
+    uniform-grid value; see the interface weight below), so nu*dt*lambda
+    <= 3.6e-3 at nu = 2e-6, dt = 112.5 s.
+
+    Parameters
+    ----------
+    q_3d : (..., nlev) mixing ratio.
+    nu_vert4 : filter rate [1/s] (``nu_vert4_T``).
+    layer_mass : (..., nlev) or (nlev,) positive layer mass (``dp``).
+    mobility : (..., nlev-1) or None.  Non-negative interface factor multiplying
+        each flux (``vertical_del4_tracer_tendency_log`` passes the water at the
+        interface).  None = 1 (this function's own form, unchanged).
+    """
+    pad_axes = ((0, 0),) * (q_3d.ndim - 1)
+    ghost_top = 2.0 * q_3d[..., 0:1] - q_3d[..., 1:2]
+    ghost_bot = 2.0 * q_3d[..., -1:] - q_3d[..., -2:-1]
+    qp = jnp.concatenate([ghost_top, q_3d, ghost_bot], axis=-1)
+    lap = qp[..., :-2] - 2.0 * qp[..., 1:-1] + qp[..., 2:]
+    dp = jnp.broadcast_to(layer_mass.astype(q_3d.dtype), q_3d.shape)
+    # Interface weight = the THINNER adjacent layer's mass (>= 0).  Then
+    # w/dp_k <= 1 on every row, so by Gershgorin the operator's spectral radius
+    # is bounded by the uniform-grid value (16) for ANY layer masses -- the
+    # arithmetic mean was unbounded as a layer thins (codex + GLM review).  A
+    # non-positive layer (broken hybrid layer under very high terrain) gets
+    # w = 0 on both interfaces and zero tendency, so every column still
+    # conserves exactly by telescoping.
+    live = dp > 0
+    w = jnp.maximum(jnp.minimum(dp[..., 1:], dp[..., :-1]), 0.0)
+    flux = w * (lap[..., 1:] - lap[..., :-1])                    # (..., nlev-1)
+    if mobility is not None:
+        flux = flux * mobility
+    flux = jnp.pad(flux, (*pad_axes, (1, 1)))                    # no-flux top/bottom
+    div = flux[..., 1:] - flux[..., :-1]
+    return -nu_vert4 * jnp.where(live, div / jnp.where(live, dp, 1.0), 0.0)
+
+
+# Offset of the log in ``vertical_del4_tracer_tendency_log`` [kg/kg]
+# (~0.16 ppmv): log behaviour where q >> it (2-5 ppmv lower stratosphere and
+# above), finite ln at q = 0.  Owner decision 2026-10-13.
+VERT4_LOG_Q_EPS = 1.0e-7
+
+
+def vertical_del4_tracer_tendency_log(
+    q_3d: jax.Array, nu_vert4: float, layer_mass: jax.Array,
+    q_eps: float = VERT4_LOG_Q_EPS,
+) -> jax.Array:
+    """Vertical biharmonic filter of a mixing ratio acting on ln(q + q_eps).
+
+    Index-space fourth difference of g = ln(max(q, 0) + q_eps), carried by the
+    mass-weighted interface fluxes of :func:`vertical_del4_tracer_tendency_flux`
+    with each flux multiplied by the interface water min(q+_k, q+_k+1)::
+
+        F_{k+1/2} = w_{k+1/2} min(q+_k, q+_{k+1}) (lap g_{k+1} - lap g_k)
+        dq_k/dt   = -nu (F_{k+1/2} - F_{k-1/2}) / dp_k
+
+    * Column water is conserved by telescoping (no correction step).
+    * A profile with q + q_eps exponential in level index has zero tendency.
+      The flux form's fourth difference of q itself is positive for any
+      exponential decay, which removes upper-tropospheric water: 4.5 %/day at
+      45-70N and 8.8 %/day at 20S-20N 103-168 hPa on ERA5 February humidity
+      (probe utls_vfilter_forms.py, 2026-10-13).
+    * A small 2-level zigzag on q = Q is damped at the flux form's rate times
+      Q / (Q + q_eps).
+    * A dry layer (q <= 0) has zero mobility on both faces: nothing moves in or
+      out of it, and it cannot drain its neighbours.
+    * Outflow from a layer per step is at most nu*dt*|delta lap g|*w/dp_k of its
+      own water (mobility <= q+_k); measured <= 0.22 % per step on a day-60
+      AMIP state at nu = 2e-6 /s, dt = 112.5 s.
+
+    Differentiable: ln's argument is >= q_eps > 0; max/min have finite
+    subgradients.  Shapes as :func:`vertical_del4_tracer_tendency_flux`.
+    """
+    q_pos = jnp.maximum(q_3d, 0.0)
+    g = jnp.log(q_pos + q_eps)
+    mobility = jnp.minimum(q_pos[..., 1:], q_pos[..., :-1])
+    return vertical_del4_tracer_tendency_flux(g, nu_vert4, layer_mass, mobility=mobility)
+
+
 def sponge_del2_profile(nlev: int, n_layers: int, factor) -> jnp.ndarray:
     """Per-level del2 viscosity multiplier of a CAM-style top diffusion sponge:
     factor**((n_layers - k)/n_layers) for level k < n_layers (k = 0 is the
@@ -381,6 +528,11 @@ def mpas_hydrostatic_tendencies(
     MPASHydrostaticTendencies
     """
     _hybrid = isinstance(sigma_coord, HybridSigmaPressureCoordinate)
+    # Typo guard on the static tracer-form selection, whether or not the
+    # filter runs (nu_vert4_T = 0 or <= 2 levels) and whether or not the state
+    # carries tracers: a misspelled name is an error, never silently unused.
+    validate_vert4_flux_form_tracers(config.vert4_flux_form_tracers,
+                                     config.vert4_log_form_tracers)
 
     # Fail-early dispatch guard on the STATIC config value (never on a tracer):
     # an unknown scheme must raise, and a scheme the hybrid lane cannot honour
@@ -823,10 +975,33 @@ def mpas_hydrostatic_tendencies(
         # tropopause-refined σ grids too, not just on a uniform grid.
         # Zero when nu_vert4_T == 0 (bit-identical).
         if config.nu_vert4_T > 0.0 and q.shape[-2] > 2:
-            dq = dq + jax.vmap(
-                lambda qk: vertical_del4_T_tendency(
-                    qk, config.nu_vert4_T, _filter_weight),
-                in_axes=-1, out_axes=-1)(q)
+            # Per-tracer form: names in ``vert4_flux_form_tracers`` get the
+            # mass-weighted flux form (no projection); the rest keep the
+            # projected form.  Static Python selection on the tracer names.
+            # A known water/number name this state does not carry (e.g. the
+            # q_v default on a passive-tracer-only state) is simply unused; a
+            # name that is no water/number tracer at all raised at function
+            # entry (``validate_vert4_flux_form_tracers``).
+            _flux_set = tuple(n for n in config.vert4_flux_form_tracers
+                              if n in _tnames)
+            _log_set = tuple(n for n in config.vert4_log_form_tracers
+                             if n in _tnames)
+            if not _flux_set and not _log_set:
+                dq = dq + jax.vmap(
+                    lambda qk: vertical_del4_T_tendency(
+                        qk, config.nu_vert4_T, _filter_weight),
+                    in_axes=-1, out_axes=-1)(q)
+            else:
+                dq = dq + jnp.stack([
+                    (vertical_del4_tracer_tendency_flux(
+                        q[..., _i], config.nu_vert4_T, _filter_weight)
+                     if _n in _flux_set else
+                     vertical_del4_tracer_tendency_log(
+                         q[..., _i], config.nu_vert4_T, _filter_weight)
+                     if _n in _log_set else
+                     vertical_del4_T_tendency(
+                         q[..., _i], config.nu_vert4_T, _filter_weight))
+                    for _i, _n in enumerate(_tnames)], axis=-1)
         _phys_tt = (physics_tendency.tracer_tendencies
                     if physics_tendency is not None else None)
         for _i, k in enumerate(_tnames):
@@ -995,24 +1170,9 @@ class MPASPrimitiveEquationModel(IntegrationMixin):
         trace; gh-417), so traced callers must thread ``phys_state``
         explicitly through their own carry.
         """
-        refuse_unthreaded_stateful_physics(
-            physics_fn, phys_state, where="MPAS step()")
-        target_mass = self._target_mass
-        if (self.config.fix_mass
-                and self.config.anchor_mass_to_initial
-                and target_mass is None):
-            target_mass = self.compute_mass(state)
-            if not isinstance(target_mass, jax.core.Tracer):
-                # Designed eager path: cache the concrete t=0 mass so
-                # later segments keep anchoring to the same constant.
-                self._target_mass = target_mass
-            # Traced path (step() inside an OUTER jit/grad/scan): NEVER
-            # cache — a tracer stored on self leaks into the next trace
-            # (UnexpectedTracerError; gh-417, same class as the
-            # primitive_eq_cdgrid A1-gate bug).  Thread the per-call
-            # pre-step mass instead (telescoping fixer semantics).
-        state_new, phys_out, sfc_diag, led_step = self._step_jit(
-            state, dt, physics_fn, target_mass, forcing, phys_state)
+        state_new, phys_out, sfc_diag, led_step = self.step_pure(
+            state, dt, physics_fn=physics_fn, forcing=forcing,
+            phys_state=phys_state, target_mass=self.mass_target(state))
         if not any(isinstance(leaf, jax.core.Tracer)
                    for leaf in jax.tree_util.tree_leaves(phys_out)):
             self._phys_state = phys_out
@@ -1045,6 +1205,36 @@ class MPASPrimitiveEquationModel(IntegrationMixin):
                 new if new is not None else old
                 for new, old in zip(sfc_diag, _prev))
         return state_new
+
+    def mass_target(self, state):
+        """Dry-mass target ``step`` anchors the fixer to (None when not
+        anchoring).  Caches only a concrete (eager) value."""
+        target_mass = self._target_mass
+        if (self.config.fix_mass
+                and self.config.anchor_mass_to_initial
+                and target_mass is None):
+            target_mass = self.compute_mass(state)
+            if not isinstance(target_mass, jax.core.Tracer):
+                # Designed eager path: cache the concrete t=0 mass so
+                # later segments keep anchoring to the same constant.
+                self._target_mass = target_mass
+            # Traced path (step() inside an OUTER jit/grad/scan): NEVER
+            # cache — a tracer stored on self leaks into the next trace
+            # (UnexpectedTracerError; gh-417, same class as the
+            # primitive_eq_cdgrid A1-gate bug).  A traced caller passes
+            # the target it wants explicitly (``step_pure``).
+        return target_mass
+
+    def step_pure(self, state, dt, physics_fn=None, forcing=None,
+                  phys_state=None, target_mass=None):
+        """The step with NO side channels: ``(state_new, phys_state_out,
+        sfc_diag, ledger)``.  ``step`` is this plus the eager stashes; a
+        differentiable caller threads ``phys_state`` and ``target_mass``
+        itself (``legoesm.driver.mpas_diff_step``)."""
+        refuse_unthreaded_stateful_physics(
+            physics_fn, phys_state, where="MPAS step_pure()")
+        return self._step_jit(state, dt, physics_fn, target_mass, forcing,
+                              phys_state)
 
     @partial(jax.jit, static_argnums=(0, 3))
     def _step_jit(
@@ -1121,6 +1311,16 @@ class MPASPrimitiveEquationModel(IntegrationMixin):
         state_new = dispatch_integrator(
             state, dyn_tendency_fn, dt, self.config.time_integrator,
         )
+        if self.config.energy_fixer:
+            # --- 1b. Dycore energy fixer (CAM check_energy_fix, F15): the
+            # energy the dynamics window lost (damping KE, numerics) comes
+            # back as a uniform heating BEFORE physics [K, +warming].
+            _dT_fix = voronoi_energy_fixer_dT(
+                state, state_new, self.mesh, self.sigma_coord,
+                self.mesh.areaCell)
+            state_new = state_new._replace(T=state_new.T.replace(
+                data=state_new.T.data
+                + _dT_fix.astype(state_new.T.data.dtype)))
 
         # --- 2. Operator-split physics: evaluate ONCE on the post-dynamics
         #        state, apply forward over dt.  ``state += dt * tendency``
@@ -1213,6 +1413,17 @@ class MPASPrimitiveEquationModel(IntegrationMixin):
                 target_mass=target_mass,
                 sigma_coord=self.sigma_coord,
             )
+            if self.config.energy_fixer:
+                # The dry-mass fixer runs OUTSIDE the energy window (after
+                # physics); return the energy its p_s shift changed as a
+                # uniform heating [K, +warming], so E is unchanged across it
+                # (CAM's window covers its mass fixer; F15 V8, vote B).
+                _dT_mf = voronoi_energy_fixer_dT(
+                    _state_prefix, state_new, self.mesh, self.sigma_coord,
+                    self.mesh.areaCell)
+                state_new = state_new._replace(T=state_new.T.replace(
+                    data=state_new.T.data
+                    + _dT_mf.astype(state_new.T.data.dtype)))
         _state_postfix = state_new        # ledger: after the dry-mass fixer
 
         # --- 3. Floors ---

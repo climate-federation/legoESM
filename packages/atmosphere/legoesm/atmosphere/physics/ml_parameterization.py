@@ -374,9 +374,20 @@ def apply_predicted_sundqvist_rain_survival_fraction(
     dz: jax.Array,
     dt: float,
     config,
+    carries_q_i: bool,
+    cell_area=None,
 ) -> MicrophysicsOutput:
-    """Rebuild Sundqvist microphysics from a learned column rain-survival fraction."""
+    """Rebuild Sundqvist microphysics from a learned column rain-survival fraction.
+    The rebuild has no ice slot: q_i is not read.  A lane that carries q_i is
+    refused (``carries_q_i=True`` raises): the physical path splits liquid/ice
+    there and this rebuild cannot (codex + GLM 2026-10-29)."""
+    if carries_q_i:
+        raise ValueError(
+            "learned Sundqvist rain-survival rebuild: this lane carries q_i, "
+            "but the rebuild has no liquid/ice split (the physical Sundqvist "
+            "path does); run the physical scheme on this lane")
     rates = diagnose_sundqvist_process_rates(
+        cell_area=cell_area,
         T=T,
         q_v=q_v,
         hydrometeors=hydrometeors,
@@ -387,20 +398,24 @@ def apply_predicted_sundqvist_rain_survival_fraction(
         dt=dt,
         config=config,
     )
-    # Both fluxes share the ``rho * dz`` weight on the level axis; fuse
-    # the autoconversion and base-evaporation column reductions.
+    # Both fluxes share the scheme's layer mass dp/g (Zhao-Carr del/g) on the
+    # level axis; fuse the autoconversion and base-evaporation reductions.
+    layer_mass = (p_half[:, 1:] - p_half[:, :-1]) / constants.g
     _flux_pair = jnp.sum(
         jnp.stack([rates.autoconversion, rates.evaporation], axis=-1)
-        * (rho * dz)[..., None],
+        * layer_mass[..., None],
         axis=-2,
     )
     generated_rain_flux = _flux_pair[..., 0]
     base_evap_flux = _flux_pair[..., 1]
     target_precip = jnp.clip(predicted_rain_survival_fraction, 0.0, 1.0) * generated_rain_flux
     target_evap_flux = jnp.clip(generated_rain_flux - target_precip, 0.0, generated_rain_flux)
+    # Double where: a rain-free column has base_evap_flux == 0 exactly, and a
+    # 0/0 in the discarded branch still poisons the reverse pass with NaN.
+    _evap_ok = base_evap_flux > 1.0e-12
     scale = jnp.where(
-        base_evap_flux > 1.0e-12,
-        target_evap_flux / base_evap_flux,
+        _evap_ok,
+        target_evap_flux / jnp.where(_evap_ok, base_evap_flux, 1.0),
         1.0,
     )
     evaporation = rates.evaporation * scale[:, None]
@@ -414,10 +429,9 @@ def apply_predicted_sundqvist_rain_survival_fraction(
     dt_safe = jnp.maximum(dt, 1e-10)
     q_r_in = jnp.clip(hydrometeors.q_r, 0.0, None)
     dq_r_dt = -q_r_in / dt_safe
-    dp = p_half[:, 1:] - p_half[:, :-1]
-    q_r_drain_flux = jnp.sum(q_r_in * dp, axis=1) / (constants.g * dt_safe)
+    q_r_drain_flux = jnp.sum(q_r_in * layer_mass, axis=1) / dt_safe
     precipitation = jnp.clip(
-        generated_rain_flux - jnp.sum(evaporation * rho * dz, axis=1)
+        generated_rain_flux - jnp.sum(evaporation * layer_mass, axis=1)
         + q_r_drain_flux,
         0.0,
         None,

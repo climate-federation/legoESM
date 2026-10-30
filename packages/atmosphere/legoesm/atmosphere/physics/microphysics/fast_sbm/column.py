@@ -1,5 +1,17 @@
 """Stateless column adapter — fast-SBM as ``scheme="fast_sbm"``.
 
+NOT YET FAITHFUL to the WRF v4.8.0 FAST_SBM driver (oracle-faithfulness
+campaign 2026-10). The building blocks it calls (Bott collision/riming,
+ONECOND1 condensation, FREEZ, J_W_MELT, FALFLUXHUCM_Z kernel) reproduce the
+running oracle (``tests/atmosphere/microphysics/unit/
+test_fast_sbm_wrf_oracle.py``); this ASSEMBLY does not: the oracle carries
+the bin spectra (FF1-FF5, FCCN) and T_OLD/QV_OLD as prognostic state, reads
+its masses/fall-speed/kernel/capacity tables from the WRF ``run/`` files,
+runs NCOND=3 condensation substeps behind the DIFFU gate, gates collision
+on T >= 233.15 K, freezes before melting, runs ONECOND2/3, JERNUCL01, ice
+breakup and SIP, and sediments with the adaptive-NSUB unlimited
+FALFLUXHUCM_Z — none of which this stateless reconstruction does.
+
 Matches the legoESM column-physics interface
 ``micro_fn(T, q_v, hydrometeors, p_full, p_half, rho, dz, dt, cfg)
 -> MicrophysicsOutput`` (see ``microphysics/integration.py``), following
@@ -43,8 +55,7 @@ live.
   (the oracle uses category-specific ice-liquid cross kernels
   ``cwsl``/``cwgl`` — a documented kernel approximation; the Bott
   collection METHOD is faithful). Both snow and graupel rime (snow first,
-  graupel collects the remainder). Graupel melt reuses the snow melt-rate
-  ladder (oracle has category-specific melt thresholds).
+  graupel collects the remainder).
 * The third snow category (oracle separates pristine crystals ``FF2`` from
   snow aggregates ``FF3``) and the per-habit ice-crystal sub-types
   (``ICEMAX=3``) are collapsed; ``q_s`` and ``dq_s_dt`` stay zero.
@@ -77,6 +88,7 @@ from legoesm.atmosphere.physics.microphysics.fast_sbm.collision import (
     precompute_riming_tables,
 )
 from legoesm.atmosphere.physics.microphysics.fast_sbm.condensation_driver import (
+    saturation_ratio_fast_sbm,
     warm_condensation_step,
 )
 from legoesm.atmosphere.physics.microphysics.fast_sbm.config import FastSBMConfig
@@ -105,7 +117,6 @@ from legoesm.atmosphere.physics.microphysics.fast_sbm.melting import (
 from legoesm.atmosphere.physics.microphysics.fast_sbm.nucleation import (
     activate_ccn,
 )
-from legoesm.thermo import relative_humidity
 from legoesm.atmosphere.physics.microphysics.fast_sbm.sedimentation import (
     sediment_bins,
 )
@@ -278,11 +289,11 @@ def fast_sbm_microphysics(
         f_graupel0 = _reconstruct_ice(qg_c, rho_c, masses, config)
         # MELT both carried ice categories above 0 °C → add to liquid, cool
         # (oracle J_W_MELT). Closes the cross-step ice loop freezing opens.
-        # Graupel reuses the snow melt-rate ladder; the oracle has
-        # category-specific melt thresholds (FF4 graupel KR<=13 vs FF3 snow
-        # KR<=14) — a documented simplification, refined with per-habit melt.
+        # Category ladders as the oracle: snow FF3 (KR<=14), graupel FF4
+        # (KR<=13).
         melt_s = melt_step(f_snow0, masses, T_c, rho_c, dt, config)
-        melt_g = melt_step(f_graupel0, masses, T_c, rho_c, dt, config)
+        melt_g = melt_step(f_graupel0, masses, T_c, rho_c, dt, config,
+                           category="graupel_hail")
         f_pre = f_liq0 + melt_s.f_liquid + melt_g.f_liquid
         f_snow_after_melt = melt_s.f_ice
         f_graupel_after_melt = melt_g.f_ice
@@ -294,7 +305,9 @@ def fast_sbm_microphysics(
         # steady cloud N_existing ≈ N_target so nothing re-activates,
         # avoiding the spurious re-activation a `ccn_number − N_existing`
         # reservoir would cause when reconstruction resets the count.
-        S_c = relative_humidity(T_c, p_c, qv_c)
+        # Same saturation ratio the condensation step uses (FAST_SBM computes
+        # one DEL1IN for nucleation and condensation).
+        S_c = saturation_ratio_fast_sbm(T_c, p_c, qv_c)
         n_existing = number_density(
             jnp.where(jnp.arange(masses.shape[0]) < cloud_bins, f_pre, 0.0),
             masses)
@@ -429,4 +442,5 @@ def fast_sbm_microphysics(
         dN_r_dt=(nr1 - nr0) * inv_dt,
         dN_i_dt=zeros,
         precipitation=precip,
+        precip_frozen=precip_s + precip_g,             # the ice-phase bins (F29)
     )

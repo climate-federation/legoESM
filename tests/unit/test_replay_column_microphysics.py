@@ -304,3 +304,32 @@ def test_issue1515_poisoned_nr_repaired_in_one_step():
         f"{np.max(n_r_new[~orphan] / np.maximum(ceiling[~orphan], 1e-300)):.3g}x, "
         f"and by more than one unit in the last place of the incoming number"
     )
+
+
+@pytest.mark.parametrize("flavor,dcs,expect", [
+    ("mg", None, 500.0e-6), ("sam", None, 250.0e-6), ("mg", 250.0e-6, 250.0e-6)])
+def test_build_morrison_config_resolves_dcs_as_the_driver(flavor, dcs, expect):
+    """A manifest's unset DCS replays at the flavour's value (mg = CAM6 MG2
+    500 um), an explicit one as recorded."""
+    from legoesm.atmosphere.physics.microphysics.morrison import (
+        resolve_morrison_flavor)
+    cfg = build_morrison_config({**RESOLVED_1432, "morrison_flavor": flavor,
+                                 "morrison_ice_snow_d_auto": dcs})
+    assert resolve_morrison_flavor(cfg).ice_snow_d_auto == expect
+
+
+@pytest.mark.parametrize("recorded,expect", [
+    ("absent", "kk2000"), (None, "kk2000_cam6"),
+    ("seifert_beheng_sb2001", "seifert_beheng_sb2001")])
+def test_build_morrison_config_replays_the_recorded_warm_rain_law(recorded,
+                                                                  expect):
+    """Explicit law as recorded; recorded unset by flavour (mg here); a
+    manifest without the key (pre-field run) at kk2000."""
+    from legoesm.atmosphere.physics.microphysics.morrison import (
+        resolve_morrison_flavor)
+    res = {**RESOLVED_1432, "morrison_flavor": "mg"}
+    res.pop("morrison_warm_rain_scheme", None)
+    if recorded != "absent":
+        res["morrison_warm_rain_scheme"] = recorded
+    cfg = build_morrison_config(res)
+    assert resolve_morrison_flavor(cfg).warm_rain_scheme == expect

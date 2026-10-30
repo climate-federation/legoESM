@@ -105,6 +105,9 @@ def run_smoke(
         "--era5-zarr", era5_path,
         "--mode", mode,
         "--dry-run",
+        # even a dry run writes the effective-config sidecar next to --out;
+        # keep it in the workdir instead of the caller's cwd
+        "--out", str(work / "corrected_clubb_config.json"),
     ]
     if ocean_only:
         dry_argv.append("--ocean-only")

@@ -139,7 +139,7 @@ namelist parsers in packages/.
   (D114); required alpha `ocean_model_latlon_cgrid.py:4415` (D115); the
   advection-OFF arms; the RK3 identity "orca2_vector_een_c2" with the OMT-0
   five-OFF selections.
-- New: `nemo_testcase_recipe.py:3662` (builder), `:3562` deck reader, `:3611`
+- New: `nemo_testcase_recipe.py:4116` (builder), `:3562` deck reader, `:3611`
   bump, `:3875` validator. A separate builder rather than a parameterised
   ORCA2 card: the ORCA2 builder requires five input files G1 has no use for
   (T/S, viscosity, wave mixing) and builds ice and TKE state; the shared part

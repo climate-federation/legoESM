@@ -94,6 +94,12 @@ class SCMGrid(NamedTuple):
     grid_lat: jax.Array  # (1, 1, 1) [rad]
     grid_lon: jax.Array  # (1, 1, 1) [rad]
     radius: float
+    #: the GCM cell area [m^2] the column stands for, declared by its case;
+    #: None = undeclared (area-aware schemes such as Sundqvist then refuse)
+    grid_area: jax.Array | None = None
+    #: land fraction [0-1] the case declares for the column; None =
+    #: undeclared (land-scaled schemes such as CAM6 McFarlane then refuse)
+    land_frac: jax.Array | None = None
 
     @property
     def grid_n_columns(self) -> int:
@@ -104,11 +110,20 @@ class SCMGrid(NamedTuple):
         return (1, 1, 1)
 
 
-def make_scm_grid(latitude_deg: float, longitude_deg: float = 0.0) -> SCMGrid:
-    """Build a single-column grid at the given latitude/longitude."""
+def make_scm_grid(latitude_deg: float, longitude_deg: float = 0.0,
+                  cell_area_m2: float | None = None,
+                  land_frac: float | None = None) -> SCMGrid:
+    """Build a single-column grid at the given latitude/longitude.
+
+    ``cell_area_m2`` is the GCM cell the column stands for and ``land_frac``
+    the column's land fraction, both declared by the case; ``None`` leaves
+    either undeclared."""
     lat = jnp.asarray([[[jnp.deg2rad(latitude_deg)]]])
     lon = jnp.asarray([[[jnp.deg2rad(longitude_deg)]]])
-    return SCMGrid(grid_lat=lat, grid_lon=lon, radius=constants.R_earth)
+    area = None if cell_area_m2 is None else jnp.full((1, 1, 1), cell_area_m2)
+    lf = None if land_frac is None else jnp.full((1, 1, 1), land_frac)
+    return SCMGrid(grid_lat=lat, grid_lon=lon, radius=constants.R_earth,
+                   grid_area=area, land_frac=lf)
 
 
 def make_column_state(
@@ -826,6 +841,8 @@ class SingleColumnModel:
         phis: float = 0.0,
         latitude_deg: float = 0.0,
         longitude_deg: float = 0.0,
+        cell_area_m2: float | None = None,
+        land_frac: float | None = None,
         sigma_top: float = 0.01,
         prng_seed: int = 0,
         dtype=None,
@@ -908,7 +925,8 @@ class SingleColumnModel:
         cls._validate_prescribed_fluxes_no_double_count(
             physics_config, forcing,
         )
-        grid = make_scm_grid(latitude_deg, longitude_deg)
+        grid = make_scm_grid(latitude_deg, longitude_deg,
+                             cell_area_m2=cell_area_m2, land_frac=land_frac)
         sigma_coord = create_sigma_coordinate(nlev, sigma_top=sigma_top, dtype=dtype)
 
         needs_moist = (
@@ -997,6 +1015,12 @@ class SingleColumnModel:
                     dims=_DIMS_3D, units=units[name],
                 )
             state = state._replace(tracers=new_tracers)
+        # The bulk surface exchange needs a surface temperature: the SCM's
+        # prescribed skin (prescribe="T_s").  Prescribed fluxes are the
+        # surface exchange already, and a case with no surface forcing has
+        # none.
+        _sfc_bulk = ("default" if (forcing is not None
+                                   and forcing.prescribe == "T_s") else None)
         microphysics_fn = None
         if (
             microphysics_substeps > 1
@@ -1007,6 +1031,7 @@ class SingleColumnModel:
             )
             physics_fn = make_physics(
                 nonmicro_config, model_type="hydrostatic", dt=dt,
+                surface_bulk_coeffs=_sfc_bulk,
             )
             microphysics_fn = make_microphysics_physics(
                 physics_config.microphysics,
@@ -1016,6 +1041,7 @@ class SingleColumnModel:
         else:
             physics_fn = make_physics(
                 physics_config, model_type="hydrostatic", dt=dt,
+                surface_bulk_coeffs=_sfc_bulk,
             )
         phys_state = init_physics_state(
             ncol=1, nlev=nlev, physics_config=physics_config,

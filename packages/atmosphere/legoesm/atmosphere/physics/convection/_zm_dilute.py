@@ -73,7 +73,8 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
-from legoesm.thermo import saturation_specific_humidity
+from legoesm.core.nonlinear import attach_implicit_gradient
+from legoesm.thermo import saturation_specific_humidity_goff_gratch
 from legoesm.thermo import latent_heat_vaporization
 from legoesm.atmosphere.physics.convection._triggers import (
     smooth_lowest_crossing_index,
@@ -122,8 +123,8 @@ __physics_contract__ = {
 
 # Saturation humidity: the oracle ``qsat_hPa`` wraps CAM/E3SM ``qsat_water``,
 # which returns the saturation SPECIFIC humidity ``ε·e/(p − (1−ε)·e)``
-# (``wv_sat_methods.F90`` ``wv_sat_svp_to_qsat``), so every qsat here is the
-# shared ``saturation_specific_humidity`` (algebraically the same expression).
+# (``wv_sat_methods.F90`` ``wv_sat_svp_to_qsat``) over the Goff-Gratch water
+# curve, so every qsat here is ``saturation_specific_humidity_goff_gratch``.
 # The oracle then uses ``e = qv·p/(ε + qv)`` and the 1.608 virtual-T
 # coefficient on that same ``q``; those formulas are kept verbatim.
 
@@ -182,8 +183,10 @@ def moist_entropy(T: jax.Array, p_pa: jax.Array, qtot: jax.Array) -> jax.Array:
     keep Pa throughout and ``p_ref = 1e5 Pa`` — the ``ln`` of the ratio
     is identical).
     """
-    q_sat = saturation_specific_humidity(T, p_pa)
-    qv = jnp.minimum(qtot, q_sat)
+    q_sat = saturation_specific_humidity_goff_gratch(T, p_pa)
+    # Saturated branch owns the exact tie, so the slope there is one-sided
+    # (jnp.minimum's derivative would average the two branches).
+    qv = jnp.where(qtot >= q_sat, q_sat, qtot)
     # Numerical floor so ln(qv/qs) is finite for a bone-dry parcel.
     qv_safe = jnp.maximum(qv, 1.0e-12)
     # Kirchhoff L(T) via the shared helper (thermodynamics module).
@@ -212,11 +215,14 @@ def invert_entropy(
     """Newton inversion: solve ``moist_entropy(T, p, qt) = s_target`` for T.
 
     Fixed ``_NEWTON_ITERS`` iterations with a centered finite-difference
-    derivative (the entropy has a ``min(qtot, qs)`` kink that a closed-
-    form derivative would have to special-case; the centered difference
-    is smooth-enough for AD and converges in < 10 iterations in
-    practice).  ``T`` is clipped to a physical range each step to keep
-    the iteration bounded.
+    derivative (converges in < 10 iterations in practice); ``T`` is clipped
+    to a physical range each step to keep the iteration bounded.  The loop
+    is not differentiated: the gradient is the exact implicit-function one,
+    attached at the root (``core.nonlinear.attach_implicit_gradient``), so
+    reverse mode costs one entropy evaluation instead of replaying the
+    iterations, and nothing flows to ``T_first_guess``.  At the
+    ``min(qtot, qs)`` kink the slope is the one-sided derivative of the
+    active branch (owner decision 2026-10-03).
     """
     dT = 0.01  # coeff-ok: FD temperature perturbation [K]
     _dtype = T_first_guess.dtype
@@ -240,7 +246,10 @@ def invert_entropy(
         # Pin to input precision (fori_loop carry dtype invariant).
         return jnp.clip(T_new, 120.0, 360.0).astype(_dtype)  # coeff-ok: physical T clip [K]
 
-    return jax.lax.fori_loop(0, _NEWTON_ITERS, body, T_first_guess)
+    T_root = jax.lax.fori_loop(0, _NEWTON_ITERS, body, T_first_guess)
+    return attach_implicit_gradient(
+        T_root, lambda T: moist_entropy(T, p_pa, qtot) - s_target,
+        lo=120.0, hi=360.0)  # coeff-ok: same physical T clip [K] as the loop
 
 
 def dilute_parcel_cape(
@@ -423,7 +432,7 @@ def dilute_parcel_cape(
         qt_mix = (qt0 + qt_entr_new) / (1.0 + m_entr_new)
 
         T_mix = invert_entropy(s_mix, p_e, qt_mix, T_mix_prev)
-        qs_mix = saturation_specific_humidity(T_mix, p_e)
+        qs_mix = saturation_specific_humidity_goff_gratch(T_mix, p_e)
 
         # Pin carry to input precision (scan-carry dtype invariant —
         # Python-float constants otherwise promote to float64).
@@ -505,7 +514,7 @@ def dilute_parcel_cape(
         # the ``sabv`` blend below restricts the modification to the
         # strictly-above-launch region.
         T_mix_k = T_mix_entr
-        qs_mix_k = saturation_specific_humidity(T_mix_k, p_e)
+        qs_mix_k = saturation_specific_humidity_goff_gratch(T_mix_k, p_e)
         new_q = qt_m
         xsh2o_k = xsh2o_prev
         dsx_k = dsx_prev
@@ -541,7 +550,7 @@ def dilute_parcel_cape(
             new_s = s_m + dsx_k + dsf_k
             new_q = qt_m - xsh2o_k
             T_mix_k = invert_entropy(new_s, p_e, new_q, T_mix_k)
-            qs_mix_k = saturation_specific_humidity(T_mix_k, p_e)
+            qs_mix_k = saturation_specific_humidity_goff_gratch(T_mix_k, p_e)
 
         # Restrict the latent-heat modification to STRICTLY above launch
         # (oracle loops only ``k < klaunch``; the launch level and below are
@@ -562,7 +571,7 @@ def dilute_parcel_cape(
         new_q = sabv * new_q + (1.0 - sabv) * q_e
         # Tp: above launch = lheat-adjusted; at/below = entrained-only T_mix.
         T_mix_k = sabv * T_mix_k + (1.0 - sabv) * T_mix_entr
-        qs_mix_k = saturation_specific_humidity(T_mix_k, p_e)
+        qs_mix_k = saturation_specific_humidity_goff_gratch(T_mix_k, p_e)
 
         # Retained vapor (qstp): above launch = qs if super-saturated else
         # new_q; at/below launch = q_env (oracle qstp(mx)=q(mx)).

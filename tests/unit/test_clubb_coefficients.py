@@ -53,8 +53,16 @@ def test_C6_C7_skw_fnc():
     Lscale_zm = jnp.asarray(50.0 + 200.0 * rng.random((ng, nzm)))
     C6rt, C6thl, C7 = C.compute_C6_C7_Skw_fnc(Skw_zm, Lscale_zm, cfg, gr)
     assert C6rt.shape == (ng, nzm) and C7.shape == (ng, nzm)
-    # CAM default C7 = C7b = 0.5 -> constant (|C7-C7b| = 0 -> the floor branch)
-    np.testing.assert_allclose(np.asarray(C7), cfg.params.C7b, rtol=1e-12)
+    # CAM default C7 = C7b = 0.5 -> constant skewness function (|C7-C7b| = 0),
+    # then damped toward C7_Lscale0 where Lscale_zm < wpxp_L_thresh above
+    # altitude_threshold (advance_xm_wpxp_module.F90:741-745).
+    p = cfg.params
+    L = np.asarray(Lscale_zm)
+    damped = (L < p.wpxp_L_thresh) & (np.asarray(gr.zm) > p.altitude_threshold)
+    assert damped.any() and (~damped).any()
+    want = np.where(damped, p.C7_Lscale0 + (p.C7 - p.C7_Lscale0) / p.wpxp_L_thresh * L,
+                    p.C7b)
+    np.testing.assert_allclose(np.asarray(C7), want, rtol=1e-12)
     # C6rt skewness function (C6rt=4 != C6rtb=6) is bounded by [min(C6rt,C6rtb)-, ...]
     assert np.all(np.isfinite(np.asarray(C6rt))) and np.all(np.isfinite(np.asarray(C6thl)))
 

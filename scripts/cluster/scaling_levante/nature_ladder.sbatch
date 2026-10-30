@@ -149,7 +149,11 @@ run_arm() {
     tripole)
       export NCCL_MIN_NCHANNELS=16 NCCL_MAX_NCHANNELS=16
       bench=scripts/bench/bench_ocean_latlon_spmd_scaling.py
-      args+=(--tripole --nlev 75)
+      # Mesh-scaled viscosity: pinned A_h=1e4 is unstable on 1.6 km polar
+      # cells at dt 600 s (user decision 2026-10-19).
+      # 200 fixed PCG iterations: 16-GPU f32 accuracy sweep on this grid, 60 left
+      # 360x the converged residual; 200 is within 10x in f32 (user decision 2026-10-21, both precisions).
+      args+=(--tripole --nlev 75 --A-h-from-mesh --pcg-fixed-iters 200)
       if [[ "$mode" == strong ]]; then
         args+=(--mode strong --n-lat "$res" --n-lon "$NLON_TRIPOLE")
       else
@@ -195,6 +199,7 @@ P2_CPU="1 2 4 8 16 32 64 128 256 512"
 case "$MATRIX" in
   atm_gpu)
     NLON_WEAK=8192
+    add latlon strong 4096 4 8 16 32 64 128   # owner 2026-10-13: 4096x8192 only, L40
     add latlon weak   32   $P2_GPU                # 32 rows x 8192 x 26 per GPU (= LL4096@128 share)
     add mpas   strong 9    $P2_GPU
     add mpas   strong 10   2 4 8 16 32 64 128 192

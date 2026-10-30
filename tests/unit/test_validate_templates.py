@@ -97,7 +97,7 @@ def test_unknown_data_id_rejected(vt, tmp_path):
             "  data: [no_such_dataset_xyz]\n"
             "model:\n  type: atmosphere_only\n"
             "grid:\n  type: cubed_sphere\n  resolution: 48\n  n_levels: 1\n"
-            "  vertical_coord: none\n"
+            "  vertical_coord: sigma\n"
             "atmosphere:\n  dynamics: shallow_water\n  dt_seconds: 600\n"
             "time:\n  duration_hours: 24\n"
         ))

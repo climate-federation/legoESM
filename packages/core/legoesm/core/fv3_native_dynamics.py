@@ -516,7 +516,7 @@ def fv_dynamics_step(ctx: dict, state: list, press: list, *,
                      inline_q: bool = False,
                      return_pre_remap: bool = False,
                      return_substeps: bool = False,
-                     stage_hook=None) -> dict:
+                     stage_hook=None, fill: bool = False) -> dict:
     """One ``fv_dynamics`` call: ``bdt`` of model time (``:451-674``).
 
     ``state`` is the six-face prognostic bundle from
@@ -898,7 +898,7 @@ def fv_dynamics_step(ctx: dict, state: list, press: list, *,
                 rdgas=(None if hydrostatic else _FV3_RDGAS),
                 grav=(None if hydrostatic else _FV3_GRAV),
                 adiabatic=adiabatic_flag,
-                consv=consv_te, fill=False, do_sat_adj=False,
+                consv=consv_te, fill=fill, do_sat_adj=False,
                 do_inline_mp=False, do_adiabatic_init=False,
                 defer_close=_defer)
 
