@@ -2314,7 +2314,7 @@ class LatLonCGridOceanConfig(NamedTuple):
     # row below.  True hands the 3-D vorticity trend that image row; False
     # (default) is the bit-identical legacy path whose compact V mask leaves
     # the row dry.  Selected explicitly by a card; needs an active fold.
-    een_fold_image_v_row: bool = False
+    # Declared once at the append-only NamedTuple tail below.
     # F-point (vertex) layer-thickness rule for the AL81/EEN PV flux:
     # "min" (default, bit-identical legacy) — MITgcm hFacZ convention, min
     #   over the 4 surrounding ACTIVE cells (Adcroft-Hill-Marshall 1997 /

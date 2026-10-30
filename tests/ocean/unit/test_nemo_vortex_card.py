@@ -653,9 +653,9 @@ _CERTIFIED_CARD_DIGESTS_GRADGATE = {        # gradient-gate tip d678430f3
 _CERTIFIED_CARD_DIGESTS = {
     # Main's additive config fields move the printed NamedTuple digest; the
     # surrounding field-by-field guards continue to pin their inert values.
-    "GYRE-zco": "bcdf435d1d327307",
-    "LOCK_EXCHANGE-zco": "4a2755867c65dc09",
-    "OVERFLOW-zps": "85ef64c8bb166058",
+    "GYRE-zco": "c67f476bb842d935",
+    "LOCK_EXCHANGE-zco": "83652380eb08c7b5",
+    "OVERFLOW-zps": "626dc566877c9442",
 }
 
 
