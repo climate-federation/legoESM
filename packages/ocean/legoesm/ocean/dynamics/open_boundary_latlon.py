@@ -16,7 +16,7 @@ does with ``OBC_M2CHARACT`` + ``OBC_VOLCONS`` and no ``Z`` key
   interior, the incoming one from the data ``ubar_ext``, ``zeta_ext``;
 * sea level in the ring cells: zero gradient (copy of the first interior);
 * a uniform normal velocity on all open faces that cancels the net volume
-  flux through the open boundary.
+  flux through the open boundary, or sets it to ``target_net_flux``.
 
 The baroclinic and tracer conditions (radiation with nudging) and the
 relaxation sponge act once per outer step and are applied elsewhere.
@@ -58,6 +58,11 @@ class OpenBoundaryData(NamedTuple):
     # switch, so it stays static under jit).  For tests of wave transparency:
     # with the correction on, a sea level anomaly's own volume cannot leave.
     volume_correction_off: object | None = None
+    # Net volume flux (m3 s-1, positive into the domain) that the volume
+    # correction keeps through all open faces together, for a nested child
+    # that must follow its parent's mass changes; a scalar, None means zero
+    # (CROCO obc_volcons).  Ignored when the correction is off.
+    target_net_flux: jnp.ndarray | None = None
     # Baroclinic and tracer data (CROCO u3dbc/v3dbc/t3dbc, OBC_M3ORLANSKI,
     # OBC_TORLANSKI with FRC_BRY), shape (nlev, along): *_T, *_S in the ring
     # cells, *_u3 the normal velocity on the open face, *_t3 the tangential
@@ -138,6 +143,7 @@ def apply_barotropic_open_boundary(eta_c, U_c, V_c, eta_new, U_new, V_new,
 
     if (faces_u or faces_v) and ob.volume_correction_off is None:
         # obc_volcons.F: remove the net inflow with one uniform inward velocity
+        # (or bring it to target_net_flux)
         flux, section = 0.0, 0.0
         for k, s, d, length in faces_u:
             flux = flux + s * jnp.sum(U_new[:, k] * d * length)
@@ -145,7 +151,8 @@ def apply_barotropic_open_boundary(eta_c, U_c, V_c, eta_new, U_new, V_new,
         for k, s, d, length in faces_v:
             flux = flux + s * jnp.sum(V_new[k] * d * length)
             section = section + jnp.sum(d * length)
-        corr = -flux / jnp.maximum(section, _EPS)
+        target = 0.0 if ob.target_net_flux is None else ob.target_net_flux
+        corr = (target - flux) / jnp.maximum(section, _EPS)
         for k, s, d, length in faces_u:
             U_new = U_new.at[:, k].add(s * corr * (d > 0))
         for k, s, d, length in faces_v:

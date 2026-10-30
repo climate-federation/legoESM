@@ -1808,6 +1808,17 @@ def _run_substep_loop(
      div_damp_coeff, div_damp_area_u, div_damp_area_v) = coeffs
     use_div_damp = div_damp_coeff is not None
     use_diffusion = nu_face_u is not None
+    if use_diffusion and open_boundary is not None:
+        # No sea level damping across an open face: the boundary condition
+        # alone sets the flow there.  Otherwise the damping flux, booked as a
+        # transport, takes a share of the prescribed inflow (1.3 % in a flat
+        # 4000 m box at the default alpha, 5 % at four times it).
+        if open_boundary.west_ubar is not None:
+            diff_u_mask = diff_u_mask.at[:, 1].set(0.0)
+        if open_boundary.south_vbar is not None:
+            diff_v_mask = diff_v_mask.at[1].set(0.0)
+        if open_boundary.north_vbar is not None:
+            diff_v_mask = diff_v_mask.at[-2].set(0.0)
 
     # BEBT semi-implicit parameter and MAXVEL clipping
     bebt = config.barotropic.bebt
