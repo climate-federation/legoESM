@@ -360,6 +360,8 @@ __param_spec__ = {
         "excluded": {
             "limcnv_p_pa": "numerics/domain: convection top cap (40 hPa reference interface), not a closure knob",
             "parcel_tpert": "default 0 = disabled/off (PBL temperature perturbation; CAM6 CLUBB path has none)",
+            "detrain_phase_width_K": "numerics: RULE 5 smoothing width of the detrainment liquid/ice ramp corners (0 = CAM hard switch)",
+            "detrain_number_width_kgkg_s": "numerics: RULE 5 smoothing width of max(0, dlf) in the detrainment number source (0 = CAM hard switch)",
         },
         "params": {
             "c0_lnd": {"units": "1/m", "bounds": (0.002, 0.02), "tunable_tier": 1, "transform": "sigmoid", "category": "autoconversion", "reference": "CAM zmconv_c0_lnd namelist span (0.002-0.0075 across configurations)", "shape": None},
@@ -783,6 +785,12 @@ class ZhangMcFarlaneConfig(NamedTuple):
     # an aquaplanet run with no land, recorded as a choice -- ocean
     # coefficients everywhere, and passing a land fraction is an error.
     land_fraction: str = "required"
+    # RULE 5 smoothing widths of CAM6's detrainment of ZM condensate
+    # (zhang_mcfarlane.cam6_detrain_condensate, clubb_intr.F90:2345-2376):
+    # the liquid/ice ramp's corners [K] and the max(0, dlf) of the number
+    # source [kg/kg/s].  0 = CAM's hard switch.
+    detrain_phase_width_K: float = 0.1
+    detrain_number_width_kgkg_s: float = 1.0e-12
 
 
 class KainFritschConfig(NamedTuple):
@@ -1572,7 +1580,7 @@ class BechtoldConfig(NamedTuple):
     # deep closure byte-identically.
     use_ifs_cape_closure: bool = True
     # IFS Kessler sub-cloud evaporation of convective rain (cuflxn.F90:436-475;
-    # see bechtold._ifs_subcloud_rain_evaporation): the post-split rain flux
+    # see bechtold.ifs_subcloud_rain_evaporation): the post-split rain flux
     # accumulates downward and evaporates below cloud base at the oracle
     # RCPECONS Kessler rate, limited by the ZRHEBC RH break (deep-ocean 0.85 /
     # non-deep 0.92, deep-weight blended; land values need an absent land
@@ -1719,7 +1727,7 @@ class BechtoldConfig(NamedTuple):
     # melt inside the sub-cloud precip march, FOLD variant (surface snow
     # forcibly melted into the lowest layer; formation-side freezing heat
     # paired so column enthalpy closes exactly — see
-    # _ifs_subcloud_rain_evaporation).  Requires use_ifs_subcloud_evap.
+    # ifs_subcloud_rain_evaporation).  Requires use_ifs_subcloud_evap.
     # Default True since 2026-07-17 (RCE A/B: T-drift 0.052 -> 0.026 K/day;
     # AMIP stable).
     use_ifs_snow_melt: bool = True

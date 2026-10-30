@@ -97,6 +97,8 @@ def test_turbulence_column_winds_match_the_edge_path(setup):
 
 def test_gwd_column_winds_match_the_edge_path(setup):
     mesh, coord, state, col_state = setup
+    # all land: CAM6 gw_oro needs a land fraction (lf = 1 is its unscaled drag)
+    mesh = mesh._replace(land_frac=jnp.ones(state.T.data.shape[0]))
     fn = gwd_int._make_mpas_gwd(GravityWaveDragConfig(scheme="mcfarlane"), DT)
     edge = fn(state, mesh, coord)
     col = fn(col_state, mesh, coord)
@@ -202,6 +204,8 @@ def test_column_gwd_dissipates(setup):
     """McFarlane orographic drag on the column path removes kinetic
     energy from every column with nonzero drag (both components)."""
     mesh, coord, state, col_state = setup
+    # all land: CAM6 gw_oro needs a land fraction (lf = 1 is its unscaled drag)
+    mesh = mesh._replace(land_frac=jnp.ones(state.T.data.shape[0]))
     fn = gwd_int._make_mpas_gwd(GravityWaveDragConfig(scheme="mcfarlane"), DT)
     t = fn(col_state, mesh, coord)
     t = t[0] if isinstance(t, tuple) else t

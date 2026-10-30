@@ -331,6 +331,8 @@ def make_convection_physics(
     convection_config: ConvectionConfig,
     model_type: str = "hydrostatic",
     dt: float = 300.0,  # coeff-ok: default physics timestep [s]
+    *,
+    defer_detrainment: bool = False,
 ) -> Callable:
     """Create a physics function for convection matching a model's signature.
 
@@ -343,6 +345,14 @@ def make_convection_physics(
         One of "hydrostatic", "nonhydrostatic", "spectral_pe".
     dt : float
         Model time step [s]. Needed for relaxation timescale.
+    defer_detrainment : bool
+        Hydrostatic/MPAS bridge only: the detrained condensate ``dlf``
+        (``dq_c_conv_dt``) is NOT booked into ``q_c``; it is published as
+        ``"conv_dlf"`` ``(ncol, nlev)`` in the returned carry dict for the
+        combined physics to hand to the CLUBB host, which books it per
+        macmic sub-step as CAM6 does (clubb_intr.F90:2345-2386).  The state
+        must carry ``q_c``, ``q_i``, ``N_c`` and ``N_i`` (the species that
+        booking writes); a state lacking any of them raises ``ValueError``.
 
     Returns
     -------
@@ -358,8 +368,13 @@ def make_convection_physics(
     # passes ``model_type="mpas"`` through to all sub-physics factories)
     # crashes the moment convection is enabled on an MPAS run.
     if model_type in ("hydrostatic", "mpas"):
-        return _make_hydrostatic_convection(convection_config, dt)
-    elif model_type == "nonhydrostatic":
+        return _make_hydrostatic_convection(
+            convection_config, dt, defer_detrainment=defer_detrainment)
+    if defer_detrainment:
+        raise ValueError(
+            "defer_detrainment is implemented by the hydrostatic/MPAS bridge "
+            f"only; got model_type={model_type!r}.")
+    if model_type == "nonhydrostatic":
         return _make_nonhydrostatic_convection(convection_config, dt)
     elif model_type == "spectral_pe":
         return _make_spectral_pe_convection(convection_config, dt)
@@ -377,6 +392,7 @@ def make_convection_physics(
 def _make_hydrostatic_convection(
     convection_config: ConvectionConfig,
     dt: float,
+    defer_detrainment: bool = False,
 ) -> Callable:
     """Create convection physics_fn for PrimitiveEquationModel.
 
@@ -870,6 +886,24 @@ def _make_hydrostatic_convection(
             _to_sfc = _to_sfc or _tr.rain_is_net_flux
             if _dq_r_conv is not None and not _has_qr and not _to_sfc:
                 dq_c_conv_dt = dq_c_conv_dt + _dq_r_conv.reshape(shape_3d)
+            # CAM6: ZM's own physics_update carries no cloud water; the CLUBB
+            # host books dlf per macmic sub-step into CLDLIQ and CLDICE
+            # (clubb_intr.F90:2345-2386), so it leaves here as a hand-off, not
+            # a tendency.  The booking writes q_c, q_i, N_c and N_i; a state
+            # missing one would silently lose part of it, so refuse.
+            _defer = defer_detrainment
+            if _defer:
+                _missing = [n for n in ("q_c", "q_i", "N_c", "N_i")
+                            if state.tracers is None or n not in state.tracers]
+                if _missing:
+                    raise ValueError(
+                        "defer_detrainment (ZM + CLUBB macmic on the MPAS "
+                        "lane) books ZM's detrained condensate into q_c, q_i, "
+                        f"N_c and N_i; the state lacks {_missing}. Carry them "
+                        "(e.g. MG2 microphysics) or run cld_macmic_num_steps=1.")
+            if _defer:
+                _dlf_pub = dq_c_conv_dt.reshape(ncol, nlev)
+                dq_c_conv_dt = jnp.zeros_like(dq_c_conv_dt)
             tracer_tends = {
                 "q_v": Field(
                     data=dq_v_dt, name="dq_v_dt_conv",
@@ -967,6 +1001,8 @@ def _make_hydrostatic_convection(
                     "together (the CAM6 deepcu consumer refuses one without "
                     f"the other); got mass_flux_up={conv_out.mass_flux_up is not None}, "
                     f"icwmr={conv_out.icwmr is not None}.")
+            if _defer:
+                conv_prog_out = {**conv_prog_out, "conv_dlf": _dlf_pub}
             if conv_out.mass_flux_up is not None:
                 _mf_pub = {
                     "conv_mass_flux_up":
@@ -1780,6 +1816,7 @@ def _make_spectral_pe_convection(
                         pblh=None if _pblh is None else _pblh.reshape(ncol),
                         pref_edge=sigma_coord.pressure_at_half(
                             jnp.asarray(constants.p_ref, dtype=T_col.dtype)),
+                        tracers=_convtran1_columns(state.tracers, ncol, nlev),
                     )
                 conv_prog_out = prog_new_profile
             elif is_w_grid_consumer:
@@ -1965,6 +2002,19 @@ def _make_spectral_pe_convection(
                         "precip_efficiency>0) needs at least a q_c tracer. Set "
                         "precip_efficiency=0 or add a condensate tracer."
                     )
+            # Convective transport of carried tracers (ZM convtran, CAM6
+            # zm_conv_intr.F90:829-846): signed, column-conserving, ADDED to
+            # any other tendency of that tracer (as the hydrostatic bridge).
+            for _nm, _dtr in (getattr(conv_out, "tracer_transport", None) or {}).items():
+                _dtr = _dtr.reshape(n_lat, n_lon, nlev)
+                _tmpl = tt[_nm] if _nm in tt else _state_tracers[_nm]
+                if hasattr(_tmpl, "data") and hasattr(_tmpl, "replace"):
+                    _base = tt[_nm].data if _nm in tt else 0.0
+                    tt[_nm] = _tmpl.replace(
+                        data=(_base + _dtr).astype(_tmpl.data.dtype))
+                else:
+                    _base = tt[_nm] if _nm in tt else 0.0
+                    tt[_nm] = (_base + _dtr).astype(_tmpl.dtype)
             # Mirror untouched tracers as zeros so the dycore RHS sees a
             # complete tracer pytree (the orchestrator's accumulation
             # also requires matching keys across modules).

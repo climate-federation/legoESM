@@ -56,12 +56,14 @@ References
 
 from __future__ import annotations
 
+import math
 from typing import NamedTuple
 
 import jax.numpy as jnp
 from jax import lax, nn
 
 from legoesm.atmosphere.physics.clouds.config import CloudConfig
+from legoesm.core.smooth import smooth_min
 from legoesm.thermo import (
     mixing_ratio_to_specific_humidity,
     saturation_mixing_ratio,
@@ -141,6 +143,7 @@ __physics_contract__ = {
 # Cloud-optics defaults (fixed): effective-radius bounds.
 _CLOUD_R_EFF_MAX_M = 60.0e-6     # max liquid effective radius for lamc clip [m]
 _R_EFF_ICE_PSD_COEFF = 1.5       # ice effective-radius PSD coefficient
+_MG2_ICE_QIC_MAX = 5.0e-3         # MG2 in-cloud ice cap [kg/kg] (micro_mg2_0.F90:2763)
 _RHO_CLOUD_ICE_DEFAULT = 500.0   # coeff-ok: CloudConfig.rho_cloud_ice default [kg/m^3]
 _R_EFF_ICE_DEFAULT_M = 25.0e-6   # fallback ice effective radius [m]
 
@@ -543,6 +546,21 @@ def _two_region_inhomogeneity_factor(
 ) -> jnp.ndarray:
     r"""Tau-dependent sub-grid cloud-optics inhomogeneity factor (chi_eff).
 
+    NOT YET FAITHFUL to ecRad Tripleclouds (1.7.2), the oracle this option is
+    named after (tier-2 audit, 2026-10-19).  This is a per-layer grey
+    surrogate: on ecRad's own meridian columns, the change from fsd = 0 to
+    fsd = 1.0 is -8.2 W/m2 of TOA reflected SW against Tripleclouds' -18.2
+    (45%) and +0.17 W/m2 of OLR against +3.04 (5%), with the oracle run at
+    overlap_param = 1 (maximally coherent inhomogeneity; the IFS default
+    overlap and decorrelation would give a smaller oracle effect).
+    Tripleclouds solves vertically overlapped thin/thick regions
+    explicitly, splits them from a lognormal or (ecRad 1.7.2 default) gamma
+    distribution (the 1 +/- fsd split here leaves the thin half empty at
+    fsd = 1), and solves
+    the LW with the regions too, instead of reusing a factor derived from SW
+    reflectance.  A faithful port needs a region-resolved solver;
+    which overlap and decorrelation it uses is a pending user decision.
+
     Two-region (Shonk & Hogan 2008 "Tripleclouds") split of the in-cloud
     optical depth ``tau`` into equal-area optically-THIN ``tau(1-fsd)`` and
     optically-THICK ``tau(1+fsd)`` sub-columns.  Inverting the domain-mean
@@ -584,6 +602,13 @@ def _partial_coverage_factor(
     tau_grid: jnp.ndarray, cf: jnp.ndarray, g,
 ) -> jnp.ndarray:
     r"""Partial-cloud-COVER optics factor (chi_cover) for the radiative path.
+
+    NOT YET FAITHFUL (tier-2 audit, 2026-10-19): ``two_column`` names no
+    oracle; against a maximum-random independent-column reference solved by
+    ecRad it captures 42% of the SW and 35% of the LW partial-coverage effect
+    (TOA reflected SW +16.2 W/m2, OLR -1.8 W/m2, sunlit mean).  No committed
+    configuration selects it; what it should become is a pending user
+    decision.
 
     ``tau_grid`` is the GRID-MEAN optical depth of the layer (``cf tau_ic``),
     summed over phases, and ``cf`` is the TRUE cloud fraction -- not the floored
@@ -1057,6 +1082,8 @@ def compute_cloud_properties(
     p_half: jnp.ndarray | None = None,
     clubb_config=None,
     n_cloud_in_cloud: bool = False,
+    mg2_ice_dcs_m: float | None = None,
+    mg2_ice_slope_log_width: float | None = None,
 ) -> CloudProperties:
     """Compute diagnostic cloud fraction and cloud optical properties.
 
@@ -1098,6 +1125,11 @@ def compute_cloud_properties(
         droplet PSD ``size_dist_param_liq``, and 10 um where that water is
         below qsmall = 1e-18.  Under ``resolved`` the cell is fully cloudy,
         so the M2005 PSD on the cell q_c is the in-cloud pairing (WRF M2005).
+    mg2_ice_dcs_m, mg2_ice_slope_log_width : float or None
+        The run's microphysics MG2 ice size threshold dcs [m] and ice-slope
+        RULE 5 width (MorrisonConfig, resolved), read -- never defaulted -- by
+        the CAM6 REL path (``cam6_clubb`` with an in-cloud number), which
+        raises without them.
         Any other scheme raises: no oracle pairs an in-cloud number with its
         cloud fraction.
 
@@ -1507,14 +1539,33 @@ def compute_cloud_properties(
                 MG2_MINCLD,
                 mg2_droplet_effective_radius,
             )
+            from legoesm.atmosphere.physics.microphysics._warm_rain import (
+                mg2_size_bounded_nc,
+            )
             q_c_ic = jnp.minimum(q_c / jnp.maximum(_ast_cam6, MG2_MINCLD),
                                  KK2000_CAM6_QC_MAX)
             # CAM's REL density is dry, p/(rair t) (micro_mg_cam.F90:2507-2508);
             # n_cloud is per volume at the moist density, so take it back to
             # per kg with that density first (follow-up row 47, user decision).
             rho_dry = compute_rho(jnp.maximum(T, 1.0), p_full)
-            r_eff_liq = mg2_droplet_effective_radius(
-                q_c_ic, n_cloud / rho_air * rho_dry, rho_dry)
+            n_vol = n_cloud / rho_air * rho_dry
+            # CAM's REL reads the number after MG2's mean-size re-adjust
+            # (micro_mg2_0.F90:2826-2834, applied before micro_mg_cam.F90:2534;
+            # follow-up row 48), both limits smooth at the RULE 5 widths.
+            # KNOWN DIFFERENCE (RULE 5): CAM runs the PSD clamp twice (MG2's
+            # re-adjust, then REL); the hard clamp is idempotent, the smooth one
+            # is not.  Where the raw slope saturates a bound, the second call
+            # moves ln(lambda) by a further ~w ln 2 (w = mg2_drop_slope_log_width),
+            # i.e. a radius ~0.69% larger at w = 0.01 than one smooth clamp; the
+            # fixture has no bound-saturated column, so its per-column gaps do
+            # not show this.  Width 0 recovers CAM exactly (codex + GLM chose to
+            # keep CAM's two-call structure, 2026-10-29).
+            psd_widths = dict(
+                number_cap_log_width=config.mg2_drop_number_cap_log_width,
+                slope_log_width=config.mg2_drop_slope_log_width)
+            n_vol = mg2_size_bounded_nc(q_c_ic, n_vol, rho_dry, **psd_widths)
+            r_eff_liq = mg2_droplet_effective_radius(q_c_ic, n_vol, rho_dry,
+                                                     **psd_widths)
         else:
             _cf_psd = jnp.clip(cf, _INHOM_CF_FLOOR, 1.0)
             q_c_psd = jnp.where(_nc_is_specified, q_c / _cf_psd, q_c)
@@ -1581,7 +1632,32 @@ def compute_cloud_properties(
                    else jnp.zeros_like(T))
         q_i_pos = jnp.maximum(q_i_trc, 1.0e-15)
         n_i_pos = jnp.maximum(jnp.clip(n_ice, 0.0), 1.0e-15)
-        lami = (cons12 * n_i_pos / q_i_pos) ** (1.0 / 3.0)
+        if n_cloud_in_cloud and _ast_cam6 is not None:
+            # CAM6 MG2 effi (micro_mg2_0.F90:2742-2763, 2772-2786; follow-up
+            # row 52) on the tracer ice: in-cloud over ast floored at mincld,
+            # the 5 g/kg in-cloud cap and the ice slope bounds 1/[2 dcs, 1 um]
+            # (number re-adjusted), each smooth at its RULE 5 width.
+            if mg2_ice_dcs_m is None or mg2_ice_slope_log_width is None:
+                raise ValueError(
+                    "the CAM6 radiation ice radius reads the run's MG2 ice "
+                    "dcs and ice-slope width from the microphysics config; "
+                    "pass mg2_ice_dcs_m and mg2_ice_slope_log_width.")
+            from legoesm.atmosphere.physics.microphysics._warm_rain import (
+                MG2_MINCLD,
+                rule5_sharpness,
+                mg2_ice_slope,
+            )
+            _icldm = jnp.maximum(_ast_cam6, MG2_MINCLD)
+            _tiny = jnp.finfo(jnp.result_type(q_i_pos)).tiny
+            q_i_ic = jnp.exp(smooth_min(
+                jnp.log(jnp.maximum(q_i_pos / _icldm, _tiny)),
+                math.log(_MG2_ICE_QIC_MAX),
+                rule5_sharpness(config.mg2_ice_cap_log_width)))
+            _, lami = mg2_ice_slope(q_i_ic, n_i_pos / _icldm,
+                                    config.rho_cloud_ice, mg2_ice_dcs_m,
+                                    mg2_ice_slope_log_width)
+        else:
+            lami = (cons12 * n_i_pos / q_i_pos) ** (1.0 / 3.0)
         r_eff_ice_psd = _R_EFF_ICE_PSD_COEFF / jnp.clip(lami, 1.0e-30)
         has_trc_ice = q_i_trc > 1.0e-14                   # SAM QSMALL
         m_psd = jnp.where(has_trc_ice, q_i_trc, 0.0)
@@ -1589,12 +1665,15 @@ def compute_cloud_properties(
         r_const = jnp.asarray(config.r_eff_ice, dtype=_scalar_dtype)
         # Extinction sum: both denominators are strictly positive by the
         # clips above (r_psd ≥ 1.5e-30 via the lami clip; r_const a config
-        # float), so the untaken ``where`` branch stays finite (AD-safe).
+        # float), so the untaken ``where`` branch stays finite.
         _ext = (m_psd / jnp.maximum(r_eff_ice_psd, 1.0e-30)
                 + m_flr / jnp.maximum(r_const, 1.0e-30))
+        # The untaken branch's denominator is 1: at _ext = 0 the 1e-30 floor
+        # squares to 0 in fp32 and its 0/0 slope would NaN the gradient
+        # (forward unchanged).
         r_eff_ice_blend = jnp.where(
             m_flr > 0.0,
-            (m_psd + m_flr) / jnp.maximum(_ext, 1.0e-30),
+            (m_psd + m_flr) / jnp.where(m_flr > 0.0, jnp.maximum(_ext, 1.0e-30), 1.0),
             r_eff_ice_psd,
         )
         has_ice = jnp.clip(q_i, 0.0) > 1.0e-14            # SAM QSMALL

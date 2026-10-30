@@ -15,8 +15,10 @@ Scope boundary (DECLARED)
 -------------------------
 The precipitation-flux, melting and rain-evaporation parts of cuflxn
 (PMFLXR / PMFLXS / PDPMEL / PSNDE / PLUDELI and the RHEBC evaporation
-loop) are NOT ported here: the repository already carries a separate IFS
-sub-cloud evaporation leaf, and wiring that coupling is a separate step.
+loop) are NOT ported here.  The below-cloud evaporation is applied by the
+faithful chain (_ifs_faithful.py, step 3c) through the shared Bechtold leaf
+``ifs_subcloud_rain_evaporation``; the flux, melting and detrained-precip
+bookkeeping remain unported (KNOWN DIFFERENCES listed there).
 Likewise the downdraught (PMFD/PMFDS/PMFDQ/IDBAS) is identically zero in
 this reduced branch (cudlfsn/cuddrafn out of scope, as in the sibling
 modules), and KTYPE is restricted to {1,2} so the KTYPE==3 ZZP squaring

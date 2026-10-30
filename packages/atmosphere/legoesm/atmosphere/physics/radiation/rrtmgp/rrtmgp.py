@@ -592,6 +592,7 @@ class RRTMGP:
       lw_optical_field_only: bool = False,
       *,
       mcica_cloud_fraction: jnp.ndarray | None = None,
+      mcica_mask_width: float | None = None,
       clear_sky: bool = False,
       o3_top_vmr: jnp.ndarray | None = None,
       cloud_rho_ice: float | None = None,
@@ -662,6 +663,10 @@ class RRTMGP:
           ``(ncol, nlev)`` layer cloud fraction, index 0 = model top.  Given,
           ``cloud_path_liq/ice`` are IN-CLOUD paths and each g-point solves
           its own maximum-random subcolumn (McICA).
+      mcica_mask_width : float | None
+          Static smoothing width of the subcolumn mask
+          (``CloudConfig.cloud_subcolumn_mask_width``; 0 = CAM's hard mask).
+          Required with ``mcica_cloud_fraction``.
       o3_top_vmr : jnp.ndarray | None
           Column-mean ozone VMR above the model top (ncol,), over
           ``0 < p < p_half[:, 0]``.  Used only by the transported overhead
@@ -690,14 +695,15 @@ class RRTMGP:
       # all inputs to match so that table lookups, lax.cond branches, and
       # lax.scan carries have consistent dtypes throughout the solver.
       _table_dtype = self.optics_lib.gas_optics_lw.kmajor.dtype
-      # McICA per-column table shift, seeded like CAM's mcica_subcol_gen:
-      # the fractional part of the lowest-layer pressure [Pa], taken before
-      # the cast to the table dtype.  State-derived, so it is independent of
-      # the domain decomposition and needs no PRNG.  Columns with IDENTICAL
-      # bottom pressure (idealized uniform states) share a shift, as they
-      # share a seed in CAM.
-      _mcica_shift = (None if mcica_cloud_fraction is None
-                      else jax.lax.stop_gradient(jnp.mod(p_full[:, -1], 1.0)))
+      # McICA per-column table shift, seeded like CAM's mcica_subcol_gen
+      # (clouds.subcolumns.cam_seed_shift), taken before the cast to the
+      # table dtype.
+      if mcica_cloud_fraction is None:
+          _mcica_shift = None
+      else:
+          from legoesm.atmosphere.physics.clouds.subcolumns import (
+              cam_seed_shift)
+          _mcica_shift = cam_seed_shift(p_full)
       T = T.astype(_table_dtype)
       p_full = p_full.astype(_table_dtype)
       p_half = p_half.astype(_table_dtype)
@@ -993,11 +999,15 @@ class RRTMGP:
                   "flux solve; the optical-field-only outputs would return "
                   "unsampled in-cloud optics")
           from legoesm.atmosphere.physics.clouds.subcolumns import (
-              generate_subcolumns)
+              apply_mask, generate_subcolumns)
+          if mcica_mask_width is None:
+              raise ValueError(
+                  "mcica_cloud_fraction needs mcica_mask_width "
+                  "(CloudConfig.cloud_subcolumn_mask_width; 0 = CAM's hard mask)")
 
           def _mcica_paths(n_gpt):
               mask = generate_subcolumns(mcica_cloud_fraction, n_gpt,
-                                         shift=_mcica_shift)
+                                         shift=_mcica_shift, width=mcica_mask_width)
               if overhead:
                   # the overhead layer is cloud-free; sample the MODEL layers
                   # only, so each g-point's model-layer subcolumn is the one
@@ -1010,7 +1020,7 @@ class RRTMGP:
                   m = mask[igpt]
                   return tuple(
                       jnp.clip(_add_halos(
-                          jnp.where(m, x, 0.0)[:, None, ::-1]), 0.0, None)
+                          apply_mask(m, x)[:, None, ::-1]), 0.0, None)
                       for x in (_cpl, _cpi))
               return paths
 

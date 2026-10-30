@@ -66,9 +66,15 @@ source "${REPO}/config/amip/amip_production.sh"
 # The deck's SST keys name the PCMDI variables (tosbcs/siconcbcs, percent SIC);
 # HadOIBl carries SST_cpl and ice_cov as a FRACTION.  CLI flags win over the deck.
 AMIP_PATH_FLAGS+=( --sst-var SST_cpl --sic-var ice_cov --sic-scale 1.0 )
+# CAM6 droplet activation inputs: the deck's cam6_aerosol_dir is a Levante path.
+# Same 31 sha256-pinned files (PPE member 000 from GDEX d651076 + CESM physprops,
+# all 31 verified 2026-10-29), linked from glade; the reader re-checks each pin.
+export CAM6_AEROSOL_DIR="${CAM6_AEROSOL_DIR:-${AMIP_INPUTS}/cam6_optics}"
+AMIP_PATH_FLAGS+=( --cam6-aerosol-dir "${CAM6_AEROSOL_DIR}" )
 for _f in "${ERA5_IC}" "${ETOPO}" "${SST}" "${SIC}" "${SOLAR}" "${GHG}" \
           "${OZONE}" "${AEROSOL}" "${VOLCANIC}" "${CLM_SURFDATA}" \
-          "${AMIP_SSO}" "${AMIP_LAND_MASK}" "${AMIP_SURFDATA}"; do
+          "${AMIP_SSO}" "${AMIP_LAND_MASK}" "${AMIP_SURFDATA}" \
+          "${CAM6_AEROSOL_DIR}"; do
     [[ -e "${_f}" ]] || { echo "[chain] missing input ${_f}" >&2; exit 3; }
 done
 

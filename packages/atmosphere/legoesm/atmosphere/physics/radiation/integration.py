@@ -435,6 +435,7 @@ def _compute_ozone_vmr(
     T: jnp.ndarray | None = None,
     lon: jnp.ndarray | None = None,
     ml_ozone_coefs=None,
+    p_half: jnp.ndarray | None = None,
 ) -> jnp.ndarray | None:
     """Compute ozone VMR for RRTMGP.
 
@@ -451,6 +452,9 @@ def _compute_ozone_vmr(
         Longitude (ncol,) [rad].  Required for ``source="ml"``.
     ml_ozone_coefs : MLOzoneCoefficients, optional
         Pre-loaded ridge weights.  Required for ``source="ml"``.
+    p_half : jnp.ndarray, optional
+        Interface pressure (ncol, nlev+1) [Pa].  Required for ``source="mls"``
+        (gSAM layer means are defined by the layer interfaces).
 
     Returns
     -------
@@ -464,13 +468,15 @@ def _compute_ozone_vmr(
         return jnp.full_like(p_full, 1.0e-10)
 
     if ozone_config.source == "mls":
-        # SAM RCEMIP ozone: the MLS standard profile read from gSAM's
-        # rrtmg_lw.nc, interpolated (log-log) to the model levels. Faithful
-        # to the oracle vs the built-in skewed-Gaussian _standard_o3_profile.
+        # SAM RCEMIP ozone: gSAM tracesini layer means of the MLS sounding in
+        # rrtmg_lw.nc over the model layers (needs the interfaces).
+        if p_half is None:
+            raise ValueError(
+                "ozone source 'mls' is gSAM's layer mean and needs p_half")
         from legoesm.atmosphere.physics.radiation.ozone_mls import (
-            mls_ozone_vmr,
+            mls_ozone_layer_vmr,
         )
-        return mls_ozone_vmr(p_full)
+        return mls_ozone_layer_vmr(p_half)[0]
 
     if ozone_config.source == "analytical":
         p_hPa = p_full / 100.0
@@ -859,6 +865,8 @@ def _call_radiation_backend(
     clear_sky_toa: bool = False,
     column_mesh=None,
     clubb_config=None,
+    mg2_ice_dcs_m: float | None = None,
+    mg2_ice_slope_log_width: float | None = None,
 ):
     """Call configured radiation backend with a unified integration interface.
 
@@ -1014,7 +1022,7 @@ def _call_radiation_backend(
     else:
         o3_vmr = _compute_ozone_vmr(
             p_full, lat, radiation_config.ozone,
-            T=T, lon=lon, ml_ozone_coefs=ml_ozone_coefs,
+            T=T, lon=lon, ml_ozone_coefs=ml_ozone_coefs, p_half=p_half,
         )
 
     # Compute cloud properties if cloud scheme is active.
@@ -1050,6 +1058,8 @@ def _call_radiation_backend(
             conv_icwmr=conv_icwmr,
             p_half=p_half,
             clubb_config=clubb_config,
+            mg2_ice_dcs_m=mg2_ice_dcs_m,
+            mg2_ice_slope_log_width=mg2_ice_slope_log_width,
         )
         if cloud_config.cap_floor_on:
             from legoesm.atmosphere.physics.clouds.cloud_fraction import apply_cap_cloud_floor
@@ -1112,7 +1122,12 @@ def _call_radiation_backend(
         _n_sub = int(getattr(cloud_config, "cloud_n_subcolumns",
                              _sub.N_SUBCOLUMNS_DEFAULT))
         _ncol = T.shape[0]
-        _mask = _sub.generate_subcolumns(cloud_props.cloud_fraction, _n_sub)
+        # CAM draws different uniforms in every column; the per-column shift
+        # (seeded from the bottom pressure, as for mcica) does the same, so a
+        # layer with cf < 1/n_sub is cloudy in some columns instead of never.
+        _mask = _sub.generate_subcolumns(
+            cloud_props.cloud_fraction, _n_sub, shift=_sub.cam_seed_shift(p_full),
+            width=float(cloud_config.cloud_subcolumn_mask_width))
         _lwp, _iwp = _sub.subcolumn_paths(
             _mask, cloud_props.cloud_fraction, cloud_props.lwp, cloud_props.iwp)
         _rad_kwargs = _sub.expand_kwargs(_rad_kwargs, _n_sub, _ncol)
@@ -1127,6 +1142,7 @@ def _call_radiation_backend(
          _rad_kwargs["cloud_path_ice"]) = _sub.in_cloud_paths(
             cloud_props.cloud_fraction, cloud_props.lwp, cloud_props.iwp)
         _rad_kwargs["mcica_cloud_fraction"] = cloud_props.cloud_fraction
+        _rad_kwargs["mcica_mask_width"] = float(cloud_config.cloud_subcolumn_mask_width)
     elif _ov != "none":
         # Dispatch hardening: a typo must never silently run the legacy
         # single-column path (validated on the static config value).
@@ -1248,6 +1264,7 @@ def make_radiation_physics(
     activation_config=None,
     use_clubb_cloud_fraction: bool = False,
     clubb_config=None,
+    micro_leaf_config=None,
 ) -> Callable:
     """Create a physics function for radiation matching a model's signature.
 
@@ -1373,7 +1390,8 @@ def make_radiation_physics(
                                             nc_from_aerosol=nc_from_aerosol,
                                             activation_config=activation_config,
                                             use_clubb_cloud_fraction=use_clubb_cloud_fraction,
-                                            clubb_config=clubb_config)
+                                            clubb_config=clubb_config,
+                                            micro_leaf_config=micro_leaf_config)
     elif model_type == "nonhydrostatic":
         return _make_nonhydrostatic_radiation(radiation_config, rrtmgp_solver,
                                                ml_ozone_coefs=ml_ozone_coefs)
@@ -1399,7 +1417,8 @@ def make_radiation_physics(
                                      column_mesh=column_mesh,
                                      nc_from_aerosol=nc_from_aerosol,
                                      use_clubb_cloud_fraction=use_clubb_cloud_fraction,
-                                     clubb_config=clubb_config)
+                                     clubb_config=clubb_config,
+                                     micro_leaf_config=micro_leaf_config)
     else:
         raise ValueError(
             f"Unknown model_type: {model_type!r}. "
@@ -1421,6 +1440,7 @@ def _make_hydrostatic_radiation(
     activation_config=None,
     use_clubb_cloud_fraction: bool = False,
     clubb_config=None,
+    micro_leaf_config=None,
 ) -> Callable:
     """Create radiation physics_fn for any hydrostatic model.
 
@@ -1452,6 +1472,10 @@ def _make_hydrostatic_radiation(
     Default False is byte-identical (the double-moment N_c carry / constant
     r_eff is used).
     """
+    # The CAM6 radiation ice radius reads the run's MG2 ice dcs and ice-slope
+    # width from the microphysics leaf config (never a default).
+    from legoesm.atmosphere.physics.microphysics.config import mg2_rel_ice_params
+    _mg2_ice_dcs_m, _mg2_ice_slope_w = mg2_rel_ice_params(micro_leaf_config)
     _time, set_time = _make_time_state()
     _T_sfc_override_cell, set_T_sfc_override = _make_T_sfc_override_cell()
     # Static build-time gate for the Slingo-1987-inspired surrogate convective-cloud carry read:
@@ -1844,6 +1868,8 @@ def _make_hydrostatic_radiation(
             tsi=_tsi_ext,
             clear_sky_toa=_clr_sky_fused,
             clubb_config=clubb_config,
+            mg2_ice_dcs_m=_mg2_ice_dcs_m,
+            mg2_ice_slope_log_width=_mg2_ice_slope_w,
         )
 
         # #843 lean-lane clear-sky second pass: SAME column state and

@@ -110,19 +110,19 @@ def test_departure_condensation_removes_supersaturation_toward_qsat():
 def test_departure_default_constants():
     """Shipped ``SundqvistConfig`` defaults (canary): a silent change trips this.
 
-    The oracle hard-codes qc_crit 3e-4, c1 300 and c2 0.5; the shipped
-    qc_crit / c2 / evap_coeff defaults differ (pending user decision), and the
+    qc_crit 3e-4, c1 300 and c2 0.5 are the oracle's hard-coded values and
+    evap_coeff 2e-5 the GFS operational evpco (tier-2 decisions R12-R14); the
     Gaussian peak/width fields have no oracle counterpart (non-default raises).
     """
     c = SundqvistConfig()
     assert c.rh_crit == 0.8
     assert c.auto_rate == 1e-3         # c_0 [1/s]
-    assert c.qc_crit == 5e-4           # q_c,crit [kg/kg]
+    assert c.qc_crit == 3e-4           # q_c,crit = oracle m_r [kg/kg]
     assert c.coalescence_enh_coeff == 300.0   # c1 (SBK89 F1)
-    assert c.bergeron_enh_coeff == 3.0        # c2 (F2 Gaussian amplitude)
+    assert c.bergeron_enh_coeff == 0.5        # c2, oracle hard-coded
     assert c.bergeron_T_peak_K == constants.T_freeze - 15.0
     assert c.bergeron_T_width_K == 7.0
-    assert c.evap_coeff == 5e-4
+    assert c.evap_coeff == 2e-5             # GFS operational evpco
     assert c.psautco == 0.0
     assert c.wminco_liquid == 0.0
     assert c.wminco_ice == 0.0

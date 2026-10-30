@@ -1541,6 +1541,7 @@ def run_scm_rce(
         v=0.0,
         p_s=WING_P_SFC,
         latitude_deg=0.0,
+        land_frac=0.0,  # RCE is an ocean case (user 2026-10-27, Q16)
         time_integrator="forward_euler",
         forcing=forcing,
         dtype=jnp.float64,
