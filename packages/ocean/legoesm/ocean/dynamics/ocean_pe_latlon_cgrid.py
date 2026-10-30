@@ -6626,12 +6626,16 @@ def _latlon_tendencies_outside_core(
         dv_diss_raw = None
 
     # --- Stage 10b: physics-pipeline tendencies. ---
+    _tbud = bool(getattr(config, "store_tracer_budget", False))
+    _tb_snap = [dT_dt] if _tbud else None
     (du_dt, dv_dt, dT_dt, dS_dt, phys_K_v, phys_A_v, diag_phys_u,
      diag_phys_v) = _bc_physics_tendencies(
         du_dt, dv_dt, dT_dt, dS_dt, physics_fn, state, grid, z_coord,
         surface_forcing, u, v,
     )
 
+    if _tbud:
+        _tb_snap.append(dT_dt)
     # --- Stage 10b': external surface forcing (wind stress / heat / shortwave). ---
     # ``surface_forcing_implicit`` (the ACC recipe): WITHHOLD the surface TRACER
     # heat (q_net + penetrating shortwave) from the explicit ``dT_dt`` and route
@@ -6672,6 +6676,8 @@ def _latlon_tendencies_outside_core(
                         dims=("lat", "lon", "level"), units="PSU/s"),
         )
 
+    if _tbud:
+        _tb_snap.append(dT_dt)
     # --- Stage 10c: sponge-layer relaxation. ---
     # ``sponge_forcing_implicit`` (EXT-N2, Veros tempsalt_sources placement):
     # the TRACER sponge rates are WITHHELD from the explicit (AB2'd)
@@ -6694,6 +6700,8 @@ def _latlon_tendencies_outside_core(
         include_tracers=not (_sponge_implicit or _sponge_stage3_damping),
         active=_sponge_active,
     )
+    if _tbud:
+        _tb_snap.append(dT_dt)
     tracer_source = None
     if _sponge_implicit:
         # Same kernel as the explicit path (rate evaluated on the PRE-STEP
@@ -6738,6 +6746,14 @@ def _latlon_tendencies_outside_core(
             dv_dt = jnp.where(_restore_hpg, hpg_tendency_v, dv_dt * v_mask_3d)
     dT_dt = dT_dt * mask_3d
     dS_dt = dS_dt * mask_3d
+    dT_budget = None
+    if _tbud:
+        dT_budget = {
+            "pre": _tb_snap[0] * mask_3d,
+            "physics": (_tb_snap[1] - _tb_snap[0]) * mask_3d,
+            "surface": (_tb_snap[2] - _tb_snap[1]) * mask_3d,
+            "sponge": (_tb_snap[3] - _tb_snap[2]) * mask_3d,
+        }
 
     # --- 12. Free-surface tendency ---
     deta_dt = -jnp.sum(flux_div_k, axis=-1) * mask
@@ -6846,6 +6862,7 @@ def _latlon_tendencies_outside_core(
         dT_diss=dT_diss,
         dS_diss=dS_diss,
         tracer_source=tracer_source,
+        dT_budget=dT_budget,
     )
 
     if not diagnose_momentum:

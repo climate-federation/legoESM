@@ -6729,6 +6729,10 @@ class LatLonCGridOceanModel:
                 "implicit_ice_ocean_top_drag=True requires the recorded "
                 "OceanSurfaceForcing.ice_ocean_top_drag_rCdu input")
         state = cast_pytree(state, None, "compute")
+        # store_tracer_budget (static): collect the record of this step's
+        # temperature content changes; ``None`` keeps every path untouched.
+        _tb = ({"T0": state.T.data}
+               if bool(getattr(_cfg_b, "store_tracer_budget", False)) else None)
         # ``_ab2_scope_override`` (private): the leap-frog step (``_leapfrog_step``)
         # drives this method in "advective" scope to WITHHOLD the dissipative
         # tendencies from ``state_expl`` (so they land on the returned
@@ -8063,6 +8067,13 @@ class LatLonCGridOceanModel:
             state_mid.eta.data, state_mid.H_bathy.data, _zc,
             min_water_column_m=_cfg_b.min_water_column_m,
         )
+        if _tb is not None:
+            if tend.dT_budget is None:
+                raise ValueError("store_tracer_budget: the tendency function "
+                                 "returned no dT_budget")
+            _tb["h0"] = h_k_old
+            _tb["R"] = tend.dT_budget
+            _tb["R_total"] = tend.dT_dt.data
 
         # 6. Barotropic step.  Two paths:
         #    - explicit_substep: split-explicit forward-backward substepping
@@ -11545,6 +11556,28 @@ class LatLonCGridOceanModel:
                         tr_a_before=_T_adv_before, tr_b_before=_S_adv_before,
                     )
 
+            if _tb is not None:
+                if _tti in ("rk3", "rk3_ws", "ab2") or _pair_divs[0] is None:
+                    raise ValueError("store_tracer_budget needs the euler "
+                                     "tracer integrator")
+                _tb_d, _tb_v, _tb_fu, _tb_fv = _compute_advection_flux_div(
+                    T_mid, _adv, mass_flux_u_tr, mass_flux_v_tr, w_baro_tr,
+                    h_k_old, h_u_old, h_v_old, _grid, dt,
+                    recon_fill_mask=_wall_fill_mask,
+                    linssh_top_flux=_linssh,
+                    tr_before=_T_adv_before,
+                    return_h_fluxes=True,
+                )
+                _tb["T_mid"] = T_mid
+                _tb["div_x"] = divergence_cgrid(
+                    _tb_fu, jnp.zeros_like(_tb_fv), _grid)
+                _tb["div_y"] = divergence_cgrid(
+                    jnp.zeros_like(_tb_fu), _tb_fv, _grid)
+                _tb["div_h"] = _tb_d
+                _tb["div_z"] = _tb_v
+                _tb["Fu"] = _tb_fu
+                _tb["Fv"] = _tb_fv
+                _tb["w"] = w_baro_tr
             for tr_name in ['T', 'S']:
                 tr = T_mid if tr_name == 'T' else S_mid
 
@@ -11666,6 +11699,10 @@ class LatLonCGridOceanModel:
             S=state_new.S.replace(data=S_corrected),
             w=w_field,
         )
+        if _tb is not None:
+            _tb["T_adv"] = T_corrected
+            _tb["h1"] = h_k_new
+            _tb["active"] = active_3d
 
         # #1442: keep the tracer-advecting mass fluxes instead of discarding
         # them.  PURE DIAGNOSTIC -- read-only capture of values this step
@@ -12019,6 +12056,8 @@ class LatLonCGridOceanModel:
             else:
                 _n2_tracers = self._n2_before_advection_tracers(state, z_coord=z_coord, config=config)
                 _n2_tracers_before = self._n2_nemo_before_tracers(state, z_coord=z_coord, config=config)
+                if _tb is not None:
+                    _tb["T_pre_zdf"] = state_new.T.data
                 _zdf_result = self._apply_implicit_vertical_mixing(
                     state_new, dt, surface_forcing,
                     K_v_phys=tend.K_v, A_v_phys=tend.A_v,
@@ -12053,6 +12092,8 @@ class LatLonCGridOceanModel:
                      _nemo_ws_budget_v_no_stress) = _zdf_result
                 else:
                     state_new, _nemo_ws_vertical_solve_trace = (_zdf_result if _return_vertical_solve_trace else (_zdf_result, None))
+                if _tb is not None:
+                    _tb["T_post_zdf"] = state_new.T.data
             if _return_momentum_budget_trace:
                 _nemo_ws_budget_v_after_zdf = state_new.v.data
         if _return_tracer_process_trace:
@@ -12489,6 +12530,9 @@ class LatLonCGridOceanModel:
                 _aux = _aux + (
                     _eta_after_spg_literal, Hu_avg, Hv_avg)
             return state_new, _aux
+        if _tb is not None:
+            _tb["T1"] = state_new.T.data
+            state_new = state_new._replace(tbudget=_tb)
         return state_new
 
     def _fixed_depth_means(self, st, z_coord=None, config=None, grid=None):
