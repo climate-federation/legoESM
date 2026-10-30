@@ -3520,6 +3520,21 @@ class LatLonCGridOceanConfig(NamedTuple):
     # Appended to preserve positional callers.
     lateral_viscosity_file_coastal: str = "four_cell"
 
+    # Face mask of the prognostic velocity on partial cells.
+    # "2d" (default, bit-identical): the step masks u, v with the 2-D face
+    #   masks.  A face whose neighbour column ends above level k has zero
+    #   thickness there (min rule) and is closed for the tracers
+    #   (compute_face_masks_3d), but it keeps a velocity: it receives every
+    #   depth-uniform increment of the step (slow-forcing removal, barotropic
+    #   correction, Coriolis) and nothing damps it.  No transport or kinetic
+    #   energy sees it, yet the horizontal momentum stencils (viscosity, KE
+    #   gradient, vorticity flux, Coriolis averages) read it as water.
+    # "3d": u, v are zeroed at those faces on entry to and on exit from the
+    #   step, as NEMO's per-level umask/vmask (tmask(i)*tmask(i+1) at level k)
+    #   and MITgcm's maskW/maskS (hFacW = 0) do.  Acts only on a partial-cell
+    #   coordinate (pure z* has no such faces).  Tested with the forward
+    #   Euler outer integrator.
+    momentum_face_mask: str = "2d"
 
     @classmethod
     def from_flat(cls, **flat) -> "LatLonCGridOceanConfig":

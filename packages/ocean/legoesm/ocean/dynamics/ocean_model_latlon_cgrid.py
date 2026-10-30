@@ -4221,6 +4221,10 @@ class LatLonCGridOceanModel:
         config: LatLonCGridOceanConfig,
     ) -> LatLonCGridOceanConfig:
         """Resolve conditional defaults, then validate configuration ranges."""
+        if getattr(config, "momentum_face_mask", "2d") not in ("2d", "3d"):
+            raise ValueError(
+                "momentum_face_mask must be '2d' or '3d', got "
+                f"{config.momentum_face_mask!r}")
         nonnegative = {
             "A_h": config.lateral_viscosity.A_h,
             "B_h": config.lateral_viscosity.B_h,
@@ -6806,6 +6810,17 @@ class LatLonCGridOceanModel:
         u_mask_3d = state.u_mask.data[..., jnp.newaxis]
         v_mask_3d = state.v_mask.data[..., jnp.newaxis]
         mask_3d = state.land_mask.data[..., jnp.newaxis]
+        # momentum_face_mask="3d": close the faces below the shallower
+        # seafloor for the velocity as for the tracers (see the config field).
+        _mom_mask_3d = (getattr(_cfg_b, "momentum_face_mask", "2d") == "3d"
+                        and isinstance(_zc, OceanPartialCellCoordinate))
+        if _mom_mask_3d:
+            u_mask_3d, v_mask_3d = compute_face_masks_3d(_zc.is_active, _grid)
+            u_mask_3d = u_mask_3d.astype(state.u.data.dtype)
+            v_mask_3d = v_mask_3d.astype(state.v.data.dtype)
+            state = state._replace(
+                u=state.u.replace(data=state.u.data * u_mask_3d),
+                v=state.v.replace(data=state.v.data * v_mask_3d))
 
         # 1. Baroclinic tendencies (non-Coriolis)
         # The geometry + density (EOS) + baroclinic pressure anomaly depend
@@ -12467,6 +12482,10 @@ class LatLonCGridOceanModel:
                 stage3_damping_rate=_nemo_ws_stage3_damping_rate,
                 stage3_explicit_temperature=T_corrected,
             )
+        if _mom_mask_3d:
+            state_new = state_new._replace(
+                u=state_new.u.replace(data=state_new.u.data * u_mask_3d),
+                v=state_new.v.replace(data=state_new.v.data * v_mask_3d))
         if not _apply_implicit_vmix:
             # Faithful AB2 path: return the explicit-only state plus the
             # implicit-mixing diffusivity profiles (evaluated from u^n, like
