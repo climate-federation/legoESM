@@ -11464,6 +11464,22 @@ _reanchor('tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:245-271',
           anchors=[('@pytest.mark.parametrize(', 2),
                    ('verify_manifests=False,', 3), 26])
 
+# Resume 2 extended the receipt-digest test without invalidating the historical
+# 1-1151 slice.  Keep that original receipt citation live, and map the appended
+# full-suite correction independently.
+_repin(
+    'tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:1-1151',
+    ['"""Direct unit and master-record tests for the SI3 O8--O14 0-ULP scoring driver."""',
+     ('    }', 8), 1151],
+)
+CITATION_MAP.update({
+    'tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:1-1170': [
+        '"""Direct unit and master-record tests for the SI3 O8--O14 0-ULP scoring driver."""',
+        '            verify(planted)',
+        1170,
+    ],
+})
+
 UNAUDITED_ROUNDS = ("1-24 -- hand-checked only; their citations are not in "
                     "CITATION_MAP and this gate does not read them")
 
