@@ -2621,22 +2621,24 @@ _SMOOTH_BECHTOLD_LEAF_PRE2249 = {
 
 
 def _sundqvist_l36_bechtold_decks():
-    """Every config/amip deck whose include chain reaches amip_sundqvist_l36."""
-    import re
-    amip = _repo_root() / "config" / "amip"
-    parent = {}
-    for f in amip.glob("*.yaml"):
-        m = re.search(r"^include:\s*(\S+)", f.read_text(), re.M)
-        if m:
-            parent[f.name] = m.group(1)
+    """Every config/amip deck whose include chain reaches amip_sundqvist_l36,
+    with ``include:`` read and resolved as the loader does (YAML value,
+    relative to the including file)."""
+    import yaml
+    amip = (_repo_root() / "config" / "amip").resolve()
+    base = amip / "amip_sundqvist_l36.yaml"
     found = []
-    for name in sorted(parent):
-        cur, seen = name, set()
-        while cur in parent and cur not in seen:
+    for f in sorted(amip.glob("*.yaml")):
+        cur, seen = f.resolve(), set()
+        while cur not in seen:
             seen.add(cur)
-            cur = parent[cur]
-            if cur == "amip_sundqvist_l36.yaml":
-                found.append(name)
+            doc = yaml.safe_load(cur.read_text(encoding="utf-8")) or {}
+            ref = doc.get("include") if isinstance(doc, dict) else None
+            if ref is None:
+                break
+            cur = (cur.parent / ref).resolve()
+            if cur == base:
+                found.append(f.name)
                 break
     return found
 
@@ -2660,15 +2662,19 @@ def test_sundqvist_l36_and_inheritors_resolve_to_the_smooth_bechtold_chain():
     # The walk must find at least the inheritors known today (non-vacuous).
     assert {"amip_production_l36.yaml", "amip_campaign_mpas.yaml",
             "amip_aug13_control.yaml", "amip_aug13_land.yaml",
-            "amip_reference_r5_land.yaml"} <= set(decks), decks
-    checked = 0
+            "amip_reference_r5_land.yaml",
+            "amip_sundqvist_latlon24.yaml"} <= set(decks), decks
+    known = {"amip_sundqvist_l36.yaml", "amip_production_l36.yaml",
+             "amip_campaign_mpas.yaml", "amip_aug13_control.yaml",
+             "amip_aug13_land.yaml", "amip_reference_r5_land.yaml"}
     for deck in ["amip_sundqvist_l36.yaml"] + decks:
         cfg, leaf = _bechtold_leaf(deck)
         if cfg.convection != "bechtold":
+            # Only a deck that is not one of the known Bechtold decks may
+            # select another scheme (amip_sundqvist_latlon24: sbm).
+            assert deck not in known, (deck, cfg.convection)
             continue
         assert leaf._asdict() == _SMOOTH_BECHTOLD_LEAF_PRE2249, deck
-        checked += 1
-    assert checked >= 6
 
 
 def test_config_yaml_explicit_cli_flag_overrides_file():
