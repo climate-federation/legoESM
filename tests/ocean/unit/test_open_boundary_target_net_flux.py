@@ -94,8 +94,8 @@ def test_corrected_faces_carry_the_target():
 
 
 def test_interior_volume_follows_the_target():
-    """After the first step (which starts from rest), every step adds the
-    target times dt to the interior, at the default sea level damping."""
+    """Every step, the first included, adds the target times dt to the
+    interior, at the default sea level damping."""
     grid, zc_pc, st0 = _box()
     cfg = LatLonCGridOceanConfig.from_flat(fix_eta_drift=False, physics=OceanPhysicsConfig(
         vertical_mixing=VerticalMixingConfig(scheme="constant"),
@@ -120,9 +120,9 @@ def test_interior_volume_follows_the_target():
         for _ in range(N_STEPS):
             st = model.step(st, DT, surface_forcing=sf, sponge=sponge)
             vols.append(float(np.sum(np.asarray(st.eta.data)[1:-1, 1:-1] * area)))
-        rate = np.diff(vols)[3:] / DT                 # steps 4 to N_STEPS
+        rate = np.diff(vols) / DT                     # every step, the first included
         want = 0.0 if target is None else Q
-        assert np.abs(rate - want).max() < 1e-4 * Q, (target, rate / Q)
+        assert np.abs(rate - want).max() < 1e-9 * Q, (target, rate / Q)
 
 
 def test_baroclinic_part_keeps_the_depth_mean_over_a_shelf():

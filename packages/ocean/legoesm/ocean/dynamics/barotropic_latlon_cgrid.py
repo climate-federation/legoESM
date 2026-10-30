@@ -2078,6 +2078,19 @@ def _run_substep_loop(
             H_u_flux, H_v_flux = H_u, H_v
         flux_u = H_u_flux * U_mid * u_mask
         flux_v = H_v_flux * V_mid * v_mask
+        if open_boundary is not None:
+            # Volume constraint of the open boundaries on the fluxes the
+            # continuity and the transport average below actually use.
+            if (_transport_evaluation == "nemo_literal"
+                    or _continuity_evaluation == "nemo_literal"):
+                raise ValueError("open boundaries need the generic barotropic "
+                                 "transport and continuity evaluation")
+            from legoesm.ocean.dynamics.open_boundary_latlon import (
+                constrain_open_face_fluxes,
+            )
+            flux_u, flux_v = constrain_open_face_fluxes(
+                flux_u, flux_v, H_u_flux * u_mask, H_v_flux * v_mask, grid,
+                open_boundary)
 
         # Accumulate transport (always box-filtered for volume conservation).
         # Keep the generic statements unchanged: non-fidelity cards retain

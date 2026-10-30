@@ -166,6 +166,45 @@ def apply_barotropic_open_boundary(eta_c, U_c, V_c, eta_new, U_new, V_new,
     return U_new, V_new, eta_new
 
 
+def constrain_open_face_fluxes(flux_u, flux_v, H_u_flux, H_v_flux, grid, ob: OpenBoundaryData):
+    """Volume constraint on the fluxes of a fast substep (CROCO applies
+    obc_volcons to the fluxes of the barotropic continuity).  flux_u, flux_v:
+    the depth-integrated face fluxes per unit face length (m2 s-1) that the
+    substep's continuity and transport average use, H_u_flux, H_v_flux their
+    face depths.  A uniform normal velocity on all open faces brings the net
+    inflow to target_net_flux (zero when None).  The velocity-level correction
+    of apply_barotropic_open_boundary measures the depth at the end of the
+    previous substep; the continuity carries the velocity with the depth
+    extrapolated to mid substep, so it misses by a small, slowly growing
+    amount, which this removes.  Returns (flux_u, flux_v)."""
+    if ob.volume_correction_off is not None:
+        return flux_u, flux_v
+    dy_cell = 0.5 * jnp.asarray(grid.dy)
+    faces = []                                          # (is_u, index, sign, depth, length)
+    if ob.west_ubar is not None:
+        faces.append((True, 1, 1.0, H_u_flux[:, 1], dy_cell))
+    if ob.south_vbar is not None:
+        faces.append((False, 1, 1.0, H_v_flux[1], _v_face_length(grid, 1)))
+    if ob.north_vbar is not None:
+        nv = flux_v.shape[0] - 2
+        faces.append((False, nv, -1.0, H_v_flux[nv], _v_face_length(grid, nv)))
+    if not faces:
+        return flux_u, flux_v
+    net, section = 0.0, 0.0
+    for is_u, k, sgn, d, length in faces:
+        f = flux_u[:, k] if is_u else flux_v[k]
+        net = net + sgn * jnp.sum(f * length)
+        section = section + jnp.sum(d * length)
+    target = 0.0 if ob.target_net_flux is None else ob.target_net_flux
+    corr = (target - net) / jnp.maximum(section, _EPS)
+    for is_u, k, sgn, d, length in faces:
+        if is_u:
+            flux_u = flux_u.at[:, k].add(sgn * corr * d)
+        else:
+            flux_v = flux_v.at[k].add(sgn * corr * d)
+    return flux_u, flux_v
+
+
 def _v_face_length(grid, row):
     """Length of the v faces of one v row, R cos(lat_v) dlon (as divergence_cgrid away from the poles)."""
     return float(grid.radius) * jnp.cos(jnp.asarray(grid.lat_v)[row]) * float(grid.dlon)
