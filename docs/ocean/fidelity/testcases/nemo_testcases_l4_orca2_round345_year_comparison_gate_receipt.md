@@ -67,13 +67,15 @@ This difference is NEMO restart bookkeeping, not model-state drift. The
 `nn_fwb = 2` annual freshwater-budget branch labels its delayed global sum
 `fwb2` (`src/OCE/SBC/sbcfwb.F90:342-365`). Delayed communication registers the
 label and allocates its output buffer only when that call executes
-(`src/OCE/LBC/mpp_allreduce_generic.h90:113-149`). On restart, NEMO reconstructs
-the delayed list and complex buffer only from `DELAY_*` variables already in
-the input restart (`src/OCE/IOM/iom.F90:1925-1966`), and restart output writes
-only registered, allocated delayed buffers (`src/OCE/IOM/iom.F90:1972-1984`).
-The continuation input at `kt = 8` has no `fwb2` buffers; the restarted run
-begins at step 9 and does not reach the next annual `fwb2` call by step 2920, so
-it never registers or writes them.
+(`src/OCE/LBC/mpp_allreduce_generic.h90:113-149`). On restart, NEMO reads the
+delayed list and complex buffer from the `DELAY_re8_fwb2` and
+`DELAY_im8_fwb2` variables carried by arm A's `kt = 8` restart and both staged
+continuation inputs (`src/OCE/IOM/iom.F90:1925-1966`). The restart writer skips
+a delayed buffer that was read but not used in the restarted run
+(`src/OCE/IOM/iom.F90:1972-1984`, specifically line 1974). The next annual
+`fwb2` delayed call is at `kt = 2921` (`src/OCE/SBC/sbcfwb.F90:342-365`), after
+this continuation ends, so the buffer cannot affect state and is not written
+in the `kt = 16..2920` outputs.
 
 The repaired control therefore compares the 728 continuation outputs variable
 by variable. It requires exactly those two variables to be arm-A-only, requires

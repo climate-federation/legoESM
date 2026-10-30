@@ -497,10 +497,11 @@ def verify_restart_continuation_control(
 ) -> dict[str, Any]:
     """Require bitwise-identical common variable data in every continuation restart.
 
-    Arm A registered the delayed ``fwb2`` reduction before the continuation's
-    input restart.  The restarted control cannot reconstruct that registration
-    from its kt=8 input, so exactly the two delayed-buffer variables are allowed
-    only in arm A.  File bytes and NetCDF metadata are deliberately not compared.
+    The kt=8 input carries the delayed ``fwb2`` buffers, which NEMO reads on
+    restart.  Because ``fwb2`` is not used again before kt=2921, NEMO's restart
+    writer skips those read-but-unused buffers in every continuation output.
+    Exactly those two variables are therefore allowed only in arm A.  File bytes
+    and NetCDF metadata are deliberately not compared.
     """
     rows = []
     common_variable_comparisons = 0
@@ -517,58 +518,14 @@ def verify_restart_continuation_control(
             require(baseline.is_file(), f"missing admitted arm-A restart: {baseline}")
             require(control.is_file() and not control.is_symlink(),
                     f"missing regular control restart: {control}")
-            with netCDF4.Dataset(baseline, "r") as baseline_ds, netCDF4.Dataset(
-                control, "r"
-            ) as control_ds:
-                baseline_names = set(baseline_ds.variables)
-                control_names = set(control_ds.variables)
-                baseline_only = baseline_names - control_names
-                control_only = control_names - baseline_names
-                require(
-                    baseline_only == DELAY_RESTART_VARIABLES and not control_only,
-                    f"{name}: restart variable inventory mismatch: "
-                    f"arm_A_only={sorted(baseline_only)}, "
-                    f"control_only={sorted(control_only)}, expected_arm_A_only="
-                    f"{sorted(DELAY_RESTART_VARIABLES)}",
-                )
-                common_names = sorted(baseline_names & control_names)
-                require(bool(common_names), f"{name}: no common restart variables")
-                for variable_name in common_names:
-                    baseline_var = baseline_ds.variables[variable_name]
-                    control_var = control_ds.variables[variable_name]
-                    baseline_var.set_auto_maskandscale(False)
-                    control_var.set_auto_maskandscale(False)
-                    baseline_values = np.asarray(baseline_var[:])
-                    control_values = np.asarray(control_var[:])
-                    require(
-                        baseline_values.dtype == control_values.dtype,
-                        f"{name}:{variable_name} dtype differs from arm A: "
-                        f"{control_values.dtype} != {baseline_values.dtype}",
-                    )
-                    require(
-                        baseline_values.shape == control_values.shape,
-                        f"{name}:{variable_name} shape differs from arm A: "
-                        f"{control_values.shape} != {baseline_values.shape}",
-                    )
-                    require(
-                        baseline_values.tobytes(order="C")
-                        == control_values.tobytes(order="C"),
-                        f"{name}:{variable_name} restart variable data differs from arm A",
-                    )
-                common_variable_comparisons += len(common_names)
-            baseline_sha = common.sha256(baseline)
-            control_sha = common.sha256(control)
-            rows.append({
-                "kt": kt,
-                "rank": rank,
-                "file": name,
-                "baseline_sha256": baseline_sha,
-                "control_sha256": control_sha,
-                "common_variable_count": len(common_names),
-                "arm_a_only_variables": sorted(DELAY_RESTART_VARIABLES),
-                "control_only_variables": [],
-                "unequal_common_variable_data": [],
-            })
+            row = _verify_continuation_restart(
+                control, baseline, kt, require_common_data_equal=True,
+                candidate_label="control",
+            )
+            row["control_sha256"] = row.pop("candidate_sha256")
+            row["control_only_variables"] = row.pop("candidate_only_variables")
+            common_variable_comparisons += row["common_variable_count"]
+            rows.append(row)
     expected_pairs = (expected_steps - RESTART_KT) // r342.DAILY_STOCK_STRIDE
     expected_files = expected_pairs * 2
     require(len(rows) == expected_files,
@@ -587,6 +544,129 @@ def verify_restart_continuation_control(
         "required_arm_a_only_variables": sorted(DELAY_RESTART_VARIABLES),
         "control_only_variables": [],
         "comparison": "variable dtype + shape + raw C-order data bytes; NetCDF file bytes and metadata excluded",
+        "restart_files": rows,
+    }
+
+
+def _verify_continuation_restart(
+    candidate: Path,
+    baseline: Path,
+    expected_kt: int,
+    *,
+    require_common_data_equal: bool,
+    candidate_label: str = "candidate",
+) -> dict[str, Any]:
+    """Validate restart data and the exact post-restart variable-set exception."""
+    require(baseline.is_file(), f"missing admitted arm-A restart: {baseline}")
+    require(candidate.is_file() and not candidate.is_symlink(),
+            f"missing regular continuation restart: {candidate}")
+    with netCDF4.Dataset(baseline, "r") as baseline_ds, netCDF4.Dataset(
+        candidate, "r"
+    ) as candidate_ds:
+        baseline_names = set(baseline_ds.variables)
+        candidate_names = set(candidate_ds.variables)
+        baseline_only = baseline_names - candidate_names
+        candidate_only = candidate_names - baseline_names
+        require(
+            baseline_only == DELAY_RESTART_VARIABLES and not candidate_only,
+            f"{candidate.name}: restart variable inventory mismatch: "
+            f"arm_A_only={sorted(baseline_only)}, "
+            f"{candidate_label}_only={sorted(candidate_only)}, expected_arm_A_only="
+            f"{sorted(DELAY_RESTART_VARIABLES)}",
+        )
+        common_names = sorted(baseline_names & candidate_names)
+        require(bool(common_names), f"{candidate.name}: no common restart variables")
+        require("kt" in candidate_names, f"missing kt variable in {candidate.name}")
+        kt_value = int(np.asarray(candidate_ds.variables["kt"][...]))
+        require(kt_value == expected_kt,
+                f"{candidate.name}: kt={kt_value} != expected {expected_kt}")
+        numeric_names = {
+            name for name in common_names
+            if np.issubdtype(candidate_ds.variables[name].dtype, np.number)
+        }
+        require(len(numeric_names) >= 20,
+                f"unexpectedly few numeric variables in {candidate.name}: "
+                f"{len(numeric_names)}")
+        for name in r342.NONZERO_RESTART_VARS:
+            require(name in numeric_names,
+                    f"missing prognostic restart variable {name!r} in {candidate.name}")
+        for variable_name in common_names:
+            baseline_var = baseline_ds.variables[variable_name]
+            candidate_var = candidate_ds.variables[variable_name]
+            candidate_var.set_auto_maskandscale(False)
+            candidate_values = np.asarray(candidate_var[:])
+            require(
+                np.dtype(baseline_var.dtype) == candidate_values.dtype,
+                f"{candidate.name}:{variable_name} dtype differs from arm A: "
+                f"{candidate_values.dtype} != {np.dtype(baseline_var.dtype)}",
+            )
+            require(
+                baseline_var.shape == candidate_values.shape,
+                f"{candidate.name}:{variable_name} shape differs from arm A: "
+                f"{candidate_values.shape} != {baseline_var.shape}",
+            )
+            if variable_name in numeric_names:
+                numeric_values = np.asarray(candidate_values, dtype=np.float64)
+                require(bool(np.isfinite(numeric_values).all()),
+                        f"{candidate.name}:{variable_name} contains non-finite values")
+                if variable_name in r342.NONZERO_RESTART_VARS:
+                    require(float(np.max(np.abs(numeric_values))) > 0.0,
+                            f"{candidate.name}:{variable_name} is identically zero")
+            if require_common_data_equal:
+                baseline_var.set_auto_maskandscale(False)
+                baseline_values = np.asarray(baseline_var[:])
+                require(
+                    baseline_values.tobytes(order="C")
+                    == candidate_values.tobytes(order="C"),
+                    f"{candidate.name}:{variable_name} restart variable data differs from arm A",
+                )
+    return {
+        "kt": expected_kt,
+        "rank": int(candidate.stem.rsplit("_", 1)[1]),
+        "file": candidate.name,
+        "baseline_sha256": common.sha256(baseline),
+        "candidate_sha256": common.sha256(candidate),
+        "common_variable_count": len(common_names),
+        "arm_a_only_variables": sorted(DELAY_RESTART_VARIABLES),
+        "candidate_only_variables": [],
+        "unequal_common_variable_data": [] if require_common_data_equal else None,
+    }
+
+
+def verify_perturbed_restart_outputs(
+    perturbed_arm: Path,
+    *,
+    baseline_arm: Path = BASELINE_ARM,
+    expected_steps: int = r342.YEAR_STEPS,
+) -> dict[str, Any]:
+    """Validate every perturbed continuation restart by data and variable set."""
+    rows = []
+    first_output_kt = RESTART_KT + r342.DAILY_STOCK_STRIDE
+    require(expected_steps >= first_output_kt,
+            f"restart continuation ends before first output: {expected_steps}")
+    require((expected_steps - RESTART_KT) % r342.DAILY_STOCK_STRIDE == 0,
+            f"restart continuation endpoint is off cadence: {expected_steps}")
+    for kt in range(first_output_kt, expected_steps + 1, r342.DAILY_STOCK_STRIDE):
+        for rank in (0, 1):
+            name = f"ORCA2_{kt:08d}_restart_{rank:04d}.nc"
+            rows.append(_verify_continuation_restart(
+                perturbed_arm / name,
+                baseline_arm / name,
+                kt,
+                require_common_data_equal=False,
+            ))
+    expected_pairs = (expected_steps - RESTART_KT) // r342.DAILY_STOCK_STRIDE
+    require(len(rows) == expected_pairs * 2,
+            f"perturbed arm validated {len(rows)} restart files, "
+            f"expected {expected_pairs * 2}")
+    return {
+        "status": "PASS_R345_PERTURBED_RESTART_OUTPUTS",
+        "restart_kt_first": first_output_kt,
+        "restart_kt_last": expected_steps,
+        "daily_restart_pairs_validated": expected_pairs,
+        "restart_files_validated": len(rows),
+        "required_arm_a_only_variables": sorted(DELAY_RESTART_VARIABLES),
+        "comparison": "variable set + dtype + shape + finite/nonzero numeric data; NetCDF file size and metadata excluded",
         "restart_files": rows,
     }
 
@@ -709,12 +789,9 @@ def admit_perturbed_arm(
     }
     common.validate_ocean_output(run_dir / "ocean.output", expected_resolved)
     completion = r342.verify_nemo_completion_signal(run_dir, expected_steps=expected_steps)
-    expected_sizes = (r342.R339_RESTART_0.stat().st_size, r342.R339_RESTART_1.stat().st_size)
-    for kt in range(r342.DAILY_STOCK_STRIDE, expected_steps + 1, r342.DAILY_STOCK_STRIDE):
-        for rank, expected_size in enumerate(expected_sizes):
-            r342._verify_single_restart_file(
-                run_dir / f"ORCA2_{kt:08d}_restart_{rank:04d}.nc", kt, expected_size
-            )
+    continuation_outputs = verify_perturbed_restart_outputs(
+        run_dir, expected_steps=expected_steps
+    )
     result = {
         "status": "PASS_R345_S4_YEAR_SST_PLUS_ONE_ULP_ARM",
         "admitted": True,
@@ -732,6 +809,7 @@ def admit_perturbed_arm(
         "binary_equal_arm_a": actual_binary == baseline["binary_sha256"],
         "arm_a_input_identity": input_identity,
         "restart_sst_perturbation": perturbation,
+        "continuation_restart_outputs": continuation_outputs,
         "producer_manifest": manifest,
     }
     if write_output:
@@ -959,10 +1037,9 @@ def write_stub_outputs(
         for local_rank in ranks:
             name = f"ORCA2_{kt:08d}_restart_{local_rank:04d}.nc"
             shutil.copy2(BASELINE_ARM / name, run_dir / name)
-            if control:
-                _copy_netcdf_excluding_variables(
-                    run_dir / name, run_dir / name, DELAY_RESTART_VARIABLES
-                )
+            _copy_netcdf_excluding_variables(
+                run_dir / name, run_dir / name, DELAY_RESTART_VARIABLES
+            )
     input_after = {
         local_rank: common.sha256(
             run_dir / f"ORCA2_{RESTART_KT:08d}_restart_{local_rank:04d}.nc"
@@ -1192,6 +1269,25 @@ def run_preflight(
         shutil.copy2(control_backup, control_restart)
         verify_restart_continuation_control(control_arm, expected_steps=16)
 
+        perturbed_output = perturbed_arm / "ORCA2_00000016_restart_0000.nc"
+        perturbed_output_backup = Path(tmp) / "perturbed_output.preplant"
+        shutil.copy2(perturbed_output, perturbed_output_backup)
+        with netCDF4.Dataset(perturbed_output, "r+") as dataset:
+            variable = dataset.variables[RESTART_VARIABLE]
+            variable.set_auto_maskandscale(False)
+            values = np.asarray(variable[:])
+            values.reshape(-1)[0] = np.nan
+            variable[:] = values
+        perturbed_nonfinite_data_caught = False
+        try:
+            verify_perturbed_restart_outputs(perturbed_arm, expected_steps=16)
+        except GateError:
+            perturbed_nonfinite_data_caught = True
+        require(perturbed_nonfinite_data_caught,
+                "perturbed non-finite restart-data plant did not fail")
+        shutil.copy2(perturbed_output_backup, perturbed_output)
+        verify_perturbed_restart_outputs(perturbed_arm, expected_steps=16)
+
         # A failing in-place admission must quarantine both arms and log the
         # refusal.  Once repaired, the refused/ route must promote both arms.
         failed_backup = Path(tmp) / "failed_admission_restart.preplant"
@@ -1254,6 +1350,7 @@ def run_preflight(
         "control_tn_byte_flip_plant": True,
         "control_extra_variable_plant": True,
         "control_missing_non_delay_variable_plant": True,
+        "perturbed_nonfinite_restart_data_plant": True,
         "producer_commit_ancestry_plant": ancestry_plant,
         "perturbation_audit": perturbation_audit,
         "control_input_audit": control_input_audit,
