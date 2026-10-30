@@ -13,7 +13,7 @@ first onto the requested current SI3 lane tip
 commits cleanly and produced `0deec1acfcb0406fa1b2f690a4fbcfadc23d5e81`.
 There were **no conflict hunks**, so no conflict-side selection or manual hunk
 resolution occurred. The score preregistration was then committed as
-`f761e959dfb60640a6b57ff2a804dc8b122600dd`, before any score command, and the
+`f761e959df3c206a0b174a4c25a8b8385f4ce370`, before any score command, and the
 extended committed scorer as `557425cdd1a2ea339ed29b0658c5114920565af6`.
 
 ## Acquisition and admission

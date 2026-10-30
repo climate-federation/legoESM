@@ -118,7 +118,7 @@ def test_o4_driver_is_a_read_only_preflight_tool() -> None:
 
 def test_o4_receipt_digests_rehash_exact_files() -> None:
     receipt = (ROOT/"docs/ice/fidelity/si3_r25_o4_acquisition_receipt.md").read_text()
-    rows = re.findall(r"^SHA256 ([^ ]+) ([0-9a-f]{64})$", receipt, re.MULTILINE)
+    rows = re.findall(r"^SHA256 `([^`]+)` `([0-9a-f]{64})`$", receipt, re.MULTILINE)
     assert len(rows) >= 6
     for relative, expected in rows:
         path = ROOT/relative
