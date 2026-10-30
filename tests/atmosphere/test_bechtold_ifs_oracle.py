@@ -185,7 +185,10 @@ def test_wrapper_matches_openifs(fix):
     """The BechtoldConfig.use_ifs_ascent path, seam included (pipeline
     surface fluxes negated into the IFS sign, PGAW from dx_m, hydrostatic
     geopotential, SATUR saturation, PLITOT = 0), against the oracle run on
-    the same inputs with PLITOT = 0 (arm L0)."""
+    the same inputs with PLITOT = 0 (arm L0).  Runs the source no-supply
+    shallow closure ("first_guess"); the default "zero" ramp (main #2253) is
+    a recorded departure whose per-column gap is
+    test_nosupply_default_gap_per_case."""
     from legoesm.atmosphere.physics.convection._ifs_faithful import ifs_faithful_convection
     from legoesm.atmosphere.physics.convection.config import BechtoldConfig
     from legoesm.atmosphere.physics.convection.output import ConvectionOutput
@@ -194,7 +197,8 @@ def test_wrapper_matches_openifs(fix):
         a = lambda k: jnp.asarray(fix[f"{g}_{k}"])
         out, mu = ifs_faithful_convection(
             a("T"), a("q"), a("p_full"), a("p_half"), a("u"), a("v"), float(fix["dt"]),
-            BechtoldConfig(use_ifs_ascent=True, dx_m=_DX), a("shf_up"), a("lhf_up"),
+            BechtoldConfig(use_ifs_ascent=True, dx_m=_DX, ifs_shallow_nosupply="first_guess"),
+            a("shf_up"), a("lhf_up"),
             a("land"), a("dT_adv"), a("dq_adv"), a("dT_other"), a("dq_other"), a("omega"),
             ConvectionOutput)
         o = lambda t: fix[f"L0_{g}_{t}"]
