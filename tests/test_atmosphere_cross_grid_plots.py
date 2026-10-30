@@ -926,7 +926,7 @@ class TestRrtmgpGhgOverrides:
         """
         captured = {}
 
-        def fake_make_physics(phys_cfg, model_type, dt):
+        def fake_make_physics(phys_cfg, model_type, dt, **_kw):
             captured["phys_cfg"] = phys_cfg
             return lambda *a, **kw: None  # no-op physics_fn
 
@@ -1088,7 +1088,7 @@ class TestOzoneProfileOverrides:
         """
         captured = {}
 
-        def fake_make_physics(phys_cfg, model_type, dt):
+        def fake_make_physics(phys_cfg, model_type, dt, **_kw):
             captured["phys_cfg"] = phys_cfg
             return lambda *a, **kw: None  # no-op
 
@@ -1112,7 +1112,7 @@ class TestOzoneProfileOverrides:
         """
         captured = {}
 
-        def fake_make_physics(phys_cfg, model_type, dt):
+        def fake_make_physics(phys_cfg, model_type, dt, **_kw):
             captured["phys_cfg"] = phys_cfg
             return lambda *a, **kw: None
 
@@ -1136,7 +1136,7 @@ class TestOzoneProfileOverrides:
         """
         captured = {}
 
-        def fake_make_physics(phys_cfg, model_type, dt):
+        def fake_make_physics(phys_cfg, model_type, dt, **_kw):
             captured["phys_cfg"] = phys_cfg
             return lambda *a, **kw: None
 
@@ -1157,7 +1157,7 @@ class TestOzoneProfileOverrides:
         """Same as above but with ``--ozone-max-vmr`` only."""
         captured = {}
 
-        def fake_make_physics(phys_cfg, model_type, dt):
+        def fake_make_physics(phys_cfg, model_type, dt, **_kw):
             captured["phys_cfg"] = phys_cfg
             return lambda *a, **kw: None
 

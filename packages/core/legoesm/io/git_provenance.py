@@ -52,7 +52,8 @@ def _git(args: list[str], cwd: str | Path) -> str:
     failure (missing git binary, not a repo, timeout).  Never raises."""
     try:
         result = subprocess.run(
-            ["git", "-C", str(cwd), *args],
+            # No index refresh-write: a timeout kill mid-write leaves a stale index.lock.
+            ["git", "--no-optional-locks", "-C", str(cwd), *args],
             capture_output=True,
             text=True,
             timeout=_GIT_TIMEOUT_S,

@@ -588,3 +588,26 @@ def test_plot_coupling_diagnostics_validates_inputs() -> None:
 
     with pytest.raises(ValueError, match="lead_day"):
         module._validate_plot_inputs(coupled, uncoupled=None, truth=None)
+
+
+def test_surface_forcing_builder_refuses_missing_inputs() -> None:
+    from legoesm.ml.s2s.neuralgcm_slab.slab_coupling import extract_surface_forcing_from_dataset
+
+    coords = {"level": [1000], "latitude": [0.0, 1.0], "longitude": [0.0, 1.0]}
+    atm = xr.Dataset(
+        {name: (("level", "latitude", "longitude"), np.full((1, 2, 2), val))
+         for name, val in (("temperature", 290.0), ("specific_humidity", 0.01),
+                           ("u_component_of_wind", 1.0), ("v_component_of_wind", 1.0))},
+        coords=coords,
+    )
+    rad = xr.Dataset(
+        {n: (("latitude", "longitude"), np.full((2, 2), 100.0)) for n in ("sw_down", "lw_down")},
+        coords={"latitude": [0.0, 1.0], "longitude": [0.0, 1.0]},
+    )
+    with pytest.raises(ValueError, match="radiation_dataset"):
+        extract_surface_forcing_from_dataset(atm, surface_pressure=np.full((2, 2), 1e5))
+    with pytest.raises(ValueError, match="surface pressure is required"):
+        extract_surface_forcing_from_dataset(atm, radiation_dataset=rad)
+    out = extract_surface_forcing_from_dataset(
+        atm, radiation_dataset=rad, surface_pressure=np.full((2, 2), 1e5))
+    assert np.allclose(np.asarray(out.sw_down), 100.0)

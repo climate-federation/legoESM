@@ -9,7 +9,7 @@ experiment:
   tier: tier2
   complexity: primitive_equation
   extent: regional
-  maturity: structurally_validated
+  maturity: run_tested
   description: >
     Wind-driven baroclinic gyre (regional): a steady wind stress spins up a
     stratified gyre, testing the baroclinic pressure-gradient and lateral

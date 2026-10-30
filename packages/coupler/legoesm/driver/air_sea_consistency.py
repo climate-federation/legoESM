@@ -150,6 +150,12 @@ def validate_air_sea_consistency(atm_config, coupler_config) -> None:
     """
     from legoesm.coupler.config import CouplerConfig
 
+    if getattr(atm_config, "surface_bulk_scheme", None) == "none":
+        # The coupler ocean tile always runs its own bulk law, so an
+        # atmosphere with no surface exchange cannot share an interface with it.
+        raise ValueError(
+            "surface_bulk_scheme='none' (no surface fluxes) cannot be coupled "
+            "to an ocean: the coupler ocean tile computes air-sea fluxes.")
     surf = resolve_effective_atm_surface(atm_config)
     if surf is None:
         return

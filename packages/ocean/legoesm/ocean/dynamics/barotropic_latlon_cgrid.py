@@ -94,6 +94,8 @@ from legoesm.ocean.dynamics.latlon_cgrid_operators import (
     vertex_coriolis,
 )
 from legoesm.grids.halo_latlon import zero_polar_lat_ends as _zero_polar_lat_ends
+from legoesm.grids.halo_latlon import (
+    get_meridionally_periodic, lat_faces_from_north, lat_north, lat_south)
 from legoesm.ocean.dynamics.eta_floor import clamp_and_redistribute as _clamp_redistribute
 from legoesm.ocean.dynamics.barotropic_common import (
     bebt_blend,
@@ -231,8 +233,7 @@ def _nemo_literal_seed_from_reference_mesh(
     wet_t = h_k[..., :nlev] > 0.0
     wet_u = (wet_t & jnp.roll(wet_t, -1, axis=1)
              & (u_mask[:, 1:, None] > 0.5))
-    wet_t_north = jnp.concatenate(
-        [wet_t[1:], jnp.zeros_like(wet_t[:1])], axis=0)
+    wet_t_north = lat_north(wet_t)
     wet_v = (wet_t & wet_t_north & (v_mask[1:, :, None] > 0.5))
     wet2_u = wet_u[..., 0]
     wet2_v = wet_v[..., 0]
@@ -242,8 +243,7 @@ def _nemo_literal_seed_from_reference_mesh(
     area_v_safe = jnp.where(wet2_v, area_v, 1.0)
     area_eta = area_t * eta_dyn
     area_eta_east = jnp.roll(area_eta, -1, axis=1)
-    area_eta_north = jnp.concatenate(
-        [area_eta[1:], jnp.zeros_like(area_eta[:1])], axis=0)
+    area_eta_north = lat_north(area_eta)
     r3u = (0.5 * (area_eta + area_eta_east) / hu_safe / area_u_safe)
     r3v = (0.5 * (area_eta + area_eta_north) / hv_safe / area_v_safe)
     mask_u3 = wet_u.astype(eta_dyn.dtype)
@@ -257,7 +257,7 @@ def _nemo_literal_seed_from_reference_mesh(
     vn_native = _nemo_literal_seed_depth_mean(
         v_3d[1:, :, :], live_v, wet2_v, r1v)
     un = jnp.concatenate([un_native[:, -1:], un_native], axis=1)
-    vn = jnp.concatenate([jnp.zeros_like(vn_native[:1]), vn_native], axis=0)
+    vn = lat_faces_from_north(vn_native)
     return un, vn
 
 
@@ -267,12 +267,17 @@ def _nemo_literal_barotropic_pressure_gradient(eta_pgf, grid, g, u_mask, v_mask)
     east_delta = jnp.roll(eta_pgf, -1, axis=1) - eta_pgf
     pgf_u_native = ((-g * east_delta) * (1.0 / geom.dx_u[:, 1:]))
     pgf_u = jnp.concatenate([pgf_u_native[:, -1:], pgf_u_native], axis=1)
-    north_delta = eta_pgf[1:] - eta_pgf[:-1]
-    pgf_v = jnp.concatenate([
-        jnp.zeros_like(eta_pgf[:1]),
-        ((-g * north_delta) * (1.0 / geom.dy_v[1:-1])),
-        jnp.zeros_like(eta_pgf[:1]),
-    ], axis=0)
+    if get_meridionally_periodic():
+        # lbclnk.f90:2028-2034: the seam V face is a periodic copy.
+        north_delta = lat_north(eta_pgf) - eta_pgf
+        pgf_v = lat_faces_from_north((-g * north_delta) * (1.0 / geom.dy_v[1:]))
+    else:
+        north_delta = eta_pgf[1:] - eta_pgf[:-1]
+        pgf_v = jnp.concatenate([
+            jnp.zeros_like(eta_pgf[:1]),
+            ((-g * north_delta) * (1.0 / geom.dy_v[1:-1])),
+            jnp.zeros_like(eta_pgf[:1]),
+        ], axis=0)
     return pgf_u * u_mask, pgf_v * v_mask
 
 
@@ -340,7 +345,7 @@ def _nemo_literal_seed_from_card_mesh(
         jnp.asarray(v_3d, dtype=dtype)[1:, :, :], geom.e3v * ops.vmask3,
         wet2_v, geom.r1_hv)
     un = jnp.concatenate([un_native[:, -1:], un_native], axis=1)
-    vn = jnp.concatenate([jnp.zeros_like(vn_native[:1]), vn_native], axis=0)
+    vn = lat_faces_from_north(vn_native)
     return un, vn
 
 
@@ -578,6 +583,11 @@ def _nemo_literal_reference_face_depths(z_coord, dtype):
     reconstructing a plausible min-depth field is the round-150 defect.
     """
 
+    if get_meridionally_periodic():
+        raise ValueError(
+            "NEMO-literal reference face depths store a closed southern V "
+            "row; a meridionally periodic domain fills it by periodicity "
+            "(jpfillperio), which this statement does not transcribe")
     hu_0 = getattr(z_coord, "nemo_hu_0", None)
     hv_0 = getattr(z_coord, "nemo_hv_0", None)
     if hu_0 is None or hv_0 is None:
@@ -1038,16 +1048,22 @@ def _dissipation_coeffs(config, grid, area, dt_s, dtype, mask):
 
 def _nemo_south_copy_fill(field):
     """NEMO ``jpfillcopy`` association for a southern native-grid halo."""
+    if get_meridionally_periodic():
+        return lat_south(field)       # jpfillperio (lbclnk.f90:2028)
     return jnp.concatenate([field[:1], field[:-1]], axis=0)
 
 
 def _nemo_een_south_e3f0(e3f0, mesh_e3f0):
     """Southern ``e3f_0vor`` after zero fill and mesh-thickness restore."""
+    if get_meridionally_periodic():
+        return lat_south(e3f0)        # jpfillperio (lbclnk.f90:2028)
     return jnp.concatenate([mesh_e3f0[:1], e3f0[:-1]], axis=0)
 
 
 def _nemo_south_zero_fill(field):
     """NEMO default constant-zero association for a southern halo."""
+    if get_meridionally_periodic():
+        return lat_south(field)       # jpfillperio (lbclnk.f90:2028)
     return jnp.concatenate([jnp.zeros_like(field[:1]), field[:-1]], axis=0)
 
 
@@ -1481,9 +1497,9 @@ def _nemo_literal_barotropic_coriolis(U_bar, V_bar, coefficients,
     ua = U_bar[:, 1:]
     va = V_bar[1:, :]
     east_v = jnp.roll(va, -1, axis=1)
-    south_v = jnp.concatenate([jnp.zeros_like(va[:1]), va[:-1]], axis=0)
+    south_v = lat_south(va)
     southeast_v = jnp.roll(south_v, -1, axis=1)
-    north_u = jnp.concatenate([ua[1:], jnp.zeros_like(ua[:1])], axis=0)
+    north_u = lat_north(ua)
     west_u = jnp.roll(ua, 1, axis=1)
     northwest_u = jnp.roll(north_u, 1, axis=1)
     products = {
@@ -1509,8 +1525,7 @@ def _nemo_literal_barotropic_coriolis(U_bar, V_bar, coefficients,
     products["v_total"] = -nemo_source_round(
         products["v_south_pair"] + products["v_north_pair"])
     cor_u = jnp.concatenate([products["u_total"][:, -1:], products["u_total"]], axis=1)
-    cor_v = jnp.concatenate(
-        [jnp.zeros_like(products["v_total"][:1]), products["v_total"]], axis=0)
+    cor_v = lat_faces_from_north(products["v_total"])
     if return_terms:
         return cor_u, cor_v, products
     return cor_u, cor_v
@@ -2894,13 +2909,24 @@ def nemo_literal_external_mode_active(config) -> bool:
     production identity on the same explicit config fields that already
     select its literal continuity and transport-accumulation statements.
     """
+    # The bundle transcribes a CLOSED southern boundary: its raw reference
+    # face depths store a zero-depth southern V row and its boundary
+    # association assumes no southern neighbour.  NEMO fills a
+    # meridionally periodic domain's southern halo by periodicity
+    # (jpfillperio, lbclnk.f90:2028), which the bundle does not transcribe,
+    # so a periodic card (TSUNAMI) keeps the external mode it was certified
+    # with instead of silently walling its j-seam.
+    if getattr(config, "meridionally_periodic", False):
+        return False
     barotropic = config.barotropic
     vector_form = (
         barotropic.barotropic_literal_fold_unit_vector_form
         and getattr(config, "momentum_time_integrator", "euler") == "rk3_ws"
         and getattr(config, "momentum_advection", "") == "vector_invariant")
+    flux_form = (nemo_flux_form_update_active(config)
+                 and barotropic.nemo_literal_external_mode_flux_form)
     return (
-        (nemo_flux_form_update_active(config) or vector_form)
+        (flux_form or vector_form)
         and barotropic.barotropic_face_depth == "nemo_ssh_avg"
         and barotropic.barotropic_continuity_evaluation == "nemo_literal"
         and (barotropic.barotropic_transport_accumulation_evaluation

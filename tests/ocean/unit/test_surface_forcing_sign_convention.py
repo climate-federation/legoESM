@@ -264,4 +264,3 @@ def test_native_face_stress_pair_direct_handoff_and_fail_closed():
             ),
             jnp.float64, z, jac, grid,
         )
-

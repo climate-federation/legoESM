@@ -334,9 +334,10 @@ def _kinetic_energy_cgrid(
 # Tendency computation
 # ==============================================================================
 
-def _nu_del4_row_profiles(
+def nu_del4_row_profiles(
     grid: LatLonGrid,
-    config: CGridLatLonShallowWaterConfig,
+    nu_del4: float,
+    cfl_frac: float,
     dt,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Per-latitude-row biharmonic coefficients with pole stability cap.
@@ -351,7 +352,7 @@ def _nu_del4_row_profiles(
 
     (``lam_row`` = max eigenvalue of the discrete 5-point Laplacian on
     that row), which keeps ``nu*dt*lam^2 <= cfl_frac`` everywhere.  The
-    interior rows keep the full ``config.nu_del4``; only rows poleward
+    interior rows keep the full ``nu_del4``; only rows poleward
     of the crossover (about 79 deg at 2.5 deg resolution, 48 h grid
     e-folding) are reduced.
 
@@ -375,10 +376,8 @@ def _nu_del4_row_profiles(
     dx_v = grid.radius * grid.dlon * grid.cos_lat_v      # (n_lat+1,)
     lam_u = 4.0 / dx_u ** 2 + 4.0 / dy_u ** 2
     lam_v = 4.0 / dx_v ** 2 + 4.0 / dy_v ** 2
-    nu_u = jnp.minimum(config.nu_del4,
-                       config.nu_del4_cfl_frac / (dt * lam_u ** 2))
-    nu_v = jnp.minimum(config.nu_del4,
-                       config.nu_del4_cfl_frac / (dt * lam_v ** 2))
+    nu_u = jnp.minimum(nu_del4, cfl_frac / (dt * lam_u ** 2))
+    nu_v = jnp.minimum(nu_del4, cfl_frac / (dt * lam_v ** 2))
     return nu_u[:, None], nu_v[:, None]
 
 
@@ -468,7 +467,8 @@ def cgrid_latlon_sw_tendencies(
                 "dt argument (per-row pole stability cap needs it).")
         lap_u, lap_v = vector_laplacian_cgrid(u, v, grid)
         lap2_u, lap2_v = vector_laplacian_cgrid(lap_u, lap_v, grid)
-        nu_u, nu_v = _nu_del4_row_profiles(grid, config, dt)
+        nu_u, nu_v = nu_del4_row_profiles(
+            grid, config.nu_del4, config.nu_del4_cfl_frac, dt)
         du_dt = du_dt - nu_u * lap2_u
         dv_dt = dv_dt - nu_v * lap2_v
 
@@ -565,7 +565,7 @@ class CGridLatLonShallowWaterModel(IntegrationMixin):
         ``dt`` is only consumed when ``config.nu_del4 > 0`` (the del-4
         pole stability cap is dt-dependent); when omitted it falls back
         to the constructor ``dt`` so the no-argument
-        ``model.tendencies(state)`` path (e.g. ``DycoreComponent``)
+        ``model.tendencies(state)`` path
         keeps working with the biharmonic enabled.
         """
         if dt is None:

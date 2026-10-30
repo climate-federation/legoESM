@@ -331,9 +331,14 @@ def test_the_epoch_checkpoint_carries_the_frozen_parameters():
                 and isinstance(c.func, ast.Attribute)
                 and c.func.attr == "combine"
                 and [x.id for x in c.args
-                     if isinstance(x, ast.Name)] == ["cur_arr", "static"]]
+                     if isinstance(x, ast.Name)] == ["cur_arr", "_static_h"]]
     assert combines, ("the checkpoint must serialise "
-                      "eqx.combine(cur_arr, static)")
+                      "eqx.combine(cur_arr, _static_h)")
+    # ``_static_h`` must BE the frozen half (a host copy of it under column
+    # sharding, the object itself otherwise).
+    src = ast.unparse(main)
+    assert ("_static_h = static if column_mesh is None "
+            "else jax.device_get(static)") in src
 
 
 def test_the_frozen_parameters_are_re_measured_after_training():
@@ -514,3 +519,58 @@ def test_only_the_first_argument_selects_the_signature_query():
         # this invocation; the old scan printed a signature and returned 0.
         mod.main(["--config", tok, "--mode", "bogus"])
     assert e.value.code != 0
+
+
+def test_probe_progress_round_trip_is_fingerprint_gated(tmp_path):
+    import json
+
+    import numpy as np
+
+    fp = {"a": 1}
+    samples = [np.arange(4.0), np.ones(3)]
+    content = mod._sample_fingerprint(samples)
+    (tmp_path / "probe_progress.json").write_text(json.dumps({
+        "schema": mod._MANIFEST_SCHEMA, "fingerprint": fp, "n_done": 7,
+        "absmax": [0.0, float("inf"), 2.5], "n_used": 6,
+        **mod._content_payload(content)}))
+    got = mod._read_probe_progress(str(tmp_path), fp, content)
+    assert got[0] == 7 and got[2] == 6 and got[1][1] == float("inf")
+    assert mod._read_probe_progress(str(tmp_path), {"a": 2}, content) is None
+    assert mod._read_probe_progress(str(tmp_path / "missing"), fp,
+                                    content) is None
+    # Same count and shapes, different values: the config fingerprint cannot
+    # see this, the content gate must.
+    other = mod._sample_fingerprint([np.arange(4.0) + 1.0, np.ones(3)])
+    assert other[0] == content[0]
+    assert mod._read_probe_progress(str(tmp_path), fp, other) is None
+    swapped = mod._sample_fingerprint([np.arange(4.0)[::-1].copy(), np.ones(3)])
+    assert mod._read_probe_progress(str(tmp_path), fp, swapped) is None
+    # Equal sum and position-weighted sum, different magnitudes (codex r2).
+    a = mod._sample_fingerprint([np.asarray([1.0, -1.0, 1.0])])
+    b = mod._sample_fingerprint([np.asarray([2.0, -3.0, 2.0])])
+    assert np.allclose(a[1][:, :2], b[1][:, :2])
+    assert not mod._content_matches(mod._content_payload(a), b)
+    # Equal sum, position-weighted sum AND magnitude sum (codex r3).
+    a = mod._sample_fingerprint([np.asarray([1.0, 2.0, 3.0])])
+    b = mod._sample_fingerprint([np.asarray([2.0, 0.0, 4.0])])
+    assert np.allclose(a[1][:, :3], b[1][:, :3]) and a[0] == b[0]
+    assert not mod._content_matches(mod._content_payload(a), b)
+
+
+def test_adjoint_window_and_probe_scenes_flags():
+    cfg = mod.build_scale_config_from_args(["--adjoint-steps", "3", "--probe-scenes", "48"])
+    assert (cfg.adjoint_steps, cfg.probe_scenes) == (3, 48)
+    base = mod.build_scale_config_from_args([])
+    assert (base.adjoint_steps, base.probe_scenes) == (0, None)
+    for bad in (["--adjoint-steps", "-1"], ["--probe-scenes", "0"]):
+        with pytest.raises(SystemExit):
+            mod.build_scale_config_from_args(bad)
+    yml = {"n_lat": 96, "n_lon": 192, "nlev": 32}
+    common = ["--mode", "physics", "--epochs", "1", "--lr", "1e-3", "--optimizer", "adamw"]
+    base = mod.build_scale_config_from_args(common)
+    cfg = mod.build_scale_config_from_args(
+        common + ["--adjoint-steps", "3", "--probe-scenes", "48"])
+    fp_base = mod._run_fingerprint(base, yml, 200, 12, 240, 1)
+    assert "adjoint_steps" not in fp_base and "probe_scenes" not in fp_base
+    fp = mod._run_fingerprint(cfg, yml, 200, 12, 240, 1)
+    assert fp["adjoint_steps"] == 3 and fp["probe_scenes"] == 48

@@ -126,7 +126,7 @@ def test_C2_is_mean_of_squares_not_square_of_mean():
 def test_C2_keeps_nemo_statement_rounding_on_recorded_gyre_vector():
     """A stored GYRE/NEMO vector goes red under the former flat expression."""
     from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
-        _nemo_c2_kinetic_energy,
+        nemo_c2_kinetic_energy,
     )
 
     # GYRE kt=1, stage 3, cell (j=4,i=3,k=0) in the round-41 dynadv record.
@@ -139,10 +139,16 @@ def test_C2_keeps_nemo_statement_rounding_on_recorded_gyre_vector():
         float.fromhex("-0x1.a579a608f3162p-16"),
     ], dtype=jnp.float64).reshape(2, 1, 1)
     expected = float.fromhex("0x1.d3aed8cd43f4dp-32")
-    actual = float(np.asarray(_nemo_c2_kinetic_energy(u, v))[0, 0, 0])
+    actual = float(np.asarray(nemo_c2_kinetic_energy(u, v))[0, 0, 0])
     former_flat = float(np.asarray(_ke_c2(u, v))[0, 0, 0])
     assert actual == expected
     assert former_flat != expected
+
+
+def test_nemo_c2_kinetic_energy_has_no_private_compatibility_alias():
+    from legoesm.ocean.dynamics import ocean_pe_latlon_cgrid
+
+    assert not hasattr(ocean_pe_latlon_cgrid, "_nemo_c2_kinetic_energy")
 
 
 # ---------- config integration ----------

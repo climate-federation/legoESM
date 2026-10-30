@@ -685,21 +685,21 @@ def test_scm_forcing_is_flat_static_pytree():
 # ----------------------------------------------------------------------
 
 
-def test_prescribe_T_s_with_zero_physics_does_not_modify_state():
-    """With no turbulence consuming the prescribed surface T, the
-    column must evolve under whatever else the forcing contributes —
-    in this case nothing.  The integration is therefore the identity
-    on every cell.  This catches any regression where the old
-    state.T[-1] mutation path silently came back.
+def test_prescribe_T_s_with_zero_physics_heats_only_the_lowest_cell():
+    """With no turbulence scheme the prescribed surface T drives the default
+    bulk surface exchange alone: the lowest cell warms toward the warmer
+    skin and every other cell is untouched.  This also catches any
+    regression where the old state.T[-1] mutation path silently came back
+    (that would pin the lowest cell AT the skin value, 320 K).
     """
     T0 = jnp.linspace(220.0, 295.0, NLEV)
     T_s_fn = lambda t: 320.0
     forcing = SCMForcing(prescribe="T_s", T_s=T_s_fn)
     scm = _make_scm(forcing=forcing, T_profile=T0)
     scm.run(nsteps=3)
-    np.testing.assert_allclose(
-        np.asarray(scm.state.T.data[0, 0, 0]), np.asarray(T0), atol=1e-12,
-    )
+    T = np.asarray(scm.state.T.data[0, 0, 0])
+    np.testing.assert_allclose(T[:-1], np.asarray(T0)[:-1], atol=1e-12)
+    assert 295.0 < T[-1] < 300.0
 
 
 def test_prescribe_T_s_drives_sensible_flux_with_turbulence():

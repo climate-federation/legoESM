@@ -648,7 +648,7 @@ def test_sixface_jax_match_is_not_vacuous(hs_sixface_case, monkeypatch,
 
 def _moist_case(seed=5):
     from legoesm.grids.fv3_native_gridstruct import (
-        FV3_C_LIQ, FV3_CP_AIR, FV3_CP_VAPOR)
+        FV3_C_ICE, FV3_C_LIQ, FV3_CP_AIR, FV3_CP_VAPOR)
     rng = np.random.default_rng(seed)
     n, ng, km = 4, 3, 3
     m = n + 2 * ng
@@ -661,7 +661,7 @@ def _moist_case(seed=5):
     q_dt = [1e-7 * rng.standard_normal((m, m, km)) for _ in range(3)]
     t_dt = 1e-3 * rng.standard_normal((m, m, km))
     kw = dict(n=n, ng=ng, cp_air=FV3_CP_AIR, cp_vapor=FV3_CP_VAPOR,
-              c_liq=FV3_C_LIQ)
+              c_liq=FV3_C_LIQ, c_ice=FV3_C_ICE, nwat=3)
     return pt, delp, q, q_dt, t_dt, kw, slice(ng, ng + n)
 
 
@@ -741,5 +741,186 @@ def test_moist_update_refuses_the_wrong_tracer_count():
     from legoesm.core.fv3_native_physics_coupling import (
         fv_update_phys_moist_duo_jax)
     pt, delp, q, q_dt, t_dt, kw, _ = _moist_case()
-    with pytest.raises(ValueError, match="warm-rain tracers"):
-        fv_update_phys_moist_duo_jax(pt, delp, q[:2], t_dt, q_dt, 600.0, **kw)
+    with pytest.raises(ValueError, match="nwat = 3 water species"):
+        fv_update_phys_moist_duo_jax(pt, delp, q[:2], t_dt, q_dt[:2], 600.0,
+                                     **kw)
+    with pytest.raises(ValueError, match="one tendency each"):
+        fv_update_phys_moist_duo_jax(pt, delp, q, t_dt, q_dt[:2], 600.0, **kw)
+    with pytest.raises(ValueError, match="nwat = 4"):
+        fv_update_phys_moist_duo_jax(pt, delp, q + q, t_dt, q_dt + q_dt,
+                                     600.0, **{**kw, "nwat": 4})
+
+
+# ---------------------------------------------------------------------
+# nwat = 6 (ice / snow / graupel + passengers): fv_update_phys.F90 :324
+# updates EVERY tracer, :335 sums the six water species, :352 divides
+# every tracer, moist_cp case(6) (fv_mapz.F90:3717-3724) adds the solid
+# water on c_ice.  Same analytic gates as the warm-rain block, plus the
+# reduction to it and the passenger contract.
+# ---------------------------------------------------------------------
+
+def _moist_case6(seed=7, with_passengers=True):
+    """Six water species in FV3 slot order + three number passengers."""
+    pt, delp, q3, q_dt3, t_dt, kw, ci = _moist_case(seed)
+    rng = np.random.default_rng(seed + 100)
+    shp = pt.shape
+    q = list(q3) + [5e-4 * rng.random(shp) for _ in range(3)]
+    q_dt = list(q_dt3) + [1e-7 * rng.standard_normal(shp) for _ in range(3)]
+    if with_passengers:
+        q += [1e8 * rng.random(shp) for _ in range(3)]          # N_c N_r N_i
+        q_dt += [1e3 * rng.standard_normal(shp) for _ in range(3)]
+    return pt, delp, q, q_dt, t_dt, {**kw, "nwat": 6}, ci
+
+
+def test_nwat6_reduces_to_warm_rain_bitwise_with_empty_ice_slots():
+    """Zero ice/snow/graupel (values and tendencies) and no passengers:
+    the nwat=6 block is BITWISE the nwat=3 block on every output --
+    the sum of three zeros and moist_cp's ``+ 0*c_ice`` change no bit."""
+    from legoesm.core.fv3_native_physics_coupling import (
+        fv_update_phys_moist_duo_jax)
+    pt, delp, q, q_dt, t_dt, kw, _ = _moist_case()
+    z = np.zeros_like(pt)
+    out3 = fv_update_phys_moist_duo_jax(pt, delp, q, t_dt, q_dt, 600.0, **kw)
+    out6 = fv_update_phys_moist_duo_jax(
+        pt, delp, q + [z, z, z], t_dt, q_dt + [z, z, z], 600.0,
+        **{**kw, "nwat": 6})
+    for a, b in zip(out3[:2], out6[:2]):
+        assert np.asarray(a).tobytes() == np.asarray(b).tobytes()
+    for a, b in zip(out3[2], out6[2][:3]):
+        assert np.asarray(a).tobytes() == np.asarray(b).tobytes()
+    assert np.asarray(out3[3]).tobytes() == np.asarray(out6[3]).tobytes()
+    for b in out6[2][3:]:
+        assert np.array_equal(np.asarray(b), z)
+
+
+def test_nwat6_reduction_holds_compiled_on_six_faces():
+    """The production caller: ``apply_column_increments_sixface_jax``
+    under jit, nwat=3 on a 3-slot bundle vs nwat=6 on a 6-slot bundle
+    whose ice slots and tendencies are RUNTIME zeros (not constants XLA
+    could fold away) -- bitwise on pt, delp, the three warm-rain
+    tracers and the rebuilt pressures (codex 2026-09-30: the eager
+    two-branch check does not exercise fusion/reassociation)."""
+    import jax
+    import jax.numpy as jnp
+    from legoesm.core.fv3_dynamics import p_var_hydrostatic
+    from legoesm.core.fv3_native_physics_coupling import (
+        apply_column_increments_sixface_jax)
+    from legoesm.grids.fv3_native_gridstruct import FV3_KAPPA
+    rng = np.random.default_rng(11)
+    n, ng, km = 4, 3, 3
+    m = n + 2 * ng
+    pt = jnp.asarray(250.0 + 40.0 * rng.random((6, m, m, km)))
+    delp = jnp.asarray(1.0e4 + 2.0e3 * rng.random((6, m, m, km)))
+    q3 = [jnp.asarray(1e-3 * rng.random((6, m, m, km))) for _ in range(3)]
+    dq3 = {i: jnp.asarray(1e-7 * rng.standard_normal((6, n, n, km)))
+           for i in range(3)}
+    t_dt = jnp.asarray(1e-3 * rng.standard_normal((6, n, n, km)))
+    state = {"pt": pt, "delp": delp}
+    press = p_var_hydrostatic(delp, ptop=100.0, akap=FV3_KAPPA, n=n, ng=ng,
+                              km=km)
+    zeros6 = jnp.zeros((6, m, m, km))
+    zeros_c = jnp.zeros((6, n, n, km))
+
+    def run3(st, pr, q, dq, tdt):
+        return apply_column_increments_sixface_jax(
+            st, pr, q, None, None, None, None, None, tdt, dq, dt=600.0,
+            n=n, ng=ng, km=km, ptop=100.0, akap=FV3_KAPPA, nwat=3)
+
+    def run6(st, pr, q, dq, tdt):
+        return apply_column_increments_sixface_jax(
+            st, pr, q, None, None, None, None, None, tdt, dq, dt=600.0,
+            n=n, ng=ng, km=km, ptop=100.0, akap=FV3_KAPPA, nwat=6)
+
+    s3, p3, o3 = jax.jit(run3)(state, press, q3, dq3, t_dt)
+    s6, p6, o6 = jax.jit(run6)(
+        state, press, q3 + [zeros6, zeros6, zeros6],
+        {**dq3, 3: zeros_c, 4: zeros_c, 5: zeros_c}, t_dt)
+    for k in ("pt", "delp"):
+        assert np.asarray(s3[k]).tobytes() == np.asarray(s6[k]).tobytes(), k
+    for k in p3:
+        assert np.asarray(p3[k]).tobytes() == np.asarray(p6[k]).tobytes(), k
+    for a, b in zip(o3, o6[:3]):
+        assert np.asarray(a).tobytes() == np.asarray(b).tobytes()
+    for b in o6[3:]:
+        assert not np.asarray(b).any()
+    # non-vacuity: the block moved the state
+    assert np.asarray(s3["delp"]).tobytes() != np.asarray(delp).tobytes()
+
+
+def test_nwat6_moves_the_mass_of_all_six_species_and_keeps_dry_air():
+    """The layer's dry air ``delp*(1 - sum of the SIX water species)`` is
+    invariant; its total water moves by ``delp*dt*sum(q_dt over six)``;
+    a warm-rain sum would miss the ice/snow/graupel mass (the defect
+    this block exists to remove)."""
+    from legoesm.core.fv3_native_physics_coupling import (
+        fv_update_phys_moist_duo_jax)
+    pt, delp, q, q_dt, t_dt, kw, ci = _moist_case6()
+    dt = 600.0
+    _, delp2, q2, ps_dt = fv_update_phys_moist_duo_jax(pt, delp, q, t_dt,
+                                                       q_dt, dt, **kw)
+    delp2 = np.asarray(delp2); q2 = [np.asarray(a) for a in q2]
+    w, w2 = sum(q[:6]), sum(q2[:6])
+    assert np.allclose((delp2 * (1.0 - w2))[ci, ci],
+                       (delp * (1.0 - w))[ci, ci], rtol=1e-13, atol=0)
+    assert np.allclose((delp2 * w2 - delp * w)[ci, ci],
+                       (delp * dt * sum(q_dt[:6]))[ci, ci], rtol=1e-12, atol=0)
+    # the ice slots CARRY mass: a warm-rain ps_dt would differ
+    ps3 = 1.0 + dt * sum(q_dt[:3])
+    assert np.abs(np.asarray(ps_dt) - ps3[ci, ci]).max() > 0.0
+    # halos untouched, every slot
+    halo = np.ones(delp.shape[:2], bool); halo[ci, ci] = False
+    for a, b in zip(q2, q):
+        assert np.array_equal(a[halo], b[halo])
+
+
+def test_nwat6_passengers_take_their_tendency_and_the_renormalisation():
+    """Number concentrations (slots >= nwat) are updated (:324) and
+    divided by ps_dt (:352) like every mass tracer, but do NOT enter
+    the water sum -- their value is per kg of moist air, so the layer
+    mass they ride on changed."""
+    from legoesm.core.fv3_native_physics_coupling import (
+        fv_update_phys_moist_duo_jax)
+    pt, delp, q, q_dt, t_dt, kw, ci = _moist_case6()
+    dt = 600.0
+    _, _, q2, ps_dt = fv_update_phys_moist_duo_jax(pt, delp, q, t_dt, q_dt,
+                                                   dt, **kw)
+    ps_dt = np.asarray(ps_dt)
+    for i in range(6, 9):
+        exp = (q[i] + dt * q_dt[i])[ci, ci] / ps_dt
+        assert np.allclose(np.asarray(q2[i])[ci, ci], exp, rtol=1e-15, atol=0)
+    # and the water sum is the SIX species only: perturbing a passenger
+    # tendency leaves ps_dt bitwise
+    q_dt_p = list(q_dt); q_dt_p[7] = q_dt[7] * 3.0
+    _, _, _, ps_dt_p = fv_update_phys_moist_duo_jax(pt, delp, q, t_dt,
+                                                    q_dt_p, dt, **kw)
+    assert np.asarray(ps_dt_p).tobytes() == ps_dt.tobytes()
+
+
+def test_nwat6_heating_uses_moist_cp_case6_with_c_ice():
+    """cvm = (1 - qv - ql - qs)*cp_air + qv*cp_vapor + ql*c_liq + qs*c_ice
+    with ql = liq+rain, qs = ice+snow+graupel (fv_mapz.F90:3717-3724),
+    written out from the Fortran independently of the twin; the
+    solid-water term is exercised (c_ice != c_liq, so a case(4) twin
+    that lumped ice into c_liq cannot pass)."""
+    from legoesm.core.fv3_native_physics_coupling import (
+        fv_update_phys_moist_duo_jax, moist_cp_fv3)
+    pt, delp, q, q_dt, t_dt, kw, ci = _moist_case6()
+    dt = 600.0
+    pt2, _, _, _ = fv_update_phys_moist_duo_jax(pt, delp, q, t_dt, q_dt, dt,
+                                                **kw)
+    ps_dt = 1.0 + dt * sum(q_dt[:6])
+    qa = [(a + dt * b) / ps_dt for a, b in zip(q[:6], q_dt[:6])]
+    ql = qa[1] + qa[2]
+    qs = qa[3] + qa[4] + qa[5]
+    cvm = ((1.0 - (qa[0] + ql + qs)) * 1004.6 + qa[0] * (4.0 * 461.5)  # const-ok: FV3 oracle values, independent of the constants module
+           + ql * 4218.0 + qs * 2106.0)  # const-ok: gfdl_mp.F90:88-89 (IFS)
+    exp = pt + t_dt * dt * 1004.6 / cvm  # const-ok: gfs_constants.h:47
+    assert np.allclose(np.asarray(pt2)[ci, ci], exp[ci, ci], rtol=1e-14, atol=0)
+    # the solid term binds: lumping qs into c_liq moves cvm measurably
+    cvm_lumped = cvm + qs * (4218.0 - 2106.0)  # const-ok: as above
+    assert np.abs(cvm_lumped / cvm - 1.0)[ci, ci].max() > 1e-6
+    assert np.allclose(np.asarray(moist_cp_fv3(
+        qa, cp_air=kw["cp_air"], cp_vapor=kw["cp_vapor"], c_liq=kw["c_liq"],
+        c_ice=kw["c_ice"])), cvm, rtol=1e-15, atol=0)
+    with pytest.raises(ValueError, match="nwat = 4"):
+        moist_cp_fv3(qa[:4], cp_air=1.0, cp_vapor=1.0, c_liq=1.0, c_ice=1.0)

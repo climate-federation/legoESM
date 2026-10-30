@@ -648,12 +648,15 @@ def test_runner_partitions_after_ice_step_via_shared_blend():
     Source-introspection drift guard."""
     import inspect
     src = inspect.getsource(R.main)
+    helper = inspect.getsource(R._blend_prognostic_ice_forcing)
     # The shared partition is called in raw_core2 mode...
-    assert "blend_ice_ocean_forcing(" in src
-    assert 'sw_partition="raw_core2"' in src
+    assert "_blend_prognostic_ice_forcing(" in src
+    assert "blend_ice_ocean_forcing(" in helper
+    assert 'sw_partition="raw_core2"' in helper
     # ...at the PRE-step concentration captured before step_sea_ice.
     assert "_ice_conc_pre = ice_state.concentration.data" in src
-    assert "ice_concentration=_ice_conc_pre" in src
+    assert "sf, fw, ice_resp, ice_state, _ice_conc_pre," in src
+    assert "ice_concentration=ice_conc_thermo" in helper
     # ...and the OLD in-runner routing (full atm stress + added ice stress,
     # beginning-of-step heat attenuation) is GONE.
     assert "_route_ice_response_to_ocean" not in src
@@ -754,3 +757,195 @@ def test_under_ice_heat_attenuation_reduces_qnet():
                                   under_ice=True, tau_ice_sw=0.03)
     # only the small transmitted SW remains; far below open water.
     assert np.all(q_full < 0.2 * q_open)
+
+
+@pytest.mark.parametrize("snow_tracked", [False, True])
+@pytest.mark.parametrize("phase", ["rain", "snow", "snow_exceeds_total"])
+def test_core2_prognostic_ice_delivers_precip_once_through_freeze_and_meltout(
+        snow_tracked, phase):
+    """Water closure of the CORE-II prognostic-ice partition: over one real
+    ``step_sea_ice`` call, precipitation reaching the ocean (direct open-water
+    share + what the ice tile forwards) plus what the snow pack stores equals
+    the incident precipitation, in a cell that freezes from open water, a cell
+    that melts out, and a steady ice cell; rain and snow, snow tracking on/off.
+
+    Isolated by differencing a wet and a dry step (everything else equal).
+    """
+    from legoesm.ice import SeaIceConfig, init_dynamic_ice_state, step_sea_ice
+    from legoesm.ice.config import BrineConfig, SnowConfig
+
+    shape = (3,)
+    dt = 3600.0
+    cfg = SeaIceConfig(brine=BrineConfig(enabled=True),
+                       snow=SnowConfig(enabled=snow_tracked))
+    st = init_dynamic_ice_state(shape, S_ice_init=4.0)
+    st = st._replace(
+        h_ice=st.h_ice.replace(data=jnp.array([0.0, 0.005, 2.0])),
+        concentration=st.concentration.replace(data=jnp.array([0.0, 0.8, 0.9])),
+        T_ice=st.T_ice.replace(data=jnp.array([271.0, 273.0, 260.0])),
+    )
+    sst_K = jnp.array([constants.T_freeze_ocean, constants.T_freeze_ocean + 2.0,
+                       constants.T_freeze_ocean])
+    land = jnp.ones(shape)
+    sf0, fw0, _, _ = _open_forcing(shape)
+
+    def delivered(p):
+        atm = AtmToSurface(
+            sw_down=jnp.array([0.0, 4000.0, 0.0]), lw_down=jnp.full(shape, 200.0),
+            precip_total=jnp.full(shape, p),
+            # snow_exceeds_total: regridded snow above the corrected total.
+            precip_snow=jnp.full(shape, {"rain": 0.0, "snow": p,
+                                         "snow_exceeds_total": 1.1 * p}[phase]),
+            T_lowest=jnp.array([245.0, 290.0, 255.0]),
+            q_lowest=jnp.full(shape, 1e-3), u_lowest=jnp.full(shape, 5.0),
+            v_lowest=jnp.zeros(shape), p_lowest=jnp.full(shape, 9.5e4),
+            p_surface=jnp.full(shape, 1e5), rho_lowest=jnp.full(shape, 1.25),
+            cos_zenith=jnp.ones(shape), co2_ppmv=jnp.full(shape, 400.0),
+            has_radiation=jnp.ones(shape), has_precipitation=jnp.ones(shape),
+        )
+        new, resp = step_sea_ice(st, atm, sst_K, jnp.zeros(shape),
+                                 jnp.zeros(shape), cfg, U_min=0.0, dt=dt)
+        fw, _ = R._blend_prognostic_ice_forcing(
+            sf0, fw0._replace(precip=jnp.full(shape, p)), resp, new,
+            resp.ice_concentration_thermo, land, cfg,
+            constants.alpha_ocean_broadband, atm)
+        pack = (new.h_snow.data * new.concentration.data
+                * cfg.snow.rho_snow / dt)
+        return (np.asarray(fw.precip + fw.ice_fw + pack), np.asarray(
+            resp.ice_concentration_thermo), np.asarray(new.concentration.data))
+
+    p = 2.0e-4
+    wet, a_pre, a_post = delivered(p)
+    dry, _, a_post_dry = delivered(0.0)
+    # Tracked snow on the steady ice cell insulates it, changing basal growth
+    # (ice_fw) and lead freeze between the wet and dry step, so that cell's
+    # difference is not a precip budget; freeze and melt-out cells carry none.
+    closed = [0, 1] if (phase != "rain" and snow_tracked) else [0, 1, 2]
+    np.testing.assert_array_equal(a_post[closed], a_post_dry[closed])
+    # The fixture really exercises a freeze and a melt-out.
+    assert a_pre[0] == 0.0 and a_post[0] > 0.0
+    assert a_pre[1] > 0.0 and a_post[1] == 0.0
+    np.testing.assert_allclose((wet - dry)[closed], p, rtol=1e-10)
+
+
+def _atm_ice_build_calls(loop_name):
+    import ast
+    import inspect
+    tree = ast.parse(inspect.getsource(getattr(R, loop_name)))
+    return [n for n in ast.walk(tree) if isinstance(n, ast.Call)
+            and isinstance(n.func, ast.Name)
+            and n.func.id == "_build_atm_to_surface_core2"]
+
+
+@pytest.mark.parametrize("loop_name", ["main", "run_fesom_forced_loop"])
+def test_both_host_loops_ramp_the_ice_forcing_like_the_ocean(loop_name):
+    """The ocean's precipitation is ramped (--forcing-ramp-days); the ice must
+    receive the same ramped precipitation or the ice-forwarded share and the
+    direct open-water share no longer sum to the ocean's P."""
+    calls = _atm_ice_build_calls(loop_name)
+    assert len(calls) == 1
+    kw = {k.arg: k.value for k in calls[0].keywords}
+    assert isinstance(kw.get("ramp"), __import__("ast").Name)
+    assert kw["ramp"].id == "ramp"
+
+
+def test_atm_to_surface_builder_no_precip_zeroes_rain_and_snow():
+    forc = _synthetic_sampled_forcing((2, 3))
+    atm = R._build_atm_to_surface_core2(forc, ramp=1.0, with_precip=False)
+    full = R._build_atm_to_surface_core2(forc, ramp=1.0)
+    assert float(jnp.max(jnp.abs(full.precip_total))) > 0.0
+    assert float(jnp.max(jnp.abs(full.precip_snow))) > 0.0
+    np.testing.assert_array_equal(np.asarray(atm.precip_total), 0.0)
+    np.testing.assert_array_equal(np.asarray(atm.precip_snow), 0.0)
+    np.testing.assert_array_equal(np.asarray(atm.sw_down), np.asarray(full.sw_down))
+
+
+@pytest.mark.parametrize("loop_name", ["main", "run_fesom_forced_loop"])
+def test_both_host_loops_withhold_ice_precip_under_no_emp(loop_name):
+    """--no-emp gives the ocean no precipitation; the ice must get none either,
+    or its forwarded share arrives with no direct share to offset it."""
+    import ast
+    calls = _atm_ice_build_calls(loop_name)
+    assert len(calls) == 1
+    kw = {k.arg: k.value for k in calls[0].keywords}
+    v = kw.get("with_precip")
+    assert isinstance(v, ast.Attribute) and v.attr == "emp_freshwater"
+    assert isinstance(v.value, ast.Name) and v.value.id == "args"
+
+
+def _ridging_rain_step(rain, conc_scale=1.0):
+    """One real multi-category step with convergence ridging (the fixture of
+    tests/ice/unit/test_ice_convergence_ridging.py) under uniform rain."""
+    from legoesm.grids.latlon import create_latlon_geometry
+    from legoesm.ice import (SeaIceConfig, distribute_dynamic_state_to_categories,
+                             init_dynamic_ice_state, step_sea_ice)
+    from legoesm.ice.config import BrineConfig, RidgingConfig
+    from tests.unit.test_run_omip_core2_ice_categories import _min_forcing
+
+    g = create_latlon_geometry(8, 12)
+    shape = (8, 12)
+    st = init_dynamic_ice_state(shape, S_ice_init=3.0)
+    st = st._replace(h_ice=st.h_ice.replace(data=jnp.full(shape, 0.8)),
+                     concentration=st.concentration.replace(data=jnp.full(shape, 0.7)),
+                     T_ice=st.T_ice.replace(data=jnp.full(shape, 260.0)))
+    st = distribute_dynamic_state_to_categories(st, 5)
+    st = st._replace(concentration=st.concentration.replace(
+        data=st.concentration.data * conc_scale))
+    cfg = SeaIceConfig(dynamics="free_drift", transport="none", n_categories=5,
+                       itd_remap="lipscomb2001", brine=BrineConfig(enabled=True),
+                       ridging=RidgingConfig(enabled=True, closing_scheme="convergence"))
+    atm = _min_forcing(shape)._replace(
+        precip_total=jnp.full(shape, rain), precip_snow=jnp.zeros(shape),
+        has_precipitation=jnp.asarray(1.0))
+    new, resp = step_sea_ice(
+        st, atm, jnp.full(shape, constants.T_freeze_ocean),
+        jnp.broadcast_to(0.5 * jnp.sin(g.lon), shape), jnp.zeros(shape),
+        cfg, U_min=0, dt=1800, grid=g)
+    return cfg, atm, new, resp
+
+
+def test_core2_prognostic_ice_rain_closes_through_ridging():
+    """Ridging after the thermodynamics shrinks the final ice cover below the
+    cover the ice forwarded rain with; the CORE-II split must use the cover the
+    ice reports, so ocean rain still equals the incident rain."""
+    sf0, fw0, _, _ = _open_forcing((8, 12))
+    land = jnp.ones((8, 12))
+
+    def delivered(rain):
+        cfg, atm, new, resp = _ridging_rain_step(rain)
+        fw, _ = R._blend_prognostic_ice_forcing(
+            sf0, fw0._replace(precip=jnp.full((8, 12), rain)), resp, new,
+            resp.ice_concentration_thermo, land, cfg,
+            constants.alpha_ocean_broadband, atm)
+        return np.asarray(fw.precip + fw.ice_fw), new, resp
+
+    rain = 2.0e-4
+    wet, new, resp = delivered(rain)
+    dry, _, _ = delivered(0.0)
+    a_final = np.asarray(jnp.sum(new.concentration.data, axis=-1))
+    # The fixture really ridges: final cover below the forwarding cover.
+    assert float(np.max(np.asarray(resp.ice_concentration_precip) - a_final)) > 1e-5
+    np.testing.assert_allclose(wet - dry, rain, rtol=1e-10)
+
+
+def test_core2_prognostic_ice_rain_closes_with_overfilled_cover():
+    """An aggregate cover above 1 entering the step (transport overfill or an
+    overfilled restart) is capped before the thermodynamics, so the cover the
+    ice forwards rain with stays <= 1 and ocean rain still equals the incident
+    rain."""
+    sf0, fw0, _, _ = _open_forcing((8, 12))
+    land = jnp.ones((8, 12))
+
+    def delivered(rain):
+        cfg, atm, new, resp = _ridging_rain_step(rain, conc_scale=1.05 / 0.7)
+        fw, _ = R._blend_prognostic_ice_forcing(
+            sf0, fw0._replace(precip=jnp.full((8, 12), rain)), resp, new,
+            resp.ice_concentration_thermo, land, cfg,
+            constants.alpha_ocean_broadband, atm)
+        return np.asarray(fw.precip + fw.ice_fw), resp
+
+    rain = 2.0e-4
+    wet, resp = delivered(rain)
+    dry, _ = delivered(0.0)
+    assert float(np.max(np.asarray(resp.ice_concentration_precip))) <= 1.0
+    np.testing.assert_allclose(wet - dry, rain, rtol=1e-10)

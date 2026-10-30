@@ -9,33 +9,30 @@ of Abkar, Bae & Moin 2016).  The single algebraic closed form in
 
     S_ij = ½(a_ij + a_ji)                         (a_cd = ∂u_c/∂x_d, the 9 inputs)
     N    = − Σ_k Δ_k² g_kᵀ S g_k,  g_k = (a_1k, a_2k, a_3k)  (k-th COLUMN of a)
-    ν_t  = C · max(N, 0) / (a_cd a_cd) + ν_floor   (a_cd a_cd = Σ_cd a_cd², UNscaled)
+    ν_t  = max(F, C · N / max(F, a_cd a_cd)) + ν_floor   (a_cd a_cd = Σ_cd a_cd², UNscaled)
+
+with F = 10·eps(fp64), AMR-Wind v4.2.0's floors (the RUNNING-oracle match is
+``tests/atmosphere/test_amd_oracle.py``).
 
 The scheme has NO hardcoded empirical coefficient (``c_amd``, ``dx/dy/dz`` and
 ``nu_floor`` are caller inputs), so the pins canary the STRUCTURE: the leading
 MINUS sign (minimum-dissipation orientation), the per-direction Δ_k² weighting on
 the NUMERATOR only (denominator is unscaled — swapping either diverges), the
-COLUMN index g_k=(a_1k,a_2k,a_3k) not the row (∂_k u_i = a_ik), the ``max(N,0)``
-clip (never-negative), and the ``_EPS`` rest floor.
+COLUMN index g_k=(a_1k,a_2k,a_3k) not the row (∂_k u_i = a_ik), the outer
+``max(F, ·)`` clip (never-negative), and the ``max(F, aa)`` denominator floor.
 
 AMD vanishing is a N≤0 property, NOT Vreman's rank-1: an off-diagonal 1-D shear
 (a_13 only) gives N=0 ⇒ ν_floor, but a single COMPRESSIVE normal strain (a_11<0)
 gives N>0 ⇒ ν_t>ν_floor — pinned by ``test_normal_strain_sign_dependence`` (the
 defining minimum-dissipation behaviour, not a blanket single-gradient cutoff).
 
-DEPARTURES from the raw closed form (all deliberate, all tested):
-  1. ``max(N, 0)``: the minimum-dissipation clip — no SGS dissipation (ν_t=ν_floor)
-     where the resolved flow needs none (N≤0), never negative viscosity.  Its grad
-     at the N=0 KINK is a finite SUBGRADIENT, not the classical two-sided
-     derivative; specifically JAX's ``maximum`` uses a BALANCED tie
-     (d max(N,0)/dN = ½ at N=0), so the AD grad there is the AVERAGE of the two
-     one-sided derivatives (½·the N>0 slope, since the N<0 slope is 0), pinned by
-     ``test_kink_balanced_tie``.  AD-safe, no sqrt trap.
-  2. ``_EPS = 1e-30`` in the denominator (aa + _EPS): keeps arg = 0/_EPS = 0
-     (⇒ ν_floor) at the aa=0 rest state instead of 0/0 = NaN.  Inert wherever
-     aa ≫ 1e-30; the round-off MATCHING tensors all have aa ~ O(1) ≫ _EPS.  The
-     oracle DUPLICATES ``+ 1e-30`` and ``test_eps_denominator_functionally_pinned``
-     pins the ACTUAL value in the aa≈_EPS regime (a wrong 1e-20 would diverge).
+FLOORS (AMR-Wind's own, not departures):
+  1. Outer ``max(F, ·)``: the minimum-dissipation clip — ν_t = ν_floor + F where
+     the resolved flow needs no SGS dissipation (N≤0), never negative viscosity.
+     On the floored side the AD gradient is 0 (a valid subgradient at the kink),
+     pinned by ``test_kink_floored_side_gradient_zero``.  AD-safe, no sqrt trap.
+  2. Denominator ``max(F, aa)``: keeps the rest state finite (aa=0) and is
+     load-bearing for aa < F (``test_denominator_floor_functionally_pinned``).
   3. ν_t ≥ ν_floor holds for c_amd ≥ 0; ν_t ≥ 0 / never-negative ALSO needs
      ν_floor ≥ 0 (a caller-supplied negative ν_floor is not validated here).
 """
@@ -55,19 +52,23 @@ jax.config.update("jax_enable_x64", True)
 
 
 def _call(A, dx, dy, dz, c, nu_floor=0.0):
-    """Call amd_nu_t with a 3x3 gradient tensor A[c,d] = a_{c+1,d+1}."""
+    """Call amd_nu_t with a 3x3 gradient tensor A[c,d] = a_{c+1,d+1}, at the
+    hard limit (floor_width=0, the AMR-Wind form these tests reimplement)."""
     a = jnp.asarray(A, dtype=float)
     return float(amd_nu_t(
         a[0, 0], a[0, 1], a[0, 2], a[1, 0], a[1, 1], a[1, 2],
-        a[2, 0], a[2, 1], a[2, 2], dx, dy, dz, c, nu_floor))
+        a[2, 0], a[2, 1], a[2, 2], dx, dy, dz, c, nu_floor, floor_width=0.0))
+
+
+_F = 10.0 * float(np.finfo(np.float64).eps)   # AMR-Wind epsilon()*1.0e1
 
 
 def _amd_oracle(A, dx, dy, dz, c, nu_floor=0.0, *, sign=-1.0, scale_denom=False,
-                clip=True, use_rows=False, eps=1e-30):
+                clip=True, use_rows=False):
     """Independent Rozema-2015 AMD eddy viscosity. Flags override the structure
     for the canaries: ``sign`` (the leading −), ``scale_denom`` (Δ-weight the
-    denominator), ``clip`` (max(N,0)), ``use_rows`` (g_k = row k, not column),
-    ``eps`` (the denominator floor — duplicates the module's ``_EPS``)."""
+    denominator), ``clip`` (the outer max(F, ·)), ``use_rows`` (g_k = row k, not
+    column)."""
     A = np.asarray(A, dtype=float)
     S = 0.5 * (A + A.T)
     cols = A.T if use_rows else A          # g_k = column k of `cols`
@@ -80,8 +81,8 @@ def _amd_oracle(A, dx, dy, dz, c, nu_floor=0.0, *, sign=-1.0, scale_denom=False,
         aa = float(np.sum(d[None, :] * (A * A)))   # WRONG: Δ_d²-weight the denom
     else:
         aa = float(np.sum(A * A))
-    Nc = max(N, 0.0) if clip else N
-    return c * Nc / (aa + eps) + nu_floor
+    nu = c * N / max(_F, aa)
+    return (max(_F, nu) if clip else nu) + nu_floor
 
 
 # Deterministic gradient tensors spanning fully-3-D turbulence (asymmetric, so
@@ -93,8 +94,8 @@ _GRIDS = [(50.0, 50.0, 50.0), (100.0, 100.0, 20.0), (25.0, 75.0, 40.0)]
 
 # ===================== module constant canary =====================
 
-def test_module_eps_floor():
-    assert amd._EPS == 1e-30
+def test_module_floor():
+    assert amd._AMR_WIND_FLOOR == _F
 
 
 # ===================== full-tensor round-off pin =====================
@@ -198,7 +199,7 @@ def test_normal_strain_sign_dependence():
 # ===================== rest / floor =====================
 
 def test_rest_state_gives_floor():
-    assert _call(np.zeros((3, 3)), 50.0, 50.0, 50.0, 0.3, 0.1) == pytest.approx(0.1, abs=1e-15)
+    assert _call(np.zeros((3, 3)), 50.0, 50.0, 50.0, 0.3, 0.1) == 0.1 + _F
 
 
 def test_nu_never_below_floor():
@@ -226,47 +227,44 @@ def test_gradient_matches_fd_on_positive_field():
     assert g == pytest.approx(fd, rel=1e-5)
 
 
-def test_kink_balanced_tie():
-    # DEPARTURE #1: at a GENUINE N=0 kink (∇N≠0) JAX's max uses a BALANCED tie,
-    # so the AD grad = ½·(left + right one-sided derivatives), NOT 0 and NOT a
-    # full one-sided slope. Construct A(s) = (a11=s, a13=v): N = -s·(Δ1²s² +
-    # Δ3²v²) is EXACTLY 0 at s=0 (module computes 0.0 for a single off-diagonal),
-    # with dN/ds|_0 = -Δ3²v² ≠ 0 — a transversal crossing (N>0 for s<0, clipped
-    # for s>0), unlike the flat off-diagonal valley.
+def test_kink_floored_side_gradient_zero():
+    # Near the N=0 crossing the oracle's outer max(F, ·) selects F: at s=0 (N=0)
+    # the value is F and the AD gradient is 0 (the true local derivative — the
+    # actual kink, where C·N/aa = F, sits at s ≈ -8e-18). The secants over ±h
+    # straddle it: 0 for s>0, < 0 for s<0. A(s) = (a11=s, a13=v):
+    # N = -s·(Δ1²s² + Δ3²v²), exactly 0 at s=0, dN/ds|_0 = -Δ3²v² ≠ 0.
     dx, dy, dz, c, v = 50.0, 50.0, 30.0, 0.3, 1.3
 
     def nu_of_s(s):
         return amd_nu_t(s, 0.0, v, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
-                        dx, dy, dz, c)
+                        dx, dy, dz, c, floor_width=0.0)   # the oracle's hard kink
 
-    assert float(nu_of_s(jnp.asarray(0.0))) == 0.0          # N=0 EXACTLY (the tie)
+    assert float(nu_of_s(jnp.asarray(0.0))) == _F           # floored
     ad = float(jax.grad(nu_of_s)(jnp.asarray(0.0)))
     h = 1e-6
     right = (float(nu_of_s(jnp.asarray(h))) - float(nu_of_s(jnp.asarray(0.0)))) / h
     left = (float(nu_of_s(jnp.asarray(0.0))) - float(nu_of_s(jnp.asarray(-h)))) / h
-    assert right == pytest.approx(0.0, abs=1e-6)            # s>0: N<0, clipped
+    assert right == pytest.approx(0.0, abs=1e-6)            # s>0: N<0, floored
     assert left < -1.0                                      # s<0: N>0, real slope
-    assert ad == pytest.approx(0.5 * (left + right), rel=2e-3)   # balanced ½-tie
-    assert ad == pytest.approx(0.5 * left, rel=2e-3)
-    assert abs(ad - left) > 0.3 * abs(left) and abs(ad) > 0.3 * abs(left)  # not 0, not full
+    assert ad == 0.0                                        # floored side (smooth at s=0)
 
 
-def test_eps_denominator_functionally_pinned():
-    # DEPARTURE #2: in the aa ≈ _EPS regime the denominator floor is LOAD-BEARING,
-    # so the pin catches a wrong _EPS (e.g. 1e-20). A tiny compressive normal
-    # strain a11=-1e-15 gives aa=1e-30 ≈ _EPS and N=Δ1²·1e-45 > 0.
+def test_denominator_floor_functionally_pinned():
+    # aa < F: the max(F, aa) denominator floor is LOAD-BEARING. A tiny compressive
+    # normal strain a11=-1e-8 gives aa=1e-16 < F and N=Δ1²·1e-24 > 0, with
+    # c·N/F well above the outer floor.
     A = np.zeros((3, 3))
-    A[0, 0] = -1.0e-15
+    A[0, 0] = -1.0e-8
     grid = (100.0, 40.0, 30.0)
     got = _call(A, *grid, 0.3)
-    assert got > 0.0                                        # N>0, non-vacuous
-    assert got == pytest.approx(_amd_oracle(A, *grid, 0.3), rel=1e-12)   # eps=1e-30
-    wrong_eps = _amd_oracle(A, *grid, 0.3, eps=1e-20)       # broken floor
-    assert abs(got - wrong_eps) > 0.4 * got                 # materially different
+    assert got > 10.0 * _F                                  # not the outer floor
+    assert got == pytest.approx(_amd_oracle(A, *grid, 0.3), rel=1e-12)
+    unfloored = 0.3 * (100.0 ** 2 * 1.0e-24) / 1.0e-16      # c·N/aa
+    assert abs(got - unfloored) > 0.5 * unfloored           # materially different
 
 
 def test_negative_floor_can_go_negative():
-    # DEPARTURE #3: "never negative" needs nu_floor >= 0 too. With nu_floor < 0
+    # FLOOR #3: "never negative" needs nu_floor >= 0 too. With nu_floor < 0
     # and a no-dissipation field (N<=0 ⇒ ν_t=nu_floor), ν_t is negative — the
     # module does NOT validate nu_floor, so the guarantee is c_amd>=0 AND floor>=0.
     A = np.zeros((3, 3))

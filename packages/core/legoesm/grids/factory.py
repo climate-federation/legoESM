@@ -173,7 +173,8 @@ class FV3DuoGridBundle(NamedTuple):
 
 
 def create_fv3_duo_grid(resolution: int, ng: int = 3, *, phis_fn=None,
-                        phis_filter_iter: int = 0) -> FV3DuoGridBundle:
+                        phis_filter_iter: int = 0,
+                        phis6=None) -> FV3DuoGridBundle:
     """Build the certified six-face duo-cube context pair for C``resolution``.
 
     Wraps ``build_six_face_duo_context`` (ext-bundle + oracle
@@ -182,7 +183,17 @@ def create_fv3_duo_grid(resolution: int, ng: int = 3, *, phis_fn=None,
     ``build_jax_duo_stepper_context``.  Slice 1 is flat-orography: the
     jax context's ``hs6`` defaults to zeros, which is what the NH carry's
     ``zs = phis/grav`` seed reads.
+
+    ``phis6``: a READY padded terrain stack ``(6, n+2ng, n+2ng)`` [m2/s2]
+    (halos included, already filtered) injected verbatim as ``hs6`` --
+    the restart path (M5): the checkpoint persists the terrain the run
+    stepped on, so a resume rebuilds the grid from the file, not from
+    the ERA5 source.  Exclusive with ``phis_fn``.
     """
+    if phis6 is not None and phis_fn is not None:
+        raise ValueError("create_fv3_duo_grid: phis6 (a ready terrain "
+                         "stack) and phis_fn (a terrain function) are "
+                         "exclusive")
     if resolution < 4:
         raise ValueError(
             f"create_fv3_duo_grid: resolution={resolution} is below the "
@@ -211,6 +222,16 @@ def create_fv3_duo_grid(resolution: int, ng: int = 3, *, phis_fn=None,
                                  ctx_np["gs6"], ctx_np["ectx"],
                                  n_iter=phis_filter_iter)
         ctx_np = {**ctx_np, "hs6": [np.asarray(hs6[t]) for t in range(6)]}
+        ctx_jax = build_jax_duo_stepper_context(ctx_np)
+    if phis6 is not None:
+        import numpy as np
+        hs6 = np.asarray(phis6, dtype=np.float64)
+        m_a = int(ctx_np["n"]) + 2 * int(ctx_np["ng"])
+        if hs6.shape != (6, m_a, m_a):
+            raise ValueError(
+                f"create_fv3_duo_grid: phis6 has shape {hs6.shape}, the "
+                f"padded C{resolution} terrain stack is (6, {m_a}, {m_a})")
+        ctx_np = {**ctx_np, "hs6": [hs6[t] for t in range(6)]}
         ctx_jax = build_jax_duo_stepper_context(ctx_np)
     return FV3DuoGridBundle(ctx_np=ctx_np, ctx_jax=ctx_jax,
                             n=int(ctx_np["n"]), ng=int(ctx_np["ng"]))

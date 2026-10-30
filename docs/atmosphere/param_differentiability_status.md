@@ -134,7 +134,7 @@ problem, and the only escape is a targeted test like the one added here.
    state construction (`build_states`) and scheme activation
    (`_single_scheme_config`, `_CATEGORY_WRAPPER`). Extending it means one
    idealized state + activation map per component, not a new audit.
-3. **`packages/ocean/legoesm/ocean/physics/lateral_mixing/gm_bvp.py` has an
+3. **`packages/ocean/legoesm/ocean/dynamics/_future/gm_bvp.py` has an
    INVALID `__param_spec__`** (missing `params` and `scheme_key`), so its
    parameters cannot be collected at all — neither tunable nor trainable.
    Pre-existing and unrelated to this branch, but the same family of defect.

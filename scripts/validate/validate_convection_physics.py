@@ -208,8 +208,11 @@ def call_scheme(
     if name == "kuo":
         return kuo_convection(**common, config=KuoConfig())
     if name == "zhang_mcfarlane":
+        # ZM refuses a call without the PBL height; no PBL scheme runs
+        # here, so it is CAM's initial value 0 (physpkg.F90:419-424).
         out, _ = zhang_mcfarlane_convection(
             **common, u=u, v=v, conv_prog_profile=prog,
+            pblh=jnp.zeros(jnp.shape(common["T"])[0], jnp.asarray(common["T"]).dtype),
             config=_with_solve(
                 ZhangMcFarlaneConfig(enable_cmt=False, land_fraction="none"), subsidence_solve),
         )

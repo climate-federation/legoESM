@@ -10,7 +10,7 @@
 
 # Smoke-test the CORE-II legoESM tripole runner: validate the full chain
 # (eORCA1 mesh -> mask/bathy -> tripole grid/model/state -> CORE-II forcing via
-# apply_omip2_surface_fluxes tripole branch -> model.step) on the GPU and
+# compute_omip2_surface_forcing -> model.step(surface_forcing=...)) on the GPU and
 # benchmark steps/s to size the real multi-year run.
 set +e
 cd /burg-archive/glab/users/pg2328/legoESM

@@ -11,6 +11,12 @@ import pytest
 from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
 from legoesm.core.transcendentals import cos, exp, log, log10, sin, tanh
 
+try:
+    ctypes.CDLL("libm.so.6")
+except OSError:
+    pytest.skip("scalar-libm oracle needs glibc libm.so.6 (not on this platform)",
+                allow_module_level=True)
+
 
 def _libm_reference(name: str, values: np.ndarray) -> np.ndarray:
     libm = ctypes.CDLL("libm.so.6")

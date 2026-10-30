@@ -51,9 +51,9 @@ from legoesm.atmosphere.dynamics.gcm.compressible_euler import (
 from legoesm.atmosphere.physics.thermodynamics import sanitize_theta_rho
 from legoesm.atmosphere.physics.turbulence.lasd_core import lasd_cs2 as _lasd_cs2
 from legoesm.atmosphere.physics.turbulence.vreman import (
-    vreman_nu_t as _vreman_nu_t_core)
+    VREMAN_BBETA_GUARD_WIDTH, vreman_nu_t as _vreman_nu_t_core)
 from legoesm.atmosphere.physics.turbulence.amd import (
-    amd_nu_t as _amd_nu_t_core)
+    AMD_FLOOR_WIDTH, amd_nu_t as _amd_nu_t_core)
 from legoesm.core.field import Field
 from legoesm.core.state import (
     PlaneNonHydrostaticState,
@@ -1355,7 +1355,8 @@ def _velocity_gradients_plane(u_yxz, v_yxz, w_yxz_half, grid, height_coord):
 
 
 def _compute_vreman_K_m_plane(u_yxz, v_yxz, w_yxz_half, grid, height_coord,
-                              c_vreman):
+                              c_vreman,
+                              bbeta_guard_width=VREMAN_BBETA_GUARD_WIDTH):
     """Vreman (2004) eddy viscosity ``K_m`` at cell centres for the plane CRM —
     OPTIONAL alternative to :func:`_compute_smagorinsky_K_m_plane` (the SAM-faithful
     default). Computes the nine A-grid velocity gradients and defers the algebra to
@@ -1370,11 +1371,12 @@ def _compute_vreman_K_m_plane(u_yxz, v_yxz, w_yxz_half, grid, height_coord,
     # a_cd = ∂u_c/∂x_d ; dz per-level (nlev,) broadcasts on the trailing axis.
     return _vreman_nu_t_core(
         dudx, dudy, dudz, dvdx, dvdy, dvdz, dwdx, dwdy, dwdz,
-        grid.dx, grid.dy, height_coord.dz, c_vreman)
+        grid.dx, grid.dy, height_coord.dz, c_vreman,
+        bbeta_guard_width=bbeta_guard_width)
 
 
 def _compute_amd_K_m_plane(u_yxz, v_yxz, w_yxz_half, grid, height_coord,
-                           c_amd):
+                           c_amd, floor_width=AMD_FLOOR_WIDTH):
     """Anisotropic Minimum-Dissipation eddy viscosity ``K_m`` at cell centres —
     OPTIONAL alternative to :func:`_compute_smagorinsky_K_m_plane`. Computes the
     nine A-grid velocity gradients (the SAME helper Vreman uses) and defers the
@@ -1388,7 +1390,7 @@ def _compute_amd_K_m_plane(u_yxz, v_yxz, w_yxz_half, grid, height_coord,
         u_yxz, v_yxz, w_yxz_half, grid, height_coord)
     return _amd_nu_t_core(
         dudx, dudy, dudz, dvdx, dvdy, dvdz, dwdx, dwdy, dwdz,
-        grid.dx, grid.dy, height_coord.dz, c_amd)
+        grid.dx, grid.dy, height_coord.dz, c_amd, floor_width=floor_width)
 
 
 def _compute_dynamic_smag_cs_plane(
@@ -2219,7 +2221,8 @@ def plane_compressible_euler_slow_tendencies(
             # widths, so it behaves on anisotropic Δx≠Δz grids. Purely local
             # (no plane average) ⇒ MPI-safe. K_h = K_m / Pr (same Prandtl).
             K_m = _compute_vreman_K_m_plane(
-                u, v, w, grid, height_coord, config.vreman_c)
+                u, v, w, grid, height_coord, config.vreman_c,
+                config.vreman_bbeta_guard_width)
             sgs_prandtl = config.smagorinsky_prandtl
         elif _use_amd:
             # Anisotropic Minimum-Dissipation (Rozema 2015 / Abkar-Bae-Moin
@@ -2229,7 +2232,8 @@ def plane_compressible_euler_slow_tendencies(
             # filter widths for anisotropic Δx≠Δz grids. Purely local (no plane
             # average) ⇒ MPI-safe. K_h = K_m / Pr (same Prandtl).
             K_m = _compute_amd_K_m_plane(
-                u, v, w, grid, height_coord, config.amd_c)
+                u, v, w, grid, height_coord, config.amd_c,
+                config.amd_floor_width)
             sgs_prandtl = config.smagorinsky_prandtl
         else:
             # CRM/LES: Smagorinsky-Lilly EDDY viscosity. Full 3D strain (takes

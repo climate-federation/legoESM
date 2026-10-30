@@ -225,7 +225,7 @@ def build_mpas_ocean_spmd_layout(
     sharding = dev.face_sharding
 
     def _put(x):
-        return multiprocess_safe_device_put(jnp.asarray(x), sharding)
+        return multiprocess_safe_device_put(x, sharding)
 
     stacked_dev = jax.tree.map(_put, stacked)
 
@@ -299,6 +299,8 @@ def halo_depth_for_config(config) -> int:
     holds depth+2 rings and the sweeps need depth >= K-2 (measured exact at
     K=4/6/8 with depth 2/4/6, wrong one ring shallower). K=4 fits the
     historical 2."""
+    from legoesm.ocean.mpas_config import resolve_barotropic_pcg_defaults
+    config = resolve_barotropic_pcg_defaults(config)
     if str(getattr(config, "barotropic_implicit_pcg_precond", "")) == "gpoly":
         return max(_DEFAULT_HALO_DEPTH,
                    int(config.barotropic_implicit_pcg_poly_sweeps) - 2)
@@ -489,7 +491,8 @@ def spmd_vertex_refresh_probe(layout: MPASOceanSPMDLayout, stacked_vertex_field)
 # The step
 # ---------------------------------------------------------------------------
 
-def make_sharded_mpas_ocean_step(model, layout: MPASOceanSPMDLayout) -> Callable:
+def make_sharded_mpas_ocean_step(model, layout: MPASOceanSPMDLayout, *,
+                                 land_mask=None) -> Callable:
     """Build ``spmd_step(state, dt, aux=None, *, freshwater=None,
     surface_forcing=None, sponge=None) -> state`` for a model whose ``mesh`` is
     the reordered + padded GLOBAL mesh of ``layout``.
@@ -499,6 +502,12 @@ def make_sharded_mpas_ocean_step(model, layout: MPASOceanSPMDLayout) -> Callable
     ``ppermute`` pack; CONCRETE per-cell arrays (closure constants such as the
     sponge's ``T_ref`` / ``S_ref``) are localised once per array identity and
     passed as stacked device operands; scalars replicate.
+
+    ``land_mask`` (the run's concrete global mask, optional) sets the local
+    model's ``land_fill_band_capacity`` to the largest per-rank count of
+    local slots holding global land-fill band cells (an upper bound of each
+    local band: the local graph is a subgraph), exposed as
+    ``spmd_step.land_fill_band_capacity``.
     """
     from legoesm.parallel.reductions import batch_psum_spmd
     from legoesm.parallel.shard_map_compat import shard_map
@@ -516,6 +525,15 @@ def make_sharded_mpas_ocean_step(model, layout: MPASOceanSPMDLayout) -> Callable
 
     n_dev = layout.n_devices
     cells_per, edges_per = layout.cells_per, layout.edges_per
+    local_config = model.config
+    if land_mask is not None:
+        from legoesm.ocean.dynamics.mpas_fill import land_fill_band
+        m = model.mesh
+        band = np.asarray(land_fill_band(land_mask, m.cellsOnEdge[0], m.cellsOnEdge[1],
+                                         m.edgesOnCell, m.nEdgesOnCell))
+        # Count local SLOTS (padding may repeat a cell): >= every local band.
+        local_config = local_config._replace(land_fill_band_capacity=int(
+            max(np.count_nonzero(band[g]) for g in layout.gather_cells)))
     max_lc, max_le, max_lv = layout.max_lc, layout.max_le, layout.max_lv
     perms, vperms = layout.ppermute_perms, layout.vppermute_perms
     jax_mesh = layout.dev_config.mesh
@@ -536,7 +554,7 @@ def make_sharded_mpas_ocean_step(model, layout: MPASOceanSPMDLayout) -> Callable
 
     def _localize_by_index(x, idx):
         loc = np.asarray(x)[idx]                              # (n_dev, max_l*, ...)
-        return multiprocess_safe_device_put(jnp.asarray(loc), layout.cell_sharding)
+        return multiprocess_safe_device_put(loc, layout.cell_sharding)
 
     # The vertical coordinate may carry PER-CELL statics (partial cells:
     # h_partial, bottom_level, is_active, t_depth_ref; NEMO EEN operands).
@@ -639,7 +657,7 @@ def make_sharded_mpas_ocean_step(model, layout: MPASOceanSPMDLayout) -> Callable
         # Concrete even when called from inside a jit trace (the block scan):
         # the localised static is a per-device CONSTANT, not a traced operand.
         with jax.ensure_compile_time_eval():
-            loc = multiprocess_safe_device_put(jnp.asarray(loc), layout.cell_sharding)
+            loc = multiprocess_safe_device_put(loc, layout.cell_sharding)
         _local_cache[key] = (x, loc)
         return loc
 
@@ -658,6 +676,7 @@ def make_sharded_mpas_ocean_step(model, layout: MPASOceanSPMDLayout) -> Callable
         my_mesh = jax.tree.map(lambda x: x[0], mesh_sl)._replace(**statics)
         model_l = copy.copy(model)
         model_l.mesh = my_mesh
+        model_l.config = local_config
         it_z = iter(z_sl)
         model_l.z_coord = jax.tree.unflatten(
             z_tree, [next(it_z)[0] if k != "rep" else x
@@ -794,4 +813,5 @@ def make_sharded_mpas_ocean_step(model, layout: MPASOceanSPMDLayout) -> Callable
 
     spmd_step.layout = layout
     spmd_step.aux = default_aux
+    spmd_step.land_fill_band_capacity = local_config.land_fill_band_capacity
     return spmd_step

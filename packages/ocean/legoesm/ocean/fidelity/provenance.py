@@ -20,6 +20,7 @@ import hashlib
 import inspect
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 ALLOW_DIRTY_ENV = "LEGOESM_GATE_ALLOW_DIRTY"
@@ -45,7 +46,7 @@ class _AllowDirtyScope:
     def __init__(self, previous: bool) -> None:
         self._previous = previous
 
-    def __enter__(self) -> "_AllowDirtyScope":
+    def __enter__(self) -> _AllowDirtyScope:
         return self
 
     def __exit__(self, *_exc) -> bool:
@@ -90,7 +91,48 @@ def scoped_allow_dirty(function):
 
 
 __all__ = ["git_sha", "worktree_stamp", "allow_dirty_stamps",
-           "dirty_stamps_allowed", "scoped_allow_dirty"]
+           "dirty_stamps_allowed", "scoped_allow_dirty",
+           "require_checkout_import"]
+
+
+def require_checkout_import(expected_repo: str | Path) -> dict[str, str]:
+    """Refuse a fidelity command imported from a different checkout.
+
+    Fidelity scripts are commonly executed by absolute path.  Without an
+    explicit checkout bootstrap, Python may satisfy the PEP-420 ``legoesm``
+    namespace from an unrelated editable install and stamp or score the wrong
+    source tree.  This check is deliberately based on the imported ocean
+    package's file, not on the current working directory.
+    """
+    import legoesm.ocean as ocean
+    import numpy as np
+
+    expected = Path(expected_repo).resolve()
+    actual = Path(ocean.__file__).resolve()
+    expected_ocean = expected / "packages/ocean/legoesm/ocean"
+    if not actual.is_relative_to(expected_ocean):
+        raise RuntimeError(
+            "checkout import mismatch: expected legoesm.ocean under "
+            f"{expected_ocean}, imported {actual}; run through this "
+            "checkout's launcher or put its package roots first on PYTHONPATH"
+        )
+    result = {
+        "repo_root": str(expected),
+        "legoesm_ocean_file": str(actual),
+        "numpy_file": str(Path(np.__file__).resolve()),
+        "numpy_version": np.__version__,
+        "python": sys.executable,
+        "python_resolved": str(Path(sys.executable).resolve()),
+    }
+    print(
+        "CHECKOUT_IMPORT_OK "
+        f"root={result['repo_root']} ocean={result['legoesm_ocean_file']} "
+        f"python={result['python']} python_resolved={result['python_resolved']} "
+        f"numpy={result['numpy_version']} "
+        f"numpy_file={result['numpy_file']}",
+        flush=True,
+    )
+    return result
 
 
 def _git_output(tree, *args: str) -> str:
@@ -100,7 +142,8 @@ def _git_output(tree, *args: str) -> str:
     own error text.
     """
     return subprocess.check_output(
-        ["git", "-C", str(tree), *args], text=True, stderr=subprocess.DEVNULL)
+        ["git", "--no-optional-locks", "-C", str(tree), *args],
+        text=True, stderr=subprocess.DEVNULL)
 
 
 def git_sha(*, allow_dirty: bool = False, repo: str | Path | None = None) -> str:
@@ -214,7 +257,10 @@ def worktree_stamp(*, repo: str | Path | None = None,
         "clean": clean,
         "dirty_paths": dirty,
         "diff_sha256": (None if clean else
-                        hashlib.sha256(_git("diff", "HEAD").encode()).hexdigest()),
+                        # Plumbing: porcelain `diff` writes the index even
+                        # under --no-optional-locks; -M keeps its rename output.
+                        hashlib.sha256(_git("diff-index", "-p", "-M", "HEAD")
+                                       .encode()).hexdigest()),
         "untracked_count": len(untracked),
         "allow_dirty_escape_used": (not clean) and allow_dirty,
     }

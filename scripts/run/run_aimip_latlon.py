@@ -103,6 +103,11 @@ def _load_run_amip():
     return mod
 
 
+def _resolved_era5_zarr(args):
+    from legoesm.training.era5_to_state import TrainingERA5Config
+    return args.era5_zarr or TrainingERA5Config().zarr_store
+
+
 def build_latlon_config(args):
     """Build an ExperimentConfig for a lat-lon C-grid AMIP run."""
     ra = _load_run_amip()
@@ -157,6 +162,9 @@ def build_latlon_config(args):
         "--convection", args.convection,
         "--turbulence", args.turbulence,
         "--microphysics", args.microphysics,
+        # Pinned kk2000: an unset law resolves to kk2000_cam6 under mg (needs CLUBB relvar).
+        *(["--morrison-warm-rain-scheme", "kk2000"]
+          if args.microphysics == "morrison" else []),
         "--clouds", args.clouds,
         "--gravity-wave-drag", args.gravity_wave_drag,
         # Match the training-segment sub-cycling (also resolves the None that
@@ -170,7 +178,14 @@ def build_latlon_config(args):
         "--days", "1",
         "--dataset", "analytical",   # IC/forcing replaced by ERA5 below
         "--ic", "standard",
+        # One coastline for land model, convection and drag: ERA5's, from the
+        # same store the run trains on (user 2026-10-28, R3/R4/R5).
+        "--land-fraction-source", "era5",
+        "--land-fraction-era5-zarr", _resolved_era5_zarr(args),
     ]
+    if args.ice_skin_prognostic is not None:
+        argv.append("--ice-skin-prognostic" if args.ice_skin_prognostic
+                    else "--no-ice-skin-prognostic")
     parsed = ra.build_arg_parser().parse_args(argv)
     # Land surface model.  This lane builds its ExperimentConfig from a FIXED
     # argv that passes no land flags and no --topography, so until now it
@@ -185,8 +200,6 @@ def build_latlon_config(args):
     from legoesm.land.config import describe_land_model, land_model_switches
     for _field, _value in land_model_switches(args.land_model).items():
         setattr(parsed, _field, _value)
-    if getattr(args, "land_mask_file", ""):
-        parsed.land_mask_file = args.land_mask_file
     logger.info(
         "Land surface model: %s (slab_land_active=%s, use_multilayer_land=%s, "
         "land_mask_file=%s)",
@@ -196,7 +209,8 @@ def build_latlon_config(args):
             has_land_mask=bool(getattr(parsed, "land_mask_file", ""))),
         parsed.slab_land_active, parsed.use_multilayer_land,
         getattr(parsed, "land_mask_file", "") or "<none>")
-    return ra.build_config_from_args(parsed)
+    from legoesm.training.scale_build import resolve_training_ice_skin
+    return resolve_training_ice_skin(ra.build_config_from_args(parsed))
 
 
 # ---------------------------------------------------------------------------
@@ -244,7 +258,8 @@ def _parse_windows(spec: str):
 
 def load_window_pairs(grid, sigma, windows, *, rollout_hours, forcing_ctx,
                       era5_zarr=None, microphysics="none", turbulence="none",
-                      multi_step_hours=(), grid_kind="latlon"):
+                      multi_step_hours=(), grid_kind="latlon",
+                      ice_skin_prognostic=False):
     """Build (initial_carries, target_carries, forcings) on the model grid.
 
     Mirrors ``neural_gcm_spectral.load_training_data`` window->time-index
@@ -263,7 +278,8 @@ def load_window_pairs(grid, sigma, windows, *, rollout_hours, forcing_ctx,
     from legoesm.training.era5_to_state import (
         TrainingERA5Config, open_era5_zarr, load_era5_slice,
         era5_to_latlon_carry, era5_to_mpas_carry, regrid_2d_to_gaussian,
-    )
+    era5_terrain_product,
+)
 
     def _to_carry(era5, grid_or_mesh, sigma_, microphysics_, turbulence_):
         """ERA5 slice -> SegmentCarry on whichever horizontal grid is in use.
@@ -291,10 +307,14 @@ def load_window_pairs(grid, sigma, windows, *, rollout_hours, forcing_ctx,
                     "era5_to_mpas_carry first, or run --grid mpas with "
                     "--microphysics none --turbulence none."
                 )
-            return era5_to_mpas_carry(era5, grid_or_mesh, sigma_)
+            return era5_to_mpas_carry(
+                era5, grid_or_mesh, sigma_,
+                target_phis=era5_terrain_product(era5, grid_or_mesh))
         return era5_to_latlon_carry(
             era5, grid_or_mesh, sigma_,
+            target_phis=era5_terrain_product(era5, grid_or_mesh),
             microphysics=microphysics_, turbulence=turbulence_,
+            ice_skin_prognostic=ice_skin_prognostic,
         )
 
     era5_cfg = TrainingERA5Config(dt_hours=6, load_radiation_fluxes=True)
@@ -648,6 +668,11 @@ def build_parser():
     # default sub-cycles (N=6 -> ~hourly at dt~600s, ~15 min at the T106
     # CFL dt~155s) — never every step.  Moot for the NN-replacement variants.
     p.add_argument("--rad-update-steps", type=int, default=6)
+    p.add_argument("--ice-skin-prognostic",
+                   action=argparse.BooleanOptionalAction, default=None,
+                   help="Prognostic sea-ice skin (#2106); unset = auto (on "
+                        "wherever the lane carries it). The ERA5 carries "
+                        "seed it at the seawater freezing point.")
     # Radiation-as-forcing: stop_gradient rrtmgp in the rollout so its adjoint
     # never enters the backward graph.  rrtmgp's reverse-mode is the dominant
     # XLA compile cost and it GROWS with grid size (>10 h at true T106) — this
@@ -714,14 +739,10 @@ def build_parser():
                         "land skin temperature falls back to the neighbouring "
                         "prescribed SST minus a lapse rate, with no soil, no "
                         "water store and no stomatal control. 'slab' and "
-                        "'multilayer' need somewhere for land to exist, so "
-                        "pass --land-mask-file with them (this lane builds a "
-                        "flat topography, and the driver refuses a land tile "
-                        "that would have no land under it).")
-    p.add_argument("--land-mask-file", type=str, default="",
-                   help="Land-mask NetCDF forwarded to the ExperimentConfig. "
-                        "Required to give --land-model slab/multilayer any "
-                        "land to act on, since this lane runs flat topography.")
+                        "'multilayer' act on the ERA5 land fraction this "
+                        "lane always uses (one coastline, user 2026-10-28); "
+                        "there is no land-mask file option, since the driver "
+                        "refuses a mask file together with the ERA5 source.")
     p.add_argument("--smoke", action="store_true",
                    help="tiny config (n_lat=32, 1 epoch, 1+1 short windows)")
     return p
@@ -858,6 +879,7 @@ def main(argv=None):
         rollout_hours=_ROLLOUT_HOURS, forcing_ctx=forcing_ctx,
         era5_zarr=args.era5_zarr,
         microphysics=args.microphysics, turbulence=args.turbulence,
+        ice_skin_prognostic=config.ice_skin_prognostic,
         multi_step_hours=tuple(args.multi_step_hours),
     )
     logger.info("Loading eval data ...")
@@ -867,6 +889,7 @@ def main(argv=None):
         rollout_hours=_EVAL_HOURS, forcing_ctx=forcing_ctx,
         era5_zarr=args.era5_zarr,
         microphysics=args.microphysics, turbulence=args.turbulence,
+        ice_skin_prognostic=config.ice_skin_prognostic,
     )
 
     scorecard = {}

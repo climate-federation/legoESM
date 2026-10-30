@@ -524,6 +524,9 @@ def _microphysics_config(base, scheme: str, n_c_m3: float | None):
     LES uses too.
     """
     cfg = base._replace(scheme=scheme)
+    if scheme == "morrison" and cfg.morrison.warm_rain_scheme is None:
+        # Pinned kk2000: an unset law resolves to kk2000_cam6 under mg (needs CLUBB relvar).
+        cfg = cfg._replace(morrison=cfg.morrison._replace(warm_rain_scheme="kk2000"))
     if scheme != "morrison" or n_c_m3 is None:
         return cfg
     morrison = getattr(cfg, "morrison", None) or MorrisonConfig()

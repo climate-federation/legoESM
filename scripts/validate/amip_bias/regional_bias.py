@@ -8,7 +8,9 @@ instead of silently compensating:
 
   ITCZ 10S-10N | trades 10-30 (each hemi) | Sc decks (Peru/Namibia/California
   boxes) | SH storm track 30-60S (Southern Ocean bias, Trenberth & Fasullo
-  2010) | NH midlat 30-60N | poles 60-90.
+  2010) | NH midlat 30-60N | poles 60-90 | five desert boxes (Sahara, Arabia,
+  Kalahari, interior Australia, Gobi/Taklamakan), LAND cells only (the run's
+  own sftlf > 50 %), for the land surface temperature bias (tas vs ERA5).
 
 Method: model CMOR Amon months (calendar labels) vs the CERES-EBAF monthly
 CLIMATOLOGY of the same calendar months (2000-2025 mean), CERES regridded to
@@ -45,9 +47,15 @@ GPCP = "/work/bd1179/b309141/climateeval_input/observation_GPCP/mon"
 REF_MIN_YEAR = 1979
 
 # TOA fluxes: CERES only (ERA5 has no rsut/rlut here).  Cloud state: ERA5.
+# Surface energy terms, staged under bb1596 from the Levante ERA5 pool (the shared
+# input tree above is read-only and has none): monthly 1979-2025 at 1 deg,
+# W m-2, hfss/hfls sign-flipped to CMOR positive-upward, ts = ERA5 skt [K].
+ERA5_BB = "/work/bb1596/b309178/diffESM/obs/reanalysis_ERA5/mon"
 _SOURCE = {"rsut": CERES, "rlut": CERES, "rsutcs": CERES, "rlutcs": CERES,
            "clt": ERA5, "lwp": ERA5, "clivi": ERA5, "prw": ERA5, "pr": GPCP,
-           "tas": ERA5, "evspsbl": ERA5}
+           "tas": ERA5, "evspsbl": ERA5,
+           "rsds": ERA5_BB, "rsus": ERA5_BB, "rlds": ERA5_BB, "rlus": ERA5_BB,
+           "hfss": ERA5_BB, "hfls": ERA5_BB, "ts": ERA5_BB, "snw": ERA5_BB}
 
 # Display scale: the water fluxes are stored in kg m-2 s-1 on BOTH sides, so
 # the difference is ~1e-5 and prints as 0.00 at two decimals.  Scale to mm/day
@@ -67,19 +75,60 @@ REGIONS = {           # (lat_lo, lat_hi, lon_lo, lon_hi) lon in [0,360)
     "poles 60-90":      (None, None, 0, 360),  # handled specially (both caps)
     "Arctic 60-90N":    (60, 90, 0, 360),
     "Antarctic 60-90S": (-90, -60, 0, 360),
+    # Desert boxes: land cells only (LAND_ONLY below), where the January
+    # short_main run was 3-7 K too cold at 2 m (2026-10-21 probe).
+    "Sahara 18-30N":    (18, 30, 345, 395),    # 15W-35E wraps
+    "Arabia 18-30N":    (18, 30, 38, 56),
+    "Kalahari":         (-28, -20, 15, 25),
+    "Australia int":    (-30, -20, 118, 140),
+    "Gobi/Taklamakan":  (38, 46, 80, 110),
     "GLOBAL":           (-90, 90, 0, 360),
 }
+# Regions averaged over LAND cells only (the run's fx sftlf > LAND_PCT): the
+# desert boxes include coastal ocean, which would dilute a land bias.
+LAND_ONLY = {"Sahara 18-30N", "Arabia 18-30N", "Kalahari", "Australia int",
+             "Gobi/Taklamakan"}
+LAND_PCT = 50.0
 
 
 def _load_model(run, var):
-    fs = sorted(glob.glob(
-        f"{ROOT}/{run}/cmor/Amon/{var}_Amon_legoESM-1-0_amip_r1i1p1f1_gn*.nc"))
+    """The run's monthly CMOR file for ``var`` from whichever monthly table
+    holds it (Amon; LImon for snw; SImon for siconc), newest file."""
+    fs = []
+    for tbl in ("Amon", "LImon", "SImon"):
+        fs += sorted(glob.glob(
+            f"{ROOT}/{run}/cmor/{tbl}/{var}_{tbl}_legoESM-1-0_amip_r1i1p1f1_gn*.nc"))
     if not fs:
         return None
     try:
         return xr.open_dataset(fs[-1], decode_times=False)
     except OSError:
         return None
+
+
+def _land_mask(run, lat, lon):
+    """Boolean (lat, lon) mask of LAND cells (fx sftlf > LAND_PCT) on the run's
+    own CMOR grid, or None when the run published no sftlf.  Refuses a mask
+    whose grid differs from the field it will be applied to."""
+    fs = sorted(glob.glob(f"{ROOT}/{run}/cmor/fx/sftlf_fx_*.nc"))
+    if not fs:
+        return None
+    d = xr.open_dataset(fs[-1])
+    if not (np.allclose(np.asarray(d.lat), lat)
+            and np.allclose(np.asarray(d.lon), lon)):
+        raise SystemExit(f"FATAL: {run} sftlf grid differs from its Amon grid")
+    return np.asarray(d["sftlf"]) > LAND_PCT
+
+
+def _region_valid(name, land):
+    """The ``valid`` mask for a region: land cells for LAND_ONLY regions
+    (refusing to score them without a mask), None otherwise."""
+    if name not in LAND_ONLY:
+        return None
+    if land is None:
+        raise SystemExit(f"FATAL: region {name!r} is land-only but the run "
+                         "published no fx sftlf")
+    return land
 
 
 def _month_labels(d):
@@ -228,8 +277,8 @@ def region_mean(field, lat, lon, box, valid=None):
     return float((np.where(m, field, 0.0) * wm).sum() / total)
 
 
-def _region_mean(field, lat, lon, box):
-    return region_mean(field, lat, lon, box)
+def _region_mean(field, lat, lon, box, valid=None):
+    return region_mean(field, lat, lon, box, valid=valid)
 
 
 def main(runs, ctl=None):
@@ -245,12 +294,16 @@ def main(runs, ctl=None):
         if ctl is not None:
             print(f"\n=== {run} - {ctl} (regional deltas) ===")
             rows = {}
+            land = None
             for var, (cv, lat, lon) in ctl_fields.items():
                 md = _load_model(run, var)
                 if md is None:
                     continue
+                if land is None:
+                    land = _land_mask(run, lat, lon)
                 mv = np.asarray(md[var]).mean(axis=0)
-                rows[var] = {name: _region_mean(mv - cv, lat, lon, box)
+                rows[var] = {name: _region_mean(mv - cv, lat, lon, box,
+                                                _region_valid(name, land))
                              for name, box in REGIONS.items()}
             # TOA imbalance = rsdt - rsut - rlut, the quantity an energy-budget
             # knob is judged on.  Reported NEXT TO its components, never alone:
@@ -271,8 +324,10 @@ def main(runs, ctl=None):
             continue
         print(f"\n=== {run} (model - CERES-EBAF climatology, matched months) ===")
         rows = {}
+        land = None
         for var in ("rsut", "rlut", "rsutcs", "rlutcs",
-                    "clt", "lwp", "clivi", "prw", "pr", "evspsbl"):
+                    "clt", "lwp", "clivi", "prw", "pr", "evspsbl", "tas",
+                    "rsds", "rsus", "rlds", "rlus", "hfss", "hfls", "ts"):
             md = _load_model(run, var)
             if md is None and var == "lwp":
                 # The runs publish clwvi (TOTAL condensed water path) and
@@ -290,9 +345,12 @@ def main(runs, ctl=None):
             ob = _ref_clim(var, months, lat, lon)
             if ob is None:
                 continue
+            if land is None:
+                land = _land_mask(run, lat, lon)
             mv = np.asarray(md[var]).mean(axis=0)
             ov = ob
-            rows[var] = {name: _region_mean(mv - ov, lat, lon, box)
+            rows[var] = {name: _region_mean(mv - ov, lat, lon, box,
+                                            _region_valid(name, land))
                          for name, box in REGIONS.items()}
         if not rows:
             print("  no scorable variables")

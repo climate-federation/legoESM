@@ -66,7 +66,8 @@ the log/cbrt args of the DISCARDED where-branches so ``0*NaN`` cannot poison the
 reverse-mode gradient.  The scalar oracle does NOT reproduce this floor — it
 evaluates only the in-regime branch (if/elif) and so never touches the discarded
 args; the floor is instead exercised by the AD test (eager ``where`` evaluates
-every regime).  ``zeta`` is clamped to ``[1e-6, 0.5]`` (stable) / ``[-100,
+every regime).  ``zeta`` is clamped to ``[1e-6, 0.5]`` (stable; the 0.5 cap is a
+smooth min, see ``CanopyConfig.zeta_cap_smoothing_width`` — CLM5 clips hard) / ``[-100,
 -1e-6]`` (unstable) each iterate (CLM5: 0.01, see ``_ZETA_NEUTRAL_FLOOR``); wind floors (0.1, 1e-3 m/s) and resistance
 floors (1e-9) guard calm/degenerate columns.
 """
@@ -231,21 +232,21 @@ def _friction_velocity(zldis: jax.Array, z0m: jax.Array,
 
     # Very unstable (valid: obu < 0, zeta < -zetam).  Floor the log/cbrt args so
     # the discarded (obu > 0) branch stays finite; both floors are no-ops here.
-    ustar1 = constants.kappa_vk * um / (
+    ustar1 = constants.kappa_von_karman * um / (
         jnp.log(jnp.maximum(-zetam * obu / z0m, _MOST_ARG_FLOOR))
         - _stability_func_momentum(-zetam)
         + _stability_func_momentum(z0m / obu)
         + _MOST_MOM_CONV_COEF * (jnp.cbrt(jnp.maximum(-zeta, zetam)) - jnp.cbrt(zetam))
     )
     # Unstable
-    ustar2 = constants.kappa_vk * um / (
+    ustar2 = constants.kappa_von_karman * um / (
         jnp.log(zldis / z0m)
         - _stability_func_momentum(zeta)
         + _stability_func_momentum(z0m / obu)
     )
     # Stable (zeta >= 0): Beljaars & Holtslag (1991), all stable zeta.  psi_m
     # is finite for the negative arguments of the discarded (obu < 0) branch.
-    ustar3 = constants.kappa_vk * um / (
+    ustar3 = constants.kappa_von_karman * um / (
         jnp.log(zldis / z0m)
         - psi_m(zeta, _STABLE_SCHEME) + psi_m(z0m / obu, _STABLE_SCHEME))
 
@@ -261,14 +262,14 @@ def _temperature_humidity_relation(zldis: jax.Array, obu: jax.Array,
     zeta  = zldis / obu
 
     # Very unstable (valid: obu < 0, zeta < -zetat).  Floor log/cbrt args; no-ops here.
-    ch1 = constants.kappa_vk / (
+    ch1 = constants.kappa_von_karman / (
         jnp.log(jnp.maximum(-zetat * obu / z0h, _MOST_ARG_FLOOR))
         - _stability_func_heat(-zetat)
         + _stability_func_heat(z0h / obu)
         + _MOST_HEAT_CONV_COEF * (1.0 / jnp.cbrt(zetat)
                                   - 1.0 / jnp.cbrt(jnp.maximum(-zeta, zetat)))
     )
-    ch2 = constants.kappa_vk / (
+    ch2 = constants.kappa_von_karman / (
         jnp.log(zldis / z0h)
         - _stability_func_heat(zeta)
         + _stability_func_heat(z0h / obu)
@@ -276,7 +277,7 @@ def _temperature_humidity_relation(zldis: jax.Array, obu: jax.Array,
     # Stable (zeta >= 0): Beljaars & Holtslag (1991), all stable zeta.  The core
     # psi_h floors its stable argument at 1e-10, so the (1 + 2z/3)^1.5 term stays
     # finite for the negative arguments of the discarded (obu < 0) branch.
-    ch3 = constants.kappa_vk / (
+    ch3 = constants.kappa_von_karman / (
         jnp.log(zldis / z0h)
         - psi_h(zeta, _STABLE_SCHEME) + psi_h(z0h / obu, _STABLE_SCHEME))
 
@@ -285,9 +286,21 @@ def _temperature_humidity_relation(zldis: jax.Array, obu: jax.Array,
     return ch
 
 
+def _cap_stable_zeta(zeta: jax.Array, width: float) -> jax.Array:
+    """Smooth cap at ``_ZETA_MAX_STABLE`` (no kink), then the neutral floor.
+
+    Floor LAST: the softplus leaks ~w*exp(-0.5/w) below the cap, which would
+    push a floored 1e-6 negative (into the unstable forms).
+    """
+    w = width
+    z = zeta - w * jax.nn.softplus((zeta - _ZETA_MAX_STABLE) / w)
+    return jnp.maximum(z, _ZETA_NEUTRAL_FLOOR)
+
+
 def _monin_obukhov_init(ur: jax.Array, Tv_atm: jax.Array,
                         dthv: jax.Array, zldis: jax.Array,
-                        z0m: jax.Array) -> tuple[jax.Array, jax.Array]:
+                        z0m: jax.Array,
+                        zeta_cap_width: float) -> tuple[jax.Array, jax.Array]:
     """Initialise MOST via bulk Richardson number (Zeng et al. 1998)."""
     wc  = 0.5
     um  = jnp.where(dthv >= 0.0, jnp.maximum(ur, 0.1), jnp.sqrt(ur**2 + wc**2))  # coeff-ok: 0.1 m/s wind floor
@@ -300,7 +313,7 @@ def _monin_obukhov_init(ur: jax.Array, Tv_atm: jax.Array,
     )
     zeta = jnp.where(
         rib >= 0.0,
-        jnp.clip(zeta, _ZETA_NEUTRAL_FLOOR, _ZETA_MAX_STABLE),
+        _cap_stable_zeta(zeta, zeta_cap_width),
         jnp.clip(zeta, -100.0, -_ZETA_NEUTRAL_FLOOR),  # coeff-ok: very-unstable bound on ζ
     )
     obu = zldis / zeta
@@ -308,7 +321,8 @@ def _monin_obukhov_init(ur: jax.Array, Tv_atm: jax.Array,
 
 
 def _stability_step(carry: jax.Array, _xs: None,
-                    forcing: jax.Array) -> tuple[jax.Array, jax.Array]:
+                    forcing: jax.Array,
+                    zeta_cap_width: float) -> tuple[jax.Array, jax.Array]:
     """Single Monin-Obukhov fixed-point iteration.
 
     carry : [z0h, obu, um]
@@ -327,9 +341,9 @@ def _stability_step(carry: jax.Array, _xs: None,
     qstar = ch * dq
     thvstar = tstar * (1.0 + _VIRT_T_COEF * q_atm) + _VIRT_T_COEF * Ta * qstar
 
-    zeta  = zldis * constants.kappa_vk * constants.g * thvstar / (ustar**2 * Tv_atm)
+    zeta  = zldis * constants.kappa_von_karman * constants.g * thvstar / (ustar**2 * Tv_atm)
 
-    zeta_stable = jnp.clip(zeta, _ZETA_NEUTRAL_FLOOR, _ZETA_MAX_STABLE)
+    zeta_stable = _cap_stable_zeta(zeta, zeta_cap_width)
     um_stable   = jnp.maximum(ur, 0.1)                     # coeff-ok: 0.1 m/s wind floor
     zeta_unstable = jnp.clip(zeta, -100.0, -_ZETA_NEUTRAL_FLOOR)  # coeff-ok: very-unstable bound on ζ
     # Floor the cbrt argument to a POSITIVE value, not 0: cbrt'(0)=inf and the
@@ -360,6 +374,8 @@ def monin_obukhov_stability(
     zldis: jax.Array,
     z0m: jax.Array,
     n_iters: int = 5,
+    *,
+    zeta_cap_width: float,
 ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
     """Above-canopy MOST iteration via jax.lax.scan.
 
@@ -374,6 +390,8 @@ def monin_obukhov_stability(
     zldis  : reference height minus displacement height [m]
     z0m    : roughness length for momentum [m]
     n_iters: number of fixed-point iterations
+    zeta_cap_width: smoothing width of the stable zeta <= 0.5 cap
+                    (``CanopyConfig.zeta_cap_smoothing_width``)
 
     Returns
     -------
@@ -391,18 +409,32 @@ def monin_obukhov_stability(
     dq   = q_atm - q_c
     dthv = (Ta - Tc) * (1.0 + _VIRT_T_COEF * q_atm) + _VIRT_T_COEF * Ta * (q_atm - q_c)
 
-    um, obu = _monin_obukhov_init(ur, Tv_atm, dthv, zldis, z0m)
+    um, obu = _monin_obukhov_init(ur, Tv_atm, dthv, zldis, z0m, zeta_cap_width)
 
     init    = jnp.array([z0h, obu, um])
     forcing = jnp.array([Ta, Tv_atm, q_atm, q_atm, zldis, z0m, dq, dth, ur])
-    step_fn = partial(_stability_step, forcing=forcing)
+    step_fn = partial(_stability_step, forcing=forcing,
+                      zeta_cap_width=zeta_cap_width)
 
-    final_carry, outputs = jax.lax.scan(step_fn, init, xs=None, length=n_iters)
+    # Only the LAST iterate's outputs are used, so carry them instead of
+    # stacking all n_iters: the stacked (n_iters, ...) buffer was rewritten
+    # every iteration, ~half the cost of this function under the canopy
+    # solve's jacfwd + vmap on CPU (production res6, bit-identical).
+    if n_iters < 1:
+        raise ValueError(f"monin_obukhov_stability needs n_iters >= 1, got {n_iters!r}")
 
-    ustar, _tstar, _qstar, _thvstar, ch, zeta = (
-        outputs[-1, 0], outputs[-1, 1], outputs[-1, 2],
-        outputs[-1, 3], outputs[-1, 4], outputs[-1, 5],
-    )
+    def _step_keep_last(c, _xs):
+        carry, _ = c
+        return step_fn(carry, None), None
+
+    # Placeholder output with the step's own shape/dtype (scalar or batched
+    # inputs alike); it is overwritten by the first iterate.
+    _out = jax.eval_shape(step_fn, init, None)[1]
+    (final_carry, last), _ = jax.lax.scan(
+        _step_keep_last, (init, jnp.zeros(_out.shape, _out.dtype)), xs=None,
+        length=n_iters)
+
+    ustar, ch, zeta = last[0], last[4], last[5]
 
     rah = 1.0 / jnp.maximum(ch * ustar, 1e-9)
     raw = rah  # same for sensible heat and water vapour (neutral Prandtl)
@@ -488,7 +520,7 @@ def compute_below_canopy_resistance(
     """
     nu       = _NU_AIR    # kinematic viscosity of air [m2/s]
     Csdense  = _CS_DENSE  # dense-canopy turbulent transfer coefficient
-    Csbare   = constants.kappa_vk / _CS_BARE_COEF * (z0mg * jnp.maximum(uav, 1e-3) / nu) ** (-_CS_BARE_EXP)  # coeff-ok: 1e-3 m/s wind floor
+    Csbare   = constants.kappa_von_karman / _CS_BARE_COEF * (z0mg * jnp.maximum(uav, 1e-3) / nu) ** (-_CS_BARE_EXP)  # coeff-ok: 1e-3 m/s wind floor
 
     w   = jnp.exp(-0.5 * CI * LAI)
     Cs  = Csbare * w + Csdense * (1.0 - w)

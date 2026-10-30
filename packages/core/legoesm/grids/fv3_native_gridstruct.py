@@ -102,6 +102,7 @@ FV3_GRAV = 9.80665         # const-ok: gfs_constants.h:35-36, != legoESM g
 # constants_mod's 4*RVGAS (= 1846.0), c_liq is gfdl_mp_mod's IFS value.
 FV3_CP_VAPOR = 4.0 * FV3_RVGAS   # const-ok: FMS constants.F90 CP_VAPOR = 4*RVGAS
 FV3_C_LIQ = 4.218e3              # const-ok: gfdl_mp.F90:89 (IFS, water at 0 C)
+FV3_C_ICE = 2.106e3              # const-ok: gfdl_mp.F90:88 (IFS, ice at 0 C)
 
 # gfs_constants.h:53 -- KAPPA = RDGAS/CP_AIR. Computed from the pair above
 # so it can never drift from them.

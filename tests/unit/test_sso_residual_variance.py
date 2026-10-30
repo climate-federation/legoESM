@@ -185,3 +185,35 @@ def test_cutoff_below_block_is_refused():
         mod.subgrid_orography_residual_stddev(
             _terrain_ds(np.zeros((n_lat, n_lon))),
             fine_res_deg=1.0, block_deg=4.0, resolved_cutoff_deg=2.0)
+
+
+def test_band_wave_between_block_and_cutoff_survives_only_with_rms():
+    """codex (#1712): a wave longer than the block but shorter than the cutoff
+    is subgrid by the stated decomposition.  The RMS estimator keeps its full
+    residual RMS; the default block-stddev estimator demeans it away (measured
+    0.39x at block 1 / cutoff 3.5).  Pins both so neither changes silently."""
+    mod = _load()
+    (LAT, LON), (n_lat, n_lon) = _grid()
+    lam, amp, fine, cutoff = 2.0, 1000.0, 0.25, 3.5
+    z = 2000.0 + amp * np.sin(2 * np.pi * LON / lam)
+    n = int(round(cutoff / fine))
+    k = np.arange(-(n // 2), n - n // 2)
+    h_k = np.mean(np.exp(2j * np.pi * k * fine / lam))
+    expected = amp * abs(1 - h_k) / np.sqrt(2)          # exact discrete residual RMS
+    band = slice(60, 120)                    # output blocks 30S-30N (1-deg rows)
+    kw = dict(fine_res_deg=fine, block_deg=1.0, resolved_cutoff_deg=cutoff)
+    rms = mod.subgrid_orography_residual_stddev(_terrain_ds(z), estimator="rms", **kw)
+    std = mod.subgrid_orography_residual_stddev(_terrain_ds(z), **kw)
+    r = float(np.mean(rms["SSO_STDH"].values[band]))
+    s = float(np.mean(std["SSO_STDH"].values[band]))
+    assert abs(r / expected - 1) < 0.02, (r, expected)
+    assert s < 0.5 * expected, (s, expected)
+
+
+def test_unknown_estimator_is_refused():
+    mod = _load()
+    (LAT, LON), _ = _grid()
+    with pytest.raises(ValueError, match="estimator"):
+        mod.subgrid_orography_residual_stddev(
+            _terrain_ds(np.ones_like(LON)), fine_res_deg=0.25, block_deg=1.0,
+            resolved_cutoff_deg=3.5, estimator="median")

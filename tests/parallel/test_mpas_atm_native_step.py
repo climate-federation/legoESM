@@ -287,18 +287,22 @@ class TestNativeFullProductionParity:
 
         _assert_state_close(out, ref_phys, moist=True,
                             label="one-tracer physics")
-        # Exactly q_c received the increment (q_c starts at 0 and is
-        # not produced by dynamics, so the signal is clean dt*rate).
-        dqc = (np.asarray(out.tracers["q_c"].data)
-               - np.asarray(ref_dyn.tracers["q_c"].data))
+        # Exactly q_c received the increment. Physics water carries its
+        # mass (p_s' = p_s + water added; every tracer rescaled by
+        # dp/dp'), so compare layer TRACER MASSES: on sigma dp ~ p_s, and
+        # the dry-air fixer keeps tracer mass, so q*p_s is the invariant.
+        ps_out = np.asarray(out.p_s.data)[..., None]
+        ps_dyn = np.asarray(ref_dyn.p_s.data)[..., None]
+        mass = lambda st, k, ps: np.asarray(st.tracers[k].data) * ps  # noqa: E731
+        dqc_mass = mass(out, "q_c", ps_out) - mass(ref_dyn, "q_c", ps_dyn)
         np.testing.assert_allclose(
-            dqc, _DT * _ONE_TRACER_RATE, rtol=1e-6,
+            dqc_mass, _DT * _ONE_TRACER_RATE * ps_dyn * np.ones_like(dqc_mass),
+            rtol=1e-6,
             err_msg="q_c did not receive the physics tendency")
         for k in ("q_v", "q_r"):
             np.testing.assert_allclose(
-                np.asarray(out.tracers[k].data),
-                np.asarray(ref_dyn.tracers[k].data),
-                atol=1e-9, rtol=1e-6,
+                mass(out, k, ps_out), mass(ref_dyn, k, ps_dyn),
+                atol=1e-9 * float(ps_dyn.max()), rtol=1e-6,
                 err_msg=(f"{k} moved: physics increment leaked to a "
                          f"key the scheme did not return"),
             )

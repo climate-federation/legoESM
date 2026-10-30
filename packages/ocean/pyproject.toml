@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "legoesm-ocean"
-version = "1.0.0"
+version = "1.0.1"
 description = "legoESM ocean component: MPAS/Voronoi + lat-lon C-grid primitive-equation and barotropic dynamics, EOS, vertical mixing, GM/Redi, biogeochemistry."
 readme = "README.md"
 license = { text = "MIT" }

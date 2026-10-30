@@ -265,7 +265,32 @@ def test_positional_construction_unshifted_by_tail_field():
         "freshwater_salinity", "zdf_drag_in_matrix",
         "zdf_baroclinic_only", "barotropic_drag_substep",
         "barotropic_forcing_centred", "store_mass_flux", "store_salt_flux",
-        "zdf_implicit_solver_evaluation")
+        "zdf_implicit_solver_evaluation",
+        # appended by the NEMO ORCA2 lane (card-selected, default off)
+        "een_fold_image_v_row",
+        "rk3_stage1_ssh_nemo_literal",
+        "rk3_stage1_rhs_nemo_literal",
+        "rk3_stage_velocity_written_order",
+        "een_vorticity_written_order",
+        "zdf_barotropic_removal_nemo_literal",
+        "zdf_momentum_nemo_face_thickness",
+        "rk3_fold_exchange_top_v_row",
+        "rk3_stage_r3f_nemo_literal",
+        "rk3_stage_r3t_nemo_literal",
+        "nemo_eos_gdept_rounded_product",
+        "rk3_stage_r3uv_nemo_literal",
+        "zdf_tracer_nemo_rounded_thickness",
+        "barotropic_rhs_ascending_level_sum",
+        "zdf_momentum_stage_r3u_nemo_literal",
+        "een_nemo_relative_vorticity",
+        "een_nemo_top_f_u_halo",
+        "barotropic_wind_nemo_stored_depth",
+        "surface_stress_nemo_fold_vector_sign",
+        "zdf_surface_stress_nemo_face_thickness",
+        "rk3_stage_tracer_written_order",
+        "rk3_stage3_heat_nemo_written",
+        "rk3_stage3_tracer_nemo_stored_thickness",
+    )
     # Head layout unchanged — the slots any positional caller binds first.
     assert f[:9] == (
         "metric_convention", "vface_zonal_metric_evaluation",

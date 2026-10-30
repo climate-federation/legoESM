@@ -35,11 +35,11 @@ back-substitution at
 `ORCA2_ORCA1ICE_OMIP_L4_R333LDFI/BLD/ppsrc/nemo/trazdf.f90:293-299`.
 
 The shared legoESM production caller reaches its literal tracer-pair dispatch
-at `ocean_model_latlon_cgrid.py:14833-14858`. The paired solve consumes the
-content RHS and matrix at `implicit_solver.py:478-539`; matrix construction is
-at `implicit_solver.py:542-641`, and its eliminated-diagonal, forward and
-reverse recurrences are at `implicit_solver.py:329-392`. The stage call that
-supplies these operands is at `ocean_model_latlon_cgrid.py:11706-11738`.
+at `ocean_model_latlon_cgrid.py:15054-15083`. The paired solve consumes the
+content RHS and matrix at `implicit_solver.py:492-553`; matrix construction is
+at `implicit_solver.py:556-655`, and its eliminated-diagonal, forward and
+reverse recurrences are at `implicit_solver.py:343-406`. The stage call that
+supplies these operands is at `ocean_model_latlon_cgrid.py:11840-11882`.
 
 ## Offline admitted-input audit
 
@@ -392,10 +392,10 @@ executes eliminated-diagonal, forward, and back-substitution statements at
 `ORCA2_ORCA1ICE_OMIP_L4_R336TZDF/BLD/ppsrc/nemo/trazdf.f90:298-304`.
 
 The production replay observes legoESM's closure handoff at
-`k_profiles.py:329-348`; the shared tracer call, matrix construction, and
+`k_profiles.py:330-349`; the shared tracer call, matrix construction, and
 three recurrences are the actual production functions at
-`implicit_solver.py:478-539`, `implicit_solver.py:542-641`, and
-`implicit_solver.py:329-392`. The extra callbacks are passive: each trace-graph
+`implicit_solver.py:492-553`, `implicit_solver.py:556-655`, and
+`implicit_solver.py:343-406`. The extra callbacks are passive: each trace-graph
 observation equals the corresponding ordinary-reference observation bit for
 bit, and both returned production states change zero leaves relative to their
 ordinary calls.
@@ -737,14 +737,14 @@ uninstrumented `_nemo_literal_tke_solve` (`0 / 772,560` interior words unequal;
   `en(ji,jj,mbkt(ji,jj)+1) = MAX( zebot, rn_emin ) * ssmask(ji,jj)` at the
   seafloor interface `jk = mbkt + 1` where `tke_wmask == 0`. In legoESM,
   `_tke_bottom_dirichlet`
-  (`packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:12466-12495`)
+  (`packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:12656-12685`)
   calls `compute_face_masks_3d(_zc.is_active, _grid)`, which sets the
   northernmost V-face mask row `north = jnp.zeros_like(south)`
-  (`packages/ocean/legoesm/ocean/dynamics/latlon_cgrid_operators.py:5450-5451`),
+  (`packages/ocean/legoesm/ocean/dynamics/latlon_cgrid_operators.py:5875-5876`),
   zeroing `vm3[-1]` on the north-fold row `jj = 150` (`j = 147`) instead of
   restoring NEMO's raw `vmask[-1]` as `_tke_step_entry_p_sh2` already does when
   `nemo_sh2_fold_top_v=True`
-  (`packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:12881-12898`).
+  (`packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:13071-13088`).
   Because `compute_tke_step` records `_statement_after_boundaries`
   (`packages/ocean/legoesm/ocean/physics/vertical_mixing/tke.py:3588-3589`)
   before `_solve_tke_backward_euler` scatters `bottom_dirichlet` into `rhs` at
@@ -764,12 +764,12 @@ uninstrumented `_nemo_literal_tke_solve` (`0 / 772,560` interior words unequal;
 ### 3. Non-landed literal fix proposal and verification on recorded inputs
 
 - **Proposal (not landed in model code)**: in `_tke_bottom_dirichlet`
-  (`packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:12466-12495`),
+  (`packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:12656-12685`),
   when `getattr(vmix.tke, "nemo_sh2_fold_top_v", False)` is active and
   `_zc.nemo_een_barotropic.vmask` is present, restore the north-fold V-face
   mask row `vm3 = vm3.at[-1].set(jnp.asarray(_raw.vmask[-1], dtype=h_k.dtype))`
   (matching `_tke_step_entry_p_sh2` at
-  `packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:12881-12898`).
+  `packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:13071-13088`).
 - **Verification on the admitted kt-2 inputs**
   (`scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round336_tke_walk.py:333-547`):
   - `bottom_dirichlet` across all 11,676 in-solve seafloor columns drops from
@@ -1388,7 +1388,7 @@ departure: in NEMO, `dommsk` applies `lbc_lnk` to `vmask`
 legoESM's `_tke_bottom_dirichlet` leaves the northernmost V-face mask row at
 `compute_face_masks_3d`'s zero wall instead of restoring the card's raw NEMO
 `vmask[-1]` under `nemo_sh2_fold_top_v=True` (already set on the ORCA2 NEMO
-recipe at `packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:2140`).
+recipe at `packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:2418`).
 
 - **R336-R18-P1 (production-call-site test and `eager == jit`)**: Restoring
   `vm3[-1]` from `_zc.nemo_een_barotropic.vmask[-1]` under the existing
@@ -1425,10 +1425,10 @@ recipe at `packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:2140`).
 ### 1. Landed production change and revert-sensitive call-site test
 
 - **Model fix**: In `_tke_bottom_dirichlet`
-  (`packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:12466-12495`),
+  (`packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:12656-12685`),
   under the existing `bool(getattr(vmix.tke, "nemo_sh2_fold_top_v", False))`
   selector (no new configuration knob; already set on the ORCA2 NEMO recipe at
-  `packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:2140`),
+  `packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:2418`),
   `_tke_bottom_dirichlet` validates that `_grid.fold` is active and
   `_zc.nemo_een_barotropic.vmask` is present and restores the north-fold V-face
   mask row `vm3 = vm3.at[-1].set(jnp.asarray(_raw.vmask[-1], dtype=h_k.dtype))`
@@ -1436,7 +1436,7 @@ recipe at `packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:2140`).
   NEMO's `lbc_lnk`-processed `vmask` (`src/OCE/DOM/dommsk.F90:146-172`) in
   `tke_tke` (`ORCA2_ORCA1ICE_OMIP_L4_R336TKE/BLD/ppsrc/nemo/zdftke.f90:303-309`)
   and matches `_tke_step_entry_p_sh2`
-  (`packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:12881-12898`).
+  (`packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:13071-13088`).
 - **Production-call-site test and `eager == jit` (`M2`, `M4`)**:
   `tests/ocean/unit/test_nemo_sh2_fold_top_v.py:118-310` exercises
   `model._tke_bottom_dirichlet` and
@@ -1500,7 +1500,7 @@ to the parent.
 ### 3. Caller audit and DINO fidelity gates (`M6`)
 
 - **All callers of `_tke_bottom_dirichlet`**:
-  1. `packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:13927-13929`
+  1. `packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:14124-14126`
      (production caller inside `_apply_implicit_vertical_mixing`).
   2. `scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_phase2t_tke_entry_gate.py:93`
      (ORCA2 `kt=1` rest-state entry check where `u = v = 0`; `0` unequal words

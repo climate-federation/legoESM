@@ -135,6 +135,27 @@ def _cols_rad(grid) -> tuple[np.ndarray, np.ndarray]:
     return lat.ravel().astype(np.float64), lon.ravel().astype(np.float64)
 
 
+def _ic_grid(grid_type: str, resolution: int):
+    """The grid an IC's columns live on (target or source), in that run's order.
+
+    ``fv3_duo`` is the FV3 duo COLUMN lane: its columns are the duo's six-face
+    A-grid centres, face-major -- the mesh the driver builds for that lane
+    (create_fv3_duo_grid + build_duo_column_mesh) -- not the generic cubed
+    sphere, which has the same column count at the same C number (so the
+    loader's count check cannot tell them apart) but other centres (up to
+    1.6 deg away) in another order (same-index centres median 273 km apart at
+    C24, measured 2026-10-10).
+    """
+    if grid_type == "fv3_duo":
+        from legoesm.atmosphere.dynamics.gcm.fv3_duo_column import (
+            build_duo_column_mesh)
+        from legoesm.grids.factory import create_fv3_duo_grid
+        bnd = create_fv3_duo_grid(resolution)
+        return build_duo_column_mesh(bnd.ctx_np, bnd.n, bnd.ng)
+    from legoesm.grids.factory import create_grid
+    return create_grid(grid_type, resolution=resolution)
+
+
 def _source_land_mask(surfdata: str, grid, land_ncol: int) -> np.ndarray:
     """The spin-up's own land definition on its own grid.
 
@@ -201,8 +222,6 @@ def main_era5_soil_t(args) -> int:
     soil column).  Glacier columns and every other field stay byte-identical:
     ERA5 stl under an ice sheet is not a soil temperature.
     """
-    from legoesm.grids.factory import create_grid
-
     src = np.load(args.source, allow_pickle=False)
     if "soil_dz" not in src.files:
         raise SystemExit("source IC has no soil_dz stamp; regrid it first.")
@@ -211,7 +230,7 @@ def main_era5_soil_t(args) -> int:
             "source IC has no soil-hydraulics stamp, so the output would be "
             "refused by the model; stamp it first (--stamp-only).")
     ncol = src["T_soil"].shape[0]
-    grid = create_grid(args.target_grid, resolution=args.target_resolution)
+    grid = _ic_grid(args.target_grid, args.target_resolution)
     lat, lon = _cols_rad(grid)
     if lat.size != ncol:
         raise SystemExit(f"grid has {lat.size} columns, the IC has {ncol}.")
@@ -297,7 +316,8 @@ def main(argv=None) -> int:
     ap.add_argument("--surfdata", default=None,
                     help="harmonized surfdata that defines the source land mask")
     ap.add_argument("--target-grid", default=None,
-                    help="target grid type (e.g. mpas, latlon)")
+                    help="target grid type (e.g. mpas, latlon; fv3_duo = the "
+                         "FV3 duo column lane's own mesh, not cubed_sphere)")
     ap.add_argument("--target-resolution", type=int, default=None)
     ap.add_argument("--out", required=True)
     ap.add_argument("--era5-soil-t", nargs=4, metavar="STL",
@@ -386,15 +406,14 @@ def main(argv=None) -> int:
     meta = json.loads(str(src["metadata_json"]))
     ncol_src = src["T_soil"].shape[0]
 
-    from legoesm.grids.factory import create_grid
-    src_grid = create_grid(meta["grid_type"], resolution=int(meta["resolution"]))
+    src_grid = _ic_grid(meta["grid_type"], int(meta["resolution"]))
     src_lat, src_lon = _cols_rad(src_grid)
     if src_lat.size != ncol_src:
         raise SystemExit(
             f"reconstructed source grid has {src_lat.size} columns, the state "
             f"has {ncol_src}: the metadata does not describe this file.")
 
-    dst_grid = create_grid(args.target_grid, resolution=args.target_resolution)
+    dst_grid = _ic_grid(args.target_grid, args.target_resolution)
     dst_lat, dst_lon = _cols_rad(dst_grid)
 
     from legoesm.coupler.grid_remap import nearest_column_map

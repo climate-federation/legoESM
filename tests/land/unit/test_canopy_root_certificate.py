@@ -130,9 +130,10 @@ _COLD_MAX = 300.0
 _WARM_BAD = [330.0, 330.0, 280.0, 280.0, 330.0, 0.01]   # admissible, but "leads astray"
 
 
-def _stub_run(monkeypatch, seed_arr, converge_on_passes=None):
+def _stub_run(monkeypatch, seed_arr, converge_on_passes=None, soil_offset=0.0):
     import legoesm.land.surface_scheme.two_leaf_canopy as tl
     calls = {"n": 0}
+    seen_Ts = []
 
     def fake(x0, bun):
         k = calls["n"]
@@ -143,71 +144,75 @@ def _stub_run(monkeypatch, seed_arr, converge_on_passes=None):
         return (x0, jnp.array(1), ok, z, z, z, z)
 
     def counted(*a, **k):
+        seen_Ts.append(a[1].Ts_bc)
         out = jax.vmap(fake)(*a)
         calls["n"] += 1
         return out
 
-    monkeypatch.setattr(tl.jax, "vmap", _VmapProxy(tl.jax.vmap, fake, counted))
+    monkeypatch.setattr(tl.jax.lax, "map", _SolveMapProxy(tl.jax.lax.map, counted))
     seen_G = []
-    out = _canopy_call(seed_arr=seed_arr, soil_record=seen_G)
-    return out, seen_G, calls["n"]
+    out = _canopy_call(seed_arr=seed_arr, soil_record=seen_G, soil_offset=soil_offset)
+    return out, seen_G, calls["n"], seen_Ts
 
 
-class _VmapProxy:
-    """jax.vmap, except vmap(_solve_one_col) is replaced by the stand-in."""
-    def __init__(self, real, fake, counted):
-        self.real, self.fake, self.counted = real, fake, counted
+class _SolveMapProxy:
+    """jax.lax.map, except the grouped map over _solve_one_col is replaced by
+    the stand-in (called on the whole batch)."""
+    def __init__(self, real, counted):
+        self.real, self.counted = real, counted
 
-    def __call__(self, f, *a, **k):
-        if getattr(f, "__name__", "") == "_solve_one_col":
-            return self.counted
-        return self.real(f, *a, **k)
+    def __call__(self, f, xs, *a, **k):
+        if "_solve_one_col" in getattr(getattr(f, "__code__", None), "co_freevars", ()):
+            return self.counted(*xs)
+        return self.real(f, xs, *a, **k)
 
 
 def test_a_warm_seed_that_fails_gets_a_cold_retry(monkeypatch):
     seed = jnp.tile(_a(_WARM_BAD, dtype=jnp.float32), (8, 1))
-    out, seen_G, n = _stub_run(monkeypatch, seed)
+    out, seen_G, n, _ = _stub_run(monkeypatch, seed)
     assert n == 6
-    # pass 0 (warm seed) fails everywhere, and its ground flux does not reach the soil
-    assert float(jnp.max(jnp.abs(seen_G[0]))) == 0.0
-    # pass 1 (cold) converges; the soil sees a real flux from then on
+    # pass 0 (warm seed) fails everywhere: the soil sees its finite cold-state
+    # fallback flux; pass 1 (cold) converges and the soil sees its root's flux
+    assert bool(jnp.all(jnp.isfinite(seen_G[0])))
+    assert float(jnp.max(jnp.abs(seen_G[0]))) > 0.0
     assert float(jnp.max(jnp.abs(seen_G[1]))) > 0.0
     assert bool(jnp.all(out.converged))
     assert bool(jnp.all(out.canopy_x[:, 0] < _COLD_MAX))
 
 
-def test_a_failed_pass_does_not_move_the_soil_boundary(monkeypatch):
-    """The soil callback returns a WARMER soil than the boundary (so a relaxation
-    step would move it); a pass that did not converge must leave the boundary
-    where it was, and the first converged pass must move it."""
-    import legoesm.land.surface_scheme.two_leaf_canopy as tl
-    seen_Ts = []
+_SEED = jnp.tile(_a(_WARM_BAD, dtype=jnp.float32), (8, 1))
 
-    def fake(x0, bun):
-        ok = x0[0] < _COLD_MAX
-        z = jnp.zeros((), x0.dtype)
-        return (x0, jnp.array(1), ok, z, z, z, z)
 
-    def counted(*a, **k):
-        seen_Ts.append(a[1].Ts_bc)
-        return jax.vmap(fake)(*a)
-
-    monkeypatch.setattr(tl.jax, "vmap", _VmapProxy(tl.jax.vmap, fake, counted))
-    seed = jnp.tile(_a(_WARM_BAD, dtype=jnp.float32), (8, 1))
-    _canopy_call(seed_arr=seed, soil_offset=5.0)
-    assert len(seen_Ts) >= 3
-    # pass 0 (warm seed) failed everywhere: pass 1 sees the same boundary
-    assert float(jnp.max(jnp.abs(seen_Ts[1] - seen_Ts[0]))) == 0.0
-    # pass 1 (cold) converged: pass 2 sees a moved boundary
+def test_a_failed_pass_moves_the_soil_boundary_with_its_fallback_flux(monkeypatch):
+    """The soil callback returns the start-of-step soil + 5 K.  Pass 0 (warm
+    seed) fails everywhere and still relaxes the boundary by omega * 5 K."""
+    from legoesm.land.surface_scheme.two_leaf_canopy import _DEFAULT_PICARD_OMEGA
+    _, _, _, seen_Ts = _stub_run(monkeypatch, _SEED, soil_offset=5.0)
+    step0 = seen_Ts[1] - seen_Ts[0]
+    assert float(jnp.max(jnp.abs(step0 - _DEFAULT_PICARD_OMEGA * 5.0))) < 1e-4
     assert float(jnp.min(seen_Ts[2] - seen_Ts[1])) > 0.0
+
+
+def test_a_never_converging_column_relaxes_its_boundary(monkeypatch):
+    """No pass converges: the boundary still relaxes on every pass instead of
+    staying at the start-of-step soil temperature."""
+    from legoesm.land.surface_scheme.two_leaf_canopy import (
+        _DEFAULT_N_PICARD, _DEFAULT_PICARD_OMEGA)
+    out, _, _, seen_Ts = _stub_run(monkeypatch, _SEED, converge_on_passes=set(),
+                                   soil_offset=5.0)
+    assert not bool(jnp.any(out.converged))
+    expect = 5.0 * (1.0 - (1.0 - _DEFAULT_PICARD_OMEGA) ** _DEFAULT_N_PICARD)
+    assert float(jnp.max(jnp.abs(out.Ts_solve - seen_Ts[0] - expect))) < 1e-4
+    assert bool(jnp.all(jnp.isfinite(out.shflx)))
 
 
 def test_acceptance_is_the_last_pass(monkeypatch):
     """Converged on pass 0 only: cached, but the call reports NOT converged."""
-    out, seen_G, _ = _stub_run(monkeypatch, None, converge_on_passes={0})
+    out, seen_G, _, _ = _stub_run(monkeypatch, None, converge_on_passes={0})
     assert not bool(jnp.any(out.converged))
     assert bool(jnp.all(jnp.isfinite(out.canopy_x)))
-    assert all(float(jnp.max(jnp.abs(g))) == 0.0 for g in seen_G[1:])
+    # the failed passes after pass 0 still feed the soil a finite fallback flux
+    assert all(bool(jnp.all(jnp.isfinite(g))) for g in seen_G[1:])
 
 
 # ---- shared solver: the new gates are opt-in and drive the adjoint ----------
@@ -261,13 +266,12 @@ def test_a_rejected_nan_iterate_leaves_finite_gradients(monkeypatch):
     """Round-1 fix: a failed column's iterate is NaN; the fluxes and the soil
     boundary it would feed must still give finite reverse-mode gradients."""
     import legoesm.land.surface_scheme.two_leaf_canopy as tl
-    real_vmap = tl.jax.vmap
 
     def fake(x0, bun):
         z = jnp.zeros((), x0.dtype)
         return (jnp.full_like(x0, jnp.nan), jnp.array(1), jnp.asarray(False), z, z, z, z)
 
-    monkeypatch.setattr(tl.jax, "vmap", _VmapProxy(real_vmap, fake, real_vmap(fake)))
+    monkeypatch.setattr(tl.jax.lax, "map", _SolveMapProxy(tl.jax.lax.map, jax.vmap(fake)))
 
     def loss(scale):
         out = _canopy_call(soil_record=None, lw_scale=scale)

@@ -51,6 +51,8 @@ import jax.numpy as jnp
 
 from legoesm import constants as C
 
+from legoesm.core.smooth import smooth_max
+
 from .mass_flux import ifs_ztaures
 
 # ---------------------------------------------------------------------------
@@ -120,6 +122,16 @@ class IFSClosureConfig(NamedTuple):
     # exceeds 60 hPa.  Kept in the source's pressure convention (Pa) and
     # derived per column from p_full; excluded from calibration.
     njkt2_pa: float = 60.0e2
+    # Shallow closure with no sub-cloud supply (ZDHPBL <= 0).  "first_guess"
+    # is the source (cumastrn.F90:912 ZMFUB1=ZMFUB keeps the first guess,
+    # 0.1*ZMFMAX for a column first triggered deep); "zero" takes the
+    # supply as max(ZDHPBL, 0), smoothed over shallow_supply_width_w_m2, so
+    # no supply means no shallow mass flux.  See shallow_closure.
+    shallow_nosupply: str = "zero"
+    shallow_supply_width_w_m2: float = 1.0
+
+
+SHALLOW_NOSUPPLY_MODES = ("zero", "first_guess")
 
 
 __param_spec__ = {
@@ -134,6 +146,7 @@ __param_spec__ = {
             "rmfcmin": "sucumf.F90 source constant (default 1e-8) of a faithful OpenIFS port",
             "rmflia": "sucumf.F90:241 source constant (default 2.0 = 2*RPLDARE) of a faithful OpenIFS port",
             "njkt2_pa": "sucumf.F90:280-285 source constant (60 hPa) defining the NJKT2 integral window; a vertical-grid property, not a tunable",
+            "shallow_supply_width_w_m2": "smoothing width of the max(ZDHPBL, 0) supply ramp (RULE 5 differentiable form), not a tunable",
         },
         "params": {},  # every field is a source constant/switch of a faithful port -- nothing is genuinely tunable
     },
@@ -523,10 +536,37 @@ def shallow_closure(p_half, k_cbot, ldcum, ktype, zdhpbl,
     above the cloud base), i.e. our index k_cbot-1.
     (:912) ``ZMFUB1(JL)=ZMFUB(JL)`` when ZDHPBL <= 0;
     (:915) ``ZMFUB1(JL)=MIN(ZMFUB1(JL),ZMFMAX)``.
+
+    ``cfg.shallow_nosupply`` selects the ZDHPBL <= 0 branch: ``"first_guess"``
+    is the source above; ``"zero"`` (default) uses the supply
+    ``smooth_max(ZDHPBL, 0)`` with width ``shallow_supply_width_w_m2`` [W/m2;
+    ZDHPBL is W/m2 times g] in place of ZDHPBL throughout, so the flux is
+    supply/ZDH and tends to 0 as the supply does.  Width 0 is the hard
+    ``max(ZDHPBL, 0)``.
+
+    KNOWN DIFFERENCE (RULE 5 / departure from OpenIFS, user decision
+    2026-10-28): a column first triggered deep and reclassified shallow
+    with no sub-cloud supply keeps 0.1*ZMFMAX in OpenIFS, which grows as
+    1/dt (measured, 60-level deep sounding, dt 112.5 s: 0.459 kg/m2/s and
+    292 K/day peak heating, reproduced by the OpenIFS single-column oracle
+    scripts/validate/oracle/ifs_cumastrn); the default gives a mass flux of
+    smooth_max(0, 0)/ZDH = ln2*g*width/ZDH instead.  "first_guess" recovers
+    the source.  The smoothing also raises small POSITIVE supplies: at
+    ZDHPBL = g*width the flux is ln(1+e) = 1.31x the source (+31 %); far
+    above the width the two agree to exp(-ZDHPBL/(g*width)).
     LMFWSTAR = .FALSE. (sucumf.F90:232), so ZMF_SHAL is never used.
     k_cbot is OUR surface-last 0-based half index: PAPH(IKB)=p_half[k_cbot],
     PAPH(IKB-1)=p_half[k_cbot-1].
     """
+    if cfg.shallow_nosupply not in SHALLOW_NOSUPPLY_MODES:
+        raise ValueError(
+            f"unknown shallow-closure no-supply scheme "
+            f"shallow_nosupply={cfg.shallow_nosupply!r}; choose one of "
+            f"{SHALLOW_NOSUPPLY_MODES}.")
+    if not cfg.shallow_supply_width_w_m2 >= 0.0:
+        raise ValueError(
+            "shallow_supply_width_w_m2 must be >= 0 (0 = hard max(ZDHPBL, 0)), "
+            f"got {cfg.shallow_supply_width_w_m2!r}.")
     ncol = p_half.shape[0]
     idx = jnp.arange(ncol)
     kb = jnp.asarray(k_cbot).astype(jnp.int32)
@@ -548,10 +588,17 @@ def shallow_closure(p_half, k_cbot, ldcum, ktype, zdhpbl,
 
     dp_base = p_half[idx, kb] - p_half[idx, kb_m1]
     zmfmax_rmfcfl = dp_base / (RG * _f(dt))                   # ZMFMAX/RMFCFL
-    zmfub1 = jnp.where(zdhpbl > 0.0, zdhpbl / _f(zdh), zmfub)  # :905 / :912
+    if cfg.shallow_nosupply == "first_guess":
+        supply = zdhpbl
+        zmfub1 = jnp.where(zdhpbl > 0.0, zdhpbl / _f(zdh), zmfub)  # :905 / :912
+    else:
+        w = cfg.shallow_supply_width_w_m2
+        supply = smooth_max(zdhpbl, 0.0,
+                            sharpness=float("inf") if w == 0.0 else 1.0 / (RG * w))
+        zmfub1 = supply / _f(zdh)
     weak = (zmfub1 > ZMFUB1_WEAK_FRAC * zmfmax_rmfcfl) \
         & (zdh < ZDH_WEAK_FRAC * RG * RCPD)                   # :897
-    zmfub1 = jnp.where(weak, zdhpbl / _f(ZDH_WEAK_FLOOR_FRAC * RCPD * RG),
+    zmfub1 = jnp.where(weak, supply / _f(ZDH_WEAK_FLOOR_FRAC * RCPD * RG),
                        zmfub1)                                # :899-900
     shallow = ldcum & (jnp.asarray(ktype) == 2)
     zmfub1 = jnp.minimum(zmfub1, zmfmax)                      # :915

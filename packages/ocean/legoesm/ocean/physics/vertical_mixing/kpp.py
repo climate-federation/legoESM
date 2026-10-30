@@ -68,7 +68,10 @@ from legoesm.ocean.eos import (
     rho_0 as rho_0_ref,
 )
 from legoesm.ocean.physics.mixing import vertical_diffusion_variable_K
-from legoesm.ocean.physics.vertical_mixing._shared import richardson_number
+from legoesm.ocean.physics.vertical_mixing._shared import (
+    eos_salinity,
+    richardson_number,
+)
 from legoesm.ocean.physics.vertical_mixing.config import KPPConfig
 from legoesm.ocean.physics.vertical_mixing.output import VerticalMixingOutput
 from legoesm.ocean.physics.vertical_mixing.tke import (
@@ -317,7 +320,9 @@ def _boundary_layer_depth(
     if eos_fn is None:
         from legoesm.ocean.eos import wright_eos
         eos_fn = wright_eos
-    rho_surf_ref = eos_fn(T, S, jnp.zeros_like(T))
+    # Floored salinity for sqrt(S) EOSes (infinite dRho/dS at S = 0), as
+    # the density above; Wright as is (#2243).
+    rho_surf_ref = eos_fn(T, eos_salinity(S, eos_fn), jnp.zeros_like(T))
     delta_rho = rho_surf_ref - rho_surf_ref[..., :1]
     delta_u = u - u[..., :1]
     delta_v = v - v[..., :1]

@@ -139,6 +139,7 @@ def specified_nc_field(
     aerosol_od: jnp.ndarray,
     target_shape,
     config: CCNFromAODConfig = CCNFromAODConfig(),
+    ccn_aod: jnp.ndarray | None = None,
 ) -> jnp.ndarray:
     """Per-column SPECIFIED cloud-droplet number [1/m³] from per-layer AOD.
 
@@ -160,12 +161,15 @@ def specified_nc_field(
         the microphysics / radiation kernel expects.  The diagnosed
         per-column value is broadcast to it.
     config : CCNFromAODConfig
+    ccn_aod : jnp.ndarray, optional
+        Column AOD ``(ncol,)`` to use instead of the ``aerosol_od`` sum (the
+        driver's tropospheric visible-band ``forcing["aerosol_ccn_aod"]``).
 
     Returns
     -------
     n_c : jnp.ndarray
         Specified cloud-droplet number [1/m³] of shape ``target_shape``.
     """
-    aod_col = jnp.sum(aerosol_od, axis=-1)
+    aod_col = jnp.sum(aerosol_od, axis=-1) if ccn_aod is None else ccn_aod
     n_ccn = ccn_from_aod(aod_col, config)
     return jnp.broadcast_to(n_ccn[..., None], target_shape)

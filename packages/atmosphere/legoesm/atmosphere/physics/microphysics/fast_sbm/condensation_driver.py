@@ -2,16 +2,16 @@
 
 Assembles the ported chain for one microphysics step of one column cell:
 
-    S = e/e_s − 1                       (legoesm.thermo.relative_humidity)
+    S = q p/(0.622+0.378 q)/e_s − 1     (FAST_SBM l. 4594-4597, e_s=POLYSVP)
     B_k  = JERRATE   (growth coefficients)
     SFN  = JERTIMESC (spectrum relaxation integral)
-    R    = (∂ln e/∂q + (L/R_v T²)(L/c_p)) (1+S) SFN     (ONECOND1 ``RW``)
+    R    = (OPER2(q) + (BB1/T²)·AL1) (1+S) SFN          (ONECOND1 ``RW``)
     S(t), ∫S dt = JERSUPSAT (exact linear-ODE step, zero in-step forcing —
                   the oracle calls it with ``DYN1 = 0``)
     m_k' = JERDFUN  (m^{2/3} growth update with B_k ∫S dt)
     f'   = JERNEWF  (KO + 3-point remap)
-    Δq_c = Σ f' m dm/ρ − Σ f m dm/ρ
-    q'   = q − Δq_c,   T' = T + (L_v/c_pd) Δq_c          (oracle ``AL1``)
+    Δq_c = max(Σ f' m dm/ρ, 0) − max(Σ f m dm/ρ, 0)
+    q'   = q − Δq_c,   T' = T + AL1·Δq_c,  AL1 = 2500 K  (oracle literal)
 
 Faithfulness note on substepping: this oracle version's ONECOND1 loop sets
 ``DTNEWL = min(DT, DT−TIMENEW)`` with no further limiter, so it executes
@@ -21,10 +21,14 @@ in-loop remap — the port implements that single-pass form directly.
 (The multi-substep machinery is vestigial there; if a future oracle
 re-enables ``DT_WATER_COND`` limits, wrap this function in ``lax.scan``.)
 
-Energy/water closure is exact by construction: ``q + q_c/ρ`` is invariant
-and ``c_pd ΔT + L_v Δq_v = 0`` (the oracle's ``AL1 = 2500 K ≈ L_v/c_pd``
-rounding is replaced by the constants-derived ratio, as in
-``supersaturation.py``).
+Closure: ``q + q_c/ρ`` is invariant and ``ΔT + AL1·Δq_v = 0`` with the
+oracle's ``AL1 = 2500 K`` (its rounding of L_v/c_pd, kept so the port
+reproduces the running scheme; user decision 2026-10-19).
+
+Scope: ONE ``ONECOND1`` call (the oracle's warm path for one condensation
+substep). The FAST_SBM ``NCOND = 3`` substep loop, its ``DIFFU`` gate and
+the ``wrf_error_fatal`` stops are NOT here (column assembly; see the
+package status).
 """
 
 from __future__ import annotations
@@ -38,6 +42,7 @@ from legoesm import constants
 from legoesm.atmosphere.physics.microphysics.fast_sbm.config import FastSBMConfig
 from legoesm.atmosphere.physics.microphysics.fast_sbm.diffusional_growth import (
     drop_growth_coefficient,
+    saturation_vapor_pressure_fast_sbm,
     supersat_relaxation_integral,
 )
 from legoesm.atmosphere.physics.microphysics.fast_sbm.grid import (
@@ -51,7 +56,6 @@ from legoesm.atmosphere.physics.microphysics.fast_sbm.supersaturation import (
     integrate_supersaturation,
     supersat_relaxation_rate,
 )
-from legoesm.thermo import relative_humidity
 
 __physics_contract__ = {
     "summary": (
@@ -76,9 +80,9 @@ __physics_contract__ = {
     },
     "sign_convention": (
         "Supersaturated (S>0): droplets grow, dq_c>0, q_v decreases, T "
-        "rises by (L_v/c_pd) dq_c; subsaturated: evaporation, opposite "
-        "signs. Total water q_v + q_c/rho is exactly invariant; "
-        "c_pd dT + L_v dq_v = 0 exactly."
+        "rises by AL1*dq_c (AL1 = 2500 K, oracle); subsaturated: "
+        "evaporation, opposite signs. Total water q_v + q_c/rho is exactly "
+        "invariant (when neither mass total is clamped); dT + AL1*dq_v = 0."
     ),
     "conserves": ["moisture", "energy"],
     "differentiable": True,
@@ -105,6 +109,14 @@ class WarmCondensationResult(NamedTuple):
     min_psi: jax.Array   # remap negativity diagnostic (oracle fatal cond.)
 
 
+def saturation_ratio_fast_sbm(T: jax.Array, p: jax.Array, q_v: jax.Array) -> jax.Array:
+    """FAST_SBM saturation ratio over water (l. 4594-4597):
+    ``EW1N/ES1N`` with ``EW1N = q p/(0.622 + 0.378 q)``, ``ES1N`` = POLYSVP."""
+    e_v = q_v * p / (constants.epsilon_fast_sbm
+                     + constants.one_minus_epsilon_fast_sbm * q_v)
+    return e_v / saturation_vapor_pressure_fast_sbm(T)
+
+
 def warm_condensation_step(
     f: jax.Array,
     T: jax.Array,
@@ -124,7 +136,7 @@ def warm_condensation_step(
     if v_term is None:
         v_term = jnp.zeros_like(masses)
 
-    S = relative_humidity(T, p, q_v) - 1.0
+    S = saturation_ratio_fast_sbm(T, p, q_v) - 1.0     # DEL1IN = EW1N/ES1N-1.
     B = drop_growth_coefficient(masses, T, p, v_term, config=config)
     sfn = supersat_relaxation_integral(f, masses, B, rho_air)
     R = supersat_relaxation_rate(T, q_v, S, sfn)
@@ -135,11 +147,13 @@ def warm_condensation_step(
     m_new = condensation_new_masses(masses, B, step.S_int)
     remap = remap_spectrum(f, masses, m_new)
 
-    # Mass closure (oracle DELMASSL1 = (after − before)·COL3/ρ).
-    dq_c = (mass_density(remap.f_new, masses) - mass_density(f, masses)) \
-        / rho_air
+    # Mass closure (oracle DELMASSL1 = RMASSLAA − RMASSLBB, each
+    # Σ f x² ·COL3/ROR clamped at >= 0; QPN = QOLD − Δ, TPN = TOLD + AL1·Δ).
+    m_after = jnp.maximum(mass_density(remap.f_new, masses) / rho_air, 0.0)
+    m_before = jnp.maximum(mass_density(f, masses) / rho_air, 0.0)
+    dq_c = m_after - m_before
     q_new = q_v - dq_c
-    T_new = T + (constants.L_v / constants.c_pd) * dq_c
+    T_new = T + constants.lv_over_cp_fast_sbm * dq_c
 
     return WarmCondensationResult(
         f=remap.f_new, T=T_new, q_v=q_new, dq_c=dq_c,

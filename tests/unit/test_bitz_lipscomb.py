@@ -119,3 +119,68 @@ def test_conduction_step_ad_safe():
 
     g = jax.grad(loss)(10.0)
     assert jnp.isfinite(g)
+
+
+def test_si3_column_step_reverse_mode_finite_on_open_water_and_bare_ice():
+    """Review F3: open water (no ice, no lead freezing) and snow-free ice hit
+    0/0 in DISCARDED where-branches of the SI3 chain (new-ice thickness,
+    layer-enthalpy remap); the reverse pass must stay finite there."""
+    from legoesm.ice.bitz_lipscomb import (
+        SI3ColumnArrays,
+        SI3SurfaceForcing,
+        ice_enthalpy_from_temperature,
+        option2_salinity_profile,
+        si3_column_step_arrays,
+        snow_enthalpy_from_temperature,
+    )
+    from legoesm.ice.constants_config import NEMO_SI3_CONSTANTS_CONFIG as c
+
+    def a(*v):
+        return jnp.asarray(v, dtype=jnp.float64)
+
+    # columns: open water | snow-free ice | snow-covered ice
+    conc, h_i, h_s = a(0.0, 0.9, 0.9), a(0.0, 2.0, 2.0), a(0.0, 0.0, 0.2)
+    bulk = a(0.0, 6.3, 6.3)
+    sal = option2_salinity_profile(bulk, a(34.7, 34.7, 34.7))
+    ti = jnp.stack([a(271.0, 271.0, 271.0), a(257.0, 261.0, 266.0),
+                    a(257.0, 261.0, 266.0)])
+    ts = jnp.stack([a(271.0, 271.0, 271.0)] * 2 + [a(255.0, 260.0, 266.0)])
+    e_i = ice_enthalpy_from_temperature(ti, sal, c) * (h_i > 0)[:, None]
+    e_s = snow_enthalpy_from_temperature(ts, c) * (h_s > 0)[:, None]
+    state = SI3ColumnArrays(conc, h_i, h_s, a(271.0, 260.0, 260.0), e_i, e_s,
+                            bulk, sal, jnp.zeros(3))
+    z3 = jnp.zeros(3)
+    forcing = SI3SurfaceForcing(
+        qns_ice=a(-60.0, -60.0, -60.0), qsr_ice=z3, dqns_ice=a(-7.0, -7.0, -7.0),
+        qtr_ice_top=z3, t_bottom=a(271.27, 271.27, 271.27),
+        sss=a(34.7, 34.7, 34.7), evaporation=z3, snow_precipitation=z3,
+        qprec_ice=z3, qcn_ice_bottom=z3, qsb_ice_bottom=z3, fhld=z3,
+        qlead=z3)   # qlead >= 0: no lead freezing, so open water stays ice-free
+
+    def loss(qns, h):
+        out = si3_column_step_arrays(state._replace(h_ice=h),
+                                     forcing._replace(qns_ice=qns),
+                                     3600.0, c).exit
+        return (jnp.sum(out.h_ice) + jnp.sum(out.concentration)
+                + 1e-9 * jnp.sum(out.e_ice) + 1e-9 * jnp.sum(out.e_snow))
+
+    out = si3_column_step_arrays(state, forcing, 3600.0, c).exit
+    assert float(out.concentration[0]) == 0.0 and float(out.h_snow[1]) == 0.0
+    g_q, g_h = jax.grad(loss, argnums=(0, 1))(forcing.qns_ice, state.h_ice)
+    assert bool(jnp.all(jnp.isfinite(g_q))), g_q
+    assert bool(jnp.all(jnp.isfinite(g_h))), g_h
+    assert float(jnp.abs(g_h[1:]).max()) > 0.0     # ice columns stay live
+
+
+def test_piecewise_remap_reverse_mode_finite_at_zero_thickness():
+    """Review F3, the layer-enthalpy remap alone: a zero new thickness is
+    0/0 in the discarded branch; the gradient must stay finite (zero)."""
+    from legoesm.ice import bitz_lipscomb as bl
+
+    th = jnp.asarray([[0.5, 0.5, 0.5], [0.0, 0.0, 0.0]])
+    en = jnp.asarray([[-3.0e8, -2.9e8, -2.8e8], [0.0, 0.0, 0.0]])
+    g = jax.grad(lambda t: jnp.sum(bl._piecewise_remap(th, en, t)))(
+        jnp.asarray([1.5, 0.0]))
+    assert bool(jnp.all(jnp.isfinite(g))), g
+    assert float(g[1]) == 0.0
+

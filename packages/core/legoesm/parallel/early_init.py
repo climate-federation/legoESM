@@ -397,6 +397,13 @@ def _pals_local_device_ids() -> list[int]:
     DIFFERENT devices instead of all contending for GPU 0 (the
     fake/contended-GPU row).  Falls back to ``[0]``.
     """
+    if _non_gpu_platform_selected():
+        # JAX_PLATFORMS=cpu on a GPU node: the one CPU device is local id 0
+        # whatever CUDA_VISIBLE_DEVICES says, and the launcher local-rank
+        # vs visible-GPU check below is a GPU-only launch rule (same class
+        # as pin_local_gpu's CPU branch; the 6-rank CPU column parity died
+        # here on a 2-GPU node, job 10201546).
+        return [0]
     cvd = os.environ.get("CUDA_VISIBLE_DEVICES", "")
     n_visible = len([x for x in cvd.split(",") if x.strip()]) if cvd else 0
     if n_visible == 1:
@@ -864,17 +871,19 @@ def init_multicontroller_distributed(coordinator: str | None = None) -> None:
     _warn_missing_nccl_plugin(rank=proc_id)
 
 
-def maybe_init_jax_distributed(coordinator_port: int | None = None) -> bool:
-    """Initialize ``jax.distributed`` if running under multi-node MPI.
+def maybe_init_jax_distributed(coordinator_port: int | None = None, *,
+                               federate: bool = True) -> bool:
+    """Initialize ``jax.distributed`` if running under multi-rank MPI.
 
     Detects the MPI world size from the environment (SLURM_NTASKS /
-    PMI_SIZE / OMPI_COMM_WORLD_SIZE).  When >1 rank and the ranks span
-    more than one hostname, calls ``jax.distributed.initialize()`` with
-    rank-0's hostname as coordinator.
+    PMI_SIZE / OMPI_COMM_WORLD_SIZE).  When >1 rank and ``federate`` is
+    True, calls ``jax.distributed.initialize()`` with rank-0's hostname as
+    coordinator, on one host or several.
 
     On a SERIAL run this does nothing.  On MULTI-RANK runs — single-node
     included — it first binds each rank to one GPU via
-    :func:`pin_local_gpu`; the single-node path takes no other action.  That
+    :func:`pin_local_gpu`; with ``federate=False`` the single-node path
+    takes no other action.  That
     binding is not optional bookkeeping: without it nothing assigns
     rank -> device on the single-node path and the whole job silently runs
     on GPU 0 (#1516).
@@ -887,6 +896,15 @@ def maybe_init_jax_distributed(coordinator_port: int | None = None) -> bool:
     ``coordinator_port=None`` (default) resolves the port via
     :func:`resolve_coordinator_port` (env override / job-id-derived /
     legacy 1234).
+
+    ``federate=False`` keeps the per-rank GPU pin and the duplicate-binding
+    tripwire but NEVER calls ``jax.distributed.initialize()``, whatever the
+    host span.  That is the mpi4jax lane (``distributed_mode='mpi'``): its
+    ranks talk over MPI only, and a jax.distributed federation on top of
+    mpi4jax deadlocks (``reductions.is_distributed`` documents the mixed
+    stack; measured 2026-10-04 on a 2x2 Ginsburg MPAS run, job 10201641:
+    three GPUs spinning in an XLA collective, rank 0 polling MPI, silent
+    for an hour).  Only the multi-controller SPMD lane federates.
     """
     global _INITIALIZED
     if _INITIALIZED:
@@ -931,6 +949,17 @@ def maybe_init_jax_distributed(coordinator_port: int | None = None) -> bool:
     size = comm.Get_size()
 
     hosts = comm.allgather(socket.gethostname())
+    # The federation decision is collective: a rank whose deck read failed
+    # (a missing included file on one host) would fall back to the mpi lane
+    # and skip initialize() while its peers enter it -- a stall until the
+    # walltime instead of an error (codex + GLM). Vote before anything
+    # rank-local happens.
+    votes = comm.allgather(bool(federate))
+    if len(set(votes)) > 1:
+        raise RuntimeError(
+            "ranks disagree on whether to federate jax.distributed "
+            f"(federate per rank: {votes}); a rank-local --config read "
+            "probably failed -- the deck must be readable on every host.")
     # Per-rank GPU binding, BEFORE the single-node early return: nothing
     # downstream assigns rank -> device on that path, so every rank grabbed
     # the default and the job silently ran entirely on GPU 0 (#1516).  A
@@ -1062,11 +1091,19 @@ def maybe_init_jax_distributed(coordinator_port: int | None = None) -> bool:
               f"{effective_pin} ({when}; CUDA_VISIBLE_DEVICES="
               f"{effective_pin}; JAX will call it local device 0)",
               flush=True)
-    if len(set(hosts)) <= 1:
-        # Single-node MPI: JAX distributed is not needed — the per-rank
-        # GPU binding was already applied above (#1516); unpinned, every
-        # local rank boots on default GPU 0 and the job completes with
-        # most of the hardware idle.
+    if len(set(hosts)) <= 1 and not federate:
+        # Single-node mpi4jax lane: JAX distributed is not needed — the
+        # per-rank GPU binding was already applied above (#1516); unpinned,
+        # every local rank boots on default GPU 0 and the job completes with
+        # most of the hardware idle.  The SPMD lane federates on one host
+        # too: its later init would run after the XLA backend is up and fail.
+        return False
+    if not federate:
+        if rank == 0:
+            print(f"[early_init] {size} ranks on {len(set(hosts))} hosts, "
+                  "mpi4jax lane: jax.distributed NOT initialised (each rank "
+                  "is its own JAX process; MPI carries the exchange)",
+                  flush=True)
         return False
 
     import jax

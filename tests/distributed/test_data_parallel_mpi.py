@@ -91,6 +91,27 @@ def test_mpi_train_step_synced_across_ranks():
     assert np.allclose(allp[0], allp[1]), allp
 
 
+def test_dp_gradient_equals_serial_mean_loss_gradient():
+    """#1814, measured: the averaged 2-rank gradient equals the single-process
+    gradient of the mean loss over both samples (not n_ranks x it).  The
+    training loss is rank-local; the cross-rank sum runs AFTER jax.grad."""
+    rank, nproc = _nranks()
+    if nproc != 2:
+        pytest.skip("needs mpirun -np 2")
+    import jax
+
+    w = jnp.array([2.0, -3.0, 0.5])
+    xs = [jnp.array([1.0, 2.0, 0.0]), jnp.array([0.5, -1.0, 4.0])]
+
+    def loss(p, x):
+        return jnp.sum(jnp.sin(p * x) ** 2) + jnp.sum(p ** 2 * x)
+
+    _, g = build_dp_value_and_grad(loss)(w, xs[rank])
+    g = all_reduce_grad_mean(g, nproc)
+    want = jax.grad(lambda p: 0.5 * (loss(p, xs[0]) + loss(p, xs[1])))(w)
+    np.testing.assert_allclose(np.asarray(g), np.asarray(want), rtol=1e-12)
+
+
 def test_one_poisoned_rank_skips_update_on_both_ranks():
     """Non-finite guard under real MPI: rank 0's sample produces a NaN
     gradient, rank 1's is finite. BOTH ranks must agree to skip (allreduce

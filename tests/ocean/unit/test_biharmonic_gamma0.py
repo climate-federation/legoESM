@@ -12,6 +12,7 @@ import jax.numpy as jnp  # noqa: E402
 import numpy as np  # noqa: E402
 import pytest  # noqa: E402
 
+from legoesm import constants  # noqa: E402
 from legoesm.ocean.state import LateralViscosityConfig  # noqa: E402
 from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (  # noqa: E402
     _validate_biharmonic_gamma0, biharmonic_gamma0_coefficients)
@@ -131,7 +132,7 @@ def test_nemo_drag_law_is_zero_and_differentiable_at_rest():
     """FESOM2's C_d|u| with ke0 = 0: zero drag at rest and a finite gradient."""
     from legoesm.ocean.dynamics.ocean_tendency_common import nemo_drag_r_from_speed_sq
     f = lambda s2: nemo_drag_r_from_speed_sq(s2, jnp.asarray(50.0), scheme="nemo_quadratic",
-                                             cd0=0.0025, cd_max=0.1, z0=3e-3, ke0=0.0, von_karman=0.4)
+                                             cd0=0.0025, cd_max=0.1, z0=3e-3, ke0=0.0, von_karman=constants.kappa_von_karman)
     assert float(f(jnp.asarray(0.0))) == 0.0
     g = jax.grad(lambda s2: jnp.sum(f(s2)))(jnp.asarray(0.0))
     assert np.isfinite(float(g))

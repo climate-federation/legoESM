@@ -147,6 +147,34 @@ def restrict_suite_def(
     return suite_def
 
 
+def drop_not_produced(suite_def: list[Any], not_produced: list[str]) -> tuple[list[Any], list[str]]:
+    """Remove every variable the run deliberately does not produce (e.g. 2 m
+    ``tas`` without a surface layer) so its suite still scores the rest instead
+    of being skipped whole.  Returns ``(suite_def, removed_variable_ids)``;
+    a diagnostic block left with no variable is dropped.  Mutates in place,
+    so pass the copy ``restrict_suite_def`` returned."""
+    removed: list[str] = []
+    drop = set(not_produced)
+    seen: set[int] = set()
+    emptied: set[int] = set()
+    for block in suite_def:
+        variables = block.get("variables") if isinstance(block, dict) else None
+        if not isinstance(variables, list) or id(variables) in seen:
+            continue
+        seen.add(id(variables))   # anchors share one list between blocks
+        keep = [v for v in variables
+                if not (isinstance(v, dict) and v.get("id") in drop)]
+        removed += [v["id"] for v in variables
+                    if isinstance(v, dict) and v.get("id") in drop]
+        if variables and not keep:
+            emptied.add(id(variables))
+        variables[:] = keep
+    suite_def = [b for b in suite_def
+                 if not (isinstance(b, dict)
+                         and id(b.get("variables")) in emptied)]
+    return suite_def, sorted(set(removed))
+
+
 def suite_db_path(output_dir: Path, suite: str) -> Path:
     """Canonical per-suite DuckDB path under the run's output directory."""
     return output_dir / f"climateeval_{suite}.ddb"
@@ -159,12 +187,17 @@ def cmor_nc_paths(cmor_dir: Path) -> list[Path]:
     table), load those (back-compat). Otherwise treat it as the ``cmor``
     root and load the monthly MIP tables + fx (see ``_MONTHLY_CMOR_TABLES``);
     ``day``/sub-daily tables are excluded to avoid frequency collisions.
+    A run written with ``--cmip-drs-tree`` keeps the same tables under the
+    ESGF DRS tree ``CMIP6/<activity>/<inst>/<source>/<expt>/<variant>/
+    <table>/<var>/<grid>/<version>/``; those are found too.
     """
     direct = sorted(cmor_dir.glob("*.nc"))
     if direct:
         return direct
     return sorted(
-        p for table in _MONTHLY_CMOR_TABLES for p in (cmor_dir / table).glob("*.nc")
+        p for table in _MONTHLY_CMOR_TABLES
+        for pattern in (f"{table}/*.nc", f"CMIP6/*/*/*/*/*/{table}/*/*/v*/*.nc")
+        for p in cmor_dir.glob(pattern)
     )
 
 
@@ -211,6 +244,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
              "climateeval.data class (e.g. climateeval.data.ERA5Monthly). "
              "Default: keep each variable's suite-declared reference, so the "
              "TOA fluxes score against CERES-EBAF instead of being dropped.")
+    parser.add_argument("--not-produced", nargs="+", default=[], metavar="VAR",
+                        help="Variables the run deliberately does not produce "
+                             "(e.g. tas under surface_bulk_scheme='none'); "
+                             "reported as 'not produced' and left out of "
+                             "scoring instead of failing their suites.")
     parser.add_argument("--fail-on-missing-data", action="store_true", default=False)
     parser.add_argument("--download-missing-data", action="store_true", default=False)
     parser.add_argument("--output-dir", required=True,
@@ -219,6 +257,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--report-name", default=DEFAULT_REPORT_NAME,
                          help="Filename of the combined HTML report written "
                               f"under --output-dir (default: {DEFAULT_REPORT_NAME}).")
+    parser.add_argument("--share", action="store_true", default=False,
+                         help="Publish the HTML report to DKRZ Swift as a public "
+                              "link (needs a valid ~/.swiftenv from `swift-token new`).")
+    parser.add_argument("--share-container", default=None,
+                         help="Swift container for --share (default: climateeval). "
+                              "WARNING: sharing makes the WHOLE container "
+                              "public-read, not just this report.")
+    parser.add_argument("--share-name", default=None,
+                         help="Report prefix on Swift for --share (default: the "
+                              "run folder, i.e. the parent of --cmor-dir, plus a UTC "
+                              "timestamp, e.g. amip_run4_20261023T1530Z).")
     return parser
 
 
@@ -289,6 +338,12 @@ def main(argv: list[str] | None = None) -> int:
                     yaml.safe_load(f), force_reference=args.force_reference
                 )
             suite_def = restrict_suite_def(suite_def, suite, args.diagnostics, args.months)
+            suite_def, gone = drop_not_produced(suite_def, args.not_produced)
+            for var in gone:
+                print(f"NOT PRODUCED: {var} (suite {suite}); not scored")
+            if not suite_def:
+                skipped.append(f"{suite}: every variable not produced")
+                continue
             with tmp_yml.open("w") as f:
                 yaml.dump(suite_def, f)
             Suite(
@@ -319,6 +374,15 @@ def main(argv: list[str] | None = None) -> int:
     serve(db_paths, model_name=args.model_id, save_html=html_path)
     print(f"Report covers {len(db_paths)}/{len(suites)} suites; "
           f"HTML report written to {html_path}")
+    if args.share:
+        # Model id is the same for every run, so default the prefix to the run
+        # folder plus a UTC timestamp (minute precision: two shares within the
+        # same minute still collide).
+        from datetime import datetime, timezone
+        from climateeval._cli import _share_report
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%MZ")
+        _share_report(html_path, args,
+                      default_name=f"{Path(args.cmor_dir).resolve().parent.name}_{stamp}")
     return 0
 
 

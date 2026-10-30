@@ -29,7 +29,7 @@ from __future__ import annotations
 import jax.numpy as jnp
 
 from legoesm.land.carbon.carbon_cycle import step_carbon_differland
-from legoesm.land.multilayer_land import root_zone_beta_soil
+from legoesm.land.multilayer_land import liquid_soil_water, root_zone_beta_soil
 from legoesm.land.stomata_utils import compute_effective_beta
 
 
@@ -99,7 +99,8 @@ def reconstruct_carbon_diagnostics(
     """
     T_sfc_new = new_state.T_soil[:, 0]
     beta_soil_new, _ = root_zone_beta_soil(
-        new_state.theta_soil, root_frac, theta_wp, theta_fc, beta_min,
+        liquid_soil_water(new_state.theta_soil, new_state.T_soil, config),
+        root_frac, theta_wp, theta_fc, beta_min,
         spatial=spatial)
     if gpp_override is None:
         _, gpp_override, _ = compute_effective_beta(

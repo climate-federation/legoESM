@@ -242,6 +242,7 @@ def build_config_from_args(args: argparse.Namespace) -> LMIPRunConfig:
         ),
         hydraulics=SoilHydraulicsConfig(**texture_kwargs),
         thermal=SoilThermalConfig(enable_freeze_thaw=args.freeze_thaw),
+        snow_scheme=args.snow_scheme,
         # Land tables were calibrated with the drainage limiter at 0.5 (#862).
         richards=RichardsConfig(fc_drain_saturation=0.5),
         carbon=CarbonConfig(
@@ -448,6 +449,10 @@ def _save_restart(
         payload["snow_age_bands"] = np.asarray(state.snow_age_bands)
         if state.ice_bands is not None:
             payload["ice_bands"] = np.asarray(state.ice_bands)
+    # Layered snowpack (present iff snow_scheme == "layered").
+    for _f in _SNOW_LAYER_FIELDS:
+        if getattr(state, _f) is not None:
+            payload[_f] = np.asarray(getattr(state, _f))
     if carbon_state is not None:
         for field in carbon_state._fields:
             payload[f"carbon_{field}"] = np.asarray(
@@ -456,6 +461,10 @@ def _save_restart(
     if soil_frozen_fraction is not None:
         payload["soil_frozen_fraction"] = np.asarray(soil_frozen_fraction)
     np.savez_compressed(str(restart_path), **payload)
+
+
+_SNOW_LAYER_FIELDS = ("snow_ice_layers", "snow_liq_layers", "snow_T_layers",
+                      "snow_rho_layers")
 
 
 def _load_restart(restart_path: Path, config: MultiLayerLandConfig):
@@ -495,6 +504,16 @@ def _load_restart(restart_path: Path, config: MultiLayerLandConfig):
         state = state._replace(
             ice_bands=jnp.asarray(data["ice_bands"]) if "ice_bands" in data
             else jnp.zeros((ncol, nb)))
+    _have = [_f for _f in _SNOW_LAYER_FIELDS if _f in data]
+    if config.snow_scheme == "layered" and len(_have) == len(_SNOW_LAYER_FIELDS):
+        state = state._replace(**{_f: jnp.asarray(data[_f])
+                                  for _f in _SNOW_LAYER_FIELDS})
+    elif config.snow_scheme == "layered" or _have:
+        raise ValueError(
+            f"Restart {restart_path} carries snow-layer fields {_have} but the run "
+            f"selects --snow-scheme {config.snow_scheme}: a layered restart needs "
+            "all four and a bulk run cannot drop them. Restart with the scheme "
+            "the checkpoint was written with.")
     start_step = int(data["step"])
     start_day = float(data["day"])
     carbon_state = None
@@ -681,6 +700,9 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--freeze-thaw", action="store_true",
                    help="Enable soil-water freeze/thaw (apparent-heat-capacity "
                         "zero-curtain) in the soil thermal solver.")
+    p.add_argument("--snow-scheme", choices=("bulk", "layered"), default="bulk",
+                   help="Snowpack: bulk (one SWE reservoir) or layered (5-layer "
+                        "pack solved implicitly with the soil column).")
     p.add_argument("--bulk-scheme", default="most",
                    choices=["constant", "most"],
                    help="Bulk flux scheme")
@@ -873,9 +895,43 @@ def main() -> None:
             apply_params_to_config,
             load_params_config,
         )
+        _params = load_params_config(args.params)
         run_config = apply_params_to_config(
-            run_config, load_params_config(args.params), driver="run_lmip")
+            run_config, _params, driver="run_lmip")
     config = run_config.land
+
+    # Run manifest (failed write aborts the run).  Forcing is synthetic, so the
+    # resolved land config + every CLI control define the experiment.
+    from legoesm.driver.restart import (
+        collective_version_drift_gate,
+        dataset_provenance_entry,
+        record_final_state_digest,
+        restart_version_drift,
+        write_run_manifest_on_root,
+    )
+    # Continuing from a restart needs the code that wrote it (its manifest
+    # sits beside it).  Checked BEFORE this run writes its own manifest, which
+    # would otherwise sit beside a restart copied into a fresh directory.
+    if args.restart_from is not None:
+        _restart = Path(args.restart_from)
+        collective_version_drift_gate(
+            lambda: restart_version_drift(_restart, [_restart.parent]),
+            f"restart {_restart}")
+    manifest_path = write_run_manifest_on_root(
+        out_dir,
+        {"runner": "run_lmip", "run_config": run_config._asdict(),
+         "cli_args": vars(args)},
+        config_kind="land",
+        runner_tag="run_lmip",
+        rng_seeds={"master": int(run_config.seed)},
+        params_applied=_params if getattr(args, "params", None) else None,
+        dataset_provenance=[
+            dataset_provenance_entry(pth, dataset_id=did)
+            for did, pth in (("restart_from", args.restart_from),
+                             ("carbon_ic", getattr(args, "carbon_ic", "")))
+            if pth
+        ],
+    )
 
     dt = args.dt
     n_total_steps = int(args.days * _SECS_PER_DAY / dt)
@@ -1218,6 +1274,8 @@ def main() -> None:
     _save_restart(final_restart, start_step + n_total_steps,
                   start_day_abs + args.days, state, carbon_state,
                   soil_frozen_fraction=carbon_phi)
+    if status == "PASS":
+        record_final_state_digest(manifest_path, state, carbon_state)
 
     # --- Summary JSON ---
     wall_time = time.time() - t_wall_start

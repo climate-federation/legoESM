@@ -81,6 +81,14 @@ def make_clubb_build_driver(
     return build_driver
 
 
+def _model_terrain_phis(base_cfg: Any) -> Any:
+    """The terrain the ERA5 reference's ``p_s`` is moved onto (``target_phis`` of
+    the ``era5_to_*_carry`` regrids): the model's OWN terrain product, the surface
+    the compared model columns run on (decision C; vote R1, 2026-10-11)."""
+    from legoesm.driver.model_driver import ModelDriver
+    return ModelDriver(base_cfg).static_topography_phis()
+
+
 def resolve_orographic_phis(orographic_mode: str, phis_provider: Callable[[], Any]) -> Any:
     """Resolve the orographic LES-forcing topography ``phis`` from the
     ``--orographic-forcing`` mode + a deferred ``phis_provider``.
@@ -2760,7 +2768,8 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - heavy I/O
     # Surface a REGIONAL --era5-zarr before the run (it would silently extrapolate a
     # garbage reference where the model grid extends beyond the ERA5 coverage).
     _warn_if_grid_exceeds_era5_lat_coverage(era5_slice.lat, grid.grid_lat)
-    reference = column_state_from_carry(select_era5_regrid(canon)(era5_slice, grid, sigma))
+    reference = column_state_from_carry(select_era5_regrid(canon)(
+        era5_slice, grid, sigma, target_phis=_model_terrain_phis(base_cfg)))
 
     # OCEAN-only ranking mask (iter 451) — computed ONCE here and passed to BOTH the single- and
     # multi-coefficient paths (the multi path previously dropped it silently — iter 466 fix).

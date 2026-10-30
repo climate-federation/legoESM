@@ -65,7 +65,8 @@ def _bundle(**kw) -> CanopyForcingBundle:
 def _resid_norm(x, bundle) -> float:
     return float(jnp.linalg.norm(_canopy_residual(
         x, bundle, _CFG.LE_module, _CFG.stomatal_model,
-        _CFG.le_cap_mode, _CFG.use_ta_for_photosynthesis)))
+        _CFG.le_cap_mode, _CFG.use_ta_for_photosynthesis,
+        _CFG.rh_cap_smoothing_width, _CFG.zeta_cap_smoothing_width, _CFG.most_n_iters)))
 
 
 # ---------------------------------------------------------------------------
@@ -101,7 +102,8 @@ def test_warm_start_reaches_the_same_fixed_point(seed):
         x_seed[jnp.array([0, 1, 4])] - x_cold[jnp.array([0, 1, 4])]))) < 0.5  # K
     assert float(jnp.abs(x_seed[5] - x_cold[5])) < 1e-3                       # kg/kg
     fl = lambda x: canopy_forward(x, b, _CFG.LE_module, _CFG.stomatal_model,
-                                  _CFG.le_cap_mode, _CFG.use_ta_for_photosynthesis)
+                                  _CFG.le_cap_mode, _CFG.use_ta_for_photosynthesis,
+                                  _CFG.rh_cap_smoothing_width, _CFG.zeta_cap_smoothing_width, _CFG.most_n_iters)
     f_cold, f_seed = fl(x_cold), fl(x_seed)
     for k in ("LE_Sun", "H_Sun", "G"):
         assert float(jnp.abs(f_seed[k] - f_cold[k])) < 1.0                    # W/m2

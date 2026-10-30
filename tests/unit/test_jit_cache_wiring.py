@@ -21,6 +21,8 @@ def test_enable_persistent_compile_cache_sets_dir(tmp_path, monkeypatch):
     """Calling the wrapper sets jax_compilation_cache_dir from the env."""
     target = tmp_path / "jit_cache"
     monkeypatch.setenv("LEGOESM_JIT_CACHE_DIR", str(target))
+    # This test runs on CPU, where the cache is opt-in (the CPU gate below).
+    monkeypatch.setenv(bk.CPU_COMPILE_CACHE_OPT_IN_ENV, "1")
 
     prev_dir = jax.config.jax_compilation_cache_dir
     prev_done = getattr(bk._configure_persistent_jit_cache, "_done", False)
@@ -36,6 +38,30 @@ def test_enable_persistent_compile_cache_sets_dir(tmp_path, monkeypatch):
         bk._configure_persistent_jit_cache._done = prev_done
         if prev_dir is not None:
             jax.config.update("jax_compilation_cache_dir", prev_dir)
+
+
+@pytest.mark.parametrize("backend, enabled", [("cpu", False), ("gpu", True)])
+def test_cpu_backend_cache_is_opt_in(tmp_path, monkeypatch, backend, enabled):
+    """The persistent cache key is not CPU-microarch-specific: on the CPU
+    backend the cache stays OFF unless LEGOESM_ALLOW_CPU_COMPILE_CACHE=1 (a
+    coupled test segfaulted on a cross-node AOT load and passed with the
+    cache off); a GPU backend is unaffected."""
+    target = tmp_path / "jit_cache"
+    monkeypatch.setenv("LEGOESM_JIT_CACHE_DIR", str(target))
+    monkeypatch.delenv(bk.CPU_COMPILE_CACHE_OPT_IN_ENV, raising=False)
+    prev_dir = jax.config.jax_compilation_cache_dir
+    prev_secs = jax.config.jax_persistent_cache_min_compile_time_secs
+    prev_done = getattr(bk._configure_persistent_jit_cache, "_done", False)
+    try:
+        bk._configure_persistent_jit_cache._done = False
+        bk._configure_persistent_jit_cache(backend)
+        assert (jax.config.jax_compilation_cache_dir == str(target)) is enabled
+        assert target.is_dir() is enabled
+    finally:
+        # restore exactly (None included): no cache dir leaks to later tests
+        bk._configure_persistent_jit_cache._done = prev_done
+        jax.config.update("jax_compilation_cache_dir", prev_dir)
+        jax.config.update("jax_persistent_cache_min_compile_time_secs", prev_secs)
 
 
 def test_disable_via_empty_env(monkeypatch):

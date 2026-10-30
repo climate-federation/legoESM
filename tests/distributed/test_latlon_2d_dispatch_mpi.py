@@ -125,7 +125,7 @@ def test_lat_only_wall_pad_grad_parity():
     def loss(x):
         local_loss = jnp.sum(pad_with_pole_bc_lat_2d(
             x, L, halo=h, south_value=SV, north_value=NV) ** 2)
-        return global_sum_mpi(local_loss, comm)
+        return global_sum_mpi(local_loss, comm, final_loss=True)
 
     grad_local = np.asarray(jax.grad(loss)(local))
     assert np.all(np.isfinite(grad_local)), \

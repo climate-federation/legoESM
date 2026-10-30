@@ -86,10 +86,11 @@ def capture_physics_teacher_snapshot(
 ) -> PhysicsTeacherDataset:
     """Capture one joint teacher snapshot from a running ModelDriver."""
     ad = driver.physics.adapter
-    T = driver.state.T.data
-    u = driver.state.u.data
-    v = driver.state.v.data
-    p_s = driver.state.p_s.data
+    st = driver.cell_centre_state()
+    T = st.T.data
+    u = st.u.data
+    v = st.v.data
+    p_s = st.p_s.data
     q_v = driver.q_v
     q_c = driver.q_c
     q_r = driver.q_r
@@ -204,7 +205,8 @@ def capture_physics_teacher_snapshot(
                 dt=dt,
                 config=micro_config,
             )
-            generated_rain_flux = jnp.sum(rates.autoconversion * rho_col * dz_col, axis=1)
+            layer_mass = (p_half_col[:, 1:] - p_half_col[:, :-1]) / constants.g
+            generated_rain_flux = jnp.sum(rates.autoconversion * layer_mass, axis=1)
             rain_survival_fraction = _copy_array(
                 jnp.where(
                     generated_rain_flux > 1.0e-12,

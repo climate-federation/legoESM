@@ -20,6 +20,17 @@ from scripts.run.run_coupled import build_parser
 REPO = Path(__file__).resolve().parents[2]
 DRIVER = REPO / "scripts" / "run" / "run_coupled.py"
 
+# JAX logs its own CUDA-plugin discovery failure WITH a traceback on a node
+# without a GPU, even under JAX_PLATFORMS=cpu.  That record is not the
+# driver's; drop it before asserting the driver raised no traceback.
+_JAX_PLUGIN_NOISE = re.compile(
+    r"[^\n]*Jax plugin configuration error[^\n]*\n"
+    r"Traceback \(most recent call last\):\n(?:[ \t][^\n]*\n)*[^\n]*\n?")
+
+
+def _driver_output(result) -> str:
+    return _JAX_PLUGIN_NOISE.sub("", result.stdout + result.stderr)
+
 
 @pytest.mark.parametrize("grid", ["cubed_sphere", "latlon", "voronoi", "gaussian"])
 def test_grid_choice_accepted(grid):
@@ -40,7 +51,7 @@ def test_gaussian_dynamic_ocean_requires_distinct_ocean_grid():
          "--grid", "gaussian", "--ocean", "dynamic", "--resolution", "8",
          "--days", "1"],
         env=env, capture_output=True, text=True, timeout=180)
-    combined = result.stdout + result.stderr
+    combined = _driver_output(result)
     assert result.returncode != 0, "gaussian+dynamic without --ocean-grid must exit"
     assert "gaussian" in combined and "--ocean-grid latlon" in combined, \
         f"missing the distinct-ocean-grid message.\n{combined[-600:]}"
@@ -71,9 +82,10 @@ def test_gaussian_slab_coupled_runs(tmp_path):
     result = subprocess.run(
         [sys.executable, str(DRIVER), "--grid", "gaussian", "--ocean", "slab",
          "--resolution", "16", "--days", "1", "--radiation", "gray",
+         "--no-energy-fixer",   # not wired on the spectral lane (F15)
          "--output", str(tmp_path / "coupled_gauss")],
         env=env, capture_output=True, text=True, timeout=600)
-    combined = result.stdout + result.stderr
+    combined = _driver_output(result)
     assert result.returncode == 0 and "COMPLETED" in combined, \
         f"coupled gaussian slab run did not complete.\n{combined[-1200:]}"
     assert "Traceback" not in combined and "nan" not in result.stdout.lower(), \

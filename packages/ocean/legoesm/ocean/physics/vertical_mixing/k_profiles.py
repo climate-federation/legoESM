@@ -38,6 +38,7 @@ from legoesm.ocean.vertical import (
 )
 from legoesm.ocean.physics.convection.config import OceanConvectionConfig
 from legoesm.ocean.physics.vertical_mixing._shared import (
+    eos_salinity,
     surface_buoyancy_flux,
     compute_N2,
     latitude_background_diffusivity,
@@ -676,6 +677,21 @@ def _surface_buoyancy_flux(surface_forcing, state, constants_config,
     )
 
 
+class _EPBLGridShim:
+    """Minimal grid object exposing ``grid_lat`` for the ePBL closure.
+
+    ``_vmix_K_profiles`` carries the latitude as ``lat_deg`` while the
+    vertical-mixing factories read ``grid.grid_lat`` in RADIANS, so this
+    adapts between the two. ``None`` means no latitude was supplied; the
+    ePBL closure then raises rather than assuming f = 0.
+    """
+
+    __slots__ = ("grid_lat",)
+
+    def __init__(self, lat_deg):
+        self.grid_lat = None if lat_deg is None else jnp.deg2rad(lat_deg)
+
+
 def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
                      constants_config=ConstantsConfig(), eos_fn=None,
                      *, tke_old=None, dt_tke=None, tke_source=None,
@@ -742,7 +758,13 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
         A_v = jnp.full(shape, cfg.A_v, dtype=dtype)
         return K_v, A_v, None
 
-    rho = _compute_rho(state, z_coord, J, eos_fn=eos_fn,
+    # KPP: sqrt(S) EOSes have an infinite dRho/dS at S = 0 (land / fill
+    # cells), so its density sees the floored salinity, as ePBL's does and
+    # as the explicit KPP factory's does; Wright as is (#2243).
+    rho_state = (state._replace(
+        S=state.S.replace(data=eos_salinity(state.S.data, eos_fn)))
+        if scheme == "kpp" else state)
+    rho = _compute_rho(rho_state, z_coord, J, eos_fn=eos_fn,
                        g=constants_config.g,
                        rho0=constants_config.rho_0)
 
@@ -1316,6 +1338,22 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
             apply_diffusion=False, eos_fn=eos_fn, ice_frac=_kpp_ice_fr,
         )
         return out.K_v, out.A_v, None
+
+    if scheme == "epbl":
+        # ePBL reuses the explicit factory's physics_fn: that closure already
+        # assembles the specific-volume derivatives, the surface buoyancy
+        # flux and the top-layer TKE forcing, so routing through it keeps the
+        # implicit and explicit paths from drifting apart (there is exactly
+        # one place where ePBL's inputs are built).
+        from legoesm.ocean.physics.vertical_mixing.integration import (
+            make_vertical_mixing_physics,
+        )
+        grid = _EPBLGridShim(lat_deg)
+        fn = make_vertical_mixing_physics(
+            vmix_cfg, apply_diffusion=False, constants_config=constants_config,
+            eos_fn=eos_fn)
+        tend = fn(state, grid, z_coord, surface_forcing)
+        return tend.K_v, tend.A_v, None
 
     if scheme == "none":
         # No background closure here (handled by the caller); zero K_v/A_v.

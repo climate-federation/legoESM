@@ -2,6 +2,7 @@
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 import pytest
 
 from legoesm import constants
@@ -209,25 +210,24 @@ class TestMoistureCorrectionDiagnostic:
 
 
 class TestEnergyConsistentMoistureFloor:
-    """Issue #323: the opt-in ``energy_consistent_moisture_floor`` must floor
-    ``q_v`` at zero WITHOUT injecting spurious latent heat — the failure mode
-    behind the kessler+sbm wind blow-up.
+    """Issue #323: the opt-in ``energy_consistent_moisture_floor`` floors
+    ``q_v`` at zero by the column-conserving borrow AND keeps
+    ``c_pd*T + L_v*q_v`` unchanged in every cell, so it neither injects the
+    phantom condensation heat behind the kessler+sbm wind blow-up nor
+    creates water.
 
     Setup mirrors one physics tracer step under organised convection: a
-    strong vapour sink ``dq_v_dt`` plus the condensation latent heating that
-    *exactly* matches it (``dT_dt = -(L_v/c_pd) dq_v_dt``), so the raw
-    (pre-floor) update conserves moist static energy ``c_pd*T + L_v*q_v`` by
-    construction.  Any post-floor change in MSE is therefore the spurious
-    injection introduced by the floor itself.
+    strong vapour sink plus the condensation heating that exactly matches
+    it, so the raw (pre-floor) update conserves moist static energy by
+    construction; any post-floor change is the floor's own.
     """
 
     L_v = constants.L_v
     c_pd = constants.c_pd
     dt = 150.0
+    w = jnp.array([0.1, 0.2, 0.3, 0.4])
 
-    def _firing_case(self):
-        """A column where the sink drives q_v < 0 (the clip fires)."""
-        q_v = jnp.array([0.012, 0.003, 8.0e-4, 5.0e-3])
+    def _case(self, q_v):
         dq_v_dt = jnp.array([-2.0e-4, -5.0e-5, -3.0e-5, -1.0e-5])  # strong drying
         dT_dt = -(self.L_v / self.c_pd) * dq_v_dt                  # condensation warming
         T = jnp.array([295.0, 290.0, 288.0, 292.0])
@@ -236,12 +236,23 @@ class TestEnergyConsistentMoistureFloor:
         mse_pre = self.c_pd * T + self.L_v * q_v
         return q_v_raw, T_upd, mse_pre
 
+    def _firing_case(self):
+        """Net-POSITIVE column where the sink drives one cell negative."""
+        return self._case(jnp.array([0.012, 0.010, 0.012, 0.015]))
+
+    def _net_negative_case(self):
+        """Column whose weighted total goes negative: nothing to borrow."""
+        return self._case(jnp.array([0.0005, 0.003, 8.0e-4, 5.0e-4]))
+
     def test_clip_actually_fires(self):
         q_v_raw, _, _ = self._firing_case()
         assert bool((q_v_raw < 0).any()), "test case must drive q_v negative"
+        assert float(jnp.sum(q_v_raw * self.w)) > 0.0
+        q_v_raw, _, _ = self._net_negative_case()
+        assert float(jnp.sum(q_v_raw * self.w)) < 0.0
 
     def test_naive_floor_injects_energy(self):
-        """Baseline (flag OFF): plain max(q_v, 0) gains energy = L_v * deficit."""
+        """Baseline: plain max(q_v, 0) gains energy = L_v * deficit."""
         q_v_raw, T_upd, mse_pre = self._firing_case()
         q_v_naive = jnp.maximum(q_v_raw, 0.0)
         mse_naive = self.c_pd * T_upd + self.L_v * q_v_naive
@@ -250,38 +261,50 @@ class TestEnergyConsistentMoistureFloor:
         assert injected > 0.0
         assert injected == pytest.approx(self.L_v * deficit, rel=1e-10)
 
-    def test_energy_consistent_floor_is_mse_neutral(self):
-        """Flag ON: the floor conserves moist static energy to roundoff."""
-        q_v_raw, T_upd, mse_pre = self._firing_case()
-        q_v_out, T_out = energy_consistent_moisture_floor(q_v_raw, T_upd)
+    @pytest.mark.parametrize("case", ["_firing_case", "_net_negative_case"])
+    def test_mse_neutral_per_cell(self, case):
+        """c_pd*T + L_v*q_v unchanged in EVERY cell, net-negative column too."""
+        q_v_raw, T_upd, mse_pre = getattr(self, case)()
+        q_v_out, T_out = energy_consistent_moisture_floor(q_v_raw, T_upd, self.w)
         mse_post = self.c_pd * T_out + self.L_v * q_v_out
-        assert float(jnp.sum(mse_post - mse_pre)) == pytest.approx(0.0, abs=1e-6)
+        np.testing.assert_allclose(mse_post, mse_pre, rtol=1e-12)
 
-    def test_positivity_enforced(self):
+    def test_column_water_conserved(self):
+        """Net-positive column: sum(w*q_v) unchanged (a plain max would add
+        the deficit)."""
         q_v_raw, T_upd, _ = self._firing_case()
-        q_v_out, _ = energy_consistent_moisture_floor(q_v_raw, T_upd)
+        q_v_out, _ = energy_consistent_moisture_floor(q_v_raw, T_upd, self.w)
+        assert float(jnp.sum(q_v_out * self.w)) == pytest.approx(
+            float(jnp.sum(q_v_raw * self.w)), rel=1e-12)
+
+    def test_net_negative_column_is_zeroed(self):
+        """Documented exception: nothing to borrow, the column is zeroed
+        (the borrow's minimum-creation choice) and cooled for it."""
+        q_v_raw, T_upd, _ = self._net_negative_case()
+        q_v_out, T_out = energy_consistent_moisture_floor(q_v_raw, T_upd, self.w)
+        assert bool((q_v_out == 0.0).all())
+        assert float(jnp.sum((T_out - T_upd) * self.w)) < 0.0
+
+    @pytest.mark.parametrize("case", ["_firing_case", "_net_negative_case"])
+    def test_positivity_enforced(self, case):
+        q_v_raw, T_upd, _ = getattr(self, case)()
+        q_v_out, _ = energy_consistent_moisture_floor(q_v_raw, T_upd, self.w)
         assert bool((q_v_out >= 0.0).all())
-
-    def test_q_v_matches_plain_floor(self):
-        """q_v output is exactly max(q_v_raw, 0) — only T differs from naive."""
-        q_v_raw, T_upd, _ = self._firing_case()
-        q_v_out, _ = energy_consistent_moisture_floor(q_v_raw, T_upd)
-        assert bool((q_v_out == jnp.maximum(q_v_raw, 0.0)).all())
 
     def test_no_op_when_already_nonnegative(self):
         """When the sink does not exhaust the vapour, the floor is a bitwise
-        no-op (so the flag is bit-identical to the legacy path on every cell
-        that does not clip)."""
+        no-op."""
         q_v_raw = jnp.array([0.012, 0.003, 1.0e-5, 0.0])  # all >= 0
         T_upd = jnp.array([295.0, 290.0, 288.0, 292.0])
-        q_v_out, T_out = energy_consistent_moisture_floor(q_v_raw, T_upd)
+        q_v_out, T_out = energy_consistent_moisture_floor(q_v_raw, T_upd, self.w)
         assert bool((q_v_out == q_v_raw).all())
         assert bool((T_out == T_upd).all())
 
     def test_differentiable_finite(self):
-        """jax.grad through the floor stays finite at the q_v_raw = 0 kink."""
+        """jax.grad through the floor stays finite."""
         def loss(q_v_raw, T_upd):
-            q_v_out, T_out = energy_consistent_moisture_floor(q_v_raw, T_upd)
+            q_v_out, T_out = energy_consistent_moisture_floor(
+                q_v_raw, T_upd, self.w)
             return jnp.sum(q_v_out ** 2) + jnp.sum(T_out ** 2)
         q_v_raw, T_upd, _ = self._firing_case()
         g_q, g_T = jax.grad(loss, argnums=(0, 1))(q_v_raw, T_upd)

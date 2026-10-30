@@ -71,6 +71,14 @@ _OCEAN_ALB_MU_EXP = 1.7
 _OCEAN_ALB_POLY = 0.15
 _OCEAN_ALB_ROOT1 = 0.1
 _ICE_ALBEDO_FALLBACK = 0.75
+# --- CESM2.1 coupler open-ocean albedo (cime5.6.47 drivers/mct/main/
+# seq_flux_mct.F90 L881-894; same Briegleb coefficients as above) ---
+# Diffuse albedo, both bands: namelist seq_flux_mct_albdif, default 0.06
+# (namelist_definition_drv.xml).  Public: the MPAS driver builds the daily
+# diffuse surface-albedo blend with it.
+OCEAN_ALBEDO_DIFFUSE_CESM = 0.06
+# Direct albedo CESM assigns when cos(zenith) <= 0 ("dark side of earth").
+_OCEAN_ALB_DARK_CESM = 1.0
 
 # --- prescribed (ERA5) radiative surface boundary condition ---------------
 # Minimum downwelling SW for trusting ERA5's implied surface albedo: below
@@ -380,6 +388,45 @@ def sam_ocean_albedo(
     return jnp.where(jnp.asarray(cos_zenith) > 0.0, a, 0.0)
 
 
+def cesm_ocean_albedo_direct(cos_zenith: jnp.ndarray) -> jnp.ndarray:
+    """CESM2.1 open-ocean DIRECT-beam albedo at the instantaneous cos(zenith).
+
+    Port of cime5.6.47 ``seq_flux_mct.F90`` L881-894 (``anidr = avsdr``)::
+
+        cosz > 0 : 0.026/(cosz**1.7 + 0.065)
+                   + 0.150*(cosz - 0.100)*(cosz - 0.500)*(cosz - 1.000)
+        else     : 1.0   (dark side of earth)
+
+    No clip (the [0.03, 0.40] clip and the 0.01 cosine floor of
+    ``surface_albedo.ocean_albedo`` are not in CESM).  The diffuse albedo is
+    the constant :data:`OCEAN_ALBEDO_DIFFUSE_CESM`.  The power is evaluated on
+    a where-substituted cosine so the night branch never forms ``(<=0)**1.7``;
+    values are unchanged and the gradient stays finite.
+    """
+    cos_zenith = jnp.asarray(cos_zenith)
+    sun = cos_zenith > 0.0
+    mu = jnp.where(sun, cos_zenith, 1.0)
+    a = (
+        _OCEAN_ALB_A / (mu ** _OCEAN_ALB_MU_EXP + _OCEAN_ALB_B)
+        + _OCEAN_ALB_POLY * (mu - _OCEAN_ALB_ROOT1) * (mu - 0.5) * (mu - 1.0)
+    )
+    return jnp.where(sun, a, _OCEAN_ALB_DARK_CESM)
+
+
+def cesm_direct_surface_albedo(sfc_albedo_diffuse, open_ocean_frac, cos_zenith):
+    """Direct-beam surface albedo from the diffuse tile blend (CESM2.1 split).
+
+    ``sfc_albedo_diffuse`` is a blend whose open-ocean term is
+    :data:`OCEAN_ALBEDO_DIFFUSE_CESM`; the blend is linear in the open-ocean
+    area fraction, so swapping that term for :func:`cesm_ocean_albedo_direct`
+    at ``cos_zenith`` (the radiation call's own cosine) is exact.  Land and
+    ice keep one albedo for both beams.  Shared by the MPAS/hydrostatic
+    backend and the FV physics pipeline.
+    """
+    return sfc_albedo_diffuse + open_ocean_frac * (
+        cesm_ocean_albedo_direct(cos_zenith) - OCEAN_ALBEDO_DIFFUSE_CESM)
+
+
 def _compute_ozone_vmr(
     p_full: jnp.ndarray,
     lat: jnp.ndarray,
@@ -388,6 +435,7 @@ def _compute_ozone_vmr(
     T: jnp.ndarray | None = None,
     lon: jnp.ndarray | None = None,
     ml_ozone_coefs=None,
+    p_half: jnp.ndarray | None = None,
 ) -> jnp.ndarray | None:
     """Compute ozone VMR for RRTMGP.
 
@@ -404,6 +452,9 @@ def _compute_ozone_vmr(
         Longitude (ncol,) [rad].  Required for ``source="ml"``.
     ml_ozone_coefs : MLOzoneCoefficients, optional
         Pre-loaded ridge weights.  Required for ``source="ml"``.
+    p_half : jnp.ndarray, optional
+        Interface pressure (ncol, nlev+1) [Pa].  Required for ``source="mls"``
+        (gSAM layer means are defined by the layer interfaces).
 
     Returns
     -------
@@ -417,13 +468,15 @@ def _compute_ozone_vmr(
         return jnp.full_like(p_full, 1.0e-10)
 
     if ozone_config.source == "mls":
-        # SAM RCEMIP ozone: the MLS standard profile read from gSAM's
-        # rrtmg_lw.nc, interpolated (log-log) to the model levels. Faithful
-        # to the oracle vs the built-in skewed-Gaussian _standard_o3_profile.
+        # SAM RCEMIP ozone: gSAM tracesini layer means of the MLS sounding in
+        # rrtmg_lw.nc over the model layers (needs the interfaces).
+        if p_half is None:
+            raise ValueError(
+                "ozone source 'mls' is gSAM's layer mean and needs p_half")
         from legoesm.atmosphere.physics.radiation.ozone_mls import (
-            mls_ozone_vmr,
+            mls_ozone_layer_vmr,
         )
-        return mls_ozone_vmr(p_full)
+        return mls_ozone_layer_vmr(p_half)[0]
 
     if ozone_config.source == "analytical":
         p_hPa = p_full / 100.0
@@ -752,6 +805,29 @@ def _simple_lw_radiation(*, T, p_half, q_v, q_cloud, q_ice, config):
     )
 
 
+def _column_constraint(column_mesh, ncol: int):
+    """Sharding constraint for arrays whose leading axis is the ``ncol`` columns.
+
+    Every other leaf (scalars, per-band tables, None) passes through unchanged.
+    """
+    from jax.sharding import NamedSharding, PartitionSpec as P
+
+    n_dev = column_mesh.shape["col"]
+    if ncol % n_dev:
+        raise ValueError(
+            f"column_mesh: solver column count {ncol} is not divisible by "
+            f"{n_dev} devices")
+
+    def cons(x):
+        if getattr(x, "ndim", 0) >= 1 and x.shape[0] == ncol:
+            spec = P("col", *((None,) * (x.ndim - 1)))
+            return jax.lax.with_sharding_constraint(
+                x, NamedSharding(column_mesh, spec))
+        return x
+
+    return cons
+
+
 def _call_radiation_backend(
     radiation_config: RadiationConfig,
     T: jnp.ndarray,
@@ -764,24 +840,33 @@ def _call_radiation_backend(
     cos_sza: jnp.ndarray | None = None,
     sfc_albedo_override: jnp.ndarray | float | None = None,
     sfc_emissivity_override: jnp.ndarray | float | None = None,
+    open_ocean_frac: jnp.ndarray | None = None,
     q_cloud: jnp.ndarray | None = None,
     q_ice: jnp.ndarray | None = None,
     n_ice: jnp.ndarray | None = None,
     n_cloud: jnp.ndarray | None = None,
+    n_cloud_in_cloud: bool = False,
     ghg_vmr_override: dict | None = None,
     f_day: jnp.ndarray | None = None,
     rrtmgp_solver=None,
     lon: jnp.ndarray | None = None,
     ml_ozone_coefs=None,
     o3_vmr_override: jnp.ndarray | None = None,
+    o3_top_vmr: jnp.ndarray | None = None,
     aerosol_od: jnp.ndarray | None = None,
     aerosol_lw_od: jnp.ndarray | None = None,
     solar_spectral_fraction: jnp.ndarray | None = None,
     eccf: float | jnp.ndarray = 1.0,
+    tsi: jnp.ndarray | None = None,
     cloud_fraction_override: jnp.ndarray | None = None,
     conv_precip: jnp.ndarray | None = None,
     conv_mass_flux_up: jnp.ndarray | None = None,
     conv_icwmr: jnp.ndarray | None = None,
+    clear_sky_toa: bool = False,
+    column_mesh=None,
+    clubb_config=None,
+    mg2_ice_dcs_m: float | None = None,
+    mg2_ice_slope_log_width: float | None = None,
 ):
     """Call configured radiation backend with a unified integration interface.
 
@@ -790,10 +875,20 @@ def _call_radiation_backend(
     cos_sza : jnp.ndarray or None
         If provided (diurnal cycle), used directly as RRTMGP cos(zenith).
         Otherwise derived from ``insolation / S_0``.
+    open_ocean_frac : jnp.ndarray or None
+        Open-ocean (ice- and land-free) area fraction per column.  When given,
+        ``sfc_albedo_override`` is the DIFFUSE albedo blend (open ocean at
+        :data:`OCEAN_ALBEDO_DIFFUSE_CESM`) and the solver's DIRECT-beam albedo
+        replaces that ocean part with :func:`cesm_ocean_albedo_direct` at this
+        call's ``cos_sza`` (CESM2.1 seq_flux_mct: direct albedo at the
+        radiation time's cosine, diffuse 0.06).  RRTMGP only.
     q_cloud : jnp.ndarray or None
         Cloud liquid water mixing ratio (ncol, nlev) [kg/kg].
     q_ice : jnp.ndarray or None
         Cloud ice mixing ratio (ncol, nlev) [kg/kg].
+    n_cloud_in_cloud : bool
+        ``n_cloud`` is an in-cloud (aerosol/CCN) droplet number, not the
+        grid-mean tracer; see ``compute_cloud_properties``.
     ghg_vmr_override : dict or None
         Runtime GHG VMR overrides passed to RRTMGP (e.g. transient CO2).
     f_day : jnp.ndarray or None
@@ -808,6 +903,11 @@ def _call_radiation_backend(
         takes precedence over the config-driven ``_compute_ozone_vmr``
         (standard / analytical / ML profiles), matching the precedence
         the coupled ``physics_pipeline`` path applies.
+    o3_top_vmr : jnp.ndarray or None
+        Column-mean ozone VMR above the model top (ncol,) for the RRTMGP
+        overhead layer (``RRTMGPConfig.overhead_layer``); used only together
+        with ``o3_vmr_override`` (same source).  ``None`` => the layer takes
+        the top model layer's ozone.
     aerosol_od : jnp.ndarray or None
         Per-layer aerosol optical depth (ncol, nlev) from the external
         forcing pipeline (Kinne climatology + volcanic), passed to the
@@ -823,7 +923,19 @@ def _call_radiation_backend(
     solar_spectral_fraction : jnp.ndarray or None
         Per-g-point solar weights for spectral solar-cycle forcing,
         passed through to ``solve_columns``.
+    clear_sky_toa : bool
+        RRTMGP only: also return the clear-sky TOA upward fluxes from the
+        same solve (``RadiationOutput.*_flux_up_toa_clr``).
     """
+    if clear_sky_toa and radiation_config.scheme in ("simple_lw", "gray"):
+        raise ValueError(
+            f"clear_sky_toa is an RRTMGP option; scheme "
+            f"{radiation_config.scheme!r} has no clear-sky solve")
+    if open_ocean_frac is not None and radiation_config.scheme != "rrtmgp":
+        raise ValueError(
+            "open_ocean_frac (direct/diffuse ocean albedo split) is wired for "
+            f"the rrtmgp solver only; scheme {radiation_config.scheme!r} has a "
+            "single surface albedo and would silently drop the direct beam.")
     if radiation_config.scheme == "simple_lw":
         return _simple_lw_radiation(
             T=T, p_half=p_half, q_v=q_v, q_cloud=q_cloud, q_ice=q_ice,
@@ -857,8 +969,12 @@ def _call_radiation_backend(
     # orbit flag so the circular-orbit path is bit-for-bit unchanged.
     _orbit_on = getattr(radiation_config, "orbit", None) is not None
     _sw_scale = None
+    # Transient TSI: the caller's ``insolation`` is already scaled by
+    # tsi/S_0, but the solver runs at its configured S_0.  So derive the
+    # optical-path cosine with ``tsi`` (stays geometric) and put tsi/S_0 on
+    # the SW flux below.  ``None`` -> byte-identical to the static-S_0 path.
     if cos_sza is None:
-        S_0 = radiation_config.rrtmgp.S_0
+        S_0 = radiation_config.rrtmgp.S_0 if tsi is None else tsi
         if f_day is not None:
             # Use daytime-effective cos(SZA): insol = (a/r)^2·S_0·f_day·<cos>_day
             # so <cos>_day = insol / (eccf·S_0·f_day).  The solver sees the
@@ -882,6 +998,21 @@ def _call_radiation_backend(
         # Diurnal path: cos_sza is already geometric; apply the distance factor
         # to the SW flux (the solver runs with S_0, not S_0·eccf).
         _sw_scale = jnp.full((cos_sza.shape[0],), eccf, dtype=cos_sza.dtype)
+    if tsi is not None:
+        _tsi_ratio = jnp.broadcast_to(
+            tsi / radiation_config.rrtmgp.S_0, (cos_sza.shape[0],)
+        ).astype(cos_sza.dtype)
+        _sw_scale = _tsi_ratio if _sw_scale is None else _sw_scale * _tsi_ratio
+    # CESM2.1 ocean albedo split: the direct beam sees the open-ocean albedo
+    # at THIS call's cosine (the one the solver uses), the diffuse beam keeps
+    # the caller's blend (open ocean at OCEAN_ALBEDO_DIFFUSE_CESM).  The blend
+    # is linear in the open-ocean fraction, so swapping its ocean term is exact.
+    sfc_albedo_direct = None
+    if open_ocean_frac is not None:
+        _alb_dif = (sfc_albedo_override if sfc_albedo_override is not None
+                    else radiation_config.rrtmgp.sfc_albedo)
+        sfc_albedo_direct = cesm_direct_surface_albedo(
+            _alb_dif, open_ocean_frac, cos_sza)
     q_v_safe = q_v if q_v is not None else jnp.zeros_like(T)
 
     # Compute ozone VMR based on config — unless the caller supplied a
@@ -891,7 +1022,7 @@ def _call_radiation_backend(
     else:
         o3_vmr = _compute_ozone_vmr(
             p_full, lat, radiation_config.ozone,
-            T=T, lon=lon, ml_ozone_coefs=ml_ozone_coefs,
+            T=T, lon=lon, ml_ozone_coefs=ml_ozone_coefs, p_half=p_half,
         )
 
     # Compute cloud properties if cloud scheme is active.
@@ -919,12 +1050,16 @@ def _call_radiation_backend(
             q_ice=q_ice,
             n_ice=n_ice,
             n_cloud=n_cloud,
+            n_cloud_in_cloud=n_cloud_in_cloud,
             conv_precip=conv_precip,
             cloud_fraction_override=cloud_fraction_override,
             lat=lat,
             conv_mass_flux_up=conv_mass_flux_up,
             conv_icwmr=conv_icwmr,
             p_half=p_half,
+            clubb_config=clubb_config,
+            mg2_ice_dcs_m=mg2_ice_dcs_m,
+            mg2_ice_slope_log_width=mg2_ice_slope_log_width,
         )
         if cloud_config.cap_floor_on:
             from legoesm.atmosphere.physics.clouds.cloud_fraction import apply_cap_cloud_floor
@@ -951,6 +1086,7 @@ def _call_radiation_backend(
         q_v=q_v_safe,
         cos_zenith=cos_sza,
         sfc_albedo=sfc_albedo_override,
+        sfc_albedo_direct=sfc_albedo_direct,
         sfc_emissivity=sfc_emissivity_override,
         o3_vmr=o3_vmr,
         ghg_vmr_override=ghg_vmr_override,
@@ -959,6 +1095,13 @@ def _call_radiation_backend(
         solar_spectral_fraction=solar_spectral_fraction,
         **cloud_kwargs,
     )
+    if cloud_config is not None:
+        # One bulk ice density for the PSD radius and the optics size (CAM6).
+        _rad_kwargs["cloud_rho_ice"] = cloud_config.rho_cloud_ice
+    if clear_sky_toa:
+        _rad_kwargs["clear_sky"] = True
+    if o3_top_vmr is not None and o3_vmr_override is not None:
+        _rad_kwargs["o3_top_vmr"] = o3_top_vmr
     # Maximum-random-overlap SUBCOLUMNS (opt-in).  The default path hands
     # every layer's GRID-MEAN water path to ONE homogeneous column, so cloud
     # spread thinly over many partly cloudy layers is solved as one deep
@@ -979,7 +1122,12 @@ def _call_radiation_backend(
         _n_sub = int(getattr(cloud_config, "cloud_n_subcolumns",
                              _sub.N_SUBCOLUMNS_DEFAULT))
         _ncol = T.shape[0]
-        _mask = _sub.generate_subcolumns(cloud_props.cloud_fraction, _n_sub)
+        # CAM draws different uniforms in every column; the per-column shift
+        # (seeded from the bottom pressure, as for mcica) does the same, so a
+        # layer with cf < 1/n_sub is cloudy in some columns instead of never.
+        _mask = _sub.generate_subcolumns(
+            cloud_props.cloud_fraction, _n_sub, shift=_sub.cam_seed_shift(p_full),
+            width=float(cloud_config.cloud_subcolumn_mask_width))
         _lwp, _iwp = _sub.subcolumn_paths(
             _mask, cloud_props.cloud_fraction, cloud_props.lwp, cloud_props.iwp)
         _rad_kwargs = _sub.expand_kwargs(_rad_kwargs, _n_sub, _ncol)
@@ -994,6 +1142,7 @@ def _call_radiation_backend(
          _rad_kwargs["cloud_path_ice"]) = _sub.in_cloud_paths(
             cloud_props.cloud_fraction, cloud_props.lwp, cloud_props.iwp)
         _rad_kwargs["mcica_cloud_fraction"] = cloud_props.cloud_fraction
+        _rad_kwargs["mcica_mask_width"] = float(cloud_config.cloud_subcolumn_mask_width)
     elif _ov != "none":
         # Dispatch hardening: a typo must never silently run the legacy
         # single-column path (validated on the static config value).
@@ -1007,12 +1156,29 @@ def _call_radiation_backend(
     # super-linear rrtmgp XLA compile time at higher horizontal resolution.
     # Columns are physically independent, so this is numerically EXACT.
     _col_chunk = getattr(radiation_config.rrtmgp, "column_chunk_size", 0)
+    if column_mesh is not None:
+        if _col_chunk and _col_chunk > 0:
+            raise ValueError(
+                "column_mesh with rrtmgp column_chunk_size > 0 is not "
+                "supported: the chunked solve scans over column blocks, so "
+                "the column axis it would shard is a scan axis.")
+        # Constrain the SOLVER's column axis (after the sub-column expansion):
+        # a partition placed only on the physics inputs does not propagate into
+        # the solver's working arrays, which keep full width on every device.
+        from legoesm.atmosphere.physics.clouds.subcolumns import (
+            PER_COLUMN_SOLVER_KEYS,
+        )
+        _cons = _column_constraint(column_mesh, _rad_kwargs["T"].shape[0])
+        _rad_kwargs = {k: (_cons(v) if k in PER_COLUMN_SOLVER_KEYS else v)
+                       for k, v in _rad_kwargs.items()}
     if _col_chunk and _col_chunk > 0:
         result = rrtmgp_solver.solve_columns_chunked(
             column_chunk_size=_col_chunk, **_rad_kwargs,
         )
     else:
         result = rrtmgp_solver.solve_columns(**_rad_kwargs)
+    if column_mesh is not None:
+        result = jax.tree.map(_cons, result)
 
     if _n_sub > 1:
         from legoesm.atmosphere.physics.clouds import subcolumns as _sub
@@ -1030,6 +1196,9 @@ def _call_radiation_backend(
             heating_rate=result.lw_heating_rate + result.sw_heating_rate * s,
             lw_heating_rate=result.lw_heating_rate,
             sw_heating_rate=result.sw_heating_rate * s,
+            lw_flux_up_toa_clr=result.lw_flux_up_toa_clr,
+            sw_flux_up_toa_clr=(None if result.sw_flux_up_toa_clr is None
+                                else result.sw_flux_up_toa_clr * _sw_scale),
         )
 
     # Carry the prescribed TOA insolation (this scope's per-column
@@ -1094,6 +1263,8 @@ def make_radiation_physics(
     nc_from_aerosol: bool = False,
     activation_config=None,
     use_clubb_cloud_fraction: bool = False,
+    clubb_config=None,
+    micro_leaf_config=None,
 ) -> Callable:
     """Create a physics function for radiation matching a model's signature.
 
@@ -1218,7 +1389,9 @@ def make_radiation_physics(
                                             column_mesh=column_mesh,
                                             nc_from_aerosol=nc_from_aerosol,
                                             activation_config=activation_config,
-                                            use_clubb_cloud_fraction=use_clubb_cloud_fraction)
+                                            use_clubb_cloud_fraction=use_clubb_cloud_fraction,
+                                            clubb_config=clubb_config,
+                                            micro_leaf_config=micro_leaf_config)
     elif model_type == "nonhydrostatic":
         return _make_nonhydrostatic_radiation(radiation_config, rrtmgp_solver,
                                                ml_ozone_coefs=ml_ozone_coefs)
@@ -1235,13 +1408,17 @@ def make_radiation_physics(
             sfc_albedo_override=sfc_albedo_override,
             sfc_emissivity_override=sfc_emissivity_override,
             use_clubb_cloud_fraction=use_clubb_cloud_fraction,
+            column_mesh=column_mesh,
+            clubb_config=clubb_config,
         )
     elif model_type == "mpas":
         return _make_mpas_radiation(radiation_config, rrtmgp_solver,
                                      ml_ozone_coefs=ml_ozone_coefs,
                                      column_mesh=column_mesh,
                                      nc_from_aerosol=nc_from_aerosol,
-                                     use_clubb_cloud_fraction=use_clubb_cloud_fraction)
+                                     use_clubb_cloud_fraction=use_clubb_cloud_fraction,
+                                     clubb_config=clubb_config,
+                                     micro_leaf_config=micro_leaf_config)
     else:
         raise ValueError(
             f"Unknown model_type: {model_type!r}. "
@@ -1262,6 +1439,8 @@ def _make_hydrostatic_radiation(
     nc_from_aerosol: bool = False,
     activation_config=None,
     use_clubb_cloud_fraction: bool = False,
+    clubb_config=None,
+    micro_leaf_config=None,
 ) -> Callable:
     """Create radiation physics_fn for any hydrostatic model.
 
@@ -1293,6 +1472,10 @@ def _make_hydrostatic_radiation(
     Default False is byte-identical (the double-moment N_c carry / constant
     r_eff is used).
     """
+    # The CAM6 radiation ice radius reads the run's MG2 ice dcs and ice-slope
+    # width from the microphysics leaf config (never a default).
+    from legoesm.atmosphere.physics.microphysics.config import mg2_rel_ice_params
+    _mg2_ice_dcs_m, _mg2_ice_slope_w = mg2_rel_ice_params(micro_leaf_config)
     _time, set_time = _make_time_state()
     _T_sfc_override_cell, set_T_sfc_override = _make_T_sfc_override_cell()
     # Static build-time gate for the Slingo-1987-inspired surrogate convective-cloud carry read:
@@ -1338,6 +1521,10 @@ def _make_hydrostatic_radiation(
     _clr_sky_cfg = (
         radiation_config._replace(cloud_scheme="none", cloud_config=None)
         if radiation_config.clear_sky_diag else None)
+    # RRTMGP computes the clear-sky fluxes inside the all-sky solve instead of
+    # a second solve; gray/simple_lw keep the second pass.
+    _clr_sky_fused = (_clr_sky_cfg is not None
+                      and radiation_config.scheme not in ("gray", "simple_lw"))
 
     def physics_fn(state, grid_or_mesh, sigma_coord,
                    forcing=None, phys_state=None) -> HydrostaticTendencies:
@@ -1378,6 +1565,9 @@ def _make_hydrostatic_radiation(
         #   aerosol_od  : (ncol, nlev) per-layer aerosol optical depth
         #   ghg_vmr     : dict[str, scalar] transient GHG VMRs
         _o3_ext = forcing.get("o3_vmr") if forcing is not None else None
+        _o3_top_ext = (
+            forcing.get("o3_top_vmr") if forcing is not None else None
+        )
         _aer_ext = forcing.get("aerosol_od") if forcing is not None else None
         _aer_lw_ext = (
             forcing.get("aerosol_lw_od") if forcing is not None else None
@@ -1398,6 +1588,12 @@ def _make_hydrostatic_radiation(
         # ``physics_pipeline.compute_radiation_core``, which this path never
         # calls.)  Absent key -> None -> the config scalar, byte-identical.
         _alb_ext = forcing.get("sfc_albedo") if forcing is not None else None
+        # Open-ocean area fraction (MPAS lane with dynamic_albedo): the
+        # direct-beam ocean albedo is then formed per radiation call from this
+        # call's cos(zenith) (CESM2.1 seq_flux_mct); ``sfc_albedo`` above is
+        # the diffuse blend.  Absent -> one albedo for both beams, as before.
+        _ocn_frac_ext = (forcing.get("open_ocean_frac")
+                         if forcing is not None else None)
 
         # Calendar time: prefer per-step TRACED forcing values (the MPAS
         # AMIP loop) over the static ``set_time`` closure.  The closure
@@ -1469,6 +1665,19 @@ def _make_hydrostatic_radiation(
         # before; ``_emis_col`` stays None (the config value) unless a
         # prescribed LW sets it to 1.
         _emis_col = None
+        _ocn_frac_col = None
+        if _ocn_frac_ext is not None:
+            _ocn_frac_col = jnp.asarray(_ocn_frac_ext)
+            if _ocn_frac_col.size != ncol:
+                raise ValueError(
+                    f"forcing['open_ocean_frac'] has {_ocn_frac_col.size} "
+                    f"values but this grid has ncol={ncol} columns.")
+            _ocn_frac_col = _ocn_frac_col.reshape(ncol)
+            if forcing.get("sfc_sw_up") is not None:
+                raise ValueError(
+                    "forcing carries both a prescribed surface shortwave "
+                    "(sfc_sw_up) and open_ocean_frac; the prescribed albedo "
+                    "would be overwritten on the direct beam.")
         T_sfc_col, _alb_col, _emis_col = resolve_prescribed_radiative_bc(
             forcing, radiation_config, ncol, T_sfc_col, _alb_col, _emis_col)
 
@@ -1491,6 +1700,7 @@ def _make_hydrostatic_radiation(
         # is gated on the scheme — gray runs the microphysics fill (second
         # indirect effect) but skips this radiation-only first-indirect path
         # instead of computing a droplet field the gray optics would discard.
+        _nc_in_cloud = False
         if nc_from_aerosol and radiation_config.scheme == "rrtmgp":
             # Route through the SAME activation dispatch as the microphysics
             # N_c fill (proxy | arg) so the first (radiation r_eff) and second
@@ -1521,7 +1731,10 @@ def _make_hydrostatic_radiation(
                 T=T_col, p=p_full_col,
                 aerosol_number=(None if _aer_num is None
                                 else jnp.asarray(_aer_num)),
+                ccn_aod=(forcing.get("aerosol_ccn_aod")
+                         if forcing is not None else None),
             )
+            _nc_in_cloud = True  # specified in-cloud number (MG2 nccons)
 
         f_day_col = f_day.reshape(ncol) if f_day is not None else None
 
@@ -1592,6 +1805,8 @@ def _make_hydrostatic_radiation(
             # (uniform) albedo has no column axis and stays replicated.
             if _alb_col is not None and _alb_col.ndim > 0:
                 _alb_col = shard_columns(_alb_col, column_mesh)
+            if _ocn_frac_col is not None:
+                _ocn_frac_col = shard_columns(_ocn_frac_col, column_mesh)
             if q_v_col is not None:
                 q_v_col = shard_columns(q_v_col, column_mesh)
             if q_cloud_col is not None:
@@ -1606,6 +1821,8 @@ def _make_hydrostatic_radiation(
                 f_day_col = shard_columns(f_day_col, column_mesh)
             if _o3_ext is not None:
                 _o3_ext = shard_columns(_o3_ext, column_mesh)
+            if _o3_top_ext is not None:
+                _o3_top_ext = shard_columns(_o3_top_ext, column_mesh)
             if _aer_ext is not None:
                 _aer_ext = shard_columns(_aer_ext, column_mesh)
             if _aer_lw_ext is not None:
@@ -1627,16 +1844,19 @@ def _make_hydrostatic_radiation(
             insolation=insol_col,
             cos_sza=cos_sza_col,
             sfc_albedo_override=_alb_col,
+            open_ocean_frac=_ocn_frac_col,
             sfc_emissivity_override=_emis_col,
             q_cloud=q_cloud_col,
             q_ice=q_ice_col,
             n_cloud=n_cloud_col,
+            n_cloud_in_cloud=_nc_in_cloud,
             n_ice=n_ice_col,
             f_day=f_day_col,
             rrtmgp_solver=rrtmgp_solver,
             lon=lon_col,
             ml_ozone_coefs=ml_ozone_coefs,
             o3_vmr_override=_o3_ext,
+            o3_top_vmr=_o3_top_ext,
             aerosol_od=_aer_ext,
             aerosol_lw_od=_aer_lw_ext,
             ghg_vmr_override=_ghg_ext,
@@ -1645,6 +1865,11 @@ def _make_hydrostatic_radiation(
             conv_mass_flux_up=_conv_mf_col,
             conv_icwmr=_conv_icwmr_col,
             solar_spectral_fraction=_ssf_ext,
+            tsi=_tsi_ext,
+            clear_sky_toa=_clr_sky_fused,
+            clubb_config=clubb_config,
+            mg2_ice_dcs_m=_mg2_ice_dcs_m,
+            mg2_ice_slope_log_width=_mg2_ice_slope_w,
         )
 
         # #843 lean-lane clear-sky second pass: SAME column state and
@@ -1657,7 +1882,12 @@ def _make_hydrostatic_radiation(
         # (the held/no-rad sub-cycle variant contains no radiation at all).
         sw_up_toa_clr = None
         lw_up_toa_clr = None
-        if _clr_sky_cfg is not None:
+        if _clr_sky_fused:
+            # RRTMGP: the clear-sky fluxes came out of the all-sky solve
+            # above, sharing its gas optics (~90% of the radiation cost).
+            sw_up_toa_clr = rad_out.sw_flux_up_toa_clr
+            lw_up_toa_clr = rad_out.lw_flux_up_toa_clr
+        elif _clr_sky_cfg is not None:
             rad_out_clr = _call_radiation_backend(
                 radiation_config=_clr_sky_cfg,
                 eccf=eccf,
@@ -1672,6 +1902,7 @@ def _make_hydrostatic_radiation(
                 # SAME surface as the all-sky solve: CMIP6 clear-sky removes
                 # CLOUDS only, never the surface boundary condition.
                 sfc_albedo_override=_alb_col,
+                open_ocean_frac=_ocn_frac_col,
                 sfc_emissivity_override=_emis_col,
                 q_cloud=None,
                 q_ice=None,
@@ -1682,12 +1913,14 @@ def _make_hydrostatic_radiation(
                 lon=lon_col,
                 ml_ozone_coefs=ml_ozone_coefs,
                 o3_vmr_override=_o3_ext,
+                o3_top_vmr=_o3_top_ext,
                 aerosol_od=_aer_ext,
                 aerosol_lw_od=_aer_lw_ext,
                 ghg_vmr_override=_ghg_ext,
                 cloud_fraction_override=None,
                 conv_precip=None,
                 solar_spectral_fraction=_ssf_ext,
+                tsi=_tsi_ext,
             )
             sw_up_toa_clr = rad_out_clr.sw_flux_up[:, 0]
             lw_up_toa_clr = rad_out_clr.lw_flux_up[:, 0]
@@ -2021,6 +2254,8 @@ def _mc3d_plane_heating(
             config=cloud_config, q_cloud=q_cloud_col, q_ice=q_ice_col,
             n_ice=n_ice_col, n_cloud=n_cloud_col,
         ).to_rrtmg_kwargs()
+        # One bulk ice density for the PSD radius and the optics size (CAM6).
+        cloud_kwargs["cloud_rho_ice"] = cloud_config.rho_cloud_ice
 
     # --- shortwave optical field ---
     # NOTE: the plane mc3d path is AEROSOL-FREE (no aerosol_optical_depth is
@@ -2501,6 +2736,8 @@ def _make_spectral_pe_radiation(
     sfc_albedo_override: jnp.ndarray | float | None = None,
     sfc_emissivity_override: jnp.ndarray | float | None = None,
     use_clubb_cloud_fraction: bool = False,
+    column_mesh=None,
+    clubb_config=None,
 ) -> Callable:
     """Create radiation physics_fn for SpectralPEModel.
 
@@ -2582,6 +2819,9 @@ def _make_spectral_pe_radiation(
         # (see _make_hydrostatic_radiation): o3_vmr / aerosol_od are
         # (ncol, nlev) columns, ghg_vmr is a dict of traced scalars.
         _o3_ext = forcing.get("o3_vmr") if forcing is not None else None
+        _o3_top_ext = (
+            forcing.get("o3_top_vmr") if forcing is not None else None
+        )
         _aer_ext = forcing.get("aerosol_od") if forcing is not None else None
         _aer_lw_ext = (
             forcing.get("aerosol_lw_od") if forcing is not None else None
@@ -2646,6 +2886,20 @@ def _make_spectral_pe_radiation(
             insol = jnp.broadcast_to(insol_1d[:, None], (n_lat, n_lon))
             cos_sza = None
             f_day = jnp.broadcast_to(f_day_1d[:, None], (n_lat, n_lon)) if f_day_1d is not None else None
+        # Transient solar from the traced forcing dict, exactly as the
+        # hydrostatic/MPAS wrapper: ``tsi`` rescales the insolation (linear in
+        # S_0 in both branches above) and ``solar_spectral_fraction`` reaches
+        # the rrtmgp solver.  Absent keys -> the configured S_0 and the
+        # solver's default spectrum (byte-identical).  Before 2026-10-06 the
+        # spectral lane never read either, so a real solar file was inert here.
+        _tsi_ext = forcing.get("tsi") if forcing is not None else None
+        _ssf_ext = (forcing.get("solar_spectral_fraction")
+                    if forcing is not None else None)
+        if _tsi_ext is not None:
+            _s0_cfg = (radiation_config.rrtmgp.S_0
+                       if radiation_config.scheme == "rrtmgp"
+                       else radiation_config.gray.S_0)
+            insol = insol * (_tsi_ext / _s0_cfg)
 
         # Reshape to columns: (n_lat, n_lon, ...) -> (ncol, ...)
         ncol = n_lat * n_lon
@@ -2730,12 +2984,17 @@ def _make_spectral_pe_radiation(
             lon=lon_col,
             ml_ozone_coefs=ml_ozone_coefs,
             o3_vmr_override=_o3_ext,
+            o3_top_vmr=_o3_top_ext,
+            solar_spectral_fraction=_ssf_ext,
+            tsi=_tsi_ext,
             aerosol_od=_aer_ext,
             aerosol_lw_od=_aer_lw_ext,
             ghg_vmr_override=_ghg_ext,
             cloud_fraction_override=_cf_ovr,
             conv_mass_flux_up=_conv_mf_col,
             conv_icwmr=_conv_icwmr_col,
+            column_mesh=column_mesh,
+            clubb_config=clubb_config,
         )
 
         # Reshape heating rate back to (n_lat, n_lon, nlev)

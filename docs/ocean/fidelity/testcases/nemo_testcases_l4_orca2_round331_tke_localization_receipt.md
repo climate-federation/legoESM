@@ -22,7 +22,7 @@ zero deepest interfaces.
 visible.  The record build sets the held surface value and its identity row at
 `ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/zdftke.f90:273-276`; the card
 selects `nemo_z0` plus its literal matrix and solver
-(`nemo_testcase_recipe.py:416,421-422`) and constructs the held virtual row in
+(`nemo_testcase_recipe.py:596,601-602`) and constructs the held virtual row in
 `tke.py:1845-1857`.  That source read does not exclude a differing input or a
 later source-order statement from the surface family.
 
@@ -290,7 +290,7 @@ when it forms `zebot`
 first step `Kbb=Kmm=1` and the stored pair is zero.  legoESM instead formed the
 boundary from the already updated solver state.  The single landed production
 statement now passes the existing entry `u_now/v_now` pair into the bottom
-boundary call (`ocean_model_latlon_cgrid.py:13927-13929`).  Its fallback is
+boundary call (`ocean_model_latlon_cgrid.py:14124-14126`).  Its fallback is
 unchanged for direct callers, and an incomplete pair refuses.  No selector,
 constant, deck, recipe or configuration value changed.
 
@@ -325,7 +325,7 @@ exact-loss plant fires on all seven pairs.  Aggregate evidence SHA-256:
 
 V1 does not execute this bottom boundary because its resolved card disables
 it (`nemo_testcase_v1_orca2tke/namelist_cfg:193`).  The NEMO-faithful DINO
-production card does execute it (`dino.py:1287`): three CPU steps are
+production card does execute it (`dino.py:1292`): three CPU steps are
 bit-identical on all 66 carried leaf/step outputs between the pinned trees.
 The reconstructed default-grid variant refuses before TKE because it lacks
 the now-required raw NEMO depth operands, so it does not execute the changed
@@ -380,8 +380,8 @@ calls `zdf_phy` with `Kbb=Kmm=Nbb`
 leapfrog build instead passes `(Nbb,Nnn)`
 (`DINO/BLD/ppsrc/nemo/stpmlf.f90:187-193`), so its bottom boundary reads the
 BEFORE-level velocity, while legoESM's two leapfrog production calls still
-pass the now level (`ocean_model_latlon_cgrid.py:16900` and
-`ocean_model_latlon_cgrid.py:17276`).  Round 331 therefore certifies the
+pass the now level (`ocean_model_latlon_cgrid.py:17265` and
+`ocean_model_latlon_cgrid.py:17641`).  Round 331 therefore certifies the
 stored entry velocity only for RK3; leapfrog time-level parity remains open.
 
 The debt has no discriminating effect on today's DINO check.  With

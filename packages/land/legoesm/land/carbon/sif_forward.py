@@ -42,7 +42,7 @@ SAME photon-flux units; the absolute scale between the two is partly absorbed by
 tier-1 calibration knobs ``max_electron_yield`` and the escape probability ``fesc`` during
 training (see :func:`legoesm.land.canopy.sif.multilayer_canopy_sif`).  Converting a
 satellite radiance product to this photon-flux convention is a data-prep follow-up
-(documented in :func:`sif_observations.load_gridded_sif`).
+(documented in ``sif_observations.SIF_VAR_CANDIDATES``).
 
 SIF >= 0 and increases with absorbed PAR (``leaf_sif`` returns 0 when APAR = 0); all
 functions are pure JAX and differentiable in the SIFConfig fluorescence params.

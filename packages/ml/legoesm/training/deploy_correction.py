@@ -350,7 +350,6 @@ def slice_override_columns(override, local_column_indices):
     silently filling/clamping under JIT.
     """
     import jax.numpy as jnp
-    from legoesm.atmosphere.physics.turbulence.config import TurbulenceConfig
 
     clubb, per_column = _per_column_clubb_fields(override)
     idx = jnp.asarray(local_column_indices).reshape(-1)
@@ -370,7 +369,9 @@ def slice_override_columns(override, local_column_indices):
                 f"local_column_indices out of range [0, {ncol}) for the global "
                 f"override: got [{lo}, {hi}].")
     sliced = {f: jnp.take(arr, idx, axis=0) for f, arr in per_column.items()}
-    return TurbulenceConfig(scheme="clubb_lite", clubb_lite=clubb._replace(**sliced))
+    # _replace, not a rebuild: the override's other fields (liquid_partition,
+    # update_interval_steps) must survive slicing.
+    return override._replace(clubb_lite=clubb._replace(**sliced))
 
 
 def slice_override_latlon_2d(override, layout):

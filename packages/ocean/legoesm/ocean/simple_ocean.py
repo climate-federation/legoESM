@@ -191,10 +191,19 @@ def _ocean_turbulent_fluxes(
     if config.bulk_scheme in ("most", "coare3", "large_yeager"):
         # "most" = generic iterative MOST with fixed roughness (no Charnock);
         # "coare3"/"large_yeager" = ocean-specific stability-dependent MOST.
-        from legoesm.core.bulk_flux import compute_most_fluxes
+        from legoesm.core.bulk_flux import (
+            compute_most_fluxes, surface_reference_state)
+        # Model-level forcing: surface-referenced T at its own height (#1818);
+        # observed forcing keeps the solver's default reference height.
+        T_air, z_kw = forcing.T_lowest, {}
+        if forcing.z_lowest is not None:
+            T_air, z_low = surface_reference_state(
+                forcing.T_lowest, None, forcing.z_lowest)
+            z_kw = {"z_ref": z_low}
         _tx, _ty, shflx, lhflx, _ust = compute_most_fluxes(
             forcing.u_lowest, forcing.v_lowest,
-            forcing.T_lowest, forcing.q_lowest, T_sfc, q_sfc, rho,
+            T_air, forcing.q_lowest, T_sfc, q_sfc, rho,
+            **z_kw,
             scheme=config.bulk_scheme,
             gustiness_w_zi=getattr(config, "gustiness_w_zi", None),
             thermo_convention=getattr(config, "thermo_convention", "legoesm"),

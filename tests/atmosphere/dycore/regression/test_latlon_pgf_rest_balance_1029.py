@@ -284,9 +284,9 @@ def test_hybrid_rest_over_topo_fp32_policy():
     fp32 cannot reach machine rest (the PGF differences two ~1e6 m^2/s^2
     terms; log/cumsum round-off seeds ~1e-7 m/s^2 accelerations), but the
     discrete consistency still keeps the 200-step drift at the few-mm/s level
-    (measured ~4.3e-3 m/s) — 40x below the broken analytic-factor form
-    (0.18 m/s). Gate at 0.02 m/s: catches a revert at fp32 while leaving 5x
-    headroom over the measured value.
+    (measured 7.5e-3 m/s on the DCMIP mountain at 0N; 4.3e-3 on the earlier
+    30N / 398 km-ridge mountain, where the broken analytic-factor form gave
+    0.18 m/s). Gate at 0.02 m/s: ~2.7x headroom over the measured value.
     """
     # No fp64 fixture override here: run under whatever the default policy is
     # (fp32 in production). The autouse fixture pins fp64, so explicitly set
@@ -303,7 +303,7 @@ def test_hybrid_rest_over_topo_fp32_policy():
 
 
 def test_sb81_omega_conversion_rest_balanced_and_gate_live():
-    """#1029 ω-side opt-in flag: (a) with sb81_omega_conversion=True the
+    """#1029 ω-side flag (default ON): (a) with sb81_omega_conversion=True the
     rest-over-topo state STAYS at rest (at exact rest the flux-form mass
     divergence is exactly zero, so both conversion forms vanish — the SB81
     swap cannot disturb a balanced column); (b) the gate is LIVE: from a

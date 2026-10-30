@@ -1,0 +1,1055 @@
+{
+  "schema": "swg-dg-nemo-only-namelist-fields-v1",
+  "description": "Every field of the compiled-read inventory that has no legoESM card counterpart, with the value the 2026-10-12 reference three-year run read and the reason the card does not model it. The deck guard refuses a run whose value differs from reference_value.",
+  "reference_run": {
+    "label": "md_dg_dx6p25_dt50_3yr",
+    "namelist_ref_sha256": "b04f2ce4d12aa247ae3b707483d25cf2d38d0b3cf8817d71d33e66918fd81cfd",
+    "namelist_cfg_sha256": "0f6fc303af68549c0c78dc1f22f9e29ed5a6feb3b4fafc88b6ee4281bb42e309",
+    "output_namelist_dyn_sha256": "a8f53c412dddb65128899c5f47ab7e82a4a5266c3a0d2929ce91a1d60f1970d3"
+  },
+  "reference_echo_groups": [
+    "nam_vvl",
+    "namcfg",
+    "namctl",
+    "namdom",
+    "namdyn_adv",
+    "namdyn_ldf",
+    "namdyn_vor",
+    "namlbc",
+    "nammpp",
+    "namnc4",
+    "namrun",
+    "namsbc",
+    "namsbc_rnf",
+    "namtile",
+    "namtsd",
+    "namusr_def"
+  ],
+  "fields": {
+    "namc1d.cn_dir": {
+      "reason": "Read only by c1d_init, which dom_init calls only when namdom ln_c1d is true; ln_c1d is a compared card field (false). Pinned to the reference run's value, so any change refuses.",
+      "reference_value": "./",
+      "reference_source": "namelist_ref"
+    },
+    "namc1d.ln_dyndmp": {
+      "reason": "Read only by c1d_init, which dom_init calls only when namdom ln_c1d is true; ln_c1d is a compared card field (false). Pinned to the reference run's value, so any change refuses.",
+      "reference_value": false,
+      "reference_source": "namelist_ref"
+    },
+    "namc1d.ln_uvd_dyndmp": {
+      "reason": "Read only by c1d_init, which dom_init calls only when namdom ln_c1d is true; ln_c1d is a compared card field (false). Pinned to the reference run's value, so any change refuses.",
+      "reference_value": false,
+      "reference_source": "namelist_ref"
+    },
+    "namc1d.ln_uvd_init": {
+      "reason": "Read only by c1d_init, which dom_init calls only when namdom ln_c1d is true; ln_c1d is a compared card field (false). Pinned to the reference run's value, so any change refuses.",
+      "reference_value": false,
+      "reference_source": "namelist_ref"
+    },
+    "namc1d.rn_lat1d": {
+      "reason": "Read only by c1d_init, which dom_init calls only when namdom ln_c1d is true; ln_c1d is a compared card field (false). Pinned to the reference run's value, so any change refuses.",
+      "reference_value": 50.1,
+      "reference_source": "namelist_ref"
+    },
+    "namc1d.rn_lon1d": {
+      "reason": "Read only by c1d_init, which dom_init calls only when namdom ln_c1d is true; ln_c1d is a compared card field (false). Pinned to the reference run's value, so any change refuses.",
+      "reference_value": -144.9,
+      "reference_source": "namelist_ref"
+    },
+    "namc1d.sn_ucur": {
+      "reason": "Read only by c1d_init, which dom_init calls only when namdom ln_c1d is true; ln_c1d is a compared card field (false). Pinned to the reference run's value, so any change refuses.",
+      "reference_value": "'ucurrent'              ,         -1.       ,'u_current',   .false.   , .true. , 'monthly' ,  ''              ,  'Ume'   , ''",
+      "reference_source": "namelist_ref"
+    },
+    "namc1d.sn_vcur": {
+      "reason": "Read only by c1d_init, which dom_init calls only when namdom ln_c1d is true; ln_c1d is a compared card field (false). Pinned to the reference run's value, so any change refuses.",
+      "reference_value": "'vcurrent'              ,         -1.       ,'v_current',   .false.   , .true. , 'monthly' ,  ''              ,  'Vme'   , ''",
+      "reference_source": "namelist_ref"
+    },
+    "namclo.ln_clo_rnf": {
+      "reason": "Read only by dom_clo, which dom_init calls only when namcfg ln_closea is true; ln_closea is a compared card field (false, and nemo_ctl forces it false when ln_read_cfg is false). Pinned to the reference run's value, so any change refuses.",
+      "reference_value": true,
+      "reference_source": "namelist_ref"
+    },
+    "namclo.ln_mask_csundef": {
+      "reason": "Read only by dom_clo, which dom_init calls only when namcfg ln_closea is true; ln_closea is a compared card field (false, and nemo_ctl forces it false when ln_read_cfg is false). Pinned to the reference run's value, so any change refuses.",
+      "reference_value": true,
+      "reference_source": "namelist_ref"
+    },
+    "namclo.ln_maskcs": {
+      "reason": "Read only by dom_clo, which dom_init calls only when namcfg ln_closea is true; ln_closea is a compared card field (false, and nemo_ctl forces it false when ln_read_cfg is false). Pinned to the reference run's value, so any change refuses.",
+      "reference_value": false,
+      "reference_source": "namelist_ref"
+    },
+    "nammpp.jpni": {
+      "reason": "Number of MPI subdomains along i (0 lets NEMO choose). MPI decomposition or communication setting read by mpp_init; legoESM integrates one undivided domain, so the card has no counterpart. NEMO's independence of the rank count is the separate rank control (guide step 4). Pinned to the reference run's value, so any change refuses.",
+      "reference_value": 0,
+      "reference_source": "output.namelist.dyn"
+    },
+    "nammpp.jpnj": {
+      "reason": "Number of MPI subdomains along j (0 lets NEMO choose). MPI decomposition or communication setting read by mpp_init; legoESM integrates one undivided domain, so the card has no counterpart. NEMO's independence of the rank count is the separate rank control (guide step 4). Pinned to the reference run's value, so any change refuses.",
+      "reference_value": 0,
+      "reference_source": "output.namelist.dyn"
+    },
+    "nammpp.ln_listonly": {
+      "reason": "When true NEMO only lists candidate decompositions and stops. MPI decomposition or communication setting read by mpp_init; legoESM integrates one undivided domain, so the card has no counterpart. NEMO's independence of the rank count is the separate rank control (guide step 4). Pinned to the reference run's value, so any change refuses.",
+      "reference_value": false,
+      "reference_source": "output.namelist.dyn"
+    },
+    "nammpp.ln_mppdelay": {
+      "reason": "Delayed global reductions, used only by reductions called with a delay key. MPI decomposition or communication setting read by mpp_init; legoESM integrates one undivided domain, so the card has no counterpart. NEMO's independence of the rank count is the separate rank control (guide step 4). Pinned to the reference run's value, so any change refuses.",
+      "reference_value": true,
+      "reference_source": "output.namelist.dyn"
+    },
+    "nammpp.ln_nnogather": {
+      "reason": "North-fold gather option; SWG_DG has no north fold (usr_def_nam sets ldNFold = .FALSE.). MPI decomposition or communication setting read by mpp_init; legoESM integrates one undivided domain, so the card has no counterpart. NEMO's independence of the rank count is the separate rank control (guide step 4). Pinned to the reference run's value, so any change refuses.",
+      "reference_value": true,
+      "reference_source": "output.namelist.dyn"
+    },
+    "nammpp.nn_comm": {
+      "reason": "Halo-exchange method (point-to-point or neighbourhood collectives). MPI decomposition or communication setting read by mpp_init; legoESM integrates one undivided domain, so the card has no counterpart. NEMO's independence of the rank count is the separate rank control (guide step 4). Pinned to the reference run's value, so any change refuses.",
+      "reference_value": 1,
+      "reference_source": "output.namelist.dyn"
+    },
+    "nammpp.nn_hls": {
+      "reason": "MPI halo width (mpp_init raises it to at least 2). MPI decomposition or communication setting read by mpp_init; legoESM integrates one undivided domain, so the card has no counterpart. NEMO's independence of the rank count is the separate rank control (guide step 4). Pinned to the reference run's value, so any change refuses.",
+      "reference_value": 2,
+      "reference_source": "output.namelist.dyn"
+    },
+    "namsbc_apr.cn_dir": {
+      "reason": "Read only by sbc_apr_init, which sbc_init calls only when namsbc ln_apr_dyn is true; ln_apr_dyn is a compared card field (false). Pinned to the reference run's value, so any change refuses.",
+      "reference_value": "./",
+      "reference_source": "namelist_ref"
+    },
+    "namsbc_apr.ln_apr_obc": {
+      "reason": "Read only by sbc_apr_init, which sbc_init calls only when namsbc ln_apr_dyn is true; ln_apr_dyn is a compared card field (false). Pinned to the reference run's value, so any change refuses.",
+      "reference_value": false,
+      "reference_source": "namelist_ref"
+    },
+    "namsbc_apr.nn_ref_apr": {
+      "reason": "Read only by sbc_apr_init, which sbc_init calls only when namsbc ln_apr_dyn is true; ln_apr_dyn is a compared card field (false). Pinned to the reference run's value, so any change refuses.",
+      "reference_value": 0,
+      "reference_source": "namelist_ref"
+    },
+    "namsbc_apr.rn_pref": {
+      "reason": "Read only by sbc_apr_init, which sbc_init calls only when namsbc ln_apr_dyn is true; ln_apr_dyn is a compared card field (false). Pinned to the reference run's value, so any change refuses.",
+      "reference_value": 101000.0,
+      "reference_source": "namelist_ref"
+    },
+    "namsbc_apr.sn_apr": {
+      "reason": "Read only by sbc_apr_init, which sbc_init calls only when namsbc ln_apr_dyn is true; ln_apr_dyn is a compared card field (false). Pinned to the reference run's value, so any change refuses.",
+      "reference_value": "'patm'                  ,         -1.       ,'somslpre' ,   .true.    , .true. , 'yearly'  ,    ''            ,    ''    ,      ''",
+      "reference_source": "namelist_ref"
+    },
+    "namsbc_apr.sn_apref": {
+      "reason": "Read only by sbc_apr_init, which sbc_init calls only when namsbc ln_apr_dyn is true; ln_apr_dyn is a compared card field (false). Pinned to the reference run's value, so any change refuses.",
+      "reference_value": "'mean_patm'             ,         -1.       ,'meanapr'  ,   .true.    , .true. , 'yearly'  ,    ''            ,    ''    ,      ''",
+      "reference_source": "namelist_ref"
+    },
+    "namsbc_blk.cn_dir": {
+      "reason": "Read only by sbc_blk_init, which sbc_init calls only when namsbc ln_blk is true; ln_blk is a compared card field (false). Pinned to the reference run's value, so any change refuses.",
+      "reference_value": "./",
+      "reference_source": "namelist_ref"
+    },
+    "namsbc_blk.ln_andreas": {
+      "reason": "Read only by sbc_blk_init, which sbc_init calls only when namsbc ln_blk is true; ln_blk is a compared card field (false). Pinned to the reference run's value, so any change refuses.",
+      "reference_value": false,
+      "reference_source": "namelist_ref"
+    },
+    "namsbc_blk.ln_coare_3p0": {
+      "reason": "Read only by sbc_blk_init, which sbc_init calls only when namsbc ln_blk is true; ln_blk is a compared card field (false). Pinned to the reference run's value, so any change refuses.",
+      "reference_value": false,
+      "reference_source": "namelist_ref"
+    },
+    "namsbc_blk.ln_coare_3p6": {
+      "reason": "Read only by sbc_blk_init, which sbc_init calls only when namsbc ln_blk is true; ln_blk is a compared card field (false). Pinned to the reference run's value, so any change refuses.",
+      "reference_value": false,
+      "reference_source": "namelist_ref"
+    },
+    "namsbc_blk.ln_crt_fbk": {
+      "reason": "Read only by sbc_blk_init, which sbc_init calls only when namsbc ln_blk is true; ln_blk is a compared card field (false). Pinned to the reference run's value, so any change refuses.",
+      "reference_value": false,
+      "reference_source": "namelist_ref"
+    },
+    "namsbc_blk.ln_cx_ice_an05": {
+      "reason": "Read only by sbc_blk_init, which sbc_init calls only when namsbc ln_blk is true; ln_blk is a compared card field (false). Pinned to the reference run's value, so any change refuses.",
+      "reference_value": false,
+      "reference_source": "namelist_ref"
+    },
+    "namsbc_blk.ln_cx_ice_cst": {
+      "reason": "Read only by sbc_blk_init, which sbc_init calls only when namsbc ln_blk is true; ln_blk is a compared card field (false). Pinned to the reference run's value, so any change refuses.",
+      "reference_value": true,
+      "reference_source": "namelist_ref"
+    },
+    "namsbc_blk.ln_cx_ice_frm": {
+      "reason": "Read only by sbc_blk_init, which sbc_init calls only when namsbc ln_blk is true; ln_blk is a compared card field (false). Pinned to the reference run's value, so any change refuses.",
+      "reference_value": false,
+      "reference_source": "namelist_ref"
+    },
+    "namsbc_blk.ln_cx_ice_lg15": {
+      "reason": "Read only by sbc_blk_init, which sbc_init calls only when namsbc ln_blk is true; ln_blk is a compared card field (false). Pinned to the reference run's value, so any change refuses.",
+      "reference_value": false,
+      "reference_source": "namelist_ref"
+    },
+    "namsbc_blk.ln_cx_ice_lu12": {
+      "reason": "Read only by sbc_blk_init, which sbc_init calls only when namsbc ln_blk is true; ln_blk is a compared card field (false). Pinned to the reference run's value, so any change refuses.",
+      "reference_value": false,
+      "reference_source": "namelist_ref"
+    },
+    "namsbc_blk.ln_ecmwf": {
+      "reason": "Read only by sbc_blk_init, which sbc_init calls only when namsbc ln_blk is true; ln_blk is a compared card field (false). Pinned to the reference run's value, so any change refuses.",
+      "reference_value": false,
+      "reference_source": "namelist_ref"
+    },
+    "namsbc_blk.ln_humi_dpt": {
+      "reason": "Read only by sbc_blk_init, which sbc_init calls only when namsbc ln_blk is true; ln_blk is a compared card field (false). Pinned to the reference run's value, so any change refuses.",
+      "reference_value": false,
+      "reference_source": "namelist_ref"
+    },
+    "namsbc_blk.ln_humi_rlh": {
+      "reason": "Read only by sbc_blk_init, which sbc_init calls only when namsbc ln_blk is true; ln_blk is a compared card field (false). Pinned to the reference run's value, so any change refuses.",
+      "reference_value": false,
+      "reference_source": "namelist_ref"
+    },
+    "namsbc_blk.ln_humi_sph": {
+      "reason": "Read only by sbc_blk_init, which sbc_init calls only when namsbc ln_blk is true; ln_blk is a compared card field (false). Pinned to the reference run's value, so any change refuses.",
+      "reference_value": true,
+      "reference_source": "namelist_ref"
+    },
+    "namsbc_blk.ln_mfs": {
+      "reason": "Read only by sbc_blk_init, which sbc_init calls only when namsbc ln_blk is true; ln_blk is a compared card field (false). Pinned to the reference run's value, so any change refuses.",
+      "reference_value": false,
+      "reference_source": "namelist_ref"
+    },
+    "namsbc_blk.ln_ncar": {
+      "reason": "Read only by sbc_blk_init, which sbc_init calls only when namsbc ln_blk is true; ln_blk is a compared card field (false). Pinned to the reference run's value, so any change refuses.",
+      "reference_value": true,
+      "reference_source": "namelist_ref"
+    },
+    "namsbc_blk.ln_prec_met": {
+      "reason": "Read only by sbc_blk_init, which sbc_init calls only when namsbc ln_blk is true; ln_blk is a compared card field (false). Pinned to the reference run's value, so any change refuses.",
+      "reference_value": false,
+      "reference_source": "namelist_ref"
+    },
+    "namsbc_blk.ln_skin_cs": {
+      "reason": "Read only by sbc_blk_init, which sbc_init calls only when namsbc ln_blk is true; ln_blk is a compared card field (false). Pinned to the reference run's value, so any change refuses.",
+      "reference_value": false,
+      "reference_source": "namelist_ref"
+    },
+    "namsbc_blk.ln_skin_wl": {
+      "reason": "Read only by sbc_blk_init, which sbc_init calls only when namsbc ln_blk is true; ln_blk is a compared card field (false). Pinned to the reference run's value, so any change refuses.",
+      "reference_value": false,
+      "reference_source": "namelist_ref"
+    },
+    "namsbc_blk.ln_tair_pot": {
+      "reason": "Read only by sbc_blk_init, which sbc_init calls only when namsbc ln_blk is true; ln_blk is a compared card field (false). Pinned to the reference run's value, so any change refuses.",
+      "reference_value": false,
+      "reference_source": "namelist_ref"
+    },
+    "namsbc_blk.nn_frm": {
+      "reason": "Read only by sbc_blk_init, which sbc_init calls only when namsbc ln_blk is true; ln_blk is a compared card field (false). Pinned to the reference run's value, so any change refuses.",
+      "reference_value": 2,
+      "reference_source": "namelist_ref"
+    },
+    "namsbc_blk.nn_iter_algo": {
+      "reason": "Read only by sbc_blk_init, which sbc_init calls only when namsbc ln_blk is true; ln_blk is a compared card field (false). Pinned to the reference run's value, so any change refuses.",
+      "reference_value": 5,
+      "reference_source": "namelist_ref"
+    },
+    "namsbc_blk.rn_cd_ia": {
+      "reason": "Read only by sbc_blk_init, which sbc_init calls only when namsbc ln_blk is true; ln_blk is a compared card field (false). Pinned to the reference run's value, so any change refuses.",
+      "reference_value": 0.0014,
+      "reference_source": "namelist_ref"
+    },
+    "namsbc_blk.rn_ce_ia": {
+      "reason": "Read only by sbc_blk_init, which sbc_init calls only when namsbc ln_blk is true; ln_blk is a compared card field (false). Pinned to the reference run's value, so any change refuses.",
+      "reference_value": 0.0014,
+      "reference_source": "namelist_ref"
+    },
+    "namsbc_blk.rn_cf_ia": {
+      "reason": "Read only by sbc_blk_init, which sbc_init calls only when namsbc ln_blk is true; ln_blk is a compared card field (false). Pinned to the reference run's value, so any change refuses.",
+      "reference_value": 0.2,
+      "reference_source": "namelist_ref"
+    },
+    "namsbc_blk.rn_cf_io": {
+      "reason": "Read only by sbc_blk_init, which sbc_init calls only when namsbc ln_blk is true; ln_blk is a compared card field (false). Pinned to the reference run's value, so any change refuses.",
+      "reference_value": 0.2,
+      "reference_source": "namelist_ref"
+    },
+    "namsbc_blk.rn_ch_ia": {
+      "reason": "Read only by sbc_blk_init, which sbc_init calls only when namsbc ln_blk is true; ln_blk is a compared card field (false). Pinned to the reference run's value, so any change refuses.",
+      "reference_value": 0.0014,
+      "reference_source": "namelist_ref"
+    },
+    "namsbc_blk.rn_cr_ia": {
+      "reason": "Read only by sbc_blk_init, which sbc_init calls only when namsbc ln_blk is true; ln_blk is a compared card field (false). Pinned to the reference run's value, so any change refuses.",
+      "reference_value": 0.2,
+      "reference_source": "namelist_ref"
+    },
+    "namsbc_blk.rn_cr_io": {
+      "reason": "Read only by sbc_blk_init, which sbc_init calls only when namsbc ln_blk is true; ln_blk is a compared card field (false). Pinned to the reference run's value, so any change refuses.",
+      "reference_value": 0.2,
+      "reference_source": "namelist_ref"
+    },
+    "namsbc_blk.rn_cs_ia": {
+      "reason": "Read only by sbc_blk_init, which sbc_init calls only when namsbc ln_blk is true; ln_blk is a compared card field (false). Pinned to the reference run's value, so any change refuses.",
+      "reference_value": 0.0005,
+      "reference_source": "namelist_ref"
+    },
+    "namsbc_blk.rn_cs_io": {
+      "reason": "Read only by sbc_blk_init, which sbc_init calls only when namsbc ln_blk is true; ln_blk is a compared card field (false). Pinned to the reference run's value, so any change refuses.",
+      "reference_value": 0.002,
+      "reference_source": "namelist_ref"
+    },
+    "namsbc_blk.rn_efac": {
+      "reason": "Read only by sbc_blk_init, which sbc_init calls only when namsbc ln_blk is true; ln_blk is a compared card field (false). Pinned to the reference run's value, so any change refuses.",
+      "reference_value": 1.0,
+      "reference_source": "namelist_ref"
+    },
+    "namsbc_blk.rn_pfac": {
+      "reason": "Read only by sbc_blk_init, which sbc_init calls only when namsbc ln_blk is true; ln_blk is a compared card field (false). Pinned to the reference run's value, so any change refuses.",
+      "reference_value": 1.0,
+      "reference_source": "namelist_ref"
+    },
+    "namsbc_blk.rn_stau_a": {
+      "reason": "Read only by sbc_blk_init, which sbc_init calls only when namsbc ln_blk is true; ln_blk is a compared card field (false). Pinned to the reference run's value, so any change refuses.",
+      "reference_value": -0.0029,
+      "reference_source": "namelist_ref"
+    },
+    "namsbc_blk.rn_stau_b": {
+      "reason": "Read only by sbc_blk_init, which sbc_init calls only when namsbc ln_blk is true; ln_blk is a compared card field (false). Pinned to the reference run's value, so any change refuses.",
+      "reference_value": 0.008,
+      "reference_source": "namelist_ref"
+    },
+    "namsbc_blk.rn_zqt": {
+      "reason": "Read only by sbc_blk_init, which sbc_init calls only when namsbc ln_blk is true; ln_blk is a compared card field (false). Pinned to the reference run's value, so any change refuses.",
+      "reference_value": 10.0,
+      "reference_source": "namelist_ref"
+    },
+    "namsbc_blk.rn_zu": {
+      "reason": "Read only by sbc_blk_init, which sbc_init calls only when namsbc ln_blk is true; ln_blk is a compared card field (false). Pinned to the reference run's value, so any change refuses.",
+      "reference_value": 10.0,
+      "reference_source": "namelist_ref"
+    },
+    "namsbc_blk.sn_cc": {
+      "reason": "Read only by sbc_blk_init, which sbc_init calls only when namsbc ln_blk is true; ln_blk is a compared card field (false). Pinned to the reference run's value, so any change refuses.",
+      "reference_value": "'NOT USED'                   ,   24.        , 'CC'      ,   .false.   , .true. , 'yearly'  , 'weights_core_orca2_bilinear_noc.nc' , ''       , ''",
+      "reference_source": "namelist_ref"
+    },
+    "namsbc_blk.sn_hpgi": {
+      "reason": "Read only by sbc_blk_init, which sbc_init calls only when namsbc ln_blk is true; ln_blk is a compared card field (false). Pinned to the reference run's value, so any change refuses.",
+      "reference_value": "'NOT USED'                   ,   24.        , 'uhpg'    ,   .false.   , .false., 'monthly' , 'weights_ERAI3D_F128_2_ORCA2_bicubic', 'UG'     , ''",
+      "reference_source": "namelist_ref"
+    },
+    "namsbc_blk.sn_hpgj": {
+      "reason": "Read only by sbc_blk_init, which sbc_init calls only when namsbc ln_blk is true; ln_blk is a compared card field (false). Pinned to the reference run's value, so any change refuses.",
+      "reference_value": "'NOT USED'                   ,   24.        , 'vhpg'    ,   .false.   , .false., 'monthly' , 'weights_ERAI3D_F128_2_ORCA2_bicubic', 'VG'     , ''",
+      "reference_source": "namelist_ref"
+    },
+    "namsbc_blk.sn_humi": {
+      "reason": "Read only by sbc_blk_init, which sbc_init calls only when namsbc ln_blk is true; ln_blk is a compared card field (false). Pinned to the reference run's value, so any change refuses.",
+      "reference_value": "'q_10.15JUNE2009_fill'       ,    6.        , 'Q_10_MOD',   .false.   , .true. , 'yearly'  , 'weights_core_orca2_bilinear_noc.nc' , ''       , ''",
+      "reference_source": "namelist_ref"
+    },
+    "namsbc_blk.sn_prec": {
+      "reason": "Read only by sbc_blk_init, which sbc_init calls only when namsbc ln_blk is true; ln_blk is a compared card field (false). Pinned to the reference run's value, so any change refuses.",
+      "reference_value": "'ncar_precip.15JUNE2009_fill',   -1.        , 'PRC_MOD1',   .false.   , .true. , 'yearly'  , 'weights_core_orca2_bilinear_noc.nc' , ''       , ''",
+      "reference_source": "namelist_ref"
+    },
+    "namsbc_blk.sn_qlw": {
+      "reason": "Read only by sbc_blk_init, which sbc_init calls only when namsbc ln_blk is true; ln_blk is a compared card field (false). Pinned to the reference run's value, so any change refuses.",
+      "reference_value": "'ncar_rad.15JUNE2009_fill'   ,   24.        , 'LWDN_MOD',   .false.   , .true. , 'yearly'  , 'weights_core_orca2_bilinear_noc.nc' , ''       , ''",
+      "reference_source": "namelist_ref"
+    },
+    "namsbc_blk.sn_qsr": {
+      "reason": "Read only by sbc_blk_init, which sbc_init calls only when namsbc ln_blk is true; ln_blk is a compared card field (false). Pinned to the reference run's value, so any change refuses.",
+      "reference_value": "'ncar_rad.15JUNE2009_fill'   ,   24.        , 'SWDN_MOD',   .false.   , .true. , 'yearly'  , 'weights_core_orca2_bilinear_noc.nc' , ''       , ''",
+      "reference_source": "namelist_ref"
+    },
+    "namsbc_blk.sn_slp": {
+      "reason": "Read only by sbc_blk_init, which sbc_init calls only when namsbc ln_blk is true; ln_blk is a compared card field (false). Pinned to the reference run's value, so any change refuses.",
+      "reference_value": "'slp.15JUNE2009_fill'        ,    6.        , 'SLP'     ,   .false.   , .true. , 'yearly'  , 'weights_core_orca2_bilinear_noc.nc' , ''       , ''",
+      "reference_source": "namelist_ref"
+    },
+    "namsbc_blk.sn_snow": {
+      "reason": "Read only by sbc_blk_init, which sbc_init calls only when namsbc ln_blk is true; ln_blk is a compared card field (false). Pinned to the reference run's value, so any change refuses.",
+      "reference_value": "'ncar_precip.15JUNE2009_fill',   -1.        , 'SNOW'    ,   .false.   , .true. , 'yearly'  , 'weights_core_orca2_bilinear_noc.nc' , ''       , ''",
+      "reference_source": "namelist_ref"
+    },
+    "namsbc_blk.sn_tair": {
+      "reason": "Read only by sbc_blk_init, which sbc_init calls only when namsbc ln_blk is true; ln_blk is a compared card field (false). Pinned to the reference run's value, so any change refuses.",
+      "reference_value": "'t_10.15JUNE2009_fill'       ,    6.        , 'T_10_MOD',   .false.   , .true. , 'yearly'  , 'weights_core_orca2_bilinear_noc.nc' , ''       , ''",
+      "reference_source": "namelist_ref"
+    },
+    "namsbc_blk.sn_uoatm": {
+      "reason": "Read only by sbc_blk_init, which sbc_init calls only when namsbc ln_blk is true; ln_blk is a compared card field (false). Pinned to the reference run's value, so any change refuses.",
+      "reference_value": "'NOT USED'                   ,    6.        , 'UOATM'   ,   .false.   , .true. , 'yearly'  , 'weights_core_orca2_bilinear_noc.nc' , 'Uoceatm', ''",
+      "reference_source": "namelist_ref"
+    },
+    "namsbc_blk.sn_voatm": {
+      "reason": "Read only by sbc_blk_init, which sbc_init calls only when namsbc ln_blk is true; ln_blk is a compared card field (false). Pinned to the reference run's value, so any change refuses.",
+      "reference_value": "'NOT USED'                   ,    6.        , 'VOATM'   ,   .false.   , .true. , 'yearly'  , 'weights_core_orca2_bilinear_noc.nc' , 'Voceatm', ''",
+      "reference_source": "namelist_ref"
+    },
+    "namsbc_blk.sn_wndi": {
+      "reason": "Read only by sbc_blk_init, which sbc_init calls only when namsbc ln_blk is true; ln_blk is a compared card field (false). Pinned to the reference run's value, so any change refuses.",
+      "reference_value": "'u_10.15JUNE2009_fill'       ,    6.        , 'U_10_MOD',   .false.   , .true. , 'yearly'  , 'weights_core_orca2_bicubic_noc.nc'  , 'Uwnd'   , ''",
+      "reference_source": "namelist_ref"
+    },
+    "namsbc_blk.sn_wndj": {
+      "reason": "Read only by sbc_blk_init, which sbc_init calls only when namsbc ln_blk is true; ln_blk is a compared card field (false). Pinned to the reference run's value, so any change refuses.",
+      "reference_value": "'v_10.15JUNE2009_fill'       ,    6.        , 'V_10_MOD',   .false.   , .true. , 'yearly'  , 'weights_core_orca2_bicubic_noc.nc'  , 'Vwnd'   , ''",
+      "reference_source": "namelist_ref"
+    },
+    "namsbc_cpl.ln_scale_ice_flux": {
+      "reason": "Read only by sbc_cpl_init, which sbc_init calls only when lk_oasis is true; lk_oasis is initialised false ('OASIS unused') and never set in this build, which has no OASIS key. Pinned to the reference run's value, so any change refuses.",
+      "reference_value": false,
+      "reference_source": "namelist_ref"
+    },
+    "namsbc_cpl.ln_usecplmask": {
+      "reason": "Read only by sbc_cpl_init, which sbc_init calls only when lk_oasis is true; lk_oasis is initialised false ('OASIS unused') and never set in this build, which has no OASIS key. Pinned to the reference run's value, so any change refuses.",
+      "reference_value": false,
+      "reference_source": "namelist_ref"
+    },
+    "namsbc_cpl.nn_cats_cpl": {
+      "reason": "Read only by sbc_cpl_init, which sbc_init calls only when lk_oasis is true; lk_oasis is initialised false ('OASIS unused') and never set in this build, which has no OASIS key. Pinned to the reference run's value, so any change refuses.",
+      "reference_value": 5,
+      "reference_source": "namelist_ref"
+    },
+    "namsbc_cpl.nn_cplmodel": {
+      "reason": "Read only by sbc_cpl_init, which sbc_init calls only when lk_oasis is true; lk_oasis is initialised false ('OASIS unused') and never set in this build, which has no OASIS key. Pinned to the reference run's value, so any change refuses.",
+      "reference_value": 1,
+      "reference_source": "namelist_ref"
+    },
+    "namsbc_cpl.sn_rcv_bhd": {
+      "reason": "Read only by sbc_cpl_init, which sbc_init calls only when lk_oasis is true; lk_oasis is initialised false ('OASIS unused') and never set in this build, which has no OASIS key. Pinned to the reference run's value, so any change refuses.",
+      "reference_value": "'none'                 ,    'no'    ,     ''      ,         ''           ,   ''",
+      "reference_source": "namelist_ref"
+    },
+    "namsbc_cpl.sn_rcv_cal": {
+      "reason": "Read only by sbc_cpl_init, which sbc_init calls only when lk_oasis is true; lk_oasis is initialised false ('OASIS unused') and never set in this build, which has no OASIS key. Pinned to the reference run's value, so any change refuses.",
+      "reference_value": "'coupled'              ,    'no'    ,     ''      ,         ''           ,   ''",
+      "reference_source": "namelist_ref"
+    },
+    "namsbc_cpl.sn_rcv_charn": {
+      "reason": "Read only by sbc_cpl_init, which sbc_init calls only when lk_oasis is true; lk_oasis is initialised false ('OASIS unused') and never set in this build, which has no OASIS key. Pinned to the reference run's value, so any change refuses.",
+      "reference_value": "'none'                 ,    'no'    ,     ''      ,         ''           ,   ''",
+      "reference_source": "namelist_ref"
+    },
+    "namsbc_cpl.sn_rcv_co2": {
+      "reason": "Read only by sbc_cpl_init, which sbc_init calls only when lk_oasis is true; lk_oasis is initialised false ('OASIS unused') and never set in this build, which has no OASIS key. Pinned to the reference run's value, so any change refuses.",
+      "reference_value": "'coupled'              ,    'no'    ,     ''      ,         ''           ,   ''",
+      "reference_source": "namelist_ref"
+    },
+    "namsbc_cpl.sn_rcv_dqnsdt": {
+      "reason": "Read only by sbc_cpl_init, which sbc_init calls only when lk_oasis is true; lk_oasis is initialised false ('OASIS unused') and never set in this build, which has no OASIS key. Pinned to the reference run's value, so any change refuses.",
+      "reference_value": "'coupled'              ,    'no'    ,     ''      ,         ''           ,   ''",
+      "reference_source": "namelist_ref"
+    },
+    "namsbc_cpl.sn_rcv_emp": {
+      "reason": "Read only by sbc_cpl_init, which sbc_init calls only when lk_oasis is true; lk_oasis is initialised false ('OASIS unused') and never set in this build, which has no OASIS key. Pinned to the reference run's value, so any change refuses.",
+      "reference_value": "'conservative'         ,    'no'    ,     ''      ,         ''           ,   ''",
+      "reference_source": "namelist_ref"
+    },
+    "namsbc_cpl.sn_rcv_hsig": {
+      "reason": "Read only by sbc_cpl_init, which sbc_init calls only when lk_oasis is true; lk_oasis is initialised false ('OASIS unused') and never set in this build, which has no OASIS key. Pinned to the reference run's value, so any change refuses.",
+      "reference_value": "'none'                 ,    'no'    ,     ''      ,         ''           ,   ''",
+      "reference_source": "namelist_ref"
+    },
+    "namsbc_cpl.sn_rcv_icb": {
+      "reason": "Read only by sbc_cpl_init, which sbc_init calls only when lk_oasis is true; lk_oasis is initialised false ('OASIS unused') and never set in this build, which has no OASIS key. Pinned to the reference run's value, so any change refuses.",
+      "reference_value": "'none'                 ,    'no'    ,     ''      ,         ''           ,   ''",
+      "reference_source": "namelist_ref"
+    },
+    "namsbc_cpl.sn_rcv_iceflx": {
+      "reason": "Read only by sbc_cpl_init, which sbc_init calls only when lk_oasis is true; lk_oasis is initialised false ('OASIS unused') and never set in this build, which has no OASIS key. Pinned to the reference run's value, so any change refuses.",
+      "reference_value": "'none'                 ,    'no'    ,     ''      ,         ''           ,   ''",
+      "reference_source": "namelist_ref"
+    },
+    "namsbc_cpl.sn_rcv_isf": {
+      "reason": "Read only by sbc_cpl_init, which sbc_init calls only when lk_oasis is true; lk_oasis is initialised false ('OASIS unused') and never set in this build, which has no OASIS key. Pinned to the reference run's value, so any change refuses.",
+      "reference_value": "'none'                 ,    'no'    ,     ''      ,         ''           ,   ''",
+      "reference_source": "namelist_ref"
+    },
+    "namsbc_cpl.sn_rcv_mslp": {
+      "reason": "Read only by sbc_cpl_init, which sbc_init calls only when lk_oasis is true; lk_oasis is initialised false ('OASIS unused') and never set in this build, which has no OASIS key. Pinned to the reference run's value, so any change refuses.",
+      "reference_value": "'none'                 ,    'no'    ,     ''      ,         ''           ,   ''",
+      "reference_source": "namelist_ref"
+    },
+    "namsbc_cpl.sn_rcv_phioc": {
+      "reason": "Read only by sbc_cpl_init, which sbc_init calls only when lk_oasis is true; lk_oasis is initialised false ('OASIS unused') and never set in this build, which has no OASIS key. Pinned to the reference run's value, so any change refuses.",
+      "reference_value": "'none'                 ,    'no'    ,     ''      ,         ''           ,   ''",
+      "reference_source": "namelist_ref"
+    },
+    "namsbc_cpl.sn_rcv_qns": {
+      "reason": "Read only by sbc_cpl_init, which sbc_init calls only when lk_oasis is true; lk_oasis is initialised false ('OASIS unused') and never set in this build, which has no OASIS key. Pinned to the reference run's value, so any change refuses.",
+      "reference_value": "'oce and ice'          ,    'no'    ,     ''      ,         ''           ,   ''",
+      "reference_source": "namelist_ref"
+    },
+    "namsbc_cpl.sn_rcv_qsr": {
+      "reason": "Read only by sbc_cpl_init, which sbc_init calls only when lk_oasis is true; lk_oasis is initialised false ('OASIS unused') and never set in this build, which has no OASIS key. Pinned to the reference run's value, so any change refuses.",
+      "reference_value": "'oce and ice'          ,    'no'    ,     ''      ,         ''           ,   ''",
+      "reference_source": "namelist_ref"
+    },
+    "namsbc_cpl.sn_rcv_qtrice": {
+      "reason": "Read only by sbc_cpl_init, which sbc_init calls only when lk_oasis is true; lk_oasis is initialised false ('OASIS unused') and never set in this build, which has no OASIS key. Pinned to the reference run's value, so any change refuses.",
+      "reference_value": "'none'                 ,    'no'    ,     ''      ,         ''           ,   ''",
+      "reference_source": "namelist_ref"
+    },
+    "namsbc_cpl.sn_rcv_rnf": {
+      "reason": "Read only by sbc_cpl_init, which sbc_init calls only when lk_oasis is true; lk_oasis is initialised false ('OASIS unused') and never set in this build, which has no OASIS key. Pinned to the reference run's value, so any change refuses.",
+      "reference_value": "'coupled'              ,    'no'    ,     ''      ,         ''           ,   ''",
+      "reference_source": "namelist_ref"
+    },
+    "namsbc_cpl.sn_rcv_sdrfx": {
+      "reason": "Read only by sbc_cpl_init, which sbc_init calls only when lk_oasis is true; lk_oasis is initialised false ('OASIS unused') and never set in this build, which has no OASIS key. Pinned to the reference run's value, so any change refuses.",
+      "reference_value": "'none'                 ,    'no'    ,     ''      ,         ''           ,   ''",
+      "reference_source": "namelist_ref"
+    },
+    "namsbc_cpl.sn_rcv_sdrfy": {
+      "reason": "Read only by sbc_cpl_init, which sbc_init calls only when lk_oasis is true; lk_oasis is initialised false ('OASIS unused') and never set in this build, which has no OASIS key. Pinned to the reference run's value, so any change refuses.",
+      "reference_value": "'none'                 ,    'no'    ,     ''      ,         ''           ,   ''",
+      "reference_source": "namelist_ref"
+    },
+    "namsbc_cpl.sn_rcv_tau": {
+      "reason": "Read only by sbc_cpl_init, which sbc_init calls only when lk_oasis is true; lk_oasis is initialised false ('OASIS unused') and never set in this build, which has no OASIS key. Pinned to the reference run's value, so any change refuses.",
+      "reference_value": "'oce only'             ,    'no'    , 'cartesian' , 'eastward-northward' ,   ''",
+      "reference_source": "namelist_ref"
+    },
+    "namsbc_cpl.sn_rcv_taumod": {
+      "reason": "Read only by sbc_cpl_init, which sbc_init calls only when lk_oasis is true; lk_oasis is initialised false ('OASIS unused') and never set in this build, which has no OASIS key. Pinned to the reference run's value, so any change refuses.",
+      "reference_value": "'coupled'              ,    'no'    ,     ''      ,         ''           ,   ''",
+      "reference_source": "namelist_ref"
+    },
+    "namsbc_cpl.sn_rcv_taw": {
+      "reason": "Read only by sbc_cpl_init, which sbc_init calls only when lk_oasis is true; lk_oasis is initialised false ('OASIS unused') and never set in this build, which has no OASIS key. Pinned to the reference run's value, so any change refuses.",
+      "reference_value": "'none'                 ,    'no'    ,     ''      ,         ''           ,   ''",
+      "reference_source": "namelist_ref"
+    },
+    "namsbc_cpl.sn_rcv_ts_ice": {
+      "reason": "Read only by sbc_cpl_init, which sbc_init calls only when lk_oasis is true; lk_oasis is initialised false ('OASIS unused') and never set in this build, which has no OASIS key. Pinned to the reference run's value, so any change refuses.",
+      "reference_value": "'none'                 ,    'no'    ,     ''      ,         ''           ,   ''",
+      "reference_source": "namelist_ref"
+    },
+    "namsbc_cpl.sn_rcv_tusd": {
+      "reason": "Read only by sbc_cpl_init, which sbc_init calls only when lk_oasis is true; lk_oasis is initialised false ('OASIS unused') and never set in this build, which has no OASIS key. Pinned to the reference run's value, so any change refuses.",
+      "reference_value": "'none'                 ,    'no'    ,     ''      ,         ''           ,   ''",
+      "reference_source": "namelist_ref"
+    },
+    "namsbc_cpl.sn_rcv_tvsd": {
+      "reason": "Read only by sbc_cpl_init, which sbc_init calls only when lk_oasis is true; lk_oasis is initialised false ('OASIS unused') and never set in this build, which has no OASIS key. Pinned to the reference run's value, so any change refuses.",
+      "reference_value": "'none'                 ,    'no'    ,     ''      ,         ''           ,   ''",
+      "reference_source": "namelist_ref"
+    },
+    "namsbc_cpl.sn_rcv_w10m": {
+      "reason": "Read only by sbc_cpl_init, which sbc_init calls only when lk_oasis is true; lk_oasis is initialised false ('OASIS unused') and never set in this build, which has no OASIS key. Pinned to the reference run's value, so any change refuses.",
+      "reference_value": "'none'                 ,    'no'    ,     ''      ,         ''           ,   ''",
+      "reference_source": "namelist_ref"
+    },
+    "namsbc_cpl.sn_rcv_wdrag": {
+      "reason": "Read only by sbc_cpl_init, which sbc_init calls only when lk_oasis is true; lk_oasis is initialised false ('OASIS unused') and never set in this build, which has no OASIS key. Pinned to the reference run's value, so any change refuses.",
+      "reference_value": "'none'                 ,    'no'    ,     ''      ,         ''           ,   ''",
+      "reference_source": "namelist_ref"
+    },
+    "namsbc_cpl.sn_rcv_wnum": {
+      "reason": "Read only by sbc_cpl_init, which sbc_init calls only when lk_oasis is true; lk_oasis is initialised false ('OASIS unused') and never set in this build, which has no OASIS key. Pinned to the reference run's value, so any change refuses.",
+      "reference_value": "'none'                 ,    'no'    ,     ''      ,         ''           ,   ''",
+      "reference_source": "namelist_ref"
+    },
+    "namsbc_cpl.sn_rcv_wper": {
+      "reason": "Read only by sbc_cpl_init, which sbc_init calls only when lk_oasis is true; lk_oasis is initialised false ('OASIS unused') and never set in this build, which has no OASIS key. Pinned to the reference run's value, so any change refuses.",
+      "reference_value": "'none'                 ,    'no'    ,     ''      ,         ''           ,   ''",
+      "reference_source": "namelist_ref"
+    },
+    "namsbc_cpl.sn_rcv_wstrf": {
+      "reason": "Read only by sbc_cpl_init, which sbc_init calls only when lk_oasis is true; lk_oasis is initialised false ('OASIS unused') and never set in this build, which has no OASIS key. Pinned to the reference run's value, so any change refuses.",
+      "reference_value": "'none'                 ,    'no'    ,     ''      ,         ''           ,   ''",
+      "reference_source": "namelist_ref"
+    },
+    "namsbc_cpl.sn_snd_alb": {
+      "reason": "Read only by sbc_cpl_init, which sbc_init calls only when lk_oasis is true; lk_oasis is initialised false ('OASIS unused') and never set in this build, which has no OASIS key. Pinned to the reference run's value, so any change refuses.",
+      "reference_value": "'weighted ice'         ,    'no'    ,     ''      ,         ''           ,   ''",
+      "reference_source": "namelist_ref"
+    },
+    "namsbc_cpl.sn_snd_co2": {
+      "reason": "Read only by sbc_cpl_init, which sbc_init calls only when lk_oasis is true; lk_oasis is initialised false ('OASIS unused') and never set in this build, which has no OASIS key. Pinned to the reference run's value, so any change refuses.",
+      "reference_value": "'coupled'              ,    'no'    ,     ''      ,         ''           ,   ''",
+      "reference_source": "namelist_ref"
+    },
+    "namsbc_cpl.sn_snd_cond": {
+      "reason": "Read only by sbc_cpl_init, which sbc_init calls only when lk_oasis is true; lk_oasis is initialised false ('OASIS unused') and never set in this build, which has no OASIS key. Pinned to the reference run's value, so any change refuses.",
+      "reference_value": "'weighted ice'         ,    'no'    ,     ''      ,         ''           ,   ''",
+      "reference_source": "namelist_ref"
+    },
+    "namsbc_cpl.sn_snd_crt": {
+      "reason": "Read only by sbc_cpl_init, which sbc_init calls only when lk_oasis is true; lk_oasis is initialised false ('OASIS unused') and never set in this build, which has no OASIS key. Pinned to the reference run's value, so any change refuses.",
+      "reference_value": "'none'                 ,    'no'    , 'spherical' , 'eastward-northward' ,  'T'",
+      "reference_source": "namelist_ref"
+    },
+    "namsbc_cpl.sn_snd_crtw": {
+      "reason": "Read only by sbc_cpl_init, which sbc_init calls only when lk_oasis is true; lk_oasis is initialised false ('OASIS unused') and never set in this build, which has no OASIS key. Pinned to the reference run's value, so any change refuses.",
+      "reference_value": "'none'                 ,    'no'    ,     ''      ,         ''           , 'U,V'",
+      "reference_source": "namelist_ref"
+    },
+    "namsbc_cpl.sn_snd_ifrac": {
+      "reason": "Read only by sbc_cpl_init, which sbc_init calls only when lk_oasis is true; lk_oasis is initialised false ('OASIS unused') and never set in this build, which has no OASIS key. Pinned to the reference run's value, so any change refuses.",
+      "reference_value": "'none'                 ,    'no'    ,     ''      ,         ''           ,   ''",
+      "reference_source": "namelist_ref"
+    },
+    "namsbc_cpl.sn_snd_mpnd": {
+      "reason": "Read only by sbc_cpl_init, which sbc_init calls only when lk_oasis is true; lk_oasis is initialised false ('OASIS unused') and never set in this build, which has no OASIS key. Pinned to the reference run's value, so any change refuses.",
+      "reference_value": "'weighted ice'         ,    'no'    ,     ''      ,         ''           ,   ''",
+      "reference_source": "namelist_ref"
+    },
+    "namsbc_cpl.sn_snd_sstfrz": {
+      "reason": "Read only by sbc_cpl_init, which sbc_init calls only when lk_oasis is true; lk_oasis is initialised false ('OASIS unused') and never set in this build, which has no OASIS key. Pinned to the reference run's value, so any change refuses.",
+      "reference_value": "'coupled'              ,    'no'    ,     ''      ,         ''           ,   ''",
+      "reference_source": "namelist_ref"
+    },
+    "namsbc_cpl.sn_snd_temp": {
+      "reason": "Read only by sbc_cpl_init, which sbc_init calls only when lk_oasis is true; lk_oasis is initialised false ('OASIS unused') and never set in this build, which has no OASIS key. Pinned to the reference run's value, so any change refuses.",
+      "reference_value": "'weighted oce and ice' ,    'no'    ,     ''      ,         ''           ,   ''",
+      "reference_source": "namelist_ref"
+    },
+    "namsbc_cpl.sn_snd_thick": {
+      "reason": "Read only by sbc_cpl_init, which sbc_init calls only when lk_oasis is true; lk_oasis is initialised false ('OASIS unused') and never set in this build, which has no OASIS key. Pinned to the reference run's value, so any change refuses.",
+      "reference_value": "'none'                 ,    'no'    ,     ''      ,         ''           ,   ''",
+      "reference_source": "namelist_ref"
+    },
+    "namsbc_cpl.sn_snd_thick1": {
+      "reason": "Read only by sbc_cpl_init, which sbc_init calls only when lk_oasis is true; lk_oasis is initialised false ('OASIS unused') and never set in this build, which has no OASIS key. Pinned to the reference run's value, so any change refuses.",
+      "reference_value": "'ice and snow'         ,    'no'    ,     ''      ,         ''           ,   ''",
+      "reference_source": "namelist_ref"
+    },
+    "namsbc_cpl.sn_snd_ttilyr": {
+      "reason": "Read only by sbc_cpl_init, which sbc_init calls only when lk_oasis is true; lk_oasis is initialised false ('OASIS unused') and never set in this build, which has no OASIS key. Pinned to the reference run's value, so any change refuses.",
+      "reference_value": "'weighted ice'         ,    'no'    ,     ''      ,         ''           ,   ''",
+      "reference_source": "namelist_ref"
+    },
+    "namsbc_cpl.sn_snd_wlev": {
+      "reason": "Read only by sbc_cpl_init, which sbc_init calls only when lk_oasis is true; lk_oasis is initialised false ('OASIS unused') and never set in this build, which has no OASIS key. Pinned to the reference run's value, so any change refuses.",
+      "reference_value": "'coupled'              ,    'no'    ,     ''      ,         ''           ,   ''",
+      "reference_source": "namelist_ref"
+    },
+    "namsbc_flx.cn_dir": {
+      "reason": "Read only by sbc_flx, which sbc calls only for the flux formulation selected by namsbc ln_flx; ln_flx is a compared card field (false). Pinned to the reference run's value, so any change refuses.",
+      "reference_value": "./",
+      "reference_source": "namelist_ref"
+    },
+    "namsbc_flx.sn_emp": {
+      "reason": "Read only by sbc_flx, which sbc calls only for the flux formulation selected by namsbc ln_flx; ln_flx is a compared card field (false). Pinned to the reference run's value, so any change refuses.",
+      "reference_value": "'emp'                   ,        24.        , 'emp'     , .false.     , .false., 'yearly'  , ''               , ''       , ''",
+      "reference_source": "namelist_ref"
+    },
+    "namsbc_flx.sn_qsr": {
+      "reason": "Read only by sbc_flx, which sbc calls only for the flux formulation selected by namsbc ln_flx; ln_flx is a compared card field (false). Pinned to the reference run's value, so any change refuses.",
+      "reference_value": "'qsr'                   ,        24.        , 'qsr'     , .false.     , .false., 'yearly'  , ''               , ''       , ''",
+      "reference_source": "namelist_ref"
+    },
+    "namsbc_flx.sn_qtot": {
+      "reason": "Read only by sbc_flx, which sbc calls only for the flux formulation selected by namsbc ln_flx; ln_flx is a compared card field (false). Pinned to the reference run's value, so any change refuses.",
+      "reference_value": "'qtot'                  ,        24.        , 'qtot'    , .false.     , .false., 'yearly'  , ''               , ''       , ''",
+      "reference_source": "namelist_ref"
+    },
+    "namsbc_flx.sn_utau": {
+      "reason": "Read only by sbc_flx, which sbc calls only for the flux formulation selected by namsbc ln_flx; ln_flx is a compared card field (false). Pinned to the reference run's value, so any change refuses.",
+      "reference_value": "'utau'                  ,        24.        , 'utau'    , .false.     , .false., 'yearly'  , ''               , ''       , ''",
+      "reference_source": "namelist_ref"
+    },
+    "namsbc_flx.sn_vtau": {
+      "reason": "Read only by sbc_flx, which sbc calls only for the flux formulation selected by namsbc ln_flx; ln_flx is a compared card field (false). Pinned to the reference run's value, so any change refuses.",
+      "reference_value": "'vtau'                  ,        24.        , 'vtau'    , .false.     , .false., 'yearly'  , ''               , ''       , ''",
+      "reference_source": "namelist_ref"
+    },
+    "namsbc_fwb.ln_hvolg_var": {
+      "reason": "Read only by sbc_fwb, which sbc calls only when namsbc nn_fwb is non-zero; nn_fwb is a compared card field (0). Pinned to the reference run's value, so any change refuses.",
+      "reference_value": false,
+      "reference_source": "namelist_ref"
+    },
+    "namsbc_fwb.nn_fwb_voltype": {
+      "reason": "Read only by sbc_fwb, which sbc calls only when namsbc nn_fwb is non-zero; nn_fwb is a compared card field (0). Pinned to the reference run's value, so any change refuses.",
+      "reference_value": 1,
+      "reference_source": "namelist_ref"
+    },
+    "namsbc_fwb.nn_hvolg_mth": {
+      "reason": "Read only by sbc_fwb, which sbc calls only when namsbc nn_fwb is non-zero; nn_fwb is a compared card field (0). Pinned to the reference run's value, so any change refuses.",
+      "reference_value": 8,
+      "reference_source": "namelist_ref"
+    },
+    "namsbc_fwb.rn_fwb0": {
+      "reason": "Read only by sbc_fwb, which sbc calls only when namsbc nn_fwb is non-zero; nn_fwb is a compared card field (0). Pinned to the reference run's value, so any change refuses.",
+      "reference_value": 0.0,
+      "reference_source": "namelist_ref"
+    },
+    "namsbc_fwb.rn_hvolg_amp": {
+      "reason": "Read only by sbc_fwb, which sbc calls only when namsbc nn_fwb is non-zero; nn_fwb is a compared card field (0). Pinned to the reference run's value, so any change refuses.",
+      "reference_value": 0.017,
+      "reference_source": "namelist_ref"
+    },
+    "namsbc_fwb.rn_hvolg_trd": {
+      "reason": "Read only by sbc_fwb, which sbc calls only when namsbc nn_fwb is non-zero; nn_fwb is a compared card field (0). Pinned to the reference run's value, so any change refuses.",
+      "reference_value": 0.0,
+      "reference_source": "namelist_ref"
+    },
+    "namsbc_iif.cn_dir": {
+      "reason": "Read only by sbc_ice_if, which sbc calls only when namsbc nn_ice is 1; nn_ice is a compared card field (0). Pinned to the reference run's value, so any change refuses.",
+      "reference_value": "./",
+      "reference_source": "namelist_ref"
+    },
+    "namsbc_iif.sn_ice": {
+      "reason": "Read only by sbc_ice_if, which sbc calls only when namsbc nn_ice is 1; nn_ice is a compared card field (0). Pinned to the reference run's value, so any change refuses.",
+      "reference_value": "'ice_cover_clim.nc'      ,        -12.       ,'ice_cover',   .true.    , .true.  , 'yearly'  ,   ''            ,   ''     ,   ''",
+      "reference_source": "namelist_ref"
+    },
+    "namsbc_rnf.cn_dir": {
+      "reason": "Runoff option read by sbc_rnf_init, which sbc_init always calls and which returns right after the read when namsbc ln_rnf is false; ln_rnf is a compared card field (false). No card counterpart. Pinned to the reference run's value, so any change refuses.",
+      "reference_value": "./",
+      "reference_source": "output.namelist.dyn"
+    },
+    "namsbc_rnf.ln_rnf_depth": {
+      "reason": "Runoff option read by sbc_rnf_init, which sbc_init always calls and which returns right after the read when namsbc ln_rnf is false; ln_rnf is a compared card field (false). No card counterpart. Pinned to the reference run's value, so any change refuses.",
+      "reference_value": false,
+      "reference_source": "output.namelist.dyn"
+    },
+    "namsbc_rnf.ln_rnf_depth_ini": {
+      "reason": "Runoff option read by sbc_rnf_init, which sbc_init always calls and which returns right after the read when namsbc ln_rnf is false; ln_rnf is a compared card field (false). No card counterpart. Pinned to the reference run's value, so any change refuses.",
+      "reference_value": false,
+      "reference_source": "output.namelist.dyn"
+    },
+    "namsbc_rnf.ln_rnf_icb": {
+      "reason": "Runoff option read by sbc_rnf_init, which sbc_init always calls and which returns right after the read when namsbc ln_rnf is false; ln_rnf is a compared card field (false). No card counterpart. Pinned to the reference run's value, so any change refuses.",
+      "reference_value": false,
+      "reference_source": "output.namelist.dyn"
+    },
+    "namsbc_rnf.ln_rnf_mouth": {
+      "reason": "Runoff option read by sbc_rnf_init, which sbc_init always calls and which returns right after the read when namsbc ln_rnf is false; ln_rnf is a compared card field (false). No card counterpart. Pinned to the reference run's value, so any change refuses.",
+      "reference_value": false,
+      "reference_source": "output.namelist.dyn"
+    },
+    "namsbc_rnf.ln_rnf_sal": {
+      "reason": "Runoff option read by sbc_rnf_init, which sbc_init always calls and which returns right after the read when namsbc ln_rnf is false; ln_rnf is a compared card field (false). No card counterpart. Pinned to the reference run's value, so any change refuses.",
+      "reference_value": false,
+      "reference_source": "output.namelist.dyn"
+    },
+    "namsbc_rnf.ln_rnf_tem": {
+      "reason": "Runoff option read by sbc_rnf_init, which sbc_init always calls and which returns right after the read when namsbc ln_rnf is false; ln_rnf is a compared card field (false). No card counterpart. Pinned to the reference run's value, so any change refuses.",
+      "reference_value": false,
+      "reference_source": "output.namelist.dyn"
+    },
+    "namsbc_rnf.nn_rnf_depth_file": {
+      "reason": "Runoff option read by sbc_rnf_init, which sbc_init always calls and which returns right after the read when namsbc ln_rnf is false; ln_rnf is a compared card field (false). No card counterpart. Pinned to the reference run's value, so any change refuses.",
+      "reference_value": 0,
+      "reference_source": "output.namelist.dyn"
+    },
+    "namsbc_rnf.rn_avt_rnf": {
+      "reason": "Runoff option read by sbc_rnf_init, which sbc_init always calls and which returns right after the read when namsbc ln_rnf is false; ln_rnf is a compared card field (false). No card counterpart. Pinned to the reference run's value, so any change refuses.",
+      "reference_value": 0.001,
+      "reference_source": "output.namelist.dyn"
+    },
+    "namsbc_rnf.rn_dep_max": {
+      "reason": "Runoff option read by sbc_rnf_init, which sbc_init always calls and which returns right after the read when namsbc ln_rnf is false; ln_rnf is a compared card field (false). No card counterpart. Pinned to the reference run's value, so any change refuses.",
+      "reference_value": 150.0,
+      "reference_source": "output.namelist.dyn"
+    },
+    "namsbc_rnf.rn_hrnf": {
+      "reason": "Runoff option read by sbc_rnf_init, which sbc_init always calls and which returns right after the read when namsbc ln_rnf is false; ln_rnf is a compared card field (false). No card counterpart. Pinned to the reference run's value, so any change refuses.",
+      "reference_value": 15.0,
+      "reference_source": "output.namelist.dyn"
+    },
+    "namsbc_rnf.rn_rfact": {
+      "reason": "Runoff option read by sbc_rnf_init, which sbc_init always calls and which returns right after the read when namsbc ln_rnf is false; ln_rnf is a compared card field (false). No card counterpart. Pinned to the reference run's value, so any change refuses.",
+      "reference_value": 1.0,
+      "reference_source": "output.namelist.dyn"
+    },
+    "namsbc_rnf.rn_rnf_max": {
+      "reason": "Runoff option read by sbc_rnf_init, which sbc_init always calls and which returns right after the read when namsbc ln_rnf is false; ln_rnf is a compared card field (false). No card counterpart. Pinned to the reference run's value, so any change refuses.",
+      "reference_value": 0.0005735,
+      "reference_source": "output.namelist.dyn"
+    },
+    "namsbc_rnf.sn_cnf": {
+      "reason": "Runoff option read by sbc_rnf_init, which sbc_init always calls and which returns right after the read when namsbc ln_rnf is false; ln_rnf is a compared card field (false). No card counterpart. Pinned to the reference run's value, so any change refuses.",
+      "reference_value": {
+        "sn_cnf%clftyp": "yearly",
+        "sn_cnf%clname": "runoff_core_monthly",
+        "sn_cnf%clvar": "socoefr0",
+        "sn_cnf%freqh": -12.0,
+        "sn_cnf%ln_clim": true,
+        "sn_cnf%ln_tint": false,
+        "sn_cnf%lname": "",
+        "sn_cnf%vcomp": "",
+        "sn_cnf%wname": ""
+      },
+      "reference_source": "output.namelist.dyn"
+    },
+    "namsbc_rnf.sn_dep_rnf": {
+      "reason": "Runoff option read by sbc_rnf_init, which sbc_init always calls and which returns right after the read when namsbc ln_rnf is false; ln_rnf is a compared card field (false). No card counterpart. Pinned to the reference run's value, so any change refuses.",
+      "reference_value": {
+        "sn_dep_rnf%clftyp": "yearly",
+        "sn_dep_rnf%clname": "runoffs",
+        "sn_dep_rnf%clvar": "rodepth",
+        "sn_dep_rnf%freqh": -12.0,
+        "sn_dep_rnf%ln_clim": true,
+        "sn_dep_rnf%ln_tint": false,
+        "sn_dep_rnf%lname": "",
+        "sn_dep_rnf%vcomp": "",
+        "sn_dep_rnf%wname": ""
+      },
+      "reference_source": "output.namelist.dyn"
+    },
+    "namsbc_rnf.sn_i_rnf": {
+      "reason": "Runoff option read by sbc_rnf_init, which sbc_init always calls and which returns right after the read when namsbc ln_rnf is false; ln_rnf is a compared card field (false). No card counterpart. Pinned to the reference run's value, so any change refuses.",
+      "reference_value": {
+        "sn_i_rnf%clftyp": "yearly",
+        "sn_i_rnf%clname": "NOT USED",
+        "sn_i_rnf%clvar": "xxxxxxxx",
+        "sn_i_rnf%freqh": 24.0,
+        "sn_i_rnf%ln_clim": true,
+        "sn_i_rnf%ln_tint": true,
+        "sn_i_rnf%lname": "",
+        "sn_i_rnf%vcomp": "",
+        "sn_i_rnf%wname": ""
+      },
+      "reference_source": "output.namelist.dyn"
+    },
+    "namsbc_rnf.sn_rnf": {
+      "reason": "Runoff option read by sbc_rnf_init, which sbc_init always calls and which returns right after the read when namsbc ln_rnf is false; ln_rnf is a compared card field (false). No card counterpart. Pinned to the reference run's value, so any change refuses.",
+      "reference_value": {
+        "sn_rnf%clftyp": "yearly",
+        "sn_rnf%clname": "runoff_core_monthly",
+        "sn_rnf%clvar": "sorunoff",
+        "sn_rnf%freqh": -1.0,
+        "sn_rnf%ln_clim": true,
+        "sn_rnf%ln_tint": true,
+        "sn_rnf%lname": "",
+        "sn_rnf%vcomp": "",
+        "sn_rnf%wname": ""
+      },
+      "reference_source": "output.namelist.dyn"
+    },
+    "namsbc_rnf.sn_s_rnf": {
+      "reason": "Runoff option read by sbc_rnf_init, which sbc_init always calls and which returns right after the read when namsbc ln_rnf is false; ln_rnf is a compared card field (false). No card counterpart. Pinned to the reference run's value, so any change refuses.",
+      "reference_value": {
+        "sn_s_rnf%clftyp": "yearly",
+        "sn_s_rnf%clname": "runoffs",
+        "sn_s_rnf%clvar": "rosaline",
+        "sn_s_rnf%freqh": 24.0,
+        "sn_s_rnf%ln_clim": true,
+        "sn_s_rnf%ln_tint": true,
+        "sn_s_rnf%lname": "",
+        "sn_s_rnf%vcomp": "",
+        "sn_s_rnf%wname": ""
+      },
+      "reference_source": "output.namelist.dyn"
+    },
+    "namsbc_rnf.sn_t_rnf": {
+      "reason": "Runoff option read by sbc_rnf_init, which sbc_init always calls and which returns right after the read when namsbc ln_rnf is false; ln_rnf is a compared card field (false). No card counterpart. Pinned to the reference run's value, so any change refuses.",
+      "reference_value": {
+        "sn_t_rnf%clftyp": "yearly",
+        "sn_t_rnf%clname": "runoffs",
+        "sn_t_rnf%clvar": "rotemper",
+        "sn_t_rnf%freqh": 24.0,
+        "sn_t_rnf%ln_clim": true,
+        "sn_t_rnf%ln_tint": true,
+        "sn_t_rnf%lname": "",
+        "sn_t_rnf%vcomp": "",
+        "sn_t_rnf%wname": ""
+      },
+      "reference_source": "output.namelist.dyn"
+    },
+    "namsbc_ssr.cn_dir": {
+      "reason": "Read only by sbc_ssr_init, which sbc_init calls only when namsbc ln_ssr is true; ln_ssr is a compared card field (false). Pinned to the reference run's value, so any change refuses.",
+      "reference_value": "./",
+      "reference_source": "namelist_ref"
+    },
+    "namsbc_ssr.ln_sssr_bnd": {
+      "reason": "Read only by sbc_ssr_init, which sbc_init calls only when namsbc ln_ssr is true; ln_ssr is a compared card field (false). Pinned to the reference run's value, so any change refuses.",
+      "reference_value": true,
+      "reference_source": "namelist_ref"
+    },
+    "namsbc_ssr.nn_sssr": {
+      "reason": "Read only by sbc_ssr_init, which sbc_init calls only when namsbc ln_ssr is true; ln_ssr is a compared card field (false). Pinned to the reference run's value, so any change refuses.",
+      "reference_value": 0,
+      "reference_source": "namelist_ref"
+    },
+    "namsbc_ssr.nn_sssr_ice": {
+      "reason": "Read only by sbc_ssr_init, which sbc_init calls only when namsbc ln_ssr is true; ln_ssr is a compared card field (false). Pinned to the reference run's value, so any change refuses.",
+      "reference_value": 1,
+      "reference_source": "namelist_ref"
+    },
+    "namsbc_ssr.nn_sstr": {
+      "reason": "Read only by sbc_ssr_init, which sbc_init calls only when namsbc ln_ssr is true; ln_ssr is a compared card field (false). Pinned to the reference run's value, so any change refuses.",
+      "reference_value": 0,
+      "reference_source": "namelist_ref"
+    },
+    "namsbc_ssr.rn_deds": {
+      "reason": "Read only by sbc_ssr_init, which sbc_init calls only when namsbc ln_ssr is true; ln_ssr is a compared card field (false). Pinned to the reference run's value, so any change refuses.",
+      "reference_value": -166.67,
+      "reference_source": "namelist_ref"
+    },
+    "namsbc_ssr.rn_dqdt": {
+      "reason": "Read only by sbc_ssr_init, which sbc_init calls only when namsbc ln_ssr is true; ln_ssr is a compared card field (false). Pinned to the reference run's value, so any change refuses.",
+      "reference_value": -40.0,
+      "reference_source": "namelist_ref"
+    },
+    "namsbc_ssr.rn_sssr_bnd": {
+      "reason": "Read only by sbc_ssr_init, which sbc_init calls only when namsbc ln_ssr is true; ln_ssr is a compared card field (false). Pinned to the reference run's value, so any change refuses.",
+      "reference_value": 4.0,
+      "reference_source": "namelist_ref"
+    },
+    "namsbc_ssr.sn_sss": {
+      "reason": "Read only by sbc_ssr_init, which sbc_init calls only when namsbc ln_ssr is true; ln_ssr is a compared card field (false). Pinned to the reference run's value, so any change refuses.",
+      "reference_value": "'sss_data'              ,        -1.        ,  'sss'    ,    .true.   , .true. , 'yearly'  ,    ''            ,    ''    ,     ''",
+      "reference_source": "namelist_ref"
+    },
+    "namsbc_ssr.sn_sst": {
+      "reason": "Read only by sbc_ssr_init, which sbc_init calls only when namsbc ln_ssr is true; ln_ssr is a compared card field (false). Pinned to the reference run's value, so any change refuses.",
+      "reference_value": "'sst_data'              ,        24.        ,  'sst'    ,    .false.  , .false., 'yearly'  ,    ''            ,    ''    ,     ''",
+      "reference_source": "namelist_ref"
+    },
+    "namsbc_wave.cn_dir": {
+      "reason": "Read by sbc_wave_init (always called by sbc_init) only after the routine has returned for namsbc ln_wave false; ln_wave is a compared card field (false). Pinned to the reference run's value, so any change refuses.",
+      "reference_value": "./",
+      "reference_source": "namelist_ref"
+    },
+    "namsbc_wave.ln_bern_srfc": {
+      "reason": "Read by sbc_wave_init (always called by sbc_init) only after the routine has returned for namsbc ln_wave false; ln_wave is a compared card field (false). Pinned to the reference run's value, so any change refuses.",
+      "reference_value": false,
+      "reference_source": "namelist_ref"
+    },
+    "namsbc_wave.ln_breivikfv_2016": {
+      "reason": "Read by sbc_wave_init (always called by sbc_init) only after the routine has returned for namsbc ln_wave false; ln_wave is a compared card field (false). Pinned to the reference run's value, so any change refuses.",
+      "reference_value": false,
+      "reference_source": "namelist_ref"
+    },
+    "namsbc_wave.ln_cdgw": {
+      "reason": "Read by sbc_wave_init (always called by sbc_init) only after the routine has returned for namsbc ln_wave false; ln_wave is a compared card field (false). Pinned to the reference run's value, so any change refuses.",
+      "reference_value": false,
+      "reference_source": "namelist_ref"
+    },
+    "namsbc_wave.ln_charn": {
+      "reason": "Read by sbc_wave_init (always called by sbc_init) only after the routine has returned for namsbc ln_wave false; ln_wave is a compared card field (false). Pinned to the reference run's value, so any change refuses.",
+      "reference_value": false,
+      "reference_source": "namelist_ref"
+    },
+    "namsbc_wave.ln_phioc": {
+      "reason": "Read by sbc_wave_init (always called by sbc_init) only after the routine has returned for namsbc ln_wave false; ln_wave is a compared card field (false). Pinned to the reference run's value, so any change refuses.",
+      "reference_value": false,
+      "reference_source": "namelist_ref"
+    },
+    "namsbc_wave.ln_sdw": {
+      "reason": "Read by sbc_wave_init (always called by sbc_init) only after the routine has returned for namsbc ln_wave false; ln_wave is a compared card field (false). Pinned to the reference run's value, so any change refuses.",
+      "reference_value": false,
+      "reference_source": "namelist_ref"
+    },
+    "namsbc_wave.ln_stcor": {
+      "reason": "Read by sbc_wave_init (always called by sbc_init) only after the routine has returned for namsbc ln_wave false; ln_wave is a compared card field (false). Pinned to the reference run's value, so any change refuses.",
+      "reference_value": false,
+      "reference_source": "namelist_ref"
+    },
+    "namsbc_wave.ln_stshear": {
+      "reason": "Read by sbc_wave_init (always called by sbc_init) only after the routine has returned for namsbc ln_wave false; ln_wave is a compared card field (false). Pinned to the reference run's value, so any change refuses.",
+      "reference_value": false,
+      "reference_source": "namelist_ref"
+    },
+    "namsbc_wave.ln_tauoc": {
+      "reason": "Read by sbc_wave_init (always called by sbc_init) only after the routine has returned for namsbc ln_wave false; ln_wave is a compared card field (false). Pinned to the reference run's value, so any change refuses.",
+      "reference_value": false,
+      "reference_source": "namelist_ref"
+    },
+    "namsbc_wave.ln_taw": {
+      "reason": "Read by sbc_wave_init (always called by sbc_init) only after the routine has returned for namsbc ln_wave false; ln_wave is a compared card field (false). Pinned to the reference run's value, so any change refuses.",
+      "reference_value": false,
+      "reference_source": "namelist_ref"
+    },
+    "namsbc_wave.ln_vortex_force": {
+      "reason": "Read by sbc_wave_init (always called by sbc_init) only after the routine has returned for namsbc ln_wave false; ln_wave is a compared card field (false). Pinned to the reference run's value, so any change refuses.",
+      "reference_value": false,
+      "reference_source": "namelist_ref"
+    },
+    "namsbc_wave.ln_wave_test": {
+      "reason": "Read by sbc_wave_init (always called by sbc_init) only after the routine has returned for namsbc ln_wave false; ln_wave is a compared card field (false). Pinned to the reference run's value, so any change refuses.",
+      "reference_value": false,
+      "reference_source": "namelist_ref"
+    },
+    "namsbc_wave.sn_cdg": {
+      "reason": "Read by sbc_wave_init (always called by sbc_init) only after the routine has returned for namsbc ln_wave false; ln_wave is a compared card field (false). Pinned to the reference run's value, so any change refuses.",
+      "reference_value": "'sdw_ecwaves_orca2'    ,        6.         , 'drag_coeff' ,  .true.  , .true. , 'yearly'  ,  ''              , ''       , ''",
+      "reference_source": "namelist_ref"
+    },
+    "namsbc_wave.sn_hsw": {
+      "reason": "Read by sbc_wave_init (always called by sbc_init) only after the routine has returned for namsbc ln_wave false; ln_wave is a compared card field (false). Pinned to the reference run's value, so any change refuses.",
+      "reference_value": "'sdw_ecwaves_orca2'    ,        6.         , 'hs'         ,  .true.  , .true. , 'yearly'  ,  ''              , ''       , ''",
+      "reference_source": "namelist_ref"
+    },
+    "namsbc_wave.sn_tauoc": {
+      "reason": "Read by sbc_wave_init (always called by sbc_init) only after the routine has returned for namsbc ln_wave false; ln_wave is a compared card field (false). Pinned to the reference run's value, so any change refuses.",
+      "reference_value": "'sdw_ecwaves_orca2'    ,        6.         , 'wave_stress',  .true.  , .true. , 'yearly'  ,  ''              , ''       , ''",
+      "reference_source": "namelist_ref"
+    },
+    "namsbc_wave.sn_usd": {
+      "reason": "Read by sbc_wave_init (always called by sbc_init) only after the routine has returned for namsbc ln_wave false; ln_wave is a compared card field (false). Pinned to the reference run's value, so any change refuses.",
+      "reference_value": "'sdw_ecwaves_orca2'    ,        6.         , 'u_sd2d'     ,  .true.  , .true. , 'yearly'  ,  ''              , ''       , ''",
+      "reference_source": "namelist_ref"
+    },
+    "namsbc_wave.sn_vsd": {
+      "reason": "Read by sbc_wave_init (always called by sbc_init) only after the routine has returned for namsbc ln_wave false; ln_wave is a compared card field (false). Pinned to the reference run's value, so any change refuses.",
+      "reference_value": "'sdw_ecwaves_orca2'    ,        6.         , 'v_sd2d'     ,  .true.  , .true. , 'yearly'  ,  ''              , ''       , ''",
+      "reference_source": "namelist_ref"
+    },
+    "namsbc_wave.sn_wmp": {
+      "reason": "Read by sbc_wave_init (always called by sbc_init) only after the routine has returned for namsbc ln_wave false; ln_wave is a compared card field (false). Pinned to the reference run's value, so any change refuses.",
+      "reference_value": "'sdw_ecwaves_orca2'    ,        6.         , 'wmp'        ,  .true.  , .true. , 'yearly'  ,  ''              , ''       , ''",
+      "reference_source": "namelist_ref"
+    },
+    "namsbc_wave.sn_wnum": {
+      "reason": "Read by sbc_wave_init (always called by sbc_init) only after the routine has returned for namsbc ln_wave false; ln_wave is a compared card field (false). Pinned to the reference run's value, so any change refuses.",
+      "reference_value": "'sdw_ecwaves_orca2'    ,        6.         , 'wave_num'   ,  .true.  , .true. , 'yearly'  ,  ''              , ''       , ''",
+      "reference_source": "namelist_ref"
+    },
+    "namtsd.cn_dir": {
+      "reason": "Temperature/salinity input-file selection read by dta_tsd_init, which istate_init always calls; with ln_tsd_init and ln_tsd_dmp false no file is read and istate_init uses usr_def_istate. The shallow-water card has no T/S input. Pinned to the reference run's value, so any change refuses.",
+      "reference_value": "./",
+      "reference_source": "output.namelist.dyn"
+    },
+    "namtsd.ln_tsd_dmp": {
+      "reason": "Temperature/salinity input-file selection read by dta_tsd_init, which istate_init always calls; with ln_tsd_init and ln_tsd_dmp false no file is read and istate_init uses usr_def_istate. The shallow-water card has no T/S input. Pinned to the reference run's value, so any change refuses.",
+      "reference_value": false,
+      "reference_source": "output.namelist.dyn"
+    },
+    "namtsd.ln_tsd_init": {
+      "reason": "Temperature/salinity input-file selection read by dta_tsd_init, which istate_init always calls; with ln_tsd_init and ln_tsd_dmp false no file is read and istate_init uses usr_def_istate. The shallow-water card has no T/S input. Pinned to the reference run's value, so any change refuses.",
+      "reference_value": false,
+      "reference_source": "output.namelist.dyn"
+    },
+    "namtsd.sn_sal": {
+      "reason": "Temperature/salinity input-file selection read by dta_tsd_init, which istate_init always calls; with ln_tsd_init and ln_tsd_dmp false no file is read and istate_init uses usr_def_istate. The shallow-water card has no T/S input. Pinned to the reference run's value, so any change refuses.",
+      "reference_value": {
+        "sn_sal%clftyp": "yearly",
+        "sn_sal%clname": "data_1m_salinity_nomask",
+        "sn_sal%clvar": "vosaline",
+        "sn_sal%freqh": -1.0,
+        "sn_sal%ln_clim": true,
+        "sn_sal%ln_tint": true,
+        "sn_sal%lname": "",
+        "sn_sal%vcomp": "",
+        "sn_sal%wname": ""
+      },
+      "reference_source": "output.namelist.dyn"
+    },
+    "namtsd.sn_tem": {
+      "reason": "Temperature/salinity input-file selection read by dta_tsd_init, which istate_init always calls; with ln_tsd_init and ln_tsd_dmp false no file is read and istate_init uses usr_def_istate. The shallow-water card has no T/S input. Pinned to the reference run's value, so any change refuses.",
+      "reference_value": {
+        "sn_tem%clftyp": "yearly",
+        "sn_tem%clname": "data_1m_potential_temperature_nomask",
+        "sn_tem%clvar": "votemper",
+        "sn_tem%freqh": -1.0,
+        "sn_tem%ln_clim": true,
+        "sn_tem%ln_tint": true,
+        "sn_tem%lname": "",
+        "sn_tem%vcomp": "",
+        "sn_tem%wname": ""
+      },
+      "reference_source": "output.namelist.dyn"
+    }
+  }
+}

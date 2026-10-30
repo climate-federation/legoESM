@@ -15,11 +15,15 @@ __param_spec__ = {
     "CloudConfig": {
         "scheme_key": "atm.clouds.CloudConfig",
         "excluded": {
+            "cloud_subcolumn_mask_width": "numerics: RULE 5 smoothing width of the maximum-random subcolumn mask (0 = CAM's hard switch), not a tunable",
             # Lower clip on the Martin gamma-PSD shape (1/PGAM^2 - 1 clipped to
             # [pgam_min, pgam_max]); a numerics regulariser/cap on the droplet
             # spectral-width, not a tunable closure coefficient. Paired with
             # the pgam_max cap (Morrison module_mp_mg.F90).
             "pgam_min": "numerics: lower clip/cap on the gamma-PSD shape parameter (regulariser, paired with pgam_max)",
+            "mg2_drop_number_cap_log_width": "numerics: smooth-switch width (RULE 5), value approved by user 2026-10-27",
+            "mg2_drop_slope_log_width": "numerics: smooth-switch width (RULE 5), value approved by user 2026-10-27",
+            "mg2_ice_cap_log_width": "numerics: smooth-switch width (RULE 5), value approved by user 2026-10-27",
             "cloud_optics_asymmetry_g": "numerics: scattering asymmetry g of the two-region inhomogeneity two-stream reflectance (shapes the reduction; the real per-band g lives in RRTMGP, not trained here)",
             "clubb_cf_override_p_min_pa": "structural: BL-top pressure [Pa] above which the diagnostic-CLUBB cloud-fraction override applies (a level/regime gate, not a trained closure coefficient); 0 => full-column override",
             "clubb_cf_override_ramp_pa": "numerics: smoothing width [Pa] of the override level gate (linear blend over [p_min-ramp, p_min] to avoid a cloud/heating discontinuity); a regulariser, not a trained coefficient; 0 => sharp step",
@@ -395,6 +399,20 @@ class CloudConfig(NamedTuple):
     cam6_deepcu_max: float = 0.6
     cam6_deepcu_frac_limit: float = 0.01
     cam6_deepcu_ic_limit: float = 1.0e-12
+    # RULE 5 widths (ln space) of the CAM6 REL limits on the radiation droplet
+    # and ice radius (0 = MG2's hard form; 0.01 approved by user 2026-10-27,
+    # follow-up rows 48, 52): the droplet number cap N <= q/1e-20 kg and slope
+    # clamp (micro_mg_utils.F90:481-516), and the 5 g/kg in-cloud ice cap
+    # (micro_mg2_0.F90:2763).  The ice slope width is the microphysics one.
+    mg2_drop_number_cap_log_width: float = 0.01
+    mg2_drop_slope_log_width: float = 0.01
+    mg2_ice_cap_log_width: float = 0.01
+    # RULE 5 width of the maximum-random subcolumn switches (CDF units, 0 =
+    # CAM's hard ``CDF > 1-cf`` recursion and ``CDF >= 1-cf`` mask,
+    # mcica_subcol_gen_sw.f90:365, :398): the subcolumn cloud weight is
+    # smoothstep_quintic((CDF - (1 - cf))/width + 1/2), exactly CAM's 0/1
+    # outside a band of that width.  Used by "max_random" and "mcica".
+    cloud_subcolumn_mask_width: float = 1.0e-3
 
 
 def build_cloud_config(

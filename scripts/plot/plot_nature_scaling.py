@@ -36,10 +36,10 @@ from matplotlib.lines import Line2D
 
 # (row, col) -> (component, grid, title, sub)
 PANELS = [
-    ("atmosphere", "latlon", "lat–lon", "4096×8192 L26 (strong) · 32 / 8 rows per device (weak)"),
-    ("atmosphere", "icosahedral", "MPAS icosahedral", "subdiv-9/10 L26 · 81k / 5k cells per device (weak)"),
-    ("atmosphere", "cubed-sphere", "cubed-sphere", "C768 L26 · 6·kt² tiles"),
-    ("ocean", "tripole", "tripole (ORCA fold)", "3072×4352 L75 (ORCA12-class) · GPU only — see note"),
+    ("atmosphere", "latlon", "lat–lon", "4096×8192 L{L} (strong) · 32 / 8 rows per device (weak)"),
+    ("atmosphere", "icosahedral", "MPAS icosahedral", "subdiv-9/10 L{L} · 81k / 5k cells per device (weak)"),
+    ("atmosphere", "cubed-sphere", "cubed-sphere", "C768 L{L} (strong) · C96 per tile (weak) · 6·kt² tiles"),
+    ("ocean", "tripole", "tripole (ORCA fold)", "3072×4352 L75 (ORCA12-class)"),
     ("ocean", "mpas", "MPAS Voronoi", "subdiv-9 L40 (2.6M cells) · 20k / 5k cells per device (weak)"),
     ("ocean", "fesom", "FESOM2 (fesom_jax)", "forca20 2.1M nodes L70 · float64 only"),
 ]
@@ -143,7 +143,7 @@ def _mode(r, path):
 # MPASOceanConfig defaults the figure is measured at: fixed_iters, precond,
 # poly_sweeps.  Rows solving anything else are a different model.
 OCEAN_MPAS_PCG_ITERS = 20
-OCEAN_MPAS_PCG_PRECOND = ("poly", 4)
+OCEAN_MPAS_PCG_PRECOND = ("gpoly", 4)
 # NCCL channel count both MPAS lanes pin (nature_ladder.sbatch): 8 -> 32 on
 # 2026-09-21 (s9 atm: 5.57 -> 4.65 ms at 128 GPUs).  Multi-device MPAS GPU
 # rows at any other count or chunk size, or without the stamp, are refused.
@@ -165,8 +165,14 @@ CPU_AFFINITY_MIN = 4
 MPAS_NCCL_CHUNK = "131072"
 
 
+#: Keys whose selected (fastest) row has no finite-state check (cube lane
+#: only); rebuilt by every load().
+UNCHECKED_KEYS = set()
+
+
 def load(dirs):
     best = {}
+    UNCHECKED_KEYS.clear()
     dropped = []
     dropped_nccl = []
     dropped_aff = []
@@ -199,7 +205,10 @@ def load(dirs):
                 # off at dt 60 s; MPAS: a fixed del4 coefficient unstable
                 # from level 7 up) and none was checked: only rows that
                 # PROVED a finite state are data.
-                if comp == "atmosphere" and r.get("finite_ok") is not True:
+                # The cube bench stamps no finite check (owner 2026-10-12: plot
+                # its rows, labelled unchecked in the panel subtitle).
+                unchecked = comp == "atmosphere" and r.get("finite_ok") is not True
+                if unchecked and grid != "cubed-sphere":
                     continue
                 prec = r.get("precision") or r.get("metadata", {}).get("precision")
                 if prec not in PREC_LW:
@@ -254,6 +263,7 @@ def load(dirs):
                 steps = r.get("steps") or r.get("metadata", {}).get("extra", {}).get("steps")
                 if key not in best or ms < best[key][0]:
                     best[key] = (float(ms), job, f, steps)
+                    (UNCHECKED_KEYS.add if unchecked else UNCHECKED_KEYS.discard)(key)
     if dropped:
         # Never silent: a refused row and a node that died both look like a
         # missing point on the curve, and only one of them is the reader's
@@ -350,6 +360,7 @@ def main() -> int:
         ress = sorted({k[4] for k in keys},
                       key=lambda s: -int("".join(ch for ch in s if ch.isdigit()) or 0))[:args.max_res]
         allx = set()
+        unchecked_plotted = False
         for k in sorted(keys, key=lambda k: (k[2], k[3], k[4])):
             _, _, be, prec, res = k
             if res not in ress:
@@ -358,6 +369,8 @@ def main() -> int:
             xs = [p[0] for p in pts]
             ys = [p[1] for p in pts]
             allx |= set(xs)
+            unchecked_plotted |= any((comp, grid, be, prec, args.mode, res, x) in UNCHECKED_KEYS
+                                     for x in xs)
             m = MARKERS[ress.index(res) % len(MARKERS)]
             c = BACKEND_COLOR[be]
             ax.plot(xs, ys, m + "-", color=c, lw=PREC_LW[prec], markerfacecolor="white",
@@ -376,17 +389,22 @@ def main() -> int:
             ticks = sorted(allx)
             if len(ticks) > 8:
                 ticks = [x for j, x in enumerate(ticks) if j % 2 == 0 or x == ticks[-1]]
+            # labels closer than 1.4x collide on a log2 axis (192 vs 256)
+            ticks = [x for j, x in enumerate(ticks)
+                     if j == len(ticks) - 1 or ticks[j + 1] / x >= 1.4]
             ax.set_xticks(ticks)
             ax.set_xticklabels([str(x) for x in ticks])
         ax.minorticks_off()
         ax.set_title(title, pad=8, loc="left", fontweight="bold")
-        ax.text(0, 1.01, sub, transform=ax.transAxes, fontsize=5.2, color="#555555", va="bottom")
+        if unchecked_plotted:
+            sub += " · finite state not checked"
+        ax.text(0, 1.01, sub.replace("{L}", str(NLEV.get((comp, grid)))), transform=ax.transAxes, fontsize=5.2, color="#555555", va="bottom")
         ax.tick_params(direction="out", length=2.5)
         for s in ("top", "right"):
             ax.spines[s].set_visible(False)
         if keys:
-            ax.legend(frameon=False, loc="lower left" if args.mode == "strong" else "upper left",
-                      handlelength=1.6, borderpad=0.2, labelspacing=0.25)
+            ax.legend(frameon=True, framealpha=0.85, edgecolor="none", loc="best", fontsize=5,
+                      handlelength=1.6, borderpad=0.2, labelspacing=0.2)
         else:
             ax.text(0.5, 0.5, "no receipts yet", transform=ax.transAxes, ha="center",
                     color="#999999", fontsize=7)

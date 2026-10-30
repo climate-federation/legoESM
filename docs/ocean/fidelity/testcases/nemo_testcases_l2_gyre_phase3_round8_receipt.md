@@ -4124,7 +4124,7 @@ Round 25 landed two source associations inside NEMO's hydrostatic pressure
 gradient and showed the changed operator bit-exact given NEMO's inputs on GYRE
 only.  Rule 12 asks for that row on every card that executes it, and the
 testcase recipe pins `pgf_scheme="nemo_sco"` on all of them
-(`nemo_testcase_recipe.py:380,636,3534`).
+(`nemo_testcase_recipe.py:560,816,4221`).
 
 The lane-1 tanks have no HPG-literal dump and do not need one.  NEMO
 accumulates `dyn_hpg`, `dyn_vor` and `dyn_adv` into a zeroed `puu(Krhs)`
@@ -5191,7 +5191,7 @@ ratio is NOT zero during step 1: `r3u(:,:,Kaa)` is assigned at STAGE 1 from
 `ssha` (`stprk3_stg.F90:156`, the assignment at `:163`), so a stage-3
 thickness already carries a nonzero free-surface ratio inside the step that
 produces the kt=2 state.  And the MIN rule is not what the production stage
-builder uses: `nemo_qco_live_face_geometry_cgrid` (`vertical.py:791`)
+builder uses: `nemo_qco_live_face_geometry_cgrid` (`vertical.py:798`)
 transcribes NEMO's area-weighted MEAN (`domqco.F90:166-169` for the MLF
 entry, `:219-222` for the RK3 one) and both time-stepping lanes call it, so
 MIN survives only as an ablation arm.  What the measured `3.06e-08` actually
@@ -5779,7 +5779,7 @@ Caught by the gate.
    tests stop there.  What should that mask be on a card with no mesh file?
 3. **The slow forcing's depth average** still uses the min rule where NEMO
    uses the area-weighted mean (`domqco.F90:166-169`, `:219-222`, transcribed
-   in `vertical.py:791`).  `3.06e-08` at kt=2.  Land it, or leave it as debt?
+   in `vertical.py:798`).  `3.06e-08` at kt=2.  Land it, or leave it as debt?
 4. **Decision 16 is preregistered and NOT landed** — the unconditional
    vorticity call in the pre-stage 2-D momentum RHS.  Its predictions are in
    the round-29 manifest; landing it needs cross-card runs this round did not
@@ -5919,7 +5919,7 @@ cells on `u` and `2220` signed-zero flips on `v` (IEEE `-0.0 + 0.0 = +0.0`).
 legoESM was adding `8.256e-10` there because it evaluated the same operator on
 the STAGE velocity.  The shared seam for the BEFORE-level operand already
 existed and the leap-frog path already used it
-(`ocean_pe_latlon_cgrid.py:5909-5910`); the WS-RK3 stage RHS simply did not
+(`ocean_pe_latlon_cgrid.py:6049-6050`); the WS-RK3 stage RHS simply did not
 pass it.  Landed at `7521513a54c3` in that one shared place, no card switch,
 no new knob.  Stage 1 hands the helper the step-entry velocity already, so only
 the stage-3 call moves, and stage 2 never calls the operator.
@@ -6091,7 +6091,7 @@ thicknesses — `e3t`/`e3u`/`e3v` at `Kbb` inside the divergence
 (`dynldf_lev_rot_scheme.h90:28-29`), `e3f` carrying no time index at all
 (`dynldf_lev_rot_scheme.h90:24-25`), and `e3u`/`e3v` at `Kmm` in the final
 division.  legoESM's lateral operator receives ONE thickness: a single `h_k`
-argument at `ocean_pe_latlon_cgrid.py:5932`, built from the stage's own live
+argument at `ocean_pe_latlon_cgrid.py:6072`, built from the stage's own live
 `eta`, which at stage 3 is the `Kmm` sea level.  So after this round the
 velocity operand is NEMO's and the thickness operand is not.  **CONFIRMED by
 reading, UNMEASURED in size**: at kt=1 the whole term is exactly zero, so no
@@ -6355,7 +6355,7 @@ source.  Measured, not assumed: `legoesm_git_sha` is absent from all five of
 `round30_post_ldf_after.json` and `round30_zdf_calibration.json`.
 
 The repo already had the right helper and it was reused rather than rebuilt:
-`provenance.py:106`'s `git_sha` fails closed on tracked dirt for exactly this
+`provenance.py:149`'s `git_sha` fails closed on tracked dirt for exactly this
 reason.  What it could not answer is whether `HEAD` was describing this code at
 all.  `worktree_stamp` adds the branch (or `DETACHED`), whether the tree is
 clean, and, when it is not, the SHA-256 of the full `git diff HEAD`.  Detached
@@ -6438,7 +6438,7 @@ model, and it touches none of the solve's own inputs (`avm`, `e3uw(Kmm)`,
 
 **Round 30 was wrong that legoESM exposes no pre-solve vector.**
 `expose_pre_implicit_state` publishes `state_new` immediately before the
-implicit solver (`ocean_model_latlon_cgrid.py:11621-11623`, struck in place from lines 7731 to
+implicit solver (`ocean_model_latlon_cgrid.py:11755-11757`, struck in place from lines 7731 to
 7733, which round 32 moved) and it carries u and v.  **P4b is REFUTED**: that vector is not NEMO's explicit stage update, and
 not by a little — `4.269765124169735e-04` on u, which is the size of the
 FIELD, not of a residual.
@@ -6460,7 +6460,7 @@ residual, which is the check.
 **THE OWNER: the ORDER of the barotropic correction relative to the solve.**
 Read on both sides before it was measured.  legoESM applies NEMO's correction
 to the stage-3 velocity BEFORE the implicit solve
-(`ocean_model_latlon_cgrid.py:9718-9721` — the line numbers ROUND 32 MOVED,
+(`ocean_model_latlon_cgrid.py:9852-9855` — the line numbers ROUND 32 MOVED,
 struck in place from the range round 31 cited, lines 6300 to 6321, which is
 rendered without backticks here because a struck citation is not a claim about
 current code and the gate is right to refuse it as one; the code at the new
@@ -6512,7 +6512,7 @@ it moot.
 
 **legoESM cannot evaluate the changed operator on ORCA2 at all.**  The card
 selects `nemo_div_curl` with `A_h = 1e5`, and that branch refuses a tripolar
-grid: `ocean_pe_latlon_cgrid.py:3657-3660` raises unless the grid carries a
+grid: `ocean_pe_latlon_cgrid.py:3762-3765` raises unless the grid carries a
 positive scalar `dlon`, and ORCA2's is `0.0`.  That is why the existing ORCA2
 phase-2 gate zeroes `A_h` in its discarded tendency.  A second gap sits behind
 it: ORCA2 resolves `nn_ahm_ijk_t = -30`, i.e. `ahmt_3d`/`ahmf_3d` read from
@@ -6582,7 +6582,7 @@ cause.  Measured: all four —
 `test_nemo_gyre_forced_trajectory_is_finite_and_stable`,
 `test_nemo_gyre_wind_forcing_sign_chain_end_to_end` and
 `test_surface_stress_implicit_wiring` — reach the SAME raise site with the
-same stack, `vertical.py:66-71`: "literal NEMO QCO e3t requires
+same stack, `vertical.py:67-72`: "literal NEMO QCO e3t requires
 explicit/reference nemo_e3t_0 and is_active".  **One cause, CONFIRMED.**
 (ROUND-34 NOTE: the user answered this as decision 17 and the guard's mask half
 now sits BELOW the early return, so that combined message no longer exists and
@@ -6596,7 +6596,7 @@ carries no such field where `OceanPartialCellCoordinate` does.
 
 **But the cause is not the geometry choice round 29 registered.**  The guard
 sits ABOVE the function's own linear-free-surface early return
-(`vertical.py:76-77`), which returns `e3t_0` and never reads the mask.  The
+(`vertical.py:77-78`), which returns `e3t_0` and never reads the mask.  The
 demo card resolves `linear_free_surface=True`, so it is refused for an operand
 its own arm does not consume.  And that resolution is the FAITHFUL one: the
 demo card reproduces NEMO's `GYRE_BARE`, whose compile keys are
@@ -7236,7 +7236,7 @@ is the key_qco form, and the deck resolves `ln_dynadv_vec = T`
 (`round19_oracle_v2_external/ocean.output:798`) with `lk_linssh` `.FALSE.` in
 that build's own `dom_oce.f90`.  NEMO takes the VECTOR arm at all three stages
 on GYRE.  legoESM honoured that at stages 1 and 2
-(`ocean_model_latlon_cgrid.py:8827` and its two branch sites) and hardcoded the
+(`ocean_model_latlon_cgrid.py:8943` and its two branch sites) and hardcoded the
 key_qco ratios at stage 3.  A transcription defect, and it had a comment
 asserting the opposite.
 
@@ -7857,8 +7857,8 @@ stays above, because the early return needs it.
 
 **The four `test_nemo_recipe` failures go green and nothing else moves**: that
 file was `4 failed, 20 passed` and is now `24 passed`.  All four failed in the same
-guard, whose surviving `e3t_0` half is now `vertical.py:66-71` and whose mask
-half is `vertical.py:85-89`.
+guard, whose surviving `e3t_0` half is now `vertical.py:67-72` and whose mask
+half is `vertical.py:86-90`.
 
 A behavioural test cannot see the ORDER -- a linear-free-surface caller that
 DOES supply a mask is served either way -- so a fourth arm reads the source and
@@ -9364,8 +9364,8 @@ transcription of the isoneutral formula — it is the CALL SITE.
   `traldf_iso.F90:135` then fills `ah_wslp2` from those slopes, and
   `trazdf.F90:173` reads `zwt = avt + ah_wslp2` at every stage.
 * legoESM recomputes its `K33` INSIDE each stage from that stage's own
-tracers: `ocean_model_latlon_cgrid.py:10283` sets `_T_gm_in = T_mid` on this
-path — `_ldf_state` is `None` outside `_nemo_mlf_step` — and `ocean_model_latlon_cgrid.py:10738` hands it
+tracers: `ocean_model_latlon_cgrid.py:10417` sets `_T_gm_in = T_mid` on this
+path — `_ldf_state` is `None` outside `_nemo_mlf_step` — and `ocean_model_latlon_cgrid.py:10872` hands it
   to `compute_isoneutral_K33_latlon`.
 
 At `kt = nit000` GYRE has `ln_rstart = F` and its analytic initial T and S are
@@ -9382,7 +9382,7 @@ all 20416 faces**.  So legoESM's slope arithmetic leaves no rounding residue on
 a horizontally uniform field, and the difference is the STATE the function is
 handed, not the function.  This arm calls the function directly rather than
 through the model and is a property of that function, not of the model's call:
-it omits ten arguments `ocean_model_latlon_cgrid.py:10738` passes.  Two of them
+it omits ten arguments `ocean_model_latlon_cgrid.py:10872` passes.  Two of them
 were measured inert by the diff review (`u_mask`/`v_mask` threaded: 0 bits
 changed), and the zero is not degenerate (a `1e-12` tracer bump gives
 `4.69e-31`).
@@ -9560,16 +9560,16 @@ question.  **The premise is FALSE and is retracted here.**  The grep:
 ```
 packages/ocean/legoesm/ocean/state.py:2205       tracer_combine: str = "concentration"
 packages/ocean/legoesm/ocean/experiments/dino.py:1016    tracer_combine: str = "concentration"
-packages/ocean/legoesm/ocean/experiments/dino.py:1769    "tracer_combine": "thickness_weighted",
-packages/ocean/legoesm/ocean/experiments/dino.py:3988        tracer_combine=cfg.tracer_combine,
+packages/ocean/legoesm/ocean/experiments/dino.py:1775    "tracer_combine": "thickness_weighted",
+packages/ocean/legoesm/ocean/experiments/dino.py:4005        tracer_combine=cfg.tracer_combine,
 packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:14051  _combine = getattr(_cfg_b, "tracer_combine", "concentration")
 packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:14442  _combine = getattr(_cfg_b, "tracer_combine", "concentration")
 ```
 
 The two readers are `_leapfrog_step` and `_nemo_mlf_step`.  The three NEMO
 test-case cards run the WS-RK3 stage ladder, which reads neither — that is why
-it is inert on them.  But `dino.py:1769` is inside `DINO_RECIPES`, and it
-SELECTS `"thickness_weighted"`; `dino.py:3988` routes it into the config those
+it is inert on them.  But `dino.py:1775` is inside `DINO_RECIPES`, and it
+SELECTS `"thickness_weighted"`; `dino.py:4005` routes it into the config those
 steps read.  So something does select it, on another card family, and neither
 "delete" nor "wire" is the right disposition.  The correct row is: the field is
 LIVE on the leapfrog and modified-leapfrog paths and simply not on the path
@@ -9862,7 +9862,7 @@ sentence here that said otherwise, and it independently established that
 hits, so nothing recomputes the slopes between stages.
 
 legoESM built them from `T_mid`/`S_mid` — the forward-Euler PREDICTOR of the
-whole baroclinic tendency (`ocean_model_latlon_cgrid.py:6904`) — and from the
+whole baroclinic tendency (`ocean_model_latlon_cgrid.py:6996`) — and from the
 after-ssh.
 
 **THE STAGE-STATE COMPONENT TABLE, which closes round 38's strongest remaining
@@ -9933,7 +9933,7 @@ the pre-change model.
 | GYRE-zco, kt=2 | YES | the round-38 record, `ah_wslp2` absolute maximum `3.3898494597440722e-08` | given NEMO's OWN before state: **DEBT**, 17400 / 17400 wet faces, max `3.3884e-08`, max relative `2.63`; legoESM's fold reaches `1.1728064666279615e-10`, 289x smaller.  Owner: the isoneutral SLOPE TRANSCRIPTION, which this round did not touch |
 | LOCK_EXCHANGE-zco | NO | legoESM resolves `gm_redi = None`; NEMO resolves `ln_traldf_OFF = T`, `ln_traldf_iso = F` (`lock_kt1_10/ocean.output:578`, `lock_kt1_10/ocean.output:584`), so `l_ldfslp = F` and `ldf_slp` is never called | kt=1..10 **BIT-IDENTICAL** before and after: the residual artifact's SHA-256 is the same on both arms, all 20 scored rows unmoved |
 | OVERFLOW-zps | NO | same, `overflow_kt1_10/ocean.output:690`, `overflow_kt1_10/ocean.output:696` | kt=1..10 **BIT-IDENTICAL**, same residual SHA-256, all 10 scored rows unmoved |
-| `build_nemo_gyre_recipe` (`fidelity/nemo_recipe.py:998`) | YES | the diff review's scope sweep: `gm_redi` on with `kappa_GM = 600`, `rk3_ws` on both integrators | **UNMEASURED WITH SPEC** — it has no trajectory gate.  Spec: the same operand gate driven off a record this configuration does not have.  Its committed tests are in the suite below |
+| `build_nemo_gyre_recipe` (`fidelity/nemo_recipe.py:1014`) | YES | the diff review's scope sweep: `gm_redi` on with `kappa_GM = 600`, `rk3_ws` on both integrators | **UNMEASURED WITH SPEC** — it has no trajectory gate.  Spec: the same operand gate driven off a record this configuration does not have.  Its committed tests are in the suite below |
 | ORCA2 | UNKNOWN | no card on this branch | **UNMEASURED WITH SPEC**, unchanged |
 | DINO / every other integrator | NO | `_ldf_state` wins, and no other lane sets `tracer_time_integrator = "rk3_ws"` | untouched by construction; a test asserts the guard keeps both conditions |
 
@@ -10254,10 +10254,10 @@ legoESM's corresponding statement.
 
 | # | NEMO statement | operands / time level | legoESM |
 |---|---|---|---|
-| 1 | `stprk3_stg.F90:266-268` `zub = un_adv*r1_hu(Kmm) - uu_b(Kmm)` | `n_baro_upd = np_HYB` (`stprk3_stg.F90:44`); the compiled form divides by `1+r3u(Kmm)` rather than multiplying a stored reciprocal | `_mom_pert_ws`'s `transport_velocity`, `ocean_model_latlon_cgrid.py:7657-7661` |
-| 2 | `stprk3_stg.F90:273-274` `zFu = e2u*e3u(Kmm)*(uu(Kmm)+zub*umask)` | `e3u(Kmm) = e3u_3d*(1+r3u(Kmm)*umask)` | `_nemo_ws_stage_transport`, `ocean_model_latlon_cgrid.py:9641` |
+| 1 | `stprk3_stg.F90:266-268` `zub = un_adv*r1_hu(Kmm) - uu_b(Kmm)` | `n_baro_upd = np_HYB` (`stprk3_stg.F90:44`); the compiled form divides by `1+r3u(Kmm)` rather than multiplying a stored reciprocal | `_mom_pert_ws`'s `transport_velocity`, `ocean_model_latlon_cgrid.py:7755-7759` |
+| 2 | `stprk3_stg.F90:273-274` `zFu = e2u*e3u(Kmm)*(uu(Kmm)+zub*umask)` | `e3u(Kmm) = e3u_3d*(1+r3u(Kmm)*umask)` | `_nemo_ws_stage_transport`, `ocean_model_latlon_cgrid.py:9775` |
 | 3 | `stprk3_stg.F90:290` `CALL wzv(... uu(Kmm), vv(Kmm), ww, np_velocity)` | velocity form, because `ln_dynadv_vec = T` (`round38_oracle_trazdf_kt2/ocean.output:798`) | `literal_wzv` inside the same helper |
-| 4 | `stprk3_stg.F90:322` `CALL eos( ts, Kmm, rhd, rhop )` | stage tracers | `_stage_hpg_operands`, `ocean_model_latlon_cgrid.py:9663` |
+| 4 | `stprk3_stg.F90:322` `CALL eos( ts, Kmm, rhd, rhop )` | stage tracers | `_stage_hpg_operands`, `ocean_model_latlon_cgrid.py:9797` |
 | 5 | `stprk3_stg.F90:324` `dyn_hpg` -> `hpg_sco` | `ln_hpg_sco = T` (`round38_oracle_trazdf_kt2/ocean.output:834`); under `key_RK3` it **OVERWRITES** `Krhs` (`dynhpg.F90:359-363`, `dynhpg.F90:383-387`), so nothing before it survives | the shared tendency accumulator's `hpg` bucket |
 | 6 | `stprk3_stg.F90:327` `dyn_vor` -> `vor_ene` | `ln_dynvor_ene = T` (`round38_oracle_trazdf_kt2/ocean.output:810`), `nn_e3f_typ = 0` (`round38_oracle_trazdf_kt2/ocean.output:813`) | `pv_flux_ene` with `nemo_qco_live_vorticity_e3f_cgrid` |
 | 7 | `stprk3_stg.F90:331` `dyn_adv` -> `dyn_keg` + `dyn_zad` | `nn_dynkeg = 0` (`round38_oracle_trazdf_kt2/ocean.output:799`); `dynkeg.F90:120-121` and `dynzad.F90:104-107`, both reading `e3u(Kmm)` | the same accumulator's `advection` bucket |
@@ -10326,7 +10326,7 @@ to stage 3:
 **NO OPERATOR IS NAMED THE OWNER, and the preregistration forbids it.**  NEMO
 has no stage-3 split to score these against: `oracle_rkstage2_terms` is
 header-locked to `kstg = 2`
-(`nemo_testcase_l2_gyre_phase3_gate.py:323`).  What the table buys is a
+(`nemo_testcase_l2_gyre_phase3_gate.py:333`).  What the table buys is a
 RANKING by the relative error each operator would have to carry, and even that
 ranking is WEAK IN ONE DIRECTION: `hpg` and `advection` are both differences
 of much larger intermediates — `hpg_sco` accumulates `zhpi` down the column
@@ -10426,7 +10426,7 @@ macro is `e3t(i,j,k,t) = e3t_0(i,j,k)*(1 + r3t(i,j,t))`
 `stprk3_stg.F90:156` computes `r3ta` from `ssha`, and `stprk3_stg.F90:231`
 assigns it to `r3t(:,:,Kaa)`.  NEMO never forms `(ssh + ht_0)/ht_0`.
 
-legoESM's shared `compute_ocean_jacobian` (`vertical.py:1963`) formed the SUM
+legoESM's shared `compute_ocean_jacobian` (`vertical.py:1981`) formed the SUM
 first, so the low bits of the small ratio were lost to cancellation.
 
 **THE INSTRUMENT WAS VALIDATED BEFORE THE CLAIM.**  On host arrays, from
@@ -10508,10 +10508,10 @@ configuration built.
 
 | # | NEMO statement | operands / time level | legoESM |
 |---|---|---|---|
-| 1 | `stprk3_stg.F90:266-268` `zub = un_adv*r1_hu(Kmm) - uu_b(Kmm)` | `n_baro_upd = np_HYB` (`stprk3_stg.F90:44`) | `ocean_model_latlon_cgrid.py:7657-7661` |
-| 2 | `stprk3_stg.F90:273-274` `zFu = e2u*e3u(Kmm)*(uu(Kmm)+zub*umask)` | `e3u(Kmm) = e3u_0*(1+r3u(Kmm)*umask)` | `ocean_model_latlon_cgrid.py:9641` |
+| 1 | `stprk3_stg.F90:266-268` `zub = un_adv*r1_hu(Kmm) - uu_b(Kmm)` | `n_baro_upd = np_HYB` (`stprk3_stg.F90:44`) | `ocean_model_latlon_cgrid.py:7755-7759` |
+| 2 | `stprk3_stg.F90:273-274` `zFu = e2u*e3u(Kmm)*(uu(Kmm)+zub*umask)` | `e3u(Kmm) = e3u_0*(1+r3u(Kmm)*umask)` | `ocean_model_latlon_cgrid.py:9775` |
 | 3 | `stprk3_stg.F90:290` `wzv(... uu(Kmm), vv(Kmm), ww, np_velocity)` | velocity form: `ln_dynadv_vec = T` (`round38_oracle_trazdf_kt2/ocean.output:798`) | the same helper's `literal_wzv` |
-| 4 | `stprk3_stg.F90:322` `eos( ts, Kmm, rhd, rhop )` | stage tracers | `ocean_model_latlon_cgrid.py:9663` |
+| 4 | `stprk3_stg.F90:322` `eos( ts, Kmm, rhd, rhop )` | stage tracers | `ocean_model_latlon_cgrid.py:9797` |
 | 5 | `stprk3_stg.F90:324` `dyn_hpg` -> `hpg_sco` | `ln_hpg_sco = T` (`round38_oracle_trazdf_kt2/ocean.output:834`); under `key_RK3` it OVERWRITES `Krhs` (`dynhpg.F90:359-363`, `dynhpg.F90:383-387`) | the shared accumulator's `hpg` bucket |
 | 6 | `stprk3_stg.F90:327` `dyn_vor` -> `vor_ene` | `ln_dynvor_ene = T` (`round38_oracle_trazdf_kt2/ocean.output:810`), `nn_e3f_typ = 0` (`round38_oracle_trazdf_kt2/ocean.output:813`) | `pv_flux_ene` with the literal `e3f_vor` |
 | 7 | `stprk3_stg.F90:331` `dyn_adv` -> `dyn_keg` + `dyn_zad` | `nn_dynkeg = 0` (`round38_oracle_trazdf_kt2/ocean.output:799`); `dynkeg.F90:120-121` and `dynzad.F90:104-107`, both on `e3u(Kmm)` | the `advection` bucket |
@@ -10710,7 +10710,7 @@ through the shared helper, one feeds legoESM's, and the arm's verdict sentence
 is now READ OFF those rows instead of asserted beside them.
 
 **THE CHANGE IS ONE STATEMENT IN ONE SHARED HELPER**, no knob and no default
-that preserves the old behaviour.  `compute_ocean_jacobian` (`vertical.py:1963`)
+that preserves the old behaviour.  `compute_ocean_jacobian` (`vertical.py:1981`)
 forms `1 + eta*r1_h` with the reciprocal taken in the PROMOTED dtype of ssh and
 bathymetry — an existing test caught the first version taking it in the
 bathymetry's storage dtype, at a relative `3.0e-10` that is f32 eps times the
@@ -10955,8 +10955,8 @@ files must be committed before the operator runs it.  No NEMO executable,
 | statement | NEMO's compiled GYRE program | legoESM statement | finding before measurement |
 |---|---|---|---|
 | dispatch and time level | `GYRE_OMIP_L2_P3_SM_R40STG3TRM/BLD/ppsrc/nemo/dynadv.f90:134-138` calls KEG then ZAD with `Kmm`; the stage diagnoses `ww` from `uu/vv(Kmm)` immediately beforehand at `GYRE_OMIP_L2_P3_SM_R40STG3TRM/BLD/ppsrc/nemo/stprk3_stg.f90:326-332` | stage-3 vector-invariant C2 KE plus NEMO-advective ZAD, on the stage-2 state | branch/time level ALIGNED |
-| C2 KEG | `GYRE_OMIP_L2_P3_SM_R40STG3TRM/BLD/ppsrc/nemo/dynkeg.f90:117-130` rounds `zu`, rounds `zv`, forms `0.25*(zv+zu)`, then differences it and multiplies stored reciprocal metrics | `ocean_pe_latlon_cgrid.py:2107-2141` now materializes the four products and source-ordered pair sums; round 41's pre-measurement one-expression observation is RETRACTED | exact association landed in round 42 |
-| ZAD transport/thickness | `GYRE_OMIP_L2_P3_SM_R40STG3TRM/BLD/ppsrc/nemo/dynzad.f90:105-137` sums adjacent `e1e2t*ww`, multiplies a Kmm velocity difference, and scales with live Kmm face thickness | `ocean_pe_latlon_cgrid.py:3360-3391` area-weights/interpolates `ww` and calls the one shared NEMO-advective helper with Kmm thickness | algebra ALIGNED; reciprocal and accumulation association UNMEASURED |
+| C2 KEG | `GYRE_OMIP_L2_P3_SM_R40STG3TRM/BLD/ppsrc/nemo/dynkeg.f90:117-130` rounds `zu`, rounds `zv`, forms `0.25*(zv+zu)`, then differences it and multiplies stored reciprocal metrics | `ocean_pe_latlon_cgrid.py:2109-2143` now materializes the four products and source-ordered pair sums; round 41's pre-measurement one-expression observation is RETRACTED | exact association landed in round 42 |
+| ZAD transport/thickness | `GYRE_OMIP_L2_P3_SM_R40STG3TRM/BLD/ppsrc/nemo/dynzad.f90:105-137` sums adjacent `e1e2t*ww`, multiplies a Kmm velocity difference, and scales with live Kmm face thickness | `ocean_pe_latlon_cgrid.py:3401-3432` area-weights/interpolates `ww` and calls the one shared NEMO-advective helper with Kmm thickness | algebra ALIGNED; reciprocal and accumulation association UNMEASURED |
 | `ww` / `wsd` | `GYRE_OMIP_L2_P3_SM_R40STG3TRM/BLD/ppsrc/nemo/sshwzv.f90:271-298` builds `ww` bottom-up from Kmm velocity and the Kaa-Kbb QCO stretch.  Resolved `ln_wave=F` takes `GYRE_OMIP_L2_P3_SM_R40STG3TRM/BLD/ppsrc/nemo/sbcwave.f90:408-423`, which returns before allocating `wsd` at `:469-477`; ZAD therefore takes its `ww`-only arm | the coupled QCO seam provides stage-consistent `ww`; no Stokes vertical velocity is added | branch ALIGNED; numerical identity UNMEASURED |
 
 **PREREGISTERED PREDICTION.**  KEG carries the first non-bit statement and the

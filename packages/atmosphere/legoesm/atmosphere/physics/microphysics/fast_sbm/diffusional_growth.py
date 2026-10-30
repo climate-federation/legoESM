@@ -17,19 +17,13 @@ analytically). The supersaturation relaxation integral
 
 feeds the analytic supersaturation integrator (next module in the chain).
 
-Saturation vapor pressure comes from ``legoesm.thermo`` (repo-wide single
-saturation curve) — NOT a port of the oracle's ``A·exp(−B/T)`` exponential
-fit / ``POLYSVP``. Deviation vs the oracle curve (codex-verified): ~+0.1%
-near 273 K but up to ≈3.4% at the 243 K / 310 K extremes, propagating
-proportionally into ``F_D`` and ``B`` there. Model consistency wins
-anyway (CLAUDE.md shared-utilities rule: a re-derived curve diverging from
-the model's own saturation caused false supersaturation in CI before) —
-oracle-fidelity comparisons at cold/hot extremes must account for this.
-
-Other accepted constant deviations from the oracle's CGS values:
-``constants.L_v`` vs the oracle's 2.5e10 erg/g (+0.04%, ~0.08% in F_K) and
-``constants.p_atm_std`` vs PZERO = 101300 Pa (0.025% in D) — both kept on
-repo-wide constants by design.
+Saturation vapor pressure is the oracle's own curve
+``e_s = AA1·exp(−BB1/T)`` (``POLYSVP`` type 0, the one ``JERRATE_KS`` and
+the FAST_SBM supersaturation use), and the thermodynamic constants are the
+oracle's literals (``RV_MY``, ``AL1_MY``, ``CF_MY``, ``PZERO``,
+``CONST = 12.566372``, the Reynolds prefactor with π = 3.141593), all from
+``legoesm.constants`` ``*_fast_sbm`` — so the coefficients reproduce the
+running WRF scheme (user decision 2026-10-19: faithful port).
 
 Differences from ``sdm/condensation.py`` (same Maxwell denominator, shared
 deliberately at the formula level, not by import): SDM works per-particle
@@ -50,7 +44,6 @@ from legoesm.atmosphere.physics.microphysics.fast_sbm.grid import (
     bin_mass_widths,
     radius_from_mass,
 )
-from legoesm.thermo import saturation_vapor_pressure
 
 __physics_contract__ = {
     "summary": (
@@ -95,8 +88,12 @@ __physics_contract__ = {
     ),
 }
 
-# 4π (oracle CONST = 12.566372) — geometry, not tunable.
-_FOUR_PI = 4.0 * jnp.pi
+# Oracle JERRATE_KS literals (module_mp_fast_sbm.F): CONST = 12.566372 (4π,
+# l.1829) and the Reynolds-number prefactor A = 2(3/(4·3.141593))^(1/3)
+# (l.1847, B = A/COEFF_VISCOUS).
+_FOUR_PI = 12.566372
+_PI_JERRATE = 3.141593
+_RE_DIAMETER_PREFACTOR = 2.0 * (3.0 / 4.0 / _PI_JERRATE) ** (1.0 / 3.0)
 
 
 # Beard-Pruppacher ventilation factor constants (fixed).
@@ -105,14 +102,20 @@ _VENT_LOW_C = 0.108
 _VENT_HIGH_C0 = 0.78
 _VENT_HIGH_C1 = 0.308
 
+def saturation_vapor_pressure_fast_sbm(T: jax.Array) -> jax.Array:
+    """Oracle ``POLYSVP(T, 0) = AA1_MY·exp(−BB1_MY/T)`` [Pa] (liquid)."""
+    return constants.aa1_fast_sbm * jnp.exp(-constants.bb1_fast_sbm / T)  # satcurve-ok: oracle POLYSVP
+
+
 def vapor_diffusivity(
     T: jax.Array, p: jax.Array, config: FastSBMConfig = FastSBMConfig()
 ) -> jax.Array:
-    """``D = D_ref (p₀/p)(T/T₀)^a`` [m²/s] (oracle ``D_MY``; p₀ = 1013.25
-    hPa = ``constants.p_atm_std``, T₀ = ``constants.T_freeze``)."""
+    """``D = D_ref (p₀/p)(T/T₀)^a`` [m²/s] (oracle ``D_MY``; p₀ = PZERO =
+    1013 hPa = ``constants.p_zero_fast_sbm``, T₀ = TZERO = 273.15 K =
+    ``constants.T_freeze``)."""
     return (
         config.d_vapor_ref_m2s
-        * (constants.p_atm_std / p)
+        * (constants.p_zero_fast_sbm / p)
         * (T / constants.T_freeze) ** config.diffusivity_T_exponent
     )
 
@@ -127,8 +130,8 @@ def ventilation_factor(
 ) -> jax.Array:
     """Pruppacher–Klett ventilation coefficient per bin (oracle ``VENTPLM``).
 
-    ``Re = 2 r V / ν`` (diameter Reynolds number — the oracle's
-    ``B·V·(m/ρ_b)^{1/3}`` with ``B = 2(3/4π)^{1/3}/ν``), ``X = √Re·Sc^{1/3}``:
+    ``Re = B·V·(m/ρ_b)^{1/3}`` with ``B = 2(3/(4·3.141593))^{1/3}/ν``
+    (oracle literal π; the diameter Reynolds number), ``X = √Re·Sc^{1/3}``:
 
         f = 1 + 0.108 X²        (Re < 2.5)
         f = 0.78 + 0.308 X      (Re ≥ 2.5)
@@ -139,8 +142,8 @@ def ventilation_factor(
     nu = config.nu_air_ref_m2s
     D = vapor_diffusivity(T, p, config)
     schmidt = nu / D
-    r = radius_from_mass(masses, rho_bulk)
-    reynolds = 2.0 * r * v_term / nu
+    reynolds = (_RE_DIAMETER_PREFACTOR / nu) * v_term \
+        * (masses / rho_bulk) ** (1.0 / 3.0)
     # AD guard: ``sqrt`` has an unbounded derivative at 0, and the shipped
     # condensation path calls this with v_term = 0 ⇒ reynolds ≡ 0.  A shared
     # ``x = sqrt(reynolds)`` fed to BOTH jnp.where branches routes a
@@ -176,14 +179,16 @@ def drop_growth_coefficient(
     """
     if capacitance is None:
         capacitance = radius_from_mass(masses, rho_bulk)
-    e_s = saturation_vapor_pressure(T)
+    e_s = saturation_vapor_pressure_fast_sbm(T)
     D = vapor_diffusivity(T, p, config)
     f_vent = ventilation_factor(masses, v_term, T, p, rho_bulk, config)
-    F_D = constants.R_v * T / (D * e_s)
+    rvt = constants.R_v_fast_sbm * T
+    F_D = rvt / D / e_s
     F_K = (
-        (constants.L_v / (constants.R_v * T) - 1.0)
-        * constants.L_v
-        / (constants.k_air * T)
+        (constants.L_v_fast_sbm / rvt - 1.0)
+        * constants.L_v_fast_sbm
+        / constants.k_air_fast_sbm
+        / T
     )
     return _FOUR_PI * capacitance * f_vent / (F_D + F_K)
 

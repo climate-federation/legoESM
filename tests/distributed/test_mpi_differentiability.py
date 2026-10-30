@@ -26,6 +26,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
+from typing import NamedTuple
 
 mpi4jax = pytest.importorskip("mpi4jax")
 MPI = pytest.importorskip("mpi4py.MPI")
@@ -58,9 +59,9 @@ class TestGlobalSumMPIGrad:
     """Gradient through allreduce(SUM)."""
 
     def test_grad_scalar(self):
-        """Gradient of global_sum_mpi should be all-ones (like jnp.sum)."""
+        """Gradient of a final-loss global_sum_mpi is all-ones (like jnp.sum)."""
         def f(x):
-            return global_sum_mpi(jnp.sum(x))
+            return global_sum_mpi(jnp.sum(x), final_loss=True)
 
         x = jnp.ones(5, dtype=jnp.float64)
         g = jax.grad(f)(x)
@@ -93,7 +94,7 @@ class TestGlobalSumMPIGrad:
         complete contract discussion.
         """
         def f(x):
-            s = global_sum_mpi(jnp.sum(x ** 2))
+            s = global_sum_mpi(jnp.sum(x ** 2), final_loss=True)
             return s
 
         x = jnp.array([1.0, 2.0, 3.0], dtype=jnp.float64)
@@ -102,6 +103,287 @@ class TestGlobalSumMPIGrad:
         assert not jnp.allclose(g, 0.0)
         # d/dx sum(x_local^2) = 2*x_local; allreduce VJP is identity.
         np.testing.assert_allclose(g, 2.0 * x, atol=1e-12)
+
+
+class TestNormalisedFinalLoss:
+    """#1814: a global MEAN that every rank evaluates as the loss also needs
+    final_loss=True; the default backward would scale it by the rank count."""
+
+    @pytest.fixture(autouse=True)
+    def _two_ranks(self):
+        if MPI.COMM_WORLD.Get_size() < 2:
+            pytest.skip("needs >= 2 MPI ranks")
+
+    def test_global_mean_loss_matches_serial(self):
+        comm = MPI.COMM_WORLD
+        n, rank = comm.Get_size(), comm.Get_rank()
+        x = jnp.arange(3.0, dtype=jnp.float64) + 10.0 * rank + 1.0
+
+        def loss(x):
+            return global_sum_mpi(jnp.sum(x ** 2), final_loss=True) / n
+
+        g = jax.grad(loss)(x)
+        np.testing.assert_allclose(np.asarray(g), np.asarray(2.0 * x / n),
+                                   rtol=1e-12)
+
+
+class TestReusedSumGrad:
+    """#1814: a sum that every rank holds and reuses needs the allreduce
+    backward pass.  Each rank differentiates its OWN local loss; the gradient
+    must equal the matching row of the serial gradient of the total loss.
+    With mpi4jax's identity backward pass these fail for >= 2 ranks."""
+
+    @pytest.fixture(autouse=True)
+    def _two_ranks(self):
+        if MPI.COMM_WORLD.Get_size() < 2:
+            pytest.skip("needs >= 2 MPI ranks")
+
+    @staticmethod
+    def _x(rank):
+        return jnp.arange(3.0, dtype=jnp.float64) + 10.0 * rank + 1.0
+
+    def _serial_row(self, total_loss):
+        comm = MPI.COMM_WORLD
+        xs = jnp.stack([self._x(r) for r in range(comm.Get_size())])
+        return np.asarray(jax.grad(total_loss)(xs))[comm.Get_rank()]
+
+    def test_reused_global_sum(self):
+        def local_loss(x):
+            s = global_sum_mpi(jnp.sum(x))
+            return jnp.sum(jnp.sin(x) * s)
+
+        def total(xs):
+            return jnp.sum(jnp.sin(xs) * jnp.sum(xs))
+
+        g = jax.grad(local_loss)(self._x(MPI.COMM_WORLD.Get_rank()))
+        np.testing.assert_allclose(np.asarray(g), self._serial_row(total),
+                                   rtol=1e-12)
+
+    def test_reused_batch_allreduce(self):
+        from legoesm.parallel.reductions import batch_allreduce_mpi
+
+        def local_loss(x):
+            s1, s2 = batch_allreduce_mpi([jnp.sum(x), jnp.sum(x ** 2)])
+            return jnp.sum(jnp.sin(x) * s1 + x * s2)
+
+        def total(xs):
+            return jnp.sum(jnp.sin(xs) * jnp.sum(xs) + xs * jnp.sum(xs ** 2))
+
+        g = jax.grad(local_loss)(self._x(MPI.COMM_WORLD.Get_rank()))
+        np.testing.assert_allclose(np.asarray(g), self._serial_row(total),
+                                   rtol=1e-12)
+
+    def test_backward_uses_the_sub_communicator(self):
+        """Singleton sub-communicators: the backward allreduce must use
+        ``comm`` too, or it would mix in the other ranks' cotangents."""
+        world = MPI.COMM_WORLD
+        sub = world.Split(color=world.Get_rank(), key=0)
+        try:
+            def local_loss(x):
+                s = global_sum_mpi(jnp.sum(x), comm=sub)
+                return jnp.sum(jnp.sin(x) * s)
+
+            x = self._x(world.Get_rank())
+            g = jax.grad(local_loss)(x)
+            want = jnp.cos(x) * jnp.sum(x) + jnp.sum(jnp.sin(x))
+            np.testing.assert_allclose(np.asarray(g), np.asarray(want),
+                                       rtol=1e-12)
+        finally:
+            sub.Free()
+
+    def test_rank_that_discards_the_sum_still_joins_backward(self):
+        """Only rank 0 uses the sum; the others discard it.  Their cotangent
+        for it is a symbolic zero, but they must still enter the backward
+        allreduce, or rank 0 deadlocks / misses nothing it needs."""
+        rank = MPI.COMM_WORLD.Get_rank()
+
+        def local_loss(x):
+            s = global_sum_mpi(jnp.sum(x))
+            if rank == 0:
+                return jnp.sum(jnp.sin(x) * s)
+            return jnp.sum(jnp.cos(x))
+
+        def total(xs):
+            return (jnp.sum(jnp.sin(xs[0]) * jnp.sum(xs))
+                    + jnp.sum(jnp.cos(xs[1:])))
+
+        g = jax.grad(local_loss)(self._x(rank))
+        np.testing.assert_allclose(np.asarray(g), self._serial_row(total),
+                                   rtol=1e-12)
+
+    def test_reused_sum_inside_jit_scan(self):
+        def step(c, s):
+            return 0.5 * c + jnp.sin(c) * s / 100.0
+
+        def local_loss(x):
+            def body(c, _):
+                return step(c, global_sum_mpi(jnp.sum(c))), None
+            c, _ = jax.lax.scan(body, x, None, length=3)
+            return jnp.sum(c ** 2)
+
+        def total(xs):
+            def body(c, _):
+                return step(c, jnp.sum(c)), None
+            c, _ = jax.lax.scan(body, xs, None, length=3)
+            return jnp.sum(c ** 2)
+
+        g = jax.jit(jax.grad(local_loss))(self._x(MPI.COMM_WORLD.Get_rank()))
+        np.testing.assert_allclose(np.asarray(g), self._serial_row(total),
+                                   rtol=1e-12)
+
+
+class TestForwardMode:
+    """#1814 follow-up: forward mode through the MPI global sum.  The tangent of
+    S = sum_r x_r is sum_r v_r, so each rank's JVP must equal the matching row
+    of the serial JVP with every rank's tangent stacked."""
+
+    @pytest.fixture(autouse=True)
+    def _two_ranks(self):
+        if MPI.COMM_WORLD.Get_size() < 2:
+            pytest.skip("needs >= 2 MPI ranks")
+
+    @staticmethod
+    def _xv(rank):
+        x = jnp.arange(3.0, dtype=jnp.float64) + 10.0 * rank + 1.0
+        return x, jnp.cos(x) + rank
+
+    def _serial_jvp_row(self, total_rows):
+        comm = MPI.COMM_WORLD
+        xs, vs = (jnp.stack(a) for a in
+                  zip(*(self._xv(r) for r in range(comm.Get_size()))))
+        return np.asarray(jax.jvp(total_rows, (xs,), (vs,))[1])[comm.Get_rank()]
+
+    @pytest.mark.parametrize("jit", [False, True])
+    def test_jvp_global_sum_matches_serial(self, jit):
+        def local(x):
+            return jnp.sin(x) * global_sum_mpi(jnp.sum(x ** 2))
+
+        def rows(xs):
+            return jnp.sin(xs) * jnp.sum(xs ** 2)
+
+        x, v = self._xv(MPI.COMM_WORLD.Get_rank())
+        fn = jax.jit(local) if jit else local
+        t = jax.jvp(fn, (x,), (v,))[1]
+        np.testing.assert_allclose(np.asarray(t), self._serial_jvp_row(rows),
+                                   rtol=1e-12)
+
+    def test_jvp_batch_allreduce_matches_serial(self):
+        from legoesm.parallel.reductions import batch_allreduce_mpi
+
+        def local(x):
+            s1, s2 = batch_allreduce_mpi([jnp.sum(x), jnp.sum(x ** 2)])
+            return jnp.sin(x) * s1 + x * s2
+
+        def rows(xs):
+            return jnp.sin(xs) * jnp.sum(xs) + xs * jnp.sum(xs ** 2)
+
+        x, v = self._xv(MPI.COMM_WORLD.Get_rank())
+        t = jax.jvp(local, (x,), (v,))[1]
+        np.testing.assert_allclose(np.asarray(t), self._serial_jvp_row(rows),
+                                   rtol=1e-12)
+
+    def test_jvp_final_loss_matches_serial(self):
+        def local(x):
+            return global_sum_mpi(jnp.sum(x ** 2), final_loss=True)
+
+        def rows(xs):
+            return jnp.broadcast_to(jnp.sum(xs ** 2), xs.shape[:1])
+
+        x, v = self._xv(MPI.COMM_WORLD.Get_rank())
+        t = jax.jvp(local, (x,), (v,))[1]
+        np.testing.assert_allclose(float(t), self._serial_jvp_row(rows),
+                                   rtol=1e-12)
+
+    def test_check_grads_fwd_and_rev_order2(self):
+        """Inputs identical on every rank (check_grads draws its direction from
+        a fixed seed, so all ranks perturb alike); then the local JVP/VJP
+        identity <ct, J v> = <J^T ct, v> holds rank by rank."""
+        from jax.test_util import check_grads
+
+        def local(x):
+            return jnp.sin(x) * global_sum_mpi(jnp.sum(x ** 2))
+
+        check_grads(local, (jnp.arange(1.0, 4.0, dtype=jnp.float64),),
+                    order=2, modes=("fwd", "rev"), atol=1e-6, rtol=1e-6)
+
+    def test_check_grads_final_loss_fwd_order2(self):
+        """final_loss keeps the per-rank identity backward by convention, so
+        only forward mode has a finite-difference reference."""
+        from jax.test_util import check_grads
+
+        check_grads(lambda x: global_sum_mpi(jnp.sum(x ** 3), final_loss=True),
+                    (jnp.arange(1.0, 4.0, dtype=jnp.float64),),
+                    order=2, modes=("fwd",), atol=1e-6, rtol=1e-6)
+
+
+class TestFixerGradScatteredMatchesSerial:
+    """#1814, measured: on face-scattered cube MPI (each rank owns some faces),
+    each rank's gradient of its OWN local loss through a mass fixer must equal
+    the serial gradient on those faces.  The fixer's global sum is reused by
+    every rank (the correction is added to every cell), so an identity
+    backward pass misses the other ranks' terms."""
+
+    N = 4
+
+    class _F(NamedTuple):
+        data: jax.Array
+
+        def replace(self, data):
+            return self._replace(data=data)
+
+    class _S(NamedTuple):
+        p_s: "TestFixerGradScatteredMatchesSerial._F"
+
+    class _G(NamedTuple):
+        area: jax.Array
+        grid_total_area: jax.Array
+
+    def _setup(self, topology):
+        n = self.N
+        rng = np.random.default_rng(1814)
+        area = jnp.asarray(rng.uniform(0.5, 1.5, (6, n, n)))
+        p_old = jnp.asarray(1e5 + 100 * rng.standard_normal((6, n, n)))
+        p_new = jnp.asarray(1e5 + 100 * rng.standard_normal((6, n, n)))
+        w = jnp.asarray(rng.standard_normal((6, n, n)))
+        faces = np.asarray(topology.local_face_ids)
+        return area, p_old, p_new, w, faces
+
+    def _compare(self, topology, fixed_fn):
+        area, p_old, p_new, w, faces = self._setup(topology)
+
+        def loss(a, wt, po, pn):
+            g = self._G(area=a, grid_total_area=jnp.sum(a))
+            return jnp.sum(wt * fixed_fn(po, pn, g) ** 2)
+
+        set_halo_backend("local")
+        g_ref = jax.grad(loss, argnums=(2, 3))(area, w, p_old, p_new)
+        set_halo_backend("mpi", topology)
+        g_mpi = jax.grad(loss, argnums=(2, 3))(
+            area[faces], w[faces], p_old[faces], p_new[faces])
+        for got, ref in zip(g_mpi, g_ref):
+            np.testing.assert_allclose(np.asarray(got),
+                                       np.asarray(ref)[faces], rtol=1e-9)
+
+    def test_fix_mass_hydrostatic(self, topology):
+        if len(topology.local_face_ids) >= 6:
+            pytest.skip("needs face scatter (>= 2 ranks)")
+        from legoesm.core.conservation import fix_mass_hydrostatic
+        F, S = self._F, self._S
+        self._compare(topology, lambda po, pn, g: fix_mass_hydrostatic(
+            S(F(pn)), S(F(po)), g).p_s.data)
+
+    def test_fix_ps_mass(self, topology):
+        if len(topology.local_face_ids) >= 6:
+            pytest.skip("needs face scatter (>= 2 ranks)")
+        from legoesm.core.conservation import fix_ps_mass
+        self._compare(topology, lambda po, pn, g: fix_ps_mass(pn, po, g))
+
+    def test_fix_ps_mass_target(self, topology):
+        if len(topology.local_face_ids) >= 6:
+            pytest.skip("needs face scatter (>= 2 ranks)")
+        from legoesm.core.conservation import fix_ps_mass_target
+        self._compare(topology, lambda po, pn, g: fix_ps_mass_target(
+            pn, jnp.asarray(1e5) * 6.0 * self.N ** 2, g))
 
 
 class TestPadHaloMPIGrad:
@@ -440,7 +722,7 @@ class TestVoronoiHaloMPIGrad:
             u_e, T_e, ps_e, qv_e = _exchange(u, T, ps, qv)
             local = (jnp.sum(u_e ** 2) + jnp.sum(T_e ** 2)
                      + jnp.sum(ps_e ** 2) + jnp.sum(qv_e ** 2))
-            return global_sum_mpi(local)
+            return global_sum_mpi(local, final_loss=True)
 
         loss_mpi, g_mpi = jax.value_and_grad(
             mpi_loss, argnums=(0, 1, 2, 3))(u_l, T_l, ps_l, qv_l)

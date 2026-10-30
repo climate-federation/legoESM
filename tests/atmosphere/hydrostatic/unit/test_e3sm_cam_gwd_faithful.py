@@ -45,7 +45,21 @@ from legoesm.atmosphere.physics.gravity_wave_drag.e3sm_cam import (
     e3sm_cam_gwd,
 )
 
+
 from legoesm import constants as C
+
+
+_e3sm_cam_gwd_kernel = e3sm_cam_gwd
+
+
+def e3sm_cam_gwd(*args, **kw):
+    """The kernel with ``p_ref_half`` (E3SM pref_edge) = the test column's own
+    interfaces: these columns are built at surface pressure p_ref = 1e5 Pa, so
+    their interfaces ARE the reference interfaces a lane would pass."""
+    if "p_ref_half" not in kw:
+        ph = kw["p_half"] if "p_half" in kw else args[4]
+        kw["p_ref_half"] = jnp.asarray(ph)[0]
+    return _e3sm_cam_gwd_kernel(*args, **kw)
 
 
 @pytest.fixture(autouse=True)
@@ -520,7 +534,9 @@ def test_spectral_heating_band_cuts_deep_beres_dttke():
                            cfg_off, netdt_col=netdt)
     out_on = e3sm_cam_gwd(u, v, T, pf, ph, zf, zh, rho, lat, 1800.0,
                           cfg_on, netdt_col=netdt)
-    kbot = int(np.argmin(np.abs(pmid_mean - cfg_on.ediff_kbot_p)))
+    # E3SM kbotbg: last reference interface above ediff_kbot_p (the wrapper
+    # passes the column's own interfaces as pref_edge).
+    kbot = int(np.sum(np.asarray(ph)[0] < cfg_on.ediff_kbot_p)) - 1
     below = np.array(out_off.dT_dt)[:, kbot:]
     assert np.max(np.abs(below)) > 0.0, (
         "fixture must deposit legacy dttke below the 500 hPa band")
@@ -541,15 +557,12 @@ def test_frontgfc_default_is_e3sm_operational_namelist_value():
     The earlier 1.0e-10 default sat ~5 orders of magnitude above anything
     the resolved flow produces (10-day r16 AMIP: max frontgf 5.4e-15), so
     the frontal source could NEVER fire — a dead-on-arrival trigger the
-    2026-07-20 frontal A/B exposed.  The __param_spec__ tuning window must
-    bracket BOTH namelist values so --params can reach them."""
+    2026-07-20 frontal A/B exposed.  frontgfc is excluded from training
+    (a hard on/off comparison, zero gradient), so it has no tuning bounds."""
     from legoesm.atmosphere.physics.gravity_wave_drag import config as gwd_config
 
     cfg = E3SMFrontalConfig()
     assert cfg.frontgfc == 1.25e-15
-    spec = gwd_config.__param_spec__["E3SMFrontalConfig"]["params"]["frontgfc"]
-    lo, hi = spec["bounds"]
-    assert lo < 7.5e-16 < hi, "bounds must cover the 4x5 coarse-grid value"
-    assert lo < 1.25e-15 < hi, "bounds must cover the operational default"
-    assert lo < 2.0e-14 < hi, (
-        "bounds must cover the ne120np4 high-res value (2e-14, E3SM master)")
+    spec = gwd_config.__param_spec__["E3SMFrontalConfig"]
+    assert "frontgfc" in spec["excluded"]
+    assert "frontgfc" not in spec["params"]

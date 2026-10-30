@@ -20,54 +20,8 @@ from typing import TypeAlias
 
 import jax
 from legoesm.atmosphere.physics._shared import safe_divide
-from legoesm.atmosphere.physics.radiation.rrtmgp import interpolation
-from legoesm.atmosphere.physics.radiation.rrtmgp import kernel_ops
 
 Array: TypeAlias = jax.Array
-
-
-def _shift_down(f: Array) -> Array:
-  """output_i = f_{i+1}."""
-  return kernel_ops.shift_from_plus(f, 2)
-
-
-def reconstruct_face_values(f: Array, f_lower_bc: Array) -> tuple[Array, Array]:
-  """Reconstruct the face values using a high-order scheme.
-
-  This function performs an interpolation from nodes to faces.
-
-  Args:
-    f: The cell-center values that will be interpolated.
-    f_lower_bc: The boundary condition for f on the lower face (wall).
-
-  Returns:
-    A tuple with the reconstructed temperature at the bottom and top face,
-    respectively.
-  """
-  # f is f_ccc.
-  # Use WENO5.
-
-  # Set halo value to the BC wall value.
-  f = f.at[:, :, 0].set(f_lower_bc)
-
-  # Enforce Neumann BC on the upper halo value.
-  f = f.at[:, :, -1].set(f[:, :, -2])
-
-  f_face_plus, f_face_minus = interpolation.weno5_node_to_face_for_rrtmgp(
-      f, dim=2, f_lower_bc=f_lower_bc, neumann_upper_bc=True
-  )
-  # To get the final interpolation, just take the average of the plus and
-  # minus reconstructions.
-  f_bottom_ccf = 0.5 * (f_face_plus + f_face_minus)
-
-  # Use centered interpolation: UNSTABLE.
-  # f_bottom_ccf = interpolation.z_c_to_f(f)
-
-  f_top = _shift_down(f_bottom_ccf)
-  # Update the f_top face (wall) value.
-  # Look into what is the appropriate BC here.
-  f_top = f_top.at[:, :, -1].set(f_top[:, :, -2])
-  return f_bottom_ccf, f_top
 
 
 class OpticsScheme(abc.ABC):
@@ -168,6 +122,7 @@ class OpticsScheme(abc.ABC):
       igpt: Array,
       vmr_fields: dict[int, Array] | None = None,
       sfc_temperature: Array | None = None,
+      level_temperature: Array | None = None,
   ) -> dict[str, Array]:
     """Computes the Planck sources used in the longwave problem.
 
@@ -178,6 +133,8 @@ class OpticsScheme(abc.ABC):
       vmr_fields: An optional dictionary containing precomputed volume mixing
         ratio fields, keyed by gas index, that will overwrite the global means.
       sfc_temperature: An optional 2D plane for the surface temperature [K].
+      level_temperature: The host's level (face) temperatures [K], surface
+        first.
 
     Returns:
       A dictionary containing the Planck source at the cell center

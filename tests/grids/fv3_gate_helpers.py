@@ -534,3 +534,25 @@ def assert_batched_matches_loop(got_b, got_l, label, rtol=BATCH_RTOL,
     np.testing.assert_allclose(
         b[keep], ref[keep], rtol=rtol, atol=atol, equal_nan=True,
         err_msg=f"{label}: batched arm != loop arm")
+
+
+def hlo_instruction_count(fn, static_argnums, *args, **kwargs) -> int:
+    """Instructions in the lowered (pre-optimisation) HLO of ``fn``: the
+    size the CPU JIT has to compile, which is what blew up at km=32.
+    ``km`` and ``batched`` are always static; ``static_argnums`` names
+    the positional statics (ctx and km) of the phase under test."""
+    lowered = jax.jit(fn, static_argnums=static_argnums,
+                      static_argnames=("km", "batched")).lower(*args, **kwargs)
+    text = lowered.compiler_ir("hlo").as_hlo_text()
+    return sum(1 for line in text.splitlines()
+               if "=" in line and not line.lstrip().startswith(
+                   ("HloModule", "ENTRY", "}", "ROOT %")))
+
+
+def assert_program_size_independent_of_km(n2b, n4b, n2l, n4l):
+    """Level batching gate: the batched arm's lowered program is the
+    same size at km=2 and km=4 (up to shape constants); the loop arm --
+    faces and levels unrolled in Python -- roughly doubles, which is
+    the non-vacuity control (the counter sees the unrolling)."""
+    assert n4b <= 1.05 * n2b + 50, (n2b, n4b)
+    assert n4l >= 1.7 * n2l, (n2l, n4l)

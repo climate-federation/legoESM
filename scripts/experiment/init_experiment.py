@@ -22,8 +22,8 @@ Examples::
 
     python scripts/experiment/init_experiment.py 2d/williamson2_sw \\
         --name w2 --output-dir ./runs/w2
-    python scripts/experiment/init_experiment.py 2d/williamson2_sw \\
-        --name w2hi --output-dir ./runs/w2hi \\
+    python scripts/experiment/init_experiment.py 3d_idealized/held_suarez \\
+        --name hshi --output-dir ./runs/hshi \\
         -o grid.resolution=96 -o time.duration_hours=240
 """
 from __future__ import annotations
@@ -290,7 +290,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"    {run_cmd}")
         print(f"  Results:       {out_subdir} (summary.json + per-case artifacts)")
     elif is_atm:
-        print(f"  Reproduce it:  legoesm reproduce {out}/<output>/run_manifest.json --check")
+        run_out = out / str(cfg.get("output.path") or "output")
+        print(f"  Reproduce it:  legoesm reproduce {run_out / 'run_manifest.json'} --check")
     else:
         # No `--check`: ocean reproduce-rerun is not wired through the atmosphere
         # driver, so --check would not perform a digest comparison. `reproduce`

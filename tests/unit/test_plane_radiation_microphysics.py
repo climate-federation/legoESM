@@ -227,7 +227,7 @@ class TestPlaneMicrophysics:
         silently dropping ice / snow / number outputs. The fixture
         provides 3 slots; Morrison needs 9."""
         cfg = MicrophysicsConfig(
-            scheme="morrison", morrison=MorrisonConfig(),
+            scheme="morrison", morrison=MorrisonConfig(warm_rain_scheme="kk2000"),
         )
         physics_fn = make_microphysics_physics(
             cfg, model_type="plane", dt=1.0,
@@ -251,7 +251,7 @@ class TestPlaneMicrophysics:
             tracers=plane_setup["state"].tracers.replace(data=tracers),
         )
         cfg = MicrophysicsConfig(
-            scheme="morrison", morrison=MorrisonConfig(),
+            scheme="morrison", morrison=MorrisonConfig(warm_rain_scheme="kk2000"),
         )
         physics_fn = make_microphysics_physics(
             cfg, model_type="plane", dt=1.0,

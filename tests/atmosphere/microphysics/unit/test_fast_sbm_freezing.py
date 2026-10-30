@@ -58,10 +58,10 @@ def test_freezing_conserves_mass_and_heats():
         np.asarray(mass_density(out.f_liquid, m) + mass_density(out.f_ice, m)),
         float(mass_density(f, m)), rtol=1e-12)
     assert float(mass_density(out.f_ice, m)) > 0.0
-    # Fusion warming = (L_f/c_pd)·dq_ice.
+    # Fusion warming = 333 K·dq_ice (oracle FREEZ ARG_1=333.*SUM_ICE/RO).
     dq_ice = float(mass_density(out.f_ice, m)) / float(rho)
     assert float(out.dT) == pytest.approx(
-        (constants.L_f / constants.c_pd) * dq_ice, rel=1e-12)
+        constants.lf_over_cp_fast_sbm * dq_ice, rel=1e-12)
     assert np.all(np.asarray(out.f_liquid) >= 0.0)
 
 

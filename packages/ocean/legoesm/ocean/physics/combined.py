@@ -148,6 +148,7 @@ def make_ocean_physics(
     config: OceanPhysicsConfig,
     apply_vertical_diffusion: bool = True,
     seos_cfg=None,
+    eos_fn=None,
 ) -> Callable:
     """Create a combined ocean physics function.
 
@@ -165,6 +166,9 @@ def make_ocean_physics(
         terms (KPP counter-gradient flux) are still applied
         explicitly.  This is the mode required for
         ``LatLonCGridOceanConfig.from_flat(implicit_vertical_mixing=True)``.
+    eos_fn : callable or None
+        The run's EOS for the vertical-mixing closures that take one
+        (Richardson, ePBL; #2177). ``None`` = Wright 1997.
 
     Returns
     -------
@@ -217,6 +221,7 @@ def make_ocean_physics(
             config.vertical_mixing,
             apply_diffusion=apply_vertical_diffusion,
             constants_config=config.constants,
+            eos_fn=eos_fn,
         ))
     if config.lateral_mixing.scheme != "none":
         lateral_fn = make_lateral_mixing_physics(
@@ -419,6 +424,16 @@ def make_ocean_physics(
                     sw_config,
                     rho_0=config.constants.rho_0,
                     c_sw=config.constants.c_sw,
+                    # ``nemo_qsr_2bd`` ignores the generic ``jacobian``
+                    # argument: NEMO's qsr_2BD evaluates both gdepw and e3t
+                    # with the live ``1+r3t(Kmm)`` factor, once, at stage 3.
+                    # NEMO has no step-entry evaluation: this pipeline field
+                    # exists only so the rk3_ws program can subtract it and
+                    # add the Kmm call.  Its live entry factor makes that
+                    # subtraction exact; other integrators refuse the scheme.
+                    z_half_stretch=(
+                        J if sw_config.scheme == "nemo_qsr_2bd" else None
+                    ),
                 )
             dT_dt = dT_dt + sw_tend
 

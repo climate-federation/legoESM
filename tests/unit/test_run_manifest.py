@@ -78,6 +78,45 @@ def test_optional_provenance_fields_are_threaded() -> None:
     assert m["result"]["model_weights_provenance"] == {"checkpoint": "physics.eqx"}
 
 
+def test_env_var_runner_provenance_overrides_caller_defaults(monkeypatch) -> None:
+    """LEGOESM_RUNNER_PATCHES is appended to the caller's patches; LEGOESM_RUNNER_TAG
+    lands in orchestrator_tag and leaves the replay-keyed runner_tag alone."""
+    monkeypatch.setenv(
+        "LEGOESM_RUNNER_TAG",
+        "ocean-runners@legoesm-294495454a29 template=3d_idealized/baroclinic_gyre",
+    )
+    monkeypatch.setenv(
+        "LEGOESM_RUNNER_PATCHES",
+        "001-libm-lazy-load.patch, , local.patch, 002-omip-core2-extensions.patch",
+    )
+    m = build_run_manifest(
+        _sample_config(), runner_tag="run_omip_core2", patches=["", " local.patch "]
+    )
+    assert m["reproducibility"]["runner_tag"] == "run_omip_core2"
+    assert m["reproducibility"]["orchestrator_tag"] == (
+        "ocean-runners@legoesm-294495454a29 template=3d_idealized/baroclinic_gyre"
+    )
+    # Caller first, then env entries; whitespace stripped, blanks and duplicates dropped.
+    assert m["reproducibility"]["patches"] == [
+        "local.patch",
+        "001-libm-lazy-load.patch",
+        "002-omip-core2-extensions.patch",
+    ]
+
+
+def test_env_var_runner_provenance_absent_keeps_caller_values(monkeypatch) -> None:
+    """Without the env vars (or with empty values) the caller's runner_tag
+    and patches pass through unchanged."""
+    monkeypatch.delenv("LEGOESM_RUNNER_TAG", raising=False)
+    monkeypatch.setenv("LEGOESM_RUNNER_PATCHES", " , ")  # blank entries only = unset
+    m = build_run_manifest(
+        _sample_config(), runner_tag="run_omip_core2", patches=["p.patch"]
+    )
+    assert m["reproducibility"]["runner_tag"] == "run_omip_core2"
+    assert m["reproducibility"]["orchestrator_tag"] == ""
+    assert m["reproducibility"]["patches"] == ["p.patch"]
+
+
 def test_dataset_provenance_entry_shape_and_checksum(tmp_path: Path) -> None:
     """Entry records identity + cheap integrity facts; sha256 is opt-in."""
     import hashlib
@@ -333,12 +372,13 @@ def test_atomic_write_leaves_no_temp_file(tmp_path: Path) -> None:
 def test_manifest_for_a_shipped_config(tmp_path: Path) -> None:
     """End-to-end: a real config -> manifest whose resolved_config rebuilds it.
 
-    Mirrors what ``legoesm run`` writes at startup for config/williamson_test2.
+    Mirrors what ``legoesm run`` writes at startup for the Held-Suarez template.
     """
     from legoesm.config import Config
 
-    ec = Config.from_yaml("config/williamson_test2.yaml").to_experiment_config()
-    path = write_run_manifest(tmp_path, ec, command_line="legoesm run williamson_test2.yaml")
+    ec = Config.from_yaml(
+        "config/templates/3d_idealized/held_suarez.yaml").to_experiment_config()
+    path = write_run_manifest(tmp_path, ec, command_line="legoesm run held_suarez.yaml")
     m = read_run_manifest(path)
     assert experiment_config_from_dict(m["config"]["resolved_config"]) == ec
     assert m["config"]["config_hash"]  # non-empty sha256

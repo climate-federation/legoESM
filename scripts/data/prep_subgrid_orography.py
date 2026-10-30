@@ -125,6 +125,7 @@ def subgrid_orography_residual_stddev(
     fine_res_deg: float = 0.25,
     block_deg: float = 2.0,
     resolved_cutoff_deg: float = 4.0,
+    estimator: str = "block_stddev",
 ):
     """Per-block stddev of the RESIDUAL terrain the model cannot resolve.
 
@@ -138,11 +139,12 @@ def subgrid_orography_residual_stddev(
     This variant makes the decomposition EXPLICIT.  Terrain is smoothed with a
     top-hat running mean of width ``resolved_cutoff_deg`` — the model's
     effective resolution, ~3-4x its cell size, NOT its cell size — and the
-    stddev is taken of ``h - smooth(h)`` per block.  A wave much longer than
+    stddev of ``h - smooth(h)`` is taken per block.  A wave much longer than
     the cutoff contributes ~nothing (the model resolves it); a wave much
-    shorter contributes its full stddev; the block size keeps only the job of
-    LOCATING the answer on the output grid, and the physics lives in the
-    cutoff, named and stamped in the file's ``history``.
+    shorter contributes its full stddev; with ``estimator="rms"`` the block
+    size keeps only the job of LOCATING the answer on the output grid and the
+    physics lives in the cutoff, named and stamped in the file (with the
+    default estimator the block still shapes it -- see ESTIMATOR).
 
     Same clipping (terrain >= 0), same area weighting, same output layout as
     the classic construction, so ``load_subgrid_orography`` reads either.
@@ -157,10 +159,23 @@ def subgrid_orography_residual_stddev(
     deliberate property, not an oversight -- but a masked variant (weight by
     land fraction in the smooth AND the block moments) is the named follow-up
     if coastal drag is ever tuned against this field.
+
+    ESTIMATOR (#1712, codex review, measured -- no default change made):
+    ``"block_stddev"`` (default, unchanged) is the stddev of the residual about
+    its BLOCK mean; it also removes residual waves longer than the block but
+    shorter than the cutoff (a 2-deg wave at block 1 / cutoff 3.5 keeps 0.39x
+    of its RMS), so the block size still shapes the answer.  ``"rms"`` is the
+    residual's RMS about zero: it keeps that band in full, but also keeps the
+    top-hat's transition-band leak of RESOLVED waves (~(cutoff/lambda)^2/6 of
+    their amplitude, e.g. 2.9% of a 30-deg wave at a 4-deg cutoff), which the
+    block demeaning suppressed.  Which one a production file uses is a choice.
     """
     import numpy as np
     import xarray as xr
 
+    if estimator not in ("block_stddev", "rms"):
+        raise ValueError(
+            f"estimator must be 'block_stddev' or 'rms'; got {estimator!r}")
     factor_f = float(block_deg) / float(fine_res_deg)
     factor = int(round(factor_f))
     if abs(factor_f - factor) > 1e-9 or factor < 2:
@@ -239,9 +254,12 @@ def subgrid_orography_residual_stddev(
     wb = np.broadcast_to(
         w_row.reshape(n_lat // factor, factor, 1, 1), rb.shape)
     w_sum = np.maximum(wb.sum(axis=(1, 3)), 1e-12)
-    mu = (wb * rb).sum(axis=(1, 3)) / w_sum
-    var = (wb * (rb - mu[:, None, :, None]) ** 2).sum(axis=(1, 3)) / w_sum
-    sso = np.sqrt(var)
+    if estimator == "rms":
+        sso = np.sqrt((wb * rb ** 2).sum(axis=(1, 3)) / w_sum)
+    else:
+        mu = (wb * rb).sum(axis=(1, 3)) / w_sum
+        sso = np.sqrt(
+            (wb * (rb - mu[:, None, :, None]) ** 2).sum(axis=(1, 3)) / w_sum)
     lat_b = lat.reshape(-1, factor).mean(axis=1)
     lon_b = lon.reshape(-1, factor).mean(axis=1)
 
@@ -258,6 +276,35 @@ def subgrid_orography_residual_stddev(
     return out
 
 
+def anchored_sso_scales(cell_deg: float, fine_res_deg: float):
+    """``(block_deg, resolved_cutoff_deg)`` anchored to a model grid (#1712).
+
+    block = the model cell, cutoff = ``EFFECTIVE_RESOLUTION_DX`` cells -- the
+    reading the loader's scale check applies to explicit-cutoff files, so a
+    file built here passes that check on the grid it was built for.  Both are
+    snapped DOWN to multiples of ``fine_res_deg``: the cutoff so it never sits
+    above the effective resolution, the block to the largest such multiple
+    that tiles 180 x 360 deg.
+    """
+    import numpy as np
+    from legoesm.grids.topography import EFFECTIVE_RESOLUTION_DX
+
+    fine = float(fine_res_deg)
+    n_lat, n_lon = round(180.0 / fine), round(360.0 / fine)
+    n_cell = int(np.floor(float(cell_deg) / fine + 1e-9))
+    for f in range(n_cell, 1, -1):
+        if n_lat % f == 0 and n_lon % f == 0:
+            block = f * fine
+            break
+    else:
+        raise ValueError(
+            f"fine_res_deg={fine_res_deg!r} is too coarse for a "
+            f"{cell_deg!r}-deg cell: need >= 2 fine samples per block")
+    cutoff = int(np.floor(EFFECTIVE_RESOLUTION_DX * float(cell_deg) / fine
+                          + 1e-9)) * fine
+    return block, cutoff
+
+
 def main(argv=None) -> int:
     import xarray as xr
 
@@ -269,8 +316,20 @@ def main(argv=None) -> int:
                    help="elevation variable name (default: auto-detect)")
     p.add_argument("--fine-res-deg", type=float, default=0.25,
                    help="normalization grid the stddev is sampled on")
-    p.add_argument("--block-deg", type=float, default=2.0,
-                   help="block size ~ model cell size (2 deg ~ C48)")
+    p.add_argument("--block-deg", type=float, default=None,
+                   help="block size ~ model cell size (default 2.0 deg ~ C48)")
+    p.add_argument("--residual-estimator", choices=("block_stddev", "rms"),
+                   default="block_stddev",
+                   help="residual construction only: stddev about the block "
+                        "mean (default) or RMS about zero (see "
+                        "subgrid_orography_residual_stddev)")
+    p.add_argument("--model-cell-deg", type=float, default=None,
+                   help="anchor the decomposition to a model grid (#1712): "
+                        "block = cell, resolved cutoff = the effective "
+                        "resolution, both derived (see anchored_sso_scales). "
+                        "For MPAS take the cell from "
+                        "legoesm.grids.topography.voronoi_cell_spacing_deg. "
+                        "Excludes --block-deg / --resolved-cutoff-deg.")
     p.add_argument("--resolved-cutoff-deg", type=float, default=None,
                    help="EXPLICIT scale decomposition (#1712): smooth the "
                         "terrain with a running mean of this width (the "
@@ -278,13 +337,26 @@ def main(argv=None) -> int:
                         "and take the block stddev of the residual. Omitted "
                         "(default) = the classic construction, unchanged.")
     args = p.parse_args(argv)
+    if args.model_cell_deg is not None:
+        if args.block_deg is not None or args.resolved_cutoff_deg is not None:
+            p.error("--model-cell-deg derives --block-deg and "
+                    "--resolved-cutoff-deg; do not pass them too")
+        args.block_deg, args.resolved_cutoff_deg = anchored_sso_scales(
+            args.model_cell_deg, args.fine_res_deg)
+    elif args.block_deg is None:
+        args.block_deg = 2.0
+    if (args.residual_estimator != "block_stddev"
+            and args.resolved_cutoff_deg is None):
+        p.error("--residual-estimator applies only to the residual "
+                "construction (--resolved-cutoff-deg or --model-cell-deg)")
 
     with xr.open_dataset(args.input) as ds:
         if args.resolved_cutoff_deg is not None:
             out = subgrid_orography_residual_stddev(
                 ds, var_name=args.elev_var,
                 fine_res_deg=args.fine_res_deg, block_deg=args.block_deg,
-                resolved_cutoff_deg=args.resolved_cutoff_deg)
+                resolved_cutoff_deg=args.resolved_cutoff_deg,
+                estimator=args.residual_estimator)
         else:
             out = subgrid_orography_stddev(
                 ds, var_name=args.elev_var,
@@ -301,11 +373,18 @@ def main(argv=None) -> int:
         else "block_stddev")
     if args.resolved_cutoff_deg is not None:
         out.attrs["resolved_cutoff_deg"] = float(args.resolved_cutoff_deg)
+        out.attrs["residual_estimator"] = args.residual_estimator
+    if args.model_cell_deg is not None:
+        out.attrs["model_cell_deg"] = float(args.model_cell_deg)
     out.attrs["history"] = (
         f"prep_subgrid_orography.py --fine-res-deg {args.fine_res_deg} "
         f"--block-deg {args.block_deg}"
         + (f" --resolved-cutoff-deg {args.resolved_cutoff_deg}"
            if args.resolved_cutoff_deg is not None else "")
+        + (f" --residual-estimator {args.residual_estimator}"
+           if args.resolved_cutoff_deg is not None else "")
+        + (f" (anchored: --model-cell-deg {args.model_cell_deg})"
+           if args.model_cell_deg is not None else "")
     )
     Path(args.out).parent.mkdir(parents=True, exist_ok=True)
     out.to_netcdf(args.out)

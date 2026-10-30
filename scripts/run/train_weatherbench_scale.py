@@ -59,6 +59,14 @@ class ScaleConfig(NamedTuple):
     warmup_steps: int | None = None
     # Held-out windows scored after every epoch (0 = no validation pass).
     n_val_windows: int = 0
+    # >0: ONE sample per step, its columns split over this many GPUs (all
+    # processes of the job form one mesh). 0 = one sample per MPI rank.
+    column_devices: int = 0
+    # Differentiate only the LAST n model steps of the rollout (0 = all). The
+    # forecast and target are unchanged; only the gradient window shrinks.
+    adjoint_steps: int = 0
+    # Scenes the start-of-run reachability freeze probes (None = every one).
+    probe_scenes: int | None = None
 
 
 # Scenes used for the POST-TRAINING reachability report.  A subsample, not the
@@ -203,15 +211,18 @@ def print_latest_complete_signature(root):
         # _read_probe_freeze). Without this, a link that finished only the
         # probe would trip the wrapper's epoch-0 restart-loop guard and the
         # chain would stop exactly where resuming has the most to save.
+        # A partial probe (probe_progress.json, rewritten every scene) counts
+        # too, or a link that ends mid-probe would stop the chain.
         for d in [root] + [os.path.join(root, x) for x in children]:
-            try:
-                st = os.stat(_probe_freeze_path(d))
-            except OSError:
-                continue
-            cand = (st.st_mtime_ns,
-                    f"{_probe_freeze_path(d)}:{st.st_mtime_ns}:{st.st_size}")
-            if best is None or cand[0] > best[0]:
-                best = cand
+            for path in (_probe_freeze_path(d), _probe_progress_path(d)):
+                try:
+                    st = os.stat(path)
+                except OSError:
+                    continue
+                cand = (st.st_mtime_ns,
+                        f"{path}:{st.st_mtime_ns}:{st.st_size}")
+                if best is None or cand[0] > best[0]:
+                    best = cand
     if best is not None:
         print(best[1])
 
@@ -273,7 +284,7 @@ def _run_fingerprint(cfg, yml, warmup, roll_steps, n_global_samples, nproc):
         _defaults["muon_min_dim"] = getattr(_tr, "_MUON_MIN_DIM_DEFAULT", None)
     except Exception:                                   # pragma: no cover
         _defaults["muon_min_dim"] = None
-    return {
+    fp = {
         "optimizer_defaults": hashlib.sha256(
             _json.dumps(_defaults, sort_keys=True).encode()).hexdigest()[:16],
         "config_sha256": digest[:32], "mode": cfg.mode,
@@ -283,6 +294,12 @@ def _run_fingerprint(cfg, yml, warmup, roll_steps, n_global_samples, nproc):
         "rollout_steps": int(roll_steps),
         "n_global_samples": int(n_global_samples), "nproc": int(nproc),
     }
+    # Only when set, so runs written before these knobs still resume.
+    if getattr(cfg, "adjoint_steps", 0):
+        fp["adjoint_steps"] = int(cfg.adjoint_steps)
+    if getattr(cfg, "probe_scenes", None) is not None:
+        fp["probe_scenes"] = int(cfg.probe_scenes)
+    return fp
 
 
 def _val_yaml(yml: dict, n_windows: int) -> dict:
@@ -330,6 +347,8 @@ def _physical_params(params) -> dict:
     so the recorded numbers are the ones the physics saw -- not raw sigmoid
     pre-images that need the bounds to interpret.
     """
+    import numpy as np
+
     out = {}
     for _attr in ("classical", "schemes"):
         _part = getattr(params, _attr, None)
@@ -356,7 +375,32 @@ def _probe_freeze_path(out_dir):
     return os.path.join(out_dir, "probe_freeze.json")
 
 
-def _read_probe_freeze(out_dir, expect_fp):
+def _content_matches(obj, content, rtol=None):
+    """True when a saved probe payload was measured on ``content`` -- the
+    ``_sample_fingerprint`` of the probed samples and parameters (crc exact,
+    every moment to ``rtol`` of the leaf's magnitude sum)."""
+    import numpy as np
+
+    rtol = _SAMPLE_AGREE_RTOL if rtol is None else rtol
+    try:
+        crc = int(obj["content_crc"])
+        mom = np.asarray(obj["content_moments"], dtype=np.float64)
+    except (KeyError, TypeError, ValueError):
+        return False
+    if crc != content[0] or mom.shape != content[1].shape:
+        return False
+    if not mom.size:
+        return True
+    scale = np.maximum(np.abs(mom[:, 2]), np.finfo(np.float64).tiny)
+    return bool(np.max(np.abs(mom - content[1]) / scale[:, None]) <= rtol)
+
+
+def _content_payload(content):
+    return {"content_crc": int(content[0]),
+            "content_moments": content[1].tolist()}
+
+
+def _read_probe_freeze(out_dir, expect_fp, content):
     """The persisted reachability-probe result, or None.
 
     Honoured only when its fingerprint matches the CURRENT run exactly — the
@@ -379,7 +423,44 @@ def _read_probe_freeze(out_dir, expect_fp):
         return None
     if not all(isinstance(x, str) for x in obj["frozen"]):
         return None
+    if not _content_matches(obj, content):
+        return None
     return obj["frozen"]
+
+
+def _probe_progress_path(out_dir):
+    import os
+
+    return os.path.join(out_dir, "probe_progress.json")
+
+
+def _read_probe_progress(out_dir, expect_fp, content):
+    """``(n_done, absmax, n_used)`` of a reachability probe a previous link
+    did not finish, or None.  Gated on the config fingerprint and on
+    ``content`` (see ``_content_matches``): the fingerprint sees only the
+    sample count."""
+    import json as _json
+
+    try:
+        with open(_probe_progress_path(out_dir)) as fh:
+            obj = _json.load(fh)
+    except (OSError, ValueError):
+        return None
+    if (not isinstance(obj, dict) or obj.get("schema") != _MANIFEST_SCHEMA
+            or obj.get("fingerprint") != expect_fp
+            or not _content_matches(obj, content)):
+        if isinstance(obj, dict):
+            import logging
+            logging.getLogger(__name__).warning(
+                "reachability probe: %s exists but was measured on "
+                "different config or inputs -- probing from scratch",
+                _probe_progress_path(out_dir))
+        return None
+    try:
+        return (int(obj["n_done"]), [float(a) for a in obj["absmax"]],
+                int(obj["n_used"]))
+    except (KeyError, TypeError, ValueError):
+        return None
 
 
 def _atomic_write(path, write_fn):
@@ -586,7 +667,28 @@ def build_scale_config_from_args(argv=None) -> ScaleConfig:
     p.add_argument("--resume", action="store_true")
     p.add_argument("--eval-wb2", action="store_true")
     p.add_argument("--smoke", action="store_true")
+    p.add_argument("--column-devices", type=int, default=0,
+                   dest="column_devices",
+                   help="Split each sample's columns over this many GPUs "
+                        "(one process per node, all local GPUs visible). "
+                        "Every process trains the same single sample per "
+                        "step; no MPI data parallelism. 0 (default) = one "
+                        "sample per MPI rank, as before.")
+    p.add_argument("--adjoint-steps", type=int, default=0, dest="adjoint_steps",
+                   help="Differentiate only the LAST n model steps (0 = all). "
+                        "The forecast still runs the full horizon against the "
+                        "same target; only the gradient window shrinks.")
+    p.add_argument("--probe-scenes", type=int, default=None,
+                   dest="probe_scenes",
+                   help="Scenes the start-of-run reachability probe reads "
+                        "(spread evenly over the shard). Default: all.")
     a = p.parse_args(argv)
+    if a.adjoint_steps < 0:
+        raise SystemExit(f"--adjoint-steps must be >= 0, got {a.adjoint_steps}")
+    if a.probe_scenes is not None and a.probe_scenes < 1:
+        raise SystemExit(f"--probe-scenes must be >= 1, got {a.probe_scenes}")
+    if a.column_devices < 0:
+        raise SystemExit(f"--column-devices must be >= 0, got {a.column_devices}")
     # --mode is already restricted by argparse ``choices=VALID_MODES`` (exits 2
     # on an unknown value), so no manual membership guard is needed here.
     if a.n_epochs is not None and a.n_epochs < 1:
@@ -603,6 +705,8 @@ def build_scale_config_from_args(argv=None) -> ScaleConfig:
         warmup_steps=a.warmup_steps, n_val_windows=a.n_val_windows,
         out_dir=a.out_dir, resume=a.resume, eval_wb2=a.eval_wb2, smoke=a.smoke,
         training_core=a.training_core, n_days=a.n_days,
+        column_devices=a.column_devices,
+        adjoint_steps=a.adjoint_steps, probe_scenes=a.probe_scenes,
     )
 
 
@@ -626,6 +730,155 @@ def _check_resolution_matches_yaml(cfg: ScaleConfig, yml: dict) -> float:
             f"grid comes from the YAML; edit n_lat/n_lon (and nlev) there "
             f"instead of passing --resolution.")
     return cfg.resolution_deg
+
+
+def _init_distributed(n_devices: int) -> None:
+    """Join every process of the job; call BEFORE anything imports legoesm or
+    touches a JAX backend (both can initialise XLA).
+
+    One process per node: JAX's SLURM auto-detection would otherwise give each
+    process ONE local GPU.
+    """
+    import os
+
+    import jax
+
+    n_proc = int(os.environ.get("SLURM_NTASKS", "1"))
+    if n_devices % n_proc:
+        raise SystemExit(f"--column-devices {n_devices} is not a multiple of "
+                         f"the {n_proc} processes")
+    if n_proc > 1:
+        jax.distributed.initialize(
+            local_device_ids=list(range(n_devices // n_proc)))
+
+
+def _init_column_mesh(n_devices: int):
+    """The ``n_devices`` column mesh over every process's GPUs (after
+    :func:`_init_distributed`)."""
+    import jax
+    from legoesm.parallel.column_shard import create_column_mesh
+
+    if jax.device_count() != n_devices:
+        raise SystemExit(f"--column-devices {n_devices} but JAX sees "
+                         f"{jax.device_count()} devices over "
+                         f"{jax.process_count()} processes")
+    return create_column_mesh(n_devices)
+
+
+def _column_placers(mesh, n_lat: int, ncol: int):
+    """``(place_sample, place_replicated, replicate_in_trace)`` for ``mesh``.
+
+    Sample leaves whose leading axis is latitude or column are split over the
+    mesh; everything else, and every parameter, is replicated.
+    """
+    import jax
+    import numpy as np
+    from jax.sharding import NamedSharding, PartitionSpec as P
+    from legoesm.parallel.mesh import multiprocess_safe_device_put
+
+    rep = NamedSharding(mesh, P())
+
+    def _spec(x):
+        shape = np.shape(x)
+        if shape and shape[0] in (n_lat, ncol):
+            return NamedSharding(mesh, P("col", *((None,) * (len(shape) - 1))))
+        return rep
+
+    def place_sample(tree):
+        return jax.tree.map(lambda x: multiprocess_safe_device_put(x, _spec(x)),
+                            tree)
+
+    def place_replicated(tree):
+        return jax.tree.map(
+            lambda x: multiprocess_safe_device_put(x, rep)
+            if isinstance(x, (jax.Array, np.ndarray)) else x, tree)
+
+    def replicate_in_trace(tree):
+        # The transpose of a sharding constraint applies it to the cotangent,
+        # so this also makes the GRADIENT come out replicated.
+        return jax.tree.map(
+            lambda x: jax.lax.with_sharding_constraint(x, rep)
+            if isinstance(x, jax.Array) else x, tree)
+
+    return place_sample, place_replicated, replicate_in_trace
+
+
+# Each process builds its own copy of the ERA5 samples (regridded on its own
+# GPU); job 27738351 showed the copies are not bit-identical. Bound for the
+# per-leaf relative difference, owner-approved 2026-09-28 (measured value is
+# logged on every run).
+_SAMPLE_AGREE_RTOL = 1e-9
+
+
+def _crc_names(names) -> int:
+    import zlib
+    return zlib.crc32(",".join(sorted(names)).encode())
+
+
+def _sample_fingerprint(samples):
+    """``(structure_crc, moments)`` of a host sample list.
+
+    ``structure_crc`` covers count, tree structure, leaf shapes and dtypes and
+    must match exactly.  ``moments`` holds, per leaf, the sum, a
+    position-weighted sum (so a reordering shows), the sum of magnitudes
+    (the scale the others are compared against) and a second, quadratically
+    weighted sum.  It is a tolerant sketch, not a hash: last-bit regridding
+    differences between nodes rule out exact hashing, and contrived inputs
+    can still match every moment.
+    """
+    import zlib
+
+    import jax
+    import numpy as np
+
+    h = zlib.crc32(str(len(samples)).encode())
+    moments = []
+    for i, s in enumerate(samples):
+        leaves, treedef = jax.tree.flatten(s)
+        h = zlib.crc32(f"{i}:{treedef}".encode(), h)
+        for x in leaves:
+            a = np.asarray(x)
+            h = zlib.crc32(f"{a.shape}:{a.dtype}".encode(), h)
+            f = a.astype(np.float64).ravel()
+            w = np.arange(1, f.size + 1, dtype=np.float64) / max(f.size, 1)
+            moments.append((f.sum(), (f * w).sum(), np.abs(f).sum(),
+                            (f * w * w).sum()))
+    return h, np.asarray(moments, dtype=np.float64).reshape(-1, 4)
+
+
+def _assert_samples_agree(samples, what: str, rtol: float) -> float:
+    """Every process must hold the same samples, to ``rtol`` of each leaf's
+    magnitude sum; returns the largest relative difference seen.  Raises on
+    every process on disagreement."""
+    import jax
+    import numpy as np
+
+    crc, mom = _sample_fingerprint(samples)
+    if jax.process_count() == 1:
+        return 0.0
+    from jax.experimental import multihost_utils
+    _assert_processes_agree([crc], f"{what} structure")
+    g = np.asarray(multihost_utils.process_allgather(mom))   # (P, n, 3)
+    scale = np.maximum(np.abs(g[0][:, 2]), np.finfo(np.float64).tiny)
+    rel = float(np.max(np.abs(g[:, :, :2] - g[0][None, :, :2])
+                       / scale[None, :, None])) if g.size else 0.0
+    if not rel <= rtol:
+        raise AssertionError(
+            f"column-sharded processes hold different {what}: largest "
+            f"relative difference {rel:.3g} > {rtol:g}")
+    return rel
+
+
+def _assert_processes_agree(values, what: str) -> None:
+    """Raise on EVERY process if the processes hold different ``values``."""
+    import jax
+    import numpy as np
+
+    if jax.process_count() > 1:
+        from jax.experimental import multihost_utils
+        multihost_utils.assert_equal(
+            np.asarray(values, dtype=np.int64),
+            f"column-sharded processes disagree on the {what}")
 
 
 def _mpi_rank_size():
@@ -657,6 +910,11 @@ def main(argv=None):
         print_latest_complete_signature(args[1])
         return 0
 
+    # The training package's import initialises XLA, so the processes must
+    # join before it (job 27736774 died on exactly this).
+    _cols = build_scale_config_from_args(argv).column_devices
+    if _cols:
+        _init_distributed(_cols)
     from legoesm.training.data_parallel import mpi_abort_on_uncaught
     return mpi_abort_on_uncaught(_main)(argv)
 
@@ -737,7 +995,14 @@ def _main(argv=None):
         mpi_data_parallel_training_loop,
     )
 
-    rank, nproc = _mpi_rank_size()
+    column_mesh = None
+    if cfg.column_devices:
+        column_mesh = _init_column_mesh(cfg.column_devices)
+        # One logical trainer: every process loads the SAME samples and the
+        # SPMD program already returns the global gradient.
+        rank, nproc = jax.process_index(), 1
+    else:
+        rank, nproc = _mpi_rank_size()
     logging.basicConfig(level=logging.INFO if rank == 0 else logging.WARNING)
     log = logging.getLogger("wb_scale")
 
@@ -772,7 +1037,18 @@ def _main(argv=None):
     #  (reuses the same package builders run_aimip_latlon uses; the mode differs
     #   only in the make_run_seg factory, per training_driver._build_train_step)
     from legoesm.training.scale_build import build_mode_components  # thin adapter (below)
-    model, grid, sigma, params, make_run_seg, loss_config, dt = build_mode_components(cfg, yml)
+    model, grid, sigma, params, make_run_seg, loss_config, dt = build_mode_components(
+        cfg, yml, column_mesh=column_mesh)
+    place_sample, place_rep, _in_trace_rep = True, None, None
+    if column_mesh is not None:
+        _n_lat, _n_lon = int(grid.n_lat), int(grid.n_lon)
+        if _n_lat % cfg.column_devices:
+            raise SystemExit(f"n_lat={_n_lat} is not divisible by "
+                             f"--column-devices {cfg.column_devices}")
+        place_sample, place_rep, _in_trace_rep = _column_placers(
+            column_mesh, _n_lat, _n_lat * _n_lon)
+        log.info("column sharding: %d devices over %d processes",
+                 cfg.column_devices, jax.process_count())
 
     # Warm the RRTMGP optics-table cache with a CONCRETE build, before anything
     # traced runs.  RRTMGP reads its NetCDF gas-optics tables on first use and
@@ -834,9 +1110,25 @@ def _main(argv=None):
         roll_steps = int(_os.environ["LEGOESM_WB_ROLL_STEPS"])
         print(f"MEMPROBE roll_steps OVERRIDDEN to {roll_steps}", flush=True)
 
+    if cfg.adjoint_steps:
+        if cfg.training_core != "spectral":
+            raise SystemExit("--adjoint-steps needs --training-core spectral")
+        if cfg.adjoint_steps > roll_steps:
+            raise SystemExit(f"--adjoint-steps {cfg.adjoint_steps} exceeds the "
+                             f"{roll_steps}-step rollout")
+        log.info("truncated adjoint: forecasting %d steps, differentiating the "
+                 "last %d; target and scored objective unchanged. The "
+                 "reachability freeze below sees the SAME windowed gradient: a "
+                 "leaf reachable only before the window is frozen.",
+                 roll_steps, cfg.adjoint_steps)
+
     def _loss(trainable, sample):
+        if _in_trace_rep is not None:
+            trainable = _in_trace_rep(trainable)
         ic, target, forcing = sample
-        pred = make_run_seg(trainable).raw(ic, roll_steps, forcing)
+        # Only the spectral segment takes the kwarg (checked above).
+        _kw = {"adjoint_steps": cfg.adjoint_steps} if cfg.adjoint_steps else {}
+        pred = make_run_seg(trainable).raw(ic, roll_steps, forcing, **_kw)
         return combined_loss(pred, target, sigma_full, grid=grid, config=loss_config)
 
     # Sized here rather than next to the optimizer because the resume check
@@ -864,6 +1156,10 @@ def _main(argv=None):
     # optimizer state that was built for it, and skips the probe's cost.)
     import json
 
+    # Probe results are measurements on these exact samples and initial
+    # parameters; saved ones are honoured only if these still match.
+    _probe_content = _sample_fingerprint(list(local) + [jax.device_get(
+        jax.tree.leaves(eqx.filter(params, eqx.is_inexact_array)))])
     start_epoch, resumed_frozen = 0, None
     if cfg.resume:
         _ep = _latest_complete_checkpoint(cfg.out_dir)
@@ -886,12 +1182,9 @@ def _main(argv=None):
             # rank reads the file, another hits an OSError and re-probes)
             # would leave ranks in different collectives and hang (codex).
             # Multi-rank WB training re-probes until a root-read + broadcast
-            # exists. NOTE (codex, deferred): the fingerprint identifies the
-            # shard by sample COUNT, not content — CLI --n-days is not in it;
-            # the campaign path never passes --n-days, and adding the key
-            # would orphan payloads already written under the current key
-            # set. Add it at the next fingerprint schema change.
-            _pf = (_read_probe_freeze(cfg.out_dir, _now_fp)
+            # exists. The fingerprint sees the sample COUNT; the content gate
+            # sees the samples and initial parameters themselves.
+            _pf = (_read_probe_freeze(cfg.out_dir, _now_fp, _probe_content)
                    if nproc == 1 else None)
             if _pf is not None:
                 resumed_frozen = set(_pf)
@@ -943,8 +1236,40 @@ def _main(argv=None):
                 log.info("resume: already at the requested %d epochs -- "
                          "nothing to do", cfg.n_epochs)
 
+    # A reachability probe longer than one job link continues where the last
+    # link stopped (single logical trainer only: under MPI data parallelism
+    # each rank would need its own saved partial measurement).
+    _probe_fp = dict(_run_fingerprint(cfg, yml, warmup, roll_steps,
+                                      len(local) * nproc, nproc),
+                     column_devices=int(cfg.column_devices))
+    _probe_resume = (_read_probe_progress(cfg.out_dir, _probe_fp,
+                                          _probe_content)
+                     if cfg.resume and resumed_frozen is None and nproc == 1
+                     else None)
+    if _probe_resume is not None:
+        log.info("resume: reachability probe continues after %d of %d scenes",
+                 _probe_resume[0], len(local))
+
+    if place_rep is not None:
+        params = place_rep(params)
+        # Every process read the checkpoint/probe files and built its sample
+        # list on its own. Agree BEFORE the first collective (the freeze
+        # probe), or a disagreeing process would hang the others.
+        _assert_processes_agree(
+            [start_epoch, -1 if resumed_frozen is None else len(resumed_frozen),
+             _crc_names(resumed_frozen or ()),
+             -1 if _probe_resume is None else _probe_resume[0]],
+            "resume point, restored frozen set or probe progress")
+        _rel = _assert_samples_agree(local, "training samples",
+                                     _SAMPLE_AGREE_RTOL)
+        log.info("training samples agree across processes (largest relative "
+                 "difference %.3g)", _rel)
+
     # --- NO INERT PARAMETERS: freeze what this configuration cannot reach ---
-    # The trainable bundle carries a knob for every scheme family and for the
+    # Unselected families' knobs, the option-unread spec fields and (ERA5
+    # fluxes) the surface knobs are already OUT of the differentiated tree,
+    # by name, at build time (scale_build); this probe judges the rest.
+    # Before that (2026-10-15) the bundle carried a knob for every family and for the
     # switched-off modes of the families that ARE selected, so a large part of
     # it has no gradient path in any one run: measured on the classical arm,
     # 110 of 157 leaves had an exactly-zero gradient on all 48 probe scenes.
@@ -974,7 +1299,9 @@ def _main(argv=None):
         # TRAINED parameters at the end of the run (no second compile).
         _probe_vg = eqx.filter_jit(jax.value_and_grad(
             lambda a, s: _loss(eqx.combine(a, _probe_static), s)))
-        # n_probe=None => every sample in the shard.  That costs one extra
+        # --probe-scenes N probes N evenly spread scenes instead, which brings
+        # the sampling risk below back in exchange for time (owner, 2026-10-12).
+        # n_probe=None (--probe-scenes unset) => every sample in the shard.  That costs one extra
         # forward+adjoint pass over the data (one epoch-equivalent of the
         # twelve a link trains) and removes the SAMPLING risk entirely: a leaf
         # is frozen iff it is zero on every scene in the shard.  It does NOT
@@ -992,16 +1319,15 @@ def _main(argv=None):
         # BOTH branches (idempotent on resume) and BEFORE the persist below,
         # so the saved list is the effective trainable set.
         def _policy_freeze(arr_, static_, frozen_):
-            if not bool(yml.get("era5_surface_fluxes", False)):
-                return arr_, static_, frozen_
             from legoesm.training.inert_params import (
                 apply_forced_freeze,
-                prescribed_surface_frozen_names,
+                surface_policy_frozen_names,
             )
-            forced = prescribed_surface_frozen_names(params)
+            forced, why = surface_policy_frozen_names(yml, params)
+            if why is None:
+                return arr_, static_, frozen_
             if rank == 0 and forced:
-                log.info("FROZEN BY POLICY (ERA5 surface fluxes prescribed): "
-                         "%s", ", ".join(forced))
+                log.info("FROZEN BY POLICY (%s): %s", why, ", ".join(forced))
             return apply_forced_freeze(params, frozen_, forced)
 
         if resumed_frozen is not None:
@@ -1030,8 +1356,25 @@ def _main(argv=None):
                 import _probe_wb_mem_total as _pm
                 _pm.run(_probe_vg, eqx.partition(params, eqx.is_inexact_array)[0],
                         local[0], label=_os.environ.get("LEGOESM_WB_MEM_ARM", "?"))
+            def _save_probe_progress(n_done, absmax, n_used):
+                if rank != 0 or nproc != 1:
+                    return
+                import os as _os
+                import pathlib as _pathlib
+
+                _os.makedirs(cfg.out_dir, exist_ok=True)
+                _payload = json.dumps({
+                    "schema": _MANIFEST_SCHEMA, "fingerprint": _probe_fp,
+                    "n_done": n_done, "absmax": absmax, "n_used": n_used,
+                    **_content_payload(_probe_content)})
+                _atomic_write(_probe_progress_path(cfg.out_dir),
+                              lambda t: _pathlib.Path(t).write_text(_payload))
+
             arr, static, frozen_names, n_probe_used = freeze_unreachable(
-                params, _probe_vg, local, n_probe=None, num_processes=nproc)
+                params, _probe_vg, local, n_probe=cfg.probe_scenes,
+                num_processes=nproc,
+                device_put=place_sample, resume_state=_probe_resume,
+                on_scene=_save_probe_progress)
             arr, static, frozen_names = _policy_freeze(arr, static, frozen_names)
             # Persist the measurement immediately: at T63/si_substeps=3 the
             # probe costs ~9 h, and a link killed between here and the first
@@ -1045,6 +1388,7 @@ def _main(argv=None):
                         cfg, yml, warmup, roll_steps, len(local) * nproc,
                         nproc),
                     "frozen": sorted(frozen_names),
+                    **_content_payload(_probe_content),
                 }
                 import pathlib as _pathlib
 
@@ -1090,6 +1434,10 @@ def _main(argv=None):
         # without this is a cold restart wearing a resumed run's name.
         opt_state = eqx.tree_deserialise_leaves(
             _checkpoint_paths(cfg.out_dir, start_epoch - 1)[1], opt_state)
+    if place_rep is not None:
+        opt_state = place_rep(opt_state)
+        _assert_processes_agree([len(frozen_names), _crc_names(frozen_names)],
+                                "frozen parameter set")
 
     import os
     os.makedirs(cfg.out_dir, exist_ok=True)
@@ -1113,6 +1461,18 @@ def _main(argv=None):
             rank=rank, nproc=nproc, host_resident=True)
         log.info("validation samples: %d local/rank from eval years %s",
                  len(val_samples), yml.get("eval_years"))
+        if column_mesh is not None:
+            # Validation runs collective forwards: the lists must match too.
+            _rel = _assert_samples_agree(val_samples, "validation samples",
+                                         _SAMPLE_AGREE_RTOL)
+            log.info("validation samples agree across processes (largest "
+                     "relative difference %.3g)", _rel)
+
+    # Sharded: the same placement as training, and one compiled forward (an
+    # eager rollout of this deck does not fit on the mesh).
+    _val_loss = (loss_fn if column_mesh is None
+                 else eqx.filter_jit(loss_fn))
+    _val_place = _device_sample if column_mesh is None else place_sample
 
     def _validation_loss(cur_arr):
         # EVERY rank reaches the reduction, including one whose validation
@@ -1124,7 +1484,7 @@ def _main(argv=None):
             return None
         total = 0.0
         for _s in val_samples:
-            total += float(loss_fn(cur_arr, _device_sample(_s)))
+            total += float(_val_loss(cur_arr, _val_place(_s)))
         if nproc <= 1:
             return total / len(val_samples)
         from mpi4py import MPI
@@ -1135,10 +1495,15 @@ def _main(argv=None):
         return g_total / g_count
 
     _history_path = os.path.join(cfg.out_dir, "training_history.jsonl")
+    _static_h = static if column_mesh is None else jax.device_get(static)
 
     def on_epoch(epoch, mean_loss, cur_arr, cur_opt_state):
         # Every rank runs the validation pass: it ends in a collective.
         val_loss = _validation_loss(cur_arr)
+        if column_mesh is not None:
+            # Host copies: rank 0 alone must not launch computations on
+            # arrays that span every process.
+            cur_arr, cur_opt_state = jax.device_get((cur_arr, cur_opt_state))
         if rank == 0:
             if val_loss is None:
                 log.info("Epoch %4d: loss=%.6f", epoch, mean_loss)
@@ -1150,14 +1515,17 @@ def _main(argv=None):
             # without loading a checkpoint and inverting the transforms.
             _row = {"epoch": int(epoch), "train_loss": float(mean_loss),
                     "val_loss": None if val_loss is None else float(val_loss),
-                    "params": _physical_params(eqx.combine(cur_arr, static))}
+                    "params": _physical_params(eqx.combine(cur_arr, _static_h))}
             with open(_history_path, "a") as _fh:
                 _fh.write(json.dumps(_row) + "\n")
             ppath, opath, fpath = _checkpoint_paths(cfg.out_dir, epoch)
             # Parameters, optimizer state and the trainable set together --
             # any one of them missing makes the other two unresumable.
+            # On-disk view: frozen (float) knobs as arrays, so the file
+            # also loads into an all-array template (checkpoint_view).
+            from legoesm.ml.training import checkpoint_view
             _atomic_write(ppath, lambda t: eqx.tree_serialise_leaves(
-                t, eqx.combine(cur_arr, static)))       # CURRENT params
+                t, checkpoint_view(eqx.combine(cur_arr, _static_h))))
             _atomic_write(opath, lambda t: eqx.tree_serialise_leaves(
                 t, cur_opt_state))
             # Written LAST: it is the marker that says this epoch is
@@ -1169,7 +1537,8 @@ def _main(argv=None):
 
     arr, opt_state, history = mpi_data_parallel_training_loop(
         loss_fn, arr, opt_state, optimizer, local, cfg.n_epochs, nproc,
-        on_epoch=on_epoch, start_epoch=start_epoch)
+        on_epoch=on_epoch, start_epoch=start_epoch,
+        place=None if column_mesh is None else place_sample)
     params = eqx.combine(arr, static)
     log.info("training done: final loss=%.6f", history[-1] if history else float("nan"))
 
@@ -1186,7 +1555,8 @@ def _main(argv=None):
             _probe_vg, params,
             [local[i] for i in probe_indices(len(local),
                                              _N_REACHABILITY_REPORT)],
-            n_probe=_N_REACHABILITY_REPORT, reduce=mpi_max_reduce(nproc))
+            n_probe=_N_REACHABILITY_REPORT, reduce=mpi_max_reduce(nproc),
+            device_put=place_sample)
         _frozen = set(frozen_names)
         # Report the MAGNITUDE and every NAME, not a yes/no: a gradient of
         # 1e-30 is numerical dust, and the only non-arbitrary scale for "big

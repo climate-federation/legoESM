@@ -34,8 +34,7 @@ def _load():
     return mod
 
 
-GUARDED = ("kessler", "sundqvist", "seifert_beheng", "morrison", "thompson",
-           "p3", "ml_emulator")
+GUARDED = ("sundqvist", "morrison", "thompson", "p3", "ml_emulator")
 
 
 @pytest.mark.parametrize("scheme", GUARDED)
@@ -46,9 +45,10 @@ def test_flag_threads_onto_the_active_subconfig(scheme):
     assert getattr(cfg, scheme).hard_saturation_adjustment is True
     # ... and ONLY the active scheme is touched: an inactive sub-config that
     # silently flipped would change behaviour on a later --microphysics switch.
-    for other in GUARDED:
-        if other != scheme:
-            assert getattr(cfg, other).hard_saturation_adjustment is False
+    for other in cfg._fields:
+        sub = getattr(cfg, other)
+        if other != scheme and hasattr(sub, "hard_saturation_adjustment"):
+            assert sub.hard_saturation_adjustment is False
 
 
 @pytest.mark.parametrize("scheme", GUARDED)
@@ -78,18 +78,22 @@ def test_float_override_without_the_gate_is_refused():
     rcp = _load()
     with pytest.raises(ValueError, match="requires --hard-saturation-adjustment"):
         rcp._build_microphysics_config(
-            "kessler", hard_sat_adjust_threshold=1.2)
+            "sundqvist", hard_sat_adjust_threshold=1.2)
     with pytest.raises(ValueError, match="requires --hard-saturation-adjustment"):
         rcp._build_microphysics_config(
-            "kessler", hard_sat_max_heating_K=8.0)
+            "sundqvist", hard_sat_max_heating_K=8.0)
 
 
-@pytest.mark.parametrize("scheme", ["sdm", "fast_sbm"])
+# HARD_SAT_GUARD_EXEMPT schemes: refused when the config is built.
+@pytest.mark.parametrize("scheme", ["sdm", "fast_sbm", "kessler", "seifert_beheng"])
 def test_exempt_schemes_reject_the_flag_loudly(scheme):
-    """sdm/fast_sbm resolve super-saturation explicitly and carry no guard
-    fields; asking for it must raise via the SHARED helper, never silently do
-    nothing."""
+    """Exempt schemes (HARD_SAT_GUARD_EXEMPT) refuse the guard flag via the
+    SHARED helper when the config is built, never silently do nothing."""
     rcp = _load()
+    # The CLI always forwards the flag, False by default: that must still build.
+    assert (rcp._build_microphysics_config(scheme)
+            == rcp._build_microphysics_config(
+                scheme, hard_saturation_adjustment=False))
     with pytest.raises(ValueError, match="hard_saturation_adjustment"):
         rcp._build_microphysics_config(
             scheme, hard_saturation_adjustment=True)

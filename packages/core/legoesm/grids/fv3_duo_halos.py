@@ -2041,10 +2041,10 @@ def ext_vector_cgrid_sixface(uc6, vc6, tab: DuoHaloTables):
 # into it, any trailing size is legal -- and dispatch exactly like the
 # per-level publics above:
 #
-# * no comm attached (certified): the CALLER's own per-level loop,
-#   relocated VERBATIM (same `.at[..., k].set(impl(...))` operations in
-#   the same order), so moving the loop inside changes nothing
-#   semantically and the existing bitwise gates keep certifying it.
+# * no comm attached (certified): the per-level impl vmapped over the
+#   trailing K (2026-09-29; formerly the caller's per-level loop
+#   relocated verbatim -- the impl is elementwise in K, so the vmap
+#   is the loop without a K-fold trace; bitwise gates certify it).
 # * ring: ONE collective for all K (``DuoRingComm.*_allk``).
 # * tile: ONE tile-arm firing for all K (``DuoTileComm.*_allk``; the
 #   tiled runtime is K-native -- same schedule, trailing K batched
@@ -2053,48 +2053,49 @@ def ext_vector_cgrid_sixface(uc6, vc6, tab: DuoHaloTables):
 def ext_scalar_sixface_allk(f6k, tab: DuoHaloTables, stag: str):
     """Batched :func:`ext_scalar_sixface` over a ``(6, m0, m1, K)`` stack.
 
-    Certified path: the per-level caller loop (e.g.
-    ``fv3_acoustic_3d._exchange_scalar_stack``), relocated verbatim --
-    each trailing slice exchanged by the certified impl, in ascending
-    ``k`` order, reading/writing only its own slice.  Byte-identical to
-    the pre-batching callers by construction.
+    Certified path: the certified per-level impl vmapped over the
+    trailing K -- each slice exchanged independently, reading/writing
+    only its own slice.  Bitwise-equal to the per-level caller loop
+    (e.g. ``fv3_acoustic_3d._exchange_scalar_stack``) eager by
+    measurement; under jit both loop and vmap sit within XLA's FMA
+    class of eager (3e-12 rel, ``test_fv3_duo_spmd.py`` gates).
     """
     comm = _active_comm(tab)
     if comm is None:
-        for k in range(f6k.shape[-1]):
-            f6k = f6k.at[..., k].set(
-                ext_scalar_sixface_impl(f6k[..., k], tab, stag))
-        return f6k
+        # one vmap over the trailing K instead of a Python loop (2026-09-29,
+        # the km=32 CPU compile: the loop traced the impl K times per
+        # exchange).  The impl is per-level gathers, sign flips and the
+        # Lagrange corner fill, all elementwise in K, so vmap batches
+        # them without reassociating anything: bitwise the loop eager
+        # (relocation gates); under jit both sit in XLA's FMA class.
+        return jax.vmap(lambda f: ext_scalar_sixface_impl(f, tab, stag),
+                        in_axes=-1, out_axes=-1)(f6k)
     return comm.ext_scalar_allk(f6k, stag)
 
 
 def ext_vector_dgrid_sixface_allk(u6k, v6k, tab: DuoHaloTables):
     """Batched :func:`ext_vector_dgrid_sixface`; trailing K on both
-    components.  Certified path = the relocated per-level loop of
-    ``fv3_acoustic_3d._exchange_dgrid_winds_stack``, verbatim."""
+    components.  Certified path = the per-level impl vmapped over K;
+    bitwise-equal EAGER to ``fv3_acoustic_3d._exchange_dgrid_winds_stack``'s
+    former loop, and within XLA's jit FMA class of it under jit
+    (relocation gates, ``test_fv3_duo_spmd.py``)."""
     comm = _active_comm(tab)
     if comm is None:
-        for k in range(u6k.shape[-1]):
-            uk, vk = ext_vector_dgrid_sixface_impl(
-                u6k[..., k], v6k[..., k], tab)
-            u6k = u6k.at[..., k].set(uk)
-            v6k = v6k.at[..., k].set(vk)
-        return u6k, v6k
+        return jax.vmap(lambda u, v: ext_vector_dgrid_sixface_impl(u, v, tab),
+                        in_axes=(-1, -1), out_axes=(-1, -1))(u6k, v6k)
     return comm.ext_vector_dgrid_allk(u6k, v6k)
 
 
 def ext_vector_cgrid_sixface_allk(uc6k, vc6k, tab: DuoHaloTables):
     """Batched :func:`ext_vector_cgrid_sixface`; trailing K on both
-    components.  Certified path = the per-level caller loop of
-    ``fv3_dsw_phase_3d.exchange_post_pgrad_3d``, relocated verbatim."""
+    components.  Certified path = the per-level impl vmapped over K;
+    bitwise-equal EAGER to ``fv3_dsw_phase_3d.exchange_post_pgrad_3d``'s
+    former loop, and within XLA's jit FMA class of it under jit
+    (relocation gates, ``test_fv3_duo_spmd.py``)."""
     comm = _active_comm(tab)
     if comm is None:
-        for k in range(uc6k.shape[-1]):
-            uk, vk = ext_vector_cgrid_sixface_impl(
-                uc6k[..., k], vc6k[..., k], tab)
-            uc6k = uc6k.at[..., k].set(uk)
-            vc6k = vc6k.at[..., k].set(vk)
-        return uc6k, vc6k
+        return jax.vmap(lambda u, v: ext_vector_cgrid_sixface_impl(u, v, tab),
+                        in_axes=(-1, -1), out_axes=(-1, -1))(uc6k, vc6k)
     return comm.ext_vector_cgrid_allk(uc6k, vc6k)
 
 # ---------------------------------------------------------------------------

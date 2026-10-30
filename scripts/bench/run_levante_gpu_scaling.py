@@ -1130,16 +1130,14 @@ def _build_segment_benchmark(
     # keyword args (``pack_carry`` makes them keyword-only after the
     # ``*,`` marker — passing them positionally collided with the
     # ``conv_prog`` slot and would raise) and seed ``target_mass`` so
-    # the segment-level mass fixer has a non-zero anchor.  We compute
-    # the global mass via the existing budget-aware
-    # ``global_area_sum`` helper (fp64 accumulator when JAX has x64
-    # enabled — see ``conservation_accumulator``).
+    # the segment-level mass fixer has a non-zero anchor: the global DRY
+    # mass the segment's dry-mass fixer holds (review 2026-10-10 F13), via
+    # the driver's own anchor helper (fp64 accumulator under x64).
     shape_2d = ctx["shape_2d"]
     shape_3d = ctx["shape_3d"]
     _sd = ctx["_sd"]
 
-    from legoesm.core.conservation import global_area_sum
-    _target_mass = global_area_sum(driver.state.p_s.data, driver.grid)
+    _target_mass = driver._segment_dry_mass_target(ctx["dsigma"])
 
     carry = pack_carry(
         driver.state, driver.q_v, driver.q_c, driver.q_r,

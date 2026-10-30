@@ -140,7 +140,7 @@ class TestLedgerDriverIntegration:
         out = tmp_path / ("on" if budget_ledger else "off")
         cfg = ExperimentConfig(
             grid=GridConfig(resolution=8, nlev=5),
-            dycore=DycoreConfig(dt=600.0),
+            dycore=DycoreConfig(energy_fixer=False, dt=600.0),
             output=OutputConfig(diag_days=1, output_dir=str(out),
                                 budget_ledger=budget_ledger),
             days=1,

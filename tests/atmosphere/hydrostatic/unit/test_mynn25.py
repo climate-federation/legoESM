@@ -417,7 +417,7 @@ def test_master_length_matches_manual_weighted_integral():
     dz = jnp.linspace(80.0, 500.0, nhalf)[None, :].repeat(ncol, 0)
 
     L = np.asarray(_master_length(q, z, dz))
-    L_S = np.maximum(c.kappa_vk * np.asarray(z), 1.0)
+    L_S = np.maximum(c.kappa_von_karman * np.asarray(z), 1.0)
     L_T = 0.23 * float(jnp.sum(q * z * dz)) / float(jnp.sum(q * dz))
     L_expected = 1.0 / (1.0 / L_S + 1.0 / L_T + 1.0 / 1e30)
     np.testing.assert_allclose(L[0], L_expected[0], rtol=1e-10)

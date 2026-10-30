@@ -83,6 +83,8 @@ from legoesm.core.fv3_native_state_3d import build_state_3d  # noqa: E402
 from tests.grids.fv3_gate_helpers import (  # noqa: E402
     assert_batched_matches_loop,
     assert_fd_gap_at_roundoff_floor,
+    assert_program_size_independent_of_km,
+    hlo_instruction_count,
     assert_real,
     check_adjoint,
     cmp_fields,
@@ -1331,3 +1333,32 @@ def test_tail_batched_jit_matches_eager(jctx, jstate, jcsw, jdsw):
     assert_batched_matches_loop(got, eager,
                                 "dsw_tail_phase_3d[jit,batched]",
                                 rtol=1e-12, atol=1e-12)
+
+
+# ---------------------------------------------------------------------
+# Level batching (2026-09-29, the km=32 compile): the batched arm's
+# traced program must be O(1) in km.
+# ---------------------------------------------------------------------
+
+def _tail_inputs_at(ctx, jctx, km, seed):
+    st = _seeded_state(km, seed=seed)
+    csw = stack_np(npcg.csw_phase_3d(ctx, deepcopy_faces(st), dt2=DT2,
+                                     km=km, nord=2, duogrid=True))
+    jst = state_3d_to_jax(st)
+    return jst, csw, dsw_transport_phase_3d(jctx, jst, csw, DT, km)
+
+
+def test_batched_arm_program_size_is_independent_of_km(ctx, jctx):
+    """See :func:`fv3_gate_helpers.assert_program_size_independent_of_km`:
+    the level loops of the batched d_sw3 / tail arms are batch axes,
+    the loop arm's unrolling is the non-vacuity control."""
+    s2, c2, d2 = _tail_inputs_at(ctx, jctx, 2, seed=5)
+    s4, c4, d4 = _tail_inputs_at(ctx, jctx, 4, seed=6)
+    fn = jtail.dsw_tail_phase_3d
+    n2b = hlo_instruction_count(fn, (0, 5), jctx, s2, c2, d2, DT, 2,
+                                batched=True)
+    n4b = hlo_instruction_count(fn, (0, 5), jctx, s4, c4, d4, DT, 4,
+                                batched=True)
+    n2l = hlo_instruction_count(fn, (0, 5), jctx, s2, c2, d2, DT, 2)
+    n4l = hlo_instruction_count(fn, (0, 5), jctx, s4, c4, d4, DT, 4)
+    assert_program_size_independent_of_km(n2b, n4b, n2l, n4l)

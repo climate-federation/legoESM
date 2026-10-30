@@ -22,12 +22,14 @@ from legoesm.thermo import (
     d_saturation_vapor_pressure_aerk,
     dd_saturation_vapor_pressure_aerk,
 )
+from legoesm.land.canopy.config import CanopyConfig
 from legoesm.land.canopy.energy_balance import (
     canopy_met_variables,
     leaf_energy_balance_bt,
     soil_energy_balance_bt,
 )
 
+_RHW = CanopyConfig().rh_cap_smoothing_width
 
 # ---- representative well-conditioned leaf state -----------------------------
 _LEAF = dict(
@@ -129,7 +131,7 @@ def test_canopy_met_uses_aerk_curve_and_derivatives():
     Ps = jnp.array(101325.0)
     for Tc in (jnp.array(298.0), jnp.array(constants.T_freeze - 15.0)):  # warm + sub-freezing
         q_c = jnp.array(0.008)
-        _, es_c, _, _, desTc, ddesTc, _ = canopy_met_variables(Ps, Tc, q_c)
+        _, es_c, _, _, desTc, ddesTc, _ = canopy_met_variables(Ps, Tc, q_c, _RHW)
         assert jnp.allclose(es_c, saturation_vapor_pressure_aerk(Tc), rtol=1e-12)
         assert jnp.allclose(desTc, d_saturation_vapor_pressure_aerk(Tc), rtol=1e-12)
         assert jnp.allclose(ddesTc, dd_saturation_vapor_pressure_aerk(Tc), rtol=1e-12)
@@ -142,8 +144,8 @@ def test_canopy_met_second_derivative_independent_of_humidity():
     second-derivative bug: ddesTc must not move when only q_c changes.
     """
     Ps = jnp.array(101325.0); Tc = jnp.array(300.0)
-    _, _, _, _, _, dd_dry, _ = canopy_met_variables(Ps, Tc, jnp.array(0.002))
-    _, _, _, _, _, dd_wet, _ = canopy_met_variables(Ps, Tc, jnp.array(0.020))
+    _, _, _, _, _, dd_dry, _ = canopy_met_variables(Ps, Tc, jnp.array(0.002), _RHW)
+    _, _, _, _, _, dd_wet, _ = canopy_met_variables(Ps, Tc, jnp.array(0.020), _RHW)
     assert jnp.allclose(dd_dry, dd_wet, rtol=0, atol=1e-12)
 
 
@@ -151,5 +153,5 @@ def test_canopy_met_over_ice_below_freezing():
     """Below 0 degC es_c uses the ice branch — materially below over-water Bolton."""
     Ps = jnp.array(101325.0); q_c = jnp.array(0.001)
     Tc = jnp.array(constants.T_freeze - 20.0)
-    _, es_c, _, _, _, _, _ = canopy_met_variables(Ps, Tc, q_c)
+    _, es_c, _, _, _, _, _ = canopy_met_variables(Ps, Tc, q_c, _RHW)
     assert float(es_c) < 0.9 * float(saturation_vapor_pressure(Tc))

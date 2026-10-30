@@ -35,7 +35,7 @@ import numpy as np
 import pytest
 
 from legoesm import constants
-from legoesm.thermo import saturation_mixing_ratio_ice
+from legoesm.thermo import saturation_specific_humidity_ice
 from legoesm.atmosphere.physics.microphysics.config import ThompsonConfig
 from legoesm.atmosphere.physics.microphysics.thompson import (
     thompson_microphysics,
@@ -70,7 +70,7 @@ def _icy_column(nlev=4, T=250.0, p=4.0e4, super_i=1.05, q_i=1.0e-5, N_i=1.0e8):
     ncol = 1
     T_a = jnp.full((ncol, nlev), T)
     p_a = jnp.full((ncol, nlev), p)
-    qsi = saturation_mixing_ratio_ice(T_a, p_a)
+    qsi = saturation_specific_humidity_ice(T_a, p_a)
     q_v = qsi * super_i
     q_ia = jnp.full((ncol, nlev), q_i)
     zero = jnp.zeros((ncol, nlev))
@@ -217,7 +217,7 @@ def test_departure_bulk_qpower_snow_differs_from_thompson2008():
     ncol, nlev = 1, 6
     T_a = jnp.full((ncol, nlev), 260.0)
     p_a = jnp.full((ncol, nlev), 5.0e4)
-    qsi = saturation_mixing_ratio_ice(T_a, p_a)
+    qsi = saturation_specific_humidity_ice(T_a, p_a)
     q_v = qsi                                        # exactly saturated: PRDS ~ 0
     q_s = jnp.full((ncol, nlev), 5.0e-4)
     zero = jnp.zeros((ncol, nlev))

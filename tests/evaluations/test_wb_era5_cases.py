@@ -101,6 +101,48 @@ def test_headline_mapping():
     assert all(cases[0].verif_by_lead[6]["valid"][k].all() for k in HEADLINE_FIELD_KEYS)
 
 
+def _ic_leaves(state):
+    import jax
+    return [np.asarray(x) for x in jax.tree_util.tree_leaves(state)]
+
+
+def test_init_state_follows_the_training_ic_recipe():
+    """The eval IC is the training loader's: ERA5 terrain target with the
+    requested diffusion passes, carry seeded for the deck's microphysics.
+    Non-flat terrain and a multi-species scheme so dropping either argument
+    changes the state."""
+    from legoesm.training.era5_to_state import (
+        era5_terrain_product, era5_to_spectral_carry, load_era5_slice)
+    from legoesm.training.neural_gcm_spectral import carry_to_spectral_state
+
+    ds = _synthetic_era5()
+    lat = np.deg2rad(ds.lat.values)[:, None]
+    lon = np.deg2rad(ds.lon.values)[None, :]
+    ds["geopotential_at_surface"] = (
+        ("lat", "lon"),
+        2000.0 * constants.g * np.cos(lat) ** 2 * (1.0 + np.sin(3.0 * lon)))
+    grid, sigma = _grid_sigma()
+    case = build_forecast_cases(
+        _cfg(), grid, sigma, leads_hours=[6], eval_year=2020, n_inits=1,
+        init_stride_hours=6, resolution_deg=6.0, ds=ds,
+        smoothing_passes=2, microphysics="morrison")[0]
+
+    sl = load_era5_slice(_cfg(), 0, ds=ds)
+
+    def ref(passes, micro):
+        tp = era5_terrain_product(sl, grid, passes=passes)
+        return _ic_leaves(carry_to_spectral_state(era5_to_spectral_carry(
+            sl, grid, sigma, target_phis=tp, microphysics=micro), grid))
+
+    got = _ic_leaves(case.init_state)
+    want = ref(2, "morrison")
+    assert len(got) == len(want)
+    assert all(np.array_equal(g, w) for g, w in zip(got, want))
+    other_passes = ref(4, "morrison")
+    assert not all(np.array_equal(g, w) for g, w in zip(got, other_passes))
+    assert len(ref(2, "none")) != len(got)
+
+
 def test_climatology_is_mean_of_verifs():
     ds = _synthetic_era5()
     grid, sigma = _grid_sigma()

@@ -91,6 +91,13 @@ def test_freeze_thaw_flag_flows_to_config():
     assert cfg_on.land.thermal.enable_freeze_thaw is True
 
 
+def test_snow_scheme_flag_flows_to_config():
+    """--snow-scheme selects the land snowpack (default bulk)."""
+    assert build_config_from_args(_parse_args(["--lat", "45.0"])).land.snow_scheme == "bulk"
+    cfg = build_config_from_args(_parse_args(["--lat", "45.0", "--snow-scheme", "layered"]))
+    assert cfg.land.snow_scheme == "layered"
+
+
 def test_issue484_new_lmip_flags_flow_to_config():
     args = _parse_args([
         "--lat", "45.5",
@@ -285,6 +292,34 @@ def test_carbon_ic_config_yaml_round_trips_to_args():
     assert args.carbon_ic.endswith("global_carbon_ic.npz")
     # A seeded config must still build a usable land config.
     assert build_config_from_args(args).land is not None
+
+
+def test_restart_snow_layers_round_trip_and_mismatch_refused(tmp_path):
+    """A layered restart reloads its four snow-layer fields; a bulk restart into
+    a layered run, a layered restart into a bulk run, and a partial field set
+    are refused instead of silently reseeding or dropping the pack."""
+    import numpy as np
+    from scripts.run.run_lmip import _load_restart, _save_restart
+    from legoesm.land.multilayer_land import (
+        MultiLayerLandConfig, init_multilayer_land_state, seed_snow_layers)
+    lay = MultiLayerLandConfig(snow_scheme="layered")
+    bulk = MultiLayerLandConfig()
+    st = seed_snow_layers(init_multilayer_land_state(1, lay, T_init=265.0)._replace(
+        snow_depth=np.array([12.0])), lay)
+    p_lay, p_bulk = tmp_path / "lay.npz", tmp_path / "bulk.npz"
+    _save_restart(p_lay, 3, 1.0, st)
+    _save_restart(p_bulk, 3, 1.0, init_multilayer_land_state(1, bulk, T_init=265.0))
+    got = _load_restart(p_lay, lay)[0]
+    np.testing.assert_allclose(got.snow_T_layers, st.snow_T_layers)
+    with pytest.raises(ValueError, match="snow-layer"):
+        _load_restart(p_bulk, lay)
+    with pytest.raises(ValueError, match="snow-layer"):
+        _load_restart(p_lay, bulk)
+    d = dict(np.load(p_lay))
+    d.pop("snow_rho_layers")
+    np.savez(tmp_path / "part.npz", **d)
+    with pytest.raises(ValueError, match="snow-layer"):
+        _load_restart(tmp_path / "part.npz", lay)
 
 
 def test_lmip_runs_the_drainage_limiter_at_the_calibrated_value():

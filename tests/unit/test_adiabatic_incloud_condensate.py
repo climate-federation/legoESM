@@ -129,13 +129,13 @@ def _sundqvist_column_props(scheme, mask_high_rh, T_val=285.0):
     condensate scheme.  ``T_val`` sets the (uniform) column temperature so the
     phase split can be exercised (285 K = liquid, 220 K = ice).
     """
-    from legoesm.thermo import saturation_mixing_ratio
+    from legoesm.thermo import saturation_specific_humidity
 
     p_half = jnp.linspace(2.0e3, 1.0e5, NLEV + 1)
     p_full = 0.5 * (p_half[:-1] + p_half[1:])[None, :]
     dp = (p_half[1:] - p_half[:-1])[None, :]
     T = jnp.full((1, NLEV), T_val)
-    q_sat = saturation_mixing_ratio(T, p_full)
+    q_sat = saturation_specific_humidity(T, p_full)
     rh = jnp.where(jnp.asarray(mask_high_rh)[None, :], 0.995, 0.2)
     q_v = rh * q_sat
     cfg = CloudConfig(scheme="sundqvist", diagnostic_condensate_scheme=scheme)
@@ -147,12 +147,12 @@ def test_constant_scheme_byte_identical_to_legacy_floor():
     mask = [False] * (NLEV - 3) + [True, True, True]
     const, _ = _sundqvist_column_props("constant", mask)
     # Explicitly build the legacy CloudConfig (no scheme field set) and compare.
-    from legoesm.thermo import saturation_mixing_ratio
+    from legoesm.thermo import saturation_specific_humidity
     p_half = jnp.linspace(2.0e3, 1.0e5, NLEV + 1)
     p_full = 0.5 * (p_half[:-1] + p_half[1:])[None, :]
     dp = (p_half[1:] - p_half[:-1])[None, :]
     T = jnp.full((1, NLEV), 285.0)
-    q_sat = saturation_mixing_ratio(T, p_full)
+    q_sat = saturation_specific_humidity(T, p_full)
     q_v = jnp.where(jnp.asarray(mask)[None, :], 0.995, 0.2) * q_sat
     legacy = compute_cloud_properties(T, p_full, q_v, dp,
                                       CloudConfig(scheme="sundqvist"))
@@ -256,13 +256,13 @@ def test_constant_deficit_path_byte_identical_incl_fp32():
     microphysics route) the constant scheme is byte-identical to the legacy floor
     in BOTH fp64 and fp32 (codex High: the phase restructure must not add division
     rounding to the default)."""
-    from legoesm.thermo import saturation_mixing_ratio
+    from legoesm.thermo import saturation_specific_humidity
     mask = [False] * (NLEV - 4) + [True, True, True, True]
     p_half = jnp.linspace(2.0e3, 1.0e5, NLEV + 1)
     p_full = 0.5 * (p_half[:-1] + p_half[1:])[None, :]
     dp = (p_half[1:] - p_half[:-1])[None, :]
     T = jnp.full((1, NLEV), 285.0)
-    q_sat = saturation_mixing_ratio(T, p_full)
+    q_sat = saturation_specific_humidity(T, p_full)
     q_v = jnp.where(jnp.asarray(mask)[None, :], 0.995, 0.2) * q_sat
     # Small explicit condensate below the floor => deficit path is exercised.
     q_cld = jnp.full((1, NLEV), 1.0e-5)
@@ -280,12 +280,12 @@ def test_constant_deficit_path_byte_identical_incl_fp32():
 
 
 def test_unknown_diagnostic_condensate_scheme_raises():
-    from legoesm.thermo import saturation_mixing_ratio
+    from legoesm.thermo import saturation_specific_humidity
     p_half = jnp.linspace(2.0e3, 1.0e5, NLEV + 1)
     p_full = 0.5 * (p_half[:-1] + p_half[1:])[None, :]
     dp = (p_half[1:] - p_half[:-1])[None, :]
     T = jnp.full((1, NLEV), 285.0)
-    q_v = 0.5 * saturation_mixing_ratio(T, p_full)
+    q_v = 0.5 * saturation_specific_humidity(T, p_full)
     bad = CloudConfig(scheme="sundqvist",
                       diagnostic_condensate_scheme="parabolic")  # typo/unknown
     with pytest.raises(ValueError, match="diagnostic_condensate_scheme"):

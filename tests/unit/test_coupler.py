@@ -41,6 +41,17 @@ from legoesm.coupler.lake.state import LakeState
 from legoesm.coupler.lake.two_layer_lake import step_lake
 
 
+@pytest.fixture(autouse=True)
+def _release_eager_compiles():
+    """These tests call ``step_land`` EAGERLY, and the two-leaf canopy's
+    control flow is rebuilt from fresh closures on every eager call, so each
+    call compiles new executables.  Kept across the file they exhausted
+    vm.max_map_count (65530 maps, ~5 GB RSS) and the process aborted (job
+    10331260); every test passes alone.  Drop them after each test."""
+    yield
+    jax.clear_caches()
+
+
 # ---- Helpers ----
 
 SHAPE = (6, 4, 4)

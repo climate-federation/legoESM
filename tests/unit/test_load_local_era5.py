@@ -60,6 +60,36 @@ def test_open_local_era5_dataset_merges_and_aligns(tmp_path):
     assert float(ds.skt.isel(time=0).mean()) == pytest.approx(290.0)
 
 
+def _write_invariant_z(tmp_path, name, val):
+    import xarray as xr
+    xr.Dataset(
+        {"Z": (("time", "latitude", "longitude"), np.full((1, 4, 5), val, "f4"))},
+        coords={"time": np.array(["1979-01-01T00"], "datetime64[ns]"),
+                "latitude": np.linspace(90.0, -90.0, 4),
+                "longitude": np.linspace(0.0, 288.0, 5)},
+    ).to_netcdf(tmp_path / name)
+
+
+def test_open_local_era5_dataset_reads_invariant_surface_geopotential(tmp_path):
+    """The archive's invariant ``128_129_z`` file becomes the static
+    ``geopotential_at_surface`` the ERA5 loader requires (it refuses a store
+    without one); a second match is ambiguous and raises."""
+    from scripts.data.load_local_era5 import open_local_era5_dataset
+
+    _write_synthetic_rda_era5(tmp_path)
+    _write_invariant_z(
+        tmp_path, "e5.oper.invariant.128_129_z.ll025sc.1979010100_1979010100.nc", 1234.0)
+    ds = open_local_era5_dataset(str(tmp_path), "20200101")
+    z = ds["geopotential_at_surface"]
+    assert z.dims == ("latitude", "longitude")             # static: no time axis
+    assert float(z.mean()) == pytest.approx(1234.0)        # m^2/s^2, unscaled
+
+    _write_invariant_z(
+        tmp_path, "e5.oper.invariant.128_129_z.ll025sc.1979010100_1979010101.nc", 0.0)
+    with pytest.raises(ValueError, match="surface-geopotential invariant"):
+        open_local_era5_dataset(str(tmp_path), "20200101")
+
+
 def test_open_local_era5_dataset_loads_via_load_era5_slice(tmp_path):
     """End-to-end: the adapter output feeds ``load_era5_slice(ds=...)`` into a valid
     ERA5Slice — the same path real NCAR-RDA ERA5 uses (iter 408/409)."""
@@ -68,6 +98,10 @@ def test_open_local_era5_dataset_loads_via_load_era5_slice(tmp_path):
     from scripts.data.load_local_era5 import open_local_era5_dataset
 
     _write_synthetic_rda_era5(tmp_path)
+    # The loader refuses a store without surface geopotential; real archives
+    # carry it in the invariant file.
+    _write_invariant_z(
+        tmp_path, "e5.oper.invariant.128_129_z.ll025sc.1979010100_1979010100.nc", 900.0)
     ds = open_local_era5_dataset(str(tmp_path), "20200101")
     cfg = TrainingERA5Config(
         levels=(1000, 850, 500),
@@ -76,6 +110,7 @@ def test_open_local_era5_dataset_loads_via_load_era5_slice(tmp_path):
     assert tuple(sl.T.shape) == (4, 5, 3) and bool(np.all(np.isfinite(sl.T)))
     assert tuple(sl.p_s.shape) == (4, 5)
     assert np.all(np.diff(sl.plev_Pa) > 0)            # ascending Pa
+    np.testing.assert_allclose(np.asarray(sl.phis), 900.0)   # invariant z reached
 
 
 def _write_synthetic_rda_seaice(tmp_path, *, val=0.0):

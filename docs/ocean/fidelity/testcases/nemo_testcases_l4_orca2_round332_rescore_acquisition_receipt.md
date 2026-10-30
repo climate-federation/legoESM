@@ -21,7 +21,7 @@ The original first-owner assignment is **REFUTED as a required NEMO flip**.
 In the executing record build, the EEN loop computes `zva` and adds it to `pv_rhs` at
 `ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/dynvor.f90:796-802`.
 legoesm computes the corresponding EEN contribution and adds it to `dv_dt` at
-`ocean_pe_latlon_cgrid.py:3049`.  The admitted round-40 source-order record
+`ocean_pe_latlon_cgrid.py:3088`.  The admitted round-40 source-order record
 shows instead that NEMO already has positive zero after HPG and changes no `v`
 word at LDF, VOR, KEG, or ZAD on either rank.  The 2,032 stage-output
 differences therefore do not establish a NEMO `vor_een` flip.  The new record
@@ -228,7 +228,7 @@ every word.  The exclusion is therefore **CONFIRMED but vacuous**: the add
 could not have changed any word.
 Thus the literal EEN add at
 `ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/dynvor.f90:796-802`, and the
-legoesm add at `ocean_pe_latlon_cgrid.py:3049`, are **CONFIRMED excluded** as
+legoesm add at `ocean_pe_latlon_cgrid.py:3088`, are **CONFIRMED excluded** as
 the first owner.
 
 The earlier fold-owner claim is **REFUTED/unsupported**.  The executing call
@@ -236,7 +236,7 @@ is the `l_zdfsh2` arm at
 `ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/stprk3_stg.f90:791-793`,
 not lines 795--796.  For equal signed-zero sources, NEMO's `psgn*src` at
 `ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/lbcnfd.f90:684-717` and
-legoesm's `-1*src*mask` at `ocean_model_latlon_cgrid.py:18325-18346` produce
+legoesm's `-1*src*mask` at `ocean_model_latlon_cgrid.py:18732-18753` produce
 the same sign.  The observed difference must therefore arise either from the
 stage dump's dry-cell zero fill or from an upstream mask multiplication on
 the source row.  The existing record cannot distinguish them and does not
@@ -274,7 +274,7 @@ successive live `e3t_0*(1+ssh/ht_0)` terms reproduces final recorded `zmxlm`
 bit for bit, and recorded `zmxld` is never below it.  NEMO's owning surface
 statement is lines 623--624; legoESM's first differing statement was
 `_mxl0_surface_anchor` at `tke.py:262-268`, with its materialization at
-`tke.py:4212-4219`.  The pre-fix production-JIT anchor
+`tke.py:4219-4226`.  The pre-fix production-JIT anchor
 missed all seven inputs by `+1,+1,-1,+1,-1,-1,-1` ULP (the repeated column is
 listed twice); eager already matched.  Materializing the NEMO source
 operations makes eager and JIT exact at every required input.  The owner is
@@ -455,7 +455,7 @@ already bit-identical case (a), and the 57 NEMO +0 words were case (b).  The
 fold sources, at row 146 and permuted columns 122, 121, 120, 119 and 116, are
 all -0.  Thus NEMO's fold multiply at
 `ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/lbcnfd.f90:684-717` and
-legoESM's fold at `ocean_model_latlon_cgrid.py:18325-18346` agree: -1 times
+legoESM's fold at `ocean_model_latlon_cgrid.py:18732-18753` agree: -1 times
 the source -0 makes the target +0.
 
 The pre-fold source-order record closes the owner.  At those 57 mapped source
@@ -471,7 +471,7 @@ in its generic tendency boundary.  That upstream multiply was therefore the
 first owning statement.
 
 The fix changes only the `rk3_vector_raw_vmask` arm at
-`ocean_pe_latlon_cgrid.py:6258-6278`: it no longer writes a prematurely masked
+`ocean_pe_latlon_cgrid.py:6406-6426`: it no longer writes a prematurely masked
 `dv_dt`, leaving NEMO's later stage-update product to determine the dry sign.
 The production-call-site AST test fails on the exact one-line revert, and the
 real stage-update-plus-fold test checks both signed-zero directions and a

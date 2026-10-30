@@ -92,7 +92,7 @@ def _override(fields: dict[str, np.ndarray], selectors: tuple[bool, bool]):
     viscosity = _interfaces(fields["avm_after_iwm"])
     zeros_i = np.zeros_like(heat)
     zeros_c = np.zeros((148, 180, 30), dtype=np.float64)
-    replace = np.zeros(6, dtype=np.bool_)
+    replace = np.zeros(7, dtype=np.bool_)
     replace[0], replace[1] = selectors
     return _NEMOVerticalSolveTestInput(
         heat_K=jnp.asarray(heat),
@@ -101,6 +101,7 @@ def _override(fields: dict[str, np.ndarray], selectors: tuple[bool, bool]):
         tracer_e3w=jnp.asarray(zeros_i),
         tracer_e3t=jnp.asarray(zeros_c),
         temperature_content=jnp.asarray(zeros_c),
+        salinity_content=jnp.asarray(zeros_c),
         replace=jnp.asarray(replace),
     )
 

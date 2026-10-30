@@ -100,9 +100,11 @@ def apply_le_cap(LE: jax.Array, Rn: jax.Array,
 
     * ``"soft"`` — smooth softplus UPPER bound ``LE <= max(Rn,0)+slack(Rn)`` with a
       radiation-gated slack (wide by day, tight at night).  Default; stops the
-      positive-LE runaway that diverges the leaf-T Newton solve.  Negative LE
-      (dew) passes through unchanged; a zero raw flux stays exactly 0 (no lower
-      bound).
+      positive-LE runaway that diverges the leaf-T Newton solve.  A zero raw
+      flux stays exactly 0 (no lower bound); elsewhere the output is shifted
+      by at most ln(1+exp(-k*cap_hi))/k (<= 0.5 W m-2 at the 30 W m-2 night
+      slack), e.g. dew LE = -50 -> -49.5, and the upper asymptote is
+      softplus(k*cap_hi)/k, that much above cap_hi.
     * ``"hard"`` — legacy ``clip(LE, 0, max(Rn,0))`` (non-smooth; forces H>=0).
     * ``"off"`` — no cap (pre-regression behaviour; can diverge at dry sites).
     """
@@ -149,11 +151,12 @@ def saturation_specific_humidity(T: jax.Array, p: jax.Array) -> jax.Array:
     return constants.epsilon * e_s / (p - (1.0 - constants.epsilon) * e_s)
 
 
-@jax.jit
+@functools.partial(jax.jit, static_argnames=("rh_cap_width",))
 def canopy_met_variables(
     Ps: jax.Array,
     Tc: jax.Array,
     q_c: jax.Array,
+    rh_cap_width: float,
 ) -> tuple[jax.Array, ...]:
     """Meteorological variables for the canopy air space.
 
@@ -162,6 +165,8 @@ def canopy_met_variables(
     Ps  : atmospheric pressure [Pa]
     Tc  : canopy air temperature [K]
     q_c : canopy air specific humidity [kg kg-1]
+    rh_cap_width : width [-] of the smooth cap RH_c <= 1
+        (``CanopyConfig.rh_cap_smoothing_width``); see the RH_c line below.
 
     Returns
     -------
@@ -179,7 +184,14 @@ def canopy_met_variables(
     ddesTc = dd_saturation_vapor_pressure_aerk(Tc)   # d²es/dT² [Pa K-2]
 
     VPD_c = es_c - e_c
-    RH_c  = jnp.clip(e_c / jnp.maximum(es_c, 1e-6), 0.0, 1.0)
+    # Smooth cap RH_c = r - w*softplus((r - 1)/w) -> 1 as r -> inf, instead of
+    # clip(r, 0, 1).  A saturated canopy air space (warm wet ground under a
+    # canopy) put the hard cap's kink on the Ball-Berry gs -> Ci rows of the
+    # canopy Newton solve, which then stalled (replay of 857 stalled production
+    # columns: 105 -> 697 converge).  Bias -w*ln2 at r = 1, -5e-4 at r = 0.97.
+    _r = e_c / jnp.maximum(es_c, 1e-6)
+    # r >= 0, so RH_c >= -w*exp(-1/w) (a denormal); no lower clip (no kink).
+    RH_c  = _r - rh_cap_width * jax.nn.softplus((_r - 1.0) / rh_cap_width)
 
     # Latent heat (temperature-corrected) and psychrometric constant
     # One latent heat for the codebase (user decision 2026-09-30): the core
@@ -534,7 +546,7 @@ def soil_surface_evap_resistance(
 
 
 # ---------------------------------------------------------------------------
-# Soil energy balance — BT
+# Soil energy balance (shared by the BT and PM leaf pathways)
 # ---------------------------------------------------------------------------
 
 @functools.partial(jax.jit, static_argnames=("le_cap_mode",))
@@ -553,7 +565,11 @@ def soil_energy_balance_bt(
     ALW_soil: jax.Array,
     le_cap_mode: str = "soft",
 ) -> tuple[jax.Array, ...]:
-    """Soil energy balance with prescribed skin temperature (BT).
+    """Soil energy balance with prescribed skin temperature (BT and PM).
+
+    With ``Ts`` prescribed, the Penman-Monteith quadratic for ``Ts`` is not needed,
+    so PM and BT coincide at the soil level; the solver calls this for both
+    ``LE_module`` values (they still differ on the leaf pathway).
 
     The soil LE is also energy-capped (default soft).  With ``Ts`` PRESCRIBED the
     humidity-gradient soil evaporation is not energy-constrained — a hot prescribed
@@ -599,60 +615,6 @@ def soil_energy_balance_bt(
     LE = apply_le_cap(LE, Rn, le_cap_mode)
     H  = rhoa * Cp * (Ts - Tc) / jnp.maximum(rah_soil, 1e-6)
     # G closes the surface energy budget as a residual — positive into soil.
-    G  = Rn - LE - H
-    return Rn, LE, H, G
-
-
-# ---------------------------------------------------------------------------
-# Soil energy balance — PM
-# ---------------------------------------------------------------------------
-
-@functools.partial(jax.jit, static_argnames=("le_cap_mode",))
-def soil_energy_balance_pm(
-    Ts: jax.Array,
-    Tc: jax.Array,
-    q_s: jax.Array,
-    q_c: jax.Array,
-    lam: jax.Array,
-    rhoa: jax.Array,
-    Cp: jax.Array,
-    rah_soil: jax.Array,
-    raw_soil: jax.Array,
-    fStress: jax.Array,
-    ASW_soil: jax.Array,
-    ALW_soil: jax.Array,
-    le_cap_mode: str = "soft",
-) -> tuple[jax.Array, ...]:
-    """Soil energy balance with prescribed skin temperature (PM).
-
-    With ``Ts`` prescribed by the caller, the second-order Penman-Monteith
-    quadratic that originally solved for ``Ts`` is no longer needed — LE
-    and H follow from explicit bulk-transfer formulas.  The PM variant is
-    therefore numerically identical to the BT variant at the soil level;
-    the dispatch is kept for API symmetry with the leaf pathway where PM
-    and BT still differ.
-
-    Returns
-    -------
-    Rn_soil, LE_soil, H_soil, G
-    """
-    Rn = ASW_soil + ALW_soil
-    # Soil evaporation — BETA form: ``fStress`` (soil-evaporation efficiency)
-    # times the below-canopy aerodynamic conductance, g_soil = fStress/raw_soil.
-    # Expressing fStress as a multiplier (not a 1/fStress dryness resistance)
-    # keeps the AD Jacobian finite as the soil dries (fStress -> 0: LE -> 0).
-    # NOTE on the stress variable: the caller supplies ``fStress`` = the soil
-    # pore RELATIVE HUMIDITY h_r = exp(psi_top g / (R_v T)) (Kelvin eq.) from the
-    # PROGNOSTIC top-layer matric potential — so soil evaporation is governed by
-    # the fast-drying SURFACE, not the root zone.  The beta form (vs the alpha
-    # sub-saturated-surface q_surf=h_r*q_s) is used deliberately: with legoESM's
-    # PROGNOSTIC skin T the alpha form drives excessive condensation (LE<0) onto a
-    # dry surface and destabilises the surface energy balance; beta bounds LE->0
-    # as h_r->0 (DifferBESS can use alpha because it PRESCRIBES Ts).
-    g_soil = fStress / jnp.maximum(raw_soil, 1e-9)
-    LE = lam * rhoa * (q_s - q_c) * g_soil
-    LE = apply_le_cap(LE, Rn, le_cap_mode)
-    H  = rhoa * Cp * (Ts - Tc) / jnp.maximum(rah_soil, 1e-6)
     G  = Rn - LE - H
     return Rn, LE, H, G
 

@@ -14,7 +14,7 @@
 # (ftp://fluo.gps.caltech.edu/data/tropomi/gridded/SIF740), reduces it to a
 # growing-season climatology, regrids onto the surfdata cover grid, converts the
 # 740 nm radiance to the model's emitted photon-flux units [umol/m2/s], and writes
-# an nc that load_gridded_sif (train_carbon_params.py --with-sif --sif-obs) accepts.
+# an nc that load_gridded_obs (train_carbon_params.py --with-sif --sif-obs) accepts.
 # NETWORK job -> compute node only (login-node policy).
 #
 # Override via env, e.g.:

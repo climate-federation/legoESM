@@ -390,6 +390,9 @@ def test_pipeline_stateless_gwd_composite_runs_and_sums(setup):
         )
         config.validate_strict()
         pipe = build_physics_pipeline(grid, sigma, config)
+        # all land: CAM6 gw_oro needs the land fraction (lf = 1 is its
+        # unscaled drag)
+        pipe.f_land = jnp.ones_like(f["sst"])
         out = pipe.physics_step_no_rad(
             f["T"], f["p_s"], f["q_v"], f["q_c"], f["q_r"], None,
             f["u"], f["v"], f["sst"], f["sic"], f["lat"], DT,

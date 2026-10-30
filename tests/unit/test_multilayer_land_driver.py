@@ -125,7 +125,7 @@ def _small_cfg():
         # guard checks for.
         surfdata_path="synthetic",
         grid=GridConfig(resolution=8, nlev=8),
-        dycore=DycoreConfig(dt=600.0),
+        dycore=DycoreConfig(energy_fixer=False, dt=600.0),
         output=OutputConfig(diag_days=1),
         days=1, dataset="analytical",
         radiation="gray",
@@ -196,7 +196,7 @@ def test_the_default_land_surface_scheme_is_the_canopy():
     # And the value has to be one the driver will accept.
     ExperimentConfig(
         grid=GridConfig(resolution=8, nlev=8),
-        dycore=DycoreConfig(dt=600.0),
+        dycore=DycoreConfig(energy_fixer=False, dt=600.0),
         output=OutputConfig(diag_days=1),
         days=1, dataset="analytical", radiation="gray",
         land_surface_scheme=default,
@@ -459,7 +459,7 @@ def test_multilayer_elevation_land_enables_tiled_flux_without_slab_or_mask(monke
                               jnp.full(grid.grid_shape_2d, 0.5)))
     cfg = ExperimentConfig(
         grid=GridConfig(resolution=8, nlev=8),
-        dycore=DycoreConfig(dt=600.0),
+        dycore=DycoreConfig(energy_fixer=False, dt=600.0),
         output=OutputConfig(diag_days=1),
         days=1, dataset="analytical", radiation="gray",
         topography="synthetic_elevation.nc",  # file loader patched above
@@ -666,7 +666,7 @@ def test_setup_multilayer_land_on_latlon_grid(monkeypatch, tmp_path):
     _patch_land_loaders(monkeypatch)
     cfg = ExperimentConfig(
         grid=GridConfig(grid_type="latlon", resolution=8, nlev=8),
-        dycore=DycoreConfig(dt=600.0, discretization="latlon_cgrid"),
+        dycore=DycoreConfig(energy_fixer=False, dt=600.0, discretization="latlon_cgrid"),
         output=OutputConfig(diag_days=1),
         days=1, dataset="analytical",
         radiation="gray",
@@ -935,7 +935,7 @@ def test_calibrated_physics_deploys_the_model_the_tables_were_fitted_to(
     cfg = _small_cfg()._replace(
         grid=GridConfig(grid_type="mpas", resolution=2, nlev=8),
         dycore=DycoreConfig(dt=600.0, discretization="mpas"),
-        mpas_land_beta_soil=True,
+        land_beta_soil=True,
         # The flux handoff rides the turbulence surface flux, so it needs a
         # turbulence scheme to ride (validation says so).
         turbulence="louis",
@@ -1069,7 +1069,7 @@ def test_snow_ageing_override_survives_the_calibration_reapply(monkeypatch, tmp_
     base = _small_cfg()._replace(
         grid=GridConfig(grid_type="mpas", resolution=2, nlev=8),
         dycore=DycoreConfig(dt=600.0, discretization="mpas"),
-        mpas_land_beta_soil=True,
+        land_beta_soil=True,
         turbulence="louis",
         land_calibrated_physics=True,      # the re-apply that used to win
         land_stomatal_beta=False,
@@ -1115,7 +1115,7 @@ def test_soil_freeze_thaw_reaches_the_land_the_mpas_run_builds(monkeypatch, tmp_
     base = _small_cfg()._replace(
         grid=GridConfig(grid_type="mpas", resolution=2, nlev=8),
         dycore=DycoreConfig(dt=600.0, discretization="mpas"),
-        mpas_land_beta_soil=True,
+        land_beta_soil=True,
         turbulence="louis",
         land_calibrated_physics=True,
         land_stomatal_beta=False,
@@ -1149,7 +1149,7 @@ def test_canopy_b0_stress_and_interception_reach_the_mpas_land(monkeypatch, tmp_
     base = _small_cfg()._replace(
         grid=GridConfig(grid_type="mpas", resolution=2, nlev=8),
         dycore=DycoreConfig(dt=600.0, discretization="mpas"),
-        mpas_land_beta_soil=True,
+        land_beta_soil=True,
         turbulence="louis",
         land_calibrated_physics=True,
         land_stomatal_beta=False,
@@ -1172,3 +1172,158 @@ def test_canopy_b0_stress_and_interception_reach_the_mpas_land(monkeypatch, tmp_
                     drv._land_ml_state.W_canopy is not None)
     assert got == {"default": (True, False, False),
                    "flipped": (False, True, True)}
+
+
+def test_two_leaf_land_stress_reaches_clubb_winds(monkeypatch, tmp_path):
+    """land_stress_from_land on the production pairing: the TWO-LEAF
+    canopy's solved stress handed to CLUBB on the mesh lane.  The run must
+    complete finite and its winds must differ from the same run with the bulk
+    stress (the canopy's tau reaches the boundary layer).  Unset (AUTO) on
+    this eligible pairing must be bit-identical to explicit on."""
+    from legoesm.driver.config import DycoreConfig, GridConfig
+    _patch_land_loaders(monkeypatch)
+    base = _small_cfg()._replace(
+        grid=GridConfig(grid_type="mpas", resolution=2, nlev=8),
+        dycore=DycoreConfig(dt=600.0, discretization="mpas"),
+        days=2401.0 / 86400.0,               # 4 steps
+        land_beta_soil=True, turbulence="clubb",
+        land_surface_scheme="two_leaf", snow_albedo_feedback=True,
+        land_params_refresh=False)   # the fixture has no LAI climatology
+    runs = {}
+    for name, on in (("off", False), ("on", True), ("auto", None)):
+        cfg = base._replace(land_stress_from_land=on)
+        cfg.validate_strict()
+        d = ModelDriver(cfg, output_dir=tmp_path / name)
+        d.setup()
+        assert d.run() == "COMPLETED"
+        runs[name] = np.asarray(d.state.u.data)
+    assert np.isfinite(runs["on"]).all()
+    assert np.max(np.abs(runs["on"] - runs["off"])) > 0.0, (
+        "two-leaf land stress did not reach the CLUBB winds")
+    np.testing.assert_array_equal(runs["auto"], runs["on"])
+
+
+def test_canopy_smoothing_widths_survive_the_calibration(monkeypatch, tmp_path):
+    """The calibration replaces surface_scheme with a fresh two-leaf config, so
+    deck widths set before it would be discarded; they must reach the solve."""
+    from legoesm.driver.config import DycoreConfig, GridConfig
+    from legoesm.land.canopy.config import CanopyConfig
+    from legoesm.land.config import biophysics_lmip_two_leaf_setup
+    _patch_land_loaders(monkeypatch)
+    cal = biophysics_lmip_two_leaf_setup()
+    base = _small_cfg()._replace(
+        grid=GridConfig(grid_type="mpas", resolution=2, nlev=8),
+        dycore=DycoreConfig(dt=600.0, discretization="mpas"),
+        land_beta_soil=True,
+        turbulence="louis",
+        land_calibrated_physics=True,
+        land_stomatal_beta=False,
+        land_surface_scheme="two_leaf",
+        snow_albedo_feedback=True,
+        multilayer_n_layers=cal["soil_grid"].n_layers,
+        multilayer_soil_depth=cal["soil_grid"].total_depth,
+        land_canopy_rh_cap_smoothing_width=0.02,
+        land_canopy_zeta_cap_smoothing_width=0.03,
+        land_canopy_most_n_iters=7,
+    )
+    d = CanopyConfig()
+    assert (d.rh_cap_smoothing_width, d.zeta_cap_smoothing_width, d.most_n_iters) != (0.02, 0.03, 7)
+    base.validate_strict()
+    drv = ModelDriver(base, output_dir=tmp_path / "w")
+    drv.setup()
+    ss = drv.physics.land_ml_cfg.surface_scheme
+    assert (ss.rh_cap_smoothing_width, ss.zeta_cap_smoothing_width, ss.most_n_iters) == (0.02, 0.03, 7)
+
+
+def test_pipeline_land_tile_gets_moist_lowest_level_density(monkeypatch, tmp_path):
+    """F28 (review 2026-10-10): the PhysicsPipeline land tile forces the land
+    with the canonical extractor's air -- the coordinate's lowest FULL-level
+    pressure and the moist density there, ``p_lowest / (R_d T_v)`` -- not the
+    surface-pressure dry form ``p_s / (R_d T)`` with ``p_lowest = 0.99 p_s``.
+    The old form is ~1-2 % denser, so the 1e-12 check fails on a revert."""
+    import legoesm.land.multilayer_land as _mll
+    from legoesm import constants
+    _patch_land_loaders(monkeypatch)
+    driver = ModelDriver(_small_cfg(), output_dir=tmp_path)
+    driver.setup()
+    seen = {}
+    real = _mll.step_multilayer_land
+
+    def _capture(land, forcing, *a, **k):
+        seen["f"] = forcing
+        return real(land, forcing, *a, **k)
+
+    monkeypatch.setattr(_mll, "step_multilayer_land", _capture)
+    ncol = int(driver._land_ml_state.T_soil.shape[0])
+    rng = np.random.default_rng(0)
+    T = driver.state.T.data
+    q_v = jnp.asarray(rng.uniform(0.002, 0.018, size=T.shape))
+    driver.physics._step_multilayer_land_tile(
+        driver._land_ml_state, jnp.full(ncol, 400.0), jnp.full(ncol, 350.0),
+        T, driver.state.p_s.data, q_v, driver.state.u.data,
+        driver.state.v.data, None, 600.0)
+    f = seen["f"]
+    ps = np.asarray(f.p_surface)
+    want_p = np.asarray(driver.physics.sigma_coord.pressure_at_full(
+        jnp.asarray(ps)))[..., -1]
+    np.testing.assert_allclose(np.asarray(f.p_lowest), want_p, rtol=1e-12)
+    T_v = np.asarray(f.T_lowest) * (
+        1.0 + (1.0 / constants.epsilon - 1.0) * np.asarray(f.q_lowest))
+    np.testing.assert_allclose(np.asarray(f.rho_lowest),
+                               want_p / (constants.R_d * T_v), rtol=1e-12)
+    # the moisture really is in the forcing (q varies), so T_v != T matters
+    assert float(np.max(np.asarray(f.q_lowest))) > 0.01
+
+
+def _tile_forcing(monkeypatch, tmp_path, precip, frozen):
+    """The forcing the pipeline land tile hands the land model for a given
+    lagged precip / frozen pair (captured from step_multilayer_land)."""
+    import legoesm.land.multilayer_land as _mll
+    _patch_land_loaders(monkeypatch)
+    driver = ModelDriver(_small_cfg(), output_dir=tmp_path)
+    driver.setup()
+    seen = {}
+    real = _mll.step_multilayer_land
+
+    def _capture(land, forcing, *a, **k):
+        seen["f"] = forcing
+        return real(land, forcing, *a, **k)
+
+    monkeypatch.setattr(_mll, "step_multilayer_land", _capture)
+    ncol = int(driver._land_ml_state.T_soil.shape[0])
+    T = driver.state.T.data
+    driver.physics._step_multilayer_land_tile(
+        driver._land_ml_state, jnp.full(ncol, 400.0), jnp.full(ncol, 350.0),
+        T, driver.state.p_s.data, driver.q_v, driver.state.u.data,
+        driver.state.v.data, precip(ncol), 600.0,
+        precip_frozen_col=None if frozen is None else frozen(ncol))
+    return seen["f"]
+
+
+def test_pipeline_land_tile_snow_is_the_atmosphere_frozen_flux(
+        monkeypatch, tmp_path):
+    """F29 (review 2026-10-10): the pipeline land tile takes its snowfall from
+    the atmosphere's own (lagged) frozen surface flux, bounded by the total,
+    not a hard 0 C re-split of the total.  The frozen flux here is a
+    temperature-independent fraction (and one column exceeds the total), so
+    the old where(T_low < 273.15, P, 0) cannot reproduce it."""
+    rng = np.random.default_rng(1)
+    P = rng.uniform(1e-5, 1e-4, size=4096)
+    fr = 0.37 * P
+    fr[0] = 2.0 * P[0]            # bounded by the total
+    f = _tile_forcing(monkeypatch, tmp_path,
+                      lambda n: jnp.asarray(P[:n]), lambda n: jnp.asarray(fr[:n]))
+    n = int(np.asarray(f.precip_total).shape[0])
+    want = np.minimum(fr[:n], P[:n])
+    np.testing.assert_allclose(np.asarray(f.precip_snow), want, rtol=1e-12)
+    np.testing.assert_allclose(np.asarray(f.precip_total), P[:n], rtol=1e-12)
+
+
+def test_pipeline_land_tile_refuses_precip_without_its_frozen_part(
+        monkeypatch, tmp_path):
+    """F29: precipitation without its frozen part (an ML emulator) is refused,
+    never re-split by temperature."""
+    import pytest
+    with pytest.raises(ValueError, match="precip_frozen"):
+        _tile_forcing(monkeypatch, tmp_path,
+                      lambda n: jnp.full(n, 1e-5), None)

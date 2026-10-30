@@ -50,7 +50,8 @@ def _build_config(workdir: str):
             grid_type="cubed_sphere", resolution=8, nlev=4,
             vertical_coord="hybrid", p_top_Pa=200.0, stretching=2.0,
         ),
-        dycore=DycoreConfig(discretization="centered", dt=600.0),
+        dycore=DycoreConfig(discretization="centered", dt=600.0,
+                            energy_fixer=False),  # parity gate pins the pre-fixer dynamics (F15b vote V5)
         # diag/checkpoint OFF by default: keeps the serial reference
         # byte-comparable (no host cadence).  The 5a/5b/5c IO gates opt in
         # via --checkpoint-days / --diag-days / --full-collect.

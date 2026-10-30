@@ -654,7 +654,10 @@ def _piecewise_remap(thickness, enthalpy, new_total, n_layers: int = 3):
         - jnp.maximum(new_lo[..., :, None], old_lo[..., None, :]),
     )
     content = jnp.sum(overlap * enthalpy[..., None, :], axis=-1)
-    return jnp.where(dz_new[..., None] > _EPS10, content / dz_new[..., None], 0.0)
+    # Double where: a zero-thickness column (no ice / no snow) is 0/0 in the
+    # discarded branch, which turns the reverse pass into NaN (review F3).
+    _has = dz_new[..., None] > _EPS10
+    return jnp.where(_has, content / jnp.where(_has, dz_new[..., None], 1.0), 0.0)
 
 
 def _nemo_snow_enthalpy_remap(thickness, enthalpy):
@@ -1112,7 +1115,8 @@ def si3_column_step_arrays(state: SI3ColumnArrays,
     v_old = post_temp2.h_ice * post_temp2.concentration
     v_total = v_old + anew * _NEW_ICE_THICKNESS + residual
     a_total = post_temp2.concentration + anew
-    h_total = jnp.where(a_total > _EPS10, v_total / a_total, 0.0)
+    _has_ice = a_total > _EPS10   # double where: open water is 0/0 (review F3)
+    h_total = jnp.where(_has_ice, v_total / jnp.where(_has_ice, a_total, 1.0), 0.0)
     post_do = post_temp2._replace(concentration=a_total, h_ice=h_total)
     exit_state = post_do._replace(age_volume=post_do.age_volume + a_total * dt)
     return SI3StepTrace(state, post_zdf, post_dh, post_temp1, post_sal,

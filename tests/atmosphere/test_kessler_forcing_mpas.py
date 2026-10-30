@@ -66,6 +66,7 @@ def test_shapes_types_and_no_momentum_source():
         assert jnp.all(jnp.isfinite(out.tracer_tendencies[k].data))
 
 
+@pytest.mark.xfail(strict=True, reason="Kessler faithful-port default gap: saturation_sharpness=100 is not the hard limit (negative cloud water, ~half adjustment); passes at the hard limit; known difference: the smooth default is kept because differentiability is never traded for oracle fidelity (user decision 2026-10-20)")
 def test_supersaturated_condenses_and_heats():
     state, sigma = _make_state()
     out = make_kessler_forcing_mpas(dt=300.0)(state, None, sigma)

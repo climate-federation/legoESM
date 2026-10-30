@@ -1035,6 +1035,36 @@ def nemo_r3t_rk3_stage1_stretch(
     return jnp.where(wet, nemo_source_round(one + r3_stage), one)
 
 
+def nemo_r3t_rk3_stage2_stretch(
+    z_coord, eta_before: jnp.ndarray, eta_after: jnp.ndarray,
+    H_bathy: jnp.ndarray,
+) -> jnp.ndarray:
+    """NEMO RK3 stage-2 ``1+r3t(Kmm)`` in source association.
+
+    Compiled ``stprk3_stg.f90:215-221`` first forms the before and after
+    ``r3t=ssh*r1_ht_0`` words, adds them, then multiplies by ``r1_2``.
+    Averaging SSH before multiplying by reciprocal depth is real-equivalent
+    but can round differently.
+    """
+    eta_before = jnp.asarray(eta_before)
+    eta_after = jnp.asarray(eta_after, dtype=eta_before.dtype)
+    if getattr(z_coord, "linear_free_surface", False):
+        return jnp.ones_like(eta_before)
+    depth = jnp.asarray(H_bathy, dtype=eta_before.dtype)
+    wet = depth > 0.0
+    one = jnp.asarray(1.0, dtype=eta_before.dtype)
+    safe_depth = jnp.where(wet, depth, one)
+    r1_depth = nemo_source_round(one / safe_depth)
+    r3_before = jnp.where(
+        wet, nemo_source_round(eta_before * r1_depth), 0.0)
+    r3_after = jnp.where(
+        wet, nemo_source_round(eta_after * r1_depth), 0.0)
+    half = jnp.asarray(0.5, dtype=eta_before.dtype)
+    r3_stage = nemo_source_round(
+        half * nemo_source_round(r3_before + r3_after))
+    return jnp.where(wet, nemo_source_round(one + r3_stage), one)
+
+
 def nemo_bn2_live_ladders(
     z_coord, eta: jnp.ndarray, H_bathy: jnp.ndarray,
     *, r3t_evaluation: str = "quotient",
@@ -3573,3 +3603,23 @@ def slab_freeze_point_K(T_freeze_const, scheme: str = "constant"):
     if scheme == "constant":
         return T_freeze_const
     return freezing_point(constants.S_ocean_ref, 0.0, scheme=scheme)
+
+
+def nemo_qco_r3t_ratio(
+    z_coord, eta: jnp.ndarray, H_bathy: jnp.ndarray, *,
+    evaluation: str = "quotient",
+) -> jnp.ndarray:
+    """NEMO ``dom_qco_r3c`` T-point ratio without a thickness floor."""
+    if evaluation not in ("quotient", "nemo_reciprocal"):
+        raise ValueError(
+            f"unknown r3t evaluation {evaluation!r}; expected 'quotient' "
+            "or 'nemo_reciprocal'")
+    if getattr(z_coord, "linear_free_surface", False):
+        return jnp.zeros_like(jnp.asarray(eta))
+    H = jnp.asarray(H_bathy)
+    wet_H = H > 0.0
+    safe_H = jnp.where(wet_H, H, 1.0)
+    if evaluation == "nemo_reciprocal":
+        r1_H = lax.optimization_barrier(1.0 / safe_H)
+        return jnp.where(wet_H, jnp.asarray(eta) * r1_H, 0.0)
+    return jnp.where(wet_H, jnp.asarray(eta) / safe_H, 0.0)

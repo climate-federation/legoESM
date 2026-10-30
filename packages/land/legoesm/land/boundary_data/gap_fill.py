@@ -57,7 +57,8 @@ _BARE_PFT_INDEX = 0
 
 
 def bare_canopy_params(ncol: int, *, pft_root_params: dict | None = None,
-                       soil_bounds: bool = False) -> CanopyLandParams:
+                       soil_bounds: bool = False,
+                       canopy_structure: bool = False) -> CanopyLandParams:
     """Bare (no-vegetation) :class:`CanopyLandParams` broadcast to ncol.
 
     ``pft_root_params`` (per-PFT length-17 tables, keys ``root_depth`` /
@@ -72,6 +73,10 @@ def bare_canopy_params(ncol: int, *, pft_root_params: dict | None = None,
     bare albedo (a fallback column has no soil colour, so no wetness
     dependence).  Like the root fields it must match the params being filled:
     set it when those carry ``ALB_VIS_DRY``.
+
+    ``canopy_structure`` fills ``SAI_dom``/``hbot_dom``/``pft_dom`` with the
+    bare values (0); same structure-matching rule (set it when those carry
+    ``SAI_dom``).
     """
     full = lambda v: jnp.full(ncol, v)
     _bounds_kw = {}
@@ -91,6 +96,8 @@ def bare_canopy_params(ncol: int, *, pft_root_params: dict | None = None,
         ALB_VIS=full(ALB_VIS_BARE), ALB_NIR=full(ALB_NIR_BARE),
         emissivity=full(EMISS_BARE), rz0m=full(RZ0M_BARE), rd=full(0.0),
         **_root_kw, **_bounds_kw,
+        **(dict(SAI_dom=full(0.0), hbot_dom=full(0.0), pft_dom=full(0.0))
+           if canopy_structure else {}),
     )
 
 
@@ -142,7 +149,8 @@ def fill_land_param_gaps(land_params, gsd, f_land=None):
             "use make_step_land_params_updater (which builds a matching bare "
             "fallback from its pft_root_params) instead.")
     fb = (bare_canopy_params(ncol,
-                             soil_bounds=land_params.ALB_VIS_DRY is not None)
+                             soil_bounds=land_params.ALB_VIS_DRY is not None,
+                             canopy_structure=land_params.SAI_dom is not None)
           if isinstance(land_params, CanopyLandParams)
           else bare_land_surface_params(ncol))
 

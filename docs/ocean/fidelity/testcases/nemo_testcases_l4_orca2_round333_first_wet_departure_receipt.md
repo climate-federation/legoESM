@@ -67,7 +67,7 @@ already recorded completed stage and fold exchange.
 
 The earliest possible owner in that order is therefore the `tra_adv` call at
 line 637. Its legoESM counterpart is the production stage-3 `_flux_pair`
-call at `ocean_model_latlon_cgrid.py:2946-2947`. This assignment is
+call at `ocean_model_latlon_cgrid.py:2990-2991`. This assignment is
 **PLAUSIBLE, not CONFIRMED**: the existing kt-2 records jump from the preceding
 completed stage to the completed stage-3 frame, so they cannot distinguish
 advection from any later tracer statement. No single statement is eligible
@@ -234,7 +234,7 @@ The first owning NEMO statement in executed source order is the record-build
 the admitted before boundary is exact everywhere wet and the admitted after
 boundary contains every first mismatch.  The corresponding shared legoESM
 route places `_ldf_t/_ldf_s` in the third L8 group at
-`ocean_model_latlon_cgrid.py:11048-11054` and writes that group into the live
+`ocean_model_latlon_cgrid.py:11182-11188` and writes that group into the live
 accumulators at `:208-210`.  This call-boundary ownership is **CONFIRMED** for
 both labels and both tracers; advection, SBC and QSR are exonerated.
 
@@ -573,10 +573,10 @@ and
 The producing record build materializes the half-stage `r3t` in
 `ORCA2_ORCA1ICE_OMIP_L4_R333LDFI/BLD/ppsrc/nemo/stprk3_stg.f90:210-229`.
 legoESM already materializes the corresponding `_h_s3_kmm` at
-`ocean_model_latlon_cgrid.py:8783-8797`, but the shared operator chooses its
-divisor at `gm_redi_latlon_cgrid.py:3264-3269` and the production call supplies
+`ocean_model_latlon_cgrid.py:8899-8913`, but the shared operator chooses its
+divisor at `gm_redi_latlon_cgrid.py:3269-3274` and the production call supplies
 only rebuilt half-stage sea level, not the stored thickness, at
-`ocean_model_latlon_cgrid.py:10630-10643`.
+`ocean_model_latlon_cgrid.py:10764-10777`.
 
 The two replay artifacts return `PASS_R333_TRALDF_REPLAY` and name
 `e3t_divisor` as first value owner. Their SHA-256 values are
@@ -676,9 +676,9 @@ the target words are exact before and after `tra_ldf`, remain exact after the
 optional BBC/BBL/damping calls, and first differ after `tra_zdf`. legoESM's
 source-ordered accumulator is materialized at
 `ocean_model_latlon_cgrid.py:192-212`, the active rung-10 path calls the
-implicit vertical mixer at `ocean_model_latlon_cgrid.py:11706-11738`, and the
+implicit vertical mixer at `ocean_model_latlon_cgrid.py:11840-11882`, and the
 literal tracer solve dispatch is at
-`ocean_model_latlon_cgrid.py:14833-14858`.
+`ocean_model_latlon_cgrid.py:15054-15083`.
 
 The owning statement is therefore **CONFIRMED** as NEMO's `CALL tra_zdf` and
 legoESM's `_apply_implicit_vertical_mixing` / literal tracer-pair solve, not the
@@ -703,7 +703,7 @@ reports division by zero, `jax.debug_nans` reports NaN in `div`, and a
 zero-cotangent primitive VJP produces NaN bars for numerator and divisor. The
 following `tend * act` mask then also forms a NaN mask cotangent. This is the
 rectangular legoESM evaluation at
-`gm_redi_latlon_cgrid.py:3288-3304`; NEMO instead executes only wet tracer
+`gm_redi_latlon_cgrid.py:3293-3309`; NEMO instead executes only wet tracer
 cells in its divisions at
 `ORCA2_ORCA1ICE_OMIP_L4_R333LDFI/BLD/ppsrc/nemo/traldf_iso.f90:301-305`
 and
@@ -716,7 +716,7 @@ The landed form uses the stored divisor at active cells and an inert unit
 divisor at inactive cells. Its helper is
 `ocean_model_latlon_cgrid.py:215-231`; the production call, including the
 diagnostic-override precedence, is
-`ocean_model_latlon_cgrid.py:10643-10659`. This leaves every NEMO-executed wet
+`ocean_model_latlon_cgrid.py:10777-10793`. This leaves every NEMO-executed wet
 word forward-exact while removing all dry zero divisions. The production
 call-site test fails when this choice is reverted.
 

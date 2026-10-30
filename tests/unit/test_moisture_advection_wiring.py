@@ -149,10 +149,12 @@ def test_segment_uses_dycore_advected_moisture():
                                            advect_moisture=True))
     res = run(_carry(), 1, _FORCING)
     # Level 0 (sigma=0.1) is far from saturation at 280 K, so the segment's
-    # saturation adjustment leaves it untouched — the doubled value must
-    # survive to the result.  (The lowest level gets sat-adjusted; that is
-    # pre-existing segment behaviour, not the advection seam.)
-    np.testing.assert_allclose(np.asarray(res.q_v[..., 0]), 0.02, rtol=1e-6)
+    # saturation adjustment leaves its vapour MASS untouched — the doubled
+    # value must survive to the result.  (The lower levels get sat-adjusted
+    # and that rain leaves with its mass, F13, so level 0's mixing ratio is
+    # re-weighted by p_s/p_s'; its mass q*p_s is the invariant.)
+    _mass0 = np.asarray(res.q_v[..., 0] * res.p_s)
+    np.testing.assert_allclose(_mass0, 0.02 * 101325.0, rtol=1e-6)
 
 
 def test_segment_legacy_path_ignores_dycore_tracers():
@@ -160,7 +162,8 @@ def test_segment_legacy_path_ignores_dycore_tracers():
     stays column-locked on the carry, byte-identical to the legacy path."""
     run = build_segment_fn(**_segment_args(_TracerMutatingModel()))
     res = run(_carry(), 1, _FORCING)
-    np.testing.assert_allclose(np.asarray(res.q_v[..., 0]), 0.01, rtol=1e-6)
+    _mass0 = np.asarray(res.q_v[..., 0] * res.p_s)
+    np.testing.assert_allclose(_mass0, 0.01 * 101325.0, rtol=1e-6)
 
 
 # --- seam 3: the real cdgrid dycore advects an attached tracer --------------

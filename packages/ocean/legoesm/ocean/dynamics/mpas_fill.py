@@ -7,6 +7,7 @@ tendencies, barotropic solver, and model step function.
 
 from __future__ import annotations
 
+import jax
 import jax.numpy as jnp
 
 
@@ -18,6 +19,7 @@ def fill_land_cells_mpas(
     edges_on_cell: jnp.ndarray,
     n_edges_on_cell: jnp.ndarray,
     n_iter: int = 3,
+    band_capacity: int | None = None,
 ) -> jnp.ndarray:
     """Replace land-cell values with ocean-neighbor average (Neumann BC).
 
@@ -57,12 +59,34 @@ def fill_land_cells_mpas(
     n_iter : int
         Number of Neumann-fill iterations (default 3).  Each iteration
         propagates ocean values one edge further into land.
+    band_capacity : int or None
+        None: every pass runs over all cells.  An int K: the passes run only
+        over the land cells within ``n_iter`` edges of ocean (the only cells
+        any pass writes), found from ``mask_cell`` on every call and padded
+        to K; same arithmetic per cell, so the result is identical.  If
+        more than K such cells exist, the all-cells passes run instead.
 
     Returns
     -------
     filled : same shape as ``field_cell``
     """
     n_cells = field_cell.shape[0]
+    nbr, valid = _neighbours(c1, c2, edges_on_cell, n_edges_on_cell)
+    if band_capacity is None or n_iter == 0:
+        return _fill_passes(field_cell, mask_cell, nbr, valid, n_iter, None)
+
+    band = _band(mask_cell, nbr, valid, n_iter)
+    idx = jnp.nonzero(band, size=band_capacity, fill_value=n_cells)[0]
+    return jax.lax.cond(
+        jnp.sum(band) <= band_capacity,
+        lambda f: _fill_passes(f, mask_cell, nbr, valid, n_iter, idx),
+        lambda f: _fill_passes(f, mask_cell, nbr, valid, n_iter, None),
+        field_cell)
+
+
+def _neighbours(c1, c2, edges_on_cell, n_edges_on_cell):
+    """Far-end cell of every (edge slot, cell) and whether it is a neighbour."""
+    n_cells = edges_on_cell.shape[1]
     # A sharded local mesh marks edges the rank does not hold with -1
     # (voronoi_partition remap); those slots are not neighbours here, just as
     # the edge scatter never visited them. Index them safely, then mask.
@@ -76,18 +100,63 @@ def fill_land_cells_mpas(
     e2 = c2[eoc]
     here = jnp.arange(n_cells)[jnp.newaxis, :]
     nbr = jnp.where(e1 == here, e2, e1)               # far-end cell per edge
-    valid = held & (jnp.arange(edges_on_cell.shape[0])[:, jnp.newaxis]
-                    < n_edges_on_cell[jnp.newaxis, :])
+    # The MPI-per-rank partition keeps an edge when EITHER cell is local and
+    # marks the missing far cell -1; that is not a neighbour here (it used to
+    # index the last local cell).
+    valid = held & (nbr >= 0) & (jnp.arange(edges_on_cell.shape[0])[:, jnp.newaxis]
+                                 < n_edges_on_cell[jnp.newaxis, :])
+    nbr = jnp.where(valid, nbr, 0)
+    return nbr, valid
 
-    filled = field_cell
-    m = mask_cell
+
+def _band(mask_cell, nbr, valid, n_iter):
+    """Land cells the fill writes: reached from ocean within n_iter passes."""
+    m, band = mask_cell, jnp.zeros(mask_cell.shape[0], dtype=bool)
+    for _ in range(n_iter):
+        cnt = jnp.zeros_like(m)
+        for k in range(nbr.shape[0]):
+            cnt = cnt + jnp.where(valid[k], m[nbr[k]], 0.0)
+        flip = (m < 0.5) & (cnt > 0.0)
+        band = band | flip
+        m = jnp.where(flip, 1.0, m)
+    return band
+
+
+def land_fill_band(mask_cell, c1, c2, edges_on_cell, n_edges_on_cell,
+                   n_iter: int = 3) -> jnp.ndarray:
+    """Boolean (nCells,): the cells the land fill writes on this mesh/mask."""
+    nbr, valid = _neighbours(jnp.asarray(c1), jnp.asarray(c2),
+                             jnp.asarray(edges_on_cell),
+                             jnp.asarray(n_edges_on_cell))
+    return _band(jnp.asarray(mask_cell), nbr, valid, n_iter)
+
+
+def land_fill_band_size(mask_cell, c1, c2, edges_on_cell, n_edges_on_cell,
+                        n_iter: int = 3) -> int:
+    """Smallest ``band_capacity`` that keeps the band path on this mesh/mask."""
+    return int(jnp.sum(land_fill_band(mask_cell, c1, c2, edges_on_cell,
+                                      n_edges_on_cell, n_iter)))
+
+
+def _fill_passes(filled, m, nbr, valid, n_iter, idx):
+    """The Neumann passes over all cells (``idx`` None) or over the cells
+    ``idx`` (entries == nCells are padding: read clipped, never written)."""
+    if idx is not None:
+        # The all-cells passes promote the field to the mask's dtype (the
+        # where() below); the band path must return the same dtype.
+        filled = filled.astype(jnp.result_type(filled, m))
+        lane = idx < filled.shape[0]
+        nbr = jnp.take(nbr, idx, axis=1, mode="clip")
+        valid = jnp.take(valid, idx, axis=1, mode="clip") & lane[jnp.newaxis, :]
 
     for _ in range(n_iter):
+        m_t = m if idx is None else jnp.take(m, idx, mode="clip")
+        f_t = filled if idx is None else jnp.take(filled, idx, axis=0, mode="clip")
         # Accumulate one edge slot at a time, so no (maxEdges, nCells, nlev)
         # temporary is ever materialized.
-        cnt = jnp.zeros_like(m)
-        vsum = jnp.zeros_like(filled)
-        for k in range(edges_on_cell.shape[0]):
+        cnt = jnp.zeros_like(m_t)
+        vsum = jnp.zeros_like(f_t)
+        for k in range(nbr.shape[0]):
             j, ok = nbr[k], valid[k]
             cnt = cnt + jnp.where(ok, m[j], 0.0)
             if filled.ndim == 1:
@@ -98,15 +167,19 @@ def fill_land_cells_mpas(
         has_nbr = cnt > 0.0
         if filled.ndim == 1:
             nbr_avg = vsum / jnp.maximum(cnt, 1.0)
-            can_fill = (m < 0.5) & has_nbr
+            can_fill = (m_t < 0.5) & has_nbr
         else:
             nbr_avg = vsum / jnp.maximum(cnt[:, jnp.newaxis], 1.0)
-            can_fill = ((m < 0.5) & has_nbr)[:, jnp.newaxis]
+            can_fill = ((m_t < 0.5) & has_nbr)[:, jnp.newaxis]
 
-        filled = jnp.where(can_fill, nbr_avg, filled)
-
-        # Update the local mask: land cells that got filled become
-        # "ocean" for the next iteration, so the fill propagates.
-        m = jnp.where((m < 0.5) & has_nbr, 1.0, m)
+        f_t = jnp.where(can_fill, nbr_avg, f_t)
+        # Land cells that got filled become "ocean" for the next pass, so
+        # the fill propagates.
+        m_t = jnp.where((m_t < 0.5) & has_nbr, 1.0, m_t)
+        if idx is None:
+            filled, m = f_t, m_t
+        else:
+            filled = filled.at[idx].set(f_t, mode="drop")
+            m = m.at[idx].set(m_t, mode="drop")
 
     return filled

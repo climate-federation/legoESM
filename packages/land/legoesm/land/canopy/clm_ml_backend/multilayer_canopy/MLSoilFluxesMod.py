@@ -23,6 +23,20 @@ from legoesm.land.canopy.clm_ml_backend.multilayer_canopy.MLCanopyFluxesType imp
 from legoesm.land.canopy.clm_ml_backend.multilayer_canopy.MLWaterVaporMod import LatVap, SatVap  # noqa: F401
 
 
+def soil_latent_heat(mlcanopy_inst: mlcanopy_type, p) -> jax.Array:
+    """Latent heat [J/mol] charged to the ground latent flux of patch p.
+
+    legoESM deviation from CLM-ML (#1875): the snow-covered weight
+    snowfrac_soil of the ground is charged the sublimation latent heat
+    lsub_soil (set by the land driver from the same L_s it books the pack's
+    ice at), the rest CLM-ML's LatVap(tref), so the ground solve pays the
+    sublimation cost itself.  snowfrac_soil = 0 is the original CLM-ML
+    charge exactly.  Leaves and canopy-air vapour keep LatVap(tref).
+    """
+    w = mlcanopy_inst.snowfrac_soil[p]
+    return (1.0 - w) * LatVap(mlcanopy_inst.tref_forcing[p]) + w * mlcanopy_inst.lsub_soil[p]
+
+
 def SoilFluxes(
     p: int,
     mlcanopy_inst: mlcanopy_type,
@@ -82,7 +96,6 @@ def SoilFluxes(
         Updated :class:`mlcanopy_type`.
     """
     # Unpack inputs (Fortran associate block, lines 43-63)
-    tref = mlcanopy_inst.tref_forcing[p]
     pref_p = mlcanopy_inst.pref_forcing[p]
     rhomol_p = mlcanopy_inst.rhomol_forcing[p]
     cpair_p = mlcanopy_inst.cpair_forcing[p]
@@ -98,9 +111,10 @@ def SoilFluxes(
     eair_1 = mlcanopy_inst.eair_profile[p, 1]
 
     # ------------------------------------------------------------------
-    # Latent heat of vaporization — Fortran line 66
+    # Latent heat of vaporization — Fortran line 66; over snow the
+    # sublimation-weighted ground charge (legoESM deviation, #1875)
     # ------------------------------------------------------------------
-    lam = LatVap(tref)  # J/mol
+    lam = soil_latent_heat(mlcanopy_inst, p)  # J/mol
 
     # ------------------------------------------------------------------
     # Soil conductance for water vapour — Fortran lines 68-70

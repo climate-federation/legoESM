@@ -1,0 +1,14 @@
+--- tests/SWG/MY_SRC/usrdef_zgr.F90
++++ tests/SWG_DG/MY_SRC/usrdef_zgr.F90
+@@ -193,9 +193,9 @@
+       CALL lbc_lnk( 'usrdef_zgr', z2d, 'T', 1._wp )           ! set surrounding land to zero (closed boundaries)
+       !
+       zylim0 =   10000._wp    ! +10km 
+-      zylim1 = 2010000._wp    ! 2010km
++      zylim1 = rn_domsiz + 10000._wp    ! SWG_DG: wet extent follows rn_domsiz (+10 km)
+       zxlim0 =   10000._wp    ! +10km 
+-      zxlim1 = 2010000._wp    ! 2010km
++      zxlim1 = rn_domsiz + 10000._wp    ! SWG_DG: wet extent follows rn_domsiz (+10 km)
+       !
+       DO_2D( nn_hls, nn_hls, nn_hls, nn_hls )
+          ! if T point in the 2000 km x 2000 km domain

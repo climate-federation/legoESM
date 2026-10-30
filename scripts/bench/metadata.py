@@ -278,7 +278,8 @@ def git_sha(short: bool = True) -> str:
         if out.returncode != 0 or not sha:
             return "unknown"
         dirty = subprocess.run(
-            ["git", "status", "--porcelain", "--untracked-files=no"],
+            ["git", "--no-optional-locks", "status", "--porcelain",
+             "--untracked-files=no"],
             capture_output=True, text=True, timeout=5, cwd=cwd)
         if dirty.returncode == 0 and dirty.stdout.strip():
             return sha + "-dirty"

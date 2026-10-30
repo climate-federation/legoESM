@@ -12,6 +12,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
+from legoesm import constants  # noqa: E402
 from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
 from legoesm.ocean.fidelity.nemo_testcase_recipe import (
     build_nemo_testcase_card,
@@ -368,7 +369,7 @@ def test_smt2_linear_rate_is_nemos_constant_and_reads_no_velocity():
     kw = dict(scheme=bd.bottom_drag_scheme, cd0=bd.bottom_drag_cd0,
               cd_max=bd.bottom_drag_cdmax, z0=bd.bottom_drag_z0,
               ke0=bd.bottom_drag_ke0, uc0=bd.bottom_drag_uc0,
-              von_karman=0.4)
+              von_karman=constants.kappa_von_karman)
     rest = nemo_effective_bottom_drag_r(
         jnp.zeros((3, 3)), jnp.zeros((3, 3)), jnp.full((3, 3), 500.0), **kw)
     fast = nemo_effective_bottom_drag_r(
@@ -387,7 +388,7 @@ def test_nemo_linear_refuses_a_missing_reference_velocity():
     with pytest.raises(ValueError, match="rn_Uc0"):
         nemo_drag_r_from_speed_sq(
             jnp.zeros((2, 2)), jnp.ones((2, 2)), scheme="nemo_linear",
-            cd0=1.0e-3, cd_max=0.1, z0=3.0e-3, ke0=2.5e-3, von_karman=0.4)
+            cd0=1.0e-3, cd_max=0.1, z0=3.0e-3, ke0=2.5e-3, von_karman=constants.kappa_von_karman)
 
 
 def test_smt2_validator_refuses_a_card_that_drops_a_drag_value():
@@ -472,6 +473,7 @@ def test_smt3_card_adds_only_rung0_lateral_tracer_diffusion():
     assert gm.slope_limit == "nemo_cap"
     assert gm.msc_stabilize is True
     assert gm.implicit_K33 is True
+    assert gm.redi_divisor_thickness_evaluation == "nemo_qco_live"
     assert gm.kappa_redi_horizontal_evaluation == "nemo_metric_literal"
     assert gm.kappa_redi_diffusive_velocity == 0.018
 
@@ -484,6 +486,21 @@ def test_smt3_card_adds_only_rung0_lateral_tracer_diffusion():
             np.asarray(getattr(base.recipe.initial_state, name).data),
             np.asarray(getattr(card.recipe.initial_state, name).data))
 
+
+def test_vortex_cards_state_the_redi_divisor_only_where_executed():
+    """Round 248: every VORTEX Redi consumer states the independent arm."""
+    for name in ("VORTEX_SMT3_VEC-zps", "VORTEX_SMT4_VEC-zps"):
+        gm = build_nemo_testcase_card(name).recipe.model_config.gm_redi
+        assert gm is not None
+        assert gm.redi_divisor_thickness_evaluation == "nemo_qco_live"
+    for name in (
+            "VORTEX-zco", "VORTEX_VEC-zco", "VORTEX-15km-zco",
+            "VORTEX_VEC-15km-zco", "VORTEX-10km-zco",
+            "VORTEX_VEC-10km-zco", "VORTEX_SMT-zps",
+            "VORTEX_SMT_VEC-zps", "VORTEX_SMT1_VEC-zps",
+            "VORTEX_SMT2_VEC-zps"):
+        assert build_nemo_testcase_card(
+            name).recipe.model_config.gm_redi is None, name
 
 def test_smt3_validator_refuses_a_dropped_rung0_ldf_value():
     from legoesm.ocean.fidelity.nemo_testcase_recipe import (

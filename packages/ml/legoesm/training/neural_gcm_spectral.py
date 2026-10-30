@@ -297,6 +297,25 @@ def has_spatial_surface_leaves(model) -> bool:
     )
 
 
+def _trainable_raw_values(grads) -> dict:
+    """``{name: grad}`` of the trainable leaves the no-inert gate judges: the
+    ``raw_values`` of a bare physics-params model or of an
+    ``AIMIPTrainableBundle`` (classical + spec-driven scheme halves), plus the
+    AIMIP spatial-surface coefficients (unread fields are never built).  Frozen
+    (non-array) knobs carry no gradient (``None``) and are not judged."""
+    parts = ([("", grads.raw_values)] if hasattr(grads, "raw_values") else
+             [("classical.", grads.classical.raw_values),
+              ("schemes.", grads.schemes.raw_values)])
+    out = {p + k: v for p, rv in parts for k, v in rv.items() if v is not None}
+    # AIMIP spatial-surface coefficients, minus the fields frozen as unread
+    sp = getattr(grads if hasattr(grads, "raw_values") else grads.classical,
+                 "spatial_surface", None)
+    if sp is not None:
+        out.update({f"spatial.{n}": f.coeffs for n, f in sp.fields.items()
+                    if n not in sp.frozen})
+    return out
+
+
 def maybe_resume_model(model_template, resume_from_dir):
     """Load latest epoch checkpoint from ``resume_from_dir`` into ``model_template``.
 
@@ -945,7 +964,8 @@ def make_turbulence_only_spectral_physics(dt,
         microphysics=MicrophysicsConfig(scheme="none"),
         gravity_wave_drag=GravityWaveDragConfig(scheme="none"),
     )
-    raw_fn = make_physics(cfg, model_type="spectral_pe", dt=dt)
+    raw_fn = make_physics(cfg, model_type="spectral_pe", dt=dt,
+                          surface_bulk_coeffs=None)   # turbulence owns it
 
     from legoesm.atmosphere.physics.physics_state import (
         NO_SFC_T_OVERRIDE,
@@ -1071,8 +1091,9 @@ def make_physics_params_spectral_physics(params, grid, dt, *,
     _kwargs = {}
     if _albedo is not None and radiation == "rrtmgp":
         _kwargs["sfc_albedo_override"] = _albedo
+    # this lane runs its own surface flux (C_H / C_E above)
     raw_fn = make_physics(physics_config, model_type="spectral_pe", dt=dt,
-                          **_kwargs)
+                          surface_bulk_coeffs=None, **_kwargs)
 
     def physics_fn(state, grid_, sigma_coord):
         result = raw_fn(state, grid_, sigma_coord)
@@ -1262,6 +1283,26 @@ def positive_tracers(tracers, sigma_coord):
     return out
 
 
+def _scan_adjoint_window(step_fn, carry0, xs, length, adjoint_steps):
+    """``lax.scan`` whose gradient flows through only the last ``adjoint_steps``.
+
+    The forward is the same per-step sequence as one scan (the step index in
+    ``xs`` continues across the cut, so radiation cadence and the solar clock
+    are unchanged); ``stop_gradient`` on the WHOLE carry at the cut (state,
+    cached radiation, prognostic physics) removes every earlier step from the
+    adjoint. ``adjoint_steps`` 0 or >= the length = ordinary scan.
+    """
+    n = int(length if xs is None else xs.shape[0])
+    k = n - int(adjoint_steps) if 0 < int(adjoint_steps) < n else 0
+    if k == 0:
+        return jax.lax.scan(step_fn, carry0, xs, length=length)
+    carry, _ = jax.lax.scan(step_fn, carry0, None if xs is None else xs[:k],
+                            length=k if xs is None else None)
+    carry = jax.lax.stop_gradient(carry)
+    return jax.lax.scan(step_fn, carry, None if xs is None else xs[k:],
+                        length=n - k if xs is None else None)
+
+
 def spectral_rollout(
     initial_state: SpectralHydrostaticState,
     physics_fn,
@@ -1279,6 +1320,10 @@ def spectral_rollout(
     forcing_base: dict | None = None,
     phys_state_in=None,
     return_phys_state: bool = False,
+    adjoint_steps: int = 0,
+    step_offset: int = 0,
+    rad_tendency_in=None,
+    return_rad_tendency: bool = False,
 ) -> SpectralHydrostaticState:
     """Roll out spectral PE + SFNO physics for n_steps using lax.scan.
 
@@ -1359,6 +1404,15 @@ def spectral_rollout(
         across the rollout (daily-AMIP granularity).  Mutually
         exclusive with the rad-gating path (the classical AMIP rollout
         ``spectral_amip_rollout`` owns that combination).
+    adjoint_steps : int
+        Differentiate only the last ``adjoint_steps`` steps (0 = all). The
+        forward rollout is unchanged; see ``_scan_adjoint_window``.
+    step_offset, rad_tendency_in, return_rad_tendency
+        Exact segment chaining (rad-gated stateful branch only): a segment
+        started at ``step_offset`` with the previous segment's physics state
+        and cached radiation tendency continues the step index, radiation
+        cadence and clock, so two chained segments equal one rollout.
+        ``return_rad_tendency`` appends the cached tendency to the return.
 
     Returns
     -------
@@ -1390,6 +1444,29 @@ def spectral_rollout(
         else None
     )
 
+    _continued = bool(step_offset) or rad_tendency_in is not None
+    if _continued or return_rad_tendency:
+        if rad_physics_fn is None or (phys_state_in is None
+                                      and not return_phys_state):
+            raise ValueError(
+                "spectral_rollout: step_offset/rad_tendency_in/"
+                "return_rad_tendency chain the rad-gated STATEFUL branch only "
+                "(rad_physics_fn plus phys_state_in or return_phys_state).")
+        if _continued and getattr(pe_config, "fix_mass", False) and getattr(
+                pe_config, "anchor_mass_to_initial", False):
+            raise ValueError(
+                "spectral_rollout: segment chaining with the dry-mass anchor "
+                "would re-anchor to the segment start, not the forecast start.")
+    if _continued and (phys_state_in is None or rad_tendency_in is None
+                       or int(step_offset) < 1):
+        raise ValueError(
+            "spectral_rollout: a continued segment needs step_offset >= 1, "
+            "the previous segment's phys_state_in AND rad_tendency_in (the "
+            "first steps may sit between radiation updates).")
+    if not 0 <= int(adjoint_steps) <= int(n_steps):
+        raise ValueError(
+            f"spectral_rollout: adjoint_steps must be in 0..{n_steps}, got "
+            f"{adjoint_steps}.")
     if rad_physics_fn is not None and rad_update_interval < 1:
         raise ValueError(
             "spectral_rollout: rad_update_interval must be >= 1, got "
@@ -1629,8 +1706,9 @@ def spectral_rollout(
                 prevent_cse=True,
                 policy=jax.checkpoint_policies.nothing_saveable,
             )
-            (final_state, final_ps), _ = jax.lax.scan(
-                step_fn_ckpt, (initial_state, phys0), None, length=n_steps,
+            (final_state, final_ps), _ = _scan_adjoint_window(
+                step_fn_ckpt, (initial_state, phys0), None, n_steps,
+                adjoint_steps,
             )
             if return_phys_state:
                 return final_state, final_ps
@@ -1654,10 +1732,11 @@ def spectral_rollout(
             policy=jax.checkpoint_policies.nothing_saveable,
         )
 
-        final_state, _ = jax.lax.scan(
+        final_state, _ = _scan_adjoint_window(
             step_fn_ckpt, initial_state,
             jnp.arange(n_steps) if forcing_base is not None else None,
-            length=None if forcing_base is not None else n_steps,
+            None if forcing_base is not None else n_steps,
+            adjoint_steps,
         )
         return final_state
 
@@ -1947,11 +2026,14 @@ def spectral_rollout(
             prevent_cse=True,
             policy=jax.checkpoint_policies.nothing_saveable,
         )
-        (final_state, _, final_ps), _ = jax.lax.scan(
+        rad0 = _init_rad(phys0) if rad_tendency_in is None else rad_tendency_in
+        (final_state, final_rad, final_ps), _ = _scan_adjoint_window(
             step_fn_ckpt,
-            (initial_state, _init_rad(phys0), phys0),
-            jnp.arange(n_steps),
+            (initial_state, rad0, phys0),
+            jnp.arange(step_offset, step_offset + n_steps), None, adjoint_steps,
         )
+        if return_rad_tendency:
+            return final_state, final_ps, final_rad
         if return_phys_state:
             return final_state, final_ps
         return final_state
@@ -1969,10 +2051,10 @@ def spectral_rollout(
         policy=jax.checkpoint_policies.nothing_saveable,
     )
 
-    (final_state, _), _ = jax.lax.scan(
+    (final_state, _), _ = _scan_adjoint_window(
         step_fn_ckpt,
         (initial_state, _init_rad()),
-        jnp.arange(n_steps),
+        jnp.arange(n_steps), None, adjoint_steps,
     )
     return final_state
 
@@ -3136,7 +3218,9 @@ def load_training_data(
             phis=phis_era5,
             lat=lat, lon=lon, plev_Pa=plev_Pa,
         )
-        return era5_to_spectral_carry(era5, grid, sigma)
+        from legoesm.training.era5_to_state import era5_terrain_product
+        return era5_to_spectral_carry(era5, grid, sigma,
+                                      target_phis=era5_terrain_product(era5, grid))
 
     # Load all snapshots.  Position ``j`` maps to absolute index
     # ``time_indices[j]`` in the full store; window-cache mode selects the SAME
@@ -3962,7 +4046,7 @@ def _train_spectral_loop(
                         ic = _stage_tree(ic, _compute_dev)
                         tgt = _stage_tree(tgt, _compute_dev)
                         fb = None if fb is None else _stage_tree(fb, _compute_dev)
-                    yield _gate_step(model, ic, tgt, fb)[2].raw_values
+                    yield _trainable_raw_values(_gate_step(model, ic, tgt, fb)[2])
 
         assert_no_inert_over(_gate_grads())
 

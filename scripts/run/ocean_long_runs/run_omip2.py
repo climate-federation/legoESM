@@ -79,13 +79,14 @@ def _build_state(grid_type, resolution, *, H_max=5500.0, nlev=15,
     tc = TestCase(case="omip2", grid_type=grid_type,
                   resolution=resolution, duration_days=365.0,
                   quick_days=1.0)
+    physics = external_surface_forcing_physics() if grid_type == "mpas" else None
     # OMIP-2 forced run requires bottom drag to balance wind input; without
     # it the wind continuously pumps momentum into the top layer and the
     # baroclinic adjustment runs away. A_h = 5e4 dissipates the Munk
     # boundary layer + intermediate-scale eddies at 1 deg resolution
     # (matches NEMO ORCA default).
     grid, z_coord, _, model, _, _, _ = _create_ocean_setup(
-        tc, H_max=H_max, nlev=nlev,
+        tc, H_max=H_max, nlev=nlev, physics=physics,
         A_h=5.0e4, A_v=1.0e-4,
         bottom_drag_r=1.0e-3,
     )
@@ -93,11 +94,50 @@ def _build_state(grid_type, resolution, *, H_max=5500.0, nlev=15,
     return state, grid, z_coord, model
 
 
-# NOTE: the inline bulk-flux step used by the Phase F skeleton has
-# been promoted to the shared coupler hook
-# ``legoesm.ocean.coupler.apply_omip2_surface_fluxes`` which both
-# this driver and ``run_bryan_thc.py`` import. The skeleton lives on
-# only as a docstring beacon.
+def external_surface_forcing_physics():
+    """MPAS physics with ONLY the coupler-provided surface-forcing block on.
+
+    The matrix setup builds MPAS with ``physics=None``, under which
+    ``model.step(surface_forcing=...)`` is accepted but ignored.  Every other
+    component is off, so the model is otherwise the ``physics=None`` model
+    (pinned by tests/unit/test_ocean_long_run_drivers_forcing.py).  Shortwave
+    penetration stays off because ``q_net`` already folds SW in and the
+    external block distributes it (as run_omip_core2's MPAS lane does).
+    """
+    from legoesm.ocean.physics import (
+        BottomDragConfig, LateralMixingConfig, OceanConvectionConfig,
+        OceanPhysicsConfig, SurfaceForcingConfig, VerticalMixingConfig,
+    )
+    return OceanPhysicsConfig(
+        vertical_mixing=VerticalMixingConfig(scheme="none"),
+        lateral_mixing=LateralMixingConfig(scheme="none"),
+        surface_forcing=SurfaceForcingConfig(scheme="external"),
+        bottom_drag=BottomDragConfig(scheme="none"),
+        convection=OceanConvectionConfig(scheme="none"),
+        shortwave_penetration=None,
+    )
+
+
+def step_with_omip2_forcing(model, state, *, forcing, idx_t, grid,
+                            grid_type, dt, pre_step=None):
+    """One ocean step with the CORE-II / JRA55-do bulk forcing integrated
+    inside the timestep (the faithful path; issue #1820).
+
+    Momentum and heat only: the surface freshwater flux (P - E,
+    ``compute_omip2_freshwater_forcing`` -> ``model.step(freshwater=...)``) is
+    NOT applied, as the deleted operator-split applicator never applied it.
+
+    The flux is computed from the BEGINNING-of-step state (the production
+    run_omip_core2 / FESOM / NEMO "now"-field convention); ``pre_step``
+    (optional) then applies operator-split edits such as runoff, ice-shelf
+    melt or SSS restoring before the ocean step.
+    """
+    from legoesm.ocean.coupler import compute_omip2_surface_forcing
+    sf = compute_omip2_surface_forcing(
+        state, forcing=forcing, idx_t=idx_t, grid=grid, grid_type=grid_type)
+    if pre_step is not None:
+        state = pre_step(state)
+    return model.step(state, dt, surface_forcing=sf)
 
 
 def main() -> int:
@@ -146,8 +186,6 @@ def main() -> int:
     print(f"   RPE_0 = {rpe0:.4e} J  |  KE_0 = {eb0.KE:.3e}  |  "
           f"vol_0 = {tb0.volume:.3e}")
 
-    from legoesm.ocean.coupler import apply_omip2_surface_fluxes
-
     yearly_diag: list[dict] = []
     dt = float(args.dt)
     n_years = 1 if args.smoke else args.years
@@ -166,12 +204,10 @@ def main() -> int:
         n_forc = forcing.u10.shape[0]
         for step in range(steps_per_year):
             idx_t = (step * n_forc) // steps_per_year
-            state = apply_omip2_surface_fluxes(
-                state, forcing=forcing, idx_t=idx_t,
-                z_coord=z_coord, grid=grid, grid_type=args.grid,
-                dt=dt,
+            state = step_with_omip2_forcing(
+                model, state, forcing=forcing, idx_t=idx_t, grid=grid,
+                grid_type=args.grid, dt=dt,
             )
-            state = model.step(state, dt)
         state = jax.block_until_ready(state)
 
         # Yearly diagnostics.

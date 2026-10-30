@@ -19,7 +19,10 @@ from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
     _bc_horizontal_momentum_advection_flux_form,
     _bc_vertical_momentum_advection,
 )
-from legoesm.ocean.fidelity.nemo_testcase_recipe import build_vortex_smt_zps_card
+from legoesm.ocean.fidelity.nemo_testcase_recipe import (
+    build_tsunami_zco_card,
+    build_vortex_smt_zps_card,
+)
 
 
 @pytest.fixture(scope="module")
@@ -32,6 +35,11 @@ def card():
         adaptive_implicit_vertadv=False,
     )
     return base._replace(recipe=base.recipe._replace(model_config=config))
+
+
+@pytest.fixture(scope="module")
+def tsunami_card():
+    return build_tsunami_zco_card()
 
 
 def _field(shape, seed):
@@ -97,6 +105,50 @@ def test_tracer_none_dispatch_is_zero(card):
         jnp.zeros((nj, ni, 2)), z + 100.0, jnp.full((nj, ni + 1, 1), 100.0),
         jnp.full((nj + 1, ni, 1), 100.0), g, 1000.0)
     assert not np.any(dh) and not np.any(dv)
+
+
+def test_tsunami_card_selects_every_off_arm(tsunami_card):
+    m = tsunami_card.recipe.model_config
+    assert (m.momentum_advection, m.momentum_flux_scheme,
+            m.vertical_momentum_scheme, m.tracer_advection) == (
+        "flux_form", "none", "none", "none")
+
+
+def test_tracer_none_dispatch_is_zero_and_upwind_plant_is_not(tsunami_card):
+    g = tsunami_card.recipe.grid
+    nj, ni = g.f_T.shape
+    tr = _field((nj, ni, 1), 9)
+    args = (0.1 * _field((nj, ni + 1, 1), 17), 0.1 * _field((nj + 1, ni, 1), 18),
+            jnp.zeros((nj, ni, 2)), jnp.full((nj, ni, 1), 100.0),
+            jnp.full((nj, ni + 1, 1), 100.0), jnp.full((nj + 1, ni, 1), 100.0),
+            g, 1000.0)
+    dh, dv = _compute_advection_flux_div(tr, "none", *args)
+    assert not np.any(dh) and not np.any(dv)
+    assert np.any(_compute_advection_flux_div(tr, "upwind", *args)[0])
+
+
+@pytest.mark.parametrize("field, value", [
+    ("eos_depth", "insitu"), ("tracer_advection", "fct2"),
+    ("momentum_flux_scheme", "nemo_up3")])
+def test_tsunami_validator_refuses_reverting_a_selection(
+        tsunami_card, field, value):
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import (
+        validate_nemo_testcase_card)
+    validate_nemo_testcase_card(tsunami_card)
+    cfg = tsunami_card.recipe.model_config._replace(**{field: value})
+    bad = tsunami_card._replace(
+        recipe=tsunami_card.recipe._replace(model_config=cfg))
+    with pytest.raises(ValueError, match="TSUNAMI-zco"):
+        validate_nemo_testcase_card(bad)
+
+
+def test_store_salt_flux_is_refused_with_tracer_advection_none(tsunami_card):
+    cfg = tsunami_card.recipe.model_config._replace(
+        store_salt_flux=True, tracer_time_integrator="euler",
+        momentum_time_integrator="euler")
+    with pytest.raises(ValueError, match="tracer_advection='none'"):
+        LatLonCGridOceanModel(
+            tsunami_card.recipe.grid, tsunami_card.recipe.z_coord, cfg)
 
 
 def test_tracer_none_stage1_is_the_qco_ratio_and_fct2_plant_moves_it(card):

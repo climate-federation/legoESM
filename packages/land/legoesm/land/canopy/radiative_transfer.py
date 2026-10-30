@@ -57,10 +57,12 @@ clumping, kb == kd smoothness / AD).
 
 from __future__ import annotations
 
+import functools
 from typing import NamedTuple
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 
 from legoesm import constants
 
@@ -469,6 +471,205 @@ def canopy_shortwave_rt(
         Vcmax25_C4Sun=Vcmax25_C4Sun,
         Vcmax25_C4Sh=Vcmax25_C4Sh,
     )
+
+
+# ---------------------------------------------------------------------------
+# CLM5 big-leaf two-stream column albedo (canopy over a snowy ground)
+# ---------------------------------------------------------------------------
+# CTSM 5.1 SurfaceAlbedoMod.F90 TwoStream (lines 1314-1338 preamble, 1378-1510
+# albedo) and clm_varcon.F90 205-208 (intercepted-snow optics).  Only the
+# column ALBEDO outputs (albd, albi) are ported; the absorbed/transmitted
+# partitions are not used here (the two-leaf RT keeps doing that).
+_CLM_CHIL_MIN = -0.4         # xl clip range (SurfaceAlbedoMod 1323)
+_CLM_CHIL_MAX = 0.6
+_CLM_CHIL_ZERO = 0.01        # |chil| <= 0.01 -> 0.01 (1324)
+_CLM_PHI1_A = 0.633          # phi1 = 0.5 - 0.633 chil - 0.330 chil^2 (1325)
+_CLM_PHI1_B = 0.330
+_CLM_PHI2_A = 0.877          # phi2 = 0.877 (1 - 2 phi1) (1326)
+_CLM_COSZ_MIN = 0.001        # cosz floor (1322)
+_CLM_TEMP0_MIN = 1.0e-6      # temp0 floor, bugzilla 2431 (1334)
+_CLM_EXP_MAX = 40.0          # optical-depth cap in exp(-t) (1428-1430)
+_CLM_MPE = 1.0e-6            # rho/tau and weight floors (823-831)
+_CLM_OMEGA_SNOW = (0.8, 0.4)  # omegas(vis, nir), clm_varcon 207-208
+_CLM_BETA_SNOW = 0.5         # betads = betais, clm_varcon 205-206
+
+
+def clm5_two_stream_albedo(vai, f_leaf, rhol, taul, rhos, taus, xl, cosz,
+                           alb_ground, fcansno=0.0, omega_snow=0.0):
+    """CLM5 big-leaf two-stream albedo of a canopy over a ground of albedo
+    ``alb_ground`` for ONE waveband.  Returns ``(albd, albi)``: direct-beam and
+    diffuse column albedo.
+
+    ``vai`` = exposed elai + esai, ``f_leaf`` = elai / vai (CLM ``wl``), the
+    leaf/stem reflectance and transmittance of that band, ``xl`` the leaf
+    orientation index, ``fcansno`` the snow-covered canopy fraction with
+    ``omega_snow`` its scattering (``_CLM_OMEGA_SNOW``).  Where ``vai <= 0`` the
+    canopy is absent and the column albedo IS the ground albedo (CLM's
+    non-vegetated filter).  Same ground albedo for beam and diffuse (the model
+    carries one per band)."""
+    veg = vai > 0.0
+    vai_s = jnp.where(veg, vai, 1.0)          # keep the masked branch finite
+    ws = 1.0 - f_leaf
+    rho = jnp.maximum(rhol * f_leaf + rhos * ws, _CLM_MPE)
+    tau = jnp.maximum(taul * f_leaf + taus * ws, _CLM_MPE)
+    cz = jnp.maximum(cosz, _CLM_COSZ_MIN)
+    chil = jnp.clip(xl, _CLM_CHIL_MIN, _CLM_CHIL_MAX)
+    chil = jnp.where(jnp.abs(chil) <= _CLM_CHIL_ZERO, _CLM_CHIL_ZERO, chil)
+    phi1 = 0.5 - _CLM_PHI1_A * chil - _CLM_PHI1_B * chil * chil
+    phi2 = _CLM_PHI2_A * (1.0 - 2.0 * phi1)
+    gdir = phi1 + phi2 * cz
+    ext = gdir / cz
+    avmu = (1.0 - phi1 / phi2 * jnp.log((phi1 + phi2) / phi1)) / phi2
+    temp0 = jnp.maximum(gdir + phi2 * cz, _CLM_TEMP0_MIN)
+    temp1 = phi1 * cz
+    temp2 = 1.0 - temp1 / temp0 * jnp.log((temp1 + temp0) / temp1)
+    # Leaf/stem single-scattering parameters (1381-1385).
+    omegal = rho + tau
+    asu = 0.5 * omegal * gdir / temp0 * temp2
+    betadl = (1.0 + avmu * ext) / (omegal * avmu * ext) * asu
+    betail = 0.5 * ((rho + tau) + (rho - tau) * ((1.0 + chil) / 2.0) ** 2) / omegal
+    # Intercepted-snow adjustment (1396-1398).
+    om = (1.0 - fcansno) * omegal + fcansno * omega_snow
+    betad = ((1.0 - fcansno) * omegal * betadl
+             + fcansno * omega_snow * _CLM_BETA_SNOW) / om
+    betai = ((1.0 - fcansno) * omegal * betail
+             + fcansno * omega_snow * _CLM_BETA_SNOW) / om
+    # Common terms (1408-1420).
+    b = 1.0 - om + om * betai
+    c1 = om * betai
+    t0 = avmu * ext
+    d = t0 * om * betad
+    f = t0 * om * (1.0 - betad)
+    h = jnp.sqrt(b * b - c1 * c1) / avmu
+    sigma = t0 * t0 - (b * b - c1 * c1)
+    p1 = b + avmu * h
+    p2 = b - avmu * h
+    p3 = b + t0
+    p4 = b - t0
+    s1 = jnp.exp(-jnp.minimum(h * vai_s, _CLM_EXP_MAX))
+    s2 = jnp.exp(-jnp.minimum(ext * vai_s, _CLM_EXP_MAX))
+    # Direct beam (1434-1462).
+    # Floored divisor: alb_ground = 0 would make u1 infinite and, through the
+    # jnp.where below, NaN the gradient even where the canopy is absent.
+    u1 = b - c1 / jnp.maximum(alb_ground, _CLM_MPE)
+    tmp2 = u1 - avmu * h
+    tmp3 = u1 + avmu * h
+    d1 = p1 * tmp2 / s1 - p2 * tmp3 * s1
+    h1 = -d * p4 - c1 * f
+    tmp6 = d - h1 * p3 / sigma
+    tmp7 = (d - c1 - h1 / sigma * (u1 + t0)) * s2
+    h2 = (tmp6 * tmp2 / s1 - p2 * tmp7) / d1
+    h3 = -(tmp6 * tmp3 * s1 - p1 * tmp7) / d1
+    albd = h1 / sigma + h2 + h3
+    # Diffuse (1480-1510): same u1 since the ground albedo is shared.
+    h7 = (c1 * tmp2) / (d1 * s1)
+    h8 = (-c1 * tmp3 * s1) / d1
+    albi = h7 + h8
+    return (jnp.where(veg, albd, alb_ground), jnp.where(veg, albi, alb_ground))
+
+
+# --- CLM5 snow burial of short vegetation (SatellitePhenologyMod.F90 173-188) ---
+_CLM_TALL_PFT_MAX = 11       # nbrdlf_dcd_brl_shrub: PFTs 1..11 use the hbot..htop rule
+_CLM_SHORT_BEND = 0.8        # grass/crop burial height = 0.8 htop (20% bending)
+_CLM_SHORT_HMIN = 0.05       # floor on that burial height [m]
+_CLM_VAI_CUT = 0.05          # elai, esai < 0.05 -> 0
+_N_CLM_PFT = 17              # natural PFTs 0..16 (surfdata npft, CLM5 order)
+
+
+def _clm5_pft_optics():
+    """Guarded front end of :func:`_clm5_pft_optics_cached`: the tower-site
+    override switch is checked on EVERY call, not only when the cache fills."""
+    from legoesm.land.canopy.clm_ml_backend.multilayer_canopy import MLclm_varctl
+    if MLclm_varctl.pftcon_val != 0:
+        raise ValueError("canopy snow albedo needs the CLM default PFT optics; "
+                         "pftcon_val is set to a tower-site override")
+    return _clm5_pft_optics_cached()
+
+
+@functools.lru_cache(maxsize=1)
+def _clm5_pft_optics_cached():
+    """CLM5 default per-PFT leaf/stem optics, rows 0..16, columns (vis, nir):
+    ``(xl, rhol, taul, rhos, taus)`` from the repo's port of CLM pftconMod, as
+    host NumPy arrays (built eagerly even when first called inside a jit trace,
+    so the cache never holds a tracer)."""
+    from legoesm.land.canopy.clm_ml_backend.clm_src_main import pftconMod as _pc
+    from legoesm.land.canopy.clm_ml_backend.clm_src_main.clm_varpar import inir, ivis
+    with jax.ensure_compile_time_eval():
+        pc = _pc.InitRead(_pc.InitAllocate())
+    from legoesm.land.surface_params import N_PFT_CLM5
+    if N_PFT_CLM5 != _N_CLM_PFT:
+        raise ValueError(f"surfdata PFT count {N_PFT_CLM5} != CLM5 optics rows {_N_CLM_PFT}")
+    rows = slice(0, _N_CLM_PFT)
+    two = lambda a: np.stack([np.asarray(a)[rows, ivis], np.asarray(a)[rows, inir]],
+                             axis=-1)
+    return (np.asarray(pc.xl)[rows], two(pc.rhol), two(pc.taul), two(pc.rhos),
+            two(pc.taus))
+
+
+def clm5_exposed_area(LAI, SAI, htop, hbot, pft_index, f_snow, snow_depth):
+    """CLM5 leaf and stem area left exposed above the snow, ``(elai, esai)``
+    (SatellitePhenologyMod.F90 173-188): trees and shrubs (PFT 1..11) are
+    buried from ``hbot`` up to ``htop``; grasses and crops up to 0.8 ``htop``
+    (20% bending, floor 0.05 m); the burial applies on the snow-covered
+    fraction ``f_snow``; exposed areas below 0.05 are set to zero."""
+    ip = jnp.clip(jnp.round(pft_index).astype(jnp.int32), 0, _N_CLM_PFT - 1)
+    tall = (ip > 0) & (ip <= _CLM_TALL_PFT_MAX)
+    ol = jnp.clip(snow_depth - hbot, 0.0, htop - hbot)
+    fb_tall = 1.0 - ol / jnp.maximum(htop - hbot, 1e-6)
+    hb = jnp.maximum(_CLM_SHORT_HMIN, _CLM_SHORT_BEND * htop)
+    fb_short = 1.0 - jnp.clip(snow_depth, 0.0, hb) / hb
+    fb = jnp.where(tall, fb_tall, fb_short)
+
+    def _exposed(x):
+        e = jnp.maximum(x * (1.0 - f_snow) + x * fb * f_snow, 0.0)
+        return jnp.where(e < _CLM_VAI_CUT, 0.0, e)
+
+    return _exposed(LAI), _exposed(SAI)
+
+
+def canopy_masked_snow_albedo(alb_snowfree, alb_snowy, band, LAI, SAI, htop,
+                              hbot, pft_index, f_snow, snow_depth, cosz,
+                              f_diffuse):
+    """Column albedo of one band with the canopy hiding the snow (CLM5).
+
+    DELTA form: the snow-free column albedo is left exactly as supplied and only
+    the snow increment is passed through the canopy,
+
+        alb = alb_snowfree + TS(elai, esai; alb_snowy) - TS(tlai, tsai; alb_snowfree)
+
+    with TS the CLM5 two-stream column albedo (:func:`clm5_two_stream_albedo`)
+    as the step's light sees it, ``f_diffuse * albi + (1 - f_diffuse) * albd``
+    (beam albedo at ``cosz``; the model carries one albedo per band, and the
+    canopy RT reflects that one value off both beam and diffuse light, so the
+    blend makes the reflected total exact for this step's split), elai/esai the
+    CLM5 snow-buried leaf/stem area and ``alb_snowy`` the ground albedo with
+    snow already blended on (the unmasked model value).  No exposed plant area
+    (none, or all of it buried) -> ``alb_snowy`` exactly; no snow ->
+    ``alb_snowfree`` exactly.  ``band`` 0 =
+    visible, 1 = near-infrared.  Intercepted canopy snow is not represented
+    (fcansno = 0): a bare-branch bound."""
+    xl_t, rhol_t, taul_t, rhos_t, taus_t = (jnp.asarray(t) for t in _clm5_pft_optics())
+    ip = jnp.clip(jnp.round(pft_index).astype(jnp.int32), 0, _N_CLM_PFT - 1)
+    elai, esai = clm5_exposed_area(LAI, SAI, htop, hbot, pft_index, f_snow,
+                                   snow_depth)
+
+    def _ts(lai, sai, ground):
+        vai = lai + sai
+        f_leaf = lai / jnp.maximum(vai, _CLM_MPE)
+        albd, albi = clm5_two_stream_albedo(
+            vai, f_leaf, rhol_t[ip, band], taul_t[ip, band], rhos_t[ip, band],
+            taus_t[ip, band], xl_t[ip], cosz, ground)
+        return f_diffuse * albi + (1.0 - f_diffuse) * albd
+
+    tlai = jnp.where(LAI < _CLM_VAI_CUT, 0.0, LAI)
+    tsai = jnp.where(SAI < _CLM_VAI_CUT, 0.0, SAI)
+    # Parenthesised so a zero increment returns alb_snowfree bit-exactly.  No
+    # EXPOSED plant area (none at all, or all buried) returns alb_snowy
+    # bit-exactly, the unmasked model value: CTSM puts elai + esai = 0 in its
+    # non-vegetated albedo filter (SurfaceAlbedoMod 805-814).
+    masked = alb_snowfree + (_ts(elai, esai, alb_snowy)
+                             - _ts(tlai, tsai, alb_snowfree))
+    return jnp.where(elai + esai > 0.0, masked, alb_snowy)
 
 
 # ---------------------------------------------------------------------------

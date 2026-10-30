@@ -1468,7 +1468,10 @@ def nemo_ff_f_to_vertex(ff_f: jax.Array) -> jax.Array:
         raise ValueError(
             f"NEMO ff_f must be a 2-D native field, got shape {native.shape}"
         )
-    with_south = jnp.concatenate([native[:1], native], axis=0)
+    from legoesm.grids.halo_latlon import lat_faces_from_north
+
+    # south row: jpfillcopy when closed, the periodic copy under the y-wrap
+    with_south = lat_faces_from_north(native, south=native[:1])
     return jnp.concatenate([with_south[:, -1:], with_south], axis=1)
 
 

@@ -50,8 +50,8 @@ Consequently:
   solved `en` (`ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/zdftke.f90:709-711`).
 
 **CONFIRMED, card.**  Rung 10's ORCA2 recipe selects the bottom boundary
-(`nemo_testcase_recipe.py:2119`) and converts NEMO's one-based bottom T-cell
-index to `bottom_level=bottom-1` (`nemo_testcase_recipe.py:1887-1894`).  The
+(`nemo_testcase_recipe.py:2397`) and converts NEMO's one-based bottom T-cell
+index to `bottom_level=bottom-1` (`nemo_testcase_recipe.py:2165-2172`).  The
 card carries 29 zero-based solve rows.  The old scatter clipped every index
 into `[0,N-1]`; the correction retains the clipped gather index but ANDs the
 row selector with `0 <= raw_idx < N` (`tke.py:1803-1834`).  Thus a shallower
@@ -128,7 +128,7 @@ SHA-256 `88044d158531b30f3257c8dd48601c79cec166caa3bf4dc17f574543b2618e18`.
 ## DINO shared-branch effect
 
 **CONFIRMED, selected.**  DINO's `nemo_dino_kamm_mlf` recipe selects the
-bottom boundary (`dino.py:1287`).  The committed fp64 probe instantiates that
+bottom boundary (`dino.py:1292`).  The committed fp64 probe instantiates that
 recipe's literal TKE solve on both DINO grids with inexact, nonuniform operands
 (`nemo_testcase_l4_orca2_round330_dino_probe.py:88-170`).
 
