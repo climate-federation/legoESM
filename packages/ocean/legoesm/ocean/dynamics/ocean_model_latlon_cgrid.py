@@ -3606,10 +3606,13 @@ class LatLonCGridOceanModel:
                 # fluid the card actually runs.
                 seos_cfg=self.config.eos_nemo_seos,
                 # The run's EOS for the Richardson / ePBL closures (#2177),
-                # built as the implicit K-profile fallback builds its own.
+                # built as the dynamics builds its own: rho0=config.rho_0
+                # only on the geometric-depth path (#2243).
                 eos_fn=_make_eos_fn_physics(
                     eos=self.config.eos, eos_linear=self.config.eos_linear,
-                    eos_nemo_seos=getattr(self.config, "eos_nemo_seos", None)),
+                    eos_nemo_seos=getattr(self.config, "eos_nemo_seos", None),
+                    **({"rho0": self.config.rho_0}
+                       if self.config.eos_depth == "geometric" else {})),
             )
         else:
             self._physics_fn = None
@@ -12743,7 +12746,10 @@ class LatLonCGridOceanModel:
                     state, _zc, _cfg_b.physics,
                     _phys_cfg.vertical_mixing.iwm,
                     eos_fn=_mk_eos(eos=_cfg_b.eos,
-                                   eos_linear=_cfg_b.eos_linear),
+                                   eos_linear=_cfg_b.eos_linear,
+                                   **({"rho0": _cfg_b.rho_0}
+                                      if _cfg_b.eos_depth == "geometric"
+                                      else {})),
                     iwm_fields=_iwm,
                 ).astype(dtype)
                 K_v_cell = K_v_cell + _K_iwm
@@ -12794,11 +12800,15 @@ class LatLonCGridOceanModel:
             # Use the model's own EOS for the vmix density / static-stability
             # N² so the TKE convection trigger (n2_mode="adiabatic") is
             # consistent with the dynamical core. None for Wright leaves the
-            # legacy behaviour bit-identical.
+            # legacy behaviour bit-identical.  Reference density as the
+            # dynamics builds it: rho0=config.rho_0 only on the
+            # geometric-depth path (#2243).
             from legoesm.ocean.eos import make_eos_fn as _make_eos_fn
             _vmix_eos_fn = _make_eos_fn(
                 eos=_cfg_b.eos, eos_linear=_cfg_b.eos_linear,
                 eos_nemo_seos=getattr(_cfg_b, "eos_nemo_seos", None),
+                **({"rho0": _cfg_b.rho_0}
+                   if _cfg_b.eos_depth == "geometric" else {}),
             )
             # PROGNOSTIC TKE carry: thread the carried TKE + the energy-recycling
             # source into the fallback K-profile solve, and capture the updated
@@ -13136,7 +13146,10 @@ class LatLonCGridOceanModel:
                 _avt_ddm, _avs_ddm = ddm_K_profile(
                     state, _zc, _cfg_b.physics, _ddm_cfg,
                     eos_fn=_mk_eos_ddm(eos=_cfg_b.eos,
-                                       eos_linear=_cfg_b.eos_linear),
+                                       eos_linear=_cfg_b.eos_linear,
+                                       **({"rho0": _cfg_b.rho_0}
+                                          if _cfg_b.eos_depth == "geometric"
+                                          else {})),
                 )
                 _dt_dtype = state.T.data.dtype
                 _avt_ddm = _avt_ddm.astype(_dt_dtype)
