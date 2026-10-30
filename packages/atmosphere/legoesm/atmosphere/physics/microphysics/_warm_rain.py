@@ -2056,7 +2056,7 @@ def autoconversion_sb2001(q_c, q_r, N_c_eff, rho, *, ramp_top):
     return dq_c_au, dN_r_au, x_c
 
 
-def accretion_sb2001(q_c, q_r, rho):
+def accretion_sb2001(q_c, q_r, rho, *, qr_ramp_top, qc_ramp_top):
     """Seifert & Beheng (2001) accretion as gSAM M2005 runs it (IRAIN=1,
     module_mp_graupel.f90:1955-1962 / :3277-3285)::
 
@@ -2067,7 +2067,25 @@ def accretion_sb2001(q_c, q_r, rho):
     computed only where ``q_r >= 1e-8`` and ``q_c >= 1e-8`` (zero elsewhere).
     NOT ported: the cloud-number sink ``NPRA`` (only reached with
     ``predict_Nc=True``).
+
+    RULE 5 (#2262): each of gSAM's two 1e-8 kg/kg steps is replaced by the C2
+    step :func:`smoothstep_quintic`, exactly 0 at the threshold and 1 from its
+    ramp top [kg/kg] up (``qr_ramp_top`` / ``qc_ramp_top`` =
+    ``MorrisonConfig`` / ``SeifertBehengConfig``
+    ``.sb2001_accretion_qr_ramp_top`` / ``.sb2001_accretion_qc_ramp_top``,
+    default 2e-8 each, codex+GLM 2026-10-30); a top <= 1e-8 is gSAM's hard
+    step for that gate.  The rate stays exactly 0 below either threshold.
+    KNOWN DIFFERENCE at the default: only q_r or q_c in [1e-8, 2e-8) kg/kg
+    sees a reduced rate.  Measured on the gSAM SB2001 kernel fixture: 192 of
+    1680 points change (those at q_r = 1e-8, rate 0 instead of gSAM's),
+    largest change 1.4e-13 kg/kg/s = 4.0e-9 of the fixture's largest rate; no
+    fixture point lies in the cloud-water ramp; the whole-call gSAM columns
+    change by exactly 0.  Gaps are pinned in test_sb2001_accretion_ramp.py.
+    No invariant is broken (the rate only shrinks, stays >= 0).
     """
+    for name, top in (("qr_ramp_top", qr_ramp_top), ("qc_ramp_top", qc_ramp_top)):
+        if not top >= 0.0 or not math.isfinite(top):
+            raise ValueError(f"{name} must be finite and >= 0 [kg/kg], got {top}")
     q_c_pos = jnp.clip(q_c, 0.0)
     q_r_pos = jnp.clip(q_r, 0.0)
     gate = (q_r_pos >= _SB2001_PRA_Q_MIN) & (q_c_pos >= _SB2001_PRA_Q_MIN)
@@ -2075,8 +2093,12 @@ def accretion_sb2001(q_c, q_r, rho):
     qr_s = jnp.where(gate, q_r_pos, 1.0)
     dum = 1.0 - qc_s / (qc_s + qr_s)
     phi_ac = (dum / (dum + _SB2001_PHI_AC_KTAU)) ** 4
-    return jnp.where(gate, _SB2001_ACCRETION_COEFF * rho * qc_s * qr_s * phi_ac,
-                     0.0)
+    pra = _SB2001_ACCRETION_COEFF * rho * qc_s * qr_s * phi_ac
+    for q_s, top in ((qr_s, qr_ramp_top), (qc_s, qc_ramp_top)):
+        if top > _SB2001_PRA_Q_MIN:
+            pra = pra * smoothstep_quintic(
+                (q_s - _SB2001_PRA_Q_MIN) / (top - _SB2001_PRA_Q_MIN))
+    return jnp.where(gate, pra, 0.0)
 
 
 def self_collection_breakup(N_r, q_r, rho, k_sc, breakup_sharpness, D_eq):
@@ -3002,7 +3024,8 @@ def _m2005_fill_down(v):
 
 
 def m2005_liquid_step(T, q_v, q_c, q_r, N_r, p, rho, dz, dt, N_c_spec, params,
-                      n_substeps_max, *, sb2001_autoconv_ramp_top):
+                      n_substeps_max, *, sb2001_autoconv_ramp_top,
+                      sb2001_accretion_qr_ramp_top, sb2001_accretion_qc_ramp_top):
     """One gSAM M2005 call, liquid only, SB2001 warm rain, specified N_c.
 
     Port of gSAM 1.8.8 ``M2005MICRO_GRAUPEL`` (SRC/MICRO_M2005/
@@ -3035,7 +3058,9 @@ def m2005_liquid_step(T, q_v, q_c, q_r, N_r, p, rho, dz, dt, N_c_spec, params,
        4679), QSMALL zeroing, and the rain-number reset at the slope bounds.
 
     ``sb2001_autoconv_ramp_top`` [kg/kg] is the autoconversion gate's RULE 5
-    ramp top (:func:`autoconversion_sb2001`; <= 1e-6 = gSAM's hard step).
+    ramp top (:func:`autoconversion_sb2001`; <= 1e-6 = gSAM's hard step);
+    ``sb2001_accretion_qr_ramp_top`` / ``sb2001_accretion_qc_ramp_top`` [kg/kg]
+    are the accretion gates' (:func:`accretion_sb2001`; <= 1e-8 = hard step).
 
     ``N_r`` is per-VOLUME [1/m^3] in and out (gSAM's per-kg NR3D times rho).
     Arrays are (ncol, nlev) TOP-DOWN (surface last).  ``params`` supplies the
@@ -3079,7 +3104,8 @@ def m2005_liquid_step(T, q_v, q_c, q_r, N_r, p, rho, dz, dt, N_c_spec, params,
     # 3. process rates
     prc, nprc1, _ = autoconversion_sb2001(q_c, q_r, N_c, rho,
                                           ramp_top=sb2001_autoconv_ramp_top)
-    pra = accretion_sb2001(q_c, q_r, rho)
+    pra = accretion_sb2001(q_c, q_r, rho, qr_ramp_top=sb2001_accretion_qr_ramp_top,
+                           qc_ramp_top=sb2001_accretion_qc_ramp_top)
     nragg = self_collection_breakup_sb2001(N_r, q_r, rho, params)
     pre = -rain_evaporation_m2005(q_v, q_r, N_r, q_sat, T, p, rho, params)
 
