@@ -1098,7 +1098,7 @@ def test_o15_o16_receipt_rehashes_every_digest_and_mismatch_plant() -> None:
     from pathlib import Path
 
     receipt = Path("docs/ice/fidelity/si3_r24_o15_o16_receipt.md")
-    cited = set(re.findall(r"\b[0-9a-f]{64}\b", receipt.read_text(encoding="utf-8")))
+    receipt_lines = receipt.read_text(encoding="utf-8").splitlines()
     root = Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/round24")
     files = (
         root / "o15_kind20_score.json",
@@ -1116,7 +1116,7 @@ def test_o15_o16_receipt_rehashes_every_digest_and_mismatch_plant() -> None:
     if missing:
         pytest.skip(f"receipt evidence files are not mounted: {missing}")
 
-    file_digests = {hashlib.sha256(path.read_bytes()).hexdigest() for path in files}
+    file_digests = {path.name: hashlib.sha256(path.read_bytes()).hexdigest() for path in files}
     d5 = json.loads((root / "d5_platform_probe.json").read_text(encoding="utf-8"))
 
     def values(value):
@@ -1130,22 +1130,41 @@ def test_o15_o16_receipt_rehashes_every_digest_and_mismatch_plant() -> None:
             yield value
 
     nested_digests = {value for value in values(d5) if re.fullmatch(r"[0-9a-f]{64}", value)}
-    covered = file_digests | nested_digests
-    original_digests = {
-        "6df5e4d29176246f490b6c0632242f1c23f502f3f0f1b485e41c71b290913804",
-        "ca59f204737a9ee9d92b23aab0b02d1ed85d5c94e465ebb839e003937f4ec294",
-        "f1d8baf0d1c1d7425c2db7365bfe6526d3c3a28c4d307ca525c5b160e0e08751",
-        "0ae03fd37dac18de6d7fc3d549e3110f0567bd849fe1bc30a3fbd4b3631582dd",
-        "f2f56c6dc7b8b375d76e4e134faeb6395780434d06693a85b837ea8fd8256e7f",
-        "84863b41d7cf854c6f2647d974b9108caf45a5766d9bfbec985694a4219c790b",
-        "34b79a739831aad8f9c269587a414a605d5949b47d36f22302b29363cc1e4a69",
-        "053cefcc173117e106658ad8975bac29afdbb6f6e971df7192180829095a8d6f",
-        "fa2cc5fc534b7789dc565c491d58472784bf6e568296635397afb2169c4c69bf",
-        "b7a7329bed74c17918fa3cbc11c7613acb2074851e2357a08869fcd4661e12d2",
-        "ab03c16a4f0a424d6be496733f815153f21c4e09681dd4ccbc09d0571b05c726",
+    expected_by_line = {
+        42: file_digests["o15_kind20_score.json"],
+        114: file_digests["o15_o16_translated_score_001_025.json"],
+        115: file_digests["o15_o16_translated_score_026_050.json"],
+        116: file_digests["o15_o16_translated_score_051_065.json"],
+        117: file_digests["o15_o16_translated_score_066_080.json"],
+        118: file_digests["o15_o16_translated_score_081_095.json"],
+        119: file_digests["o15_o16_translated_score_096_100.json"],
+        151: file_digests["o15_o16_production_score_resume3.json"],
+        176: "ebcb768d0a6c6d0ad9f14be203495d2b10018547531fdea08e760d4360a0db8a",
+        179: "59d59a1f464928c5ebb0cef883fa1f7b85b69d3febfb085cc79366cc36a3cc10",
+        183: "0f322ac2098a08c8993faff34b07158b1a3dc2bbc9424d25fff7cfbd7866efa8",
+        189: "b7a7329bed74c17918fa3cbc11c7613acb2074851e2357a08869fcd4661e12d2",
+        191: "2c07a832729871c4183ce5a753df69a82ee0632ee76eb6ba3e47d196220606d5",
+        195: "9be609f47d7c9c9188ca8e0db79a949347b7c2f5ba6f40f694839333ba949a01",
+        206: file_digests["o8_o12_master_score.json"],
+        210: "b7a7329bed74c17918fa3cbc11c7613acb2074851e2357a08869fcd4661e12d2",
+        212: file_digests["d5_platform_probe.json"],
     }
-    assert original_digests <= cited and original_digests <= covered
-    planted = set(covered)
-    planted.discard(next(iter(original_digests)))
-    with pytest.raises(AssertionError):
-        assert original_digests <= planted
+    assert expected_by_line[189] in nested_digests
+    assert expected_by_line[210] in nested_digests
+
+    def verify(lines):
+        occurrences = []
+        for number, line in enumerate(lines, 1):
+            for digest in re.findall(r"\b[0-9a-f]{64}\b", line):
+                occurrences.append(number)
+                assert digest == expected_by_line[number], f"receipt line {number}"
+        assert occurrences == list(expected_by_line)
+
+    verify(receipt_lines)
+    for line_number in (210, 189):  # original repeated digest; Resume 4 amendment
+        planted = list(receipt_lines)
+        planted[line_number - 1] = re.sub(
+            r"\b[0-9a-f]{64}\b", "0" * 64, planted[line_number - 1]
+        )
+        with pytest.raises(AssertionError, match=rf"receipt line {line_number}"):
+            verify(planted)
