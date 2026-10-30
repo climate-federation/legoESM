@@ -370,6 +370,9 @@ SWITCH_COLUMNS = {
 # [kg/kg/s] and 1e2*CBMF [kg/m^2/s] of _col_outputs) a switch column must
 # carry at both settings (reviewer finding 2026-10-30).
 SWITCH_COLUMN_MIN_OUTPUT = 1.0e-8
+# ... and within this factor of the other setting's, so neither setting is
+# effectively rejected (codex r4; the smallest measured ratio is 0.09, cbmf).
+SWITCH_COLUMN_MIN_RATIO = 1.0e-3
 UNREACHABLE = {
     "tlift_floor_sharpness": "TLIFT's MAX(TG, 35 K) acts only on a parcel colder than 35 K",
     # Measured (sw_probe2.py, bisection onto the switch argument over 15
@@ -481,14 +484,16 @@ def test_each_switch_carries_gradient_at_default(fx, field):
     os_ = np.asarray(_col_outputs(soft, T, q, pf, ph, cb))
     oh = np.asarray(_col_outputs(hard, T, q, pf, ph, cb))
     # The column must convect at BOTH settings (output scale above
-    # SWITCH_COLUMN_MIN_OUTPUT, the probe's selection floor), so a column one
-    # setting rejects cannot pass on a vanishing output; the change is
-    # normalised by the larger of the two.
+    # SWITCH_COLUMN_MIN_OUTPUT, the probe's selection floor, and within
+    # SWITCH_COLUMN_MIN_RATIO of each other), so a column one setting rejects
+    # cannot pass on a vanishing output; the change is normalised by the
+    # larger of the two.
     sh, ss = float(np.max(np.abs(oh))), float(np.max(np.abs(os_)))
     d = float(np.max(np.abs(os_ - oh))) / max(sh, ss, 1e-300)
     print(f"{field}: column {SWITCH_COLUMNS[field]}, output scale {ss:.3e}/{sh:.3e}, "
           f"change {d:.3e}")
     assert min(sh, ss) > SWITCH_COLUMN_MIN_OUTPUT, (field, sh, ss)
+    assert min(sh, ss) > SWITCH_COLUMN_MIN_RATIO * max(sh, ss), (field, sh, ss)
     assert d > 1.0e-9, (field, d)
 
     def loss(cfg):

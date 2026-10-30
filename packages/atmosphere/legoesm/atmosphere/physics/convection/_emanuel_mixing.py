@@ -79,7 +79,8 @@ all of them at those values reproduce the oracle (<= 1e-10):
   ``BSUM < 1e-18`` local-detrainment switch (the BSUM sigmoid is centred
   ``_BSUM_CENTRE_WIDTHS/bsum_sharpness`` above 1e-18, so a row with BSUM
   exactly 0 and entrainment counted gets local-detrainment weight
-  ``1 - sigmoid(-12)``, not one half);
+  ``1 - sigmoid(-12 - 1e-18 bsum_sharpness)`` (~ ``1 - 6e-6`` at the default),
+  not one half);
 * ``asij_floor_sharpness`` -- ``MAX(ASIJ, 1e-21)``;
 * ``sort_sharpness`` -- the ``DO 200`` SMIN march (its min/max/abs and the
   strict SMIN tests) and the ``[0, 1]`` clip of the stored ``SIJ``.
