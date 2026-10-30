@@ -3081,10 +3081,65 @@ def _nemo_ws_rk3_tracer_pair_step(
     return out_a, out_b
 
 
+def _coriolis_pair_operator(grid, h_u, h_v, dtype):
+    """Energy-conserving C-grid Coriolis operator (coriolis_baroclinic_operator
+    = "energy_conserving"): returns cor_u(v), cor_v(u).
+
+    The force is assembled at cell centres, as CROCO's rhs3d.F (UV_COR: the
+    flux Hz f/(mn) times the velocity averaged to the rho point, half to each
+    adjacent face), so every u face / v face pair of a cell exchanges energy
+    with equal and opposite coefficients K = 1/4 f_T A_T min(h_a, h_b):
+
+        w_u cor_u =  sum over the two cells of the face and their v faces of K v
+        w_v cor_v = -sum over the two cells of the face and their u faces of K u
+
+    with w = h A the kinetic energy weight of each face (min-rule h, masked).
+    sum w_u u cor_u(v) + sum w_v v cor_v(u) = 0 for any (u, v), pair by pair.
+    In a uniform interior this is f times the four point average.  The pair
+    thickness is the thinner face (the corner min rule of MITgcm's hFacZ), so
+    a dry face couples to nothing.  Not for a tripolar fold.
+    """
+    if getattr(getattr(grid, "fold", None), "is_active", False):
+        raise ValueError(
+            'coriolis_baroclinic_operator="energy_conserving" does not '
+            "support a tripolar fold")
+    f_T = jnp.asarray(grid.f_T, dtype)
+    A_T = jnp.asarray(grid.area_T, dtype)
+    w_u = h_u * (jnp.asarray(grid.dx_u, dtype) * jnp.asarray(grid.dy_u, dtype))[..., None]
+    w_v = h_v * (jnp.asarray(grid.dx_v, dtype) * jnp.asarray(grid.dy_v, dtype))[..., None]
+    hw, he = h_u[:, :-1], h_u[:, 1:]
+    hs, hn = h_v[:-1], h_v[1:]
+    c = 0.25 * (f_T * A_T)[..., jnp.newaxis]
+    k_ws, k_wn = c * jnp.minimum(hw, hs), c * jnp.minimum(hw, hn)
+    k_es, k_en = c * jnp.minimum(he, hs), c * jnp.minimum(he, hn)
+    inv_u = jnp.where(w_u > 0, 1.0 / jnp.where(w_u > 0, w_u, 1.0), 0.0)
+    inv_v = jnp.where(w_v > 0, 1.0 / jnp.where(w_v > 0, w_v, 1.0), 0.0)
+
+    def cor_u(v):
+        vs, vn = v[:-1], v[1:]
+        f_west = k_ws * vs + k_wn * vn        # to the west face of each cell
+        f_east = k_es * vs + k_en * vn        # to the east face
+        g = f_west + jnp.roll(f_east, 1, axis=1)   # face i: cell i and cell i-1
+        g = jnp.concatenate([g, g[:, 0:1]], axis=1)  # periodic duplicate face
+        return g * inv_u
+
+    def cor_v(u):
+        uw, ue = u[:, :-1], u[:, 1:]
+        f_south = -(k_ws * uw + k_es * ue)    # to the south face of each cell
+        f_north = -(k_wn * uw + k_en * ue)    # to the north face
+        z = jnp.zeros_like(f_south[:1])
+        g = (jnp.concatenate([z, f_north], axis=0)
+             + jnp.concatenate([f_south, z], axis=0))
+        return g * inv_v
+
+    return cor_u, cor_v
+
+
 # Fixed-point passes of the trapezoidal Coriolis rotation (coriolis_time_scheme
-# = "trapezoidal"): the error falls by about |f| dt / 2 per pass, so 6 passes
-# leave about 1e-7 of the increment at |f| dt = 0.13 (30N, dt = 1800 s).
-_N_CORIOLIS_TRAPEZOIDAL_ITER = 6
+# = "trapezoidal"): the error falls by about |f| dt / 2 per pass, so 12 passes
+# leave about 1e-15 of the increment at |f| dt = 0.13 (30N, dt = 1800 s), the
+# round-off of the energy neutral rotation.
+_N_CORIOLIS_TRAPEZOIDAL_ITER = 12
 
 
 def _forward_backward_coriolis_3d(
@@ -3177,32 +3232,48 @@ def _forward_backward_coriolis_3d(
         interp_u_to_vface_4pt,
     )
 
-    def _v_to_u(vp):
-        # Average v' to u-points (Sadourny 4-point average)
-        v_west = jnp.roll(vp, 1, axis=1)
-        v_at_u = 0.25 * (vp[:-1] + vp[1:] + v_west[:-1] + v_west[1:])
-        return jnp.concatenate([v_at_u, v_at_u[:, 0:1, :]], axis=1)
+    # dt times the Coriolis acceleration of u' (from v') and minus that of v'
+    # (from u'), so that u' + du(v') and v' - dv(u') are the updates.
+    if getattr(config, "coriolis_baroclinic_operator",
+               "four_point") == "energy_conserving":
+        cor_u, cor_v = _coriolis_pair_operator(grid, h_u * u_mask_3d,
+                                               h_v * v_mask_3d, u.dtype)
+
+        def du(vp):
+            return dt * cor_u(vp)
+
+        def dv(up):
+            return -dt * cor_v(up)
+    else:
+        def du(vp):
+            # Average v' to u-points (Sadourny 4-point average)
+            v_west = jnp.roll(vp, 1, axis=1)
+            v_at_u = 0.25 * (vp[:-1] + vp[1:] + v_west[:-1] + v_west[1:])
+            v_at_u = jnp.concatenate([v_at_u, v_at_u[:, 0:1, :]], axis=1)
+            return dt * f_u[:, :, jnp.newaxis] * v_at_u
+
+        def dv(up):
+            u_at_v = interp_u_to_vface_4pt(up, grid)
+            return dt * f_v[:, :, jnp.newaxis] * u_at_v
 
     if getattr(config, "coriolis_time_scheme",
                "forward_backward") == "trapezoidal":
         # Crank-Nicolson rotation x1 = x0 + dt L((x0 + x1)/2), solved by
         # fixed-point iteration; each pass contracts the error by about
         # |f| dt / 2 (0.066 at 30N, dt = 1800 s).
-        u_prime_new, v_prime_new = u_prime, v_prime
-        for _ in range(_N_CORIOLIS_TRAPEZOIDAL_ITER):
-            u_mid = 0.5 * (u_prime + u_prime_new)
-            v_mid = 0.5 * (v_prime + v_prime_new)
-            u_prime_new = (u_prime + dt * f_u[:, :, jnp.newaxis]
-                           * _v_to_u(v_mid)) * u_mask_3d
-            v_prime_new = (v_prime - dt * f_v[:, :, jnp.newaxis]
-                           * interp_u_to_vface_4pt(u_mid, grid)) * v_mask_3d
+        def _pass(_, uv):
+            u_mid = 0.5 * (u_prime + uv[0])
+            v_mid = 0.5 * (v_prime + uv[1])
+            return ((u_prime + du(v_mid)) * u_mask_3d,
+                    (v_prime - dv(u_mid)) * v_mask_3d)
+
+        u_prime_new, v_prime_new = jax.lax.fori_loop(
+            0, _N_CORIOLIS_TRAPEZOIDAL_ITER, _pass, (u_prime, v_prime))
     else:
         # --- Forward step: update u' using old v' ---
-        u_prime_new = (u_prime + dt * f_u[:, :, jnp.newaxis]
-                       * _v_to_u(v_prime)) * u_mask_3d
+        u_prime_new = (u_prime + du(v_prime)) * u_mask_3d
         # --- Backward step: update v' using NEW u' ---
-        u_at_v = interp_u_to_vface_4pt(u_prime_new, grid)
-        v_prime_new = (v_prime - dt * f_v[:, :, jnp.newaxis] * u_at_v) * v_mask_3d
+        v_prime_new = (v_prime - dv(u_prime_new)) * v_mask_3d
 
     # --- Reconstruct full velocity ---
     u_new = u_prime_new + U_bar[..., jnp.newaxis]
@@ -4250,6 +4321,11 @@ class LatLonCGridOceanModel:
             raise ValueError(
                 "coriolis_time_scheme must be 'forward_backward' or "
                 f"'trapezoidal', got {config.coriolis_time_scheme!r}")
+        if getattr(config, "coriolis_baroclinic_operator", "four_point") not in (
+                "four_point", "energy_conserving"):
+            raise ValueError(
+                "coriolis_baroclinic_operator must be 'four_point' or "
+                f"'energy_conserving', got {config.coriolis_baroclinic_operator!r}")
         nonnegative = {
             "A_h": config.lateral_viscosity.A_h,
             "B_h": config.lateral_viscosity.B_h,

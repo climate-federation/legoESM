@@ -1,11 +1,14 @@
-"""Kinetic energy of one baroclinic Coriolis rotation of a zonal flow.
+"""Kinetic energy of one baroclinic Coriolis rotation.
 
 The forward-backward rotation (u' with the old v', then v' with the new u')
 adds energy of order (f dt)^2 to a zonal flow every step (Sielecki 1968),
 1.2 percent per step here (20N to 32N, dt = 1800 s), which feeds zonal
-geostrophic jets.
-``coriolis_time_scheme="trapezoidal"`` (Crank-Nicolson rotation) leaves it
-unchanged to the fixed-point and metric residuals, and still rotates the flow.
+geostrophic jets.  ``coriolis_time_scheme="trapezoidal"`` (Crank-Nicolson)
+with ``coriolis_baroclinic_operator="energy_conserving"`` (equal and opposite
+pair coefficients) leaves the energy unchanged to round-off for any flow,
+also over partial cells, and still rotates the flow.  The trapezoidal scheme
+with the four point average keeps a residual that does not vanish as dt -> 0
+(f and the face weights differ between u and v faces).
 """
 import numpy as np
 import pytest
@@ -21,7 +24,8 @@ from legoesm.ocean.dynamics import ocean_model_latlon_cgrid as oml  # noqa: E402
 from legoesm.ocean.dynamics.latlon_cgrid_operators import (  # noqa: E402
     min_cell_to_uface, min_cell_to_vface)
 from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel  # noqa: E402
-from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean  # noqa: E402
+from legoesm.ocean.init_latlon_cgrid import (  # noqa: E402
+    make_partial_cell_latlon, rest_state_latlon_cgrid_ocean)
 from legoesm.ocean.state import LatLonCGridOceanConfig  # noqa: E402
 from legoesm.ocean.vertical import compute_layer_thickness, create_z_star_from_thicknesses  # noqa: E402
 
@@ -29,48 +33,75 @@ set_policy(PrecisionPolicy.fp64())
 DT = 1800.0
 
 
-def _ke_change(scheme):
+def _ke_change(time_scheme, operator="four_point", flow="zonal"):
     grid, wall = create_regional_grid("latlon", n_lat=12, n_lon=16, lat_south=20.0,
                                       lat_north=32.0, lon_west=140.0, lon_east=156.0)
-    zc = create_z_star_from_thicknesses(np.full(6, 500.0))
-    cfg = LatLonCGridOceanConfig.from_flat(coriolis_time_scheme=scheme)
-    model = LatLonCGridOceanModel(grid, zc, cfg)
-    st = rest_state_latlon_cgrid_ocean(grid, zc, land_mask_override=jnp.asarray(np.asarray(wall) > 0.5,
-                                                                                    dtype=jnp.float64))
-    h = compute_layer_thickness(st.eta.data, st.H_bathy.data, zc)
+    ocean = np.asarray(wall) > 0.5
+    dz = np.full(6, 500.0)
+    zc = create_z_star_from_thicknesses(dz)
+    if flow == "zonal":                                   # flat bottom, full cells
+        zc_pc, H, lm = zc, np.where(ocean, 3000.0, 0.0), ocean.astype(float)
+    else:                                                 # a ridge of partial cells
+        lon = np.broadcast_to(np.linspace(139.5, 156.5, 18)[None, :], (14, 18))
+        H = np.where(ocean, 3000.0 - 1700.0 * np.exp(-((lon - 148.0) / 2.0) ** 2), 0.0)
+        zc_pc, H, lm = make_partial_cell_latlon(zc, H, ocean.astype(float))
+    cfg = LatLonCGridOceanConfig.from_flat(coriolis_time_scheme=time_scheme,
+                                           coriolis_baroclinic_operator=operator)
+    model = LatLonCGridOceanModel(grid, zc_pc, cfg)
+    st = rest_state_latlon_cgrid_ocean(grid, zc_pc, land_mask_override=jnp.asarray(lm, dtype=jnp.float64),
+                                       H_bathy_override=jnp.asarray(H, dtype=jnp.float64),
+                                       H_max=float(zc.H_max))
+    h = compute_layer_thickness(st.eta.data, st.H_bathy.data, zc_pc)
     hu = np.asarray(min_cell_to_uface(h)) * np.asarray(st.u_mask.data)[..., None]
     hv = np.asarray(min_cell_to_vface(h, model.grid)) * np.asarray(st.v_mask.data)[..., None]
-    zmid = np.arange(6) * 500.0 + 250.0
-    u0 = 0.5 * np.cos(np.pi * zmid / 3000.0)[None, None, :] * (hu > 0)     # baroclinic, zero depth mean
-    u0 = jnp.asarray(u0)
-    v0 = jnp.zeros(hv.shape)
-    u1, v1 = oml._forward_backward_coriolis_3d(u0, v0, DT, model.grid, model.z_coord, model.config, st.u_mask.data,
+    if flow == "zonal":
+        zmid = np.cumsum(dz) - dz / 2
+        u0 = 0.5 * np.cos(np.pi * zmid / 3000.0)[None, None, :] * (hu > 0)
+        v0 = np.zeros(hv.shape)
+    else:                                                 # any flow: random u and v
+        rng = np.random.default_rng(0)
+        u0, v0 = rng.normal(0.0, 0.3, hu.shape) * (hu > 0), rng.normal(0.0, 0.3, hv.shape) * (hv > 0)
+    # zero depth mean, so the output is the rotated perturbation itself
+    u0 = u0 - ((u0 * hu).sum(-1) / np.maximum(hu.sum(-1), 1e-10))[..., None] * (hu > 0)
+    v0 = v0 - ((v0 * hv).sum(-1) / np.maximum(hv.sum(-1), 1e-10))[..., None] * (hv > 0)
+    u0[:, -1] = u0[:, 0]                                  # periodic duplicate u face, as the model
+    u1, v1 = oml._forward_backward_coriolis_3d(jnp.asarray(u0), jnp.asarray(v0), DT, model.grid,
+                                               model.z_coord, model.config, st.u_mask.data,
                                                st.v_mask.data, st.land_mask.data, st.eta.data,
                                                st.H_bathy.data)
     Au = (np.asarray(model.grid.dx_u) * np.asarray(model.grid.dy_u))[..., None]
     Av = (np.asarray(model.grid.dx_v) * np.asarray(model.grid.dy_v))[..., None]
+    nx = Au.shape[1] - 1                                  # count the duplicate u face once
 
     def ke(u, v):
-        return float(np.sum(hu * Au * np.asarray(u) ** 2) + np.sum(hv * Av * np.asarray(v) ** 2))
+        u, v = np.asarray(u), np.asarray(v)
+        return float(np.sum((hu * Au * u ** 2)[:, :nx]) + np.sum(hv * Av * v ** 2))
 
-    return (ke(u1, v1) - ke(u0, v0)) / ke(u0, v0), float(np.abs(np.asarray(v1)).max())
+    return (ke(u1, v1) - ke(u0, v0)) / ke(u0, v0), float(np.abs(np.asarray(v1) - v0).max())
 
 
 def test_forward_backward_adds_energy_to_zonal_flow():
-    dke, vmax = _ke_change("forward_backward")
+    dke, dv = _ke_change("forward_backward")
     assert dke > 4e-3, dke                    # measured 1.2e-2
-    assert vmax > 0.03, vmax
+    assert dv > 0.03, dv
 
 
-def test_trapezoidal_conserves_energy_and_rotates():
-    dke, vmax = _ke_change("trapezoidal")
-    assert abs(dke) < 1e-5, dke              # measured 1.3e-6
-    assert vmax > 0.03, vmax                  # dt f u is about 0.06 m/s: the flow still turns
+def test_trapezoidal_energy_conserving_is_neutral_to_round_off_for_any_flow():
+    for flow in ("zonal", "random_partial_cells"):
+        dke, dv = _ke_change("trapezoidal", "energy_conserving", flow)
+        assert abs(dke) < 1e-13, (flow, dke)
+        assert dv > 0.03, (flow, dv)          # dt f u is about 0.06 m/s: the flow still turns
 
 
-def test_unknown_coriolis_time_scheme_raises():
+def test_trapezoidal_four_point_keeps_a_spatial_residual():
+    dke, _ = _ke_change("trapezoidal", "four_point", "random_partial_cells")
+    assert abs(dke) > 1e-9, dke
+
+
+def test_unknown_coriolis_options_raise():
     grid, _ = create_regional_grid("latlon", n_lat=4, n_lon=4, lat_south=20.0, lat_north=24.0,
                                    lon_west=140.0, lon_east=144.0)
     zc = create_z_star_from_thicknesses(np.full(2, 500.0))
-    with pytest.raises(ValueError):
-        LatLonCGridOceanModel(grid, zc, LatLonCGridOceanConfig.from_flat(coriolis_time_scheme="leapfrog"))
+    for field, value in (("coriolis_time_scheme", "leapfrog"), ("coriolis_baroclinic_operator", "een")):
+        with pytest.raises(ValueError):
+            LatLonCGridOceanModel(grid, zc, LatLonCGridOceanConfig.from_flat(**{field: value}))

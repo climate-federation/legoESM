@@ -3550,6 +3550,16 @@ class LatLonCGridOceanConfig(NamedTuple):
     #   Exactly energy neutral for any dt when L is (as here, to the
     #   residual of the metric terms) skew in the kinetic energy norm.
     coriolis_time_scheme: str = "forward_backward"
+    # Spatial operator of that rotation.
+    # "four_point" (default, bit-identical): f at the face times the 4-point
+    #   average of the other component.  Not exactly energy neutral on the
+    #   sphere or at partial cells (f_u differs from f_v, face areas and
+    #   thicknesses differ): the residual rate does not vanish as dt -> 0.
+    # "energy_conserving": the cell-centre pair form of CROCO's rhs3d.F
+    #   (_coriolis_pair_operator), equal and opposite coefficients for every
+    #   u face / v face pair, energy neutral to round-off for any flow; with
+    #   coriolis_time_scheme="trapezoidal" the whole rotation is.
+    coriolis_baroclinic_operator: str = "four_point"
 
     @classmethod
     def from_flat(cls, **flat) -> "LatLonCGridOceanConfig":
