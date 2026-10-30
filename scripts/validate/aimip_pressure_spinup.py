@@ -250,6 +250,8 @@ def main(argv=None):
                 make_aimip_classical_spectral_physics,
             )
             rad_update_interval = int(cfg.get("aimip_rad_update_interval", 1))
+            from legoesm.training.aimip_spatial import grid_with_land_fraction
+            grid = grid_with_land_fraction(grid)
             built = make_aimip_classical_spectral_physics(
                 trained, grid, spec_cfg.dt,
                 # rrtmgp by default like every other AIMIP path; a config

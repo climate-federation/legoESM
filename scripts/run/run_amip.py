@@ -1726,6 +1726,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         help="Land-sea-mask NetCDF (CMIP6 sftlf / ERA5 lsm). "
                              "When set, activates the slab-land surface tile "
                              "with the land fraction from this file.")
+    parser.add_argument("--land-fraction-source", type=str,
+                        default="topography",
+                        choices=("topography", "era5", "zero"),
+                        help="Column land fraction for land model and physics: "
+                             "topography/land-mask (default), the ERA5 "
+                             "land-sea mask (lat-lon only, needs "
+                             "--land-fraction-era5-zarr), or zero (lat-lon only).")
+    parser.add_argument("--land-fraction-era5-zarr", type=str, default="",
+                        help="ERA5 zarr store for --land-fraction-source era5.")
     parser.add_argument("--albedo-land-file", type=str, default="",
                         help="Static land-albedo NetCDF (e.g. ICON-extpar ALB). "
                              "When set (with --land-mask-file), overrides the "
@@ -3020,6 +3029,8 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         topography=args.topography,
         topo_smoothing=args.topo_smoothing,
         land_mask_path=args.land_mask_file,
+        land_fraction_source=args.land_fraction_source,
+        land_fraction_era5_zarr=args.land_fraction_era5_zarr,
         use_multilayer_land=args.use_multilayer_land,
         land_update_seconds=args.land_update_seconds,
         multilayer_n_layers=args.multilayer_n_layers,

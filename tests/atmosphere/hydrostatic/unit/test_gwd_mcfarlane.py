@@ -34,6 +34,7 @@ def test_fcrit2_couples_launch_cap_and_saturation():
               dt=600.0)
     kw["h_topo_col"] = h_topo
     kw["p_ref_half"] = p_half[0]
+    kw["land_frac_col"] = jnp.ones(ncol)    # all land (lf = 1: unscaled drag)
     out1 = mcfarlane_gwd(config=McFarlaneConfig(fcrit2=1.0), **kw)
     outh = mcfarlane_gwd(config=McFarlaneConfig(fcrit2=0.5), **kw)
     du1, duh = out1.du_dt, outh.du_dt

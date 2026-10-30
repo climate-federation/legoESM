@@ -94,6 +94,9 @@ class SCMGrid(NamedTuple):
     grid_lat: jax.Array  # (1, 1, 1) [rad]
     grid_lon: jax.Array  # (1, 1, 1) [rad]
     radius: float
+    #: land fraction [0-1] the case declares for the column; None =
+    #: undeclared (land-scaled schemes such as CAM6 McFarlane then refuse)
+    land_frac: jax.Array | None = None
 
     @property
     def grid_n_columns(self) -> int:
@@ -104,11 +107,17 @@ class SCMGrid(NamedTuple):
         return (1, 1, 1)
 
 
-def make_scm_grid(latitude_deg: float, longitude_deg: float = 0.0) -> SCMGrid:
-    """Build a single-column grid at the given latitude/longitude."""
+def make_scm_grid(latitude_deg: float, longitude_deg: float = 0.0,
+                  land_frac: float | None = None) -> SCMGrid:
+    """Build a single-column grid at the given latitude/longitude.
+
+    ``land_frac`` is the column's land fraction, declared by the case;
+    ``None`` leaves it undeclared."""
     lat = jnp.asarray([[[jnp.deg2rad(latitude_deg)]]])
     lon = jnp.asarray([[[jnp.deg2rad(longitude_deg)]]])
-    return SCMGrid(grid_lat=lat, grid_lon=lon, radius=constants.R_earth)
+    lf = None if land_frac is None else jnp.full((1, 1, 1), land_frac)
+    return SCMGrid(grid_lat=lat, grid_lon=lon, radius=constants.R_earth,
+                   land_frac=lf)
 
 
 def make_column_state(
@@ -826,6 +835,7 @@ class SingleColumnModel:
         phis: float = 0.0,
         latitude_deg: float = 0.0,
         longitude_deg: float = 0.0,
+        land_frac: float | None = None,
         sigma_top: float = 0.01,
         prng_seed: int = 0,
         dtype=None,
@@ -908,7 +918,7 @@ class SingleColumnModel:
         cls._validate_prescribed_fluxes_no_double_count(
             physics_config, forcing,
         )
-        grid = make_scm_grid(latitude_deg, longitude_deg)
+        grid = make_scm_grid(latitude_deg, longitude_deg, land_frac)
         sigma_coord = create_sigma_coordinate(nlev, sigma_top=sigma_top, dtype=dtype)
 
         needs_moist = (
