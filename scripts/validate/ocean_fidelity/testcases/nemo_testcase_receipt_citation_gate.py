@@ -11333,7 +11333,6 @@ _repin('tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:1-932', [
 # the O6 kernels).  Citations of that code resolve at the last commit that had it.
 _D177_PARENT = "6c53813384"
 
-
 def _pin_at(key: str, commit: str) -> None:
     value = CITATION_MAP[key]
     CITATION_MAP[key] = ({**value, "at": commit} if isinstance(value, dict)
@@ -11346,8 +11345,6 @@ for _key in (
     'packages/ice/legoesm/ice/ridging.py:84-100',
     'tests/ice/fidelity/test_si3_jpl1_ridging.py:221-250',
     'tests/ice/unit/test_si3_o6_rdgrft_cor.py:912',
-    'packages/ice/legoesm/ice/__init__.py:199-225',
-    'packages/ice/legoesm/ice/__init__.py:227-251',
     'packages/ice/legoesm/ice/ridging.py:1245',
     'packages/ice/legoesm/ice/ridging.py:1015',
     'packages/ice/legoesm/ice/ridging.py:1088',
@@ -11594,6 +11591,29 @@ CITATION_MAP.update({
         1170,
     ],
 })
+# The composed O6/O8--O16 tree moves source below citations that describe each
+# side's reviewed pre-rebase tree.  Keep those historical claims line-exact at
+# the commit where they were reviewed; the current production anchors added by
+# the other rung remain live and are audited independently.
+_REVIEWED_O6 = "7441c9f79cc86182d71ab2cefde5a680071f2039"
+_REBASE_LANE = "0d339a87e5c1d718a0b9aa4bb49f8fb8788562be"
+for _key in (
+    'packages/ice/legoesm/ice/itd.py:993',
+    'packages/ice/legoesm/ice/itd.py:932',
+    'packages/ice/legoesm/ice/itd.py:950',
+    'packages/ice/legoesm/ice/si3_orca2_state.py:3112',
+    'packages/ice/legoesm/ice/si3_orca2_state.py:3170',
+):
+    _pin_at(_key, _REVIEWED_O6)
+
+for _key in (
+    'packages/ice/legoesm/ice/__init__.py:201-227',
+    'scripts/validate/ocean_fidelity/testcases/nemo_testcase_receipt_citation_gate.py:10272-10309',
+    'packages/ice/legoesm/ice/ridging.py:422-423,459-559',
+    'packages/ice/legoesm/ice/__init__.py:266-295',
+    'packages/ice/legoesm/ice/__init__.py:298-321',
+):
+    _pin_at(_key, _REBASE_LANE)
 
 UNAUDITED_ROUNDS = ("1-24 -- hand-checked only; their citations are not in "
                     "CITATION_MAP and this gate does not read them")

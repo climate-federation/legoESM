@@ -1007,6 +1007,52 @@ def test_parent_vs_current_shared_ridging_callers():
         np.testing.assert_array_equal(_bits(gen_c[k]), _bits(gen_p[k]))
 
 
+def test_parent_vs_current_shared_ridging_three_input_gradients():
+    """Shared ridging state and gradients in (area, thickness, closing) keep every bit."""
+    from legoesm.ice import ridging as cur
+
+    par = _load_parent()["legoesm.ice.ridging"]
+    rng = np.random.default_rng(19)
+    area = jnp.asarray(rng.uniform(0.05, 0.3, (2, 2, 5)), dtype=jnp.float64)
+    thickness = jnp.asarray(
+        np.sort(rng.uniform(0.1, 4.0, (2, 2, 5)), axis=-1), dtype=jnp.float64
+    )
+    closing = jnp.asarray(rng.uniform(1.0e-7, 4.0e-7, (2, 2)), dtype=jnp.float64)
+    snow = area * thickness * 0.2
+    salinity = jnp.full((2, 2, 5), 6.0, dtype=jnp.float64)
+    ponds = area * 0.01
+
+    def run(module, a, h, c):
+        return module.apply_ridging(
+            a, h, snow, salinity, c, 5, RDT, V_pond_cat=ponds
+        )
+
+    current = run(cur, area, thickness, closing)
+    parent = run(par, area, thickness, closing)
+    assert sorted(current) == sorted(parent)
+    for name in current:
+        np.testing.assert_array_equal(_bits(current[name]), _bits(parent[name]))
+
+    keys = tuple(sorted(current))
+
+    def loss(module, a, h, c):
+        out = run(module, a, h, c)
+        return sum((index + 1.0) * jnp.sum(out[name])
+                   for index, name in enumerate(keys))
+
+    current_grad = jax.grad(
+        lambda a, h, c: loss(cur, a, h, c), argnums=(0, 1, 2)
+    )(area, thickness, closing)
+    parent_grad = jax.grad(
+        lambda a, h, c: loss(par, a, h, c), argnums=(0, 1, 2)
+    )(area, thickness, closing)
+    for current_input_grad, parent_input_grad in zip(current_grad, parent_grad):
+        assert np.all(np.isfinite(current_input_grad))
+        np.testing.assert_array_equal(
+            _bits(current_input_grad), _bits(parent_input_grad)
+        )
+
+
 @pytest.mark.slow
 @pytest.mark.skipif(not _RHEO_ROOT.exists(), reason="lane-3 ICE_RHEO record absent")
 def test_lane3_rheo_card_merge_parent_vs_current_bit_identical():

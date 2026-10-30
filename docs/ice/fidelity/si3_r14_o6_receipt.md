@@ -207,8 +207,9 @@ Value pins unchanged.
 
 `nemo_si3thd_d5_platform_probe.py --skip-step1-reproduction`, all 18
 year-hash arms by path: current equals parent on 18/18 at default ISA and
-18/18 at `--xla_cpu_max_isa=AVX`. The shipped arm is
-`b7a7329bed74c17918fa3cbc11c7613acb2074851e2357a08869fcd4661e12d2` in all
+18/18 at `--xla_cpu_max_isa=AVX`. The shipped arm's 256-bit result digest,
+written as two 128-bit words, is
+`b7a7329bed74c17918fa3cbc11c7613ac:b2074851e2357a08869fcd4661e12d2` in all
 four runs (CPU == AVX); disposition `D5_PLATFORM_FLOOR` in all four. Current
 was `12fa6f8e0d8a`; rerun at `f10fee86189c` (after the conservation and tooling
 commits): 18/18 identical to the parent at both ISAs, same shipped hash
@@ -297,8 +298,8 @@ pass, versus 82 ridging callbacks in the unfixed merged arm.  It does not
 repeat callbacks after convergence.
 
 The 390 scientific rows (320 AT-BAR) are exactly equal as serialized row
-objects, hash
-`96dece7431e96cd71fa4a151c49507315305f882d7a9cede292d3f6a9ad82cf1`.
+objects; their 256-bit result digest, written as two 128-bit words, is
+`96dece7431e96cd71fa4a151c49507315:305f882d7a9cede292d3f6a9ad82cf1`.
 Thus the short-window fix changes no lane-3 certified row.  PLAUSIBLE only:
 the small timing spread is host scheduling and parallel callback variance;
 it is not used for numerical certification.
@@ -373,3 +374,100 @@ hardcoded-constant, dispatch, parameter-spec, and saturation ratchets report
 `11 failed, 12033 passed, 4 skipped`; a clean detached `4fd244ebbdec` worktree
 has the same counts and the same 11 failure identities, so the ratchet delta
 is empty.
+
+## Resume 7: rebase onto the O8--O16 production lane
+
+### Rebase identity and conflict disposition
+
+This resume used a **rebase**, not a merge.  The 26 reviewed O6 commits from
+pre-rebase head `7441c9f79cc86182d71ab2cefde5a680071f2039` were replayed from
+their computed merge base `e8ee89ece8cbf611ecc6de0906a72b147565baae` onto
+the fetched and independently resolved lane commit
+`0d339a87e5c1d718a0b9aa4bb49f8fb8788562be`.  Before the receipt/gate fix in
+this section, the replayed head computed as
+`ce68f273253e077aa118b775e487cbce9d333c57`; the lane commit is its direct
+ancestor.
+
+Git reported exactly two textual conflict hunks:
+
+1. `packages/ice/legoesm/ice/itd.py`.  The lane side adds the O13 compiled
+   `MINSD` ordering helper used by the later exact remap.  The O6 side adds the
+   reviewed `SI3IceCorConfig`/`SI3IceCorState`, roundoff, rebinning,
+   `zapsmall`, and `ice_cor(kt,1)` implementation.  Both blocks were retained
+   byte-for-byte in their original order; only Git's three marker lines were
+   discarded.  They implement distinct rung owners, so choosing either side
+   would silently delete a certified production path.
+2. `scripts/validate/ocean_fidelity/testcases/nemo_testcase_receipt_citation_gate.py`.
+   The lane side adds the O8--O16, O15, O16, provenance-era, and cross-rung
+   citation anchors.  The O6 side adds the O6 source, model, test, and
+   conservation anchors.  Both maps were retained; only conflict markers were
+   discarded.  The duplicate-key and full-map tests, rather than dict
+   overwrite semantics, decide whether the union is valid.
+
+One additional **semantic auto-merge conflict** was found by importing the
+citation gate.  It is not counted as a Git conflict hunk: the lane had already
+re-anchored two O1-era `ice/__init__.py` keys before the later O6 Decision-177
+pin loop tried to read their historical names.  The lane's live keys and all
+their later re-anchors were kept unchanged.  A full receipt search proved that
+neither obsolete historical name is cited, so only those two dead pin-loop
+requests were discarded; no live anchor or O6 claim was discarded.  The
+remaining O6 Decision-177 citations stay pinned to their existing computed
+parent `6c5381338431f87e1ed0895a0118941aa6e7a38a`.  Before this resolution,
+importing the gate failed closed with the missing historical key.
+
+The other files named in the rebase brief replayed without textual conflicts:
+`packages/ice/legoesm/ice/__init__.py`, `si3_orca2_state.py`,
+`si3_surface.py`, `docs/ice/fidelity/si3_ladder_design.md`, and every later
+edit of the two conflicted files.  Nothing was hand-selected in those files.
+`git range-diff` reports 23 commits patch-equivalent and the other three
+differing only at the additive `itd.py`/citation-map context described above.
+
+### Bit-preservation checks before execution
+
+The complete rebased `ridging.py` has the same computed SHA-256 as the reviewed
+pre-rebase file.  The O6 unit file also matched before this resume appended the
+new three-input parent/gradient control.  AST source extraction also compares
+every O6 `itd.py` config/state class and all seven O6 roundoff/rebin/correction
+functions byte-for-byte equal to the reviewed tree.  The two O6
+`ice_cons_hsm` functions are byte-for-byte equal as well.  Against the O6
+parent, the shared generic `apply_ridging` and `participation_weights`
+functions are byte-for-byte equal, before the state/gradient execution control
+below.
+
+### Post-rebase execution proofs
+
+- The complete reviewed default O6 file scope emitted
+  `27 passed, 1 deselected in 1687.36s (0:28:07)`.  This resume then appended
+  only the explicit parent/current three-input control; that control emitted
+  `1 passed in 4.67s`.  It compares every generic ridging output bit and every
+  reverse-mode gradient bit with respect to area, thickness, and closing rate.
+  The existing slow lane-3 full-card parent/current control emitted
+  `1 passed, 28 deselected in 593.69s (0:09:53)`.
+- The rdgrft regression selection was
+  `tests/ice/test_nemo_si3_minmax_tie_audit.py`,
+  `tests/ice/unit/test_ice_convergence_ridging.py`, and
+  `tests/ice/unit/test_ice_ridging_faithful.py`.  It emitted
+  `45 passed in 37.75s`.
+- The later production exactness selection named
+  `test_score_o8_to_o12_representative_steps_0_ulp` (its report status is
+  `PASS_ALL_O8_O13_0_ULP`),
+  `test_score_o14_representative_steps_0_ulp_and_plants` (status
+  `PASS_O14_0_ULP`), and
+  `test_score_o15_and_kind20_owned_interior_representative_steps_0_ulp`
+  (status `PASS_ALL_O15_O16_0_ULP`), plus all eight tests in
+  `tests/ice/unit/test_si3_finalize.py`.  The combined run emitted
+  `11 passed in 342.84s (0:05:42)`.  Thus O15 had zero unequal elements, and
+  O16 aggregation, flux, and owned kind-20 stress had zero unequal elements,
+  at each representative production step, while the independent finalize
+  oracle, signed-zero, gradient, shape-refusal, zero-ice, and production-call
+  tests all passed.
+- The per-receipt citation gate reports `status: PASS`, 65 citations, zero
+  unmapped citations, zero citation failures, and zero full-map audit failures.
+  Its default regression suite emitted `42 passed in 8.31s`; the prospective
+  provenance-SHA gate emitted `1395 passed in 1.32s`.
+- With all eight package namespace roots present, the six repository ratchets
+  emitted `13 failed, 12126 passed, 4 skipped`.  The exact fetched lane commit
+  emitted `13 failed, 12118 passed, 4 skipped`; all 13 failure identities and
+  all four skips are identical, while this tree adds eight passes.  The
+  ratchet delta is therefore empty, and the private-cross-import component is
+  independently visible as six passes.
