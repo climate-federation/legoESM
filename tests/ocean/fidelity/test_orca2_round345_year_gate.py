@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
 import shlex
@@ -475,7 +476,7 @@ def test_round345_document_file_shas_rehash(tmp_path: Path) -> None:
     perturbed.mkdir()
     shutil.copy2(baseline / ulp_gate.DOMAIN_FILE, perturbed / ulp_gate.DOMAIN_FILE)
     ulp_gate.perturb_day1_restart_pair(perturbed, baseline)
-    expected = {
+    acquisition_expected = {
         "835f03b99a3c96e80d23f35c415d099fde292678ae30572e9c5412be4b67e16d":
             baseline / "nemo",
         "3fbed2281e66f7d51cd34247e799d1b76c8a102d36d5b64c0a3b80aba56dd2e3":
@@ -487,6 +488,25 @@ def test_round345_document_file_shas_rehash(tmp_path: Path) -> None:
         "0279bb4021ef1b557e178ef01b5c4cac732479102404871b557b984433fff8cf":
             perturbed / "ORCA2_00000008_restart_0001.nc",
     }
+    phase3 = Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3")
+    resume7 = phase3 / "si3_rounds/orca2_r345/year1_envelope_metrics"
+    receipt_expected = {
+        **acquisition_expected,
+        "e98db5c288964138ac97ae9d80444d8f83e14d24bfa3607b488f084c8077d494":
+            phase3 / "orca2_rounds/round345/s4_year/round345_s4_year_sst_ulp_admission.json",
+        "6be9341fea3d89edbf735661e0b5e7bdd7fc72faa4c3b08efee3a30a1ccf5ac7":
+            resume7 / "round342_s4_candidate_vs_nemo_metrics.json",
+        "d191184fab8e4de011b9ee691dcad21c43c115a1f58dea04cbb78a6184509640":
+            resume7 / "round342_s4_nemo_twin_b_vs_a_metrics.json",
+        "a14601770432d3480743f890b22145d03c91ca1dc1a92830fa3de94edd8383b0":
+            resume7 / "decision188_verdict.json",
+        "ca74a5a05f13d0c99e3286cdb7c1be1e18ef972514433dd85bbbe94c76157cc2":
+            resume7 / "eval.log",
+        "7ec864d4da7fb28a67671ab895405e43a00124e5ef5ed8a497b1d1ccbb4c85ec":
+            phase3 / "si3_rounds/orca2_r342/year1_metrics_comparison/round342_s4_candidate_vs_nemo_metrics.json",
+        "26cf06800b1a7e08535722aa83540ad2f415a5ce5ac4d415f84303db1b758308":
+            phase3 / "orca2x_rounds/round1/pilot/metrics/pilot_metrics.json",
+    }
     documents = (
         repo / "docs/ocean/fidelity/testcases" /
         "PREREG_nemo_testcases_l4_orca2_round345_year_comparison_gate.md",
@@ -494,7 +514,56 @@ def test_round345_document_file_shas_rehash(tmp_path: Path) -> None:
         "nemo_testcases_l4_orca2_round345_year_comparison_gate_receipt.md",
     )
     for document in documents:
+        expected = (
+            acquisition_expected
+            if document.name.startswith("PREREG_")
+            else receipt_expected
+        )
         cited = set(re.findall(r"`([0-9a-f]{64})`", document.read_text(encoding="utf-8")))
         assert cited == set(expected), (document, cited)
         for digest in cited:
             assert hashlib.sha256(expected[digest].read_bytes()).hexdigest() == digest
+
+
+def test_round345_real_decision188_artifact_recomputes_exactly() -> None:
+    phase3 = Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3")
+    evidence = phase3 / "si3_rounds/orca2_r345/year1_envelope_metrics"
+    candidate = json.loads(
+        (evidence / "round342_s4_candidate_vs_nemo_metrics.json").read_text()
+    )
+    envelope = json.loads(
+        (evidence / "round342_s4_nemo_twin_b_vs_a_metrics.json").read_text()
+    )
+    admission = json.loads(
+        (
+            phase3
+            / "orca2_rounds/round345/s4_year/round345_s4_year_sst_ulp_admission.json"
+        ).read_text()
+    )
+    recorded = json.loads((evidence / "decision188_verdict.json").read_text())
+
+    recomputed = decision188.evaluate_decision188(candidate, envelope, admission)
+    assert recomputed == recorded
+    assert recomputed["verdict"] == "PASS"
+    assert recomputed["months_evaluated"] == 12
+    assert recomputed["nonzero_envelope_months"] == 12
+    assert all(month["verdict"] == "PASS" for month in recomputed["months"])
+
+
+def test_round345_candidate_science_payload_is_byte_stable_after_provenance_strip() -> None:
+    phase3 = Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3")
+    old_path = (
+        phase3
+        / "si3_rounds/orca2_r342/year1_metrics_comparison/round342_s4_candidate_vs_nemo_metrics.json"
+    )
+    new_path = (
+        phase3
+        / "si3_rounds/orca2_r345/year1_envelope_metrics/round342_s4_candidate_vs_nemo_metrics.json"
+    )
+    assert old_path.read_bytes() != new_path.read_bytes()
+    old = json.loads(old_path.read_text())
+    new = json.loads(new_path.read_text())
+    for payload in (old, new):
+        payload.pop("daily_sst_rms_curve_figure")
+        payload.pop("worktree")
+    assert json.dumps(old, sort_keys=True).encode() == json.dumps(new, sort_keys=True).encode()

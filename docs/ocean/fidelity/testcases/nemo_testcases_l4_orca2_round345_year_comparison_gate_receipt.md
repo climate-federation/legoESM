@@ -11,9 +11,8 @@ Admitted arm-A day-1 restart SHA-256 values:
 Deterministic perturbed day-1 restart SHA-256 values:
 `bb25179365e776ae73e6ead9d2bad42e222f2094f687c22ede3b0eb3bcae1f01` and
 `0279bb4021ef1b557e178ef01b5c4cac732479102404871b557b984433fff8cf`.
-Disposition: **STOPPED_FOR_RECORD** — both continuations completed with `STOP
-0` and are retained under `round345/s4_year/refused/`; the operator must run the
-reviewed re-admission command after this comparator repair lands.
+Disposition: **PASS_DECISION_188** — both real continuations are admitted;
+the year comparison passes all 12 months with a nonzero envelope in all 12.
 
 ## Result
 
@@ -27,8 +26,9 @@ data for every common variable in both ranks at all 364 continuation-output
 restart pairs. The original ORCA2X 30-day schema remains a single partial-month
 input.
 
-No scientific year verdict is claimed because the completed pair is not yet
-admitted or scored. This repair did not run NEMO and killed no process.
+Resume 7 closes the scientific year verdict: **PASS**, 12/12 months, with a
+strictly positive KE envelope in every evaluated month. This work did not run
+NEMO and killed no process.
 
 ## Corrected NEMO perturbation
 
@@ -197,6 +197,152 @@ plant exits 1. The full citation-gate suite passes 20/20. The private-import
 ratchet passes 5/6; its sole failure is the pre-existing missing-sentinel census
 in five unrelated package files, and this resume changes no package file.
 
+## Resume 7: admitted envelope and Decision-188 result
+
+### Exact commands and inputs
+
+All Python commands that can reach the reporter import graph were pinned to CPU.
+The operator admitted the retained real pair with:
+
+```bash
+scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round345_sst_ulp_acquisition/run.sh --admit-existing /data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round345/s4_year/refused/20261030T023228Z_orca2_k0_year1_sst_plus_1ulp_np2
+```
+
+It returned zero and promoted both arms. The metric command was:
+
+```bash
+CUDA_VISIBLE_DEVICES="" JAX_PLATFORMS=cpu .venv/bin/python scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round342_s4_year_metrics.py --nemo-root /data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round342/s4_year/orca2_k0_year1_a_np2 --candidate-root /data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/orca2_r342/legoesm_year1_2920step --nemo-twin-b-root /data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round345/s4_year/orca2_k0_year1_sst_plus_1ulp_np2 --output-dir /data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/orca2_r345/year1_envelope_metrics
+```
+
+The Decision-188 command was:
+
+```bash
+CUDA_VISIBLE_DEVICES="" JAX_PLATFORMS=cpu .venv/bin/python scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round345_decision188_gate.py --candidate-metrics /data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/orca2_r345/year1_envelope_metrics/round342_s4_candidate_vs_nemo_metrics.json --envelope-metrics /data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/orca2_r345/year1_envelope_metrics/round342_s4_nemo_twin_b_vs_a_metrics.json --envelope-admission /data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round345/s4_year/round345_s4_year_sst_ulp_admission.json --output /data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/orca2_r345/year1_envelope_metrics/decision188_verdict.json
+```
+
+Inputs were the admitted round-342 arm A, the completed round-342 legoESM K0
+year, the admitted round-345 one-ULP NEMO continuation, and the paired
+round-345 admission JSON named by those commands. The admission status is
+`PASS_R345_S4_YEAR_SST_PLUS_ONE_ULP_ARM`: 16,433 selected wet surface `tn`
+values changed by exactly one float64 ULP toward positive infinity; all
+unselected restart values and metadata are bit-identical; all 59 deck,
+forcing, and damping inputs match arm A; the binary matches arm A; and the
+unperturbed continuation control compares 728 files with zero unequal common
+variable arrays.
+
+### Computed provenance
+
+The following values were computed with `sha256sum -- <path>` rather than
+copied from prose:
+
+- `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round345/s4_year/round345_s4_year_sst_ulp_admission.json` SHA-256 `e98db5c288964138ac97ae9d80444d8f83e14d24bfa3607b488f084c8077d494`.
+- `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/orca2_r345/year1_envelope_metrics/round342_s4_candidate_vs_nemo_metrics.json` SHA-256 `6be9341fea3d89edbf735661e0b5e7bdd7fc72faa4c3b08efee3a30a1ccf5ac7`.
+- `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/orca2_r345/year1_envelope_metrics/round342_s4_nemo_twin_b_vs_a_metrics.json` SHA-256 `d191184fab8e4de011b9ee691dcad21c43c115a1f58dea04cbb78a6184509640`.
+- `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/orca2_r345/year1_envelope_metrics/decision188_verdict.json` SHA-256 `a14601770432d3480743f890b22145d03c91ca1dc1a92830fa3de94edd8383b0`.
+- `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/orca2_r345/year1_envelope_metrics/eval.log` SHA-256 `ca74a5a05f13d0c99e3286cdb7c1be1e18ef972514433dd85bbbe94c76157cc2`.
+- `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/orca2_r345/year1_envelope_metrics/gate.log` SHA-256 `a14601770432d3480743f890b22145d03c91ca1dc1a92830fa3de94edd8383b0`.
+- `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/orca2_r342/year1_metrics_comparison/round342_s4_candidate_vs_nemo_metrics.json` SHA-256 `7ec864d4da7fb28a67671ab895405e43a00124e5ef5ed8a497b1d1ccbb4c85ec`.
+- `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2x_rounds/round1/pilot/metrics/pilot_metrics.json` SHA-256 `26cf06800b1a7e08535722aa83540ad2f415a5ce5ac4d415f84303db1b758308`.
+
+The whole recomputed candidate JSON is **not** byte-identical to the earlier
+round-342 JSON: `cmp -s` returns 1. The only differences are the regenerated
+figure path/digest and the worktree commit/root provenance. After deleting
+exactly `daily_sst_rms_curve_figure` and `worktree` from both JSON objects and
+sorting with `jq -S`, `cmp -s` returns zero. Thus the scientific payload is
+byte-identical; the complete provenance-bearing files are correctly different.
+
+Full values computed with `git rev-parse` are: reporter execution HEAD
+`d2ba162780b9f2b48eaeb640d9a524d8a5c0191d`, imported round-342 tool HEAD
+`c983dc345a0b30c3ac5287d796986a069d981289`, post-rebase lane base
+`bf3ad4b42442900686648d9c432ed4e247e57663`, and post-rebase pre-receipt HEAD
+`02c37e14463f0d84883784131e418555204ec435`.
+
+### Decision-188 month tables
+
+Verdict: **PASS**, 12/12 complete months, and a strictly positive KE envelope
+in all 12. `C/E/bar` means legoESM candidate / one-ULP NEMO envelope / frozen
+option-1 bar. Under-ice SST/SSS are reporter diagnostics but are not registered
+Decision-188 gate rows.
+
+| Month | KE candidate rel RMS | KE envelope rel RMS | KE bar | SST candidate RMS (K) | SST envelope RMS (K) | SST bar (K) |
+|---|---:|---:|---:|---:|---:|---:|
+| `M01_Jan` | `0.0000e+00` | `1.8632e-10` | `1.0000e-02` | `0.0000e+00` | `8.8920e-11` | `1.0000e-02` |
+| `M02_Feb` | `9.5620e-11` | `2.8232e-10` | `1.0000e-02` | `5.4642e-11` | `4.3331e-10` | `1.0000e-02` |
+| `M03_Mar` | `8.1798e-10` | `1.2008e-09` | `1.0000e-02` | `2.1069e-10` | `4.5284e-10` | `1.0000e-02` |
+| `M04_Apr` | `3.2995e-09` | `6.4596e-09` | `1.0000e-02` | `9.2933e-08` | `1.2333e-09` | `1.0000e-02` |
+| `M05_May` | `2.5481e-09` | `1.3476e-08` | `1.0000e-02` | `7.2534e-08` | `2.1616e-09` | `1.0000e-02` |
+| `M06_Jun` | `9.7334e-09` | `4.8931e-08` | `1.0000e-02` | `3.2197e-08` | `5.9077e-09` | `1.0000e-02` |
+| `M07_Jul` | `1.1447e-07` | `3.7440e-07` | `1.0000e-02` | `2.2401e-08` | `2.6684e-08` | `1.0000e-02` |
+| `M08_Aug` | `7.6776e-07` | `2.6294e-06` | `1.0000e-02` | `7.2797e-08` | `1.9897e-07` | `1.0000e-02` |
+| `M09_Sep` | `2.6068e-05` | `5.4988e-03` | `1.6496e-02` | `1.2176e-06` | `3.5322e-04` | `1.0000e-02` |
+| `M10_Oct` | `1.4613e-03` | `3.3248e-02` | `9.9745e-02` | `7.0776e-05` | `1.9268e-03` | `1.0000e-02` |
+| `M11_Nov` | `1.2823e-02` | `3.4522e-02` | `1.0357e-01` | `8.1962e-04` | `3.0700e-03` | `1.0000e-02` |
+| `M12_Dec` | `3.1441e-02` | `4.6904e-02` | `1.4071e-01` | `1.8368e-03` | `4.5631e-03` | `1.0000e-02` |
+
+| Month | T 0-100m C/E/bar (K) | T 100-1000m C/E/bar (K) | T >1000m C/E/bar (K) |
+|---|---:|---:|---:|
+| `M01_Jan` | `0.0000e+00 / 1.1556e-10 / 1.0000e-02` | `0.0000e+00 / 5.3429e-11 / 1.0000e-02` | `0.0000e+00 / 3.8415e-13 / 1.0000e-02` |
+| `M02_Feb` | `6.7943e-11 / 4.8057e-10 / 1.0000e-02` | `3.5125e-11 / 1.6903e-10 / 1.0000e-02` | `1.9818e-13 / 1.0794e-12 / 1.0000e-02` |
+| `M03_Mar` | `2.4682e-10 / 5.8958e-10 / 1.0000e-02` | `1.4116e-10 / 2.1240e-10 / 1.0000e-02` | `1.1338e-12 / 3.3653e-12 / 1.0000e-02` |
+| `M04_Apr` | `7.7286e-08 / 3.4558e-09 / 1.0000e-02` | `3.9743e-08 / 3.0074e-10 / 1.0000e-02` | `3.0567e-11 / 7.9998e-12 / 1.0000e-02` |
+| `M05_May` | `6.6198e-08 / 6.8736e-09 / 1.0000e-02` | `2.5164e-08 / 1.1327e-09 / 1.0000e-02` | `9.7508e-11 / 2.7710e-11 / 1.0000e-02` |
+| `M06_Jun` | `3.1558e-08 / 2.5346e-08 / 1.0000e-02` | `1.4221e-08 / 9.3774e-09 / 1.0000e-02` | `9.3142e-11 / 1.6842e-10 / 1.0000e-02` |
+| `M07_Jul` | `3.9706e-08 / 1.1890e-07 / 1.0000e-02` | `1.5554e-08 / 3.0991e-08 / 1.0000e-02` | `1.7949e-10 / 6.4499e-10 / 1.0000e-02` |
+| `M08_Aug` | `2.7153e-07 / 2.7842e-06 / 1.0000e-02` | `7.2004e-08 / 6.9773e-07 / 1.0000e-02` | `9.0244e-10 / 6.7089e-09 / 1.0000e-02` |
+| `M09_Sep` | `2.5010e-06 / 4.7883e-04 / 1.0000e-02` | `1.0038e-06 / 9.5081e-05 / 1.0000e-02` | `1.7161e-08 / 3.0627e-06 / 1.0000e-02` |
+| `M10_Oct` | `1.1113e-04 / 1.9645e-03 / 1.0000e-02` | `3.8344e-05 / 4.6575e-04 / 1.0000e-02` | `6.7040e-07 / 1.3231e-05 / 1.0000e-02` |
+| `M11_Nov` | `7.4306e-04 / 3.2809e-03 / 1.0000e-02` | `2.3959e-04 / 1.1762e-03 / 1.0000e-02` | `5.2469e-06 / 2.5080e-05 / 1.0000e-02` |
+| `M12_Dec` | `1.7365e-03 / 4.5588e-03 / 1.0000e-02` | `5.7897e-04 / 1.7501e-03 / 1.0000e-02` | `1.2812e-05 / 3.8155e-05 / 1.0000e-02` |
+
+| Month | SSS C/E/bar (psu) | S 0-100m C/E/bar (psu) | S 100-1000m C/E/bar (psu) | S >1000m C/E/bar (psu) |
+|---|---:|---:|---:|---:|
+| `M01_Jan` | `0.0000e+00 / 6.8828e-11 / 2.0000e-03` | `0.0000e+00 / 5.8476e-11 / 2.0000e-03` | `0.0000e+00 / 8.9487e-12 / 2.0000e-03` | `0.0000e+00 / 4.8381e-14 / 2.0000e-03` |
+| `M02_Feb` | `2.5010e-11 / 1.1488e-10 / 2.0000e-03` | `2.1400e-11 / 1.0567e-10 / 2.0000e-03` | `6.5279e-12 / 2.7211e-11 / 2.0000e-03` | `2.3595e-14 / 9.7905e-14 / 2.0000e-03` |
+| `M03_Mar` | `8.9433e-11 / 1.1638e-10 / 2.0000e-03` | `7.3257e-11 / 1.0602e-10 / 2.0000e-03` | `2.4882e-11 / 3.4433e-11 / 2.0000e-03` | `1.2945e-13 / 1.8958e-13 / 2.0000e-03` |
+| `M04_Apr` | `4.5327e-09 / 3.5089e-10 / 2.0000e-03` | `3.5933e-09 / 5.3120e-10 / 2.0000e-03` | `1.4380e-09 / 3.6112e-11 / 2.0000e-03` | `6.3281e-13 / 6.4839e-13 / 2.0000e-03` |
+| `M05_May` | `3.8584e-09 / 8.3422e-10 / 2.0000e-03` | `3.5144e-09 / 8.5858e-10 / 2.0000e-03` | `9.9537e-10 / 7.1081e-11 / 2.0000e-03` | `2.3168e-12 / 1.9396e-12 / 2.0000e-03` |
+| `M06_Jun` | `2.1403e-09 / 1.1387e-09 / 2.0000e-03` | `2.0453e-09 / 2.2715e-09 / 2.0000e-03` | `6.0585e-10 / 7.4226e-10 / 2.0000e-03` | `3.5091e-12 / 5.7000e-12 / 2.0000e-03` |
+| `M07_Jul` | `2.0273e-09 / 3.6650e-09 / 2.0000e-03` | `3.4018e-09 / 9.8268e-09 / 2.0000e-03` | `1.0347e-09 / 2.5272e-09 / 2.0000e-03` | `6.2572e-12 / 2.1206e-11 / 2.0000e-03` |
+| `M08_Aug` | `8.8039e-09 / 2.6979e-08 / 2.0000e-03` | `2.2045e-08 / 6.2435e-07 / 2.0000e-03` | `6.0199e-09 / 7.9964e-08 / 2.0000e-03` | `2.8761e-11 / 1.8783e-10 / 2.0000e-03` |
+| `M09_Sep` | `1.7826e-07 / 2.7968e-05 / 2.0000e-03` | `3.3050e-07 / 3.6094e-05 / 2.0000e-03` | `8.1153e-08 / 5.4990e-06 / 2.0000e-03` | `5.8044e-10 / 1.0558e-07 / 2.0000e-03` |
+| `M10_Oct` | `1.4015e-05 / 1.5586e-04 / 2.0000e-03` | `2.1845e-05 / 1.6193e-04 / 2.0000e-03` | `3.5027e-06 / 2.3368e-05 / 2.0000e-03` | `2.1885e-08 / 4.5088e-07 / 2.0000e-03` |
+| `M11_Nov` | `1.0454e-04 / 2.9473e-04 / 2.0000e-03` | `9.2015e-05 / 3.1090e-04 / 2.0000e-03` | `2.1122e-05 / 7.0412e-05 / 2.0000e-03` | `1.7708e-07 / 8.6912e-07 / 2.0000e-03` |
+| `M12_Dec` | `2.0464e-04 / 4.5864e-04 / 2.0000e-03` | `1.8289e-04 / 4.3029e-04 / 2.0000e-03` | `4.0078e-05 / 9.1877e-05 / 2.0000e-03` | `4.3713e-07 / 1.2935e-06 / 2.0000e-03` |
+
+| Month | SSH C/E/bar (m) | PSI RMS C/E/bar (Sv) | PSI corr C/E/min | Drake abs diff C/E/bar (Sv) | MLD C/E/bar (m) |
+|---|---:|---:|---:|---:|---:|
+| `M01_Jan` | `0.0000e+00 / 4.0477e-12 / 1.0000e-03` | `0.0000e+00 / 3.0155e-10 / 1.0000e-01` | `1.000000000 / 1.000000000 / 0.999` | `0.0000e+00 / 8.3276e-12 / 5.0000e-01` | `0.0000e+00 / 1.6217e-12 / 1.0000e+00` |
+| `M02_Feb` | `2.1439e-12 / 9.0496e-12 / 1.0000e-03` | `1.7408e-10 / 1.2040e-09 / 1.0000e-01` | `1.000000000 / 1.000000000 / 0.999` | `1.3046e-11 / 1.1426e-11 / 5.0000e-01` | `1.0742e-12 / 4.8856e-12 / 1.0000e+00` |
+| `M03_Mar` | `5.7041e-12 / 7.9614e-12 / 1.0000e-03` | `3.9657e-10 / 6.1146e-10 / 1.0000e-01` | `1.000000000 / 1.000000000 / 0.999` | `1.2278e-11 / 1.3017e-11 / 5.0000e-01` | `2.6923e-12 / 4.0003e-12 / 1.0000e+00` |
+| `M04_Apr` | `2.5839e-10 / 4.7845e-11 / 1.0000e-03` | `1.6213e-08 / 3.4110e-09 / 1.0000e-01` | `1.000000000 / 1.000000000 / 0.999` | `3.5183e-10 / 2.3320e-10 / 5.0000e-01` | `5.6797e-11 / 1.8938e-11 / 1.0000e+00` |
+| `M05_May` | `5.1005e-10 / 5.1188e-11 / 1.0000e-03` | `1.2448e-08 / 8.3308e-09 / 1.0000e-01` | `1.000000000 / 1.000000000 / 0.999` | `2.9840e-10 / 1.1059e-10 / 5.0000e-01` | `5.2974e-11 / 1.6759e-11 / 1.0000e+00` |
+| `M06_Jun` | `3.9972e-10 / 1.4616e-10 / 1.0000e-03` | `9.2615e-09 / 2.4952e-08 / 1.0000e-01` | `1.000000000 / 1.000000000 / 0.999` | `1.6408e-10 / 1.0638e-10 / 5.0000e-01` | `2.8645e-11 / 8.4624e-12 / 1.0000e+00` |
+| `M07_Jul` | `7.4963e-10 / 7.4250e-10 / 1.0000e-03` | `1.3547e-07 / 1.2362e-07 / 1.0000e-01` | `1.000000000 / 1.000000000 / 0.999` | `1.0764e-08 / 1.2616e-09 / 5.0000e-01` | `3.7524e-10 / 4.1084e-11 / 1.0000e+00` |
+| `M08_Aug` | `1.5256e-09 / 7.3214e-09 / 1.0000e-03` | `1.9063e-07 / 7.6416e-07 / 1.0000e-01` | `1.000000000 / 1.000000000 / 0.999` | `2.2698e-10 / 2.6584e-08 / 5.0000e-01` | `1.1965e-10 / 9.5355e-11 / 1.0000e+00` |
+| `M09_Sep` | `2.8938e-08 / 3.8971e-06 / 1.0000e-03` | `4.3547e-06 / 2.0839e-04 / 1.0000e-01` | `1.000000000 / 1.000000000 / 0.999` | `5.1503e-08 / 6.6768e-07 / 5.0000e-01` | `2.1952e-10 / 3.6437e-02 / 1.0000e+00` |
+| `M10_Oct` | `9.4832e-07 / 1.5137e-05 / 1.0000e-03` | `7.1743e-05 / 1.7883e-03 / 1.0000e-01` | `1.000000000 / 0.999999999 / 0.999` | `2.0399e-06 / 8.9886e-06 / 5.0000e-01` | `3.5275e-02 / 1.7816e-01 / 1.0000e+00` |
+| `M11_Nov` | `6.8366e-06 / 2.8338e-05 / 1.0000e-03` | `7.5224e-04 / 4.3799e-03 / 1.0000e-01` | `1.000000000 / 0.999999996 / 0.999` | `1.8753e-06 / 1.4911e-05 / 5.0000e-01` | `1.2348e-01 / 2.3075e-01 / 1.0000e+00` |
+| `M12_Dec` | `1.6333e-05 / 4.7813e-05 / 1.0000e-03` | `2.6756e-03 / 9.1371e-03 / 1.0000e-01` | `0.999999998 / 0.999999981 / 0.999` | `3.0384e-05 / 8.9517e-05 / 5.0000e-01` | `2.0259e-01 / 3.6758e-01 / 1.0000e+00` |
+
+### Interpretation, ORCA2X pilot, and rebase
+
+- **CONFIRMED:** from September through December, the one-ULP NEMO twin's KE
+  relative RMS and SST RMS both exceed legoESM's. In December, SST RMS is
+  `4.5631e-03 K` (4.6 mK) for the twin versus `1.8368e-03 K` (1.8 mK) for
+  legoESM; KE relative RMS is `4.6904e-02` (4.7%) versus `3.1441e-02` (3.1%).
+- **PLAUSIBLE, not confirmed:** the twin separates faster because the one-ULP
+  perturbation touches all 16,433 wet surface cells simultaneously. No
+  localization or dose-response experiment was run, so this is not causal.
+- **ORCA2X pilot not scored:** the existing 30-day candidate report is
+  `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2x_rounds/round1/pilot/metrics/pilot_metrics.json`
+  with format `orca2x-r1-pilot-metrics-v1`, but no matching ORCA2X perturbed-
+  versus-baseline envelope report of that format exists. That is the missing
+  gate input; substituting the ORCA2 envelope would be a cross-grid confound.
+- **Rebase:** fetched the current ORCA2 lane and rebased the 33-commit round
+  stack from `d2ba162780b9f2b48eaeb640d9a524d8a5c0191d` onto
+  `bf3ad4b42442900686648d9c432ed4e247e57663`. Replayed pre-receipt HEAD is
+  `02c37e14463f0d84883784131e418555204ec435`. Conflict hunks: **none**.
+
 ## Choices and review
 
 - ASKED: option-1 fixed bars; monthly 3x KE envelope with 1% floor; perturb the
@@ -211,7 +357,5 @@ in five unrelated package files, and this resume changes no package file.
 
 ## Open
 
-The operator re-admits the retained pair with the command above. No NEMO rerun
-is needed. After admission, the operator evaluates arm A versus the perturbed
-continuation with the Decision-160 reporter and supplies that report plus the
-paired round-345 admission JSON to the Decision-188 gate.
+Round-345 year gate is closed. The ORCA2X pilot remains unscored until a
+matching ORCA2X perturbation-envelope report exists.
