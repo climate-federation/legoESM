@@ -4937,6 +4937,23 @@ def surface_stress_faces(
     _native_j = getattr(surface_forcing, "tau_j_native", None)
     if (_native_i is None) != (_native_j is None):
         raise ValueError("tau_i_native and tau_j_native must be supplied together")
+    _face_u = getattr(surface_forcing, "tau_u_face", None)
+    _face_v = getattr(surface_forcing, "tau_v_face", None)
+    if (_face_u is None) != (_face_v is None):
+        raise ValueError("tau_u_face and tau_v_face must be supplied together")
+    if _face_u is not None:
+        if (_native_i is not None or _native_u is not None or cell_mask is not None
+                or nemo_fold_vector_sign):
+            raise ValueError("tau_u_face/tau_v_face cannot be combined with "
+                             "the native T-point stress or the NEMO identities")
+        dz_0_T = jnp.asarray(z_coord.dz_ref[0], dtype=u_dtype) * J
+        dz_0_u = interp_cell_to_uface(dz_0_T)
+        (dz_0_v,) = interp_to_v_points_multi((dz_0_T,), grid=grid)
+        if (jnp.shape(_face_u) != jnp.shape(dz_0_u)
+                or jnp.shape(_face_v) != jnp.shape(dz_0_v)):
+            raise ValueError("tau_u_face/tau_v_face must match the u/v face shapes")
+        return (jnp.asarray(_face_u, dtype=u_dtype),
+                jnp.asarray(_face_v, dtype=u_dtype), dz_0_u, dz_0_v)
     if _native_u is not None and _native_i is not None:
         raise ValueError(
             "utau_u_native/vtau_v_native and tau_i_native/tau_j_native "

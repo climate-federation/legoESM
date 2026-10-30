@@ -333,6 +333,15 @@ class OceanSurfaceForcing(NamedTuple):
                                        # attenuation of the lc/etau wave-TKE
                                        # sources (TKEConfig.eice=1; NEMO
                                        # nn_eice).  None ⇒ no attenuation.
+    tau_u_face: object = None          # jnp.ndarray | None [Pa], on-ocean,
+                                       # grid-native stress AT the u faces
+                                       # (n_lat, n_lon+1), and tau_v_face at the
+                                       # v faces (n_lat+1, n_lon): taken as the
+                                       # momentum stress without interpolation
+                                       # (ROMS and CROCO sustr/svstr).  tau_x and
+                                       # tau_y stay the T-point fields of the
+                                       # friction velocity.  Both or neither.
+    tau_v_face: object = None
     tau_i_native: object = None        # jnp.ndarray | None [Pa], on-ocean i
     tau_j_native: object = None        # jnp.ndarray | None [Pa], on-ocean j
     runoff_tracer_content: object = None
