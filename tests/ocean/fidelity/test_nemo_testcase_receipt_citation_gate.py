@@ -286,3 +286,23 @@ def test_orca2_round344_receipt_passes_citation_gate_and_plant_fires():
     assert planted["status"] == "FAIL"
     assert any(row["citation"] == citation for row in planted["failures"])
 
+
+def test_orca2_round348_receipt_passes_citation_gate_and_plant_fires():
+    """The round-348 receipt must pass the citation gate and fail on a plant."""
+    receipt = (
+        gate.REPO
+        / "docs/ocean/fidelity/testcases"
+        / "nemo_testcases_l4_orca2_round348_speed_long_runs_receipt.md"
+    )
+    heading = "# ORCA2 round 348 —"
+    report = gate.run(receipt, heading)
+    assert report["unmapped_citations"] == []
+    assert report["failures"] == []
+    assert report["map_entries_failing_audit"] == []
+    assert all(row["fired"] for row in report["self_test"])
+    assert report["status"] == "PASS"
+
+    citation = "packages/core/legoesm/core/_scalar_libm.c:4-38"
+    planted = gate.run(receipt, heading, plant=citation)
+    assert planted["status"] == "FAIL"
+    assert any(row["citation"] == citation for row in planted["failures"])

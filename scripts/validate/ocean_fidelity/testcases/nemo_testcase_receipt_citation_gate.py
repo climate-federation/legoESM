@@ -2348,6 +2348,14 @@ FILES = {
         REPO / "packages/core/legoesm/core/precision.py"),
     "packages/core/legoesm/core/transcendentals.py": (
         REPO / "packages/core/legoesm/core/transcendentals.py"),
+    "packages/core/legoesm/core/_scalar_libm.c": (
+        REPO / "packages/core/legoesm/core/_scalar_libm.c"),
+    "scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round342_s4_year_driver.py": (
+        REPO / "scripts/validate/ocean_fidelity/orca2_l4/"
+        "nemo_testcase_l4_orca2_round342_s4_year_driver.py"),
+    "scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round348_transcendentals_compare.py": (
+        REPO / "scripts/validate/ocean_fidelity/orca2_l4/"
+        "nemo_testcase_l4_orca2_round348_transcendentals_compare.py"),
     "packages/core/legoesm/core/source_rounding.py": (
         REPO / "packages/core/legoesm/core/source_rounding.py"),
     "packages/ocean/legoesm/ocean/physics/vertical_mixing/config.py": (
@@ -5017,7 +5025,17 @@ CITATION_MAP = {
     'packages/ocean/legoesm/ocean/bulk_flux_omip.py:854-927': ['next_s2: NemoS2Inputs', ('),', 31), 74],
     'packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:2264-2527': [('bbl_aht_m2_s=1000.0,', 2), ('1,', 51), 264],
     'packages/core/legoesm/core/precision.py:117-125': ['def fp64(*, transcendentals: str = "native") -> PrecisionPolicy:', (')', 24), 9],
-    'packages/core/legoesm/core/transcendentals.py:66-98': [('if jax.default_backend() != "cpu":', 1), (')', 38), 33],
+    'packages/core/legoesm/core/transcendentals.py:163-178': ['def _scalar_libm_reference(name: str, values: np.ndarray) -> np.ndarray:', ('return result', 2), 16],
+    'packages/core/legoesm/core/transcendentals.py:217-235': ['def _scalar_libm_binary_reference(', ('return result', 4), 19],
+    # ORCA2 round 348: compiled exact-libm loops and native-vs-libm arm tool.
+    'packages/core/legoesm/core/transcendentals.py:35-117': ['_LIBM_SONAME = "libm.so.6"', 'raise RuntimeError(f"scalar-libm load failed for {path}: {exc}") from exc', 83],
+    'packages/core/legoesm/core/_scalar_libm.c:4-38': ['#define DEFINE_UNARY(NAME)', ('}', 8), 35],
+    'packages/core/legoesm/core/transcendentals.py:145-258': ['def _scalar_libm(name: str, values: np.ndarray) -> np.ndarray:', 'return result, result * value_dot', 114],
+    'scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round342_s4_year_driver.py:229-263': ['def run_standalone_k0_driver(', '"resolved card transcendental mode disagrees with requested mode",', 35],
+    'scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round342_s4_year_driver.py:477-528': ['manifest = {', 'help="Transcendental backend (default: certified libm)",', 52],
+    'scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round348_transcendentals_compare.py:56-185': ['def compare_snapshot_data(', 'return rows', 130],
+    'scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round348_transcendentals_compare.py:229-290': ['def main(argv: list[str] | None = None) -> int:', 'return 0', 62],
+    'packages/core/legoesm/core/transcendentals.py:297-411': ['def exp(value) -> jax.Array:', '__all__ = ("atan", "cos", "exp", "log", "log10", "pow", "sin", "tanh")', 115],
     'packages/core/legoesm/core/precision.py:103-114': [('transcendentals: str = "native"', 1), (')', 22), 12],
     'packages/core/legoesm/core/source_rounding.py:14-35': ['def nemo_source_round(value: jax.Array) -> jax.Array:', 'def nemo_fortran_sign(magnitude: jax.Array, sign_source: jax.Array) -> jax.Array:', 22],
     'scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round343_speed_benchmark.py:781-843': ['def verify_switch_inventory_against_card(', ('}', 10), 63],

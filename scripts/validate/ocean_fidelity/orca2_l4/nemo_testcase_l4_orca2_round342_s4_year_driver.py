@@ -14,13 +14,12 @@ ORCA2X long-run metric card.
 from __future__ import annotations
 
 import argparse
-from datetime import datetime, timezone
 import hashlib
 import json
-import os
-from pathlib import Path
 import sys
 import time
+from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 import jax
@@ -43,10 +42,17 @@ from legoesm.ocean.fidelity.nemo_testcase_recipe import (  # noqa: E402
 )
 from legoesm.ocean.fidelity.provenance import worktree_stamp  # noqa: E402
 from legoesm.ocean.forcing.nemo_surface import NemoSurfaceMeans  # noqa: E402
+
 from scripts.validate.ocean_fidelity.orca2_l4 import (  # noqa: E402
     nemo_testcase_l4_orca2_o1_numerical_gate as o1,
+)
+from scripts.validate.ocean_fidelity.orca2_l4 import (  # noqa: E402
     nemo_testcase_l4_orca2_round1_ladder_gate as ladder,
+)
+from scripts.validate.ocean_fidelity.orca2_l4 import (  # noqa: E402
     nemo_testcase_l4_orca2_round339_common as common,
+)
+from scripts.validate.ocean_fidelity.orca2_l4 import (  # noqa: E402
     nemo_testcase_l4_orca2_round340_standalone_gate as r340_s4,
 )
 
@@ -229,13 +235,18 @@ def run_standalone_k0_driver(
     ice_cover_path: Path = DEFAULT_ICE_COVER_PATH,
     save_stride: int = STEPS_PER_DAY,
     save_steps: tuple[int, ...] = (),
+    transcendentals: str = "libm",
 ) -> dict[str, Any]:
     """Run the production standalone ORCA2 K0 composed card for `steps` steps."""
+    require(
+        transcendentals in ("libm", "native"),
+        f"transcendentals must be 'libm' or 'native', got {transcendentals!r}",
+    )
     jax.config.update("jax_enable_x64", True)
-    set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
+    set_policy(PrecisionPolicy.fp64(transcendentals=transcendentals))
     require(
         jax.config.jax_enable_x64 and jax.default_backend() == "cpu",
-        f"standalone K0 card requires CPU fp64/libm backend, got {jax.default_backend()!r}",
+        f"standalone K0 card requires CPU fp64 backend, got {jax.default_backend()!r}",
     )
     require(1 <= steps <= YEAR_STEPS, f"steps must be in 1..{YEAR_STEPS}, got {steps}")
     require(save_stride > 0, f"save_stride must be positive, got {save_stride}")
@@ -243,6 +254,14 @@ def run_standalone_k0_driver(
 
     t0 = time.monotonic()
     card = bulk.build_nemo_orca2_k0_ocean_card(deck_root)
+    if transcendentals == "native":
+        card = card._replace(
+            ocean=card.ocean._replace(transcendentals="native")
+        )
+    require(
+        card.ocean.transcendentals == transcendentals,
+        "resolved card transcendental mode disagrees with requested mode",
+    )
     require(card.k0 == EXPLICIT_K0_CONFIG,
             f"card.k0 {card.k0!r} != explicit {EXPLICIT_K0_CONFIG!r}")
     bulk.validate_nemo_standalone_k0(card.k0)
@@ -461,6 +480,7 @@ def run_standalone_k0_driver(
         "steps": steps,
         "dt_s": dt_s,
         "save_stride": save_stride,
+        "transcendentals": transcendentals,
         "k0_config": card.k0._asdict(),
         "deck_root": str(deck_root),
         "ice_cover_path": str(ice_cover_path),
@@ -470,7 +490,7 @@ def run_standalone_k0_driver(
         "jax_default_backend": jax.default_backend(),
         "jax_devices": devices,
         "snapshots": saved_snapshots,
-        "completed_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "completed_utc": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "worktree": worktree_stamp(allow_dirty=False),
     }
     manifest_path = output_dir / "run_manifest.json"
@@ -483,15 +503,30 @@ def run_standalone_k0_driver(
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--steps", type=int, default=20,
-                        help="Number of K0 steps to run (20 for smoke, 2920 for 1-year)")
+    parser.add_argument(
+        "--steps",
+        type=int,
+        default=20,
+        help="Number of K0 steps to run (20 for smoke, 2920 for 1-year)",
+    )
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
     parser.add_argument("--deck-root", type=Path, default=DEFAULT_DECK_ROOT)
     parser.add_argument("--core-manifest", type=Path, default=DEFAULT_CORE_MANIFEST)
     parser.add_argument("--ice-cover", type=Path, default=DEFAULT_ICE_COVER_PATH)
     parser.add_argument("--save-stride", type=int, default=STEPS_PER_DAY)
-    parser.add_argument("--also-save-step", type=int, action="append", default=[10],
-                        help="Additional step(s) to save (default includes kt=10 for R340 cross-check)")
+    parser.add_argument(
+        "--also-save-step",
+        type=int,
+        action="append",
+        default=[10],
+        help="Additional saved steps (default: kt=10 for R340 cross-check)",
+    )
+    parser.add_argument(
+        "--transcendentals",
+        choices=("libm", "native"),
+        default="libm",
+        help="Transcendental backend (default: certified libm)",
+    )
     args = parser.parse_args(argv)
 
     manifest = run_standalone_k0_driver(
@@ -502,15 +537,22 @@ def main(argv: list[str] | None = None) -> int:
         ice_cover_path=args.ice_cover,
         save_stride=args.save_stride,
         save_steps=tuple(args.also_save_step),
+        transcendentals=args.transcendentals,
     )
-    print(json.dumps({
-        "status": manifest["status"],
-        "steps": manifest["steps"],
-        "wall_seconds": round(manifest["wall_seconds"], 2),
-        "jax_default_backend": manifest["jax_default_backend"],
-        "snapshot_count": len(manifest["snapshots"]),
-        "output_dir": manifest["output_dir"],
-    }, indent=2))
+    print(
+        json.dumps(
+            {
+                "status": manifest["status"],
+                "steps": manifest["steps"],
+                "wall_seconds": round(manifest["wall_seconds"], 2),
+                "jax_default_backend": manifest["jax_default_backend"],
+                "transcendentals": manifest["transcendentals"],
+                "snapshot_count": len(manifest["snapshots"]),
+                "output_dir": manifest["output_dir"],
+            },
+            indent=2,
+        )
+    )
     return 0
 
 

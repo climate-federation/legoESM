@@ -2,32 +2,16 @@
 
 from __future__ import annotations
 
-import ctypes
+import re
+import subprocess
 
 import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
+from legoesm.core import transcendentals as tx
 from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
-from legoesm.core.transcendentals import cos, exp, log, log10, sin, tanh
-
-try:
-    ctypes.CDLL("libm.so.6")
-except OSError:
-    pytest.skip("scalar-libm oracle needs glibc libm.so.6 (not on this platform)",
-                allow_module_level=True)
-
-
-def _libm_reference(name: str, values: np.ndarray) -> np.ndarray:
-    libm = ctypes.CDLL("libm.so.6")
-    function = getattr(libm, name)
-    function.argtypes = (ctypes.c_double,)
-    function.restype = ctypes.c_double
-    source = np.asarray(values, dtype=np.float64)
-    result = np.empty_like(source)
-    for index, value in enumerate(source):
-        result[index] = function(float(value))
-    return result
+from legoesm.core.transcendentals import atan, cos, exp, log, log10, pow, sin, tanh
 
 
 @pytest.fixture(autouse=True)
@@ -38,7 +22,8 @@ def _restore_policy():
 
 
 @pytest.mark.parametrize(
-    "name,function", [("exp", exp), ("tanh", tanh), ("sin", sin), ("cos", cos)]
+    "name,function",
+    [("exp", exp), ("atan", atan), ("tanh", tanh), ("sin", sin), ("cos", cos)],
 )
 def test_libm_policy_is_scalar_library_bit_exact_and_native_is_not(name, function):
     # The non-power-of-two stride avoids repeatedly sampling easy reduction
@@ -46,7 +31,7 @@ def test_libm_policy_is_scalar_library_bit_exact_and_native_is_not(name, functio
     values = np.linspace(-19.75, 19.25, 100_000, dtype=np.float64)
     values += (np.arange(values.size, dtype=np.float64)
                * np.float64(float.fromhex("0x1p-46")))
-    reference = _libm_reference(name, values)
+    reference = tx._scalar_libm_reference(name, values)
 
     set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
     jax.clear_caches()
@@ -63,7 +48,7 @@ def test_libm_policy_is_scalar_library_bit_exact_and_native_is_not(name, functio
     )
     if name in {"exp", "tanh"}:
         assert native_mismatches > 0
-    else:
+    elif name in {"sin", "cos"}:
         # On this certification host XLA sine/cosine already agree with scalar
         # glibc.  They still route through the poisoned callback in the NEMO
         # policy, which the GYRE discriminator tests behaviorally.
@@ -74,13 +59,13 @@ def test_libm_policy_is_scalar_library_bit_exact_and_native_is_not(name, functio
 def test_libm_log_policy_is_scalar_library_bit_exact(name, function):
     values = np.geomspace(2.0**-40, 2.0**40, 100_000, dtype=np.float64)
     values += np.arange(values.size, dtype=np.float64) * np.float64(2.0**-60)
-    reference = _libm_reference(name, values)
+    reference = tx._scalar_libm_reference(name, values)
     set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
     observed = np.asarray(jax.jit(function)(jnp.asarray(values)))
     assert np.array_equal(observed.view(np.uint64), reference.view(np.uint64))
 
 
-@pytest.mark.parametrize("function", [exp, tanh, sin, cos])
+@pytest.mark.parametrize("function", [exp, atan, tanh, sin, cos])
 def test_libm_policy_jit_and_eager_are_bit_exact(function):
     set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
     values = jnp.asarray([-3.125, -0.25, 0.0, 0.75, 4.5], dtype=jnp.float64)
@@ -98,7 +83,7 @@ def test_libm_log_policy_jit_and_eager_are_bit_exact(function):
     assert np.array_equal(eager.view(np.uint64), compiled.view(np.uint64))
 
 
-@pytest.mark.parametrize("function", [exp, log, log10, tanh, sin, cos])
+@pytest.mark.parametrize("function", [exp, log, log10, atan, tanh, sin, cos])
 def test_libm_policy_custom_jvp_matches_finite_difference(function):
     set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
     point = jnp.asarray(0.375, dtype=jnp.float64)
@@ -112,3 +97,166 @@ def test_libm_policy_custom_jvp_matches_finite_difference(function):
 
     reverse = jax.grad(lambda value: function(value))(point)
     assert np.isfinite(float(reverse))
+
+
+def test_libm_pow_policy_preserves_broadcast_jit_and_custom_jvp() -> None:
+    set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
+    left = jnp.asarray([[0.5], [2.0], [4.0]], dtype=jnp.float64)
+    right = jnp.asarray([[-2.0, 0.5, 3.0]], dtype=jnp.float64)
+    eager = np.asarray(pow(left, right))
+    compiled = np.asarray(jax.jit(pow)(left, right))
+    reference = tx._scalar_libm_binary_reference("pow", np.asarray(left), np.asarray(right))
+    _assert_bitwise_equal(eager, reference)
+    _assert_bitwise_equal(compiled, reference)
+    _, tangent = jax.jvp(
+        pow,
+        (jnp.asarray(2.0), jnp.asarray(3.0)),
+        (jnp.asarray(0.25), jnp.asarray(0.5)),
+    )
+    reverse = jax.grad(lambda x: pow(x, jnp.asarray(3.0)))(jnp.asarray(2.0))
+    assert np.isfinite(float(tangent))
+    assert float(reverse) == pytest.approx(12.0)
+
+
+_MILLION = 1_000_000
+
+
+def _large_unary_values(name: str, dtype: np.dtype) -> np.ndarray:
+    dtype = np.dtype(dtype)
+    finfo = np.finfo(dtype)
+    count = _MILLION - 9
+    if name == "exp":
+        ordinary = np.linspace(-800.0, 710.0, count, dtype=dtype)
+    elif name in {"log", "log10"}:
+        positive = np.exp(
+            np.linspace(np.log(float(finfo.smallest_subnormal)), np.log(float(finfo.max)), count)
+        )
+        ordinary = positive.astype(dtype)
+    else:
+        ordinary = np.linspace(-1.0e6, 1.0e6, count, dtype=dtype)
+    special = np.asarray(
+        [
+            0.0,
+            -0.0,
+            finfo.smallest_subnormal,
+            -finfo.smallest_subnormal,
+            finfo.tiny,
+            finfo.max,
+            np.inf,
+            -np.inf,
+            np.nan,
+        ],
+        dtype=dtype,
+    )
+    return np.concatenate((ordinary, special))
+
+
+def _large_pow_values(dtype: np.dtype) -> tuple[np.ndarray, np.ndarray]:
+    dtype = np.dtype(dtype)
+    count = _MILLION - 18
+    left = np.linspace(0.125, 32.0, count, dtype=dtype)
+    right = np.linspace(-4.0, 4.0, count, dtype=dtype)
+    special_left = np.asarray(
+        [
+            -2.0, -2.0, -2.0, 0.0, -0.0, 1.0, 1.0, np.inf, -np.inf,
+            np.inf, np.nan, 2.0, np.nan, 0.0, -0.0, np.inf, -np.inf, 2.0,
+        ],
+        dtype=dtype,
+    )
+    special_right = np.asarray(
+        [
+            2.0, 3.0, 0.5, -1.0, -3.0, np.nan, np.inf, 0.0, 3.0,
+            -1.0, 0.0, np.nan, 2.0, np.inf, -np.inf, np.nan, np.nan, -np.inf,
+        ],
+        dtype=dtype,
+    )
+    return np.concatenate((left, special_left)), np.concatenate((right, special_right))
+
+
+def _assert_bitwise_equal(observed: np.ndarray, reference: np.ndarray) -> None:
+    word = np.uint32 if observed.dtype == np.float32 else np.uint64
+    assert observed.shape == reference.shape
+    assert np.array_equal(observed.view(word), reference.view(word))
+
+
+@pytest.mark.parametrize("dtype", [np.float32, np.float64])
+@pytest.mark.parametrize("name", ["exp", "log", "log10", "atan", "tanh", "sin", "cos"])
+def test_compiled_unary_loop_matches_python_scalar_reference_on_one_million_values(
+    name: str, dtype: np.dtype
+) -> None:
+    values = _large_unary_values(name, dtype)
+    assert values.size >= _MILLION
+    observed = tx._scalar_libm(name, values)
+    reference = tx._scalar_libm_reference(name, values)
+    _assert_bitwise_equal(observed, reference)
+
+
+@pytest.mark.parametrize("dtype", [np.float32, np.float64])
+def test_compiled_pow_loop_matches_python_scalar_reference_on_one_million_values(
+    dtype: np.dtype,
+) -> None:
+    left, right = _large_pow_values(dtype)
+    assert left.size == right.size >= _MILLION
+    observed = tx._scalar_libm_binary("pow", left, right)
+    reference = tx._scalar_libm_binary_reference("pow", left, right)
+    _assert_bitwise_equal(observed, reference)
+
+
+def _assert_disassembly_calls_scalar_symbol(disassembly: str, name: str) -> None:
+    assert re.search(rf"callq?\s+[^\n]*<{name}@plt>", disassembly)
+    assert not re.search(r"_ZGV|libmvec|v(?:exp|log|atan|tanh|sin|cos|pow)", disassembly)
+
+
+def test_compiled_loops_call_only_the_named_scalar_libm_plt_symbols() -> None:
+    shared_object = tx._compiled_libm_path()
+    for name in (*tx._UNARY_NAMES, "pow"):
+        for suffix in ("f32", "f64"):
+            symbol = f"legoesm_libm_{name}_{suffix}"
+            disassembly = subprocess.run(
+                ["objdump", "-d", f"--disassemble={symbol}", str(shared_object)],
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout
+            _assert_disassembly_calls_scalar_symbol(disassembly, name)
+
+    planted = subprocess.run(
+        [
+            "objdump",
+            "-d",
+            "--disassemble=legoesm_libm_exp_f64",
+            str(shared_object),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.replace("<exp@plt>", "<log@plt>")
+    with pytest.raises(AssertionError):
+        _assert_disassembly_calls_scalar_symbol(planted, "exp")
+
+
+def test_fast_path_wrong_libm_function_plant_fails_bitwise_gate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    values = np.linspace(0.125, 4.0, 4096, dtype=np.float64)
+    reference = tx._scalar_libm_reference("exp", values)
+    monkeypatch.setitem(tx._FAST_SYMBOLS, "exp", "log")
+    planted = tx._scalar_libm("exp", values)
+    with pytest.raises(AssertionError):
+        _assert_bitwise_equal(planted, reference)
+
+
+def test_fast_path_is_fail_closed_and_uses_required_compiler_flags(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert {"-O2", "-fno-builtin", "-fno-tree-vectorize"} <= set(
+        tx._COMPILE_FLAGS
+    )
+    assert "-ffast-math" not in tx._COMPILE_FLAGS
+
+    def broken_loader():
+        raise RuntimeError("planted build/load failure")
+
+    monkeypatch.setattr(tx, "_compiled_libm", broken_loader)
+    with pytest.raises(RuntimeError, match="planted build/load failure"):
+        tx._scalar_libm("exp", np.asarray([1.0], dtype=np.float64))

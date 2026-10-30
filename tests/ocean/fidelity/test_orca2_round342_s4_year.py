@@ -2,17 +2,26 @@
 
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 
 import numpy as np
 import pytest
-
 from legoesm.ocean import bulk_flux_omip as bulk
+
 from scripts.validate.ocean_fidelity.orca2_l4 import (
     nemo_testcase_l4_orca2_round1_ladder_gate as ladder,
+)
+from scripts.validate.ocean_fidelity.orca2_l4 import (
     nemo_testcase_l4_orca2_round342_s4_year_driver as r342_driver,
+)
+from scripts.validate.ocean_fidelity.orca2_l4 import (
     nemo_testcase_l4_orca2_round342_s4_year_gate as r342_gate,
+)
+from scripts.validate.ocean_fidelity.orca2_l4 import (
     nemo_testcase_l4_orca2_round342_s4_year_metrics as r342_metrics,
+)
+from scripts.validate.ocean_fidelity.orca2_l4 import (
     nemo_testcase_l4_orca2x_round1_pilot_metrics as pilot_metrics,
 )
 
@@ -148,6 +157,67 @@ def test_driver_explicit_k0_and_full_year_fld_read_schedule() -> None:
         chl_2920 = ladder.chlorophyll_at_step(r342_driver.DEFAULT_DECK_ROOT, 2920, wet, dt_s=10800.0)
         assert chl_1.shape == (148, 180) and np.isfinite(chl_1).all()
         assert chl_2920.shape == (148, 180) and np.isfinite(chl_2920).all()
+
+
+@pytest.mark.parametrize(
+    "cli,expected", [([], "libm"), (["--transcendentals", "native"], "native")]
+)
+def test_driver_transcendentals_flag_round_trips_to_manifest(
+    cli: list[str],
+    expected: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_run(**kwargs):
+        captured.update(kwargs)
+        return {
+            "status": "PASS_R342_S4_K0_LEGOESM_RUN",
+            "steps": kwargs["steps"],
+            "wall_seconds": 1.0,
+            "jax_default_backend": "cpu",
+            "transcendentals": kwargs["transcendentals"],
+            "snapshots": [],
+            "output_dir": str(kwargs["output_dir"]),
+        }
+
+    monkeypatch.setattr(r342_driver, "run_standalone_k0_driver", fake_run)
+    assert r342_driver.main(["--steps", "1", "--output-dir", str(tmp_path), *cli]) == 0
+    payload = capsys.readouterr().out
+    assert f'"transcendentals": "{expected}"' in payload
+    assert captured["transcendentals"] == expected
+
+
+def test_driver_and_wrapper_refuse_unknown_transcendentals(tmp_path: Path) -> None:
+    with pytest.raises(RuntimeError, match="must be 'libm' or 'native'"):
+        r342_driver.run_standalone_k0_driver(
+            steps=1,
+            output_dir=tmp_path,
+            transcendentals="other",
+        )
+
+    wrapper = Path(r342_driver.__file__).with_name(
+        "nemo_testcase_l4_orca2_round342_s4_year_legoesm_run.sh"
+    )
+    refused = subprocess.run(
+        ["bash", str(wrapper), "--transcendentals", "other"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert refused.returncode == 2
+    assert "REFUSE: --transcendentals must be libm or native" in refused.stderr
+
+
+def test_wrapper_passes_transcendentals_to_driver() -> None:
+    wrapper = Path(r342_driver.__file__).with_name(
+        "nemo_testcase_l4_orca2_round342_s4_year_legoesm_run.sh"
+    )
+    source = wrapper.read_text(encoding="utf-8")
+    assert 'TRANSCENDENTALS="libm"' in source
+    assert '--transcendentals "${TRANSCENDENTALS}"' in source
 
 
 @pytest.mark.skipif(

@@ -24,6 +24,7 @@ STEPS=20
 OUTPUT_DIR="/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/orca2_r342/legoesm_smoke_20step"
 ALLOW_FULL_YEAR=0
 WAIT_FOR_COMPLETION=0
+TRANSCENDENTALS="libm"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -43,12 +44,21 @@ while [[ $# -gt 0 ]]; do
       WAIT_FOR_COMPLETION=1
       shift
       ;;
+    --transcendentals)
+      TRANSCENDENTALS="$2"
+      shift 2
+      ;;
     *)
       echo "Unknown argument: $1" >&2
       exit 2
       ;;
   esac
 done
+
+if [[ "${TRANSCENDENTALS}" != "libm" && "${TRANSCENDENTALS}" != "native" ]]; then
+  echo "REFUSE: --transcendentals must be libm or native, got ${TRANSCENDENTALS}" >&2
+  exit 2
+fi
 
 if [[ "${STEPS}" -gt 40 && "${ALLOW_FULL_YEAR}" -ne 1 ]]; then
   echo "REFUSE: --steps ${STEPS} (> 40) requires explicit operator flag --allow-full-year" >&2
@@ -74,6 +84,7 @@ export XLA_PYTHON_CLIENT_PREALLOCATE=false
 nohup "${PYTHON_BIN}" "${DRIVER_PY}" \
   --steps "${STEPS}" \
   --output-dir "${OUTPUT_DIR}" \
+  --transcendentals "${TRANSCENDENTALS}" \
   >"${LOG_FILE}" 2>&1 &
 BG_PID=$!
 echo "${BG_PID}" > "${PID_FILE}"
