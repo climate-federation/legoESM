@@ -39,7 +39,10 @@ from tests.unit.test_sfno_latlon_coupling import (  # noqa: E402
 )
 
 NLEV = 3
-RAW = 0.7  # raw network output on every wind row
+# Distinct, level-dependent raw outputs per head so a u/v swap or a level
+# reversal anywhere in the column lane fails the reference comparisons.
+RAW_U = np.array([0.7, 0.4, 0.1])
+RAW_V = np.array([-0.3, -0.6, 0.9])
 
 
 def _net():
@@ -47,12 +50,13 @@ def _net():
                                     key=jax.random.PRNGKey(0))
 
 
-def _with_wind_bias(net, raw=RAW):
+def _with_wind_bias(net, raw=None):
+    raw = np.concatenate([RAW_U, RAW_V]) if raw is None else raw
     b = net.layers[-1].bias.at[4 * NLEV:6 * NLEV].set(raw)
     return eqx.tree_at(lambda m: m.layers[-1].bias, net, b)
 
 
-def _expected_wind(raw=RAW):
+def _expected_wind(raw):
     cap = nph._DEFAULT_TENDENCY_CAP
     return (nph._DEFAULT_RESIDUAL_SCALE * cap * np.tanh(raw / cap)
             * nph._WIND_HEAD_TENDENCY_FACTOR)
@@ -82,15 +86,15 @@ def test_spectral_zero_init_gives_exactly_zero_wind(spectral):
 
 
 def test_spectral_wind_head_reaches_vor_div_with_the_right_scale(spectral):
-    """A uniform du = dv = w field must come back as exactly that wind."""
+    """Per-level du != dv fields must come back as exactly that wind."""
     from legoesm.grids.gaussian import vordiv_from_uv_exact_3d
     grid, state, sigma = spectral
     out = nph.make_column_physics_fn(_with_wind_bias(_net()), grid)(
         state, grid, sigma)
-    w = _expected_wind()
     shp = (grid.n_lat, grid.n_lon, NLEV)
     ref_vor, ref_div = vordiv_from_uv_exact_3d(
-        grid, jnp.full(shp, w), jnp.full(shp, w))
+        grid, jnp.broadcast_to(_expected_wind(RAW_U), shp),
+        jnp.broadcast_to(_expected_wind(RAW_V), shp))
     assert float(jnp.max(jnp.abs(ref_vor))) > 0.0
     np.testing.assert_allclose(np.asarray(out.vor_hat.data),
                                np.asarray(ref_vor), rtol=1e-10, atol=1e-25)
@@ -160,9 +164,12 @@ def test_gridded_wind_head_reaches_du_dv(latlon_adapter):
                                         latlon_adapter)
     out, _ = step(True, *_positional_nlev(latlon_adapter))
     assert out.du_dt.shape == (*latlon_adapter.shape_2d, NLEV)
-    np.testing.assert_allclose(np.asarray(out.du_dt), _expected_wind(),
+    shp = out.du_dt.shape
+    np.testing.assert_allclose(np.asarray(out.du_dt),
+                               np.broadcast_to(_expected_wind(RAW_U), shp),
                                rtol=1e-12)
-    np.testing.assert_allclose(np.asarray(out.dv_dt), _expected_wind(),
+    np.testing.assert_allclose(np.asarray(out.dv_dt),
+                               np.broadcast_to(_expected_wind(RAW_V), shp),
                                rtol=1e-12)
 
 
