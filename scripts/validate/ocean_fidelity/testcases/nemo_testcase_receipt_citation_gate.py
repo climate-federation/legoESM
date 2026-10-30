@@ -11370,7 +11370,7 @@ _reanchor(
     'tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:1-932',
     'tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:1-1151',
     anchors=['"""Direct unit and master-record tests for the SI3 O8--O14 0-ULP scoring driver."""',
-             'assert cited <= planted', 1151],
+             'assert original_digests <= planted', 1151],
 )
 _reanchor('tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:25-57', 'tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:27-59')
 _reanchor('tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:60-87', 'tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:62-91', anchors=['def test_master_admission_manifests_and_plants() -> None:', ('verify_manifests=False,', 1), 30])

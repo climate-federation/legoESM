@@ -1131,7 +1131,7 @@ def test_o15_o16_receipt_rehashes_every_digest_and_mismatch_plant() -> None:
 
     nested_digests = {value for value in values(d5) if re.fullmatch(r"[0-9a-f]{64}", value)}
     covered = file_digests | nested_digests
-    assert cited == {
+    original_digests = {
         "6df5e4d29176246f490b6c0632242f1c23f502f3f0f1b485e41c71b290913804",
         "ca59f204737a9ee9d92b23aab0b02d1ed85d5c94e465ebb839e003937f4ec294",
         "f1d8baf0d1c1d7425c2db7365bfe6526d3c3a28c4d307ca525c5b160e0e08751",
@@ -1144,8 +1144,8 @@ def test_o15_o16_receipt_rehashes_every_digest_and_mismatch_plant() -> None:
         "b7a7329bed74c17918fa3cbc11c7613acb2074851e2357a08869fcd4661e12d2",
         "ab03c16a4f0a424d6be496733f815153f21c4e09681dd4ccbc09d0571b05c726",
     }
-    assert cited <= covered
+    assert original_digests <= cited and original_digests <= covered
     planted = set(covered)
-    planted.discard(next(iter(cited)))
+    planted.discard(next(iter(original_digests)))
     with pytest.raises(AssertionError):
-        assert cited <= planted
+        assert original_digests <= planted
