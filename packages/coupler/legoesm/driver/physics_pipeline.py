@@ -4025,14 +4025,15 @@ def mean_grid_spacing_m(grid):
 def _zm_overrides(config):
     """ZM leaf overrides from the flat zm_* scalars; refuses them when the run
     does not select zhang_mcfarlane (they would be silently inert)."""
-    from legoesm.driver.config import ZM_SCALAR_FIELDS
+    from legoesm.driver.config import ZM_SCALAR_FIELDS, ZM_WIDTH_FIELDS
 
-    given = [f for f in ZM_SCALAR_FIELDS if getattr(config, f, None) is not None]
+    table = {**ZM_SCALAR_FIELDS, **ZM_WIDTH_FIELDS}
+    given = [f for f in table if getattr(config, f, None) is not None]
     if given and config.convection != "zhang_mcfarlane":
         raise ValueError(
             f"{given} are Zhang-McFarlane parameters; got "
             f"convection={config.convection!r}, which does not read them.")
-    return {ZM_SCALAR_FIELDS[f]: float(getattr(config, f)) for f in given}
+    return {table[f]: float(getattr(config, f)) for f in given}
 
 
 def _resolve_convection(config):

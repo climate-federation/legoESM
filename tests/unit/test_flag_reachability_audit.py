@@ -66,7 +66,9 @@ from legoesm.atmosphere.physics.microphysics.morrison import MorrisonConfig
 from legoesm.driver import physics_pipeline as pp
 from legoesm.driver.config import (
     CLUBB_SCALAR_FIELDS,
+    DycoreConfig,
     ZM_SCALAR_FIELDS,
+    ZM_WIDTH_FIELDS,
     ExperimentConfig,
 )
 
@@ -87,7 +89,12 @@ _RESOLVERS = {
     "convection_config_for": (
         lambda c: pp.convection_config_for(c),
         [{"convection": "bechtold"}, {"convection": "sbm"},
-         {"convection": "tiedtke"}, {"convection": "zhang_mcfarlane"}],
+         {"convection": "tiedtke"}, {"convection": "zhang_mcfarlane"},
+         # The ZM detrainment widths are legal only where they are read: the
+         # MPAS macro/micro sub-cycle with ZM + CLUBB (validate_strict).
+         {"convection": "zhang_mcfarlane", "turbulence": "clubb",
+          "cld_macmic_num_steps": 3,
+          "dycore": DycoreConfig(discretization="mpas")}],
     ),
     "gwd_config_for": (
         lambda c: pp.gwd_config_for(c),
@@ -216,6 +223,7 @@ def _reads(fn, _seen: set[str] | None = None) -> set[str]:
 
 _CFG_NAMES = ("config", "cfg")
 _FIELD_TABLES = {"ZM_SCALAR_FIELDS": ZM_SCALAR_FIELDS,
+                 "ZM_WIDTH_FIELDS": ZM_WIDTH_FIELDS,
                  "CLUBB_SCALAR_FIELDS": CLUBB_SCALAR_FIELDS}
 
 

@@ -65,7 +65,7 @@ from legoesm.core.smooth import smooth_clamp, smooth_relu
 
 
 __all__ = ("CONVTRAN1_TRACERS", "cam6_detrain_condensate",
-           "zhang_mcfarlane_convection")
+           "validate_detrain_widths", "zhang_mcfarlane_convection")
 
 # CAM6 constituents with ``is_convtran1`` (micro_mg_cam.F90:416-435, MG2) that
 # zm_conv_intr.F90:829-846 transports with ``convtran``, mapped to legoESM
@@ -288,6 +288,17 @@ def zhang_mcfarlane_convection(
     return out, conv_prog_profile_new
 
 
+def validate_detrain_widths(w_T, w_n) -> None:
+    """The one legal range of the two detrainment smoothing widths: finite and
+    >= 0 (0 = CAM's hard switch).  Shared by :func:`cam6_detrain_condensate`
+    and ``ExperimentConfig.validate_strict``.  NaN and inf are refused."""
+    if not all(math.isfinite(w) and w >= 0 for w in (w_T, w_n)):
+        raise ValueError(
+            "ZhangMcFarlaneConfig detrain_phase_width_K / "
+            "detrain_number_width_kgkg_s must be finite and >= 0 (0 = CAM's "
+            f"hard switch); got {w_T!r}, {w_n!r}.")
+
+
 def cam6_detrain_condensate(T: jax.Array, dlf: jax.Array,
                             config: ZhangMcFarlaneConfig):
     """CAM6 detrainment of ZM condensate, clubb_intr.F90:2345-2376.
@@ -327,11 +338,7 @@ def cam6_detrain_condensate(T: jax.Array, dlf: jax.Array,
     """
     w_T = config.detrain_phase_width_K
     w_n = config.detrain_number_width_kgkg_s
-    if w_T < 0 or w_n < 0:
-        raise ValueError(
-            "ZhangMcFarlaneConfig detrain_phase_width_K / "
-            "detrain_number_width_kgkg_s must be >= 0 (0 = CAM's hard switch); "
-            f"got {w_T!r}, {w_n!r}.")
+    validate_detrain_widths(w_T, w_n)
     dum1 = smooth_clamp((_DETRAIN_T_LIQ_K - T) / _DETRAIN_RAMP_K, 0.0, 1.0,
                         math.inf if w_T == 0 else _DETRAIN_RAMP_K / w_T)
     dlf_pos = (jnp.maximum(0.0, dlf) if w_n == 0

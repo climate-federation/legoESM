@@ -288,6 +288,10 @@ zm_ke: 5.0e-6               # rain evaporation efficiency
 zm_dmpdz: -1.0e-3           # dilute-plume entrainment [1/m]
 zm_tau: 3600.0              # CAPE consumption timescale [s]
 zm_capelmt: 70.0            # deep-convection CAPE threshold [J/kg]
+# ZM detrainment smoothing widths (RULE 5; values = the scheme defaults; 0 =
+# CAM's hard switch), read by the CLUBB macmic sub-step's detrainment booking.
+zm_detrain_phase_width_K: 0.1              # liquid/ice ramp corners [K]
+zm_detrain_number_width_kgkg_s: 1.0e-12    # max(0, dlf) in the number source [kg/kg/s]
 zm_transport_cloud_tracers: true  # ZM convtran of carried cloud/precip water + numbers (CAM6)
 
 # ---- turbulence ---------------------------------------------------------------
