@@ -56,7 +56,7 @@ full-domain and nonempty wet seam/north-fold regional maxima are required.
 Separate wet one-bit plants cover all four state exits, and the sweep-order,
 fold-sign, and subcycle-link plants use a nontrivial deck. The schema and score
 implementation are in
-`scripts/validate/ocean_fidelity/testcases/nemo_si3_o4_orca2_prather_gate.py:37-379`.
+`scripts/validate/ocean_fidelity/testcases/nemo_si3_o4_orca2_prather_gate.py:37-501`.
 
 ## Driver, admission, and tests
 

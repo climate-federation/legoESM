@@ -11267,6 +11267,8 @@ AUDITED_ROUNDS = "25 and later (heading to end of file)"
 FILES.update({
     'docs/ice/fidelity/si3_r25_o4_acquisition_preregister.md': REPO / 'docs/ice/fidelity/si3_r25_o4_acquisition_preregister.md',
     'docs/ice/fidelity/si3_r25_o4_acquisition_receipt.md': REPO / 'docs/ice/fidelity/si3_r25_o4_acquisition_receipt.md',
+    'docs/ice/fidelity/si3_r25_o4_score_preregister.md': REPO / 'docs/ice/fidelity/si3_r25_o4_score_preregister.md',
+    'docs/ice/fidelity/si3_r25_o4_score_receipt.md': REPO / 'docs/ice/fidelity/si3_r25_o4_score_receipt.md',
     'scripts/validate/ocean_fidelity/orca2_l4/nemo_acquisition_extents.py': REPO / 'scripts/validate/ocean_fidelity/orca2_l4/nemo_acquisition_extents.py',
     'scripts/validate/ocean_fidelity/testcases/nemo_si3_o4_orca2_prather_gate.py': REPO / 'scripts/validate/ocean_fidelity/testcases/nemo_si3_o4_orca2_prather_gate.py',
     'scripts/validate/ocean_fidelity/testcases/nemo_si3_o4_orca2_prather_passivity.py': REPO / 'scripts/validate/ocean_fidelity/testcases/nemo_si3_o4_orca2_prather_passivity.py',
@@ -11276,10 +11278,14 @@ FILES.update({
 })
 CITATION_MAP.update({
     'docs/ice/fidelity/si3_r25_o4_acquisition_preregister.md:1-132': ['# SI3 Ladder Round 25 (`si3_r25`) Preregistration — O4 Prather Acquisition and Exact-Input Score', 'record contract.', 132],
-    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o4_orca2_prather_gate.py:37-379': ['GRID = (', '    return {"status": "PASS", "criterion": "every exit, seam, and fold cell == 0 ULP", "scores": scores}', 343],
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o4_orca2_prather_gate.py:37-501': ['GRID = (', '        "scores": scores,', 465],
     'scripts/validate/ocean_fidelity/testcases/nemo_si3_o4_orca2_prather_passivity.py:20-173': ['NEMO = Path("/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2")', '    raise SystemExit(main())', 154],
     'scripts/validate/ocean_fidelity/testcases/nemo_si3_o4_orca2_prather_acquisition/run.sh:180-510': ['prepare_patched_ppsrc() {', 'printf \'ACQUISITION_DONE: %s\\n\' "$EVIDENCE"', 331],
     'tests/ocean/fidelity/test_nemo_si3_o4_prather_acquisition.py:1-106': ['from __future__ import annotations', '        assert hashlib.sha256(path.read_bytes()).hexdigest() == expected, relative', 106],
+    'docs/ice/fidelity/si3_r25_o4_score_preregister.md:1-84': ['# SI3 Ladder Round 25 (`si3_r25`) — O4 production-score preregistration', 'measurement.', 84],
+    'packages/ice/legoesm/ice/si3_orca2_state.py:3807-3910': ['def si3_o4_step(', '        v_il=work_dyn.v_il,', 104],
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o4_orca2_prather_gate.py:248-506': ['def _array_metrics(actual: np.ndarray, expected: np.ndarray,', '    return hashlib.sha256(path.read_bytes()).hexdigest()', 259],
+    'tests/ocean/fidelity/test_nemo_si3_o4_prather_acquisition.py:43-75': ['def test_o4_record_schema_and_reader_plants(records: Path) -> None:', '    assert score_deck(independent_records)["status"] == "PASS_O4_EXACT"', 33],
 })
 # --- SI3 round 22 (O13 exact ITD remap); appended for merge isolation ---
 FILES.update({
