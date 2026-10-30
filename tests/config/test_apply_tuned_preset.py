@@ -37,11 +37,19 @@ def test_header_only_preset_is_a_noop():
     cfg = camp.make_physics_config(convection="kuo")
     out, n = camp.apply_tuned_preset(cfg, "kuo", _PRESETS)
     assert n == 0 and out is cfg
+    assert (_PRESETS / "emanuel.yaml").exists()  # a missing file is also a no-op
+    cfg = camp.make_physics_config(convection="emanuel")
+    out, n = camp.apply_tuned_preset(cfg, "emanuel", _PRESETS)
+    assert n == 0 and out is cfg
 
 
 def test_wrong_scheme_preset_is_rejected():
     camp = _camp()
-    # a dca config fed the emanuel preset must raise, not silently do nothing.
+    # a dca config fed the sbm preset must raise, not silently do
+    # nothing (a MISSING preset is a silent no-op, so the file must exist).
+    from legoesm.driver.run_config_yaml import load_params_config
+
+    assert load_params_config(_PRESETS / "sbm.yaml")
     cfg = camp.make_physics_config(convection="dca")
-    with pytest.raises((ValueError, Exception)):
-        camp.apply_tuned_preset(cfg, "emanuel", _PRESETS)
+    with pytest.raises(ValueError, match="wrong preset"):
+        camp.apply_tuned_preset(cfg, "sbm", _PRESETS)

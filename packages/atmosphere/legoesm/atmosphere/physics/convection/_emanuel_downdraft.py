@@ -42,18 +42,32 @@ through a separate dry-static-energy flux.
 INDEX CONVENTION.  Everything here is SURFACE-FIRST (``i=0`` is the lowest
 model level, ``i+1`` is ABOVE ``i``), exactly as the oracle indexes it and as
 ``_emanuel_mixing`` works internally.  The caller flips.  Getting this
-backwards produces a plausible-looking wrong answer with every shape intact,
-so ``emanuel_downdraft_tendencies`` asserts the orientation of its inputs
-rather than trusting it.
+backwards produces a plausible-looking wrong answer with every shape intact;
+``tests/unit/test_emanuel_downdraft.py`` checks the orientation.
 
-FAITHFUL WHERE?  The arithmetic is line-by-line faithful.  TWO branches are
-deliberately NOT: the ``T(I) > 273`` phase switch (line 749) and the
-``EP(INB) < 1e-4`` whole-shaft skip (line 717) are replaced by sigmoids, so
-inside their transition intervals this produces numbers the Fortran does not.
-That is the price of a scheme that has to train, and it is bounded: both
-widths are arguments, and driving them to zero recovers the oracle's hard
-branches exactly, which is asserted by a test rather than argued.  Every other
-departure would be a defect.
+FAITHFUL WHERE?  The arithmetic is line-by-line faithful.  The branches are
+smoothed, deliberately: the ``T(I) > 273`` phase switch (line 749) and the
+``EP(INB) < 1e-4`` whole-shaft skip (line 717) by sigmoids whose widths are
+arguments, and the switches listed under RULE 5 below by sharpness
+arguments; inside their transition intervals this produces numbers the
+Fortran does not.  That is the price of a scheme that has to train, and it
+is bounded: driving every width to zero / sharpness to ``inf`` recovers the
+oracle's hard branches, which is asserted by a test rather than argued.  Any
+other departure would be a defect.
+
+RULE 5 (#2158).  The remaining switches on traced state are smooth too, each
+exact at ``math.inf`` of its sharpness: ``AFAC = MAX(AFAC, 0)`` (C1 positive
+part, ``evap_sharpness``); ``DHDP = MAX(DHDP, dhdp_min)`` (softplus,
+``dhdp_sharpness``; KNOWN DIFFERENCE: a ``ln2/dhdp_sharpness`` = 0.07
+J/kg/hPa offset on every level at the default); ``MAX(MP_raw, 0)`` (C1
+positive part, ``mp_sharpness``); the ``MP(I) > MP(I+1)`` / ``MP(I+1) > 0`` QP branches
+(C1 strict indicators, exactly the oracle's fallback at equality,
+``mp_sharpness``); ``QP = CLIP(QP, 0, QS(I-1))`` (bound-preserving C1 clip,
+``condensate_sharpness``); the ``P > 0.949 P(1)`` taper band's value blend
+(``taper_band_sharpness``; ``JTT`` stays an index pick); ``AWAT``'s
+``MAX(0, .)``.  Kept hard,
+documented: the ``_safe_divide`` / ``_safe_sqrt`` singularity guards (0 value
+and 0 derivative where the divisor is <= 1e-12 or the radicand <= 1e-30).
 
 DIFFERENTIABILITY.  Every oracle branch becomes smooth or masked.  Three
 places need the double-``where`` guard, because a plain ``jnp.where`` still
@@ -68,6 +82,7 @@ Zivkovic-Rothman (1999), J. Atmos. Sci. 56, 1766-1782.
 
 from __future__ import annotations
 
+import math
 from typing import NamedTuple
 
 import jax
@@ -75,6 +90,12 @@ import jax.numpy as jnp
 from jax import lax
 
 from legoesm import constants
+from legoesm.core.smooth import (
+    positive_part_c1,
+    sigmoid_switch,
+    smooth_relu,
+    smoothstep_cubic,
+)
 
 __physics_contract__ = {
     "summary": (
@@ -94,6 +115,8 @@ __physics_contract__ = {
         "elij": "kg/kg (condensate of each mixture)",
         "clw": "kg/kg (adiabatic cloud water)",
         "ep": "1 (precipitation efficiency)",
+        "inb": "1 (oracle INB, 0-based surface-first level index)",
+        "c_l": "J/kg/K (CONVECT CL)",
     },
     "outputs": {
         "mp": "kg/m^2/s (downdraft mass flux, magnitude)",
@@ -115,11 +138,10 @@ __physics_contract__ = {
     "reference": "Emanuel (1991) CONVECT v4.3c, convect43c.f lines 713-934",
     "idealized_test": (
         "A column with no detrained condensate (ep == 0) gives exactly zero "
-        "mp, evap and tendencies. Evaporation floors at zero only when the "
-        "MIXTURE of environmental and downdraft air is supersaturated: a "
-        "saturated ENVIRONMENT still evaporates, because AFAC is driven by "
-        "QS(I) - 0.5*(Q(I) + QP(I+1)) and the descending shaft is drier than "
-        "its surroundings (measured, not assumed)."
+        "mp, evap and tendencies; a saturated column (Q = QS) evaporates "
+        "nothing, since AFAC is driven by QS(I) - 0.5*(Q(I) + QP(I+1)) and "
+        "QP keeps its initialisation Q(I-1) where there is no downdraught "
+        "flux.  Oracle match: tests/atmosphere/test_emanuel_convect43c_oracle.py."
     ),
 }
 
@@ -129,11 +151,6 @@ _PA_TO_HPA = 0.01
 _SEC_PER_DAY = 86400.0
 
 # --- Published CONVECT v4.3c constants (convect43c.f lines 186-201) ------ #
-#: Specific heat of liquid water [J/kg/K] AS THE ORACLE SETS IT (line 190).
-#: The textbook value is ~4190; CONVECT uses 2500, and an oracle port
-#: reproduces the oracle.  It enters only the ``(CL - CPD)`` sensible-heat
-#: term carried by falling precipitation.
-_CL_ORACLE = 2500.0
 #: Density of liquid water [kg/m^3] used by the oracle's precipitation
 #: conversion (line 189).
 _ROWL_ORACLE = 1000.0
@@ -187,6 +204,27 @@ def _safe_divide(num: jax.Array, den: jax.Array, floor: float) -> jax.Array:
     return jnp.where(ok, num / safe_den, jnp.zeros_like(num))
 
 
+def _hard(s) -> bool:
+    return s == math.inf
+
+
+def _strict_step_c1(x: jax.Array, sharpness: float) -> jax.Array:
+    """C1 indicator of the STRICT ``x > 0``: exactly 0 for ``x <= 0``,
+    exactly 1 for ``x >= 1/sharpness``; ``x > 0`` at ``sharpness = inf``."""
+    if _hard(sharpness):
+        return (x > 0.0).astype(x.dtype)
+    return smoothstep_cubic(x * sharpness)
+
+
+def _clip_c1(x: jax.Array, lo: jax.Array, hi: jax.Array, sharpness: float) -> jax.Array:
+    """``clip(x, lo, hi)`` from two C1 positive parts; never leaves [lo, hi]
+    (for ``lo <= hi``), exact inside ``[lo + 1/s, hi - 1/s]``."""
+    if _hard(sharpness):
+        return jnp.clip(x, lo, hi)
+    y = lo + positive_part_c1(x - lo, sharpness)
+    return hi - positive_part_c1(hi - y, sharpness)
+
+
 def _above(x: jax.Array) -> jax.Array:
     """``x[i+1]`` (the level ABOVE i in surface-first order), clamped at top."""
     return jnp.concatenate([x[:, 1:], x[:, -1:]], axis=-1)
@@ -223,59 +261,6 @@ def _fall_speed_and_coefficient(
     return wt, coeff
 
 
-def _taper_mass_flux_to_surface(
-    mp: jax.Array, p_full: jax.Array, *, taper_p_fraction: float,
-) -> jax.Array:
-    """Force ``MP`` linearly to zero between ~950 hPa and the surface.
-
-    Oracle lines 779-784::
-
-        IF(P(I).GT.(0.949*P(1)))THEN
-           JTT=MAX(JTT,I)
-           MP(I)=MP(JTT)*(P(1)-P(I))/(P(1)-P(JTT))
-        END IF
-
-    ``JTT`` is a running maximum over a loop DESCENDING from cloud top, and
-    ``P`` decreases upward, so the pressure test is true exactly on a prefix
-    of levels near the surface.  The loop meets that band at its TOP first;
-    there ``JTT`` is fixed for good and the formula is the identity, so every
-    lower level reads the same anchor.  The construct is therefore a one-pass
-    linear taper:
-
-        jtt   = max(1, largest i with p[i] > f * p[0])         (0-based)
-        mp[i] = mp[jtt] * (p[0]-p[i]) / (p[0]-p[jtt])   for 1 <= i <= jtt
-
-    Two consequences worth stating because they are why a second pass is
-    EXACT rather than approximate: the anchor ``mp[jtt]`` comes from the
-    inertia recursion and is never itself tapered, and the recursion's output
-    at levels inside the band is dead — the taper overwrites it before
-    anything reads it.
-
-    ``i = 0`` is excluded because the oracle's ``IF(I.EQ.1)GOTO 360`` jumps
-    past this whole block at the lowest level, leaving ``MP(1)`` at its zero
-    initialisation (line 481).  The caller enforces that zero; the outcome is
-    the same either way, and stating which mechanism produces it keeps the
-    port checkable against the Fortran.
-
-    The anchor INDEX is discrete in the oracle and stays discrete here; the
-    gradient flows through the gathered ``mp[jtt]`` and the pressures.
-    """
-    _ncol, nlev = mp.shape
-    idx = jnp.arange(nlev)
-    p_sfc = p_full[:, :1]
-    band = p_full > taper_p_fraction * p_sfc
-    # Floored at 1 to match ``JTT`` starting at 2 in the oracle's 1-based
-    # indexing; also keeps the anchor off the surface level itself.
-    jtt = jnp.maximum(jnp.max(jnp.where(band, idx[None, :], -1), axis=-1), 1)
-    mp_anchor = jnp.take_along_axis(mp, jtt[:, None], axis=-1)
-    p_anchor = jnp.take_along_axis(p_full, jtt[:, None], axis=-1)
-    # Zero denominator whenever the two lowest levels share a pressure — the
-    # oracle would produce NaN there.
-    ramp = _safe_divide(p_sfc - p_full, p_sfc - p_anchor, _DENOM_FLOOR)
-    inside = band & (idx[None, :] <= jtt[:, None]) & (idx[None, :] > 0)
-    return jnp.where(inside, mp_anchor * ramp, mp)
-
-
 def emanuel_downdraft(
     *,
     T: jax.Array,
@@ -292,6 +277,8 @@ def emanuel_downdraft(
     elij: jax.Array,
     clw: jax.Array,
     ep: jax.Array,
+    inb: jax.Array,
+    c_l: float,
     sigd: float,
     sigs: float,
     omtrain: float,
@@ -304,6 +291,11 @@ def emanuel_downdraft(
     dhdp_min: float,
     ep_gate_threshold: float,
     ep_gate_width: float,
+    condensate_sharpness: float,
+    evap_sharpness: float,
+    dhdp_sharpness: float,
+    mp_sharpness: float,
+    taper_band_sharpness: float,
 ) -> EmanuelDowndraftOutput:
     """Diagnose the precipitating downdraft and its tendencies.
 
@@ -326,6 +318,16 @@ def emanuel_downdraft(
     m_profile, ment, elij, clw, ep : updraught mass flux, mixing matrix,
         mixture condensate, adiabatic cloud water and precipitation efficiency
         from ``_emanuel_mixing`` (all surface-first).
+    inb : (ncol,) int, the oracle's INB as a 0-based surface-first index.  The
+        sweep starts there (DO 400 I=INB,1,-1); above it every array keeps its
+        DO 70 initialisation, and the whole shaft is gated on EP(INB).
+    c_l : CONVECT's liquid-water heat capacity CL (the same CL as the mixer).
+    condensate_sharpness : sharpness [1/(kg/kg)] of the ``AWAT`` ``MAX(0, .)``
+        and the ``QP`` clip.
+    evap_sharpness, dhdp_sharpness, mp_sharpness, taper_band_sharpness :
+        sharpness of ``MAX(AFAC, 0)`` [1], ``MAX(DHDP, dhdp_min)``
+        [hPa kg/J], the ``MP`` QP branches [m^2 s/kg] and the taper band
+        [1/Pa].  ``math.inf`` is the oracle for each.
     """
     _ncol, nlev = T.shape
     g = constants.g
@@ -342,7 +344,10 @@ def emanuel_downdraft(
     # than from intuition.
     idx = jnp.arange(nlev)
     lower = (idx[:, None] < idx[None, :])[None, :, :]
-    awat = jnp.maximum(elij - (1.0 - ep)[:, None, :] * clw[:, None, :], 0.0)
+    # MAX(0, ...) smoothed by condensate_sharpness [kg/kg]^-1 (RULE 5), as the
+    # mixing module's AWAT; exact at inf.
+    awat = smooth_relu(elij - (1.0 - ep)[:, None, :] * clw[:, None, :],
+                       condensate_sharpness)
     wdtrain = g * ep * m_profile * clw + g * jnp.sum(
         jnp.where(lower, awat * ment, 0.0), axis=1)
 
@@ -367,21 +372,42 @@ def emanuel_downdraft(
     gz_above = _above(gz)
 
     is_surface = (idx[None, :] == 0)
-    is_top = (idx[None, :] == nlev - 1)
+    is_top = idx[None, :] == inb[:, None]
+    is_above = idx[None, :] > inb[:, None]
+
+    # MP is forced linearly to zero between ~950 hPa and the surface INSIDE
+    # the sweep (l.779-785), before the QP update at the same level reads it.
+    # JTT=MAX(JTT,I) is fixed at the first band level the sweep meets coming
+    # down from INB, i.e. min(INB, highest band level) (>= 2 in 1-based form);
+    # every level below is anchored to MP(JTT) as computed there.
+    p_sfc = p_full[:, :1]
+    band = p_full > taper_p_fraction * p_sfc
+    # The band's VALUE blend is smooth (strict P > 0.949 P(1)); JTT, an index
+    # pick, reads the hard band.
+    band_w = 1.0 - sigmoid_switch(taper_p_fraction * p_sfc - p_full, taper_band_sharpness)
+    band_top = jnp.max(jnp.where(band, idx[None, :], -1), axis=-1)
+    jtt = jnp.maximum(jnp.minimum(band_top, inb), 1)
+    p_jtt = jnp.take_along_axis(p_full, jtt[:, None], axis=-1)
+    # Zero denominator whenever the two lowest levels share a pressure -- the
+    # oracle would produce NaN there.
+    ramp = _safe_divide(p_sfc - p_full, p_sfc - p_jtt, _DENOM_FLOOR)
+    inside = band_w * ((idx[None, :] <= jtt[:, None]) & (idx[None, :] > 0))
+    is_jtt = idx[None, :] == jtt[:, None]
 
     # -- 3. Downward sweep (oracle DO 400 I=INB,1,-1) ----------------------
     # Sequential: level i needs WATER(i+1), WT(i+1), MP(i+1), QP(i+1).  In
     # surface-first order that is DESCENDING index, so the scan runs reversed.
     def step(carry, x):
-        water_up, wt_up, mp_up, qp_up = carry
+        water_up, wt_up, mp_up, qp_up, anchor = carry
         (T_i, q_i, qs_i, wt_i, coeff_i, sigt_i, dph_i, dph_below_i,
          dp_below_i, wdtrain_i, ph_i, lv_i, h_i, h_below_i, gz_i, gz_up_i,
-         T_up_i, lv_up_i, qs_below_i, qp_top_i, surf_i, top_i) = x
+         T_up_i, lv_up_i, qs_below_i, qp_top_i, surf_i, top_i, above_i,
+         ramp_i, inside_i, is_jtt_i) = x
 
         qsm = 0.5 * (q_i + qp_up)
         afac = coeff_i * ph_i * (qs_i - qsm) / (
             _AFAC_DENOM_CONST + _AFAC_DENOM_QS_COEFF * ph_i * qs_i)
-        afac = jnp.maximum(afac, 0.0)
+        afac = positive_part_c1(afac, evap_sharpness)
         b6 = _HPA_TO_PA * dph_i * sigt_i * afac / wt_i
         c6 = (water_up * wt_up + wdtrain_i / sigd) / wt_i
         revap = 0.5 * (-b6 + _safe_sqrt(b6 * b6 + 4.0 * c6))
@@ -390,15 +416,20 @@ def emanuel_downdraft(
 
         # Hydrostatic downdraft mass flux + inertia (oracle 769-777).  Skipped
         # at the lowest level, where MP keeps its zero initialisation.
-        dhdp = jnp.maximum(
-            _safe_divide(h_i - h_below_i, dp_below_i, _DENOM_FLOOR), dhdp_min)
-        mp_raw = jnp.maximum(
+        dhdp_raw = _safe_divide(h_i - h_below_i, dp_below_i, _DENOM_FLOOR)
+        dhdp = (jnp.maximum(dhdp_raw, dhdp_min) if _hard(dhdp_sharpness)
+                else dhdp_min + smooth_relu(dhdp_raw - dhdp_min, dhdp_sharpness))
+        mp_raw = positive_part_c1(
             _HPA_TO_PA * ginv * lv_i * sigd
-            * _safe_divide(evap_i, dhdp, _DENOM_FLOOR), 0.0)
+            * _safe_divide(evap_i, dhdp, _DENOM_FLOOR), mp_sharpness)
         fac = _safe_divide(jnp.full_like(dph_below_i, inertia_scale_hPa),
                            dph_below_i, _DENOM_FLOOR)
         mp_i = jnp.where(surf_i, jnp.zeros_like(mp_raw),
                          (fac * mp_up + mp_raw) / (1.0 + fac))
+        anchor = jnp.where(is_jtt_i, mp_i, anchor)
+        mp_i = (jnp.where(inside_i > 0.5, anchor * ramp_i, mp_i)
+                if _hard(taper_band_sharpness)
+                else inside_i * anchor * ramp_i + (1.0 - inside_i) * mp_i)
 
         # QP (oracle 790-817).  Skipped at cloud top, where QP keeps its
         # initialisation QP(I) = Q(I-1) (line 501).
@@ -407,44 +438,57 @@ def emanuel_downdraft(
                   + _HPA_TO_PA * ginv * sigd * dph_i
                   * _safe_divide(evap_i, mp_i, _MP_FLOOR))
         qp_desc = _safe_divide(
-            gz_up_i - gz_i + qp_up * (lv_up_i + T_up_i * (_CL_ORACLE - cpd))
+            gz_up_i - gz_i + qp_up * (lv_up_i + T_up_i * (c_l - cpd))
             + cpd * (T_up_i - T_i),
-            lv_i + T_i * (_CL_ORACLE - cpd), _DENOM_FLOOR)
-        qp_new = jnp.where(mp_i > mp_up, qp_mix,
-                           jnp.where(mp_up > 0.0, qp_desc, qp_up))
-        qp_new = jnp.clip(qp_new, 0.0, qs_below_i)
+            lv_i + T_i * (c_l - cpd), _DENOM_FLOOR)
+        # Neither branch assigns when MP(I) <= MP(I+1) = 0: QP(I) keeps its
+        # initialisation Q(I-1) (l.500-502, 796-817), then the clip below.
+        w_mix = _strict_step_c1(mp_i - mp_up, mp_sharpness)
+        w_desc = _strict_step_c1(mp_up, mp_sharpness)
+        if _hard(mp_sharpness):
+            qp_new = jnp.where(w_mix > 0.5, qp_mix,
+                               jnp.where(w_desc > 0.5, qp_desc, qp_top_i))
+        else:
+            qp_new = w_mix * qp_mix + (1.0 - w_mix) * (
+                w_desc * qp_desc + (1.0 - w_desc) * qp_top_i)
+        qp_new = _clip_c1(qp_new, 0.0, qs_below_i, condensate_sharpness)
         # ``IF(I.EQ.INB)GOTO 400`` leaves QP(INB) at its INITIALISATION, which
         # is Q(I-1) (line 501) -- NOT the incoming carry QP(INB+1)=Q(INB).
         # The two differ by one level, and using the carry here would feed the
         # next step a shifted QP(I+1) that still runs and still looks sane.
         qp_i = jnp.where(top_i, qp_top_i, qp_new)
 
-        return ((water_i, wt_i, mp_i, qp_i),
+        # Above INB nothing runs: the DO 70 initialisations stand.
+        z0 = jnp.zeros_like(mp_i)
+        water_i = jnp.where(above_i, z0, water_i)
+        wt_i = jnp.where(above_i, jnp.full_like(wt_i, omtsnow), wt_i)
+        mp_i = jnp.where(above_i, z0, mp_i)
+        evap_i = jnp.where(above_i, z0, evap_i)
+        qp_i = jnp.where(above_i, qp_top_i, qp_i)
+
+        return ((water_i, wt_i, mp_i, qp_i, anchor),
                 (mp_i, qp_i, evap_i, water_i))
 
     # Carry above cloud top: WATER=0, WT=OMTSNOW, MP=0 (oracle 478-481) and
     # QP(INB+1)=Q(INB) from the QP initialisation at line 501.
     zeros = jnp.zeros_like(T[:, 0])
-    carry0 = (zeros, jnp.full_like(zeros, omtsnow), zeros, q[:, -1])
+    carry0 = (zeros, jnp.full_like(zeros, omtsnow), zeros, q[:, -1], zeros)
     xs = (T, q, qs, wt, coeff, sigt, dph, dph_below, dp_below, wdtrain,
           ph_hpa, lv, h_dry_static, h_below, gz, gz_above, T_above, lv_above,
           qs_below, _below(q), jnp.broadcast_to(is_surface, T.shape),
-          jnp.broadcast_to(is_top, T.shape))
+          jnp.broadcast_to(is_top, T.shape), jnp.broadcast_to(is_above, T.shape),
+          ramp, inside, jnp.broadcast_to(is_jtt, T.shape))
     xs = tuple(jnp.moveaxis(a, 1, 0) for a in xs)
     _carry, out = lax.scan(step, carry0, xs, reverse=True)
     mp, qp, evap, water = (jnp.moveaxis(a, 0, 1) for a in out)
 
-    mp = _taper_mass_flux_to_surface(
-        mp, p_full, taper_p_fraction=taper_p_fraction)
-    # ``IF(I.EQ.1)GOTO 360`` leaves MP at the lowest level at zero; enforced
-    # after the taper so neither path can reintroduce a surface mass flux.
-    mp = jnp.where(is_surface, 0.0, mp)
 
     # -- 4. Whole-downdraft gate (oracle 717: IF(EP(INB).LT.1e-4) skip) ----
     # A column that detrains no precipitation has no shaft at all.  Smooth so
     # the gate is differentiable rather than a cliff at the threshold.
     gate = jax.nn.sigmoid(
-        (ep[:, -1:] - ep_gate_threshold) / ep_gate_width)
+        (jnp.take_along_axis(ep, inb[:, None], axis=-1) - ep_gate_threshold)
+        / ep_gate_width)
     mp = mp * gate
     qp = qp * gate + q * (1.0 - gate)
     evap = evap * gate
@@ -462,7 +506,7 @@ def emanuel_downdraft(
     q_below = _below(q)
 
     dT_dt = (-sigd * lvcp * evap
-             + sigd * wt_above * (_CL_ORACLE - cpd) * water_above
+             + sigd * wt_above * (c_l - cpd) * water_above
              * (T_above - T) * dpinv * _PA_TO_HPA / cpn)
     dq_v_dt = (sigd * evap
                + g * (mp_above * (qp_above - q) - mp * (qp - q_below))
