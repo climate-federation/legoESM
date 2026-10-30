@@ -67,6 +67,28 @@ def _candidate_paths(
     return sorted({path for distance, gap, path in candidates if (distance, gap) == best})
 
 
+def _git_commit_failure(repo: Path, value: str, label: str) -> str | None:
+    resolved = _run("git", "cat-file", "-e", f"{value}^{{commit}}", cwd=repo, check=False)
+    if resolved.returncode:
+        return f"{label}: unresolved Git commit {value}"
+
+    ancestor = _run(
+        "git", "merge-base", "--is-ancestor", value, "HEAD", cwd=repo, check=False
+    )
+    if ancestor.returncode == 0:
+        return None
+
+    keep_refs = _run(
+        "git", "for-each-ref", "--format=%(objectname)", "refs/keep/", cwd=repo
+    ).stdout.splitlines()
+    if value in keep_refs:
+        return None
+    return (
+        f"{label}: Git commit {value} is neither an ancestor of HEAD "
+        "nor pinned under refs/keep/*"
+    )
+
+
 def _failures(repo: Path, doc: Path) -> list[str]:
     lines = doc.read_text(errors="replace").splitlines()
     failures: list[str] = []
@@ -75,9 +97,9 @@ def _failures(repo: Path, doc: Path) -> list[str]:
             value = match.group().lower()
             label = f"{doc.relative_to(repo)}:{index + 1}"
             if len(value) == 40:
-                result = _run("git", "cat-file", "-e", value, cwd=repo, check=False)
-                if result.returncode:
-                    failures.append(f"{label}: unresolved Git object {value}")
+                failure = _git_commit_failure(repo, value, label)
+                if failure is not None:
+                    failures.append(failure)
                 continue
             paths = _candidate_paths(repo, doc, lines, index, match.start())
             if len(paths) != 1:
@@ -112,16 +134,43 @@ def _init_plant_repo(tmp_path: Path) -> tuple[Path, Path, str, str]:
     return repo, doc, commit, digest
 
 
-def test_planted_valid_git_object_and_file_digest_pass(tmp_path: Path):
+def test_planted_ancestor_and_file_digest_pass(tmp_path: Path):
     repo, doc, _, _ = _init_plant_repo(tmp_path)
     assert _failures(repo, doc) == []
 
 
-def test_planted_unresolved_git_object_fails(tmp_path: Path):
+def _plant_side_branch_commit(repo: Path) -> str:
+    main_branch = _run("git", "branch", "--show-current", cwd=repo).stdout.strip()
+    _run("git", "checkout", "-q", "-b", "pre-rebase-side", cwd=repo)
+    side_payload = repo / "side.txt"
+    side_payload.write_text("pre-rebase side commit\n")
+    _run("git", "add", "side.txt", cwd=repo)
+    _run("git", "commit", "-q", "-m", "plant pre-rebase side commit", cwd=repo)
+    side_commit = _run("git", "rev-parse", "HEAD", cwd=repo).stdout.strip()
+    _run("git", "checkout", "-q", main_branch, cwd=repo)
+    return side_commit
+
+
+def test_planted_dangling_pre_rebase_side_branch_commit_fails(tmp_path: Path):
+    repo, doc, ancestor, _ = _init_plant_repo(tmp_path)
+    side_commit = _plant_side_branch_commit(repo)
+    doc.write_text(doc.read_text().replace(ancestor, side_commit))
+    assert "neither an ancestor of HEAD nor pinned" in "\n".join(_failures(repo, doc))
+
+
+def test_planted_refs_keep_commit_passes(tmp_path: Path):
+    repo, doc, ancestor, _ = _init_plant_repo(tmp_path)
+    side_commit = _plant_side_branch_commit(repo)
+    _run("git", "update-ref", "refs/keep/orca2_r345_plant", side_commit, cwd=repo)
+    doc.write_text(doc.read_text().replace(ancestor, side_commit))
+    assert _failures(repo, doc) == []
+
+
+def test_planted_unresolved_git_commit_fails(tmp_path: Path):
     repo, doc, commit, _ = _init_plant_repo(tmp_path)
     bad = ("0" if commit[0] != "0" else "1") + commit[1:]
     doc.write_text(doc.read_text().replace(commit, bad))
-    assert "unresolved Git object" in "\n".join(_failures(repo, doc))
+    assert "unresolved Git commit" in "\n".join(_failures(repo, doc))
 
 
 def test_planted_wrong_file_digest_fails(tmp_path: Path):

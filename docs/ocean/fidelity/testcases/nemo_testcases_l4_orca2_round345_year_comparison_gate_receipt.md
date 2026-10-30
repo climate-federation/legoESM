@@ -1,7 +1,8 @@
 # ORCA2 round 345 receipt — Decision-188 year-comparison gate
 
 Round: 345 (Codex). Base: `d3a0a329c6925786815c4684593e88ff7d58167d`.
-Review-resume base: `acef9cc04e314d10ce6e1bb7cbb795d32c5ffacb`.
+Review-resume base: `fe98377a856078fd9cef30d842061d9f2ce49628`
+(pre-rebase `acef9cc04`).
 Round-342 tool HEAD: `c983dc345a0b30c3ac5287d796986a069d981289`.
 Admitted arm-A binary SHA-256:
 `835f03b99a3c96e80d23f35c415d099fde292678ae30572e9c5412be4b67e16d`.
@@ -143,13 +144,15 @@ gate from `sha256sum`-equivalent byte hashing and immediately re-hashed.
 ## Verification
 
 The safety/restart implementation is committed as
-`4e175e60e1223eb2f98188d0f102ac037aa27ceb`; the retained-arm relocation fix is
-`95eb6b45a12508e4b2d32eef1f89a3af938a76cc`; and the paired-control, admission,
-and all-month envelope repair is
-`8e91ec01953e048586c296094361d9fd37df346c`. These values were copied from
-`git rev-parse`, and the document gate resolves every quoted git object.
+`88a294214393b7a1da74f06db1be49a40226de7c` (pre-rebase `4e175e60e`); the
+retained-arm relocation fix is
+`eb28fac1b7026a93c718d2a64fd82b7bf8f0aca2` (pre-rebase `95eb6b45a`); and the
+paired-control, admission, and all-month envelope repair is
+`15af7c3b09014792848a99f5cfbacbe28fb29ed5` (pre-rebase `8e91ec019`). These
+values were copied from `git rev-parse`, and the document gate resolves every
+quoted git object.
 The rank-local, input-preserving stub repair is
-`527dd75f1e043278d41693dc11a0cd9781cd65ec`.
+`2a6c1d842e83a326028d6843cb10f57d81666034` (pre-rebase `527dd75f1`).
 
 Focused round-345, inherited round-342 year, and ORCA2X pilot tests pass 23/23.
 The seven Decision-188 controls fire, including independent refusal of a zero
@@ -161,7 +164,8 @@ quarantine, and promotion from `refused/`. A separate existing-target probe
 refuses while retaining both targets in place and creating no refused copy.
 
 The clean default preflight was re-run at
-`b8db53c7d2fc60f1aa2615d83f6dcb742b1600bd` with evidence rooted under
+`c023d7ababcc494e785ff7798bc321e2d135ef1a` (pre-rebase `b8db53c7d`) with
+evidence rooted under
 `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/work/r345-resume2-preflight`.
 Its inherited round-342 MPI stub stops
 before the round-345 stub because this managed sandbox denies the Open MPI
@@ -185,7 +189,8 @@ The per-receipt citation gate passes its one citation with zero failures and
 its shifted-line plant refuses. The exact default ORCA2 landing battery passes
 155/155 in 1,104.74 seconds; the explicit private-import ratchet passes 6/6.
 
-Resume 5 is committed as `96d29d324f2c767932bddff0950a4cf15f89c4c7`.
+Resume 5 is committed as `8f4de8ac7ac7f9f35a7a79e9bdd642d4cf5fc640`
+(pre-rebase `96d29d324`).
 The repaired comparator was run read-only on the actual retained control: all
 728 restart files passed, with 28,392 common-variable data comparisons, zero
 unequal, no control-only variables, and exactly the two required arm-A-only
@@ -342,6 +347,21 @@ Decision-188 gate rows.
   stack from `d2ba162780b9f2b48eaeb640d9a524d8a5c0191d` onto
   `bf3ad4b42442900686648d9c432ed4e247e57663`. Replayed pre-receipt HEAD is
   `02c37e14463f0d84883784131e418555204ec435`. Conflict hunks: **none**.
+
+## Producer commits pinned under refs/keep/
+
+These producer identities are immutable fields in admitted evidence and must
+remain verbatim. Before landing, pin each object in the ORCA2 lane at the named
+keep ref:
+
+- `d6b2a3342c0c006cacbcd3289d5598f7d8d893ce` at
+  `refs/keep/orca2_r345_d6b2a3342` (admitted continuation manifests and
+  admission JSON).
+- `d2ba162780b9f2b48eaeb640d9a524d8a5c0191d` at
+  `refs/keep/orca2_r345_d2ba16278` (candidate and envelope metric JSON
+  worktree provenance).
+- `c983dc345a0b30c3ac5287d796986a069d981289` at
+  `refs/keep/orca2_r345_c983dc345a` (imported round-342 tool producer).
 
 ## Choices and review
 
