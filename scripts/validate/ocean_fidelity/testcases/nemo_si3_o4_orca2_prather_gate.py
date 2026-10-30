@@ -56,6 +56,31 @@ KINDS = {1: GRID, 2: STATE, 3: MOMENTS, 4: (), 5: STATE, 6: MOMENTS,
 PROJECTIONS = {(kind, name): name.replace(".", "_") for kind in KINDS for name in KINDS[kind]}
 REPO_ROOT = Path(__file__).resolve().parents[4]
 
+_JIT_ADVECT = jax.jit(
+    si3_dyn_adv_pra_orca2,
+    static_argnames=(
+        "kt", "config", "_plant_invert_sweep_order", "_plant_perturb_hbig_cap",
+        "_plant_omit_subcycle_lbc", "_plant_omit_donor_readjust",
+        "_plant_corrupt_receiver_flux", "_plant_wrong_nfd_sign",
+        "_plant_ignore_mppdelay",
+    ),
+)
+_JIT_ZAPSMALL = jax.jit(si3_var_zapsmall, static_argnames=("nn_hls", "nn_icesal"))
+_JIT_LBC = jax.jit(
+    si3_lbc_lnk_orca2,
+    static_argnames=("cd_nat", "psgn", "nn_hls", "ldfull", "_plant_wrong_nfd_sign"),
+)
+_JIT_STEP = jax.jit(
+    si3_o4_step,
+    static_argnames=(
+        "kt", "rn_uice", "rn_vice", "config", "apply_halos",
+        "_plant_invert_sweep_order", "_plant_perturb_hbig_cap",
+        "_plant_omit_subcycle_lbc", "_plant_omit_donor_readjust",
+        "_plant_corrupt_receiver_flux", "_plant_wrong_nfd_sign",
+        "_plant_ignore_mppdelay", "_plant_stop_gradient",
+    ),
+)
+
 
 def _refuse(message: str) -> ValueError:
     return ValueError(f"STATUS PLANT-FIRED: {message}")
@@ -220,33 +245,109 @@ def _state_and_diagnostics(state: SI3State, diagnostics: Any) -> dict[str, np.nd
     return out
 
 
-def _compare_stage(label: str, got: dict[str, np.ndarray], expected: dict[str, np.ndarray],
+def _array_metrics(actual: np.ndarray, expected: np.ndarray,
+                   mask: np.ndarray) -> dict[str, Any]:
+    """Return strict float64 bit metrics over one broadcast wet mask."""
+    actual = np.asarray(actual, dtype=np.float64)
+    expected = np.asarray(expected, dtype=np.float64)
+    if actual.shape != expected.shape:
+        raise _refuse(f"score shape mismatch: {actual.shape} != {expected.shape}")
+    selected = np.asarray(mask, dtype=bool)
+    while selected.ndim < actual.ndim:
+        selected = selected[..., None]
+    selected = np.broadcast_to(selected, actual.shape)
+    cells = int(np.count_nonzero(selected))
+    if cells == 0:
+        raise _refuse("score region has zero wet scalar cells")
+    unequal_mask = selected & (actual.view(np.uint64) != expected.view(np.uint64))
+    unequal = int(np.count_nonzero(unequal_mask))
+    first = None
+    if unequal:
+        first = [int(value) for value in np.argwhere(unequal_mask)[0]]
+    return {
+        "cells": cells,
+        "unequal": unequal,
+        "max_ulp": max_ulp_diff(actual, expected, selected, strict_signed_zero=True),
+        "first_index": first,
+    }
+
+
+def _new_row(step: int, record_kind: int, stage: str, region: str) -> dict[str, Any]:
+    return {
+        "step": step,
+        "record_kind": record_kind,
+        "stage": stage,
+        "region": region,
+        "cells": 0,
+        "unequal": 0,
+        "max_ulp": 0,
+        "first_differing_cell": None,
+    }
+
+
+def _add_metrics(row: dict[str, Any], field: str, metrics: dict[str, Any]) -> None:
+    row["cells"] += metrics["cells"]
+    row["unequal"] += metrics["unequal"]
+    row["max_ulp"] = max(row["max_ulp"], metrics["max_ulp"])
+    if row["first_differing_cell"] is None and metrics["first_index"] is not None:
+        row["first_differing_cell"] = {
+            "field": field,
+            "index": metrics["first_index"],
+        }
+
+
+def _compare_stage(step: int, record_kind: int, label: str,
+                   got: dict[str, np.ndarray], expected: dict[str, np.ndarray],
                    meta: dict[str, int], wet: np.ndarray, seam: np.ndarray,
-                   fold: np.ndarray) -> tuple[int, dict[str, int], list[str]]:
-    failures: list[str] = []
-    maximum = 0
-    regional = {f"{label}_seam": 0, f"{label}_fold": 0}
+                   fold: np.ndarray) -> list[dict[str, Any]]:
+    rows = {region: _new_row(step, record_kind, label, region)
+            for region in ("full", "seam", "fold")}
     for name in STATE:
         actual = got[name]
-        ulp = max_ulp_diff(actual, expected[name], strict_signed_zero=True)
-        maximum = max(maximum, ulp)
-        if ulp:
-            failures.append(f"{label}.{name}={ulp}")
         if name in RESIDUALS + TRANSPORT_DIAGNOSTICS:
             h = meta["nn_hls"]
-            masks = ((seam[h:-h, h:-h] & wet[h:-h, h:-h]),
-                     (fold[h:-h, h:-h] & wet[h:-h, h:-h]))
+            field_wet = wet[h:-h, h:-h]
+            masks = {
+                "full": field_wet,
+                "seam": seam[h:-h, h:-h] & field_wet,
+                "fold": fold[h:-h, h:-h] & field_wet,
+            }
         else:
-            masks = (seam & wet, fold & wet)
-        for region_name, mask in zip((f"{label}_seam", f"{label}_fold"), masks, strict=True):
-            regional[region_name] = max(
-                regional[region_name],
-                max_ulp_diff(actual, expected[name], mask, strict_signed_zero=True),
-            )
-    return maximum, regional, failures
+            masks = {"full": wet, "seam": seam & wet, "fold": fold & wet}
+        for region, mask in masks.items():
+            _add_metrics(rows[region], name, _array_metrics(actual, expected[name], mask))
+    return list(rows.values())
 
 
-def score_step(records: dict[tuple[int, int], dict[str, Any]], step: int, plant: str | None = None) -> dict[str, Any]:
+def _compare_moments(step: int, got: dict[str, np.ndarray],
+                     expected: dict[str, np.ndarray], wet: np.ndarray,
+                     seam: np.ndarray, fold: np.ndarray) -> list[dict[str, Any]]:
+    rows = {region: _new_row(step, 6, "advection_moments", region)
+            for region in ("full", "seam", "fold")}
+    masks = {"full": wet, "seam": seam & wet, "fold": fold & wet}
+    for name in MOMENTS:
+        for region, mask in masks.items():
+            _add_metrics(rows[region], name, _array_metrics(got[name], expected[name], mask))
+    return list(rows.values())
+
+
+def _control_row(step: int, out: tuple[Any, ...], cfl: dict[str, Any]) -> dict[str, Any]:
+    row = _new_row(step, 4, "controls", "full")
+    controls = (
+        ("delayed_cfl", np.asarray(out[19]), np.asarray(cfl["scalars"][3])),
+        ("current_cfl", np.asarray(out[20]), np.asarray(cfl["scalars"][2])),
+        ("icycle", np.asarray(out[21], dtype=np.float64),
+         np.asarray(cfl["meta"]["icycle"], dtype=np.float64)),
+        ("sweep", np.asarray((step - 1) % 2, dtype=np.float64),
+         np.asarray(cfl["meta"]["sweep"], dtype=np.float64)),
+    )
+    for name, actual, expected in controls:
+        _add_metrics(row, name, _array_metrics(actual, expected, np.asarray(True)))
+    return row
+
+
+def score_step(records: dict[tuple[int, int], dict[str, Any]], step: int,
+               plant: str | None = None, mode: str = "eager") -> dict[str, Any]:
     """Replay every registered O4 boundary and demand strict signed-zero 0 ULP."""
     grid_f = records[(step, 1)]["fields"]
     entry = records[(step, 2)]["fields"]
@@ -267,7 +368,8 @@ def score_step(records: dict[tuple[int, int], dict[str, Any]], step: int, plant:
         hooks["_plant_wrong_nfd_sign"] = "sx"
     elif plant == "omit-subcycle-lbc":
         hooks["_plant_omit_subcycle_lbc"] = True
-    out = si3_dyn_adv_pra_orca2(
+    advect = _JIT_ADVECT if mode == "jit" else si3_dyn_adv_pra_orca2
+    out = advect(
         kt=step, u_ice=jnp.asarray(grid_f["u_ice"]), v_ice=jnp.asarray(grid_f["v_ice"]),
         h_i=jnp.asarray(entry["h_i"]), h_s=jnp.asarray(entry["h_s"]), h_ip=jnp.asarray(entry["h_ip"]),
         ato_i=jnp.asarray(entry["ato_i"]), v_i=jnp.asarray(entry["v_i"]), v_s=jnp.asarray(entry["v_s"]),
@@ -285,7 +387,8 @@ def score_step(records: dict[tuple[int, int], dict[str, Any]], step: int, plant:
                        for name, value in zip(RESIDUALS, out[13:19], strict=True)})
     actual_moments = _flatten_moments(out[12])
 
-    zap = si3_var_zapsmall(
+    zapsmall = _JIT_ZAPSMALL if mode == "jit" else si3_var_zapsmall
+    zap = zapsmall(
         v_i=out[1], v_s=out[2], sv_i=out[3], oa_i=out[4], a_i=out[5], a_ip=out[6],
         v_ip=out[7], v_il=out[8], t_su=jnp.asarray(entry["t_su"]),
         h_i=jnp.asarray(entry["h_i"]), h_s=jnp.asarray(entry["h_s"]),
@@ -306,7 +409,8 @@ def score_step(records: dict[tuple[int, int], dict[str, Any]], step: int, plant:
         actual_zap[name] = _crop_interior(np.asarray(value), meta) if name in RESIDUALS else np.asarray(value)
 
     entry_state = _build_entry_state(entry, moment_entry, grid_f, cfg, float(cfl["scalars"][3]))
-    final_state, final_diag = si3_o4_step(
+    production_step = _JIT_STEP if mode == "jit" else si3_o4_step
+    final_state, final_diag = production_step(
         entry_state, grid, kt=step, sss_m=jnp.asarray(grid_f["sss_m"]),
         sst_m=jnp.asarray(grid_f["sst_m"]), rn_uice=0.5, rn_vice=0.5,
         config=cfg, apply_halos=False, **hooks,
@@ -315,7 +419,8 @@ def score_step(records: dict[tuple[int, int], dict[str, Any]], step: int, plant:
         actual_zap[name] = _crop_interior(np.asarray(getattr(final_diag, name)), meta)
     actual_lbc = dict(actual_zap)
     for name in ("a_i", "v_i", "v_s", "sv_i", "oa_i", "t_su", "e_i", "e_s", "szv_i"):
-        actual_lbc[name] = np.asarray(si3_lbc_lnk_orca2(
+        lbc = _JIT_LBC if mode == "jit" else si3_lbc_lnk_orca2
+        actual_lbc[name] = np.asarray(lbc(
             jnp.asarray(actual_zap[name]), "T", 1.0, nn_hls=meta["nn_hls"], ldfull=True))
     actual_final = _state_and_diagnostics(final_state, final_diag)
     for name in RESIDUALS + TRANSPORT_DIAGNOSTICS:
@@ -342,41 +447,58 @@ def score_step(records: dict[tuple[int, int], dict[str, Any]], step: int, plant:
         i, j = wet_indices[len(wet_indices) // 2]
         target[i, j, 0] = np.nextafter(target[i, j, 0], np.inf)
         expected_by_stage[plant_stage]["v_i"] = target
-    failures: list[str] = []
-    max_ulp = 0
-    regional_max: dict[str, int] = {}
-    for label, actual in (("adv", actual_adv), ("zapsmall", actual_zap),
-                          ("lbc", actual_lbc), ("step", actual_final)):
-        maximum, regional, stage_failures = _compare_stage(
-            label, actual, expected_by_stage[label], meta, wet, seam, fold)
-        max_ulp = max(max_ulp, maximum)
-        regional_max.update(regional)
-        failures.extend(stage_failures)
-    expected_moments = records[(step, 6)]["fields"]
-    for name, got in actual_moments.items():
-        ulp = max_ulp_diff(got, expected_moments[name], strict_signed_zero=True)
-        max_ulp = max(max_ulp, ulp)
-        if ulp:
-            failures.append(f"{name}={ulp}")
-        regional_max["adv_seam"] = max(regional_max["adv_seam"], max_ulp_diff(got, expected_moments[name], seam & wet, strict_signed_zero=True))
-        regional_max["adv_fold"] = max(regional_max["adv_fold"], max_ulp_diff(got, expected_moments[name], fold & wet, strict_signed_zero=True))
-    if int(np.asarray(out[21])) != cfl["meta"]["icycle"]:
-        failures.append("icycle")
-    if max_ulp_diff(np.asarray(out[19]), np.asarray(cfl["scalars"][3]), strict_signed_zero=True):
-        failures.append("delayed-cfl")
-    if max_ulp_diff(np.asarray(out[20]), np.asarray(cfl["scalars"][2]), strict_signed_zero=True):
-        failures.append("current-cfl")
-    if failures:
-        raise _refuse(f"O4 step {step} is not 0 ULP: {', '.join(failures[:12])}")
-    return {"step": step, "max_ulp": max_ulp, **regional_max, "sweep": "x-y" if step == 1 else "y-x"}
+    rows = [_control_row(step, out, cfl)]
+    rows.extend(_compare_stage(step, 5, "advection", actual_adv,
+                               expected_by_stage["adv"], meta, wet, seam, fold))
+    rows.extend(_compare_moments(step, actual_moments,
+                                 records[(step, 6)]["fields"], wet, seam, fold))
+    for record_kind, label, actual in (
+        (7, "zapsmall", actual_zap),
+        (8, "lbc", actual_lbc),
+        (9, "step", actual_final),
+    ):
+        rows.extend(_compare_stage(step, record_kind, label, actual,
+                                   expected_by_stage[label], meta, wet, seam, fold))
+    unequal = sum(row["unequal"] for row in rows)
+    max_ulp = max(row["max_ulp"] for row in rows)
+    if plant is not None and unequal:
+        first = next(row for row in rows if row["unequal"])
+        raise _refuse(
+            f"O4 step {step} plant is not 0 ULP: kind={first['record_kind']} "
+            f"stage={first['stage']} first={first['first_differing_cell']}"
+        )
+    return {
+        "step": step,
+        "sweep": "x-y" if step == 1 else "y-x",
+        "status": "PASS_O4_EXACT" if unequal == 0 else "O4_DEBT",
+        "cells": sum(row["cells"] for row in rows),
+        "unequal": unequal,
+        "max_ulp": max_ulp,
+        "rows": rows,
+    }
 
 
-def score_deck(root: str | Path, plant: str | None = None) -> dict[str, Any]:
+def score_deck(root: str | Path, plant: str | None = None,
+               mode: str = "eager") -> dict[str, Any]:
+    if mode not in {"eager", "jit"}:
+        raise ValueError(f"unknown O4 execution mode {mode!r}")
     set_policy(PrecisionPolicy.fp64())
     jax.config.update("jax_enable_x64", True)
     records = load_deck(root, plant if plant in {"header", "truncation", "step"} else None)
-    scores = [score_step(records, step, plant) for step in STEPS]
-    return {"status": "PASS", "criterion": "every exit, seam, and fold cell == 0 ULP", "scores": scores}
+    if mode == "eager":
+        with jax.disable_jit():
+            scores = [score_step(records, step, plant, mode) for step in STEPS]
+    else:
+        scores = [score_step(records, step, plant, mode) for step in STEPS]
+    status = "PASS_O4_EXACT" if all(score["status"] == "PASS_O4_EXACT" for score in scores) else "O4_DEBT"
+    return {
+        "status": status,
+        "criterion": "0 ULP on every NEMO-written wet cell; seam and fold reported separately",
+        "execution_mode": mode,
+        "jax_enable_x64": bool(jax.config.jax_enable_x64),
+        "dtype": "float64",
+        "scores": scores,
+    }
 
 
 def _sha(path: Path) -> str:
@@ -479,7 +601,9 @@ def admit_evidence(root: str | Path, expect_commit: str | None = None,
     if actual != expected:
         raise _refuse(f"record set mismatch: missing={sorted(expected-actual)} extra={sorted(actual-expected)}")
     score_plant = "one-bit" if plant == "wet-1ulp" else None
-    score = score_deck(records, score_plant)
+    score = score_deck(records, score_plant, mode="eager")
+    if score["status"] != "PASS_O4_EXACT":
+        raise _refuse("admitted O4 evidence is not exact")
     checksums = root / "manifest/artifacts.sha256"
     if not checksums.is_file():
         raise _refuse("missing artifact checksum list")
@@ -497,6 +621,7 @@ def main() -> None:
     parser.add_argument("records", type=Path, nargs="?")
     parser.add_argument("--admit-evidence", type=Path)
     parser.add_argument("--expect-commit")
+    parser.add_argument("--mode", choices=("eager", "jit"), default="eager")
     parser.add_argument("--plant", choices=("header", "truncation", "step", "one-bit", "one-bit-zapsmall", "one-bit-lbc", "one-bit-step",
                                              "invert-sweep", "wrong-fold-sign", "omit-subcycle-lbc",
                                              "producer", "binary", "checksum", "missing-complete", "error-log", "restart", "missing-frame", "wet-1ulp"))
@@ -504,10 +629,12 @@ def main() -> None:
     if args.admit_evidence:
         result = admit_evidence(args.admit_evidence, args.expect_commit, args.plant)
     elif args.records:
-        result = score_deck(args.records, args.plant)
+        result = score_deck(args.records, args.plant, args.mode)
     else:
         parser.error("records or --admit-evidence is required")
     print(json.dumps(result, indent=2, sort_keys=True))
+    if result.get("status") == "O4_DEBT":
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":

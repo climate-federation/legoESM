@@ -50,7 +50,21 @@ def test_o4_record_schema_and_reader_plants(records: Path) -> None:
 
 
 def test_o4_production_scorer_and_plants(records: Path) -> None:
-    assert score_deck(records)["status"] == "PASS"
+    result = score_deck(records)
+    assert result["status"] == "PASS_O4_EXACT"
+    assert result["execution_mode"] == "eager"
+    assert result["dtype"] == "float64"
+    assert len(result["scores"]) == 2
+    for step in result["scores"]:
+        assert len(step["rows"]) == 16
+        assert step["unequal"] == 0
+        assert step["max_ulp"] == 0
+        assert all(row["cells"] > 0 for row in step["rows"])
+        assert all(row["first_differing_cell"] is None for row in step["rows"])
+    compiled = score_deck(records, mode="jit")
+    assert compiled["status"] == "PASS_O4_EXACT"
+    assert compiled["execution_mode"] == "jit"
+    assert compiled["scores"] == result["scores"]
     for plant in ("one-bit", "one-bit-zapsmall", "one-bit-lbc", "one-bit-step",
                   "invert-sweep", "wrong-fold-sign", "omit-subcycle-lbc"):
         with pytest.raises(ValueError, match="STATUS PLANT-FIRED"):
@@ -58,7 +72,7 @@ def test_o4_production_scorer_and_plants(records: Path) -> None:
 
 
 def test_o4_stub_records_are_independent_and_score(independent_records: Path) -> None:
-    assert score_deck(independent_records)["status"] == "PASS"
+    assert score_deck(independent_records)["status"] == "PASS_O4_EXACT"
     stub = (HERE/"stub_nemo.sh").read_text()
     assert "--nontrivial-score-fixture" not in stub
     assert "write_stub_records.py" not in stub  # path is supplied explicitly by run.sh
