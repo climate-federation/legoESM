@@ -1445,6 +1445,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         default=None,
                         help="CAM6 conv_water_frac_limit (bounds 1e-4..0.1); "
                              "None = 0.01 (CAM6 namelist)")
+    parser.add_argument("--cloud-cam6-snow-in-rad", dest="cloud_cam6_snow_in_rad",
+                        action=argparse.BooleanOptionalAction, default=False,
+                        help="CAM6 snow in the radiation (cloud scheme "
+                             "cam6_clubb, McICA): snow fraction, in-cloud snow "
+                             "path and MG2 snow diameter through the Mitchell "
+                             "ice optics. Default off.")
+    parser.add_argument("--cloud-cam6-snow-optics-file",
+                        dest="cloud_cam6_snow_optics_file", type=str, default="",
+                        help="path of CESM inputdata "
+                             "atm/cam/physprops/iceoptics_c080917.nc (Mitchell "
+                             "table, sha256 checked) for --cloud-cam6-snow-in-rad")
     parser.add_argument("--cloud-cover-condensate-q-ref",
                         dest="cloud_cover_condensate_q_ref", type=float,
                         default=None,
@@ -3282,6 +3293,8 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         cloud_cam6_rhmaxis=args.cloud_cam6_rhmaxis,
         cloud_cam6_conv_water_in_rad=args.cloud_cam6_conv_water_in_rad,
         cloud_cam6_conv_water_frac_limit=args.cloud_cam6_conv_water_frac_limit,
+        cloud_cam6_snow_in_rad=args.cloud_cam6_snow_in_rad,
+        cloud_cam6_snow_optics_file=args.cloud_cam6_snow_optics_file,
         cloud_cap_floor_on=args.cloud_cap_floor_on,
         cloud_cap_floor_lat_deg=args.cloud_cap_floor_lat_deg,
         cloud_cap_floor_p_max_pa=args.cloud_cap_floor_p_max_pa,

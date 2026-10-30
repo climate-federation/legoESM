@@ -71,6 +71,7 @@ def compute_optical_properties(
     radius_eff_ice: Array,
     ibnd: Array,
     absorption_only: bool = False,
+    cloud_snow=None,
 ) -> dict[str, Array]:
   """Computes the optical properties of clouds from lookup tables.
 
@@ -96,6 +97,9 @@ def compute_optical_properties(
       atmospheric grid cell [m], bulk-density (500 kg/m^3) PSD convention; the
       table coordinate is CAM6's solid-ice diameter ``2 r 500/917``.
     ibnd: The spectral band index.
+    cloud_snow: ``None`` or ``(path [kg/m2], effective diameter [micron],
+      MitchellIceOptics)``: CAM6 snow, added as a third phase with the
+      Mitchell table (its bands are in RRTMGP order, so ``ibnd`` indexes it).
     absorption_only: If True, return the absorption-only (no-scattering)
       properties RTE-RRTMGP computes for a ``ty_optical_props_1scl`` target
       (mo_cloud_optics_rrtmgp.F90:527-541): optical depth
@@ -179,13 +183,33 @@ def compute_optical_properties(
     )
     optical_props.append(props)
 
+  if cloud_snow is not None:
+    # CAM6 snow (radiation.F90:969-993, 1057-1067): Mitchell optics at the
+    # snow diameter, summed with the cloud's tau, tau*w and tau*w*g.  CAM
+    # weights each part by its fraction over cldfprime; the caller has put
+    # those weights into the paths, so the sum here is the same thing.  LW:
+    # Mitchell's absorption optical depth (capped at 50 per band, :654).
+    from legoesm.atmosphere.physics.radiation.rrtmgp.optics import (
+        mitchell_ice_optics as mio)
+    snow_path, snow_d_eff, snow_table = cloud_snow
+    if absorption_only:
+      snow_abs = mio.mitchell_band_lw_abs_od(
+          snow_table, ibnd, snow_path, snow_d_eff)
+    else:
+      s_tau, s_tau_w, s_tau_w_g = mio.mitchell_band_sw(
+          snow_table, ibnd, snow_path, snow_d_eff)
+      optical_props.append(
+          {'tau': s_tau, 'tau_ssa': s_tau_w, 'tau_ssa_g': s_tau_w_g})
+
   if absorption_only:
     liq, ice = optical_props
     tau_abs = (liq['tau'] - liq['tau_ssa']) + (ice['tau'] - ice['tau_ssa'])
+    if cloud_snow is not None:
+      tau_abs = tau_abs + snow_abs
     zero = jnp.zeros_like(tau_abs)
     return {'optical_depth': tau_abs, 'ssa': zero, 'asymmetry_factor': zero}
 
-  combined_props = jax.tree.map(jnp.add, *optical_props)
+  combined_props = jax.tree.map(lambda *xs: sum(xs[1:], xs[0]), *optical_props)
   # AD-safe denominators (restored from commit 59407953 after AIMIP-#312
   # merge reverted it).  The previous ``safe_tau = jnp.maximum(tau, tiny)``
   # pattern is forward-safe but NOT backward-safe under fp64: the local
@@ -207,3 +231,4 @@ def compute_optical_properties(
           eps=_EPSILON, fill=0.0,
       ),
   }
+

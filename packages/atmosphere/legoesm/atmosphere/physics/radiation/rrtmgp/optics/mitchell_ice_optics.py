@@ -160,3 +160,36 @@ def mitchell_lw_abs_od(table: MitchellIceOptics, path, d_eff):
     path = jnp.where(on, path, 0.0)
     absor = jax.vmap(lambda row: cam_lininterp.interp1(table.d_eff, row, d_eff))(table.lw_abs)
     return jnp.where(on, jnp.minimum(path * absor, _LW_ABS_OD_MAX), 0.0)
+
+
+def mitchell_band_sw(table: MitchellIceOptics, ibnd, path, d_eff):
+    """``mitchell_sw_optics`` for ONE SW band ``ibnd`` (RRTMGP order; may be
+    traced): (tau, tau_w, tau_w_g), each shaped like ``path``.  Used per
+    g-point by the solver, which needs only its own band."""
+    path = jnp.asarray(path)
+    d_eff = jnp.asarray(d_eff)
+    on = _on(path, d_eff)
+    d_eff = jnp.where(on, d_eff, table.d_eff[0])
+    path = jnp.where(on, path, 0.0)
+    ext, ssa, asm = (cam_lininterp.interp1(table.d_eff, t[ibnd], d_eff)
+                     for t in (table.sw_ext, table.sw_ssa, table.sw_asm))
+    tau = path * ext
+    tau_w = tau * ssa
+    tau_w_g = tau_w * asm
+    return tuple(jnp.where(on, x, 0.0) for x in (tau, tau_w, tau_w_g))
+
+
+def mitchell_band_lw_abs_od(table: MitchellIceOptics, ibnd, path, d_eff):
+    """``mitchell_lw_abs_od`` for ONE LW band ``ibnd`` (may be traced)."""
+    path = jnp.asarray(path)
+    d_eff = jnp.asarray(d_eff)
+    on = _on(path, d_eff)
+    d_eff = jnp.where(on, d_eff, table.d_eff[0])
+    path = jnp.where(on, path, 0.0)
+    absor = cam_lininterp.interp1(table.d_eff, table.lw_abs[ibnd], d_eff)
+    return jnp.where(on, jnp.minimum(path * absor, _LW_ABS_OD_MAX), 0.0)
+
+
+def cast_table(table: MitchellIceOptics, dtype) -> MitchellIceOptics:
+    """The table in the solver's working dtype."""
+    return MitchellIceOptics(*(jnp.asarray(a, dtype=dtype) for a in table))

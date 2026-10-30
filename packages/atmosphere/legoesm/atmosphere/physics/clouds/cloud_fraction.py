@@ -217,6 +217,12 @@ class CloudProperties(NamedTuple):
     # by ~10 W/m2 globally against the subcolumn ICA treatment (#1521).
     lwp_lw: jnp.ndarray | None = None
     iwp_lw: jnp.ndarray | None = None
+    # CAM6 snow for the radiation (``CloudConfig.cam6_snow_in_rad``, else
+    # ``None``): snow cloud fraction cldfsnow, in-cloud snow path icswp
+    # [kg/m2] and snow effective diameter des [micron].
+    cldfsnow: jnp.ndarray | None = None
+    icswp: jnp.ndarray | None = None
+    des: jnp.ndarray | None = None
 
     def to_rrtmg_kwargs(self) -> dict:
         """Return cloud kwargs dict for ``rrtmgp_radiation`` / ``solve_columns``.
@@ -997,6 +1003,47 @@ _CW_IC_LIMIT = 1.0e-12       # conv_water.F90 ic_limit [kg/kg]
 _CW_ICE_RATIO_EPS = 1.0e-36  # conv_water.F90 wrk1 denominator guard [kg/kg]
 _CD_MIN_CLD = 1.0e-4         # cloud_diagnostics.F90:391 floor on CLD
 _CD_IC_MAX = 5.0e-3          # cloud_diagnostics.F90:391 in-cloud cap [kg/kg]
+# CAM6 snow for the radiation (micro_mg_cam.F90, micro_mg_utils.F90)
+_SN_MINCLD = 1.0e-4          # micro_mg_utils mincld; cldfsnow thresholds :2311-2317
+_SN_QLIQ_MIN = 1.0e-10       # :2313 no-liquid threshold [kg/kg]
+_SN_QS_FRAC = 1.0e-6         # :2317 snow that gets the 0.25 fraction [kg/kg]
+_SN_FRAC_NOCLD = 0.25        # :2318
+_SN_CONCLD_MAX = 0.80        # clubb_intr.F90:2512 concld cap
+_SN_QS_DES = 1.0e-7          # :2576 snow mass needed for a diameter [kg/kg]
+_MG2_RHOSN = 250.0           # micro_mg_utils rhosn, bulk snow density [kg/m3]
+_MG2_RHOWS = 917.0           # micro_mg_utils rhows, solid ice density [kg/m3]
+
+
+def cam6_snow_for_radiation(cld, deepcu, q_liq, q_snow, n_snow, T, p_full, dp):
+    """CAM6 snow fields the radiation reads: ``(cldfsnow, icswp, des)``.
+
+    micro_mg_cam.F90 (cam_cesm2_1_rel_60): cldfsnow at :2309-2319 (starts
+    from CLD; 0 where there is cloud but no convective cloud and no liquid;
+    0.25 where there is no cloud but snow above 1e-6 kg/kg), the in-cloud
+    snow path ``icswp = q_s/max(mincld, cldfsnow) dp/g`` [kg/m2] at :2321,
+    and the snow effective diameter ``des = 3 rhosn/rhows avg_diameter(q_s,
+    n_s rho, rho, rhosn)`` in micron at :2576-2583, :2639, 0 where q_s is
+    below 1e-7.  ``concld = min(deepcu, 0.8)`` is clubb_intr.F90:2512 with
+    CLUBB's cloud_frac still equal to alst there.  ``n_snow`` is per kg;
+    ``rho = p/(R_d T)`` as CAM (it cancels in the diameter).
+
+    One guard beyond CAM: a cell with snow mass but zero snow number (MG2
+    keeps the number bounded away from zero, legoESM's tracer need not)
+    gets des = 0, i.e. no snow optics, instead of an infinite diameter.
+    """
+    concld = jnp.minimum(deepcu, _SN_CONCLD_MAX)
+    cldfsnow = jnp.where((cld > _SN_MINCLD) & (concld < _SN_MINCLD)
+                         & (q_liq < _SN_QLIQ_MIN), 0.0, cld)
+    cldfsnow = jnp.where((cldfsnow <= _SN_MINCLD) & (q_snow > _SN_QS_FRAC),
+                         _SN_FRAC_NOCLD, cldfsnow)
+    icswp = q_snow / jnp.maximum(_SN_MINCLD, cldfsnow) * dp / constants.g
+    rho = p_full / (constants.R_d * T)
+    on = (q_snow >= _SN_QS_DES) & (n_snow > 0.0)
+    qs_on = jnp.where(on, q_snow, 1.0)
+    n_on = jnp.where(on, n_snow, 1.0)
+    dsout = (jnp.pi * _MG2_RHOSN * (n_on * rho) / (qs_on * rho)) ** (-1.0 / 3.0)
+    des = jnp.where(on, dsout * 3.0 * _MG2_RHOSN / _MG2_RHOWS * 1.0e6, 0.0)
+    return cldfsnow, icswp, des
 
 
 def cam6_conv_water_4rad(ls_liq, ls_ice, ast, dp_frac, dp_icwmr, frac_limit,
@@ -1067,6 +1114,8 @@ def compute_cloud_properties(
     mg2_ice_dcs_m: float | None = None,
     mg2_ice_slope_log_width: float | None = None,
     subcolumn_inhomogeneity: bool = False,
+    q_snow: jnp.ndarray | None = None,
+    n_snow: jnp.ndarray | None = None,
 ) -> CloudProperties:
     """Compute diagnostic cloud fraction and cloud optical properties.
 
@@ -1162,6 +1211,7 @@ def compute_cloud_properties(
 
     # --- Cloud fraction ---
     _ast_cam6 = None  # CAM6 stratiform fraction max(alst, aist); cam6_clubb only
+    _deepcu_cam6 = None
     if config.scheme == "xu_randall":
         q_c = jnp.zeros_like(T) if q_cloud is None else q_cloud
         q_i = jnp.zeros_like(T) if q_ice is None else q_ice
@@ -1236,6 +1286,7 @@ def compute_cloud_properties(
             deepcu = cam6_deep_convective_fraction(
                 conv_mass_flux_up, conv_icwmr, config)
         _ast_cam6 = jnp.maximum(alst, aist)
+        _deepcu_cam6 = deepcu
         cf = jnp.minimum(_ast_cam6 + deepcu, 1.0)
     else:
         raise ValueError(
@@ -1478,6 +1529,20 @@ def compute_cloud_properties(
         _cld = jnp.maximum(_CD_MIN_CLD, cf)
         lwp = jnp.minimum(_totg_liq / _cld, _CD_IC_MAX) * dp / constants.g * cf
         iwp = jnp.minimum(_totg_ice / _cld, _CD_IC_MAX) * dp / constants.g * cf
+    _cldfsnow = _icswp = _des = None
+    if config.cam6_snow_in_rad:
+        if config.scheme != "cam6_clubb":
+            raise ValueError(
+                "CloudConfig.cam6_snow_in_rad needs scheme 'cam6_clubb' "
+                f"(CAM6's snow fraction reads CLD and deepcu); got {config.scheme!r}.")
+        if q_snow is None or n_snow is None:
+            raise ValueError(
+                "CloudConfig.cam6_snow_in_rad needs the snow mass and number "
+                "(q_snow, n_snow); the run carries no prognostic two-moment "
+                "snow, or the caller did not pass it.")
+        _cldfsnow, _icswp, _des = cam6_snow_for_radiation(
+            cf, _deepcu_cam6, q_c, jnp.maximum(q_snow, 0.0),
+            jnp.maximum(n_snow, 0.0), T, p_full, dp)
 
     # Effective radii (constant for now): ``broadcast_to`` produces a
     # zero-copy logical view, whereas ``jnp.full_like(T, scalar)``
@@ -1784,6 +1849,9 @@ def compute_cloud_properties(
         r_eff_ice=r_eff_ice,
         lwp_lw=lwp_lw,
         iwp_lw=iwp_lw,
+        cldfsnow=_cldfsnow,
+        icswp=_icswp,
+        des=_des,
     )
 
 

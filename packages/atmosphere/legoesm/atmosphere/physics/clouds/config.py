@@ -426,6 +426,16 @@ class CloudConfig(NamedTuple):
     # ported.
     cam6_conv_water_in_rad: int = 0
     cam6_conv_water_frac_limit: float = 0.01
+    # CAM6 snow in the radiation (micro_mg_cam.F90:2306-2321 cldfsnow and
+    # icswp, :2576-2583 and :2639 the snow diameter des; radiation.F90:928-1067
+    # cldfprime = max(CLD, cldfsnow), fraction-weighted cloud + snow optics;
+    # cloud_rad_props.F90:424-443, 594-608 snow through the Mitchell ice
+    # optics).  Scheme "cam6_clubb" with McICA only.  False (default) = no
+    # snow in the radiation, as before.  The Mitchell table file is
+    # CESM inputdata atm/cam/physprops/iceoptics_c080917.nc (sha256 pinned in
+    # mitchell_ice_optics.ICEOPTICS_SHA256), given by path.
+    cam6_snow_in_rad: bool = False
+    cam6_snow_optics_file: str = ""
 
 
 def build_cloud_config(
@@ -463,6 +473,8 @@ def build_cloud_config(
     cam6_rhmaxis: float | None = None,
     cam6_conv_water_in_rad: int | None = None,
     cam6_conv_water_frac_limit: float | None = None,
+    cam6_snow_in_rad: bool | None = None,
+    cam6_snow_optics_file: str | None = None,
 ) -> "CloudConfig":
     """Assemble a ``CloudConfig`` from the ``ExperimentConfig``-level cloud
     fields (``cloud_scheme`` + the optional ``cloud_rh_crit`` /
@@ -518,7 +530,9 @@ def build_cloud_config(
     for _name, _val in (("cam6_rhmini", cam6_rhmini), ("cam6_rhmaxi", cam6_rhmaxi),
                         ("cam6_rhminis", cam6_rhminis), ("cam6_rhmaxis", cam6_rhmaxis),
                         ("cam6_conv_water_in_rad", cam6_conv_water_in_rad),
-                        ("cam6_conv_water_frac_limit", cam6_conv_water_frac_limit)):
+                        ("cam6_conv_water_frac_limit", cam6_conv_water_frac_limit),
+                        ("cam6_snow_in_rad", cam6_snow_in_rad),
+                        ("cam6_snow_optics_file", cam6_snow_optics_file)):
         if _val is not None:
             overrides[_name] = _val
     for _name, _val in (("cap_floor_on", cap_floor_on), ("cap_floor_lat_deg", cap_floor_lat_deg),

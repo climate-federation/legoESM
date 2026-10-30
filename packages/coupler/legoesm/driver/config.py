@@ -1060,6 +1060,13 @@ class ExperimentConfig(NamedTuple):
     # alone.  cloud_scheme='cam6_clubb' only.  None frac_limit => 0.01.
     cloud_cam6_conv_water_in_rad: int = 0
     cloud_cam6_conv_water_frac_limit: float | None = None
+    # CAM6 snow in the radiation (CloudConfig.cam6_snow_in_rad): the snow
+    # fraction cldfsnow, in-cloud snow path and MG2 snow diameter, through the
+    # Mitchell ice optics, combined with the cloud by fraction under McICA.
+    # Needs cloud_scheme='cam6_clubb', cloud_vertical_overlap_optics='mcica'
+    # and the path of CESM inputdata atm/cam/physprops/iceoptics_c080917.nc.
+    cloud_cam6_snow_in_rad: bool = False
+    cloud_cam6_snow_optics_file: str = ""
     # Polar-cap radiative cloud floor (CloudConfig.cap_floor_*): an attribution
     # lever for the 2026-09 Arctic self-isolation A/B, radiation-only, MPAS /
     # spectral standalone radiation path only (the FV pipeline refuses it).
@@ -4909,6 +4916,16 @@ class ExperimentConfig(NamedTuple):
                 f"{', '.join(_cam6_rh_set)} set but cloud_scheme="
                 f"{self.cloud_scheme!r}: the CAM6 aist ramp is read only by "
                 "cloud_scheme='cam6_clubb' (otherwise silently inert).")
+        if self.cloud_cam6_snow_in_rad and (
+                self.cloud_scheme != "cam6_clubb"
+                or self.cloud_vertical_overlap_optics != "mcica"
+                or not self.cloud_cam6_snow_optics_file):
+            errors.append(
+                "cloud_cam6_snow_in_rad=True needs cloud_scheme='cam6_clubb', "
+                "cloud_vertical_overlap_optics='mcica' and "
+                "cloud_cam6_snow_optics_file (iceoptics_c080917.nc); got "
+                f"{self.cloud_scheme!r}, {self.cloud_vertical_overlap_optics!r}, "
+                f"{self.cloud_cam6_snow_optics_file!r}.")
         if self.cloud_cam6_conv_water_in_rad not in (0, 1):
             errors.append(
                 "cloud_cam6_conv_water_in_rad must be 0 (off) or 1 (CAM6 "

@@ -234,12 +234,24 @@ def _compute_optimal_lw_secant(
 def _gpoint_cloud_paths(igpt, cloud_path_liq, cloud_path_ice, cloud_path_fn):
   """Cloud water paths seen by g-point ``igpt``.
 
-  ``cloud_path_fn(igpt) -> (liq, ice)`` supplies McICA paths (each g-point
-  its own cloud subcolumn); without it every g-point sees the same paths.
+  ``cloud_path_fn(igpt) -> (liq, ice[, snow])`` supplies McICA paths (each
+  g-point its own cloud subcolumn); without it every g-point sees the same
+  paths.
   """
   if cloud_path_fn is None:
     return cloud_path_liq, cloud_path_ice
-  return cloud_path_fn(igpt)
+  paths = cloud_path_fn(igpt)
+  return paths[0], paths[1]
+
+
+def _gpoint_snow(igpt, cloud_snow, cloud_path_fn):
+  """``{'cloud_snow': (path, d_eff, table)}`` for g-point ``igpt`` (the McICA
+  path when ``cloud_path_fn`` samples snow too), or ``{}`` without snow."""
+  if cloud_snow is None:
+    return {}
+  if cloud_path_fn is None:
+    return {'cloud_snow': cloud_snow}
+  return {'cloud_snow': (cloud_path_fn(igpt)[2],) + tuple(cloud_snow[1:])}
 
 
 def _accumulate_over_gpoints(step_fn, n_gpt, init_val, gpoint_batch_size,
@@ -364,8 +376,13 @@ def solve_lw(
     cloud_path_fn=None,
     clear_sky: bool = False,
     level_temperature: Array | None = None,
+    cloud_snow=None,
 ) -> dict[str, Array]:
   """Solves two-stream radiative transfer equation over the longwave spectrum.
+
+  ``cloud_snow``: ``None`` or ``(snow path, snow diameter [micron], Mitchell
+  table)`` on the cloud paths' grid (CAM6 snow in the radiation); with
+  ``cloud_path_fn`` the snow path per g-point is the fn's third output.
 
   Local optical properties like optical depth, single-scattering albedo, and
   asymmetry factor are computed using an optics library and transformed to
@@ -533,6 +550,7 @@ def solve_lw(
   def step_fn(igpt, cumulative_flux):
     liq_g, ice_g = _gpoint_cloud_paths(
         igpt, cloud_path_liq, cloud_path_ice, cloud_path_fn)
+    snow_kw = _gpoint_snow(igpt, cloud_snow, cloud_path_fn)
     if not clear_sky:
       # Compute the LW optics once per g-point; reuse for both the
       # optimal-angle secant and the source-and-properties solve.
@@ -540,7 +558,7 @@ def solve_lw(
           pressure, temperature, molecules, igpt, vmr_fields,
           cloud_r_eff_liq, liq_g,
           cloud_r_eff_ice, ice_g,
-          cloud_fraction=cloud_fraction,
+          cloud_fraction=cloud_fraction, **snow_kw,
       )
       fluxes = _lw_gpoint_fluxes(igpt, precomputed_props, liq_g, ice_g)
     else:
@@ -551,7 +569,7 @@ def solve_lw(
           pressure, temperature, molecules, igpt, vmr_fields)
       cloudy_props = optics_lib.add_cloud_optical_properties(
           igpt, gas_props, True, cloud_r_eff_liq, liq_g,
-          cloud_r_eff_ice, ice_g, cloud_fraction=cloud_fraction)
+          cloud_r_eff_ice, ice_g, cloud_fraction=cloud_fraction, **snow_kw)
       sfc_t = sfc_temperature
       if isinstance(sfc_t, float):
         sfc_t = sfc_t * jnp.ones(temperature.shape[:2], dtype=temperature.dtype)
@@ -610,6 +628,7 @@ def compute_sw_optical_props_gpt(
     aerosol_optical_depth: Array | None,
     aerosol_single_scattering_albedo: float | Array,
     aerosol_asymmetry_factor: float | Array,
+    cloud_snow=None,
 ) -> dict[str, Array]:
   """Per-g-point shortwave optical properties (optical_depth / ssa / asymmetry).
 
@@ -629,6 +648,7 @@ def compute_sw_optical_props_gpt(
       cloud_r_eff_ice,
       cloud_path_ice,
       cloud_fraction=cloud_fraction,
+      **({} if cloud_snow is None else {'cloud_snow': cloud_snow}),
   )
   return _mix_sw_aerosol_and_clip(
       igpt, optics_lib, sw_optical_props, aerosol_optical_depth,
@@ -844,8 +864,11 @@ def solve_sw(
     gpoint_checkpoint: bool = True,
     cloud_path_fn=None,
     clear_sky: bool = False,
+    cloud_snow=None,
 ) -> dict[str, Array]:
   """Solves the two-stream radiative transfer equation for shortwave.
+
+  ``cloud_snow``: as in :func:`solve_lw`.
 
   Local optical properties like optical depth, single-scattering albedo, and
   asymmetry factor are computed using an optics library and transformed to
@@ -965,6 +988,7 @@ def solve_sw(
   def step_fn(igpt, partial_fluxes):
     liq_g, ice_g = _gpoint_cloud_paths(
         igpt, cloud_path_liq, cloud_path_ice, cloud_path_fn)
+    snow_kw = _gpoint_snow(igpt, cloud_snow, cloud_path_fn)
     if not clear_sky:
       # Per-g-point gas+cloud+aerosol optics (shared with the MC ray tracer).
       sw_optical_props = compute_sw_optical_props_gpt(
@@ -972,6 +996,7 @@ def solve_sw(
           cloud_r_eff_liq, liq_g, cloud_r_eff_ice, ice_g,
           cloud_fraction, aerosol_optical_depth,
           aerosol_single_scattering_albedo, aerosol_asymmetry_factor,
+          **snow_kw,
       )
       sw_fluxes = _sw_gpoint_fluxes(igpt, sw_optical_props)
     else:
@@ -981,7 +1006,7 @@ def solve_sw(
           pressure, temperature, molecules, igpt, vmr_fields)
       cloudy_props = optics_lib.add_cloud_optical_properties(
           igpt, gas_props, False, cloud_r_eff_liq, liq_g,
-          cloud_r_eff_ice, ice_g, cloud_fraction=cloud_fraction)
+          cloud_r_eff_ice, ice_g, cloud_fraction=cloud_fraction, **snow_kw)
       _aer = (aerosol_optical_depth, aerosol_single_scattering_albedo,
               aerosol_asymmetry_factor)
       sw_fluxes = _sw_gpoint_fluxes(

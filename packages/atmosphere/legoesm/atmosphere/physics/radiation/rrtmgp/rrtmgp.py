@@ -613,6 +613,9 @@ class RRTMGP:
       clear_sky: bool = False,
       o3_top_vmr: jnp.ndarray | None = None,
       cloud_rho_ice: float | None = None,
+      cloud_path_snow: jnp.ndarray | None = None,
+      cloud_d_eff_snow: jnp.ndarray | None = None,
+      snow_optics=None,
   ):
       """Compute radiation for legoESM column arrays.
 
@@ -695,6 +698,14 @@ class RRTMGP:
           ``rhoi`` for the ice PSD and the optics size ``deffi =
           effi*rhoi/rhows*2`` (micro_mg2_0.F90:2795).  ``None`` => CAM's
           ``rhoi`` = 500, the value the cloud optics convert from.
+      cloud_path_snow, cloud_d_eff_snow, snow_optics :
+          CAM6 snow in the radiation (radiation.F90:928-1067): snow water
+          path (ncol, nlev) [kg/m^2] on the same footing as the cloud paths
+          (in cloud, with its fraction weight, under McICA), snow effective
+          diameter (ncol, nlev) [micron] (0 = no snow optics) and the
+          Mitchell table (``mitchell_ice_optics.MitchellIceOptics``).  All
+          three or none; they need cloud paths, and are refused with
+          ``cloud_fraction`` scaling or separate LW paths.
 
       Returns
       -------
@@ -767,6 +778,26 @@ class RRTMGP:
       if mcica_cloud_fraction is not None:
           mcica_cloud_fraction = jnp.asarray(
               mcica_cloud_fraction).astype(_table_dtype)
+      _snow_parts = (cloud_path_snow, cloud_d_eff_snow, snow_optics)
+      if any(x is not None for x in _snow_parts):
+          if any(x is None for x in _snow_parts):
+              raise ValueError(
+                  "snow in the radiation needs cloud_path_snow, "
+                  "cloud_d_eff_snow and snow_optics together")
+          if cloud_path_liq is None and cloud_path_ice is None:
+              raise ValueError("cloud_path_snow needs the cloud paths too")
+          if (cloud_fraction is not None or cloud_path_liq_lw is not None
+                  or cloud_path_ice_lw is not None
+                  or sw_optical_field_only or lw_optical_field_only):
+              raise ValueError(
+                  "cloud_path_snow is wired for in-cloud (McICA) or plain "
+                  "grid-mean paths only, not cloud_fraction scaling, "
+                  "separate LW paths or the optical-field outputs")
+          from legoesm.atmosphere.physics.radiation.rrtmgp.optics import (
+              mitchell_ice_optics as _mio)
+          cloud_path_snow = jnp.asarray(cloud_path_snow).astype(_table_dtype)
+          cloud_d_eff_snow = jnp.asarray(cloud_d_eff_snow).astype(_table_dtype)
+          snow_optics = _mio.cast_table(snow_optics, _table_dtype)
       if ghg_vmr_override is not None:
           # Cast every numeric override (array, Python float/int, list)
           # to the working dtype; only floating leaves are retyped so
@@ -820,6 +851,9 @@ class RRTMGP:
                         else jnp.asarray(o3_top_vmr).astype(
                             _table_dtype).reshape(ncol, 1))
           cloud_path_liq, cloud_path_ice = _zero(cloud_path_liq), _zero(cloud_path_ice)
+          cloud_path_snow = _zero(cloud_path_snow)
+          if cloud_d_eff_snow is not None:
+              cloud_d_eff_snow = _top(cloud_d_eff_snow, cloud_d_eff_snow[:, :1])
           cloud_path_liq_lw = _zero(cloud_path_liq_lw)
           cloud_path_ice_lw = _zero(cloud_path_ice_lw)
           cloud_fraction = _zero(cloud_fraction)
@@ -997,6 +1031,14 @@ class RRTMGP:
       else:
           cpl_3d = cpi_3d = crl_3d = cri_3d = cf_3d = None
           cpl_lw_3d = cpi_lw_3d = None
+      # CAM6 snow: same halo + post-clip as the cloud paths (a halo diameter
+      # extrapolated below 0 is clipped to 0 = no snow optics there).
+      cloud_snow = None
+      if has_clouds and cloud_path_snow is not None:
+          cloud_snow = (
+              jnp.clip(_add_halos(cloud_path_snow[:, None, ::-1]), 0.0, None),
+              jnp.clip(_add_halos(cloud_d_eff_snow[:, None, ::-1]), 0.0, None),
+              snow_optics)
 
       # McICA (CAM6 mcica_subcol_gen): each g-point sees its own
       # maximum-random cloud subcolumn.  The paths passed in are IN-CLOUD;
@@ -1033,12 +1075,15 @@ class RRTMGP:
                   mask = jnp.concatenate(
                       [jnp.zeros_like(mask[:, :, :1]), mask], axis=2)
 
+              _sampled = ((_cpl, _cpi) if cloud_snow is None
+                          else (_cpl, _cpi, cloud_path_snow))
+
               def paths(igpt):
                   m = mask[igpt]
                   return tuple(
                       jnp.clip(_add_halos(
                           apply_mask(m, x)[:, None, ::-1]), 0.0, None)
-                      for x in (_cpl, _cpi))
+                      for x in _sampled)
               return paths
 
           lw_path_fn = _mcica_paths(optics_lib.n_gpt_lw)
@@ -1170,6 +1215,7 @@ class RRTMGP:
           vmr_fields,
           sfc_T_2d,
           level_temperature=T_lev_3d,
+          **({} if cloud_snow is None else {'cloud_snow': cloud_snow}),
           cloud_r_eff_liq=crl_3d,
           cloud_path_liq=cpl_lw_3d,
           cloud_r_eff_ice=cri_3d,
@@ -1206,6 +1252,7 @@ class RRTMGP:
           gpoint_checkpoint=getattr(config, "gpoint_checkpoint", True),
           cloud_path_fn=sw_path_fn,
           clear_sky=clear_sky,
+          **({} if cloud_snow is None else {'cloud_snow': cloud_snow}),
       )
 
       # --- 6. Compute heating rates using exact layer thickness ---
