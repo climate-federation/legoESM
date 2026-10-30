@@ -25,6 +25,7 @@ jax.config.update("jax_enable_x64", True)
 
 _RHO0_RUN = 1026.0
 _T, _S, _P = 10.0, 35.0, 4.0e7          # ~4 km: the depth term is large
+_RTOL = 1e-12                           # same construction on both sides (x64)
 
 
 def _rho(eos_fn):
@@ -40,7 +41,8 @@ def _expected(eos_depth):
 def test_probe_sees_the_reference_density():
     """Instrument control: the probe point separates the two rho0 values."""
     from legoesm.ocean.eos import make_eos_fn
-    assert abs(_expected("geometric") - _rho(make_eos_fn(eos="nemo_eos80"))) > 1e-6
+    gap = abs(_expected("geometric") - _rho(make_eos_fn(eos="nemo_eos80")))
+    assert gap > 1e3 * _RTOL * _expected("geometric")
 
 
 def _model(eos_depth, physics, monkeypatch=None, spy_physics=None):
@@ -88,7 +90,8 @@ def test_closure_eos_reference_density(monkeypatch, eos_depth):
     _model(eos_depth, _physics(VerticalMixingConfig(scheme="richardson")),
            monkeypatch, seen)
     assert len(seen) == 1
-    assert _rho(seen[0]) == _expected(eos_depth)
+    np.testing.assert_allclose(_rho(seen[0]), _expected(eos_depth),
+                               rtol=_RTOL, atol=0)
 
 
 class _Stop(Exception):
@@ -113,7 +116,8 @@ def test_fallback_eos_reference_density(monkeypatch, eos_depth):
     with pytest.raises(_Stop):
         model._apply_implicit_vertical_mixing(state, 1800.0, None)
     assert len(seen) == 1
-    assert _rho(seen[0]) == _expected(eos_depth)
+    np.testing.assert_allclose(_rho(seen[0]), _expected(eos_depth),
+                               rtol=_RTOL, atol=0)
 
 
 @pytest.mark.parametrize("eos_depth", ["geometric", "insitu"])
@@ -154,5 +158,5 @@ def test_iwm_and_ddm_eos_reference_density(monkeypatch, eos_depth):
             state, 1800.0, None, K_v_phys=K, A_v_phys=K)
     assert set(seen) == {"iwm", "ddm"}
     want = _expected(eos_depth)
-    assert _rho(seen["iwm"]) == want
-    assert _rho(seen["ddm"]) == want
+    np.testing.assert_allclose(_rho(seen["iwm"]), want, rtol=_RTOL, atol=0)
+    np.testing.assert_allclose(_rho(seen["ddm"]), want, rtol=_RTOL, atol=0)
