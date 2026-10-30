@@ -335,6 +335,8 @@ __param_spec__ = {
         "excluded": {
             "limcnv_p_pa": "numerics/domain: convection top cap (40 hPa reference interface), not a closure knob",
             "parcel_tpert": "default 0 = disabled/off (PBL temperature perturbation; CAM6 CLUBB path has none)",
+            "detrain_phase_width_K": "numerics: RULE 5 smoothing width of the detrainment liquid/ice ramp corners (0 = CAM hard switch)",
+            "detrain_number_width_kgkg_s": "numerics: RULE 5 smoothing width of max(0, dlf) in the detrainment number source (0 = CAM hard switch)",
         },
         "params": {
             "c0_lnd": {"units": "1/m", "bounds": (0.002, 0.02), "tunable_tier": 1, "transform": "sigmoid", "category": "autoconversion", "reference": "CAM zmconv_c0_lnd namelist span (0.002-0.0075 across configurations)", "shape": None},
@@ -758,6 +760,12 @@ class ZhangMcFarlaneConfig(NamedTuple):
     # an aquaplanet run with no land, recorded as a choice -- ocean
     # coefficients everywhere, and passing a land fraction is an error.
     land_fraction: str = "required"
+    # RULE 5 smoothing widths of CAM6's detrainment of ZM condensate
+    # (zhang_mcfarlane.cam6_detrain_condensate, clubb_intr.F90:2345-2376):
+    # the liquid/ice ramp's corners [K] and the max(0, dlf) of the number
+    # source [kg/kg/s].  0 = CAM's hard switch.
+    detrain_phase_width_K: float = 0.1
+    detrain_number_width_kgkg_s: float = 1.0e-12
 
 
 class KainFritschConfig(NamedTuple):

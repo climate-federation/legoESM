@@ -360,7 +360,8 @@ def test_horizontal_photon_on_top_face_no_nan():
   ]
   for pos0, dir0 in cases:
     st = trace_one(jax.random.PRNGKey(0), pos0, dir0, k_ext, ssa, g, maj,
-                   0.0, geom, 4096)
+                   0.0, geom, 4096,
+                   free_path_floor_sharpness=MC3DRadiationConfig().free_path_floor_sharpness)
     assert bool(jnp.all(jnp.isfinite(st.pos)))
     assert int(st.status) in (1, 2, 3, 4)   # terminated in a real bin
 
@@ -381,7 +382,8 @@ def test_tally_batch_direct():
   pos = jnp.stack([(ix + 0.5) * geom.dx, (iy + 0.5) * geom.dx,
                    jnp.full((n,), geom.z_faces[-1])], axis=1)
   dirs = jnp.broadcast_to(jnp.array([0.0, 0.0, -1.0]), (n, 3))
-  states = trace_batch(keys, pos, dirs, k_ext, ssa, g, maj, 0.0, geom, 4096)
+  states = trace_batch(keys, pos, dirs, k_ext, ssa, g, maj, 0.0, geom, 4096,
+                       free_path_floor_sharpness=MC3DRadiationConfig().free_path_floor_sharpness)
   res = tally_batch(states, geom, p)
   total = (float(res.vol_abs_total) + float(res.sfc_abs_total)
            + float(res.tod_up_frac))

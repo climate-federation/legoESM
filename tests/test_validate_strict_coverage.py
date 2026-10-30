@@ -88,6 +88,7 @@ EXPECTED_VALIDATED: frozenset[str] = frozenset(
         "ghg_forcing",
         "ozone_forcing",
         "ozone_source",
+        "land_fraction_source",
         "solar_source",
         "solar_spectral_band_order",
         "dataset",

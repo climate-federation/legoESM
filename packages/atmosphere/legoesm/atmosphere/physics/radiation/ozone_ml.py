@@ -34,6 +34,17 @@ Additionally we require UKESM full-level pressures (z,) which the upstream
 repo does not currently bundle.  Until shipped, supply a sidecar
 ``plev.npy`` or ``plev.nc`` with the 76 UKESM training pressures [Pa] in
 the same directory; the loader will pick it up automatically.
+
+ORACLE STATUS (tier-2 audit, 2026-10-19).  The on-node regression above
+matches the UKESM implementation (implementation/UKESM/ukca_mach_learn_mod.F90
+lines 208-256, repo head bad56708) to 4.3e-15 on synthetic coefficients.
+NOT YET FAITHFUL, each pending a user decision: the oracle's predictor is the
+previous DAY's mean temperature (this uses the instantaneous T); it runs on
+UKESM's native height-based levels and grid (this maps levels through assumed
+fixed pressures and interpolates coefficients bilinearly before the
+nonlinear combination); above the training levels this clamps, where the ICON
+implementation (mo_art_mloz.f90) uses climatology; its floor is 1e-15 (mass mixing ratio) against 1e-10
+(volume mixing ratio) here; it divides by x_scale where this guards zero.
 """
 from __future__ import annotations
 

@@ -162,6 +162,7 @@ def solve_sw_monochromatic(
         walk_keys, pos0, dir0, k_ext, ssa, g, maj, albedo, geom,
         int(config.max_iterations), rayleigh_frac=rayleigh_frac,
         mie_cdf=mie_cdf, mie_ang=mie_ang, r_eff=r_eff,
+        free_path_floor_sharpness=float(config.free_path_floor_sharpness),
     )
     st = states.status
     vol_ids = jnp.where(st == STATUS_VOL_ABS, states.vol_idx, -1)

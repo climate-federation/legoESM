@@ -212,7 +212,11 @@ def test_aimip_latlon_exposes_a_land_model_flag_defaulting_to_today():
     mod = _run_aimip_latlon()
     args = mod.build_parser().parse_args([])
     assert args.land_model == "none"
-    assert args.land_mask_file == ""
+    # ERA5 is the lane's only coastline: no land-mask option (it could only
+    # ever fail validation with the ERA5 source).
+    assert not hasattr(args, "land_mask_file")
+    with pytest.raises(SystemExit):
+        mod.build_parser().parse_args(["--land-mask-file", "m.nc"])
     assert land_model_switches(args.land_model) == dict(
         slab_land_active=False, use_multilayer_land=False)
 

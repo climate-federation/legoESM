@@ -34,6 +34,7 @@ from legoesm.core.tracers import (
 from legoesm.driver.config import ExperimentConfig
 from legoesm.driver.physics_pipeline import (
     refuse_cap_floor_on_fv,
+    rrtmgp_config_from_experiment,
     convection_config_for,
     build_physics_pipeline,
     gwd_config_for,
@@ -3044,6 +3045,27 @@ class ModelDriver:
                 f"  Land-sea mask: {land_mask_path} "
                 f"(land fraction mean={float(jnp.mean(self._f_land)):.3f})"
             )
+        _lf_src = self.config.land_fraction_source
+        if _lf_src != "topography":
+            # validate_strict keeps era5/zero to lat-lon grids
+            if _lf_src == "era5":
+                from legoesm.training.aimip_spatial import era5_land_fraction
+                from legoesm.training.era5_to_state import TrainingERA5Config
+                # column lane: regrid on the native grid, then flatten
+                _nat = getattr(self, "_latlon_native_grid", None)
+                self._f_land = era5_land_fraction(
+                    self.grid if _nat is None else _nat, TrainingERA5Config(
+                        zarr_store=self.config.land_fraction_era5_zarr,
+                        flux_zarr="")   # "" = the named store, no other
+                ).reshape(shape_2d).astype(_sd)
+            elif _lf_src == "zero":
+                self._f_land = jnp.zeros(shape_2d, dtype=_sd)
+            else:
+                raise ValueError(
+                    f"unknown land_fraction_source {_lf_src!r}")
+            logger.info(
+                f"  Land fraction source: {_lf_src} "
+                f"(mean={float(jnp.mean(self._f_land)):.3f})")
 
         # Attach land_frac for convection and orographic GWD on grids carrying
         # the field (VoronoiMesh and GaussianGrid).  Where it comes from:
@@ -4017,6 +4039,7 @@ class ModelDriver:
                  else bool(jnp.any(self._f_land > 0)))
         )
         self._has_land_anywhere = _has_land
+        self.physics.run_has_no_land = not _has_land
         if _has_land:
             from legoesm.surface_albedo import land_vegetation_albedo
             from legoesm.core.precision import get_policy
@@ -5344,8 +5367,9 @@ class ModelDriver:
         # Ozone is evaluated on the model levels PLUS 16 midpoints of equal
         # pressure sub-layers above the model top (0 < p < p_top); their mean
         # is the overhead column-mean VMR for the RRTMGP overhead layer
-        # (RRTMGPConfig.overhead_layer; unused when that is off).  All ozone sources are pointwise in
-        # p, so the model-level values are unchanged.
+        # (RRTMGPConfig.overhead_layer; unused when that is off).  The inline sources other than
+        # "mls" are pointwise in p, so the model-level values are unchanged;
+        # "mls" (gSAM layer means) is handled from the interfaces below.
         _p_o3 = jnp.concatenate([
             p_full_col,
             p_half_col[:, :1] * ((jnp.arange(16) + 0.5) / 16.0),
@@ -5394,10 +5418,32 @@ class ModelDriver:
             from legoesm.atmosphere.physics.radiation.config import (
                 OzoneProfileConfig,
             )
-            _o3_inline = _compute_ozone_vmr(
-                _p_o3, lat_col,
-                OzoneProfileConfig(source=self.config.ozone_source),
-            )
+            if self.config.ozone_source == "mls":
+                # gSAM layer means are not pointwise in p: evaluate them on the
+                # model interfaces; the overhead layer takes gSAM's own extra
+                # layer above the model top (p_top to min(1e-4 hPa, p_top/8)).
+                # With p_top = 0 there is no overhead layer: it keeps the top
+                # model layer's value, and the extra layer's 0/0 is never formed
+                # (p_top replaced by 1 Pa only inside that branch).
+                from legoesm.atmosphere.physics.radiation.ozone_mls import (
+                    mls_ozone_layer_vmr,
+                )
+                _lay = _compute_ozone_vmr(
+                    p_full_col, lat_col, OzoneProfileConfig(source="mls"),
+                    p_half=p_half_col,
+                )
+                _ptop = p_half_col[:, 0]
+                _ph_safe = p_half_col.at[:, 0].set(jnp.where(_ptop > 0.0, _ptop, 1.0))
+                _above = jnp.where(_ptop > 0.0, mls_ozone_layer_vmr(_ph_safe)[1],
+                                   _lay[:, 0])
+                _o3_inline = jnp.concatenate(
+                    [_lay, jnp.broadcast_to(_above[:, None], (ncol, _p_o3.shape[1] - nlev))],
+                    axis=1)
+            else:
+                _o3_inline = _compute_ozone_vmr(
+                    _p_o3, lat_col,
+                    OzoneProfileConfig(source=self.config.ozone_source),
+                )
             if _o3_inline is None:
                 # source="standard": the backend contract is o3_vmr=None →
                 # its built-in US Std Atm 1976 fit; materialize the same
@@ -12843,7 +12889,7 @@ class ModelDriver:
             MicrophysicsConfig, apply_microphysics_experiment_flags,
         )
         from legoesm.atmosphere.physics.radiation.config import (
-            RRTMGPConfig, OzoneProfileConfig, GrayRadiationConfig,
+            OzoneProfileConfig, GrayRadiationConfig,
         )
 
         # Phase D: wire the CMIP6 / experiment greenhouse-gas concentrations
@@ -13018,22 +13064,9 @@ class ModelDriver:
                 # the compiled pipeline already builds with it, this lane used
                 # the radiation-module default (gridaudit 2026-10-09).
                 gray=GrayRadiationConfig(S_0=cfg.S_0),
-                rrtmgp=RRTMGPConfig(
-                    co2_ppmv=cfg.co2_ppmv,
-                    ch4_ppbv=cfg.ch4_ppbv,
-                    n2o_ppbv=cfg.n2o_ppbv,
-                    S_0=cfg.S_0,
-                    compute_fp32=_rrtmgp_fp32,
-                    include_clouds=(_cloud_scheme != "none"),
-                    gpoint_batch_size=getattr(
-                        cfg, "rrtmgp_gpoint_batch_size", 0),
-                    gpoint_checkpoint=getattr(
-                        cfg, "rrtmgp_gpoint_checkpoint", True),
-                    column_chunk_size=getattr(
-                        cfg, "rrtmgp_column_chunk_size", 0),
-                    overhead_layer=bool(getattr(
-                        cfg, "rrtmgp_overhead_layer", False)),
-                ),
+                rrtmgp=rrtmgp_config_from_experiment(
+                    cfg, compute_fp32=_rrtmgp_fp32,
+                    include_clouds=(_cloud_scheme != "none")),
                 cloud_scheme=_cloud_scheme,
                 # Tuned cloud scalars (rh_crit / q_c_diagnostic / Xu-Randall)
                 # reach the MPAS radiation clouds too (#870 Phase 1).
@@ -16792,7 +16825,7 @@ class ModelDriver:
                 PhysicsConfig, make_physics,
             )
             from legoesm.atmosphere.physics.radiation.config import (
-                RadiationConfig, RRTMGPConfig, OzoneProfileConfig,
+                RadiationConfig, OzoneProfileConfig,
             )
             from legoesm.atmosphere.physics.convection.config import (
                 ConvectionConfig,
@@ -16825,21 +16858,8 @@ class ModelDriver:
                     scheme=_rad_scheme,
                     # cfg.S_0: same constant-solar TSI as the compiled lanes.
                     gray=GrayRadiationConfig(S_0=cfg.S_0),
-                    rrtmgp=RRTMGPConfig(
-                        co2_ppmv=cfg.co2_ppmv,
-                        ch4_ppbv=cfg.ch4_ppbv,
-                        n2o_ppbv=cfg.n2o_ppbv,
-                        S_0=cfg.S_0,
-                        include_clouds=(_cloud_scheme != "none"),
-                        gpoint_batch_size=getattr(
-                            cfg, "rrtmgp_gpoint_batch_size", 0),
-                        gpoint_checkpoint=getattr(
-                            cfg, "rrtmgp_gpoint_checkpoint", True),
-                        column_chunk_size=getattr(
-                            cfg, "rrtmgp_column_chunk_size", 0),
-                        overhead_layer=bool(getattr(
-                            cfg, "rrtmgp_overhead_layer", False)),
-                    ),
+                    rrtmgp=rrtmgp_config_from_experiment(
+                        cfg, include_clouds=(_cloud_scheme != "none")),
                     cloud_scheme=_cloud_scheme,
                     # Tuned cloud scalars for the spectral standalone
                     # radiation path (#870 Phase 1).
@@ -17861,7 +17881,8 @@ class ModelDriver:
         # REAL unified physics at TILE ncol (refuses land / horizontal-
         # operator convection inside).
         tile_su, _tile_pipeline = build_tile_step_unified(
-            self.grid, self.sigma, cfg, kt)
+            self.grid, self.sigma, cfg, kt,
+            run_has_no_land=self.physics.run_has_no_land)
         self._record_pipeline_physics(_tile_pipeline)
 
         ghg_vmr = ctx["ghg_vmr"]
@@ -18455,6 +18476,10 @@ class ModelDriver:
         band_grid = build_band_grids_atm(self.grid, n_dev)[0]
         band_physics = build_physics_pipeline(
             band_grid, self.sigma, cfg, spacing_grid=self.grid)
+        # the band pipeline carries no f_land; a land-free run's mark still
+        # holds per band (McFarlane then gets zeros, a land run gets None
+        # and refuses)
+        band_physics.run_has_no_land = self.physics.run_has_no_land
         self._record_pipeline_physics(band_physics)
         # Radiation cadence.  ``make_sharded_operator_split_step`` computes the
         # serial prologue's predicate per step (``_need_rad_and_time``,

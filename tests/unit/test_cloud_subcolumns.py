@@ -36,18 +36,18 @@ def _cf(ncol=16, seed=3):
 # ------------------------------------------------------------------- limits
 
 def test_clear_column_is_never_cloudy():
-    m = np.asarray(generate_subcolumns(jnp.zeros((3, NLEV))))
+    m = np.asarray(generate_subcolumns(jnp.zeros((3, NLEV)), width=0.0))
     assert not m.any()
 
 
 def test_overcast_column_is_always_cloudy():
-    m = np.asarray(generate_subcolumns(jnp.ones((3, NLEV))))
+    m = np.asarray(generate_subcolumns(jnp.ones((3, NLEV)), width=0.0))
     assert m.all()
 
 
 def test_shape_and_dtype():
     for n in (4, 8, 12):
-        m = generate_subcolumns(_cf(), n)
+        m = generate_subcolumns(_cf(), n, width=0.0)
         assert m.shape == (n, 16, NLEV)
         assert m.dtype == jnp.bool_
 
@@ -63,7 +63,7 @@ def test_per_layer_marginal_reproduces_cloud_fraction():
     by comparing against an arbitrary constant instead of the noise floor.
     """
     cf = _cf()
-    m = np.asarray(generate_subcolumns(cf, 32))
+    m = np.asarray(generate_subcolumns(cf, 32, width=0.0))
     p = m.mean(axis=0)
     err = np.abs(p - np.asarray(cf))
     assert err.mean() < 0.02, f"mean marginal error {err.mean():.4f}"
@@ -73,7 +73,7 @@ def test_per_layer_marginal_reproduces_cloud_fraction():
 def test_total_cover_matches_the_models_own_overlap_function():
     """Must agree with maximum_random_overlap, not a formula re-derived here."""
     cf = _cf(ncol=24)
-    m = np.asarray(generate_subcolumns(cf, 64))
+    m = np.asarray(generate_subcolumns(cf, 64, width=0.0))
     got = m.any(axis=2).mean(axis=0)
     want = np.asarray(maximum_random_overlap(cf))
     assert np.abs(got - want).mean() < 0.03
@@ -88,7 +88,7 @@ def test_adjacent_cloudy_layers_overlap_maximally():
     overlap; if the recursion were wrong the cover would be too large.
     """
     cf = jnp.full((4, 2), 0.5)
-    m = np.asarray(generate_subcolumns(cf, 64))
+    m = np.asarray(generate_subcolumns(cf, 64, width=0.0))
     assert m.any(axis=2).mean(axis=0).mean() == pytest.approx(0.5, abs=0.05)
     both = (m[:, :, 0] & m[:, :, 1]).mean()
     assert both == pytest.approx(0.5, abs=0.05), "layers are not maximally overlapped"
@@ -97,7 +97,7 @@ def test_adjacent_cloudy_layers_overlap_maximally():
 def test_separated_cloud_groups_overlap_randomly():
     """A clear layer between two cloudy ones resets to random overlap."""
     cf = jnp.asarray(np.array([[0.5, 0.0, 0.5]] * 4))
-    m = np.asarray(generate_subcolumns(cf, 256))
+    m = np.asarray(generate_subcolumns(cf, 256, width=0.0))
     cover = m.any(axis=2).mean(axis=0).mean()
     assert cover == pytest.approx(1.0 - 0.5 * 0.5, abs=0.06)
 
@@ -109,7 +109,7 @@ def test_grid_mean_water_is_conserved():
     lwp = jnp.asarray(np.asarray(cf) * 2.0e-4)     # grid-mean = cf * in-cloud
     iwp = jnp.asarray(np.asarray(cf) * 5.0e-5)
     n = 64
-    m = generate_subcolumns(cf, n)
+    m = generate_subcolumns(cf, n, width=0.0)
     ls, is_ = subcolumn_paths(m, cf, lwp, iwp)
     lm = np.asarray(average_over_subcolumns(ls, n, cf.shape[0]))
     im = np.asarray(average_over_subcolumns(is_, n, cf.shape[0]))
@@ -137,7 +137,7 @@ def test_grid_mean_water_is_conserved():
 def test_clear_cells_carry_no_water():
     cf = _cf()
     lwp = jnp.asarray(np.asarray(cf) * 2.0e-4)
-    m = generate_subcolumns(cf, 8)
+    m = generate_subcolumns(cf, 8, width=0.0)
     ls, _ = subcolumn_paths(m, cf, lwp, lwp)
     assert np.all(np.asarray(ls).reshape(np.asarray(m).shape)[~np.asarray(m)] == 0.0)
 
@@ -147,7 +147,7 @@ def test_expand_matches_the_subcolumn_flattening_order():
     subcolumn_paths, or every column would be paired with the wrong profile."""
     cf = _cf(ncol=5)
     n = 8
-    m = generate_subcolumns(cf, n)
+    m = generate_subcolumns(cf, n, width=0.0)
     T = jnp.asarray(np.arange(5 * NLEV, dtype=float).reshape(5, NLEV))
     e = np.asarray(expand_to_subcolumns(m, T))
     assert e.shape == (n * 5, NLEV)
@@ -159,22 +159,22 @@ def test_expand_matches_the_subcolumn_flattening_order():
 def test_is_deterministic_across_calls_and_processes():
     """No PRNG in the hot loop: repeated calls must be bit-identical."""
     cf = _cf()
-    a = np.asarray(generate_subcolumns(cf, 8))
-    b = np.asarray(generate_subcolumns(cf, 8))
+    a = np.asarray(generate_subcolumns(cf, 8, width=0.0))
+    b = np.asarray(generate_subcolumns(cf, 8, width=0.0))
     np.testing.assert_array_equal(a, b)
 
 
 def test_jit_parity():
     cf = _cf()
-    eager = np.asarray(generate_subcolumns(cf, 8))
-    jitted = np.asarray(jax.jit(lambda c: generate_subcolumns(c, 8))(cf))
+    eager = np.asarray(generate_subcolumns(cf, 8, width=0.0))
+    jitted = np.asarray(jax.jit(lambda c: generate_subcolumns(c, 8, width=0.0))(cf))
     np.testing.assert_array_equal(eager, jitted)
 
 
 def test_water_path_gradient_is_finite():
     """The mask thresholds, but the PATHS must still carry a gradient."""
     cf = _cf(ncol=4)
-    m = generate_subcolumns(cf, 8)
+    m = generate_subcolumns(cf, 8, width=0.0)
 
     def total(lwp):
         ls, _ = subcolumn_paths(m, cf, lwp, jnp.zeros_like(lwp))
@@ -250,8 +250,8 @@ def test_stratified_table_is_not_mutable_by_callers():
     # and the generator itself is unaffected
     cf = _cf(ncol=3)
     np.testing.assert_array_equal(
-        np.asarray(generate_subcolumns(cf, 8)),
-        np.asarray(generate_subcolumns(cf, 8)))
+        np.asarray(generate_subcolumns(cf, 8, width=0.0)),
+        np.asarray(generate_subcolumns(cf, 8, width=0.0)))
 
 
 def test_expand_kwargs_refuses_a_wrong_leading_dimension():
@@ -325,7 +325,7 @@ def test_validate_strict_bounds_the_subcolumn_count():
 def test_shift_keeps_the_per_layer_marginal():
     cf = _cf()
     shift = jnp.linspace(0.0, 0.97, cf.shape[0])
-    m = np.asarray(generate_subcolumns(cf, 32, shift=shift))
+    m = np.asarray(generate_subcolumns(cf, 32, shift=shift, width=0.0))
     err = np.abs(m.mean(axis=0) - np.asarray(cf))
     assert err.mean() < 0.02, f"mean marginal error {err.mean():.4f}"
 
@@ -338,7 +338,7 @@ def test_each_g_point_sees_random_overlap_across_columns():
     ncol = 2000
     cf = jnp.broadcast_to(jnp.asarray([0.5, 0.0, 0.5]), (ncol, 3))
     shift = (jnp.arange(ncol) + 0.5) / ncol
-    cover = np.asarray(generate_subcolumns(cf, 112, shift=shift)).any(-1).mean(1)
+    cover = np.asarray(generate_subcolumns(cf, 112, shift=shift, width=0.0)).any(-1).mean(1)
     assert np.abs(cover - 0.75).max() < 0.06, np.abs(cover - 0.75).max()
 
 
@@ -346,7 +346,7 @@ def test_shift_changes_which_subcolumn_is_cloudy():
     """Identical columns with different shifts get different subcolumn masks,
     so a g-point is not paired with the same cloud sample in every column."""
     cf = jnp.broadcast_to(_cf()[5], (2, NLEV))
-    m = np.asarray(generate_subcolumns(cf, 16, shift=jnp.asarray([0.0, 0.37])))
+    m = np.asarray(generate_subcolumns(cf, 16, shift=jnp.asarray([0.0, 0.37]), width=0.0))
     assert not np.array_equal(m[:, 0], m[:, 1])
 
 

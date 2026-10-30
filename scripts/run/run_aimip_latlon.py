@@ -103,6 +103,11 @@ def _load_run_amip():
     return mod
 
 
+def _resolved_era5_zarr(args):
+    from legoesm.training.era5_to_state import TrainingERA5Config
+    return args.era5_zarr or TrainingERA5Config().zarr_store
+
+
 def build_latlon_config(args):
     """Build an ExperimentConfig for a lat-lon C-grid AMIP run."""
     ra = _load_run_amip()
@@ -173,6 +178,10 @@ def build_latlon_config(args):
         "--days", "1",
         "--dataset", "analytical",   # IC/forcing replaced by ERA5 below
         "--ic", "standard",
+        # One coastline for land model, convection and drag: ERA5's, from the
+        # same store the run trains on (user 2026-10-28, R3/R4/R5).
+        "--land-fraction-source", "era5",
+        "--land-fraction-era5-zarr", _resolved_era5_zarr(args),
     ]
     if args.ice_skin_prognostic is not None:
         argv.append("--ice-skin-prognostic" if args.ice_skin_prognostic
@@ -191,8 +200,6 @@ def build_latlon_config(args):
     from legoesm.land.config import describe_land_model, land_model_switches
     for _field, _value in land_model_switches(args.land_model).items():
         setattr(parsed, _field, _value)
-    if getattr(args, "land_mask_file", ""):
-        parsed.land_mask_file = args.land_mask_file
     logger.info(
         "Land surface model: %s (slab_land_active=%s, use_multilayer_land=%s, "
         "land_mask_file=%s)",
@@ -732,14 +739,10 @@ def build_parser():
                         "land skin temperature falls back to the neighbouring "
                         "prescribed SST minus a lapse rate, with no soil, no "
                         "water store and no stomatal control. 'slab' and "
-                        "'multilayer' need somewhere for land to exist, so "
-                        "pass --land-mask-file with them (this lane builds a "
-                        "flat topography, and the driver refuses a land tile "
-                        "that would have no land under it).")
-    p.add_argument("--land-mask-file", type=str, default="",
-                   help="Land-mask NetCDF forwarded to the ExperimentConfig. "
-                        "Required to give --land-model slab/multilayer any "
-                        "land to act on, since this lane runs flat topography.")
+                        "'multilayer' act on the ERA5 land fraction this "
+                        "lane always uses (one coastline, user 2026-10-28); "
+                        "there is no land-mask file option, since the driver "
+                        "refuses a mask file together with the ERA5 source.")
     p.add_argument("--smoke", action="store_true",
                    help="tiny config (n_lat=32, 1 epoch, 1+1 short windows)")
     return p
