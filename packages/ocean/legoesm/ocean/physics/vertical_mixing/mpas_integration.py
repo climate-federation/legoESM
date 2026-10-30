@@ -42,7 +42,10 @@ from legoesm.ocean.physics.vertical_mixing.tke import (
     nemo_tke_effective_ice_fraction,
     tke_vertical_mixing,
 )
-from legoesm.ocean.physics.vertical_mixing._shared import surface_buoyancy_flux
+from legoesm.ocean.physics.vertical_mixing._shared import (
+    eos_salinity,
+    surface_buoyancy_flux,
+)
 from legoesm.ocean.vertical import (
     OceanPartialCellCoordinate,
     compute_layer_thickness,
@@ -244,7 +247,8 @@ def _vertical_diffusion_edge_partial(
 
 def _reconstruct_mpas_cell_fields(state: MPASOceanState, mesh, z_coord,
                                   eos_fn=None,
-                                  constants_config=ConstantsConfig()):
+                                  constants_config=ConstantsConfig(),
+                                  floor_salinity=False):
     """Shared MPAS cell-field prep for the vertical-mixing bridges.
 
     Single-sources the edge→cell velocity reconstruction + land/partial-cell
@@ -260,6 +264,11 @@ def _reconstruct_mpas_cell_fields(state: MPASOceanState, mesh, z_coord,
       ``rho_0``) via the model-selected ``eos_fn`` (``None`` ⇒ Wright default);
     * land-zeroing + the partial-cell sub-seafloor T/S/u/v fill (deepest active
       value) so neither closure sees a spurious T=0/u=0 discontinuity.
+
+    ``floor_salinity=True`` (the KPP bridge only) builds the density on
+    salinity floored as ePBL's (``eos_salinity``; Wright as is): sqrt(S)
+    EOSes have an infinite dRho/dS at S = 0 land cells, and the land
+    ``where`` below does not stop the NaN cotangent (#2243).
 
     Returns ``(u_east_w, v_north_w, T_w, S_w, rho, J, mask)`` — the land-safe
     Jacobian ``J`` is returned because the KPP physics path reuses it for the
@@ -285,7 +294,10 @@ def _reconstruct_mpas_cell_fields(state: MPASOceanState, mesh, z_coord,
     # The run's gravity, not the library's: the hydrostatic pressure this
     # density is built on is linear in it, and the cards this lane is compared
     # against pin a value that differs from the module default.
-    rho_real = compute_ocean_rho(state, z_coord, J_real, eos_fn=eos_fn,
+    rho_state = (state._replace(
+        S=state.S.replace(data=eos_salinity(S_3d, eos_fn)))
+        if floor_salinity else state)
+    rho_real = compute_ocean_rho(rho_state, z_coord, J_real, eos_fn=eos_fn,
                                  g=constants_config.g,
                                  rho0=constants_config.rho_0)
     rho = jnp.where(mask[:, None] > 0.5, rho_real, _RHO_0)
@@ -340,7 +352,7 @@ def _run_mpas_kpp(state: MPASOceanState, mesh, z_coord, surface_forcing, cfg,
     # ``state.land_mask`` directly, so it is unused here.)
     u_east_w, v_north_w, T_w, S_w, rho, J, _ = _reconstruct_mpas_cell_fields(
         state, mesh, z_coord, eos_fn=eos_fn,
-        constants_config=constants_config)
+        constants_config=constants_config, floor_salinity=True)
     T_3d = state.T.data       # (nCells, nlev) — RAW surface T/S for buoyancy flux
     S_3d = state.S.data
     eta = state.eta.data
