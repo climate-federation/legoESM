@@ -101,7 +101,13 @@ def test_decision188_refuses_missing_restart_control() -> None:
         )
 
 
-def _write_restart(path: Path, rank: int) -> np.ndarray:
+def _write_restart(
+    path: Path,
+    rank: int,
+    *,
+    kt_value: int = 8,
+    include_delay_buffers: bool = False,
+) -> np.ndarray:
     values = np.arange(2 * 2 * 3, dtype=np.float64).reshape(1, 2, 2, 3)
     values += np.float64(rank + 1)
     with netCDF4.Dataset(path, "w") as dataset:
@@ -117,7 +123,11 @@ def _write_restart(path: Path, rank: int) -> np.ndarray:
         salinity = dataset.createVariable("sn", "f8", ("time", "z", "y", "x"))
         salinity[:] = values + 30.0
         kt = dataset.createVariable("kt", "f8")
-        kt[...] = 8.0
+        kt[...] = float(kt_value)
+        if include_delay_buffers:
+            dataset.createDimension("delay", 2)
+            dataset.createVariable("DELAY_re8_fwb2", "f8", ("delay",))[:] = [1.0, 2.0]
+            dataset.createVariable("DELAY_im8_fwb2", "f8", ("delay",))[:] = [3.0, 4.0]
     return values
 
 
@@ -176,26 +186,54 @@ def test_day1_restart_gets_exact_uniform_fp64_one_ulp_pattern(tmp_path: Path) ->
         ulp_gate.verify_perturbation_manifest(refused)
 
 
-def test_unperturbed_restart_control_requires_every_daily_file_exact(
+def test_unperturbed_restart_control_requires_every_common_variable_data_exact(
     tmp_path: Path,
 ) -> None:
     baseline = tmp_path / "baseline"
     control = tmp_path / "control"
     baseline.mkdir()
     control.mkdir()
-    for kt in (8, 16):
-        for rank in (0, 1):
-            name = f"ORCA2_{kt:08d}_restart_{rank:04d}.nc"
-            payload = f"restart {kt} rank {rank}\n".encode()
-            (baseline / name).write_bytes(payload)
-            (control / name).write_bytes(payload)
+    for rank in (0, 1):
+        name = f"ORCA2_00000016_restart_{rank:04d}.nc"
+        _write_restart(
+            baseline / name, rank, kt_value=16, include_delay_buffers=True
+        )
+        _write_restart(control / name, rank, kt_value=16)
     result = ulp_gate.verify_restart_continuation_control(
         control, baseline_arm=baseline, expected_steps=16
     )
-    assert result["all_daily_restarts_byte_identical"] is True
-    assert result["restart_files_compared"] == 4
-    (control / "ORCA2_00000016_restart_0001.nc").write_bytes(b"drift\n")
-    with pytest.raises(ulp_gate.GateError, match="differs from arm A"):
+    assert result["all_common_variable_data_bitwise_identical"] is True
+    assert result["restart_files_compared"] == 2
+    assert result["common_variable_data_comparisons"] == 6
+    assert result["required_arm_a_only_variables"] == [
+        "DELAY_im8_fwb2", "DELAY_re8_fwb2",
+    ]
+
+    target = control / "ORCA2_00000016_restart_0001.nc"
+    pristine = tmp_path / "control_pristine.nc"
+    shutil.copy2(target, pristine)
+    with netCDF4.Dataset(target, "r+") as dataset:
+        variable = dataset.variables["tn"]
+        variable.set_auto_maskandscale(False)
+        values = np.asarray(variable[:])
+        values.view(np.uint8).reshape(-1)[0] ^= np.uint8(1)
+        variable[:] = values
+    with pytest.raises(ulp_gate.GateError, match="tn restart variable data differs"):
+        ulp_gate.verify_restart_continuation_control(
+            control, baseline_arm=baseline, expected_steps=16
+        )
+    shutil.copy2(pristine, target)
+
+    with netCDF4.Dataset(target, "r+") as dataset:
+        dataset.createVariable("unknown_restart_state", "f8").assignValue(1.0)
+    with pytest.raises(ulp_gate.GateError, match="control_only=.*unknown_restart_state"):
+        ulp_gate.verify_restart_continuation_control(
+            control, baseline_arm=baseline, expected_steps=16
+        )
+    shutil.copy2(pristine, target)
+
+    ulp_gate._copy_netcdf_excluding_variables(pristine, target, {"sn"})
+    with pytest.raises(ulp_gate.GateError, match="arm_A_only=.*sn"):
         ulp_gate.verify_restart_continuation_control(
             control, baseline_arm=baseline, expected_steps=16
         )
@@ -332,21 +370,31 @@ def test_restart_stub_two_concurrent_rank_processes_preserve_input_and_ownership
     )
     for kt in (8, 16):
         for local_rank, expected_size in enumerate(expected_sizes):
+            if control and kt == 16:
+                with netCDF4.Dataset(
+                    run_dir / f"ORCA2_{kt:08d}_restart_{local_rank:04d}.nc"
+                ) as dataset:
+                    assert set(dataset.variables).isdisjoint(
+                        ulp_gate.DELAY_RESTART_VARIABLES
+                    )
+                    assert int(np.asarray(dataset.variables["kt"][...])) == kt
+                continue
             ulp_gate.r342._verify_single_restart_file(
                 run_dir / f"ORCA2_{kt:08d}_restart_{local_rank:04d}.nc",
                 kt,
                 expected_size,
             )
-    for local_rank in (0, 1):
-        output = run_dir / f"ORCA2_00000016_restart_{local_rank:04d}.nc"
-        baseline = ulp_gate.BASELINE_ARM / output.name
-        assert ulp_gate.common.sha256(output) == ulp_gate.common.sha256(baseline)
     if control:
         continuation = ulp_gate.verify_restart_continuation_control(
             run_dir, expected_steps=16
         )
-        assert continuation["all_daily_restarts_byte_identical"] is True
+        assert continuation["all_common_variable_data_bitwise_identical"] is True
+        assert continuation["restart_files_compared"] == 2
     else:
+        for local_rank in (0, 1):
+            output = run_dir / f"ORCA2_00000016_restart_{local_rank:04d}.nc"
+            baseline = ulp_gate.BASELINE_ARM / output.name
+            assert ulp_gate.common.sha256(output) == ulp_gate.common.sha256(baseline)
         perturbation = ulp_gate.verify_perturbation_manifest(run_dir)
         assert perturbation["exact_ulp_distance"] == 1
 

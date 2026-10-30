@@ -252,12 +252,16 @@ def _verify_envelope_admission(
         == "PASS_R345_DAY1_RESTART_UNPERTURBED_CONTROL"
         and control_input.get("restart_pair_byte_identical") is True
         and continuation.get("status") == "PASS_R345_UNPERTURBED_RESTART_CONTROL"
-        and continuation.get("all_daily_restarts_byte_identical") is True
-        and continuation.get("restart_kt_first") == 8
+        and continuation.get("all_common_variable_data_bitwise_identical") is True
+        and continuation.get("unequal_common_variable_data_count") == 0
+        and continuation.get("required_arm_a_only_variables")
+        == ["DELAY_im8_fwb2", "DELAY_re8_fwb2"]
+        and continuation.get("control_only_variables") == []
+        and continuation.get("restart_kt_first") == 16
         and continuation.get("restart_kt_last") == 2920
-        and continuation.get("daily_restart_pairs_compared") == 365
-        and continuation.get("restart_files_compared") == 730,
-        "envelope lacks the passed 365-day unperturbed restart-continuation control",
+        and continuation.get("daily_restart_pairs_compared") == 364
+        and continuation.get("restart_files_compared") == 728,
+        "envelope lacks the passed 364-output-day unperturbed restart-continuation control",
     )
     require(
         Path(str(continuation.get("baseline_arm", ""))).resolve()
@@ -392,11 +396,16 @@ def minimal_envelope_admission(*, changed_values: int = 4) -> dict[str, Any]:
             "status": "PASS_R345_UNPERTURBED_RESTART_CONTROL",
             "baseline_arm": "/synthetic/nemo-baseline",
             "control_arm": "/synthetic/unperturbed-control",
-            "restart_kt_first": 8,
+            "restart_kt_first": 16,
             "restart_kt_last": 2920,
-            "daily_restart_pairs_compared": 365,
-            "restart_files_compared": 730,
-            "all_daily_restarts_byte_identical": True,
+            "daily_restart_pairs_compared": 364,
+            "restart_files_compared": 728,
+            "unequal_common_variable_data_count": 0,
+            "all_common_variable_data_bitwise_identical": True,
+            "required_arm_a_only_variables": [
+                "DELAY_im8_fwb2", "DELAY_re8_fwb2",
+            ],
+            "control_only_variables": [],
         },
     }
 

@@ -6,8 +6,10 @@ The control changes no bit. The envelope arm advances only finite wet surface
 `tn` values by one float64 ULP toward positive infinity. Both restart the same
 binary at step 9 and continue through step 2920.
 
-Admission requires the control to be byte-identical to arm A at every daily
-restart before the perturbed arm can set an envelope.
+Admission compares every common variable's dtype, shape, and raw data bytes in
+both ranks at every continuation output (`kt = 16..2920`). It requires exactly
+`DELAY_re8_fwb2` and `DELAY_im8_fwb2` to exist only in arm A, and refuses every
+other missing/extra variable or unequal common-variable byte.
 
 The cold-start, forcing, and damping inputs are unchanged and re-hashed against
 arm A. `restart_sst_ulp_perturbation.json` records both rank-file digests,
