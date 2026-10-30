@@ -2548,10 +2548,11 @@ def test_sundqvist_l36_deck_still_round_trips():
     # what makes this deck the neither-lever baseline.
     assert cfg.dycore.mpas_div_damp4_scale == 0.0
     assert cfg.convection == "bechtold"
-    # F22: the default turned CMT ON everywhere; this deck pins the OFF its
-    # results were produced with (resolved, not just the deck key).
+    # Q17 (user 2026-10-27): the deck runs the faithful IFS convection, which
+    # carries its own momentum transport and refuses the legacy CMT pin; runs
+    # from before that switch used the legacy reduction (not comparable).
     from legoesm.driver.physics_pipeline import convection_config_for
-    assert convection_config_for(cfg).bechtold.enable_cmt is False
+    assert convection_config_for(cfg).bechtold.use_ifs_ascent is True
     assert cfg.cloud_scheme == "sundqvist"
     assert cfg.gravity_wave_drag == "mcfarlane+e3sm_cam"
     assert cfg.surface_bulk_scheme == "coare3"
@@ -3687,6 +3688,30 @@ def test_bechtold_use_ifs_cape_closure_legacy_flat_config_gets_default():
 
     cfg = ExperimentConfig.from_amip_config(_LegacyView(flat))
     assert cfg.bechtold_use_ifs_cape_closure is True
+
+
+def test_bechtold_use_ifs_ascent_round_trips_and_threads():
+    """--bechtold-use-ifs-ascent reaches the hot-loop BechtoldConfig, survives
+    the AMIP flat round-trip, and the resolved default leaf passes the faithful
+    path's own guard (only its run-set fields may differ from default)."""
+    from legoesm.driver.config import ExperimentConfig
+    from legoesm.driver.physics_pipeline import _resolve_convection
+    from legoesm.atmosphere.physics.convection._ifs_faithful import _check_config
+    parser = build_arg_parser()
+    on = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--convection", "bechtold",
+        "--bechtold-use-ifs-ascent"]), parser))
+    assert on.bechtold_use_ifs_ascent is True
+    leaf = _resolve_convection(on)[1]
+    assert leaf.use_ifs_ascent is True
+    _check_config(leaf._replace(dx_m=1.0e5))
+    off = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--convection", "bechtold"]), parser))
+    assert _resolve_convection(off)[1].use_ifs_ascent is False
+    for flag in (True, False):
+        cfg = ExperimentConfig(convection="bechtold", bechtold_use_ifs_ascent=flag)
+        assert ExperimentConfig.from_amip_config(
+            cfg.to_amip_config()).bechtold_use_ifs_ascent is flag
 
 
 def test_bechtold_use_ifs_subcloud_evap_round_trips_and_threads():
@@ -5766,6 +5791,86 @@ def test_mcfarlane_effgw_oro_flag_flows_to_config():
     parser = build_arg_parser()
     # The deck sets the dest as a parser default, exactly as main() applies it.
     assert load_yaml_config(deck, parser)["mcfarlane_effgw_oro"] == 0.125
+
+
+def test_kain_fritsch_variant_round_trips_and_threads():
+    """--kain-fritsch-variant reaches the KainFritschConfig leaf, survives the
+    AMIP flat round-trip, and defaults to the smooth surrogate (PR #2249)."""
+    from legoesm.driver.config import ExperimentConfig
+    from legoesm.driver.physics_pipeline import convection_config_for
+    parser = build_arg_parser()
+    on = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--convection", "kain_fritsch",
+        "--kain-fritsch-variant", "wrf_kfeta"]), parser))
+    assert on.kain_fritsch_variant == "wrf_kfeta"
+    assert convection_config_for(on).kain_fritsch.variant == "wrf_kfeta"
+    off = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--convection", "kain_fritsch"]), parser))
+    assert off.kain_fritsch_variant == "smooth"
+    assert convection_config_for(off).kain_fritsch.variant == "smooth"
+    for v in ("smooth", "wrf_kfeta"):
+        cfg = ExperimentConfig(convection="kain_fritsch", kain_fritsch_variant=v)
+        assert ExperimentConfig.from_amip_config(
+            cfg.to_amip_config()).kain_fritsch_variant == v
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--dataset", "analytical",
+                           "--kain-fritsch-variant", "wrf"])
+
+
+def test_kain_fritsch_variant_validate_strict():
+    """Unknown variant and a surrogate-only field on the WRF variant both fail
+    at load, not at the first physics call."""
+    from legoesm.driver.config import ExperimentConfig
+    ExperimentConfig(convection="kain_fritsch",
+                     kain_fritsch_variant="wrf_kfeta").validate_strict()
+    with pytest.raises(ValueError, match="kain_fritsch_variant must be one of"):
+        ExperimentConfig(convection="kain_fritsch",
+                         kain_fritsch_variant="wrf").validate_strict()
+    with pytest.raises(ValueError, match="precip_efficiency"):
+        ExperimentConfig(convection="kain_fritsch", kain_fritsch_variant="wrf_kfeta",
+                         convective_precip_efficiency=0.5).validate_strict()
+    # the smooth default keeps accepting the shared rain split
+    ExperimentConfig(convection="kain_fritsch",
+                     convective_precip_efficiency=0.5).validate_strict()
+
+
+def test_amip_kain_fritsch_wrf_deck_selects_the_opt_in():
+    """The committed opt-in deck (cube C12) resolves to the WRF KF-Eta variant
+    and passes validate_strict, including the port's surrogate-field check."""
+    from legoesm.driver.physics_pipeline import convection_config_for
+    from legoesm.driver.run_config_yaml import load_yaml_config
+    from legoesm.atmosphere.physics.convection.kain_fritsch_wrf import (
+        check_wrf_kfeta_config,
+    )
+    deck = _repo_root() / "config" / "amip" / "amip_kain_fritsch_wrf_c12.yaml"
+    parser = build_arg_parser()
+    parser.set_defaults(**load_yaml_config(str(deck), parser))
+    cfg = build_config_from_args(_postprocess_args(
+        parser.parse_args(_AMIP_DUMMY_PATHS), parser))
+    assert cfg.convection == "kain_fritsch"
+    assert cfg.kain_fritsch_variant == "wrf_kfeta"
+    cc = convection_config_for(cfg)
+    assert cc.kain_fritsch.variant == "wrf_kfeta"
+    check_wrf_kfeta_config(cc.kain_fritsch)
+    cfg.validate_strict()
+
+
+def test_amip_bechtold_deck_runs_the_ifs_path():
+    """User 2026-10-27 (Q17 item 2): the AMIP Bechtold deck switches the
+    faithful CUMASTRN path on and drops the two legacy-only fields it refuses;
+    the deck's resolved leaf passes the path's own config guard."""
+    from legoesm.driver.physics_pipeline import _resolve_convection
+    from legoesm.driver.run_config_yaml import load_yaml_config
+    from legoesm.atmosphere.physics.convection._ifs_faithful import _check_config
+    deck = _repo_root() / "config" / "amip" / "amip_sundqvist_l36.yaml"
+    parser = build_arg_parser()
+    parser.set_defaults(**load_yaml_config(str(deck), parser))
+    cfg = build_config_from_args(_postprocess_args(
+        parser.parse_args(_AMIP_DUMMY_PATHS), parser))
+    assert cfg.convection == "bechtold" and cfg.bechtold_use_ifs_ascent is True
+    leaf = _resolve_convection(cfg)[1]
+    assert leaf.use_ifs_ascent is True
+    _check_config(leaf._replace(dx_m=1.0e5))
 
 
 _CMIP_ID_FLAGS = (

@@ -1314,10 +1314,19 @@ class PhysicsPipeline:
             and u.shape == shape_3d and v.shape == shape_3d
         )
         u_conv_col = v_conv_col = None
-        if _ctr.is_cmt_capable:
+        # Only the opt-in WRF KF-Eta variant reads winds; the smooth KF
+        # default keeps main's inputs (no winds).
+        _kf_wrf_winds = (self._conv_scheme == "kain_fritsch"
+                         and _conv_cfg.variant == "wrf_kfeta")
+        if _ctr.is_cmt_capable or _kf_wrf_winds:
             if _winds_on_t_grid:
                 u_conv_col = ad.flatten_3d(u)
                 v_conv_col = ad.flatten_3d(v)
+            elif not _ctr.is_cmt_capable:
+                # Kain-Fritsch needs the real winds (TIMEC, shear): no zero fallback.
+                raise ValueError(
+                    "convection: kain_fritsch_variant='wrf_kfeta' needs the winds on the T grid "
+                    f"(got u {None if u is None else u.shape}, expected {shape_3d})")
             else:
                 u_conv_col = jnp.zeros((ad.ncol, nlev), dtype=T_col.dtype)
                 v_conv_col = jnp.zeros((ad.ncol, nlev), dtype=T_col.dtype)
@@ -1587,6 +1596,7 @@ class PhysicsPipeline:
                     T=T_col, q_v=q_v_col,
                     p_full=p_full_col, p_half=p_half_col,
                     w_grid=w_grid_col,
+                    u=u_conv_col, v=v_conv_col,
                     conv_prog_profile=conv_prog,
                     dt=dt, config=_conv_cfg,
                 )
@@ -1819,6 +1829,12 @@ class PhysicsPipeline:
             _bl_conv_q = dq_v_dt_conv + (
                 dq_c_dt_conv if _ctr.detrains_to_cloud
                 else jnp.zeros_like(dq_v_dt_conv))
+            # detrained precipitation handed to the rain/snow species stays
+            # in the column (IFS PSNDE)
+            for _detr in (getattr(conv_out, "dq_r_detr_dt", None),
+                          getattr(conv_out, "dq_s_detr_dt", None)):
+                if _detr is not None:
+                    _bl_conv_q = _bl_conv_q + ad.unflatten_3d(_detr)
             _bl_conv = ledger_entry(_bl_conv_q, dT_dt_conv, p_s, _bl_dsigma,
                                     area=self._ledger_area)
 
@@ -1873,6 +1889,18 @@ class PhysicsPipeline:
                     jnp.sum(dq_r_dt_conv * _dp_r / constants.g, axis=-1),
                     0.0)  # (..., n, n) kg/m2/s in-updraft rain to the surface
                 precip = precip + precip_conv_rain
+            # Detrained precipitation (IFS PSNDE) goes to the host's rain and
+            # snow species, as CUDTDQN hands it to the grid-scale cloud
+            # scheme; its condensation heat is already in dT_dt_conv.
+            _detr_r = getattr(conv_out, "dq_r_detr_dt", None)
+            _detr_s = getattr(conv_out, "dq_s_detr_dt", None)
+            if _detr_r is not None or _detr_s is not None:
+                if q_s is None:
+                    raise ValueError(
+                        "convection detrains rain and snow (IFS PSNDE) but "
+                        "this run carries no snow species")
+                dq_r_dt = dq_r_dt + ad.unflatten_3d(_detr_r)
+                dq_s_dt = dq_s_dt + ad.unflatten_3d(_detr_s)
         else:
             # Convective precip = the column-net VAPOUR sink of the convective
             # tendency (mass-EXACT for every adjustment scheme: water removed
@@ -4170,6 +4198,7 @@ def _resolve_convection(config):
             # field gets the scheme default, not the legacy closure).
             use_ifs_cape_closure=getattr(
                 config, 'bechtold_use_ifs_cape_closure', True),
+            use_ifs_ascent=getattr(config, 'bechtold_use_ifs_ascent', False),
             # IFS Kessler sub-cloud rain evaporation (fallback True =
             # the scheme default since the 2026-07-16 flip).
             use_ifs_subcloud_evap=getattr(
@@ -4194,7 +4223,6 @@ def _resolve_convection(config):
                 config, 'bechtold_use_ifs_shallow_closure', False),
             use_ifs_capdcycl=getattr(
                 config, 'bechtold_use_ifs_capdcycl', True),
-            use_ifs_ascent=config.bechtold_use_ifs_ascent,
             ifs_shallow_nosupply=config.bechtold_ifs_shallow_nosupply,
             use_ifs_land_rhebc=getattr(
                 config, 'bechtold_use_ifs_land_rhebc', True),
@@ -4218,6 +4246,9 @@ def _resolve_convection(config):
         if (_pe is not None and _pe > 0.0
                 and hasattr(conv_config, "precip_efficiency")):
             conv_config = conv_config._replace(precip_efficiency=_pe)
+        if scheme == "kain_fritsch":
+            conv_config = conv_config._replace(
+                variant=config.kain_fritsch_variant)
         if scheme == "zhang_mcfarlane":
             conv_config = conv_config._replace(
                 land_fraction=config.zm_land_fraction,

@@ -1001,6 +1001,12 @@ class KainFritschConfig(NamedTuple):
     # solve does not debit vapor for that condensate.
     subsidence_solve: str = "implicit_flux"
     theta_implicit: float = 1.0
+    # Which Kain-Fritsch implementation runs (user decision 2026-10-30, PR
+    # #2249; selector form and names agreed by codex + GLM): "smooth" (default)
+    # = the smooth surrogate above; "wrf_kfeta" = the faithful WRF v4.8.0
+    # KF-Eta port (kain_fritsch_wrf.py), OPT-IN and NOT RULE 5 compliant (its
+    # traced-state switches are hard; #2280).  Any other value raises.
+    variant: str = "smooth"
 
 
 class EmanuelConfig(NamedTuple):
@@ -1650,29 +1656,20 @@ class BechtoldConfig(NamedTuple):
     # 10 days, r16); RCE-inert (no trigger data).  Flip needs a skill-gated
     # longer run.  False is byte-identical legacy.
     use_ifs_shallow_closure: bool = False
-    # Faithful IFS chain (2026-09-17, user decision): selects the ported
-    # cubasen trigger + cuascn ascent + cumastrn closure + cudtdqn tendencies
-    # AS A WHOLE, in place of the legacy Bechtold reduction.  Static python
-    # bool, so only one branch is ever traced.
-    #
-    # INCOMPLETE -- DO NOT SCORE A RUN WITH THIS ON.  Closed so far: CUFLXN and
-    # the absolute-flux reconstruction (which removes a +-11000 K/day dipole at
-    # the two lowest levels) and the humidity convention across the trigger /
-    # ascent seam (q_v, q_u and l_u are all PQEN / PQU / PLU specific humidity,
-    # cubasen.F90:72 and :677-678) and the KTYPE reclassification against the
-    # actual ascent top (cumastrn.F90:635-641) and the return of the detrained
-    # condensate and the convective precipitation to the host water budget.
-    # Still open: the early return
-    # bypasses the legacy downdraught and sub-cloud evaporation rather than
-    # keeping them, and the ported ascent does not return an updated LDCUM
-    # (CUASCN has it INOUT and clears it for mid-level columns, cuascn.F90:389
-    # and :627), which is harmless only while this port has no KTYPE=3 branch.
+    # Faithful IFS convection (2026-09-17, user decision): runs CUMASTRN as
+    # OpenIFS 8f6f722 does (trigger, ascent, downdraught, closures,
+    # precipitation/melting/evaporation, implicit T/q/u/v tendencies), matched
+    # to the compiled oracle at 1e-10 (tests/atmosphere/
+    # test_bechtold_ifs_oracle.py).  Static python bool, so only one branch is
+    # ever traced.  On this path only dx_m is read; any other non-default
+    # BechtoldConfig field raises.  Default False keeps the legacy smooth
+    # reduction below, which is NOT the oracle.
     use_ifs_ascent: bool = False
     # Faithful chain only: shallow closure with no sub-cloud supply.
     # "zero" (default) = flux max(supply, 0)/ZDH, smoothed over
     # ifs_shallow_supply_width_w_m2; "first_guess" = OpenIFS (cumastrn.F90:912
     # keeps the first-guess 0.1*ZMFMAX).  KNOWN DIFFERENCE in
-    # _ifs_closure.shallow_closure.
+    # _ifs_cumastrn.cumastrn_column (shallow closure).
     ifs_shallow_nosupply: str = "zero"
     ifs_shallow_supply_width_w_m2: float = 1.0  # W/m2, 0 = hard max
     # IFS RCAPDCYCL=2 diurnal-cycle CAPE correction (cumastrn.F90:780-833;

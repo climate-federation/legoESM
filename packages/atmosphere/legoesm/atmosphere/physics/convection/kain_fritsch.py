@@ -894,8 +894,17 @@ def kain_fritsch_convection(
     conv_prog_profile: jax.Array,
     dt: float,
     config: KainFritschConfig = KainFritschConfig(),
+    *,
+    u: jax.Array | None = None,
+    v: jax.Array | None = None,
 ) -> tuple[ConvectionOutput, jax.Array]:
     """Kain-Fritsch convection (AD-safe; smooth trigger/blend/gates).
+
+    ``config.variant`` selects the implementation: ``"smooth"`` (default) runs
+    the surrogate below and ignores ``u``/``v``; ``"wrf_kfeta"`` runs the
+    faithful, NOT RULE 5 compliant WRF KF-Eta port
+    (:func:`~legoesm.atmosphere.physics.convection.kain_fritsch_wrf.kain_fritsch_wrf_convection`),
+    which needs ``u`` and ``v``.  Any other value raises ``ValueError``.
 
     Parameters
     ----------
@@ -933,6 +942,18 @@ def kain_fritsch_convection(
     conv_prog_profile_new : jax.Array, shape (ncol, nlev)
         Updated carry with diagnosed ``M_b`` packed at ``[:, -1]``.
     """
+    if config.variant == "wrf_kfeta":
+        from legoesm.atmosphere.physics.convection.kain_fritsch_wrf import (
+            kain_fritsch_wrf_convection,
+        )
+        return kain_fritsch_wrf_convection(
+            T, q_v, p_full, p_half, w_grid, conv_prog_profile, dt, config,
+            u=u, v=v)
+    if config.variant != "smooth":
+        raise ValueError(
+            f"KainFritschConfig.variant must be one of ('smooth', 'wrf_kfeta'), "
+            f"got {config.variant!r}")
+    del u, v  # the smooth surrogate has no wind dependence
     ncol, nlev = T.shape
     del conv_prog_profile  # KF is diagnostic; we only emit a fresh profile.
 

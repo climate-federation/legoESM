@@ -169,8 +169,13 @@ BASELINE_DISPATCHERS: frozenset[tuple[str, str]] = frozenset(
         # raise, not silently run the wrong precip physics.
         ("packages/atmosphere/legoesm/atmosphere/physics/convection/bechtold.py", "bechtold_convection"),
         # faithful IFS shallow closure: unknown no-supply mode must raise
-        ("packages/atmosphere/legoesm/atmosphere/physics/convection/_ifs_closure.py", "shallow_closure"),
+        # (moved with #2253's mode from the removed reduced chain's
+        # _ifs_closure.shallow_closure into the CUMASTRN port's entry)
+        ("packages/atmosphere/legoesm/atmosphere/physics/convection/_ifs_cumastrn.py", "cumastrn"),
         ("packages/atmosphere/legoesm/atmosphere/physics/convection/tiedtke.py", "tiedtke_convection"),
+        # Kain-Fritsch implementation selector ("smooth" | "wrf_kfeta", PR
+        # #2249): a typo must raise, not silently run the surrogate.
+        ("packages/atmosphere/legoesm/atmosphere/physics/convection/kain_fritsch.py", "kain_fritsch_convection"),
         # ZM land-fraction policy ("required" | "none"): a typo must raise, not
         # silently run every column with ocean coefficients.
         ("packages/atmosphere/legoesm/atmosphere/physics/convection/zhang_mcfarlane.py", "zhang_mcfarlane_convection"),

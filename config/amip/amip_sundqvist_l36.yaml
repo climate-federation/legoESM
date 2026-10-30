@@ -157,11 +157,13 @@ morrison_sed_cfl_substeps: true  # user decision 2026-09-22: MG2 CFL sub-stepped
                                  # 256 cap; turning the abort on is a user choice, not taken.
 convection: bechtold        # mass-flux (IFS lineage), water-conserving by
                             # construction; C24 screen = revalidation gate
-# Convective momentum transport PINNED OFF (review 2026-10-10 F22, majority
-# vote Claude+GLM): the unset default is now ON on every lane, but it resolved
-# OFF on MPAS when this deck's results were produced; this deck exists so
-# those results reproduce, so it records the behaviour they ran with.
-bechtold_enable_cmt: false
+# Bechtold runs the faithful IFS CUMASTRN path (user 2026-10-27, Q17 item 2:
+# codex+GLM split, author pick (a)).  The path refuses every legacy-only field,
+# so this deck no longer pins bechtold_enable_cmt: false or
+# convective_precip_efficiency: 0.8; results before this change ran the legacy
+# reduction and are not comparable term by term.
+bechtold_use_ifs_ascent: true
+bechtold_ifs_shallow_nosupply: zero   # main #2253 default, stated explicitly (OpenIFS: first_guess)
 # NEW BASELINE, 2026-09-13 (owner decision). This moves TWO things at once and
 # is therefore a deliberate re-baselining, not a one-variable arm: the boundary
 # layer changes closure AND gains prognostic sub-grid variance. Nothing here is
@@ -291,7 +293,6 @@ cloud_q_c_diagnostic: 5.0e-6   # was 3.0e-4 ("thinner cloud" -> lower albedo)
 cloud_partial_coverage_optics: none
 cloud_optics_inhomogeneity: two_region
 cloud_fsd: 1.0
-convective_precip_efficiency: 0.8  # detrained-condensate -> convective-rain split
 # Survivor convective rain (after the IFS downdraft + sub-cloud evaporation)
 # goes to the SURFACE (IFS cuflxn); before 2026-09-16 it entered the
 # microphysics rain tracer and was re-evaporated at grid-mean humidity

@@ -1633,6 +1633,10 @@ class ExperimentConfig(NamedTuple):
     # Zhang-McFarlane convective transport of the carried cloud/precipitation
     # tracers (ZhangMcFarlaneConfig.transport_cloud_tracers; CAM6 convtran).
     zm_transport_cloud_tracers: bool = True
+    # Kain-Fritsch implementation (KainFritschConfig.variant; user 2026-10-30,
+    # PR #2249): "smooth" (default surrogate) or "wrf_kfeta" (faithful WRF
+    # v4.8.0 KF-Eta port, OPT-IN, NOT RULE 5 compliant, #2280).
+    kain_fritsch_variant: str = "smooth"
     # Bechtold convective-top pressure [Pa]; terminates the (non-detraining)
     # plume + subsidence gate. 150 hPa stability cap (see BechtoldConfig.
     # p_conv_top_pa); raise toward 100 hPa if deep tropical tops are clipped.
@@ -1665,6 +1669,11 @@ class ExperimentConfig(NamedTuple):
     # neutral); --no-bechtold-use-ifs-cape-closure restores the legacy
     # surrogate byte-identically.  Mirrors BechtoldConfig.use_ifs_cape_closure.
     bechtold_use_ifs_cape_closure: bool = True
+    # Run the IFS convection as CUMASTRN does (faithful OpenIFS port; the six
+    # run-set fields bechtold_epsilon_deep/delta_deep/rprcon/dnoprc,
+    # epsilon_shallow, cape_qadv_weight reach it, every other Bechtold field
+    # must stay at its default).  Mirrors BechtoldConfig.use_ifs_ascent.
+    bechtold_use_ifs_ascent: bool = False
     # IFS Kessler sub-cloud rain evaporation (cuflxn.F90:436-475).  Default
     # ON (2026-07-16, validated: codex x3 + gray-RCE A/B + C24 AMIP A/B);
     # mirrors BechtoldConfig.use_ifs_subcloud_evap (fallbacks match).
@@ -1714,9 +1723,8 @@ class ExperimentConfig(NamedTuple):
     bechtold_use_ifs_capdcycl: bool = True
     bechtold_use_ifs_land_rhebc: bool = True
     bechtold_use_ifs_snow_melt: bool = True
-    # Faithful OpenIFS convection chain (mirrors BechtoldConfig.use_ifs_ascent)
-    # and its no-supply shallow mode (BechtoldConfig.ifs_shallow_nosupply).
-    bechtold_use_ifs_ascent: bool = False
+    # The faithful chain's no-supply shallow mode
+    # (BechtoldConfig.ifs_shallow_nosupply; bechtold_use_ifs_ascent above).
     bechtold_ifs_shallow_nosupply: str = "zero"
     sigma_b: float = 0.7
     k_BL_max_per_day: float = 1.0
@@ -2204,6 +2212,17 @@ class ExperimentConfig(NamedTuple):
         g = self.grid
         d = self.dycore
         errors: list[str] = []
+        # The faithful IFS convection hands its detrained rain and snow
+        # (PSNDE) to the host's rain and snow species (user 2026-10-28, R12):
+        # only schemes that carry and process both may run it.  p3's snow
+        # slot holds rime, fast_sbm's ice slots stay zero, seifert_beheng is
+        # liquid only, the ML emulator's layout is generic.
+        if (self.convection == "bechtold" and self.bechtold_use_ifs_ascent
+                and self.microphysics not in ("morrison", "thompson")):
+            errors.append(
+                f"bechtold_use_ifs_ascent needs a microphysics that carries "
+                f"rain and snow (morrison, thompson) for the "
+                f"detrained precipitation, not {self.microphysics!r}")
         if self.land_fraction_source not in ("topography", "era5", "zero"):
             errors.append(
                 f"land_fraction_source must be topography, era5 or zero, got "
@@ -2696,6 +2715,23 @@ class ExperimentConfig(NamedTuple):
                 f"zm_land_fraction must be one of ('required', 'none'), got "
                 f"{self.zm_land_fraction!r}"
             )
+        if self.kain_fritsch_variant not in ("smooth", "wrf_kfeta"):
+            errors.append(
+                f"kain_fritsch_variant must be one of ('smooth', 'wrf_kfeta'), "
+                f"got {self.kain_fritsch_variant!r}"
+            )
+        elif (self.convection == "kain_fritsch"
+              and self.kain_fritsch_variant == "wrf_kfeta"):
+            # Fail at load, not at the first physics call: the faithful port
+            # refuses every surrogate-only field away from its default.
+            from legoesm.atmosphere.physics.convection.kain_fritsch_wrf import (
+                check_wrf_kfeta_config,
+            )
+            from legoesm.driver.physics_pipeline import convection_config_for
+            try:
+                check_wrf_kfeta_config(convection_config_for(self).kain_fritsch)
+            except ValueError as exc:
+                errors.append(f"kain_fritsch_variant='wrf_kfeta': {exc}")
         if not isinstance(self.zm_transport_cloud_tracers, bool):
             errors.append(
                 f"zm_transport_cloud_tracers must be a bool, got "
@@ -5136,6 +5172,8 @@ class ExperimentConfig(NamedTuple):
             # fresh default run gets, not silently pin the old one.
             bechtold_use_ifs_cape_closure=getattr(
                 amip_cfg, 'bechtold_use_ifs_cape_closure', True),
+            bechtold_use_ifs_ascent=getattr(
+                amip_cfg, 'bechtold_use_ifs_ascent', False),
             bechtold_use_ifs_subcloud_evap=getattr(
                 amip_cfg, 'bechtold_use_ifs_subcloud_evap', True),
             bechtold_use_ifs_inplume_precip=getattr(
@@ -5156,6 +5194,7 @@ class ExperimentConfig(NamedTuple):
             bechtold_rain_vapor_sink=getattr(amip_cfg, 'bechtold_rain_vapor_sink', "formation"),
             zm_land_fraction=getattr(amip_cfg, 'zm_land_fraction', "required"),
             zm_transport_cloud_tracers=getattr(amip_cfg, 'zm_transport_cloud_tracers', True),
+            kain_fritsch_variant=getattr(amip_cfg, 'kain_fritsch_variant', "smooth"),
             convective_buoyancy_death_memory=getattr(amip_cfg, 'convective_buoyancy_death_memory', False),
             convective_cloud=getattr(amip_cfg, 'convective_cloud', False),
             bechtold_use_ifs_downdraft=getattr(
@@ -5164,7 +5203,6 @@ class ExperimentConfig(NamedTuple):
                 amip_cfg, 'bechtold_use_ifs_shallow_closure', False),
             bechtold_use_ifs_capdcycl=getattr(
                 amip_cfg, 'bechtold_use_ifs_capdcycl', True),
-            bechtold_use_ifs_ascent=amip_cfg.bechtold_use_ifs_ascent,
             bechtold_ifs_shallow_nosupply=amip_cfg.bechtold_ifs_shallow_nosupply,
             bechtold_use_ifs_land_rhebc=getattr(
                 amip_cfg, 'bechtold_use_ifs_land_rhebc', True),
@@ -5317,6 +5355,7 @@ class ExperimentConfig(NamedTuple):
             bechtold_downdraft_alpha=self.bechtold_downdraft_alpha,
             bechtold_downdraft_rh_min=self.bechtold_downdraft_rh_min,
             bechtold_use_ifs_cape_closure=self.bechtold_use_ifs_cape_closure,
+            bechtold_use_ifs_ascent=self.bechtold_use_ifs_ascent,
             bechtold_use_ifs_subcloud_evap=self.bechtold_use_ifs_subcloud_evap,
             bechtold_use_ifs_inplume_precip=self.bechtold_use_ifs_inplume_precip,
             bechtold_dx_m=self.bechtold_dx_m,
@@ -5337,12 +5376,12 @@ class ExperimentConfig(NamedTuple):
             bechtold_rain_vapor_sink=self.bechtold_rain_vapor_sink,
             zm_land_fraction=self.zm_land_fraction,
             zm_transport_cloud_tracers=self.zm_transport_cloud_tracers,
+            kain_fritsch_variant=self.kain_fritsch_variant,
             convective_buoyancy_death_memory=self.convective_buoyancy_death_memory,
             convective_cloud=self.convective_cloud,
             bechtold_use_ifs_downdraft=self.bechtold_use_ifs_downdraft,
             bechtold_use_ifs_shallow_closure=self.bechtold_use_ifs_shallow_closure,
             bechtold_use_ifs_capdcycl=self.bechtold_use_ifs_capdcycl,
-            bechtold_use_ifs_ascent=self.bechtold_use_ifs_ascent,
             bechtold_ifs_shallow_nosupply=self.bechtold_ifs_shallow_nosupply,
             bechtold_use_ifs_land_rhebc=self.bechtold_use_ifs_land_rhebc,
             bechtold_use_ifs_snow_melt=self.bechtold_use_ifs_snow_melt,
