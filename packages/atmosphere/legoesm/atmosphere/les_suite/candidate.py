@@ -181,6 +181,77 @@ def flux_to_tendency(flux_kin: Array, rho_half: Array, mass: Array) -> Array:
     return -(m_flux[1:] - m_flux[:-1]) / mass
 
 
+def substepped(fluxes_fn, n_sub: int, kind: str):
+    """A candidate ``fluxes`` that takes ``n_sub`` equal internal steps inside one
+    SCM step (user 2026-10-30: a candidate may sub-step at the 10-min SCM step) and
+    reports their MEAN flux. Each sub-step calls ``fluxes_fn`` with ``dt/n_sub`` and
+    advances the candidate's own copy of the column with its own fluxes in flux form
+    (:func:`flux_to_tendency`; θ_l, q_t and, for momentum kinds, u, v), then
+    re-derives θ, q_v, q_c by :func:`~.scm_coupling.saturation_adjust` with the rain
+    (``q_t − q_v − q_c``) held fixed; pressure, density and Exner stay at the step's
+    values. The internal update is a predictor in θ_l flux form whatever heat form
+    the harness applies, and KE heating stays with the harness step. The harness
+    applies the returned mean flux over the full step, so the column update stays
+    flux-form and conserves exactly. A PRESCRIBED surface flux (index 0 of the
+    scalar fluxes; of the momentum fluxes for ``kind="momentum"``) is reported as the
+    prescribed value when every sub-step returned exactly it (the mean of ``n_sub``
+    equal values can differ in the last bit), else as NaN, so a sub-step that broke
+    the contract fails the harness's checks loudly (a mean could hide violations that
+    cancel). The returned aux is the last sub-step's."""
+    from jax import lax
+
+    from .scm_coupling import saturation_adjust
+
+    if kind not in KINDS:
+        raise ValueError(f"unknown candidate kind {kind!r}")
+    if int(n_sub) != n_sub or n_sub < 1:
+        raise ValueError(f"n_sub must be a positive integer, got {n_sub!r}")
+    n_sub = int(n_sub)
+
+    def wrapped(params, inputs, aux):
+        h = inputs.dt / n_sub
+        q_rain = inputs.q_t - inputs.q_v - inputs.q_c
+
+        def tend(f):
+            return flux_to_tendency(f, inputs.rho_half, inputs.mass)
+
+        def body(carry, _):
+            cols, ax = carry
+            cur = inputs._replace(dt=h, **cols)
+            fa, fb, ax = fluxes_fn(params, cur, ax)
+            if kind == "scalar":
+                fs = {"theta_l": fa, "q_t": fb}
+            elif kind == "momentum":
+                fs = {"u": fa, "v": fb}
+            else:
+                fs = {"theta_l": fa[0], "q_t": fa[1], "u": fb[0], "v": fb[1]}
+            new = dict(cols)
+            for name, f in fs.items():
+                new[name] = cols[name] + h * tend(f)
+            theta, q_v, q_c = saturation_adjust(new["theta_l"], new["q_t"] - q_rain,
+                                                inputs.exner, inputs.p_full)
+            new.update(temp=theta * inputs.exner, q_v=q_v, q_c=q_c)
+            return (new, ax), fs
+
+        cols0 = {k: getattr(inputs, k) for k in
+                 ("theta_l", "q_t", "u", "v", "temp", "q_v", "q_c")}
+        (_, ax), steps = lax.scan(body, (cols0, aux), None, length=n_sub)
+        sfc = {"theta_l": inputs.w_theta_s, "q_t": inputs.w_qt_s,
+               "u": inputs.uw_s, "v": inputs.vw_s}
+        prescribed = {"scalar": ("theta_l", "q_t"), "momentum": ("u", "v"),
+                      "both": ("theta_l", "q_t")}[kind]
+        mean = {k: jnp.sum(f, axis=0) / n_sub for k, f in steps.items()}
+        for k in prescribed:
+            ok = jnp.all(steps[k][:, 0] == sfc[k])
+            mean[k] = mean[k].at[0].set(jnp.where(ok, sfc[k], jnp.nan))
+        if kind == "scalar":
+            return mean["theta_l"], mean["q_t"], ax
+        if kind == "momentum":
+            return mean["u"], mean["v"], ax
+        return (mean["theta_l"], mean["q_t"]), (mean["u"], mean["v"]), ax
+    return wrapped
+
+
 def tendency_to_flux(tend: Array, rho_half: Array, mass: Array) -> Array:
     """Inverse of :func:`flux_to_tendency` with a zero top flux: the kinematic interface
     flux a flux-form scheme applied, recovered from its tendency (``M_n = 0``,

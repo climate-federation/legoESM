@@ -241,16 +241,20 @@ class Arm:
                                  nsteps, params)
 
 
-def candidate_case_loss(arm, artifact, *, nlev, dt):
-    """The E2 loss of one case as a jitted function of the candidate parameters: the
-    SCM is built once and the rollout compiled once, so every tuning step reuses it."""
-    prep = arm.prepare(artifact, nlev=nlev, dt=dt)
-    n = e2_nsteps(artifact, dt)
+def candidate_loss(arm, train, *, nlev, dt):
+    """Regime-mean E2 training loss of a candidate as ONE jitted function of its
+    parameters over every case in ``train`` (as :func:`baseline_loss`): the SCMs are
+    built once and the rollouts compiled into one executable, so every tuning step
+    reuses it. One executable per case exhausted the kernel's memory-mapping cap
+    (65530) at 14 cases; this one peaked at 49909 (2026-10-30)."""
+    preps = {path: arm.prepare(art, nlev=nlev, dt=dt) for path, art in train}
 
     @jax.jit
     def loss(params):
-        rec, _ = arm.run_prepared(prep, n, params)
-        return e2_score(artifact, rec, dt).combined
+        def per_case(path, art):
+            rec, _ = arm.run_prepared(preps[path], e2_nsteps(art, dt), params)
+            return e2_score(art, rec, dt).combined
+        return _regime_mean_loss(per_case, train)
     return loss
 
 
@@ -591,12 +595,10 @@ def stage_e2(cand_arm, base_names, artifacts, nlev, dt, steps, lr,
                 for k in ("theta_l", "q_t", "u", "v")}
         entry["max_abs_diff_vs_baseline_rollout"] = base_rec_diff
         if tune and train and names:
-            case_loss = {path: candidate_case_loss(cand_arm, art, nlev=nlev, dt=dt)
-                         for path, art in train}
+            joint = candidate_loss(cand_arm, train, nlev=nlev, dt=dt)
 
             def loss_of(x):
-                p = to_params(x)
-                return _regime_mean_loss(lambda path, art: case_loss[path](p), train)
+                return joint(to_params(x))
             best, record = tune_active(loss_of, lo, hi, x0, names, steps=steps, lr=lr)
             tuned = to_params(best)
             entry["ad"] = {"params": {k: float(v) for k, v in tuned.items()}, **record,
@@ -648,11 +650,7 @@ def stage_e0(cand_arm, artifacts, nlev, dt) -> dict:
                        for k, v in cols.items()}}
     train = [(p, a) for p, a in artifacts if not _held_out(a.case_name)]
     if train and cand.params:
-        case_loss = {path: candidate_case_loss(cand_arm, art, nlev=nlev, dt=dt)
-                     for path, art in train}
-
-        def loss(p):
-            return _regime_mean_loss(lambda path, art: case_loss[path](p), train)
+        loss = candidate_loss(cand_arm, train, nlev=nlev, dt=dt)
         res["gradient_activity_on_E2_loss"] = gradient_activity(loss, params)
     else:
         res["gradient_activity_on_E2_loss"] = (

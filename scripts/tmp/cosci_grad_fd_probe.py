@@ -19,7 +19,7 @@ from legoesm.atmosphere.les_suite.bridge import load_artifact
 from legoesm.atmosphere.les_suite.candidate import load_candidate
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts" / "validate" / "les_suite"))
-from cosci_eval import SCM_DT_S, SCM_NLEV, Arm, _roster_base, candidate_case_loss  # noqa: E402
+from cosci_eval import SCM_DT_S, SCM_NLEV, Arm, _roster_base, candidate_loss  # noqa: E402
 
 REL_STEPS = (1e-2, 1e-3, 1e-4, 1e-5, 1e-6, 1e-7)
 ABS_SCALE = 1e-3  # step scale for a parameter whose default is 0
@@ -41,7 +41,7 @@ def main() -> None:
     names = [s for s in a.params.split(",") if s] or list(p0)
     for path in a.artifacts:
         art = load_artifact(path)
-        loss = candidate_case_loss(arm, art, nlev=SCM_NLEV, dt=SCM_DT_S)
+        loss = candidate_loss(arm, [(path, art)], nlev=SCM_NLEV, dt=SCM_DT_S)
         l0 = float(loss(p0))
         g = jax.grad(loss)(p0)
         print(f"\n### {path}  candidate={a.candidate} baseline={a.baseline} "

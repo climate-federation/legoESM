@@ -392,9 +392,9 @@ def test_e2_score_finite_and_gradient_reaches_candidate_param(tmp_path):
     val = loss(cand.default_params())
     g = jax.grad(loss)(cand.default_params())
     assert np.isfinite(float(val)) and float(abs(g["K"])) > 0.0
-    from cosci_eval import candidate_case_loss
+    from cosci_eval import candidate_loss
     art60 = _cbl_artifact(seconds=600.0)
-    jl = candidate_case_loss(arm, art60, nlev=16, dt=10.0)
+    jl = candidate_loss(arm, [("cbl_harness.npz", art60)], nlev=16, dt=10.0)
     assert abs(float(jl(cand.default_params())) - float(val)) < 1e-12
     gj = jax.grad(jl)(cand.default_params())
     assert abs(float(gj["K"]) - float(g["K"])) <= 1e-9 * abs(float(g["K"]))
@@ -619,6 +619,46 @@ def test_baseline_loss_compiles_once_and_matches_eager(monkeypatch):
     assert abs(float(vp) - float(v0)) > 1e-6 * abs(float(v0))  # the perturbation acts
 
 
+def test_candidate_loss_is_one_executable_and_the_regime_mean(tmp_path, monkeypatch):
+    import dataclasses
+
+    import cosci_eval
+    from tune_scm_to_les import _base_turbulence
+    cand = _write(tmp_path, "good_joint", _GOOD_SCALAR)
+    arm = cosci_eval.Arm(_base_turbulence("louis", **_RGH)[0], cand, "theta", False)
+    a1 = _cbl_artifact(seconds=600.0)
+    # a second (stable) regime; heights as a jax array, as load_artifact gives them
+    # (a closed-over numpy array is traced under jit, and its sponge cut needs them)
+    a2 = dataclasses.replace(a1, case_name="sullivan16_cr025",
+                             heights_m=jnp.asarray(a1.heights_m))
+    train = [("a1.npz", a1), ("a2_twice.npz", a1), ("a3.npz", a2)]
+    traces = []
+    real = cosci_eval.Arm.run_prepared
+
+    def counting(self, *a, **k):
+        traces.append(1)  # Python side effect: runs only while tracing
+        return real(self, *a, **k)
+    monkeypatch.setattr(cosci_eval.Arm, "run_prepared", counting)
+    jl = cosci_eval.candidate_loss(arm, train, nlev=16, dt=10.0)
+    p0 = cand.default_params()
+    p1 = {k: v * 0.5 for k, v in p0.items()}
+    v0, v1 = jl(p0), jl(p1)
+    g = jax.grad(jl)(p0)
+    assert len(traces) <= 2 * len(train)    # one forward + one grad trace per case
+    # ONE executable over every case: a jitted function whose lowering holds them all
+    hlo = jl.lower(p0).as_text()
+    assert hlo.count("stablehlo.while") >= len({id(a) for _, a in train})
+    assert float(abs(g["K"])) > 0.0
+
+    def eager(p, art):
+        rec, _ = arm.run(art, ev.e2_nsteps(art, 10.0), params=p, nlev=16, dt=10.0)
+        return float(ev.e2_score(art, rec, 10.0).combined)
+    for p, v in ((p0, v0), (p1, v1)):
+        want = 0.5 * (eager(p, a1) + eager(p, a2))   # regimes weighted equally
+        assert abs(float(v) - want) < 1e-9 * abs(want)
+    assert abs(float(v1) - float(v0)) > 1e-6 * abs(float(v0))
+
+
 def test_tune_active_refuses_a_non_finite_gradient():
     import cosci_eval
     with pytest.raises(SystemExit, match="non-finite"):
@@ -822,6 +862,88 @@ _GOOD_BOTH = """
         return ((f(inputs.theta_l, inputs.w_theta_s), f(inputs.q_t, inputs.w_qt_s)),
                 (f(inputs.u, tau * inputs.u[0]), f(inputs.v, tau * inputs.v[0])), aux)
 """
+
+
+@pytest.mark.parametrize("body", ["_GOOD_SCALAR", "_GOOD_MOMENTUM", "_GOOD_BOTH"])
+def test_substepped_with_one_sub_step_is_the_candidate(tmp_path, body):
+    c = _write(tmp_path, "sub_one", globals()[body])
+    inp, p = _column(), c.default_params()
+    want = jax.tree_util.tree_leaves(c.fluxes(p, inp, ())[:2])
+    got = jax.tree_util.tree_leaves(cmod.substepped(c.fluxes, 1, c.kind)(p, inp, ())[:2])
+    for a, b in zip(want, got, strict=True):
+        np.testing.assert_array_equal(np.asarray(a), np.asarray(b))
+
+
+@pytest.mark.parametrize("body", ["_GOOD_SCALAR", "_GOOD_MOMENTUM"])
+def test_substepped_keeps_the_prescribed_surface_flux_exact(tmp_path, body):
+    c = _write(tmp_path, "sub_sfc", globals()[body])
+    # stresses/fluxes whose repeated sum is not exact in binary
+    inp = _column(w_theta_s=0.1, uw_s=-0.07, vw_s=0.03)._replace(dt=jnp.asarray(600.0))
+    fa, fb, _ = cmod.substepped(c.fluxes, 7, c.kind)(c.default_params(), inp, ())
+    s0 = ((inp.w_theta_s, inp.w_qt_s) if c.kind == "scalar" else (inp.uw_s, inp.vw_s))
+    assert float(fa[0]) == float(s0[0]) and float(fb[0]) == float(s0[1])
+
+
+@pytest.mark.parametrize("factors", [(1.0, 2.0, 2.0, 2.0), (1.0, 2.0, 0.0, 1.0)])
+def test_substepped_shows_a_sub_step_breaking_the_surface_contract(tmp_path, factors):
+    # surface heat flux s * factors[k] on sub-step k (via aux); the second set
+    # averages back to exactly s, which a reported mean would hide
+    body = _GOOD_SCALAR.replace("        return ()\n", "        return jnp.zeros((), int)\n")
+    body = body.replace("f(inputs.theta_l, inputs.w_theta_s), f(inputs.q_t, inputs.w_qt_s), aux",
+                        f"f(inputs.theta_l, inputs.w_theta_s * jnp.asarray({factors})[aux]), "
+                        "f(inputs.q_t, inputs.w_qt_s), aux + 1")
+    c = _write(tmp_path, "sub_bad", body)
+    inp = _column(w_theta_s=0.125)._replace(dt=jnp.asarray(600.0))
+    w, q, _ = cmod.substepped(c.fluxes, 4, c.kind)(c.default_params(), inp, c.init_aux(inp))
+    assert np.isnan(float(w[0])) and float(q[0]) == float(inp.w_qt_s)
+
+
+def test_substepped_carries_the_candidate_aux_through_its_sub_steps(tmp_path):
+    body = _GOOD_SCALAR.replace("        return ()\n", "        return jnp.zeros(())\n")
+    body = body.replace("f(inputs.q_t, inputs.w_qt_s), aux", "f(inputs.q_t, inputs.w_qt_s), aux + 1.0")
+    c = _write(tmp_path, "sub_aux", body)
+    inp = _column()._replace(dt=jnp.asarray(600.0))
+    _, _, aux = cmod.substepped(c.fluxes, 5, c.kind)(c.default_params(), inp,
+                                                    c.init_aux(inp))
+    assert float(aux) == 5.0
+
+
+def test_substepped_reports_the_mean_of_its_own_sub_steps(tmp_path):
+    from legoesm.atmosphere.les_suite.scm_coupling import saturation_adjust
+    both = _write(tmp_path, "sub_three", _GOOD_BOTH)
+    inp, p, n = _column()._replace(dt=jnp.asarray(600.0)), both.default_params(), 3
+    (w, q), (u, v), _ = cmod.substepped(both.fluxes, n, "both")(p, inp, ())
+    # the same sub-steps by hand
+    h, cols, acc = 600.0 / n, inp, [0.0, 0.0, 0.0, 0.0]
+    rain = inp.q_t - inp.q_v - inp.q_c
+    for _ in range(n):
+        cur = cols._replace(dt=jnp.asarray(h))
+        (a, b), (c, d), _ = both.fluxes(p, cur, ())
+        acc = [x + y for x, y in zip(acc, (a, b, c, d))]
+        new = {k: getattr(cur, k) + h * cmod.flux_to_tendency(f, inp.rho_half, inp.mass)
+               for k, f in (("theta_l", a), ("q_t", b), ("u", c), ("v", d))}
+        th, qv, qc = saturation_adjust(new["theta_l"], new["q_t"] - rain, inp.exner,
+                                       inp.p_full)
+        cols = cur._replace(temp=th * inp.exner, q_v=qv, q_c=qc, **new)
+    for got, want in zip((w, q, u, v), acc):
+        want = np.asarray(want) / n
+        np.testing.assert_allclose(np.asarray(got)[1:], want[1:], rtol=1e-12, atol=1e-18)
+    # RULE 0: the mean flux over the full step moves the column exactly as the
+    # sub-steps did (flux divergence is linear at fixed density and layer mass)
+    for got, name in zip((w, q, u, v), ("theta_l", "q_t", "u", "v")):
+        np.testing.assert_allclose(
+            np.asarray(getattr(inp, name)
+                       + 600.0 * cmod.flux_to_tendency(got, inp.rho_half, inp.mass)),
+            np.asarray(getattr(cols, name)), rtol=1e-12, atol=1e-14)
+    assert float(w[0]) == float(inp.w_theta_s) and float(q[0]) == float(inp.w_qt_s)
+    np.testing.assert_allclose(float(u[0]), float(acc[2][0]) / n, rtol=1e-12)
+    assert float(w[-1]) == 0.0 and float(u[-1]) == 0.0
+    (w1, _), _, _ = both.fluxes(p, inp, ())
+    assert float(jnp.max(jnp.abs(w - w1))) > 1e-6   # the sub-steps act on the column
+    with pytest.raises(ValueError, match="n_sub"):
+        cmod.substepped(both.fluxes, 0, "both")
+    with pytest.raises(ValueError, match="kind"):
+        cmod.substepped(both.fluxes, 2, "bogus")
 
 
 def test_both_tendencies_are_the_scalar_and_momentum_kinds_summed(tmp_path):

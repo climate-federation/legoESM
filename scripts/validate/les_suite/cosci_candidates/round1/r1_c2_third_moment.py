@@ -103,6 +103,14 @@ Implementation deviations from the hypothesis (each one recorded)
   interfaces; the lowest and highest levels copy the nearest interface value. The
   surface interface carries the stress work -(F_u0 U_1 + F_v0 V_1)/z_1.
 * The absorbing layer for momentum spans the top (1 - Z_ABSORB_FRAC) of the column.
+* SUB-STEPS (user 2026-10-30): the SCM steps every 10 min, and this explicit operator
+  blows up there (12 of 14 cases within 6-12 steps at default parameters). It takes
+  N_SUB = 60 internal steps of 10 s per SCM step (``candidate.substepped``) and
+  reports their mean flux. Measured at default parameters on the 14 scored cases:
+  sub-steps of 300, 120, 60 and 30 s blew up in 12, 11, 5 and 1 cases; 10 s in none.
+  KNOWN DIFFERENCE (PI 2026-10-30, round 1): the reported flux is the mean over the
+  SCM step, and scoring compares the applied flux with the LES snapshot at the step's
+  start (as for the implicit candidates).
 
 Diagnostics (review fix 6)
 --------------------------
@@ -119,7 +127,7 @@ import jax.numpy as jnp
 from jax import lax
 
 from legoesm import constants
-from legoesm.atmosphere.les_suite.candidate import absorb_top
+from legoesm.atmosphere.les_suite.candidate import absorb_top, substepped
 from legoesm.atmosphere.physics._shared import buoyancy_coefficient, virtual_temperature
 from legoesm.core.bulk_flux import psi_m
 from legoesm.timestepping.tridiagonal import thomas_solve
@@ -234,7 +242,7 @@ def init_aux(inputs):
     }
 
 
-def fluxes(params, inputs, aux):
+def _fluxes_one_step(params, inputs, aux):
     dtype = inputs.theta_l.dtype
     p = {k: jnp.asarray(v, dtype) for k, v in params.items()}
     kappa = constants.kappa_von_karman
@@ -393,3 +401,9 @@ def fluxes(params, inputs, aux):
         "dw": full(dw0, dw_i), "Pi": full(pi_0, pi_i),
     }
     return (F_thl, F_qt), (F_u, F_v), aux_new
+
+
+# Internal steps per SCM step (deviation SUB-STEPS above): the longest sub-step that
+# stayed finite on all 14 scored cases at default parameters, measured 2026-10-30.
+N_SUB = 60
+fluxes = substepped(_fluxes_one_step, N_SUB, KIND)
