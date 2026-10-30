@@ -120,7 +120,10 @@ def load_mitchell_ice_optics(path, expected_sha256: str = ICEOPTICS_SHA256,
         raise ValueError(f"Mitchell ice optics {path}: non-finite grid or table values")
     arrs = (d, rrtmg_to_rrtmgp_sw(sw_ext), rrtmg_to_rrtmgp_sw(sw_ssa),
             rrtmg_to_rrtmgp_sw(sw_asm), lw_abs)
-    return MitchellIceOptics(*(jnp.asarray(a, dtype=dtype) for a in arrs))
+    # numpy, not jnp: the caller caches this table (lru_cache), and a jnp array made
+    # while a jit is tracing would be a tracer that leaks into the next trace.
+    return MitchellIceOptics(*(np.asarray(a, dtype=np.float64 if dtype is None else dtype)
+                               for a in arrs))
 
 
 def _on(path, d_eff):
