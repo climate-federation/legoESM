@@ -9,6 +9,12 @@ pair coefficients) leaves the energy unchanged to round-off for any flow,
 also over partial cells, and still rotates the flow.  The trapezoidal scheme
 with the four point average keeps a residual that does not vanish as dt -> 0
 (f and the face weights differ between u and v faces).
+
+``coriolis_time_scheme="trapezoidal_step"`` centres the rotation on the whole step,
+u1 = u0 + dt T + dt C((u0 + u1)/2), with u0 the velocity before the explicit
+tendency T.  Its energy change is then exactly dt times the work of T on the centred
+velocity (u0 + u1)/2, so the forward pressure gradient stage no longer adds
+(1/2) dt^2 |T|^2, about (f dt)^2 of the energy of balanced flow per step.
 """
 import numpy as np
 import pytest
@@ -33,7 +39,7 @@ set_policy(PrecisionPolicy.fp64())
 DT = 1800.0
 
 
-def _ke_change(time_scheme, operator="four_point", flow="zonal"):
+def _setup(time_scheme, operator, flow):
     grid, wall = create_regional_grid("latlon", n_lat=12, n_lon=16, lat_south=20.0,
                                       lat_north=32.0, lon_west=140.0, lon_east=156.0)
     ocean = np.asarray(wall) > 0.5
@@ -65,19 +71,32 @@ def _ke_change(time_scheme, operator="four_point", flow="zonal"):
     u0 = u0 - ((u0 * hu).sum(-1) / np.maximum(hu.sum(-1), 1e-10))[..., None] * (hu > 0)
     v0 = v0 - ((v0 * hv).sum(-1) / np.maximum(hv.sum(-1), 1e-10))[..., None] * (hv > 0)
     u0[:, -1] = u0[:, 0]                                  # periodic duplicate u face, as the model
-    u1, v1 = oml._forward_backward_coriolis_3d(jnp.asarray(u0), jnp.asarray(v0), DT, model.grid,
-                                               model.z_coord, model.config, st.u_mask.data,
-                                               st.v_mask.data, st.land_mask.data, st.eta.data,
-                                               st.H_bathy.data)
     Au = (np.asarray(model.grid.dx_u) * np.asarray(model.grid.dy_u))[..., None]
     Av = (np.asarray(model.grid.dx_v) * np.asarray(model.grid.dy_v))[..., None]
     nx = Au.shape[1] - 1                                  # count the duplicate u face once
 
-    def ke(u, v):
-        u, v = np.asarray(u), np.asarray(v)
-        return float(np.sum((hu * Au * u ** 2)[:, :nx]) + np.sum(hv * Av * v ** 2))
+    def rot(u, v, **kw):
+        return oml._forward_backward_coriolis_3d(jnp.asarray(u), jnp.asarray(v), DT, model.grid, model.z_coord,
+                                                 model.config, st.u_mask.data, st.v_mask.data, st.land_mask.data,
+                                                 st.eta.data, st.H_bathy.data, **kw)
 
-    return (ke(u1, v1) - ke(u0, v0)) / ke(u0, v0), float(np.abs(np.asarray(v1) - v0).max())
+    def dot(a, b, c, d):                                  # sum of h A (a c + b d) over faces
+        return float(np.sum((hu * Au * np.asarray(a) * np.asarray(c))[:, :nx])
+                     + np.sum(hv * Av * np.asarray(b) * np.asarray(d)))
+
+    def zero_mean(u, v):
+        u = u - ((u * hu).sum(-1) / np.maximum(hu.sum(-1), 1e-10))[..., None] * (hu > 0)
+        v = v - ((v * hv).sum(-1) / np.maximum(hv.sum(-1), 1e-10))[..., None] * (hv > 0)
+        u[:, -1] = u[:, 0]
+        return u, v
+
+    return model, st, u0, v0, hu, hv, rot, dot, zero_mean
+
+
+def _ke_change(time_scheme, operator="four_point", flow="zonal"):
+    _, _, u0, v0, _, _, rot, dot, _ = _setup(time_scheme, operator, flow)
+    u1, v1 = rot(u0, v0)
+    return (dot(u1, v1, u1, v1) - dot(u0, v0, u0, v0)) / dot(u0, v0, u0, v0), float(np.abs(np.asarray(v1) - v0).max())
 
 
 def test_forward_backward_adds_energy_to_zonal_flow():
@@ -105,3 +124,41 @@ def test_unknown_coriolis_options_raise():
     for field, value in (("coriolis_time_scheme", "leapfrog"), ("coriolis_baroclinic_operator", "een")):
         with pytest.raises(ValueError):
             LatLonCGridOceanModel(grid, zc, LatLonCGridOceanConfig.from_flat(**{field: value}))
+
+
+def test_step_centred_energy_change_is_the_work_on_the_centred_velocity():
+    """Any flow, any tendency, partial cells: KE(u1) - KE(u0) = 2 dt (T, (u0 + u1)/2) to round-off."""
+    for operator in ("energy_conserving",):
+        _, _, u0, v0, hu, hv, rot, dot, zero_mean = _setup("trapezoidal_step", operator, "random_partial_cells")
+        rng = np.random.default_rng(1)
+        Tu, Tv = zero_mean(rng.normal(0.0, 2e-5, hu.shape) * (hu > 0), rng.normal(0.0, 2e-5, hv.shape) * (hv > 0))
+        u1, v1 = (np.asarray(x) for x in rot(u0 + DT * Tu, v0 + DT * Tv, u_old=jnp.asarray(u0), v_old=jnp.asarray(v0)))
+        dke = dot(u1, v1, u1, v1) - dot(u0, v0, u0, v0)
+        work = 2.0 * DT * dot(Tu, Tv, 0.5 * (u0 + u1), 0.5 * (v0 + v1))
+        assert abs(dke - work) < 1e-12 * dot(u0, v0, u0, v0), (dke, work)
+        assert abs(work) > 1e-6 * dot(u0, v0, u0, v0)    # the tendency does work: the check is not vacuous
+
+
+def test_step_centred_removes_the_gain_of_a_balanced_forward_stage():
+    """T balancing the Coriolis force of u0 (geostrophy): the step-centred rotation keeps the energy, the
+    rotation of the forward-stage velocity gains about (f dt)^2 of it."""
+    model, st, u0, v0, hu, hv, rot, dot, zero_mean = _setup("trapezoidal_step", "energy_conserving", "zonal")
+    cor_u, cor_v = oml._coriolis_pair_operator(model.grid, jnp.asarray(hu), jnp.asarray(hv), jnp.float64)
+    # the Coriolis acceleration is (cor_u(v), cor_v(u)) (the rotation adds dt cor_u(v') to u' and subtracts
+    # dv = -dt cor_v(u') from v'); T is minus that
+    Tu, Tv = zero_mean(-np.asarray(cor_u(jnp.asarray(v0))) * (hu > 0), -np.asarray(cor_v(jnp.asarray(u0))) * (hv > 0))
+    E0 = dot(u0, v0, u0, v0)
+    us, vs = u0 + DT * Tu, v0 + DT * Tv
+    u1, v1 = rot(us, vs, u_old=jnp.asarray(u0), v_old=jnp.asarray(v0))
+    gain_centred = (dot(u1, v1, u1, v1) - E0) / E0
+    _, _, _, _, _, _, rot_trap, _, _ = _setup("trapezoidal", "energy_conserving", "zonal")
+    u2, v2 = rot_trap(us, vs)
+    gain_trap = (dot(u2, v2, u2, v2) - E0) / E0
+    assert gain_trap > 4e-3, gain_trap                   # about (f dt)^2 at 20N to 32N
+    assert abs(gain_centred) < 1e-2 * gain_trap, (gain_centred, gain_trap)
+
+
+def test_step_centred_needs_the_old_velocity():
+    _, _, u0, v0, _, _, rot, _, _ = _setup("trapezoidal_step", "energy_conserving", "zonal")
+    with pytest.raises(ValueError):
+        rot(u0, v0)

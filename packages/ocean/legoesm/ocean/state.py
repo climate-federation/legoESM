@@ -3549,6 +3549,12 @@ class LatLonCGridOceanConfig(NamedTuple):
     #   with the same spatial operator L, solved by fixed-point iteration.
     #   Exactly energy neutral for any dt when L is (as here, to the
     #   residual of the metric terms) skew in the kinetic energy norm.
+    # "trapezoidal_step": the same rotation centred on the whole step,
+    #   u1 = u0 + dt T + dt L((u0 + u1)/2), u0 the velocity before the explicit
+    #   tendency T.  The energy change is exactly dt times the work of T on the
+    #   centred velocity, so a forward pressure gradient balanced by Coriolis
+    #   adds no (1/2) dt^2 |T|^2 (about (f dt)^2 of the energy of geostrophic
+    #   flow per step with "trapezoidal"; docs/88 5.5 of the ENSO project).
     coriolis_time_scheme: str = "forward_backward"
     # Spatial operator of that rotation.
     # "four_point" (default, bit-identical): f at the face times the 4-point

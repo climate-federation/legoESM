@@ -3154,6 +3154,8 @@ def _forward_backward_coriolis_3d(
     land_mask: jnp.ndarray,
     eta: jnp.ndarray,
     H_bathy: jnp.ndarray,
+    u_old: jnp.ndarray | None = None,
+    v_old: jnp.ndarray | None = None,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Apply forward-backward (Matsuno) Coriolis to baroclinic perturbation velocity.
 
@@ -3179,6 +3181,8 @@ def _forward_backward_coriolis_3d(
     v_mask : (n_lat+1, n_lon)
     land_mask : (n_lat, n_lon)
     eta, H_bathy : (n_lat, n_lon) for layer thickness computation
+    u_old, v_old : velocity before the explicit tendency was added to (u, v);
+        required by, and only used by, coriolis_time_scheme="trapezoidal_step"
 
     Returns
     -------
@@ -3256,14 +3260,29 @@ def _forward_backward_coriolis_3d(
             u_at_v = interp_u_to_vface_4pt(up, grid)
             return dt * f_v[:, :, jnp.newaxis] * u_at_v
 
-    if getattr(config, "coriolis_time_scheme",
-               "forward_backward") == "trapezoidal":
+    time_scheme = getattr(config, "coriolis_time_scheme", "forward_backward")
+    if (time_scheme == "trapezoidal_step") != (u_old is not None and v_old is not None):
+        raise ValueError(
+            'u_old and v_old are required by, and only by, coriolis_time_scheme="trapezoidal_step" '
+            f"(got {time_scheme!r} with u_old {'set' if u_old is not None else 'None'})")
+    if time_scheme in ("trapezoidal", "trapezoidal_step"):
         # Crank-Nicolson rotation x1 = x0 + dt L((x0 + x1)/2), solved by
         # fixed-point iteration; each pass contracts the error by about
-        # |f| dt / 2 (0.066 at 30N, dt = 1800 s).
+        # |f| dt / 2 (0.066 at 30N, dt = 1800 s).  "trapezoidal" centres it on
+        # the rotation alone (x0 = the velocity after the explicit tendency);
+        # "trapezoidal_step" on the whole step, x1 = u_old + dt T + dt L((u_old
+        # + x1)/2), so the energy change is dt times the work of T on the
+        # centred velocity and a forward tendency balanced by Coriolis (the
+        # pressure gradient of geostrophic flow) adds no (1/2) dt^2 |T|^2.
+        if time_scheme == "trapezoidal_step":
+            u_c = (u_old - depth_average_to_faces(u_old, h_u, u_mask, min_water_col)[..., jnp.newaxis]) * u_mask_3d
+            v_c = (v_old - depth_average_to_faces(v_old, h_v, v_mask, min_water_col)[..., jnp.newaxis]) * v_mask_3d
+        else:
+            u_c, v_c = u_prime, v_prime
+
         def _pass(_, uv):
-            u_mid = 0.5 * (u_prime + uv[0])
-            v_mid = 0.5 * (v_prime + uv[1])
+            u_mid = 0.5 * (u_c + uv[0])
+            v_mid = 0.5 * (v_c + uv[1])
             return ((u_prime + du(v_mid)) * u_mask_3d,
                     (v_prime - dv(u_mid)) * v_mask_3d)
 
@@ -4317,10 +4336,10 @@ class LatLonCGridOceanModel:
                 "momentum_face_mask must be '2d' or '3d', got "
                 f"{config.momentum_face_mask!r}")
         if getattr(config, "coriolis_time_scheme", "forward_backward") not in (
-                "forward_backward", "trapezoidal"):
+                "forward_backward", "trapezoidal", "trapezoidal_step"):
             raise ValueError(
-                "coriolis_time_scheme must be 'forward_backward' or "
-                f"'trapezoidal', got {config.coriolis_time_scheme!r}")
+                "coriolis_time_scheme must be 'forward_backward', 'trapezoidal' or "
+                f"'trapezoidal_step', got {config.coriolis_time_scheme!r}")
         if getattr(config, "coriolis_baroclinic_operator", "four_point") not in (
                 "four_point", "energy_conserving"):
             raise ValueError(
@@ -8158,10 +8177,13 @@ class LatLonCGridOceanModel:
         # Applying the Matsuno rotation here too would DOUBLE-count Coriolis.
         # Static Python branch on the config string ⇒ default is bit-identical.
         if getattr(_cfg_b, "coriolis_scheme", "matsuno_split") != "explicit_ab2":
+            _old = ({"u_old": state.u.data, "v_old": state.v.data}
+                    if getattr(_cfg_b, "coriolis_time_scheme", "forward_backward") == "trapezoidal_step"
+                    else {})
             u_star, v_star = _forward_backward_coriolis_3d(
                 u_star, v_star, dt_mom, _grid, _zc, _cfg_b,
                 state.u_mask.data, state.v_mask.data, state.land_mask.data,
-                state.eta.data, state.H_bathy.data,
+                state.eta.data, state.H_bathy.data, **_old,
             )
 
         # Enforce periodic wrap column: u[:,n_lon] must equal u[:,0].
