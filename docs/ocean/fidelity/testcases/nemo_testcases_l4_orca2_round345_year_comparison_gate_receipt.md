@@ -11,10 +11,9 @@ Admitted arm-A day-1 restart SHA-256 values:
 Deterministic perturbed day-1 restart SHA-256 values:
 `bb25179365e776ae73e6ead9d2bad42e222f2094f687c22ede3b0eb3bcae1f01` and
 `0279bb4021ef1b557e178ef01b5c4cac732479102404871b557b984433fff8cf`.
-Disposition: **STOPPED_FOR_RECORD** — the rank-local round-345 stub repair is
-verified without MPI; the full preflight must be repeated outside this sandbox
-before the control and perturbed NEMO continuations are acquired by the
-operator.
+Disposition: **STOPPED_FOR_RECORD** — both continuations completed with `STOP
+0` and are retained under `round345/s4_year/refused/`; the operator must run the
+reviewed re-admission command after this comparator repair lands.
 
 ## Result
 
@@ -23,12 +22,13 @@ surface-KE rule `max(0.01, 3 * envelope_relative_RMS)`. The gate now requires a
 strictly positive envelope in every evaluated month and binds the report to an
 admitted round-345 fp64 restart perturbation, admitted arm-A forcing/damping,
 and the arm-A binary. Before using that envelope, it also requires a second NEMO
-continuation from the exact same unperturbed restart to be byte-identical to arm
-A at all 365 daily restart pairs. The original ORCA2X 30-day schema remains a
-single partial-month input.
+continuation from the exact same unperturbed restart to have bitwise-identical
+data for every common variable in both ranks at all 364 continuation-output
+restart pairs. The original ORCA2X 30-day schema remains a single partial-month
+input.
 
-No scientific year verdict is claimed because the perturbed-NEMO envelope has
-not been acquired. No NEMO process was run.
+No scientific year verdict is claimed because the completed pair is not yet
+admitted or scored. This repair did not run NEMO and killed no process.
 
 ## Corrected NEMO perturbation
 
@@ -46,6 +46,42 @@ ULP distance. Its verifier compares every restart variable, dimension, and
 attribute, proving all unselected state and metadata are bit-identical. The
 cold-start temperature input is no longer modified; all forcing and damping
 files are re-hashed against admitted arm A.
+
+## Restart continuation control correction
+
+The operator's reviewed acquisition completed both arms with `STOP 0`, then the
+old whole-file SHA-256 comparison refused at
+`ORCA2_00000016_restart_0000.nc`. Both complete arms were retained at
+`round345/s4_year/refused/20261030T023228Z_orca2_k0_year1_restart_control_np2`
+and
+`round345/s4_year/refused/20261030T023228Z_orca2_k0_year1_sst_plus_1ulp_np2`.
+
+The operator's committed measurement script
+`/data/abyssal/dbalwada/nemo-testcases-l2/phase3/work/pending/r345_restart_data_compare.py`
+checked all 728 output restart files (`kt = 16..2920`, stride 8, ranks 0 and 1).
+All 39 variables present in both arms had equal dtype, shape, and raw data bytes:
+28,392 variable-data comparisons, zero unequal. The exact inventory difference
+in every file was `DELAY_re8_fwb2` and `DELAY_im8_fwb2`, present only in arm A.
+
+This difference is NEMO restart bookkeeping, not model-state drift. The
+`nn_fwb = 2` annual freshwater-budget branch labels its delayed global sum
+`fwb2` (`src/OCE/SBC/sbcfwb.F90:342-365`). Delayed communication registers the
+label and allocates its output buffer only when that call executes
+(`src/OCE/LBC/mpp_allreduce_generic.h90:113-149`). On restart, NEMO reconstructs
+the delayed list and complex buffer only from `DELAY_*` variables already in
+the input restart (`src/OCE/IOM/iom.F90:1925-1966`), and restart output writes
+only registered, allocated delayed buffers (`src/OCE/IOM/iom.F90:1972-1984`).
+The continuation input at `kt = 8` has no `fwb2` buffers; the restarted run
+begins at step 9 and does not reach the next annual `fwb2` call by step 2920, so
+it never registers or writes them.
+
+The repaired control therefore compares the 728 continuation outputs variable
+by variable. It requires exactly those two variables to be arm-A-only, requires
+no control-only variable, and compares every common variable's dtype, shape, and
+raw C-order data bytes. Any other inventory difference or any unequal byte
+refuses. Per-file SHA-256 values remain provenance fields, not equality tests.
+Plants prove refusal after one byte is flipped in `tn`, after an unknown variable
+is added, and after a non-delay variable is omitted.
 
 ## Safety and retention
 
@@ -66,6 +102,12 @@ successful paired pipeline, safe overwrite refusal, a missing-STOP refusal
 retaining the binary and build snapshot, a failing in-place admission trap,
 ancestry refusal, and promotion of a passed pair from `refused/`.
 
+The refused-arm route validates both retained manifests and both scientific
+arms before moving either path, then rechecks the canonical pair and writes the
+admission JSON only under the run root. The two retained operator arms above
+match the route's exact naming and pairing rules; either retained-arm path may
+be supplied to `--admit-existing`.
+
 The operator's resume-3 preflight REFUSED in the retained control arm. This
 CONFIRMED two stub defects that invalidate the earlier direct-stub claim: both
 MPI processes entered the all-ranks writer concurrently, and the restart-arm
@@ -84,9 +126,9 @@ Acquisition command:
 
 `scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round345_sst_ulp_acquisition/run.sh --run`
 
-Re-admit a completed retained arm without deleting it:
+Re-admit the completed retained pair without deleting or re-running it:
 
-`scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round345_sst_ulp_acquisition/run.sh --admit-existing /absolute/path/to/refused/<retained-arm>`
+`scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round345_sst_ulp_acquisition/run.sh --admit-existing /data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round345/s4_year/refused/20261030T023228Z_orca2_k0_year1_sst_plus_1ulp_np2`
 
 ## Integrity
 
@@ -146,15 +188,16 @@ its shifted-line plant refuses. The exact default ORCA2 landing battery passes
 - ASKED: option-1 fixed bars; monthly 3x KE envelope with 1% floor; perturb the
   admitted day-1 NEMO double-precision restart SST by one ULP; leave forcing and
   damping untouched; compare from day 1; refuse zero/non-perturbed envelopes;
-  require the exact unperturbed restart continuation before using the envelope.
+  require the unperturbed restart continuation before using the envelope;
+  compare all common restart-variable data bitwise and require exactly the two
+  arm-A-only `fwb2` delay buffers measured by the operator.
 - UNASKED: none.
 - independent review: Claude Sonnet RUN confirmed the prior repair; Argon HOLD
   received; all four findings are repaired here; operator re-review remains open
 
 ## Open
 
-The operator runs the acquisition command (which first runs the same
-fail-closed preflight), acquires both the exact restart control and perturbed
-continuation, evaluates admitted arm A versus the perturbed continuation with
-the Decision-160 reporter, and supplies that report plus the paired round-345
-admission JSON to the Decision-188 gate.
+The operator re-admits the retained pair with the command above. No NEMO rerun
+is needed. After admission, the operator evaluates arm A versus the perturbed
+continuation with the Decision-160 reporter and supplies that report plus the
+paired round-345 admission JSON to the Decision-188 gate.

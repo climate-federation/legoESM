@@ -127,6 +127,10 @@ _OVERFLOW_R62ZDF_COMPILED = (
     NEMO / "tests/OVERFLOW_OMIP_L1_P3_R62ZDF/BLD/ppsrc/nemo")
 FILES = {
     "src/OCE/TRA/traldf_iso.F90": NEMO / "src/OCE/TRA/traldf_iso.F90",
+    "src/OCE/SBC/sbcfwb.F90": NEMO / "src/OCE/SBC/sbcfwb.F90",
+    "src/OCE/LBC/mpp_allreduce_generic.h90": (
+        NEMO / "src/OCE/LBC/mpp_allreduce_generic.h90"),
+    "src/OCE/IOM/iom.F90": NEMO / "src/OCE/IOM/iom.F90",
     # ORCA2X round 1: long-run design/receipt (DECISION 160).
     'ORCA2_ORCA1ICE_OMIP_L4_ORCA2X_R1_LONGRUN/BLD/ppsrc/nemo/zdftke.f90': NEMO / ('cfgs/ORCA2_ORCA1ICE_OMIP_L4_ORCA2X_R1_LONGRUN/BLD/ppsrc/nemo/zdftke.f90'),
     'orca1ice_longrun_30day_np2/namelist_cfg': Path('/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2x_rounds/round1/acquisition/orca1ice_longrun_30day_np2/namelist_cfg'),
@@ -2126,6 +2130,27 @@ FILES = {
 # recurring symbol is refused now, and every multi-line citation states its
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
+    # ORCA2 round 345: delayed fwb2 restart-buffer explanation.
+    "src/OCE/SBC/sbcfwb.F90:342-365": [
+        "! at the end of year n:",
+        ("END SELECT", 5),
+        24,
+    ],
+    "src/OCE/LBC/mpp_allreduce_generic.h90:113-149": [
+        "llisdelay = ln_mppdelay .AND. PRESENT(cdelay)",
+        "ALLOCATE(todelay(idvar)%DELAYBUFF/**/in(ipi), todelay(idvar)%DELAYBUFF/**/out(ipi))",
+        37,
+    ],
+    "src/OCE/IOM/iom.F90:1925-1966": [
+        "IF( TRIM(cdaction) == 'READ' ) THEN   ! read restart related to mpp_delay !",
+        ("ndelayid(ji) = ndlrstuse   ! set to ndlrstuse to specify that the value was read in the restart", 4),
+        42,
+    ],
+    "src/OCE/IOM/iom.F90:1972-1984": [
+        ("DO ji = 1, nbdelay", 2),
+        "CALL iom_rstput( kt, nitrst, kncid, 'DELAY_im8_'//c_delaylist(ji), AIMAG(todelay(ji)%ydpbuffout      ), jp_r8 )",
+        13,
+    ],
     # ORCA2X round 1: long-run design/receipt (DECISION 160).
     'ORCA2_ORCA1ICE_OMIP_L4_ORCA2X_R1_LONGRUN/BLD/ppsrc/nemo/zdftke.f90:195': 'CALL orca2x_longrun_hmi_write( kt, nn_mxlice, ln_mxl0 )   ! ORCA2X write-only replay input',
     'orca1ice_longrun_30day_np2/namelist_cfg:21': 'nn_itend    =      240   !  Lane-4 registered ten-step endpoint',

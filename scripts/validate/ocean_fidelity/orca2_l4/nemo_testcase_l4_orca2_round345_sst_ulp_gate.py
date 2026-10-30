@@ -44,6 +44,7 @@ CONTROL_INPUT_MANIFEST = "restart_unperturbed_control_input.json"
 INPUT_AUDIT = "round342_arm_a_input_identity.json"
 PERTURBED_ARM_NAME = "orca2_k0_year1_sst_plus_1ulp_np2"
 CONTROL_ARM_NAME = "orca2_k0_year1_restart_control_np2"
+DELAY_RESTART_VARIABLES = frozenset({"DELAY_re8_fwb2", "DELAY_im8_fwb2"})
 BASELINE_ARM = (
     Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds")
     / "round342/s4_year/orca2_k0_year1_a_np2"
@@ -494,9 +495,21 @@ def verify_restart_continuation_control(
     baseline_arm: Path = BASELINE_ARM,
     expected_steps: int = r342.YEAR_STEPS,
 ) -> dict[str, Any]:
-    """Require byte-identical baseline/control restart files at every daily save."""
+    """Require bitwise-identical common variable data in every continuation restart.
+
+    Arm A registered the delayed ``fwb2`` reduction before the continuation's
+    input restart.  The restarted control cannot reconstruct that registration
+    from its kt=8 input, so exactly the two delayed-buffer variables are allowed
+    only in arm A.  File bytes and NetCDF metadata are deliberately not compared.
+    """
     rows = []
-    for kt in range(RESTART_KT, expected_steps + 1, r342.DAILY_STOCK_STRIDE):
+    common_variable_comparisons = 0
+    first_output_kt = RESTART_KT + r342.DAILY_STOCK_STRIDE
+    require(expected_steps >= first_output_kt,
+            f"restart continuation ends before first output: {expected_steps}")
+    require((expected_steps - RESTART_KT) % r342.DAILY_STOCK_STRIDE == 0,
+            f"restart continuation endpoint is off cadence: {expected_steps}")
+    for kt in range(first_output_kt, expected_steps + 1, r342.DAILY_STOCK_STRIDE):
         for rank in (0, 1):
             name = f"ORCA2_{kt:08d}_restart_{rank:04d}.nc"
             baseline = baseline_arm / name
@@ -504,31 +517,109 @@ def verify_restart_continuation_control(
             require(baseline.is_file(), f"missing admitted arm-A restart: {baseline}")
             require(control.is_file() and not control.is_symlink(),
                     f"missing regular control restart: {control}")
+            with netCDF4.Dataset(baseline, "r") as baseline_ds, netCDF4.Dataset(
+                control, "r"
+            ) as control_ds:
+                baseline_names = set(baseline_ds.variables)
+                control_names = set(control_ds.variables)
+                baseline_only = baseline_names - control_names
+                control_only = control_names - baseline_names
+                require(
+                    baseline_only == DELAY_RESTART_VARIABLES and not control_only,
+                    f"{name}: restart variable inventory mismatch: "
+                    f"arm_A_only={sorted(baseline_only)}, "
+                    f"control_only={sorted(control_only)}, expected_arm_A_only="
+                    f"{sorted(DELAY_RESTART_VARIABLES)}",
+                )
+                common_names = sorted(baseline_names & control_names)
+                require(bool(common_names), f"{name}: no common restart variables")
+                for variable_name in common_names:
+                    baseline_var = baseline_ds.variables[variable_name]
+                    control_var = control_ds.variables[variable_name]
+                    baseline_var.set_auto_maskandscale(False)
+                    control_var.set_auto_maskandscale(False)
+                    baseline_values = np.asarray(baseline_var[:])
+                    control_values = np.asarray(control_var[:])
+                    require(
+                        baseline_values.dtype == control_values.dtype,
+                        f"{name}:{variable_name} dtype differs from arm A: "
+                        f"{control_values.dtype} != {baseline_values.dtype}",
+                    )
+                    require(
+                        baseline_values.shape == control_values.shape,
+                        f"{name}:{variable_name} shape differs from arm A: "
+                        f"{control_values.shape} != {baseline_values.shape}",
+                    )
+                    require(
+                        baseline_values.tobytes(order="C")
+                        == control_values.tobytes(order="C"),
+                        f"{name}:{variable_name} restart variable data differs from arm A",
+                    )
+                common_variable_comparisons += len(common_names)
             baseline_sha = common.sha256(baseline)
             control_sha = common.sha256(control)
-            require(control_sha == baseline_sha,
-                    f"unperturbed restart control differs from arm A: {name}")
             rows.append({
                 "kt": kt,
                 "rank": rank,
                 "file": name,
                 "baseline_sha256": baseline_sha,
                 "control_sha256": control_sha,
+                "common_variable_count": len(common_names),
+                "arm_a_only_variables": sorted(DELAY_RESTART_VARIABLES),
+                "control_only_variables": [],
+                "unequal_common_variable_data": [],
             })
-    expected_files = (expected_steps // r342.DAILY_STOCK_STRIDE) * 2
+    expected_pairs = (expected_steps - RESTART_KT) // r342.DAILY_STOCK_STRIDE
+    expected_files = expected_pairs * 2
     require(len(rows) == expected_files,
             f"control compared {len(rows)} restart files, expected {expected_files}")
     return {
         "status": "PASS_R345_UNPERTURBED_RESTART_CONTROL",
         "baseline_arm": str(baseline_arm.resolve()),
         "control_arm": str(control_arm.resolve()),
-        "restart_kt_first": RESTART_KT,
+        "restart_kt_first": first_output_kt,
         "restart_kt_last": expected_steps,
-        "daily_restart_pairs_compared": expected_steps // r342.DAILY_STOCK_STRIDE,
+        "daily_restart_pairs_compared": expected_pairs,
         "restart_files_compared": len(rows),
-        "all_daily_restarts_byte_identical": True,
+        "common_variable_data_comparisons": common_variable_comparisons,
+        "unequal_common_variable_data_count": 0,
+        "all_common_variable_data_bitwise_identical": True,
+        "required_arm_a_only_variables": sorted(DELAY_RESTART_VARIABLES),
+        "control_only_variables": [],
+        "comparison": "variable dtype + shape + raw C-order data bytes; NetCDF file bytes and metadata excluded",
         "restart_files": rows,
     }
+
+
+def _copy_netcdf_excluding_variables(
+    source: Path,
+    destination: Path,
+    excluded: set[str] | frozenset[str],
+) -> None:
+    """Copy a stub restart while omitting named variables from its inventory."""
+    temporary = destination.with_name(destination.name + ".variable-copy.tmp")
+    if temporary.exists():
+        temporary.unlink()
+    with netCDF4.Dataset(source, "r") as src, netCDF4.Dataset(
+        temporary, "w", format=src.data_model
+    ) as dst:
+        for name, dimension in src.dimensions.items():
+            dst.createDimension(name, None if dimension.isunlimited() else len(dimension))
+        dst.setncatts({name: src.getncattr(name) for name in src.ncattrs()})
+        for name, src_var in src.variables.items():
+            if name in excluded:
+                continue
+            attrs = {attr: src_var.getncattr(attr) for attr in src_var.ncattrs()}
+            fill_value = attrs.pop("_FillValue", None)
+            create_kwargs = {} if fill_value is None else {"fill_value": fill_value}
+            dst_var = dst.createVariable(
+                name, src_var.datatype, src_var.dimensions, **create_kwargs
+            )
+            dst_var.setncatts(attrs)
+            src_var.set_auto_maskandscale(False)
+            dst_var.set_auto_maskandscale(False)
+            dst_var[...] = src_var[...]
+    os.replace(temporary, destination)
 
 
 def admit_control_arm(
@@ -868,6 +959,10 @@ def write_stub_outputs(
         for local_rank in ranks:
             name = f"ORCA2_{kt:08d}_restart_{local_rank:04d}.nc"
             shutil.copy2(BASELINE_ARM / name, run_dir / name)
+            if control:
+                _copy_netcdf_excluding_variables(
+                    run_dir / name, run_dir / name, DELAY_RESTART_VARIABLES
+                )
     input_after = {
         local_rank: common.sha256(
             run_dir / f"ORCA2_{RESTART_KT:08d}_restart_{local_rank:04d}.nc"
@@ -1060,18 +1155,41 @@ def run_preflight(
         with netCDF4.Dataset(control_restart, "r+") as dataset:
             variable = dataset.variables[RESTART_VARIABLE]
             variable.set_auto_maskandscale(False)
-            value = np.asarray(variable[0, 0], dtype=np.float64)
-            wet = _rank_wet_mask(control_arm / DOMAIN_FILE, 0, tuple(value.shape))
-            j, i = np.argwhere(wet & np.isfinite(value))[0]
-            value[j, i] = np.nextafter(value[j, i], np.float64(np.inf))
-            variable[0, 0] = value
-        control_drift_caught = False
+            values = np.asarray(variable[:])
+            byte_view = values.view(np.uint8).reshape(-1)
+            byte_view[0] ^= np.uint8(1)
+            variable[:] = values
+        control_tn_byte_flip_caught = False
         try:
             verify_restart_continuation_control(control_arm, expected_steps=16)
         except GateError:
-            control_drift_caught = True
-        require(control_drift_caught, "unperturbed-control drift plant did not fail")
-        shutil.move(control_backup, control_restart)
+            control_tn_byte_flip_caught = True
+        require(control_tn_byte_flip_caught,
+                "one-byte tn restart-data plant did not fail")
+        shutil.copy2(control_backup, control_restart)
+
+        with netCDF4.Dataset(control_restart, "r+") as dataset:
+            dataset.createVariable("UNKNOWN_R345_PLANT", "f8").assignValue(1.0)
+        control_extra_variable_caught = False
+        try:
+            verify_restart_continuation_control(control_arm, expected_steps=16)
+        except GateError:
+            control_extra_variable_caught = True
+        require(control_extra_variable_caught,
+                "extra unknown restart-variable plant did not fail")
+        shutil.copy2(control_backup, control_restart)
+
+        _copy_netcdf_excluding_variables(
+            control_backup, control_restart, {"sn"}
+        )
+        control_missing_non_delay_caught = False
+        try:
+            verify_restart_continuation_control(control_arm, expected_steps=16)
+        except GateError:
+            control_missing_non_delay_caught = True
+        require(control_missing_non_delay_caught,
+                "missing non-DELAY restart-variable plant did not fail")
+        shutil.copy2(control_backup, control_restart)
         verify_restart_continuation_control(control_arm, expected_steps=16)
 
         # A failing in-place admission must quarantine both arms and log the
@@ -1133,7 +1251,9 @@ def run_preflight(
         "refused_admit_existing_plant": True,
         "refusal_retention_plant": True,
         "two_ulp_plant": True,
-        "control_drift_plant": True,
+        "control_tn_byte_flip_plant": True,
+        "control_extra_variable_plant": True,
+        "control_missing_non_delay_variable_plant": True,
         "producer_commit_ancestry_plant": ancestry_plant,
         "perturbation_audit": perturbation_audit,
         "control_input_audit": control_input_audit,
