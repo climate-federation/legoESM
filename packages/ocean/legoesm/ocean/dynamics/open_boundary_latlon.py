@@ -212,20 +212,43 @@ def _set_side(a, side, b0, row):
     return a.at[b0].set(row.T)
 
 
-def apply_baroclinic_open_boundary(state_old, state_new, ob: OpenBoundaryData, dt, dz_ref):
+def _face_thickness_rows(h, side, is_normal):
+    """Layer thickness on the boundary faces as (nlev, along), min rule of the
+    two cells sharing each face (zero below the shallower seafloor, as the
+    tracer and 3-D momentum face masks).  Normal faces: the open face between
+    the ring and the first interior cell.  Tangential faces: the faces between
+    neighbouring ring cells, the two end faces zero."""
+    if is_normal:
+        if side == 'west':
+            return jnp.minimum(h[:, 0], h[:, 1]).T
+        if side == 'south':
+            return jnp.minimum(h[0], h[1]).T
+        return jnp.minimum(h[-1], h[-2]).T
+    ring = h[:, 0] if side == 'west' else (h[0] if side == 'south' else h[-1])     # (along, nlev)
+    inner = jnp.minimum(ring[:-1], ring[1:])
+    z = jnp.zeros((1, ring.shape[1]), dtype=ring.dtype)
+    return jnp.concatenate([z, inner, z], axis=0).T
+
+
+def apply_baroclinic_open_boundary(state_old, state_new, ob: OpenBoundaryData, dt, h):
     """Ring cells and open faces after an outer step: T, S radiated and nudged
     toward the data; the open-face normal velocity and the ring tangential
     velocity likewise for their baroclinic part, with the depth mean kept from
-    the barotropic boundary condition; passive tracers zero gradient.  The
-    depth mean is weighted by the reference layer thicknesses dz_ref (partial
-    bottom cells not accounted for)."""
+    the barotropic boundary condition; passive tracers zero gradient.
+
+    ``h`` (n_lat, n_lon, nlev): the layer thickness of ``state_new``.  The
+    depth mean is the thickness-weighted mean over the wet part of each face
+    (min rule), and levels below the face's seafloor get zero velocity.  With
+    reference weights over all levels, data extrapolated below a shallow
+    face's seafloor shifted the wet column's mean, and the face carried a net
+    flow the barotropic condition never set (-33 Sv through the shelf faces
+    of a nested grid E child)."""
     if ob.tau_in is None:
         return state_new
     r_in, r_out = dt / ob.tau_in, dt / ob.tau_out
     T, S, u, v = state_new.T.data, state_new.S.data, state_new.u.data, state_new.v.data
     To, So, uo, vo = state_old.T.data, state_old.S.data, state_old.u.data, state_old.v.data
     P = getattr(state_new, 'passive', None)
-    w = jnp.asarray(dz_ref)[:, None] / jnp.sum(jnp.asarray(dz_ref))
     for side in ('west', 'south', 'north'):
         dT = getattr(ob, f'{side}_T')
         if dT is None:
@@ -248,10 +271,13 @@ def apply_baroclinic_open_boundary(state_old, state_new, ob: OpenBoundaryData, d
             use_u = normal_is_u == is_normal
             new, old = (u, uo) if use_u else (v, vo)
             b0 = face if is_normal else ring
+            hf = _face_thickness_rows(h, side, is_normal)                             # (nlev, along)
+            wet = (hf > 0).astype(hf.dtype)
+            w = hf / jnp.maximum(jnp.sum(hf, axis=0, keepdims=True), _EPS)
             mean_cur = jnp.sum(w * _side(new, side, b0, 0), axis=0, keepdims=True)    # barotropic part kept
             rad = _orlanski(_side(old, side, b0, 0), _side(old, side, b0, 1), _side(new, side, b0, 1),
                             _side(new, side, b0, 2), data, r_in, r_out)
-            row = rad - jnp.sum(w * rad, axis=0, keepdims=True) + mean_cur
+            row = (rad - jnp.sum(w * rad, axis=0, keepdims=True) + mean_cur) * wet
             if use_u:
                 u = _set_side(u, side, b0, row)
             else:

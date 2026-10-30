@@ -15723,7 +15723,8 @@ class LatLonCGridOceanModel:
             finally:
                 self._open_boundary_post = False
             return apply_baroclinic_open_boundary(
-                state, _new, _ob, dt, self.z_coord.dz_ref)
+                state, _new, _ob, dt,
+                compute_layer_thickness(_new.eta.data, _new.H_bathy.data, self.z_coord))
         # A direct eager step is also a valid cold-start driver.  Seed the
         # NEMO pre-tke_avn coefficient memory here as well as in
         # seed_scan_carry(); otherwise only scan/restart drivers get the

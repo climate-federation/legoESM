@@ -123,3 +123,54 @@ def test_interior_volume_follows_the_target():
         rate = np.diff(vols)[3:] / DT                 # steps 4 to N_STEPS
         want = 0.0 if target is None else Q
         assert np.abs(rate - want).max() < 1e-4 * Q, (target, rate / Q)
+
+
+def test_baroclinic_part_keeps_the_depth_mean_over_a_shelf():
+    """The baroclinic condition must keep the depth mean of the open-face
+    velocity over the wet part of each face.  A 50 m shelf on the open west
+    side (a partial second level) with data of 0.3 m/s in the top two levels
+    and none below: weighted over all reference levels, the face carried 1.2
+    to 1.3 times the target after a step."""
+    from legoesm.ocean.dynamics.latlon_cgrid_operators import min_cell_to_uface, min_cell_to_vface
+    from legoesm.ocean.vertical import compute_layer_thickness
+
+    grid, wall = create_regional_grid("latlon", n_lat=NY, n_lon=NX, lat_south=-5.0,
+                                      lat_north=5.0, lon_west=200.0, lon_east=200.0 + NX)
+    ocean = np.asarray(wall) > 0.5
+    ocean[1:-1, 0] = True
+    ocean[0, 1:-1] = True
+    ocean[-1, 1:-1] = True
+    H = np.where(ocean, 4000.0, 0.0)
+    H[:, :4] = np.where(ocean[:, :4], 50.0, 0.0)
+    zc = create_z_star_from_thicknesses(np.array([20.0, 40.0, 80.0, 160.0, 300.0, 600.0, 1200.0, 1600.0]))
+    zc_pc, H2, lm = make_partial_cell_latlon(zc, H, ocean.astype(float), smoothing_passes=0)
+    st = rest_state_latlon_cgrid_ocean(grid, zc_pc, land_mask_override=jnp.asarray(lm),
+                                       H_bathy_override=jnp.asarray(H2), H_max=float(zc.H_max))
+    lmj = jnp.asarray(lm)
+    st = st._replace(T=st.T.replace(data=jnp.full(st.T.data.shape, 10.0) * lmj[..., None]),
+                     S=st.S.replace(data=jnp.full(st.S.data.shape, 35.0) * lmj[..., None]))
+    nl = st.T.data.shape[-1]
+    kw = {}
+    for side, n in (("west", NY + 2), ("south", NX + 2), ("north", NX + 2)):
+        u3 = jnp.zeros((nl, n)).at[:2].set(0.3) if side == "west" else jnp.zeros((nl, n))
+        kw.update({f"{side}_T": jnp.full((nl, n), 10.0), f"{side}_S": jnp.full((nl, n), 35.0),
+                   f"{side}_u3": u3, f"{side}_t3": jnp.zeros((nl, n + 1))})
+    ob = _data(Q)._replace(tau_in=jnp.asarray(86400.0), tau_out=jnp.asarray(360 * 86400.0), **kw)
+    cfg = LatLonCGridOceanConfig.from_flat(fix_eta_drift=False, physics=OceanPhysicsConfig(
+        vertical_mixing=VerticalMixingConfig(scheme="constant"),
+        lateral_mixing=LateralMixingConfig(scheme="none"), shortwave_penetration=None))
+    model = LatLonCGridOceanModel(grid, zc_pc, cfg)
+    z = jnp.zeros_like(st.eta.data)
+    sf = OceanSurfaceForcing(tau_x=z, tau_y=z, q_net=z, sw_down=None)
+    sponge = SpongeForcing(gamma=z, T_ref=st.T.data, S_ref=st.S.data, open_boundary=ob)
+    dy_cell = 0.5 * jnp.asarray(grid.dy)
+    lat_v = jnp.asarray(grid.lat_v)
+    L = float(grid.radius) * float(grid.dlon)
+    for _ in range(4):
+        st = model.step(st, DT, surface_forcing=sf, sponge=sponge)
+        h = compute_layer_thickness(st.eta.data, st.H_bathy.data, zc_pc)
+        U = (st.u.data * min_cell_to_uface(h)).sum(-1)
+        V = (st.v.data * min_cell_to_vface(h, grid)).sum(-1)
+        net = float(jnp.sum(U[:, 1] * dy_cell) + jnp.sum(V[1]) * L * jnp.cos(lat_v[1])
+                    - jnp.sum(V[-2]) * L * jnp.cos(lat_v[-2]))
+        assert abs(net - Q) < 1e-3 * Q, net / Q
