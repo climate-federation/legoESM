@@ -595,12 +595,18 @@ def stage_e2(cand_arm, base_names, artifacts, nlev, dt, steps, lr,
                 for k in ("theta_l", "q_t", "u", "v")}
         entry["max_abs_diff_vs_baseline_rollout"] = base_rec_diff
         if tune and train and names:
+            # Every compiled rollout holds kernel memory mappings (cap 65530): the
+            # per-case rollouts above plus the joint loss exceeded it at 14 cases
+            # (2026-10-30), so each phase starts with the caches cleared.
+            jax.clear_caches()
             joint = candidate_loss(cand_arm, train, nlev=nlev, dt=dt)
 
             def loss_of(x):
                 return joint(to_params(x))
             best, record = tune_active(loss_of, lo, hi, x0, names, steps=steps, lr=lr)
             tuned = to_params(best)
+            del joint, loss_of
+            jax.clear_caches()
             entry["ad"] = {"params": {k: float(v) for k, v in tuned.items()}, **record,
                            "scores": _case_scores(cand_arm, artifacts, nlev, dt,
                                                   params=tuned)}
