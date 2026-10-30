@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 import pytest
 
 from legoesm.grids.gaussian import (
@@ -757,3 +758,47 @@ class TestSpectralPEAllProfileSchemes:
         tend, _ = physics_fn(state, grid, sigma_coord)
         # And the resulting T tendency must be finite (no NaN).
         assert bool(jnp.all(jnp.isfinite(tend.T_hat.data)))
+
+
+class TestSpectralRainToSurface:
+    """``rain_to_surface`` on the spectral bridge: a mass-flux scheme's survivor
+    rain leaves the column (the bridge's existing surface route) instead of
+    entering q_r, where the microphysics would evaporate it a second time.
+    The kernel's ``dq_r_conv_dt`` is overridden with a fixed positive profile
+    (spy) so the rain source is known exactly."""
+
+    def _run(self, grid, sigma_coord, rest_state, flag):
+        from legoesm.atmosphere.physics.convection import integration as ci
+        shape = (grid.n_lat, grid.n_lon, sigma_coord.n_levels)
+        dq_r = jnp.full((grid.n_lat * grid.n_lon, sigma_coord.n_levels), 2.0e-7)
+        real = ci.bechtold_convection
+
+        def spy(*a, **k):
+            out, m_u, stoch = real(*a, **k)
+            return out._replace(dq_r_conv_dt=dq_r), m_u, stoch
+
+        zeros = jnp.zeros(shape)
+        tracers = {n: Field(data=zeros, name=n, dims=("lat", "lon", "level"), units="kg/kg")
+                   for n in ("q_v", "q_c", "q_r")}
+        ci.bechtold_convection = spy
+        try:
+            fn = make_convection_physics(
+                ConvectionConfig(scheme="bechtold", rain_to_surface=flag),
+                model_type="spectral_pe", dt=300.0)
+            tend, _ = fn(_state_with_tracers(rest_state, tracers), grid, sigma_coord)
+        finally:
+            ci.bechtold_convection = real
+        return tend, np.asarray(dq_r).reshape(shape)
+
+    def test_flag_off_hands_the_rain_to_q_r(self, grid, sigma_coord, rest_state):
+        tend, dq_r = self._run(grid, sigma_coord, rest_state, False)
+        np.testing.assert_array_equal(np.asarray(tend.tracers["q_r"].data), dq_r)
+
+    def test_flag_on_sends_the_rain_out_of_the_column(self, grid, sigma_coord, rest_state):
+        off, _ = self._run(grid, sigma_coord, rest_state, False)
+        on, _ = self._run(grid, sigma_coord, rest_state, True)
+        if "q_r" in on.tracers:
+            assert float(jnp.max(jnp.abs(on.tracers["q_r"].data))) == 0.0
+        for k in ("q_v", "q_c"):
+            np.testing.assert_array_equal(np.asarray(on.tracers[k].data),
+                                          np.asarray(off.tracers[k].data))
