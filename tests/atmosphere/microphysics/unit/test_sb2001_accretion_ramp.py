@@ -117,6 +117,9 @@ def test_default_gap_per_column_is_zero():
             gap = np.abs(np.asarray(a) - np.asarray(b)).reshape(len(np.asarray(a)), -1)
             np.testing.assert_allclose(gap.max(axis=1), 0.0, rtol=RTOL, atol=ATOL,
                                        err_msg=f"{g} {name}")
+            # measured gap is exactly 0, below the 1e-12 floor (codex+GLM)
+            np.testing.assert_array_equal(np.asarray(a), np.asarray(b),
+                                          err_msg=f"{g} {name}")
 
 
 def _ramp_points(fx, gated):
