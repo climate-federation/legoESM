@@ -2548,11 +2548,14 @@ def test_sundqvist_l36_deck_still_round_trips():
     # what makes this deck the neither-lever baseline.
     assert cfg.dycore.mpas_div_damp4_scale == 0.0
     assert cfg.convection == "bechtold"
-    # Q17 (user 2026-10-27): the deck runs the faithful IFS convection, which
-    # carries its own momentum transport and refuses the legacy CMT pin; runs
-    # from before that switch used the legacy reduction (not comparable).
+    # User decision 2026-10-30: production runs the SMOOTH Bechtold chain
+    # (the faithful IFS path is oracle-only, issue #2281), with the CMT-off
+    # and 0.8 rain-split pins it last ran with (resolved, not just the keys).
     from legoesm.driver.physics_pipeline import convection_config_for
-    assert convection_config_for(cfg).bechtold.use_ifs_ascent is True
+    _bech = convection_config_for(cfg).bechtold
+    assert _bech.use_ifs_ascent is False
+    assert _bech.enable_cmt is False
+    assert _bech.precip_efficiency == pytest.approx(0.8)
     assert cfg.cloud_scheme == "sundqvist"
     assert cfg.gravity_wave_drag == "mcfarlane+e3sm_cam"
     assert cfg.surface_bulk_scheme == "coare3"
@@ -2581,6 +2584,27 @@ def test_sundqvist_l36_deck_still_round_trips():
     assert cfg.cloud_fsd == 1.0
     _assert_optics_thinning(cfg, thinned=True)
 
+
+@pytest.mark.parametrize("deck", [
+    "amip_production_l36.yaml", "amip_campaign_mpas.yaml",
+    "amip_aug13_control.yaml", "amip_aug13_land.yaml",
+    "amip_reference_r5_land.yaml"])
+def test_sundqvist_l36_inheritors_resolve_to_smooth_bechtold(deck):
+    """Every Bechtold deck inheriting amip_sundqvist_l36.yaml resolves to the
+    smooth chain the base pins (IFS ascent off, CMT off, rain split 0.8), so
+    no child silently re-enables the non-differentiable IFS path."""
+    from legoesm.driver.run_config_yaml import load_yaml_config
+    from legoesm.driver.physics_pipeline import convection_config_for
+    parser = build_arg_parser()
+    parser.set_defaults(**load_yaml_config(
+        str(_repo_root() / "config" / "amip" / deck), parser))
+    cfg = build_config_from_args(
+        _postprocess_args(parser.parse_args(_AMIP_DUMMY_PATHS), parser))
+    assert cfg.convection == "bechtold"
+    leaf = convection_config_for(cfg).bechtold
+    assert leaf.use_ifs_ascent is False
+    assert leaf.enable_cmt is False
+    assert leaf.precip_efficiency == pytest.approx(0.8)
 
 def test_config_yaml_explicit_cli_flag_overrides_file():
     """Precedence: an explicit CLI flag wins over the --config file default."""
@@ -5853,24 +5877,6 @@ def test_amip_kain_fritsch_wrf_deck_selects_the_opt_in():
     assert cc.kain_fritsch.variant == "wrf_kfeta"
     check_wrf_kfeta_config(cc.kain_fritsch)
     cfg.validate_strict()
-
-
-def test_amip_bechtold_deck_runs_the_ifs_path():
-    """User 2026-10-27 (Q17 item 2): the AMIP Bechtold deck switches the
-    faithful CUMASTRN path on and drops the two legacy-only fields it refuses;
-    the deck's resolved leaf passes the path's own config guard."""
-    from legoesm.driver.physics_pipeline import _resolve_convection
-    from legoesm.driver.run_config_yaml import load_yaml_config
-    from legoesm.atmosphere.physics.convection._ifs_faithful import _check_config
-    deck = _repo_root() / "config" / "amip" / "amip_sundqvist_l36.yaml"
-    parser = build_arg_parser()
-    parser.set_defaults(**load_yaml_config(str(deck), parser))
-    cfg = build_config_from_args(_postprocess_args(
-        parser.parse_args(_AMIP_DUMMY_PATHS), parser))
-    assert cfg.convection == "bechtold" and cfg.bechtold_use_ifs_ascent is True
-    leaf = _resolve_convection(cfg)[1]
-    assert leaf.use_ifs_ascent is True
-    _check_config(leaf._replace(dx_m=1.0e5))
 
 
 _CMIP_ID_FLAGS = (
