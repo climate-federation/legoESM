@@ -290,17 +290,19 @@ def zhang_mcfarlane_convection(
 
 def validate_detrain_widths(w_T, w_n) -> None:
     """The one legal range of the two detrainment smoothing widths: 0 (CAM's
-    hard switch) or finite and >= the smallest normal float32.  Shared by
-    :func:`cam6_detrain_condensate` and ``ExperimentConfig.validate_strict``.
-    NaN, inf and sub-normal widths are refused: ``dlf / w_n`` overflows for a
-    sub-normal ``w_n`` (measured: NaN number sources at 1e-320 in fp64), and
-    the run's dtype is unknown here, so the float32 bound covers both."""
-    tiny = float(jnp.finfo(jnp.float32).tiny)
-    if not all(w == 0 or (math.isfinite(w) and w >= tiny) for w in (w_T, w_n)):
+    hard switch) or finite and >= sqrt(finfo(float32).tiny) (~1.08e-19).
+    Shared by :func:`cam6_detrain_condensate` and
+    ``ExperimentConfig.validate_strict``.  Far enough below the floor the
+    divisions ``30 / w_T`` (the ramp sharpness) and ``dlf / w_n`` overflow (measured: fp32
+    outputs non-finite at w_T = 1.2e-38 and w_n = 1e-100, fp64 NaN at
+    w_n = 1e-320); the run's dtype is unknown here, so the floor keeps both
+    quotients <~ 1e20 x their numerators, far below the float32 maximum."""
+    floor = math.sqrt(float(jnp.finfo(jnp.float32).tiny))
+    if not all(w == 0 or (math.isfinite(w) and w >= floor) for w in (w_T, w_n)):
         raise ValueError(
             "ZhangMcFarlaneConfig detrain_phase_width_K / "
             "detrain_number_width_kgkg_s must be finite and >= 0, and either 0 "
-            f"(CAM's hard switch) or >= {tiny:.3e}; got {w_T!r}, {w_n!r}.")
+            f"(CAM's hard switch) or >= {floor:.3e}; got {w_T!r}, {w_n!r}.")
 
 
 def cam6_detrain_condensate(T: jax.Array, dlf: jax.Array,
