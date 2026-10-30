@@ -5703,6 +5703,20 @@ def _bc_surface_forcing_stage(du_dt, dv_dt, dT_dt, dS_dt, surface_forcing, u, v,
                 "external-forcing shortwave path; leave "
                 "surface_forcing.shortwave_scheme='auto' on a NEMO qsr card.")
         _sw_scheme = _sw_pen_scheme
+    elif (_sw_pen_scheme is not None
+          and surface_forcing is not None
+          and getattr(surface_forcing, "sw_down", None) is not None
+          and getattr(surface_forcing, "q_net", None) is not None):
+        # One owner for the shortwave deposit: with q_net and sw_down the
+        # external stage below removes sw_down from q_net and puts it down its
+        # own profile, and the shared physics pipeline would deposit 100% of the
+        # same sw_down again (column gains q_net + sw).
+        raise ValueError(
+            f"physics.shortwave_penetration.scheme={_sw_pen_scheme!r} and the "
+            "external surface forcing (q_net and sw_down given) would both deposit the "
+            "shortwave. Set physics.shortwave_penetration=None and choose the "
+            "profile with surface_forcing.shortwave_scheme / "
+            "shortwave_water_type / shortwave_skin_fraction.")
     (du_dt, dv_dt, dT_dt, dS_dt, dT_surf_heat,
      diag_surface_stress_u, diag_surface_stress_v) = (
         _bc_external_surface_forcing(
