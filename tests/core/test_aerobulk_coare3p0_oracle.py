@@ -352,7 +352,7 @@ def test_check_grads_gust_onset_scheme_level_at_default():
 @pytest.mark.parametrize("width", [-1e-3, float("nan"), float("inf")])
 def test_2241_widths_validated(width):
     x = [jnp.asarray([v]) for v in (5.0, 0.0, 290.0, 0.01, 291.0, 0.012, 1.2)]
-    for kw in ("coare_charnock_ramp_width", "coare_gust_onset_width", "ncar_neutral_width"):
+    for kw in ("coare_charnock_ramp_width", "coare_gust_onset_width"):
         with pytest.raises(ValueError, match=kw):
             compute_most_fluxes(*x, scheme="coare3", **{kw: width})
     with pytest.raises(ValueError, match="coare_charnock_ramp_width"):
