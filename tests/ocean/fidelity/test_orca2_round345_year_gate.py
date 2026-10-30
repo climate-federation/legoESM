@@ -122,6 +122,14 @@ def _write_restart(
         variable[:] = values
         salinity = dataset.createVariable("sn", "f8", ("time", "z", "y", "x"))
         salinity[:] = values + 30.0
+        for name, offset in (("un", 40.0), ("vn", 50.0), ("sshn", 60.0)):
+            state = dataset.createVariable(name, "f8", ("time", "z", "y", "x"))
+            state[:] = values + offset
+        for index in range(14):
+            state = dataset.createVariable(
+                f"synthetic_state_{index:02d}", "f8", ("time", "z", "y", "x")
+            )
+            state[:] = values + 100.0 + index
         kt = dataset.createVariable("kt", "f8")
         kt[...] = float(kt_value)
         if include_delay_buffers:
@@ -204,7 +212,7 @@ def test_unperturbed_restart_control_requires_every_common_variable_data_exact(
     )
     assert result["all_common_variable_data_bitwise_identical"] is True
     assert result["restart_files_compared"] == 2
-    assert result["common_variable_data_comparisons"] == 6
+    assert result["common_variable_data_comparisons"] == 40
     assert result["required_arm_a_only_variables"] == [
         "DELAY_im8_fwb2", "DELAY_re8_fwb2",
     ]
@@ -236,6 +244,37 @@ def test_unperturbed_restart_control_requires_every_common_variable_data_exact(
     with pytest.raises(ulp_gate.GateError, match="arm_A_only=.*sn"):
         ulp_gate.verify_restart_continuation_control(
             control, baseline_arm=baseline, expected_steps=16
+        )
+
+
+def test_perturbed_restart_outputs_use_data_and_exact_variable_set(
+    tmp_path: Path,
+) -> None:
+    baseline = tmp_path / "baseline"
+    perturbed = tmp_path / "perturbed"
+    baseline.mkdir()
+    perturbed.mkdir()
+    for rank in (0, 1):
+        name = f"ORCA2_00000016_restart_{rank:04d}.nc"
+        _write_restart(baseline / name, rank, kt_value=16, include_delay_buffers=True)
+        _write_restart(perturbed / name, rank, kt_value=16)
+    result = ulp_gate.verify_perturbed_restart_outputs(
+        perturbed, baseline_arm=baseline, expected_steps=16
+    )
+    assert result["restart_files_validated"] == 2
+    assert result["required_arm_a_only_variables"] == [
+        "DELAY_im8_fwb2", "DELAY_re8_fwb2",
+    ]
+
+    target = perturbed / "ORCA2_00000016_restart_0001.nc"
+    with netCDF4.Dataset(target, "r+") as dataset:
+        variable = dataset.variables["tn"]
+        values = np.asarray(variable[:])
+        values.reshape(-1)[0] = np.nan
+        variable[:] = values
+    with pytest.raises(ulp_gate.GateError, match="tn contains non-finite values"):
+        ulp_gate.verify_perturbed_restart_outputs(
+            perturbed, baseline_arm=baseline, expected_steps=16
         )
 
 
@@ -370,7 +409,7 @@ def test_restart_stub_two_concurrent_rank_processes_preserve_input_and_ownership
     )
     for kt in (8, 16):
         for local_rank, expected_size in enumerate(expected_sizes):
-            if control and kt == 16:
+            if kt == 16:
                 with netCDF4.Dataset(
                     run_dir / f"ORCA2_{kt:08d}_restart_{local_rank:04d}.nc"
                 ) as dataset:
@@ -391,10 +430,10 @@ def test_restart_stub_two_concurrent_rank_processes_preserve_input_and_ownership
         assert continuation["all_common_variable_data_bitwise_identical"] is True
         assert continuation["restart_files_compared"] == 2
     else:
-        for local_rank in (0, 1):
-            output = run_dir / f"ORCA2_00000016_restart_{local_rank:04d}.nc"
-            baseline = ulp_gate.BASELINE_ARM / output.name
-            assert ulp_gate.common.sha256(output) == ulp_gate.common.sha256(baseline)
+        continuation = ulp_gate.verify_perturbed_restart_outputs(
+            run_dir, expected_steps=16
+        )
+        assert continuation["restart_files_validated"] == 2
         perturbation = ulp_gate.verify_perturbation_manifest(run_dir)
         assert perturbation["exact_ulp_distance"] == 1
 
