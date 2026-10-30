@@ -82,3 +82,8 @@ as advection state, advection moments, zapsmall state, post-LBC state, and
 end-of-step state. Both step 1 (`x-y`) and step 2 (`y-x`) are mandatory. No
 record, field, wet cell, seam cell, fold cell, or mode may be waived after
 measurement.
+
+Post-rebase provenance amendment: the historical acquisition commit above is
+superseded by the exact acquisition patch content retained on the landing lane.
+
+PROVENANCE-SUPERSESSION: 896c2acf024274db71e4b39b4cd8eaf8bd0620fd -> blob 4f5f458723219d8afdd09973d33afd13c8f5f1d1 `scripts/validate/ocean_fidelity/testcases/nemo_si3_o4_orca2_prather_acquisition/icedyn_adv_o4.patch`
