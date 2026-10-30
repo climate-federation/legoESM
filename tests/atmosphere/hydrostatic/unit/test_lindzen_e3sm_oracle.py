@@ -38,7 +38,8 @@ _KEYS = ("u", "v", "T", "p_full", "p_half", "z_full", "z_half", "rho", "lat", "s
 
 def _hard_config():
     return LindzenConfig()._replace(
-        Fr_sharpness=_HARD, crit_level_sharpness=_HARD, crit_level_floor=0.0)
+        Fr_sharpness=_HARD, crit_level_sharpness=_HARD, crit_level_floor=0.0,
+        oro_wind_ramp_width=0.0)
 
 
 def _run(f, cfg, dtype=jnp.float64):
@@ -165,3 +166,34 @@ def test_check_grads_through_the_smoothing_at_default(fx, col, s_star):
     s0 = jnp.asarray(s_star)
     check_grads(f, (s0,), order=2, modes=("fwd", "rev"), eps=1e-5)
     assert float(jax.grad(f)(s0)) != 0.0
+
+
+# #2241 RULE 5: the U > 2 m/s launch gate.  Column 12 launches at a source
+# wind U0 = 2.6563 m/s (measured 2026-10-30, gw_oro_src on the fixture); its
+# wind scaled by s = 2/U0 puts U on the gate, where the hard stress jumps from
+# tau(2 m/s) to 0 (check_grads fails at oro_wind_ramp_width = 0); s = 2.25/U0
+# (mid-ramp at the default width 0.5) is coverage with a non-zero derivative.
+_GATE_COL, _GATE_U0 = 12, 2.656279920412854
+
+
+def test_check_grads_through_the_wind_gate_at_default(fx):
+    cfg = LindzenConfig()
+    assert cfg.oro_wind_ramp_width == 0.5
+    f1 = {k: jnp.asarray(fx[k][_GATE_COL:_GATE_COL + 1]) for k in _KEYS}
+
+    def f(s):
+        out = lindzen_gwd(f1["u"] * s, f1["v"] * s, f1["T"], f1["p_full"], f1["p_half"],
+                          f1["z_full"], f1["z_half"], f1["rho"], f1["lat"], float(fx["dt"]),
+                          cfg, h_topo_col=f1["sgh"])
+        return jnp.sum(out.du_dt) + jnp.sum(out.dv_dt) + jnp.sum(out.dT_dt)
+
+    f = jax.jit(f)
+    check_grads(f, (jnp.asarray(2.0 / _GATE_U0),), order=2, modes=("fwd", "rev"), eps=1e-5)
+    s_mid = jnp.asarray(2.25 / _GATE_U0)
+    check_grads(f, (s_mid,), order=2, modes=("fwd", "rev"), eps=1e-5)
+    assert float(jax.grad(f)(s_mid)) != 0.0
+
+
+def test_wind_gate_ramp_width_validated(fx):
+    with pytest.raises(ValueError, match="oro_wind_ramp_width"):
+        _run(fx, LindzenConfig()._replace(oro_wind_ramp_width=-0.1))

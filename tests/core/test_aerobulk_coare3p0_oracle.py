@@ -47,7 +47,11 @@ import numpy as np  # noqa: E402
 import pytest  # noqa: E402
 from jax.test_util import check_grads  # noqa: E402
 from legoesm.core.bulk_flux import (  # noqa: E402
+    COARE_CHARNOCK_RAMP_WIDTH,
+    COARE_GUST_ONSET_WIDTH,
     COARE_NEUTRAL_WIDTH,
+    _coare3p0_charnock,
+    _gust_factor,
     compute_most_fluxes,
     psi_h_coare,
     psi_m_coare,
@@ -63,6 +67,8 @@ _CHARNOCK_GAP_FILE = (Path(__file__).parent / "oracle_fixtures"
 _RTOL = 1e-10
 _HEIGHTS = {"z10": 10.0, "z2": 2.0}
 CHARNOCK_AEROBULK = float(np.float32(0.011))  # AeroBulk charn_coare3p0 literal
+# The #2241 RULE 5 widths at their hard limit (AeroBulk's clip and x**(2/3)).
+_HARD_2241 = dict(coare_charnock_ramp_width=0.0, coare_gust_onset_width=0.0)
 
 
 def _fixture():
@@ -114,7 +120,7 @@ def test_fixture_provenance_and_coverage():
 
 @pytest.mark.parametrize("h", sorted(_HEIGHTS))
 def test_coare3_matches_compiled_aerobulk_turb_coare3p0(h):
-    worst = max_rel_errors(_fixture(), h, coare_neutral_width=0.0)
+    worst = max_rel_errors(_fixture(), h, coare_neutral_width=0.0, **_HARD_2241)
     bad = {k: v for k, v in worst.items() if not v <= _RTOL}
     assert not bad, (h, worst)
 
@@ -189,6 +195,9 @@ def test_default_width_is_the_recorded_one():
     sig = inspect.signature(compute_most_fluxes).parameters
     assert sig["coare_neutral_width"].default == COARE_NEUTRAL_WIDTH
     assert sig["charnock"].default == 0.011
+    assert COARE_CHARNOCK_RAMP_WIDTH == 0.5 and COARE_GUST_ONSET_WIDTH == 1.0e-2
+    assert sig["coare_charnock_ramp_width"].default == COARE_CHARNOCK_RAMP_WIDTH
+    assert sig["coare_gust_onset_width"].default == COARE_GUST_ONSET_WIDTH
 
 
 def test_default_gap_per_state():
@@ -206,7 +215,7 @@ def test_charnock_only_gap_per_state():
     """The Charnock part of the default gap alone (fp64 0.011 vs AeroBulk's fp32
     literal, hard neutral switch), pinned per state like the default gap."""
     stored = np.load(_CHARNOCK_GAP_FILE)
-    gaps = _default_gaps(_fixture(), coare_neutral_width=0.0)
+    gaps = _default_gaps(_fixture(), coare_neutral_width=0.0, **_HARD_2241)
     assert sorted(gaps) == sorted(stored.files)
     for k, g in gaps.items():
         np.testing.assert_allclose(g, stored[k], rtol=1e-6, atol=1e-12, err_msg=k)
@@ -257,6 +266,99 @@ def test_check_grads_psi_coare_across_zeta0_at_default(psi, zeta):
     assert float(jax.grad(psi)(z0)) != 0.0
 
 
+# --- #2241 RULE 5 gradient tests: Charnock wind ramp and gustiness onset ---
+# Each test checks the hard-form kink (fails at width 0: the non-vacuity check)
+# and, as coverage, a mid-band point with a non-zero derivative.
+_W_CH = COARE_CHARNOCK_RAMP_WIDTH
+
+
+@pytest.mark.parametrize("corner,inside", [(10.0, 10.0 + 0.5 * _W_CH),
+                                           (18.0, 18.0 - 0.5 * _W_CH)])
+def test_check_grads_charnock_ramp_at_default(corner, inside):
+    """The default rounding is C1 at each ramp corner (order 1 there: the
+    second derivative jumps at the C1 joins) and smooth mid-band (order 2);
+    the hard clip has a slope jump at the corner.  eps 1e-4 m/s."""
+    def f(u):
+        return _coare3p0_charnock(u, 0.011)
+    check_grads(f, (jnp.asarray(corner),), order=1, modes=("fwd", "rev"), eps=1e-4)
+    check_grads(f, (jnp.asarray(inside),), order=2, modes=("fwd", "rev"), eps=1e-4)
+    assert float(jax.grad(f)(jnp.asarray(inside))) != 0.0
+
+
+def test_charnock_ramp_bounds_and_hard_limit():
+    u = jnp.linspace(0.0, 30.0, 3001)
+    soft, hard = _coare3p0_charnock(u, 0.011), _coare3p0_charnock(u, 0.011, 0.0)
+    assert float(jnp.min(soft)) >= 0.011 and float(jnp.max(soft)) <= float(np.float32(0.018))
+    assert np.all(np.diff(np.asarray(soft)) >= 0.0)
+    out = (u <= 10.0) | ((u >= 10.0 + _W_CH) & (u <= 18.0 - _W_CH)) | (u >= 18.0)
+    np.testing.assert_array_equal(np.asarray(soft)[np.asarray(out)], np.asarray(hard)[np.asarray(out)])
+
+
+def test_check_grads_gust_onset_at_default():
+    """x = -zi/(kappa L) = 0: the hard x**(2/3) has an infinite slope there
+    (fails), the default quintic onset is C2; mid-band x = w/2 as coverage.
+    eps = w/1e4 (the N6 ratio): eps = 1e-5 = w/1e3 left a finite-difference
+    error of 1.8e-5 relative mid-band, above JAX's fp64 tolerance (measured)."""
+    def f(x):
+        return _gust_factor(x)
+    eps = 1e-4 * COARE_GUST_ONSET_WIDTH
+    check_grads(f, (jnp.asarray(0.0),), order=2, modes=("fwd", "rev"), eps=eps)
+    xm = jnp.asarray(0.5 * COARE_GUST_ONSET_WIDTH)
+    check_grads(f, (xm,), order=2, modes=("fwd", "rev"), eps=eps)
+    assert float(jax.grad(f)(xm)) != 0.0
+    x = jnp.linspace(-1.0, 1.0, 2001)
+    assert np.all(np.asarray(_gust_factor(x)) <= np.asarray(_gust_factor(x, 0.0)))
+
+
+def _one_state_flux(var, scheme, state, **kw):
+    """f(x) = taux + Q_H + Q_E + u* of one ocean state with ``var`` = x."""
+    st = dict(u=8.0, v=0.0, ta=290.0, q=0.010, ts=290.0, qs=0.010) | state
+    zi = kw.pop("gustiness_w_zi", None)
+
+    def f(x):
+        d = st | {var: x}
+        r = compute_most_fluxes(*(jnp.atleast_1d(d[k]) for k in ("u", "v", "ta", "q", "ts", "qs")),
+                                jnp.atleast_1d(1.2), z_ref=10.0, scheme=scheme,
+                                gustiness_w_zi=zi, **kw)
+        return jnp.sum(r[0] + r[2] + r[3] + r[4])
+    return f
+
+
+def test_check_grads_charnock_scheme_level_at_default():
+    """Scheme-level Charnock kink: no gustiness, T_s = 290.5 K, wind u =
+    9.948649 m/s, where the hard ramp's U_N10 = 10 m/s crossing gives the
+    fluxes a slope jump (found 2026-10-30 by a derivative-jump scan of the
+    hard form over u in [9, 12]; check_grads fails there at width 0).  Order 1:
+    the default rounding is C1 there."""
+    f = _one_state_flux("u", "coare3", dict(ts=290.5), gustiness_w_zi=0.0)
+    u0 = jnp.asarray(9.948648980536408)
+    check_grads(f, (u0,), order=1, modes=("fwd", "rev"), eps=1e-4)
+    assert float(jax.grad(f)(u0)) != 0.0
+
+
+def test_check_grads_gust_onset_scheme_level_at_default():
+    """Scheme-level gustiness onset: u = 3 m/s, air 290 K / 10 g/kg over a
+    12 g/kg sea, T_s = 289.649624 K, where the last iteration's 1/L crosses 0
+    (bisected 2026-10-30 on the solver's 1/L; dt and dq keep their signs).  The
+    hard x**(2/3) fails check_grads there (with only the gust width at 0 too).
+    Order 1 and eps 1e-7 K: the default onset band spans ~1e-4 K in T_s, and
+    the kept first-guess Richardson switch is only C1 at neutral (#2241)."""
+    f = _one_state_flux("ts", "coare3", dict(u=3.0, q=0.010, qs=0.012))
+    t0 = jnp.asarray(289.64962358387515)
+    check_grads(f, (t0,), order=1, modes=("fwd", "rev"), eps=1e-7)
+    assert float(jax.grad(f)(t0)) != 0.0
+
+
+@pytest.mark.parametrize("width", [-1e-3, float("nan"), float("inf")])
+def test_2241_widths_validated(width):
+    x = [jnp.asarray([v]) for v in (5.0, 0.0, 290.0, 0.01, 291.0, 0.012, 1.2)]
+    for kw in ("coare_charnock_ramp_width", "coare_gust_onset_width", "ncar_neutral_width"):
+        with pytest.raises(ValueError, match=kw):
+            compute_most_fluxes(*x, scheme="coare3", **{kw: width})
+    with pytest.raises(ValueError, match="coare_charnock_ramp_width"):
+        compute_most_fluxes(*x, scheme="coare3", coare_charnock_ramp_width=8.5)
+
+
 def test_exchange_cap_below_aerobulk_floor_raises():
     x = [jnp.asarray([v]) for v in (5.0, 0.0, 290.0, 0.01, 291.0, 0.012, 1.2)]
     for scheme in ("coare3", "large_yeager"):
@@ -267,5 +369,6 @@ def test_exchange_cap_below_aerobulk_floor_raises():
 
 if __name__ == "__main__":
     np.savez_compressed(_GAP_FILE, width=COARE_NEUTRAL_WIDTH, **_default_gaps(_fixture()))
-    np.savez_compressed(_CHARNOCK_GAP_FILE, **_default_gaps(_fixture(), coare_neutral_width=0.0))
+    np.savez_compressed(_CHARNOCK_GAP_FILE,
+                        **_default_gaps(_fixture(), coare_neutral_width=0.0, **_HARD_2241))
     print("wrote", _GAP_FILE, _CHARNOCK_GAP_FILE)

@@ -142,6 +142,7 @@ __param_spec__ = {
             "Fr_sharpness": "p-norm exponent of the smooth min(taudmp, tausat) (NOT a Froude-number transition); a differentiability/smoothing width, not a closure",
             "crit_level_sharpness": "sigmoid sharpness of the smooth critical-level filter; a differentiability/smoothing width, not a closure",
             "crit_level_floor": "signed source-projected wind U_proj (NOT a wind magnitude) at which the smooth critical-level filter is half-on; a smoothing/regulariser offset, not a closure",
+            "oro_wind_ramp_width": "numerics: smooth-switch width of the U > oro_min_wind launch gate (RULE 5), value decided by codex+GLM (#2241)",
         },
         "params": {
             # --- orographic launch amplitude ---
@@ -270,6 +271,14 @@ class LindzenConfig(NamedTuple):
     umcfac : float
         Maximum fraction of ``|c - ubm|`` (c = 0) the wind may change per step
         (default 0.5, E3SM ``umcfac``).
+    oro_wind_ramp_width : float
+        Width [m/s] of the smooth ``U > oro_min_wind`` (2 m/s) launch gate
+        (default 0.5, RULE 5, #2241): the launch stress is multiplied by
+        ``smoothstep_quintic((U - 2)/w)``, exactly 0 at and below 2 m/s and
+        exact from 2.5 m/s.  ``0.0`` is E3SM's hard gate (the stress jumps
+        from tau(2 m/s) to 0).  The mountain-height gate (``hdsp > 10 m``) and
+        the 1 Pa pressure floors stay hard: they are static (orography; the
+        model-top interface), not model state.
     """
     h_topo: float = 500.0
     k_wave: float = 2.0 * math.pi / 100e3
@@ -279,6 +288,7 @@ class LindzenConfig(NamedTuple):
     crit_level_floor: float = 0.5
     tndmax_per_day: float = 500.0
     umcfac: float = 0.5
+    oro_wind_ramp_width: float = 0.5
 
 
 class McFarlaneConfig(NamedTuple):
