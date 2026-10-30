@@ -67,6 +67,10 @@ mpas_qv_smooth_del4_m4s: 0.0       # B5: OFF on the duo (no FV3 counterpart)
 land_ic: data/lmip_soil_ic/soil_ic_fv3duo24_era5T_19790101.npz
 
 # ---- hardware ---------------------------------------------------------------
+rrtmgp_use_scan: null       # keep the code default (unrolled on CPU, scan on GPU): the
+                            # included deck's scan row was measured on the MPAS lane only
+                            # (CPU -4%/-7% at 1/8 nodes, round-off only); not measured on
+                            # this lane.  User 2026-10-30.
 rrtmgp_gpoint_batch_size: 16  # this lane runs on GPU (A100): the 16-wide vmap
                               # block, not the MPAS deck's CPU-measured 0 (the
                               # per-g-point checkpointed scan, which compiles a
