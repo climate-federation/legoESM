@@ -17343,6 +17343,16 @@ class ModelDriver:
         # `DiagnosticCollector.save` for the keys we actually populate;
         # other keys are filled with NaN of the same length so the
         # downstream consumer can iterate without ``KeyError``.
+        if _full_physics and not _ts["days"]:
+            # Run shorter than one diagnostic interval: its single end-of-run
+            # sample carries the run-mean precip (#2277).
+            from legoesm.diagnostics.energy_budget import area_weighted_mean
+            _ts["precip"] = [
+                float(area_weighted_mean(
+                    _sp_diag["p"] / (_sp_diag["n"] * DT),
+                    self.grid.grid_area)) * 86400.0
+                if _sp_diag["ok"] and _sp_diag["p"] is not None
+                else float("nan")]
         self._save_lightweight_timeseries(_ts, run_status, t_start)
         return run_status
 
@@ -17440,6 +17450,9 @@ class ModelDriver:
                 "max_wind": [u_final],
                 "dry_mass_ps": [ps_final],
                 "T_finite": [T_finite],
+                # the run-mean precip the spectral loop passes (#2277)
+                **({"precip": ts["precip"]}
+                   if len(ts.get("precip", ())) == 1 else {}),
             }
             n = 1
         nan = np.full(n, np.nan, dtype=np.float64)
