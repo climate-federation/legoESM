@@ -296,10 +296,12 @@ def validate_detrain_widths(w_T, w_n) -> None:
     ``30 / w_T`` and the quotient ``dlf / w_n`` leave the normal float32 range
     (measured: fp32 outputs non-finite at w_T = 1.2e-38 and w_n = 1e-100, fp64
     NaN at w_n = 1e-320); the run's dtype is unknown here, so the float32 bound
-    covers both.  It is a numerics bound only, not a physical range."""
+    covers both.  It is a numerics bound only, not a physical range.  Booleans
+    are refused (a YAML ``false`` would otherwise read as the hard switch)."""
     lo = math.sqrt(float(jnp.finfo(jnp.float32).tiny))
     hi = 1.0 / lo
-    if not all(w == 0 or (math.isfinite(w) and lo <= w <= hi)
+    if not all(not isinstance(w, bool)
+               and (w == 0 or (math.isfinite(w) and lo <= w <= hi))
                for w in (w_T, w_n)):
         raise ValueError(
             "ZhangMcFarlaneConfig detrain_phase_width_K / "

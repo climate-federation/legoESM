@@ -271,6 +271,16 @@ def test_width_out_of_range_refused(field, value):
                                 zm.detrain_number_width_kgkg_s)
 
 
+@pytest.mark.parametrize("field", sorted(ZM_WIDTH_FIELDS))
+@pytest.mark.parametrize("value", [False, True])
+def test_width_bool_refused(field, value):
+    """A YAML ``false`` reaches the config as a bool (the deck loader coerces
+    strings only); it must not read as 0 = the hard switch."""
+    cfg = _mpas(ExperimentConfig(**_ZW_HOST, **{field: value}))
+    with pytest.raises(ValueError, match=field):
+        cfg.validate_strict()
+
+
 def test_width_zero_hard_switch_accepted():
     _mpas(ExperimentConfig(**_ZW_HOST, zm_detrain_phase_width_K=0.0,
                            zm_detrain_number_width_kgkg_s=0.0)).validate_strict()

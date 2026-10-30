@@ -3103,7 +3103,7 @@ class ExperimentConfig(NamedTuple):
             _zmd = _ZMC()
             try:
                 validate_detrain_widths(*(
-                    float(_zw.get(f, getattr(_zmd, leaf)))
+                    _zw.get(f, getattr(_zmd, leaf))
                     for f, leaf in ZM_WIDTH_FIELDS.items()))
             except (TypeError, ValueError) as exc:
                 errors.append(f"{sorted(_zw)}: {exc}")
