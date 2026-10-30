@@ -352,7 +352,7 @@ def test_nemo_literal_dissl_guard_preserves_primal_bits_and_zero_vjp():
     source = inspect.getsource(tke_mod.tke_vertical_mixing)
     assert "_dissl_sqrt_input = jnp.where(" in source
     assert "_dissl_divisor = jnp.where(" in source
-    assert "jnp.sqrt(_dissl_sqrt_input)" in source
+    assert "safe_sqrt(_dissl_sqrt_input)" in source
 
 
 def test_resource_cli_requires_a_schedule():

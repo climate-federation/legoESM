@@ -475,8 +475,11 @@ def test_literal_blk_oce_inexact_binary64_pins_and_eager_jit():
 
 def test_literal_blk_oce_path_plants_and_physical_inputs_have_no_defaults():
     signature = inspect.signature(nemo_blk_oce_ncar)
+    optional_composition = {
+        "prior_surface", "chl", "geothermal_heat_flux_mwm2"}
     assert all(parameter.default is inspect.Parameter.empty
-               for parameter in signature.parameters.values())
+               for name, parameter in signature.parameters.items()
+               if name not in optional_composition)
     base_args = list(_literal_scalar_inputs())
     base = nemo_blk_oce_ncar(*base_args, **_NO_ICE, s0=None, s2=None)
     longwave_args = list(base_args)

@@ -2334,8 +2334,9 @@ def _nemo_ws_stage_transport(
             eta_stage, h_ref, u_mask_3d, v_mask_3d, grid,
             z_coord=z_coord, nemo_stage_pair=nemo_stage_pair,
             include_reciprocals=True,
-            fold_exchange_ratios=(config.rk3_vector_raw_vmask
-                                  or config.rk3_stage_transport_fold_exchanges))  # r3v fold exchange, stprk3_stg.f90:169  # noqa: E501
+            fold_exchange_ratios=(
+                getattr(config, "rk3_vector_raw_vmask", False)
+                or getattr(config, "rk3_stage_transport_fold_exchanges", False)))  # r3v fold exchange, stprk3_stg.f90:169  # noqa: E501
     Hu_stage_depth = jnp.sum(hu_stage, axis=-1)
     Hv_stage_depth = jnp.sum(hv_stage, axis=-1)
     if barotropic_velocity is None:
@@ -2382,7 +2383,8 @@ def _nemo_ws_stage_transport(
             if isinstance(z_coord, OceanPartialCellCoordinate)
             else jnp.ones_like(h_stage))
         # stprk3_stg.f90:134-135/:177 (stage 1), :188-189/:221 (stage 2).
-        _stage_pair = (bool(config.rk3_stage_wzv_nemo_clock_pair)
+        _stage_pair = (bool(getattr(
+                           config, "rk3_stage_wzv_nemo_clock_pair", False))
                        and stage_index in (0, 1))
         w_stage, _, _ = nemo_qco_wzv_operands(
             eta_stage, eta_before, u_stage, v_stage, grid, z_coord,
@@ -2401,17 +2403,20 @@ def _nemo_ws_stage_transport(
                 # indicator) differences the already corrected zFu/zFv.
                 None if (legacy_wzv_rederived_transport or velocity_form_wzv)
                 else (zfu_stage, zfv_stage)),
-            fold_exchange_ratios=bool(config.rk3_vector_raw_vmask),
+            fold_exchange_ratios=bool(
+                getattr(config, "rk3_vector_raw_vmask", False)),
             runoff_mass_flux=runoff_mass_flux,
             stored_r3_ratios=bool(
-                config.nemo_wzv_stored_r3_ratios
-                or config.rk3_stage_tracer_wzv_stored_kmm_ratios),
+                getattr(config, "nemo_wzv_stored_r3_ratios", False)
+                or getattr(config,
+                           "rk3_stage_tracer_wzv_stored_kmm_ratios", False)),
             # Stages 2/3 read the r3t(Kmm) slot written by the preceding RK
             # stage, not a ratio rebuilt from its interpolated ssh
             # (stprk3_stg.f90:177-179/:221-223; sshwzv.f90:297).
             stored_kmm_level=(
                 stage_index
-                if (config.rk3_stage_tracer_wzv_stored_kmm_ratios
+                if (getattr(
+                        config, "rk3_stage_tracer_wzv_stored_kmm_ratios", False)
                     and stage_index in (1, 2))
                 else 0))
         if momentum_velocity_form_w:
@@ -2429,18 +2434,25 @@ def _nemo_ws_stage_transport(
                 (dt, eta_after) if momentum_wzv_clock is None
                 else momentum_wzv_clock)
             _w_half = (stage_index == 1 and momentum_wzv_clock is None
-                       and bool(config.nemo_stage2_momentum_wzv_half_step))
+                       and bool(getattr(
+                           config, "nemo_stage2_momentum_wzv_half_step", False)))
             w_momentum, _, _ = nemo_qco_wzv_operands(
                 eta_stage, eta_before, u_stage, v_stage, grid, z_coord,
                 u_mask_3d, v_mask_3d, _tmask3, _w_dt / 2.0 if _w_half else _w_dt,
                 eta_after_override=_w_eta_after,
                 volume_transport_override=None,
-                fold_exchange_ratios=bool(config.rk3_vector_raw_vmask), runoff_mass_flux=runoff_mass_flux,
-                stored_r3_ratios=bool(config.nemo_wzv_stored_r3_ratios),
+                fold_exchange_ratios=bool(
+                    getattr(config, "rk3_vector_raw_vmask", False)),
+                runoff_mass_flux=runoff_mass_flux,
+                stored_r3_ratios=bool(getattr(
+                    config, "nemo_wzv_stored_r3_ratios", False)),
                 half_step_after_ratio=_w_half,
                 stored_kmm_level=(
                     stage_index if (momentum_wzv_clock is None and stage_index in (1, 2)
-                                    and bool(config.nemo_stage_momentum_wzv_stored_kmm_ratios))
+                                    and bool(getattr(
+                                        config,
+                                        "nemo_stage_momentum_wzv_stored_kmm_ratios",
+                                        False)))
                     else 0))
     else:
         w_stage = diagnose_w_from_flux_div(
@@ -2518,6 +2530,12 @@ class _NEMOWSLiveOperandTrace(NamedTuple):
     tke_statement_trace: object
     barotropic_targets: object
     slow_forcing_producer: object
+    stage3_composed_source: object
+    stage3_before_geothermal: object
+    stage3_geothermal_rate: object
+    stage3_before_damping: object
+    stage3_damping_rate: object
+    stage3_explicit_temperature: object
     stage_rhs: object
     stage1_full_rhs: object
     stage1_rhs_walk: object
@@ -2525,12 +2543,6 @@ class _NEMOWSLiveOperandTrace(NamedTuple):
     barotropic_correction_geometry: object
     stage_outputs: object
     stage_tracer_sources: object
-    stage3_composed_source: object
-    stage3_before_geothermal: object
-    stage3_geothermal_rate: object
-    stage3_before_damping: object
-    stage3_damping_rate: object
-    stage3_explicit_temperature: object
 
 
 class _NEMOWSMomentumBudgetTrace(NamedTuple):

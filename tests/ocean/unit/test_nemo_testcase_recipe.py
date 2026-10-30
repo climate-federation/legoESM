@@ -92,10 +92,12 @@ def test_orca2_structural_guard_rejects_iceberg_option_drift():
                 ),
                 bbl_diffusive_option=1,
                 bbl_aht_m2_s=1000.0,
+                bbl_gamma_s=10.0,
             )
         ),
         bbl_diffusive_option=1,
         bbl_aht_m2_s=1000.0,
+        bbl_gamma_s=10.0,
     )
     with pytest.raises(ValueError, match="ln_icebergs=F"):
         validate_nemo_testcase_card(card)
