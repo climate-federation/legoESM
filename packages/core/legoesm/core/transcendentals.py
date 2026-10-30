@@ -125,7 +125,7 @@ def _libm_cos_jvp(primals, tangents):
 
 def _scalar_libm_pow(base: np.ndarray, exponent: np.ndarray) -> np.ndarray:
     base, exponent = np.broadcast_arrays(np.asarray(base), np.asarray(exponent))
-    function = _LIBM.pow
+    function = glibc_libm().pow
     function.argtypes = (ctypes.c_double, ctypes.c_double)
     function.restype = ctypes.c_double
     result = np.empty(base.shape, dtype=np.result_type(base, exponent))
