@@ -279,6 +279,9 @@ def test_width_bool_refused(field, value):
     cfg = _mpas(ExperimentConfig(**_ZW_HOST, **{field: value}))
     with pytest.raises(ValueError, match=field):
         cfg.validate_strict()
+    # The resolver refuses it too (a caller that skips validate_strict).
+    with pytest.raises(ValueError, match="finite and >= 0"):
+        convection_config_for(cfg)
 
 
 def test_width_zero_hard_switch_accepted():

@@ -4056,7 +4056,22 @@ def _zm_overrides(config):
         raise ValueError(
             f"{given} are Zhang-McFarlane parameters; got "
             f"convection={config.convection!r}, which does not read them.")
-    return {table[f]: float(getattr(config, f)) for f in given}
+    out = {table[f]: float(getattr(config, f)) for f in given
+           if f in ZM_SCALAR_FIELDS}
+    widths = {ZM_WIDTH_FIELDS[f]: getattr(config, f) for f in given
+              if f in ZM_WIDTH_FIELDS}
+    if widths:
+        # Raw values: float() would read a YAML ``false`` as 0 = the hard switch.
+        from legoesm.atmosphere.physics.convection.config import (
+            ZhangMcFarlaneConfig,
+        )
+        from legoesm.atmosphere.physics.convection.zhang_mcfarlane import (
+            validate_detrain_widths,
+        )
+        validate_detrain_widths(*(widths.get(leaf, getattr(
+            ZhangMcFarlaneConfig(), leaf)) for leaf in ZM_WIDTH_FIELDS.values()))
+        out.update({k: float(v) for k, v in widths.items()})
+    return out
 
 
 def _resolve_convection(config):
