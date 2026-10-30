@@ -73,7 +73,8 @@ _GSAM_M2005_PARAMS = MorrisonConfig(morrison_flavor="sam")
 _SED_SUBSTEPS_MAX = MorrisonConfig._field_defaults["sed_cfl_substeps_max"]
 # The only SeifertBehengConfig field gSAM reads (NDCNST, as a per-volume count).
 _GSAM_FIELDS = ("Nc_0", "gsam_satadj_excess_sharpness", "gsam_satadj_qc_floor_sharpness",
-                "gsam_satadj_p_min_width_pa", "sb2001_autoconv_ramp_top")
+                "gsam_satadj_p_min_width_pa", "sb2001_autoconv_ramp_top",
+                "sb2001_accretion_qr_ramp_top", "sb2001_accretion_qc_ramp_top")
 
 __physics_contract__ = {
     "summary": (
@@ -135,7 +136,7 @@ def _reject_fields_without_gsam_counterpart(config: SeifertBehengConfig) -> None
             "seifert_beheng runs gSAM 1.8.8 M2005 (liquid only, SB2001 warm "
             f"rain), which has no counterpart for {bad}; leave them at their "
             "defaults (only Nc_0, the specified droplet number, the three "
-            "gsam_satadj_* smooth-switch fields and sb2001_autoconv_ramp_top "
+            "gsam_satadj_* smooth-switch fields and the sb2001_* ramp tops "
             "are read).")
 
 
@@ -150,7 +151,9 @@ def _gsam_call(T, q_v, hydrometeors, p_full, rho, dz, dt, config):
     return m2005_liquid_step(
         T1, q_v1, q_c1, hydrometeors.q_r, hydrometeors.N_r, p_full, rho, dz,
         dt, config.Nc_0, _GSAM_M2005_PARAMS, _SED_SUBSTEPS_MAX,
-        sb2001_autoconv_ramp_top=config.sb2001_autoconv_ramp_top)
+        sb2001_autoconv_ramp_top=config.sb2001_autoconv_ramp_top,
+        sb2001_accretion_qr_ramp_top=config.sb2001_accretion_qr_ramp_top,
+        sb2001_accretion_qc_ramp_top=config.sb2001_accretion_qc_ramp_top)
 
 
 def _guard(state):

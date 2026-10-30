@@ -69,7 +69,9 @@ def _inputs(fx, g, dtype=jnp.float64, hard=True):
         cfg = cfg._replace(gsam_satadj_excess_sharpness=math.inf,
                            gsam_satadj_qc_floor_sharpness=math.inf,
                            gsam_satadj_p_min_width_pa=0.0,
-                           sb2001_autoconv_ramp_top=0.0)
+                           sb2001_autoconv_ramp_top=0.0,
+                           sb2001_accretion_qr_ramp_top=0.0,
+                           sb2001_accretion_qc_ramp_top=0.0)
     return (flip("T"), flip("q_v"), hyd, flip("p_full"),
             jnp.asarray(fx[f"{g}_p_half"][:, ::-1], dtype=dtype), rho,
             flip("dz"), float(fx[f"{g}_dt"]), cfg)
