@@ -54,6 +54,12 @@ def test_line_numbers_expands_commas_and_ranges():
     assert gate.line_numbers("1,3-5") == [1, 3, 4, 5]
 
 
+def test_c_source_citations_are_scanned():
+    assert gate.extract("`packages/core/legoesm/core/_scalar_libm.c:4-38`") == [
+        "packages/core/legoesm/core/_scalar_libm.c:4-38"
+    ]
+
+
 @pytest.mark.parametrize("spec", ["309-300", ""])
 def test_a_reversed_or_empty_range_raises_instead_of_crashing_later(spec):
     """It used to return ``[]`` and crash in ``check`` with an IndexError.
