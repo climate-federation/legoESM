@@ -180,10 +180,32 @@ DEPARTURES (deliberate, each raises or is documented):
 - ``EPBL_ANSWER_DATE`` is fixed at the modern (>= 20240101) arithmetic; the
   pre-2019 and pre-2024 expression variants are not selectable.
 - MOM6 applies the surface fluxes BEFORE ePBL and hands it the resulting
-  per-layer energy ``TKE_forced``.  Here ``tke_forcing`` is computed for the
-  top layer only, from the net surface heat and salt fluxes, matching
-  ``applyBoundaryFluxesInOut`` for a non-penetrating flux.  Penetrating
-  shortwave does not contribute a sub-surface ``TKE_forced`` profile.
+  per-layer energy ``TKE_forced``: the non-penetrating heat and salt fluxes
+  in the top layer (:func:`surface_tke_forcing`) plus, in every layer, the
+  energy needed to mix the penetrating shortwave absorbed there
+  (:func:`penetrating_sw_tke`, MOM6 ``absorbRemainingSW``; issue #2178).
+  Penetrating shortwave is supported on the ocean single-column model with
+  the two-band Jerlov scheme only; every other driver and scheme raises when
+  ``sw_down`` is supplied (see ``integration._make_epbl``).
+
+KNOWN DIFFERENCES: penetrating shortwave (issue #2178)
+------------------------------------------------------
+The TKE profile describes the heating legoESM's Jerlov kernel deposits, not
+MOM6's ``absorbRemainingSW``:
+
+- MOM6 absorbs a band entirely in a layer once its remaining heating falls
+  below ``PEN_SW_FLUX_ABSORB`` (2.5e-11 degC m/s) over
+  ``PEN_SW_ABSORB_MINTHICK``; legoESM's kernel has no such threshold, so it
+  is not ported.  It never binds in the MOM6 fixture's shortwave cases
+  (the deep band still carries ~1e-2 degC m per step at 50 m).
+- Light reaching the seabed: MOM6 spreads it uniformly over the column,
+  legoESM's kernel puts it in the deepest layer.  Both treat it as uniform
+  heating within a layer, so it carries no TKE term in either model; the
+  temperature it leaves differs, and that difference is part of the stored
+  per-case MOM6 gap (``tests/ocean/unit/test_epbl_mom6_oracle.py``).
+- Under the MOM6 step order the specific-volume derivatives come from the
+  post-flux column (MOM6 takes them before the fluxes), as for the existing
+  top-layer term.
 """
 
 from __future__ import annotations
@@ -292,6 +314,10 @@ _SMOOTH_SHARPNESS_FIELDS = tuple(
 # traced equivalent needs a finite epsilon so the unselected branch cannot
 # produce a NaN that `jnp.where` would propagate through reverse-mode AD.
 _TINY = 1.0e-30
+# --- penetrating shortwave TKE (MOM6 MOM_opacity.F90 absorbRemainingSW) ---
+# Optical depth below which MOM6 evaluates the in-layer shape factor by its
+# Taylor series instead of the closed form (numerics, not physics).
+_PEN_SW_TAYLOR_OPT_DEPTH = 1.0e-2
 
 
 def _safe_div(num, den):
@@ -1367,3 +1393,56 @@ def surface_tke_forcing(q_net, salt_flux, h_top, dSV_dT_top, dSV_dS_top,
     g_hconv2 = g * rho_0**2
     return -(0.5 * h_top * g_hconv2) * (d_temp * dSV_dT_top
                                         + d_salt * dSV_dS_top)
+
+
+def penetrating_sw_tke(sw_bands, inv_scale_bands, h, dSV_dT, *,
+                       c_sw: float, dt: float,
+                       g: float = constants.g,
+                       rho_0: float = constants.rho_ocean):
+    """Energy required to mix penetrating shortwave through each layer.
+
+    The ``TKE`` output of MOM6's ``absorbRemainingSW`` (``MOM_opacity.F90``),
+    which ``applyBoundaryFluxesInOut`` adds to ``cTKE``: for band ``n`` with
+    ``Pen = sw dt / (rho_0 c_sw)`` [degC m] reaching the top of layer ``k``,
+    optical depth ``tau = h_k * inv_scale``, the layer absorbs
+    ``Heat = Pen (1 - e^-tau)`` and
+
+        TKE_k -= Heat dSV_dT_k (h_k g rho_0^2 / 2)
+                 * (tau (1 + e^-tau) - 2 (1 - e^-tau)) / (tau (1 - e^-tau))
+
+    (Taylor form ``tau/6 (1 - tau^2/60)`` for ``tau <= 1e-2``, as in MOM6).
+    Heating that is uniform within a layer costs nothing; the exponential
+    profile puts more heat near the layer top, which is stabilising, so the
+    result is <= 0 when ``dSV_dT > 0``.  Light left below the last layer
+    carries no term (see KNOWN DIFFERENCES).  MOM6's small-heating absorption
+    threshold is not ported.
+
+    Parameters
+    ----------
+    sw_bands : array ``(..., nband)``
+        Penetrating shortwave per band at the surface [W/m^2], INTO the ocean.
+    inv_scale_bands : array ``(nband,)``
+        Band opacities [1/m] (inverse e-folding depths).
+    h, dSV_dT : array ``(..., nlev)``
+        Layer thickness [m] and specific-volume derivative [m^3/kg/degC].
+    c_sw, dt : float
+        The run's seawater heat capacity [J/kg/K] and timestep [s].
+
+    Returns
+    -------
+    array ``(..., nlev)``
+        Energy per unit area [J/m^2], negative = required.
+    """
+    pen0 = sw_bands * dt / (rho_0 * c_sw)                     # (..., nb)
+    tau = h[..., :, None] * inv_scale_bands                   # (..., nlev, nb)
+    tau_above = jnp.cumsum(tau, axis=-2) - tau
+    heat = pen0[..., None, :] * jnp.exp(-tau_above) * (1.0 - jnp.exp(-tau))
+    big = tau > _PEN_SW_TAYLOR_OPT_DEPTH
+    t = jnp.where(big, tau, 1.0)            # safe operand for the closed form
+    e = jnp.exp(-t)
+    shape = jnp.where(
+        big,
+        (t * (1.0 + e) - 2.0 * (1.0 - e)) / (t * (1.0 - e)),
+        (tau / 6.0) * (1.0 - tau * tau / 60.0))  # coeff-ok: MOM6 Taylor series (C1_6, C1_60)
+    g_hconv2 = g * rho_0**2
+    return -(0.5 * h * g_hconv2) * dSV_dT * jnp.sum(heat * shape, axis=-1)

@@ -35,6 +35,7 @@ def make_vertical_mixing_physics(
     apply_diffusion: bool = True,
     constants_config: ConstantsConfig = ConstantsConfig(),
     eos_fn=None,
+    epbl_shortwave=None,
 ) -> Callable:
     """Create a vertical mixing physics function.
 
@@ -52,6 +53,12 @@ def make_vertical_mixing_physics(
         ePBL's specific-volume derivatives and surface buoyancy (#2177).
         Also KPP's density, surface buoyancy and boundary-layer reference
         density (#2243). ``None`` = Wright 1997 (unchanged).
+    epbl_shortwave : ShortwavePenetrationConfig or None
+        ePBL only (#2178): the penetration scheme that deposits
+        ``surface_forcing.sw_down``, whose bands ePBL's TKE forcing then
+        uses. Only the ocean single-column model passes it (its ``q_net`` is
+        the non-solar heat); with ``None``, ePBL raises if ``sw_down`` is
+        supplied.
 
     Returns
     -------
@@ -117,7 +124,8 @@ def make_vertical_mixing_physics(
                          constants_config=constants_config, eos_fn=eos_fn)
     elif scheme == "epbl":
         return _make_epbl(config, apply_diffusion=apply_diffusion,
-                          constants_config=constants_config, eos_fn=eos_fn)
+                          constants_config=constants_config, eos_fn=eos_fn,
+                          shortwave=epbl_shortwave)
     elif scheme == "tke":
         return _make_tke(config, apply_diffusion=apply_diffusion)
     elif scheme == "catke":
@@ -280,7 +288,7 @@ def _make_kpp(config: VerticalMixingConfig,
 def _make_epbl(config: VerticalMixingConfig,
                apply_diffusion: bool = True,
                constants_config: ConstantsConfig = ConstantsConfig(),
-               eos_fn=None) -> Callable:
+               eos_fn=None, shortwave=None) -> Callable:
     """Factory for the energetic PBL closure (Reichl & Hallberg 2018).
 
     ePBL is implicit-only: it returns the interface diffusivity/viscosity for
@@ -292,14 +300,29 @@ def _make_epbl(config: VerticalMixingConfig,
     lat-lon tendency probe check (or set) it against their dt; any other
     caller of this factory must set ``EPBLConfig.dt_s`` to the dt its
     implicit solve uses.
+
+    ``shortwave`` (#2178) is the ``ShortwavePenetrationConfig`` that deposits
+    ``surface_forcing.sw_down`` with ``q_net`` holding the NON-SOLAR heat (the
+    ocean single-column model's convention).  ePBL then counts ``q_net +
+    sw_down`` in the surface buoyancy flux and adds the penetrating
+    shortwave's per-layer energy to its TKE forcing (MOM6
+    ``applyBoundaryFluxesInOut``).  Only ``jerlov_2band`` is supported.  With
+    ``shortwave=None`` a supplied ``sw_down`` raises: the lat-lon lanes carry
+    solar heat inside ``q_net`` and deposit it with their own scheme.
     """
     import jax.numpy as jnp
 
     from legoesm.ocean.eos import eos_density_derivatives, make_eos_fn
-    from legoesm.ocean.physics.vertical_mixing.epbl import validate_epbl_config
+    from legoesm.ocean.physics.shortwave_penetration import JERLOV_TYPES
+    from legoesm.ocean.physics.vertical_mixing.epbl import (
+        penetrating_sw_tke, validate_epbl_config)
 
     cfg = config.epbl
     validate_epbl_config(cfg)
+    if shortwave is not None and shortwave.scheme == "jerlov_2band":
+        _jer = JERLOV_TYPES[shortwave.water_type]
+        sw_frac = (_jer.R, 1.0 - _jer.R)
+        sw_inv_scale = (1.0 / _jer.zeta1, 1.0 / _jer.zeta2)
     if apply_diffusion:
         raise ValueError(
             "vertical_mixing=\"epbl\" requires implicit_vertical_mixing=True. "
@@ -361,6 +384,22 @@ def _make_epbl(config: VerticalMixingConfig,
                 f"surface_forcing supplies no {', '.join(missing)}. Pass "
                 "explicit zeros for an unforced column.")
 
+        sw = getattr(surface_forcing, "sw_down", None) if surface_forcing else None
+        if sw is not None and shortwave is None:
+            raise ValueError(
+                "ePBL got surface_forcing.sw_down but no penetrating-shortwave "
+                "scheme to price it (#2178): only the ocean single-column model "
+                "with physics.shortwave_penetration set supports shortwave "
+                "with ePBL.")
+        if sw is not None and shortwave.scheme != "jerlov_2band":
+            raise NotImplementedError(
+                "ePBL's penetrating-shortwave TKE forcing supports "
+                "shortwave_penetration.scheme='jerlov_2band' only; got "
+                f"{shortwave.scheme!r}.")
+        # MOM6 counts all penetrating shortwave as surface heat in the
+        # buoyancy flux (netHeat + netPen); here q_net is the non-solar part.
+        q_buoy = q_net if sw is None else q_net + sw
+
         # Surface buoyancy flux through the shared helper (#2178), MOM6 form:
         # derivatives at surface pressure divided by rho_0 (GoRho = g/Rho0),
         # brine salt included with the freshwater dilution (MOM6 netSalt).
@@ -368,20 +407,26 @@ def _make_epbl(config: VerticalMixingConfig,
         # buoyancyFlux) is POSITIVE = stabilizing, hence the minus.
         c_sw = constants_config.c_sw
         B_f, _, Q_sfc_S = surface_buoyancy_flux(
-            q_net, fw, salt, T[..., 0], S[..., 0],
+            q_buoy, fw, salt, T[..., 0], S[..., 0],
             g=g, rho_0=rho_0, c_sw=c_sw, real_salt_in_qs=True,
             rho_0_norm=True, eos_fn=run_eos)
         B_flux = -B_f        # never None: q_net and fw are required above
 
         # Energy released (or required) by mixing the surface fluxes through
         # the top layer, with the same net salt flux [psu kg/m^2/s] as the
-        # buoyancy.  Only the top layer is forced: no penetrating shortwave
-        # profile is supplied on this path.
+        # buoyancy (non-penetrating heat only), plus the penetrating
+        # shortwave's energy in every layer (MOM6 absorbRemainingSW).
         tke_top = surface_tke_forcing(
             q_net, Q_sfc_S * rho_0,
             h[..., 0], dSV_dT[..., 0], dSV_dS[..., 0],
             g=g, rho_0=rho_0, c_sw=c_sw, dt=cfg.dt_s)
         tke_forcing = jnp.zeros_like(T).at[..., 0].set(tke_top)
+        if sw is not None:
+            sw_b = (jnp.asarray(sw, T.dtype)[..., None]
+                    * jnp.asarray(sw_frac, T.dtype))
+            tke_forcing = tke_forcing + penetrating_sw_tke(
+                sw_b, jnp.asarray(sw_inv_scale, T.dtype), h, dSV_dT,
+                c_sw=c_sw, dt=cfg.dt_s, g=g, rho_0=rho_0)
 
         # Coriolis from the grid latitude (ePBL's rotational length scale).
         lat = getattr(grid, "grid_lat", None)
