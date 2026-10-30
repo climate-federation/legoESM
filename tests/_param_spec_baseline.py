@@ -21,4 +21,11 @@ in lockstep with the now-empty ``PARAM_SPEC_TODO``.
 
 from __future__ import annotations
 
-PARAM_SPEC_FIELD_BASELINE: dict[str, frozenset[str]] = {}
+PARAM_SPEC_FIELD_BASELINE: dict[str, frozenset[str]] = {
+    # PR #2249 (see PARAM_SPEC_TODO): IfsTunables mirrors BechtoldConfig.
+    "packages/atmosphere/legoesm/atmosphere/physics/convection/_ifs_cumastrn.py": frozenset({
+        "IfsTunables.entrorg", "IfsTunables.detrpen", "IfsTunables.entshalp",
+        "IfsTunables.rprcon", "IfsTunables.zdnoprc", "IfsTunables.rcapqadv",
+        "IfsTunables.shallow_supply_width_w_m2",
+    }),
+}

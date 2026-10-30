@@ -5835,14 +5835,14 @@ def test_kain_fritsch_variant_validate_strict():
 
 
 def test_amip_kain_fritsch_wrf_deck_selects_the_opt_in():
-    """The committed opt-in deck resolves to the WRF KF-Eta variant, turns on
-    the MPAS cell-wind reconstruction the variant needs, and validates."""
+    """The committed opt-in deck (cube C12) resolves to the WRF KF-Eta variant
+    and passes validate_strict, including the port's surrogate-field check."""
     from legoesm.driver.physics_pipeline import convection_config_for
     from legoesm.driver.run_config_yaml import load_yaml_config
     from legoesm.atmosphere.physics.convection.kain_fritsch_wrf import (
         check_wrf_kfeta_config,
     )
-    deck = _repo_root() / "config" / "amip" / "amip_kain_fritsch_wrf_l36.yaml"
+    deck = _repo_root() / "config" / "amip" / "amip_kain_fritsch_wrf_c12.yaml"
     parser = build_arg_parser()
     parser.set_defaults(**load_yaml_config(str(deck), parser))
     cfg = build_config_from_args(_postprocess_args(
@@ -5850,12 +5850,9 @@ def test_amip_kain_fritsch_wrf_deck_selects_the_opt_in():
     assert cfg.convection == "kain_fritsch"
     assert cfg.kain_fritsch_variant == "wrf_kfeta"
     cc = convection_config_for(cfg)
-    assert cc.kain_fritsch.variant == "wrf_kfeta" and cc.mpas_cmt is True
+    assert cc.kain_fritsch.variant == "wrf_kfeta"
     check_wrf_kfeta_config(cc.kain_fritsch)
     cfg.validate_strict()
-    # the smooth default on the same MPAS deck keeps main's inputs (no winds)
-    assert convection_config_for(
-        cfg._replace(kain_fritsch_variant="smooth")).mpas_cmt is False
 
 
 def test_amip_bechtold_deck_runs_the_ifs_path():

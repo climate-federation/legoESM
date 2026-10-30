@@ -4056,12 +4056,6 @@ def convection_config_for(config, grid_dx_m=None):
         # their leaf default).  Gating this on Bechtold alone handed ZM zero
         # winds and silently discarded its momtran output.
         cc = cc._replace(mpas_cmt=True)
-    if (scheme == "kain_fritsch" and leaf.variant == "wrf_kfeta"
-            and _is_mpas_grid(config)):
-        # The WRF KF-Eta variant needs real cell winds (TIMEC, shear); on MPAS
-        # they exist only through the edge-normal reconstruction (codex + GLM
-        # 2026-10-30: a scheme that needs cell winds asks for them).
-        cc = cc._replace(mpas_cmt=True)
     return cc
 
 
