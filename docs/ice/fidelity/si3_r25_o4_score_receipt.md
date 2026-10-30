@@ -121,6 +121,29 @@ reported no difference between the two JSON files.
 | `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/round25/oracle_o4_prather/o4_score_eager.json` | `7f38d2a0cdb6e0605398cfd2422a7a6eec2f2cc72d1c420fe3d366148b37bc6a` |
 | `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/round25/oracle_o4_prather/o4_score_jit.json` | `b015d0201978f049ba9178bfa53a1e405150ac5786ac2bb9d923682d7806680c` |
 
+## Gates and independent-review availability
+
+All commands used repository source roots on `PYTHONPATH`, CPU JAX, and x64:
+
+* the focused acquisition/scorer file: 8 passed in 288.84 s, including true
+  eager/JIT summary identity and every score plant;
+* this receipt's clean-tree citation gate: PASS with 4 citations, zero
+  unmapped citations, zero citation failures, zero full-map audit failures,
+  and every planted self-test firing;
+* prospective provenance SHA gate: 1,397 passed in 1.36 s. Its first run
+  correctly rejected a mistyped preregistration commit SHA and unresolvable
+  acquisition digest paths; both were corrected from `git rev-parse` and
+  `sha256sum`, and the focused rehash test also passes;
+* default seven-file landing gate: 171 passed in 1,048.79 s; and
+* standalone private-import ratchet: 6 passed in 5.08 s.
+
+The required independent reviewers could not return verdicts in this managed
+sandbox. Claude Sonnet exited before review with API/DNS `ENOTFOUND`. Argon
+exited before review because its language server could not create the required
+localhost socket (`operation not permitted`). Both were invoked read-only and
+neither changed the worktree. Status is therefore **independent review
+unavailable in-sandbox**, not RUN and not a waived review.
+
 ## Attribution, choices, and status
 
 There is no first differing cell and therefore no first differing statement to
