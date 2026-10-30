@@ -531,3 +531,19 @@ PROVENANCE-SUPERSESSION: ce68f273253e077aa118b775e487cbce9d333c57 -> blob d9d3c3
 The first assignment, beside `fortran_min`, `fortran_max`, and
 `ieee_is_zero`, is retained; the later repeated assignment and repeated
 `__all__` entry are removed.
+
+## Resume 9: rebase onto the moved O4 lane
+
+The 28 O6 commits were rebased from the prior production-lane base onto lane
+commit `729a71aae6e222d172ce67a1c9593dcf495170d7`.  Git conflicts remained
+confined to
+`scripts/validate/ocean_fidelity/testcases/nemo_testcase_receipt_citation_gate.py`.
+The additive map hunk retained all 66 O6 keys and all 10 lane keys with their
+values unchanged; an AST census found no key in both added sets and the
+resolved file has 3,434 unique literal keys.  The final provenance-stability
+hunk retained the lane's appended receipt-digest anchors and the O6 content-
+blob pin maps, replacing the superseded round-local O6 commit variable as that
+commit intended.  No citation-map entry was dropped or altered; only conflict
+markers and the superseded variable were omitted.  The lane pin remains the
+lane commit already recorded in Resume 8, and every O6 replay pin remains a
+reachable content blob.
