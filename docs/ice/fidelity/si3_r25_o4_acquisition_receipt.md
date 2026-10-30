@@ -56,7 +56,7 @@ full-domain and nonempty wet seam/north-fold regional maxima are required.
 Separate wet one-bit plants cover all four state exits, and the sweep-order,
 fold-sign, and subcycle-link plants use a nontrivial deck. The schema and score
 implementation are in
-`scripts/validate/ocean_fidelity/testcases/nemo_si3_o4_orca2_prather_gate.py:37-501`.
+`scripts/validate/ocean_fidelity/testcases/nemo_si3_o4_orca2_prather_gate.py:37-500`.
 
 ## Driver, admission, and tests
 
@@ -76,7 +76,7 @@ record, artifact, and restart paths against the producer commit.
 Seven focused tests cover schema, all score plants, independent and nontrivial
 decks, extent/read-set controls, fuzz-zero patching, shell syntax, and the
 receipt digest ratchet
-(`tests/ocean/fidelity/test_nemo_si3_o4_prather_acquisition.py:1-106`). The
+(`tests/ocean/fidelity/test_nemo_si3_o4_prather_acquisition.py:1-126`). The
 complete default preflight passes and explicitly reports that no real NEMO
 integration was run.
 

@@ -63,7 +63,7 @@ enters `si3_dyn_orca2` and the landed `si3_dyn_adv_pra_orca2`. The committed
 scorer runs the whole eager arm inside `jax.disable_jit()`, wraps the same
 production calls with `jax.jit` in the JIT arm, and emits strict signed-zero
 cell counts and first differences
-(`scripts/validate/ocean_fidelity/testcases/nemo_si3_o4_orca2_prather_gate.py:248-506`).
+(`scripts/validate/ocean_fidelity/testcases/nemo_si3_o4_orca2_prather_gate.py:248-505`).
 The direct fixture proves eager/JIT identity and fires every stage, sweep,
 fold-sign, and subcycle-LBC plant
 (`tests/ocean/fidelity/test_nemo_si3_o4_prather_acquisition.py:43-75`).
