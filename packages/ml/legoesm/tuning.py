@@ -234,8 +234,8 @@ TUNING_PARAMETERS: dict[str, TuningParameter] = {
     ),
     "sundqvist_auto_rate": TuningParameter(
         name="sundqvist_auto_rate",
-        default=1e-3,
-        min_val=2e-4,
+        default=1.5e-4,
+        min_val=1e-4,
         max_val=5e-3,
         units="1/s",
         description="Sundqvist autoconversion rate (cloud water -> rain)",
