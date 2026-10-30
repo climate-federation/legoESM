@@ -422,7 +422,8 @@ class TestIssue6_KuoTriggerUnits:
             (2.0e-8 * (jnp.arange(nlev) >= nlev // 3))[None, :], q_v.shape,
         ).astype(q_v.dtype)
         out = kuo_convection(T, q_v, p_full, p_half, dt=300.0,
-                             config=KuoConfig(), moisture_convergence=ptenq)
+                             config=KuoConfig(), moisture_convergence=ptenq,
+                             w_grid=jnp.full_like(ptenq, 0.01))
         assert jnp.any(out.convective_mask > 0.1), "Kuo should fire for convergence"
         assert jnp.any(out.dT_dt != 0), "Kuo should produce nonzero heating"
 

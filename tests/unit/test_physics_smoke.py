@@ -176,6 +176,9 @@ def test_gwd_smoke(scheme):
     from legoesm.atmosphere.physics.gravity_wave_drag.config import GravityWaveDragConfig
 
     state, grid, sigma = make_hydrostatic_setup()
+    # all land: CAM6 gw_oro (mcfarlane) needs a land fraction; lf = 1 is its
+    # unscaled drag
+    grid = grid._replace(land_frac=jnp.ones(6 * 8 * 8))
     config = GravityWaveDragConfig(scheme=scheme)
     gwd_fn = make_gwd_physics(config, model_type="hydrostatic", dt=300.0)
     tend, prog = gwd_fn(state, grid, sigma)

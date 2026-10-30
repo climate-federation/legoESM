@@ -258,6 +258,8 @@ __param_spec__ = {
             "buoyancy_scale_K": {"units": "K", "bounds": (0.033, 0.3), "tunable_tier": 3, "transform": "sigmoid", "category": "trigger", "reference": "Kuo (1974) buoyancy-gate normalisation", "shape": None},
             "entrainment": {"units": "1/m", "bounds": (1.65e-05, 0.00015), "tunable_tier": 1, "transform": "sigmoid", "category": "entrainment", "reference": "Kuo (1974) Mahfouf reference Eps", "shape": None},
             "supersat_scale": {"units": "kg/kg", "bounds": (3.3e-06, 3e-05), "tunable_tier": 3, "transform": "sigmoid", "category": "trigger", "reference": "Kuo (1974) condensation-gate normalisation", "shape": None},
+            "w_lcl_scale_ms": {"units": "m/s", "bounds": (0.0033, 0.03), "tunable_tier": 3, "transform": "sigmoid", "category": "trigger", "reference": "smoothing scale of the Mahfouf oracle's w_lcl > 0 gate", "shape": None},
+            "ptenq_scale": {"units": "kg/kg/s", "bounds": (3.3e-10, 3e-09), "tunable_tier": 3, "transform": "sigmoid", "category": "trigger", "reference": "smoothing scale of the Mahfouf oracle's max(0, ptenq) in cvgu", "shape": None},
         },
     },
     "MassFluxConfig": {
@@ -333,6 +335,8 @@ __param_spec__ = {
         "excluded": {
             "limcnv_p_pa": "numerics/domain: convection top cap (40 hPa reference interface), not a closure knob",
             "parcel_tpert": "default 0 = disabled/off (PBL temperature perturbation; CAM6 CLUBB path has none)",
+            "detrain_phase_width_K": "numerics: RULE 5 smoothing width of the detrainment liquid/ice ramp corners (0 = CAM hard switch)",
+            "detrain_number_width_kgkg_s": "numerics: RULE 5 smoothing width of max(0, dlf) in the detrainment number source (0 = CAM hard switch)",
         },
         "params": {
             "c0_lnd": {"units": "1/m", "bounds": (0.002, 0.02), "tunable_tier": 1, "transform": "sigmoid", "category": "autoconversion", "reference": "CAM zmconv_c0_lnd namelist span (0.002-0.0075 across configurations)", "shape": None},
@@ -534,17 +538,17 @@ class KuoConfig(NamedTuple):
         dq/dt = −ptenq + cvgu/zint · (qvc − qv)
         zint  = Σ (qvc − qv + (tc − t)/alpha) dp/g
 
-    over levels that are buoyant AND have positive vertical velocity at
-    the LCL (``icond==2``) AND positive local convergence
-    (``ptenq > 0``).  ``tc, qvc`` come from an entraining moist-adiabat
-    ascent (entrainment ``Eps``) with condensation removed.
+    applied at levels that are buoyant AND have positive vertical velocity
+    at the LCL (``icond==2``) AND positive local convergence
+    (``ptenq > 0``); ``cvgu`` and ``zint`` are integrated over ``icond==2``
+    (so, as in the oracle, the column water is not closed when divergence
+    lies inside the cloud).  ``tc, qvc`` come from an entraining
+    moist-adiabat ascent (entrainment ``Eps``) with condensation removed.
 
     The optional ``partition="anthes"`` Kuo-Anthes (1977) closure splits
     the source between heating ``(1 − bkuo)`` and moistening ``bkuo``
-    with ``bkuo = clip(1 − RH_mean − rh_offset, 0, 1)`` — b is a
-    moistening FRACTION, so it is clamped to [0, 1] (a near-saturated
-    layer with ``RH_mean + rh_offset > 1`` moistens nothing rather than
-    flipping the term into spurious extra drying).
+    with ``bkuo = 1 − RH_mean − rh_offset``, unclamped as in the oracle
+    (negative in a layer with ``RH_mean + rh_offset > 1``).
 
     Fields
     ------
@@ -567,9 +571,13 @@ class KuoConfig(NamedTuple):
         Dimensionless sigmoid sharpness for the smooth ``icond``
         activation gates (supersaturation, buoyancy, w_lcl>0, ptenq>0).
         Each gate argument is normalised to O(1) by the scales below
-        before the sigmoid, so a single large dimensionless sharpness
-        (default 50) makes every gate a crisp Heaviside approaching the
-        oracle's hard ``if`` switches while staying differentiable.
+        before the sigmoid; the gates tend to the oracle's hard ``if``
+        switches as the sharpness goes to infinity (1e12 reproduces the
+        oracle to round-off on the fixture; an argument of exactly 0 gives
+        0.5).  The ``ptenq > 0`` sign gate's width is ``ptenq_sign_floor``,
+        not this sharpness.  The same sharpness smooths the two ``max(x, 0)``
+        cut-offs (parcel excess over saturation, on ``supersat_scale``;
+        positive convergence in ``cvgu``, on ``ptenq_scale``).
     buoyancy_scale_K : float
         Normalisation scale [K] for the buoyancy gate ``tvc − tve`` —
         the sigmoid argument is ``(tvc − tve)/buoyancy_scale_K``.  A
@@ -585,6 +593,13 @@ class KuoConfig(NamedTuple):
         magnitude); the scale-free sign makes the smooth gate ~1 across
         the whole convergent column down to its exponential tail and ~0
         only for clear subsidence.  1e-30 = pure numerical guard.
+    w_lcl_scale_ms : float
+        Fixed speed scale [m/s] of the ``w_lcl > 0`` gate, argument
+        ``w_lcl / w_lcl_scale_ms`` (transition width
+        ``w_lcl_scale_ms / icond_sharpness``).
+    ptenq_scale : float
+        Scale [kg/kg/s] of the smoothed ``max(0, ptenq)`` in ``cvgu``,
+        ``ptenq * sigmoid(s ptenq / ptenq_scale)`` with ``s = icond_sharpness``.
     zint_floor : float
         Safety floor [kg/m²] on the ``|zint|`` normalisation denominator
         so the closure is finite when the convective layer is empty.
@@ -608,6 +623,8 @@ class KuoConfig(NamedTuple):
     ptenq_sign_floor: float = 1.0e-30
     zint_floor: float = 1.0e-12
     cvgu_activation_scale: float = 1.0e-8
+    w_lcl_scale_ms: float = 0.01
+    ptenq_scale: float = 1.0e-9
 
 
 class MassFluxConfig(NamedTuple):
@@ -743,6 +760,12 @@ class ZhangMcFarlaneConfig(NamedTuple):
     # an aquaplanet run with no land, recorded as a choice -- ocean
     # coefficients everywhere, and passing a land fraction is an error.
     land_fraction: str = "required"
+    # RULE 5 smoothing widths of CAM6's detrainment of ZM condensate
+    # (zhang_mcfarlane.cam6_detrain_condensate, clubb_intr.F90:2345-2376):
+    # the liquid/ice ramp's corners [K] and the max(0, dlf) of the number
+    # source [kg/kg/s].  0 = CAM's hard switch.
+    detrain_phase_width_K: float = 0.1
+    detrain_number_width_kgkg_s: float = 1.0e-12
 
 
 class KainFritschConfig(NamedTuple):

@@ -250,7 +250,7 @@ class TestMcFarlane:
         u, v, T, p_full, p_half, z_full, z_half, rho, lat = _make_columns(ncol, nlev)
         config = McFarlaneConfig()
         out = mcfarlane_gwd(u, v, T, p_full, p_half, z_full, z_half, rho, lat, 300.0, config,
-                            p_ref_half=p_half[0])
+                            p_ref_half=p_half[0], land_frac_col=jnp.ones((ncol,)))
         assert out.du_dt.shape == (ncol, nlev)
         assert out.eps_gwd.shape == (ncol,)
 
@@ -259,7 +259,7 @@ class TestMcFarlane:
         u, v, T, p_full, p_half, z_full, z_half, rho, lat = _make_columns(ncol, nlev)
         config = McFarlaneConfig()
         out = mcfarlane_gwd(u, v, T, p_full, p_half, z_full, z_half, rho, lat, 300.0, config,
-                            p_ref_half=p_half[0])
+                            p_ref_half=p_half[0], land_frac_col=jnp.ones((ncol,)))
         total = float(jnp.sum(jnp.abs(out.du_dt)))
         assert total > 0.0
 
@@ -268,7 +268,7 @@ class TestMcFarlane:
         u, v, T, p_full, p_half, z_full, z_half, rho, lat = _make_columns(ncol, nlev)
         config = McFarlaneConfig()
         out = mcfarlane_gwd(u, v, T, p_full, p_half, z_full, z_half, rho, lat, 300.0, config,
-                            p_ref_half=p_half[0])
+                            p_ref_half=p_half[0], land_frac_col=jnp.ones((ncol,)))
         assert jnp.all(jnp.isfinite(out.du_dt))
         assert jnp.all(jnp.isfinite(out.dT_dt))
 
@@ -288,7 +288,7 @@ class TestMcFarlane:
         u, v, T, p_full, p_half, z_full, z_half, rho, lat = _make_columns(ncol, nlev)
         config = McFarlaneConfig()
         out = mcfarlane_gwd(u, v, T, p_full, p_half, z_full, z_half, rho, lat, 300.0, config,
-                            p_ref_half=p_half[0])
+                            p_ref_half=p_half[0], land_frac_col=jnp.ones((ncol,)))
         assert jnp.all(out.eps_gwd >= -1e-9), (
             f"orographic GWD must be dissipative (eps_gwd >= 0); got {out.eps_gwd}"
         )
@@ -304,7 +304,7 @@ class TestMcFarlane:
 
         def loss(u_in):
             out = mcfarlane_gwd(u_in, v, T, p_full, p_half, z_full, z_half, rho, lat, 300.0, config,
-                            p_ref_half=p_half[0])
+                            p_ref_half=p_half[0], land_frac_col=jnp.ones((ncol,)))
             return jnp.sum(out.du_dt ** 2 + out.dv_dt ** 2)
 
         g = jax.grad(loss)(u)
@@ -318,7 +318,7 @@ class TestMcFarlane:
         v = jnp.full((ncol, nlev), 0.1)
         config = McFarlaneConfig(min_wind=2.0)
         out = mcfarlane_gwd(u, v, T, p_full, p_half, z_full, z_half, rho, lat, 300.0, config,
-                            p_ref_half=p_half[0])
+                            p_ref_half=p_half[0], land_frac_col=jnp.ones((ncol,)))
         max_drag = float(jnp.max(jnp.abs(out.du_dt)))
         # Should be very small (min_wind suppression)
         assert max_drag < 1e-3

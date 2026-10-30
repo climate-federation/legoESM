@@ -84,7 +84,9 @@ def mie_sample_cos(
   dtype = cdf_band.dtype
   # r_eff interpolation: lower bin index + fractional remainder.
   r_idx = jnp.clip((r_eff - _R_EFF_MIN).astype(jnp.int32), 0, _R_IDX_MAX)
-  r_rest = jnp.mod(r_eff - _R_EFF_MIN, 1.0).astype(dtype)
+  # C fmod (sign of the dividend), as the oracle: below 2.5 um the remainder
+  # is negative, so the r_eff rows 0/1 are extrapolated, not wrapped.
+  r_rest = jnp.fmod(r_eff - _R_EFF_MIN, 1.0).astype(dtype)
   # find_index on the DESCENDING CDF == (#{cdf > u}) - 1, clipped to [0,n_mie-2].
   i = jnp.clip(jnp.sum(cdf_band > u).astype(jnp.int32) - 1, 0, n_mie - 2)
 

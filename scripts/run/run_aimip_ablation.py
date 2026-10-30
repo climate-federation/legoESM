@@ -145,6 +145,8 @@ def _per_var_metrics(pred_grid, target_carry, grid):
 def _train_and_eval(schemes: dict, spec_cfg, grid, sigma, base_cfg, cache_dir):
     """Train the classical AIMIP pipeline with the given scheme overrides,
     evaluate on the held-out eval windows, return metrics."""
+    from legoesm.training.aimip_spatial import grid_with_land_fraction
+    grid = grid_with_land_fraction(grid)
     from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
         compute_spectral_filter,
         compute_sponge_factor,

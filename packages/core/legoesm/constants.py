@@ -304,6 +304,10 @@ albedo_cloud_offset_nemo = -0.0148
 # from legoESM's globals in the 4th-5th digit; the faithful path uses these
 # so flux-level golden tests against the NEMO formulas close exactly.
 g_nemo = 9.80665                # [m/s^2]  NEMO phycst grav
+# gSAM 1.8.8 gravity (SRC/consts.f90 ``ggr``).  Used only where a gSAM port
+# must repeat the oracle's operations (radiation/ozone_mls.py: it cancels
+# analytically there).
+g_gsam = 9.79764                # [m/s^2]  gSAM consts.f90 ggr
 R_v_nemo = 461.495              # [J/(kg*K)] NEMO sbc_phy R_vap (ours: 461.51)
 L_fus_nemo = 0.3333601e6        # [J/kg]   NEMO phycst rLfus (ours L_f: 3.337e5)
 L_fus_isf_nemo = 0.334e6        # [J/kg]   NEMO isf_oce rLfusisf (ISF melt latent

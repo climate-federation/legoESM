@@ -358,13 +358,15 @@ def _tropical_qv_profile(nlev=_RCE_NLEV):
     return 1.8e-2 * jnp.exp(-z / 3.0e3)
 
 
-def _run_and_assert_stable(cfg, integrator="forward_euler", cell_area_m2=None):
+def _run_and_assert_stable(cfg, integrator="forward_euler", cell_area_m2=None,
+                           land_frac=None):
     scm = SingleColumnModel.create(
         physics_config=cfg, nlev=_RCE_NLEV, dt=_RCE_DT,
         T_profile=_tropical_T_profile(),
         q_v_profile=_tropical_qv_profile(),
         latitude_deg=0.0,
         cell_area_m2=cell_area_m2,
+        land_frac=land_frac,
         time_integrator=integrator,
     )
     final, _ = scm.run(nsteps=_RCE_NSTEPS)
@@ -459,7 +461,16 @@ def test_swap_gwd_schemes(gwd_scheme):
     cfg = _baseline_cfg(
         gravity_wave_drag=GravityWaveDragConfig(scheme=gwd_scheme),
     )
-    _run_and_assert_stable(cfg)
+    # The swap case declares an all-land column (user 2026-10-27, Q16 item 1):
+    # CAM6 McFarlane scales its drag by the land fraction and refuses without one.
+    _run_and_assert_stable(cfg, land_frac=1.0)
+
+
+def test_mcfarlane_refuses_a_column_without_a_land_fraction():
+    cfg = _baseline_cfg(
+        gravity_wave_drag=GravityWaveDragConfig(scheme="mcfarlane"))
+    with pytest.raises(ValueError, match="land_frac"):
+        _run_and_assert_stable(cfg)
 
 
 @pytest.mark.parametrize("integrator", ["forward_euler", "rk2", "rk4"])

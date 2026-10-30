@@ -186,7 +186,8 @@ def solve_lw_monochromatic(
     walk_keys = jax.random.split(k_walk, batch_size)
     states = photon_walk.trace_batch(
         walk_keys, pos0, dir0, k_abs, ssa0, g0, maj, albedo_lw, geom,
-        int(config.max_iterations))
+        int(config.max_iterations),
+        free_path_floor_sharpness=float(config.free_path_floor_sharpness))
     st = states.status
     emit_ids = jnp.where(is_vol, v, -1)
     emit_c = emit_c + jax.ops.segment_sum(ones, emit_ids, num_segments=ncells)
