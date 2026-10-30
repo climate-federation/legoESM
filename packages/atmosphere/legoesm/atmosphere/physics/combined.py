@@ -1538,6 +1538,19 @@ def _make_nonhydrostatic_combined(config: PhysicsConfig, dt: float) -> Callable:
 # Spectral PE
 # ======================================================================
 
+def _sfc_add(acc, sfc, w=1.0):
+    """``acc + w * sfc`` over spectral surface-precip pairs ``(precip,
+    precip_frozen)``; ``acc=None`` starts the sum.  The frozen part stays
+    None (unknown) once either side's is None (#2277)."""
+    if sfc is None:
+        return acc
+    p, pf = sfc
+    if acc is None:
+        return (w * p, None if pf is None else w * pf)
+    return (acc[0] + w * p,
+            None if (acc[1] is None or pf is None) else acc[1] + w * pf)
+
+
 def _make_spectral_pe_combined(
     config: PhysicsConfig, dt: float,
     sfc_albedo_override=None, sfc_emissivity_override=None,
@@ -1636,7 +1649,8 @@ def _make_spectral_pe_combined(
             f"{len(tagged_fns)} physics modules — the two append sequences "
             "have drifted; every module needs exactly one group.")
 
-    def physics_fn(state, grid, sigma_coord, phys_state=None, forcing=None):
+    def physics_fn(state, grid, sigma_coord, phys_state=None, forcing=None,
+                   return_sfc_precip=False):
         if not tagged_fns:
             zero_3d = jnp.zeros_like(state.vor_hat.data)
             zero_2d = jnp.zeros_like(state.lnps_hat.data)
@@ -1652,6 +1666,10 @@ def _make_spectral_pe_combined(
                 phis_hat=state.phis_hat.replace(data=jnp.zeros_like(state.phis_hat.data)),
                 tracers=zero_tracers,
             )
+            if return_sfc_precip:
+                _p0 = jnp.zeros((grid.n_lat, grid.n_lon),
+                                dtype=jnp.real(state.lnps_hat.data).dtype)
+                return zero_tend, None, (_p0, _p0)
             return zero_tend, None
 
         # Compute grid-space diagnostics once and reuse across all active modules.
@@ -1665,12 +1683,21 @@ def _make_spectral_pe_combined(
             first_t = None
             vor = div = T_a = lnps = phis = None
             acc_tr = None
+            # Surface precip [kg/m^2/s, +down] (#2277): summed over the
+            # modules that publish it (convection's surface-routed rain,
+            # microphysics), as the hydrostatic combined does; the frozen
+            # part is None (unknown) once any of them leaves it unknown.
+            sfc = None
             for fn, accepts_ps, field_name in fns:
                 _fwd = ({"forcing": forcing}
                         if getattr(fn, "_wants_forcing", False) else {})
+                _emits = getattr(fn, "_emits_sfc_precip", False)
+                if _emits:
+                    _fwd = {**_fwd, "return_sfc_precip": True}
                 if accepts_ps:
-                    t, field_val = fn(st, grid, sigma_coord,
-                                      grid_fields=shared, phys_state=ps, **_fwd)
+                    _r = fn(st, grid, sigma_coord,
+                            grid_fields=shared, phys_state=ps, **_fwd)
+                    t, field_val = _r[0], _r[1]
                     if field_val is not None and field_name is not None:
                         # Multi-field updates (e.g. Bechtold's
                         # conv_prog_profile + conv_stoch_state) arrive as a
@@ -1685,7 +1712,10 @@ def _make_spectral_pe_combined(
                         # CLUBB cloud-fraction / CAM6 deepcu carries): forward
                         # it but keep the single-return contract.
                         _fwd = {**_fwd, "phys_state": ps}
-                    t = fn(st, grid, sigma_coord, grid_fields=shared, **_fwd)
+                    _r = fn(st, grid, sigma_coord, grid_fields=shared, **_fwd)
+                    t = _r[0] if _emits else _r
+                if _emits:
+                    sfc = _sfc_add(sfc, _r[-1])
                 if first_t is None:
                     first_t = t
                     vor = t.vor_hat.data
@@ -1709,7 +1739,7 @@ def _make_spectral_pe_combined(
                             v_data = _grid_data(v)
                             acc_tr[k] = (acc_tr[k] + v_data if k in acc_tr
                                          else v_data)
-            return (vor, div, T_a, lnps, phis, acc_tr, upd, first_t)
+            return (vor, div, T_a, lnps, phis, acc_tr, upd, first_t, sfc)
 
         def _advance(st, r, dt_x):
             """``st + dt_x * tendency`` (CAM ``physics_update``); phis fixed."""
@@ -1737,14 +1767,16 @@ def _make_spectral_pe_combined(
             if acc is None:
                 tr = (None if r[5] is None
                       else {k: w * v for k, v in r[5].items()})
-                return tuple(w * x for x in r[:5]) + (tr, dict(r[6]), r[7])
+                return tuple(w * x for x in r[:5]) + (
+                    tr, dict(r[6]), r[7], _sfc_add(None, r[8], w))
             tr = acc[5]
             if r[5] is not None:
                 tr = dict(tr) if tr is not None else {}
                 for k, v in r[5].items():
                     tr[k] = tr[k] + w * v if k in tr else w * v
             return (tuple(a + w * b for a, b in zip(acc[:5], r[:5]))
-                    + (tr, {**acc[6], **r[6]}, acc[7]))
+                    + (tr, {**acc[6], **r[6]}, acc[7],
+                       _sfc_add(acc[8], r[8], w)))
 
         def _carry_within_call(ps, upd):
             """Hand this call's carries to the next sub-cycled module."""
@@ -1811,7 +1843,7 @@ def _make_spectral_pe_combined(
             return acc
 
         (vor_hat, div_hat, T_hat, lnps_hat, phis_hat,
-         accumulated_tracers, phys_updates, first) = _accumulate_step(
+         accumulated_tracers, phys_updates, first, sfc) = _accumulate_step(
             tuple(tagged_fns), tuple(_macmic_group), state, phys_state)
 
         # Build the final tracers dict for the combined tendency,
@@ -1847,9 +1879,19 @@ def _make_spectral_pe_combined(
             tracers=tracers_combined,
         )
         phys_state_out = update_physics_state(phys_state, phys_updates)
+        if return_sfc_precip:
+            if sfc is None:
+                # no precipitating module (dry): a known zero
+                _p0 = jnp.zeros((grid.n_lat, grid.n_lon),
+                                dtype=jnp.real(state.lnps_hat.data).dtype)
+                sfc = (_p0, _p0)
+            return combined, phys_state_out, sfc
         return combined, phys_state_out
 
     physics_fn = _attach_lifecycle_hooks(physics_fn, tagged_fns)
+    # #2277: accepts ``return_sfc_precip=True`` (third return: surface precip
+    # (precip, precip_frozen-or-None), each (n_lat, n_lon) [kg/m^2/s, +down]).
+    physics_fn._emits_sfc_precip = True
     # Marker: the combined fn consumes a per-step traced ``forcing``
     # dict when any sub-physics advertises ``_wants_forcing`` (currently
     # the spectral_pe radiation factory: T_sfc/o3_vmr/aerosol_od/ghg_vmr).

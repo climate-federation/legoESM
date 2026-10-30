@@ -114,6 +114,12 @@ def soft_clip_lnps(lnps_raw: jax.Array) -> jax.Array:
 _NO_FORCING = object()
 
 
+def _emits_sfc_precip(physics_fn) -> bool:
+    """True for a physics fn that accepts ``return_sfc_precip=True`` and then
+    also returns its surface precip (#2277; static: read at trace time)."""
+    return bool(getattr(physics_fn, "_emits_sfc_precip", False))
+
+
 # =============================================================================
 # State and config
 # =============================================================================
@@ -1655,6 +1661,16 @@ class SpectralPrimitiveEquationModel:
         # leapfrog body for stability (#405 stiff-physics fix); None until the
         # first stateful step.
         self._prev_phys_tend = None
+        # ... and its surface precip (#2277), so the published precip is the
+        # one of the tendency actually applied.
+        self._prev_sfc_precip = None
+        # Surface precip (precip, precip_frozen-or-None), each (n_lat, n_lon)
+        # [kg/m^2/s, +down], of the physics the LAST step applied: the
+        # stage-weighted rate on the explicit-RK path, the applied (lagged)
+        # tendency's on leapfrog.  None when the physics publishes none or
+        # the step path cannot integrate it (semi-implicit RK, CPU batch
+        # loop).  Eager-only side channel, like the MPAS model's _sfc_diag.
+        self._sfc_precip = None
         # Precompute implicit hyperdiffusion filter (unconditionally stable)
         self._hyperdiff_filter = None
         self._hyperdiff_filter_div = None  # iter-69: precomputed hf**2
@@ -1932,7 +1948,8 @@ class SpectralPrimitiveEquationModel:
             self._si_dt_lf = dt_eff
 
     def _do_step(self, state, dt, tendency_fn,
-                 si_data=None, sponge_factor=None, target_mass=None):
+                 si_data=None, sponge_factor=None, target_mass=None,
+                 sfc=False):
         """Core step: explicit RK3/RK54 or semi-implicit RK3, then sponge.
 
         ``si_data`` and ``sponge_factor`` are passed as **dynamic args**
@@ -1951,6 +1968,19 @@ class SpectralPrimitiveEquationModel:
         if sponge_factor is None:
             sponge_factor = self._sponge_factor
 
+        # ``sfc`` (#2277): ``tendency_fn`` is the pair closure of
+        # ``_make_sfc_tendency_fn``; returns ``(state, surface precip rate)``.
+        # The explicit RK integrates the precip as a 2-D accumulator with the
+        # state's own stage weights, so ``accumulator / dt`` is the step-mean
+        # rate the column water actually lost.  The semi-implicit RK applies
+        # its correction to a spectral state only: no precip there (None).
+        sfc_rate = None
+        if sfc and self.config.semi_implicit:
+            _pair_fn = tendency_fn
+
+            def tendency_fn(s):
+                return _pair_fn((s, None))[0]
+
         if self.config.semi_implicit:
             n_substeps = int(self.config.si_substeps)
             dt_si = dt / float(n_substeps)
@@ -1965,6 +1995,13 @@ class SpectralPrimitiveEquationModel:
                         s, tendency_fn, dt_si, si_data, self.grid,
                     )
                 result = jax.lax.fori_loop(0, n_substeps, si_substep, state)
+        elif sfc:
+            _acc0 = jax.tree.map(
+                lambda x: jnp.zeros(x.shape, x.dtype),
+                jax.eval_shape(lambda s: tendency_fn((s, None))[1], state))
+            result, _acc = dispatch_integrator(
+                (state, _acc0), tendency_fn, dt, self.config.time_integrator)
+            sfc_rate = jax.tree.map(lambda a: a / dt, _acc)
         else:
             result = dispatch_integrator(
                 state, tendency_fn, dt, self.config.time_integrator,
@@ -2010,6 +2047,8 @@ class SpectralPrimitiveEquationModel:
                 and target_mass is not None):
             result = self._apply_mass_fixer(result, target_mass)
 
+        if sfc:
+            return result, sfc_rate
         return result
 
     def _apply_state_truncation(self, state):
@@ -2143,6 +2182,7 @@ class SpectralPrimitiveEquationModel:
         # driver's _run_spectral loop, mirroring the MPAS self._phys_state).
         # Passthrough default; the stateful leapfrog branch overwrites it.
         self._phys_state = phys_state
+        self._sfc_precip = None
 
         if _is_leapfrog:
             return self._leapfrog_step(
@@ -2153,10 +2193,37 @@ class SpectralPrimitiveEquationModel:
         self._ensure_hyperdiff_filter(dt)
         self._ensure_tracer_filter(dt)
         if forcing_data is not None:
-            return self._step_with_forcing_jit(
+            result = self._step_with_forcing_jit(
                 state, dt, physics_fn, forcing_data, self._target_mass,
             )
-        return self._step_jit(state, dt, physics_fn, self._target_mass)
+        else:
+            result = self._step_jit(state, dt, physics_fn, self._target_mass)
+        if _emits_sfc_precip(physics_fn):
+            result, sfc = result
+            self._publish_sfc_precip(sfc)
+        return result
+
+    def _publish_sfc_precip(self, sfc):
+        """Stash the step's surface precip on ``self._sfc_precip`` -- eager
+        calls only (a stashed tracer leaks into the next trace, gh-417)."""
+        if sfc is not None and not any(
+                isinstance(leaf, jax.core.Tracer)
+                for leaf in jax.tree_util.tree_leaves(sfc)):
+            self._sfc_precip = sfc
+
+    def _call_physics(self, physics_fn, s, forcing_data=_NO_FORCING):
+        """``(physics tendency, surface precip or None)`` of ``physics_fn`` at
+        ``s``; the precip comes from a physics fn that publishes it
+        (``_emits_sfc_precip``, #2277), else None."""
+        _emits = _emits_sfc_precip(physics_fn)
+        _kw = {"return_sfc_precip": True} if _emits else {}
+        if forcing_data is _NO_FORCING:
+            r = physics_fn(s, self.grid, self.sigma_coord, **_kw)
+        else:
+            r = physics_fn(s, self.grid, self.sigma_coord, forcing_data, **_kw)
+        if _emits:
+            return r[0], r[-1]
+        return (r[0] if type(r) is tuple else r), None
 
     def _leapfrog_step(self, state, dt, physics_fn=None, forcing_data=None,
                        phys_state=None):
@@ -2201,15 +2268,23 @@ class SpectralPrimitiveEquationModel:
             # centered n level excites leapfrog's computational mode (clubb_lite /
             # bechtold NaN'd otherwise).  The Euler STARTUP applies the current
             # (n) tendency — a forward step with no computational mode.
-            _phys_tend_now, _phys_state_out = physics_fn(
+            _emits = _emits_sfc_precip(physics_fn)
+            _r = physics_fn(
                 state, self.grid, self.sigma_coord,
-                phys_state=phys_state, forcing=forcing_data)
+                phys_state=phys_state, forcing=forcing_data,
+                **({"return_sfc_precip": True} if _emits else {}))
+            _phys_tend_now, _phys_state_out = _r[0], _r[1]
+            _sfc_now = _r[2] if _emits else None
             self._phys_state = _phys_state_out
             if self._state_prev is None or self._prev_phys_tend is None:
                 _phys_tend = _phys_tend_now          # Euler startup: forward (n)
+                _sfc = _sfc_now
             else:
                 _phys_tend = self._prev_phys_tend    # leapfrog body: lagged (n-1)
+                _sfc = self._prev_sfc_precip
             self._prev_phys_tend = _phys_tend_now    # store for next step's lag
+            self._prev_sfc_precip = _sfc_now
+            self._publish_sfc_precip(_sfc)
 
         if self._state_prev is None:
             # --- First step: forward Euler + SI ---
@@ -2224,6 +2299,9 @@ class SpectralPrimitiveEquationModel:
                 )
             else:
                 result = self._euler_si_jit(state, dt, physics_fn)
+            if not _stateful and _emits_sfc_precip(physics_fn):
+                result, _sfc = result
+                self._publish_sfc_precip(_sfc)
             # Apply sponge and spectral filter
             if self._sponge_factor is not None:
                 result = apply_sponge_filter(result, self._sponge_factor, self._sponge_factor_T)
@@ -2261,6 +2339,9 @@ class SpectralPrimitiveEquationModel:
                 state_np1 = self._leapfrog_si_jit(
                     state, self._state_prev, dt, physics_fn,
                 )
+            if not _stateful and _emits_sfc_precip(physics_fn):
+                state_np1, _sfc = state_np1
+                self._publish_sfc_precip(_sfc)
             # Apply sponge and spectral filter
             if self._sponge_factor is not None:
                 state_np1 = apply_sponge_filter(
@@ -2340,6 +2421,32 @@ class SpectralPrimitiveEquationModel:
             )
         return tendency_fn
 
+    def _make_sfc_tendency_fn(self, physics_fn, forcing_data=_NO_FORCING):
+        """Tendency closure on the pair ``(state, precip accumulator)`` for a
+        physics fn that publishes surface precip (#2277): returns
+        ``(state tendency, surface precip)``, so an explicit RK integrator
+        integrates the precip with the SAME stage weights as the state (the
+        accumulator is never read)."""
+        def tendency_fn(pair):
+            s = pair[0]
+            phys, sfc = self._call_physics(physics_fn, s, forcing_data)
+            return (spectral_pe_tendencies(
+                s, self.grid, self.sigma_coord, self.config, phys), sfc)
+        return tendency_fn
+
+    def _make_fixed_physics_tendency_fn(self, physics_fn, state,
+                                        forcing_data=_NO_FORCING):
+        """``(tendency closure, surface precip)`` with the physics evaluated
+        ONCE at ``state`` -- for a step that evaluates its tendency once at
+        ``state`` (Euler + SI), numerically the same as evaluating it inside
+        the closure, and the precip is the applied physics' (#2277)."""
+        phys, sfc = self._call_physics(physics_fn, state, forcing_data)
+
+        def tendency_fn(s):
+            return spectral_pe_tendencies(
+                s, self.grid, self.sigma_coord, self.config, phys)
+        return tendency_fn, sfc
+
     def _make_leapfrog_tendency_fn(self, physics_fn, state_lag,
                                    forcing_data=_NO_FORCING):
         """Leapfrog tendency with the PHYSICS evaluated ONCE at ``state_lag``
@@ -2361,20 +2468,16 @@ class SpectralPrimitiveEquationModel:
         step keeps physics at n (a forward step, which has no computational
         mode), so only the leapfrog body lags.
         """
-        phys = None
+        phys = sfc = None
         if physics_fn is not None:
-            if forcing_data is _NO_FORCING:
-                _r = physics_fn(state_lag, self.grid, self.sigma_coord)
-            else:
-                _r = physics_fn(
-                    state_lag, self.grid, self.sigma_coord, forcing_data)
-            phys = _r[0] if type(_r) is tuple else _r
+            phys, sfc = self._call_physics(physics_fn, state_lag, forcing_data)
 
         def tendency_fn(s):
             return spectral_pe_tendencies(
                 s, self.grid, self.sigma_coord, self.config, phys,
             )
-        return tendency_fn
+        # ``sfc``: the lagged physics' surface precip (#2277), or None.
+        return tendency_fn, sfc
 
     @partial(jax.jit, static_argnums=(0, 2, 3))
     def _euler_si_jit(self, state, dt, physics_fn=None):
@@ -2386,8 +2489,15 @@ class SpectralPrimitiveEquationModel:
         matrices from the first dt.  A static ``dt`` keys the JIT cache on
         the value, so ``_ensure_si_data(dt)`` + retrace stay consistent.
         """
-        tendency_fn = self._make_tendency_fn(physics_fn)
         from legoesm.timestepping.semi_implicit import euler_si_step
+        if _emits_sfc_precip(physics_fn):
+            # The SI step evaluates the tendency once, at ``state``: the same
+            # physics evaluated here, so its precip is the applied one.
+            tendency_fn, sfc = self._make_fixed_physics_tendency_fn(
+                physics_fn, state)
+            return euler_si_step(
+                state, tendency_fn, dt, self._si_data, self.grid), sfc
+        tendency_fn = self._make_tendency_fn(physics_fn)
         return euler_si_step(state, tendency_fn, dt, self._si_data, self.grid)
 
     @partial(jax.jit, static_argnums=(0, 2, 3))
@@ -2398,6 +2508,11 @@ class SpectralPrimitiveEquationModel:
         are static (dt keys the cache — see ``_euler_si_jit``);
         ``forcing_data`` stays traced so per-step values never retrace.
         """
+        if _emits_sfc_precip(physics_fn):
+            tendency_fn, sfc = self._make_fixed_physics_tendency_fn(
+                physics_fn, state, forcing_data)
+            return euler_si_step(
+                state, tendency_fn, dt, self._si_data, self.grid), sfc
         tendency_fn = self._make_tendency_fn(physics_fn, forcing_data)
         return euler_si_step(state, tendency_fn, dt, self._si_data, self.grid)
 
@@ -2411,10 +2526,12 @@ class SpectralPrimitiveEquationModel:
         Physics is LAGGED to ``state_nm1`` (n-1) for leapfrog stability — see
         :meth:`_make_leapfrog_tendency_fn`.
         """
-        tendency_fn = self._make_leapfrog_tendency_fn(physics_fn, state_nm1)
-        return leapfrog_si_step(
+        tendency_fn, sfc = self._make_leapfrog_tendency_fn(
+            physics_fn, state_nm1)
+        out = leapfrog_si_step(
             state_n, state_nm1, tendency_fn, dt, self._si_data_lf, self.grid,
         )
+        return (out, sfc) if _emits_sfc_precip(physics_fn) else out
 
     @partial(jax.jit, static_argnums=(0, 3, 4))
     def _leapfrog_si_with_forcing_jit(
@@ -2428,11 +2545,12 @@ class SpectralPrimitiveEquationModel:
         Physics is LAGGED to ``state_nm1`` (n-1) for leapfrog stability — see
         :meth:`_make_leapfrog_tendency_fn`.
         """
-        tendency_fn = self._make_leapfrog_tendency_fn(
+        tendency_fn, sfc = self._make_leapfrog_tendency_fn(
             physics_fn, state_nm1, forcing_data)
-        return leapfrog_si_step(
+        out = leapfrog_si_step(
             state_n, state_nm1, tendency_fn, dt, self._si_data_lf, self.grid,
         )
+        return (out, sfc) if _emits_sfc_precip(physics_fn) else out
 
     @partial(jax.jit, static_argnums=(0, 2))
     def _euler_si_phys_jit(self, state, dt, phys_tend):
@@ -2487,15 +2605,18 @@ class SpectralPrimitiveEquationModel:
         closure capture (structure is stable — ``step()`` snapshots
         before the first JIT call whenever anchoring is on).
         """
-        tendency_fn = self._make_tendency_fn(physics_fn)
+        _sfc = _emits_sfc_precip(physics_fn)
+        tendency_fn = (self._make_sfc_tendency_fn(physics_fn) if _sfc
+                       else self._make_tendency_fn(physics_fn))
 
         if self._use_cpu_for_spectral:
             state_cpu = jax.device_put(state, self._cpu_device)
             result_cpu = self._do_step(state_cpu, dt, tendency_fn,
-                                       target_mass=target_mass)
+                                       target_mass=target_mass, sfc=_sfc)
             return jax.device_put(result_cpu, self._default_device)
 
-        return self._do_step(state, dt, tendency_fn, target_mass=target_mass)
+        return self._do_step(state, dt, tendency_fn, target_mass=target_mass,
+                             sfc=_sfc)
 
     @partial(jax.jit, static_argnums=(0, 2, 3))
     def _step_with_forcing_jit(
@@ -2524,15 +2645,19 @@ class SpectralPrimitiveEquationModel:
         closures stay fresh — see ``_step_jit``); ``forcing_data`` and
         ``target_mass`` traced.
         """
-        tendency_fn = self._make_tendency_fn(physics_fn, forcing_data)
+        _sfc = _emits_sfc_precip(physics_fn)
+        tendency_fn = (self._make_sfc_tendency_fn(physics_fn, forcing_data)
+                       if _sfc
+                       else self._make_tendency_fn(physics_fn, forcing_data))
 
         if self._use_cpu_for_spectral:
             state_cpu = jax.device_put(state, self._cpu_device)
             result_cpu = self._do_step(state_cpu, dt, tendency_fn,
-                                       target_mass=target_mass)
+                                       target_mass=target_mass, sfc=_sfc)
             return jax.device_put(result_cpu, self._default_device)
 
-        return self._do_step(state, dt, tendency_fn, target_mass=target_mass)
+        return self._do_step(state, dt, tendency_fn, target_mass=target_mass,
+                             sfc=_sfc)
 
     @partial(jax.jit, static_argnums=(0, 2, 3))
     def _step_on_cpu(
