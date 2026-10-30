@@ -289,14 +289,18 @@ def zhang_mcfarlane_convection(
 
 
 def validate_detrain_widths(w_T, w_n) -> None:
-    """The one legal range of the two detrainment smoothing widths: finite and
-    >= 0 (0 = CAM's hard switch).  Shared by :func:`cam6_detrain_condensate`
-    and ``ExperimentConfig.validate_strict``.  NaN and inf are refused."""
-    if not all(math.isfinite(w) and w >= 0 for w in (w_T, w_n)):
+    """The one legal range of the two detrainment smoothing widths: 0 (CAM's
+    hard switch) or finite and >= the smallest normal float32.  Shared by
+    :func:`cam6_detrain_condensate` and ``ExperimentConfig.validate_strict``.
+    NaN, inf and sub-normal widths are refused: ``dlf / w_n`` overflows for a
+    sub-normal ``w_n`` (measured: NaN number sources at 1e-320 in fp64), and
+    the run's dtype is unknown here, so the float32 bound covers both."""
+    tiny = float(jnp.finfo(jnp.float32).tiny)
+    if not all(w == 0 or (math.isfinite(w) and w >= tiny) for w in (w_T, w_n)):
         raise ValueError(
             "ZhangMcFarlaneConfig detrain_phase_width_K / "
-            "detrain_number_width_kgkg_s must be finite and >= 0 (0 = CAM's "
-            f"hard switch); got {w_T!r}, {w_n!r}.")
+            "detrain_number_width_kgkg_s must be finite and >= 0, and either 0 "
+            f"(CAM's hard switch) or >= {tiny:.3e}; got {w_T!r}, {w_n!r}.")
 
 
 def cam6_detrain_condensate(T: jax.Array, dlf: jax.Array,

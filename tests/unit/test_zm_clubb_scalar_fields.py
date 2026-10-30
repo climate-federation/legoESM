@@ -256,7 +256,8 @@ def test_width_refused_off_the_mpas_lane():
 
 
 @pytest.mark.parametrize("field", sorted(ZM_WIDTH_FIELDS))
-@pytest.mark.parametrize("value", [-1.0e-3, float("nan"), float("inf")])
+@pytest.mark.parametrize("value", [-1.0e-3, float("nan"), float("inf"), 1.0e-320,
+                                   1.0e-39])
 def test_width_out_of_range_refused(field, value):
     cfg = _mpas(ExperimentConfig(**_ZW_HOST, **{field: value}))
     with pytest.raises(ValueError, match=field):
