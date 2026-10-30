@@ -22,7 +22,10 @@ sigmoid transforms.
 
 from __future__ import annotations
 
+import math
+
 import jax
+import numpy as np
 import jax.numpy as jnp
 import equinox as eqx
 
@@ -125,7 +128,7 @@ _XU_RANDALL_TRAINABLE: list[ParamConstraint] = [
     ParamConstraint("cloud_rh_crit", 0.5, 0.95, "sigmoid"),
     ParamConstraint("cloud_alpha_xr", 25.0, 400.0, "sigmoid"),
     ParamConstraint("cloud_p_xr", 0.1, 1.0, "sigmoid"),
-    ParamConstraint("cloud_q_c_diagnostic", 1.0e-6, 5.0e-4, "sigmoid"),  # lower bound = spec/driver (1e-6)
+    ParamConstraint("cloud_q_c_diagnostic", 1.0e-6, 1.0e-3, "sigmoid"),  # = spec and driver range (one parameter, one range)
     # Cloud particle effective radii (drive RRTMGP cloud optics).
     ParamConstraint("cloud_r_eff_liq", 5.0e-6, 30.0e-6, "sigmoid"),
     ParamConstraint("cloud_r_eff_ice", 10.0e-6, 100.0e-6, "sigmoid"),
@@ -327,6 +330,41 @@ def aimip_classical_trainable_names(*, convection, turbulence, gwd,
 # Equinox container for the AIMIP classical variant
 # ----------------------------------------------------------------------
 
+def _exact_logit(value, lo, hi):
+    """Logit whose sigmoid maps back to ``value`` in [lo, hi] (up to round-off):
+    no clamp, so a frozen knob runs at its declared value; +-inf at the bounds.
+    A value outside [lo, hi] cannot be represented and raises."""
+    t = (float(value) - lo) / (hi - lo)
+    if not 0.0 <= t <= 1.0:
+        raise ValueError(f"declared value {value} outside its range [{lo}, {hi}]")
+    if t == 0.0:
+        return -math.inf
+    if t == 1.0:
+        return math.inf
+    return math.log(t / (1.0 - t))
+
+
+# Deck keys that declare a knob's physical value (from_defaults ``declared``).
+AIMIP_DECLARED_KNOB_KEYS = {"aimip_sundqvist_auto_rate": "sundqvist_auto_rate"}
+
+
+def declare_sundqvist_rate(deck: dict) -> dict:
+    """``deck`` with aimip_sundqvist_auto_rate named when it selects sundqvist
+    microphysics (generated configs state the GFS prautco explicitly).  A rate
+    the deck already states is kept (codex + GLM 2026-10-29)."""
+    if (deck.get("aimip_microphysics") != "sundqvist"
+            or "aimip_sundqvist_auto_rate" in deck):
+        return dict(deck)
+    from legoesm.atmosphere.physics.microphysics.config import SundqvistConfig
+    return {**deck, "aimip_sundqvist_auto_rate": float(SundqvistConfig().auto_rate)}
+
+
+def aimip_declared_knobs(cfg) -> dict:
+    """The knob values a deck declares, by knob name."""
+    return {knob: float(cfg[key]) for key, knob in AIMIP_DECLARED_KNOB_KEYS.items()
+            if key in cfg}
+
+
 class AIMIPClassicalParams(eqx.Module):
     """Trainable scheme tunables for the AIMIP classical variant.
 
@@ -358,6 +396,7 @@ class AIMIPClassicalParams(eqx.Module):
         spatial_seed: int = 0,
         trainable=None,
         spatial_unread=None,
+        declared=None,
     ) -> "AIMIPClassicalParams":
         """Initialize all knobs at (or just inside) their canonical defaults.
 
@@ -400,6 +439,11 @@ class AIMIPClassicalParams(eqx.Module):
             them (``aimip_spatial_unread_fields``). ``None`` derives them from
             ``trainable`` (a field is read exactly when its scalar knob is);
             ``trainable=None`` and ``spatial_unread=None`` build every field.
+        declared : mapping of knob name -> physical value, or None
+            Deck-declared values that replace the scheme default for those
+            knobs.  A FROZEN knob (``trainable`` given, name not in it) runs at
+            exactly its declared/default value: no edge pull-in (user
+            2026-10-28); trained knobs keep the pull-in for their start.
         """
         names = {c.name for c in AIMIP_CLASSICAL_CONSTRAINTS}
         if trainable is not None:
@@ -425,8 +469,16 @@ class AIMIPClassicalParams(eqx.Module):
         # in [0.5, 1.0]) but bumps the sigmoid gradient by ~3x.
         sigmoid_margin = 0.05
         raw: dict[str, jax.Array] = {}
+        declared = dict(declared or {})
+        unknown = sorted(set(declared) - names)
+        if unknown:
+            raise ValueError(f"unknown AIMIP classical knob(s): {unknown}")
         for c in AIMIP_CLASSICAL_CONSTRAINTS:
-            default = scheme_defaults.get(c.name, 0.5 * (c.min_val + c.max_val))
+            default = declared.get(
+                c.name, scheme_defaults.get(c.name, 0.5 * (c.min_val + c.max_val)))
+            if trainable is not None and c.name not in trainable:
+                raw[c.name] = _exact_logit(default, c.min_val, c.max_val)
+                continue
             margin = sigmoid_margin * (c.max_val - c.min_val)
             default_clamped = min(
                 c.max_val - margin, max(c.min_val + margin, default),
@@ -434,8 +486,7 @@ class AIMIPClassicalParams(eqx.Module):
             raw_c = jnp.asarray(
                 range_to_sigmoid(default_clamped, c.min_val, c.max_val),
                 dtype=param_dtype)
-            raw[c.name] = (raw_c if trainable is None or c.name in trainable
-                           else float(raw_c))
+            raw[c.name] = raw_c
         spatial = None
         if spatial_surface:
             derived = frozenset(f for f, k in _SPATIAL_FIELD_READ_WITH.items()
@@ -460,22 +511,73 @@ class AIMIPClassicalParams(eqx.Module):
         )
 
     def for_checkpoint(self) -> "AIMIPClassicalParams":
-        """On-disk view: frozen (Python-float) knobs as arrays of the trainable
-        knobs' dtype, so a checkpoint loads into an all-array template
-        (``from_defaults()``) without an equinox dtype mismatch, and back into
-        a frozen template as the same float (``ml.training.save_checkpoint``)."""
+        """On-disk view: frozen (Python-float) knobs as float64 NumPy scalars,
+        whatever the trainable dtype or x64 mode, so the file holds them
+        exactly; a frozen template reloads them as the same Python float
+        (``ml.training.save_checkpoint``; :meth:`checkpoint_load_spec`)."""
         # Only Python-float knobs change; optimizer-moment copies of this
         # module (None / MaskedNode at frozen or masked slots) pass through.
         if not any(type(v) is float for v in self.raw_values.values()):
             return self
-        dt = next((v.dtype for v in self.raw_values.values()
-                   if hasattr(v, "dtype")), None)
-        if dt is None:   # every knob frozen: the dtype from_defaults uses
-            from legoesm.core.precision import get_policy
-            dt = get_policy().compute
-        raw = {k: (jnp.asarray(v, dtype=dt) if type(v) is float else v)
+        raw = {k: (np.asarray(v, dtype=np.float64) if type(v) is float else v)
                for k, v in self.raw_values.items()}
         return eqx.tree_at(lambda m: m.raw_values, self, raw)
+
+    def knob_record(self) -> dict | None:
+        """``{"frozen": [...], "ranges": {knob: [lo, hi]}}`` for this module's
+        checkpoint record, or None for an optimizer-moment copy (None / masked
+        slots where the parameters hold frozen floats)."""
+        vals = self.raw_values.values()
+        if any(not (type(v) is float or hasattr(v, "dtype")) for v in vals):
+            return None
+        return {"frozen": sorted(k for k, v in self.raw_values.items()
+                                 if type(v) is float),
+                "ranges": {c.name: [c.min_val, c.max_val]
+                           for c in self.constraints}}
+
+    def checkpoint_load_spec(self, record=None):
+        """Equinox deserialise filter spec for this module.
+
+        A knob read into an ARRAY slot (all-array template) of another dtype:
+        a knob the checkpoint's record lists as frozen takes the template
+        dtype; a trained knob may only widen losslessly (fp32 -> fp64); a
+        narrowing, or any dtype change with no record to classify the knob,
+        raises (user 2026-10-28, Q).  A record whose ranges differ from this
+        module's raises: no decoding across range sets yet.  Every other leaf
+        loads as equinox's default (a Python-float slot gets the exact float).
+        """
+        default = eqx.default_deserialise_filter_spec
+        if record is not None:
+            mine = {c.name: [c.min_val, c.max_val] for c in self.constraints}
+            if record["ranges"] != mine:
+                diff = sorted(k for k in set(mine) | set(record["ranges"])
+                              if mine.get(k) != record["ranges"].get(k))
+                raise ValueError(
+                    f"checkpoint trained with other AIMIP knob ranges or knobs "
+                    f"({diff}); decoding across range sets is not implemented")
+        frozen = None if record is None else frozenset(record["frozen"])
+
+        def knob(name):
+            def spec(f, x):
+                if not isinstance(x, (jax.Array, jax.ShapeDtypeStruct)):
+                    return default(f, x)
+                disk = np.load(f)
+                if disk.dtype == x.dtype:
+                    return jnp.asarray(disk)
+                if frozen is None:
+                    raise ValueError(
+                        f"knob {name}: checkpoint dtype {disk.dtype} vs template "
+                        f"{x.dtype} and no knob record to tell frozen from trained")
+                if name in frozen or np.can_cast(disk.dtype, x.dtype, "safe"):
+                    return jnp.asarray(disk, dtype=x.dtype)
+                raise ValueError(
+                    f"trained knob {name}: checkpoint {disk.dtype} would narrow "
+                    f"to the template's {x.dtype}")
+            return spec
+
+        spec = jax.tree_util.tree_map(lambda _: default, self)
+        return eqx.tree_at(lambda m: m.raw_values, spec,
+                           {k: knob(k) for k in self.raw_values})
 
     def as_dict(self) -> dict[str, jax.Array]:
         """Return constrained physical values for every knob."""

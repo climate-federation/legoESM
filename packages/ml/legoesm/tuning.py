@@ -234,8 +234,8 @@ TUNING_PARAMETERS: dict[str, TuningParameter] = {
     ),
     "sundqvist_auto_rate": TuningParameter(
         name="sundqvist_auto_rate",
-        default=1e-3,
-        min_val=2e-4,
+        default=1.5e-4,
+        min_val=1e-4,
         max_val=5e-3,
         units="1/s",
         description="Sundqvist autoconversion rate (cloud water -> rain)",
@@ -282,7 +282,7 @@ TUNING_PARAMETERS: dict[str, TuningParameter] = {
         name="sundqvist_evap_coeff",
         default=2e-5,
         min_val=1e-5,
-        max_val=2e-3,
+        max_val=1.5e-3,  # = SundqvistConfig __param_spec__ bound (one range)
         units="1",
         description="Sundqvist sub-cloud rain evaporation coefficient",
         category="convection",

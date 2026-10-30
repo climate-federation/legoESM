@@ -1,15 +1,9 @@
-"""Unit tests for the Emanuel (1991) convection scheme.
+"""Unit tests for the Emanuel (1991) convection scheme (CONVECT v4.3c port).
 
-Tests pin:
-
-* tendency shape / dtype / finiteness;
-* the no-CMT invariant;
-* the buoyancy-sort detrainment enhancement (the distinguishing
-  feature relative to ZM and KF);
-* the unsaturated-downdraft toggle (column conservation under both
-  modes);
-* finite gradients through ``cape_threshold`` and
-  ``smooth_trigger_sharpness`` — the AD-safety property.
+Fidelity to the running oracle is tests/atmosphere/test_emanuel_convect43c_oracle.py.
+These pin shape / finiteness, the no-CMT invariant, the free-tropospheric
+heating peak, the downdraught toggle, the refusal of retired surrogate fields,
+the carry layout, the orchestrator, and column enthalpy / water closure.
 """
 
 from __future__ import annotations
@@ -55,6 +49,9 @@ def _column(
     )
     z_full = -8500.0 * jnp.log(p_full / p_s)
     T = jnp.full((ncol,), T_sfc)[:, None] - lapse_rate * 1e-3 * z_full
+    # Isothermal stratosphere: without one the moist static energy falls to
+    # the model top, and CONVECT rejects the column (its IHMIN = NL-1 gate).
+    T = jnp.maximum(T, 200.0)
     q = q_sfc * jnp.exp(-z_full / 3000.0)
     return T, q, p_full, p_half
 
@@ -119,66 +116,60 @@ def test_emanuel_no_cmt():
     assert out.dv_dt_conv is None
 
 
-def test_emanuel_cloud_water_source_non_negative():
-    """The convective cloud-water source is non-negative even after
-    the unsaturated-downdraft evaporation step subtracts column
-    condensate (we ``maximum(., 0)`` the result)."""
+@pytest.mark.parametrize("dd", (False, True))
+def test_emanuel_condensate_goes_to_rain_not_cloud(dd):
+    """As CONVECT (WDTRAIN), the mixture condensate AWAT detrained below its
+    origin is precipitation: no cloud-water source, and the rain source
+    carries the whole column vapour loss."""
     T, q, pf, ph = _column()
     ncol, nlev = T.shape
-    cpp = jnp.zeros((ncol, nlev))
-    out, _ = emanuel_convection(T, q, pf, ph, cpp, dt=300.0)
-    assert jnp.all(out.dq_c_conv_dt >= 0.0)
+    cpp = jnp.zeros((ncol, nlev)).at[:, -1].set(0.1)
+    out, _ = emanuel_convection(
+        T, q, pf, ph, cpp, dt=300.0,
+        config=EmanuelConfig(enable_unsaturated_downdraft=dd))
+    dpg = (ph[:, 1:] - ph[:, :-1]) / constants.g
+    loss = -jnp.sum(out.dq_v_dt * dpg, axis=-1)
+    assert float(jnp.max(loss)) > 0.0
+    assert float(jnp.max(jnp.abs(out.dq_c_conv_dt))) == 0.0
+    np.testing.assert_allclose(
+        np.asarray(jnp.sum(out.dq_r_conv_dt * dpg, axis=-1)),
+        np.asarray(jnp.maximum(loss, 0.0)), rtol=1e-10, atol=0.0)
+
+
+def test_emanuel_downdraught_on_by_default():
+    """The oracle always runs its downdraught: so does the default config."""
+    assert EmanuelConfig().enable_unsaturated_downdraft is True
 
 
 # ---------------------------------------------------------------------------
-# Buoyancy-sort: n_mixing_fractions affects detrainment but not gross sign
+# Retired surrogate fields
 # ---------------------------------------------------------------------------
 
-def test_emanuel_n_fractions_finite_for_all_choices():
-    """Tendencies are finite for ``n_mixing_fractions`` ∈ {1, 4, 8, 16}.
-    n_fractions=1 is the limit of a single bulk plume; larger values
-    approach Emanuel 1991's 50-bin spectrum more closely."""
+@pytest.mark.parametrize("override", [
+    dict(use_genuine_mixing=False), dict(n_mixing_fractions=4),
+    dict(cu_coefficient=0.9), dict(delta_0=3e-4), dict(epsilon_0=1e-3),
+    dict(smooth_trigger_sharpness=1.0), dict(parcel_perturb_T=0.0),
+    dict(parcel_perturb_q=0.0), dict(precip_efficiency_water=0.5),
+    dict(precip_efficiency_lcl=0.1), dict(mse_min_search_offset=4e4),
+    dict(M_b_max=0.2), dict(cbmf_carry_max=1.0),
+])
+def test_emanuel_retired_surrogate_fields_are_refused(override):
     T, q, pf, ph = _column()
-    ncol, nlev = T.shape
-    cpp = jnp.zeros((ncol, nlev))
-    for n in (1, 4, 8, 16):
-        config = EmanuelConfig(n_mixing_fractions=n)
-        out, _ = emanuel_convection(T, q, pf, ph, cpp, dt=300.0, config=config)
-        assert jnp.all(jnp.isfinite(out.dT_dt)), (
-            f"NaN with n_mixing_fractions={n}"
-        )
+    with pytest.raises(ValueError, match="EmanuelConfig"):
+        emanuel_convection(T, q, pf, ph, jnp.zeros_like(T), dt=300.0,
+                           config=EmanuelConfig(**override))
 
 
 def test_emanuel_genuine_mixing_detrainment_structure():
-    """The GENUINE (i,j) mixing matrix concentrates detrainment near the
-    parcel's level of neutral buoyancy (cloud top), not uniformly.
-
-    With the faithful SIJ/ELIJ/MENT spectrum the per-level convective
-    cloud-water source ``dq_c_conv_dt`` is bottom-heavy in mass flux but
-    its detrainment (and hence the upper-tropospheric heating) peaks near
-    cloud top — a structure a single bulk plume cannot produce.  We pin
-    the genuine path against the legacy single-sigmoid surrogate: the two
-    give materially different per-level ``dT_dt`` profiles (the genuine
-    sort redistributes the heating)."""
+    """The (i,j) mixing matrix deposits its heating in the free troposphere:
+    the column-maximum heating sits above the boundary layer."""
     T, q, pf, ph = _column()
     ncol, nlev = T.shape
     # Seed Emanuel's prognostic CBMF memory so this test isolates the
     # mixing matrix structure rather than the DTMA trigger-from-rest.
     cpp = jnp.zeros((ncol, nlev)).at[:, -1].set(0.1)
-    out_genuine, _ = emanuel_convection(
-        T, q, pf, ph, cpp, dt=300.0,
-        config=EmanuelConfig(use_genuine_mixing=True),
-    )
-    out_surrogate, _ = emanuel_convection(
-        T, q, pf, ph, cpp, dt=300.0,
-        config=EmanuelConfig(use_genuine_mixing=False),
-    )
-    # The genuine mixing is not the surrogate (materially different).
-    dT_diff = float(jnp.max(jnp.abs(out_genuine.dT_dt - out_surrogate.dT_dt)))
-    assert dT_diff > 1e-6
-    # The genuine path heats the free troposphere (the detrainment-height
-    # sort deposits buoyancy aloft); the column-max heating sits above the
-    # boundary layer, not at the surface.
+    out_genuine, _ = emanuel_convection(T, q, pf, ph, cpp, dt=300.0)
+    assert float(jnp.max(jnp.abs(out_genuine.dT_dt))) > 0.0
     dT = out_genuine.dT_dt[0]
     k_max = int(jnp.argmax(dT))
     assert k_max < nlev - 2, "genuine heating should peak above the surface"
@@ -203,40 +194,6 @@ def test_emanuel_genuine_mixing_matrix_tunable_changes_tendency():
     )
     dT_diff = float(jnp.max(jnp.abs(out_a.dT_dt - out_b.dT_dt)))
     assert dT_diff > 1e-9
-
-
-def test_emanuel_mixture_buoyancy_sign_crosses():
-    """Faithful Emanuel-1991 buoyancy sorting: the mixture buoyancy
-    B(χ) starts positive (undilute updraft) and **crosses zero** into
-    negative for a dry environment (evaporative cooling of entrained
-    air) — the defining feature the old ``B_mix = χ·B_u`` could not
-    produce.  A saturated environment evaporates nothing, so no mixture
-    turns spuriously negative."""
-    from legoesm.atmosphere.physics.convection.emanuel import _mixture_buoyancy
-    from legoesm.thermo import saturation_mixing_ratio
-
-    T_e = jnp.array([[290.0]])
-    p = jnp.array([[8.0e4]])
-    T_u = jnp.array([[292.0]])                       # buoyant updraft
-    q_u = saturation_mixing_ratio(T_u, p)            # saturated cloud
-    q_c_u = jnp.array([[2e-3]])                      # cloud condensate
-    chi = jnp.linspace(0.02, 0.98, 25)
-
-    B_dry = _mixture_buoyancy(
-        T_e, 0.3 * saturation_mixing_ratio(T_e, p), T_u, q_u, q_c_u, p, chi,
-    )[0, 0]
-    B_sat = _mixture_buoyancy(
-        T_e, saturation_mixing_ratio(T_e, p), T_u, q_u, q_c_u, p, chi,
-    )[0, 0]
-
-    assert float(B_dry[0]) > 0.0                     # undilute is buoyant
-    assert bool(jnp.any(B_dry > 0) & jnp.any(B_dry < 0))  # genuine sign reversal
-    assert float(jnp.min(B_sat)) >= -1e-6            # saturated env: no spurious sink
-    # Gradient through the mixture buoyancy is finite (AD-safe sat-adjust).
-    g = jax.grad(lambda t: jnp.sum(_mixture_buoyancy(
-        jnp.array([[t]]), 0.3 * saturation_mixing_ratio(jnp.array([[t]]), p),
-        T_u, q_u, q_c_u, p, chi)))(290.0)
-    assert jnp.isfinite(g)
 
 
 # ---------------------------------------------------------------------------
@@ -272,6 +229,7 @@ def test_emanuel_downdraft_toggle_changes_subcloud_dT():
 # ---------------------------------------------------------------------------
 
 def test_emanuel_grad_through_cape_threshold():
+    """``cape_threshold`` shapes only the diagnostic convective_mask."""
     T, q, pf, ph = _column()
     ncol, nlev = T.shape
     cpp = jnp.zeros((ncol, nlev))
@@ -279,23 +237,9 @@ def test_emanuel_grad_through_cape_threshold():
     def f(threshold):
         config = EmanuelConfig(cape_threshold=threshold)
         out, _ = emanuel_convection(T, q, pf, ph, cpp, dt=300.0, config=config)
-        return jnp.sum(out.dT_dt)
+        return jnp.sum(out.convective_mask)
 
     g = float(jax.grad(f)(jnp.asarray(70.0)))
-    assert np.isfinite(g)
-
-
-def test_emanuel_grad_through_smooth_trigger_sharpness():
-    T, q, pf, ph = _column()
-    ncol, nlev = T.shape
-    cpp = jnp.zeros((ncol, nlev))
-
-    def f(s):
-        config = EmanuelConfig(smooth_trigger_sharpness=s)
-        out, _ = emanuel_convection(T, q, pf, ph, cpp, dt=300.0, config=config)
-        return jnp.sum(out.dT_dt)
-
-    g = float(jax.grad(f)(jnp.asarray(0.5)))
     assert np.isfinite(g)
 
 
@@ -393,21 +337,21 @@ def test_emanuel_vapor_side_enthalpy_residual_small():
     )
 
 
-def test_emanuel_total_water_nearly_conserved():
-    """The legacy kernel surrogate conserves vapor+cloud water because it has
-    no explicit Emanuel precipitation split.  The genuine mixer is different:
-    EP·CLW is precipitating condensate and is intentionally not reinserted as
-    retained cloud water."""
+def test_emanuel_total_water_conserved():
+    """Vapour, cloud-water and rain sources integrate to zero over the column:
+    every kg of vapour convection removes leaves as cloud water or rain."""
     T, q, pf, ph = _column()
     ncol, nlev = T.shape
-    cpp = jnp.zeros((ncol, nlev))
-    out, _ = emanuel_convection(
-        T=T, q_v=q, p_full=pf, p_half=ph,
-        conv_prog_profile=cpp, dt=1800.0,
-        config=EmanuelConfig(use_genuine_mixing=False),
-    )
-    dp = ph[:, 1:] - ph[:, :-1]
-    net = jnp.sum((out.dq_v_dt + out.dq_c_conv_dt) * dp / constants.g, axis=1)
-    flux = jnp.sum(jnp.abs(out.dq_v_dt) * dp / constants.g, axis=1)
-    rel = float(jnp.max(jnp.abs(net) / (flux + 1e-12)))
-    assert rel < 0.05, f"Emanuel total-water residual {rel*100:.1f}% of flux"
+    cpp = jnp.zeros((ncol, nlev)).at[:, -1].set(0.1)
+    for dd in (False, True):
+        out, _ = emanuel_convection(
+            T=T, q_v=q, p_full=pf, p_half=ph, conv_prog_profile=cpp, dt=1800.0,
+            config=EmanuelConfig(enable_unsaturated_downdraft=dd),
+        )
+        dp = ph[:, 1:] - ph[:, :-1]
+        net = jnp.sum((out.dq_v_dt + out.dq_c_conv_dt + out.dq_r_conv_dt)
+                      * dp / constants.g, axis=1)
+        flux = jnp.sum(jnp.abs(out.dq_v_dt) * dp / constants.g, axis=1)
+        assert float(jnp.max(flux)) > 0.0
+        rel = float(jnp.max(jnp.abs(net) / (flux + 1e-30)))
+        assert rel < 1e-12, f"Emanuel total-water residual {rel:.2e} of flux (dd={dd})"

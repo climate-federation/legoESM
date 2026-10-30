@@ -439,13 +439,23 @@ def save_checkpoint(
     path : str or Path
         Destination file path for the checkpoint.
     """
+    from legoesm.ml.checkpoint_io import knob_record_path, write_knob_record
+
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f"{path.name}.tmp-{os.getpid()}")
+    # No stale record may pair with the new file: drop it once the new payload
+    # is serialised, just before it replaces the old one, and write it after
+    # (a serialisation failure keeps the old payload AND its record; a crash
+    # between unlink and replace leaves no record, which loads only where no
+    # frozen/trained classification is needed; codex + GLM 2026-10-29).
+    live = model
     model = checkpoint_view(model)
     try:
         eqx.tree_serialise_leaves(str(tmp), model)
+        knob_record_path(path).unlink(missing_ok=True)
         os.replace(tmp, path)
+        write_knob_record(live, path)
     finally:
         # ``os.replace`` consumes ``tmp`` on success; this only fires if
         # serialisation raised, cleaning up the partial temp file.

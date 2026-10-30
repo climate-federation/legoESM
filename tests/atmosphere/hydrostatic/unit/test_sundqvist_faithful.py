@@ -64,8 +64,7 @@ def _rates(cfg, T_K, q_c, rh, **kw):
     T, q_v, hydro, p_full, p_half, rho, dz, dt = _column(T_K, q_c, rh, **kw)
     return diagnose_sundqvist_process_rates(
         T=T, q_v=q_v, hydrometeors=hydro, p_full=p_full, p_half=p_half,
-        rho=rho, dz=dz, dt=dt, config=cfg,
-    )
+        rho=rho, dz=dz, dt=dt, config=cfg, cell_area=1.0e10)
 
 
 # ===========================================================================
@@ -116,13 +115,13 @@ def test_departure_default_constants():
     """
     c = SundqvistConfig()
     assert c.rh_crit == 0.8
-    assert c.auto_rate == 1e-3         # c_0 [1/s]
+    assert c.auto_rate == 1.5e-4       # c_0 [1/s], GFS prautco
     assert c.qc_crit == 3e-4           # q_c,crit = oracle m_r [kg/kg]
     assert c.coalescence_enh_coeff == 300.0   # c1 (SBK89 F1)
     assert c.bergeron_enh_coeff == 0.5        # c2, oracle hard-coded
     assert c.bergeron_T_peak_K == constants.T_freeze - 15.0
     assert c.bergeron_T_width_K == 7.0
     assert c.evap_coeff == 2e-5             # GFS operational evpco
-    assert c.psautco == 0.0
-    assert c.wminco_liquid == 0.0
-    assert c.wminco_ice == 0.0
+    assert (c.psautco_fine, c.psautco_coarse) == (8.0e-4, 5.0e-4)  # GFS namelist
+    assert c.wminco_liquid == 1.0e-5        # fv3atm GFS_typedefs.F90:2854
+    assert c.wminco_ice == 1.0e-5

@@ -96,6 +96,7 @@ __param_spec__ = {
     "LouisConfig": {
         "scheme_key": "atm.turb.LouisConfig",
         "excluded": {
+            "shear_floor_sharpness": "numerics: smoothing sharpness of the RULE 5 smooth OpenIFS shear floor (inf = hard MAX), not a tunable",
             "blend_ri_sharpness": "numerics: solver/smoothing/tolerance/iteration parameter",
             "cloudtop_entrainment_efficiency": "opt-in marine-Sc cloud-top entrainment lever, default 0.0 (off) = the physical floor; not a well-posed sigmoid tunable (default on the bound)",
         },
@@ -438,11 +439,14 @@ class LouisConfig(NamedTuple):
         one, ``b_h / b_m`` (Louis, Tiedtke & Geleyn 1982 use 3b for heat
         vs 2b for momentum ⇒ 1.5).  Gives a stratification-dependent
         turbulent Prandtl number Pr_t = K_m/K_h (>1 stable, <1 unstable);
-        ``1.0`` recovers the Louis (1979) ``f_h = f_m`` simplification.
+        ``1.0`` gives ``f_h = f_m`` on the unstable branch only (the stable
+        heat function multiplies by √(1+d·Ri) where momentum divides).
         Momentum K_m is independent of this ratio (default 1.5).  Must be
         positive: like ``b_louis``/``d_louis`` it appears in the stable
-        denominator ``1 + 2·b_h·Ri/√(1+d·Ri)``, which a negative value
-        could drive through zero (singular K_h).
+        heat denominator ``1 + 2·b_h·Ri·√(1+d·Ri)`` (OpenIFS vdfexcu.F90:395),
+        which a negative value could drive through zero (singular K_h).
+        The running oracles use 1.0 (OpenIFS, stable) and 1.5 (ECHAM/ICON,
+        unstable).
     surface : SurfaceLayerConfig
         Surface layer parameters.
     """
@@ -468,6 +472,10 @@ class LouisConfig(NamedTuple):
     # constant float, so --params can both SET and ACTIVATE it (no separate bool
     # that --params could not reach).
     cloudtop_entrainment_efficiency: float = 0.0   # A: K_ent = A·W_REF·dz·(drying·inverted·cloudy); 0 = off
+    # Smooth OpenIFS shear floor (RULE 5): |dV|^2 -> smooth_max(|dV|^2, REPDU2,
+    # s) [s^2/m^2]; inf = vdfexcu.F90:361 hard MAX.  At 1e4 the floor adds
+    # log(2)/s = 6.9e-5 m^2/s^2 where |dV|^2 = REPDU2 = 0.01 m^2/s^2.
+    shear_floor_sharpness: float = 1.0e4
 
 
 class TKEConfig(NamedTuple):

@@ -638,6 +638,16 @@ ZM_SCALAR_FIELDS = {
     "zm_tau": "tau",
     "zm_capelmt": "capelmt",
 }
+# Flat ExperimentConfig scalar -> ZhangMcFarlaneConfig smoothing width of the
+# CAM6 detrainment booking (zhang_mcfarlane.cam6_detrain_condensate, RULE 5).
+# Excluded from __param_spec__ (tier 0, no --params route); the one legal range
+# is zhang_mcfarlane.validate_detrain_widths.  Read only by the MPAS macmic
+# loop with ZM + CLUBB (combined.py ``_defer_dlf``), so validate_strict refuses
+# them elsewhere.  None = keep the scheme's own default.
+ZM_WIDTH_FIELDS = {
+    "zm_detrain_phase_width_K": "detrain_phase_width_K",
+    "zm_detrain_number_width_kgkg_s": "detrain_number_width_kgkg_s",
+}
 CLUBB_SCALAR_FIELDS = {
     "clubb_c14": "C14",
     "clubb_c8": "C8",
@@ -1326,6 +1336,14 @@ class ExperimentConfig(NamedTuple):
     # the land fraction is taken from this file and the slab-land tile
     # is activated; empty → ocean-only surface.
     land_mask_path: str = ""
+    # Where the column land fraction comes from, for the land model AND the
+    # physics alike (one coastline; user 2026-10-28, R3/R5/R6):
+    #   "topography" -- the terrain / land_mask_path above (every lane so far);
+    #   "era5"       -- the ERA5 land-sea mask from land_fraction_era5_zarr
+    #                   (required, no default); lat-lon grids only;
+    #   "zero"       -- an all-ocean column set, chosen explicitly; lat-lon only.
+    land_fraction_source: str = "topography"
+    land_fraction_era5_zarr: str = ""
     # Optional land-surface-albedo NetCDF (e.g. ICON-extpar ALB on a
     # regular lat-lon grid).  When set AND ``land_mask_path`` is set, the
     # static land albedo field replaces the latitude-band fallback used
@@ -1536,7 +1554,7 @@ class ExperimentConfig(NamedTuple):
     sbm_tau_c: float = 7200.0
     sbm_RH_ref: float = 0.7
     sbm_cape_threshold: float = 70.0
-    sundqvist_auto_rate: float = 1e-3      # Sundqvist autoconversion rate [1/s]
+    sundqvist_auto_rate: float = 1.5e-4    # Sundqvist autoconversion rate [1/s] (GFS prautco)
     # Convection / microphysics / turbulence / GWD scheme knobs exposed for
     # calibration (AIMIP commit 0c747d4).  These mirror the scheme-config
     # defaults; the calibration threads them to the schemes as a
@@ -2130,6 +2148,10 @@ class ExperimentConfig(NamedTuple):
     # sharpness=1/width).  0 = the hard clip (pre-#2106 behaviour).
     ice_skin_melt_cap_width_K: float = _ICE_SFC_DEFAULTS[
         "ice_skin_melt_cap_width_K"]
+    # ZM detrainment smoothing widths (ZM_WIDTH_FIELDS).  None = the scheme
+    # default; the production deck names both.
+    zm_detrain_phase_width_K: float | None = None
+    zm_detrain_number_width_kgkg_s: float | None = None
 
     def _liquid_partition_resolved(self) -> bool:
         """Is CLUBB's cloud-liquid exchange selected, by ANY route?
@@ -2197,6 +2219,30 @@ class ExperimentConfig(NamedTuple):
                 f"bechtold_use_ifs_ascent needs a microphysics that carries "
                 f"rain and snow (morrison, thompson) for the "
                 f"detrained precipitation, not {self.microphysics!r}")
+        if self.land_fraction_source not in ("topography", "era5", "zero"):
+            errors.append(
+                f"land_fraction_source must be topography, era5 or zero, got "
+                f"{self.land_fraction_source!r}")
+        elif self.land_fraction_source != "topography":
+            if self.grid.grid_type != "latlon":
+                errors.append(
+                    f"land_fraction_source={self.land_fraction_source!r} is only "
+                    f"supported on the lat-lon grid, not {self.grid.grid_type!r}")
+            if (self.land_fraction_source == "era5"
+                    and not self.land_fraction_era5_zarr):
+                errors.append("land_fraction_source='era5' needs "
+                              "land_fraction_era5_zarr (no default store)")
+            if self.land_mask_path:
+                errors.append(
+                    f"land_mask_path={self.land_mask_path!r} and "
+                    f"land_fraction_source={self.land_fraction_source!r} name "
+                    "two coastlines; drop one")
+            if (self.land_fraction_source == "zero"
+                    and (self.use_multilayer_land or self.slab_land_active)):
+                errors.append(
+                    "land_fraction_source='zero' with a land tile "
+                    "(use_multilayer_land / slab_land_active): land physics "
+                    "on no land")
         # Owner decision 2026-08-16: conserving form always, and any
         # NON-conserving form must ANNOUNCE itself when invoked. These are
         # warnings, not errors — the legacy/exception paths stay selectable
@@ -3048,6 +3094,34 @@ class ExperimentConfig(NamedTuple):
                 if not _ok:
                     errors.append(f"{_f} must be a number in [{_lo}, {_hi}] "
                                   f"(the scheme's __param_spec__), got {_v!r}")
+        _zw = {f: getattr(self, f) for f in ZM_WIDTH_FIELDS
+               if getattr(self, f) is not None}
+        if _zw:
+            _nmm_w = self.cld_macmic_num_steps
+            if not (self.convection == "zhang_mcfarlane"
+                    and self.turbulence == "clubb"
+                    and isinstance(_nmm_w, int) and _nmm_w >= 2):
+                errors.append(
+                    f"{sorted(_zw)} are read only by the ZM detrainment booking "
+                    "of the MPAS macro/micro sub-cycle (convection="
+                    "'zhang_mcfarlane', turbulence='clubb', "
+                    "cld_macmic_num_steps>=2); got convection="
+                    f"{self.convection!r}, turbulence={self.turbulence!r}, "
+                    f"cld_macmic_num_steps={_nmm_w!r}, where they would be "
+                    "silently inert")
+            from legoesm.atmosphere.physics.convection.config import (
+                ZhangMcFarlaneConfig as _ZMC,
+            )
+            from legoesm.atmosphere.physics.convection.zhang_mcfarlane import (
+                validate_detrain_widths,
+            )
+            _zmd = _ZMC()
+            try:
+                validate_detrain_widths(*(
+                    _zw.get(f, getattr(_zmd, leaf))
+                    for f, leaf in ZM_WIDTH_FIELDS.items()))
+            except (TypeError, ValueError) as exc:
+                errors.append(f"{sorted(_zw)}: {exc}")
         if (self.clubb_trop_cloud_top_press is not None
                 and self.turbulence != "clubb"):
             errors.append(
@@ -3222,6 +3296,7 @@ class ExperimentConfig(NamedTuple):
         # campaign three tuning waves. Refused, not warned.
         if ((self.use_multilayer_land or self.slab_land_active)
                 and not self.land_mask_path
+                and self.land_fraction_source != "era5"
                 and _idealized_topography):
             errors.append(
                 f"a land tile was requested (use_multilayer_land="
@@ -3229,8 +3304,8 @@ class ExperimentConfig(NamedTuple):
                 f"{self.slab_land_active}) with an idealized "
                 f"topography={self.topography!r} and no land-mask file, which "
                 "has NO land anywhere (f_land is 0 in every cell), so the tile "
-                "would silently no-op — pass a real elevation file to --topography, or a "
-                "--land-mask-file."
+                "would silently no-op — pass a real elevation file to --topography, a "
+                "--land-mask-file, or --land-fraction-source era5."
             )
         # The same "no land anywhere" trap, on the MESH lane, which does not use
         # surface_tiled and so never reached the check above: the flux handoff
@@ -5036,7 +5111,7 @@ class ExperimentConfig(NamedTuple):
             lw_diff_factor=getattr(amip_cfg, 'lw_diff_factor', 1.66),
             sw_tau_0=getattr(amip_cfg, 'sw_tau_0', 0.22),
             sw_exponent=getattr(amip_cfg, 'sw_exponent', 2.0),
-            sundqvist_auto_rate=getattr(amip_cfg, 'sundqvist_auto_rate', 1e-3),
+            sundqvist_auto_rate=getattr(amip_cfg, 'sundqvist_auto_rate', 1.5e-4),
             cloud_rh_crit=getattr(amip_cfg, 'cloud_rh_crit', 0.7),
             louis_l_mix_max=getattr(amip_cfg, 'louis_l_mix_max', 100.0),
             louis_Ri_crit=getattr(amip_cfg, 'louis_Ri_crit', 0.25),
@@ -5234,7 +5309,7 @@ class ExperimentConfig(NamedTuple):
             lw_diff_factor=getattr(self, 'lw_diff_factor', 1.66),
             sw_tau_0=getattr(self, 'sw_tau_0', 0.22),
             sw_exponent=getattr(self, 'sw_exponent', 2.0),
-            sundqvist_auto_rate=getattr(self, 'sundqvist_auto_rate', 1e-3),
+            sundqvist_auto_rate=getattr(self, 'sundqvist_auto_rate', 1.5e-4),
             cloud_rh_crit=getattr(self, 'cloud_rh_crit', 0.7),
             louis_l_mix_max=getattr(self, 'louis_l_mix_max', 100.0),
             louis_Ri_crit=getattr(self, 'louis_Ri_crit', 0.25),

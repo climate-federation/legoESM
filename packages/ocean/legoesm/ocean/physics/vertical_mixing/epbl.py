@@ -85,6 +85,66 @@ passes, here every trip is executed.  Size them from the tolerance
 (``ceil(log2(depth / mld_tol))`` plus a margin for bisection), not from the
 MOM6 cap.
 
+KNOWN DIFFERENCES: RULE 5 smooth switches (issue #2180)
+-------------------------------------------------------
+MOM6's switches on traced state at the five places the MOM6 single-column
+fixture exercises (each site is marked ``# RULE5:<id>``) are smooth by
+default, using ``legoesm.core.smooth`` (softplus / logsumexp / sigmoid).  Each
+unit class has one sharpness field on ``EPBLConfig``; ``math.inf`` gives
+MOM6's exact switch, and at that limit the port reproduces its exact-port gap
+to MOM6 (``tests/ocean/unit/test_epbl_mom6_oracle.py``).  Unlike MOM6, the
+smooth forms are not exact at their kinks: ``max(0, 0)`` is ``ln 2 / sharpness``.
+
+- ``smooth_bflux_sharpness_s3m2`` (default 1e10 s^3/m^2, width 1e-10 m^2/s^3):
+  ``max(0, B)**2`` in the REICHL_H18 ``mstar_S`` (C1r) and ``min(0, B)`` in
+  the MSTAR_CONV_ADJ reduction (C2).  At ``B = 0`` the stabilising mstar term
+  is ``cs1 * ((ln2 * width)**2 * BLD / (u*^5 f))**cs2`` instead of 0 (the
+  ``cs2 = 0.4`` power amplifies the width), and the convective reduction is
+  slightly below 1, so a neutral surface gets slightly MORE mechanical TKE
+  (deeper mixing) than in MOM6.  This is the largest gap: the fixture's Q = 0 case moves
+  from 2.6e-13 / 1.0e-12 degC (dt 1200 / 300 s) to 3.5e-3 / 4.0e-3 degC at 8 h.
+- ``smooth_ratio_sharpness`` (default 1e3, width 1e-3): the
+  ``sigma_max`` clip to [0.1, 0.7] of the equation-discovery shape (C3);
+  largest fixture change 5.7e-5 relative (Q = -200, dt 300 s).
+- ``smooth_colht_sharpness_per_m`` (default 1e10 1/m, width 1e-10 m):
+  ``min(ColHt_chg, 0)`` in ``_find_pe_chg_orig``'s PE change (C5).  A zero
+  diffusivity now prices a PE change of ``pres_z * ln2 * width`` instead of 0,
+  and every ``ColHt_chg`` within a few widths of 0 (either sign) is charged a
+  little more, so mixing there is slightly MORE expensive than in MOM6.  The
+  kernel's other three outputs (dPEc_dKd, dPE_max, dPEc_dKd_0) keep MOM6's
+  exact ``min(., 0)`` (smoothing them moves no fixture gap beyond the test
+  tolerance), so within a width of ``ColHt_chg = 0`` the returned slope is not
+  the derivative of the smoothed PE change.  The energy-limited Kd solve uses
+  that slope for its Newton steps and for its first guess, so there it can
+  take different iterates and, if it has not converged within
+  ``max_kd_its``, return a different Kd; a converged solve still lands on a
+  root of the smoothed energy balance.
+  The fixture gap at Q = -200 / dt 300 s goes from 2.6e-5 to 4.7e-6 degC; Q = 0
+  goes to 6.9e-6 / 2.2e-5 degC.
+- ``smooth_energy_sharpness_m2j`` (default 1e6 m^2/J, width 1e-6 J/m^2): the
+  top-layer ``conv_PErel = max(TKE_forced, 0)`` (C6a) and the matching
+  ``mech_TKE`` spend ``where(TKE_forced <= 0, max(0, mech + TKE_forced), mech)``
+  (C6b/c, same kink; smoothing C6b/c alone leaves every fixture gap unchanged
+  (measured), it is smoothed so the gradient at the kink exists).  At
+  ``TKE_forced = 0`` the column starts with ``ln2 * width`` of convective PE.
+  The two smooth forms are not complementary near the kink: for
+  ``0 < TKE_forced <~ width`` the convective PE gets ``softplus >= TKE_forced``
+  AND ``mech_TKE`` still gets ``sigmoid(-s TKE_forced) * TKE_forced``, so the
+  column starts with up to ~``(ln2 + 0.3) * width`` [J/m^2] more energy than
+  MOM6 gives it.  Fixture Q = 0 goes to 1.9e-8 / 8.6e-8 degC.
+
+With every switch smooth the six fixture gaps are 2.47e-4, 3.49e-3, 1.10e-3
+(dt 1200 s; Q = -200, 0, +200) and 4.70e-6, 3.99e-3, 1.34e-4 (dt 300 s).  No
+smoothed site changes the column's conservation (ePBL returns diffusivities;
+the implicit solve conserves T and S).  Still exact, pending MOM6 fixture
+cases that exercise them: the OM4 mstar branch, ``_eqdisc_v0``, the linear
+mixing-length shape, the ``eh`` / ``lh`` caps, the v0h buoyancy clip,
+heat/cool select and v0 cap, the three derivative/limit ``min(., 0)`` in
+``_find_pe_chg_orig``, the interior ``max(0, TKE_forced)`` and TKE depletion,
+and the velocity-scale / mixing-length caps (which with ``eqdisc_shape`` feed
+only diagnostics); the column descent's branch selection and the two
+iterations (issue #2180 groups D and E) are unchanged.
+
 Faithfulness
 ------------
 ``tests/ocean/unit/test_epbl.py`` pins the kernels against independent
@@ -136,6 +196,8 @@ import jax.numpy as jnp
 from jax import lax
 
 from legoesm import constants
+from legoesm.core.smooth import (
+    sigmoid_switch, smooth_clamp, smooth_min, smooth_relu)
 from legoesm.ocean.physics.vertical_mixing.config import EPBLConfig
 from legoesm.ocean.physics.vertical_mixing.output import VerticalMixingOutput
 
@@ -223,6 +285,8 @@ _NSTAR_ROSSBY_COEF = 0.2
 
 _EPBL_MSTAR_SCHEMES = ("constant", "om4", "reichl_h18")
 _EPBL_WT_SCHEMES = ("cube_root_tke", "reichl_h18")
+_SMOOTH_SHARPNESS_FIELDS = tuple(
+    f for f in EPBLConfig._fields if f.startswith("smooth_"))
 
 # A denominator floor. MOM6 relies on Fortran's `if (x > 0)` guards; the
 # traced equivalent needs a finite epsilon so the unselected branch cannot
@@ -318,6 +382,12 @@ def validate_epbl_config(cfg: EPBLConfig) -> None:
     if cfg.mld_tol <= 0.0:
         raise ValueError(
             f"EPBLConfig.mld_tol must be positive, got {cfg.mld_tol!r}.")
+    for name in _SMOOTH_SHARPNESS_FIELDS:
+        value = getattr(cfg, name)
+        if not value > 0.0:  # also rejects NaN; math.inf (exact MOM6) passes
+            raise ValueError(
+                f"EPBLConfig.{name} must be > 0 (math.inf = MOM6's exact "
+                f"switch), got {value!r}.")
 
 
 # ---------------------------------------------------------------------------
@@ -357,13 +427,13 @@ def _find_mstar(cfg: EPBLConfig, b_flux, u_star, bld, absf):
         mstar_n = (cfg.rh18_mstar_cn1 * msn_term) / (1.0 + msn_term)
         absf_safe = jnp.maximum(absf, 1.0e-20)
         mstar_s = cfg.rh18_mstar_cs1 * _safe_pow(
-            _safe_div(jnp.maximum(0.0, b_flux) ** 2 * bld,
-                      u_star**5 * absf_safe), cfg.rh18_mstar_cs2)
+            _safe_div(smooth_relu(b_flux, cfg.smooth_bflux_sharpness_s3m2) ** 2  # RULE5:C1r
+                      * bld, u_star**5 * absf_safe), cfg.rh18_mstar_cs2)
         mstar = mstar_n + mstar_s
 
     # Reduce mstar to account for convective turbulence eroding the stable
     # density gradient that mechanical mixing would otherwise work against.
-    mscr_term1 = -bld * jnp.minimum(0.0, b_flux)
+    mscr_term1 = -bld * smooth_min(b_flux, 0.0, cfg.smooth_bflux_sharpness_s3m2)  # RULE5:C2
     mscr_term2 = 2.0 * mstar * u_star**3
     mstar_conv_red = jnp.where(
         jnp.abs(mscr_term2) > 0.0,
@@ -398,7 +468,9 @@ def _eqdisc_shape(cfg: EPBLConfig, z_int, absf, b_flux, u_star, mld_guess):
     f_fn = 1.0 / (c[3] + c[4] * jnp.exp(-c[5] * lh)) + c[6]
     f_eh = f_fn * eh
     sm = _safe_div(f_eh, c[1] * f_eh + c[2])
-    sm = jnp.clip(sm, cfg.eqd_sigma_max_lower_cap, cfg.eqd_sigma_max_upper_cap)
+    sm = smooth_clamp(sm, cfg.eqd_sigma_max_lower_cap,
+                      cfg.eqd_sigma_max_upper_cap,
+                      cfg.smooth_ratio_sharpness)  # RULE5:C3sm
 
     sm_h = sm * hbl
     eps = cfg.eqd_shape_function_epsilon
@@ -473,7 +545,7 @@ def _find_pe_chg_orig(kddt_h, h_k, b_den_1, dte_term, dse_term,
                       dt_to_dpe_k, ds_to_dpe_k, dt_to_dpe_a, ds_to_dpe_a,
                       pres_z,
                       dt_to_dcolht_k, ds_to_dcolht_k,
-                      dt_to_dcolht_a, ds_to_dcolht_a):
+                      dt_to_dcolht_a, ds_to_dcolht_a, *, colht_sharpness):
     """MOM6 ``find_PE_chg_orig``.
 
     Returns ``(PE_chg, dPEc_dKd, dPE_max, dPEc_dKd_0)``: the column potential-
@@ -493,7 +565,7 @@ def _find_pe_chg_orig(kddt_h, h_k, b_den_1, dte_term, dse_term,
               + (ds_to_dpe_k * ds_k + ds_to_dpe_a * ds_km1))
     colht_chg = ((dt_to_dcolht_k * dt_k + dt_to_dcolht_a * dt_km1)
                  + (ds_to_dcolht_k * ds_k + ds_to_dcolht_a * ds_km1))
-    pe_chg = pe_chg - pres_z * jnp.minimum(colht_chg, 0.0)
+    pe_chg = pe_chg - pres_z * smooth_min(colht_chg, 0.0, colht_sharpness)  # RULE5:C5a
 
     dkr_dkd = (h_k * b_den_1) * i_kr_denom**2
     ddt_k_dkd = dkr_dkd * dte_term
@@ -564,6 +636,28 @@ def _find_pe_chg(kddt_h0, dkddt_h, hp_a, hp_b, th_a, sh_a, th_b, sh_b,
 # ---------------------------------------------------------------------------
 
 
+def _top_layer_energy(cfg: EPBLConfig, tkef0, mech_tke_0):
+    """``(conv_PErel, mech_TKE)`` above the first interior interface.
+
+    The top-layer forcing ``tkef0`` is spent (or released) before the first
+    interior interface is reached: MOM6 ``conv_PErel = max(TKE_forced, 0)``
+    and ``mech_TKE = max(0, mech_TKE + TKE_forced)`` where the forcing costs
+    energy.  Both switches kink at ``tkef0 = 0`` and are smooth by default.
+    """
+    s_e = cfg.smooth_energy_sharpness_m2j
+    if s_e == math.inf:
+        # MOM6's switches verbatim (a 0/1 blend would turn an overflowed
+        # branch into NaN where MOM6 selects the other one).
+        return (jnp.where(tkef0 > 0.0, tkef0, 0.0),
+                jnp.where(tkef0 <= 0.0,
+                          jnp.maximum(0.0, mech_tke_0 + tkef0), mech_tke_0))
+    conv_perel_0 = smooth_relu(tkef0, s_e)  # RULE5:C6a
+    spent = sigmoid_switch(-tkef0, s_e)  # RULE5:C6b
+    mech_tke_0 = (spent * smooth_relu(mech_tke_0 + tkef0, s_e)  # RULE5:C6c
+                  + (1.0 - spent) * mech_tke_0)
+    return conv_perel_0, mech_tke_0
+
+
 def _epbl_column(h, u, v, t0, s0, dsv_dt, dsv_ds, tke_forcing,
                  b_flux, absf, u_star, mech_tke_in, mld_guess_in,
                  cfg: EPBLConfig, g: float, rho_0: float):
@@ -604,16 +698,12 @@ def _epbl_column(h, u, v, t0, s0, dsv_dt, dsv_ds, tke_forcing,
 
     # --- initial energy state above the first interior interface ---------
     tkef0 = tke_forcing[0]
-    conv_perel_0 = jnp.where(tkef0 > 0.0, tkef0, 0.0)
 
     def one_pass(mld_guess):
         """A single descent through the column for a given depth guess."""
         mstar = _find_mstar(cfg, b_flux, u_star, mld_guess, absf)
-        mech_tke_0 = mstar * mech_tke_in
-        # The top-layer forcing is spent (or released) before the first
-        # interior interface is reached.
-        mech_tke_0 = jnp.where(tkef0 <= 0.0,
-                               jnp.maximum(0.0, mech_tke_0 + tkef0), mech_tke_0)
+        conv_perel_0, mech_tke_0 = _top_layer_energy(
+            cfg, tkef0, mstar * mech_tke_in)
 
         # --- mixing-length shape ---------------------------------------
         if (not cfg.use_mld_iteration) or cfg.translay_scale >= 1.0 \
@@ -760,7 +850,8 @@ def _epbl_column(h, u, v, t0, s0, dsv_dt, dsv_ds, tke_forcing,
                 dt_km1_t2, ds_km1_t2, dt_to_dpe_k, ds_to_dpe_k,
                 dt_to_dpe_a_prev, ds_to_dpe_a_prev, pres_k,
                 dt_to_dcolht_k, ds_to_dcolht_k,
-                dt_to_dcolht_a_prev, ds_to_dcolht_a_prev)
+                dt_to_dcolht_a_prev, ds_to_dcolht_a_prev,
+                colht_sharpness=cfg.smooth_colht_sharpness_per_m)
             mke_src_g0 = dmke_max * (1.0 - jnp.exp(-kddt_h_g0 * mke2_hharm))
 
             convectively_unstable = (
@@ -777,7 +868,8 @@ def _epbl_column(h, u, v, t0, s0, dsv_dt, dsv_ds, tke_forcing,
                 dt_km1_t2, ds_km1_t2, dt_to_dpe_k, ds_to_dpe_k,
                 dt_to_dpe_a_prev, ds_to_dpe_a_prev, pres_k,
                 dt_to_dcolht_k, ds_to_dcolht_k,
-                dt_to_dcolht_a_prev, ds_to_dcolht_a_prev)
+                dt_to_dcolht_a_prev, ds_to_dcolht_a_prev,
+                colht_sharpness=cfg.smooth_colht_sharpness_per_m)
             # If that costs energy after all, fall back to the first guess.
             revert = dpe_conv_c > 0.0
             kd_cu = jnp.where(pe_chg_max <= 0.0,
@@ -829,7 +921,8 @@ def _epbl_column(h, u, v, t0, s0, dsv_dt, dsv_ds, tke_forcing,
                     dt_km1_t2, ds_km1_t2, dt_to_dpe_k, ds_to_dpe_k,
                     dt_to_dpe_a_prev, ds_to_dpe_a_prev, pres_k,
                     dt_to_dcolht_k, ds_to_dcolht_k,
-                    dt_to_dcolht_a_prev, ds_to_dcolht_a_prev)
+                    dt_to_dcolht_a_prev, ds_to_dcolht_a_prev,
+                    colht_sharpness=cfg.smooth_colht_sharpness_per_m)
                 mke_src = dmke_max * (1.0 - jnp.exp(-mke2_hharm * guess))
                 dmke_src_dk = dmke_max * mke2_hharm * jnp.exp(
                     -mke2_hharm * guess)

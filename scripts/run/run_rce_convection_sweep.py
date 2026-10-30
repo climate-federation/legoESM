@@ -46,9 +46,10 @@ stripped-down scaffolding.  CMT and AR1 stochasticity remain
 disabled for the same reason: the lat-lon FV cell-centred wind is
 weakly damped here.
 
-**Scientific caveat**: with such a tight M_b cap, all six mass-flux-
+**Scientific caveat**: with such a tight M_b cap, the capped mass-flux-
 based schemes converge to nearly the same near-equilibrium state
-because the cap dominates each scheme's response.  Kuo (which uses a
+because the cap dominates each scheme's response.  Emanuel runs
+uncapped (CONVECT has no M_b cap).  Kuo (which uses a
 column moisture-excess closure rather than M_b) sits apart and is the
 true outlier.  This is a *stability comparison*, not a validation of
 the schemes' distinct physics.  For the latter, run the production
@@ -246,7 +247,7 @@ def _build_convection_call(scheme: str, dt: float):
         )
 
     elif scheme == "emanuel":
-        cfg = EmanuelConfig(M_b_max=M_B_MAX_RCE)
+        cfg = EmanuelConfig()  # no mass-flux cap: CONVECT has none (#2213 split)
 
         def call(T, qv, pf, ph, u, v, carry):
             (prog,) = carry
@@ -254,8 +255,10 @@ def _build_convection_call(scheme: str, dt: float):
                 T=T, q_v=qv, p_full=pf, p_half=ph,
                 conv_prog_profile=prog, dt=dt, config=cfg,
             )
+            # Emanuel's condensate is its rain source (dq_c_conv_dt = 0);
+            # this sweep's only precipitation path is the cloud bucket.
             return (
-                out.dT_dt, out.dq_v_dt, out.dq_c_conv_dt,
+                out.dT_dt, out.dq_v_dt, out.dq_c_conv_dt + out.dq_r_conv_dt,
                 jnp.zeros_like(u), jnp.zeros_like(v), (prog_new,),
             )
         init_carry_fn = lambda ncol, nlev, dtype: (

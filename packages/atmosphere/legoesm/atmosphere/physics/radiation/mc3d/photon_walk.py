@@ -87,6 +87,8 @@ def trace_one(
     mie_cdf: Array | None = None,
     mie_ang: Array | None = None,
     r_eff: Array | None = None,
+    *,
+    free_path_floor_sharpness: float,
 ) -> PhotonState:
   """Walk one photon to termination via coarse-grid (decomposition) Woodcock
   tracking; return its terminal ``PhotonState``.
@@ -137,7 +139,7 @@ def trace_one(
     cix, ciy, ciz = s.cix, s.ciy, s.ciz
     k_maj = maj.grid[cix, ciy, ciz]
 
-    t_coll = sampling.free_path(k_path, k_maj)
+    t_coll = sampling.free_path(k_path, k_maj, floor_sharpness=free_path_floor_sharpness)
 
     # Distance to the CURRENT coarse cell's faces (derived from carried indices,
     # not a position re-floor). Horizontal axes with one coarse cell have no
@@ -312,6 +314,8 @@ def trace_batch(
     mie_cdf: Array | None = None,
     mie_ang: Array | None = None,
     r_eff: Array | None = None,
+    *,
+    free_path_floor_sharpness: float,
 ) -> PhotonState:
   """``vmap`` ``trace_one`` over a photon batch (leading axis on
   ``keys``/``pos0``/``dir0``). ``maj``/fields/geom are CLOSED OVER (not mapped)
@@ -319,6 +323,7 @@ def trace_batch(
   def _one(key, pos, dir_):
     return trace_one(key, pos, dir_, k_ext, ssa, g, maj, albedo, geom,
                      max_iterations, rayleigh_frac=rayleigh_frac,
-                     mie_cdf=mie_cdf, mie_ang=mie_ang, r_eff=r_eff)
+                     mie_cdf=mie_cdf, mie_ang=mie_ang, r_eff=r_eff,
+                     free_path_floor_sharpness=free_path_floor_sharpness)
 
   return jax.vmap(_one)(keys, pos0, dir0)

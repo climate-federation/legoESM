@@ -5107,6 +5107,10 @@ _DUO_DECK_OWN_ROWS = frozenset({
     "land_ic_path",
     # hardware, not physics: GPU g-point batch (fluxes differ by summation order)
     "rrtmgp_gpoint_batch_size",
+    # RRTMGP scan vs unrolled recurrence: the MPAS deck's scan row was measured
+    # on the MPAS lane only (round-off only); this deck keeps the code default
+    # (user 2026-10-30)
+    "rrtmgp_use_scan",
 })
 
 

@@ -336,6 +336,8 @@ def test_spectral_rollout_rad_gating_one_step():
     from legoesm.driver.compiled_segments import SegmentCarry as _SC
 
     grid = create_gaussian_grid(11, dealiasing="quadratic")
+    # all-land unit fixture: the default McFarlane drag needs a land fraction
+    grid = grid._replace(land_frac=jnp.ones(grid.n_lat * grid.n_lon))
     sigma = create_sigma_coordinate(8)
 
     n_lat, n_lon, nlev = grid.n_lat, grid.n_lon, 8
@@ -616,7 +618,7 @@ def test_aimip_zm_lane_runs_on_the_era5_land_fraction_and_refuses_without_it(
     from legoesm.training.aimip_params import (
         AIMIPClassicalParams, make_aimip_classical_spectral_physics,
     )
-    from legoesm.training.aimip_spatial import grid_with_zm_land_fraction
+    from legoesm.training.aimip_spatial import grid_with_land_fraction
 
     # ERA5-like slice: land in ONE quadrant (north, lon < pi), so a lat flip,
     # lon roll or transpose of the mask lands it on the wrong columns.
@@ -632,9 +634,7 @@ def test_aimip_zm_lane_runs_on_the_era5_land_fraction_and_refuses_without_it(
     monkeypatch.setattr(e2s, "load_era5_slice", fake_slice)
     grid = create_gaussian_grid(8, dealiasing="quadratic")
     sig = create_sigma_coordinate(6)
-    assert grid_with_zm_land_fraction(grid, "tiedtke") is grid
-    assert calls == []
-    g_land = grid_with_zm_land_fraction(grid, "zhang_mcfarlane")
+    g_land = grid_with_land_fraction(grid)
     assert calls == [True]
     assert g_land.land_frac.shape == (grid.n_lat * grid.n_lon,)
     lf = np.asarray(g_land.land_frac).reshape(grid.n_lat, grid.n_lon)
@@ -701,7 +701,7 @@ def test_era5_land_fraction_on_the_aimip_t21_grid_is_earths():
 
     from legoesm.grids.gaussian import create_gaussian_grid
     from legoesm.training.aimip_spatial import (
-        era5_land_fraction, grid_with_zm_land_fraction,
+        era5_land_fraction, grid_with_land_fraction,
     )
 
     grid = create_gaussian_grid(21, dealiasing="quadratic")
@@ -714,14 +714,18 @@ def test_era5_land_fraction_on_the_aimip_t21_grid_is_earths():
     assert land.mean() == pytest.approx(0.33, abs=0.03)
     assert (land * w).sum() / w.sum() == pytest.approx(0.29, abs=0.03)
     # ZM and the surface-parameter mask see the same field.
-    zm = grid_with_zm_land_fraction(grid, "zhang_mcfarlane", land).land_frac
+    zm = grid_with_land_fraction(grid, land).land_frac
     assert np.array_equal(np.asarray(zm), land.reshape(-1))
 
 
-def test_run_aimip_training_and_eval_use_the_era5_land_mask(monkeypatch):
+@pytest.mark.parametrize("conv,gwd", [
+    ("zhang_mcfarlane", "mcfarlane"), ("tiedtke", "hines")])
+def test_run_aimip_training_and_eval_use_the_era5_land_mask(monkeypatch, conv,
+                                                            gwd):
     """run_aimip's classical training AND its in-script eval take the spatial
-    surface mask from the ERA5 land-sea mask (the one AMIP inference and ZM
-    use), not from orography."""
+    surface mask from the ERA5 land-sea mask, not from orography, and the
+    grid carries that land fraction whatever the schemes (user 2026-10-28,
+    Q33: attach it on every AIMIP run, Bechtold/Tiedtke included)."""
     import importlib.util
     import types
     from pathlib import Path
@@ -741,7 +745,7 @@ def test_run_aimip_training_and_eval_use_the_era5_land_mask(monkeypatch):
     cfg = mod._merge(mod._load_yaml(root / "config" / "aimip" / "aimip_era5.yaml"), {
         "n_max": 8, "aimip_variant": "classical", "aimip_spatial_surface": True,
         "aimip_radiation": "gray", "aimip_rad_update_interval": 1,
-        "aimip_convection": "zhang_mcfarlane"})
+        "aimip_convection": conv, "aimip_gwd": gwd})
     spec_cfg = mod._build_spectral_config(cfg)
 
     masks = []
@@ -788,3 +792,21 @@ def test_run_aimip_training_and_eval_use_the_era5_land_mask(monkeypatch):
     with pytest.raises(_Stop):
         mod._evaluate_variant("classical", None, cfg, "unused")
     np.testing.assert_array_equal(np.asarray(seen[1][0]), np.asarray(masks[-1]))
+    # the eval grid carries an ERA5 load too, in grid order
+    assert any(np.array_equal(np.asarray(seen[1][1]), np.asarray(m).reshape(-1))
+               for m in masks[1:])
+
+
+def test_land_fraction_helper_always_attaches():
+    """The helper takes no scheme argument: the attach cannot be made
+    conditional on convection or drag again without changing its signature."""
+    import inspect
+
+    from legoesm.grids.gaussian import create_gaussian_grid
+    from legoesm.training.aimip_spatial import grid_with_land_fraction
+    assert list(inspect.signature(grid_with_land_fraction).parameters) == [
+        "grid", "land"]
+    grid = create_gaussian_grid(11, dealiasing="quadratic")
+    land = jnp.zeros((grid.n_lat, grid.n_lon))
+    out = grid_with_land_fraction(grid, land)
+    assert out.land_frac.shape == (grid.n_lat * grid.n_lon,)

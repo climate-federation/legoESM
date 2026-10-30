@@ -213,7 +213,8 @@ def _write_combo(repo_root: Path, combo_name: str, overrides: dict) -> str:
         "variants": ["classical"],
         "output_dir": str(STAGE2_RESULTS_REL / combo_name),
     }
-    overlay_yaml = dict(overrides)
+    from legoesm.training.aimip_params import declare_sundqvist_rate
+    overlay_yaml = declare_sundqvist_rate(overrides)
     with (combo_dir / "suite.yaml").open("w") as fh:
         yaml.safe_dump(suite_yaml, fh, sort_keys=False)
     with (combo_dir / "variant_classical.yaml").open("w") as fh:

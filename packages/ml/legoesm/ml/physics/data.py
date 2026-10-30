@@ -204,6 +204,8 @@ def capture_physics_teacher_snapshot(
                 dz=dz_col,
                 dt=dt,
                 config=micro_config,
+                cell_area=(None if driver.physics.grid_area is None
+                           else ad.flatten_2d(jnp.asarray(driver.physics.grid_area))),
             )
             layer_mass = (p_half_col[:, 1:] - p_half_col[:, :-1]) / constants.g
             generated_rain_flux = jnp.sum(rates.autoconversion * layer_mass, axis=1)

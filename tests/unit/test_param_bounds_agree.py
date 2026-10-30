@@ -138,3 +138,183 @@ def test_each_known_disagreement_is_still_real(name):
     """An entry that stops describing the code is a lie in a list."""
     assert name in _disagreements(), (
         f"{name} is listed as disagreeing but does not; remove it")
+
+
+# --- AIMIP trainable knobs: a third declaration of the same ranges -------------
+# (user 2026-10-28, ASK N): every AIMIP knob's range is compared with its
+# scheme's __param_spec__ and, where one exists, the driver's check.  Values
+# are NOT reconciled here; today's disagreements are listed, SHRINK-ONLY.
+_AIMIP_DISAGREE: dict[str, str] = {
+    "tiedtke_tau_M_u_relax":
+        "aimip (600.0, 14400.0) vs spec (600.0, 5400.0) vs driver None",
+    "tiedtke_tau_MC_proxy":
+        "aimip (1800.0, 28800.0) vs spec (1188.0, 10800.0) vs driver None",
+    "tiedtke_downdraft_alpha":
+        "aimip (0.05, 0.6) vs spec (0.0, 0.9) vs driver None",
+    "tiedtke_delta_deep":
+        "aimip (2e-05, 0.0005) vs spec (3.3e-05, 0.0003) vs driver None",
+    "tiedtke_delta_shallow":
+        "aimip (0.0001, 0.001) vs spec (9.9e-05, 0.0009) vs driver None",
+    "tiedtke_delta_midlevel":
+        "aimip (2e-05, 0.0005) vs spec (6.6e-05, 0.0006) vs driver None",
+    "tiedtke_cmt_c_u":
+        "aimip (0.3, 1.0) vs spec (0.0, 2.0) vs driver None",
+    "tiedtke_cmt_c_d":
+        "aimip (0.3, 1.0) vs spec (0.0, 2.0) vs driver None",
+    "tiedtke_parcel_dq":
+        "aimip (0.0001, 0.005) vs spec (0.0, 0.003) vs driver None",
+    "tiedtke_cloud_depth_shallow_max":
+        "aimip (500.0, 3000.0) vs spec (800.0, 2500.0) vs driver None",
+    "tiedtke_mc_proxy_RH_crit":
+        "aimip (0.4, 0.9) vs spec (0.3, 1.0) vs driver None",
+    "louis_l_mix_max":
+        "aimip (20.0, 400.0) vs spec (10.0, 300.0) vs driver None",
+    "louis_Ri_crit":
+        "aimip (0.1, 0.6) vs spec (0.1, 0.75) vs driver None",
+    "louis_b_louis":
+        "aimip (2.0, 10.0) vs spec (1.5, 15.0) vs driver None",
+    "louis_c_louis":
+        "aimip (5.0, 30.0) vs spec (5.0, 49.8) vs driver None",
+    "louis_d_louis":
+        "aimip (2.0, 15.0) vs spec (1.5, 15.0) vs driver None",
+    "surface_Cd_neutral":
+        "aimip (0.0005, 0.003) vs spec (0.0005, 0.005) vs driver None",
+    "surface_Ch_neutral":
+        "aimip (0.0005, 0.003) vs spec (0.0005, 0.005) vs driver None",
+    "mcfarlane_h_topo":
+        "aimip (100.0, 2000.0) vs spec (50.0, 2000.0) vs driver None",
+    "mcfarlane_G_0":
+        "aimip (0.1, 1.0) vs spec (0.1, 2.0) vs driver None",
+    "mcfarlane_efficiency":
+        "aimip (0.1, 1.0) vs spec (0.0, 1.0) vs driver None",
+    "mcfarlane_min_wind":
+        "aimip (0.5, 5.0) vs spec (0.5, 6.0) vs driver None",
+    "mcfarlane_envelope_scale":
+        "aimip (0.5, 2.0) vs spec (0.25, 4.0) vs driver None",
+    "mcfarlane_directional_spread":
+        "aimip (0.5, 2.0) vs spec (0.25, 4.0) vs driver None",
+    "cloud_rh_crit":
+        "aimip (0.5, 0.95) vs spec (0.5, 0.99) vs driver (0.5, 0.99)",
+    "cloud_alpha_xr":
+        "aimip (25.0, 400.0) vs spec (10.0, 1000.0) vs driver (10.0, 1000.0)",
+    "cloud_p_xr":
+        "aimip (0.1, 1.0) vs spec (0.05, 1.0) vs driver (0.05, 1.0)",
+    "cloud_r_eff_liq":
+        "aimip (5e-06, 3e-05) vs spec (4e-06, 3e-05) vs driver None",
+    "cloud_r_eff_ice":
+        "aimip (1e-05, 0.0001) vs spec (1e-05, 9e-05) vs driver None",
+    "sundqvist_RH_crit":
+        "aimip (0.5, 0.95) vs spec (0.5, 1.0) vs driver None",
+    "sundqvist_evap_coeff":
+        "aimip (1e-05, 0.005) vs spec (1e-05, 0.0015) vs driver None",
+    "sbm_RH_ref":
+        "aimip (0.5, 0.9) vs spec (0.4, 1.0) vs driver None",
+}
+
+
+# AIMIP knobs with NO second declaration (no scheme spec entry, no driver
+# check), so nothing is compared for them (user 2026-10-28, R10).  SHRINK-ONLY:
+# a new unchecked knob fails, and one that gains a range must leave the list.
+_AIMIP_UNCHECKED: frozenset[str] = frozenset({
+    "tiedtke_downdraft_RH_min",
+    "tiedtke_epsilon_deep",
+    "tiedtke_epsilon_shallow",
+    "tiedtke_epsilon_midlevel",
+    "tiedtke_parcel_dT",
+    "mcfarlane_k_wave",
+    "sundqvist_sigmoid_sharpness",
+    "rrtmgp_sfc_emissivity",
+    "rrtmgp_sfc_albedo",
+})
+
+
+def _aimip_knob_fields() -> dict[str, tuple[str, str]]:
+    """knob -> (config class name, field), read from the code that maps them:
+    ``aimip_params._canonical_scheme_defaults`` (``var = Class()`` then
+    ``"knob": float(var.field)``)."""
+    import inspect
+
+    from legoesm.training import aimip_params
+    tree = ast.parse(inspect.getsource(aimip_params._canonical_scheme_defaults))
+    var_cls = {}
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Assign) and isinstance(node.value, ast.Call)
+                and isinstance(node.value.func, ast.Name)):
+            var_cls[node.targets[0].id] = node.value.func.id
+    out = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Dict):
+            for k, v in zip(node.keys, node.values):
+                attr = v.args[0]
+                out[k.value] = (var_cls[attr.value.id], attr.attr)
+    return out
+
+
+def _aimip_rows():
+    """``[(knob, aimip (lo, hi), spec (lo, hi) | None, driver (lo, hi) | None)]``."""
+    from legoesm.training.aimip_params import AIMIP_CLASSICAL_CONSTRAINTS
+    from legoesm.training.param_collector import build_registry
+    spec = {}
+    for m in build_registry():
+        spec.setdefault((m.config_class, m.field), []).append(m)
+    fields, driver = _aimip_knob_fields(), _driver_bounds()
+    rows = []
+    for c in AIMIP_CLASSICAL_CONSTRAINTS:
+        metas = spec.get(fields[c.name], [])
+        assert len(metas) <= 1, f"{c.name}: {len(metas)} spec entries"
+        sb = tuple(map(float, metas[0].bounds)) if metas else None
+        rows.append((c.name, (c.min_val, c.max_val), sb, driver.get(c.name)))
+    return rows
+
+
+def _close(a, b):
+    return all(abs(x - y) <= _TOL * max(1.0, abs(y)) for x, y in zip(a, b))
+
+
+def _aimip_disagreements(rows=None) -> dict[str, str]:
+    bad = {}
+    for name, a, sb, db in (_aimip_rows() if rows is None else rows):
+        if any(o is not None and not _close(a, o) for o in (sb, db)):
+            bad[name] = f"aimip {a} vs spec {sb} vs driver {db}"
+    return bad
+
+
+def test_aimip_disagreement_detector_catches_either_side():
+    """Non-vacuity: a knob off from its spec OR its driver range is flagged;
+    one with no other declaration is not."""
+    rows = [("a", (0.0, 1.0), (0.0, 2.0), None),
+            ("b", (0.0, 1.0), None, (0.5, 1.0)),
+            ("c", (0.0, 1.0), (0.0, 1.0), (0.0, 1.0)),
+            ("d", (0.0, 1.0), None, None)]
+    assert set(_aimip_disagreements(rows)) == {"a", "b"}
+
+
+def test_every_aimip_knob_maps_to_a_config_field():
+    """Non-vacuity: the knob -> field map covers every knob, and most knobs
+    find a spec entry (if the lookup broke, everything would 'agree')."""
+    from legoesm.training.aimip_params import AIMIP_CLASSICAL_CONSTRAINTS
+    fields = _aimip_knob_fields()
+    assert {c.name for c in AIMIP_CLASSICAL_CONSTRAINTS} <= set(fields)
+    rows = _aimip_rows()
+    assert sum(sb is not None for _, _, sb, _ in rows) >= len(rows) // 2
+
+
+def test_no_new_aimip_knob_declares_another_range():
+    new = sorted(set(_aimip_disagreements()) - set(_AIMIP_DISAGREE))
+    assert not new, (
+        f"{new}: the AIMIP knob range differs from its scheme spec or driver "
+        f"range. Reconcile, or list it in _AIMIP_DISAGREE with what is owed.")
+
+
+def test_the_aimip_disagreement_list_only_shrinks():
+    fixed = sorted(set(_AIMIP_DISAGREE) - set(_aimip_disagreements()))
+    assert not fixed, f"{fixed} now agree — delete their _AIMIP_DISAGREE entries."
+
+
+def test_aimip_unchecked_knobs_list_is_exact():
+    unchecked = {n for n, _, sb, db in _aimip_rows() if sb is None and db is None}
+    new = sorted(unchecked - _AIMIP_UNCHECKED)
+    gone = sorted(_AIMIP_UNCHECKED - unchecked)
+    assert not new, (f"{new}: AIMIP knob with no scheme spec and no driver "
+                     f"range. Declare one, or list it in _AIMIP_UNCHECKED.")
+    assert not gone, f"{gone} are now checked; delete them from _AIMIP_UNCHECKED."

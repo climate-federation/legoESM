@@ -42,7 +42,9 @@ from legoesm.atmosphere.physics.turbulence.vertical_diffusion import (
 # ---------------------------------------------------------------------------
 
 def _louis_reference(Ri, l_mix, dz, b, c, d, blend_sharpness, b_heat):
-    """Inline copy of the OLD louis.py stability-function block (pre-dedup)."""
+    """Inline copy of the OLD louis.py stability-function block (pre-dedup),
+    with the stable HEAT function moved to the OpenIFS vdfexcu.F90:395 form
+    (sqrt multiplies) by the oracle port; legacy (no-heights) unstable geometry."""
     Ri_neg = jnp.minimum(Ri, 0.0)
     denom_unstable = (
         1.0 + 3.0 * b * c * l_mix ** 2
@@ -53,7 +55,7 @@ def _louis_reference(Ri, l_mix, dz, b, c, d, blend_sharpness, b_heat):
     Ri_pos = jnp.maximum(Ri, 0.0)
     sqrt_stable = jnp.sqrt(1.0 + d * Ri_pos)
     f_stable_m = 1.0 / (1.0 + 2.0 * b * Ri_pos / sqrt_stable)
-    f_stable_h = 1.0 / (1.0 + 2.0 * b_heat * Ri_pos / sqrt_stable)
+    f_stable_h = 1.0 / (1.0 + 2.0 * b_heat * Ri_pos * sqrt_stable)
     blend = jax.nn.sigmoid(blend_sharpness * Ri)
     f_m = (1.0 - blend) * f_unstable_m + blend * f_stable_m
     f_h = (1.0 - blend) * f_unstable_h + blend * f_stable_h
@@ -102,8 +104,10 @@ def test_louis_stability_matches_old_ysu_inline():
     blend_ri = jax.nn.sigmoid(sharp * Ri)
     f_m_ref = (1.0 - blend_ri) * f_unstable + blend_ri * f_stable
     np.testing.assert_allclose(np.asarray(f_m), np.asarray(f_m_ref), rtol=1e-10)
-    # b_heat defaulted to b: heat function must equal momentum function.
-    np.testing.assert_allclose(np.asarray(f_h), np.asarray(f_m), rtol=1e-12)
+    # b_heat defaulted to b: the unstable heat function equals the momentum
+    # one (the stable heat form differs: sqrt multiplies, OpenIFS vdfexcu:395).
+    neg = np.asarray(Ri) <= 0.0
+    np.testing.assert_allclose(np.asarray(f_h)[neg], np.asarray(f_m)[neg], rtol=1e-12)
 
 
 def test_louis_stability_neutral_limit_and_grad():

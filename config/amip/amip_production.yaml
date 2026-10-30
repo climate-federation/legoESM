@@ -250,6 +250,13 @@ rrtmgp_gpoint_batch_size: 0          # CPU: one g-point at a time (code default 
                                      # cores: radiation step 13.8 s at 16, 7.9 s at 0
                                      # (~139 s per simulated day); fluxes differ only by
                                      # summation order (<= 6.1e-4 W/m2).
+rrtmgp_use_scan: true                # scan the RRTMGP column recurrence (code default:
+                                     # unrolled on CPU, scan on GPU, so GPU is unchanged).
+                                     # Measured 2026-10-29, this deck, MPAS res6 CPU: step
+                                     # -4% at 1 node, -7% at 8; round-off only (fp32 fluxes
+                                     # <= 1.1e-7 of max after one step), dry mass unchanged,
+                                     # 127-step divergence (0.66 K) matched by a 1e-14 T
+                                     # perturbation control (0.27 K).  User 2026-10-30.
 hard_sat_ice_curve: false          # the ice-curve blend of that same
                                    # post-step drain; inert once the drain
                                    # is off, set explicitly so no row rests
@@ -288,6 +295,10 @@ zm_ke: 5.0e-6               # rain evaporation efficiency
 zm_dmpdz: -1.0e-3           # dilute-plume entrainment [1/m]
 zm_tau: 3600.0              # CAPE consumption timescale [s]
 zm_capelmt: 70.0            # deep-convection CAPE threshold [J/kg]
+# ZM detrainment smoothing widths (RULE 5; values = the scheme defaults; 0 =
+# CAM's hard switch), read by the CLUBB macmic sub-step's detrainment booking.
+zm_detrain_phase_width_K: 0.1              # liquid/ice ramp corners [K]
+zm_detrain_number_width_kgkg_s: 1.0e-12    # max(0, dlf) in the number source [kg/kg/s]
 zm_transport_cloud_tracers: true  # ZM convtran of carried cloud/precip water + numbers (CAM6)
 
 # ---- turbulence ---------------------------------------------------------------
@@ -341,7 +352,9 @@ gravity_wave_drag: mcfarlane            # orographic member = CAM6 gw_oro port
                                         # interface N with n2min 5e-5, no launch
                                         # clip, tndmax 400 m/s/day, limiter
                                         # remainder carried down, gw eddy
-                                        # diffusion of dse + tracers.  These are
+                                        # diffusion of dse + tracers, critical-
+                                        # level offset 0 (CAM c = 0; follow-up
+                                        # 2026-10-20, was 0.5 m/s).  These are
                                         # the McFarlaneConfig code defaults (no
                                         # deck rows exist for them, except
                                         # effgw_oro below); the fv3duo deck

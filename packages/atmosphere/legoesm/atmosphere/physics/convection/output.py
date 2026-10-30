@@ -44,7 +44,9 @@ class ConvectionOutput(NamedTuple):
         ``precipitation``: convective condensate now joins the
         cloud-water bucket and is processed by microphysics, which
         owns the resulting surface precipitation diagnostic. By
-        construction this field is non-negative.
+        construction this field is non-negative, except for Kuo, whose
+        source is the Mahfouf oracle's signed rain integrand
+        ``dT_dt / alpha`` (negative where the scheme cools).
     cape : jax.Array
         CAPE diagnostic [J/kg], shape (ncol,).
     convective_mask : jax.Array
