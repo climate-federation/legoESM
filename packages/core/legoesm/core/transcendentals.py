@@ -81,7 +81,7 @@ def _scalar_libm_binary(
     left_source, right_source = np.broadcast_arrays(left, right)
     if left_source.dtype not in (np.dtype(np.float32), np.dtype(np.float64)):
         raise TypeError(f"libm {name} requires float32/float64")
-    function = getattr(_LIBM, name)
+    function = getattr(glibc_libm(), name)
     function.argtypes = (ctypes.c_double, ctypes.c_double)
     function.restype = ctypes.c_double
     result = np.empty_like(left_source)
