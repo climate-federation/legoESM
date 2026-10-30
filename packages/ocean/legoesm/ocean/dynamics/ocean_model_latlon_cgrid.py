@@ -15699,6 +15699,31 @@ class LatLonCGridOceanModel:
         -------
         LatLonCGridOceanState
         """
+        # Open lateral boundaries, baroclinic and tracer part: run the step,
+        # then set the ring cells and open faces (CROCO u3dbc/v3dbc/t3dbc).
+        # Eager wrapper, so every outer integrator and diagnostic path below
+        # stays untouched; the barotropic part acts inside the substeps.
+        _ob = getattr(sponge, "open_boundary", None)
+        if (_ob is not None and getattr(_ob, "tau_in", None) is not None
+                and not getattr(self, "_open_boundary_post", False)):
+            from legoesm.ocean.dynamics.open_boundary_latlon import (
+                apply_baroclinic_open_boundary,
+            )
+            self._open_boundary_post = True
+            try:
+                _new = self.step(
+                    state, dt, freshwater, surface_forcing, sponge, grid=grid,
+                    vertex_mask=vertex_mask, t_seconds=t_seconds,
+                    external_tracer_rate=external_tracer_rate,
+                    _shortwave_tendency_test_delta=_shortwave_tendency_test_delta,
+                    _vertical_K_test_override=_vertical_K_test_override,
+                    _nemo_stage1_zad_eta_after_override=(
+                        _nemo_stage1_zad_eta_after_override),
+                )
+            finally:
+                self._open_boundary_post = False
+            return apply_baroclinic_open_boundary(
+                state, _new, _ob, dt, self.z_coord.dz_ref)
         # A direct eager step is also a valid cold-start driver.  Seed the
         # NEMO pre-tke_avn coefficient memory here as well as in
         # seed_scan_carry(); otherwise only scan/restart drivers get the
