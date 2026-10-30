@@ -67,6 +67,7 @@ from legoesm.driver import physics_pipeline as pp
 from legoesm.driver.config import (
     CLUBB_SCALAR_FIELDS,
     DycoreConfig,
+    GridConfig,
     ZM_SCALAR_FIELDS,
     ZM_WIDTH_FIELDS,
     ExperimentConfig,
@@ -94,6 +95,7 @@ _RESOLVERS = {
          # MPAS macro/micro sub-cycle with ZM + CLUBB (validate_strict).
          {"convection": "zhang_mcfarlane", "turbulence": "clubb",
           "cld_macmic_num_steps": 3,
+          "grid": GridConfig(grid_type="mpas"),
           "dycore": DycoreConfig(discretization="mpas")}],
     ),
     "gwd_config_for": (

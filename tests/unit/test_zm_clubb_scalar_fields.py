@@ -190,7 +190,8 @@ _ZW_HOST = dict(convection="zhang_mcfarlane", turbulence="clubb",
 
 
 def _mpas(cfg):
-    return cfg._replace(dycore=cfg.dycore._replace(discretization="mpas"))
+    return cfg._replace(grid=cfg.grid._replace(grid_type="mpas"),
+                        dycore=cfg.dycore._replace(discretization="mpas"))
 
 
 def _zw_leaves(cfg):
@@ -242,6 +243,15 @@ def test_production_deck_names_the_widths_at_their_defaults():
 def test_width_refused_where_nothing_reads_it(host):
     cfg = _mpas(ExperimentConfig(**host, zm_detrain_phase_width_K=0.2))
     with pytest.raises(ValueError, match="zm_detrain_phase_width_K"):
+        cfg.validate_strict()
+
+
+def test_width_refused_off_the_mpas_lane():
+    """The booking runs only in the MPAS macmic loop (combined.py _defer_dlf);
+    elsewhere cld_macmic_num_steps>=2 itself is refused."""
+    cfg = ExperimentConfig(**_ZW_HOST, zm_detrain_phase_width_K=0.2)
+    assert not cfg.column_loop_lane
+    with pytest.raises(ValueError, match="cld_macmic_num_steps=3 is wired"):
         cfg.validate_strict()
 
 
