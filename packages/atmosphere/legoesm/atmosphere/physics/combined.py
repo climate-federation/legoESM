@@ -1048,7 +1048,7 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
     from legoesm.diagnostics.process_ledger import LEDGER_WATER_SPECIES
     _LEDGER_WATER = LEDGER_WATER_SPECIES
 
-    def _module_ledger_row(t, p_s, dsigma):
+    def _module_ledger_row(t, p_s, dsigma, dp=None):
         """One module's per-column ``[water, energy]`` from its OWN tendency.
 
         Simpler than the FV capture, which must reach into intermediate
@@ -1065,7 +1065,7 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
             for _k in _LEDGER_WATER:
                 if _k in tt:
                     dq = tt[_k].data if dq is None else dq + tt[_k].data
-        return ledger_entry_column(dq, t.dT_dt.data, p_s, dsigma,
+        return ledger_entry_column(dq, t.dT_dt.data, p_s, dsigma, dp=dp,
                                    level_weight=_ledger_level_weight)
 
     def _zero_tendencies(state, has_v):
@@ -1159,6 +1159,15 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
             from legoesm.diagnostics.process_ledger import zero_ledger_column
             _bl_dsigma = sigma_coord.dsigma
             _bl_ps = state.p_s.data
+            # The column's true layer masses: on a hybrid grid p_s*dsigma is
+            # off over terrain (0.25 percent of the physics rows at MPAS level
+            # 1 with CAM L32), and the ledger must match the column store.
+            # p_s in the conservation accumulator's precision first, as the
+            # p_s*dsigma path did: a float32 dp would put rounding of order
+            # 1e-7 of the column store into a one-step budget difference.
+            from legoesm.core.conservation import conservation_accumulator
+            _bl_dp = sigma_coord.layer_thickness_dp(
+                _bl_ps.astype(conservation_accumulator()))
             # Budget accumulator in the WIDEST available float (f64 under
             # x64, f32 otherwise — canonicalize_dtype respects the setting):
             # per-module rows arrive in MIXED precision (f32 radiation, f64
@@ -1170,7 +1179,7 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
             _led_dtype = canonicalize_dtype(jnp.float64)
             _led = zero_ledger_column(_bl_ps.shape[0], dtype=_led_dtype)
             _led = _led.at[:, ledger_rows[0], :].add(
-                _module_ledger_row(first, _bl_ps, _bl_dsigma)
+                _module_ledger_row(first, _bl_ps, _bl_dsigma, _bl_dp)
                 .astype(_led_dtype))
 
         # Accumulate tracer tendencies from all physics modules
@@ -1208,7 +1217,7 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
                 # the same row (e.g. GWD and any future module on
                 # other_physics), and a set would silently discard the first.
                 _led = _led.at[:, ledger_rows[_i_mod], :].add(
-                    _module_ledger_row(t, _bl_ps, _bl_dsigma)
+                    _module_ledger_row(t, _bl_ps, _bl_dsigma, _bl_dp)
                     .astype(_led.dtype))
             du_dt = du_dt + t.du_dt.data
             if dv_dt is not None and t.dv_dt is not None:
@@ -1494,6 +1503,7 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
                     # without this the radiation row would read zero on every
                     # held step and the ledger would not sum to the applied
                     # total.  Pinned by a held-step closure test.
+                    from legoesm.core.conservation import conservation_accumulator
                     from legoesm.diagnostics.process_ledger import (
                         ROW_RADIATION, ledger_entry_column,
                     )
@@ -1501,6 +1511,8 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
                         ledger_entry_column(
                             None, cached_rad.reshape(dT_dt.shape),
                             state.p_s.data, sigma_coord.dsigma,
+                            dp=sigma_coord.layer_thickness_dp(
+                                state.p_s.data.astype(conservation_accumulator())),
                             level_weight=_ledger_level_weight)
                         .astype(_led.dtype))
             combined = _build_combined(

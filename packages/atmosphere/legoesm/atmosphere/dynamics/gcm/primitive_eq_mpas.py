@@ -1578,7 +1578,8 @@ class MPASPrimitiveEquationModel(IntegrationMixin):
                 (state, _state_postdyn, _state_postphys, _state_prefix,
                  _state_postfix, state_new),
                 self.sigma_coord.dsigma, dt,
-                level_weight=self.config.budget_ledger_level_weight)
+                level_weight=self.config.budget_ledger_level_weight,
+                layer_dp=self.sigma_coord.layer_thickness_dp)
 
         # #1675: ``cast_pytree`` skips DOWNCASTS, so in ``mixed`` it never
         # rounded the mass fixer's float64 back out of the bulk state.

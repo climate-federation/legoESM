@@ -1341,7 +1341,8 @@ def make_voronoi_mpi_step(
                  _state_postfix, state_new),
                 sigma_coord.dsigma, dt,
                 level_weight=getattr(config, "budget_ledger_level_weight",
-                                     None))
+                                     None),
+                layer_dp=sigma_coord.layer_thickness_dp)
 
         return (finalize_to_storage(
                     cast_pytree(state_new, None, "storage")),

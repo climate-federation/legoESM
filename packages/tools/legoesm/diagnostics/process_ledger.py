@@ -456,7 +456,7 @@ def total_energy_entry_column(p_s, dsigma, *, dT_dt=None, du_dt=None,
 
 
 def step_ledger_from_stages(phys_rows, stages, dsigma, dt, *,
-                            level_weight=None):
+                            level_weight=None, layer_dp=None):
     """One MPAS step's per-column ledger ``(nCells, N_LEDGER, 2)``.
 
     ``stages`` = ``(pre, post_dynamics, post_physics, pre_mass_fix,
@@ -466,12 +466,20 @@ def step_ledger_from_stages(phys_rows, stages, dsigma, dt, *,
     it; the physics closure discrepancy is booked to ``other_physics`` so
     ``sum(rows) == (snap(end) - snap(pre)) / dt`` exactly.  Shared by the
     serial and the cell-partition MPI step so the two cannot drift.
+    ``layer_dp(p_s)`` gives the true layer masses on a hybrid grid, where
+    ``p_s*dsigma`` is off over terrain; p_s is widened to the conservation
+    accumulator first so a float32 dp does not leak rounding into the budget.
     """
+    from legoesm.core.conservation import conservation_accumulator
+
     def _snap(s):
         water = [s.tracers[k].data for k in LEDGER_WATER_SPECIES
                  if s.tracers is not None and k in s.tracers]
+        dp = (None if layer_dp is None else
+              layer_dp(s.p_s.data.astype(conservation_accumulator())))
         return column_store_snapshot_column(
-            s.p_s.data, dsigma, s.T.data, *water, level_weight=level_weight)
+            s.p_s.data, dsigma, s.T.data, *water, dp=dp,
+            level_weight=level_weight)
 
     s_pre, s_dyn, s_phy, s_fix0, s_fix1, s_end = (_snap(s) for s in stages)
     rows = phys_rows.astype(s_pre.dtype)
