@@ -1433,6 +1433,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
                             help=f"CAM6 ice-stratus ramp cldfrc2m {_nm} "
                                  f"(cloud scheme cam6_clubb; bounds {_lo}..{_hi}); "
                                  f"None = {_dv} (CAM6 CLUBB default)")
+    parser.add_argument("--cloud-cam6-conv-water-in-rad",
+                        dest="cloud_cam6_conv_water_in_rad", type=int,
+                        choices=(0, 1), default=0,
+                        help="CAM6 conv_water_in_rad (cloud scheme cam6_clubb): "
+                             "1 adds the deep convective in-cloud water over "
+                             "deepcu to the radiation's cloud water "
+                             "(conv_water.F90); 0 (default) = stratiform only.")
+    parser.add_argument("--cloud-cam6-conv-water-frac-limit",
+                        dest="cloud_cam6_conv_water_frac_limit", type=float,
+                        default=None,
+                        help="CAM6 conv_water_frac_limit (bounds 1e-4..0.1); "
+                             "None = 0.01 (CAM6 namelist)")
     parser.add_argument("--cloud-cover-condensate-q-ref",
                         dest="cloud_cover_condensate_q_ref", type=float,
                         default=None,
@@ -3268,6 +3280,8 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         cloud_cam6_rhmaxi=args.cloud_cam6_rhmaxi,
         cloud_cam6_rhminis=args.cloud_cam6_rhminis,
         cloud_cam6_rhmaxis=args.cloud_cam6_rhmaxis,
+        cloud_cam6_conv_water_in_rad=args.cloud_cam6_conv_water_in_rad,
+        cloud_cam6_conv_water_frac_limit=args.cloud_cam6_conv_water_frac_limit,
         cloud_cap_floor_on=args.cloud_cap_floor_on,
         cloud_cap_floor_lat_deg=args.cloud_cap_floor_lat_deg,
         cloud_cap_floor_p_max_pa=args.cloud_cap_floor_p_max_pa,

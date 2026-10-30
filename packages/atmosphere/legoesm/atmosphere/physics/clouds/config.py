@@ -49,6 +49,7 @@ __param_spec__ = {
             "cam6_rhmaxis": "CAM6 cldfrc2m rhmaxis default 1.0 (stratospheric step at rhi=1) = physical ceiling",
             "cam6_deepcu_frac_limit": "numerics: threshold below which the deep-convective fraction is zeroed (clubb_intr frac_limit)",
             "cam6_deepcu_ic_limit": "numerics: in-cloud water floor below which the deep-convective fraction is zeroed (clubb_intr ic_limit)",
+            "cam6_conv_water_frac_limit": "numerics: conv_water_frac_limit, the fraction below which conv_water_4rad drops a cloud part (CAM6 namelist 0.01)",
             "cloud_inhomogeneity_factor": "Cahalan plane-parallel-bias reduction, default 1.0 (homogeneous, no reduction) = the physical ceiling; not a well-posed sigmoid tunable (default on the bound)",
         },
         "params": {
@@ -413,6 +414,18 @@ class CloudConfig(NamedTuple):
     # smoothstep_quintic((CDF - (1 - cf))/width + 1/2), exactly CAM's 0/1
     # outside a band of that width.  Used by "max_random" and "mcica".
     cloud_subcolumn_mask_width: float = 1.0e-3
+    # CAM6 convective water in the radiation (conv_water.F90 conv_water_4rad,
+    # used by cloud_diagnostics.F90:364-404; cam6 namelist conv_water_in_rad
+    # = 1 and conv_water_frac_limit = 0.01, namelist_defaults_cam.xml:1183,
+    # 1186).  Scheme "cam6_clubb" only.  0 (default) = the stratiform water
+    # alone reaches the cloud optics, as before.  1 = the deep convective
+    # in-cloud water (ZM ql, ``conv_icwmr``) over deepcu is area-averaged with
+    # the stratiform in-cloud water over ast, split by the stratiform ice
+    # ratio, and the result is taken in cloud over the radiative cover with
+    # CAM's 1e-4 floor and 5 g/kg cap.  Mode 2 (emissivity average) is not
+    # ported.
+    cam6_conv_water_in_rad: int = 0
+    cam6_conv_water_frac_limit: float = 0.01
 
 
 def build_cloud_config(
@@ -448,6 +461,8 @@ def build_cloud_config(
     cam6_rhmaxi: float | None = None,
     cam6_rhminis: float | None = None,
     cam6_rhmaxis: float | None = None,
+    cam6_conv_water_in_rad: int | None = None,
+    cam6_conv_water_frac_limit: float | None = None,
 ) -> "CloudConfig":
     """Assemble a ``CloudConfig`` from the ``ExperimentConfig``-level cloud
     fields (``cloud_scheme`` + the optional ``cloud_rh_crit`` /
@@ -501,7 +516,9 @@ def build_cloud_config(
     if cover_condensate_q_ref is not None:
         overrides["cover_condensate_q_ref"] = cover_condensate_q_ref
     for _name, _val in (("cam6_rhmini", cam6_rhmini), ("cam6_rhmaxi", cam6_rhmaxi),
-                        ("cam6_rhminis", cam6_rhminis), ("cam6_rhmaxis", cam6_rhmaxis)):
+                        ("cam6_rhminis", cam6_rhminis), ("cam6_rhmaxis", cam6_rhmaxis),
+                        ("cam6_conv_water_in_rad", cam6_conv_water_in_rad),
+                        ("cam6_conv_water_frac_limit", cam6_conv_water_frac_limit)):
         if _val is not None:
             overrides[_name] = _val
     for _name, _val in (("cap_floor_on", cap_floor_on), ("cap_floor_lat_deg", cap_floor_lat_deg),

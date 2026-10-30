@@ -993,6 +993,59 @@ def cam6_deep_convective_fraction(
     return deepcu.at[:, -1].set(0.0)
 
 
+_CW_IC_LIMIT = 1.0e-12       # conv_water.F90 ic_limit [kg/kg]
+_CW_ICE_RATIO_EPS = 1.0e-36  # conv_water.F90 wrk1 denominator guard [kg/kg]
+_CD_MIN_CLD = 1.0e-4         # cloud_diagnostics.F90:391 floor on CLD
+_CD_IC_MAX = 5.0e-3          # cloud_diagnostics.F90:391 in-cloud cap [kg/kg]
+
+
+def cam6_conv_water_4rad(ls_liq, ls_ice, ast, dp_frac, dp_icwmr, frac_limit,
+                         sh_frac=None, sh_icwmr=None):
+    """Grid-mean liquid and ice for the radiation, stratus plus cumulus.
+
+    Port of CAM6 ``conv_water_4rad`` (conv_water.F90, cam_cesm2_1_rel_60,
+    the loop at :299-390) for ``conv_water_in_rad = 1`` (area-weighted
+    arithmetic average).  Inputs (ncol, nlev): ``ls_liq``/``ls_ice`` the
+    grid-mean stratiform cloud liquid and ice [kg/kg] (CLDLIQ, CLDICE),
+    ``ast`` the stratiform fraction max(alst, aist), ``dp_frac`` deepcu,
+    ``dp_icwmr`` the deep in-cloud water (ZM ql, ICWMRDP) [kg/kg]; shallow
+    fraction and water default to zero (no shallow scheme under CLUBB).
+    Returns ``(totg_liq, totg_ice)`` [kg/kg].
+
+    Both branches of the Fortran ``if`` are evaluated and selected with
+    ``where``; every division has a ``max(frac_limit, .)`` denominator, as in
+    the Fortran, so ``frac_limit`` must be positive.  The convective water is
+    split by the STRATIFORM ice ratio, so cumulus with no stratiform
+    condensate in the cell is booked as liquid, as CAM6 does.
+    """
+    if not frac_limit > 0.0:
+        raise ValueError(f"conv_water_frac_limit must be > 0, got {frac_limit}")
+    zero = jnp.zeros_like(ls_liq)
+    sh_frac = zero if sh_frac is None else sh_frac
+    sh_icwmr = zero if sh_icwmr is None else sh_icwmr
+    fl = frac_limit
+    sh0 = jnp.where((sh_frac <= fl) | (sh_icwmr <= _CW_IC_LIMIT), 0.0, sh_frac)
+    dp0 = jnp.where((dp_frac <= fl) | (dp_icwmr <= _CW_IC_LIMIT), 0.0, dp_frac)
+    cu0 = sh0 + dp0
+    wrk1 = jnp.minimum(1.0, jnp.maximum(
+        0.0, ls_ice / (ls_ice + ls_liq + _CW_ICE_RATIO_EPS)))
+    no_cu = (cu0 < fl) | ((sh_icwmr + dp_icwmr) < _CW_IC_LIMIT)
+    ls_sum = ls_liq + ls_ice
+    ls_icwmr = ls_sum / jnp.maximum(fl, ast)
+    # stratus only (:330-341): a fraction under frac_limit is dropped
+    tot0_a = jnp.where(ast < fl, 0.0, ast)
+    tot_ic_a = jnp.where(ast < fl, 0.0, ls_icwmr)
+    # stratus and cumulus (:345-385), mode 1
+    cu_icwmr = (sh0 * sh_icwmr + dp0 * dp_icwmr) / jnp.maximum(fl, cu0)
+    tot0_b = ast + cu0
+    tot_ic_b = (ast * ls_icwmr + cu0 * cu_icwmr) / jnp.maximum(fl, tot0_b)
+    tot0 = jnp.where(no_cu, tot0_a, tot0_b)
+    tot_ic = jnp.where(no_cu, tot_ic_a, tot_ic_b)
+    totg_ice = tot0 * tot_ic * wrk1
+    totg_liq = tot0 * tot_ic * (1.0 - wrk1)
+    return totg_liq, totg_ice
+
+
 def compute_cloud_properties(
     T: jnp.ndarray,
     p_full: jnp.ndarray,
@@ -1404,6 +1457,27 @@ def compute_cloud_properties(
     # partial-coverage factor needs the in-cloud optical depth = f(path, r_eff).
     lwp = q_c * dp / constants.g
     iwp = q_i * dp / constants.g
+    if config.cam6_conv_water_in_rad != 0:
+        # CAM6 conv_water_in_rad (cloud_diagnostics.F90:364-404): the grid
+        # water for the optics is conv_water_4rad's stratus + cumulus water,
+        # taken in cloud over CLD = cf (floor 1e-4, cap 5 g/kg) and back to
+        # the grid with cf.  q_c and q_i stay STRATIFORM below: CAM6's REL
+        # and REI come from the MG2 stratiform water only.
+        if config.scheme != "cam6_clubb":
+            raise ValueError(
+                "CloudConfig.cam6_conv_water_in_rad needs scheme 'cam6_clubb' "
+                f"(it reads ast and deepcu); got {config.scheme!r}.")
+        if config.cam6_conv_water_in_rad != 1:
+            raise ValueError(
+                "cam6_conv_water_in_rad: only CAM6's mode 1 (area-weighted "
+                f"average) is ported; got {config.cam6_conv_water_in_rad}.")
+        _dp_icwmr = jnp.zeros_like(T) if conv_icwmr is None else conv_icwmr
+        _totg_liq, _totg_ice = cam6_conv_water_4rad(
+            q_c, q_i, _ast_cam6, _deepcu_cam6, _dp_icwmr,
+            config.cam6_conv_water_frac_limit)
+        _cld = jnp.maximum(_CD_MIN_CLD, cf)
+        lwp = jnp.minimum(_totg_liq / _cld, _CD_IC_MAX) * dp / constants.g * cf
+        iwp = jnp.minimum(_totg_ice / _cld, _CD_IC_MAX) * dp / constants.g * cf
 
     # Effective radii (constant for now): ``broadcast_to`` produces a
     # zero-copy logical view, whereas ``jnp.full_like(T, scalar)``
