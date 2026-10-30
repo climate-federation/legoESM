@@ -70,9 +70,24 @@ records, 365 daily radiation records, 12 cyclic monthly precipitation/snow,
 runoff, SSS, chlorophyll, and 3D T/S damping records, and the single-record
 Decision-171 `ice_cover_clim.nc` climatology) and writes daily snapshots
 `candidate_step{kt:08d}.npz` at `kt = 8, 16, ..., 2920`. The launcher checks
-available memory (`>= 150 GiB`) and idle GPU status (`memory.used < 500 MiB`,
-`utilization.gpu == 0`), refuses `--steps > 40` unless `--allow-full-year` is
-passed by the operator, and launches detached under `nohup`.
+available memory (`>= 150 GiB`), pins the run to the CPU with x64 enabled,
+refuses `--steps > 40` unless `--allow-full-year` is passed by the operator,
+and launches detached under `nohup`.
+
+**Certified code scope (2026-10-30):** the completed 2,920-step legoESM year
+was produced by commit `e1f1b2e7e83088d1e66d0d052383cf36441566a7`, as recorded by its
+`run_manifest.json`. The current lane additionally contains commits
+`2cc5ff7c89211c0aab2ffd9dcc83773364bedfba` (the Round-341 Stage-2 stored-
+thickness change selected by the K0 card in
+`packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py`, line 1997),
+`3178d9a6dc695727ea4ec4e21646c7173ef52917`, and
+`e7f884b8e878f57454f05aa8aa0a22bc262a7bdd`. HEAD was not re-run for the
+full year. A CPU/x64 exact-mode transfer check at pre-edit HEAD
+`fdcd6d6f9d2335e8754cbf64c098bce224cd91f5` ran steps `1..80` into scratch
+and compared every saved state (`kt = 8, 10, 16, 24, 32, 40, 48, 56, 64,
+72, 80`) with the completed-year directory. All 11 `.npz` files were
+byte-identical, so the completed-year result transfers to that HEAD only
+through step 80 (10 days); no claim is made for later steps.
 
 The 20-step smoke was executed in
 `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/orca2_r342/legoesm_smoke_20step`
@@ -103,9 +118,12 @@ Ported the Decision-160 ORCA2X long-run metric card
 `scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2x_round1_longrun_acquisition.py`,
 `scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2x_round1_pilot_metrics.py`,
 and `tests/ocean/fidelity/test_orca2x_round1_pilot_metrics.py`) from the ORCA2X
-branch verbatim (`100%` byte-identical) and extended `chlorophyll_at_step` in
+branch and extended `chlorophyll_at_step` in
 `scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round1_ladder_gate.py`
-to `1 <= kt <= 2920` (bit-identical for `kt = 1..10`).
+to `1 <= kt <= 2920`. The round-342 reporter imports the existing
+Decision-160 functions directly; it does not compare a copied metric
+implementation. The chlorophyll schedule outputs for `kt = 1..10` were
+compared and were bit-identical.
 `nemo_testcase_l4_orca2_round342_s4_year_metrics.py` reuses the Decision-160
 metric card verbatim for both:
 1. The NEMO reproducibility twin comparison (`Twin B vs Twin A`), and
@@ -140,6 +158,11 @@ exactly):**
   months (`[31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]` days, summing to
   `365` days), identically for both `Twin B vs Twin A` and `candidate vs NEMO
   Arm A`.
+
+**Known minor (no change):** the metric geometry zeroes the fold-row `vmask`
+at 68 faces that are wet in NEMO. Independent recomputation gives a mean-KE
+shift of approximately `2e-6`, applied identically on both sides of each
+comparison; this round does not alter the metric.
 
 Every monthly metric is reported next to its Decision-185 reference bar:
 - Monthly RMS `SST` and depth-band `T` (`0-100m`, `100-1000m`, `>1000m`): `0.01 K`
@@ -407,9 +430,10 @@ ORCA2_ROUND342_S4_YEAR_ARM_A_ADMITTED /data/abyssal/dbalwada/nemo-testcases-l2/p
 ### 4. Trajectory separation milestones (from `round342_s4_daily_sst_rms_curve.json`)
 
 - **Days `1..43` (`kt = 8..344`, entire `M01_Jan` plus first 12 days of `M02_Feb`):** Exact `0.0000e+00 K` `SST RMS` (`last_exact_zero_day = 43`).
-- **Day `44` (`kt = 352`):** First nonzero `SST RMS` appears (`1.1151e-11 K`, `bias = -6.7177e-14 K`).
+- **Day `44` (`kt = 352`):** First nonzero `SST RMS` appears (`1.1151e-11 K`, `bias = -6.7177e-14 K`); the first differing wet SST cell is in the Arctic, with a maximum absolute difference of approximately `5e-9 K` (**CONFIRMED**).
+- **Day `112` (`kt = 896`, `M04_Apr`):** Daily `SST RMS` jumps from `3.4579e-10 K` on Day 111 to `5.6067e-07 K` (approximately `1600x`). The event is at Nordic Seas level `k = 12`; its cause is unattributed (**CONFIRMED location and magnitude; attribution unknown**).
 - **Days `44..248` (`kt = 352..1984`, `M02_Feb` through mid-`M09_Sep`):** `SST RMS` stays in the `1e-11 K` to `5.6e-07 K` range (`M02_Feb = 5.4642e-11 K`, `M03_Mar = 2.1069e-10 K`, `M04_Apr = 9.2933e-08 K`, `M05_May = 7.2534e-08 K`, `M06_Jun = 3.2197e-08 K`, `M07_Jul = 2.2401e-08 K`, `M08_Aug = 7.2797e-08 K`).
-- **Day `249` (`kt = 1992`, `M09_Sep`):** Exponential chaotic separation crosses `1e-6 K` (`SST RMS = 1.1999e-06 K`).
+- **Day `249` (`kt = 1992`, `M09_Sep`):** Separation crosses `1e-6 K` (`SST RMS = 1.1999e-06 K`). Interpreting the observed growth as exponential chaotic separation is **PLAUSIBLE**, not demonstrated.
 - **Day `279` (`kt = 2232`, `M10_Oct`):** Crosses `1e-5 K` (`SST RMS = 1.0268e-05 K`).
 - **Day `297` (`kt = 2376`, `M10_Oct`):** Crosses `1e-4 K` (`SST RMS = 1.6257e-04 K`).
 - **Day `324` (`kt = 2592`, `M11_Nov`):** Crosses `1e-3 K` (`1 mK`, `SST RMS = 1.0583e-03 K`).
@@ -1029,7 +1053,10 @@ Executed
   curve across `Days 1..365` (`kt = 8..2920`), no NEMO execution, and
   `DECISION_NEEDED` for the user to decide the bar after seeing this.
 - UNASKED: none.
-- independent review: operator
+- independent reviews (2026-10-30): Codex read-only review **LAND**; Claude
+  Sonnet review **LAND** with receipt edits. Both reviews covered the 42
+  round-342 commits carried by this round; all cited numbers were independently
+  recomputed and **CONFIRMED**.
 
 ## Verification
 

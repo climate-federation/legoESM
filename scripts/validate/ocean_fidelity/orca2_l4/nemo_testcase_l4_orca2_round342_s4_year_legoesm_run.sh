@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# ORCA2 Round 342 — Detached idle-GPU launcher for the standalone K0 legoESM arm.
+# ORCA2 Round 342 — Detached CPU launcher for the standalone K0 legoESM arm.
 #
 # Usage:
-#   # 20-step smoke (detached on an idle GPU):
+#   # 20-step smoke (detached on CPU):
 #   bash scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round342_s4_year_legoesm_run.sh \
 #     --steps 20 --output-dir /data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/orca2_r342/legoesm_smoke_20step
 #
@@ -61,29 +61,11 @@ if [[ -z "${AVAIL_GB}" || "${AVAIL_GB}" -lt 150 ]]; then
   exit 1
 fi
 
-IDLE_GPU=""
-while IFS=',' read -r idx mem_used util; do
-  idx="$(echo "${idx}" | tr -d '[:space:]')"
-  mem_used="$(echo "${mem_used}" | tr -d '[:space:]')"
-  util="$(echo "${util}" | tr -d '[:space:]')"
-  if [[ -n "${idx}" && "${mem_used}" -lt 500 && "${util}" -eq 0 ]]; then
-    IDLE_GPU="${idx}"
-    break
-  fi
-done < <(nvidia-smi --query-gpu=index,memory.used,utilization.gpu --format=csv,noheader,nounits)
-
-if [[ -z "${IDLE_GPU}" ]]; then
-  echo "REFUSE: no idle GPU found (require memory.used < 500 MiB and utilization.gpu == 0)" >&2
-  nvidia-smi >&2 || true
-  exit 1
-fi
-
 mkdir -p "${OUTPUT_DIR}"
 LOG_FILE="${OUTPUT_DIR}/legoesm_run.log"
 PID_FILE="${OUTPUT_DIR}/legoesm_run.pid"
 
 export PYTHONPATH="${REPO_ROOT}/packages/ocean:${REPO_ROOT}/packages/core:${REPO_ROOT}:${PYTHONPATH:-}"
-export ORCA2_R342_IDLE_GPU="${IDLE_GPU}"
 export CUDA_VISIBLE_DEVICES=""
 export JAX_PLATFORMS="cpu"
 export JAX_ENABLE_X64=1
@@ -96,7 +78,7 @@ nohup "${PYTHON_BIN}" "${DRIVER_PY}" \
 BG_PID=$!
 echo "${BG_PID}" > "${PID_FILE}"
 
-echo "LAUNCHED_DETACHED_LEGOESM_K0: pid=${BG_PID} gpu=${IDLE_GPU} steps=${STEPS} output_dir=${OUTPUT_DIR}"
+echo "LAUNCHED_DETACHED_LEGOESM_K0: pid=${BG_PID} backend=cpu steps=${STEPS} output_dir=${OUTPUT_DIR}"
 
 if [[ "${WAIT_FOR_COMPLETION}" -eq 1 ]]; then
   rc=0
