@@ -292,8 +292,8 @@ def diagnose_w_grid_columns_hydrostatic(
     Only the cubed-sphere and lat-lon grids ship a divergence operator we
     can call here; other grids fall back to ``zeros`` when
     ``need_concrete`` (Kain-Fritsch reads ``w_grid`` unconditionally) or
-    ``None`` otherwise (Kuo then uses its convergence-sign proxy rather
-    than a spurious zero-w gate).
+    ``None`` otherwise (Kuo then raises if it is given a moisture
+    convergence: it needs a real ``w``, not a spurious zero-w gate).
 
     Shared by the hydrostatic bridge below and the unified driver
     pipeline.
@@ -808,9 +808,9 @@ def _make_hydrostatic_convection(
         elif is_simple_mc_consumer:
             # Kuo: simple leaf that consumes the large-scale moisture
             # convergence as its source, plus the resolved ``w_grid`` for
-            # the oracle's ``w_lcl>0`` gate (None → convergence-sign
-            # proxy).  ``mc_col`` is None on single-column grids → Kuo is
-            # quiescent (correct).
+            # the oracle's ``w_lcl>0`` gate (None with a convergence →
+            # Kuo raises).  ``mc_col`` is None on single-column grids → Kuo
+            # is quiescent (correct).
             conv_out = conv_fn(
                 T=T_col, q_v=q_v_col,
                 p_full=p_full_col, p_half=p_half_col,
