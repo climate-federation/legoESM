@@ -4,15 +4,13 @@ Date: 2026-10-29. Base: `d3a0a329c6925786815c4684593e88ff7d58167d`.
 Imported round-342 tool HEAD:
 `c983dc345a0b30c3ac5287d796986a069d981289`.
 
-Admitted arm-A pins computed from the retained files: binary SHA-256
-`835f03b99a3c96e80d23f35c415d099fde292678ae30572e9c5412be4b67e16d`,
-rank-0 day-1 restart SHA-256
-`3fbed2281e66f7d51cd34247e799d1b76c8a102d36d5b64c0a3b80aba56dd2e3`,
-and rank-1 day-1 restart SHA-256
-`a5660f4c44b70a7cf7d70500b2df8e2d2145f08a205b266301c7312517413023`.
-The deterministic perturbed rank-file SHA-256 values are
-`bb25179365e776ae73e6ead9d2bad42e222f2094f687c22ede3b0eb3bcae1f01` and
-`0279bb4021ef1b557e178ef01b5c4cac732479102404871b557b984433fff8cf`.
+Admitted arm-A pins computed from the retained files:
+
+- `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round345/s4_year/orca2_k0_year1_restart_control_np2/nemo` SHA-256 `835f03b99a3c96e80d23f35c415d099fde292678ae30572e9c5412be4b67e16d`.
+- `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round345/s4_year/orca2_k0_year1_restart_control_np2/ORCA2_00000008_restart_0000.nc` SHA-256 `3fbed2281e66f7d51cd34247e799d1b76c8a102d36d5b64c0a3b80aba56dd2e3`.
+- `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round345/s4_year/orca2_k0_year1_restart_control_np2/ORCA2_00000008_restart_0001.nc` SHA-256 `a5660f4c44b70a7cf7d70500b2df8e2d2145f08a205b266301c7312517413023`.
+- `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round345/s4_year/orca2_k0_year1_sst_plus_1ulp_np2/ORCA2_00000008_restart_0000.nc` SHA-256 `bb25179365e776ae73e6ead9d2bad42e222f2094f687c22ede3b0eb3bcae1f01`.
+- `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round345/s4_year/orca2_k0_year1_sst_plus_1ulp_np2/ORCA2_00000008_restart_0001.nc` SHA-256 `0279bb4021ef1b557e178ef01b5c4cac732479102404871b557b984433fff8cf`.
 
 This corrected registration incorporates the operator's Decision-188
 clarification and supersedes the rejected float32 input-file perturbation.

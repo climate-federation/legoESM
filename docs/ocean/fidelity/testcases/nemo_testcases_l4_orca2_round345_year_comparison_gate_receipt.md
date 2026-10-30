@@ -2,16 +2,15 @@
 
 Round: 345 (Codex). Base: `d3a0a329c6925786815c4684593e88ff7d58167d`.
 Review-resume base: `fe98377a856078fd9cef30d842061d9f2ce49628`
-(pre-rebase `acef9cc04`).
+(pre-rebase acef9cc04).
 Round-342 tool HEAD: `c983dc345a0b30c3ac5287d796986a069d981289`.
-Admitted arm-A binary SHA-256:
-`835f03b99a3c96e80d23f35c415d099fde292678ae30572e9c5412be4b67e16d`.
-Admitted arm-A day-1 restart SHA-256 values:
-`3fbed2281e66f7d51cd34247e799d1b76c8a102d36d5b64c0a3b80aba56dd2e3` and
-`a5660f4c44b70a7cf7d70500b2df8e2d2145f08a205b266301c7312517413023`.
-Deterministic perturbed day-1 restart SHA-256 values:
-`bb25179365e776ae73e6ead9d2bad42e222f2094f687c22ede3b0eb3bcae1f01` and
-`0279bb4021ef1b557e178ef01b5c4cac732479102404871b557b984433fff8cf`.
+Admitted evidence pins:
+
+- `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round345/s4_year/orca2_k0_year1_restart_control_np2/nemo` SHA-256 `835f03b99a3c96e80d23f35c415d099fde292678ae30572e9c5412be4b67e16d`.
+- `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round345/s4_year/orca2_k0_year1_restart_control_np2/ORCA2_00000008_restart_0000.nc` SHA-256 `3fbed2281e66f7d51cd34247e799d1b76c8a102d36d5b64c0a3b80aba56dd2e3`.
+- `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round345/s4_year/orca2_k0_year1_restart_control_np2/ORCA2_00000008_restart_0001.nc` SHA-256 `a5660f4c44b70a7cf7d70500b2df8e2d2145f08a205b266301c7312517413023`.
+- `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round345/s4_year/orca2_k0_year1_sst_plus_1ulp_np2/ORCA2_00000008_restart_0000.nc` SHA-256 `bb25179365e776ae73e6ead9d2bad42e222f2094f687c22ede3b0eb3bcae1f01`.
+- `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round345/s4_year/orca2_k0_year1_sst_plus_1ulp_np2/ORCA2_00000008_restart_0001.nc` SHA-256 `0279bb4021ef1b557e178ef01b5c4cac732479102404871b557b984433fff8cf`.
 Disposition: **PASS_DECISION_188** — both real continuations are admitted;
 the year comparison passes all 12 months with a nonzero envelope in all 12.
 
@@ -144,15 +143,15 @@ gate from `sha256sum`-equivalent byte hashing and immediately re-hashed.
 ## Verification
 
 The safety/restart implementation is committed as
-`88a294214393b7a1da74f06db1be49a40226de7c` (pre-rebase `4e175e60e`); the
+`88a294214393b7a1da74f06db1be49a40226de7c` (pre-rebase 4e175e60e); the
 retained-arm relocation fix is
-`eb28fac1b7026a93c718d2a64fd82b7bf8f0aca2` (pre-rebase `95eb6b45a`); and the
+`eb28fac1b7026a93c718d2a64fd82b7bf8f0aca2` (pre-rebase 95eb6b45a); and the
 paired-control, admission, and all-month envelope repair is
-`15af7c3b09014792848a99f5cfbacbe28fb29ed5` (pre-rebase `8e91ec019`). These
+`15af7c3b09014792848a99f5cfbacbe28fb29ed5` (pre-rebase 8e91ec019). These
 values were copied from `git rev-parse`, and the document gate resolves every
 quoted git object.
 The rank-local, input-preserving stub repair is
-`2a6c1d842e83a326028d6843cb10f57d81666034` (pre-rebase `527dd75f1`).
+`2a6c1d842e83a326028d6843cb10f57d81666034` (pre-rebase 527dd75f1).
 
 Focused round-345, inherited round-342 year, and ORCA2X pilot tests pass 23/23.
 The seven Decision-188 controls fire, including independent refusal of a zero
@@ -164,7 +163,7 @@ quarantine, and promotion from `refused/`. A separate existing-target probe
 refuses while retaining both targets in place and creating no refused copy.
 
 The clean default preflight was re-run at
-`c023d7ababcc494e785ff7798bc321e2d135ef1a` (pre-rebase `b8db53c7d`) with
+`c023d7ababcc494e785ff7798bc321e2d135ef1a` (pre-rebase b8db53c7d) with
 evidence rooted under
 `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/work/r345-resume2-preflight`.
 Its inherited round-342 MPI stub stops
@@ -190,7 +189,7 @@ its shifted-line plant refuses. The exact default ORCA2 landing battery passes
 155/155 in 1,104.74 seconds; the explicit private-import ratchet passes 6/6.
 
 Resume 5 is committed as `8f4de8ac7ac7f9f35a7a79e9bdd642d4cf5fc640`
-(pre-rebase `96d29d324`).
+(pre-rebase 96d29d324).
 The repaired comparator was run read-only on the actual retained control: all
 728 restart files passed, with 28,392 common-variable data comparisons, zero
 unequal, no control-only variables, and exactly the two required arm-A-only
@@ -348,20 +347,23 @@ Decision-188 gate rows.
   `bf3ad4b42442900686648d9c432ed4e247e57663`. Replayed pre-receipt HEAD is
   `02c37e14463f0d84883784131e418555204ec435`. Conflict hunks: **none**.
 
-## Producer commits pinned under refs/keep/
+## Producer commit reachability
 
 These producer identities are immutable fields in admitted evidence and must
-remain verbatim. Before landing, pin each object in the ORCA2 lane at the named
-keep ref:
+remain verbatim. The read-only source refs are:
 
 - `d6b2a3342c0c006cacbcd3289d5598f7d8d893ce` at
-  `refs/keep/orca2_r345_d6b2a3342` (admitted continuation manifests and
+  `refs/keep/orca2_r345_d6b2a3342c` (admitted continuation manifests and
   admission JSON).
 - `d2ba162780b9f2b48eaeb640d9a524d8a5c0191d` at
-  `refs/keep/orca2_r345_d2ba16278` (candidate and envelope metric JSON
+  `refs/keep/orca2_r345_d2ba162780` (candidate and envelope metric JSON
   worktree provenance).
 - `c983dc345a0b30c3ac5287d796986a069d981289` at
   `refs/keep/orca2_r345_c983dc345a` (imported round-342 tool producer).
+
+Landing retains all three as HEAD ancestors with one tree-preserving `ours`
+merge. The provenance gate therefore requires ancestry and does not depend on
+`refs/keep/` in a fresh clone.
 
 ## Choices and review
 

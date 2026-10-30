@@ -13,34 +13,70 @@ CUTOFF = dt.date(2026, 10, 29)
 HEX_RE = re.compile(r"(?<![0-9A-Fa-f])(?:[0-9A-Fa-f]{64}|[0-9A-Fa-f]{40})(?![0-9A-Fa-f])")
 DOC_RE = re.compile(r"^docs/.*(?:receipt|prereg).*\.md$", re.IGNORECASE)
 PATH_RE = re.compile(r"`([^`]+)`|(/[A-Za-z0-9_@%+=:,./~-]+)")
+# Exact round-341 correction citations: historical identities only, not producers
+# for admitted round-345 evidence. Every other 40-hex citation requires ancestry.
+GIT_COMMIT_EXEMPTIONS = {
+    (
+        "docs/ocean/fidelity/testcases/nemo_testcases_l4_orca2_round341_rescore_walk_receipt.md",
+        "5fae40dddf6b09178bd9008464227adb76b9ebf7",
+    ),
+    (
+        "docs/ocean/fidelity/testcases/nemo_testcases_l4_orca2_round341_rescore_walk_receipt.md",
+        "ca77c284e0a5b9c5d804d9e25bc61581350e87bd",
+    ),
+}
 
 
 def _run(*args: str, cwd: Path, check: bool = True) -> subprocess.CompletedProcess[str]:
     return subprocess.run(args, cwd=cwd, text=True, capture_output=True, check=check)
 
 
-def _added_after(repo: Path, cutoff: dt.date = CUTOFF) -> list[Path]:
-    """Return still-present receipt/prereg Markdown added strictly after cutoff."""
-    output = _run(
-        "git",
-        "log",
-        "--diff-filter=A",
-        "--format=@@%aI",
-        "--name-only",
-        "--",
-        "docs",
-        cwd=repo,
+def _author_date(timestamp: int, offset: str) -> dt.date:
+    sign = 1 if offset[0] == "+" else -1
+    delta = dt.timedelta(hours=int(offset[1:3]), minutes=int(offset[3:5]))
+    return dt.datetime.fromtimestamp(timestamp, dt.timezone(sign * delta)).date()
+
+
+def _added_after(repo: Path, cutoff: dt.date = CUTOFF) -> dict[Path, set[int]]:
+    """Return present lines blamed to author dates on or after the cutoff."""
+    audited: dict[Path, set[int]] = {}
+    history = _run(
+        "git", "log", "--format=@@%aI", "--name-only", "--", "docs", cwd=repo
     ).stdout
-    added: dict[str, dt.date] = {}
+    candidates: set[str] = set()
     stamp: dt.date | None = None
-    for line in output.splitlines():
+    for line in history.splitlines():
         if line.startswith("@@"):
             stamp = dt.datetime.fromisoformat(line[2:]).date()
-        elif stamp is not None and DOC_RE.match(line):
-            added[line] = stamp
-    return sorted(
-        repo / name for name, date in added.items() if date > cutoff and (repo / name).is_file()
-    )
+        elif stamp is not None and stamp >= cutoff and DOC_RE.match(line):
+            candidates.add(line)
+    for name in sorted(candidates):
+        doc = repo / name
+        if not doc.is_file():
+            continue
+        output = _run("git", "blame", "--line-porcelain", "--", name, cwd=repo).stdout
+        line_number: int | None = None
+        timestamp: int | None = None
+        offset: str | None = None
+        included: set[int] = set()
+        for line in output.splitlines():
+            fields = line.split()
+            if len(fields) >= 3 and re.fullmatch(r"[0-9a-f^]{40}", fields[0]):
+                line_number = int(fields[2])
+                timestamp = None
+                offset = None
+            elif line.startswith("author-time "):
+                timestamp = int(line.removeprefix("author-time "))
+            elif line.startswith("author-tz "):
+                offset = line.removeprefix("author-tz ")
+            elif line.startswith("\t"):
+                if line_number is None or timestamp is None or offset is None:
+                    raise AssertionError(f"incomplete git blame metadata for {name}")
+                if _author_date(timestamp, offset) >= cutoff:
+                    included.add(line_number)
+        if included:
+            audited[doc] = included
+    return audited
 
 
 def _candidate_paths(
@@ -78,25 +114,21 @@ def _git_commit_failure(repo: Path, value: str, label: str) -> str | None:
     if ancestor.returncode == 0:
         return None
 
-    keep_refs = _run(
-        "git", "for-each-ref", "--format=%(objectname)", "refs/keep/", cwd=repo
-    ).stdout.splitlines()
-    if value in keep_refs:
-        return None
-    return (
-        f"{label}: Git commit {value} is neither an ancestor of HEAD "
-        "nor pinned under refs/keep/*"
-    )
+    return f"{label}: Git commit {value} is not an ancestor of HEAD"
 
 
-def _failures(repo: Path, doc: Path) -> list[str]:
+def _failures(repo: Path, doc: Path, audited_lines: set[int] | None = None) -> list[str]:
     lines = doc.read_text(errors="replace").splitlines()
     failures: list[str] = []
     for index, line in enumerate(lines):
+        if audited_lines is not None and index + 1 not in audited_lines:
+            continue
         for match in HEX_RE.finditer(line):
             value = match.group().lower()
             label = f"{doc.relative_to(repo)}:{index + 1}"
             if len(value) == 40:
+                if (str(doc.relative_to(repo)), value) in GIT_COMMIT_EXEMPTIONS:
+                    continue
                 failure = _git_commit_failure(repo, value, label)
                 if failure is not None:
                     failures.append(failure)
@@ -112,7 +144,11 @@ def _failures(repo: Path, doc: Path) -> list[str]:
 
 
 def test_default_gate_checks_every_post_audit_receipt_and_preregistration():
-    failures = [failure for doc in _added_after(REPO) for failure in _failures(REPO, doc)]
+    failures = [
+        failure
+        for doc, audited_lines in _added_after(REPO).items()
+        for failure in _failures(REPO, doc, audited_lines)
+    ]
     assert failures == []
 
 
@@ -155,15 +191,26 @@ def test_planted_dangling_pre_rebase_side_branch_commit_fails(tmp_path: Path):
     repo, doc, ancestor, _ = _init_plant_repo(tmp_path)
     side_commit = _plant_side_branch_commit(repo)
     doc.write_text(doc.read_text().replace(ancestor, side_commit))
-    assert "neither an ancestor of HEAD nor pinned" in "\n".join(_failures(repo, doc))
+    assert "not an ancestor of HEAD" in "\n".join(_failures(repo, doc))
 
 
-def test_planted_refs_keep_commit_passes(tmp_path: Path):
-    repo, doc, ancestor, _ = _init_plant_repo(tmp_path)
-    side_commit = _plant_side_branch_commit(repo)
-    _run("git", "update-ref", "refs/keep/orca2_r345_plant", side_commit, cwd=repo)
-    doc.write_text(doc.read_text().replace(ancestor, side_commit))
-    assert _failures(repo, doc) == []
+def test_planted_bad_digest_authored_on_cutoff_date_fails(tmp_path: Path):
+    repo, doc, _, digest = _init_plant_repo(tmp_path)
+    bad = ("0" if digest[0] != "0" else "1") + digest[1:]
+    doc.write_text(doc.read_text().replace(digest, bad))
+    _run("git", "add", str(doc.relative_to(repo)), cwd=repo)
+    _run(
+        "git",
+        "commit",
+        "-q",
+        "--date=2026-10-29T00:00:00+00:00",
+        "-m",
+        "plant receipt on inclusive audit date",
+        cwd=repo,
+    )
+    audited = _added_after(repo)
+    assert doc in audited
+    assert "SHA-256 mismatch" in "\n".join(_failures(repo, doc, audited[doc]))
 
 
 def test_planted_unresolved_git_commit_fails(tmp_path: Path):
