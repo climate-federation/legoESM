@@ -11049,6 +11049,11 @@ class LatLonCGridOceanModel:
                 # above (bit-identical on pure z-star where active_3d==mask_3d).
                 T_mid = T_mid + dt * dT_gm * active_3d
                 S_mid = S_mid + dt * dS_gm * active_3d
+                if _tb is not None:
+                    # store_tracer_budget: T's GM-Redi rate, applied on h0 before advection like the
+                    # explicit stages; in R and R_total so that step_terms books it (stream A's hmix)
+                    _tb["R"] = dict(_tb["R"], gm=dT_gm * active_3d)
+                    _tb["R_total"] = _tb["R_total"] + dT_gm * active_3d
             if eke_new is not None:
                 state_new = state_new._replace(eke=eke_new)
             # Carry the EKE dissipation (Veros eke_diss_iw) for the prognostic-TKE
