@@ -351,3 +351,30 @@ def test_the_hold_count_is_read_at_a_cadence_and_cannot_overflow():
         "the device hold counter is never reset, so it accumulates the whole "
         "run in 32 bits and wraps")
     assert "self._land_n_held_total += " in src
+
+
+def test_an_unconverged_but_plausible_column_is_kept():
+    # The closure's convergence flag is the adjoint's tolerance (1e-8 relative
+    # on the squared residual); a stalled column with ordinary fluxes is a
+    # usable surface, not a failure.  Holding on the flag skipped one land
+    # column-hour in six and dropped that hour's precipitation.
+    new = _new_state()
+    resp = _response()
+    old, (held, held_resp, mask, n_held) = _run(
+        new, resp, converged=jnp.array([True, False, True]))
+    assert int(n_held) == 0
+    assert np.allclose(np.asarray(held.T_soil[1]), np.asarray(new.T_soil[1]))
+    assert float(held_resp.shflx[1]) == 40.0
+
+
+def test_an_implausible_skin_temperature_is_held_whatever_the_flag_says():
+    # A diverged closure can leave a finite answer that is not a land surface
+    # (skin below 200 K was seen); the hold asks the answer, not the flag.
+    new = _new_state()
+    resp = _response(T_sfc=jnp.array([290.0, 150.0, 290.0]))
+    old, (held, held_resp, mask, n_held) = _run(
+        new, resp, converged=jnp.array([True, True, True]))
+    assert int(n_held) == 1 and bool(mask[1])
+    assert np.allclose(np.asarray(held.T_soil[1]), np.asarray(old.T_soil[1]))
+    assert float(held_resp.shflx[1]) == 0.0
+    assert float(held_resp.T_sfc[1]) == float(old.T_soil[1, 0])

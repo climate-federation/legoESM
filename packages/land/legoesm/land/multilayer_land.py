@@ -1469,16 +1469,30 @@ def _step_multilayer_land_impl(
 # Per-column containment: an unsolved column must not be able to kill the model
 # ---------------------------------------------------------------------------
 
+# Hold bounds on the closure's answer (see _hold_unsolved_columns): a skin
+# temperature or a turbulent flux outside these is a diverged solve, not a
+# land surface.  Coldest/hottest observed skins are ~180 K / ~345 K; turbulent
+# fluxes over land stay within a few hundred W/m2 (extreme advective cases
+# ~1e3).
+_HOLD_T_SFC_MIN_K = 180.0
+_HOLD_T_SFC_MAX_K = 350.0
+_HOLD_FLUX_MAX_W_M2 = 1500.0
+
+
 def _hold_unsolved_columns(state, new_state, response, surface_out, forcing,
                            config, ncol, carbon_old=None, carbon_new=None):
     """Freeze any column the land model failed to solve, and say so.
 
     Two things make a column's new state untrustworthy:
 
-    * the surface scheme's iterative closure did not reach a root
-      (``SurfaceFluxOutput.converged is False``), so its fluxes are a stopped
-      iterate rather than a solution of the surface energy balance; or
+    * the surface scheme's answer is not a land surface: skin temperature
+      outside [_HOLD_T_SFC_MIN_K, _HOLD_T_SFC_MAX_K] or a turbulent flux beyond
+      _HOLD_FLUX_MAX_W_M2 (a diverged closure; its convergence FLAG is not
+      used here, see the note at ``bad`` below); or
     * some leaf of the new state or of the tile response came back non-finite.
+
+    A held hour's precipitation is not applied (the state reverts whole); the
+    water budget tape (run_lmip_biophys ``water_budget``) shows it as -P.
 
     Either way the column is HELD: its state (soil, snow, ponding, carbon)
     reverts to the start of the step and its tile response reports no turbulent
@@ -1540,8 +1554,21 @@ def _hold_unsolved_columns(state, new_state, response, surface_out, forcing,
         return acc
 
     bad = _any_bad(new_state) | _any_bad(response)
-    if surface_out.converged is not None:
-        bad = bad | ~jnp.asarray(surface_out.converged).reshape(-1).astype(bool)
+    # Physical plausibility of the closure's answer, in place of its own
+    # convergence flag.  That flag is the adjoint's tolerance (squared residual
+    # below 1e-12 + 1e-8 of the start), which a stalled but ordinary column
+    # misses about one hour in six (bare, cold, night-time columns, where the
+    # leaf equations are nearly degenerate); holding on it threw those hours
+    # away.  Of the stalled solutions 93 % were ordinary and 7 % divergent
+    # (skin below 200 K, sensible heat to 9e3 W/m2), so the hold now asks the
+    # answer itself: a skin temperature or a turbulent flux outside the range
+    # any land surface reaches.  The flag stays taped (SurfaceFluxOutput.
+    # converged) for the gradient path, which still masks unconverged roots.
+    _t_sfc = jnp.asarray(response.T_sfc).reshape(-1)
+    _h = jnp.asarray(response.shflx).reshape(-1)
+    _le = jnp.asarray(response.lhflx).reshape(-1)
+    bad = bad | (_t_sfc < _HOLD_T_SFC_MIN_K) | (_t_sfc > _HOLD_T_SFC_MAX_K) \
+        | (jnp.abs(_h) > _HOLD_FLUX_MAX_W_M2) | (jnp.abs(_le) > _HOLD_FLUX_MAX_W_M2)
 
     n_held = jnp.sum(bad.astype(jnp.int32))
 
