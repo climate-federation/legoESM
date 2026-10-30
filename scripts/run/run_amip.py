@@ -316,6 +316,19 @@ def build_arg_parser() -> argparse.ArgumentParser:
                                  "voronoi", "icosahedral", "mpas_voronoi"])
     parser.add_argument("--use-duogrid", action="store_true", default=False,
                         help="Enable FV3 Duo-Grid halo exchange (required for MPI multi-node)")
+    parser.add_argument("--mpas-mesh-file", type=str, default="",
+                        dest="mpas_mesh_file",
+                        help="Saved global MPAS mesh (.npz from "
+                             "scripts/grids/save_mpas_mesh.py). The run loads "
+                             "it instead of regenerating the mesh, so every "
+                             "machine steps the same cells in the same order. "
+                             "Needs --mpas-mesh-sha256; the file's resolution "
+                             "must equal --resolution. Default: regenerate.")
+    parser.add_argument("--mpas-mesh-sha256", type=str, default="",
+                        dest="mpas_mesh_sha256",
+                        help="SHA-256 the --mpas-mesh-file must have (printed "
+                             "by save_mpas_mesh.py); the run refuses any other "
+                             "mesh.")
     # The canonical names in `supported_matrix.py` are:
     #   - centered       (cubed_sphere, latlon)
     #   - finite_volume  (cubed_sphere, latlon)
@@ -2974,6 +2987,8 @@ def dry_run_check_inputs(config: ExperimentConfig,
                          args: argparse.Namespace) -> int:
     """Print found / MISSING / not used for every input file; 0 if none missing."""
     entries = [(f, getattr(config, f)) for f in DRY_RUN_CONFIG_INPUTS]
+    entries.append(("mpas_mesh_file",
+                    getattr(config.grid, "mpas_mesh_file", "")))
     entries += [(f, getattr(args, f, None)) for f in DRY_RUN_ARG_INPUTS]
     from legoesm.ml.checkpoint_io import checkpoint_path
     missing = []
@@ -3037,6 +3052,8 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
                             if args.sigma_refine_width is not None else 0.45),
         sigma_layout=(args.sigma_layout if args.sigma_layout is not None else "standard"),
         use_duogrid=getattr(args, "use_duogrid", False),
+        mpas_mesh_file=getattr(args, "mpas_mesh_file", "") or "",
+        mpas_mesh_sha256=getattr(args, "mpas_mesh_sha256", "") or "",
     )
 
     dycore_config = DycoreConfig(

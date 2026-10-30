@@ -3506,9 +3506,40 @@ class ModelDriver:
         self.static_topography_phis()
         return self._f_land
 
+    @staticmethod
+    def _load_mpas_mesh_file(gc, *, lloyd_iterations: int):
+        """The global MPAS mesh from ``gc.mpas_mesh_file``, pinned by hash.
+
+        Refuses without ``mpas_mesh_sha256``, on a hash mismatch (stored or
+        expected), when the file's resolution differs from ``gc.resolution``
+        or its Lloyd iterations from the driver's, and when its radius is not
+        the driver's sphere.
+        """
+        from legoesm import constants
+        from legoesm.grids.voronoi_mesh_file import load_voronoi_mesh_for_run
+        mesh = load_voronoi_mesh_for_run(
+            gc.mpas_mesh_file, resolution=gc.resolution,
+            expected_sha256=getattr(gc, "mpas_mesh_sha256", ""),
+            lloyd_iterations=lloyd_iterations, radius=constants.R_earth)
+        logger.info(
+            "  MPAS mesh loaded from %s (sha256 %s, %d cells); not "
+            "regenerated", gc.mpas_mesh_file, gc.mpas_mesh_sha256,
+            mesh.nCells)
+        return mesh
+
     def _create_grid(self) -> None:
         """Create horizontal grid and vertical coordinate."""
         gc = self.config.grid
+        if (getattr(gc, "mpas_mesh_file", "")
+                or getattr(gc, "mpas_mesh_sha256", "")):
+            from legoesm.driver.config import normalize_grid_type
+            if normalize_grid_type(gc.grid_type) != "mpas":
+                raise ValueError(
+                    f"mpas_mesh_file/mpas_mesh_sha256 set with grid_type "
+                    f"{gc.grid_type!r}; a saved mesh is only used on 'mpas'")
+            if not getattr(gc, "mpas_mesh_file", ""):
+                raise ValueError(
+                    "mpas_mesh_sha256 set without mpas_mesh_file")
 
         # All global grids go through the one component-agnostic factory
         # (legoesm.grids.factory.create_grid) — the driver owns no grid
@@ -3597,7 +3628,16 @@ class ModelDriver:
             # mpas aliases (voronoi, icosahedral, mpas_voronoi) are normalised
             # to "mpas" at the config boundary (driver.config.normalize_grid_type).
             kwargs = {"lloyd_iterations": 50} if gc.grid_type == "mpas" else {}
-            global_grid = create_grid(gc.grid_type, gc.resolution, **kwargs)
+            if getattr(gc, "mpas_mesh_file", ""):
+                # grid_type is mpas or an alias (refused above otherwise)
+                # Saved mesh: the same cells in the same order on every
+                # machine (a regenerated mesh is not bitwise portable).
+                # This is the ONLY place the driver builds the global MPAS
+                # mesh; topography, diagnostics, CMOR and the cell partition
+                # all take self.grid / self._grid_global from here.
+                global_grid = self._load_mpas_mesh_file(gc, lloyd_iterations=50)
+            else:
+                global_grid = create_grid(gc.grid_type, gc.resolution, **kwargs)
             # MPAS / Voronoi cell-partition MPI: partition the global mesh
             # and slice this rank's (owned + halo) local mesh.  Deferred to
             # here — not the runtime bootstrap — because the partition needs

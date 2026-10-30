@@ -118,6 +118,17 @@ class GridConfig(NamedTuple):
     # stratospheric layers up to sigma_top (the raised-lid experiment).
     sigma_layout: str = "standard"
     use_duogrid: bool = False        # enable FV3 Duo-Grid halo (required for MPI multi-node)
+    # Saved global MPAS mesh (grid_type "mpas" only).  A regenerated SCVT mesh
+    # is not bitwise portable: the cells agree across machines to ~4e-5 chord
+    # but their ORDER can differ (1,973 of 2,562 level 4 cells moved between a
+    # Mac and Snellius), so per-cell inputs built on one machine land on the
+    # wrong cells on the other.  When set, the driver loads this file
+    # (scripts/grids/save_mpas_mesh.py) instead of calling create_grid, and
+    # refuses to run unless mpas_mesh_sha256 matches the file's content hash
+    # and the file's resolution matches ``resolution``.  "" = regenerate as
+    # before (unchanged).
+    mpas_mesh_file: str = ""
+    mpas_mesh_sha256: str = ""
 
 
 # Canonical name for the SCVT Voronoi mesh + TRiSK discretization.
@@ -2437,6 +2448,21 @@ class ExperimentConfig(NamedTuple):
             errors.append(
                 "ifs_ozone_chem runs only on the MPAS dycore lane, which "
                 "carries the o3_ifs tracer (not the FV3-duo column lane)")
+        _mesh_file = getattr(g, "mpas_mesh_file", "")
+        _mesh_sha = getattr(g, "mpas_mesh_sha256", "")
+        if _mesh_file and normalize_grid_type(g.grid_type) != "mpas":
+            errors.append(
+                f"mpas_mesh_file={_mesh_file!r} is only valid with grid_type "
+                f"'mpas', not {g.grid_type!r}")
+        if _mesh_file and not _mesh_sha:
+            errors.append(
+                f"mpas_mesh_file={_mesh_file!r} needs mpas_mesh_sha256 (the "
+                "hash printed by scripts/grids/save_mpas_mesh.py); a run "
+                "never loads an unpinned mesh")
+        if _mesh_sha and not _mesh_file:
+            errors.append(
+                "mpas_mesh_sha256 is set but mpas_mesh_file is empty; the "
+                "pin would be ignored")
         if self.land_fraction_source not in ("topography", "era5", "zero"):
             errors.append(
                 f"land_fraction_source must be topography, era5 or zero, got "
