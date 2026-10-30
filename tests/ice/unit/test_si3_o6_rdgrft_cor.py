@@ -768,7 +768,14 @@ def test_halos_untouched():
 _REPO = __import__("pathlib").Path(__file__).resolve().parents[3]
 _SITES = __import__("json").loads(
     (_REPO / "scripts/validate/ocean_fidelity/testcases/nemo_si3_o6_minmax_sites.json").read_text())["sites"]
-_O6_PRE_FIX = "2e58765fa3ec"  # the O6 commit before the tie audit
+# Content identities of the two pre-audit source files.  Blob IDs, unlike the
+# O6 commit that first carried them, survive rebases and remain reachable from
+# this lane's replayed history.  They protect the MIN/MAX and source-rounding
+# non-vacuity controls below.
+_O6_PRE_AUDIT_BLOBS = {
+    "packages/ice/legoesm/ice/ridging.py": "e6fbd2b02ce005c753db62d96cecd179f1c97fc2",
+    "packages/ice/legoesm/ice/itd.py": "a808145ebbbde9464a606582df47ecdc20f895e3",
+}
 _MODEL_FUNCS = {
     "packages/ice/legoesm/ice/ridging.py": ("_rdgrft_prep", "_rdgrft_shift", "si3_ice_dyn_rdgrft"),
     "packages/ice/legoesm/ice/itd.py": ("si3_var_roundoff", "_si3_itd_shiftice", "si3_ice_itd_reb",
@@ -800,12 +807,18 @@ def _minmax_calls(src: str, names, helpers):
     return sorted(found), other
 
 
-def _model_minmax(rev=None):
+def _git_blob_text(blob: str) -> str:
     import subprocess
+
+    kind = subprocess.check_output(["git", "cat-file", "-t", blob], cwd=_REPO, text=True).strip()
+    assert kind == "blob", f"{blob} is {kind}, not a file-content identity"
+    return subprocess.check_output(["git", "cat-file", "blob", blob], cwd=_REPO, text=True)
+
+
+def _model_minmax(blobs=None):
     found, other = [], []
     for rel, names in _MODEL_FUNCS.items():
-        src = (subprocess.check_output(["git", "show", f"{rev}:{rel}"], cwd=_REPO, text=True)
-               if rev else (_REPO / rel).read_text())
+        src = _git_blob_text(blobs[rel]) if blobs else (_REPO / rel).read_text()
         f, o = _minmax_calls(src, names, ("fmin", "fmax"))
         found += f
         other += o
@@ -826,7 +839,7 @@ def test_every_minmax_keeps_the_record_object_code_survivor():
                                  _ORACLE_FUNCS, ("_mink", "_maxk"))
     assert other == [] and found == want_oracle
     # non-vacuity: the pre-audit model used NaN-propagating jnp.minimum/maximum and wrong orders
-    pre, pre_other = _model_minmax(_O6_PRE_FIX)
+    pre, pre_other = _model_minmax(_O6_PRE_AUDIT_BLOBS)
     assert pre_other and pre != want_model
 
 
@@ -943,10 +956,9 @@ def test_barrier_sweep_sees_every_arithmetic_form():
 
 def test_every_array_operation_is_source_rounded():
     """Each rung statement is materialized before its consumer (DECISION 158 barriers)."""
-    import subprocess
     for rel, names in _MODEL_FUNCS.items():
         assert _unbarriered((_REPO / rel).read_text(), names) == [], rel
-    pre = subprocess.check_output(["git", "show", f"{_O6_PRE_FIX}:packages/ice/legoesm/ice/itd.py"], cwd=_REPO, text=True)
+    pre = _git_blob_text(_O6_PRE_AUDIT_BLOBS["packages/ice/legoesm/ice/itd.py"])
     assert any("zworkv" in b or "si3_safe_div(dvi" in b for b in _unbarriered(pre, _MODEL_FUNCS["packages/ice/legoesm/ice/itd.py"]))
 
 
@@ -956,7 +968,15 @@ COR_PIN = "929051ba6c3889e31c92fa0e014810d45c99b5b5594ca566185d73ebde4cd0af"
 
 # ------------------------------------------------- parent-vs-current controls
 O6_PARENT_COMMIT = "e8ee89ece8cb"
-MERGE_PARENT_COMMIT = "6c53813384"  # last commit with lane 3's own jpl=1 ridging and ice_cor (DECISION 177)
+# File-content identities immediately before DECISION 177 removed lane 3's own
+# jpl=1 ridging and ice_cor.  Each blob is reachable from this lane and protects
+# the parent/current production-card comparison without naming an O6 commit.
+D177_PARENT_BLOBS = {
+    "packages/ice/legoesm/ice/itd.py": "9ad1652db3140884432e84ffd56aea71420a1d05",
+    "packages/ice/legoesm/ice/ridging.py": "d3b5c6411f87fa9f1453c0e34af269818b075141",
+    "packages/ice/legoesm/ice/si3_surface.py": "d9d3c34dec7c5b58258f463abc03f1f0bd4939a5",
+    "packages/ice/legoesm/ice/fidelity/nemo_rheo_testcase_recipe.py": "56bfdb50f2da94dfe7ca8e2d3c956c0b7e79de53",
+}
 _RHEO_ROOT = __import__("pathlib").Path("/data/abyssal/dbalwada/nemo-testcases-l3/ice_rheo/final")
 _TOUCHED = (
     ("legoesm.ice.itd", "packages/ice/legoesm/ice/itd.py"),
@@ -965,7 +985,7 @@ _TOUCHED = (
 )
 
 
-def _load_parent(extra=(), rev=O6_PARENT_COMMIT, touched=_TOUCHED):
+def _load_parent(extra=(), rev=O6_PARENT_COMMIT, touched=_TOUCHED, blobs=None):
     import subprocess
     import sys
     import types
@@ -977,7 +997,8 @@ def _load_parent(extra=(), rev=O6_PARENT_COMMIT, touched=_TOUCHED):
     loaded = {}
     try:
         for name, rel in names:
-            src = subprocess.check_output(["git", "show", f"{rev}:{rel}"], cwd=root, text=True)
+            src = (_git_blob_text(blobs[rel]) if blobs is not None else
+                   subprocess.check_output(["git", "show", f"{rev}:{rel}"], cwd=root, text=True))
             mod = types.ModuleType(name)
             mod.__file__ = f"<git:{rev}:{rel}>"
             sys.modules[name] = mod
@@ -1072,7 +1093,7 @@ def test_lane3_rheo_card_merge_parent_vs_current_bit_identical():
     root = __import__("pathlib").Path(__file__).resolve().parents[3]
     par = _load_parent((("legoesm.ice.fidelity.nemo_rheo_testcase_recipe",
                          "packages/ice/legoesm/ice/fidelity/nemo_rheo_testcase_recipe.py"),),
-                       rev=MERGE_PARENT_COMMIT)
+                       rev=None, blobs=D177_PARENT_BLOBS)
     rheo_par = par["legoesm.ice.fidelity.nemo_rheo_testcase_recipe"]
     assert hasattr(rheo_par, "apply_si3_jpl1_ridging") and not hasattr(rheo_cur, "apply_si3_jpl1_ridging")
     spec = importlib.util.spec_from_file_location(

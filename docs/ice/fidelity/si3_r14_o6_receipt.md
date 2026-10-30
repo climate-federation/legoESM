@@ -471,3 +471,63 @@ below.
   all four skips are identical, while this tree adds eight passes.  The
   ratchet delta is therefore empty, and the private-cross-import component is
   independently visible as six passes.
+
+## Resume 8: rebase-stable provenance amendment
+
+The Resume-7 rebase result remains the reviewed result, but three identities in
+its tests and citation map incorrectly depended on commits created by this
+round.  A fresh clone after another rebase is not required to contain those
+objects.  This amendment supersedes only those identities; it does not rewrite
+the Resume-7 history or change any scientific claim.
+
+- The pre-audit counterfactual now reads the exact `ridging.py` blob
+  `e6fbd2b02ce005c753db62d96cecd179f1c97fc2` and `itd.py` blob
+  `a808145ebbbde9464a606582df47ecdc20f895e3`.  They protect the tests proving
+  that the audited MIN/MAX survivor order and source-rounding barriers are
+  non-vacuous.
+- The pre-Decision-177 parent/current execution control now reads the exact
+  `itd.py`, `ridging.py`, `si3_surface.py`, and ICE_RHEO recipe blobs
+  `9ad1652db3140884432e84ffd56aea71420a1d05`,
+  `d3b5c6411f87fa9f1453c0e34af269818b075141`,
+  `d9d3c34dec7c5b58258f463abc03f1f0bd4939a5`, and
+  `56bfdb50f2da94dfe7ca8e2d3c956c0b7e79de53`.  They protect lane 3's deleted
+  one-category ridging/correction behavior and its equality with the merged O6
+  production path.
+- The Decision-177 historical citations now read the exact `ridging.py`,
+  deleted lane-3 test, and O6 test blobs
+  `d3b5c6411f87fa9f1453c0e34af269818b075141`,
+  `77d5fcdd1ab29d4abbb9d90967b3b72483934e8f`, and
+  `21a106c2142ebbb5b7fd8bbf1fd194ec6dcbf47a`.  They protect the line-exact
+  evidence that Decision 177 subsumed instead of silently dropping.
+- The reviewed O6 model citations now read the composed `itd.py` and
+  `si3_orca2_state.py` blobs `9ad1652db3140884432e84ffd56aea71420a1d05`
+  and `eead840e3353e43b9aeeff801d07e146bb382954`, with explicit line relocation
+  to the same unique symbols.  They protect the reviewed correction and
+  conservation implementations while allowing additive lane code above them.
+- The pre-O6 parent `e8ee89ece8cbf611ecc6de0906a72b147565baae` and the
+  production-lane identity `0d339a87e5c1d718a0b9aa4bb49f8fb8788562be`
+  remain commit pins because both were already on the landing lane.  The first
+  protects shared generic ridging behavior; the second protects the O8--O16
+  production anchors composed with O6.
+
+The following machine-readable lines make the append-only supersession visible
+to the prospective provenance gate.  Every replacement is a Git blob reachable
+from this lane at the named path.
+
+PROVENANCE-SUPERSESSION: 7441c9f79cc86182d71ab2cefde5a680071f2039 -> blob 9ad1652db3140884432e84ffd56aea71420a1d05 `packages/ice/legoesm/ice/itd.py`
+PROVENANCE-SUPERSESSION: 7441c9f79cc86182d71ab2cefde5a680071f2039 -> blob eead840e3353e43b9aeeff801d07e146bb382954 `packages/ice/legoesm/ice/si3_orca2_state.py`
+PROVENANCE-SUPERSESSION: 6c5381338431f87e1ed0895a0118941aa6e7a38a -> blob d3b5c6411f87fa9f1453c0e34af269818b075141 `packages/ice/legoesm/ice/ridging.py`
+PROVENANCE-SUPERSESSION: 6c5381338431f87e1ed0895a0118941aa6e7a38a -> blob 77d5fcdd1ab29d4abbb9d90967b3b72483934e8f `tests/ice/fidelity/test_si3_jpl1_ridging.py`
+PROVENANCE-SUPERSESSION: 6c5381338431f87e1ed0895a0118941aa6e7a38a -> blob 21a106c2142ebbb5b7fd8bbf1fd194ec6dcbf47a `tests/ice/unit/test_si3_o6_rdgrft_cor.py`
+PROVENANCE-SUPERSESSION: 6c5381338431f87e1ed0895a0118941aa6e7a38a -> blob 9ad1652db3140884432e84ffd56aea71420a1d05 `packages/ice/legoesm/ice/itd.py`
+PROVENANCE-SUPERSESSION: 6c5381338431f87e1ed0895a0118941aa6e7a38a -> blob d9d3c34dec7c5b58258f463abc03f1f0bd4939a5 `packages/ice/legoesm/ice/si3_surface.py`
+PROVENANCE-SUPERSESSION: 6c5381338431f87e1ed0895a0118941aa6e7a38a -> blob 56bfdb50f2da94dfe7ca8e2d3c956c0b7e79de53 `packages/ice/legoesm/ice/fidelity/nemo_rheo_testcase_recipe.py`
+PROVENANCE-SUPERSESSION: ce68f273253e077aa118b775e487cbce9d333c57 -> blob b10f26b738194f9f089ca6ae7441c8e3072bcd27 `packages/ice/legoesm/ice/ridging.py`
+PROVENANCE-SUPERSESSION: ce68f273253e077aa118b775e487cbce9d333c57 -> blob 9ad1652db3140884432e84ffd56aea71420a1d05 `packages/ice/legoesm/ice/itd.py`
+PROVENANCE-SUPERSESSION: ce68f273253e077aa118b775e487cbce9d333c57 -> blob eead840e3353e43b9aeeff801d07e146bb382954 `packages/ice/legoesm/ice/si3_orca2_state.py`
+PROVENANCE-SUPERSESSION: ce68f273253e077aa118b775e487cbce9d333c57 -> blob d9d3c34dec7c5b58258f463abc03f1f0bd4939a5 `packages/ice/legoesm/ice/si3_surface.py`
+
+`fortran_sum0` had two identical assignments to `_sum0` in `si3_surface.py`.
+The first assignment, beside `fortran_min`, `fortran_max`, and
+`ieee_is_zero`, is retained; the later repeated assignment and repeated
+`__all__` entry are removed.

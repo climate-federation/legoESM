@@ -15,6 +15,11 @@ CUTOFF = dt.datetime(2026, 10, 30, tzinfo=dt.timezone.utc).isoformat()
 HEX_RE = re.compile(r"(?<![0-9A-Fa-f])(?:[0-9A-Fa-f]{64}|[0-9A-Fa-f]{40})(?![0-9A-Fa-f])")
 DOC_RE = re.compile(r"(?i)(?:receipt|prereg).*\.md$")
 PATH_RE = re.compile(r"`([^`]+)`|(/[A-Za-z0-9_@%+=:,./~-]+)")
+SUPERSESSION_RE = re.compile(
+    r"^PROVENANCE-SUPERSESSION: "
+    r"(?P<old>[0-9A-Fa-f]{40}) -> blob (?P<blob>[0-9A-Fa-f]{40}) "
+    r"`(?P<path>[^`\n]+)`$"
+)
 MINIMUM_DOCUMENTS = 1389
 
 
@@ -77,15 +82,54 @@ def cited_path(path: Path, lines: list[str], index: int, start: int) -> Path | N
     return paths.pop() if len(paths) == 1 else None
 
 
+def superseded_git_shas(lines: list[str]) -> tuple[set[str], list[str]]:
+    """Validate append-only commit-to-file-content supersessions.
+
+    A receipt cannot rewrite its historical paragraph after a rebase.  This
+    record form retires that paragraph's round-local commit identity in favour
+    of a blob that is reachable from ``HEAD`` at the named path.  Merely naming
+    an arbitrary object, an unreachable blob, or a different path cannot make
+    an unresolved SHA pass.
+    """
+    superseded: set[str] = set()
+    failures: list[str] = []
+    for line_number, line in enumerate(lines, 1):
+        if not line.startswith("PROVENANCE-SUPERSESSION:"):
+            continue
+        match = SUPERSESSION_RE.fullmatch(line)
+        if match is None:
+            failures.append(f"line {line_number}: malformed provenance supersession")
+            continue
+        old = match.group("old").lower()
+        blob = match.group("blob").lower()
+        rel = Path(match.group("path"))
+        if rel.is_absolute() or ".." in rel.parts:
+            failures.append(f"line {line_number}: supersession path must be repository-relative")
+            continue
+        kind = run("git", "cat-file", "-t", blob, check=False)
+        if kind.returncode != 0 or kind.stdout.strip() != "blob":
+            failures.append(f"line {line_number}: supersession target is not a reachable Git blob")
+            continue
+        objects = run("git", "rev-list", "--objects", "HEAD", "--", str(rel)).stdout.splitlines()
+        if not any(row.split(" ", 1)[0].lower() == blob for row in objects):
+            failures.append(
+                f"line {line_number}: blob {blob} is not reachable from HEAD at {rel}")
+            continue
+        superseded.add(old)
+    return superseded, failures
+
+
 def validate_document(path: Path, selected: set[int] | None = None) -> list[str]:
     lines = path.read_text(errors="replace").splitlines()
     selected = POST_CUTOFF_CHANGES.get(path, set()) if selected is None else selected
-    failures: list[str] = []
+    superseded, failures = superseded_git_shas(lines)
     for line_number in sorted(selected):
         line = lines[line_number - 1]
         for match in HEX_RE.finditer(line):
             value = match.group().lower()
             if len(value) == 40:
+                if value in superseded:
+                    continue
                 found = run("git", "cat-file", "-e", value, check=False).returncode == 0
                 if not found:
                     failures.append(f"{path}:{line_number}: unresolved Git SHA {value}")
@@ -130,3 +174,27 @@ def test_real_file_sha256_plant_control_passes(tmp_path: Path) -> None:
     document = tmp_path / "control_receipt.md"
     document.write_text(f"`{artifact}` SHA-256 `{digest}`\n")
     assert validate_document(document, {1}) == []
+
+
+def test_reachable_blob_supersedes_an_unresolved_commit_append_only(tmp_path: Path) -> None:
+    document = tmp_path / "amended_receipt.md"
+    blob = run("git", "rev-parse", "HEAD:CLAUDE.md").stdout.strip()
+    old = "0" * 40
+    document.write_text(
+        f"historical commit `{old}`\n"
+        f"PROVENANCE-SUPERSESSION: {old} -> blob {blob} `CLAUDE.md`\n"
+    )
+    assert validate_document(document, {1, 2}) == []
+
+
+def test_wrong_path_cannot_supersede_an_unresolved_commit(tmp_path: Path) -> None:
+    document = tmp_path / "bad_amendment_receipt.md"
+    blob = run("git", "rev-parse", "HEAD:CLAUDE.md").stdout.strip()
+    old = "0" * 40
+    document.write_text(
+        f"historical commit `{old}`\n"
+        f"PROVENANCE-SUPERSESSION: {old} -> blob {blob} `README.md`\n"
+    )
+    failures = validate_document(document, {1, 2})
+    assert any("not reachable from HEAD at README.md" in failure for failure in failures)
+    assert any("unresolved Git SHA" in failure for failure in failures)

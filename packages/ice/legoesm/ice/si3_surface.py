@@ -596,11 +596,10 @@ __all__ = (
     "SI3BlkIce2", "SI3FlxOther", "SI3SurfaceConfig", "SI3SurfaceOutputs",
     "fortran_max", "fortran_min", "fortran_sum0", "ieee_is_zero",
     "orca2_flx_other_neighbours", "si3_blk_ice_1", "si3_blk_ice_2", "si3_ice_alb",
-    "si3_ice_flx_other", "si3_ice_sbc_tau_lbc", "si3_surface_step", "fortran_sum0", "fortran_min_tie_first", "fortran_max_tie_first",
+    "si3_ice_flx_other", "si3_ice_sbc_tau_lbc", "si3_surface_step", "fortran_min_tie_first", "fortran_max_tie_first",
 )
 
 
 # Public names for other SI3 statement families (appended: no cited line moves).
-fortran_sum0 = _sum0
 fortran_min_tie_first = _fmin
 fortran_max_tie_first = _fmax

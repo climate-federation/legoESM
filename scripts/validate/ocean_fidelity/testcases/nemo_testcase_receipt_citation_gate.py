@@ -11330,13 +11330,29 @@ _repin('tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:1-932', [
     'assert calls == ["_cumulative_remap", "_cumulative_remap"]', 932])
 
 # DECISION 177 deleted lane 3's own jpl=1 ridging arm and its tests (merged into
-# the O6 kernels).  Citations of that code resolve at the last commit that had it.
-_D177_PARENT = "6c53813384"
+# the O6 kernels).  Citations of that code resolve against the exact historical
+# file contents.  These blobs are reachable from the replayed lane history and
+# therefore survive another rebase without naming an O6 commit.
+_D177_BLOBS = {
+    'packages/ice/legoesm/ice/ridging.py': 'd3b5c6411f87fa9f1453c0e34af269818b075141',
+    'tests/ice/fidelity/test_si3_jpl1_ridging.py': '77d5fcdd1ab29d4abbb9d90967b3b72483934e8f',
+    'tests/ice/unit/test_si3_o6_rdgrft_cor.py': '21a106c2142ebbb5b7fd8bbf1fd194ec6dcbf47a',
+}
 
 def _pin_at(key: str, commit: str) -> None:
     value = CITATION_MAP[key]
     CITATION_MAP[key] = ({**value, "at": commit} if isinstance(value, dict)
                          else {"anchors": value, "at": commit})
+
+
+def _pin_blob(key: str, blob: str, *, lines: str | None = None) -> None:
+    """Pin anchors to file content, optionally after a pure line-number move."""
+    value = CITATION_MAP[key]
+    pinned = ({**value, "blob": blob} if isinstance(value, dict)
+              else {"anchors": value, "blob": blob})
+    if lines is not None:
+        pinned["lines"] = lines
+    CITATION_MAP[key] = pinned
 
 
 # The earlier O6 receipt sections describe the tree before the merge; their
@@ -11359,7 +11375,8 @@ for _key in (
     'tests/ice/unit/test_si3_o6_rdgrft_cor.py:548',
     'tests/ice/unit/test_si3_o6_rdgrft_cor.py:568',
 ):
-    _pin_at(_key, _D177_PARENT)
+    _path = _key.rsplit(':', 1)[0]
+    _pin_blob(_key, _D177_BLOBS[_path])
 
 DEFAULT_RECEIPT = (
     REPO / "docs/ocean/fidelity/testcases"
@@ -11591,20 +11608,26 @@ CITATION_MAP.update({
         1170,
     ],
 })
-# The composed O6/O8--O16 tree moves source below citations that describe each
-# side's reviewed pre-rebase tree.  Keep those historical claims line-exact at
-# the commit where they were reviewed; the current production anchors added by
-# the other rung remain live and are audited independently.
-_REVIEWED_O6 = "7441c9f79cc86182d71ab2cefde5a680071f2039"
+# The composed O6/O8--O16 tree moves source below citations that describe the
+# reviewed O6 source.  Pin the replayed files by content and map each historical
+# line to the same unique symbol in that content; no round-local commit survives
+# as an identity dependency.  Current production anchors remain live and are
+# audited independently.
+_REVIEWED_O6_BLOBS = {
+    'packages/ice/legoesm/ice/itd.py': '9ad1652db3140884432e84ffd56aea71420a1d05',
+    'packages/ice/legoesm/ice/si3_orca2_state.py': 'eead840e3353e43b9aeeff801d07e146bb382954',
+}
+_REVIEWED_O6_LINES = {
+    'packages/ice/legoesm/ice/itd.py:993': '1311',
+    'packages/ice/legoesm/ice/itd.py:932': '1250',
+    'packages/ice/legoesm/ice/itd.py:950': '1268',
+    'packages/ice/legoesm/ice/si3_orca2_state.py:3112': '4860',
+    'packages/ice/legoesm/ice/si3_orca2_state.py:3170': '4918',
+}
 _REBASE_LANE = "0d339a87e5c1d718a0b9aa4bb49f8fb8788562be"
-for _key in (
-    'packages/ice/legoesm/ice/itd.py:993',
-    'packages/ice/legoesm/ice/itd.py:932',
-    'packages/ice/legoesm/ice/itd.py:950',
-    'packages/ice/legoesm/ice/si3_orca2_state.py:3112',
-    'packages/ice/legoesm/ice/si3_orca2_state.py:3170',
-):
-    _pin_at(_key, _REVIEWED_O6)
+for _key, _lines in _REVIEWED_O6_LINES.items():
+    _path = _key.rsplit(':', 1)[0]
+    _pin_blob(_key, _REVIEWED_O6_BLOBS[_path], lines=_lines)
 
 for _key in (
     'packages/ice/legoesm/ice/__init__.py:201-227',
@@ -11770,15 +11793,21 @@ def check(citation: str, value, shift: int = 0, shift_last_only: bool = False,
     """
     path_key, spec = citation.rsplit(":", 1)
     path = FILES.get(path_key)
-    # {"at": <commit>} pins a citation of code a later decision deleted to the
-    # last commit that had it; the receipt's claim is about that tree.
+    # {"at": <commit>} pins a citation to a commit already on the landing lane.
+    # {"blob": <oid>} pins it to exact file content, independent of rebases;
+    # "lines" may locate the same unique anchor after additive composition.
     at = value.get("at") if isinstance(value, dict) else None
-    if path is None or not (at or path.is_file()):
+    blob = value.get("blob") if isinstance(value, dict) else None
+    if at and blob:
+        return {"citation": citation, "status": "BAD-IDENTITY",
+                "detail": "a citation cannot name both a commit and a blob"}
+    if path is None or not (at or blob or path.is_file()):
         return {"citation": citation, "status": "UNRESOLVED",
                 "detail": f"no readable file for {path_key!r}"}
     routine = None
     if isinstance(value, dict):
         routine = value.get("routine")
+        spec = value.get("lines", spec)
         value = value.get("anchors")
     try:
         numbers = line_numbers(spec)
@@ -11787,7 +11816,16 @@ def check(citation: str, value, shift: int = 0, shift_last_only: bool = False,
     except ValueError as error:
         return {"citation": citation, "status": "BAD-CITATION",
                 "detail": str(error)}
-    if at:
+    if blob:
+        kind = subprocess.run(["git", "cat-file", "-t", blob], cwd=REPO,
+                              capture_output=True, text=True)
+        if kind.returncode != 0 or kind.stdout.strip() != "blob":
+            return {"citation": citation, "status": "UNRESOLVED",
+                    "detail": f"{blob} is not a reachable Git blob"}
+        shown = subprocess.run(["git", "cat-file", "blob", blob], cwd=REPO,
+                               capture_output=True, text=True, errors="replace")
+        body = shown.stdout.splitlines()
+    elif at:
         shown = subprocess.run(["git", "show", f"{at}:{path.relative_to(REPO)}"], cwd=REPO,
                                capture_output=True, text=True, errors="replace")
         if shown.returncode != 0:
@@ -11899,12 +11937,15 @@ def self_test() -> list[dict]:
                 CITATION_MAP["BLD/ppsrc/nemo/dynadv_up3.f90:211,317,355"][-2],
                 3])),
     ]
-    # a commit-pinned citation of deleted code is still line-exact at that commit
+    # a content-pinned citation of deleted code is still line-exact in that file
     pinned = CITATION_MAP["tests/ice/fidelity/test_si3_jpl1_ridging.py:221-250"]
-    planted.append(("commit-pinned endpoint shifted",
+    planted.append(("content-pinned endpoint shifted",
                     check("tests/ice/fidelity/test_si3_jpl1_ridging.py:221-250", pinned, shift=2)))
-    planted.append(("commit pin removed from deleted code",
+    planted.append(("content pin removed from deleted code",
                     check("tests/ice/fidelity/test_si3_jpl1_ridging.py:221-250", pinned["anchors"])))
+    planted.append(("content blob made unreachable",
+                    check("tests/ice/fidelity/test_si3_jpl1_ridging.py:221-250",
+                          {**pinned, "blob": "0" * 40})))
     # and the unplanted entry must still PASS, or the controls prove nothing
     baseline = check("stprk3_stg.F90:309-334", good)
     comma_baseline = check(
