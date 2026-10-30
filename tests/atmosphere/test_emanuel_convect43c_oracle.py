@@ -330,7 +330,8 @@ def test_check_grads_at_default_sharpness(fx, v):
 # defrac_floor: fixture column 10 with its level temperatures Newton-solved
 # (sw_probe3.py, against the scheme's own BY) so that INB stays fixed, CAPEM
 # = 2e-4 on one level and BYP = -1e-3, the MAX(CAPEM - CAPE, 0.001) floor
-# (codex construction, reviewer pick 2026-10-30); surface-last, K.
+# (codex construction, reviewer pick 2026-10-30); surface-last, K.  Run with
+# carried CBMF 0.01: from a cold start this column carries only ~5e-12.
 DEFRAC_DT_K = (
     0.0, 0.0, -4.87042, -5.609691, -6.15788, -6.53336,
     -6.855447, -7.181987, -7.531112, -7.846367, -8.068969, -4.301848,
@@ -360,7 +361,7 @@ SWITCH_COLUMNS = {
     "downdraft_dhdp_sharpness": ("warm", 10, 4.0, 0.01),
     "downdraft_mp_sharpness": ("qnear", 5, -0.020000000000000018, 0.01),
     "downdraft_taper_band_sharpness": ("band", 10, (5.0, 20.0), 0.0),
-    "defrac_floor_sharpness": ("dT", 10, DEFRAC_DT_K, 0.0),
+    "defrac_floor_sharpness": ("dT", 10, DEFRAC_DT_K, 0.01),
     # SCRIT bisected onto 0 at level 8 (surface-first, 0-based); thin margin
     # (output change 1.9e-9): the floor moves SCRIT by at most ln2/1e3.
     "scrit_floor_sharpness": ("free", 1, 1.49296875, 0.01),
