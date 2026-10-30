@@ -53,7 +53,6 @@ from legoesm.atmosphere.physics.physics_state import init_physics_state, update_
 from legoesm.core.field import Field  # noqa: E402
 from legoesm.core.state import HydrostaticState  # noqa: E402
 from legoesm.grids.vertical import make_cam6_l32_levels  # noqa: E402
-from tests.atmosphere._cam6_detrain_oracle import cam6_clubb_detrain_oracle  # noqa: E402
 
 FIXTURE = os.path.join(os.path.dirname(__file__), "oracle_fixtures", "zm_pblh_cam.npz")
 TOL = 1e-10
@@ -202,16 +201,14 @@ def test_evaporation_saturation_is_the_cam_qsat_table():
         q(e_lo), rel=TOL, abs=0.0)
 
 
-def _bridge(fx, pblh, zm=None, drop=()):
-    """The hydrostatic/MPAS convection bridge on the fixture columns
-    (``drop``: legoESM tracer names the state does not carry)."""
+def _bridge(fx, pblh, zm=None):
+    """The hydrostatic/MPAS convection bridge on the fixture columns."""
     ncol, nlev = fx["T"].shape
     coord = make_cam6_l32_levels()
     np.testing.assert_allclose(np.asarray(coord.pressure_at_full(jnp.asarray(fx["p_s"]))),
                                fx["p_full"], rtol=0, atol=0)
     tracers = {"q_v": Field(jnp.asarray(fx["q"]))}
-    tracers.update({nm: Field(jnp.asarray(fx[key])) for key, nm, _ in TRACERS
-                    if nm not in drop})
+    tracers.update({nm: Field(jnp.asarray(fx[key])) for key, nm, _ in TRACERS})
     state = HydrostaticState(
         u=Field(jnp.asarray(fx["u"])), v=Field(jnp.asarray(fx["v"])),
         T=Field(jnp.asarray(fx["T"])), p_s=Field(jnp.asarray(fx["p_s"])),
@@ -237,17 +234,12 @@ def test_mpas_bridge_passes_the_carried_pblh_and_matches_cam(fx):
             "precip": tend.precip.data}
     o_cmp = {k: o[k] for k in ours if k != "precip"}
     o_cmp["precip"] = np.maximum(np.sum(o["dq_r"] * dp, axis=1), 0.0) / constants.g
-    # every carried convtran1 tracer: its transport, plus clubb_intr's
-    # treatment of the detrained condensate dlf (clubb_intr.F90:2345-2376:
-    # liquid/ice split, number sources, fusion heating), evaluated on the
-    # bridge's input T (the documented departure from CAM's state1%t)
-    det = dict(zip(("q_c", "q_i", "N_c", "N_i", "dT"),
-                   cam6_clubb_detrain_oracle(o["dq_c"], fx["T"])))
-    o_cmp["dq_c"] = det["q_c"] + fx["oracle_dqc_convtran"]
-    o_cmp["dT_dt"] = o["dT_dt"] + det["dT"]
+    # every carried convtran1 tracer: its transport, plus the detrained
+    # condensate dlf for q_c (CAM books dlf as cloud water in clubb_intr)
+    o_cmp["dq_c"] = o["dq_c"] + fx["oracle_dqc_convtran"]
     for _, nm, key in TRACERS[1:]:
         ours[nm] = tend.tracer_tendencies[nm].data
-        o_cmp[nm] = fx[f"oracle_{key}"] + det.get(nm, 0.0)
+        o_cmp[nm] = fx[f"oracle_{key}"]
     errs = {k: _rel(ours[k], o_cmp[k]) for k in ours}
     assert max(errs.values()) <= TOL, errs
 
@@ -257,15 +249,12 @@ def test_transport_switch_off_drops_exactly_the_tracer_transport(fx):
     scheme returns tracer_transport=None even when handed tracers), q_c gets
     the detrained condensate alone, the other convtran1 tracers get no
     convective tendency, and T/q_v/winds/mass flux are bit-identical to on."""
-    # detrained-condensate partition off on both arms, so q_c carries dlf
-    # alone and the other tracers get no convective tendency at all
-    off_cfg = ZhangMcFarlaneConfig(transport_cloud_tracers=False,
-                                   detrain_number_source=False)
+    off_cfg = ZhangMcFarlaneConfig(transport_cloud_tracers=False)
     assert ZhangMcFarlaneConfig().transport_cloud_tracers is True
     out_off, _ = _wrapper(fx, config=off_cfg)
     assert out_off.tracer_transport is None
     pblh = jnp.asarray(fx["pblh"])
-    on, c_on = _bridge(fx, pblh, zm=ZhangMcFarlaneConfig(detrain_number_source=False))
+    on, c_on = _bridge(fx, pblh)
     off, c_off = _bridge(fx, pblh, zm=off_cfg)
     for a, b in ((on.dT_dt, off.dT_dt), (on.du_dt, off.du_dt), (on.dv_dt, off.dv_dt),
                  (on.tracer_tendencies["q_v"], off.tracer_tendencies["q_v"])):
@@ -279,36 +268,6 @@ def test_transport_switch_off_drops_exactly_the_tracer_transport(fx):
     for _, nm, _ in TRACERS[1:]:
         t = off.tracer_tendencies.get(nm)
         assert t is None or not np.any(np.asarray(t.data)), nm
-
-
-def test_detrain_switch_off_is_the_all_liquid_routing(fx):
-    """ZhangMcFarlaneConfig.detrain_number_source=False restores the previous
-    routing bit-for-bit: every bridge output equals the run whose state
-    carries no q_i/N_c/N_i (the code path untouched by the partition) except
-    those tracers' own convtran, and q_c = dlf + transport matches CAM's
-    zm_convr dlf.  On (the default) differs in q_c, q_i, N_c, N_i and T."""
-    assert ZhangMcFarlaneConfig().detrain_number_source is True
-    pblh = jnp.asarray(fx["pblh"])
-    off, c_off = _bridge(fx, pblh, zm=ZhangMcFarlaneConfig(detrain_number_source=False))
-    on, _ = _bridge(fx, pblh)
-    ref, c_ref = _bridge(fx, pblh, drop=("q_i", "N_c", "N_i"))   # default config
-    for a, b in ((off.dT_dt, ref.dT_dt), (off.du_dt, ref.du_dt), (off.dv_dt, ref.dv_dt),
-                 (off.precip, ref.precip)):
-        np.testing.assert_array_equal(np.asarray(a.data), np.asarray(b.data))
-    for nm in ref.tracer_tendencies:
-        np.testing.assert_array_equal(np.asarray(off.tracer_tendencies[nm].data),
-                                      np.asarray(ref.tracer_tendencies[nm].data), err_msg=nm)
-    np.testing.assert_array_equal(np.asarray(c_off["conv_heating"]), np.asarray(c_ref["conv_heating"]))
-    o = _oracle_tendencies(fx)
-    assert _rel(off.tracer_tendencies["q_c"].data, o["dq_c"] + fx["oracle_dqc_convtran"]) <= TOL
-    assert _rel(off.dT_dt.data, o["dT_dt"]) <= TOL
-    for nm in ("q_i", "N_c", "N_i"):
-        assert np.any(np.asarray(on.tracer_tendencies[nm].data)
-                      != np.asarray(off.tracer_tendencies[nm].data)), nm
-    assert np.any(np.asarray(on.dT_dt.data) != np.asarray(off.dT_dt.data))
-    # the Beres heating carry is ZM's own heating in both arms (CAM TTEND_DP)
-    _, c_on = _bridge(fx, pblh)
-    np.testing.assert_array_equal(np.asarray(c_on["conv_heating"]), np.asarray(c_off["conv_heating"]))
 
 
 def test_zm_gradient_is_finite_with_carried_pblh(fx):

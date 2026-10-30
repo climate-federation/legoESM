@@ -299,9 +299,6 @@ zm_momcd: 0.7               # CMT downdraft pressure-gradient coefficient
 zm_tiedke_add: 0.5          # parcel buoyancy offset [K]
 zm_alfa: 0.1                # downdraft mass-flux fraction of the updraft
 zm_transport_cloud_tracers: true  # ZM convtran of carried cloud/precip water + numbers (CAM6)
-zm_detrain_number_source: true    # ZM detrained condensate as CAM6 clubb_intr: liquid/ice
-                                  # split 268-238 K, droplet (8 um) + ice (25 um) number
-                                  # sources, fusion heating; false = all to cloud liquid
 
 # ---- turbulence ---------------------------------------------------------------
 turbulence: clubb

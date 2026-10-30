@@ -30,8 +30,6 @@ from __future__ import annotations
 
 from typing import NamedTuple
 
-from legoesm import constants
-
 
 __param_spec__ = {
     "AhmedNeelinDCAConfig": {
@@ -335,12 +333,6 @@ __param_spec__ = {
         "excluded": {
             "limcnv_p_pa": "numerics/domain: convection top cap (40 hPa reference interface), not a closure knob",
             "parcel_tpert": "default 0 = disabled/off (PBL temperature perturbation; CAM6 CLUBB path has none)",
-            "detrain_ice_t_warm_K": "fixed CAM6 clubb_intr.F90:2347 constant: warm end (268.15 K) of the detrained-condensate liquid/ice ramp (structural phase partition, not a trained closure)",
-            "detrain_ice_t_cold_K": "fixed CAM6 clubb_intr.F90:2349 constant: cold end (238.15 K) of the detrained-condensate liquid/ice ramp (structural phase partition, not a trained closure)",
-            "detrain_r_liq_m": "fixed CAM6 clubb_intr.F90:2369 constant: assumed deep-convective detrained droplet radius (8 um) setting the droplet-number source",
-            "detrain_r_ice_m": "fixed CAM6 clubb_intr.F90:2373 constant: assumed deep-convective detrained ice-crystal radius (25 um) setting the ice-number source",
-            "detrain_rho_liq": "fixed CAM6 clubb_intr.F90:2369 constant: liquid density (997 kg/m3) in the detrained droplet-number source",
-            "detrain_rho_ice": "fixed CAM6 clubb_intr.F90:2373 constant: ice density (500 kg/m3) in the detrained ice-number source",
         },
         "params": {
             "c0_lnd": {"units": "1/m", "bounds": (0.002, 0.02), "tunable_tier": 1, "transform": "sigmoid", "category": "autoconversion", "reference": "CAM zmconv_c0_lnd namelist span (0.002-0.0075 across configurations)", "shape": None},
@@ -729,24 +721,6 @@ class ZhangMcFarlaneConfig(NamedTuple):
         Run ``convtran`` on the carried CAM6 convtran1 tracers
         (``zm_conv_intr.F90:829-846``); when False they are not transported
         and ``tracer_transport`` is ``None``.
-    detrain_number_source : bool
-        Host treatment of the detrained condensate ``dlf`` as CAM6
-        ``clubb_intr.F90:2345-2376`` (non-``zmconv_microp`` branch, shallow
-        ``dlf2 = 0``): split into cloud liquid / ice by the linear
-        temperature ramp below, add the droplet and ice-crystal number
-        sources and the fusion heating of the ice part.  False = the
-        pre-2026-10-28 behaviour (all ``dlf`` to cloud liquid, no number
-        source, no fusion heating).  Read by the hydrostatic/MPAS bridge
-        (``convection.integration``); see
-        :func:`~legoesm.atmosphere.physics.convection.zhang_mcfarlane.cam6_detrained_condensate_partition`.
-    detrain_ice_t_warm_K, detrain_ice_t_cold_K : float
-        Ends of the ramp [K]: ice fraction 0 above the warm end, 1 below the
-        cold end, linear between (CAM6 268.15 / 238.15 K).
-    detrain_r_liq_m, detrain_r_ice_m : float
-        Assumed detrained droplet / ice-crystal radius [m] (CAM6 deep
-        convection 8 / 25 um).
-    detrain_rho_liq, detrain_rho_ice : float
-        Liquid / ice density [kg/m^3] in the number sources (CAM6 997 / 500).
     """
     c0_lnd: float = 0.0075
     c0_ocn: float = 0.03
@@ -763,15 +737,6 @@ class ZhangMcFarlaneConfig(NamedTuple):
     parcel_tpert: float = 0.0
     enable_cmt: bool = True
     transport_cloud_tracers: bool = True
-    # --- detrained-condensate partition (CAM6 clubb_intr.F90:2345-2376,
-    # cam_cesm2_1_rel; non-zmconv_microp branch, dlf2 = 0) ---
-    detrain_number_source: bool = True
-    detrain_ice_t_warm_K: float = constants.T_freeze - 5.0    # 268.15 K
-    detrain_ice_t_cold_K: float = constants.T_freeze - 35.0   # 238.15 K
-    detrain_r_liq_m: float = 8.0e-6      # [m] deep-convective droplet radius
-    detrain_r_ice_m: float = 25.0e-6     # [m] deep-convective ice radius
-    detrain_rho_liq: float = 997.0       # [kg/m^3] CAM's literal (not rho_water)
-    detrain_rho_ice: float = 500.0       # [kg/m^3]
     # Column land fraction policy (static, closure-time).  "required": the host
     # must pass ``land_frac`` (it picks c0_lnd vs c0_ocn per column); a missing
     # one raises instead of silently treating every column as ocean.  "none":

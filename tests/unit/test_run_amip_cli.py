@@ -5505,33 +5505,6 @@ def test_zm_transport_cloud_tracers_flows_to_config_and_kernel():
         cfg_on._replace(zm_transport_cloud_tracers="false").validate_strict()
 
 
-def test_zm_detrain_number_source_flows_to_config_and_kernel():
-    """--[no-]zm-detrain-number-source threads CLI -> ExperimentConfig ->
-    ZhangMcFarlaneConfig.detrain_number_source (both the FV resolver and the
-    combined-physics convection_config_for the MPAS lane uses) and survives
-    the AMIP export; default on (CAM6 clubb_intr); the production deck pins it."""
-    from legoesm.driver.config import ExperimentConfig
-    from legoesm.driver.physics_pipeline import _resolve_convection, convection_config_for
-    from legoesm.driver.run_config_yaml import load_yaml_config
-    parser = build_arg_parser()
-    base = ["--dataset", "analytical", "--convection", "zhang_mcfarlane"]
-    cfg_on = build_config_from_args(_postprocess_args(parser.parse_args(base), parser))
-    cfg_off = build_config_from_args(_postprocess_args(parser.parse_args(
-        base + ["--no-zm-detrain-number-source"]), parser))
-    assert cfg_on.zm_detrain_number_source is True
-    assert cfg_off.zm_detrain_number_source is False
-    for c, want in ((cfg_on, True), (cfg_off, False)):
-        assert _resolve_convection(c)[1].detrain_number_source is want
-        assert convection_config_for(c).zhang_mcfarlane.detrain_number_source is want
-        assert ExperimentConfig.from_amip_config(
-            c.to_amip_config()).zm_detrain_number_source is want
-    with pytest.raises(ValueError, match="zm_detrain_number_source"):
-        cfg_on._replace(zm_detrain_number_source="false").validate_strict()
-    keys = load_yaml_config(
-        str(_repo_root() / "config" / "amip" / "amip_production.yaml"), build_arg_parser())
-    assert keys["zm_detrain_number_source"] is True
-
-
 def test_production_deck_pins_zm_tracer_transport_on():
     from legoesm.driver.run_config_yaml import load_yaml_config
     for deck in ("amip_production.yaml", "amip_production_fv3duo_c24.yaml"):

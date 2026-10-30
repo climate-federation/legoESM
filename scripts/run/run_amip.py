@@ -1418,17 +1418,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "of the carried cloud water, ice, rain, snow and "
                              "number tracers. "
                              f"Default {_EXPERIMENT_DEFAULTS.zm_transport_cloud_tracers}.")
-    parser.add_argument("--zm-detrain-number-source",
-                        dest="zm_detrain_number_source",
-                        action=argparse.BooleanOptionalAction,
-                        default=_EXPERIMENT_DEFAULTS.zm_detrain_number_source,
-                        help="Zhang-McFarlane detrained condensate as CAM6 "
-                             "(clubb_intr): split into cloud liquid and ice by "
-                             "temperature, add droplet and ice-crystal number "
-                             "sources and the fusion heating; off = all to "
-                             "cloud liquid. Acts on the MPAS/FV3-duo "
-                             "(hydrostatic bridge) lane. "
-                             f"Default {_EXPERIMENT_DEFAULTS.zm_detrain_number_source}.")
     parser.add_argument("--bechtold-conv-top-pa", type=float,
                         default=_EXPERIMENT_DEFAULTS.bechtold_conv_top_pa,
                         dest="bechtold_conv_top_pa",
@@ -3250,7 +3239,6 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         bechtold_rain_vapor_sink=args.bechtold_rain_vapor_sink,
         zm_land_fraction=args.zm_land_fraction,
         zm_transport_cloud_tracers=args.zm_transport_cloud_tracers,
-        zm_detrain_number_source=args.zm_detrain_number_source,
         bechtold_conv_top_pa=args.bechtold_conv_top_pa,
         bechtold_downdraft_evap=args.bechtold_downdraft_evap,
         bechtold_downdraft_alpha=args.bechtold_downdraft_alpha,
