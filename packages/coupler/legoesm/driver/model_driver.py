@@ -801,6 +801,46 @@ def warn_sed_substeps_unreported(cfg, lane: str = "current",
     return True
 
 
+def _dump_native_feed(driver, day, kw) -> None:
+    """Write the MPAS CMOR feed of one diagnostic interval on the model's own
+    cells (float32 npz), when ``LEGOESM_NATIVE_DUMP_DIR`` is set.
+
+    Flux fields are the interval means the CMOR feed uses; state fields (T,
+    q, winds, p_s) are the end-of-interval samples.  The first call also writes
+    ``grid.npz`` (cell centres, areas, hybrid coefficients) so pressure on
+    model levels can be rebuilt as A p_ref + B p_s.  No-op when the variable is
+    unset, so default runs are unchanged.
+    """
+    import os
+    out = os.environ.get("LEGOESM_NATIVE_DUMP_DIR")
+    if not out:
+        return
+    os.makedirs(out, exist_ok=True)
+    gpath = os.path.join(out, "grid.npz")
+    if not os.path.exists(gpath):
+        g = driver.grid
+        sig = driver.sigma
+        extra = {}
+        for name in ("A_half", "B_half", "a_half", "b_half", "sigma_half",
+                     "sigma_full", "hyai", "hybi"):
+            v = getattr(sig, name, None)
+            if v is not None:
+                extra[name] = np.asarray(v, dtype=np.float64)
+        np.savez(gpath, latCell=np.asarray(g.latCell), lonCell=np.asarray(g.lonCell),
+                 areaCell=np.asarray(getattr(g, "areaCell", np.nan)), **extra)
+    arrs = {}
+    for k, v in kw.items():
+        if v is None or isinstance(v, (str, bytes)):
+            continue
+        try:
+            a = np.asarray(v)
+        except Exception:
+            continue
+        if a.dtype.kind in "fiu" and a.size > 1:
+            arrs[k] = a.astype(np.float32)
+    np.savez(os.path.join(out, f"feed_{day:010.4f}.npz"), day=np.float64(day), **arrs)
+
+
 def _sfc_diag_slot(key: str) -> int:
     """Index of *key* in the MPAS ``_sfc_diag`` tuple, derived from the
     SHARED slot contract like ``_sed_substeps_slot`` -- never hand-counted."""
@@ -11065,6 +11105,7 @@ class ModelDriver:
                     _kw = self._mpas_cmip_native_kwargs(day, diag)
                     diag.feed_cmip_accumulators_native(
                         day, include_state=not flux_only, **_kw)
+                    _dump_native_feed(self, day, _kw)
                     self._feed_mpas_moisture_budget(day, diag, _kw)
         except Exception as exc:  # pragma: no cover - defensive diag guard
             logger.error(
