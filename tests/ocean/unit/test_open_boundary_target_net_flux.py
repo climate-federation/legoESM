@@ -5,7 +5,11 @@ removes the net flux through the open faces (CROCO obc_volcons) takes an
 optional target instead of zero.  Checked twice: the corrected faces carry
 exactly the target, and the interior volume of a resting box with three open
 sides grows by the target times the elapsed time, while without a target it
-stays put.
+stays put.  The second check is repeated with the baroclinic and tracer
+condition on and an uneven boundary sea level (data +1 m on the west side,
+-1 m on the north, interior 0.5 m above the data), where large inflows and
+outflows nearly cancel: the correction must then measure the face depth as
+H + eta, as the model's transports do.
 """
 import numpy as np
 
@@ -60,8 +64,9 @@ def _data(target):
                             target_net_flux=None if target is None else jnp.asarray(target))
 
 
-def _net_inflow(U, V, H, grid, u_mask, v_mask):
-    """Net volume flux into the domain through the open faces, measured as the correction measures it."""
+def _net_inflow(U, V, H, eta, grid, u_mask, v_mask):
+    """Net volume flux into the domain through the open faces, total depth H + eta by the min rule."""
+    H = H + eta
     dy_cell = 0.5 * jnp.asarray(grid.dy)
     R, dlon = float(grid.radius), float(grid.dlon)
     lat_v = jnp.asarray(grid.lat_v)
@@ -80,10 +85,10 @@ def test_corrected_faces_carry_the_target():
     V = jnp.asarray(0.1 * rng.standard_normal(st.v_mask.data.shape)) * st.v_mask.data
     H = st.H_bathy.data
     for target in (None, Q, -2.5 * Q):
-        U2, V2, _ = apply_barotropic_open_boundary(
+        U2, V2, eta2 = apply_barotropic_open_boundary(
             eta, U, V, eta, U, V, H, grid, 60.0, 9.81, _data(target),
             st.u_mask.data, st.v_mask.data, st.land_mask.data)
-        net = _net_inflow(U2, V2, H, grid, st.u_mask.data, st.v_mask.data)
+        net = _net_inflow(U2, V2, H, eta2, grid, st.u_mask.data, st.v_mask.data)
         want = 0.0 if target is None else target
         assert abs(net - want) <= 1e-10 * Q, (target, net)
 
@@ -100,12 +105,21 @@ def test_interior_volume_follows_the_target():
     z = jnp.zeros_like(st0.eta.data)
     sf = OceanSurfaceForcing(tau_x=z, tau_y=z, q_net=z, sw_down=None)
     area = np.asarray(grid.area)[1:-1, 1:-1]
-    for target in (None, Q):
-        sponge = SpongeForcing(gamma=z, T_ref=st0.T.data, S_ref=st0.S.data, open_boundary=_data(target))
-        st, vols = st0, []
+    nl = st0.T.data.shape[-1]
+    baroclinic = {}
+    for side, n in (("west", NY + 2), ("south", NX + 2), ("north", NX + 2)):
+        baroclinic.update({f"{side}_T": jnp.full((nl, n), 10.0), f"{side}_S": jnp.full((nl, n), 35.0),
+                           f"{side}_u3": jnp.zeros((nl, n)), f"{side}_t3": jnp.zeros((nl, n + 1))})
+    uneven = _data(Q)._replace(west_zeta=jnp.full(NY + 2, 1.0), north_zeta=jnp.full(NX + 2, -1.0),
+                               tau_in=jnp.asarray(86400.0), tau_out=jnp.asarray(360 * 86400.0), **baroclinic)
+    st_up = st0._replace(eta=st0.eta.replace(data=st0.eta.data + 0.5 * st0.land_mask.data))
+    for target, ob, start in ((None, _data(None), st0), (Q, _data(Q), st0), (Q, uneven, st_up)):
+        sponge = SpongeForcing(gamma=z, T_ref=st0.T.data, S_ref=st0.S.data, open_boundary=ob)
+        st = start
+        vols = [float(np.sum(np.asarray(st.eta.data)[1:-1, 1:-1] * area))]
         for _ in range(N_STEPS):
             st = model.step(st, DT, surface_forcing=sf, sponge=sponge)
             vols.append(float(np.sum(np.asarray(st.eta.data)[1:-1, 1:-1] * area)))
-        rate = np.diff(vols)[2:] / DT                 # steps 4 to N_STEPS
+        rate = np.diff(vols)[3:] / DT                 # steps 4 to N_STEPS
         want = 0.0 if target is None else Q
         assert np.abs(rate - want).max() < 1e-4 * Q, (target, rate / Q)

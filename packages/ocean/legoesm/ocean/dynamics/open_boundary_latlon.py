@@ -116,7 +116,7 @@ def apply_barotropic_open_boundary(eta_c, U_c, V_c, eta_new, U_new, V_new,
                              ob.west_ubar, ob.west_zeta, 1.0)
         U_new = U_new.at[:, 1].set(ub * u_mask[:, 1])
         eta_new = eta_new.at[:, 0].set(eta_new[:, 1] * mask[:, 0])
-        faces_u.append((1, 1.0, jnp.minimum(H_bathy[:, 0], H_bathy[:, 1]) * u_mask[:, 1], dy_cell))
+        faces_u.append((1, 1.0, (slice(None), 0), (slice(None), 1), u_mask[:, 1], dy_cell))
     if ob.south_vbar is not None:
         dy_r = dy_cell[1]
         vb = _characteristic(V_c[1], V_c[2], eta_c[0], eta_c[1], eta_new[1],
@@ -124,7 +124,7 @@ def apply_barotropic_open_boundary(eta_c, U_c, V_c, eta_new, U_new, V_new,
                              ob.south_vbar, ob.south_zeta, 1.0)
         V_new = V_new.at[1].set(vb * v_mask[1])
         eta_new = eta_new.at[0].set(eta_new[1] * mask[0])
-        faces_v.append((1, 1.0, jnp.minimum(H_bathy[0], H_bathy[1]) * v_mask[1], _v_face_length(grid, 1)))
+        faces_v.append((1, 1.0, 0, 1, v_mask[1], _v_face_length(grid, 1)))
     if ob.north_vbar is not None:
         dy_r = dy_cell[-2]
         vb = _characteristic(V_c[-2], V_c[-3], eta_c[-1], eta_c[-2], eta_new[-2],
@@ -133,7 +133,7 @@ def apply_barotropic_open_boundary(eta_c, U_c, V_c, eta_new, U_new, V_new,
         V_new = V_new.at[-2].set(vb * v_mask[-2])
         eta_new = eta_new.at[-1].set(eta_new[-2] * mask[-1])
         nv = V_new.shape[0] - 2
-        faces_v.append((nv, -1.0, jnp.minimum(H_bathy[-1], H_bathy[-2]) * v_mask[-2], _v_face_length(grid, nv)))
+        faces_v.append((nv, -1.0, -1, -2, v_mask[-2], _v_face_length(grid, nv)))
 
     if ob.band_gamma_u is not None:
         ru = 0.0 if ob.band_U_ref is None else ob.band_U_ref
@@ -143,20 +143,26 @@ def apply_barotropic_open_boundary(eta_c, U_c, V_c, eta_new, U_new, V_new,
 
     if (faces_u or faces_v) and ob.volume_correction_off is None:
         # obc_volcons.F: remove the net inflow with one uniform inward velocity
-        # (or bring it to target_net_flux)
+        # (or bring it to target_net_flux).  The face depth is the total depth
+        # H + eta by the min rule of the substep's continuity flux, as CROCO's
+        # Dstp = h + zeta: with H alone the correction misses the realised net
+        # flux by the sum of (normal velocity x eta) along the boundary, which
+        # is large when big inflows and outflows nearly cancel.
+        D = (H_bathy + eta_new) * mask
+        faces = [(U_new, k, s, jnp.minimum(D[a], D[b]) * m, length, True) for k, s, a, b, m, length in faces_u]
+        faces += [(V_new, k, s, jnp.minimum(D[a], D[b]) * m, length, False) for k, s, a, b, m, length in faces_v]
         flux, section = 0.0, 0.0
-        for k, s, d, length in faces_u:
-            flux = flux + s * jnp.sum(U_new[:, k] * d * length)
-            section = section + jnp.sum(d * length)
-        for k, s, d, length in faces_v:
-            flux = flux + s * jnp.sum(V_new[k] * d * length)
+        for F, k, s, d, length, is_u in faces:
+            vel = F[:, k] if is_u else F[k]
+            flux = flux + s * jnp.sum(vel * d * length)
             section = section + jnp.sum(d * length)
         target = 0.0 if ob.target_net_flux is None else ob.target_net_flux
         corr = (target - flux) / jnp.maximum(section, _EPS)
-        for k, s, d, length in faces_u:
-            U_new = U_new.at[:, k].add(s * corr * (d > 0))
-        for k, s, d, length in faces_v:
-            V_new = V_new.at[k].add(s * corr * (d > 0))
+        for _, k, s, d, length, is_u in faces:
+            if is_u:
+                U_new = U_new.at[:, k].add(s * corr * (d > 0))
+            else:
+                V_new = V_new.at[k].add(s * corr * (d > 0))
     return U_new, V_new, eta_new
 
 
