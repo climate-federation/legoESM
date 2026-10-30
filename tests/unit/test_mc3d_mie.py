@@ -11,6 +11,7 @@ Two comparisons:
 Run with JAX_ENABLE_X64=1.
 """
 
+import math
 import pathlib
 
 import jax
@@ -32,7 +33,7 @@ _NC = (pathlib.Path(__file__).resolve().parents[2]
 def _microhh_ref_cos(u, r_eff, cdf, ang):
   """NumPy transcription of microhh raytracer_functions.h::mie_sample_angle."""
   r_idx = min(max(int(r_eff - 2.5), 0), 18)
-  r_rest = (r_eff - 2.5) % 1.0
+  r_rest = math.fmod(r_eff - 2.5, 1.0)   # C fmod, as the oracle
   # find_index on the descending CDF (microhh binary search).
   left, right = 0, len(cdf) - 1
   while left < right:

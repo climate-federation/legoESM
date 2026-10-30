@@ -56,7 +56,8 @@ def _cfg(fx, run, sharpness=HARD):
     from legoesm.atmosphere.physics.microphysics.config import SundqvistConfig
     dt, u00k, prautco, psautco, evpco, wl, wi = (float(x) for x in fx[f"run_{run}"])
     return dt, SundqvistConfig(
-        rh_crit=u00k, auto_rate=prautco, psautco=psautco, evap_coeff=evpco,
+        rh_crit=u00k, auto_rate=prautco, psautco_fine=psautco, psautco_coarse=psautco,
+        evap_coeff=evpco,
         wminco_liquid=wl, wminco_ice=wi, qc_crit=3.0e-4,
         coalescence_enh_coeff=300.0, bergeron_enh_coeff=0.5,
         sigmoid_sharpness=sharpness)
@@ -80,7 +81,7 @@ def _whole_call(fx, run, sharpness=HARD, dtype=jnp.float64, idx=None):
     hyd = HydrometeorState(q_c=g["q_c"], q_r=z, q_i=z, q_s=z, q_g=z, N_c=z, N_r=z, N_i=z)
     dt, cfg = _cfg(fx, run, sharpness)
     out = sundqvist_microphysics(g["T"], g["q_v"], hyd, g["p_full"], g["p_half"],
-                                 g["rho"], dz, dt, cfg)
+                                 g["rho"], dz, dt, cfg, cell_area=1.0e10)
     return idx, dt, g, dz, out
 
 
@@ -114,7 +115,7 @@ def test_precpd_kernel_matches_zhao_carr(run):
     T, qv, qc = fx["col_T"], fx["col_q_v"], fx["col_q_c"]
     mass = np.diff(fx["col_p_half"], axis=1) / C.g
     r = zhao_carr_precpd(jnp.asarray(T), jnp.asarray(qv), jnp.asarray(qc),
-                         jnp.asarray(fx["col_p_full"]), jnp.asarray(mass), dt, cfg)
+                         jnp.asarray(fx["col_p_full"]), jnp.asarray(mass), dt, cfg, wk1=1.0)
     p = f"ora_{run}_"
     rn = fx[p + "rn"] * 1000.0 / dt
     errs = {
@@ -160,7 +161,7 @@ def test_whole_call_matches_zhao_carr(run):
     hyd = HydrometeorState(q_c=g["q_c"], q_r=z, q_i=z, q_s=z, q_g=z, N_c=z, N_r=z, N_i=z)
     rates = diagnose_sundqvist_process_rates(
         g["T"], g["q_v"], hyd, g["p_full"], g["p_half"], g["rho"], dz, dt,
-        _cfg(fx, run)[1])
+        _cfg(fx, run)[1], cell_area=1.0e10)
     assert np.all(np.asarray(rates.condensation) == 0.0)
 
 
@@ -222,7 +223,7 @@ def test_gradient_finite_at_rh_crit_one():
 
     def loss(T, qv):
         r = zhao_carr_precpd(T, qv, jnp.full((1, 2), 1e-3), p, jnp.full((1, 2), 100.0),
-                             600.0, cfg)
+                             600.0, cfg, wk1=1.0)
         return jnp.sum(r.T) + jnp.sum(r.rain_sfc + r.snow_sfc)
 
     g = jax.grad(loss, argnums=(0, 1))(T, 0.95 * saturation_specific_humidity(T, p))
@@ -262,7 +263,7 @@ def test_gradients_finite_on_fixture_columns(dtype):
             z = jnp.zeros_like(T)
             hyd = HydrometeorState(q_c=qc, q_r=z, q_i=z, q_s=z, q_g=z, N_c=z, N_r=z, N_i=z)
             out = sundqvist_microphysics(T, qv, hyd, g["p_full"], g["p_half"], g["rho"],
-                                         dz, dt, cfg)
+                                         dz, dt, cfg, cell_area=1.0e10)
             return jnp.sum(out.precipitation) * 1e3 + jnp.sum(out.dT_dt)
 
         grads = jax.grad(loss, argnums=(0, 1, 2))(g["T"], g["q_v"], g["q_c"])
@@ -280,7 +281,8 @@ def test_jit_matches_eager():
     z = jnp.zeros_like(g["T"])
     hyd = HydrometeorState(q_c=g["q_c"], q_r=z, q_i=z, q_s=z, q_g=z, N_c=z, N_r=z, N_i=z)
     jitted = jax.jit(S.sundqvist_microphysics, static_argnums=(7, 8))(
-        g["T"], g["q_v"], hyd, g["p_full"], g["p_half"], g["rho"], dz, dt, cfg)
+        g["T"], g["q_v"], hyd, g["p_full"], g["p_half"], g["rho"], dz, dt, cfg,
+        cell_area=1.0e10)
     for k in ("dT_dt", "dq_v_dt", "dq_c_dt", "precipitation", "precip_frozen"):
         assert float(_rel(getattr(jitted, k), getattr(eager, k)).max()) <= TOL, k
 
@@ -315,9 +317,9 @@ def test_pre_port_gaussian_f2_fields_refuse_non_default():
     args = (jnp.full((1, 2), 280.0), jnp.full((1, 2), 1e-3), make_zero_hydrometeors(1, 2),
             jnp.full((1, 2), 8e4), jnp.asarray([[7e4, 8e4, 9e4]]), jnp.ones((1, 2)),
             jnp.full((1, 2), 1e3), 600.0)
-    diagnose_sundqvist_process_rates(*args, SundqvistConfig())
+    diagnose_sundqvist_process_rates(*args, SundqvistConfig(), cell_area=1.0e10)
     diagnose_sundqvist_process_rates(*args, SundqvistConfig(
-        bergeron_T_peak_K=jnp.asarray(SundqvistConfig().bergeron_T_peak_K, jnp.float32)))
+        bergeron_T_peak_K=jnp.asarray(SundqvistConfig().bergeron_T_peak_K, jnp.float32)), cell_area=1.0e10)
     for kw in (dict(bergeron_T_peak_K=260.0), dict(bergeron_T_width_K=5.0)):
         with pytest.raises(ValueError, match="no counterpart"):
-            diagnose_sundqvist_process_rates(*args, SundqvistConfig(**kw))
+            diagnose_sundqvist_process_rates(*args, SundqvistConfig(**kw), cell_area=1.0e10)

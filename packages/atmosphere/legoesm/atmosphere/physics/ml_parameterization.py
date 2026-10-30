@@ -374,9 +374,20 @@ def apply_predicted_sundqvist_rain_survival_fraction(
     dz: jax.Array,
     dt: float,
     config,
+    carries_q_i: bool,
+    cell_area=None,
 ) -> MicrophysicsOutput:
-    """Rebuild Sundqvist microphysics from a learned column rain-survival fraction."""
+    """Rebuild Sundqvist microphysics from a learned column rain-survival fraction.
+    The rebuild has no ice slot: q_i is not read.  A lane that carries q_i is
+    refused (``carries_q_i=True`` raises): the physical path splits liquid/ice
+    there and this rebuild cannot (codex + GLM 2026-10-29)."""
+    if carries_q_i:
+        raise ValueError(
+            "learned Sundqvist rain-survival rebuild: this lane carries q_i, "
+            "but the rebuild has no liquid/ice split (the physical Sundqvist "
+            "path does); run the physical scheme on this lane")
     rates = diagnose_sundqvist_process_rates(
+        cell_area=cell_area,
         T=T,
         q_v=q_v,
         hydrometeors=hydrometeors,

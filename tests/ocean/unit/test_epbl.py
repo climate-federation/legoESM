@@ -108,7 +108,8 @@ def test_find_pe_chg_orig_matches_independent_reimplementation():
                 dt_to_dpe_a=2.7e3, ds_to_dpe_a=-1.9e3,
                 pres_z=1.1e4,
                 dt_to_dcolht_k=1.7e-4, ds_to_dcolht_k=-8.0e-5,
-                dt_to_dcolht_a=1.3e-4, ds_to_dcolht_a=-6.0e-5)
+                dt_to_dcolht_a=1.3e-4, ds_to_dcolht_a=-6.0e-5,
+                colht_sharpness=math.inf)  # MOM6's exact min(colht, 0)
     pe, dpe, pe_max, dpe0 = _find_pe_chg_orig(**args)
 
     # Independent transcription of MOM_energetic_PBL.F90:3460-3519.
@@ -170,7 +171,7 @@ def test_find_pe_chg_condensed_agrees_with_orig_on_a_shared_case():
         hp_a * (T_a - T_b), hp_a * (S_a - S_b),
         T_b - T_a, S_b - S_a,
         dt_to_dpe_k, ds_to_dpe_k, dt_to_dpe_a, ds_to_dpe_a,
-        pres, dt_ch_k, ds_ch_k, dt_ch_a, ds_ch_a)
+        pres, dt_ch_k, ds_ch_k, dt_ch_a, ds_ch_a, colht_sharpness=math.inf)
     assert float(pe_new) == pytest.approx(float(pe_orig), rel=1e-10)
 
 
@@ -209,16 +210,19 @@ def test_mstar_reichl_h18_matches_independent_reimplementation():
 
 def test_mstar_convective_reduction_bites_only_when_cooling():
     """MSTAR_CONV_ADJ must reduce mstar under cooling and not under heating."""
-    cfg = _ref_cfg()
+    # MOM6's exact min(0, b_flux): at b_flux = 0 the smooth default leaves a
+    # residual convective reduction (test_epbl_smooth_switches.py).
+    exact = dict(smooth_bflux_sharpness_s3m2=math.inf)
+    cfg = _ref_cfg(**exact)
     kw = dict(u_star=jnp.asarray(0.014), bld=jnp.asarray(22.0),
               absf=jnp.asarray(9.37e-5))
     cool = float(_find_mstar(cfg, jnp.asarray(-3.0e-7), **kw))
     warm = float(_find_mstar(cfg, jnp.asarray(0.0), **kw))
-    no_adj = float(_find_mstar(_ref_cfg(mstar_convect_coef=0.0),
+    no_adj = float(_find_mstar(_ref_cfg(mstar_convect_coef=0.0, **exact),
                                jnp.asarray(-3.0e-7), **kw))
     assert cool < no_adj, "cooling must reduce mstar when MSTAR_CONV_ADJ > 0"
     assert warm == pytest.approx(
-        float(_find_mstar(_ref_cfg(mstar_convect_coef=0.0),
+        float(_find_mstar(_ref_cfg(mstar_convect_coef=0.0, **exact),
                           jnp.asarray(0.0), **kw)), rel=1e-12), (
         "with no convection the reduction factor must be exactly 1")
 

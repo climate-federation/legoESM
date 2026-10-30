@@ -309,6 +309,7 @@ class TestGWDSchemes:
     def test_mcfarlane(self):
         state, grid, sigma = _make_hydrostatic_setup()
         cfg = _none_config(gravity_wave_drag=GravityWaveDragConfig(scheme="mcfarlane"))
+        grid = grid._replace(land_frac=jnp.ones(6 * grid.n * grid.n))  # all-land fixture
         tend, _ = make_physics(cfg, "hydrostatic", dt=300.0)(state, grid, sigma)
         _check_tendencies(tend, "gwd/mcfarlane")
 

@@ -23,7 +23,8 @@ from legoesm import constants
 
 
 def _column(ncol=1, nlev=24, u_sfc=15.0, u_top=15.0):
-    """Deterministic column (surface at index -1)."""
+    """Deterministic column (surface at index -1).  Callers pass an all-land
+    ``land_frac_col`` (lf = 1 is CAM6 gw_oro's unscaled drag)."""
     p_half = jnp.broadcast_to(
         jnp.linspace(100.0, 1.0e5, nlev + 1)[None, :], (ncol, nlev + 1),
     )
@@ -130,7 +131,8 @@ def test_mcfarlane_strict_momentum_sink():
     )
     cfg = McFarlaneConfig(h_topo=1000.0)
     out = mcfarlane_gwd(u, v, T, p_full, p_half, z_full, z_half, rho, lat, 300.0, cfg,
-                        p_ref_half=p_half[0])
+                        p_ref_half=p_half[0],
+                        land_frac_col=jnp.ones(u.shape[0]))
     ke_rate = u * out.du_dt + v * out.dv_dt
     assert jnp.all(ke_rate <= 1e-12), (
         f"drag added KE: max(u*du+v*dv)={float(jnp.max(ke_rate)):.3e}"
@@ -152,7 +154,8 @@ def test_mcfarlane_critical_level_no_reversed_acceleration():
     )
     cfg = McFarlaneConfig(h_topo=1000.0)
     out = mcfarlane_gwd(u, v, T, p_full, p_half, z_full, z_half, rho, lat, 300.0,
-                        cfg, p_ref_half=p_half[0])
+                        cfg, p_ref_half=p_half[0],
+                        land_frac_col=jnp.ones(u.shape[0]))
     ke_rate = u * out.du_dt + v * out.dv_dt
     assert jnp.all(ke_rate <= 1e-12), (
         f"drag accelerated the local flow: max(u*du+v*dv)={float(jnp.max(ke_rate)):.3e}"
@@ -179,7 +182,8 @@ def test_mcfarlane_ke_heat_diagnostic_consistency():
     )
     cfg = McFarlaneConfig(h_topo=800.0)
     out = mcfarlane_gwd(u, v, T, p_full, p_half, z_full, z_half, rho, lat, 300.0,
-                        cfg, p_ref_half=p_half[0])
+                        cfg, p_ref_half=p_half[0],
+                        land_frac_col=jnp.ones(u.shape[0]))
     dpg = (p_half[:, 1:] - p_half[:, :-1]) / constants.g
     heat_col = constants.c_pd * jnp.sum(dpg * out.dT_dt, axis=1)
     ke_col = -jnp.sum(dpg * (u * out.du_dt + v * out.dv_dt), axis=1)
@@ -241,7 +245,8 @@ def test_mcfarlane_vector_ke_sink_not_componentwise_for_veering_wind():
     lat = jnp.full((ncol,), 0.5)
     cfg = McFarlaneConfig(h_topo=1500.0)
     out = mcfarlane_gwd(u, v, T, p_full, p_half, z_full, z_half, rho, lat, 300.0, cfg,
-                        p_ref_half=p_half[0])
+                        p_ref_half=p_half[0],
+                        land_frac_col=jnp.ones(u.shape[0]))
 
     # (a) VECTOR invariant holds at every level.
     ke_rate = u * out.du_dt + v * out.dv_dt
@@ -348,7 +353,7 @@ def test_e3sm_hdsp_auto_resolution_full_scheme():
     u, v, T, p_full, p_half, z_full, z_half, rho, lat = _column()
     col = jnp.full((u.shape[0],), 300.0)           # below the Froude cap
     args = (u, v, T, p_full, p_half, z_full, z_half, rho, lat, 1800.0)
-    pr = {"p_ref_half": p_half[0]}
+    pr = {"p_ref_half": p_half[0], "land_frac_col": jnp.ones(u.shape[0])}
 
     auto_scalar = mcfarlane_gwd(*args, McFarlaneConfig(), h_topo_col=None, **pr)
     false_scalar = mcfarlane_gwd(
@@ -395,7 +400,8 @@ def test_e3sm_hdsp_requires_per_column_topo():
     # And with the per-column field it runs.
     out = mcfarlane_gwd(u, v, T, p_full, p_half, z_full, z_half, rho, lat,
                         1800.0, cfg, h_topo_col=jnp.full((u.shape[0],), 300.0),
-                        p_ref_half=p_half[0])
+                        p_ref_half=p_half[0],
+                        land_frac_col=jnp.ones(u.shape[0]))
     # The reference interfaces are required (CAM pref_edge damping profile).
     with pytest.raises(ValueError, match="p_ref_half"):
         mcfarlane_gwd(u, v, T, p_full, p_half, z_full, z_half, rho, lat,
@@ -418,7 +424,8 @@ def test_depth_avg_source_default_off_bit_identical():
         u_sfc=15.0, u_top=25.0)
     cfg = McFarlaneConfig(use_depth_averaged_source=False)  # legacy explicit
     out = mcfarlane_gwd(u, v, T, p_full, p_half, z_full, z_half, rho, lat,
-                        300.0, cfg, p_ref_half=p_half[0])
+                        300.0, cfg, p_ref_half=p_half[0],
+                        land_frac_col=jnp.ones(u.shape[0]))
     # Independent recomputation of the legacy launch from surface values:
     expected_dir = float(u[0, -1] / jnp.sqrt(u[0, -1] ** 2 + 1e-10))
     assert abs(expected_dir - 1.0) < 1e-6  # sanity: along +x
@@ -442,11 +449,13 @@ def test_depth_avg_nocturnal_decoupling_discriminant():
     off = mcfarlane_gwd(u, v, T, p_full, p_half, z_full, z_half, rho, lat,
                         300.0,
                         McFarlaneConfig(use_depth_averaged_source=False),
-                        h_topo_col=h_col, p_ref_half=p_half[0])
+                        h_topo_col=h_col, p_ref_half=p_half[0],
+                        land_frac_col=jnp.ones(u.shape[0]))
     on = mcfarlane_gwd(u, v, T, p_full, p_half, z_full, z_half, rho, lat,
                        300.0,
                        McFarlaneConfig(use_depth_averaged_source=True),
-                       h_topo_col=h_col, p_ref_half=p_half[0])
+                       h_topo_col=h_col, p_ref_half=p_half[0],
+                        land_frac_col=jnp.ones(u.shape[0]))
     tot_off = float(jnp.sum(jnp.abs(off.du_dt)))
     tot_on = float(jnp.sum(jnp.abs(on.du_dt)))
     assert tot_on > 10.0 * max(tot_off, 1e-30), (
@@ -475,7 +484,8 @@ def test_depth_avg_composes_with_e3sm_hdsp():
     out = mcfarlane_gwd(
         u, v, T, p_full, p_half, z_full, z_half, rho, lat, 300.0,
         McFarlaneConfig(use_depth_averaged_source=True, use_e3sm_hdsp=True),
-        h_topo_col=h_col, p_ref_half=p_half[0])
+        h_topo_col=h_col, p_ref_half=p_half[0],
+                        land_frac_col=jnp.ones(u.shape[0]))
     assert bool(jnp.all(jnp.isfinite(out.du_dt)))
     assert float(jnp.max(jnp.abs(out.du_dt))) > 0.0
 

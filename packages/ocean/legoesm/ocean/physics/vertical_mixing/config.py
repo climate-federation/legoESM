@@ -33,6 +33,10 @@ __param_spec__ = {
             "eqd_shape_function_epsilon": "below-boundary-layer floor that keeps the iterative solver well posed",
             "vonkar": "von Karman constant; a measured universal constant, not tunable",
             "min_mix_len": "numerical floor on the mixing length (MOM6 default 0 = no floor)",
+            "smooth_bflux_sharpness_s3m2": "RULE 5 smoothing sharpness of the ePBL buoyancy-flux switches; a numerics regulariser, not physics",
+            "smooth_energy_sharpness_m2j": "RULE 5 smoothing sharpness of the ePBL energy switches; a numerics regulariser, not physics",
+            "smooth_colht_sharpness_per_m": "RULE 5 smoothing sharpness of the ePBL column-height switches; a numerics regulariser, not physics",
+            "smooth_ratio_sharpness": "RULE 5 smoothing sharpness of the ePBL nondimensional caps; a numerics regulariser, not physics",
         },
         "params": {
             "nstar": {"units": "1", "bounds": (0.02, 0.4), "tunable_tier": 1, "transform": "sigmoid", "category": "vertical_mixing", "reference": "Reichl & Hallberg (2018) NSTAR: fraction of released PE available to drive entrainment", "shape": None},
@@ -1112,6 +1116,17 @@ class EPBLConfig(NamedTuple):
     eqd_lh_cap: float = 8.0               # ..._LH_CAP
     eqd_f_lower: float = 2.5384e-7        # ..._CORIOLIS_LOWER_CAP [1/s]
     eqd_shape_function_epsilon: float = 0.01  # ..._SHAPE_FUNCTION_EPSILON
+
+    # --- RULE 5 smooth switches (no MOM6 equivalent; issue #2180) ---
+    # Sharpness [1/units of the switched quantity] of the logsumexp/softplus/
+    # sigmoid forms (legoesm.core.smooth) that replace MOM6's max/min/clip/
+    # where on traced state.  math.inf = MOM6's exact switch.  One field per
+    # unit class; the default width is 1/sharpness.  The sites each field
+    # controls and the gap to MOM6 they cost are listed in epbl.py.
+    smooth_bflux_sharpness_s3m2: float = 1.0e10   # [s^3/m^2] buoyancy flux
+    smooth_energy_sharpness_m2j: float = 1.0e6    # [m^2/J] TKE / PE per area
+    smooth_colht_sharpness_per_m: float = 1.0e10  # [1/m] column-height change
+    smooth_ratio_sharpness: float = 1.0e3         # [1] nondimensional ratios
 
     # --- background floors added to the ePBL diffusivity ---
     K_bg: float = 1.0e-5               # KD   [m^2/s]

@@ -233,13 +233,13 @@ class TestSundqvist:
         """Condensation removes only supersaturation (not q_v above RH_crit)."""
         T, q_v, hyd, p_full, p_half, rho, dz = _warm_column(rh=1.0)
         # exactly saturated -> condensation should be ~0 (only removes >q_sat)
-        out = sundqvist_microphysics(T, q_v, hyd, p_full, p_half, rho, dz, 1800.0)
+        out = sundqvist_microphysics(T, q_v, hyd, p_full, p_half, rho, dz, 1800.0, cell_area=1.0e10)
         # at RH=1.0, q_v-q_sat=0 -> condensation 0
         assert jnp.max(jnp.abs(out.dq_c_dt)) < 1e-6
 
     def test_conservation_total_water(self):
         T, q_v, hyd, p_full, p_half, rho, dz = _warm_column(rh=1.05)
-        out = sundqvist_microphysics(T, q_v, hyd, p_full, p_half, rho, dz, 1800.0)
+        out = sundqvist_microphysics(T, q_v, hyd, p_full, p_half, rho, dz, 1800.0, cell_area=1.0e10)
         res = _column_water_residual(out, _layer_mass(p_half), 1.0)
         assert jnp.max(jnp.abs(res)) < 1e-15
 
@@ -254,7 +254,7 @@ class TestSundqvist:
         T, q_v, hyd, p_full, p_half, rho, dz = _warm_column(rh=0.9)
         hyd = hyd._replace(q_r=jnp.full_like(hyd.q_r, 2.0e-4))
         dt = 1800.0
-        out = sundqvist_microphysics(T, q_v, hyd, p_full, p_half, rho, dz, dt)
+        out = sundqvist_microphysics(T, q_v, hyd, p_full, p_half, rho, dz, dt, cell_area=1.0e10)
         # dq_r_dt = -q_r/dt exactly (drained)
         np.testing.assert_allclose(out.dq_r_dt, -hyd.q_r / dt, rtol=1e-12)
         res = _column_water_residual(out, _layer_mass(p_half), 1.0)
@@ -263,7 +263,7 @@ class TestSundqvist:
     def test_sign_qc_nonneg_under_step(self):
         T, q_v, hyd, p_full, p_half, rho, dz = _warm_column(rh=1.05)
         dt = 1800.0
-        out = sundqvist_microphysics(T, q_v, hyd, p_full, p_half, rho, dz, dt)
+        out = sundqvist_microphysics(T, q_v, hyd, p_full, p_half, rho, dz, dt, cell_area=1.0e10)
         q_c_new = hyd.q_c + dt * out.dq_c_dt
         assert jnp.all(q_c_new >= -1e-12)
 
@@ -271,7 +271,7 @@ class TestSundqvist:
         T, q_v, hyd, p_full, p_half, rho, dz = _warm_column(rh=1.05)
 
         def loss(qv):
-            out = sundqvist_microphysics(T, qv, hyd, p_full, p_half, rho, dz, 1800.0)
+            out = sundqvist_microphysics(T, qv, hyd, p_full, p_half, rho, dz, 1800.0, cell_area=1.0e10)
             return jnp.sum(out.precipitation)
 
         g = jax.grad(loss)(q_v)
@@ -280,7 +280,7 @@ class TestSundqvist:
 
         def loss_rate(rate):
             cfg = SundqvistConfig(auto_rate=rate)
-            out = sundqvist_microphysics(T, q_v, hyd, p_full, p_half, rho, dz, 1800.0, cfg)
+            out = sundqvist_microphysics(T, q_v, hyd, p_full, p_half, rho, dz, 1800.0, cfg, cell_area=1.0e10)
             return jnp.sum(out.precipitation)
 
         gr = jax.grad(loss_rate)(SundqvistConfig().auto_rate)
@@ -290,7 +290,7 @@ class TestSundqvist:
         T, q_v, hyd, p_full, p_half, rho, dz = _warm_column(rh=0.3)
         hyd = hyd._replace(q_c=jnp.zeros_like(hyd.q_c),
                            q_r=jnp.zeros_like(hyd.q_r))
-        out = sundqvist_microphysics(T, q_v, hyd, p_full, p_half, rho, dz, 1800.0)
+        out = sundqvist_microphysics(T, q_v, hyd, p_full, p_half, rho, dz, 1800.0, cell_area=1.0e10)
         assert jnp.max(jnp.abs(out.dq_v_dt)) < 1e-12
         assert jnp.max(jnp.abs(out.precipitation)) < 1e-12
 

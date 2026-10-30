@@ -1446,13 +1446,8 @@ def gw_diff_tridiag_coeffs(
     # interfaces (E3SM ktop+2..kbot+1 in 1-based -> our interior interfaces).
     # tmpi[i] uses midpoints i-1 (above) and i (below): pmid[i]-pmid[i-1].
     dpmid = pmid[:, 1:] - pmid[:, :-1]                     # (ncol, nlev-1) iface 1..nlev-1
-    # E3SM divides by pmid(k)-pmid(k-1) directly.  We floor the magnitude at
-    # 1 Pa (codex ediff-1 #3): a SAFETY floor only — on any physical
-    # monotone-pressure grid the midpoint spacing is >> 1 Pa, so this is a
-    # no-op and the coefficients are bit-faithful to E3SM; it only guards a
-    # pathological/degenerate column from a divide-by-zero (same pattern as the
-    # dpm/piln floors used elsewhere in this module).
-    dpmid = jnp.where(jnp.abs(dpmid) < 1.0, 1.0, dpmid)
+    # Unfloored, as CAM/E3SM: Coords1D rdst = 1/(mid(k+1)-mid(k))
+    # (CAM cam_cesm2_1_rel_60 src/utils/coords_1d.F90:81-83).
     tmpi_int = dt * (gravit * rhoi_kludge[:, 1:nlev]) ** 2 / dpmid  # iface 1..nlev-1
     tmpi = jnp.zeros((ncol, nlev + 1), dtype=pmid.dtype)
     tmpi = tmpi.at[:, 1:nlev].set(tmpi_int)

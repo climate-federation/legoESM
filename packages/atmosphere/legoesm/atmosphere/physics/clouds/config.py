@@ -15,6 +15,7 @@ __param_spec__ = {
     "CloudConfig": {
         "scheme_key": "atm.clouds.CloudConfig",
         "excluded": {
+            "cloud_subcolumn_mask_width": "numerics: RULE 5 smoothing width of the maximum-random subcolumn mask (0 = CAM's hard switch), not a tunable",
             # Lower clip on the Martin gamma-PSD shape (1/PGAM^2 - 1 clipped to
             # [pgam_min, pgam_max]); a numerics regulariser/cap on the droplet
             # spectral-width, not a tunable closure coefficient. Paired with
@@ -406,6 +407,12 @@ class CloudConfig(NamedTuple):
     mg2_drop_number_cap_log_width: float = 0.01
     mg2_drop_slope_log_width: float = 0.01
     mg2_ice_cap_log_width: float = 0.01
+    # RULE 5 width of the maximum-random subcolumn switches (CDF units, 0 =
+    # CAM's hard ``CDF > 1-cf`` recursion and ``CDF >= 1-cf`` mask,
+    # mcica_subcol_gen_sw.f90:365, :398): the subcolumn cloud weight is
+    # smoothstep_quintic((CDF - (1 - cf))/width + 1/2), exactly CAM's 0/1
+    # outside a band of that width.  Used by "max_random" and "mcica".
+    cloud_subcolumn_mask_width: float = 1.0e-3
 
 
 def build_cloud_config(
