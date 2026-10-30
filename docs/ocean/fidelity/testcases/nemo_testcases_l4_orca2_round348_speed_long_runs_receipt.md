@@ -60,10 +60,8 @@ million-value equality tests cover every function routed by every caller.
   inside the wheel-selected `legoesm` package tree; runtime compilation and
   loading passed in the tests.
 
-The two pre-existing round-342 tests that demand a clean provenance stamp were
-deferred until after the implementation commit; all other focused tests passed
-while the tree was dirty. The citation gate, default gate, and ratchet results
-are recorded after the clean-tree run below.
+After the implementation commit, the complete focused suite passed on the
+clean tree, including the two round-342 provenance-stamp tests.
 
 ## Acquisition disposition
 
@@ -83,6 +81,10 @@ bar. No unasked scientific choice or relaxed threshold was introduced.
 
 ## Landing gates
 
-- Receipt citation gate: PENDING CLEAN-TREE RUN.
-- Default ORCA2 gate: PENDING CLEAN-TREE RUN.
-- Ratchet: PENDING CLEAN-TREE RUN.
+- Receipt citation gate: 22/22 passed in 20.49 s. The round-348 receipt had
+  zero failures and unmapped citations, the complete map audit passed, all
+  self-test controls fired, and the shifted C-source citation plant failed as
+  required.
+- Default ORCA2 landing battery: 157/157 passed on CPU in the established
+  three batches: 145 in 406.47 s, 10 in 67.43 s, and 2 in 535.54 s.
+- Explicit private-import ratchet: 6/6 passed in 5.08 s.
