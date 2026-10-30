@@ -1,5 +1,6 @@
 """Oracle match: WRF v4.8.0 Kain-Fritsch (``_kf_eta.kf_eta_para`` and the
-``kain_fritsch_convection`` wrapper).
+``kain_fritsch_wrf`` wrapper, reached through ``kain_fritsch_convection``
+with the opt-in ``KainFritschConfig(variant="wrf_kfeta")``; NOT RULE 5 compliant, #2280).
 
 Fixture ``oracle_fixtures/kain_fritsch.npz``: the 15 audit columns (3 real L32
 MPAS AMIP columns, 12 constructed soundings) and the outputs of RUNNING WRF
@@ -29,15 +30,16 @@ import numpy as np
 import pytest
 from legoesm.atmosphere.physics.convection._kf_eta import KFConstants, kf_eta_para
 from legoesm.atmosphere.physics.convection.config import KainFritschConfig
-from legoesm.atmosphere.physics.convection.kain_fritsch import (
-    _lego_constants,
-    kain_fritsch_convection,
-)
+from legoesm.atmosphere.physics.convection.kain_fritsch import kain_fritsch_convection
+from legoesm.atmosphere.physics.convection.kain_fritsch_wrf import _lego_constants
 
 from legoesm import constants
 
 _FIX = Path(__file__).parent / "oracle_fixtures" / "kain_fritsch.npz"
 _TOL = 1.0e-10  # user-approved oracle-match tolerance (max relative error, fp64)
+# The port is the OPT-IN variant (default "smooth" is the surrogate; #2280):
+# every wrapper test goes through the public dispatch with it selected.
+_WRF = KainFritschConfig(variant="wrf_kfeta")
 _OUT = ("dtdt", "dqdt", "dqcdt", "dqrdt", "dqidt", "dqsdt")
 _DIAG_SCALARS = ("ltop", "let", "lc", "kpbl", "lcl", "lfs", "ldb", "ncount", "nstep", "abe",
                  "ainc", "timec", "tder", "trppt", "pptflx", "cpr", "fbfrc", "frc2", "vmflcl",
@@ -221,7 +223,7 @@ def test_wrapper_matches_wrf(fix, arm, cfg):
     """kain_fritsch_convection end to end (flip, geometry, rhoe, constants) vs the
     oracle run on the same columns."""
     m, x = _wrapper_inputs(fix, arm)
-    out, carry = kain_fritsch_convection(**x, config=KainFritschConfig()._replace(**cfg))
+    out, carry = kain_fritsch_convection(**x, config=_WRF._replace(**cfg))
     td = lambda a: np.asarray(a)[:, ::-1]  # noqa: E731
     assert _rel(out.dT_dt, td(fix[f"{arm}_dtdt"])) <= _TOL
     assert _rel(out.dq_v_dt, td(fix[f"{arm}_dqdt"])) <= _TOL
@@ -249,7 +251,7 @@ def test_column_water_closes_as_the_oracle(fix, arm):
     """Vapour + cloud + precipitation sources integrate to zero in each column
     (the oracle's own moisture budget); measured residual is round-off."""
     m, x = _wrapper_inputs(fix, arm)
-    out, _ = kain_fritsch_convection(**x)
+    out, _ = kain_fritsch_convection(**x, config=_WRF)
     dp = fix["p_half"][:, 1:] - fix["p_half"][:, :-1]
     tot = (np.asarray(out.dq_v_dt) + np.asarray(out.dq_c_conv_dt)
            + np.asarray(out.dq_r_conv_dt)) * dp / constants.g
@@ -264,7 +266,7 @@ def test_wrapper_gradients_finite(fix, dtype):
 
     def loss(T, q, u, v, w):
         out, carry = kain_fritsch_convection(**{**x, "T": T, "q_v": q, "u": u, "v": v,
-                                                "w_grid": w})
+                                                "w_grid": w}, config=_WRF)
         return (jnp.sum(out.dT_dt) * 1e2 + jnp.sum(out.dq_v_dt) * 1e6
                 + jnp.sum(out.dq_r_conv_dt) * 1e6 + jnp.sum(carry))
 
@@ -277,8 +279,8 @@ def test_wrapper_gradients_finite(fix, dtype):
 
 def test_eager_matches_jit(fix):
     m, x = _wrapper_inputs(fix, "L_nat_w05")
-    e, _ = kain_fritsch_convection(**x)
-    j, _ = jax.jit(lambda kw: kain_fritsch_convection(**kw, dt=m["dt"]))(
+    e, _ = kain_fritsch_convection(**x, config=_WRF)
+    j, _ = jax.jit(lambda kw: kain_fritsch_convection(**kw, dt=m["dt"], config=_WRF))(
         {k: v for k, v in x.items() if k != "dt"})
     for a, b in ((e.dT_dt, j.dT_dt), (e.dq_v_dt, j.dq_v_dt), (e.dq_r_conv_dt, j.dq_r_conv_dt)):
         assert _rel(b, a) <= _TOL
@@ -287,9 +289,9 @@ def test_eager_matches_jit(fix):
 def test_surrogate_fields_and_missing_winds_raise(fix):
     m, x = _wrapper_inputs(fix, "L_nat_w05")
     with pytest.raises(ValueError, match="M_b_max"):
-        kain_fritsch_convection(**x, config=KainFritschConfig(M_b_max=0.1))
+        kain_fritsch_convection(**x, config=_WRF._replace(M_b_max=0.1))
     with pytest.raises(ValueError, match="winds"):
-        kain_fritsch_convection(**{**x, "u": None})
+        kain_fritsch_convection(**{**x, "u": None}, config=_WRF)
     T = jnp.asarray(fix["T"])
     with pytest.raises(ValueError, match="trigger"):
         kf_eta_para(T, T, T, T, T, T, T, T, dt=300.0, dx=25e3,

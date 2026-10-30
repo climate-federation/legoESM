@@ -1001,6 +1001,12 @@ class KainFritschConfig(NamedTuple):
     # solve does not debit vapor for that condensate.
     subsidence_solve: str = "implicit_flux"
     theta_implicit: float = 1.0
+    # Which Kain-Fritsch implementation runs (user decision 2026-10-30, PR
+    # #2249; selector form and names agreed by codex + GLM): "smooth" (default)
+    # = the smooth surrogate above; "wrf_kfeta" = the faithful WRF v4.8.0
+    # KF-Eta port (kain_fritsch_wrf.py), OPT-IN and NOT RULE 5 compliant (its
+    # traced-state switches are hard; #2280).  Any other value raises.
+    variant: str = "smooth"
 
 
 class EmanuelConfig(NamedTuple):

@@ -303,6 +303,7 @@ CANONICAL_FORMULAS = {
             "packages/atmosphere/legoesm/atmosphere/idealized/rcemip_initial_conditions.py": 1,
             "packages/atmosphere/legoesm/atmosphere/physics/convection/dca.py": 1,
             "packages/atmosphere/legoesm/atmosphere/physics/convection/integration.py": 1,
+            "packages/atmosphere/legoesm/atmosphere/physics/convection/kain_fritsch.py": 1,
             # GWD hines/lindzen/mcfarlane/prognostic_spectral dropped their inline
             # θ=T·(p_ref/p)^κ (folded into physics._shared.brunt_vaisala_n_full,
             # ponytail dedup 2026-06-17) → entries removed (budget 0). integration.py

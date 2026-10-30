@@ -1314,14 +1314,18 @@ class PhysicsPipeline:
             and u.shape == shape_3d and v.shape == shape_3d
         )
         u_conv_col = v_conv_col = None
-        if _ctr.is_cmt_capable or _ctr.is_w_grid_consumer:
+        # Only the opt-in WRF KF-Eta variant reads winds; the smooth KF
+        # default keeps main's inputs (no winds).
+        _kf_wrf_winds = (self._conv_scheme == "kain_fritsch"
+                         and _conv_cfg.variant == "wrf_kfeta")
+        if _ctr.is_cmt_capable or _kf_wrf_winds:
             if _winds_on_t_grid:
                 u_conv_col = ad.flatten_3d(u)
                 v_conv_col = ad.flatten_3d(v)
             elif not _ctr.is_cmt_capable:
                 # Kain-Fritsch needs the real winds (TIMEC, shear): no zero fallback.
                 raise ValueError(
-                    "convection: kain_fritsch needs the winds on the T grid "
+                    "convection: kain_fritsch_variant='wrf_kfeta' needs the winds on the T grid "
                     f"(got u {None if u is None else u.shape}, expected {shape_3d})")
             else:
                 u_conv_col = jnp.zeros((ad.ncol, nlev), dtype=T_col.dtype)
@@ -4052,6 +4056,12 @@ def convection_config_for(config, grid_dx_m=None):
         # their leaf default).  Gating this on Bechtold alone handed ZM zero
         # winds and silently discarded its momtran output.
         cc = cc._replace(mpas_cmt=True)
+    if (scheme == "kain_fritsch" and leaf.variant == "wrf_kfeta"
+            and _is_mpas_grid(config)):
+        # The WRF KF-Eta variant needs real cell winds (TIMEC, shear); on MPAS
+        # they exist only through the edge-normal reconstruction (codex + GLM
+        # 2026-10-30: a scheme that needs cell winds asks for them).
+        cc = cc._replace(mpas_cmt=True)
     return cc
 
 
@@ -4242,6 +4252,9 @@ def _resolve_convection(config):
         if (_pe is not None and _pe > 0.0
                 and hasattr(conv_config, "precip_efficiency")):
             conv_config = conv_config._replace(precip_efficiency=_pe)
+        if scheme == "kain_fritsch":
+            conv_config = conv_config._replace(
+                variant=config.kain_fritsch_variant)
         if scheme == "zhang_mcfarlane":
             conv_config = conv_config._replace(
                 land_fraction=config.zm_land_fraction,

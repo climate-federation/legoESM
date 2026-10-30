@@ -1419,6 +1419,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "(explicit aquaplanet, ocean coefficients "
                              "everywhere). "
                              f"Default {_EXPERIMENT_DEFAULTS.zm_land_fraction}.")
+    parser.add_argument("--kain-fritsch-variant", type=str,
+                        choices=["smooth", "wrf_kfeta"],
+                        default=_EXPERIMENT_DEFAULTS.kain_fritsch_variant,
+                        dest="kain_fritsch_variant",
+                        help="Kain-Fritsch implementation: smooth (the "
+                             "differentiable surrogate) or wrf_kfeta (the "
+                             "faithful WRF v4.8.0 KF-Eta port; opt-in, NOT "
+                             "RULE 5 compliant: hard switches, #2280). "
+                             f"Default {_EXPERIMENT_DEFAULTS.kain_fritsch_variant}.")
     parser.add_argument("--zm-transport-cloud-tracers",
                         dest="zm_transport_cloud_tracers",
                         action=argparse.BooleanOptionalAction,
@@ -3219,6 +3228,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         bechtold_subsidence_solve=args.bechtold_subsidence_solve,
         bechtold_rain_vapor_sink=args.bechtold_rain_vapor_sink,
         zm_land_fraction=args.zm_land_fraction,
+        kain_fritsch_variant=args.kain_fritsch_variant,
         zm_transport_cloud_tracers=args.zm_transport_cloud_tracers,
         bechtold_conv_top_pa=args.bechtold_conv_top_pa,
         bechtold_downdraft_evap=args.bechtold_downdraft_evap,

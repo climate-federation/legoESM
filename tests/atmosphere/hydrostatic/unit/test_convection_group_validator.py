@@ -161,10 +161,6 @@ def _capped_column(
     ``compute_lfc_lnb`` LNB-collapse on an uncapped tower is a narrow but real
     diagnostic soft-spot, reported separately; it does not bite on any
     physically-capped sounding.)
-
-    (History: the paragraphs above describe the pre-port KF surrogate.  The WRF
-    KF-Eta port finds its own cloud top (LTOP) from the entraining updraft and
-    still runs on this column; it is kept for KF as the convecting probe.)
     """
     T, q, p_full, p_half, u, v = _column(ncol=ncol, nlev=nlev, **kw)
     # Isothermal cap: freeze T at its tropopause value above ``tropopause_pa``.
@@ -232,13 +228,13 @@ def _run_emanuel(T, q, pf, ph, **kw):
     return out
 
 
-def _run_kf(T, q, pf, ph, u, v, w=None, dt=DT, **kw):
+def _run_kf(T, q, pf, ph, w=None, **kw):
     ncol, nlev = T.shape
     if w is None:
         w = jnp.zeros((ncol, nlev))
     cpp = jnp.zeros((ncol, nlev))
     out, _ = kain_fritsch_convection(
-        T, q, pf, ph, w, cpp, dt, KainFritschConfig(**kw), u=u, v=v,
+        T, q, pf, ph, w, cpp, DT, KainFritschConfig(**kw),
     )
     return out
 
@@ -263,7 +259,7 @@ def _all_schemes(T, q, pf, ph, u, v, w, mc):
         "kuo": lambda: _run_kuo(T, q, pf, ph, mc=mc),
         "zhang_mcfarlane": lambda: _run_zm(T, q, pf, ph, u, v),
         "emanuel": lambda: _run_emanuel(T, q, pf, ph),
-        "kain_fritsch": lambda: _run_kf(T, q, pf, ph, u, v, w=w),
+        "kain_fritsch": lambda: _run_kf(T, q, pf, ph, w=w),
         "bechtold": lambda: _run_bechtold(T, q, pf, ph, u, v, mc=mc),
     }
 
@@ -454,42 +450,112 @@ def test_tier3_zm_total_water_closed_in_scheme():
             f"{name}: total water not closed: {net}"
 
 
-def test_tier3_kf_column_water_closes_with_precipitation():
-    """WRF KF-Eta port: the vapour the scheme removes reappears as detrained
-    condensate (dq_c) or convective precipitation (dq_r, which the pipeline
-    sends to the surface): column total water closes to round-off on both the
-    deep-tropical and the capped column, and the net response is warm + dry.
-    Column vapour-MSE does NOT close: the oracle itself does not conserve it
-    (theta advection with a moist Exner function, constant-L_v theta-e, fusion
-    terms); the port reproduces the oracle's residual (oracle test at 1e-10)."""
-    for T, q, pf, ph, u, v in (_column(), _capped_column()):
-        ncol, nlev = T.shape
-        dp = _dp(ph)
-        out = _run_kf(T, q, pf, ph, u, v, w=jnp.full((ncol, nlev), 0.05))
-        water = _col_int(out.dq_v_dt + out.dq_c_conv_dt + out.dq_r_conv_dt, dp)
-        scale = _col_int(jnp.abs(out.dq_v_dt), dp)
-        assert jnp.all(scale > 0.0), "KF did not convect on the probe column"
-        assert jnp.all(jnp.abs(water) <= 1.0e-12 * scale), f"KF water residual {water}"
-        assert jnp.all(_col_int(constants.c_pd * out.dT_dt, dp) > 0.0)
-        assert jnp.all(_col_int(out.dq_v_dt, dp) < 0.0)
+def test_tier3_kf_precip_efficiency_leak_removed():
+    """REGRESSION (was a BUG — kain_fritsch.py; FIXED 2026-07-13, coupled
+    water+energy budget).  KF-Eta previously let the downdraft re-evaporate its
+    CONDLOAD fallout as a ``+dq_v_dt`` source with NO matching vapor sink or
+    latent warming for the CONDENSATION that produced that precip — water and
+    energy appeared from nowhere: ``net(dq_v+dq_c)=+3.16e-4`` kg/m^2/s spurious
+    water SOURCE (130x ZM) and ``~-1500`` W/m^2 of phantom COOLING on this
+    deep-tropical column (convection cooling+moistening a conditionally-unstable
+    column — backwards).
+
+    The fix books the condensation explicitly (see ``kain_fritsch.py`` "column
+    condensation water+energy budget"): the ``+L_v/c_p`` latent warming at the
+    condensation levels, a POSITIVITY-SAFE vapor sink of the same column
+    magnitude ``precip_col`` distributed over the post-transport vapor (so no
+    level goes negative), and the non-re-evaporated condensate routed to CLOUD
+    water ``dq_c_conv_dt`` (ZM/Emanuel convention: microphysics owns precip).
+    The kernel is switched to the conservative ``implicit_flux`` solve (residual
+    telescopes to machine precision) and its detrained-cloud latent is released
+    as warming so convection is MSE ``h=c_p T+L_v q_v`` conserving in-scheme.
+
+    Result on this column: column TOTAL WATER ``∫(dq_v+dq_c)`` and column MSE
+    ``∫(c_p dT + L_v dq_v)`` both close to MACHINE PRECISION, and the net column
+    response flips to the physically-correct WARM+DRY (``+L_v*`` net condensate)."""
+    T, q, pf, ph, u, v = _column()
+    ncol, nlev = T.shape
+    mc = jnp.full((ncol, nlev), 3.0e-6)
+    dp = _dp(ph)
+    sch = _all_schemes(T, q, pf, ph, u, v, None, mc)
+    out_kf = sch["kain_fritsch"]()
+    Tc, qc, pfc, phc, uc, vc = _capped_column()
+    out_zm = _all_schemes(Tc, qc, pfc, phc, uc, vc, None, mc)["zhang_mcfarlane"]()
+    dp_zm = _dp(phc)
+    net_kf = _col_int(out_kf.dq_v_dt + out_kf.dq_c_conv_dt, dp)
+    net_zm = _col_int(out_zm.dq_v_dt + out_zm.dq_c_conv_dt + out_zm.dq_r_conv_dt, dp_zm)
+    # (1) Column TOTAL WATER closes to machine precision (was +3.16e-4 leak);
+    #     the CAM6 ZM port closes its own budget (vapour + cloud + rain) too.
+    assert jnp.all(jnp.abs(net_kf) < 1.0e-8), \
+        f"KF column-water residual {net_kf} not machine-zero — budget leak"
+    assert jnp.all(jnp.abs(net_zm) < 1.0e-8), \
+        f"ZM column-water residual {net_zm} not machine-zero — budget leak"
+    # (2) Column MSE closes to machine precision (was -728 W/m^2 sink): the
+    #     +L_v condensation warming offsets the -L_v vapor sink; the -L_v re-evap
+    #     cooling offsets the +L_v re-evap moistening.  This is the ENERGY half
+    #     of the fix — a water-only patch would still leave this ~-728.
+    mse_kf = _col_int(constants.c_pd * out_kf.dT_dt
+                      + constants.L_v * out_kf.dq_v_dt, dp)
+    assert jnp.all(jnp.abs(mse_kf) < 1.0e-6), \
+        f"KF column MSE residual {mse_kf} W/m^2 not conserved — energy leak"
+    # (3) Net column response is now WARM+DRY (deep convection), not the old
+    #     cool+moisten: heating > 0 and vapor tendency < 0.
+    heat_kf = _col_int(constants.c_pd * out_kf.dT_dt, dp)
+    dry_kf = _col_int(out_kf.dq_v_dt, dp)
+    assert jnp.all(heat_kf > 0.0), f"KF net column heating {heat_kf} W/m^2 <= 0"
+    assert jnp.all(dry_kf < 0.0), f"KF net column drying {dry_kf} >= 0"
 
 
-@pytest.mark.parametrize("dt", [300.0, 1800.0])
+def test_tier3_kf_mse_conserved_on_capped_finite_lnb_column():
+    """KF MSE closure must hold on the FINITE-LNB (capped) column too — KF's
+    real production regime (a real tropopause), where the plume detrains genuine
+    cloud.  The implicit_flux kernel books ``dq_v -= dq_c`` for that detrained
+    cloud with NO sensible heat (it defers the latent), which left column MSE
+    ``h=c_p T + L_v q_v`` short by ~-549 W/m^2 here.  KF now RELEASES the
+    detrained-cloud latent as warming (h-conserving in-scheme, ZM convention),
+    so both column total water and MSE close to machine precision on the capped
+    column, not only the uncapped one (codex review-2 #2)."""
+    T, q, pf, ph, u, v = _capped_column()
+    dp = _dp(ph)
+    out = _run_kf(T, q, pf, ph)
+    water = _col_int(out.dq_v_dt + out.dq_c_conv_dt, dp)
+    mse = _col_int(constants.c_pd * out.dT_dt + constants.L_v * out.dq_v_dt, dp)
+    assert jnp.all(jnp.abs(water) < 1.0e-8), \
+        f"KF capped-column water residual {water} not machine-zero"
+    assert jnp.all(jnp.abs(mse) < 1.0e-5), \
+        f"KF capped-column MSE residual {mse} W/m^2 — detrained-cloud latent leak"
+
+
+@pytest.mark.parametrize("dt", [300.0, 1800.0, 3600.0])
 @pytest.mark.parametrize("q_scale", [1.0, 0.1, 0.02])
 def test_tier3_kf_vapor_stays_nonnegative(dt, q_scale):
-    """KF-Eta borrows moisture so the adjusted sounding keeps QG >= 1e-9; the
-    tendency is (QG - Q0)/TIMEC with TIMEC >= 1800 s, so one step with
-    dt <= TIMEC cannot drive q_v negative where q_v >= the oracle's 1e-6 floor."""
+    """KF must never drive column vapor negative after a step: the CONDLOAD
+    condensation sink is drawn from the vapor the updraft ingests, distributed
+    over the available (post-transport) moisture and moisture-limited so
+    ``precip*dt <= column vapor``; a final CONSERVATIVE VAPOR RELOCATION fills any
+    residual kernel-transport over-dry from the surplus deposited elsewhere.
+    Probe the production dt range AND the drier / longer-dt corner (q_scale=0.02,
+    dt=3600) that actually exercises the relocation clamp (codex review-2 #1: the
+    earlier -cond_rate sink drove q_v to -4e-4; review-4: cover the relocation
+    path on a nonzero-vapor column).  ``dt`` is threaded into the KF call so its
+    internal moisture limiter / clamp see the same step used for the check."""
     T, q, pf, ph, u, v = _column()
     q = q * q_scale
     ncol, nlev = T.shape
     dp = _dp(ph)
-    out = _run_kf(T, q, pf, ph, u, v, w=jnp.full((ncol, nlev), 0.05), dt=dt)
+    out, _ = kain_fritsch_convection(
+        T, q, pf, ph, jnp.zeros((ncol, nlev)), jnp.zeros((ncol, nlev)),
+        dt, KainFritschConfig(),
+    )
     q_new = q + out.dq_v_dt * dt
     assert jnp.all(jnp.isfinite(out.dq_v_dt)) and jnp.all(jnp.isfinite(out.dT_dt))
-    assert jnp.all(jnp.where(q >= 1.0e-6, q_new, 0.0) >= -1.0e-12), float(jnp.min(q_new))
-    water = _col_int(out.dq_v_dt + out.dq_c_conv_dt + out.dq_r_conv_dt, dp)
-    assert jnp.all(jnp.abs(water) < 1.0e-12)
+    assert jnp.all(q_new >= -1.0e-12), \
+        f"KF drove q_v negative (min={jnp.min(q_new)}) at dt={dt}, q_scale={q_scale}"
+    # On a nonzero-vapor column the vapor relocation is conservative: column
+    # total water stays closed (not the degenerate q_v==0 residual regime).
+    water = _col_int(out.dq_v_dt + out.dq_c_conv_dt, dp)
+    assert jnp.all(jnp.abs(water) < 1.0e-5), \
+        f"KF column-water residual {water} at dt={dt}, q_scale={q_scale}"
 
 
 def test_tier3_sbm_conserves_water_and_mse():
@@ -560,23 +626,22 @@ _GRAD_CASES = {
     # DTMA on this warm-started column drives CBMF to its zero floor.
     "emanuel": (0.2, lambda T, q, pf, ph, u, v, w, mc, x:
                 _scalar_loss(_run_emanuel(T, q, pf, ph, alpha_closure=x))),   # CBMF closure slope
-    "kain_fritsch": (0.03, lambda T, q, pf, ph, u, v, w, mc, x:
-                     _scalar_loss(_run_kf(T, q, pf, ph, u, v, w=w,
-                                          entrain_const=x))),  # KF-Eta REI coefficient
+    "kain_fritsch": (1800.0, lambda T, q, pf, ph, u, v, w, mc, x:
+                     _scalar_loss(_run_kf(T, q, pf, ph, w=w,
+                                          cape_consumption_time=x))),         # TIMEC [s]
     "bechtold": (3600.0, lambda T, q, pf, ph, u, v, w, mc, x:
                  _scalar_loss(_run_bechtold(T, q, pf, ph, u, v, mc=mc, tau_bl=x))),  # tau_bl [s]
 }
 
 
-# Bechtold (tau_bl) feeds a CAPE/tau cloud-base mass flux that is
-# hard-clipped at ``M_b_max`` (a CFL/stability cap).  In the deep-CAPE
+# KF (TIMEC) and Bechtold (tau_bl) feed a CAPE/tau cloud-base mass flux that
+# is hard-clipped at ``M_b_max`` (a CFL/stability cap).  In the deep-CAPE
 # regime that clip is ACTIVE, which makes the relaxation-timescale gradient
 # exactly zero (see test_tier4_relaxation_tau_grad_dies_under_M_b_cap_KNOWN
 # below — a documented trainability limitation, NOT broken AD plumbing).  To
-# verify the AD path itself is sound we probe it at a milder (sub-cap)
-# column where the clip is inactive and the gradient is alive.  The WRF
-# KF-Eta port has no such cap; it is probed on its convecting LNB column.
-_GRAD_SUBCAP = {"bechtold"}
+# verify the AD path itself is sound we probe these two at a milder
+# (sub-cap) column where the clip is inactive and the gradient is alive.
+_GRAD_SUBCAP = {"kain_fritsch", "bechtold"}
 
 
 def _grad_column(name):
@@ -625,6 +690,13 @@ def test_tier4_relaxation_tau_grad_dies_under_M_b_cap_KNOWN():
     w = jnp.full((ncol, nlev), 0.05)
     mc = jnp.full((ncol, nlev), 3.0e-6)
 
+    def kf_loss(tau):
+        out, _ = kain_fritsch_convection(
+            T, q, pf, ph, w, jnp.zeros((ncol, nlev)), DT,
+            KainFritschConfig(cape_consumption_time=tau),
+        )
+        return _scalar_loss(out)
+
     def be_loss(tau):
         out, _, _ = bechtold_convection(
             T, q, pf, ph, u, v, jnp.zeros((ncol, nlev)), jnp.zeros((ncol,)),
@@ -632,12 +704,13 @@ def test_tier4_relaxation_tau_grad_dies_under_M_b_cap_KNOWN():
         )
         return _scalar_loss(out)
 
-    # KF dropped from this probe: the WRF KF-Eta port has no M_b_max cap and no
-    # cape_consumption_time (its closure is the oracle's iterated ABE removal).
+    g_kf = jax.grad(kf_loss)(1800.0)
     g_be = jax.grad(be_loss)(3600.0)
-    # strict-xfail: expected to be exactly 0 under the active clip.
-    assert g_be != 0.0, (
-        f"tau gradient should be alive; Bechtold={g_be} (dead under the M_b_max clip)"
+    # strict-xfail: BOTH are expected to be exactly 0 under the active clip,
+    # so this "alive" assertion fails (documenting the limitation for both).
+    assert g_kf != 0.0 and g_be != 0.0, (
+        f"tau gradients should be alive; KF={g_kf}, Bechtold={g_be} "
+        "(both dead under the M_b_max clip)"
     )
 
 

@@ -415,6 +415,10 @@ def _make_hydrostatic_convection(
     is_profile_prognostic = _tr.is_profile_prognostic
     is_cmt_capable = _tr.is_cmt_capable
     is_w_grid_consumer = _tr.is_w_grid_consumer
+    # Only the opt-in WRF KF-Eta variant reads winds (TIMEC, shear); the smooth
+    # KF default keeps main's inputs (no winds) bit for bit.
+    kf_wrf_winds = (scheme_name == "kain_fritsch"
+                    and scheme_config.variant == "wrf_kfeta")
     is_stochastic = _tr.is_stochastic
     is_mc_consumer = _tr.is_mc_consumer
     is_simple_mc_consumer = _tr.is_simple_mc_consumer
@@ -484,14 +488,15 @@ def _make_hydrostatic_convection(
         # (``shape (nEdges, nlev)``): rebuild cell-centred winds with the
         # Perot reconstruction (before 2026-09-15 this branch handed the
         # scheme zero winds, so CMT was silently dead on the MPAS lane).
-        if is_cmt_capable or is_w_grid_consumer:
+        if is_cmt_capable or kf_wrf_winds:
             _u_data = state.u.data
             if _u_data.shape[0] == ncol or _u_data.shape[:-1] == shape_2d:
                 u_col = _u_data.reshape(ncol, nlev)
                 if state.v is None and not is_cmt_capable:
                     # Kain-Fritsch: no zero-wind fallback (TIMEC, shear).
                     raise ValueError(
-                        "convection: kain_fritsch needs both wind components; "
+                        "convection: kain_fritsch_variant='wrf_kfeta' needs both wind "
+                        "components; "
                         "state.v is None")
                 v_col = (
                     state.v.data.reshape(ncol, nlev)
@@ -513,7 +518,8 @@ def _make_hydrostatic_convection(
                         # shear-dependent precipitation efficiency): refuse the
                         # zero-wind fallback rather than run on invented winds.
                         raise ValueError(
-                            "convection: kain_fritsch on MPAS needs cell-centred "
+                            "convection: kain_fritsch_variant='wrf_kfeta' on MPAS needs "
+                            "cell-centred "
                             "winds; set convection.mpas_cmt=True so they are "
                             "reconstructed from the edge normals")
                     # mpas_cmt off: keep the pre-2026-09-15 zero winds bit for
@@ -1155,6 +1161,10 @@ def _make_nonhydrostatic_convection(
     is_profile_prognostic = _tr.is_profile_prognostic
     is_cmt_capable = _tr.is_cmt_capable
     is_w_grid_consumer = _tr.is_w_grid_consumer
+    # Only the opt-in WRF KF-Eta variant reads winds (TIMEC, shear); the smooth
+    # KF default keeps main's inputs (no winds) bit for bit.
+    kf_wrf_winds = (scheme_name == "kain_fritsch"
+                    and scheme_config.variant == "wrf_kfeta")
     is_stochastic = _tr.is_stochastic
     is_mc_consumer = _tr.is_mc_consumer
     is_simple_mc_consumer = _tr.is_simple_mc_consumer
@@ -1241,7 +1251,7 @@ def _make_nonhydrostatic_convection(
             )
 
         # Wind columns for CMT-capable schemes.
-        if is_cmt_capable or is_w_grid_consumer:
+        if is_cmt_capable or kf_wrf_winds:
             u_col = state.u.data.reshape(ncol, nlev)
             v_col = state.v.data.reshape(ncol, nlev)
         else:
@@ -1577,6 +1587,10 @@ def _make_spectral_pe_convection(
     is_profile_prognostic = _tr.is_profile_prognostic
     is_cmt_capable = _tr.is_cmt_capable
     is_w_grid_consumer = _tr.is_w_grid_consumer
+    # Only the opt-in WRF KF-Eta variant reads winds (TIMEC, shear); the smooth
+    # KF default keeps main's inputs (no winds) bit for bit.
+    kf_wrf_winds = (scheme_name == "kain_fritsch"
+                    and scheme_config.variant == "wrf_kfeta")
     is_stochastic = _tr.is_stochastic
     is_mc_consumer = _tr.is_mc_consumer
     is_simple_mc_consumer = _tr.is_simple_mc_consumer
@@ -1630,7 +1644,7 @@ def _make_spectral_pe_convection(
         # the leaf produces meaningful CMT.  The grid→spectral round-trip
         # for the resulting (du_dt_conv, dv_dt_conv) is handled below
         # via :func:`vordiv_from_uv_3d`.
-        if is_cmt_capable or is_w_grid_consumer:
+        if is_cmt_capable or kf_wrf_winds:
             u_grid = fields['u'].astype(_state_dtype)   # (n_lat, n_lon, nlev)
             v_grid = fields['v'].astype(_state_dtype)
             u_col = u_grid.reshape(ncol, nlev)

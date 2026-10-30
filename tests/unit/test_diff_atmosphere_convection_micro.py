@@ -275,7 +275,6 @@ def _call_convection(scheme, col, *, T=None, q_v=None, u=None, v=None,
         )
         out, _prof = kain_fritsch_convection(
             T, q_v, p_full, p_half, w, carry, _DT, KainFritschConfig(),
-            u=u, v=v,
         )
         return out
     if scheme == "mass_flux":
@@ -448,9 +447,9 @@ class TestConvectionLeafGrad:
     def test_grad_wrt_w_grid_kain_fritsch(self, col):
         """KF's trigger perturbation is driven by the grid-scale updraft.
 
-        In the WRF KF-Eta port ``w_grid`` (W0AVG) sets the trigger temperature
-        perturbation DTLCL and the parcel's initial vertical velocity WLCL; a
-        zero gradient here means the dynamical-core coupling is severed.
+        ``w_grid`` is KF's only non-thermodynamic input; a zero gradient here
+        means the trigger reduces to the fixed ``parcel_perturb_T`` and the
+        dynamical-core coupling is severed.
         """
         def loss(w):
             return _conv_loss(_call_convection("kain_fritsch", col, w=w))
@@ -514,9 +513,6 @@ class TestConvectionLeafGrad:
         """
         if scheme == "zhang_mcfarlane":
             pytest.skip("CAM6 ZM uses the oracle's hard cape > capelmt gate")
-        if scheme == "kain_fritsch":
-            pytest.skip("WRF KF-Eta port uses the oracle's hard trigger "
-                        "(TLCL+DTLCL > TENV, then the cloud-depth test)")
         # Stabilization blend toward an isothermal column at T_surface; q_v is
         # recomputed at FIXED RH so the moisture field follows the sounding
         # instead of the column merely becoming supersaturated.

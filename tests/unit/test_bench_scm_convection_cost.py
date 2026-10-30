@@ -124,7 +124,7 @@ def test_the_TIMED_function_returns_more_than_the_temperature_tendency(mod, col)
     assert r["n_leaves"] >= 4, r["n_leaves"]
 
 
-# `kuo` is pinned as inactive because its reason is
+# Only `kuo` is pinned as inactive, and only because its reason is
 # STRUCTURAL: it needs a large-scale moisture-convergence operator, which a
 # single column never supplies, at any vertical resolution.
 #
@@ -139,19 +139,14 @@ def test_the_TIMED_function_returns_more_than_the_temperature_tendency(mod, col)
 # `dca` is pinned for a reason that is also structural: GFDL moist_conv adjusts
 # only pairs of SUPERSATURATED levels, and build_state's column is RH 0.85 at
 # every level and every nlev.
-# `kain_fritsch` (WRF KF-Eta port) is pinned too: the bench column is at REST,
-# so the grid-scale vertical velocity the KF trigger reads (W0AVG) is 0, and
-# on this sounding the oracle trigger does not fire at w=0 (measured with the
-# port, which matches WRF to 1e-10: inactive at w=0, fires at w=0.01-0.1 m/s,
-# CAPE 2270-3007 J/kg).  Timing KF needs a column with grid-scale ascent.
-_EXPECTED_INACTIVE = ("kuo", "dca", "kain_fritsch")
+_EXPECTED_INACTIVE = ("kuo", "dca")
 
 # Schemes expected to trigger AT THIS MODULE'S nlev. `emanuel` belongs here
 # precisely because it is active at nlev=16.
 @pytest.mark.parametrize(
     "scheme", [s for s in (
         "sbm", "mass_flux", "edmf", "zhang_mcfarlane",
-        "tiedtke", "bechtold", "emanuel") ])
+        "kain_fritsch", "tiedtke", "bechtold", "emanuel") ])
 def test_active_schemes_are_reported_active(mod, col, scheme):
     """codex round 1 findings 14/19: an all-zero tendency is finite and times
     fine, so an untriggered scheme silently joins the 'pack' that ZM is

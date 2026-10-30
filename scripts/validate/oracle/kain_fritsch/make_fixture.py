@@ -7,7 +7,7 @@ usage: python make_fixture.py <columns.npz> <build dir> <out.npz>
 columns and 12 constructed soundings, top-down, specific humidity ``q``).
 <build dir> holds kf_driver.x and lut_dump.x from build.sh.
 
-The oracle is fed exactly what ``kain_fritsch_convection`` feeds the port:
+The oracle is fed exactly what ``kain_fritsch_wrf_convection`` (``KainFritschConfig.variant="wrf_kfeta"``) feeds the port:
 levels flipped to bottom-up, QV = the model's ``q`` unchanged, DZ = the
 hypsometric layer depth of ``compute_column_geometry`` and RHO = dp/(G*DZ) so
 the oracle's DP = RHO*G*DZ is the model's dp, W0AVG = ``w_grid``,

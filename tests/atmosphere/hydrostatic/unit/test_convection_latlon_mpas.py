@@ -118,10 +118,6 @@ def scheme_config(request):
     # The test grids carry no land fraction: ZM gets the explicit aquaplanet choice.
     kwargs = {scheme_field: (scheme_cls(land_fraction="none")
                              if name == "zhang_mcfarlane" else scheme_cls())}
-    # The WRF KF-Eta port needs real winds; on MPAS they come only from the
-    # edge-normal reconstruction (mpas_cmt=True), else the bridge raises.
-    if name == "kain_fritsch":
-        kwargs["mpas_cmt"] = True
     return name, ConvectionConfig(scheme=name, **kwargs)
 
 
@@ -272,15 +268,24 @@ class TestConvectionMPAS:
         assert bool(jnp.all(jnp.isfinite(tend.du_dt.data)))
         assert bool(jnp.all(jnp.isfinite(tend.dp_s_dt.data)))
 
-    def test_kf_mpas_without_reconstructed_winds_raises(
+    def test_kf_wrf_variant_mpas_needs_reconstructed_winds(
         self, mpas_mesh, mpas_state, sigma_coord,
     ):
-        """KF on MPAS with mpas_cmt off would run on zero winds: refused."""
-        physics_fn = make_convection_physics(
-            ConvectionConfig(scheme="kain_fritsch"), model_type="mpas", dt=300.0,
-        )
+        """The opt-in WRF KF-Eta variant on MPAS: refused with mpas_cmt off
+        (it would run on zero winds), finite with the edge-normal
+        reconstruction on.  The smooth default runs either way (above)."""
+        wrf = KainFritschConfig(variant="wrf_kfeta")
+        off = make_convection_physics(
+            ConvectionConfig(scheme="kain_fritsch", kain_fritsch=wrf),
+            model_type="mpas", dt=300.0)
         with pytest.raises(ValueError, match="mpas_cmt"):
-            physics_fn(mpas_state, mpas_mesh, sigma_coord)
+            off(mpas_state, mpas_mesh, sigma_coord)
+        on = make_convection_physics(
+            ConvectionConfig(scheme="kain_fritsch", kain_fritsch=wrf,
+                             mpas_cmt=True),
+            model_type="mpas", dt=300.0)
+        tend, _ = on(mpas_state, mpas_mesh, sigma_coord)
+        assert bool(jnp.all(jnp.isfinite(tend.dT_dt.data)))
 
     def test_tiedtke_mpas_passes_none_not_zeros_for_missing_mc(
         self, mpas_mesh, mpas_state, sigma_coord,

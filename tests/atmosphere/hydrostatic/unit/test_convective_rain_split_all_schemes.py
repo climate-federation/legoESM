@@ -41,6 +41,11 @@ def _column():
 def _run(scheme, pe):
     from legoesm.atmosphere.physics.convection import config as C
     T, q_v, pf, ph, u, v, w, prog = _column()
+    if scheme == "kain_fritsch":
+        from legoesm.atmosphere.physics.convection.kain_fritsch import (
+            kain_fritsch_convection as fn)
+        cfg = C.KainFritschConfig(precip_efficiency=pe)
+        return fn(T, q_v, pf, ph, w, prog, 600.0, config=cfg)[0]
     if scheme == "mass_flux":
         from legoesm.atmosphere.physics.convection.mass_flux import (
             mass_flux_convection as fn)
@@ -54,10 +59,9 @@ def _run(scheme, pe):
     raise ValueError(scheme)
 
 
-# zhang_mcfarlane and kain_fritsch left out: the CAM6 / WRF KF-Eta ports produce
-# rain explicitly (dq_r_conv_dt) and have no precip_efficiency split (KF raises
-# on a non-default precip_efficiency).
-_SCHEMES = ["mass_flux", "edmf"]
+# zhang_mcfarlane left out: the CAM6 port produces rain explicitly (cldprp
+# c0 autoconversion -> dq_r_conv_dt) and has no precip_efficiency split.
+_SCHEMES = ["kain_fritsch", "mass_flux", "edmf"]
 
 
 @pytest.mark.parametrize("scheme", _SCHEMES)
@@ -96,6 +100,7 @@ def test_split_emits_rain_conserving_mass(scheme):
 def test_config_has_precip_efficiency_default_zero(scheme):
     from legoesm.atmosphere.physics.convection import config as C
     cfg_cls = {
+        "kain_fritsch": C.KainFritschConfig,
         "mass_flux": C.MassFluxConfig,
         "edmf": C.ConvectiveEDMFConfig,
     }[scheme]

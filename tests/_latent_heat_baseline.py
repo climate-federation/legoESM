@@ -20,6 +20,7 @@ LATENT_BUDGET: dict[str, int] = {
     'packages/atmosphere/legoesm/atmosphere/physics/convection/bechtold.py': 14,
     'packages/atmosphere/legoesm/atmosphere/physics/convection/dca.py': 3,
     'packages/atmosphere/legoesm/atmosphere/physics/convection/emanuel.py': 2,
+    'packages/atmosphere/legoesm/atmosphere/physics/convection/kain_fritsch.py': 3,
     'packages/atmosphere/legoesm/atmosphere/physics/convection/mass_flux.py': 1,
     'packages/atmosphere/legoesm/atmosphere/physics/convection/sbm.py': 3,
     'packages/atmosphere/legoesm/atmosphere/physics/convection/tiedtke.py': 1,

@@ -8,6 +8,10 @@ oracle's order (arithmetic association included) so the port reproduces the
 compiled Fortran to round-off; the test is
 ``tests/atmosphere/test_kain_fritsch_oracle.py``.
 
+NOT RULE 5 COMPLIANT: reached only through the opt-in
+``KainFritschConfig.variant = "wrf_kfeta"`` (``kain_fritsch_wrf.py``); every
+traced-state switch below is hard at the default.  Smoothing tracked in #2280.
+
 Conventions are the oracle's, NOT legoESM's:
 
 * levels BOTTOM-UP (index 0 = lowest model level);

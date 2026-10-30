@@ -113,22 +113,34 @@ class TestConvectionAudit:
             return jnp.sum(out.dT_dt ** 2)
         assert_grad_ok(loss, 0.2, "emanuel.alpha_closure")
 
-    def test_kain_fritsch_entrain_const(self):
+    def test_kain_fritsch_cape_consumption_time(self):
         from legoesm.atmosphere.physics.convection.kain_fritsch import kain_fritsch_convection
         from legoesm.atmosphere.physics.convection.config import KainFritschConfig
-        # WRF KF-Eta port: cape_consumption_time / M_b_max are surrogate-only
-        # (they raise if set); the oracle's TIMEC comes from DX/VCONV and its
-        # closure has no mass-flux cap.  The tier-1 tunable is the REI
-        # entrainment coefficient (WRF 0.03).
+        # ``cape_consumption_time`` (TIMEC) sets the closure cloud-base mass flux
+        # ``M_b = rho_BL * CAPE / (g * TIMEC)``, clipped at the literature
+        # stability cap ``M_b_max``.  A SHORT TIMEC gives a LARGE M_b; the
+        # default ``_column``
+        # (and even the stabilised/dried one below at TIMEC=1800 s) is deep
+        # enough that M_b saturates at ``M_b_max`` there, which makes the applied
+        # mass flux — and ``dT_dt`` — TIMEC-independent (grad zero) in the CAP
+        # regime (a documented trainability limitation, NOT dead AD plumbing).
+        # This is the M_b_max CAP, not the timec clamp: the operative timec is
+        # ``clip(cape_consumption_time, 1800, 3600)`` whose subgradient at the
+        # 1800 s boundary is 0.5 (nonzero), so the clamp does NOT zero it — the
+        # sibling tier-4 sub-cap test even audits TIMEC=1800 s successfully.
+        # Probe a LONGER, sub-cap TIMEC (2400 s) where M_b is below the cap and
+        # TIMEC genuinely flows into the tendency.
         T, q_v, p_full, p_half = _column()
+        T = T.at[:, -1].add(-2.0)   # gentler boundary-layer instability
+        q_v = q_v * 0.85            # nearer the sub-cap regime
         A = _aux()
 
         def loss(x):
-            cfg = KainFritschConfig()._replace(entrain_const=x)
+            cfg = KainFritschConfig()._replace(cape_consumption_time=x)
             out = kain_fritsch_convection(T, q_v, p_full, p_half, A["w"],
-                A["prog"], 600.0, config=cfg, u=A["u"], v=A["v"])[0]
+                A["prog"], 600.0, config=cfg)[0]
             return jnp.sum(out.dT_dt ** 2)
-        assert_grad_ok(loss, 0.03, "kain_fritsch.entrain_const")
+        assert_grad_ok(loss, 2400.0, "kain_fritsch.cape_consumption_time")
 
     def test_tiedtke_epsilon_deep(self):
         from legoesm.atmosphere.physics.convection.tiedtke import tiedtke_convection

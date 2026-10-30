@@ -1,0 +1,16 @@
+# Opt-in deck for the faithful WRF v4.8.0 KF-Eta convection (user decision
+# 2026-10-30, PR #2249; deck shape agreed by codex + GLM).
+#
+# NOT RULE 5 COMPLIANT: every traced-state switch of the port (trigger,
+# source-layer search, deep/shallow choice, level selections, downdraft and
+# closure exits) is hard, so gradients ignore them.  Not a production or
+# training deck; smoothing is tracked in #2280.  Differs from the included
+# deck in the convection scheme only (bechtold -> kain_fritsch, WRF variant);
+# the bechtold_* keys of the included deck are inert here.
+#
+# On this MPAS lane the driver turns on the edge-normal wind reconstruction
+# for this variant (it needs real cell winds: TIMEC = DX/VCONV, shear).
+include: amip_sundqvist_l36.yaml
+
+convection: kain_fritsch
+kain_fritsch_variant: wrf_kfeta
