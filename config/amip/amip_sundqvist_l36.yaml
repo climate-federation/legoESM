@@ -162,7 +162,8 @@ convection: bechtold        # mass-flux (IFS lineage), water-conserving by
 # it is not differentiable (RULE 5 status: issue #2281).  Production runs the
 # smooth Bechtold chain; the IFS port stays an oracle / validation target.
 # The two legacy pins below are restored to the values this deck ran with
-# before #2249, so results reproduce the last smooth-chain production.
+# before #2249: the convection config now resolves field for field to the one
+# built at fec6aacafe^1 (pinned by test_run_amip_cli.py).
 bechtold_use_ifs_ascent: false
 # Convective momentum transport PINNED OFF (review 2026-10-10 F22, majority
 # vote Claude+GLM): the unset default is now ON on every lane, but it resolved

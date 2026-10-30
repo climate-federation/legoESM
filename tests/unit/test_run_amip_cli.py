@@ -2585,14 +2585,63 @@ def test_sundqvist_l36_deck_still_round_trips():
     _assert_optics_thinning(cfg, thinned=True)
 
 
-@pytest.mark.parametrize("deck", [
-    "amip_production_l36.yaml", "amip_campaign_mpas.yaml",
-    "amip_aug13_control.yaml", "amip_aug13_land.yaml",
-    "amip_reference_r5_land.yaml"])
-def test_sundqvist_l36_inheritors_resolve_to_smooth_bechtold(deck):
-    """Every Bechtold deck inheriting amip_sundqvist_l36.yaml resolves to the
-    smooth chain the base pins (IFS ascent off, CMT off, rain split 0.8), so
-    no child silently re-enables the non-differentiable IFS path."""
+# The RESOLVED Bechtold leaf of amip_sundqvist_l36.yaml as built at the
+# commit before #2249 (fec6aacafe^1), i.e. the smooth chain production last
+# ran.  Captured by building that commit; a drift in any leaf value -- a moved
+# code default included -- fails here instead of silently changing the runs.
+_SMOOTH_BECHTOLD_LEAF_PRE2249 = {
+    'M_b_max': 0.05, 'autoconv_pe_max': 0.9, 'autoconv_q_c_crit': 0.0005,
+    'buoyancy_death_memory': False, 'capdcycl_land_tau_scale': 1.0,
+    'cape_pbl_depth': 500.0, 'cape_qadv_weight': 0.8, 'cape_sharpness': 0.1,
+    'cape_threshold': 70.0, 'cloud_depth_deep': 3000.0,
+    'cloud_depth_shallow_max': 1500.0, 'cmt_c_d': 0.7, 'cmt_c_u': 0.7,
+    'delta_deep': 7.5e-05, 'delta_midlevel': 0.0002, 'delta_shallow': 7.5e-05,
+    'depth_split_sharpness': 0.001, 'dnoprc': 0.0003, 'downdraft_RH_min': 0.2,
+    'downdraft_alpha': 0.3, 'downdraft_detrain_scale_m': 700.0,
+    'downdraft_entrain_rate': 0.0003, 'downdraft_evap_efficiency': 0.05,
+    'downdraft_rh_sharpness': 10.0, 'downdraft_transport': False, 'dx_m': 0.0,
+    'enable_cmt': False, 'enable_downdraft': True, 'enable_stochastic': False,
+    'epsilon_deep': 0.00175, 'epsilon_midlevel': 0.0001,
+    'epsilon_shallow': 0.0035, 'ifs_shallow_nosupply': 'zero',
+    'ifs_shallow_supply_width_w_m2': 1.0, 'lcl_membership_sharpness': 2.0,
+    'mc_normalize_scale': 0.05, 'p_conv_top_pa': 15000.0, 'parcel_dT': 0.5,
+    'parcel_dq': 0.001, 'precip_efficiency': 0.8,
+    'precip_split_scheme': 'constant', 'rain_vapor_sink': 'formation',
+    'rhebc_land': 0.75, 'rhebc_land_deep': 0.7, 'rprcon': 0.0014,
+    'stochastic_amplitude': 0.5, 'stochastic_decorrelation': 7200.0,
+    'subcloud_evap_scale': 1.0, 'subsidence_solve': 'implicit_flux',
+    'tau_M_u_relax': 1800.0, 'tau_bl': 3600.0, 'theta_implicit': 1.0,
+    'use_convective_turnover_tau': True, 'use_ifs_ascent': False,
+    'use_ifs_capdcycl': True, 'use_ifs_cape_closure': True,
+    'use_ifs_cape_qadv': False, 'use_ifs_downdraft': True,
+    'use_ifs_inplume_precip': True, 'use_ifs_land_rhebc': True,
+    'use_ifs_shallow_closure': False, 'use_ifs_snow_melt': True,
+    'use_ifs_subcloud_evap': True, 'use_pbl_cape': True,
+}
+
+
+def _sundqvist_l36_bechtold_decks():
+    """Every config/amip deck whose include chain reaches amip_sundqvist_l36."""
+    import re
+    amip = _repo_root() / "config" / "amip"
+    parent = {}
+    for f in amip.glob("*.yaml"):
+        m = re.search(r"^include:\s*(\S+)", f.read_text(), re.M)
+        if m:
+            parent[f.name] = m.group(1)
+    found = []
+    for name in sorted(parent):
+        cur, seen = name, set()
+        while cur in parent and cur not in seen:
+            seen.add(cur)
+            cur = parent[cur]
+            if cur == "amip_sundqvist_l36.yaml":
+                found.append(name)
+                break
+    return found
+
+
+def _bechtold_leaf(deck):
     from legoesm.driver.run_config_yaml import load_yaml_config
     from legoesm.driver.physics_pipeline import convection_config_for
     parser = build_arg_parser()
@@ -2600,11 +2649,27 @@ def test_sundqvist_l36_inheritors_resolve_to_smooth_bechtold(deck):
         str(_repo_root() / "config" / "amip" / deck), parser))
     cfg = build_config_from_args(
         _postprocess_args(parser.parse_args(_AMIP_DUMMY_PATHS), parser))
-    assert cfg.convection == "bechtold"
-    leaf = convection_config_for(cfg).bechtold
-    assert leaf.use_ifs_ascent is False
-    assert leaf.enable_cmt is False
-    assert leaf.precip_efficiency == pytest.approx(0.8)
+    return cfg, convection_config_for(cfg).bechtold
+
+
+def test_sundqvist_l36_and_inheritors_resolve_to_the_smooth_bechtold_chain():
+    """User decision 2026-10-30: production runs the smooth Bechtold chain
+    (IFS CUMASTRN path off, issue #2281).  The base deck and every Bechtold
+    deck inheriting it resolve to the pre-#2249 leaf, field for field."""
+    decks = _sundqvist_l36_bechtold_decks()
+    # The walk must find at least the inheritors known today (non-vacuous).
+    assert {"amip_production_l36.yaml", "amip_campaign_mpas.yaml",
+            "amip_aug13_control.yaml", "amip_aug13_land.yaml",
+            "amip_reference_r5_land.yaml"} <= set(decks), decks
+    checked = 0
+    for deck in ["amip_sundqvist_l36.yaml"] + decks:
+        cfg, leaf = _bechtold_leaf(deck)
+        if cfg.convection != "bechtold":
+            continue
+        assert leaf._asdict() == _SMOOTH_BECHTOLD_LEAF_PRE2249, deck
+        checked += 1
+    assert checked >= 6
+
 
 def test_config_yaml_explicit_cli_flag_overrides_file():
     """Precedence: an explicit CLI flag wins over the --config file default."""
