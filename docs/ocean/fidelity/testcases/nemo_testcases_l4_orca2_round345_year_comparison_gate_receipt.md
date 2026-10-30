@@ -183,6 +183,18 @@ The per-receipt citation gate passes its one citation with zero failures and
 its shifted-line plant refuses. The exact default ORCA2 landing battery passes
 155/155 in 1,104.74 seconds; the explicit private-import ratchet passes 6/6.
 
+Resume 5 is committed as `96d29d324f2c767932bddff0950a4cf15f89c4c7`.
+The repaired comparator was run read-only on the actual retained control: all
+728 restart files passed, with 28,392 common-variable data comparisons, zero
+unequal, no control-only variables, and exactly the two required arm-A-only
+delay buffers. The fp64 focused round-342/345/ORCA2X battery passes 26/26 in
+87.92 seconds; round 345 alone passes 12/12, including both re-admission routes
+and the three requested variable-data plants. The per-receipt citation gate
+passes 5 citations with zero failures/unmapped entries, and its shifted-line
+plant exits 1. The full citation-gate suite passes 20/20. The private-import
+ratchet passes 5/6; its sole failure is the pre-existing missing-sentinel census
+in five unrelated package files, and this resume changes no package file.
+
 ## Choices and review
 
 - ASKED: option-1 fixed bars; monthly 3x KE envelope with 1% floor; perturb the
