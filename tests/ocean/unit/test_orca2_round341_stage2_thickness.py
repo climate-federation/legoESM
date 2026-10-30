@@ -371,20 +371,9 @@ def test_stage1_stage3_and_legacy_caller_stay_bit_identical() -> None:
                 f"Stage 3 slot {slot_idx} moved"
             )
 
-    # Legacy caller is bit-identical across all 3 stages.  Locate the
-    # executable block by its stable statements so additive code above it
-    # cannot silently turn this into a test of unrelated lines.
-    src_lines = Path(omlc.__file__).read_text(encoding="utf-8").splitlines()
-    block_start = next(
-        index for index, line in enumerate(src_lines)
-        if "h_k_one_third = h_k_old" in line
-    )
-    block_end = next(
-        index for index in range(block_start, len(src_lines))
-        if "strict=True)))" in src_lines[index]
-    ) + 1
-    legacy_block = textwrap.dedent("\n".join(
-        src_lines[block_start:block_end]))
+    # Locate the legacy caller by stable statements so additive code cannot retarget this test.
+    src_lines = Path(omlc.__file__).read_text(encoding="utf-8").splitlines(); block_start = next(i for i, line in enumerate(src_lines) if "h_k_one_third = h_k_old" in line)
+    legacy_block = textwrap.dedent("\n".join(src_lines[block_start:next(i for i in range(block_start, len(src_lines)) if "strict=True)))" in src_lines[i]) + 1]))
     assert "_nemo_ws_stage_transport(" in legacy_block
 
     def _eval_legacy_caller(m_obj):
