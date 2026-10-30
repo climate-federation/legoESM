@@ -12,9 +12,9 @@ and writes two figures next to it:
 * ``training_history_loss.png`` — training and held-out loss vs epoch. The
   held-out curve is absent for a run launched without ``--val-windows``, and
   the figure says so rather than drawing a training curve alone unlabelled.
-* ``training_history_terms.png`` — each weighted held-out loss term
-  (``val_terms``: MSE, bias and CRPS per variable, flux, spectral) vs epoch on
-  a log axis; colour = variable, line style = kind. Skipped for histories
+* ``training_history_terms.png`` — % change of each held-out loss term
+  (``val_terms``: MSE, bias and CRPS per variable, flux, spectral) vs epoch;
+  colour = variable, line style = kind. Skipped for histories
   written before the trainer logged terms.
 * ``training_history_params.png`` — every parameter that MOVED, as a fraction
   of its epoch-0 value, so knobs whose units differ by ten orders of magnitude
@@ -136,8 +136,9 @@ def main() -> int:
     fig.savefig(loss_png, dpi=140)
     plt.close(fig)
 
-    # A log axis cannot show a zero (a zero-weight term): those are listed in
-    # the console output instead of drawn as empty legend entries.
+    # Terms span ~4 decades, so each is drawn as % change from its first
+    # logged value. A zero-weight term has no such change: those are listed
+    # in the console output instead of drawn as empty legend entries.
     all_terms = term_series(rows)
     terms = {n: v for n, v in all_terms.items()
              if any(x is not None and x > 0 for x in v)}
@@ -152,15 +153,16 @@ def main() -> int:
             kind, _, var = name.partition("_")
             pts = [(e, v) for e, v in zip(epochs, series)
                    if v is not None and v > 0]
-            ax.plot([p[0] for p in pts], [p[1] for p in pts],
+            ax.plot([p[0] for p in pts],
+                    [100.0 * (p[1] / pts[0][1] - 1.0) for p in pts],
                     _KIND_STYLE.get(kind, "-."), marker="o", ms=3,
                     color=_VAR_COLOR.get(var, "#000000"), label=name)
-        ax.set_yscale("log")
+        ax.axhline(0.0, color="#000000", lw=0.8)
         ax.set_xlabel("epoch")
-        ax.set_ylabel("weighted held-out loss term")
+        ax.set_ylabel("held-out loss term, % change from first epoch")
         ax.set_title("Held-out loss by term (colour: variable; "
                      "solid MSE, dashed CRPS, dotted bias)")
-        ax.grid(alpha=0.3, which="both")
+        ax.grid(alpha=0.3)
         ax.legend(fontsize=7, ncol=3)
         fig.tight_layout()
         fig.savefig(terms_png, dpi=140)
