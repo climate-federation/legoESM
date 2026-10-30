@@ -2,7 +2,16 @@
 """Bytes written/read and MPI calls per traced step, from a profiler trace
 matched to the after-optimizations HLO dump of the same run.
 
-For every executed XLA op event (``args.hlo_op`` / ``args.hlo_module``) the
+Events come from each window's raw profile (``*.xplane.pb``), never from the
+``*.trace.json.gz`` beside it: that conversion keeps only the earliest
+1,000,000 events of a window (measured: 20-50 % of the op events of the duo
+C24/C96 windows).  A window folder with no raw profile, or one that is empty
+(the profiler writes 0 bytes when the profile exceeds the 2 GB protobuf
+limit), unreadable or without op events is an error naming the window;
+``--exclude-window`` drops named windows explicitly, and ``n_steps`` must
+then count only the kept windows' steps.
+
+For every executed XLA op event (stats ``hlo_op`` / ``hlo_module``) the
 op's output and operand shapes are looked up in the dump and summed:
   W = output bytes   (every result written once; logical bytes, not DRAM)
   R = operand bytes  (every operand read in FULL: an upper bound, it
@@ -17,14 +26,13 @@ match are counted as unmatched (both bias W, so read them before quoting).
 USE (trace with LEGOESM_TRACE_STEPS + LEGOESM_TRACE_WINDOWS, dump with
 --xla_dump_to=<dir> --xla_dump_hlo_as_text on the traced rank):
   python scripts/bench/bytes_census.py <hlo_dump_dir> <rank_trace_dir> <n_steps>
+      [--exclude-window w00 ...]
 """
 from __future__ import annotations
 
 import argparse
 import collections
 import glob
-import gzip
-import json
 import re
 import sys
 from pathlib import Path
@@ -84,9 +92,62 @@ def load_dump(dump_dir: str) -> dict:
     return mods
 
 
-def op_events(trace_file: str) -> list[dict]:
-    return [e for e in json.load(gzip.open(trace_file))["traceEvents"]
-            if e.get("ph") == "X" and "hlo_op" in e.get("args", {})]
+def ns_to_us(ns: float) -> float:
+    return ns / 1e3
+
+
+def op_events(xplane_file: str) -> list[dict]:
+    """Op events of every plane and line of a raw profile, in the shape the
+    census reads (ts/dur in us, tid = line name)."""
+    from jax.profiler import ProfileData
+
+    ev = []
+    for plane in ProfileData.from_file(xplane_file).planes:
+        for line in plane.lines:
+            for e in line.events:
+                st = dict(e.stats)
+                if "hlo_op" in st:
+                    ev.append({"ts": ns_to_us(e.start_ns), "dur": ns_to_us(e.duration_ns),
+                               "tid": f"{plane.name}/{line.name}",
+                               "args": {"hlo_op": st["hlo_op"],
+                                        "hlo_module": st.get("hlo_module", "?")}})
+    return ev
+
+
+def window_files(trace_dir: str, exclude: list[str]) -> list[Path]:
+    """One raw profile per file under each window folder of ``trace_dir``;
+    raises SystemExit naming any window that cannot be counted."""
+    root = Path(trace_dir)
+    wins = sorted(d.name for d in root.iterdir() if d.is_dir())
+    unknown = sorted(set(exclude) - set(wins))
+    if unknown:
+        raise SystemExit(f"--exclude-window names no window under {trace_dir}: {unknown}")
+    files = []
+    for w in wins:
+        if w in exclude:
+            print(f"  EXCLUDED window {w}")
+            continue
+        found = sorted((root / w).rglob("*.xplane.pb"))
+        if not found:
+            raise SystemExit(f"window {w}: no raw profile (*.xplane.pb)")
+        for f in found:
+            if f.stat().st_size == 0:
+                raise SystemExit(f"window {w}: raw profile {f} is empty (0 bytes)")
+        print(f"  window {w}: {len(found)} raw profile file(s)")
+        files += found
+    if not files:
+        raise SystemExit(f"no window to count under {trace_dir}")
+    return files
+
+
+def window_events(f: Path, window: str) -> list[dict]:
+    try:
+        ev = op_events(str(f))
+    except Exception as exc:  # any parse failure of one window ends the census
+        raise SystemExit(f"window {window}: unreadable raw profile {f}: {exc}") from exc
+    if not ev:
+        raise SystemExit(f"window {window}: raw profile {f} has no op events")
+    return ev
 
 
 def census_window(mods: dict, ev: list[dict]) -> dict:
@@ -152,24 +213,28 @@ def main(argv=None) -> int:
     p.add_argument("n_steps", type=int, help="steps covered by all windows")
     p.add_argument("--module", default="jit__step",
                    help="module for the kernel-overlap / MPI-call statistics")
+    p.add_argument("--exclude-window", action="append", default=[],
+                   help="window folder to leave out (repeatable)")
     a = p.parse_args(argv)
     mods = load_dump(a.dump_dir)
-    trs = sorted(glob.glob(a.trace_dir + "/**/*.trace.json.gz", recursive=True))
-    if not trs:
-        raise SystemExit(f"no trace under {a.trace_dir}")
+    trs = window_files(a.trace_dir, a.exclude_window)
     tot = collections.defaultdict(collections.Counter)
     for f in trs:
-        ev = op_events(f)
+        win = Path(f).relative_to(a.trace_dir).parts[0]
+        ev = window_events(f, win)
+        lines = collections.Counter(e["tid"] for e in ev)
+        print(f"  {win}: {len(ev)} op events on {len(lines)} line(s): "
+              + ", ".join(f"{k} {v}" for k, v in sorted(lines.items())))
         w = census_window(mods, ev)
         for k in ("W", "R", "K", "miss", "mpi_n", "mpi_b", "mpi_t"):
             tot[k].update(w[k])
         for m in w["ties"]:
             print(f"  TIE {m}: dumped variants share the top op-name coverage")
-        print(f"  {Path(f).relative_to(a.trace_dir).parts[0]}: write "
+        print(f"  {win}: write "
               f"{sum(w['W'].values())/1e9:7.3f} GB, mpi calls "
               f"{sum(w['mpi_n'].values())}, unmatched {sum(w['miss'].values())}")
     n = a.n_steps
-    print(f"{len(trs)} trace file(s); modules in dump: {len(mods)}; "
+    print(f"{len(trs)} raw profile(s); modules in dump: {len(mods)}; "
           f"unmatched events by module: {dict(tot['miss'])}")
     print(f"per step (/{n}):")
     for mod in sorted(tot["K"], key=tot["K"].get, reverse=True)[:12]:
@@ -181,7 +246,7 @@ def main(argv=None) -> int:
     for t in tot["mpi_n"]:
         print(f"  {t:28s} calls {tot['mpi_n'][t]/n:7.1f}  payload "
               f"{tot['mpi_b'][t]/n/1e6:8.3f} MB  time {tot['mpi_t'][t]/n/1e3:7.1f} ms")
-    st = call_stats(op_events(trs[-1]), a.module)
+    st = call_stats(ev, a.module)  # the last raw profile's events
     if st:
         print(f"{a.module} kernels in the last window: summed {st['summed_us']/1e3:.1f} "
               f"ms, union {st['union_us']/1e3:.1f} ms, span {st['span_us']/1e3:.1f} "
