@@ -308,3 +308,9 @@ class SurfaceForcingConfig(NamedTuple):
     # kernel default; "I" is the Veros flux_feedback literal, which lives on
     # FluxFeedbackConfig.shortwave_water_type).
     shortwave_water_type: str = "II"
+    # Fraction of the net shortwave that "jerlov_2band" keeps out of the column
+    # and deposits in the surface cell.  None keeps the 0.94 / 0.06 split of
+    # ``penetrating_fraction``; 0.0 sends all of it through the two-band
+    # profile, as ROMS and CROCO (lmd_swfrac) and the Paulson and Simpson
+    # (1977) fits themselves do.
+    shortwave_skin_fraction: float | None = None

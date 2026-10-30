@@ -5059,7 +5059,7 @@ def _bc_external_surface_forcing(
     du_dt, dv_dt, dT_dt, dS_dt, surface_forcing, u, v, T, S, h_k,
     z_coord, J, grid, rho_0, mask, mask_3d, *, route_heat_to_implicit=False,
     withhold_stress=False, shortwave_scheme="auto", shortwave_water_type="II",
-    shortwave_time_step_s=None, c_sw=None,
+    shortwave_time_step_s=None, c_sw=None, shortwave_skin_fraction=None,
 ):
     """Stage 10b': external surface forcing (wind stress tau_x/tau_y, net heat
     q_net, penetrating shortwave) from a coupled / OMIP OceanSurfaceForcing,
@@ -5197,7 +5197,9 @@ def _bc_external_surface_forcing(
                 _sw_cfg = ShortwavePenetrationConfig(
                     scheme="jerlov_2band", water_type=shortwave_water_type)
                 sw_T = jnp.asarray(_sf_sw, dtype=T.dtype)
-                sw_absorbed = sw_T * jnp.asarray(penetrating_fraction(_sw_cfg), dtype=T.dtype)
+                _pen = (penetrating_fraction(_sw_cfg) if shortwave_skin_fraction is None
+                        else 1.0 - float(shortwave_skin_fraction))
+                sw_absorbed = sw_T * jnp.asarray(_pen, dtype=T.dtype)
                 q_nonsolar = q_net_T - sw_absorbed
                 dT_target = dT_target.at[..., 0].add(
                     q_nonsolar * inv_rho_csw_dz * mask
@@ -5682,6 +5684,7 @@ def _bc_surface_forcing_stage(du_dt, dv_dt, dT_dt, dS_dt, surface_forcing, u, v,
             withhold_stress=_stress_implicit,
             shortwave_scheme=_sw_scheme,
             shortwave_water_type=getattr(_sf_cfg, "shortwave_water_type", "II"),
+            shortwave_skin_fraction=getattr(_sf_cfg, "shortwave_skin_fraction", None),
             shortwave_time_step_s=getattr(
                 getattr(getattr(config, "physics", None),
                         "shortwave_penetration", None),
