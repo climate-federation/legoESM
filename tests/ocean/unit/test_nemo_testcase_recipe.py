@@ -579,6 +579,10 @@ def test_stage3_two_band_solar_card_selects_kbb_and_kmm_stretch_routes():
         "kmm-default": (False, None),
     }
     for label, (kbb_live_stretch, kmm_source_association) in arms.items():
+        resolved_kmm_source = (
+            True
+            if kmm_source_association is None
+            else kmm_source_association)
         shortwave = card.recipe.model_config.physics.shortwave_penetration._replace(
             nemo_qsr_kbb_live_stretch=kbb_live_stretch)
         cfg = card.recipe.model_config._replace(
@@ -591,7 +595,7 @@ def test_stage3_two_band_solar_card_selects_kbb_and_kmm_stretch_routes():
             cfg,
             _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(tracer_process_trace=()),
         ).step(state, card.dt_s, freshwater=freshwater, surface_forcing=surface)
-        if kmm_source_association:
+        if resolved_kmm_source:
             stretch = jnp.where(
                 wet,
                 nemo_r3t_rk3_stage2_stretch(
