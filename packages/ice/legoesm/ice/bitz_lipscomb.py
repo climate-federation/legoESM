@@ -977,6 +977,33 @@ class SI3DHOutputs(NamedTuple):
     fluxes: SI3DHFluxes
 
 
+def _piecewise_remap(thickness, enthalpy, new_total, n_layers: int = 3):
+    """Conservative constant-cell remap retained for compatibility tests.
+
+    The certified SI3 path uses :func:`_cumulative_remap` below.  Keeping this
+    former implementation available preserves main's reverse-mode regression
+    coverage without selecting it on the NEMO-fidelity path.
+    """
+
+    old_lo = jnp.cumsum(thickness, axis=-1) - thickness
+    old_hi = jnp.cumsum(thickness, axis=-1)
+    dz_new = new_total / n_layers
+    idx = jnp.arange(n_layers, dtype=new_total.dtype)
+    new_lo = dz_new[..., None] * idx
+    new_hi = dz_new[..., None] * (idx + 1.0)
+    overlap = jnp.maximum(
+        0.0,
+        jnp.minimum(new_hi[..., :, None], old_hi[..., None, :])
+        - jnp.maximum(new_lo[..., :, None], old_lo[..., None, :]),
+    )
+    content = jnp.sum(overlap * enthalpy[..., None, :], axis=-1)
+    # Double where: an unselected zero-thickness branch must not evaluate 0/0
+    # during the reverse pass.  The selected forward quotient is unchanged.
+    has_thickness = dz_new[..., None] > _EPS10
+    safe_dz = jnp.where(has_thickness, dz_new[..., None], 1.0)
+    return jnp.where(has_thickness, content / safe_dz, 0.0)
+
+
 def _cumulative_remap(h_old, content_old, nlay, sr):
     """``ice_var_vremap`` (`icevar.f90:1010-1046`) and ``snw_ent`` (`icethd_dh.f90:584-619`).
 
@@ -2077,7 +2104,14 @@ def si3_column_step_arrays(state: SI3ColumnArrays,
 
     e_ice = jnp.asarray(state.e_ice)
     dtype = e_ice.dtype
-    h_ice = jnp.asarray(state.h_ice, dtype=dtype)
+    h_ice_raw = jnp.asarray(state.h_ice, dtype=dtype)
+    gathered_at_entry = jnp.asarray(state.concentration, dtype=dtype) > _EPS10
+    # NEMO calls the thermodynamic kernels only for gathered ice cells.  The
+    # array transcription evaluates inactive open-water lanes too, so sever
+    # their reverse-mode path while preserving the exact forward operands.
+    h_ice = jnp.where(
+        gathered_at_entry, h_ice_raw, jax.lax.stop_gradient(h_ice_raw)
+    )
     h_snow = jnp.asarray(state.h_snow, dtype=dtype)
     S_layers = jnp.asarray(state.S_layers, dtype=dtype)
     e_snow = jnp.asarray(state.e_snow, dtype=dtype)
@@ -2127,6 +2161,10 @@ def si3_column_step_arrays(state: SI3ColumnArrays,
     else:
         # C1D has no SST in its forcing record; snow-ice water enthalpy uses t_bo - rt0.
         sst_dh = t_bo_arr - constants.T0
+    qns_ice_raw = jnp.asarray(forcing.qns_ice, dtype=dtype)
+    qns_ice = jnp.where(
+        gathered_at_entry, qns_ice_raw, jax.lax.stop_gradient(qns_ice_raw)
+    )
     entry = {
         "h_i": h_ice,
         "h_s": h_snow,
@@ -2142,7 +2180,7 @@ def si3_column_step_arrays(state: SI3ColumnArrays,
         "t_bo": t_bo_arr,
         "sss": jnp.asarray(forcing.sss, dtype=dtype),
         "sst": sst_dh,
-        "qns_ice": jnp.asarray(forcing.qns_ice, dtype=dtype),
+        "qns_ice": qns_ice,
         "qsr_ice": jnp.asarray(forcing.qsr_ice, dtype=dtype),
         "dqns_ice": jnp.asarray(forcing.dqns_ice, dtype=dtype),
         "qtr_ice_top": jnp.asarray(forcing.qtr_ice_top, dtype=dtype),

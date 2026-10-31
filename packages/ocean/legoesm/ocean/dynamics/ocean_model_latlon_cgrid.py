@@ -2106,7 +2106,8 @@ def _nemo_metric_stage_transport(metric, face_thickness, corrected_velocity):
 
 
 def _nemo_cen2_tracer_rhs(
-    tracer, p_u, p_v, p_w, e3t_kmm, tmask_kmm, grid,
+    tracer, p_u, p_v, p_w, e3t_kmm, tmask_kmm, grid, *,
+    _certified_nemo_storage: bool = False,
 ):
     """Literal RK3 stage-1/2 CEN2 tracer accumulator.
 
@@ -2129,13 +2130,22 @@ def _nemo_cen2_tracer_rhs(
     horizontal_sum = sr(delta_u + delta_v)
     r1_e1e2t = sr(1.0 / jnp.asarray(grid.area_T)[..., None])
     horizontal_scaled = sr(horizontal_sum * r1_e1e2t)
-    # Gradient-only guard: e3t is 0 on dry cells, whose 0/0 is masked later
-    # but would turn the reverse pass NaN; wet divisions are unchanged.
-    e3t_div = jnp.where(e3t_kmm == 0.0, 1.0, e3t_kmm)
-    rhs = sr(-sr(horizontal_scaled / e3t_div))
+    tmask_kmm = jnp.broadcast_to(jnp.asarray(tmask_kmm), tracer.shape)
+    active_t = tmask_kmm > 0.0
+    if _certified_nemo_storage:
+        # Certified NEMO paths retain the lane's literal inactive-storage
+        # accumulator.  Only zero thickness is replaced to keep its discarded
+        # reverse path finite; every nonzero-thickness division is unchanged.
+        e3t_div = jnp.where(e3t_kmm == 0.0, 1.0, e3t_kmm)
+        rhs = sr(-sr(horizontal_scaled / e3t_div))
+    else:
+        # Main's general helper contract follows NEMO's owned tracer-cell loop:
+        # inactive storage is exact zero and never evaluates its dry division.
+        e3t_div = jnp.where(active_t, e3t_kmm, 1.0)
+        horizontal_divergence = sr(horizontal_scaled / e3t_div)
+        rhs = sr(jnp.where(active_t, sr(-horizontal_divergence), 0.0))
 
     tracer_w_sum = sr(tracer[..., :-1] + tracer[..., 1:])
-    tmask_kmm = jnp.broadcast_to(jnp.asarray(tmask_kmm), tracer.shape)
     wmask_inner = sr(tmask_kmm[..., 1:] * tmask_kmm[..., :-1])
     flux_w_inner = sr(
         sr(sr(0.5 * p_w[..., 1:-1]) * tracer_w_sum) * wmask_inner)
@@ -2145,7 +2155,11 @@ def _nemo_cen2_tracer_rhs(
     )
     vertical_difference = sr(flux_w[..., :-1] - flux_w[..., 1:])
     vertical_scaled = sr(vertical_difference * r1_e1e2t)
-    return sr(rhs - sr(vertical_scaled / e3t_div))
+    vertical_divergence = sr(vertical_scaled / e3t_div)
+    combined = sr(rhs - vertical_divergence)
+    if _certified_nemo_storage:
+        return combined
+    return sr(jnp.where(active_t, combined, 0.0))
 
 
 def _nemo_stage_corrected_velocity(
@@ -2723,7 +2737,9 @@ def _nemo_ws_rk3_tracer_pair_step(
 
             def _cen2_content_div(tracer):
                 rhs = _nemo_cen2_tracer_rhs(
-                    tracer, p_u, p_v, p_w, h_stage, active_3d, grid)
+                    tracer, p_u, p_v, p_w, h_stage, active_3d, grid,
+                    _certified_nemo_storage=True,
+                )
                 return nemo_source_round(
                     -nemo_source_round(h_stage * rhs)), rhs
 

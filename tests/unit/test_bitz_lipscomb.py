@@ -133,7 +133,10 @@ def test_si3_column_step_reverse_mode_finite_on_open_water_and_bare_ice():
         si3_column_step_arrays,
         snow_enthalpy_from_temperature,
     )
+    from legoesm.ice.config import SI3ThermoConfig
     from legoesm.ice.constants_config import NEMO_SI3_CONSTANTS_CONFIG as c
+
+    si3 = SI3ThermoConfig()
 
     def a(*v):
         return jnp.asarray(v, dtype=jnp.float64)
@@ -160,11 +163,11 @@ def test_si3_column_step_reverse_mode_finite_on_open_water_and_bare_ice():
     def loss(qns, h):
         out = si3_column_step_arrays(state._replace(h_ice=h),
                                      forcing._replace(qns_ice=qns),
-                                     3600.0, c).exit
+                                     3600.0, c, si3=si3).exit
         return (jnp.sum(out.h_ice) + jnp.sum(out.concentration)
                 + 1e-9 * jnp.sum(out.e_ice) + 1e-9 * jnp.sum(out.e_snow))
 
-    out = si3_column_step_arrays(state, forcing, 3600.0, c).exit
+    out = si3_column_step_arrays(state, forcing, 3600.0, c, si3=si3).exit
     assert float(out.concentration[0]) == 0.0 and float(out.h_snow[1]) == 0.0
     g_q, g_h = jax.grad(loss, argnums=(0, 1))(forcing.qns_ice, state.h_ice)
     assert bool(jnp.all(jnp.isfinite(g_q))), g_q
@@ -183,4 +186,3 @@ def test_piecewise_remap_reverse_mode_finite_at_zero_thickness():
         jnp.asarray([1.5, 0.0]))
     assert bool(jnp.all(jnp.isfinite(g))), g
     assert float(g[1]) == 0.0
-
