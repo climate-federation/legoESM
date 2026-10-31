@@ -339,7 +339,7 @@ def test_manifest_timing_legacy_field_guards_and_plants_fail(
     plants = (
         (reference, {**legacy, "round": "orca2_r341"}),
         (reference, {**legacy, "status": "INCOMPLETE"}),
-        (candidate, {key: value for key, value in current.items() if key != "transcendentals"}),
+        (candidate, dict(legacy)),
     )
     for path, planted_payload in plants:
         reference.write_text(json.dumps(legacy))

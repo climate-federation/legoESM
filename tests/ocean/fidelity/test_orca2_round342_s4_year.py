@@ -705,3 +705,23 @@ def test_evaluate_month_by_month_on_day1_smoke(
     for m_pending in report["months"][1:]:
         assert m_pending["status"] == "PENDING_ACQUISITION"
         assert m_pending["verdict"] is None
+
+
+def test_callable_default_transcendentals_is_libm_and_native_plant_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def require_certified_default() -> None:
+        assert (
+            r342_driver.run_standalone_k0_driver.__kwdefaults__["transcendentals"]
+            == "libm"
+        ), "round-342 callable default must remain certified libm"
+
+    require_certified_default()
+    with monkeypatch.context() as planted:
+        planted.setitem(
+            r342_driver.run_standalone_k0_driver.__kwdefaults__,
+            "transcendentals",
+            "native",
+        )
+        with pytest.raises(AssertionError, match="must remain certified libm"):
+            require_certified_default()

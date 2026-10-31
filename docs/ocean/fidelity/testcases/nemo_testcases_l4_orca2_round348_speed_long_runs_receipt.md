@@ -79,20 +79,24 @@ million-value equality tests cover every function routed by every caller.
 - Nine round-348 comparator tests passed. Their byte-flip, signed-zero,
   area-weight, wet-mask, routing-hook, and production daily-temperature plants
   all fire, including explicit no-op-control failures.
-- Eighteen round-342 tests passed on the clean tree. The CLI reaches the native
+- Nineteen round-342 tests passed on the clean tree. The CLI reaches the native
   card override; removing its argument pass-through makes that test fail. The
   wrapper dirty-tree refusal, trailing-slash log placement, mode pass-through,
   unknown-mode refusal, shell syntax, and focused lint checks passed.
-- The round-342 driver and shell-wrapper defaults are behaviorally pinned to
-  certified `libm` at both definition sites
-  (`scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round342_s4_year_driver.py:585-588`;
+- The round-342 callable, CLI, and shell-wrapper defaults are behaviorally
+  pinned to certified `libm` at all three definition sites
+  (`scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round342_s4_year_driver.py:302-312`;
+  `scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round342_s4_year_driver.py:585-588`;
   `scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round342_s4_year_legoesm_run.sh:27`).
-  Flipping either default independently to `native` makes the pin assertion
-  fail (`tests/ocean/fidelity/test_orca2_round342_s4_year.py:265-360`).
+  Flipping each default independently to `native` makes its pin assertion fail
+  (`tests/ocean/fidelity/test_orca2_round342_s4_year.py:265-360` and
+  `tests/ocean/fidelity/test_orca2_round342_s4_year.py:710-727`).
 - The comparator's legacy-field exception remains limited to the certified
   round-342 reference with its exact status, and never applies to the candidate
   (`scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round348_transcendentals_compare.py:282-300`).
-  Wrong-round, wrong-status, and missing-candidate-mode plants all fail
+  Wrong-round, wrong-status, and candidate-side certified-round-342 plants all
+  fail; the candidate plant satisfies every legacy predicate except
+  `index == 0`, so removing only that condition makes the test fail
   (`tests/ocean/fidelity/test_orca2_round348_transcendentals.py:312-356`).
 - Direct core-wheel construction was not available in this sandbox because
   Hatchling was absent and network installation is disabled. The C source is
@@ -104,11 +108,9 @@ clean tree, including the two round-342 provenance-stamp tests.
 
 ## Acquisition disposition
 
-ACQUISITION_NEEDED. Re-run the preregistered default-flag 80-step bitwise
-identity check on this final code. The exact CPU-only, one-at-a-time commands,
-expected lines, signed-zero policy, and refusal conditions are preregistered in
-`PREREG_nemo_testcases_l4_orca2_round348_speed_long_runs.md`. No NEMO or long
-legoESM integration was run in this round.
+Acquisition A4 at `7820af6091` passed the preregistered default-flag 80-step
+bitwise identity check: 11 snapshots were bitwise exact in 459.5 seconds. No
+NEMO run is needed for this test-only follow-up.
 
 ## Review and choices
 
@@ -183,10 +185,11 @@ keep libm as the certified default; perform long acquisitions on CPU one at a
 time; do not change the existing native-vs-NEMO metric card or Decision-188
 bar. No unasked scientific choice or relaxed threshold was introduced.
 
-Both final re-reviews returned **LAND**: Claude Sonnet and Gemini Argon. The A3
-acquisition at pre-catch-up commit `a666faaef0` passed the 80-step default-flag
-comparison bitwise. Because history and tests changed afterward, acquisition A
-must be rerun at the final HEAD before landing.
+Resume-4 reviews of `7820af6091`: Claude Sonnet returned **LAND** and Gemini
+Argon returned **HOLD**. Both identified the same two test gaps: the callable
+default was unpinned, and the candidate legacy-field plant was rejected by its
+round before exercising the candidate-only index guard. This test-only
+follow-up closes both gaps; Argon re-review remains an operator landing step.
 
 ## Recorded follow-ups (unchanged in this resume)
 
@@ -200,16 +203,16 @@ them.
 
 ## Landing gates
 
-- Per-receipt citation gate final line: `"status": "PASS"`; 31 citations,
+- Per-receipt citation gate final line: `"status": "PASS"`; 33 citations,
   zero failures, zero unmapped citations, zero map-audit failures, and all nine
   self-test controls fired.
 - Round-348 named files, each in its own fresh serial CPU process:
-  - `tests/unit/test_transcendentals.py`: `69 passed in 14.97s`.
-  - `tests/unit/test_transcendentals_lazy_libm.py`: `2 passed in 1.48s`.
+  - `tests/unit/test_transcendentals.py`: `69 passed`.
+  - `tests/unit/test_transcendentals_lazy_libm.py`: `2 passed`.
   - `tests/ocean/fidelity/test_orca2_round348_transcendentals.py`:
-    `9 passed in 3.12s`.
+    `9 passed`.
   - `tests/ocean/fidelity/test_orca2_round342_s4_year.py`:
-    `18 passed in 5.92s`.
+    `19 passed`.
 - The exact eight-file ORCA2 `land.sh` list passed 157/157, with every file in
   a fresh serial process. Quoted final lines:
   - receipt-citation suite: `22 passed in 22.38s`;
@@ -239,4 +242,4 @@ them.
   - SI3 scalar-math provenance: `1 failed, 4 passed in 0.86s`; inherited
     `test_full_v2_gate_and_plants` failure `A MY_SRC is not verbatim`.
 
-No failing ratchet path is changed by the resume-3 test/receipt commits.
+No failing ratchet path is changed by the resume-4 test/receipt commits.
