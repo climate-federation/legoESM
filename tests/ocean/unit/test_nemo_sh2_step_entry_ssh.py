@@ -18,9 +18,11 @@ from legoesm.ocean.physics.vertical_mixing.config import TKEConfig
 STAGE, ENTRY = jnp.asarray([0.3]), jnp.asarray([0.1])
 
 
-def test_default_keeps_the_stage_eta_on_every_other_card():
+def test_default_preserves_mains_ws_step_entry_override_when_supplied():
     assert _nemo_sh2_eta(TKEConfig(), prognostic=True, eta_now=STAGE,
-                         eta_step_entry=ENTRY) is STAGE
+                         eta_step_entry=ENTRY) is ENTRY
+    assert _nemo_sh2_eta(TKEConfig(), prognostic=True, eta_now=STAGE,
+                         eta_step_entry=None) is STAGE
 
 
 def test_selected_flag_reads_the_whole_step_entry_eta():
