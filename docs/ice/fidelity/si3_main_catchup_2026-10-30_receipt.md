@@ -312,7 +312,7 @@ The merged gate retains both parents’ independent maps. All moved citations we
    `ponds.scheme="si3_lev"` production steps bypassed the certified pond-rain
    branch.  A serial, fresh-process run of every `tests/ice/**/test_si3_o*.py`
    and `test_nemo_si3_*.py` file collected 23 files and emitted
-   `416 passed, 1 failed, 2 deselected`; the only failure was O12
+   `367 passed, 1 failed, 2 deselected`; the only failure was O12
    `test_m6_parent_commit_vs_current_across_all_other_callers`, at response
    leaf 17 (`freshwater_flux`).  The earlier "O8–O16 30 passed" was a selected
    master-scorer run, not the requested filename-wide run, so it never
@@ -366,17 +366,17 @@ The merged gate retains both parents’ independent maps. All moved citations we
 
 | Selection | Final line |
 |---|---|
-| Every requested `test_si3_o*.py` / `test_nemo_si3_*.py` file | PENDING |
-| `test_bitz_lipscomb.py` | PENDING |
-| `test_sea_ice_precip_routing.py` | PENDING |
-| `test_si3_surface.py` | PENDING |
-| Certified O8–O16 exactness scorer | PENDING |
-| O5 slow parent/current control | PENDING |
-| O6 slow merge-parent/current control | PENDING |
-| CEN2 direct-caller wrappers | PENDING |
-| Landing battery | PENDING |
-| Receipt citation gate | PENDING |
-| Provenance SHA gate | PENDING |
+| Every requested `test_si3_o*.py` / `test_nemo_si3_*.py` file | 23/23 files; `368 passed, 2 deselected` |
+| `test_bitz_lipscomb.py` | `12 passed in 45.07s` |
+| `test_sea_ice_precip_routing.py` | `7 passed in 3.50s` |
+| `test_si3_surface.py` | `1 failed, 22 passed, 1 skipped, 1 xfailed in 40.50s`; only the reproduced lane-parent `sum_first_category` plant |
+| Certified O8–O16 exactness scorer | `30 passed in 701.95s` |
+| O5 slow parent/current control | `1 passed in 599.22s` |
+| O6 slow merge-parent/current control | `1 passed in 774.76s` |
+| CEN2 direct-caller wrappers | ORCA2 `8 passed in 1.42s`; GYRE `2 passed in 0.59s` |
+| Landing battery | 7/7 files; `172 passed` |
+| Receipt citation gate | `44 passed in 9.28s` |
+| Provenance SHA gate | `1516 passed in 21.25s` |
 
 ## Failure inventory and attribution
 
