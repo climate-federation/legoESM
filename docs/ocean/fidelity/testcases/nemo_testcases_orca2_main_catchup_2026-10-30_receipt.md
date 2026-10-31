@@ -589,4 +589,5 @@ before handoff:
 env CUDA_VISIBLE_DEVICES="" JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 PYTHONPATH=packages/core:packages/ocean:packages/atmosphere:packages/coupler:packages/ice:packages/land:packages/ml:packages/tools:src python -m pytest -q -p no:cacheprovider tests/ocean/fidelity/test_nemo_testcase_receipt_citation_gate.py
 ```
 
-Final line: `20 passed in 17.90s`.
+Final-code line: `20 passed in 17.90s`.  Clean receipt-commit repeat:
+`20 passed in 18.24s`.
