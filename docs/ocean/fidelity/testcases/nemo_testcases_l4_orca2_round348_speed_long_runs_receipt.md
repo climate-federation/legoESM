@@ -76,10 +76,10 @@ million-value equality tests cover every function routed by every caller.
 - The disassembly test requires each f32/f64 loop to call its named scalar
   symbol through the PLT and rejects vector-math calls. Its substituted-symbol
   plant fails. A separate fast-function substitution plant fails bitwise.
-- Eight round-348 comparator tests passed. Their byte-flip, signed-zero,
+- Nine round-348 comparator tests passed. Their byte-flip, signed-zero,
   area-weight, wet-mask, routing-hook, and production daily-temperature plants
   all fire, including explicit no-op-control failures.
-- Sixteen round-342 tests passed on the clean tree. The CLI reaches the native
+- Eighteen round-342 tests passed on the clean tree. The CLI reaches the native
   card override; removing its argument pass-through makes that test fail. The
   wrapper dirty-tree refusal, trailing-slash log placement, mode pass-through,
   unknown-mode refusal, shell syntax, and focused lint checks passed.
@@ -200,6 +200,43 @@ them.
 
 ## Landing gates
 
-- Final clean-checkout receipt citation gate: PENDING.
-- Final clean-checkout round-348 named suites: PENDING.
-- Final clean-checkout landing battery and ratchets: PENDING.
+- Per-receipt citation gate final line: `"status": "PASS"`; 31 citations,
+  zero failures, zero unmapped citations, zero map-audit failures, and all nine
+  self-test controls fired.
+- Round-348 named files, each in its own fresh serial CPU process:
+  - `tests/unit/test_transcendentals.py`: `69 passed in 14.97s`.
+  - `tests/unit/test_transcendentals_lazy_libm.py`: `2 passed in 1.48s`.
+  - `tests/ocean/fidelity/test_orca2_round348_transcendentals.py`:
+    `9 passed in 3.12s`.
+  - `tests/ocean/fidelity/test_orca2_round342_s4_year.py`:
+    `18 passed in 5.92s`.
+- The exact eight-file ORCA2 `land.sh` list passed 157/157, with every file in
+  a fresh serial process. Quoted final lines:
+  - receipt-citation suite: `22 passed in 22.38s`;
+  - private-import ratchet: `6 passed in 8.96s`;
+  - TKE terms: `76 passed in 45.21s`;
+  - NEMO recipe: `25 passed in 364.21s (0:06:04)`;
+  - real-freshwater closure: `16 passed in 6.74s`;
+  - stage face-mask rank: `2 passed in 554.41s (0:09:14)`;
+  - prognostic barotropic state: `8 passed in 64.02s (0:01:04)`;
+  - ORCA2 parallel receipt gate: `2 passed in 0.46s`.
+- Root and standing ratchets were also run as separate named files:
+  - inline coefficients: `376 passed in 6.12s`;
+  - dispatch hardening: `24 passed in 11.07s`;
+  - strict-validation coverage: `73 passed in 5.88s`;
+  - RK3-WS/MXL3: `12 passed, 1 warning in 118.17s (0:01:58)`;
+  - parameter specs: `1 failed, 72 passed in 4.54s`; inherited failure
+    `test_config_module_has_valid_param_spec[packages/ocean/legoesm/ocean/physics/shortwave_penetration.py]`
+    names non-float fields `rgb_chl_profile`, `scheme`, and `water_type`;
+  - hard-coded constants: `1 failed, 6254 passed, 2 skipped, 1 warning in
+    49.04s`; inherited failure while parsing round-336
+    `make_stub_records.py`, `IndentationError` at line 72;
+  - saturation reimplementation: `1 failed, 6250 passed, 2 skipped, 1 warning
+    in 48.25s`; the same inherited round-336 parse failure;
+  - worktree-stamp census: `1 failed, 11 passed in 4.28s`; inherited
+    `test_every_report_emitter_stamps_the_worktree` census of 19 older gate
+    scripts;
+  - SI3 scalar-math provenance: `1 failed, 4 passed in 0.86s`; inherited
+    `test_full_v2_gate_and_plants` failure `A MY_SRC is not verbatim`.
+
+No failing ratchet path is changed by the resume-3 test/receipt commits.
