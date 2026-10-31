@@ -94,12 +94,14 @@ def post_cutoff_changes() -> dict[Path, set[int]]:
 POST_CUTOFF_CHANGES = post_cutoff_changes()
 
 
-def inherited_merge_sha(path: Path, line_number: int, value: str) -> bool:
-    """Whether a merge re-anchor carried this SHA token from parent one.
+def inherited_parent_sha(path: Path, line_number: int, value: str) -> bool:
+    """Whether a first-parent re-anchor carried this SHA token unchanged.
 
-    Only a token on the same original line of a merge's first parent is
-    carried forward.  New tokens, copied tokens, and ordinary post-cutoff
-    commits remain subject to the normal resolution/digest checks.
+    Only a token on the same original line of the authoring commit's first
+    parent is carried forward.  This covers both combined merge resolutions
+    and ordinary citation-only re-anchor commits.  New tokens, copied tokens,
+    and tokens moved between lines remain subject to the normal
+    resolution/digest checks.
     """
     origin = POST_CUTOFF_ORIGINS.get(path, {}).get(line_number)
     if origin is None:
@@ -107,7 +109,7 @@ def inherited_merge_sha(path: Path, line_number: int, value: str) -> bool:
     commit, original_line = origin
     parents = run(
         "git", "rev-list", "--parents", "-n", "1", commit).stdout.split()
-    if len(parents) < 3:
+    if len(parents) < 2:
         return False
     relative = path.relative_to(ROOT)
     key = (commit, relative)
@@ -192,7 +194,7 @@ def validate_document(path: Path, selected: set[int] | None = None) -> list[str]
         line = lines[line_number - 1]
         for match in HEX_RE.finditer(line):
             value = match.group().lower()
-            if inherited_merge_sha(path, line_number, value):
+            if inherited_parent_sha(path, line_number, value):
                 continue
             if len(value) == 40:
                 if value in superseded:
