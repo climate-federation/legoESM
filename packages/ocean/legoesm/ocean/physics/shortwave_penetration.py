@@ -170,6 +170,11 @@ class ShortwavePenetrationConfig(NamedTuple):
     nemo_time_step_s : float or None
         Whole-step ``rDt`` used by NEMO's ``qsr_ext_lev`` initialization.
         Required by ``nemo_qsr_2bd``; absent for the generic Jerlov scheme.
+    nemo_qsr_kbb_live_stretch : bool
+        For ``nemo_qsr_2bd``, select main's live Kbb stretch in the shared
+        physics pipeline and its source-identical Jacobian at RK3 stage 3.
+        ``False`` preserves the lane-certified static pipeline and Kbb
+        thickness-quotient association.  Other schemes ignore this field.
     """
     scheme: str = "jerlov_2band"
     water_type: str = "II"
@@ -177,6 +182,7 @@ class ShortwavePenetrationConfig(NamedTuple):
     rgb_ir_extinction_m: float = 0.35   # NEMO rn_si0 [m]
     rgb_chl_profile: str = "morel_berthon"
     nemo_time_step_s: float | None = None
+    nemo_qsr_kbb_live_stretch: bool = True
 
 
 SHORTWAVE_PENETRATION_SCHEMES = (

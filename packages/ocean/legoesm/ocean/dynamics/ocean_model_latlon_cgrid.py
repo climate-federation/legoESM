@@ -9152,8 +9152,8 @@ class LatLonCGridOceanModel:
                 # is algebraically the same value, but not necessarily the
                 # same fp64 word; subtracting a separately rounded qsr field
                 # from ``tend.dT_dt`` leaves a false source in Krhs.
-                _r3t_b = compute_ocean_jacobian(
-                    state.eta.data, state.H_bathy.data, _zc)
+                _r3t_b = (compute_ocean_jacobian(state.eta.data, state.H_bathy.data, _zc) if _cfg_b.physics.shortwave_penetration.nemo_qsr_kbb_live_stretch else
+                           h_k_old[..., 0] / jnp.maximum(_h_ref_ws[..., 0], 1.0e-10))
                 # Compiled stprk3_stg.f90:215-221 forms Kmm by averaging the
                 # two already-rounded endpoint ratios.  Both the live-
                 # thickness quotient and _qt_12's ratio-of-mean SSH are the

@@ -437,7 +437,7 @@ def make_ocean_physics(
                     # add the Kmm call.  Its live entry factor makes that
                     # subtraction exact; other integrators refuse the scheme.
                     z_half_stretch=(
-                        J if sw_config.scheme == "nemo_qsr_2bd" else None
+                        J if sw_config.scheme == "nemo_qsr_2bd" and sw_config.nemo_qsr_kbb_live_stretch else None
                     ),
                 )
             dT_dt = dT_dt + sw_tend

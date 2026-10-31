@@ -923,11 +923,15 @@ def run(
     if decision189_routing != "card":
         shear_selected = decision189_routing in ("main", "shear-main")
         qsr_selected = decision189_routing in ("main", "qsr-main")
+        kbb_selected = decision189_routing in ("main", "kbb-main")
         vertical = cfg.physics.vertical_mixing
         vertical = vertical._replace(tke=vertical.tke._replace(
             nemo_sh2_step_entry_ssh=shear_selected))
+        shortwave = cfg.physics.shortwave_penetration._replace(
+            nemo_qsr_kbb_live_stretch=kbb_selected)
         cfg = cfg._replace(
-            physics=cfg.physics._replace(vertical_mixing=vertical),
+            physics=cfg.physics._replace(
+                vertical_mixing=vertical, shortwave_penetration=shortwave),
             nemo_qsr_stage3_kmm_source_association=qsr_selected,
             vmix_eos_use_config_rho0=decision189_routing == "main",
         )
@@ -2727,12 +2731,13 @@ def main(argv=None) -> int:
              "omitting this flag is the card.")
     parser.add_argument(
         "--decision189-routing",
-        choices=("card", "lane", "main", "qsr-main", "shear-main"),
+        choices=(
+            "card", "lane", "main", "kbb-main", "qsr-main", "shear-main"),
         default="card",
-        help=("controlled measurement arm: lane selects both certified "
-              "routes false; main selects both catch-up routes true; card "
-              "uses the checked-in selections; qsr-main and shear-main "
-              "isolate one catch-up route"),
+        help=("controlled measurement arm: lane selects every certified "
+              "route false; main selects every catch-up route true; card "
+              "uses the checked-in selections; kbb-main, qsr-main, and "
+              "shear-main isolate one catch-up route"),
     )
     parser.add_argument("--output", type=Path)
     parser.add_argument("--plant-state", action="store_true")
