@@ -19,12 +19,14 @@ RULE 5 smooth default (user decision 2026-10-28): the OUTER floor is
 ``10·eps + w·softplus((x − 10·eps)/w)`` with ``x = C·N/max(10·eps, a_cd a_cd)``
 and ``w = floor_width`` (default 1e-8 m²/s); ``floor_width = 0`` is AMR-Wind's
 hard ``max`` and matches the running oracle (tests/atmosphere/test_amd_oracle.py).
-KNOWN DIFFERENCES at the default: wherever ``N`` is near 0 the viscosity sits
-up to ``w·ln2 = 6.9e-9`` m²/s above the oracle's floor (exactly that at rest or
-in a pure off-diagonal 1-D shear); points with x well below the floor and
-active points are unchanged to round-off.  On the oracle fixture 3 of 6030
-points move by more than 1e-12 m²/s, at most 6.9e-9 (signed per-point gaps in
-``tests/atmosphere/oracle_fixtures/amd_default_gap.npz``).  The DENOMINATOR
+KNOWN DIFFERENCES at the default output width (this width alone): wherever
+``N`` is near 0 the viscosity sits up to ``w·ln2 = 6.9e-9`` m²/s above the
+oracle's floor (exactly that at rest or in a pure off-diagonal 1-D shear);
+points with x well below the floor and active points are unchanged to
+round-off.  On the oracle fixture 3 of 6030 points move by more than
+1e-12 m²/s, at most 6.9e-9 (re-measured 2026-10-31).  The signed per-point gaps
+at BOTH default widths are in
+``tests/atmosphere/oracle_fixtures/amd_default_gap.npz``.  The DENOMINATOR
 floor ``max(10·eps, a_cd a_cd)`` is smoothed the same way (user decision
 2026-10-31): ``10·eps + w_d·softplus((a_cd a_cd − 10·eps)/w_d)`` with
 ``w_d = denom_floor_width`` (default 10·eps = 2.22e-15 s⁻²); ``0`` = the hard
@@ -33,8 +35,7 @@ floor ``max(10·eps, a_cd a_cd)`` is smoothed the same way (user decision
 KNOWN DIFFERENCE (measured 2026-10-31 on the oracle fixture, fp64, this width
 alone): 10 of 6030 points move by more than 1e-12 m²/s, at most 3.1e-7 m²/s
 (1.5e-3 relative).  With
-both defaults 13 points move, at most 3.1e-7 m²/s; the stored signed per-point
-gap file above is at both defaults.
+both defaults 13 points move, at most 3.1e-7 m²/s (the stored file above).
 
 where ``g_k = (a_1k, a_2k, a_3k)`` is the k-th column of the gradient tensor
 (the derivative of the velocity VECTOR in direction k).  Key properties:
