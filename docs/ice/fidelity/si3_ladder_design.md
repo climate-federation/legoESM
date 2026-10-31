@@ -234,12 +234,62 @@ the later production salinity, lateral-melt and pond calls.
 | O14 | Exact-input post-remap replay. | Add **open-water growth and lead-heat melt** in `ice_thd_do`. | New-ice category choice, heat/freshwater/salt changes; 5–10 GiB. |
 | O15 | Exact-input post-open-water replay. | Add **post-thermodynamic `ice_cor(kt,2)`** as its own owner. | All corrected state, zapping/caps and conservation; 5–10 GiB. |
 | O16 | Exact-input post-aggregation view of the same production-deck record. | Add **`ice_update_flx`** and its ocean heat, freshwater, salt, cover, temperature and mass outputs. It records `snwice_mass(_b)` but, as verified above, does not claim an `ln_ice_embd` branch absent from this routine. C1 consumes this owned implementation rather than treating it as “no new physics.” | Pre/post aggregation, every returned exchange field and first ocean-format boundary; 5–10 GiB retained projection. |
-| O17 | Unmodified ORCA2_SAS_ICE, 100 x 10800 s, `nn_fsbc=1`. | Add **full-deck composition at SAS cadence**; no new operator implementation. This is the first rung that calls the full `ice_thd`, so its unconditional frazil, jpl5 remap, open-water growth and correction have already been admitted at O8/O13/O14/O15 (`ORCA2_OMIP_L4/BLD/ppsrc/nemo/icethd.f90:182-245`). | Complete call-order frames, live O7 forcing, exchange outputs and restart; 40–80 GiB. |
+| O17 | Unmodified ORCA2_SAS_ICE, 100 x 10800 s, `nn_fsbc=1`; the explicit selector card below is part of the row. | Compose **only** the admitted O1-O16 operators, in the NEMO order in section 1, through one production SI3 step entry. O7 consumes raw meteorology and computes its products live; no recorded O7 product may be injected. Keep `INDEPENDENT` (one 100-step rollout from the O17 initial state) and `GIVEN-NEMO-ENTRY` (one-step replay from each recorded NEMO entry) as separate labels and reports. This is the first rung that calls the full `ice_thd`, whose unconditional frazil, jpl5 remap, open-water growth and correction were admitted at O8/O13/O14/O15 (`ORCA2_OMIP_L4/BLD/ppsrc/nemo/icethd.f90:182-245`). No new physical operator is allowed. | Every recorded step-entry, live-forcing, named call-order, exchange-output and restart field at every one of the 100 steps. The local bar is bit identity; the continuous `INDEPENDENT` bar remains the fixed pointwise `1e-15` bar. A first normal-range non-bit row is **DEBT** and names the first owning admitted operator; no relaxed bar. The O8-O16 master plus O1-O7 records are incomplete for this record contract, and the current production dispatcher has only the O15/O16 tail, so O17 is held as recorded in the round-29 receipt. |
 | C0 | Coupled certified ORCA2 card, still replaying NEMO's post-surface exchange fields and drag. | Change **cadence only**, from SAS `nn_fsbc=1` (10,800 s) to coupled `nn_fsbc=2` (21,600 s). The producer also changes: SAS reads prescribed `sst_m/sss_m/ssu_m/ssv_m/ssh_m/e3t_m` (`src/SAS/sbcssm.F90:87-121`), whereas coupled NEMO accumulates and divides the two ocean steps (`src/OCE/SBC/sbcssm.F90:128-173`). Apply the exact-input rule: record the coupled NEMO mean fields and replay those exact fields into both ice implementations; do not compare SAS prescribed fields with live coupled means. The false `ln_ice_embd` ocean-load disposition is recorded at its first coupled consumer. | Coupled mean-field producer output, ice carry on both ocean steps, cadence gate, levitating-load flag, before/after levels and restart; 10–20 GiB. |
 | C1 | Same coupled `nn_fsbc=2` card; keep NEMO `rCdU_ice` replay. | Replace **replayed ice heat/freshwater/salt/cover fields** with live O16 `ice_update_flx`; cadence is already owned by C0. | Pre-surface, post-flux and ocean first-consumer; 20–40 GiB. |
 | C2 | Same coupled card; Decision 150 drag replay disabled. | Replace **ice stress and `tmod_io/rCdU_ice` replay** with live `ice_update_tau`. | Relative velocity, stress blend, drag and ocean top-stress first consumer every ocean step; exact local, ocean registered bars unchanged; 10–20 GiB. |
 | C3 | Same coupled card with `nn_mxlice=2` consuming live ice. | Enable **live under-ice TKE length coupling** using `fr_i` and `hm_i`. | Aggregation -> TKE first-consumer frame and short coupled trajectory; exact local owner and inherited ocean/ice bars; 10–20 GiB. |
 | C4 | Same coupled card after C0-C3 admission. | Add **full coupled composition** by removing only the C0 exact-NEMO mean-field replay; the already certified ocean card produces the two-step means live. No new operator is introduced. | Mean producer -> ice first-consumer, complete ice/ocean call order, exchange outputs and restart; inherited bars; 30–60 GiB. |
+
+### O17 explicit selector card
+
+O17 may not inherit a Python or namelist default. Its frozen oracle identity is
+`ORCA2_SAS_ICE`, one rank, steps 1--100, `rn_Dt=10800`, `nn_fsbc=1`, with CPP
+keys `key_si3 key_linssh key_vco_1d3d key_xios key_RK3`, the shipped NCAR
+CORE-II atmospheric files, and the prescribed SAS ocean fields listed in
+section 1. Dynamics and thermodynamics are both live. The legoESM card must
+write the following dispatcher/state selectors explicitly:
+
+```text
+SeaIceConfig(
+  dynamics="none", transport="none",        # SI3 O17 owns both; no second generic step
+  thermo_scheme="si3_orca2_o17",            # required production composition entry
+  n_categories=5, bulk_scheme="nemo_si3_constant",
+  ice_constants=NEMO_SI3_CONSTANTS_CONFIG,
+  core2_precipitation_closure=False,         # NEMO-comparison path (Decision 190)
+  si3_orca2=SI3ORCA2StateConfig(
+    jpl=5, nlay_i=10, nlay_s=5,
+    nn_icesal=4, rn_icesal=4.0, rn_sal_gd=5.0, rn_sal_fl=2.0,
+    rn_simax=35.0, rn_simin=0.1, rn_sinew=0.75,
+    rn_himean=2.0, rn_himax=99.0, opt_hips=0,
+    ln_pnd=True, ln_pnd_LEV=True, ln_pnd_TOPO=False,
+    ln_pnd_lids=True, ln_pnd_alb=True,
+    rn_apnd_min=0.15, rn_apnd_max=0.80,
+    rn_pnd_hl_min=0.005, rn_pnd_hl_max=0.015,
+    nn_snwfra=2, ln_icedyn=True, ln_icethd=True,
+    ln_dynadv_pra=True, ln_mppdelay=True,
+    nn_fsbc=1, rDt_ice=10800.0, nn_hls=2, ln_cpl=False,
+    ice_constants=NEMO_SI3_CONSTANTS_CONFIG,
+  ),
+)
+```
+
+The physical selector map is also explicit: `dynALL=True`,
+`dynRHGADV=False`, `dynADV1D=False`, `dynADV2D=False`, `rn_ishlat=2`,
+landfast off; H79 strength and smoothing, EVP+aEVP with 100 subcycles, Prather,
+linear redistribution, exponential participation, ridging and rafting are on;
+R75/constant strength, EAP/VP and UMx are off. BL99/P07, thickness and lateral
+melt, open-water and lead-heat growth/melt, drainage and flushing under
+salinity scheme 4, and level ponds with rain, lids and pond albedo are on;
+U64, frazil collection, topographic/constant ponds, embedded ice, convergence
+diagnostics and online conservation are off. Every coefficient is the value in
+the resolved table in section 1; the card is invalid if a selector is omitted
+and obtained from a library default.
+
+This selector card is a design contract, not an implemented option at the
+current tip. In particular, `thermo_scheme="si3_orca2_o17"` does not yet exist;
+it names the missing production composition entry rather than authorizing a
+new physical operator.
 
 Rungs D1-D5 reuse the existing lane-3 cards and immutable records rather than
 reacquire them unless admission proves the record lacks the discriminating
@@ -335,11 +385,30 @@ for the 100 aEVP subcycles and retain only ten chunk-boundary carries; use
 nested rematerialised scans for the 50 drainage x 5 flushing bounds; and use a
 fixed maximum masked scan for repeated ridging/rafting, retaining only its
 outer carry. BL99's tridiagonal solve uses a custom/implicit transpose rather
-than taping every Picard temporary. Before training admission, compile
-`value_and_grad` for one O17/C4 ice step and a representative multi-step
-segment on the target accelerator, publish peak device memory and recompute
-factor, and compare them with a preregistered device budget. The acceptance
-plant disables rematerialisation and must increase the measured peak.
+than taping every Picard temporary.
+
+**O17/C4 one-step differentiability gate.** At O17, before any multi-step or
+accelerator claim, compile `jax.value_and_grad` on CPU with binary64 enabled for
+exactly one call to the same production SI3 step entry used by the forward
+score. The scalar test objective is the unweighted sum of every floating
+prognostic and exchange-output leaf; it is an AD reachability instrument, not
+a physical loss and creates no fidelity bar. Differentiate with respect to
+every floating leaf of the step-entry state and live forcing pytrees, then
+publish, for each input leaf, shape, dtype, finite count, NaN count, Inf count,
+and nonzero count. Integer and Boolean schedule/routing leaves are static and
+must be listed as literal non-differentiable inputs rather than silently
+dropped. The compiled primal output must be bit-for-bit identical to the
+ordinary O17 step for every floating leaf, including signed zero. A planted
+`stop_gradient` on a known-active floating input must change that leaf's
+nonzero count or the control fails. The same gate applies at C4 with the live
+two-step ocean-mean producer prepended. Peak GPU memory, rematerialisation
+factor, a multi-step segment and an accelerator budget are a later training
+item, not part of the O17 design round.
+
+Round 29 could not execute this gate: the current production SI3 dispatcher
+accepts only the typed O15/O16 finalization continuation and refuses its
+earlier O2 forcing path; no callable composes O4--O16 plus live O7. Reporting
+gradients of the tail alone would mix a different program into the O17 label.
 
 **Denormals are platform-specific.** D5's CPU result cannot be inherited by a
 GPU training run. Every admitted CPU and accelerator tuple runs the smallest-

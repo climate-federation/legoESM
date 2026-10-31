@@ -13410,6 +13410,112 @@ _reanchor(
     'packages/ice/legoesm/ice/bitz_lipscomb.py:2113-2115',
 )
 
+# --- SI3 round 29 (O17 design and retained-record completeness audit) ---
+# Historical receipts retain their printed citation strings; only the resolved
+# live lines move after the new O17 sections.  A ``lines`` pin audits the new
+# location without making those old receipt citations unmapped.
+CITATION_MAP['docs/ice/fidelity/si3_ladder_design.md:344-350'] = {
+    'anchors': CITATION_MAP['docs/ice/fidelity/si3_ladder_design.md:344-350'],
+    'lines': '413-419',
+}
+CITATION_MAP['docs/ice/fidelity/si3_ladder_design.md:354-365'] = {
+    'anchors': CITATION_MAP['docs/ice/fidelity/si3_ladder_design.md:354-365'],
+    'lines': '423-434',
+}
+FILES.update({
+    'docs/ice/fidelity/si3_r29_o17_design_receipt.md':
+        REPO / 'docs/ice/fidelity/si3_r29_o17_design_receipt.md',
+    'docs/ice/fidelity/si3_r18_o8_o16_master_preregister.md':
+        REPO / 'docs/ice/fidelity/si3_r18_o8_o16_master_preregister.md',
+})
+CITATION_MAP.update({
+    'cfgs/ORCA2_SAS_ICE/EXPREF/namelist_cfg:21-28': [
+        '   nn_it000    =       1   !  first time step',
+        '   rn_Dt       = 10800.     !  time step for the dynamics and tracer',
+        8,
+    ],
+    'cfgs/ORCA2_SAS_ICE/EXPREF/namelist_cfg:59-61': [
+        '&namsbc        !   Surface Boundary Condition (surface module)',
+        '   nn_fsbc     = 1         !  frequency of SBC module call',
+        3,
+    ],
+    'docs/ice/fidelity/si3_r18_o8_o16_master_preregister.md:3-24': [
+        '## Claim and run',
+        'five categories. Picard final state is recorded only at steps 1, 2 and 100.',
+        22,
+    ],
+    'docs/ice/fidelity/si3_r25_o4_score_receipt.md:3-6,19-29': [
+        'Date: 2026-10-29. Verdict: **PASS_O4_EXACT**. The landed five-category O4',
+        'production JIT fp64/x64. Wet seam and north-fold regions are exact separately.',
+        '## Acquisition and admission',
+        'dynamics and thermodynamics off.',
+        15,
+    ],
+    'docs/ice/fidelity/si3_r12_o5_acquisition_receipt.md:3-14,26-34': [
+        '## Outcome',
+        "`&namrun`, matching NEMO 5.0.2's group ownership and the admitted O1/O2 decks.",
+        '| staged group | NEMO 5.0.2 reference ownership | admitted O1/O2 | failed O5 | fixed O5 |',
+        '| ice `namdyn_rdgrft` | `ln_ridging`, `ln_rafting` belong | no overrides | both false | unchanged |',
+        21,
+    ],
+    'docs/ice/fidelity/si3_r14_o6_receipt.md:252-255': [
+        '## CONFIRMED vs PLAUSIBLE',
+        "- PLAUSIBLE: bit-exactness against NEMO's ORCA2 record (no record yet, P1-P6).",
+        4,
+    ],
+    'docs/ice/fidelity/si3_r13_o7_admission_receipt.md:3-11,64-90': [
+        '## Outcome',
+        'files are byte-identical.',
+        '## Full O7 score',
+        'five-number row for every leaf.',
+        36,
+    ],
+    'docs/ice/fidelity/si3_r18_o8_o16_master_preregister.md:15-24,40-58': [
+        '## Registered boundaries and projections',
+        'five categories. Picard final state is recorded only at steps 1, 2 and 100.',
+        '## Frozen acquisition predictions',
+        'is authorized until the retained record exists and the respective scorer runs.',
+        29,
+    ],
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o16_master_gate.py:93-100,136-238': [
+        'STATE_I3 = _fields(',
+        'STATE = STATE_I3 + STATE_II4 + STATE_IS4',
+        'KINDS: dict[int, Kind] = {',
+        '    "O16": (18, 15, 16, 19, 20),',
+        111,
+    ],
+    'docs/ice/fidelity/si3_r21_o8_o12_score_receipt.md:3-13': [
+        '- **Date**: 2026-10-27',
+        ('- **independent review: operator**', 1),
+        11,
+    ],
+    'docs/ice/fidelity/si3_r22_o13_receipt.md:3-8': [
+        '- **Date:** 2026-10-28',
+        '- **independent review: operator (Codex)**',
+        6,
+    ],
+    'docs/ice/fidelity/si3_r23_o14_score_receipt.md:3-15': [
+        'Date: 2026-10-28. Parent: `87a1c8843803`. Scope: O14 only. Preregistration:',
+        'independent review: operator (Claude)',
+        13,
+    ],
+    'docs/ice/fidelity/si3_r24_o15_o16_receipt.md:3-19': [
+        'Date: 2026-10-28',
+        'is 0 ULP.',
+        17,
+    ],
+    'packages/ice/legoesm/ice/config.py:524-529': [
+        "    # Optional ORCA2 5-category 10+5-layer SI3 state configuration (`thermo_scheme='si3_orca2_o1'`).",
+        '    core2_precipitation_closure: bool = True',
+        6,
+    ],
+    'packages/ice/legoesm/ice/si3_orca2_state.py:92-131': [
+        'class SI3ORCA2StateConfig(NamedTuple):',
+        ('    ice_constants: IceConstantsConfig = NEMO_SI3_CONSTANTS_CONFIG', 1),
+        40,
+    ],
+})
+
 UNAUDITED_ROUNDS = ("1-24 -- hand-checked only; their citations are not in "
                     "CITATION_MAP and this gate does not read them")
 
