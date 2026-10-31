@@ -54,7 +54,7 @@ pair, or manual resolution to record. Every replayed diff was accepted by Git
 without a content conflict. The post-rebase citation audit identified only the
 line shift introduced later by the new `argparse` import and tests; the two
 affected receipt citations and their `CITATION_MAP` keys were re-anchored from
-`:34-38` to `:35-39` and from `:179-349` to `:180-448`.
+lines 34–38 to 35–39 and from lines 179–349 to 180–448.
 
 ## MODEL-CODE CHECKLIST M6
 
