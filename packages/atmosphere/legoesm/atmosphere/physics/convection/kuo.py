@@ -541,11 +541,12 @@ def kuo_convection(
     # into the sigmoid so the gate is ~1 across the convergent column
     # wherever ptenq is well above ``ptenq_sign_floor``, not 0.5 at the
     # cloud top.
-    # ``ptenq_sign_floor`` is the gate's transition width (default 3e-10
-    # kg/kg/s; 1e-30 with icond_sharpness 1e12 = the oracle).  Written
-    # as ``z / (|z| + 1)`` with ``z = ptenq / floor`` (same value): the
-    # derivative never forms ``(|ptenq| + 1e-30)**2``, which underflows to 0
-    # in fp32 and made the fp32 gradient w.r.t. ptenq NaN at ptenq = 0.
+    # ``ptenq_sign_floor`` sets the gate's transition width with the
+    # sharpness (default 3e-10 kg/kg/s; 1e-30 with icond_sharpness 1e12 =
+    # the oracle).  Written as ``z / (|z| + 1)`` with ``z = ptenq / floor``
+    # (same value): the derivative never forms ``(|ptenq| + floor)**2``,
+    # which at floor 1e-30 underflows to 0 in fp32 and made the fp32
+    # gradient w.r.t. ptenq NaN at ptenq = 0.
     pq_z = ptenq / config.ptenq_sign_floor
     pq_sign = pq_z / (jnp.abs(pq_z) + 1.0)
     pq_gate = smooth_step(pq_sign, config.icond_sharpness)

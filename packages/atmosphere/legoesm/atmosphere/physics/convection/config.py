@@ -599,8 +599,10 @@ class KuoConfig(NamedTuple):
         before the sigmoid; the gates tend to the oracle's hard ``if``
         switches as the sharpness goes to infinity (1e12, with
         ``ptenq_sign_floor = 1e-30``, reproduces the oracle to round-off on
-        the fixture; an argument of exactly 0 gives 0.5).  The ``ptenq > 0`` sign gate's width is ``ptenq_sign_floor``,
-        not this sharpness.  The same sharpness smooths the two ``max(x, 0)``
+        the fixture; an argument of exactly 0 gives 0.5).  The ``ptenq > 0``
+        sign gate's transition width is set by ``ptenq_sign_floor`` together
+        with this sharpness (the sigmoid is applied to the bounded sign
+        ``ptenq / (|ptenq| + ptenq_sign_floor)``).  The same sharpness smooths the two ``max(x, 0)``
         cut-offs (parcel excess over saturation, on ``supersat_scale``;
         positive convergence in ``cvgu``, on ``ptenq_scale``).
     buoyancy_scale_K : float

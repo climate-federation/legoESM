@@ -237,8 +237,7 @@ def test_check_grads_at_default_sharpness(fx):
             jnp.asarray(fx[f"{g}_{k}"], jnp.float64)
             for k in ("T", "q", "p_full", "p_half", "w", "ptenq")
         )
-        if g == "g32":
-            w = jnp.full_like(w, G32_W_LCL_CHECK_MS)
+        w_chk = jnp.full_like(w, G32_W_LCL_CHECK_MS) if g == "g32" else w
 
         def loss(T, q, w, pq):
             o = kuo_convection(T, q, pf, ph, 900.0, KuoConfig(), pq, w)
@@ -247,7 +246,7 @@ def test_check_grads_at_default_sharpness(fx):
         cases = [
             ("T", jax.jit(lambda T: loss(T, q0, w, pq0)), T0, 1e-6),
             ("q_v", jax.jit(lambda q: loss(T0, q, w, pq0)), q0, 1e-9),
-            ("w", jax.jit(lambda ww: loss(T0, q0, ww, pq0)), w, 1e-7),
+            ("w", jax.jit(lambda ww: loss(T0, q0, ww, pq0)), w_chk, 1e-7),
         ]
         if g == "g32":
             cases.append(("ptenq", jax.jit(lambda p: loss(T0, q0, w, p)), pq0, 1e-15))
