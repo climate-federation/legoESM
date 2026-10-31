@@ -1559,6 +1559,15 @@ class PhysicsPipeline:
                     moisture_convergence=mc_col,
                     **_extra_conv,
                 )
+            elif self._conv_scheme == "emanuel":
+                # Emanuel: CONVECT FU/FV (read only with enable_cmt).
+                conv_out, conv_prog_out = self.convection_fn(
+                    T=T_col, q_v=q_v_col,
+                    p_full=p_full_col, p_half=p_half_col,
+                    conv_prog_profile=conv_prog,
+                    dt=dt, config=_conv_cfg,
+                    u=u_conv_col, v=v_conv_col,
+                )
             elif _ctr.is_cmt_capable:
                 if _ctr.is_mc_consumer:
                     # Tiedtke: CMT winds + moisture convergence.
@@ -1601,7 +1610,8 @@ class PhysicsPipeline:
                     dt=dt, config=_conv_cfg,
                 )
             else:
-                # Emanuel: plain profile carry.
+                # Plain profile carry (no current scheme: Emanuel has its own
+                # branch above since #2266).
                 conv_out, conv_prog_out = self.convection_fn(
                     T=T_col, q_v=q_v_col,
                     p_full=p_full_col, p_half=p_half_col,

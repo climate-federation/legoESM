@@ -17,9 +17,12 @@ RULE 5 field, 1e3/1e12 for the five older sigmoid fields).  Error metric: the
 tier-1 oracle tests' field-normalised ``max|ours - oracle| / max|oracle|``
 over all columns of a group.
 
+Convective momentum transport (#2266, ``enable_cmt``): FU/FV against the
+oracle's FU/FV (stored in the fixture since #2266) at the same tolerance.
+
 RULE 5 gap at the default smoothing: pinned PER COLUMN in
 ``oracle_fixtures/emanuel_convect43c_default_gaps.json`` (per group, per
-output FT / FQ / CBMF; per column ``max_k|ours - oracle| / max_k|oracle|``,
+output FT / FQ / CBMF / FU / FV, FU/FV with ``enable_cmt``; per column ``max_k|ours - oracle| / max_k|oracle|``,
 absolute where the oracle column is all zero), asserted to 1e-6 relative with
 a 1e-12 absolute floor.  Regenerate (only with a change to a smooth form or a
 default sharpness, stating why) with
@@ -85,15 +88,18 @@ def fx():
     return _load()
 
 
-def _cfg(v, hard=True):
-    cfg = EmanuelConfig(enable_unsaturated_downdraft=(v == "dd"))
+def _cfg(v, hard=True, cmt=False):
+    cfg = EmanuelConfig(enable_unsaturated_downdraft=(v == "dd"), enable_cmt=cmt)
     return cfg._replace(**HARD) if hard else cfg
 
 
 def _run(fx, v, cb, cfg, dtype=jnp.float64, fn=emanuel_convection):
     T, q, pf, ph = (jnp.asarray(fx[k], dtype) for k in ("T", "q", "p_full", "p_half"))
     prog = jnp.zeros_like(T).at[:, -1].set(fx["meta"]["cbmf_in"][cb])
-    return fn(T, q, pf, ph, prog, float(fx["meta"]["dt"]), cfg)
+    if not cfg.enable_cmt:
+        return fn(T, q, pf, ph, prog, float(fx["meta"]["dt"]), cfg)
+    u, v_ = (jnp.asarray(fx[k], dtype) for k in ("u", "v"))
+    return fn(T, q, pf, ph, prog, float(fx["meta"]["dt"]), cfg, u, v_)
 
 
 def _err(a, b):
@@ -151,6 +157,76 @@ def test_matches_convect43c_oracle_at_hard_limit(fx, v, cb):
     assert max(errs.values()) <= TOL, errs
 
 
+@pytest.mark.parametrize("v,cb", GROUPS)
+def test_momentum_transport_matches_convect43c_oracle_at_hard_limit(fx, v, cb):
+    out, _ = _run(fx, v, cb, _cfg(v, cmt=True))
+    p = f"{v}_{cb}"
+    assert np.max(np.abs(fx[f"{p}_FU"])) > 0.0 and np.max(np.abs(fx[f"{p}_FV"])) > 0.0
+    errs = {"FU": _err(out.du_dt_conv, fx[f"{p}_FU"]),
+            "FV": _err(out.dv_dt_conv, fx[f"{p}_FV"])}
+    print(f"Emanuel {p} vs convect43c, hard limit, max rel err", errs)
+    assert max(errs.values()) <= TOL, errs
+
+
+@pytest.mark.parametrize("hard", (True, False))
+@pytest.mark.parametrize("v,cb", GROUPS)
+def test_column_momentum_conserved(fx, v, cb, hard):
+    """sum(FU dp) = sum(FV dp) = 0 per column (the oracle's UAV pass), at the
+    hard limit and at the default smoothing; relative to sum |FU| dp."""
+    out, _ = _run(fx, v, cb, _cfg(v, hard=hard, cmt=True))
+    dp = np.diff(fx["p_half"], axis=1)
+    for f in (np.asarray(out.du_dt_conv), np.asarray(out.dv_dt_conv)):
+        scale = np.max(np.sum(np.abs(f) * dp, axis=1))
+        assert scale > 0.0
+        resid = np.max(np.abs(np.sum(f * dp, axis=1)))
+        print(f"{v}_{cb} hard={hard}: column momentum residual / scale = {resid / scale:.3e}")
+        assert resid <= TOL * scale
+
+
+def test_cmt_switch_and_cu_coefficient(fx):
+    """enable_cmt=False: no momentum tendency (winds ignored); True without
+    winds raises; FU, FV scale as (1 - CU)."""
+    T, q, pf, ph = (jnp.asarray(fx[k]) for k in ("T", "q", "p_full", "p_half"))
+    u, v_ = jnp.asarray(fx["u"]), jnp.asarray(fx["v"])
+    prog = jnp.zeros_like(T).at[:, -1].set(0.01)
+    off, _ = emanuel_convection(T, q, pf, ph, prog, 1800.0, EmanuelConfig(), u, v_)
+    assert off.du_dt_conv is None and off.dv_dt_conv is None
+    with pytest.raises(ValueError, match="enable_cmt"):
+        emanuel_convection(T, q, pf, ph, prog, 1800.0, EmanuelConfig(enable_cmt=True))
+    on = EmanuelConfig(enable_cmt=True)
+    a, _ = emanuel_convection(T, q, pf, ph, prog, 1800.0, on, u, v_)
+    b, _ = emanuel_convection(T, q, pf, ph, prog, 1800.0, on._replace(cu_coefficient=0.0), u, v_)
+    assert np.max(np.abs(np.asarray(a.du_dt_conv))) > 0.0
+    for x, y in ((a.du_dt_conv, b.du_dt_conv), (a.dv_dt_conv, b.dv_dt_conv)):
+        np.testing.assert_allclose(np.asarray(x), (1.0 - on.cu_coefficient) * np.asarray(y),
+                                   rtol=1e-12, atol=1e-25)
+    np.testing.assert_array_equal(np.asarray(a.dT_dt), np.asarray(off.dT_dt))
+
+
+@pytest.mark.parametrize("v", ("nodd", "dd"))
+def test_momentum_check_grads_at_default_sharpness(fx, v):
+    """RULE 5 gradient test for FU/FV at the default smoothing: check_grads
+    (fp64, order 1, rev) w.r.t. u, v and T on every fixture column, carried
+    CBMF 0.01.  Level-weighted loss: the column sums of FU dp are 0."""
+    from jax.test_util import check_grads
+
+    T0, q0, pf, ph, u0, v0 = (jnp.asarray(fx[k], jnp.float64)
+                              for k in ("T", "q", "p_full", "p_half", "u", "v"))
+    prog = jnp.zeros_like(T0).at[:, -1].set(0.01)
+    cfg = _cfg(v, hard=False, cmt=True)
+    w = jnp.linspace(1.0, 2.0, T0.shape[1])
+
+    def loss(T, u, v_):
+        o, _ = emanuel_convection(T, q0, pf, ph, prog, 1800.0, cfg, u, v_)
+        return 1.0e4 * jnp.sum(w * (o.du_dt_conv + o.dv_dt_conv))
+
+    for name, f, x in (("u", jax.jit(lambda u: loss(T0, u, v0)), u0),
+                       ("v", jax.jit(lambda v_: loss(T0, u0, v_)), v0),
+                       ("T", jax.jit(lambda T: loss(T, u0, v0)), T0)):
+        assert float(jnp.max(jnp.abs(jax.grad(f)(x)))) > 0.0, (v, name)
+        check_grads(f, (x,), order=1, modes=("rev",), eps=CHECK_GRADS_EPS["T"])
+
+
 def _per_case(a, b):
     """Per column: max_k|a - b| / max_k|b|, absolute where b's column is 0."""
     a = np.asarray(a, np.float64).reshape(len(b), -1)
@@ -163,12 +239,14 @@ def _per_case(a, b):
 def _default_gaps(fx):
     gaps = {}
     for v, cb in GROUPS:
-        out, prog = _run(fx, v, cb, _cfg(v, hard=False))
+        out, prog = _run(fx, v, cb, _cfg(v, hard=False, cmt=True))
         p = f"{v}_{cb}"
         for name, ours, ora in (
             ("FT", out.dT_dt, fx[f"{p}_FT"]),
             ("FQ", out.dq_v_dt, fx[f"{p}_FQ"]),
             ("CBMF", prog[:, -1], fx[f"{p}_cbmf"]),
+            ("FU", out.du_dt_conv, fx[f"{p}_FU"]),
+            ("FV", out.dv_dt_conv, fx[f"{p}_FV"]),
         ):
             gaps[f"{p}/{name}"] = _per_case(ours, ora).tolist()
     return gaps

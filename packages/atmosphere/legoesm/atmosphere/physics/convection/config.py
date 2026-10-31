@@ -157,7 +157,6 @@ __param_spec__ = {
             "cape_threshold": "diagnostic only: threshold of the convective_mask CAPE indicator; CONVECT has no CAPE gate (no tendency effect)",
             "denom_floor": "numerics: SIJ denominator magnitude floor (oracle ABS(DENOM)<0.01)",
             "epsilon_0": "RETIRED: field of the former Emanuel surrogate, no CONVECT v4.3c counterpart; non-default values raise",
-            "cu_coefficient": "RETIRED: field of the former Emanuel surrogate, no CONVECT v4.3c counterpart; non-default values raise",
             "delta_0": "RETIRED: field of the former Emanuel surrogate, no CONVECT v4.3c counterpart; non-default values raise",
             "mse_min_search_offset": "RETIRED: field of the former Emanuel surrogate, no CONVECT v4.3c counterpart; non-default values raise",
             "parcel_perturb_T": "RETIRED: field of the former Emanuel surrogate, no CONVECT v4.3c counterpart; non-default values raise",
@@ -200,6 +199,7 @@ __param_spec__ = {
         },
         "params": {
             "alpha_closure": {"units": "1", "bounds": (0.05, 0.6), "tunable_tier": 1, "transform": "sigmoid", "category": "cape_closure", "reference": "Emanuel (1991) CONVECT v4.3c ALPHA", "shape": None},
+            "cu_coefficient": {"units": "1", "bounds": (0.0, 1.0), "tunable_tier": 2, "transform": "sigmoid", "category": "mixing", "reference": "CONVECT v4.3c CU, convective momentum transport pressure-gradient factor (convect43c.f:198); read only with enable_cmt", "shape": None},
             "c_l_emanuel": {"units": "J/kg/K", "bounds": (2000.0, 4500.0), "tunable_tier": 3, "transform": "sigmoid", "category": "mixing", "reference": "Emanuel (1991) CONVECT v4.3c CL", "shape": None},
             "damp_coefficient": {"units": "1", "bounds": (0.0, 0.3), "tunable_tier": 2, "transform": "sigmoid", "category": "cape_closure", "reference": "Emanuel (1991) CONVECT v4.3c DAMP", "shape": None},
             "downdraft_sigd": {"units": "1", "bounds": (0.01, 0.3), "tunable_tier": 1, "transform": "sigmoid", "category": "downdraft", "reference": "CONVECT v4.3c SIGD, fractional area of the unsaturated downdraft (convect43c.f:192)", "shape": None},
@@ -1019,9 +1019,10 @@ class EmanuelConfig(NamedTuple):
     ``downdraft_*`` fields, DTMAX ``dtmax``, ALPHA ``alpha_closure``, DAMP
     ``damp_coefficient``, CL ``c_l_emanuel``, EPMAX
     ``precip_efficiency_max``, the 0.9 entrainment-band edge
-    ``sij_upper_gate``, the 0.01 denominator floor ``denom_floor``.  CU and
-    BETA (momentum transport, downdraught velocity scale) are not used: the
-    port returns no momentum tendency and no WD/TPRIME/QPRIME.
+    ``sij_upper_gate``, the 0.01 denominator floor ``denom_floor``, CU
+    (momentum-transport pressure-gradient factor) ``cu_coefficient``, read
+    only when ``enable_cmt`` selects CONVECT's FU/FV.  BETA (downdraught
+    velocity scale) is not used: the port returns no WD/TPRIME/QPRIME.
 
     The ``*_sharpness`` / ``*_width`` / ``*_transition_K`` fields smooth oracle
     switches for differentiability; their hard limit is the oracle.
@@ -1031,7 +1032,7 @@ class EmanuelConfig(NamedTuple):
 
     RETIRED (fields of the former single-sigmoid surrogate, kept so existing
     configs load; any non-default value raises): ``n_mixing_fractions``,
-    ``cu_coefficient``, ``precip_efficiency_water``, ``precip_efficiency_lcl``,
+    ``precip_efficiency_water``, ``precip_efficiency_lcl``,
     ``parcel_perturb_T``, ``parcel_perturb_q``, ``smooth_trigger_sharpness``,
     ``epsilon_0``, ``delta_0``, ``mse_min_search_offset``,
     ``M_b_max`` and ``cbmf_carry_max`` (the two mass-flux caps, no oracle
@@ -1196,6 +1197,11 @@ class EmanuelConfig(NamedTuple):
     downdraft_dhdp_sharpness: float = 10.0
     downdraft_mp_sharpness: float = 1.0e4
     downdraft_taper_band_sharpness: float = 1.0e-2
+    # Convective momentum transport, CONVECT's FU/FV (convect43c.f l.850-983,
+    # CU = ``cu_coefficient``); needs the winds.  Default False keeps the
+    # pre-#2266 behaviour (no momentum tendency): PENDING USER DECISION
+    # (#2266, RULE 3) whether it moves to True.
+    enable_cmt: bool = False
     # NOTE: Emanuel deliberately has NO ``subsidence_solve`` selector, unlike
     # the rest of the mass-flux family.  Its SHIPPED path
     # (``use_genuine_mixing=True``) is a buoyancy-sorting MIXING MATRIX that

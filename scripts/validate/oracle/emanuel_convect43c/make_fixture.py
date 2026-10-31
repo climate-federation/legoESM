@@ -17,6 +17,11 @@ Columns: the 15 columns of the 2026-10-19 tier-2 audit (tier-1 ZM columns: 3
 real MPAS AMIP day-1 L32 checkpoint columns + 12 constructed soundings on the
 CAM6 L32 grid).
 
+Stored per group: FT, FQ and (since #2266) FU, FV, plus the scalars.
+``--columns`` may be the previous fixture (it holds the column inputs); #2266
+regenerated from it, the audit ``columns.npz`` being lost, and every array
+the earlier fixture held came back bit-identical.
+
 Usage (CPU node; gfortran 8.5.0)::
 
     bash scripts/validate/oracle/emanuel_convect43c/build.sh <convect43c.f> <build dir>
@@ -93,7 +98,8 @@ def read_output(path):
         col.update(cbmf=sc[0], precip=sc[1], frac=sc[8])
         prof = np.array([[float(x) for x in toks[pos + k].split()] for k in range(nd)])
         pos += nd
-        col.update(FT=prof[:, 0], FQ=prof[:, 1], M=prof[:, 8], MP=prof[:, 17])
+        col.update(FT=prof[:, 0], FQ=prof[:, 1], FU=prof[:, 2], FV=prof[:, 3], M=prof[:, 8],
+                   MP=prof[:, 17])
         mats = []
         for _m in range(4):  # MENT, QENT, ELIJ, SIJ
             mats.append(np.array([[float(x) for x in toks[pos + k].split()] for k in range(nd)]))
@@ -137,7 +143,7 @@ def main():
                 )
                 cols = read_output(fout)
                 p = f"{v}_{tag}"
-                for k in ("FT", "FQ"):  # stored surface-LAST
+                for k in ("FT", "FQ", "FU", "FV"):  # stored surface-LAST
                     out[f"{p}_{k}"] = np.stack([col[k][::-1] for col in cols])
                 for k in ("cbmf", "precip", "frac", "iflag", "nk", "icb", "inb", "inb1"):
                     out[f"{p}_{k}"] = np.array([col[k] for col in cols])
