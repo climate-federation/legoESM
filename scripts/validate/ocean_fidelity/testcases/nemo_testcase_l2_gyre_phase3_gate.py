@@ -894,8 +894,8 @@ def run(
         "stage2_term_only must be none, hpg, vorticity, advection, or None",
     )
     require(decision189_routing in (
-        "card", "lane", "main", "qsr-main", "shear-main"),
-        "decision189_routing must be card, lane, main, qsr-main, or shear-main")
+        "card", "lane", "main", "kbb-main", "qsr-main", "shear-main"),
+        "decision189_routing must be card, lane, main, kbb-main, qsr-main, or shear-main")
 
     def host_result_and_release_compilation(value):
         """Materialize one diagnostic executable, then release its JIT cache.
