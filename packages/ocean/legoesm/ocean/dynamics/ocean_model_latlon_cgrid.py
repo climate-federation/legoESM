@@ -12747,6 +12747,8 @@ class LatLonCGridOceanModel:
                     _phys_cfg.vertical_mixing.iwm,
                     eos_fn=_mk_eos(eos=_cfg_b.eos,
                                    eos_linear=_cfg_b.eos_linear,
+                                   eos_nemo_seos=getattr(
+                                       _cfg_b, "eos_nemo_seos", None),
                                    **({"rho0": _cfg_b.rho_0}
                                       if _cfg_b.eos_depth == "geometric"
                                       else {})),
@@ -13147,6 +13149,8 @@ class LatLonCGridOceanModel:
                     state, _zc, _cfg_b.physics, _ddm_cfg,
                     eos_fn=_mk_eos_ddm(eos=_cfg_b.eos,
                                        eos_linear=_cfg_b.eos_linear,
+                                       eos_nemo_seos=getattr(
+                                           _cfg_b, "eos_nemo_seos", None),
                                        **({"rho0": _cfg_b.rho_0}
                                           if _cfg_b.eos_depth == "geometric"
                                           else {})),

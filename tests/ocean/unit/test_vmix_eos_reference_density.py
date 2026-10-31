@@ -160,3 +160,64 @@ def test_iwm_and_ddm_eos_reference_density(monkeypatch, eos_depth):
     want = _expected(eos_depth)
     np.testing.assert_allclose(_rho(seen["iwm"]), want, rtol=_RTOL, atol=0)
     np.testing.assert_allclose(_rho(seen["ddm"]), want, rtol=_RTOL, atol=0)
+
+
+def test_iwm_and_ddm_eos_nemo_seos_coefficients(monkeypatch):
+    """The internal-wave add-on and double diffusion build their EOS from the
+    run's NEMO simplified-EOS coefficients, not the DINO defaults (#2243)."""
+    from legoesm.grids.latlon import create_latlon_grid
+    from legoesm.ocean.dynamics import ocean_model_latlon_cgrid as mod
+    from legoesm.ocean.eos import NemoSEOSConfig, make_eos_fn
+    from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean
+    from legoesm.ocean.physics.vertical_mixing import k_profiles
+    from legoesm.ocean.physics.vertical_mixing.config import (
+        VerticalMixingConfig,
+    )
+    from legoesm.ocean.physics.vertical_mixing.double_diffusion import (
+        DoubleDiffusionConfig,
+    )
+    from legoesm.ocean.physics.vertical_mixing.internal_wave_mixing import (
+        IWMConfig,
+    )
+    from legoesm.ocean.state import LatLonCGridOceanConfig
+    from legoesm.ocean.vertical import create_ocean_z_star
+    seos = NemoSEOSConfig()._replace(a0=0.2, b0=0.8, nu=0.002)
+    t, s = _T + 5.0, _S - 1.0       # off (T0, S0): a0/b0/nu all bite
+    want = float(make_eos_fn(eos="nemo_seos", eos_nemo_seos=seos)(
+        jnp.asarray(t), jnp.asarray(s), jnp.asarray(_P)))
+    dino = float(make_eos_fn(eos="nemo_seos")(
+        jnp.asarray(t), jnp.asarray(s), jnp.asarray(_P)))
+    assert abs(want - dino) > 1e3 * _RTOL * want     # instrument control
+    vm = VerticalMixingConfig(scheme="richardson")._replace(
+        iwm=IWMConfig(enabled=True),
+        ddm=DoubleDiffusionConfig()._replace(enabled=True))
+    grid = create_latlon_grid(n_lat=8, n_lon=16)
+    z = create_ocean_z_star(n_levels=4, H_max=4000.0)
+    cfg = LatLonCGridOceanConfig.from_flat(
+        eos="nemo_seos", eos_nemo_seos=seos,
+        implicit_vertical_mixing=True, enable_runtime_checks=False,
+        physics=_physics(vm))
+    model = mod.LatLonCGridOceanModel(grid, z, cfg)
+    state = rest_state_latlon_cgrid_ocean(grid, z, H_max=4000.0,
+                                          land_lat_threshold=80.0)
+    shape = state.T.data.shape[:2] + (state.T.data.shape[2] - 1,)
+    seen = {}
+
+    def iwm_spy(*a, eos_fn=None, **kw):
+        seen["iwm"] = eos_fn
+        return jnp.zeros(shape, dtype=state.T.data.dtype)
+
+    def ddm_spy(*a, eos_fn=None, **kw):
+        seen["ddm"] = eos_fn
+        raise _Stop
+
+    monkeypatch.setattr(k_profiles, "iwm_K_profile", iwm_spy)
+    monkeypatch.setattr(k_profiles, "ddm_K_profile", ddm_spy)
+    K = jnp.full(shape, 1e-5, dtype=state.T.data.dtype)
+    with pytest.raises(_Stop):
+        model._apply_implicit_vertical_mixing(
+            state, 1800.0, None, K_v_phys=K, A_v_phys=K)
+    assert set(seen) == {"iwm", "ddm"}
+    for k in ("iwm", "ddm"):
+        got = float(seen[k](jnp.asarray(t), jnp.asarray(s), jnp.asarray(_P)))
+        np.testing.assert_allclose(got, want, rtol=_RTOL, atol=0)
