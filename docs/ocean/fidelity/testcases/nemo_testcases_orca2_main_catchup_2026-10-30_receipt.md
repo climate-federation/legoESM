@@ -829,6 +829,23 @@ Expected in each JSON/stdout result:
 The operator is separately running the 80-step standalone S4 check; it is not
 duplicated here.
 
+### Catch-up 3 verification
+
+All commands used the CPU/fp64 environment stated above and named test files
+serially, without xdist.  No NEMO executable was run.
+
+- Every test file changed in catch-up 3, the shortwave kernel file, and the
+  three corrected inherited guards: `182 passed in 358.22s (0:05:58)`.
+- Full receipt-citation suite after restoring append-only source anchors:
+  `20 passed in 18.18s`.
+- Required landing battery: `1 failed, 154 passed in 1067.85s (0:17:47)`.
+  The only failure remains main's pre-existing
+  `TestMomentumEVD::test_kpp_plus_nu_conv_still_raises`: its
+  `types.SimpleNamespace` test fixture has no `_replace` method.
+- Named ORCA2 standalone/exactness/year trio: `38 passed, 3 skipped in
+  242.30s (0:04:02)`.  The skips are operator-only smokes and are not the
+  real-card round-341 measurement requested under `ACQUISITION_NEEDED`.
+
 ### Catch-up 3 disposition
 
 `DECISION_NEEDED: GYRE shear/T routing: lane certified vs main's, numbers`
