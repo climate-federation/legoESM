@@ -45,6 +45,41 @@ def test_probe_sees_the_reference_density():
     assert gap > 1e3 * _RTOL * _expected("geometric")
 
 
+def test_certified_gyre_and_orca2_rho0_wiring_is_live():
+    from pathlib import Path
+    from legoesm.ocean.eos import make_eos_fn
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import (
+        build_gyre_zco_card,
+        build_orca2_zps_card,
+    )
+
+    cards = [build_gyre_zco_card()]
+    deck = Path("/data/abyssal/dbalwada/nemo-testcases-l4/inputs/"
+                "ORCA2_ICE_v5.0.0")
+    if deck.is_dir():
+        cards.append(build_orca2_zps_card(deck))
+    for card in cards:
+        cfg = card.recipe.model_config
+        assert cfg.eos_depth == "geometric"
+        explicit = make_eos_fn(
+            eos=cfg.eos, eos_linear=cfg.eos_linear,
+            eos_nemo_seos=cfg.eos_nemo_seos, rho0=cfg.rho_0)
+        prior_default = make_eos_fn(
+            eos=cfg.eos, eos_linear=cfg.eos_linear,
+            eos_nemo_seos=cfg.eos_nemo_seos)
+        explicit_rho = np.asarray(explicit(
+            jnp.asarray(_T), jnp.asarray(_S), jnp.asarray(_P)))
+        prior_rho = np.asarray(prior_default(
+            jnp.asarray(_T), jnp.asarray(_S), jnp.asarray(_P)))
+        assert not np.array_equal(explicit_rho, prior_rho)
+        assert float(explicit_rho - prior_rho) == pytest.approx(
+            4.8386165508418344e-4 if cfg.eos == "nemo_teos10"
+            else 4.873468174082518e-4,
+            rel=1e-12,
+            abs=0.0,
+        )
+
+
 def _model(eos_depth, physics, monkeypatch=None, spy_physics=None):
     from legoesm.grids.latlon import create_latlon_grid
     from legoesm.ocean.dynamics import ocean_model_latlon_cgrid as mod

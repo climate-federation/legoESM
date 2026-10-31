@@ -567,3 +567,40 @@ def test_slow_forcing_depth_evaluation_has_no_default_and_unset_raises():
                .barotropic_slow_forcing_depth_evaluation)
         assert got == "nemo_literal", (
             f"{case} does not state NEMO's own depth average: {got!r}")
+
+
+def test_gyre_routing_choices_do_not_leak_to_orca2_tanks_or_vortex():
+    from pathlib import Path
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import (
+        build_gyre_zco_card,
+        build_lock_exchange_zco_card,
+        build_orca2_zps_card,
+        build_overflow_zps_card,
+        build_vortex_smt_zps_card,
+        build_vortex_zco_card,
+    )
+
+    gyre = build_gyre_zco_card().recipe.model_config
+    assert gyre.physics.vertical_mixing.tke.nemo_sh2_step_entry_ssh is False
+    assert gyre.nemo_qsr_stage3_kmm_source_association is False
+
+    off_cards = (
+        build_lock_exchange_zco_card(),
+        build_overflow_zps_card(),
+        build_vortex_zco_card("flux"),
+        build_vortex_zco_card("vector"),
+        build_vortex_smt_zps_card("flux"),
+        build_vortex_smt_zps_card("vector"),
+    )
+    for card in off_cards:
+        cfg = card.recipe.model_config
+        assert cfg.physics is None
+        assert cfg.nemo_qsr_stage3_kmm_source_association is None
+
+    deck = Path("/data/abyssal/dbalwada/nemo-testcases-l4/inputs/"
+                "ORCA2_ICE_v5.0.0")
+    if deck.is_dir():
+        orca2 = build_orca2_zps_card(deck).recipe.model_config
+        assert orca2.physics.vertical_mixing.tke.nemo_sh2_step_entry_ssh is True
+        assert orca2.physics.shortwave_penetration.scheme == "nemo_qsr_rgb"
+        assert orca2.nemo_qsr_stage3_kmm_source_association is False

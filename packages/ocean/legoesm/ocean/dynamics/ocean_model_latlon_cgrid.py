@@ -9158,17 +9158,17 @@ class LatLonCGridOceanModel:
                 # two already-rounded endpoint ratios.  Both the live-
                 # thickness quotient and _qt_12's ratio-of-mean SSH are the
                 # same real number but not the same fp64 composition.
-                _nemo_qsr_kmm_stretch = nemo_r3t_rk3_stage2_stretch(
-                    _zc,
-                    state.eta.data,
-                    state_new.eta.data,
-                    state.H_bathy.data,
-                )
-                _r3t_m = jnp.where(
-                    _h_ref_ws[..., 0] > 0.0,
-                    _nemo_qsr_kmm_stretch,
-                    0.0,
-                )
+                _qsr_assoc = getattr(_cfg_b, "nemo_qsr_stage3_kmm_source_association", None)
+                if _qsr_assoc is None:
+                    raise ValueError("nemo_qsr_2bd requires an explicit Kmm association")
+                if _qsr_assoc:
+                    _nemo_qsr_kmm_stretch = nemo_r3t_rk3_stage2_stretch(
+                        _zc, state.eta.data, state_new.eta.data, state.H_bathy.data)
+                    _r3t_m = jnp.where(_h_ref_ws[..., 0] > 0.0,
+                                       _nemo_qsr_kmm_stretch, 0.0)
+                else:
+                    _r3t_m = _h_live_one_half[..., 0] / jnp.maximum(
+                        _h_ref_ws[..., 0], 1.0e-10)
                 _qsr_stretch_override = (
                     self._nemo_ws_test_hooks.stage3_qsr_stretch_override)
                 if _qsr_stretch_override is not None:
@@ -11862,11 +11862,11 @@ class LatLonCGridOceanModel:
                         else state.eta.data),
                     nemo_zdf_stage_pair=_nemo_ws_zdf_stage_pair,
                     eta_step_entry=state.eta.data,
-                    # zdf_sh2 reads the step-entry geometry even while the
-                    # implicit tracer solve consumes stage-Kmm geometry.
-                    tke_shear_eta_now=(
-                        state.eta.data
-                        if _nemo_ws_zdf_eta_kmm is not None else None),
+                    # zdf_sh2 routing is governed inside the implicit solve
+                    # solely by the card's nemo_sh2_step_entry_ssh selector.
+                    # No separate call-site input may silently override it.
+                    # False reproduces the certified lane route; True keeps
+                    # main's step-entry route selectable (Decision 189).
                     u_now=state.u.data, v_now=state.v.data,
                     effective_K_test_override=_vertical_K_test_override,
                     nemo_aimp_tracer_w=_nemo_ws_aimp_tracer_w,
@@ -13737,7 +13737,7 @@ class LatLonCGridOceanModel:
         tke_n2_bundle=None,
         eta_now=None,
         eta_step_entry=None,
-        tke_shear_eta_now=None,
+        # Shear eta is selected only by tke_cfg.nemo_sh2_step_entry_ssh.
         nemo_zdf_stage_pair=None,
         u_now=None,
         v_now=None,
@@ -14100,8 +14100,8 @@ class LatLonCGridOceanModel:
                     state,
                     eta_now=(
                         _sh2_eta
-                        if tke_shear_eta_now is None
-                        else tke_shear_eta_now),
+                        # The card selector was resolved immediately above.
+                    ),
                     u_now=u_now, v_now=v_now,
                     z_coord=_zc, config=_cfg_b, grid=_grid,
                     return_face_metrics=return_tke_entry)

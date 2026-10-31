@@ -684,12 +684,12 @@ def _model_config(
             # integrator or any other field (decision 75).
             nemo_first_wzv_after_ssh="rk3_extrapolated_carried",
             wzv_call2_evaluation="nemo_literal",
-            # Round 163 (Decision 55, note AT): GYRE-zco's own measured,
-            # landed choice -- explicit here, not inferred from EOS or any
-            # other field.  ORCA2-zps specializes this SAME branch below and
-            # overrides it back to False, because it resolves the identical
-            # program but has never been measured under it.
+            # Decision 55: explicit GYRE choice; ORCA2 specializes this card.
             nemo_stage_momentum_wzv_split=True,
+            # DECISION 189: preserve the lane-certified quotient association;
+            # main's source-associated endpoint-ratio arm remains selectable
+            # through this explicit per-card field.
+            nemo_qsr_stage3_kmm_source_association=False,
             vorticity_scheme="ene_total",
             # key_qco e3f_vor = e3f_0vor*(1+r3f); dom_qco_r3c_RK3 builds
             # r3f from the four-cell surface-weighted SSH average

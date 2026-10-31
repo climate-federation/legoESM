@@ -3467,6 +3467,12 @@ class LatLonCGridOceanConfig(NamedTuple):
     # refusal binding for every other EIV variant and leaves all prior cards
     # on their existing path.  Appended to preserve positional callers.
     rk3_stage3_l9_eiv_nemo_order: bool = False
+    # Stage-3 two-band solar Kmm stretch association.  False preserves the
+    # lane-certified live/reference top-thickness quotient; True selects the
+    # source-associated mean of NEMO's two stored endpoint ratios.  None is a
+    # fail-closed construction default: every rk3_ws+nemo_qsr_2bd card must
+    # state its arm explicitly.  Appended to preserve positional callers.
+    nemo_qsr_stage3_kmm_source_association: bool | None = None
 
     @classmethod
     def from_flat(cls, **flat) -> "LatLonCGridOceanConfig":

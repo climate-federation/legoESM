@@ -6,6 +6,8 @@ dyn_zdf/tra_zdf read.
 """
 from __future__ import annotations
 
+import inspect
+
 import jax
 import jax.numpy as jnp
 import pytest
@@ -80,6 +82,15 @@ def _shear_eta_at_call_site(flag):
 def test_production_shear_call_site_routes_through_the_selector():
     assert _shear_eta_at_call_site(True) is ENTRY
     assert _shear_eta_at_call_site(False) is STAGE
+
+
+def test_whole_step_does_not_bypass_the_card_selector():
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel,
+    )
+
+    source = inspect.getsource(LatLonCGridOceanModel._step_impl)
+    assert "tke_shear_eta_now" not in source
 
 
 class _LatSeen(Exception):
