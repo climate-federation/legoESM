@@ -295,6 +295,9 @@ def build_coupler_config(args):
         gustiness_w_zi=args.surface_gustiness_zi,
         thermo_convention=args.bulk_thermo_convention,
         stability_scheme=args.surface_stability_scheme,
+        large_yeager_neutral_width=args.surface_large_yeager_neutral_width,
+        large_yeager_dthv_width=args.surface_large_yeager_dthv_width,
+        large_yeager_cd_cutoff_width=args.surface_large_yeager_cd_cutoff_width,
     )
 
 
@@ -498,8 +501,10 @@ def build_parser():
         VALID_MICROPHYSICS,
         VALID_SURFACE_BULK,
         VALID_TURBULENCE,
+        ExperimentConfig,
         parse_gwd_spec,
     )
+    _EXPERIMENT_DEFAULTS = ExperimentConfig()
 
     parser = argparse.ArgumentParser(
         description="Run a fully coupled ESM simulation",
@@ -750,6 +755,33 @@ def build_parser():
                              "(fixes the persistent tropical hfls<<Earth / R_TOA "
                              "imbalance). Applied to the atmosphere surface layer "
                              "AND the slab ocean heat budget (kept consistent).")
+    # Large-Yeager (--surface-bulk-scheme large_yeager) RULE 5 smooth-switch
+    # widths (#2241).  Defaults = the ExperimentConfig values (bit-identical);
+    # 0 = AeroBulk's hard switch.  Read only by large_yeager.
+    parser.add_argument("--surface-large-yeager-neutral-width",
+                        dest="surface_large_yeager_neutral_width", type=float,
+                        default=_EXPERIMENT_DEFAULTS.surface_large_yeager_neutral_width,
+                        help="Large-Yeager smoothing half-width of the neutral "
+                             "Stanton-number switch, in zeta_u. 0 = AeroBulk "
+                             "hard switch. Read only by large_yeager; applied "
+                             "to the atmosphere surface layer AND the coupler "
+                             "ocean tile.")
+    parser.add_argument("--surface-large-yeager-dthv-width",
+                        dest="surface_large_yeager_dthv_width", type=float,
+                        default=_EXPERIMENT_DEFAULTS.surface_large_yeager_dthv_width,
+                        help="Large-Yeager smoothing half-width of the "
+                             "first-guess stability switch [K of virtual "
+                             "potential temperature difference]. 0 = AeroBulk "
+                             "hard switch. Read only by large_yeager; applied "
+                             "to the atmosphere surface layer AND the coupler "
+                             "ocean tile.")
+    parser.add_argument("--surface-large-yeager-cd-cutoff-width",
+                        dest="surface_large_yeager_cd_cutoff_width", type=float,
+                        default=_EXPERIMENT_DEFAULTS.surface_large_yeager_cd_cutoff_width,
+                        help="Large-Yeager smoothing band of the 33 m/s drag "
+                             "cutoff [m/s]. 0 = AeroBulk hard cutoff. Read only "
+                             "by large_yeager; applied to the atmosphere "
+                             "surface layer AND the coupler ocean tile.")
     parser.add_argument("--bulk-thermo-convention", dest="bulk_thermo_convention",
                         type=str, default="legoesm",
                         choices=["legoesm", "aerobulk"],
@@ -1539,6 +1571,9 @@ def main(argv=None, *, build_only=False):
         turbulence=args.turbulence,
         surface_bulk_scheme=args.surface_bulk_scheme,
         surface_gustiness_zi=args.surface_gustiness_zi,
+        surface_large_yeager_neutral_width=args.surface_large_yeager_neutral_width,
+        surface_large_yeager_dthv_width=args.surface_large_yeager_dthv_width,
+        surface_large_yeager_cd_cutoff_width=args.surface_large_yeager_cd_cutoff_width,
         surface_thermo_convention=args.bulk_thermo_convention,
         surface_stability_scheme=args.surface_stability_scheme,
         gravity_wave_drag=args.gravity_wave_drag,
