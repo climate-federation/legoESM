@@ -9,14 +9,21 @@
 #   * the zm_* tunables and detrainment widths are unset below because the
 #     driver refuses them unless convection is zhang_mcfarlane;
 #   * CAM6's deep-convective cloud fraction (clubb_intr deepcu) reads ZM's
-#     updraft mass flux; Emanuel publishes none, so deepcu is exactly 0 here;
+#     updraft mass flux; Emanuel publishes none, so deepcu is exactly 0 on a
+#     cold start (a restart from a ZM checkpoint would keep that checkpoint's
+#     lagged mass-flux carry, so start this deck from an IC);
 #   * the ZM detrainment booking inside the CLUBB macmic sub-step is ZM-only;
 #     Emanuel detrains no cloud condensate (its convective-condensate
 #     tendency is zero: condensate leaves as rain or re-evaporates);
 #   * zm_land_fraction and zm_transport_cloud_tracers stay as inherited and
 #     are inert (read only by ZM);
-#   * the Emanuel parameters are the EmanuelConfig defaults (the CONVECT v4.3c
-#     oracle values), smoothing at its differentiable defaults (RULE 5).
+#   * the Emanuel parameters are the EmanuelConfig defaults: the CONVECT v4.3c
+#     parameter values, with the scheme's switches smoothed at their
+#     differentiable default widths (RULE 5; the per-column gaps to the oracle
+#     are recorded with the port, PR #2297).  In particular the momentum
+#     pressure-gradient factor cu_coefficient = 0.7 (CONVECT CU), read only by
+#     the "on" arm.  No driver row exists for these leaves; every run records
+#     them under resolved_physics.convection.emanuel in run_manifest.json.
 include: amip_production.yaml
 convection: emanuel
 emanuel_enable_cmt: false   # = EmanuelConfig.enable_cmt default; written so

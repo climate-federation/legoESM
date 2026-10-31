@@ -4,7 +4,10 @@ convection instead of Zhang-McFarlane, for the #2266 momentum-transport A/B.
 Pins that the deck differs from production only in the convection rows, that
 it resolves on the production (MPAS) lane without new validation errors, and
 that the A/B's two arms (deck alone vs deck + --emanuel-enable-cmt) differ in
-exactly one resolved field and reach the MPAS wind reconstruction only when on.
+exactly one resolved field and request the MPAS wind reconstruction
+(``mpas_cmt``) only when on.  That the bridge then puts Emanuel's tendency on
+the MPAS edge winds (and exact zeros when off) is pinned by
+tests/unit/test_mpas_cmt_wiring.py.
 """
 from __future__ import annotations
 
