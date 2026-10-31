@@ -1,6 +1,7 @@
-"""The lat-lon model's vertical-mixing EOS uses the run's reference density
-exactly as its dynamics does (#2243): ``rho0 = config.rho_0`` on the
-geometric-depth path, the module default otherwise.
+"""The lat-lon model's vertical-mixing EOS reference density is card-routed.
+
+Main's route uses ``rho0 = config.rho_0`` on the geometric-depth path; the
+certified GYRE and ORCA2 cards retain the prior module-default route.
 
 ``rho0`` only enters the NEMO EOS80/TEOS-10 polynomials (their depth
 reconstruction ``zh = p/(rho0*g)``), so the probe evaluates every captured EOS
@@ -32,9 +33,10 @@ def _rho(eos_fn):
     return float(eos_fn(jnp.asarray(_T), jnp.asarray(_S), jnp.asarray(_P)))
 
 
-def _expected(eos_depth):
+def _expected(eos_depth, use_config_rho0=True):
     from legoesm.ocean.eos import make_eos_fn
-    kw = {"rho0": _RHO0_RUN} if eos_depth == "geometric" else {}
+    kw = ({"rho0": _RHO0_RUN}
+          if eos_depth == "geometric" and use_config_rho0 else {})
     return _rho(make_eos_fn(eos="nemo_eos80", **kw))
 
 
@@ -81,7 +83,8 @@ def test_certified_gyre_and_orca2_keep_prior_rho0_route_selectable():
         )
 
 
-def _model(eos_depth, physics, monkeypatch=None, spy_physics=None):
+def _model(eos_depth, physics, monkeypatch=None, spy_physics=None,
+           use_config_rho0=True):
     from legoesm.grids.latlon import create_latlon_grid
     from legoesm.ocean.dynamics import ocean_model_latlon_cgrid as mod
     from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean
@@ -99,6 +102,7 @@ def _model(eos_depth, physics, monkeypatch=None, spy_physics=None):
     z = create_ocean_z_star(n_levels=4, H_max=4000.0)
     cfg = LatLonCGridOceanConfig.from_flat(
         eos="nemo_eos80", eos_depth=eos_depth, rho_0=_RHO0_RUN,
+        vmix_eos_use_config_rho0=use_config_rho0,
         implicit_vertical_mixing=True, enable_runtime_checks=False,
         physics=physics)
     model = mod.LatLonCGridOceanModel(grid, z, cfg)
@@ -118,15 +122,18 @@ def _physics(vm):
 
 
 @pytest.mark.parametrize("eos_depth", ["geometric", "insitu"])
-def test_closure_eos_reference_density(monkeypatch, eos_depth):
+@pytest.mark.parametrize("use_config_rho0", [False, True])
+def test_closure_eos_reference_density(monkeypatch, eos_depth,
+                                       use_config_rho0):
     from legoesm.ocean.physics.vertical_mixing.config import (
         VerticalMixingConfig,
     )
     seen = []
     _model(eos_depth, _physics(VerticalMixingConfig(scheme="richardson")),
-           monkeypatch, seen)
+           monkeypatch, seen, use_config_rho0)
     assert len(seen) == 1
-    np.testing.assert_allclose(_rho(seen[0]), _expected(eos_depth),
+    np.testing.assert_allclose(
+        _rho(seen[0]), _expected(eos_depth, use_config_rho0),
                                rtol=_RTOL, atol=0)
 
 
@@ -135,13 +142,16 @@ class _Stop(Exception):
 
 
 @pytest.mark.parametrize("eos_depth", ["geometric", "insitu"])
-def test_fallback_eos_reference_density(monkeypatch, eos_depth):
+@pytest.mark.parametrize("use_config_rho0", [False, True])
+def test_fallback_eos_reference_density(monkeypatch, eos_depth,
+                                        use_config_rho0):
     import legoesm.ocean.physics.vertical_mixing as vmix
     from legoesm.ocean.physics.vertical_mixing.config import (
         VerticalMixingConfig,
     )
     model, state = _model(
-        eos_depth, _physics(VerticalMixingConfig(scheme="richardson")))
+        eos_depth, _physics(VerticalMixingConfig(scheme="richardson")),
+        use_config_rho0=use_config_rho0)
     seen = []
 
     def spy(*a, eos_fn=None, **kw):
@@ -152,12 +162,15 @@ def test_fallback_eos_reference_density(monkeypatch, eos_depth):
     with pytest.raises(_Stop):
         model._apply_implicit_vertical_mixing(state, 1800.0, None)
     assert len(seen) == 1
-    np.testing.assert_allclose(_rho(seen[0]), _expected(eos_depth),
+    np.testing.assert_allclose(
+        _rho(seen[0]), _expected(eos_depth, use_config_rho0),
                                rtol=_RTOL, atol=0)
 
 
 @pytest.mark.parametrize("eos_depth", ["geometric", "insitu"])
-def test_iwm_and_ddm_eos_reference_density(monkeypatch, eos_depth):
+@pytest.mark.parametrize("use_config_rho0", [False, True])
+def test_iwm_and_ddm_eos_reference_density(monkeypatch, eos_depth,
+                                           use_config_rho0):
     """Fast path (physics-provided K): the internal-wave add-on and double
     diffusion each build an EOS."""
     from legoesm.ocean.physics.vertical_mixing import k_profiles
@@ -173,7 +186,8 @@ def test_iwm_and_ddm_eos_reference_density(monkeypatch, eos_depth):
     vm = VerticalMixingConfig(scheme="richardson")._replace(
         iwm=IWMConfig(enabled=True),
         ddm=DoubleDiffusionConfig()._replace(enabled=True))
-    model, state = _model(eos_depth, _physics(vm))
+    model, state = _model(
+        eos_depth, _physics(vm), use_config_rho0=use_config_rho0)
     seen = {}
 
     def iwm_spy(*a, eos_fn=None, **kw):
@@ -193,6 +207,6 @@ def test_iwm_and_ddm_eos_reference_density(monkeypatch, eos_depth):
         model._apply_implicit_vertical_mixing(
             state, 1800.0, None, K_v_phys=K, A_v_phys=K)
     assert set(seen) == {"iwm", "ddm"}
-    want = _expected(eos_depth)
+    want = _expected(eos_depth, use_config_rho0)
     np.testing.assert_allclose(_rho(seen["iwm"]), want, rtol=_RTOL, atol=0)
     np.testing.assert_allclose(_rho(seen["ddm"]), want, rtol=_RTOL, atol=0)
