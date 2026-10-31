@@ -122,4 +122,23 @@ leaves: UNMEASURED`, and `finite/NaN/Inf/nonzero counts: UNMEASURED`. Running
 `CONFIRMED`: the master/record mismatch and missing production entry are direct
 schema/source findings. `PLAUSIBLE`: none promoted to an O17 physics verdict.
 
+## Gates
+
+- The required receipt-citation test file passed 45/45. The round receipt gate
+  found 17 citations with zero unmapped citations, failures, or full-map audit
+  failures; all 12 built-in controls fired. The cumulative default gate found
+  274 citations with the same zero-failure result.
+- The documented landing battery passed. The combined process reached the
+  known per-process JAX compiler limit in the two-case stage-face-mask file, so
+  that file and the following barotropic-state file were completed in fresh,
+  serial processes as required by the repository instructions: both mask cases
+  passed and the barotropic-state file passed 8/8. No test ran with `pytest -n`.
+- The nine CI ratchet files reported 11 failed, 6,936 passed, and 2 skipped.
+  Those are the established lane failures in hardcoded constants, inline
+  coefficients, and parameter specifications; every named failure is in an
+  untouched model, acquisition-fixture, or unit-test file. This round changes
+  only the ladder design, this receipt, and the citation registry.
+- All commands used CPU fp64 with `CUDA_VISIBLE_DEVICES=""`,
+  `JAX_PLATFORMS=cpu`, and `JAX_ENABLE_X64=1`. No NEMO or GPU command ran.
+
 independent review: operator (Claude)
