@@ -518,11 +518,10 @@ for lane-only fidelity gates, on the lane parent alone).
 
 **Merge-introduced and fixed.**  These files exposed genuine composition
 regressions and pass after the follow-up commits: the round-340/344/345
-exactness files; `test_nemo_testcase_l2_gyre_decision43_gate.py`;
+exactness files;
 `test_nemo_testcase_l2_gyre_round160_wzv_split.py`;
 `test_nemo_testcase_l2_gyre_round51_live_operands.py`;
-`test_nemo_testcase_l4_orca2_round71_independent_month_gate.py`;
-`test_orca2_round309_selection.py`; `test_ncar_bulk.py`;
+`test_orca2_round309_selection.py`;
 `test_nemo_testcase_l2_gyre_gradient_gate.py`;
 `test_nemo_testcase_recipe.py`; `test_nemo_vortex_card.py`;
 `test_orca2_initial_hand_alterations.py`;
@@ -560,6 +559,18 @@ the lane parent after preceding assertion failures;
 stale parent citation; and the no-timeout
 `test_orca2_round323_step_paths.py` replay ended
 `1 failed, 3 passed, 1 warning in 3435.12s (0:57:15)`.
+Three files originally misclassified above were also pre-existing on exact
+lane parent `6b97234455`.  Their combined replay ended
+`3 failed, 55 passed in 42.96s`: `test_ncar_bulk.py` rejected the already-live
+optional composition inputs `prior_surface`, `chl`, and
+`geothermal_heat_flux_mwm2`; the round-71 test expected rejection at step 241
+even though the admitted no-leap chlorophyll clock already accepts the full
+`1..2920` year; and the decision-43 inventory omitted `ORCA2-zps` even though
+its card already selects and executes `slope_n2_evaluation="carried_step_entry"`.
+Commit `37aa3a0cea` therefore corrected stale guards rather than relaxing
+production: it exempts only those three optional composition inputs while all
+physical/deck inputs remain mandatory, moves the first rejected chlorophyll
+step to 2921, and inventories ORCA2's actual carried-step-entry N2 route.
 The discovery-only round-322 failure was order/environment sensitive: the
 merge checkout passed its isolated differentiability case (`1 passed in
 1268.56s`) and the lane parent passed the complete file (`12 passed in
@@ -710,3 +721,114 @@ Final line: `109 passed in 136.34s (0:02:16)`.  Thus that required set had no
 failures to classify.  The added/changed non-Python files under
 `tests/ocean/` are fixtures consumed by these three modules and were retained
 unchanged from main.
+
+## Catch-up 3 — DECISION 189 routing audit
+
+### Card-owned GYRE shear and temperature routing
+
+The four-step CPU/fp64 production-JIT replay confirmed the review finding:
+catch-up 2 tip `b9b0d31464` matched main `edd34c2446`, not lane parent
+`6b97234455`.  Three independent main-side routes had silently moved the GYRE
+card despite its certified selections:
+
+- `5f92ee93fe` passed an unconditional `tke_shear_eta_now` override around
+  `TKEConfig.nemo_sh2_step_entry_ssh`; follow-up `e3d377b16c` removes that
+  bypass, so the card field again owns the shear input.
+- `1b60b58077` changed the shared `nemo_qsr_2bd` Kbb pipeline from the static
+  ladder to live `z_half_stretch=J` and changed stage 3's Kbb association from
+  the live/reference thickness quotient to `compute_ocean_jacobian`.  The
+  controlled `kbb-main` arm is the bisect proof: relative to the lane arm its
+  first trajectory departure is `kt3.before.T`, 8,430 unequal cells and
+  `max|lane-main| = 1.3765927064923744e-08 K`.
+- `219db484b0` independently changed the stage-3 Kmm solar association from
+  the lane's live-half-thickness quotient to NEMO's source-associated mean of
+  the two already-rounded endpoint ratios.  The controlled `qsr-main` arm
+  first differs at `kt2.before.T` in exactly 3 of 18,000 scored wet cells by
+  `3.552713678800501e-15 K` (1 ULP); no other kt2 field differs.
+
+The GYRE card now states all four lane-certified choices: step-entry shear
+`False`, Kbb live stretch `False`, Kmm source association `False`, and the
+pre-catch-up vmix EOS reference-density route `False`.  Main's alternatives
+remain explicitly selectable.  The final lane replay's 84 candidate/oracle/
+residual arrays are byte-identical to the exact lane-parent replay; both NPZ
+artifacts have SHA-256
+`04c7124c24efcbe7dd9b1a33cfe8fcd6c75bee0d99c20095b7b4d85f82c8f374`.
+
+The card blast-radius test records the other cases.  ORCA2 keeps its own
+step-entry shear selection `True`; its shortwave scheme is `nemo_qsr_rgb`, so
+the two `nemo_qsr_2bd` Kbb/Kmm selectors are inert; and it explicitly retains
+the prior vmix EOS density route.  LOCK_EXCHANGE, OVERFLOW, and all flux/vector
+VORTEX cards have `physics=None`, so none of these physics routes executes.
+
+### Same-protocol comparison to the existing GYRE NEMO oracle
+
+Both arms used the same checked-in GYRE card, same four steps, CPU fp64/libm
+production JIT, oracle root, wet masks, and gate metric.  Values below are the
+gate's maximum absolute residual against NEMO; smaller is closer.  `kt2` is
+the state after one model step, `kt3` after two, and `kt4` after three.
+
+| Boundary | Field | Lane-certified | Main routing |
+|---|---|---:|---:|
+| `kt2.before` | T | `1.4210854715202004e-14` | `1.4210854715202004e-14` |
+|  | S | `2.1316282072803006e-14` | `2.1316282072803006e-14` |
+|  | u | `8.326672684688674e-17` | `8.326672684688674e-17` |
+|  | v | `9.714451465470120e-17` | `9.714451465470120e-17` |
+|  | ssh | `0.0` | `0.0` |
+| `kt3.before` | T | `1.3765816930799701e-08` | `6.610889613511972e-11` |
+|  | S | `5.984546191939444e-10` | `1.0542322570472606e-10` |
+|  | u | `4.4348118233283884e-10` | `1.0046085057585641e-11` |
+|  | v | `5.758083176932161e-10` | `7.112879729653798e-12` |
+|  | ssh | `6.695688014451973e-11` | `6.695688014451973e-11` |
+| `kt4.before` | T | `1.9254130734225328e-08` | `7.358380571531598e-11` |
+|  | S | `4.776978812515154e-10` | `1.1883116712851916e-10` |
+|  | u | `9.383765431358881e-10` | `2.2876856225345632e-11` |
+|  | v | `1.3128989492794396e-09` | `1.7007912439526152e-11` |
+|  | ssh | `2.059070735097035e-10` | `1.0434915128157418e-10` |
+
+The lane and main maxima tie at `kt2`; the Kmm-only 3-cell ULP change does not
+own the maximum.  At `kt3`, main is closer for T/S/u/v and tied for ssh; at
+`kt4`, main is closer for all five fields.  These measurements inform, but do
+not make, the routing choice.
+
+### Geometric-depth vmix EOS reference density
+
+Main's configured-`rho_0` kwarg is numerically live at the three vmix EOS
+builders (fallback K profile, internal-wave mixing, and double diffusion), as
+well as the closure EOS given to combined physics.  At the test's 4 km probe,
+configured `rho_0=1026` changes density relative to the prior EOS default by
+`4.8386165508418344e-4 kg m-3` for GYRE's TEOS-10 and
+`4.873468174082518e-4 kg m-3` for ORCA2's EOS80.  The 14-case unit test runs
+both selector values through all builders and confirms GYRE and ORCA2 state
+the prior route.  GYRE's full four-step equality to its lane parent above is
+the trajectory check.  The real-card ORCA2 trajectory check remains the
+operator acquisition below; the three existing skips are only operator-smoke
+guards and are not claimed as that measurement.
+
+### ACQUISITION_NEEDED
+
+Run both round-341 rung-10 labels from a clean final checkout.  These commands
+read the existing admitted ORCA2/NEMO data and run legoESM only; they do not run
+NEMO.  `ORCA2_CATCHUP_HEAD` intentionally resolves the final receipt commit so
+the gate's clean-worktree provenance check binds the result to final HEAD.
+
+```bash
+ORCA2_CATCHUP_HEAD="$(git rev-parse HEAD)"
+test -z "$(git status --porcelain)"
+env CUDA_VISIBLE_DEVICES="" JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 PYTHONPATH=packages/core:packages/ocean:packages/atmosphere:packages/coupler:packages/ice:packages/land:packages/ml:packages/tools:src taskset -c 0-7 python scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round341_rescore_walk_gate.py --measure --rung rung10 --label given_nemo_entry --arm candidate --deck-root /data/abyssal/dbalwada/nemo-testcases-l4/inputs/ORCA2_ICE_v5.0.0 --twin-a /data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round5/acquisition/orca1ice_surface_entry_every_step_a_np2 --expect-commit "$ORCA2_CATCHUP_HEAD" --output /tmp/orca2_r347_final_rung10_given_nemo_entry.json
+env CUDA_VISIBLE_DEVICES="" JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 PYTHONPATH=packages/core:packages/ocean:packages/atmosphere:packages/coupler:packages/ice:packages/land:packages/ml:packages/tools:src taskset -c 0-7 python scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round341_rescore_walk_gate.py --measure --rung rung10 --label independent --arm candidate --deck-root /data/abyssal/dbalwada/nemo-testcases-l4/inputs/ORCA2_ICE_v5.0.0 --twin-a /data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round5/acquisition/orca1ice_surface_entry_every_step_a_np2 --expect-commit "$ORCA2_CATCHUP_HEAD" --output /tmp/orca2_r347_final_rung10_independent.json
+```
+
+Expected in each JSON/stdout result:
+
+```text
+"status": "PASS_R341_PAIR_RESCORE"
+"wet_3d_classification_counts": {"BIT_EXACT": 200, "AT_BAR_NOT_EXACT": 0, "OVER_BAR": 0}
+"first_wet_3d_non_bit_row": null
+```
+
+The operator is separately running the 80-step standalone S4 check; it is not
+duplicated here.
+
+### Catch-up 3 disposition
+
+`DECISION_NEEDED: GYRE shear/T routing: lane certified vs main's, numbers`

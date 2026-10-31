@@ -465,8 +465,8 @@ def test_gyre_r4_card_resolves_grid_clock_and_mixing_from_namelist():
     assert sbc.qsr_w_m2.shape == (82, 122)
 
 
-def test_gyre_nemo_qsr_pipeline_uses_live_kbb_stretch():
-    """The shared Kbb deposit must be the field stage 3 later subtracts."""
+def test_gyre_nemo_qsr_pipeline_selects_both_kbb_stretch_routes():
+    """The card owns the shared Kbb deposit that stage 3 later subtracts."""
     from legoesm.ocean.physics.shortwave_penetration import (
         shortwave_penetration_tendency,
     )
@@ -479,47 +479,45 @@ def test_gyre_nemo_qsr_pipeline_uses_live_kbb_stretch():
         eta=state.eta.replace(
             data=jnp.where(wet, jnp.asarray(0.25, dtype=jnp.float64), 0.0)))
     _, surface = gyre_surface_forcings(card, state, 2)
-    model = LatLonCGridOceanModel(
-        card.recipe.grid, card.recipe.z_coord, card.recipe.model_config)
     cc_state = state._replace(
         u=state.u.replace(
             data=0.5 * (state.u.data[:, :-1] + state.u.data[:, 1:])),
         v=state.v.replace(
             data=0.5 * (state.v.data[:-1] + state.v.data[1:])),
     )
-    actual = model._physics_fn(
-        cc_state, card.recipe.grid, card.recipe.z_coord, surface).dT_dt.data
-    zero = model._physics_fn(
-        cc_state, card.recipe.grid, card.recipe.z_coord,
-        surface._replace(sw_down=jnp.zeros_like(surface.sw_down)),
-    ).dT_dt.data
-    actual_qsr = actual - zero
     stretch = compute_ocean_jacobian(
         state.eta.data, state.H_bathy.data, card.recipe.z_coord)
-    expected = shortwave_penetration_tendency(
-        surface.sw_down,
-        card.recipe.z_coord.dz_ref,
-        card.recipe.z_coord.z_half_ref,
-        stretch,
-        card.recipe.model_config.physics.shortwave_penetration,
-        rho_0=card.recipe.model_config.rho_0,
-        c_sw=card.recipe.model_config.physics.constants.c_sw,
-        z_half_stretch=stretch,
-    )
-    static = shortwave_penetration_tendency(
-        surface.sw_down,
-        card.recipe.z_coord.dz_ref,
-        card.recipe.z_coord.z_half_ref,
-        stretch,
-        card.recipe.model_config.physics.shortwave_penetration,
-        rho_0=card.recipe.model_config.rho_0,
-        c_sw=card.recipe.model_config.physics.constants.c_sw,
-    )
     active = np.asarray(card.recipe.z_coord.is_active, dtype=bool)
-    np.testing.assert_array_equal(
-        np.asarray(actual_qsr)[active], np.asarray(expected)[active])
-    assert not np.array_equal(
-        np.asarray(expected)[active], np.asarray(static)[active])
+    observed = {}
+    assert card.recipe.model_config.physics.shortwave_penetration.nemo_qsr_kbb_live_stretch is False
+    for live_stretch in (False, True):
+        shortwave = card.recipe.model_config.physics.shortwave_penetration._replace(
+            nemo_qsr_kbb_live_stretch=live_stretch)
+        cfg = card.recipe.model_config._replace(
+            physics=card.recipe.model_config.physics._replace(
+                shortwave_penetration=shortwave))
+        model = LatLonCGridOceanModel(
+            card.recipe.grid, card.recipe.z_coord, cfg)
+        actual = model._physics_fn(
+            cc_state, card.recipe.grid, card.recipe.z_coord, surface).dT_dt.data
+        zero = model._physics_fn(
+            cc_state, card.recipe.grid, card.recipe.z_coord,
+            surface._replace(sw_down=jnp.zeros_like(surface.sw_down)),
+        ).dT_dt.data
+        observed[live_stretch] = np.asarray(actual - zero)
+        expected = shortwave_penetration_tendency(
+            surface.sw_down,
+            card.recipe.z_coord.dz_ref,
+            card.recipe.z_coord.z_half_ref,
+            stretch,
+            shortwave,
+            rho_0=cfg.rho_0,
+            c_sw=cfg.physics.constants.c_sw,
+            z_half_stretch=stretch if live_stretch else None,
+        )
+        np.testing.assert_array_equal(
+            observed[live_stretch][active], np.asarray(expected)[active])
+    assert not np.array_equal(observed[False][active], observed[True][active])
 
 
 def test_nemo_qsr_2bd_refuses_integrators_without_stage3_kmm_call():
