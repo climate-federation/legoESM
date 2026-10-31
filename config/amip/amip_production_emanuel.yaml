@@ -10,8 +10,9 @@
 #     driver refuses them unless convection is zhang_mcfarlane;
 #   * CAM6's deep-convective cloud fraction (clubb_intr deepcu) reads ZM's
 #     updraft mass flux; Emanuel publishes none, so deepcu is exactly 0 on a
-#     cold start (a restart from a ZM checkpoint would keep that checkpoint's
-#     lagged mass-flux carry, so start this deck from an IC);
+#     cold start.  Start this deck from an IC: the driver refuses a restart
+#     from a scheme-tagged ZM checkpoint, and an untagged legacy checkpoint
+#     would carry its lagged mass flux into the first steps;
 #   * the ZM detrainment booking inside the CLUBB macmic sub-step is ZM-only;
 #     Emanuel detrains no cloud condensate (its convective-condensate
 #     tendency is zero: condensate leaves as rain or re-evaporates);
