@@ -524,9 +524,9 @@ class SeaIceConfig(NamedTuple):
     # Optional ORCA2 5-category 10+5-layer SI3 state configuration (`thermo_scheme='si3_orca2_o1'`).
     si3_orca2: SI3ORCA2StateConfig | None = None
     # Select CORE-II's exact precipitation closure (pond runoff, untracked
-    # snowfall, and the post-thermo cover reported to the coupler).  False
-    # preserves the certified SI3 response and freshwater paths bit for bit.
-    core2_precipitation_closure: bool = False
+    # snowfall, and the post-thermo cover reported to the coupler).  Disable
+    # only in a NEMO-comparison config that requires the legacy paths.
+    core2_precipitation_closure: bool = True
 
 
 from legoesm.ice.si3_orca2_state import SI3ORCA2StateConfig  # noqa: E402,F401

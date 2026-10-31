@@ -271,7 +271,7 @@ These main changes touch ocean/NEMO paths used by, or immediately surrounding, t
 - `config/templates/ocean/*.yaml` — main updates shipped ocean templates; none silently selects a certified private arm.
 - Added/changed SWG, TSUNAMI, GYRE-hires, VORTEX, and ORCA fidelity scripts/tests under `scripts/validate/ocean_fidelity/testcases/` and `tests/ocean/fidelity/` — retained wholesale; these are semantic-risk controls even where no production hunk conflicted.
 - `tests/ocean/fidelity/test_post_20261029_provenance_sha_gate.py` — the lane's prospective gate initially treated the catch-up merge's independently authored second-parent history as new lane evidence; it now selects first-parent-authored lines by blame, includes novel combined-merge resolutions, and carries an unchanged SHA token only when the same token occupies the same original line in the authoring commit's first parent (merge or ordinary citation-only re-anchor).  Its planted unresolved-SHA and wrong-file-digest controls are unchanged.
-- `packages/ice/legoesm/ice/{config.py,sea_ice.py}` and `scripts/run/run_omip_core2.py` — main's precipitation-closure additions changed the response pytree and pond/snow freshwater paths for every SI3 caller despite no textual conflict.  The new `core2_precipitation_closure` selector still defaults off to preserve the certified lane bit for bit, while the CORE-II production constructor selects it explicitly.  Main's test was restored unmodified rather than hidden behind fixture opt-ins; four of its seven nodes therefore fail until the default policy is decided.  This is an unresolved decision, recorded below.
+- `packages/ice/legoesm/ice/{config.py,sea_ice.py}` and `scripts/run/run_omip_core2.py` — main's precipitation-closure additions changed the response pytree and pond/snow freshwater paths for every SI3 caller despite no textual conflict.  Per Decision 190, the `core2_precipitation_closure` selector defaults on everywhere.  Both CORE-II production constructors retain their explicit selections, while certified NEMO-comparison configurations need no opt-out.  Main's test remains unmodified and uses the default.
 
 ## Citation reconciliation
 
@@ -384,7 +384,7 @@ Every observed stable failure is classified here.
 
 ## Decision register
 
-DECISION_NEEDED: whether `core2_precipitation_closure` should remain False by default for certified SI3 bit preservation or become True by default for main's rain/snow water-budget behavior
+DECISION 190 applied: default True; certified tests per file with the committed default
 
 All other direct behavioral conflicts were composed behind existing explicit
 selectors or resolved in favor of the already certified lane path where main
