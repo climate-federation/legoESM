@@ -3473,6 +3473,11 @@ class LatLonCGridOceanConfig(NamedTuple):
     # fail-closed construction default: every rk3_ws+nemo_qsr_2bd card must
     # state its arm explicitly.  Appended to preserve positional callers.
     nemo_qsr_stage3_kmm_source_association: bool | None = None
+    # Reference density passed into vertical-mixing EOS builders on the
+    # geometric-depth path.  True is main's configured-rho0 route; False is
+    # the lane-certified pre-catch-up EOS-default route.  NEMO testcase cards
+    # state this explicitly.  Appended to preserve positional callers.
+    vmix_eos_use_config_rho0: bool = True
 
     @classmethod
     def from_flat(cls, **flat) -> "LatLonCGridOceanConfig":

@@ -45,7 +45,7 @@ def test_probe_sees_the_reference_density():
     assert gap > 1e3 * _RTOL * _expected("geometric")
 
 
-def test_certified_gyre_and_orca2_rho0_wiring_is_live():
+def test_certified_gyre_and_orca2_keep_prior_rho0_route_selectable():
     from pathlib import Path
     from legoesm.ocean.eos import make_eos_fn
     from legoesm.ocean.fidelity.nemo_testcase_recipe import (
@@ -61,6 +61,7 @@ def test_certified_gyre_and_orca2_rho0_wiring_is_live():
     for card in cards:
         cfg = card.recipe.model_config
         assert cfg.eos_depth == "geometric"
+        assert cfg.vmix_eos_use_config_rho0 is False
         explicit = make_eos_fn(
             eos=cfg.eos, eos_linear=cfg.eos_linear,
             eos_nemo_seos=cfg.eos_nemo_seos, rho0=cfg.rho_0)

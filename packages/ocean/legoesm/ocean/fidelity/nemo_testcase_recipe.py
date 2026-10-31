@@ -687,9 +687,9 @@ def _model_config(
             # Decision 55: explicit GYRE choice; ORCA2 specializes this card.
             nemo_stage_momentum_wzv_split=True,
             # DECISION 189: preserve the lane-certified quotient association;
-            # main's source-associated endpoint-ratio arm remains selectable
-            # through this explicit per-card field.
+            # main's endpoint-ratio arm remains explicitly selectable.
             nemo_qsr_stage3_kmm_source_association=False,
+            vmix_eos_use_config_rho0=False,
             vorticity_scheme="ene_total",
             # key_qco e3f_vor = e3f_0vor*(1+r3f); dom_qco_r3c_RK3 builds
             # r3f from the four-cell surface-weighted SSH average

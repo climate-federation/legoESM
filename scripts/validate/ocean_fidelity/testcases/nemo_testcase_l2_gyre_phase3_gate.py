@@ -929,6 +929,7 @@ def run(
         cfg = cfg._replace(
             physics=cfg.physics._replace(vertical_mixing=vertical),
             nemo_qsr_stage3_kmm_source_association=qsr_selected,
+            vmix_eos_use_config_rho0=decision189_routing == "main",
         )
     tke_cfg = cfg.physics.vertical_mixing.tke
     evd_cfg = cfg.physics.convection.enhanced_diffusion

@@ -583,6 +583,7 @@ def test_gyre_routing_choices_do_not_leak_to_orca2_tanks_or_vortex():
     gyre = build_gyre_zco_card().recipe.model_config
     assert gyre.physics.vertical_mixing.tke.nemo_sh2_step_entry_ssh is False
     assert gyre.nemo_qsr_stage3_kmm_source_association is False
+    assert gyre.vmix_eos_use_config_rho0 is False
 
     off_cards = (
         build_lock_exchange_zco_card(),
@@ -604,3 +605,4 @@ def test_gyre_routing_choices_do_not_leak_to_orca2_tanks_or_vortex():
         assert orca2.physics.vertical_mixing.tke.nemo_sh2_step_entry_ssh is True
         assert orca2.physics.shortwave_penetration.scheme == "nemo_qsr_rgb"
         assert orca2.nemo_qsr_stage3_kmm_source_association is False
+        assert orca2.vmix_eos_use_config_rho0 is False

@@ -4006,7 +4006,7 @@ class LatLonCGridOceanModel:
                     eos=self.config.eos, eos_linear=self.config.eos_linear,
                     eos_nemo_seos=getattr(self.config, "eos_nemo_seos", None),
                     **({"rho0": self.config.rho_0}
-                       if self.config.eos_depth == "geometric" else {})),
+                       if self.config.eos_depth == "geometric" and self.config.vmix_eos_use_config_rho0 else {})),
             )
         else:
             self._physics_fn = None
@@ -14006,7 +14006,7 @@ class LatLonCGridOceanModel:
                     eos_fn=_mk_eos(eos=_cfg_b.eos,
                                    eos_linear=_cfg_b.eos_linear,
                                    **({"rho0": _cfg_b.rho_0}
-                                      if getattr(_cfg_b, "eos_depth", None) == "geometric"
+                                      if getattr(_cfg_b, "eos_depth", None) == "geometric" and getattr(_cfg_b, "vmix_eos_use_config_rho0", True)
                                       else {})),
                     iwm_fields=_iwm,
                 ).astype(dtype)
@@ -14066,7 +14066,7 @@ class LatLonCGridOceanModel:
                 eos=_cfg_b.eos, eos_linear=_cfg_b.eos_linear,
                 eos_nemo_seos=getattr(_cfg_b, "eos_nemo_seos", None),
                 **({"rho0": _cfg_b.rho_0}
-                   if getattr(_cfg_b, "eos_depth", None) == "geometric" else {}),
+                   if getattr(_cfg_b, "eos_depth", None) == "geometric" and getattr(_cfg_b, "vmix_eos_use_config_rho0", True) else {}),
             )
             # PROGNOSTIC TKE carry: thread the carried TKE + the energy-recycling
             # source into the fallback K-profile solve, and capture the updated
@@ -14436,7 +14436,7 @@ class LatLonCGridOceanModel:
                     eos_fn=_mk_eos_ddm(eos=_cfg_b.eos,
                                        eos_linear=_cfg_b.eos_linear,
                                        **({"rho0": _cfg_b.rho_0}
-                                          if getattr(_cfg_b, "eos_depth", None) == "geometric"
+                                          if getattr(_cfg_b, "eos_depth", None) == "geometric" and getattr(_cfg_b, "vmix_eos_use_config_rho0", True)
                                           else {})),
                 )
                 _dt_dtype = state.T.data.dtype
