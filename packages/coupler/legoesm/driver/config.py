@@ -19,6 +19,8 @@ from pathlib import Path
 from typing import Any, NamedTuple
 
 from legoesm import constants
+from legoesm.core.bulk_flux import (NCAR_CD_CUTOFF_WIDTH, NCAR_DTHV_WIDTH,
+                                      NCAR_NEUTRAL_WIDTH)
 from legoesm.atmosphere.physics.turbulence.surface_layer import (
     C_E_BULK_DEFAULT, C_H_BULK_DEFAULT)
 from legoesm.land import snow_column as _snow_column
@@ -2160,6 +2162,14 @@ class ExperimentConfig(NamedTuple):
     # default; the production deck names both.
     zm_detrain_phase_width_K: float | None = None
     zm_detrain_number_width_kgkg_s: float | None = None
+    # APPENDED LAST (positional order of the fields above unchanged).
+    # Large-Yeager (surface_bulk_scheme="large_yeager", AeroBulk TURB_NCAR)
+    # RULE 5 smooth-switch widths (#2241), threaded into the atmosphere
+    # SurfaceLayerConfig by apply_surface_flux_config; 0.0 = AeroBulk's hard
+    # switch.  large_yeager_cesm and the other schemes never read them.
+    surface_large_yeager_neutral_width: float = NCAR_NEUTRAL_WIDTH
+    surface_large_yeager_dthv_width: float = NCAR_DTHV_WIDTH
+    surface_large_yeager_cd_cutoff_width: float = NCAR_CD_CUTOFF_WIDTH
 
     def _liquid_partition_resolved(self) -> bool:
         """Is CLUBB's cloud-liquid exchange selected, by ANY route?

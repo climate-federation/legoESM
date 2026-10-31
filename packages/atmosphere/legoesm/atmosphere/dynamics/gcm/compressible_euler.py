@@ -100,7 +100,8 @@ from legoesm.grids.vertical import HeightCoordinate, TerrainMetric
 from legoesm.timestepping.split_explicit import SplitExplicitConfig
 from legoesm.timestepping.tridiagonal import thomas_solve_batched
 from legoesm.atmosphere.physics.thermodynamics import sanitize_theta_rho
-from legoesm.atmosphere.physics.turbulence.amd import AMD_FLOOR_WIDTH
+from legoesm.atmosphere.physics.turbulence.amd import (AMD_DENOM_FLOOR_WIDTH,
+                                                        AMD_FLOOR_WIDTH)
 from legoesm.atmosphere.physics.turbulence.vreman import VREMAN_BBETA_GUARD_WIDTH
 from legoesm import constants
 
@@ -475,6 +476,11 @@ class CompressibleEulerConfig(NamedTuple):
                                           # for serial-parity / oracle validation
                                           # runs, at ~5-16% per-step comm cost.
                                           # No effect single-rank or n_ranks==1.
+    # APPENDED LAST (positional order of the fields above unchanged).
+    amd_denom_floor_width: float = AMD_DENOM_FLOOR_WIDTH
+                                          # AMD softplus denominator-floor width
+                                          # [s^-2] (RULE 5 smooth default 10 eps
+                                          # = 2.22e-15; 0.0 = AMR-Wind's hard floor).
 
 
 # ==============================================================================

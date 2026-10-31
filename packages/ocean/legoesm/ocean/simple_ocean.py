@@ -19,7 +19,9 @@ import jax.numpy as jnp
 from legoesm import constants
 from legoesm.core.field import Field
 from legoesm.core.coupling_fields import AtmToSurface
-from legoesm.core.bulk_flux import apply_gustiness, ocean_surface_q_sat
+from legoesm.core.bulk_flux import (NCAR_CD_CUTOFF_WIDTH, NCAR_DTHV_WIDTH,
+                                      NCAR_NEUTRAL_WIDTH, apply_gustiness,
+                                      ocean_surface_q_sat)
 from legoesm.ocean.eos import FreezingPointConfig, slab_freeze_point_K
 
 
@@ -98,6 +100,13 @@ class SimpleOceanConfig(NamedTuple):
     restore_deep: bool = False       # Restore deep layer toward T_deep_ref?
     T_deep_ref: float = 278.0        # Deep restoring target [K]
     tau_deep: float = 365.25 * 86400.0  # Restoring timescale [s] (1 year)
+    # Large-Yeager (bulk_scheme="large_yeager", AeroBulk TURB_NCAR) RULE 5
+    # smooth-switch widths (#2241): in-loop neutral Stanton switch half-width
+    # in zeta_u, first-guess switch half-width in dthv [K], 33 m/s drag-cutoff
+    # band [m/s]; 0.0 = AeroBulk's hard switch.  Read only by that scheme.
+    large_yeager_neutral_width: float = NCAR_NEUTRAL_WIDTH
+    large_yeager_dthv_width: float = NCAR_DTHV_WIDTH
+    large_yeager_cd_cutoff_width: float = NCAR_CD_CUTOFF_WIDTH
 
 
 # ============================================================================
@@ -192,7 +201,7 @@ def _ocean_turbulent_fluxes(
         # "most" = generic iterative MOST with fixed roughness (no Charnock);
         # "coare3"/"large_yeager" = ocean-specific stability-dependent MOST.
         from legoesm.core.bulk_flux import (
-            compute_most_fluxes, surface_reference_state)
+            compute_most_fluxes, large_yeager_widths, surface_reference_state)
         # Model-level forcing: surface-referenced T at its own height (#1818);
         # observed forcing keeps the solver's default reference height.
         T_air, z_kw = forcing.T_lowest, {}
@@ -207,6 +216,7 @@ def _ocean_turbulent_fluxes(
             scheme=config.bulk_scheme,
             gustiness_w_zi=getattr(config, "gustiness_w_zi", None),
             thermo_convention=getattr(config, "thermo_convention", "legoesm"),
+            **large_yeager_widths(config),
         )
         return shflx, lhflx
     raise ValueError(

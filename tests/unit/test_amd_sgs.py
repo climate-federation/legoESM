@@ -23,12 +23,12 @@ _G = ("a11", "a12", "a13", "a21", "a22", "a23", "a31", "a32", "a33")
 
 
 def _nu(floor_width=0.0, **grads):
-    """AMD at the hard limit (floor_width=0, AMR-Wind's exact floor) unless a
-    width is given."""
+    """AMD at the hard limit (both floor widths 0, AMR-Wind's exact floors)
+    unless an output-floor width is given."""
     a = {k: jnp.asarray(grads.get(k, 0.0)) for k in _G}
     return amd_nu_t(a["a11"], a["a12"], a["a13"], a["a21"], a["a22"], a["a23"],
                     a["a31"], a["a32"], a["a33"], _DX, _DY, _DZ, _C,
-                    floor_width=floor_width)
+                    floor_width=floor_width, denom_floor_width=0.0)
 
 
 def test_offdiagonal_one_d_shear_gives_zero():

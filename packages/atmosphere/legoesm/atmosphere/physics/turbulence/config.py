@@ -32,6 +32,9 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, NamedTuple
 
+from legoesm.core.bulk_flux import (NCAR_CD_CUTOFF_WIDTH, NCAR_DTHV_WIDTH,
+                                      NCAR_NEUTRAL_WIDTH)
+
 if TYPE_CHECKING:  # avoid a config <-> clubb import cycle at runtime
     from legoesm.atmosphere.physics.turbulence.clubb import CLUBBConfig
 
@@ -142,6 +145,9 @@ __param_spec__ = {
     "SurfaceLayerConfig": {
         "scheme_key": "atm.turb.SurfaceLayerConfig",
         "excluded": {
+            "large_yeager_neutral_width": "numerics: RULE 5 smoothing width of the Large-Yeager neutral Stanton switch (zeta_u)",
+            "large_yeager_dthv_width": "numerics: RULE 5 smoothing width of the Large-Yeager first-guess stability switch [K]",
+            "large_yeager_cd_cutoff_width": "numerics: RULE 5 smoothing band of the Large-Yeager 33 m/s drag cutoff [m/s]",
             # gustiness_w_zi is no longer spec-eligible: annotated
             # ``float | None`` (None = scheme-native default), and a
             # scheme-enable / BL-depth convention was never trainable anyway.
@@ -378,6 +384,13 @@ class SurfaceLayerConfig(NamedTuple):
     # tau_x/tau_y in compute_surface_fluxes. [Pa]
     prescribed_tau_x_pa: float | None = None
     prescribed_tau_y_pa: float | None = None
+    # Large-Yeager (bulk_scheme="large_yeager", AeroBulk TURB_NCAR) RULE 5
+    # smooth-switch widths (#2241): in-loop neutral Stanton switch half-width
+    # in zeta_u, first-guess switch half-width in dthv [K], 33 m/s drag-cutoff
+    # band [m/s]; 0.0 = AeroBulk's hard switch.  Read only by that scheme.
+    large_yeager_neutral_width: float = NCAR_NEUTRAL_WIDTH
+    large_yeager_dthv_width: float = NCAR_DTHV_WIDTH
+    large_yeager_cd_cutoff_width: float = NCAR_CD_CUTOFF_WIDTH
 
 
 class SmagorinskyConfig(NamedTuple):
