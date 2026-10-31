@@ -967,6 +967,28 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "a rounding-level change on coare3, and the "
                              "genuinely different strong-stable tails there "
                              "are grachev2007_sheba/gryanik2020.")
+    # Large-Yeager (--surface-bulk-scheme large_yeager) RULE 5 smooth-switch
+    # widths (#2241).  Defaults = the ExperimentConfig values (bit-identical);
+    # 0 = AeroBulk's hard switch.  Read only by large_yeager.
+    parser.add_argument("--surface-large-yeager-neutral-width",
+                        dest="surface_large_yeager_neutral_width", type=float,
+                        default=_EXPERIMENT_DEFAULTS.surface_large_yeager_neutral_width,
+                        help="Large-Yeager smoothing half-width of the neutral "
+                             "Stanton-number switch, in zeta_u. 0 = AeroBulk "
+                             "hard switch. Read only by large_yeager.")
+    parser.add_argument("--surface-large-yeager-dthv-width",
+                        dest="surface_large_yeager_dthv_width", type=float,
+                        default=_EXPERIMENT_DEFAULTS.surface_large_yeager_dthv_width,
+                        help="Large-Yeager smoothing half-width of the "
+                             "first-guess stability switch [K of virtual "
+                             "potential temperature difference]. 0 = AeroBulk "
+                             "hard switch. Read only by large_yeager.")
+    parser.add_argument("--surface-large-yeager-cd-cutoff-width",
+                        dest="surface_large_yeager_cd_cutoff_width", type=float,
+                        default=_EXPERIMENT_DEFAULTS.surface_large_yeager_cd_cutoff_width,
+                        help="Large-Yeager smoothing band of the 33 m/s drag "
+                             "cutoff [m/s]. 0 = AeroBulk hard cutoff. Read only "
+                             "by large_yeager.")
     parser.add_argument("--hb-kvf-min", dest="hb_kvf_min", type=float,
                         default=None,
                         help="Free-atmosphere diffusivity floor override "
@@ -3006,6 +3028,9 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         surface_bulk_scheme=args.surface_bulk_scheme,
         surface_stability_scheme=args.surface_stability_scheme,
         surface_gustiness_zi=args.surface_gustiness_zi,
+        surface_large_yeager_neutral_width=args.surface_large_yeager_neutral_width,
+        surface_large_yeager_dthv_width=args.surface_large_yeager_dthv_width,
+        surface_large_yeager_cd_cutoff_width=args.surface_large_yeager_cd_cutoff_width,
         surface_z_ref_model_level=args.surface_z_ref_model_level,
         surface_ocean_q_sfc_saline=args.surface_ocean_q_sfc_saline,
         hb_kvf_min=args.hb_kvf_min,
