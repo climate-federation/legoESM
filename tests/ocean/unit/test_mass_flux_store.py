@@ -1426,6 +1426,8 @@ def test_store_mass_flux_is_the_last_config_field():
             "rk3_stage3_damping_after_geothermal_nemo_order",
             "rk3_stage3_l8_nemo_order",
             "rk3_stage3_l9_eiv_nemo_order",
+            "nemo_qsr_stage3_kmm_source_association",
+            "vmix_eos_use_config_rho0",
             )
     assert fields[-len(tail):] == tail, (
         f"config tail is {fields[-len(tail):]}, expected {tail}; a new field "

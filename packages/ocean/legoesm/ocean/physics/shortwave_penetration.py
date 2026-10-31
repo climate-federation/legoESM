@@ -147,9 +147,15 @@ class ShortwavePenetrationConfig(NamedTuple):
     Parameters
     ----------
     scheme : str
-        Generic Jerlov/RGB/Sweeney or source-named NEMO identity; see module docs.
+        ``"jerlov_2band"`` (default), ``"rgb_chl"``, ``"sweeney_2band"``
+        (FESOM2 / Sweeney 2005 chlorophyll two-band; see module docstring),
+        or the source-named NEMO identities ``"nemo_qsr_2bd"`` /
+        ``"nemo_qsr_rgb"``.  The NEMO names select the same physical kernels
+        while preserving NEMO's full-qsr surface composition.
     water_type : str
-        Jerlov type ("I", "IA", "IB", "II", "III"); default "II".
+        Jerlov water type ("I", "IA", "IB", "II", "III") for the two-band
+        scheme.  Type I = clearest open ocean, Type III = coastal/turbid.
+        Default "II" is a reasonable global average.
     rgb_ir_fraction : float
         ``rgb_chl`` only.  Fraction of net SW in the infrared band absorbed
         in the very-near surface (NEMO ``rn_abs``; ORCA1 default 0.58).  The

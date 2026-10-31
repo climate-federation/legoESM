@@ -465,6 +465,7 @@ def test_the_nemo_testcase_cards_still_require_the_carried_pair():
 
     from legoesm.ocean.fidelity.nemo_testcase_recipe import (
         build_gyre_zco_card,
+        build_gyre_zco_lane_certified_card,
         validate_nemo_testcase_card,
     )
 
@@ -573,6 +574,7 @@ def test_gyre_routing_choices_do_not_leak_to_orca2_tanks_or_vortex():
     from pathlib import Path
     from legoesm.ocean.fidelity.nemo_testcase_recipe import (
         build_gyre_zco_card,
+        build_gyre_zco_lane_certified_card,
         build_lock_exchange_zco_card,
         build_orca2_zps_card,
         build_overflow_zps_card,
@@ -581,10 +583,16 @@ def test_gyre_routing_choices_do_not_leak_to_orca2_tanks_or_vortex():
     )
 
     gyre = build_gyre_zco_card().recipe.model_config
-    assert gyre.physics.vertical_mixing.tke.nemo_sh2_step_entry_ssh is False
-    assert gyre.physics.shortwave_penetration.nemo_qsr_kbb_live_stretch is False
-    assert gyre.nemo_qsr_stage3_kmm_source_association is False
-    assert gyre.vmix_eos_use_config_rho0 is False
+    assert gyre.physics.vertical_mixing.tke.nemo_sh2_step_entry_ssh is True
+    assert gyre.physics.shortwave_penetration.nemo_qsr_kbb_live_stretch is True
+    assert gyre.nemo_qsr_stage3_kmm_source_association is True
+    assert gyre.vmix_eos_use_config_rho0 is True
+
+    lane = build_gyre_zco_lane_certified_card().recipe.model_config
+    assert lane.physics.vertical_mixing.tke.nemo_sh2_step_entry_ssh is False
+    assert lane.physics.shortwave_penetration.nemo_qsr_kbb_live_stretch is False
+    assert lane.nemo_qsr_stage3_kmm_source_association is False
+    assert lane.vmix_eos_use_config_rho0 is False
 
     off_cards = (
         build_lock_exchange_zco_card(),

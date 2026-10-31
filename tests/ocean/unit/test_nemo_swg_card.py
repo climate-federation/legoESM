@@ -232,9 +232,12 @@ def _card_digest(card):
 
 
 def test_parameterisation_keeps_shipped_card_digest_byte_identical(card):
-    # Re-pinned 2026-10-17: the ORCA2 lane's appended config fields and the
-    # deck's explicit rn_bt_alpha=0.07; every non-config input is unchanged.
-    assert _card_digest(card) == "d2bc64535257d2b9"
+    # Re-pinned for the two appended routing fields; state, grid, coordinate,
+    # deck parameters, and every other hashed input remain guarded above.
+    cfg = card.recipe.model_config
+    assert cfg.nemo_qsr_stage3_kmm_source_association is True
+    assert cfg.vmix_eos_use_config_rho0 is True
+    assert _card_digest(card) == "3c4b8b94406b7525"
 
 
 def test_maddison_geometry_honours_domsiz_and_fixed_wind_period():

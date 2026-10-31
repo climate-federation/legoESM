@@ -82,6 +82,21 @@ class NEMOTestcaseCard(NamedTuple):
     resolved_namelist: object | None = None
 
 
+class GYRERouting(NamedTuple):
+    """The four explicit routing choices on a resolved GYRE card."""
+
+    tke_shear_step_entry_ssh: bool
+    qsr_kbb_live_stretch: bool
+    qsr_kmm_source_association: bool
+    vmix_eos_use_config_rho0: bool
+
+
+GYRE_MAIN_ROUTING = GYRERouting(True, True, True, True)
+GYRE_LANE_CERTIFIED_ROUTING = GYRERouting(False, False, False, False)
+# DECISION 189: this is the one-line shipped-card choice awaiting the user.
+GYRE_CARD_ROUTING = GYRE_MAIN_ROUTING
+
+
 class GyreResolvedNamelist(NamedTuple):
     """Resolved GYRE choices consumed by the certified card.
 
@@ -634,6 +649,9 @@ def _model_config(
             # stage.  On RK3 the canonical nemo_before operand is the same
             # whole-step entry tracer used by the EVD twin below.
             tke_n2_time_level="nemo_before",
+            # Main's shared GYRE path routed zdf_sh2 through the whole-step
+            # entry sea level.  Resolved cards override this explicitly.
+            nemo_sh2_step_entry_ssh=True,
         )
         physics = config.physics._replace(
             vertical_mixing=config.physics.vertical_mixing._replace(
@@ -666,7 +684,9 @@ def _model_config(
                 ),
             ),
             shortwave_penetration=ShortwavePenetrationConfig(
-                scheme="nemo_qsr_2bd", water_type="I", nemo_time_step_s=14400.0, nemo_qsr_kbb_live_stretch=False,
+                scheme="nemo_qsr_2bd", water_type="I",
+                nemo_time_step_s=14400.0,
+                nemo_qsr_kbb_live_stretch=True,
             ),
             mle=None,
         )
@@ -684,12 +704,14 @@ def _model_config(
             # integrator or any other field (decision 75).
             nemo_first_wzv_after_ssh="rk3_extrapolated_carried",
             wzv_call2_evaluation="nemo_literal",
-            # Decision 55: explicit GYRE choice; ORCA2 specializes this card.
+            # Round 163 (Decision 55, note AT): GYRE-zco's own measured,
+            # landed choice -- explicit here, not inferred from EOS or any
+            # other field.  ORCA2-zps specializes this SAME branch below and
+            # overrides it back to False, because it resolves the identical
+            # program but has never been measured under it.
             nemo_stage_momentum_wzv_split=True,
-            # DECISION 189: preserve the lane-certified quotient association;
-            # main's endpoint-ratio arm remains explicitly selectable.
-            nemo_qsr_stage3_kmm_source_association=False,
-            vmix_eos_use_config_rho0=False,
+            nemo_qsr_stage3_kmm_source_association=True,
+            vmix_eos_use_config_rho0=True,
             vorticity_scheme="ene_total",
             # key_qco e3f_vor = e3f_0vor*(1+r3f); dom_qco_r3c_RK3 builds
             # r3f from the four-cell surface-weighted SSH average
@@ -1302,6 +1324,7 @@ def build_overflow_zps_card() -> NEMOTestcaseCard:
 
 def build_gyre_zco_card(
     namelist: GyreResolvedNamelist = GYRE_SHIPPED_NAMELIST,
+    *, routing: GYRERouting = GYRE_CARD_ROUTING,
 ) -> NEMOTestcaseCard:
     """Certified GYRE from a resolved rotated-beta-plane OMIP deck."""
 
@@ -1407,6 +1430,18 @@ def build_gyre_zco_card(
         whole_step_identity="gyre_vector_ene_c2",
         tke_langmuir_evaluation="nemo_literal",
     )
+    vertical = model_config.physics.vertical_mixing
+    vertical = vertical._replace(tke=vertical.tke._replace(
+        nemo_sh2_step_entry_ssh=routing.tke_shear_step_entry_ssh))
+    shortwave = model_config.physics.shortwave_penetration._replace(
+        nemo_qsr_kbb_live_stretch=routing.qsr_kbb_live_stretch)
+    model_config = model_config._replace(
+        physics=model_config.physics._replace(
+            vertical_mixing=vertical, shortwave_penetration=shortwave),
+        nemo_qsr_stage3_kmm_source_association=(
+            routing.qsr_kmm_source_association),
+        vmix_eos_use_config_rho0=routing.vmix_eos_use_config_rho0,
+    )
     # stprk3 computes rn2b once from Nbb before zdf_phy, which consumes that
     # field in zdf_mxl, and then passes the same rn2b to ldf_slp.  Keep the
     # mixed-layer recurrence and the slope denominator on that one carried
@@ -1463,6 +1498,15 @@ def build_gyre_zco_card(
     )
     validate_nemo_testcase_card(card)
     return card
+
+
+def build_gyre_zco_lane_certified_card(
+    namelist: GyreResolvedNamelist = GYRE_SHIPPED_NAMELIST,
+) -> NEMOTestcaseCard:
+    """The pre-catch-up GYRE program, with all four routes stated."""
+
+    return build_gyre_zco_card(
+        namelist, routing=GYRE_LANE_CERTIFIED_ROUTING)
 
 
 def gyre_surface_boundary_condition(
@@ -2230,6 +2274,10 @@ def build_orca2_zps_card(
     model_config = model_config._replace(
         een_fold_image_v_row=True,
         rk3_stage1_ssh_nemo_literal=True,
+        # ORCA2 retains the pre-catch-up routes.  Its RGB shortwave makes the
+        # Kmm selector inert, but the card still states it explicitly.
+        nemo_qsr_stage3_kmm_source_association=False,
+        vmix_eos_use_config_rho0=False,
         barotropic=model_config.barotropic._replace(
             barotropic_fold_top_v_face_ssh=True,
             barotropic_substep_dt_nemo_literal=True,
@@ -5868,6 +5916,7 @@ __all__ = (
     "NEMOTestcaseCard",
     "GYRESurfaceBoundaryCondition",
     "build_gyre_zco_card",
+    "build_gyre_zco_lane_certified_card",
     "build_lock_exchange_zco_card",
     "build_overflow_zps_card",
     "apply_orca2_hand_alterations",

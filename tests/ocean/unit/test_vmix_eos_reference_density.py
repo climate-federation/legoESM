@@ -47,15 +47,15 @@ def test_probe_sees_the_reference_density():
     assert gap > 1e3 * _RTOL * _expected("geometric")
 
 
-def test_certified_gyre_and_orca2_keep_prior_rho0_route_selectable():
+def test_certified_gyre_variant_and_orca2_keep_prior_rho0_route_selectable():
     from pathlib import Path
     from legoesm.ocean.eos import make_eos_fn
     from legoesm.ocean.fidelity.nemo_testcase_recipe import (
-        build_gyre_zco_card,
+        build_gyre_zco_lane_certified_card,
         build_orca2_zps_card,
     )
 
-    cards = [build_gyre_zco_card()]
+    cards = [build_gyre_zco_lane_certified_card()]
     deck = Path("/data/abyssal/dbalwada/nemo-testcases-l4/inputs/"
                 "ORCA2_ICE_v5.0.0")
     if deck.is_dir():

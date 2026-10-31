@@ -9152,15 +9152,23 @@ class LatLonCGridOceanModel:
                 # while that arm's shared pipeline remains static.  Keep the
                 # two complete associations selectable without mixing them.
                 # from ``tend.dT_dt`` leaves a false source in Krhs.
-                _r3t_b = (compute_ocean_jacobian(state.eta.data, state.H_bathy.data, _zc) if _cfg_b.physics.shortwave_penetration.nemo_qsr_kbb_live_stretch else
-                           h_k_old[..., 0] / jnp.maximum(_h_ref_ws[..., 0], 1.0e-10))
+                _r3t_b = (
+                    compute_ocean_jacobian(
+                        state.eta.data, state.H_bathy.data, _zc)
+                    if _cfg_b.physics.shortwave_penetration
+                    .nemo_qsr_kbb_live_stretch
+                    else h_k_old[..., 0]
+                    / jnp.maximum(_h_ref_ws[..., 0], 1.0e-10))
                 # Compiled stprk3_stg.f90:215-221 forms Kmm by averaging the
                 # two already-rounded endpoint ratios.  Both the live-
                 # thickness quotient and _qt_12's ratio-of-mean SSH are the
                 # same real number but not the same fp64 composition.
-                _qsr_assoc = getattr(_cfg_b, "nemo_qsr_stage3_kmm_source_association", None)
+                _qsr_assoc = getattr(
+                    _cfg_b, "nemo_qsr_stage3_kmm_source_association", None)
                 if _qsr_assoc is None:
-                    raise ValueError("nemo_qsr_2bd requires an explicit Kmm association")
+                    # Back-compatible resolution: main formed Kmm from the
+                    # source-associated mean before this selector existed.
+                    _qsr_assoc = True
                 if _qsr_assoc:
                     _nemo_qsr_kmm_stretch = nemo_r3t_rk3_stage2_stretch(
                         _zc, state.eta.data, state_new.eta.data, state.H_bathy.data)
@@ -11861,12 +11869,14 @@ class LatLonCGridOceanModel:
                         if _nemo_ws_zdf_eta_kmm is not None
                         else state.eta.data),
                     nemo_zdf_stage_pair=_nemo_ws_zdf_stage_pair,
-                    eta_step_entry=state.eta.data,
+                    eta_step_entry=(
+                        state.eta.data
+                        if _nemo_ws_zdf_eta_kmm is not None
+                        else None),
                     # zdf_sh2 routing is governed inside the implicit solve
-                    # solely by the card's nemo_sh2_step_entry_ssh selector.
-                    # No separate call-site input may silently override it.
-                    # False reproduces the certified lane route; True keeps
-                    # main's step-entry route selectable (Decision 189).
+                    # by the card's selector. An omitted selector retains
+                    # main's WS step-entry route; explicit False reproduces
+                    # the certified lane route (Decision 189).
                     u_now=state.u.data, v_now=state.v.data,
                     effective_K_test_override=_vertical_K_test_override,
                     nemo_aimp_tracer_w=_nemo_ws_aimp_tracer_w,
@@ -11901,7 +11911,10 @@ class LatLonCGridOceanModel:
                         if _nemo_ws_zdf_eta_kmm is not None
                         else state.eta.data),
                     nemo_zdf_stage_pair=_nemo_ws_zdf_stage_pair,
-                    eta_step_entry=state.eta.data,
+                    eta_step_entry=(
+                        state.eta.data
+                        if _nemo_ws_zdf_eta_kmm is not None
+                        else None),
                     u_now=state.u.data, v_now=state.v.data,
                     effective_K_test_override=_vertical_K_test_override,
                     nemo_aimp_tracer_w=_nemo_ws_aimp_tracer_w,
@@ -18880,7 +18893,12 @@ def _nemo_sh2_eta(tke_cfg, *, prognostic, eta_now, eta_step_entry):
     zdf_phy(kstp,Nbb,Nbb,Nrhs) once at step entry (stprk3.f90:185), so with
     ``nemo_sh2_step_entry_ssh`` the shear reads the whole-step entry eta, not
     the stage Kmm eta that dyn_zdf/tra_zdf read through ``eta_now``."""
-    if not getattr(tke_cfg, "nemo_sh2_step_entry_ssh", False):
+    step_entry = getattr(tke_cfg, "nemo_sh2_step_entry_ssh", None)
+    if step_entry is None:
+        # Before the selector existed, RK3-WS supplied a dedicated step-entry
+        # override.  Its presence is the missing-safe legacy discriminator.
+        step_entry = prognostic and eta_step_entry is not None
+    if not step_entry:
         return eta_now
     if not prognostic:
         raise ValueError("nemo_sh2_step_entry_ssh=True requires prognostic "

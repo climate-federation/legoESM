@@ -872,6 +872,7 @@ def run(
         _NEMOWSRK3TestHooks,
     )
     from legoesm.ocean.fidelity.nemo_testcase_recipe import (
+        build_gyre_zco_lane_certified_card,
         build_nemo_testcase_card,
         with_first_wzv_after_ssh,
     )
@@ -912,7 +913,11 @@ def run(
         jax.clear_caches()
         return host
 
-    card = build_nemo_testcase_card(CASE)
+    card = (
+        build_gyre_zco_lane_certified_card()
+        if decision189_routing == "lane"
+        else build_nemo_testcase_card(CASE)
+    )
     # ONE CARD, ONE PROGRAM.  The card resolves its own freshwater pair --
     # real_freshwater (NEMO QCO carries E-P as volume with sfx=0,
     # usrdef_sbc.F90:138-145) with fix_eta_drift=False (decision 35: NEMO has
@@ -920,7 +925,7 @@ def run(
     # certifies is what the card runs.
     # Measurement arm only -- the card still STATES its own after-SSH form.
     cfg = with_first_wzv_after_ssh(card.recipe.model_config, after_ssh_form)
-    if decision189_routing != "card":
+    if decision189_routing not in ("card", "lane"):
         shear_selected = decision189_routing in ("main", "shear-main")
         qsr_selected = decision189_routing in ("main", "qsr-main")
         kbb_selected = decision189_routing in ("main", "kbb-main")

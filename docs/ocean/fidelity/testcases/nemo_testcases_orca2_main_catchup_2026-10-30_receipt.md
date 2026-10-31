@@ -860,3 +860,90 @@ serially, without xdist.  No NEMO executable was run.
 ### Catch-up 3 disposition
 
 `DECISION_NEEDED: GYRE shear/T routing: lane certified vs main's, numbers`
+
+## Catch-up 4 — main-path restoration and named lane card
+
+### Disposition and correction to catch-up 3
+
+Catch-up 3 accidentally made the lane routing the shared GYRE card and
+reported the inherited tail/digest guards as passing before the two new
+`LatLonCGridOceanConfig` fields were appended.  That statement at lines
+526-531 is superseded by this section.  The shared card and missing-field
+resolution now reproduce main `edd34c2446`; the lane-certified program is the
+public `build_gyre_zco_lane_certified_card`.  All four route choices are
+explicit on both cards.  The pending user choice is the single assignment
+`GYRE_CARD_ROUTING = GYRE_MAIN_ROUTING` at
+`packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:97`; changing
+only its right-hand side to `GYRE_LANE_CERTIFIED_ROUTING` flips the shipped
+card.
+
+`nemo_qsr_stage3_kmm_source_association=None` is missing-safe again: it
+resolves to main's source-associated Kmm route instead of raising.  The
+strengthened GYRE test uses a non-uniform sea level and four independent arms
+(lane, Kbb-only, Kmm-only, and omitted-Kmm).  Forcing the stage-3 Kbb
+assignment at
+`packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:9155-9161`
+to ignore its selector made the test fail with 705 unequal active elements;
+the unplanted test passed.  The omitted-Kmm arm is byte-identical to the
+explicit main-Kmm arm.
+
+The following table records effective routes in `(TKE shear, Kbb, Kmm,
+vmix-rho0)` order.  `N/A` means the consuming physics is absent or, for
+ORCA2's Kbb/Kmm columns, the card selects `nemo_qsr_rgb` rather than
+`nemo_qsr_2bd`.  Thus ORCA2 is equal to its lane-parent program in every
+executable row even though its inert final raw selector fields are Kbb `True`
+and Kmm `False`.
+
+| Card | Lane parent `6b97234455` | Main `edd34c2446` | Catch-up 4 HEAD |
+|---|---|---|---|
+| GYRE shared | `(F, F, F, F)` | `(T, T, T, T)` | `(T, T, T, T)` |
+| GYRE lane variant | `(F, F, F, F)` program | not named | `(F, F, F, F)` |
+| ORCA2 | `(T, N/A, N/A, F)` | `(T, N/A, N/A, T)` | `(T, N/A, N/A, F)` |
+| Tanks (LOCK_EXCHANGE, OVERFLOW) | `(N/A, N/A, N/A, N/A)` | same | same |
+| VORTEX (zco and SMT, flux and vector) | `(N/A, N/A, N/A, N/A)` | same | same |
+| SWG | `(F, F, F, F)` | `(T, T, T, T)` | `(T, T, T, T)` |
+
+The final four-step residual artifacts must retain both established byte
+equalities: shared GYRE equals main with SHA-256
+`78916e2ccfbae253739ef8e18b33731e5e3935d912bd1e6676a7bdeb92ed5158`,
+and the named lane variant equals the lane parent with SHA-256
+`04c7124c24efcbe7dd9b1a33cfe8fcd6c75bee0d99c20095b7b4d85f82c8f374`.
+
+### Guard and citation repair
+
+The append-only config guards now include both new tail fields.  The VORTEX
+and SWG digest tests were re-pinned while explicitly asserting the fields'
+resolved values; no digest assertion was removed or weakened.  Focused final
+pre-commit results were `80 passed, 3 skipped` for mass flux, `16 passed` for
+prescribed flow, `85 passed` for VORTEX, and `157 passed` for SWG.  Main's
+previously failing GYRE shear test passed unmodified.
+
+The explanatory shortwave docstrings and the Decision-55 GYRE comment removed
+by `237e598c44` are restored.  The occurrence-aware citation re-anchor updated
+the audited receipts and map, corrected the changed range extents, and left
+the unrelated `gridladder_vmix/nemo_testcase_recipe.py` source untouched.  The
+map's independent endpoint-shift audit returns zero failures.
+
+### Acquisition needed at final HEAD
+
+The operator reported both rung-10 labels at `e06de06124` as 200/200
+`BIT_EXACT`, but the final commit needs fresh provenance.  The commands below
+are deliberately not executed in this authoring lane because this task also
+forbids writing `si3_rounds/*`; the operator must run them from a clean final
+checkout.  They run legoESM against admitted data and do not launch NEMO.
+
+```bash
+ORCA2_CATCHUP_HEAD="$(git rev-parse HEAD)"
+test -z "$(git status --porcelain)"
+env CUDA_VISIBLE_DEVICES="" JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 PYTHONPATH=packages/core:packages/ocean:packages/atmosphere:packages/coupler:packages/ice:packages/land:packages/ml:packages/tools:src taskset -c 0-7 python scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round341_rescore_walk_gate.py --measure --rung rung10 --label given_nemo_entry --arm candidate --deck-root /data/abyssal/dbalwada/nemo-testcases-l4/inputs/ORCA2_ICE_v5.0.0 --twin-a /data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round5/acquisition/orca1ice_surface_entry_every_step_a_np2 --expect-commit "$ORCA2_CATCHUP_HEAD" --output /data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/orca2_r347/final2/orca2_r347_final_rung10_given_nemo_entry.json
+env CUDA_VISIBLE_DEVICES="" JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 PYTHONPATH=packages/core:packages/ocean:packages/atmosphere:packages/coupler:packages/ice:packages/land:packages/ml:packages/tools:src taskset -c 0-7 python scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round341_rescore_walk_gate.py --measure --rung rung10 --label independent --arm candidate --deck-root /data/abyssal/dbalwada/nemo-testcases-l4/inputs/ORCA2_ICE_v5.0.0 --twin-a /data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round5/acquisition/orca1ice_surface_entry_every_step_a_np2 --expect-commit "$ORCA2_CATCHUP_HEAD" --output /data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/orca2_r347/final2/orca2_r347_final_rung10_independent.json
+```
+
+### Choice ledger
+
+- ASKED: preserve main's shared GYRE/default behavior; expose the lane program
+  as a fully explicit named card; repair the blind selector test, strict
+  guards, restored prose, citations, verification, and acquisition commands.
+- UNASKED: none.
+
+`DECISION_NEEDED: GYRE shear/T routing: lane certified vs main's, numbers`
