@@ -165,8 +165,9 @@ always in the bottom layer, where legoESM deposits the light reaching the
 seabed while MOM6 spreads it over the column (a KNOWN DIFFERENCE of the
 deposit kernel, not of ePBL); 6.2e-3 / 6.1e-3 over levels 0-48 (at level 48);
 1.3e-3 at the surface.  Before the fix (ePBL ignoring the shortwave) the gap
-was 0.27-0.44 degC at 10-11 m.  The stored-gap test for these cases is
-pending a choice of metric (issue #2178).
+was 0.27-0.44 degC at 10-11 m.  `test_epbl_mom6_oracle.py` stores each
+case's per-level |T_legoESM - T_MOM6| vector (50 values) to 1e-6 relative
+(1e-12 degC floor).
 
 legoESM side:
 
