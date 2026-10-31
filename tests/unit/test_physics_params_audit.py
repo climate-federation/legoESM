@@ -101,9 +101,8 @@ class TestConvectionAudit:
     def test_emanuel_alpha_closure(self):
         from legoesm.atmosphere.physics.convection.emanuel import emanuel_convection
         from legoesm.atmosphere.physics.convection.config import EmanuelConfig
-        # ``cu_coefficient`` belonged to the retired single-sigmoid surrogate
-        # (it now raises when set).  Audit AD-reachability of the CONVECT
-        # closure slope ALPHA instead.  The shared column convects from rest.
+        # Audit AD-reachability of the CONVECT closure slope ALPHA
+        # (``cu_coefficient`` is read only with ``enable_cmt``).  The shared column convects from rest.
         T, q_v, p_full, p_half = _column()
 
         def loss(x):

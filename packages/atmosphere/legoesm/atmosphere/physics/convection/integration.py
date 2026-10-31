@@ -246,7 +246,8 @@ def convection_scheme_traits(scheme_name: str) -> ConvectionSchemeTraits:
             "zhang_mcfarlane", "kain_fritsch", "emanuel", "tiedtke",
             "bechtold",
         ),
-        is_cmt_capable=scheme_name in ("zhang_mcfarlane", "tiedtke", "bechtold"),
+        is_cmt_capable=scheme_name in ("zhang_mcfarlane", "tiedtke", "bechtold",
+                                       "emanuel"),
         is_w_grid_consumer=scheme_name in ("kain_fritsch",),
         is_stochastic=scheme_name in ("bechtold",),
         is_mc_consumer=scheme_name in ("tiedtke", "bechtold"),
@@ -784,6 +785,17 @@ def _make_hydrostatic_convection(
                 }
                 if master_key_new is not None:
                     conv_prog_out["prng_key"] = master_key_new
+            elif scheme_name == "emanuel":
+                # Emanuel: CONVECT FU/FV (read only with enable_cmt), no
+                # ZM/Tiedtke-specific kwargs.
+                conv_out, prog_new_profile = conv_fn(
+                    T=T_col, q_v=q_v_col,
+                    p_full=p_full_col, p_half=p_half_col,
+                    conv_prog_profile=prog_in,
+                    dt=dt, config=scheme_config,
+                    u=u_col, v=v_col,
+                )
+                conv_prog_out = prog_new_profile
             elif is_cmt_capable:
                 # Tiedtke also consumes moisture_convergence; ZM does
                 # not (its signature lacks the kwarg).
@@ -1072,8 +1084,9 @@ def _make_hydrostatic_convection(
 
         # Convective momentum transport (CMT): use the scheme's optional
         # ``du_dt_conv``/``dv_dt_conv`` when present (Zhang-McFarlane,
-        # Tiedtke, Bechtold).  Schemes that do not produce CMT (the
-        # existing five plus Kain-Fritsch and Emanuel) leave these as
+        # Tiedtke, Bechtold, and Emanuel with enable_cmt).  Schemes that do
+        # not produce CMT (the existing five plus Kain-Fritsch, and Emanuel
+        # with enable_cmt off) leave these as
         # ``None`` and the bridge zero-fills.  On MPAS where the
         # prognostic ``u`` lives on edges and ``state.v is None`` we
         # do not return a ``dv_dt`` Field — the orchestrator's
@@ -1406,6 +1419,17 @@ def _make_nonhydrostatic_convection(
                 }
                 if master_key_new is not None:
                     conv_prog_out["prng_key"] = master_key_new
+            elif scheme_name == "emanuel":
+                # Emanuel: CONVECT FU/FV (read only with enable_cmt), no
+                # ZM/Tiedtke-specific kwargs.
+                conv_out, prog_new_profile = conv_fn(
+                    T=T_col, q_v=q_v_col,
+                    p_full=p_full_col, p_half=p_half_col,
+                    conv_prog_profile=prog_in,
+                    dt=dt, config=scheme_config,
+                    u=u_col, v=v_col,
+                )
+                conv_prog_out = prog_new_profile
             elif is_cmt_capable:
                 if is_mc_consumer:
                     conv_out, prog_new_profile = conv_fn(
@@ -1836,6 +1860,17 @@ def _make_spectral_pe_convection(
                 }
                 if master_key_new is not None:
                     conv_prog_out["prng_key"] = master_key_new
+            elif scheme_name == "emanuel":
+                # Emanuel: CONVECT FU/FV (read only with enable_cmt), no
+                # ZM/Tiedtke-specific kwargs.
+                conv_out, prog_new_profile = conv_fn(
+                    T=T_col, q_v=q_v_col,
+                    p_full=p_full_col, p_half=p_half_col,
+                    conv_prog_profile=prog_in,
+                    dt=dt, config=scheme_config,
+                    u=u_col, v=v_col,
+                )
+                conv_prog_out = prog_new_profile
             elif is_cmt_capable:
                 # CMT-capable, non-stochastic profile schemes — ZM and
                 # Tiedtke (Bechtold is stochastic and caught above).
@@ -1894,9 +1929,8 @@ def _make_spectral_pe_convection(
                 conv_prog_out = prog_new_profile
             else:
                 # Profile-prognostic schemes that take neither winds
-                # nor MC (Emanuel).  Pre-fix this branch passed ``u``
-                # and ``v`` unconditionally, which raised TypeError on
-                # Emanuel's wind-free leaf signature.
+                # nor MC (none at present: Emanuel has its own branch
+                # above since #2266).
                 conv_out, prog_new_profile = conv_fn(
                     T=T_col, q_v=q_v_col,
                     p_full=p_full_col, p_half=p_half_col,

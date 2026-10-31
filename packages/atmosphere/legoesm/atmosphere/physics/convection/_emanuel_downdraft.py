@@ -182,6 +182,7 @@ class EmanuelDowndraftOutput(NamedTuple):
     dT_dt: jax.Array
     dq_v_dt: jax.Array
     precip_mm_day: jax.Array
+    duv_dt: jax.Array = None   # (2, ncol, nlev) FU/FV terms, when winds given
 
 
 def _safe_sqrt(x: jax.Array) -> jax.Array:
@@ -296,6 +297,7 @@ def emanuel_downdraft(
     dhdp_sharpness: float,
     mp_sharpness: float,
     taper_band_sharpness: float,
+    winds: jax.Array | None = None,
 ) -> EmanuelDowndraftOutput:
     """Diagnose the precipitating downdraft and its tendencies.
 
@@ -328,6 +330,9 @@ def emanuel_downdraft(
         sharpness of ``MAX(AFAC, 0)`` [1], ``MAX(DHDP, dhdp_min)``
         [hPa kg/J], the ``MP`` QP branches [m^2 s/kg] and the taper band
         [1/Pa].  ``math.inf`` is the oracle for each.
+    winds : optional (2, ncol, nlev) SURFACE-FIRST (u, v) [m/s]: the shaft's
+        UP/VP (oracle 800-810) are carried with QP's branch weights and the
+        FU/FV terms (oracle 850-851, 930-933) returned as ``duv_dt``.
     """
     _ncol, nlev = T.shape
     g = constants.g
@@ -398,7 +403,9 @@ def emanuel_downdraft(
     # Sequential: level i needs WATER(i+1), WT(i+1), MP(i+1), QP(i+1).  In
     # surface-first order that is DESCENDING index, so the scan runs reversed.
     def step(carry, x):
-        water_up, wt_up, mp_up, qp_up, anchor = carry
+        water_up, wt_up, mp_up, qp_up, anchor, wp_up = carry
+        w_i, w_below_i = x[-2:]
+        x = x[:-2]
         (T_i, q_i, qs_i, wt_i, coeff_i, sigt_i, dph_i, dph_below_i,
          dp_below_i, wdtrain_i, ph_i, lv_i, h_i, h_below_i, gz_i, gz_up_i,
          T_up_i, lv_up_i, qs_below_i, qp_top_i, surf_i, top_i, above_i,
@@ -457,6 +464,16 @@ def emanuel_downdraft(
         # The two differ by one level, and using the carry here would feed the
         # next step a shifted QP(I+1) that still runs and still looks sane.
         qp_i = jnp.where(top_i, qp_top_i, qp_new)
+        # UP/VP (oracle 800-801, 809-810): same branches as QP, no clip;
+        # unassigned (and at INB) they keep the initialisation U(I-1).
+        wp_mix = wp_up * rat + w_i * (1.0 - rat)
+        if _hard(mp_sharpness):
+            wp_new = jnp.where(w_mix > 0.5, wp_mix,
+                               jnp.where(w_desc > 0.5, wp_up, w_below_i))
+        else:
+            wp_new = w_mix * wp_mix + (1.0 - w_mix) * (
+                w_desc * wp_up + (1.0 - w_desc) * w_below_i)
+        wp_i = jnp.where(top_i | above_i, w_below_i, wp_new)
 
         # Above INB nothing runs: the DO 70 initialisations stand.
         z0 = jnp.zeros_like(mp_i)
@@ -466,21 +483,27 @@ def emanuel_downdraft(
         evap_i = jnp.where(above_i, z0, evap_i)
         qp_i = jnp.where(above_i, qp_top_i, qp_i)
 
-        return ((water_i, wt_i, mp_i, qp_i, anchor),
-                (mp_i, qp_i, evap_i, water_i))
+        return ((water_i, wt_i, mp_i, qp_i, anchor, wp_i),
+                (mp_i, qp_i, evap_i, water_i, wp_i))
 
     # Carry above cloud top: WATER=0, WT=OMTSNOW, MP=0 (oracle 478-481) and
     # QP(INB+1)=Q(INB) from the QP initialisation at line 501.
     zeros = jnp.zeros_like(T[:, 0])
-    carry0 = (zeros, jnp.full_like(zeros, omtsnow), zeros, q[:, -1], zeros)
+    # Winds: a size-0 leading axis when absent (no extra work, same scan).
+    w = jnp.zeros((0,) + T.shape, T.dtype) if winds is None else winds
+    w_below = jnp.concatenate([w[..., :1], w[..., :-1]], axis=-1)
+    carry0 = (zeros, jnp.full_like(zeros, omtsnow), zeros, q[:, -1], zeros,
+              w[..., -1])
     xs = (T, q, qs, wt, coeff, sigt, dph, dph_below, dp_below, wdtrain,
           ph_hpa, lv, h_dry_static, h_below, gz, gz_above, T_above, lv_above,
           qs_below, _below(q), jnp.broadcast_to(is_surface, T.shape),
           jnp.broadcast_to(is_top, T.shape), jnp.broadcast_to(is_above, T.shape),
           ramp, inside, jnp.broadcast_to(is_jtt, T.shape))
-    xs = tuple(jnp.moveaxis(a, 1, 0) for a in xs)
+    xs = tuple(jnp.moveaxis(a, 1, 0) for a in xs) + tuple(
+        jnp.moveaxis(a, -1, 0) for a in (w, w_below))
     _carry, out = lax.scan(step, carry0, xs, reverse=True)
-    mp, qp, evap, water = (jnp.moveaxis(a, 0, 1) for a in out)
+    mp, qp, evap, water = (jnp.moveaxis(a, 0, 1) for a in out[:4])
+    wp = jnp.moveaxis(out[4], 0, -1)
 
 
     # -- 4. Whole-downdraft gate (oracle 717: IF(EP(INB).LT.1e-4) skip) ----
@@ -491,6 +514,7 @@ def emanuel_downdraft(
         / ep_gate_width)
     mp = mp * gate
     qp = qp * gate + q * (1.0 - gate)
+    # UP/VP are not blended with the gate (open reviewer split): MP carries it.
     evap = evap * gate
     water = water * gate
 
@@ -518,7 +542,14 @@ def emanuel_downdraft(
     precip_mm_day = (wt[:, 0] * sigd * water[:, 0] * _SEC_PER_DAY
                      * 1.0e3 / (_ROWL_ORACLE * g))
 
+    duv_dt = None
+    if winds is not None:
+        wp_above = jnp.concatenate([wp[..., 1:], wp[..., -1:]], axis=-1)
+        duv_dt = (g * (mp_above * (wp_above - w) - mp * (wp - w_below))
+                  * dpinv * _PA_TO_HPA)
+
     return EmanuelDowndraftOutput(
         mp=mp, qp=qp, evap=evap, water=water, wt=wt,
         dT_dt=dT_dt, dq_v_dt=dq_v_dt, precip_mm_day=precip_mm_day,
+        duv_dt=duv_dt,
     )

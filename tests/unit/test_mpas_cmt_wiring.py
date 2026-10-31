@@ -21,9 +21,10 @@ jax.config.update("jax_enable_x64", True)
 
 import jax.numpy as jnp  # noqa: E402
 import numpy as np  # noqa: E402
+import pytest  # noqa: E402
 
 from legoesm.atmosphere.physics.convection.config import (  # noqa: E402
-    BechtoldConfig, ConvectionConfig, ZhangMcFarlaneConfig)
+    BechtoldConfig, ConvectionConfig, EmanuelConfig, ZhangMcFarlaneConfig)
 
 # The Voronoi test mesh carries no land fraction: an aquaplanet, chosen explicitly.
 _ZM_AQUA = ZhangMcFarlaneConfig(land_fraction="none")
@@ -75,12 +76,13 @@ def _state(mesh):
     return state, sigma
 
 
-def _run(enable_cmt, n_calls=8):
+def _run(enable_cmt, n_calls=8, scheme="bechtold"):
     mesh = create_voronoi_mesh(3, lloyd_iterations=3)
     state, sigma = _state(mesh)
+    sub = (dict(bechtold=BechtoldConfig(enable_cmt=enable_cmt)) if scheme == "bechtold"
+           else dict(emanuel=EmanuelConfig(enable_cmt=enable_cmt)))
     fn = make_convection_physics(
-        ConvectionConfig(scheme="bechtold", bechtold=BechtoldConfig(enable_cmt=enable_cmt),
-                         mpas_cmt=enable_cmt),
+        ConvectionConfig(scheme=scheme, mpas_cmt=enable_cmt, **sub),
         model_type="mpas", dt=600.0)
     prog, tend = None, None
     for _ in range(n_calls):
@@ -91,16 +93,18 @@ def _run(enable_cmt, n_calls=8):
     return mesh, np.asarray(tend.du_dt.data), np.asarray(out["conv_precip"])
 
 
-def test_convection_cmt_reaches_mpas_edge_winds():
-    mesh, du, pconv = _run(True)
+@pytest.mark.parametrize("scheme", ["bechtold", "emanuel"])
+def test_convection_cmt_reaches_mpas_edge_winds(scheme):
+    mesh, du, pconv = _run(True, scheme=scheme)
     assert du.shape == (mesh.nEdges, NLEV)
     assert np.all(np.isfinite(du))
     assert pconv.max() > 1e-7, "fixture must convect or the test is vacuous"
     assert np.abs(du).max() > 0.0
 
 
-def test_convection_cmt_off_gives_exact_zeros_on_the_edges():
-    mesh, du, _ = _run(False)
+@pytest.mark.parametrize("scheme", ["bechtold", "emanuel"])
+def test_convection_cmt_off_gives_exact_zeros_on_the_edges(scheme):
+    mesh, du, _ = _run(False, scheme=scheme)
     assert du.shape == (mesh.nEdges, NLEV)
     assert np.all(du == 0.0)
 
