@@ -13401,6 +13401,14 @@ _reanchor(
     anchors=['e_s_new = _cumulative_remap(zh_s, [sr(e * h) for e, h in zip(ze_s, zh_s)], nlay_s, sr)',
              (')', 556), 1],
 )
+_reanchor(
+    'packages/ice/legoesm/ice/bitz_lipscomb.py:2149',
+    'packages/ice/legoesm/ice/bitz_lipscomb.py:2153',
+)
+_reanchor(
+    'packages/ice/legoesm/ice/bitz_lipscomb.py:2109-2111',
+    'packages/ice/legoesm/ice/bitz_lipscomb.py:2113-2115',
+)
 
 UNAUDITED_ROUNDS = ("1-24 -- hand-checked only; their citations are not in "
                     "CITATION_MAP and this gate does not read them")

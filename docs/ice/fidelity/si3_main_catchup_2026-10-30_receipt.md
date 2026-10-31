@@ -227,7 +227,7 @@ block, recorded once here.
 
 | # | File / hunk | Newer main changed | SI3 first parent changed | Kept | Why |
 |---:|---|---|---|---|---|
-| C2-1 | `packages/core/legoesm/core/bulk_flux.py` H01 (import block) | added `positive_part_c1` beside `smoothstep_c1` | retained the certified NEMO source-rounding alias `sr` beside `smoothstep_c1` | imported all three independent helpers | all three names have distinct live consumers; composing the imports preserves both parents without changing selection |
+| C2-1 | `packages/core/legoesm/core/bulk_flux.py` H01 (import block) | added `positive_part_c1` beside `smoothstep_quintic` | retained the certified NEMO source-rounding alias `sr` beside `smoothstep_quintic` | imported all three independent helpers | all three names have distinct live consumers; composing the imports preserves both parents without changing selection |
 
 Catch-up 2 no-conflict semantic risks:
 
@@ -270,8 +270,8 @@ These main changes touch ocean/NEMO paths used by, or immediately surrounding, t
 - `packages/ocean/legoesm/ocean/timestep.py` — main changes generic time-step routing adjacent to the certified RK3 path.
 - `config/templates/ocean/*.yaml` — main updates shipped ocean templates; none silently selects a certified private arm.
 - Added/changed SWG, TSUNAMI, GYRE-hires, VORTEX, and ORCA fidelity scripts/tests under `scripts/validate/ocean_fidelity/testcases/` and `tests/ocean/fidelity/` — retained wholesale; these are semantic-risk controls even where no production hunk conflicted.
-- `tests/ocean/fidelity/test_post_20261029_provenance_sha_gate.py` — the lane's prospective gate initially treated the catch-up merge's independently authored second-parent history as new lane evidence; it now selects first-parent-authored lines by blame, includes novel combined-merge resolutions, and carries an unchanged SHA token only when the same token occupies the same original line in the authoring commit's first parent (merge or ordinary citation-only re-anchor).  Its planted unresolved-SHA and wrong-file-digest controls are unchanged.
-- `packages/ice/legoesm/ice/{config.py,sea_ice.py}` and `scripts/run/run_omip_core2.py` — main's precipitation-closure additions changed the response pytree and pond/snow freshwater paths for every SI3 caller despite no textual conflict.  Per Decision 190, the `core2_precipitation_closure` selector defaults on everywhere.  Both CORE-II production constructors retain their explicit selections, while certified NEMO-comparison configurations need no opt-out.  Main's test remains unmodified and uses the default.
+- `tests/ocean/fidelity/test_post_20261029_provenance_sha_gate.py` — the lane's prospective gate initially treated the catch-up merge's independently authored second-parent history as new lane evidence.  Its later one-hop exemption was also too weak: a token could be re-edited, copied or retargeted on the same line, or moved between lines and then evade validation.  The exemption now maps the same logical line through every first-parent revision back to the pre-cutoff base and requires the same token at every revision.  Three committed bypass plants fail inheritance, while a same-line citation-only re-anchor remains valid.
+- `packages/ice/legoesm/ice/{config.py,sea_ice.py}` and `scripts/run/run_omip_core2.py` — main's precipitation-closure additions changed the response pytree and pond/snow freshwater paths for every SI3 caller despite no textual conflict.  Per Decision 190, the `core2_precipitation_closure` selector defaults on.  Both CORE-II production constructors retain their explicit selections.  The nine certified NEMO-comparison pond/remap configurations whose bits could move are explicitly pinned False below; main's precipitation-routing test deliberately retains and exercises the committed True default.
 
 ## Citation reconciliation
 
@@ -306,57 +306,77 @@ The merged gate retains both parents’ independent maps. All moved citations we
 - The certified O12 parent/current comparison plus main's two CORE-II rain
   closure regressions emit `3 passed in 21.43s` after adding the explicit
   precipitation-closure selector.
-- The clean merged-tree default ice selection initially emitted
-  `6 failed, 847 passed, 2 skipped, 2 deselected, 1 xfailed` in `4762.16s`.
-  One failure is the unchanged lane-parent O7 `sum_first_category` planted
-  control.  The other five were closure expectations obscured during the
-  original merge by fixture opt-ins.  This follow-up restores main's
-  `test_sea_ice_precip_routing.py` unchanged: it emits
-  `4 failed, 3 passed in 2.63s` on the merge and `7 passed in 2.49s` on
-  standalone newer main.  The False default remains unchanged by instruction.
+## Decision 190 follow-up measurements and fixes
 
-## Follow-up test adaptations
+1. **Committed-default pond routing.**  With the committed True default,
+   `ponds.scheme="si3_lev"` production steps bypassed the certified pond-rain
+   branch.  A serial, fresh-process run of every `tests/ice/**/test_si3_o*.py`
+   and `test_nemo_si3_*.py` file collected 23 files and emitted
+   `416 passed, 1 failed, 2 deselected`; the only failure was O12
+   `test_m6_parent_commit_vs_current_across_all_other_callers`, at response
+   leaf 17 (`freshwater_flux`).  The earlier "O8–O16 30 passed" was a selected
+   master-scorer run, not the requested filename-wide run, so it never
+   collected O12 or O13.  The following nine NEMO-comparison configurations
+   are now explicitly False, and only these configurations are opted out:
+   O12 production wiring, lid restart, multicategory JPL5, Decision 184c run,
+   lid-on one- and five-category validation, lid-off one- and five-category
+   validation, and the O13 production remap call-site.  The four O12
+   parent/current control configurations (slab, legacy dynamics, v2 one
+   category, and v2 five categories) are explicitly False on both sides, so
+   the control continues to prove that the certified round changed nothing
+   else.  The final filename-wide result is recorded below.
 
-Main's two Bitz-Lipscomb regressions were preserved, not deleted or weakened.
-The production-step test now constructs `SI3ThermoConfig()` and passes the
-lane-required `si3=si3` argument at both call sites.  The remap-only regression
-was renamed from `test_piecewise_remap_reverse_mode_finite_at_zero_thickness`
-to `test_cumulative_remap_reverse_mode_finite_at_zero_thickness` and invokes
-the lane's live `_cumulative_remap(h_old, content_old, 3,
-nemo_source_round)` instead of reviving main's deleted `_piecewise_remap`.
-Its material assertion is unchanged: every cotangent is finite and the
-zero-thickness cotangent is exactly zero.  The file emits
-`10 passed in 23.75s`.
+2. **Complete inactive-column AD guard.**  On a 64-column batch with eight
+   open-water columns, gradients of `sum(h_ice * concentration)` with respect
+   to the seven shared scalar inputs `(concentration, qns_ice, qsr_ice,
+   dqns_ice, qtr_ice_top, t_bottom, snow_precipitation)` were finite only 1/7
+   on the merge (only `qns_ice`) and 7/7 on main.  Guarding every state and
+   forcing leaf at entry restores 7/7.  Main's gradient vector is
+   `(112.15480618544086, -1.418502551029677e-11,
+   -1.418502551029677e-11, 5.5976408980624675e-11,
+   -8.668037835921993e-05, 0.21751529753232843, 0.0)`; the fixed tree matches
+   to floating-point roundoff, including `t_bottom = 0.2175152975323284`.
+   Thus the review patch's 0.02% `t_bottom` drift is not present.
 
-The certified O8–O16 scorer then emits `30 passed in 676.42s`, including all
-representative zero-ULP nodes and the no-duplicate-remap AST gate.  This proves
-that the forward-identity AD guards do not change any certified forward bit.
+3. **Non-vacuous AD plants.**  The old remap fixture stayed green without its
+   guard.  It now uses the physical sub-epsilon thickness
+   `(0, 0, 1e-300)` with content equal to enthalpy times thickness.  Removing
+   the remap guard produces three NaN cotangents and fails its test.  Removing
+   the entry guard makes the dedicated inactive-`h_ice` cotangent and the
+   seven-input batch tests fail (`2 failed`); restoring it makes inactive
+   cotangents zero and live cotangents one.
 
-## Forced-True precipitation experiment
+4. **Provenance SHA history.**  The one-hop exemption accepted all three
+   reported bypass classes.  The replacement walks to the pre-cutoff base and
+   requires token continuity on the mapped line at every revision.  Committed
+   plants cover later re-editing, same-line copy/retargeting, and a moved
+   token; a fourth control proves same-line citation-only edits remain valid.
+   The focused full gate emits `1516 passed in 18.83s` before the final clean
+   checkout rerun.
 
-For measurement only, `SeaIceConfig.core2_precipitation_closure` was changed
-locally from False to True, the complete named D5/O1–O16-through-production
-selection was run serially, and the edit was immediately reversed.  No knob
-change is committed.  Results by certified test file were:
+5. **CEN2 certified direct callers.**  The ORCA2 round-257 writer gate and
+   GYRE round-72 tracer-stage probe now pass
+   `_certified_nemo_storage=True` explicitly.  Their wrappers emit
+   `8 passed in 1.11s` and `2 passed in 0.41s`, respectively.
 
-| Certified test | Collected | Forced-True result |
-|---|---:|---|
-| D5 `test_nemo_si3thd_d5_platform_probe.py` | 22 | PASS — every selected node |
-| O1 `test_nemo_si3_o1_orca2_sas_gate.py` | 15 | PASS — every selected node |
-| O2 `test_nemo_si3_o2_orca2_sas_gate.py` | 12 | PASS — every selected node |
-| O3 `test_si3_o3_itd_fit.py` | 10 | PASS — every selected node |
-| O4 `test_nemo_si3_o4_prather_acquisition.py` | 8 | PASS — every selected node, with repository root in `PYTHONPATH` |
-| O5 `test_si3_o5_strength_aevp.py` | 22 | PASS — every selected node |
-| O6 `test_si3_o6_rdgrft_cor.py` | 29 | PASS — every selected node |
-| O7/surface `test_si3_surface.py` | 25 | FAIL — `1 failed, 22 passed, 1 skipped, 1 xfailed in 40.67s`; only `test_production_path_plants_fire[sum_first_category]`, reproduced at the lane parent |
-| O8–O16 `test_nemo_si3_o8_o12_master_scorer.py` | 30 | PASS — `30 passed in 676.42s` |
-| production finalization `test_si3_finalize.py` | 8 | PASS — `8 passed in 29.97s` |
+6. **Slow parent controls.**  Project addopts deselect both controls under an
+   ordinary run.  Explicit final-HEAD `-m slow` results are recorded below.
 
-The first all-files process accumulated a large JAX compilation cache and
-aborted itself with exit 134 during O15/O16 after 145 tests.  The affected
-scorer was rerun in a fresh serial process and passed 30/30; the two apparent
-plant failures before the abort also passed there.  They are therefore not
-semantic failures and no process was signalled or killed.
+## Final clean-checkout verification
+
+| Selection | Final line |
+|---|---|
+| Every requested `test_si3_o*.py` / `test_nemo_si3_*.py` file | PENDING |
+| `test_bitz_lipscomb.py` | PENDING |
+| `test_sea_ice_precip_routing.py` | PENDING |
+| `test_si3_surface.py` | PENDING |
+| Certified O8–O16 exactness scorer | PENDING |
+| O5 slow parent/current control | PENDING |
+| O6 slow merge-parent/current control | PENDING |
+| CEN2 direct-caller wrappers | PENDING |
+| Landing battery | PENDING |
+| Receipt citation gate | PENDING |
+| Provenance SHA gate | PENDING |
 
 ## Failure inventory and attribution
 
@@ -365,16 +385,13 @@ Every observed stable failure is classified here.
 | Test node(s) | Classification | Disposition / cause |
 |---|---|---|
 | `test_si3_surface.py::test_libm_pow_matches_glibc_and_differentiates` | merge-introduced, fixed here | original merge dereferenced lazy `_LIBM=None`; cherry-picked `e4be5cee4e29aa2c71bf5802e2ccee7df5ca0fb9`, using `glibc_libm().pow` |
-| `test_bitz_lipscomb.py::test_si3_column_step_reverse_mode_finite_on_open_water_and_bare_ice` | merge-introduced, fixed here | restored finite inactive `qns_ice`/`h_ice` reverse paths with forward-identity gather guards and supplied the lane-required `si3` argument |
-| main's remap-only Bitz regression (now `test_cumulative_remap_reverse_mode_finite_at_zero_thickness`) | merge-introduced, fixed here | applied main's F3 guard intent to the lane's live cumulative remap; no deleted duplicate helper was restored |
+| `test_bitz_lipscomb.py` open-water reverse-mode regressions | merge-introduced, fixed here | guarded every state and forcing leaf at column-step entry; the seven shared gradients match main and the dedicated inactive-`h_ice` plant is non-vacuous |
+| main's remap-only Bitz regression (now `test_cumulative_remap_reverse_mode_finite_at_zero_thickness`) | merge-introduced, fixed here | applied main's F3 guard intent to the lane's live cumulative remap and replaced the vacuous fixture; no deleted duplicate helper was restored |
 | landing battery KPP validation-order node recorded above | merge-introduced, fixed in the original catch-up | main closure evaluation ran before the lane's unchanged fail-closed refusal; ordering was corrected and the node passed |
 | 15 nodes in `test_nemo_testcase_receipt_citation_gate.py` on the first clean follow-up run | follow-up source-shift, fixed here | the AD guards, dual CEN2 path, and catch-up-2 core changes moved 149 mapped endpoints; all audited Markdown citations and the executable map were re-anchored with literal insertion maps and explicit replacement anchors; pre-commit result is `42 passed` plus the two expected dirty-worktree provenance refusals |
-| three per-document nodes in `test_post_20261029_provenance_sha_gate.py` after citation re-anchoring | follow-up blame effect, fixed here | citation-only edits made unchanged SHA-bearing lines first-parent-authored; carry-forward now requires the identical token on the identical original line of the authoring commit's first parent; new, copied, or moved tokens still fail; full gate emits `1512 passed in 13.12s` |
+| three bypass classes in `test_post_20261029_provenance_sha_gate.py` | follow-up weakness, fixed here | carry-forward now requires the identical token on one mapped logical line through the complete first-parent history to the pre-cutoff base; later re-edits, copied/retargeted tokens, and moved tokens fail committed plants |
 | `test_si3_surface.py::test_production_path_plants_fire[sum_first_category]` | pre-existing lane | unchanged qsb tie-handling planted-control failure; reproduced at exact lane parent |
 | `test_nemo_si3_o4_prather_acquisition.py::test_o4_production_scorer_and_plants` initial setup error | invocation/environment, fixed invocation | child process could not import repository-local `scripts` until `.` was included in `PYTHONPATH`; production scorer then passed |
-| `test_sea_ice_precip_routing.py::test_snow_off_snowfall_on_ice_reaches_ocean_with_melt_heat` | merge policy, unresolved | False default bypasses main's water-budget closure; standalone main passes |
-| `test_sea_ice_precip_routing.py::test_ponds_on_rain_on_ice_is_conserved[0.3-2.0-0.9]` and `[0.0-0.0-0.0]` | merge policy, unresolved | same False-default decision; standalone main passes |
-| `test_sea_ice_precip_routing.py::test_ponds_on_no_phantom_rain_without_precipitation_flag[0.0]` | merge policy, unresolved | same False-default decision; standalone main passes |
 | `test_flag_reachability_audit.py::test_every_resolver_read_reaches_the_leaf` | pre-existing on newer main | reproduced identically on `edd34c24469c`; main's CLUBB host table is rejected by its own strict validity check |
 | four `test_pipeline_profile_convection.py` Zhang–McFarlane nodes | pre-existing on newer main | reproduced identically on `edd34c24469c`; strict validation rejects CMT on the cubed-sphere/CD-grid test host |
 | `test_pipeline_profile_convection.py::TestMicrophysicsWiring::test_micro_steps_finite[p3]` | pre-existing on newer main/environment | reproduced identically on `edd34c24469c`; sandbox cannot create `/home/dbalwada/.cache/legoesm/p3` |
@@ -384,7 +401,9 @@ Every observed stable failure is classified here.
 
 ## Decision register
 
-DECISION 190 applied: default True; certified tests per file with the committed default
+DECISION 190 applied: default True; every affected certified NEMO-comparison
+configuration is explicitly False, while default-behavior tests retain True.
+DECISION_NEEDED: NONE
 
 All other direct behavioral conflicts were composed behind existing explicit
 selectors or resolved in favor of the already certified lane path where main

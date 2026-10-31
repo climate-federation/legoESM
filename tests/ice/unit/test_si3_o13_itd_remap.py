@@ -345,7 +345,7 @@ def test_o13_production_sea_ice_call_site_fires(monkeypatch) -> None:
         si3_orca2=si3_cfg,
         ice_constants=NEMO_SI3_CONSTANTS_CONFIG,
         emissivity_ice=0.0, Cd_ice=0.0, Ch_ice=0.0, Ce_ice=0.0,
-        ocean_heat_transfer_coeff=30.0,
+        ocean_heat_transfer_coeff=30.0, core2_precipitation_closure=False,
     )
     real = sea_ice_mod.si3_ice_itd_rem
     calls: list[dict[str, object]] = []

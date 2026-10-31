@@ -221,19 +221,19 @@ def measure(deck_root: Path, frame_root: Path, operand_root: Path,
     tmask = np.asarray(card.recipe.z_coord.is_active, np.float64)
     candidate_t_rhs = np.asarray(_nemo_cen2_tracer_rhs(
         entry_t, candidate_pu_full, candidate_pv_full, candidate_pw,
-        h_stage, tmask, card.recipe.grid), np.float64)
+        h_stage, tmask, card.recipe.grid, _certified_nemo_storage=True), np.float64)
     recorded_t_rhs = np.asarray(_nemo_cen2_tracer_rhs(
         nemo_entry_t, recorded_pu_full, recorded_pv_full, recorded_pw,
         np.asarray(record["e3t_Kmm"], np.float64)[..., :30],
-        np.asarray(record["tmask"], np.float64)[..., :30], card.recipe.grid),
+        np.asarray(record["tmask"], np.float64)[..., :30], card.recipe.grid, _certified_nemo_storage=True),
         np.float64)
     candidate_s_rhs = np.asarray(_nemo_cen2_tracer_rhs(
         entry_s, candidate_pu_full, candidate_pv_full, candidate_pw,
-        h_stage, tmask, card.recipe.grid), np.float64)
+        h_stage, tmask, card.recipe.grid, _certified_nemo_storage=True), np.float64)
     recorded_s_rhs = np.asarray(_nemo_cen2_tracer_rhs(
         nemo_entry_s, recorded_pu_full, recorded_pv_full, recorded_pw,
         np.asarray(record["e3t_Kmm"], np.float64)[..., :30],
-        np.asarray(record["tmask"], np.float64)[..., :30], card.recipe.grid),
+        np.asarray(record["tmask"], np.float64)[..., :30], card.recipe.grid, _certified_nemo_storage=True),
         np.float64)
 
     # Publish write-only production boundaries after the ordinary step has

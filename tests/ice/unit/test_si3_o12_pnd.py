@@ -1962,7 +1962,7 @@ def test_production_step_sea_ice_and_step_ponds_wire_si3_lev_and_preserve_cesm(m
         ocean_heat_transfer_coeff=0.0,
         snow=SnowConfig(enabled=True, flooding=False),
         ponds=MeltPondConfig(enabled=True, scheme="si3_lev", namthd_pnd=namthd_pnd),
-        ice_constants=NEMO_SI3_CONSTANTS_CONFIG,
+        ice_constants=NEMO_SI3_CONSTANTS_CONFIG, core2_precipitation_closure=False,
     )
 
     def _run_step(st, frc, sst, u_ocn, v_ocn):
@@ -2250,7 +2250,7 @@ def test_lid_thickness_h_il_persists_across_steps_and_restart_round_trip(tmp_pat
         ocean_heat_transfer_coeff=0.0,
         snow=SnowConfig(enabled=True, flooding=False),
         ponds=MeltPondConfig(enabled=True, scheme="si3_lev", namthd_pnd=namthd_pnd),
-        ice_constants=NEMO_SI3_CONSTANTS_CONFIG,
+        ice_constants=NEMO_SI3_CONSTANTS_CONFIG, core2_precipitation_closure=False,
     )
 
     @jax.jit
@@ -2504,7 +2504,7 @@ def test_multicategory_jpl5_step_sea_ice_sums_at_i_over_categories(monkeypatch):
         ocean_heat_transfer_coeff=0.0,
         snow=SnowConfig(enabled=True, flooding=False),
         ponds=MeltPondConfig(enabled=True, scheme="si3_lev", namthd_pnd=namthd_pnd),
-        ice_constants=NEMO_SI3_CONSTANTS_CONFIG,
+        ice_constants=NEMO_SI3_CONSTANTS_CONFIG, core2_precipitation_closure=False,
     )
 
     grid_mc = create_latlon_grid(n_lat=spatial[0], n_lon=spatial[1])
@@ -2769,7 +2769,7 @@ def test_m6_parent_commit_vs_current_across_all_other_callers(monkeypatch):
         _compare_pair(g, w)
 
     # Caller 3: step_sea_ice slab mode (SeaIceState, default SeaIceConfig)
-    cfg_slab = SeaIceConfig()
+    cfg_slab = SeaIceConfig(core2_precipitation_closure=False)
     got_slab_st, got_slab_rsp = sea_ice_mod.step_sea_ice(
         slab_cur, forcing, ocean_sst, ocean_u, ocean_v, cfg_slab, U_min=1.0, dt=RDT
     )
@@ -2782,7 +2782,7 @@ def test_m6_parent_commit_vs_current_across_all_other_callers(monkeypatch):
         _compare_pair(g, w)
 
     # Caller 4: step_sea_ice legacy dynamic mode (dynamics="free_drift", uses_new_physics=False)
-    cfg_leg_dyn = SeaIceConfig(dynamics="free_drift")
+    cfg_leg_dyn = SeaIceConfig(dynamics="free_drift", core2_precipitation_closure=False)
     got_leg_st, got_leg_rsp = sea_ice_mod.step_sea_ice(
         cur_seeded, forcing, ocean_sst, ocean_u, ocean_v, cfg_leg_dyn, U_min=1.0, dt=RDT
     )
@@ -2800,7 +2800,7 @@ def test_m6_parent_commit_vs_current_across_all_other_callers(monkeypatch):
         shortwave_scheme="delta_eddington",
         snow=SnowConfig(enabled=True, flooding=True),
         brine=BrineConfig(enabled=True),
-        ponds=MeltPondConfig(enabled=True),
+        ponds=MeltPondConfig(enabled=True), core2_precipitation_closure=False,
     )
     got_v2_1_st, got_v2_1_rsp = sea_ice_mod.step_sea_ice(
         cur_seeded, forcing, ocean_sst, ocean_u, ocean_v, cfg_v2_1cat, U_min=1.0, dt=RDT
@@ -2826,7 +2826,7 @@ def test_m6_parent_commit_vs_current_across_all_other_callers(monkeypatch):
         snow=SnowConfig(enabled=True, flooding=True),
         brine=BrineConfig(enabled=True),
         ridging=RidgingConfig(enabled=True),
-        ponds=MeltPondConfig(enabled=True),
+        ponds=MeltPondConfig(enabled=True), core2_precipitation_closure=False,
     )
     got_v2_5_st, got_v2_5_rsp = sea_ice_mod.step_sea_ice(
         cur_mc, forcing, ocean_sst, ocean_u, ocean_v, cfg_v2_5cat, U_min=1.0, dt=RDT, grid=grid
@@ -3280,7 +3280,7 @@ def test_decision_184c_si3_lev_run_carries_and_restarts_h_il(tmp_path):
         ocean_heat_transfer_coeff=0.0,
         snow=SnowConfig(enabled=True, flooding=False),
         ponds=MeltPondConfig(enabled=True, scheme="si3_lev", namthd_pnd=namthd_pnd),
-        ice_constants=NEMO_SI3_CONSTANTS_CONFIG,
+        ice_constants=NEMO_SI3_CONSTANTS_CONFIG, core2_precipitation_closure=False,
     )
 
     with precision_scope(PrecisionPolicy.fp64(transcendentals="libm")):
@@ -3542,7 +3542,7 @@ def test_si3_lev_lids_refuses_advection_concentration_cap_itd_remap_and_ridging_
         ocean_heat_transfer_coeff=0.0,
         snow=SnowConfig(enabled=True, flooding=False),
         ponds=ponds_lids,
-        ice_constants=NEMO_SI3_CONSTANTS_CONFIG,
+        ice_constants=NEMO_SI3_CONSTANTS_CONFIG, core2_precipitation_closure=False,
     )
     validate_si3_thermo_config(cfg_thermo_1cat)
 
@@ -3559,7 +3559,7 @@ def test_si3_lev_lids_refuses_advection_concentration_cap_itd_remap_and_ridging_
         ocean_heat_transfer_coeff=0.0,
         snow=SnowConfig(enabled=True, flooding=False),
         ponds=ponds_lids,
-        ice_constants=NEMO_SI3_CONSTANTS_CONFIG,
+        ice_constants=NEMO_SI3_CONSTANTS_CONFIG, core2_precipitation_closure=False,
     )
     validate_si3_thermo_config(cfg_thermo_5cat)
 
@@ -3757,7 +3757,7 @@ def test_si3_lev_lids_off_refuses_advection_concentration_cap_itd_remap_and_ridg
         ocean_heat_transfer_coeff=0.0,
         snow=SnowConfig(enabled=True, flooding=False),
         ponds=ponds_nolid,
-        ice_constants=NEMO_SI3_CONSTANTS_CONFIG,
+        ice_constants=NEMO_SI3_CONSTANTS_CONFIG, core2_precipitation_closure=False,
     )
     validate_si3_thermo_config(cfg_thermo_1cat_nolid)
 
@@ -3774,7 +3774,7 @@ def test_si3_lev_lids_off_refuses_advection_concentration_cap_itd_remap_and_ridg
         ocean_heat_transfer_coeff=0.0,
         snow=SnowConfig(enabled=True, flooding=False),
         ponds=ponds_nolid,
-        ice_constants=NEMO_SI3_CONSTANTS_CONFIG,
+        ice_constants=NEMO_SI3_CONSTANTS_CONFIG, core2_precipitation_closure=False,
     )
     validate_si3_thermo_config(cfg_thermo_5cat_nolid)
 

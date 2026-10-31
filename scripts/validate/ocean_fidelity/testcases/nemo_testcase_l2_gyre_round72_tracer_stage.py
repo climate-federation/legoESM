@@ -142,7 +142,8 @@ def _live_stage_rows(trace, sources, card, records, masks) -> tuple[dict, dict]:
     @jax.jit
     def cen2_rhs(tracer, p_u, p_v, p_w, thickness):
         return model_module._nemo_cen2_tracer_rhs(
-            tracer, p_u, p_v, p_w, thickness, active, card.recipe.grid)
+            tracer, p_u, p_v, p_w, thickness, active, card.recipe.grid,
+            _certified_nemo_storage=True)
 
     for stage in (1, 2):
         record = records[stage]["fields"]

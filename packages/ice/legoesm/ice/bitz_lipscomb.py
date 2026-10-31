@@ -2088,16 +2088,20 @@ def si3_column_step_arrays(state: SI3ColumnArrays,
                            _return_stage_outputs: bool = False, _zdf_dh_override=None) -> SI3StepTrace:
     """Execute the selected `ice_thd` chain and retain every oracle boundary."""
 
-    e_ice = jnp.asarray(state.e_ice)
-    dtype = e_ice.dtype
-    h_ice_raw = jnp.asarray(state.h_ice, dtype=dtype)
+    dtype = jnp.asarray(state.e_ice).dtype
     gathered_at_entry = jnp.asarray(state.concentration, dtype=dtype) > _EPS10
     # NEMO calls the thermodynamic kernels only for gathered ice cells.  The
-    # array transcription evaluates inactive open-water lanes too, so sever
-    # their reverse-mode path while preserving the exact forward operands.
-    h_ice = jnp.where(
-        gathered_at_entry, h_ice_raw, jax.lax.stop_gradient(h_ice_raw)
-    )
+    # array transcription evaluates inactive open-water lanes too.  Guard every
+    # state and forcing operand at entry so no discarded open-water quotient can
+    # return a NaN cotangent to a shared scalar input.  Scalar forcing leaves are
+    # broadcast to the column batch before the guard; all forward values remain
+    # identical.
+    def guard_inactive_leaf(value):
+        return _guard_inactive_columns(value, gathered_at_entry, dtype)
+    state = jax.tree.map(guard_inactive_leaf, state)
+    forcing = jax.tree.map(guard_inactive_leaf, forcing)
+    e_ice = jnp.asarray(state.e_ice)
+    h_ice = jnp.asarray(state.h_ice, dtype=dtype)
     h_snow = jnp.asarray(state.h_snow, dtype=dtype)
     S_layers = jnp.asarray(state.S_layers, dtype=dtype)
     e_snow = jnp.asarray(state.e_snow, dtype=dtype)
@@ -2147,10 +2151,6 @@ def si3_column_step_arrays(state: SI3ColumnArrays,
     else:
         # C1D has no SST in its forcing record; snow-ice water enthalpy uses t_bo - rt0.
         sst_dh = t_bo_arr - constants.T0
-    qns_ice_raw = jnp.asarray(forcing.qns_ice, dtype=dtype)
-    qns_ice = jnp.where(
-        gathered_at_entry, qns_ice_raw, jax.lax.stop_gradient(qns_ice_raw)
-    )
     entry = {
         "h_i": h_ice,
         "h_s": h_snow,
@@ -2166,7 +2166,7 @@ def si3_column_step_arrays(state: SI3ColumnArrays,
         "t_bo": t_bo_arr,
         "sss": jnp.asarray(forcing.sss, dtype=dtype),
         "sst": sst_dh,
-        "qns_ice": qns_ice,
+        "qns_ice": jnp.asarray(forcing.qns_ice, dtype=dtype),
         "qsr_ice": jnp.asarray(forcing.qsr_ice, dtype=dtype),
         "dqns_ice": jnp.asarray(forcing.dqns_ice, dtype=dtype),
         "qtr_ice_top": jnp.asarray(forcing.qtr_ice_top, dtype=dtype),
@@ -2399,3 +2399,15 @@ def _si3_column_thd_da(entry, post_temp2, forcing, si3, dt, constants, *,
     if _return_da_outputs:
         return post_da, da
     return post_da
+
+
+def _guard_inactive_columns(value, active_columns, dtype):
+    """Stop inactive-column cotangents without changing forward values."""
+    array = jnp.asarray(value, dtype=dtype)
+    if array.ndim < active_columns.ndim:
+        array = jnp.broadcast_to(array, active_columns.shape)
+    active = jnp.reshape(
+        active_columns,
+        active_columns.shape + (1,) * (array.ndim - active_columns.ndim),
+    )
+    return jnp.where(active, array, jax.lax.stop_gradient(array))

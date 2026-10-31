@@ -175,18 +175,96 @@ def test_si3_column_step_reverse_mode_finite_on_open_water_and_bare_ice():
     assert float(jnp.abs(g_h[1:]).max()) > 0.0     # ice columns stay live
 
 
+def test_si3_column_step_shared_forcing_gradients_finite_with_open_water_batch():
+    """All seven shared inputs remain finite with 8 open-water columns."""
+    from legoesm.ice.bitz_lipscomb import (
+        SI3ColumnArrays,
+        SI3SurfaceForcing,
+        ice_enthalpy_from_temperature,
+        option2_salinity_profile,
+        si3_column_step_arrays,
+        snow_enthalpy_from_temperature,
+    )
+    from legoesm.ice.config import SI3ThermoConfig
+    from legoesm.ice.constants_config import NEMO_SI3_CONSTANTS_CONFIG as c
+
+    ncol = 64
+    live = jnp.arange(ncol) >= 8
+    zero = jnp.zeros(ncol, dtype=jnp.float64)
+    h_ice = jnp.where(live, 2.0, 0.0)
+    h_snow = jnp.where(live, 0.2, 0.0)
+    S_bulk = jnp.where(live, 6.3, 0.0)
+    sss = jnp.full((ncol,), 34.7, dtype=jnp.float64)
+    S_layers = option2_salinity_profile(S_bulk, sss)
+    e_ice = ice_enthalpy_from_temperature(
+        jnp.full((ncol, 3), 260.0, dtype=jnp.float64), S_layers, c
+    ) * live[:, None]
+    e_snow = snow_enthalpy_from_temperature(
+        jnp.full((ncol, 3), 260.0, dtype=jnp.float64), c
+    ) * live[:, None]
+
+    def loss(conc_live, qns, qsr, dqns, qtr, t_bottom, snow_precip):
+        concentration = jnp.where(live, conc_live, 0.0)
+        state = SI3ColumnArrays(
+            concentration, h_ice, h_snow, jnp.where(live, 260.0, c.T0),
+            e_ice, e_snow, S_bulk, S_layers, zero,
+        )
+        forcing = SI3SurfaceForcing(
+            qns_ice=jnp.full((ncol,), qns),
+            qsr_ice=jnp.full((ncol,), qsr),
+            dqns_ice=jnp.full((ncol,), dqns),
+            qtr_ice_top=jnp.full((ncol,), qtr),
+            t_bottom=jnp.full((ncol,), t_bottom),
+            sss=sss,
+            evaporation=zero,
+            snow_precipitation=jnp.full((ncol,), snow_precip),
+            qprec_ice=zero,
+            qcn_ice_bottom=zero,
+            qsb_ice_bottom=zero,
+            fhld=zero,
+            qlead=zero,
+        )
+        out = si3_column_step_arrays(
+            state, forcing, 3600.0, c, si3=SI3ThermoConfig()
+        ).exit
+        return jnp.sum(out.h_ice * out.concentration)
+
+    args = (0.9, -60.0, 0.0, -7.0, 0.0, 271.27, 0.0)
+    gradients = jax.grad(loss, argnums=tuple(range(7)))(*args)
+    assert all(bool(jnp.isfinite(value)) for value in gradients), gradients
+
+
+def test_inactive_column_guard_stops_h_ice_cotangent():
+    """Removing the entry guard revives cotangents in open-water h_ice."""
+    from legoesm.ice import bitz_lipscomb as bl
+
+    active = jnp.asarray([False] * 8 + [True] * 56)
+    h_ice = jnp.linspace(0.0, 2.0, 64, dtype=jnp.float64)
+    gradient = jax.grad(
+        lambda h: jnp.sum(bl._guard_inactive_columns(h, active, h.dtype))
+    )(h_ice)
+    assert bool(jnp.all(gradient[:8] == 0.0)), gradient
+    assert bool(jnp.all(gradient[8:] == 1.0)), gradient
+
+
 def test_cumulative_remap_reverse_mode_finite_at_zero_thickness():
     """Review F3 on the lane's live remap: a zero-total column must have a
     finite zero cotangent without reviving main's deleted duplicate remap."""
     from legoesm.ice import bitz_lipscomb as bl
 
-    en = jnp.asarray([[3.0e8, 2.9e8, 2.8e8], [3.0e8, 2.9e8, 2.8e8]])
+    en = jnp.asarray([3.0e8, 2.9e8, 2.8e8])
 
-    def remap(total):
-        h_old = [total / 3.0] * 3
-        content_old = [en[:, k] * h_old[k] for k in range(3)]
+    def remap(thickness):
+        h_old = list(thickness)
+        content_old = list(en * thickness)
         return bl._cumulative_remap(h_old, content_old, 3, bl.nemo_source_round)
 
-    g = jax.grad(lambda t: jnp.sum(remap(t)))(jnp.asarray([1.5, 0.0]))
+    # A sub-epsilon remap with material confined to the last old layer is the
+    # discarded-column case that exposes NaN cotangents when the guard is
+    # removed.  Evenly splitting a shared total (the former fixture) was
+    # vacuous: its unguarded gradient was already finite.
+    g = jax.grad(lambda h: jnp.sum(remap(h)))(
+        jnp.asarray([0.0, 0.0, 1.0e-300], dtype=jnp.float64)
+    )
     assert bool(jnp.all(jnp.isfinite(g))), g
-    assert float(g[1]) == 0.0
+    assert bool(jnp.all(g == 0.0)), g

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import difflib
 import re
 import subprocess
 from pathlib import Path
@@ -22,7 +23,8 @@ SUPERSESSION_RE = re.compile(
 )
 MINIMUM_DOCUMENTS = 1389
 POST_CUTOFF_ORIGINS: dict[Path, dict[int, tuple[str, int]]] = {}
-_MERGE_PARENT_LINES: dict[tuple[str, Path], list[str] | None] = {}
+PRE_CUTOFF_BASE = ""
+_REVISION_LINES: dict[tuple[str, Path], list[str] | None] = {}
 
 
 def run(*args: str, cwd: Path = ROOT, check: bool = True) -> subprocess.CompletedProcess[str]:
@@ -43,11 +45,13 @@ def post_cutoff_changes() -> dict[Path, set[int]]:
     commits plus combined merge resolutions, then use blame to retain only
     lines actually introduced by those prospective first-parent commits.
     """
+    global PRE_CUTOFF_BASE
     base = run(
         "git", "rev-list", "--first-parent", "-1", f"--before={CUTOFF}",
         "HEAD").stdout.strip()
     if not base:
         raise AssertionError(f"no repository commit exists before {CUTOFF}")
+    PRE_CUTOFF_BASE = base
 
     prospective = set(run(
         "git", "rev-list", "--first-parent", f"{base}..HEAD").stdout.splitlines())
@@ -94,36 +98,82 @@ def post_cutoff_changes() -> dict[Path, set[int]]:
 POST_CUTOFF_CHANGES = post_cutoff_changes()
 
 
-def inherited_parent_sha(path: Path, line_number: int, value: str) -> bool:
-    """Whether a first-parent re-anchor carried this SHA token unchanged.
+def _mapped_parent_line(
+    parent_lines: list[str], child_lines: list[str], child_line: int,
+) -> int | None:
+    """Map a child line to the same logical first-parent line."""
+    child_index = child_line - 1
+    matcher = difflib.SequenceMatcher(
+        None, parent_lines, child_lines, autojunk=False
+    )
+    for tag, parent_start, parent_end, child_start, child_end in matcher.get_opcodes():
+        if not child_start <= child_index < child_end:
+            continue
+        if tag == "equal":
+            return parent_start + child_index - child_start + 1
+        if tag == "replace" and parent_end - parent_start == child_end - child_start:
+            return parent_start + child_index - child_start + 1
+        return None
+    return None
 
-    Only a token on the same original line of the authoring commit's first
-    parent is carried forward.  This covers both combined merge resolutions
-    and ordinary citation-only re-anchor commits.  New tokens, copied tokens,
-    and tokens moved between lines remain subject to the normal
-    resolution/digest checks.
+
+def _sha_survives_line_history(
+    value: str, line_number: int, history: list[list[str]],
+) -> bool:
+    """Require a token to stay on one mapped line through every revision."""
+    current_line = line_number
+    for child_lines, parent_lines in zip(history, history[1:]):
+        if not 1 <= current_line <= len(child_lines):
+            return False
+        if value not in HEX_RE.findall(child_lines[current_line - 1]):
+            return False
+        parent_line = _mapped_parent_line(parent_lines, child_lines, current_line)
+        if parent_line is None or value not in HEX_RE.findall(parent_lines[parent_line - 1]):
+            return False
+        current_line = parent_line
+    return bool(history)
+
+
+def _revision_lines(commit: str, relative: Path) -> list[str] | None:
+    key = (commit, relative)
+    if key not in _REVISION_LINES:
+        shown = run("git", "show", f"{commit}:{relative}", check=False)
+        _REVISION_LINES[key] = (
+            shown.stdout.splitlines() if shown.returncode == 0 else None
+        )
+    return _REVISION_LINES[key]
+
+
+def inherited_parent_sha(path: Path, line_number: int, value: str) -> bool:
+    """Whether a SHA stayed on one line back to the pre-cutoff base.
+
+    Checking only the immediate first parent lets a post-cutoff token become
+    exempt after one later edit.  Walk the complete first-parent history to the
+    cutoff base instead.  Same-line citation re-anchors remain valid, while new,
+    copied, retargeted, or line-moved tokens reach the ordinary resolution and
+    digest checks.
     """
     origin = POST_CUTOFF_ORIGINS.get(path, {}).get(line_number)
     if origin is None:
         return False
     commit, original_line = origin
-    parents = run(
-        "git", "rev-list", "--parents", "-n", "1", commit).stdout.split()
-    if len(parents) < 2:
-        return False
     relative = path.relative_to(ROOT)
-    key = (commit, relative)
-    if key not in _MERGE_PARENT_LINES:
-        shown = run(
-            "git", "show", f"{commit}^1:{relative}", check=False)
-        _MERGE_PARENT_LINES[key] = (
-            shown.stdout.splitlines() if shown.returncode == 0 else None)
-    lines = _MERGE_PARENT_LINES[key]
-    return (
-        lines is not None
-        and 1 <= original_line <= len(lines)
-        and value in HEX_RE.findall(lines[original_line - 1])
-    )
+    history: list[list[str]] = []
+    revision = commit
+    while True:
+        lines = _revision_lines(revision, relative)
+        if lines is None:
+            return False
+        history.append(lines)
+        if revision == PRE_CUTOFF_BASE:
+            break
+        parents = run(
+            "git", "rev-list", "--parents", "-n", "1", revision
+        ).stdout.split()
+        if len(parents) < 2:
+            return False
+        revision = parents[1]
+    return _sha_survives_line_history(value, original_line, history)
 
 
 def cited_path(path: Path, lines: list[str], index: int, start: int) -> Path | None:
@@ -226,6 +276,43 @@ def test_planted_unresolved_git_sha_fails(tmp_path: Path) -> None:
     document = tmp_path / "plant_receipt.md"
     document.write_text("commit `0000000000000000000000000000000000000000`\n")
     assert "unresolved Git SHA" in validate_document(document, {1})[0]
+
+
+def test_post_cutoff_sha_reedited_later_is_not_inherited() -> None:
+    value = "1" * 40
+    history = [
+        [f"edited citation `{value}`"],
+        [f"new post-cutoff citation `{value}`"],
+        ["pre-cutoff line without a token"],
+    ]
+    assert not _sha_survives_line_history(value, 1, history)
+
+
+def test_same_line_copied_sha_is_not_inherited() -> None:
+    value = "2" * 40
+    history = [
+        [f"retargeted citation `{value}`"],
+        [f"original citation `{'3' * 40}`"],
+    ]
+    assert not _sha_survives_line_history(value, 1, history)
+
+
+def test_line_shifted_sha_is_not_inherited() -> None:
+    value = "4" * 40
+    history = [
+        ["first citation", f"second citation `{value}`"],
+        [f"first citation `{value}`", "second citation"],
+    ]
+    assert not _sha_survives_line_history(value, 2, history)
+
+
+def test_same_line_citation_reanchor_remains_inherited() -> None:
+    value = "5" * 40
+    history = [
+        [f"artifact.py:20-30 commit `{value}`"],
+        [f"artifact.py:10-20 commit `{value}`"],
+    ]
+    assert _sha_survives_line_history(value, 1, history)
 
 
 def test_planted_wrong_file_sha256_fails(tmp_path: Path) -> None:
