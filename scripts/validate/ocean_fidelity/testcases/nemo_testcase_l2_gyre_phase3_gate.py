@@ -893,8 +893,9 @@ def run(
         stage2_term_only in (None, "none", "hpg", "vorticity", "advection"),
         "stage2_term_only must be none, hpg, vorticity, advection, or None",
     )
-    require(decision189_routing in ("card", "lane", "main"),
-            "decision189_routing must be card, lane, or main")
+    require(decision189_routing in (
+        "card", "lane", "main", "qsr-main", "shear-main"),
+        "decision189_routing must be card, lane, main, qsr-main, or shear-main")
 
     def host_result_and_release_compilation(value):
         """Materialize one diagnostic executable, then release its JIT cache.
@@ -920,13 +921,14 @@ def run(
     # Measurement arm only -- the card still STATES its own after-SSH form.
     cfg = with_first_wzv_after_ssh(card.recipe.model_config, after_ssh_form)
     if decision189_routing != "card":
-        selected = decision189_routing == "main"
+        shear_selected = decision189_routing in ("main", "shear-main")
+        qsr_selected = decision189_routing in ("main", "qsr-main")
         vertical = cfg.physics.vertical_mixing
         vertical = vertical._replace(tke=vertical.tke._replace(
-            nemo_sh2_step_entry_ssh=selected))
+            nemo_sh2_step_entry_ssh=shear_selected))
         cfg = cfg._replace(
             physics=cfg.physics._replace(vertical_mixing=vertical),
-            nemo_qsr_stage3_kmm_source_association=selected,
+            nemo_qsr_stage3_kmm_source_association=qsr_selected,
         )
     tke_cfg = cfg.physics.vertical_mixing.tke
     evd_cfg = cfg.physics.convection.enhanced_diffusion
@@ -2723,11 +2725,13 @@ def main(argv=None) -> int:
              "rk3_extrapolated_carried). The card still states its own; "
              "omitting this flag is the card.")
     parser.add_argument(
-        "--decision189-routing", choices=("card", "lane", "main"),
+        "--decision189-routing",
+        choices=("card", "lane", "main", "qsr-main", "shear-main"),
         default="card",
         help=("controlled measurement arm: lane selects both certified "
               "routes false; main selects both catch-up routes true; card "
-              "uses the checked-in selections"),
+              "uses the checked-in selections; qsr-main and shear-main "
+              "isolate one catch-up route"),
     )
     parser.add_argument("--output", type=Path)
     parser.add_argument("--plant-state", action="store_true")
