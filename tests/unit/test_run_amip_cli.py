@@ -4871,6 +4871,32 @@ def test_bechtold_enable_cmt_round_trips_and_default_is_one_value_on_every_lane(
             grid=dflt.grid._replace(grid_type=gt))).bechtold.enable_cmt is True
 
 
+def test_emanuel_enable_cmt_round_trips():
+    """--emanuel-enable-cmt reaches the EmanuelConfig leaf on both resolvers
+    (#2266); unset keeps the scheme default; explicit True on a compiled
+    PhysicsPipeline lane (which drops du_dt_conv) is refused."""
+    from legoesm.atmosphere.physics.convection.config import EmanuelConfig
+    from legoesm.driver.physics_pipeline import _resolve_convection, convection_config_for
+
+    parser = build_arg_parser()
+
+    def cfg_of(*extra):
+        return build_config_from_args(_postprocess_args(parser.parse_args([
+            "--dataset", "analytical", "--convection", "emanuel", *extra]), parser))
+
+    on = cfg_of("--emanuel-enable-cmt")
+    assert on.emanuel_enable_cmt is True
+    assert _resolve_convection(on)[1].enable_cmt is True
+    assert convection_config_for(on).emanuel.enable_cmt is True
+    off = cfg_of("--no-emanuel-enable-cmt")
+    assert convection_config_for(off).emanuel.enable_cmt is False
+    dflt = cfg_of()
+    assert dflt.emanuel_enable_cmt is None
+    assert convection_config_for(dflt).emanuel.enable_cmt is EmanuelConfig().enable_cmt
+    mpas = on._replace(grid=on.grid._replace(grid_type="mpas"))
+    assert convection_config_for(mpas).mpas_cmt is True
+
+
 def test_persistent_dgrid_flag_flows_to_config_1028():
     """--persistent-dgrid reaches DycoreConfig, and OFF is the default.
 

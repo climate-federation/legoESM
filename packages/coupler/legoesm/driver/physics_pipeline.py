@@ -4259,6 +4259,11 @@ def _resolve_convection(config):
         if scheme == "kain_fritsch":
             conv_config = conv_config._replace(
                 variant=config.kain_fritsch_variant)
+        # Emanuel FU/FV (#2266): an explicit emanuel_enable_cmt wins; None
+        # keeps EmanuelConfig.enable_cmt.
+        _em_cmt = getattr(config, "emanuel_enable_cmt", None)
+        if scheme == "emanuel" and _em_cmt is not None:
+            conv_config = conv_config._replace(enable_cmt=bool(_em_cmt))
         if scheme == "zhang_mcfarlane":
             conv_config = conv_config._replace(
                 land_fraction=config.zm_land_fraction,

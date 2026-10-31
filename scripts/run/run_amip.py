@@ -1573,6 +1573,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         action=argparse.BooleanOptionalAction, default=None,
                         help="Gregory-1997 convective momentum transport in Bechtold "
                              "(applied to the MPAS edge winds).")
+    parser.add_argument("--emanuel-enable-cmt", dest="emanuel_enable_cmt",
+                        action=argparse.BooleanOptionalAction, default=None,
+                        help="CONVECT FU/FV convective momentum transport in Emanuel "
+                             "(unset = EmanuelConfig.enable_cmt).")
     parser.add_argument("--bechtold-use-ifs-shallow-closure",
                         dest="bechtold_use_ifs_shallow_closure",
                         action=argparse.BooleanOptionalAction,
@@ -3245,6 +3249,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         bechtold_use_ifs_downdraft=args.bechtold_use_ifs_downdraft,
         bechtold_use_ifs_shallow_closure=args.bechtold_use_ifs_shallow_closure,
         bechtold_enable_cmt=args.bechtold_enable_cmt,
+        emanuel_enable_cmt=args.emanuel_enable_cmt,
         bechtold_M_b_max=args.bechtold_M_b_max,
         bechtold_use_ifs_capdcycl=args.bechtold_use_ifs_capdcycl,
         bechtold_ifs_shallow_nosupply=args.bechtold_ifs_shallow_nosupply,

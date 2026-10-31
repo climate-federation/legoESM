@@ -1699,6 +1699,10 @@ class ExperimentConfig(NamedTuple):
     # scheme's own default (BechtoldConfig.enable_cmt, ON) on every lane
     # (review 2026-10-10 F22, majority vote; it used to be OFF on MPAS only).
     bechtold_enable_cmt: bool | None = None
+    # Emanuel CONVECT FU/FV convective momentum transport (#2266).  None = the
+    # scheme's own default (EmanuelConfig.enable_cmt, OFF pending the user's
+    # default decision) on every lane.
+    emanuel_enable_cmt: bool | None = None
     bechtold_dnoprc: float = 3.0e-4   # BechtoldConfig.dnoprc [kg/kg]
     # Deep-plume entrainment / detrainment base rates (IFS cuascn), exposed
     # 2026-08-14. These set the ITCZ WIDTH and tropical rain concentration:
@@ -3775,7 +3779,9 @@ class ExperimentConfig(NamedTuple):
                     "(its du/dv sum never reads du_dt_conv). Use the MPAS / "
                     "FV3-duo column lane or spectral"
                     + (", or bechtold_enable_cmt=false."
-                       if self.convection == "bechtold" else "."))
+                       if self.convection == "bechtold"
+                       else ", or emanuel_enable_cmt=false."
+                       if self.convection == "emanuel" else "."))
             _drops = []
             if self.cloud_vertical_overlap_optics != "none":
                 errors.append(
@@ -3786,7 +3792,9 @@ class ExperimentConfig(NamedTuple):
                     "FV3-duo column lane or spectral, or 'none'.")
             if (self.convection == "zhang_mcfarlane"
                     or (self.convection == "bechtold"
-                        and self.bechtold_enable_cmt)):
+                        and self.bechtold_enable_cmt)
+                    or (self.convection == "emanuel"
+                        and self.emanuel_enable_cmt)):
                 errors.append(_cmt)
             elif (self.convection == "tiedtke"
                     or (self.convection == "bechtold"
@@ -5189,6 +5197,7 @@ class ExperimentConfig(NamedTuple):
             bechtold_rprcon=getattr(amip_cfg, 'bechtold_rprcon', 1.4e-3),
             bechtold_M_b_max=getattr(amip_cfg, 'bechtold_M_b_max', 0.05),
             bechtold_enable_cmt=getattr(amip_cfg, 'bechtold_enable_cmt', None),
+            emanuel_enable_cmt=getattr(amip_cfg, 'emanuel_enable_cmt', None),
             bechtold_dnoprc=getattr(amip_cfg, 'bechtold_dnoprc', 3.0e-4),
             bechtold_subsidence_solve=getattr(amip_cfg, 'bechtold_subsidence_solve', "implicit_flux"),
             bechtold_rain_vapor_sink=getattr(amip_cfg, 'bechtold_rain_vapor_sink', "formation"),
@@ -5368,6 +5377,7 @@ class ExperimentConfig(NamedTuple):
             bechtold_rprcon=self.bechtold_rprcon,
             bechtold_M_b_max=self.bechtold_M_b_max,
             bechtold_enable_cmt=self.bechtold_enable_cmt,
+            emanuel_enable_cmt=self.emanuel_enable_cmt,
             bechtold_dnoprc=self.bechtold_dnoprc,
             bechtold_downdraft_entrain_rate=self.bechtold_downdraft_entrain_rate,
             bechtold_downdraft_detrain_scale_m=self.bechtold_downdraft_detrain_scale_m,
