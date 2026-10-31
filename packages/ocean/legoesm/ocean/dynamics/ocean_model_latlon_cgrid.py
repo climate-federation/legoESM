@@ -14006,7 +14006,7 @@ class LatLonCGridOceanModel:
                     eos_fn=_mk_eos(eos=_cfg_b.eos,
                                    eos_linear=_cfg_b.eos_linear,
                                    **({"rho0": _cfg_b.rho_0}
-                                      if _cfg_b.eos_depth == "geometric"
+                                      if getattr(_cfg_b, "eos_depth", None) == "geometric"
                                       else {})),
                     iwm_fields=_iwm,
                 ).astype(dtype)
@@ -14066,7 +14066,7 @@ class LatLonCGridOceanModel:
                 eos=_cfg_b.eos, eos_linear=_cfg_b.eos_linear,
                 eos_nemo_seos=getattr(_cfg_b, "eos_nemo_seos", None),
                 **({"rho0": _cfg_b.rho_0}
-                   if _cfg_b.eos_depth == "geometric" else {}),
+                   if getattr(_cfg_b, "eos_depth", None) == "geometric" else {}),
             )
             # PROGNOSTIC TKE carry: thread the carried TKE + the energy-recycling
             # source into the fallback K-profile solve, and capture the updated
@@ -14436,7 +14436,7 @@ class LatLonCGridOceanModel:
                     eos_fn=_mk_eos_ddm(eos=_cfg_b.eos,
                                        eos_linear=_cfg_b.eos_linear,
                                        **({"rho0": _cfg_b.rho_0}
-                                          if _cfg_b.eos_depth == "geometric"
+                                          if getattr(_cfg_b, "eos_depth", None) == "geometric"
                                           else {})),
                 )
                 _dt_dtype = state.T.data.dtype
