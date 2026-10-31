@@ -392,7 +392,7 @@ executes eliminated-diagonal, forward, and back-substitution statements at
 `ORCA2_ORCA1ICE_OMIP_L4_R336TZDF/BLD/ppsrc/nemo/trazdf.f90:298-304`.
 
 The production replay observes legoESM's closure handoff at
-`k_profiles.py:330-349`; the shared tracer call, matrix construction, and
+`k_profiles.py:346-365`; the shared tracer call, matrix construction, and
 three recurrences are the actual production functions at
 `implicit_solver.py:492-553`, `implicit_solver.py:556-655`, and
 `implicit_solver.py:343-406`. The extra callbacks are passive: each trace-graph

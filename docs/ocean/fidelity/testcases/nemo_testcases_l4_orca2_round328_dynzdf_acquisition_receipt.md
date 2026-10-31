@@ -224,7 +224,7 @@ diffusion and internal-wave mixing at
 `ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfphy.f90:349-350`,
 `ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfphy.f90:363`, and
 `ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfphy.f90:372`. legoESM likewise keeps the
-carried TKE pair separate and composes DDM then IWM in `k_profiles.py:485-579`.
+carried TKE pair separate and composes DDM then IWM in `k_profiles.py:487-581`.
 The old all-414,119 score, its `[1,49,0]` first cell, and the claim that TKE
 alone owned the difference were comparisons of unlike fields.
 
