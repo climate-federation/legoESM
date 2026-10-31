@@ -16,11 +16,13 @@ Monin-Obukhov similarity theory (MOST). Three schemes:
    floors, height adjustment of t/q.  Oracle-matched by
    tests/core/test_aerobulk_ncar_oracle.py.
 
-RULE 5 (#2241): coare3's Charnock wind ramp and gustiness onset are smooth by
-default (``coare_charnock_ramp_width``, ``coare_gust_onset_width``; 0 = the
-oracle).  Still hard as in AeroBulk, pending user decisions (#2241): the
-dt/dq sign floors (both schemes), and on large_yeager the neutral Stanton
-switches (first guess and loop) and the 33 m/s drag cutoff.
+RULE 5 (#2241): coare3's Charnock wind ramp and gustiness onset, and
+large_yeager's neutral Stanton switches (first guess and loop) and 33 m/s drag
+cutoff, are smooth by default (``coare_charnock_ramp_width``,
+``coare_gust_onset_width``, ``large_yeager_neutral_width``,
+``large_yeager_dthv_width``, ``large_yeager_cd_cutoff_width``; 0 = the
+oracle).  coare3's dt/dq sign floors stay hard as in AeroBulk (division guard,
+user decision 2026-10-31; KNOWN DIFFERENCE, see :func:`_sign_floor`).
 
 The iterative Obukhov length loop uses ``jax.lax.fori_loop`` for
 full JAX differentiability (compatible with jax.grad, jax.jit).
@@ -806,7 +808,16 @@ def resolve_gustiness_w_zi(gustiness_w_zi, scheme) -> float:
 # ============================================================================
 
 def _sign_floor(x, x_min):
-    """Fortran ``SIGN(MAX(ABS(x), x_min), x)`` (gfortran: -0.0 counts negative)."""
+    """Fortran ``SIGN(MAX(ABS(x), x_min), x)`` (gfortran: -0.0 counts negative).
+
+    Kept hard as in AeroBulk (user decision 2026-10-31, #2241): it is the
+    division guard of ``Ch = r*ts/dt`` / ``Ce = r*qs/dq`` in TURB_COARE3P0.
+    KNOWN DIFFERENCE from RULE 5: a jump of ``2*x_min`` (2e-6 K in dt, 2e-9
+    kg/kg in dq) where the air-sea difference crosses zero.  It flips the
+    sign of theta* (q*) at that state, which changes 1/L by that scale's
+    tiny buoyancy contribution; the derivative there is undefined.  Not a gap
+    to the oracle (same form).
+    """
     m = jnp.maximum(jnp.abs(x), x_min)
     return jnp.where(jnp.signbit(x), -m, m)
 
@@ -1051,21 +1062,63 @@ _AB_NCAR_ZETA_ABS_MAX = 10.0
 _AB_NCAR_CHN_STABLE = 18.0     # 1e-3 sqrt(CdN) * 18   (zeta >= 0)
 _AB_NCAR_CHN_UNSTABLE = 32.7   # 1e-3 sqrt(CdN) * 32.7 (zeta < 0)
 _AB_NCAR_CEN = 34.6            # 1e-3 sqrt(CdN) * 34.6
+_AB_NCAR_CD_CUTOFF_U = 33.0    # cd_n10_ncar: 2.34e-3 plateau for U >= 33 m/s
+_AB_NCAR_CD_PLATEAU = 2.34
+# RULE 5 smooth defaults (#2241, user decisions 2026-10-31); 0.0 = AeroBulk's
+# hard switch in each case.
+# Half-width in zeta_u of the compact quintic blend of the stable/unstable
+# neutral Stanton numbers (18 vs 32.7) inside the iteration (the N6 form).
+NCAR_NEUTRAL_WIDTH = 1.0e-3
+# Half-width [K] of the same blend in dthv for the first guess.
+NCAR_DTHV_WIDTH = 1.0e-2
+# Width [m/s] of the one-sided quintic blend of the LY09 polynomial into the
+# 2.34e-3 plateau over [33 - w, 33] m/s (the plateau stays exact from 33 m/s).
+NCAR_CD_CUTOFF_WIDTH = 0.5
 
 
-def _cd_n10_ncar(w10):
+def _ncar_stable_weight(x, width):
+    """Weight of the stable neutral Stanton number (18) in TURB_NCAR.
+
+    ``x`` is ``zeta_u`` in the iteration or ``dthv`` [K] in the first guess.
+    ``width == 0``: AeroBulk's ``x >= 0`` step.  ``width = w > 0`` (RULE 5):
+    ``smoothstep_quintic((x + w) / (2 w))``, C2, exactly 0 for ``x <= -w`` and
+    1 for ``x >= w`` (0.5 at ``x = 0``, where the hard step is 1).
+    """
+    if width == 0.0:
+        return jnp.where(x >= 0.0, 1.0, 0.0)
+    return smoothstep_quintic((x + width) / (2.0 * width))
+
+
+def _cd_n10_ncar(w10, cutoff_width=NCAR_CD_CUTOFF_WIDTH):
     """AeroBulk ``cd_n10_ncar``: LY09 Eq. 6 neutral 10 m drag, 2.34e-3 for
-    U >= 33 m/s, floored at Cx_min.  No wind floor (callers floor U)."""
-    w6 = w10 * w10 * w10
-    w6 = w6 * w6
-    poly = 2.7 / w10 + 0.142 + w10 / 13.09 - 3.14807e-10 * w6
-    cd = 1.0e-3 * jnp.where(w10 >= 33.0, 2.34, poly)
-    return jnp.maximum(cd, _AB_CX_MIN)
+    U >= 33 m/s, floored at Cx_min.  No wind floor (callers floor U).
+
+    ``cutoff_width == 0``: AeroBulk's hard switch at 33 m/s (a 0.074 % jump,
+    2.33827 -> 2.34).  ``cutoff_width = w > 0`` (RULE 5 default 0.5 m/s):
+    ``s * 2.34 + (1 - s) * poly`` with ``s = smoothstep_quintic((U - 33 + w)/w)``,
+    exactly the polynomial below ``33 - w`` and exactly 2.34 from 33 m/s.  The
+    smooth path evaluates the polynomial at ``min(U, 33)`` (only its weight
+    ``1 - s = 0`` reaches it above 33 m/s), so a huge wind cannot overflow
+    its ``U**6`` term into ``0 * inf = NaN``.
+    """
+    def _poly(w):
+        w6 = w * w * w
+        w6 = w6 * w6
+        return 2.7 / w + 0.142 + w / 13.09 - 3.14807e-10 * w6
+
+    if cutoff_width == 0.0:
+        cd = jnp.where(w10 >= _AB_NCAR_CD_CUTOFF_U, _AB_NCAR_CD_PLATEAU, _poly(w10))
+    else:
+        s = smoothstep_quintic((w10 - _AB_NCAR_CD_CUTOFF_U + cutoff_width) / cutoff_width)
+        cd = (s * _AB_NCAR_CD_PLATEAU
+              + (1.0 - s) * _poly(jnp.minimum(w10, _AB_NCAR_CD_CUTOFF_U)))
+    return jnp.maximum(1.0e-3 * cd, _AB_CX_MIN)
 
 
 def _turb_ncar(W2, t_zt, q_zt, T_s, q_s, z_u, z_t, equal, n_iter, stability_scheme="dyer1974",
                unstable_gamma=_DYER_UNSTABLE_GAMMA, stable_beta=_DYER_STABLE_BETA,
-               coeff_cap=None):
+               coeff_cap=None, neutral_width=NCAR_NEUTRAL_WIDTH, dthv_width=NCAR_DTHV_WIDTH,
+               cd_cutoff_width=NCAR_CD_CUTOFF_WIDTH):
     """AeroBulk 1.0.0 ``TURB_NCAR`` (Large & Yeager 2004, 2009).
 
     ``W2`` is the squared wind module; ``equal`` is AeroBulk's
@@ -1090,8 +1143,8 @@ def _turb_ncar(W2, t_zt, q_zt, T_s, q_s, z_u, z_t, equal, n_iter, stability_sche
     log_zt_zu = jnp.log(z_t / z_u)
     log_zu_10 = jnp.log(z_u / 10.0)
     dthv = t_zt * (1.0 + _AB_RCTV0 * q_zt) - T_s * (1.0 + _AB_RCTV0 * q_s)
-    stab = jnp.where(dthv >= 0.0, 1.0, 0.0)
-    CdN = _cd_n10_ncar(Ub)
+    stab = _ncar_stable_weight(dthv, dthv_width)
+    CdN = _cd_n10_ncar(Ub, cd_cutoff_width)
     sqrt_CdN = jnp.sqrt(CdN)
     Cd = CdN
     Ce = jnp.maximum(1.0e-3 * (_AB_NCAR_CEN * sqrt_CdN), _AB_CX_MIN)
@@ -1122,14 +1175,14 @@ def _turb_ncar(W2, t_zt, q_zt, T_s, q_s, z_u, z_t, equal, n_iter, stability_sche
         sq = jnp.sqrt(Cd)
         z0 = z_u * jnp.exp(-(KAPPA / sq + psim))
         un10 = jnp.maximum(_AB_NCAR_UN10_MIN, sq * Ub / KAPPA * jnp.log(10.0 / z0))
-        CdN = _cd_n10_ncar(un10)
+        CdN = _cd_n10_ncar(un10, cd_cutoff_width)
         sqrt_CdN = jnp.sqrt(CdN)
         tmp = 1.0 + sqrt_CdN / KAPPA * (log_zu_10 - psim)
         Cd = jnp.maximum(CdN / (tmp * tmp), _AB_CX_MIN)
         sqrt_Cd = jnp.sqrt(Cd)
         tmp = (log_zu_10 - psih_u) / KAPPA / sqrt_CdN
         tmp2 = sqrt_Cd / sqrt_CdN
-        stab = jnp.where(zeta_u >= 0.0, 1.0, 0.0)
+        stab = _ncar_stable_weight(zeta_u, neutral_width)
         ChN = 1.0e-3 * sqrt_CdN * (_AB_NCAR_CHN_STABLE * stab
                                    + _AB_NCAR_CHN_UNSTABLE * (1.0 - stab))
         CeN = 1.0e-3 * (_AB_NCAR_CEN * sqrt_CdN)
@@ -1191,6 +1244,9 @@ def compute_most_fluxes(
     coare_neutral_width=COARE_NEUTRAL_WIDTH,
     coare_charnock_ramp_width=COARE_CHARNOCK_RAMP_WIDTH,
     coare_gust_onset_width=COARE_GUST_ONSET_WIDTH,
+    large_yeager_neutral_width=NCAR_NEUTRAL_WIDTH,
+    large_yeager_dthv_width=NCAR_DTHV_WIDTH,
+    large_yeager_cd_cutoff_width=NCAR_CD_CUTOFF_WIDTH,
 ):
     """Compute stability-dependent bulk fluxes via iterative MOST.
 
@@ -1349,6 +1405,35 @@ def compute_most_fluxes(
         (RULE 5); ``0.0`` is AeroBulk's form (infinite slope at x = 0+).
         KNOWN DIFFERENCE (#2241, same fixture, this width alone): max relative
         gap 3.9e-5 in stress, 2.7e-5 in heat fluxes, 3.1e-5 in u*.
+    large_yeager_neutral_width : float
+        ``large_yeager`` only: half-width in zeta_u of the compact quintic blend
+        (:func:`_ncar_stable_weight`) of the stable/unstable neutral Stanton
+        numbers (18 vs 32.7) inside the iteration (static Python float).
+        Default ``NCAR_NEUTRAL_WIDTH`` = 1e-3 (RULE 5); ``0.0`` is AeroBulk's
+        hard ``zeta_u >= 0`` switch.  KNOWN DIFFERENCE (#2241, measured
+        2026-10-31 on the 1549-state AeroBulk TURB_NCAR fixture, this width
+        alone): 73 states at z_t = 10 m and 96 at 2 m move by more than 1e-9
+        relative, mostly high-wind ones (small |zeta| at every stratification);
+        max sensible-heat gap 45.7 W/m2 (0.33 relative) at 10 m and 28.9 W/m2
+        (0.72) at 2 m; max relative gap in stress 3.6e-3 / 3.9e-2, latent heat
+        3.8e-3 / 2.2e-2, u* 5.4e-3 / 1.9e-2 (10 m / 2 m).
+    large_yeager_dthv_width : float
+        ``large_yeager`` only: half-width [K] of the same blend in the first
+        guess, across ``dthv = 0`` (virtual potential temperature air - sea).
+        Default ``NCAR_DTHV_WIDTH`` = 1e-2 (RULE 5); ``0.0`` is AeroBulk's
+        ``dthv >= 0``.  KNOWN DIFFERENCE (same fixture, this width alone): 1
+        state at 10 m and 3 at 2 m move by more than 1e-9; max relative gap
+        7.9e-7 (sensible heat, 2 m).
+    large_yeager_cd_cutoff_width : float
+        ``large_yeager`` only: width [m/s] of the one-sided quintic blend of the
+        LY09 drag polynomial into the 2.34e-3 plateau over ``[33 - w, 33]``
+        (:func:`_cd_n10_ncar`; static Python float, ``0 <= w <= 33``).  Default
+        ``NCAR_CD_CUTOFF_WIDTH`` = 0.5 (RULE 5); ``0.0`` is AeroBulk's hard
+        switch.  KNOWN DIFFERENCE (same fixture, this width alone): 5 states
+        move; max relative gap 7.4e-4 in stress, 3.7e-4 in heat fluxes and u*.
+        With all three defaults: 77 states (10 m) / 101 (2 m), maxima as for
+        the neutral width alone; per state in
+        ``tests/core/oracle_fixtures/aerobulk_ncar_default_gap.npz``.
     return_convergence : bool
         When True, additionally return the MOST fixed-point convergence
         residual (the relative change in ``u*`` over the FINAL iteration).
@@ -1464,7 +1549,11 @@ def compute_most_fluxes(
 
     for _name, _w, _w_max in (("coare_charnock_ramp_width", coare_charnock_ramp_width,
                                _COARE_CHARNOCK_U_HI - _COARE_CHARNOCK_U_LO),
-                              ("coare_gust_onset_width", coare_gust_onset_width, math.inf)):
+                              ("coare_gust_onset_width", coare_gust_onset_width, math.inf),
+                              ("large_yeager_neutral_width", large_yeager_neutral_width, math.inf),
+                              ("large_yeager_dthv_width", large_yeager_dthv_width, math.inf),
+                              ("large_yeager_cd_cutoff_width", large_yeager_cd_cutoff_width,
+                               _AB_NCAR_CD_CUTOFF_U)):
         if not (isinstance(_w, numbers.Real) and math.isfinite(_w) and 0.0 <= _w <= _w_max):
             raise ValueError(f"{_name} must be a finite float in [0, {_w_max}], got {_w!r}")
 
@@ -1493,7 +1582,8 @@ def compute_most_fluxes(
                 f"got gustiness_w_zi={gustiness_w_zi!r}.")
         _coare = _turb_ncar(
             u_rel ** 2 + v_rel ** 2, T_atm, q_atm, T_sfc, q_sfc, z_u, z_t, _equal,
-            n_iter, stability_scheme, unstable_gamma, stable_beta, _coeff_cap)
+            n_iter, stability_scheme, unstable_gamma, stable_beta, _coeff_cap,
+            large_yeager_neutral_width, large_yeager_dthv_width, large_yeager_cd_cutoff_width)
         u_star = _coare["us"]
         theta_star = -_coare["ts"]
         q_star_val = -_coare["qs"]
