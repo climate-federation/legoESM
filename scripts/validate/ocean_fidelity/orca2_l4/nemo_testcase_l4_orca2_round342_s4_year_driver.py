@@ -32,7 +32,12 @@ for _pkg in reversed((REPO_ROOT, REPO_ROOT / "packages/core", REPO_ROOT / "packa
     if str(_pkg) not in sys.path:
         sys.path.insert(0, str(_pkg))
 
-from legoesm.core.precision import PrecisionPolicy, set_policy  # noqa: E402
+from legoesm.core import transcendentals as transcendental_module  # noqa: E402
+from legoesm.core.precision import (  # noqa: E402
+    PrecisionPolicy,
+    get_policy,
+    set_policy,
+)
 from legoesm.ocean import bulk_flux_omip as bulk  # noqa: E402
 from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (  # noqa: E402
     LatLonCGridOceanModel,
@@ -179,7 +184,7 @@ def _monthly_pair_for_clock(
     records_12: np.ndarray,
     isecsbc: int,
 ) -> bulk.NemoStandaloneFieldPair:
-    """Select the bracketing cyclic monthly records and timestamps (`fldread.f90:243-246,885-937`)."""
+    """Select bracketing cyclic monthly records (`fldread.f90:243-246,885-937`)."""
     after_ext = int(np.searchsorted(EXTENDED_MONTH_CENTRES_SEC, isecsbc, side="right"))
     before_ext = after_ext - 1
     before_s = int(EXTENDED_MONTH_CENTRES_SEC[before_ext])
@@ -226,6 +231,74 @@ def _save_snapshot(
     }
 
 
+def _resolve_transcendentals(requested: str) -> str:
+    require(
+        requested in ("libm", "native"),
+        f"transcendentals must be 'libm' or 'native', got {requested!r}",
+    )
+    set_policy(PrecisionPolicy.fp64(transcendentals=requested))
+    resolved = get_policy().transcendentals
+    require(resolved == requested, "resolved transcendental policy disagrees with request")
+    return resolved
+
+
+def _prepare_empty_output_directory(output_dir: Path) -> None:
+    if output_dir.exists():
+        require(output_dir.is_dir(), f"output path is not a directory: {output_dir}")
+        require(
+            not any(output_dir.iterdir()),
+            f"output directory must be empty: {output_dir}",
+        )
+    else:
+        output_dir.mkdir(parents=True)
+
+
+def _write_run_manifest(
+    output_dir: Path,
+    *,
+    steps: int,
+    dt_s: int,
+    save_stride: int,
+    k0_config: dict[str, Any],
+    deck_root: Path,
+    ice_cover_path: Path,
+    wall_seconds: float,
+    devices: list[dict[str, Any]],
+    snapshots: list[dict[str, Any]],
+    worktree: dict[str, Any],
+) -> dict[str, Any]:
+    resolved = get_policy().transcendentals
+    libm_info = (
+        transcendental_module.libm_build_info() if resolved == "libm" else None
+    )
+    manifest = {
+        "status": "PASS_R342_S4_K0_LEGOESM_RUN",
+        "round": "orca2_r342",
+        "steps": steps,
+        "dt_s": dt_s,
+        "save_stride": save_stride,
+        "transcendentals": resolved,
+        "scalar_libm": libm_info,
+        "k0_config": k0_config,
+        "deck_root": str(deck_root),
+        "ice_cover_path": str(ice_cover_path),
+        "ice_cover_sha256": sha256_file(ice_cover_path),
+        "output_dir": str(output_dir),
+        "wall_seconds": wall_seconds,
+        "jax_default_backend": jax.default_backend(),
+        "jax_devices": devices,
+        "snapshots": snapshots,
+        "completed_utc": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "worktree": worktree,
+    }
+    manifest_path = output_dir / "run_manifest.json"
+    manifest_path.write_text(
+        json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    return manifest
+
+
 def run_standalone_k0_driver(
     *,
     steps: int,
@@ -238,19 +311,16 @@ def run_standalone_k0_driver(
     transcendentals: str = "libm",
 ) -> dict[str, Any]:
     """Run the production standalone ORCA2 K0 composed card for `steps` steps."""
-    require(
-        transcendentals in ("libm", "native"),
-        f"transcendentals must be 'libm' or 'native', got {transcendentals!r}",
-    )
+    resolved_transcendentals = _resolve_transcendentals(transcendentals)
+    _prepare_empty_output_directory(output_dir)
+    initial_worktree = worktree_stamp(repo=REPO_ROOT, allow_dirty=False)
     jax.config.update("jax_enable_x64", True)
-    set_policy(PrecisionPolicy.fp64(transcendentals=transcendentals))
     require(
         jax.config.jax_enable_x64 and jax.default_backend() == "cpu",
         f"standalone K0 card requires CPU fp64 backend, got {jax.default_backend()!r}",
     )
     require(1 <= steps <= YEAR_STEPS, f"steps must be in 1..{YEAR_STEPS}, got {steps}")
     require(save_stride > 0, f"save_stride must be positive, got {save_stride}")
-    output_dir.mkdir(parents=True, exist_ok=True)
 
     t0 = time.monotonic()
     card = bulk.build_nemo_orca2_k0_ocean_card(deck_root)
@@ -259,7 +329,7 @@ def run_standalone_k0_driver(
             ocean=card.ocean._replace(transcendentals="native")
         )
     require(
-        card.ocean.transcendentals == transcendentals,
+        card.ocean.transcendentals == resolved_transcendentals,
         "resolved card transcendental mode disagrees with requested mode",
     )
     require(card.k0 == EXPLICIT_K0_CONFIG,
@@ -344,7 +414,9 @@ def run_standalone_k0_driver(
         vmask=jnp.asarray(vmask, dtype=jnp.float64),
         freshwater_budget_correction=jnp.asarray(0.0, dtype=jnp.float64),
         runoff_factor=jnp.asarray(1.0, dtype=jnp.float64),
-        reference_density=jnp.asarray(recipe.model_config.physics.constants.rho_0, dtype=jnp.float64),
+        reference_density=jnp.asarray(
+            recipe.model_config.physics.constants.rho_0, dtype=jnp.float64
+        ),
         restoring_mm_per_day=jnp.asarray(-166.67, dtype=jnp.float64),
         restoring_bound_mm_per_day=jnp.asarray(4.0, dtype=jnp.float64),
         seconds_per_day=jnp.asarray(86400.0, dtype=jnp.float64),
@@ -474,31 +546,19 @@ def run_standalone_k0_driver(
         {"id": int(d.id), "platform": d.platform, "device_kind": d.device_kind}
         for d in jax.devices()
     ]
-    manifest = {
-        "status": "PASS_R342_S4_K0_LEGOESM_RUN",
-        "round": "orca2_r342",
-        "steps": steps,
-        "dt_s": dt_s,
-        "save_stride": save_stride,
-        "transcendentals": transcendentals,
-        "k0_config": card.k0._asdict(),
-        "deck_root": str(deck_root),
-        "ice_cover_path": str(ice_cover_path),
-        "ice_cover_sha256": sha256_file(ice_cover_path),
-        "output_dir": str(output_dir),
-        "wall_seconds": wall_seconds,
-        "jax_default_backend": jax.default_backend(),
-        "jax_devices": devices,
-        "snapshots": saved_snapshots,
-        "completed_utc": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "worktree": worktree_stamp(allow_dirty=False),
-    }
-    manifest_path = output_dir / "run_manifest.json"
-    manifest_path.write_text(
-        json.dumps(manifest, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
+    return _write_run_manifest(
+        output_dir,
+        steps=steps,
+        dt_s=dt_s,
+        save_stride=save_stride,
+        k0_config=card.k0._asdict(),
+        deck_root=deck_root,
+        ice_cover_path=ice_cover_path,
+        wall_seconds=wall_seconds,
+        devices=devices,
+        snapshots=saved_snapshots,
+        worktree=initial_worktree,
     )
-    return manifest
 
 
 def main(argv: list[str] | None = None) -> int:

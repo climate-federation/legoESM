@@ -23,9 +23,9 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import xarray as xr
+from legoesm.ocean.fidelity.provenance import worktree_stamp
 from nemo_testcase_l2_gyre_phase3_gate import read_qsr_stage3, read_tracer_stage3
 from nemo_testcase_l2_gyre_round15_eligibility import _candidate, _read_sbc
-from legoesm.ocean.fidelity.provenance import worktree_stamp
 
 F64 = np.float64
 U64 = np.uint64
@@ -350,40 +350,44 @@ def _current_qsr_sites(card, r3t):
     return tuple(np.asarray(value) for value in evaluate(z, stretch))
 
 
-class _PoisonFunction:
-    def __init__(self, owner, name):
+class _PoisonCompiledFunction:
+    def __init__(self, owner, name, function):
         self.owner = owner
         self.name = name
-        self.argtypes = None
-        self.restype = None
+        self.function = function
 
-    def __call__(self, value):
-        self.owner.counts[self.name] += 1
-        result = _libm(self.name, value)
-        return float(np.nextafter(result, np.inf))
+    def __call__(self, *args):
+        self.function(*args)
+        count = int(args[-1])
+        result = np.ctypeslib.as_array(args[-2], shape=(count,))
+        np.nextafter(result, np.asarray(np.inf, dtype=result.dtype), out=result)
+        self.owner.counts[self.name] += count
 
 
-class _PoisonLibm:
-    def __init__(self):
-        self.counts = {name: 0 for name in ("exp", "tanh", "sin", "cos")}
-        self.functions = {name: _PoisonFunction(self, name) for name in self.counts}
+class _PoisonFastFunction:
+    def __init__(self, original):
+        self.original = original
+        self.counts = {
+            name: 0 for name in ("exp", "log", "log10", "atan", "tanh", "sin", "cos", "pow")
+        }
 
-    def __getattr__(self, name):
-        return self.functions[name]
+    def __call__(self, name, dtype, *, binary):
+        function = self.original(name, dtype, binary=binary)
+        return _PoisonCompiledFunction(self, name, function)
 
 
 def _routing_control(qsr_record, tracer_record) -> dict[str, object]:
     import legoesm.core.transcendentals as transcendental_module
 
     clean = _candidate("libm", qsr_record, tracer_record)
-    original = transcendental_module._LIBM
-    poison = _PoisonLibm()
+    original = transcendental_module._fast_function
+    poison = _PoisonFastFunction(original)
     try:
-        transcendental_module._LIBM = poison
+        transcendental_module._fast_function = poison
         jax.clear_caches()
         planted = _candidate("libm", qsr_record, tracer_record)
     finally:
-        transcendental_module._LIBM = original
+        transcendental_module._fast_function = original
         jax.clear_caches()
     changed = {
         name: not np.array_equal(

@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import hashlib
+import os
 import re
 import subprocess
+from pathlib import Path
 
 import jax
 import jax.numpy as jnp
@@ -19,6 +22,9 @@ def _restore_policy():
     previous = get_policy()
     yield
     set_policy(previous)
+    tx._compiled_libm.cache_clear()
+    tx._compiled_libm_path.cache_clear()
+    tx._gcc_version.cache_clear()
 
 
 @pytest.mark.parametrize(
@@ -118,6 +124,32 @@ def test_libm_pow_policy_preserves_broadcast_jit_and_custom_jvp() -> None:
     assert float(reverse) == pytest.approx(12.0)
 
 
+@pytest.mark.parametrize(
+    "left,right",
+    [
+        (jnp.asarray([2.0], dtype=jnp.float32), 3.0),
+        (jnp.asarray([2.0], dtype=jnp.float32), 3),
+        (jnp.asarray([2.0], dtype=jnp.float32), jnp.asarray([3], dtype=jnp.int64)),
+        (jnp.asarray([2.0], dtype=jnp.float32), jnp.asarray([3.0], dtype=jnp.float64)),
+        (jnp.asarray([2], dtype=jnp.int32), jnp.asarray([3.0], dtype=jnp.float64)),
+    ],
+)
+def test_pow_libm_callback_dtype_matches_jax_result_type_and_native_lane(
+    left, right
+) -> None:
+    expected_dtype = jnp.result_type(left, right)
+    set_policy(PrecisionPolicy.fp64(transcendentals="native"))
+    native = pow(left, right)
+    native_reference = jnp.power(*jnp.broadcast_arrays(jnp.asarray(left), jnp.asarray(right)))
+    assert native.dtype == native_reference.dtype
+    np.testing.assert_array_equal(np.asarray(native), np.asarray(native_reference))
+
+    set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
+    observed = pow(left, right)
+    assert observed.dtype == expected_dtype
+    np.testing.assert_array_equal(np.asarray(observed), np.asarray(native_reference))
+
+
 _MILLION = 1_000_000
 
 
@@ -177,6 +209,14 @@ def _assert_bitwise_equal(observed: np.ndarray, reference: np.ndarray) -> None:
     word = np.uint32 if observed.dtype == np.float32 else np.uint64
     assert observed.shape == reference.shape
     assert np.array_equal(observed.view(word), reference.view(word))
+
+
+def test_python_reference_handles_non_contiguous_transposed_input() -> None:
+    values = np.linspace(-4.0, 4.0, 60, dtype=np.float64).reshape(5, 12).T
+    assert not values.flags.c_contiguous
+    reference = tx._scalar_libm_reference("exp", values)
+    observed = tx._scalar_libm("exp", values)
+    _assert_bitwise_equal(reference, observed)
 
 
 @pytest.mark.parametrize("dtype", [np.float32, np.float64])
@@ -246,17 +286,133 @@ def test_fast_path_wrong_libm_function_plant_fails_bitwise_gate(
         _assert_bitwise_equal(planted, reference)
 
 
-def test_fast_path_is_fail_closed_and_uses_required_compiler_flags(
+def _clear_build_caches() -> None:
+    tx._compiled_libm.cache_clear()
+    tx._compiled_libm_path.cache_clear()
+    tx._gcc_version.cache_clear()
+
+
+def test_compile_flags_participate_in_cache_key(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     assert {"-O2", "-fno-builtin", "-fno-tree-vectorize"} <= set(
         tx._COMPILE_FLAGS
     )
     assert "-ffast-math" not in tx._COMPILE_FLAGS
+    monkeypatch.setenv("LEGOESM_SCALAR_LIBM_CACHE", str(tmp_path / "cache"))
+    _clear_build_caches()
+    first = tx._compiled_libm_path()
+    monkeypatch.setattr(tx, "_COMPILE_FLAGS", (*tx._COMPILE_FLAGS, "-fwrapv"))
+    tx._compiled_libm_path.cache_clear()
+    second = tx._compiled_libm_path()
+    assert first.parent != second.parent
 
-    def broken_loader():
-        raise RuntimeError("planted build/load failure")
 
-    monkeypatch.setattr(tx, "_compiled_libm", broken_loader)
-    with pytest.raises(RuntimeError, match="planted build/load failure"):
-        tx._scalar_libm("exp", np.asarray([1.0], dtype=np.float64))
+def test_missing_compiler_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("LEGOESM_SCALAR_LIBM_CACHE", str(tmp_path / "cache"))
+    _clear_build_caches()
+
+    def missing_compiler(*_args, **_kwargs):
+        raise FileNotFoundError("planted missing gcc")
+
+    monkeypatch.setattr(tx.subprocess, "run", missing_compiler)
+    with pytest.raises(RuntimeError, match="GCC version query failed"):
+        tx._compiled_libm_path()
+
+
+def test_compile_error_removes_all_temporary_files(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "broken.c"
+    source.write_text("this is not C\n", encoding="utf-8")
+    cache = tmp_path / "cache"
+    monkeypatch.setenv("LEGOESM_SCALAR_LIBM_CACHE", str(cache))
+    monkeypatch.setattr(tx, "_C_SOURCE", source)
+    _clear_build_caches()
+    with pytest.raises(RuntimeError, match="scalar-libm build failed"):
+        tx._compiled_libm_path()
+    assert not list(cache.rglob("scalar_libm-*.so"))
+    assert not list(cache.rglob("scalar_libm-*.sha256"))
+
+
+def test_corrupt_shared_object_with_matching_sha_fails_to_load(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("LEGOESM_SCALAR_LIBM_CACHE", str(tmp_path / "cache"))
+    _clear_build_caches()
+    shared_object = tx._compiled_libm_path()
+    shared_object.write_bytes(b"not a shared object")
+    checksum = hashlib.sha256(shared_object.read_bytes()).hexdigest()
+    shared_object.with_name(shared_object.name + tx._SHA256_SUFFIX).write_text(
+        checksum + "\n", encoding="ascii"
+    )
+    tx._compiled_libm.cache_clear()
+    with pytest.raises(RuntimeError, match="scalar-libm load failed"):
+        tx._compiled_libm()
+
+
+def test_shared_object_sha_mismatch_fails_without_rebuild(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("LEGOESM_SCALAR_LIBM_CACHE", str(tmp_path / "cache"))
+    _clear_build_caches()
+    shared_object = tx._compiled_libm_path()
+    with shared_object.open("ab") as stream:
+        stream.write(b"planted corruption")
+    tx._compiled_libm.cache_clear()
+    with pytest.raises(RuntimeError, match="SHA-256 mismatch"):
+        tx._compiled_libm()
+
+
+def test_world_writable_cache_directory_is_refused(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    cache = tmp_path / "cache"
+    cache.mkdir(mode=0o700)
+    cache.chmod(0o777)
+    monkeypatch.setenv("LEGOESM_SCALAR_LIBM_CACHE", str(cache))
+    _clear_build_caches()
+    with pytest.raises(RuntimeError, match="group/world-accessible"):
+        tx._compiled_libm_path()
+
+
+def test_foreign_owned_cache_directory_is_refused(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    cache = tmp_path / "cache"
+    cache.mkdir(mode=0o700)
+    monkeypatch.setenv("LEGOESM_SCALAR_LIBM_CACHE", str(cache))
+    monkeypatch.setattr(tx.os, "geteuid", lambda: cache.stat().st_uid + 1)
+    _clear_build_caches()
+    with pytest.raises(RuntimeError, match="not owned"):
+        tx._compiled_libm_path()
+
+
+def test_new_cache_directories_are_private(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    cache = tmp_path / "cache"
+    monkeypatch.setenv("LEGOESM_SCALAR_LIBM_CACHE", str(cache))
+    _clear_build_caches()
+    shared_object = tx._compiled_libm_path()
+    assert os.stat(cache).st_mode & 0o777 == 0o700
+    assert os.stat(shared_object.parent).st_mode & 0o777 == 0o700
+
+
+def test_default_cache_root_uses_xdg_not_shared_tmp(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.delenv("LEGOESM_SCALAR_LIBM_CACHE", raising=False)
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "xdg"))
+    assert tx._cache_root() == tmp_path / "xdg" / "legoesm" / "scalar-libm"

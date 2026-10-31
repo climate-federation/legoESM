@@ -22,6 +22,7 @@ from __future__ import annotations
 import ctypes
 import hashlib
 import os
+import stat
 import subprocess
 import tempfile
 from functools import lru_cache, partial
@@ -44,6 +45,8 @@ _COMPILE_FLAGS = (
 )
 _UNARY_NAMES = ("exp", "log", "log10", "atan", "tanh", "sin", "cos")
 _FAST_SYMBOLS = {name: name for name in (*_UNARY_NAMES, "pow")}
+_SHARED_OBJECT_NAME = "scalar_libm.so"
+_SHA256_SUFFIX = ".sha256"
 
 
 def glibc_libm() -> ctypes.CDLL:
@@ -84,6 +87,60 @@ def _gcc_version() -> str:
     ).stdout.strip()
 
 
+def _sha256_path(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _cache_root() -> Path:
+    override = os.environ.get("LEGOESM_SCALAR_LIBM_CACHE")
+    if override:
+        return Path(override).expanduser()
+    xdg = os.environ.get("XDG_CACHE_HOME", "")
+    base = Path(xdg) if xdg and os.path.isabs(xdg) else Path.home() / ".cache"
+    return base / "legoesm" / "scalar-libm"
+
+
+def _ensure_secure_cache_directory(path: Path) -> None:
+    try:
+        path.mkdir(mode=0o700, parents=True, exist_ok=True)
+        info = path.stat()
+    except OSError as exc:
+        raise RuntimeError(f"scalar-libm cache directory is unavailable: {path}") from exc
+    if not stat.S_ISDIR(info.st_mode):
+        raise RuntimeError(f"scalar-libm cache path is not a directory: {path}")
+    if info.st_uid != os.geteuid():
+        raise RuntimeError(
+            f"scalar-libm cache directory is not owned by uid {os.geteuid()}: {path}"
+        )
+    if stat.S_IMODE(info.st_mode) & 0o077:
+        raise RuntimeError(
+            f"scalar-libm cache directory is group/world-accessible: {path}"
+        )
+
+
+def _verify_shared_object(shared_object: Path) -> str:
+    checksum_path = shared_object.with_name(shared_object.name + _SHA256_SUFFIX)
+    try:
+        expected = checksum_path.read_text(encoding="ascii").strip()
+    except OSError as exc:
+        raise RuntimeError(
+            f"scalar-libm checksum is unavailable for {shared_object}"
+        ) from exc
+    if len(expected) != 64 or any(char not in "0123456789abcdef" for char in expected):
+        raise RuntimeError(f"scalar-libm checksum is invalid for {shared_object}")
+    try:
+        observed = _sha256_path(shared_object)
+    except OSError as exc:
+        raise RuntimeError(f"scalar-libm shared object is unavailable: {shared_object}") from exc
+    if observed != expected:
+        raise RuntimeError(f"scalar-libm SHA-256 mismatch for {shared_object}")
+    return observed
+
+
 @lru_cache(maxsize=1)
 def _compiled_libm_path() -> Path:
     try:
@@ -93,22 +150,25 @@ def _compiled_libm_path() -> Path:
     source_digest = hashlib.sha256(source).hexdigest()
     version = _gcc_version()
     version_digest = hashlib.sha256(version.encode("utf-8")).hexdigest()
-    cache_root = Path(
-        os.environ.get(
-            "LEGOESM_SCALAR_LIBM_CACHE",
-            str(Path(tempfile.gettempdir()) / "legoesm-scalar-libm"),
-        )
-    )
-    cache_dir = cache_root / f"{source_digest}-{version_digest}"
-    shared_object = cache_dir / "scalar_libm.so"
+    flags_digest = hashlib.sha256("\0".join(_COMPILE_FLAGS).encode("utf-8")).hexdigest()
+    cache_root = _cache_root()
+    _ensure_secure_cache_directory(cache_root)
+    cache_dir = cache_root / f"{source_digest}-{version_digest}-{flags_digest}"
+    _ensure_secure_cache_directory(cache_dir)
+    shared_object = cache_dir / _SHARED_OBJECT_NAME
     if shared_object.is_file():
+        _verify_shared_object(shared_object)
         return shared_object
+    checksum_path = shared_object.with_name(shared_object.name + _SHA256_SUFFIX)
     try:
-        cache_dir.mkdir(parents=True, exist_ok=True)
         with tempfile.NamedTemporaryFile(
             prefix="scalar_libm-", suffix=".so", dir=cache_dir, delete=False
         ) as tmp:
             temporary = Path(tmp.name)
+        with tempfile.NamedTemporaryFile(
+            prefix="scalar_libm-", suffix=".sha256", dir=cache_dir, delete=False
+        ) as tmp_checksum:
+            temporary_checksum = Path(tmp_checksum.name)
         command = [
             "gcc",
             *_COMPILE_FLAGS,
@@ -119,21 +179,40 @@ def _compiled_libm_path() -> Path:
             "-lm",
         ]
         _run_checked(command, "build")
+        digest = _sha256_path(temporary)
+        temporary_checksum.write_text(digest + "\n", encoding="ascii")
         os.replace(temporary, shared_object)
+        os.replace(temporary_checksum, checksum_path)
     except Exception:
         if "temporary" in locals():
             temporary.unlink(missing_ok=True)
+        if "temporary_checksum" in locals():
+            temporary_checksum.unlink(missing_ok=True)
         raise
+    _verify_shared_object(shared_object)
     return shared_object
 
 
 @lru_cache(maxsize=1)
 def _compiled_libm() -> ctypes.CDLL:
     path = _compiled_libm_path()
+    _verify_shared_object(path)
+    glibc_libm()
     try:
         return ctypes.CDLL(str(path))
     except OSError as exc:
         raise RuntimeError(f"scalar-libm load failed for {path}: {exc}") from exc
+
+
+def libm_build_info() -> dict[str, str]:
+    """Return verified provenance for the loaded compiled scalar-libm loop."""
+    _compiled_libm()
+    path = _compiled_libm_path().resolve()
+    return {
+        "path": str(path),
+        "sha256": _verify_shared_object(path),
+        "gcc_version": _gcc_version(),
+    }
 
 
 def _dtype_pointer(dtype: np.dtype):
@@ -187,7 +266,7 @@ def _scalar_libm_reference(name: str, values: np.ndarray) -> np.ndarray:
     function = getattr(glibc_libm(), name)
     function.argtypes = (ctypes.c_double,)
     function.restype = ctypes.c_double
-    result = np.empty_like(source)
+    result = np.empty(source.shape, dtype=source.dtype, order="C")
     source_flat = source.reshape(-1)
     result_flat = result.reshape(-1)
     with np.errstate(over="ignore", invalid="ignore"):
@@ -255,8 +334,11 @@ def _scalar_libm_binary_reference(
 def _callback_binary(name: str, left: jax.Array, right: jax.Array) -> jax.Array:
     if jax.default_backend() != "cpu":
         raise RuntimeError("scalar libm policy is CPU-only")
+    dtype = jnp.result_type(left, right)
+    left = jnp.asarray(left, dtype=dtype)
+    right = jnp.asarray(right, dtype=dtype)
     shape = jnp.broadcast_shapes(left.shape, right.shape)
-    result = jax.ShapeDtypeStruct(shape, jnp.result_type(left, right))
+    result = jax.ShapeDtypeStruct(shape, dtype)
     return jax.pure_callback(
         partial(_scalar_libm_binary, name), result, left, right,
         vmap_method="broadcast_all",
@@ -393,9 +475,7 @@ def atan(value) -> jax.Array:
 
 def pow(left, right) -> jax.Array:
     """Evaluate binary power under the active precision policy."""
-    left_array, right_array = jnp.broadcast_arrays(
-        jnp.asarray(left), jnp.asarray(right)
-    )
+    left_array, right_array = jnp.broadcast_arrays(jnp.asarray(left), jnp.asarray(right))
     if get_policy().transcendentals == "native":
         return jnp.power(left_array, right_array)
     return _libm_pow(left_array, right_array)
@@ -425,4 +505,15 @@ def cos(value) -> jax.Array:
     return _libm_cos(array)
 
 
-__all__ = ("atan", "cos", "exp", "log", "log10", "pow", "sin", "tanh")
+__all__ = (
+    "atan",
+    "cos",
+    "exp",
+    "glibc_libm",
+    "libm_build_info",
+    "log",
+    "log10",
+    "pow",
+    "sin",
+    "tanh",
+)

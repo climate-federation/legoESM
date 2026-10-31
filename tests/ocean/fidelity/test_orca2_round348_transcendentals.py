@@ -3,14 +3,25 @@
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 
 import numpy as np
 import pytest
+from legoesm.core import transcendentals as tx
 
 from scripts.validate.ocean_fidelity.orca2_l4 import (
     nemo_testcase_l4_orca2_round348_transcendentals_compare as compare,
 )
+
+_TESTCASE_SCRIPTS = (
+    Path(__file__).resolve().parents[3] / "scripts/validate/ocean_fidelity/testcases"
+)
+sys.path.insert(0, str(_TESTCASE_SCRIPTS))
+try:
+    import nemo_testcase_l2_gyre_round16_discriminator as r16_discriminator
+finally:
+    sys.path.pop(0)
 
 
 def _snapshot(path: Path, step: int, *, negative_zero: bool = False) -> None:
@@ -29,6 +40,25 @@ def _snapshot(path: Path, step: int, *, negative_zero: bool = False) -> None:
     if negative_zero:
         arrays["T"][0, 0, 0] = -0.0
     np.savez(path / f"candidate_step{step:08d}.npz", **arrays)
+
+
+def _assert_plant_changes_bits(clean: np.ndarray, planted: np.ndarray) -> None:
+    word = np.uint32 if clean.dtype == np.float32 else np.uint64
+    assert not np.array_equal(clean.view(word), planted.view(word))
+
+
+def test_round16_routing_plant_changes_compiled_libm_result_and_noop_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    values = np.linspace(-2.0, 2.0, 257, dtype=np.float64)
+    clean = tx._scalar_libm("exp", values)
+    poison = r16_discriminator._PoisonFastFunction(tx._fast_function)
+    monkeypatch.setattr(tx, "_fast_function", poison)
+    planted = tx._scalar_libm("exp", values)
+    assert poison.counts["exp"] == values.size
+    _assert_plant_changes_bits(clean, planted)
+    with pytest.raises(AssertionError):
+        _assert_plant_changes_bits(clean, clean.copy())
 
 
 def test_all_field_bitwise_comparison_and_signed_zero_policy(tmp_path: Path) -> None:
@@ -75,8 +105,11 @@ def test_daily_comparison_reuses_area_weights_and_wet_3d_mask(
         "static_geometry",
         lambda _root: {"tmask": wet, "area_t": area},
     )
-    calls = iter(({"T": reference_t}, {"T": candidate_t}))
-    monkeypatch.setattr(compare.pilot_metrics, "read_candidate_day", lambda *_: next(calls))
+    monkeypatch.setattr(
+        compare.pilot_metrics,
+        "read_candidate_day",
+        lambda root, _day: {"T": reference_t if root == Path("left") else candidate_t},
+    )
     rows = compare.compare_daily_temperature(Path("left"), Path("right"), Path("geo"), 1)
 
     surface_weight = area * wet[..., 0]
@@ -84,6 +117,17 @@ def test_daily_comparison_reuses_area_weights_and_wet_3d_mask(
     expected_t3d = np.sqrt(4.0 / wet.astype(bool).sum())
     assert rows[0]["sst_area_weighted_rms_k"] == pytest.approx(expected_sst)
     assert rows[0]["t3d_wet_rms_k"] == pytest.approx(expected_t3d)
+    control = compare.planted_daily_temperature_control(
+        Path("left"), Path("right"), Path("geo"), rows[0]
+    )
+    assert control["daily_sst_rms_plant"] != rows[0]["sst_area_weighted_rms_k"]
+    assert control["daily_t3d_rms_plant"] != rows[0]["t3d_wet_rms_k"]
+
+    monkeypatch.setattr(compare, "compare_daily_temperature", lambda *_args, **_kwargs: rows)
+    with pytest.raises(RuntimeError, match="plant did not move"):
+        compare.planted_daily_temperature_control(
+            Path("left"), Path("right"), Path("geo"), rows[0]
+        )
 
 
 def test_metric_controls_fire_and_json_png_are_written(
@@ -103,11 +147,38 @@ def test_metric_controls_fire_and_json_png_are_written(
     ]
     monkeypatch.setattr(compare, "compare_daily_temperature", lambda *_args: rows)
     monkeypatch.setattr(compare, "planted_metric_controls", lambda: controls)
+    monkeypatch.setattr(
+        compare,
+        "planted_daily_temperature_control",
+        lambda *_args: {"daily_sst_rms_plant": 1.0, "daily_t3d_rms_plant": 1.0},
+    )
     monkeypatch.setattr(compare, "worktree_stamp", lambda **_kwargs: "test-clean")
     monkeypatch.setattr(
         compare,
         "compare_snapshot_data",
         lambda *_args: {"status": "EXACT", "snapshot_count": 2, "compared_arrays": 18},
+    )
+    reference_manifest = tmp_path / "reference.json"
+    candidate_manifest = tmp_path / "candidate.json"
+    reference_manifest.write_text(
+        json.dumps(
+            {
+                "steps": 2,
+                "wall_seconds": 4.0,
+                "jax_default_backend": "cpu",
+                "transcendentals": "libm",
+            }
+        )
+    )
+    candidate_manifest.write_text(
+        json.dumps(
+            {
+                "steps": 2,
+                "wall_seconds": 2.0,
+                "jax_default_backend": "cpu",
+                "transcendentals": "native",
+            }
+        )
     )
     assert compare.main(
         [
@@ -118,11 +189,15 @@ def test_metric_controls_fire_and_json_png_are_written(
             "--days", "2",
             "--bitwise-steps", "8,10",
             "--require-bitwise-exact",
+            "--reference-manifest", str(reference_manifest),
+            "--candidate-manifest", str(candidate_manifest),
         ]
     ) == 0
     output = capsys.readouterr().out
     assert "PASS_R348_BITWISE_EXACT snapshots=2 arrays=18" in output
     assert "PASS_R348_ARM_COMPARISON days=2" in output
+    assert "reference_backend=cpu reference_transcendentals=libm" in output
+    assert "candidate_backend=cpu candidate_transcendentals=native" in output
     report_path = tmp_path / "out" / "transcendentals_arm_temperature_rms.json"
     report = json.loads(report_path.read_text())
     assert report["daily"] == rows
@@ -138,9 +213,42 @@ def test_step_parser_refuses_unknown_or_unsorted_values() -> None:
 def test_manifest_timing_uses_total_wall_seconds_per_completed_step(tmp_path: Path) -> None:
     reference = tmp_path / "reference.json"
     candidate = tmp_path / "candidate.json"
-    reference.write_text(json.dumps({"steps": 2920, "wall_seconds": 70284.4}))
-    candidate.write_text(json.dumps({"steps": 80, "wall_seconds": 800.0}))
+    reference.write_text(json.dumps({
+        "steps": 2920,
+        "wall_seconds": 70284.4,
+        "jax_default_backend": "cpu",
+        "transcendentals": "libm",
+    }))
+    candidate.write_text(json.dumps({
+        "steps": 80,
+        "wall_seconds": 800.0,
+        "jax_default_backend": "cpu",
+        "transcendentals": "native",
+    }))
     timing = compare.compare_manifest_timing(reference, candidate)
     assert timing["reference_seconds_per_step"] == pytest.approx(24.07)
     assert timing["candidate_seconds_per_step"] == 10.0
     assert timing["speedup"] == pytest.approx(2.407)
+    assert timing["reference_backend"] == "cpu"
+    assert timing["reference_transcendentals"] == "libm"
+    assert timing["candidate_transcendentals"] == "native"
+
+    bad = json.loads(candidate.read_text())
+    bad["jax_default_backend"] = "gpu"
+    candidate.write_text(json.dumps(bad))
+    with pytest.raises(RuntimeError, match="backend must be 'cpu'"):
+        compare.compare_manifest_timing(reference, candidate)
+
+
+def test_comparison_refuses_identical_roots(tmp_path: Path) -> None:
+    root = tmp_path / "same"
+    with pytest.raises(RuntimeError, match="reference_root and candidate_root must differ"):
+        compare.main(
+            [
+                "--reference-root", str(root),
+                "--candidate-root", str(root),
+                "--geometry-root", str(tmp_path / "geometry"),
+                "--output-dir", str(tmp_path / "out"),
+                "--days", "1",
+            ]
+        )

@@ -157,9 +157,15 @@ def compare_daily_temperature(
     candidate_root: Path,
     geometry_root: Path,
     days: int,
+    *,
+    plant: str | None = None,
 ) -> list[dict[str, Any]]:
     """Compute daily area-weighted SST RMS and unweighted 3-D wet T RMS."""
     require(1 <= days <= 365, f"days must be in 1..365, got {days}")
+    require(
+        plant in (None, "first-wet-temperature"),
+        f"unknown daily-temperature plant {plant!r}",
+    )
     geometry = pilot_metrics.static_geometry(geometry_root)
     wet3 = np.asarray(geometry["tmask"], dtype=bool)
     surface_weight = np.asarray(geometry["area_t"]) * wet3[..., 0]
@@ -167,11 +173,19 @@ def compare_daily_temperature(
     for day in range(1, days + 1):
         reference = pilot_metrics.read_candidate_day(reference_root, day)
         candidate = pilot_metrics.read_candidate_day(candidate_root, day)
+        candidate_t = np.asarray(candidate["T"])
+        reference_t = np.asarray(reference["T"])
+        if plant == "first-wet-temperature" and day == 1:
+            candidate_t = candidate_t.copy()
+            surface_wet = np.argwhere(wet3[..., 0])
+            require(surface_wet.size > 0, "daily-temperature plant has no wet surface cell")
+            j, i = (int(value) for value in surface_wet[0])
+            candidate_t[j, i, 0] = reference_t[j, i, 0] + 1.0e6
         score = r343_benchmark.score_daily_temperature_against_reference(
-            candidate["T"], reference["T"], wet3, kt=day * STEPS_PER_DAY
+            candidate_t, reference_t, wet3, kt=day * STEPS_PER_DAY
         )
         sst = pilot_metrics.bias_rms(
-            candidate["T"][..., 0] - reference["T"][..., 0],
+            candidate_t[..., 0] - reference_t[..., 0],
             surface_weight,
         )
         rows.append(
@@ -183,6 +197,31 @@ def compare_daily_temperature(
             }
         )
     return rows
+
+
+def planted_daily_temperature_control(
+    reference_root: Path,
+    candidate_root: Path,
+    geometry_root: Path,
+    baseline: dict[str, Any],
+) -> dict[str, float]:
+    """Prove the production daily-temperature comparison detects a plant."""
+    planted = compare_daily_temperature(
+        reference_root,
+        candidate_root,
+        geometry_root,
+        1,
+        plant="first-wet-temperature",
+    )[0]
+    changed = {
+        name: float(planted[name]) != float(baseline[name])
+        for name in ("sst_area_weighted_rms_k", "t3d_wet_rms_k")
+    }
+    require(all(changed.values()), "daily-temperature plant did not move both scores")
+    return {
+        "daily_sst_rms_plant": float(planted["sst_area_weighted_rms_k"]),
+        "daily_t3d_rms_plant": float(planted["t3d_wet_rms_k"]),
+    }
 
 
 def write_curve(rows: list[dict[str, Any]], output_path: Path) -> str:
@@ -207,7 +246,7 @@ def write_curve(rows: list[dict[str, Any]], output_path: Path) -> str:
     return hashlib.sha256(output_path.read_bytes()).hexdigest()
 
 
-def compare_manifest_timing(reference_path: Path, candidate_path: Path) -> dict[str, float]:
+def compare_manifest_timing(reference_path: Path, candidate_path: Path) -> dict[str, Any]:
     """Compare total wall seconds per completed step from two run manifests."""
     manifests = []
     for path in (reference_path, candidate_path):
@@ -215,6 +254,14 @@ def compare_manifest_timing(reference_path: Path, candidate_path: Path) -> dict[
         payload = json.loads(path.read_text(encoding="utf-8"))
         require(int(payload["steps"]) > 0, f"{path}: steps must be positive")
         require(float(payload["wall_seconds"]) > 0.0, f"{path}: wall_seconds must be positive")
+        require(
+            payload.get("jax_default_backend") == "cpu",
+            f"{path}: manifest backend must be 'cpu'",
+        )
+        require(
+            payload.get("transcendentals") in ("libm", "native"),
+            f"{path}: manifest transcendentals must be 'libm' or 'native'",
+        )
         manifests.append(payload)
     reference_s = float(manifests[0]["wall_seconds"]) / int(manifests[0]["steps"])
     candidate_s = float(manifests[1]["wall_seconds"]) / int(manifests[1]["steps"])
@@ -223,6 +270,10 @@ def compare_manifest_timing(reference_path: Path, candidate_path: Path) -> dict[
         "candidate_seconds_per_step": candidate_s,
         "candidate_over_reference": candidate_s / reference_s,
         "speedup": reference_s / candidate_s,
+        "reference_backend": manifests[0]["jax_default_backend"],
+        "candidate_backend": manifests[1]["jax_default_backend"],
+        "reference_transcendentals": manifests[0]["transcendentals"],
+        "candidate_transcendentals": manifests[1]["transcendentals"],
     }
 
 
@@ -241,6 +292,10 @@ def main(argv: list[str] | None = None) -> int:
     require(
         (args.reference_manifest is None) == (args.candidate_manifest is None),
         "reference and candidate manifests must be provided together",
+    )
+    require(
+        args.reference_root.resolve() != args.candidate_root.resolve(),
+        "reference_root and candidate_root must differ",
     )
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
@@ -269,7 +324,15 @@ def main(argv: list[str] | None = None) -> int:
             "sst": "Decision-160 area_t * surface tmask weighted RMS",
             "t3d": "Round-343 unweighted RMS over wet 3-D tmask cells",
         },
-        "planted_controls": planted_metric_controls(),
+        "planted_controls": {
+            **planted_metric_controls(),
+            **planted_daily_temperature_control(
+                args.reference_root,
+                args.candidate_root,
+                args.geometry_root,
+                rows[0],
+            ),
+        },
         "daily": rows,
         "figure": {"path": str(figure), "sha256": figure_sha},
         "bitwise": bitwise,
@@ -285,6 +348,14 @@ def main(argv: list[str] | None = None) -> int:
         print(
             f"PASS_R348_BITWISE_EXACT snapshots={bitwise['snapshot_count']} "
             f"arrays={bitwise['compared_arrays']}"
+        )
+    if timing is not None:
+        print(
+            "R348_MANIFEST_MODES "
+            f"reference_backend={timing['reference_backend']} "
+            f"reference_transcendentals={timing['reference_transcendentals']} "
+            f"candidate_backend={timing['candidate_backend']} "
+            f"candidate_transcendentals={timing['candidate_transcendentals']}"
         )
     print(f"PASS_R348_ARM_COMPARISON days={args.days} output={report_path}")
     return 0

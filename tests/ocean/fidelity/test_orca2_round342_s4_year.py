@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import os
 import subprocess
 from pathlib import Path
 
@@ -154,40 +156,48 @@ def test_driver_explicit_k0_and_full_year_fld_read_schedule() -> None:
     if r342_driver.DEFAULT_DECK_ROOT.is_dir():
         wet = np.ones((148, 180), dtype=bool)
         chl_1 = ladder.chlorophyll_at_step(r342_driver.DEFAULT_DECK_ROOT, 1, wet, dt_s=10800.0)
-        chl_2920 = ladder.chlorophyll_at_step(r342_driver.DEFAULT_DECK_ROOT, 2920, wet, dt_s=10800.0)
+        chl_2920 = ladder.chlorophyll_at_step(
+            r342_driver.DEFAULT_DECK_ROOT, 2920, wet, dt_s=10800.0
+        )
         assert chl_1.shape == (148, 180) and np.isfinite(chl_1).all()
         assert chl_2920.shape == (148, 180) and np.isfinite(chl_2920).all()
 
 
 @pytest.mark.parametrize(
-    "cli,expected", [([], "libm"), (["--transcendentals", "native"], "native")]
+    "expected", ["libm", "native"]
 )
 def test_driver_transcendentals_flag_round_trips_to_manifest(
-    cli: list[str],
     expected: str,
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
 ) -> None:
-    captured: dict[str, object] = {}
-
-    def fake_run(**kwargs):
-        captured.update(kwargs)
-        return {
-            "status": "PASS_R342_S4_K0_LEGOESM_RUN",
-            "steps": kwargs["steps"],
-            "wall_seconds": 1.0,
-            "jax_default_backend": "cpu",
-            "transcendentals": kwargs["transcendentals"],
-            "snapshots": [],
-            "output_dir": str(kwargs["output_dir"]),
-        }
-
-    monkeypatch.setattr(r342_driver, "run_standalone_k0_driver", fake_run)
-    assert r342_driver.main(["--steps", "1", "--output-dir", str(tmp_path), *cli]) == 0
-    payload = capsys.readouterr().out
-    assert f'"transcendentals": "{expected}"' in payload
-    assert captured["transcendentals"] == expected
+    output_dir = tmp_path / expected
+    output_dir.mkdir()
+    ice_cover = tmp_path / f"{expected}-ice.nc"
+    ice_cover.write_bytes(b"manifest-only fixture")
+    resolved = r342_driver._resolve_transcendentals(expected)
+    assert resolved == expected
+    manifest = r342_driver._write_run_manifest(
+        output_dir,
+        steps=1,
+        dt_s=10800,
+        save_stride=8,
+        k0_config=r342_driver.EXPLICIT_K0_CONFIG._asdict(),
+        deck_root=tmp_path,
+        ice_cover_path=ice_cover,
+        wall_seconds=1.0,
+        devices=[],
+        snapshots=[],
+        worktree={"clean": True, "git_sha": "test"},
+    )
+    written = json.loads((output_dir / "run_manifest.json").read_text())
+    assert written == manifest
+    assert manifest["transcendentals"] == expected
+    if expected == "libm":
+        assert Path(manifest["scalar_libm"]["path"]).is_file()
+        assert len(manifest["scalar_libm"]["sha256"]) == 64
+        assert manifest["scalar_libm"]["gcc_version"]
+    else:
+        assert manifest["scalar_libm"] is None
 
 
 def test_driver_and_wrapper_refuse_unknown_transcendentals(tmp_path: Path) -> None:
@@ -218,6 +228,77 @@ def test_wrapper_passes_transcendentals_to_driver() -> None:
     source = wrapper.read_text(encoding="utf-8")
     assert 'TRANSCENDENTALS="libm"' in source
     assert '--transcendentals "${TRANSCENDENTALS}"' in source
+
+
+def test_driver_refuses_nonempty_output_before_loading_card(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    output_dir = tmp_path / "occupied"
+    output_dir.mkdir()
+    (output_dir / "evidence.json").write_text("{}\n")
+    called = False
+
+    def planted_card_loader(*_args, **_kwargs):
+        nonlocal called
+        called = True
+        raise AssertionError("card loader must not run")
+
+    monkeypatch.setattr(bulk, "build_nemo_orca2_k0_ocean_card", planted_card_loader)
+    with pytest.raises(RuntimeError, match="output directory must be empty"):
+        r342_driver.run_standalone_k0_driver(steps=1, output_dir=output_dir)
+    assert not called
+
+
+def test_driver_checks_clean_worktree_before_loading_card(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    called = False
+
+    def dirty_tree(*_args, **_kwargs):
+        raise RuntimeError("planted dirty worktree")
+
+    def planted_card_loader(*_args, **_kwargs):
+        nonlocal called
+        called = True
+        raise AssertionError("card loader must not run")
+
+    monkeypatch.setattr(r342_driver, "worktree_stamp", dirty_tree)
+    monkeypatch.setattr(bulk, "build_nemo_orca2_k0_ocean_card", planted_card_loader)
+    with pytest.raises(RuntimeError, match="planted dirty worktree"):
+        r342_driver.run_standalone_k0_driver(
+            steps=1,
+            output_dir=tmp_path / "empty-output",
+        )
+    assert not called
+
+
+def test_wrapper_refuses_nonempty_output_directory(
+    tmp_path: Path,
+) -> None:
+    wrapper = Path(r342_driver.__file__).with_name(
+        "nemo_testcase_l4_orca2_round342_s4_year_legoesm_run.sh"
+    )
+    output_dir = tmp_path / "occupied"
+    output_dir.mkdir()
+    (output_dir / "prior-evidence").write_text("occupied\n")
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    fake_git = bin_dir / "git"
+    fake_git.write_text("#!/usr/bin/env bash\nexit 0\n")
+    fake_git.chmod(0o755)
+    env = dict(os.environ)
+    env["PATH"] = f"{bin_dir}:{env['PATH']}"
+    refused = subprocess.run(
+        ["bash", str(wrapper), "--steps", "1", "--output-dir", str(output_dir)],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    assert refused.returncode == 1
+    assert "output directory must be empty" in refused.stderr
 
 
 @pytest.mark.skipif(

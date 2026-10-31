@@ -65,6 +65,22 @@ if [[ "${STEPS}" -gt 40 && "${ALLOW_FULL_YEAR}" -ne 1 ]]; then
   exit 1
 fi
 
+if [[ -n "$(git -C "${REPO_ROOT}" status --porcelain --untracked-files=no)" ]]; then
+  echo "REFUSE: tracked worktree is dirty; commit before launch" >&2
+  exit 1
+fi
+
+if [[ -e "${OUTPUT_DIR}" ]]; then
+  if [[ ! -d "${OUTPUT_DIR}" ]]; then
+    echo "REFUSE: output path is not a directory: ${OUTPUT_DIR}" >&2
+    exit 1
+  fi
+  if [[ -n "$(find "${OUTPUT_DIR}" -mindepth 1 -maxdepth 1 -print -quit)" ]]; then
+    echo "REFUSE: output directory must be empty: ${OUTPUT_DIR}" >&2
+    exit 1
+  fi
+fi
+
 AVAIL_GB="$(free -g | awk '/^Mem:/ {print $7}')"
 if [[ -z "${AVAIL_GB}" || "${AVAIL_GB}" -lt 150 ]]; then
   echo "REFUSE: available RAM is ${AVAIL_GB:-0} GiB (< 150 GiB required by Memory Rule)" >&2
@@ -72,8 +88,8 @@ if [[ -z "${AVAIL_GB}" || "${AVAIL_GB}" -lt 150 ]]; then
 fi
 
 mkdir -p "${OUTPUT_DIR}"
-LOG_FILE="${OUTPUT_DIR}/legoesm_run.log"
-PID_FILE="${OUTPUT_DIR}/legoesm_run.pid"
+LOG_FILE="${OUTPUT_DIR}.log"
+PID_FILE="${OUTPUT_DIR}.pid"
 
 export PYTHONPATH="${REPO_ROOT}/packages/ocean:${REPO_ROOT}/packages/core:${REPO_ROOT}:${PYTHONPATH:-}"
 export CUDA_VISIBLE_DEVICES=""
