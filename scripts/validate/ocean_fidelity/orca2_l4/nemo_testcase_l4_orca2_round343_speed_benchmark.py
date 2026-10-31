@@ -228,7 +228,7 @@ def build_orca2_exact_vs_normal_switch_inventory() -> tuple[SwitchSpec, ...]:
             normal_citation="packages/ocean/legoesm/ocean/physics/vertical_mixing/internal_wave_mixing.py:187-203",
             notes=(
                 "form='nemo_literal' raises RuntimeError when transcendentals!='libm' "
-                "(internal_wave_mixing.py:411-415); k_profiles.py:580-590 requires "
+                "(internal_wave_mixing.py:411-415); k_profiles.py:582-592 requires "
                 "tsdiff=False when form='generic'."
             ),
         ),
