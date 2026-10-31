@@ -113,6 +113,12 @@ def _err(a, b):
 def test_fixture_provenance_and_coverage(fx):
     m = fx["meta"]
     assert m["oracle_sha256"] == "3eb50b9cf65817966ab89c56fbbdaf09fa546056d7f58b2ceb8564a4c254cc23"
+    # original audit columns checksum kept; the #2266 regeneration read the previous fixture
+    assert m["columns_sha256"] == "cd5e943660b00207955670ff53b2dfb18044d4aaa93d04f7f3dbbbf09bdc1c8b"
+    assert m["columns_read"] == dict(
+        path="tests/atmosphere/oracle_fixtures/emanuel_convect43c.npz",
+        sha256="ef9bca3cd0f01beea0284cf28276d0a1830cc157587eb15fabcd9e7fc2b97902",
+    )
     assert m["constants"] == dict(
         cpd=constants.c_pd,
         cpv=constants.c_pv,

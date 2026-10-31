@@ -20,7 +20,9 @@ CAM6 L32 grid).
 Stored per group: FT, FQ and (since #2266) FU, FV, plus the scalars.
 ``--columns`` may be the previous fixture (it holds the column inputs); #2266
 regenerated from it, the audit ``columns.npz`` being lost, and every array
-the earlier fixture held came back bit-identical.
+the earlier fixture held came back bit-identical.  A previous fixture's
+``columns_sha256``/``columns`` (the original audit checksum) are kept and the
+file actually read is recorded separately as ``columns_read`` (path, sha256).
 
 Usage (CPU node; gfortran 8.5.0)::
 
@@ -182,6 +184,10 @@ def main():
         columns_sha256=_sha256(a.columns),
         columns="oracle_audit/emanuel_convection/inputs/columns.npz (the audit copy of the tier-1 ZM columns)",
     )
+    if "meta" in c:  # --columns is a previous fixture: keep the audit record, point at the file read
+        prev = json.loads(str(c["meta"]))
+        meta.update(columns_sha256=prev["columns_sha256"], columns=prev["columns"])
+        meta["columns_read"] = dict(path=str(a.columns), sha256=_sha256(a.columns))
     out["meta"] = np.array(json.dumps(meta, sort_keys=True))
     np.savez(a.out, **out)
     for p in (f"{v}_{t}" for v in VARIANTS for t in CBMF_IN):
