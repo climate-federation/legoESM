@@ -13483,6 +13483,38 @@ _repin('packages/ice/legoesm/ice/bitz_lipscomb.py:2176,2178', [
     '"sprecip": jnp.asarray(thermo_forcing.snow_precipitation, dtype=dtype),',
     '"evap_ice": jnp.asarray(thermo_forcing.evaporation, dtype=dtype),', 2])
 
+# Resume 5 removes the forward-changing inactive-state substitution.  Its
+# forward-identity custom reverse rule moves these unchanged statements by one.
+_reanchor(
+    'packages/ice/legoesm/ice/bitz_lipscomb.py:2313-2331',
+    'packages/ice/legoesm/ice/bitz_lipscomb.py:2314-2332',
+    anchors=['def si3_ice_thd_frazil(qlead, *, rn_hinew, ln_frazil) -> SI3Frazil:',
+             'return SI3Frazil(ht_i_new=ht_i_new, fraz_frac=zero)', 19],
+)
+_reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:2313',
+          'packages/ice/legoesm/ice/bitz_lipscomb.py:2314')
+_reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:2301',
+          'packages/ice/legoesm/ice/bitz_lipscomb.py:2302')
+_reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:2243',
+          'packages/ice/legoesm/ice/bitz_lipscomb.py:2244')
+_reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:2336',
+          'packages/ice/legoesm/ice/bitz_lipscomb.py:2337')
+_reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:2368',
+          'packages/ice/legoesm/ice/bitz_lipscomb.py:2369')
+_reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:2407',
+          'packages/ice/legoesm/ice/bitz_lipscomb.py:2408')
+_reanchor(
+    'packages/ice/legoesm/ice/bitz_lipscomb.py:2072-2287',
+    'packages/ice/legoesm/ice/bitz_lipscomb.py:2072-2288',
+    anchors=['def si3_column_step_arrays(state: SI3ColumnArrays,',
+             ('return trace', 2), 217],
+)
+_reanchor(
+    'packages/ice/legoesm/ice/bitz_lipscomb.py:2242-2287',
+    'packages/ice/legoesm/ice/bitz_lipscomb.py:2243-2288',
+    anchors=['# `ice_thd_frazil` supplies ht_i_new', ('return trace', 2), 46],
+)
+
 UNAUDITED_ROUNDS = ("1-24 -- hand-checked only; their citations are not in "
                     "CITATION_MAP and this gate does not read them")
 
