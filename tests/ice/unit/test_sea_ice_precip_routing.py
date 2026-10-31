@@ -50,7 +50,7 @@ def _pond_kg_per_cell(out):
 
 
 def test_snow_off_snowfall_on_ice_reaches_ocean_with_melt_heat():
-    cfg = SeaIceConfig(core2_precipitation_closure=True)
+    cfg = SeaIceConfig()
     assert not cfg.snow.enabled
     snow = 1.0e-4  # kg/m^2/s, all solid
     wet = _run(cfg, _forcing(snow, snow))
@@ -66,7 +66,7 @@ def test_snow_off_snowfall_on_ice_reaches_ocean_with_melt_heat():
 
 
 def test_snow_off_no_phantom_snow_without_precipitation_flag():
-    cfg = SeaIceConfig(core2_precipitation_closure=True)
+    cfg = SeaIceConfig()
     off = _run(cfg, _forcing(1.0e-4, 1.0e-4, has_precip=0.0))
     dry = _run(cfg, _forcing(0.0, 0.0))
     assert float(off["freshwater_to_ocean"][0, 0]) == pytest.approx(
@@ -82,7 +82,7 @@ def test_ponds_on_rain_on_ice_is_conserved(h_snow0, h0, conc0):
     nothing and the rain must run off to the ocean.  ``h0 = conc0 = 0`` is
     ice newly frozen in an open lead this step: no pond can exist yet.
     """
-    cfg = SeaIceConfig(core2_precipitation_closure=True)
+    cfg = SeaIceConfig()
     cfg = cfg._replace(ponds=cfg.ponds._replace(enabled=True))
     rain = 2.0e-4
     wet = _run(cfg, _forcing(rain, 0.0), h_snow0=h_snow0, h0=h0, conc0=conc0)
@@ -98,7 +98,7 @@ def test_ponds_on_rain_on_ice_is_conserved(h_snow0, h0, conc0):
 
 @pytest.mark.parametrize("h_snow0", [0.0, 0.3])
 def test_ponds_on_no_phantom_rain_without_precipitation_flag(h_snow0):
-    cfg = SeaIceConfig(core2_precipitation_closure=True)
+    cfg = SeaIceConfig()
     cfg = cfg._replace(ponds=cfg.ponds._replace(enabled=True))
     off = _run(cfg, _forcing(2.0e-4, 0.0, has_precip=0.0), h_snow0=h_snow0)
     dry = _run(cfg, _forcing(0.0, 0.0), h_snow0=h_snow0)

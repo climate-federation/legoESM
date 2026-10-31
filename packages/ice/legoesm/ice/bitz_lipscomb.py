@@ -977,39 +977,25 @@ class SI3DHOutputs(NamedTuple):
     fluxes: SI3DHFluxes
 
 
-def _piecewise_remap(thickness, enthalpy, new_total, n_layers: int = 3):
-    """Conservative constant-cell remap retained for compatibility tests.
-
-    The certified SI3 path uses :func:`_cumulative_remap` below.  Keeping this
-    former implementation available preserves main's reverse-mode regression
-    coverage without selecting it on the NEMO-fidelity path.
-    """
-
-    old_lo = jnp.cumsum(thickness, axis=-1) - thickness
-    old_hi = jnp.cumsum(thickness, axis=-1)
-    dz_new = new_total / n_layers
-    idx = jnp.arange(n_layers, dtype=new_total.dtype)
-    new_lo = dz_new[..., None] * idx
-    new_hi = dz_new[..., None] * (idx + 1.0)
-    overlap = jnp.maximum(
-        0.0,
-        jnp.minimum(new_hi[..., :, None], old_hi[..., None, :])
-        - jnp.maximum(new_lo[..., :, None], old_lo[..., None, :]),
-    )
-    content = jnp.sum(overlap * enthalpy[..., None, :], axis=-1)
-    # Double where: an unselected zero-thickness branch must not evaluate 0/0
-    # during the reverse pass.  The selected forward quotient is unchanged.
-    has_thickness = dz_new[..., None] > _EPS10
-    safe_dz = jnp.where(has_thickness, dz_new[..., None], 1.0)
-    return jnp.where(has_thickness, content / safe_dz, 0.0)
-
-
 def _cumulative_remap(h_old, content_old, nlay, sr):
     """``ice_var_vremap`` (`icevar.f90:1010-1046`) and ``snw_ent`` (`icethd_dh.f90:584-619`).
 
     ``h_old``/``content_old`` are lists of the old segments' thickness and
     content (``q*h``); the result is the new per-layer intensive value.
     """
+
+    # Preserve main's F3 reverse-mode guard on the lane's live remap.  The
+    # stopped operands have exactly the same forward values, including signed
+    # zero and sub-epsilon values, but a no-material column cannot feed an
+    # inactive quotient cotangent back to its inputs.
+    raw_total = jnp.zeros_like(h_old[0])
+    for h in h_old:
+        raw_total = raw_total + h
+    has_material = raw_total > _EPS10
+    h_old = [jnp.where(has_material, h, jax.lax.stop_gradient(h)) for h in h_old]
+    content_old = [
+        jnp.where(has_material, e, jax.lax.stop_gradient(e)) for e in content_old
+    ]
 
     # Materialized seed: XLA folds 0 + x to x, which would keep a -0 segment's sign.
     zero = nemo_source_round(jnp.zeros_like(h_old[0]))

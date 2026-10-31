@@ -175,14 +175,18 @@ def test_si3_column_step_reverse_mode_finite_on_open_water_and_bare_ice():
     assert float(jnp.abs(g_h[1:]).max()) > 0.0     # ice columns stay live
 
 
-def test_piecewise_remap_reverse_mode_finite_at_zero_thickness():
-    """Review F3, the layer-enthalpy remap alone: a zero new thickness is
-    0/0 in the discarded branch; the gradient must stay finite (zero)."""
+def test_cumulative_remap_reverse_mode_finite_at_zero_thickness():
+    """Review F3 on the lane's live remap: a zero-total column must have a
+    finite zero cotangent without reviving main's deleted duplicate remap."""
     from legoesm.ice import bitz_lipscomb as bl
 
-    th = jnp.asarray([[0.5, 0.5, 0.5], [0.0, 0.0, 0.0]])
-    en = jnp.asarray([[-3.0e8, -2.9e8, -2.8e8], [0.0, 0.0, 0.0]])
-    g = jax.grad(lambda t: jnp.sum(bl._piecewise_remap(th, en, t)))(
-        jnp.asarray([1.5, 0.0]))
+    en = jnp.asarray([[3.0e8, 2.9e8, 2.8e8], [3.0e8, 2.9e8, 2.8e8]])
+
+    def remap(total):
+        h_old = [total / 3.0] * 3
+        content_old = [en[:, k] * h_old[k] for k in range(3)]
+        return bl._cumulative_remap(h_old, content_old, 3, bl.nemo_source_round)
+
+    g = jax.grad(lambda t: jnp.sum(remap(t)))(jnp.asarray([1.5, 0.0]))
     assert bool(jnp.all(jnp.isfinite(g))), g
     assert float(g[1]) == 0.0
