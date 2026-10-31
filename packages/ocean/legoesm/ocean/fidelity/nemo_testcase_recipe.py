@@ -666,8 +666,7 @@ def _model_config(
                 ),
             ),
             shortwave_penetration=ShortwavePenetrationConfig(
-                scheme="nemo_qsr_2bd", water_type="I", nemo_time_step_s=14400.0,
-                nemo_qsr_kbb_live_stretch=False,
+                scheme="nemo_qsr_2bd", water_type="I", nemo_time_step_s=14400.0, nemo_qsr_kbb_live_stretch=False,
             ),
             mle=None,
         )
