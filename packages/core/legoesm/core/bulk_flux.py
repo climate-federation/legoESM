@@ -16,6 +16,12 @@ Monin-Obukhov similarity theory (MOST). Three schemes:
    floors, height adjustment of t/q.  Oracle-matched by
    tests/core/test_aerobulk_ncar_oracle.py.
 
+RULE 5 (#2241): coare3's Charnock wind ramp and gustiness onset are smooth by
+default (``coare_charnock_ramp_width``, ``coare_gust_onset_width``; 0 = the
+oracle).  Still hard as in AeroBulk, pending user decisions (#2241): the
+dt/dq sign floors (both schemes), and on large_yeager the neutral Stanton
+switches (first guess and loop) and the 33 m/s drag cutoff.
+
 The iterative Obukhov length loop uses ``jax.lax.fori_loop`` for
 full JAX differentiability (compatible with jax.grad, jax.jit).
 
@@ -65,7 +71,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from legoesm import constants
-from legoesm.core.smooth import smoothstep_quintic
+from legoesm.core.smooth import positive_part_c1, smoothstep_quintic
 
 # Physical constants
 KAPPA = constants.kappa_von_karman
@@ -635,6 +641,14 @@ _AB_EQUAL_HEIGHT_TOL = 0.01       # l_zt_equal_zu = |zu - zt| < 0.01 m
 # compact quintic blend across zeta = 0 in psi_m_coare / psi_h_coare; 0.0 = the
 # oracle's hard SIGN switch.
 COARE_NEUTRAL_WIDTH = 1.0e-3
+# RULE 5 smooth defaults (#2241; form and value decided by codex and GLM
+# separately, same answers); 0.0 = the oracle's hard switch in each case.
+# Charnock wind ramp: width [m/s] of the C1 rounding inside each corner of the
+# 10 -> 18 m/s ramp (exact outside [10, 10 + w] and [18 - w, 18]).
+COARE_CHARNOCK_RAMP_WIDTH = 0.5
+# Convective-gustiness onset: width [1] in x = max(-zi/(kappa L), 0) over which
+# x**(2/3) is ramped on by a quintic smoothstep (exact for x >= w).
+COARE_GUST_ONSET_WIDTH = 1.0e-2
 
 
 def _psi_coare_unstable(zn, conv, kansas):
@@ -670,7 +684,9 @@ def _coare_neutral_select(zeta, neutral_width, stable_fn, unstable_fn):
     (per-state in ``aerobulk_coare3p0_charnock0p011_width0_gap.npz``).
     Measured 2026-10-28 after the switch from the logistic blend, whose stress
     gap was 1.2e-3 and which was not C1 at zeta = 0.  Per-state gaps in
-    ``tests/core/oracle_fixtures/aerobulk_coare3p0_default_gap.npz``.  Width 0
+    ``tests/core/oracle_fixtures/aerobulk_coare3p0_default_gap.npz`` (since
+    #2241 that file is the gap at ALL coare3 defaults, incl. the Charnock-ramp
+    and gust-onset smoothing; see :func:`compute_most_fluxes`).  Width 0
     recovers the oracle (<= 1e-10).
     """
     if neutral_width == 0.0:
@@ -824,16 +840,44 @@ def _ri_bulk_aerobulk(z, T_s, theta, q_s, q, Ub):
     return _AB_GRAV * dthv * z / (tv * Ub * Ub)
 
 
-def _coare3p0_charnock(wind, charnock):
+def _coare3p0_charnock(wind, charnock, ramp_width=COARE_CHARNOCK_RAMP_WIDTH):
     """AeroBulk ``charn_coare3p0``: ``charnock`` below 10 m/s, linear to the
     0.018 high-wind value at 18 m/s.  With ``charnock`` = AeroBulk's literal
-    0.011 this is the oracle's function exactly; a larger ``charnock`` keeps
-    the ramp monotone (high value ``max(0.018, charnock)``)."""
-    ramp = jnp.clip(
-        (wind - _COARE_CHARNOCK_U_LO) / (_COARE_CHARNOCK_U_HI - _COARE_CHARNOCK_U_LO),
-        0.0, 1.0)
+    0.011 and ``ramp_width = 0`` this is the oracle's function exactly; a larger
+    ``charnock`` keeps the ramp monotone (high value ``max(0.018, charnock)``).
+
+    RULE 5 (#2241): ``ramp_width = w > 0`` [m/s] rounds both corners C1 with
+    ``1 - pp(1 - pp(t, s), s)`` (``pp`` = :func:`positive_part_c1`,
+    ``t = (wind - 10)/8``, ``s = 8/w``): exact outside ``[10, 10 + w]`` and
+    ``[18 - w, 18]``, monotone, never outside the ``[charnock, charnock_hi]``
+    range (below the hard ramp inside the low band, above it inside the high
+    band, by at most ``4 w/(27*8)`` of the ramp).  ``w = 0``: AeroBulk's
+    ``clip``.
+    """
+    t = (wind - _COARE_CHARNOCK_U_LO) / (_COARE_CHARNOCK_U_HI - _COARE_CHARNOCK_U_LO)
+    if ramp_width == 0.0:
+        ramp = jnp.clip(t, 0.0, 1.0)
+    else:
+        s = (_COARE_CHARNOCK_U_HI - _COARE_CHARNOCK_U_LO) / ramp_width
+        ramp = 1.0 - positive_part_c1(1.0 - positive_part_c1(t, s), s)
     charnock_hi = jnp.maximum(_COARE_CHARNOCK_HI, charnock)
     return charnock + ramp * (charnock_hi - charnock)
+
+
+def _gust_factor(x, onset_width=COARE_GUST_ONSET_WIDTH):
+    """Gustiness factor ``max(x, 0)**(2/3)`` of TURB_COARE3P0
+    (``x = -zi/(kappa L)``).
+
+    RULE 5 (#2241): ``onset_width = w > 0`` multiplies it by
+    ``smoothstep_quintic(x/w)``: exactly 0 for ``x <= 0`` (as AeroBulk), exact
+    for ``x >= w``, never above the hard factor, and C2 at ``x = 0`` where the
+    hard ``x**(2/3)`` has an infinite slope.  ``w = 0``: AeroBulk's form.
+    """
+    xp = jnp.maximum(x, 0.0)
+    g = _gust_power(xp)
+    if onset_width == 0.0:
+        return g
+    return g * smoothstep_quintic(xp / onset_width)
 
 
 def _gust_power(x):
@@ -857,7 +901,7 @@ def _safe_sqrt(x):
 
 
 def _first_guess_coare(W2, t_zt, q_zt, T_s, q_s, z_u, z_t, equal, charnock,
-                       neutral_width):
+                       neutral_width, charnock_ramp_width=COARE_CHARNOCK_RAMP_WIDTH):
     """AeroBulk mod_common_coare ``FIRST_GUESS_COARE`` (bulk-Richardson seed)."""
     t_zu = jnp.maximum(t_zt, _AB_T_MIN)
     q_zu = jnp.maximum(q_zt, _AB_Q_MIN)
@@ -868,7 +912,7 @@ def _first_guess_coare(W2, t_zt, q_zt, T_s, q_s, z_u, z_t, equal, charnock,
     nu = _visc_air_aerobulk(t_zu)
     Ub = jnp.sqrt(W2 + _AB_FG_GUST * _AB_FG_GUST)
     us = c_a * Ub
-    ch = _coare3p0_charnock(_safe_sqrt(W2), charnock)
+    ch = _coare3p0_charnock(_safe_sqrt(W2), charnock, charnock_ramp_width)
     z0 = jnp.clip(jnp.abs(ch * us * us / _AB_GRAV + _AB_COARE_SMOOTH * nu / us),
                   _AB_FG_Z_MIN, 1.0)
     log_z0 = jnp.log(z0)
@@ -878,7 +922,10 @@ def _first_guess_coare(W2, t_zt, q_zt, T_s, q_s, z_u, z_t, equal, charnock,
     log_z0t = jnp.log(z0t)
     rib = _ri_bulk_aerobulk(z_u, T_s, t_zu, q_s, q_zu, Ub)
     cc_ri = KAPPA * KAPPA / (Cd * (jnp.log(z_t) - log_z0t)) * rib
-    rib_stable = ~jnp.signbit(rib)   # 0.5 + SIGN(0.5, zRib)
+    # 0.5 + SIGN(0.5, zRib).  Kept hard (#2241, codex+GLM): both branches are 0
+    # with slope K = cc_ri/rib at rib = 0, so the seed is already C1 in rib;
+    # only its second derivative jumps there.
+    rib_stable = ~jnp.signbit(rib)
     den_unst = jnp.where(rib_stable, 1.0, 1.0 + rib * (-_AB_FG_CB / z_u))
     zeta_u = jnp.where(rib_stable, cc_ri + _AB_FG_RIB_STB * rib * rib, cc_ri / den_unst)
     us = jnp.maximum(Ub * KAPPA / (log_zu - log_z0 - psi_m_coare(zeta_u, neutral_width=neutral_width)),
@@ -907,7 +954,9 @@ def _first_guess_coare(W2, t_zt, q_zt, T_s, q_s, z_u, z_t, equal, charnock,
 
 
 def _turb_coare3p0(W2, t_zt, q_zt, T_s, q_s, z_u, z_t, equal, n_iter, charnock,
-                   zi, beta, stability_scheme, denom_floor, neutral_width):
+                   zi, beta, stability_scheme, denom_floor, neutral_width,
+                   charnock_ramp_width=COARE_CHARNOCK_RAMP_WIDTH,
+                   gust_onset_width=COARE_GUST_ONSET_WIDTH):
     """AeroBulk 1.0.0 ``TURB_COARE3P0`` (l_use_cs = l_use_wl = .false.).
 
     ``W2`` is the squared wind module ``U_zu**2``; ``equal`` is AeroBulk's
@@ -923,7 +972,8 @@ def _turb_coare3p0(W2, t_zt, q_zt, T_s, q_s, z_u, z_t, equal, n_iter, charnock,
     log_zu = jnp.log(z_u)
     log_10 = jnp.log(10.0)
     us, ts, qs, t_zu, q_zu, Ub, z0 = _first_guess_coare(
-        W2, t_zt, q_zt, T_s, q_s, z_u, z_t, equal, charnock, neutral_width)
+        W2, t_zt, q_zt, T_s, q_s, z_u, z_t, equal, charnock, neutral_width,
+        charnock_ramp_width)
     log_z0 = jnp.log(z0)
     nu = _visc_air_aerobulk(t_zu)
     dt = _sign_floor(t_zu - T_s, _AB_DT_MIN)
@@ -942,13 +992,13 @@ def _turb_coare3p0(W2, t_zt, q_zt, T_s, q_s, z_u, z_t, equal, n_iter, charnock,
         us2 = us * us
         inv_L = _one_on_l_aerobulk(t_zu, q_zu, us, ts, qs)
         if zi > 0.0:
-            gust2 = beta * beta * us2 * _gust_power(jnp.maximum(-zi * inv_L / KAPPA, 0.0))
+            gust2 = beta * beta * us2 * _gust_factor(-zi * inv_L / KAPPA, gust_onset_width)
             Ub = jnp.maximum(_safe_sqrt(W2 + gust2), _COARE_UB_FLOOR)
         else:
             Ub = jnp.maximum(_safe_sqrt(W2), _COARE_UB_FLOOR)
         zeta_u = jnp.clip(z_u * inv_L, -_AB_COARE_ZETA_ABS_MAX, _AB_COARE_ZETA_ABS_MAX)
         un10 = us / KAPPA * (log_10 - log_z0)
-        z0 = (_coare3p0_charnock(un10, charnock) * us2 / _AB_GRAV
+        z0 = (_coare3p0_charnock(un10, charnock, charnock_ramp_width) * us2 / _AB_GRAV
               + _AB_COARE_SMOOTH * nu / us)
         z0 = jnp.clip(jnp.abs(z0), _AB_COARE_Z_MIN, 1.0)
         log_z0 = jnp.log(z0)
@@ -1139,6 +1189,8 @@ def compute_most_fluxes(
     stable_beta=_DYER_STABLE_BETA,
     z0h_z0_ratio=_Z0H_Z0_RATIO_DEFAULT,
     coare_neutral_width=COARE_NEUTRAL_WIDTH,
+    coare_charnock_ramp_width=COARE_CHARNOCK_RAMP_WIDTH,
+    coare_gust_onset_width=COARE_GUST_ONSET_WIDTH,
 ):
     """Compute stability-dependent bulk fluxes via iterative MOST.
 
@@ -1279,6 +1331,24 @@ def compute_most_fluxes(
         compiled AeroBulk oracle at the default (with ``charnock`` = 0.011):
         per-state gaps stored in
         ``tests/core/oracle_fixtures/aerobulk_coare3p0_default_gap.npz``.
+    coare_charnock_ramp_width : float
+        ``coare3`` only: width [m/s] of the C1 corner rounding of the Charnock
+        10 -> 18 m/s wind ramp (:func:`_coare3p0_charnock`; static Python
+        float, ``0 <= w <= 8``).  Default ``COARE_CHARNOCK_RAMP_WIDTH`` = 0.5
+        (RULE 5); ``0.0`` is AeroBulk's ``clip``.  KNOWN DIFFERENCE (#2241,
+        measured 2026-10-30 on the 1549-state AeroBulk fixture, this width
+        alone, the others hard): max relative gap 1.3e-3 in stress, 4.0e-4 in
+        heat fluxes, 6.5e-4 in u* at z_t = 10 m (1.5e-3 / 3.8e-4 / 7.3e-4 at
+        2 m).  With every coare3 default: 1.3e-3 / 5.2e-4 / 6.5e-4 at 10 m,
+        1.5e-3 / 4.6e-4 / 7.3e-4 at 2 m, per state in
+        ``aerobulk_coare3p0_default_gap.npz``.
+    coare_gust_onset_width : float
+        ``coare3`` only: width [1] in ``x = -zi/(kappa L)`` of the quintic onset
+        of the convective-gustiness factor ``x**(2/3)`` (:func:`_gust_factor`;
+        static Python float).  Default ``COARE_GUST_ONSET_WIDTH`` = 1e-2
+        (RULE 5); ``0.0`` is AeroBulk's form (infinite slope at x = 0+).
+        KNOWN DIFFERENCE (#2241, same fixture, this width alone): max relative
+        gap 3.9e-5 in stress, 2.7e-5 in heat fluxes, 3.1e-5 in u*.
     return_convergence : bool
         When True, additionally return the MOST fixed-point convergence
         residual (the relative change in ``u*`` over the FINAL iteration).
@@ -1392,6 +1462,12 @@ def compute_most_fluxes(
         # historical 0.5-floor behaviour.
         _coeff_cap = KAPPA / _denom_floor
 
+    for _name, _w, _w_max in (("coare_charnock_ramp_width", coare_charnock_ramp_width,
+                               _COARE_CHARNOCK_U_HI - _COARE_CHARNOCK_U_LO),
+                              ("coare_gust_onset_width", coare_gust_onset_width, math.inf)):
+        if not (isinstance(_w, numbers.Real) and math.isfinite(_w) and 0.0 <= _w <= _w_max):
+            raise ValueError(f"{_name} must be a finite float in [0, {_w_max}], got {_w!r}")
+
     _coare = None
     if scheme in ("coare3", "large_yeager"):
         if max_exchange_coeff is not None and max_exchange_coeff < _AB_CX_MIN:
@@ -1428,7 +1504,8 @@ def compute_most_fluxes(
         _coare = _turb_coare3p0(
             u_rel ** 2 + v_rel ** 2, T_atm, q_atm, T_sfc, q_sfc, z_u, z_t, _equal,
             n_iter, charnock, gustiness_w_zi, gustiness_beta, stability_scheme,
-            None if max_exchange_coeff is None else _denom_floor, coare_neutral_width)
+            None if max_exchange_coeff is None else _denom_floor, coare_neutral_width,
+            coare_charnock_ramp_width, coare_gust_onset_width)
         # legoESM sign convention for the scales (positive upward = surface
         # warmer/moister than the air): theta* = -AeroBulk zts.
         u_star = _coare["us"]
