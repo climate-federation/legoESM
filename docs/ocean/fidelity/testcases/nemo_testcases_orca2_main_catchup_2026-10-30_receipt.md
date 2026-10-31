@@ -632,3 +632,81 @@ updates the ePBL/MOM6 fixtures and three ocean test modules
 `test_epbl.py`, `test_vmix_eos_reference_density.py`, and
 `test_vmix_mpas_integration.py`.  All are retained and included in the
 verification below.
+
+### Catch-up 2 merge and follow-up commits
+
+The required merge commit is `dc26607e78aef8a0da00b143437a983411892706`,
+with parents `4d86c201351d18fb8a5322292d7d852e3b460202` and
+`edd34c24469c834d536c511160ea0c4aef8974ae`.  Verification exposed two
+merge-composition issues, corrected in ordinary follow-up commits:
+
+| Commit | Correction |
+|---|---|
+| `283bace843` | Preserved main's geometric-depth `rho_0` EOS wiring while using a missing-safe `eos_depth` lookup for lane test/probe configurations; mechanically re-anchored the citation map and independently audited receipts after main's source insertions. |
+| `6536dbcfe7`, `15bf377d8d` | Re-anchored the remaining continuation-style round-341 citations that intentionally omit the repeated filename. |
+
+No new behavior selector or default was introduced.  Main's real
+`OceanConfig` behavior is unchanged, while lane fixtures that predate
+`eos_depth` retain their former no-override behavior.  Therefore
+`DECISION_NEEDED: NONE`.
+
+### Catch-up 2 verification
+
+All commands used this environment and were run serially, without xdist, from
+a clean detached worktree at final code commit `15bf377d8d`:
+
+```text
+CUDA_VISIBLE_DEVICES="" JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 PYTHONPATH=packages/core:packages/ocean:packages/atmosphere:packages/coupler:packages/ice:packages/land:packages/ml:packages/tools:src
+```
+
+The named operator landing battery was:
+
+```bash
+python -m pytest -q -p no:cacheprovider tests/ocean/fidelity/test_nemo_testcase_receipt_citation_gate.py tests/test_no_private_cross_imports.py tests/ocean/unit/test_tke_nemo_terms.py tests/ocean/unit/test_nemo_recipe.py tests/ocean/unit/test_real_freshwater_closure.py tests/ocean/unit/test_nemo_ws_stage_face_mask_rank.py tests/ocean/unit/test_nemo_prognostic_barotropic_state.py tests/ocean/fidelity/test_nemo_testcase_l2_orca2_parallel_receipt_gate.py
+```
+
+Final line: `1 failed, 154 passed in 992.96s (0:16:32)`.  The only failure,
+`TestMomentumEVD::test_kpp_plus_nu_conv_still_raises`, raises because the test
+passes a `types.SimpleNamespace` where main's KPP implementation calls
+`state._replace`.  It was reproduced from a clean checkout of exact main
+`edd34c2446` with:
+
+```bash
+python -m pytest -q -p no:cacheprovider tests/ocean/unit/test_tke_nemo_terms.py::TestMomentumEVD::test_kpp_plus_nu_conv_still_raises
+```
+
+Main final line: `1 failed in 2.10s`.  This is pre-existing on main, not
+introduced by the merge.
+
+The first landing run at the merge commit ended
+`8 failed, 147 passed in 982.39s (0:16:22)`.  Failure classification was:
+
+- six citation-gate failures were merge-introduced line-anchor drift from
+  main's additions to `ocean_model_latlon_cgrid.py`; fixed by the re-anchor
+  follow-ups and cleanly rerun as `20 passed in 18.96s`;
+- the lane production-vmix fixture's missing `eos_depth` was a
+  merge-introduced interface-composition failure; the focused post-fix test
+  ended `1 passed in 0.95s` and the full landing rerun contains no such
+  failure;
+- the remaining `_replace` failure is the main-pre-existing failure above.
+
+The ORCA2 rung-10/standalone exactness, standalone S4 literal comparison, and
+round-345 year gate were run together:
+
+```bash
+python -m pytest -q -p no:cacheprovider tests/ocean/fidelity/test_orca2_round340_standalone.py tests/ocean/fidelity/test_orca2_round344_fast_literal.py tests/ocean/fidelity/test_orca2_round345_year_gate.py
+```
+
+Final line: `38 passed, 3 skipped in 252.80s (0:04:12)`.
+
+The complete set of test modules under `tests/ocean/` added or changed by the
+116-commit main interval was run with:
+
+```bash
+python -m pytest -q -p no:cacheprovider tests/ocean/unit/test_epbl.py tests/ocean/unit/test_vmix_eos_reference_density.py tests/ocean/unit/test_vmix_mpas_integration.py
+```
+
+Final line: `109 passed in 136.34s (0:02:16)`.  Thus that required set had no
+failures to classify.  The added/changed non-Python files under
+`tests/ocean/` are fixtures consumed by these three modules and were retained
+unchanged from main.
