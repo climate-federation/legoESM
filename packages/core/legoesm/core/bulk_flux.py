@@ -813,9 +813,10 @@ def _sign_floor(x, x_min):
     Kept hard as in AeroBulk (user decision 2026-10-31, #2241): it is the
     division guard of ``Ch = r*ts/dt`` / ``Ce = r*qs/dq`` in TURB_COARE3P0.
     KNOWN DIFFERENCE from RULE 5: a jump of ``2*x_min`` (2e-6 K in dt, 2e-9
-    kg/kg in dq) where the air-sea difference crosses zero, which flips the
-    sign of theta*/q* and so of 1/L by that amount; the derivative there is
-    undefined.  Not a gap to the oracle (same form).
+    kg/kg in dq) where the air-sea difference crosses zero.  It flips the
+    sign of theta* (q*) at that state, which changes 1/L by that scale's
+    tiny buoyancy contribution; the derivative there is undefined.  Not a gap
+    to the oracle (same form).
     """
     m = jnp.maximum(jnp.abs(x), x_min)
     return jnp.where(jnp.signbit(x), -m, m)
@@ -1095,16 +1096,22 @@ def _cd_n10_ncar(w10, cutoff_width=NCAR_CD_CUTOFF_WIDTH):
     ``cutoff_width == 0``: AeroBulk's hard switch at 33 m/s (a 0.074 % jump,
     2.33827 -> 2.34).  ``cutoff_width = w > 0`` (RULE 5 default 0.5 m/s):
     ``s * 2.34 + (1 - s) * poly`` with ``s = smoothstep_quintic((U - 33 + w)/w)``,
-    exactly the polynomial below ``33 - w`` and exactly 2.34 from 33 m/s.
+    exactly the polynomial below ``33 - w`` and exactly 2.34 from 33 m/s.  The
+    smooth path evaluates the polynomial at ``min(U, 33)`` (only its weight
+    ``1 - s = 0`` reaches it above 33 m/s), so a huge wind cannot overflow
+    its ``U**6`` term into ``0 * inf = NaN``.
     """
-    w6 = w10 * w10 * w10
-    w6 = w6 * w6
-    poly = 2.7 / w10 + 0.142 + w10 / 13.09 - 3.14807e-10 * w6
+    def _poly(w):
+        w6 = w * w * w
+        w6 = w6 * w6
+        return 2.7 / w + 0.142 + w / 13.09 - 3.14807e-10 * w6
+
     if cutoff_width == 0.0:
-        cd = jnp.where(w10 >= _AB_NCAR_CD_CUTOFF_U, _AB_NCAR_CD_PLATEAU, poly)
+        cd = jnp.where(w10 >= _AB_NCAR_CD_CUTOFF_U, _AB_NCAR_CD_PLATEAU, _poly(w10))
     else:
         s = smoothstep_quintic((w10 - _AB_NCAR_CD_CUTOFF_U + cutoff_width) / cutoff_width)
-        cd = s * _AB_NCAR_CD_PLATEAU + (1.0 - s) * poly
+        cd = (s * _AB_NCAR_CD_PLATEAU
+              + (1.0 - s) * _poly(jnp.minimum(w10, _AB_NCAR_CD_CUTOFF_U)))
     return jnp.maximum(1.0e-3 * cd, _AB_CX_MIN)
 
 

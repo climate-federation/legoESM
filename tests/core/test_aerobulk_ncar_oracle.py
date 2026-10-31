@@ -220,6 +220,16 @@ def test_check_grads_drag_cutoff_at_default():
     assert float(jax.grad(_cd_n10_ncar)(xm)) != 0.0
 
 
+def test_drag_cutoff_plateau_exact_and_finite_at_huge_fp32_wind():
+    """From 33 m/s the default is the 2.34e-3 plateau bitwise, also where the
+    polynomial's U**6 term would overflow fp32 (1e7 m/s): no 0 * inf NaN in
+    the value or the gradient."""
+    u = jnp.asarray([33.0, 40.0, 1.0e7], dtype=jnp.float32)
+    np.testing.assert_array_equal(np.asarray(_cd_n10_ncar(u)), np.asarray(_cd_n10_ncar(u, 0.0))[:1].repeat(3))
+    g = jax.grad(lambda x: jnp.sum(_cd_n10_ncar(x)))(u)
+    assert np.all(np.asarray(g) == 0.0)
+
+
 def _one_state_flux(var, state, **kw):
     """f(x) = taux + Q_H + Q_E + u* of one ocean state with ``var`` = x."""
     st = dict(u=8.0, v=0.0, ta=290.0, q=0.010, ts=290.0, qs=0.010) | state
