@@ -315,6 +315,22 @@ def compute_vertical_K_profiles(
             "Unknown VerticalMixingConfig.vmix_background_mode: must be one "
             f"of ('additive', 'nemo_max_floor'), got {_bg_mode!r}.")
     _nemo_floor = _bg_mode == "nemo_max_floor"
+    # Fail closed before any profile is computed: nu_conv/nu_bg cannot be
+    # honoured under KPP (the A_conv momentum term is gated off below to avoid
+    # double-counting KPP's own interior convective viscosity).  Reject rather
+    # than silently ignore — mirrors the guard in combined.make_ocean_physics.
+    if physics_config.convection.scheme == "enhanced_diffusion":
+        _ed = physics_config.convection.enhanced_diffusion
+        if vmix.scheme == "kpp" and (_ed.nu_conv != 0.0 or _ed.nu_bg != 0.0):
+            raise ValueError(
+                "EnhancedDiffusionConfig convective momentum viscosity "
+                "(nu_conv/nu_bg) cannot be combined with KPP vertical mixing: "
+                "KPP already enhances interior momentum where N²<0, so "
+                "applying nu_* on top would double-count and is suppressed. "
+                "Set EnhancedDiffusionConfig(nu_conv=0.0, nu_bg=0.0) to let "
+                "KPP own convective momentum, or choose a non-KPP "
+                "vertical_mixing scheme."
+            )
     K_v_total = jnp.full(interface_shape, K_v_background, dtype=dtype)
     A_v_total = jnp.full(interface_shape, A_v_background, dtype=dtype)
 
@@ -350,21 +366,7 @@ def compute_vertical_K_profiles(
 
     conv = physics_config.convection
     if conv.scheme == "enhanced_diffusion":
-        # Fail closed: nu_conv/nu_bg cannot be honoured under KPP (the A_conv
-        # momentum term is gated off below to avoid double-counting KPP's
-        # own interior convective viscosity).  Reject rather than silently
-        # ignore — mirrors the guard in combined.make_ocean_physics.
         _ed = conv.enhanced_diffusion
-        if vmix.scheme == "kpp" and (_ed.nu_conv != 0.0 or _ed.nu_bg != 0.0):
-            raise ValueError(
-                "EnhancedDiffusionConfig convective momentum viscosity "
-                "(nu_conv/nu_bg) cannot be combined with KPP vertical mixing: "
-                "KPP already enhances interior momentum where N²<0, so "
-                "applying nu_* on top would double-count and is suppressed. "
-                "Set EnhancedDiffusionConfig(nu_conv=0.0, nu_bg=0.0) to let "
-                "KPP own convective momentum, or choose a non-KPP "
-                "vertical_mixing scheme."
-            )
         # ---- Time levels of the two EVD trigger arms (zdfevd MIN(rn2,rn2b)).
         # EnhancedDiffusionConfig.evd_n2_time_level; dispatch-hardened here,
         # this being its only consumption site.
