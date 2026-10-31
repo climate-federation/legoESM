@@ -12,8 +12,9 @@ gaps and gradients are in ``test_epbl_smooth_switches.py``).
 Each case's measured max |T_legoESM - T_MOM6| at 8 h is stored below and must
 be reproduced to 1e-6 relative (1e-12 degC floor): any change to the port's
 answer, better or worse, turns this red and must re-measure the gaps.
-The four shortwave cases (#2178, ``mom6_epbl_scm_sw_0e9a561.npz``) store the
-per-level gap vector instead, to the same tolerance.
+The four shortwave cases (#2178; MOM6 fields in ``mom6_epbl_scm_sw_0e9a561.npz``)
+are pinned instead by the per-level gap vector stored below
+(``MEASURED_GAP_SW``), to the same tolerance.
 The column runs under legoESM's fp64 precision policy (pinned per test, as the
 MOM6 oracle is double precision); the default fp32 policy gives different gaps.
 """
