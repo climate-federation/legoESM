@@ -190,6 +190,11 @@ def test_check_grads_through_the_denominator_floor_at_default():
     d = np.asarray(jax.grad(lambda l: jnp.sum(lognu(l)))(l0))
     # hard limit: exactly 3 (r < 1), 3 or 1 (r = 1), 1 (r > 1)
     assert np.all(d > 1.01) and np.all(d < 2.99), d
+    # the softplus floor's own value: 3 - 2 r sigmoid(r - 1) / (1 + softplus(r - 1))
+    rr = np.asarray(r)
+    sig = 1.0 / (1.0 + np.exp(-(rr - 1.0)))
+    np.testing.assert_allclose(d, 3.0 - 2.0 * rr * sig / (1.0 + np.log1p(np.exp(rr - 1.0))),
+                               rtol=1e-6)
 
 
 if __name__ == "__main__":

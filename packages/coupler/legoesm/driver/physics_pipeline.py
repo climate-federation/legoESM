@@ -41,7 +41,8 @@ from legoesm.forcing.surface_utils import (
     blend_surface_temperature,
     blended_surface_albedo,
 )
-from legoesm.core.bulk_flux import LARGE_YEAGER_WIDTH_DEFAULTS
+from legoesm.core.bulk_flux import (LARGE_YEAGER_WIDTH_DEFAULTS, NCAR_CD_CUTOFF_WIDTH,
+                                    NCAR_DTHV_WIDTH, NCAR_NEUTRAL_WIDTH)
 from legoesm.core.grid_adapters import SingleColumnGrid, make_adapter
 from legoesm.core.physics_output import PhysicsOutput  # shared tendency pytree (moved to core)
 
@@ -4736,8 +4737,14 @@ def apply_surface_flux_config(tc, config):
     zml = getattr(config, "surface_z_ref_model_level", None)
     # Large-Yeager smooth-switch widths (#2241): only values that differ from
     # the shared default are injected, so a default run keeps the fast path.
-    lyw = {k: getattr(config, "surface_" + k, d)
-           for k, d in LARGE_YEAGER_WIDTH_DEFAULTS.items()}
+    lyw = {
+        "large_yeager_neutral_width": getattr(
+            config, "surface_large_yeager_neutral_width", NCAR_NEUTRAL_WIDTH),
+        "large_yeager_dthv_width": getattr(
+            config, "surface_large_yeager_dthv_width", NCAR_DTHV_WIDTH),
+        "large_yeager_cd_cutoff_width": getattr(
+            config, "surface_large_yeager_cd_cutoff_width", NCAR_CD_CUTOFF_WIDTH),
+    }
     lyw = {k: v for k, v in lyw.items() if v != LARGE_YEAGER_WIDTH_DEFAULTS[k]}
 
     _qsal_req = getattr(config, "surface_ocean_q_sfc_saline", None)
