@@ -1,6 +1,7 @@
 # ORCA2 round 348 — fast exact-libm and long-run arm receipt
 
-Date: 2026-10-30. Base: `4d86c201351d`. Scope: final round-348 review fixes.
+Date: 2026-10-30. Rebased base: `9c070141d0cf`. Scope: final round-348 review
+fixes and post-catch-up landing gates.
 
 ## Result
 
@@ -9,7 +10,7 @@ the 24-step run took 836.812 s cumulatively, with 514.707 s in the unary
 Python scalar-libm loop, 11.689 s in its binary counterpart, and 184.813 s in
 XLA backend compilation. These are profile observations, not new run results.
 
-The round-348 commits were rebased onto `4d86c201351d`; main's portable,
+The round-348 implementation was first rebased onto `4d86c201351d`; main's portable,
 lazy `glibc_libm()` API remains the one loader for `libm.so.6`. The compiled
 loop cache key contains the packaged C-source, GCC version, glibc version from
 `gnu_get_libc_version`, and compile flags in one composite digest. The per-user
@@ -40,6 +41,21 @@ daily-temperature comparison before JSON and PNG are written
 (`scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round348_transcendentals_compare.py:56-223` and `:249-402`). The existing round-342
 NEMO metrics and round-345 Decision-188 gate were not changed.
 
+## Resume 3 rebase
+
+The nine commits in the original `4d86c20135..a666faaef0` range were rebased
+with `git rebase --onto refs/remotes/lane/landed 4d86c20135` onto the landed
+Decision-189 catch-up at `9c070141d0cf`. Git replayed all nine commits and
+reported `Successfully rebased and updated`; it stopped on no commit and wrote
+no conflict markers.
+
+Conflict-hunk inventory: **none**. There is therefore no file, ours/theirs
+pair, or manual resolution to record. Every replayed diff was accepted by Git
+without a content conflict. The post-rebase citation audit identified only the
+line shift introduced later by the new `argparse` import and tests; the two
+affected receipt citations and their `CITATION_MAP` keys were re-anchored from
+`:34-38` to `:35-39` and from `:179-349` to `:180-448`.
+
 ## MODEL-CODE CHECKLIST M6
 
 A repository grep for imports of `legoesm.core.transcendentals` found callers
@@ -67,6 +83,17 @@ million-value equality tests cover every function routed by every caller.
   card override; removing its argument pass-through makes that test fail. The
   wrapper dirty-tree refusal, trailing-slash log placement, mode pass-through,
   unknown-mode refusal, shell syntax, and focused lint checks passed.
+- The round-342 driver and shell-wrapper defaults are behaviorally pinned to
+  certified `libm` at both definition sites
+  (`scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round342_s4_year_driver.py:585-588`;
+  `scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round342_s4_year_legoesm_run.sh:27`).
+  Flipping either default independently to `native` makes the pin assertion
+  fail (`tests/ocean/fidelity/test_orca2_round342_s4_year.py:265-360`).
+- The comparator's legacy-field exception remains limited to the certified
+  round-342 reference with its exact status, and never applies to the candidate
+  (`scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round348_transcendentals_compare.py:282-300`).
+  Wrong-round, wrong-status, and missing-candidate-mode plants all fail
+  (`tests/ocean/fidelity/test_orca2_round348_transcendentals.py:312-356`).
 - Direct core-wheel construction was not available in this sandbox because
   Hatchling was absent and network installation is disabled. The C source is
   inside the wheel-selected `legoesm` package tree; runtime compilation and
@@ -143,7 +170,7 @@ new claim was measured on `4d86c20135` and `08bc33f0f8` before this follow-up:
   fixture restores policy, the behavioral test traverses `main()` into the
   card override, its deleted-pass-through plant fails, and fake-process wrapper
   tests cover dirty-tree refusal and argument routing
-  (`tests/ocean/fidelity/test_orca2_round342_s4_year.py:34-38` and `:179-349`).
+  (`tests/ocean/fidelity/test_orca2_round342_s4_year.py:35-39` and `:180-448`).
 - **Sonnet portability/provenance finding — REAL:** HEAD had removed the
   non-glibc module skip, a trailing slash placed `.log` inside the output
   directory, and glibc version was absent from both cache identity and manifest
@@ -156,12 +183,23 @@ keep libm as the certified default; perform long acquisitions on CPU one at a
 time; do not change the existing native-vs-NEMO metric card or Decision-188
 bar. No unasked scientific choice or relaxed threshold was introduced.
 
+Both final re-reviews returned **LAND**: Claude Sonnet and Gemini Argon. The A3
+acquisition at pre-catch-up commit `a666faaef0` passed the 80-step default-flag
+comparison bitwise. Because history and tests changed afterward, acquisition A
+must be rerun at the final HEAD before landing.
+
+## Recorded follow-ups (unchanged in this resume)
+
+- `--output-dir foo//` can still place the wrapper log incorrectly.
+- The JAX path still flushes denormals.
+- The libm `pow` JVP can produce NaN at base zero or a negative base.
+- The comparator still does not require the two manifest modes to differ.
+
+These four items are recorded only; this resume deliberately changes none of
+them.
+
 ## Landing gates
 
-- Receipt citation gate: 26/26 passed. The round-348 receipt had
-  zero failures and unmapped citations, the complete map audit passed, all
-  self-test controls fired, and the shifted C-source citation plant failed as
-  required.
-- Named serial CPU suites: transcendental 69/69, lazy-libm 2/2, round-348
-  comparator 8/8, and round-342 driver/provenance 16/16. No whole-tree or
-  parallel test run was used.
+- Final clean-checkout receipt citation gate: PENDING.
+- Final clean-checkout round-348 named suites: PENDING.
+- Final clean-checkout landing battery and ratchets: PENDING.
