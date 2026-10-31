@@ -168,6 +168,8 @@ __param_spec__ = {
             "gsam_satadj_qc_floor_sharpness": "numerics: smooth-switch sharpness (RULE 5), value approved by user 2026-10-21",
             "gsam_satadj_p_min_width_pa": "numerics: smooth-switch width (RULE 5), value approved by user 2026-10-21",
             "sb2001_autoconv_ramp_top": "numerics: smooth-switch width (RULE 5), value decided by codex+GLM 2026-10-29 (#2232)",
+            "sb2001_accretion_qr_ramp_top": "numerics: smooth-switch width (RULE 5), value decided by codex+GLM 2026-10-30 (#2262)",
+            "sb2001_accretion_qc_ramp_top": "numerics: smooth-switch width (RULE 5), value decided by codex+GLM 2026-10-30 (#2262)",
             "cam_qsat_cap_sharpness": "numerics: smooth-switch sharpness (RULE 5), value approved by user 2026-10-21",
             # Fall-speed power-law EXPONENTS feed math.gamma(4 + b) / math.gamma(1 + b)
             # (morrison.py, _warm_rain.py) to precompute the cons* moment factors.
@@ -318,6 +320,8 @@ __param_spec__ = {
             "gsam_satadj_qc_floor_sharpness": "numerics: smooth-switch sharpness (RULE 5), value approved by user 2026-10-21",
             "gsam_satadj_p_min_width_pa": "numerics: smooth-switch width (RULE 5), value approved by user 2026-10-21",
             "sb2001_autoconv_ramp_top": "numerics: smooth-switch width (RULE 5), value decided by codex+GLM 2026-10-29 (#2232)",
+            "sb2001_accretion_qr_ramp_top": "numerics: smooth-switch width (RULE 5), value decided by codex+GLM 2026-10-30 (#2262)",
+            "sb2001_accretion_qc_ramp_top": "numerics: smooth-switch width (RULE 5), value decided by codex+GLM 2026-10-30 (#2262)",
             "autoconversion_sharpness": "numerics: solver/smoothing/tolerance/iteration parameter",
             "breakup_sharpness": "numerics: solver/smoothing/tolerance/iteration parameter",
             "saturation_sharpness": "numerics: solver/smoothing/tolerance/iteration parameter",
@@ -340,9 +344,11 @@ __param_spec__ = {
         "scheme_key": "atm.micro.SundqvistConfig",
         "excluded": {
             "sigmoid_sharpness": "numerics: solver/smoothing/tolerance/iteration parameter",
+            "liquid_fraction_clamp_sharpness": "numerics: smoothing width of the liquid-fraction clamp (RULE 5), not a closure",
             # Zhao-Carr namelist coefficients added by the oracle port; whether
             # (and within which bounds) they are trainable is a pending user decision.
-            "psautco": "physics: Zhao-Carr namelist coefficient; trainability not yet decided",
+            "psautco_fine": "physics: Zhao-Carr namelist coefficient; trainability not yet decided",
+            "psautco_coarse": "physics: Zhao-Carr namelist coefficient; trainability not yet decided",
             "wminco_liquid": "physics: Zhao-Carr namelist coefficient; trainability not yet decided",
             "wminco_ice": "physics: Zhao-Carr namelist coefficient; trainability not yet decided",
         },
@@ -456,7 +462,9 @@ class SundqvistConfig(NamedTuple):
     # Smooth RH_crit gate of the condensation surrogate and of the precipitation
     # evaporation; the oracle is its hard-switch limit (sharpness -> inf).
     sigmoid_sharpness: float = 20.0
-    auto_rate: float = 1e-3           # Liquid release rate c_0 [1/s] (oracle prautco)
+    # Liquid release rate c_0 [1/s] (oracle prautco; GFS v16/v17 namelist pair
+    # 1.5e-4, 1.5e-4, so its grid-area blend is the identity; user 2026-10-27).
+    auto_rate: float = 1.5e-4
     # Critical cloud water m_r of the SBK89 release
     # (1 - exp(-(m*F1*F2/(m_r*max(b, 0.01)))^2)) [kg/kg] (oracle 1/cmr).
     qc_crit: float = 3e-4             # oracle m_r (tier-2 decision R14)
@@ -512,13 +520,21 @@ class SundqvistConfig(NamedTuple):
     hard_sat_adjust_threshold: float = 1.1      # blend knob here, NOT an on/off trigger [-]
     hard_sat_max_heating_K: float = 5.0         # per-step latent-heating cap [K]
     # --- Zhao-Carr ice route and conversion thresholds ---
-    # Ice -> snow autoconversion coefficient (oracle psautco) [1/s];
-    # psaut = psautco*dt*exp(0.025*(T - 273.16))*max(0, cwm - wmini).
-    psautco: float = 0.0
+    # Ice -> snow autoconversion coefficient [1/s],
+    # psaut = psautco*dt*exp(0.025*(T - 273.16))*max(0, cwm - wmini), blended
+    # by grid-cell area as GFS does (zhaocarr_precpd.f:194-198):
+    # psautco_fine*wk1 + psautco_coarse*(1 - wk1), wk1 = 1 on the finest grid
+    # (oracle psautco(1), psautco(2); GFS v16/v17 namelist 8e-4, 5e-4).
+    psautco_fine: float = 8.0e-4
+    psautco_coarse: float = 5.0e-4
     # Condensate left unconverted, wmin = wminco*p/1e5 [kg/kg] (oracle
-    # wminco(1) liquid, wminco(2) ice).
-    wminco_liquid: float = 0.0
-    wminco_ice: float = 0.0
+    # wminco(1) liquid, wminco(2) ice; fv3atm GFS_typedefs.F90:2854 default).
+    wminco_liquid: float = 1.0e-5
+    wminco_ice: float = 1.0e-5
+    # Sharpness of the smooth clamp of the -15..0 C liquid-fraction ramp (the
+    # liquid/ice split, lanes carrying q_i); the hard clip is math.inf
+    # (RULE 5; codex + GLM 2026-10-29; 100 = the 2026-10-21 smooth-clamp value).
+    liquid_fraction_clamp_sharpness: float = 100.0
 
 
 class SeifertBehengConfig(NamedTuple):
@@ -565,6 +581,12 @@ class SeifertBehengConfig(NamedTuple):
     # [kg/kg]; <= 1e-6 = gSAM's hard step (codex+GLM 2026-10-29, #2232; KNOWN
     # DIFFERENCE in _warm_rain.autoconversion_sb2001).
     sb2001_autoconv_ramp_top: float = 2.0e-6
+    # RULE 5 smoothing of gSAM's two SB2001 accretion gates q_r >= 1e-8 and
+    # q_c >= 1e-8 kg/kg (module_mp_graupel.f90:1944/3266): each C2 step
+    # reaches 1 at its value [kg/kg]; <= 1e-8 = gSAM's hard step (codex+GLM
+    # 2026-10-30, #2262; KNOWN DIFFERENCE in _warm_rain.accretion_sb2001).
+    sb2001_accretion_qr_ramp_top: float = 2.0e-8
+    sb2001_accretion_qc_ramp_top: float = 2.0e-8
 
 
 # Unset Morrison DCS per flavour [m] (MorrisonConfig.ice_snow_d_auto=None,
@@ -1131,6 +1153,12 @@ class MorrisonConfig(NamedTuple):
     # [kg/kg]; <= 1e-6 = gSAM's hard step (codex+GLM 2026-10-29, #2232; KNOWN
     # DIFFERENCE in _warm_rain.autoconversion_sb2001).
     sb2001_autoconv_ramp_top: float = 2.0e-6
+    # RULE 5 smoothing of gSAM's two SB2001 accretion gates q_r >= 1e-8 and
+    # q_c >= 1e-8 kg/kg (module_mp_graupel.f90:1944/3266): each C2 step
+    # reaches 1 at its value [kg/kg]; <= 1e-8 = gSAM's hard step (codex+GLM
+    # 2026-10-30, #2262; KNOWN DIFFERENCE in _warm_rain.accretion_sb2001).
+    sb2001_accretion_qr_ramp_top: float = 2.0e-8
+    sb2001_accretion_qc_ramp_top: float = 2.0e-8
     # MG2's CAM Goff-Gratch q_sat = 1 cap (RULE 5, limiter class): sharpness
     # on e_sat/p; math.inf = CAM's hard cap.  Value approved by user 2026-10-21.
     cam_qsat_cap_sharpness: float = CAM_QSAT_CAP_SHARPNESS

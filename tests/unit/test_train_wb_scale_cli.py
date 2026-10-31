@@ -371,8 +371,9 @@ def test_resume_restores_the_optimizer_state_not_just_the_parameters():
     main = next(n for n in tree.body
                 if isinstance(n, ast.FunctionDef) and n.name == "_main")
     reads = [n for n in ast.walk(main)
-             if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
-             and n.func.attr == "tree_deserialise_leaves"]
+             if isinstance(n, ast.Call)
+             and getattr(n.func, "attr", getattr(n.func, "id", None))
+             in ("tree_deserialise_leaves", "deserialise_knob_aware")]
     assert len(reads) >= 2, (
         "resume must deserialise BOTH the parameters and the optimizer state; "
         f"found {len(reads)} deserialise call(s)")

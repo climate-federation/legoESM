@@ -268,6 +268,54 @@ class TestConvectionMPAS:
         assert bool(jnp.all(jnp.isfinite(tend.du_dt.data)))
         assert bool(jnp.all(jnp.isfinite(tend.dp_s_dt.data)))
 
+    def test_kf_wrf_variant_mpas_needs_reconstructed_winds(
+        self, mpas_mesh, mpas_state, sigma_coord,
+    ):
+        """The opt-in WRF KF-Eta variant on MPAS: refused with mpas_cmt off
+        (it would run on zero winds), finite with the edge-normal
+        reconstruction on.  The smooth default runs either way (above)."""
+        wrf = KainFritschConfig(variant="wrf_kfeta")
+        off = make_convection_physics(
+            ConvectionConfig(scheme="kain_fritsch", kain_fritsch=wrf),
+            model_type="mpas", dt=300.0)
+        with pytest.raises(ValueError, match="mpas_cmt"):
+            off(mpas_state, mpas_mesh, sigma_coord)
+        # With the reconstruction on, the port receives exactly the
+        # reconstructed cell winds (spy on the port's entry; codex r1).
+        import numpy as np
+
+        from legoesm.atmosphere.physics.convection import kain_fritsch_wrf
+        from legoesm.grids.voronoi import reconstruct_cell_velocity
+        real = kain_fritsch_wrf.kain_fritsch_wrf_convection
+        seen = {}
+        # the fixture starts at rest; give the edges a non-trivial wind
+        ne, nl = mpas_state.u.data.shape
+        st = mpas_state._replace(u=mpas_state.u.replace(
+            data=5.0 * jnp.sin(jnp.arange(ne, dtype=mpas_state.u.data.dtype))[:, None]
+            * jnp.ones((1, nl), dtype=mpas_state.u.data.dtype)))
+
+        def spy(*a, **kw):
+            seen["u"], seen["v"] = kw["u"], kw["v"]
+            return real(*a, **kw)
+
+        mp = pytest.MonkeyPatch()
+        mp.setattr(kain_fritsch_wrf, "kain_fritsch_wrf_convection", spy)
+        try:
+            on = make_convection_physics(
+                ConvectionConfig(scheme="kain_fritsch", kain_fritsch=wrf,
+                                 mpas_cmt=True),
+                model_type="mpas", dt=300.0)
+            tend, _ = on(st, mpas_mesh, sigma_coord)
+        finally:
+            mp.undo()
+        assert bool(jnp.all(jnp.isfinite(tend.dT_dt.data)))
+        u_ref, v_ref = reconstruct_cell_velocity(st.u.data, mpas_mesh)
+        assert float(jnp.max(jnp.abs(u_ref))) > 0.0  # non-trivial winds
+        np.testing.assert_allclose(np.asarray(seen["u"]), np.asarray(u_ref),
+                                   rtol=1e-12, atol=0.0)
+        np.testing.assert_allclose(np.asarray(seen["v"]), np.asarray(v_ref),
+                                   rtol=1e-12, atol=0.0)
+
     def test_tiedtke_mpas_passes_none_not_zeros_for_missing_mc(
         self, mpas_mesh, mpas_state, sigma_coord,
     ):

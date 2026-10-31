@@ -339,3 +339,42 @@ def test_sharded_step_radiates_on_exactly_the_cadence_steps(rad_update_steps):
         f"rad_update_steps={rad_update_steps}; the cadence "
         f"(i+1)%{rad_update_steps}==0 asks for {expected}. "
         f"{'Every step -> the need_rad predicate is being discarded.' if refreshed == list(range(n_steps)) else 'Phase error.'}")
+
+
+def _mock_area_step(*args, **kwargs):
+    """The mock physics with a drying rate proportional to the cell area the
+    lane hands in (Sundqvist's GFS area blend reads it the same way)."""
+    area = kwargs.get("cell_area")
+    assert area is not None, "lane did not pass its cell areas"
+    out, held, t_land = _mock_step_unified_stateful(*args, **kwargs)
+    a0 = 4.0 * np.pi * constants.R_earth ** 2 / (N_LAT * N_LON)
+    dq = -1e-9 * (jnp.asarray(area) / a0)[..., None] * jnp.ones(out.dq_v_dt.shape)
+    return out._replace(dq_v_dt=dq), held, t_land
+
+
+def test_each_band_gets_its_own_cell_areas():
+    """Item 9 (user 2026-10-27): the lat-band lane shares ONE pipeline build,
+    so each band must hand physics its OWN cell areas.  Moisture is
+    column-local, so with an area-proportional sink the sharded q_v equals the
+    serial one only if every band received its own rows of grid_area."""
+    mesh = _mesh()
+    model, statics, carry, forcing = _build_harness()
+    area = np.asarray(statics.grid.grid_area)
+    band_rows = N_LAT // N_DEV
+    assert not np.allclose(area[:band_rows], area[band_rows:2 * band_rows])
+    statics = dataclasses.replace(statics, step_unified=_mock_area_step,
+                                  cell_area=statics.grid.grid_area)
+    step_none = make_sharded_operator_split_step(
+        model, None, statics, fix_mass=True, rad_update_steps=1, start_day=0.0)
+    step_dev = make_sharded_operator_split_step(
+        model, mesh, statics, fix_mass=True, rad_update_steps=1, start_day=0.0)
+    c_s = step_none(step_none(carry, forcing), forcing)
+    c_b = shard_operator_split_carry(carry, mesh)
+    f_b = shard_operator_split_forcing(forcing, mesh)
+    c_b = step_dev(step_dev(c_b, f_b), f_b)
+    rep = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec())
+    q_b = np.asarray(jax.device_put(c_b.q_v, rep))
+    q_s = np.asarray(c_s.q_v)
+    assert float(np.max(np.abs(q_s - np.asarray(carry.q_v)))) > 0.0
+    worst = float(np.max(np.abs(q_b - q_s)))
+    assert worst < 1e-11, f"q_v sharded vs serial {worst:.3e} (band areas wrong)"

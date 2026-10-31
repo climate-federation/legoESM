@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 import pytest
 
+from legoesm import constants
 from legoesm.atmosphere.physics.microphysics.config import MorrisonConfig
 from legoesm.atmosphere.physics import (
     PhysicsConfig,
@@ -356,12 +358,14 @@ def _tropical_qv_profile(nlev=_RCE_NLEV):
     return 1.8e-2 * jnp.exp(-z / 3.0e3)
 
 
-def _run_and_assert_stable(cfg, integrator="forward_euler", land_frac=None):
+def _run_and_assert_stable(cfg, integrator="forward_euler", cell_area_m2=None,
+                           land_frac=None):
     scm = SingleColumnModel.create(
         physics_config=cfg, nlev=_RCE_NLEV, dt=_RCE_DT,
         T_profile=_tropical_T_profile(),
         q_v_profile=_tropical_qv_profile(),
         latitude_deg=0.0,
+        cell_area_m2=cell_area_m2,
         land_frac=land_frac,
         time_integrator=integrator,
     )
@@ -440,6 +444,12 @@ def test_swap_microphysics_schemes(micro_scheme):
             scheme=micro_scheme,
             morrison=MorrisonConfig(warm_rain_scheme="kk2000")),
     )
+    if micro_scheme == "sundqvist":
+        # This case declares no GCM cell area (cell_area_m2=None), so
+        # Sundqvist refuses; see the declared-area test below.
+        with pytest.raises(ValueError, match="cell area"):
+            _run_and_assert_stable(cfg)
+        return
     _run_and_assert_stable(cfg)
 
 
@@ -496,3 +506,21 @@ def test_scm_state_remains_pytree_compatible():
     assert all(isinstance(leaf, jax.Array) for leaf in leaves)
     leaves_h = jax.tree_util.tree_leaves(hist)
     assert all(isinstance(leaf, jax.Array) for leaf in leaves_h)
+
+
+def test_sundqvist_runs_on_a_column_that_declares_its_cell_area():
+    """A case that declares the GCM cell it stands for (the RCE case: the
+    production MPAS mean cell, user 2026-10-27) runs Sundqvist; the same case
+    without a declared area refuses (the swap test above)."""
+    from legoesm.atmosphere.idealized.rcemip_initial_conditions import (
+        RCE_CELL_AREA_M2)
+    from legoesm.atmosphere.forcing.scm.scm import make_scm_grid
+    assert RCE_CELL_AREA_M2 == pytest.approx(
+        4.0 * np.pi * constants.R_earth ** 2 / 40962, rel=1e-15)
+    assert 1.2e10 < RCE_CELL_AREA_M2 < 1.3e10
+    g = make_scm_grid(0.0, cell_area_m2=RCE_CELL_AREA_M2)
+    assert float(g.grid_area.reshape(-1)[0]) == RCE_CELL_AREA_M2
+    assert make_scm_grid(0.0).grid_area is None
+    _run_and_assert_stable(
+        _baseline_cfg(microphysics=MicrophysicsConfig(scheme="sundqvist")),
+        cell_area_m2=RCE_CELL_AREA_M2)

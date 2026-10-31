@@ -591,3 +591,44 @@ env CUDA_VISIBLE_DEVICES="" JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 PYTHONPATH=packag
 
 Final-code line: `20 passed in 17.90s`.  Clean receipt-commit repeat:
 `20 passed in 18.24s`.
+
+## Catch-up 2 (main edd34c2446)
+
+### Scope and conflict-hunk ledger
+
+This second no-rebase catch-up merges current main
+`edd34c24469c834d536c511160ea0c4aef8974ae` into lane receipt tip
+`4d86c201351d18fb8a5322292d7d852e3b460202`.  Main advanced by exactly 116
+commits from the first catch-up pin `b8222d501476ffceccadfa31a1e21bde2ccac7ab`.
+The merge was performed with `git merge --no-ff --no-commit`; no NEMO
+executable was run.
+
+Git produced **0 conflicted hunks in 0 files**.  Consequently there are no
+conflicted-hunk rows to resolve: neither parent's tests or behavior required a
+textual choice, and the automatic merge retained both parents' changes.
+
+| File / hunk | Main changed | Lane changed | Kept and reason |
+|---|---|---|---|
+| _None (0 textual conflict hunks)_ | _Not applicable_ | _Not applicable_ | The merge was text-clean; the certified paths are nevertheless audited below for semantic composition risk. |
+
+### No-conflict semantic-risk register
+
+These are all implementation paths in the 116-commit interval under
+`packages/ocean/` that the lane certifies or that feed its selectable ocean
+physics.  They merged without textual conflicts but were retained as explicit
+review and exactness-test risks.
+
+| File | Main-side change and semantic risk | Merged disposition |
+|---|---|---|
+| `packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py` | Passes `rho_0` into four EOS builders when `eos_depth == "geometric"`; the calls sit in the certified dynamics/vertical-mixing wiring and could perturb density-dependent exact operands if activated on ORCA2. | Kept main's conditional reference-density wiring together with every lane exactness selector and source-ordered path.  The condition preserves the prior non-geometric behavior. |
+| `packages/ocean/legoesm/ocean/physics/combined.py` | Adds the optional `epbl_shortwave` argument and forwards it into vertical mixing; combined-physics dispatch is shared by certified recipes. | Kept the optional main argument.  Its default is `None`, so existing ORCA2 call sites and arithmetic remain unchanged. |
+| `packages/ocean/legoesm/ocean/physics/vertical_mixing/epbl.py` | Adds MOM6-style penetrating-shortwave TKE accounting and its literal Taylor/closed-form arithmetic. | Kept the new selectable ePBL behavior.  ORCA2's certified NEMO TKE/ZDF route does not select ePBL penetrating shortwave. |
+| `packages/ocean/legoesm/ocean/physics/vertical_mixing/integration.py` | Threads the optional shortwave scheme into ePBL, validates unsupported combinations, adds shortwave to buoyancy forcing, and constructs the per-layer TKE source. | Kept main's guarded ePBL path and the lane's NEMO/TKE/literal integration paths.  The new branch is inactive when `epbl_shortwave` and `sw_down` are absent. |
+| `packages/ocean/legoesm/ocean/physics/vertical_mixing/mpas_integration.py` | Floors salinity before the MPAS KPP EOS evaluation to avoid non-finite land-cell cotangents. | Kept main's KPP-only `floor_salinity=True` call.  It is confined to the MPAS KPP bridge and does not change the ORCA2 lat-lon NEMO route. |
+| `packages/ocean/legoesm/ocean/scm.py` | Passes the SCM shortwave-penetration configuration into combined physics so ePBL can price `sw_down`. | Kept main's SCM wiring; it composes with the lane implementation and does not alter the lat-lon ORCA2 model construction. |
+
+The interval also changes `docs/ocean/specs/epbl_energetic_pbl.md` and adds or
+updates the ePBL/MOM6 fixtures and three ocean test modules
+`test_epbl.py`, `test_vmix_eos_reference_density.py`, and
+`test_vmix_mpas_integration.py`.  All are retained and included in the
+verification below.

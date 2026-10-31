@@ -605,7 +605,7 @@ def _call_microphysics(scheme, col, *, T=None, q_v=None, hyd=None):
         nlev = T.shape[1]
         dry = jnp.where(jnp.arange(nlev) >= nlev - nlev // 4, 0.6, 1.0)
         args = (T, q_v * dry, *args[2:])
-        return sundqvist_microphysics(*args, SundqvistConfig())
+        return sundqvist_microphysics(*args, SundqvistConfig(), cell_area=1.0e10)
     if scheme == "p3":
         from legoesm.atmosphere.physics.microphysics.config import P3Config
         from legoesm.atmosphere.physics.microphysics.p3 import p3_microphysics

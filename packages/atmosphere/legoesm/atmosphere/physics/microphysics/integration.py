@@ -17,6 +17,7 @@ import jax
 import jax.numpy as jnp
 
 from legoesm.core.field import Field
+from legoesm.core.conservation import WATER_MASS_SPECIES
 from legoesm.core.state import (
     HydrostaticState,
     HydrostaticTendencies,
@@ -277,6 +278,16 @@ def require_relvar_for_kk2000_cam6(microphysics_config, relvar_wired: bool):
 # ===========================================================================
 # Hydrostatic PE
 # ===========================================================================
+
+def sundqvist_lane_kwargs(scheme_name, grid, ncol, carries_q_i):
+    """Sundqvist's lane inputs: the grid-cell area [m^2] per column (None where
+    the grid has none; Sundqvist then raises) and whether the lane carries q_i."""
+    if scheme_name != "sundqvist":
+        return {}
+    area = getattr(grid, "grid_area", None)
+    return dict(cell_area=None if area is None else jnp.asarray(area).reshape(ncol),
+                carries_q_i=carries_q_i)
+
 
 def _make_hydrostatic_microphysics(
     microphysics_config: MicrophysicsConfig,
@@ -549,6 +560,9 @@ def _make_hydrostatic_microphysics(
                 _below = jnp.arange(nlev) >= cam6_activation.top_lev
                 _cldo_new = jnp.where(
                     _below, _ast, phys_state.cloud_fraction_old.reshape(ncol, nlev))
+            _kw.update(sundqvist_lane_kwargs(
+                scheme_name, grid, ncol,
+                state.tracers is not None and "q_i" in state.tracers))
             micro_out = micro_fn(
                 T_col, q_v_col, hydrometeors,
                 p_full_col, p_half_col, rho, dz, dt, scheme_config, **_kw,
@@ -809,6 +823,7 @@ def _make_nonhydrostatic_microphysics(
             micro_out = micro_fn(
                 T_col, q_v_col, hydrometeors,
                 p_full_col, p_half, rho_col, dz, dt, scheme_config,
+                **sundqvist_lane_kwargs(scheme_name, grid, ncol, n_tracers > 3),
             )
 
         # Convert dT/dt -> dtheta'/dt using local Exner (T = theta * exner).
@@ -1027,6 +1042,7 @@ def _make_plane_microphysics(
             micro_out = micro_fn(
                 T_col, q_v_col, hydrometeors,
                 p_full_col, p_half, rho_col, dz, dt, scheme_config,
+                **sundqvist_lane_kwargs(scheme_name, grid, ncol, n_tracers > 3),
             )
 
         dT_dt = micro_out.dT_dt.reshape(shape_3d)
@@ -1231,6 +1247,7 @@ def _make_mpas_nh_microphysics(
             micro_out = micro_fn(
                 T_col, q_v_col, hydrometeors,
                 p_full_col, p_half, rho_col, dz, dt, scheme_config,
+                **sundqvist_lane_kwargs(scheme_name, mesh, ncol, n_tracers > 3),
             )
 
         dT_dt = micro_out.dT_dt
@@ -1319,7 +1336,8 @@ def _make_spectral_pe_microphysics(
         "N_i": "dN_i_dt",
     }
 
-    def physics_fn(state, grid, sigma_coord, grid_fields=None):
+    def physics_fn(state, grid, sigma_coord, grid_fields=None,
+                   return_sfc_precip=False):
         # Transform spectral state to grid space
         fields = grid_fields
         if fields is None:
@@ -1336,12 +1354,28 @@ def _make_spectral_pe_microphysics(
         # we do not silently flow x64 zeros into the column path.
         _state_dtype = T.dtype
 
+        if return_sfc_precip and micro_fn is not None:
+            # #2277: the surface precip is recorded only when every water
+            # species the scheme writes is carried -- a dropped tendency would
+            # report water leaving a column that never lost it.
+            _need = WATER_MASS_SPECIES[:min(
+                min_tracer_slots(scheme_name, scheme_config),
+                len(WATER_MASS_SPECIES))]
+            _missing = [n for n in _need
+                        if state.tracers is None or n not in state.tracers]
+            if _missing:
+                raise ValueError(
+                    f"microphysics '{scheme_name}' writes {list(_need)}, but "
+                    f"the spectral state lacks {_missing}: its tendency would "
+                    "be dropped while the surface precipitation is recorded. "
+                    "Carry those tracers.")
+
         if micro_fn is None:
             # Mirror the input tracer pytree shape with zeros so the
             # orchestrator's accumulator and the dycore RHS see a
             # consistent tendency structure even when microphysics is
             # disabled.
-            return SpectralHydrostaticState(
+            _z = SpectralHydrostaticState(
                 vor_hat=state.vor_hat.replace(data=zero_3d),
                 div_hat=state.div_hat.replace(data=zero_3d),
                 T_hat=state.T_hat.replace(data=jnp.zeros_like(state.T_hat.data)),
@@ -1349,6 +1383,10 @@ def _make_spectral_pe_microphysics(
                 phis_hat=state.phis_hat.replace(data=jnp.zeros_like(state.phis_hat.data)),
                 tracers=zero_like_tracers(state.tracers),
             )
+            if not return_sfc_precip:
+                return _z
+            _p0 = jnp.zeros((n_lat, n_lon), dtype=p_s.dtype)
+            return _z, (_p0, _p0)
 
         # Pressure at full and half levels
         p_full = sigma_coord.pressure_at_full(p_s)
@@ -1406,6 +1444,9 @@ def _make_spectral_pe_microphysics(
             micro_out = micro_fn(
                 T_col, q_v_col, hydrometeors,
                 p_full_col, p_half_col, rho, dz, dt, scheme_config,
+                **sundqvist_lane_kwargs(
+                    scheme_name, grid, ncol,
+                    state.tracers is not None and "q_i" in state.tracers),
             )
 
         dT_dt = micro_out.dT_dt.reshape(n_lat, n_lon, nlev)
@@ -1448,7 +1489,7 @@ def _make_spectral_pe_microphysics(
                     tt.setdefault(k, zv)
             tracers_tend = tt
 
-        return SpectralHydrostaticState(
+        tend = SpectralHydrostaticState(
             vor_hat=state.vor_hat.replace(data=zero_3d),
             div_hat=state.div_hat.replace(data=zero_3d),
             T_hat=state.T_hat.replace(data=dT_hat),
@@ -1456,9 +1497,21 @@ def _make_spectral_pe_microphysics(
             phis_hat=state.phis_hat.replace(data=jnp.zeros_like(state.phis_hat.data)),
             tracers=tracers_tend,
         )
+        if not return_sfc_precip:
+            return tend
+        # Surface precip [kg/m^2/s, +down] the scheme computes, and its frozen
+        # part (None when the scheme does not publish it), as on the
+        # hydrostatic bridge (#2277).
+        _pf = micro_out.precip_frozen
+        return tend, (
+            micro_out.precipitation.reshape(n_lat, n_lon).astype(p_s.dtype),
+            None if _pf is None
+            else _pf.reshape(n_lat, n_lon).astype(p_s.dtype))
 
     def reset_state():
         _ml_model_cache[0] = None
 
     physics_fn.reset_state = reset_state
+    # #2277: accepts ``return_sfc_precip=True`` (second return: surface precip).
+    physics_fn._emits_sfc_precip = True
     return physics_fn

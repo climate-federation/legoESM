@@ -146,6 +146,43 @@ class TestBridgeEquivalence:
                     <= 1e-12 + 1e-9 * qscale)
 
 
+def test_kf_wrf_variant_pipeline_matches_bridge(setup):
+    """The opt-in WRF KF-Eta variant (PR #2249) gets the real winds on both
+    paths: pipeline (ExperimentConfig.kain_fritsch_variant) and bridge
+    (KainFritschConfig.variant) agree to roundoff."""
+    from legoesm.atmosphere.physics.convection.config import KainFritschConfig
+    grid, sigma, f, state = setup
+
+    def step(scheme):
+        config = ExperimentConfig(
+            grid=GridConfig(grid_type="cubed_sphere", resolution=4, nlev=NLEV),
+            dycore=DycoreConfig(model_type="hydrostatic", discretization="cdgrid"),
+            convection=scheme, radiation="none", microphysics="none",
+            kain_fritsch_variant="wrf_kfeta",
+        )
+        config.validate_strict()
+        pipe = build_physics_pipeline(grid, sigma, config)
+        return pipe.physics_step_no_rad(
+            f["T"], f["p_s"], f["q_v"], f["q_c"], f["q_r"], None,
+            f["u"], f["v"], f["sst"], f["sic"], f["lat"], DT,
+            f["z3"], f["z2"], f["z2"], f["z2"], f["z2"], f["z2"])
+
+    pipe_dT = step("kain_fritsch").dT_dt - step("none").dT_dt
+    bridge_fn = make_convection_physics(
+        ConvectionConfig(scheme="kain_fritsch",
+                         kain_fritsch=KainFritschConfig(variant="wrf_kfeta")),
+        model_type="hydrostatic", dt=DT)
+    ncol = int(np.prod(f["p_s"].shape))
+    phys_state = SimpleNamespace(conv_prog_profile=jnp.zeros((ncol, NLEV)),
+                                 conv_stoch_state=jnp.zeros((ncol,)),
+                                 prng_key=jax.random.PRNGKey(0))
+    res = bridge_fn(state, grid, sigma, phys_state)
+    bridge_dT = (res[0] if isinstance(res, tuple) else res).dT_dt.data
+    assert bool(jnp.all(jnp.isfinite(pipe_dT)))
+    scale = float(jnp.max(jnp.abs(bridge_dT))) + 1e-30
+    assert float(jnp.max(jnp.abs(pipe_dT - bridge_dT))) <= 1e-12 + 1e-9 * scale
+
+
 class TestCarryAndFiring:
 
     @pytest.mark.parametrize("scheme", PROFILE_SCHEMES)

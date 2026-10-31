@@ -169,7 +169,7 @@ from legoesm.atmosphere.physics.gravity_wave_drag.oro_source import (
     depth_averaged_oro_source,
 )
 from legoesm.atmosphere.physics.gravity_wave_drag.output import GWDOutput
-from legoesm.core.smooth import pnorm_smooth_min
+from legoesm.core.smooth import pnorm_smooth_min, smoothstep_quintic
 
 # Machine-checked scheme contract (see tests/test_physics_contracts.py). Applies
 # to the top-level driver ``e3sm_cam_gwd``; the ``gw_*`` functions above/below
@@ -374,8 +374,18 @@ def gw_oro_src(
     fcrit2: float,
     oro_min_h: float,
     oro_min_wind: float,
+    oro_wind_ramp_width: float = 0.0,
 ):
     """McFarlane (1987) orographic source (single c=0 wave).
+
+    ``oro_wind_ramp_width = w`` [m/s] (static Python float): ``0.0`` is E3SM's
+    hard ``U > oro_min_wind`` launch gate (the stress jumps from tau(U) to 0);
+    ``w > 0`` (RULE 5, the Lindzen scheme's default, #2241) multiplies the
+    launch stress by ``smoothstep_quintic((U - oro_min_wind)/w)``: exactly 0 at
+    and below the gate, exact from ``oro_min_wind + w``, never above the hard
+    stress.  The launch level keeps the hard test (the weight is 0 there).
+    The mountain-height gate ``hdsp > oro_min_h`` stays hard: ``hdsp`` is
+    static orography, not model state.
 
     Faithful to ``gw_oro_src`` (gw_oro.F90).  Returns the launched stress
     profile (ncol, nlev+1), source/tend levels, projection unit vectors,
@@ -416,6 +426,11 @@ def gw_oro_src(
         oroko2 * jnp.minimum(hdsp ** 2, sghmax) * rsrc * nsrc * ubi_sfc
     )
     active = (ubi_sfc > oro_min_wind) & (hdsp > oro_min_h)
+    if oro_wind_ramp_width != 0.0:
+        if not (math.isfinite(oro_wind_ramp_width) and oro_wind_ramp_width > 0.0):
+            raise ValueError(
+                f"oro_wind_ramp_width must be finite and >= 0, got {oro_wind_ramp_width!r}")
+        tauoro = tauoro * smoothstep_quintic((ubi_sfc - oro_min_wind) / oro_wind_ramp_width)
     tauoro = jnp.where(active, tauoro, 0.0)             # (ncol,)
     # Where orographic term is zero, E3SM sets src_level = pver (no waves).
     src_level = jnp.where(active, src_level, nlev).astype(jnp.int32)

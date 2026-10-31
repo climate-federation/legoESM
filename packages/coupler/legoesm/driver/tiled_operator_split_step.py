@@ -465,7 +465,7 @@ def make_tiled_operator_split_step(
             carry_t.step_index, start_day, dt, rad_update_steps)
         tile_statics = dataclasses.replace(
             statics, grid=TileGridView(ar_t),
-            lat=lat_t, lon=lon_t, forcing=forcing_t)
+            lat=lat_t, lon=lon_t, cell_area=ar_t, forcing=forcing_t)
         if ghg_keys is not None:
             # Transient GHG: rebuild the override from THIS segment's
             # forcing (the lat-band factory's contract — a baked statics

@@ -385,6 +385,27 @@ def make_convection_physics(
         )
 
 
+def _convective_surface_precip(dq_r_conv, p_half_col, rain_is_net_flux):
+    """Column rain flux [kg/m^2/s, +down] of a convective rain source
+    ``dq_r_conv`` (ncol, nlev) [kg/kg/s]: ``sum_k dq_r_k dp_k / g``, dp > 0
+    (p increases downward).  A signed NET flux divergence (CAM ZM) has its
+    column SUM clipped at zero; a non-negative source (bechtold/tiedtke) is
+    clipped per layer.  Shared by the hydrostatic and spectral bridges."""
+    dp = p_half_col[:, 1:] - p_half_col[:, :-1]
+    if rain_is_net_flux:
+        return jnp.maximum(jnp.sum(dq_r_conv * dp, axis=-1), 0.0) / constants.g
+    return jnp.sum(jnp.maximum(dq_r_conv, 0.0) * dp, axis=-1) / constants.g
+
+
+def _convective_surface_snow(conv_out, precip):
+    """The scheme's frozen surface flux (ZM snow; F29) bounded to
+    ``[0, precip]``, shape (ncol,); ``None`` when the scheme books none."""
+    snow = getattr(conv_out, "precip_frozen_sfc", None)
+    if snow is None:
+        return None
+    return jnp.clip(snow.reshape(precip.shape), 0.0, precip)
+
+
 # ===========================================================================
 # Hydrostatic PE
 # ===========================================================================
@@ -415,6 +436,10 @@ def _make_hydrostatic_convection(
     is_profile_prognostic = _tr.is_profile_prognostic
     is_cmt_capable = _tr.is_cmt_capable
     is_w_grid_consumer = _tr.is_w_grid_consumer
+    # Only the opt-in WRF KF-Eta variant reads winds (TIMEC, shear); the smooth
+    # KF default keeps main's inputs (no winds) bit for bit.
+    kf_wrf_winds = (scheme_name == "kain_fritsch"
+                    and scheme_config.variant == "wrf_kfeta")
     is_stochastic = _tr.is_stochastic
     is_mc_consumer = _tr.is_mc_consumer
     is_simple_mc_consumer = _tr.is_simple_mc_consumer
@@ -484,10 +509,16 @@ def _make_hydrostatic_convection(
         # (``shape (nEdges, nlev)``): rebuild cell-centred winds with the
         # Perot reconstruction (before 2026-09-15 this branch handed the
         # scheme zero winds, so CMT was silently dead on the MPAS lane).
-        if is_cmt_capable:
+        if is_cmt_capable or kf_wrf_winds:
             _u_data = state.u.data
             if _u_data.shape[0] == ncol or _u_data.shape[:-1] == shape_2d:
                 u_col = _u_data.reshape(ncol, nlev)
+                if state.v is None and not is_cmt_capable:
+                    # Kain-Fritsch: no zero-wind fallback (TIMEC, shear).
+                    raise ValueError(
+                        "convection: kain_fritsch_variant='wrf_kfeta' needs both wind "
+                        "components; "
+                        "state.v is None")
                 v_col = (
                     state.v.data.reshape(ncol, nlev)
                     if state.v is not None
@@ -503,6 +534,15 @@ def _make_hydrostatic_convection(
                     u_col = u_col.astype(_state_dtype)
                     v_col = v_col.astype(_state_dtype)
                 else:
+                    if not is_cmt_capable:
+                        # Kain-Fritsch needs the real winds (TIMEC = DX/VCONV,
+                        # shear-dependent precipitation efficiency): refuse the
+                        # zero-wind fallback rather than run on invented winds.
+                        raise ValueError(
+                            "convection: kain_fritsch_variant='wrf_kfeta' on MPAS needs "
+                            "cell-centred "
+                            "winds; set convection.mpas_cmt=True so they are "
+                            "reconstructed from the edge normals")
                     # mpas_cmt off: keep the pre-2026-09-15 zero winds bit for
                     # bit for EVERY scheme (Tiedtke / ZM keep enable_cmt=True
                     # but received zero winds here; the diurnal-CAPE wind term
@@ -792,6 +832,7 @@ def _make_hydrostatic_convection(
                     T=T_col, q_v=q_v_col,
                     p_full=p_full_col, p_half=p_half_col,
                     w_grid=w_grid_col,
+                    u=u_col, v=v_col,
                     conv_prog_profile=prog_in,
                     dt=dt, config=scheme_config,
                 )
@@ -919,6 +960,25 @@ def _make_hydrostatic_convection(
                     data=_dq_r_conv.reshape(shape_3d), name="dq_r_conv_dt",
                     dims=dims_3d, units="kg/kg/s",
                 )
+            # Detrained precipitation (IFS PSNDE) goes to the rain and snow
+            # species, never to the surface or to cloud water (user
+            # 2026-10-28, S1''/R12); no species to take it -> refuse.
+            for _nm, _detr in (("q_r", getattr(conv_out, "dq_r_detr_dt", None)),
+                               ("q_s", getattr(conv_out, "dq_s_detr_dt", None))):
+                if _detr is None:
+                    continue
+                if state.tracers is None or _nm not in state.tracers:
+                    raise ValueError(
+                        f"convection detrains precipitation into {_nm} (IFS "
+                        f"PSNDE) but the state carries no {_nm} tracer")
+                _d = _detr.reshape(shape_3d)
+                if _nm in tracer_tends:
+                    tracer_tends[_nm] = tracer_tends[_nm].replace(
+                        data=tracer_tends[_nm].data + _d)
+                else:
+                    tracer_tends[_nm] = Field(
+                        data=_d, name=f"d{_nm}_detr_dt", dims=dims_3d,
+                        units="kg/kg/s")
             # Convective transport of carried tracers (ZM convtran): signed,
             # column-conserving, ADDED to any other tendency of that tracer.
             for _nm, _dtr in (getattr(conv_out, "tracer_transport", None) or {}).items():
@@ -946,15 +1006,9 @@ def _make_hydrostatic_convection(
             # SIGN/UNITS: dq_r_conv >= 0 is a condensate source [kg/kg/s];
             # dp = p_half[k+1] - p_half[k] > 0 (p increases downward).
             if _dq_r_conv is not None:
-                _dp_col = p_half_col[:, 1:] - p_half_col[:, :-1]
-                if _tr.rain_is_net_flux:
-                    # signed field: clip the column SUM, not the layers
-                    _p_conv_diag = jnp.maximum(jnp.sum(
-                        _dq_r_conv.reshape(ncol, nlev) * _dp_col, axis=-1), 0.0) / constants.g
-                else:
-                    _p_conv_diag = jnp.sum(
-                        jnp.maximum(_dq_r_conv.reshape(ncol, nlev), 0.0)
-                        * _dp_col, axis=-1) / constants.g
+                _p_conv_diag = _convective_surface_precip(
+                    _dq_r_conv.reshape(ncol, nlev), p_half_col,
+                    _tr.rain_is_net_flux)
                 if _to_sfc:
                     # Column water removed == this flux (the q_r/q_c hand-off
                     # above is skipped); latent heat already booked by the plume.
@@ -964,11 +1018,10 @@ def _make_hydrostatic_convection(
                     )
                     # its frozen part, when the scheme books one (ZM snow;
                     # F29), bounded by the surface flux it belongs to
-                    _snow = getattr(conv_out, "precip_frozen_sfc", None)
+                    _snow = _convective_surface_snow(conv_out, _p_conv_diag)
                     if _snow is not None:
                         _precip_conv_frozen = Field(
-                            data=jnp.clip(_snow.reshape(ncol), 0.0, _p_conv_diag)
-                            .reshape(shape_2d).astype(_ps_dtype),
+                            data=_snow.reshape(shape_2d).astype(_ps_dtype),
                             name="precip_frozen_conv", dims=dims_2d,
                             units="kg/m^2/s")
                 if isinstance(conv_prog_out, dict):
@@ -1122,6 +1175,10 @@ def _make_nonhydrostatic_convection(
     is_profile_prognostic = _tr.is_profile_prognostic
     is_cmt_capable = _tr.is_cmt_capable
     is_w_grid_consumer = _tr.is_w_grid_consumer
+    # Only the opt-in WRF KF-Eta variant reads winds (TIMEC, shear); the smooth
+    # KF default keeps main's inputs (no winds) bit for bit.
+    kf_wrf_winds = (scheme_name == "kain_fritsch"
+                    and scheme_config.variant == "wrf_kfeta")
     is_stochastic = _tr.is_stochastic
     is_mc_consumer = _tr.is_mc_consumer
     is_simple_mc_consumer = _tr.is_simple_mc_consumer
@@ -1208,7 +1265,7 @@ def _make_nonhydrostatic_convection(
             )
 
         # Wind columns for CMT-capable schemes.
-        if is_cmt_capable:
+        if is_cmt_capable or kf_wrf_winds:
             u_col = state.u.data.reshape(ncol, nlev)
             v_col = state.v.data.reshape(ncol, nlev)
         else:
@@ -1389,6 +1446,7 @@ def _make_nonhydrostatic_convection(
                     T=T_col, q_v=q_v_col,
                     p_full=p_full_col, p_half=p_half_col,
                     w_grid=w_grid_col,
+                    u=u_col, v=v_col,
                     conv_prog_profile=prog_in,
                     dt=dt, config=scheme_config,
                 )
@@ -1543,6 +1601,10 @@ def _make_spectral_pe_convection(
     is_profile_prognostic = _tr.is_profile_prognostic
     is_cmt_capable = _tr.is_cmt_capable
     is_w_grid_consumer = _tr.is_w_grid_consumer
+    # Only the opt-in WRF KF-Eta variant reads winds (TIMEC, shear); the smooth
+    # KF default keeps main's inputs (no winds) bit for bit.
+    kf_wrf_winds = (scheme_name == "kain_fritsch"
+                    and scheme_config.variant == "wrf_kfeta")
     is_stochastic = _tr.is_stochastic
     is_mc_consumer = _tr.is_mc_consumer
     is_simple_mc_consumer = _tr.is_simple_mc_consumer
@@ -1557,7 +1619,8 @@ def _make_spectral_pe_convection(
         else:  # edmf
             prog_key, prog_init = "a_u", scheme_config.a_u_init
 
-    def physics_fn(state, grid, sigma_coord, grid_fields=None, phys_state=None):
+    def physics_fn(state, grid, sigma_coord, grid_fields=None, phys_state=None,
+                   return_sfc_precip=False):
         # 1. Transform spectral state to grid space
         fields = grid_fields
         if fields is None:
@@ -1596,7 +1659,7 @@ def _make_spectral_pe_convection(
         # the leaf produces meaningful CMT.  The grid→spectral round-trip
         # for the resulting (du_dt_conv, dv_dt_conv) is handled below
         # via :func:`vordiv_from_uv_3d`.
-        if is_cmt_capable:
+        if is_cmt_capable or kf_wrf_winds:
             u_grid = fields['u'].astype(_state_dtype)   # (n_lat, n_lon, nlev)
             v_grid = fields['v'].astype(_state_dtype)
             u_col = u_grid.reshape(ncol, nlev)
@@ -1824,6 +1887,7 @@ def _make_spectral_pe_convection(
                     T=T_col, q_v=q_v_col,
                     p_full=p_full_col, p_half=p_half_col,
                     w_grid=w_grid_col,
+                    u=u_col, v=v_col,
                     conv_prog_profile=prog_in,
                     dt=dt, config=scheme_config,
                 )
@@ -1912,18 +1976,24 @@ def _make_spectral_pe_convection(
         # layers holding none.  Its column integral IS the surface rain, so it
         # takes the surface route here exactly as on the hydrostatic bridge
         # (``_to_sfc``) and in the unified pipeline: only dq_v and dq_c are
-        # booked and the rain leaves the column (this lane has no surface
-        # precipitation channel; every precipitating species already leaves
-        # the prescribed surface this way).  Column water then closes by the
+        # booked and the rain leaves the column as surface precipitation
+        # (published with ``return_sfc_precip``, #2277).  Column water then
+        # closes by the
         # scheme's own contract, sum dp*dq_r = -sum dp*(dq_v + dq_c), which
         # requires BOTH q_v and q_c to be carried -- without q_c the detrained
-        # condensate would vanish unrecorded.
-        _rain_to_sfc = conv_fn is not None and _tr.rain_is_net_flux
+        # condensate would vanish unrecorded.  ``rain_to_surface`` sends a
+        # mass-flux scheme's survivor rain (bechtold/tiedtke) the same way, as
+        # on the hydrostatic bridge, instead of handing it to q_r where the
+        # microphysics would evaporate it a second time.  The routed rain is
+        # the bridge's surface precip (``return_sfc_precip``, #2277), which the
+        # driver exports to the coupler.
+        _rain_to_sfc = conv_fn is not None and (
+            _tr.rain_is_net_flux or convection_config.rain_to_surface)
         if (_rain_to_sfc and conv_out.dq_r_conv_dt is not None
                 and (state.tracers is None or "q_v" not in state.tracers
                      or "q_c" not in state.tracers)):
             raise ValueError(
-                f"convection scheme '{scheme_name}' routes its net rain flux "
+                f"convection scheme '{scheme_name}' routes its rain "
                 "(dq_r_conv_dt) to the surface and books vapour and detrained "
                 "condensate into q_v and q_c; the spectral state must carry "
                 "both tracers, got "
@@ -2061,10 +2131,31 @@ def _make_spectral_pe_convection(
             phis_hat=state.phis_hat.replace(data=jnp.zeros_like(state.phis_hat.data)),
             tracers=tracers_tend,
         )
-        return tendencies, conv_prog_out
+        if not return_sfc_precip:
+            return tendencies, conv_prog_out
+        # Surface precip [kg/m^2/s, +down] (#2277): the rain routed out of the
+        # column above, by the hydrostatic bridge's arithmetic, so the column
+        # water removed equals this flux.  Rain booked into q_r / q_c has not
+        # reached the surface (the microphysics records it): a known zero.
+        # Frozen part: the scheme's surface snow, None (unknown) when a
+        # routed scheme books none.
+        if _rain_to_sfc and conv_out.dq_r_conv_dt is not None:
+            _p = _convective_surface_precip(
+                conv_out.dq_r_conv_dt.reshape(ncol, nlev), p_half_col,
+                _tr.rain_is_net_flux)
+            _pf = _convective_surface_snow(conv_out, _p)
+        else:
+            _p = jnp.zeros((ncol,), dtype=p_s.dtype)
+            _pf = _p
+        sfc = (_p.reshape(n_lat, n_lon).astype(p_s.dtype),
+               None if _pf is None
+               else _pf.reshape(n_lat, n_lon).astype(p_s.dtype))
+        return tendencies, conv_prog_out, sfc
 
     def reset_state():
         pass
 
     physics_fn.reset_state = reset_state
+    # #2277: accepts ``return_sfc_precip=True`` (third return: surface precip).
+    physics_fn._emits_sfc_precip = True
     return physics_fn

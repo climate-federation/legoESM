@@ -265,6 +265,7 @@ def test_pack_unpack_carry_roundtrip():
 
 def test_tiled_operator_split_matches_serial():
     import dataclasses
+    import functools
 
     mesh = _mesh()
     model, cdgrid, coord, cfg, carry0, statics, forcing = _build()
@@ -439,3 +440,42 @@ def test_build_tile_step_unified_refuses_column_sharding():
     with pytest.raises(NotImplementedError,
                        match="shard_radiation_columns"):
         build_tile_step_unified(grid, coord, cfg, KT)
+
+
+def _mock_area_step(*args, a0, **kwargs):
+    """The column mock with an extra drying proportional to the cell area the
+    lane hands in (Sundqvist's GFS area blend reads it the same way)."""
+    area = kwargs.get("cell_area")
+    assert area is not None, "lane did not pass its cell areas"
+    out, *rest = _mock_step_unified(*args, **kwargs)
+    T = args[1]
+    extra = -1e-9 * (jnp.asarray(area).reshape(T.shape[:-1]) / a0)[..., None]
+    out.dq_v_dt = out.dq_v_dt + extra
+    return (out, *rest)
+
+
+def test_each_tile_gets_its_own_cell_areas():
+    """Item 9 (user 2026-10-27): the tiled cube shares ONE tile-ncol build, so
+    each tile must hand physics its OWN cell areas.  q_v (column-local) tracks
+    the serial run only if every tile received its own slice of grid.area."""
+    import dataclasses
+    import functools
+
+    mesh = _mesh()
+    model, cdgrid, coord, cfg, carry0, statics, forcing = _build()
+    statics = dataclasses.replace(statics, step_unified=functools.partial(
+        _mock_area_step, a0=float(np.mean(np.asarray(statics.grid.area)))))
+    statics_ref = dataclasses.replace(statics, forcing=forcing,
+                                      cell_area=statics.grid.area)
+    ref = carry0
+    for _ in range(N_STEPS):
+        ref = _serial_split_step(ref, model, cdgrid, coord, cfg, statics_ref)
+    step = make_tiled_operator_split_step(
+        model, mesh, statics, fix_mass=True,
+        rad_update_steps=RAD_UPDATE_STEPS, start_day=START_DAY, kt=KT)
+    tc = shard_tiled_split_carry(carry0, mesh, N)
+    for _ in range(N_STEPS):
+        tc = step(tc, forcing)
+    got = unpack_carry_tiled(tc, N, carry0)
+    assert float(np.ptp(np.asarray(statics.grid.area))) > 0.0
+    assert float(np.max(np.abs(np.asarray(got.q_v) - np.asarray(ref.q_v)))) < 1e-9
