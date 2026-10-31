@@ -5035,7 +5035,7 @@ CITATION_MAP = {
     'packages/core/legoesm/core/_scalar_libm.c:4-38': ['#define DEFINE_UNARY(NAME)', ('}', 8), 35],
     'packages/core/legoesm/core/transcendentals.py:224-449': ['def _fast_function(name: str, dtype: np.dtype, *, binary: bool):', 'return result, tangent', 226],
     'packages/core/legoesm/core/transcendentals.py:90-214': ['def _sha256_path(path: Path) -> str:', '"gcc_version": _gcc_version(),', 125],
-    'packages/core/legoesm/core/transcendentals.py:334-343': ['def _callback_binary(name: str, left: jax.Array, right: jax.Array) -> jax.Array:', 'partial(_scalar_libm_binary, name), result, left, right,', 10],
+    'packages/core/legoesm/core/transcendentals.py:334-344': ['def _callback_binary(name: str, left: jax.Array, right: jax.Array) -> jax.Array:', 'vmap_method="broadcast_all",', 11],
     'packages/core/legoesm/core/transcendentals.py:396-505': ['def exp(value) -> jax.Array:', 'return _libm_cos(array)', 110],
     'packages/core/legoesm/core/transcendentals.py:476-481': ['def pow(left, right) -> jax.Array:', 'return _libm_pow(left_array, right_array)', 6],
     'scripts/validate/ocean_fidelity/testcases/nemo_testcase_l2_gyre_round16_discriminator.py:353-407': ['class _PoisonCompiledFunction:', 'and any(changed[name] for name in ("qsr", "qns", "emp", "utau", "vtau"))', 55],
