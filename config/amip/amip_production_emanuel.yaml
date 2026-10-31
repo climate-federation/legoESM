@@ -1,0 +1,31 @@
+# Production deck with Emanuel convection instead of Zhang-McFarlane (#2266).
+#
+# Everything is amip_production.yaml except the convection scheme.  This deck
+# exists for the Emanuel convective-momentum-transport A/B: the two arms run
+# THIS deck and differ only in the momentum switch (off here; the "on" arm adds
+# --emanuel-enable-cmt on the command line).  It is not a production candidate.
+#
+# Consequences of the swap that come with the scheme (no extra knobs):
+#   * the zm_* tunables and detrainment widths are unset below because the
+#     driver refuses them unless convection is zhang_mcfarlane;
+#   * CAM6's deep-convective cloud fraction (clubb_intr deepcu) reads ZM's
+#     updraft mass flux; Emanuel publishes none, so deepcu is exactly 0 here;
+#   * the ZM detrainment booking inside the CLUBB macmic sub-step is ZM-only;
+#     Emanuel detrains no cloud condensate (its convective-condensate
+#     tendency is zero: condensate leaves as rain or re-evaporates);
+#   * zm_land_fraction and zm_transport_cloud_tracers stay as inherited and
+#     are inert (read only by ZM);
+#   * the Emanuel parameters are the EmanuelConfig defaults (the CONVECT v4.3c
+#     oracle values), smoothing at its differentiable defaults (RULE 5).
+include: amip_production.yaml
+convection: emanuel
+emanuel_enable_cmt: false   # = EmanuelConfig.enable_cmt default; written so
+                            # the A/B's one differing row is visible
+zm_c0_lnd: null
+zm_c0_ocn: null
+zm_ke: null
+zm_dmpdz: null
+zm_tau: null
+zm_capelmt: null
+zm_detrain_phase_width_K: null
+zm_detrain_number_width_kgkg_s: null
