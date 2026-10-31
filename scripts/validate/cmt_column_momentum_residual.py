@@ -90,6 +90,8 @@ def gate(fu, fv, dp, expect, edge_du=None, tol=TOL):
         return n_nonzero == 0, {"edge_du_nonzero": n_nonzero}
     if fu is None or fv is None:
         return False, {"error": "on arm: scheme returned no momentum tendency"}
+    if not (np.isfinite(fu).all() and np.isfinite(fv).all()):
+        return False, {"error": "on arm: non-finite momentum tendency"}
     rep, ok = {}, True
     for name, f in (("FU", fu), ("FV", fv)):
         s = summarize(f, dp, tol)

@@ -77,6 +77,8 @@ def test_gate_on_requires_a_nonzero_tendency():
     bad = f.copy(); bad[0] += 1e-3
     assert not m.gate(bad, f, dp, "on")[0]
     assert not m.gate(None, None, dp, "on")[0]
+    nan = np.full_like(f, np.nan)
+    assert not m.gate(f, nan, dp, "on")[0]                    # NaN component cannot hide
 
 
 def test_gate_off_requires_exact_zero_edges_and_no_scheme_tendency():

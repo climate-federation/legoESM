@@ -115,6 +115,8 @@ def check_arm_window(run, start, ndays):
     if last != ndays:
         raise SystemExit(f"FATAL: {run} newest checkpoint is day {last}, expected {ndays}")
     f = _one(run, "ua")
+    if Path(f).stat().st_mtime < Path(ck[-1]).stat().st_mtime:
+        raise SystemExit(f"FATAL: {f} is older than {ck[-1]}: a stale record, not this run's window")
     t0 = xr.open_dataset(f).time_bnds.values[0][0]
     if (t0.year, t0.month, t0.day) != tuple(int(x) for x in start.split("-")[:2]) + (1,):
         raise SystemExit(f"FATAL: {f} starts {t0}, not in the month of {start}")
@@ -179,6 +181,9 @@ def score(off_dir, on_dir, era5_nc):
         raise SystemExit("FATAL: ERA5 reference is not on the CMOR grid")
     if not np.isfinite(e).all():
         raise SystemExit("FATAL: non-finite ERA5 reference")
+    missing = sorted(set(plev) - set(eplev))
+    if missing:
+        raise SystemExit(f"FATAL: ERA5 reference lacks model levels {missing}")
     out = {"rmse": {}, "rmse_2d": {}, "band_mean_u": {}, "pr_tropics_mm_day": {}}
     zm = {k: u[k][0].mean(-1) for k in u}
     zm["ERA5"] = np.stack([e[list(eplev).index(p)].mean(-1) for p in plev])
