@@ -872,3 +872,28 @@ class TestNemoBn2OnMPAS:
         with _pytest.raises(NotImplementedError, match="adiabatic"):
             make_tke_profiles_mpas(VerticalMixingConfig(
                 scheme="tke", tke=TKEConfig(n2_mode="adiabatic")))
+
+
+def test_tke_sqrt_s_eos_gradient_finite_at_zero_salinity_land(mesh, z_coord,
+                                                               tke_cfg):
+    """A sqrt(S) EOS (veros_gsw) has an infinite dRho/dS at S = 0; the MPAS
+    TKE bridge builds its density on floored salinity (as the MPAS KPP bridge
+    does, #2283), so d(sum K)/dS stays finite with zero-salinity land cells."""
+    from legoesm.ocean.eos import make_eos_fn
+
+    st = rest_state_mpas_ocean(
+        mesh, z_coord, T_water_init_C=20.0, T_deep=2.0, S_uniform=35.0,
+        H_max=4000.0, land_lat_threshold=60.0)
+    land = st.land_mask.data < 0.5
+    assert bool(jnp.any(land)), "fixture must contain land"
+    fn = make_tke_profiles_mpas(tke_cfg, eos_fn=make_eos_fn(eos="veros_gsw"))
+    forcing = _wind_forcing(st)
+
+    def loss(s):
+        out = fn(st._replace(S=st.S.replace(data=s)), mesh, z_coord, forcing)
+        return sum(jnp.sum(x) for x in out)
+
+    S0 = jnp.where(land[:, None], 0.0, st.S.data)
+    grad = jax.grad(loss)(S0)
+    assert bool(jnp.isfinite(loss(S0)))
+    assert bool(jnp.all(jnp.isfinite(grad)))
