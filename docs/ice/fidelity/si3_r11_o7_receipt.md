@@ -4,7 +4,7 @@
 
 1. My first transcription let XLA turn `zta/rtt0` into a multiply by the
    reciprocal: 93 one-ULP rows against the independent oracle. The divisor
-   is now materialized (`packages/core/legoesm/thermo.py:631`).
+   is now materialized (`packages/core/legoesm/thermo.py:639`).
 2. My first Fortran `SUM` seed `0 + x` was folded away by XLA, so an
    open-ocean `emp_ice` kept a `-0`. The seed is now materialized
    (`packages/ice/legoesm/ice/si3_surface.py:256`).
@@ -39,7 +39,7 @@ local in `blk_ice_1` is a non-constant arm:
 `:1107`: `CALL turb_ice_lu12( rn_zqt, rn_zu, zsipt, ptair, ztmp, pqair, wndm_ice, fr_i, &`,
 `:1112`: `CALL turb_ice_lg15( rn_zqt, rn_zu, zsipt, ptair, ztmp, pqair, wndm_ice, fr_i, &`.
 (`blk_ice_2`'s `zsipt` is its own scalar local, `:1225`.) Transcribed
-(`packages/core/legoesm/core/bulk_flux.py:2071`). The test moves
+(`packages/core/legoesm/core/bulk_flux.py:2148`). The test moves
 `tm_su` alone and requires `zsipt` to change and every other output to stay
 bit-identical (`tests/ice/unit/test_si3_surface.py:478`); a planted consumer
 (`theta_zu_i = zsipt`) is caught (`tests/ice/unit/test_si3_surface.py:483`).
@@ -63,9 +63,9 @@ The reader is the round-314 audit's, moved to one home
 
 | family | single implementation | C1D caller | O7 caller |
 |---|---|---|---|
-| `e_sat`/`q_sat`/`dq_sat`, `theta_exner` | `packages/core/legoesm/thermo.py:656` | yes | yes |
-| `blk_ice_1` constant arm | `packages/core/legoesm/core/bulk_flux.py:2061` | yes | yes |
-| `blk_ice_2` turbulent terms | `packages/core/legoesm/core/bulk_flux.py:2093` | yes | yes |
+| `e_sat`/`q_sat`/`dq_sat`, `theta_exner` | `packages/core/legoesm/thermo.py:664` | yes | yes |
+| `blk_ice_1` constant arm | `packages/core/legoesm/core/bulk_flux.py:2138` | yes | yes |
+| `blk_ice_2` turbulent terms | `packages/core/legoesm/core/bulk_flux.py:2170` | yes | yes |
 | `ice_alb`, pond and no-pond | `packages/ice/legoesm/ice/si3_surface.py:300` | yes | yes |
 | `blk_ice_2` | `packages/ice/legoesm/ice/si3_surface.py:384` | yes | yes |
 | `ice_flx_other`, pointwise neighbours | `packages/ice/legoesm/ice/si3_surface.py:467` | yes | yes |

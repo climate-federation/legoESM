@@ -27,7 +27,7 @@ The current compact-grid association folds U velocity and V velocity/depth/
 inverse depth, but only cyclically closes U depth/inverse depth and returns SSH
 unchanged at `barotropic_latlon_cgrid.py:689-744`. The current RK3 program uses
 the stage-corrected velocities and tracers directly at
-`ocean_model_latlon_cgrid.py:8446-8478,8524-8543,8655-8660`. These are
+`ocean_model_latlon_cgrid.py:8465-8497,8543-8562,8674-8679`. These are
 inspection findings, not trajectory attribution.
 
 At every stage of kt=1..7 and stages 1-2 of kt=8, the committed audit will

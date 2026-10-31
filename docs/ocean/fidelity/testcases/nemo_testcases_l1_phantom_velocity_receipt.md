@@ -77,11 +77,11 @@ zFu_t(ji+1,jj) = (  zFu(ji,jj) + zFu(ji+1,jj)  ) * ( zui - gamma1 * zl_u )      
 ```
 
 **(i) the operator that writes a nonzero `u` into a masked cell**:
-`ocean_model_latlon_cgrid.py:5094-5107` (`_replace_stage_mean`, the ONE stage
+`ocean_model_latlon_cgrid.py:5113-5126` (`_replace_stage_mean`, the ONE stage
 ladder, called at `:5103,:5120,:5139`) applied `u_mask_3d =
 state.u_mask.data[..., jnp.newaxis]` (`:4066`) -- the 2-D face mask broadcast
 over levels -- to `u_in + (target_u - mean_u)[..., jnp.newaxis]`; and
-`:5155-5162` (`_transport_stage`) did the same for the stage velocities the
+`:5174-5181` (`_transport_stage`) did the same for the stage velocities the
 tracer transports consume.  MEASURED fingerprint: the below-seabed column is
 EXACTLY constant -- 1 unique value over all 75 dry levels, `ptp = 0.0` -- i.e.
 a depth-mean broadcast, not an operator residue.  Both halves of

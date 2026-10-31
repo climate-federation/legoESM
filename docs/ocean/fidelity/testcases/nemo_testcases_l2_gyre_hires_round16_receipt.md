@@ -214,8 +214,8 @@ external row, as its explicit row equations show at
 
 In legoESM, the vertical solve explicitly re-adds the subtracted barotropic
 mean to both the production and no-stress results before returning at
-`ocean_model_latlon_cgrid.py:13050-13058`.  Its budget trace then forms
+`ocean_model_latlon_cgrid.py:13069-13077`.  Its budget trace then forms
 vertical, stress, external, and independent total rows from those returned
-boundaries at `ocean_model_latlon_cgrid.py:10425-10442`.  This executed-source
+boundaries at `ocean_model_latlon_cgrid.py:10444-10461`.  This executed-source
 comparison is why only the vertical-plus-external pair is semantically
 matched; it does not change the preregistered raw table.

@@ -21,7 +21,7 @@ x64, production JIT, libm policy. The machine is shared and loaded (load
   rewired probe): reverse = forward to 2.9e-15, FD to 5.4e-7. RETRACTED:
   "a rung-10 trainer must freeze it out".
 - Drag still cannot be trained on rung 10 (TKE cards): five more `float()`
-  casts at `ocean_model_latlon_cgrid.py:11589-11593` (confirmed by review;
+  casts at `ocean_model_latlon_cgrid.py:11608-11612` (confirmed by review;
   gradient-only fix goes to the next round).
 
 ## Round 316's detached results (item 1)

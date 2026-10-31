@@ -18,7 +18,7 @@ bottom limits, and associates them laterally at
 stage update consumes those arrays at
 `ORCA2_OMIP_L4_R280STAGE1/BLD/ppsrc/nemo/stprk3_stg.f90:477-480`.
 legoESM's current production path instead reconstructs its stage masks from
-compact T-cell activity at `ocean_model_latlon_cgrid.py:6048-6052`.
+compact T-cell activity at `ocean_model_latlon_cgrid.py:6067-6071`.
 
 The private candidate routed only this WS-RK3 consumer through the existing
 resolved NEMO operand source.  It added no builder, default, configuration

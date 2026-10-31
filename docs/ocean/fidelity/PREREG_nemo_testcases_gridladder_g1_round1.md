@@ -136,7 +136,7 @@ namelist parsers in packages/.
   images `nemo_testcase_recipe.py:1290`; depth ladder
   `nemo_testcase_recipe.py:1271`; fold-owned F mask `vertical.py:281`; raw-mesh
   operand carrier `vertical.py:883` and its resolved builder `vertical.py:673`
-  (D114); required alpha `ocean_model_latlon_cgrid.py:4415` (D115); the
+  (D114); required alpha `ocean_model_latlon_cgrid.py:4434` (D115); the
   advection-OFF arms; the RK3 identity "orca2_vector_een_c2" with the OMT-0
   five-OFF selections.
 - New: `nemo_testcase_recipe.py:4116` (builder), `:3562` deck reader, `:3611`

@@ -82,12 +82,12 @@ at each executing call site:
 
 ## 2. One production implementation and production wiring
 
-`packages/ice/legoesm/ice/bitz_lipscomb.py:1811-2055` is the only O14
+`packages/ice/legoesm/ice/bitz_lipscomb.py:1824-2068` is the only O14
 implementation. It applies NEMO statement barriers, compiled operand roles,
 category interval selection, residual/bottom remapping, and all ten changed
 outputs. The former inline open-water arithmetic was deleted.
 
-`packages/ice/legoesm/ice/bitz_lipscomb.py:2204-2249` wires the same function
+`packages/ice/legoesm/ice/bitz_lipscomb.py:2228-2273` wires the same function
 into `si3_column_step_arrays`, with `rn_hinew`, `ln_frazil`, and `rn_sinew`
 read from the resolved namelist dictionary. The one-category C1D adapter
 constructs extensive inputs, calls the production kernel once, and extracts

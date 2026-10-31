@@ -185,8 +185,8 @@ Rung 0, one step (OMT-4 runs the same path), in reverse-pass order:
 | # | statement | what is zero | lanes | class | reaches |
 |---|---|---|---|---|---|
 | 1 | `implicit_solver.py:377-396` | pivot of the vertical momentum solve, one row of V faces | 180 | residual | land- and V-mask cotangents only |
-| 2 | `ocean_model_latlon_cgrid.py:13455` | top V-face thickness in the surface-stress division, same row | 180 | generated + residual | the same two masks only |
-| 3 | `:2568-2570` | `q_after` in the stage-1/2 tracer combine (masked by `:2576`) | 368,648 | residual | every leaf |
+| 2 | `ocean_model_latlon_cgrid.py:13474` | top V-face thickness in the surface-stress division, same row | 180 | generated + residual | the same two masks only |
+| 3 | `:2582-2584` | `q_after` in the stage-1/2 tracer combine (masked by `:2590`) | 368,648 | residual | every leaf |
 | 4 | `:1946` | `e3t_kmm` in the vertical tracer flux divergence | 368,648 | generated + residual | every leaf |
 | 5 | `:1933` | `e3t_kmm` in the horizontal tracer flux divergence | 368,648 | generated + residual | every leaf |
 
@@ -194,7 +194,7 @@ Rung 0, one step (OMT-4 runs the same path), in reverse-pass order:
 and 2. "Reaches" for 1-2 is measured on OMT-1, which has them and nothing
 else: its T and SSH gradients stay finite and only the two mask cotangents
 (180 entries each) go NaN.
-- So guarding `:1933` alone leaves `:1946` and the `:2568-2570` division —
+- So guarding `:1933` alone leaves `:1946` and the `:2582-2584` division —
   the review's still-all-NaN result. The first non-finite value in reverse
   order is source 1 (the vertical momentum solve, the step's last forward
   operation); the first that reaches T is source 3.
@@ -235,11 +235,11 @@ per step (6-8 s against ~2 s), linear in N; compile excluded.
 Each must keep every forward value bit-identical, re-proven by C1 on all six
 cards; the tracer helpers are in the WS-RK3 path GYRE also runs, so the GYRE
 (Decision 43+45) and D122 seven-pair gates apply too.
-1. Sources 3-5 (`ocean_model_latlon_cgrid.py:1936`, `:1946`, `:2568-2570`):
+1. Sources 3-5 (`ocean_model_latlon_cgrid.py:1936`, `:1946`, `:2582-2584`):
    divide by a denominator equal to 1 on dry lanes and the live value on wet
    lanes (same operands on wet lanes; dry lanes stay masked). Measured: zeroing
    exactly these makes rung 0 finite and equal to forward mode. Pick: yes.
-2. Sources 1-2 (`implicit_solver.py:377-396`, `ocean_model_latlon_cgrid.py:13455`):
+2. Sources 1-2 (`implicit_solver.py:377-396`, `ocean_model_latlon_cgrid.py:13474`):
    same guard on the zero pivot / zero face thickness. Reach only the mask
    cotangents. Pick: yes, after 1.
 3. Sources 6-9 (rung 10): a square root whose derivative is zero where its

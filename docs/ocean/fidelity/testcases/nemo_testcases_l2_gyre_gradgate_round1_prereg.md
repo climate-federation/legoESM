@@ -21,7 +21,7 @@ NEMO AB3/AM4 filtering, NEMO-literal TKE, and Redi diffusivity 1000 m2/s. State
 and vertical geometry both print as float64 after selecting the fp64/libm
 precision policy. The production call is
 `LatLonCGridOceanModel._step_jitted` at
-`packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:13209-13361`.
+`packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:13228-13380`.
 Forcing is the existing GYRE campaign forcing builder used by
 `nemo_testcase_l2_gyre_year_fromrest.py`; it is not reimplemented here.
 

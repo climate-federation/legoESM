@@ -25,7 +25,7 @@ CPU, fp64, x64, production JIT, libm policy.
   floor cells equal); the eager form of the same function would not.
 
 ## 1. The fix (`7f4c7f360050`)
-`ocean_model_latlon_cgrid.py:11751-11755`: `cd0`, `cd_max`, `z0`, `ke0`,
+`ocean_model_latlon_cgrid.py:11770-11774`: `cd0`, `cd_max`, `z0`, `ke0`,
 `uc0` pass the config values straight through (round 316 did the same in
 the momentum drag). The config fields are Python floats, so `float(x)` was
 the identity on every card.
@@ -50,7 +50,7 @@ Tests (jit, x64):
 - `test_orca2_round319_traced_scalars.py::test_cd0_traces_through_rung10_step_under_jit_grad`:
   `make_jaxpr(jit(grad))` of a rung-10 one-step loss w.r.t. traced cd0
   (226,830 jaxpr lines). With the casts restored it fails with
-  ConcretizationTypeError raised at `ocean_model_latlon_cgrid.py:11751`
+  ConcretizationTypeError raised at `ocean_model_latlon_cgrid.py:11770`
   (`jobs/plant_casts_back.log`).
 
 Not in scope, named only: the C-D grid and MPAS drag paths still cast the

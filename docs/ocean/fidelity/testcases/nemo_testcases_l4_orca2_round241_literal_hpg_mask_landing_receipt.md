@@ -23,7 +23,7 @@ legoESM instead multiplied the completed V tendency by its generic compact
 mask at `ocean_pe_latlon_cgrid.py:5983-5996`. The landed statement preserves
 the literal HPG contribution where NEMO's resolved raw V mask is wet and the
 compact mask is dry. The raw mask comes from the production D114 resolved
-mesh route at `ocean_model_latlon_cgrid.py:6007-6087`. The private hook is a
+mesh route at `ocean_model_latlon_cgrid.py:6026-6106`. The private hook is a
 test-only legacy/force control; no public configuration choice was added.
 
 ## Frozen predictions

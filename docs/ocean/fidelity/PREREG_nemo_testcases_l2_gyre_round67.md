@@ -16,12 +16,12 @@ constructs the content right-hand side as
 `e3t(Kbb)*T(Kbb) + p2dt*e3t(Kmm)*Krhs` at `:547-565`.
 
 legoESM constructs the stage-3 surface/solar source in concentration-rate form
-at `ocean_model_latlon_cgrid.py:6321-6412`. It computes the GM/Redi rate from
-Kbb operands at `:7048-7127,7340-7460`, then adds `dt*dT_gm`/`dt*dS_gm` to
-the intermediate concentration at `:7474-7480`. The WS-RK3 call later restarts
+at `ocean_model_latlon_cgrid.py:6340-6431`. It computes the GM/Redi rate from
+Kbb operands at `:7067-7146,7359-7479`, then adds `dt*dT_gm`/`dt*dS_gm` to
+the intermediate concentration at `:7493-7499`. The WS-RK3 call later restarts
 from the step-entry tracer and consumes only `_stage_source_rates` at
-`:7639-7677`; it constructs content at `:1905-1917`, and the implicit solve
-consumes that separate content at `:8038-8150,10417-10438`. Therefore the
+`:7658-7696`; it constructs content at `:1905-1917`, and the implicit solve
+consumes that separate content at `:8057-8169,10436-10457`. Therefore the
 GM/Redi increment is not applied after the solve: it is applied in
 concentration form before the WS call and is then replaced. Moving that
 existing increment into the stage-3 pre-solve content is NEMO's operator order.

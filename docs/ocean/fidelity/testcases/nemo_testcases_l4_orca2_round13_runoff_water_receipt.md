@@ -85,8 +85,8 @@ REUSED rather than rebuilt:
 | for | what already existed |
 |---|---|
 | A1 and A2 | the `runoff_mass_flux` branch of `nemo_transport_wzv_divergence_level` (`ocean_pe_latlon_cgrid.py:1577-1585`), already cited to `sbcrnf.F90:253-260` |
-| its production wiring | `ocean_model_latlon_cgrid.py:6330-6331`, which already passes `freshwater.runoff` into the stage transport |
-| A3 | `ocean_model_latlon_cgrid.py:5725-5727`, whose net is `precip - evap + runoff + ice_fw` — algebraically `-(emp - rnf)` on this card |
+| its production wiring | `ocean_model_latlon_cgrid.py:6349-6350`, which already passes `freshwater.runoff` into the stage transport |
+| A3 | `ocean_model_latlon_cgrid.py:5744-5746`, whose net is `precip - evap + runoff + ice_fw` — algebraically `-(emp - rnf)` on this card |
 | a bit-exact gate for A1/A2 against NEMO's own `ww` and `pFw` | `nemo_testcase_l4_orca2_wzv_gate.py` |
 | the production-binding stage-source harness and its water arm | `nemo_testcase_l4_orca2_round12_runoff_gate.py` |
 
@@ -391,7 +391,7 @@ tests fail; and that a sample of the twenty-four citation shifts is a uniform
 | stage-1 owner probe | exit 0 — one quantity, depth-uniform |
 | GYRE identity, base vs tip | section 7 |
 | receipt citation gate | **PASS**, 274 citations, 0 failures, 0 unmapped, 0 map-audit failures |
-| citation gate plant on a REAL key the receipt RENDERS | **FIRES** — exit 1, status FAIL, `ocean_model_latlon_cgrid.py:6924`, `SYMBOL-NOT-AT-LINE`, "that symbol identifies line 6924", checked against line 6926 |
+| citation gate plant on a REAL key the receipt RENDERS | **FIRES** — exit 1, status FAIL, `ocean_model_latlon_cgrid.py:6943`, `SYMBOL-NOT-AT-LINE`, "that symbol identifies line 6924", checked against line 6926 |
 
 **The citation map now covers this round's compiled statements.**  Round 12
 recorded that a citation planted only in the map does not fire, and the

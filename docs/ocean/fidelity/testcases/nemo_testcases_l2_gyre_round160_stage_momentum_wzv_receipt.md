@@ -63,7 +63,7 @@ legoESM's side of the change is one function and two call sites:
 `ocean_model_latlon_cgrid.py:1681-1692` is the predicate that decides which
 cards are in this program at all,
 `ocean_model_latlon_cgrid.py:1816-1821` is the second solve itself, and
-`ocean_model_latlon_cgrid.py:6970-6976` is the helper the two momentum
+`ocean_model_latlon_cgrid.py:6989-6995` is the helper the two momentum
 consumers read it through.  Stage 1 gets no momentum solve.
 
 **The adaptive-implicit pair is refused, not run once.**  Where

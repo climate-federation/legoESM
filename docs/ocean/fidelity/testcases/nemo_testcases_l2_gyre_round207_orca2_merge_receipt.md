@@ -128,12 +128,12 @@ The reviewer flagged three stale citations in
 whether the merge caused them. **It did not: they were already wrong on the
 GYRE parent `a2382abce`.** Reading the parent's own tree at the cited lines:
 `nemo_testcase_recipe.py:236-238` is an EOS comment and `eos="nemo_seos",`,
-not a card selector; `ocean_model_latlon_cgrid.py:9060-9133` is a
+not a card selector; `ocean_model_latlon_cgrid.py:9079-9152` is a
 `return_fct_activity=(...)` tracer-advection block, not the live-face metric.
 
 The symbols the prose names live, on the merged tree, at
 `nemo_testcase_recipe.py:437` (`tke_shear_production="nemo_face_native_now2"`)
-and `ocean_model_latlon_cgrid.py:10844` (`if shear_disc ==
+and `ocean_model_latlon_cgrid.py:10863` (`if shear_disc ==
 "nemo_face_native_now2":`), with the arm's validation at `:10805-10809`.
 
 I am NOT rewriting the numbers: the prose's intent for each span belongs to

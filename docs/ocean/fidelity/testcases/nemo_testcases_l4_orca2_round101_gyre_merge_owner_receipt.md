@@ -44,7 +44,7 @@ order reversal have the same first difference:
 
 The smallest dependency-closed restoring pair is the stage-one tracer
 thickness ratio import and evaluation at
-`ocean_model_latlon_cgrid.py:7315-7325`. It replaces a ratio formed after SSH
+`ocean_model_latlon_cgrid.py:7334-7344`. It replaces a ratio formed after SSH
 interpolation with `nemo_r3t_rk3_stage1_stretch`. Reversing the complete
 introducing commit `a0b2f7a5da06f416e530361355df8603b7826a3d`, including its
 helper in `eos.py:1004-1035`, restores every saved bit through day 17. Reversing
@@ -126,7 +126,7 @@ five probe tests (bit flip, signed zero, frozen file census, reverse commit,
 and 49-edit-block controls) and all 17 citation-gate tests. The default
 cumulative receipt and this receipt both pass with zero failures and zero
 unmapped citations. Shifting
-`ocean_model_latlon_cgrid.py:7315-7325` by two lines makes the citation gate
+`ocean_model_latlon_cgrid.py:7334-7344` by two lines makes the citation gate
 fail, so the receipt control fires.
 
 The one required `tests/ocean/fidelity -n 12` battery reached 99%, emitted 33

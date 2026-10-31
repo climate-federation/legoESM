@@ -12,10 +12,10 @@ preregistered measurement, only round 7's numbers as the bar.
 
 | finding | disposition |
 |---|---|
-| HIGH: `_step_impl` is scoped to the config's y-wrap, but the outer AB2 / leapfrog / NEMO-MLF integrators build partial-cell face masks outside that scope (`ocean_model_latlon_cgrid.py:13781, 14444, 14931, 15224`), and `compute_face_masks_3d` reads the context flag (`latlon_cgrid_operators.py:3994`); a periodic partial-cell AB2 run under the default caller context walls its seam | **FIXED.** The four integrators (`_ab2_step`, `_leapfrog_step`, `_nemo_mlf_step`, `_unsplit_ab2_step`) join the wrapped list at `ocean_model_latlon_cgrid.py:15975-15978`, through the same `_honour_meridional_periodicity` wrapper as `_step_impl` (True and False). No new state, no new helper. Sites wrapped: 4 integrators. |
+| HIGH: `_step_impl` is scoped to the config's y-wrap, but the outer AB2 / leapfrog / NEMO-MLF integrators build partial-cell face masks outside that scope (`ocean_model_latlon_cgrid.py:13781, 14444, 14931, 15224`), and `compute_face_masks_3d` reads the context flag (`latlon_cgrid_operators.py:3994`); a periodic partial-cell AB2 run under the default caller context walls its seam | **FIXED.** The four integrators (`_ab2_step`, `_leapfrog_step`, `_nemo_mlf_step`, `_unsplit_ab2_step`) join the wrapped list at `ocean_model_latlon_cgrid.py:16004-16007`, through the same `_honour_meridional_periodicity` wrapper as `_step_impl` (True and False). No new state, no new helper. Sites wrapped: 4 integrators. |
 
 Why the integrators and not the four call sites: the sites sit inside
-`_ab2_step` etc., which `_step_jitted` (`:13244`) calls BEFORE they call
+`_ab2_step` etc., which `_step_jitted` (`:13263`) calls BEFORE they call
 `_step_impl`; the helpers they reach (`_apply_implicit_vertical_mixing`,
 `_apply_tke_advection`, `_eke_3d_step`, `_tke_bottom_dirichlet`,
 `_tke_step_entry_p_sh2`) are covered by the same wrap.
@@ -24,11 +24,11 @@ Why the integrators and not the four call sites: the sites sit inside
 
 | site | enclosing function | integrator path / scope |
 |---|---|---|
-| `ocean_model_latlon_cgrid.py:13781` | `_ab2_step` | AB2; NEWLY wrapped |
-| `ocean_model_latlon_cgrid.py:14444` | `_leapfrog_step` | leapfrog; NEWLY wrapped |
-| `ocean_model_latlon_cgrid.py:14931` | `_nemo_mlf_step` | NEMO MLF; NEWLY wrapped |
-| `ocean_model_latlon_cgrid.py:15224` | `_unsplit_ab2_step` | unsplit AB2; NEWLY wrapped |
-| `ocean_model_latlon_cgrid.py:1750` | `_nemo_dynzdf_drag_face_thickness` | called from `_apply_implicit_vertical_mixing` (`:12617`), reached from `_step_impl` and from the four integrators: scoped |
+| `ocean_model_latlon_cgrid.py:13800` | `_ab2_step` | AB2; NEWLY wrapped |
+| `ocean_model_latlon_cgrid.py:14473` | `_leapfrog_step` | leapfrog; NEWLY wrapped |
+| `ocean_model_latlon_cgrid.py:14960` | `_nemo_mlf_step` | NEMO MLF; NEWLY wrapped |
+| `ocean_model_latlon_cgrid.py:15253` | `_unsplit_ab2_step` | unsplit AB2; NEWLY wrapped |
+| `ocean_model_latlon_cgrid.py:1750` | `_nemo_dynzdf_drag_face_thickness` | called from `_apply_implicit_vertical_mixing` (`:12636`), reached from `_step_impl` and from the four integrators: scoped |
 | `ocean_model_latlon_cgrid.py:5789, 6084, 7412, 8515` | inside `_step_impl` | scoped (round 7) |
 | `ocean_model_latlon_cgrid.py:10682, 11043, 11225, 11431, 12339, 12376` | `_tke_bottom_dirichlet`, `_tke_step_entry_p_sh2`, `_apply_tke_advection`, `_eke_3d_step`, `_apply_implicit_vertical_mixing` | model-internal helpers reached only from the step paths: scoped |
 | `ocean_pe_latlon_cgrid.py:3655, 5181`; `gm_redi_latlon_cgrid.py:267, 3409, 5919`; `mle_latlon_cgrid.py:313`; `k_profiles.py:791`; `barotropic_latlon_cgrid.py:321` | tendency / mixing / seed helpers | called from the model's step and tendency paths: scoped |

@@ -32,7 +32,7 @@ measurement without changing the producer.
 The only card is the fail-closed `GYRE-zco` dispatch at
 `nemo_testcase_recipe.py:3351`. The harness builds and verifies that card at
 `nemo_testcase_l2_gyre_gradient_gate.py:158`. Every modeled step uses the
-production JIT at `ocean_model_latlon_cgrid.py:13219`; the direct step,
+production JIT at `ocean_model_latlon_cgrid.py:13238`; the direct step,
 Decision-49 per-step loop, and schedule entry points are
 `nemo_testcase_l2_gyre_gradient_gate.py:199,213,222`.
 

@@ -13277,6 +13277,131 @@ _reanchor(
     extent=388,
 )
 
+# Decision-189 follow-up and catch-up 2.  These are literal source-edit maps,
+# not live symbol searches: a later insertion still shifts a key and makes the
+# full-map audit fail.  Ranges crossing an insertion grow by the exact number
+# of inserted source lines.
+def _decision189_extent(spec: str) -> int:
+    total = 0
+    for part in spec.split(','):
+        if '-' in part:
+            first, last = map(int, part.split('-', 1))
+            total += last - first + 1
+        else:
+            total += 1
+    return total
+
+
+def _decision189_value(value, new_spec: str):
+    extent = _decision189_extent(new_spec)
+    if isinstance(value, dict):
+        value = dict(value)
+        if 'lines' in value:
+            value['lines'] = new_spec
+        anchors = value.get('anchors')
+        if anchors is not None:
+            anchors = list(anchors)
+            if anchors and isinstance(anchors[-1], int):
+                anchors[-1] = extent
+            else:
+                anchors.append(extent)
+            value['anchors'] = anchors
+        return value
+    if isinstance(value, tuple):
+        return [value, extent]
+    anchors = [value] if isinstance(value, str) else list(value)
+    if anchors and isinstance(anchors[-1], int):
+        anchors[-1] = extent
+    else:
+        anchors.append(extent)
+    return anchors
+
+
+def _decision189_bitz_line(line: int) -> int:
+    if line < 987:
+        return line
+    if line < 2081:
+        return line + 13
+    if line < 2130:
+        return line + 20
+    return line + 24
+
+
+def _decision189_ocean_line(line: int) -> int:
+    if line < 2151:
+        return line
+    if line < 2727:
+        return line + 14
+    if line < 3980:
+        return line + 16
+    if line < 14301:
+        return line + 19
+    if line < 14384:
+        return line + 26
+    return line + 29
+
+
+_DECISION189_TRANSLATIONS = (
+    ('packages/ice/legoesm/ice/bitz_lipscomb.py', _decision189_bitz_line),
+    ('ocean_model_latlon_cgrid.py', _decision189_ocean_line),
+    ('packages/core/legoesm/core/bulk_flux.py',
+     lambda line: line + 77 if line >= 2061 else line),
+    ('packages/core/legoesm/thermo.py',
+     lambda line: line + 8 if line >= 48 else line),
+)
+for _prefix, _mapper in _DECISION189_TRANSLATIONS:
+    _translated = {}
+    for _old in [key for key in CITATION_MAP if key.startswith(_prefix + ':')]:
+        _old_spec = _old.rsplit(':', 1)[1]
+        _new_spec = _o14_spec(_old_spec, _mapper)
+        if _new_spec == _old_spec:
+            continue
+        _new = f'{_prefix}:{_new_spec}'
+        _value = _decision189_value(CITATION_MAP.pop(_old), _new_spec)
+        # Multiple historical citations can collapse to the same current
+        # statement.  The gate already represents such a citation string once;
+        # retain the first independently anchored value, as the earlier
+        # catch-up translation tables do.
+        _translated.setdefault(_new, _value)
+    CITATION_MAP.update(_translated)
+
+# The certified CEN2 expressions were split so main's active-cell mask and the
+# lane's raw inactive-storage path can coexist.  Pin the exact lane-equivalent
+# statements rather than pretending the deleted one-line return still exists.
+_reanchor(
+    'ocean_model_latlon_cgrid.py:2135',
+    'ocean_model_latlon_cgrid.py:2140',
+    anchors=['rhs = sr(-sr(horizontal_scaled / e3t_div))', 1],
+)
+_reanchor(
+    'ocean_model_latlon_cgrid.py:2148',
+    'ocean_model_latlon_cgrid.py:2161',
+    anchors=['return combined', 1],
+)
+_reanchor(
+    'packages/ice/legoesm/ice/bitz_lipscomb.py:1301-1324',
+    'packages/ice/legoesm/ice/bitz_lipscomb.py:1301-1320',
+    anchors=['def si3_ice_thd_dh(*, fluxes: SI3DHFluxes, rDt_ice, rn_snwblow, rn_sinew,',
+             (')', 587), 20],
+)
+_reanchor(
+    'packages/ice/legoesm/ice/bitz_lipscomb.py:1718-1795',
+    'packages/ice/legoesm/ice/bitz_lipscomb.py:1718-1783',
+    anchors=['def si3_ice_thd_sal(*, h_i, t_su, t_i, sz_i, t_bo, sss, a_i, dh_i_sum,',
+             (')', 834), 66],
+)
+_reanchor(
+    'packages/ice/legoesm/ice/bitz_lipscomb.py:1028-1282',
+    'packages/ice/legoesm/ice/bitz_lipscomb.py:1028-1277',
+    anchors=['def _si3_ice_thd_dh_core(', (')', 567), 250],
+)
+_reanchor(
+    'packages/ice/legoesm/ice/bitz_lipscomb.py:1256-1261',
+    'packages/ice/legoesm/ice/bitz_lipscomb.py:1256-1256',
+    anchors=['e_s_new = _cumulative_remap(zh_s, [sr(e * h) for e, h in zip(ze_s, zh_s)], nlay_s, sr)',
+             (')', 556), 1],
+)
+
 UNAUDITED_ROUNDS = ("1-24 -- hand-checked only; their citations are not in "
                     "CITATION_MAP and this gate does not read them")
 

@@ -60,13 +60,13 @@ Both are true; they are separable and were measured separately.
 
 **(i) legoESM lets a masked cell hold a nonzero `u`, and the operator that
 writes it is the WS-RK3 stage velocity update.**
-`ocean_model_latlon_cgrid.py:5094-5107` (`_replace_stage_mean`, the ONE stage
+`ocean_model_latlon_cgrid.py:5113-5126` (`_replace_stage_mean`, the ONE stage
 ladder, called at `:5103,:5120,:5139` for stages 1/2/3) applies
-`u_mask_3d = state.u_mask.data[..., jnp.newaxis]` (`:4066`) -- the **2-D**
+`u_mask_3d = state.u_mask.data[..., jnp.newaxis]` (`:4085`) -- the **2-D**
 face mask broadcast over every level -- to
 `u_in + (target_u - mean_u)[..., jnp.newaxis]`.  A face that is wet at ANY
 level therefore keeps the depth-mean increment at EVERY level below its own
-seabed.  The same 2-D rule is at `:5155-5162` (`_transport_stage`, the stage
+seabed.  The same 2-D rule is at `:5174-5181` (`_transport_stage`, the stage
 velocities the tracer transports consume).  MEASURED signature: the
 below-seabed column is EXACTLY constant -- 1 unique value over all 75 dry
 levels, `ptp = 0.0` -- i.e. a depth-mean broadcast, not an operator residue.
@@ -145,7 +145,7 @@ on LOCK); every dtype `float64`.
 
 NEMO has ONE mask rule, and legoESM already builds the 3-D live face mask
 once for this branch -- `_ws_u_live_mask` / `_ws_v_live_mask` at
-`ocean_model_latlon_cgrid.py:4265-4272`, from the shared
+`ocean_model_latlon_cgrid.py:4284-4291`, from the shared
 `compute_face_masks_3d`, already handed to the stage face-thickness kernel.
 
 Change: `_replace_stage_mean` (both branches) and `_transport_stage` mask

@@ -44,8 +44,8 @@ selectors and the card's `unmeasured_features` tuple are unchanged.  Evidence:
 
 The admitted `ocean.output` resolves `ln_dynvor_een = T`, `nn_e3f_typ = 0`
 and `ln_dynvor_msk = F`.  The landed legoESM statements are the two
-lateral-diffusion call sites in `ocean_model_latlon_cgrid.py:5395-5436` and
-`ocean_model_latlon_cgrid.py:5936-5999`, and the reference selection in
+lateral-diffusion call sites in `ocean_model_latlon_cgrid.py:5414-5455` and
+`ocean_model_latlon_cgrid.py:5955-6018`, and the reference selection in
 `vertical.py:390-488`.
 
 ## 2. Which cards execute the changed line

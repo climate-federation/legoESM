@@ -74,14 +74,14 @@ What already exists, and is therefore REUSED rather than rebuilt:
 | NEMO statement | legoESM owner that already exists |
 |---|---|
 | A1/A2, the runoff into the divergence | `ocean_pe_latlon_cgrid.py:1577-1585`, the `runoff_mass_flux` branch of `nemo_transport_wzv_divergence_level`, already cited to `sbcrnf.F90:253-260` |
-| the production wiring of that branch | `ocean_model_latlon_cgrid.py:6330-6331`, which already passes `freshwater.runoff` into the stage transport |
-| A3, the sea-surface forcing | `ocean_model_latlon_cgrid.py:5725-5727`, `freshwater_eta_tendency`, whose net is `precip - evap + runoff + ice_fw (+ restoring)` — algebraically `-(emp - rnf)` on this card |
+| the production wiring of that branch | `ocean_model_latlon_cgrid.py:6349-6350`, which already passes `freshwater.runoff` into the stage transport |
+| A3, the sea-surface forcing | `ocean_model_latlon_cgrid.py:5744-5746`, `freshwater_eta_tendency`, whose net is `precip - evap + runoff + ice_fw (+ restoring)` — algebraically `-(emp - rnf)` on this card |
 | an existing bit-exact gate for A1/A2 against NEMO's own `ww` and `pFw` | `scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_wzv_gate.py` |
 | the production-binding stage-source harness | `scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round12_runoff_gate.py`, whose `_stage_sources` already has a `with_runoff_mass` arm |
 
 **So statement A owes exactly ONE new model statement, and it is A4.**
 legoESM's stage-1/2 dilution operand is `net_freshwater_flux(freshwater)`,
-which INCLUDES the runoff (`ocean_model_latlon_cgrid.py:6413-6415`).  NEMO's
+which INCLUDES the runoff (`ocean_model_latlon_cgrid.py:6432-6434`).  NEMO's
 `emp` does not.  That single line is why round 12's pairing arm was
 confounded: supplying the runoff there deposits a second, near-identical copy
 of the same heat (`emp`'s dilution carries `rnf * T_top / rho0 / h`, and the

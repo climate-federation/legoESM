@@ -10,7 +10,7 @@ existing leapfrog card); (5) budget tolerance pulled from last recorded run at P
 # SPEC: `nemo_mlf` step — line-by-line transcription of `stpmlf.F90`
 
 **Status:** design only, no code changed. Read-only lane per task instructions.
-**Sources cited:** `stpmlf.F90` (NEMO, `/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/MY_SRC/stpmlf.F90`), `stpmlf_call_coverage.py` (the join/term audit tool — 106-CALL table, `scripts/validate/ocean_fidelity/dino_1226/stpmlf_call_coverage.py`), current reimplementation `_leapfrog_step` (`packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:6920-7404`), plan doc (`docs/ocean/fidelity/nemo_faithful_ocean_implementation_plan.md`).
+**Sources cited:** `stpmlf.F90` (NEMO, `/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/MY_SRC/stpmlf.F90`), `stpmlf_call_coverage.py` (the join/term audit tool — 106-CALL table, `scripts/validate/ocean_fidelity/dino_1226/stpmlf_call_coverage.py`), current reimplementation `_leapfrog_step` (`packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:6939-7423`), plan doc (`docs/ocean/fidelity/nemo_faithful_ocean_implementation_plan.md`).
 
 ## 1. The step skeleton
 
@@ -64,10 +64,10 @@ Rows dropped as N/A (WAIVED, dead branches / I/O / diagnostics per the audit): l
 
 ## 2. Tendency-interface delta
 
-Per-term status against the `return_rate`/explicit-arg pattern (`surface_tendency_placement="leapfrog_rhs"`, `_external_tracer_rate`, `_fct_tracer_before`, `_barotropic_before_state` — all in `_step_impl` signature, `ocean_model_latlon_cgrid.py:2855-2863`):
+Per-term status against the `return_rate`/explicit-arg pattern (`surface_tendency_placement="leapfrog_rhs"`, `_external_tracer_rate`, `_fct_tracer_before`, `_barotropic_before_state` — all in `_step_impl` signature, `ocean_model_latlon_cgrid.py:2871-2879`):
 
 **Already conformant** (state the term, cite the kwarg):
-- Row 8 (`ldf_slp`): consumes Nbb density/N² explicitly — `_step_impl` already reads `entry_state.T_before`/`N_before` per the `_n2_nemo_before_tracers` hook (`:4631`).
+- Row 8 (`ldf_slp`): consumes Nbb density/N² explicitly — `_step_impl` already reads `entry_state.T_before`/`N_before` per the `_n2_nemo_before_tracers` hook (`:4650`).
 - Row 17/28 (`dyn_ldf`/`tra_ldf` at Nbb): conformant via the **existing two-pass hack** (`_ab2_scope_override="advective"` + a second `_step_impl` call on `nbb`, `_leapfrog_step:7114-7123`) — this is the thing being REPLACED by the transcription, not a term needing a new kwarg. Under `nemo_mlf`, this becomes ONE pass with the dissipative RHS terms evaluated on `state_before` inline, not a second full `_step_impl` invocation.
 - Row 19 (`dyn_spg_ts`): conformant via `_barotropic_before_state` (seeds from Nbb, already built, residual #1 CLOSED).
 - Row 24 (`tra_sbc`): conformant via `_external_tracer_rate` (residual placement fix, already built, PR history `fb059a9cb`/`3207405e1`).
@@ -75,7 +75,7 @@ Per-term status against the `return_rate`/explicit-arg pattern (`surface_tendenc
 - Rows 32-34 (Asselin filters): conformant — these are POST-solve filter steps already isolated as their own code block (`_leapfrog_step:7279-7324`), not tendency injections; no interface change needed, just re-sequencing relative to row 30.
 
 **NOT yet conformant — needs a new return_rate-style signature change:**
-- Row 22 (`dyn_zdf`): `_apply_implicit_vertical_mixing` (`:5252`) currently **mutates/returns full state** (`naa`), not a `(rate, diagnostics)` pair — it IS the state-commit step by design (matches NEMO's own contract: `dyn_zdf` folds RHS into the solve, it does not return a separable rate). **No change needed** — this term's contract in NEMO is itself "solve produces state", so `return_rate=True` does not apply; the delta here is purely the **divisor time-level** (§6), not the interface shape.
+- Row 22 (`dyn_zdf`): `_apply_implicit_vertical_mixing` (`:5271`) currently **mutates/returns full state** (`naa`), not a `(rate, diagnostics)` pair — it IS the state-commit step by design (matches NEMO's own contract: `dyn_zdf` folds RHS into the solve, it does not return a separable rate). **No change needed** — this term's contract in NEMO is itself "solve produces state", so `return_rate=True` does not apply; the delta here is purely the **divisor time-level** (§6), not the interface shape.
 - Row 29 (`tra_zdf`): same reasoning — `tra_zdf` is a solve-to-state routine in NEMO too. Interface already matches the CONTRACT (state-commit), no `return_rate` change needed. Flag the **W2 divisor gap** (`implicit_vmix_dzw_slot`, needs new `nemo_kmm` slot value per plan doc `:74-76`) as the one real signature-adjacent addition: a new enum value on an EXISTING kwarg, not a new kwarg.
 - Row 30 (`mlf_baro_corr`): **currently has no lego call at all** for the kamm card (proven immaterial, §1). For `nemo_mlf` to be a literal transcription rather than "transcription except this one call", it needs an explicit **guarded pass-through kernel**: `mlf_baro_corr(naa_after_dyn_zdf, barotropic_mode_from_dyn_spg_ts) -> naa_corrected`, active only when `surface_stress_implicit=True` (currently never set True outside `explicit_substep`, which already `raise`s against it per `_validate_config`). DECISION-NEEDED: build this as a real (currently-always-no-op) kernel now for transcription completeness, or WAIVE it explicitly in the `nemo_mlf` card with a comment citing W1a, deferring the kernel until a card sets `surface_stress_implicit=True`. Recommend the latter (YAGNI — building a kernel with zero live callers fails the "no unrequested abstraction" bar) but it IS a DECISION, not a default.
 - Rows 4-7 (`zdf_phy` composite): currently one fused call inside `_step_impl`'s tendency stage — conformant in the sense that it produces `K_v_phys`/`A_v_phys`/`tke_source` as explicit returned values already threaded through `_leapfrog_step:7080-7101`. No change needed.
@@ -96,7 +96,7 @@ Per-term status against the `return_rate`/explicit-arg pattern (`surface_tendenc
 
 ## 4. Config surface
 
-**Dispatch site**: `_step_jitted` (`ocean_model_latlon_cgrid.py:6356-6435`), which already validates `outer_integrator in ("forward_euler", "ab2", "leapfrog")` and `raise ValueError` on unknown (`:6166-6169`) — dispatch-hardening-compliant pattern to extend, not replace.
+**Dispatch site**: `_step_jitted` (`ocean_model_latlon_cgrid.py:6375-6454`), which already validates `outer_integrator in ("forward_euler", "ab2", "leapfrog")` and `raise ValueError` on unknown (`:6185-6188`) — dispatch-hardening-compliant pattern to extend, not replace.
 
 **Proposed**: add `"nemo_mlf"` as a fourth literal:
 ```python

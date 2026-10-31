@@ -25,8 +25,8 @@ legoESM's active shared WS-RK3 statement is
 `ocean_model_latlon_cgrid.py:2018-2024`: it starts the final content from
 `h_k_old*tr`, subtracts the complete stage-3 FCT content divergence, then
 adds `dt*h_one_half*stage_source_rates[2]`.  The production call supplies the
-step-entry tracer and thickness at `:7639-7667` and the already-computed
-stage-2 tracer through `resume=(2, ...)` at `:7671-7677`.
+step-entry tracer and thickness at `:7658-7686` and the already-computed
+stage-2 tracer through `resume=(2, ...)` at `:7690-7696`.
 
 ## Operand prediction and exact falsifier
 

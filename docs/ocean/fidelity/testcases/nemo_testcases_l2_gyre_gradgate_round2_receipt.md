@@ -83,7 +83,7 @@ poison source.
 
 `JAX_DEBUG_NANS=1` localizes the remaining NaN only to the backward graph of
 the executed production JIT at
-`packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:13210-13218`.
+`packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:13229-13237`.
 The nested JIT prevents a statement-level stack. A diagnostic
 `JAX_DISABLE_JIT=1` run changes the forward arithmetic graph and produces a
 forward NaN in the tracer content division; it is therefore not evidence for

@@ -39,10 +39,10 @@ substitution at `:575-580`.
 legoESM's single WS helper forms its stage-3 advection content and source
 association at `ocean_model_latlon_cgrid.py:2018-2030`, returning the actual
 content at `:1918-1922`. The production GYRE path constructs its stage-3
-SBC/QSR source at `:6181-6208`, computes the Kbb-input GM/Redi rate at
-`:7117-7128,7340-7422`, and calls the helper with the source tuple at
-`:7598-7678`. It then replaces the earlier concentration update with the
-helper output at `:7833-7842`. Therefore the measured LDF rate must enter the
+SBC/QSR source at `:6200-6227`, computes the Kbb-input GM/Redi rate at
+`:7136-7147,7359-7441`, and calls the helper with the source tuple at
+`:7617-7697`. It then replaces the earlier concentration update with the
+helper output at `:7852-7861`. Therefore the measured LDF rate must enter the
 helper's stage-3 source tuple to execute NEMO's compiled order.
 
 ## JIT-native causal arm and frozen falsifiers
