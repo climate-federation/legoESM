@@ -329,29 +329,33 @@ The merged gate retains both parents’ independent maps. All moved citations we
    before a sea-ice step can produce a response.  The grep found no other
    executed NEMO-comparison `si3_lev` configuration without the False pin.
 
-2. **Inactive thermodynamics without inactive open-water gradients.**  The
-   whole-pytree entry guard fixed NaN cotangents but also stopped real gradients
-   needed by the later open-water formation stage.  For `qlead=-40`, HEAD
-   returned zero derivatives of new ice volume with respect to `qlead`, bottom
-   temperature, and salinity, while `edd34c2446` returned
-   `(-1.3096887137695114e-08, 8.220414129866561e-07,
-   4.470021523873651e-08)`.  HEAD's central-difference `qlead` slope was already
-   `-1.3096887137699779e-08`, proving the zero AD result was false.  The quoted
-   review values `2.06e-6` and `1.12e-7` are real at `qlead=-100`, not at
-   `qlead=-40`.  The fix guards only the inactive thermodynamic operands, then
-   restores the live entry state before open-water formation.  All three AD
-   values now match main to roundoff, and the sub-epsilon
-   `d(concentration_out)/d(concentration_in)` is restored from zero to one.
+2. **Inactive thermodynamics without forward drift.**  Resume 4 guarded the
+   thermodynamic operands but then selected the live entry state as the
+   *forward* value before open-water formation.  The operator's four-column,
+   two-step probe proved that this changed the lane: among other differences,
+   step-1 `S_bulk` moved from `0.1` to `0.0`, sub-epsilon enthalpy was erased,
+   and step-2 freezing thickness moved from `0.04984625211138035` to
+   `0.04976158051528507`.  Resume 5 restores the exact `920c61d884` expression
+   and uses a custom reverse rule whose primal is exactly `post_da`.
+   Hard-coded eager and JIT bit patterns cover all nine state leaves on open
+   water, freezing open water, sub-epsilon ice, and freezing sub-epsilon ice
+   for two steps.  Both plants failed on `ae5a8821d2` before the fix.
 
-3. **Non-vacuous AD plants.**  The remap plant remains unchanged.  The former
-   entry-guard plant called `_guard_inactive_columns` directly and could not
-   detect a missing production guard: deleting the state guard left all
-   `12 passed` while production gradients for concentration, snow thickness,
-   surface temperature, ice enthalpy, and layer salinity contained NaNs.  The
-   replacement differentiates the real column step over the entire state and
-   fails when that guard is removed.  The shared-forcing production test fails
-   when its guard is removed.  The new ice-forming open-water test separately
-   prevents either guard from suppressing real formation gradients.
+   For `qlead=-40`, the lane and main ice-volume forwards agree and the fixed
+   derivatives with respect to `qlead`, bottom temperature, and salinity remain
+   `(-1.3096887137695114e-08, 8.220414129866561e-07,
+   4.470021523873651e-08)`, equal to main to roundoff and to central differences.
+   On the measured lane-only sub-epsilon state (`concentration=5e-11`,
+   `h_ice=0.5`), AD gives `1.0` for
+   `d(concentration_out)/d(concentration_in)` and the lane forward's wholly
+   sub-epsilon central difference gives `0.9999999999852521`.
+
+3. **Non-vacuous AD plants.**  The remap and production-pytree plants remain.
+   The helper `_guard_inactive_columns` still exists, so the deleted
+   `test_inactive_column_guard_stops_h_ice_cotangent` is restored verbatim in
+   intent: inactive cotangents are zero and active cotangents are one.  The
+   formation test now compares the lane forward to its own finite difference,
+   while retaining main's values only for the agreed ice-volume forward.
 
 4. **Provenance SHA history.**  The one-hop exemption accepted all three
    reported bypass classes.  The replacement walks to the pre-cutoff base and
@@ -364,27 +368,52 @@ The merged gate retains both parents’ independent maps. All moved citations we
 
 5. **CEN2 certified direct callers.**  The ORCA2 round-257 writer gate and
    GYRE round-72 tracer-stage probe pass `_certified_nemo_storage=True`
-   explicitly.  Removing both selections still left their old wrappers green
-   (`8 passed` and `2 passed`) because no wrapper executed either CEN2 call.
-   Each caller now routes through a directly executed wrapper plant that
-   requires the certified selection; the focused suites collect nine and three
-   tests, and removing either selection fails its own production-call plant.
+   explicitly.  Resume 4 tested the wrappers themselves, so a direct caller
+   could bypass a still-correct wrapper.  Resume 5 binds `measure` to all four
+   ORCA2 wrapper calls and `_live_stage_rows` to the GYRE wrapper call.  Plants
+   routing one ORCA2 call and the GYRE call directly to the lower helper fail
+   with `3 == 4` and `0 == 1`, respectively.
 
 6. **Slow parent controls.**  Project addopts deselect both controls under an
    ordinary run.  Explicit final-HEAD `-m slow` results are recorded below.
+
+7. **Degenerate-column reach and NEMO semantics.**  On clean main
+   `edd34c2446`, an instrumented real call emitted
+   `IceColumnModel.step -> step_sea_ice -> _si3_step_with_trace ->
+   si3_column_step_arrays` with entry concentration min/max `(5e-11, 5e-11)`.
+   `IceColumnModel.create` exposes `concentration_init`, so main production can
+   reach the disputed range.  `run_omip_core2` cannot currently do so: it
+   constructs the default `SeaIceConfig` (`thermo_scheme="zero_layer"`) and a
+   `DynamicSeaIceState`, whereas the SI3 dispatch requires
+   `thermo_scheme="si3_bl99"` and `SI3ColumnState`.  Validation/scorer callers
+   also reach the function, but the certified gates contain no near-empty
+   columns.
+
+   Neither the lane nor main degenerate forward is fully NEMO-literal.  NEMO
+   gathers thermodynamics only for `a_i > epsi10`
+   (`C1D_OMIP_L3/BLD/ppsrc/nemo/icethd.f90:181-222`), runs lead growth over the
+   geographic grid at `:235`, and then calls correction at `:238`.
+   `ice_var_zapsmall` first sets `h_i=0` for `a_i <= epsi10`
+   (`icevar.f90:625-627`) and, when the minimum area/volume/thickness is below
+   `epsi10`, clears energy and temperature (`:664-689`) and finally clears
+   area, ice/snow volume, surface temperature, age, and ponds (`:695-720`).
+   The production transcription has neither a literal inactive gather/scatter
+   nor the final `ice_cor`/`ice_var_zapsmall` stage.  The merge kept the lane's
+   already-certified forward, so resume 5 changes no primal value and registers
+   the production-reachable semantic choice below.
 
 ## Final clean-checkout verification
 
 | Selection | Final line |
 |---|---|
 | Every requested `test_si3_o*.py` / `test_nemo_si3_*.py` file | 40/40 files, each in a fresh serial process; `1 failed, 624 passed, 2 deselected`; the sole failure is the pre-existing external scalar-math build-artifact drift below.  The old `23/23` row covered only `tests/ice` and its per-file logs actually totalled `417 passed`, not `368` |
-| `test_bitz_lipscomb.py` | `12 passed in 80.25s` |
+| `test_bitz_lipscomb.py` | `15 passed` |
 | `test_sea_ice_precip_routing.py` | `7 passed in 2.85s` |
 | `test_si3_surface.py` | `1 failed, 22 passed, 1 skipped, 1 xfailed in 42.13s`; only the reproduced lane-parent `sum_first_category` plant |
 | Certified O8–O16 exactness scorer | `30 passed in 752.00s` |
 | O5 slow parent/current control | `1 passed in 599.22s` |
 | O6 slow merge-parent/current control | `1 passed in 774.76s` |
-| CEN2 direct-caller wrappers | ORCA2 `9 passed in 1.11s`; GYRE `3 passed in 0.47s` |
+| CEN2 direct-caller wrappers | ORCA2 `10 passed`; GYRE `4 passed` |
 | Landing battery | 7/7 files; `172 passed` |
 | Receipt citation gate | `44 passed in 8.74s` |
 | Provenance SHA gate | `1517 passed in 20.99s` |
@@ -396,7 +425,7 @@ Every observed stable failure is classified here.
 | Test node(s) | Classification | Disposition / cause |
 |---|---|---|
 | `test_si3_surface.py::test_libm_pow_matches_glibc_and_differentiates` | merge-introduced, fixed here | original merge dereferenced lazy `_LIBM=None`; cherry-picked `e4be5cee4e29aa2c71bf5802e2ccee7df5ca0fb9`, using `glibc_libm().pow` |
-| `test_bitz_lipscomb.py` open-water reverse-mode regressions | merge-introduced, corrected here | guarded inactive thermodynamic operands only, restored the live entry state before formation, and bound both guards plus main's real formation gradients through production tests |
+| `test_bitz_lipscomb.py` open-water reverse-mode regressions | merge-introduced, corrected here | preserved the lane's exact `post_da` forward and routed only the valid inactive concentration cotangent to the entry value; eager/JIT two-step bits equal `920c61d884` |
 | main's remap-only Bitz regression (now `test_cumulative_remap_reverse_mode_finite_at_zero_thickness`) | merge-introduced, fixed here | applied main's F3 guard intent to the lane's live cumulative remap and replaced the vacuous fixture; no deleted duplicate helper was restored |
 | landing battery KPP validation-order node recorded above | merge-introduced, fixed in the original catch-up | main closure evaluation ran before the lane's unchanged fail-closed refusal; ordering was corrected and the node passed |
 | 15 nodes in `test_nemo_testcase_receipt_citation_gate.py` on the first clean follow-up run | follow-up source-shift, fixed here | the AD guards, dual CEN2 path, and catch-up-2 core changes moved 149 mapped endpoints; all audited Markdown citations and the executable map were re-anchored with literal insertion maps and explicit replacement anchors; pre-commit result is `42 passed` plus the two expected dirty-worktree provenance refusals |
@@ -415,9 +444,16 @@ Every observed stable failure is classified here.
 
 DECISION 190 applied: default True; every affected certified NEMO-comparison
 configuration is explicitly False, while default-behavior tests retain True.
-DECISION_NEEDED: NONE
 
-All other direct behavioral conflicts were composed behind existing explicit
-selectors or resolved in favor of the already certified lane path where main
-modified an implementation that the lane had replaced.  No test from either
-parent was removed or weakened.
+DECISION_NEEDED:
+
+1. Keep the certified lane degenerate forward indefinitely.
+2. Replace it with main's pre-merge degenerate forward.
+3. Transcribe the complete NEMO inactive gather/scatter plus
+   `ice_cor`/`ice_var_zapsmall`, certify near-empty records, and switch only
+   with a new explicit decision. **Pick: 3.** Neither existing version is the
+   complete NEMO statement sequence; option 3 resolves the discrepancy from
+   source instead of choosing whichever partial behavior happens to be closer.
+
+No option is implemented in this round.  The certified lane forward remains
+bit-identical while the production-reachable semantic conflict is explicit.
