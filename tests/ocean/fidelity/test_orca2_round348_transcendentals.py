@@ -309,6 +309,54 @@ def test_manifest_timing_refuses_identical_paths_and_wrong_roots(
         )
 
 
+def test_manifest_timing_legacy_field_guards_and_plants_fail(
+    tmp_path: Path,
+) -> None:
+    reference_root = tmp_path / "reference"
+    candidate_root = tmp_path / "candidate"
+    reference_root.mkdir()
+    candidate_root.mkdir()
+    reference = reference_root / "run_manifest.json"
+    candidate = candidate_root / "run_manifest.json"
+    legacy = {
+        "status": "PASS_R342_S4_K0_LEGOESM_RUN",
+        "round": "orca2_r342",
+        "steps": 2920,
+        "wall_seconds": 2920.0,
+        "jax_default_backend": "cpu",
+    }
+    current = {**legacy, "round": "orca2_r348", "transcendentals": "native"}
+    reference.write_text(json.dumps(legacy))
+    candidate.write_text(json.dumps(current))
+    timing = compare.compare_manifest_timing(
+        reference,
+        candidate,
+        reference_root=reference_root,
+        candidate_root=candidate_root,
+    )
+    assert timing["reference_transcendentals"] == "libm"
+
+    plants = (
+        (reference, {**legacy, "round": "orca2_r341"}),
+        (reference, {**legacy, "status": "INCOMPLETE"}),
+        (candidate, {key: value for key, value in current.items() if key != "transcendentals"}),
+    )
+    for path, planted_payload in plants:
+        reference.write_text(json.dumps(legacy))
+        candidate.write_text(json.dumps(current))
+        path.write_text(json.dumps(planted_payload))
+        with pytest.raises(
+            RuntimeError,
+            match="only the certified pre-r348 round-342 reference may omit transcendentals",
+        ):
+            compare.compare_manifest_timing(
+                reference,
+                candidate,
+                reference_root=reference_root,
+                candidate_root=candidate_root,
+            )
+
+
 def test_comparison_refuses_identical_roots(tmp_path: Path) -> None:
     root = tmp_path / "same"
     with pytest.raises(RuntimeError, match="reference_root and candidate_root must differ"):

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import shutil
@@ -259,6 +260,104 @@ def test_driver_cli_transcendentals_reaches_card_override(
                 "--transcendentals", "native",
             ]
         )
+
+
+def test_driver_default_transcendentals_is_libm_and_native_plant_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def run_default() -> str:
+        seen: dict[str, str] = {}
+
+        def fake_run(**kwargs):
+            seen["transcendentals"] = kwargs["transcendentals"]
+            return {
+                "status": "PASS_R342_S4_K0_LEGOESM_RUN",
+                "steps": kwargs["steps"],
+                "wall_seconds": 1.0,
+                "jax_default_backend": "cpu",
+                "transcendentals": kwargs["transcendentals"],
+                "snapshots": [],
+                "output_dir": str(kwargs["output_dir"]),
+            }
+
+        monkeypatch.setattr(r342_driver, "run_standalone_k0_driver", fake_run)
+        assert r342_driver.main(["--steps", "1", "--output-dir", str(tmp_path)]) == 0
+        return seen["transcendentals"]
+
+    def require_certified_default(mode: str) -> None:
+        assert mode == "libm", "round-342 driver default must remain certified libm"
+
+    require_certified_default(run_default())
+
+    original_add_argument = argparse.ArgumentParser.add_argument
+
+    def plant_native_default(parser, *args, **kwargs):
+        if "--transcendentals" in args:
+            kwargs["default"] = "native"
+        return original_add_argument(parser, *args, **kwargs)
+
+    with monkeypatch.context() as planted:
+        planted.setattr(argparse.ArgumentParser, "add_argument", plant_native_default)
+        with pytest.raises(AssertionError, match="must remain certified libm"):
+            require_certified_default(run_default())
+
+
+def test_wrapper_default_transcendentals_is_libm_and_native_plant_fails(
+    tmp_path: Path,
+) -> None:
+    source_wrapper = Path(r342_driver.__file__).with_name(
+        "nemo_testcase_l4_orca2_round342_s4_year_legoesm_run.sh"
+    )
+
+    def run_default(root: Path, *, plant_native: bool) -> str:
+        script_dir = root / "repo/scripts/validate/ocean_fidelity/orca2_l4"
+        script_dir.mkdir(parents=True)
+        wrapper = script_dir / source_wrapper.name
+        source = source_wrapper.read_text(encoding="utf-8")
+        if plant_native:
+            anchor = 'TRANSCENDENTALS="libm"'
+            assert source.count(anchor) == 1
+            source = source.replace(anchor, 'TRANSCENDENTALS="native"', 1)
+        wrapper.write_text(source, encoding="utf-8")
+        fake_driver = script_dir / "nemo_testcase_l4_orca2_round342_s4_year_driver.py"
+        fake_driver.write_text(
+            "import sys\nprint('FAKE_DRIVER_ARGS', *sys.argv[1:])\n",
+            encoding="utf-8",
+        )
+        bin_dir = root / "bin"
+        bin_dir.mkdir()
+        fake_git = bin_dir / "git"
+        fake_git.write_text("#!/usr/bin/env bash\nexit 0\n")
+        fake_git.chmod(0o755)
+        fake_free = bin_dir / "free"
+        fake_free.write_text("#!/usr/bin/env bash\nprintf 'Mem: 1000 0 0 0 0 999\\n'\n")
+        fake_free.chmod(0o755)
+        env = dict(os.environ)
+        env["PATH"] = f"{bin_dir}:{env['PATH']}"
+        completed = subprocess.run(
+            [
+                "bash", str(wrapper),
+                "--steps", "1",
+                "--output-dir", str(root / "run"),
+                "--wait",
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+        assert completed.returncode == 0, completed.stderr
+        return completed.stdout
+
+    def require_certified_default(output: str) -> None:
+        assert "--transcendentals libm" in output, (
+            "round-342 wrapper default must remain certified libm"
+        )
+
+    require_certified_default(run_default(tmp_path / "clean", plant_native=False))
+    with pytest.raises(AssertionError, match="must remain certified libm"):
+        require_certified_default(run_default(tmp_path / "plant", plant_native=True))
 
 
 def test_driver_and_wrapper_refuse_unknown_transcendentals(tmp_path: Path) -> None:
