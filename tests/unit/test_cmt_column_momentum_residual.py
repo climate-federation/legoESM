@@ -72,6 +72,8 @@ def test_gate_on_requires_a_nonzero_tendency():
     assert ok and rep["FU"]["control_flagged"] and rep["FV"]["n_violations"] == 0
     ok, rep = m.gate(np.zeros_like(f), np.zeros_like(f), dp, "on")
     assert not ok and rep["FU"]["n_active"] == 0
+    ok, rep = m.gate(f, np.zeros_like(f), dp, "on")          # zonal-only response is legal
+    assert ok and rep["FU"]["control_flagged"] and "control_flagged" not in rep["FV"]
     bad = f.copy(); bad[0] += 1e-3
     assert not m.gate(bad, f, dp, "on")[0]
     assert not m.gate(None, None, dp, "on")[0]
@@ -101,7 +103,9 @@ def test_real_mpas_emanuel_bridge(cmt):
     for _ in range(8):   # spin the cloud-base mass flux up, as the wiring test does
         ps = None if prog is None else types.SimpleNamespace(
             conv_prog_profile=jnp.asarray(prog), conv_stoch_state=jnp.zeros((mesh.nCells,)))
-        fu, fv, p_half, edge_du, out = m.capture_bridge(state, mesh, sigma, cfg, 600.0, ps)
+        fu, fv, p_half, edge_du, out, prog_in = m.capture_bridge(state, mesh, sigma, cfg, 600.0, ps)
+        if prog is not None:   # the scheme saw the carry we fed, bit for bit
+            np.testing.assert_array_equal(prog_in, np.asarray(prog))
         prog = out["conv_prog_profile"]
     from legoesm.atmosphere.physics.convection import integration as integ
     assert integ.emanuel_convection.__name__ == "emanuel_convection"   # spy removed

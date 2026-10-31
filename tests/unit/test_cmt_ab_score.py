@@ -62,3 +62,20 @@ def test_profile_rmse_and_band_mean_are_cos_lat_weighted():
     assert m.profile_rmse(model, ref, LAT, m.BOXES["global"]) == pytest.approx(expect, rel=1e-12)
     assert m.band_mean(model, LAT, m.BOXES["global"]) == pytest.approx((w * model).sum() / w.sum(), rel=1e-12)
     assert m.band_mean(LAT, LAT, m.BOXES["tropics"]) == pytest.approx(0.0, abs=1e-12)
+
+
+def test_check_dates_refuses_a_shifted_or_short_window():
+    m = _load()
+    days = [f"1979-01-{d:02d}" for d in range(1, 31)]
+    m.check_dates(days, "1979-01-01", 30)
+    with pytest.raises(SystemExit):
+        m.check_dates(days[1:] + ["1979-01-31"], "1979-01-01", 30)
+    with pytest.raises(SystemExit):
+        m.check_dates(days[:29], "1979-01-01", 30)
+
+
+def test_check_arm_window_needs_the_day_n_checkpoint(tmp_path):
+    m = _load()
+    (tmp_path / "checkpoint_day_0020.npz").write_bytes(b"")
+    with pytest.raises(SystemExit, match="day 20"):
+        m.check_arm_window(str(tmp_path), "1979-01-01", 30)

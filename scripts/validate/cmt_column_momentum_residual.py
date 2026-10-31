@@ -93,17 +93,21 @@ def gate(fu, fv, dp, expect, edge_du=None, tol=TOL):
     rep, ok = {}, True
     for name, f in (("FU", fu), ("FV", fv)):
         s = summarize(f, dp, tol)
-        bad, i = broken_control(f, dp)
-        s["control_column"] = i
-        s["control_flagged"] = bool(i in violations(bad, dp, tol))
-        ok &= s["n_active"] > 0 and s["n_violations"] == 0 and s["control_flagged"]
+        ok &= s["n_violations"] == 0
+        if s["n_active"] > 0:      # the control needs a nonzero column to break
+            bad, i = broken_control(f, dp)
+            s["control_column"] = i
+            s["control_flagged"] = bool(i in violations(bad, dp, tol))
+            ok &= s["control_flagged"]
         rep[name] = s
+    ok &= rep["FU"]["n_active"] + rep["FV"]["n_active"] > 0   # a nonzero tendency exists
     return bool(ok), rep
 
 
 def capture_bridge(state, mesh, sc, conv_cfg, dt, phys_state):
     """Call the MPAS convection bridge; return (FU, FV, p_half, edge du_dt,
-    carry): FU/FV and p_half as the scheme handed them to the bridge."""
+    carry, prog_in): FU/FV, p_half and the convective carry exactly as the
+    bridge passed them to / received them from the scheme."""
     from legoesm.atmosphere.physics.convection import integration as integ
     if conv_cfg.scheme != "emanuel":
         raise SystemExit(f"probe covers the Emanuel scheme only; deck selects {conv_cfg.scheme}")
@@ -112,7 +116,7 @@ def capture_bridge(state, mesh, sc, conv_cfg, dt, phys_state):
 
     def _spy(**kw):
         out, prog = orig(**kw)
-        seen.update(out=out, p_half=kw["p_half"])
+        seen.update(out=out, p_half=kw["p_half"], prog_in=kw["conv_prog_profile"])
         return out, prog
 
     integ.emanuel_convection = _spy
@@ -127,7 +131,8 @@ def capture_bridge(state, mesh, sc, conv_cfg, dt, phys_state):
     out = seen["out"]
     as_np = (lambda x: None if x is None else np.asarray(x))
     return (as_np(out.du_dt_conv), as_np(out.dv_dt_conv),
-            np.asarray(seen["p_half"]), np.asarray(tend.du_dt.data), carry)
+            np.asarray(seen["p_half"]), np.asarray(tend.du_dt.data), carry,
+            np.asarray(seen["prog_in"]))
 
 
 def main():
@@ -173,7 +178,11 @@ def main():
         {"conv_prog_profile": jnp.asarray(driver._carry_aux["physstate_conv_prog_profile"])})
     dt_phys = float(config.dycore.dt) * int(getattr(config, "physics_update_steps", 1) or 1)
 
-    fu, fv, p_half, edge_du, _ = capture_bridge(state, mesh, sc, conv_cfg, dt_phys, ps)
+    fu, fv, p_half, edge_du, _, prog_in = capture_bridge(state, mesh, sc, conv_cfg, dt_phys, ps)
+    # The bridge silently substitutes zeros for a carry of the wrong shape:
+    # the scheme must have seen the checkpoint's carry, bit for bit.
+    if not np.array_equal(prog_in, np.asarray(driver._carry_aux["physstate_conv_prog_profile"])):
+        raise SystemExit("the bridge did not hand the checkpoint's conv_prog_profile to the scheme")
     dp = p_half[:, 1:] - p_half[:, :-1]
     ok, rep = gate(fu, fv, dp, a.expect, edge_du=edge_du)
     try:

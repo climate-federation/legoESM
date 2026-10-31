@@ -1,16 +1,20 @@
 #!/usr/bin/env python3
 """Pre-registered score of the #2266 Emanuel momentum-transport A/B (off vs on).
 
-    cmt_ab_score.py --off <run dir> --on <run dir> --era5 <ua on the CMOR grid>
-                    --out <dir> [--build-era5 <ERA5 daily GRIB> --ndays 30]
+    cmt_ab_score.py --off <run dir> --on <run dir> --era5-grib <ERA5 daily GRIB>
+                    --start 1979-01-01 --ndays 30 --out <dir>
 
 Both arms' CMOR Amon ``ua`` (the exact mean over the simulated window) against
-the ERA5 daily mean over the same days.  ``--build-era5`` makes that reference
-with cdo: first ``ndays`` daily means of the GRIB (reduced -> regular Gaussian,
+the ERA5 daily mean over the same days, built here with cdo (never taken
+prebuilt, so its window is always checked): first ``ndays`` daily means of the GRIB (reduced -> regular Gaussian,
 ``setgridtype,regular``), time mean, conservative remap
 (``remapcon``) onto the arm's own CMOR grid; the remap is first checked on a
 known field, sin(lat), whose exact cell mean on a regular lat band is
 (sin(lat0) + sin(lat1)) / 2, and on the global mean of the remapped u.
+Window checks (refused otherwise): the GRIB's selected dates are exactly
+start .. start + ndays - 1; each arm's single Amon record starts in the start
+month and the arm's newest checkpoint is day ``ndays`` (CMOR month bounds are
+nominal, so the checkpoint is what proves the averaging window).
 
 Metric (PREREGISTRATION.md, user-approved 2026-10-31): RMSE vs ERA5 of the
 zonal-mean u profile u(lat) at 850 and 200 hPa, cos-lat weighted over the
@@ -95,7 +99,28 @@ def _read(path, var):
     return a, lat, lon, plev
 
 
-def build_era5(grb, target_nc, out_nc, ndays, work):
+def check_dates(dates, start, ndays):
+    """``dates`` (YYYY-MM-DD strings) must be the ``ndays`` consecutive days from ``start``."""
+    want = [str(d) for d in np.arange(np.datetime64(start), np.datetime64(start) + ndays)]
+    if list(dates) != want:
+        raise SystemExit(f"FATAL: ERA5 dates {list(dates)[:3]}..{list(dates)[-1:]} "
+                         f"are not {want[0]}..{want[-1]}")
+
+
+def check_arm_window(run, start, ndays):
+    """The arm stopped at day ``ndays`` and its Amon record is the start month."""
+    import xarray as xr
+    ck = sorted(glob.glob(f"{run}/checkpoint_day_*.npz"))
+    last = int(Path(ck[-1]).stem.split("_")[-1]) if ck else None
+    if last != ndays:
+        raise SystemExit(f"FATAL: {run} newest checkpoint is day {last}, expected {ndays}")
+    f = _one(run, "ua")
+    t0 = xr.open_dataset(f).time_bnds.values[0][0]
+    if (t0.year, t0.month, t0.day) != tuple(int(x) for x in start.split("-")[:2]) + (1,):
+        raise SystemExit(f"FATAL: {f} starts {t0}, not in the month of {start}")
+
+
+def build_era5(grb, target_nc, out_nc, ndays, work, start):
     """ERA5 ``ndays`` daily-mean u, time mean, remapcon onto ``target_nc``'s grid.
     Returns the remap check numbers (known field + global-mean)."""
     work = Path(work)
@@ -105,10 +130,8 @@ def build_era5(grb, target_nc, out_nc, ndays, work):
     tm = work / "era5_ua_timmean_native.nc"
     # Reduced Gaussian -> regular Gaussian first (remapcon needs cell corners),
     # as snowheat_ab_score.py does for the same ERA5 pool.
+    check_dates(_cdo("showdate", f"-seltimestep,1/{ndays}", str(grb)).split(), start, ndays)
     _cdo("-f", "nc4", "timmean", f"-seltimestep,1/{ndays}", "-setgridtype,regular", str(grb), str(tm))
-    ntime = int(_cdo("ntime", f"-seltimestep,1/{ndays}", str(grb)).split()[0])
-    if ntime != ndays:
-        raise SystemExit(f"FATAL: GRIB holds {ntime} of the {ndays} requested days")
     _cdo("-f", "nc4", f"remapcon,{grid}", str(tm), str(out_nc))
     # Known field: sin(lat) on the native grid, conservatively remapped.
     known = work / "known_sinlat_5deg.nc"
@@ -123,13 +146,18 @@ def build_era5(grb, target_nc, out_nc, ndays, work):
     g_5 = np.array(_cdo("outputf,%.10g", "-fldmean", str(out_nc)).split(), dtype=float)
     return {"known_field_max_abs_err": known_err,
             "global_mean_max_abs_diff_m_s": float(np.max(np.abs(g_nat - g_5))),
-            "ndays": ntime}
+            "ndays": ndays, "start": start}
 
 
-def _model(run, var):
+def _one(run, var):
     fs = sorted(glob.glob(f"{run}/cmor/Amon/{var}_Amon_*.nc"))
     if len(fs) != 1:
         raise SystemExit(f"FATAL: expected one Amon {var} file in {run}, got {fs}")
+    return fs[0]
+
+
+def _model(run, var):
+    fs = [_one(run, var)]
     a, lat, lon, plev = _read(fs[0], var)
     if a.shape[0] != 1:
         raise SystemExit(f"FATAL: {fs[0]} has {a.shape[0]} time steps, expected 1")
@@ -142,7 +170,8 @@ def score(off_dir, on_dir, era5_nc):
     u = {k: _model(d, "ua") for k, d in (("off", off_dir), ("on", on_dir))}
     _, lat, lon, plev = u["off"]
     for k in ("on",):
-        if not (np.array_equal(u[k][1], lat) and np.array_equal(u[k][3], plev)):
+        if not (np.array_equal(u[k][1], lat) and np.array_equal(u[k][2], lon)
+                and np.array_equal(u[k][3], plev)):
             raise SystemExit("FATAL: arms are on different grids")
     e, elat, elon, eplev = _read(era5_nc, "var131" if "var131" in _vars(era5_nc) else "u")
     e = np.squeeze(e, axis=0) if e.ndim == 4 else e
@@ -179,7 +208,7 @@ def _vars(path):
     return list(xr.open_dataset(path, decode_times=False).data_vars)
 
 
-def figure(zm, lat, plev, path):
+def figure(zm, lat, plev, path, window):
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -204,7 +233,7 @@ def figure(zm, lat, plev, path):
     ax[2].set_yticks([1000, 500, 200, 100, 10, 1]); ax[2].set_yticklabels([1000, 500, 200, 100, 10, 1])
     ax[2].set_xlabel("latitude"); ax[2].set_title("zonal-mean u, CMT on minus off [m/s]\n(contours: off arm, 10 m/s)")
     fig.colorbar(h, ax=ax[2])
-    fig.suptitle("Emanuel convective momentum transport A/B, AMIP 1979-01-01..30 (#2266)")
+    fig.suptitle(f"Emanuel convective momentum transport A/B, AMIP {window}, CMOR monthly ua vs ERA5 (#2266)")
     fig.tight_layout()
     fig.savefig(path, dpi=130)
 
@@ -213,22 +242,22 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--off", required=True)
     ap.add_argument("--on", required=True)
-    ap.add_argument("--era5", required=True)
+    ap.add_argument("--era5-grib", required=True)
+    ap.add_argument("--start", required=True, help="first simulated day, YYYY-MM-DD")
+    ap.add_argument("--ndays", type=int, required=True)
     ap.add_argument("--out", required=True)
-    ap.add_argument("--build-era5", default=None)
-    ap.add_argument("--ndays", type=int, default=None)
     a = ap.parse_args(argv)
     out = Path(a.out)
     out.mkdir(parents=True, exist_ok=True)
-    rec = {}
-    if a.build_era5:
-        if a.ndays is None:
-            raise SystemExit("--build-era5 needs --ndays")
-        target = sorted(glob.glob(f"{a.off}/cmor/Amon/ua_Amon_*.nc"))[0]
-        rec["remap_check"] = build_era5(a.build_era5, target, a.era5, a.ndays, out / "era5_work")
-    s, zm, lat, plev = score(a.off, a.on, a.era5)
+    for run in (a.off, a.on):
+        check_arm_window(run, a.start, a.ndays)
+    era5 = out / f"era5_ua_{a.start}_{a.ndays}d_cmorgrid.nc"
+    rec = {"remap_check": build_era5(a.era5_grib, _one(a.off, "ua"), era5, a.ndays,
+                                     out / "era5_work", a.start)}
+    s, zm, lat, plev = score(a.off, a.on, era5)
     rec.update(s)
-    figure(zm, lat, plev, out / "cmt_ab_zonal_u.png")
+    end = str(np.datetime64(a.start) + a.ndays - 1)
+    figure(zm, lat, plev, out / "cmt_ab_zonal_u.png", f"{a.start}..{end}")
     (out / "cmt_ab_score.json").write_text(json.dumps(rec, indent=1))
     print(json.dumps(rec, indent=1))
 
