@@ -349,10 +349,6 @@ class CompressibleEulerConfig(NamedTuple):
                                           # AMD softplus output-floor width [m^2/s]
                                           # (RULE 5 smooth default 1e-8; 0.0 =
                                           # AMR-Wind's hard floor).
-    amd_denom_floor_width: float = AMD_DENOM_FLOOR_WIDTH
-                                          # AMD softplus denominator-floor width
-                                          # [s^-2] (RULE 5 smooth default 10 eps
-                                          # = 2.22e-15; 0.0 = AMR-Wind's hard floor).
     amd_c: float = 0.3                    # Anisotropic Minimum-Dissipation constant
                                           # (modified Poincaré const ≈0.3; Rozema 2015
                                           # / Abkar-Bae-Moin 2016) for
@@ -480,6 +476,11 @@ class CompressibleEulerConfig(NamedTuple):
                                           # for serial-parity / oracle validation
                                           # runs, at ~5-16% per-step comm cost.
                                           # No effect single-rank or n_ranks==1.
+    # APPENDED LAST (positional order of the fields above unchanged).
+    amd_denom_floor_width: float = AMD_DENOM_FLOOR_WIDTH
+                                          # AMD softplus denominator-floor width
+                                          # [s^-2] (RULE 5 smooth default 10 eps
+                                          # = 2.22e-15; 0.0 = AMR-Wind's hard floor).
 
 
 # ==============================================================================

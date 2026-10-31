@@ -62,8 +62,9 @@ def test_experiment_config_mirrors_the_widths():
 
 def _calls_compute_most_fluxes(tree):
     for node in ast.walk(tree):
-        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
-                and node.func.id == "compute_most_fluxes"):
+        if isinstance(node, ast.Call) and (
+                getattr(node.func, "id", None) == "compute_most_fluxes"
+                or getattr(node.func, "attr", None) == "compute_most_fluxes"):
             yield node
 
 
@@ -130,3 +131,7 @@ def test_experiment_widths_reach_the_surface_layer_config():
     assert large_yeager_widths(surf) == LARGE_YEAGER_WIDTH_DEFAULTS
     cfg = base._replace(**{"surface_" + k: v for k, v in _HARD.items()})
     assert large_yeager_widths(turbulence_config_for(cfg).louis.surface) == _HARD
+    # one width alone: only it moves, the other two keep the default
+    one = base._replace(surface_large_yeager_dthv_width=0.0)
+    got = large_yeager_widths(turbulence_config_for(one).louis.surface)
+    assert got == {**LARGE_YEAGER_WIDTH_DEFAULTS, "large_yeager_dthv_width": 0.0}
