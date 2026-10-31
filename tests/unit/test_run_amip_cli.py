@@ -6067,3 +6067,38 @@ def test_climateeval_ids_follow_cmip_flags_unless_given():
     cmd = run.call_args.args[0]
     assert cmd[cmd.index("--model-id") + 1] == "SRC-1-0"
     assert cmd[cmd.index("--variant-id") + 1] == "r2i1p1f1"
+
+
+_LY_WIDTH_FIELDS = ("surface_large_yeager_neutral_width",
+                    "surface_large_yeager_dthv_width",
+                    "surface_large_yeager_cd_cutoff_width")
+
+
+def test_large_yeager_width_flags_default_bit_identical():
+    """Unset Large-Yeager width flags (#2241) leave ExperimentConfig at its own
+    defaults exactly (no new value chosen by the CLI)."""
+    from legoesm.driver.config import ExperimentConfig
+    parser = build_arg_parser()
+    args = _postprocess_args(parser.parse_args(["--dataset", "analytical"]),
+                             parser)
+    cfg = build_config_from_args(args)
+    for f in _LY_WIDTH_FIELDS:
+        assert getattr(cfg, f) == getattr(ExperimentConfig(), f)
+
+
+def test_large_yeager_width_flags_thread_to_config():
+    """Each --surface-large-yeager-*-width flag reaches its ExperimentConfig
+    field (0 = AeroBulk hard switch, the reference limit)."""
+    parser = build_arg_parser()
+    args = parser.parse_args([
+        "--dataset", "analytical",
+        "--surface-bulk-scheme", "large_yeager",
+        "--turbulence", "holtslag_boville",
+        "--surface-large-yeager-neutral-width", "0",
+        "--surface-large-yeager-dthv-width", "0.02",
+        "--surface-large-yeager-cd-cutoff-width", "0.25",
+    ])
+    cfg = build_config_from_args(_postprocess_args(args, parser))
+    assert cfg.surface_large_yeager_neutral_width == 0.0
+    assert cfg.surface_large_yeager_dthv_width == 0.02
+    assert cfg.surface_large_yeager_cd_cutoff_width == 0.25
