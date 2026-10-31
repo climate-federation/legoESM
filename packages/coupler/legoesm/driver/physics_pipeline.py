@@ -41,6 +41,7 @@ from legoesm.forcing.surface_utils import (
     blend_surface_temperature,
     blended_surface_albedo,
 )
+from legoesm.core.bulk_flux import LARGE_YEAGER_WIDTH_DEFAULTS
 from legoesm.core.grid_adapters import SingleColumnGrid, make_adapter
 from legoesm.core.physics_output import PhysicsOutput  # shared tendency pytree (moved to core)
 
@@ -4733,6 +4734,11 @@ def apply_surface_flux_config(tc, config):
     stc = getattr(config, "surface_thermo_convention", "legoesm")
     sss = getattr(config, "surface_stability_scheme", "dyer1974")
     zml = getattr(config, "surface_z_ref_model_level", None)
+    # Large-Yeager smooth-switch widths (#2241): only values that differ from
+    # the shared default are injected, so a default run keeps the fast path.
+    lyw = {k: getattr(config, "surface_" + k, d)
+           for k, d in LARGE_YEAGER_WIDTH_DEFAULTS.items()}
+    lyw = {k: v for k, v in lyw.items() if v != LARGE_YEAGER_WIDTH_DEFAULTS[k]}
 
     _qsal_req = getattr(config, "surface_ocean_q_sfc_saline", None)
     # None = "on wherever the lane can honour it".  CAPABILITY, not grid: the
@@ -4761,7 +4767,7 @@ def apply_surface_flux_config(tc, config):
             f"{getattr(getattr(config, 'grid', None), 'grid_type', '?')!r}")
     if (sbs == "constant" and gzi is None and stc == "legoesm"
             and sss == "dyer1974" and zml is None and _qsal_req is None
-            and not qsal):
+            and not qsal and not lyw):
         # The two surface switches gate this fast path on whether they have
         # anything to SAY, not on whether they are true:
         #   zml is None  -> the experiment stated nothing, so leaving the
@@ -4822,6 +4828,8 @@ def apply_surface_flux_config(tc, config):
         # driven by the one --surface-stability-scheme flag) so the
         # interface cannot split Dyer-vs-SHEBA across its two sides.
         surf = surf._replace(stability_scheme=sss)
+    if lyw:
+        surf = surf._replace(**lyw)
     return tc._replace(**{tc.scheme: sub._replace(surface=surf)})
 
 

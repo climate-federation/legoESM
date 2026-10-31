@@ -19,6 +19,8 @@ from pathlib import Path
 from typing import Any, NamedTuple
 
 from legoesm import constants
+from legoesm.core.bulk_flux import (NCAR_CD_CUTOFF_WIDTH, NCAR_DTHV_WIDTH,
+                                      NCAR_NEUTRAL_WIDTH)
 from legoesm.atmosphere.physics.turbulence.surface_layer import (
     C_E_BULK_DEFAULT, C_H_BULK_DEFAULT)
 from legoesm.land import snow_column as _snow_column
@@ -1192,6 +1194,13 @@ class ExperimentConfig(NamedTuple):
     # the genuinely different SBL tails are "grachev2007_sheba"/"gryanik2020";
     # see bulk_flux.psi_m_coare).
     surface_stability_scheme: str = "dyer1974"
+    # Large-Yeager (surface_bulk_scheme="large_yeager", AeroBulk TURB_NCAR)
+    # RULE 5 smooth-switch widths (#2241), threaded into the atmosphere
+    # SurfaceLayerConfig by apply_surface_flux_config; 0.0 = AeroBulk's hard
+    # switch.  large_yeager_cesm and the other schemes never read them.
+    surface_large_yeager_neutral_width: float = NCAR_NEUTRAL_WIDTH
+    surface_large_yeager_dthv_width: float = NCAR_DTHV_WIDTH
+    surface_large_yeager_cd_cutoff_width: float = NCAR_CD_CUTOFF_WIDTH
     # Tiled (mosaic) surface fluxes: when True, the atmosphere surface
     # turbulent flux is computed SEPARATELY per surface tile and area-weighted
     # — ``surface_bulk_scheme`` (e.g. coare3) runs on the OCEAN tile, the

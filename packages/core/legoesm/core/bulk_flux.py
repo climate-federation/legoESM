@@ -21,7 +21,9 @@ large_yeager's neutral Stanton switches (first guess and loop) and 33 m/s drag
 cutoff, are smooth by default (``coare_charnock_ramp_width``,
 ``coare_gust_onset_width``, ``large_yeager_neutral_width``,
 ``large_yeager_dthv_width``, ``large_yeager_cd_cutoff_width``; 0 = the
-oracle).  coare3's dt/dq sign floors stay hard as in AeroBulk (division guard,
+oracle).  The three large_yeager widths are fields of every component config
+that selects a bulk scheme, passed by each caller via
+:func:`large_yeager_widths` (the 2 m diagnostic still uses the defaults).  coare3's dt/dq sign floors stay hard as in AeroBulk (division guard,
 user decision 2026-10-31; KNOWN DIFFERENCE, see :func:`_sign_floor`).
 
 The iterative Obukhov length loop uses ``jax.lax.fori_loop`` for
@@ -1074,6 +1076,19 @@ NCAR_DTHV_WIDTH = 1.0e-2
 # Width [m/s] of the one-sided quintic blend of the LY09 polynomial into the
 # 2.34e-3 plateau over [33 - w, 33] m/s (the plateau stays exact from 33 m/s).
 NCAR_CD_CUTOFF_WIDTH = 0.5
+# Config-field name -> default of the three widths above (#2241).
+LARGE_YEAGER_WIDTH_DEFAULTS = {
+    "large_yeager_neutral_width": NCAR_NEUTRAL_WIDTH,
+    "large_yeager_dthv_width": NCAR_DTHV_WIDTH,
+    "large_yeager_cd_cutoff_width": NCAR_CD_CUTOFF_WIDTH,
+}
+
+
+def large_yeager_widths(config) -> dict:
+    """The three Large-Yeager smooth-switch widths a component config carries,
+    as :func:`compute_most_fluxes` keyword arguments (#2241: config fields, not
+    call-site defaults).  Missing fields raise ``AttributeError``."""
+    return {k: getattr(config, k) for k in LARGE_YEAGER_WIDTH_DEFAULTS}
 
 
 def _ncar_stable_weight(x, width):

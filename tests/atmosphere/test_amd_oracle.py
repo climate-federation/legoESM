@@ -11,11 +11,12 @@ grid point, plus 246 synthetic edge tensors).  C = 0.3.
 Tolerance (user decision 2026-10-19): max relative error <= 1e-10 in fp64.  Relative
 error is ``|a-b| / max(|a|, |b|)`` (0 where both are exactly 0); no floor.
 
-RULE 5 (user decision 2026-10-28): the output floor is a softplus floor of width
-``floor_width`` (default 1e-8 m2/s).  The oracle match is asserted at the hard
-limit (width 0); at the default the signed per-point gap (ours - oracle) is pinned
+RULE 5 (user decisions 2026-10-28 and 2026-10-31): the output floor is a softplus
+floor of width ``floor_width`` (default 1e-8 m2/s) and the denominator floor one of
+width ``denom_floor_width`` (default 10 eps s^-2).  The oracle match is asserted at
+the hard limit (both widths 0); at the defaults the signed per-point gap (ours - oracle) is pinned
 against ``oracle_fixtures/amd_default_gap.npz`` (1e-6 relative, 1e-12 absolute).
-Regenerate it after a change to the smooth form or its default width with
+Regenerate it after a change to a smooth form or a default width with
 ``python tests/atmosphere/test_amd_oracle.py``.
 """
 from __future__ import annotations
@@ -31,7 +32,8 @@ import pytest
 
 from jax.test_util import check_grads
 
-from legoesm.atmosphere.physics.turbulence.amd import AMD_FLOOR_WIDTH, amd_nu_t
+from legoesm.atmosphere.physics.turbulence.amd import (AMD_DENOM_FLOOR_WIDTH,
+                                                        AMD_FLOOR_WIDTH, amd_nu_t)
 
 jax.config.update("jax_enable_x64", True)
 
@@ -40,6 +42,7 @@ FIXTURE = ROOT / "tests/atmosphere/oracle_fixtures/amd.npz"
 GENERATOR = ROOT / "scripts/validate/oracle/amd/make_fixture.py"
 GAP_FILE = ROOT / "tests/atmosphere/oracle_fixtures/amd_default_gap.npz"
 TOL = 1.0e-10
+HARD = dict(floor_width=0.0, denom_floor_width=0.0)
 
 
 def _fx():
@@ -81,7 +84,7 @@ def test_fixture_provenance_and_edge_inputs_reproduce():
 
 def test_amd_matches_amr_wind():
     fx = _fx()
-    rel = _rel(_ours(fx, floor_width=0.0), fx["nu"])
+    rel = _rel(_ours(fx, **HARD), fx["nu"])
     assert rel.max() <= TOL, (rel.max(), int(np.argmax(rel)))
     # the fixture exercises the oracle's outer 10*eps floor (N <= 0) and the
     # active branch
@@ -90,10 +93,10 @@ def test_amd_matches_amr_wind():
 
 
 def test_eager_jit_parity():
-    """Hard limit (floor_width=0): relative parity, no floor."""
+    """Hard limit (both widths 0): relative parity, no floor."""
     fx = _fx()
     c = float(json.loads(str(fx["meta"]))["c_amd"])
-    f = lambda a, h: amd_nu_t(*a, *h, c, floor_width=0.0)  # noqa: E731
+    f = lambda a, h: amd_nu_t(*a, *h, c, **HARD)  # noqa: E731
     a, h = jnp.asarray(fx["a"]), jnp.asarray(fx["h"])
     assert _rel(jax.jit(f)(a, h), f(a, h)).max() <= TOL
 
@@ -124,6 +127,14 @@ def test_default_width_is_the_recorded_one():
     from legoesm.atmosphere.dynamics.gcm.compressible_euler import CompressibleEulerConfig
     assert AMD_FLOOR_WIDTH == 1.0e-8
     assert CompressibleEulerConfig().amd_floor_width == AMD_FLOOR_WIDTH
+    assert AMD_DENOM_FLOOR_WIDTH == 10.0 * np.finfo(np.float64).eps
+    assert CompressibleEulerConfig().amd_denom_floor_width == AMD_DENOM_FLOOR_WIDTH
+
+
+def test_negative_denominator_width_raises():
+    z = jnp.zeros(2)
+    with pytest.raises(ValueError, match="denom_floor_width"):
+        amd_nu_t(*([z] * 9), 1.0, 1.0, 1.0, 0.3, denom_floor_width=-1.0)
 
 
 def test_default_smoothing_gap_per_point():
@@ -157,6 +168,31 @@ def test_check_grads_through_the_softplus_floor_at_default():
     assert np.all(d != 0.0), d
 
 
+def test_check_grads_through_the_denominator_floor_at_default():
+    """RULE 5 gradient test for the denominator floor: a compressive a11 strain
+    with a11^2 = r * 10 eps, r around 1.  With the hard floor (a11^2 floored at
+    10 eps) nu = C dx^2 |a11|^3 / (10 eps), so d ln(nu)/d ln(s) = 3 below the
+    floor and 1 above it; the smooth floor gives a value strictly between.
+    dx = 1e3 m keeps nu (~1e-2 m2/s) far above the output floor."""
+    F = 10.0 * np.finfo(np.float64).eps
+    c, dx = 0.3, 1.0e3
+    r = jnp.asarray([0.3, 1.0, 3.0])
+    a11 = -jnp.sqrt(r * F)
+    z = jnp.zeros_like(a11)
+
+    def lognu(logs):   # one log-scale per point
+        return jnp.log(amd_nu_t(a11 * jnp.exp(logs), z, z, z, z, z, z, z, z,
+                                dx, dx, dx, c))
+
+    l0 = jnp.zeros_like(a11)
+    check_grads(lambda l: jnp.sum(lognu(l)), (l0,), order=2, modes=("fwd", "rev"),
+                eps=1e-6)
+    d = np.asarray(jax.grad(lambda l: jnp.sum(lognu(l)))(l0))
+    # hard limit: exactly 3 (r < 1), 3 or 1 (r = 1), 1 (r > 1)
+    assert np.all(d > 1.01) and np.all(d < 2.99), d
+
+
 if __name__ == "__main__":
-    np.savez_compressed(GAP_FILE, gap=_default_gap(_fx()), width=AMD_FLOOR_WIDTH)
+    np.savez_compressed(GAP_FILE, gap=_default_gap(_fx()), width=AMD_FLOOR_WIDTH,
+                        denom_width=AMD_DENOM_FLOOR_WIDTH)
     print("wrote", GAP_FILE)

@@ -53,7 +53,7 @@ from legoesm.atmosphere.physics.turbulence.lasd_core import lasd_cs2 as _lasd_cs
 from legoesm.atmosphere.physics.turbulence.vreman import (
     VREMAN_BBETA_GUARD_WIDTH, vreman_nu_t as _vreman_nu_t_core)
 from legoesm.atmosphere.physics.turbulence.amd import (
-    AMD_FLOOR_WIDTH, amd_nu_t as _amd_nu_t_core)
+    AMD_DENOM_FLOOR_WIDTH, AMD_FLOOR_WIDTH, amd_nu_t as _amd_nu_t_core)
 from legoesm.core.field import Field
 from legoesm.core.state import (
     PlaneNonHydrostaticState,
@@ -1376,7 +1376,8 @@ def _compute_vreman_K_m_plane(u_yxz, v_yxz, w_yxz_half, grid, height_coord,
 
 
 def _compute_amd_K_m_plane(u_yxz, v_yxz, w_yxz_half, grid, height_coord,
-                           c_amd, floor_width=AMD_FLOOR_WIDTH):
+                           c_amd, floor_width=AMD_FLOOR_WIDTH,
+                           denom_floor_width=AMD_DENOM_FLOOR_WIDTH):
     """Anisotropic Minimum-Dissipation eddy viscosity ``K_m`` at cell centres —
     OPTIONAL alternative to :func:`_compute_smagorinsky_K_m_plane`. Computes the
     nine A-grid velocity gradients (the SAME helper Vreman uses) and defers the
@@ -1390,7 +1391,8 @@ def _compute_amd_K_m_plane(u_yxz, v_yxz, w_yxz_half, grid, height_coord,
         u_yxz, v_yxz, w_yxz_half, grid, height_coord)
     return _amd_nu_t_core(
         dudx, dudy, dudz, dvdx, dvdy, dvdz, dwdx, dwdy, dwdz,
-        grid.dx, grid.dy, height_coord.dz, c_amd, floor_width=floor_width)
+        grid.dx, grid.dy, height_coord.dz, c_amd, floor_width=floor_width,
+        denom_floor_width=denom_floor_width)
 
 
 def _compute_dynamic_smag_cs_plane(
@@ -2233,7 +2235,7 @@ def plane_compressible_euler_slow_tendencies(
             # average) ⇒ MPI-safe. K_h = K_m / Pr (same Prandtl).
             K_m = _compute_amd_K_m_plane(
                 u, v, w, grid, height_coord, config.amd_c,
-                config.amd_floor_width)
+                config.amd_floor_width, config.amd_denom_floor_width)
             sgs_prandtl = config.smagorinsky_prandtl
         else:
             # CRM/LES: Smagorinsky-Lilly EDDY viscosity. Full 3D strain (takes

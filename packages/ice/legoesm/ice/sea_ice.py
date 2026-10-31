@@ -36,6 +36,7 @@ from legoesm.thermo import (
 from legoesm.core.bulk_flux import (
     simple_bulk_fluxes,
     compute_most_fluxes,
+    large_yeager_widths,
     surface_reference_state,
     nemo_si3_constant_fluxes,
     validate_bulk_scheme,
@@ -935,6 +936,7 @@ def _bulk_flux_dispatch(
             scheme=config.bulk_scheme,
             n_iter=config.bulk_n_iter,
             L_latent=latent_heat_sublimation(T_ice),
+            **large_yeager_widths(config),
             stability_scheme=config.stability_scheme,
         )
     else:
