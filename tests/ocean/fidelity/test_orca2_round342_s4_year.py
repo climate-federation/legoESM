@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
+from legoesm.core.precision import get_policy, set_policy
 from legoesm.ocean import bulk_flux_omip as bulk
 
 from scripts.validate.ocean_fidelity.orca2_l4 import (
@@ -26,6 +29,13 @@ from scripts.validate.ocean_fidelity.orca2_l4 import (
 from scripts.validate.ocean_fidelity.orca2_l4 import (
     nemo_testcase_l4_orca2x_round1_pilot_metrics as pilot_metrics,
 )
+
+
+@pytest.fixture(autouse=True)
+def _restore_precision_policy():
+    previous = get_policy()
+    yield
+    set_policy(previous)
 
 
 def test_calendar_month_day_ranges_full_noleap_year() -> None:
@@ -166,7 +176,7 @@ def test_driver_explicit_k0_and_full_year_fld_read_schedule() -> None:
 @pytest.mark.parametrize(
     "expected", ["libm", "native"]
 )
-def test_driver_transcendentals_flag_round_trips_to_manifest(
+def test_driver_manifest_records_resolved_transcendentals(
     expected: str,
     tmp_path: Path,
 ) -> None:
@@ -196,8 +206,59 @@ def test_driver_transcendentals_flag_round_trips_to_manifest(
         assert Path(manifest["scalar_libm"]["path"]).is_file()
         assert len(manifest["scalar_libm"]["sha256"]) == 64
         assert manifest["scalar_libm"]["gcc_version"]
+        assert manifest["scalar_libm"]["glibc_version"]
     else:
         assert manifest["scalar_libm"] is None
+
+
+def test_driver_cli_transcendentals_reaches_card_override(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: dict[str, str] = {}
+    recipe = SimpleNamespace(
+        grid="grid", z_coord="z", model_config="model", iwm_forcing="iwm"
+    )
+
+    class FakeOcean:
+        def __init__(self, transcendentals: str = "libm") -> None:
+            self.transcendentals = transcendentals
+            self.recipe = recipe
+
+        def _replace(self, **updates):
+            seen["card_override"] = updates["transcendentals"]
+            return FakeOcean(transcendentals=updates["transcendentals"])
+
+    class FakeCard:
+        def __init__(self, ocean=None) -> None:
+            self.ocean = FakeOcean() if ocean is None else ocean
+            self.k0 = r342_driver.EXPLICIT_K0_CONFIG
+
+        def _replace(self, **updates):
+            return FakeCard(ocean=updates["ocean"])
+
+    class ReachedModelConstructionError(Exception):
+        pass
+
+    def stop_after_card(*_args, **_kwargs):
+        assert seen == {"card_override": "native"}
+        assert get_policy().transcendentals == "native"
+        raise ReachedModelConstructionError
+
+    monkeypatch.setattr(
+        bulk, "build_nemo_orca2_k0_ocean_card", lambda _root: FakeCard()
+    )
+    monkeypatch.setattr(bulk, "validate_nemo_standalone_k0", lambda _k0: None)
+    monkeypatch.setattr(r342_driver, "worktree_stamp", lambda **_kwargs: {"clean": True})
+    monkeypatch.setattr(r342_driver, "LatLonCGridOceanModel", stop_after_card)
+    with pytest.raises(ReachedModelConstructionError):
+        r342_driver.main(
+            [
+                "--steps", "1",
+                "--output-dir", str(tmp_path / "output"),
+                "--transcendentals", "native",
+            ]
+        )
 
 
 def test_driver_and_wrapper_refuse_unknown_transcendentals(tmp_path: Path) -> None:
@@ -221,13 +282,71 @@ def test_driver_and_wrapper_refuse_unknown_transcendentals(tmp_path: Path) -> No
     assert "REFUSE: --transcendentals must be libm or native" in refused.stderr
 
 
-def test_wrapper_passes_transcendentals_to_driver() -> None:
+def test_wrapper_refuses_dirty_tracked_tree(tmp_path: Path) -> None:
     wrapper = Path(r342_driver.__file__).with_name(
         "nemo_testcase_l4_orca2_round342_s4_year_legoesm_run.sh"
     )
-    source = wrapper.read_text(encoding="utf-8")
-    assert 'TRANSCENDENTALS="libm"' in source
-    assert '--transcendentals "${TRANSCENDENTALS}"' in source
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    fake_git = bin_dir / "git"
+    fake_git.write_text("#!/usr/bin/env bash\nprintf ' M tracked-file\\n'\n")
+    fake_git.chmod(0o755)
+    env = dict(os.environ)
+    env["PATH"] = f"{bin_dir}:{env['PATH']}"
+    refused = subprocess.run(
+        ["bash", str(wrapper), "--steps", "1", "--output-dir", str(tmp_path / "out")],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    assert refused.returncode == 1
+    assert "REFUSE: tracked worktree is dirty" in refused.stderr
+
+
+def test_wrapper_trailing_slash_keeps_log_outside_output_and_passes_mode(
+    tmp_path: Path,
+) -> None:
+    source_wrapper = Path(r342_driver.__file__).with_name(
+        "nemo_testcase_l4_orca2_round342_s4_year_legoesm_run.sh"
+    )
+    script_dir = tmp_path / "repo/scripts/validate/ocean_fidelity/orca2_l4"
+    script_dir.mkdir(parents=True)
+    wrapper = script_dir / source_wrapper.name
+    shutil.copyfile(source_wrapper, wrapper)
+    fake_driver = script_dir / "nemo_testcase_l4_orca2_round342_s4_year_driver.py"
+    fake_driver.write_text(
+        "import sys\nprint('FAKE_DRIVER_ARGS', *sys.argv[1:])\n",
+        encoding="utf-8",
+    )
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    fake_git = bin_dir / "git"
+    fake_git.write_text("#!/usr/bin/env bash\nexit 0\n")
+    fake_git.chmod(0o755)
+    fake_free = bin_dir / "free"
+    fake_free.write_text("#!/usr/bin/env bash\nprintf 'Mem: 1000 0 0 0 0 999\\n'\n")
+    fake_free.chmod(0o755)
+    env = dict(os.environ)
+    env["PATH"] = f"{bin_dir}:{env['PATH']}"
+    output_dir = tmp_path / "run"
+    completed = subprocess.run(
+        [
+            "bash", str(wrapper),
+            "--steps", "1",
+            "--output-dir", str(output_dir) + "/",
+            "--transcendentals", "native",
+            "--wait",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert "--transcendentals native" in completed.stdout
+    assert Path(str(output_dir) + ".log").is_file()
+    assert not (output_dir / ".log").exists()
 
 
 def test_driver_refuses_nonempty_output_before_loading_card(

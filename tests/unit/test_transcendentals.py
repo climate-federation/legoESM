@@ -16,6 +16,15 @@ from legoesm.core import transcendentals as tx
 from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
 from legoesm.core.transcendentals import atan, cos, exp, log, log10, pow, sin, tanh
 
+try:
+    tx.glibc_libm()
+    tx._glibc_version()
+except RuntimeError:
+    pytest.skip(
+        "scalar-libm oracle needs glibc libm.so.6 (not on this platform)",
+        allow_module_level=True,
+    )
+
 
 @pytest.fixture(autouse=True)
 def _restore_policy():
@@ -25,6 +34,7 @@ def _restore_policy():
     tx._compiled_libm.cache_clear()
     tx._compiled_libm_path.cache_clear()
     tx._gcc_version.cache_clear()
+    tx._glibc_version.cache_clear()
 
 
 @pytest.mark.parametrize(
@@ -148,6 +158,65 @@ def test_pow_libm_callback_dtype_matches_jax_result_type_and_native_lane(
     observed = pow(left, right)
     assert observed.dtype == expected_dtype
     np.testing.assert_array_equal(np.asarray(observed), np.asarray(native_reference))
+
+
+@pytest.mark.parametrize("dtype", [jnp.float32, jnp.float64])
+@pytest.mark.parametrize("base", [10.0, 10, jnp.asarray(10, dtype=jnp.int32)])
+def test_pow_python_scalar_and_integer_base_support_grad_and_jvp(
+    dtype, base
+) -> None:
+    set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
+    exponent = jnp.asarray(2.0, dtype=dtype)
+    tangent_in = jnp.asarray(0.25, dtype=dtype)
+    derivative = jax.grad(lambda value: pow(base, value))(exponent)
+    _, tangent = jax.jvp(lambda value: pow(base, value), (exponent,), (tangent_in,))
+    expected = jnp.power(jnp.asarray(base, dtype=dtype), exponent) * jnp.log(
+        jnp.asarray(base, dtype=dtype)
+    )
+    assert derivative.dtype == dtype
+    assert tangent.dtype == dtype
+    np.testing.assert_allclose(np.asarray(derivative), np.asarray(expected), rtol=2e-6)
+    np.testing.assert_allclose(
+        np.asarray(tangent), np.asarray(expected * tangent_in), rtol=2e-6
+    )
+
+
+@pytest.mark.parametrize("dtype", [jnp.float32, jnp.float64])
+@pytest.mark.parametrize("exponent", [3, jnp.asarray(3, dtype=jnp.int32)])
+def test_pow_integer_exponent_supports_grad_and_jvp(dtype, exponent) -> None:
+    set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
+    base = jnp.asarray(2.0, dtype=dtype)
+    tangent_in = jnp.asarray(0.25, dtype=dtype)
+    derivative = jax.grad(lambda value: pow(value, exponent))(base)
+    _, tangent = jax.jvp(lambda value: pow(value, exponent), (base,), (tangent_in,))
+    expected = jnp.asarray(3.0, dtype=dtype) * base * base
+    assert derivative.dtype == dtype
+    assert tangent.dtype == dtype
+    np.testing.assert_allclose(np.asarray(derivative), np.asarray(expected), rtol=2e-6)
+    np.testing.assert_allclose(
+        np.asarray(tangent), np.asarray(expected * tangent_in), rtol=2e-6
+    )
+
+
+def test_pow_integer_operands_promote_to_floating_callback_dtype() -> None:
+    left = jnp.asarray([2], dtype=jnp.int32)
+    set_policy(PrecisionPolicy.fp64(transcendentals="native"))
+    native = pow(left, 3)
+    native_reference = jnp.power(left, 3)
+    assert native.dtype == native_reference.dtype
+    np.testing.assert_array_equal(np.asarray(native), np.asarray(native_reference))
+
+    set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
+    observed = pow(left, 3)
+    assert jnp.issubdtype(observed.dtype, jnp.floating)
+    np.testing.assert_array_equal(np.asarray(observed), np.asarray([8.0]))
+
+
+@pytest.mark.parametrize("function", [tx._scalar_libm_binary, tx._scalar_libm_binary_reference])
+def test_direct_pow_callback_preserves_float32_with_python_scalar(function) -> None:
+    observed = function("pow", np.asarray([2.0], dtype=np.float32), 3.0)
+    assert observed.dtype == np.float32
+    np.testing.assert_array_equal(observed, np.asarray([8.0], dtype=np.float32))
 
 
 _MILLION = 1_000_000
@@ -290,6 +359,7 @@ def _clear_build_caches() -> None:
     tx._compiled_libm.cache_clear()
     tx._compiled_libm_path.cache_clear()
     tx._gcc_version.cache_clear()
+    tx._glibc_version.cache_clear()
 
 
 def test_compile_flags_participate_in_cache_key(
@@ -304,6 +374,21 @@ def test_compile_flags_participate_in_cache_key(
     _clear_build_caches()
     first = tx._compiled_libm_path()
     monkeypatch.setattr(tx, "_COMPILE_FLAGS", (*tx._COMPILE_FLAGS, "-fwrapv"))
+    tx._compiled_libm_path.cache_clear()
+    second = tx._compiled_libm_path()
+    assert first.parent != second.parent
+
+
+def test_glibc_version_participates_in_cache_key_and_build_info(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("LEGOESM_SCALAR_LIBM_CACHE", str(tmp_path / "cache"))
+    _clear_build_caches()
+    first = tx._compiled_libm_path()
+    actual_version = tx._glibc_version()
+    assert tx.libm_build_info()["glibc_version"] == actual_version
+    monkeypatch.setattr(tx, "_glibc_version", lambda: actual_version + "-plant")
     tx._compiled_libm_path.cache_clear()
     second = tx._compiled_libm_path()
     assert first.parent != second.parent

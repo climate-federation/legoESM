@@ -8,7 +8,7 @@ campaign host (glibc 2.34).  A small packaged C loop deliberately invokes the
 scalar C function once per element, in element order: NumPy ufuncs may dispatch
 their own vector math and are not an equivalent oracle.  The shared object is
 compiled fail-closed with vectorization and builtin substitution disabled and
-cached by C-source digest and GCC version.
+cached by C-source digest, GCC version, glibc version, and compile flags.
 
 The libm arm is CPU-only by construction.  Custom JVP rules preserve forward
 and reverse autodiff using d(exp)=exp and d(tanh)=1-tanh**2, with the primal
@@ -87,6 +87,22 @@ def _gcc_version() -> str:
     ).stdout.strip()
 
 
+@lru_cache(maxsize=1)
+def _glibc_version() -> str:
+    """Return the GNU C Library version that supplies the scalar libm ABI."""
+    libc = ctypes.CDLL(None)
+    try:
+        function = libc.gnu_get_libc_version
+    except AttributeError as exc:
+        raise RuntimeError("scalar-libm oracle requires glibc") from exc
+    function.argtypes = ()
+    function.restype = ctypes.c_char_p
+    version = function()
+    if version is None:
+        raise RuntimeError("glibc version query returned no version")
+    return version.decode("ascii")
+
+
 def _sha256_path(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as stream:
@@ -147,13 +163,21 @@ def _compiled_libm_path() -> Path:
         source = _C_SOURCE.read_bytes()
     except OSError as exc:
         raise RuntimeError(f"scalar-libm C source is unavailable: {_C_SOURCE}") from exc
-    source_digest = hashlib.sha256(source).hexdigest()
-    version = _gcc_version()
-    version_digest = hashlib.sha256(version.encode("utf-8")).hexdigest()
-    flags_digest = hashlib.sha256("\0".join(_COMPILE_FLAGS).encode("utf-8")).hexdigest()
+    gcc_version = _gcc_version()
+    glibc_version = _glibc_version()
+    key_digest = hashlib.sha256(
+        b"\0".join(
+            (
+                source,
+                gcc_version.encode("utf-8"),
+                glibc_version.encode("ascii"),
+                "\0".join(_COMPILE_FLAGS).encode("utf-8"),
+            )
+        )
+    ).hexdigest()
     cache_root = _cache_root()
     _ensure_secure_cache_directory(cache_root)
-    cache_dir = cache_root / f"{source_digest}-{version_digest}-{flags_digest}"
+    cache_dir = cache_root / key_digest
     _ensure_secure_cache_directory(cache_dir)
     shared_object = cache_dir / _SHARED_OBJECT_NAME
     if shared_object.is_file():
@@ -212,6 +236,7 @@ def libm_build_info() -> dict[str, str]:
         "path": str(path),
         "sha256": _verify_shared_object(path),
         "gcc_version": _gcc_version(),
+        "glibc_version": _glibc_version(),
     }
 
 
@@ -292,8 +317,12 @@ def _scalar_libm_binary(
     name: str, left: np.ndarray, right: np.ndarray
 ) -> np.ndarray:
     """Evaluate one binary libm entry point in the compiled element-order loop."""
-    left_source, right_source = np.broadcast_arrays(left, right)
-    dtype = np.result_type(left_source.dtype, right_source.dtype)
+    left_operand = left if np.isscalar(left) else np.asarray(left)
+    right_operand = right if np.isscalar(right) else np.asarray(right)
+    dtype = np.result_type(left_operand, right_operand)
+    if not np.issubdtype(dtype, np.inexact):
+        dtype = np.result_type(dtype, np.float64)
+    left_source, right_source = np.broadcast_arrays(left_operand, right_operand)
     if dtype not in (np.dtype(np.float32), np.dtype(np.float64)):
         raise TypeError(f"libm {name} requires float32/float64")
     if name != "pow":
@@ -315,8 +344,12 @@ def _scalar_libm_binary_reference(
     name: str, left: np.ndarray, right: np.ndarray
 ) -> np.ndarray:
     """Slow Python/ctypes binary reference retained only for exactness tests."""
-    left_source, right_source = np.broadcast_arrays(left, right)
-    dtype = np.result_type(left_source.dtype, right_source.dtype)
+    left_operand = left if np.isscalar(left) else np.asarray(left)
+    right_operand = right if np.isscalar(right) else np.asarray(right)
+    dtype = np.result_type(left_operand, right_operand)
+    if not np.issubdtype(dtype, np.inexact):
+        dtype = np.result_type(dtype, np.float64)
+    left_source, right_source = np.broadcast_arrays(left_operand, right_operand)
     if dtype not in (np.dtype(np.float32), np.dtype(np.float64)):
         raise TypeError(f"libm {name} requires float32/float64")
     function = getattr(glibc_libm(), name)
@@ -335,6 +368,8 @@ def _callback_binary(name: str, left: jax.Array, right: jax.Array) -> jax.Array:
     if jax.default_backend() != "cpu":
         raise RuntimeError("scalar libm policy is CPU-only")
     dtype = jnp.result_type(left, right)
+    if not jnp.issubdtype(dtype, jnp.inexact):
+        dtype = jnp.result_type(dtype, 1.0)
     left = jnp.asarray(left, dtype=dtype)
     right = jnp.asarray(right, dtype=dtype)
     shape = jnp.broadcast_shapes(left.shape, right.shape)
@@ -478,6 +513,12 @@ def pow(left, right) -> jax.Array:
     left_array, right_array = jnp.broadcast_arrays(jnp.asarray(left), jnp.asarray(right))
     if get_policy().transcendentals == "native":
         return jnp.power(left_array, right_array)
+    dtype = jnp.result_type(left, right)
+    if not jnp.issubdtype(dtype, jnp.inexact):
+        dtype = jnp.result_type(dtype, 1.0)
+    left_array, right_array = jnp.broadcast_arrays(
+        jnp.asarray(left, dtype=dtype), jnp.asarray(right, dtype=dtype)
+    )
     return _libm_pow(left_array, right_array)
 
 

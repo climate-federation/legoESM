@@ -55,6 +55,10 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+if [[ "${OUTPUT_DIR}" != "/" ]]; then
+  OUTPUT_DIR="${OUTPUT_DIR%/}"
+fi
+
 if [[ "${TRANSCENDENTALS}" != "libm" && "${TRANSCENDENTALS}" != "native" ]]; then
   echo "REFUSE: --transcendentals must be libm or native, got ${TRANSCENDENTALS}" >&2
   exit 2

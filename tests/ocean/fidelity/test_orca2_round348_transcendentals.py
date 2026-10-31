@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import sys
 from pathlib import Path
 
@@ -12,6 +13,11 @@ from legoesm.core import transcendentals as tx
 
 from scripts.validate.ocean_fidelity.orca2_l4 import (
     nemo_testcase_l4_orca2_round348_transcendentals_compare as compare,
+)
+
+_REAL_R342_MANIFEST = Path(
+    "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/orca2_r342/"
+    "legoesm_year1_2920step/run_manifest.json"
 )
 
 _TESTCASE_SCRIPTS = (
@@ -158,8 +164,12 @@ def test_metric_controls_fire_and_json_png_are_written(
         "compare_snapshot_data",
         lambda *_args: {"status": "EXACT", "snapshot_count": 2, "compared_arrays": 18},
     )
-    reference_manifest = tmp_path / "reference.json"
-    candidate_manifest = tmp_path / "candidate.json"
+    reference_root = tmp_path / "libm"
+    candidate_root = tmp_path / "native"
+    reference_root.mkdir()
+    candidate_root.mkdir()
+    reference_manifest = reference_root / "run_manifest.json"
+    candidate_manifest = candidate_root / "run_manifest.json"
     reference_manifest.write_text(
         json.dumps(
             {
@@ -182,8 +192,8 @@ def test_metric_controls_fire_and_json_png_are_written(
     )
     assert compare.main(
         [
-            "--reference-root", str(tmp_path / "libm"),
-            "--candidate-root", str(tmp_path / "native"),
+            "--reference-root", str(reference_root),
+            "--candidate-root", str(candidate_root),
             "--geometry-root", str(tmp_path / "geometry"),
             "--output-dir", str(tmp_path / "out"),
             "--days", "2",
@@ -210,34 +220,93 @@ def test_step_parser_refuses_unknown_or_unsorted_values() -> None:
         compare.parse_steps("10,8")
 
 
-def test_manifest_timing_uses_total_wall_seconds_per_completed_step(tmp_path: Path) -> None:
-    reference = tmp_path / "reference.json"
-    candidate = tmp_path / "candidate.json"
-    reference.write_text(json.dumps({
-        "steps": 2920,
-        "wall_seconds": 70284.4,
-        "jax_default_backend": "cpu",
-        "transcendentals": "libm",
-    }))
-    candidate.write_text(json.dumps({
-        "steps": 80,
-        "wall_seconds": 800.0,
-        "jax_default_backend": "cpu",
-        "transcendentals": "native",
-    }))
-    timing = compare.compare_manifest_timing(reference, candidate)
-    assert timing["reference_seconds_per_step"] == pytest.approx(24.07)
+@pytest.mark.skipif(
+    not _REAL_R342_MANIFEST.is_file(),
+    reason="certified round-342 run manifest is not present on this host",
+)
+def test_manifest_timing_accepts_copy_of_real_pre_field_r342_manifest(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    reference_root = tmp_path / "reference"
+    candidate_root = tmp_path / "candidate"
+    reference_root.mkdir()
+    candidate_root.mkdir()
+    reference = reference_root / "run_manifest.json"
+    candidate = candidate_root / "run_manifest.json"
+    shutil.copyfile(_REAL_R342_MANIFEST, reference)
+    reference_payload = json.loads(reference.read_text())
+    candidate_payload = dict(reference_payload)
+    candidate_payload.update(
+        {"steps": 80, "wall_seconds": 800.0, "transcendentals": "native"}
+    )
+    candidate.write_text(json.dumps(candidate_payload))
+    timing = compare.compare_manifest_timing(
+        reference,
+        candidate,
+        reference_root=reference_root,
+        candidate_root=candidate_root,
+    )
+    assert timing["reference_seconds_per_step"] == pytest.approx(
+        reference_payload["wall_seconds"] / reference_payload["steps"]
+    )
     assert timing["candidate_seconds_per_step"] == 10.0
-    assert timing["speedup"] == pytest.approx(2.407)
+    assert timing["speedup"] == pytest.approx(
+        timing["reference_seconds_per_step"] / 10.0
+    )
     assert timing["reference_backend"] == "cpu"
     assert timing["reference_transcendentals"] == "libm"
     assert timing["candidate_transcendentals"] == "native"
+    assert (
+        "rule=certified-pre-r348-round342-lane-used-libm"
+        in capsys.readouterr().out
+    )
 
     bad = json.loads(candidate.read_text())
     bad["jax_default_backend"] = "gpu"
     candidate.write_text(json.dumps(bad))
     with pytest.raises(RuntimeError, match="backend must be 'cpu'"):
-        compare.compare_manifest_timing(reference, candidate)
+        compare.compare_manifest_timing(
+            reference,
+            candidate,
+            reference_root=reference_root,
+            candidate_root=candidate_root,
+        )
+
+
+def test_manifest_timing_refuses_identical_paths_and_wrong_roots(
+    tmp_path: Path,
+) -> None:
+    reference_root = tmp_path / "reference"
+    candidate_root = tmp_path / "candidate"
+    wrong_root = tmp_path / "wrong"
+    for root in (reference_root, candidate_root, wrong_root):
+        root.mkdir()
+    reference = reference_root / "run_manifest.json"
+    candidate = candidate_root / "run_manifest.json"
+    payload = {
+        "status": "PASS_R342_S4_K0_LEGOESM_RUN",
+        "round": "orca2_r342",
+        "steps": 1,
+        "wall_seconds": 1.0,
+        "jax_default_backend": "cpu",
+        "transcendentals": "libm",
+    }
+    reference.write_text(json.dumps(payload))
+    candidate.write_text(json.dumps({**payload, "transcendentals": "native"}))
+    with pytest.raises(RuntimeError, match="manifest paths must differ"):
+        compare.compare_manifest_timing(
+            reference,
+            reference,
+            reference_root=reference_root,
+            candidate_root=reference_root,
+        )
+    with pytest.raises(RuntimeError, match="manifest must belong to run root"):
+        compare.compare_manifest_timing(
+            reference,
+            candidate,
+            reference_root=wrong_root,
+            candidate_root=candidate_root,
+        )
 
 
 def test_comparison_refuses_identical_roots(tmp_path: Path) -> None:

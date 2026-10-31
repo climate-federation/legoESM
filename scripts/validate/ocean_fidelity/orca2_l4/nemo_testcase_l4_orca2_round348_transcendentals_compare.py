@@ -246,11 +246,32 @@ def write_curve(rows: list[dict[str, Any]], output_path: Path) -> str:
     return hashlib.sha256(output_path.read_bytes()).hexdigest()
 
 
-def compare_manifest_timing(reference_path: Path, candidate_path: Path) -> dict[str, Any]:
-    """Compare total wall seconds per completed step from two run manifests."""
+def compare_manifest_timing(
+    reference_path: Path,
+    candidate_path: Path,
+    *,
+    reference_root: Path,
+    candidate_root: Path,
+) -> dict[str, Any]:
+    """Compare timing, accepting certified pre-r348 reference as implicit libm.
+
+    The round-342 certified reference predates the ``transcendentals`` field.
+    That lane unconditionally selected libm, so only that reference manifest
+    may omit the field; candidate manifests must state their mode explicitly.
+    """
+    require(
+        reference_path.resolve() != candidate_path.resolve(),
+        "reference and candidate manifest paths must differ",
+    )
     manifests = []
-    for path in (reference_path, candidate_path):
+    for index, (path, root) in enumerate(
+        ((reference_path, reference_root), (candidate_path, candidate_root))
+    ):
         require(path.is_file(), f"missing run manifest {path}")
+        require(
+            path.resolve().parent == root.resolve(),
+            f"{path}: manifest must belong to run root {root}",
+        )
         payload = json.loads(path.read_text(encoding="utf-8"))
         require(int(payload["steps"]) > 0, f"{path}: steps must be positive")
         require(float(payload["wall_seconds"]) > 0.0, f"{path}: wall_seconds must be positive")
@@ -258,10 +279,25 @@ def compare_manifest_timing(reference_path: Path, candidate_path: Path) -> dict[
             payload.get("jax_default_backend") == "cpu",
             f"{path}: manifest backend must be 'cpu'",
         )
+        mode = payload.get("transcendentals")
+        if mode is None:
+            require(
+                index == 0
+                and payload.get("round") == "orca2_r342"
+                and payload.get("status") == "PASS_R342_S4_K0_LEGOESM_RUN",
+                f"{path}: only the certified pre-r348 round-342 reference may "
+                "omit transcendentals",
+            )
+            mode = "libm"
+            print(
+                "R348_REFERENCE_MANIFEST_LEGACY_MODE transcendentals=libm "
+                "rule=certified-pre-r348-round342-lane-used-libm"
+            )
         require(
-            payload.get("transcendentals") in ("libm", "native"),
+            mode in ("libm", "native"),
             f"{path}: manifest transcendentals must be 'libm' or 'native'",
         )
+        payload["transcendentals"] = mode
         manifests.append(payload)
     reference_s = float(manifests[0]["wall_seconds"]) / int(manifests[0]["steps"])
     candidate_s = float(manifests[1]["wall_seconds"]) / int(manifests[1]["steps"])
@@ -312,7 +348,12 @@ def main(argv: list[str] | None = None) -> int:
     timing = (
         None
         if args.reference_manifest is None
-        else compare_manifest_timing(args.reference_manifest, args.candidate_manifest)
+        else compare_manifest_timing(
+            args.reference_manifest,
+            args.candidate_manifest,
+            reference_root=args.reference_root,
+            candidate_root=args.candidate_root,
+        )
     )
     report = {
         "format": "orca2-r348-transcendentals-arm-comparison-v1",
