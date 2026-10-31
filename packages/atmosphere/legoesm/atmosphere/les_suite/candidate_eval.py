@@ -398,13 +398,22 @@ class E2Score(NamedTuple):
     combined: Array
 
 
-def e2_score(artifact: LESReferenceArtifact, rec: RolloutRecord, dt: float) -> E2Score:
-    """Score a rollout against every LES frame after t=0: θ_l, q_t (moist), u, v
-    profiles and heat, moisture (moist), u'w', v'w' fluxes, equally weighted (RMS of
-    the per-variable normalized RMSEs). Fluxes are LES resolved+SGS totals, which are
-    snapshots at the frame time, so they are compared with the SCM flux evaluated on
-    the frame's own column (``rec`` must run :func:`e2_nsteps` steps). Momentum
-    fluxes are scored per :func:`momentum_flux_floor`."""
+class E2Profiles(NamedTuple):
+    """What :func:`e2_score` compares: per variable, the SCM (``model``) and LES
+    (``truth``) profiles on the LES heights, shape ``(frames after t=0, nz)``, with
+    the case's height weights and per-variable floors."""
+
+    steps: list
+    heights: Array
+    truth: dict
+    model: dict
+    weights: Array
+    floors: dict
+
+
+def e2_profiles(artifact: LESReferenceArtifact, rec: RolloutRecord,
+                dt: float) -> E2Profiles:
+    """The SCM and LES profiles :func:`e2_score` scores (see there)."""
     steps = _frames(artifact, dt)
     momflux_floor = momentum_flux_floor(artifact)
     if rec.fluxes.wtheta.shape[0] <= steps[-1]:
@@ -440,8 +449,21 @@ def e2_score(artifact: LESReferenceArtifact, rec: RolloutRecord, dt: float) -> E
         for key in ("wtheta", "wqt", "uw", "vw"):
             if key in truth:
                 model[key].append(interp_profile(getattr(fl, key), zh, z))
-    per = {k: normalized_rmse_series(jnp.stack(model[k]), truth[k], w, floors[k])
-           for k in truth}
+    return E2Profiles(steps=steps, heights=z, truth=truth,
+                      model={k: jnp.stack(v) for k, v in model.items()},
+                      weights=w, floors={k: floors[k] for k in truth})
+
+
+def e2_score(artifact: LESReferenceArtifact, rec: RolloutRecord, dt: float) -> E2Score:
+    """Score a rollout against every LES frame after t=0: θ_l, q_t (moist), u, v
+    profiles and heat, moisture (moist), u'w', v'w' fluxes, equally weighted (RMS of
+    the per-variable normalized RMSEs). Fluxes are LES resolved+SGS totals, which are
+    snapshots at the frame time, so they are compared with the SCM flux evaluated on
+    the frame's own column (``rec`` must run :func:`e2_nsteps` steps). Momentum
+    fluxes are scored per :func:`momentum_flux_floor`."""
+    p = e2_profiles(artifact, rec, dt)
+    per = {k: normalized_rmse_series(p.model[k], p.truth[k], p.weights, p.floors[k])
+           for k in p.truth}
     stacked = jnp.stack([per[k] for k in per])
     return E2Score(per_var=per, combined=safe_sqrt(jnp.mean(stacked ** 2)))
 

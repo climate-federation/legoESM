@@ -733,6 +733,25 @@ def test_recorded_tuned_params_are_scored_without_retuning(tmp_path):
                      cand_sha=None), {bkey: fields}, None, bset)
 
 
+def test_e2_profiles_are_what_e2_score_scores():
+    from cosci_eval import Arm
+    from legoesm.atmosphere.les_suite.scm_coupling import interp_profile
+    from tune_scm_to_les import _base_turbulence
+    base = _base_turbulence("holtslag_boville", **_RGH)[0]
+    art = _moist_artifact()
+    rec, _ = Arm(base).run(art, ev.e2_nsteps(art, 10.0), nlev=16, dt=10.0)
+    p = ev.e2_profiles(art, rec, 10.0)
+    s = ev.e2_score(art, rec, 10.0)
+    assert set(p.model) == set(p.truth) == set(s.per_var) >= {"theta", "qt", "wqt"}
+    for k in p.truth:
+        assert p.model[k].shape == p.truth[k].shape == (len(p.steps), p.heights.shape[0])
+        got = ev.normalized_rmse_series(p.model[k], p.truth[k], p.weights, p.floors[k])
+        assert float(got) == float(s.per_var[k])
+    last = rec.at(p.steps[-1])
+    want = interp_profile(last.theta_l, last.z_full, p.heights)
+    assert float(jnp.max(jnp.abs(p.model["theta"][-1] - want))) == 0.0
+
+
 def test_tune_active_refuses_a_non_finite_gradient():
     import cosci_eval
     with pytest.raises(SystemExit, match="non-finite"):
