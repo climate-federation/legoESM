@@ -404,6 +404,189 @@ Independent review: operator (Claude).
 
 ## Verification
 
-The exact commands, clean-tree status, classifications, and final pytest lines
-are appended after the landing runs.  The citation gate is run again as the
-last test before the merge commit.
+### Commit identity and environment
+
+The preserved resolved tree was committed as merge `6f323a0379` (parents
+`6b972344551649a9962eed583174b1d990ce4ff2` and
+`b8222d501476ffceccadfa31a1e21bde2ccac7ab`).  The merge commit message was
+corrected from the operator's temporary clean-check label without changing its
+tree.  Verification found merge-composition regressions, which were corrected
+in the following ordinary follow-up commits:
+
+| Commit | Correction |
+|---|---|
+| `e4be5cee4e` | Load the glibc `libm` handle lazily before resolving binary callbacks. |
+| `37aa3a0cea` | Reconcile post-merge ocean fidelity guards and composed configuration. |
+| `76272fb9fc` | Restore certified receipt citation anchors without changing runtime behavior. |
+| `02d772dad3` | Keep the stage-transport fake configuration in its test fixture. |
+| `062aeb7e84` | Follow the delegated ORCA2 initial-state builder in the source guard. |
+| `721b7d1a11` | Locate the ORCA2 stage block symbolically in the thickness guard. |
+| `b87f02d1fb` | Restore the append-only ocean configuration layout and update its exact digests. |
+| `8f91afa92f` | Preserve the certified round-341 citation endpoint while retaining the symbolic stage-block lookup. |
+
+Every command below was run with the following explicit environment (shown
+inline in the commands for reproducibility), and no NEMO executable was run:
+
+```text
+CUDA_VISIBLE_DEVICES="" JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 PYTHONPATH=packages/core:packages/ocean:packages/atmosphere:packages/coupler:packages/ice:packages/land:packages/ml:packages/tools:src
+```
+
+### Operator landing battery
+
+From a clean detached checkout of final code commit `8f91afa92f`:
+
+```bash
+env CUDA_VISIBLE_DEVICES="" JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 PYTHONPATH=packages/core:packages/ocean:packages/atmosphere:packages/coupler:packages/ice:packages/land:packages/ml:packages/tools:src taskset -c 0-7 python -m pytest -q -p no:cacheprovider tests/ocean/fidelity/test_nemo_testcase_receipt_citation_gate.py tests/test_no_private_cross_imports.py tests/ocean/unit/test_tke_nemo_terms.py tests/ocean/unit/test_nemo_recipe.py tests/ocean/unit/test_real_freshwater_closure.py tests/ocean/unit/test_nemo_ws_stage_face_mask_rank.py tests/ocean/unit/test_nemo_prognostic_barotropic_state.py tests/ocean/fidelity/test_nemo_testcase_l2_orca2_parallel_receipt_gate.py
+```
+
+Final line: `1 failed, 154 passed in 1008.22s (0:16:48)`.  The only failure
+is the main baseline classified below; all 20 receipt-citation tests pass in
+this complete run.
+
+The only failure in the pre-receipt landing run was independently reproduced
+on main `b8222d5014` with:
+
+```bash
+env CUDA_VISIBLE_DEVICES="" JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 PYTHONPATH=packages/core:packages/ocean:packages/atmosphere:packages/coupler:packages/ice:packages/land:packages/ml:packages/tools:src python -m pytest -q -p no:cacheprovider tests/ocean/unit/test_tke_nemo_terms.py::TestMomentumEVD::test_kpp_plus_nu_conv_still_raises
+```
+
+Main final line: `1 failed in 2.10s`.  The test supplies a
+`types.SimpleNamespace` where the implementation calls `_replace`; this is a
+pre-existing main failure, not a merge regression.
+
+### Certified ORCA2 exactness
+
+The rung-10/standalone exactness, standalone S4 literal comparison, and
+round-345 year gate were run together from the clean final checkout:
+
+```bash
+env CUDA_VISIBLE_DEVICES="" JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 PYTHONPATH=packages/core:packages/ocean:packages/atmosphere:packages/coupler:packages/ice:packages/land:packages/ml:packages/tools:src taskset -c 0-7 python -m pytest -q -p no:cacheprovider tests/ocean/fidelity/test_orca2_round340_standalone.py tests/ocean/fidelity/test_orca2_round344_fast_literal.py tests/ocean/fidelity/test_orca2_round345_year_gate.py
+```
+
+Final line: `38 passed, 3 skipped in 238.66s (0:03:58)`.
+
+### Main default ocean selection
+
+The repository documents that a single `pytest tests/ocean` process can abort
+because of XLA thread-pool sizing (issue #1387), so main's checked-in default
+per-file ocean selector was used for the required discovery run:
+
+```bash
+env CUDA_VISIBLE_DEVICES="" JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 PYTHONPATH=packages/core:packages/ocean:packages/atmosphere:packages/coupler:packages/ice:packages/land:packages/ml:packages/tools:src python scripts/validate/sweep_ocean_tests.py --out /tmp/orca2_r347_merge_ocean_sweep.json
+```
+
+Final line:
+```text
+[sweep] 1086 files: 1016 clean, 69 failed, 1 aborted -> /tmp/orca2_r347_merge_ocean_sweep.json
+```
+
+This run began clean at follow-up `e4be5cee4e`, but later fixes were
+committed while it was still progressing, so it is evidence for discovery and
+classification rather than the final clean-tree result.  The selector's built-in
+timeout returned `-9` for five long child tests; no manual process termination
+was performed.  Each such case was rerun on the appropriate parent without a
+timeout.
+
+A second invocation from the clean detached final-code checkout used a
+practically unbounded timeout:
+
+```bash
+env CUDA_VISIBLE_DEVICES="" JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 PYTHONPATH=packages/core:packages/ocean:packages/atmosphere:packages/coupler:packages/ice:packages/land:packages/ml:packages/tools:src python scripts/validate/sweep_ocean_tests.py --timeout 999999 --out /tmp/orca2_r347_final_ocean_sweep.json
+```
+
+It completed the first 630 files, then the fifth test in
+`test_core2_corrected_cache_default.py` remained active after the first four
+had passed.  The exact main-parent replay,
+
+```bash
+env CUDA_VISIBLE_DEVICES="" JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 PYTHONPATH=packages/core:packages/ocean:packages/atmosphere:packages/coupler:packages/ice:packages/land:packages/ml:packages/tools:src taskset -c 8-15 python -m pytest -q -p no:cacheprovider tests/ocean/unit/test_core2_corrected_cache_default.py
+```
+
+behaved identically: it collected five tests, printed four passing dots, and
+remained active in the last test.  Both processes were left untouched as
+required, so neither has a fabricated final line.  Redundant continuations of
+the remaining manifest were also left active rather than terminated; they are
+not used as classification evidence.  The complete required selector final
+line is the 1,086-file result quoted above, and every non-clean outcome from it
+was replayed on final code and/or the relevant parent as classified below.
+
+### Failure classification
+
+The discovery sweep failures were classified as follows.  A file is listed as
+pre-existing only after replaying the failing test or file on main alone (or,
+for lane-only fidelity gates, on the lane parent alone).
+
+**Merge-introduced and fixed.**  These files exposed genuine composition
+regressions and pass after the follow-up commits: the round-340/344/345
+exactness files; `test_nemo_testcase_l2_gyre_decision43_gate.py`;
+`test_nemo_testcase_l2_gyre_round160_wzv_split.py`;
+`test_nemo_testcase_l2_gyre_round51_live_operands.py`;
+`test_nemo_testcase_l4_orca2_round71_independent_month_gate.py`;
+`test_orca2_round309_selection.py`; `test_ncar_bulk.py`;
+`test_nemo_testcase_l2_gyre_gradient_gate.py`;
+`test_nemo_testcase_recipe.py`; `test_nemo_vortex_card.py`;
+`test_orca2_initial_hand_alterations.py`;
+`test_orca2_round341_stage2_thickness.py`; `test_prescribed_flow.py`; and
+`test_mass_flux_store.py`.  The final focused mass-flux rerun ended
+`80 passed, 3 skipped in 181.44s (0:03:01)`, and the final affected-regression
+batch ended `283 passed in 362.23s`.
+
+**Pre-existing on main.**  Main-alone replays reproduced the failures in:
+`test_nemo_gyre_hires_shipped_ceiling.py`;
+`test_nemo_si3_scalarmath_v2_gate.py`;
+`test_nemo_testcase_l2_gyre_round129_spread_floor_gate.py`;
+`test_nemo_testcase_round35_stamp_scope.py`;
+`test_nemo_testcase_round35_trazdf.py`;
+`test_nemo_testcase_worktree_stamp.py`; `test_recipe_case_board.py`;
+`test_swg_dg_reproduction_guards.py`; `test_recipe_option_threading.py`;
+`test_advection_grad_underflow.py`; `test_barotropic_implicit_mpas.py`;
+`test_bbl_adv_mpas.py`; `test_bbl_drag.py`; `test_config_nesting_501.py`;
+`test_diag_omip_nemo_battery.py`; `test_freesurface_helmholtz_adjoint_mpas.py`;
+`test_freshwater_local_salinity.py`; `test_full_matrix_case_list.py`;
+`test_fv3edge_barotropic.py`; `test_k_zeta_bih_resolution_scaling.py`;
+`test_leapfrog_integrator.py`; `test_momentum_rk3.py`; `test_mpas_iwm.py`;
+`test_nemo_match_recipe.py`; `test_nemo_mlf_step_transcription.py`;
+`test_nemo_sco_step_pgf.py`; `test_nemo_swg_card.py`;
+`test_nemo_zdfmxl_transcription.py`; `test_overflow_runner_parity.py`;
+`test_partial_cells_mpas.py`; `test_partial_cells_phase1.py`;
+`test_partial_cells_phase2.py`; `test_stpmlf_call_coverage.py`;
+`test_teos10_rab_bn2.py`; `test_tke_nemo_terms.py`;
+`test_zad_qco_coupled.py`; and `test_differentiability_ocean.py`.
+
+**Pre-existing on the lane parent.**  The lane-only
+`test_nemo_testcase_g1_orca2grid_ladder.py` self-aborted at the same point on
+the lane parent after preceding assertion failures;
+`test_nemo_testcase_l4_orca2_round228_receipt_citations.py` reproduced its
+stale parent citation; and the no-timeout
+`test_orca2_round323_step_paths.py` replay ended
+`1 failed, 3 passed, 1 warning in 3435.12s (0:57:15)`.
+The discovery-only round-322 failure was order/environment sensitive: the
+merge checkout passed its isolated differentiability case (`1 passed in
+1268.56s`) and the lane parent passed the complete file (`12 passed in
+1378.31s`).
+
+**Selection/infrastructure outcomes.**  The seven distributed MPI files,
+`test_metrics_tier5.py`, `test_veros_runner.py`, and the three FESOM files all
+returned pytest code 5 because the current environment collected no runnable
+tests; main-alone replays produced the same outcome.  No NEMO runtime was
+invoked.  The clean final-code replay of
+`test_orca2_round342_s4_year.py` ended `1 failed, 6 passed in 5.43s`; its only
+failure was the gate's explicit disk-capacity check (30.55 GiB available versus
+50.00 GiB required), so this is an environmental outcome rather than a merge
+regression.  The no-timeout main-parent stage-sweep replay ended
+`11 passed in 2472.04s (0:41:12)`; the EPBL replay ended
+`53 passed in 1393.68s (0:23:13)`; and the WS-tracer replay ended
+`38 passed in 1721.40s (0:28:41)`.  The core2 parent replay's matching
+four-dots-then-stall behavior is recorded with the clean selector above.
+
+### Last citation check
+
+The citation gate was run from the clean detached final-code checkout after
+the follow-up corrections, and is repeated from the clean receipt commit
+before handoff:
+
+```bash
+env CUDA_VISIBLE_DEVICES="" JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 PYTHONPATH=packages/core:packages/ocean:packages/atmosphere:packages/coupler:packages/ice:packages/land:packages/ml:packages/tools:src python -m pytest -q -p no:cacheprovider tests/ocean/fidelity/test_nemo_testcase_receipt_citation_gate.py
+```
+
+Final line: `20 passed in 17.90s`.
