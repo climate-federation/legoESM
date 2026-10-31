@@ -385,6 +385,27 @@ def make_convection_physics(
         )
 
 
+def _convective_surface_precip(dq_r_conv, p_half_col, rain_is_net_flux):
+    """Column rain flux [kg/m^2/s, +down] of a convective rain source
+    ``dq_r_conv`` (ncol, nlev) [kg/kg/s]: ``sum_k dq_r_k dp_k / g``, dp > 0
+    (p increases downward).  A signed NET flux divergence (CAM ZM) has its
+    column SUM clipped at zero; a non-negative source (bechtold/tiedtke) is
+    clipped per layer.  Shared by the hydrostatic and spectral bridges."""
+    dp = p_half_col[:, 1:] - p_half_col[:, :-1]
+    if rain_is_net_flux:
+        return jnp.maximum(jnp.sum(dq_r_conv * dp, axis=-1), 0.0) / constants.g
+    return jnp.sum(jnp.maximum(dq_r_conv, 0.0) * dp, axis=-1) / constants.g
+
+
+def _convective_surface_snow(conv_out, precip):
+    """The scheme's frozen surface flux (ZM snow; F29) bounded to
+    ``[0, precip]``, shape (ncol,); ``None`` when the scheme books none."""
+    snow = getattr(conv_out, "precip_frozen_sfc", None)
+    if snow is None:
+        return None
+    return jnp.clip(snow.reshape(precip.shape), 0.0, precip)
+
+
 # ===========================================================================
 # Hydrostatic PE
 # ===========================================================================
@@ -985,15 +1006,9 @@ def _make_hydrostatic_convection(
             # SIGN/UNITS: dq_r_conv >= 0 is a condensate source [kg/kg/s];
             # dp = p_half[k+1] - p_half[k] > 0 (p increases downward).
             if _dq_r_conv is not None:
-                _dp_col = p_half_col[:, 1:] - p_half_col[:, :-1]
-                if _tr.rain_is_net_flux:
-                    # signed field: clip the column SUM, not the layers
-                    _p_conv_diag = jnp.maximum(jnp.sum(
-                        _dq_r_conv.reshape(ncol, nlev) * _dp_col, axis=-1), 0.0) / constants.g
-                else:
-                    _p_conv_diag = jnp.sum(
-                        jnp.maximum(_dq_r_conv.reshape(ncol, nlev), 0.0)
-                        * _dp_col, axis=-1) / constants.g
+                _p_conv_diag = _convective_surface_precip(
+                    _dq_r_conv.reshape(ncol, nlev), p_half_col,
+                    _tr.rain_is_net_flux)
                 if _to_sfc:
                     # Column water removed == this flux (the q_r/q_c hand-off
                     # above is skipped); latent heat already booked by the plume.
@@ -1003,11 +1018,10 @@ def _make_hydrostatic_convection(
                     )
                     # its frozen part, when the scheme books one (ZM snow;
                     # F29), bounded by the surface flux it belongs to
-                    _snow = getattr(conv_out, "precip_frozen_sfc", None)
+                    _snow = _convective_surface_snow(conv_out, _p_conv_diag)
                     if _snow is not None:
                         _precip_conv_frozen = Field(
-                            data=jnp.clip(_snow.reshape(ncol), 0.0, _p_conv_diag)
-                            .reshape(shape_2d).astype(_ps_dtype),
+                            data=_snow.reshape(shape_2d).astype(_ps_dtype),
                             name="precip_frozen_conv", dims=dims_2d,
                             units="kg/m^2/s")
                 if isinstance(conv_prog_out, dict):
@@ -1605,7 +1619,8 @@ def _make_spectral_pe_convection(
         else:  # edmf
             prog_key, prog_init = "a_u", scheme_config.a_u_init
 
-    def physics_fn(state, grid, sigma_coord, grid_fields=None, phys_state=None):
+    def physics_fn(state, grid, sigma_coord, grid_fields=None, phys_state=None,
+                   return_sfc_precip=False):
         # 1. Transform spectral state to grid space
         fields = grid_fields
         if fields is None:
@@ -1961,19 +1976,17 @@ def _make_spectral_pe_convection(
         # layers holding none.  Its column integral IS the surface rain, so it
         # takes the surface route here exactly as on the hydrostatic bridge
         # (``_to_sfc``) and in the unified pipeline: only dq_v and dq_c are
-        # booked and the rain leaves the column (this lane has no surface
-        # precipitation channel; every precipitating species already leaves
-        # the prescribed surface this way).  Column water then closes by the
+        # booked and the rain leaves the column as surface precipitation
+        # (published with ``return_sfc_precip``, #2277).  Column water then
+        # closes by the
         # scheme's own contract, sum dp*dq_r = -sum dp*(dq_v + dq_c), which
         # requires BOTH q_v and q_c to be carried -- without q_c the detrained
         # condensate would vanish unrecorded.  ``rain_to_surface`` sends a
         # mass-flux scheme's survivor rain (bechtold/tiedtke) the same way, as
         # on the hydrostatic bridge, instead of handing it to q_r where the
-        # microphysics would evaporate it a second time.  KNOWN DIFFERENCE
-        # (user decision 2026-10-30): this lane has no surface-precipitation
-        # output, so the routed rain leaves the column unrecorded -- no precip
-        # diagnostic, and the coupled lane's freshwater export (seg_precip) is
-        # zero -- exactly as Zhang-McFarlane's net rain flux already does here.
+        # microphysics would evaporate it a second time.  The routed rain is
+        # the bridge's surface precip (``return_sfc_precip``, #2277), which the
+        # driver exports to the coupler.
         _rain_to_sfc = conv_fn is not None and (
             _tr.rain_is_net_flux or convection_config.rain_to_surface)
         if (_rain_to_sfc and conv_out.dq_r_conv_dt is not None
@@ -2118,10 +2131,31 @@ def _make_spectral_pe_convection(
             phis_hat=state.phis_hat.replace(data=jnp.zeros_like(state.phis_hat.data)),
             tracers=tracers_tend,
         )
-        return tendencies, conv_prog_out
+        if not return_sfc_precip:
+            return tendencies, conv_prog_out
+        # Surface precip [kg/m^2/s, +down] (#2277): the rain routed out of the
+        # column above, by the hydrostatic bridge's arithmetic, so the column
+        # water removed equals this flux.  Rain booked into q_r / q_c has not
+        # reached the surface (the microphysics records it): a known zero.
+        # Frozen part: the scheme's surface snow, None (unknown) when a
+        # routed scheme books none.
+        if _rain_to_sfc and conv_out.dq_r_conv_dt is not None:
+            _p = _convective_surface_precip(
+                conv_out.dq_r_conv_dt.reshape(ncol, nlev), p_half_col,
+                _tr.rain_is_net_flux)
+            _pf = _convective_surface_snow(conv_out, _p)
+        else:
+            _p = jnp.zeros((ncol,), dtype=p_s.dtype)
+            _pf = _p
+        sfc = (_p.reshape(n_lat, n_lon).astype(p_s.dtype),
+               None if _pf is None
+               else _pf.reshape(n_lat, n_lon).astype(p_s.dtype))
+        return tendencies, conv_prog_out, sfc
 
     def reset_state():
         pass
 
     physics_fn.reset_state = reset_state
+    # #2277: accepts ``return_sfc_precip=True`` (third return: surface precip).
+    physics_fn._emits_sfc_precip = True
     return physics_fn
