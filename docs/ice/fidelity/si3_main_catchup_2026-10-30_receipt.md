@@ -271,7 +271,7 @@ These main changes touch ocean/NEMO paths used by, or immediately surrounding, t
 - `config/templates/ocean/*.yaml` — main updates shipped ocean templates; none silently selects a certified private arm.
 - Added/changed SWG, TSUNAMI, GYRE-hires, VORTEX, and ORCA fidelity scripts/tests under `scripts/validate/ocean_fidelity/testcases/` and `tests/ocean/fidelity/` — retained wholesale; these are semantic-risk controls even where no production hunk conflicted.
 - `tests/ocean/fidelity/test_post_20261029_provenance_sha_gate.py` — the lane's prospective gate initially treated the catch-up merge's independently authored second-parent history as new lane evidence.  Its later one-hop exemption was also too weak: a token could be re-edited, copied or retargeted on the same line, or moved between lines and then evade validation.  The exemption now maps the same logical line through every first-parent revision back to the pre-cutoff base and requires the same token at every revision.  Three committed bypass plants fail inheritance, while a same-line citation-only re-anchor remains valid.
-- `packages/ice/legoesm/ice/{config.py,sea_ice.py}` and `scripts/run/run_omip_core2.py` — main's precipitation-closure additions changed the response pytree and pond/snow freshwater paths for every SI3 caller despite no textual conflict.  Per Decision 190, the `core2_precipitation_closure` selector defaults on.  Both CORE-II production constructors retain their explicit selections.  The nine certified NEMO-comparison pond/remap configurations whose bits could move are explicitly pinned False below; main's precipitation-routing test deliberately retains and exercises the committed True default.
+- `packages/ice/legoesm/ice/{config.py,sea_ice.py}` and `scripts/run/run_omip_core2.py` — main's precipitation-closure additions changed the response pytree and pond/snow freshwater paths for every SI3 caller despite no textual conflict.  Per Decision 190, the `core2_precipitation_closure` selector defaults on.  Both CORE-II production constructors retain their explicit selections.  Nine certified NEMO pond/remap configurations are explicitly pinned False for literal configuration provenance even though these fixtures do not move bits when unpinned.  The four m6 parent/current control configurations do move response structure or bits and are pinned False for control validity.  Main's precipitation-routing test deliberately retains and exercises the committed True default.
 
 ## Citation reconciliation
 
@@ -308,56 +308,67 @@ The merged gate retains both parents’ independent maps. All moved citations we
   precipitation-closure selector.
 ## Decision 190 follow-up measurements and fixes
 
-1. **Committed-default pond routing.**  With the committed True default,
-   `ponds.scheme="si3_lev"` production steps bypassed the certified pond-rain
-   branch.  A serial, fresh-process run of every `tests/ice/**/test_si3_o*.py`
-   and `test_nemo_si3_*.py` file collected 23 files and emitted
-   `367 passed, 1 failed, 2 deselected`; the only failure was O12
-   `test_m6_parent_commit_vs_current_across_all_other_callers`, at response
-   leaf 17 (`freshwater_flux`).  The earlier "O8–O16 30 passed" was a selected
-   master-scorer run, not the requested filename-wide run, so it never
-   collected O12 or O13.  The following nine NEMO-comparison configurations
-   are now explicitly False, and only these configurations are opted out:
-   O12 production wiring, lid restart, multicategory JPL5, Decision 184c run,
+1. **Committed-default pond routing.**  The original filename-wide failure was
+   caused by the four O12 m6 parent/current control configurations (slab,
+   legacy dynamics, v2 one category, and v2 five categories): removing their
+   explicit False selections makes the control fail on the changed response
+   pytree.  By contrast, removing the other nine explicit-False selections
+   from O12 production wiring, lid restart, multicategory JPL5, Decision 184c,
    lid-on one- and five-category validation, lid-off one- and five-category
-   validation, and the O13 production remap call-site.  The four O12
-   parent/current control configurations (slab, legacy dynamics, v2 one
-   category, and v2 five categories) are explicitly False on both sides, so
-   the control continues to prove that the certified round changed nothing
-   else.  The final filename-wide result is recorded below.
+   validation, and the O13 production remap call-site still emits `85 passed`.
+   Those nine pins remain because certified NEMO-comparison configurations
+   state NEMO's setting literally, not because these particular fixtures move
+   bits.  The master scorer had one additional executed `si3_lev` configuration
+   without the pin; with the True default its precipitation-concentration
+   response is `0.8` instead of `None`.  It is now explicitly False and has a
+   production-path assertion.  The remaining `si3_lev` omissions in O12 are
+   validation-refusal inputs: the missing-`namthd_pnd` production check, and
+   (for each of lids-on and lids-off) the all-stages composition, four
+   dynamics/advection selections, two unsupported remap selections, the
+   one-category remap selection, and the ridging selection.  Each is rejected
+   before a sea-ice step can produce a response.  The grep found no other
+   executed NEMO-comparison `si3_lev` configuration without the False pin.
 
-2. **Complete inactive-column AD guard.**  On a 64-column batch with eight
-   open-water columns, gradients of `sum(h_ice * concentration)` with respect
-   to the seven shared scalar inputs `(concentration, qns_ice, qsr_ice,
-   dqns_ice, qtr_ice_top, t_bottom, snow_precipitation)` were finite only 1/7
-   on the merge (only `qns_ice`) and 7/7 on main.  Guarding every state and
-   forcing leaf at entry restores 7/7.  Main's gradient vector is
-   `(112.15480618544086, -1.418502551029677e-11,
-   -1.418502551029677e-11, 5.5976408980624675e-11,
-   -8.668037835921993e-05, 0.21751529753232843, 0.0)`; the fixed tree matches
-   to floating-point roundoff, including `t_bottom = 0.2175152975323284`.
-   Thus the review patch's 0.02% `t_bottom` drift is not present.
+2. **Inactive thermodynamics without inactive open-water gradients.**  The
+   whole-pytree entry guard fixed NaN cotangents but also stopped real gradients
+   needed by the later open-water formation stage.  For `qlead=-40`, HEAD
+   returned zero derivatives of new ice volume with respect to `qlead`, bottom
+   temperature, and salinity, while `edd34c2446` returned
+   `(-1.3096887137695114e-08, 8.220414129866561e-07,
+   4.470021523873651e-08)`.  HEAD's central-difference `qlead` slope was already
+   `-1.3096887137699779e-08`, proving the zero AD result was false.  The quoted
+   review values `2.06e-6` and `1.12e-7` are real at `qlead=-100`, not at
+   `qlead=-40`.  The fix guards only the inactive thermodynamic operands, then
+   restores the live entry state before open-water formation.  All three AD
+   values now match main to roundoff, and the sub-epsilon
+   `d(concentration_out)/d(concentration_in)` is restored from zero to one.
 
-3. **Non-vacuous AD plants.**  The old remap fixture stayed green without its
-   guard.  It now uses the physical sub-epsilon thickness
-   `(0, 0, 1e-300)` with content equal to enthalpy times thickness.  Removing
-   the remap guard produces three NaN cotangents and fails its test.  Removing
-   the entry guard makes the dedicated inactive-`h_ice` cotangent and the
-   seven-input batch tests fail (`2 failed`); restoring it makes inactive
-   cotangents zero and live cotangents one.
+3. **Non-vacuous AD plants.**  The remap plant remains unchanged.  The former
+   entry-guard plant called `_guard_inactive_columns` directly and could not
+   detect a missing production guard: deleting the state guard left all
+   `12 passed` while production gradients for concentration, snow thickness,
+   surface temperature, ice enthalpy, and layer salinity contained NaNs.  The
+   replacement differentiates the real column step over the entire state and
+   fails when that guard is removed.  The shared-forcing production test fails
+   when its guard is removed.  The new ice-forming open-water test separately
+   prevents either guard from suppressing real formation gradients.
 
 4. **Provenance SHA history.**  The one-hop exemption accepted all three
    reported bypass classes.  The replacement walks to the pre-cutoff base and
-   requires token continuity on the mapped line at every revision.  Committed
-   plants cover later re-editing, same-line copy/retargeting, and a moved
-   token; a fourth control proves same-line citation-only edits remain valid.
-   The focused full gate emits `1516 passed in 18.83s` before the final clean
-   checkout rerun.
+   requires token continuity on the mapped line at every revision.  The four
+   original plants exercised only `_sha_survives_line_history`; reverting the
+   real `inherited_parent_sha` entry point to one hop therefore still emitted
+   `1516 passed`.  A temporary three-commit Git history now drives the bypass
+   through `validate_document`; it fails under the one-hop revert and keeps the
+   full-history implementation bound end to end.
 
 5. **CEN2 certified direct callers.**  The ORCA2 round-257 writer gate and
-   GYRE round-72 tracer-stage probe now pass
-   `_certified_nemo_storage=True` explicitly.  Their wrappers emit
-   `8 passed in 1.11s` and `2 passed in 0.41s`, respectively.
+   GYRE round-72 tracer-stage probe pass `_certified_nemo_storage=True`
+   explicitly.  Removing both selections still left their old wrappers green
+   (`8 passed` and `2 passed`) because no wrapper executed either CEN2 call.
+   Each caller now routes through a directly executed wrapper plant that
+   requires the certified selection; the focused suites collect nine and three
+   tests, and removing either selection fails its own production-call plant.
 
 6. **Slow parent controls.**  Project addopts deselect both controls under an
    ordinary run.  Explicit final-HEAD `-m slow` results are recorded below.
@@ -385,7 +396,7 @@ Every observed stable failure is classified here.
 | Test node(s) | Classification | Disposition / cause |
 |---|---|---|
 | `test_si3_surface.py::test_libm_pow_matches_glibc_and_differentiates` | merge-introduced, fixed here | original merge dereferenced lazy `_LIBM=None`; cherry-picked `e4be5cee4e29aa2c71bf5802e2ccee7df5ca0fb9`, using `glibc_libm().pow` |
-| `test_bitz_lipscomb.py` open-water reverse-mode regressions | merge-introduced, fixed here | guarded every state and forcing leaf at column-step entry; the seven shared gradients match main and the dedicated inactive-`h_ice` plant is non-vacuous |
+| `test_bitz_lipscomb.py` open-water reverse-mode regressions | merge-introduced, corrected here | guarded inactive thermodynamic operands only, restored the live entry state before formation, and bound both guards plus main's real formation gradients through production tests |
 | main's remap-only Bitz regression (now `test_cumulative_remap_reverse_mode_finite_at_zero_thickness`) | merge-introduced, fixed here | applied main's F3 guard intent to the lane's live cumulative remap and replaced the vacuous fixture; no deleted duplicate helper was restored |
 | landing battery KPP validation-order node recorded above | merge-introduced, fixed in the original catch-up | main closure evaluation ran before the lane's unchanged fail-closed refusal; ordering was corrected and the node passed |
 | 15 nodes in `test_nemo_testcase_receipt_citation_gate.py` on the first clean follow-up run | follow-up source-shift, fixed here | the AD guards, dual CEN2 path, and catch-up-2 core changes moved 149 mapped endpoints; all audited Markdown citations and the executable map were re-anchored with literal insertion maps and explicit replacement anchors; pre-commit result is `42 passed` plus the two expected dirty-worktree provenance refusals |

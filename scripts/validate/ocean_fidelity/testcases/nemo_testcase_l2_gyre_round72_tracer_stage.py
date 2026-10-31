@@ -133,6 +133,15 @@ def _live_trace(card, seeded, freshwater, surface):
     return trace, source_rates[0]
 
 
+def _certified_cen2_rhs(tracer, p_u, p_v, p_w, thickness, active, grid):
+    """Run this replay's production CEN2 call with literal NEMO storage."""
+
+    return model_module._nemo_cen2_tracer_rhs(
+        tracer, p_u, p_v, p_w, thickness, active, grid,
+        _certified_nemo_storage=True,
+    )
+
+
 def _live_stage_rows(trace, sources, card, records, masks) -> tuple[dict, dict]:
     nlev = card.recipe.z_coord.n_levels
     active = jnp.asarray(card.recipe.z_coord.is_active, dtype=jnp.float64)
@@ -141,9 +150,8 @@ def _live_stage_rows(trace, sources, card, records, masks) -> tuple[dict, dict]:
 
     @jax.jit
     def cen2_rhs(tracer, p_u, p_v, p_w, thickness):
-        return model_module._nemo_cen2_tracer_rhs(
-            tracer, p_u, p_v, p_w, thickness, active, card.recipe.grid,
-            _certified_nemo_storage=True)
+        return _certified_cen2_rhs(
+            tracer, p_u, p_v, p_w, thickness, active, card.recipe.grid)
 
     for stage in (1, 2):
         record = records[stage]["fields"]

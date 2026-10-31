@@ -49,3 +49,17 @@ def test_stage2_transport_hook_is_default_inert() -> None:
     assert hooks._replace(
         stage2_tracer_transport_override=target
     ).stage2_tracer_transport_override is target
+
+
+def test_production_cen2_call_selects_certified_nemo_storage(monkeypatch) -> None:
+    sentinel = object()
+
+    def fake_cen2(*args, **kwargs):
+        assert len(args) == 7
+        assert kwargs == {"_certified_nemo_storage": True}
+        return sentinel
+
+    monkeypatch.setattr(
+        GATE.model_module, "_nemo_cen2_tracer_rhs", fake_cen2
+    )
+    assert GATE._certified_cen2_rhs(*range(7)) is sentinel

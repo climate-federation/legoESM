@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 import pytest
 
 jax.config.update("jax_enable_x64", True)
@@ -174,6 +175,18 @@ def test_si3_column_step_reverse_mode_finite_on_open_water_and_bare_ice():
     assert bool(jnp.all(jnp.isfinite(g_h))), g_h
     assert float(jnp.abs(g_h[1:]).max()) > 0.0     # ice columns stay live
 
+    def state_loss(value):
+        result = si3_column_step_arrays(
+            value, forcing, 3600.0, c, si3=si3
+        ).exit
+        return sum(jnp.sum(leaf) for leaf in jax.tree.leaves(result))
+
+    state_gradient = jax.grad(state_loss)(state)
+    assert all(
+        bool(jnp.all(jnp.isfinite(leaf)))
+        for leaf in jax.tree.leaves(state_gradient)
+    ), state_gradient
+
 
 def test_si3_column_step_shared_forcing_gradients_finite_with_open_water_batch():
     """All seven shared inputs remain finite with 8 open-water columns."""
@@ -234,17 +247,66 @@ def test_si3_column_step_shared_forcing_gradients_finite_with_open_water_batch()
     assert all(bool(jnp.isfinite(value)) for value in gradients), gradients
 
 
-def test_inactive_column_guard_stops_h_ice_cotangent():
-    """Removing the entry guard revives cotangents in open-water h_ice."""
-    from legoesm.ice import bitz_lipscomb as bl
+def test_ice_forming_open_water_gradients_match_main_and_finite_difference():
+    """Open-water formation keeps every gradient present on main edd34c2446."""
+    from legoesm.ice.bitz_lipscomb import (
+        SI3ColumnArrays,
+        SI3SurfaceForcing,
+        si3_column_step_arrays,
+    )
+    from legoesm.ice.config import SI3ThermoConfig
+    from legoesm.ice.constants_config import NEMO_SI3_CONSTANTS_CONFIG as c
 
-    active = jnp.asarray([False] * 8 + [True] * 56)
-    h_ice = jnp.linspace(0.0, 2.0, 64, dtype=jnp.float64)
-    gradient = jax.grad(
-        lambda h: jnp.sum(bl._guard_inactive_columns(h, active, h.dtype))
-    )(h_ice)
-    assert bool(jnp.all(gradient[:8] == 0.0)), gradient
-    assert bool(jnp.all(gradient[8:] == 1.0)), gradient
+    zero = jnp.zeros((1,), dtype=jnp.float64)
+    zero_layers = jnp.zeros((1, 3), dtype=jnp.float64)
+
+    def run(concentration, qlead, t_bottom, sss):
+        state = SI3ColumnArrays(
+            jnp.asarray([concentration]), zero, zero,
+            jnp.asarray([c.T0]), zero_layers, zero_layers,
+            zero, zero_layers, zero,
+        )
+        forcing = SI3SurfaceForcing(
+            qns_ice=zero, qsr_ice=zero, dqns_ice=zero,
+            qtr_ice_top=zero, t_bottom=jnp.asarray([t_bottom]),
+            sss=jnp.asarray([sss]), evaporation=zero,
+            snow_precipitation=zero, qprec_ice=zero,
+            qcn_ice_bottom=zero, qsb_ice_bottom=zero, fhld=zero,
+            qlead=jnp.asarray([qlead]),
+        )
+        return si3_column_step_arrays(
+            state, forcing, 3600.0, c, si3=SI3ThermoConfig()
+        ).exit
+
+    def ice_volume(qlead, t_bottom, sss):
+        out = run(0.0, qlead, t_bottom, sss)
+        return out.h_ice[0] * out.concentration[0]
+
+    args = (-40.0, 271.27, 34.7)
+    gradient = jax.grad(ice_volume, argnums=(0, 1, 2))(*args)
+    main_gradient = np.asarray((
+        -1.3096887137695114e-08,
+        8.220414129866561e-07,
+        4.470021523873651e-08,
+    ))
+    np.testing.assert_allclose(np.asarray(gradient), main_gradient, rtol=2e-15)
+
+    for index, epsilon in enumerate((1.0e-3, 1.0e-4, 1.0e-4)):
+        plus = list(args)
+        minus = list(args)
+        plus[index] += epsilon
+        minus[index] -= epsilon
+        finite_difference = (
+            ice_volume(*plus) - ice_volume(*minus)
+        ) / (2.0 * epsilon)
+        np.testing.assert_allclose(
+            float(gradient[index]), float(finite_difference), rtol=1e-7
+        )
+
+    concentration_gradient = jax.grad(
+        lambda concentration: run(concentration, *args).concentration[0]
+    )(5.0e-11)
+    assert float(concentration_gradient) == 1.0
 
 
 def test_cumulative_remap_reverse_mode_finite_at_zero_thickness():

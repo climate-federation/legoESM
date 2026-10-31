@@ -58,6 +58,20 @@ def test_classifier_names_zfv_and_preserves_both_labels():
     assert result["predictions"]["R257-P3"] == "CONFIRMED"
 
 
+def test_production_cen2_call_selects_certified_nemo_storage(monkeypatch):
+    from legoesm.ocean.dynamics import ocean_model_latlon_cgrid as model_module
+
+    sentinel = object()
+
+    def fake_cen2(*args, **kwargs):
+        assert len(args) == 7
+        assert kwargs == {"_certified_nemo_storage": True}
+        return sentinel
+
+    monkeypatch.setattr(model_module, "_nemo_cen2_tracer_rhs", fake_cen2)
+    assert gate._certified_cen2_rhs(*range(7)) is sentinel
+
+
 @pytest.mark.parametrize("plant", gate.PLANTS[1:])
 def test_every_plant_refuses(plant):
     reports = [_report("independent"), _report("given_nemo_entry")]

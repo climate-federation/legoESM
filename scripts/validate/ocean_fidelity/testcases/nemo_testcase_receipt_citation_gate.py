@@ -13410,6 +13410,79 @@ _reanchor(
     'packages/ice/legoesm/ice/bitz_lipscomb.py:2113-2115',
 )
 
+# Resume 4 keeps the same certified statements while separating inactive
+# thermodynamics from live open-water formation gradients.  Re-anchor every
+# historical SI3 citation moved by that local insertion and the Decision 190
+# production-wiring assertions.
+_reanchor(
+    'tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:1-1151',
+    'tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:1-1153',
+    anchors=['"""Direct unit and master-record tests for the SI3 O8--O14 0-ULP scoring driver."""',
+             ('    }', 8), 1153],
+)
+_reanchor(
+    'tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:274-964',
+    'tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:274-966',
+    anchors=['def test_production_call_sites_route_through_o8_o12_and_fail_when_reverted(',
+             'assert calls == ["_cumulative_remap", "_cumulative_remap"]', 693],
+)
+_reanchor(
+    'tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:1-1170',
+    'tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:1-1172',
+    anchors=['"""Direct unit and master-record tests for the SI3 O8--O14 0-ULP scoring driver."""',
+             '            verify(planted)', 1172],
+)
+_reanchor(
+    'packages/ice/legoesm/ice/bitz_lipscomb.py:2299-2317',
+    'packages/ice/legoesm/ice/bitz_lipscomb.py:2313-2331',
+    anchors=['def si3_ice_thd_frazil(qlead, *, rn_hinew, ln_frazil) -> SI3Frazil:',
+             'return SI3Frazil(ht_i_new=ht_i_new, fraz_frac=zero)', 19],
+)
+_reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:2299',
+          'packages/ice/legoesm/ice/bitz_lipscomb.py:2313')
+_reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:2287',
+          'packages/ice/legoesm/ice/bitz_lipscomb.py:2301')
+_reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:2229',
+          'packages/ice/legoesm/ice/bitz_lipscomb.py:2243')
+_repin('packages/ice/legoesm/ice/bitz_lipscomb.py:2226',
+       ['post_da = _si3_column_thd_da(', 1])
+_reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:2322',
+          'packages/ice/legoesm/ice/bitz_lipscomb.py:2336')
+_reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:2354',
+          'packages/ice/legoesm/ice/bitz_lipscomb.py:2368')
+_reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:2393',
+          'packages/ice/legoesm/ice/bitz_lipscomb.py:2407')
+_reanchor(
+    'packages/ice/legoesm/ice/bitz_lipscomb.py:2072-2273',
+    'packages/ice/legoesm/ice/bitz_lipscomb.py:2072-2287',
+    anchors=['def si3_column_step_arrays(state: SI3ColumnArrays,', ('return trace', 2), 216],
+)
+_reanchor(
+    'packages/ice/legoesm/ice/bitz_lipscomb.py:2228-2273',
+    'packages/ice/legoesm/ice/bitz_lipscomb.py:2242-2287',
+    anchors=['# `ice_thd_frazil` supplies ht_i_new', ('return trace', 2), 46],
+)
+_repin('packages/ice/legoesm/ice/bitz_lipscomb.py:41,1080-1081,2175', [
+    'frq_m: jax.Array | float = 1.0',
+    'zf_tt = sr(sr(qcn_ice_bot + qsb_ice_bot) + fhld) + sr(qtr_ice_bot * frq_m)',
+    'zq_bot = _maxsd(sr(zf_tt * dt), 0.0)',
+    '"frq_m": jnp.asarray(thermo_forcing.frq_m, dtype=dtype),', 4])
+_repin('packages/ice/legoesm/ice/bitz_lipscomb.py:1103-1108,1111-1121,1124-1132,2176,2178', [
+    'falling = sprecip > 0.0', 'h_s = jnp.where(falling, h_s + zh_s[0], h_s)',
+    'zdeltah = -_minsd(sr(sr(evap_ice * r1_rhos) * dt), h_s)',
+    'zdeltah = _minsd(zdeltah - zdum, 0.0)', ('for jk in range(nlay_s + 1):', 2),
+    'zh_s[jk] = jnp.where(melt, _maxsd(zh_s[jk] + zdum, 0.0), zh_s[jk])',
+    '"sprecip": jnp.asarray(thermo_forcing.snow_precipitation, dtype=dtype),',
+    '"evap_ice": jnp.asarray(thermo_forcing.evaporation, dtype=dtype),', 28])
+_repin('packages/ice/legoesm/ice/bitz_lipscomb.py:1034-1035,2176-2178', [
+    'rDt_ice: float, rn_snwblow: float, rn_sinew: float, nn_icesal: int,',
+    ('constants: IceConstantsConfig,', 7),
+    '"sprecip": jnp.asarray(thermo_forcing.snow_precipitation, dtype=dtype),',
+    '"evap_ice": jnp.asarray(thermo_forcing.evaporation, dtype=dtype),', 5])
+_repin('packages/ice/legoesm/ice/bitz_lipscomb.py:2176,2178', [
+    '"sprecip": jnp.asarray(thermo_forcing.snow_precipitation, dtype=dtype),',
+    '"evap_ice": jnp.asarray(thermo_forcing.evaporation, dtype=dtype),', 2])
+
 UNAUDITED_ROUNDS = ("1-24 -- hand-checked only; their citations are not in "
                     "CITATION_MAP and this gate does not read them")
 

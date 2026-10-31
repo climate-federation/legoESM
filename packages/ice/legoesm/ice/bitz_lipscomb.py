@@ -2098,13 +2098,13 @@ def si3_column_step_arrays(state: SI3ColumnArrays,
     # identical.
     def guard_inactive_leaf(value):
         return _guard_inactive_columns(value, gathered_at_entry, dtype)
-    state = jax.tree.map(guard_inactive_leaf, state)
-    forcing = jax.tree.map(guard_inactive_leaf, forcing)
-    e_ice = jnp.asarray(state.e_ice)
-    h_ice = jnp.asarray(state.h_ice, dtype=dtype)
-    h_snow = jnp.asarray(state.h_snow, dtype=dtype)
-    S_layers = jnp.asarray(state.S_layers, dtype=dtype)
-    e_snow = jnp.asarray(state.e_snow, dtype=dtype)
+    thermo_state = jax.tree.map(guard_inactive_leaf, state)
+    thermo_forcing = jax.tree.map(guard_inactive_leaf, forcing)
+    e_ice = jnp.asarray(thermo_state.e_ice)
+    h_ice = jnp.asarray(thermo_state.h_ice, dtype=dtype)
+    h_snow = jnp.asarray(thermo_state.h_snow, dtype=dtype)
+    S_layers = jnp.asarray(thermo_state.S_layers, dtype=dtype)
+    e_snow = jnp.asarray(thermo_state.e_snow, dtype=dtype)
     if t_i_entry is None:
         T_i_old = ice_temperature_from_enthalpy(e_ice, S_layers, constants)
     else:
@@ -2143,39 +2143,39 @@ def si3_column_step_arrays(state: SI3ColumnArrays,
     }
     if namelist is not None:
         nml.update(namelist)
-    a_i_arr = jnp.asarray(state.concentration, dtype=dtype)
+    a_i_arr = jnp.asarray(thermo_state.concentration, dtype=dtype)
     at_i_arr = a_i_arr if at_i is None else jnp.asarray(at_i, dtype=dtype)
-    t_bo_arr = jnp.asarray(forcing.t_bottom, dtype=dtype)
-    if nml["nn_icesal"] == 4 and forcing.sst_m is not None:
-        sst_dh = jnp.asarray(forcing.sst_m, dtype=dtype)
+    t_bo_arr = jnp.asarray(thermo_forcing.t_bottom, dtype=dtype)
+    if nml["nn_icesal"] == 4 and thermo_forcing.sst_m is not None:
+        sst_dh = jnp.asarray(thermo_forcing.sst_m, dtype=dtype)
     else:
         # C1D has no SST in its forcing record; snow-ice water enthalpy uses t_bo - rt0.
         sst_dh = t_bo_arr - constants.T0
     entry = {
         "h_i": h_ice,
         "h_s": h_snow,
-        "t_su": jnp.asarray(state.T_surface, dtype=dtype),
+        "t_su": jnp.asarray(thermo_state.T_surface, dtype=dtype),
         "t_i": T_i_old,
         "t_s": T_s_old,
         "e_i": e_ice,
         "e_s": e_snow,
         "sz_i": S_layers,
-        "s_i": jnp.asarray(state.S_bulk, dtype=dtype),
+        "s_i": jnp.asarray(thermo_state.S_bulk, dtype=dtype),
         "a_i": a_i_arr,
         "at_i": at_i_arr,
         "t_bo": t_bo_arr,
-        "sss": jnp.asarray(forcing.sss, dtype=dtype),
+        "sss": jnp.asarray(thermo_forcing.sss, dtype=dtype),
         "sst": sst_dh,
-        "qns_ice": jnp.asarray(forcing.qns_ice, dtype=dtype),
-        "qsr_ice": jnp.asarray(forcing.qsr_ice, dtype=dtype),
-        "dqns_ice": jnp.asarray(forcing.dqns_ice, dtype=dtype),
-        "qtr_ice_top": jnp.asarray(forcing.qtr_ice_top, dtype=dtype),
-        "qsb_ice_bot": jnp.asarray(forcing.qsb_ice_bottom, dtype=dtype),
-        "fhld": jnp.asarray(forcing.fhld, dtype=dtype),
-        "frq_m": jnp.asarray(forcing.frq_m, dtype=dtype),
-        "sprecip": jnp.asarray(forcing.snow_precipitation, dtype=dtype),
-        "qprec_ice": jnp.asarray(forcing.qprec_ice, dtype=dtype),
-        "evap_ice": jnp.asarray(forcing.evaporation, dtype=dtype),
+        "qns_ice": jnp.asarray(thermo_forcing.qns_ice, dtype=dtype),
+        "qsr_ice": jnp.asarray(thermo_forcing.qsr_ice, dtype=dtype),
+        "dqns_ice": jnp.asarray(thermo_forcing.dqns_ice, dtype=dtype),
+        "qtr_ice_top": jnp.asarray(thermo_forcing.qtr_ice_top, dtype=dtype),
+        "qsb_ice_bot": jnp.asarray(thermo_forcing.qsb_ice_bottom, dtype=dtype),
+        "fhld": jnp.asarray(thermo_forcing.fhld, dtype=dtype),
+        "frq_m": jnp.asarray(thermo_forcing.frq_m, dtype=dtype),
+        "sprecip": jnp.asarray(thermo_forcing.snow_precipitation, dtype=dtype),
+        "qprec_ice": jnp.asarray(thermo_forcing.qprec_ice, dtype=dtype),
+        "evap_ice": jnp.asarray(thermo_forcing.evaporation, dtype=dtype),
         "hfx_err_dif": zero if hfx_err_dif is None else jnp.asarray(hfx_err_dif, dtype=dtype),
         "hfx_dif": zero if hfx_dif is None else jnp.asarray(hfx_dif, dtype=dtype),
     }
@@ -2194,7 +2194,7 @@ def si3_column_step_arrays(state: SI3ColumnArrays,
         gravity=canonical_constants.g_nemo,
         constants=constants,
     )
-    post_zdf = _zdf_dh_override[0] if _zdf_dh_override else state._replace(
+    post_zdf = _zdf_dh_override[0] if _zdf_dh_override else thermo_state._replace(
         T_surface=o10.o9.zdf.t_su,
         e_ice=o10.o9.zdf.e_i,
         e_snow=o10.o9.zdf.e_s,
@@ -2208,7 +2208,7 @@ def si3_column_step_arrays(state: SI3ColumnArrays,
         o10.o9.dh.e_s,
         o10.o9.dh.s_i,
         o10.o9.dh.sz_i,
-        state.age_volume,
+        thermo_state.age_volume,
     )
     # `ice_thd_temp` is diagnostic because enthalpy is prognostic (:221-247).
     post_temp1 = post_dh
@@ -2217,14 +2217,28 @@ def si3_column_step_arrays(state: SI3ColumnArrays,
     post_temp2 = post_sal
     if _return_stage_outputs:
         post_da, da_out = _si3_column_thd_da(
-            state, post_temp2, forcing, si3, dt, constants,
+            thermo_state, post_temp2, thermo_forcing, si3, dt, constants,
             at_i=at_i_arr, sfx_lam=sfx_lam,
             hfx_thd=o10.o9.dh.fluxes.hfx_thd if hfx_thd is None else hfx_thd,
             wfx_lam=wfx_lam, _return_da_outputs=True,
         )
     else:
-        post_da = _si3_column_thd_da(state, post_temp2, forcing, si3, dt, constants)
+        post_da = _si3_column_thd_da(
+            thermo_state, post_temp2, thermo_forcing, si3, dt, constants
+        )
         da_out = None
+    # NEMO never gathers thermodynamics for entry concentrations <= epsi10.
+    # Feed those columns' unmodified entry state into the later open-water
+    # formation stage so only the genuinely inactive thermodynamic operands
+    # are stopped; qlead, bottom temperature, salinity, and sub-epsilon entry
+    # concentration keep their real open-water gradients.
+    post_da = jax.tree.map(
+        lambda updated, entry_value: _guard_inactive_columns(
+            updated, gathered_at_entry, dtype, inactive_value=entry_value
+        ),
+        post_da,
+        state,
+    )
     # `ice_thd_frazil` supplies ht_i_new (O7_REF ppsrc `icethd.f90:174`).
     frazil = si3_ice_thd_frazil(
         forcing.qlead,
@@ -2401,8 +2415,10 @@ def _si3_column_thd_da(entry, post_temp2, forcing, si3, dt, constants, *,
     return post_da
 
 
-def _guard_inactive_columns(value, active_columns, dtype):
-    """Stop inactive-column cotangents without changing forward values."""
+def _guard_inactive_columns(
+    value, active_columns, dtype, *, inactive_value=None,
+):
+    """Stop inactive cotangents, or select a live inactive-stage value."""
     array = jnp.asarray(value, dtype=dtype)
     if array.ndim < active_columns.ndim:
         array = jnp.broadcast_to(array, active_columns.shape)
@@ -2410,4 +2426,9 @@ def _guard_inactive_columns(value, active_columns, dtype):
         active_columns,
         active_columns.shape + (1,) * (array.ndim - active_columns.ndim),
     )
-    return jnp.where(active, array, jax.lax.stop_gradient(array))
+    inactive = (
+        jax.lax.stop_gradient(array)
+        if inactive_value is None
+        else jnp.asarray(inactive_value, dtype=dtype)
+    )
+    return jnp.where(active, array, inactive)
