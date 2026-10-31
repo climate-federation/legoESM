@@ -659,6 +659,80 @@ def test_candidate_loss_is_one_executable_and_the_regime_mean(tmp_path, monkeypa
     assert abs(float(v1) - float(v0)) > 1e-6 * abs(float(v0))
 
 
+def test_recorded_tuned_params_are_scored_without_retuning(tmp_path):
+    import cosci_eval
+    from tune_scm_to_les import _base_turbulence
+    cand = _write(tmp_path, "good_rec", _GOOD_SCALAR)
+    arm = cosci_eval.Arm(_base_turbulence("louis", **_RGH)[0], cand, "theta", False)
+    art = _cbl_artifact(seconds=600.0)
+    sha = cosci_eval._sha256(tmp_path / "good_rec.py")
+    key = "candidate:" + cand.name
+    want = {key: ["K"]}
+    settings = {"dt": 10.0, "nlev": 16, "heat_form": "enthalpy", "ke_heating": "on",
+                "baseline": "louis"}
+
+    def recorded(arms=None, cand_sha=sha, **prov):
+        out = tmp_path / "E2_prev.json"
+        out.write_text(json.dumps({
+            "stage": "E2",
+            "provenance": {"candidate": None if cand_sha is None else {"sha256": cand_sha},
+                           **settings, **prov},
+            "result": {"arms": {key: {"ad": {"params": {"K": 25.0}}}}
+                       if arms is None else arms}}))
+        return out
+
+    rec = cosci_eval.recorded_ad_params(recorded(), want, sha, settings)
+    assert rec == {key: {"K": 25.0}}
+    res = cosci_eval.stage_e2(arm, [], [("cbl.npz", art)], 16, 10.0, 0, 0.0, False, rec)
+    got = res["arms"][key]["ad_recorded"]
+    scores = cosci_eval._case_scores(arm, [("cbl.npz", art)], 16, 10.0, params={"K": 25.0})
+    assert got["params"] == {"K": 25.0} and got["scores"] == scores
+    assert got["scores"] != res["arms"][key]["default"]       # the recorded K acts
+    with pytest.raises(SystemExit, match="tuned for candidate source"):
+        cosci_eval.recorded_ad_params(recorded(), want, "0" * 64, settings)
+    for k, other in (("dt", 600.0), ("nlev", 32), ("heat_form", "theta"),
+                     ("ke_heating", "off"), ("baseline", "ysu")):
+        with pytest.raises(SystemExit, match=f"tuned with {k}="):
+            cosci_eval.recorded_ad_params(recorded(**{k: other}), want, sha, settings)
+    with pytest.raises(SystemExit, match="no tuned parameters"):
+        cosci_eval.recorded_ad_params(recorded(arms={"candidate:renamed": {
+            "ad": {"params": {"K": 25.0}}}}), want, sha, settings)
+    for params in ({}, {"K": 25.0, "extra": 1.0}):
+        with pytest.raises(SystemExit, match="tuned parameters"):
+            cosci_eval.recorded_ad_params(recorded(arms={key: {"ad": {"params": params}}}),
+                                          want, sha, settings)
+    with pytest.raises(ValueError, match="without tuning"):
+        cosci_eval.stage_e2(arm, [], [("cbl.npz", art)], 16, 10.0, 0, 0.0, True, rec)
+    with pytest.raises(SystemExit):
+        cosci_eval.parse_args(["--stage", "E2", "--baseline-only", "ysu", "--out", "x.json",
+                               "--recorded-params", str(recorded())])
+
+    # benchmark arm: its recorded overrides of every tunable field are scored too
+    bkey = "baseline:louis"
+    fields = cosci_eval._baseline_tunable_fields("louis")
+    assert fields
+    base = cosci_eval._roster_base("louis")[0]
+    ov = {m.field: float(m.bounds[1])
+          for m in cosci_eval._scheme_tunable_metas(cosci_eval._roster_base("louis")[1], (1,))}
+    bset = {"dt": 10.0, "nlev": 16, "heat_form": None, "ke_heating": None,
+            "baseline": None}
+    settings.update(bset)
+    bfile = recorded(arms={bkey: {"ad": {"params": ov}}}, cand_sha=None)
+    brec = cosci_eval.recorded_ad_params(bfile, {bkey: fields}, None, bset)
+    assert brec == {bkey: ov}
+    bres = cosci_eval.stage_e2(None, ["louis"], [("cbl.npz", art)], 16, 10.0, 0, 0.0,
+                               False, brec)
+    bgot = bres["arms"][bkey]["ad_recorded"]
+    bscores = cosci_eval._case_scores(cosci_eval.Arm(base), [("cbl.npz", art)], 16, 10.0,
+                                      turb=cosci_eval.apply_overrides_to_base(base, ov))
+    assert bgot["params"] == ov and bgot["scores"] == bscores
+    assert bgot["scores"] != bres["arms"][bkey]["default"]    # the overrides act
+    with pytest.raises(SystemExit, match="tuned parameters"):
+        cosci_eval.recorded_ad_params(
+            recorded(arms={bkey: {"ad": {"params": dict(list(ov.items())[:-1])}}},
+                     cand_sha=None), {bkey: fields}, None, bset)
+
+
 def test_tune_active_refuses_a_non_finite_gradient():
     import cosci_eval
     with pytest.raises(SystemExit, match="non-finite"):

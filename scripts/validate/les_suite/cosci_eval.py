@@ -502,7 +502,46 @@ def _case_scores(arm, artifacts, nlev, dt, params=None, turb=None):
         s = e2_score(art, rec, dt)
         out[Path(path).name] = {"per_var": {k: float(v) for k, v in s.per_var.items()},
                                 "combined": float(s.combined)}
+        jax.clear_caches()   # one case's executables at a time (kernel mapping cap)
     return out
+
+
+RECORDED_SETTINGS = ("dt", "nlev", "heat_form", "ke_heating", "baseline")
+
+
+def recorded_ad_params(path, wanted, cand_sha256, settings) -> dict:
+    """``{arm key: tuned params}`` for each arm of ``wanted`` (``{arm key: its
+    parameter names}``) from an earlier E2 output ``path`` (its ``ad`` entries), to
+    score them on other cases without re-tuning (PI 2026-10-30). Refuses a file that
+    is not E2 output, was tuned for other candidate source (``cand_sha256``, None
+    when no candidate) or under other ``settings`` (each of
+    :data:`RECORDED_SETTINGS`), holds no tuned entry for a wanted arm, or whose
+    parameter names for it differ (PI 2026-10-31)."""
+    rec = json.loads(Path(path).read_text())
+    prov = rec.get("provenance", {})
+    if rec.get("stage") != "E2":
+        raise SystemExit(f"{path}: not an E2 output")
+    got = (prov.get("candidate") or {}).get("sha256")
+    if got != cand_sha256:
+        raise SystemExit(f"{path}: tuned for candidate source {got}, not {cand_sha256}")
+    for k in RECORDED_SETTINGS:
+        if prov.get(k) != settings[k]:
+            raise SystemExit(f"{path}: tuned with {k}={prov.get(k)!r}, "
+                             f"this run has {settings[k]!r}")
+    out = {}
+    for key, names in wanted.items():
+        ad = rec["result"]["arms"].get(key, {}).get("ad")
+        if not isinstance(ad, dict) or "params" not in ad:
+            raise SystemExit(f"{path}: no tuned parameters for {key}")
+        if sorted(ad["params"]) != sorted(names):
+            raise SystemExit(f"{path}: tuned parameters {sorted(ad['params'])}, "
+                             f"{key} has {sorted(names)}")
+        out[key] = {k: float(ad["params"][k]) for k in names}
+    return out
+
+
+def _baseline_tunable_fields(name):
+    return [m.field for m in _scheme_tunable_metas(_roster_base(name)[1], (1,))]
 
 
 def tune_active(loss_of, lo, hi, x0, names, *, steps, lr):
@@ -572,7 +611,12 @@ def _regime_mean_loss(scores_fn, train):
 
 
 def stage_e2(cand_arm, base_names, artifacts, nlev, dt, steps, lr,
-             tune: bool) -> dict:
+             tune: bool, recorded: dict | None = None) -> dict:
+    """E2 scores; with ``recorded`` (every arm's tuned parameters, from
+    :func:`recorded_ad_params`, untuned runs only) those are also scored, as
+    ``ad_recorded``."""
+    if recorded is not None and tune:
+        raise ValueError("recorded tuned parameters are scored only without tuning")
     train = [(p, a) for p, a in artifacts if not _held_out(a.case_name)]
     res = {"split": {Path(p).name: {"held_out": _held_out(a.case_name),
                                     "regime": _regime(a.case_name)}
@@ -593,6 +637,7 @@ def stage_e2(cand_arm, base_names, artifacts, nlev, dt, steps, lr,
             base_rec_diff[Path(path).name] = {
                 k: float(jnp.max(jnp.abs(getattr(rc.inputs, k) - getattr(rb.inputs, k))))
                 for k in ("theta_l", "q_t", "u", "v")}
+            jax.clear_caches()
         entry["max_abs_diff_vs_baseline_rollout"] = base_rec_diff
         if tune and train and names:
             # Every compiled rollout holds kernel memory mappings (cap 65530): the
@@ -610,7 +655,12 @@ def stage_e2(cand_arm, base_names, artifacts, nlev, dt, steps, lr,
             entry["ad"] = {"params": {k: float(v) for k, v in tuned.items()}, **record,
                            "scores": _case_scores(cand_arm, artifacts, nlev, dt,
                                                   params=tuned)}
-        res["arms"]["candidate:" + cand.name] = entry
+        key = "candidate:" + cand.name
+        if recorded is not None:
+            rp = recorded[key]
+            entry["ad_recorded"] = {"params": rp, "scores": _case_scores(
+                cand_arm, artifacts, nlev, dt, params=rp)}
+        res["arms"][key] = entry
     for name in base_names:
         base, key = _roster_base(name)
         arm = Arm(base)
@@ -631,6 +681,10 @@ def stage_e2(cand_arm, base_names, artifacts, nlev, dt, steps, lr,
             entry["ad"] = {"params": ov, **record,
                            "scores": _case_scores(arm, artifacts, nlev, dt,
                                                   turb=apply_overrides_to_base(base, ov))}
+        if recorded is not None:
+            ov = recorded["baseline:" + name]
+            entry["ad_recorded"] = {"params": ov, "scores": _case_scores(
+                arm, artifacts, nlev, dt, turb=apply_overrides_to_base(base, ov))}
         res["arms"]["baseline:" + name] = entry
     return res
 
@@ -685,6 +739,9 @@ def parse_args(argv=None):
     p.add_argument("--nlev", type=int, default=SCM_NLEV)
     p.add_argument("--dt", type=float, default=SCM_DT_S)
     p.add_argument("--no-tune", action="store_true", help="E2 without AD tuning")
+    p.add_argument("--recorded-params", type=Path, default=None,
+                   help="E2 output whose tuned parameters of every scored arm are "
+                        "scored too (needs --stage E2 --no-tune)")
     p.add_argument("--out", type=Path, required=True)
     args = p.parse_args(argv)
     if args.candidate is None and not args.baseline_only:
@@ -693,6 +750,8 @@ def parse_args(argv=None):
         p.error("--candidate needs --baseline (no default)")
     if args.stage == "E0" and args.candidate is None:
         p.error("--stage E0 checks a candidate; give --candidate")
+    if args.recorded_params is not None and not (args.stage == "E2" and args.no_tune):
+        p.error("--recorded-params scores recorded parameters: needs --stage E2 --no-tune")
     return args
 
 
@@ -731,8 +790,19 @@ def main(argv=None) -> int:
     elif args.stage == "E1":
         result = stage_e1(arms, artifacts, args.nlev, args.dt)
     else:
+        recorded = None
+        if args.recorded_params is not None:
+            wanted = {"baseline:" + n: _baseline_tunable_fields(n)
+                      for n in args.baseline_only}
+            if cand_arm is not None:
+                wanted["candidate:" + cand_arm.candidate.name] = (
+                    cand_arm.candidate.bounds()[0])
+            recorded = recorded_ad_params(
+                args.recorded_params, wanted,
+                None if args.candidate is None else _sha256(args.candidate),
+                {k: getattr(args, k) for k in RECORDED_SETTINGS})
         result = stage_e2(cand_arm, args.baseline_only, artifacts, args.nlev, args.dt,
-                          args.ad_steps, args.ad_lr, not args.no_tune)
+                          args.ad_steps, args.ad_lr, not args.no_tune, recorded)
     record = {
         "stage": args.stage, "result": result,
         "provenance": {
@@ -749,6 +819,9 @@ def main(argv=None) -> int:
             "l_stage_constants": {k: v for k, v in globals().items()
                                   if k.startswith("_L_")},
             "artifacts": {p: _sha256(p) for p, _ in artifacts},
+            "recorded_params": None if args.recorded_params is None else {
+                "path": str(args.recorded_params),
+                "sha256": _sha256(args.recorded_params)},
             "jax": jax.__version__, "x64": bool(jax.config.read("jax_enable_x64")),
             "platform": jax.default_backend(),
         },
