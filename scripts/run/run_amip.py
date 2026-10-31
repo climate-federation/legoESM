@@ -139,6 +139,7 @@ from legoesm.driver.config import (
     CLUBB_SCALAR_FIELDS,
     VALID_RADIATION,
     ZM_SCALAR_FIELDS,
+    ZM_WIDTH_FIELDS,
     VALID_TURBULENCE,
     DycoreConfig,
     EvaluationConfig,
@@ -1115,6 +1116,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
                             help=f"{_cls}.{_leaf} (legal range: the scheme's "
                                  "__param_spec__). Default: the scheme's own "
                                  "value.")
+    for _f, _leaf in ZM_WIDTH_FIELDS.items():
+        parser.add_argument("--" + _f.replace("_", "-"), type=float,
+                            default=None, dest=_f,
+                            help=f"ZhangMcFarlaneConfig.{_leaf}: RULE 5 "
+                                 "smoothing width of the CAM6 detrainment "
+                                 "booking (0 = CAM's hard switch; MPAS ZM + "
+                                 "CLUBB with cld_macmic_num_steps>=2 only). "
+                                 "Default: the scheme's own value.")
     parser.add_argument("--clubb-q-flux-scale", type=float, default=None,
                         dest="clubb_q_flux_scale",
                         help="Moisture-only multiplier on CLUBB's q_v eddy "
@@ -1410,6 +1419,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "(explicit aquaplanet, ocean coefficients "
                              "everywhere). "
                              f"Default {_EXPERIMENT_DEFAULTS.zm_land_fraction}.")
+    parser.add_argument("--kain-fritsch-variant", type=str,
+                        choices=["smooth", "wrf_kfeta"],
+                        default=_EXPERIMENT_DEFAULTS.kain_fritsch_variant,
+                        dest="kain_fritsch_variant",
+                        help="Kain-Fritsch implementation: smooth (the "
+                             "differentiable surrogate) or wrf_kfeta (the "
+                             "faithful WRF v4.8.0 KF-Eta port; opt-in, NOT "
+                             "RULE 5 compliant: hard switches, #2280). "
+                             f"Default {_EXPERIMENT_DEFAULTS.kain_fritsch_variant}.")
     parser.add_argument("--zm-transport-cloud-tracers",
                         dest="zm_transport_cloud_tracers",
                         action=argparse.BooleanOptionalAction,
@@ -1472,6 +1490,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "--no-bechtold-use-ifs-cape-closure disables a "
                              "config-file default. Default "
                              f"{_EXPERIMENT_DEFAULTS.bechtold_use_ifs_cape_closure}.")
+    parser.add_argument("--bechtold-use-ifs-ascent",
+                        dest="bechtold_use_ifs_ascent",
+                        action=argparse.BooleanOptionalAction,
+                        default=_EXPERIMENT_DEFAULTS.bechtold_use_ifs_ascent,
+                        help="Run the IFS convection as CUMASTRN does (the "
+                             "faithful OpenIFS port); only the six run-set "
+                             "Bechtold fields may differ from their defaults. "
+                             "Default "
+                             f"{_EXPERIMENT_DEFAULTS.bechtold_use_ifs_ascent}.")
     parser.add_argument("--bechtold-use-ifs-subcloud-evap",
                         dest="bechtold_use_ifs_subcloud_evap",
                         action=argparse.BooleanOptionalAction,
@@ -1519,14 +1546,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "correction (openifs cumastrn.F90:780-833; land "
                              "deep convection peaks late afternoon). Default "
                              f"{_EXPERIMENT_DEFAULTS.bechtold_use_ifs_capdcycl}.")
-    parser.add_argument("--bechtold-use-ifs-ascent",
-                        dest="bechtold_use_ifs_ascent",
-                        action=argparse.BooleanOptionalAction,
-                        default=_EXPERIMENT_DEFAULTS.bechtold_use_ifs_ascent,
-                        help="Run the faithful OpenIFS convection chain "
-                             "(cubasen/cuascn/cumastrn/cudtdqn port) instead "
-                             "of the legacy Bechtold scheme. Default "
-                             f"{_EXPERIMENT_DEFAULTS.bechtold_use_ifs_ascent}.")
     parser.add_argument("--bechtold-ifs-shallow-nosupply",
                         dest="bechtold_ifs_shallow_nosupply",
                         choices=("zero", "first_guess"),
@@ -2958,7 +2977,8 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         clubb_liquid_partition=args.clubb_liquid_partition,
         clubb_trop_cloud_top_press=args.clubb_trop_cloud_top_press,
         **{_f: getattr(args, _f)
-           for _f in {**ZM_SCALAR_FIELDS, **CLUBB_SCALAR_FIELDS}},
+           for _f in {**ZM_SCALAR_FIELDS, **ZM_WIDTH_FIELDS,
+                      **CLUBB_SCALAR_FIELDS}},
         clubb_q_flux_scale=args.clubb_q_flux_scale,
         clubb_q_flux_scale_sigma_band=(tuple(args.clubb_q_flux_scale_sigma_band)
                                        if args.clubb_q_flux_scale_sigma_band
@@ -3208,6 +3228,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         bechtold_subsidence_solve=args.bechtold_subsidence_solve,
         bechtold_rain_vapor_sink=args.bechtold_rain_vapor_sink,
         zm_land_fraction=args.zm_land_fraction,
+        kain_fritsch_variant=args.kain_fritsch_variant,
         zm_transport_cloud_tracers=args.zm_transport_cloud_tracers,
         bechtold_conv_top_pa=args.bechtold_conv_top_pa,
         bechtold_downdraft_evap=args.bechtold_downdraft_evap,
@@ -3217,6 +3238,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         bechtold_downdraft_entrain_rate=args.bechtold_downdraft_entrain_rate,
         bechtold_downdraft_detrain_scale_m=args.bechtold_downdraft_detrain_scale_m,
         bechtold_use_ifs_cape_closure=args.bechtold_use_ifs_cape_closure,
+        bechtold_use_ifs_ascent=args.bechtold_use_ifs_ascent,
         bechtold_use_ifs_subcloud_evap=args.bechtold_use_ifs_subcloud_evap,
         bechtold_use_ifs_inplume_precip=args.bechtold_use_ifs_inplume_precip,
         bechtold_dx_m=args.bechtold_dx_m,
@@ -3225,7 +3247,6 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         bechtold_enable_cmt=args.bechtold_enable_cmt,
         bechtold_M_b_max=args.bechtold_M_b_max,
         bechtold_use_ifs_capdcycl=args.bechtold_use_ifs_capdcycl,
-        bechtold_use_ifs_ascent=args.bechtold_use_ifs_ascent,
         bechtold_ifs_shallow_nosupply=args.bechtold_ifs_shallow_nosupply,
         bechtold_use_ifs_land_rhebc=args.bechtold_use_ifs_land_rhebc,
         bechtold_use_ifs_snow_melt=args.bechtold_use_ifs_snow_melt,

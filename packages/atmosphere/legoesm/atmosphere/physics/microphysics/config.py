@@ -168,6 +168,8 @@ __param_spec__ = {
             "gsam_satadj_qc_floor_sharpness": "numerics: smooth-switch sharpness (RULE 5), value approved by user 2026-10-21",
             "gsam_satadj_p_min_width_pa": "numerics: smooth-switch width (RULE 5), value approved by user 2026-10-21",
             "sb2001_autoconv_ramp_top": "numerics: smooth-switch width (RULE 5), value decided by codex+GLM 2026-10-29 (#2232)",
+            "sb2001_accretion_qr_ramp_top": "numerics: smooth-switch width (RULE 5), value decided by codex+GLM 2026-10-30 (#2262)",
+            "sb2001_accretion_qc_ramp_top": "numerics: smooth-switch width (RULE 5), value decided by codex+GLM 2026-10-30 (#2262)",
             "cam_qsat_cap_sharpness": "numerics: smooth-switch sharpness (RULE 5), value approved by user 2026-10-21",
             # Fall-speed power-law EXPONENTS feed math.gamma(4 + b) / math.gamma(1 + b)
             # (morrison.py, _warm_rain.py) to precompute the cons* moment factors.
@@ -318,6 +320,8 @@ __param_spec__ = {
             "gsam_satadj_qc_floor_sharpness": "numerics: smooth-switch sharpness (RULE 5), value approved by user 2026-10-21",
             "gsam_satadj_p_min_width_pa": "numerics: smooth-switch width (RULE 5), value approved by user 2026-10-21",
             "sb2001_autoconv_ramp_top": "numerics: smooth-switch width (RULE 5), value decided by codex+GLM 2026-10-29 (#2232)",
+            "sb2001_accretion_qr_ramp_top": "numerics: smooth-switch width (RULE 5), value decided by codex+GLM 2026-10-30 (#2262)",
+            "sb2001_accretion_qc_ramp_top": "numerics: smooth-switch width (RULE 5), value decided by codex+GLM 2026-10-30 (#2262)",
             "autoconversion_sharpness": "numerics: solver/smoothing/tolerance/iteration parameter",
             "breakup_sharpness": "numerics: solver/smoothing/tolerance/iteration parameter",
             "saturation_sharpness": "numerics: solver/smoothing/tolerance/iteration parameter",
@@ -577,6 +581,12 @@ class SeifertBehengConfig(NamedTuple):
     # [kg/kg]; <= 1e-6 = gSAM's hard step (codex+GLM 2026-10-29, #2232; KNOWN
     # DIFFERENCE in _warm_rain.autoconversion_sb2001).
     sb2001_autoconv_ramp_top: float = 2.0e-6
+    # RULE 5 smoothing of gSAM's two SB2001 accretion gates q_r >= 1e-8 and
+    # q_c >= 1e-8 kg/kg (module_mp_graupel.f90:1944/3266): each C2 step
+    # reaches 1 at its value [kg/kg]; <= 1e-8 = gSAM's hard step (codex+GLM
+    # 2026-10-30, #2262; KNOWN DIFFERENCE in _warm_rain.accretion_sb2001).
+    sb2001_accretion_qr_ramp_top: float = 2.0e-8
+    sb2001_accretion_qc_ramp_top: float = 2.0e-8
 
 
 # Unset Morrison DCS per flavour [m] (MorrisonConfig.ice_snow_d_auto=None,
@@ -1143,6 +1153,12 @@ class MorrisonConfig(NamedTuple):
     # [kg/kg]; <= 1e-6 = gSAM's hard step (codex+GLM 2026-10-29, #2232; KNOWN
     # DIFFERENCE in _warm_rain.autoconversion_sb2001).
     sb2001_autoconv_ramp_top: float = 2.0e-6
+    # RULE 5 smoothing of gSAM's two SB2001 accretion gates q_r >= 1e-8 and
+    # q_c >= 1e-8 kg/kg (module_mp_graupel.f90:1944/3266): each C2 step
+    # reaches 1 at its value [kg/kg]; <= 1e-8 = gSAM's hard step (codex+GLM
+    # 2026-10-30, #2262; KNOWN DIFFERENCE in _warm_rain.accretion_sb2001).
+    sb2001_accretion_qr_ramp_top: float = 2.0e-8
+    sb2001_accretion_qc_ramp_top: float = 2.0e-8
     # MG2's CAM Goff-Gratch q_sat = 1 cap (RULE 5, limiter class): sharpness
     # on e_sat/p; math.inf = CAM's hard cap.  Value approved by user 2026-10-21.
     cam_qsat_cap_sharpness: float = CAM_QSAT_CAP_SHARPNESS

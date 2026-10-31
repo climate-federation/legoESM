@@ -51,8 +51,15 @@ switches at their limit: ``Fr_sharpness`` = p of the p-norm smooth min
 2^(-1/p) = 0.966 of both at the default p = 20 where they are equal) and
 ``crit_level_sharpness`` / ``crit_level_floor`` (the sign-agreement test of
 ``ubi`` across the layer; E3SM is ``crit_level_floor -> 0``, in the form
-``mcfarlane.py`` uses).  The launch gates, floors and limiters are hard, as in
-E3SM (piecewise smooth).  The production smoothing values are NOT the hard
+``mcfarlane.py`` uses), and ``oro_wind_ramp_width`` (the ``U > 2 m/s``
+launch gate as a one-sided quintic ramp, exact from 2.5 m/s at the default
+0.5; 0 = E3SM's hard gate, #2241; KNOWN DIFFERENCE: the launch stress is
+``smoothstep_quintic((U - 2)/0.5)`` of E3SM's for 2 < U < 2.5 m/s, i.e. up to
+100 % low just above 2 m/s; no oracle column launches in that band (source
+winds 1.74 and 2.66 m/s are the nearest), so the per-column gap below is
+unchanged by it, measured 2026-10-30).  The mountain-height gate, the 1 Pa
+pressure floors (static: orography, the model-top interface) and the
+limiters are hard, as in E3SM (piecewise smooth).  The production smoothing values are NOT the hard
 limit; the oracle test pins that gap per column.  KNOWN DIFFERENCE at the
 defaults (vs the E3SM oracle, 17 columns): up to 6.3e-2 relative in du/dt and
 3.6e-2 in dT/dt, in the column whose stresses sit near taudmp = tausat; 2.4e-3
@@ -190,6 +197,7 @@ def lindzen_gwd(
     tau0, src_level, tend_level, xv, yv, c, ubm, ubi = gw_oro_src(
         u, v, T, sgh, pmid, pint, dpm, z_full, nm, R_d, cfg.kwv, cfg.fcrit2,
         cfg.orographic.oro_min_h, cfg.orographic.oro_min_wind,
+        oro_wind_ramp_width=config.oro_wind_ramp_width,
     )
     _tau, du_dt, dv_dt, _gwut, _tau_sat = gw_drag_prof(
         tau0, c, src_level, tend_level, T, ti, piln, rhoi, nm, ni,

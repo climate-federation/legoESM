@@ -91,6 +91,11 @@ PARAM_SPEC_TODO: frozenset[str] = frozenset(
         # (CLUBB graduated 2026-07-11: clubb.py now ships a complete
         # __param_spec__ over CLUBBParams + CLUBBConfig — see clubb.py and
         # param_collector.SPEC_MODULES.)
+        # IfsTunables (PR #2249, CUMASTRN port) holds run-set values the host
+        # copies from BechtoldConfig fields that already carry a spec; a second
+        # spec would declare the same ranges twice.  Fix = source its spec from
+        # BechtoldConfig (codex + GLM 2026-10-30), then drop this entry.
+        "packages/atmosphere/legoesm/atmosphere/physics/convection/_ifs_cumastrn.py",
         # --- ocean ---------------------------------------------------------
         # --- land ----------------------------------------------------------
     }

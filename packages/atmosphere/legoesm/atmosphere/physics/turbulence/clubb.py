@@ -4980,8 +4980,21 @@ def monotonic_turbulent_flux_limit(
     # Windowed min/max over the reachable level window [low, high] (masked).
     j = jnp.arange(nzt)[None, None, :]
     in_win = (j >= low_lev_effect[:, :, None]) & (j <= high_lev_effect[:, :, None])
-    min_x_allowable = jnp.min(jnp.where(in_win, min_x_lev[:, None, :], jnp.inf), axis=2)
-    max_x_allowable = jnp.max(jnp.where(in_win, max_x_lev[:, None, :], -jnp.inf), axis=2)
+    # Picked by index (argmin/argmax + gather), not jnp.min/jnp.max: the
+    # reduce_min/max JVP finds the chosen element by EQUALITY with the reduced
+    # value and divides by the match count.  Under jit (and remat) XLA can
+    # recompute the operand in a second fusion that rounds 1 ulp differently,
+    # so no element matches and the gradient is 0/0 = NaN (production CLUBB,
+    # one sub-step: ~45 % of d/dT NaN; eager finite).  The gather's VJP routes
+    # the cotangent to the chosen element with no division.  Same forward
+    # value; at an exact tie the whole cotangent goes to the first level
+    # instead of being split.
+    min_cand = jnp.where(in_win, min_x_lev[:, None, :], jnp.inf)
+    max_cand = jnp.where(in_win, max_x_lev[:, None, :], -jnp.inf)
+    min_x_allowable = jnp.take_along_axis(
+        min_cand, jnp.argmin(min_cand, axis=2, keepdims=True), axis=2)[..., 0]
+    max_x_allowable = jnp.take_along_axis(
+        max_cand, jnp.argmax(max_cand, axis=2, keepdims=True), axis=2)[..., 0]
 
     thr_term_zt = invrs_dt * gd * dzt * (xm_without_ta - min_x_allowable)
     mfl_max_term_zt = rho_ds_zt * thr_term_zt

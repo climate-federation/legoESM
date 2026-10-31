@@ -151,6 +151,23 @@ table below (MOM6-order column) to the digits shown, except Q = 0, where they
 are round-off (2.6e-13 and 1.0e-12 at 1200 s and 300 s, vs 1.1e-7 and 5.2e-8;
 under the default fp32 policy the rebuild gives 1.0e-7 and 4.9e-8).
 
+**Shortwave cases (#2178).** Four more MOM6 runs of the same column add
+200 W/m^2 of penetrating shortwave (sensible Q = -200 / 0 W/m^2, dt 1200 /
+300 s; `BUOY_CONFIG="file"`, `EXP_OPACITY_SCHEME="DOUBLE_EXP"` with Jerlov
+type I bands 0.35 m / 23 m, ratio 0.58): `mom6_epbl_scm_sw_0e9a561.npz` plus
+the per-case overrides, forcing generator and parameter record in the same
+fixture directory (`provenance.json`, `shortwave_cases`).  legoESM runs them
+with `shortwave_penetration=ShortwavePenetrationConfig(water_type="I")` and
+`sw_down=200`; ePBL then counts the shortwave in its buoyancy flux and adds
+its per-layer TKE (MOM6 `absorbRemainingSW`).  Measured max |T_legoESM -
+T_MOM6| at 8 h (exact switches, fp64): 5.75e-2 / 5.77e-2 degC (dt 1200 / 300),
+always in the bottom layer, where legoESM deposits the light reaching the
+seabed while MOM6 spreads it over the column (a KNOWN DIFFERENCE of the
+deposit kernel, not of ePBL); 6.2e-3 / 6.1e-3 over levels 0-48 (at level 48);
+1.3e-3 at the surface.  Before the fix (ePBL ignoring the shortwave) the gap
+was 0.27-0.44 degC at 10-11 m.  The stored-gap test for these cases is
+pending a choice of metric (issue #2178).
+
 legoESM side:
 
 ```python

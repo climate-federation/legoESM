@@ -17,6 +17,7 @@ import jax
 import jax.numpy as jnp
 
 from legoesm.core.field import Field
+from legoesm.core.conservation import WATER_MASS_SPECIES
 from legoesm.core.state import (
     HydrostaticState,
     HydrostaticTendencies,
@@ -1335,7 +1336,8 @@ def _make_spectral_pe_microphysics(
         "N_i": "dN_i_dt",
     }
 
-    def physics_fn(state, grid, sigma_coord, grid_fields=None):
+    def physics_fn(state, grid, sigma_coord, grid_fields=None,
+                   return_sfc_precip=False):
         # Transform spectral state to grid space
         fields = grid_fields
         if fields is None:
@@ -1352,12 +1354,28 @@ def _make_spectral_pe_microphysics(
         # we do not silently flow x64 zeros into the column path.
         _state_dtype = T.dtype
 
+        if return_sfc_precip and micro_fn is not None:
+            # #2277: the surface precip is recorded only when every water
+            # species the scheme writes is carried -- a dropped tendency would
+            # report water leaving a column that never lost it.
+            _need = WATER_MASS_SPECIES[:min(
+                min_tracer_slots(scheme_name, scheme_config),
+                len(WATER_MASS_SPECIES))]
+            _missing = [n for n in _need
+                        if state.tracers is None or n not in state.tracers]
+            if _missing:
+                raise ValueError(
+                    f"microphysics '{scheme_name}' writes {list(_need)}, but "
+                    f"the spectral state lacks {_missing}: its tendency would "
+                    "be dropped while the surface precipitation is recorded. "
+                    "Carry those tracers.")
+
         if micro_fn is None:
             # Mirror the input tracer pytree shape with zeros so the
             # orchestrator's accumulator and the dycore RHS see a
             # consistent tendency structure even when microphysics is
             # disabled.
-            return SpectralHydrostaticState(
+            _z = SpectralHydrostaticState(
                 vor_hat=state.vor_hat.replace(data=zero_3d),
                 div_hat=state.div_hat.replace(data=zero_3d),
                 T_hat=state.T_hat.replace(data=jnp.zeros_like(state.T_hat.data)),
@@ -1365,6 +1383,10 @@ def _make_spectral_pe_microphysics(
                 phis_hat=state.phis_hat.replace(data=jnp.zeros_like(state.phis_hat.data)),
                 tracers=zero_like_tracers(state.tracers),
             )
+            if not return_sfc_precip:
+                return _z
+            _p0 = jnp.zeros((n_lat, n_lon), dtype=p_s.dtype)
+            return _z, (_p0, _p0)
 
         # Pressure at full and half levels
         p_full = sigma_coord.pressure_at_full(p_s)
@@ -1467,7 +1489,7 @@ def _make_spectral_pe_microphysics(
                     tt.setdefault(k, zv)
             tracers_tend = tt
 
-        return SpectralHydrostaticState(
+        tend = SpectralHydrostaticState(
             vor_hat=state.vor_hat.replace(data=zero_3d),
             div_hat=state.div_hat.replace(data=zero_3d),
             T_hat=state.T_hat.replace(data=dT_hat),
@@ -1475,9 +1497,21 @@ def _make_spectral_pe_microphysics(
             phis_hat=state.phis_hat.replace(data=jnp.zeros_like(state.phis_hat.data)),
             tracers=tracers_tend,
         )
+        if not return_sfc_precip:
+            return tend
+        # Surface precip [kg/m^2/s, +down] the scheme computes, and its frozen
+        # part (None when the scheme does not publish it), as on the
+        # hydrostatic bridge (#2277).
+        _pf = micro_out.precip_frozen
+        return tend, (
+            micro_out.precipitation.reshape(n_lat, n_lon).astype(p_s.dtype),
+            None if _pf is None
+            else _pf.reshape(n_lat, n_lon).astype(p_s.dtype))
 
     def reset_state():
         _ml_model_cache[0] = None
 
     physics_fn.reset_state = reset_state
+    # #2277: accepts ``return_sfc_precip=True`` (second return: surface precip).
+    physics_fn._emits_sfc_precip = True
     return physics_fn
