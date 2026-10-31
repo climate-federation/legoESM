@@ -2227,17 +2227,18 @@ def si3_column_step_arrays(state: SI3ColumnArrays,
             thermo_state, post_temp2, thermo_forcing, si3, dt, constants
         )
         da_out = None
-    # NEMO never gathers thermodynamics for entry concentrations <= epsi10.
-    # Feed those columns' unmodified entry state into the later open-water
-    # formation stage so only the genuinely inactive thermodynamic operands
-    # are stopped; qlead, bottom temperature, salinity, and sub-epsilon entry
-    # concentration keep their real open-water gradients.
-    post_da = jax.tree.map(
-        lambda updated, entry_value: _guard_inactive_columns(
-            updated, gathered_at_entry, dtype, inactive_value=entry_value
-        ),
-        post_da,
-        state,
+    # Preserve the lane's literal forward expression into ice_thd_do.  Only the
+    # reverse pass for an inactive concentration is supplied by the live entry
+    # concentration: the guarded thermodynamic path has no valid cotangent
+    # there, while finite differences of this exact forward expression do.
+    post_da = post_da._replace(
+        concentration=_inactive_reverse_from_entry(
+            post_da.concentration,
+            state.concentration,
+            gathered_at_entry,
+            (~gathered_at_entry)
+            & (post_da.concentration == state.concentration),
+        )
     )
     # `ice_thd_frazil` supplies ht_i_new (O7_REF ppsrc `icethd.f90:174`).
     frazil = si3_ice_thd_frazil(
@@ -2415,10 +2416,8 @@ def _si3_column_thd_da(entry, post_temp2, forcing, si3, dt, constants, *,
     return post_da
 
 
-def _guard_inactive_columns(
-    value, active_columns, dtype, *, inactive_value=None,
-):
-    """Stop inactive cotangents, or select a live inactive-stage value."""
+def _guard_inactive_columns(value, active_columns, dtype):
+    """Stop inactive-column cotangents without changing forward values."""
     array = jnp.asarray(value, dtype=dtype)
     if array.ndim < active_columns.ndim:
         array = jnp.broadcast_to(array, active_columns.shape)
@@ -2426,9 +2425,38 @@ def _guard_inactive_columns(
         active_columns,
         active_columns.shape + (1,) * (array.ndim - active_columns.ndim),
     )
-    inactive = (
-        jax.lax.stop_gradient(array)
-        if inactive_value is None
-        else jnp.asarray(inactive_value, dtype=dtype)
+    return jnp.where(active, array, jax.lax.stop_gradient(array))
+
+
+@jax.custom_vjp
+def _inactive_reverse_from_entry(
+    updated, entry, active_columns, inactive_entry_columns,
+):
+    """Return ``updated`` exactly; route only inactive cotangents to ``entry``."""
+    del entry, active_columns, inactive_entry_columns
+    return updated
+
+
+def _inactive_reverse_from_entry_fwd(
+    updated, entry, active_columns, inactive_entry_columns,
+):
+    del entry
+    return updated, (active_columns, inactive_entry_columns)
+
+
+def _inactive_reverse_from_entry_bwd(masks, cotangent):
+    active_columns, inactive_entry_columns = masks
+    active = jnp.asarray(active_columns)
+    inactive_entry = jnp.asarray(inactive_entry_columns)
+    return (
+        jnp.where(active, cotangent, 0.0),
+        jnp.where(inactive_entry, cotangent, 0.0),
+        None,
+        None,
     )
-    return jnp.where(active, array, inactive)
+
+
+_inactive_reverse_from_entry.defvjp(
+    _inactive_reverse_from_entry_fwd,
+    _inactive_reverse_from_entry_bwd,
+)

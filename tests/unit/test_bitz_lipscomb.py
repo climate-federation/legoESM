@@ -247,8 +247,104 @@ def test_si3_column_step_shared_forcing_gradients_finite_with_open_water_batch()
     assert all(bool(jnp.isfinite(value)) for value in gradients), gradients
 
 
-def test_ice_forming_open_water_gradients_match_main_and_finite_difference():
-    """Open-water formation keeps every gradient present on main edd34c2446."""
+def _degenerate_four_column_step(*, compiled=False):
+    from legoesm.ice.bitz_lipscomb import (
+        SI3ColumnArrays,
+        SI3SurfaceForcing,
+        si3_column_step_arrays,
+    )
+    from legoesm.ice.config import SI3ThermoConfig
+    from legoesm.ice.constants_config import NEMO_SI3_CONSTANTS_CONFIG as c
+
+    concentration = jnp.asarray([0.0, 0.0, 5.0e-11, 5.0e-11])
+    h_ice = jnp.asarray([0.0, 0.0, 0.5, 0.5])
+    qlead = jnp.asarray([0.0, -40.0, 0.0, -40.0])
+    zero = jnp.zeros((4,), dtype=jnp.float64)
+    zero_layers = jnp.zeros((4, 3), dtype=jnp.float64)
+    state = SI3ColumnArrays(
+        concentration, h_ice, zero, jnp.full((4,), c.T0),
+        zero_layers, zero_layers, zero, zero_layers, zero,
+    )
+    forcing = SI3SurfaceForcing(
+        qns_ice=zero, qsr_ice=zero, dqns_ice=zero, qtr_ice_top=zero,
+        t_bottom=jnp.full((4,), 271.27), sss=jnp.full((4,), 34.7),
+        evaporation=zero, snow_precipitation=zero, qprec_ice=zero,
+        qcn_ice_bottom=zero, qsb_ice_bottom=zero, fhld=zero, qlead=qlead,
+    )
+    step = lambda value: si3_column_step_arrays(  # noqa: E731
+        value, forcing, 3600.0, c, si3=SI3ThermoConfig()
+    ).exit
+    if compiled:
+        step = jax.jit(step)
+    first = step(state)
+    return first, step(first)
+
+
+@pytest.mark.parametrize("compiled", [False, True], ids=["eager", "jit"])
+def test_degenerate_four_column_two_step_forward_bits_match_lane(compiled):
+    """Pin 920c61d884 on open-water and sub-epsilon columns exactly."""
+    expected = (
+        {
+            "concentration": (0.0, 1.0477509710156091e-05, 5e-11,
+                              1.0477559710156091e-05),
+            "h_ice": (0.0, 0.05, 0.0, 0.050002145361805514),
+            "h_snow": (0.0, 0.0, 0.0, 0.0),
+            "T_surface": (273.15, 273.15, 273.14510067184534,
+                          273.14510067184534),
+            "e_ice": (0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                      305700631.51037043, 305769255.1803446,
+                      306405736.09880507, 305700631.51037043,
+                      305769255.1803446, 306405736.09880507),
+            "e_snow": (0.0,) * 12,
+            "S_bulk": (0.1, 0.1, 0.1, 0.1),
+            "S_layers": (0.1,) * 12,
+            "age_volume": (0.0, 0.037719034956561925, 1.8e-07,
+                           0.03771921495656193),
+        },
+        {
+            "concentration": (0.0, 2.0955019420312182e-05, 0.0,
+                              2.0955069420312182e-05),
+            "h_ice": (0.0, 0.02500000000000001, 0.0,
+                      0.04984625211138035),
+            "h_snow": (0.0, 0.0, 0.0, 0.0),
+            "T_surface": (273.15, 273.1446003491123, 273.15,
+                          271.59905056567794),
+            "e_ice": (0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                      307618229.39976406, 307803557.08903724,
+                      308172027.764088),
+            "e_snow": (0.0,) * 12,
+            "S_bulk": (0.1, 0.1, 0.1, 0.1),
+            "S_layers": (0.1,) * 12,
+            "age_volume": (0.0, 0.11315710486968578, 1.8e-07,
+                           0.11315746486968578),
+        },
+    )
+    if compiled:
+        expected[0].update({
+            "concentration": (0.0, 1.0477509710156093e-05, 5e-11,
+                              1.0477559710156093e-05),
+            "h_ice": (0.0, 0.049999999999999996, 0.0,
+                      0.05000214536180551),
+            "age_volume": (0.0, 0.03771903495656193, 1.8e-07,
+                           0.037719214956561935),
+        })
+        expected[1].update({
+            "concentration": (0.0, 2.0955019420312186e-05, 0.0,
+                              2.0955069420312186e-05),
+            "h_ice": (0.0, 0.025, 0.0, 0.04984625211138034),
+            "age_volume": (0.0, 0.1131571048696858, 1.8e-07,
+                           0.11315746486968581),
+        })
+
+    for actual, wanted in zip(_degenerate_four_column_step(compiled=compiled),
+                              expected, strict=True):
+        for name, leaf in zip(actual._fields, actual, strict=True):
+            np.testing.assert_array_equal(
+                np.asarray(leaf).ravel(), np.asarray(wanted[name]))
+
+
+def test_ice_forming_open_water_gradients_match_main_and_lane_difference():
+    """Formation gradients follow the lane forward and agreed main values."""
     from legoesm.ice.bitz_lipscomb import (
         SI3ColumnArrays,
         SI3SurfaceForcing,
@@ -262,7 +358,7 @@ def test_ice_forming_open_water_gradients_match_main_and_finite_difference():
 
     def run(concentration, qlead, t_bottom, sss):
         state = SI3ColumnArrays(
-            jnp.asarray([concentration]), zero, zero,
+            jnp.asarray([concentration]), jnp.asarray([0.5]), zero,
             jnp.asarray([c.T0]), zero_layers, zero_layers,
             zero, zero_layers, zero,
         )
@@ -306,7 +402,30 @@ def test_ice_forming_open_water_gradients_match_main_and_finite_difference():
     concentration_gradient = jax.grad(
         lambda concentration: run(concentration, *args).concentration[0]
     )(5.0e-11)
-    assert float(concentration_gradient) == 1.0
+    # Stay wholly below epsi10 while avoiding subtractive cancellation in the
+    # source-rounded forward expression.
+    epsilon = 4.0e-11
+    concentration_difference = (
+        run(5.0e-11 + epsilon, *args).concentration[0]
+        - run(5.0e-11 - epsilon, *args).concentration[0]
+    ) / (2.0 * epsilon)
+    np.testing.assert_allclose(
+        float(concentration_gradient), float(concentration_difference),
+        rtol=5e-11, atol=0.0,
+    )
+
+
+def test_inactive_column_guard_stops_h_ice_cotangent():
+    """The helper-level plant remains bound to its cotangent mask."""
+    from legoesm.ice import bitz_lipscomb as bl
+
+    active = jnp.asarray([False] * 8 + [True] * 56)
+    h_ice = jnp.linspace(0.0, 2.0, 64, dtype=jnp.float64)
+    gradient = jax.grad(
+        lambda h: jnp.sum(bl._guard_inactive_columns(h, active, h.dtype))
+    )(h_ice)
+    assert bool(jnp.all(gradient[:8] == 0.0)), gradient
+    assert bool(jnp.all(gradient[8:] == 1.0)), gradient
 
 
 def test_cumulative_remap_reverse_mode_finite_at_zero_thickness():

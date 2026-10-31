@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import ast
 import importlib.util
+import inspect
 from pathlib import Path
+import textwrap
 
 import numpy as np
 
@@ -63,3 +66,14 @@ def test_production_cen2_call_selects_certified_nemo_storage(monkeypatch) -> Non
         GATE.model_module, "_nemo_cen2_tracer_rhs", fake_cen2
     )
     assert GATE._certified_cen2_rhs(*range(7)) is sentinel
+
+
+def test_live_stage_rows_routes_direct_cen2_call_through_certified_wrapper():
+    """Plant the round-72 direct caller, not only the wrapper it should use."""
+    tree = ast.parse(textwrap.dedent(inspect.getsource(GATE._live_stage_rows)))
+    calls = [
+        node.func.id for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+    ]
+    assert calls.count("_certified_cen2_rhs") == 1
+    assert "_nemo_cen2_tracer_rhs" not in calls
