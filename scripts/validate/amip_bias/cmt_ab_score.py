@@ -11,10 +11,10 @@ prebuilt, so its window is always checked): first ``ndays`` daily means of the G
 (``remapcon``) onto the arm's own CMOR grid; the remap is first checked on a
 known field, sin(lat), whose exact cell mean on a regular lat band is
 (sin(lat0) + sin(lat1)) / 2, and on the global mean of the remapped u.
-Window checks (refused otherwise): the GRIB's selected dates are exactly
-start .. start + ndays - 1; each arm's single Amon record starts in the start
-month and the arm's newest checkpoint is day ``ndays`` (CMOR month bounds are
-nominal, so the checkpoint is what proves the averaging window).
+Window check (refused otherwise): the GRIB's selected dates are exactly
+start .. start + ndays - 1.  That each arm's single Amon record is the mean
+over the same ndays is NOT checked here (CMOR month bounds are nominal); the
+caller establishes it from the run (reviewer split, #2266).
 
 Metric (PREREGISTRATION.md, user-approved 2026-10-31): RMSE vs ERA5 of the
 zonal-mean u profile u(lat) at 850 and 200 hPa, cos-lat weighted over the
@@ -107,21 +107,6 @@ def check_dates(dates, start, ndays):
                          f"are not {want[0]}..{want[-1]}")
 
 
-def check_arm_window(run, start, ndays):
-    """The arm stopped at day ``ndays`` and its Amon record is the start month."""
-    import xarray as xr
-    ck = sorted(glob.glob(f"{run}/checkpoint_day_*.npz"))
-    last = int(Path(ck[-1]).stem.split("_")[-1]) if ck else None
-    if last != ndays:
-        raise SystemExit(f"FATAL: {run} newest checkpoint is day {last}, expected {ndays}")
-    f = _one(run, "ua")
-    if Path(f).stat().st_mtime < Path(ck[-1]).stat().st_mtime:
-        raise SystemExit(f"FATAL: {f} is older than {ck[-1]}: a stale record, not this run's window")
-    t0 = xr.open_dataset(f).time_bnds.values[0][0]
-    if (t0.year, t0.month, t0.day) != tuple(int(x) for x in start.split("-")[:2]) + (1,):
-        raise SystemExit(f"FATAL: {f} starts {t0}, not in the month of {start}")
-
-
 def build_era5(grb, target_nc, out_nc, ndays, work, start):
     """ERA5 ``ndays`` daily-mean u, time mean, remapcon onto ``target_nc``'s grid.
     Returns the remap check numbers (known field + global-mean)."""
@@ -141,6 +126,8 @@ def build_era5(grb, target_nc, out_nc, ndays, work, start):
          f"-sellevel,85000", str(tm), str(known))
     k, lat, lon, _ = _read(known, "k")
     dlat = np.diff(lat).mean()
+    if not np.allclose(np.diff(lat), dlat):
+        raise SystemExit("FATAL: known-field check needs a uniform target latitude grid")
     exact = 0.5 * (np.sin(np.deg2rad(lat - dlat / 2)) + np.sin(np.deg2rad(lat + dlat / 2)))
     known_err = float(np.max(np.abs(np.squeeze(k) - exact[:, None])))
     # Global mean of u before / after the remap, per level.
@@ -254,8 +241,6 @@ def main(argv=None):
     a = ap.parse_args(argv)
     out = Path(a.out)
     out.mkdir(parents=True, exist_ok=True)
-    for run in (a.off, a.on):
-        check_arm_window(run, a.start, a.ndays)
     era5 = out / f"era5_ua_{a.start}_{a.ndays}d_cmorgrid.nc"
     rec = {"remap_check": build_era5(a.era5_grib, _one(a.off, "ua"), era5, a.ndays,
                                      out / "era5_work", a.start)}

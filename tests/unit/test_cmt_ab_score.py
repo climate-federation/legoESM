@@ -72,23 +72,3 @@ def test_check_dates_refuses_a_shifted_or_short_window():
         m.check_dates(days[1:] + ["1979-01-31"], "1979-01-01", 30)
     with pytest.raises(SystemExit):
         m.check_dates(days[:29], "1979-01-01", 30)
-
-
-def test_check_arm_window_needs_the_day_n_checkpoint(tmp_path):
-    m = _load()
-    (tmp_path / "checkpoint_day_0020.npz").write_bytes(b"")
-    with pytest.raises(SystemExit, match="day 20"):
-        m.check_arm_window(str(tmp_path), "1979-01-01", 30)
-
-
-def test_check_arm_window_refuses_a_record_older_than_the_last_checkpoint(tmp_path):
-    import os
-    m = _load()
-    (tmp_path / "cmor" / "Amon").mkdir(parents=True)
-    ua = tmp_path / "cmor" / "Amon" / "ua_Amon_x.nc"
-    ua.write_bytes(b"")
-    ck = tmp_path / "checkpoint_day_0030.npz"
-    ck.write_bytes(b"")
-    os.utime(ua, (1000, 1000)); os.utime(ck, (2000, 2000))
-    with pytest.raises(SystemExit, match="older"):
-        m.check_arm_window(str(tmp_path), "1979-01-01", 30)

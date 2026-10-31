@@ -27,7 +27,7 @@ import os
 import subprocess
 from pathlib import Path
 
-os.environ.setdefault("JAX_ENABLE_X64", "1")
+os.environ["JAX_ENABLE_X64"] = "1"   # forced: the 1e-12 gate is a float64 statement
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
 import numpy as np  # noqa: E402
 
@@ -186,6 +186,10 @@ def main():
     if not np.array_equal(prog_in, np.asarray(driver._carry_aux["physstate_conv_prog_profile"])):
         raise SystemExit("the bridge did not hand the checkpoint's conv_prog_profile to the scheme")
     dp = p_half[:, 1:] - p_half[:, :-1]
+    if p_half.dtype != np.float64 or (fu is not None and fu.dtype != np.float64):
+        raise SystemExit(f"the scheme ran in {p_half.dtype}, not float64: the 1e-12 gate needs fp64")
+    if not (dp > 0).all():
+        raise SystemExit("p_half is not surface-last (non-positive layer thickness)")
     ok, rep = gate(fu, fv, dp, a.expect, edge_du=edge_du)
     try:
         sha = subprocess.run(["git", "-C", str(_ROOT), "rev-parse", "HEAD"],
