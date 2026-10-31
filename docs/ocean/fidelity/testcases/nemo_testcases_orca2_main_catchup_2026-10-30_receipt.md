@@ -757,8 +757,10 @@ artifacts have SHA-256
 The card blast-radius test records the other cases.  ORCA2 keeps its own
 step-entry shear selection `True`; its shortwave scheme is `nemo_qsr_rgb`, so
 the two `nemo_qsr_2bd` Kbb/Kmm selectors are inert; and it explicitly retains
-the prior vmix EOS density route.  LOCK_EXCHANGE, OVERFLOW, and all flux/vector
-VORTEX cards have `physics=None`, so none of these physics routes executes.
+the prior vmix EOS density route.  Relative to `b9b0d31464`, that restored vmix
+EOS route is ORCA2's only executable change: shear resolves to the same
+step-entry eta and both solar selectors remain inert.  LOCK_EXCHANGE, OVERFLOW,
+and all flux/vector VORTEX cards have `physics=None`, so none changes.
 
 ### Same-protocol comparison to the existing GYRE NEMO oracle
 
@@ -818,11 +820,20 @@ env CUDA_VISIBLE_DEVICES="" JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 PYTHONPATH=packag
 env CUDA_VISIBLE_DEVICES="" JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 PYTHONPATH=packages/core:packages/ocean:packages/atmosphere:packages/coupler:packages/ice:packages/land:packages/ml:packages/tools:src taskset -c 0-7 python scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round341_rescore_walk_gate.py --measure --rung rung10 --label independent --arm candidate --deck-root /data/abyssal/dbalwada/nemo-testcases-l4/inputs/ORCA2_ICE_v5.0.0 --twin-a /data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round5/acquisition/orca1ice_surface_entry_every_step_a_np2 --expect-commit "$ORCA2_CATCHUP_HEAD" --output /tmp/orca2_r347_final_rung10_independent.json
 ```
 
-Expected in each JSON/stdout result:
+Expected literal stdout line from each command:
 
 ```text
-"status": "PASS_R341_PAIR_RESCORE"
-"wet_3d_classification_counts": {"BIT_EXACT": 200, "AT_BAR_NOT_EXACT": 0, "OVER_BAR": 0}
+STATUS PASS_R341_PAIR_RESCORE
+```
+
+Expected JSON predicates (the file is pretty-printed with sorted keys):
+
+```text
+"wet_3d_classification_counts": {
+  "AT_BAR_NOT_EXACT": 0,
+  "BIT_EXACT": 200,
+  "OVER_BAR": 0
+}
 "first_wet_3d_non_bit_row": null
 ```
 
