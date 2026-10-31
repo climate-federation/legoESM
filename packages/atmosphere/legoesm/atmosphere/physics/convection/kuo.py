@@ -22,8 +22,9 @@ Not the oracle (user decisions 2026-10-28, #2213 split):
 
 KNOWN DIFFERENCE (RULE 5).  The oracle's hard switches on model state are
 smooth at the default ``icond_sharpness = 50`` and recovered at its hard
-limit (1e12 reproduces the oracle to round-off, dT, dq and CAPE, on the
-fixture, where no gate argument at a firing level is exactly 0):
+limit (1e12, with ``ptenq_sign_floor = 1e-30``, reproduces the oracle to
+round-off, dT, dq and CAPE, on the fixture, where no gate argument at a
+firing level is exactly 0):
 sigmoids for LCL condensation (scale ``supersat_scale``), buoyancy
 (``buoyancy_scale_K``), ``w_lcl > 0`` (fixed speed scale ``w_lcl_scale_ms``)
 and ``ptenq > 0`` (scale-free sign); ``x * sigmoid`` smooth positive parts
@@ -31,17 +32,21 @@ for the parcel excess ``max(qv1 - qsat, 0)`` (``supersat_scale``) and
 ``max(ptenq, 0)`` in ``cvgu`` (``ptenq_scale``), which undershoot to at most
 ``-0.28 scale / icond_sharpness`` for a negative argument.  An argument of exactly 0
 gives a half-open sigmoid gate where the oracle's strict ``>`` gives 0.
-The ``ptenq > 0`` sign gate is effectively HARD at the default too: its
-transition width is ``ptenq_sign_floor`` (1e-30 kg/kg/s), so it has no usable
-derivative and ``check_grads`` with respect to ``ptenq`` fails at every step
-1e-12..1e-16 (measured 2026-10-29); whether to give it a real width (which
-changes the default tendencies and the pinned gaps) is an open user decision.
+The ``ptenq > 0`` sign gate's transition width is ``ptenq_sign_floor``
+(default 3e-10 kg/kg/s, user decision 2026-10-31, #2273); the oracle's hard
+gate needs BOTH ``icond_sharpness = 1e12`` and ``ptenq_sign_floor = 1e-30``
+(at the hard sharpness with a width >= 1e-11 the fixture error is 4e-3..4e-2,
+from oracle-firing levels with ptenq ~ 1e-23).
 Measured gap at the defaults (fp64, field-normalised
 ``max|ours - oracle| / max|oracle|``, fixture of
-``tests/atmosphere/test_kuo_mahfouf_oracle.py``): Kuo-1965 L60 dT 0.175,
-dq 0.150, CAPE 2.2e-4, 45 columns fire vs the oracle's 38 of 51; L32 dT
-7.2e-5, dq 4.7e-4, CAPE 3.8e-7, 15 vs 15 of 18; Kuo-Anthes L60 dT 0.114, dq
-0.167; L32 dT 1.2e-4, dq 2.4e-4.  Per-column gaps are pinned
+``tests/atmosphere/test_kuo_mahfouf_oracle.py``, re-measured 2026-10-31 at
+the sign-gate width 3e-10): Kuo-1965 L60 dT 0.175, dq 0.150, CAPE 2.2e-4,
+45 columns fire vs the oracle's 38 of 51; L32 dT 4.7e-4, dq 1.2e-3, CAPE
+3.8e-7, 15 vs 15 of 18; Kuo-Anthes L60 dT 0.114, dq 0.167; L32 dT 7.8e-4,
+dq 4.1e-4.  Against the former width 1e-30 the field gaps change only on
+L32 (Kuo-1965 dT 7.2e-5 -> 4.7e-4, dq 4.7e-4 -> 1.2e-3; Anthes dT 1.2e-4
+-> 7.8e-4, dq 2.4e-4 -> 4.1e-4) and the largest per-column dT gap goes
+0.50 -> 0.75 (L60) and 2.4e-4 -> 1.7e-2 (L32).  Per-column gaps are pinned
 in ``tests/atmosphere/oracle_fixtures/kuo_mahfouf_default_gaps.json``.
 What the smoothing breaks: columns the oracle leaves off fire partially;
 positivity and column-water closure are not guaranteed at either setting
@@ -533,9 +538,11 @@ def kuo_convection(
     # vanishingly small, as long as it is positive).  We feed the
     # SCALE-FREE sign ``ptenq / (|ptenq| + floor)`` (→ +1 for any
     # clearly-positive ptenq, → −1 for subsidence, 0 only at exactly 0)
-    # into the sigmoid so the gate is ~1 across the whole convergent
-    # column down to its exponential tail, not 0.5 at the cloud top.
-    # ``ptenq_sign_floor`` (1e-30) is a pure division-by-zero guard.  Written
+    # into the sigmoid so the gate is ~1 across the convergent column
+    # wherever ptenq is well above ``ptenq_sign_floor``, not 0.5 at the
+    # cloud top.
+    # ``ptenq_sign_floor`` is the gate's transition width (default 3e-10
+    # kg/kg/s; 1e-30 with icond_sharpness 1e12 = the oracle).  Written
     # as ``z / (|z| + 1)`` with ``z = ptenq / floor`` (same value): the
     # derivative never forms ``(|ptenq| + 1e-30)**2``, which underflows to 0
     # in fp32 and made the fp32 gradient w.r.t. ptenq NaN at ptenq = 0.

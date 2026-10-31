@@ -274,7 +274,7 @@ __param_spec__ = {
         "excluded": {
             "cvgu_activation_scale": "numerics: tanh activation scale of the 0-1 convective_mask DIAGNOSTIC (no tendency effect; cvgu ~1e-4 kg/m^2/s when firing)",
             "icond_sharpness": "numerics: sigmoid sharpness on the smooth icond activation gates",
-            "ptenq_sign_floor": "numerics: division-by-zero guard in the scale-free ptenq sign",
+            "ptenq_sign_floor": "numerics: transition width of the smooth ptenq > 0 sign gate",
             "qv_min": "numerics: in-cloud vapor / LCL-detection floor",
             "zint_floor": "numerics: safety floor on the |zint| normalisation denominator",
         },
@@ -597,9 +597,9 @@ class KuoConfig(NamedTuple):
         activation gates (supersaturation, buoyancy, w_lcl>0, ptenq>0).
         Each gate argument is normalised to O(1) by the scales below
         before the sigmoid; the gates tend to the oracle's hard ``if``
-        switches as the sharpness goes to infinity (1e12 reproduces the
-        oracle to round-off on the fixture; an argument of exactly 0 gives
-        0.5).  The ``ptenq > 0`` sign gate's width is ``ptenq_sign_floor``,
+        switches as the sharpness goes to infinity (1e12, with
+        ``ptenq_sign_floor = 1e-30``, reproduces the oracle to round-off on
+        the fixture; an argument of exactly 0 gives 0.5).  The ``ptenq > 0`` sign gate's width is ``ptenq_sign_floor``,
         not this sharpness.  The same sharpness smooths the two ``max(x, 0)``
         cut-offs (parcel excess over saturation, on ``supersat_scale``;
         positive convergence in ``cvgu``, on ``ptenq_scale``).
@@ -611,13 +611,14 @@ class KuoConfig(NamedTuple):
         Normalisation scale [kg/kg] for the condensation gate
         ``qv − qsat`` — argument ``(qv − qsat)/supersat_scale``.
     ptenq_sign_floor : float
-        Division-by-zero guard [kg/kg/s] in the scale-free sign
-        ``ptenq / (|ptenq| + floor)`` feeding the ``ptenq > 0``
-        activation gate.  The oracle gate is a Heaviside on the SIGN of
+        Transition width [kg/kg/s] of the smooth ``ptenq > 0`` activation
+        gate, which feeds the sign ``ptenq / (|ptenq| + ptenq_sign_floor)``
+        into the sigmoid.  The oracle gate is a Heaviside on the SIGN of
         the local convergence (on for ANY positive value, regardless of
-        magnitude); the scale-free sign makes the smooth gate ~1 across
-        the whole convergent column down to its exponential tail and ~0
-        only for clear subsidence.  1e-30 = pure numerical guard.
+        magnitude); the gate is ~1 for ``ptenq`` well above this width
+        and ~0 for clear subsidence.  Default 3e-10 (user decision
+        2026-10-31, #2273); the oracle's hard gate is recovered with
+        ``ptenq_sign_floor = 1e-30`` together with ``icond_sharpness = 1e12``.
     w_lcl_scale_ms : float
         Fixed speed scale [m/s] of the ``w_lcl > 0`` gate, argument
         ``w_lcl / w_lcl_scale_ms`` (transition width
@@ -645,7 +646,7 @@ class KuoConfig(NamedTuple):
     icond_sharpness: float = 50.0
     buoyancy_scale_K: float = 0.1
     supersat_scale: float = 1.0e-5
-    ptenq_sign_floor: float = 1.0e-30
+    ptenq_sign_floor: float = 3.0e-10
     zint_floor: float = 1.0e-12
     cvgu_activation_scale: float = 1.0e-8
     w_lcl_scale_ms: float = 0.01

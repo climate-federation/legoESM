@@ -12,7 +12,8 @@ second-LCL soundings) and ``g32`` (tier-1 ZM L32 columns, incl. three MPAS
 checkpoint columns with a level of zero humidity, and three edge columns).
 
 Tolerance (user decision 2026-10-19): max relative error <= 1e-10 in fp64 at
-the hard limit of the existing smoothing field (``icond_sharpness = 1e12``).
+the hard limit of the smoothing fields (``icond_sharpness = 1e12`` with the
+``ptenq > 0`` sign-gate width ``ptenq_sign_floor = 1e-30``).
 Error metric: the tier-1 CLUBB oracle test's field-normalised
 ``max|ours - oracle| / max|oracle|`` over all columns of a group.
 
@@ -45,6 +46,8 @@ FIXTURE = Path(__file__).resolve().parent / "oracle_fixtures" / "kuo_mahfouf.npz
 GAPS = FIXTURE.with_name("kuo_mahfouf_default_gaps.json")
 TOL = 1.0e-10
 HARD = 1.0e12
+HARD_PTENQ_WIDTH = 1.0e-30
+G32_W_LCL_CHECK_MS = 1.0e-4  # constructed L32 LCL velocity for the w-gate gradient check
 GROUPS = ("g60", "g32")
 PARTITIONS = {"kuo1965": ("dT_k65", "dq_k65"), "anthes": ("dT_anth", "dq_anth")}
 
@@ -129,7 +132,7 @@ def test_fixture_provenance_and_coverage(fx):
 @pytest.mark.parametrize("partition", list(PARTITIONS))
 def test_matches_mahfouf_oracle_at_hard_limit(fx, partition):
     kT, kq = PARTITIONS[partition]
-    cfg = KuoConfig(partition=partition, icond_sharpness=HARD)
+    cfg = KuoConfig(partition=partition, icond_sharpness=HARD, ptenq_sign_floor=HARD_PTENQ_WIDTH)
     errs = {}
     for g in GROUPS:
         out = _run(fx, g, cfg)
@@ -162,7 +165,7 @@ def test_column_water_residual_matches_oracle(fx):
     from legoesm.thermo import latent_heat_vaporization
 
     for g in GROUPS:
-        out = _run(fx, g, KuoConfig(icond_sharpness=HARD))
+        out = _run(fx, g, KuoConfig(icond_sharpness=HARD, ptenq_sign_floor=HARD_PTENQ_WIDTH))
         T, q = fx[f"{g}_T"], fx[f"{g}_q"]
         dpg = np.diff(fx[f"{g}_p_half"], axis=1) / constants.g
         alpha = np.asarray(latent_heat_vaporization(jnp.asarray(T))) / (
@@ -216,29 +219,38 @@ def test_check_grads_at_default_sharpness(fx):
     ``supersat_scale / icond_sharpness = 2e-7``, so the stencil crosses gates;
     measured, the q_v check fails at 1e-6 (3.1e-2 g60 / 1.0e-3 g32 relative)
     and 1e-7, g32 also at 1e-8 (1.1e-5), and passes at 1e-9 and 1e-10.
-    w_grid (the ``w_lcl > 0`` gate), g60 only, ``eps = 1e-7`` (reviewer
-    decision 2026-10-29; measured: fails at 1e-4, passes 1e-6..1e-9).  g32 is
-    not checked: its uniform w = 0.01 gives max|dL/dw| = 5.5e-22.  ``ptenq``
-    is not checked: its sign gate is effectively hard (see the module
-    docstring of ``kuo``); check_grads fails at every eps 1e-12..1e-16."""
+    w_grid (the ``w_lcl > 0`` gate), ``eps = 1e-7`` (reviewer decision
+    2026-10-29; measured: fails at 1e-4, passes 1e-6..1e-9): g60 with its
+    own w; g32 with w replaced by a uniform 1e-4 m/s (user decision
+    2026-10-31, #2273), inside the gate's transition
+    ``w_lcl_scale_ms / icond_sharpness = 2e-4`` m/s but off its midpoint
+    (the fixture's uniform w = 0.01 gives max|dL/dw| = 5.5e-22).
+    ``ptenq`` (the ``ptenq > 0`` sign gate, width ``ptenq_sign_floor``),
+    g32 only, ``eps = 1e-15`` (user decision 2026-10-31, #2273; measured at
+    the default width 3e-10: passes 1e-14..1e-16).  g60 is not checked
+    w.r.t. ptenq: its order-2 check fails at every width and step tried,
+    also with this gate at sharpness 5 (cause not identified)."""
     from jax.test_util import check_grads
 
     for g in GROUPS:
-        T0, q0, pf, ph, w, pq = (
+        T0, q0, pf, ph, w, pq0 = (
             jnp.asarray(fx[f"{g}_{k}"], jnp.float64)
             for k in ("T", "q", "p_full", "p_half", "w", "ptenq")
         )
+        if g == "g32":
+            w = jnp.full_like(w, G32_W_LCL_CHECK_MS)
 
-        def loss(T, q, w):
+        def loss(T, q, w, pq):
             o = kuo_convection(T, q, pf, ph, 900.0, KuoConfig(), pq, w)
             return jnp.sum(o.dT_dt) + 1.0e3 * jnp.sum(o.dq_v_dt)
 
         cases = [
-            ("T", jax.jit(lambda T: loss(T, q0, w)), T0, 1e-6),
-            ("q_v", jax.jit(lambda q: loss(T0, q, w)), q0, 1e-9),
+            ("T", jax.jit(lambda T: loss(T, q0, w, pq0)), T0, 1e-6),
+            ("q_v", jax.jit(lambda q: loss(T0, q, w, pq0)), q0, 1e-9),
+            ("w", jax.jit(lambda ww: loss(T0, q0, ww, pq0)), w, 1e-7),
         ]
-        if g == "g60":
-            cases.append(("w", jax.jit(lambda ww: loss(T0, q0, ww)), w, 1e-7))
+        if g == "g32":
+            cases.append(("ptenq", jax.jit(lambda p: loss(T0, q0, w, p)), pq0, 1e-15))
         for name, f, x, eps in cases:
             assert float(jnp.max(jnp.abs(jax.grad(f)(x)))) > 0.0, (g, name)
             check_grads(f, (x,), order=2, modes=("fwd", "rev"), eps=eps)
