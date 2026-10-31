@@ -93,7 +93,7 @@ class GYRERouting(NamedTuple):
 
 GYRE_MAIN_ROUTING = GYRERouting(True, True, True, True)
 GYRE_LANE_CERTIFIED_ROUTING = GYRERouting(False, False, False, False)
-# DECISION 189: this is the one-line shipped-card choice awaiting the user.
+# DECISION 191 (user, 2026-10-31): the shipped GYRE card keeps main's routing.
 GYRE_CARD_ROUTING = GYRE_MAIN_ROUTING
 
 

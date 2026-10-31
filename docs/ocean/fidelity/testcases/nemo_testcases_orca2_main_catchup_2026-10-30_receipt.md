@@ -946,4 +946,13 @@ env CUDA_VISIBLE_DEVICES="" JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 PYTHONPATH=packag
   guards, restored prose, citations, verification, and acquisition commands.
 - UNASKED: none.
 
-`DECISION_NEEDED: GYRE shear/T routing: lane certified vs main's, numbers`
+### DECISION 191 applied
+
+The user chose main's routing for the shared GYRE card on 2026-10-31
+(step-entry TKE shear, live-stretch Kbb solar, source-associated Kmm solar,
+and main's vertical-mixing reference density).  The shipped assignment
+`GYRE_CARD_ROUTING = GYRE_MAIN_ROUTING` is unchanged from catch-up 4; the
+lane's certified routing stays available as the named card
+`build_gyre_zco_lane_certified_card`.
+
+`DECISION_NEEDED: NONE`
