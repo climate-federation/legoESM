@@ -155,14 +155,14 @@ All numerical verification used CPU binary64 with `CUDA_VISIBLE_DEVICES=""`,
 test file, ran serially, used no xdist worker, and was bounded by `timeout`. No
 NEMO command ran.
 
-The complete O17 unit file passed 8/8 in 1072.76 s. The complete
+The complete O17 unit file passed 8/8 in 978.57 s. The complete
 `tests/ocean/fidelity/test_nemo_si3_*.py` sweep produced 206 passing tests. Its
 two already-disclosed non-green boundaries were unchanged: the O4 file passed
 all eight forward cases before the full-step AD compile reached the 2400 s file
 cap without a compiler diagnostic, and scalarmath-v2 returned four passes plus
 the external-state failure `A MY_SRC is not verbatim`. The O8--O12 master
-scorer passed 30/30 in 907.55 s; the extended O8--O16/O17 acquisition suite
-passed 28/28 in 765.59 s.
+scorer passed 30/30 in 833.82 s; the extended O8--O16/O17 acquisition suite
+passed 28/28 in 707.08 s.
 
 The complete `tests/ice/unit/test_si3_*.py` sweep produced 404 passes, two
 deselections, one skip, and one expected xfail. Its sole failure is the
@@ -178,8 +178,8 @@ TKE terms 71/71; NEMO recipe 25/25; freshwater closure 16/16; stage-face masks
 default cumulative gate both report no unmapped citations, citation failures,
 or full-map audit failures; every built-in control fires.
 
-The nine repository ratchets collected 6,952 cases and returned 11 failed,
-6,939 passed, and 2 skipped. All eleven are pre-existing and outside this
+The nine repository ratchets collected 6,958 cases and returned 11 failed,
+6,945 passed, and 2 skipped. All eleven are pre-existing and outside this
 round's changed model/tool paths: hardcoded-constant rows in
 `test_si3_o13_itd_remap.py`, `test_si3_thd_do.py`, and the O4 stub writer;
 inline-coefficient rows in `bitz_lipscomb.py`, `si3_orca2_state.py`,
@@ -318,7 +318,7 @@ measured on the reviewed parent before its correction was accepted.
    process was started.
 
 10. **Read-only operator preflight.** The final stub-only preflight completed in
-    707.967 s. Its final lines were `PASS_EXISTING_CFG_DIGESTS_UNCHANGED`,
+    760.573 s. Its final lines were `PASS_EXISTING_CFG_DIGESTS_UNCHANGED`,
     `PREFLIGHT_OK: no real NEMO integration was run; worst-case master
     140965556460 bytes (131.28 GiB)`, and
     `PASS_O17_UNIFIED_MASTER_PREFLIGHT_AND_NUMERICAL_PLANTS`. It exercised the
