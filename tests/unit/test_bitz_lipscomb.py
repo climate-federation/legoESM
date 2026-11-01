@@ -524,6 +524,10 @@ _SI3_GRADIENT_SWEEP_ORACLE_B85 = (
     "c-rmTZA?>V6bEoDlWj&Y_>wV|DP3?1NTIkbkb2u9O&}YN31*Ik3KIrSWW4N+$QWzDz(k;eL#hw~1!RtGWTHs#EnuAT&Hx!TfKUsHAVSI<3p&S#-8wK0b73tP{=Y9LCGfOOp7PH*Cp9tx0Dy&Sgg;;3nLGD$OV6#NgdML!82;!x;%War$HT_oEJI4+jsO7YH+O>E8xB`_mhjc7m(P6V_u*6LRPfFvB4Ph_#X`wDm|Yu_B3}H~zUYbjBD^3U8tF2xnErD~O#gxJog0Pp<CMjR+#XpJ^XYp2(_Tk~pM%08<g;9dk~506udLN{e;qXI_fc#i-J)LUR`o}1LP-S6s%q-%mhz_m{-5%kCCjY$UZNk@<fo4(nO&=-Yv?WhGrx!U3Vg|y!9uSF!A8-s+_YC$YtQY8C~NO=d`GD3^$hPR<t69xE9r`x1^?OlvjS%JJOBUl&UU}k`C8VRFpXM(ONZP+?f`O!iTw@$04z+{@BG_-2LJ%{lRMb&fFWVdhB+I|G1%|ut>0-VkL%d4Q43ZCMK*`#MHB8n=h|h4zdz%-0b*&ML!nxmyL+~^ZHYQ`M^4uk-!IP|JRQzEY8rDdJ8T~rJr;G3XC6s$go&*;BRSM!StrldI!kBYm9n%<W^*x$r0YY@!Ojc&mlN~liX(TBJFxI_2m2iW0ANzzVJO(|001yEcd*|9L&BU5b2gY`u;0;Jzw>5uyHS8fEie;EZgiWp5z3Ai0&X_RiK+ij9G$11<9gB9G>a|Je$ErC*#(1gH<GSCZRH=!Shc*v6KTH$hFvB-wng6Ra;c{ZyDr@=l_pZ_Y@Mo&Piu7cU4Ff;>y#~xBwb5)m~eO3g<`*h+(GUDV{-@l9RL7eQr}@H*zW)UFf(_s-vL9yoDFj}m}9Wt(ObXcdTxEcw?-}aB*pSXhl!eKuh}WS-c&#1xgARGq71f|_H$l9HE!yY`;c^fz<OiH5!Q9y6*IY|IP4l3`$aHO@6t)F94$=EmmZ_CpWmDP@RYI6Ipv0lr~^$c-6UP#O5erttc$^Z2f2gX0mkMI_B#Loz@)yzP_W+t0AObBV88SDMN7}+6GHZ?aSzrAKVD=jwRrB=8Q+H__GD#E-MiX(h;{9a+~#zDimsgMOv(9L^;Yh<FI8gIOXalgvt6ENuRT{)@p7D1$g)aZ=Wh=DKt<-?rsz7~ZYbt#n6tqggZ+-)`kjOT<qyspwP1K~_o{l6F~TcDwd-nA=d|zdy#2)YcM8&E14(Ru?dSYG71yyt9!SzP;be@dgms74bM>V%udqI{{k~+V$YqGyppdo3ON%I_XOH*jsTDfsltH4~PV$yvlCDS1IX0W>lCj@G?jU!7vAKi&4gdf!sqZip>~{bFn3+4+?@WdLj(%azhB+I|G1%|ut=~}%NBs0rm4;}~e=y-RnLD8}`;qZyALq{B`yH3*=OhnY@h<pB?r?d-UFDN`L)S&s#=prXb0<3Po7XcZb4R4wObz^K#~<UYZi^i+riwXr;`_n6bBC;0v-HGd-q2Oy6Mwhwcq;Zg$Q|SkFgAB)yWjZ>Wj4Sg"
 )
 
+_SI3_ENTRY_GUARD_SWEEP_ORACLE_B85 = (
+    "c-rmReN4=890%}(Sg1+1sH{AbI$a)CyY7BRw`CI%lZ<LaNYv(`X_i}A5p^q1$C{ieAvAhW_q$?Ex}u5Hc2Vb7MBQpf&OF{9eo=PgtnT_<@7F)y-B#azSKscv&-ZO+1^@s<S0~R@-<dD_fTN#x7k3_~n7`-yb*{eOpRsIih*i3X#2EnqFl_FG`Bon<^ULK?DdkrVZ``4GPHkIjDd4xRkPVf*gZ?!;DQePHw`|6pmrZt}1(dB%8UBJ`a-6Oa%$#=y{^$1hyrWoj);>~A5jb?n9pnxmcbGWu006+ygns8==N$k5Fih^C-vML7JsZFvgMP<g^G<b9T>UOJMN9~bu8Fu9!yT~ap8hSc+$Nf2@e^xbMYHstx4yEDC<=Gka82ciBX<CXUhbgZ0RR9d%^k*qeg^=6nYn|02aE~#Yyg7{`W=JKJIib8%tF-^VMPdEzOZ;YVEu`LpD|{scNLk{c)uf0l&JT-mABf09W0MPzk}QXU~KN7-vIysCe0njf_?`8fSI|2eg}*R_iO-z4Eh~|%{xo(IJE|-DPr#l$Mf|T)PVIT=kC^qx_c`~+peq>iRg^p^VZ6=K$f387X1!#2Y|7;gMJ490GKp)7z_Fx003s@4*H#64=uVQ;qs?W)GRaa<i!hIM0TT}|Mh(c4_zpIC|}=m-!h}}WoAuU2uZK3d#8m3m6SJI6GY}ZH<KB)J6&upy7la<ES?tU9By5zYk$`*Ta{AD8<Jj4?S$&OXX6)^w0Aa+FaG2A9ou^FhUX(b{rbenV?N*Qa(MJwu&>!&wsF49E_{FH{M;)thglBl7e~YT{XEk5Y@aF<a-+<h%X&Yzh|~A$zm;TITF=;ipML#NlBP+rdR9uW5wCe8K86PoLDDDhviz%w*@82fsS79f?AsKTU)SWmj<4%^RGafS$(g)Tdc|iS{5SMF2Ag*hLK|*+swqPCE_h;<#e1%Qx-zihv4Y$C^JJB0-+eBpirbQ=hV=ZOZ&0$`>r1vs={4a(>^PzMTTWBOlzjil7HM6#usz$Wot!BX*T##o$p*isfUZjubly{j3Ep^=JW)yM_2hWg+&S`OlkazsJIEa{-P}RH0{{R_nmddI{SE*CGjj+1PH*UU3=8*cxMzbw2K|n~<{hOf>h|t3HMdUk<+F!2cOt}Yotja<a_48i<JEVc<hBO^mw(G0Hb>Q1q|F<89d>W{2eCGHV&YCMKCR6ifzp+1yETvZo;CUDAx#dM!;)|6-ljWuq{a4Q&ujCBUS(_IJ6g`Apx;66Aa{VVxzpeC&JWCB;tv"
+)
+
 
 def test_si3_column_step_full_gradient_sweep_matches_main_or_lane_difference():
     """All exit/input leaf pairs match the reviewed main/FD oracle, eager/JIT."""
@@ -575,7 +579,7 @@ def test_si3_column_step_full_gradient_sweep_matches_main_or_lane_difference():
         return jnp.stack([jnp.sum(leaf) for leaf in result])
 
     oracle = np.frombuffer(
-        zlib.decompress(base64.b85decode(_SI3_GRADIENT_SWEEP_ORACLE_B85)),
+        zlib.decompress(base64.b85decode(_SI3_ENTRY_GUARD_SWEEP_ORACLE_B85)),
         dtype="<f8",
     ).reshape(24, 9, 23)
     eager = jax.vmap(jax.jacrev(step))(vectors)
