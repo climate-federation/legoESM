@@ -13063,6 +13063,62 @@ for _old, _new, _extent in _CATCHUP_REANCHORS:
 for _new, _value in _catchup_values.items():
     CITATION_MAP[_new] = _value
 
+# Round 29 O17 adds the typed live-forcing branch to the production dispatcher.
+# Preserve the design receipt's historical citation while anchoring the complete
+# current dispatcher implementation that supersedes the recorded stop.
+_reanchor(
+    'packages/ice/legoesm/ice/sea_ice.py:636-708',
+    'packages/ice/legoesm/ice/sea_ice.py:642-725',
+    anchors=[
+        'def _si3_orca2_o2_step_with_trace(',
+        '        "typed SI3O17LiveForcing so no heat/freshwater/salt field is invented."',
+        84,
+    ],
+)
+
+_round29_pending_reanchors = []
+
+
+def _round29_reanchor_or_defer(old: str, new: str, extent: int | None = None) -> None:
+    if old in CITATION_MAP:
+        _reanchor(old, new, extent=extent)
+    else:
+        _round29_pending_reanchors.append((old, new, extent))
+
+
+for _old, _new in (
+    ('packages/ice/legoesm/ice/dynamics.py:1221', 'packages/ice/legoesm/ice/dynamics.py:1226'),
+    ('packages/ice/legoesm/ice/dynamics.py:1273', 'packages/ice/legoesm/ice/dynamics.py:1278'),
+    ('packages/ice/legoesm/ice/dynamics.py:1938', 'packages/ice/legoesm/ice/dynamics.py:1943'),
+    ('packages/ice/legoesm/ice/dynamics.py:1970', 'packages/ice/legoesm/ice/dynamics.py:1975'),
+    ('packages/ice/legoesm/ice/dynamics.py:2029', 'packages/ice/legoesm/ice/dynamics.py:2034'),
+    ('packages/ice/legoesm/ice/dynamics.py:2106', 'packages/ice/legoesm/ice/dynamics.py:2111'),
+    ('packages/ice/legoesm/ice/dynamics.py:2127', 'packages/ice/legoesm/ice/dynamics.py:2132'),
+    ('packages/ice/legoesm/ice/config.py:607-611', 'packages/ice/legoesm/ice/config.py:636-640'),
+    ('packages/ice/legoesm/ice/config.py:581-589', 'packages/ice/legoesm/ice/config.py:589-597'),
+    ('packages/ice/legoesm/ice/config.py:645-659', 'packages/ice/legoesm/ice/config.py:674-688'),
+    ('packages/ice/legoesm/ice/config.py:593-603', 'packages/ice/legoesm/ice/config.py:601-611'),
+    ('packages/ice/legoesm/ice/config.py:267-288,311-315,662-734', 'packages/ice/legoesm/ice/config.py:267-288,311-315,691-763'),
+    ('packages/ice/legoesm/ice/config.py:311-315,672-734', 'packages/ice/legoesm/ice/config.py:311-315,701-763'),
+    ('packages/ice/legoesm/ice/sea_ice.py:3103-3142', 'packages/ice/legoesm/ice/sea_ice.py:3120-3159'),
+    ('packages/ice/legoesm/ice/sea_ice.py:2924-2945', 'packages/ice/legoesm/ice/sea_ice.py:2941-2962'),
+    ('packages/ice/legoesm/ice/sea_ice.py:3318-3390', 'packages/ice/legoesm/ice/sea_ice.py:3335-3407'),
+    ('packages/ice/legoesm/ice/sea_ice.py:3337-3369', 'packages/ice/legoesm/ice/sea_ice.py:3354-3386'),
+    ('packages/ice/legoesm/ice/sea_ice.py:1766-1844,3069-3077,3311-3472', 'packages/ice/legoesm/ice/sea_ice.py:1783-1861,3086-3094,3328-3489'),
+    ('packages/ice/legoesm/ice/sea_ice.py:428-441,1794-1798,2906-2954,3091-3171,3311-3434,3479-3481', 'packages/ice/legoesm/ice/sea_ice.py:428-441,1811-1815,2923-2971,3108-3188,3328-3451,3496-3498'),
+    ('packages/ice/legoesm/ice/sea_ice.py:428-441,483,1794-1798,2445-2470,2536-2602,2906-2954,3091-3171,3311-3434,3479-3481,3601-3618', 'packages/ice/legoesm/ice/sea_ice.py:428-441,483,1811-1815,2462-2487,2553-2619,2923-2971,3108-3188,3328-3451,3496-3498,3618-3635'),
+):
+    _round29_reanchor_or_defer(_old, _new)
+
+_round29_reanchor_or_defer('packages/ice/legoesm/ice/si3_thd_pnd.py:784-972',
+                           'packages/ice/legoesm/ice/si3_thd_pnd.py:784-988', extent=205)
+_round29_reanchor_or_defer('packages/ice/legoesm/ice/config.py:524-578',
+                           'packages/ice/legoesm/ice/config.py:524-586', extent=63)
+_round29_reanchor_or_defer('packages/ice/legoesm/ice/config.py:532-590',
+                           'packages/ice/legoesm/ice/config.py:536-598', extent=63)
+_round29_reanchor_or_defer('packages/ice/legoesm/ice/config.py:535-578',
+                           'packages/ice/legoesm/ice/config.py:539-586', extent=48)
+
 
 _CATCHUP_REANCHORS_2 = (
     ('ocean_model_latlon_cgrid.py:2111', 'ocean_model_latlon_cgrid.py:2135', 1),
@@ -13276,6 +13332,24 @@ _reanchor(
     'packages/ice/legoesm/ice/sea_ice.py:428-441,483,1794-1798,2445-2470,2536-2602,2906-2954,3091-3171,3311-3434,3479-3481,3601-3618',
     extent=388,
 )
+
+for _old, _new, _extent in _round29_pending_reanchors:
+    _reanchor(_old, _new, extent=_extent)
+
+CITATION_MAP['packages/ice/legoesm/ice/config.py:674-688'] = [
+    'def build_si3_orca2_o4_config(', ('return cfg', 2), 15]
+CITATION_MAP['packages/ice/legoesm/ice/config.py:536-598'] = [
+    'from legoesm.ice.si3_orca2_state import SI3ORCA2StateConfig  # noqa: E',
+    ('    )', 13), 63]
+for _key in (
+    'packages/ice/legoesm/ice/sea_ice.py:428-441,1811-1815,2923-2971,3108-3188,3328-3451,3496-3498',
+    'packages/ice/legoesm/ice/sea_ice.py:428-441,483,1811-1815,2462-2487,2553-2619,2923-2971,3108-3188,3328-3451,3496-3498,3618-3635',
+):
+    CITATION_MAP[_key] = [
+        '(pond_area, pond_depth, h_il) as NEMO rung O6/O15 ice_cor does'
+        if anchor == (')', 575) else anchor
+        for anchor in CITATION_MAP[_key]
+    ]
 
 # Decision-189 follow-up and catch-up 2.  These are literal source-edit maps,
 # not live symbol searches: a later insertion still shifts a key and makes the

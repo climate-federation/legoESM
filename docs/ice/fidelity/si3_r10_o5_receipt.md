@@ -54,17 +54,17 @@ Strength, `ice_strength` H79 arm:
 - `:1081`: `strength(ji,jj) = rn_pstar * SUM( v_i(ji,jj,:) ) * EXP( -rn_crhg * ( 1._wp - at_i(ji,jj) ) )`, on the full halo extent, zero where `at_i <= epsi10`.
 - `:1102-1105`: first line `zworka(ji,jj) = ( 4._wp * strength(ji,jj)`, last line `&            ) / ( 4._wp + tmask(ji-1,jj,1) + tmask(ji+1,jj,1) + tmask(ji,jj-1,1) + tmask(ji,jj+1,1) )`; interior only, reading the raw un-exchanged neighbours.
 - `:1114`: `CALL lbc_lnk( 'icedyn_rdgrft', strength, 'T', 1.0_wp )`.
-- Model: `packages/ice/legoesm/ice/dynamics.py:1938` (`def si3_h79_strength_raw(`, shared with lane 3) and `packages/ice/legoesm/ice/dynamics.py:2029` (`def si3_orca2_ice_strength(`).
+- Model: `packages/ice/legoesm/ice/dynamics.py:1943` (`def si3_h79_strength_raw(`, shared with lane 3) and `packages/ice/legoesm/ice/dynamics.py:2034` (`def si3_orca2_ice_strength(`).
 
 aEVP, `ice_dyn_rhg_evp`:
 - Strength enters at `ORCA2_SAS_ICE_O2_REF/BLD/ppsrc/nemo/icedyn_rhg_evp.f90:268` (`CALL ice_strength`) and SSH at `:281` (`zsshdyn(:,:) = ice_var_sshdyn( ssh_m, snwice_mass, snwice_mass_b)`).
 - Levitating arm `ORCA2_SAS_ICE_O2_REF/BLD/ppsrc/nemo/icevar.f90:1090`: `ice_var_sshdyn(:,:) = pssh(:,:)`; the embedded arm is refused.
 - Exchanges, each with NEMO's nature, sign and `ldfull`: `ORCA2_SAS_ICE_O2_REF/BLD/ppsrc/nemo/icedyn_rhg_evp.f90:238` (`fimask`, `'F'`, full: it runs at `kt == nit000`), `:440` (`zdelta`, `zp_delt`, `'T'`, no `ldfull`), `:647` and `:754` (`u_ice` `'U'` -1, `v_ice` `'V'` -1, `ldfull=.true.`), `:845` (`zs1`, `zs2` `'T'`, `zs12` `'F'`, no `ldfull`).
-- Model: `packages/ice/legoesm/ice/dynamics.py:1273` (`def _si3_cgrid_aevp_core(`, the one body), `packages/ice/legoesm/ice/dynamics.py:1221` (`def si3_cgrid_aevp_solver(`, lane 3: periodic halo `packages/ice/legoesm/ice/dynamics.py:843`), `packages/ice/legoesm/ice/dynamics.py:2127` (`def si3_orca2_aevp_solver(`, ORCA2), `packages/ice/legoesm/ice/dynamics.py:2106` (`def si3_var_sshdyn(`).
+- Model: `packages/ice/legoesm/ice/dynamics.py:1278` (`def _si3_cgrid_aevp_core(`, the one body), `packages/ice/legoesm/ice/dynamics.py:1226` (`def si3_cgrid_aevp_solver(`, lane 3: periodic halo `packages/ice/legoesm/ice/dynamics.py:843`), `packages/ice/legoesm/ice/dynamics.py:2132` (`def si3_orca2_aevp_solver(`, ORCA2), `packages/ice/legoesm/ice/dynamics.py:2111` (`def si3_var_sshdyn(`).
 
 Fold, F nature:
 - `ORCA2_SAS_ICE_O2_REF/BLD/ppsrc/nemo/lbcnfd.f90:722` (`CASE ( 'F' )`, T-pivot), rows `ij2 = ipj - 2*ihls + jj - 2`; model `packages/ice/legoesm/ice/si3_orca2_state.py:1389`.
-- When a call without `ldfull` folds the duplicated pivot line: always for one rank (`ORCA2_SAS_ICE_O2_REF/BLD/ppsrc/nemo/lbclnk.f90:2112`, `IF( jpni == 1 )  THEN   ;   CALL lbc_nfd(`), else only at the first step (`ORCA2_SAS_ICE_O2_REF/BLD/ppsrc/nemo/lbcnfd.f90:1617`). This is the explicit, default-free `nfd_full_when_absent` of `packages/ice/legoesm/ice/dynamics.py:1970` (`class SI3ORCA2FoldProgram(NamedTuple):`).
+- When a call without `ldfull` folds the duplicated pivot line: always for one rank (`ORCA2_SAS_ICE_O2_REF/BLD/ppsrc/nemo/lbclnk.f90:2112`, `IF( jpni == 1 )  THEN   ;   CALL lbc_nfd(`), else only at the first step (`ORCA2_SAS_ICE_O2_REF/BLD/ppsrc/nemo/lbcnfd.f90:1617`). This is the explicit, default-free `nfd_full_when_absent` of `packages/ice/legoesm/ice/dynamics.py:1975` (`class SI3ORCA2FoldProgram(NamedTuple):`).
 
 ## Exact-input structure
 

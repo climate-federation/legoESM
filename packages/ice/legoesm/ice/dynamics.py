@@ -1175,6 +1175,8 @@ def si3_cgrid_deformation(
     forcing: SI3CGridAEVPForcing,
     metrics: SI3CGridMetrics,
     config: SI3CGridAEVPConfig,
+    *,
+    fold: SI3ORCA2FoldProgram | None = None,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Return final C-grid divergence and deformation for redistribution.
 
@@ -1185,12 +1187,15 @@ def si3_cgrid_deformation(
     their halos before ``icedyn_rdgrft.F90:234-237`` packs physical cells.
     """
 
-    _validate_si3_cgrid_aevp_static(config)
+    if config.category_count not in (1, 5):
+        raise ValueError("SI3 C-grid deformation owns only admitted category counts 1 and 5")
+    _validate_si3_cgrid_aevp_static(config, category_count=config.category_count)
     shape = state.u_ice_u.shape
-    leaves = (*state, *forcing, *metrics)
+    leaves = tuple(value for value in (*state, *forcing, *metrics) if hasattr(value, "shape"))
     if len(shape) != 2 or any(value.shape != shape for value in leaves):
         raise ValueError("SI3 C-grid deformation requires same-shape 2-D leaves")
-    fimask = _si3_cgrid_fmask(forcing, config, state.u_ice_u.dtype, _si3_lane3_halo)
+    halo = _si3_lane3_halo if fold is None else _si3_orca2_halo(fold, frozenset())
+    fimask = _si3_cgrid_fmask(forcing, config, state.u_ice_u.dtype, halo)
     shear_f = _si3_f_shear(
         state.u_ice_u,
         state.v_ice_v,

@@ -784,7 +784,7 @@ def si3_ice_thd_pnd(
 def si3_ice_thd_o12_stages(
     *,
     category_entries: Sequence[dict],
-    category_fluxes: Sequence[SI3DHFluxes],
+    category_fluxes: Sequence[SI3DHFluxes] | SI3DHFluxes,
     sfx_bri,
     sfx_lam,
     hfx_thd,
@@ -819,11 +819,17 @@ def si3_ice_thd_o12_stages(
     if namelist is None:
         raise ValueError("si3_ice_thd_o12_stages requires the resolved namelist; no default")
     nml = dict(namelist)
-    if len(category_entries) != 5 or len(category_fluxes) != 5:
-        raise ValueError("SI3 O12 requires 5 category entries and flux tuples (jpl=5)")
+    if len(category_entries) != 5:
+        raise ValueError("SI3 O12 requires 5 category entries (jpl=5)")
+    live_flux_carry = isinstance(category_fluxes, SI3DHFluxes)
+    if not live_flux_carry and len(category_fluxes) != 5:
+        raise ValueError("SI3 O12 record replay requires 5 category flux tuples (jpl=5)")
     ln_iceda = nml.get("ln_icedA")
     if not isinstance(ln_iceda, bool):
-        raise ValueError(f"si3_ice_thd_o12_stages requires bool ln_icedA in namelist; got {ln_iceda!r}")
+        raise ValueError(
+            "si3_ice_thd_o12_stages requires bool ln_icedA in namelist; "
+            f"got {ln_iceda!r}"
+        )
     r1_nlay_s_arr = _required("r1_nlay_s", r1_nlay_s)
     r1_nlay_i_arr = _required("r1_nlay_i", r1_nlay_i)
     sr = nemo_source_round
@@ -833,10 +839,11 @@ def si3_ice_thd_o12_stages(
     cur_sfx_lam = _required("sfx_lam", sfx_lam)
     cur_hfx_thd = _required("hfx_thd", hfx_thd)
     cur_wfx_lam = _required("wfx_lam", wfx_lam)
+    cur_fluxes = category_fluxes if live_flux_carry else None
 
     for jl in range(5):
         entry = category_entries[jl]
-        fluxes = category_fluxes[jl]
+        fluxes = cur_fluxes if live_flux_carry else category_fluxes[jl]
         o10 = si3_ice_thd_o10_category_stages(
             entry=entry,
             fluxes=fluxes,
@@ -853,6 +860,11 @@ def si3_ice_thd_o12_stages(
         )
         cur_sfx_bri = o10.sal.sfx_bri
         dh = o10.o9.dh
+        if live_flux_carry:
+            # icethd.f90 carries the module flux arrays through the category
+            # loop; the five-tuple arm above remains the exact-input record
+            # replay boundary used by O9--O12 scorers.
+            cur_fluxes = dh.fluxes
         a_i_cat = dh.a_i
         h_i_cat = dh.h_i
         h_s_cat = dh.h_s
@@ -884,6 +896,10 @@ def si3_ice_thd_o12_stages(
             cur_sfx_lam = da_out.sfx_lam
             cur_hfx_thd = da_out.hfx_thd
             cur_wfx_lam = da_out.wfx_lam
+            if live_flux_carry:
+                # ``hfx_thd`` is both a DH accumulator and an ice_thd_da
+                # in/out array.  The next category sees DA's updated value.
+                cur_fluxes = cur_fluxes._replace(hfx_thd=cur_hfx_thd)
         else:
             da_out = None
 

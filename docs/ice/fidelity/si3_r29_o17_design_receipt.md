@@ -1,6 +1,6 @@
 # SI3 round 29 (`si3_r29`) — O17 design and record audit receipt
 
-Date: 2026-10-31. Base: `920c61d884384e18470962568cda8295f0dfbe89`.
+Date: 2026-10-31. Base: `44ca9044917b13ac14e074223f436385a78eb058`.
 No NEMO build, launch, or integration was run.
 
 ## Outcome
@@ -11,10 +11,14 @@ thermodynamic stage frames, exchange outputs, and restart. It does not have a
 complete ice-step-entry state or raw O7 meteorology at every step. The O1--O7
 records do not fill those holes over the same 100-step production trajectory.
 
+The audit in this opening section predates the Resume 1 implementation.  The
+typed composition entry and acquisition tooling described below now exist;
+the unified O17 record and through-entry numerical proof still do not.
+
 There is also no existing legoESM production entry point that performs the O17
 program. The current dispatcher accepts a typed finalization forcing and calls
 O15, O16, and the stress tail, while its earlier O2 forcing path raises
-`NotImplementedError` (`packages/ice/legoesm/ice/sea_ice.py:636-708`). O4--O16
+`NotImplementedError` (`packages/ice/legoesm/ice/sea_ice.py:642-725`). O4--O16
 therefore do **not** already score through one common full-step entry point.
 The exact missing piece is a typed `si3_orca2_o17` production composition entry
 that orders the already admitted O4 Prather, O5 H79+aEVP, O6 redistribution and
@@ -140,5 +144,127 @@ schema/source findings. `PLAUSIBLE`: none promoted to an O17 physics verdict.
   only the ladder design, this receipt, and the citation registry.
 - All commands used CPU fp64 with `CUDA_VISIBLE_DEVICES=""`,
   `JAX_PLATFORMS=cpu`, and `JAX_ENABLE_X64=1`. No NEMO or GPU command ran.
+
+independent review: operator (Claude)
+
+## Resume 2 measurement and disposition
+
+The probe now keeps every scheduler value outside the differentiated pytree.
+The literal static inputs are `kt=1`, `jpl=5`, `nlay_i=10`, `nlay_s=5`,
+`nn_hls=2`, `n_subcycles=100`, `category_count=5`, `ln_icedyn=True`, and
+`ln_icethd=True`.  `jax.eval_shape` completes without converting a traced
+integer to Boolean.  The floating pytree is an 8 by 7 full tile with a 4 by 3
+owned region: eight owned columns contain ice in five categories, snow, and
+ponds; four owned columns are open water; ice/ocean velocities, wind stress,
+ocean stress, heat, freshwater, and precipitation forcings are nonzero.
+
+The exact compiled CPU-fp64 `value_and_grad` program was run twice under the
+required `timeout 3600`.  Both runs returned exit 124 without a compiler
+diagnostic.  The resource-accounted current-source run measured 3607.36 s wall
+including timeout reap and 18,061,120 KiB peak RSS (about 17.2 GiB).  The same
+exact transform under `jax.disable_jit()` also returned exit 124 after 3604.83 s
+and measured 17,710,772 KiB peak RSS.  Thus neither execution produced a
+numerical gradient or a primal-from-gradient result; forward-bit equality for
+that transformed program is unmeasured, not failed.
+
+Trace-only accounting completed in 43 seconds.  The scalar objective contains
+180,148 top-level and 576,742 recursively nested jaxpr equations.  The largest
+named owner is the five-category O9--O12 thermodynamic program (112,647
+equations); O8 open-water thermodynamics contributes 25,688, O6 redistribution
+18,434, O15 9,893, post-dynamics correction 9,367, and the remaining inlined
+helpers 384,109.  By contrast, the scan-based aEVP owner contributes 806
+recursive equations.  There are 132,351 nested `jit` equations, 74,780
+`select_n`, 28,519 source-rounding barriers, and only 27 `scan` primitives.
+The compile limit is therefore the inlined/unrolled thermodynamic and
+source-rounding graph, not the 100-subcycle aEVP scan or memory exhaustion.
+
+The complete 206-leaf publication is
+`docs/ice/fidelity/si3_r29_o17_ad_leaf_table.md`.  Shape and dtype are measured
+for every floating entry/forcing leaf.  Finite, NaN, Inf, and nonzero gradient
+counts are `UNMEASURED_TIMEOUT` on every row.  Consequently no leaf is called
+zero and no zero reason is asserted.  The probe contains reason classification
+for a completed run (overwritten live-state fields, masks/routing, disabled
+landfast drag, inactive bulk-salinity Prather moments, and exact local zeros),
+but publishing any of those as observed zero leaves would fabricate evidence.
+
+The production dispatcher and frozen O17 card are wired, and the structural
+preflight proves the admitted call order.  Its swapped-rheology/advection and
+dropped-redistribution plants both fire.  The O4 forward/JIT exact cases passed
+before only its final AD test reached its 1800-second timeout; O5 passed 17/17,
+O7 passed 19/19, the O8--O16 master scorer passed 30/30, O6 passed 28 selected
+tests (one deselected), O12 passed 80/80, finalization passed 8/8, and the new
+O17 unit file passed 6/6.  These retain every certified component's forward
+bits.
+
+The nine repository ratchets report the established baseline: 11 failed,
+6,936 passed, and 2 skipped.  The failures are the three pre-existing
+hardcoded-constant rows (`test_si3_o13_itd_remap.py`, `test_si3_thd_do.py`, and
+the O4 stub writer), five pre-existing inline-coefficient rows
+(`bitz_lipscomb.py`, `si3_orca2_state.py`, `geothermal.py`, `mle.py`, and
+`mle_latlon_cgrid.py`), and three pre-existing parameter-spec rows
+(`si3_orca2_state.py`, `mle.py`, and `shortwave_penetration.py`).  O17 adds no
+ratchet failure; its frozen deck literals carry explicit provenance comments.
+
+They are not, however, a through-entry composition proof.  The retained O4,
+O5, O7, and O8--O16 records are different projections/runs and do not contain
+one complete O17 step-entry plus live forcing.  The composition scorer now
+reports both `INDEPENDENT` and `GIVEN-NEMO-ENTRY` as `ACQUISITION_NEEDED`
+instead of relabelling separate component scores as an O17 result.  A true
+eager/JIT through-entry proof, and meaningful swap/drop numerical red scores,
+require the unified O17 record named by the acquisition tool.
+
+### Decision needed
+
+1. Convert the O9--O12 category/layer/Picard Python loops to bit-preserving JAX
+   control flow and place checkpoint boundaries between already admitted rung
+   calls.  This changes traced operator structure but not intended forward
+   arithmetic; every O4--O16 exactness test must remain 0 ULP. **Pick.**
+2. Add stagewise custom VJPs around the admitted calls, preserving the current
+   forward graph but taking on hand-maintained reverse rules.
+3. Replace the full-step objective with separate per-stage gradients.  This is
+   a different program and is not recommended.
+
+No option was applied in Resume 2 because the operator explicitly prohibited
+operator-structure changes.  Until option 1 or 2 is approved, the C4 numerical
+reachability table remains measured as timed out rather than passing.
+
+## Resume 1 implementation (operator ruling applied)
+
+The earlier stop above is historical.  The operator confirmed that O17's one
+new piece is the typed full-deck composition entry, not a new physical
+operator.  Resume 1 therefore implemented that composition while retaining the
+stop on any previously unadmitted physical kernel.
+
+The dispatcher now accepts `SI3O17StepState` plus
+`SI3O17LiveForcing`.  The explicit `SI3O17Card` writes the live O4--O16 deck,
+including `ln_icedyn=True`, `ln_icethd=True`, 100 aEVP subcycles, five
+categories, 10+5 layers, 10800 s, `nn_hls=2`, all surface selectors, and
+`core2_precipitation_closure=False`.  The production call graph is:
+
+1. O7 `blk_ice_1` and stress exchange;
+2. O5 H79 strength and aEVP;
+3. O4 Prather advection;
+4. O6 deformation, redistribution/rafting, and `ice_cor(kt,1)`;
+5. the remainder of O7 (`ice_alb`, `blk_ice_2`, `ice_flx_other`);
+6. O8 frazil, O9--O12 category/pond work, O13 remap, and O14 open water;
+7. O15 correction, O16 aggregation/flux update, and tau update.
+
+No new physical formula was added.  The only supporting changes are production
+wiring: the admitted deformation routine can select the admitted ORCA2 fold
+exchange, and the admitted O9--O12 loop can carry its flux tuple live between
+categories while preserving its old five-snapshot exact-record replay arm.
+
+The read-only O17 preflight imports the O5, O7, O8--O16, read-set, and shared
+extent tools.  It mechanically verifies the call graph above, the 100 x 10800 s
+contract, both score labels, and the required complete entry/raw
+meteorology/products/boundaries/exchanges/restart record set.  Both a swapped
+O5/O4-order plant and a dropped-O6 plant fail.  The acquisition driver defaults
+to this read-only preflight, writes its source/resource/retention/admission
+manifest before an explicit operator run, and routes output only below
+`si3_rounds/round<k>/`.
+
+Resume 1 initially left the differentiability probe with an ice-free synthetic
+state.  Resume 2 above replaces it with the active mixed-regime state and
+records the bounded compiled/eager measurements and per-leaf disposition.
 
 independent review: operator (Claude)
