@@ -1,6 +1,6 @@
 # Ocean biogeochemistry on the forced tripole / lat-lon drivers (`ggn/bgc-tripole`)
 
-Status, 25 Oct 2026. Branch = `main` (faabec69) + the commits listed at the end.
+Status, 1 Nov 2026. Branch = `main` (faabec69) + the commits listed at the end.
 Three BGC schemes run online on the eORCA1 tripole ocean + sea ice under the
 standard NEMO-faithful card, from GLODAPv2 / WOA23 initial fields, with
 restart chaining: `--biogeo {abiotic,npzd,npzd_v2,marbl}`.
@@ -67,15 +67,29 @@ physics step (unchanged)  ->  TracerTransporter  ->  scheme source/sink  ->  nex
 
 * First-order operator splitting; GM/Redi bolus fluxes not applied to tracers
   (off on the standard card).
-* No river / atmospheric deposition sources (ShyBFM eq. 6) and no burial sink:
-  closed system apart from air-sea exchange. The dilution term is NOT needed:
-  the z* flux-form update conserves `h*c` under freshwater volume change.
+* Surface deposition for MARBL via `--marbl-forcing` (dust, soluble Fe, NOy, NHx;
+  `scripts/data/build_marbl_forcing_eorca1.py` from the CESM2 gx1v6 set: 528 Tg dust,
+  7.9 Gmol Fe, 13.5 Tg N per year in 1850). Not yet wired: sediment / hydrothermal Fe
+  (3-D interior source), rivers (GNEWS2000) and burial -> Step 4. npzd_v2 still uses a
+  uniform `Fe_dust`.
 * NPZD-family settling is inside the source/sink on reference `dz`; moving it
   into the transport (real thicknesses) is planned.
-* MARBL deposition forcing (`--marbl-forcing`, monthly dust/Fe/NOx/NHy on the
-  model grid) not yet built; Fe starts from a 0.1-0.6 nM profile.
-* Cost (1 A100, eORCA1 L75, dt 150 s): physics 0.65 steps/s = 0.28 SYPD;
-  +15 % MARBL at `--bgc-every 4`, +25 % npzd_v2 at every step.
+* The GPU runs are not bit-reproducible (XLA atomics): two legs with identical
+  configuration differ at ~1e-6 in point maxima and in the last printed digit of
+  mean SST after weeks, without growing. Any restart round-trip / one-way-coupling
+  check must use a tolerance, or `--xla_gpu_deterministic_ops=true`.
+* Seeds: MARBL's semi-labile DOM must start small (DOC 1, DON 0.1, DOP 0.01
+  mmol/m^3). A 40 mmol/m^3 DOC seed (~640 PgC) remineralised at ~100 PgC/yr and
+  drove surface pCO2 from 273 to 295 ppm within six months (C2_marbl_6mo).
+* npzd_v2 keeps phytoplankton near its refuge value outside the subpolar North
+  Atlantic (zooplankton > phytoplankton at the surface, NO3/PO4 accumulating): a
+  grazing/mortality calibration issue of the scheme, to be done in the 1-D harness
+  (`tests/ocean/unit/test_bgc_npzd_v2_column.py`). K_Fe (80/50 pM) is not the cause:
+  MARBL grows normally under the same Fe field.
+* Cost (1 A100-40GB, eORCA1 L75, dt 150 s): physics 0.65 steps/s = 0.28 SYPD;
+  +15 % MARBL at `--bgc-every 4`, +25 % npzd_v2 at every step. At dt = 1200 s
+  (Phase-1 plan) use `--bgc-every 3` (1-h BGC step, CESM's interval) to keep the
+  MARBL share at that level.
 
 ## Validation runs (Levante, `/work/bb1596/b384036/diffESM/runs/step1/`)
 
@@ -85,6 +99,19 @@ physics step (unchanged)  ->  TracerTransporter  ->  scheme source/sink  ->  nex
 | B2_npzdv2_smoke | npzd_v2 | uniform | 2 d | 18 tracers, no negatives |
 | B3_npzdv2_glodap | npzd_v2 | GLODAP/WOA | 10 d | air-sea +8 -> +3.7 PgC/yr |
 | B4_marbl_smoke | marbl | GLODAP/WOA + seeds | 2 d + resume | NPP 22->48, export 1.0->2.0, CO2 +2.1 PgC/yr, pCO2 272, P conserved 1e-7 |
+| C2_npzdv2_6mo | npzd_v2 | GLODAP/WOA, branched from B3 | 180 d, 7 legs | C/N/P/Si closed; uptake 3.8 -> 0.7 PgC/yr; surface Pd+Pn flat at 0.12 mmol N/m^3; deep seed dies (correct) |
+| C2_marbl_6mo | marbl (DOC seed 40) | same parent | 180 d, 7 legs | NPP 82 -> 44, export 9 -> 4 PgC/yr, Chl 0.6 -> 0.15; P 3e-6, Si 9e-6; DIC +1.3e-3 linear = DOC-seed artefact; pCO2 273 -> 295 |
+| C2 one-way split | both | | 180 d | ocean diagnostics of the two chains identical to GPU roundoff (SST last digit, max\|u\| 1e-6, no growth) |
+| B5_marbl_seedfix | marbl (DOC seed 1) | | 2 d | total C conserved 2.7e-8; DIC rise now the dying 3-D living seed only |
+| B6_marbl_dep | marbl + `--marbl-forcing` | | 2 d | N deposition exact (+0.9e-7); Fe +3.1e-5 of +4.5e-5 deposited retained (rest: dust-scaled scavenging/burial) |
+| C1 + C1b | physics only | WOA | 1.08 yr, 10 legs | dt = 150 reference: 0.66 steps/s; AMOC@26N 23 -> 34 -> 26 Sv, Drake 136 -> 146 -> 144 Sv over year 1 |
+
+Figures: `docs/figures/bgc_tripole/c2_marbl_vs_npzdv2_6mo.png` (time series),
+`docs/figures/bgc_tripole/c2_endstate_surface_maps.png` (day-180 surface fields);
+`scripts/analysis` equivalent: `/work/bb1596/b384036/diffESM/runs/step1/compare_c2.py`.
+
+Decision (Step 1): MARBL carries the Step 4 BGC spin-up; npzd_v2 is the cheap
+baseline pending calibration.
 
 ## Commits over main
 
@@ -97,4 +124,10 @@ e84c593 ocean: opt-in vmix_K_v diagnostic slot (store_vmix_K)
 5c77d91 bgc: --biogeo marbl (MARBLRunner)
 4ecb70a marbl: carbonate_marbl.py, piston_velocity, MARBL constants
 cff76c5 marbl: fix inverted ocean mask; sidecar pco2 for MarblConfig
+114e0b6 docs: README
+ba082b3 bgc: branch legs start the BGC fresh when the parent sidecar holds another scheme
+33ec391 restart fingerprint: exclude LEGOESM_ALLOW_VERSION_DRIFT
+5a27384 marbl: realistic semi-labile DOM seeds; total-carbon inventory in diagnostics
+1fed170 bgc: CESM2/MARBL deposition forcing (dust, soluble Fe, NOy, NHx) -> eORCA1
+(this)  docs: README after Block C
 ```
