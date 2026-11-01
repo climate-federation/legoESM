@@ -195,7 +195,7 @@ def test_initial_profiles_interpolate_linearly_and_condense_with_our_curve():
         cb.initial_profiles(s, zp)
 
 
-def _write_case(tmp_path, nx=6, ny=6, nz=16, nt=2, z_scale=1.0):
+def _write_case(tmp_path, nx=6, ny=6, nz=16, nt=2, z_scale=1.0, t_int_units=None):
     import pandas as pd
     import xarray as xr
     dx, dy, dz = _grid(nx, ny, nz)
@@ -218,6 +218,8 @@ def _write_case(tmp_path, nx=6, ny=6, nz=16, nt=2, z_scale=1.0):
     ds = xr.Dataset({k: (("t", "x", "y", "z"), v.astype("float32")) for k, v in data.items()},
                     coords={"t": t, "x": np.arange(nx) * dx, "y": np.arange(ny) * dy, "z": z})
     ds["cloud_fraction"] = (("t", "z"), np.full((nt, nz), 0.2, dtype="float32"))
+    if t_int_units is not None:  # untagged int64 time axis, as in sites >= 100
+        ds = ds.assign_coords(t=("t", t.as_unit("ns").asi8, {"units": t_int_units}))
     ds.attrs["_swirl_lm.pbtxt"] = "boundary_models {\n  z_0: 0.001\n}\nsurface_gustiness: 1.0\n"
     store = tmp_path / "data.zarr"
     ds.to_zarr(store, consolidated=True)
@@ -268,6 +270,20 @@ def test_build_artifact_from_a_store(tmp_path):
     from legoesm.atmosphere.les_suite.scm_runner import moist_scm_microphysics
     micro = moist_scm_microphysics(back)
     assert micro.scheme == "kessler" and micro.kessler.parameter_set == "cloudbench"
+
+
+def test_build_artifact_reads_an_untagged_integer_time_as_nanoseconds(tmp_path):
+    import xarray as xr
+    store, forcing, _, _ = _write_case(tmp_path, t_int_units="nanoseconds")
+    assert np.issubdtype(xr.open_zarr(store)["t"].dtype, np.integer)  # stays undecoded
+    art = cb.build_artifact(0, 7, "amip", forcing, store=str(store))
+    assert np.array_equal(art.times_s, [0.0, 96 * 3600.0, 96 * 3600.0 + 1200.0])
+
+
+def test_build_artifact_refuses_an_integer_time_in_other_units(tmp_path):
+    store, forcing, _, _ = _write_case(tmp_path, t_int_units="seconds")
+    with pytest.raises(ValueError, match="expected elapsed time"):
+        cb.build_artifact(0, 7, "amip", forcing, store=str(store))
 
 
 def test_held_out_sites_are_a_fixed_fifth_of_the_sites():

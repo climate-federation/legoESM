@@ -343,11 +343,19 @@ def build_artifact(site, month, exp, forcing_dir, store=None, time_indices=None)
             raise ValueError(f"{url}: {ax} is not k*L/(n-1); the grid differs from "
                              "CloudBench's")
     z_store = np.asarray(ds["z"].values, dtype=np.float64)
-    if not np.issubdtype(ds["t"].dtype, np.timedelta64):
-        raise ValueError(f"{url}: t has dtype {ds['t'].dtype}, expected elapsed time")
+    # Stores for sites >= 100 keep t as int64 with units "nanoseconds" but lack the
+    # dtype tag xarray needs to decode it; read those as nanoseconds (PI 2026-11-01).
+    t_var = ds["t"]
+    if np.issubdtype(t_var.dtype, np.timedelta64):
+        t_ns = t_var.values.astype("timedelta64[ns]").astype(np.int64)
+    elif np.issubdtype(t_var.dtype, np.integer) and t_var.attrs.get("units") == "nanoseconds":
+        t_ns = t_var.values.astype(np.int64)
+    else:
+        raise ValueError(f"{url}: t has dtype {t_var.dtype} and units "
+                         f"{t_var.attrs.get('units')!r}, expected elapsed time")
     surface = run_surface_settings(ds.attrs["_swirl_lm.pbtxt"])
     z_phys = z_store + 0.5 * dz
-    t_all = ds["t"].values.astype("timedelta64[ns]").astype(np.int64) / 1e9
+    t_all = t_ns / 1e9
     idx = list(range(len(t_all))) if time_indices is None else list(time_indices)
     keep = slice(1, nz - 1)
 
