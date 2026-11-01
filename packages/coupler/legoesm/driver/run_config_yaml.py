@@ -316,6 +316,7 @@ _ATM_SCALAR_PARAM_MAP: dict[str, str] = {
     "atm.turb.CLUBBParams.gamma_coefb": "clubb_gamma_coefb",
     "atm.turb.CLUBBParams.beta": "clubb_beta",
     "atm.turb.CLUBBParams.c_K10": "clubb_c_k10",
+    "atm.turb.CLUBBParams.C6rtb": "clubb_c6rtb",
     # hard saturation-adjustment trigger + heating cap -> _resolve_microphysics
     # (physics_pipeline, via apply_microphysics_experiment_flags; the MPAS
     # post-step drain reads the same threaded sub-config in model_driver).
