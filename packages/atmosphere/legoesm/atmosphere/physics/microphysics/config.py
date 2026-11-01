@@ -1072,7 +1072,9 @@ class MorrisonConfig(NamedTuple):
     # so the default graph and every existing run are untouched; nothing in the
     # model reads it.  Exists because the donor clamp scales all q_c sinks by a
     # common factor, so terms re-derived outside the scheme are PRE-clamp and
-    # cannot close the budget.  NOT a tunable: it selects no physics.
+    # cannot close the budget.  NOT a tunable: it selects no physics.  Under
+    # prognostic_droplet_number it also publishes the droplet-number budget
+    # (``MicrophysicsOutput.nc_budget``).
     publish_qc_budget: bool = False
     # CAM6 MG2-style warm-rain multipliers, read ONLY by the kk2000 branch
     # (appended at the END: positional ABI).  autocon_fact scales the KK2000
