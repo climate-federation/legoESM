@@ -104,6 +104,27 @@ def _nemo_sqrt_jvp(primals, tangents):
     return y, ydot
 
 
+def _category_loop(body, carry, xs: Sequence):
+    """``DO jl = 1, jpl``: ``carry, y = body(carry, xs[jl])`` in order; returns ``carry, [y_jl]``.
+
+    DECISION 194: when any input is a JAX tracer (jit/grad) the passes run as
+    one ``lax.scan`` over the stacked ``xs`` (same body, same order, static
+    trip count), so the traced program holds the category body once; the body
+    is checkpointed so reverse mode stores only the carry.  Eager calls keep
+    the Python loop.
+    """
+    leaves = jax.tree_util.tree_leaves((carry, tuple(xs)))
+    if not any(isinstance(leaf, jax.core.Tracer) for leaf in leaves):
+        ys = []
+        for x in xs:
+            carry, y = body(carry, x)
+            ys.append(y)
+        return carry, ys
+    stacked = jax.tree.map(lambda *v: jnp.stack(v), *xs)
+    carry, ys = jax.lax.scan(jax.checkpoint(body), carry, stacked)
+    return carry, [jax.tree.map(lambda y, jl=jl: y[jl], ys) for jl in range(len(xs))]
+
+
 def _required(name: str, value):
     if value is None:
         raise ValueError(f"SI3 O12 pond stage requires {name!r}; no default")
@@ -538,22 +559,13 @@ def si3_pnd_lev(
         )
 
     jpl = arr["a_i"].shape[-1]
-    wfx = arr["wfx_pnd"]
-    a_ip_list, h_ip_list, h_il_list, v_ip_list, v_il_list = [], [], [], [], []
-    for jl in range(jpl):
+    per_category = ("a_i", "h_i", "t_su", "a_ip", "h_ip", "h_il", "dh_i_sum", "dh_s_sum", "sz_i", "t_i")
+
+    def _category(wfx, cat):
         cat_out = _pnd_lev_single_category(
             at_i=arr["at_i"],
             wfx_pnd=wfx,
-            a_i=arr["a_i"][..., jl],
-            h_i=arr["h_i"][..., jl],
-            t_su=arr["t_su"][..., jl],
-            a_ip=arr["a_ip"][..., jl],
-            h_ip=arr["h_ip"][..., jl],
-            h_il=arr["h_il"][..., jl],
-            dh_i_sum=arr["dh_i_sum"][..., jl],
-            dh_s_sum=arr["dh_s_sum"][..., jl],
-            sz_i=arr["sz_i"][..., :, jl],
-            t_i=arr["t_i"][..., :, jl],
+            **cat,
             rDt_ice=scl["rDt_ice"],
             r1_Dt_ice=scl["r1_Dt_ice"],
             rn_himin=scl["rn_himin"],
@@ -568,19 +580,19 @@ def si3_pnd_lev(
             z1_aspect=z1_aspect,
             z1_Tp=z1_Tp,
         )
-        wfx = cat_out.wfx_pnd
-        a_ip_list.append(cat_out.a_ip)
-        h_ip_list.append(cat_out.h_ip)
-        h_il_list.append(cat_out.h_il)
-        v_ip_list.append(cat_out.v_ip)
-        v_il_list.append(cat_out.v_il)
+        return cat_out.wfx_pnd, cat_out
 
+    wfx, outs = _category_loop(
+        _category,
+        arr["wfx_pnd"],
+        [{k: arr[k][..., jl] for k in per_category} for jl in range(jpl)],
+    )
     return SI3PndLevOutputs(
-        a_ip=jnp.stack(a_ip_list, axis=-1),
-        h_ip=jnp.stack(h_ip_list, axis=-1),
-        h_il=jnp.stack(h_il_list, axis=-1),
-        v_ip=jnp.stack(v_ip_list, axis=-1),
-        v_il=jnp.stack(v_il_list, axis=-1),
+        a_ip=jnp.stack([o.a_ip for o in outs], axis=-1),
+        h_ip=jnp.stack([o.h_ip for o in outs], axis=-1),
+        h_il=jnp.stack([o.h_il for o in outs], axis=-1),
+        v_ip=jnp.stack([o.v_ip for o in outs], axis=-1),
+        v_il=jnp.stack([o.v_il for o in outs], axis=-1),
         wfx_pnd=wfx,
     )
 
@@ -847,7 +859,6 @@ def si3_ice_thd_o12_stages(
     r1_nlay_i_arr = _required("r1_nlay_i", r1_nlay_i)
     sr = nemo_source_round
 
-    cat_outputs: list[SI3O12CategoryOutput] = []
     cur_sfx_bri = _required("sfx_bri", sfx_bri)
     cur_sfx_lam = _required("sfx_lam", sfx_lam)
     cur_hfx_thd = _required("hfx_thd", hfx_thd)
@@ -862,12 +873,14 @@ def si3_ice_thd_o12_stages(
         cur_hfx_err_dif = None  # icethd.F90:160-180 exact-input record replay arm
         cur_hfx_dif = None  # icethd.F90:160-180 exact-input record replay arm
 
-    for jl in range(5):
-        entry = dict(category_entries[jl])
+    def _category(carry, xs):  # one ``DO jl = 1, jpl`` pass (icethd.f90:176-221)
+        (cur_sfx_bri, cur_sfx_lam, cur_hfx_thd, cur_wfx_lam,
+         cur_fluxes, cur_hfx_err_dif, cur_hfx_dif) = carry
+        entry = dict(xs[0])
         if live_flux_carry:
             entry["hfx_err_dif"] = cur_hfx_err_dif  # icethd_zdf_bl99.F90:828
             entry["hfx_dif"] = cur_hfx_dif  # icethd_zdf_bl99.F90:831
-        fluxes = cur_fluxes if live_flux_carry else category_fluxes[jl]
+        fluxes = cur_fluxes if live_flux_carry else xs[1]
         o10 = si3_ice_thd_o10_category_stages(
             entry=entry,
             fluxes=fluxes,
@@ -944,7 +957,9 @@ def si3_ice_thd_o12_stages(
         oa_i_cat = sr(o_i_entry * a_i_cat)
         szv_i_cat = sr(sr(o10.sal.sz_i * v_i_cat[..., None]) * r1_nlay_i_arr)
 
-        cat_outputs.append(
+        carry = (cur_sfx_bri, cur_sfx_lam, cur_hfx_thd, cur_wfx_lam,
+                 cur_fluxes, cur_hfx_err_dif, cur_hfx_dif)
+        return carry, (
             SI3O12CategoryOutput(
                 o10=o10,
                 da=da_out,
@@ -967,6 +982,16 @@ def si3_ice_thd_o12_stages(
                 dh_s_sum=dh.dh.dh_s_sum,
             )
         )
+
+    carry, cat_outputs = _category_loop(
+        _category,
+        (cur_sfx_bri, cur_sfx_lam, cur_hfx_thd, cur_wfx_lam,
+         cur_fluxes, cur_hfx_err_dif, cur_hfx_dif),
+        [(category_entries[jl], None if live_flux_carry else category_fluxes[jl])
+         for jl in range(5)],
+    )
+    (cur_sfx_bri, cur_sfx_lam, cur_hfx_thd, cur_wfx_lam,
+     cur_fluxes, cur_hfx_err_dif, cur_hfx_dif) = carry
 
     def _pack_3d(field_name: str) -> jax.Array:
         vals = [getattr(c, field_name) for c in cat_outputs]

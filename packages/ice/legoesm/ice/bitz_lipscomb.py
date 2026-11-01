@@ -795,7 +795,9 @@ def _zdf_interface_fluxes(core: _SI3ZDFCore, t_bo, sr):
     zg1 = 2.0
     zg1s = 2.0
     isnow = core.isnow
-    qcn_bottom = -core.k_i[..., -1] * zg1 * (t_bo - core.t_i[..., -1])
+    # Materialised (M1): ice_thd_dh adds it and the hfx_err_dif budget subtracts it;
+    # without the barrier the scanned category body contracts both into FMAs (D194).
+    qcn_bottom = sr(-core.k_i[..., -1] * zg1 * (t_bo - core.t_i[..., -1]))
     qcn_top = sr(
         -isnow * core.k_s[..., 0] * zg1s * (core.t_s[..., 0] - core.t_su)
     ) - sr(
@@ -1007,17 +1009,34 @@ def _cumulative_remap(h_old, content_old, nlay, sr):
     h_cum1 = [zero]
     for _ in range(nlay):
         h_cum1.append(h_cum1[-1] + zhnew)
-    e_cum1 = [zero] * (nlay + 1)
-    for old in range(1, len(h_old) + 1):
-        for new in range(1, nlay):
-            selected = (h_cum1[new] <= h_cum0[old]) & (h_cum1[new] > h_cum0[old - 1])
-            denominator = h_cum0[old] - h_cum0[old - 1]
-            interpolated = (
-                sr(e_cum0[old - 1] * (h_cum0[old] - h_cum1[new]))
-                + sr(e_cum0[old] * (h_cum1[new] - h_cum0[old - 1]))
-            ) / jnp.where(selected, denominator, 1.0)
-            e_cum1[new] = jnp.where(selected, interpolated, e_cum1[new])
-    e_cum1[nlay] = e_cum0[-1]
+    def overlap(old, e_new, h_new):
+        # One old segment against the new interfaces ``h_new`` (vremap inner loop).
+        lo, hi = h_cum0[old - 1], h_cum0[old]
+        selected = (h_new <= hi) & (h_new > lo)
+        denominator = hi - lo
+        interpolated = (
+            sr(e_cum0[old - 1] * (hi - h_new)) + sr(e_cum0[old] * (h_new - lo))
+        ) / jnp.where(selected, denominator, 1.0)
+        return jnp.where(selected, interpolated, e_new)
+
+    if any(isinstance(x, jax.core.Tracer) for x in h_cum0 + e_cum0):
+        # DECISION 194: traced callers run the old-segment loop once as a
+        # static-trip fori_loop over stacked cumulative sums; every new
+        # interface is updated elementwise by the same statements in the same
+        # old-segment order.  Eager calls keep the Python loops below.
+        h_cum0, e_cum0 = jnp.stack(h_cum0), jnp.stack(e_cum0)
+        h_mid = jnp.stack(h_cum1[1:nlay])
+        e_mid = jax.lax.fori_loop(
+            1, h_cum0.shape[0], lambda old, e_new: overlap(old, e_new, h_mid),
+            jnp.stack([zero] * (nlay - 1)),
+        )
+        e_cum1 = [zero] + [e_mid[k] for k in range(nlay - 1)] + [e_cum0[-1]]
+    else:
+        e_cum1 = [zero] * (nlay + 1)
+        for old in range(1, len(h_old) + 1):
+            for new in range(1, nlay):
+                e_cum1[new] = overlap(old, e_cum1[new], h_cum1[new])
+        e_cum1[nlay] = e_cum0[-1]
     # MAX(0, .) is `maxsd 0, x`; MAX(zhnew, epsi20) is `maxsd epsi20, zhnew`.
     divisor = _maxsd(zhnew, _EPS20)
     return jnp.stack([
@@ -1080,12 +1099,41 @@ def _si3_ice_thd_dh_core(
     zf_tt = sr(sr(qcn_ice_bot + qsb_ice_bot) + fhld) + sr(qtr_ice_bot * frq_m)
     zq_bot = _maxsd(sr(zf_tt * dt), 0.0)
     zs_i = [sz_i[..., k] for k in range(nlay_i)] if nn_icesal == 4 else [s_i] * nlay_i
-    # Layer carriers 0..nlay_i+1 (:138-147) and 0..nlay_s (:150-155).
+    # Layer carriers 0..nlay_i+1 (:138-147) and 0..nlay_s (:150-155).  The ice
+    # carriers are stacked (layer axis first) so a traced layer pass can index
+    # them with a traced ``jk``; stacking and indexing round nothing.
     dz0 = sr(h_i * r1_nlay_i)
-    zh_i = [zero] + [dz0] * nlay_i + [zero]
-    zh_i_old = list(zh_i)
-    ze_i_old = [zero] + [sr(dz0 * e_i[..., k]) for k in range(nlay_i)] + [zero]
-    zs_i_old = [zero] + [sr(dz0 * zs_i[k]) for k in range(nlay_i)] + [zero]
+    L = dict(
+        zh_i=jnp.stack([zero] + [dz0] * nlay_i + [zero]),
+        zh_i_old=jnp.stack([zero] + [dz0] * nlay_i + [zero]),
+        ze_i_old=jnp.stack([zero] + [sr(dz0 * e_i[..., k]) for k in range(nlay_i)] + [zero]),
+        zs_i_old=jnp.stack([zero] + [sr(dz0 * zs_i[k]) for k in range(nlay_i)] + [zero]),
+    )
+    zs_i_layers = jnp.stack(zs_i)
+    traced = any(isinstance(x, jax.core.Tracer) for x in jax.tree_util.tree_leaves((L, f)))
+
+    def layer_loop(order, step, st):
+        """``for jk in order: step(jk, st)``; ``st``/``f``/``dh``/``L`` are the mutable carry.
+
+        DECISION 194: traced calls run the passes as one static-trip
+        ``fori_loop`` (same statements, same jk order); eager calls keep Python.
+        """
+        if not traced:
+            for jk in order:
+                step(jk, st)
+            return st
+        order = jnp.asarray(order)
+
+        def body(i, carry):
+            for target, values in zip((f, dh, L, st), carry):
+                target.update(values)
+            step(order[i], st)
+            return tuple(dict(d) for d in (f, dh, L, st))
+
+        carry = jax.lax.fori_loop(0, len(order), body, tuple(dict(d) for d in (f, dh, L, st)))
+        for target, values in zip((f, dh, L, st), carry):
+            target.update(values)
+        return st
     zh_s = [zero] + [sr(h_s * r1_nlay_s)] * nlay_s
     ze_s = [zero] + [e_s[..., k] for k in range(nlay_s)]
 
@@ -1131,17 +1179,17 @@ def _si3_ice_thd_dh_core(
         h_s = jnp.where(melt, _maxsd(h_s + zdum, 0.0), h_s)
         zh_s[jk] = jnp.where(melt, _maxsd(zh_s[jk] + zdum, 0.0), zh_s[jk])
 
-    def melt_layer(jk, heat, internal_melt, active, kind):
+    def melt_layer(jk, heat, internal_melt, active, kind, st):
         """One surface (:243-296) or basal (:378-433) layer step; ``kind`` 'sum'/'bom'."""
 
-        nonlocal h_i
+        zh_jk = L["zh_i"][jk]
         ztmelts = sr(-rTmlt * sz_i[..., jk - 1])
         zEi = sr(-e_i[..., jk - 1] * r1_rhoi)
         zEw = sr(rcp * ztmelts)
         zdE = zEi - zEw
         zfmdt_gross = -heat / zdE
-        zdum_melt = _minsd(_maxsd(sr(-zfmdt_gross * r1_rhoi), -zh_i[jk]), 0.0)
-        zdum_itm = _minsd(-zh_i[jk], 0.0)
+        zdum_melt = _minsd(_maxsd(sr(-zfmdt_gross * r1_rhoi), -zh_jk), 0.0)
+        zdum_itm = _minsd(-zh_jk, 0.0)
         zdum = jnp.where(internal_melt, zdum_itm, zdum_melt)
         surface = active & ~internal_melt
         internal = active & internal_melt
@@ -1152,39 +1200,50 @@ def _si3_ice_thd_dh_core(
         zfmdt_itm = sr(-zdum * rhoi)
         acc("hfx_res", internal, rate(zEi, zfmdt_itm))
         acc("wfx_res", internal, -rate(rhoi, zdum))
-        acc("sfx_res", internal, -rate(rhoi, zdum, zs_i[jk - 1]))
+        acc("sfx_res", internal, -rate(rhoi, zdum, zs_i_layers[jk - 1]))
         zfmdt = sr(-rhoi * zdum)
         acc("hfx_thd", surface, rate(zEw, zfmdt))
         acc("hfx_" + kind, surface, -rate(zdE, zfmdt))
         acc("wfx_" + kind, surface, -rate(rhoi, zdum))
-        acc("sfx_" + kind, surface, -rate(rhoi, zdum, zs_i[jk - 1]))
-        zh_i[jk] = jnp.where(active, _maxsd(zh_i[jk] + zdum, 0.0), zh_i[jk])
-        h_i = jnp.where(active, _maxsd(h_i + zdum, 0.0), h_i)
-        zs_i_old[jk] = jnp.where(active, zs_i_old[jk] + sr(zdum * zs_i[jk - 1]), zs_i_old[jk])
-        ze_i_old[jk] = jnp.where(active, ze_i_old[jk] + sr(zdum * e_i[..., jk - 1]), ze_i_old[jk])
-        zh_i_old[jk] = jnp.where(active, zh_i_old[jk] + zdum, zh_i_old[jk])
+        acc("sfx_" + kind, surface, -rate(rhoi, zdum, zs_i_layers[jk - 1]))
+        old = {k: L[k][jk] for k in ("zs_i_old", "ze_i_old", "zh_i_old")}
+        L["zh_i"] = L["zh_i"].at[jk].set(jnp.where(active, _maxsd(zh_jk + zdum, 0.0), zh_jk))
+        st["h_i"] = jnp.where(active, _maxsd(st["h_i"] + zdum, 0.0), st["h_i"])
+        L["zs_i_old"] = L["zs_i_old"].at[jk].set(
+            jnp.where(active, old["zs_i_old"] + sr(zdum * zs_i_layers[jk - 1]), old["zs_i_old"]))
+        L["ze_i_old"] = L["ze_i_old"].at[jk].set(
+            jnp.where(active, old["ze_i_old"] + sr(zdum * e_i[..., jk - 1]), old["ze_i_old"]))
+        L["zh_i_old"] = L["zh_i_old"].at[jk].set(
+            jnp.where(active, old["zh_i_old"] + zdum, old["zh_i_old"]))
         return heat
 
     # Surface ice melting and sublimation (:243-325).
-    icount = []
     always = jnp.ones_like(h_i, dtype=bool)
-    for jk in range(1, nlay_i + 1):
+
+    def surface_pass(jk, st):
         tmelt = sr(-rTmlt * sz_i[..., jk - 1])
         internal_melt = t_i[..., jk - 1] >= tmelt + rt0
-        zq_top = melt_layer(jk, zq_top, internal_melt, always, "sum")
+        st["zq_top"] = melt_layer(jk, st["zq_top"], internal_melt, always, "sum", st)
+        zh_jk = L["zh_i"][jk]
         # MAX(-zh_i, -zevap_rema*r1_rhoi) is emitted -MIN(zevap_rema*r1_rhoi, zh_i).
-        zdum = _maxsd(-sr(zevap_rema * r1_rhoi), -zh_i[jk])
+        zdum = _maxsd(-sr(st["zevap_rema"] * r1_rhoi), -zh_jk)
         acc("hfx_sub", None, rate(e_i[..., jk - 1], zdum))
         acc("wfx_ice_sub", None, -rate(rhoi, zdum))
-        acc("sfx_sub", None, -rate(rhoi, zdum, zs_i[jk - 1]))
-        zevap_rema = zevap_rema + sr(zdum * rhoi)
-        zh_i[jk] = _maxsd(zh_i[jk] + zdum, 0.0)
-        h_i = _maxsd(h_i + zdum, 0.0)
+        acc("sfx_sub", None, -rate(rhoi, zdum, zs_i_layers[jk - 1]))
+        st["zevap_rema"] = st["zevap_rema"] + sr(zdum * rhoi)
+        zh_new = _maxsd(zh_jk + zdum, 0.0)
+        L["zh_i"] = L["zh_i"].at[jk].set(zh_new)
+        st["h_i"] = _maxsd(st["h_i"] + zdum, 0.0)
         dh["dh_i_sub"] = dh["dh_i_sub"] + zdum
-        zs_i_old[jk] = zs_i_old[jk] + sr(zdum * zs_i[jk - 1])
-        ze_i_old[jk] = ze_i_old[jk] + sr(zdum * e_i[..., jk - 1])
-        zh_i_old[jk] = zh_i_old[jk] + zdum
-        icount.append(jnp.where(zh_i[jk] > 0.0, 0, 1))
+        L["zs_i_old"] = L["zs_i_old"].at[jk].set(L["zs_i_old"][jk] + sr(zdum * zs_i_layers[jk - 1]))
+        L["ze_i_old"] = L["ze_i_old"].at[jk].set(L["ze_i_old"][jk] + sr(zdum * e_i[..., jk - 1]))
+        L["zh_i_old"] = L["zh_i_old"].at[jk].set(L["zh_i_old"][jk] + zdum)
+        st["icount"] = st["icount"].at[jk - 1].set(jnp.where(zh_new > 0.0, 0, 1))
+
+    st = layer_loop(range(1, nlay_i + 1), surface_pass, dict(
+        zq_top=zq_top, zevap_rema=zevap_rema, h_i=h_i,
+        icount=jnp.zeros((nlay_i,) + h_i.shape, dtype=jnp.int32)))
+    zq_top, zevap_rema, h_i, icount = st["zq_top"], st["zevap_rema"], st["h_i"], st["icount"]
     acc("wfx_err_sub", None, -rate(zevap_rema))  # :328
 
     # Basal growth (:338-374).
@@ -1208,18 +1267,23 @@ def _si3_ice_thd_dh_core(
     acc("wfx_bog", growing, -rate(rhoi, dh_bog))
     acc("sfx_bog", growing, -rate(rhoi, dh_bog, zs_i_new))
     top = nlay_i + 1
-    zh_i[top] = jnp.where(growing, zh_i[top] + dh_bog, zh_i[top])
+    zh_top, zs_top, ze_top, zho_top = (L[k][top] for k in ("zh_i", "zs_i_old", "ze_i_old", "zh_i_old"))
+    L["zh_i"] = L["zh_i"].at[top].set(jnp.where(growing, zh_top + dh_bog, zh_top))
     h_i = jnp.where(growing, h_i + dh_bog, h_i)
-    zs_i_old[top] = jnp.where(growing, zs_i_old[top] + sr(dh_bog * zs_i_new), zs_i_old[top])
-    ze_i_old[top] = jnp.where(growing, ze_i_old[top] + sr(dh_bog * sr(-zEi * rhoi)), ze_i_old[top])
-    zh_i_old[top] = jnp.where(growing, zh_i_old[top] + dh_bog, zh_i_old[top])
+    L["zs_i_old"] = L["zs_i_old"].at[top].set(jnp.where(growing, zs_top + sr(dh_bog * zs_i_new), zs_top))
+    L["ze_i_old"] = L["ze_i_old"].at[top].set(
+        jnp.where(growing, ze_top + sr(dh_bog * sr(-zEi * rhoi)), ze_top))
+    L["zh_i_old"] = L["zh_i_old"].at[top].set(jnp.where(growing, zho_top + dh_bog, zho_top))
 
     # Basal melt (:378-434).
-    for jk in range(nlay_i, 0, -1):
+    def basal_pass(jk, st):
         active = (zf_tt > 0.0) & (jk > icount[jk - 1])
         tmelt = sr(-rTmlt * sz_i[..., jk - 1])
         internal_melt = t_i[..., jk - 1] >= tmelt + rt0
-        zq_bot = melt_layer(jk, zq_bot, internal_melt, active, "bom")
+        st["zq_bot"] = melt_layer(jk, st["zq_bot"], internal_melt, active, "bom", st)
+
+    st = layer_loop(range(nlay_i, 0, -1), basal_pass, dict(zq_bot=zq_bot, h_i=h_i))
+    zq_bot, h_i = st["zq_bot"], st["h_i"]
 
     # Remove snow if the ice melted entirely (:438-449).
     gone = h_i == 0.0
@@ -1241,7 +1305,8 @@ def _si3_ice_thd_dh_core(
     acc("sfx_sni", None, rate(sss, zfmdt))
     acc("wfx_sni", None, -rate(dh_sni, rhoi))
     acc("wfx_snw_sni", None, rate(dh_sni, rhos))
-    zh_i[0] = zh_i[0] + dh_sni
+    L["zh_i"] = L["zh_i"].at[0].set(L["zh_i"][0] + dh_sni)
+    zh_i_old, ze_i_old, zs_i_old = (list(L[k]) for k in ("zh_i_old", "ze_i_old", "zs_i_old"))
     zdeltah = dh_sni
     zs_i_old[0] = zs_i_old[0] - sr(sr(zfmdt * sss) * r1_rhoi)
     zh_i_old[0] = zh_i_old[0] + dh_sni
@@ -1414,21 +1479,43 @@ def _sal4_effective_permeability(zv_br, *, initial):
     out = []
     one = jnp.ones_like(zv_br[..., 0])
     zero = jnp.zeros_like(one)
+
+    def term(v, ztmp, active, one, zero):  # one jk2 term of the harmonic sum
+        stop = v < _EPS06 if initial else v == 0.0  # absorb +0 without 1/0
+        go = active & ~stop
+        safe_v = jnp.where(go, v, one)
+        zperm = nemo_source_round(_SAL4_PERMEABILITY * safe_v)
+        zperm = nemo_source_round(zperm * safe_v)
+        zperm = nemo_source_round(zperm * safe_v)
+        reciprocal = nemo_source_round(one / zperm)
+        candidate = nemo_source_round(ztmp + reciprocal)
+        return jnp.where(go, candidate, jnp.where(active & stop, zero, ztmp)), go
+
+    if isinstance(zv_br, jax.core.Tracer):
+        # DECISION 194: every start layer jk at once (trailing axis), one
+        # static-trip fori_loop over jk2; a start layer joins at jk2 == jk.
+        first = jnp.arange(nlay)
+        one, zero = one[..., None], zero[..., None]
+
+        def body(jk2, carry):
+            ztmp, active = carry
+            new = term(zv_br[..., jk2][..., None], ztmp, active, one, zero)
+            joined = jk2 >= first
+            return jnp.where(joined, new[0], ztmp), jnp.where(joined, new[1], active)
+
+        ztmp, _ = jax.lax.fori_loop(
+            0, nlay, body,
+            (jnp.broadcast_to(zero, zv_br.shape), jnp.ones(zv_br.shape, dtype=bool)),
+        )
+        count = (nlay - first).astype(zv_br.dtype)
+        safe_sum = jnp.where(ztmp > 0.0, ztmp, one)
+        value = nemo_source_round(count / safe_sum)
+        return jnp.where(ztmp > 0.0, value, zero)
     for jk in range(nlay):
         ztmp = zero
         active = jnp.ones_like(one, dtype=bool)
         for jk2 in range(jk, nlay):
-            low = zv_br[..., jk2] < _EPS06
-            stop = low if initial else zv_br[..., jk2] == 0.0  # absorb +0 without 1/0
-            go = active & ~stop
-            safe_v = jnp.where(go, zv_br[..., jk2], one)
-            zperm = nemo_source_round(_SAL4_PERMEABILITY * safe_v)
-            zperm = nemo_source_round(zperm * safe_v)
-            zperm = nemo_source_round(zperm * safe_v)
-            reciprocal = nemo_source_round(one / zperm)
-            candidate = nemo_source_round(ztmp + reciprocal)
-            ztmp = jnp.where(go, candidate, jnp.where(active & stop, zero, ztmp))
-            active = go
+            ztmp, active = term(zv_br[..., jk2], ztmp, active, one, zero)
         count = jnp.asarray(float(nlay - jk), dtype=zv_br.dtype)
         safe_sum = jnp.where(ztmp > 0.0, ztmp, one)
         value = nemo_source_round(count / safe_sum)

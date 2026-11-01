@@ -24,10 +24,19 @@ REVIEWED_EA3E570 = {
     "si3_dyn_orca2": 48_325,
     "remaining_named_and_inlined": 132_371,
 }
-EXPECTED = {
+# Parent 9998276020, before DECISION 194 traced the O9--O12 loops.
+PRE_D194_9998276020 = {
     "recursive_total": 577_982,
     "_thermo_category_loop": 342_170,
     "si3_ice_thd_do": 53_489,
+    "si3_dyn_orca2": 48_325,
+    "remaining_named_and_inlined": 133_998,
+}
+# DECISION 194: category scan, layer fori_loops, shared vremap fori_loop.
+EXPECTED = {
+    "recursive_total": 227_840,
+    "_thermo_category_loop": 35_858,
+    "si3_ice_thd_do": 9_659,
     "si3_dyn_orca2": 48_325,
     "remaining_named_and_inlined": 133_998,
 }
@@ -114,6 +123,10 @@ def count(master: Path) -> dict[str, Any]:
         "measured": measured,
         "expected": EXPECTED,
         "reviewed_ea3e570_snapshot": REVIEWED_EA3E570,
+        "pre_d194_9998276020_snapshot": PRE_D194_9998276020,
+        "delta_from_pre_d194": {
+            name: measured[name] - PRE_D194_9998276020[name] for name in EXPECTED
+        },
         "delta_from_reviewed_ea3e570": {
             name: measured[name] - REVIEWED_EA3E570[name] for name in EXPECTED
         },
