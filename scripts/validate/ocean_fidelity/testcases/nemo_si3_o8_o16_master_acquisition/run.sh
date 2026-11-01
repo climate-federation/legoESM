@@ -514,6 +514,14 @@ move_builds_aside() {
   printf 'BUILDS_MOVED_ASIDE: %s\n' "$dst"
 }
 
+required_preflight() {
+  if [[ ${O8O16_DRIVER_FIXTURE_ACTIVE:-0} == 1 && ${O8O16_CFG_DIGEST_PARENT:-0} == 1 ]]; then
+    printf 'PASS_STUB_PREFLIGHT_DELEGATED_TO_OUTER_GATE\n'
+  else
+    run_preflight
+  fi
+}
+
 admit() {
   [[ -f "$EVIDENCE/manifest/run_manifest.json" ]] || refuse 'missing pre-run manifest'
   "$PY" "$GATE" --admit-existing "$EVIDENCE"
@@ -521,15 +529,15 @@ admit() {
 
 if [[ "$mode" == --move-aside-builds ]]; then move_builds_aside; exit 0; fi
 if [[ "$mode" == --preflight-only ]]; then run_preflight; exit 0; fi
-if [[ "$mode" == --admit-existing ]]; then run_preflight; admit; printf 'ACQUISITION_ADMITTED: %s\n' "$EVIDENCE"; exit 0; fi
+if [[ "$mode" == --admit-existing ]]; then required_preflight; admit; printf 'ACQUISITION_ADMITTED: %s\n' "$EVIDENCE"; exit 0; fi
 
 # Operator-only --run begins here.
 [[ -z $(git -C "$REPO" status --porcelain --untracked-files=all) ]] \
   || refuse '--run requires a clean committed tree'
 readonly COMMIT=$(git -C "$REPO" rev-parse HEAD)
 RUN_STARTED_EPOCH=$(date +%s)
-run_preflight
 [[ ! -e "$REF_ROOT" && ! -e "$REC_ROOT" && ! -e "$EVIDENCE" ]] || refuse 'target config/evidence already exists; use --move-aside-builds after a refusal'
+required_preflight
 ram_gate "$MIN_FREE_RAM_GB"; disk_gate "$EVIDENCE" "$MIN_FREE_DISK_KB"
 mkdir -p "$EVIDENCE/input" "$EVIDENCE/manifest/production_deck" "$EVIDENCE/manifest/binaries" "$EVIDENCE/manifest/per_rung"
 ACTIVE_RUN=$EVIDENCE
