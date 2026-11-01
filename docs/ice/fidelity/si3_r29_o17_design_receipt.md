@@ -148,6 +148,48 @@ schema/source findings. `PLAUSIBLE`: none promoted to an O17 physics verdict.
 
 independent review: operator (Claude)
 
+## Resume 4 final verification
+
+All numerical verification used CPU binary64 with `CUDA_VISIBLE_DEVICES=""`,
+`JAX_PLATFORMS=cpu`, and `JAX_ENABLE_X64=1`. Every pytest invocation named a
+test file, ran serially, used no xdist worker, and was bounded by `timeout`. No
+NEMO command ran.
+
+The complete O17 unit file passed 8/8 in 1072.76 s. The complete
+`tests/ocean/fidelity/test_nemo_si3_*.py` sweep produced 206 passing tests. Its
+two already-disclosed non-green boundaries were unchanged: the O4 file passed
+all eight forward cases before the full-step AD compile reached the 2400 s file
+cap without a compiler diagnostic, and scalarmath-v2 returned four passes plus
+the external-state failure `A MY_SRC is not verbatim`. The O8--O12 master
+scorer passed 30/30 in 907.55 s; the extended O8--O16/O17 acquisition suite
+passed 28/28 in 765.59 s.
+
+The complete `tests/ice/unit/test_si3_*.py` sweep produced 404 passes, two
+deselections, one skip, and one expected xfail. Its sole failure is the
+pre-existing `test_production_path_plants_fire[sum_first_category]` at
+`test_si3_surface.py` line 531 (`assert [] != []`); that file otherwise had 22
+passes. O12 passed 81/81, O6 passed 28 selected tests with one deselected, and
+the new O17 file passed 8/8 including the exact eager/JIT full step.
+
+The landing files returned: receipt citations 45/45 after retaining historical
+citation spellings and registering 44 Resume-4 anchors; private imports 6/6;
+TKE terms 71/71; NEMO recipe 25/25; freshwater closure 16/16; stage-face masks
+2/2; and prognostic barotropic state 8/8. The Resume-4 per-receipt gate and the
+default cumulative gate both report no unmapped citations, citation failures,
+or full-map audit failures; every built-in control fires.
+
+The nine repository ratchets collected 6,952 cases and returned 11 failed,
+6,939 passed, and 2 skipped. All eleven are pre-existing and outside this
+round's changed model/tool paths: hardcoded-constant rows in
+`test_si3_o13_itd_remap.py`, `test_si3_thd_do.py`, and the O4 stub writer;
+inline-coefficient rows in `bitz_lipscomb.py`, `si3_orca2_state.py`,
+`geothermal.py`, `mle.py`, and `mle_latlon_cgrid.py`; and parameter-spec rows
+in `si3_orca2_state.py`, `mle.py`, and `shortwave_penetration.py`.
+
+The acquisition wrapper is ready to write the unified record and run the real
+composition scorer within its derived disk and acquisition-clock budgets. A
+successful score remains operator evidence and has not been claimed here.
+
 ## Resume 4 review-HOLD closure
 
 This section is authoritative for the review of `999827602052`. No NEMO

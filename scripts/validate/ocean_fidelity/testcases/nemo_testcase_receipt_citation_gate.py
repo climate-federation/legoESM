@@ -13860,6 +13860,45 @@ CITATION_MAP.update({
     ],
 })
 
+# Receipt citations are immutable evidence.  Keep every pre-Resume-4 spelling
+# while pointing it at the mechanically re-anchored live range above.
+def _resume4_historical(live: str):
+    value = CITATION_MAP[live]
+    if isinstance(value, dict):
+        return value
+    return {"lines": live.rsplit(":", 1)[1], "anchors": value}
+
+
+CITATION_MAP.update({
+    'nemo_si3_o8_o16_master_gate.py:171-180': _resume4_historical('nemo_si3_o8_o16_master_gate.py:174-183'),
+    'packages/ice/legoesm/ice/si3_orca2_state.py:3374-3804': _resume4_historical('packages/ice/legoesm/ice/si3_orca2_state.py:3374-3823'),
+    'packages/ice/legoesm/ice/si3_orca2_state.py:3450-3500': _resume4_historical('packages/ice/legoesm/ice/si3_orca2_state.py:3456-3506'),
+    'packages/ice/legoesm/ice/si3_orca2_state.py:3807-3910': _resume4_historical('packages/ice/legoesm/ice/si3_orca2_state.py:3826-3929'),
+    'packages/ice/legoesm/ice/si3_orca2_state.py:3807-3960': _resume4_historical('packages/ice/legoesm/ice/si3_orca2_state.py:3826-3979'),
+    'packages/ice/legoesm/ice/si3_orca2_state.py:4027-4080': _resume4_historical('packages/ice/legoesm/ice/si3_orca2_state.py:4046-4099'),
+    'packages/ice/legoesm/ice/si3_orca2_state.py:4027-4134': _resume4_historical('packages/ice/legoesm/ice/si3_orca2_state.py:4046-4153'),
+    'packages/ice/legoesm/ice/si3_orca2_state.py:4027-4812': _resume4_historical('packages/ice/legoesm/ice/si3_orca2_state.py:4046-4831'),
+    'packages/ice/legoesm/ice/si3_orca2_state.py:4083-4117': _resume4_historical('packages/ice/legoesm/ice/si3_orca2_state.py:4102-4136'),
+    'packages/ice/legoesm/ice/si3_orca2_state.py:4121-4134': _resume4_historical('packages/ice/legoesm/ice/si3_orca2_state.py:4140-4153'),
+    'packages/ice/legoesm/ice/si3_orca2_state.py:4138-4241': _resume4_historical('packages/ice/legoesm/ice/si3_orca2_state.py:4157-4260'),
+    'packages/ice/legoesm/ice/si3_orca2_state.py:4153-4181': _resume4_historical('packages/ice/legoesm/ice/si3_orca2_state.py:4172-4200'),
+    'packages/ice/legoesm/ice/si3_orca2_state.py:4184-4202': _resume4_historical('packages/ice/legoesm/ice/si3_orca2_state.py:4203-4221'),
+    'packages/ice/legoesm/ice/si3_orca2_state.py:4206-4241': _resume4_historical('packages/ice/legoesm/ice/si3_orca2_state.py:4225-4260'),
+    'packages/ice/legoesm/ice/si3_orca2_state.py:4294-4403': _resume4_historical('packages/ice/legoesm/ice/si3_orca2_state.py:4313-4422'),
+    'packages/ice/legoesm/ice/si3_orca2_state.py:4321': _resume4_historical('packages/ice/legoesm/ice/si3_orca2_state.py:4340'),
+    'packages/ice/legoesm/ice/si3_orca2_state.py:4410-4524': _resume4_historical('packages/ice/legoesm/ice/si3_orca2_state.py:4429-4543'),
+    'packages/ice/legoesm/ice/si3_orca2_state.py:4528-4713': _resume4_historical('packages/ice/legoesm/ice/si3_orca2_state.py:4547-4732'),
+    'packages/ice/legoesm/ice/si3_orca2_state.py:4528-4812': _resume4_historical('packages/ice/legoesm/ice/si3_orca2_state.py:4547-4831'),
+    'packages/ice/legoesm/ice/si3_orca2_state.py:4542-4723': _resume4_historical('packages/ice/legoesm/ice/si3_orca2_state.py:4561-4742'),
+    'packages/ice/legoesm/ice/si3_orca2_state.py:4692-4699': _resume4_historical('packages/ice/legoesm/ice/si3_orca2_state.py:4711-4718'),
+    'packages/ice/legoesm/ice/si3_orca2_state.py:4754-4768': _resume4_historical('packages/ice/legoesm/ice/si3_orca2_state.py:4773-4787'),
+    'packages/ice/legoesm/ice/si3_orca2_state.py:4804-4811': _resume4_historical('packages/ice/legoesm/ice/si3_orca2_state.py:4823-4830'),
+    'packages/ice/legoesm/ice/si3_thd_pnd.py:784-988': _resume4_historical('packages/ice/legoesm/ice/si3_thd_pnd.py:784-1024'),
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o16_master_gate.py:40-55': _resume4_historical('scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o16_master_gate.py:43-58'),
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o16_master_gate.py:701-741': _resume4_historical('scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o16_master_gate.py:710-750'),
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o16_master_gate.py:93-100,136-238': _resume4_historical('scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o16_master_gate.py:96-103,139-241'),
+})
+
 
 _NAME = (r"[A-Za-z0-9_./]+\.(?:F90|f90|h90|py|fcm)"
          r"|[A-Za-z0-9_./]*(?:namelist_cfg|namelist_ref|namelist_ice_cfg|namelist_ice_ref|ocean\.output\.excerpt|ocean\.output)"
