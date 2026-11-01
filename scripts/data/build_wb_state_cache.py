@@ -44,9 +44,9 @@ def needed_indices(cfg, yml, times):
 
     cadence = int(yml.get("era5_cadence_hours", 6))
     _, stride, step = sb.wb_lead_strides(cfg, yml, cadence)
-    decks = [yml]
-    if yml.get("validation"):
-        decks.append(sb.wb_validation_yaml(yml, int(yml["validation"]["n_inits"])))
+    # Every deck validates (its block or the legacy 2014 protocol).
+    decks = [yml, sb.wb_validation_yaml(
+        yml, int(sb.wb_validation_spec(yml)["n_inits"]))]
     out = set()
     for d in decks:
         for _, a, b in sb._training_sample_indices(cfg, d, times, 24 // cadence,

@@ -179,3 +179,14 @@ def test_soil_moisture_plane_and_land_inputs_flag():
     e, f, _ = sb.wb_state_cache_configs(NS(mode="sfno"), {"era5_zarr": "x",
                                                           "era5_soil_moisture": True})
     assert f.load_soil_moisture and not e.load_soil_moisture
+
+
+def test_empty_validation_block_is_an_error_and_builder_always_validates():
+    with pytest.raises(ValueError, match="needs years"):
+        sb.wb_validation_yaml({"validation": {}}, 24)
+    mod = _builder()
+    times = np.datetime64("2014-01-01") + np.arange(4 * 800) * np.timedelta64(6, "h")
+    cfg = SimpleNamespace(smoke=False, windows=None, n_days=None, multi_step_hours=None)
+    idx = mod.needed_indices(cfg, {"train_windows": [[2015, 0, 1]], "eval_years": [2020]},
+                             times)
+    assert {0, 60 * 23} <= set(idx.tolist())     # implicit 2014 validation inits

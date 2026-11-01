@@ -398,6 +398,11 @@ def _val_yaml(yml: dict, n_windows: int) -> dict:
     return wb_validation_yaml(yml, n_windows)
 
 
+def wb_validation_spec(yml):
+    from legoesm.training.scale_build import wb_validation_spec as _s
+    return _s(yml)
+
+
 def _device_sample(sample):
     """One host-resident sample, moved to the device for a no-gradient score.
 
@@ -1672,8 +1677,7 @@ def _main(argv=None):
             cfg, _val_yaml(yml, int(cfg.n_val_windows)), grid, sigma,
             rank=rank, nproc=nproc, host_resident=True)
         log.info("validation samples: %d local/rank from years %s",
-                 len(val_samples), (yml.get("validation") or {}).get(
-                     "years", yml.get("eval_years")))
+                 len(val_samples), wb_validation_spec(yml)["years"])
         if column_mesh is not None:
             # Validation runs collective forwards: the lists must match too.
             _rel = _assert_samples_agree(val_samples, "validation samples",

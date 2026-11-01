@@ -159,6 +159,11 @@ _LEGACY_VALIDATION = {"years": [2014], "n_inits": 24, "init_stride_hours": 360}
 _VAL_INITS_KEY = "_val_inits"
 
 
+def wb_validation_spec(yml: dict) -> dict:
+    """The deck's validation protocol (its block, or the legacy default)."""
+    return yml["validation"] if "validation" in yml else dict(_LEGACY_VALIDATION)
+
+
 def wb_validation_yaml(yml: dict, n_windows: int) -> dict:
     """The deck, with its training windows replaced by HELD-OUT ones.
 
@@ -170,7 +175,10 @@ def wb_validation_yaml(yml: dict, n_windows: int) -> dict:
     a validation loss computed under a different protocol than the training
     loss is not comparable to it.
     """
-    val = yml.get("validation") or dict(_LEGACY_VALIDATION)
+    val = yml["validation"] if "validation" in yml else dict(_LEGACY_VALIDATION)
+    if not isinstance(val, dict) or not {"years", "n_inits",
+                                         "init_stride_hours"} <= set(val):
+        raise ValueError("validation needs years, n_inits and init_stride_hours.")
     years = [int(y) for y in val["years"]]
     n, stride = int(val["n_inits"]), int(val["init_stride_hours"])
     if set(years) & {int(y) for y in (yml.get("eval_years") or [])}:
@@ -2125,9 +2133,11 @@ def load_era5_samples(cfg, yml, grid, sigma, *,
         return _load_era5_samples_spectral(
             cfg, yml, grid, sigma,
             rank=rank, nproc=nproc, host_resident=host_resident)
-    if supervised_leads(yml) or wb_needs_surface_targets(yml):
-        raise ValueError("loss.train_leads_hours and the near-surface loss "
-                         "are implemented on the spectral training core only.")
+    if (supervised_leads(yml) or wb_needs_surface_targets(yml)
+            or yml.get("era5_soil_moisture")):
+        raise ValueError("loss.train_leads_hours, the near-surface loss and "
+                         "era5_soil_moisture are implemented on the spectral "
+                         "training core only.")
 
     global _WARNED_ERA5_FLUX_HOLD_FIXED
 

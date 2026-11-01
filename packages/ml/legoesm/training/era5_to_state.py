@@ -1128,7 +1128,7 @@ def load_era5_slice(
         q_i_spec = _get_3d("specific_cloud_ice_water_content",
                            src=cds_t, flip_lat=_cflip)
 
-    sfc_targets = {}
+    optional_fields = {}   # near-surface targets and input planes, by flag
     if config.load_surface_targets:
         for key, name in (("t2m", "2m_temperature"),
                           ("u10", "10m_u_component_of_wind"),
@@ -1139,14 +1139,14 @@ def load_era5_slice(
                 raise ValueError(
                     f"load_era5_slice: surface target {name!r} has non-finite "
                     f"values at time index {time_idx}; refusing to train on it.")
-            sfc_targets[key] = f
+            optional_fields[key] = f
 
     if config.load_soil_moisture:
         _sm = _get_2d("volumetric_soil_water_layer_1", required=True)
         if not np.all(np.isfinite(_sm)):
             raise ValueError("load_era5_slice: volumetric_soil_water_layer_1 has "
                              f"non-finite values at time index {time_idx}.")
-        sfc_targets["soil_moisture"] = _sm
+        optional_fields["soil_moisture"] = _sm
 
     return ERA5Slice(
         T=_get_3d("temperature"),
@@ -1169,7 +1169,7 @@ def load_era5_slice(
         sfc_tau_x=sfc_tau_x, sfc_tau_y=sfc_tau_y,
         sfc_sw_up=sfc_sw_up, sfc_sw_down=sfc_sw_down, sfc_lw_up=sfc_lw_up,
         land_frac=land_frac,
-        **sfc_targets,
+        **optional_fields,
     )
 
 
