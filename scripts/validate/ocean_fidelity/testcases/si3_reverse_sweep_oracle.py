@@ -59,8 +59,10 @@ INPUT_NAMES = (
 # Steps are large enough to resolve the lane's source-rounded float64 forward
 # while remaining local to its branch.  Concentration uses case-specific steps
 # below so zero and epsi10 never cross their physical/statement boundaries.
+# S_layers at S=0, e_ice=0 has smooth nonlinearity scale c_ice*epsi10/zgamma =
+# 1.146e-11, so 5e-15 resolves the central difference to <4e-7 relative error.
 _INPUT_STEPS = (
-    None, 1.0e-7, 1.0e-7, 1.0e-4, 1.0e2, 1.0e2, 1.0e-5, 1.0e-8,
+    None, 1.0e-7, 1.0e-7, 1.0e-4, 1.0e2, 1.0e2, 1.0e-5, 5.0e-15,
     1.0e-4, 1.0e-4, 1.0e-4, 1.0e-4, 1.0e-4, 1.0e-4, 1.0e-4,
     9.0e-8, 1.0e-4, 1.0e-4, 1.0e-4, 1.0e-2, 1.0e-2, 1.0e-3,
     1.0e-4,
@@ -78,8 +80,24 @@ METHOD_LEGEND = {
     1: "lane_fd_central",
     2: "lane_fd_forward",
     3: "lane_fd_backward",
-    4: "lane_ad_at_nondifferentiable_boundary",
+    4: "excluded_nondifferentiable_boundary",
 }
+SELECTION_RULE = (
+    "main compiled reverse AD iff main/lane forwards agree in the recorded "
+    "neighbourhood and main AD agrees with the lane finite difference within "
+    "1e-6 relative error; otherwise the lane finite difference, with genuine "
+    "non-differentiable boundary entries excluded only where measured left "
+    "and right one-sided lane finite differences disagree"
+)
+FD_ROUNDING_BOUND_FORMULA = (
+    "per-entry float64 subtraction rounding bound of the lane finite-difference "
+    "stencil: (|spacing(f(x+d))| + |spacing(f(x-d))|) / (2*d) for central "
+    "differences, (|spacing(f(x+d))| + |spacing(f(x))|) / d for forward "
+    "differences, (|spacing(f(x))| + |spacing(f(x-d))|) / d for backward "
+    "differences, and the 0.5-weighted sum of the two forward-step bounds for "
+    "two-step averaged evaporation differences; each unexcluded entry passes "
+    "iff relative_error <= 1e-6 or |error| <= 1x fd_rounding_bound"
+)
 
 
 def _encode(array: np.ndarray) -> dict[str, object]:
@@ -139,7 +157,7 @@ def _stencil(case: tuple[float, float, float], input_index: int) -> tuple[int, f
         21: case[2],
         22: 1.0,
     }.get(input_index, 0.0)
-    if value == 0.0 and input_index not in (4, 5, 8):
+    if value == 0.0 and input_index not in (4, 5, 7, 8):
         # Stay on the physical positive side of a zero state/forcing entry.
         return 2, step
     return 1, step
@@ -212,7 +230,12 @@ def _sample(repo: Path, output: Path) -> None:
             minus[input_index] -= delta
             plus[input_index] += delta
             perturbed.extend((minus, plus))
-            refinement_delta = delta + 5.0e-9 if input_index == 15 else delta
+            if input_index == 2:
+                refinement_delta = 1.0e-6
+            elif input_index == 15:
+                refinement_delta = delta + 5.0e-9
+            else:
+                refinement_delta = delta
             refinement_minus = vectors[case_index].copy()
             refinement_plus = vectors[case_index].copy()
             refinement_minus[input_index] -= refinement_delta
@@ -228,25 +251,30 @@ def _sample(repo: Path, output: Path) -> None:
         compiled_forward(jnp.asarray(np.stack(refinement_perturbed)))
     ).reshape(len(CASES), len(INPUT_NAMES), 2, len(OUTPUT_NAMES))
     refinement_steps = steps.copy()
+    refinement_steps[:, 2] = 1.0e-6
     refinement_steps[:, 15] += 5.0e-9
-    jacobian = np.asarray(jax.jit(jax.vmap(jax.jacrev(step)))(jnp.asarray(vectors)))
-    payload = {
+    sha = _repo_sha(repo)
+    payload: dict[str, object] = {
         "schema": 1,
-        "sha": _repo_sha(repo),
+        "sha": sha,
         "cases": CASES,
         "output_names": OUTPUT_NAMES,
         "input_names": INPUT_NAMES,
         "base": _encode(base),
         "neighbourhood": _encode(neighbourhood),
         "refinement_neighbourhood": _encode(refinement_neighbourhood),
-        "jacobian": _encode(jacobian),
         "stencil_codes": _encode(stencil_codes),
         "steps": _encode(steps),
         "refinement_steps": _encode(refinement_steps),
     }
+    if sha == MAIN_SHA:
+        jacobian = np.asarray(
+            jax.jit(jax.vmap(jax.jacrev(step)))(jnp.asarray(vectors))
+        )
+        payload["jacobian"] = _encode(jacobian)
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(payload, indent=2) + "\n")
-    print(f"sample sha={payload['sha']} base={base.shape} jacobian={jacobian.shape}")
+    print(f"sample sha={payload['sha']} base={base.shape} has_jacobian={'jacobian' in payload}")
 
 
 def _forward_agrees(left: np.ndarray, right: np.ndarray) -> np.ndarray:
@@ -259,6 +287,8 @@ def build_oracle(main: dict[str, object], lane: dict[str, object]) -> dict[str, 
     """Assemble independently selected targets from two sample payloads."""
     if main["sha"] != MAIN_SHA or lane["sha"] != LANE_SHA:
         raise ValueError(f"unexpected provenance: main={main['sha']} lane={lane['sha']}")
+    if "jacobian" in lane:
+        raise ValueError("lane sample must not provide its own AD jacobian")
     for key in ("cases", "output_names", "input_names"):
         if main[key] != lane[key]:
             raise ValueError(f"sample metadata differs for {key}")
@@ -269,7 +299,6 @@ def build_oracle(main: dict[str, object], lane: dict[str, object]) -> dict[str, 
     main_refinement = decode(main["refinement_neighbourhood"])
     lane_refinement = decode(lane["refinement_neighbourhood"])
     main_jacobian = decode(main["jacobian"])
-    lane_jacobian = decode(lane["jacobian"])
     stencil_codes = decode(lane["stencil_codes"])
     steps = decode(lane["steps"])
     refinement_steps = decode(lane["refinement_steps"])
@@ -357,105 +386,111 @@ def build_oracle(main: dict[str, object], lane: dict[str, object]) -> dict[str, 
         delta = refinement_steps[case_index, input_index]
         plus = lane_refinement[case_index, input_index, 1]
         refined = (plus - lane_base[case_index]) / delta
+        refined_rounding = (
+            np.abs(np.spacing(plus)) + np.abs(np.spacing(lane_base[case_index]))
+        ) / delta
         lane_fd[case_index, :, input_index] = 0.5 * (
             lane_fd[case_index, :, input_index] + refined
+        )
+        rounding[case_index, :, input_index] = 0.5 * (
+            rounding[case_index, :, input_index] + refined_rounding
         )
         agree[case_index, :, input_index] &= refinement_equal[
             case_index, input_index, 1
         ]
 
     # Zero snow is a statement boundary.  The live no-snow branch is approached
-    # from below for thermodynamic outputs, while the thickness identity uses
-    # the symmetric derivative.  Record those per-entry choices explicitly.
+    # from below for thermodynamic outputs (using the 1e-6 refinement step to
+    # keep float64 subtraction noise below 1e-6 relative error on h_ice).
     for case_index, (_concentration, h_ice, _qlead) in enumerate(CASES):
         if h_ice == 0.0:
             continue
         input_index = 2
-        delta = steps[case_index, input_index]
-        minus = lane_neighbourhood[case_index, input_index, 0]
-        plus = lane_neighbourhood[case_index, input_index, 1]
+        delta = refinement_steps[case_index, input_index]
+        minus = lane_refinement[case_index, input_index, 0]
         for output_index in (1, 3, 4):
             lane_fd[case_index, output_index, input_index] = (
                 lane_base[case_index, output_index] - minus[output_index]
             ) / delta
             rounding[case_index, output_index, input_index] = (
-                abs(np.spacing(lane_base[case_index, output_index]))
-                + abs(np.spacing(minus[output_index]))
+                np.abs(np.spacing(lane_base[case_index, output_index]))
+                + np.abs(np.spacing(minus[output_index]))
             ) / delta
             fd_methods[case_index, output_index, input_index] = 3
-        lane_fd[case_index, 2, input_index] = (
-            plus[2] - minus[2]
-        ) / (2.0 * delta)
-        fd_methods[case_index, 2, input_index] = 1
+            agree[case_index, output_index, input_index] = (
+                refinement_equal[case_index, input_index, 0, output_index]
+                & _forward_agrees(
+                    main_base[case_index, output_index],
+                    lane_base[case_index, output_index],
+                )
+            )
 
-    absolute_floor = 3.0e-6
-    # An AD value below the global absolute noise floor is not independently
-    # resolved when the lane difference is itself below its subtraction bound.
-    # Material derivatives continue to use main AD when the forwards agree.
-    unresolved = (
-        (np.abs(lane_fd) <= rounding)
-        & (np.abs(main_jacobian) <= absolute_floor)
-        & (np.abs(lane_jacobian) <= absolute_floor)
+    # Measure one-sided left and right lane finite differences on the primary
+    # neighbourhood.  Exclude an entry at a statement boundary only when the
+    # measured left and right one-sided lane finite differences disagree.
+    fd_left = np.empty_like(main_jacobian)
+    fd_right = np.empty_like(main_jacobian)
+    one_sided_rounding = np.empty_like(main_jacobian)
+    for case_index in range(len(CASES)):
+        for input_index in range(len(INPUT_NAMES)):
+            delta = steps[case_index, input_index]
+            minus = lane_neighbourhood[case_index, input_index, 0]
+            plus = lane_neighbourhood[case_index, input_index, 1]
+            base_val = lane_base[case_index]
+            fd_left[case_index, :, input_index] = (base_val - minus) / delta
+            fd_right[case_index, :, input_index] = (plus - base_val) / delta
+            one_sided_rounding[case_index, :, input_index] = (
+                np.abs(np.spacing(plus))
+                + 2.0 * np.abs(np.spacing(base_val))
+                + np.abs(np.spacing(minus))
+            ) / delta
+
+    boundary_candidate = np.zeros_like(main_jacobian, dtype=bool)
+    for case_index, (_concentration, h_ice, _qlead) in enumerate(CASES):
+        if h_ice == 0.0:
+            boundary_candidate[case_index, :, 1] = True
+        else:
+            boundary_candidate[case_index, :, 16] = True
+            boundary_candidate[case_index, 2, 2] = True
+            boundary_candidate[case_index, 5, 2] = True
+
+    one_sided_scale = np.maximum(
+        np.maximum(np.abs(fd_left), np.abs(fd_right)),
+        np.finfo(np.float64).tiny,
     )
+    one_sided_disagrees = np.abs(fd_right - fd_left) > np.maximum(
+        1.0e-6 * one_sided_scale,
+        one_sided_rounding,
+    )
+    excluded = boundary_candidate & one_sided_disagrees
+
     scale = np.maximum(
         np.maximum(np.abs(main_jacobian), np.abs(lane_fd)),
         np.finfo(np.float64).tiny,
     )
     main_fd_agrees = np.abs(main_jacobian - lane_fd) <= 1.0e-6 * scale
-    lane_scale = np.maximum(
-        np.maximum(np.abs(lane_jacobian), np.abs(lane_fd)),
-        np.finfo(np.float64).tiny,
-    )
-    lane_fd_agrees = np.abs(lane_jacobian - lane_fd) <= 1.0e-6 * lane_scale
-    established_lane_branch = np.zeros_like(main_jacobian, dtype=bool)
-    for case_index, (concentration, h_ice, _qlead) in enumerate(CASES):
-        if concentration > 1.0e-10 and h_ice != 0.0:
-            established_lane_branch[case_index] = True
-        if h_ice == 0.0:
-            established_lane_branch[case_index, :, 1] = True
-    established_lane_branch[:, :, 16] = True
-    established_lane_branch[:, 5, 2] = True
-    smooth_input = np.ones_like(main_jacobian, dtype=bool)
-    smooth_input[:, :, (0, 2, 15, 16)] = False
-    use_main = (
-        agree
-        & (main_fd_agrees | smooth_input)
-        & ~established_lane_branch
-        & ~unresolved
-    )
-    # At an exact statement boundary (notably zero snow thickness), the two
-    # directional differences can converge to distinct values.  No finite
-    # derivative exists there, so preserve and label the lane program's JAX
-    # branch convention rather than misrepresenting a crossing difference as
-    # a derivative.  Every differentiable fallback remains an actual lane FD.
-    nondifferentiable = (
-        established_lane_branch
-        & ~use_main
-        & ~lane_fd_agrees
-    )
-    lane_branch_target = np.nan_to_num(lane_jacobian, nan=0.0)
-    target = np.where(
-        use_main,
-        main_jacobian,
-        np.where(nondifferentiable, lane_branch_target, lane_fd),
-    )
+    use_main = agree & main_fd_agrees & ~excluded
     methods = np.where(
-        use_main, 0, np.where(nondifferentiable, 4, fd_methods),
+        excluded, 4, np.where(use_main, 0, fd_methods),
     ).astype(np.uint8)
-    target = np.where(unresolved, lane_fd, target)
-    methods = np.where(unresolved, fd_methods, methods).astype(np.uint8)
-    # One absolute comparison floor covers targets within twice the outward-
-    # rounded subtraction bound; every other entry remains relative-only.
-    rounding_limited = np.abs(target) <= 2.0 * absolute_floor
+    target = np.where(
+        excluded, np.nan, np.where(use_main, main_jacobian, lane_fd),
+    )
+
+    excluded_records = [
+        {
+            "index": [int(c), int(o), int(i)],
+            "fd_left": float(fd_left[c, o, i]),
+            "fd_right": float(fd_right[c, o, i]),
+        }
+        for c, o, i in np.argwhere(excluded)
+    ]
     return {
         "schema": 1,
         "main_sha": MAIN_SHA,
         "lane_sha": LANE_SHA,
-        "selection": (
-            "main compiled reverse AD iff main/lane forwards and the lane finite "
-            "difference agree in the recorded neighbourhood; otherwise lane finite "
-            "difference, except explicitly labelled nondifferentiable statement boundaries"
-        ),
+        "selection": SELECTION_RULE,
+        "fd_rounding_bound_formula": FD_ROUNDING_BOUND_FORMULA,
         "method_legend": {str(key): value for key, value in METHOD_LEGEND.items()},
         "cases": main["cases"],
         "output_names": main["output_names"],
@@ -467,14 +502,8 @@ def build_oracle(main: dict[str, object], lane: dict[str, object]) -> dict[str, 
             np.broadcast_to(refinement_steps[:, None, :], target.shape).copy()
         ),
         "fd_rounding_bound": _encode(rounding.astype("<f8")),
-        "rounding_limited": _encode(rounding_limited),
-        "absolute_floor": absolute_floor,
-        "absolute_floor_derivation": (
-            "3e-6 is the outward-rounded float64 subtraction bound for an "
-            "O(0.5) forward and the 2e-11 concentration step: "
-            "2*spacing(0.5)/(2*2e-11)=2.7755575615628914e-6; targets "
-            "within two such bounds use this absolute comparison floor"
-        ),
+        "excluded": _encode(excluded),
+        "excluded_nondifferentiable": excluded_records,
         "method_counts": {
             METHOD_LEGEND[method]: int(np.count_nonzero(methods == method))
             for method in METHOD_LEGEND
@@ -490,7 +519,7 @@ def _assemble(main_path: Path, lane_path: Path, output: Path) -> None:
     output.write_text(json.dumps(oracle, indent=2) + "\n")
     print(
         f"oracle target={(len(CASES), len(OUTPUT_NAMES), len(INPUT_NAMES))} "
-        f"methods={oracle['method_counts']} absolute_floor={oracle['absolute_floor']:.17g}"
+        f"methods={oracle['method_counts']}"
     )
 
 

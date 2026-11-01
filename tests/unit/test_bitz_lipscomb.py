@@ -511,7 +511,7 @@ def test_si3_column_step_remap_reverse_mode_finite_at_tiny_snow():
         qcn_ice_bottom=zero, qsb_ice_bottom=zero, fhld=zero, qlead=zero,
     )
 
-    def snow_thickness(thickness):
+    def step_exit(thickness):
         state = SI3ColumnArrays(
             jnp.asarray([0.5]), jnp.asarray([0.5]), thickness,
             jnp.asarray([c.T0]), zero_layers,
@@ -519,10 +519,17 @@ def test_si3_column_step_remap_reverse_mode_finite_at_tiny_snow():
         )
         return si3_column_step_arrays(
             state, forcing, 3600.0, c, si3=SI3ThermoConfig(),
-        ).exit.h_snow[0]
+        ).exit
 
-    gradient = jax.grad(snow_thickness)(jnp.asarray([3.0e-200]))
-    np.testing.assert_array_equal(np.asarray(gradient), np.asarray([1.0]))
+    jacobian = jax.jacrev(step_exit)(jnp.asarray([3.0e-200]))
+    for field, leaf in zip(jacobian._fields, jacobian):
+        assert bool(jnp.all(jnp.isfinite(leaf))), f"{field}: {leaf}"
+    np.testing.assert_array_equal(np.asarray(jacobian.h_snow), np.asarray([[1.0]]))
+    for field, leaf in zip(jacobian._fields, jacobian):
+        if field != "h_snow":
+            np.testing.assert_array_equal(
+                np.asarray(leaf), np.zeros_like(np.asarray(leaf)),
+            )
 
 
 def test_si3_column_step_mixed_dtypes_match_lane_and_differentiate():
@@ -688,38 +695,50 @@ def test_si3_column_step_full_gradient_sweep_matches_main_or_lane_difference():
     methods = generator.decode(fixture["methods"])
     steps = generator.decode(fixture["steps"])
     refinement_steps = generator.decode(fixture["refinement_steps"])
-    rounding_limited = generator.decode(fixture["rounding_limited"])
+    fd_rounding_bound = generator.decode(fixture["fd_rounding_bound"])
+    excluded = generator.decode(fixture["excluded"])
     assert (
         oracle.shape == methods.shape == steps.shape
-        == refinement_steps.shape == (24, 9, 23)
+        == refinement_steps.shape == fd_rounding_bound.shape
+        == excluded.shape == (24, 9, 23)
     )
     assert fixture["main_sha"] == generator.MAIN_SHA
     assert fixture["lane_sha"] == generator.LANE_SHA
+    assert fixture["selection"] == generator.SELECTION_RULE
+    assert fixture["fd_rounding_bound_formula"] == generator.FD_ROUNDING_BOUND_FORMULA
     assert bool(np.all(steps > 0.0))
+    assert bool(np.all(np.isfinite(fd_rounding_bound) & (fd_rounding_bound >= 0.0)))
+    assert np.array_equal(excluded, methods == 4)
+    assert bool(np.all(np.isfinite(oracle[~excluded])))
     eager = jax.vmap(jax.jacrev(step))(vectors)
     compiled = jax.jit(jax.vmap(jax.jacrev(step)))(vectors)
     for mode, actual in (("eager", eager), ("jit", compiled)):
         actual = np.asarray(actual)
-        error = np.abs(actual - oracle)
-        relative = error / np.maximum(
-            np.maximum(np.abs(actual), np.abs(oracle)),
-            np.finfo(np.float64).tiny,
+        assert bool(np.all(np.isfinite(actual))), mode
+        error = np.where(excluded, 0.0, np.abs(actual - oracle))
+        relative = np.where(
+            excluded,
+            0.0,
+            error
+            / np.maximum(
+                np.maximum(np.abs(actual), np.abs(oracle)),
+                np.finfo(np.float64).tiny,
+            ),
         )
-        passed = np.where(
-            rounding_limited,
-            error <= float(fixture["absolute_floor"]),
-            relative <= 1.0e-6,
-        )
-        for case, worst in zip(cases, np.max(relative, axis=(1, 2)), strict=True):
+        passed = excluded | (relative <= 1.0e-6) | (error <= fd_rounding_bound)
+        resolved_relative = np.where(error <= fd_rounding_bound, 0.0, relative)
+        for case, worst in zip(
+            cases, np.max(resolved_relative, axis=(1, 2)), strict=True
+        ):
             print(
                 f"gradient-sweep {mode} conc={case[0]:.12g} "
                 f"h_ice={case[1]:.1f} qlead={case[2]:.1f} worst_rel={worst:.3e}"
             )
-        assert bool(np.all(np.isfinite(actual))), mode
         assert bool(np.all(passed)), (
             mode,
+            int(np.count_nonzero(~passed)),
             np.unravel_index(
-                np.argmax(np.where(passed, -1.0, relative)), relative.shape,
+                int(np.argmax(np.where(passed, -1.0, relative))), relative.shape,
             ),
         )
 
@@ -744,7 +763,13 @@ def test_si3_reverse_sweep_generator_records_entry_provenance():
     methods = generator.decode(fixture["methods"])
     steps = generator.decode(fixture["steps"])
     refinement_steps = generator.decode(fixture["refinement_steps"])
+    fd_rounding_bound = generator.decode(fixture["fd_rounding_bound"])
+    excluded = generator.decode(fixture["excluded"])
     assert set(np.unique(methods)).issubset(generator.METHOD_LEGEND)
     assert bool(np.all(np.isfinite(steps) & (steps > 0.0)))
     assert bool(np.all(np.isfinite(refinement_steps) & (refinement_steps > 0.0)))
-    assert fixture["absolute_floor_derivation"]
+    assert bool(np.all(np.isfinite(fd_rounding_bound) & (fd_rounding_bound >= 0.0)))
+    assert np.array_equal(excluded, methods == 4)
+    assert len(fixture["excluded_nondifferentiable"]) == int(np.count_nonzero(excluded))
+    assert fixture["selection"] == generator.SELECTION_RULE
+    assert fixture["fd_rounding_bound_formula"] == generator.FD_ROUNDING_BOUND_FORMULA

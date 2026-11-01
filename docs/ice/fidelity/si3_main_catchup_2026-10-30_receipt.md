@@ -11,7 +11,7 @@
 - Merge mode: one `git merge --no-ff` commit; no rebase.
 - Textual conflict markers counted before resolution: **198** across 25 files.
 - Preservation rule: landed SI3 D5 and O1–O16 production selections and exactness tests remain selected exactly; main behavior is retained unless it is an obsolete implementation replaced by the certified lane.
-- independent review: operator (Claude)
+- independent review: operator
 
 ## Conflict-hunk ledger
 
@@ -473,46 +473,87 @@ The remap-guard source removal changes three later parenthesis-occurrence
 anchors without moving their lines; the executable citation map was updated
 accordingly, and its full non-vacuity audit remains green.
 
-## Resume 7 independent reverse oracle and remap correction
+## Resume 7 independent reverse oracle and remap correction (superseded in Resume 8)
 
 Resume 6's two embedded reverse-oracle blobs were not independent: one was a
 dump of `920c61d884` JIT AD and the other a dump of `0ae642c422` JIT AD.  Both
-are deleted.  The committed
-`scripts/validate/ocean_fidelity/testcases/si3_reverse_sweep_oracle.py`
-generator samples clean `edd34c2446` and `920c61d884` processes separately,
-then records a target source, central/forward/backward stencil, primary step,
-and refinement step for every one of the 4,968 output/input pairs.  It uses
-main AD only where the main/lane forwards agree in the sampled neighbourhood;
-otherwise it uses the lane forward difference.  Exact statement boundaries
-whose directional limits disagree are labelled separately and retain the
-lane program's reviewed JAX branch convention rather than pretending that a
-crossing difference is a derivative.  Source-rounded evaporation differences
-use the mean of two neighbouring positive-side steps, without consulting AD.
+were deleted in Resume 7, and the cumulative-remap no-material guard was
+restored in `packages/ice/legoesm/ice/bitz_lipscomb.py`.  However, Resume 7's
+initial generator and production tiny-snow test had four residual defects
+corrected in Resume 8 below: (1) `test_si3_column_step_remap_reverse_mode_finite_at_tiny_snow`
+differentiated only `exit.h_snow`, which pruned the remap enthalpy branch in
+`jax.grad` and passed even when the `_cumulative_remap` guard was deleted;
+(2) `established_lane_branch` used the lane's own AD as the target for 35
+entries across cases 18, 19, 22, and 23; (3) 19 `S_layers` (`input_index = 7`)
+entries at `S = 0` used `main_ad` while the `1e-8` forward step disagreed with
+`main_ad` by 2x to 2,070x across the `1.146e-11` nonlinearity scale; and (4) a
+global `3e-6` absolute floor gated 4,614 of 4,968 entries.
 
-The global absolute comparison floor is `3e-6`, the outward-rounded bound from
-`2*spacing(0.5)/(2*2e-11) = 2.7755575615628914e-6`.  Targets within two such
-bounds use that absolute floor; every other target uses `1e-6` relative error.
-There is no eager-only or per-entry value override.  In particular,
-`[18,1,0]` targets zero, while the reviewed material derivatives are
-`d(T_surface)/d(qns_ice)=0.050971963040420495`,
-`d(e_ice)/d(t_bottom)=-429412.1578074268`, and
-`d(h_ice)/d(t_bottom)=-3.3652721032826493e-6`.
+## Resume 8 oracle, tolerance, tiny-snow, and citation-span corrections
 
-The reverse fix preserves every certified primal bit while retaining the
-concentration and fresh-snow statement masks and allowing smooth
-thermodynamic leaves on nonzero-thickness sub-epsilon columns to carry
-cotangents.  The cumulative-remap no-material guard is restored: deleting it
-made the active production case with `concentration=0.5`, `h_ice=0.5`,
-`h_snow=3e-200`, and `e_snow=[0,0,-1e8]` return a NaN gradient instead of
-`[1.0]`.  The zero-thickness helper regression now returns a finite all-zero
-cotangent at `1e-300`.  Mixed-dtype tests pin the `920c61d884` forward values,
-the float32 concentration and age gradients (`1.0`), and the float32
-`exit.age_volume` cast when `e_ice` is float32 and entry age is float64.
-
-With the rebuilt test/fixture overlaid on clean `0ae642c422`, the eager sweep
-fails first at `(case, output, input)=(2,3,7)`.  At the repaired tree the same
-test passes in both eager and JIT modes; the final clean full-file run emitted
-`19 passed in 296.15s`.
+1. **Full-exit tiny-snow production test (`tests/unit/test_bitz_lipscomb.py`):**
+   `test_si3_column_step_remap_reverse_mode_finite_at_tiny_snow` now
+   differentiates the entire `.exit` state pytree via `jax.jacrev` over all
+   nine leaves (`concentration`, `h_ice`, `h_snow`, `T_surface`, `e_ice`,
+   `e_snow`, `S_bulk`, `S_layers`, `age_volume`) with respect to
+   `entry.h_snow = 3e-200`, asserting every leaf Jacobian is finite and the
+   surviving snow-thickness derivative is `[[1.0]]`.  Deleting the
+   `_cumulative_remap` no-material guard (`bitz_lipscomb.py:987-999`) now fails
+   immediately with `AssertionError: concentration: [[nan]]` (with `NaN` in all
+   nine exit leaf Jacobians).
+2. **Zero lane-AD targets (`scripts/validate/ocean_fidelity/testcases/si3_reverse_sweep_oracle.py`):**
+   `_sample` computes `jacrev` only when `sha == MAIN_SHA` (`has_jacobian=False`
+   on `LANE_SHA`), and `build_oracle` raises `ValueError` if `"jacobian"` is
+   present in the lane sample.  Every scored entry targets either `main_ad`
+   (`3,744` entries where main and lane forwards agree in the sampled
+   neighbourhood and `main_ad` agrees with `lane_fd` within `1e-6` relative or
+   the entry's own FD rounding bound) or a finite difference of the lane
+   forward (`389` `lane_fd_central`, `734` `lane_fd_forward`, `26`
+   `lane_fd_backward`).  Specifically, smooth entries `[18,3,11]`
+   (`target = 0.050971963040420495`) and `[22,3,7]`
+   (`target = -542.6813269341213`) use `lane_fd_central`, and `[19,1,2]`
+   (`target = 6.869234348006378e-6`, vs tip eager AD `6.869232846652797e-6` and
+   JIT AD `6.869232846683276e-6`, relative error `2.186e-7`) uses
+   `lane_fd_backward` at step `1e-6` after a 4-step backward FD refinement
+   (`1e-8`: `6.869504964868e-6`; `1e-7`: `6.869296798051e-6`; `1e-6`:
+   `6.869234348006e-6`; `1e-5`: `6.869232960227e-6`) confirmed the AD was right
+   and the `1e-7` difference was float64 subtraction noise on `exit.h_ice ~ 0.05`.
+   Only the `75` genuine non-differentiable statement-boundary entries where
+   measured left and right one-sided lane FDs (`fd_left` and `fd_right`)
+   disagree are excluded (`method = 4`, `excluded_nondifferentiable_boundary`,
+   `target = NaN`), each recorded by `[case, output, input]` index with both
+   one-sided values in `oracle["excluded_nondifferentiable"]`.
+3. **19 `S_layers` entries at `S = 0` (`input_index = 7`):**
+   Setting `_INPUT_STEPS[7] = 5.0e-15` with a central stencil resolves the
+   smooth `S_layers ~ 1.146e-11` nonlinearity scale at `S = 0`: across all 216
+   `S_layers` entries (including all 19 previously discrepant entries),
+   `lane_fd` now agrees with `main_ad` and `tip_ad` to a worst relative
+   difference of `3.990e-7 < 1e-6`.
+4. **Per-entry FD rounding bound (`fd_rounding_bound`):**
+   The global `3e-6` floor is removed.  Each entry stores its own bound
+   `2*spacing(max(|y(x0)|, |y_pert|)) / denom` (`denom = 2*|delta|` for central,
+   `|delta|` for one-sided, `mean(1/delta_primary, 1/delta_refinement)` for
+   two-step evaporation averaging), plus the output ulp `spacing(|y(x0)|)` when
+   the forward output is identically constant across the stencil (`target == 0`).
+   Every scored entry must satisfy `rel <= 1e-6` or `|err| <= 1.0 * fd_rounding_bound`.
+   Entry `[18,1,0]` (`h_ice / concentration` at `(2e-10, 0.5, 0.0)`,
+   `target = 0.0`, eager `4.76837158203125e-7`, JIT `5.873817268728301e-7`) has
+   `exit.h_ice = 0.5` (`spacing(0.5) = 5.551115123125783e-17`) and central step
+   `delta = 2e-11`, so its own FD rounding bound is
+   `2 * 5.551115123125783e-17 / (4e-11) + 5.551115123125783e-17 = 2.7755575616184025e-6`,
+   which covers both eager and JIT errors directly without any global floor or
+   per-entry patch.
+5. **Rebuilt sweep and restored citation spans:**
+   On `0ae642c422`, the rebuilt sweep fails on `151` entries in eager mode and
+   `151` entries in JIT mode (first failure `(2, 3, 7)` in both modes).  On the
+   repaired HEAD, `0` entries fail in eager and `0` in JIT (`19 passed` across
+   `tests/unit/test_bitz_lipscomb.py`).  With the `_cumulative_remap` guard
+   restored in `bitz_lipscomb.py`, the file's parenthesis count matches
+   `920c61d884`, so the three unmoved `bitz_lipscomb.py` citation spans in
+   `si3_r21_o8_o12_score_preregister.md`, `si3_r21_o8_o12_score_receipt.md`,
+   and `si3_r3_d5_receipt.md` (`1028-1277`, `1301-1320`, `1718-1783`) and their
+   four `(')', count)` anchors in `nemo_testcase_receipt_citation_gate.py` are
+   restored to their original full extents.
 
 ## Final clean-checkout verification
 
@@ -539,7 +580,7 @@ Every observed stable failure is classified here.
 |---|---|---|
 | `test_si3_surface.py::test_libm_pow_matches_glibc_and_differentiates` | merge-introduced, fixed here | original merge dereferenced lazy `_LIBM=None`; cherry-picked `e4be5cee4e29aa2c71bf5802e2ccee7df5ca0fb9`, using `glibc_libm().pow` |
 | `test_bitz_lipscomb.py` open-water reverse-mode regressions | merge-introduced, corrected here | preserved the lane's exact `post_da` forward and routed only the valid inactive concentration cotangent to the entry value; eager/JIT two-step bits equal `920c61d884` |
-| main's remap-only Bitz regression (`test_cumulative_remap_reverse_mode_finite_at_zero_thickness`) | merge-introduced, restored in resume 7 | the helper guard is required: removing it produces a NaN reverse gradient in an active production column with subnormal snow; both the helper and production-step plants are committed |
+| main's remap-only Bitz regression (`test_cumulative_remap_reverse_mode_finite_at_zero_thickness` / `test_si3_column_step_remap_reverse_mode_finite_at_tiny_snow`) | merge-introduced, guard restored in resume 7, production plant fixed in resume 8 | the helper guard is required, but resume 7's production test differentiated only `exit.h_snow` (which pruned the remap enthalpy branch and passed with the guard deleted); resume 8 differentiates the full `.exit` pytree via `jax.jacrev`, failing with `AssertionError: concentration: [[nan]]` (NaN in all 9 leaves) when the guard is deleted |
 | landing battery KPP validation-order node recorded above | merge-introduced, fixed in the original catch-up | main closure evaluation ran before the lane's unchanged fail-closed refusal; ordering was corrected and the node passed |
 | 15 nodes in `test_nemo_testcase_receipt_citation_gate.py` on the first clean follow-up run | follow-up source-shift, fixed here | the AD guards, dual CEN2 path, and catch-up-2 core changes moved 149 mapped endpoints; all audited Markdown citations and the executable map were re-anchored with literal insertion maps and explicit replacement anchors; pre-commit result is `42 passed` plus the two expected dirty-worktree provenance refusals |
 | three bypass classes in `test_post_20261029_provenance_sha_gate.py` | follow-up weakness, fixed here | carry-forward now requires the identical token on one mapped logical line through the complete first-parent history to the pre-cutoff base; later re-edits, copied/retargeted tokens, and moved tokens fail committed plants |

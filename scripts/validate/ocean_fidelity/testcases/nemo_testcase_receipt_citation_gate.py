@@ -13382,24 +13382,24 @@ _reanchor(
     'packages/ice/legoesm/ice/bitz_lipscomb.py:1301-1324',
     'packages/ice/legoesm/ice/bitz_lipscomb.py:1301-1320',
     anchors=['def si3_ice_thd_dh(*, fluxes: SI3DHFluxes, rDt_ice, rn_snwblow, rn_sinew,',
-             (')', 584), 20],
+             (')', 587), 20],
 )
 _reanchor(
     'packages/ice/legoesm/ice/bitz_lipscomb.py:1718-1795',
     'packages/ice/legoesm/ice/bitz_lipscomb.py:1718-1783',
     anchors=['def si3_ice_thd_sal(*, h_i, t_su, t_i, sz_i, t_bo, sss, a_i, dh_i_sum,',
-             (')', 831), 66],
+             (')', 834), 66],
 )
 _reanchor(
     'packages/ice/legoesm/ice/bitz_lipscomb.py:1028-1282',
     'packages/ice/legoesm/ice/bitz_lipscomb.py:1028-1277',
-    anchors=['def _si3_ice_thd_dh_core(', (')', 564), 250],
+    anchors=['def _si3_ice_thd_dh_core(', (')', 567), 250],
 )
 _reanchor(
     'packages/ice/legoesm/ice/bitz_lipscomb.py:1256-1261',
     'packages/ice/legoesm/ice/bitz_lipscomb.py:1256-1256',
     anchors=['e_s_new = _cumulative_remap(zh_s, [sr(e * h) for e, h in zip(ze_s, zh_s)], nlay_s, sr)',
-             (')', 553), 1],
+             (')', 556), 1],
 )
 _reanchor(
     'packages/ice/legoesm/ice/bitz_lipscomb.py:2149',
@@ -13515,9 +13515,8 @@ _reanchor(
     anchors=['# `ice_thd_frazil` supplies ht_i_new', ('return trace', 2), 46],
 )
 
-# Resume 7 restores the remap guard and narrows the entry cotangent masks.  The
-# former changes four parenthesis-occurrence anchors; the latter inserts twelve
-# lines in the column step.  Re-anchor every moved SI3 citation explicitly.
+# Resume 7 narrows the entry cotangent masks, inserting twelve lines in the
+# column step.  Re-anchor every moved SI3 citation explicitly.
 _reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:2226',
           'packages/ice/legoesm/ice/bitz_lipscomb.py:2238')
 _reanchor(
@@ -13539,17 +13538,6 @@ _reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:2176,2178',
           'packages/ice/legoesm/ice/bitz_lipscomb.py:2188,2190')
 _reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:2072-2200',
           'packages/ice/legoesm/ice/bitz_lipscomb.py:2072-2212', extent=141)
-_reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:1301-1320',
-          'packages/ice/legoesm/ice/bitz_lipscomb.py:1301-1316', extent=16)
-_reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:1718-1783',
-          'packages/ice/legoesm/ice/bitz_lipscomb.py:1718-1774', extent=57)
-_reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:1028-1277',
-          'packages/ice/legoesm/ice/bitz_lipscomb.py:1028-1270', extent=243)
-_repin('packages/ice/legoesm/ice/bitz_lipscomb.py:1256-1256', [
-    'e_s_new = _cumulative_remap(zh_s, [sr(e * h) for e, h in zip(ze_s, zh_s)], nlay_s, sr)',
-    'e_s_new = _cumulative_remap(zh_s, [sr(e * h) for e, h in zip(ze_s, zh_s)], nlay_s, sr)',
-    1,
-])
 _reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:2153',
           'packages/ice/legoesm/ice/bitz_lipscomb.py:2165')
 _reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:2113-2115',
