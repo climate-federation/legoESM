@@ -5,15 +5,16 @@ No NEMO build, launch, or integration was run.
 
 ## Outcome
 
-**ACQUISITION_NEEDED; O17 composition held.** The admitted O8--O16 master has
+**ACQUISITION_NEEDED; the unified O17 producer is now scorable.** The admitted O8--O16 master has
 the correct unmodified production deck, 100-step window, dynamics disposition,
 thermodynamic stage frames, exchange outputs, and restart. It does not have a
 complete ice-step-entry state or raw O7 meteorology at every step. The O1--O7
 records do not fill those holes over the same 100-step production trajectory.
 
-The audit in this opening section predates the Resume 1 implementation.  The
-typed composition entry and acquisition tooling described below now exist;
-the unified O17 record and through-entry numerical proof still do not.
+The audit in this opening section predates the Resume 1--3 implementation. The
+typed composition entry and one-trajectory acquisition/scoring tooling now
+exist; the operator-produced unified O17 record and its through-entry numerical
+verdict still do not.
 
 There is also no existing legoESM production entry point that performs the O17
 program. The current dispatcher accepts a typed finalization forcing and calls
@@ -167,16 +168,15 @@ and measured 17,710,772 KiB peak RSS.  Thus neither execution produced a
 numerical gradient or a primal-from-gradient result; forward-bit equality for
 that transformed program is unmeasured, not failed.
 
-Trace-only accounting completed in 43 seconds.  The scalar objective contains
-180,148 top-level and 576,742 recursively nested jaxpr equations.  The largest
-named owner is the five-category O9--O12 thermodynamic program (112,647
-equations); O8 open-water thermodynamics contributes 25,688, O6 redistribution
-18,434, O15 9,893, post-dynamics correction 9,367, and the remaining inlined
-helpers 384,109.  By contrast, the scan-based aEVP owner contributes 806
-recursive equations.  There are 132,351 nested `jit` equations, 74,780
-`select_n`, 28,519 source-rounding barriers, and only 27 `scan` primitives.
-The compile limit is therefore the inlined/unrolled thermodynamic and
-source-rounding graph, not the 100-subcycle aEVP scan or memory exhaustion.
+Trace-only accounting completed in 43 seconds. Argon's corrected recursive
+count for the reviewed graph is 576,364 equations. `_thermo_category_loop`
+owns 342,178 (the five O9--O11 category paths contribute about 191k and the O12
+pond path about 151k), `si3_ice_thd_do` owns 53,490, and `si3_dyn_orca2` owns
+48,325. The remaining named and inlined program is 132,371 equations. The
+earlier attribution of 179,770 equations to a catch-all bucket is retracted:
+those equations were nested beneath the thermodynamic owner. The reproducible
+recursive/source-owner counter is
+`scripts/validate/ocean_fidelity/testcases/nemo_si3_o17_jaxpr_count.py`.
 
 The complete 206-leaf publication is
 `docs/ice/fidelity/si3_r29_o17_ad_leaf_table.md`.  Shape and dtype are measured
@@ -228,6 +228,71 @@ No option was applied in Resume 2 because the operator explicitly prohibited
 operator-structure changes.  Until option 1 or 2 is approved, the C4 numerical
 reachability table remains measured as timed out rather than passing.
 
+## Resume 3 review closure
+
+This section is authoritative for the review of `ea3e570732`. No NEMO command
+was run. The O2 production boundary again raises the original
+`NotImplementedError("ice_update_flx" ...)` class/message contract; both
+certified O2 gate cases pass unchanged. O17 still refuses the incomplete O2
+forcing as a production full-step input, so restoring the exception contract
+does not invent any forcing or weaken either gate.
+
+The production step now includes every cited tail operation rather than taking
+it as forcing: `t_bo` is formed at `icestp.F90:136-138`; `u_ice_b/v_ice_b` at
+the first `store_fields` boundary (`icestp.F90:151`, `icestp.F90:421-423`);
+`a_i_b/at_i_b` at the second `store_fields` boundary (`icestp.F90:184`,
+`icestp.F90:399-418`); `diag_set0` resets owned `t_si` at
+`icestp.F90:485-488`; category unpack retains `t_si` at
+`icethd.F90:163,334,533-534`; and the post-`ice_cor(kt,2)` ageing, T/U/V halo
+links, category sum, and melted-edge velocity zeroing are transcribed from
+`icethd.F90:183-201`. C-grid deformation now occurs between aEVP and Prather
+advection, matching `icedyn.F90:132-134` and
+`icedyn_rhg_evp.F90:788-836`.
+
+The admitted live O9--O12 category loop now returns its carried module flux
+state. Salinity's `sfx_res/sfx_bri` are retained from
+`icethd_sal.F90:1335-1340`; diffusion's `hfx_err_dif/hfx_dif` are carried from
+`icethd_zdf_bl99.F90:786,838-841`; the already admitted category aggregation is
+used directly. The five-snapshot replay arm is unchanged. The live-arm unit
+test numerically proves all four carries across all five categories.
+
+The O17 unit gate executes one mixed open/ice, five-category, snow-and-pond
+step through the real `si3_o17_step` in eager and compiled modes. Its red
+controls numerically change the rheology/advection order, ORCA2 deformation
+fold, and `frq_m`, while `ln_ice_embd=True` refuses. The production dispatcher
+test calls the live composed entry, and the record-reader test proves
+self-described extents and truncation refusal. Removing any of those live arms
+therefore fails a numerical assertion rather than an AST-list or `callable()`
+check.
+
+The former four-component O17 driver is removed. The operator tool now invokes
+the extended O8--O16 master exactly once. That master retains its passive
+reference twin, then runs one instrumented, unmodified 100-step
+`ORCA2_SAS_ICE` production trajectory. Per-step/per-rank O17 kinds 22--34 cover
+entry, rheology, advection, redistribution, dynamic correction, thermodynamics,
+exit, Prather entry/exit, flux-other, both raw bulk boundaries, and the private
+stress exit. Records are self-describing and include full prognostic state,
+all 55 Prather arrays, dynamic stress, category bounds, delayed CFL, raw O7
+meteorology, precipitation, ocean/grid/mask forcing, all carried fluxes, O16
+exchange fields, and all stress outputs. The manifest names exactly those
+kinds. Production-flag FP-census and same-program gates cover every observer.
+
+The scorer reads that one trajectory and calls `si3_o17_step` for every step
+and rank. `GIVEN-NEMO-ENTRY` enforces bitwise equality (including signed zero)
+at the named boundaries and exit; `INDEPENDENT` seeds only step 1 from NEMO and
+enforces the fixed `1e-15` trajectory bar thereafter. A non-PASS score prevents
+the top-level `RUN_COMPLETE` marker and exit zero. The read-only preflight uses
+stub NEMO only for driver retention/control flow and separately executes live
+numeric swap/fold plants. RAM, disk, and one global wall-clock gates remain.
+The operator entry is:
+
+`scripts/validate/ocean_fidelity/testcases/nemo_si3_o17_acquisition/run.sh`
+
+Decision 194 selected option 1: bit-preserving JAX loop conversion with
+checkpoints. It is deliberately not implemented in this round; it is the next
+round's work. The corrected Argon ownership numbers above are the frozen
+measurement motivating that decision.
+
 ## Resume 1 implementation (operator ruling applied)
 
 The earlier stop above is historical.  The operator confirmed that O17's one
@@ -243,8 +308,8 @@ categories, 10+5 layers, 10800 s, `nn_hls=2`, all surface selectors, and
 
 1. O7 `blk_ice_1` and stress exchange;
 2. O5 H79 strength and aEVP;
-3. O4 Prather advection;
-4. O6 deformation, redistribution/rafting, and `ice_cor(kt,1)`;
+3. O5 C-grid deformation at the rheology exit;
+4. O4 Prather advection, then O6 redistribution/rafting and `ice_cor(kt,1)`;
 5. the remainder of O7 (`ice_alb`, `blk_ice_2`, `ice_flx_other`);
 6. O8 frazil, O9--O12 category/pond work, O13 remap, and O14 open water;
 7. O15 correction, O16 aggregation/flux update, and tau update.

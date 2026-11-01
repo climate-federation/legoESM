@@ -137,7 +137,6 @@ def test_o17_step_executes_active_ice_eager_jit_and_numerical_plants(monkeypatch
     dynamic = forcing[1:]
     with jax.disable_jit():
         eager = run(entry, dynamic)
-    compiled = jax.jit(lambda e, f: run(e, f))(entry, dynamic)
 
     def selected(result):
         out, trace = result
@@ -150,7 +149,8 @@ def test_o17_step_executes_active_ice_eager_jit_and_numerical_plants(monkeypatch
             trace.finalize.final.outputs.sfx,
         )
 
-    for got, want in zip(selected(compiled), selected(eager), strict=True):
+    compiled = jax.jit(lambda e, f: selected(run(e, f)))(entry, dynamic)
+    for got, want in zip(compiled, selected(eager), strict=True):
         np.testing.assert_allclose(np.asarray(got), np.asarray(want), rtol=0.0, atol=1.0e-12, equal_nan=True)
     assert np.count_nonzero(np.asarray(eager[0].ice.a_i)) > 0
     assert np.count_nonzero(np.asarray(eager[1].finalize.final.fluxes.hfx_dif)) > 0
