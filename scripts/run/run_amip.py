@@ -2296,6 +2296,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         help="Multiplier on kk2000 accretion of cloud by "
                              "rain (MG2 accre_enhan; 1.0 = unscaled). "
                              "kk2000 only.")
+    parser.add_argument("--morrison-mg2-drop-readjust-log-width", type=float,
+                        default=ExperimentConfig._field_defaults[
+                            "morrison_mg2_drop_readjust_log_width"],
+                        dest="morrison_mg2_drop_readjust_log_width",
+                        help="RULE 5 width (ln space) of CAM6 MG2's final "
+                             "droplet mean-size readjust, prognostic droplet "
+                             "number only; 0 = MG2's hard clip.")
     parser.add_argument("--morrison-warm-rain-incloud",
                         action=argparse.BooleanOptionalAction,
                         default=ExperimentConfig._field_defaults[
@@ -3148,6 +3155,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         morrison_autocon_fact=args.morrison_autocon_fact,
         morrison_ice_snow_d_auto=args.morrison_ice_snow_d_auto,
         morrison_accre_enhan_fact=args.morrison_accre_enhan_fact,
+        morrison_mg2_drop_readjust_log_width=args.morrison_mg2_drop_readjust_log_width,
         morrison_sed_cfl_substeps=args.morrison_sed_cfl_substeps,
         morrison_sed_cfl_substeps_max=args.morrison_sed_cfl_substeps_max,
         morrison_sed_cfl_substeps_strict=args.morrison_sed_cfl_substeps_strict,

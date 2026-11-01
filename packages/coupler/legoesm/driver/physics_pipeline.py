@@ -4486,6 +4486,8 @@ def thread_morrison_scalars(config, scheme, micro_config):
          getattr(config, "morrison_autocon_fact", None)),
         ("morrison_accre_enhan_fact", "accre_enhan_fact",
          getattr(config, "morrison_accre_enhan_fact", None)),
+        ("morrison_mg2_drop_readjust_log_width", "mg2_drop_readjust_log_width",
+         getattr(config, "morrison_mg2_drop_readjust_log_width", None)),
     ):
         if _val is not None and not math.isclose(
                 float(_val), float(_ExpCfg._field_defaults[_exp_name]),

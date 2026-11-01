@@ -10,3 +10,7 @@
 include: amip_production.yaml
 aerosol_ccn: false
 morrison_prognostic_droplet_number: true
+morrison_mg2_drop_readjust_log_width: 0.01  # NAMED, equals the code default:
+                            # RULE 5 width of MG2's final droplet mean-size
+                            # readjust (0 = MG2's hard clip; #2216, the
+                            # cloud-optics width)

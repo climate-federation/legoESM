@@ -2170,6 +2170,10 @@ class ExperimentConfig(NamedTuple):
     surface_large_yeager_neutral_width: float = NCAR_NEUTRAL_WIDTH
     surface_large_yeager_dthv_width: float = NCAR_DTHV_WIDTH
     surface_large_yeager_cd_cutoff_width: float = NCAR_CD_CUTOFF_WIDTH
+    # MorrisonConfig.mg2_drop_readjust_log_width: RULE 5 width of MG2's final
+    # droplet mean-size readjust (prognostic droplet number only); 0 = MG2's
+    # hard clip.  Range [0, 1], checked in validate_strict.
+    morrison_mg2_drop_readjust_log_width: float = 0.01
 
     def _liquid_partition_resolved(self) -> bool:
         """Is CLUBB's cloud-liquid exchange selected, by ANY route?
@@ -4487,6 +4491,20 @@ class ExperimentConfig(NamedTuple):
                 "column lane: no other lane carries the snow number N_s; got "
                 f"grid_type={g.grid_type!r}, discretization={d.discretization!r}, "
                 f"column_lane={d.column_lane}")
+        _rw = self.morrison_mg2_drop_readjust_log_width
+        if (isinstance(_rw, bool) or not isinstance(_rw, (int, float))
+                or not math.isfinite(_rw) or not 0.0 <= _rw <= 1.0):
+            errors.append(
+                f"morrison_mg2_drop_readjust_log_width must be a finite float in "
+                f"[0, 1] (0 = MG2's hard clip), got {_rw!r}")
+        elif (_rw != ExperimentConfig._field_defaults[
+                "morrison_mg2_drop_readjust_log_width"]
+                and not (self.microphysics == "morrison"
+                         and self.morrison_prognostic_droplet_number is True)):
+            errors.append(
+                f"morrison_mg2_drop_readjust_log_width={_rw} is read only with "
+                "microphysics='morrison' and morrison_prognostic_droplet_number="
+                "True (it would be silently inert)")
         if self.morrison_prognostic_droplet_number is True and not self.cam6_aerosol_dir:
             # user decision 2026-10-24, 3
             errors.append(
