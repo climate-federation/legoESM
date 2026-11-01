@@ -213,7 +213,7 @@ measured on the reviewed parent before its correction was accepted.
 
 6. **Compiled arithmetic.** The parent eager/compiled comparison differed in
    six `oa_i` entries by one ULP, with maximum absolute difference
-   2.2737367544323206e-13. The `icethd.F90:185` multiply and add now use the
+   2.2737367544323206e-13. The `src/ICE/icethd.F90:185` multiply and add now use the
    lane's `nemo_source_round` at both NEMO statement boundaries
    (`packages/ice/legoesm/ice/si3_o17.py:489-499`). Every former
    `atol=1e-12` comparison was removed. The fast composition test and the full
@@ -271,7 +271,7 @@ measured on the reviewed parent before its correction was accepted.
    555.355544 s compile plus 80.127607 s execute (635.483151 s total), peak RSS
    22,514,800 KiB. The production scorer uses eager execution and publishes its
    own wall time and peak RSS in the score JSON
-   (`scripts/validate/ocean_fidelity/testcases/nemo_si3_o17_composition_scorer.py:351-402`).
+   (`scripts/validate/ocean_fidelity/testcases/nemo_si3_o17_composition_scorer.py:351-400`).
    This is below the operator's one-process 100 GB ceiling; no concurrent heavy
    process was started.
 
