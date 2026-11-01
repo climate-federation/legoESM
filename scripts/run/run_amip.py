@@ -2311,6 +2311,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "droplet size reset (before autoconversion and "
                              "snow riming), both droplet-number paths; 0 = "
                              "MG2's hard clip.")
+    parser.add_argument("--morrison-mg2-drop-sed-reset-log-width", type=float,
+                        default=ExperimentConfig._field_defaults[
+                            "morrison_mg2_drop_sed_reset_log_width"],
+                        dest="morrison_mg2_drop_sed_reset_log_width",
+                        help="RULE 5 width (ln space) of CAM6 MG2's droplet "
+                             "size reset in the sedimentation fall speeds, "
+                             "prognostic droplet number only; 0 = MG2's hard "
+                             "clip.")
     parser.add_argument("--morrison-warm-rain-incloud",
                         action=argparse.BooleanOptionalAction,
                         default=ExperimentConfig._field_defaults[
@@ -3165,6 +3173,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         morrison_accre_enhan_fact=args.morrison_accre_enhan_fact,
         morrison_mg2_drop_readjust_log_width=args.morrison_mg2_drop_readjust_log_width,
         morrison_mg2_drop_early_reset_log_width=args.morrison_mg2_drop_early_reset_log_width,
+        morrison_mg2_drop_sed_reset_log_width=args.morrison_mg2_drop_sed_reset_log_width,
         morrison_sed_cfl_substeps=args.morrison_sed_cfl_substeps,
         morrison_sed_cfl_substeps_max=args.morrison_sed_cfl_substeps_max,
         morrison_sed_cfl_substeps_strict=args.morrison_sed_cfl_substeps_strict,

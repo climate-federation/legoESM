@@ -408,6 +408,17 @@ def rlutcs_replay(fns, state, mesh, sig, forcing, phys_state, rad_int, real_back
     return 0
 
 
+
+def replace_deck(argv: list[str], deck: str) -> list[str]:
+    """``argv`` with its single ``--config`` value replaced by ``deck``."""
+    idx = [i for i, a in enumerate(argv) if a == "--config"]
+    if len(idx) != 1 or idx[0] + 1 >= len(argv):
+        raise SystemExit(f"--deck: the logged command needs exactly one --config, got {argv}")
+    out = list(argv)
+    out[idx[0] + 1] = deck
+    print(f"relaunch deck: {argv[idx[0] + 1]} -> {deck}", flush=True)
+    return out
+
 def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("--run", default="dd_ctl")
@@ -455,9 +466,19 @@ def main(argv=None):
                     help="#2216: microphysics early droplet size reset at the configured "
                          "width vs MG2's hard clip (width 0), same inputs, one step "
                          "(nc_budget.run_reset_ab); writes npz into --out")
+    ap.add_argument("--reset-field", default="mg2_drop_early_reset_log_width",
+                    choices=("mg2_drop_early_reset_log_width", "mg2_drop_sed_reset_log_width"),
+                    help="with --reset-width-ab: which size-reset width is set to 0 "
+                         "(the early reset, or the sedimentation fall-speed reset)")
+    ap.add_argument("--deck", default=None,
+                    help="relaunch with this --config deck instead of the run's logged "
+                         "one (e.g. a run made with the production deck before it changed); "
+                         "the logged command must carry --config")
     args = ap.parse_args(argv)
     if args.no_graupel_riming and not args.nc_budget:
         ap.error("--no-graupel-riming needs --nc-budget")
+    if args.reset_field != "mg2_drop_early_reset_log_width" and not args.reset_width_ab:
+        ap.error("--reset-field needs --reset-width-ab")
     if args.reset_width_ab and (args.nc_budget or args.rlutcs_replay):
         ap.error("--reset-width-ab is its own mode (not with --nc-budget / --rlutcs-replay)")
     t0 = time.time()
@@ -466,6 +487,8 @@ def main(argv=None):
     scratch = out_dir / f"_launch_{args.run}"
     scratch.mkdir(exist_ok=True)
     argv_run = H.launch_argv(args.run, args.day, scratch)
+    if args.deck is not None:
+        argv_run = replace_deck(argv_run, args.deck)
 
     import jax
     import jax.numpy as jnp
@@ -479,7 +502,8 @@ def main(argv=None):
     if args.nc_budget or args.reset_width_ab:
         import nc_budget as NCB
         NCB.install_micro_spy(micro_calls, graupel_riming=not args.no_graupel_riming,
-                              reset_width_ab=args.reset_width_ab)
+                              reset_width_ab=args.reset_width_ab,
+                              reset_field=args.reset_field)
         NCB.report_terrain_drift()
     fns: dict = {}
     rad_calls: list = []

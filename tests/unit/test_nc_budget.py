@@ -231,3 +231,61 @@ def test_spy_reset_width_ab_runs_both_arms_on_the_same_inputs(monkeypatch):
     nb.install_micro_spy([], reset_width_ab=True)
     with pytest.raises(SystemExit, match="no mg2_drop_early_reset_log_width"):
         mi._get_microphysics_fn(None)
+
+
+def test_spy_reset_width_ab_sedimentation_field(monkeypatch):
+    """#2216: the sedimentation fall-speed reset width is switched instead, and
+    the droplet-number rows (whole tendency, sedimentation) are recorded."""
+    from typing import NamedTuple
+    import legoesm.atmosphere.physics.microphysics.integration as mi
+
+    class Cfg(NamedTuple):
+        publish_qc_budget: bool = False
+        mg2_drop_early_reset_log_width: float = 0.01
+        mg2_drop_sed_reset_log_width: float = 0.01
+
+    class Out(NamedTuple):
+        dq_c_dt: object = None
+        dq_r_dt: object = None
+        dq_s_dt: object = None
+        dq_v_dt: object = None
+        dN_r_dt: object = None
+        dN_c_dt: object = None
+        nc_budget: object = None
+        qc_budget: object = None
+    seen = []
+
+    def fn(*a, **kw):
+        seen.append(a[8])
+        w = a[8].mg2_drop_sed_reset_log_width
+        one = np.ones((1, 1))
+        return Out(*(one * (1.0 + w),) * 4, dN_r_dt=one * 2.0, dN_c_dt=one * (4.0 + w),
+                   nc_budget={"sedimentation": one * (2.0 + w)},
+                   qc_budget={"sedimentation": one * (1.0 + w)})
+    monkeypatch.setattr(mi, "_get_microphysics_fn", lambda c: ("morrison", fn, Cfg()))
+    calls = []
+    nb.install_micro_spy(calls, reset_width_ab=True, reset_field="mg2_drop_sed_reset_log_width")
+    _, spy, cfg = mi._get_microphysics_fn(None)
+    spy(*range(5), np.full((1, 1), 2.0), 6, 7, cfg)
+    assert seen == [Cfg(True, 0.01, 0.01), Cfg(True, 0.01, 0.0)]   # only the sed width moves
+    assert calls[0]["field"] == "mg2_drop_sed_reset_log_width"
+    t = nb.reset_ab_table(nb.reset_ab_rows(calls), np.ones((1, 1)), np.ones((1, 1), bool))
+    assert t["N_c: sedimentation"] == pytest.approx((86400.0, 1.005 * 86400, 0.005 * 86400))
+    assert t["dN_c_dt"][2] == pytest.approx(0.005 * 86400)
+    assert t["q_c: sedimentation"][2] == pytest.approx(0.01 * 86400)
+    # no droplet sedimentation in the calls (specified droplet number): vacuous
+    for arm in ("hard", "default"):
+        calls[0][arm]["qc"] = {"other": calls[0][arm]["qc"]["sedimentation"]}
+    with pytest.raises(SystemExit, match="droplet sedimentation ran"):
+        nb.reset_ab_rows(calls)
+    nb.install_micro_spy([], reset_width_ab=True, reset_field="mg2_drop_readjust_log_width")
+    with pytest.raises(SystemExit, match="unknown reset field"):
+        mi._get_microphysics_fn(None)
+
+
+def test_reset_ab_path_keeps_the_two_fields_apart(tmp_path):
+    early = nb.reset_ab_path(tmp_path, "mg2_drop_early_reset_log_width", "r_d0010")
+    sed = nb.reset_ab_path(tmp_path, "mg2_drop_sed_reset_log_width", "r_d0010")
+    assert early.name == "reset_ab_r_d0010.npz" and sed.name == "reset_ab_sed_r_d0010.npz"
+    with pytest.raises(SystemExit, match="unknown reset field"):
+        nb.reset_ab_path(tmp_path, "mg2_drop_readjust_log_width", "r_d0010")

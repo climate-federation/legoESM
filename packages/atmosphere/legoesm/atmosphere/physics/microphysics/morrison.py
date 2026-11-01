@@ -2384,7 +2384,11 @@ def morrison_microphysics(
         (sed_c, sed_nc_kg, sed_qv, sed_T, precip_c,
          _req_c) = mg2_cloud_sedimentation(
             q_c + dq_c_dt * dt, (N_c + dN_c_dt * dt) / rho, cf_eff, T, rho,
-            p_half, dt, _nsub, presence_top=config.mg2_presence_ramp_top)
+            p_half, dt, _nsub, presence_top=config.mg2_presence_ramp_top,
+            # RULE 5: the fall-speed size reset rounded by its width (0 = MG2's
+            # hard clip; KNOWN DIFFERENCE in mg2_droplet_fall_coefficients)
+            number_cap_log_width=config.mg2_drop_sed_reset_log_width,
+            slope_log_width=config.mg2_drop_sed_reset_log_width)
         if config.sed_cfl_substeps:
             sed_substeps_required = jnp.maximum(sed_substeps_required, _req_c)
             if config.sed_cfl_substeps_strict:

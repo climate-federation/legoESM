@@ -2179,6 +2179,10 @@ class ExperimentConfig(NamedTuple):
     # paths: read by the kk2000_cam6 autoconversion and the MG2 snow riming);
     # 0 = MG2's hard clip.  Range [0, 1], checked in validate_strict.
     morrison_mg2_drop_early_reset_log_width: float = 0.01
+    # MorrisonConfig.mg2_drop_sed_reset_log_width: RULE 5 width of MG2's
+    # droplet size reset in the sedimentation fall speeds (prognostic droplet
+    # number only); 0 = MG2's hard clip.  Range [0, 1], checked in validate_strict.
+    morrison_mg2_drop_sed_reset_log_width: float = 0.01
 
     def _liquid_partition_resolved(self) -> bool:
         """Is CLUBB's cloud-liquid exchange selected, by ANY route?
@@ -4496,10 +4500,11 @@ class ExperimentConfig(NamedTuple):
                 "column lane: no other lane carries the snow number N_s; got "
                 f"grid_type={g.grid_type!r}, discretization={d.discretization!r}, "
                 f"column_lane={d.column_lane}")
-        # Where each width is read: the readjust on the prognostic droplet
-        # number only; the early reset by the kk2000_cam6 autoconversion (both
-        # droplet-number paths) and the MG2 snow riming (warm_rain_incloud,
-        # which needs the MPAS / FV3-duo column lane that carries N_s).
+        # Where each width is read: the readjust and the sedimentation reset on
+        # the prognostic droplet number only; the early reset by the
+        # kk2000_cam6 autoconversion (both droplet-number paths) and the MG2
+        # snow riming (warm_rain_incloud, which needs the MPAS / FV3-duo
+        # column lane that carries N_s).
         _morr = self.microphysics == "morrison"
         _reads = {   # (is it read, where), evaluated only for a non-default value
             "morrison_mg2_drop_readjust_log_width": (
@@ -4513,6 +4518,9 @@ class ExperimentConfig(NamedTuple):
                            == "kk2000_cam6"),
                 "microphysics='morrison' and the kk2000_cam6 warm-rain scheme or "
                 "morrison_warm_rain_incloud=True"),
+            "morrison_mg2_drop_sed_reset_log_width": (
+                lambda: _morr and self.morrison_prognostic_droplet_number is True,
+                "microphysics='morrison' and morrison_prognostic_droplet_number=True"),
         }
         for _rn, (_read, _where) in _reads.items():
             _rw = getattr(self, _rn)
