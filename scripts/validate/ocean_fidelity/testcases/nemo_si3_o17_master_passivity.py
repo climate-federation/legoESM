@@ -30,11 +30,15 @@ def _source(unit: str) -> Path:
 
 def _patch(source: Path, unit: str, destination: Path) -> None:
     destination.write_bytes(source.read_bytes())
-    for suffix in ("o17", "o8_o16"):
-        patch = HERE / f"{unit}_{suffix}.patch"
-        if patch.is_file():
-            subprocess.run(["patch", "--batch", "--fuzz=0", str(destination), str(patch)],
-                           check=True, capture_output=True, text=True)
+    o17 = HERE / f"{unit}_o17.patch"
+    if o17.is_file():
+        subprocess.run(["patch", "--batch", "--fuzz=0", str(destination), str(o17)],
+                       check=True, capture_output=True, text=True)
+    combined = HERE / f"{unit}_o8_o16_o17.patch"
+    o8_o16 = combined if combined.is_file() else HERE / f"{unit}_o8_o16.patch"
+    if o8_o16.is_file():
+        subprocess.run(["patch", "--batch", "--fuzz=0", str(destination), str(o8_o16)],
+                       check=True, capture_output=True, text=True)
 
 
 def _preprocess(source: Path, destination: Path, env: dict[str, str]) -> None:

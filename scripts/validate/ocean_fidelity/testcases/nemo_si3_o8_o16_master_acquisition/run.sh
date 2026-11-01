@@ -158,7 +158,9 @@ patch_real_sources() {
     if [[ "$O17_EXTENDED" == 1 && -f "$here/${unit}_o17.patch" ]]; then
       patch --batch --fuzz=0 "$out/$unit.F90" "$here/${unit}_o17.patch" >/dev/null
     fi
-    if [[ -f "$here/${unit}_o8_o16.patch" ]]; then
+    if [[ "$O17_EXTENDED" == 1 && -f "$here/${unit}_o8_o16_o17.patch" ]]; then
+      patch --batch --fuzz=0 "$out/$unit.F90" "$here/${unit}_o8_o16_o17.patch" >/dev/null
+    elif [[ -f "$here/${unit}_o8_o16.patch" ]]; then
       patch --batch --fuzz=0 "$out/$unit.F90" "$here/${unit}_o8_o16.patch" >/dev/null
     fi
   done

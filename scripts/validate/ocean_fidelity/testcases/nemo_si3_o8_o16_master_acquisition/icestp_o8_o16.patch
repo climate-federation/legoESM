@@ -1,23 +1,41 @@
 --- icestp.F90
 +++ icestp.F90
-@@ -78,0 +79,3 @@
+@@ -81,1 +81,4 @@
 +! O8O16_OBSERVER_BEGIN
 +   USE o8_o16_master_writer, ONLY : o8o16_set_context, o8o16_update
 +! O8O16_OBSERVER_END
-@@ -128,0 +132,4 @@
+    IMPLICIT NONE
+@@ -126,6 +129,10 @@
+       IF( MOD( kt-1, nn_fsbc ) == 0 ) THEN   ! Ice time step
+          !
+          kt_ice = kt                                                  ! Ice model time step
 +! O8O16_OBSERVER_BEGIN
 +                                        CALL o8o16_set_context( kt, Kmm, nit000, narea-1, jpni, jpnj, &
 +                                           &                    rDt_ice, r1_Dt_ice )
 +! O8O16_OBSERVER_END
-@@ -206,0 +214,3 @@
+          !
+          DO_2D( nn_hls, nn_hls, nn_hls, nn_hls )                      ! mean surface ocean current
+             u_oce(ji,jj) = ssu_m(ji,jj)
+@@ -204,13 +211,22 @@
+          ! --- ice thermodynamics --- !
+          !----------------------------!
+          IF( ln_icethd )                CALL ice_thd( kt )            ! -- Ice thermodynamics
 +! O8O16_OBSERVER_BEGIN
 +                                        CALL o8o16_update(18)
 +! O8O16_OBSERVER_END
-@@ -211,0 +222,3 @@
+          ! ==> clem: here, all the global variables are correctly defined in the halos
+          !
+                                         CALL diag_trends(2)           ! record thermo trends
+                                         CALL ice_var_glo2eqv(2)
+                                         CALL ice_var_agg(2)
 +! O8O16_OBSERVER_BEGIN
 +                                        CALL o8o16_update(15)
 +! O8O16_OBSERVER_END
-@@ -213,0 +227,3 @@
+          !
+                                         CALL ice_update_flx( kt )     ! -- Update ocean surface mass, heat and salt fluxes
 +! O8O16_OBSERVER_BEGIN
 +                                        CALL o8o16_update(16)
 +! O8O16_OBSERVER_END
+          !
+          !------------------------!
+          ! --- Diag and write --- !
