@@ -42,9 +42,15 @@ def test_incloud_known_answer():
     cf = np.array([[0.5], [0.5], [0.0]])
     qc = np.array([[1e-5], [1e-5], [0.0]])
     ic = nb.incloud(n, cf, qc, np.ones((3, 1)), np.ones((3, 1), bool))
-    assert ic["n_cells"] == 2
+    assert ic["n_cells"] == 2 and ic["n_cf_zero"] == 0
     assert ic["grid_mean"] == pytest.approx(100.0) and ic["in_cloud"] == pytest.approx(200.0)
     assert ic["median_in_cloud"] == pytest.approx(200.0) and ic["cloud_fraction"] == pytest.approx(0.5)
+
+
+def test_incloud_median_skips_zero_cloud_fraction():
+    ic = nb.incloud(np.full((2, 1), 1e8), np.array([[0.5], [0.0]]), np.full((2, 1), 1e-5),
+                    np.ones((2, 1)), np.ones((2, 1), bool))
+    assert ic["n_cf_zero"] == 1 and ic["median_in_cloud"] == pytest.approx(200.0)
 
 
 def test_masks_regions_and_layers():

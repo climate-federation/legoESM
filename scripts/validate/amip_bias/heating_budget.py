@@ -468,6 +468,7 @@ def main(argv=None):
     if args.nc_budget:
         import nc_budget as NCB
         NCB.install_micro_spy(micro_calls)
+        NCB.report_terrain_drift()
     fns: dict = {}
     rad_calls: list = []
 

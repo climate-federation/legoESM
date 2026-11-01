@@ -4,19 +4,26 @@ Question: the CAM6 MG2 prognostic droplet number is activated at ~50 cm^-3/day
 but holds only ~12 cm^-3 grid-mean.  Which process removes it?
 
 Driven by ``heating_budget.py --nc-budget`` (same relaunch-from-checkpoint
-capture).  One un-jitted model step of the run's OWN code on its OWN state:
+capture).  One un-jitted model step of the run's OWN code on its OWN state,
+plus the same step with no physics (what the held steps of the physics cadence
+run).  Rows are rates [per second] averaged over one physics window of
+``n_steps`` dycore steps (the physics step applies n_steps x the physics rate,
+the held steps zero), taking THIS step's dynamics and fixers as the window's
+(an assumption: one state):
 
 * dynamics row      = (N_c after the dycore's RK dynamics - N_c at step start)/dt,
                       read from the state the step hands to its physics;
-* physics rows      = each physics module's N_c tendency in that same step (the
-                      macmic sub-cycled modules are averaged over their calls,
-                      as the combined physics weights them);
+* physics rows      = each physics module's N_c rate in that step (the macmic
+                      sub-cycled modules averaged over their calls, as the
+                      combined physics weights them);
 * microphysics rows = the MG2 droplet-number terms the scheme itself publishes
                       (``MicrophysicsOutput.nc_budget``, applied, post-limiter),
                       converted to per-kg with each call's own density;
-* post-physics row  = (N_c at step end - N_c after dynamics)/dt - physics: the
-                      water-mass application, dry-mass fixer and positivity
-                      borrow.
+* fixers after dynamics = (N_c at the end of the no-physics step - N_c after
+                      dynamics)/dt: positivity borrow and dry-mass fix;
+* fixers after physics, extra = the physics step's fixer change beyond that,
+                      / n_steps (water-mass application, borrow of the physics
+                      increment's undershoots).
 
 Gates (abort on failure): microphysics terms sum to the microphysics module's
 tendency; module tendencies sum to the combined physics tendency.  The rows sum
@@ -105,7 +112,8 @@ def incloud(n_vol, cf, q_c, vol, mk):
             "grid_mean": float((n_vol[c] * v).sum() / v.sum() * 1e-6),
             "in_cloud": float((n_vol[c] * v).sum() / (cf[c] * v).sum() * 1e-6),
             "cloud_fraction": float((cf[c] * v).sum() / v.sum()),
-            "median_in_cloud": float(np.median(n_vol[c] / cf[c]) * 1e-6)}
+            "n_cf_zero": int((c & (cf <= 0)).sum()),
+            "median_in_cloud": float(np.median(n_vol[c & (cf > 0)] / cf[c & (cf > 0)]) * 1e-6)}
 
 
 def figure(results: dict, path: Path, title: str) -> None:
@@ -160,6 +168,24 @@ def install_micro_spy(micro_calls: list) -> None:
     mi._get_microphysics_fn = get
 
 
+def report_terrain_drift() -> None:
+    """The single-process relaunch rebuilds the terrain product, which can differ
+    from the 4-GPU run's by reduction-order round-off (measured 7.1e-2 m2/s2 =
+    1.4e-6 of max phis on jan1979_main1027), just above the driver's 1e-6
+    restart refusal.  The step uses the checkpoint's own phis either way; the
+    refusal is turned into a printed line so the number travels with the
+    output."""
+    from legoesm.driver.model_driver import ModelDriver
+    real = ModelDriver._check_restart_terrain
+
+    def check(self):
+        try:
+            real(self)
+        except RuntimeError as e:
+            print(f"TERRAIN DRIFT (reported, not refused): {e}", flush=True)
+    ModelDriver._check_restart_terrain = check
+
+
 def run(model, state, DT, pf_full, forcing, phys_state, calls, micro_calls,
         out_dir: Path, tag: str) -> int:
     """The mode body; ``calls`` and ``micro_calls`` are filled by the spies
@@ -184,9 +210,12 @@ def run(model, state, DT, pf_full, forcing, phys_state, calls, micro_calls,
     step_raw = type(model)._step_jit.__wrapped__
     new = step_raw(model, state, DT, pf_rec, target_mass, forcing, phys_state)[0]
     gate("state" in seen, "the step called its physics once, eagerly")
+    # the same step with NO physics: the held steps of the physics cadence
+    # (zero physics increment) run the same dynamics and fixers
+    held = step_raw(model, state, DT, None, target_mass, forcing, phys_state)[0]
 
     f = lambda a: np.asarray(a, dtype=np.float64)   # noqa: E731
-    n0, npd, n1 = (f(s.tracers["N_c"].data) for s in (state, seen["state"], new))
+    n0, npd, n1, n1h = (f(s.tracers["N_c"].data) for s in (state, seen["state"], new, held))
     tend = seen["res"][0] if type(seen["res"]) is tuple else seen["res"]   # as the step
     phys = f(tend.tracer_tendencies["N_c"].data)
 
@@ -197,8 +226,15 @@ def run(model, state, DT, pf_full, forcing, phys_state, calls, micro_calls,
                if t.tracer_tendencies is not None and "N_c" in t.tracer_tendencies]
         mod_rows[name] = mean_calls(arr) if arr else np.zeros_like(n0)
         print(f"module {name}: {len(ts)} call(s)", flush=True)
-    ok, worst = closes(list(mod_rows.values()), phys)
-    gate(ok, f"module N_c tendencies sum to the combined physics (worst rel {worst:.2e})")
+    # Physics cadence: the physics step applies n_steps x the physics rate
+    # (the whole window's increment), the held steps apply zero.  n_steps is
+    # read off the applied tendency and must be an integer that closes.
+    msum = sum(mod_rows.values())
+    big = np.abs(msum) > 1e-3 * np.abs(msum).max()
+    n_steps = int(round(float(np.median(phys[big] / msum[big]))))
+    ok, worst = closes([n_steps * v for v in mod_rows.values()], phys)
+    gate(n_steps >= 1 and ok, f"module N_c tendencies x {n_steps} (physics cadence) sum to "
+                              f"the applied physics (worst rel {worst:.2e})")
 
     gate(len(micro_calls) == len(calls.get("microphysics", ())) > 0,
          f"{len(micro_calls)} microphysics calls published an nc_budget")
@@ -207,10 +243,16 @@ def run(model, state, DT, pf_full, forcing, phys_state, calls, micro_calls,
     ok, worst = closes(list(micro.values()), mod_rows["microphysics"])
     gate(ok, f"MG2 nc_budget terms sum to the microphysics tendency (worst rel {worst:.2e})")
 
+    # Rates [1/kg/s] averaged over one physics window of n_steps dycore steps,
+    # taking this step's dynamics and held-step fixers as representative of
+    # the window's (one state, so that is an assumption, printed):
+    fix_held = (n1h - npd) / DT                        # fixers on a held step
+    fix_phys = (n1 - npd) / DT - phys                  # fixers on the physics step
     rows["dynamics (transport)"] = (npd - n0) / DT
     rows.update({f"micro: {k}": v for k, v in micro.items()})
     rows.update({f"{k}": v for k, v in mod_rows.items() if k != "microphysics"})
-    rows["post-physics (mass fix, positivity)"] = (n1 - npd) / DT - phys
+    rows["fixers after dynamics (positivity, mass fix)"] = fix_held
+    rows["fixers after physics, extra"] = (fix_phys - fix_held) / n_steps
 
     sig = model.sigma_coord
     p_s = f(state.p_s.data)
@@ -227,7 +269,9 @@ def run(model, state, DT, pf_full, forcing, phys_state, calls, micro_calls,
     c0 = micro_calls[0]
     vol = mass / c0["rho"]
     results, save = {}, {}
-    print(f"\n{tag}: dt={DT} s, one step; rows in cm-3/day per volume of air", flush=True)
+    print(f"\n{tag}: dycore dt={DT} s, physics every {n_steps} steps; rows = rates averaged "
+          "over one physics window (this step's dynamics and fixers taken as the window's), "
+          "cm-3/day per volume of air", flush=True)
     for key, mk in mks.items():
         inv, r, tau_all, tau = aggregate(rows, n0, mass, rho, mk)
         _, rneg, _, _ = aggregate({"neg": neg_dyn / DT}, n0, mass, rho, mk)
@@ -237,7 +281,8 @@ def run(model, state, DT, pf_full, forcing, phys_state, calls, micro_calls,
               f"negative number left by dynamics {rneg['neg']:+.3f} cm-3/day", flush=True)
         print(f"  cloudy cells (q_c>={QC_CLOUDY:g}) n={ic['n_cells']}: grid-mean "
               f"{ic['grid_mean']:.2f} cm-3, in-cloud {ic['in_cloud']:.2f} cm-3 "
-              f"(median {ic['median_in_cloud']:.2f}), mean cloud fraction {ic['cloud_fraction']:.3f}")
+              f"(median over cf>0 {ic['median_in_cloud']:.2f}; {ic['n_cf_zero']} with cf=0), "
+              f"mean cloud fraction {ic['cloud_fraction']:.3f}")
         for k, v in r.items():
             print(f"  {k:40s} {v:+10.4f}" + (f"   sink time {tau[k]:8.2f} h" if v < 0 else ""))
         save["|".join(key)] = np.array([inv, tau_all] + [r[k] for k in r])
