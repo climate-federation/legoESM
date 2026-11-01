@@ -6873,14 +6873,12 @@ def clubb_step(
     du_dt = (u_new - u) / dt
     dv_dt = (v_new - v) / dt
     if liquid_partition:
-        # CAM's outbound split (clubb_intr.F90:2159,2160): the post-advance PDF
-        # closure's rcm IS the new cloud liquid, so vapour is the remainder of
-        # total water and the temperature carries that liquid's latent heat.
-        # That rcm is the IN-LAYER value (l_use_cloud_cover = .true. overwrites
-        # rcm with rcm_in_layer, pdf_closure_module.F90:4340-4348); it is not
-        # clipped against rtm (only the grid mean is), so q_v >= 0 is NOT
-        # guaranteed here -- the same as CAM.
-        rcm_new = flip_vertical(diags["rcm"])
+        # CAM's outbound split (clubb_intr.F90:2159,2160): the new cloud liquid
+        # is the core's rcm_out (copied into rcm at :1991, the same array the
+        # clubbtop search :2043 and relvar :2424 read), so vapour is the
+        # remainder of total water and the temperature carries that liquid's
+        # latent heat.
+        rcm_new = flip_vertical(diags["rcm_out"])
         q_new = flip_vertical(new_state.rtm) - rcm_new
         # Inverse of the inbound host map (clubb_intr.F90:2048-2051:
         # clubb_s = cpair*((thlm + (latvap/cpair)*rcm)/exner_clubb)).
@@ -6929,7 +6927,7 @@ def clubb_step(
         dv_dt = w * dv_dt + _removed(dv_dt) * spread
         dT_dt = w * dT_dt
         clubbtop = clubb_top_level(troplev, flip_vertical(new_state.rtp2),
-                                   flip_vertical(diags["rcm"]))
+                                   flip_vertical(diags["rcm_out"]))
         below = jnp.arange(nlev)[None, :] > clubbtop[:, None]
         keep = w * below
         removed_water = jnp.sum(dp_g * (1.0 - keep) * (dq_v_dt + dq_c_dt),
