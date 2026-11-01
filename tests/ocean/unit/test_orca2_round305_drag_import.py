@@ -1,4 +1,3 @@
-Error while loading conda entry point: conda-anaconda-tos (cannot import name 'validate_prefix_exists' from 'conda.cli.install' (/home/dbalwada/miniconda3/lib/python3.13/site-packages/conda/cli/install.py))
 """ORCA2 round 305: G5 top drag + G7 bottom drag imported from the grid ladder.
 
 The VORTEX-based statement tests are gridladder's (tests/ocean/fidelity/
@@ -294,4 +293,3 @@ def test_bottom_only_selector_runs_both_g7_statements_without_ice(
     np.testing.assert_array_equal(by_shape[vb.shape], np.asarray(vb))
     pair = 2 * -(recipe._SMT2_RN_CD0 * recipe._SMT2_RN_UC0)
     assert sum(np.any(p == pair) for p in zdf) >= 2
-
