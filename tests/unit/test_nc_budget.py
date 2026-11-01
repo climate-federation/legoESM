@@ -281,3 +281,11 @@ def test_spy_reset_width_ab_sedimentation_field(monkeypatch):
     nb.install_micro_spy([], reset_width_ab=True, reset_field="mg2_drop_readjust_log_width")
     with pytest.raises(SystemExit, match="unknown reset field"):
         mi._get_microphysics_fn(None)
+
+
+def test_reset_ab_path_keeps_the_two_fields_apart(tmp_path):
+    early = nb.reset_ab_path(tmp_path, "mg2_drop_early_reset_log_width", "r_d0010")
+    sed = nb.reset_ab_path(tmp_path, "mg2_drop_sed_reset_log_width", "r_d0010")
+    assert early.name == "reset_ab_r_d0010.npz" and sed.name == "reset_ab_sed_r_d0010.npz"
+    with pytest.raises(SystemExit, match="unknown reset field"):
+        nb.reset_ab_path(tmp_path, "mg2_drop_readjust_log_width", "r_d0010")

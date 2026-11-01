@@ -4501,9 +4501,10 @@ class ExperimentConfig(NamedTuple):
                 f"grid_type={g.grid_type!r}, discretization={d.discretization!r}, "
                 f"column_lane={d.column_lane}")
         # Where each width is read: the readjust and the sedimentation reset on
-        # the prognostic droplet number only; the early reset by the kk2000_cam6 autoconversion (both
-        # droplet-number paths) and the MG2 snow riming (warm_rain_incloud,
-        # which needs the MPAS / FV3-duo column lane that carries N_s).
+        # the prognostic droplet number only; the early reset by the
+        # kk2000_cam6 autoconversion (both droplet-number paths) and the MG2
+        # snow riming (warm_rain_incloud, which needs the MPAS / FV3-duo
+        # column lane that carries N_s).
         _morr = self.microphysics == "morrison"
         _reads = {   # (is it read, where), evaluated only for a non-default value
             "morrison_mg2_drop_readjust_log_width": (

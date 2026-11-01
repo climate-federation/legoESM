@@ -406,6 +406,13 @@ def reset_ab_rows(micro_calls: list) -> dict:
     return out
 
 
+def reset_ab_path(out_dir: Path, field: str, tag: str) -> Path:
+    """The early reset keeps its file name; the sedimentation reset gets its own."""
+    if field not in RESET_FIELDS:
+        raise SystemExit(f"unknown reset field {field!r}; one of {RESET_FIELDS}")
+    return out_dir / (f"reset_ab_{tag}.npz" if field == RESET_FIELD else f"reset_ab_sed_{tag}.npz")
+
+
 def reset_ab_table(rows: dict, mass, mk) -> dict:
     """Mass-weighted region means [per day] of both arms and their difference."""
     m = mass[mk].sum()
@@ -451,10 +458,11 @@ def run_reset_ab(model, state, DT, pf_full, forcing, phys_state, micro_calls,
             print(f"  {k:28s} {h:+14.6e} {d:+14.6e} {dd:+14.6e} {rel:+10.2e}")
         save["|".join(key)] = np.array([t[k] for k in t])
     out_dir.mkdir(parents=True, exist_ok=True)
-    np.savez(out_dir / f"reset_ab_{tag}.npz", row_names=np.array(list(rows["hard"])),
-             width=micro_calls[0]["width"], field=micro_calls[0].get("field", RESET_FIELD),
-             **save)
-    print(f"\nwrote {out_dir / f'reset_ab_{tag}.npz'}", flush=True)
+    field = micro_calls[0].get("field", RESET_FIELD)
+    path = reset_ab_path(out_dir, field, tag)
+    np.savez(path, row_names=np.array(list(rows["hard"])), width=micro_calls[0]["width"],
+             field=field, **save)
+    print(f"\nwrote {path}", flush=True)
     return 0
 
 
