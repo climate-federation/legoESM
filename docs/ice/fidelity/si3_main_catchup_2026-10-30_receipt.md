@@ -445,15 +445,20 @@ Every observed stable failure is classified here.
 DECISION 190 applied: default True; every affected certified NEMO-comparison
 configuration is explicitly False, while default-behavior tests retain True.
 
-DECISION_NEEDED:
+DECISION 193 applied (user, 2026-10-31): near-empty columns (concentration
+<= epsi10) keep the lane's certified degenerate forward for now.  The complete
+NEMO inactive gather/scatter plus `ice_cor`/`ice_var_zapsmall` is a separate
+later round, and the production forward switches only after that round is
+certified.  Main's pre-merge degenerate forward is not restored.
+
+The options as registered by resume 5 were:
 
 1. Keep the certified lane degenerate forward indefinitely.
 2. Replace it with main's pre-merge degenerate forward.
 3. Transcribe the complete NEMO inactive gather/scatter plus
    `ice_cor`/`ice_var_zapsmall`, certify near-empty records, and switch only
-   with a new explicit decision. **Pick: 3.** Neither existing version is the
-   complete NEMO statement sequence; option 3 resolves the discrepancy from
-   source instead of choosing whichever partial behavior happens to be closer.
+   with a new explicit decision.
 
-No option is implemented in this round.  The certified lane forward remains
-bit-identical while the production-reachable semantic conflict is explicit.
+Neither existing version is the complete NEMO statement sequence.  This round
+implements no option: the certified lane forward remains bit-identical, and
+the NEMO transcription is queued.
