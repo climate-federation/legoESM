@@ -133,30 +133,40 @@ def _relu(x, width_k):
     return width_k * jax.nn.softplus(x / width_k)
 
 
+def _step(x, width_k):
+    """Heaviside(x); smooth logistic of width ``width_k`` [K] when width_k > 0."""
+    if width_k <= 0.0:
+        return (x > 0.0).astype(jnp.result_type(x, float))
+    return jax.nn.sigmoid(x / width_k)
+
+
 def mean_sea_level_pressure_ecmwf(p_s, T_surface, phis, *, limit_width_k,
                                   lapse_rate_k_per_m=_STD_LAPSE_RATE_K_PER_M):
     """Mean sea-level pressure [Pa], ECMWF/Trenberth reduction.
 
         ln(p_msl/p_s) = Φ_s/(R_d T*) · (1 - y/2 + y²/3),   y = (T0 - T*)/T*
 
-    T* = surface temperature, relaxed half-way to 255 K when colder; T0 =
-    T* + Γ z_s capped at 290.5 K (when T* itself exceeds 290.5 K, T* is relaxed
-    half-way to 290.5 K and Γ = 0). The series is the exact constant-lapse-rate
-    hypsometric reduction expanded in y, with SURFACE T* in the denominator.
-    On ERA5's own surface fields (2020, 1.5 deg, T* = 2 m T) it reproduces ERA5
-    MSLP to 203 Pa RMSE over land, 4 Pa over ocean
-    (scripts/validate/wb_mslp_reduction_probe.py).
+    T* = surface temperature, relaxed half-way to 255 K when colder. T0 =
+    T* + Γ z_s. If T0 > 290.5 K: when T* <= 290.5 K, T0 is capped at 290.5 K;
+    when T* > 290.5 K too, T* is relaxed half-way to 290.5 K and Γ = 0 (T0 = T*).
+    The series is the exact constant-lapse-rate hypsometric reduction expanded
+    in y, with SURFACE T* in the denominator. On ERA5's own surface fields
+    (2020, 1.5 deg, T* = 2 m T) it reproduces ERA5 MSLP to 203 Pa RMSE over
+    land, 4 Pa over ocean (scripts/validate/wb_mslp_reduction_probe.py).
 
     ``limit_width_k`` [K]: 0 = the reference's hard limits; > 0 smooths each
-    limit with a softplus of that width (differentiable). Static Python float.
+    limit (softplus caps, logistic gate on the hot branch), differentiable.
+    The hot gate tests min(T*, T0) > 290.5 K, which equals the reference's
+    "T0 > 290.5 and T* > 290.5". Static Python float.
     """
     gamma = float(lapse_rate_k_per_m)
     w = float(limit_width_k)
     z_s = phis / constants.g
     t_cold = T_surface + 0.5 * _relu(_MSLP_T_COLD_K - T_surface, w)
-    excess = _relu(t_cold - _MSLP_T_WARM_K, w)
-    t_star = t_cold - 0.5 * excess
-    t_sea = _MSLP_T_WARM_K - _relu(_MSLP_T_WARM_K - (t_star + gamma * z_s), w) + 0.5 * excess
+    t0 = t_cold + gamma * z_s
+    hot = _step(jnp.minimum(t_cold, t0) - _MSLP_T_WARM_K, w)
+    t_star = t_cold - 0.5 * hot * (t_cold - _MSLP_T_WARM_K)
+    t_sea = hot * t_star + (1.0 - hot) * (_MSLP_T_WARM_K - _relu(_MSLP_T_WARM_K - t0, w))
     y = (t_sea - t_star) / t_star
     return p_s * jnp.exp(phis / (constants.R_d * t_star) * (1.0 - 0.5 * y + y * y / 3.0))
 

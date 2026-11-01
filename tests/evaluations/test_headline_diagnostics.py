@@ -202,10 +202,15 @@ def test_z500_gradient_wrt_temperature_finite():
 # hot T* > 290.5 K, below sea level near the warm cap
 _MSLP_CASES = [(101000.0, 288.0, 0.0), (90000.0, 280.0, 1000.0),
                (70000.0, 240.0, 3000.0), (80000.0, 285.0, 2000.0),
-               (95000.0, 300.0, 500.0), (101500.0, 290.0, -400.0)]
-# measured smooth(1 K) - hard [Pa] per case (commit d858bc8d3a)
-_MSLP_GAP_W1K = [0.0, 0.3893932426581159, -2.4744338588789105e-05,
-                 0.024214830904384144, 0.0033077911066357046, -2.1548123696265975]
+               (95000.0, 300.0, 500.0), (101500.0, 290.0, -400.0),
+               (100000.0, 298.0, -300.0), (101500.0, 292.0, -400.0),
+               (101500.0, 293.1, -400.0)]
+# hot T* below sea level: T0 above the cap (relaxed) and inside the band
+# 290.5 < T* < 290.5 - Γz where the reference does NOT relax
+# measured smooth(1 K) - hard [Pa] per case (hot-gate form, after review round 1)
+_MSLP_GAP_W1K = [0.0, 0.38977269385941327, -2.4744338588789105e-05,
+                 0.4797891518974211, -0.0035057472996413708, 0.6453032290592091,
+                 0.08259141918097157, 1.5742682517739013, -0.14610893171629868]
 
 
 def _ecmwf_mslp_reference(p_s, t_s, z_s):
