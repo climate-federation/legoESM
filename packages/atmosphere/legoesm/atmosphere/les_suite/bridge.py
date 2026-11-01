@@ -135,6 +135,12 @@ class LESReferenceArtifact:
         qr : horizontal-mean rain water [kg/kg].
         cloud_frac : fraction of cells with ``q_c`` above the cloudy-cell threshold.
 
+    Realised forcing series (optional, ``(nt, nz)``) — see
+    :data:`FORCING_SERIES_FIELDS`:
+        rad_T_tendency : horizontal-mean radiative TEMPERATURE tendency [K/s] the
+            LES applied at each output time (CloudBench's ``rad_heat_src``); NaN
+            where the LES has no output (CloudBench's t=0 frame).
+
     Provenance:
         case_name : the :class:`LESCase` this run realizes.
         sgs : SGS closure used (one of the case's ``sgs_variants``).
@@ -203,6 +209,7 @@ class LESReferenceArtifact:
     precip_s_cum: Array | None = None
     qr: Array | None = None
     cloud_frac: Array | None = None
+    rad_T_tendency: Array | None = None
     #: JSON-serialisable record of how the reference was produced (surface BC,
     #: viscosity floor, refinement, dt, grid) so references made under different
     #: setups of the same case are distinguishable after the fact.
@@ -251,7 +258,8 @@ class LESReferenceArtifact:
         for name in (("theta", "u", "v", "wtheta_resolved", "wtheta_sgs",
                       "qt", "wqt_resolved", "wqt_sgs", "qc")
                      + tuple(f"{c}_cum" for c in CUM_CHANNELS)
-                     + TURBULENCE_STAT_FIELDS + MOIST_STAT_FIELDS):
+                     + TURBULENCE_STAT_FIELDS + MOIST_STAT_FIELDS
+                     + FORCING_SERIES_FIELDS):
             arr = getattr(self, name)
             if arr is None:
                 continue
@@ -385,6 +393,7 @@ SURFACE_SERIES_FIELDS = (
 # ((nt,)), and rain / cloud-fraction profiles ((nt, nz)).
 MOIST_SURFACE_SERIES_FIELDS = ("w_qv_s_cum", "precip_s", "precip_s_cum")
 MOIST_STAT_FIELDS = ("qr", "cloud_frac")
+FORCING_SERIES_FIELDS = ("rad_T_tendency",)
 
 # Array-valued fields serialized to/from npz (order-independent; a missing key on
 # load ⇒ that optional channel was None). Scalar/string fields ride in a metadata
@@ -396,7 +405,7 @@ _ARTIFACT_ARRAY_FIELDS = (
     "qv_adv_cum", "u_geo_cum", "v_geo_cum",
     "T_s", "w_theta_s", "w_qv_s",
 ) + (TURBULENCE_STAT_FIELDS + SURFACE_SERIES_FIELDS + MOIST_SURFACE_SERIES_FIELDS
-     + MOIST_STAT_FIELDS)
+     + MOIST_STAT_FIELDS + FORCING_SERIES_FIELDS)
 
 
 def save_artifact(artifact: LESReferenceArtifact, path) -> None:
