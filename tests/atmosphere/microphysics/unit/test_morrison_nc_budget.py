@@ -3,7 +3,7 @@ budget by process, published under ``MorrisonConfig.publish_qc_budget``.
 
 Closure: the published terms sum to ``dN_c_dt`` cell by cell, on a warm case
 (activation, warm rain, sedimentation, ice melt, orphan number cleared) and a
-cold case (snow riming, homogeneous freezing).  Every term is non-zero somewhere, so a term booked as
+cold case (snow and graupel riming, homogeneous freezing).  Every term is non-zero somewhere, so a term booked as
 zero fails coverage and a term left out fails closure.  Publishing must not
 change any output.  x64.
 """
@@ -31,12 +31,12 @@ def _call(cold: bool, publish: bool = True):
     g, dz = _inputs(fx)
     z = jnp.zeros_like(g["T"])
     one = jnp.ones_like(g["T"])
-    # cold: 40 K colder (homogeneous freezing below 233 K) with snow to rime
+    # cold: 40 K colder (homogeneous freezing below 233 K) with snow and graupel to rime
     T = g["T"] - (40.0 if cold else 0.0)
     hyd = HydrometeorState(
         q_c=g["q_c"], q_r=g["q_r"], q_i=1e-6 * one, q_s=(1e-4 if cold else 0.0) * one,
         # cloud-free cells carry an orphan number (as transport leaves) to clear
-        q_g=z, N_c=jnp.where(g["q_c"] > 0, g["nc_kg"], 1e6) * g["rho"], N_r=g["N_r"],
+        q_g=(1e-4 if cold else 0.0) * one, N_c=jnp.where(g["q_c"] > 0, g["nc_kg"], 1e6) * g["rho"], N_r=g["N_r"],
         N_i=1e4 * one,
         N_s=(1e4 if cold else 0.0) * one)
     npccn = jnp.where(g["q_c"] > 0, 1e3, 0.0) * g["rho"]       # 1e3 /kg/s, per volume
@@ -58,8 +58,7 @@ def test_nc_budget_closes_and_covers_every_term():
         assert (resid <= 1e-12 * gross + 1e-300).all(), float((resid / (gross + 1e-300)).max())
         for k, v in nb.items():
             seen[k] += int(np.count_nonzero(v))
-    # riming_graupel stays zero: the cases carry no graupel
-    missing = [k for k, n in seen.items() if n == 0 and k != "riming_graupel"]
+    missing = [k for k, n in seen.items() if n == 0]
     assert not missing, (missing, seen)
 
 

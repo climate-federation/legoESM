@@ -53,6 +53,12 @@ def test_incloud_median_skips_zero_cloud_fraction():
     assert ic["n_cf_zero"] == 1 and ic["median_in_cloud"] == pytest.approx(200.0)
 
 
+def test_incloud_refuses_nonfinite():
+    with pytest.raises(SystemExit, match="non-finite N_c"):
+        nb.incloud(np.array([[np.nan]]), np.ones((1, 1)), np.ones((1, 1)), np.ones((1, 1)),
+                   np.ones((1, 1), bool))
+
+
 def test_masks_regions_and_layers():
     m = nb.masks(np.array([-50.0, 0.0]), np.array([[800.0, 500.0], [800.0, 500.0]]))
     np.testing.assert_array_equal(m[("SO 40-65S", "column")], [[True, True], [False, False]])
@@ -64,6 +70,9 @@ def test_closes_catches_a_missing_term_and_mean_calls_weights():
     a, b = np.array([1.0, -2.0]), np.array([0.5, 0.25])
     assert nb.closes([a, b], a + b)[0]
     assert not nb.closes([a], a + b)[0]
+    # a complete miss in a tiny cell next to a large one is still caught
+    big, tiny = np.array([1e6, 1e-9]), np.array([0.0, 1e-9])
+    assert not nb.closes([big - tiny], big)[0]
     np.testing.assert_allclose(nb.mean_calls([a, b, b]), (a + 2 * b) / 3)
     with pytest.raises(SystemExit, match="GATE FAILED"):
         nb.gate(False, "x")

@@ -50,6 +50,7 @@ import numpy as np
 REGIONS = {"global": (-90.0, 90.0), "SO 40-65S": (-65.0, -40.0)}
 LAYERS = {"column": None, "950-700 hPa": (700.0, 950.0)}
 QC_CLOUDY = 1.0e-6          # kg/kg, cloudy-cell threshold of the in-cloud row
+TERRAIN_DRIFT_MAX = 1.0e-5  # relative; reduction-order drift accepted on relaunch
 MICRO_TERMS = ("activation", "autoconversion", "accretion", "riming_snow",
                "riming_graupel", "sedimentation", "ice_melt_homog_freeze",
                "size_readjust", "no_cloud_clear")
@@ -69,8 +70,7 @@ def closes(parts, total, rtol=1e-9) -> tuple[bool, float]:
     parts = [np.asarray(p, dtype=np.float64) for p in parts]
     gross = sum(np.abs(p) for p in parts) + np.abs(total)
     resid = np.abs(sum(parts) - total)
-    scale = max(float(gross.max()), 1e-300)
-    worst = float((resid / np.maximum(gross, 1e-12 * scale)).max())
+    worst = float((resid / np.maximum(gross, 1e-300)).max())   # per cell, no global floor
     return worst <= rtol, worst
 
 
@@ -107,6 +107,9 @@ def aggregate(rows: dict, n0, mass, rho, mk):
 def incloud(n_vol, cf, q_c, vol, mk):
     """Grid-mean and in-cloud droplet number [cm^-3] over cloudy cells."""
     c = mk & (q_c >= QC_CLOUDY)
+    for name, a in (("N_c", n_vol), ("cloud fraction", cf), ("q_c", q_c)):
+        if not np.isfinite(a[mk]).all():
+            raise SystemExit(f"FATAL: {np.count_nonzero(~np.isfinite(a[mk]))} non-finite {name}")
     v = vol[c]
     return {"n_cells": int(c.sum()),
             "grid_mean": float((n_vol[c] * v).sum() / v.sum() * 1e-6),
@@ -182,7 +185,12 @@ def report_terrain_drift() -> None:
         try:
             real(self)
         except RuntimeError as e:
-            print(f"TERRAIN DRIFT (reported, not refused): {e}", flush=True)
+            a = np.asarray(self.state.phis.data, dtype=np.float64)
+            b = np.asarray(self._phis_data, dtype=np.float64)
+            rel = float(np.abs(a - b).max() / max(1.0, np.abs(b).max()))
+            if "terrain product (max |d|" not in str(e) or rel > TERRAIN_DRIFT_MAX:
+                raise
+            print(f"TERRAIN DRIFT {rel:.2e} of max phis (reported, not refused): {e}", flush=True)
     ModelDriver._check_restart_terrain = check
 
 
@@ -263,11 +271,12 @@ def run(model, state, DT, pf_full, forcing, phys_state, calls, micro_calls,
     rho = f(compute_rho(jnp.asarray(f(state.T.data)), jnp.asarray(pm),
                         jnp.asarray(f(state.tracers["q_v"].data))))
     lat = np.rad2deg(f(model.mesh.latCell))
+    qg0 = f(state.tracers["q_g"].data) if "q_g" in state.tracers else np.zeros_like(n0)
     mks = masks(lat, pm / 100.0)
     neg_dyn = np.minimum(npd, 0.0) - np.minimum(n0, 0.0)
 
     c0 = micro_calls[0]
-    vol = mass / c0["rho"]
+    vol = mass / rho
     results, save = {}, {}
     print(f"\n{tag}: dycore dt={DT} s, physics every {n_steps} steps; rows = rates averaged "
           "over one physics window (this step's dynamics and fixers taken as the window's), "
@@ -276,13 +285,14 @@ def run(model, state, DT, pf_full, forcing, phys_state, calls, micro_calls,
         inv, r, tau_all, tau = aggregate(rows, n0, mass, rho, mk)
         _, rneg, _, _ = aggregate({"neg": neg_dyn / DT}, n0, mass, rho, mk)
         ic = incloud(c0["N_c"], c0["cf"], c0["q_c"], vol, mk)
+        qg = (qg0 * mass)[mk].sum() / mass[mk].sum()
         results[key] = (inv, r, tau_all, tau)
         print(f"\n[{key[0]} | {key[1]}] inventory {inv:.3f} cm-3; all-sink time {tau_all:.2f} h; "
               f"negative number left by dynamics {rneg['neg']:+.3f} cm-3/day", flush=True)
         print(f"  cloudy cells (q_c>={QC_CLOUDY:g}) n={ic['n_cells']}: grid-mean "
               f"{ic['grid_mean']:.2f} cm-3, in-cloud {ic['in_cloud']:.2f} cm-3 "
               f"(median over cf>0 {ic['median_in_cloud']:.2f}; {ic['n_cf_zero']} with cf=0), "
-              f"mean cloud fraction {ic['cloud_fraction']:.3f}")
+              f"mean cloud fraction {ic['cloud_fraction']:.3f}; mean graupel q_g {qg:.3e} kg/kg")
         for k, v in r.items():
             print(f"  {k:40s} {v:+10.4f}" + (f"   sink time {tau[k]:8.2f} h" if v < 0 else ""))
         save["|".join(key)] = np.array([inv, tau_all] + [r[k] for k in r])
