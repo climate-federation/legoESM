@@ -110,9 +110,26 @@ def _training_sample_indices(cfg, yml, times, snaps_per_day, stride):
     ONE place. Scattered mode (``_resolve_windows`` -> a list) walks each
     ``(year, day_offset, n_days)`` window; consecutive mode (default) walks the
     first ``n_days`` days of each ``train_years`` entry. A pair whose target
-    index runs past the ERA5 record is skipped; ``cfg.smoke`` stops after the
-    first window (single-window wiring check, matching the prior behaviour).
+    index runs past the ERA5 record, or falls in a held-out ``eval_years``
+    year, is skipped; ``cfg.smoke`` stops after the first window (single-window
+    wiring check, matching the prior behaviour).
     """
+    held_out = {int(y) for y in (yml.get("eval_years") or [])}
+
+    def _keep(i_tg):
+        # A target in a held-out test year would train on the test data.
+        return int(str(np.datetime64(times[i_tg], "Y"))) not in held_out
+
+    inits = yml.get(_VAL_INITS_KEY)
+    if inits is not None:
+        # Validation protocol: explicit single-time inits [year, hour offset].
+        for year, hour in inits:
+            i_ic = int(np.searchsorted(times, np.datetime64(f"{int(year)}-01-01")
+                                       + np.timedelta64(int(hour), "h")))
+            i_tg = i_ic + stride
+            if i_tg < len(times) and _keep(i_tg):
+                yield int(year), i_ic, i_tg
+        return
     windows = _resolve_windows(cfg, yml)
     if windows is None:
         n_days = _resolve_n_days(cfg, yml)
@@ -124,9 +141,63 @@ def _training_sample_indices(cfg, yml, times, snaps_per_day, stride):
             i_ic, i_tg = start + d, start + d + stride
             if i_tg >= len(times):
                 break
-            yield year, i_ic, i_tg
+            if _keep(i_tg):
+                yield year, i_ic, i_tg
         if getattr(cfg, "smoke", False):
             break
+
+
+# Internal (never a deck key): the validation deck's explicit init list.
+_VAL_INITS_KEY = "_val_inits"
+
+
+def wb_validation_yaml(yml: dict, n_windows: int) -> dict:
+    """The deck, with its training windows replaced by HELD-OUT ones.
+
+    With a ``validation`` block: its single held-out year, scored with the test
+    protocol (``n_inits`` single-time inits, ``init_stride_hours`` apart from
+    1 January 00 UTC).  Without one (older decks): windows from ``eval_years``
+    -- the same years the scorecard
+    scores -- spread evenly over the calendar so the validation number is not
+    one season's weather. Everything else (grid, cadence, lead time, loss) is
+    the deck's own, because a validation loss computed under a different
+    protocol than the training loss is not comparable to it.
+    """
+    val = yml.get("validation")
+    if val is not None:
+        # Held-out VALIDATION year(s), scored with the test protocol: n_inits
+        # single-time inits, init_stride_hours apart from 1 January 00 UTC.
+        years = [int(y) for y in val["years"]]
+        n, stride = int(val["n_inits"]), int(val["init_stride_hours"])
+        if set(years) & {int(y) for y in (yml.get("eval_years") or [])}:
+            raise ValueError("validation.years must not overlap eval_years.")
+        if set(years) & {int(y) for y in (yml.get("train_years") or [])}:
+            raise ValueError("validation.years must not overlap train_years.")
+        if int(n_windows) != n:
+            raise ValueError(f"--val-windows {n_windows} != validation.n_inits {n}.")
+        out = dict(yml)
+        out.pop("train_windows", None)
+        out["train_years"] = years
+        if len(years) != 1:
+            raise ValueError("validation.years must name exactly one year "
+                             "(the test protocol scores one year).")
+        out[_VAL_INITS_KEY] = [[years[0], k * stride] for k in range(n)]
+        return out
+    years = list(yml.get("eval_years") or [])
+    if not years:
+        raise ValueError(
+            "--val-windows needs `eval_years` in the campaign YAML: there is "
+            "no held-out year to validate on.")
+    # Month starts, evenly spread, cycling the eval years.
+    starts = [0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334]
+    windows = []
+    for i in range(int(n_windows)):
+        year = int(years[i % len(years)])
+        windows.append([year, starts[(i * 5) % len(starts)], 1])
+    out = dict(yml)
+    out["train_windows"] = windows
+    out["train_years"] = years
+    return out
 
 
 def _sharded_indices(cfg, yml, times, snaps_per_day, stride, rank, nproc):
@@ -507,8 +578,8 @@ _WB_CONSUMED_TOP_KEYS = frozenset({
     "grad_accum", "grad_clip_norm", "gravity_wave_drag", "loss", "lr",
     "microphysics", "n_epochs", "n_lat", "n_lon", "n_training_days",
     "neural_gcm", "nlev", "optimizer", "rad_update_steps", "radiation",
-    "sfno", "smoke_radiation", "spectral", "train_windows", "train_years",
-    "turbulence", "warmup_steps", "weight_decay",
+    "sfno", "smoke_radiation", "spectral", "state_cache_dir", "train_windows",
+    "train_years", "turbulence", "validation", "warmup_steps", "weight_decay",
 })
 # Deck metadata this trainer never reads but the decks legitimately carry
 # (documentation / other tooling).  Kept OUT of the consumed set so the
@@ -1775,6 +1846,82 @@ def _lead_target(sl, carry, grid):
                                 ("v10", sl.v10), ("mslp", sl.msl))}
 
 
+def wb_state_cache_root(yml):
+    """The deck's ``state_cache_dir`` (model-grid states), resolved like
+    ``cache_dir``, or None."""
+    root = yml.get("state_cache_dir")
+    if not root:
+        return None
+    p = Path(root)
+    return p if p.is_absolute() else _REPO / p
+
+
+def wb_state_cache_configs(cfg, yml):
+    """``(state slice config, forcing slice config, microphysics)`` a state
+    record is built with -- the same split as the sample loader."""
+    sst_cfg = wb_era5_config(cfg, yml)._replace(load_cloud_condensate=False)
+    era5_cfg = wb_era5_config(cfg, yml)._replace(
+        load_surface_fluxes=False, load_land_frac=False)
+    return era5_cfg, sst_cfg, wb_ic_microphysics(cfg.mode, yml)
+
+
+def wb_state_cache_path(cfg, yml, grid, sigma):
+    """The state-cache store this configuration reads and writes."""
+    from legoesm.training import wb_state_cache as wsc
+
+    era5_cfg, sst_cfg, micro = wb_state_cache_configs(cfg, yml)
+    tag = wsc.cache_tag([wsc.STORE_FORMAT, era5_cfg._asdict(), sst_cfg._asdict(),
+                         micro, int(grid.n_max), int(grid.n_lat), int(grid.n_lon),
+                         np.asarray(sigma.sigma_full).tolist(),
+                         np.asarray(sigma.sigma_half).tolist()])
+    return wsc.store_path(wb_state_cache_root(yml), tag)
+
+
+def wb_state_record(i, era5_cfg, sst_cfg, ds, cloud_ds, flux_ds, grid, sigma,
+                    micro, times):
+    """``(carry, near-surface fields, forcing)`` of ONE ERA5 analysis on the
+    model grid, host numpy leaves: what the sample builder makes of index ``i``
+    as an initial condition or as a target (the terrain is the store's static
+    surface geopotential, so it is the same either way).  The forcing omits
+    the aerosol, which is computed from the sample's initial carry."""
+    import jax
+
+    from legoesm.training.era5_to_state import (
+        era5_terrain_product,
+        era5_to_spectral_carry,
+        load_era5_slice,
+    )
+
+    s = load_era5_slice(era5_cfg, i, ds=ds, cloud_ds=cloud_ds)
+    f = load_era5_slice(sst_cfg, i, ds=ds, flux_ds=flux_ds)
+    tp = era5_terrain_product(s, grid)
+    carry = era5_to_spectral_carry(s, grid, sigma, target_phis=tp,
+                                   microphysics=micro)
+    sfc = _lead_target(s, carry, grid)[1]
+    year = int(str(np.datetime64(times[i], "Y")))
+    forcing = build_spectral_forcing(f, grid, times[i], year)
+    return jax.device_get((carry, sfc, forcing))
+
+
+class _CachedSamples:
+    """Lazy sample list: each ``(ic, target, forcing)`` is assembled from the
+    state cache when indexed, so the full record never sits in host memory."""
+
+    def __init__(self, idx, make):
+        self._idx, self._make = list(idx), make
+
+    def __len__(self):
+        return len(self._idx)
+
+    def __getitem__(self, k):
+        if isinstance(k, slice):
+            return [self[j] for j in range(*k.indices(len(self)))]
+        return self._make(*self._idx[k])
+
+    def __iter__(self):
+        return (self[k] for k in range(len(self)))
+
+
 def _load_era5_samples_spectral(cfg, yml, grid, sigma, *,
                                 rank=0, nproc=1, host_resident=False):
     """(ic, target, forcing) samples on the Gaussian grid for the spectral core.
@@ -1876,6 +2023,10 @@ def _load_era5_samples_spectral(cfg, yml, grid, sigma, *,
 
     mine = list(_sharded_indices(
         cfg, yml, times, snaps_per_day, stride, rank, nproc))
+    if wb_state_cache_root(yml) is not None:
+        return _state_cached_samples(
+            cfg, yml, grid, sigma, mine, leads, lead_stride, times, ds,
+            cloud_ds, flux_ds, _micro, _aerosol)
     src = (ds, cloud_ds, flux_ds, int)
     local = _wb_local_stores(cfg, yml, era5_cfg, sst_cfg, times,
                              snaps_per_day, stride, rank, nproc,
@@ -1894,6 +2045,58 @@ def _load_era5_samples_spectral(cfg, yml, grid, sigma, *,
             validate_carry_holds_scheme(
                 sample[0], _micro, context=f"WB {cfg.mode} arm initial condition")
         samples.append(_sample_to_host(sample) if host_resident else sample)
+    return samples
+
+
+def _state_cached_samples(cfg, yml, grid, sigma, mine, leads, lead_stride,
+                          times, ds, cloud_ds, flux_ds, micro, aerosol):
+    """The spectral samples, read lazily from the model-grid state cache.
+
+    Gate: every ERA5 time of the FIRST sample is rebuilt from the raw store
+    and must equal its cached record exactly (float32), and the cache must
+    hold every time this shard needs, before any training happens."""
+    from legoesm.training import wb_state_cache as wsc
+
+    era5_cfg, sst_cfg, _ = wb_state_cache_configs(cfg, yml)
+    if not mine:
+        return _CachedSamples([], None)
+
+    def times_of(i_ic, i_tg):
+        step = lead_stride if leads else (i_tg - i_ic)
+        return [i_ic, *range(i_ic + step, i_tg + 1, step)]
+
+    _, i0, t0 = mine[0]
+    fresh = {i: wb_state_record(i, era5_cfg, sst_cfg, ds, cloud_ds, flux_ds,
+                                grid, sigma, micro, times)
+             for i in times_of(i0, t0)}
+    cache = wsc.StateCache(wb_state_cache_path(cfg, yml, grid, sigma),
+                           fresh[i0])
+    need = sorted({i for _, a, b in mine for i in times_of(a, b)})
+    missing = cache.missing(need)
+    if missing:
+        raise RuntimeError(
+            f"state cache {cache.path} lacks {len(missing)} of the {len(need)} "
+            f"ERA5 times this run needs (first {missing[:3]}); build it with "
+            "scripts/data/build_wb_state_cache.py.")
+    for i, rec in fresh.items():
+        wsc.assert_cache_matches(rec, cache.read(i))
+    logger.info("state cache gate passed: %d times of the first sample equal "
+                "a fresh ERA5 build (float32).", len(fresh))
+
+    def make(year, i_ic, i_tg):
+        ic, _, forcing = cache.read(i_ic)
+        if aerosol is not None:
+            forcing = {**forcing, **wb_aerosol_forcing(aerosol, grid, sigma, ic,
+                                                       times[i_ic])}
+        if leads:
+            target = tuple(cache.read(i)[:2] for i in times_of(i_ic, i_tg)[1:])
+        else:
+            target = cache.read(i_tg)[0]
+        return (ic, target, forcing)
+
+    samples = _CachedSamples(mine, make)
+    validate_carry_holds_scheme(samples[0][0], micro,
+                                context=f"WB {cfg.mode} arm initial condition")
     return samples
 
 

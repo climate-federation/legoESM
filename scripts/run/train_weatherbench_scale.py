@@ -394,29 +394,8 @@ def _run_fingerprint(cfg, yml, warmup, roll_steps, n_global_samples, nproc):
 
 
 def _val_yaml(yml: dict, n_windows: int) -> dict:
-    """The deck, with its training windows replaced by HELD-OUT ones.
-
-    The windows are taken from ``eval_years`` -- the same years the scorecard
-    scores -- spread evenly over the calendar so the validation number is not
-    one season's weather. Everything else (grid, cadence, lead time, loss) is
-    the deck's own, because a validation loss computed under a different
-    protocol than the training loss is not comparable to it.
-    """
-    years = list(yml.get("eval_years") or [])
-    if not years:
-        raise SystemExit(
-            "--val-windows needs `eval_years` in the campaign YAML: there is "
-            "no held-out year to validate on.")
-    # Month starts, evenly spread, cycling the eval years.
-    starts = [0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334]
-    windows = []
-    for i in range(int(n_windows)):
-        year = int(years[i % len(years)])
-        windows.append([year, starts[(i * 5) % len(starts)], 1])
-    out = dict(yml)
-    out["train_windows"] = windows
-    out["train_years"] = years
-    return out
+    from legoesm.training.scale_build import wb_validation_yaml
+    return wb_validation_yaml(yml, n_windows)
 
 
 def _device_sample(sample):
@@ -1676,8 +1655,9 @@ def _main(argv=None):
         val_samples = load_era5_samples(
             cfg, _val_yaml(yml, int(cfg.n_val_windows)), grid, sigma,
             rank=rank, nproc=nproc, host_resident=True)
-        log.info("validation samples: %d local/rank from eval years %s",
-                 len(val_samples), yml.get("eval_years"))
+        log.info("validation samples: %d local/rank from years %s",
+                 len(val_samples), (yml.get("validation") or {}).get(
+                     "years", yml.get("eval_years")))
         if column_mesh is not None:
             # Validation runs collective forwards: the lists must match too.
             _rel = _assert_samples_agree(val_samples, "validation samples",
