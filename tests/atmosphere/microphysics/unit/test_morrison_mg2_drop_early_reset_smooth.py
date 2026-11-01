@@ -197,7 +197,8 @@ def test_flat_field_validation_cli_and_deck():
         with pytest.raises(ValueError, match=f"{f} must be a finite float in"):
             ExperimentConfig(**kw, **{f: bad}).validate_strict()
     with pytest.raises(ValueError, match=f"{f}=0.0 is read only .* silently inert"):
-        ExperimentConfig(microphysics="morrison", **{f: 0.0}).validate_strict()
+        ExperimentConfig(microphysics="morrison", morrison_flavor="sam",
+                         **{f: 0.0}).validate_strict()
     base = MorrisonConfig()
     assert thread_morrison_scalars(ExperimentConfig(**{f: 0.0}), "morrison", base) == \
         base._replace(mg2_drop_early_reset_log_width=0.0)
@@ -212,5 +213,5 @@ def test_flat_field_validation_cli_and_deck():
     assert arm[f] == WIDTH        # named explicitly
     assert arm["morrison_prognostic_droplet_number"] is True
     prod = load_yaml_config(amip / "amip_production.yaml", build_arg_parser())
-    assert f not in prod
+    assert prod[f] == WIDTH       # the specified-number path reads it too (#2216)
     assert prod["morrison_prognostic_droplet_number"] is False

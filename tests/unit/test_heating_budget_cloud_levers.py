@@ -138,3 +138,11 @@ def test_window_budget_refuses_unexplained_call_counts(tmp_path, monkeypatch):
     args, win, acc, ncall, builds = _window_case(tmp_path, monkeypatch, turb_calls=5)
     with pytest.raises(SystemExit, match="GATE FAILED"):
         hb.window_budget(args, win, acc, ncall, builds, tmp_path, 0.0)
+def test_replace_deck_swaps_the_one_config_value():
+    argv = ["--config", "config/amip/amip_production.yaml", "--days", "1"]
+    out = hb.replace_deck(argv, "config/amip/amip_production_prognostic_nc.yaml")
+    assert out == ["--config", "config/amip/amip_production_prognostic_nc.yaml", "--days", "1"]
+    assert argv[1] == "config/amip/amip_production.yaml"          # input untouched
+    for bad in (["--days", "1"], ["--config", "a", "--config", "b"], ["--config"]):
+        with pytest.raises(SystemExit, match="exactly one --config"):
+            hb.replace_deck(bad, "x.yaml")

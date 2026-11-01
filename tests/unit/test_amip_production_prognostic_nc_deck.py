@@ -59,11 +59,10 @@ def test_resolved_configs_differ_only_in_the_droplet_rows():
 def test_arm_deck_flips_only_the_two_yaml_rows():
     prod, arm = read_yaml_with_includes(_PROD), read_yaml_with_includes(_ARM)
     diff = {k for k in prod.keys() | arm.keys() if prod.get(k) != arm.get(k)}
-    # plus the two droplet size-reset widths the arm names at their code
-    # defaults (#2216): read only on the prognostic path, so not further
-    # physics changes
-    widths = {"morrison_mg2_drop_readjust_log_width",
-              "morrison_mg2_drop_early_reset_log_width"}
+    # plus the droplet readjust width the arm names at its code default
+    # (#2216): read only on the prognostic path, so not a further physics
+    # change (the early-reset width is named in production too)
+    widths = {"morrison_mg2_drop_readjust_log_width"}
     assert diff == {"aerosol_ccn", "morrison_prognostic_droplet_number"} | widths
     from legoesm.driver.config import ExperimentConfig
     for k in widths:
