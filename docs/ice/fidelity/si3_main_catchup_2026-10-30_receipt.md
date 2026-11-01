@@ -479,7 +479,7 @@ accordingly, and its full non-vacuity audit remains green.
 |---|---|
 | Every requested `test_si3_o*.py` / `test_nemo_si3_*.py` file | each file started in a fresh serial process: 38 files completed green, the scalar-math file emitted its unchanged `1 failed, 4 passed`, and the O4 Prather file emitted eight passing dots before its ninth node reached the two-hour command timeout; totals from completed nodes are `1 failed, 623 passed, 2 deselected`, with no O4 failure output |
 | `test_bitz_lipscomb.py` | `15 passed in 244.33s` |
-| Operator forward probe | byte-identical (`cmp_status=0`); reference SHA-256 `e641b73bea4a2ab52ed50d0928ec489bcd7c1b562ea25896af871492214c044c` |
+| Operator forward probe | byte-identical to `fwd_old.txt` (`cmp_status=0`) |
 | `test_sea_ice_precip_routing.py` | `7 passed in 2.80s` |
 | `test_si3_surface.py` | `1 failed, 22 passed, 1 skipped, 1 xfailed in 45.51s`; only the reproduced lane-parent `sum_first_category` plant |
 | Certified O8–O16 exactness scorer | `30 passed in 688.29s` |
