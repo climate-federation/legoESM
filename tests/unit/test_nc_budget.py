@@ -122,3 +122,59 @@ def test_terrain_override_reports_only_small_magnitude_drift(monkeypatch, capsys
     msg["text"] = "restart: the checkpoint's terrain has shape (3,), this run's terrain product (4,)"
     with pytest.raises(RuntimeError, match="has shape"):   # any other refusal: refused
         check(fake(0.0, n_state=3))
+
+
+def test_spy_switches_off_graupel_riming_only(monkeypatch):
+    from typing import NamedTuple
+    import legoesm.atmosphere.physics.microphysics.integration as mi
+
+    class Cfg(NamedTuple):
+        publish_qc_budget: bool = False
+        do_graupel_riming: bool = True
+        do_snow_riming: bool = True
+
+    class Out(NamedTuple):
+        dN_c_dt: object = None
+        nc_budget: object = None
+        qc_budget: object = None
+    seen = []
+
+    def fn(*a, **kw):
+        seen.append(a[8])
+        return Out()
+    for flag, want in ((True, True), (False, False)):
+        monkeypatch.setattr(mi, "_get_microphysics_fn", lambda c: ("morrison", fn, Cfg()))
+        nb.install_micro_spy([], graupel_riming=flag)
+        _, spy, cfg = mi._get_microphysics_fn(None)
+        spy(*range(8), cfg)
+        assert seen[-1] == Cfg(publish_qc_budget=True, do_graupel_riming=want)
+    # a scheme without the switch is refused, not silently run with riming on
+    class NoSwitch(NamedTuple):
+        publish_qc_budget: bool = False
+    monkeypatch.setattr(mi, "_get_microphysics_fn", lambda c: ("x", fn, NoSwitch()))
+    nb.install_micro_spy([], graupel_riming=False)
+    with pytest.raises(SystemExit, match="no do_graupel_riming"):
+        mi._get_microphysics_fn(None)
+
+
+def test_compare_known_answer(tmp_path):
+    # inventory 6 cm-3, sink time 3 h, activation +48 /day -> N* = 48 * 3 / 24 = 6
+    names = np.array(["micro: activation", "micro: riming_graupel"])
+
+    def save(path, rim):
+        d = {}
+        for rn in nb.REGIONS:
+            for ln in nb.LAYERS:
+                k = f"{rn}|{ln}"
+                d[k] = np.array([6.0, 3.0, 48.0, rim])
+                d[k + "|incloud"] = np.array([1, 10.0, 20.0, 20.0, 0.5])
+                d[k + "|incloud_last"] = np.array([1, 11.0, 22.0, 22.0, 0.5])
+        np.savez(path, row_names=names, dt=112.5, **d)
+    save(tmp_path / "on.npz", -12.0)
+    save(tmp_path / "off.npz", 0.0)
+    out = nb.compare(tmp_path / "on.npz", tmp_path / "off.npz", tmp_path / "c.png")
+    a = out["SO 40-65S|950-700 hPa"]
+    assert a["on"]["n_star"] == pytest.approx(6.0) and a["on"]["net"] == pytest.approx(36.0)
+    assert a["off"]["rows"]["micro: riming_graupel"] == 0.0
+    assert a["on"]["incloud_first"] == 20.0 and a["on"]["incloud_last"] == 22.0
+    assert (tmp_path / "c.png").stat().st_size > 0

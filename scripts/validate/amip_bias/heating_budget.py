@@ -448,7 +448,12 @@ def main(argv=None):
     ap.add_argument("--nc-budget", action="store_true",
                     help="#2216: cloud-droplet number budget by process over one step "
                          "(nc_budget.py); writes npz + png into --out")
+    ap.add_argument("--no-graupel-riming", action="store_true",
+                    help="#2216 option 2, with --nc-budget only: the same step with the "
+                         "scheme's do_graupel_riming=False (graupel collecting cloud water off)")
     args = ap.parse_args(argv)
+    if args.no_graupel_riming and not args.nc_budget:
+        ap.error("--no-graupel-riming needs --nc-budget")
     t0 = time.time()
     out_dir = Path(args.out or (H.ROOT / "_tools" / "heating_budget"))
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -467,7 +472,7 @@ def main(argv=None):
     micro_calls: list = []
     if args.nc_budget:
         import nc_budget as NCB
-        NCB.install_micro_spy(micro_calls)
+        NCB.install_micro_spy(micro_calls, graupel_riming=not args.no_graupel_riming)
         NCB.report_terrain_drift()
     fns: dict = {}
     rad_calls: list = []
@@ -542,7 +547,8 @@ def main(argv=None):
                              args.ref_run or args.run, args.profile_era5, args.target)
     if args.nc_budget:
         return NCB.run(model, state, DT, pf_full, forcing, phys_state, calls, micro_calls,
-                       out_dir, f"{args.run}_d{args.day:04d}")
+                       out_dir, f"{args.run}_d{args.day:04d}"
+                       + ("_nograupelrime" if args.no_graupel_riming else ""))
     if args.cloud_levers:
         return cloud_levers(fns, state, mesh, sig, forcing, phys_state, rad_int,
                             real_backend, n_times=args.n_times)
