@@ -628,11 +628,9 @@ def _si3_zdf_bl99_core(
             k_s_bulk = jnp.broadcast_to(
                 sr(k_snow * z1_h_s)[..., None], Ti.shape[:-1] + (nlay_s + 1,)
             )
-            k_si_denominator = sr(
-                0.5 * (sr(k0 * zh_s) + sr(k_snow * zh_i))
-            )
-            k_si = sr(sr(isnow * k_snow) * k0) / jnp.where(
-                snow_present, k_si_denominator, 1.0,
+            k_si = (
+                sr(sr(isnow * k_snow) * k0)
+                / sr(0.5 * (sr(k0 * zh_s) + sr(k_snow * zh_i)))
             )
         else:
             k_i = tcond_i / dz_i[..., None]
@@ -730,18 +728,6 @@ def _si3_zdf_bl99_core(
             + sr(eta_i[..., 0] * (ab_i[..., 0] + sr(2.0 * k_i[..., 0] * Tsu))),
             d[..., s + 1],
         ))  # :509-512
-
-        # NEMO omits zero-thickness columns from this solve.  The array path
-        # evaluates them before discarding them, so make that solve an identity
-        # to keep its singular surface row out of reverse mode.
-        no_ice = (~ice_present)[..., None]
-        no_ice_d = jnp.concatenate(
-            (jnp.zeros_like(t_s_old), Tsu[..., None], t_i_old), axis=-1,
-        )
-        a = jnp.where(no_ice, 0.0, a)
-        b = jnp.where(no_ice, 1.0, b)
-        c = jnp.where(no_ice, 0.0, c)
-        d = jnp.where(no_ice, no_ice_d, d)
 
         thomas_order = (
             "nemo_unnormalised" if _nemo_source_round else "nemo_unnormalised_unrounded"
@@ -923,11 +909,9 @@ def si3_ice_thd_zdf_bl99(
     t1_ice = sr(isnow * core.t_s[..., 0]) + sr((1.0 - isnow) * ti_new[..., 0])  # :859
     lhs = sr(sr(cst.k_snow * h_i) * r1_nlay_i)
     rhs = sr(sr(core.tcond_i[..., 1] * h_s) * r1_nlay_s)
-    thick_snow = h_s >= _SNOW_SSL_DEPTH
     t_si = jnp.where(
-        thick_snow,
-        (sr(lhs * core.t_s[..., -1]) + sr(rhs * ti_new[..., 0]))
-        / jnp.where(thick_snow, lhs + rhs, 1.0),
+        h_s >= _SNOW_SSL_DEPTH,
+        (sr(lhs * core.t_s[..., -1]) + sr(rhs * ti_new[..., 0])) / (lhs + rhs),
         core.t_su,
     )  # :871-878
     return SI3ZDFOutputs(core.t_su, ti_new, core.t_s, e_i_new, e_s_new,
@@ -1104,12 +1088,7 @@ def _si3_ice_thd_dh_core(
 
     # Snow precipitation (:178-187).
     falling = sprecip > 0.0
-    zh_s[0] = jnp.where(
-        falling,
-        sr(sr(sr(zsnw * sprecip) * dt) * r1_rhos)
-        / jnp.where(falling, at_i, 1.0),
-        0.0,
-    )
+    zh_s[0] = jnp.where(falling, sr(sr(sr(zsnw * sprecip) * dt) * r1_rhos) / at_i, 0.0)
     ze_s[0] = jnp.where(falling, _maxsd(-qprec_ice, 0.0), 0.0)
     acc("hfx_spr", falling, rate(ze_s[0], zh_s[0]))
     acc("wfx_spr", falling, -rate(rhos, zh_s[0]))
@@ -2098,17 +2077,20 @@ def si3_column_step_arrays(state: SI3ColumnArrays,
 
     dtype = jnp.asarray(state.e_ice).dtype
     gathered_at_entry = jnp.asarray(state.concentration, dtype=dtype) > _EPS10
-    # Broadcast scalar forcing leaves before the category kernels.  Unsafe
-    # discarded quotients are guarded at their local denominators so genuine
-    # inactive-column derivatives remain available.
-    def column_leaf(value):
-        array = jnp.asarray(value, dtype=dtype)
-        if array.ndim < gathered_at_entry.ndim:
-            array = jnp.broadcast_to(array, gathered_at_entry.shape)
-        return array
+    # NEMO gathers only columns with material before these thermodynamic
+    # kernels.  Stop discarded operands at entry so singular quotients cannot
+    # poison reverse mode, while leaving every primal value unchanged.
+    has_thickness = jnp.asarray(state.h_ice, dtype=dtype) != 0.0
+    thermo_active = gathered_at_entry & has_thickness
 
-    thermo_state = jax.tree.map(column_leaf, state)
-    thermo_forcing = jax.tree.map(column_leaf, forcing)
+    def guard_inactive_leaf(value):
+        return _guard_inactive_columns(value, thermo_active, dtype)
+
+    thermo_state = jax.tree.map(guard_inactive_leaf, state)
+    thermo_state = thermo_state._replace(
+        h_ice=_guard_inactive_columns(state.h_ice, has_thickness, dtype),
+    )
+    thermo_forcing = jax.tree.map(guard_inactive_leaf, forcing)
     e_ice = jnp.asarray(thermo_state.e_ice)
     h_ice = jnp.asarray(thermo_state.h_ice, dtype=dtype)
     h_snow = jnp.asarray(thermo_state.h_snow, dtype=dtype)
@@ -2236,6 +2218,15 @@ def si3_column_step_arrays(state: SI3ColumnArrays,
             thermo_state, post_temp2, thermo_forcing, si3, dt, constants
         )
         da_out = None
+    # The dh stage clears concentration at zero thickness.  Route an entry
+    # cotangent only when the lane structurally carried that entry value.
+    post_da = post_da._replace(
+        concentration=_inactive_reverse_from_entry(
+            post_da.concentration,
+            state.concentration,
+            (~gathered_at_entry) & (post_dh.h_ice != 0.0),
+        ),
+    )
     do_qlead = jnp.asarray(forcing.qlead, dtype=dtype)
     do_t_bottom = jnp.asarray(forcing.t_bottom, dtype=dtype)
     do_sss = jnp.asarray(forcing.sss, dtype=dtype)
@@ -2413,3 +2404,43 @@ def _si3_column_thd_da(entry, post_temp2, forcing, si3, dt, constants, *,
     if _return_da_outputs:
         return post_da, da
     return post_da
+
+
+def _guard_inactive_columns(value, active_columns, dtype):
+    """Stop inactive-column cotangents without changing forward values."""
+    array = jnp.asarray(value, dtype=dtype)
+    if array.ndim < active_columns.ndim:
+        array = jnp.broadcast_to(array, active_columns.shape)
+    active = jnp.reshape(
+        active_columns,
+        active_columns.shape + (1,) * (array.ndim - active_columns.ndim),
+    )
+    return jnp.where(active, array, jax.lax.stop_gradient(array))
+
+
+@jax.custom_vjp
+def _inactive_reverse_from_entry(updated, entry, entry_columns):
+    """Return ``updated`` exactly; route selected cotangents to ``entry``."""
+    del entry, entry_columns
+    return updated
+
+
+def _inactive_reverse_from_entry_fwd(updated, entry, entry_columns):
+    return updated, (entry, entry_columns)
+
+
+def _inactive_reverse_from_entry_bwd(residual, cotangent):
+    entry, entry_columns = residual
+    return (
+        cotangent,
+        jnp.asarray(
+            jnp.where(entry_columns, cotangent, 0.0), dtype=entry.dtype,
+        ),
+        None,
+    )
+
+
+_inactive_reverse_from_entry.defvjp(
+    _inactive_reverse_from_entry_fwd,
+    _inactive_reverse_from_entry_bwd,
+)
