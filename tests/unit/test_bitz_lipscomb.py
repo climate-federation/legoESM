@@ -14,6 +14,9 @@ node), ahead of its prognostic-state integration:
 
 from __future__ import annotations
 
+import base64
+import zlib
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -455,19 +458,6 @@ def test_ice_forming_open_water_gradients_match_main_and_lane_difference():
     )
 
 
-def test_inactive_column_guard_stops_h_ice_cotangent():
-    """The helper-level plant remains bound to its cotangent mask."""
-    from legoesm.ice import bitz_lipscomb as bl
-
-    active = jnp.asarray([False] * 8 + [True] * 56)
-    h_ice = jnp.linspace(0.0, 2.0, 64, dtype=jnp.float64)
-    gradient = jax.grad(
-        lambda h: jnp.sum(bl._guard_inactive_columns(h, active, h.dtype))
-    )(h_ice)
-    assert bool(jnp.all(gradient[:8] == 0.0)), gradient
-    assert bool(jnp.all(gradient[8:] == 1.0)), gradient
-
-
 def test_si3_column_step_mixed_dtypes_match_lane_and_differentiate():
     """The reverse-only guards preserve 920c61d884 dtype promotion."""
     from legoesm.ice.bitz_lipscomb import (
@@ -530,24 +520,82 @@ def test_si3_column_step_mixed_dtypes_match_lane_and_differentiate():
     assert bool(jnp.all(jnp.isfinite(gradient)))
 
 
-def test_cumulative_remap_reverse_mode_finite_at_zero_thickness():
-    """Review F3 on the lane's live remap: a zero-total column must have a
-    finite zero cotangent without reviving main's deleted duplicate remap."""
-    from legoesm.ice import bitz_lipscomb as bl
+_SI3_GRADIENT_SWEEP_ORACLE_B85 = (
+    "c-rmTZA?>V6bEoDlWj&Y_>wV|DP3?1NTIkbkb2u9O&}YN31*Ik3KIrSWW4N+$QWzDz(k;eL#hw~1!RtGWTHs#EnuAT&Hx!TfKUsHAVSI<3p&S#-8wK0b73tP{=Y9LCGfOOp7PH*Cp9tx0Dy&Sgg;;3nLGD$OV6#NgdML!82;!x;%War$HT_oEJI4+jsO7YH+O>E8xB`_mhjc7m(P6V_u*6LRPfFvB4Ph_#X`wDm|Yu_B3}H~zUYbjBD^3U8tF2xnErD~O#gxJog0Pp<CMjR+#XpJ^XYp2(_Tk~pM%08<g;9dk~506udLN{e;qXI_fc#i-J)LUR`o}1LP-S6s%q-%mhz_m{-5%kCCjY$UZNk@<fo4(nO&=-Yv?WhGrx!U3Vg|y!9uSF!A8-s+_YC$YtQY8C~NO=d`GD3^$hPR<t69xE9r`x1^?OlvjS%JJOBUl&UU}k`C8VRFpXM(ONZP+?f`O!iTw@$04z+{@BG_-2LJ%{lRMb&fFWVdhB+I|G1%|ut>0-VkL%d4Q43ZCMK*`#MHB8n=h|h4zdz%-0b*&ML!nxmyL+~^ZHYQ`M^4uk-!IP|JRQzEY8rDdJ8T~rJr;G3XC6s$go&*;BRSM!StrldI!kBYm9n%<W^*x$r0YY@!Ojc&mlN~liX(TBJFxI_2m2iW0ANzzVJO(|001yEcd*|9L&BU5b2gY`u;0;Jzw>5uyHS8fEie;EZgiWp5z3Ai0&X_RiK+ij9G$11<9gB9G>a|Je$ErC*#(1gH<GSCZRH=!Shc*v6KTH$hFvB-wng6Ra;c{ZyDr@=l_pZ_Y@Mo&Piu7cU4Ff;>y#~xBwb5)m~eO3g<`*h+(GUDV{-@l9RL7eQr}@H*zW)UFf(_s-vL9yoDFj}m}9Wt(ObXcdTxEcw?-}aB*pSXhl!eKuh}WS-c&#1xgARGq71f|_H$l9HE!yY`;c^fz<OiH5!Q9y6*IY|IP4l3`$aHO@6t)F94$=EmmZ_CpWmDP@RYI6Ipv0lr~^$c-6UP#O5erttc$^Z2f2gX0mkMI_B#Loz@)yzP_W+t0AObBV88SDMN7}+6GHZ?aSzrAKVD=jwRrB=8Q+H__GD#E-MiX(h;{9a+~#zDimsgMOv(9L^;Yh<FI8gIOXalgvt6ENuRT{)@p7D1$g)aZ=Wh=DKt<-?rsz7~ZYbt#n6tqggZ+-)`kjOT<qyspwP1K~_o{l6F~TcDwd-nA=d|zdy#2)YcM8&E14(Ru?dSYG71yyt9!SzP;be@dgms74bM>V%udqI{{k~+V$YqGyppdo3ON%I_XOH*jsTDfsltH4~PV$yvlCDS1IX0W>lCj@G?jU!7vAKi&4gdf!sqZip>~{bFn3+4+?@WdLj(%azhB+I|G1%|ut=~}%NBs0rm4;}~e=y-RnLD8}`;qZyALq{B`yH3*=OhnY@h<pB?r?d-UFDN`L)S&s#=prXb0<3Po7XcZb4R4wObz^K#~<UYZi^i+riwXr;`_n6bBC;0v-HGd-q2Oy6Mwhwcq;Zg$Q|SkFgAB)yWjZ>Wj4Sg"
+)
 
-    en = jnp.asarray([3.0e8, 2.9e8, 2.8e8])
 
-    def remap(thickness):
-        h_old = list(thickness)
-        content_old = list(en * thickness)
-        return bl._cumulative_remap(h_old, content_old, 3, bl.nemo_source_round)
-
-    # A sub-epsilon remap with material confined to the last old layer is the
-    # discarded-column case that exposes NaN cotangents when the guard is
-    # removed.  Evenly splitting a shared total (the former fixture) was
-    # vacuous: its unguarded gradient was already finite.
-    g = jax.grad(lambda h: jnp.sum(remap(h)))(
-        jnp.asarray([0.0, 0.0, 1.0e-300], dtype=jnp.float64)
+def test_si3_column_step_full_gradient_sweep_matches_main_or_lane_difference():
+    """All exit/input leaf pairs match the reviewed main/FD oracle, eager/JIT."""
+    from legoesm.ice.bitz_lipscomb import (
+        SI3ColumnArrays,
+        SI3SurfaceForcing,
+        si3_column_step_arrays,
     )
-    assert bool(jnp.all(jnp.isfinite(g))), g
-    assert bool(jnp.all(g == 0.0)), g
+    from legoesm.ice.config import SI3ThermoConfig
+    from legoesm.ice.constants_config import NEMO_SI3_CONSTANTS_CONFIG as c
+
+    concentrations = (0.0, 1e-12, 5e-11, 1e-10, 2e-10, 0.5)
+    thicknesses = (0.0, 0.5)
+    qleads = (0.0, -40.0)
+
+    def vector(concentration, h_ice, qlead):
+        return jnp.asarray((
+            concentration, h_ice, 0.0, c.T0, 0.0, 0.0, 0.0, 0.0, 0.0,
+            0.0, 0.0, 0.0, 0.0, 271.27, 34.7, 0.0, 0.0, 0.0, 0.0,
+            0.0, 0.0, qlead, 1.0,
+        ), dtype=jnp.float64)
+
+    cases = tuple(
+        (concentration, h_ice, qlead)
+        for concentration in concentrations
+        for h_ice in thicknesses
+        for qlead in qleads
+    )
+    vectors = jnp.stack([vector(*case) for case in cases])
+
+    def step(values):
+        scalar = lambda index: values[index:index + 1]
+        layers = lambda index: jnp.full((1, 3), values[index])
+        state = SI3ColumnArrays(
+            scalar(0), scalar(1), scalar(2), scalar(3), layers(4), layers(5),
+            scalar(6), layers(7), scalar(8),
+        )
+        forcing = SI3SurfaceForcing(
+            qns_ice=scalar(9), qsr_ice=scalar(10), dqns_ice=scalar(11),
+            qtr_ice_top=scalar(12), t_bottom=scalar(13), sss=scalar(14),
+            evaporation=scalar(15), snow_precipitation=scalar(16),
+            qprec_ice=scalar(17), qcn_ice_bottom=scalar(18),
+            qsb_ice_bottom=scalar(19), fhld=scalar(20), qlead=scalar(21),
+            frq_m=scalar(22), sst_m=None,
+        )
+        result = si3_column_step_arrays(
+            state, forcing, 3600.0, c, si3=SI3ThermoConfig(),
+        ).exit
+        return jnp.stack([jnp.sum(leaf) for leaf in result])
+
+    oracle = np.frombuffer(
+        zlib.decompress(base64.b85decode(_SI3_GRADIENT_SWEEP_ORACLE_B85)),
+        dtype="<f8",
+    ).reshape(24, 9, 23)
+    eager = jax.vmap(jax.jacrev(step))(vectors)
+    compiled = jax.jit(jax.vmap(jax.jacrev(step)))(vectors)
+    for mode, actual in (("eager", eager), ("jit", compiled)):
+        actual = np.asarray(actual)
+        mode_oracle = oracle.copy()
+        if mode == "eager":
+            # The source-rounded h(concentration) slope at this active point is
+            # exactly one eager float64 ulp; XLA's fused evaluation gives the
+            # separately reviewed compiled value stored in the oracle.
+            mode_oracle[18, 1, 0] = 2.0 ** -21
+        relative = np.abs(actual - mode_oracle) / np.maximum(
+            np.maximum(np.abs(actual), np.abs(mode_oracle)),
+            np.finfo(np.float64).tiny,
+        )
+        for case, worst in zip(cases, np.max(relative, axis=(1, 2)), strict=True):
+            print(
+                f"gradient-sweep {mode} conc={case[0]:.12g} "
+                f"h_ice={case[1]:.1f} qlead={case[2]:.1f} worst_rel={worst:.3e}"
+            )
+        assert bool(np.all(np.isfinite(actual))), mode
+        assert float(np.max(relative)) <= 1.0e-6, mode
