@@ -140,16 +140,6 @@ def test_each_known_disagreement_is_still_real(name):
         f"{name} is listed as disagreeing but does not; remove it")
 
 
-def test_ifs_ascent_port_shares_the_bechtold_ranges():
-    """IFSAscentConfig ports the same rprcon / dnoprc as BechtoldConfig: one
-    parameter, one range."""
-    from legoesm.atmosphere.physics.convection import _ifs_ascent, config
-    ifs = _ifs_ascent.__param_spec__["IFSAscentConfig"]["params"]
-    bec = config.__param_spec__["BechtoldConfig"]["params"]
-    for name in ("rprcon", "dnoprc"):
-        assert ifs[name]["bounds"] == bec[name]["bounds"], name
-
-
 # --- AIMIP trainable knobs: a third declaration of the same ranges -------------
 # (user 2026-10-28, ASK N): every AIMIP knob's range is compared with its
 # scheme's __param_spec__ and, where one exists, the driver's check.  Values

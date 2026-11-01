@@ -93,11 +93,20 @@ LAND_PCT = 50.0
 
 def _load_model(run, var):
     """The run's monthly CMOR file for ``var`` from whichever monthly table
-    holds it (Amon; LImon for snw; SImon for siconc), newest file."""
-    fs = []
+    holds it (Amon; LImon for snw; SImon for siconc), newest file.
+
+    Grid label ``gn`` (native) or ``gr`` (regridded) only; a variable written
+    under BOTH labels is fatal, since which one is "newest" is meaningless."""
+    fs, grids = [], set()
     for tbl in ("Amon", "LImon", "SImon"):
-        fs += sorted(glob.glob(
-            f"{ROOT}/{run}/cmor/{tbl}/{var}_{tbl}_legoESM-1-0_amip_r1i1p1f1_gn*.nc"))
+        pre = f"{ROOT}/{run}/cmor/{tbl}/{var}_{tbl}_legoESM-1-0_amip_r1i1p1f1_"
+        for g in ("gn", "gr"):
+            got = glob.glob(f"{pre}{g}.nc") + glob.glob(f"{pre}{g}_*.nc")
+            if got:
+                grids.add(g)
+                fs += sorted(got)
+    if len(grids) > 1:
+        raise SystemExit(f"FATAL: {run} has CMOR {var} on both gn and gr grids")
     if not fs:
         return None
     try:

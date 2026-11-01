@@ -1086,14 +1086,15 @@ def mg2_droplet_psd(q_c_ic, N_c_ic, rho, *, number_cap_log_width=0.0,
     return active, pgam, lam, lam ** 3 * q_safe / shape
 
 
-def mg2_size_dist_liq(q_c_ic, N_c_ic, rho):
+def mg2_size_dist_liq(q_c_ic, N_c_ic, rho, **widths):
     """MG2 ``size_dist_param_liq`` (micro_mg_utils.F90:376-422):
     ``(N_c_ic_adjusted, pgam, lamc)`` with the number per-VOLUME, see
     :func:`mg2_size_bounded_nc`.  ``lamc`` is the slope clipped to
     ``(pgam+1)/[50 um, 2 um]``; where ``qcic <= qsmall`` MG2 sets ``pgam=-100``
-    and ``lamc=0`` and so does this.
+    and ``lamc=0`` and so does this.  ``widths``: the RULE 5 widths of
+    :func:`mg2_droplet_psd` (none = MG2's hard clip).
     """
-    active, pgam, lam, nc_kg = mg2_droplet_psd(q_c_ic, N_c_ic, rho)
+    active, pgam, lam, nc_kg = mg2_droplet_psd(q_c_ic, N_c_ic, rho, **widths)
     return (jnp.where(active, nc_kg * rho, N_c_ic),
             jnp.where(active, pgam, _MG2_PGAM_UNSET),
             jnp.where(active, lam, 0.0))
@@ -1253,7 +1254,7 @@ def mg2_instant_ice_melt_homog_freeze(q_c, N_c_kg, q_i, N_i_kg, T, T_homog,
     return q_c2, N_c2, q_i2, N_i2, T2, melt, frz, fired_m | fired_h
 
 def mg2_droplet_number_readjust(q_c_post, N_c_post, N_c, cf, rho, dt, dN_c_dt, *,
-                                presence_top):
+                                presence_top, log_width=0.0):
     """CAM6 MG2 final droplet mean-size re-adjust (micro_mg2_0.F90:2743-2753,
     :2812-2835) on the grid-mean post-step state (per-volume number): in-cloud
     dumc = min(max(q_post,0)/cf, 5e-3), dumnc = max(N_post,0)/cf; where
@@ -1261,11 +1262,45 @@ def mg2_droplet_number_readjust(q_c_post, N_c_post, N_c, cf, rho, dt, dN_c_dt, *
     becomes (dumnc_adj*cf - N_c)/dt.  At dumc == qsmall exactly the size
     routine (qcic > qsmall) leaves the number, so a negative one survives, as
     in MG2.
+
+    ``log_width`` (``MorrisonConfig.mg2_drop_readjust_log_width``) is the
+    RULE 5 width of both size limits (:func:`mg2_droplet_psd`); 0 = MG2.
+
+    KNOWN DIFFERENCE (RULE 5, #2216).  MG2 clips: the in-cloud mean diameter
+    is set to exactly 2 um (or 50 um) where it leaves [2, 50] um, the number
+    to qcic/1e-20 kg where it exceeds that, and the number is left untouched
+    inside the bounds.  At ``log_width > 0`` the port rounds both limits by a
+    LogSumExp in ln space and applies the result in every cell with cloud
+    water above qsmall (the "number moved" test is dropped: with rounded
+    limits it is a jump of up to the rounding offset).  Measured at the default 0.01 on the
+    prognostic-number oracle fixtures (x64; readjust inputs of the real call):
+    the readjusted number departs from MG2's by up to 1.4e-2 relative (7.1e-3
+    in cells MG2 leaves untouched); with every other switch at its hard
+    limit the readjust alone moves the whole-call droplet tendency by up to
+    9.7e-3 of the column's largest MG2 droplet tendency (icelim column 0).
+    At the prognostic arm's resolved defaults the total gap to MG2 reaches
+    1.10 in the melt fixture, from the other approved smoothings (the
+    readjust's share there is <= 1e-14).  Both per-column tables (GAP,
+    ARM_GAP) are stored in tests/atmosphere/microphysics/unit/
+    test_morrison_mg2_drop_readjust_smooth.py.  Bounds: the number stays at
+    or below qcic/1e-20 kg and the mean diameter at or above 2 um for every
+    width (LogSumExp min <= min); the 50 um maximum can be passed by at most
+    ``log_width*ln(1 + 25**(-1/log_width))`` in ln D (the clamp's upper
+    rounding reaching its lower bound, ln 25 away): 1e-140 at the default
+    0.01 (measured on the fixtures: <= 2e-15, round-off), 4 % (52 um) at the
+    largest accepted width 1.  What changes at the default is that cells
+    within a few ``log_width`` of a bound (in ln lambda) are moved inward too.
+    ``log_width = 0`` recovers MG2 exactly.
     """
     q_ic = jnp.minimum(jnp.maximum(q_c_post, 0.0) / cf, KK2000_CAM6_QC_MAX)
     n_ic = jnp.maximum(N_c_post, 0.0) / cf
-    n_adj = mg2_size_bounded_nc(q_ic, n_ic, rho)
-    f = mg2_presence(q_ic, presence_top) * jnp.where(n_adj != n_ic, 1.0, 0.0)
+    n_adj = mg2_size_bounded_nc(q_ic, n_ic, rho, number_cap_log_width=log_width,
+                                slope_log_width=log_width)
+    f = mg2_presence(q_ic, presence_top)
+    if log_width == 0.0:
+        f = f * jnp.where(n_adj != n_ic, 1.0, 0.0)
+    else:   # the size routine's own qcic > qsmall test (0 width at the default presence ramp)
+        f = f * jnp.where(q_ic > MG2_QSMALL, 1.0, 0.0)
     return f * ((n_adj * cf - N_c) / dt) + (1.0 - f) * dN_c_dt
 
 
@@ -2056,7 +2091,7 @@ def autoconversion_sb2001(q_c, q_r, N_c_eff, rho, *, ramp_top):
     return dq_c_au, dN_r_au, x_c
 
 
-def accretion_sb2001(q_c, q_r, rho):
+def accretion_sb2001(q_c, q_r, rho, *, qr_ramp_top, qc_ramp_top):
     """Seifert & Beheng (2001) accretion as gSAM M2005 runs it (IRAIN=1,
     module_mp_graupel.f90:1955-1962 / :3277-3285)::
 
@@ -2067,7 +2102,25 @@ def accretion_sb2001(q_c, q_r, rho):
     computed only where ``q_r >= 1e-8`` and ``q_c >= 1e-8`` (zero elsewhere).
     NOT ported: the cloud-number sink ``NPRA`` (only reached with
     ``predict_Nc=True``).
+
+    RULE 5 (#2262): each of gSAM's two 1e-8 kg/kg steps is replaced by the C2
+    step :func:`smoothstep_quintic`, exactly 0 at the threshold and 1 from its
+    ramp top [kg/kg] up (``qr_ramp_top`` / ``qc_ramp_top`` =
+    ``MorrisonConfig`` / ``SeifertBehengConfig``
+    ``.sb2001_accretion_qr_ramp_top`` / ``.sb2001_accretion_qc_ramp_top``,
+    default 2e-8 each, codex+GLM 2026-10-30); a top <= 1e-8 is gSAM's hard
+    step for that gate.  The rate stays exactly 0 below either threshold.
+    KNOWN DIFFERENCE at the default: only q_r or q_c in [1e-8, 2e-8) kg/kg
+    sees a reduced rate.  Measured on the gSAM SB2001 kernel fixture: 192 of
+    1680 points change (those at q_r = 1e-8, rate 0 instead of gSAM's),
+    largest change 1.4e-13 kg/kg/s = 4.0e-9 of the fixture's largest rate; no
+    fixture point lies in the cloud-water ramp; the whole-call gSAM columns
+    change by exactly 0.  Gaps are pinned in test_sb2001_accretion_ramp.py.
+    No invariant is broken (the rate only shrinks, stays >= 0).
     """
+    for name, top in (("qr_ramp_top", qr_ramp_top), ("qc_ramp_top", qc_ramp_top)):
+        if not top >= 0.0 or not math.isfinite(top):
+            raise ValueError(f"{name} must be finite and >= 0 [kg/kg], got {top}")
     q_c_pos = jnp.clip(q_c, 0.0)
     q_r_pos = jnp.clip(q_r, 0.0)
     gate = (q_r_pos >= _SB2001_PRA_Q_MIN) & (q_c_pos >= _SB2001_PRA_Q_MIN)
@@ -2075,8 +2128,12 @@ def accretion_sb2001(q_c, q_r, rho):
     qr_s = jnp.where(gate, q_r_pos, 1.0)
     dum = 1.0 - qc_s / (qc_s + qr_s)
     phi_ac = (dum / (dum + _SB2001_PHI_AC_KTAU)) ** 4
-    return jnp.where(gate, _SB2001_ACCRETION_COEFF * rho * qc_s * qr_s * phi_ac,
-                     0.0)
+    pra = _SB2001_ACCRETION_COEFF * rho * qc_s * qr_s * phi_ac
+    for q_s, top in ((qr_s, qr_ramp_top), (qc_s, qc_ramp_top)):
+        if top > _SB2001_PRA_Q_MIN:
+            pra = pra * smoothstep_quintic(
+                (q_s - _SB2001_PRA_Q_MIN) / (top - _SB2001_PRA_Q_MIN))
+    return jnp.where(gate, pra, 0.0)
 
 
 def self_collection_breakup(N_r, q_r, rho, k_sc, breakup_sharpness, D_eq):
@@ -3002,7 +3059,8 @@ def _m2005_fill_down(v):
 
 
 def m2005_liquid_step(T, q_v, q_c, q_r, N_r, p, rho, dz, dt, N_c_spec, params,
-                      n_substeps_max, *, sb2001_autoconv_ramp_top):
+                      n_substeps_max, *, sb2001_autoconv_ramp_top,
+                      sb2001_accretion_qr_ramp_top, sb2001_accretion_qc_ramp_top):
     """One gSAM M2005 call, liquid only, SB2001 warm rain, specified N_c.
 
     Port of gSAM 1.8.8 ``M2005MICRO_GRAUPEL`` (SRC/MICRO_M2005/
@@ -3035,7 +3093,9 @@ def m2005_liquid_step(T, q_v, q_c, q_r, N_r, p, rho, dz, dt, N_c_spec, params,
        4679), QSMALL zeroing, and the rain-number reset at the slope bounds.
 
     ``sb2001_autoconv_ramp_top`` [kg/kg] is the autoconversion gate's RULE 5
-    ramp top (:func:`autoconversion_sb2001`; <= 1e-6 = gSAM's hard step).
+    ramp top (:func:`autoconversion_sb2001`; <= 1e-6 = gSAM's hard step);
+    ``sb2001_accretion_qr_ramp_top`` / ``sb2001_accretion_qc_ramp_top`` [kg/kg]
+    are the accretion gates' (:func:`accretion_sb2001`; <= 1e-8 = hard step).
 
     ``N_r`` is per-VOLUME [1/m^3] in and out (gSAM's per-kg NR3D times rho).
     Arrays are (ncol, nlev) TOP-DOWN (surface last).  ``params`` supplies the
@@ -3079,7 +3139,8 @@ def m2005_liquid_step(T, q_v, q_c, q_r, N_r, p, rho, dz, dt, N_c_spec, params,
     # 3. process rates
     prc, nprc1, _ = autoconversion_sb2001(q_c, q_r, N_c, rho,
                                           ramp_top=sb2001_autoconv_ramp_top)
-    pra = accretion_sb2001(q_c, q_r, rho)
+    pra = accretion_sb2001(q_c, q_r, rho, qr_ramp_top=sb2001_accretion_qr_ramp_top,
+                           qc_ramp_top=sb2001_accretion_qc_ramp_top)
     nragg = self_collection_breakup_sb2001(N_r, q_r, rho, params)
     pre = -rain_evaporation_m2005(q_v, q_r, N_r, q_sat, T, p, rho, params)
 

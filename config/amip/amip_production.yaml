@@ -268,12 +268,16 @@ hard_sat_ice_curve: false          # the ice-curve blend of that same
                                    # is off, set explicitly so no row rests
                                    # on a default.  User table row 3.
 homogeneous_ice_nucleation: true
-aerosol_ccn: false                 # off with the prognostic droplet number (user
-                                   # decision 2026-10-24): CAM6 MG2 cannot run both.
-morrison_prognostic_droplet_number: true  # CAM6 MG2 prognostic droplet number,
-                                   # activation = CAM6 microp_aero_run on the
-                                   # prescribed PPE-000 MAM4 climatology (user
-                                   # decision 2026-10-24).
+aerosol_ccn: true                  # droplet number diagnosed from the prescribed
+                                   # aerosol (user decision 2026-11-01, #2216,
+                                   # reverses 2026-10-24): Jan 1979 30-day arm,
+                                   # global rsut bias vs CERES-EBAF -7.99 W/m2
+                                   # (prognostic) -> +0.78 (this setting).
+morrison_prognostic_droplet_number: false  # CAM6 MG2 prognostic droplet number
+                                   # OFF until its droplet budget closes (#2216);
+                                   # the prognostic arm is
+                                   # amip_production_prognostic_nc.yaml.
+                                   # cam6_aerosol_dir below is read only by it.
 cam6_aerosol_dir: /work/bb1596/b309178/diffESM/legoesm_ap/data/cam6_optics
 energy_consistent_moisture_clip: true
 

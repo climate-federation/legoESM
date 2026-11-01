@@ -967,6 +967,28 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "a rounding-level change on coare3, and the "
                              "genuinely different strong-stable tails there "
                              "are grachev2007_sheba/gryanik2020.")
+    # Large-Yeager (--surface-bulk-scheme large_yeager) RULE 5 smooth-switch
+    # widths (#2241).  Defaults = the ExperimentConfig values (bit-identical);
+    # 0 = AeroBulk's hard switch.  Read only by large_yeager.
+    parser.add_argument("--surface-large-yeager-neutral-width",
+                        dest="surface_large_yeager_neutral_width", type=float,
+                        default=_EXPERIMENT_DEFAULTS.surface_large_yeager_neutral_width,
+                        help="Large-Yeager smoothing half-width of the neutral "
+                             "Stanton-number switch, in zeta_u. 0 = AeroBulk "
+                             "hard switch. Read only by large_yeager.")
+    parser.add_argument("--surface-large-yeager-dthv-width",
+                        dest="surface_large_yeager_dthv_width", type=float,
+                        default=_EXPERIMENT_DEFAULTS.surface_large_yeager_dthv_width,
+                        help="Large-Yeager smoothing half-width of the "
+                             "first-guess stability switch [K of virtual "
+                             "potential temperature difference]. 0 = AeroBulk "
+                             "hard switch. Read only by large_yeager.")
+    parser.add_argument("--surface-large-yeager-cd-cutoff-width",
+                        dest="surface_large_yeager_cd_cutoff_width", type=float,
+                        default=_EXPERIMENT_DEFAULTS.surface_large_yeager_cd_cutoff_width,
+                        help="Large-Yeager smoothing band of the 33 m/s drag "
+                             "cutoff [m/s]. 0 = AeroBulk hard cutoff. Read only "
+                             "by large_yeager.")
     parser.add_argument("--hb-kvf-min", dest="hb_kvf_min", type=float,
                         default=None,
                         help="Free-atmosphere diffusivity floor override "
@@ -1419,6 +1441,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "(explicit aquaplanet, ocean coefficients "
                              "everywhere). "
                              f"Default {_EXPERIMENT_DEFAULTS.zm_land_fraction}.")
+    parser.add_argument("--kain-fritsch-variant", type=str,
+                        choices=["smooth", "wrf_kfeta"],
+                        default=_EXPERIMENT_DEFAULTS.kain_fritsch_variant,
+                        dest="kain_fritsch_variant",
+                        help="Kain-Fritsch implementation: smooth (the "
+                             "differentiable surrogate) or wrf_kfeta (the "
+                             "faithful WRF v4.8.0 KF-Eta port; opt-in, NOT "
+                             "RULE 5 compliant: hard switches, #2280). "
+                             f"Default {_EXPERIMENT_DEFAULTS.kain_fritsch_variant}.")
     parser.add_argument("--zm-transport-cloud-tracers",
                         dest="zm_transport_cloud_tracers",
                         action=argparse.BooleanOptionalAction,
@@ -1481,6 +1512,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "--no-bechtold-use-ifs-cape-closure disables a "
                              "config-file default. Default "
                              f"{_EXPERIMENT_DEFAULTS.bechtold_use_ifs_cape_closure}.")
+    parser.add_argument("--bechtold-use-ifs-ascent",
+                        dest="bechtold_use_ifs_ascent",
+                        action=argparse.BooleanOptionalAction,
+                        default=_EXPERIMENT_DEFAULTS.bechtold_use_ifs_ascent,
+                        help="Run the IFS convection as CUMASTRN does (the "
+                             "faithful OpenIFS port); only the six run-set "
+                             "Bechtold fields may differ from their defaults. "
+                             "Default "
+                             f"{_EXPERIMENT_DEFAULTS.bechtold_use_ifs_ascent}.")
     parser.add_argument("--bechtold-use-ifs-subcloud-evap",
                         dest="bechtold_use_ifs_subcloud_evap",
                         action=argparse.BooleanOptionalAction,
@@ -1528,14 +1568,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "correction (openifs cumastrn.F90:780-833; land "
                              "deep convection peaks late afternoon). Default "
                              f"{_EXPERIMENT_DEFAULTS.bechtold_use_ifs_capdcycl}.")
-    parser.add_argument("--bechtold-use-ifs-ascent",
-                        dest="bechtold_use_ifs_ascent",
-                        action=argparse.BooleanOptionalAction,
-                        default=_EXPERIMENT_DEFAULTS.bechtold_use_ifs_ascent,
-                        help="Run the faithful OpenIFS convection chain "
-                             "(cubasen/cuascn/cumastrn/cudtdqn port) instead "
-                             "of the legacy Bechtold scheme. Default "
-                             f"{_EXPERIMENT_DEFAULTS.bechtold_use_ifs_ascent}.")
     parser.add_argument("--bechtold-ifs-shallow-nosupply",
                         dest="bechtold_ifs_shallow_nosupply",
                         choices=("zero", "first_guess"),
@@ -1563,6 +1595,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         action=argparse.BooleanOptionalAction, default=None,
                         help="Gregory-1997 convective momentum transport in Bechtold "
                              "(applied to the MPAS edge winds).")
+    parser.add_argument("--emanuel-enable-cmt", dest="emanuel_enable_cmt",
+                        action=argparse.BooleanOptionalAction, default=None,
+                        help="CONVECT FU/FV convective momentum transport in Emanuel "
+                             "(unset = EmanuelConfig.enable_cmt).")
     parser.add_argument("--bechtold-use-ifs-shallow-closure",
                         dest="bechtold_use_ifs_shallow_closure",
                         action=argparse.BooleanOptionalAction,
@@ -2288,6 +2324,21 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         help="Multiplier on kk2000 accretion of cloud by "
                              "rain (MG2 accre_enhan; 1.0 = unscaled). "
                              "kk2000 only.")
+    parser.add_argument("--morrison-mg2-drop-readjust-log-width", type=float,
+                        default=ExperimentConfig._field_defaults[
+                            "morrison_mg2_drop_readjust_log_width"],
+                        dest="morrison_mg2_drop_readjust_log_width",
+                        help="RULE 5 width (ln space) of CAM6 MG2's final "
+                             "droplet mean-size readjust, prognostic droplet "
+                             "number only; 0 = MG2's hard clip.")
+    parser.add_argument("--morrison-mg2-drop-early-reset-log-width", type=float,
+                        default=ExperimentConfig._field_defaults[
+                            "morrison_mg2_drop_early_reset_log_width"],
+                        dest="morrison_mg2_drop_early_reset_log_width",
+                        help="RULE 5 width (ln space) of CAM6 MG2's early "
+                             "droplet size reset (before autoconversion), "
+                             "prognostic droplet number only; 0 = MG2's hard "
+                             "clip.")
     parser.add_argument("--morrison-warm-rain-incloud",
                         action=argparse.BooleanOptionalAction,
                         default=ExperimentConfig._field_defaults[
@@ -3028,6 +3079,9 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         surface_bulk_scheme=args.surface_bulk_scheme,
         surface_stability_scheme=args.surface_stability_scheme,
         surface_gustiness_zi=args.surface_gustiness_zi,
+        surface_large_yeager_neutral_width=args.surface_large_yeager_neutral_width,
+        surface_large_yeager_dthv_width=args.surface_large_yeager_dthv_width,
+        surface_large_yeager_cd_cutoff_width=args.surface_large_yeager_cd_cutoff_width,
         surface_z_ref_model_level=args.surface_z_ref_model_level,
         surface_ocean_q_sfc_saline=args.surface_ocean_q_sfc_saline,
         hb_kvf_min=args.hb_kvf_min,
@@ -3149,6 +3203,8 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         morrison_rain_vent_f2=args.morrison_rain_vent_f2,
         morrison_N_i0=args.morrison_N_i0,
         morrison_cooper_a=args.morrison_cooper_a,
+        morrison_mg2_drop_readjust_log_width=args.morrison_mg2_drop_readjust_log_width,
+        morrison_mg2_drop_early_reset_log_width=args.morrison_mg2_drop_early_reset_log_width,
         morrison_sed_cfl_substeps=args.morrison_sed_cfl_substeps,
         morrison_sed_cfl_substeps_max=args.morrison_sed_cfl_substeps_max,
         morrison_sed_cfl_substeps_strict=args.morrison_sed_cfl_substeps_strict,
@@ -3259,6 +3315,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         bechtold_subsidence_solve=args.bechtold_subsidence_solve,
         bechtold_rain_vapor_sink=args.bechtold_rain_vapor_sink,
         zm_land_fraction=args.zm_land_fraction,
+        kain_fritsch_variant=args.kain_fritsch_variant,
         zm_transport_cloud_tracers=args.zm_transport_cloud_tracers,
         bechtold_conv_top_pa=args.bechtold_conv_top_pa,
         bechtold_downdraft_evap=args.bechtold_downdraft_evap,
@@ -3268,15 +3325,16 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         bechtold_downdraft_entrain_rate=args.bechtold_downdraft_entrain_rate,
         bechtold_downdraft_detrain_scale_m=args.bechtold_downdraft_detrain_scale_m,
         bechtold_use_ifs_cape_closure=args.bechtold_use_ifs_cape_closure,
+        bechtold_use_ifs_ascent=args.bechtold_use_ifs_ascent,
         bechtold_use_ifs_subcloud_evap=args.bechtold_use_ifs_subcloud_evap,
         bechtold_use_ifs_inplume_precip=args.bechtold_use_ifs_inplume_precip,
         bechtold_dx_m=args.bechtold_dx_m,
         bechtold_use_ifs_downdraft=args.bechtold_use_ifs_downdraft,
         bechtold_use_ifs_shallow_closure=args.bechtold_use_ifs_shallow_closure,
         bechtold_enable_cmt=args.bechtold_enable_cmt,
+        emanuel_enable_cmt=args.emanuel_enable_cmt,
         bechtold_M_b_max=args.bechtold_M_b_max,
         bechtold_use_ifs_capdcycl=args.bechtold_use_ifs_capdcycl,
-        bechtold_use_ifs_ascent=args.bechtold_use_ifs_ascent,
         bechtold_ifs_shallow_nosupply=args.bechtold_ifs_shallow_nosupply,
         bechtold_use_ifs_land_rhebc=args.bechtold_use_ifs_land_rhebc,
         bechtold_use_ifs_snow_melt=args.bechtold_use_ifs_snow_melt,

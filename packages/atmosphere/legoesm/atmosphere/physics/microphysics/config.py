@@ -168,6 +168,8 @@ __param_spec__ = {
             "gsam_satadj_qc_floor_sharpness": "numerics: smooth-switch sharpness (RULE 5), value approved by user 2026-10-21",
             "gsam_satadj_p_min_width_pa": "numerics: smooth-switch width (RULE 5), value approved by user 2026-10-21",
             "sb2001_autoconv_ramp_top": "numerics: smooth-switch width (RULE 5), value decided by codex+GLM 2026-10-29 (#2232)",
+            "sb2001_accretion_qr_ramp_top": "numerics: smooth-switch width (RULE 5), value decided by codex+GLM 2026-10-30 (#2262)",
+            "sb2001_accretion_qc_ramp_top": "numerics: smooth-switch width (RULE 5), value decided by codex+GLM 2026-10-30 (#2262)",
             "cam_qsat_cap_sharpness": "numerics: smooth-switch sharpness (RULE 5), value approved by user 2026-10-21",
             # Fall-speed power-law EXPONENTS feed math.gamma(4 + b) / math.gamma(1 + b)
             # (morrison.py, _warm_rain.py) to precompute the cons* moment factors.
@@ -196,6 +198,8 @@ __param_spec__ = {
             "mg2_qi_limit_width": "numerics: solver/smoothing/tolerance/iteration parameter",
             "mg2_presence_ramp_top": "numerics: solver/smoothing/tolerance/iteration parameter",
             "mg2_frozen_rain_ice_ramp_frac": "numerics: solver/smoothing/tolerance/iteration parameter",
+            "mg2_drop_readjust_log_width": "numerics: solver/smoothing/tolerance/iteration parameter",
+            "mg2_drop_early_reset_log_width": "numerics: solver/smoothing/tolerance/iteration parameter",
             "nuc_T_sharpness": "numerics: solver/smoothing/tolerance/iteration parameter",
             "nuc_rh_sharpness": "numerics: solver/smoothing/tolerance/iteration parameter",
             "saturation_sharpness": "numerics: solver/smoothing/tolerance/iteration parameter",
@@ -319,6 +323,8 @@ __param_spec__ = {
             "gsam_satadj_qc_floor_sharpness": "numerics: smooth-switch sharpness (RULE 5), value approved by user 2026-10-21",
             "gsam_satadj_p_min_width_pa": "numerics: smooth-switch width (RULE 5), value approved by user 2026-10-21",
             "sb2001_autoconv_ramp_top": "numerics: smooth-switch width (RULE 5), value decided by codex+GLM 2026-10-29 (#2232)",
+            "sb2001_accretion_qr_ramp_top": "numerics: smooth-switch width (RULE 5), value decided by codex+GLM 2026-10-30 (#2262)",
+            "sb2001_accretion_qc_ramp_top": "numerics: smooth-switch width (RULE 5), value decided by codex+GLM 2026-10-30 (#2262)",
             "autoconversion_sharpness": "numerics: solver/smoothing/tolerance/iteration parameter",
             "breakup_sharpness": "numerics: solver/smoothing/tolerance/iteration parameter",
             "saturation_sharpness": "numerics: solver/smoothing/tolerance/iteration parameter",
@@ -578,6 +584,12 @@ class SeifertBehengConfig(NamedTuple):
     # [kg/kg]; <= 1e-6 = gSAM's hard step (codex+GLM 2026-10-29, #2232; KNOWN
     # DIFFERENCE in _warm_rain.autoconversion_sb2001).
     sb2001_autoconv_ramp_top: float = 2.0e-6
+    # RULE 5 smoothing of gSAM's two SB2001 accretion gates q_r >= 1e-8 and
+    # q_c >= 1e-8 kg/kg (module_mp_graupel.f90:1944/3266): each C2 step
+    # reaches 1 at its value [kg/kg]; <= 1e-8 = gSAM's hard step (codex+GLM
+    # 2026-10-30, #2262; KNOWN DIFFERENCE in _warm_rain.accretion_sb2001).
+    sb2001_accretion_qr_ramp_top: float = 2.0e-8
+    sb2001_accretion_qc_ramp_top: float = 2.0e-8
 
 
 # Unset Morrison DCS per flavour [m] (MorrisonConfig.ice_snow_d_auto=None,
@@ -1063,7 +1075,9 @@ class MorrisonConfig(NamedTuple):
     # so the default graph and every existing run are untouched; nothing in the
     # model reads it.  Exists because the donor clamp scales all q_c sinks by a
     # common factor, so terms re-derived outside the scheme are PRE-clamp and
-    # cannot close the budget.  NOT a tunable: it selects no physics.
+    # cannot close the budget.  NOT a tunable: it selects no physics.  Under
+    # prognostic_droplet_number it also publishes the droplet-number budget
+    # (``MicrophysicsOutput.nc_budget``).
     publish_qc_budget: bool = False
     # CAM6 MG2-style warm-rain multipliers, read ONLY by the kk2000 branch
     # (appended at the END: positional ABI).  autocon_fact scales the KK2000
@@ -1144,6 +1158,12 @@ class MorrisonConfig(NamedTuple):
     # [kg/kg]; <= 1e-6 = gSAM's hard step (codex+GLM 2026-10-29, #2232; KNOWN
     # DIFFERENCE in _warm_rain.autoconversion_sb2001).
     sb2001_autoconv_ramp_top: float = 2.0e-6
+    # RULE 5 smoothing of gSAM's two SB2001 accretion gates q_r >= 1e-8 and
+    # q_c >= 1e-8 kg/kg (module_mp_graupel.f90:1944/3266): each C2 step
+    # reaches 1 at its value [kg/kg]; <= 1e-8 = gSAM's hard step (codex+GLM
+    # 2026-10-30, #2262; KNOWN DIFFERENCE in _warm_rain.accretion_sb2001).
+    sb2001_accretion_qr_ramp_top: float = 2.0e-8
+    sb2001_accretion_qc_ramp_top: float = 2.0e-8
     # MG2's CAM Goff-Gratch q_sat = 1 cap (RULE 5, limiter class): sharpness
     # on e_sat/p; math.inf = CAM's hard cap.  Value approved by user 2026-10-21.
     cam_qsat_cap_sharpness: float = CAM_QSAT_CAP_SHARPNESS
@@ -1181,6 +1201,20 @@ class MorrisonConfig(NamedTuple):
     # activation; read only under prognostic_droplet_number.  1.0 = the
     # climatology as on file (bit-identical).  APPENDED AT THE TUPLE END.
     cam6_aerosol_number_scale: float = 1.0
+    # RULE 5 smoothing of MG2's FINAL droplet mean-size readjust (in-cloud
+    # mean diameter held in [2, 50] um and ncic <= qcic/1e-20,
+    # micro_mg2_0.F90:2743-2835; prognostic droplet number only): LogSumExp
+    # width in ln space of both limits, the cloud-optics value
+    # (CloudConfig.mg2_drop_*_log_width); 0 = MG2's hard clip
+    # (#2216, codex + GLM 2026-11-01; KNOWN DIFFERENCE in
+    # _warm_rain.mg2_droplet_number_readjust).
+    mg2_drop_readjust_log_width: float = 0.01
+    # RULE 5 smoothing of MG2's EARLY droplet size reset (size_dist_param_liq
+    # before autoconversion, micro_mg2_0.F90:1296; its number and PSD feed
+    # every droplet sink and snow riming; prognostic droplet number only):
+    # same LogSumExp form and default as the readjust; 0 = MG2's hard clip
+    # (#2216, user 2026-11-01; KNOWN DIFFERENCE at the morrison.py call).
+    mg2_drop_early_reset_log_width: float = 0.01
 
 
 # Hard ceiling of ``sed_cfl_substeps_max`` wherever it is set (leaf, applier,

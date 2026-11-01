@@ -1099,6 +1099,8 @@ def _strict_msgs(cfg, caplog):
     (dict(convection="zhang_mcfarlane"), "momentum transport", True),
     (dict(convection="bechtold", bechtold_enable_cmt=True),
      "bechtold_enable_cmt=false", True),
+    (dict(convection="emanuel", emanuel_enable_cmt=True),
+     "emanuel_enable_cmt=false", True),
     (dict(turbulence="clubb", clubb_prognostic=True), "CLUBB-moment slot", True),
     (dict(convection="tiedtke"), "momentum transport", False),
     (dict(convection="bechtold"), "bechtold_enable_cmt=false", False),
@@ -1130,6 +1132,9 @@ def test_pipeline_cmt_off_not_flagged(caplog):
     err, warn = _strict_msgs(
         _cdgrid_cfg(convection="bechtold", bechtold_enable_cmt=False), caplog)
     assert "momentum transport" not in err + warn
+    for kw in (dict(), dict(emanuel_enable_cmt=False)):
+        err, warn = _strict_msgs(_cdgrid_cfg(convection="emanuel", **kw), caplog)
+        assert "momentum transport" not in err + warn
 
 
 @pytest.mark.parametrize("scheme, refused", [

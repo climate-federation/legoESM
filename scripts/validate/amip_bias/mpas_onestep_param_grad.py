@@ -63,8 +63,9 @@ def launch_argv(run: str, day: int, out: Path) -> list[str]:
         for ln in open(lg, errors="replace"):
             # single-GPU chains write "[chain] launching:", multi-GPU ones
             # "[chain] launching on N GPU(s):"
-            # direct (non-chain) multi-GPU sbatch decks log "[run] srun ..."
-            if (("[chain] launching" in ln or ln.startswith("[run] "))
+            # direct (non-chain) multi-GPU sbatch decks log "[run] srun ...";
+            # the 2026-10-27 monthly baseline decks log "[jan] python ..."
+            if (("[chain] launching" in ln or ln.startswith(("[run] ", "[jan] ")))
                     and "run_amip.py" in ln):
                 line = ln
                 break

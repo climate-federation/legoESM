@@ -19,13 +19,23 @@ RULE 5 smooth default (user decision 2026-10-28): the OUTER floor is
 ``10·eps + w·softplus((x − 10·eps)/w)`` with ``x = C·N/max(10·eps, a_cd a_cd)``
 and ``w = floor_width`` (default 1e-8 m²/s); ``floor_width = 0`` is AMR-Wind's
 hard ``max`` and matches the running oracle (tests/atmosphere/test_amd_oracle.py).
-KNOWN DIFFERENCES at the default: wherever ``N`` is near 0 the viscosity sits
-up to ``w·ln2 = 6.9e-9`` m²/s above the oracle's floor (exactly that at rest or
-in a pure off-diagonal 1-D shear); points with x well below the floor and
-active points are unchanged to round-off.  On the oracle fixture 3 of 6030
-points move by more than 1e-12 m²/s, at most 6.9e-9 (signed per-point gaps in
-``tests/atmosphere/oracle_fixtures/amd_default_gap.npz``).  The DENOMINATOR
-floor ``max(10·eps, a_cd a_cd)`` is still a hard switch (follow-up).
+KNOWN DIFFERENCES at the default output width (this width alone): wherever
+``N`` is near 0 the viscosity sits up to ``w·ln2 = 6.9e-9`` m²/s above the
+oracle's floor (exactly that at rest or in a pure off-diagonal 1-D shear);
+points with x well below the floor and active points are unchanged to
+round-off.  On the oracle fixture 3 of 6030 points move by more than
+1e-12 m²/s, at most 6.9e-9 (re-measured 2026-10-31).  The signed per-point gaps
+at BOTH default widths are in
+``tests/atmosphere/oracle_fixtures/amd_default_gap.npz``.  The DENOMINATOR
+floor ``max(10·eps, a_cd a_cd)`` is smoothed the same way (user decision
+2026-10-31): ``10·eps + w_d·softplus((a_cd a_cd − 10·eps)/w_d)`` with
+``w_d = denom_floor_width`` (default 10·eps = 2.22e-15 s⁻²); ``0`` = the hard
+``max``.  It moves only points whose ``a_cd a_cd`` is within a few ``w_d`` of
+10·eps (at rest the denominator is 10·eps·(1 + ln(1 + e⁻¹)) = 1.31·10·eps).
+KNOWN DIFFERENCE (measured 2026-10-31 on the oracle fixture, fp64, this width
+alone): 10 of 6030 points move by more than 1e-12 m²/s, at most 3.1e-7 m²/s
+(1.5e-3 relative).  With
+both defaults 13 points move, at most 3.1e-7 m²/s (the stored file above).
 
 where ``g_k = (a_1k, a_2k, a_3k)`` is the k-th column of the gradient tensor
 (the derivative of the velocity VECTOR in direction k).  Key properties:
@@ -48,13 +58,14 @@ where ``g_k = (a_1k, a_2k, a_3k)`` is the k-th column of the gradient tensor
 Like :mod:`legoesm.atmosphere.physics.turbulence.vreman`, this module holds ONLY
 the algebra (no grid/staggering): the caller supplies the nine gradients at the
 target points (cell centres), so the spectral and finite-volume cores share one
-definition.  AD-safe by construction — the two hard floors (``jnp.maximum``) and
-the absence of any sqrt avoid the ``sqrt(0)`` gradient trap the Vreman/Smagorinsky
-paths must guard; on the floored side the gradient is 0.
+definition.  AD-safe by construction — the two floors (softplus by default,
+``jnp.maximum`` at width 0) and the absence of any sqrt avoid the ``sqrt(0)``
+gradient trap the Vreman/Smagorinsky paths must guard; at width 0 the gradient
+on the floored side is 0.
 
 Faithfulness: a line-by-line port of AMR-Wind v4.2.0
 (0ee09c22b9afeca06231e4910276c0ba05fb52dd) ``src/turbulence/LES/AMD.H::amd_muvel``
-with ``beta = 0`` — same loop and accumulation order, same ``10·eps`` floors on the
+with ``beta = 0`` — same loop and accumulation order, same ``10·eps`` floors (at both widths 0) on the
 denominator and on ν_t — matched to the RUNNING oracle in
 ``tests/atmosphere/test_amd_oracle.py``.  Not ported: AMR-Wind's Abkar–Moin
 buoyancy numerator (legoESM's cited references are shear-only); ``nu_floor`` is a
@@ -80,6 +91,7 @@ __physics_contract__ = {
         "a31": "1/s", "a32": "1/s", "a33": "1/s",
         "dx": "m", "dy": "m", "dz": "m",
         "c_amd": "1", "nu_floor": "m^2/s", "floor_width": "m^2/s",
+        "denom_floor_width": "1/s^2",
     },
     "outputs": {"nu_t": "m^2/s"},
     "sign_convention": (
@@ -114,10 +126,15 @@ _AMR_WIND_FLOOR = 10.0 * 2.220446049250313e-16
 # RULE 5 smooth default (user decision 2026-10-28): width [m^2/s] of the
 # softplus floor on nu_t; 0.0 = AMR-Wind's hard floor (the oracle).
 AMD_FLOOR_WIDTH = 1.0e-8
+# RULE 5 smooth default (user decision 2026-10-31): width [s^-2] of the softplus
+# floor on the denominator a_cd a_cd, equal to the floor itself (10 eps); 0.0 =
+# AMR-Wind's hard floor (the oracle).
+AMD_DENOM_FLOOR_WIDTH = _AMR_WIND_FLOOR
 
 
 def amd_nu_t(a11, a12, a13, a21, a22, a23, a31, a32, a33,
-             dx, dy, dz, c_amd, nu_floor=0.0, floor_width=AMD_FLOOR_WIDTH):
+             dx, dy, dz, c_amd, nu_floor=0.0, floor_width=AMD_FLOOR_WIDTH,
+             denom_floor_width=AMD_DENOM_FLOOR_WIDTH):
     """Anisotropic Minimum-Dissipation eddy viscosity from the nine gradients.
 
     Parameters
@@ -136,8 +153,10 @@ def amd_nu_t(a11, a12, a13, a21, a22, a23, a31, a32, a33,
     floor_width : float, default ``AMD_FLOOR_WIDTH`` (1e-8)
         Width w [m²/s] of the softplus output floor
         ``floor + w·softplus((x − floor)/w)`` (static Python float).  ``0.0``
-        is AMR-Wind's hard ``max(10·eps, x)`` (the oracle).  The denominator
-        floor stays hard (KNOWN DIFFERENCE: not smoothed yet).
+        is AMR-Wind's hard ``max(10·eps, x)`` (the oracle).
+    denom_floor_width : float, default ``AMD_DENOM_FLOOR_WIDTH`` (10·eps)
+        Width [s⁻²] of the softplus floor on the denominator ``a_cd a_cd``
+        (static Python float); ``0.0`` is AMR-Wind's hard ``max(10·eps, ·)``.
 
     Returns
     -------
@@ -161,9 +180,15 @@ def amd_nu_t(a11, a12, a13, a21, a22, a23, a31, a32, a33,
             sij = 0.5 * (diuj + djui)
             for kk in range(3):
                 num_shear = num_shear + g[ii][kk] * g[jj][kk] * h[kk] * h[kk] * sij
-    # Hard floors exactly as the oracle (jnp.maximum: piecewise differentiable,
-    # gradient 0 on the floored side).  No sqrt, so AD-safe at rest (aa=0).
-    denom = jnp.maximum(_AMR_WIND_FLOOR, denom)
+    # Floors: hard (jnp.maximum, the oracle) at width 0, else the RULE 5
+    # softplus floor.  No sqrt, so AD-safe at rest (aa=0).
+    if denom_floor_width == 0.0:
+        denom = jnp.maximum(_AMR_WIND_FLOOR, denom)
+    elif denom_floor_width > 0.0:
+        denom = _AMR_WIND_FLOOR + denom_floor_width * jax.nn.softplus(
+            (denom - _AMR_WIND_FLOOR) / denom_floor_width)
+    else:
+        raise ValueError(f"denom_floor_width must be >= 0, got {denom_floor_width!r}")
     num_shear = num_shear * (-c_amd)
     x = num_shear / denom
     if floor_width == 0.0:

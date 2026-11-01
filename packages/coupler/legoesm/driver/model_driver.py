@@ -16892,13 +16892,18 @@ class ModelDriver:
                                      else (*_sp_bulk, True)),
             )
 
-            def _amip_physics_fn(state, grid, sigma_coord, forcing_data=None):
+            def _amip_physics_fn(state, grid, sigma_coord, forcing_data=None,
+                                 return_sfc_precip=False):
                 # The spectral step extracts ``result[0]`` from tuple
                 # returns, so the (tendency, phys_state_out) pair from
                 # the combined pipeline is handled; phys_state_out is
-                # dropped (stateless schemes only — guarded above).
+                # dropped (stateless schemes only — guarded above).  With
+                # ``return_sfc_precip`` the surface precip rides last (#2277).
                 return _combined_fn(state, grid, sigma_coord,
-                                    phys_state=None, forcing=forcing_data)
+                                    phys_state=None, forcing=forcing_data,
+                                    return_sfc_precip=return_sfc_precip)
+
+            _amip_physics_fn._emits_sfc_precip = True
 
             # #405: thread the prognostic PhysicsState carry on the leapfrog
             # path — pass the COMBINED fn DIRECTLY (its (state, grid, sigma,
@@ -17057,6 +17062,28 @@ class ModelDriver:
             _lw = (_rad.lw_flux_down[:, -1] - _rad.lw_flux_up[:, -1])
             return _sw.reshape(shape_2d), _lw.reshape(shape_2d)
 
+        # Surface precip accumulators (#2277), full physics only: sum of the
+        # step's rate x DT [kg/m^2] since the last reseed, per coupling segment
+        # and per diagnostic window.  ``frozen`` None = some step's frozen part
+        # was unknown; ``ok`` False = some step published no precip (an
+        # integrator path that cannot integrate it).  Not checkpointed: a
+        # restart starts a fresh partial segment over the steps it takes.
+        def _sp_acc_new():
+            return {"p": None, "frozen": 0.0, "n": 0, "ok": True}
+
+        def _sp_acc_add(acc, sfc):
+            acc["n"] += 1
+            if sfc is None:
+                acc["ok"] = False
+                return
+            _p, _pf = sfc
+            acc["p"] = _p * DT if acc["p"] is None else acc["p"] + _p * DT
+            acc["frozen"] = (None if (_pf is None or acc["frozen"] is None)
+                             else acc["frozen"] + _pf * DT)
+
+        _sp_seg = _sp_acc_new()
+        _sp_diag = _sp_acc_new()
+
         for step in range(start_step, n_steps_total):
             self._current_day = START_DAY + (step + 1) * DT / 86400.0
 
@@ -17077,26 +17104,35 @@ class ModelDriver:
                         self._carry_aux = {}
                     self._carry_aux["held_sw_net_sfc"] = _sw_net
                     self._carry_aux["held_lw_net_sfc"] = _lw_net
-                    # Surface precipitation export: the spectral lane recomputes
-                    # only the surface RADIATION at the coupling boundary (above),
-                    # not an accumulated precip rate.  Stash an EXPLICIT zero
-                    # seg_precip (not a silent absence — the coupler's
-                    # require_surface_radiation_aux guard forbids the SILENT
-                    # zero-fill that would go unnoticed).  This is EXACT for the
-                    # slab / two-layer ocean (no prognostic salinity, so P-E is
-                    # unused); a 3-D dynamic ocean on the spectral grid is gated
-                    # off (run_coupled), so no freshwater budget depends on it.
-                    # Accumulating the true segment precip through the spectral
-                    # step is the follow-up for a coupled spectral dynamic ocean.
-                    self._carry_aux["seg_precip"] = jnp.zeros_like(_sw_net)
-                    # nothing falls, nothing frozen (F29: the coupler needs it)
-                    self._carry_aux["seg_precip_frozen"] = jnp.zeros_like(_sw_net)
-                    if not getattr(self, "_logged_spectral_precip", False):
-                        logger.info(
-                            "  Coupled spectral lane: surface precip export is "
-                            "0 (exact for the slab ocean; the spectral 3-D ocean "
-                            "is gated). Radiation is exported.")
-                        self._logged_spectral_precip = True
+                    # Surface precipitation export [kg/m^2/s, +down] (#2277):
+                    # the segment-MEAN rate over the steps since the last
+                    # boundary (the compiled lanes' segment_accum_to_rate
+                    # semantics), from the precip each step's physics applied.
+                    # Its frozen part is None when a precipitating module does
+                    # not publish one -- the coupler then refuses
+                    # (require_surface_radiation_aux).  The dry legacy path
+                    # precipitates nothing: an exact zero.
+                    if _full_physics:
+                        if not _sp_seg["ok"] or _sp_seg["p"] is None:
+                            raise RuntimeError(
+                                "coupled spectral lane: a step since the last "
+                                "coupling boundary published no surface "
+                                "precipitation (model._sfc_precip is None: the "
+                                "step path does not integrate it, e.g. the "
+                                "semi-implicit RK); run the driver's explicit "
+                                "ssp_rk54 or leapfrog_si integrator.")
+                        _seg_s = _sp_seg["n"] * DT
+                        self._carry_aux["seg_precip"] = (
+                            _sp_seg["p"] / _seg_s).reshape(shape_2d)
+                        self._carry_aux["seg_precip_frozen"] = (
+                            None if _sp_seg["frozen"] is None
+                            else (_sp_seg["frozen"] / _seg_s).reshape(shape_2d))
+                        _sp_seg = _sp_acc_new()
+                    else:
+                        self._carry_aux["seg_precip"] = jnp.zeros_like(_sw_net)
+                        # nothing falls, nothing frozen (F29: the coupler needs it)
+                        self._carry_aux["seg_precip_frozen"] = jnp.zeros_like(
+                            _sw_net)
                     self._segment_callback(self, self._current_day, 86400.0)
                 _last_coupling_day = _cd_int
 
@@ -17190,6 +17226,9 @@ class ModelDriver:
             # / ssp_rk3 path, where this is a byte-identical no-op).
             if _spectral_prognostic:
                 _spectral_phys_state = self.model._phys_state
+            if _full_physics:
+                _sp_acc_add(_sp_seg, self.model._sfc_precip)
+                _sp_acc_add(_sp_diag, self.model._sfc_precip)
 
             if DIAG_INTERVAL > 0 and (step + 1) % DIAG_INTERVAL == 0:
                 elapsed_day = (step + 1) * DT / 86400.0
@@ -17225,6 +17264,19 @@ class ModelDriver:
                 _ts["max_wind"].append(max_wind)
                 _ts["dry_mass_ps"].append(mean_ps)
                 _ts["T_finite"].append(T_finite)
+                if _full_physics:
+                    # Area-weighted global-mean surface precip [mm/day] over
+                    # this diagnostic window (#2277); NaN when a step
+                    # published none.
+                    from legoesm.diagnostics.energy_budget import (
+                        area_weighted_mean)
+                    _ts.setdefault("precip", []).append(
+                        float(area_weighted_mean(
+                            _sp_diag["p"] / (_sp_diag["n"] * DT),
+                            self.grid.grid_area)) * 86400.0
+                        if _sp_diag["ok"] and _sp_diag["p"] is not None
+                        else float("nan"))
+                    _sp_diag = _sp_acc_new()
 
                 elapsed = time.time() - t_start
                 rate = elapsed_day / (elapsed + 1e-10)
@@ -17291,6 +17343,16 @@ class ModelDriver:
         # `DiagnosticCollector.save` for the keys we actually populate;
         # other keys are filled with NaN of the same length so the
         # downstream consumer can iterate without ``KeyError``.
+        if _full_physics and not _ts["days"]:
+            # Run shorter than one diagnostic interval: its single end-of-run
+            # sample carries the run-mean precip (#2277).
+            from legoesm.diagnostics.energy_budget import area_weighted_mean
+            _ts["precip"] = [
+                float(area_weighted_mean(
+                    _sp_diag["p"] / (_sp_diag["n"] * DT),
+                    self.grid.grid_area)) * 86400.0
+                if _sp_diag["ok"] and _sp_diag["p"] is not None
+                else float("nan")]
         self._save_lightweight_timeseries(_ts, run_status, t_start)
         return run_status
 
@@ -17388,6 +17450,9 @@ class ModelDriver:
                 "max_wind": [u_final],
                 "dry_mass_ps": [ps_final],
                 "T_finite": [T_finite],
+                # the run-mean precip the spectral loop passes (#2277)
+                **({"precip": ts["precip"]}
+                   if len(ts.get("precip", ())) == 1 else {}),
             }
             n = 1
         nan = np.full(n, np.nan, dtype=np.float64)

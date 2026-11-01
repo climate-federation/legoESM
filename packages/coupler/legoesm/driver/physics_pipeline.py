@@ -41,6 +41,8 @@ from legoesm.forcing.surface_utils import (
     blend_surface_temperature,
     blended_surface_albedo,
 )
+from legoesm.core.bulk_flux import (LARGE_YEAGER_WIDTH_DEFAULTS, NCAR_CD_CUTOFF_WIDTH,
+                                    NCAR_DTHV_WIDTH, NCAR_NEUTRAL_WIDTH)
 from legoesm.core.grid_adapters import SingleColumnGrid, make_adapter
 from legoesm.core.physics_output import PhysicsOutput  # shared tendency pytree (moved to core)
 
@@ -1314,10 +1316,19 @@ class PhysicsPipeline:
             and u.shape == shape_3d and v.shape == shape_3d
         )
         u_conv_col = v_conv_col = None
-        if _ctr.is_cmt_capable:
+        # Only the opt-in WRF KF-Eta variant reads winds; the smooth KF
+        # default keeps main's inputs (no winds).
+        _kf_wrf_winds = (self._conv_scheme == "kain_fritsch"
+                         and _conv_cfg.variant == "wrf_kfeta")
+        if _ctr.is_cmt_capable or _kf_wrf_winds:
             if _winds_on_t_grid:
                 u_conv_col = ad.flatten_3d(u)
                 v_conv_col = ad.flatten_3d(v)
+            elif not _ctr.is_cmt_capable:
+                # Kain-Fritsch needs the real winds (TIMEC, shear): no zero fallback.
+                raise ValueError(
+                    "convection: kain_fritsch_variant='wrf_kfeta' needs the winds on the T grid "
+                    f"(got u {None if u is None else u.shape}, expected {shape_3d})")
             else:
                 u_conv_col = jnp.zeros((ad.ncol, nlev), dtype=T_col.dtype)
                 v_conv_col = jnp.zeros((ad.ncol, nlev), dtype=T_col.dtype)
@@ -1550,6 +1561,15 @@ class PhysicsPipeline:
                     moisture_convergence=mc_col,
                     **_extra_conv,
                 )
+            elif self._conv_scheme == "emanuel":
+                # Emanuel: CONVECT FU/FV (read only with enable_cmt).
+                conv_out, conv_prog_out = self.convection_fn(
+                    T=T_col, q_v=q_v_col,
+                    p_full=p_full_col, p_half=p_half_col,
+                    conv_prog_profile=conv_prog,
+                    dt=dt, config=_conv_cfg,
+                    u=u_conv_col, v=v_conv_col,
+                )
             elif _ctr.is_cmt_capable:
                 if _ctr.is_mc_consumer:
                     # Tiedtke: CMT winds + moisture convergence.
@@ -1587,11 +1607,13 @@ class PhysicsPipeline:
                     T=T_col, q_v=q_v_col,
                     p_full=p_full_col, p_half=p_half_col,
                     w_grid=w_grid_col,
+                    u=u_conv_col, v=v_conv_col,
                     conv_prog_profile=conv_prog,
                     dt=dt, config=_conv_cfg,
                 )
             else:
-                # Emanuel: plain profile carry.
+                # Plain profile carry (no current scheme: Emanuel has its own
+                # branch above since #2266).
                 conv_out, conv_prog_out = self.convection_fn(
                     T=T_col, q_v=q_v_col,
                     p_full=p_full_col, p_half=p_half_col,
@@ -1819,6 +1841,12 @@ class PhysicsPipeline:
             _bl_conv_q = dq_v_dt_conv + (
                 dq_c_dt_conv if _ctr.detrains_to_cloud
                 else jnp.zeros_like(dq_v_dt_conv))
+            # detrained precipitation handed to the rain/snow species stays
+            # in the column (IFS PSNDE)
+            for _detr in (getattr(conv_out, "dq_r_detr_dt", None),
+                          getattr(conv_out, "dq_s_detr_dt", None)):
+                if _detr is not None:
+                    _bl_conv_q = _bl_conv_q + ad.unflatten_3d(_detr)
             _bl_conv = ledger_entry(_bl_conv_q, dT_dt_conv, p_s, _bl_dsigma,
                                     area=self._ledger_area)
 
@@ -1873,6 +1901,18 @@ class PhysicsPipeline:
                     jnp.sum(dq_r_dt_conv * _dp_r / constants.g, axis=-1),
                     0.0)  # (..., n, n) kg/m2/s in-updraft rain to the surface
                 precip = precip + precip_conv_rain
+            # Detrained precipitation (IFS PSNDE) goes to the host's rain and
+            # snow species, as CUDTDQN hands it to the grid-scale cloud
+            # scheme; its condensation heat is already in dT_dt_conv.
+            _detr_r = getattr(conv_out, "dq_r_detr_dt", None)
+            _detr_s = getattr(conv_out, "dq_s_detr_dt", None)
+            if _detr_r is not None or _detr_s is not None:
+                if q_s is None:
+                    raise ValueError(
+                        "convection detrains rain and snow (IFS PSNDE) but "
+                        "this run carries no snow species")
+                dq_r_dt = dq_r_dt + ad.unflatten_3d(_detr_r)
+                dq_s_dt = dq_s_dt + ad.unflatten_3d(_detr_s)
         else:
             # Convective precip = the column-net VAPOUR sink of the convective
             # tendency (mass-EXACT for every adjustment scheme: water removed
@@ -4170,6 +4210,7 @@ def _resolve_convection(config):
             # field gets the scheme default, not the legacy closure).
             use_ifs_cape_closure=getattr(
                 config, 'bechtold_use_ifs_cape_closure', True),
+            use_ifs_ascent=getattr(config, 'bechtold_use_ifs_ascent', False),
             # IFS Kessler sub-cloud rain evaporation (fallback True =
             # the scheme default since the 2026-07-16 flip).
             use_ifs_subcloud_evap=getattr(
@@ -4194,7 +4235,6 @@ def _resolve_convection(config):
                 config, 'bechtold_use_ifs_shallow_closure', False),
             use_ifs_capdcycl=getattr(
                 config, 'bechtold_use_ifs_capdcycl', True),
-            use_ifs_ascent=config.bechtold_use_ifs_ascent,
             ifs_shallow_nosupply=config.bechtold_ifs_shallow_nosupply,
             use_ifs_land_rhebc=getattr(
                 config, 'bechtold_use_ifs_land_rhebc', True),
@@ -4218,6 +4258,14 @@ def _resolve_convection(config):
         if (_pe is not None and _pe > 0.0
                 and hasattr(conv_config, "precip_efficiency")):
             conv_config = conv_config._replace(precip_efficiency=_pe)
+        if scheme == "kain_fritsch":
+            conv_config = conv_config._replace(
+                variant=config.kain_fritsch_variant)
+        # Emanuel FU/FV (#2266): an explicit emanuel_enable_cmt wins; None
+        # keeps EmanuelConfig.enable_cmt.
+        _em_cmt = getattr(config, "emanuel_enable_cmt", None)
+        if scheme == "emanuel" and _em_cmt is not None:
+            conv_config = conv_config._replace(enable_cmt=bool(_em_cmt))
         if scheme == "zhang_mcfarlane":
             conv_config = conv_config._replace(
                 land_fraction=config.zm_land_fraction,
@@ -4448,6 +4496,10 @@ def thread_morrison_scalars(config, scheme, micro_config):
          getattr(config, "morrison_N_i0", None)),
         ("morrison_cooper_a", "cooper_a",
          getattr(config, "morrison_cooper_a", None)),
+        ("morrison_mg2_drop_readjust_log_width", "mg2_drop_readjust_log_width",
+         getattr(config, "morrison_mg2_drop_readjust_log_width", None)),
+        ("morrison_mg2_drop_early_reset_log_width", "mg2_drop_early_reset_log_width",
+         getattr(config, "morrison_mg2_drop_early_reset_log_width", None)),
     ):
         if _val is not None and not math.isclose(
                 float(_val), float(_ExpCfg._field_defaults[_exp_name]),
@@ -4697,6 +4749,17 @@ def apply_surface_flux_config(tc, config):
     stc = getattr(config, "surface_thermo_convention", "legoesm")
     sss = getattr(config, "surface_stability_scheme", "dyer1974")
     zml = getattr(config, "surface_z_ref_model_level", None)
+    # Large-Yeager smooth-switch widths (#2241): only values that differ from
+    # the shared default are injected, so a default run keeps the fast path.
+    lyw = {
+        "large_yeager_neutral_width": getattr(
+            config, "surface_large_yeager_neutral_width", NCAR_NEUTRAL_WIDTH),
+        "large_yeager_dthv_width": getattr(
+            config, "surface_large_yeager_dthv_width", NCAR_DTHV_WIDTH),
+        "large_yeager_cd_cutoff_width": getattr(
+            config, "surface_large_yeager_cd_cutoff_width", NCAR_CD_CUTOFF_WIDTH),
+    }
+    lyw = {k: v for k, v in lyw.items() if v != LARGE_YEAGER_WIDTH_DEFAULTS[k]}
 
     _qsal_req = getattr(config, "surface_ocean_q_sfc_saline", None)
     # None = "on wherever the lane can honour it".  CAPABILITY, not grid: the
@@ -4725,7 +4788,7 @@ def apply_surface_flux_config(tc, config):
             f"{getattr(getattr(config, 'grid', None), 'grid_type', '?')!r}")
     if (sbs == "constant" and gzi is None and stc == "legoesm"
             and sss == "dyer1974" and zml is None and _qsal_req is None
-            and not qsal):
+            and not qsal and not lyw):
         # The two surface switches gate this fast path on whether they have
         # anything to SAY, not on whether they are true:
         #   zml is None  -> the experiment stated nothing, so leaving the
@@ -4786,6 +4849,8 @@ def apply_surface_flux_config(tc, config):
         # driven by the one --surface-stability-scheme flag) so the
         # interface cannot split Dyer-vs-SHEBA across its two sides.
         surf = surf._replace(stability_scheme=sss)
+    if lyw:
+        surf = surf._replace(**lyw)
     return tc._replace(**{tc.scheme: sub._replace(surface=surf)})
 
 

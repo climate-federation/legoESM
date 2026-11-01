@@ -160,6 +160,7 @@
   "e3sm_cam_pgwv": 0,
   "e3sm_cam_source": "orographic",
   "e3sm_cam_taubgnd": 0.0015,
+  "emanuel_enable_cmt": null,
   "emissivity_ice": 0.97,
   "emissivity_land": 0.95,
   "enable_latlon_spmd": false,

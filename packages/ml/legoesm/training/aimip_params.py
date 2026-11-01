@@ -1302,6 +1302,8 @@ def resolved_inactive_fields(physics_config, *,
     * McFarlane ``h_topo``: the scalar fallback height, read only when no
       per-column subgrid-orography field is wired (mcfarlane.py).
       ``subgrid_orography`` = the driver wired one (production: SSO file).
+    * Emanuel ``cu_coefficient`` (CONVECT CU): read only by the momentum
+      transport, i.e. with ``EmanuelConfig.enable_cmt`` (emanuel.py).
     """
     from legoesm.atmosphere.physics.microphysics.config import (
         resolve_warm_rain_scheme)
@@ -1323,6 +1325,10 @@ def resolved_inactive_fields(physics_config, *,
             not in _KK2000_WARM_RAIN):
         out |= {f"atm.micro.MorrisonConfig.{f}"
                 for f in ("autocon_fact", "accre_enhan_fact")}
+    conv = getattr(physics_config, "convection", None)
+    if (getattr(conv, "scheme", None) == "emanuel"
+            and not conv.emanuel.enable_cmt):
+        out.add("atm.conv.EmanuelConfig.cu_coefficient")
     gwd = getattr(physics_config, "gravity_wave_drag", None)
     if subgrid_orography and "mcfarlane" in str(
             getattr(gwd, "scheme", "")).split("+"):

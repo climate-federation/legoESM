@@ -174,7 +174,14 @@ def test_experiment_config_cli_and_threading():
 def test_production_deck_selects_droplet_numbers():
     from scripts.run.run_amip import build_arg_parser
     from legoesm.driver.run_config_yaml import load_yaml_config
+    # Production = aerosol-diagnosed droplet number (user 2026-11-01, #2216);
+    # the prognostic number is the non-default arm deck.
     keys = load_yaml_config("config/amip/amip_production.yaml", build_arg_parser())
+    assert keys["morrison_prognostic_droplet_number"] is False
+    assert keys["cam6_aerosol_dir"] == "/work/bb1596/b309178/diffESM/legoesm_ap/data/cam6_optics"
+    assert keys["aerosol_ccn"] is True
+    keys = load_yaml_config("config/amip/amip_production_prognostic_nc.yaml",
+                            build_arg_parser())
     assert keys["morrison_prognostic_droplet_number"] is True
     assert keys["cam6_aerosol_dir"] == "/work/bb1596/b309178/diffESM/legoesm_ap/data/cam6_optics"
     assert keys["aerosol_ccn"] is False

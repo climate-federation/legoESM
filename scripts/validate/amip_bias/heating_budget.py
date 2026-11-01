@@ -575,7 +575,15 @@ def main(argv=None):
                          "--day and accumulate every physics call (window-mean process rows); "
                          "dynamics = total change - applied physics, checked against the "
                          "run's checkpoint at day+N")
+    ap.add_argument("--nc-budget", action="store_true",
+                    help="#2216: cloud-droplet number budget by process over one step "
+                         "(nc_budget.py); writes npz + png into --out")
+    ap.add_argument("--no-graupel-riming", action="store_true",
+                    help="#2216 option 2, with --nc-budget only: the same step with the "
+                         "scheme's do_graupel_riming=False (graupel collecting cloud water off)")
     args = ap.parse_args(argv)
+    if args.no_graupel_riming and not args.nc_budget:
+        ap.error("--no-graupel-riming needs --nc-budget")
     t0 = time.time()
     out_dir = Path(args.out or (H.ROOT / "_tools" / "heating_budget"))
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -598,6 +606,12 @@ def main(argv=None):
         MPASPrimitiveEquationModel)
 
     rec: dict[str, np.ndarray] = {}
+    calls: dict[str, list] = {}
+    micro_calls: list = []
+    if args.nc_budget:
+        import nc_budget as NCB
+        NCB.install_micro_spy(micro_calls, graupel_riming=not args.no_graupel_riming)
+        NCB.report_terrain_drift()
     fns: dict = {}
     win_mode = args.window_days is not None
     acc: dict[str, np.ndarray] = {}
@@ -620,6 +634,7 @@ def main(argv=None):
                 t = res if hasattr(res, "dT_dt") else res[0]   # tendencies are NamedTuples
                 if not isinstance(t.dT_dt.data, jax.core.Tracer):   # setup traces under jit
                     rec[name] = np.asarray(t.dT_dt.data, dtype=np.float64)
+                    calls.setdefault(name, []).append(t)     # every eager call (--nc-budget)
                 elif win_mode:
                     jax.debug.callback(functools.partial(_acc, name), t.dT_dt.data)
                     for _tr, _tag in WINDOW_TRACERS:
@@ -724,6 +739,10 @@ def main(argv=None):
     if args.rlutcs_replay:
         return rlutcs_replay(fns, state, mesh, sig, forcing, phys_state, rad_int, real_backend,
                              args.ref_run or args.run, args.profile_era5, args.target)
+    if args.nc_budget:
+        return NCB.run(model, state, DT, pf_full, forcing, phys_state, calls, micro_calls,
+                       out_dir, f"{args.run}_d{args.day:04d}"
+                       + ("_nograupelrime" if args.no_graupel_riming else ""))
     if args.cloud_levers:
         return cloud_levers(fns, state, mesh, sig, forcing, phys_state, rad_int,
                             real_backend, n_times=args.n_times)

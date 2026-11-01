@@ -182,7 +182,9 @@ def main():
         dq_au, _, _ = autoconversion_sb2001(
             q_c_ic, q_r_ic, N_c_eff, rho, ramp_top=cfg.sb2001_autoconv_ramp_top)
         dq_au = dq_au * cf_eff
-        dq_ac = accretion_sb2001(q_c_ic, q_r_ic, rho) * cf_eff
+        dq_ac = accretion_sb2001(
+            q_c_ic, q_r_ic, rho, qr_ramp_top=cfg.sb2001_accretion_qr_ramp_top,
+            qc_ramp_top=cfg.sb2001_accretion_qc_ramp_top) * cf_eff
     elif scheme == "seifert_beheng":
         dq_au, _, _ = autoconversion_sb(q_c_ic, N_c_eff, rho, cfg.k_au, cfg.x_star,
                                         cfg.autoconversion_sharpness)
@@ -247,7 +249,9 @@ def main():
         elif scheme == "seifert_beheng_sb2001":
             d_au, _, _ = autoconversion_sb2001(
                 qci, qri, N_c_eff, rhox, ramp_top=cfg.sb2001_autoconv_ramp_top)
-            d_ac = accretion_sb2001(qci, qri, rhox)
+            d_ac = accretion_sb2001(
+                qci, qri, rhox, qr_ramp_top=cfg.sb2001_accretion_qr_ramp_top,
+                qc_ramp_top=cfg.sb2001_accretion_qc_ramp_top)
         else:
             d_au, _, _ = autoconversion_sb(qci, N_c_eff, rhox, cfg.k_au,
                                            cfg.x_star, cfg.autoconversion_sharpness)

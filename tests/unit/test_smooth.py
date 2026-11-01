@@ -5,7 +5,7 @@ import jax.numpy as jnp
 import pytest
 
 from legoesm.core.smooth import (
-    pnorm_smooth_min, sigmoid_switch, smooth_max, smooth_min, smooth_clamp,
+    pnorm_smooth_min, positive_part_c1, sigmoid_switch, smooth_max, smooth_min, smooth_clamp,
     smooth_relu, smooth_abs, smoothstep_cubic, smoothstep_quintic,
 )
 
@@ -104,6 +104,7 @@ def test_infinite_sharpness_is_the_exact_hard_limit():
     assert jnp.array_equal(smooth_max(x, y, inf), jnp.maximum(x, y))
     assert jnp.array_equal(smooth_min(x, y, inf), jnp.minimum(x, y))
     assert jnp.array_equal(smooth_relu(x, inf), jnp.maximum(x, 0.0))
+    assert jnp.array_equal(positive_part_c1(x, inf), jnp.maximum(x, 0.0))
     assert jnp.array_equal(smooth_clamp(x, -1.0, 1.0, inf), jnp.clip(x, -1.0, 1.0))
     import numpy as np
     assert jnp.array_equal(sigmoid_switch(x, np.float64(inf)), (x >= 0).astype(x.dtype))
@@ -121,3 +122,19 @@ def test_pnorm_smooth_min():
     assert float(out[3]) == 0.0 and float(out[4]) == 0.0
     g = jax.grad(lambda x: pnorm_smooth_min(x, jnp.array(2.0), 50.0, 1e-10))(jnp.array(2.0))
     assert bool(jnp.isfinite(g)) and 0.0 < float(g) < 1.0
+
+
+def test_positive_part_c1_is_zero_below_and_c1():
+    """Exactly 0 for x <= 0 (softplus is not), exactly x at and above 1/s,
+    never above max(x, 0), and value and slope continuous at both joins."""
+    s = 4.0
+    x = jnp.array([-1.0, 0.0, 0.1, 0.25, 0.5, 2.0])
+    y = positive_part_c1(x, s)
+    assert jnp.array_equal(y[:2], jnp.zeros(2))
+    assert jnp.array_equal(y[3:], x[3:])
+    assert jnp.allclose(y[2], 0.4 ** 2 * 1.6 / s)
+    assert jnp.all(y <= jnp.maximum(x, 0.0))
+    g = jax.vmap(jax.grad(lambda t: positive_part_c1(t, s)))
+    for j in (0.0, 1.0 / s):
+        lo, hi = g(jnp.array([j - 1e-7, j + 1e-7]))
+        assert abs(float(hi - lo)) < 1e-5

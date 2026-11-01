@@ -1,0 +1,20 @@
+# Production deck + CAM6 MG2 prognostic droplet number (#2216), non-default arm.
+#
+# The 2026-10-24 production setting: droplet number prognostic, activation =
+# CAM6 microp_aero_run on the prescribed PPE-000 MAM4 climatology
+# (cam6_aerosol_dir, inherited), and the aerosol-diagnosed droplet number off
+# (CAM6 MG2 cannot run both).  Production went back to the aerosol-diagnosed
+# number on 2026-11-01 (user decision, #2216: Jan 1979 30-day rsut bias vs
+# CERES-EBAF -7.99 W/m2 with this arm, +0.78 with production).  Everything
+# else is amip_production.yaml.
+include: amip_production.yaml
+aerosol_ccn: false
+morrison_prognostic_droplet_number: true
+morrison_mg2_drop_readjust_log_width: 0.01  # NAMED, equals the code default:
+                            # RULE 5 width of MG2's final droplet mean-size
+                            # readjust (0 = MG2's hard clip; #2216, the
+                            # cloud-optics width)
+morrison_mg2_drop_early_reset_log_width: 0.01  # NAMED, equals the code
+                            # default: RULE 5 width of MG2's early droplet size
+                            # reset before autoconversion (0 = MG2's hard clip;
+                            # #2216)

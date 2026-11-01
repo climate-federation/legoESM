@@ -149,6 +149,23 @@ def smooth_relu(x: jax.Array, sharpness: float = 100.0) -> jax.Array:
     return jax.nn.softplus(x * sharpness) / sharpness
 
 
+def positive_part_c1(x: jax.Array, sharpness: float) -> jax.Array:
+    """C1 positive part, EXACTLY 0 for ``x <= 0`` and exactly ``x`` above ``1/s``.
+
+    ``0`` for ``x <= 0``; ``t**2 (2 - t)/s`` with ``t = s*x`` on
+    ``0 < x < 1/s`` (value and slope match at both joins); ``x`` above.
+    Monotone and never above ``max(x, 0)`` (the shortfall is at most
+    ``4/(27 s)``, at ``x = 1/(3s)``).  Unlike :func:`smooth_relu` (softplus,
+    positive everywhere, offset everywhere) it creates nothing from a
+    non-positive input and is exact for ``x >= 1/s``; exactly ``max(x, 0)``
+    at ``sharpness = inf``.
+    """
+    if _hard(sharpness):
+        return jnp.maximum(x, 0.0)
+    t = jnp.clip(x * sharpness, 0.0, 1.0)
+    return jnp.where(t >= 1.0, x, t * t * (2.0 - t) / sharpness)
+
+
 def smooth_abs(x: jax.Array, epsilon: float = 1e-7) -> jax.Array:
     """Smooth approximation to |x|.
 

@@ -115,6 +115,9 @@ class AMIPExperimentConfig(NamedTuple):
     # the flat schema so the to_amip_config/from_amip_config round-trip cannot
     # silently drop an explicit selection across a checkpoint/restart boundary.
     bechtold_use_ifs_cape_closure: bool = True
+    # Faithful CUMASTRN path (BechtoldConfig.use_ifs_ascent); flat schema so
+    # the AMIP round-trip carries it across a restart.
+    bechtold_use_ifs_ascent: bool = False
     # IFS Kessler sub-cloud rain evaporation (cuflxn.F90; default ON
     # 2026-07-16) — in the flat schema so round-trips cannot drop it.
     bechtold_use_ifs_subcloud_evap: bool = True
@@ -130,7 +133,6 @@ class AMIPExperimentConfig(NamedTuple):
     bechtold_use_ifs_capdcycl: bool = True
     bechtold_use_ifs_land_rhebc: bool = True
     bechtold_use_ifs_snow_melt: bool = True
-    bechtold_use_ifs_ascent: bool = False
     bechtold_ifs_shallow_nosupply: str = "zero"
     # Convective in-updraft rain-split efficiency [0,1] (shared across the
     # mass-flux schemes); 0 = disabled (legacy no split).
@@ -232,6 +234,7 @@ class AMIPExperimentConfig(NamedTuple):
     morrison_do_graupel: bool = True  # Morrison graupel category (CAM6 MG2 has none)
     zm_land_fraction: str = "required"  # ZM land mask policy: "required" | "none" (aquaplanet)
     zm_transport_cloud_tracers: bool = True  # ZM convtran of carried cloud/precip tracers (CAM6)
+    kain_fritsch_variant: str = "smooth"  # KF: "smooth" (default) | "wrf_kfeta" (opt-in WRF port, #2280)
 
 
 def config_to_dict(config) -> dict:
