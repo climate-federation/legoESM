@@ -35,5 +35,9 @@ zm_ke: null
 zm_dmpdz: null
 zm_tau: null
 zm_capelmt: null
+zm_momcu: null
+zm_momcd: null
+zm_tiedke_add: null
+zm_alfa: null
 zm_detrain_phase_width_K: null
 zm_detrain_number_width_kgkg_s: null
