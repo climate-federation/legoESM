@@ -341,6 +341,7 @@ clubb_gamma_coef: 0.308
 clubb_gamma_coefb: 0.32
 clubb_beta: 2.4
 clubb_c_k10: 0.5
+clubb_c6rtb: 6.0
 
 # ---- gravity-wave drag ---------------------------------------------------------
 # CAM6 f09 L32 (non-WACCM, nlev < 60) runs OROGRAPHIC drag ONLY: build-namelist

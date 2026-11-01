@@ -659,13 +659,14 @@ CLUBB_SCALAR_FIELDS = {
     "clubb_gamma_coefb": "gamma_coefb",
     "clubb_beta": "beta",
     "clubb_c_k10": "c_K10",
+    "clubb_c6rtb": "C6rtb",
 }
 # Read only by the prognostic CLUBB path (advance_clubb_core and its
 # advance_xp2_xpyp / advance_wp2_wp3 / compute_clubb_diagnostics); the
 # diagnostic path (clubb_turbulence) reads gamma_coef and beta only.
 CLUBB_PROGNOSTIC_ONLY = frozenset({
     "clubb_c14", "clubb_c8", "clubb_c11", "clubb_c11b", "clubb_gamma_coefb",
-    "clubb_c_k10"})
+    "clubb_c_k10", "clubb_c6rtb"})
 
 
 def resolve_sea_ice_albedo_scheme(cfg) -> str:
@@ -2170,6 +2171,8 @@ class ExperimentConfig(NamedTuple):
     surface_large_yeager_neutral_width: float = NCAR_NEUTRAL_WIDTH
     surface_large_yeager_dthv_width: float = NCAR_DTHV_WIDTH
     surface_large_yeager_cd_cutoff_width: float = NCAR_CD_CUTOFF_WIDTH
+    # CLUBB_SCALAR_FIELDS member appended at the tuple end (positional ABI).
+    clubb_c6rtb: float | None = None
 
     def _liquid_partition_resolved(self) -> bool:
         """Is CLUBB's cloud-liquid exchange selected, by ANY route?
