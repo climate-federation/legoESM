@@ -193,6 +193,27 @@ def test_qsmall_boundary_keeps_mg2_semantics():
         np.testing.assert_array_equal(np.asarray(got), -5.0 * np.ones(2))
 
 
+@pytest.mark.parametrize("width", [WIDTH, 1.0])
+def test_mean_diameter_bounds_as_documented(width):
+    """Few droplets (50 um side) and many (2 um side, and past the number cap):
+    D >= 2 um always; D <= 50 um x exp(w ln(1 + 25^(-1/w))) (= 50 um to
+    round-off at the default)."""
+    q = jnp.full(4, 1.0e-4)
+    n = jnp.asarray([1.0e-9, 1.0, 1.0e12, 1.0e30])
+    rho = jnp.ones(4)
+    _, pgam, lam, nc = W.mg2_droplet_psd(q, n, rho, number_cap_log_width=width,
+                                         slope_log_width=width)
+    d = np.asarray((pgam + 1.0) / lam)
+    over = width * np.log1p(25.0 ** (-1.0 / width))
+    assert np.all(d >= 2.0e-6 * (1 - 1e-12))
+    assert np.all(d <= 50.0e-6 * np.exp(over) * (1 + 1e-12))
+    assert np.asarray(nc).max() <= 1.0e-4 / 1.0e-20
+    if width == 1.0:
+        assert d[0] > 51.9e-6        # the documented excursion is reached
+    else:
+        assert d.max() <= 50.0e-6 * (1 + 1e-12)
+
+
 def _near_2um_bound(u):
     """Readjust inputs whose mean diameter sits ``3*u*WIDTH`` in ln N from the
     2 um bound (u > 0: too many droplets, the side MG2 clips)."""

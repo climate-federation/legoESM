@@ -1274,15 +1274,21 @@ def mg2_droplet_number_readjust(q_c_post, N_c_post, N_c, cf, rho, dt, dN_c_dt, *
     limits it is a jump of up to the rounding offset).  Measured at the default 0.01 on the
     prognostic-number oracle fixtures (x64; readjust inputs of the real call):
     the readjusted number departs from MG2's by up to 1.4e-2 relative (7.1e-3
-    in cells MG2 leaves untouched), the whole-call droplet tendency by up to
-    9.7e-3 of the column's largest MG2 droplet tendency (per-column gaps
-    stored in tests/atmosphere/microphysics/unit/
-    test_morrison_mg2_drop_readjust_smooth.py).  The bounds still hold: the
-    rounded limits never pass the hard ones (LogSumExp max >= max, min <=
-    min), so the mean diameter stays in [2, 50] um and the number at or
-    below qcic/1e-20 kg (measured excursion <= 2e-15 in ln D, round-off);
-    what changes is that cells within a few ``log_width`` of a bound (in ln
-    lambda) are moved inward too.
+    in cells MG2 leaves untouched); with every other switch at its hard
+    limit the readjust alone moves the whole-call droplet tendency by up to
+    9.7e-3 of the column's largest MG2 droplet tendency (icelim column 0).
+    At the prognostic arm's resolved defaults the total gap to MG2 reaches
+    1.10 in the melt fixture, from the other approved smoothings (the
+    readjust's share there is <= 1e-14).  Both per-column tables (GAP,
+    ARM_GAP) are stored in tests/atmosphere/microphysics/unit/
+    test_morrison_mg2_drop_readjust_smooth.py.  Bounds: the number stays at
+    or below qcic/1e-20 kg and the mean diameter at or above 2 um for every
+    width (LogSumExp min <= min); the 50 um maximum can be passed by at most
+    ``log_width*ln(1 + 25**(-1/log_width))`` in ln D (the clamp's upper
+    rounding reaching its lower bound, ln 25 away): 1e-140 at the default
+    0.01 (measured on the fixtures: <= 2e-15, round-off), 4 % (52 um) at the
+    largest accepted width 1.  What changes at the default is that cells
+    within a few ``log_width`` of a bound (in ln lambda) are moved inward too.
     ``log_width = 0`` recovers MG2 exactly.
     """
     q_ic = jnp.minimum(jnp.maximum(q_c_post, 0.0) / cf, KK2000_CAM6_QC_MAX)
