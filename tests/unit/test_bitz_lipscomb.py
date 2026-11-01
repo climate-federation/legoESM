@@ -14,8 +14,9 @@ node), ahead of its prognostic-state integration:
 
 from __future__ import annotations
 
-import base64
-import zlib
+import importlib.util
+import json
+from pathlib import Path
 
 import jax
 import jax.numpy as jnp
@@ -458,6 +459,72 @@ def test_ice_forming_open_water_gradients_match_main_and_lane_difference():
     )
 
 
+def test_inactive_column_guard_stops_h_ice_cotangent():
+    """The helper-level plant remains bound to its cotangent mask."""
+    from legoesm.ice import bitz_lipscomb as bl
+
+    active = jnp.asarray([False] * 8 + [True] * 56)
+    h_ice = jnp.linspace(0.0, 2.0, 64, dtype=jnp.float64)
+    gradient = jax.grad(
+        lambda h: jnp.sum(bl._guard_inactive_columns(h, active, h.dtype))
+    )(h_ice)
+    assert bool(jnp.all(gradient[:8] == 0.0)), gradient
+    assert bool(jnp.all(gradient[8:] == 1.0)), gradient
+
+
+def test_cumulative_remap_reverse_mode_finite_at_zero_thickness():
+    """A discarded sub-epsilon remap has a finite zero cotangent."""
+    from legoesm.ice import bitz_lipscomb as bl
+
+    enthalpy = jnp.asarray([3.0e8, 2.9e8, 2.8e8])
+
+    def remap(thickness):
+        h_old = list(thickness)
+        content_old = list(enthalpy * thickness)
+        return bl._cumulative_remap(
+            h_old, content_old, 3, bl.nemo_source_round,
+        )
+
+    gradient = jax.grad(lambda h: jnp.sum(remap(h)))(
+        jnp.asarray([0.0, 0.0, 1.0e-300], dtype=jnp.float64)
+    )
+    assert bool(jnp.all(jnp.isfinite(gradient))), gradient
+    assert bool(jnp.all(gradient == 0.0)), gradient
+
+
+def test_si3_column_step_remap_reverse_mode_finite_at_tiny_snow():
+    """The live production remap keeps an active tiny-snow gradient finite."""
+    from legoesm.ice.bitz_lipscomb import (
+        SI3ColumnArrays,
+        SI3SurfaceForcing,
+        si3_column_step_arrays,
+    )
+    from legoesm.ice.config import SI3ThermoConfig
+    from legoesm.ice.constants_config import NEMO_SI3_CONSTANTS_CONFIG as c
+
+    zero = jnp.zeros((1,), dtype=jnp.float64)
+    zero_layers = jnp.zeros((1, 3), dtype=jnp.float64)
+    forcing = SI3SurfaceForcing(
+        qns_ice=zero, qsr_ice=zero, dqns_ice=zero, qtr_ice_top=zero,
+        t_bottom=jnp.asarray([271.27]), sss=jnp.asarray([34.7]),
+        evaporation=zero, snow_precipitation=zero, qprec_ice=zero,
+        qcn_ice_bottom=zero, qsb_ice_bottom=zero, fhld=zero, qlead=zero,
+    )
+
+    def snow_thickness(thickness):
+        state = SI3ColumnArrays(
+            jnp.asarray([0.5]), jnp.asarray([0.5]), thickness,
+            jnp.asarray([c.T0]), zero_layers,
+            jnp.asarray([[0.0, 0.0, -1.0e8]]), zero, zero_layers, zero,
+        )
+        return si3_column_step_arrays(
+            state, forcing, 3600.0, c, si3=SI3ThermoConfig(),
+        ).exit.h_snow[0]
+
+    gradient = jax.grad(snow_thickness)(jnp.asarray([3.0e-200]))
+    np.testing.assert_array_equal(np.asarray(gradient), np.asarray([1.0]))
+
+
 def test_si3_column_step_mixed_dtypes_match_lane_and_differentiate():
     """The reverse-only guards preserve 920c61d884 dtype promotion."""
     from legoesm.ice.bitz_lipscomb import (
@@ -499,6 +566,13 @@ def test_si3_column_step_mixed_dtypes_match_lane_and_differentiate():
 
     mixed = step(state, forcing(jnp.float32))
     all64 = step(state, forcing(jnp.float64))
+    expected_post_do = (
+        [1.0477559710156091e-05], [0.050002145361805514], [0.0],
+        [273.14510067184534],
+        [[305700631.51037043, 305769255.1803446, 306405736.09880507]],
+        [[0.0, 0.0, 0.0]], [0.1], [[0.1, 0.1, 0.1]], [0.0],
+    )
+    expected_exit = (*expected_post_do[:-1], [0.03771921495656193])
     for mixed_stage, all64_stage in (
         (mixed.post_do, all64.post_do), (mixed.exit, all64.exit),
     ):
@@ -506,6 +580,10 @@ def test_si3_column_step_mixed_dtypes_match_lane_and_differentiate():
             np.testing.assert_array_equal(
                 np.asarray(mixed_leaf), np.asarray(all64_leaf),
             )
+    for actual, expected in zip(mixed.post_do, expected_post_do, strict=True):
+        np.testing.assert_array_equal(np.asarray(actual), np.asarray(expected))
+    for actual, expected in zip(mixed.exit, expected_exit, strict=True):
+        np.testing.assert_array_equal(np.asarray(actual), np.asarray(expected))
 
     state32_concentration = state._replace(
         concentration=state.concentration.astype(jnp.float32),
@@ -517,16 +595,29 @@ def test_si3_column_step_mixed_dtypes_match_lane_and_differentiate():
         ).exit.concentration[0]
     )(state32_concentration.concentration)
     assert gradient.dtype == jnp.float32
-    assert bool(jnp.all(jnp.isfinite(gradient)))
+    np.testing.assert_array_equal(
+        np.asarray(gradient), np.asarray([1.0], dtype=np.float32),
+    )
 
-
-_SI3_GRADIENT_SWEEP_ORACLE_B85 = (
-    "c-rmTZA?>V6bEoDlWj&Y_>wV|DP3?1NTIkbkb2u9O&}YN31*Ik3KIrSWW4N+$QWzDz(k;eL#hw~1!RtGWTHs#EnuAT&Hx!TfKUsHAVSI<3p&S#-8wK0b73tP{=Y9LCGfOOp7PH*Cp9tx0Dy&Sgg;;3nLGD$OV6#NgdML!82;!x;%War$HT_oEJI4+jsO7YH+O>E8xB`_mhjc7m(P6V_u*6LRPfFvB4Ph_#X`wDm|Yu_B3}H~zUYbjBD^3U8tF2xnErD~O#gxJog0Pp<CMjR+#XpJ^XYp2(_Tk~pM%08<g;9dk~506udLN{e;qXI_fc#i-J)LUR`o}1LP-S6s%q-%mhz_m{-5%kCCjY$UZNk@<fo4(nO&=-Yv?WhGrx!U3Vg|y!9uSF!A8-s+_YC$YtQY8C~NO=d`GD3^$hPR<t69xE9r`x1^?OlvjS%JJOBUl&UU}k`C8VRFpXM(ONZP+?f`O!iTw@$04z+{@BG_-2LJ%{lRMb&fFWVdhB+I|G1%|ut>0-VkL%d4Q43ZCMK*`#MHB8n=h|h4zdz%-0b*&ML!nxmyL+~^ZHYQ`M^4uk-!IP|JRQzEY8rDdJ8T~rJr;G3XC6s$go&*;BRSM!StrldI!kBYm9n%<W^*x$r0YY@!Ojc&mlN~liX(TBJFxI_2m2iW0ANzzVJO(|001yEcd*|9L&BU5b2gY`u;0;Jzw>5uyHS8fEie;EZgiWp5z3Ai0&X_RiK+ij9G$11<9gB9G>a|Je$ErC*#(1gH<GSCZRH=!Shc*v6KTH$hFvB-wng6Ra;c{ZyDr@=l_pZ_Y@Mo&Piu7cU4Ff;>y#~xBwb5)m~eO3g<`*h+(GUDV{-@l9RL7eQr}@H*zW)UFf(_s-vL9yoDFj}m}9Wt(ObXcdTxEcw?-}aB*pSXhl!eKuh}WS-c&#1xgARGq71f|_H$l9HE!yY`;c^fz<OiH5!Q9y6*IY|IP4l3`$aHO@6t)F94$=EmmZ_CpWmDP@RYI6Ipv0lr~^$c-6UP#O5erttc$^Z2f2gX0mkMI_B#Loz@)yzP_W+t0AObBV88SDMN7}+6GHZ?aSzrAKVD=jwRrB=8Q+H__GD#E-MiX(h;{9a+~#zDimsgMOv(9L^;Yh<FI8gIOXalgvt6ENuRT{)@p7D1$g)aZ=Wh=DKt<-?rsz7~ZYbt#n6tqggZ+-)`kjOT<qyspwP1K~_o{l6F~TcDwd-nA=d|zdy#2)YcM8&E14(Ru?dSYG71yyt9!SzP;be@dgms74bM>V%udqI{{k~+V$YqGyppdo3ON%I_XOH*jsTDfsltH4~PV$yvlCDS1IX0W>lCj@G?jU!7vAKi&4gdf!sqZip>~{bFn3+4+?@WdLj(%azhB+I|G1%|ut=~}%NBs0rm4;}~e=y-RnLD8}`;qZyALq{B`yH3*=OhnY@h<pB?r?d-UFDN`L)S&s#=prXb0<3Po7XcZb4R4wObz^K#~<UYZi^i+riwXr;`_n6bBC;0v-HGd-q2Oy6Mwhwcq;Zg$Q|SkFgAB)yWjZ>Wj4Sg"
-)
-
-_SI3_ENTRY_GUARD_SWEEP_ORACLE_B85 = (
-    "c-rmReN4=890%}(Sg1+1sH{AbI$a)CyY7BRw`CI%lZ<LaNYv(`X_i}A5p^q1$C{ieAvAhW_q$?Ex}u5Hc2Vb7MBQpf&OF{9eo=PgtnT_<@7F)y-B#azSKscv&-ZO+1^@s<S0~R@-<dD_fTN#x7k3_~n7`-yb*{eOpRsIih*i3X#2EnqFl_FG`Bon<^ULK?DdkrVZ``4GPHkIjDd4xRkPVf*gZ?!;DQePHw`|6pmrZt}1(dB%8UBJ`a-6Oa%$#=y{^$1hyrWoj);>~A5jb?n9pnxmcbGWu006+ygns8==N$k5Fih^C-vML7JsZFvgMP<g^G<b9T>UOJMN9~bu8Fu9!yT~ap8hSc+$Nf2@e^xbMYHstx4yEDC<=Gka82ciBX<CXUhbgZ0RR9d%^k*qeg^=6nYn|02aE~#Yyg7{`W=JKJIib8%tF-^VMPdEzOZ;YVEu`LpD|{scNLk{c)uf0l&JT-mABf09W0MPzk}QXU~KN7-vIysCe0njf_?`8fSI|2eg}*R_iO-z4Eh~|%{xo(IJE|-DPr#l$Mf|T)PVIT=kC^qx_c`~+peq>iRg^p^VZ6=K$f387X1!#2Y|7;gMJ490GKp)7z_Fx003s@4*H#64=uVQ;qs?W)GRaa<i!hIM0TT}|Mh(c4_zpIC|}=m-!h}}WoAuU2uZK3d#8m3m6SJI6GY}ZH<KB)J6&upy7la<ES?tU9By5zYk$`*Ta{AD8<Jj4?S$&OXX6)^w0Aa+FaG2A9ou^FhUX(b{rbenV?N*Qa(MJwu&>!&wsF49E_{FH{M;)thglBl7e~YT{XEk5Y@aF<a-+<h%X&Yzh|~A$zm;TITF=;ipML#NlBP+rdR9uW5wCe8K86PoLDDDhviz%w*@82fsS79f?AsKTU)SWmj<4%^RGafS$(g)Tdc|iS{5SMF2Ag*hLK|*+swqPCE_h;<#e1%Qx-zihv4Y$C^JJB0-+eBpirbQ=hV=ZOZ&0$`>r1vs={4a(>^PzMTTWBOlzjil7HM6#usz$Wot!BX*T##o$p*isfUZjubly{j3Ep^=JW)yM_2hWg+&S`OlkazsJIEa{-P}RH0{{R_nmddI{SE*CGjj+1PH*UU3=8*cxMzbw2K|n~<{hOf>h|t3HMdUk<+F!2cOt}Yotja<a_48i<JEVc<hBO^mw(G0Hb>Q1q|F<89d>W{2eCGHV&YCMKCR6ifzp+1yETvZo;CUDAx#dM!;)|6-ljWuq{a4Q&ujCBUS(_IJ6g`Apx;66Aa{VVxzpeC&JWCB;tv"
-)
+    state32_energy = state._replace(
+        e_ice=state.e_ice.astype(jnp.float32),
+        age_volume=jnp.asarray([1.25], dtype=jnp.float64),
+    )
+    dtype_result = step(state32_energy, forcing(jnp.float64))
+    assert dtype_result.exit.age_volume.dtype == jnp.float32
+    np.testing.assert_array_equal(
+        np.asarray(dtype_result.exit.age_volume),
+        np.asarray([1.2877188920974731], dtype=np.float32),
+    )
+    age_gradient = jax.grad(
+        lambda age: step(
+            state32_energy._replace(age_volume=age), forcing(jnp.float64),
+        ).exit.age_volume[0]
+    )(jnp.asarray([1.25], dtype=jnp.float32))
+    assert age_gradient.dtype == jnp.float32
+    np.testing.assert_array_equal(
+        np.asarray(age_gradient), np.asarray([1.0], dtype=np.float32),
+    )
 
 
 def test_si3_column_step_full_gradient_sweep_matches_main_or_lane_difference():
@@ -578,23 +669,46 @@ def test_si3_column_step_full_gradient_sweep_matches_main_or_lane_difference():
         ).exit
         return jnp.stack([jnp.sum(leaf) for leaf in result])
 
-    oracle = np.frombuffer(
-        zlib.decompress(base64.b85decode(_SI3_ENTRY_GUARD_SWEEP_ORACLE_B85)),
-        dtype="<f8",
-    ).reshape(24, 9, 23)
+    fixture_path = (
+        Path(__file__).parents[1]
+        / "ice/fidelity/fixtures/si3_reverse_sweep_oracle.json"
+    )
+    fixture = json.loads(fixture_path.read_text())
+    generator_path = (
+        Path(__file__).parents[2]
+        / "scripts/validate/ocean_fidelity/testcases/si3_reverse_sweep_oracle.py"
+    )
+    spec = importlib.util.spec_from_file_location(
+        "si3_reverse_sweep_oracle", generator_path,
+    )
+    assert spec is not None and spec.loader is not None
+    generator = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(generator)
+    oracle = generator.decode(fixture["target"])
+    methods = generator.decode(fixture["methods"])
+    steps = generator.decode(fixture["steps"])
+    refinement_steps = generator.decode(fixture["refinement_steps"])
+    rounding_limited = generator.decode(fixture["rounding_limited"])
+    assert (
+        oracle.shape == methods.shape == steps.shape
+        == refinement_steps.shape == (24, 9, 23)
+    )
+    assert fixture["main_sha"] == generator.MAIN_SHA
+    assert fixture["lane_sha"] == generator.LANE_SHA
+    assert bool(np.all(steps > 0.0))
     eager = jax.vmap(jax.jacrev(step))(vectors)
     compiled = jax.jit(jax.vmap(jax.jacrev(step)))(vectors)
     for mode, actual in (("eager", eager), ("jit", compiled)):
         actual = np.asarray(actual)
-        mode_oracle = oracle.copy()
-        if mode == "eager":
-            # The source-rounded h(concentration) slope at this active point is
-            # exactly one eager float64 ulp; XLA's fused evaluation gives the
-            # separately reviewed compiled value stored in the oracle.
-            mode_oracle[18, 1, 0] = 2.0 ** -21
-        relative = np.abs(actual - mode_oracle) / np.maximum(
-            np.maximum(np.abs(actual), np.abs(mode_oracle)),
+        error = np.abs(actual - oracle)
+        relative = error / np.maximum(
+            np.maximum(np.abs(actual), np.abs(oracle)),
             np.finfo(np.float64).tiny,
+        )
+        passed = np.where(
+            rounding_limited,
+            error <= float(fixture["absolute_floor"]),
+            relative <= 1.0e-6,
         )
         for case, worst in zip(cases, np.max(relative, axis=(1, 2)), strict=True):
             print(
@@ -602,4 +716,35 @@ def test_si3_column_step_full_gradient_sweep_matches_main_or_lane_difference():
                 f"h_ice={case[1]:.1f} qlead={case[2]:.1f} worst_rel={worst:.3e}"
             )
         assert bool(np.all(np.isfinite(actual))), mode
-        assert float(np.max(relative)) <= 1.0e-6, mode
+        assert bool(np.all(passed)), (
+            mode,
+            np.unravel_index(
+                np.argmax(np.where(passed, -1.0, relative)), relative.shape,
+            ),
+        )
+
+
+def test_si3_reverse_sweep_generator_records_entry_provenance():
+    """The committed fixture records an independent source/stencil/step per entry."""
+    generator_path = (
+        Path(__file__).parents[2]
+        / "scripts/validate/ocean_fidelity/testcases/si3_reverse_sweep_oracle.py"
+    )
+    spec = importlib.util.spec_from_file_location(
+        "si3_reverse_sweep_oracle_meta", generator_path,
+    )
+    assert spec is not None and spec.loader is not None
+    generator = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(generator)
+    fixture_path = (
+        Path(__file__).parents[1]
+        / "ice/fidelity/fixtures/si3_reverse_sweep_oracle.json"
+    )
+    fixture = json.loads(fixture_path.read_text())
+    methods = generator.decode(fixture["methods"])
+    steps = generator.decode(fixture["steps"])
+    refinement_steps = generator.decode(fixture["refinement_steps"])
+    assert set(np.unique(methods)).issubset(generator.METHOD_LEGEND)
+    assert bool(np.all(np.isfinite(steps) & (steps > 0.0)))
+    assert bool(np.all(np.isfinite(refinement_steps) & (refinement_steps > 0.0)))
+    assert fixture["absolute_floor_derivation"]

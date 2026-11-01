@@ -1,0 +1,234 @@
+{
+  "schema": 1,
+  "main_sha": "edd34c24469c834d536c511160ea0c4aef8974ae",
+  "lane_sha": "920c61d884384e18470962568cda8295f0dfbe89",
+  "selection": "main compiled reverse AD iff main/lane forwards and the lane finite difference agree in the recorded neighbourhood; otherwise lane finite difference, except explicitly labelled nondifferentiable statement boundaries",
+  "method_legend": {
+    "0": "main_ad",
+    "1": "lane_fd_central",
+    "2": "lane_fd_forward",
+    "3": "lane_fd_backward",
+    "4": "lane_ad_at_nondifferentiable_boundary"
+  },
+  "cases": [
+    [
+      0.0,
+      0.0,
+      0.0
+    ],
+    [
+      0.0,
+      0.0,
+      -40.0
+    ],
+    [
+      0.0,
+      0.5,
+      0.0
+    ],
+    [
+      0.0,
+      0.5,
+      -40.0
+    ],
+    [
+      1e-12,
+      0.0,
+      0.0
+    ],
+    [
+      1e-12,
+      0.0,
+      -40.0
+    ],
+    [
+      1e-12,
+      0.5,
+      0.0
+    ],
+    [
+      1e-12,
+      0.5,
+      -40.0
+    ],
+    [
+      5e-11,
+      0.0,
+      0.0
+    ],
+    [
+      5e-11,
+      0.0,
+      -40.0
+    ],
+    [
+      5e-11,
+      0.5,
+      0.0
+    ],
+    [
+      5e-11,
+      0.5,
+      -40.0
+    ],
+    [
+      1e-10,
+      0.0,
+      0.0
+    ],
+    [
+      1e-10,
+      0.0,
+      -40.0
+    ],
+    [
+      1e-10,
+      0.5,
+      0.0
+    ],
+    [
+      1e-10,
+      0.5,
+      -40.0
+    ],
+    [
+      2e-10,
+      0.0,
+      0.0
+    ],
+    [
+      2e-10,
+      0.0,
+      -40.0
+    ],
+    [
+      2e-10,
+      0.5,
+      0.0
+    ],
+    [
+      2e-10,
+      0.5,
+      -40.0
+    ],
+    [
+      0.5,
+      0.0,
+      0.0
+    ],
+    [
+      0.5,
+      0.0,
+      -40.0
+    ],
+    [
+      0.5,
+      0.5,
+      0.0
+    ],
+    [
+      0.5,
+      0.5,
+      -40.0
+    ]
+  ],
+  "output_names": [
+    "concentration",
+    "h_ice",
+    "h_snow",
+    "T_surface",
+    "e_ice",
+    "e_snow",
+    "S_bulk",
+    "S_layers",
+    "age_volume"
+  ],
+  "input_names": [
+    "concentration",
+    "h_ice",
+    "h_snow",
+    "T_surface",
+    "e_ice",
+    "e_snow",
+    "S_bulk",
+    "S_layers",
+    "age_volume",
+    "qns_ice",
+    "qsr_ice",
+    "dqns_ice",
+    "qtr_ice_top",
+    "t_bottom",
+    "sss",
+    "evaporation",
+    "snow_precipitation",
+    "qprec_ice",
+    "qcn_ice_bottom",
+    "qsb_ice_bottom",
+    "fhld",
+    "qlead",
+    "frq_m"
+  ],
+  "target": {
+    "dtype": "<f8",
+    "shape": [
+      24,
+      9,
+      23
+    ],
+    "b85_zlib": "c%1Fse@v8h90%|(Q0NpDi4{ec!p2H!2xmEU$UUfJTD05LBnzU(uMjT5R;H{T(JfIDPS{ie6Hz&>uvjTS?s>Q~fAK@O@E1A3umfd@XlF%3qkHfklFj2do;&a0-mgFIySu^ndA{s+pMBn++aLr0036p%iLLLzT3!{e5rxma6(SC<3|-axZHT$Q|J5S@=!v;<)*AN)0N}Vx*PX;yPJf{eFOhU)9Y3%>GSTchmAGtNSZMp}Rpwq7tViRK6Kv~y7^=-5rabv|fMUq+7q__fb%$oxhw{(2KDuQ=uh&5dzaIIhHK-~wu*xgp<HEp_1687DpVqZ(j<xvvG1OcBqSkYPnvnWCDb7A>Q$HVGv1{BUzxRLQpVt)SbZ1OFr{Y)HRmmfNC#;|%n8x3WrKc&supNcjFFn=2Z^dgQw>4;a=!17BWLa`)aAu)I#jk=72##y&H<YjqZ1wqX{p(t~-?=bzr?*U}r7U`rHiEi?x+D02;J6+_-LX!;0{{SyY4qk@w7<lk>vza=Cx_MV&{E8I001nhx|h>svhL7#=I!PB9a_;atbT{g!hFZxAZJ6)CisBhxG>)_%F^?l>T<d%S*N8Y#inYK_I$$aN6%jSp2>a7-<IzQEY_OL8M7v&brr}~GSZEkyMiaDvRgJBI`doVbk@6O<@rv(okshv47bC1{uQekevJ$&xKx(xG3b4v?x5}nJ|H+Q%y$3)U_=?cc^Bq8008y{^Bu>9oDDgf-~)o=!hFXlOV4)}YR;2)by{jXm43O!^{jqB>f(t8rOAEQmbpyW=}V~wytrvTGho%r=*j*$Ms}Rpr%JurJg1H=TYRjuRKAJ5B`Pa--lsF#cfHX%Z^|!?^$fq#jjrN%YLhVEF+kn92XzN52J;;N02on5Z{CIZ4gi3C!F<PYA!kF*CisBhxG>)_%F^>4$&XXpm*})q%2rW+ldIM+->EaX@3tnfQ?9R6#XsN0)=z6wE@k+Ye_cIMDT<PvW8A6ukh(dS*rLkftRndic6ZgWAMWmTF`83~dRDJ%Xl!BlRk1W;dU$Ob<~s(cJNKaOfW=_G0{{Rc%IM9zFy8?HurIcn?>P58j@){;pxd*1k@HOn?KEEQHTHtZbEJQ|TUA~AW`7>yS97^glM~JI>-3}B(~s0>=jxl+k`kX*mZ(CX_t+EAzwe5$CupC9Nh;%4D80fIU1R@WN0;8-^&)d}w)C`tIU6CKFLU`Czw$X7A#wR!&Zhsn|6z@sjYOZFX->}euX13{M#vf+m#^__k|Ad!B(Ryw*$CBXR?eoUFyw0r<ZLipW4MPAIN$O9=kAc|olutUcU*igem9%@|2uTPd!6g;5NYm}h*J%hOzyisJFg?dH(JF%f9r}ks7V>a@GJlNucw|lES0q}gf6(Qm~&l!-H7^)as~VNnTv6^_C97br;H7|HbdEXgW*>~Rs~F}%{2SG_6l_ebqDN6bSe>4cZS;UjCG&i*YA*4jRn8Y1^@t#Y2@ZzreMAU0AOEiHQ)JMJ+$lEE9=d76zT`fcU)V1Ow4y^!(4~Pe1{-s8{`tm*+8)68vV!j6an)cy4fb5|2rmgj}N2Ix*gEh?+|+7aQYqn@5K-7ce)pUpw@*%NbmH_(AOQZLDkhg#&q4u>^Qk(|9y2w9DJj>Twiba)#<3qpLu<ChYr}z)g7v*vg7*~xP8Mu>psZFMV*NHD}J!LBX-O0t2g{gTHC(N!hEM6>W%^G4hYs8M1*~>V90f6*1h=-q5RT^)9(-xbAP|{AGwX`8U"
+  },
+  "methods": {
+    "dtype": "|u1",
+    "shape": [
+      24,
+      9,
+      23
+    ],
+    "b85_zlib": "c%1E((Tc+`3<SNl{{NfLb}rW@9tCs=O2K&uWe_WEtF3CSlKQLG@u?n<Y7AS3$iHxTs4nH8g+=6Ivg220;&Pq4Pmbo*7z=Tk)m?2oF1FdYix_J=lOR6lE{t!#P9ZyDJ7PO4o_54`#B;m&V&^rtc<sd->){lUl$N~q9_B?3R;OTY>10Qo9o?4AP8G}!;E^41cH~Wxk)3mrNq-l#upO}-#D@lE2j_P2&d$!x&d%$bO2|&*9c;X@9!?QSX~{e2VP525bqWq;r*U=~XQy#?0FUf6&Q9|t$;?hiZ`naRVmpXOcF>M^ZWjmdj*ZUie^q7d-W?XPh<2=H^zN+M;cBw;P#tRdcy~-@cEPqT+go+5Mk05daCaj3?=}oO{WY=KdNR(tLvugiguCP6ot>SXk7oz$d_i`8093>tBL"
+  },
+  "steps": {
+    "dtype": "<f8",
+    "shape": [
+      24,
+      9,
+      23
+    ],
+    "b85_zlib": "c%1FmAxlG19L8b4!oVbc0L#E+5S)SxEyAi%F<33)W)NY)Aht0a7!4LpYa%oF1uV;(CQVyfP#6gJhQZyP@jsqZ-f+%=r~V3G#mn2~$;R%}b8FbGm69!PFMs#fmNpmu&i+=igX52@_UN;;e!beisg~1s|J~QS)0fW5S?2%q#mAjqt)A}B!{B}Iu#(;vxVgExxw*Nyxw*NyXLKhXZf<UFZf<UFZf<Vw`Enlw?KEy~Zf<UFZf<UFZti?{)K25(=H}++=H}++=H||FH;$^ki{H0!oyN`0&CSit&CSit%{{9-YNv5?b8~ZZb8~ZZb8}C3-v{k9Zf<UFZf<UFZf<Vwe0S7N<L2h(=H}++=H}++p6+f3?KEy~Zf<UFZf<UFZti?{)K25(=H}++=H}++=H||FPkOnzxw*Nyxw*Nyxw+@f9ktWAxw*Nyxw*Nyxw*Ns++&Vd%oY"
+  },
+  "refinement_steps": {
+    "dtype": "<f8",
+    "shape": [
+      24,
+      9,
+      23
+    ],
+    "b85_zlib": "c%1FmAxlG19L8b4!oVbcg@I{7a1%sa8CVw;gVlIvaKeOzVUsbtf*_jKtbPHDd7DYoOoj=9aBmRq?u`HOobrZq4m|Z&dM}?3`X^iU$EWMh*H$&%^3M9lxUyDT`900;bf?FY?(play4l+pUnaZRyZ`RR?cl!IPICXBu0HIITAgfXchi@~;eK{s;^yY&=H}++=H}++UeKL-xVgExxw*Nyxw*Nym&<(+w9~k`xw*Nyxw*Nyxw(toQ9F&Bo12@Po12@Po0~h&eRY(K&c2_+bs9G}H#avoH#avoH}|6MsGY{m&CSit&CSit&CNaEeG|0PxVgExxw*Nyxw*Nyi``K>jhmaBo12@Po12@Pd%k-Zw9~k`xw*Nyxw*Nyxw(toQ9F&Bo12@Po12@Po0~h&{nyLQ&CSit&CSit&CR`R?x>x{&CSit&CSit&CSi7=l%ggl%tj"
+  },
+  "fd_rounding_bound": {
+    "dtype": "<f8",
+    "shape": [
+      24,
+      9,
+      23
+    ],
+    "b85_zlib": "c%1E9O=w(I7`<gIp-8DDDJ4RgLM&a?7$P*C_cKqjNN`~mvq)UH3gXYw6!B+MNYq(X7eZXPD2<>IbQ4Od;KsCQS4Kw(T@^`6DpI<zTDvIm&HKK4-@We_t0wovmqkxuzPX%!bMu{dzS9xMo?iNXpAh2YaQ9DzkDL&hKf%Eo{pIUlAJ*%RJyVRbPU5-4t$juH-wG4gdd&BWiuca)7UIJDkABsRUh7@<brkKI|7QQ^<3GP~*_F86{ds93dVPL<OVttfm0(Tb=IFVN>EVmT^<v30Fu3lib5Q$@$~(Fz_xXPO=IJQfV;<d)hg^wtPukJz^Xn&kSx49^!7+t&Pkt}17r(d$26g?MkoQr(-+jK0qCLaBA9E!V?@yTbxT+(ZEx{Ru#QU&cST7Ek7&PN^{^32La~9p*xhE&N&x4+h;lG>v{G=n1`h6+-+~(J(R2|`53C=2{ejoP=>&1YHK~p~`<b8{IZ+JS2_6XmTJB~!+{TknsBfhL794o;Qg~a<talN?a8W?Q5>Ku@Ha<gW>UqI>3cW}Cs>NhHHDBU>(syjpaIhb=W;{BO>{%yM6w%+f&=RtVh-J0G-*LvQpJ9KYHE!Q2*??k*0KE?Bm=SnT0*IP~E+wV)Hx(}Mf`;@99oGHPULgKx@`2FIZZ(uMKpObk{Hkugs<i4-ZH+yv_?RWU|XWq8zPE$W8<o%rYpmUJU**(9*eT+U2B)>y^Uc}LP5Z%f1I~cm7`5h?Tsl(|`p5MXHowVP<(4Dm3L7judchN!f4Yuzg_6%>RJzJIU?6%*DUbBABwukbah;Pe9^E<@5%6GD{%69~m?o|2CZu_0?U+mYND&LWH$$n<zznSlxef@UlBKL9BA>PXly<TI!mrqONdEyZ7EmcR@SAsQ#JWq=2#Ztq-;Ce%yQ{_7k#5?+FcT&$cRlf6I?%8tct9-{gzk{)7)AOC+#)nV5;t`*lJiljnzAy9qKGTp$b${~wUf{Y###N^nmlYE4=ZoJbo;5LeS3jr9cm7BD4)G}0ohski4c)2o9a+bH*m1vup*wpZ-}&<B5BurG?)|{YcO-Ai_YixAcQ|5RotOgIvuS<@wcn_`qkFOdvS%~=PRM)3*ss~EJDT4y=JzsEz7zKQ8@?Y<`A*3D9lX6J$UMn-js?;k&F`T08<jVd?ihXtNOugsgE<F<xboKUr}FdX{a}q>Z!zEghD7$EydONJ>bMUj*iy)Q2)D3a+-n#Z48`a0?<HKmljJSz+_UBR9gIDjk?(}OKMpYVY+AmPc~9)yv*r06j6GZ0?_liNjPLJ+^ZRAacP2O|S>?If$9#WmNTj-H_6>Iv`OaVo_9-OZSBmS!7mk6!ZAUvN@;iX}PNegwdrjMQC(rL-=#G)^0O?L0PIvPB4u<Ze{SJoir2P)u99+Bg-sAKl`5YAAAbDH9huAZ`>3)Ok*)+d{+HX|e^c)MaXG{8>Es#B%=68(wy$Y7^+~xa$mhZ@YEYMyPWS(R{$D-(t=66v0jmjHJcanYwMR$^Z2XGEjzg<1I3Hz;b7w&UIBKMo~o$*9IGh2dje#8BC3+u%J6N6@a4*y=l<vU5<!p=Qgp5MXPvnBJLb&x%qmhWWV6Z`gTd430D&zAN(7<)D&-|6m=Jw3Ns>+PtVh4^kZB=SCveM1kQBlDe+5{&a3;{8)`y}0Ta7;HP*Ig#JN%y(8`_nNlrPM+Vv(4AzygQ7ciINizfI~cl?_B$B5llD7sbMTDwkzDjeJ_p4&7`$gr!|}F!f0F$i`vS<GP4hdb{YK?Y&)*<>wxr*Y`$60HY?|LO=3oab-&yDTftK&c?+F0yH9_V{_H!(X?r44owcn_`p>!wdcTjXE>30C<AnA_mBj-DEk2fpzrXi7ahx47OL_RZDf^mMsy5knsivbgZN&Otn&)e>c)6XZi@7ePF4#u7>neVKC?Af$@C-a`zw`a@qI~aSmwBLc7C!{-`p4)`?MCB~3Hw}sWxv+0I!sp0*XRHL{{DyU>xL#ay3=9tG=R|%7Gv8T&-D}#eJ9&NwLwAz-4vOy7;dCd@?_lUo+V5cKPTKFF%|Y{Chkdrx&nKU&Ox`&8PV)cXq43Vq8+&yp_B*KkM&+HQH}>jI?02&C#$Mft{f;>YSO50>rgL^a--&%rsFJGR_WPY!-_IZaqql>n^Onz(<Z~>R?!<lvwcn_`v2-W)J6O6C`yF!*t{ORy&2z8|XD2UsdLKjGQGH;&k@~~^zQnwz68)Mh!MLBSJAPrk7%(xIRPUGf1j84npHFPxv*r06j6GZIcjSHzW6u`nJK6WdzCBx>-@(|krTq@tJRu&_zC_~P;qwOhUT@0p@yO?O{=MvJ$~wZ45*$>>-`^>&7gs$4gKbZ~U-l0}cbe+`Sob7;K0(o)JimjXJF(xv(w#b-?&SF$4Bbil9kh9Zr8~Ek?)(K(x1wD"
+  },
+  "rounding_limited": {
+    "dtype": "|b1",
+    "shape": [
+      24,
+      9,
+      23
+    ],
+    "b85_zlib": "c%1E%;R=8-2!wC%|I$$*3JtW7(suW2I#3V&#^^0P{41(sWI%!(2asyJOd2)~(>ST)WdoQ8H@kjpN4L{mWG7g(K0DFoWG6{vCs?!(JKhjvCrM-{ShO-bFbUr@*-6rx?8u#*Pw!6Zv!iy%&U+#||6-@U9o^0bzycBn"
+  },
+  "absolute_floor": 3e-06,
+  "absolute_floor_derivation": "3e-6 is the outward-rounded float64 subtraction bound for an O(0.5) forward and the 2e-11 concentration step: 2*spacing(0.5)/(2*2e-11)=2.7755575615628914e-6",
+  "method_counts": {
+    "main_ad": 390,
+    "lane_fd_central": 1720,
+    "lane_fd_forward": 2686,
+    "lane_fd_backward": 66,
+    "lane_ad_at_nondifferentiable_boundary": 106
+  }
+}
