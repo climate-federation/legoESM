@@ -155,6 +155,9 @@ def _sharded_indices(cfg, yml, times, snaps_per_day, stride, rank, nproc):
 # first-sample gate compares a cache-built sample against a remote-built one.
 _ERA5_CACHE_EXTRA_STATE_VARS = (
     "2m_temperature", "land_sea_mask", "sea_surface_temperature")
+_ERA5_CACHE_SURFACE_TARGET_VARS = (
+    "2m_temperature", "10m_u_component_of_wind", "10m_v_component_of_wind",
+    "mean_sea_level_pressure")
 _ERA5_CACHE_CLOUD_VARS = (
     "specific_cloud_liquid_water_content", "specific_cloud_ice_water_content")
 _ERA5_CACHE_FLUX_VARS = (
@@ -201,6 +204,8 @@ def _era5_store_groups(era5_cfg, sst_cfg):
     state = era5_cfg.zarr_store
     add(state, era5_cfg.pressure_variables,
         tuple(era5_cfg.surface_variables) + _ERA5_CACHE_EXTRA_STATE_VARS)
+    if era5_cfg.load_surface_targets:
+        add(state, (), _ERA5_CACHE_SURFACE_TARGET_VARS)
     if era5_cfg.load_cloud_condensate:
         add(era5_cfg.cloud_zarr or state, _ERA5_CACHE_CLOUD_VARS)
     if sst_cfg.load_surface_fluxes:
@@ -312,7 +317,7 @@ def _store_size_gb(path):
 
 
 def _wb_local_stores(cfg, yml, era5_cfg, sst_cfg, times, snaps_per_day,
-                     stride, rank, nproc):
+                     stride, rank, nproc, lead_stride=None):
     """Local ``(ds, cloud_ds, flux_ds, at)`` replacing the remote stores, or
     None when the deck names no cache. ``at`` maps a remote time index to its
     position in the local state store; every mapping is verified by timestamp.
@@ -322,8 +327,11 @@ def _wb_local_stores(cfg, yml, era5_cfg, sst_cfg, times, snaps_per_day,
         return None
     from legoesm.training.era5_to_state import open_era5_zarr
 
+    # Multi-lead samples read every intermediate lead's analysis too.
+    _step = int(lead_stride or stride)
     all_idx = sorted({i for _, a, b in _training_sample_indices(
-        cfg, yml, times, snaps_per_day, stride) for i in (a, b)})
+        cfg, yml, times, snaps_per_day, stride)
+        for i in (*range(a, b, _step), b)})
     if not all_idx:
         return None
     stamps = times[np.asarray(all_idx)]
@@ -567,6 +575,10 @@ def wb_needs_land_frac(mode: str, yml: dict) -> bool:
     return False
 
 
+# Loss-block keys the WB TRAINER reads itself (not LossConfig fields).
+_WB_TRAINER_LOSS_KEYS = frozenset({"train_leads_hours", "train_curriculum_hours"})
+
+
 def validate_wb_campaign_yaml(yml: dict) -> None:
     """Refuse a campaign YAML carrying keys this training path does not read.
 
@@ -618,9 +630,10 @@ def validate_wb_campaign_yaml(yml: dict) -> None:
     if loss:
         from legoesm.training.losses import LossConfig
 
-        unknown = set(loss) - set(LossConfig._fields)
+        _loss_known = set(LossConfig._fields) | _WB_TRAINER_LOSS_KEYS
+        unknown = set(loss) - _loss_known
         if unknown:
-            _reject(unknown, sorted(LossConfig._fields), "loss-block")
+            _reject(unknown, sorted(_loss_known), "loss-block")
     # Nested per-scheme blocks (#1663): typo'd keys here silently defaulted.
     for _blk, _known in (("classical", _WB_CLASSICAL_KEYS),
                          ("neural_gcm", _WB_NEURAL_KEYS),
@@ -1098,6 +1111,43 @@ def _build_mode_components_spectral(cfg, yml, column_mesh=None):
                                n_steps, forcing, adjoint_steps=adjoint_steps)
             return spectral_state_to_carry(final, grid, sigma)
 
+        def raw_multi(self, ic_carry, seg_steps, n_segs, forcing,
+                      adjoint_steps=0):
+            """One forecast of ``n_segs * seg_steps`` steps, returning the
+            carry after EVERY segment (one per supervised lead). The segments
+            are chained exactly: the stateful branch hands on the physics
+            state, cached radiation and step clock; the stateless branch
+            continues the forcing clock, so the result equals one ``raw``
+            rollout of the full length. ``adjoint_steps`` applies per
+            segment."""
+            if getattr(pe_config, "fix_mass", False) and getattr(
+                    pe_config, "anchor_mass_to_initial", False):
+                raise ValueError(
+                    "raw_multi: the dry-mass anchor would re-anchor to each "
+                    "segment start, not the forecast start.")
+            if self._rad_fn is None and hasattr(self._physics_fn,
+                                                "with_phys_state"):
+                raise ValueError(
+                    "raw_multi: a stateful physics without split radiation "
+                    "cannot be chained (its physics state would restart).")
+            state = carry_to_spectral_state(ic_carry, grid)
+            ps = rad = None
+            out = []
+            for k in range(int(n_segs)):
+                kw = {"adjoint_steps": adjoint_steps}
+                if self._rad_fn is not None:
+                    kw.update(return_phys_state=True, return_rad_tendency=True)
+                    if k:
+                        kw.update(phys_state_in=ps, rad_tendency_in=rad,
+                                  step_offset=k * int(seg_steps))
+                    state, ps, rad = self._roll(state, seg_steps, forcing, **kw)
+                else:
+                    if k:
+                        kw["sim_time_offset_seconds"] = k * int(seg_steps) * dt
+                    state = self._roll(state, seg_steps, forcing, **kw)
+                out.append(spectral_state_to_carry(state, grid, sigma))
+            return tuple(out)
+
         def raw_two_leg(self, suffix_seg, ic_carry, n_steps, forcing,
                         suffix_steps):
             """One forecast whose last ``suffix_steps`` run ``suffix_seg``'s
@@ -1379,6 +1429,80 @@ def rollout_hours(cfg, yml):
     return float(hrs[0]) if hrs else 6.0     # first lead = the base rollout horizon
 
 
+def supervised_leads(yml) -> tuple:
+    """The deck's ``loss.train_leads_hours`` [h]: every lead the forecast is
+    scored at, or () for the legacy single-target path (``multi_step_hours``,
+    of which training reads only the first entry).
+
+    Leads must be consecutive multiples of the first, ``(h, 2h, ..., Kh)``: the
+    forecast is one chained rollout scored after every segment."""
+    hrs = tuple(int(h) for h in ((yml.get("loss", {}) or {}).get(
+        "train_leads_hours") or ()))
+    if not hrs:
+        return ()
+    if hrs != tuple(hrs[0] * (k + 1) for k in range(len(hrs))):
+        raise ValueError(
+            f"loss.train_leads_hours {list(hrs)} must be consecutive multiples "
+            "of the first lead (e.g. [6, 12, 18, 24]): each lead is one more "
+            "segment of the same rollout.")
+    return hrs
+
+
+def curriculum_n_segs(yml, leads, n_epochs) -> tuple:
+    """Leads scored in each curriculum stage, from ``loss.train_curriculum_hours``.
+
+    ``[6, 12, 24]`` = three stages of EQUAL length (the run's epochs split in
+    thirds), stage k scoring every lead up to its horizon.  Absent = one stage
+    on all leads.  The epochs must split evenly: a stage boundary inside an
+    epoch would change the objective mid-pass over the data."""
+    hrs = [int(h) for h in ((yml.get("loss", {}) or {}).get(
+        "train_curriculum_hours") or [leads[-1]])]
+    if any(h not in leads for h in hrs) or hrs != sorted(set(hrs)):
+        raise ValueError(f"loss.train_curriculum_hours {hrs} must be increasing "
+                         f"leads out of train_leads_hours {list(leads)}.")
+    if int(n_epochs) % len(hrs):
+        raise ValueError(f"{n_epochs} epochs do not split into {len(hrs)} "
+                         "equal curriculum stages.")
+    return tuple(leads.index(h) + 1 for h in hrs)
+
+
+def multi_lead_loss(run_seg, ic, targets, forcing, *, n_segs, seg_steps,
+                    sigma_full, grid, sigma, loss_config, diagnose_fn,
+                    adjoint_steps=0, terms=False):
+    """Mean over the first ``n_segs`` supervised leads of the per-lead loss.
+
+    One chained forecast (``run_seg.raw_multi``) is scored after every
+    segment against ``targets[k] = (carry, near-surface fields)``: the carry
+    loss plus, when the fields are given, the near-surface loss on the fields
+    ``diagnose_fn`` (the WB2 eval's diagnosis, injected because ``evaluations``
+    depends on this package, not the reverse) derives from the predicted
+    state the way the eval does.  Returns the loss, or ``(loss, terms)`` with
+    each term averaged over the leads the same way."""
+    from legoesm.training.losses import combined_loss_terms, surface_field_terms
+    from legoesm.training.neural_gcm_spectral import carry_to_spectral_state
+
+    n = int(n_segs)
+    if not 1 <= n <= len(targets):
+        raise ValueError(f"n_segs={n} outside 1..{len(targets)} loaded leads")
+    preds = run_seg.raw_multi(ic, seg_steps, n, forcing,
+                              adjoint_steps=adjoint_steps)
+    total, acc = 0.0, {}
+    for pred, (tgt, sfc) in zip(preds, targets[:n]):
+        loss, t = combined_loss_terms(pred, tgt, sigma_full, grid=grid,
+                                      config=loss_config)
+        if sfc:
+            diag = diagnose_fn(carry_to_spectral_state(pred, grid), grid, sigma)
+            ls, ts = surface_field_terms(diag.fields, sfc, diag.valid,
+                                         grid.weights, loss_config)
+            loss = loss + ls
+            t = {**t, **ts}
+        total = total + loss
+        for k_, v_ in t.items():
+            acc[k_] = acc.get(k_, 0.0) + v_ / n
+    total = total / n
+    return (total, acc) if terms else total
+
+
 def era5_time_to_forcing_calendar(time_ns, year):
     """(day_of_year 1-based INTEGER, seconds_of_day) for spectral_rollout.
 
@@ -1432,6 +1556,14 @@ def wb_ic_microphysics(mode, yml):
     return str(cl.get("microphysics", "none"))
 
 
+def wb_needs_surface_targets(yml) -> bool:
+    """True iff the deck's loss scores any near-surface WB2 field."""
+    from legoesm.training.losses import SURFACE_LOSS_KEYS
+    lb = yml.get("loss", {}) or {}
+    return any(float(lb.get(f"{pre}{k}", 0.0) or 0.0) > 0.0
+               for k in SURFACE_LOSS_KEYS for pre in ("w_", "w_bias_", "w_crps_"))
+
+
 def wb_era5_config(cfg, yml):
     """The ERA5 store config for a training run.
 
@@ -1451,7 +1583,8 @@ def wb_era5_config(cfg, yml):
         c = c._replace(cloud_zarr=str(yml["era5_cloud_zarr"]))
     c = c._replace(
         load_surface_fluxes=bool(yml.get("era5_surface_fluxes", False)),
-        load_land_frac=wb_needs_land_frac(getattr(cfg, "mode", None), yml))
+        load_land_frac=wb_needs_land_frac(getattr(cfg, "mode", None), yml),
+        load_surface_targets=wb_needs_surface_targets(yml))
     if "era5_flux_zarr" in yml:
         # An explicit "" selects the STATE store as the flux store (the
         # loader's documented option), so the key's presence decides.
@@ -1608,6 +1741,20 @@ def build_spectral_forcing(sl, grid, time_ns, year, *, aerosol=None,
     return forcing
 
 
+def _lead_target(sl, carry, grid):
+    """``(carry, {t2m, u10, v10, mslp})`` for one supervised lead; the dict is
+    empty unless the slice carries the WB2 near-surface targets."""
+    import jax.numpy as jnp
+
+    from legoesm.training.era5_to_state import regrid_2d_to_gaussian
+
+    if sl.t2m is None:
+        return carry, {}
+    return carry, {k: jnp.asarray(regrid_2d_to_gaussian(f, sl.lat, sl.lon, grid))
+                   for k, f in (("t2m", sl.t2m), ("u10", sl.u10),
+                                ("v10", sl.v10), ("mslp", sl.msl))}
+
+
 def _load_era5_samples_spectral(cfg, yml, grid, sigma, *,
                                 rank=0, nproc=1, host_resident=False):
     """(ic, target, forcing) samples on the Gaussian grid for the spectral core.
@@ -1625,6 +1772,7 @@ def _load_era5_samples_spectral(cfg, yml, grid, sigma, *,
     """
     from legoesm.training.era5_to_state import (
         era5_to_spectral_carry,
+        load_era5_slice,
         open_era5_zarr,
     era5_terrain_product,
 )
@@ -1655,8 +1803,13 @@ def _load_era5_samples_spectral(cfg, yml, grid, sigma, *,
             "(owner decision 2026-09-15).")
     times = np.asarray(ds.time.values, dtype="datetime64[ns]")
     snaps_per_day = 24 // era5_cfg.dt_hours
-    roll_h = rollout_hours(cfg, yml)
+    leads = supervised_leads(yml)
+    roll_h = leads[-1] if leads else rollout_hours(cfg, yml)
     stride = int(roll_h) // era5_cfg.dt_hours
+    lead_stride = (leads[0] // era5_cfg.dt_hours) if leads else stride
+    if leads and leads[0] % era5_cfg.dt_hours:
+        raise ValueError(f"train_leads_hours {list(leads)} are not on the "
+                         f"{era5_cfg.dt_hours} h ERA5 cadence.")
     # The condensate store is opened ONCE and threaded through every slice --
     # re-opening a remote zarr per sample would dominate the load.
     cloud_ds = (open_era5_zarr(era5_cfg.cloud_zarr)
@@ -1685,6 +1838,17 @@ def _load_era5_samples_spectral(cfg, yml, grid, sigma, *,
         tp = era5_terrain_product(s_ic, grid)
         ic = era5_to_spectral_carry(s_ic, grid, sigma, target_phis=tp, microphysics=_micro)
         target = era5_to_spectral_carry(s_tg, grid, sigma, target_phis=tp, microphysics=_micro)
+        if leads:
+            # One (carry, near-surface fields) target per lead, on the SAME
+            # ERA5 -> Gaussian regrid as the state targets.
+            target = tuple(
+                _lead_target(sl, era5_to_spectral_carry(
+                    sl, grid, sigma, target_phis=tp, microphysics=_micro), grid)
+                for sl in (load_era5_slice(era5_cfg, at(i), ds=ds,
+                                           cloud_ds=cloud_ds)
+                           if i != i_tg else s_tg
+                           for i in range(i_ic + lead_stride, i_tg + 1,
+                                          lead_stride)))
         # times stays the REMOTE calendar: i_ic is always a remote index
         forcing = build_spectral_forcing(sst_src, grid, times[i_ic], year,
                                          aerosol=_aerosol, sigma=sigma,
@@ -1695,7 +1859,8 @@ def _load_era5_samples_spectral(cfg, yml, grid, sigma, *,
         cfg, yml, times, snaps_per_day, stride, rank, nproc))
     src = (ds, cloud_ds, flux_ds, int)
     local = _wb_local_stores(cfg, yml, era5_cfg, sst_cfg, times,
-                             snaps_per_day, stride, rank, nproc)
+                             snaps_per_day, stride, rank, nproc,
+                             lead_stride=lead_stride)
     if local is not None and mine:
         _, i0, t0 = mine[0]
         _assert_same_sample(
@@ -1735,6 +1900,9 @@ def load_era5_samples(cfg, yml, grid, sigma, *,
         return _load_era5_samples_spectral(
             cfg, yml, grid, sigma,
             rank=rank, nproc=nproc, host_resident=host_resident)
+    if supervised_leads(yml) or wb_needs_surface_targets(yml):
+        raise ValueError("loss.train_leads_hours and the near-surface loss "
+                         "are implemented on the spectral training core only.")
 
     global _WARNED_ERA5_FLUX_HOLD_FIXED
 

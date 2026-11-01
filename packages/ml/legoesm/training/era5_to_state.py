@@ -41,6 +41,8 @@ _ERA5_VAR_ALIASES = {
     'specific_cloud_liquid_water_content': 'clwc',
     'specific_cloud_ice_water_content': 'ciwc',
     'land_sea_mask': 'lsm',
+    '10m_u_component_of_wind': 'u10', '10m_v_component_of_wind': 'v10',
+    'mean_sea_level_pressure': 'msl',
     'mean_surface_sensible_heat_flux': 'msshf',
     'mean_surface_latent_heat_flux': 'mslhf',
     'mean_eastward_turbulent_surface_stress': 'metss',
@@ -296,6 +298,10 @@ class TrainingERA5Config(NamedTuple):
     # Read only the static land_sea_mask (0..1); implied by
     # load_surface_fluxes.
     load_land_frac: bool = False
+    # WB2 near-surface verification fields (2 m temperature, 10 m wind,
+    # mean sea-level pressure) as surface-loss TARGETS; a missing or
+    # non-finite field is a hard error.
+    load_surface_targets: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -617,6 +623,11 @@ class ERA5Slice(NamedTuple):
     sfc_sw_down: np.ndarray = None  # downwelling SW at the surface [W/m^2], positive DOWN
     sfc_lw_up: np.ndarray = None    # upwelling LW at the surface [W/m^2], positive UP
     land_frac: np.ndarray = None    # static land-sea fraction, dimensionless [0..1]
+    # --- WB2 near-surface targets (None unless load_surface_targets) ---
+    t2m: np.ndarray = None          # 2 m temperature [K]
+    u10: np.ndarray = None          # 10 m eastward wind [m/s]
+    v10: np.ndarray = None          # 10 m northward wind [m/s]
+    msl: np.ndarray = None          # mean sea-level pressure [Pa]
 
 
 def _assert_required_era5_vars(ds_t, ds) -> None:
@@ -1112,6 +1123,19 @@ def load_era5_slice(
         q_i_spec = _get_3d("specific_cloud_ice_water_content",
                            src=cds_t, flip_lat=_cflip)
 
+    sfc_targets = {}
+    if config.load_surface_targets:
+        for key, name in (("t2m", "2m_temperature"),
+                          ("u10", "10m_u_component_of_wind"),
+                          ("v10", "10m_v_component_of_wind"),
+                          ("msl", "mean_sea_level_pressure")):
+            f = _get_2d(name, required=True)
+            if not np.all(np.isfinite(f)):
+                raise ValueError(
+                    f"load_era5_slice: surface target {name!r} has non-finite "
+                    f"values at time index {time_idx}; refusing to train on it.")
+            sfc_targets[key] = f
+
     return ERA5Slice(
         T=_get_3d("temperature"),
         u=_get_3d("u_component_of_wind"),
@@ -1133,6 +1157,7 @@ def load_era5_slice(
         sfc_tau_x=sfc_tau_x, sfc_tau_y=sfc_tau_y,
         sfc_sw_up=sfc_sw_up, sfc_sw_down=sfc_sw_down, sfc_lw_up=sfc_lw_up,
         land_frac=land_frac,
+        **sfc_targets,
     )
 
 

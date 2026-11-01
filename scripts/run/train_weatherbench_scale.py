@@ -1228,10 +1228,44 @@ def _main(argv=None):
                  "leaf reachable only before the window is frozen.",
                  roll_steps, cfg.adjoint_steps)
 
-    def _loss(trainable, sample, terms=False):
+    from legoesm.training.scale_build import (
+        curriculum_n_segs,
+        multi_lead_loss,
+        supervised_leads,
+        wb_needs_surface_targets,
+    )
+    _leads = supervised_leads(yml)
+    if wb_needs_surface_targets(yml) and not _leads:
+        raise SystemExit("the near-surface loss (w_t2m/u10/v10/mslp) needs "
+                         "loss.train_leads_hours: it is scored per lead.")
+    if _leads and roll_steps * dt != _leads[0] * 3600.0:
+        raise SystemExit(f"rollout horizon {roll_steps * dt / 3600.0} h != the "
+                         f"first train_leads_hours lead {_leads[0]} h "
+                         "(--multi-step-hours sets the first).")
+    if _leads and cfg.training_core != "spectral":
+        raise SystemExit("loss.train_leads_hours needs --training-core spectral")
+    # Stage k of the lead curriculum trains on the first _curriculum[k] leads.
+    _curriculum = curriculum_n_segs(yml, _leads, cfg.n_epochs) if _leads else (None,)
+    _diagnose = None
+    if _leads:
+        import pathlib as _pl
+        import sys as _sys_m
+        _sys_root = str(_pl.Path(__file__).resolve().parents[2])
+        if _sys_root not in _sys_m.path:
+            _sys_m.path.insert(0, _sys_root)
+        from evaluations.wb_forecast import diagnose_headline_fields as _diagnose
+
+    def _loss(trainable, sample, terms=False, n_segs=None):
         if _in_trace_rep is not None:
             trainable = _in_trace_rep(trainable)
         ic, target, forcing = sample
+        if _leads:
+            return multi_lead_loss(
+                make_run_seg(trainable), ic, target, forcing,
+                n_segs=n_segs or _curriculum[0], seg_steps=roll_steps, sigma_full=sigma_full,
+                grid=grid, sigma=sigma, loss_config=loss_config,
+                diagnose_fn=_diagnose, adjoint_steps=cfg.adjoint_steps or 0,
+                terms=terms)
         # Only the spectral segment takes the kwarg (checked above).
         _kw = {"adjoint_steps": cfg.adjoint_steps} if cfg.adjoint_steps else {}
         pred = make_run_seg(trainable).raw(ic, roll_steps, forcing, **_kw)
@@ -1572,11 +1606,22 @@ def _main(argv=None):
         arr, static = eqx.partition(params, eqx.is_inexact_array)
         frozen_names, _probe_vg = [], None
 
-    def loss_fn(arr_leaves, sample):
-        return _loss(eqx.combine(arr_leaves, static), sample)
+    # One function object PER curriculum stage: the training loop jits the
+    # loss once per call, and a shared object would reuse a stale trace.
+    def _stage_loss_fns(n_segs):
+        def loss_fn(arr_leaves, sample):
+            return _loss(eqx.combine(arr_leaves, static), sample, n_segs=n_segs)
 
-    def loss_terms_fn(arr_leaves, sample):
-        return _loss(eqx.combine(arr_leaves, static), sample, terms=True)
+        def loss_terms_fn(arr_leaves, sample):
+            return _loss(eqx.combine(arr_leaves, static), sample, terms=True,
+                         n_segs=n_segs)
+        return loss_fn, loss_terms_fn
+
+    _stage_fns = [_stage_loss_fns(n) for n in _curriculum]
+    _cur_stage = [0]
+
+    def _stage_of(epoch):
+        return int(epoch) * len(_curriculum) // max(int(cfg.n_epochs), 1)
 
     optimizer = create_optimizer(TrainingConfig(
         lr=cfg.lr, optimizer=cfg.optimizer,
@@ -1641,8 +1686,13 @@ def _main(argv=None):
     # eager rollout of this deck does not fit on the mesh).
     # Same forward as the training loss, returning each weighted term too, so
     # the per-term curves add up to the validation loss.
-    _val_loss = (loss_terms_fn if column_mesh is None
-                 else eqx.filter_jit(loss_terms_fn))
+    # Validation scores the CURRENT stage's objective (same protocol as the
+    # training loss it is reported next to); one jitted program per stage.
+    _val_jit = [fns[1] if column_mesh is None else eqx.filter_jit(fns[1])
+                for fns in _stage_fns]
+
+    def _val_loss(cur_arr, sample):
+        return _val_jit[_cur_stage[0]](cur_arr, sample)
     _val_place = _device_sample if column_mesh is None else place_sample
 
     def _validation_loss(cur_arr):
@@ -1755,12 +1805,28 @@ def _main(argv=None):
                 t, checkpoint_view(eqx.combine(cur_arr, _static_h))),
             lambda t: eqx.tree_serialise_leaves(t, cur_opt_state))
 
-    arr, opt_state, history = mpi_data_parallel_training_loop(
-        loss_fn, arr, opt_state, optimizer, local, cfg.n_epochs, nproc,
-        on_epoch=on_epoch, start_epoch=start_epoch,
-        place=None if column_mesh is None else place_sample,
-        on_step=on_step, start_step=start_step, start_losses=start_losses,
-        start_skipped=start_skipped)
+    # Curriculum: stage k runs epochs [k, k+1) * n_epochs / n_stages with its
+    # own objective; the optimizer state and schedule carry straight through.
+    history = []
+    _n_st = len(_curriculum)
+    for _k in range(_stage_of(start_epoch) if start_epoch < cfg.n_epochs
+                    else _n_st, _n_st):
+        _e0 = _k * cfg.n_epochs // _n_st
+        _e1 = (_k + 1) * cfg.n_epochs // _n_st
+        _first = start_epoch >= _e0
+        _cur_stage[0] = _k
+        if _leads:
+            log.info("curriculum stage %d/%d: epochs %d-%d score leads %s h",
+                     _k + 1, _n_st, _e0, _e1 - 1, list(_leads[:_curriculum[_k]]))
+        arr, opt_state, _hist = mpi_data_parallel_training_loop(
+            _stage_fns[_k][0], arr, opt_state, optimizer, local, _e1, nproc,
+            on_epoch=on_epoch, start_epoch=max(start_epoch, _e0),
+            place=None if column_mesh is None else place_sample,
+            on_step=on_step,
+            start_step=start_step if _first else 0,
+            start_losses=start_losses if _first else (),
+            start_skipped=start_skipped if _first else 0)
+        history += list(_hist)
     params = eqx.combine(arr, static)
     log.info("training done: final loss=%.6f", history[-1] if history else float("nan"))
 

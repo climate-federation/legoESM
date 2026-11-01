@@ -172,6 +172,32 @@ class LossConfig(NamedTuple):
     wind_resid_scale: float = 3.0  # m/s — ERA5 6 h |Δu|,|Δv| std
     q_resid_scale: float = 5.0e-4  # kg/kg — ERA5 6 h |Δq| std
     ps_resid_scale: float = 200.0  # Pa — ERA5 6 h |Δps| std
+    # Per-LEVEL 6 h residual scales (one entry per model level, top->bottom),
+    # used instead of the scalar ``T/wind/q_resid_scale`` when non-empty and
+    # ``residual_normalize`` is on.  Measured, never defaulted: empty = off.
+    T_resid_scale_lev: tuple[float, ...] = ()
+    u_resid_scale_lev: tuple[float, ...] = ()
+    v_resid_scale_lev: tuple[float, ...] = ()
+    q_resid_scale_lev: tuple[float, ...] = ()
+    # Near-surface WB2 headline fields (diagnosed from the predicted state the
+    # way the WB2 eval does), scored on the model grid.  A weight > 0 needs its
+    # own 6 h residual scale > 0; all 0.0 = off.
+    w_t2m: float = 0.0
+    w_u10: float = 0.0
+    w_v10: float = 0.0
+    w_mslp: float = 0.0
+    w_bias_t2m: float = 0.0
+    w_bias_u10: float = 0.0
+    w_bias_v10: float = 0.0
+    w_bias_mslp: float = 0.0
+    w_crps_t2m: float = 0.0
+    w_crps_u10: float = 0.0
+    w_crps_v10: float = 0.0
+    w_crps_mslp: float = 0.0
+    t2m_resid_scale: float = 0.0
+    u10_resid_scale: float = 0.0
+    v10_resid_scale: float = 0.0
+    mslp_resid_scale: float = 0.0
     # Radiation-flux supervision (TOA + surface) — drives cross-climate
     # generalization by constraining the radiative response, not just the
     # instantaneous state.  Reads the SegmentCarry ``held_*`` flux fields
@@ -417,6 +443,9 @@ def carry_mse_terms(
     # this, w_T·<dT²>, w_q·<dq²>, w_ps·<dps²> differ by ~9 orders of
     # magnitude (ps² ~ 1e10 dominates; q² ~ 1e-4 is invisible).  Set
     # to all-1 when normalization is off for backward compatibility.
+    if getattr(config, "residual_normalize", False) and _per_level_scales(config):
+        return _carry_terms_per_level(pred_carry, target_carry, lev_w,
+                                      lat_weights, config, loss, terms)
     if getattr(config, "residual_normalize", False):
         # ACE2-style residual normalization (scale by std of the 6h field
         # change — see LossConfig). Matches _spectral_state_loss_components.
@@ -503,6 +532,110 @@ def carry_mse_terms(
             pred_carry, target_carry, lat_weights=lat_weights, config=config,
         ))
 
+    return loss, terms
+
+
+_SCALE_FLOOR_SQ = 1e-30   # the existing zero-scale floor, on the squared scale
+
+
+def _per_level_scales(config) -> bool:
+    lev = (config.T_resid_scale_lev, config.u_resid_scale_lev,
+           config.v_resid_scale_lev, config.q_resid_scale_lev)
+    if not any(lev):
+        return False
+    if not all(lev):
+        raise ValueError(
+            "per-level residual scales must be given for all of T, u, v, q "
+            "(T/u/v/q_resid_scale_lev), not a subset.")
+    return True
+
+
+def _inv_scale(per_level, nlev: int, name: str):
+    s = jnp.asarray(per_level, dtype=jnp.float64)
+    if s.shape != (nlev,):
+        raise ValueError(f"{name} has {s.shape[0]} entries, the model has {nlev} levels.")
+    return 1.0 / jnp.sqrt(jnp.maximum(s ** 2, _SCALE_FLOOR_SQ))
+
+
+def _carry_terms_per_level(pred_carry, target_carry, lev_w, lat_weights,
+                           config, loss, terms):
+    """``carry_mse_terms`` with a per-level 6 h residual scale per variable.
+
+    Each variable's error is divided by its level's scale BEFORE the level
+    weighting and the area mean, so MSE ~ (d/s)^2, bias ~ mean(d/s)^2 and
+    CRPS ~ |d|/s with the same weights as the scalar-scale path."""
+    nlev = lev_w.shape[0]
+
+    def _add(name, x):
+        nonlocal loss
+        terms[name] = x
+        loss = loss + x
+
+    ps_inv = 1.0 / max(config.ps_resid_scale ** 2, _SCALE_FLOOR_SQ) ** 0.5
+    fields = (
+        ("T", pred_carry.T - target_carry.T,
+         _inv_scale(config.T_resid_scale_lev, nlev, "T_resid_scale_lev"),
+         config.w_T, config.w_bias_T, config.w_crps_T, True),
+        ("u", pred_carry.u - target_carry.u,
+         _inv_scale(config.u_resid_scale_lev, nlev, "u_resid_scale_lev"),
+         config.w_u, config.w_bias_u, config.w_crps_u, True),
+        ("v", pred_carry.v - target_carry.v,
+         _inv_scale(config.v_resid_scale_lev, nlev, "v_resid_scale_lev"),
+         config.w_v, config.w_bias_v, config.w_crps_v, True),
+        ("q", pred_carry.q_v - target_carry.q_v,
+         _inv_scale(config.q_resid_scale_lev, nlev, "q_resid_scale_lev"),
+         config.w_q, 0.0, config.w_crps_q, True),
+        ("ps", pred_carry.p_s - target_carry.p_s, ps_inv,
+         config.w_ps, config.w_bias_ps, config.w_crps_ps, False),
+    )
+    for name, d, inv, w, wb, wc, levelled in fields:
+        x = d * inv
+        lw = lev_w if levelled else 1.0
+        _add(f"mse_{name}", w * _lat_weighted_mean(x ** 2 * lw, lat_weights))
+        if wb > 0.0:
+            _add(f"bias_{name}", wb * _lat_weighted_mean(x * lw, lat_weights) ** 2)
+        if wc > 0.0:
+            _add(f"crps_{name}", wc * _lat_weighted_mean(jnp.abs(x) * lw, lat_weights))
+    if _any_flux_weight(config):
+        _add("flux", radiation_flux_loss(
+            pred_carry, target_carry, lat_weights=lat_weights, config=config))
+    return loss, terms
+
+
+SURFACE_LOSS_KEYS = ("t2m", "u10", "v10", "mslp")
+
+
+def surface_field_terms(pred_fields, target_fields, valid, lat_weights,
+                        config: LossConfig = LossConfig()) -> tuple[jax.Array, dict]:
+    """MSE + bias + CRPS on the near-surface WB2 fields, as ``(loss, terms)``.
+
+    ``pred_fields`` are diagnosed from the predicted state by the WB2 eval's
+    own diagnosis; ``target_fields`` are ERA5 on the same model grid;
+    ``valid`` is the diagnosis' own above-ground mask. Each field is scaled
+    by its own 6 h residual scale."""
+    loss = jnp.asarray(0.0)
+    terms = {}
+    for key in SURFACE_LOSS_KEYS:
+        w, wb, wc = (getattr(config, f"w_{key}"), getattr(config, f"w_bias_{key}"),
+                     getattr(config, f"w_crps_{key}"))
+        if w <= 0.0 and wb <= 0.0 and wc <= 0.0:
+            continue
+        s = getattr(config, f"{key}_resid_scale")
+        if not s > 0.0:
+            raise ValueError(f"w_*_{key} > 0 needs {key}_resid_scale > 0, got {s!r}.")
+        m = jnp.asarray(valid[key], dtype=jnp.float64)
+        msum = _lat_weighted_mean(m, lat_weights)
+        x = (pred_fields[key] - target_fields[key]) / s
+
+        def _mean(f):
+            return _lat_weighted_mean(f * m, lat_weights) / msum
+
+        for name, wt, val in ((f"mse_{key}", w, lambda: _mean(x ** 2)),
+                              (f"bias_{key}", wb, lambda: _mean(x) ** 2),
+                              (f"crps_{key}", wc, lambda: _mean(jnp.abs(x)))):
+            if wt > 0.0:
+                terms[name] = wt * val()
+                loss = loss + terms[name]
     return loss, terms
 
 

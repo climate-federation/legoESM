@@ -347,3 +347,98 @@ def test_spectral_core_raw_two_leg_matches_raw():
         np.testing.assert_allclose(np.asarray(getattr(two, name)),
                                    np.asarray(getattr(one, name)),
                                    rtol=1e-10, atol=1e-10, err_msg=name)
+
+
+def _perturbed(params, scale=1e-2, seed=0):
+    """Params with every float leaf nudged off its (possibly zero) init, so a
+    learned arm's output actually depends on its inputs (incl. the clock)."""
+    import equinox as eqx
+
+    arr, static = eqx.partition(params, eqx.is_inexact_array)
+    leaves, tdef = jax.tree_util.tree_flatten(arr)
+    keys = jax.random.split(jax.random.PRNGKey(seed), len(leaves))
+    leaves = [x + scale * jax.random.normal(k, x.shape, x.dtype)
+              for x, k in zip(leaves, keys)]
+    return eqx.combine(jax.tree_util.tree_unflatten(tdef, leaves), static)
+
+
+@pytest.mark.parametrize("mode", ["neural_gcm", "physics"])
+def test_spectral_core_raw_multi_equals_one_rollout(mode):
+    """``raw_multi`` chains segments EXACTLY: after k segments it equals one
+    ``raw`` rollout of k*seg steps (clock, physics state and cached radiation
+    carried on).  The IC sits at 21 UTC so a chained segment that restarted
+    the clock would see a different sun."""
+    from legoesm.training.scale_build import build_mode_components
+
+    yml = _yml()
+    model, grid, sigma, params, make_run_seg, loss_config, dt = (
+        build_mode_components(_cfg(mode), yml))
+    if mode == "neural_gcm":
+        params = _perturbed(params)
+    ic = _synthetic_carry(grid, int(yml["nlev"]))
+    ncol = int(grid.n_lat) * int(grid.n_lon)
+    forcing = {
+        "T_sfc": jnp.full((ncol,), 300.0),
+        "sic": jnp.zeros((ncol,)),
+        "land_frac": jnp.zeros((int(grid.n_lat), int(grid.n_lon))),
+        "day_of_year": jnp.asarray(80.0),
+        "seconds_of_day": jnp.asarray(21 * 3600.0),
+    }
+    seg = make_run_seg(params)
+    outs = seg.raw_multi(ic, 2, 2, forcing)
+    assert len(outs) == 2
+    for got, n in ((outs[0], 2), (outs[1], 4)):
+        ref = seg.raw(ic, n, forcing)
+        for name in ("u", "v", "T", "p_s", "q_v"):
+            np.testing.assert_allclose(np.asarray(getattr(got, name)),
+                                       np.asarray(getattr(ref, name)),
+                                       rtol=1e-10, atol=1e-10,
+                                       err_msg=f"{name} after {n} steps")
+
+
+def test_supervised_leads_and_curriculum():
+    from legoesm.training.scale_build import curriculum_n_segs, supervised_leads
+
+    assert supervised_leads({"loss": {}}) == ()
+    yml = {"loss": {"train_leads_hours": [6, 12, 18, 24],
+                    "train_curriculum_hours": [6, 12, 24]}}
+    leads = supervised_leads(yml)
+    assert leads == (6, 12, 18, 24)
+    assert curriculum_n_segs(yml, leads, 12) == (1, 2, 4)
+    assert curriculum_n_segs({"loss": {}}, leads, 5) == (4,)
+    with pytest.raises(ValueError, match="equal curriculum"):
+        curriculum_n_segs(yml, leads, 10)
+    with pytest.raises(ValueError, match="consecutive multiples"):
+        supervised_leads({"loss": {"train_leads_hours": [6, 12, 24]}})
+    with pytest.raises(ValueError, match="increasing"):
+        curriculum_n_segs({"loss": {"train_curriculum_hours": [12, 6]}}, leads, 12)
+
+
+def test_multi_lead_loss_is_mean_over_scored_leads():
+    """``multi_lead_loss`` = (1/N) * sum of the per-lead carry losses of one
+    chained forecast, N = the stage's lead count; near-surface terms ride
+    along when the target carries the fields."""
+    from legoesm.training.losses import LossConfig, combined_loss
+    from legoesm.training.scale_build import multi_lead_loss
+
+    grid = create_gaussian_grid(10, dealiasing="quadratic")
+    sigma = create_sigma_coordinate(8)
+    sf = jnp.asarray(sigma.sigma_full)
+    base = _synthetic_carry(grid, 8)
+    preds = tuple(base._replace(T=base.T + d) for d in (0.5, 1.0, 2.0))
+    tgts = tuple((base, {}) for _ in preds)
+
+    class _Seg:
+        def raw_multi(self, ic, seg_steps, n, forcing, adjoint_steps=0):
+            return preds[:n]
+
+    cfg = LossConfig()
+    kw = dict(seg_steps=1, sigma_full=sf, grid=grid, sigma=sigma,
+              loss_config=cfg, diagnose_fn=None)
+    for n in (1, 2, 3):
+        got = multi_lead_loss(_Seg(), base, tgts, None, n_segs=n, **kw)
+        want = sum(float(combined_loss(p, base, sf, grid=grid, config=cfg))
+                   for p in preds[:n]) / n
+        np.testing.assert_allclose(float(got), want, rtol=1e-12)
+    with pytest.raises(ValueError, match="outside"):
+        multi_lead_loss(_Seg(), base, tgts, None, n_segs=4, **kw)
