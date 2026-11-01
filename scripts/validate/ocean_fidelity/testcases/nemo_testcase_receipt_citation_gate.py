@@ -13382,24 +13382,24 @@ _reanchor(
     'packages/ice/legoesm/ice/bitz_lipscomb.py:1301-1324',
     'packages/ice/legoesm/ice/bitz_lipscomb.py:1301-1320',
     anchors=['def si3_ice_thd_dh(*, fluxes: SI3DHFluxes, rDt_ice, rn_snwblow, rn_sinew,',
-             (')', 587), 20],
+             (')', 584), 20],
 )
 _reanchor(
     'packages/ice/legoesm/ice/bitz_lipscomb.py:1718-1795',
     'packages/ice/legoesm/ice/bitz_lipscomb.py:1718-1783',
     anchors=['def si3_ice_thd_sal(*, h_i, t_su, t_i, sz_i, t_bo, sss, a_i, dh_i_sum,',
-             (')', 834), 66],
+             (')', 831), 66],
 )
 _reanchor(
     'packages/ice/legoesm/ice/bitz_lipscomb.py:1028-1282',
     'packages/ice/legoesm/ice/bitz_lipscomb.py:1028-1277',
-    anchors=['def _si3_ice_thd_dh_core(', (')', 567), 250],
+    anchors=['def _si3_ice_thd_dh_core(', (')', 564), 250],
 )
 _reanchor(
     'packages/ice/legoesm/ice/bitz_lipscomb.py:1256-1261',
     'packages/ice/legoesm/ice/bitz_lipscomb.py:1256-1256',
     anchors=['e_s_new = _cumulative_remap(zh_s, [sr(e * h) for e, h in zip(ze_s, zh_s)], nlay_s, sr)',
-             (')', 556), 1],
+             (')', 553), 1],
 )
 _reanchor(
     'packages/ice/legoesm/ice/bitz_lipscomb.py:2149',

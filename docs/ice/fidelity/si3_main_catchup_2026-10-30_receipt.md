@@ -402,6 +402,77 @@ The merged gate retains both parents’ independent maps. All moved citations we
    already-certified forward, so resume 5 changes no primal value and registers
    the production-reachable semantic choice below.
 
+## Resume 6 reverse-only follow-up
+
+The production forward remains the certified lane expression.  The operator
+probe is byte-identical to its `fwd_old.txt` reference, and both eager and JIT
+forward bit cards remain unchanged.  Only reverse routing and dtype
+normalization changed:
+
+- the entry-concentration cotangent is now selected by structural carry
+  (`post_dh.h_ice != 0`) rather than accidental value equality;
+- open-water `age_volume` is carried from the live entry state, restoring its
+  identity cotangent;
+- the entry gather guard distinguishes nonzero thickness from the discarded
+  thermodynamic lane, restoring the sub-epsilon thickness derivative;
+- frazil/do forcing leaves are cast to the state dtype, restoring the
+  certified mixed-float behavior and a finite float32 concentration gradient;
+- the redundant active-column mask in the custom reverse rule was deleted;
+  the cumulative-remap guard was also deleted after both its production sweep
+  and tie-survivor plants stayed green without it; and
+- the original `h_ice=0` formation fixture is restored, with `h_ice=0.5` kept
+  as a second case.
+
+At the pre-fix `6326624aac` tree, the committed sweep fails in eager mode:
+the first 16 cases have worst relative error `1.0`, and the four positive-
+concentration/zero-thickness cases are non-finite.  The focused defects are
+`d(concentration_out)/d(concentration_in)=1` and
+`d(age_volume_out)/d(concentration_in)=3600` at zero concentration and zero
+thickness (both targets are zero),
+`d(age_volume_out)/d(age_volume_in)=0` (target one), and a zero sub-epsilon
+thickness derivative where the lane finite difference is approximately
+`4.775e-6`.
+
+The 4,968-pair oracle covers 24 production cases, nine exit leaves, and 23
+entry-state/forcing leaves.  It uses main AD wherever the main and lane
+forwards agree in a neighborhood, otherwise the lane forward: central
+differences away from a boundary, a positive-side difference at concentration
+zero, and a below-threshold difference at `epsi10`.  Eager and compiled values
+are independently pinned; their one reviewed source-rounding difference is
+the active case's `h_ice`-versus-concentration slope.
+
+| concentration | h_ice | qlead | eager worst relative | JIT worst relative |
+|---:|---:|---:|---:|---:|
+| 0 | 0.0 | 0 | `0.000e+00` | `0.000e+00` |
+| 0 | 0.0 | -40 | `0.000e+00` | `0.000e+00` |
+| 0 | 0.5 | 0 | `5.307e-15` | `0.000e+00` |
+| 0 | 0.5 | -40 | `5.307e-15` | `0.000e+00` |
+| 1e-12 | 0.0 | 0 | `0.000e+00` | `0.000e+00` |
+| 1e-12 | 0.0 | -40 | `0.000e+00` | `0.000e+00` |
+| 1e-12 | 0.5 | 0 | `5.307e-15` | `0.000e+00` |
+| 1e-12 | 0.5 | -40 | `5.307e-15` | `0.000e+00` |
+| 5e-11 | 0.0 | 0 | `0.000e+00` | `0.000e+00` |
+| 5e-11 | 0.0 | -40 | `0.000e+00` | `0.000e+00` |
+| 5e-11 | 0.5 | 0 | `5.307e-15` | `0.000e+00` |
+| 5e-11 | 0.5 | -40 | `5.307e-15` | `0.000e+00` |
+| 1e-10 | 0.0 | 0 | `0.000e+00` | `0.000e+00` |
+| 1e-10 | 0.0 | -40 | `0.000e+00` | `0.000e+00` |
+| 1e-10 | 0.5 | 0 | `5.307e-15` | `0.000e+00` |
+| 1e-10 | 0.5 | -40 | `5.307e-15` | `0.000e+00` |
+| 2e-10 | 0.0 | 0 | `0.000e+00` | `0.000e+00` |
+| 2e-10 | 0.0 | -40 | `0.000e+00` | `0.000e+00` |
+| 2e-10 | 0.5 | 0 | `2.715e-14` | `0.000e+00` |
+| 2e-10 | 0.5 | -40 | `2.715e-14` | `0.000e+00` |
+| 0.5 | 0.0 | 0 | `0.000e+00` | `0.000e+00` |
+| 0.5 | 0.0 | -40 | `0.000e+00` | `0.000e+00` |
+| 0.5 | 0.5 | 0 | `2.715e-14` | `0.000e+00` |
+| 0.5 | 0.5 | -40 | `7.880e-13` | `0.000e+00` |
+
+The maximum is `7.880e-13`, below the required `1e-6` relative threshold.
+The remap-guard source removal changes three later parenthesis-occurrence
+anchors without moving their lines; the executable citation map was updated
+accordingly, and its full non-vacuity audit remains green.
+
 ## Final clean-checkout verification
 
 | Selection | Final line |
@@ -426,7 +497,7 @@ Every observed stable failure is classified here.
 |---|---|---|
 | `test_si3_surface.py::test_libm_pow_matches_glibc_and_differentiates` | merge-introduced, fixed here | original merge dereferenced lazy `_LIBM=None`; cherry-picked `e4be5cee4e29aa2c71bf5802e2ccee7df5ca0fb9`, using `glibc_libm().pow` |
 | `test_bitz_lipscomb.py` open-water reverse-mode regressions | merge-introduced, corrected here | preserved the lane's exact `post_da` forward and routed only the valid inactive concentration cotangent to the entry value; eager/JIT two-step bits equal `920c61d884` |
-| main's remap-only Bitz regression (now `test_cumulative_remap_reverse_mode_finite_at_zero_thickness`) | merge-introduced, fixed here | applied main's F3 guard intent to the lane's live cumulative remap and replaced the vacuous fixture; no deleted duplicate helper was restored |
+| main's remap-only Bitz regression (formerly `test_cumulative_remap_reverse_mode_finite_at_zero_thickness`) | merge-introduced, superseded in resume 6 | the helper-only guard was removed because no production-step case requires it; the full production Jacobian sweep and tie-survivor controls remain finite and green with reverse protection at the gather boundary |
 | landing battery KPP validation-order node recorded above | merge-introduced, fixed in the original catch-up | main closure evaluation ran before the lane's unchanged fail-closed refusal; ordering was corrected and the node passed |
 | 15 nodes in `test_nemo_testcase_receipt_citation_gate.py` on the first clean follow-up run | follow-up source-shift, fixed here | the AD guards, dual CEN2 path, and catch-up-2 core changes moved 149 mapped endpoints; all audited Markdown citations and the executable map were re-anchored with literal insertion maps and explicit replacement anchors; pre-commit result is `42 passed` plus the two expected dirty-worktree provenance refusals |
 | three bypass classes in `test_post_20261029_provenance_sha_gate.py` | follow-up weakness, fixed here | carry-forward now requires the identical token on one mapped logical line through the complete first-parent history to the pre-cutoff base; later re-edits, copied/retargeted tokens, and moved tokens fail committed plants |

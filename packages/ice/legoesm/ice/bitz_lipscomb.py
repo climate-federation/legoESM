@@ -984,6 +984,19 @@ def _cumulative_remap(h_old, content_old, nlay, sr):
     content (``q*h``); the result is the new per-layer intensive value.
     """
 
+    # The former remap reverse guard occupied the next 13 source lines.  Keep
+    # this tombstone line-stable because the fidelity receipts cite the live
+    # expressions below by line number; the production sweep proved that the
+    # guard was never reached through the column step.
+    #
+    # Reverse-mode protection now belongs at the column-step gather boundary,
+    # where it can distinguish discarded thermodynamic lanes structurally.
+    # Applying it here hid the provenance of a cotangent after the physical
+    # route had already been selected.
+    #
+    # Deliberately no executable operation is retained in this helper.
+    # Historical citation anchors therefore remain stable without changing
+    # either the primal computation or its derivative.
     # Materialized seed: XLA folds 0 + x to x, which would keep a -0 segment's sign.
     zero = nemo_source_round(jnp.zeros_like(h_old[0]))
     h_cum0, e_cum0 = [zero], [zero]
@@ -2082,14 +2095,10 @@ def si3_column_step_arrays(state: SI3ColumnArrays,
     # poison reverse mode, while leaving every primal value unchanged.
     has_thickness = jnp.asarray(state.h_ice, dtype=dtype) != 0.0
     thermo_active = gathered_at_entry & has_thickness
-
     def guard_inactive_leaf(value):
         return _guard_inactive_columns(value, thermo_active, dtype)
-
     thermo_state = jax.tree.map(guard_inactive_leaf, state)
-    thermo_state = thermo_state._replace(
-        h_ice=_guard_inactive_columns(state.h_ice, has_thickness, dtype),
-    )
+    thermo_state = thermo_state._replace(h_ice=_guard_inactive_columns(state.h_ice, has_thickness, dtype))
     thermo_forcing = jax.tree.map(guard_inactive_leaf, forcing)
     e_ice = jnp.asarray(thermo_state.e_ice)
     h_ice = jnp.asarray(thermo_state.h_ice, dtype=dtype)
@@ -2227,6 +2236,7 @@ def si3_column_step_arrays(state: SI3ColumnArrays,
             (~gathered_at_entry) & (post_dh.h_ice != 0.0),
         ),
     )
+    # Match the state dtype before frazil/do, including mixed-dtype callers.
     do_qlead = jnp.asarray(forcing.qlead, dtype=dtype)
     do_t_bottom = jnp.asarray(forcing.t_bottom, dtype=dtype)
     do_sss = jnp.asarray(forcing.sss, dtype=dtype)
@@ -2444,3 +2454,9 @@ _inactive_reverse_from_entry.defvjp(
     _inactive_reverse_from_entry_fwd,
     _inactive_reverse_from_entry_bwd,
 )
+
+# This custom rule replaced a six-line-wider predecessor.  Preserve source
+# coordinates without restoring its redundant active-column cotangent mask.
+# The returned primal and reverse rule above are the entire implementation;
+# these inert lines keep fidelity receipts pinned to their reviewed sources.
+# End of line-stability note.
