@@ -401,6 +401,10 @@ def morrison_microphysics(
     config = resolve_morrison_flavor(config)
     ncol, nlev = T.shape
     _prog_nc = bool(getattr(config, "prognostic_droplet_number", False))
+    # RULE 5 widths of MG2's early droplet size reset (micro_mg2_0.F90:1296),
+    # every call site, both droplet-number paths; 0 = MG2's hard clip.
+    _early_reset_w = dict(number_cap_log_width=config.mg2_drop_early_reset_log_width,
+                          slope_log_width=config.mg2_drop_early_reset_log_width)
     # Droplet-number budget publication (``MicrophysicsOutput.nc_budget``):
     # the same static switch as ``qc_budget``, MG2 prognostic number only.
     _nc_pub = _prog_nc and bool(getattr(config, "publish_qc_budget", False))
@@ -652,13 +656,24 @@ def morrison_microphysics(
             # tendency moves by up to 1.9e-5 of the column's largest MG2
             # droplet tendency; per-column table GAP in tests/atmosphere/
             # microphysics/unit/test_morrison_mg2_drop_early_reset_smooth.py.
-            _w = config.mg2_drop_early_reset_log_width
             N_c_ic, _pgam_c, _lamc_c = mg2_size_dist_liq(
-                q_c_ic, N_c_ic, rho, number_cap_log_width=_w, slope_log_width=_w)
+                q_c_ic, N_c_ic, rho, **_early_reset_w)
+        # Specified droplet number (production): the same MG2 reset, inside
+        # the autoconversion, with the same RULE 5 width (#2216, user
+        # 2026-11-01).  KNOWN DIFFERENCE: as above.  Measured at the default
+        # 0.01 (x64): on the specified-number oracle fixtures, every other
+        # switch hard, the whole-call quantities move by <= 7.5e-15 of the
+        # column's largest MG2 value and the MG2 kernel points' autoconversion
+        # rate by up to 1.0e-8 relative (50 um side); per-case tables GAP and
+        # POINT_GAP in tests/atmosphere/microphysics/unit/
+        # test_morrison_mg2_specnc_reset_smooth.py.  On production-deck
+        # states (one step, jan1979_main1027_ncaero days 10/20/30, mass-
+        # weighted global and 40-65S means) autoconversion and snow riming
+        # move by <= 2e-6 relative and the rain-number tendency by <= 2e-4.
         dq_c_au, dN_r_au, x_c = autoconversion_kk2000_cam6(
             q_c_ic, N_c_ic, rho, _relvar,
             fact=config.autocon_fact, nc_floor=not _prog_nc,
-            size_reset=not _prog_nc)
+            size_reset=not _prog_nc, **_early_reset_w)
         dq_c_au = dq_c_au * cf_eff
         dN_r_au = dN_r_au * cf_eff
         dq_c_ac = accretion_kk2000(
@@ -1126,7 +1141,10 @@ def morrison_microphysics(
             if _prog_nc:     # N_c_ic is already MG2's reset number (above)
                 _nc_liq, _pgam, _lamc = N_c_ic, _pgam_c, _lamc_c
             else:
-                _nc_liq, _pgam, _lamc = mg2_size_dist_liq(q_c_ic, N_c_ic, rho)
+                # specified number: MG2's reset again, same RULE 5 width
+                # (KNOWN DIFFERENCE at the autoconversion call above)
+                _nc_liq, _pgam, _lamc = mg2_size_dist_liq(q_c_ic, N_c_ic, rho,
+                                                          **_early_reset_w)
             riming_s = mg2_accrete_cloud_water_snow(
                 T, rho, mu_air, uns_ic, q_c_ic, _nc_liq, q_sic, _pgam, _lamc,
                 lams_ic, n0s_ic, config,

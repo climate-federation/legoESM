@@ -150,14 +150,25 @@ def figure(results: dict, path: Path, title: str) -> None:
     plt.close(fig)
 
 
-def install_micro_spy(micro_calls: list, graupel_riming: bool = True) -> None:
+RESET_FIELD = "mg2_drop_early_reset_log_width"
+AB_FIELDS = ("dq_c_dt", "dq_r_dt", "dq_s_dt", "dq_v_dt")
+
+
+def install_micro_spy(micro_calls: list, graupel_riming: bool = True,
+                      reset_width_ab: bool = False) -> None:
     """Make every microphysics build publish its budget and record each EAGER
     call; the scheme outputs other than the budgets are unchanged (pinned by
     test_morrison_nc_budget), and the budgets are stripped before returning.
 
     ``graupel_riming=False`` (#2216 option 2, offline only) runs the scheme
     with its own switch ``do_graupel_riming=False``: graupel collecting cloud
-    water (mass and number) off, every other process as configured."""
+    water (mass and number) off, every other process as configured.
+
+    ``reset_width_ab=True`` (#2216, the specified-number early size reset):
+    each eager call is run a second time on the SAME inputs with only
+    ``mg2_drop_early_reset_log_width = 0`` (MG2's hard clip); both arms'
+    cloud-water budget and tendencies are recorded and the configured arm's
+    output is returned (the step itself is unchanged)."""
     import jax
     import legoesm.atmosphere.physics.microphysics.integration as mi
     real = mi._get_microphysics_fn
@@ -171,10 +182,23 @@ def install_micro_spy(micro_calls: list, graupel_riming: bool = True) -> None:
             if not hasattr(cfg, "do_graupel_riming"):
                 raise SystemExit(f"{name}: no do_graupel_riming switch to turn off")
             sw["do_graupel_riming"] = False
+        if reset_width_ab and not hasattr(cfg, RESET_FIELD):
+            raise SystemExit(f"{name}: no {RESET_FIELD} to compare")
 
         def spy(T, q_v, hyd, p_full, p_half, rho, dz, dt, scheme_cfg, **kw):
             out = fn(T, q_v, hyd, p_full, p_half, rho, dz, dt,
                      scheme_cfg._replace(**sw), **kw)
+            if reset_width_ab:
+                if not isinstance(out.dq_c_dt, jax.core.Tracer):
+                    hard = fn(T, q_v, hyd, p_full, p_half, rho, dz, dt,
+                              scheme_cfg._replace(**sw, **{RESET_FIELD: 0.0}), **kw)
+                    f = lambda a: np.asarray(a, dtype=np.float64)   # noqa: E731
+                    micro_calls.append({"width": float(getattr(scheme_cfg, RESET_FIELD)),
+                                        **{arm: {"qc": {k: f(v) for k, v in o.qc_budget.items()},
+                                                 "dN_r_dt": f(o.dN_r_dt) / f(rho),
+                                                 **{k: f(getattr(o, k)) for k in AB_FIELDS}}
+                                           for arm, o in (("default", out), ("hard", hard))}})
+                return out._replace(qc_budget=None, nc_budget=None)
             if out.nc_budget is not None and not isinstance(out.dN_c_dt, jax.core.Tracer):
                 f = lambda a: np.asarray(a, dtype=np.float64)   # noqa: E731
                 micro_calls.append({
@@ -337,6 +361,74 @@ def run(model, state, DT, pf_full, forcing, phys_state, calls, micro_calls,
     figure(results, png, f"Droplet-number budget by process, {tag}, one step "
                          f"(dt = {DT:g} s), per volume of air")
     print(f"\nwrote {png}", flush=True)
+    return 0
+
+
+def reset_ab_rows(micro_calls: list) -> dict:
+    """{arm: {row: rate [1/s per kg of air] (ncol, nlev)}}, each row the mean
+    over the macmic calls; gates each call's cloud-water budget closure and a
+    non-zero configured width."""
+    gate(len(micro_calls) > 0, f"{len(micro_calls)} microphysics calls recorded both arms")
+    gate(all(c["width"] > 0.0 for c in micro_calls),
+         f"configured {RESET_FIELD} > 0 (else the comparison is vacuous)")
+    out = {}
+    for arm in ("hard", "default"):
+        for c in micro_calls:
+            ok, worst = closes(list(c[arm]["qc"].values()), c[arm]["dq_c_dt"])
+            gate(ok, f"{arm}: cloud-water budget terms sum to dq_c_dt (worst rel {worst:.2e})")
+        keys = [f"q_c: {k}" for k in micro_calls[0][arm]["qc"]] + list(AB_FIELDS) + ["dN_r_dt"]
+        out[arm] = {k: mean_calls([c[arm]["qc"][k[5:]] if k.startswith("q_c: ") else c[arm][k]
+                                   for c in micro_calls]) for k in keys}
+    return out
+
+
+def reset_ab_table(rows: dict, mass, mk) -> dict:
+    """Mass-weighted region means [per day] of both arms and their difference."""
+    m = mass[mk].sum()
+    res = {}
+    for k in rows["hard"]:
+        h, d = ((rows[a][k] * mass)[mk].sum() / m * 86400.0 for a in ("hard", "default"))
+        res[k] = (h, d, d - h)
+    return res
+
+
+def run_reset_ab(model, state, DT, pf_full, forcing, phys_state, micro_calls,
+                 out_dir: Path, tag: str) -> int:
+    """#2216: the early droplet size reset at the configured width vs MG2's
+    hard clip (width 0), on the same inputs of every microphysics call of one
+    eager step.  Rows [kg/kg/day; rain number /kg/day] mass-weighted over the
+    nc_budget regions and layers.  NUMBERS ONLY, no verdict."""
+    import jax.numpy as jnp
+    from legoesm import constants
+
+    micro_calls.clear()
+    target_mass = model._target_mass
+    if model.config.fix_mass and model.config.anchor_mass_to_initial and target_mass is None:
+        target_mass = model.compute_mass(state)
+    type(model)._step_jit.__wrapped__(model, state, DT, pf_full, target_mass, forcing,
+                                      phys_state)
+    rows = reset_ab_rows(micro_calls)
+    f = lambda a: np.asarray(a, dtype=np.float64)   # noqa: E731
+    sig = model.sigma_coord
+    p_s = jnp.asarray(f(state.p_s.data))
+    ph, pm = f(sig.pressure_at_half(p_s)), f(sig.pressure_at_full(p_s))
+    mass = f(model.mesh.areaCell)[:, None] * (ph[:, 1:] - ph[:, :-1]) / constants.g
+    mks = masks(np.rad2deg(f(model.mesh.latCell)), pm / 100.0)
+    print(f"\n{tag}: {len(micro_calls)} microphysics calls, {RESET_FIELD} = "
+          f"{micro_calls[0]['width']:g} vs 0 (hard); mass-weighted, per day", flush=True)
+    save = {}
+    for key, mk in mks.items():
+        t = reset_ab_table(rows, mass, mk)
+        print(f"\n[{key[0]} | {key[1]}]  {'hard':>14s} {'default':>14s} {'default-hard':>14s} "
+              f"{'rel':>10s}")
+        for k, (h, d, dd) in t.items():
+            rel = dd / abs(h) if h != 0.0 else (0.0 if dd == 0.0 else np.inf)
+            print(f"  {k:28s} {h:+14.6e} {d:+14.6e} {dd:+14.6e} {rel:+10.2e}")
+        save["|".join(key)] = np.array([t[k] for k in t])
+    out_dir.mkdir(parents=True, exist_ok=True)
+    np.savez(out_dir / f"reset_ab_{tag}.npz", row_names=np.array(list(rows["hard"])),
+             width=micro_calls[0]["width"], **save)
+    print(f"\nwrote {out_dir / f'reset_ab_{tag}.npz'}", flush=True)
     return 0
 
 

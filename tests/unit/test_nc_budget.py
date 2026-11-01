@@ -178,3 +178,56 @@ def test_compare_known_answer(tmp_path):
     assert a["off"]["rows"]["micro: riming_graupel"] == 0.0
     assert a["on"]["incloud_first"] == 20.0 and a["on"]["incloud_last"] == 22.0
     assert (tmp_path / "c.png").stat().st_size > 0
+
+
+def test_spy_reset_width_ab_runs_both_arms_on_the_same_inputs(monkeypatch):
+    from typing import NamedTuple
+    import legoesm.atmosphere.physics.microphysics.integration as mi
+
+    class Cfg(NamedTuple):
+        publish_qc_budget: bool = False
+        mg2_drop_early_reset_log_width: float = 0.01
+
+    class Out(NamedTuple):
+        dq_c_dt: object = None
+        dq_r_dt: object = None
+        dq_s_dt: object = None
+        dq_v_dt: object = None
+        dN_r_dt: object = None
+        nc_budget: object = None
+        qc_budget: object = None
+    seen = []
+
+    def fn(*a, **kw):
+        seen.append((a[:8], a[8]))
+        w = a[8].mg2_drop_early_reset_log_width
+        one = np.ones((1, 1))
+        return Out(*(one * (1.0 + w),) * 4, dN_r_dt=one * 2.0,
+                   qc_budget={"autoconversion": one * (0.5 + w), "riming_snow": one * 0.5})
+    monkeypatch.setattr(mi, "_get_microphysics_fn", lambda c: ("morrison", fn, Cfg()))
+    calls = []
+    nb.install_micro_spy(calls, reset_width_ab=True)
+    _, spy, cfg = mi._get_microphysics_fn(None)
+    ret = spy(*range(5), np.full((1, 1), 2.0), 6, 7, cfg)
+    assert [s[0] for s in seen] == [seen[0][0]] * 2           # same inputs
+    assert [s[1] for s in seen] == [Cfg(True, 0.01), Cfg(True, 0.0)]
+    assert ret.qc_budget is None and float(ret.dq_c_dt[0, 0]) == pytest.approx(1.01)
+    assert calls[0]["width"] == 0.01 and calls[0]["hard"]["dN_r_dt"][0, 0] == 1.0
+    rows = nb.reset_ab_rows(calls)
+    t = nb.reset_ab_table(rows, np.ones((1, 1)), np.ones((1, 1), bool))
+    assert t["q_c: autoconversion"] == pytest.approx((0.5 * 86400, 0.51 * 86400, 0.01 * 86400))
+    assert t["dq_c_dt"][2] == pytest.approx(0.01 * 86400)
+    # a budget that does not close is refused
+    calls[0]["hard"]["qc"]["riming_snow"] = np.zeros((1, 1))
+    with pytest.raises(SystemExit, match="GATE FAILED: hard: cloud-water budget"):
+        nb.reset_ab_rows(calls)
+    # a configured width of 0 makes the comparison vacuous
+    calls[0]["width"] = 0.0
+    with pytest.raises(SystemExit, match="vacuous"):
+        nb.reset_ab_rows(calls)
+    class NoField(NamedTuple):
+        publish_qc_budget: bool = False
+    monkeypatch.setattr(mi, "_get_microphysics_fn", lambda c: ("x", fn, NoField()))
+    nb.install_micro_spy([], reset_width_ab=True)
+    with pytest.raises(SystemExit, match="no mg2_drop_early_reset_log_width"):
+        mi._get_microphysics_fn(None)
