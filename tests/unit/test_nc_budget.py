@@ -97,7 +97,7 @@ def test_launch_argv_reads_monthly_baseline_lines(tmp_path, monkeypatch):
     assert argv[argv.index("--days") + 1] == "1"
 
 
-def test_terrain_override_reports_only_small_magnitude_drift(monkeypatch):
+def test_terrain_override_reports_only_small_magnitude_drift(monkeypatch, capsys):
     from types import SimpleNamespace
     from legoesm.driver.model_driver import ModelDriver
     msg = {"text": ""}
@@ -105,18 +105,18 @@ def test_terrain_override_reports_only_small_magnitude_drift(monkeypatch):
     def refuse(self):
         raise RuntimeError(msg["text"])
     monkeypatch.setattr(ModelDriver, "_check_restart_terrain", refuse)
-    nb.report_terrain_drift()
+    nb.report_terrain_drift()                         # wraps the refusal patched above
     check = ModelDriver._check_restart_terrain
 
-    def fake(drift):
-        b = np.full(4, 5.0e4)
-        return SimpleNamespace(_phis_data=b, state=SimpleNamespace(
-            phis=SimpleNamespace(data=b + drift)))
-    magnitude = "restart: the checkpoint's terrain differs from this run's terrain product (max |d| x)"
-    msg["text"] = magnitude
+    def fake(drift, n_state=4):
+        b = np.full(4, 5.0e4)                         # this run's terrain product
+        return SimpleNamespace(_phis_data=b, state=SimpleNamespace(   # the checkpoint's
+            phis=SimpleNamespace(data=np.full(n_state, 5.0e4) + drift)))
+    msg["text"] = "restart: the checkpoint's terrain differs from this run's terrain product (max |d| x)"
     check(fake(5.0e4 * 1.4e-6))                       # measured size: reported
+    assert "TERRAIN DRIFT 1.40e-06 of max phis" in capsys.readouterr().out
     with pytest.raises(RuntimeError):                 # above the cap: refused
         check(fake(5.0e4 * 2.0e-5))
     msg["text"] = "restart: the checkpoint's terrain has shape (3,), this run's terrain product (4,)"
-    with pytest.raises(RuntimeError):                 # any other refusal: refused
-        check(fake(0.0))
+    with pytest.raises(RuntimeError, match="has shape"):   # any other refusal: refused
+        check(fake(0.0, n_state=3))

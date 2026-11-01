@@ -191,10 +191,15 @@ def report_terrain_drift() -> None:
         try:
             real(self)
         except RuntimeError as e:
+            # only the magnitude refusal (a changed driver message refuses again)
+            if "terrain product (max |d|" not in str(e):
+                raise
             a = np.asarray(self.state.phis.data, dtype=np.float64)
             b = np.asarray(self._phis_data, dtype=np.float64)
+            if a.shape != b.shape:
+                raise
             rel = float(np.abs(a - b).max() / max(1.0, np.abs(b).max()))
-            if "terrain product (max |d|" not in str(e) or rel > TERRAIN_DRIFT_MAX:
+            if rel > TERRAIN_DRIFT_MAX:
                 raise
             print(f"TERRAIN DRIFT {rel:.2e} of max phis (reported, not refused): {e}", flush=True)
     ModelDriver._check_restart_terrain = check
