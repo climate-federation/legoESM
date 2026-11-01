@@ -698,14 +698,37 @@ def verify_manifest(root: Path, producer: str | None = None) -> dict[str, Any]:
     return manifest
 
 
+def _verify_nemo_run_completion_and_logs(
+    run_dir: Path, run_label: str, *, expect_icedyn: bool, expect_icethd: bool
+) -> dict[str, Any]:
+    """Reuse the admitted log gate while reserving RUN_COMPLETE for scoring."""
+
+    marker = run_dir / "NEMO_RUN_COMPLETE"
+    if not marker.is_file():
+        raise _refuse(f"missing NEMO_RUN_COMPLETE in {run_label} ({run_dir})")
+    with tempfile.TemporaryDirectory() as raw:
+        view = Path(raw)
+        for name in ("ocean.output", "run.user.stdout.log"):
+            source = run_dir / name
+            if source.exists():
+                (view / name).symlink_to(source)
+        (view / "RUN_COMPLETE").touch()
+        return _verify_run_completion_and_logs(
+            view,
+            run_label,
+            expect_icedyn=expect_icedyn,
+            expect_icethd=expect_icethd,
+        )
+
+
 def admit(root: Path, producer: str | None = None) -> dict[str, Any]:
     manifest = verify_manifest(root, producer)
     if not (root / "RUN_COMPLETE").is_file():
         raise _refuse("missing acquisition RUN_COMPLETE")
-    _verify_run_completion_and_logs(
+    _verify_nemo_run_completion_and_logs(
         root / "reference_100step", "reference_100step", expect_icedyn=True, expect_icethd=True
     )
-    _verify_run_completion_and_logs(
+    _verify_nemo_run_completion_and_logs(
         root / "record_100step", "record_100step", expect_icedyn=True, expect_icethd=True
     )
     verify_o7_log(root / "record_100step/ocean.output", expected_nn_itend=100)

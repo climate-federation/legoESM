@@ -13646,7 +13646,7 @@ for _key, _lines, _extent in (
     ('tests/ice/unit/test_si3_o12_pnd.py:3030-3200', '3134-3304', 171),
     ('tests/ice/unit/test_si3_o12_pnd.py:3203-3333', '3307-3437', 131),
     ('tests/ice/unit/test_si3_o12_pnd.py:3336-3793', '3440-3897', 458),
-    ('scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o16_master_gate.py:701-741', '701-752', 52),
+    ('scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o16_master_gate.py:701-741', '724-775', 52),
     ('packages/ice/legoesm/ice/si3_thd_pnd.py:575-781', '588-793', 206),
     ('packages/ice/legoesm/ice/si3_thd_pnd.py:701', '714', 1),
     ('packages/ice/legoesm/ice/si3_thd_pnd.py:717-735', '730-748', 19),
