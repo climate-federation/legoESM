@@ -511,26 +511,25 @@ the float32 concentration and age gradients (`1.0`), and the float32
 
 With the rebuilt test/fixture overlaid on clean `0ae642c422`, the eager sweep
 fails first at `(case, output, input)=(2,3,7)`.  At the repaired tree the same
-test passes in both eager and JIT modes; the full file emitted 18 passing nodes
-plus the corrected mixed-dtype pin on its first run, and the corrected node
-then emitted `1 passed in 21.34s`.
+test passes in both eager and JIT modes; the final clean full-file run emitted
+`19 passed in 296.15s`.
 
 ## Final clean-checkout verification
 
 | Selection | Final line |
 |---|---|
-| Every requested `test_si3_o*.py` / `test_nemo_si3_*.py` file | each file started in a fresh serial process: 38 files completed green, the scalar-math file emitted its unchanged `1 failed, 4 passed`, and the O4 Prather file emitted eight passing dots before its ninth node reached the two-hour command timeout; totals from completed nodes are `1 failed, 623 passed, 2 deselected`, with no O4 failure output |
-| `test_bitz_lipscomb.py` | `15 passed in 267.89s` |
+| Every requested `test_si3_o*.py` / `test_nemo_si3_*.py` file | each file started in a fresh serial process: 37 files completed green; scalar math emitted its unchanged `1 failed, 4 passed`; O6 ridging emitted 16 passing dots and O4 Prather emitted eight passing dots before their separate 30-minute command timeouts; the completed final lines account for `1 failed, 587 passed, 2 deselected`, plus those 24 timeout-prefix passes, with no timeout-file failure output |
+| `test_bitz_lipscomb.py` | `19 passed in 296.15s` |
 | Operator forward probe | byte-identical to `fwd_old.txt` (`cmp_status=0`) |
-| `test_sea_ice_precip_routing.py` | `7 passed in 2.80s` |
-| `test_si3_surface.py` | `1 failed, 22 passed, 1 skipped, 1 xfailed in 45.51s`; only the reproduced lane-parent `sum_first_category` plant |
-| Certified O8–O16 exactness scorer | `30 passed in 688.29s` |
+| `test_sea_ice_precip_routing.py` | `7 passed in 3.56s` |
+| `test_si3_surface.py` | `1 failed, 23 passed, 1 xfailed in 53.15s`; only the reproduced lane-parent `sum_first_category` plant |
+| Certified O8–O16 exactness scorer | `30 passed in 741.84s`; the O8–O16 acquisition file separately emitted `28 passed in 1114.96s (0:18:34)` |
 | O5 slow parent/current control | `1 passed in 599.22s` |
 | O6 slow merge-parent/current control | `1 passed in 774.76s` |
 | CEN2 direct-caller wrappers | ORCA2 `10 passed`; GYRE `4 passed` |
-| Landing battery | 7/7 files in fresh serial processes; `172 passed` |
-| Receipt citation gate | `44 passed in 8.79s` |
-| Provenance SHA gate | `1517 passed in 20.33s` |
+| Landing battery | 7/7 files in fresh serial processes; `172 passed` (component final lines: `44`, `6`, `71`, `25`, `16`, `2`, and `8` passed) |
+| Receipt citation gate | `44 passed in 8.90s` |
+| Provenance SHA gate | `1517 passed in 22.81s` |
 
 ## Failure inventory and attribution
 
@@ -546,7 +545,8 @@ Every observed stable failure is classified here.
 | three bypass classes in `test_post_20261029_provenance_sha_gate.py` | follow-up weakness, fixed here | carry-forward now requires the identical token on one mapped logical line through the complete first-parent history to the pre-cutoff base; later re-edits, copied/retargeted tokens, and moved tokens fail committed plants |
 | `test_si3_surface.py::test_production_path_plants_fire[sum_first_category]` | pre-existing lane | unchanged qsb tie-handling planted-control failure; reproduced at exact lane parent |
 | `test_nemo_si3_o4_prather_acquisition.py::test_o4_production_scorer_and_plants` initial setup error | invocation/environment, fixed invocation | child process could not import repository-local `scripts` until `.` was included in `PYTHONPATH`; production scorer then passed |
-| `test_nemo_si3_o4_orca2_prather.py` final whole-file run | runtime limit, no failure observed | eight of nine nodes emitted passing dots; the last node did not finish within a fresh two-hour process, so the receipt records the timeout rather than claiming a completed file |
+| `test_si3_o6_rdgrft_cor.py` final whole-file run | runtime limit, no failure observed | 16 of 28 selected nodes emitted passing dots before the fresh 30-minute process timed out; the receipt records the timeout rather than claiming a completed file |
+| `test_nemo_si3_o4_orca2_prather.py` final whole-file run | runtime limit, no failure observed | eight of nine nodes emitted passing dots; the last node did not finish within a fresh 30-minute process, so the receipt records the timeout rather than claiming a completed file |
 | `test_nemo_si3_scalarmath_v2_gate.py::test_full_v2_gate_and_plants` | pre-existing external build-artifact drift | clean final code emits `A MY_SRC is not verbatim`; the same named file at original clean HEAD `920c61d884` emits the identical `1 failed, 4 passed`, and no NEMO executable was run |
 | `test_flag_reachability_audit.py::test_every_resolver_read_reaches_the_leaf` | pre-existing on newer main | reproduced identically on `edd34c24469c`; main's CLUBB host table is rejected by its own strict validity check |
 | four `test_pipeline_profile_convection.py` Zhang–McFarlane nodes | pre-existing on newer main | reproduced identically on `edd34c24469c`; strict validation rejects CMT on the cubed-sphere/CD-grid test host |
