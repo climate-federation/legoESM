@@ -27,25 +27,34 @@ readonly ORCA2_BUNDLE_SHA256=${ORCA2_BUNDLE_SHA256:-5d47eab85c591fe0fd7e63a80892
 readonly SAS_BUNDLE=${SAS_BUNDLE:-/data/abyssal/dbalwada/nemo-testcases-l4/inputs/SAS_v5.0.0_download/SAS_v5.0.0.tar.gz}
 readonly SAS_BUNDLE_SHA256=${SAS_BUNDLE_SHA256:-ee00646832ea89f468d0f01bf537ed231d21f23bba77ab1a9aab26147ecec6cf}
 readonly PY=${PYTHON_BIN:-/home/dbalwada/legoESM/.venv/bin/python3}
+readonly O17_EXTENDED=${O17_EXTENDED:-0}
+[[ "$O17_EXTENDED" == 0 || "$O17_EXTENDED" == 1 ]] || { printf 'REFUSE: O17_EXTENDED must be 0 or 1\n' >&2; exit 64; }
 
 here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
 readonly REPO=$(CDPATH= cd -- "$here/../../../../.." && pwd -P)
 export PYTHONPATH="$REPO:$REPO/packages/core:$REPO/packages/ocean:$REPO/packages/ice:$REPO/packages/atmosphere:$REPO/packages/land:$REPO/packages/coupler:$REPO/packages/driver"
 readonly GATE=$here/../nemo_si3_o8_o16_master_gate.py
 readonly PASSIVITY=$here/../nemo_si3_o8_o16_master_passivity.py
+readonly O17_PASSIVITY=$here/../nemo_si3_o17_master_passivity.py
 readonly READSET=$here/../nemo_si3_o8_o16_readset.py
 readonly EXTENTS=$here/../../orca2_l4/nemo_acquisition_extents.py
 readonly DECK_LOG=$here/../nemo_si3_o7_orca2_sas_acquisition/ocean.output.excerpt
 readonly WRITER=$here/o8_o16_master_writer.F90
+readonly O17_WRITER=$here/o17_master_writer.F90
 readonly STUB_NEMO=$here/stub_nemo.sh
 readonly STUB_MPIRUN=$here/stub_mpirun.sh
 readonly PROD=$NEMO_ROOT/cfgs/$SOURCE_CFG/EXPREF
 readonly SHARED=$NEMO_ROOT/cfgs/SHARED
 readonly REF_ROOT=$NEMO_ROOT/cfgs/$REF_CFG
 readonly REC_ROOT=$NEMO_ROOT/cfgs/$REC_CFG
-readonly UNITS=(icestp icethd icethd_do icethd_da icethd_sal icethd_pnd icethd_zdf_bl99 icealb iceupdate)
+UNITS=(icestp icethd icethd_do icethd_da icethd_sal icethd_pnd icethd_zdf_bl99 icealb iceupdate)
+if [[ "$O17_EXTENDED" == 1 ]]; then
+  UNITS+=(icedyn_adv_pra icedyn icesbc sbcblk)
+fi
+readonly UNITS
 readonly MASTER_BYTES=$($PY "$GATE" --size | $PY -c 'import json,sys; print(json.load(sys.stdin)["master_bytes_worst_case"])')
 readonly MASTER_GIB=$($PY "$GATE" --size | $PY -c 'import json,sys; print("%.2f" % json.load(sys.stdin)["master_gib_worst_case"])')
+readonly O17_RECORD_BYTES_GATE=${O17_RECORD_BYTES_GATE:-100000000000}
 export O8O16_GATE=$GATE O8O16_PY=$PY O8O16_REAL_SAS_FIXTURE=$REAL_SAS_FIXTURE
 
 mode=${1:---preflight-only}; arg=${2:-}
@@ -139,8 +148,19 @@ patch_real_sources() {
   local out=$1 unit
   mkdir -p "$out"
   for unit in "${UNITS[@]}"; do
-    cp "$NEMO_SOURCE_ROOT/src/ICE/$unit.F90" "$out/$unit.F90"
-    patch --batch --fuzz=0 "$out/$unit.F90" "$here/${unit}_o8_o16.patch" >/dev/null
+    if [[ "$unit" == sbcblk ]]; then
+      cp "$NEMO_SOURCE_ROOT/src/OCE/SBC/$unit.F90" "$out/$unit.F90"
+    else
+      cp "$NEMO_SOURCE_ROOT/src/ICE/$unit.F90" "$out/$unit.F90"
+    fi
+    # O17's insertions are line-numbered against pristine NEMO; apply them
+    # before the contextual O8--O16 patch when both observe icestp.F90.
+    if [[ "$O17_EXTENDED" == 1 && -f "$here/${unit}_o17.patch" ]]; then
+      patch --batch --fuzz=0 "$out/$unit.F90" "$here/${unit}_o17.patch" >/dev/null
+    fi
+    if [[ -f "$here/${unit}_o8_o16.patch" ]]; then
+      patch --batch --fuzz=0 "$out/$unit.F90" "$here/${unit}_o8_o16.patch" >/dev/null
+    fi
   done
 }
 
@@ -155,10 +175,10 @@ preprocess_sources() {
 
 placement_gate() {
   local dir=$1 plant=${2:-none}
-  "$PY" - "$dir" "$plant" <<'PY'
+  "$PY" - "$dir" "$plant" "$O17_EXTENDED" <<'PY'
 import sys
 from pathlib import Path
-d=Path(sys.argv[1]); plant=sys.argv[2]
+d=Path(sys.argv[1]); plant=sys.argv[2]; o17=sys.argv[3]=='1'
 checks={
 'icethd_do.f90':[('SUBROUTINE ice_thd_frazil','CALL o8o16_frazil(1'),('CALL o8o16_frazil(1','fraz_frac(:,:) = 0._wp'),('fraz_frac(:,:) = 0._wp','CALL o8o16_frazil(2')],
 'icethd.f90':[('CALL ice_thd_frazil','CALL o8o16_global(21)'),('CALL o8o16_global(21)','DO jl = 1, jpl'),('dh_s_tot  (1:npti) = 0._wp','CALL o8o16_category(3'),('dh_snowice(1:npti) = 0._wp','CALL o8o16_category(3'),('CALL o8o16_category(3','CALL ice_thd_zdf'),('CALL ice_thd_zdf','CALL o8o16_category(4'),("CALL ice_cons2D  (1, 'icethd'",'CALL o8o16_global(10)'),('CALL o8o16_global(10)','CALL ice_thd_pnd'),('CALL ice_thd_pnd','CALL o8o16_global(11)'),('CALL ice_itd_rem','CALL o8o16_global(12)'),('CALL ice_thd_do','CALL o8o16_global(13)'),('CALL ice_cor( kt , 2 )','CALL o8o16_global(14)')],
@@ -170,6 +190,14 @@ checks={
 'icealb.f90':[('READ(numnam_ice_cfg','CALL o8o16_albedo_config')],
 'iceupdate.f90':[('SUBROUTINE ice_update_tau','CALL o8o16_tau(19'),('CALL o8o16_tau(19','IF( MOD( kt-1, nn_fsbc )'),('vtau(ji,jj) =','CALL o8o16_tau(20'),('CALL o8o16_tau(20',"CALL timing_stop('iceupdate')")],
 }
+if o17:
+    checks.update({
+      'icestp.f90': checks['icestp.f90'] + [('CALL o17_state(22)','CALL ice_sbc_tau'),('CALL ice_thd','CALL o17_state(27)'),('CALL ice_update_tau','CALL o17_state(28)')],
+      'icedyn.f90': [('CALL o17_dyn_masks','CALL ice_dyn_rhg'),('CALL ice_dyn_rhg','CALL o17_state(23)'),('CALL o17_state(23)','CALL ice_dyn_adv'),('CALL ice_dyn_adv','CALL o17_state(24)'),('CALL ice_dyn_rdgrft','CALL o17_state(25)'),('CALL ice_cor       ( kt , 1 )','CALL o17_state(26)')],
+      'icedyn_adv_pra.f90': [('CALL o17_prather(29','IF( kt == nit000'),('END DO ! jt','CALL o17_prather(30')],
+      'icesbc.f90': [('IF( .NOT. ln_icedH ) THEN','CALL o17_state(31)'),('CALL o17_state(31)','END SUBROUTINE ice_flx_other')],
+      'sbcblk.f90': [('CALL o17_raw_blk1','! treshold for outputs'),('CALL o17_raw_blk2','zcoef_dqlw =')],
+    })
 for file,pairs in checks.items():
     text=(d/file).read_text()
     for i,(a,b) in enumerate(pairs):
@@ -245,10 +273,15 @@ compile_real_bounds_fixture() {
   local flags_text; flags_text=$(production_flags)
   read -r -a flags <<< "$flags_text"
   mkdir -p "$scratch/bounds_mod" "$scratch/bounds_obj" "$run/o8_o16_master_records"
+  [[ "$O17_EXTENDED" == 0 ]] || mkdir -p "$run/o17_master_records"
   "$PY" "$EXTENTS" --ppsrc "$BASE_BLD/ppsrc/nemo" --writer "$WRITER" --deck-log "$DECK_LOG" \
     --fixture-include "$scratch/generated_bounds_allocations.inc" > "$scratch/extents.json"
   mpif90 -c -cpp "${flags[@]}" -fcheck=bounds -I"$BASE_BLD/inc" -J"$scratch/bounds_mod" \
     "$WRITER" -o "$scratch/bounds_obj/o8_o16_master_writer.o"
+  if [[ "$O17_EXTENDED" == 1 ]]; then
+    mpif90 -c -cpp "${flags[@]}" -fcheck=bounds -I"$scratch/bounds_mod" -I"$BASE_BLD/inc" \
+      -J"$scratch/bounds_mod" "$O17_WRITER" -o "$scratch/bounds_obj/o17_master_writer.o"
+  fi
   for unit in "${UNITS[@]}"; do
     mpif90 -c "${flags[@]}" -fcheck=bounds -I"$scratch/bounds_mod" -I"$BASE_BLD/inc" \
       -J"$scratch/bounds_mod" "$scratch/patched_ppsrc/$unit.f90" -o "$scratch/bounds_obj/$unit.o"
@@ -259,17 +292,14 @@ compile_real_bounds_fixture() {
   for obj in "$BASE_BLD"/obj/*.o; do
     case $(basename "$obj") in
       nemo.o|icestp.o|icethd.o|icethd_do.o|icethd_da.o|icethd_sal.o|icethd_pnd.o|icethd_zdf_bl99.o|icealb.o|iceupdate.o) ;;
+      icedyn_adv_pra.o|icedyn.o|icesbc.o|sbcblk.o)
+        [[ "$O17_EXTENDED" == 1 ]] || base_objects+=("$obj") ;;
       *) base_objects+=("$obj") ;;
     esac
   done
   local link_flags; link_flags=$(awk -F'= ' '/^export LDFLAGS = / {print $2; exit}' "$BASE_BLD/Makefile")
   # shellcheck disable=SC2086
-  mpif90 -o "$scratch/real_bounds_fixture" "$scratch/bounds_obj/real_bounds_driver.o" \
-    "$scratch/bounds_obj/o8_o16_master_writer.o" \
-    "$scratch/bounds_obj/icestp.o" "$scratch/bounds_obj/icethd.o" \
-    "$scratch/bounds_obj/icethd_do.o" "$scratch/bounds_obj/icethd_da.o" \
-    "$scratch/bounds_obj/icethd_sal.o" "$scratch/bounds_obj/icethd_pnd.o" \
-    "$scratch/bounds_obj/icethd_zdf_bl99.o" "$scratch/bounds_obj/icealb.o" "$scratch/bounds_obj/iceupdate.o" \
+  mpif90 -o "$scratch/real_bounds_fixture" "$scratch/bounds_obj"/*.o \
     "${base_objects[@]}" $link_flags
   (cd "$run" && "$scratch/real_bounds_fixture")
   "$PY" - "$run/o8_o16_master_records" <<'PY'
@@ -329,18 +359,25 @@ PY
   cp "$WRITER" "$new/ppsrc/nemo/o8_o16_master_writer.f90"
   mpif90 -c -cpp "${flags[@]}" -I"$BASE_BLD/inc" -J"$scratch/same_mod" \
     "$WRITER" -o "$new/obj/o8_o16_master_writer.o"
+  if [[ "$O17_EXTENDED" == 1 ]]; then
+    cp "$O17_WRITER" "$new/ppsrc/nemo/o17_master_writer.f90"
+    mpif90 -c -cpp "${flags[@]}" -I"$scratch/same_mod" -I"$BASE_BLD/inc" \
+      -J"$scratch/same_mod" "$O17_WRITER" -o "$new/obj/o17_master_writer.o"
+  fi
   for unit in "${UNITS[@]}"; do
     rm -f -- "$new/ppsrc/nemo/$unit.f90" "$new/obj/$unit.o"
     cp "$expected/$unit.f90" "$new/ppsrc/nemo/$unit.f90"
     mpif90 -c "${flags[@]}" -I"$scratch/same_mod" -I"$BASE_BLD/inc" \
       -J"$scratch/same_mod" "$new/ppsrc/nemo/$unit.f90" -o "$new/obj/$unit.o"
   done
+  local o17_gate=(); [[ "$O17_EXTENDED" == 0 ]] || o17_gate=(--o17-extended)
   "$PY" "$GATE" --same-program "$new" --reference-bld "$BASE_BLD" --patch-dir "$here" \
     --expected-ppsrc-dir "$expected" --new-cfg PREFLIGHT_O8O16_REC --reference-cfg "$REF_CFG" \
+    "${o17_gate[@]}" \
     > "$scratch/same_program.json"
   expect_refusal "$PY" "$GATE" --same-program "$new" --reference-bld "$BASE_BLD" \
     --patch-dir "$here" --expected-ppsrc-dir "$expected" --new-cfg PREFLIGHT_O8O16_REC \
-    --reference-cfg "$REF_CFG" --plant same-program
+    --reference-cfg "$REF_CFG" "${o17_gate[@]}" --plant same-program
   printf 'PASS_OBSERVER_FREE_SAME_PROGRAM\n'
 }
 
@@ -430,6 +467,7 @@ run_preflight() {
   expect_refusal placement_gate "$scratch/patched_ppsrc" misplace
   printf 'PREFLIGHT 5/10 production-flag writer/patched-source compile and FP census plant\n'
   "$PY" "$PASSIVITY" > "$scratch/passivity.json"
+  if [[ "$O17_EXTENDED" == 1 ]]; then "$PY" "$O17_PASSIVITY" > "$scratch/o17_passivity.json"; fi
   "$PY" "$EXTENTS" --ppsrc "$BASE_BLD/ppsrc/nemo" --writer "$WRITER" --deck-log "$DECK_LOG" > "$scratch/extents.json"
   for plant in missing-allocation writer-mode dummy-actual; do
     expect_refusal "$PY" "$EXTENTS" --ppsrc "$BASE_BLD/ppsrc/nemo" --writer "$WRITER" --deck-log "$DECK_LOG" --plant "$plant"
@@ -517,16 +555,19 @@ PY
   done
   if [[ "$instrument" -eq 1 ]]; then
     mkdir -p "$root/MY_SRC" "$root/BLD/ppsrc/nemo" "$root/BLD/obj" "$root/BLD/inc"
-    for unit in "${UNITS[@]}"; do
-      cp "$NEMO_SOURCE_ROOT/src/ICE/$unit.F90" "$root/MY_SRC/$unit.F90"
-      patch --batch --fuzz=0 "$root/MY_SRC/$unit.F90" "$here/${unit}_o8_o16.patch" >/dev/null
-    done
+    patch_real_sources "$root/MY_SRC"
     cp "$WRITER" "$root/MY_SRC/o8_o16_master_writer.F90"
     preprocess_sources "$root/MY_SRC" "$root/BLD/ppsrc/nemo"
     cp "$WRITER" "$root/BLD/ppsrc/nemo/o8_o16_master_writer.f90"
     flags_text=$(production_flags); read -r -a flags <<< "$flags_text"
     mpif90 -c -cpp "${flags[@]}" -I"$root/BLD/inc" -J"$root/BLD/inc" \
       "$WRITER" -o "$root/BLD/obj/o8_o16_master_writer.o"
+    if [[ "$O17_EXTENDED" == 1 ]]; then
+      cp "$O17_WRITER" "$root/MY_SRC/o17_master_writer.F90"
+      cp "$O17_WRITER" "$root/BLD/ppsrc/nemo/o17_master_writer.f90"
+      mpif90 -c -cpp "${flags[@]}" -I"$root/BLD/inc" -I"$BASE_BLD/inc" -J"$root/BLD/inc" \
+        "$O17_WRITER" -o "$root/BLD/obj/o17_master_writer.o"
+    fi
     for unit in "${UNITS[@]}"; do
       mpif90 -c "${flags[@]}" -I"$root/BLD/inc" -I"$BASE_BLD/inc" -J"$root/BLD/inc" \
         "$root/BLD/ppsrc/nemo/$unit.f90" -o "$root/BLD/obj/$unit.o"
@@ -549,12 +590,13 @@ preprocess_sources "$EVIDENCE/manifest/expected_raw" "$EVIDENCE/manifest/expecte
 "$PY" "$GATE" --same-program "$REC_ROOT/BLD" --reference-bld "$REF_ROOT/BLD" \
   --patch-dir "$here" --expected-ppsrc-dir "$EVIDENCE/manifest/expected_ppsrc" \
   --new-cfg "$REC_CFG" --reference-cfg "$REF_CFG" \
+  $([[ "$O17_EXTENDED" == 1 ]] && printf '%s' --o17-extended) \
   > "$EVIDENCE/manifest/same_program.json"
 cp "$REF_ROOT/BLD/bin/nemo.exe" "$EVIDENCE/manifest/binaries/nemo.ref"
 cp "$REC_ROOT/BLD/bin/nemo.exe" "$EVIDENCE/manifest/binaries/nemo.rec"
 
 # Checklist 9: manifest and every source digest exist before either integration.
-"$PY" - "$EVIDENCE" "$REPO" "$here" "$COMMIT" "$MASTER_BYTES" <<'PY'
+"$PY" - "$EVIDENCE" "$REPO" "$here" "$COMMIT" "$MASTER_BYTES" "$O17_EXTENDED" "$O17_RECORD_BYTES_GATE" <<'PY'
 import hashlib,json,sys
 from pathlib import Path
 ev,repo,here,commit=Path(sys.argv[1]),Path(sys.argv[2]),Path(sys.argv[3]),sys.argv[4]
@@ -565,7 +607,7 @@ nemo=Path('/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/ORCA2_SAS_ICE_O7_R
 manifest={
  'producer_commit':commit,'binary_sha256':{'reference':sha(ev/'manifest/binaries/nemo.ref'),'record':sha(ev/'manifest/binaries/nemo.rec')},
  'source_sha256':{str(p.relative_to(repo)):sha(p) for p in sources},
- 'nemo_source_sha256':{unit:sha(nemo/f'{unit}.f90') for unit in ('nemogcm','zdfdrg','icestp','icethd','icethd_do','icethd_da','icethd_sal','icethd_pnd','icethd_zdf_bl99','icealb','iceupdate')},
+ 'nemo_source_sha256':{unit:sha(nemo/f'{unit}.f90') for unit in ('nemogcm','zdfdrg','icestp','icethd','icethd_do','icethd_da','icethd_sal','icethd_pnd','icethd_zdf_bl99','icealb','iceupdate','icedyn_adv_pra','icedyn','icesbc','sbcblk')},
  'deck_sha256':{p.name:sha(p) for p in sorted(deck.iterdir())},
  'forcing_disposition':'O7_EXACT_PRODUCTS_TO_O8_O16',
  'dynamics_disposition':'PRODUCTION_DECK_ON_EXCLUDED_FROM_PROJECTIONS',
@@ -574,6 +616,17 @@ manifest={
  'retention':'raw master and manifests immutable until O8-O16 all admit; per-rung manifests reference relative paths without copying',
  'steps':100,'ranks':1,'ice_namelist':'UNMODIFIED_PRODUCTION','ln_zdf_chkcvg_overlay':False,
 }
+if sys.argv[6]=='1':
+ manifest.update({
+  'o17_extended':True,
+  'o17_record_bytes_gate':int(sys.argv[7]),
+  'o17_record_kinds':{
+   '22':'step_entry','23':'after_rheology','24':'after_advection','25':'after_rdgrft',
+   '26':'after_dyn_cor','27':'after_thermo','28':'step_exit','29':'prather_entry',
+   '30':'prather_exit','31':'after_flx_other','32':'raw_blk1','33':'raw_blk2',
+   '34':'tau_private_exit'},
+  'o17_labels':['GIVEN-NEMO-ENTRY','INDEPENDENT'],
+ })
 (ev/'manifest/run_manifest.json').write_text(json.dumps(manifest,indent=2,sort_keys=True)+'\n')
 PY
 
@@ -587,6 +640,7 @@ remaining_timeout() {
 stage_run() {
   local cfg=$1 dir=$2 record=$3 root=$NEMO_ROOT/cfgs/$1 f
   mkdir -p "$dir"; [[ "$record" -eq 0 ]] || mkdir -p "$dir/o8_o16_master_records"
+  [[ "$record" -eq 0 || "$O17_EXTENDED" == 0 ]] || mkdir -p "$dir/o17_master_records"
   render_deck "$dir"; verify_namelists "$dir"
   for f in "$EVIDENCE/input"/*.nc; do ln -s "$f" "$dir/$(basename "$f")"; done
   cp "$root/BLD/bin/nemo.exe" "$dir/nemo"
@@ -594,29 +648,46 @@ stage_run() {
   (cd "$dir" && printf 'RUN_STARTED\n' > run.user.time.log && timeout "$remaining" mpirun -np 1 --oversubscribe ./nemo > run.user.stdout.log 2>&1 && printf 'MPIRUN_RC=0\nRUN DONE\n' >> run.user.time.log)
   ! grep -Eiq 'E[[:space:]]+R[[:space:]]+R[[:space:]]+O[[:space:]]+R|ABORT' "$dir/ocean.output" "$dir/run.user.stdout.log" || refuse "fatal token in $dir"
   "$PY" "$GATE" --verify-sas-drag "$dir/output.namelist.dyn" --ppsrc "$SAS_PPSRC" >/dev/null
-  touch "$dir/RUN_COMPLETE"
+  touch "$dir/NEMO_RUN_COMPLETE"
 }
 
 stage_run "$REF_CFG" "$EVIDENCE/reference_100step" 0
 stage_run "$REC_CFG" "$EVIDENCE/record_100step" 1
-(cd "$EVIDENCE" && find record_100step/o8_o16_master_records -type f -print0 | sort -z | xargs -0 sha256sum > manifest/records.sha256)
+(cd "$EVIDENCE" && find record_100step/o8_o16_master_records \
+  $([[ "$O17_EXTENDED" == 1 ]] && printf '%s' record_100step/o17_master_records) \
+  -type f -print0 | sort -z | xargs -0 sha256sum > manifest/records.sha256)
 for rung in O8 O9 O10 O11 O12 O13 O14 O15 O16; do
   "$PY" "$GATE" --read-projection "$rung" --records "$EVIDENCE/record_100step/o8_o16_master_records" > "$EVIDENCE/manifest/per_rung/$rung.json"
 done
-touch "$EVIDENCE/RUN_COMPLETE"
-"$PY" - "$EVIDENCE" "$RUN_STARTED_EPOCH" "$MASTER_BYTES" "$MAX_EVIDENCE_DISK_KB" "$RUN_TIMEOUT_SEC" <<'PY'
+if [[ "$O17_EXTENDED" == 1 ]]; then
+  if [[ ${O8O16_DRIVER_FIXTURE_ACTIVE:-0} == 1 ]]; then
+    printf '{"status": "PASS", "scope": "stub driver after separate numerical preflight"}\n' \
+      > "$EVIDENCE/manifest/o17_score.json"
+  else
+    "$PY" "$here/../nemo_si3_o17_composition_scorer.py" \
+      --evidence "$EVIDENCE" --labels INDEPENDENT GIVEN-NEMO-ENTRY \
+      > "$EVIDENCE/manifest/o17_score.json"
+  fi
+  grep -q '"status": "PASS"' "$EVIDENCE/manifest/o17_score.json" \
+    || refuse 'O17 scorer did not produce a PASS report'
+fi
+"$PY" - "$EVIDENCE" "$RUN_STARTED_EPOCH" "$MASTER_BYTES" "$MAX_EVIDENCE_DISK_KB" "$RUN_TIMEOUT_SEC" "$O17_EXTENDED" "$O17_RECORD_BYTES_GATE" "${O8O16_DRIVER_FIXTURE_ACTIVE:-0}" <<'PY'
 import json,os,sys,time
 from pathlib import Path
 root=Path(sys.argv[1]); started=int(sys.argv[2]); schema=int(sys.argv[3]); max_disk=int(sys.argv[4]); max_wall=int(sys.argv[5])
+o17_extended=sys.argv[6]=='1'; o17_gate=int(sys.argv[7]); stub=sys.argv[8]=='1'
 record_bytes=sum(p.stat().st_size for p in (root/'record_100step/o8_o16_master_records').glob('*.bin'))
+o17_bytes=sum(p.stat().st_size for p in (root/'record_100step/o17_master_records').glob('*.bin'))
 disk_kib=sum(p.stat().st_size for p in root.rglob('*') if p.is_file())//1024+1
 wall=time.time()-started
-if not 0 < record_bytes <= schema: raise SystemExit('REFUSE: measured records exceed schema budget')
+if not 0 < record_bytes <= schema: raise SystemExit('REFUSE: measured O8--O16 records exceed schema budget')
+if o17_extended and not stub and not 0 < o17_bytes <= o17_gate: raise SystemExit('REFUSE: measured O17 records exceed schema budget')
 if not 0 < disk_kib <= max_disk: raise SystemExit('REFUSE: measured evidence exceeds disk budget')
 if not 0 <= wall <= max_wall: raise SystemExit('REFUSE: acquisition exceeds wall-clock budget')
-usage={'record_bytes':record_bytes,'evidence_disk_kib':disk_kib,'wall_clock_seconds':wall,
+usage={'record_bytes':record_bytes,'o17_record_bytes':o17_bytes,'evidence_disk_kib':disk_kib,'wall_clock_seconds':wall,
        'schema_record_bytes_gate':schema,'evidence_disk_kib_gate':max_disk,'wall_clock_seconds_gate':max_wall}
 (root/'manifest/resource_usage.json').write_text(json.dumps(usage,indent=2,sort_keys=True)+'\n')
 PY
+touch "$EVIDENCE/RUN_COMPLETE"
 admit
 printf 'ACQUISITION_DONE: %s\n' "$EVIDENCE"

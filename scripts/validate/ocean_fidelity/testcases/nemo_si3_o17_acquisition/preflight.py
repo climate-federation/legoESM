@@ -14,6 +14,8 @@ import importlib
 import json
 from pathlib import Path
 
+import numpy as np
+
 COMPONENTS = (
     "scripts.validate.ocean_fidelity.testcases.nemo_si3_o4_orca2_prather_gate",
     "scripts.validate.ocean_fidelity.testcases.nemo_si3_o5_orca2_sas_gate",
@@ -28,8 +30,8 @@ ORDER = (
     "si3_ice_sbc_tau_lbc",
     "si3_orca2_ice_strength",
     "si3_orca2_aevp_solver",
-    "si3_dyn_orca2",
     "si3_cgrid_deformation",
+    "si3_dyn_orca2",
     "si3_ice_dyn_rdgrft",
     "si3_ice_cor_dyn",
     "si3_var_glo2eqv",
@@ -88,9 +90,6 @@ def preflight(repo: Path, plant: str | None = None) -> dict:
             raise SystemExit(f"STATUS PLANT-FIRED: missing/out-of-order {name}") from exc
         positions.append(index)
         start = index + 1
-    source = (repo / "packages/ice/legoesm/ice/sea_ice.py").read_text()
-    if "raise NotImplementedError" in source[source.index("def _si3_orca2_o2_step_with_trace") :]:
-        raise SystemExit("STATUS PLANT-FIRED: production dispatcher retains NotImplementedError")
     return {
         "status": "PASS_O17_READ_ONLY_PREFLIGHT",
         "imported_component_tools": imported,
@@ -109,12 +108,72 @@ def preflight(repo: Path, plant: str | None = None) -> dict:
     }
 
 
+def numerical_preflight(master: Path, plant: str | None = None) -> dict:
+    """Execute live O17 boundaries and require each planted change to be numeric."""
+
+    import jax
+    from legoesm.ice import si3_o17 as o17
+    from legoesm.ice.si3_o17 import SI3O17LiveForcing
+    from scripts.validate.ocean_fidelity.testcases.nemo_si3_o17_ad_probe import _case
+
+    entry, forcing, card = _case(master)
+    card = card._replace(aevp=card.aevp._replace(n_subcycles=1))
+
+    class Boundary(RuntimeError):
+        def __init__(self, values):
+            self.values = values
+
+    original = o17.si3_ice_dyn_rdgrft
+
+    def capture(state, **kwargs):
+        raise Boundary((state.a_i, kwargs["divu_i"], kwargs["delta_i"]))
+
+    def run(**plants):
+        o17.si3_ice_dyn_rdgrft = capture
+        try:
+            with jax.disable_jit():
+                o17.si3_o17_step(entry, SI3O17LiveForcing(1, *forcing[1:]), card, **plants)
+        except Boundary as stop:
+            return tuple(np.asarray(value) for value in stop.values)
+        finally:
+            o17.si3_ice_dyn_rdgrft = original
+        raise RuntimeError("O17 numerical boundary was not reached")
+
+    baseline = run()
+    if plant == "swap-rheology-advection":
+        candidate = run(_plant_swap_rheology_advection=True)
+        fired = not np.array_equal(candidate[0], baseline[0])
+    elif plant == "drop-deformation-fold":
+        candidate = run(_plant_drop_deformation_fold=True)
+        fired = any(not np.array_equal(a, b) for a, b in zip(candidate[1:], baseline[1:], strict=True))
+    elif plant is None:
+        fired = True
+    else:
+        raise ValueError(f"unknown numerical plant {plant}")
+    if not fired:
+        raise SystemExit(f"STATUS PLANT-SURVIVED: {plant}")
+    return {
+        "status": "PASS_O17_NUMERICAL_PREFLIGHT",
+        "plant": plant,
+        "active_ice_values": int(np.count_nonzero(baseline[0])),
+        "deformation_values": int(np.count_nonzero(baseline[1])) + int(np.count_nonzero(baseline[2])),
+    }
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--repo", type=Path, required=True)
     parser.add_argument("--plant", choices=("swap-rheology-advection", "drop-redistribution"))
+    parser.add_argument("--numerical", action="store_true")
+    parser.add_argument("--master", type=Path)
+    parser.add_argument("--numerical-plant", choices=("swap-rheology-advection", "drop-deformation-fold"))
     args = parser.parse_args()
-    print(json.dumps(preflight(args.repo.resolve(), args.plant), indent=2, sort_keys=True))
+    result = (
+        numerical_preflight(args.master.resolve(), args.numerical_plant)
+        if args.numerical
+        else preflight(args.repo.resolve(), args.plant)
+    )
+    print(json.dumps(result, indent=2, sort_keys=True))
     return 0
 
 

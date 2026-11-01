@@ -738,6 +738,17 @@ def admit(root: Path, producer: str | None = None) -> dict[str, Any]:
         raise _refuse("measured evidence disk use exceeds gate")
     if not (0 <= usage.get("wall_clock_seconds", -1) <= manifest["wall_clock_budget_seconds"]):
         raise _refuse("measured wall clock exceeds gate")
+    if manifest.get("o17_extended"):
+        score_path = root / "manifest/o17_score.json"
+        if not score_path.is_file() or json.loads(score_path.read_text()).get("status") != "PASS":
+            raise _refuse("missing or failing real O17 score")
+        o17_files = sorted((root / "record_100step/o17_master_records").glob("o17_kind*.bin"))
+        expected = manifest.get("steps", 0) * manifest.get("ranks", 1) * len(manifest["o17_record_kinds"])
+        if len(o17_files) != expected:
+            raise _refuse(f"O17 record count {len(o17_files)} != manifest {expected}")
+        o17_bytes = sum(path.stat().st_size for path in o17_files)
+        if usage.get("o17_record_bytes") != o17_bytes or not (0 < o17_bytes <= manifest["o17_record_bytes_gate"]):
+            raise _refuse("measured O17 record size missing or over gate")
     return {"status": "ADMITTED", "manifest": manifest, "projections": list(PROJECTIONS)}
 
 
@@ -774,11 +785,24 @@ def verify_same_program(
     new_cfg: str,
     ref_cfg: str,
     plant: str | None = None,
+    o17_extended: bool = False,
 ) -> dict[str, Any]:
     units = (
         "icestp", "icethd", "icethd_do", "icethd_da", "icethd_sal",
         "icethd_pnd", "icethd_zdf_bl99", "icealb", "iceupdate",
     )
+    if o17_extended:
+        units += ("icedyn_adv_pra", "icedyn", "icesbc", "sbcblk")
+    patches = {
+        unit: patch_dir
+        / (
+            f"{unit}_o17.patch"
+            if o17_extended and (patch_dir / f"{unit}_o17.patch").is_file()
+            else f"{unit}_o8_o16.patch"
+        )
+        for unit in units
+    }
+    writers = ("o8_o16_master_writer",) + (("o17_master_writer",) if o17_extended else ())
     markers = {unit: ("! O8O16_OBSERVER_BEGIN", "! O8O16_OBSERVER_END") for unit in units}
     expected = {unit: expected_ppsrc_dir / f"{unit}.f90" for unit in units}
     if plant == "same-program":
@@ -793,15 +817,11 @@ def verify_same_program(
             target.write_text(text)
             expected = {unit: planted / f"{unit}.f90" for unit in units}
             return same_program_observers(
-                new_bld, ref_bld,
-                {unit: patch_dir / f"{unit}_o8_o16.patch" for unit in units},
-                ("o8_o16_master_writer",), new_cfg=new_cfg, ref_cfg=ref_cfg,
+                new_bld, ref_bld, patches, writers, new_cfg=new_cfg, ref_cfg=ref_cfg,
                 preprocessed_markers=markers, preprocessed_patch_units=expected,
             )
     return same_program_observers(
-        new_bld, ref_bld,
-        {unit: patch_dir / f"{unit}_o8_o16.patch" for unit in units},
-        ("o8_o16_master_writer",), new_cfg=new_cfg, ref_cfg=ref_cfg,
+        new_bld, ref_bld, patches, writers, new_cfg=new_cfg, ref_cfg=ref_cfg,
         preprocessed_markers=markers, preprocessed_patch_units=expected,
     )
 
@@ -822,6 +842,7 @@ def main(argv: list[str] | None = None) -> int:
     action.add_argument("--verify-category-freshness", action="store_true")
     parser.add_argument("--records", type=Path)
     parser.add_argument("--plant")
+    parser.add_argument("--o17-extended", action="store_true")
     parser.add_argument("--producer")
     parser.add_argument("--nemo-root", type=Path, default=DEFAULT_NEMO_ROOT)
     parser.add_argument("--ppsrc", type=Path)
@@ -857,7 +878,7 @@ def main(argv: list[str] | None = None) -> int:
                 raise _refuse("--same-program needs reference BLD, patch/expected ppsrc dirs and config names")
             result = verify_same_program(
                 args.same_program, args.reference_bld, args.patch_dir, args.expected_ppsrc_dir,
-                args.new_cfg, args.reference_cfg, args.plant,
+                args.new_cfg, args.reference_cfg, args.plant, args.o17_extended,
             )
         elif args.write_stub_records:
             result = write_stub_records(args.write_stub_records)

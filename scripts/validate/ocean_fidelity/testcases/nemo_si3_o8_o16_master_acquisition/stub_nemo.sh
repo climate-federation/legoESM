@@ -28,4 +28,13 @@ if [[ -d o8_o16_master_records ]]; then
   : "${O8O16_PY:?O8O16_PY is required by stub NEMO}"
   "$O8O16_PY" "$O8O16_GATE" --write-stub-records o8_o16_master_records >/dev/null
 fi
+if [[ -d o17_master_records ]]; then
+  # Driver-only fixture: exercise the preregistered 12-kind x 100-step index.
+  # The real scorer is separately exercised numerically by O17 preflight.
+  for kt in $(seq 1 100); do
+    for kind in $(seq 22 34); do
+      printf 'S' > "o17_master_records/o17_kind${kind}_stub_step$(printf '%04d' "$kt")_rank0000.bin"
+    done
+  done
+fi
 printf 'STOP 0\n'

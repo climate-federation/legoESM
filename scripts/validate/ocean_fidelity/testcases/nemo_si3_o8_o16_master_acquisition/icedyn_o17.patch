@@ -1,0 +1,26 @@
+--- icedyn.F90
++++ icedyn.F90
+@@ -32,0 +33,3 @@
++! O8O16_OBSERVER_BEGIN
++   USE o17_master_writer, ONLY : o17_state, o17_dyn_masks
++! O8O16_OBSERVER_END
+@@ -126,0 +130,3 @@
++! O8O16_OBSERVER_BEGIN
++      CALL o17_dyn_masks(fast_tmask,fast_umask,fast_vmask,icb_tmask,icb_umask,icb_vmask)
++! O8O16_OBSERVER_END
+@@ -132,0 +139,3 @@
++! O8O16_OBSERVER_BEGIN
++         CALL o17_state(23)
++! O8O16_OBSERVER_END
+@@ -133,0 +143,3 @@
++! O8O16_OBSERVER_BEGIN
++         CALL o17_state(24)
++! O8O16_OBSERVER_END
+@@ -134,0 +147,3 @@
++! O8O16_OBSERVER_BEGIN
++         CALL o17_state(25)
++! O8O16_OBSERVER_END
+@@ -135,0 +151,3 @@
++! O8O16_OBSERVER_BEGIN
++         CALL o17_state(26)
++! O8O16_OBSERVER_END

@@ -488,6 +488,40 @@ CONTAINS
          ERROR STOP 'O16 tau kind'
       ENDIF
       CLOSE(u)
+      IF(kind==20) CALL o17_tau_private(ptmod_io,putau_oce,pvtau_oce) ! iceupdate.F90:407-409
    END SUBROUTINE o8o16_tau
+
+   SUBROUTINE put_o17_f2(u,name,value)
+      INTEGER,INTENT(in)::u
+      CHARACTER(LEN=*),INTENT(in)::name
+      REAL(wp),DIMENSION(:,:),INTENT(in)::value
+      CHARACTER(LEN=32)::field
+      INTEGER(int32)::dims(4)
+      field=name ; dims=[INT(SIZE(value,1),int32),INT(SIZE(value,2),int32),0_int32,0_int32]
+      WRITE(u) field,INT(2,int32),dims,REAL(value,real64)
+   END SUBROUTINE put_o17_f2
+
+   SUBROUTINE o17_tau_private(ptmod_io,putau_oce,pvtau_oce)
+      REAL(wp),DIMENSION(:,:),INTENT(in)::ptmod_io,putau_oce,pvtau_oce
+      CHARACTER(LEN=16)::enabled
+      CHARACTER(LEN=256)::path
+      CHARACTER(LEN=8),PARAMETER::magic='O17S0001'
+      CHARACTER(LEN=32)::finish
+      INTEGER::u,status
+      INTEGER(int32)::meta(8),dims(4)
+      CALL GET_ENVIRONMENT_VARIABLE('O17_EXTENDED',enabled,STATUS=status)
+      IF(status/=0 .OR. TRIM(enabled)/='1') RETURN
+      WRITE(path,'("o17_master_records/o17_kind34_tau_private_step",I4.4,"_rank",I4.4,".bin")') &
+         current_kt,current_rank
+      OPEN(NEWUNIT=u,FILE=TRIM(path),ACCESS='stream',FORM='unformatted',STATUS='replace',ACTION='write')
+      meta=[34,current_kt,current_rank,jpi,jpj,jpl,nlay_i,nlay_s]
+      WRITE(u) magic,INT(1,int32),meta
+      CALL put_o17_f2(u,'tmod_io',ptmod_io)
+      CALL put_o17_f2(u,'utau_oce',putau_oce)
+      CALL put_o17_f2(u,'vtau_oce',pvtau_oce)
+      finish='__END__' ; dims=0_int32
+      WRITE(u) finish,INT(-1,int32),dims
+      CLOSE(u)
+   END SUBROUTINE o17_tau_private
 
 END MODULE o8_o16_master_writer

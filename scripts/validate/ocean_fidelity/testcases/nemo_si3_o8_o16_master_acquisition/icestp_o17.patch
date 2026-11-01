@@ -1,0 +1,19 @@
+--- icestp.F90
++++ icestp.F90
+@@ -78,0 +79,3 @@
++! O8O16_OBSERVER_BEGIN
++   USE o17_master_writer, ONLY : o17_set_context, o17_state
++! O8O16_OBSERVER_END
+@@ -151,0 +155,4 @@
++! O8O16_OBSERVER_BEGIN
++                                        CALL o17_set_context(kt,narea-1,Kbb)
++                                        CALL o17_state(22)
++! O8O16_OBSERVER_END
+@@ -206,0 +214,3 @@
++! O8O16_OBSERVER_BEGIN
++                                        CALL o17_state(27)
++! O8O16_OBSERVER_END
+@@ -233,0 +244,3 @@
++! O8O16_OBSERVER_BEGIN
++                                        CALL o17_state(28)
++! O8O16_OBSERVER_END
