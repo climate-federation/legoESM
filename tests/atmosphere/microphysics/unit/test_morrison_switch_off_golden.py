@@ -6,7 +6,10 @@ columns, a cold copy and a frozen copy (homogeneous freezing active), written by
 ``scripts/validate/oracle/morrison_mg2_warm_rain/make_switch_off_golden.py`` at the
 commit recorded in its meta.  Compared bitwise.  Regenerated 2026-10-21 on the
 rebase onto main (bit-identical to main) and 2026-10-22 for the smooth Bigg -4 C
-step (user decision 3a: cold column set only, max relative change 1.8e-3).
+step (user decision 3a: cold column set only, max relative change 1.8e-3), and
+2026-11-01 at 3db9432886 for the smooth specified-number early droplet size reset
+(#2216, user decision RULE 3; the two kk2000_cam6 configs only, every changed leaf
+<= 3.2e-14 of its array maximum).
 """
 from __future__ import annotations
 
