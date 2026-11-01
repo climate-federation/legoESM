@@ -117,6 +117,8 @@ def test_terrain_override_reports_only_small_magnitude_drift(monkeypatch, capsys
     assert "TERRAIN DRIFT 1.40e-06 of max phis" in capsys.readouterr().out
     with pytest.raises(RuntimeError):                 # above the cap: refused
         check(fake(5.0e4 * 2.0e-5))
+    with pytest.raises(RuntimeError, match="max"):    # magnitude text, unequal shapes: refused
+        check(fake(0.0, n_state=3))
     msg["text"] = "restart: the checkpoint's terrain has shape (3,), this run's terrain product (4,)"
     with pytest.raises(RuntimeError, match="has shape"):   # any other refusal: refused
         check(fake(0.0, n_state=3))
