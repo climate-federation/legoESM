@@ -7625,6 +7625,9 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                         "(drag removed afterwards -> free run).")
     from legoesm.ocean.biogeochemistry.omip_hooks import add_arguments as _bgc_add_args
     _bgc_add_args(p)
+    p.add_argument("--ice-substeps", type=int, default=1,
+                   help="Sub-step the prognostic sea ice: call step_sea_ice N times with dt/N per ocean "
+                        "step (ocean-side inputs held fixed; fluxes averaged). Default 1.")
     return p
 
 
@@ -9197,7 +9200,7 @@ def main() -> int:
         _cat_str = (f" n_categories={_n_cat} itd={_itd_remap!r}"
                     f" ridging={'ON' if _ridging_on else 'off'}"
                     if _n_cat > 1 else "")
-        print(f"[setup] PROGNOSTIC SEA ICE: step_sea_ice dynamics={_ice_dyn!r} "
+        print(f"[setup] PROGNOSTIC SEA ICE (ice-substeps={getattr(args, 'ice_substeps', 1)}): step_sea_ice dynamics={_ice_dyn!r} "
               f"transport={_transport!r} brine=ON (S_ice_new="
               f"{_brine.S_ice_new:.1f} PSU) on {app_grid_type} shape {ice_shape}"
               f"{_cat_str}; "
@@ -10461,13 +10464,39 @@ def main() -> int:
             # the OPEN-water non-solar flux the coupler will hand the ocean
             # over leads (sf is the unmasked raw_core2 bulk: q_net =
             # q_non_sw + sw_down) and the top-cell thickness for zqfr.
-            ice_state, ice_resp = step_sea_ice(
-                ice_state, atm_ice, sst_K, ocn_u, ocn_v,
-                ice_config, U_min=0.0, dt=dt, grid=grid,
+            _ice_kw = dict(
                 ocean_freezing_temperature_K=_ice_freezing_temperature_K(
                     jnp.asarray(state.S.data)[..., 0], _ice_freeze_scheme),
                 q_open_top=_q_open_top(sf, float(np.asarray(z_coord.dz_ref)[0])),
                 ocean_dz_top_m=float(np.asarray(z_coord.dz_ref)[0]))
+            _n_ice = max(1, int(getattr(args, "ice_substeps", 1)))
+            if _n_ice == 1:
+                ice_state, ice_resp = step_sea_ice(
+                    ice_state, atm_ice, sst_K, ocn_u, ocn_v,
+                    ice_config, U_min=0.0, dt=dt, grid=grid, **_ice_kw)
+            else:
+                # Sub-stepped ice: ocean inputs fixed over the ocean step; the response handed
+                # to the ocean is the sub-step mean of the (step-averaged) flux fields and the
+                # last value of the end-of-step state fields, so ice-ocean exchange stays
+                # conservative over the ocean step.
+                _end_state_fields = {"T_sfc", "albedo", "emissivity", "z0", "q_surface", "lw_up"}
+                _acc = None
+                for _k in range(_n_ice):
+                    ice_state, _r = step_sea_ice(
+                        ice_state, atm_ice, sst_K, ocn_u, ocn_v,
+                        ice_config, U_min=0.0, dt=dt / _n_ice, grid=grid, **_ice_kw)
+                    if _acc is None:
+                        _acc = _r
+                    else:
+                        _acc = type(_r)(**{
+                            f: (getattr(_r, f) if (f in _end_state_fields or getattr(_r, f) is None
+                                                   or getattr(_acc, f) is None)
+                                else getattr(_acc, f) + getattr(_r, f))
+                            for f in _r._fields})
+                ice_resp = type(_acc)(**{
+                    f: (getattr(_acc, f) if (f in _end_state_fields or getattr(_acc, f) is None)
+                        else getattr(_acc, f) / _n_ice)
+                    for f in _acc._fields})
             if args.ew_cyclic_overlap and app_grid_type == "tripole":
                 # Re-slave the duplicated ORCA halo columns after transport
                 # (codex: the C-grid ice advection wraps with period nx, off
