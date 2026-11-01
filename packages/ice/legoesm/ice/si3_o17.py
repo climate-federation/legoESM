@@ -52,8 +52,11 @@ from legoesm.ice.si3_orca2_state import (
     SI3ORCA2AdvectionGrid,
     SI3ORCA2StateConfig,
     SI3State,
+    fortran_sum_categories,
     si3_apply_state_halos_orca2,
     si3_dyn_orca2,
+    si3_eos_fzp,
+    si3_lbc_lnk_orca2,
     si3_var_agg,
     si3_var_glo2eqv,
 )
@@ -88,6 +91,7 @@ class SI3O17Card(NamedTuple):
     rn_hinew: float
     ln_frazil: bool
     ln_drgice_imp: bool
+    ln_ice_embd: bool  # icestp.F90:168 -> icedyn_rhg_evp.F90:145-150
     differentiable: bool
     core2_precipitation_closure: bool
 
@@ -113,8 +117,6 @@ class SI3O17SurfaceForcing(NamedTuple):
     snow: jnp.ndarray
     qsr: jnp.ndarray
     emp: jnp.ndarray
-    at_i_b: jnp.ndarray
-    a_i_b: jnp.ndarray
     qns_oce: jnp.ndarray
     qsr_oce: jnp.ndarray
     ssu_m: jnp.ndarray
@@ -123,7 +125,6 @@ class SI3O17SurfaceForcing(NamedTuple):
     vtau: jnp.ndarray
     frq_m: jnp.ndarray
     e3t_m: jnp.ndarray
-    t_bo: jnp.ndarray
 
 
 class SI3O17LiveForcing(NamedTuple):
@@ -137,8 +138,6 @@ class SI3O17LiveForcing(NamedTuple):
     aevp_forcing: SI3CGridAEVPForcing
     aevp_metrics: SI3CGridMetrics
     ssh_m: jnp.ndarray
-    u_ice_b: jnp.ndarray
-    v_ice_b: jnp.ndarray
     surface: SI3O17SurfaceForcing
     stress: SI3StressInputs
 
@@ -151,6 +150,7 @@ class SI3O17Trace(NamedTuple):
     aevp: SI3CGridAEVPState
     deformation: tuple[jnp.ndarray, jnp.ndarray]
     advection: SI3AdvectionDiagnostics
+    advection_state: SI3State  # icedyn.F90:133 boundary before ice_dyn_rdgrft :134
     redistribution: SI3RdgrftResult
     postdyn_correction: SI3IceCorState
     frazil: SI3Frazil
@@ -284,6 +284,7 @@ def build_orca2_sas_ice_o17_card(*, surface: SI3SurfaceConfig, thermo_namelist: 
         rn_hinew=0.1,  # coeff-ok: frozen ORCA2_SAS_ICE deck selector
         ln_frazil=False,
         ln_drgice_imp=False,
+        ln_ice_embd=False,  # cfgs/SHARED/namelist_ref:199; icestp.F90:168
         differentiable=True,
         core2_precipitation_closure=False,
     )
@@ -383,6 +384,7 @@ def _thermo_entries(
     forcing: SI3O17LiveForcing,
     surface: SI3SurfaceOutputs,
     fluxes: SI3Fluxes,
+    t_bo: jnp.ndarray,
     nn_hls: int,
 ) -> tuple[dict, ...]:
     eq = state.equivalent
@@ -404,7 +406,7 @@ def _thermo_entries(
             at_i=state.aggregated.at_i,
             sss=forcing.sss_m,
             sst=forcing.sst_m,
-            t_bo=_scatter(jnp.zeros_like(forcing.sst_m), forcing.surface.t_bo, h),
+            t_bo=_scatter(jnp.zeros_like(forcing.sst_m), t_bo, h),  # icestp.F90:136-138
             qns_ice=_scatter(
                 jnp.zeros_like(state.a_i[..., jl]), surface.blk_ice_2.qns_ice[..., jl], h
             ),
@@ -442,6 +444,57 @@ def _scatter(full: jnp.ndarray, interior: jnp.ndarray, h: int) -> jnp.ndarray:
     return full.at[h:-h, h:-h, ...].set(interior)
 
 
+def _thermodynamic_tail(state: SI3State, card: SI3O17Card) -> SI3State:
+    """Finish ``ice_thd`` after ``ice_cor(kt, 2)`` (``icethd.F90:185-201``)."""
+
+    h = int(card.state.nn_hls)  # icethd.F90:185-201 (A2D(0) and lbc_lnk extents)
+    owned = (slice(h, -h), slice(h, -h)) if h else (slice(None), slice(None))  # :185-200
+    oa_i = state.oa_i.at[owned].set(  # icethd.F90:185
+        state.oa_i[owned] + state.a_i[owned] * card.state.rDt_ice  # icethd.F90:185
+    )
+
+    def t_lbc(field: jnp.ndarray) -> jnp.ndarray:
+        return si3_lbc_lnk_orca2(  # icethd.F90:188-190
+            field, "T", 1.0, nn_hls=h, ldfull=True  # icethd.F90:188-190
+        )
+
+    linked = state._replace(  # icethd.F90:188-190
+        a_i=t_lbc(state.a_i),  # icethd.F90:188
+        v_i=t_lbc(state.v_i),  # icethd.F90:188
+        v_s=t_lbc(state.v_s),  # icethd.F90:188
+        sv_i=t_lbc(state.sv_i),  # icethd.F90:188
+        oa_i=t_lbc(oa_i),  # icethd.F90:188
+        t_su=t_lbc(state.t_su),  # icethd.F90:189
+        a_ip=t_lbc(state.a_ip),  # icethd.F90:189
+        v_ip=t_lbc(state.v_ip),  # icethd.F90:189
+        v_il=t_lbc(state.v_il),  # icethd.F90:189
+        e_i=t_lbc(state.e_i),  # icethd.F90:190
+        e_s=t_lbc(state.e_s),  # icethd.F90:190
+        szv_i=t_lbc(state.szv_i),  # icethd.F90:190
+    )
+    at_i = fortran_sum_categories(linked.a_i, axis=-1)  # icethd.F90:192
+    no_ice = at_i == 0.0  # icethd.F90:194
+    if h:
+        east = (slice(h, -h), slice(h, -h))  # icethd.F90:195
+        west = (slice(h - 1, -h - 1), slice(h, -h))  # icethd.F90:196
+        north = (slice(h, -h), slice(h, -h))  # icethd.F90:197
+        south = (slice(h, -h), slice(h - 1, -h - 1))  # icethd.F90:198
+        u_ice = linked.u_ice.at[east].set(jnp.where(no_ice[owned] & no_ice[h + 1 : -h + 1, h:-h], 0.0, linked.u_ice[east]))  # :195
+        u_ice = u_ice.at[west].set(jnp.where(no_ice[owned] & no_ice[h - 1 : -h - 1, h:-h], 0.0, u_ice[west]))  # :196
+        v_ice = linked.v_ice.at[north].set(jnp.where(no_ice[owned] & no_ice[h:-h, h + 1 : -h + 1], 0.0, linked.v_ice[north]))  # :197
+        v_ice = v_ice.at[south].set(jnp.where(no_ice[owned] & no_ice[h:-h, h - 1 : -h - 1], 0.0, v_ice[south]))  # :198
+    else:
+        u_ice = jnp.where(no_ice & jnp.roll(no_ice, -1, axis=0), 0.0, linked.u_ice)  # icethd.F90:195-196
+        v_ice = jnp.where(no_ice & jnp.roll(no_ice, -1, axis=1), 0.0, linked.v_ice)  # icethd.F90:197-198
+    u_ice = si3_lbc_lnk_orca2(u_ice, "U", -1.0, nn_hls=h, ldfull=True)  # icethd.F90:201
+    v_ice = si3_lbc_lnk_orca2(v_ice, "V", -1.0, nn_hls=h, ldfull=True)  # icethd.F90:201
+    return linked._replace(  # icethd.F90:192-201
+        u_ice=u_ice,  # icethd.F90:195-196,201
+        v_ice=v_ice,  # icethd.F90:197-198,201
+        aggregated=linked.aggregated._replace(at_i=at_i),  # icethd.F90:192
+    )
+
+
 def si3_o17_step(
     entry: SI3O17StepState,
     forcing: SI3O17LiveForcing,
@@ -449,6 +502,7 @@ def si3_o17_step(
     *,
     _plant_swap_rheology_advection: bool = False,
     _plant_drop_redistribution: bool = False,
+    _plant_drop_deformation_fold: bool = False,
 ) -> tuple[SI3O17StepState, SI3O17Trace]:
     """One exact production call graph in NEMO ``ice_stp`` order."""
 
@@ -462,6 +516,15 @@ def si3_o17_step(
     sf = forcing.surface
     h = int(card.state.nn_hls)
     owned = (slice(h, -h), slice(h, -h)) if h else (slice(None), slice(None))
+    u_ice_b = state.u_ice  # icestp.F90:151; store_fields :421-423
+    v_ice_b = state.v_ice  # icestp.F90:151; store_fields :421-423
+    t_bo_celsius = si3_eos_fzp(  # icestp.F90:136
+        forcing.sss_m, kbnd=0, nn_hls=h  # icestp.F90:136
+    )
+    t_bo = (t_bo_celsius[owned] + card.constants.T0) * sf.smask0 + card.constants.T0 * (1.0 - sf.smask0)  # icestp.F90:138
+    t_si_step = state.t_si  # icestp.F90:164; diag_set0 :485-488 touches A2D(0) only
+    t_si_step = t_si_step.at[owned].set(card.constants.T0)  # icestp.F90:164; diag_set0 :485-488
+    state = state._replace(t_si=t_si_step)  # icestp.F90:164; diag_set0 :488
 
     b1 = si3_blk_ice_1(
         wndi=sf.wndi,
@@ -498,16 +561,23 @@ def si3_o17_step(
         forcing.aevp_metrics,
         card.aevp,
         strength_t=strength.strength,
-        u_ice_b=forcing.u_ice_b,
-        v_ice_b=forcing.v_ice_b,
+        u_ice_b=u_ice_b,  # icestp.F90:151; store_fields :422
+        v_ice_b=v_ice_b,  # icestp.F90:151; store_fields :423
         ssh_m=forcing.ssh_m,
         snwice_mass=state.snwice_mass,
         snwice_mass_b=state.snwice_mass_b,
-        ln_ice_embd=False,
+        ln_ice_embd=card.ln_ice_embd,  # icedyn_rhg_evp.F90:145-150
         fold=card.fold,
         differentiable=card.differentiable,
     )
     state = state._replace(u_ice=aevp.u_ice_u, v_ice=aevp.v_ice_v)
+    divu, delta = si3_cgrid_deformation(  # icedyn_rhg_evp.F90:788-836
+        aevp,
+        aevp_forcing,
+        forcing.aevp_metrics,
+        card.aevp,
+        fold=None if _plant_drop_deformation_fold else card.fold,  # icedyn_rhg_evp.F90:791-838
+    )
     zeros = jnp.zeros_like(state.u_ice)
     # icestp.diag_set0 assigns +0 to every SI3 flux accumulator at step
     # entry.  They are not live forcing and cannot be injected mid-step.
@@ -547,9 +617,7 @@ def si3_o17_step(
             diag_adv_salt=zeros,
             diag_adv_heat=zeros,
         )
-    divu, delta = si3_cgrid_deformation(
-        aevp, aevp_forcing, forcing.aevp_metrics, card.aevp, fold=card.fold
-    )
+    advection_state = state  # icedyn.F90:133-134; named O17 localisation boundary
     rdg_entry = _rdgrft_state(state, step_fluxes)
     if _plant_drop_redistribution:
         rdg = SI3RdgrftResult(
@@ -640,6 +708,8 @@ def si3_o17_step(
         config=card.state,
     )
     state = state._replace(a_i=eqv.a_i, v_s=eqv.v_s, equivalent=eqv, aggregated=agg)
+    a_i_b = state.a_i[owned]  # icestp.F90:184; store_fields :399
+    at_i_b = fortran_sum_categories(a_i_b, axis=-1)  # icestp.F90:184; store_fields :418
 
     alb = si3_ice_alb(
         t_su=state.t_su[owned],
@@ -673,8 +743,8 @@ def si3_o17_step(
         smask0=sf.smask0,
         sst_m=forcing.sst_m[owned],
         emp=sf.emp,
-        at_i_b=sf.at_i_b,
-        a_i_b=sf.a_i_b,
+        at_i_b=at_i_b,  # icestp.F90:184; store_fields :418
+        a_i_b=a_i_b,  # icestp.F90:184; store_fields :399
         qns_oce=sf.qns_oce,
         qsr_oce=sf.qsr_oce,
         cloud_fra=sf.cloud_fra,
@@ -692,7 +762,7 @@ def si3_o17_step(
         vtau=sf.vtau,
         smask0=sf.smask0,
         at_i=state.aggregated.at_i[owned],
-        at_i_b=sf.at_i_b,
+        at_i_b=at_i_b,  # icestp.F90:184; store_fields :418
         vt_i=state.aggregated.vt_i[owned],
         qsr_oce=sf.qsr_oce,
         qns_oce=sf.qns_oce,
@@ -700,7 +770,7 @@ def si3_o17_step(
         frq_m=sf.frq_m,
         e3t_m=sf.e3t_m,
         sst_m=forcing.sst_m[owned],
-        t_bo=sf.t_bo,
+        t_bo=t_bo,  # icestp.F90:136-138
         rn_amax_2d=forcing.rn_amax_2d[owned],
         config=card.surface,
     )
@@ -709,7 +779,9 @@ def si3_o17_step(
     frazil = si3_ice_thd_frazil(other.qlead, rn_hinew=card.rn_hinew, ln_frazil=card.ln_frazil)
     dh_fluxes = SI3DHFluxes(**{name: getattr(fluxes, name) for name in SI3DHFluxes._fields})
     stages = si3_ice_thd_o12_stages(
-        category_entries=_thermo_entries(state, forcing, surface, fluxes, card.state.nn_hls),
+        category_entries=_thermo_entries(  # icethd.F90:117-140
+            state, forcing, surface, fluxes, t_bo, card.state.nn_hls  # icethd.F90:140
+        ),
         category_fluxes=dh_fluxes,
         sfx_bri=fluxes.sfx_bri,
         sfx_lam=fluxes.sfx_lam,
@@ -734,17 +806,20 @@ def si3_o17_step(
         nn_hls=card.state.nn_hls,
         constants=card.constants,
     )
-    carried = stages.categories[-1].o10.o9.dh.fluxes
+    if stages.fluxes is None:
+        raise ValueError("O17 requires the live category-flux carry arm")
+    carried = stages.fluxes.category  # icethd.F90:117-171; module flux arrays are in/out
     carried_updates = {
         name: getattr(carried, name) for name in carried._fields if name in SI3Fluxes._fields
     }
-    last_da = stages.categories[-1].da
-    if last_da is not None:
-        carried_updates.update(
-            sfx_lam=last_da.sfx_lam,
-            hfx_thd=last_da.hfx_thd,
-            wfx_lam=last_da.wfx_lam,
-        )
+    carried_updates.update(  # icethd.F90:148-163; sal/diffusion/DA accumulators
+        sfx_bri=stages.fluxes.sfx_bri,  # icethd_sal.F90:1335-1338
+        sfx_lam=stages.fluxes.sfx_lam,  # icethd.F90:161
+        hfx_thd=stages.fluxes.hfx_thd,  # icethd.F90:161
+        wfx_lam=stages.fluxes.wfx_lam,  # icethd.F90:161
+        hfx_err_dif=stages.fluxes.hfx_err_dif,  # icethd_zdf_bl99.F90:838
+        hfx_dif=stages.fluxes.hfx_dif,  # icethd_zdf_bl99.F90:841
+    )
     fluxes = fluxes._replace(
         **carried_updates,
         wfx_pnd=stages.pnd.wfx_pnd,
@@ -777,6 +852,9 @@ def si3_o17_step(
             t_s=_pack_categories(stages, "t_s"),
             a_i=_pack_categories(stages, "a_i"),
             v_s=_pack_categories(stages, "v_s"),
+        ),
+        t_si=jnp.stack(  # icethd.F90:163; ice_thd_1d2d :533-534
+            [c.o10.o9.zdf.t_si for c in stages.categories], axis=-1  # icethd.F90:334,533-534
         ),
         aggregated=state.aggregated._replace(
             at_i=stages.pnd.at_i,
@@ -837,7 +915,7 @@ def si3_o17_step(
         e_i=state.e_i[owned],
         szv_i=state.szv_i[owned],
         qlead=other.qlead,
-        t_bo=sf.t_bo,
+        t_bo=t_bo,  # icestp.F90:136-138
         sfx_opw=fluxes.sfx_opw[owned],
         wfx_opw=fluxes.wfx_opw[owned],
         ht_i_new=frazil.ht_i_new,
@@ -876,6 +954,8 @@ def si3_o17_step(
         rn_himin=card.rn_himin,
         config=card.state,
     )
+    corrected_state = _thermodynamic_tail(correction.state, card)  # icethd.F90:183-201
+    correction = correction._replace(state=corrected_state)  # icethd.F90:183-201
     owned = (slice(h, -h), slice(h, -h)) if h else (slice(None), slice(None))
     owned_fluxes = SI3Fluxes(*(x[owned] for x in correction.fluxes))
     qtr_bot = jnp.stack([c.o10.o9.zdf.qtr_ice_bot for c in stages.categories], axis=-1)[owned]
@@ -883,7 +963,7 @@ def si3_o17_step(
     qcn_bot = jnp.stack([c.o10.o9.zdf.qcn_ice_bot for c in stages.categories], axis=-1)[owned]
     qml_ice = jnp.stack([c.o10.o9.dh.qml_ice for c in stages.categories], axis=-1)[owned]
     zero2 = jnp.zeros_like(sf.smask0)
-    zero3 = jnp.zeros_like(sf.a_i_b)
+    zero3 = jnp.zeros_like(a_i_b)  # icestp.F90:184; store_fields :399-418
     update = SI3UpdateFluxForcing(
         **{
             name: (
@@ -917,8 +997,8 @@ def si3_o17_step(
         qns_tot=b2.qns_tot,
         qsr_tot=b2.qsr_tot,
         frq_m=sf.frq_m,
-        a_i_b=sf.a_i_b,
-        at_i_b=sf.at_i_b,
+        a_i_b=a_i_b,  # icestp.F90:184; store_fields :399
+        at_i_b=at_i_b,  # icestp.F90:184; store_fields :418
         qsr_ice=b2.qsr_ice,
         qtr_ice_top=b2.qtr_ice_top,
         qtr_ice_bot=qtr_bot,
@@ -958,6 +1038,7 @@ def si3_o17_step(
         aevp,
         (divu, delta),
         adv,
+        advection_state,
         rdg,
         cor,
         frazil,

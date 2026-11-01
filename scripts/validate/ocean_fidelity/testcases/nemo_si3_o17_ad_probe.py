@@ -52,10 +52,9 @@ def _case(master: Path):
         run / "output.namelist.dyn", run / "output.namelist.ice"
     )
     card = build_orca2_sas_ice_o17_card(surface=surface_cfg, thermo_namelist=nml)
-    # A 4 x 3 owned region is the minimum useful mixed regime: several ice
-    # categories, snow, and ponds sit beside open-water columns.  The even
-    # zonal interior also conforms to ORCA2's T-pivot fold.
-    ni, nj, h = 8, 7, 2
+    # A 2 x 1 owned region is the smallest ORCA2-fold-conforming mixed regime:
+    # one column carries all categories, snow and ponds beside one open column.
+    ni, nj, h = 6, 5, 2
     ii = (ni - 2 * h, nj - 2 * h)
     full = (ni, nj)
     zf, of = jnp.zeros(full, jnp.float64), jnp.ones(full, jnp.float64)
@@ -258,8 +257,6 @@ def _case(master: Path):
         snow=jnp.full(ii, 4.0e-8),
         qsr=jnp.full(ii, 80.0),
         emp=jnp.full(ii, 2.0e-8),
-        at_i_b=agg.at_i[h:-h, h:-h],
-        a_i_b=a_i[h:-h, h:-h],
         qns_oce=jnp.full(ii, 20.0),
         qsr_oce=jnp.full(ii, 80.0),
         ssu_m=ocean_u,
@@ -268,7 +265,6 @@ def _case(master: Path):
         vtau=jnp.full(ii, 0.03),
         frq_m=jnp.full(ii, 0.02),
         e3t_m=jnp.full(ii, 10.0),
-        t_bo=jnp.full(ii, card.constants.T0 - 1.5),
     )
     stress = SI3StressInputs(
         uu_kbb=ocean_u,
@@ -297,8 +293,6 @@ def _case(master: Path):
         aevp_forcing=aevp_forcing,
         aevp_metrics=metrics,
         ssh_m=zf,
-        u_ice_b=u_ice * 0.9,
-        v_ice_b=v_ice * 0.9,
         surface=surface,
         stress=stress,
     )
@@ -472,10 +466,10 @@ def probe(master: Path, *, execution_mode: str = "compiled") -> dict:
             "exact full O17 reverse-mode compile; run alone on a small conforming mixed-regime tile"
         ),
         "synthetic_regime": {
-            "full_shape": [8, 7],
-            "owned_shape": [4, 3],
-            "ice_owned_columns": 8,
-            "open_water_owned_columns": 4,
+            "full_shape": [6, 5],
+            "owned_shape": [2, 1],
+            "ice_owned_columns": 1,
+            "open_water_owned_columns": 1,
             "ice_categories": 5,
             "snow": True,
             "ponds": True,

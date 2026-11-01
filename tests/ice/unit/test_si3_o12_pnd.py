@@ -1648,6 +1648,110 @@ def test_o12_composer_calls_o10_then_da_then_1d2d_then_pnd(monkeypatch):
     np.testing.assert_array_equal(res.pnd.wfx_pnd, one_2d * 42.0)
 
 
+def test_o12_live_flux_carry_preserves_salinity_and_diffusion_outputs(monkeypatch):
+    """The live arm carries category module arrays; replay snapshots stay separate."""
+
+    z2 = jnp.zeros((5, 5), dtype=jnp.float64)
+    z3 = jnp.zeros((5, 5, 5), dtype=jnp.float64)
+    zi = jnp.zeros((5, 5, 10), dtype=jnp.float64)
+    zs = jnp.zeros((5, 5, 5), dtype=jnp.float64)
+    flux0 = bl.SI3DHFluxes(*(z2 for _ in bl.SI3DHFluxes._fields))
+    seen = []
+
+    def o10_spy(**kwargs):
+        f = kwargs["fluxes"]
+        e = kwargs["entry"]
+        seen.append(
+            (
+                float(f.hfx_res[0, 0]),
+                float(f.sfx_res[0, 0]),
+                float(kwargs["sfx_bri"][0, 0]),
+                float(e["hfx_err_dif"][0, 0]),
+                float(e["hfx_dif"][0, 0]),
+            )
+        )
+        next_flux = f._replace(hfx_res=f.hfx_res + 1.0, sfx_res=f.sfx_res + 2.0)
+        dh = SimpleNamespace(
+            a_i=z2 + 0.1,
+            h_i=z2 + 1.0,
+            h_s=z2 + 0.1,
+            t_su=z2 + 270.0,
+            t_s=zs + 268.0,
+            s_i=z2 + 4.0,
+            e_i=zi + 1.0e8,
+            e_s=zs + 5.0e7,
+            dh=SimpleNamespace(dh_i_sum=z2, dh_s_sum=z2),
+            fluxes=next_flux,
+        )
+        zdf = SimpleNamespace(
+            hfx_err_dif=e["hfx_err_dif"] + 3.0,
+            hfx_dif=e["hfx_dif"] + 4.0,
+        )
+        sal = SimpleNamespace(
+            sz_i=zi + 5.0,
+            sfx_bri=kwargs["sfx_bri"] + 5.0,
+            sfx_res=next_flux.sfx_res + 7.0,
+        )
+        return SimpleNamespace(
+            o9=SimpleNamespace(dh=dh, zdf=zdf),
+            sal=sal,
+            t_i=zi + 271.0,
+        )
+
+    monkeypatch.setattr(pnd_mod, "si3_ice_thd_o10_category_stages", o10_spy)
+    monkeypatch.setattr(
+        pnd_mod,
+        "si3_ice_thd_pnd",
+        lambda **kw: pnd_mod.SI3PondOutputs(z2, z3, z3, z3, z3, z3, z3, z2),
+    )
+    entries = tuple(
+        {
+            "at_i": z2,
+            "sst": z2,
+            "t_bo": z2,
+            "o_i": z2,
+            "hfx_err_dif": z2 + 10.0,
+            "hfx_dif": z2 + 20.0,
+        }
+        for _ in range(5)
+    )
+    out = pnd_mod.si3_ice_thd_o12_stages(
+        category_entries=entries,
+        category_fluxes=flux0,
+        sfx_bri=z2 + 30.0,
+        sfx_lam=z2,
+        hfx_thd=z2,
+        wfx_lam=z2,
+        a_ip=z3,
+        v_ip=z3,
+        h_ip=z3,
+        v_il=z3,
+        h_il=z3,
+        a_ip_frac=z3,
+        wfx_pnd=z2,
+        namelist={"ln_icedA": False},
+        rDt_ice=RDT,
+        r1_Dt_ice=R1_RDT,
+        r1_nlay_i=R1_NLAY_I,
+        r1_nlay_s=R1_NLAY_S,
+        rho_i=RHO_I,
+        rho_s=RHO_S,
+        rho_w=RHO_W,
+        gravity=GRAVITY,
+        constants=NEMO_SI3_CONSTANTS_CONFIG,
+        nn_hls=2,
+    )
+    assert seen == [
+        (float(jl), float(9 * jl), float(30 + 5 * jl), float(10 + 3 * jl), float(20 + 4 * jl))
+        for jl in range(5)
+    ]
+    assert out.fluxes is not None
+    assert float(out.fluxes.category.sfx_res[0, 0]) == 45.0
+    assert float(out.fluxes.sfx_bri[0, 0]) == 55.0
+    assert float(out.fluxes.hfx_err_dif[0, 0]) == 25.0
+    assert float(out.fluxes.hfx_dif[0, 0]) == 40.0
+
+
 def test_pnd_lev_and_ice_thd_pnd_gradients_are_finite_nonzero_and_match_central_difference():
     """Smooth interior columns have finite nonzero AD gradients matching central finite differences."""
     T0 = float(NEMO_SI3_CONSTANTS_CONFIG.T0)

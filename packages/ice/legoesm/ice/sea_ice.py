@@ -719,10 +719,11 @@ def _si3_orca2_o2_step_with_trace(
             stress=stress,
         )
 
-    raise ValueError(
-        "SI3ORCA2O2Forcing is the initialization acquisition boundary; use "
-        "si3_o2_step directly. Production step_sea_ice requires the complete "
-        "typed SI3O17LiveForcing so no heat/freshwater/salt field is invented."
+    raise NotImplementedError(
+        "ice_update_flx: SI3ORCA2O2Forcing is the initialization acquisition "
+        "boundary; use si3_o2_step directly. Production step_sea_ice requires "
+        "the complete typed SI3O17LiveForcing so no heat/freshwater/salt field "
+        "is invented."
     )
 
 

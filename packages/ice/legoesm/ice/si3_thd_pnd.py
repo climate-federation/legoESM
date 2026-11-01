@@ -163,6 +163,19 @@ class SI3O12Stages(NamedTuple):
 
     categories: tuple[SI3O12CategoryOutput, ...]
     pnd: SI3PondOutputs
+    fluxes: "SI3O12FluxCarry | None" = None
+
+
+class SI3O12FluxCarry(NamedTuple):
+    """Live module accumulators after the admitted category loop."""
+
+    category: SI3DHFluxes
+    sfx_bri: jax.Array
+    sfx_lam: jax.Array
+    hfx_thd: jax.Array
+    wfx_lam: jax.Array
+    hfx_err_dif: jax.Array
+    hfx_dif: jax.Array
 
 
 def si3_ice_perm_eff(
@@ -840,9 +853,14 @@ def si3_ice_thd_o12_stages(
     cur_hfx_thd = _required("hfx_thd", hfx_thd)
     cur_wfx_lam = _required("wfx_lam", wfx_lam)
     cur_fluxes = category_fluxes if live_flux_carry else None
+    cur_hfx_err_dif = _required("hfx_err_dif", category_entries[0]["hfx_err_dif"])
+    cur_hfx_dif = _required("hfx_dif", category_entries[0]["hfx_dif"])
 
     for jl in range(5):
-        entry = category_entries[jl]
+        entry = dict(category_entries[jl])
+        if live_flux_carry:
+            entry["hfx_err_dif"] = cur_hfx_err_dif  # icethd_zdf_bl99.F90:786,838
+            entry["hfx_dif"] = cur_hfx_dif  # icethd_zdf_bl99.F90:841
         fluxes = cur_fluxes if live_flux_carry else category_fluxes[jl]
         o10 = si3_ice_thd_o10_category_stages(
             entry=entry,
@@ -864,7 +882,9 @@ def si3_ice_thd_o12_stages(
             # icethd.f90 carries the module flux arrays through the category
             # loop; the five-tuple arm above remains the exact-input record
             # replay boundary used by O9--O12 scorers.
-            cur_fluxes = dh.fluxes
+            cur_fluxes = dh.fluxes._replace(sfx_res=o10.sal.sfx_res)  # icethd_sal.F90:1335-1338
+            cur_hfx_err_dif = o10.o9.zdf.hfx_err_dif  # icethd_zdf_bl99.F90:838
+            cur_hfx_dif = o10.o9.zdf.hfx_dif  # icethd_zdf_bl99.F90:841
         a_i_cat = dh.a_i
         h_i_cat = dh.h_i
         h_s_cat = dh.h_s
@@ -985,7 +1005,13 @@ def si3_ice_thd_o12_stages(
         nn_hls=nn_hls,
         constants=constants,
     )
-    return SI3O12Stages(categories=tuple(cat_outputs), pnd=pnd_out)
+    live_out = None
+    if live_flux_carry:
+        live_out = SI3O12FluxCarry(  # icethd.F90:117-171 module-array carry
+            cur_fluxes, cur_sfx_bri, cur_sfx_lam, cur_hfx_thd, cur_wfx_lam,
+            cur_hfx_err_dif, cur_hfx_dif,
+        )
+    return SI3O12Stages(categories=tuple(cat_outputs), pnd=pnd_out, fluxes=live_out)
 
 
 __all__ = (
@@ -993,6 +1019,7 @@ __all__ = (
     "SI3PondOutputs",
     "SI3O12CategoryOutput",
     "SI3O12Stages",
+    "SI3O12FluxCarry",
     "si3_ice_perm_eff",
     "si3_pnd_lev",
     "si3_ice_thd_pnd",
