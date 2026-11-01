@@ -135,7 +135,46 @@ def _sounding(saturated=False):
     q = np.array([0.03 if saturated else 0.012, 0.010, 0.008, 0.003, 0.001])
     p = np.array([1.0e5, 9.45e4, 8.9e4, 7.0e4, 4.7e4])
     return {"z": z, "theta_li": T, "temperature": T, "T": T.copy(), "q_t": q,
-            "u": np.array([-5.0, -6.0, -7.0, -4.0, 0.0]), "v": np.zeros(5), "p": p}
+            "u": np.array([-5.0, -6.0, -7.0, -4.0, 0.0]), "v": np.zeros(5), "p": p,
+            "w": np.array([0.0, -0.002, -0.004, -0.004, 0.0]),
+            "T_adv_src": np.full(5, -1.0e-5), "q_t_adv_src": np.full(5, -2.0e-8)}
+
+
+def test_nudge_rate_is_swirl_lms_cosine_ramp_over_one_day():
+    z = np.array([0.0, 2999.0, 3000.0, 3250.0, 3500.0, 5000.0])
+    r = cb.nudge_rate(z) * 86400.0
+    assert np.allclose(r, [0.0, 0.0, 0.0, 0.5, 1.0, 1.0], atol=1e-12)
+
+
+def test_gcm_forcing_matches_swirl_lms_recipe_on_linear_profiles():
+    z = np.array([0.0, 2000.0, 4000.0, 6000.0])
+    w, gam, dq = -0.003, -0.0065, -1.0e-6
+    s = {"z": z, "T": 300.0 + gam * z, "q_t": 0.01 + dq * z, "w": np.full(4, w),
+         "T_adv_src": np.full(4, -1.0e-5), "q_t_adv_src": np.full(4, -2.0e-8)}
+    zc = np.array([100.0, 3250.0, 5000.0])
+    p_ref = np.array([9.9e4, 7.0e4, 5.5e4])
+    f = cb.gcm_forcing(s, zc, p_ref)
+    exner_inv = (p_ref / 1.0e5) ** (-cb._CB_R_D / cb._CB_CP_D)
+    assert np.allclose(f["subsidence_w"], w)
+    assert np.allclose(f["theta_adv"],
+                       exner_inv * (-1.0e-5 + w * gam + w * cb._CB_G / cb._CB_CP_D),
+                       rtol=1e-12)
+    assert np.allclose(f["qv_adv"], -2.0e-8 + w * dq, rtol=1e-12, atol=0.0)
+    assert np.allclose(f["nudge_rate"] * 86400.0, [0.0, 0.5, 1.0], atol=1e-12)
+
+
+def test_gcm_forcing_takes_the_upwind_side_for_either_sign_of_w():
+    z = np.array([0.0, 1000.0, 2000.0, 3000.0, 4000.0])
+    T = 300.0 - 1.0e-6 * z**2
+    w = np.array([0.0, 0.01, 0.01, -0.01, 0.0])
+    s = {"z": z, "T": T, "q_t": 1.0e-3 * T, "w": w,
+         "T_adv_src": np.zeros(5), "q_t_adv_src": np.zeros(5)}
+    f = cb.gcm_forcing(s, z, np.full(5, 1.0e5))
+    # donor below where w > 0 (1, 2 km), above where w < 0 (3 km)
+    dTdz = np.array([(T[1] - T[0]), (T[2] - T[1]), (T[4] - T[3])]) / 1000.0
+    want = w[1:4] * (dTdz + cb._CB_G / cb._CB_CP_D)
+    assert np.allclose(f["theta_adv"][1:4], want, rtol=1e-12, atol=0.0)
+    assert np.allclose(f["qv_adv"][1:4], 1.0e-3 * w[1:4] * dTdz, rtol=1e-12, atol=0.0)
 
 
 def test_initial_profiles_interpolate_linearly_and_condense_with_our_curve():
@@ -185,7 +224,8 @@ def _write_case(tmp_path, nx=6, ny=6, nz=16, nt=2, z_scale=1.0):
     fdir = tmp_path / "forcing" / "0" / "7" / "amip"
     fdir.mkdir(parents=True)
     s = _sounding()
-    cols = ["z", "theta_li", "temperature", "q_t", "u", "v", "T", "p"]
+    cols = ["z", "theta_li", "temperature", "q_t", "u", "v", "w", "T_adv_src",
+            "q_t_adv_src", "T", "p"]
     lines = [",".join(cols)] + [",".join(f"{s[c][i]:.6e}" for c in cols)
                                 for i in range(len(s["z"]))]
     (fdir / "sounding.csv").write_text("\n".join(lines) + "\n")
@@ -201,6 +241,13 @@ def test_build_artifact_from_a_store(tmp_path):
     assert np.allclose(art.heights_m, (np.arange(1, nz - 1) + 0.5) * dz)
     assert np.allclose(art.times_s, [0.0, 96 * 3600.0, 96 * 3600.0 + 1200.0])
     assert np.allclose(art.T_s, 298.33)
+    z_node = np.arange(1, nz - 1) * dz          # swirl-lm sounding coordinate k·dz
+    s = _sounding()
+    assert np.allclose(np.asarray(art.qt)[0], np.interp(z_node, s["z"], s["q_t"]))
+    assert np.allclose(np.asarray(art.subsidence_w), np.interp(z_node, s["z"], s["w"]))
+    assert np.allclose(np.asarray(art.nudge_rate), cb.nudge_rate(z_node))
+    assert np.all(np.isfinite(art.theta_adv)) and np.all(np.isfinite(art.qv_adv))
+    assert art.les_setup["forcing_recipe"]["tau_wind_s"] == 21600.0
     for k in ("wtheta_resolved", "wtheta_sgs", "wqt_resolved", "wqt_sgs"):
         a = np.asarray(getattr(art, k))
         assert np.all(a[0] == 0.0) and np.all(np.isfinite(a[1:])), k
@@ -213,10 +260,22 @@ def test_build_artifact_from_a_store(tmp_path):
     save_artifact(art, path)
     back = load_artifact(path)
     assert np.array_equal(np.asarray(back.rad_T_tendency), rad, equal_nan=True)
+    assert np.array_equal(np.asarray(back.nudge_rate), np.asarray(art.nudge_rate))
     assert back.les_setup["height_offset_m"] == pytest.approx(0.5 * dz)
     from legoesm.atmosphere.les_suite.bridge import surface_roughness
     assert surface_roughness(back) == (0.001, 0.001)
     assert back.les_setup["surface_gustiness_m_s"] == 1.0
+    from legoesm.atmosphere.les_suite.scm_runner import moist_scm_microphysics
+    micro = moist_scm_microphysics(back)
+    assert micro.scheme == "kessler" and micro.kessler.parameter_set == "cloudbench"
+
+
+def test_held_out_sites_are_a_fixed_fifth_of_the_sites():
+    sites = list(range(500))
+    a = cb.held_out_sites(sites)
+    assert len(a) == 100 and a == sorted(set(a)) and set(a) <= set(sites)
+    assert a == cb.held_out_sites(list(reversed(sites)) + sites[:3])  # order/dupes
+    assert a != cb.held_out_sites(sites, seed=cb.HELD_OUT_SEED + 1)
 
 
 def test_run_surface_settings_refuses_a_missing_or_repeated_key():

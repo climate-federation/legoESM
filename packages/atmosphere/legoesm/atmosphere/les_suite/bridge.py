@@ -70,6 +70,8 @@ class LESReferenceArtifact:
         subsidence_w : (nz,) large-scale vertical velocity [m/s], positive up, or ``None``.
         theta_adv, qv_adv : (nz,) prescribed horizontal-advection tendencies
             [K/s] / [(kg/kg)/s] or ``None``.
+        nudge_rate : (nz,) inverse relaxation time [1/s] toward the t=0 θ_l and
+            q_t profiles (CloudBench's free-troposphere nudging), or ``None``.
         theta_adv_cum : (nt, nz) time integral from ``t=0`` of a TIME-VARYING θ
             forcing the LES applied [K] (e.g. DYCOMS's interactive longwave
             cooling), or ``None``. Exclusive with ``theta_adv``; the SCM receives
@@ -210,6 +212,7 @@ class LESReferenceArtifact:
     qr: Array | None = None
     cloud_frac: Array | None = None
     rad_T_tendency: Array | None = None
+    nudge_rate: Array | None = None
     #: JSON-serialisable record of how the reference was produced (surface BC,
     #: viscosity floor, refinement, dt, grid) so references made under different
     #: setups of the same case are distinguishable after the fact.
@@ -269,7 +272,8 @@ class LESReferenceArtifact:
                     f"{self.case_name}: {name} must have shape {(nt, nz)}, got {a.shape}"
                 )
         # forcing profiles: (nz,)
-        for name in ("u_geo", "v_geo", "subsidence_w", "theta_adv", "qv_adv"):
+        for name in ("u_geo", "v_geo", "subsidence_w", "theta_adv", "qv_adv",
+                     "nudge_rate"):
             arr = getattr(self, name)
             if arr is None:
                 continue
@@ -401,7 +405,8 @@ FORCING_SERIES_FIELDS = ("rad_T_tendency",)
 _ARTIFACT_ARRAY_FIELDS = (
     "heights_m", "times_s", "theta", "u", "v",
     "wtheta_resolved", "wtheta_sgs", "qt", "wqt_resolved", "wqt_sgs", "qc",
-    "u_geo", "v_geo", "subsidence_w", "theta_adv", "qv_adv", "theta_adv_cum",
+    "u_geo", "v_geo", "subsidence_w", "theta_adv", "qv_adv", "nudge_rate",
+    "theta_adv_cum",
     "qv_adv_cum", "u_geo_cum", "v_geo_cum",
     "T_s", "w_theta_s", "w_qv_s",
 ) + (TURBULENCE_STAT_FIELDS + SURFACE_SERIES_FIELDS + MOIST_SURFACE_SERIES_FIELDS

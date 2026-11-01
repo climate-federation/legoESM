@@ -32,9 +32,19 @@ Conversions (PI 2026-10-31):
   cell, averaged from the two neighbouring faces to the node (the suite's face to
   centre convention). KNOWN DIFFERENCE: the LES diffused its own θ_li, not θ_l.
 - Frame 0 is the starting state from the GCM sounding, interpolated linearly in
-  height (as swirl-lm's ``interpolate_sounding``), condensed with OUR saturation
-  curve; its fluxes are zero and its radiative heating and cloud fraction are NaN
-  (never scored).
+  height (as swirl-lm's ``interpolate_sounding``) at the LES node COORDINATE
+  ``k·dz`` (what each node received) and stored at its physical height, condensed
+  with OUR saturation curve; its fluxes are zero and its radiative heating and
+  cloud fraction are NaN (never scored).
+- GCM forcing (swirl-lm ``cloud_feedback/gcm_forcing.py``, ``gcm_settings.py``
+  defaults, which the run does not override), on the same node coordinates:
+  ``subsidence_w`` = the GCM w; ``theta_adv`` = the horizontal part of the GCM
+  temperature advection, (T_adv + w ∂T/∂z + w g/c_pd) times swirl-lm's dry Exner
+  inverse (p_ref/p00)^(-R_d/c_pd); ``qv_adv`` = q_t_adv + w ∂q_t/∂z (first-order
+  upwind derivatives, as swirl-lm); ``nudge_rate`` = r(z)/τ with r = 0 below z_i,
+  a cosine ramp to 1 at z_r, τ = 1 day. The nudging targets are frame 0's θ_l and
+  q_t (the GCM column is unsaturated, so frame 0 is the GCM state); the winds relax
+  to frame 0's u, v with τ_wind everywhere (``les_setup["forcing_recipe"]``).
 - Momentum fluxes are not stored: CloudBench did not save its SGS momentum flux
   (u, v profiles only are scored, PI 2026-10-31).
 - ``rad_T_tendency`` is the horizontal mean of the stored ``rad_heat_src``, a
@@ -49,12 +59,17 @@ import json
 import re
 from pathlib import Path
 
+import jax.numpy as jnp
 import numpy as np
+from legoesm.atmosphere.forcing.idealized.large_scale_forcing import upwind_dphi_dz_top2bottom
+from legoesm.atmosphere.physics import MicrophysicsConfig
 from legoesm.atmosphere.physics._shared import exner_function
+from legoesm.atmosphere.physics.microphysics.config import KesslerConfig
 from legoesm.thermo import saturation_mixing_ratio
 
 from .bridge import LESReferenceArtifact
 from .scm_coupling import liquid_water_theta
+from .scm_runner import microphysics_record
 
 STORE_URL = "https://storage.googleapis.com/cloudbench-simulation-output/{site}/{month}/{exp}/data.zarr"
 SWIRL_LM_COMMIT = "98f96f801d71b9e303f22c51e615f41b29ea64c4"
@@ -71,8 +86,20 @@ _CB_CP_D = 728.31 + 286.69      # cv_d + R_d (water.py cp_d)
 _CB_CP_V = 1859.0               # thermodynamics.proto water.cp_v default
 _CB_P00 = 1.0e5                 # thermodynamics.proto p00 default
 _BUDGET_TOP_M = 1000.0          # lowest-km band of the recorded budget check
+# --- swirl-lm cloud_feedback gcm_settings.py defaults (not overridden by the run) ---
+_CB_NUDGE_Z_I_M = 3000.0
+_CB_NUDGE_Z_R_M = 3500.0
+_CB_TAU_SCALAR_S = 86400.0
+_CB_TAU_WIND_S = 21600.0
 
 CASE_NAME = "cloudbench_s{site:03d}_m{month:02d}_{exp}"
+#: The column-model microphysics recorded for CloudBench (PI 2026-11-01): our
+#: Kessler with the CloudBench one-moment warm-rain set. KNOWN DIFFERENCE: the
+#: LES's one-moment scheme also carried ice and snow.
+MICROPHYSICS = MicrophysicsConfig(scheme="kessler",
+                                  kessler=KesslerConfig(parameter_set="cloudbench"))
+HELD_OUT_FRACTION = 0.2
+HELD_OUT_SEED = 20261031
 SGS_NAME = "smagorinsky"
 _FIELDS = ("u", "v", "w", "theta_li", "q_t", "q_c", "q_r", "T", "rho", "p_ref",
            "rad_heat_src", "theta_li_les_tendency", "q_t_les_tendency")
@@ -219,6 +246,36 @@ def run_surface_settings(pbtxt: str) -> dict:
     return out
 
 
+def nudge_rate(z):
+    """swirl-lm's free-troposphere relaxation coefficient [1/s] at coordinate ``z``:
+    0 below z_i, ½(1 - cos(π (z - z_i)/(z_r - z_i))) up to z_r, then 1; over τ."""
+    ramp = 0.5 * (1.0 - np.cos(np.pi * (z - _CB_NUDGE_Z_I_M)
+                               / (_CB_NUDGE_Z_R_M - _CB_NUDGE_Z_I_M)))
+    r = np.where(z < _CB_NUDGE_Z_I_M, 0.0, np.where(z <= _CB_NUDGE_Z_R_M, ramp, 1.0))
+    return r / _CB_TAU_SCALAR_S
+
+
+def _upwind_ddz(phi, w, z):
+    """First-order upwind ∂φ/∂z (donor below where w > 0, above otherwise) on an
+    increasing ``z``, by the shared top-to-bottom helper."""
+    return np.asarray(upwind_dphi_dz_top2bottom(
+        jnp.asarray(phi[::-1]), jnp.asarray(z[::-1]), jnp.asarray(w[::-1])))[::-1]
+
+
+def gcm_forcing(sounding, z_coord, p_ref):
+    """The GCM forcing profiles swirl-lm applied, at node coordinates ``z_coord``
+    (``p_ref``: the LES reference pressure there). Returns subsidence_w,
+    theta_adv [K/s], qv_adv [1/s] (q_t) and nudge_rate [1/s]."""
+    zs = sounding["z"]
+    w, T, q, T_adv, q_adv = (np.interp(z_coord, zs, sounding[k]) for k in
+                             ("w", "T", "q_t", "T_adv_src", "q_t_adv_src"))
+    exner_inv = (p_ref / _CB_P00) ** (-_CB_R_D / _CB_CP_D)
+    theta_adv = exner_inv * (T_adv + w * _upwind_ddz(T, w, z_coord) + w * _CB_G / _CB_CP_D)
+    qv_adv = q_adv + w * _upwind_ddz(q, w, z_coord)
+    return {"subsidence_w": w, "theta_adv": theta_adv, "qv_adv": qv_adv,
+            "nudge_rate": nudge_rate(z_coord)}
+
+
 def read_sounding(path):
     with open(path, newline="") as fh:
         rows = list(csv.DictReader(fh))
@@ -241,6 +298,15 @@ def initial_profiles(sounding, z_phys):
     return {"theta": np.asarray(liquid_water_theta(T / exner, q_c, exner)), "qt": q_t,
             "qc": q_c, "qr": np.zeros_like(q_t), "u": np.interp(z_phys, zs, sounding["u"]),
             "v": np.interp(z_phys, zs, sounding["v"])}
+
+
+def held_out_sites(sites, fraction=HELD_OUT_FRACTION, seed=HELD_OUT_SEED):
+    """The held-out sites: a fixed random draw of ``round(fraction * n)`` of
+    ``sites`` (all their months held out; PI 2026-10-31), sorted."""
+    sites = sorted(int(s) for s in set(sites))
+    n = int(round(fraction * len(sites)))
+    rng = np.random.default_rng(seed)
+    return sorted(int(s) for s in rng.choice(sites, size=n, replace=False))
 
 
 def _sha256(path):
@@ -285,13 +351,14 @@ def build_artifact(site, month, exp, forcing_dir, store=None, time_indices=None)
     idx = list(range(len(t_all))) if time_indices is None else list(time_indices)
     keep = slice(1, nz - 1)
 
-    init = initial_profiles(sounding, z_phys)
+    init = initial_profiles(sounding, z_store)
     series = {k: [v] for k, v in init.items()}
     for k in ("wtheta_resolved", "wqt_resolved", "wtheta_sgs", "wqt_sgs"):
         series[k] = [np.zeros(nz)]
     series["rad_T_tendency"] = [np.full(nz, np.nan)]
     series["cloud_frac"] = [np.full(nz, np.nan)]
     checks = []
+    p_ref_mean = None
     cloud = ds["cloud_fraction"]
     if tuple(cloud.dims) != ("t", "z"):
         raise ValueError(f"{url}: cloud_fraction dims {cloud.dims}, expected (t, z)")
@@ -301,11 +368,16 @@ def build_artifact(site, month, exp, forcing_dir, store=None, time_indices=None)
         if bad:
             raise ValueError(f"{url}: time index {ti} has non-finite {bad}")
         prof, check = frame_profiles(s, dx, dy, dz, z_phys)
+        if p_ref_mean is None:
+            p_ref_mean = s["p_ref"].mean(axis=(0, 1))
         for k, v in prof.items():
             series[k].append(v)
         series["cloud_frac"].append(np.asarray(cloud.isel(t=ti).values, np.float64))
         checks.append({"time_s": float(t_all[ti]), **check})
     arr = {k: np.stack(v)[:, keep] for k, v in series.items()}
+    if p_ref_mean is None:
+        raise ValueError(f"{url}: no output times selected")
+    forcing = {k: v[keep] for k, v in gcm_forcing(sounding, z_store, p_ref_mean).items()}
     times = np.concatenate([[0.0], t_all[idx]])
     sst = float(params["sst"])
     setup = {
@@ -315,6 +387,15 @@ def build_artifact(site, month, exp, forcing_dir, store=None, time_indices=None)
         "parameters": params, "grid": [nx, ny, nz], "dz_m": dz, "dx_m": dx,
         "height_offset_m": 0.5 * dz, "levels": "nodes 1..nz-2",
         "z0_m": surface["z_0"], "surface_gustiness_m_s": surface["surface_gustiness"],
+        "microphysics": microphysics_record(MICROPHYSICS),
+        "forcing_recipe": {
+            "source": "swirl-lm cloud_feedback gcm_forcing.py / gcm_settings.py defaults",
+            "nudge_z_i_m": _CB_NUDGE_Z_I_M, "nudge_z_r_m": _CB_NUDGE_Z_R_M,
+            "tau_scalar_s": _CB_TAU_SCALAR_S, "tau_wind_s": _CB_TAU_WIND_S,
+            "nudge_targets": "frame 0 theta_l and q_t", "wind_targets": "frame 0 u, v",
+            "subsidence": "theta_l and q_t, first-order upwind",
+            "frame0_max_qc": float(np.max(arr["qc"][0])),
+            "coriolis": "none"},
         "sgs": {"model": "smagorinsky_lilly", "c_s": _CB_C_S, "pr_t": _CB_PR_T,
                 "d_mol_m2_s": _CB_D_MOL, "rebuilt": True},
         "budget_check": checks,
@@ -324,6 +405,8 @@ def build_artifact(site, month, exp, forcing_dir, store=None, time_indices=None)
             "SGS heat flux uses the rebuilt K on our theta_l; the LES diffused theta_li",
             "no momentum fluxes: CloudBench did not store its SGS momentum flux",
             "rad_T_tendency units K/s inferred from swirl-lm two_stream.py, not stored",
+            "microphysics recorded as our Kessler CloudBench warm-rain set; the LES's "
+            "one-moment scheme also carried ice and snow",
         ],
     }
     return LESReferenceArtifact(
@@ -332,5 +415,7 @@ def build_artifact(site, month, exp, forcing_dir, store=None, time_indices=None)
         v=arr["v"], wtheta_resolved=arr["wtheta_resolved"], wtheta_sgs=arr["wtheta_sgs"],
         qt=arr["qt"], wqt_resolved=arr["wqt_resolved"], wqt_sgs=arr["wqt_sgs"],
         qc=arr["qc"], qr=arr["qr"], cloud_frac=arr["cloud_frac"],
-        rad_T_tendency=arr["rad_T_tendency"], prescribe="T_s",
+        rad_T_tendency=arr["rad_T_tendency"], subsidence_w=forcing["subsidence_w"],
+        theta_adv=forcing["theta_adv"], qv_adv=forcing["qv_adv"],
+        nudge_rate=forcing["nudge_rate"], prescribe="T_s",
         T_s=np.full(times.shape, sst), les_setup=setup)
