@@ -123,26 +123,37 @@ def numerical_preflight(master: Path, plant: str | None = None) -> dict:
         def __init__(self, values):
             self.values = values
 
-    original = o17.si3_ice_dyn_rdgrft
+    original_rdgrft = o17.si3_ice_dyn_rdgrft
+    original_advection = o17.si3_dyn_orca2
 
-    def capture(state, **kwargs):
+    def capture_rdgrft(state, **kwargs):
         raise Boundary((state.a_i, kwargs["divu_i"], kwargs["delta_i"]))
 
-    def run(**plants):
-        o17.si3_ice_dyn_rdgrft = capture
+    def capture_advection(state, *_args, **_kwargs):
+        raise Boundary((state.u_ice, state.v_ice))
+
+    def run(boundary="rdgrft", **plants):
+        o17.si3_ice_dyn_rdgrft = capture_rdgrft
+        if boundary == "advection":
+            o17.si3_dyn_orca2 = capture_advection
         try:
             with jax.disable_jit():
                 o17.si3_o17_step(entry, SI3O17LiveForcing(1, *forcing[1:]), card, **plants)
         except Boundary as stop:
             return tuple(np.asarray(value) for value in stop.values)
         finally:
-            o17.si3_ice_dyn_rdgrft = original
+            o17.si3_ice_dyn_rdgrft = original_rdgrft
+            o17.si3_dyn_orca2 = original_advection
         raise RuntimeError("O17 numerical boundary was not reached")
 
     baseline = run()
     if plant == "swap-rheology-advection":
-        candidate = run(_plant_swap_rheology_advection=True)
-        fired = not np.array_equal(candidate[0], baseline[0])
+        baseline_advection = run("advection")
+        candidate = run("advection", _plant_swap_rheology_advection=True)
+        fired = any(
+            not np.array_equal(a, b)
+            for a, b in zip(candidate, baseline_advection, strict=True)
+        )
     elif plant == "drop-deformation-fold":
         candidate = run(_plant_drop_deformation_fold=True)
         fired = any(not np.array_equal(a, b) for a, b in zip(candidate[1:], baseline[1:], strict=True))

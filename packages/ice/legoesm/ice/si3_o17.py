@@ -503,6 +503,7 @@ def si3_o17_step(
     _plant_swap_rheology_advection: bool = False,
     _plant_drop_redistribution: bool = False,
     _plant_drop_deformation_fold: bool = False,
+    _test_return_surface_probe: bool = False,
 ) -> tuple[SI3O17StepState, SI3O17Trace]:
     """One exact production call graph in NEMO ``ice_stp`` order."""
 
@@ -583,6 +584,7 @@ def si3_o17_step(
     # entry.  They are not live forcing and cannot be injected mid-step.
     step_fluxes = SI3Fluxes(*(jnp.zeros_like(forcing.sss_m) for _ in SI3Fluxes._fields))
     if _plant_swap_rheology_advection:
+        adv_input_u, adv_input_v = entry.ice.u_ice, entry.ice.v_ice  # icedyn.F90:132-133
         adv_state, adv = si3_dyn_orca2(
             entry.ice,
             forcing.advection_grid,
@@ -601,6 +603,7 @@ def si3_o17_step(
         )
         state = adv_state._replace(u_ice=aevp.u_ice_u, v_ice=aevp.v_ice_v)
     else:
+        adv_input_u, adv_input_v = state.u_ice, state.v_ice  # icedyn.F90:132-133
         state, adv = si3_dyn_orca2(
             state,
             forcing.advection_grid,
@@ -775,6 +778,17 @@ def si3_o17_step(
         config=card.surface,
     )
     surface = SI3SurfaceOutputs(b1, utau_ice, vtau_ice, alb, b2, other)
+    if _test_return_surface_probe:
+        # Test-only projection immediately before ice_thd (icestp.F90:191-192).
+        # It keeps the real entry, rheology, deformation, Prather, O6 and O7
+        # arithmetic JIT-executable while Decision 194 leaves the 342k-equation
+        # category-loop compilation to the next round (icethd.F90:117-177).
+        return (  # icestp.F90:126-191
+            adv_input_u, adv_input_v, advection_state.a_i,  # icedyn.F90:132-133
+            state.a_i, divu, delta,  # icedyn.F90:133-134
+            other.qlead, other.fhld, t_bo,  # icesbc.F90:450-464; icestp.F90:136
+            u_ice_b, v_ice_b, a_i_b, at_i_b,  # icestp.F90:151,184
+        )
 
     frazil = si3_ice_thd_frazil(other.qlead, rn_hinew=card.rn_hinew, ln_frazil=card.ln_frazil)
     dh_fluxes = SI3DHFluxes(**{name: getattr(fluxes, name) for name in SI3DHFluxes._fields})

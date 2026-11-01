@@ -265,13 +265,19 @@ live-arm unit test numerically proves all four carries across all five
 categories.
 
 The O17 unit gate executes one mixed open/ice, five-category, snow-and-pond
-step through the real `si3_o17_step` in eager and compiled modes. Its red
-controls numerically change the rheology/advection order, ORCA2 deformation
-fold, and `frq_m`, while `ln_ice_embd=True` refuses. The production dispatcher
-test calls the live composed entry, and the record-reader test proves
-self-described extents and truncation refusal. Removing any of those live arms
-therefore fails a numerical assertion rather than an AST-list or `callable()`
-check.
+entry through the real `si3_o17_step` to the O7 surface boundary in eager and
+compiled modes. It uses the explicit redistribution plant because O6 already
+has its admitted eager/JIT numerical suite, and it stops before the 342k
+thermodynamic category equations whose compilation Decision 194 reserves for
+the next round. The separate live O9--O12 test executes all five category
+carries, and the post-thermodynamic ageing/halo/velocity tail runs in eager and
+compiled modes. Red controls numerically change the velocity pair presented to
+Prather when rheology/advection are swapped, ORCA2 deformation when the fold is
+dropped, and O7 heat flux when `frq_m` is halved; `ln_ice_embd=True` refuses.
+The production dispatcher test calls the live composed entry, and the
+record-reader test proves self-described extents and truncation refusal.
+Removing any of those live arms therefore fails a numerical assertion rather
+than an AST-list or `callable()` check.
 
 The former four-component O17 driver is removed. The operator tool now invokes
 the extended O8--O16 master exactly once. That master retains its passive
