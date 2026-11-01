@@ -504,7 +504,7 @@ def _make_plev_da(plev: np.ndarray):
         dims=("plev",),
         attrs={
             "standard_name": "air_pressure",
-            "long_name": "Pressure",
+            "long_name": "pressure",
             "units": "Pa",
             "axis": "Z",
             "positive": "down",
@@ -556,7 +556,7 @@ def _make_time_da(
         dims=("time",),
         attrs={
             "standard_name": "time",
-            "long_name": "Time",
+            "long_name": "time",
             "units": f"days since {ref_date}",
             "calendar": calendar,
             "axis": "T",
@@ -1838,7 +1838,7 @@ class CFWriter:
                 dims=("time",),
                 attrs={
                     "standard_name": "time",
-                    "long_name": "Time",
+                    "long_name": "time",
                     "units": f"days since {self.ref_date}",
                     "calendar": self.calendar,
                     "axis": "T",
