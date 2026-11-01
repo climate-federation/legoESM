@@ -626,25 +626,18 @@ def _compute_legendre(
     #   dP_m^m/dtheta = m * (x / sin_theta) * P_m^m
     # which is m * cot(theta) * P_m^m at non-polar points.
 
-    # Use a safer recursion for derivatives. The standard approach:
-    # H_n^m = -(1-mu^2)*dP_n^m/dmu  (= cos(lat)*dP/d(colatitude))
-    # Using the identity: (1-x^2)*dP/dx = (n+1)*eps_{n,m}*P_{n-1}^m - n*eps_{n+1,m}*P_{n+1}^m
-    # where eps_{n,m} = sqrt((n^2 - m^2) / (4*n^2 - 1))
-    # So H = -(1-x^2)*dP/dx = n*eps_{n+1,m}*P_{n+1}^m - (n+1)*eps_{n,m}*P_{n-1}^m
+    # H_n^m = -(1-mu^2) dP_n^m/dmu (= cos(lat) dP/d(colatitude)), via the
+    # lower-neighbour identity (CAM-EUL phcs.F90), exact at n = n_max too:
+    #   H_n^m = n*mu*P_n^m - (2n+1)*eps_{n,m}*P_{n-1}^m,
+    #   eps_{n,m} = sqrt((n^2 - m^2) / (4n^2 - 1)).
+    # The upper-neighbour form needs P_{n_max+1}, outside this table.
     for m in range(n_max + 1):
         for n in range(m, n_max + 1):
             k = _idx(n, m)
-            # Term 1: -(n+1) * eps_{n,m} * P_{n-1}^m
+            Hnm[:, k] = n * x * Pnm[:, k]
             if n > m:
                 eps_nm = np.sqrt((n * n - m * m) / (4.0 * n * n - 1.0))
-                Hnm[:, k] -= (n + 1.0) * eps_nm * Pnm[:, _idx(n - 1, m)]
-            # Term 2: +n * eps_{n+1,m} * P_{n+1}^m
-            if n < n_max:
-                n1 = n + 1
-                eps_n1m = np.sqrt(
-                    (n1 * n1 - m * m) / (4.0 * n1 * n1 - 1.0)
-                )
-                Hnm[:, k] += n * eps_n1m * Pnm[:, _idx(n1, m)]
+                Hnm[:, k] -= (2.0 * n + 1.0) * eps_nm * Pnm[:, _idx(n - 1, m)]
 
     return Pnm, Hnm
 
@@ -1375,21 +1368,15 @@ def vordiv_from_uv_3d(
 # ``vordiv_from_uv_3d`` above implements the Bourke (1972) / Hack-Jakob (1992)
 # ``oc2``/``dmu`` divergence-curl operators.  Those are the CORRECT spectral
 # divergence/vorticity operators for the dycore's own de-aliased nonlinear
-# FLUX products, and are cheap.  They are NOT, however, an exact left-inverse
-# of the streamfunction/velocity-potential wind synthesis
-# (:func:`uv_from_vordiv_3d`) at the TRUNCATION BOUNDARY: the meridional
-# derivative maps a mode of total wavenumber ``n`` to ``n±1``, so the
-# reconstructed winds carry power at ``n = n_max + 1`` that the truncated
-# analysis basis cannot represent.  Continuously the telescoping
-# ``∫(1-µ²)P'_nP'_{n'} = n(n+1)δ_{nn'} - m²∫P_nP_{n'}/(1-µ²)`` closes and
-# ``A∘S = Id``; discretely the missing ``n_max+1`` partner leaves the
-# ``n = n_max`` row unbalanced.  The result is a pole-concentrated
-# amplifier — every input mode leaks spurious power into ``(n_max, m)`` and
-# the ``(n_max, m)`` mode self-amplifies (~×21 per pass at T85), which
-# blows up the ``carry -> state -> carry -> state`` round trip used by the
-# WB2 eval driver (#951).  Adding Gaussian latitudes does NOT help
-# (verified: identical gain for linear/quadratic/cubic grids) because it is
-# an operator-truncation defect, not a quadrature-resolution defect.
+# FLUX products, and are cheap.  When ``Hnm`` dropped the ``P_{n_max+1}``
+# term at ``n = n_max`` (since fixed in :func:`_compute_legendre`), they were
+# not a left-inverse of the wind synthesis (:func:`uv_from_vordiv_3d`) at the
+# truncation boundary: modes leaked power into ``(n_max, m)``, which
+# self-amplified (~x21 per pass at T85) and blew up the WB2 eval driver's
+# ``carry -> state -> carry -> state`` round trip (#951).  With the exact
+# ``Hnm`` the T85 top-mode gain is 1 to roundoff and ``vordiv_from_uv_3d``
+# inverts the synthesis of band-limited winds to roundoff.  The pseudo-inverse
+# below differs only for winds outside that subspace (least-squares fit).
 #
 # The exact left-inverse of the synthesis on the band-limited subspace,
 # pole rows included, is obtained by solving the (per zonal wavenumber ``m``)
@@ -1513,10 +1500,10 @@ def vordiv_from_uv_exact_3d(
     """Exact left-inverse of :func:`uv_from_vordiv_3d` (#976).
 
     Grid-space winds ``(u, v)`` (physical units, NOT pre-multiplied by
-    ``cos φ``) -> spectral ``(vor_hat, div_hat)``.  Unlike
-    :func:`vordiv_from_uv_3d` this is the exact LEFT-INVERSE of the
+    ``cos φ``) -> spectral ``(vor_hat, div_hat)``.  Exact LEFT-INVERSE of the
     streamfunction/velocity-potential synthesis on the band-limited
-    subspace (``range(B_m)``): for winds that are a synthesis of some
+    subspace (``range(B_m)``), as :func:`vordiv_from_uv_3d` now also is for
+    such winds; the two differ for winds outside it.  For winds that are a synthesis of some
     band-limited ``(vor, div)`` it recovers them to machine precision, pole
     rows included, so ``carry -> state -> carry`` round trips are idempotent
     at every truncation (no polar amplification).  For winds OUTSIDE that
