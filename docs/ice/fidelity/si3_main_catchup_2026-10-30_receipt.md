@@ -473,6 +473,48 @@ The remap-guard source removal changes three later parenthesis-occurrence
 anchors without moving their lines; the executable citation map was updated
 accordingly, and its full non-vacuity audit remains green.
 
+## Resume 7 independent reverse oracle and remap correction
+
+Resume 6's two embedded reverse-oracle blobs were not independent: one was a
+dump of `920c61d884` JIT AD and the other a dump of `0ae642c422` JIT AD.  Both
+are deleted.  The committed
+`scripts/validate/ocean_fidelity/testcases/si3_reverse_sweep_oracle.py`
+generator samples clean `edd34c2446` and `920c61d884` processes separately,
+then records a target source, central/forward/backward stencil, primary step,
+and refinement step for every one of the 4,968 output/input pairs.  It uses
+main AD only where the main/lane forwards agree in the sampled neighbourhood;
+otherwise it uses the lane forward difference.  Exact statement boundaries
+whose directional limits disagree are labelled separately and retain the
+lane program's reviewed JAX branch convention rather than pretending that a
+crossing difference is a derivative.  Source-rounded evaporation differences
+use the mean of two neighbouring positive-side steps, without consulting AD.
+
+The global absolute comparison floor is `3e-6`, the outward-rounded bound from
+`2*spacing(0.5)/(2*2e-11) = 2.7755575615628914e-6`.  Targets within two such
+bounds use that absolute floor; every other target uses `1e-6` relative error.
+There is no eager-only or per-entry value override.  In particular,
+`[18,1,0]` targets zero, while the reviewed material derivatives are
+`d(T_surface)/d(qns_ice)=0.050971963040420495`,
+`d(e_ice)/d(t_bottom)=-429412.1578074268`, and
+`d(h_ice)/d(t_bottom)=-3.3652721032826493e-6`.
+
+The reverse fix preserves every certified primal bit while retaining the
+concentration and fresh-snow statement masks and allowing smooth
+thermodynamic leaves on nonzero-thickness sub-epsilon columns to carry
+cotangents.  The cumulative-remap no-material guard is restored: deleting it
+made the active production case with `concentration=0.5`, `h_ice=0.5`,
+`h_snow=3e-200`, and `e_snow=[0,0,-1e8]` return a NaN gradient instead of
+`[1.0]`.  The zero-thickness helper regression now returns a finite all-zero
+cotangent at `1e-300`.  Mixed-dtype tests pin the `920c61d884` forward values,
+the float32 concentration and age gradients (`1.0`), and the float32
+`exit.age_volume` cast when `e_ice` is float32 and entry age is float64.
+
+With the rebuilt test/fixture overlaid on clean `0ae642c422`, the eager sweep
+fails first at `(case, output, input)=(2,3,7)`.  At the repaired tree the same
+test passes in both eager and JIT modes; the full file emitted 18 passing nodes
+plus the corrected mixed-dtype pin on its first run, and the corrected node
+then emitted `1 passed in 21.34s`.
+
 ## Final clean-checkout verification
 
 | Selection | Final line |
@@ -498,7 +540,7 @@ Every observed stable failure is classified here.
 |---|---|---|
 | `test_si3_surface.py::test_libm_pow_matches_glibc_and_differentiates` | merge-introduced, fixed here | original merge dereferenced lazy `_LIBM=None`; cherry-picked `e4be5cee4e29aa2c71bf5802e2ccee7df5ca0fb9`, using `glibc_libm().pow` |
 | `test_bitz_lipscomb.py` open-water reverse-mode regressions | merge-introduced, corrected here | preserved the lane's exact `post_da` forward and routed only the valid inactive concentration cotangent to the entry value; eager/JIT two-step bits equal `920c61d884` |
-| main's remap-only Bitz regression (formerly `test_cumulative_remap_reverse_mode_finite_at_zero_thickness`) | merge-introduced, superseded in resume 6 | the helper-only guard was removed because no production-step case requires it; the full production Jacobian sweep and tie-survivor controls remain finite and green with reverse protection at the gather boundary |
+| main's remap-only Bitz regression (`test_cumulative_remap_reverse_mode_finite_at_zero_thickness`) | merge-introduced, restored in resume 7 | the helper guard is required: removing it produces a NaN reverse gradient in an active production column with subnormal snow; both the helper and production-step plants are committed |
 | landing battery KPP validation-order node recorded above | merge-introduced, fixed in the original catch-up | main closure evaluation ran before the lane's unchanged fail-closed refusal; ordering was corrected and the node passed |
 | 15 nodes in `test_nemo_testcase_receipt_citation_gate.py` on the first clean follow-up run | follow-up source-shift, fixed here | the AD guards, dual CEN2 path, and catch-up-2 core changes moved 149 mapped endpoints; all audited Markdown citations and the executable map were re-anchored with literal insertion maps and explicit replacement anchors; pre-commit result is `42 passed` plus the two expected dirty-worktree provenance refusals |
 | three bypass classes in `test_post_20261029_provenance_sha_gate.py` | follow-up weakness, fixed here | carry-forward now requires the identical token on one mapped logical line through the complete first-parent history to the pre-cutoff base; later re-edits, copied/retargeted tokens, and moved tokens fail committed plants |

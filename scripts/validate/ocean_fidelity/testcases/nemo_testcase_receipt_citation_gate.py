@@ -13515,6 +13515,64 @@ _reanchor(
     anchors=['# `ice_thd_frazil` supplies ht_i_new', ('return trace', 2), 46],
 )
 
+# Resume 7 restores the remap guard and narrows the entry cotangent masks.  The
+# former changes four parenthesis-occurrence anchors; the latter inserts twelve
+# lines in the column step.  Re-anchor every moved SI3 citation explicitly.
+_reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:2226',
+          'packages/ice/legoesm/ice/bitz_lipscomb.py:2238')
+_reanchor(
+    'packages/ice/legoesm/ice/bitz_lipscomb.py:41,980-1024,1134-1222,1244-1265,2072-2213',
+    'packages/ice/legoesm/ice/bitz_lipscomb.py:41,980-1024,1134-1222,1244-1265,2072-2225',
+    extent=311,
+)
+_reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:41,1080-1081,2175',
+          'packages/ice/legoesm/ice/bitz_lipscomb.py:41,1080-1081,2187')
+_reanchor(
+    'packages/ice/legoesm/ice/bitz_lipscomb.py:1103-1108,1111-1121,1124-1132,2176,2178',
+    'packages/ice/legoesm/ice/bitz_lipscomb.py:1103-1108,1111-1121,1124-1132,2188,2190',
+)
+_reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:1034-1035,2176-2178',
+          'packages/ice/legoesm/ice/bitz_lipscomb.py:1034-1035,2188-2190')
+_reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:2072-2213',
+          'packages/ice/legoesm/ice/bitz_lipscomb.py:2072-2225', extent=154)
+_reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:2176,2178',
+          'packages/ice/legoesm/ice/bitz_lipscomb.py:2188,2190')
+_reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:2072-2200',
+          'packages/ice/legoesm/ice/bitz_lipscomb.py:2072-2212', extent=141)
+_reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:1301-1320',
+          'packages/ice/legoesm/ice/bitz_lipscomb.py:1301-1316', extent=16)
+_reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:1718-1783',
+          'packages/ice/legoesm/ice/bitz_lipscomb.py:1718-1774', extent=57)
+_reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:1028-1277',
+          'packages/ice/legoesm/ice/bitz_lipscomb.py:1028-1270', extent=243)
+_repin('packages/ice/legoesm/ice/bitz_lipscomb.py:1256-1256', [
+    'e_s_new = _cumulative_remap(zh_s, [sr(e * h) for e, h in zip(ze_s, zh_s)], nlay_s, sr)',
+    'e_s_new = _cumulative_remap(zh_s, [sr(e * h) for e, h in zip(ze_s, zh_s)], nlay_s, sr)',
+    1,
+])
+_reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:2153',
+          'packages/ice/legoesm/ice/bitz_lipscomb.py:2165')
+_reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:2113-2115',
+          'packages/ice/legoesm/ice/bitz_lipscomb.py:2125-2127')
+_reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:2314-2332',
+          'packages/ice/legoesm/ice/bitz_lipscomb.py:2326-2344')
+_reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:2314',
+          'packages/ice/legoesm/ice/bitz_lipscomb.py:2326')
+_reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:2302',
+          'packages/ice/legoesm/ice/bitz_lipscomb.py:2314')
+_reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:2244',
+          'packages/ice/legoesm/ice/bitz_lipscomb.py:2256')
+_reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:2337',
+          'packages/ice/legoesm/ice/bitz_lipscomb.py:2349')
+_reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:2369',
+          'packages/ice/legoesm/ice/bitz_lipscomb.py:2381')
+_reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:2408',
+          'packages/ice/legoesm/ice/bitz_lipscomb.py:2420')
+_reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:2072-2288',
+          'packages/ice/legoesm/ice/bitz_lipscomb.py:2072-2300', extent=229)
+_reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:2243-2288',
+          'packages/ice/legoesm/ice/bitz_lipscomb.py:2255-2300')
+
 UNAUDITED_ROUNDS = ("1-24 -- hand-checked only; their citations are not in "
                     "CITATION_MAP and this gate does not read them")
 
