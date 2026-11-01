@@ -101,17 +101,18 @@ def test_traced_o12_loops_keep_parent_forward_bits():
 
 
 # (category or None, leaf, index, relative step): thickness, concentration,
-# enthalpy, snow, pond and forcing elements whose central differences at h and
-# h/10 agree to 1e-4, i.e. away from the max/min/where thresholds.  Measured
-# |AD - FD| / max(|AD|, |FD|): 5.0e-7, 1.5e-7, 9.6e-11, 1.6e-7, 3.3e-6, 4.9e-8; the
-# residual is the converged-Picard (1e-4 K) kink, not rounding.
+# enthalpy, snow, pond and forcing elements away from the max/min/where
+# thresholds (central differences at relative steps 1e-4 and 1e-5 agree).
+# The step is large enough that the objective's rounding (|f| ~ 1.9e4) stays
+# far below the difference; measured |AD - FD| / max(|AD|, |FD|):
+# 2.6e-9, 2.4e-8, 2.6e-10, 7.1e-9, 9.9e-9, 9.1e-9.
 FD_CASES = (
-    (2, "h_i", (3, 2), 1.0e-6),
-    (0, "a_i", (3, 2), 1.0e-6),
-    (2, "e_i", (3, 2, 3), 1.0e-6),
-    (1, "h_s", (2, 3), 1.0e-6),
-    (None, "a_ip", (2, 3, 0), 1.0e-6),
-    (0, "qns_ice", (3, 2), 1.0e-6),
+    (2, "h_i", (3, 2), 1.0e-4),
+    (0, "a_i", (3, 2), 1.0e-4),
+    (2, "e_i", (3, 2, 3), 1.0e-4),
+    (1, "h_s", (2, 3), 1.0e-4),
+    (None, "a_ip", (2, 3, 0), 1.0e-4),
+    (0, "qns_ice", (3, 2), 1.0e-4),
 )
 
 
@@ -150,4 +151,4 @@ def test_traced_o12_loops_reverse_mode_compiles_and_matches_central_differences(
         fd = (float(forward(perturbed(jl, leaf, index, x0 + h)))
               - float(forward(perturbed(jl, leaf, index, x0 - h)))) / (2.0 * h)
         assert g != 0.0, (jl, leaf, index)
-        assert abs(g - fd) <= 1.0e-5 * max(abs(g), abs(fd)), (jl, leaf, index, g, fd)
+        assert abs(g - fd) <= 1.0e-6 * max(abs(g), abs(fd)), (jl, leaf, index, g, fd)
