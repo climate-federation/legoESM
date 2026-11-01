@@ -984,19 +984,19 @@ def _cumulative_remap(h_old, content_old, nlay, sr):
     content (``q*h``); the result is the new per-layer intensive value.
     """
 
-    # The former remap reverse guard occupied the next 13 source lines.  Keep
-    # this tombstone line-stable because the fidelity receipts cite the live
-    # expressions below by line number; the production sweep proved that the
-    # guard was never reached through the column step.
-    #
-    # Reverse-mode protection now belongs at the column-step gather boundary,
-    # where it can distinguish discarded thermodynamic lanes structurally.
-    # Applying it here hid the provenance of a cotangent after the physical
-    # route had already been selected.
-    #
-    # Deliberately no executable operation is retained in this helper.
-    # Historical citation anchors therefore remain stable without changing
-    # either the primal computation or its derivative.
+    # Preserve main's F3 reverse-mode guard on the lane's live remap.  The
+    # stopped operands have exactly the same forward values, including signed
+    # zero and sub-epsilon values, but a no-material column cannot feed an
+    # inactive quotient cotangent back to its inputs.
+    raw_total = jnp.zeros_like(h_old[0])
+    for h in h_old:
+        raw_total = raw_total + h
+    has_material = raw_total > _EPS10
+    h_old = [jnp.where(has_material, h, jax.lax.stop_gradient(h)) for h in h_old]
+    content_old = [
+        jnp.where(has_material, e, jax.lax.stop_gradient(e)) for e in content_old
+    ]
+
     # Materialized seed: XLA folds 0 + x to x, which would keep a -0 segment's sign.
     zero = nemo_source_round(jnp.zeros_like(h_old[0]))
     h_cum0, e_cum0 = [zero], [zero]
@@ -2094,12 +2094,24 @@ def si3_column_step_arrays(state: SI3ColumnArrays,
     # kernels.  Stop discarded operands at entry so singular quotients cannot
     # poison reverse mode, while leaving every primal value unchanged.
     has_thickness = jnp.asarray(state.h_ice, dtype=dtype) != 0.0
-    thermo_active = gathered_at_entry & has_thickness
+    thermo_active = has_thickness
     def guard_inactive_leaf(value):
         return _guard_inactive_columns(value, thermo_active, dtype)
     thermo_state = jax.tree.map(guard_inactive_leaf, state)
-    thermo_state = thermo_state._replace(h_ice=_guard_inactive_columns(state.h_ice, has_thickness, dtype))
+    # Concentration and fresh-snow routing select statement arms at epsi10;
+    # retain their gather mask while allowing the smooth thermodynamic leaves
+    # of a nonzero-thickness, sub-epsilon column to differentiate.
+    thermo_state = thermo_state._replace(
+        concentration=_guard_inactive_columns(
+            state.concentration, gathered_at_entry, dtype,
+        ),
+    )
     thermo_forcing = jax.tree.map(guard_inactive_leaf, forcing)
+    thermo_forcing = thermo_forcing._replace(
+        snow_precipitation=_guard_inactive_columns(
+            forcing.snow_precipitation, gathered_at_entry, dtype,
+        ),
+    )
     e_ice = jnp.asarray(thermo_state.e_ice)
     h_ice = jnp.asarray(thermo_state.h_ice, dtype=dtype)
     h_snow = jnp.asarray(thermo_state.h_snow, dtype=dtype)
@@ -2208,7 +2220,7 @@ def si3_column_step_arrays(state: SI3ColumnArrays,
         o10.o9.dh.e_s,
         o10.o9.dh.s_i,
         o10.o9.dh.sz_i,
-        state.age_volume,
+        jnp.asarray(state.age_volume, dtype=dtype),
     )
     # `ice_thd_temp` is diagnostic because enthalpy is prognostic (:221-247).
     post_temp1 = post_dh
