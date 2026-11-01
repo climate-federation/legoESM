@@ -13,15 +13,23 @@ import jax
 import jax.numpy as jnp
 from jax.extend import core as jax_core
 
+from legoesm.ice import si3_o17 as o17_module
 from legoesm.ice.si3_o17 import SI3O17LiveForcing, si3_o17_step
 from scripts.validate.ocean_fidelity.testcases.nemo_si3_o17_ad_probe import DEFAULT_MASTER, _case
 
-EXPECTED = {
+REVIEWED_EA3E570 = {
     "recursive_total": 576_364,
     "_thermo_category_loop": 342_178,
     "si3_ice_thd_do": 53_490,
     "si3_dyn_orca2": 48_325,
     "remaining_named_and_inlined": 132_371,
+}
+EXPECTED = {
+    "recursive_total": 577_982,
+    "_thermo_category_loop": 342_170,
+    "si3_ice_thd_do": 53_489,
+    "si3_dyn_orca2": 48_325,
+    "remaining_named_and_inlined": 133_998,
 }
 OWNERS = ("_thermo_category_loop", "si3_ice_thd_do", "si3_dyn_orca2")
 
@@ -66,6 +74,24 @@ def count(master: Path) -> dict[str, Any]:
     entry, forcing, card = _case(master)
     inputs = entry, forcing[1:]
 
+    # Add trace-only names around the three boundaries Argon measured. This
+    # does not change the production source or arithmetic, and makes nested
+    # ownership explicit in source_info.name_stack.
+    originals = {
+        "_thermo_category_loop": o17_module.si3_ice_thd_o12_stages,
+        "si3_ice_thd_do": o17_module.si3_ice_thd_do,
+        "si3_dyn_orca2": o17_module.si3_dyn_orca2,
+    }
+    o17_module.si3_ice_thd_o12_stages = jax.named_call(
+        originals["_thermo_category_loop"], name="_thermo_category_loop"
+    )
+    o17_module.si3_ice_thd_do = jax.named_call(
+        originals["si3_ice_thd_do"], name="si3_ice_thd_do"
+    )
+    o17_module.si3_dyn_orca2 = jax.named_call(
+        originals["si3_dyn_orca2"], name="si3_dyn_orca2"
+    )
+
     def objective(x):
         step_entry, dynamic = x
         out, trace = si3_o17_step(step_entry, SI3O17LiveForcing(1, *dynamic), card)
@@ -74,7 +100,12 @@ def count(master: Path) -> dict[str, Any]:
                   if hasattr(leaf, "dtype") and jnp.issubdtype(leaf.dtype, jnp.floating)]
         return sum(jnp.sum(leaf) for leaf in leaves)
 
-    closed = jax.make_jaxpr(objective)(inputs)
+    try:
+        closed = jax.make_jaxpr(objective)(inputs)
+    finally:
+        o17_module.si3_ice_thd_o12_stages = originals["_thermo_category_loop"]
+        o17_module.si3_ice_thd_do = originals["si3_ice_thd_do"]
+        o17_module.si3_dyn_orca2 = originals["si3_dyn_orca2"]
     counts: Counter[str] = Counter()
     _walk(closed.jaxpr, counts)
     measured = {name: int(counts[name]) for name in EXPECTED}
@@ -82,6 +113,10 @@ def count(master: Path) -> dict[str, Any]:
         "status": "PASS" if measured == EXPECTED else "COUNT_CHANGED",
         "measured": measured,
         "expected": EXPECTED,
+        "reviewed_ea3e570_snapshot": REVIEWED_EA3E570,
+        "delta_from_reviewed_ea3e570": {
+            name: measured[name] - REVIEWED_EA3E570[name] for name in EXPECTED
+        },
         "method": "recursive JAXPR equation count attributed by source_info.name_stack",
     }
 

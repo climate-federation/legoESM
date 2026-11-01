@@ -177,6 +177,11 @@ earlier attribution of 179,770 equations to a catch-all bucket is retracted:
 those equations were nested beneath the thermodynamic owner. The reproducible
 recursive/source-owner counter is
 `scripts/validate/ocean_fidelity/testcases/nemo_si3_o17_jaxpr_count.py`.
+The same counter on the Resume 3 source reports 577,982 total: 342,170 in the
+thermodynamic loop, 53,489 in open-water thermodynamics, 48,325 in Prather
+dynamics, and 133,998 remaining. It retains the reviewed `ea3e570` snapshot
+above separately, so the Decision 194 measurement is not silently rewritten by
+the Resume 3 carry/tail changes and their surrounding composition wiring.
 
 The complete 206-leaf publication is
 `docs/ice/fidelity/si3_r29_o17_ad_leaf_table.md`.  Shape and dtype are measured
