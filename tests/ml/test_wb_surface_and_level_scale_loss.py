@@ -114,3 +114,9 @@ def test_surface_term_without_scale_is_an_error():
                             LAT_W, LossConfig(w_u10=0.1))
     loss, t = surface_field_terms(_fields(1.0), _fields(0.0), {}, LAT_W, LossConfig())
     assert t == {} and float(loss) == 0.0
+
+
+def test_per_level_scales_without_residual_normalize_refused():
+    cfg = LossConfig(**{f"{v}_resid_scale_lev": (1.0,) * NLEV for v in "Tuvq"})
+    with pytest.raises(ValueError, match="residual_normalize"):
+        carry_mse_terms(_C(), _C(), _sf(), LAT_W, cfg)

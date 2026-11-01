@@ -1483,10 +1483,13 @@ def _main(argv=None):
             probe_indices,
         )
         _probe_static = eqx.partition(params, eqx.is_inexact_array)[1]
+        # Probed on the LAST curriculum stage: its loss holds every lead, so a
+        # leaf reachable at any stage's horizon has a gradient here.
         # Kept alive past the freeze: the same program re-measures on the
         # TRAINED parameters at the end of the run (no second compile).
         _probe_vg = eqx.filter_jit(jax.value_and_grad(
-            lambda a, s: _loss(eqx.combine(a, _probe_static), s)))
+            lambda a, s: _loss(eqx.combine(a, _probe_static), s,
+                               n_segs=_curriculum[-1])))
         # --probe-scenes N probes N evenly spread scenes instead, which brings
         # the sampling risk below back in exchange for time (owner, 2026-10-12).
         # n_probe=None (--probe-scenes unset) => every sample in the shard.  That costs one extra

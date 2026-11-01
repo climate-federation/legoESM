@@ -443,6 +443,9 @@ def carry_mse_terms(
     # this, w_T·<dT²>, w_q·<dq²>, w_ps·<dps²> differ by ~9 orders of
     # magnitude (ps² ~ 1e10 dominates; q² ~ 1e-4 is invisible).  Set
     # to all-1 when normalization is off for backward compatibility.
+    if _per_level_scales(config) and not getattr(config, "residual_normalize", False):
+        raise ValueError("*_resid_scale_lev are given but residual_normalize is "
+                         "off, so they would be ignored; set residual_normalize.")
     if getattr(config, "residual_normalize", False) and _per_level_scales(config):
         return _carry_terms_per_level(pred_carry, target_carry, lev_w,
                                       lat_weights, config, loss, terms)

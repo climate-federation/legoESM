@@ -325,3 +325,23 @@ def test_land_fraction_alone_gets_the_local_flux_store(tmp_path, monkeypatch):
         era5._replace(load_land_frac=True), times, 4, 1, 0, 1)
     assert flux_l is not None and "land_sea_mask" in flux_l
     assert flux_l.sizes["time"] == 2      # the window copy, not the 24-step remote
+
+
+def test_multi_lead_cache_holds_every_lead_and_gate_compares_them(tmp_path, monkeypatch):
+    """A 3-lead sample (IC 3, leads 4, 5, 6): the cache stores every
+    intermediate analysis, and the gate's target is the tuple of all three."""
+    _write_store(tmp_path / "src.zarr", var_3d=_STATE_3D, var_2d=_STATE_2D)
+    times = xr.open_zarr(str(tmp_path / "src.zarr")).time.values.astype("datetime64[ns]")
+    monkeypatch.setattr(sb, "_training_sample_indices", lambda *a: iter([(2015, 3, 6)]))
+    era5 = TrainingERA5Config(zarr_store=str(tmp_path / "src.zarr"), levels=(500, 850))
+    ds_l, cloud_l, flux_l, at = sb._wb_local_stores(
+        SimpleNamespace(), {"cache_dir": str(tmp_path / "cache")}, era5, era5,
+        times, 4, 3, rank=0, nproc=1, lead_stride=1)
+    assert [int(np.datetime64(t, "h").astype(int)) for t in ds_l.time.values] == [
+        int(np.datetime64(times[i], "h").astype(int)) for i in (3, 4, 5, 6)]
+    remote = xr.open_zarr(str(tmp_path / "src.zarr"))
+    a = sb._sample_inputs(era5, era5, 3, 6, remote, None, None, int, lead_stride=1)
+    b = sb._sample_inputs(era5, era5, 3, 6, ds_l, cloud_l, flux_l, at, lead_stride=1)
+    assert isinstance(a[1], tuple) and len(a[1]) == 3
+    sb._assert_same_sample(a, b)
+    np.testing.assert_array_equal(a[1][1].p_s, remote["surface_pressure"].isel(time=5).values)

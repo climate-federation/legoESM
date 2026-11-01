@@ -442,3 +442,58 @@ def test_multi_lead_loss_is_mean_over_scored_leads():
         np.testing.assert_allclose(float(got), want, rtol=1e-12)
     with pytest.raises(ValueError, match="outside"):
         multi_lead_loss(_Seg(), base, tgts, None, n_segs=4, **kw)
+
+
+def test_curriculum_without_leads_is_refused():
+    from legoesm.training.scale_build import supervised_leads
+
+    with pytest.raises(ValueError, match="needs loss.train_leads_hours"):
+        supervised_leads({"loss": {"train_curriculum_hours": [6]}})
+
+
+def test_multi_lead_loss_real_rollout_with_surface_targets():
+    """Real chained forecast + the WB2 eval diagnosis: targets equal to the
+    forecast's own states and diagnosed near-surface fields score ~0; moving
+    one lead's t2m target by 1 K adds exactly (1/s)^2 * w / N to the loss."""
+    import importlib
+    import pathlib
+    import sys as _sys
+
+    from legoesm.training.losses import LossConfig
+    from legoesm.training.neural_gcm_spectral import carry_to_spectral_state
+    from legoesm.training.scale_build import build_mode_components, multi_lead_loss
+
+    root = str(pathlib.Path(__file__).resolve().parents[2])
+    if root not in _sys.path:
+        _sys.path.insert(0, root)
+    diagnose = importlib.import_module(
+        "evaluations.wb_forecast").diagnose_headline_fields
+
+    yml = _yml()
+    _, grid, sigma, params, mk, _, dt = build_mode_components(_cfg("neural_gcm"), yml)
+    seg = mk(_perturbed(params))
+    ic = _synthetic_carry(grid, int(yml["nlev"]))
+    ncol = int(grid.n_lat) * int(grid.n_lon)
+    f = {"T_sfc": jnp.full((ncol,), 300.0), "sic": jnp.zeros((ncol,)),
+         "day_of_year": jnp.asarray(80.0), "seconds_of_day": jnp.asarray(0.0)}
+    outs = seg.raw_multi(ic, 2, 2, f)
+    sfc = [{k: diagnose(carry_to_spectral_state(o, grid), grid, sigma).fields[k]
+            for k in ("t2m", "u10", "v10", "mslp")} for o in outs]
+    cfg = LossConfig(w_t2m=1.0, t2m_resid_scale=2.0, w_u10=0.1, u10_resid_scale=3.0)
+    kw = dict(n_segs=2, seg_steps=2, sigma_full=jnp.asarray(sigma.sigma_full),
+              grid=grid, sigma=sigma, loss_config=cfg, diagnose_fn=diagnose,
+              terms=True)
+    l0, t0 = multi_lead_loss(seg, ic, tuple(zip(outs, sfc)), f, **kw)
+    assert {"mse_t2m", "mse_u10"} <= set(t0)
+    assert float(l0) < 1e-16
+    moved = [dict(sfc[0]), sfc[1]]
+    moved[0]["t2m"] = moved[0]["t2m"] + 1.0
+    l1, t1 = multi_lead_loss(seg, ic, tuple(zip(outs, moved)), f, **kw)
+    np.testing.assert_allclose(float(l1) - float(l0), 0.25 / 2, rtol=1e-9)
+
+
+def test_lead_hours_must_be_integers():
+    from legoesm.training.scale_build import supervised_leads
+
+    with pytest.raises(ValueError, match="integer hours"):
+        supervised_leads({"loss": {"train_leads_hours": [6.9, 12.9]}})

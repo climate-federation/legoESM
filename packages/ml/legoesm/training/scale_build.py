@@ -395,13 +395,21 @@ def _assert_same_sample(remote, cached):
     logger.info("ERA5 cache gate passed: first sample inputs identical to remote.")
 
 
-def _sample_inputs(era5_cfg, sst_cfg, i_ic, i_tg, ds, cloud_ds, flux_ds, at):
+def _sample_inputs(era5_cfg, sst_cfg, i_ic, i_tg, ds, cloud_ds, flux_ds, at,
+                   lead_stride=None):
     """The three ERA5 slices one WB sample is built from (IC, target, and the
     IC-time surface/forcing slice). The loaders build from these and the cache
-    gate compares them, so the gate checks exactly what training reads."""
+    gate compares them, so the gate checks exactly what training reads.
+
+    With ``lead_stride`` the target is the TUPLE of every lead's slice,
+    ``i_ic + lead_stride, ..., i_tg``."""
     from legoesm.training.era5_to_state import load_era5_slice
-    return (load_era5_slice(era5_cfg, at(i_ic), ds=ds, cloud_ds=cloud_ds),
-            load_era5_slice(era5_cfg, at(i_tg), ds=ds, cloud_ds=cloud_ds),
+
+    def _state(i):
+        return load_era5_slice(era5_cfg, at(i), ds=ds, cloud_ds=cloud_ds)
+    tg = (_state(i_tg) if lead_stride is None else tuple(
+        _state(i) for i in range(i_ic + lead_stride, i_tg + 1, lead_stride)))
+    return (_state(i_ic), tg,
             load_era5_slice(sst_cfg, at(i_ic), ds=ds, flux_ds=flux_ds))
 
 
@@ -1436,9 +1444,16 @@ def supervised_leads(yml) -> tuple:
 
     Leads must be consecutive multiples of the first, ``(h, 2h, ..., Kh)``: the
     forecast is one chained rollout scored after every segment."""
-    hrs = tuple(int(h) for h in ((yml.get("loss", {}) or {}).get(
-        "train_leads_hours") or ()))
+    lb = yml.get("loss", {}) or {}
+    raw = list(lb.get("train_leads_hours") or ())
+    if any(isinstance(h, bool) or not isinstance(h, int) or h < 1 for h in raw):
+        raise ValueError(f"loss.train_leads_hours {raw} must be positive "
+                         "integer hours.")
+    hrs = tuple(raw)
     if not hrs:
+        if lb.get("train_curriculum_hours"):
+            raise ValueError("loss.train_curriculum_hours needs "
+                             "loss.train_leads_hours (it selects among them).")
         return ()
     if hrs != tuple(hrs[0] * (k + 1) for k in range(len(hrs))):
         raise ValueError(
@@ -1455,8 +1470,10 @@ def curriculum_n_segs(yml, leads, n_epochs) -> tuple:
     thirds), stage k scoring every lead up to its horizon.  Absent = one stage
     on all leads.  The epochs must split evenly: a stage boundary inside an
     epoch would change the objective mid-pass over the data."""
-    hrs = [int(h) for h in ((yml.get("loss", {}) or {}).get(
-        "train_curriculum_hours") or [leads[-1]])]
+    hrs = list((yml.get("loss", {}) or {}).get(
+        "train_curriculum_hours") or [leads[-1]])
+    if any(isinstance(h, bool) or not isinstance(h, int) for h in hrs):
+        raise ValueError(f"loss.train_curriculum_hours {hrs} must be integer hours.")
     if any(h not in leads for h in hrs) or hrs != sorted(set(hrs)):
         raise ValueError(f"loss.train_curriculum_hours {hrs} must be increasing "
                          f"leads out of train_leads_hours {list(leads)}.")
@@ -1772,7 +1789,6 @@ def _load_era5_samples_spectral(cfg, yml, grid, sigma, *,
     """
     from legoesm.training.era5_to_state import (
         era5_to_spectral_carry,
-        load_era5_slice,
         open_era5_zarr,
     era5_terrain_product,
 )
@@ -1833,7 +1849,11 @@ def _load_era5_samples_spectral(cfg, yml, grid, sigma, *,
 
     def build(year, i_ic, i_tg, ds, cloud_ds, flux_ds, at):
         s_ic, s_tg, sst_src = _sample_inputs(
-            era5_cfg, sst_cfg, i_ic, i_tg, ds, cloud_ds, flux_ds, at)
+            era5_cfg, sst_cfg, i_ic, i_tg, ds, cloud_ds, flux_ds, at,
+            lead_stride=lead_stride if leads else None)
+        s_leads = s_tg if leads else None
+        if leads:
+            s_tg = s_leads[-1]
         # ERA5-derived terrain (no elevation file on the training lane)
         tp = era5_terrain_product(s_ic, grid)
         ic = era5_to_spectral_carry(s_ic, grid, sigma, target_phis=tp, microphysics=_micro)
@@ -1842,13 +1862,9 @@ def _load_era5_samples_spectral(cfg, yml, grid, sigma, *,
             # One (carry, near-surface fields) target per lead, on the SAME
             # ERA5 -> Gaussian regrid as the state targets.
             target = tuple(
-                _lead_target(sl, era5_to_spectral_carry(
+                _lead_target(sl, target if sl is s_tg else era5_to_spectral_carry(
                     sl, grid, sigma, target_phis=tp, microphysics=_micro), grid)
-                for sl in (load_era5_slice(era5_cfg, at(i), ds=ds,
-                                           cloud_ds=cloud_ds)
-                           if i != i_tg else s_tg
-                           for i in range(i_ic + lead_stride, i_tg + 1,
-                                          lead_stride)))
+                for sl in s_leads)
         # times stays the REMOTE calendar: i_ic is always a remote index
         forcing = build_spectral_forcing(sst_src, grid, times[i_ic], year,
                                          aerosol=_aerosol, sigma=sigma,
@@ -1863,9 +1879,10 @@ def _load_era5_samples_spectral(cfg, yml, grid, sigma, *,
                              lead_stride=lead_stride)
     if local is not None and mine:
         _, i0, t0 = mine[0]
+        _ls = lead_stride if leads else None
         _assert_same_sample(
-            _sample_inputs(era5_cfg, sst_cfg, i0, t0, *src),
-            _sample_inputs(era5_cfg, sst_cfg, i0, t0, *local))
+            _sample_inputs(era5_cfg, sst_cfg, i0, t0, *src, lead_stride=_ls),
+            _sample_inputs(era5_cfg, sst_cfg, i0, t0, *local, lead_stride=_ls))
         src = local
     samples = []
     for year, i_ic, i_tg in mine:
