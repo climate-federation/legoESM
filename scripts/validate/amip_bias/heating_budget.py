@@ -408,6 +408,17 @@ def rlutcs_replay(fns, state, mesh, sig, forcing, phys_state, rad_int, real_back
     return 0
 
 
+
+def replace_deck(argv: list[str], deck: str) -> list[str]:
+    """``argv`` with its single ``--config`` value replaced by ``deck``."""
+    idx = [i for i, a in enumerate(argv) if a == "--config"]
+    if len(idx) != 1 or idx[0] + 1 >= len(argv):
+        raise SystemExit(f"--deck: the logged command needs exactly one --config, got {argv}")
+    out = list(argv)
+    out[idx[0] + 1] = deck
+    print(f"relaunch deck: {argv[idx[0] + 1]} -> {deck}", flush=True)
+    return out
+
 def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("--run", default="dd_ctl")
@@ -459,6 +470,10 @@ def main(argv=None):
                     choices=("mg2_drop_early_reset_log_width", "mg2_drop_sed_reset_log_width"),
                     help="with --reset-width-ab: which size-reset width is set to 0 "
                          "(the early reset, or the sedimentation fall-speed reset)")
+    ap.add_argument("--deck", default=None,
+                    help="relaunch with this --config deck instead of the run's logged "
+                         "one (e.g. a run made with the production deck before it changed); "
+                         "the logged command must carry --config")
     args = ap.parse_args(argv)
     if args.no_graupel_riming and not args.nc_budget:
         ap.error("--no-graupel-riming needs --nc-budget")
@@ -472,6 +487,8 @@ def main(argv=None):
     scratch = out_dir / f"_launch_{args.run}"
     scratch.mkdir(exist_ok=True)
     argv_run = H.launch_argv(args.run, args.day, scratch)
+    if args.deck is not None:
+        argv_run = replace_deck(argv_run, args.deck)
 
     import jax
     import jax.numpy as jnp

@@ -273,6 +273,11 @@ def test_spy_reset_width_ab_sedimentation_field(monkeypatch):
     assert t["N_c: sedimentation"] == pytest.approx((86400.0, 1.005 * 86400, 0.005 * 86400))
     assert t["dN_c_dt"][2] == pytest.approx(0.005 * 86400)
     assert t["q_c: sedimentation"][2] == pytest.approx(0.01 * 86400)
+    # no droplet sedimentation in the calls (specified droplet number): vacuous
+    for arm in ("hard", "default"):
+        calls[0][arm]["qc"] = {"other": calls[0][arm]["qc"]["sedimentation"]}
+    with pytest.raises(SystemExit, match="droplet sedimentation ran"):
+        nb.reset_ab_rows(calls)
     nb.install_micro_spy([], reset_width_ab=True, reset_field="mg2_drop_readjust_log_width")
     with pytest.raises(SystemExit, match="unknown reset field"):
         mi._get_microphysics_fn(None)

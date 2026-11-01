@@ -390,6 +390,10 @@ def reset_ab_rows(micro_calls: list) -> dict:
          f"configured {field} > 0 (else the comparison is vacuous)")
     gate(all(len(c[a]["qc"]) > 0 for c in micro_calls for a in ("hard", "default")),
          "both arms published a cloud-water budget")
+    if field == "mg2_drop_sed_reset_log_width":
+        gate(all("sedimentation" in c[a]["qc"] for c in micro_calls for a in ("hard", "default")),
+             "droplet sedimentation ran in every call (prognostic droplet number; "
+             "else the sedimentation-reset comparison is vacuous)")
     out = {}
     for arm in ("hard", "default"):
         for c in micro_calls:
