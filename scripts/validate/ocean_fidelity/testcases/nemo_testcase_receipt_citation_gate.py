@@ -13666,10 +13666,10 @@ _resume3_reline(
     anchors=['def _si3_orca2_o2_step_with_trace(', ('    )', 39), 86],
 )
 _resume3_reline(
-    'packages/ice/legoesm/ice/si3_thd_pnd.py:784-988', '797-1014', 218,
+    'packages/ice/legoesm/ice/si3_thd_pnd.py:784-988', '797-1020', 224,  # icethd.F90:160-223
     anchors=['def si3_ice_thd_o12_stages(',
              'return SI3O12Stages(categories=tuple(cat_outputs), pnd=pnd_out, fluxes=live_out)',
-             218],
+             224],  # icethd.F90:160-223
 )
 
 
