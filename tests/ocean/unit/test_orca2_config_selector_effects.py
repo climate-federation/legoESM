@@ -19,7 +19,13 @@ from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
     _nemo_ws_stage_pair,
     _nemo_ws_stage_r3uv,
 )
+from legoesm.ocean.dynamics import ocean_model_latlon_cgrid as omlc
+from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
+    _bc_horizontal_viscosity,
+)
 from legoesm.ocean.fidelity import nemo_testcase_recipe as recipe
+from legoesm.grids.tripole import create_synthetic_tripole
+from legoesm.ocean.vertical import create_ocean_z_star
 
 
 class _SelectorTouched(RuntimeError):
@@ -182,6 +188,166 @@ def test_stage_wzv_clock_pair_selector_changes_the_carried_pair():
     assert got[0] == 1
     np.testing.assert_array_equal(got[1], before)
     np.testing.assert_array_equal(got[2], after)
+
+
+def test_stage_wzv_clock_pair_changes_the_executed_wzv_clock(
+        gyre_card, monkeypatch):
+    """Pin the dt/after-level pair handed to the actual continuity solve."""
+    state = gyre_card.recipe.initial_state
+    grid, z_coord = gyre_card.recipe.grid, gyre_card.recipe.z_coord
+    h_ref = jnp.asarray(z_coord.nemo_e3t_0, dtype=jnp.float64)
+    u_mask = jnp.broadcast_to(
+        state.u_mask.data[..., None], state.u.data.shape)
+    v_mask = jnp.broadcast_to(
+        state.v_mask.data[..., None], state.v.data.shape)
+    seen = []
+
+    def fake_wzv(*args, **kwargs):
+        clock = float(args[9])
+        after_level = int(kwargs["stage_after_level"])
+        seen.append((clock, after_level))
+        value = clock + after_level
+        return jnp.full_like(h_ref, value), None, None
+
+    monkeypatch.setattr(omlc, "nemo_qco_wzv_operands", fake_wzv)
+
+    def selected(flag):
+        cfg = gyre_card.recipe.model_config._replace(
+            rk3_stage_wzv_nemo_clock_pair=flag)
+        return omlc._nemo_ws_stage_transport(
+            (state.u.data, state.v.data), h_ref, 1,
+            eta_stage=state.eta.data, stored_h_stage=True,
+            h_ref=h_ref, Hu_avg=jnp.zeros_like(state.u.data[..., 0]),
+            Hv_avg=jnp.zeros_like(state.v.data[..., 0]),
+            u_mask_3d=u_mask, v_mask_3d=v_mask, grid=grid,
+            z_coord=z_coord, H_bathy=state.H_bathy.data,
+            config=cfg, dt=10800.0, eta_before=state.eta.data,
+            eta_after=state.eta.data, literal_wzv=True)[2]
+
+    on = np.asarray(selected(True))
+    off = np.asarray(selected(False))
+    assert seen == [(5400.0, 2), (10800.0, 0)]
+    assert float(on[0, 0, 0]) == 5402.0
+    assert float(off[0, 0, 0]) == 10800.0
+    assert not np.array_equal(on, off)
+
+
+def test_nemo_ldf_fold_rows_changes_the_executed_fold_operator():
+    """The config bit must change the literal folded viscosity result."""
+    grid = create_synthetic_tripole(8, 12, dtype=jnp.float64)
+    rng = np.random.default_rng(12)
+    u = jnp.asarray(rng.normal(size=(8, 13, 3)))
+    v = jnp.asarray(rng.normal(size=(9, 12, 3)))
+    h = jnp.asarray(rng.uniform(1.0, 3.0, size=(8, 12, 3)))
+    e3u = jnp.asarray(rng.uniform(1.0, 3.0, size=u.shape))
+    e3v = jnp.asarray(rng.uniform(1.0, 3.0, size=v.shape))
+    e3f = jnp.asarray(rng.uniform(1.0, 3.0, size=(9, 13, 3)))
+    thickness = (h, e3u, e3v, e3f, e3u + 0.25, e3v + 0.5)
+    z_coord = create_ocean_z_star(3, 300.0, 100.0, 100.0)
+    base = recipe.build_nemo_testcase_card(
+        "GYRE-zco").recipe.model_config._replace(
+        lateral_viscosity_coefficient_source="nemo_constant",
+        nemo_ldf_stored_f_area=False,
+    )
+    mask = jnp.ones((8, 12), dtype=jnp.float64)
+
+    def selected(flag):
+        return _bc_horizontal_viscosity(
+            jnp.zeros_like(u), jnp.zeros_like(v), u, v, grid, mask,
+            jnp.ones_like(u), jnp.ones_like(v),
+            base._replace(nemo_ldf_fold_rows=flag), z_coord,
+            300.0 * mask, 10.0, h_k=h,
+            ldf_thickness_operands=thickness,
+        )[:2]
+
+    on_u, on_v = (np.asarray(x) for x in selected(True))
+    off_u, off_v = (np.asarray(x) for x in selected(False))
+    assert np.count_nonzero(on_u.view(np.uint64) != off_u.view(np.uint64)) == 39
+    assert np.count_nonzero(on_v.view(np.uint64) != off_v.view(np.uint64)) == 36
+    assert on_u.view(np.uint64)[7, 0, 0] == np.uint64(4498141291464064851)
+    assert off_u.view(np.uint64)[7, 0, 0] == np.uint64(4503684672064473110)
+
+
+def test_fct_fold_exchange_changes_a_full_tripole_ws_rk3_step():
+    """Exercise the model call-site on a record-free stored-pivot fold."""
+    from legoesm.core.precision import PrecisionPolicy, set_policy
+    from legoesm.grids.tripole import create_synthetic_tripole_pivot
+    from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean
+    from legoesm.ocean.state import LatLonCGridOceanConfig
+    from legoesm.ocean.vertical import create_partial_cell_coordinate
+
+    set_policy(PrecisionPolicy.fp64())
+    grid = create_synthetic_tripole_pivot(8, 12, dtype=jnp.float64)
+    base_z = create_ocean_z_star(3, 600.0)
+    state = rest_state_latlon_cgrid_ocean(
+        grid, base_z, T_water_init_C=20.0, T_deep=2.0,
+        S_uniform=35.0, H_max=600.0)
+    z_coord = create_partial_cell_coordinate(base_z, state.H_bathy.data)
+    rng = np.random.default_rng(420)
+    state = state._replace(
+        u=state.u.replace(data=jnp.asarray(
+            0.02 * rng.standard_normal(state.u.data.shape))
+            * state.u_mask.data[..., None]),
+        v=state.v.replace(data=jnp.asarray(
+            0.02 * rng.standard_normal(state.v.data.shape))
+            * state.v_mask.data[..., None]),
+        T=state.T.replace(data=state.T.data + jnp.asarray(
+            rng.standard_normal(state.T.data.shape))),
+        S=state.S.replace(data=state.S.data + jnp.asarray(
+            0.1 * rng.standard_normal(state.S.data.shape))),
+    )
+    base = LatLonCGridOceanConfig.from_flat(
+        barotropic_solver="explicit_substep",
+        tracer_time_integrator="rk3_ws",
+        momentum_time_integrator="rk3_ws",
+        tracer_advection="fct2",
+        momentum_advection="flux_form",
+        momentum_flux_scheme="none",
+        vertical_momentum_scheme="none",
+        barotropic_slow_forcing_depth_evaluation="min_rule_live",
+        barotropic_face_depth="nemo_ssh_avg",
+        n_barotropic_substeps=3,
+        enable_runtime_checks=False,
+    )
+
+    def selected(flag):
+        return LatLonCGridOceanModel(
+            grid, z_coord, base._replace(fct_fold_exchange=flag),
+        ).step(state, 600.0)
+
+    on, off = selected(True), selected(False)
+    on_t, off_t = np.asarray(on.T.data), np.asarray(off.T.data)
+    on_s, off_s = np.asarray(on.S.data), np.asarray(off.S.data)
+    assert np.count_nonzero(
+        on_t.view(np.uint64) != off_t.view(np.uint64)) == 29
+    assert np.count_nonzero(
+        on_s.view(np.uint64) != off_s.view(np.uint64)) == 48
+    assert on_t.view(np.uint64)[6, 6, 1] == np.uint64(4625908986858152799)
+    assert off_t.view(np.uint64)[6, 6, 1] == np.uint64(4625908986858152689)
+
+
+def test_surface_salt_flux_sfx_changes_written_stage3_salt_source():
+    """Pin the recorded sfx operand's stage-3 written source effect."""
+    from legoesm.core.source_rounding import nemo_source_round
+    from legoesm.ocean.state import OceanSurfaceForcing
+
+    rho0 = jnp.asarray(1026.0, dtype=jnp.float64)
+    e3t_kmm = jnp.asarray([[7.25]], dtype=jnp.float64)
+
+    def selected(value):
+        forcing = OceanSurfaceForcing(
+            salt_flux_sfx=jnp.asarray([[value]], dtype=jnp.float64))
+        reciprocal = nemo_source_round(
+            nemo_source_round(1.0 / rho0) / e3t_kmm)
+        return nemo_source_round(forcing.salt_flux_sfx * reciprocal)
+
+    on = np.asarray(selected(2.5e-6))
+    off = np.asarray(selected(0.0))
+    expected = np.float64(2.5e-6) * (
+        np.float64(1.0) / np.float64(1026.0) / np.float64(7.25))
+    assert on[0, 0] == pytest.approx(expected, rel=2.0e-16)
+    assert off[0, 0] == 0.0
+    assert not np.array_equal(on, off)
 
 
 def test_stage_transport_stored_r3uv_pair_runs_the_written_ratio_path(

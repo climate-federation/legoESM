@@ -7,6 +7,8 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
+from legoesm.ocean.state import LatLonCGridOceanConfig
+
 
 class _Fold:
     is_active = True
@@ -31,13 +33,15 @@ def test_een_fold_image_row_and_disabled_plant():
     thickness = values + 100.0
     mask = jnp.ones_like(values).at[-1].set(0.0).at[-2, 2].set(0.0)
     sentinel = object()
+    off_cfg = LatLonCGridOceanConfig(een_fold_image_v_row=False)
+    on_cfg = off_cfg._replace(een_fold_image_v_row=True)
     off = _een_fold_image_v_row(
-        False, _Grid(_Fold(size)), thickness, values,
+        off_cfg.een_fold_image_v_row, _Grid(_Fold(size)), thickness, values,
         sentinel, sentinel, sentinel, mask)
     assert off[0] is thickness and off[1] is values and off[5] is mask
 
     moved = _een_fold_image_v_row(
-        True, _Grid(_Fold(size)), thickness, values,
+        on_cfg.een_fold_image_v_row, _Grid(_Fold(size)), thickness, values,
         sentinel, sentinel, sentinel, mask)
     perm = (size - np.arange(size)) % size
     wet = np.asarray(mask)[-2][perm]
@@ -48,20 +52,36 @@ def test_een_fold_image_row_and_disabled_plant():
         np.asarray(moved[0])[-1], np.asarray(thickness)[-2][perm])
     with pytest.raises(ValueError, match="active north fold"):
         _een_fold_image_v_row(
-            True, _Grid(None), thickness, values,
+            on_cfg.een_fold_image_v_row, _Grid(None), thickness, values,
             sentinel, sentinel, sentinel, mask)
 
 
 def test_fold_top_v_operands_and_disabled_plant():
     from legoesm.ocean.dynamics.barotropic_latlon_cgrid import (
+        _nemo_fold_top_v_wet,
         _nemo_fold_top_v_operands,
     )
 
     mask = jnp.arange(12.0).reshape(4, 3)
-    same, flag = _nemo_fold_top_v_operands(mask, False, None)
+    base = LatLonCGridOceanConfig()
+    off_cfg = base._replace(barotropic=base.barotropic._replace(
+        barotropic_fold_top_v_face_ssh=False))
+    on_cfg = base._replace(barotropic=base.barotropic._replace(
+        barotropic_fold_top_v_face_ssh=True))
+    raw = type("Raw", (), {
+        "vmask": jnp.asarray([
+            [[0.0], [0.0], [0.0]],
+            [[1.0], [1.0], [1.0]],
+            [[1.0], [0.0], [1.0]],
+        ])
+    })()
+    z_coord = type("Coordinate", (), {"nemo_een_barotropic": raw})()
+    off_wet = _nemo_fold_top_v_wet(off_cfg, z_coord, mask.dtype)
+    on_wet = _nemo_fold_top_v_wet(on_cfg, z_coord, mask.dtype)
+    same, flag = _nemo_fold_top_v_operands(mask, False, off_wet)
     assert same is mask and flag is False
     moved, flag = _nemo_fold_top_v_operands(
-        mask, False, jnp.asarray([1.0, 0.0, 1.0]))
+        mask, False, on_wet)
     assert flag is True
     np.testing.assert_array_equal(np.asarray(moved)[-1], [1.0, 0.0, 1.0])
     np.testing.assert_array_equal(np.asarray(moved)[:-1], np.asarray(mask)[:-1])
@@ -95,17 +115,28 @@ def test_literal_flux_update_matches_written_order_and_legacy_plant_moves():
 def test_ascending_level_sum_is_written_order_and_control_can_fail():
     from legoesm.ocean.dynamics.barotropic_common import ascending_level_sum
 
-    rng = np.random.default_rng(276)
-    values = rng.standard_normal((400, 30))
-    values *= np.exp(rng.uniform(-20.0, 0.0, values.shape))
+    # Thirty-three levels force XLA's generic reduction tree to differ from
+    # NEMO's explicitly ascending scalar accumulation for this fixed input.
+    rng = np.random.default_rng(1)
+    values = rng.standard_normal((20, 33))
+    values *= np.exp(rng.uniform(-50.0, 50.0, values.shape))
     expected = np.zeros(values.shape[:-1], dtype=np.float64)
     for level in range(values.shape[-1]):
         expected = expected + values[..., level]
-    ordered = np.asarray(jax.jit(ascending_level_sum)(jnp.asarray(values)))
+    base = LatLonCGridOceanConfig()
+    off_cfg = base._replace(barotropic_rhs_ascending_level_sum=False)
+    on_cfg = base._replace(barotropic_rhs_ascending_level_sum=True)
+    def selected(cfg, operand):
+        if cfg.barotropic_rhs_ascending_level_sum:
+            return ascending_level_sum(operand)
+        return jnp.sum(operand, axis=-1)
+
+    ordered = np.asarray(jax.jit(
+        lambda operand: selected(on_cfg, operand))(jnp.asarray(values)))
+    generic = np.asarray(jax.jit(
+        lambda operand: selected(off_cfg, operand))(jnp.asarray(values)))
     np.testing.assert_array_equal(ordered, expected)
-    lanes = [values[:, level::4].sum(axis=1) for level in range(4)]
-    four_lane = (lanes[0] + lanes[1]) + (lanes[2] + lanes[3])
-    assert np.count_nonzero(four_lane != expected) > 0
+    assert np.count_nonzero(generic != ordered) > 0
 
 
 def test_npcrv_area_selector_changes_live_relative_vorticity_by_area_ratio(

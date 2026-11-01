@@ -201,6 +201,32 @@ def test_nemo_a33_source_order_is_exact_under_jit_and_left_fold_fails():
     assert np.count_nonzero(legacy_akz != expected_akz) == 13
 
 
+def test_redi_a33_source_ordering_config_changes_operator_bits():
+    """Run the config-selected A33 branch on an adversarial finite fixture."""
+    rng = np.random.default_rng(1903)
+    aht = rng.uniform(1.0e-3, 1.0e4, size=(2, 3, 7)).astype(np.float64)
+    aht_v = rng.uniform(1.0e-3, 1.0e4, size=(2, 3, 7)).astype(np.float64)
+    wet = np.ones_like(aht)
+    wslpi = rng.uniform(-1.0e-2, 1.0e-2, size=aht.shape)
+    wslpj = rng.uniform(-1.0e-2, 1.0e-2, size=aht.shape)
+
+    def selected(flag):
+        cfg = GMRediConfig(redi_a33_source_ordering=flag)
+        return np.asarray(nemo_iso_a33(
+            jnp.asarray(aht), jnp.asarray(wet), jnp.asarray(wet),
+            jnp.asarray(wet), jnp.asarray(wslpi), jnp.asarray(wslpj),
+            jnp.ones(wet.shape[:2]), jnp.ones(wet.shape[:2]),
+            jnp.asarray(wet), msc=False, aht_v=jnp.asarray(aht_v),
+            evaluation="nemo_literal",
+            source_ordered=cfg.redi_a33_source_ordering)[0])
+
+    on = selected(True).view(np.uint64)
+    off = selected(False).view(np.uint64)
+    assert np.count_nonzero(on != off) == 9
+    assert on[0, 1, 0] == np.uint64(4598523282282970091)
+    assert off[0, 1, 0] == np.uint64(4598523282282970090)
+
+
 def test_orca2_l2_config_selects_every_new_redi_operand_route():
     """The record-free certified L2 constructor reaches all six new fields."""
     from legoesm.ocean.fidelity.nemo_testcase_recipe import (
@@ -285,6 +311,52 @@ def test_orca2_l2_new_routes_reach_the_record_free_operator(monkeypatch):
         assert routed["face_thickness_u"] is not None
         assert routed["face_thickness_v"] is not None
         assert routed["a33_source_ordering"] is True
+
+
+def test_redi_flux_geometry_stage_changes_live_flux_result():
+    """Run step-entry and RK3-Kmm flux geometry on one live SSH pair."""
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import (
+        orca2_l2_isoneutral_gm_redi,
+    )
+
+    setup = _stratified_with_meridional_tilt(n_lat=5, n_lon=7, nlev=4)
+    (grid, base_z, mask, u_mask, v_mask, eta, H_bathy, _, _, T, S, _) = setup
+    raw = np.broadcast_to(np.asarray(base_z.dz_ref), T.shape).copy()
+    raw2 = np.ones(T.shape[:2], dtype=np.float64)
+    z_coord = create_partial_cell_coordinate(
+        create_z_star_from_thicknesses(
+            np.asarray(base_z.dz_ref), nemo_e3t_0_m=raw,
+            nemo_e3w_0_m=raw, nemo_hu_0_m=raw2,
+            nemo_hv_0_m=raw2, nemo_e1e2t_m=raw2,
+            nemo_e1e2u_m=raw2, nemo_e1e2v_m=raw2,
+            nemo_e2u_m=raw2, nemo_e1v_m=raw2),
+        H_bathy)
+    eta_kmm = eta + jnp.asarray(
+        np.linspace(-0.19, 0.23, eta.size).reshape(eta.shape))
+    base = orca2_l2_isoneutral_gm_redi()._replace(
+        nemo_slope_north_fold=False,
+        slope_prd_evaluation="density_roundtrip",
+        slope_depth_evaluation="legacy_jacobian_t_surface",
+        msc_stabilize=False,
+        redi_w_slope_stage_evaluation="redi_tuple",
+        redi_flux_reference_thickness_evaluation="tpoint_alias",
+        redi_flux_stored_face_ratios=False,
+        redi_a33_source_ordering=False,
+    )
+
+    def selected(stage):
+        cfg = base._replace(redi_flux_geometry_stage=stage)
+        flux_eta = eta_kmm if cfg.redi_flux_geometry_stage == "rk3_kmm" else eta
+        return tuple(np.asarray(x) for x in gm_redi_tracer_tendency_latlon(
+            T, S, eta, H_bathy, grid, z_coord, cfg,
+            eos="linear", mask=mask, u_mask=u_mask, v_mask=v_mask,
+            redi_flux_eta=flux_eta))
+
+    on_t, _ = selected("rk3_kmm")
+    off_t, _ = selected("step_entry")
+    assert np.count_nonzero(
+        on_t.view(np.uint64) != off_t.view(np.uint64)) == 140
+    assert on_t.view(np.uint64)[2, 3, 1] == np.uint64(4484165692200207305)
 
 
 def test_orca2_l2_north_fold_selector_reaches_the_slope_guard():

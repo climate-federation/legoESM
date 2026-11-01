@@ -1887,6 +1887,53 @@ def test_nn_mxlice2_anchor_materializes_nemo_source_order_under_jit():
     assert np.all(np.isfinite(np.asarray(gradient)))
 
 
+def test_surface_forcing_hm_i_changes_the_tke_profile_at_its_consumer(
+        monkeypatch):
+    """Exercise OceanSurfaceForcing.ice_mean_thickness_hm_i through k_profiles."""
+    from legoesm.ocean.state import OceanSurfaceForcing
+    from legoesm.ocean.physics.vertical_mixing import k_profiles
+    from legoesm.ocean.physics.vertical_mixing import tke as tke_module
+
+    state, z_coord = _kprof_setup(unstable=False)
+    state = SimpleNamespace(
+        **vars(state),
+        land_mask=SimpleNamespace(data=jnp.ones(state.eta.data.shape)))
+    physics = _physics_cfg("tke", 0.0)
+    tke_cfg = physics.vertical_mixing.tke._replace(
+        tke_mxl_choice=3, nemo_mxlice=2,
+        nemo_mxl0_surface_tmask=True)
+    physics = physics._replace(
+        vertical_mixing=physics.vertical_mixing._replace(tke=tke_cfg))
+    seen = []
+
+    def fake_tke(*args, **kwargs):
+        thickness = kwargs["mxlice_hm_i"]
+        seen.append(np.asarray(thickness))
+        shape = state.T.data.shape[:-1] + (state.T.data.shape[-1] - 1,)
+        value = jnp.mean(thickness)
+        return SimpleNamespace(
+            K_H=jnp.full(shape, value), K_M=jnp.full(shape, 2.0 * value),
+            tke_new=jnp.zeros(shape))
+
+    monkeypatch.setattr(tke_module, "tke_vertical_mixing", fake_tke)
+    concentration = jnp.full(state.eta.data.shape, 0.5)
+
+    def selected(value):
+        forcing = OceanSurfaceForcing(
+            ice_concentration=concentration,
+            ice_mean_thickness_hm_i=jnp.full_like(concentration, value))
+        return k_profiles.compute_vertical_K_profiles(
+            state, z_coord, forcing, physics)[0]
+
+    one = np.asarray(selected(1.25))
+    two = np.asarray(selected(2.5))
+    assert len(seen) == 2
+    np.testing.assert_array_equal(seen[0], np.full((2, 2), 1.25))
+    assert float(one[0, 0, 0]) == 1.25001
+    assert float(two[0, 0, 0]) == 2.50001
+    assert not np.array_equal(one, two)
+
+
 def test_nemo_step_entry_prandtl_uses_literal_pdlr_multiply_eager_and_jit():
     """zdftke.f90:717 is ``pdlr*zav``, not ``zav/(1/pdlr)``."""
     from legoesm.ocean.physics.vertical_mixing.tke import compute_K_from_tke

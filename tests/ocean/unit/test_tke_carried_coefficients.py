@@ -370,6 +370,25 @@ def test_literal_raw_mxl_matches_hand_computed_source_order_and_red_control():
 
 
 @pytest.mark.skipif(not jax.config.x64_enabled, reason="binary64 receipt")
+def test_literal_mxl_ldown_keeps_jpk_terminal_seed_unmodified():
+    e = jnp.asarray([[2.0, 3.0, 1.0e8]])
+    n2 = jnp.full_like(e, 1.0e-12)
+    dz_cell = jnp.asarray([[1.0, 2.0, 3.0, 4.0]])
+    cfg = TKEConfig(tke_mxl_choice=3, mxl_min=0.01,
+                    tke_mxl_raw_evaluation="nemo_literal")
+    floor = tke_mod._mixing_length_floor(cfg)
+    lk, _ = tke_mod.compute_mixing_lengths(
+        e, n2, jnp.ones_like(e), cfg, dz_cell=dz_cell,
+        l_surface_anchor=jnp.asarray([floor]))
+    assert float(lk[0, -1]) == floor
+    legacy, _ = tke_mod.compute_mixing_lengths(
+        e, n2, jnp.ones_like(e),
+        cfg._replace(tke_mxl_raw_evaluation="factored"),
+        dz_cell=dz_cell, l_surface_anchor=jnp.asarray([floor]))
+    assert float(legacy[0, -1]) != floor
+
+
+@pytest.mark.skipif(not jax.config.x64_enabled, reason="binary64 receipt")
 def test_literal_mxl_ldown_updates_jpkm1_only_with_true_terminal_e3t():
     e = jnp.asarray([[2.0, 3.0, 1.0e8]])
     n2 = jnp.full_like(e, 1.0e-12)
@@ -454,6 +473,56 @@ def test_terminal_e3t_flag_reaches_the_closure_lengths_and_refuses_unused_paths(
     with pytest.raises(ValueError, match="nemo_etau_wmask=True is not"):
         tke_mod._validate_post_mixing_cfg(post._replace(
             nemo_mxl_terminal_e3t=False, nemo_etau_wmask=True))
+
+
+@pytest.mark.skipif(not jax.config.x64_enabled, reason="binary64 receipt")
+@pytest.mark.parametrize("coordinate_kind", ["zstar", "partial"])
+def test_coordinate_nemo_e3t_jpk_changes_literal_terminal_length(
+        coordinate_kind):
+    """Exercise nemo_e3t_jpk from both coordinate classes into the sweep."""
+    from legoesm.ocean.vertical import (
+        create_partial_cell_coordinate, create_z_star_from_thicknesses,
+    )
+
+    cfg = dino_mod._dino_vertical_mixing_config(
+        dino_config_for_recipe("nemo_dino_kamm_mlf")).tke._replace(
+            tke_mxl_choice=3, nemo_mxl_terminal_e3t=True,
+            tke_mxl_raw_evaluation="nemo_literal")
+    model, state = _step_entry_helper_fixture(cfg)
+    partial = model.z_coord
+    base = create_z_star_from_thicknesses(
+        np.asarray(partial.dz_ref),
+        nemo_gdept_0_m=np.asarray(partial.nemo_gdept_0),
+        nemo_gdepw_0_m=np.asarray(partial.nemo_gdepw_0),
+        nemo_e3t_0_m=np.asarray(partial.nemo_e3t_0),
+        nemo_e3w_0_m=np.asarray(partial.nemo_e3w_0))
+
+    def selected(terminal):
+        coordinate = base._replace(
+            nemo_e3t_jpk=jnp.full(state.eta.data.shape, terminal))
+        if coordinate_kind == "partial":
+            coordinate = create_partial_cell_coordinate(
+                coordinate, state.H_bathy.data)
+        bundle = LatLonCGridOceanModel._tke_step_entry_n2_bundle(
+            model, state, z_coord=coordinate)
+        e = jnp.full((*state.eta.data.shape, 2), 1.0e8)
+        n2 = jnp.full_like(e, 1.0e-12)
+        dz_cell = jnp.concatenate(
+            [bundle.e3t_Kmm, bundle.e3t_jpk[..., None]], axis=-1)
+        floor = tke_mod._mixing_length_floor(cfg)
+        length, _ = tke_mod.compute_mixing_lengths(
+            e, n2, jnp.ones_like(e), cfg, dz_cell=dz_cell,
+            l_surface_anchor=jnp.full(state.eta.data.shape, floor))
+        return bundle, np.asarray(length)
+
+    on_bundle, on = selected(7.0)
+    off_bundle, off = selected(3.0)
+    np.testing.assert_array_equal(on_bundle.e3t_jpk, np.full((2, 2), 7.0))
+    np.testing.assert_array_equal(off_bundle.e3t_jpk, np.full((2, 2), 3.0))
+    assert not np.array_equal(on, off)
+    assert on[0, 0, -1] == pytest.approx(3.11)
+    assert off[0, 0, -1] == pytest.approx(3.01)
+    assert np.count_nonzero(on[..., -1] > off[..., -1]) == 3
 
 
 @pytest.mark.skipif(not jax.config.x64_enabled, reason="binary64 receipt")

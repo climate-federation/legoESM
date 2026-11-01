@@ -111,8 +111,8 @@ def _physics(vm):
 
 @pytest.mark.parametrize("eos_depth", ["geometric", "insitu"])
 @pytest.mark.parametrize("use_config_rho0", [False, True])
-def test_closure_eos_reference_density(monkeypatch, eos_depth,
-                                       use_config_rho0):
+def test_configurable_closure_eos_reference_density(
+        monkeypatch, eos_depth, use_config_rho0):
     from legoesm.ocean.physics.vertical_mixing.config import (
         VerticalMixingConfig,
     )
@@ -125,14 +125,27 @@ def test_closure_eos_reference_density(monkeypatch, eos_depth,
                                rtol=_RTOL, atol=0)
 
 
+@pytest.mark.parametrize("eos_depth", ["geometric", "insitu"])
+def test_closure_eos_reference_density(monkeypatch, eos_depth):
+    from legoesm.ocean.physics.vertical_mixing.config import (
+        VerticalMixingConfig,
+    )
+    seen = []
+    _model(eos_depth, _physics(VerticalMixingConfig(scheme="richardson")),
+           monkeypatch, seen)
+    assert len(seen) == 1
+    np.testing.assert_allclose(_rho(seen[0]), _expected(eos_depth),
+                               rtol=_RTOL, atol=0)
+
+
 class _Stop(Exception):
     pass
 
 
 @pytest.mark.parametrize("eos_depth", ["geometric", "insitu"])
 @pytest.mark.parametrize("use_config_rho0", [False, True])
-def test_fallback_eos_reference_density(monkeypatch, eos_depth,
-                                        use_config_rho0):
+def test_configurable_fallback_eos_reference_density(
+        monkeypatch, eos_depth, use_config_rho0):
     import legoesm.ocean.physics.vertical_mixing as vmix
     from legoesm.ocean.physics.vertical_mixing.config import (
         VerticalMixingConfig,
@@ -156,9 +169,31 @@ def test_fallback_eos_reference_density(monkeypatch, eos_depth,
 
 
 @pytest.mark.parametrize("eos_depth", ["geometric", "insitu"])
+def test_fallback_eos_reference_density(monkeypatch, eos_depth):
+    import legoesm.ocean.physics.vertical_mixing as vmix
+    from legoesm.ocean.physics.vertical_mixing.config import (
+        VerticalMixingConfig,
+    )
+    model, state = _model(
+        eos_depth, _physics(VerticalMixingConfig(scheme="richardson")))
+    seen = []
+
+    def spy(*a, eos_fn=None, **kw):
+        seen.append(eos_fn)
+        raise _Stop
+
+    monkeypatch.setattr(vmix, "compute_vertical_K_profiles", spy)
+    with pytest.raises(_Stop):
+        model._apply_implicit_vertical_mixing(state, 1800.0, None)
+    assert len(seen) == 1
+    np.testing.assert_allclose(_rho(seen[0]), _expected(eos_depth),
+                               rtol=_RTOL, atol=0)
+
+
+@pytest.mark.parametrize("eos_depth", ["geometric", "insitu"])
 @pytest.mark.parametrize("use_config_rho0", [False, True])
-def test_iwm_and_ddm_eos_reference_density(monkeypatch, eos_depth,
-                                           use_config_rho0):
+def test_configurable_iwm_and_ddm_eos_reference_density(
+        monkeypatch, eos_depth, use_config_rho0):
     """Fast path (physics-provided K): the internal-wave add-on and double
     diffusion each build an EOS."""
     from legoesm.ocean.physics.vertical_mixing import k_profiles
@@ -196,6 +231,48 @@ def test_iwm_and_ddm_eos_reference_density(monkeypatch, eos_depth,
             state, 1800.0, None, K_v_phys=K, A_v_phys=K)
     assert set(seen) == {"iwm", "ddm"}
     want = _expected(eos_depth, use_config_rho0)
+    np.testing.assert_allclose(_rho(seen["iwm"]), want, rtol=_RTOL, atol=0)
+    np.testing.assert_allclose(_rho(seen["ddm"]), want, rtol=_RTOL, atol=0)
+
+
+@pytest.mark.parametrize("eos_depth", ["geometric", "insitu"])
+def test_iwm_and_ddm_eos_reference_density(monkeypatch, eos_depth):
+    """Fast path (physics-provided K): the internal-wave add-on and double
+    diffusion each build an EOS."""
+    from legoesm.ocean.physics.vertical_mixing import k_profiles
+    from legoesm.ocean.physics.vertical_mixing.config import (
+        VerticalMixingConfig,
+    )
+    from legoesm.ocean.physics.vertical_mixing.double_diffusion import (
+        DoubleDiffusionConfig,
+    )
+    from legoesm.ocean.physics.vertical_mixing.internal_wave_mixing import (
+        IWMConfig,
+    )
+    vm = VerticalMixingConfig(scheme="richardson")._replace(
+        iwm=IWMConfig(enabled=True),
+        ddm=DoubleDiffusionConfig()._replace(enabled=True))
+    model, state = _model(eos_depth, _physics(vm))
+    seen = {}
+
+    def iwm_spy(*a, eos_fn=None, **kw):
+        seen["iwm"] = eos_fn
+        return jnp.zeros(state.T.data.shape[:2] + (state.T.data.shape[2] - 1,),
+                         dtype=state.T.data.dtype)
+
+    def ddm_spy(*a, eos_fn=None, **kw):
+        seen["ddm"] = eos_fn
+        raise _Stop
+
+    monkeypatch.setattr(k_profiles, "iwm_K_profile", iwm_spy)
+    monkeypatch.setattr(k_profiles, "ddm_K_profile", ddm_spy)
+    shape = state.T.data.shape[:2] + (state.T.data.shape[2] - 1,)
+    K = jnp.full(shape, 1e-5, dtype=state.T.data.dtype)
+    with pytest.raises(_Stop):
+        model._apply_implicit_vertical_mixing(
+            state, 1800.0, None, K_v_phys=K, A_v_phys=K)
+    assert set(seen) == {"iwm", "ddm"}
+    want = _expected(eos_depth)
     np.testing.assert_allclose(_rho(seen["iwm"]), want, rtol=_RTOL, atol=0)
     np.testing.assert_allclose(_rho(seen["ddm"]), want, rtol=_RTOL, atol=0)
 

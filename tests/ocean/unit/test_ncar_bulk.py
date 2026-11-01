@@ -446,7 +446,7 @@ def test_l_vap_and_cp_air_reference():
         rel=1e-12)
 
 
-def test_public_l_vap_deviation_from_nemo_is_bounded():
+def test_l_vap_deviation_from_nemo_is_bounded():
     T = constants.T_freeze + np.array([0.0, 10.0, 25.0, 32.0])
     ours = np.asarray(latent_heat_vaporization(jnp.asarray(T)))
     nemo = _np_nemo_l_vap(T)
@@ -592,7 +592,7 @@ def test_record_object_sign_treats_negative_zero_as_positive():
     assert float(nemo_fortran_sign(magnitude, jnp.asarray(-1.0))) == -2.0
 
 
-def test_pressure_at_height_supersaturated_matches_parent_guarded_formula():
+def test_pressure_at_height_supersaturated_matches_unclipped_nemo():
     """Public callers retain the parent's physical supersaturation behavior."""
     T, slp = 275.0, 101000.0
     q_sat0 = float(_np_q_sat(np.float64(T), np.float64(slp)))

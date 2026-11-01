@@ -1353,7 +1353,7 @@ def test_mpi_band_gather_collects_every_mass_flux_slot(monkeypatch):
 # 5. config surface: positional stability, unsupported lanes, source=
 # ---------------------------------------------------------------------------
 
-def test_main_field_order_is_exact_prefix_and_mass_flux_position_is_fixed():
+def test_store_mass_flux_is_the_last_config_field():
     """RED 1: inserted mid-tuple it SHIFTS every later positional argument.
 
     ``LatLonCGridOceanConfig`` documents a positional-order compatibility
