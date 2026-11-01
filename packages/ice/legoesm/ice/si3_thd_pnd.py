@@ -859,8 +859,8 @@ def si3_ice_thd_o12_stages(
     for jl in range(5):
         entry = dict(category_entries[jl])
         if live_flux_carry:
-            entry["hfx_err_dif"] = cur_hfx_err_dif  # icethd_zdf_bl99.F90:786,838
-            entry["hfx_dif"] = cur_hfx_dif  # icethd_zdf_bl99.F90:841
+            entry["hfx_err_dif"] = cur_hfx_err_dif  # icethd_zdf_bl99.F90:828
+            entry["hfx_dif"] = cur_hfx_dif  # icethd_zdf_bl99.F90:831
         fluxes = cur_fluxes if live_flux_carry else category_fluxes[jl]
         o10 = si3_ice_thd_o10_category_stages(
             entry=entry,
@@ -882,9 +882,9 @@ def si3_ice_thd_o12_stages(
             # icethd.f90 carries the module flux arrays through the category
             # loop; the five-tuple arm above remains the exact-input record
             # replay boundary used by O9--O12 scorers.
-            cur_fluxes = dh.fluxes._replace(sfx_res=o10.sal.sfx_res)  # icethd_sal.F90:1335-1338
-            cur_hfx_err_dif = o10.o9.zdf.hfx_err_dif  # icethd_zdf_bl99.F90:838
-            cur_hfx_dif = o10.o9.zdf.hfx_dif  # icethd_zdf_bl99.F90:841
+            cur_fluxes = dh.fluxes._replace(sfx_res=o10.sal.sfx_res)  # icethd_sal.F90:239,624
+            cur_hfx_err_dif = o10.o9.zdf.hfx_err_dif  # icethd_zdf_bl99.F90:828
+            cur_hfx_dif = o10.o9.zdf.hfx_dif  # icethd_zdf_bl99.F90:831
         a_i_cat = dh.a_i
         h_i_cat = dh.h_i
         h_s_cat = dh.h_s

@@ -813,12 +813,12 @@ def si3_o17_step(
         name: getattr(carried, name) for name in carried._fields if name in SI3Fluxes._fields
     }
     carried_updates.update(  # icethd.F90:148-163; sal/diffusion/DA accumulators
-        sfx_bri=stages.fluxes.sfx_bri,  # icethd_sal.F90:1335-1338
+        sfx_bri=stages.fluxes.sfx_bri,  # icethd_sal.F90:231,489,596
         sfx_lam=stages.fluxes.sfx_lam,  # icethd.F90:161
         hfx_thd=stages.fluxes.hfx_thd,  # icethd.F90:161
         wfx_lam=stages.fluxes.wfx_lam,  # icethd.F90:161
-        hfx_err_dif=stages.fluxes.hfx_err_dif,  # icethd_zdf_bl99.F90:838
-        hfx_dif=stages.fluxes.hfx_dif,  # icethd_zdf_bl99.F90:841
+        hfx_err_dif=stages.fluxes.hfx_err_dif,  # icethd_zdf_bl99.F90:828
+        hfx_dif=stages.fluxes.hfx_dif,  # icethd_zdf_bl99.F90:831
     )
     fluxes = fluxes._replace(
         **carried_updates,
@@ -853,8 +853,8 @@ def si3_o17_step(
             a_i=_pack_categories(stages, "a_i"),
             v_s=_pack_categories(stages, "v_s"),
         ),
-        t_si=jnp.stack(  # icethd.F90:163; ice_thd_1d2d :533-534
-            [c.o10.o9.zdf.t_si for c in stages.categories], axis=-1  # icethd.F90:334,533-534
+        t_si=jnp.stack(  # icethd.F90:163; ice_thd_1d2d :518
+            [c.o10.o9.zdf.t_si for c in stages.categories], axis=-1  # icethd.F90:518
         ),
         aggregated=state.aggregated._replace(
             at_i=stages.pnd.at_i,

@@ -313,6 +313,10 @@ FILES = {
     "src/ICE/iceitd.F90": NEMO / "src/ICE/iceitd.F90",
     "src/ICE/icerst.F90": NEMO / "src/ICE/icerst.F90",
     "src/ICE/icestp.F90": NEMO / "src/ICE/icestp.F90",
+    "src/ICE/icethd_sal.F90": NEMO / "src/ICE/icethd_sal.F90",
+    "src/ICE/icethd_zdf_bl99.F90": NEMO / "src/ICE/icethd_zdf_bl99.F90",
+    "src/ICE/icedyn.F90": NEMO / "src/ICE/icedyn.F90",
+    "src/ICE/icedyn_rhg_evp.F90": NEMO / "src/ICE/icedyn_rhg_evp.F90",
     "src/ICE/iceupdate.F90": NEMO / "src/ICE/iceupdate.F90",
     "src/OCE/LBC/lbc_lnk_pt2pt_generic.h90": (
         NEMO / "src/OCE/LBC/lbc_lnk_pt2pt_generic.h90"),
@@ -2878,6 +2882,16 @@ CITATION_MAP = {
     'src/ICE/icedyn_adv_pra.F90:1226': "IF( ln_rstart ) THEN   ;   id1 = iom_varid( numrir, 'sxice' , ldstop =",
     'cfgs/ref_cfgs.txt:8': 'ORCA2_SAS_ICE OCE ICE NST SAS',
     'src/ICE/icestp.F90:341-342': ['NAMELIST/nampar/ jpl, nlay_i, nlay_s, ln_virtual_itd, ln_icedyn, ln_ic', '&             cn_icerst_in, cn_icerst_indir, cn_icerst_out, cn_icerst_', 2],
+    'src/ICE/icestp.F90:136-138': ['CALL eos_fzp( sss_m(:,:), t_bo(:,:), kbnd=0 )', 't_bo(:,:) = ( t_bo(:,:) + rt0 ) * smask0(:,:)', 3],
+    'src/ICE/icestp.F90:151': ('CALL store_fields             ! Store now ice values', 1),
+    'src/ICE/icestp.F90:421-423': ['DO_2D( nn_hls, nn_hls, nn_hls, nn_hls  )', 'v_ice_b(ji,jj) = v_ice(ji,jj)', 3],
+    'src/ICE/icestp.F90:399-418': ['a_i_b (ji,jj,jl)   = a_i (ji,jj,jl)', 'at_i_b(:,:)  = SUM( a_i_b(:,:,:), dim=3 )', 20],
+    'src/ICE/icethd.F90:163,518': ['CALL ice_thd_1d2d( jl, 2 )', 't_si_1d       (1:npti), t_si       (:,:,kl)', 2],
+    'src/ICE/icethd.F90:183-201': ['CALL ice_cor( kt , 2 )', "CALL lbc_lnk( 'icethd', u_ice, 'U', -1.0_wp", 19],
+    'src/ICE/icedyn.F90:132-134': [('CALL ice_dyn_rhg   ( kt, Kmm )', 1), 'CALL ice_dyn_rdgrft( kt )', 3],
+    'src/ICE/icedyn_rhg_evp.F90:791-827': [('DO_2D( nn_hls, nn_hls-1, nn_hls, nn_hls-1 )', 3), 'zdelta(ji,jj)   = SQRT( pdivu_i(ji,jj)', 37],
+    'src/ICE/icethd_sal.F90:231,239,489,596,624': ['sfx_bri_1d(ji) = sfx_bri_1d(ji) - rhoi * a_i_1d(ji) * h_i_1d(ji) * zds(1)', 'sfx_res_1d(ji) = sfx_res_1d(ji) - rhoi * a_i_1d(ji) * h_i_1d(ji) * ( s_i_1d(ji) - zsal )', ('sfx_bri_1d(ji) = sfx_bri_1d(ji) - rhoi * a_i_1d(ji) * h_i_1d(ji) * r1_nlay_i * zds(jk)', 1), ('sfx_bri_1d(ji) = sfx_bri_1d(ji) - rhoi * a_i_1d(ji) * h_i_1d(ji) * r1_nlay_i * zds(jk)', 2), 'sfx_res_1d(ji) = sfx_res_1d(ji) - rhoi * a_i_1d(ji) * h_i_1d(ji) * r1_nlay_i * ( sz_i_1d(ji,jk) - zsal )', 5],
+    'src/ICE/icethd_zdf_bl99.F90:828-831': ['hfx_err_dif_1d(ji) = hfx_err_dif_1d(ji) + zhfx_err', 'hfx_dif_1d(ji) = hfx_dif_1d(ji) - zdq * r1_Dt_ice * a_i_1d(ji)', 4],
     'src/ICE/iceistate.F90:465-470': ['NAMELIST/namini/ ln_iceini, nn_iceini_file, rn_thres_sst, &', '&             sn_hti, sn_hts, sn_ati, sn_tsu, sn_tmi, sn_smi, sn_tms, ', 6],
     'scripts/validate/ocean_fidelity/testcases/nemo_si3_o1_orca2_sas_acquisition/o1_si3_state_writer.F90:1-251': [('MODULE o1_si3_state_writer', 1), 'END MODULE o1_si3_state_writer', 251],
     'scripts/validate/ocean_fidelity/testcases/nemo_si3_o1_orca2_sas_acquisition/o1_si3_state_writer.F90:6': 'USE, INTRINSIC :: iso_fortran_env, ONLY : int32, real64',
@@ -13592,6 +13606,72 @@ CITATION_MAP.update({
 
 UNAUDITED_ROUNDS = ("1-24 -- hand-checked only; their citations are not in "
                     "CITATION_MAP and this gate does not read them")
+
+# Resume 3 added live category carries/tests and one dispatcher line.  Keep the
+# receipts' historical citation spellings, but audit their anchors at the new
+# live-source locations.  The explicit extents make insertions within a cited
+# routine visible to the full-map ratchet.
+def _resume3_reline(key: str, lines: str, extent: int, anchors=None) -> None:
+    value = CITATION_MAP[key]
+    if anchors is None:
+        adjusted = _catchup_value(value, f"{key.rsplit(':', 1)[0]}:{lines}", extent)
+        anchors = adjusted.get("anchors") if isinstance(adjusted, dict) else adjusted
+    CITATION_MAP[key] = {"lines": lines, "anchors": anchors}
+
+
+for _key, _lines, _extent in (
+    ('packages/ice/legoesm/ice/si3_thd_pnd.py:235-572', '248-583', 336),
+    ('packages/ice/legoesm/ice/si3_thd_pnd.py:493-495', '506-508', 3),
+    ('packages/ice/legoesm/ice/si3_thd_pnd.py:286,530-563', '299,543-576', 35),
+    ('packages/ice/legoesm/ice/si3_thd_pnd.py:289,406-408', '302,419-421', 4),
+    ('packages/ice/legoesm/ice/si3_thd_pnd.py:294-323', '307-336', 30),
+    ('packages/ice/legoesm/ice/si3_thd_pnd.py:326-354', '339-367', 29),
+    ('packages/ice/legoesm/ice/si3_thd_pnd.py:358-387', '371-400', 30),
+    ('packages/ice/legoesm/ice/si3_thd_pnd.py:390-414', '403-427', 25),
+    ('packages/ice/legoesm/ice/si3_thd_pnd.py:168-232', '181-245', 65),
+    ('packages/ice/legoesm/ice/si3_thd_pnd.py:200-211', '213-224', 12),
+    ('packages/ice/legoesm/ice/si3_thd_pnd.py:214-232', '227-245', 19),
+    ('packages/ice/legoesm/ice/si3_thd_pnd.py:311,316', '324,329', 2),
+    ('packages/ice/legoesm/ice/si3_thd_pnd.py:373-382', '386-395', 10),
+    ('tests/ice/unit/test_si3_o12_pnd.py:1651-1785', '1755-1889', 135),
+    ('tests/ice/unit/test_si3_o12_pnd.py:1788-1807', '1892-1911', 20),
+    ('tests/ice/unit/test_si3_o12_pnd.py:1810-1837', '1914-1941', 28),
+    ('tests/ice/unit/test_si3_o12_pnd.py:1840-1867', '1944-1971', 28),
+    ('tests/ice/unit/test_si3_o12_pnd.py:1870-1911', '1974-2015', 42),
+    ('tests/ice/unit/test_si3_o12_pnd.py:1914-2183', '2018-2202', 185),
+    ('tests/ice/unit/test_si3_o12_pnd.py:2186-2407', '2290-2511', 222),
+    ('tests/ice/unit/test_si3_o12_pnd.py:2410-2610', '2514-2714', 201),
+    ('tests/ice/unit/test_si3_o12_pnd.py:2613-2860', '2717-2964', 248),
+    ('tests/ice/unit/test_si3_o12_pnd.py:2863-3027', '2967-3131', 165),
+    ('tests/ice/unit/test_si3_o12_pnd.py:3030-3200', '3134-3304', 171),
+    ('tests/ice/unit/test_si3_o12_pnd.py:3203-3333', '3307-3437', 131),
+    ('tests/ice/unit/test_si3_o12_pnd.py:3336-3793', '3440-3897', 458),
+    ('scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o16_master_gate.py:701-741', '701-752', 52),
+    ('packages/ice/legoesm/ice/si3_thd_pnd.py:575-781', '588-793', 206),
+    ('packages/ice/legoesm/ice/si3_thd_pnd.py:701', '714', 1),
+    ('packages/ice/legoesm/ice/si3_thd_pnd.py:717-735', '730-748', 19),
+    ('packages/ice/legoesm/ice/si3_thd_pnd.py:738-781', '751-793', 43),
+    ('packages/ice/legoesm/ice/sea_ice.py:3120-3159', '3121-3160', 40),
+    ('packages/ice/legoesm/ice/sea_ice.py:2941-2962', '2942-2963', 22),
+    ('packages/ice/legoesm/ice/sea_ice.py:3335-3407', '3336-3408', 73),
+    ('packages/ice/legoesm/ice/sea_ice.py:3354-3386', '3355-3387', 33),
+    ('packages/ice/legoesm/ice/sea_ice.py:1783-1861,3086-3094,3328-3489', '1784-1862,3087-3095,3329-3490', 250),
+    ('packages/ice/legoesm/ice/sea_ice.py:428-441,1811-1815,2923-2971,3108-3188,3328-3451,3496-3498', '428-441,1812-1816,2924-2972,3109-3189,3329-3452,3497-3499', 276),
+    ('packages/ice/legoesm/ice/sea_ice.py:428-441,483,1811-1815,2462-2487,2553-2619,2923-2971,3108-3188,3328-3451,3496-3498,3618-3635', '428-441,483,1812-1816,2463-2488,2554-2620,2924-2972,3109-3189,3329-3452,3497-3499,3619-3636', 388),
+):
+    _resume3_reline(_key, _lines, _extent)
+
+_resume3_reline(
+    'packages/ice/legoesm/ice/sea_ice.py:642-725', '642-727', 86,
+    anchors=['def _si3_orca2_o2_step_with_trace(', ('    )', 39), 86],
+)
+_resume3_reline(
+    'packages/ice/legoesm/ice/si3_thd_pnd.py:784-988', '797-1014', 218,
+    anchors=['def si3_ice_thd_o12_stages(',
+             'return SI3O12Stages(categories=tuple(cat_outputs), pnd=pnd_out, fluxes=live_out)',
+             218],
+)
+
 
 _NAME = (r"[A-Za-z0-9_./]+\.(?:F90|f90|h90|py|fcm)"
          r"|[A-Za-z0-9_./]*(?:namelist_cfg|namelist_ref|namelist_ice_cfg|namelist_ice_ref|ocean\.output\.excerpt|ocean\.output)"

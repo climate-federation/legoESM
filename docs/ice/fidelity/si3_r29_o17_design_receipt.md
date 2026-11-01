@@ -243,23 +243,26 @@ forcing as a production full-step input, so restoring the exception contract
 does not invent any forcing or weaken either gate.
 
 The production step now includes every cited tail operation rather than taking
-it as forcing: `t_bo` is formed at `icestp.F90:136-138`; `u_ice_b/v_ice_b` at
-the first `store_fields` boundary (`icestp.F90:151`, `icestp.F90:421-423`);
-`a_i_b/at_i_b` at the second `store_fields` boundary (`icestp.F90:184`,
-`icestp.F90:399-418`); `diag_set0` resets owned `t_si` at
-`icestp.F90:485-488`; category unpack retains `t_si` at
-`icethd.F90:163,334,533-534`; and the post-`ice_cor(kt,2)` ageing, T/U/V halo
+it as forcing: `t_bo` is formed at `src/ICE/icestp.F90:136-138`;
+`u_ice_b/v_ice_b` at the first `store_fields` boundary
+(`src/ICE/icestp.F90:151`, `src/ICE/icestp.F90:421-423`); `a_i_b/at_i_b` at the
+second `store_fields` boundary (`src/ICE/icestp.F90:184`,
+`src/ICE/icestp.F90:399-418`); `diag_set0` resets owned `t_si` at
+`src/ICE/icestp.F90:488`; category unpack retains `t_si` at
+`src/ICE/icethd.F90:163,518`; and the post-`ice_cor(kt,2)` ageing, T/U/V halo
 links, category sum, and melted-edge velocity zeroing are transcribed from
-`icethd.F90:183-201`. C-grid deformation now occurs between aEVP and Prather
-advection, matching `icedyn.F90:132-134` and
-`icedyn_rhg_evp.F90:788-836`.
+`src/ICE/icethd.F90:183-201`. C-grid deformation now occurs between aEVP and
+Prather advection, matching `src/ICE/icedyn.F90:132-134` and
+`src/ICE/icedyn_rhg_evp.F90:791-827`.
 
 The admitted live O9--O12 category loop now returns its carried module flux
 state. Salinity's `sfx_res/sfx_bri` are retained from
-`icethd_sal.F90:1335-1340`; diffusion's `hfx_err_dif/hfx_dif` are carried from
-`icethd_zdf_bl99.F90:786,838-841`; the already admitted category aggregation is
-used directly. The five-snapshot replay arm is unchanged. The live-arm unit
-test numerically proves all four carries across all five categories.
+`src/ICE/icethd_sal.F90:231,239,489,596,624`; diffusion's
+`hfx_err_dif/hfx_dif` are carried from
+`src/ICE/icethd_zdf_bl99.F90:828-831`; the already admitted category
+aggregation is used directly. The five-snapshot replay arm is unchanged. The
+live-arm unit test numerically proves all four carries across all five
+categories.
 
 The O17 unit gate executes one mixed open/ice, five-category, snow-and-pond
 step through the real `si3_o17_step` in eager and compiled modes. Its red
