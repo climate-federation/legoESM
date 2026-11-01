@@ -1474,6 +1474,9 @@ def curriculum_n_segs(yml, leads, n_epochs) -> tuple:
         "train_curriculum_hours") or [leads[-1]])
     if any(isinstance(h, bool) or not isinstance(h, int) for h in hrs):
         raise ValueError(f"loss.train_curriculum_hours {hrs} must be integer hours.")
+    if hrs[-1] != leads[-1]:
+        raise ValueError(f"loss.train_curriculum_hours {hrs} must end at the "
+                         f"last lead {leads[-1]} h, or later leads never train.")
     if any(h not in leads for h in hrs) or hrs != sorted(set(hrs)):
         raise ValueError(f"loss.train_curriculum_hours {hrs} must be increasing "
                          f"leads out of train_leads_hours {list(leads)}.")

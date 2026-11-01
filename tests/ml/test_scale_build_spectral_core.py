@@ -411,7 +411,9 @@ def test_supervised_leads_and_curriculum():
     with pytest.raises(ValueError, match="consecutive multiples"):
         supervised_leads({"loss": {"train_leads_hours": [6, 12, 24]}})
     with pytest.raises(ValueError, match="increasing"):
-        curriculum_n_segs({"loss": {"train_curriculum_hours": [12, 6]}}, leads, 12)
+        curriculum_n_segs({"loss": {"train_curriculum_hours": [12, 6, 24]}}, leads, 12)
+    with pytest.raises(ValueError, match="must end at the last lead"):
+        curriculum_n_segs({"loss": {"train_curriculum_hours": [6, 12]}}, leads, 12)
 
 
 def test_multi_lead_loss_is_mean_over_scored_leads():
