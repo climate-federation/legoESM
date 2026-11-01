@@ -199,6 +199,7 @@ __param_spec__ = {
             "mg2_presence_ramp_top": "numerics: solver/smoothing/tolerance/iteration parameter",
             "mg2_frozen_rain_ice_ramp_frac": "numerics: solver/smoothing/tolerance/iteration parameter",
             "mg2_drop_readjust_log_width": "numerics: solver/smoothing/tolerance/iteration parameter",
+            "mg2_drop_early_reset_log_width": "numerics: solver/smoothing/tolerance/iteration parameter",
             "nuc_T_sharpness": "numerics: solver/smoothing/tolerance/iteration parameter",
             "nuc_rh_sharpness": "numerics: solver/smoothing/tolerance/iteration parameter",
             "saturation_sharpness": "numerics: solver/smoothing/tolerance/iteration parameter",
@@ -1202,6 +1203,12 @@ class MorrisonConfig(NamedTuple):
     # (#2216, codex + GLM 2026-11-01; KNOWN DIFFERENCE in
     # _warm_rain.mg2_droplet_number_readjust).
     mg2_drop_readjust_log_width: float = 0.01
+    # RULE 5 smoothing of MG2's EARLY droplet size reset (size_dist_param_liq
+    # before autoconversion, micro_mg2_0.F90:1296; its number and PSD feed
+    # every droplet sink and snow riming; prognostic droplet number only):
+    # same LogSumExp form and default as the readjust; 0 = MG2's hard clip
+    # (#2216, user 2026-11-01; KNOWN DIFFERENCE at the morrison.py call).
+    mg2_drop_early_reset_log_width: float = 0.01
 
 
 # Hard ceiling of ``sed_cfl_substeps_max`` wherever it is set (leaf, applier,

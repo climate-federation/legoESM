@@ -641,7 +641,20 @@ def morrison_microphysics(
             # droplet-number sink below.
             # The shape (pgam, lamc) comes from the PRE-reset number, as MG2
             # keeps it (:1296); riming reads it below.
-            N_c_ic, _pgam_c, _lamc_c = mg2_size_dist_liq(q_c_ic, N_c_ic, rho)
+            # RULE 5: both size limits rounded by mg2_drop_early_reset_log_width
+            # (0 = MG2's hard clip).  KNOWN DIFFERENCE (#2216): the port moves
+            # the number (and lamc) of cells within a few widths of a bound
+            # (in ln lambda) inward too; the 2 um / qcic/1e-20 limits hold for
+            # every width, 50 um is passed by at most
+            # w*ln(1 + 25**(-1/w)) in ln D (see mg2_droplet_number_readjust).
+            # Measured at the default 0.01 on the prognostic-number oracle
+            # fixtures (x64, every other switch hard): the whole-call droplet
+            # tendency moves by up to 1.9e-5 of the column's largest MG2
+            # droplet tendency; per-column table GAP in tests/atmosphere/
+            # microphysics/unit/test_morrison_mg2_drop_early_reset_smooth.py.
+            _w = config.mg2_drop_early_reset_log_width
+            N_c_ic, _pgam_c, _lamc_c = mg2_size_dist_liq(
+                q_c_ic, N_c_ic, rho, number_cap_log_width=_w, slope_log_width=_w)
         dq_c_au, dN_r_au, x_c = autoconversion_kk2000_cam6(
             q_c_ic, N_c_ic, rho, _relvar,
             fact=config.autocon_fact, nc_floor=not _prog_nc,
