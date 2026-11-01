@@ -211,9 +211,12 @@ def main_deck(args):
             eval_year=int(str(t_sub[0])[:4]), n_inits=n_sub + 1,
             init_stride_hours=cadence, resolution_deg=args.resolution_deg,
             ds=sub, microphysics=wb_ic_microphysics(args.mode, yml))
-        got = [int(str(t)[11:13]) for t in t_sub[1:1 + n_sub]]
-        if got != hours or len(cases) != n_sub + 1:
-            raise SystemExit(f"window {a}:{b} hours {got} != {hours}")
+        # build_forecast_cases puts case j at its anchor + j cadences; the
+        # pairing is right only if that anchor is the slice's first time.
+        anchor = int(np.searchsorted(
+            t_sub, np.datetime64(f"{str(t_sub[0])[:4]}-01-01")))
+        if anchor != 0 or len(cases) != n_sub + 1:
+            raise SystemExit(f"window {a}:{b}: case anchor {anchor} != 0")
         dates.append(str(t_sub[1]))
         for j in range(n_sub):
             verif = cases[j].verif_by_lead[cadence]
@@ -249,6 +252,8 @@ def main(argv=None):
         if args.n_inits is None or args.init_stride_hours is None:
             raise SystemExit("--config needs explicit --n-inits and "
                              "--init-stride-hours (the scorecard's sample)")
+        if args.n_inits < 1 or args.init_stride_hours < 1:
+            raise SystemExit("--n-inits and --init-stride-hours must be >= 1")
         out = main_deck(args)
         text = json.dumps(out, indent=2)
         print(text)

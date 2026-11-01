@@ -48,6 +48,8 @@ def test_aggregate_is_mean_over_cases_and_nan_is_fatal():
     ["--config", "x.yaml", "--mode", "sfno"],                          # no sample
     ["--config", "x.yaml", "--mode", "sfno", "--n-inits", "24"],       # no stride
     ["--config", "x.yaml", "--n-inits", "24", "--init-stride-hours", "360"],
+    ["--config", "x.yaml", "--mode", "sfno", "--n-inits", "0",
+     "--init-stride-hours", "360"],
 ])
 def test_deck_mode_refuses_implicit_sample_or_mode(argv):
     with pytest.raises(SystemExit):
