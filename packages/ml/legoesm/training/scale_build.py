@@ -152,6 +152,9 @@ def _training_sample_indices(cfg, yml, times, snaps_per_day, stride):
             break
 
 
+# Validation of a deck without a ``validation`` block (owner 2026-11-01).
+_LEGACY_VALIDATION = {"years": [2014], "n_inits": 24, "init_stride_hours": 360}
+
 # Internal (never a deck key): the validation deck's explicit init list.
 _VAL_INITS_KEY = "_val_inits"
 
@@ -159,49 +162,30 @@ _VAL_INITS_KEY = "_val_inits"
 def wb_validation_yaml(yml: dict, n_windows: int) -> dict:
     """The deck, with its training windows replaced by HELD-OUT ones.
 
-    With a ``validation`` block: its single held-out year, scored with the test
+    The ``validation`` block's single held-out year, scored with the test
     protocol (``n_inits`` single-time inits, ``init_stride_hours`` apart from
-    1 January 00 UTC).  Without one (older decks): windows from ``eval_years``
-    -- the same years the scorecard
-    scores -- spread evenly over the calendar so the validation number is not
-    one season's weather. Everything else (grid, cadence, lead time, loss) is
-    the deck's own, because a validation loss computed under a different
-    protocol than the training loss is not comparable to it.
+    1 January 00 UTC); a deck without the block validates on
+    ``_LEGACY_VALIDATION`` (owner 2026-11-01: never on the test year).
+    Everything else (grid, cadence, lead time, loss) is the deck's own, because
+    a validation loss computed under a different protocol than the training
+    loss is not comparable to it.
     """
-    val = yml.get("validation")
-    if val is not None:
-        # Held-out VALIDATION year(s), scored with the test protocol: n_inits
-        # single-time inits, init_stride_hours apart from 1 January 00 UTC.
-        years = [int(y) for y in val["years"]]
-        n, stride = int(val["n_inits"]), int(val["init_stride_hours"])
-        if set(years) & {int(y) for y in (yml.get("eval_years") or [])}:
-            raise ValueError("validation.years must not overlap eval_years.")
-        if set(years) & {int(y) for y in (yml.get("train_years") or [])}:
-            raise ValueError("validation.years must not overlap train_years.")
-        if int(n_windows) != n:
-            raise ValueError(f"--val-windows {n_windows} != validation.n_inits {n}.")
-        out = dict(yml)
-        out.pop("train_windows", None)
-        out["train_years"] = years
-        if len(years) != 1:
-            raise ValueError("validation.years must name exactly one year "
-                             "(the test protocol scores one year).")
-        out[_VAL_INITS_KEY] = [[years[0], k * stride] for k in range(n)]
-        return out
-    years = list(yml.get("eval_years") or [])
-    if not years:
-        raise ValueError(
-            "--val-windows needs `eval_years` in the campaign YAML: there is "
-            "no held-out year to validate on.")
-    # Month starts, evenly spread, cycling the eval years.
-    starts = [0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334]
-    windows = []
-    for i in range(int(n_windows)):
-        year = int(years[i % len(years)])
-        windows.append([year, starts[(i * 5) % len(starts)], 1])
+    val = yml.get("validation") or dict(_LEGACY_VALIDATION)
+    years = [int(y) for y in val["years"]]
+    n, stride = int(val["n_inits"]), int(val["init_stride_hours"])
+    if set(years) & {int(y) for y in (yml.get("eval_years") or [])}:
+        raise ValueError("validation.years must not overlap eval_years.")
+    if set(years) & {int(y) for y in (yml.get("train_years") or [])}:
+        raise ValueError("validation.years must not overlap train_years.")
+    if int(n_windows) != n:
+        raise ValueError(f"--val-windows {n_windows} != validation.n_inits {n}.")
     out = dict(yml)
-    out["train_windows"] = windows
+    out.pop("train_windows", None)
     out["train_years"] = years
+    if len(years) != 1:
+        raise ValueError("validation.years must name exactly one year "
+                         "(the test protocol scores one year).")
+    out[_VAL_INITS_KEY] = [[years[0], k * stride] for k in range(n)]
     return out
 
 
@@ -282,6 +266,8 @@ def _era5_store_groups(era5_cfg, sst_cfg):
         tuple(era5_cfg.surface_variables) + _ERA5_CACHE_EXTRA_STATE_VARS)
     if era5_cfg.load_surface_targets:
         add(state, (), _ERA5_CACHE_SURFACE_TARGET_VARS)
+    if sst_cfg.load_soil_moisture:
+        add(state, (), ("volumetric_soil_water_layer_1",))
     if era5_cfg.load_cloud_condensate:
         add(era5_cfg.cloud_zarr or state, _ERA5_CACHE_CLOUD_VARS)
     if sst_cfg.load_surface_fluxes:
@@ -579,7 +565,7 @@ def build_latlon_config(cfg, yml):
 _WB_CONSUMED_TOP_KEYS = frozenset({
     "classical", "convection", "dt", "era5_cadence_hours",
     "cache_dir", "era5_cloud_condensate", "era5_cloud_zarr", "era5_flux_zarr",
-    "era5_surface_fluxes", "era5_zarr", "eval_years",
+    "era5_soil_moisture", "era5_surface_fluxes", "era5_zarr", "eval_years",
     "grad_accum", "grad_clip_norm", "gravity_wave_drag", "loss", "lr",
     "microphysics", "n_epochs", "n_lat", "n_lon", "n_training_days",
     "neural_gcm", "nlev", "optimizer", "rad_update_steps", "radiation",
@@ -624,7 +610,7 @@ _WB_CLASSICAL_KEYS = frozenset({
 _WB_NEURAL_KEYS = frozenset({
     "surface_drag", "surface_drag_scheme", "surface_drag_confounded",
     "nn_hidden", "nn_layers", "gauss_n_max", "sfno_embed_dim", "sfno_n_blocks",
-    "sfno_mlp_expansion", "spatial_embedding",
+    "sfno_mlp_expansion", "spatial_embedding", "land_inputs",
 })
 
 
@@ -655,7 +641,8 @@ def wb_needs_land_frac(mode: str, yml: dict) -> bool:
         return True
     if mode in ("neural_gcm", "sfno"):
         ov = yml.get(mode, {}) or {}
-        return bool(ov.get("spatial_embedding", False))
+        return bool(ov.get("spatial_embedding", False)
+                    or ov.get("land_inputs", False))
     return False
 
 
@@ -1692,7 +1679,8 @@ def wb_era5_config(cfg, yml):
     c = c._replace(
         load_surface_fluxes=bool(yml.get("era5_surface_fluxes", False)),
         load_land_frac=wb_needs_land_frac(getattr(cfg, "mode", None), yml),
-        load_surface_targets=wb_needs_surface_targets(yml))
+        load_surface_targets=wb_needs_surface_targets(yml),
+        load_soil_moisture=bool(yml.get("era5_soil_moisture", False)))
     if "era5_flux_zarr" in yml:
         # An explicit "" selects the STATE store as the flux store (the
         # loader's documented option), so the key's presence decides.
@@ -1734,6 +1722,9 @@ def prescribed_surface_planes(sl, grid):
                      "sfc_sw_up", "sfc_sw_down", "sfc_lw_up"):
             planes[_key] = jnp.asarray(regrid_2d_to_gaussian(
                 getattr(sl, _key), sl.lat, sl.lon, grid))
+    if sl.soil_moisture is not None:
+        planes["soil_moisture"] = jnp.asarray(regrid_2d_to_gaussian(
+            sl.soil_moisture, sl.lat, sl.lon, grid))
     if sl.land_frac is not None:
         # Static 0..1 mask; interpolation can overshoot, clip back.
         planes["land_frac"] = jnp.asarray(np.clip(regrid_2d_to_gaussian(
@@ -1878,7 +1869,8 @@ def wb_state_cache_configs(cfg, yml):
     record is built with -- the same split as the sample loader."""
     sst_cfg = wb_era5_config(cfg, yml)._replace(load_cloud_condensate=False)
     era5_cfg = wb_era5_config(cfg, yml)._replace(
-        load_surface_fluxes=False, load_land_frac=False)
+        load_surface_fluxes=False, load_land_frac=False,
+        load_soil_moisture=False)
     return era5_cfg, sst_cfg, wb_ic_microphysics(cfg.mode, yml)
 
 

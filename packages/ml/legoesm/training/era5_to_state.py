@@ -43,6 +43,7 @@ _ERA5_VAR_ALIASES = {
     'land_sea_mask': 'lsm',
     '10m_u_component_of_wind': 'u10', '10m_v_component_of_wind': 'v10',
     'mean_sea_level_pressure': 'msl',
+    'volumetric_soil_water_layer_1': 'swvl1',
     'mean_surface_sensible_heat_flux': 'msshf',
     'mean_surface_latent_heat_flux': 'mslhf',
     'mean_eastward_turbulent_surface_stress': 'metss',
@@ -302,6 +303,9 @@ class TrainingERA5Config(NamedTuple):
     # mean sea-level pressure) as surface-loss TARGETS; a missing or
     # non-finite field is a hard error.
     load_surface_targets: bool = False
+    # ERA5 top-layer volumetric soil moisture (m3/m3) as a prescribed input
+    # plane, held at its initial-time value; non-finite is a hard error.
+    load_soil_moisture: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -628,6 +632,7 @@ class ERA5Slice(NamedTuple):
     u10: np.ndarray = None          # 10 m eastward wind [m/s]
     v10: np.ndarray = None          # 10 m northward wind [m/s]
     msl: np.ndarray = None          # mean sea-level pressure [Pa]
+    soil_moisture: np.ndarray = None  # top-layer volumetric soil water [m3/m3]
 
 
 def _assert_required_era5_vars(ds_t, ds) -> None:
@@ -1135,6 +1140,13 @@ def load_era5_slice(
                     f"load_era5_slice: surface target {name!r} has non-finite "
                     f"values at time index {time_idx}; refusing to train on it.")
             sfc_targets[key] = f
+
+    if config.load_soil_moisture:
+        _sm = _get_2d("volumetric_soil_water_layer_1", required=True)
+        if not np.all(np.isfinite(_sm)):
+            raise ValueError("load_era5_slice: volumetric_soil_water_layer_1 has "
+                             f"non-finite values at time index {time_idx}.")
+        sfc_targets["soil_moisture"] = _sm
 
     return ERA5Slice(
         T=_get_3d("temperature"),

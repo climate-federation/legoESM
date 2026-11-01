@@ -159,3 +159,23 @@ def test_validation_init_must_exist_in_the_store():
     times = np.datetime64("2015-01-01") + np.arange(40) * np.timedelta64(6, "h")
     with pytest.raises(ValueError, match="not in the ERA5 store"):
         list(sb._training_sample_indices(SimpleNamespace(smoke=False), yml, times, 4, 4))
+
+
+def test_deck_without_validation_block_validates_on_2014():
+    v = sb.wb_validation_yaml({"train_years": [2015], "eval_years": [2020]}, 24)
+    assert v["train_years"] == [2014]
+    assert v[sb._VAL_INITS_KEY] == [[2014, 360 * k] for k in range(24)]
+    with pytest.raises(ValueError, match="n_inits"):
+        sb.wb_validation_yaml({"train_years": [2015], "eval_years": [2020]}, 6)
+
+
+def test_soil_moisture_plane_and_land_inputs_flag():
+    import jax.numpy as jnp
+    from types import SimpleNamespace as NS
+    assert sb.wb_needs_land_frac("sfno", {"sfno": {"land_inputs": True}})
+    assert not sb.wb_needs_land_frac("sfno", {"sfno": {}})
+    c = sb.wb_era5_config(NS(mode="sfno"), {"era5_zarr": "x", "era5_soil_moisture": True})
+    assert c.load_soil_moisture
+    e, f, _ = sb.wb_state_cache_configs(NS(mode="sfno"), {"era5_zarr": "x",
+                                                          "era5_soil_moisture": True})
+    assert f.load_soil_moisture and not e.load_soil_moisture
