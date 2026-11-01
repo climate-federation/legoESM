@@ -1122,9 +1122,15 @@ def mg2_droplet_fall_coefficients(q_c, N_c_kg, lcldm, T, rho, *, presence_top, *
     their fall speeds differ from MG2's; the 2 um bound holds for every width
     (50 um is passed by at most w*ln(1 + 25**(-1/w)) in ln D, see
     :func:`mg2_droplet_number_readjust`).  Measured at the default 0.01 on the
-    prognostic-number oracle fixtures (x64, every other switch hard): per-column
-    table GAP in tests/atmosphere/microphysics/unit/
-    test_morrison_mg2_sed_reset_smooth.py."""
+    prognostic-number oracle fixtures (x64, every other switch hard): the
+    whole-call droplet tendency moves by up to 1.7e-5 and the cloud-water
+    sedimentation by up to 3.0e-4 of the column's largest MG2 value; per-column
+    tables GAP / GAP_QC in tests/atmosphere/microphysics/unit/
+    test_morrison_mg2_sed_reset_smooth.py.  Production (specified droplet
+    number) never calls this: gap 0.  Prognostic arm, offline, one step on
+    jan1979_main1027 days 10/20/30 (#2216): mass-weighted q_c and N_c
+    sedimentation, cloud-water and droplet-number change move by <= 1.7e-5
+    relative (global, SO 40-65S; 950-700 hPa and column)."""
     g = constants.g
     has_c = q_c / lcldm >= MG2_QSMALL
     on = mg2_presence(q_c / lcldm, presence_top)
