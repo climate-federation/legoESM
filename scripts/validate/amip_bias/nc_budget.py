@@ -371,6 +371,8 @@ def reset_ab_rows(micro_calls: list) -> dict:
     gate(len(micro_calls) > 0, f"{len(micro_calls)} microphysics calls recorded both arms")
     gate(all(c["width"] > 0.0 for c in micro_calls),
          f"configured {RESET_FIELD} > 0 (else the comparison is vacuous)")
+    gate(all(len(c[a]["qc"]) > 0 for c in micro_calls for a in ("hard", "default")),
+         "both arms published a cloud-water budget")
     out = {}
     for arm in ("hard", "default"):
         for c in micro_calls:

@@ -458,8 +458,8 @@ def main(argv=None):
     args = ap.parse_args(argv)
     if args.no_graupel_riming and not args.nc_budget:
         ap.error("--no-graupel-riming needs --nc-budget")
-    if args.reset_width_ab and args.nc_budget:
-        ap.error("--reset-width-ab and --nc-budget are separate modes")
+    if args.reset_width_ab and (args.nc_budget or args.rlutcs_replay):
+        ap.error("--reset-width-ab is its own mode (not with --nc-budget / --rlutcs-replay)")
     t0 = time.time()
     out_dir = Path(args.out or (H.ROOT / "_tools" / "heating_budget"))
     out_dir.mkdir(parents=True, exist_ok=True)

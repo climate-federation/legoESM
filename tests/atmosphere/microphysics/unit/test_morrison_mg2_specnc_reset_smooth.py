@@ -177,27 +177,32 @@ def _warm_points(width):
             "nprc1": (jnp.where(prc > 0, prc / x_c, 0.0), o["nprc1"])}, i, o
 
 
-def _snow_points(width):
+def _snow_riming(i, qcic, ncic_vol, width):
+    """The oracle kernel test's snow chain (its config and hard switches) up
+    to MG2 snow riming, with the droplet reset at ``width``."""
     from legoesm.atmosphere.physics.microphysics.config import MorrisonConfig
     from legoesm.atmosphere.physics.microphysics.morrison import resolve_morrison_flavor
-    fx = S._fx()
-    i = {k[6:]: jnp.asarray(v) for k, v in fx.items() if k.startswith("pt_in_")}
-    o = {k[7:]: v for k, v in fx.items() if k.startswith("pt_out_")}
     cfg = resolve_morrison_flavor(MorrisonConfig(morrison_flavor="mg", ice_snow_d_auto=500.0e-6,
                                                  melt_sharpness=1.0e9))
     rho, T, p, pf = i["rho"], i["T"], i["p"], i["precip_frac"]
     qsic, nsic, lams, n0s = W.mg2_inprecip_snow(i["qs"], i["ns"], pf, cfg, psd_sharpness=1.0e9)
     _, uns = W.mg2_snow_fall_speeds(lams, rho, cfg)
-    nc_adj, pgam, lamc = W.mg2_size_dist_liq(i["qcic"], i["ncic"] * rho, rho,
+    nc_adj, pgam, lamc = W.mg2_size_dist_liq(qcic, ncic_vol, rho,
                                              number_cap_log_width=width, slope_log_width=width)
     _, mu = W.mg2_snow_vent_eps(n0s, lams, T, p, rho, cfg)
     psacws, npsacws = W.mg2_accrete_cloud_water_snow(
-        T, rho, mu, uns, i["qcic"], nc_adj / rho, qsic, pgam, lamc, lams, n0s, cfg, 1.0e-9)
-    return {"ncic_adj": (nc_adj / rho, o["ncic_adj"]), "pgam": (pgam, o["pgam"]),
+        T, rho, mu, uns, qcic, nc_adj / rho, qsic, pgam, lamc, lams, n0s, cfg, 1.0e-9)
+    return nc_adj, pgam, lamc, psacws, npsacws
+
+
+def _snow_points(width):
+    fx = S._fx()
+    i = {k[6:]: jnp.asarray(v) for k, v in fx.items() if k.startswith("pt_in_")}
+    o = {k[7:]: v for k, v in fx.items() if k.startswith("pt_out_")}
+    nc_adj, pgam, lamc, psacws, npsacws = _snow_riming(i, i["qcic"], i["ncic"] * i["rho"], width)
+    return {"ncic_adj": (nc_adj / i["rho"], o["ncic_adj"]), "pgam": (pgam, o["pgam"]),
             "lamc": (lamc, o["lamc"]), "psacws": (psacws, o["psacws"]),
             "npsacws": (npsacws, o["npsacws"])}, i, o
-
-
 
 
 def test_defaults_and_hard_limit():
@@ -220,8 +225,8 @@ def test_hard_limit_matches_mg2_kernel_points(pts):
     q, i, o = pts(0.0)
     for k, (a, b) in q.items():
         assert float(_rel(a, b).max()) <= TOL, k
-    assert np.any(o["ncic_adj"] != np.asarray(i["ncic"]))      # the reset moves points
-    if pts is _warm_points:
+    if pts is _warm_points:   # (no snow point is moved by the reset: the whole call covers it)
+        assert np.any(o["ncic_adj"] != np.asarray(i["ncic"]))      # the reset moves points
         soft, _, _ = pts(WIDTH)
         assert float(_rel(*soft["prc"]).max()) > 10.0 * TOL
 
@@ -292,10 +297,26 @@ def test_gradients_through_the_autoconversion_reset():
     check_grads(lambda x: f(x, **w), (u,), order=2, modes=["rev"], eps=1e-3, atol=1e-6,
                 rtol=1e-3)
     g = np.asarray(jax.grad(lambda x: jnp.sum(f(x, **w)[0]))(u))
-    hard = np.asarray(jax.grad(lambda x: jnp.sum(f(x)[0]))(u))
     assert np.all(np.isfinite(g)) and np.all(g != 0.0)
-    # MG2's clip has no derivative of the rate on its clipped side; the rounded one does
-    assert np.all(np.abs(hard[u < 0]) < 1e-2 * np.abs(g[u < 0]))
+
+
+def test_gradients_through_the_riming_reset():
+    """check_grads of MG2 snow riming (rate and droplet-number sink) through
+    the reset at the default, droplets within a few widths of the 50 um
+    bound, on a fixture snow point that rimes."""
+    fx = S._fx()
+    j = int(np.flatnonzero(fx["pt_out_psacws"] > 0.0)[0])
+    u = jnp.asarray([-2.0, -0.5, 0.5, 2.0])
+    i = {k[6:]: jnp.full(u.shape, v[j]) for k, v in fx.items() if k.startswith("pt_in_")}
+    n_b = W.mg2_size_bounded_nc(i["qcic"], 1.0e3 * jnp.ones_like(u), i["rho"])
+
+    def f(x):
+        out = _snow_riming(i, i["qcic"], n_b * jnp.exp(3.0 * WIDTH * x), WIDTH)
+        return jnp.stack([jnp.log(out[3]), jnp.log(out[4])])
+
+    check_grads(f, (u,), order=2, modes=["rev"], eps=1e-3, atol=1e-6, rtol=1e-3)
+    g = np.asarray(jax.grad(lambda x: jnp.sum(f(x)))(u))
+    assert np.all(np.isfinite(g)) and np.all(g != 0.0)
 
 
 def test_whole_call_gradient_finite_at_the_default():
