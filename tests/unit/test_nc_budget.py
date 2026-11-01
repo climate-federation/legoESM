@@ -95,3 +95,28 @@ def test_launch_argv_reads_monthly_baseline_lines(tmp_path, monkeypatch):
     argv = H.launch_argv("arm", 30, tmp_path / "out")
     assert argv[:2] == ["--config", "x.yaml"] and "--distributed" not in argv
     assert argv[argv.index("--days") + 1] == "1"
+
+
+def test_terrain_override_reports_only_small_magnitude_drift(monkeypatch):
+    from types import SimpleNamespace
+    from legoesm.driver.model_driver import ModelDriver
+    msg = {"text": ""}
+
+    def refuse(self):
+        raise RuntimeError(msg["text"])
+    monkeypatch.setattr(ModelDriver, "_check_restart_terrain", refuse)
+    nb.report_terrain_drift()
+    check = ModelDriver._check_restart_terrain
+
+    def fake(drift):
+        b = np.full(4, 5.0e4)
+        return SimpleNamespace(_phis_data=b, state=SimpleNamespace(
+            phis=SimpleNamespace(data=b + drift)))
+    magnitude = "restart: the checkpoint's terrain differs from this run's terrain product (max |d| x)"
+    msg["text"] = magnitude
+    check(fake(5.0e4 * 1.4e-6))                       # measured size: reported
+    with pytest.raises(RuntimeError):                 # above the cap: refused
+        check(fake(5.0e4 * 2.0e-5))
+    msg["text"] = "restart: the checkpoint's terrain has shape (3,), this run's terrain product (4,)"
+    with pytest.raises(RuntimeError):                 # any other refusal: refused
+        check(fake(0.0))
