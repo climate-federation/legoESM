@@ -455,9 +455,15 @@ def main(argv=None):
                     help="#2216: microphysics early droplet size reset at the configured "
                          "width vs MG2's hard clip (width 0), same inputs, one step "
                          "(nc_budget.run_reset_ab); writes npz into --out")
+    ap.add_argument("--reset-field", default="mg2_drop_early_reset_log_width",
+                    choices=("mg2_drop_early_reset_log_width", "mg2_drop_sed_reset_log_width"),
+                    help="with --reset-width-ab: which size-reset width is set to 0 "
+                         "(the early reset, or the sedimentation fall-speed reset)")
     args = ap.parse_args(argv)
     if args.no_graupel_riming and not args.nc_budget:
         ap.error("--no-graupel-riming needs --nc-budget")
+    if args.reset_field != "mg2_drop_early_reset_log_width" and not args.reset_width_ab:
+        ap.error("--reset-field needs --reset-width-ab")
     if args.reset_width_ab and (args.nc_budget or args.rlutcs_replay):
         ap.error("--reset-width-ab is its own mode (not with --nc-budget / --rlutcs-replay)")
     t0 = time.time()
@@ -479,7 +485,8 @@ def main(argv=None):
     if args.nc_budget or args.reset_width_ab:
         import nc_budget as NCB
         NCB.install_micro_spy(micro_calls, graupel_riming=not args.no_graupel_riming,
-                              reset_width_ab=args.reset_width_ab)
+                              reset_width_ab=args.reset_width_ab,
+                              reset_field=args.reset_field)
         NCB.report_terrain_drift()
     fns: dict = {}
     rad_calls: list = []

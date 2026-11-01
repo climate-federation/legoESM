@@ -18,3 +18,7 @@ morrison_mg2_drop_early_reset_log_width: 0.01  # NAMED, equals the code
                             # default: RULE 5 width of MG2's early droplet size
                             # reset before autoconversion (0 = MG2's hard clip;
                             # #2216)
+morrison_mg2_drop_sed_reset_log_width: 0.01  # NAMED, equals the code default:
+                            # RULE 5 width of MG2's droplet size reset in the
+                            # sedimentation fall speeds (0 = MG2's hard clip;
+                            # #2216)

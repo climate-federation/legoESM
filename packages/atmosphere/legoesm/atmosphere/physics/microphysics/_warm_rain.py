@@ -1109,17 +1109,28 @@ def mg2_size_bounded_nc(q_c_ic, N_c_ic, rho, **widths):
     return jnp.where(active, nc_kg * rho, N_c_ic)
 
 
-def mg2_droplet_fall_coefficients(q_c, N_c_kg, lcldm, T, rho, *, presence_top):
+def mg2_droplet_fall_coefficients(q_c, N_c_kg, lcldm, T, rho, *, presence_top, **widths):
     """MG2 droplet ``(fc, fnc)`` [Pa/s per unit mixing ratio] (micro_mg2_0.F90:
     2056-2120): ``g rho`` x the mass- / number-weighted Stokes fall speed of the
     in-cloud size distribution of the grid state ``(q_c, N_c_kg)``; 0 where the
-    in-cloud water is below qsmall, switched on by :func:`mg2_presence`."""
+    in-cloud water is below qsmall, switched on by :func:`mg2_presence`.
+
+    ``widths``: the RULE 5 widths of the size reset (:func:`mg2_droplet_psd`;
+    none = MG2's hard clip), ``MorrisonConfig.mg2_drop_sed_reset_log_width``
+    in the model.  KNOWN DIFFERENCE (#2216): at a width > 0 the slope lamc of
+    cells within a few widths (in ln lambda) of a bound moves inward too, so
+    their fall speeds differ from MG2's; the 2 um bound holds for every width
+    (50 um is passed by at most w*ln(1 + 25**(-1/w)) in ln D, see
+    :func:`mg2_droplet_number_readjust`).  Measured at the default 0.01 on the
+    prognostic-number oracle fixtures (x64, every other switch hard): per-column
+    table GAP in tests/atmosphere/microphysics/unit/
+    test_morrison_mg2_sed_reset_smooth.py."""
     g = constants.g
     has_c = q_c / lcldm >= MG2_QSMALL
     on = mg2_presence(q_c / lcldm, presence_top)
     q_ic = jnp.where(has_c, q_c / lcldm, 0.0)
     n_ic = jnp.where(has_c, jnp.maximum(N_c_kg / lcldm, 0.0), 0.0)
-    _, pgam, lamc = mg2_size_dist_liq(q_ic, n_ic * rho, rho)
+    _, pgam, lamc = mg2_size_dist_liq(q_ic, n_ic * rho, rho, **widths)
     # MG2 gates the fall speed at qcic >= qsmall but the size distribution at
     # qcic > qsmall, so qcic == qsmall exactly divides by lamc = 0 there (inf
     # in the Fortran too); such a cell falls at 0 here.
@@ -1136,7 +1147,7 @@ def mg2_droplet_fall_coefficients(q_c, N_c_kg, lcldm, T, rho, *, presence_top):
 
 
 def mg2_cloud_sedimentation(q_c, N_c_kg, lcldm, T, rho, p_half, dt, n_substeps_max, *,
-                            presence_top):
+                            presence_top, **widths):
     """CAM6 MG2 cloud-droplet sedimentation (micro_mg2_0.F90:2056-2120,
     :2204-2216, :2319-2377) on the POST-process grid state.
 
@@ -1153,11 +1164,13 @@ def mg2_cloud_sedimentation(q_c, N_c_kg, lcldm, T, rho, p_half, dt, n_substeps_m
     ``(1-d) F(k-1)`` falling into clear air evaporates (vapour source, latent
     cooling ``L_v/c_pd``).  Returns ``(dq_c, dN_c_kg, dq_v, dT, sfc_flux,
     nstep_required)`` [kg/kg/s, 1/(kg s), kg/kg/s, K/s, kg/(m^2 s), int].
+    ``widths``: the size reset's RULE 5 widths, see
+    :func:`mg2_droplet_fall_coefficients` (none = MG2's hard clip).
     """
     g = constants.g
     pdel = p_half[:, 1:] - p_half[:, :-1]
     fc, fnc = mg2_droplet_fall_coefficients(q_c, N_c_kg, lcldm, T, rho,
-                                            presence_top=presence_top)
+                                            presence_top=presence_top, **widths)
     c0 = q_c
     n0 = mg2_presence(q_c, presence_top) * jnp.maximum(N_c_kg, 0.0)
     courant = jnp.max(jnp.maximum(fc, fnc) / pdel, axis=1) * dt
