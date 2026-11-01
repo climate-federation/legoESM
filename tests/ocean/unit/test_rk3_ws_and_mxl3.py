@@ -447,6 +447,23 @@ def test_evd_n2_time_level_dispatch_hardening():
         compute_vertical_K_profiles(state, z, None, phys, n2_tracers=nn,
                                     n2_tracers_before=bb, eta_now=eta_nn)
 
+
+def test_evd_step_entry_bn2_selector_requires_the_carried_bundle():
+    """The new selector is consumed and cannot silently use rebuilt N2."""
+    from legoesm.ocean.physics.vertical_mixing.k_profiles import (
+        compute_vertical_K_profiles,
+    )
+
+    state, z, phys, nn, bb, eta_nn = _evd_tl_fixture("nemo_now_before")
+    ed = phys.convection.enhanced_diffusion._replace(
+        smooth_transition=False, trigger_step_entry_bn2=True)
+    phys = phys._replace(
+        convection=phys.convection._replace(enhanced_diffusion=ed))
+    with pytest.raises(ValueError, match="step-entry bn2 bundle"):
+        compute_vertical_K_profiles(
+            state, z, None, phys, n2_tracers=nn,
+            n2_tracers_before=bb, eta_now=eta_nn)
+
     state, z, phys, nn, bb, eta_nn = _evd_tl_fixture("nemo_now_before")
     for kw in ({"n2_tracers": None}, {"n2_tracers_before": None},
                {"eta_now": None}):

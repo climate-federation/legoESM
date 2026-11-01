@@ -43,6 +43,30 @@ from legoesm.ocean.bulk_flux_omip import (  # noqa: E402
 from legoesm.thermo import saturation_vapor_pressure_goff  # noqa: E402
 
 
+def test_standalone_k0_config_requires_every_explicit_selector():
+    """All six record-free K0 fields participate in fail-closed validation."""
+    from legoesm.ocean.bulk_flux_omip import (
+        NemoStandaloneK0Config,
+        validate_nemo_standalone_k0,
+    )
+
+    cfg = NemoStandaloneK0Config(
+        nn_ice=1, ln_drgice_imp=False, ln_mxl0=True, nn_mxlice=0,
+        ln_icebergs=False, initial_state="nemo_k0_istate")
+    validate_nemo_standalone_k0(cfg)
+    plants = {
+        "nn_ice": 0,
+        "ln_drgice_imp": True,
+        "ln_mxl0": False,
+        "nn_mxlice": 2,
+        "ln_icebergs": True,
+        "initial_state": "si3_iceistate",
+    }
+    for field, value in plants.items():
+        with pytest.raises(ValueError, match="Decision-175 K0 selectors"):
+            validate_nemo_standalone_k0(cfg._replace(**{field: value}))
+
+
 # ---------------------------------------------------------------------------
 # Independent NumPy mirror of NEMO sbcblk_algo_ncar + sbc_phy preprocessing
 # (zt = zu = 10 m), transcribed directly from the Fortran.  Deliberately

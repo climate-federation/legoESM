@@ -49,6 +49,15 @@ from legoesm.ocean.physics.lateral_mixing.mle import (
 
 from legoesm import constants
 
+
+def test_orca2_l5_selects_fct_and_nemo_association():
+    """The record-free certified L5 constructor reaches both new fields."""
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import orca2_l5_mle
+
+    cfg = orca2_l5_mle()
+    assert cfg.through_fct is True
+    assert cfg.nemo_association is True
+
 jax.config.update("jax_enable_x64", True)
 
 # --- NEMO tramle.F90 fixed constants (typed from source; canaried below) ---
