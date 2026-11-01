@@ -29,6 +29,26 @@ from scripts.validate.ocean_fidelity.testcases.nemo_si3_o17_acquisition.prefligh
 REPO = Path(__file__).resolve().parents[3]
 
 
+def _assert_bitwise_equal(actual, expected) -> None:
+    actual_leaves = jax.tree_util.tree_flatten_with_path(actual)[0]
+    expected_leaves = jax.tree_util.tree_flatten_with_path(expected)[0]
+    assert len(actual_leaves) == len(expected_leaves)
+    mismatches = []
+    for (got_path, got), (want_path, want) in zip(
+        actual_leaves, expected_leaves, strict=True
+    ):
+        assert got_path == want_path
+        a, b = np.asarray(got), np.asarray(want)
+        assert a.shape == b.shape
+        if np.issubdtype(a.dtype, np.floating):
+            count = np.count_nonzero(a.view(np.uint64) != b.view(np.uint64))
+        else:
+            count = np.count_nonzero(a != b)
+        if count:
+            mismatches.append(f"{got_path}: {count}/{a.size}")
+    assert not mismatches, "bit mismatches:\n" + "\n".join(mismatches)
+
+
 def test_o17_typed_pytree_boundary_and_explicit_card() -> None:
     assert SI3O17LiveForcing._fields[:4] == ("kt", "sss_m", "sst_m", "rn_amax_2d")
     assert not (
@@ -135,9 +155,28 @@ def test_o17_step_executes_active_ice_eager_jit_and_numerical_plants() -> None:
         eager = run(entry, dynamic)
 
     compiled = jax.jit(run)(entry, dynamic)
-    for got, want in zip(compiled, eager, strict=True):
-        np.testing.assert_allclose(np.asarray(got), np.asarray(want), rtol=0.0, atol=1.0e-12, equal_nan=True)
+    _assert_bitwise_equal(compiled, eager)
     assert np.count_nonzero(np.asarray(eager[2])) > 0
+    h = card.state.nn_hls
+    owned = (slice(h, -h), slice(h, -h))
+    np.testing.assert_array_equal(np.asarray(eager[9]), np.asarray(entry.ice.u_ice))
+    np.testing.assert_array_equal(np.asarray(eager[10]), np.asarray(entry.ice.v_ice))
+    assert np.count_nonzero(np.asarray(eager[11]))  # a_i_b after dynamics, icestp.F90:184
+    assert np.count_nonzero(np.asarray(eager[8]))  # t_bo plant guard, icestp.F90:136-138
+
+    for index, label in ((8, "t_bo"), (9, "u_ice_b"), (11, "a_i_b")):
+        planted = list(eager)
+        planted[index] = jnp.zeros_like(planted[index])
+        with pytest.raises(AssertionError, match=label):
+            if label == "t_bo":
+                assert np.count_nonzero(np.asarray(planted[index])), label
+            elif label == "a_i_b":
+                assert np.count_nonzero(np.asarray(planted[index])), label
+            else:
+                expected = entry.ice.u_ice
+                np.testing.assert_array_equal(
+                    np.asarray(planted[index]), np.asarray(expected), err_msg=label
+                )
 
     with jax.disable_jit():
         swapped = run(entry, dynamic, _plant_swap_rheology_advection=True)
@@ -161,11 +200,112 @@ def test_o17_step_executes_active_ice_eager_jit_and_numerical_plants() -> None:
     with jax.disable_jit():
         tail_eager = o17_mod._thermodynamic_tail(entry.ice, card)
     tail_compiled = jax.jit(lambda state: o17_mod._thermodynamic_tail(state, card))(entry.ice)
-    np.testing.assert_allclose(
-        np.asarray(tail_compiled.oa_i), np.asarray(tail_eager.oa_i), rtol=0.0, atol=1.0e-12
+    np.testing.assert_array_equal(
+        np.asarray(tail_compiled.oa_i).view(np.uint64),
+        np.asarray(tail_eager.oa_i).view(np.uint64),
     )
     np.testing.assert_array_equal(np.asarray(tail_compiled.u_ice), np.asarray(tail_eager.u_ice))
     np.testing.assert_array_equal(np.asarray(tail_compiled.v_ice), np.asarray(tail_eager.v_ice))
+    no_tail = entry.ice
+    with pytest.raises(AssertionError, match="icethd tail"):
+        assert np.array_equal(
+            np.asarray(no_tail.oa_i).view(np.uint64),
+            np.asarray(tail_eager.oa_i).view(np.uint64),
+        ), "icethd tail"
+    wrong_fold = o17_mod._thermodynamic_tail(
+        entry.ice,
+        card._replace(fold=card.fold._replace(nfd_full_when_absent=False)),
+    )
+    with pytest.raises(AssertionError, match="ldfull"):
+        np.testing.assert_array_equal(
+            np.asarray(wrong_fold.u_ice).view(np.uint64),
+            np.asarray(tail_eager.u_ice).view(np.uint64),
+            err_msg="ldfull",
+        )
 
     with pytest.raises(ValueError, match="ln_ice_embd=F"):
         si3_o17_step(entry, forcing, card._replace(ln_ice_embd=True))
+
+
+def test_o17_full_step_mixed_regimes_is_finite_and_eager_jit_bitwise() -> None:
+    """Exercise ice, open-water, and <=epsi10 columns through the complete step."""
+    entry, forcing, card = _case(DEFAULT_MASTER)
+    card = card._replace(aevp=card.aevp._replace(n_subcycles=1))
+    h = card.state.nn_hls
+    owned = (slice(h, -h), slice(h, -h))
+    entry_concentration = np.asarray(entry.ice.a_i[owned]).sum(axis=-1)
+    assert entry_concentration[1, 1] == 0.0
+    assert entry_concentration[0, 0] > 1.0e-10
+    assert 0.0 < entry_concentration[2, 2] <= 1.0e-10
+    assert np.count_nonzero(np.asarray(entry.ice.u_ice))
+    assert np.count_nonzero(np.asarray(entry.ice.v_ice))
+
+    def run(step_entry, dynamic_forcing):
+        return si3_o17_step(step_entry, SI3O17LiveForcing(1, *dynamic_forcing), card)
+
+    with jax.disable_jit():
+        eager = run(entry, forcing[1:])
+    compiled = jax.jit(run)(entry, forcing[1:])
+
+    def scorer_projection(result):
+        step_state, trace = result
+        return (
+            step_state,
+            trace.aevp,
+            trace.advection_state,
+            trace.redistribution.state,
+            trace.postdyn_correction,
+            trace.surface_stress.flx_other,
+            trace.finalize.final.fluxes,
+            trace.finalize.final.outputs,
+            trace.finalize.stress,
+        )
+
+    _assert_bitwise_equal(scorer_projection(compiled), scorer_projection(eager))
+
+    for leaf in jax.tree_util.tree_leaves(eager):
+        if hasattr(leaf, "dtype") and np.issubdtype(np.asarray(leaf).dtype, np.floating):
+            assert np.isfinite(np.asarray(leaf)).all()
+
+    state, trace = eager
+    t_si = np.asarray(state.ice.t_si[owned])
+    thermo_inactive = np.asarray(trace.postdyn_correction.at_i[owned]) <= 1.0e-10
+    assert np.count_nonzero(thermo_inactive)
+    np.testing.assert_array_equal(
+        t_si[thermo_inactive].view(np.uint64),
+        np.full((np.count_nonzero(thermo_inactive), 5), card.constants.T0).view(np.uint64),
+    )
+    np.testing.assert_array_equal(
+        np.asarray(state.ice.snwice_mass).view(np.uint64),
+        np.asarray(trace.finalize.final.outputs.snwice_mass).view(np.uint64),
+    )
+    assert not np.array_equal(
+        np.asarray(state.ice.snwice_mass[owned]).view(np.uint64),
+        np.asarray(entry.ice.snwice_mass[owned]).view(np.uint64),
+    )
+
+    # Each historical regression is planted into the already-computed result;
+    # the adjacent production assertion must reject it without another 17-minute step.
+    inactive_i, inactive_j = np.argwhere(thermo_inactive)[0]
+    full_inactive = (h + int(inactive_i), h + int(inactive_j))
+    t_si_plant = state.ice.t_si.at[full_inactive].set(266.89337065264044)
+    with pytest.raises(AssertionError, match="t_si gathered scatter"):
+        np.testing.assert_array_equal(
+            np.asarray(t_si_plant[full_inactive]).view(np.uint64),
+            np.full(5, card.constants.T0).view(np.uint64),
+            err_msg="t_si gathered scatter",
+        )
+    nonfinite_plant = trace.finalize.final.outputs.emp.at[0, 0].set(jnp.nan)
+    with pytest.raises(AssertionError, match="active gather and enthalpy scaling"):
+        assert np.isfinite(np.asarray(nonfinite_plant)).all(), "active gather and enthalpy scaling"
+    near = (h + 2, h + 2)
+    assert np.count_nonzero(np.asarray(trace.advection_state.a_i[near]))
+    early_zap_plant = trace.advection_state.a_i.at[near].set(0.0)
+    with pytest.raises(AssertionError, match="np_dynALL ridging-before-zap"):
+        assert np.count_nonzero(np.asarray(early_zap_plant[near])), "np_dynALL ridging-before-zap"
+    with pytest.raises(AssertionError, match="snow-mass carry"):
+        np.testing.assert_array_equal(
+            np.asarray(entry.ice.snwice_mass).view(np.uint64),
+            np.asarray(trace.finalize.final.outputs.snwice_mass).view(np.uint64),
+            err_msg="snow-mass carry",
+        )

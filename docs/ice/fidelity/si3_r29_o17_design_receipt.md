@@ -148,6 +148,145 @@ schema/source findings. `PLAUSIBLE`: none promoted to an O17 physics verdict.
 
 independent review: operator (Claude)
 
+## Resume 4 review-HOLD closure
+
+This section is authoritative for the review of `999827602052`. No NEMO
+command was run. Every reviewer item below was treated as a hypothesis and was
+measured on the reviewed parent before its correction was accepted.
+
+### Measured defects and literal corrections
+
+1. **Ice-surface temperature scatter.** On the parent, the full step changed an
+   ice-free column from the `diag_set0` value 273.15 K to
+   266.89337065264044 K. NEMO initializes every category to `rt0` but scatters
+   the diffusion result only at gathered ice points
+   (`src/ICE/icestp.F90:485-498`, `src/ICE/icethd.F90:121-140,518`). O17 now
+   retains the entry `t_si` wherever the category gather predicate is false
+   (`packages/ice/legoesm/ice/si3_o17.py:933-940`). The corrected mixed-regime
+   measurement is exactly 273.15 K in every inactive category.
+
+2. **`ice_thd_1d2d` gather and units.** Before correction, the two-column
+   complete-step probe had six non-finite final flux leaves and three
+   non-finite final output leaves. The parent passed extensive J/m2 `e_i/e_s`
+   directly into the J/m3 category kernels and executed them at `a_i=0`.
+   NEMO's active predicate and conversion are
+   `src/ICE/icethd.F90:121-141,418-435`, and its selected scatter is
+   `src/ICE/icethd.F90:438-526`. The production entry now applies that same
+   predicate, source-rounded layer scaling, safe inactive dummies, and
+   selected scatter (`packages/ice/legoesm/ice/si3_o17.py:395-473`,
+   `packages/ice/legoesm/ice/si3_thd_pnd.py:865-874,955-1003`). Repeating the
+   complete step produced zero non-finite trace, flux, or output leaves.
+
+3. **Production dynamics selector.** The shipped deck says
+   `ln_dynALL=.true.` (`cfgs/ORCA2_SAS_ICE/EXPREF/namelist_ice_ref:49-54`). The
+   parent nevertheless selected the `np_dynADV2D` helper path, which executes
+   `ice_var_zapsmall` immediately after advection. NEMO's selected path orders
+   rheology, advection, ridging, then `ice_cor(kt,1)`
+   (`src/ICE/icedyn.F90:128-135`), with the zap inside that correction
+   (`src/ICE/icecor.F90:111-116`). `si3_dyn_orca2` now has an explicit path
+   selector: its historical default preserves every admitted O4 caller, while
+   O17 selects `np_dynALL` and returns the unzapped advection state for the
+   existing ridging/correction calls
+   (`packages/ice/legoesm/ice/si3_orca2_state.py:3380-3427,3583-3663`,
+   `packages/ice/legoesm/ice/si3_o17.py:660-683`). The near-empty plant at
+   `tests/ice/unit/test_si3_o17.py:301-305` fails if that category is zapped at
+   the advection boundary.
+
+4. **Snow/ice mass carry.** The parent complete step measured entry and exit
+   `SI3State.snwice_mass` both as 1211.504 while O16 had computed
+   1212.47614344. NEMO carries all three updated mass fields at
+   `src/ICE/iceupdate.F90:187-194`. The returned step state now takes
+   `snwice_mass`, `snwice_mass_b`, and `snwice_fmass` from O16
+   (`packages/ice/legoesm/ice/si3_o17.py:1115-1120`), so the independent scorer
+   advances them rather than reusing step 1. The full-step test proves the state
+   and O16 output are bit-identical and differ from the entry
+   (`tests/ice/unit/test_si3_o17.py:278-285`); the stale-carry plant fails at
+   lines 306-310.
+
+5. **Fold extent.** The parent hard-coded `ldfull=True` at every thermodynamic
+   tail link. The parsed one-rank ORCA2 card has
+   `fold.nfd_full_when_absent=True`, while the planted absent-full-fold card is
+   `False` and changes the U-link bits. The tail now uses that card value at
+   each link (`packages/ice/legoesm/ice/si3_o17.py:501-543`), corresponding to
+   NEMO's omitted optional `ldfull` at `src/ICE/icethd.F90:188-201`. The wrong
+   fold plant is rejected at `tests/ice/unit/test_si3_o17.py:215-224`.
+
+6. **Compiled arithmetic.** The parent eager/compiled comparison differed in
+   six `oa_i` entries by one ULP, with maximum absolute difference
+   2.2737367544323206e-13. The `icethd.F90:185` multiply and add now use the
+   lane's `nemo_source_round` at both NEMO statement boundaries
+   (`packages/ice/legoesm/ice/si3_o17.py:489-499`). Every former
+   `atol=1e-12` comparison was removed. The fast composition test and the full
+   scorer-visible projection now compare binary64 views exactly, including
+   signed zero (`tests/ice/unit/test_si3_o17.py:29-48,157-158,200-208,264`).
+   The focused fast gate passed in 122.57 s and the complete mixed-regime gate
+   passed in 1107.04 s.
+
+7. **Complete-step coverage and plants.** The new 7x7 fixture has a 3x3 owned
+   tile with separated active-ice, open-water, and nonzero-at-or-below-`epsi10`
+   columns, plus nonzero ice and ocean velocities
+   (`scripts/validate/ocean_fidelity/testcases/nemo_si3_o17_ad_probe.py:55-90`).
+   One test executes the entire step eagerly and compiled, requires exact bits
+   on every scorer-visible state/boundary/output leaf, and checks every floating
+   trace leaf is finite (`tests/ice/unit/test_si3_o17.py:230-285`). The named
+   assertion line rejected each plant: `t_bo` line 172, `u_ice_b` lines
+   176-179, `a_i_b` line 174, thermodynamic-tail omission lines 210-214,
+   wrong `ldfull` lines 219-224, inactive `t_si` scatter lines 292-297,
+   gather/scaling NaN lines 298-300, early zap lines 303-305, and stale mass
+   lines 306-310. The pre-existing swap-order, missing-fold, and forcing plants
+   remain numerical red controls at lines 181-198.
+
+8. **Scorer extents and delayed scalar.** Before correction, comparing the
+   model's `(182,149)` owned field with the writer's `(186,153)` full-halo field
+   produced `(different,max_relative)=(28458,inf)`. The scorer now takes the
+   owned slice only when those exact extent signatures differ
+   (`scripts/validate/ocean_fidelity/testcases/nemo_si3_o17_composition_scorer.py:248-278,287-350`).
+   The writer omits `cflice_delayed` while the delayed buffer is unallocated,
+   matching `src/OCE/LBC/mpp_allreduce_generic.h90:147-152`, and the reader
+   supplies `None` when it is absent
+   (`scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o16_master_acquisition/o17_master_writer.F90:133-154`,
+   `scripts/validate/ocean_fidelity/testcases/nemo_si3_o17_composition_scorer.py:170-177`).
+   At full ORCA2 shape the synthetic identical-record control passes; changing
+   one owned zero to its next binary64 value fails with exactly one differing
+   element and maximum relative error 2.220446049250313e-16.
+
+9. **One derived acquisition budget and resource measurement.** The writer
+   schema calculation uses `jpi*jpj=28,458`, A2D(0)=27,118, every field header,
+   and every state/Prather/raw/tau record. It gives 964,823,300 bytes per step
+   and an exact 100-step maximum of **96,482,330,000 O17 bytes**. Combined with
+   the O8--O16 worst-case 140,965,556,460 bytes, one 4% budget is
+   **241,158,010 KiB**; the extended wall budget is 21,600 s
+   (`scripts/validate/ocean_fidelity/testcases/nemo_si3_o17_record_budget.py:13-67`).
+   The wrapper, manifest, measured-size check, and gate all derive those values
+   from that one calculator. With `O17_EXTENDED=0`, the round-18 contract stays
+   exactly 150,000,000 KiB and 14,400 s
+   (`scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o16_master_acquisition/run.sh:24-43`,
+   `scripts/validate/ocean_fidelity/testcases/nemo_si3_o8_o16_master_gate.py:677-692`).
+   Scoring starts after the acquisition stop timestamp, so its wall time is not
+   silently charged to the NEMO integration clock, while disk/RUN_COMPLETE
+   admission still includes its report.
+
+   One ORCA2-size, production-card step with 100 aEVP subcycles measured:
+   eager execution 554.434314 s and peak RSS 7,747,388 KiB; compiled execution
+   555.355544 s compile plus 80.127607 s execute (635.483151 s total), peak RSS
+   22,514,800 KiB. The production scorer uses eager execution and publishes its
+   own wall time and peak RSS in the score JSON
+   (`scripts/validate/ocean_fidelity/testcases/nemo_si3_o17_composition_scorer.py:351-402`).
+   This is below the operator's one-process 100 GB ceiling; no concurrent heavy
+   process was started.
+
+10. **Read-only operator preflight.** The final stub-only preflight completed in
+    707.967 s. Its final lines were `PASS_EXISTING_CFG_DIGESTS_UNCHANGED`,
+    `PREFLIGHT_OK: no real NEMO integration was run; worst-case master
+    140965556460 bytes (131.28 GiB)`, and
+    `PASS_O17_UNIFIED_MASTER_PREFLIGHT_AND_NUMERICAL_PLANTS`. It exercised the
+    complete generated driver, retention/refusal/admit-existing flow, exact
+    budget manifest, scorer controls, and numerical plants without launching
+    NEMO.
+
+Decision 194 remains the next round. No JAX-loop conversion, checkpointing, or
+AD graph restructuring was implemented here.
+
 ## Resume 2 measurement and disposition
 
 The probe now keeps every scheduler value outside the differentiated pytree.

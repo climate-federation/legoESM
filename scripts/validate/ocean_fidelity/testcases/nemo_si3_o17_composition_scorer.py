@@ -5,7 +5,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import resource
 import struct
+import time
 from pathlib import Path
 from typing import Any
 
@@ -170,7 +172,9 @@ def _entry_state(entry: dict[str, Any], prather: dict[str, Any], card) -> SI3O17
         **{name: jnp.asarray(f[name]) for name in STATE_FIELDS},
         prather=_moments(prather["fields"]), equivalent=eqv, aggregated=agg,
         bounds=SI3CategoryBounds(jnp.asarray(f["hi_max"]), jnp.asarray(f["hi_mean"])),
-        cflice_delayed=jnp.asarray(f["cflice_delayed"]),
+        cflice_delayed=(
+            jnp.asarray(f["cflice_delayed"]) if "cflice_delayed" in f else None
+        ),  # mpp_allreduce_generic.h90:147-152; unallocated at kt=1
     )
     aevp = SI3CGridAEVPState(
         state.u_ice, state.v_ice, jnp.asarray(f["stress1_i"]),
@@ -244,6 +248,36 @@ def _comparison(actual: Any, expected: Any, exact: bool) -> tuple[int, float]:
     return int(different), float(np.max(np.abs(a-b)/scale, initial=0.0))
 
 
+def _align_owned(actual: Any, expected: Any, shape: tuple[int, int], h: int = 2) -> Any:
+    """Align a full-halo writer field with an A2D(0) model output."""
+    actual_array, expected_array = np.asarray(actual), np.asarray(expected)
+    if (
+        expected_array.ndim >= 2
+        and expected_array.shape[:2] == shape
+        and actual_array.shape[:2] == (shape[0] - 2 * h, shape[1] - 2 * h)
+    ):
+        return expected_array[h:-h, h:-h, ...]
+    return expected
+
+
+def scorer_self_test(*, plant_one_ulp: bool = False) -> dict[str, Any]:
+    """Full-ORCA2 synthetic owned/full-halo scorer control."""
+    shape = (186, 153)
+    actual = np.zeros((182, 149), dtype=np.float64)
+    expected = np.full(shape, -7.0, dtype=np.float64)
+    expected[2:-2, 2:-2] = actual
+    if plant_one_ulp:
+        expected[2, 2] = np.nextafter(0.0, 1.0)
+    different, relative = _comparison(actual, _align_owned(actual, expected, shape), True)
+    if plant_one_ulp:
+        if different != 1:
+            raise ValueError("one-ULP scorer plant did not produce exactly one differing value")
+        return {"status": "FAIL", "different": different, "max_relative": relative}
+    if different != 0 or relative != 0.0:
+        raise ValueError("identical full-ORCA2 synthetic record did not pass")
+    return {"status": "PASS", "shape": list(shape), "owned_shape": list(actual.shape)}
+
+
 def _score_output(
     out: SI3O17StepState,
     trace,
@@ -253,8 +287,11 @@ def _score_output(
     exact: bool,
 ) -> dict[str, Any]:
     f = record["fields"]
+    shape = record["meta"]["jpi"], record["meta"]["jpj"]
+    h = 2
     rows: dict[str, dict[str, Any]] = {}
     def add(key: str, actual: Any, expected: Any) -> None:
+        expected = _align_owned(actual, expected, shape, h)  # A2D(0) owned extent
         different, relative = _comparison(actual, expected, exact)
         rows[key] = {"different": different, "max_relative": relative}
     for name in STATE_FIELDS:
@@ -280,7 +317,11 @@ def _score_boundaries(trace, index, kt: int, rank: int, exact: bool) -> dict[str
 
     rows: dict[str, dict[str, Any]] = {}
     def add(boundary: str, name: str, actual: Any) -> None:
-        different, relative = _comparison(actual, index[(boundary, kt, rank)]["fields"][name], exact)
+        record = index[(boundary, kt, rank)]
+        expected = record["fields"][name]
+        shape = record["meta"]["jpi"], record["meta"]["jpj"]
+        expected = _align_owned(actual, expected, shape)  # A2D(0) owned extent
+        different, relative = _comparison(actual, expected, exact)
         rows[f"{KINDS[boundary]}.{name}"] = {"different": different, "max_relative": relative}
 
     for name, actual in (
@@ -300,12 +341,13 @@ def _score_boundaries(trace, index, kt: int, rank: int, exact: bool) -> dict[str
     for name in STATE_FIELDS:
         add(27, name, getattr(trace.finalize.correction.state, name))
     for name in ("qlead", "qsb_ice_bot", "fhld"):
-        add(31, name, getattr(trace.surface.flx_other, name))
+        add(31, name, getattr(trace.surface_stress.flx_other, name))  # icestp.F90:182-189
     return {"different": sum(row["different"] for row in rows.values()),
             "max_relative": max(row["max_relative"] for row in rows.values()), "fields": rows}
 
 
 def score(evidence: Path, labels: list[str]) -> dict[str, Any]:
+    started = time.monotonic()
     if labels != list(VALID_LABELS):
         raise ValueError(f"labels must be exactly {VALID_LABELS}")
     run = evidence / "record_100step"
@@ -353,7 +395,9 @@ def score(evidence: Path, labels: list[str]) -> dict[str, Any]:
                                 trajectory_relative_bar=1.0e-15)
     status = "PASS" if all(per_label[label]["status"] == "PASS" for label in labels) else "FAIL"
     return {"status": status, "labels": per_label, "steps": steps, "ranks": ranks,
-            "production_entry": "legoesm.ice.si3_o17.si3_o17_step"}
+            "production_entry": "legoesm.ice.si3_o17.si3_o17_step",
+            "scorer_wall_seconds": time.monotonic() - started,
+            "scorer_peak_rss_kib": resource.getrusage(resource.RUSAGE_SELF).ru_maxrss}
 
 
 def schema() -> dict[str, Any]:
@@ -368,9 +412,13 @@ def main() -> int:
     parser.add_argument("--labels", nargs=2, default=list(VALID_LABELS))
     parser.add_argument("--schema", action="store_true")
     parser.add_argument("--read-record", type=Path)
+    parser.add_argument("--self-test", action="store_true")
+    parser.add_argument("--plant-one-ulp", action="store_true")
     args = parser.parse_args()
     try:
-        if args.schema:
+        if args.self_test:
+            result = scorer_self_test(plant_one_ulp=args.plant_one_ulp)
+        elif args.schema:
             result = schema()
         elif args.read_record:
             record = read_record(args.read_record)

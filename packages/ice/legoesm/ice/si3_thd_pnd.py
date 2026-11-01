@@ -864,6 +864,14 @@ def si3_ice_thd_o12_stages(
 
     for jl in range(5):
         entry = dict(category_entries[jl])
+        active = entry.get("_active")  # icethd.F90:121-138; absent for exact-input replay
+        previous_fluxes = cur_fluxes  # icethd.F90:117-171 module arrays scatter gathered points
+        previous_sfx_bri = cur_sfx_bri  # icethd.F90:117-171
+        previous_sfx_lam = cur_sfx_lam  # icethd.F90:117-171
+        previous_hfx_thd = cur_hfx_thd  # icethd.F90:117-171
+        previous_wfx_lam = cur_wfx_lam  # icethd.F90:117-171
+        previous_hfx_err_dif = cur_hfx_err_dif  # icethd_zdf_bl99.F90:828
+        previous_hfx_dif = cur_hfx_dif  # icethd_zdf_bl99.F90:831
         if live_flux_carry:
             entry["hfx_err_dif"] = cur_hfx_err_dif  # icethd_zdf_bl99.F90:828
             entry["hfx_dif"] = cur_hfx_dif  # icethd_zdf_bl99.F90:831
@@ -944,6 +952,34 @@ def si3_ice_thd_o12_stages(
         oa_i_cat = sr(o_i_entry * a_i_cat)
         szv_i_cat = sr(sr(o10.sal.sz_i * v_i_cat[..., None]) * r1_nlay_i_arr)
 
+        if active is not None:
+            # Vectorised equivalent of tab_1d_2d: only nptidx-selected cells
+            # are scattered back (icethd.F90:456-526).
+            def scatter_selected(value, original):
+                mask = active.reshape(active.shape + (1,) * (value.ndim - active.ndim))
+                return jnp.where(mask, value, original)
+
+            a_i_cat = scatter_selected(a_i_cat, entry["_a_i_2d"])  # icethd.F90:457
+            h_i_cat = scatter_selected(h_i_cat, entry["_h_i_2d"])  # icethd.F90:458
+            h_s_cat = scatter_selected(h_s_cat, entry["_h_s_2d"])  # icethd.F90:459
+            v_i_cat = scatter_selected(v_i_cat, entry["_v_i_2d"])  # icethd.F90:523
+            v_s_cat = scatter_selected(v_s_cat, entry["_v_s_2d"])  # icethd.F90:524
+            sv_i_cat = scatter_selected(sv_i_cat, entry["_sv_i_2d"])  # icethd.F90:525
+            oa_i_cat = scatter_selected(oa_i_cat, entry["_oa_i_2d"])  # icethd.F90:526
+            e_i_2d = scatter_selected(e_i_2d, entry["_e_i_2d"])  # icethd.F90:468
+            e_s_2d = scatter_selected(e_s_2d, entry["_e_s_2d"])  # icethd.F90:464
+            szv_i_cat = scatter_selected(szv_i_cat, entry["_szv_i_2d"])  # icethd.F90:470
+            cur_sfx_bri = jnp.where(active, cur_sfx_bri, previous_sfx_bri)  # icethd.F90:492
+            cur_sfx_lam = jnp.where(active, cur_sfx_lam, previous_sfx_lam)  # icethd.F90:495
+            cur_hfx_thd = jnp.where(active, cur_hfx_thd, previous_hfx_thd)  # icethd.F90:497
+            cur_wfx_lam = jnp.where(active, cur_wfx_lam, previous_wfx_lam)  # icethd.F90:486
+            if live_flux_carry:
+                cur_fluxes = jax.tree.map(
+                    lambda new, old: jnp.where(active, new, old), cur_fluxes, previous_fluxes
+                )  # icethd.F90:473-507
+                cur_hfx_err_dif = jnp.where(active, cur_hfx_err_dif, previous_hfx_err_dif)  # icethd.F90:507
+                cur_hfx_dif = jnp.where(active, cur_hfx_dif, previous_hfx_dif)  # icethd.F90:502
+
         cat_outputs.append(
             SI3O12CategoryOutput(
                 o10=o10,
@@ -953,18 +989,18 @@ def si3_ice_thd_o12_stages(
                 h_s=h_s_cat,
                 v_i=v_i_cat,
                 v_s=v_s_cat,
-                t_su=dh.t_su,
-                t_i=o10.t_i,
+                t_su=(scatter_selected(dh.t_su, entry["_t_su_2d"]) if active is not None else dh.t_su),  # icethd.F90:460
+                t_i=(scatter_selected(o10.t_i, entry["_t_i_2d"]) if active is not None else o10.t_i),  # icethd.F90:467
                 e_i=e_i_2d,
-                t_s=dh.t_s,
+                t_s=(scatter_selected(dh.t_s, entry["_t_s_2d"]) if active is not None else dh.t_s),  # icethd.F90:463
                 e_s=e_s_2d,
-                sz_i=o10.sal.sz_i,
+                sz_i=(scatter_selected(o10.sal.sz_i, entry["_sz_i_2d"]) if active is not None else o10.sal.sz_i),  # icethd.F90:469
                 szv_i=szv_i_cat,
-                s_i=dh.s_i,
+                s_i=(scatter_selected(dh.s_i, entry["_s_i_2d"]) if active is not None else dh.s_i),  # icethd.F90:461
                 sv_i=sv_i_cat,
                 oa_i=oa_i_cat,
-                dh_i_sum=dh.dh.dh_i_sum,
-                dh_s_sum=dh.dh.dh_s_sum,
+                dh_i_sum=(jnp.where(active, dh.dh.dh_i_sum, 0.0) if active is not None else dh.dh.dh_i_sum),  # icethd_pnd.F90:222-240
+                dh_s_sum=(jnp.where(active, dh.dh.dh_s_sum, 0.0) if active is not None else dh.dh.dh_s_sum),  # icethd_pnd.F90:222-240
             )
         )
 

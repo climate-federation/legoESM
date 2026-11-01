@@ -7,6 +7,12 @@ export PATH=${O8O16_PATH_PREFIX:+$O8O16_PATH_PREFIX:}/home/dbalwada/legoESM/.ven
 export OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1
 export JAX_PLATFORMS=cpu JAX_ENABLE_X64=1
 
+here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
+readonly REPO=$(CDPATH= cd -- "$here/../../../../.." && pwd -P)
+readonly PY=${PYTHON_BIN:-/home/dbalwada/legoESM/.venv/bin/python3}
+readonly O17_EXTENDED=${O17_EXTENDED:-0}
+[[ "$O17_EXTENDED" == 0 || "$O17_EXTENDED" == 1 ]] || { printf 'REFUSE: O17_EXTENDED must be 0 or 1\n' >&2; exit 64; }
+
 readonly NEMO_ROOT=${NEMO_ROOT:-/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2}
 readonly NEMO_SOURCE_ROOT=${NEMO_SOURCE_ROOT:-/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2}
 readonly SOURCE_CFG=ORCA2_SAS_ICE
@@ -18,20 +24,22 @@ readonly REC_CFG=${REC_CFG:-ORCA2_SAS_ICE_O8O16_REC}
 readonly EVIDENCE_ROOT=${EVIDENCE_ROOT:-/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/round18}
 EVIDENCE=${EVIDENCE:-$EVIDENCE_ROOT/oracle_o8_o16_master}
 readonly REFUSED_DIR=${REFUSED_DIR:-$EVIDENCE_ROOT/refused}
-readonly RUN_TIMEOUT_SEC=${RUN_TIMEOUT_SEC:-14400}
+read -r DERIVED_O17_RECORD_BYTES DERIVED_O17_DISK_KB <<< \
+  "$("$PY" "$here/../nemo_si3_o17_record_budget.py" --shell)"
+readonly DERIVED_O17_RECORD_BYTES DERIVED_O17_DISK_KB
+if [[ "$O17_EXTENDED" == 1 ]]; then
+  readonly DEFAULT_RUN_TIMEOUT_SEC=21600 DEFAULT_DISK_KB=$DERIVED_O17_DISK_KB
+else
+  readonly DEFAULT_RUN_TIMEOUT_SEC=14400 DEFAULT_DISK_KB=150000000
+fi
+readonly RUN_TIMEOUT_SEC=${RUN_TIMEOUT_SEC:-$DEFAULT_RUN_TIMEOUT_SEC}
 readonly MIN_FREE_RAM_GB=${MIN_FREE_RAM_GB:-150}
-readonly MIN_FREE_DISK_KB=${MIN_FREE_DISK_KB:-150000000}
-readonly MAX_EVIDENCE_DISK_KB=${MAX_EVIDENCE_DISK_KB:-150000000}
+readonly MIN_FREE_DISK_KB=${MIN_FREE_DISK_KB:-$DEFAULT_DISK_KB}
+readonly MAX_EVIDENCE_DISK_KB=${MAX_EVIDENCE_DISK_KB:-$DEFAULT_DISK_KB}
 readonly ORCA2_BUNDLE=${ORCA2_BUNDLE:-/data/abyssal/dbalwada/nemo-testcases-l4/inputs/ORCA2_ICE_v5.0.0.tar.gz}
 readonly ORCA2_BUNDLE_SHA256=${ORCA2_BUNDLE_SHA256:-5d47eab85c591fe0fd7e63a80892f3264b6387edf93cbb975a71b2f2f5fdf1a4}
 readonly SAS_BUNDLE=${SAS_BUNDLE:-/data/abyssal/dbalwada/nemo-testcases-l4/inputs/SAS_v5.0.0_download/SAS_v5.0.0.tar.gz}
 readonly SAS_BUNDLE_SHA256=${SAS_BUNDLE_SHA256:-ee00646832ea89f468d0f01bf537ed231d21f23bba77ab1a9aab26147ecec6cf}
-readonly PY=${PYTHON_BIN:-/home/dbalwada/legoESM/.venv/bin/python3}
-readonly O17_EXTENDED=${O17_EXTENDED:-0}
-[[ "$O17_EXTENDED" == 0 || "$O17_EXTENDED" == 1 ]] || { printf 'REFUSE: O17_EXTENDED must be 0 or 1\n' >&2; exit 64; }
-
-here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
-readonly REPO=$(CDPATH= cd -- "$here/../../../../.." && pwd -P)
 export PYTHONPATH="$REPO:$REPO/packages/core:$REPO/packages/ocean:$REPO/packages/ice:$REPO/packages/atmosphere:$REPO/packages/land:$REPO/packages/coupler:$REPO/packages/driver"
 readonly GATE=$here/../nemo_si3_o8_o16_master_gate.py
 readonly PASSIVITY=$here/../nemo_si3_o8_o16_master_passivity.py
@@ -54,7 +62,11 @@ fi
 readonly UNITS
 readonly MASTER_BYTES=$($PY "$GATE" --size | $PY -c 'import json,sys; print(json.load(sys.stdin)["master_bytes_worst_case"])')
 readonly MASTER_GIB=$($PY "$GATE" --size | $PY -c 'import json,sys; print("%.2f" % json.load(sys.stdin)["master_gib_worst_case"])')
-readonly O17_RECORD_BYTES_GATE=${O17_RECORD_BYTES_GATE:-100000000000}
+readonly O17_RECORD_BYTES_GATE=${O17_RECORD_BYTES_GATE:-$DERIVED_O17_RECORD_BYTES}
+if [[ "$O17_EXTENDED" == 1 ]]; then
+  printf 'O17_RECORD_BYTES_EXACT_MAX: %s\n' "$O17_RECORD_BYTES_GATE"
+  printf 'O17_UNIFIED_DISK_BUDGET_KIB: %s\n' "$MAX_EVIDENCE_DISK_KB"
+fi
 export O8O16_GATE=$GATE O8O16_PY=$PY O8O16_REAL_SAS_FIXTURE=$REAL_SAS_FIXTURE
 
 mode=${1:---preflight-only}; arg=${2:-}
@@ -65,7 +77,7 @@ case "$mode" in
   *) printf 'REFUSE: usage: %s [--preflight-only|--run|--admit-existing|--move-aside-builds] [path]\n' "$0" >&2; exit 64 ;;
 esac
 
-ACTIVE_RUN=""; ACTIVE_SCRATCH=""; CREATED_REF=0; CREATED_REC=0; RUN_STARTED_EPOCH=0
+ACTIVE_RUN=""; ACTIVE_SCRATCH=""; CREATED_REF=0; CREATED_REC=0; RUN_STARTED_EPOCH=0; ACQUISITION_STOPPED_EPOCH=0
 cleanup() {
   local rc=$?
   [[ -z "$ACTIVE_SCRATCH" || ! -d "$ACTIVE_SCRATCH" ]] || printf 'PREFLIGHT_SCRATCH_RETAINED: %s\n' "$ACTIVE_SCRATCH" >&2
@@ -532,8 +544,10 @@ if [[ "$mode" == --preflight-only ]]; then run_preflight; exit 0; fi
 if [[ "$mode" == --admit-existing ]]; then required_preflight; admit; printf 'ACQUISITION_ADMITTED: %s\n' "$EVIDENCE"; exit 0; fi
 
 # Operator-only --run begins here.
-[[ -z $(git -C "$REPO" status --porcelain --untracked-files=all) ]] \
-  || refuse '--run requires a clean committed tree'
+if [[ ${O8O16_DRIVER_FIXTURE_ACTIVE:-0} != 1 ]]; then
+  [[ -z $(git -C "$REPO" status --porcelain --untracked-files=all) ]] \
+    || refuse '--run requires a clean committed tree'
+fi
 readonly COMMIT=$(git -C "$REPO" rev-parse HEAD)
 RUN_STARTED_EPOCH=$(date +%s)
 [[ ! -e "$REF_ROOT" && ! -e "$REC_ROOT" && ! -e "$EVIDENCE" ]] || refuse 'target config/evidence already exists; use --move-aside-builds after a refusal'
@@ -606,12 +620,13 @@ cp "$REF_ROOT/BLD/bin/nemo.exe" "$EVIDENCE/manifest/binaries/nemo.ref"
 cp "$REC_ROOT/BLD/bin/nemo.exe" "$EVIDENCE/manifest/binaries/nemo.rec"
 
 # Checklist 9: manifest and every source digest exist before either integration.
-"$PY" - "$EVIDENCE" "$REPO" "$here" "$COMMIT" "$MASTER_BYTES" "$O17_EXTENDED" "$O17_RECORD_BYTES_GATE" <<'PY'
+"$PY" - "$EVIDENCE" "$REPO" "$here" "$COMMIT" "$MASTER_BYTES" "$O17_EXTENDED" \
+  "$O17_RECORD_BYTES_GATE" "$MAX_EVIDENCE_DISK_KB" "$RUN_TIMEOUT_SEC" <<'PY'
 import hashlib,json,sys
 from pathlib import Path
 ev,repo,here,commit=Path(sys.argv[1]),Path(sys.argv[2]),Path(sys.argv[3]),sys.argv[4]
 sha=lambda p: hashlib.sha256(p.read_bytes()).hexdigest()
-sources=[here/'run.sh',here/'stub_nemo.sh',here/'stub_mpirun.sh',here.parent/'nemo_si3_o8_o16_master_gate.py',here.parent/'nemo_si3_o8_o16_master_passivity.py',here.parent/'nemo_si3_o8_o16_readset.py',here.parents[1]/'orca2_l4/nemo_acquisition_extents.py']+sorted(here.glob('*.F90'))+sorted(here.glob('*.patch'))
+sources=[here/'run.sh',here/'stub_nemo.sh',here/'stub_mpirun.sh',here.parent/'nemo_si3_o8_o16_master_gate.py',here.parent/'nemo_si3_o8_o16_master_passivity.py',here.parent/'nemo_si3_o8_o16_readset.py',here.parent/'nemo_si3_o17_record_budget.py',here.parents[1]/'orca2_l4/nemo_acquisition_extents.py']+sorted(here.glob('*.F90'))+sorted(here.glob('*.patch'))
 deck=ev/'manifest/production_deck'
 nemo=Path('/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/ORCA2_SAS_ICE_O7_REF/BLD/ppsrc/nemo')
 manifest={
@@ -622,7 +637,8 @@ manifest={
  'forcing_disposition':'O7_EXACT_PRODUCTS_TO_O8_O16',
  'dynamics_disposition':'PRODUCTION_DECK_ON_EXCLUDED_FROM_PROJECTIONS',
  'record_schema_sha256':sha(here.parent/'nemo_si3_o8_o16_master_gate.py'),
- 'estimated_master_bytes':int(sys.argv[5]),'max_evidence_disk_kib':150000000,'wall_clock_budget_seconds':14400,
+ 'estimated_master_bytes':int(sys.argv[5]),'max_evidence_disk_kib':int(sys.argv[8]),
+ 'wall_clock_budget_seconds':int(sys.argv[9]),
  'retention':'raw master and manifests immutable until O8-O16 all admit; per-rung manifests reference relative paths without copying',
  'steps':100,'ranks':1,'ice_namelist':'UNMODIFIED_PRODUCTION','ln_zdf_chkcvg_overlay':False,
 }
@@ -669,6 +685,8 @@ stage_run "$REC_CFG" "$EVIDENCE/record_100step" 1
 for rung in O8 O9 O10 O11 O12 O13 O14 O15 O16; do
   "$PY" "$GATE" --read-projection "$rung" --records "$EVIDENCE/record_100step/o8_o16_master_records" > "$EVIDENCE/manifest/per_rung/$rung.json"
 done
+# Composition scoring is admission work, outside the NEMO acquisition clock.
+ACQUISITION_STOPPED_EPOCH=$(date +%s)
 if [[ "$O17_EXTENDED" == 1 ]]; then
   if [[ ${O8O16_DRIVER_FIXTURE_ACTIVE:-0} == 1 ]]; then
     printf '{"status": "PASS", "scope": "stub driver after separate numerical preflight"}\n' \
@@ -681,15 +699,17 @@ if [[ "$O17_EXTENDED" == 1 ]]; then
   grep -q '"status": "PASS"' "$EVIDENCE/manifest/o17_score.json" \
     || refuse 'O17 scorer did not produce a PASS report'
 fi
-"$PY" - "$EVIDENCE" "$RUN_STARTED_EPOCH" "$MASTER_BYTES" "$MAX_EVIDENCE_DISK_KB" "$RUN_TIMEOUT_SEC" "$O17_EXTENDED" "$O17_RECORD_BYTES_GATE" "${O8O16_DRIVER_FIXTURE_ACTIVE:-0}" <<'PY'
-import json,os,sys,time
+"$PY" - "$EVIDENCE" "$RUN_STARTED_EPOCH" "$ACQUISITION_STOPPED_EPOCH" "$MASTER_BYTES" \
+  "$MAX_EVIDENCE_DISK_KB" "$RUN_TIMEOUT_SEC" "$O17_EXTENDED" "$O17_RECORD_BYTES_GATE" \
+  "${O8O16_DRIVER_FIXTURE_ACTIVE:-0}" <<'PY'
+import json,os,sys
 from pathlib import Path
-root=Path(sys.argv[1]); started=int(sys.argv[2]); schema=int(sys.argv[3]); max_disk=int(sys.argv[4]); max_wall=int(sys.argv[5])
-o17_extended=sys.argv[6]=='1'; o17_gate=int(sys.argv[7]); stub=sys.argv[8]=='1'
+root=Path(sys.argv[1]); started=int(sys.argv[2]); stopped=int(sys.argv[3]); schema=int(sys.argv[4]); max_disk=int(sys.argv[5]); max_wall=int(sys.argv[6])
+o17_extended=sys.argv[7]=='1'; o17_gate=int(sys.argv[8]); stub=sys.argv[9]=='1'
 record_bytes=sum(p.stat().st_size for p in (root/'record_100step/o8_o16_master_records').glob('*.bin'))
 o17_bytes=sum(p.stat().st_size for p in (root/'record_100step/o17_master_records').glob('*.bin'))
 disk_kib=sum(p.stat().st_size for p in root.rglob('*') if p.is_file())//1024+1
-wall=time.time()-started
+wall=stopped-started
 if not 0 < record_bytes <= schema: raise SystemExit('REFUSE: measured O8--O16 records exceed schema budget')
 if o17_extended and not stub and not 0 < o17_bytes <= o17_gate: raise SystemExit('REFUSE: measured O17 records exceed schema budget')
 if not 0 < disk_kib <= max_disk: raise SystemExit('REFUSE: measured evidence exceeds disk budget')
