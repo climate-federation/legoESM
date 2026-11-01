@@ -2308,9 +2308,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
                             "morrison_mg2_drop_early_reset_log_width"],
                         dest="morrison_mg2_drop_early_reset_log_width",
                         help="RULE 5 width (ln space) of CAM6 MG2's early "
-                             "droplet size reset (before autoconversion), "
-                             "prognostic droplet number only; 0 = MG2's hard "
-                             "clip.")
+                             "droplet size reset (before autoconversion and "
+                             "snow riming), both droplet-number paths; 0 = "
+                             "MG2's hard clip.")
     parser.add_argument("--morrison-warm-rain-incloud",
                         action=argparse.BooleanOptionalAction,
                         default=ExperimentConfig._field_defaults[

@@ -1205,9 +1205,11 @@ class MorrisonConfig(NamedTuple):
     mg2_drop_readjust_log_width: float = 0.01
     # RULE 5 smoothing of MG2's EARLY droplet size reset (size_dist_param_liq
     # before autoconversion, micro_mg2_0.F90:1296; its number and PSD feed
-    # every droplet sink and snow riming; prognostic droplet number only):
-    # same LogSumExp form and default as the readjust; 0 = MG2's hard clip
-    # (#2216, user 2026-11-01; KNOWN DIFFERENCE at the morrison.py call).
+    # every droplet sink and snow riming), at every call site on BOTH droplet-
+    # number paths (prognostic, and the specified number production runs:
+    # autoconversion + snow riming): same LogSumExp form and default as the
+    # readjust; 0 = MG2's hard clip (#2216, user 2026-11-01; KNOWN DIFFERENCE
+    # at the morrison.py calls).
     mg2_drop_early_reset_log_width: float = 0.01
 
 

@@ -1887,7 +1887,7 @@ def autoconversion_kk2000(q_c, N_c_eff, rho, dt, fact=1.0):
 
 
 def autoconversion_kk2000_cam6(q_c, N_c_eff, rho, relvar, fact=1.0, nc_floor=True,
-                               size_reset=True):
+                               size_reset=True, **widths):
     """CAM6 MG2 KK2000 autoconversion (``kk2000_liq_autoconversion``,
     micro_mg_utils.F90:689-736, CAM6 default ``microp_uniform=.false.``)::
 
@@ -1916,7 +1916,9 @@ def autoconversion_kk2000_cam6(q_c, N_c_eff, rho, relvar, fact=1.0, nc_floor=Tru
     as is wherever the law is evaluated (``q_c >= icsmall``, where the reset
     makes it positive) and replaced by 1 only in the masked branch.
     ``size_reset=False``: ``N_c_eff`` already carries MG2's one reset (the
-    caller shares it with every liquid sink, micro_mg2_0.F90:1296).  ``fact`` =
+    caller shares it with every liquid sink, micro_mg2_0.F90:1296).  ``widths``:
+    the RULE 5 widths of that reset (:func:`mg2_droplet_psd`; none = MG2's
+    hard clip).  ``fact`` =
     ``MorrisonConfig.autocon_fact``.  Returns ``(dq_c_au, dN_r_au, x_c)`` like
     :func:`autoconversion_kk2000`.
     """
@@ -1925,7 +1927,7 @@ def autoconversion_kk2000_cam6(q_c, N_c_eff, rho, relvar, fact=1.0, nc_floor=Tru
     # MG2 resets ncic to the [2, 50] um mean-size window before the law
     # (size_dist_param_liq, called at micro_mg2_0.F90:1296 before :1306).
     if size_reset:
-        N_c_eff = mg2_size_bounded_nc(q_c_ic, N_c_eff, rho)
+        N_c_eff = mg2_size_bounded_nc(q_c_ic, N_c_eff, rho, **widths)
     if nc_floor:
         N_c_eff = jnp.clip(N_c_eff, 1.0)
     else:
