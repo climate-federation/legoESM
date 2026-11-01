@@ -115,3 +115,6 @@ classical:
     atm.micro.MorrisonConfig:
       hard_saturation_adjustment: true
       homogeneous_ice_nucleation: true
+
+# Per-epoch sample shuffle, fixed seed (owner 2026-11-01).
+shuffle_seed: 0

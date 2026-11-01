@@ -588,3 +588,39 @@ def test_mpi_abort_on_uncaught_lets_every_clean_exit_through(exit_code):
     with pytest.raises(SystemExit):
         _boom()
     assert comm.aborts == []
+
+
+def test_epoch_shuffle_is_reproducible_across_processes_and_resume():
+    """The per-epoch order is a pure function of (seed, epoch, n): two
+    processes draw the same order, and a resume at (epoch 1, step 3) visits
+    exactly the samples the uninterrupted run visited from there on."""
+    from legoesm.training.data_parallel import (
+        epoch_permutation,
+        mpi_data_parallel_training_loop,
+    )
+
+    n = 7
+    samples = [jnp.asarray(float(i)) for i in range(n)]
+    np.testing.assert_array_equal(epoch_permutation(0, 1, n), epoch_permutation(0, 1, n))
+    assert sorted(epoch_permutation(0, 1, n)) == list(range(n))
+    assert list(epoch_permutation(0, 0, n)) != list(epoch_permutation(0, 1, n))
+
+    def run(**kw):
+        seen = []
+
+        def place(s):
+            seen.append(int(np.asarray(s)))
+            return jax.device_put(s)
+
+        w = jnp.asarray(0.0)
+        opt = optax.sgd(1e-3)
+        mpi_data_parallel_training_loop(
+            lambda p, s: (p - s) ** 2, w, opt.init(w), opt, samples, 2, 1,
+            place=place, epoch_order=lambda e: epoch_permutation(0, e, n), **kw)
+        return seen
+
+    full = run()
+    assert full[:n] == list(epoch_permutation(0, 0, n))
+    assert full[n:] == list(epoch_permutation(0, 1, n))
+    resumed = run(start_epoch=1, start_step=3, start_losses=(0.0, 0.0, 0.0))
+    assert resumed == full[n + 3:]

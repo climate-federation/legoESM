@@ -569,7 +569,8 @@ _WB_CONSUMED_TOP_KEYS = frozenset({
     "grad_accum", "grad_clip_norm", "gravity_wave_drag", "loss", "lr",
     "microphysics", "n_epochs", "n_lat", "n_lon", "n_training_days",
     "neural_gcm", "nlev", "optimizer", "rad_update_steps", "radiation",
-    "sfno", "smoke_radiation", "spectral", "state_cache_dir", "train_windows",
+    "sfno", "shuffle_seed", "smoke_radiation", "spectral", "state_cache_dir",
+    "train_windows",
     "train_years", "turbulence", "validation", "warmup_steps", "weight_decay",
 })
 # Deck metadata this trainer never reads but the decks legitimately carry

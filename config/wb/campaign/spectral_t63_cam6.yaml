@@ -305,3 +305,6 @@ classical:
   # which is what lets the closure's liquid reach the microphysics within
   # the step. Required by the liquid partition.
   cld_macmic_num_steps: 3
+
+# Per-epoch sample shuffle, fixed seed (owner 2026-11-01).
+shuffle_seed: 0

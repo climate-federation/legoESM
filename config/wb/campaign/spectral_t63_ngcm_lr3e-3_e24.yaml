@@ -247,3 +247,6 @@ classical:
   surface_bulk: "constant"
   rad_update_interval_steps: 6
   spatial_surface: false
+
+# Per-epoch sample shuffle, fixed seed (owner 2026-11-01).
+shuffle_seed: 0

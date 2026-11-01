@@ -1091,6 +1091,7 @@ def _main(argv=None):
     import yaml
     from legoesm.ml.training import TrainingConfig, create_optimizer
     from legoesm.training.data_parallel import (
+        epoch_permutation,
         mpi_data_parallel_training_loop,
     )
 
@@ -1803,6 +1804,14 @@ def _main(argv=None):
                 t, checkpoint_view(eqx.combine(cur_arr, _static_h))),
             lambda t: eqx.tree_serialise_leaves(t, cur_opt_state))
 
+    # Per-epoch shuffle (deck ``shuffle_seed``): a pure function of the epoch,
+    # so every process and every mid-epoch resume draws the same order.
+    _seed = yml.get("shuffle_seed")
+    if _seed is not None and (isinstance(_seed, bool) or not isinstance(_seed, int)):
+        raise SystemExit(f"shuffle_seed must be an integer, got {_seed!r}")
+    _epoch_order = (None if _seed is None
+                    else (lambda e: epoch_permutation(_seed, e, len(local))))
+
     # Curriculum: stage k runs epochs [k, k+1) * n_epochs / n_stages with its
     # own objective; the optimizer state and schedule carry straight through.
     history = []
@@ -1823,7 +1832,8 @@ def _main(argv=None):
             on_step=on_step,
             start_step=start_step if _first else 0,
             start_losses=start_losses if _first else (),
-            start_skipped=start_skipped if _first else 0)
+            start_skipped=start_skipped if _first else 0,
+            epoch_order=_epoch_order)
         history += list(_hist)
     params = eqx.combine(arr, static)
     log.info("training done: final loss=%.6f", history[-1] if history else float("nan"))

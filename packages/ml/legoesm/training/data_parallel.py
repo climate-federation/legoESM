@@ -392,13 +392,20 @@ def mpi_data_parallel_train_step(value_and_grad_fn, params, opt_state, optimizer
     return params, opt_state, loss
 
 
+def epoch_permutation(seed: int, epoch: int, n: int):
+    """The sample order of ``epoch``: a permutation of ``range(n)`` that depends
+    only on ``(seed, epoch, n)``."""
+    import numpy as np
+    return np.random.default_rng([int(seed), int(epoch)]).permutation(int(n))
+
+
 @mpi_abort_on_uncaught
 def mpi_data_parallel_training_loop(loss_fn, params, opt_state, optimizer,
                                     local_samples, n_epochs, num_processes, *,
                                     comm=None, on_epoch=None, start_epoch=0,
                                     place=None, on_step=None,
                                     start_step=0, start_losses=(),
-                                    start_skipped=0):
+                                    start_skipped=0, epoch_order=None):
     """Per-rank loop over this rank's ERA5 shard, gradients averaged across ranks
     each step. All ranks run lockstep (balanced shards from ``shard_samples`` with
     ``drop_remainder``), so the per-step ``allreduce`` never deadlocks. Rank-0
@@ -423,6 +430,11 @@ def mpi_data_parallel_training_loop(loss_fn, params, opt_state, optimizer,
     ``start_losses`` and its skip count with ``start_skipped``.
     ``on_step(epoch, n_done, losses, n_skipped, params, opt_state)`` runs after
     every step on every rank and holds what such a resume needs.
+
+    ``epoch_order(epoch) -> permutation of range(len(local_samples))`` visits
+    the samples in that order (a per-epoch shuffle).  It must be a pure function
+    of the epoch, so every process and every resume of an epoch draws the same
+    order and ``start_step`` skips the same samples; None = the stored order.
     """
     if not 0 <= start_epoch <= n_epochs:
         raise ValueError(
@@ -449,9 +461,12 @@ def mpi_data_parallel_training_loop(loss_fn, params, opt_state, optimizer,
         first = epoch == start_epoch and start_step > 0
         losses = list(start_losses) if first else []
         n_skipped = start_skipped if first else 0
-        for i_step, sample in enumerate(local_samples):
+        order = (range(len(local_samples)) if epoch_order is None
+                 else epoch_order(epoch))
+        for i_step, k_sample in enumerate(order):
             if first and i_step < start_step:
                 continue
+            sample = local_samples[k_sample]
             import time as _time
             _t0 = _time.perf_counter()
             # #1286 fix A: samples are kept HOST-resident (numpy leaves) so the
