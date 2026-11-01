@@ -900,6 +900,20 @@ def _crc_names(names) -> int:
     return zlib.crc32(",".join(sorted(names)).encode())
 
 
+class _Chained:
+    """``len`` + iteration over two sequences without copying either."""
+
+    def __init__(self, a, b):
+        self._a, self._b = a, b
+
+    def __len__(self):
+        return len(self._a) + len(self._b)
+
+    def __iter__(self):
+        yield from self._a
+        yield from self._b
+
+
 def _sample_fingerprint(samples):
     """``(structure_crc, moments)`` of a host sample list.
 
@@ -1280,8 +1294,9 @@ def _main(argv=None):
 
     # Probe results are measurements on these exact samples and initial
     # parameters; saved ones are honoured only if these still match.
-    _probe_content = _sample_fingerprint(list(local) + [jax.device_get(
-        jax.tree.leaves(eqx.filter(params, eqx.is_inexact_array)))])
+    # A sized, lazy view: list(local) would load every streamed sample at once.
+    _probe_content = _sample_fingerprint(_Chained(local, [jax.device_get(
+        jax.tree.leaves(eqx.filter(params, eqx.is_inexact_array)))]))
     start_epoch, resumed_frozen = 0, None
     if cfg.resume:
         _ep = _latest_complete_checkpoint(cfg.out_dir)

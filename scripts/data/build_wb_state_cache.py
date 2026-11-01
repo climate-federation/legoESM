@@ -43,10 +43,7 @@ def needed_indices(cfg, yml, times):
     from legoesm.training import scale_build as sb
 
     cadence = int(yml.get("era5_cadence_hours", 6))
-    leads = sb.supervised_leads(yml)
-    roll = leads[-1] if leads else sb.rollout_hours(cfg, yml)
-    stride = int(roll) // cadence
-    step = (leads[0] // cadence) if leads else stride
+    _, stride, step = sb.wb_lead_strides(cfg, yml, cadence)
     decks = [yml]
     if yml.get("validation"):
         decks.append(sb.wb_validation_yaml(yml, int(yml["validation"]["n_inits"])))

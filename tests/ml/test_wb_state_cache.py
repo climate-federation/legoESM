@@ -145,3 +145,10 @@ def test_builder_needs_train_leads_and_validation_times():
     assert set(range(base15, base15 + 6)) <= set(idx.tolist())     # 4 ICs + 2 leads
     assert {0, 1, 2, 60, 61, 62} <= set(idx.tolist())               # 2014 inits + leads
     assert len(idx) == 6 + 6
+
+
+def test_validation_init_that_cannot_be_scored_is_an_error():
+    yml = {"eval_years": [2020], sb._VAL_INITS_KEY: [[2019, 8754]]}
+    times = np.datetime64("2019-01-01") + np.arange(4 * 366) * np.timedelta64(6, "h")
+    with pytest.raises(ValueError, match="validation init 2019"):
+        list(sb._training_sample_indices(SimpleNamespace(smoke=False), yml, times, 4, 4))

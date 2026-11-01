@@ -127,8 +127,10 @@ def _training_sample_indices(cfg, yml, times, snaps_per_day, stride):
             i_ic = int(np.searchsorted(times, np.datetime64(f"{int(year)}-01-01")
                                        + np.timedelta64(int(hour), "h")))
             i_tg = i_ic + stride
-            if i_tg < len(times) and _keep(i_tg):
-                yield int(year), i_ic, i_tg
+            if i_tg >= len(times) or not _keep(i_tg):
+                raise ValueError(f"validation init {year} +{hour} h has its "
+                                 "target outside the store or in a test year.")
+            yield int(year), i_ic, i_tg
         return
     windows = _resolve_windows(cfg, yml)
     if windows is None:
@@ -1508,6 +1510,18 @@ def rollout_hours(cfg, yml):
     return float(hrs[0]) if hrs else 6.0     # first lead = the base rollout horizon
 
 
+def wb_lead_strides(cfg, yml, cadence_hours) -> tuple:
+    """``(leads, stride, lead_stride)`` in ERA5 snapshots: the sample's full
+    horizon and the spacing of its supervised leads."""
+    leads = supervised_leads(yml)
+    if leads and leads[0] % int(cadence_hours):
+        raise ValueError(f"train_leads_hours {list(leads)} are not on the "
+                         f"{cadence_hours} h ERA5 cadence.")
+    roll_h = leads[-1] if leads else rollout_hours(cfg, yml)
+    stride = int(roll_h) // int(cadence_hours)
+    return leads, stride, ((leads[0] // int(cadence_hours)) if leads else stride)
+
+
 def supervised_leads(yml) -> tuple:
     """The deck's ``loss.train_leads_hours`` [h]: every lead the forecast is
     scored at, or () for the legacy single-target path (``multi_step_hours``,
@@ -1947,9 +1961,7 @@ def _load_era5_samples_spectral(cfg, yml, grid, sigma, *,
     # fields only: asking it for condensate would re-read the cloud store per
     # sample for data it throws away) is the one that carries the prescribed
     # surface planes.
-    sst_cfg = wb_era5_config(cfg, yml)._replace(load_cloud_condensate=False)
-    era5_cfg = wb_era5_config(cfg, yml)._replace(
-        load_surface_fluxes=False, load_land_frac=False)
+    era5_cfg, sst_cfg, _ = wb_state_cache_configs(cfg, yml)
     surface_fluxes = sst_cfg.load_surface_fluxes
     flux_ds = None
     global _WARNED_ERA5_FLUX_HOLD_FIXED
@@ -1969,13 +1981,7 @@ def _load_era5_samples_spectral(cfg, yml, grid, sigma, *,
             "(owner decision 2026-09-15).")
     times = np.asarray(ds.time.values, dtype="datetime64[ns]")
     snaps_per_day = 24 // era5_cfg.dt_hours
-    leads = supervised_leads(yml)
-    roll_h = leads[-1] if leads else rollout_hours(cfg, yml)
-    stride = int(roll_h) // era5_cfg.dt_hours
-    lead_stride = (leads[0] // era5_cfg.dt_hours) if leads else stride
-    if leads and leads[0] % era5_cfg.dt_hours:
-        raise ValueError(f"train_leads_hours {list(leads)} are not on the "
-                         f"{era5_cfg.dt_hours} h ERA5 cadence.")
+    leads, stride, lead_stride = wb_lead_strides(cfg, yml, era5_cfg.dt_hours)
     # The condensate store is opened ONCE and threaded through every slice --
     # re-opening a remote zarr per sample would dominate the load.
     cloud_ds = (open_era5_zarr(era5_cfg.cloud_zarr)
