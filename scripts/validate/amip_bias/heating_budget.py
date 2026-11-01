@@ -445,6 +445,9 @@ def main(argv=None):
     ap.add_argument("--target", type=float, default=None,
                     help="rlutcs model-minus-obs error to be explained [W/m2]")
     ap.add_argument("--n-times", type=int, default=8)
+    ap.add_argument("--nc-budget", action="store_true",
+                    help="#2216: cloud-droplet number budget by process over one step "
+                         "(nc_budget.py); writes npz + png into --out")
     args = ap.parse_args(argv)
     t0 = time.time()
     out_dir = Path(args.out or (H.ROOT / "_tools" / "heating_budget"))
@@ -460,6 +463,11 @@ def main(argv=None):
         MPASPrimitiveEquationModel)
 
     rec: dict[str, np.ndarray] = {}
+    calls: dict[str, list] = {}
+    micro_calls: list = []
+    if args.nc_budget:
+        import nc_budget as NCB
+        NCB.install_micro_spy(micro_calls)
     fns: dict = {}
     rad_calls: list = []
 
@@ -474,6 +482,7 @@ def main(argv=None):
                 t = res if hasattr(res, "dT_dt") else res[0]   # tendencies are NamedTuples
                 if not isinstance(t.dT_dt.data, jax.core.Tracer):   # setup traces under jit
                     rec[name] = np.asarray(t.dT_dt.data, dtype=np.float64)
+                    calls.setdefault(name, []).append(t)     # every eager call (--nc-budget)
                 return res
             fns[name] = wrapped
             return wrapped
@@ -530,6 +539,9 @@ def main(argv=None):
     if args.rlutcs_replay:
         return rlutcs_replay(fns, state, mesh, sig, forcing, phys_state, rad_int, real_backend,
                              args.ref_run or args.run, args.profile_era5, args.target)
+    if args.nc_budget:
+        return NCB.run(model, state, DT, pf_full, forcing, phys_state, calls, micro_calls,
+                       out_dir, f"{args.run}_d{args.day:04d}")
     if args.cloud_levers:
         return cloud_levers(fns, state, mesh, sig, forcing, phys_state, rad_int,
                             real_backend, n_times=args.n_times)

@@ -401,6 +401,9 @@ def morrison_microphysics(
     config = resolve_morrison_flavor(config)
     ncol, nlev = T.shape
     _prog_nc = bool(getattr(config, "prognostic_droplet_number", False))
+    # Droplet-number budget publication (``MicrophysicsOutput.nc_budget``):
+    # the same static switch as ``qc_budget``, MG2 prognostic number only.
+    _nc_pub = _prog_nc and bool(getattr(config, "publish_qc_budget", False))
     if _prog_nc:
         # Start-up guards (static config; user decisions 2026-10-19 2a, Q-I/10a,
         # Q-B 3a, 18a; 2026-10-20 Q4): CAM6 MG2 droplet number lives only on the MG2 warm-rain
@@ -1497,10 +1500,20 @@ def morrison_microphysics(
         # MG2 conservation of nc with omsm (micro_mg2_0.F90:1628-1642), against
         # the post-activation grid-mean number.
         _nclim = nc_sink * dt > N_c_act
-        nc_sink = nc_sink * jnp.where(
+        _nc_lim = jnp.where(
             _nclim,
             N_c_act / dt / jnp.where(_nclim, nc_sink, 1.0) * _MG2_OMSM,
             1.0)
+        nc_sink = nc_sink * _nc_lim
+        if _nc_pub:
+            # APPLIED (post-limiter) sinks, split by process; they sum to
+            # ``nc_sink`` up to round-off.
+            _nc_terms = {
+                "autoconversion": -dq_c_au * _nc_per_qc * _nc_lim,
+                "accretion": -dq_c_ac * _nc_per_qc * _nc_lim,
+                "riming_snow": -riming_s * _nc_per_qc * _nc_lim,
+                "riming_graupel": -riming_g * _nc_per_qc * _nc_lim,
+            }
     qc_avail = jnp.clip(q_c, 0.0)
     if config.warm_rain_incloud:
         # CAM6 MG2 q_c limiter form (micro_mg2_0.F90:1566-1590): only where
@@ -2282,6 +2295,8 @@ def morrison_microphysics(
         # MG2 nctend (micro_mg2_0.F90:1947) + activation re-applied everywhere
         # (:2019-2022).
         dN_c_dt = -nc_sink + npccn
+        if _nc_pub:
+            _nc_terms["activation"] = npccn
     elif getattr(config, "predict_Nc", False):
         dN_c_dt = safe_divide(-dq_c_au * rho, x_c, eps=1e-15) - dN_c_riming
     else:
@@ -2351,6 +2366,8 @@ def morrison_microphysics(
                 _sed_poison = jnp.where(_overflow_c, jnp.nan, _sed_poison)
         dq_c_dt = dq_c_dt + sed_c
         dN_c_dt = dN_c_dt + sed_nc_kg * rho
+        if _nc_pub:
+            _nc_terms["sedimentation"] = sed_nc_kg * rho
         dq_v_dt = dq_v_dt + sed_qv
         dT_dt = dT_dt + sed_T
     if mg2_snow:
@@ -2372,8 +2389,11 @@ def morrison_microphysics(
         _dqc = jnp.where(_chg, (_q_c_end - _q_c_raw) / dt, 0.0)
         dq_c_dt = dq_c_dt + _dqc
         if _prog_nc or config.predict_Nc:
-            dN_c_dt = dN_c_dt + jnp.where(
+            _dnc_mf = jnp.where(
                 _chg, (_N_c_end * rho - (N_c + dN_c_dt * dt)) / dt, 0.0)
+            dN_c_dt = dN_c_dt + _dnc_mf
+            if _nc_pub:
+                _nc_terms["ice_melt_homog_freeze"] = _dnc_mf
         dq_i_dt = dq_i_dt + jnp.where(
             _chg, (_q_i_end - (q_i + dq_i_dt * dt)) / dt, 0.0)
         dN_i_dt = dN_i_dt + jnp.where(
@@ -2384,13 +2404,19 @@ def morrison_microphysics(
     if _prog_nc:
         # MG2 final droplet mean-size re-adjust (micro_mg2_0.F90:2743-2753,
         # :2812-2830; Q2'a).
+        _dnc_pre = dN_c_dt
         dN_c_dt = mg2_droplet_number_readjust(
             q_c + dq_c_dt * dt, N_c + dN_c_dt * dt, N_c, cf_eff, rho, dt, dN_c_dt,
             presence_top=config.mg2_presence_ramp_top)
+        if _nc_pub:
+            _nc_terms["size_readjust"] = dN_c_dt - _dnc_pre
+            _dnc_pre = dN_c_dt
         # MG2's last droplet-number write (micro_mg2_0.F90:2913): no cloud
         # water left after the step => no droplets.
         _on = mg2_presence(q_c + dq_c_dt * dt, config.mg2_presence_ramp_top)
         dN_c_dt = _on * dN_c_dt + (1.0 - _on) * (-N_c / dt)
+        if _nc_pub:
+            _nc_terms["no_cloud_clear"] = dN_c_dt - _dnc_pre
 
     # === Non-negativity floor on the cloud/rain/ice NUMBER tendencies ===
     # Each individual number sink above is bounded (evap/riming ∝ N/dt,
@@ -2707,6 +2733,11 @@ def morrison_microphysics(
         if mg2_snow:
             out.qc_budget["ice_melt"] = _qc_ice_melt
             out.qc_budget["homogeneous_freezing"] = _qc_homog
+    if _nc_pub:
+        # Droplet-number terms [1/(m^3 s)], APPLIED: each later stage is booked
+        # as the increment it made to ``dN_c_dt``, so they sum to ``dN_c_dt``
+        # up to round-off (the probe asserts the residual).
+        out = out._replace(nc_budget=_nc_terms)
     if _sed_poison is not None:
         # Strict mode: every FLOAT field carries the overflow guard.  Static
         # Python branch -- the non-strict graph is untouched.
