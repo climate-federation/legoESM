@@ -30,7 +30,30 @@ from tests.atmosphere.microphysics.unit import test_morrison_prognostic_nc_act a
 ROOT = Path(__file__).resolve().parents[4]
 FXD = ROOT / "tests/atmosphere/microphysics/oracle_fixtures"
 WIDTH = 0.01
-# measured 2026-11-01 at the default width 0.01; re-measure on any change
+# measured 2026-11-01; re-measure on any change of the readjust or its width.
+# ARM_GAP: whole-call droplet tendency at the arm's resolved defaults vs MG2.
+ARM_GAP = {
+    "mg2_prognostic_nc": [2.837937896417557e-16, 6.317951349675112e-14, 1.546676106662368e-16,
+                          2.877001770591271e-16, 1.1530107845990739e-10, 0.0],
+    "mg2_prognostic_nc_act": [1.418956462149667e-16, 7.262013045603576e-15, 1.546676106662368e-16,
+                              1.8700432818724313e-15, 2.608704944694982e-10, 0.0,
+                              1.922456754670477e-16, 3.954884734458624e-14, 0.0016938689792919711],
+    "mg2_prognostic_nc_sed": [1.418956462149667e-16, 7.262013045603576e-15, 1.546676106662368e-16,
+                              1.8700432818724313e-15, 2.608704944694982e-10, 0.0,
+                              1.922456754670477e-16, 3.954884734458624e-14, 0.0016938689792919711,
+                              0.0016965082452155384, 1.2833761767092315e-16],
+    # the melt and icelim columns 8-9 gaps come from the other approved
+    # smoothings, not the readjust (its GAP there is <= 7e-6)
+    "mg2_prognostic_nc_melt": [1.1029928257250563, 0.17331596388320308],
+    "mg2_prognostic_nc_icelim": [0.015747026523859654, 2.200600984745154e-06, 5.43736930357168e-07,
+                                 7.014162700215055e-07, 0.0004164605302753922,
+                                 2.6758384096153907e-08, 3.256499384878998e-08,
+                                 4.331625679378158e-08, 0.45653134092247827, 0.35822587760631697,
+                                 0.0, 0.0],
+    "mg2_prognostic_nc_frz": [0.0008640803562640687, 0.003318373145832064, 0.00040398555129533955,
+                              3.658033901500748e-08, 5.8608543009113286e-05, 5.75577730011353e-05],
+}
+# GAP: the readjust alone (every other switch at its hard limit), default vs hard.
 GAP = {
     "mg2_prognostic_nc": [6.607589070726086e-26, 6.370765990006775e-14, 3.4886004364331466e-26,
                           8.976045932137181e-24, 1.1530107845990739e-10, 0.0],
@@ -132,6 +155,42 @@ def test_default_gap_per_column_is_the_recorded_one(name):
     np.testing.assert_allclose(gap, GAP[name], rtol=1e-6, atol=1e-12)
     # a gap below the 1e-12 floor must not vanish (or appear) unnoticed
     assert np.array_equal(gap > 0.0, np.asarray(GAP[name]) > 0.0)
+
+
+def _arm_defaults():
+    """The prognostic arm's resolved Morrison smoothing (every HARD_LIMIT field
+    at the production resolution), the readjust width at its default."""
+    from tests.atmosphere.microphysics.unit.test_mg2_warm_rain_oracle import _production_morrison
+    prod = _production_morrison()
+    assert prod.mg2_drop_readjust_log_width == WIDTH
+    return _cfg(do_snow_to_graupel=False)._replace(**{k: getattr(prod, k) for k in HARD_LIMIT})
+
+
+@pytest.mark.parametrize("name", sorted(GAP))
+def test_arm_default_gap_to_mg2_per_column_is_the_recorded_one(name):
+    """The whole-call droplet tendency at the arm's defaults vs the RUNNING MG2,
+    per fixture column, relative to the column's largest MG2 value (every
+    approved smoothing contributes, not only the readjust)."""
+    fx = _load(name)
+    hyd = {k: jnp.asarray(fx[f"col_{v}"]) for k, v in
+           (("q_i", "q_i"), ("N_i", "ni_kg"), ("q_s", "q_s"), ("N_s", "ns_kg")) if f"col_{v}" in fx}
+    out = A._run(fx, cfg=_arm_defaults(), hyd_kw=hyd)
+    ora = fx["ora_nctend"] * fx["col_rho"]
+    d = np.abs(np.asarray(out.dN_c_dt) - ora)
+    gap = d.max(axis=1) / np.maximum(np.abs(ora).max(axis=1), 1e-300)
+    print(name, "arm-default gap to MG2 per column", [float(x) for x in gap])
+    np.testing.assert_allclose(gap, ARM_GAP[name], rtol=1e-6, atol=1e-12)
+    assert np.array_equal(gap > 0.0, np.asarray(ARM_GAP[name]) > 0.0)
+
+
+def test_qsmall_boundary_keeps_mg2_semantics():
+    """At qcic == qsmall exactly MG2's size routine leaves the number (a negative
+    one survives); the smooth path keeps that."""
+    one = jnp.ones(2)
+    args = (W.MG2_QSMALL * one, -1.0e3 * one, 2.0e3 * one, one, one, 600.0, -5.0 * one)
+    for w in (0.0, WIDTH):
+        got = W.mg2_droplet_number_readjust(*args, presence_top=W.MG2_QSMALL, log_width=w)
+        np.testing.assert_array_equal(np.asarray(got), -5.0 * np.ones(2))
 
 
 def _near_2um_bound(u):

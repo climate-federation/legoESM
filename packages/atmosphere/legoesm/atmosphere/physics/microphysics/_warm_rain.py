@@ -1270,8 +1270,8 @@ def mg2_droplet_number_readjust(q_c_post, N_c_post, N_c, cf, rho, dt, dN_c_dt, *
     to qcic/1e-20 kg where it exceeds that, and the number is left untouched
     inside the bounds.  At ``log_width > 0`` the port rounds both limits by a
     LogSumExp in ln space and applies the result in every cell with cloud
-    water (the "number moved" test is dropped: with rounded limits it is a
-    jump of up to the rounding offset).  Measured at the default 0.01 on the
+    water above qsmall (the "number moved" test is dropped: with rounded
+    limits it is a jump of up to the rounding offset).  Measured at the default 0.01 on the
     prognostic-number oracle fixtures (x64; readjust inputs of the real call):
     the readjusted number departs from MG2's by up to 1.4e-2 relative (7.1e-3
     in cells MG2 leaves untouched), the whole-call droplet tendency by up to
@@ -1292,6 +1292,8 @@ def mg2_droplet_number_readjust(q_c_post, N_c_post, N_c, cf, rho, dt, dN_c_dt, *
     f = mg2_presence(q_ic, presence_top)
     if log_width == 0.0:
         f = f * jnp.where(n_adj != n_ic, 1.0, 0.0)
+    else:   # the size routine's own qcic > qsmall test (0 width at the default presence ramp)
+        f = f * jnp.where(q_ic > MG2_QSMALL, 1.0, 0.0)
     return f * ((n_adj * cf - N_c) / dt) + (1.0 - f) * dN_c_dt
 
 
