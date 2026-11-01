@@ -150,10 +150,14 @@ def figure(results: dict, path: Path, title: str) -> None:
     plt.close(fig)
 
 
-def install_micro_spy(micro_calls: list) -> None:
+def install_micro_spy(micro_calls: list, graupel_riming: bool = True) -> None:
     """Make every microphysics build publish its budget and record each EAGER
     call; the scheme outputs other than the budgets are unchanged (pinned by
-    test_morrison_nc_budget), and the budgets are stripped before returning."""
+    test_morrison_nc_budget), and the budgets are stripped before returning.
+
+    ``graupel_riming=False`` (#2216 option 2, offline only) runs the scheme
+    with its own switch ``do_graupel_riming=False``: graupel collecting cloud
+    water (mass and number) off, every other process as configured."""
     import jax
     import legoesm.atmosphere.physics.microphysics.integration as mi
     real = mi._get_microphysics_fn
@@ -162,10 +166,15 @@ def install_micro_spy(micro_calls: list) -> None:
         name, fn, cfg = real(config)
         if fn is None or not hasattr(cfg, "publish_qc_budget"):
             return name, fn, cfg
+        sw = {"publish_qc_budget": True}
+        if not graupel_riming:
+            if not hasattr(cfg, "do_graupel_riming"):
+                raise SystemExit(f"{name}: no do_graupel_riming switch to turn off")
+            sw["do_graupel_riming"] = False
 
         def spy(T, q_v, hyd, p_full, p_half, rho, dz, dt, scheme_cfg, **kw):
             out = fn(T, q_v, hyd, p_full, p_half, rho, dz, dt,
-                     scheme_cfg._replace(publish_qc_budget=True), **kw)
+                     scheme_cfg._replace(**sw), **kw)
             if out.nc_budget is not None and not isinstance(out.dN_c_dt, jax.core.Tracer):
                 f = lambda a: np.asarray(a, dtype=np.float64)   # noqa: E731
                 micro_calls.append({
@@ -300,6 +309,8 @@ def run(model, state, DT, pf_full, forcing, phys_state, calls, micro_calls,
         inv, r, tau_all, tau = aggregate(rows, n0, mass, rho, mk)
         _, rneg, _, _ = aggregate({"neg": neg_dyn / DT}, n0, mass, rho, mk)
         ic = incloud(c0["N_c"], c0["cf"], c0["q_c"], vol, mk)
+        cl = micro_calls[-1]       # last macmic sub-step's inputs: after the earlier ones
+        icl = incloud(cl["N_c"], cl["cf"], cl["q_c"], vol, mk)
         qg = (qg0 * mass)[mk].sum() / mass[mk].sum()
         results[key] = (inv, r, tau_all, tau)
         print(f"\n[{key[0]} | {key[1]}] inventory {inv:.3f} cm-3; all-sink time {tau_all:.2f} h; "
@@ -308,12 +319,17 @@ def run(model, state, DT, pf_full, forcing, phys_state, calls, micro_calls,
               f"{ic['grid_mean']:.2f} cm-3, in-cloud {ic['in_cloud']:.2f} cm-3 "
               f"(median over cf>0 {ic['median_in_cloud']:.2f}; {ic['n_cf_zero']} with cf=0), "
               f"mean cloud fraction {ic['cloud_fraction']:.3f}; mean graupel q_g {qg:.3e} kg/kg")
+        print(f"  last of {len(micro_calls)} microphysics calls: n={icl['n_cells']}: grid-mean "
+              f"{icl['grid_mean']:.2f} cm-3, in-cloud {icl['in_cloud']:.2f} cm-3", flush=True)
         for k, v in r.items():
             print(f"  {k:40s} {v:+10.4f}" + (f"   sink time {tau[k]:8.2f} h" if v < 0 else ""))
         save["|".join(key)] = np.array([inv, tau_all] + [r[k] for k in r])
         save["|".join(key) + "|incloud"] = np.array(
             [ic["n_cells"], ic["grid_mean"], ic["in_cloud"], ic["median_in_cloud"],
              ic["cloud_fraction"]])
+        save["|".join(key) + "|incloud_last"] = np.array(
+            [icl["n_cells"], icl["grid_mean"], icl["in_cloud"], icl["median_in_cloud"],
+             icl["cloud_fraction"]])
     out_dir.mkdir(parents=True, exist_ok=True)
     np.savez(out_dir / f"nc_budget_{tag}.npz", row_names=np.array(list(rows)),
              dt=DT, **save)
@@ -322,3 +338,62 @@ def run(model, state, DT, pf_full, forcing, phys_state, calls, micro_calls,
                          f"(dt = {DT:g} s), per volume of air")
     print(f"\nwrote {png}", flush=True)
     return 0
+
+
+def compare(npz_on: Path, npz_off: Path, png: Path) -> dict:
+    """#2216 option 2: graupel riming of droplets on vs off on one state.
+    Prints every row, the net, and the implied steady-state number
+    N* = activation / (all sinks / inventory) = activation x all-sink time;
+    draws the SO and global 950-700 hPa rows side by side."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    on, off = np.load(npz_on), np.load(npz_off)
+    names = list(on["row_names"])
+    if names != list(off["row_names"]):
+        raise SystemExit("the two budgets have different rows")
+    out = {}
+    for key in [f"{rn}|{ln}" for rn in REGIONS for ln in LAYERS]:
+        out[key] = {}
+        for arm, d in (("on", on), ("off", off)):
+            v = d[key]
+            inv, tau_all, r = float(v[0]), float(v[1]), dict(zip(names, v[2:]))
+            act = r["micro: activation"]
+            out[key][arm] = {"inventory": inv, "sink_time_h": tau_all, "rows": r,
+                             "net": float(sum(r.values())), "n_star": act * tau_all / 24.0,
+                             "incloud_first": float(d[key + "|incloud"][2]),
+                             "incloud_last": float(d[key + "|incloud_last"][2])}
+        a, b = out[key]["on"], out[key]["off"]
+        print(f"\n[{key}]  [cm-3/day]            riming on    riming off")
+        for k in names:
+            print(f"  {k:44s} {a['rows'][k]:+10.4f}  {b['rows'][k]:+10.4f}")
+        for k in ("net", "inventory", "sink_time_h", "n_star", "incloud_first", "incloud_last"):
+            print(f"  {k:44s} {a[k]:10.4f}  {b[k]:10.4f}")
+    keys = [f"{rn}|950-700 hPa" for rn in REGIONS]
+    fig, axes = plt.subplots(1, len(keys), figsize=(13, 0.42 * len(names) + 2), sharey=True)
+    y = np.arange(len(names))
+    for ax, key in zip(np.atleast_1d(axes), keys):
+        for j, (arm, col) in enumerate((("on", OKABE_ITO[4]), ("off", OKABE_ITO[0]))):
+            d = out[key][arm]
+            ax.barh(y + (j - 0.5) * 0.4, [d["rows"][k] for k in names], height=0.4, color=col,
+                    label=f"graupel riming {arm}: N* = {d['n_star']:.1f} cm-3, "
+                          f"sink time {d['sink_time_h']:.2f} h")
+        ax.axvline(0.0, color="k", lw=0.8)
+        ax.set_title(key.replace("|", ", "))
+        ax.set_xlabel("droplet number tendency [cm$^{-3}$ day$^{-1}$]")
+        ax.legend(fontsize=8, loc="lower left")
+    axes[0].set_yticks(y, names)
+    axes[0].invert_yaxis()
+    fig.suptitle(f"{Path(npz_on).stem}: one-step budget, graupel riming of droplets on vs off",
+                 fontsize=10)
+    fig.tight_layout()
+    fig.savefig(png, dpi=130)
+    plt.close(fig)
+    return out
+
+
+if __name__ == "__main__":
+    import sys
+    if len(sys.argv) != 4:
+        raise SystemExit("usage: nc_budget.py <riming-on.npz> <riming-off.npz> <out.png>")
+    compare(Path(sys.argv[1]), Path(sys.argv[2]), Path(sys.argv[3]))
