@@ -10485,6 +10485,11 @@ def main() -> int:
                     ice_state, _r = step_sea_ice(
                         ice_state, atm_ice, sst_K, ocn_u, ocn_v,
                         ice_config, U_min=0.0, dt=dt / _n_ice, grid=grid, **_ice_kw)
+                    if args.ew_cyclic_overlap and app_grid_type == "tripole":
+                        # re-slave the duplicated ORCA seam columns after EVERY transport
+                        # sub-step (see the note below the single-step call)
+                        ice_state = _ice_apply_ew_overlap(ice_state)
+                        _r = _ice_apply_ew_overlap(_r)
                     if _acc is None:
                         _acc = _r
                     else:
