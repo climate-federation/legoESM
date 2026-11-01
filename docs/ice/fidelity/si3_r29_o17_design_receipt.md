@@ -307,6 +307,51 @@ checkpoints. It is deliberately not implemented in this round; it is the next
 round's work. The corrected Argon ownership numbers above are the frozen
 measurement motivating that decision.
 
+### Resume 3 final verification
+
+All verification used CPU binary64 with `CUDA_VISIBLE_DEVICES=""`,
+`JAX_PLATFORMS=cpu`, and `JAX_ENABLE_X64=1`; every pytest command named its
+test file, ran serially, and used no xdist worker. No NEMO command ran.
+
+The complete `tests/ocean/fidelity/test_nemo_si3_*.py` sweep returned 206
+passing assertions. The O8--O12 master scorer passed 30/30 in 703.01 s and the
+extended O8--O16/O17 acquisition suite passed 28/28 in 493.97 s. The O4
+Prather file completed its eight forward cases before the deliberately deferred
+full-step AD compile reached the 1800-second cap, which is the Decision 194
+boundary rather than a numerical red. The scalarmath-v2 file returned four
+passes and the pre-existing external-state failure `A MY_SRC is not verbatim`;
+neither that test nor its gate changed from `ea3e570732`.
+
+The complete `tests/ice/unit/test_si3_*.py` sweep returned 404 passing
+assertions, two deselections, and one expected xfail. O12 passes 81/81 after the
+exact-input five-snapshot replay arm was kept compatible with its historical
+mock entries while the live arm continues to require and carry
+`hfx_err_dif/hfx_dif`; the old composer test and the new five-category live
+carry test both pass. O17 passes 7/7, including the eager/JIT numerical
+composition test. The only remaining red is the pre-existing
+`test_production_path_plants_fire[sum_first_category]` in `test_si3_surface.py`
+(23 passed, 1 failed, 1 xfailed); neither the test nor `si3_surface.py` changed
+from `ea3e570732`, and the earlier O12 receipt already records the same inert
+plant after `e96c1875f8`.
+
+The documented landing files pass after the mechanical O12 citation reanchor:
+receipt citations 45/45, private imports 6/6, TKE terms 71/71, NEMO recipe
+25/25, freshwater closure 16/16, stage-face masks 2/2, and prognostic
+barotropic state 8/8. The nine repository ratchets report the unchanged failure
+set: 11 failed, 6,944 passed, and 2 skipped. The three hardcoded-constant rows
+are `test_si3_o13_itd_remap.py`, `test_si3_thd_do.py`, and the O4 stub writer;
+the five inline-coefficient rows are `bitz_lipscomb.py`, `si3_orca2_state.py`,
+`geothermal.py`, `mle.py`, and `mle_latlon_cgrid.py`; the three parameter-spec
+rows are `si3_orca2_state.py`, `mle.py`, and `shortwave_penetration.py`.
+
+The unified acquisition's final read-only preflight exited zero after proving
+the real preprocessed-source placement, patched bounds fixture, writer layout,
+observer-free same program, 100-step stub-driver retention, unchanged cfg
+digests, and independent admission. Its final line is
+`PREFLIGHT_OK: no real NEMO integration was run; worst-case master 140965556460
+bytes (131.28 GiB)`. A top-level `RUN_COMPLETE` remains impossible until the
+real record has been scored successfully.
+
 ## Resume 1 implementation (operator ruling applied)
 
 The earlier stop above is historical.  The operator confirmed that O17's one
