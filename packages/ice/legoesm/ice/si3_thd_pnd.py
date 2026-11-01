@@ -853,8 +853,14 @@ def si3_ice_thd_o12_stages(
     cur_hfx_thd = _required("hfx_thd", hfx_thd)
     cur_wfx_lam = _required("wfx_lam", wfx_lam)
     cur_fluxes = category_fluxes if live_flux_carry else None
-    cur_hfx_err_dif = _required("hfx_err_dif", category_entries[0]["hfx_err_dif"])
-    cur_hfx_dif = _required("hfx_dif", category_entries[0]["hfx_dif"])
+    if live_flux_carry:  # icethd.F90:160-180; icethd_zdf_bl99.F90:828-831
+        cur_hfx_err_dif = _required(  # icethd_zdf_bl99.F90:828
+            "hfx_err_dif", category_entries[0]["hfx_err_dif"]  # icethd_zdf_bl99.F90:828
+        )  # icethd_zdf_bl99.F90:828
+        cur_hfx_dif = _required("hfx_dif", category_entries[0]["hfx_dif"])  # icethd_zdf_bl99.F90:831
+    else:  # icethd.F90:160-180 exact-input record replay arm
+        cur_hfx_err_dif = None  # icethd.F90:160-180 exact-input record replay arm
+        cur_hfx_dif = None  # icethd.F90:160-180 exact-input record replay arm
 
     for jl in range(5):
         entry = dict(category_entries[jl])
