@@ -42,3 +42,13 @@ def test_aggregate_is_mean_over_cases_and_nan_is_fatal():
     assert r["overall"]["land"]["t2m"] == {"rmse": 2.0, "bias": 0.0, "n": 2}
     with pytest.raises(SystemExit):
         floor._aggregate({("overall", "all", "t2m"): [(np.nan, 0.0)]})
+
+
+@pytest.mark.parametrize("argv", [
+    ["--config", "x.yaml", "--mode", "sfno"],                          # no sample
+    ["--config", "x.yaml", "--mode", "sfno", "--n-inits", "24"],       # no stride
+    ["--config", "x.yaml", "--n-inits", "24", "--init-stride-hours", "360"],
+])
+def test_deck_mode_refuses_implicit_sample_or_mode(argv):
+    with pytest.raises(SystemExit):
+        floor.main(argv)

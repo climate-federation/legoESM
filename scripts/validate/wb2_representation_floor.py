@@ -72,8 +72,9 @@ def build_parser():
     # Default: 2017 for --suite (unchanged); the deck's eval_years[0] for
     # --config, as run_weatherbench_eval resolves it.
     p.add_argument("--eval-year", type=int, default=None, dest="eval_year")
-    p.add_argument("--n-inits", type=int, default=8, dest="n_inits")
-    p.add_argument("--init-stride-hours", type=int, default=24,
+    # Defaults 8 / 24 h for --suite; --config must name the scorecard's sample.
+    p.add_argument("--n-inits", type=int, default=None, dest="n_inits")
+    p.add_argument("--init-stride-hours", type=int, default=None,
                    dest="init_stride_hours")
     p.add_argument("--resolution-deg", type=float, default=1.5,
                    dest="resolution_deg")
@@ -164,6 +165,10 @@ def main_deck(args):
     import jax
     jax.config.update("jax_enable_x64", True)
 
+    import subprocess
+    sha = subprocess.run(["git", "-c", "safe.directory=*", "rev-parse",
+                          "--short", "HEAD"], capture_output=True, text=True,
+                         cwd=_REPO).stdout.strip()
     yml = yaml.safe_load(open(args.config))
     mode_cfg = types.SimpleNamespace(mode=args.mode,
                                      training_core=args.training_core)
@@ -182,8 +187,11 @@ def main_deck(args):
     lsm = ds[lsm_name]
     if "time" in lsm.dims:
         lsm = lsm.isel(time=0)
+    lsm = np.asarray(lsm.values, dtype=np.float64)
+    if not np.all(np.isfinite(lsm)):
+        raise SystemExit("land_sea_mask has non-finite values")
     land, _, _ = regrid_to_wb2(
-        np.asarray(lsm.values, dtype=np.float64),
+        lsm,
         np.asarray(ds.lat.values), np.asarray(ds.lon.values),
         resolution_deg=args.resolution_deg, mask=True, mask_threshold=0.5)
 
@@ -203,6 +211,9 @@ def main_deck(args):
             eval_year=int(str(t_sub[0])[:4]), n_inits=n_sub + 1,
             init_stride_hours=cadence, resolution_deg=args.resolution_deg,
             ds=sub, microphysics=wb_ic_microphysics(args.mode, yml))
+        got = [int(str(t)[11:13]) for t in t_sub[1:1 + n_sub]]
+        if got != hours or len(cases) != n_sub + 1:
+            raise SystemExit(f"window {a}:{b} hours {got} != {hours}")
         dates.append(str(t_sub[1]))
         for j in range(n_sub):
             verif = cases[j].verif_by_lead[cadence]
@@ -213,13 +224,7 @@ def main_deck(args):
             for (region, key), sc in split_scores(
                     fields, verif["fields"], valid, lat, land).items():
                 per_case.setdefault(("overall", region, key), []).append(sc)
-                if region == "all":
-                    per_case.setdefault((f"utc{hour}", region, key),
-                                        []).append(sc)
-    import subprocess
-    sha = subprocess.run(["git", "-c", "safe.directory=*", "rev-parse",
-                          "--short", "HEAD"], capture_output=True, text=True,
-                         cwd=_REPO).stdout.strip()
+                per_case.setdefault((f"utc{hour}", region, key), []).append(sc)
     return {
         "meta": {
             "what": "lead-0 ERA5 -> model state -> WB2 round-trip RMSE/bias "
@@ -241,6 +246,9 @@ def main(argv=None):
     if args.config is not None:
         if args.suite is not None or args.mode is None:
             raise SystemExit("--config needs --mode and excludes --suite")
+        if args.n_inits is None or args.init_stride_hours is None:
+            raise SystemExit("--config needs explicit --n-inits and "
+                             "--init-stride-hours (the scorecard's sample)")
         out = main_deck(args)
         text = json.dumps(out, indent=2)
         print(text)
@@ -252,6 +260,10 @@ def main(argv=None):
         raise SystemExit("--suite and --variant are required without --config")
     if args.eval_year is None:
         args.eval_year = 2017
+    if args.n_inits is None:
+        args.n_inits = 8
+    if args.init_stride_hours is None:
+        args.init_stride_hours = 24
 
     import numpy as np
     import jax.numpy as jnp
