@@ -194,3 +194,68 @@ def test_z500_gradient_wrt_temperature_finite():
 
     g = jax.grad(z500)(260.0)
     assert bool(jnp.isfinite(g))
+
+
+# ---- ECMWF/Trenberth MSLP reduction (RULE 5: hard limit, smooth gap, gradient) ----
+
+# (p_s Pa, T* K, z_s m): sea level, mid terrain, cold limit, warm T0 cap,
+# hot T* > 290.5 K, below sea level near the warm cap
+_MSLP_CASES = [(101000.0, 288.0, 0.0), (90000.0, 280.0, 1000.0),
+               (70000.0, 240.0, 3000.0), (80000.0, 285.0, 2000.0),
+               (95000.0, 300.0, 500.0), (101500.0, 290.0, -400.0)]
+# measured smooth(1 K) - hard [Pa] per case (commit d858bc8d3a)
+_MSLP_GAP_W1K = [0.0, 0.3893932426581159, -2.4744338588789105e-05,
+                 0.024214830904384144, 0.0033077911066357046, -2.1548123696265975]
+
+
+def _ecmwf_mslp_reference(p_s, t_s, z_s):
+    """Branching transcription of the ECMWF/Trenberth reduction (oracle)."""
+    gamma, g, r = 0.0065, float(constants.g), float(constants.R_d)
+    t_star = t_s if t_s >= 255.0 else 0.5 * (255.0 + t_s)
+    t0 = t_star + gamma * z_s
+    if t0 > 290.5:
+        if t_star <= 290.5:
+            gamma = (290.5 - t_star) / z_s
+        else:
+            gamma, t_star = 0.0, 0.5 * (290.5 + t_star)
+    x = gamma * z_s / t_star
+    return p_s * np.exp(g * z_s / (r * t_star) * (1.0 - x / 2.0 + x * x / 3.0))
+
+
+@pytest.mark.parametrize("case", _MSLP_CASES)
+def test_mslp_ecmwf_hard_limit_matches_reference(case):
+    p_s, t_s, z_s = case
+    got = mean_sea_level_pressure_ecmwf(jnp.array(p_s), jnp.array(t_s),
+                                        jnp.array(z_s * float(constants.g)), limit_width_k=0.0)
+    assert np.isclose(float(got), _ecmwf_mslp_reference(p_s, t_s, z_s), rtol=1e-12, atol=1e-9)
+
+
+@pytest.mark.parametrize("case,gap", list(zip(_MSLP_CASES, _MSLP_GAP_W1K)))
+def test_mslp_ecmwf_smooth_default_gap_per_case(case, gap):
+    from evaluations.wb_forecast import MSLP_LIMIT_WIDTH_K
+    assert MSLP_LIMIT_WIDTH_K == 1.0  # the gaps were measured at 1 K
+    p_s, t_s, z_s = case
+    args = (jnp.array(p_s), jnp.array(t_s), jnp.array(z_s * float(constants.g)))
+    d = float(mean_sea_level_pressure_ecmwf(*args, limit_width_k=MSLP_LIMIT_WIDTH_K)
+              - mean_sea_level_pressure_ecmwf(*args, limit_width_k=0.0))
+    assert np.isclose(d, gap, rtol=1e-6, atol=1e-12)
+
+
+def test_mslp_ecmwf_smooth_gradients():
+    from jax.test_util import check_grads
+    phis = jnp.array([c[2] for c in _MSLP_CASES]) * float(constants.g)
+    p_s = jnp.array([c[0] for c in _MSLP_CASES])
+    t_s = jnp.array([c[1] for c in _MSLP_CASES])
+    f = lambda p, t: mean_sea_level_pressure_ecmwf(p, t, phis, limit_width_k=1.0)
+    check_grads(f, (p_s, t_s), order=2, modes=["rev"])
+    dt = jax.grad(lambda t: f(p_s, t).sum())(t_s)
+    assert np.all(np.isfinite(dt)) and np.all(np.abs(np.asarray(dt)[1:]) > 0.0)
+
+
+def test_surface_temperature_from_lowest_level():
+    # ln(p_s/p_L) > 0 -> warmer at the ground; equal pressures -> identity
+    t = surface_temperature_from_lowest_level(jnp.array([280.0, 280.0]),
+                                              jnp.array([99000.0, 100000.0]),
+                                              jnp.array([100000.0, 100000.0]))
+    expect = 280.0 + 0.0065 * float(constants.R_d) / float(constants.g) * 280.0 * np.log(100000.0 / 99000.0)
+    assert np.isclose(float(t[0]), expect, rtol=1e-12) and float(t[1]) == 280.0
