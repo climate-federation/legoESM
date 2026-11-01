@@ -19,6 +19,7 @@ from legoesm.ocean.fidelity.nemo_testcase_recipe import (
     _orca2_depth_ladder,
     _orca2_masks,
     build_gyre_zco_card,
+    build_gyre_zco_lane_certified_card,
     build_lock_exchange_zco_card,
     build_nemo_testcase_card,
     build_overflow_zps_card,
@@ -66,7 +67,7 @@ def test_orca2_structural_guard_rejects_iceberg_option_drift():
         tke_shear_avm_weighting="nemo_face",
         tke_shear_evaluation_stage="step_entry",
         tke_shear_metric_source="nemo_qco_live_face",
-        tke_langmuir_evaluation="vectorized",
+        tke_langmuir_evaluation="nemo_literal",
         bottom_tke_bc=True,
         eice=1,
     )
@@ -92,10 +93,12 @@ def test_orca2_structural_guard_rejects_iceberg_option_drift():
                 ),
                 bbl_diffusive_option=1,
                 bbl_aht_m2_s=1000.0,
+                bbl_gamma_s=10.0,
             )
         ),
         bbl_diffusive_option=1,
         bbl_aht_m2_s=1000.0,
+        bbl_gamma_s=10.0,
     )
     with pytest.raises(ValueError, match="ln_icebergs=F"):
         validate_nemo_testcase_card(card)
@@ -254,7 +257,7 @@ def test_gyre_whole_step_identity_rejects_hybrid_and_staged_gm():
             recipe.z_coord,
             recipe.model_config._replace(ke_gradient_scheme="centered"),
         )
-    with pytest.raises(ValueError, match="staged GM bolus"):
+    with pytest.raises(ValueError, match="complete staged Treguier"):
         LatLonCGridOceanModel(
             recipe.grid,
             recipe.z_coord,
@@ -463,61 +466,59 @@ def test_gyre_r4_card_resolves_grid_clock_and_mixing_from_namelist():
     assert sbc.qsr_w_m2.shape == (82, 122)
 
 
-def test_gyre_nemo_qsr_pipeline_uses_live_kbb_stretch():
-    """The shared Kbb deposit must be the field stage 3 later subtracts."""
+def test_gyre_nemo_qsr_pipeline_selects_both_kbb_stretch_routes():
+    """The card owns the shared Kbb deposit that stage 3 later subtracts."""
     from legoesm.ocean.physics.shortwave_penetration import (
         shortwave_penetration_tendency,
     )
 
     set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
-    card = build_nemo_testcase_card("GYRE-zco")
+    card = build_gyre_zco_lane_certified_card()
     state = card.recipe.initial_state
     wet = jnp.asarray(card.recipe.land_mask) > 0.5
     state = state._replace(
         eta=state.eta.replace(
             data=jnp.where(wet, jnp.asarray(0.25, dtype=jnp.float64), 0.0)))
     _, surface = gyre_surface_forcings(card, state, 2)
-    model = LatLonCGridOceanModel(
-        card.recipe.grid, card.recipe.z_coord, card.recipe.model_config)
     cc_state = state._replace(
         u=state.u.replace(
             data=0.5 * (state.u.data[:, :-1] + state.u.data[:, 1:])),
         v=state.v.replace(
             data=0.5 * (state.v.data[:-1] + state.v.data[1:])),
     )
-    actual = model._physics_fn(
-        cc_state, card.recipe.grid, card.recipe.z_coord, surface).dT_dt.data
-    zero = model._physics_fn(
-        cc_state, card.recipe.grid, card.recipe.z_coord,
-        surface._replace(sw_down=jnp.zeros_like(surface.sw_down)),
-    ).dT_dt.data
-    actual_qsr = actual - zero
     stretch = compute_ocean_jacobian(
         state.eta.data, state.H_bathy.data, card.recipe.z_coord)
-    expected = shortwave_penetration_tendency(
-        surface.sw_down,
-        card.recipe.z_coord.dz_ref,
-        card.recipe.z_coord.z_half_ref,
-        stretch,
-        card.recipe.model_config.physics.shortwave_penetration,
-        rho_0=card.recipe.model_config.rho_0,
-        c_sw=card.recipe.model_config.physics.constants.c_sw,
-        z_half_stretch=stretch,
-    )
-    static = shortwave_penetration_tendency(
-        surface.sw_down,
-        card.recipe.z_coord.dz_ref,
-        card.recipe.z_coord.z_half_ref,
-        stretch,
-        card.recipe.model_config.physics.shortwave_penetration,
-        rho_0=card.recipe.model_config.rho_0,
-        c_sw=card.recipe.model_config.physics.constants.c_sw,
-    )
     active = np.asarray(card.recipe.z_coord.is_active, dtype=bool)
-    np.testing.assert_array_equal(
-        np.asarray(actual_qsr)[active], np.asarray(expected)[active])
-    assert not np.array_equal(
-        np.asarray(expected)[active], np.asarray(static)[active])
+    observed = {}
+    assert card.recipe.model_config.physics.shortwave_penetration.nemo_qsr_kbb_live_stretch is False
+    for live_stretch in (False, True):
+        shortwave = card.recipe.model_config.physics.shortwave_penetration._replace(
+            nemo_qsr_kbb_live_stretch=live_stretch)
+        cfg = card.recipe.model_config._replace(
+            physics=card.recipe.model_config.physics._replace(
+                shortwave_penetration=shortwave))
+        model = LatLonCGridOceanModel(
+            card.recipe.grid, card.recipe.z_coord, cfg)
+        actual = model._physics_fn(
+            cc_state, card.recipe.grid, card.recipe.z_coord, surface).dT_dt.data
+        zero = model._physics_fn(
+            cc_state, card.recipe.grid, card.recipe.z_coord,
+            surface._replace(sw_down=jnp.zeros_like(surface.sw_down)),
+        ).dT_dt.data
+        observed[live_stretch] = np.asarray(actual - zero)
+        expected = shortwave_penetration_tendency(
+            surface.sw_down,
+            card.recipe.z_coord.dz_ref,
+            card.recipe.z_coord.z_half_ref,
+            stretch,
+            shortwave,
+            rho_0=cfg.rho_0,
+            c_sw=cfg.physics.constants.c_sw,
+            z_half_stretch=stretch if live_stretch else None,
+        )
+        np.testing.assert_array_equal(
+            observed[live_stretch][active], np.asarray(expected)[active])
+    assert not np.array_equal(observed[False][active], observed[True][active])
 
 
 def test_nemo_qsr_2bd_refuses_integrators_without_stage3_kmm_call():
@@ -544,7 +545,7 @@ def test_nemo_qsr_2bd_refuses_integrators_without_stage3_kmm_call():
         LatLonCGridOceanModel(recipe.grid, recipe.z_coord, with_qsr(rk3))
 
 
-def test_stage3_two_band_solar_uses_source_literal_kmm_stretch():
+def test_stage3_two_band_solar_card_selects_kbb_and_kmm_stretch_routes():
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
         _NEMOWSRK3TestHooks,
     )
@@ -552,53 +553,137 @@ def test_stage3_two_band_solar_uses_source_literal_kmm_stretch():
         shortwave_penetration_tendency,
     )
     from legoesm.ocean.eos import nemo_r3t_rk3_stage2_stretch
+    from legoesm.ocean.vertical import compute_ocean_jacobian
 
     set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
-    card = build_nemo_testcase_card("GYRE-zco")
+    card = build_gyre_zco_lane_certified_card()
     wet = jnp.asarray(card.recipe.land_mask) > 0.5
+    eta_rows = jnp.linspace(-0.25, 0.35, wet.shape[0])[:, None]
+    eta_cols = jnp.linspace(0.05, 0.20, wet.shape[1])[None, :]
     state = card.recipe.initial_state._replace(
         eta=card.recipe.initial_state.eta.replace(
-            data=jnp.where(wet, jnp.asarray(0.25, dtype=jnp.float64), 0.0)))
+            data=jnp.where(wet, eta_rows + eta_cols, 0.0)))
     freshwater, surface = gyre_surface_forcings(card, state, 2)
-    trace = LatLonCGridOceanModel(
-        card.recipe.grid,
-        card.recipe.z_coord,
-        card.recipe.model_config,
-        _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(tracer_process_trace=()),
-    ).step(state, card.dt_s, freshwater=freshwater, surface_forcing=surface)
-    stretch = jnp.where(
-        wet,
-        nemo_r3t_rk3_stage2_stretch(
-            card.recipe.z_coord,
-            state.eta.data,
-            trace.state_after.eta.data,
-            state.H_bathy.data,
-        ),
-        0.0,
-    )
-    cfg = card.recipe.model_config
-    expected = shortwave_penetration_tendency(
-        surface.sw_down,
-        card.recipe.z_coord.dz_ref,
-        card.recipe.z_coord.z_half_ref,
-        stretch,
-        cfg.physics.shortwave_penetration,
-        rho_0=cfg.rho_0,
-        c_sw=cfg.physics.constants.c_sw,
-        z_half_stretch=stretch,
-    )
     active = np.asarray(card.recipe.z_coord.is_active, dtype=bool)
-    np.testing.assert_array_equal(
-        np.asarray(trace.qsr_association.qsr_kmm)[active],
-        np.asarray(expected)[active],
+    assert (
+        card.recipe.model_config.physics.shortwave_penetration
+        .nemo_qsr_kbb_live_stretch
+        is False
     )
-    old_stretch = (
-        np.asarray(trace.qsr_association.thickness_kmm)[..., 0]
-        / np.asarray(card.recipe.z_coord.dz_ref)[..., 0]
+    assert card.recipe.model_config.nemo_qsr_stage3_kmm_source_association is False
+    observed = {}
+    arms = {
+        "lane": (False, False),
+        "kbb-main": (True, False),
+        "kmm-main": (False, True),
+        "kmm-default": (False, None),
+    }
+    for label, (kbb_live_stretch, kmm_source_association) in arms.items():
+        resolved_kmm_source = (
+            True
+            if kmm_source_association is None
+            else kmm_source_association)
+        shortwave = card.recipe.model_config.physics.shortwave_penetration._replace(
+            nemo_qsr_kbb_live_stretch=kbb_live_stretch)
+        cfg = card.recipe.model_config._replace(
+            physics=card.recipe.model_config.physics._replace(
+                shortwave_penetration=shortwave),
+            nemo_qsr_stage3_kmm_source_association=kmm_source_association)
+        trace = LatLonCGridOceanModel(
+            card.recipe.grid,
+            card.recipe.z_coord,
+            cfg,
+            _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(tracer_process_trace=()),
+        ).step(state, card.dt_s, freshwater=freshwater, surface_forcing=surface)
+        if resolved_kmm_source:
+            stretch = jnp.where(
+                wet,
+                nemo_r3t_rk3_stage2_stretch(
+                    card.recipe.z_coord,
+                    state.eta.data,
+                    trace.state_after.eta.data,
+                    state.H_bathy.data,
+                ),
+                0.0,
+            )
+        else:
+            stretch = (
+                trace.qsr_association.thickness_kmm[..., 0]
+                / card.recipe.z_coord.dz_ref[..., 0]
+            )
+        expected = shortwave_penetration_tendency(
+            surface.sw_down,
+            card.recipe.z_coord.dz_ref,
+            card.recipe.z_coord.z_half_ref,
+            stretch,
+            cfg.physics.shortwave_penetration,
+            rho_0=cfg.rho_0,
+            c_sw=cfg.physics.constants.c_sw,
+            z_half_stretch=stretch,
+        )
+        observed[label] = {
+            "kbb": np.asarray(trace.qsr_association.qsr_kbb),
+            "kmm": np.asarray(trace.qsr_association.qsr_kmm),
+        }
+        np.testing.assert_array_equal(
+            observed[label]["kmm"][active],
+            np.asarray(expected)[active],
+        )
+        kbb_stretch = (
+            compute_ocean_jacobian(
+                state.eta.data, state.H_bathy.data, card.recipe.z_coord)
+            if kbb_live_stretch
+            else trace.qsr_association.thickness_kbb[..., 0]
+            / card.recipe.z_coord.dz_ref[..., 0]
+        )
+        expected_kbb = shortwave_penetration_tendency(
+            surface.sw_down,
+            card.recipe.z_coord.dz_ref,
+            card.recipe.z_coord.z_half_ref,
+            kbb_stretch,
+            shortwave,
+            rho_0=cfg.rho_0,
+            c_sw=cfg.physics.constants.c_sw,
+            z_half_stretch=kbb_stretch,
+        )
+        np.testing.assert_array_equal(
+            np.asarray(trace.qsr_association.qsr_kbb)[active],
+            np.asarray(expected_kbb)[active],
+        )
+        expected_pipeline = shortwave_penetration_tendency(
+            surface.sw_down,
+            card.recipe.z_coord.dz_ref,
+            card.recipe.z_coord.z_half_ref,
+            compute_ocean_jacobian(
+                state.eta.data, state.H_bathy.data, card.recipe.z_coord),
+            shortwave,
+            rho_0=cfg.rho_0,
+            c_sw=cfg.physics.constants.c_sw,
+            z_half_stretch=(
+                compute_ocean_jacobian(
+                    state.eta.data, state.H_bathy.data, card.recipe.z_coord)
+                if kbb_live_stretch else None
+            ),
+        )
+        np.testing.assert_array_equal(
+            np.asarray(trace.qsr_association.process_qsr_kbb)[active],
+            np.asarray(expected_pipeline)[active],
+        )
+    assert not np.array_equal(
+        observed["lane"]["kbb"][active],
+        observed["kbb-main"]["kbb"][active],
+    )
+    np.testing.assert_array_equal(
+        observed["lane"]["kbb"][active],
+        observed["kmm-main"]["kbb"][active],
     )
     assert not np.array_equal(
-        np.asarray(stretch)[np.asarray(wet)],
-        old_stretch[np.asarray(wet)],
+        observed["lane"]["kmm"][active],
+        observed["kmm-main"]["kmm"][active],
+    )
+    np.testing.assert_array_equal(
+        observed["kmm-main"]["kmm"][active],
+        observed["kmm-default"]["kmm"][active],
     )
 
 
