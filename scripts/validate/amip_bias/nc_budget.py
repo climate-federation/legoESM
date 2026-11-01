@@ -70,7 +70,13 @@ def closes(parts, total, rtol=1e-9) -> tuple[bool, float]:
     parts = [np.asarray(p, dtype=np.float64) for p in parts]
     gross = sum(np.abs(p) for p in parts) + np.abs(total)
     resid = np.abs(sum(parts) - total)
-    worst = float((resid / np.maximum(gross, 1e-300)).max())   # per cell, no global floor
+    rel = resid / np.maximum(gross, 1e-300)                  # per cell, no global floor
+    worst = float(rel.max())
+    if worst > rtol:
+        i = np.unravel_index(int(np.argmax(rel)), rel.shape)
+        print(f"     worst cell {i}: |resid| {resid[i]:.3e}, gross {gross[i]:.3e}, "
+              f"total {np.asarray(total)[i]:.3e}; max gross {gross.max():.3e}; "
+              f"{int((rel > rtol).sum())} cells above rtol", flush=True)
     return worst <= rtol, worst
 
 
@@ -228,11 +234,12 @@ def run(model, state, DT, pf_full, forcing, phys_state, calls, micro_calls,
     phys = f(tend.tracer_tendencies["N_c"].data)
 
     rows: dict[str, np.ndarray] = {}
-    mod_rows = {}
+    mod_rows, mod_calls = {}, []
     for name, ts in calls.items():
         arr = [t.tracer_tendencies["N_c"].data for t in ts
                if t.tracer_tendencies is not None and "N_c" in t.tracer_tendencies]
         mod_rows[name] = mean_calls(arr) if arr else np.zeros_like(n0)
+        mod_calls += [f(a) / len(arr) for a in arr]      # each call's weighted share
         print(f"module {name}: {len(ts)} call(s)", flush=True)
     # Physics cadence: the physics step applies n_steps x the physics rate
     # (the whole window's increment), the held steps apply zero.  n_steps is
@@ -240,7 +247,9 @@ def run(model, state, DT, pf_full, forcing, phys_state, calls, micro_calls,
     msum = sum(mod_rows.values())
     big = np.abs(msum) > 1e-3 * np.abs(msum).max()
     n_steps = int(round(float(np.median(phys[big] / msum[big]))))
-    ok, worst = closes([n_steps * v for v in mod_rows.values()], phys)
+    # closure against every CALL's share, so the per-cell gross is not hidden
+    # by cancellation between sub-steps
+    ok, worst = closes([n_steps * v for v in mod_calls], phys)
     gate(n_steps >= 1 and ok, f"module N_c tendencies x {n_steps} (physics cadence) sum to "
                               f"the applied physics (worst rel {worst:.2e})")
 
@@ -248,7 +257,8 @@ def run(model, state, DT, pf_full, forcing, phys_state, calls, micro_calls,
          f"{len(micro_calls)} microphysics calls published an nc_budget")
     micro = {k: mean_calls([c["terms"][k] / c["rho"] for c in micro_calls])
              for k in micro_calls[0]["terms"]}
-    ok, worst = closes(list(micro.values()), mod_rows["microphysics"])
+    ok, worst = closes([c["terms"][k] / c["rho"] / len(micro_calls)
+                        for c in micro_calls for k in c["terms"]], mod_rows["microphysics"])
     gate(ok, f"MG2 nc_budget terms sum to the microphysics tendency (worst rel {worst:.2e})")
 
     # Rates [1/kg/s] averaged over one physics window of n_steps dycore steps,
