@@ -152,3 +152,10 @@ def test_validation_init_that_cannot_be_scored_is_an_error():
     times = np.datetime64("2019-01-01") + np.arange(4 * 366) * np.timedelta64(6, "h")
     with pytest.raises(ValueError, match="validation init 2019"):
         list(sb._training_sample_indices(SimpleNamespace(smoke=False), yml, times, 4, 4))
+
+
+def test_validation_init_must_exist_in_the_store():
+    yml = {sb._VAL_INITS_KEY: [[2014, 0]]}
+    times = np.datetime64("2015-01-01") + np.arange(40) * np.timedelta64(6, "h")
+    with pytest.raises(ValueError, match="not in the ERA5 store"):
+        list(sb._training_sample_indices(SimpleNamespace(smoke=False), yml, times, 4, 4))

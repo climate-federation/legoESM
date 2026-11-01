@@ -124,8 +124,11 @@ def _training_sample_indices(cfg, yml, times, snaps_per_day, stride):
     if inits is not None:
         # Validation protocol: explicit single-time inits [year, hour offset].
         for year, hour in inits:
-            i_ic = int(np.searchsorted(times, np.datetime64(f"{int(year)}-01-01")
-                                       + np.timedelta64(int(hour), "h")))
+            want = (np.datetime64(f"{int(year)}-01-01")
+                    + np.timedelta64(int(hour), "h"))
+            i_ic = int(np.searchsorted(times, want))
+            if i_ic >= len(times) or times[i_ic] != want:
+                raise ValueError(f"validation init {want} is not in the ERA5 store.")
             i_tg = i_ic + stride
             if i_tg >= len(times) or not _keep(i_tg):
                 raise ValueError(f"validation init {year} +{hour} h has its "
