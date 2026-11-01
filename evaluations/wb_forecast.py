@@ -33,7 +33,8 @@ from .headline_diagnostics import (
     geopotential_height_at,
     geopotential_on_levels,
     interp_to_pressure_level,
-    mean_sea_level_pressure,
+    mean_sea_level_pressure_ecmwf,
+    surface_temperature_from_lowest_level,
     wind_10m,
 )
 
@@ -51,6 +52,10 @@ _Z500_PA = 50000.0
 _T850_PA = 85000.0
 _Q700_PA = 70000.0
 _WIND_LEVELS_PA = (("850", 85000.0), ("700", 70000.0), ("500", 50000.0), ("250", 25000.0))
+
+# Smoothing width of the ECMWF MSLP temperature limits [K] (user-approved
+# 2026-11-01; 0 = ECMWF's hard limits).
+MSLP_LIMIT_WIDTH_K = 1.0
 
 # --- surface-proxy constants ---
 _Z0M_SURFACE_PROXY = 2e-4   # open-ocean momentum roughness [m] for the neutral 10 m reduction
@@ -94,7 +99,11 @@ def diagnose_headline_fields(state, grid, sigma_coord) -> HeadlineDiagnosis:
     within the model column; where the target level is below the surface the
     value is clamped and flagged ``valid=False`` (score with the mask).
 
-    ``mslp`` (Pa): standard sea-level reduction, valid everywhere.
+    ``mslp`` (Pa): ECMWF/Trenberth sea-level reduction, valid everywhere. Its
+    temperature limits are smoothed over ``MSLP_LIMIT_WIDTH_K`` (differentiable,
+    it enters the training loss). KNOWN DIFFERENCE vs ECMWF's hard limits: on
+    ERA5 2020 surface fields the 1 K smoothing moves land RMSE vs ERA5 MSLP
+    from 203.2 to 202.9 Pa; ``limit_width_k=0`` recovers the hard limits.
 
     Surface proxies (the spectral state has no skin-T / roughness / Obukhov L):
       * ``t2m`` := lowest-level air temperature.
@@ -137,8 +146,10 @@ def diagnose_headline_fields(state, grid, sigma_coord) -> HeadlineDiagnosis:
     for key, pa in _PLEVEL_TARGET_PA.items():
         valid[key] = pa <= p_s                           # True where level is at/above surface
 
-    # --- MSLP (defined everywhere) ---
-    fields["mslp"] = mean_sea_level_pressure(p_s, T[..., -1], phis)
+    # --- MSLP (defined everywhere): ECMWF reduction from ECMWF's surface T* ---
+    t_star = surface_temperature_from_lowest_level(T[..., -1], p_model[..., -1], p_s)
+    fields["mslp"] = mean_sea_level_pressure_ecmwf(
+        p_s, t_star, phis, limit_width_k=MSLP_LIMIT_WIDTH_K)
     valid["mslp"] = all_valid
 
     # --- surface proxies (spectral state carries no skin-T / z0 / L) ---

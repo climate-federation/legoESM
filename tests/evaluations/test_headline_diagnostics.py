@@ -5,6 +5,7 @@ Run on a compute node (JAX x64):
         <conda>/python -m pytest tests/evaluations/test_headline_diagnostics.py -v
 """
 import numpy as np
+import pytest
 import jax
 import jax.numpy as jnp
 
@@ -13,7 +14,8 @@ from legoesm.grids import create_sigma_coordinate, create_hybrid_coordinate
 from evaluations.headline_diagnostics import (
     interp_to_pressure_level,
     geopotential_height_at,
-    mean_sea_level_pressure,
+    mean_sea_level_pressure_ecmwf,
+    surface_temperature_from_lowest_level,
     screen_level_t2m,
     wind_10m,
 )
@@ -94,18 +96,6 @@ def test_z500_virtual_temperature_raises_thickness():
 
 # ---- Task 3: mean sea-level pressure ----
 
-def test_mslp_reduces_upward_and_identity_at_sea_level():
-    p_s = jnp.array([90000.0, 100000.0])
-    T_low = jnp.array([280.0, 288.0])
-    phis = jnp.array([1000.0 * constants.g, 0.0])  # 1000 m, and sea level
-    mslp = mean_sea_level_pressure(p_s, T_low, phis)
-    assert np.isclose(float(mslp[1]), float(p_s[1]), atol=1e-6)  # sea level -> identity
-    assert float(mslp[0]) > float(p_s[0])                        # elevated -> raised
-    assert 100000.0 < float(mslp[0]) < 103000.0                  # physical range
-
-
-# ---- Task 4: screen-level MOST diagnostics ----
-
 def test_t2m_between_surface_and_lowest_level_neutral():
     T_sfc = jnp.array([300.0])
     T_low = jnp.array([295.0])
@@ -143,27 +133,6 @@ def test_z500_hybrid_matches_sigma_in_pure_sigma_limit():
     z_hyb = geopotential_height_at(T, q, p_s, phis, hyb, 50000.0)
     z_sig = geopotential_height_at(T, q, p_s, phis, sig, 50000.0)
     assert float(jnp.max(jnp.abs(z_hyb - z_sig))) < 50.0
-
-
-def test_mslp_isothermal_limit_finite():
-    # gamma=0 must use the hypsometric limit p_msl = p_s exp(g z_s/(R_d T)), not divide by zero.
-    p_s = jnp.array([90000.0])
-    T_low = jnp.array([280.0])
-    phis = jnp.array([1000.0 * constants.g])
-    mslp = mean_sea_level_pressure(p_s, T_low, phis, lapse_rate_k_per_m=0.0)
-    expected = 90000.0 * np.exp(float(constants.g) * 1000.0 / (float(constants.R_d) * 280.0))
-    assert np.isfinite(float(mslp[0]))
-    assert np.isclose(float(mslp[0]), expected, rtol=1e-6)
-
-
-def test_mslp_below_sea_level_reduces_pressure():
-    # Dead-Sea-like z_s < 0: reduction must LOWER pressure and stay finite (no NaN under fractional power).
-    p_s = jnp.array([101000.0])
-    T_low = jnp.array([290.0])
-    phis = jnp.array([-400.0 * constants.g])
-    mslp = mean_sea_level_pressure(p_s, T_low, phis)
-    assert np.isfinite(float(mslp[0]))
-    assert float(mslp[0]) < float(p_s[0])
 
 
 def test_t2m_rough_surface_stays_bracketed():

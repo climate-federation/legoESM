@@ -25,7 +25,8 @@ __all__ = [
     "interp_to_pressure_level",
     "geopotential_on_levels",
     "geopotential_height_at",
-    "mean_sea_level_pressure",
+    "mean_sea_level_pressure_ecmwf",
+    "surface_temperature_from_lowest_level",
     "screen_level_t2m",
     "wind_10m",
 ]
@@ -34,6 +35,10 @@ __all__ = [
 _STD_LAPSE_RATE_K_PER_M = 0.0065  # ICAO standard atmosphere tropospheric lapse rate
 _Z_REF_2M = 2.0                   # WMO screen-temperature reference height [m]
 _Z_REF_10M = 10.0                 # WMO anemometer reference height [m]
+# --- ECMWF/Trenberth MSLP reduction limits (Trenberth et al. 1993, NCAR TN-396;
+#     IFS post-processing, as in CDO ``sealevelpressure``) ---
+_MSLP_T_COLD_K = 255.0            # below: surface T* relaxed half-way to this
+_MSLP_T_WARM_K = 290.5            # cap on the sea-level temperature T0
 
 
 def interp_to_pressure_level(field, p_model, p_target_pa):
@@ -112,31 +117,48 @@ def geopotential_height_at(T, q, p_s, phis, sigma_coord, p_target_pa):
     return phi_at / constants.g                                 # geopotential height [m]
 
 
-def mean_sea_level_pressure(p_s, T_lowest, phis, *, lapse_rate_k_per_m=_STD_LAPSE_RATE_K_PER_M):
-    """Mean sea-level pressure [Pa] via the standard hydrostatic reduction.
+def surface_temperature_from_lowest_level(T_lowest, p_lowest, p_s, *,
+                                          lapse_rate_k_per_m=_STD_LAPSE_RATE_K_PER_M):
+    """ECMWF's surface T* for the MSLP reduction [K]: the lowest-level T carried
+    down to the ground at the standard lapse rate,
+    T* = T_L + Γ (R_d/g) T_L ln(p_s/p_L)."""
+    return T_lowest + (float(lapse_rate_k_per_m) * constants.R_d / constants.g
+                       * T_lowest * jnp.log(p_s / p_lowest))
 
-        p_msl = p_s · (1 + Γ z_s / T0)^(g / (R_d Γ)),   T0 = T_lowest + Γ z_s / 2
 
-    Convention: z_s = phis/g. For z_s > 0 the reduction RAISES pressure
-    (p_msl ≥ p_s); at sea level (z_s = 0) it is the identity; for below-sea-level
-    cells (z_s < 0) it lowers pressure. Γ = 0 falls back to the isothermal
-    hypsometric limit. Temperatures are floored at ``constants.T_min_atmosphere``
-    and the power base is kept positive, so no NaNs arise for cold/deep columns.
+def _relu(x, width_k):
+    """max(x, 0); smooth softplus of width ``width_k`` [K] when width_k > 0."""
+    if width_k <= 0.0:
+        return jnp.maximum(x, 0.0)
+    return width_k * jax.nn.softplus(x / width_k)
 
-    ``lapse_rate_k_per_m`` is a STATIC Python float (a fixed measurement
-    convention — the ICAO standard-atmosphere lapse rate), branched on at trace
-    time; it is not a traced/differentiable argument (MSLP is a diagnostic, not
-    a loss term, and the lapse rate is never a gradient target).
+
+def mean_sea_level_pressure_ecmwf(p_s, T_surface, phis, *, limit_width_k,
+                                  lapse_rate_k_per_m=_STD_LAPSE_RATE_K_PER_M):
+    """Mean sea-level pressure [Pa], ECMWF/Trenberth reduction.
+
+        ln(p_msl/p_s) = Φ_s/(R_d T*) · (1 - y/2 + y²/3),   y = (T0 - T*)/T*
+
+    T* = surface temperature, relaxed half-way to 255 K when colder; T0 =
+    T* + Γ z_s capped at 290.5 K (when T* itself exceeds 290.5 K, T* is relaxed
+    half-way to 290.5 K and Γ = 0). The series is the exact constant-lapse-rate
+    hypsometric reduction expanded in y, with SURFACE T* in the denominator.
+    On ERA5's own surface fields (2020, 1.5 deg, T* = 2 m T) it reproduces ERA5
+    MSLP to 203 Pa RMSE over land, 4 Pa over ocean
+    (scripts/validate/wb_mslp_reduction_probe.py).
+
+    ``limit_width_k`` [K]: 0 = the reference's hard limits; > 0 smooths each
+    limit with a softplus of that width (differentiable). Static Python float.
     """
+    gamma = float(lapse_rate_k_per_m)
+    w = float(limit_width_k)
     z_s = phis / constants.g
-    gamma = float(lapse_rate_k_per_m)                # static (config), not traced
-    T_low_safe = jnp.maximum(T_lowest, constants.T_min_atmosphere)
-    if abs(gamma) < 1e-8:                            # isothermal hypsometric limit
-        return p_s * jnp.exp(constants.g * z_s / (constants.R_d * T_low_safe))
-    T0 = jnp.maximum(T_low_safe + 0.5 * gamma * z_s, constants.T_min_atmosphere)
-    exponent = constants.g / (constants.R_d * gamma)
-    ratio = jnp.maximum(1.0 + gamma * z_s / T0, 1e-6)   # positive base for fractional power
-    return p_s * ratio ** exponent
+    t_cold = T_surface + 0.5 * _relu(_MSLP_T_COLD_K - T_surface, w)
+    excess = _relu(t_cold - _MSLP_T_WARM_K, w)
+    t_star = t_cold - 0.5 * excess
+    t_sea = _MSLP_T_WARM_K - _relu(_MSLP_T_WARM_K - (t_star + gamma * z_s), w) + 0.5 * excess
+    y = (t_sea - t_star) / t_star
+    return p_s * jnp.exp(phis / (constants.R_d * t_star) * (1.0 - 0.5 * y + y * y / 3.0))
 
 
 def _log_frac(z_ref, z_low, z0, psi_fn, obukhov_L):
